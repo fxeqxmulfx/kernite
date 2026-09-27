@@ -1,6 +1,6 @@
 //! Each generated `IQ2_XXS` kernel on its own, against one vector, over rows few enough to stay
 //! in the caches: `ROWS` rows of `COLS` (64 of 2560 by default, as `examples/iqdot.rs` in
-//! `roofline` runs them), again and again for `SECS` each. `AHEAD` picks one kernel. Run it
+//! `roofline` runs them), again and again for `SECS` each. `KERNEL` picks one by name, and `KERNEL=?` lists them. Run it
 //! pinned:
 //!
 //!     taskset -c 0 target/release/examples/speed
@@ -17,7 +17,13 @@ fn env<T: std::str::FromStr>(name: &str, fallback: T) -> T {
 
 fn main() {
     let (rows, cols, secs): (usize, usize, f64) = (env("ROWS", 64), env("COLS", 2560), env("SECS", 3.0));
-    let only: usize = env("AHEAD", 0);
+    let only = std::env::var("KERNEL").unwrap_or_default();
+    if only == "?" {
+        for (name, _) in KERNELS {
+            println!("{name}");
+        }
+        return;
+    }
     assert_eq!(cols % 256, 0, "whole superblocks");
     let sbs = cols / 256;
     let mut state = 0x2545_f491_4f6c_dd1du64;
@@ -40,8 +46,8 @@ fn main() {
     }
     let quants: Vec<Block> = (0..sbs * 8).map(|_| Block(std::array::from_fn(|_| byte() as i8))).collect();
     let scales: Vec<f32> = (0..sbs * 8).map(|i| 0.01 + i as f32 * 1e-4).collect();
-    for (ahead, kernel) in KERNELS {
-        if only != 0 && ahead != only {
+    for (name, kernel) in KERNELS {
+        if !only.is_empty() && name != only {
             continue;
         }
         let (start, mut passes) = (Instant::now(), 0u64);
@@ -57,7 +63,7 @@ fn main() {
         let took = start.elapsed().as_secs_f64();
         let done = passes * (rows * cols) as u64;
         println!(
-            "iq2_xxs ahead {ahead}: {rows} rows of {cols}, {:.2} G weights/s, {:.1} ns a row, {done} weights  (check {check})",
+            "iq2_xxs {name}: {rows} rows of {cols}, {:.2} G weights/s, {:.1} ns a row, {done} weights  (check {check})",
             done as f64 / took / 1e9,
             took * 1e9 / (passes as f64 * rows as f64)
         );

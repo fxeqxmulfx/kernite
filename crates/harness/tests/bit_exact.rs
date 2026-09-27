@@ -71,12 +71,12 @@ fn iq2_xxs_matches_its_reference_to_the_bit() {
             for trial in 0..40 {
                 let (row, quants, scales) = case(&mut rng, sbs);
                 let want = reference(&row, &quants, &scales, &grid);
-                for (ahead, kernel) in KERNELS {
+                for (name, kernel) in KERNELS {
                     let got = dot(kernel, &row, &quants, &scales, &grid);
                     assert_eq!(
                         got.to_bits(),
                         want.to_bits(),
-                        "ahead {ahead}, {sbs} superblocks, trial {trial}, wild grid {wild}: {got} against {want}"
+                        "{name}, {sbs} superblocks, trial {trial}, wild grid {wild}: {got} against {want}"
                     );
                     checked += 1;
                 }

@@ -1,5 +1,5 @@
 //! The kernels, written in [`kgen_x86::Asm`], and [`Kernel`], which names each with its
-//! parameters the way the macro spells them: `iq2_xxs(ahead = 3)`.
+//! parameters the way the macro spells them: `iq2_xxs(ahead = 3, pairs = 2)`.
 
 mod iq2_xxs;
 
@@ -14,6 +14,8 @@ pub enum Kernel {
     Iq2Xxs {
         /// Groups whose products are made ahead of their sums.
         ahead: usize,
+        /// How many of each group's two pairs of grid rows are loaded as pairs.
+        pairs: usize,
     },
 }
 
@@ -25,7 +27,8 @@ impl Kernel {
         let kernel = match name {
             "iq2_xxs" => {
                 let ahead = take.int("ahead", 3, 1..=7)? as usize;
-                Kernel::Iq2Xxs { ahead }
+                let pairs = take.int("pairs", 0, 0..=2)? as usize;
+                Kernel::Iq2Xxs { ahead, pairs }
             }
             _ => return Err(format!("no kernel `{name}`; there is `iq2_xxs`")),
         };
@@ -36,13 +39,15 @@ impl Kernel {
     /// Its program.
     pub fn program(&self) -> Program<Op> {
         match *self {
-            Kernel::Iq2Xxs { ahead } => iq2_xxs(ahead),
+            Kernel::Iq2Xxs { ahead, pairs } => iq2_xxs(ahead, pairs),
         }
     }
 
     /// The kernels whose listings are kept as snapshots.
     pub fn snapshots() -> Vec<Kernel> {
-        (1..=4).map(|ahead| Kernel::Iq2Xxs { ahead }).collect()
+        let mut kernels: Vec<Kernel> = (1..=4).map(|ahead| Kernel::Iq2Xxs { ahead, pairs: 0 }).collect();
+        kernels.extend((1..=2).map(|pairs| Kernel::Iq2Xxs { ahead: 3, pairs }));
+        kernels
     }
 }
 

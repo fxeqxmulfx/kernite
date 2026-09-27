@@ -2,15 +2,19 @@
 """Everything this repository runs, one target each.
 
     ./make.py check                 formatting, clippy and every test
-    ./make.py speed AHEAD=3         the generated kernels alone on cpu 0
-    ./make.py stat AHEAD=3          the same under perf stat: EVENTS, or cycles, uops and ports
+    ./make.py fmt                   formats every crate
+    ./make.py speed KERNEL=ahead3   the generated kernels alone on cpu 0
+    ./make.py stat KERNEL=ahead3    the same under perf stat: EVENTS, or cycles, uops and ports
     ./make.py cycles                each kernel's weights a cycle, runs whose core was shared set aside
-    ./make.py ports AHEAD=3         its uops a superblock by port, and the frontend's
+    ./make.py ports KERNELS=ahead3  its uops a superblock by port, and the frontend's
+
+The measuring targets move your threads onto SYSTEM (41,55) while they run, and back after.
 
 An argument NAME=VALUE sets a variable for the targets and the environment of everything they run.
 With no target, the targets are listed.
 """
 
+import contextlib
 import os
 import re
 import shlex
@@ -24,6 +28,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import percycle
+import quiet as quieting
 
 TARGETS = {}
 PORTS = ",".join(f"uops_dispatched_port.port_{p}" for p in range(8))
@@ -79,10 +84,27 @@ def check():
     sh(["cargo", "test", "-q"])
 
 
+@target("fmt")
+def fmt():
+    """formats every crate"""
+    sh(["cargo", "fmt"])
+
+
 @target("bless")
 def bless():
     """rewrites snapshots/ from the kernels as they now are"""
     sh(["cargo", "test", "-q", "-p", "kgen", "--test", "snapshots"], env={"KGEN_BLESS": "1"})
+
+
+@contextlib.contextmanager
+def quieted():
+    """Your threads, and with root the rest of the machine's work, on SYSTEM (41,55) while cpu 0 is
+    measured, and back onto every cpu after."""
+    print(quieting.apply(quieting.parse(var("SYSTEM", "41,55"))))
+    try:
+        yield
+    finally:
+        print(quieting.apply(set(range(os.cpu_count()))))
 
 
 def speed_cmd() -> list[str]:
@@ -92,48 +114,59 @@ def speed_cmd() -> list[str]:
 
 @target("speed")
 def speed():
-    """the generated kernels alone on CPU (0): AHEAD picks one, ROWS, COLS, SECS"""
-    sh(speed_cmd())
+    """the generated kernels alone on CPU (0): KERNEL picks one, ROWS, COLS, SECS"""
+    cmd = speed_cmd()
+    with quieted():
+        sh(cmd)
 
 
 @target("stat")
 def stat():
     """speed under perf stat, EVENTS or cycles, uops and the ports"""
-    said = sh(["perf", "stat", "-e", var("EVENTS", EVENTS), *speed_cmd()], capture=True)
+    cmd = speed_cmd()
+    with quieted():
+        said = sh(["perf", "stat", "-e", var("EVENTS", EVENTS), *cmd], capture=True)
     print("\n".join(line for line in said.splitlines() if line and "Performance counter" not in line))
 
 
-def counted(exe: list, cpu: str, ahead: str, events: list = ()) -> tuple:
-    """One run of AHEAD's kernel under percycle's counters."""
+def kernels(exe: list) -> list[str]:
+    """KERNELS, or every kernel exe runs."""
+    return var("KERNELS").split() or sh([*exe], env={"KERNEL": "?"}, capture=True, echo=False).split()
+
+
+def counted(exe: list, cpu: str, kernel: str, events: list = ()) -> tuple:
+    """One run of kernel under percycle's counters."""
     with tempfile.TemporaryDirectory() as tmp:
-        run = ["env", f"AHEAD={ahead}", f"SECS={var('SECS', '1')}", *exe]
+        run = ["env", f"KERNEL={kernel}", f"SECS={var('SECS', '1')}", *exe]
         said = sh(percycle.command(run, cpu, Path(tmp), events), capture=True, echo=False)
         return percycle.result(said, Path(tmp))
 
 
 @target("ports")
 def ports():
-    """each kernel's, or AHEAD's, uops a superblock by port, and the frontend's, on CPU (0)"""
+    """each kernel's, or KERNELS', uops a superblock by port, and the frontend's, on CPU (0)"""
     cmd, cpu = speed_cmd(), var("CPU", "0")
-    for ahead in var("AHEAD", "1 2 3 4").split():
-        print(f"ahead {ahead}")
-        print(percycle.ports(lambda events: counted(cmd[3:], cpu, ahead, events)))
+    with quieted():
+        for kernel in kernels(cmd[3:]):
+            print(kernel)
+            print(percycle.ports(lambda events: counted(cmd[3:], cpu, kernel, events)))
 
 
 @target("cycles")
 def cycles():
-    """each kernel, or AHEAD's, alone on CPU (0), REPS rounds of SECS (1) each: weights a cycle"""
+    """each kernel, or KERNELS, alone on CPU (0), REPS rounds of SECS (1) each: weights a cycle"""
     cmd, cpu = speed_cmd(), var("CPU", "0")
-    aheads, runs = var("AHEAD", "1 2 3 4").split(), int(var("REPS", "5"))
-    kept = {ahead: [] for ahead in aheads}
-    for _ in range(runs):
-        for ahead in aheads:
-            line, rate, busy, _ = counted(cmd[3:], cpu, ahead)
-            print(percycle.row(rate, busy, line))
-            if busy <= percycle.BUSY:
-                kept[ahead].append(rate)
-    for ahead in aheads:
-        print(percycle.summary(f"ahead {ahead}", kept[ahead], runs))
+    names, runs = kernels(cmd[3:]), int(var("REPS", "5"))
+    kept = {name: [] for name in names}
+    with quieted():
+        for _ in range(runs):
+            for name in names:
+                line, rate, busy, per = counted(cmd[3:], cpu, name)
+                print(percycle.row(rate, busy, f"{per['instructions']:6.1f} instructions a superblock | {line}"))
+                if busy <= percycle.BUSY:
+                    kept[name].append(rate)
+    for name in names:
+        print(percycle.summary(name, kept[name], runs))
 
 
 def main(args: list[str]) -> None:
@@ -141,6 +174,9 @@ def main(args: list[str]) -> None:
     for sig in signal.SIGTERM, signal.SIGHUP:
         signal.signal(sig, lambda signum, _: sys.exit(128 + signum))
     os.chdir(ROOT)
+    # Back onto every cpu, from wherever a quiet machine put the shell: what this starts, builds above
+    # all, should use them all, and what must run in one place pins itself there.
+    os.sched_setaffinity(0, range(os.cpu_count()))
     names = []
     for arg in args:
         name, eq, value = arg.partition("=")

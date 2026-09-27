@@ -324,6 +324,8 @@ macro_rules! two {
 /// Vector.
 impl Asm {
     three! {
+        /// `vpaddb`: bytes added, wrapping.
+        vpaddb = Vpaddb;
         /// `vpaddd`: 32-bit lanes added.
         vpaddd = Vpaddd;
         /// `vpaddw`: 16-bit lanes added.
@@ -429,6 +431,11 @@ impl Asm {
         self.emit(Op::Vmovq, vec![vec(dst, Write), mem(from, W64)]);
     }
 
+    /// `vmovhps`: 64 bits from memory over the high quadword of `a`, its low one kept.
+    pub fn vmovhps(&mut self, dst: Xmm, a: Xmm, from: Addr) {
+        self.emit(Op::Vmovhps, vec![vec(dst, Write), vec(a, Read), mem(from, W64)]);
+    }
+
     /// `vcvtph2ps`: eight halves to eight floats, exactly.
     pub fn vcvtph2ps(&mut self, dst: Ymm, a: impl Into<Src<Xmm>>) {
         self.emit(Op::Vcvtph2ps, vec![vec(dst, Write), src(a.into())]);
@@ -437,6 +444,11 @@ impl Asm {
     /// `vextractf128`: one 128-bit lane of `a`.
     pub fn vextractf128(&mut self, dst: Xmm, a: Ymm, lane: u8) {
         self.emit(Op::Vextractf128, vec![vec(dst, Write), vec(a, Read), number(lane.into())]);
+    }
+
+    /// `vinserti128`: `a` with its 128-bit lane `lane` replaced by `b`.
+    pub fn vinserti128(&mut self, dst: Ymm, a: Ymm, b: impl Into<Src<Xmm>>, lane: u8) {
+        self.emit(Op::Vinserti128, vec![vec(dst, Write), vec(a, Read), src(b.into()), number(lane.into())]);
     }
 
     /// `vmovhlps`: the high two floats of `b` over the low two of `a`.

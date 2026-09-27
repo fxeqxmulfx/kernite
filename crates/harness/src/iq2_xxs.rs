@@ -41,8 +41,34 @@ unsafe extern "sysv64" fn ahead4(
     grid: *const u64,
 ) -> f32;
 
-/// Every kernel, by how many groups ahead of their sums it makes their products.
-pub const KERNELS: [(usize, Kernel); 4] = [(1, ahead1), (2, ahead2), (3, ahead3), (4, ahead4)];
+#[kgen_macros::kernel(iq2_xxs(ahead = 3, pairs = 1))]
+unsafe extern "sysv64" fn ahead3_pairs1(
+    row: *const u8,
+    sbs: usize,
+    quants: *const i8,
+    scales: *const f32,
+    grid: *const u64,
+) -> f32;
+
+#[kgen_macros::kernel(iq2_xxs(ahead = 3, pairs = 2))]
+unsafe extern "sysv64" fn ahead3_pairs2(
+    row: *const u8,
+    sbs: usize,
+    quants: *const i8,
+    scales: *const f32,
+    grid: *const u64,
+) -> f32;
+
+/// Every kernel, by name: `aheadD` makes each group's products `D` groups ahead of its sum, and
+/// `pairsP` loads `P` of its two pairs of grid rows as pairs.
+pub const KERNELS: [(&str, Kernel); 6] = [
+    ("ahead1", ahead1),
+    ("ahead2", ahead2),
+    ("ahead3", ahead3),
+    ("ahead4", ahead4),
+    ("ahead3-pairs1", ahead3_pairs1),
+    ("ahead3-pairs2", ahead3_pairs2),
+];
 
 /// Bytes to a superblock of 256 weights.
 pub const SUPERBLOCK: usize = 66;

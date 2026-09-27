@@ -1,7 +1,7 @@
 # iq2_xxs_ahead1(gpr, gpr, gpr, gpr, gpr) -> vec
 # frame: 128 bytes aligned to 128, saves [rbx, r12]
 # row=rdi sbs=rsi quants=rdx scales=rcx grid=r8 spread=ymm0
-# bit=ymm1 one8=ymm2 one16=ymm3 acc=ymm4 cur=rax nxt=r9
+# bit=ymm1 max8=ymm2 one16=ymm3 acc=ymm4 cur=rax nxt=r9
 # p0=ymm5 p1=ymm8 p2=ymm9 p3=ymm8 p4=ymm10 p5=ymm5
 # p6=ymm7 p7=ymm8 steps=ymm5,ymm6 words=ymm5,ymm6 fields=ymm6,ymm7 field=ymm7,ymm5
 # parity=ymm8,ymm9 d=ymm6,ymm5 scale=ymm5,ymm6 index0=r10,rcx index1=r11,rsi index2=rbx,r9
@@ -71,8 +71,7 @@
     vpbroadcastd ymm6, dword ptr [rax + 32]
     vpshufb ymm6, ymm6, ymm0
     vpand ymm6, ymm6, ymm1
-    vpcmpeqb ymm6, ymm6, ymm1
-    vpor ymm6, ymm6, ymm2
+    vpaddb ymm6, ymm6, ymm2
     vmovdqa ymm7, ymmword ptr [rdx]
     vpsignb ymm7, ymm7, ymm6
     vpmaddubsw ymm5, ymm5, ymm7
@@ -99,8 +98,7 @@
     vpbroadcastd ymm9, dword ptr [rax + 36]
     vpshufb ymm9, ymm9, ymm0
     vpand ymm9, ymm9, ymm1
-    vpcmpeqb ymm9, ymm9, ymm1
-    vpor ymm9, ymm9, ymm2
+    vpaddb ymm9, ymm9, ymm2
     vmovdqa ymm10, ymmword ptr [rdx + 32]
     vpsignb ymm10, ymm10, ymm9
     vpmaddubsw ymm8, ymm8, ymm10
@@ -128,8 +126,7 @@
     vpbroadcastd ymm10, dword ptr [rax + 40]
     vpshufb ymm10, ymm10, ymm0
     vpand ymm10, ymm10, ymm1
-    vpcmpeqb ymm10, ymm10, ymm1
-    vpor ymm10, ymm10, ymm2
+    vpaddb ymm10, ymm10, ymm2
     vmovdqa ymm11, ymmword ptr [rdx + 64]
     vpsignb ymm11, ymm11, ymm10
     vpmaddubsw ymm9, ymm9, ymm11
@@ -157,8 +154,7 @@
     vpbroadcastd ymm10, dword ptr [rax + 44]
     vpshufb ymm10, ymm10, ymm0
     vpand ymm10, ymm10, ymm1
-    vpcmpeqb ymm10, ymm10, ymm1
-    vpor ymm10, ymm10, ymm2
+    vpaddb ymm10, ymm10, ymm2
     vmovdqa ymm11, ymmword ptr [rdx + 96]
     vpsignb ymm11, ymm11, ymm10
     vpmaddubsw ymm8, ymm8, ymm11
@@ -186,8 +182,7 @@
     vpbroadcastd ymm5, dword ptr [rax + 48]
     vpshufb ymm5, ymm5, ymm0
     vpand ymm5, ymm5, ymm1
-    vpcmpeqb ymm5, ymm5, ymm1
-    vpor ymm5, ymm5, ymm2
+    vpaddb ymm5, ymm5, ymm2
     vmovdqa ymm11, ymmword ptr [rdx + 128]
     vpsignb ymm11, ymm11, ymm5
     vpmaddubsw ymm10, ymm10, ymm11
@@ -215,8 +210,7 @@
     vpbroadcastd ymm8, dword ptr [rax + 52]
     vpshufb ymm8, ymm8, ymm0
     vpand ymm8, ymm8, ymm1
-    vpcmpeqb ymm8, ymm8, ymm1
-    vpor ymm8, ymm8, ymm2
+    vpaddb ymm8, ymm8, ymm2
     vmovdqa ymm11, ymmword ptr [rdx + 160]
     vpsignb ymm11, ymm11, ymm8
     vpmaddubsw ymm5, ymm5, ymm11
@@ -243,8 +237,7 @@
     vpbroadcastd ymm8, dword ptr [rax + 56]
     vpshufb ymm8, ymm8, ymm0
     vpand ymm8, ymm8, ymm1
-    vpcmpeqb ymm8, ymm8, ymm1
-    vpor ymm8, ymm8, ymm2
+    vpaddb ymm8, ymm8, ymm2
     vmovdqa ymm9, ymmword ptr [rdx + 192]
     vpsignb ymm9, ymm9, ymm8
     vpmaddubsw ymm7, ymm7, ymm9
@@ -268,8 +261,7 @@
     vpbroadcastd ymm5, dword ptr [rax + 60]
     vpshufb ymm5, ymm5, ymm0
     vpand ymm5, ymm5, ymm1
-    vpcmpeqb ymm5, ymm5, ymm1
-    vpor ymm5, ymm5, ymm2
+    vpaddb ymm5, ymm5, ymm2
     vmovdqa ymm9, ymmword ptr [rdx + 224]
     vpsignb ymm9, ymm9, ymm5
     vpmaddubsw ymm8, ymm8, ymm9
@@ -302,8 +294,7 @@
     vpbroadcastd ymm6, dword ptr [r9 + 32]
     vpshufb ymm6, ymm6, ymm0
     vpand ymm6, ymm6, ymm1
-    vpcmpeqb ymm6, ymm6, ymm1
-    vpor ymm6, ymm6, ymm2
+    vpaddb ymm6, ymm6, ymm2
     vmovdqa ymm7, ymmword ptr [rdx + 256]
     vpsignb ymm7, ymm7, ymm6
     vpmaddubsw ymm5, ymm5, ymm7
@@ -335,8 +326,7 @@
     vpbroadcastd ymm6, dword ptr [rax + 36]
     vpshufb ymm6, ymm6, ymm0
     vpand ymm6, ymm6, ymm1
-    vpcmpeqb ymm6, ymm6, ymm1
-    vpor ymm6, ymm6, ymm2
+    vpaddb ymm6, ymm6, ymm2
     vmovdqa ymm7, ymmword ptr [rdx + 32]
     vpsignb ymm7, ymm7, ymm6
     vpmaddubsw ymm8, ymm8, ymm7
@@ -360,8 +350,7 @@
     vpbroadcastd ymm5, dword ptr [rax + 40]
     vpshufb ymm5, ymm5, ymm0
     vpand ymm5, ymm5, ymm1
-    vpcmpeqb ymm5, ymm5, ymm1
-    vpor ymm5, ymm5, ymm2
+    vpaddb ymm5, ymm5, ymm2
     vmovdqa ymm6, ymmword ptr [rdx + 64]
     vpsignb ymm6, ymm6, ymm5
     vpmaddubsw ymm9, ymm9, ymm6
@@ -385,8 +374,7 @@
     vpbroadcastd ymm5, dword ptr [rax + 44]
     vpshufb ymm5, ymm5, ymm0
     vpand ymm5, ymm5, ymm1
-    vpcmpeqb ymm5, ymm5, ymm1
-    vpor ymm5, ymm5, ymm2
+    vpaddb ymm5, ymm5, ymm2
     vmovdqa ymm6, ymmword ptr [rdx + 96]
     vpsignb ymm6, ymm6, ymm5
     vpmaddubsw ymm8, ymm8, ymm6
@@ -410,8 +398,7 @@
     vpbroadcastd ymm5, dword ptr [rax + 48]
     vpshufb ymm5, ymm5, ymm0
     vpand ymm5, ymm5, ymm1
-    vpcmpeqb ymm5, ymm5, ymm1
-    vpor ymm5, ymm5, ymm2
+    vpaddb ymm5, ymm5, ymm2
     vmovdqa ymm6, ymmword ptr [rdx + 128]
     vpsignb ymm6, ymm6, ymm5
     vpmaddubsw ymm10, ymm10, ymm6
@@ -435,8 +422,7 @@
     vpbroadcastd ymm6, dword ptr [rax + 52]
     vpshufb ymm6, ymm6, ymm0
     vpand ymm6, ymm6, ymm1
-    vpcmpeqb ymm6, ymm6, ymm1
-    vpor ymm6, ymm6, ymm2
+    vpaddb ymm6, ymm6, ymm2
     vmovdqa ymm7, ymmword ptr [rdx + 160]
     vpsignb ymm7, ymm7, ymm6
     vpmaddubsw ymm5, ymm5, ymm7
@@ -460,8 +446,7 @@
     vpbroadcastd ymm6, dword ptr [rax + 56]
     vpshufb ymm6, ymm6, ymm0
     vpand ymm6, ymm6, ymm1
-    vpcmpeqb ymm6, ymm6, ymm1
-    vpor ymm6, ymm6, ymm2
+    vpaddb ymm6, ymm6, ymm2
     vmovdqa ymm8, ymmword ptr [rdx + 192]
     vpsignb ymm8, ymm8, ymm6
     vpmaddubsw ymm7, ymm7, ymm8
@@ -485,8 +470,7 @@
     vpbroadcastd ymm5, dword ptr [rax + 60]
     vpshufb ymm5, ymm5, ymm0
     vpand ymm5, ymm5, ymm1
-    vpcmpeqb ymm5, ymm5, ymm1
-    vpor ymm5, ymm5, ymm2
+    vpaddb ymm5, ymm5, ymm2
     vmovdqa ymm0, ymmword ptr [rdx + 224]
     vpsignb ymm0, ymm0, ymm5
     vpmaddubsw ymm8, ymm8, ymm0
@@ -529,7 +513,7 @@
 # c1, aligned to 8:
 #   01 02 04 08 10 20 40 80
 # c2, aligned to 4:
-#   01 01 01 01
+#   7f 7f 7f 7f
 # c3, aligned to 4:
 #   01 00 01 00
 # c4, aligned to 32:

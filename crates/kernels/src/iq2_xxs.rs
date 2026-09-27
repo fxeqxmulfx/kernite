@@ -7,8 +7,11 @@ struct Group {
     spread: Ymm,
     /// Bit `j % 8` for byte `j`.
     bit: Ymm,
-    one8: Ymm,
+    /// 0x7F, the largest signed byte, in every byte.
+    max8: Ymm,
     one16: Ymm,
+    /// How many of the two pairs of grid rows are loaded as pairs: see [`products`].
+    pairs: usize,
 }
 
 /// The constants a superblock's scales and signs use once each, in memory.
@@ -45,9 +48,15 @@ struct Row {
 /// As there, each group's integer work runs `ahead` groups before its sum, and each
 /// superblock's scales and signs one superblock before its groups. They go to one of two
 /// 64-byte halves of a 128-byte slot, which `cur` and `nxt` swap between with an `xor`.
-pub fn iq2_xxs(ahead: usize) -> Program<Op> {
+///
+/// `pairs` of each group's two pairs of grid rows are loaded as pairs: see [`products`].
+pub fn iq2_xxs(ahead: usize, pairs: usize) -> Program<Op> {
     assert!((1..8).contains(&ahead), "ahead {ahead}");
-    let mut a = Asm::new(format!("iq2_xxs_ahead{ahead}"));
+    assert!(pairs <= 2, "pairs {pairs}");
+    let mut a = Asm::new(match pairs {
+        0 => format!("iq2_xxs_ahead{ahead}"),
+        _ => format!("iq2_xxs_ahead{ahead}_pairs{pairs}"),
+    });
     let row = a.param("row");
     let n = a.param("sbs");
     let quants = a.param("quants");
@@ -61,11 +70,11 @@ pub fn iq2_xxs(ahead: usize) -> Program<Op> {
     a.note("constants");
     let spread: Vec<u8> = (0..32).map(|j| j / 8).collect();
     let (spread_at, bit_at) = (a.u8s(&spread), a.u64s(&[0x8040_2010_0804_0201]));
-    let (one8_at, one16_at) = (a.u32s(&[0x0101_0101]), a.u32s(&[0x0001_0001]));
-    let k = Group { spread: a.ymm("spread"), bit: a.ymm("bit"), one8: a.ymm("one8"), one16: a.ymm("one16") };
+    let (max8_at, one16_at) = (a.u32s(&[0x7F7F_7F7F]), a.u32s(&[0x0001_0001]));
+    let k = Group { spread: a.ymm("spread"), bit: a.ymm("bit"), max8: a.ymm("max8"), one16: a.ymm("one16"), pairs };
     a.vmovdqa(k.spread, spread_at);
     a.vpbroadcastq(k.bit, bit_at);
-    a.vpbroadcastd(k.one8, one8_at);
+    a.vpbroadcastd(k.max8, max8_at);
     a.vpbroadcastd(k.one16, one16_at);
     let s = Superblock {
         fields: [0x7F, 0x7F00, 0x7F_0000, 0x7F00_0000].map(|m| a.u32s(&[m; 8])),
@@ -208,19 +217,33 @@ fn products(a: &mut Asm, k: &Group, r: &Row, p: Ymm, sb: i32, from: Gpr, g: i32)
     for (l, &i) in index.iter().enumerate() {
         a.movzx_byte(i, r.row.at(at + l as i32));
     }
-    // The four rows, quadword `l` from index `l`.
-    let row = a.ymm("rows");
-    a.vmovq(p.xmm(), r.grid.at(0).index(index[0], 8));
-    for (l, &i) in index.iter().enumerate().skip(1) {
-        a.vpbroadcastq(row, r.grid.at(0).index(i, 8));
-        a.vpblendd(p, p, row, 0b11 << (2 * l));
+    // The four rows, quadword `l` from index `l`. A pair is two rows in a 128-bit lane, the
+    // second loaded over its high quadword by `vmovhps`: one fused uop, on port 5. The high
+    // lane's pair goes in above the low one's by `vinserti128`, port 5 again. A row not in a
+    // pair is broadcast and blended in: two uops, on any vector port.
+    let rows = a.ymm("rows");
+    let grid = |i: Gpr| r.grid.at(0).index(i, 8);
+    a.vmovq(p.xmm(), grid(index[0]));
+    if k.pairs >= 1 {
+        a.vmovhps(p.xmm(), p.xmm(), grid(index[1]));
+    }
+    if k.pairs == 2 {
+        a.vmovq(rows.xmm(), grid(index[2]));
+        a.vmovhps(rows.xmm(), rows.xmm(), grid(index[3]));
+        a.vinserti128(p, p, rows.xmm(), 1);
+    } else {
+        for (l, &i) in index.iter().enumerate().skip(1 + k.pairs) {
+            a.vpbroadcastq(rows, grid(i));
+            a.vpblendd(p, p, rows, 0b11 << (2 * l));
+        }
     }
     let signs = a.ymm("signs");
     a.vpbroadcastd(signs, from.at(32 + 4 * g));
     a.vpshufb(signs, signs, k.spread);
     a.vpand(signs, signs, k.bit);
-    a.vpcmpeqb(signs, signs, k.bit);
-    a.vpor(signs, signs, k.one8);
+    // A byte's bit, where set, plus 0x7F is negative, and 0x7F alone positive: `vpsignb`
+    // negates the activation under the one and keeps it under the other.
+    a.vpaddb(signs, signs, k.max8);
     let x = a.ymm("x");
     a.vmovdqa(x, r.quants.at(256 * sb + 32 * g));
     a.vpsignb(x, x, signs);
