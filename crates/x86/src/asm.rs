@@ -216,6 +216,11 @@ impl Asm {
         self.emit(Op::Mov, vec![gpr(dst, W64, Write), gpr(src, W64, Read)]);
     }
 
+    /// `mov dst, qword ptr [from]`.
+    pub fn load_u64(&mut self, dst: Gpr, from: Addr) {
+        self.emit(Op::Mov, vec![gpr(dst, W64, Write), mem(from, W64)]);
+    }
+
     /// `movzx dst, byte ptr [from]`: one byte, zero-extended through all of `dst`.
     pub fn movzx_byte(&mut self, dst: Gpr, from: Addr) {
         self.emit(Op::Movzx, vec![gpr(dst, W32, Write), mem(from, W8)]);

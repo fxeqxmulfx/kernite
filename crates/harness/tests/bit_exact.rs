@@ -3,6 +3,7 @@
 use kgen_harness::bf16;
 use kgen_harness::iq2_s;
 use kgen_harness::iq2_s_nibble;
+use kgen_harness::iq2_s_packed;
 use kgen_harness::iq2_s_planes;
 use kgen_harness::iq2_xxs::{KERNELS, SUPERBLOCK, dot, reference};
 use kgen_harness::iq3_s;
@@ -198,6 +199,15 @@ fn iq2_s_matches_its_reference_to_the_bit() {
                     })
                     .collect();
                 let want = iq2_s::reference(&row, &quants, &scales, &grid);
+                let packed = iq2_s_packed::repack(&row);
+                for (name, kernel) in iq2_s_packed::KERNELS {
+                    let got = iq2_s_packed::dot(kernel, &packed, &quants, &scales, &grid);
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "IQ2_S {name}, {sbs} superblocks, trial {trial}, wild grid {wild}: {got} against {want}"
+                    );
+                }
                 for (name, kernel) in iq2_s::KERNELS {
                     let got = iq2_s::dot(kernel, &row, &quants, &scales, &grid);
                     assert_eq!(

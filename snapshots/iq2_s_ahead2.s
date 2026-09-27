@@ -4,7 +4,7 @@
 # bit=ymm1 max8=ymm2 one16=ymm3 acc=ymm4 cur=rax nxt=r9
 # p0=ymm5 p1=ymm6 p2=ymm8 p3=ymm5 p4=ymm6 p5=ymm7
 # p6=ymm8 p7=ymm9 packed_signs=ymm5,ymm7 d=ymm5,ymm6 steps=ymm6,ymm5 low_scales=ymm7
-# high_scales=ymm6,ymm10 high_index_bits=r10,rcx index0=r11,rsi index1=rbx,r9 index2=r12,r10 index3=r13,r11,rdi
+# high_scales=ymm6,ymm10 index0=r11,rsi index1=rbx,r9 index2=r12,r10 index3=r13,r11,rdi high_index_bits=r10,rcx
 # high_for_entry=rbx,r12,r13,r10,r9,r11,rcx rows=ymm6,ymm7,ymm9,ymm8,ymm5,ymm11 signs=ymm6,ymm7,ymm9,ymm8,ymm5,ymm11 x=ymm7,ymm8,ymm10,ymm9,ymm6,ymm12,ymm0 lanes=ymm5,ymm6,ymm7,ymm8,ymm0 low_scale=ymm9,ymm7,ymm8,ymm6,ymm11,ymm1
 # high_scale=ymm10,ymm9,ymm7,ymm12,ymm2 scale=ymm9,ymm7,ymm8,ymm6,ymm11,ymm1 zero=ymm0 high=ymm0 sum=ymm0 pair=ymm1
 # result=ymm0 nothing=ymm0
