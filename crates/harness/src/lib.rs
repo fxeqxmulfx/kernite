@@ -9,6 +9,7 @@ pub mod iq3_s_nibble;
 pub mod iq3_xxs;
 pub mod iq3_xxs_nibble;
 pub mod iq4_nl;
+pub mod q6_k;
 
 /// 32 activation quants, aligned as the kernels load them.
 #[repr(C, align(32))]

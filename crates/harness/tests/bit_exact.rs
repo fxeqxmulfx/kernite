@@ -8,6 +8,7 @@ use kgen_harness::iq3_s_nibble;
 use kgen_harness::iq3_xxs;
 use kgen_harness::iq3_xxs_nibble;
 use kgen_harness::iq4_nl;
+use kgen_harness::q6_k;
 use kgen_harness::{Block, supported};
 
 /// xorshift64*: the same numbers on every run.
@@ -62,6 +63,33 @@ fn case(rng: &mut Rng, sbs: usize) -> (Vec<u8>, Vec<Block>, Vec<f32>) {
         })
         .collect();
     (row, quants, scales)
+}
+
+#[test]
+fn q6_k_matches_its_reference_to_the_bit() {
+    if !supported() {
+        return;
+    }
+    let mut rng = Rng(0x8a1b_cdef_0472_3956);
+    for sbs in [0, 1, 2, 3, 4, 8, 10] {
+        for trial in 0..50 {
+            let mut row = vec![0u8; sbs * q6_k::SUPERBLOCK];
+            for blk in row.as_chunks_mut::<{ q6_k::SUPERBLOCK }>().0 {
+                for b in &mut blk[..208] {
+                    *b = rng.byte();
+                }
+                blk[208..210].copy_from_slice(&finite_half(&mut rng).to_le_bytes());
+            }
+            let quants: Vec<Block> = (0..sbs * 8).map(|_| Block(std::array::from_fn(|_| rng.byte() as i8))).collect();
+            let scales: Vec<f32> =
+                (0..sbs * 8).map(|_| ((rng.next() >> 40) as f32 / (1u64 << 24) as f32 - 0.5) / 32.0).collect();
+            let sums: Vec<f32> =
+                (0..sbs * 16).map(|_| ((rng.next() >> 40) as f32 / (1u64 << 24) as f32 - 0.5) / 8.0).collect();
+            let want = q6_k::reference(&row, &quants, &scales, &sums);
+            let got = q6_k::dot(&row, &quants, &scales, &sums);
+            assert_eq!(got.to_bits(), want.to_bits(), "{sbs} superblocks, trial {trial}: {got} versus {want}");
+        }
+    }
 }
 
 #[test]

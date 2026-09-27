@@ -8,6 +8,7 @@ mod iq3_s;
 mod iq3_s_nibble;
 mod iq3_xxs;
 mod iq4_nl;
+mod q6_k;
 
 pub use bf16::bf16_pairs;
 pub use iq2_s::iq2_s;
@@ -19,6 +20,7 @@ pub use iq3_xxs::iq3_xxs;
 pub use iq4_nl::iq4_nl;
 use kgen_core::Program;
 use kgen_x86::{Hint, Op};
+pub use q6_k::q6_k;
 
 /// A kernel and its parameters.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +62,8 @@ pub enum Kernel {
         /// Blocks whose integer products are made ahead of their sums.
         ahead: usize,
     },
+    /// [`q6_k`].
+    Q6K,
     /// [`bf16_pairs`].
     Bf16Pairs {
         /// Bytes ahead of each row's reads that it asks for, or none.
@@ -104,6 +108,7 @@ impl Kernel {
                 let ahead = take.int("ahead", 2, 1..=3)? as usize;
                 Kernel::Iq4Nl { ahead }
             }
+            "q6_k" => Kernel::Q6K,
             "bf16_pairs" => {
                 let ahead = take.int("ahead", 0, 0..=4096)? as i32;
                 let hint = [Hint::T0, Hint::T1, Hint::T2, Hint::Nta][take.int("hint", 0, 0..=3)? as usize];
@@ -129,6 +134,7 @@ impl Kernel {
             Kernel::Iq3SNibble { ahead } => iq3_s_nibble(ahead),
             Kernel::Iq3XxsNibble { ahead } => iq3_xxs_nibble(ahead),
             Kernel::Iq4Nl { ahead } => iq4_nl(ahead),
+            Kernel::Q6K => q6_k(),
             Kernel::Bf16Pairs { ahead, hint } => bf16_pairs(ahead, hint),
         }
     }
@@ -143,6 +149,7 @@ impl Kernel {
         kernels.extend((1..=3).map(|ahead| Kernel::Iq3SNibble { ahead }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq3XxsNibble { ahead }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq4Nl { ahead }));
+        kernels.push(Kernel::Q6K);
         kernels.push(Kernel::Bf16Pairs { ahead: 0, hint: Hint::T0 });
         kernels.extend(
             [(512, Hint::T0), (1024, Hint::T0), (512, Hint::T1)].map(|(ahead, hint)| Kernel::Bf16Pairs { ahead, hint }),

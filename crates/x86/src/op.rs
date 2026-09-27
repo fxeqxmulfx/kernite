@@ -77,6 +77,7 @@ ops! {
     Vpmaddubsw = "vpmaddubsw",
     Vpmaddwd = "vpmaddwd",
     Vpmovzxbd = "vpmovzxbd",
+    Vpmovsxbd = "vpmovsxbd",
     Vpmovzxwd = "vpmovzxwd",
     Vpor = "vpor",
     Vpshufb = "vpshufb",

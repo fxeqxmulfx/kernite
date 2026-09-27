@@ -458,6 +458,11 @@ impl Asm {
         self.emit(Op::Vpmovzxbd, vec![vec(dst, Write), vec(from, Read)]);
     }
 
+    /// `vpmovsxbd`: eight signed bytes from a register to eight 32-bit lanes.
+    pub fn vpmovsxbd_reg(&mut self, dst: Ymm, from: Xmm) {
+        self.emit(Op::Vpmovsxbd, vec![vec(dst, Write), vec(from, Read)]);
+    }
+
     /// `vpgatherdd`: eight 32-bit entries, where mask lanes have their high bit set. The
     /// instruction clears those mask bits as it gathers, and leaves other destination lanes.
     pub fn vpgatherdd(&mut self, dst: Ymm, from: Addr, mask: Ymm) {
