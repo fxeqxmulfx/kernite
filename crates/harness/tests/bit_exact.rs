@@ -7,6 +7,7 @@ use kgen_harness::iq3_s;
 use kgen_harness::iq3_s_nibble;
 use kgen_harness::iq3_xxs;
 use kgen_harness::iq3_xxs_nibble;
+use kgen_harness::iq4_nl;
 use kgen_harness::{Block, supported};
 
 /// xorshift64*: the same numbers on every run.
@@ -309,6 +310,43 @@ fn iq3_xxs_nibbles_match_the_original_row_to_the_bit() {
                     got.to_bits(),
                     want.to_bits(),
                     "IQ3_XXS nibble {name}, {sbs} superblocks, trial {trial}: {got} against {want}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn iq4_nl_matches_its_reference_to_the_bit() {
+    if !supported() {
+        eprintln!("skipped: no AVX2, FMA or F16C");
+        return;
+    }
+    let mut rng = Rng(0xb2ec_6117_4ca9_e503);
+    for groups in [0, 1, 2, 3, 5, 10] {
+        for trial in 0..60 {
+            let mut row = vec![0u8; groups * iq4_nl::GROUP];
+            for blk in row.as_chunks_mut::<18>().0 {
+                blk[..2].copy_from_slice(&finite_half(&mut rng).to_le_bytes());
+                for b in &mut blk[2..] {
+                    *b = rng.byte();
+                }
+            }
+            let blocks = 4 * groups;
+            let quants: Vec<Block> = (0..blocks).map(|_| Block(std::array::from_fn(|_| rng.byte() as i8))).collect();
+            let scales: Vec<f32> = (0..blocks)
+                .map(|_| {
+                    let unit = (rng.next() >> 40) as f32 / (1u64 << 24) as f32 - 0.5;
+                    unit * 2f32.powi((rng.next() % 21) as i32 - 10)
+                })
+                .collect();
+            let want = iq4_nl::reference(&row, &quants, &scales);
+            for (name, kernel) in iq4_nl::KERNELS {
+                let got = iq4_nl::dot(kernel, &row, &quants, &scales);
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "IQ4_NL {name}, {groups} groups, trial {trial}: {got} against {want}"
                 );
             }
         }
