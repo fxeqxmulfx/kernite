@@ -3,6 +3,7 @@
 
 mod bf16;
 mod iq2_s;
+mod iq2_s_nibble;
 mod iq2_xxs;
 mod iq3_s;
 mod iq3_s_nibble;
@@ -12,6 +13,8 @@ mod q6_k;
 
 pub use bf16::bf16_pairs;
 pub use iq2_s::iq2_s;
+pub use iq2_s_nibble::iq2_s_nibble;
+pub use iq2_s_nibble::iq2_s_planes;
 pub use iq2_xxs::iq2_xxs;
 pub use iq3_s::iq3_s;
 pub use iq3_s_nibble::iq3_s_nibble;
@@ -27,6 +30,16 @@ pub use q6_k::q6_k;
 pub enum Kernel {
     /// [`iq2_s`].
     Iq2S {
+        /// Groups whose products are made ahead of their sums.
+        ahead: usize,
+    },
+    /// [`iq2_s_nibble`].
+    Iq2SNibble {
+        /// Groups whose products are made ahead of their sums.
+        ahead: usize,
+    },
+    /// [`iq2_s_planes`].
+    Iq2SPlanes {
         /// Groups whose products are made ahead of their sums.
         ahead: usize,
     },
@@ -83,6 +96,14 @@ impl Kernel {
                 let ahead = take.int("ahead", 2, 1..=7)? as usize;
                 Kernel::Iq2S { ahead }
             }
+            "iq2_s_nibble" => {
+                let ahead = take.int("ahead", 2, 1..=7)? as usize;
+                Kernel::Iq2SNibble { ahead }
+            }
+            "iq2_s_planes" => {
+                let ahead = take.int("ahead", 2, 1..=7)? as usize;
+                Kernel::Iq2SPlanes { ahead }
+            }
             "iq2_xxs" => {
                 let ahead = take.int("ahead", 3, 1..=7)? as usize;
                 let pairs = take.int("pairs", 0, 0..=2)? as usize;
@@ -116,7 +137,7 @@ impl Kernel {
             }
             _ => {
                 return Err(format!(
-                    "no kernel `{name}`; there are `iq2_s`, `iq2_xxs`, `iq3_xxs`, `iq3_xxs_nibble`, `iq3_s`, `iq3_s_nibble`, `iq4_nl` and `bf16_pairs`"
+                    "no kernel `{name}`; there are `iq2_s`, `iq2_s_nibble`, `iq2_s_planes`, `iq2_xxs`, `iq3_xxs`, `iq3_xxs_nibble`, `iq3_s`, `iq3_s_nibble`, `iq4_nl`, `q6_k` and `bf16_pairs`"
                 ));
             }
         };
@@ -128,6 +149,8 @@ impl Kernel {
     pub fn program(&self) -> Program<Op> {
         match *self {
             Kernel::Iq2S { ahead } => iq2_s(ahead),
+            Kernel::Iq2SNibble { ahead } => iq2_s_nibble(ahead),
+            Kernel::Iq2SPlanes { ahead } => iq2_s_planes(ahead),
             Kernel::Iq2Xxs { ahead, pairs } => iq2_xxs(ahead, pairs),
             Kernel::Iq3Xxs { ahead } => iq3_xxs(ahead),
             Kernel::Iq3S { ahead } => iq3_s(ahead),
@@ -142,6 +165,8 @@ impl Kernel {
     /// The kernels whose listings are kept as snapshots.
     pub fn snapshots() -> Vec<Kernel> {
         let mut kernels: Vec<Kernel> = (1..=3).map(|ahead| Kernel::Iq2S { ahead }).collect();
+        kernels.extend((1..=3).map(|ahead| Kernel::Iq2SNibble { ahead }));
+        kernels.extend((1..=3).map(|ahead| Kernel::Iq2SPlanes { ahead }));
         kernels.extend((1..=4).map(|ahead| Kernel::Iq2Xxs { ahead, pairs: 0 }));
         kernels.extend((1..=2).map(|pairs| Kernel::Iq2Xxs { ahead: 3, pairs }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq3Xxs { ahead }));

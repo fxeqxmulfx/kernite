@@ -2,6 +2,8 @@
 
 use kgen_harness::bf16;
 use kgen_harness::iq2_s;
+use kgen_harness::iq2_s_nibble;
+use kgen_harness::iq2_s_planes;
 use kgen_harness::iq2_xxs::{KERNELS, SUPERBLOCK, dot, reference};
 use kgen_harness::iq3_s;
 use kgen_harness::iq3_s_nibble;
@@ -88,6 +90,49 @@ fn q6_k_matches_its_reference_to_the_bit() {
             let want = q6_k::reference(&row, &quants, &scales, &sums);
             let got = q6_k::dot(&row, &quants, &scales, &sums);
             assert_eq!(got.to_bits(), want.to_bits(), "{sbs} superblocks, trial {trial}: {got} versus {want}");
+        }
+    }
+}
+
+#[test]
+fn iq2_s_repacked_matches_grid_reference_to_the_bit() {
+    if !supported() {
+        return;
+    }
+    let mut rng = Rng(0x7128_8d23_64fb_129c);
+    let grid: [u64; 1024] =
+        std::array::from_fn(|_| u64::from_le_bytes(std::array::from_fn(|_| [8, 25, 43][(rng.next() % 3) as usize])));
+    for sbs in [0, 1, 2, 3, 4, 8, 10] {
+        for trial in 0..50 {
+            let mut row = vec![0u8; sbs * iq2_s::SUPERBLOCK];
+            for blk in row.as_chunks_mut::<{ iq2_s::SUPERBLOCK }>().0 {
+                blk[..2].copy_from_slice(&finite_half(&mut rng).to_le_bytes());
+                for b in &mut blk[2..] {
+                    *b = rng.byte();
+                }
+            }
+            let packed = iq2_s_nibble::repack(&row, &grid);
+            let planes = iq2_s_planes::repack(&row, &grid);
+            let quants: Vec<Block> = (0..sbs * 8).map(|_| Block(std::array::from_fn(|_| rng.byte() as i8))).collect();
+            let scales: Vec<f32> =
+                (0..sbs * 8).map(|_| ((rng.next() >> 40) as f32 / (1u64 << 24) as f32 - 0.5) / 32.0).collect();
+            let want = iq2_s::reference(&row, &quants, &scales, &grid);
+            for (name, kernel) in iq2_s_nibble::KERNELS {
+                let got = iq2_s_nibble::dot(kernel, &packed, &quants, &scales);
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "{name}, {sbs} superblocks, trial {trial}: {got} versus {want}"
+                );
+            }
+            for (name, kernel) in iq2_s_planes::KERNELS {
+                let got = iq2_s_planes::dot(kernel, &planes, &quants, &scales);
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "planes {name}, {sbs} superblocks, trial {trial}: {got} versus {want}"
+                );
+            }
         }
     }
 }

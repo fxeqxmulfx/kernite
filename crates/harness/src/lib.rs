@@ -3,6 +3,8 @@
 
 pub mod bf16;
 pub mod iq2_s;
+pub mod iq2_s_nibble;
+pub mod iq2_s_planes;
 pub mod iq2_xxs;
 pub mod iq3_s;
 pub mod iq3_s_nibble;
