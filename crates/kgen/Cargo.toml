@@ -1,0 +1,16 @@
+[package]
+name = "kgen"
+description = "Kernels written as instructions over variables, compiled to assembly that changes only when they do"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+kgen-core = { workspace = true }
+kgen-compile = { workspace = true }
+kgen-x86 = { workspace = true }
+kgen-kernels = { workspace = true }
+
+[lints]
+workspace = true

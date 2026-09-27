@@ -1,0 +1,4 @@
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order would reach the generated code; use a Vec or a BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order would reach the generated code; use a Vec or a BTreeSet" },
+]

@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# The dependency rule, innermost first. `crates/kgen/tests/architecture.rs` checks every
+# manifest against it.
+[workspace.dependencies]
+kgen-core = { path = "crates/core" }
+kgen-compile = { path = "crates/compile" }
+kgen-x86 = { path = "crates/x86" }
+kgen-kernels = { path = "crates/kernels" }
+kgen = { path = "crates/kgen" }
+kgen-macros = { path = "crates/macros" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Iteration order must never reach the output: same program, same bytes.
+disallowed_types = "deny"
+
+[profile.release]
+codegen-units = 1

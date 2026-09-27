@@ -1,0 +1,17 @@
+[package]
+name = "kgen-harness"
+description = "The generated kernels, run against scalar references and timed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+kgen-macros = { workspace = true }
+
+# Not the workspace's lints: calling a kernel is unsafe, and this crate is where it happens.
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+disallowed_types = "deny"

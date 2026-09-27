@@ -1,0 +1,13 @@
+[package]
+name = "kgen-x86"
+description = "x86-64 for kgen: the typed instruction builder kernels are written in, SysV, Intel syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+kgen-core = { workspace = true }
+
+[lints]
+workspace = true
