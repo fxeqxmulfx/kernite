@@ -90,12 +90,20 @@ pub fn iq2_xxs(ahead: usize) -> Program<Op> {
     a.jz(last);
 
     a.place(top);
-    // The next superblock's scales and signs, a chain of instructions that wait on each other,
-    // spread over the groups before the first that reads its signs.
-    let mut next = a.capture(|a| prepare(a, &s, &r, 1, nxt));
-    let share = next.len().div_ceil(8 - ahead);
+    // The next superblock's signs and scales, chains of instructions that wait on each other,
+    // spread over the groups: the signs over those before the first that reads them, the
+    // scales, which only the next pass reads, over the rest, so that the two chains' variables
+    // are not alive together.
+    let steps = a.ymm("steps");
+    let mut next_signs = a.capture(|a| group_signs(a, &s, &r, 1, steps, nxt));
+    let mut next_scales = a.capture(|a| group_scales(a, &s, &r, steps, 1, nxt));
+    let (share, scales_share) = (next_signs.len().div_ceil(8 - ahead), next_scales.len().div_ceil(ahead));
     for g in 0..8 {
-        a.splice(&mut next, share);
+        if g < 8 - ahead {
+            a.splice(&mut next_signs, share);
+        } else {
+            a.splice(&mut next_scales, scales_share);
+        }
         match g + ahead {
             j if j < 8 => products(&mut a, &k, &r, ring[j], 0, cur, j as i32),
             j => products(&mut a, &k, &r, ring[j - 8], 1, nxt, (j - 8) as i32),
@@ -126,32 +134,26 @@ pub fn iq2_xxs(ahead: usize) -> Program<Op> {
     a.finish()
 }
 
-/// Superblock `sb` (0 this one, 1 the next)'s eight group scales, times the activations',
-/// then its eight words of signs, to the 64 bytes at `to`.
+/// Superblock `sb` (0 this one, 1 the next)'s eight words of signs and eight group scales,
+/// times the activations', to the 64 bytes at `to`.
+fn prepare(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr) {
+    let steps = a.ymm("steps");
+    group_signs(a, s, r, sb, steps, to);
+    group_scales(a, s, r, steps, sb, to);
+}
+
+/// Superblock `sb`'s eight words of signs, to the 32 bytes at `to + 32`, and `steps` of its
+/// group scales.
 ///
 /// Each group's second word holds its scale in the top nibble and four 7-bit fields of signs
-/// below; `vshufps` and `vpermq` gather the eight second words in group order.
-fn prepare(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr) {
-    a.note(format!("scales and signs of superblock +{sb}"));
-    let at = 66 * sb;
-    let w = a.ymm("words");
+/// below; `vshufps` and `vpermq` gather the eight second words in group order. `(w >> 27) | 1`
+/// is `2 * (w >> 28) + 1`, the odd step.
+fn group_signs(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, steps: Ymm, to: Gpr) {
+    a.note(format!("signs of superblock +{sb}"));
+    let (at, w) = (66 * sb, a.ymm("words"));
     a.vmovdqu(w, r.row.at(at + 2));
     a.vshufps(w, w, r.row.at(at + 34), 0xdd);
     a.vpermq(w, w, 0xd8);
-
-    // `(w >> 27) | 1` is `2 * (w >> 28) + 1`, the odd step.
-    let d = a.ymm("d");
-    a.vpbroadcastw(d.xmm(), r.row.at(at));
-    a.vcvtph2ps(d, d.xmm());
-    let scale = a.ymm("scale");
-    a.vpsrld(scale, w, 27);
-    a.vpor(scale, scale, s.one);
-    a.vcvtdq2ps(scale, scale);
-    a.vmulps(scale, d, scale);
-    a.vmulps(scale, scale, s.eighth);
-    a.vmulps(scale, scale, r.scales.at(32 * sb));
-    a.store_vmovaps(to.at(0), scale);
-
     // Field `l`, bits `7l..7l + 7`, moved up `l` bits to the bottom of byte `l`.
     let (y, t) = (a.ymm("fields"), a.ymm("field"));
     a.vpand(y, w, s.fields[0]);
@@ -164,6 +166,7 @@ fn prepare(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr) {
     a.vpslld(t, w, 3);
     a.vpand(t, t, s.fields[3]);
     a.vpor(y, y, t);
+    a.vpsrld(steps, w, 27);
     // Bit 7 of each byte is the parity of the seven below: bit `k` of `z` is the XOR of bits
     // `k - 7..=k` of `y`, and what the shifts carry across bytes lands below the tops.
     let z = a.ymm("parity");
@@ -176,6 +179,22 @@ fn prepare(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr) {
     a.vpand(z, z, s.tops);
     a.vpor(y, y, z);
     a.store_vmovdqa(to.at(32), y);
+}
+
+/// Superblock `sb`'s eight group scales, from `steps` of them, times the activations', to the
+/// 32 bytes at `to`.
+fn group_scales(a: &mut Asm, s: &Superblock, r: &Row, steps: Ymm, sb: i32, to: Gpr) {
+    a.note(format!("scales of superblock +{sb}"));
+    let d = a.ymm("d");
+    a.vpbroadcastw(d.xmm(), r.row.at(66 * sb));
+    a.vcvtph2ps(d, d.xmm());
+    let scale = a.ymm("scale");
+    a.vpor(scale, steps, s.one);
+    a.vcvtdq2ps(scale, scale);
+    a.vmulps(scale, d, scale);
+    a.vmulps(scale, scale, s.eighth);
+    a.vmulps(scale, scale, r.scales.at(32 * sb));
+    a.store_vmovaps(to.at(0), scale);
 }
 
 /// Group `g` of superblock `sb` (0 this one, 1 the next): its 32 levels times its signed

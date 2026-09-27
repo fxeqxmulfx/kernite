@@ -2,11 +2,11 @@
 # frame: 128 bytes aligned to 128, saves [rbx, r12]
 # row=rdi sbs=rsi quants=rdx scales=rcx grid=r8 spread=ymm0
 # bit=ymm1 one8=ymm2 one16=ymm3 acc=ymm4 cur=rax nxt=r9
-# p0=ymm5 p1=ymm6 p2=ymm7 p3=ymm11 p4=ymm10 p5=ymm6
-# p6=ymm8 p7=ymm9 words=ymm5,ymm8 d=ymm6,ymm9 scale=ymm7,ymm10 fields=ymm6,ymm5
-# field=ymm7,ymm9 parity=ymm5,ymm7 index0=r10,rcx index1=r11,rsi index2=rbx,r9 index3=r12,r10,rdi
-# rows=ymm6,ymm7,ymm8,ymm12,ymm9,ymm5 signs=ymm6,ymm7,ymm8,ymm12,ymm9,ymm5 x=ymm7,ymm8,ymm9,ymm13,ymm12,ymm10,ymm0 lanes=ymm5,ymm6,ymm7,ymm9,ymm8,ymm0 group_scale=ymm12,ymm8,ymm11,ymm7,ymm9,ymm6,ymm1 zero=ymm0
-# high=ymm0 sum=ymm0 pair=ymm1 result=ymm0 nothing=ymm0
+# p0=ymm5 p1=ymm6 p2=ymm7 p3=ymm11 p4=ymm5 p5=ymm12
+# p6=ymm7 p7=ymm8 steps=ymm5,ymm6 words=ymm5,ymm8 fields=ymm6,ymm9 field=ymm7,ymm10
+# parity=ymm8 d=ymm6,ymm9 scale=ymm5,ymm10 index0=r10,rcx index1=r11,rsi index2=rbx,r9
+# index3=r12,r10,rdi rows=ymm6,ymm7,ymm8,ymm12,ymm10,ymm9 signs=ymm6,ymm7,ymm8,ymm12,ymm10,ymm9 x=ymm7,ymm8,ymm9,ymm13,ymm12,ymm10,ymm11,ymm0 lanes=ymm5,ymm6,ymm7,ymm10,ymm8,ymm0 group_scale=ymm12,ymm10,ymm11,ymm9,ymm8,ymm7,ymm1
+# zero=ymm0 high=ymm0 sum=ymm0 pair=ymm1 result=ymm0 nothing=ymm0
     push rbx
     push r12
     push rbp
@@ -23,19 +23,10 @@
     vxorps xmm4, xmm4, xmm4
     lea rax, [rsp]
     lea r9, [rsp + 64]
-    # scales and signs of superblock +0
+    # signs of superblock +0
     vmovdqu ymm5, ymmword ptr [rdi + 2]
     vshufps ymm5, ymm5, ymmword ptr [rdi + 34], 0xdd
     vpermq ymm5, ymm5, 0xd8
-    vpbroadcastw xmm6, word ptr [rdi]
-    vcvtph2ps ymm6, xmm6
-    vpsrld ymm7, ymm5, 27
-    vpor ymm7, ymm7, ymmword ptr [rip + {c9}]
-    vcvtdq2ps ymm7, ymm7
-    vmulps ymm7, ymm6, ymm7
-    vmulps ymm7, ymm7, ymmword ptr [rip + {c10}]
-    vmulps ymm7, ymm7, ymmword ptr [rcx]
-    vmovaps ymmword ptr [rax], ymm7
     vpand ymm6, ymm5, ymmword ptr [rip + {c4}]
     vpaddd ymm7, ymm5, ymm5
     vpand ymm7, ymm7, ymmword ptr [rip + {c5}]
@@ -46,15 +37,25 @@
     vpslld ymm7, ymm5, 3
     vpand ymm7, ymm7, ymmword ptr [rip + {c7}]
     vpor ymm6, ymm6, ymm7
-    vpaddw ymm5, ymm6, ymm6
-    vpxor ymm5, ymm5, ymm6
-    vpsllw ymm7, ymm5, 2
-    vpxor ymm5, ymm5, ymm7
-    vpsllw ymm7, ymm5, 4
-    vpxor ymm5, ymm5, ymm7
-    vpand ymm5, ymm5, ymmword ptr [rip + {c8}]
-    vpor ymm6, ymm6, ymm5
+    vpsrld ymm5, ymm5, 27
+    vpaddw ymm8, ymm6, ymm6
+    vpxor ymm8, ymm8, ymm6
+    vpsllw ymm7, ymm8, 2
+    vpxor ymm8, ymm8, ymm7
+    vpsllw ymm7, ymm8, 4
+    vpxor ymm8, ymm8, ymm7
+    vpand ymm8, ymm8, ymmword ptr [rip + {c8}]
+    vpor ymm6, ymm6, ymm8
     vmovdqa ymmword ptr [rax + 32], ymm6
+    # scales of superblock +0
+    vpbroadcastw xmm6, word ptr [rdi]
+    vcvtph2ps ymm6, xmm6
+    vpor ymm5, ymm5, ymmword ptr [rip + {c9}]
+    vcvtdq2ps ymm5, ymm5
+    vmulps ymm5, ymm6, ymm5
+    vmulps ymm5, ymm5, ymmword ptr [rip + {c10}]
+    vmulps ymm5, ymm5, ymmword ptr [rcx]
+    vmovaps ymmword ptr [rax], ymm5
     # products of group 0 of superblock +0
     movzx r10d, byte ptr [rdi + 2]
     movzx r11d, byte ptr [rdi + 3]
@@ -118,14 +119,12 @@
     dec rsi
     jz 3f
 2:
-    # scales and signs of superblock +1
+    # signs of superblock +1
     vmovdqu ymm8, ymmword ptr [rdi + 68]
     vshufps ymm8, ymm8, ymmword ptr [rdi + 100], 0xdd
     vpermq ymm8, ymm8, 0xd8
-    vpbroadcastw xmm9, word ptr [rdi + 66]
-    vcvtph2ps ymm9, xmm9
-    vpsrld ymm10, ymm8, 27
-    vpor ymm10, ymm10, ymmword ptr [rip + {c9}]
+    vpand ymm9, ymm8, ymmword ptr [rip + {c4}]
+    vpaddd ymm10, ymm8, ymm8
     # products of group 3 of superblock +0
     movzx r10d, byte ptr [rdi + 26]
     movzx r11d, byte ptr [rdi + 27]
@@ -151,82 +150,104 @@
     vcvtdq2ps ymm5, ymm5
     vbroadcastss ymm12, dword ptr [rax]
     vfmadd231ps ymm4, ymm5, ymm12
-    vcvtdq2ps ymm10, ymm10
-    vmulps ymm10, ymm9, ymm10
-    vmulps ymm10, ymm10, ymmword ptr [rip + {c10}]
-    vmulps ymm10, ymm10, ymmword ptr [rcx + 32]
-    vmovaps ymmword ptr [r9], ymm10
-    vpand ymm5, ymm8, ymmword ptr [rip + {c4}]
-    vpaddd ymm9, ymm8, ymm8
+    vpand ymm10, ymm10, ymmword ptr [rip + {c5}]
+    vpor ymm9, ymm9, ymm10
+    vpslld ymm10, ymm8, 2
+    vpand ymm10, ymm10, ymmword ptr [rip + {c6}]
+    vpor ymm9, ymm9, ymm10
     # products of group 4 of superblock +0
     movzx r10d, byte ptr [rdi + 34]
     movzx r11d, byte ptr [rdi + 35]
     movzx ebx, byte ptr [rdi + 36]
     movzx r12d, byte ptr [rdi + 37]
-    vmovq xmm10, qword ptr [r8 + r10*8]
-    vpbroadcastq ymm12, qword ptr [r8 + r11*8]
-    vpblendd ymm10, ymm10, ymm12, 0x0c
-    vpbroadcastq ymm12, qword ptr [r8 + rbx*8]
-    vpblendd ymm10, ymm10, ymm12, 0x30
-    vpbroadcastq ymm12, qword ptr [r8 + r12*8]
-    vpblendd ymm10, ymm10, ymm12, 0xc0
-    vpbroadcastd ymm12, dword ptr [rax + 48]
-    vpshufb ymm12, ymm12, ymm0
-    vpand ymm12, ymm12, ymm1
-    vpcmpeqb ymm12, ymm12, ymm1
-    vpor ymm12, ymm12, ymm2
-    vmovdqa ymm13, ymmword ptr [rdx + 128]
-    vpsignb ymm13, ymm13, ymm12
-    vpmaddubsw ymm10, ymm10, ymm13
+    vmovq xmm5, qword ptr [r8 + r10*8]
+    vpbroadcastq ymm10, qword ptr [r8 + r11*8]
+    vpblendd ymm5, ymm5, ymm10, 0x0c
+    vpbroadcastq ymm10, qword ptr [r8 + rbx*8]
+    vpblendd ymm5, ymm5, ymm10, 0x30
+    vpbroadcastq ymm10, qword ptr [r8 + r12*8]
+    vpblendd ymm5, ymm5, ymm10, 0xc0
+    vpbroadcastd ymm10, dword ptr [rax + 48]
+    vpshufb ymm10, ymm10, ymm0
+    vpand ymm10, ymm10, ymm1
+    vpcmpeqb ymm10, ymm10, ymm1
+    vpor ymm10, ymm10, ymm2
+    vmovdqa ymm12, ymmword ptr [rdx + 128]
+    vpsignb ymm12, ymm12, ymm10
+    vpmaddubsw ymm5, ymm5, ymm12
     # sum of group 1
     vpmaddwd ymm6, ymm6, ymm3
     vcvtdq2ps ymm6, ymm6
-    vbroadcastss ymm12, dword ptr [rax + 4]
-    vfmadd231ps ymm4, ymm6, ymm12
-    vpand ymm9, ymm9, ymmword ptr [rip + {c5}]
-    vpor ymm5, ymm5, ymm9
-    vpslld ymm9, ymm8, 2
-    vpand ymm9, ymm9, ymmword ptr [rip + {c6}]
-    vpor ymm5, ymm5, ymm9
-    vpslld ymm9, ymm8, 3
-    vpand ymm9, ymm9, ymmword ptr [rip + {c7}]
+    vbroadcastss ymm10, dword ptr [rax + 4]
+    vfmadd231ps ymm4, ymm6, ymm10
+    vpslld ymm10, ymm8, 3
+    vpand ymm10, ymm10, ymmword ptr [rip + {c7}]
+    vpor ymm9, ymm9, ymm10
+    vpsrld ymm6, ymm8, 27
+    vpaddw ymm8, ymm9, ymm9
     # products of group 5 of superblock +0
     movzx r10d, byte ptr [rdi + 42]
     movzx r11d, byte ptr [rdi + 43]
     movzx ebx, byte ptr [rdi + 44]
     movzx r12d, byte ptr [rdi + 45]
-    vmovq xmm6, qword ptr [r8 + r10*8]
-    vpbroadcastq ymm8, qword ptr [r8 + r11*8]
-    vpblendd ymm6, ymm6, ymm8, 0x0c
-    vpbroadcastq ymm8, qword ptr [r8 + rbx*8]
-    vpblendd ymm6, ymm6, ymm8, 0x30
-    vpbroadcastq ymm8, qword ptr [r8 + r12*8]
-    vpblendd ymm6, ymm6, ymm8, 0xc0
-    vpbroadcastd ymm8, dword ptr [rax + 52]
-    vpshufb ymm8, ymm8, ymm0
-    vpand ymm8, ymm8, ymm1
-    vpcmpeqb ymm8, ymm8, ymm1
-    vpor ymm8, ymm8, ymm2
-    vmovdqa ymm12, ymmword ptr [rdx + 160]
-    vpsignb ymm12, ymm12, ymm8
-    vpmaddubsw ymm6, ymm6, ymm12
+    vmovq xmm12, qword ptr [r8 + r10*8]
+    vpbroadcastq ymm10, qword ptr [r8 + r11*8]
+    vpblendd ymm12, ymm12, ymm10, 0x0c
+    vpbroadcastq ymm10, qword ptr [r8 + rbx*8]
+    vpblendd ymm12, ymm12, ymm10, 0x30
+    vpbroadcastq ymm10, qword ptr [r8 + r12*8]
+    vpblendd ymm12, ymm12, ymm10, 0xc0
+    vpbroadcastd ymm10, dword ptr [rax + 52]
+    vpshufb ymm10, ymm10, ymm0
+    vpand ymm10, ymm10, ymm1
+    vpcmpeqb ymm10, ymm10, ymm1
+    vpor ymm10, ymm10, ymm2
+    vmovdqa ymm13, ymmword ptr [rdx + 160]
+    vpsignb ymm13, ymm13, ymm10
+    vpmaddubsw ymm12, ymm12, ymm13
     # sum of group 2
     vpmaddwd ymm7, ymm7, ymm3
     vcvtdq2ps ymm7, ymm7
-    vbroadcastss ymm8, dword ptr [rax + 8]
-    vfmadd231ps ymm4, ymm7, ymm8
-    vpor ymm5, ymm5, ymm9
-    vpaddw ymm7, ymm5, ymm5
-    vpxor ymm7, ymm7, ymm5
-    vpsllw ymm9, ymm7, 2
-    vpxor ymm7, ymm7, ymm9
-    vpsllw ymm9, ymm7, 4
-    vpxor ymm7, ymm7, ymm9
+    vbroadcastss ymm10, dword ptr [rax + 8]
+    vfmadd231ps ymm4, ymm7, ymm10
+    vpxor ymm8, ymm8, ymm9
+    vpsllw ymm10, ymm8, 2
+    vpxor ymm8, ymm8, ymm10
+    vpsllw ymm10, ymm8, 4
+    vpxor ymm8, ymm8, ymm10
     # products of group 6 of superblock +0
     movzx r10d, byte ptr [rdi + 50]
     movzx r11d, byte ptr [rdi + 51]
     movzx ebx, byte ptr [rdi + 52]
     movzx r12d, byte ptr [rdi + 53]
+    vmovq xmm7, qword ptr [r8 + r10*8]
+    vpbroadcastq ymm10, qword ptr [r8 + r11*8]
+    vpblendd ymm7, ymm7, ymm10, 0x0c
+    vpbroadcastq ymm10, qword ptr [r8 + rbx*8]
+    vpblendd ymm7, ymm7, ymm10, 0x30
+    vpbroadcastq ymm10, qword ptr [r8 + r12*8]
+    vpblendd ymm7, ymm7, ymm10, 0xc0
+    vpbroadcastd ymm10, dword ptr [rax + 56]
+    vpshufb ymm10, ymm10, ymm0
+    vpand ymm10, ymm10, ymm1
+    vpcmpeqb ymm10, ymm10, ymm1
+    vpor ymm10, ymm10, ymm2
+    vmovdqa ymm13, ymmword ptr [rdx + 192]
+    vpsignb ymm13, ymm13, ymm10
+    vpmaddubsw ymm7, ymm7, ymm13
+    # sum of group 3
+    vpmaddwd ymm10, ymm11, ymm3
+    vcvtdq2ps ymm10, ymm10
+    vbroadcastss ymm11, dword ptr [rax + 12]
+    vfmadd231ps ymm4, ymm10, ymm11
+    vpand ymm8, ymm8, ymmword ptr [rip + {c8}]
+    vpor ymm9, ymm9, ymm8
+    vmovdqa ymmword ptr [r9 + 32], ymm9
+    # products of group 7 of superblock +0
+    movzx r10d, byte ptr [rdi + 58]
+    movzx r11d, byte ptr [rdi + 59]
+    movzx ebx, byte ptr [rdi + 60]
+    movzx r12d, byte ptr [rdi + 61]
     vmovq xmm8, qword ptr [r8 + r10*8]
     vpbroadcastq ymm9, qword ptr [r8 + r11*8]
     vpblendd ymm8, ymm8, ymm9, 0x0c
@@ -234,119 +255,100 @@
     vpblendd ymm8, ymm8, ymm9, 0x30
     vpbroadcastq ymm9, qword ptr [r8 + r12*8]
     vpblendd ymm8, ymm8, ymm9, 0xc0
-    vpbroadcastd ymm9, dword ptr [rax + 56]
+    vpbroadcastd ymm9, dword ptr [rax + 60]
     vpshufb ymm9, ymm9, ymm0
     vpand ymm9, ymm9, ymm1
     vpcmpeqb ymm9, ymm9, ymm1
     vpor ymm9, ymm9, ymm2
-    vmovdqa ymm12, ymmword ptr [rdx + 192]
-    vpsignb ymm12, ymm12, ymm9
-    vpmaddubsw ymm8, ymm8, ymm12
-    # sum of group 3
-    vpmaddwd ymm9, ymm11, ymm3
-    vcvtdq2ps ymm9, ymm9
-    vbroadcastss ymm11, dword ptr [rax + 12]
-    vfmadd231ps ymm4, ymm9, ymm11
-    vpand ymm7, ymm7, ymmword ptr [rip + {c8}]
-    vpor ymm5, ymm5, ymm7
-    vmovdqa ymmword ptr [r9 + 32], ymm5
-    # products of group 7 of superblock +0
-    movzx r10d, byte ptr [rdi + 58]
-    movzx r11d, byte ptr [rdi + 59]
-    movzx ebx, byte ptr [rdi + 60]
-    movzx r12d, byte ptr [rdi + 61]
-    vmovq xmm9, qword ptr [r8 + r10*8]
-    vpbroadcastq ymm5, qword ptr [r8 + r11*8]
-    vpblendd ymm9, ymm9, ymm5, 0x0c
-    vpbroadcastq ymm5, qword ptr [r8 + rbx*8]
-    vpblendd ymm9, ymm9, ymm5, 0x30
-    vpbroadcastq ymm5, qword ptr [r8 + r12*8]
-    vpblendd ymm9, ymm9, ymm5, 0xc0
-    vpbroadcastd ymm5, dword ptr [rax + 60]
-    vpshufb ymm5, ymm5, ymm0
-    vpand ymm5, ymm5, ymm1
-    vpcmpeqb ymm5, ymm5, ymm1
-    vpor ymm5, ymm5, ymm2
-    vmovdqa ymm7, ymmword ptr [rdx + 224]
-    vpsignb ymm7, ymm7, ymm5
-    vpmaddubsw ymm9, ymm9, ymm7
+    vmovdqa ymm10, ymmword ptr [rdx + 224]
+    vpsignb ymm10, ymm10, ymm9
+    vpmaddubsw ymm8, ymm8, ymm10
     # sum of group 4
-    vpmaddwd ymm5, ymm10, ymm3
+    vpmaddwd ymm5, ymm5, ymm3
     vcvtdq2ps ymm5, ymm5
-    vbroadcastss ymm7, dword ptr [rax + 16]
-    vfmadd231ps ymm4, ymm5, ymm7
+    vbroadcastss ymm9, dword ptr [rax + 16]
+    vfmadd231ps ymm4, ymm5, ymm9
+    # scales of superblock +1
+    vpbroadcastw xmm9, word ptr [rdi + 66]
+    vcvtph2ps ymm9, xmm9
+    vpor ymm10, ymm6, ymmword ptr [rip + {c9}]
     # products of group 0 of superblock +1
     movzx r10d, byte ptr [rdi + 68]
     movzx r11d, byte ptr [rdi + 69]
     movzx ebx, byte ptr [rdi + 70]
     movzx r12d, byte ptr [rdi + 71]
     vmovq xmm5, qword ptr [r8 + r10*8]
-    vpbroadcastq ymm7, qword ptr [r8 + r11*8]
-    vpblendd ymm5, ymm5, ymm7, 0x0c
-    vpbroadcastq ymm7, qword ptr [r8 + rbx*8]
-    vpblendd ymm5, ymm5, ymm7, 0x30
-    vpbroadcastq ymm7, qword ptr [r8 + r12*8]
-    vpblendd ymm5, ymm5, ymm7, 0xc0
-    vpbroadcastd ymm7, dword ptr [r9 + 32]
-    vpshufb ymm7, ymm7, ymm0
-    vpand ymm7, ymm7, ymm1
-    vpcmpeqb ymm7, ymm7, ymm1
-    vpor ymm7, ymm7, ymm2
-    vmovdqa ymm10, ymmword ptr [rdx + 256]
-    vpsignb ymm10, ymm10, ymm7
-    vpmaddubsw ymm5, ymm5, ymm10
+    vpbroadcastq ymm6, qword ptr [r8 + r11*8]
+    vpblendd ymm5, ymm5, ymm6, 0x0c
+    vpbroadcastq ymm6, qword ptr [r8 + rbx*8]
+    vpblendd ymm5, ymm5, ymm6, 0x30
+    vpbroadcastq ymm6, qword ptr [r8 + r12*8]
+    vpblendd ymm5, ymm5, ymm6, 0xc0
+    vpbroadcastd ymm6, dword ptr [r9 + 32]
+    vpshufb ymm6, ymm6, ymm0
+    vpand ymm6, ymm6, ymm1
+    vpcmpeqb ymm6, ymm6, ymm1
+    vpor ymm6, ymm6, ymm2
+    vmovdqa ymm11, ymmword ptr [rdx + 256]
+    vpsignb ymm11, ymm11, ymm6
+    vpmaddubsw ymm5, ymm5, ymm11
     # sum of group 5
-    vpmaddwd ymm6, ymm6, ymm3
+    vpmaddwd ymm6, ymm12, ymm3
     vcvtdq2ps ymm6, ymm6
-    vbroadcastss ymm7, dword ptr [rax + 20]
-    vfmadd231ps ymm4, ymm6, ymm7
+    vbroadcastss ymm11, dword ptr [rax + 20]
+    vfmadd231ps ymm4, ymm6, ymm11
+    vcvtdq2ps ymm10, ymm10
+    vmulps ymm10, ymm9, ymm10
+    vmulps ymm10, ymm10, ymmword ptr [rip + {c10}]
     # products of group 1 of superblock +1
     movzx r10d, byte ptr [rdi + 76]
     movzx r11d, byte ptr [rdi + 77]
     movzx ebx, byte ptr [rdi + 78]
     movzx r12d, byte ptr [rdi + 79]
     vmovq xmm6, qword ptr [r8 + r10*8]
-    vpbroadcastq ymm7, qword ptr [r8 + r11*8]
-    vpblendd ymm6, ymm6, ymm7, 0x0c
-    vpbroadcastq ymm7, qword ptr [r8 + rbx*8]
-    vpblendd ymm6, ymm6, ymm7, 0x30
-    vpbroadcastq ymm7, qword ptr [r8 + r12*8]
-    vpblendd ymm6, ymm6, ymm7, 0xc0
-    vpbroadcastd ymm7, dword ptr [r9 + 36]
-    vpshufb ymm7, ymm7, ymm0
-    vpand ymm7, ymm7, ymm1
-    vpcmpeqb ymm7, ymm7, ymm1
-    vpor ymm7, ymm7, ymm2
-    vmovdqa ymm10, ymmword ptr [rdx + 288]
-    vpsignb ymm10, ymm10, ymm7
-    vpmaddubsw ymm6, ymm6, ymm10
+    vpbroadcastq ymm9, qword ptr [r8 + r11*8]
+    vpblendd ymm6, ymm6, ymm9, 0x0c
+    vpbroadcastq ymm9, qword ptr [r8 + rbx*8]
+    vpblendd ymm6, ymm6, ymm9, 0x30
+    vpbroadcastq ymm9, qword ptr [r8 + r12*8]
+    vpblendd ymm6, ymm6, ymm9, 0xc0
+    vpbroadcastd ymm9, dword ptr [r9 + 36]
+    vpshufb ymm9, ymm9, ymm0
+    vpand ymm9, ymm9, ymm1
+    vpcmpeqb ymm9, ymm9, ymm1
+    vpor ymm9, ymm9, ymm2
+    vmovdqa ymm11, ymmword ptr [rdx + 288]
+    vpsignb ymm11, ymm11, ymm9
+    vpmaddubsw ymm6, ymm6, ymm11
     # sum of group 6
-    vpmaddwd ymm7, ymm8, ymm3
+    vpmaddwd ymm7, ymm7, ymm3
     vcvtdq2ps ymm7, ymm7
-    vbroadcastss ymm8, dword ptr [rax + 24]
-    vfmadd231ps ymm4, ymm7, ymm8
+    vbroadcastss ymm9, dword ptr [rax + 24]
+    vfmadd231ps ymm4, ymm7, ymm9
+    vmulps ymm10, ymm10, ymmword ptr [rcx + 32]
+    vmovaps ymmword ptr [r9], ymm10
     # products of group 2 of superblock +1
     movzx r10d, byte ptr [rdi + 84]
     movzx r11d, byte ptr [rdi + 85]
     movzx ebx, byte ptr [rdi + 86]
     movzx r12d, byte ptr [rdi + 87]
     vmovq xmm7, qword ptr [r8 + r10*8]
-    vpbroadcastq ymm8, qword ptr [r8 + r11*8]
-    vpblendd ymm7, ymm7, ymm8, 0x0c
-    vpbroadcastq ymm8, qword ptr [r8 + rbx*8]
-    vpblendd ymm7, ymm7, ymm8, 0x30
-    vpbroadcastq ymm8, qword ptr [r8 + r12*8]
-    vpblendd ymm7, ymm7, ymm8, 0xc0
-    vpbroadcastd ymm8, dword ptr [r9 + 40]
-    vpshufb ymm8, ymm8, ymm0
-    vpand ymm8, ymm8, ymm1
-    vpcmpeqb ymm8, ymm8, ymm1
-    vpor ymm8, ymm8, ymm2
+    vpbroadcastq ymm9, qword ptr [r8 + r11*8]
+    vpblendd ymm7, ymm7, ymm9, 0x0c
+    vpbroadcastq ymm9, qword ptr [r8 + rbx*8]
+    vpblendd ymm7, ymm7, ymm9, 0x30
+    vpbroadcastq ymm9, qword ptr [r8 + r12*8]
+    vpblendd ymm7, ymm7, ymm9, 0xc0
+    vpbroadcastd ymm9, dword ptr [r9 + 40]
+    vpshufb ymm9, ymm9, ymm0
+    vpand ymm9, ymm9, ymm1
+    vpcmpeqb ymm9, ymm9, ymm1
+    vpor ymm9, ymm9, ymm2
     vmovdqa ymm10, ymmword ptr [rdx + 320]
-    vpsignb ymm10, ymm10, ymm8
+    vpsignb ymm10, ymm10, ymm9
     vpmaddubsw ymm7, ymm7, ymm10
     # sum of group 7
-    vpmaddwd ymm8, ymm9, ymm3
+    vpmaddwd ymm8, ymm8, ymm3
     vcvtdq2ps ymm8, ymm8
     vbroadcastss ymm9, dword ptr [rax + 28]
     vfmadd231ps ymm4, ymm8, ymm9
@@ -388,113 +390,113 @@
     movzx esi, byte ptr [rdi + 35]
     movzx r9d, byte ptr [rdi + 36]
     movzx r10d, byte ptr [rdi + 37]
-    vmovq xmm10, qword ptr [r8 + rcx*8]
-    vpbroadcastq ymm5, qword ptr [r8 + rsi*8]
-    vpblendd ymm10, ymm10, ymm5, 0x0c
-    vpbroadcastq ymm5, qword ptr [r8 + r9*8]
-    vpblendd ymm10, ymm10, ymm5, 0x30
-    vpbroadcastq ymm5, qword ptr [r8 + r10*8]
-    vpblendd ymm10, ymm10, ymm5, 0xc0
-    vpbroadcastd ymm5, dword ptr [rax + 48]
-    vpshufb ymm5, ymm5, ymm0
-    vpand ymm5, ymm5, ymm1
-    vpcmpeqb ymm5, ymm5, ymm1
-    vpor ymm5, ymm5, ymm2
-    vmovdqa ymm8, ymmword ptr [rdx + 128]
-    vpsignb ymm8, ymm8, ymm5
-    vpmaddubsw ymm10, ymm10, ymm8
+    vmovq xmm5, qword ptr [r8 + rcx*8]
+    vpbroadcastq ymm8, qword ptr [r8 + rsi*8]
+    vpblendd ymm5, ymm5, ymm8, 0x0c
+    vpbroadcastq ymm8, qword ptr [r8 + r9*8]
+    vpblendd ymm5, ymm5, ymm8, 0x30
+    vpbroadcastq ymm8, qword ptr [r8 + r10*8]
+    vpblendd ymm5, ymm5, ymm8, 0xc0
+    vpbroadcastd ymm8, dword ptr [rax + 48]
+    vpshufb ymm8, ymm8, ymm0
+    vpand ymm8, ymm8, ymm1
+    vpcmpeqb ymm8, ymm8, ymm1
+    vpor ymm8, ymm8, ymm2
+    vmovdqa ymm9, ymmword ptr [rdx + 128]
+    vpsignb ymm9, ymm9, ymm8
+    vpmaddubsw ymm5, ymm5, ymm9
     # sum of group 1
-    vpmaddwd ymm5, ymm6, ymm3
-    vcvtdq2ps ymm5, ymm5
-    vbroadcastss ymm6, dword ptr [rax + 4]
-    vfmadd231ps ymm4, ymm5, ymm6
+    vpmaddwd ymm6, ymm6, ymm3
+    vcvtdq2ps ymm6, ymm6
+    vbroadcastss ymm8, dword ptr [rax + 4]
+    vfmadd231ps ymm4, ymm6, ymm8
     # products of group 5 of superblock +0
     movzx ecx, byte ptr [rdi + 42]
     movzx esi, byte ptr [rdi + 43]
     movzx r9d, byte ptr [rdi + 44]
     movzx r10d, byte ptr [rdi + 45]
-    vmovq xmm6, qword ptr [r8 + rcx*8]
-    vpbroadcastq ymm5, qword ptr [r8 + rsi*8]
-    vpblendd ymm6, ymm6, ymm5, 0x0c
-    vpbroadcastq ymm5, qword ptr [r8 + r9*8]
-    vpblendd ymm6, ymm6, ymm5, 0x30
-    vpbroadcastq ymm5, qword ptr [r8 + r10*8]
-    vpblendd ymm6, ymm6, ymm5, 0xc0
-    vpbroadcastd ymm5, dword ptr [rax + 52]
-    vpshufb ymm5, ymm5, ymm0
-    vpand ymm5, ymm5, ymm1
-    vpcmpeqb ymm5, ymm5, ymm1
-    vpor ymm5, ymm5, ymm2
+    vmovq xmm12, qword ptr [r8 + rcx*8]
+    vpbroadcastq ymm6, qword ptr [r8 + rsi*8]
+    vpblendd ymm12, ymm12, ymm6, 0x0c
+    vpbroadcastq ymm6, qword ptr [r8 + r9*8]
+    vpblendd ymm12, ymm12, ymm6, 0x30
+    vpbroadcastq ymm6, qword ptr [r8 + r10*8]
+    vpblendd ymm12, ymm12, ymm6, 0xc0
+    vpbroadcastd ymm6, dword ptr [rax + 52]
+    vpshufb ymm6, ymm6, ymm0
+    vpand ymm6, ymm6, ymm1
+    vpcmpeqb ymm6, ymm6, ymm1
+    vpor ymm6, ymm6, ymm2
     vmovdqa ymm8, ymmword ptr [rdx + 160]
-    vpsignb ymm8, ymm8, ymm5
-    vpmaddubsw ymm6, ymm6, ymm8
+    vpsignb ymm8, ymm8, ymm6
+    vpmaddubsw ymm12, ymm12, ymm8
     # sum of group 2
-    vpmaddwd ymm5, ymm7, ymm3
-    vcvtdq2ps ymm5, ymm5
+    vpmaddwd ymm6, ymm7, ymm3
+    vcvtdq2ps ymm6, ymm6
     vbroadcastss ymm7, dword ptr [rax + 8]
-    vfmadd231ps ymm4, ymm5, ymm7
+    vfmadd231ps ymm4, ymm6, ymm7
     # products of group 6 of superblock +0
     movzx ecx, byte ptr [rdi + 50]
     movzx esi, byte ptr [rdi + 51]
     movzx r9d, byte ptr [rdi + 52]
     movzx r10d, byte ptr [rdi + 53]
-    vmovq xmm8, qword ptr [r8 + rcx*8]
-    vpbroadcastq ymm5, qword ptr [r8 + rsi*8]
-    vpblendd ymm8, ymm8, ymm5, 0x0c
-    vpbroadcastq ymm5, qword ptr [r8 + r9*8]
-    vpblendd ymm8, ymm8, ymm5, 0x30
-    vpbroadcastq ymm5, qword ptr [r8 + r10*8]
-    vpblendd ymm8, ymm8, ymm5, 0xc0
-    vpbroadcastd ymm5, dword ptr [rax + 56]
-    vpshufb ymm5, ymm5, ymm0
-    vpand ymm5, ymm5, ymm1
-    vpcmpeqb ymm5, ymm5, ymm1
-    vpor ymm5, ymm5, ymm2
-    vmovdqa ymm7, ymmword ptr [rdx + 192]
-    vpsignb ymm7, ymm7, ymm5
-    vpmaddubsw ymm8, ymm8, ymm7
+    vmovq xmm7, qword ptr [r8 + rcx*8]
+    vpbroadcastq ymm6, qword ptr [r8 + rsi*8]
+    vpblendd ymm7, ymm7, ymm6, 0x0c
+    vpbroadcastq ymm6, qword ptr [r8 + r9*8]
+    vpblendd ymm7, ymm7, ymm6, 0x30
+    vpbroadcastq ymm6, qword ptr [r8 + r10*8]
+    vpblendd ymm7, ymm7, ymm6, 0xc0
+    vpbroadcastd ymm6, dword ptr [rax + 56]
+    vpshufb ymm6, ymm6, ymm0
+    vpand ymm6, ymm6, ymm1
+    vpcmpeqb ymm6, ymm6, ymm1
+    vpor ymm6, ymm6, ymm2
+    vmovdqa ymm8, ymmword ptr [rdx + 192]
+    vpsignb ymm8, ymm8, ymm6
+    vpmaddubsw ymm7, ymm7, ymm8
     # sum of group 3
-    vpmaddwd ymm5, ymm11, ymm3
-    vcvtdq2ps ymm5, ymm5
-    vbroadcastss ymm7, dword ptr [rax + 12]
-    vfmadd231ps ymm4, ymm5, ymm7
+    vpmaddwd ymm6, ymm11, ymm3
+    vcvtdq2ps ymm6, ymm6
+    vbroadcastss ymm8, dword ptr [rax + 12]
+    vfmadd231ps ymm4, ymm6, ymm8
     # products of group 7 of superblock +0
     movzx ecx, byte ptr [rdi + 58]
     movzx esi, byte ptr [rdi + 59]
     movzx r9d, byte ptr [rdi + 60]
     movzx edi, byte ptr [rdi + 61]
-    vmovq xmm9, qword ptr [r8 + rcx*8]
-    vpbroadcastq ymm5, qword ptr [r8 + rsi*8]
-    vpblendd ymm9, ymm9, ymm5, 0x0c
-    vpbroadcastq ymm5, qword ptr [r8 + r9*8]
-    vpblendd ymm9, ymm9, ymm5, 0x30
-    vpbroadcastq ymm5, qword ptr [r8 + rdi*8]
-    vpblendd ymm9, ymm9, ymm5, 0xc0
-    vpbroadcastd ymm5, dword ptr [rax + 60]
-    vpshufb ymm5, ymm5, ymm0
-    vpand ymm5, ymm5, ymm1
-    vpcmpeqb ymm5, ymm5, ymm1
-    vpor ymm5, ymm5, ymm2
+    vmovq xmm8, qword ptr [r8 + rcx*8]
+    vpbroadcastq ymm6, qword ptr [r8 + rsi*8]
+    vpblendd ymm8, ymm8, ymm6, 0x0c
+    vpbroadcastq ymm6, qword ptr [r8 + r9*8]
+    vpblendd ymm8, ymm8, ymm6, 0x30
+    vpbroadcastq ymm6, qword ptr [r8 + rdi*8]
+    vpblendd ymm8, ymm8, ymm6, 0xc0
+    vpbroadcastd ymm6, dword ptr [rax + 60]
+    vpshufb ymm6, ymm6, ymm0
+    vpand ymm6, ymm6, ymm1
+    vpcmpeqb ymm6, ymm6, ymm1
+    vpor ymm6, ymm6, ymm2
     vmovdqa ymm0, ymmword ptr [rdx + 224]
-    vpsignb ymm0, ymm0, ymm5
-    vpmaddubsw ymm9, ymm9, ymm0
+    vpsignb ymm0, ymm0, ymm6
+    vpmaddubsw ymm8, ymm8, ymm0
     # sum of group 4
-    vpmaddwd ymm0, ymm10, ymm3
+    vpmaddwd ymm0, ymm5, ymm3
     vcvtdq2ps ymm0, ymm0
     vbroadcastss ymm1, dword ptr [rax + 16]
     vfmadd231ps ymm4, ymm0, ymm1
     # sum of group 5
-    vpmaddwd ymm0, ymm6, ymm3
+    vpmaddwd ymm0, ymm12, ymm3
     vcvtdq2ps ymm0, ymm0
     vbroadcastss ymm1, dword ptr [rax + 20]
     vfmadd231ps ymm4, ymm0, ymm1
     # sum of group 6
-    vpmaddwd ymm0, ymm8, ymm3
+    vpmaddwd ymm0, ymm7, ymm3
     vcvtdq2ps ymm0, ymm0
     vbroadcastss ymm1, dword ptr [rax + 24]
     vfmadd231ps ymm4, ymm0, ymm1
     # sum of group 7
-    vpmaddwd ymm0, ymm9, ymm3
+    vpmaddwd ymm0, ymm8, ymm3
     vcvtdq2ps ymm0, ymm0
     vbroadcastss ymm1, dword ptr [rax + 28]
     vfmadd231ps ymm4, ymm0, ymm1
