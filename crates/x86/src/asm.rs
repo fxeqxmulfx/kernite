@@ -390,9 +390,13 @@ impl Asm {
         vpslld = Vpslld;
         /// `vpsllw`: 16-bit lanes shifted left.
         vpsllw = Vpsllw;
+        /// `vpsrlw`: 16-bit lanes shifted right.
+        vpsrlw = Vpsrlw;
     }
 
     two! {
+        /// `vpabsb`: absolute value of signed bytes, as unsigned bytes.
+        vpabsb = Vpabsb;
         /// `vcvtdq2ps`: 32-bit integers to floats, rounded as MXCSR says.
         vcvtdq2ps = Vcvtdq2ps;
         /// `vmovshdup`: each odd float copied down to the even lane below it.

@@ -108,8 +108,9 @@ def quieted():
 
 
 def speed_cmd() -> list[str]:
-    sh(["cargo", "build", "-q", "--release", "--example", "speed"])
-    return ["taskset", "-c", var("CPU", "0"), "target/release/examples/speed"]
+    example = var("SPEED_EXAMPLE", "speed")
+    sh(["cargo", "build", "-q", "--release", "--example", example])
+    return ["taskset", "-c", var("CPU", "0"), f"target/release/examples/{example}"]
 
 
 @target("speed")
