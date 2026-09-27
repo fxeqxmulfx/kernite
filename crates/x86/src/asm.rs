@@ -241,6 +241,21 @@ impl Asm {
         self.emit(Op::And, vec![gpr(dst, W64, ReadWrite), number(imm.into())]);
     }
 
+    /// `or dst, src`.
+    pub fn or_reg(&mut self, dst: Gpr, src: Gpr) {
+        self.emit(Op::Or, vec![gpr(dst, W64, ReadWrite), gpr(src, W64, Read)]);
+    }
+
+    /// `shl dst, count`.
+    pub fn shl(&mut self, dst: Gpr, count: u8) {
+        self.emit(Op::Shl, vec![gpr(dst, W64, ReadWrite), number(count.into())]);
+    }
+
+    /// `shr dst, count`.
+    pub fn shr(&mut self, dst: Gpr, count: u8) {
+        self.emit(Op::Shr, vec![gpr(dst, W64, ReadWrite), number(count.into())]);
+    }
+
     /// `xor dst, imm`.
     pub fn xor(&mut self, dst: Gpr, imm: i32) {
         self.emit(Op::Xor, vec![gpr(dst, W64, ReadWrite), number(imm.into())]);

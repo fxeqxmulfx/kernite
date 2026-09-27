@@ -2,6 +2,7 @@
 //! arithmetic they must reproduce to the bit.
 
 pub mod bf16;
+pub mod iq2_s;
 pub mod iq2_xxs;
 pub mod iq3_s;
 pub mod iq3_s_nibble;

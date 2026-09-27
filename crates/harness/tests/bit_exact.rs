@@ -1,6 +1,7 @@
 //! Every generated kernel against its scalar reference, to the bit, on random rows.
 
 use kgen_harness::bf16;
+use kgen_harness::iq2_s;
 use kgen_harness::iq2_xxs::{KERNELS, SUPERBLOCK, dot, reference};
 use kgen_harness::iq3_s;
 use kgen_harness::iq3_s_nibble;
@@ -88,6 +89,53 @@ fn iq2_xxs_matches_its_reference_to_the_bit() {
         }
     }
     assert_eq!(checked, 2 * 8 * 40 * KERNELS.len());
+}
+
+#[test]
+fn iq2_s_matches_its_reference_to_the_bit() {
+    if !supported() {
+        eprintln!("skipped: no AVX2, FMA or F16C");
+        return;
+    }
+    let mut rng = Rng(0xf4c9_e2da_37b0_1586);
+    let mut checked = 0;
+    for wild in [false, true] {
+        let grid: [u64; 1024] = std::array::from_fn(|_| {
+            u64::from_le_bytes(std::array::from_fn(|_| {
+                if wild { rng.byte() } else { [8, 25, 43][(rng.next() % 3) as usize] }
+            }))
+        });
+        for sbs in [0, 1, 2, 3, 4, 5, 8, 10] {
+            for trial in 0..40 {
+                let mut row = vec![0u8; sbs * iq2_s::SUPERBLOCK];
+                for blk in row.as_chunks_mut::<{ iq2_s::SUPERBLOCK }>().0 {
+                    blk[..2].copy_from_slice(&finite_half(&mut rng).to_le_bytes());
+                    for b in &mut blk[2..] {
+                        *b = rng.byte();
+                    }
+                }
+                let quants: Vec<Block> =
+                    (0..sbs * 8).map(|_| Block(std::array::from_fn(|_| rng.byte() as i8))).collect();
+                let scales: Vec<f32> = (0..sbs * 8)
+                    .map(|_| {
+                        let unit = (rng.next() >> 40) as f32 / (1u64 << 24) as f32 - 0.5;
+                        unit * 2f32.powi((rng.next() % 21) as i32 - 10)
+                    })
+                    .collect();
+                let want = iq2_s::reference(&row, &quants, &scales, &grid);
+                for (name, kernel) in iq2_s::KERNELS {
+                    let got = iq2_s::dot(kernel, &row, &quants, &scales, &grid);
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "IQ2_S {name}, {sbs} superblocks, trial {trial}, wild grid {wild}: {got} against {want}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 2 * 8 * 40 * iq2_s::KERNELS.len());
 }
 
 #[test]

@@ -2,12 +2,14 @@
 //! parameters the way the macro spells them: `iq2_xxs(ahead = 3, pairs = 2)`.
 
 mod bf16;
+mod iq2_s;
 mod iq2_xxs;
 mod iq3_s;
 mod iq3_s_nibble;
 mod iq3_xxs;
 
 pub use bf16::bf16_pairs;
+pub use iq2_s::iq2_s;
 pub use iq2_xxs::iq2_xxs;
 pub use iq3_s::iq3_s;
 pub use iq3_s_nibble::iq3_s_nibble;
@@ -18,6 +20,11 @@ use kgen_x86::{Hint, Op};
 /// A kernel and its parameters.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Kernel {
+    /// [`iq2_s`].
+    Iq2S {
+        /// Groups whose products are made ahead of their sums.
+        ahead: usize,
+    },
     /// [`iq2_xxs`].
     Iq2Xxs {
         /// Groups whose products are made ahead of their sums.
@@ -55,6 +62,10 @@ impl Kernel {
     pub fn parse(name: &str, params: &[(String, i64)]) -> Result<Kernel, String> {
         let mut take = Params(params.to_vec());
         let kernel = match name {
+            "iq2_s" => {
+                let ahead = take.int("ahead", 2, 1..=7)? as usize;
+                Kernel::Iq2S { ahead }
+            }
             "iq2_xxs" => {
                 let ahead = take.int("ahead", 3, 1..=7)? as usize;
                 let pairs = take.int("pairs", 0, 0..=2)? as usize;
@@ -79,7 +90,7 @@ impl Kernel {
             }
             _ => {
                 return Err(format!(
-                    "no kernel `{name}`; there are `iq2_xxs`, `iq3_xxs`, `iq3_s`, `iq3_s_nibble` and `bf16_pairs`"
+                    "no kernel `{name}`; there are `iq2_s`, `iq2_xxs`, `iq3_xxs`, `iq3_s`, `iq3_s_nibble` and `bf16_pairs`"
                 ));
             }
         };
@@ -90,6 +101,7 @@ impl Kernel {
     /// Its program.
     pub fn program(&self) -> Program<Op> {
         match *self {
+            Kernel::Iq2S { ahead } => iq2_s(ahead),
             Kernel::Iq2Xxs { ahead, pairs } => iq2_xxs(ahead, pairs),
             Kernel::Iq3Xxs { ahead } => iq3_xxs(ahead),
             Kernel::Iq3S { ahead } => iq3_s(ahead),
@@ -100,7 +112,8 @@ impl Kernel {
 
     /// The kernels whose listings are kept as snapshots.
     pub fn snapshots() -> Vec<Kernel> {
-        let mut kernels: Vec<Kernel> = (1..=4).map(|ahead| Kernel::Iq2Xxs { ahead, pairs: 0 }).collect();
+        let mut kernels: Vec<Kernel> = (1..=3).map(|ahead| Kernel::Iq2S { ahead }).collect();
+        kernels.extend((1..=4).map(|ahead| Kernel::Iq2Xxs { ahead, pairs: 0 }));
         kernels.extend((1..=2).map(|pairs| Kernel::Iq2Xxs { ahead: 3, pairs }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq3Xxs { ahead }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq3S { ahead }));
