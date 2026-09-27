@@ -6,6 +6,7 @@ pub mod iq2_s;
 pub mod iq2_s_nibble;
 pub mod iq2_s_packed;
 pub mod iq2_s_planes;
+pub mod iq2_xs_packed;
 pub mod iq2_xxs;
 pub mod iq3_s;
 pub mod iq3_s_nibble;

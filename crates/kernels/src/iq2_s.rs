@@ -48,21 +48,35 @@ pub fn iq2_s_packed(ahead: usize) -> Program<Op> {
     build(ahead, IndexMode::Packed)
 }
 
+/// IQ2_XS with 9-bit indices packed into 36 bytes and sign bytes expanded once at load.
+/// A superblock grows from 74 to 78 bytes and uses the original 512-entry grid.
+pub fn iq2_xs_packed(ahead: usize) -> Program<Op> {
+    build(ahead, IndexMode::XsPacked)
+}
+
 #[derive(Clone, Copy)]
 enum IndexMode {
     Original,
     Gather,
     Packed,
+    XsPacked,
+}
+
+impl IndexMode {
+    fn stride(self) -> i32 {
+        if matches!(self, Self::XsPacked) { 78 } else { 82 }
+    }
 }
 
 fn build(ahead: usize, mode: IndexMode) -> Program<Op> {
     assert!((1..8).contains(&ahead), "ahead {ahead}");
-    let prefix = match mode {
-        IndexMode::Original => "",
-        IndexMode::Gather => "gather_",
-        IndexMode::Packed => "packed_",
+    let name = match mode {
+        IndexMode::Original => format!("iq2_s_ahead{ahead}"),
+        IndexMode::Gather => format!("iq2_s_gather_ahead{ahead}"),
+        IndexMode::Packed => format!("iq2_s_packed_ahead{ahead}"),
+        IndexMode::XsPacked => format!("iq2_xs_packed_ahead{ahead}"),
     };
-    let mut a = Asm::new(format!("iq2_s_{prefix}ahead{ahead}"));
+    let mut a = Asm::new(name);
     let row = a.param("row");
     let n = a.param("sbs");
     let quants = a.param("quants");
@@ -100,7 +114,7 @@ fn build(ahead: usize, mode: IndexMode) -> Program<Op> {
 
     a.place(top);
     let mut next_signs = a.capture(|a| group_signs(a, &r, 1, nxt, mode));
-    let mut next_scales = a.capture(|a| group_scales(a, &s, &r, 1, nxt));
+    let mut next_scales = a.capture(|a| group_scales(a, &s, &r, 1, nxt, mode));
     let (sign_share, scale_share) = (next_signs.len().div_ceil(8 - ahead), next_scales.len().div_ceil(ahead));
     for g in 0..8 {
         if g < 8 - ahead {
@@ -114,7 +128,7 @@ fn build(ahead: usize, mode: IndexMode) -> Program<Op> {
         }
         sum(&mut a, &k, acc, ring[g], cur, g as i32);
     }
-    a.add(r.row, 82);
+    a.add(r.row, mode.stride());
     a.add(r.quants, 256);
     a.add(r.scales, 32);
     a.xor(cur, 128);
@@ -140,25 +154,30 @@ fn build(ahead: usize, mode: IndexMode) -> Program<Op> {
 
 fn prepare(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr, mode: IndexMode) {
     group_signs(a, r, sb, to, mode);
-    group_scales(a, s, r, sb, to);
+    group_scales(a, s, r, sb, to, mode);
 }
 
 fn group_signs(a: &mut Asm, r: &Row, sb: i32, to: Gpr, mode: IndexMode) {
     a.note(format!("signs of superblock +{sb}"));
     let signs = a.ymm("packed_signs");
-    let at = if matches!(mode, IndexMode::Packed) { 42 } else { 34 };
-    a.vmovdqu(signs, r.row.at(82 * sb + at));
+    let at = match mode {
+        IndexMode::Packed => 42,
+        IndexMode::XsPacked => 38,
+        _ => 34,
+    };
+    a.vmovdqu(signs, r.row.at(mode.stride() * sb + at));
     a.store_vmovdqa(to.at(64), signs);
 }
 
 /// Scale low and high halves, in group order, to the two aligned 32-byte halves of `to`.
-fn group_scales(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr) {
+fn group_scales(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr, mode: IndexMode) {
     a.note(format!("scales of superblock +{sb}"));
     let d = a.ymm("d");
-    a.vpbroadcastw(d.xmm(), r.row.at(82 * sb));
+    a.vpbroadcastw(d.xmm(), r.row.at(mode.stride() * sb));
     a.vcvtph2ps(d, d.xmm());
     let steps = a.ymm("steps");
-    a.vpmovzxbd(steps, r.row.at(82 * sb + 74));
+    let scales_at = if matches!(mode, IndexMode::XsPacked) { 70 } else { 74 };
+    a.vpmovzxbd(steps, r.row.at(mode.stride() * sb + scales_at));
     let low = a.ymm("low_scales");
     let high = a.ymm("high_scales");
     a.vpand(low, steps, s.nibble);
@@ -196,15 +215,23 @@ fn products(a: &mut Asm, k: &Group, r: &Row, p: Ymm, sb: i32, from: Gpr, g: i32,
         a.vpgatherdq(p, r.grid.at(0).index_xmm(index.xmm(), 8), gather_mask);
     } else {
         let index: [Gpr; 4] = std::array::from_fn(|l| a.gpr(format!("index{l}")));
-        if matches!(mode, IndexMode::Packed) {
+        if matches!(mode, IndexMode::Packed | IndexMode::XsPacked) {
             let bits = a.gpr("packed_indices");
-            a.load_u64(bits, r.row.at(82 * sb + 2 + 5 * g));
+            let (at, width) = if matches!(mode, IndexMode::XsPacked) {
+                (78 * sb + 2 + 9 * (g / 2) + 4 * (g % 2), 9)
+            } else {
+                (82 * sb + 2 + 5 * g, 10)
+            };
+            a.load_u64(bits, r.row.at(at));
+            if width == 9 && g % 2 != 0 {
+                a.shr(bits, 4);
+            }
             for (l, &i) in index.iter().enumerate() {
                 a.mov(i, bits);
                 if l != 0 {
-                    a.shr(i, (10 * l) as u8);
+                    a.shr(i, (width * l as i32) as u8);
                 }
-                a.and(i, 1023);
+                a.and(i, (1 << width) - 1);
             }
         } else {
             let high = a.gpr("high_index_bits");

@@ -5,6 +5,7 @@ use kgen_harness::iq2_s;
 use kgen_harness::iq2_s_nibble;
 use kgen_harness::iq2_s_packed;
 use kgen_harness::iq2_s_planes;
+use kgen_harness::iq2_xs_packed;
 use kgen_harness::iq2_xxs::{KERNELS, SUPERBLOCK, dot, reference};
 use kgen_harness::iq3_s;
 use kgen_harness::iq3_s_nibble;
@@ -221,6 +222,51 @@ fn iq2_s_matches_its_reference_to_the_bit() {
         }
     }
     assert_eq!(checked, 2 * 8 * 40 * iq2_s::KERNELS.len());
+}
+
+#[test]
+fn iq2_xs_packed_matches_file_reference_to_the_bit() {
+    if !supported() {
+        eprintln!("skipped: no AVX2, FMA or F16C");
+        return;
+    }
+    let mut rng = Rng(0x7a86_92f1_a7e4_5311);
+    for wild in [false, true] {
+        let grid: [u64; 512] = std::array::from_fn(|_| {
+            u64::from_le_bytes(std::array::from_fn(|_| {
+                if wild { rng.byte() } else { [8, 25, 43][(rng.next() % 3) as usize] }
+            }))
+        });
+        for sbs in [0, 1, 2, 3, 4, 5, 8, 10] {
+            for trial in 0..40 {
+                let mut row = vec![0u8; sbs * 74];
+                for blk in row.as_chunks_mut::<74>().0 {
+                    blk[..2].copy_from_slice(&finite_half(&mut rng).to_le_bytes());
+                    for b in &mut blk[2..] {
+                        *b = rng.byte();
+                    }
+                }
+                let quants: Vec<Block> =
+                    (0..sbs * 8).map(|_| Block(std::array::from_fn(|_| rng.byte() as i8))).collect();
+                let scales: Vec<f32> = (0..sbs * 8)
+                    .map(|_| {
+                        let unit = (rng.next() >> 40) as f32 / (1u64 << 24) as f32 - 0.5;
+                        unit * 2f32.powi((rng.next() % 21) as i32 - 10)
+                    })
+                    .collect();
+                let want = iq2_xs_packed::reference(&row, &quants, &scales, &grid);
+                let packed = iq2_xs_packed::repack(&row);
+                for (name, kernel) in iq2_xs_packed::KERNELS {
+                    let got = iq2_xs_packed::dot(kernel, &packed, &quants, &scales, &grid);
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "IQ2_XS {name}, {sbs} superblocks, trial {trial}, wild grid {wild}: {got} against {want}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
