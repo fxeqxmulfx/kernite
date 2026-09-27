@@ -370,6 +370,10 @@ impl Asm {
         vmulps = Vmulps;
         /// `vaddps`.
         vaddps = Vaddps;
+        /// `vpsllvd`: each dword shifted left by the corresponding dword of `b`.
+        vpsllvd = Vpsllvd;
+        /// `vpsrlvd`: each dword shifted right by the corresponding dword of `b`.
+        vpsrlvd = Vpsrlvd;
     }
 
     three_control! {
@@ -430,6 +434,11 @@ impl Asm {
         self.emit(Op::Vpmovzxbd, vec![vec(dst, Write), mem(from, W64)]);
     }
 
+    /// `vpmovzxbd`: eight unsigned bytes from the low half of a register.
+    pub fn vpmovzxbd_reg(&mut self, dst: Ymm, from: Xmm) {
+        self.emit(Op::Vpmovzxbd, vec![vec(dst, Write), vec(from, Read)]);
+    }
+
     /// `vpgatherdd`: eight 32-bit entries, where mask lanes have their high bit set. The
     /// instruction clears those mask bits as it gathers, and leaves other destination lanes.
     pub fn vpgatherdd(&mut self, dst: Ymm, from: Addr, mask: Ymm) {
@@ -461,6 +470,11 @@ impl Asm {
         self.emit(Op::Vpbroadcastw, vec![vec(dst, Write), mem(from, W16)]);
     }
 
+    /// `vpbroadcastb`: one byte from memory to every byte lane.
+    pub fn vpbroadcastb<V: Vector>(&mut self, dst: V, from: Addr) {
+        self.emit(Op::Vpbroadcastb, vec![vec(dst, Write), mem(from, W8)]);
+    }
+
     /// `vpbroadcastd`: a 32-bit word from memory to every lane.
     pub fn vpbroadcastd<V: Vector>(&mut self, dst: V, from: Addr) {
         self.emit(Op::Vpbroadcastd, vec![vec(dst, Write), mem(from, W32)]);
@@ -479,6 +493,11 @@ impl Asm {
     /// `vmovq`: 64 bits from memory to the low quadword, zeros above.
     pub fn vmovq(&mut self, dst: Xmm, from: Addr) {
         self.emit(Op::Vmovq, vec![vec(dst, Write), mem(from, W64)]);
+    }
+
+    /// `vmovd`: 32 bits from memory to the low dword, zeros above.
+    pub fn vmovd(&mut self, dst: Xmm, from: Addr) {
+        self.emit(Op::Vmovd, vec![vec(dst, Write), mem(from, W32)]);
     }
 
     /// `vmovhps`: 64 bits from memory over the high quadword of `a`, its low one kept.

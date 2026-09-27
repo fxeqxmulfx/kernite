@@ -3,6 +3,7 @@
 
 pub mod bf16;
 pub mod iq2_xxs;
+pub mod iq3_s;
 pub mod iq3_xxs;
 
 /// 32 activation quants, aligned as the kernels load them.
