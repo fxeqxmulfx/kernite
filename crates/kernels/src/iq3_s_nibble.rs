@@ -13,6 +13,7 @@ struct Superblock {
     nibble_shifts: Addr,
     nibble: Addr,
     one: Addr,
+    quarter: Option<Addr>,
 }
 
 struct Row {
@@ -36,8 +37,18 @@ struct Row {
 /// `ahead` groups' integer products are made before their sums. The next superblock's
 /// scales are prepared alongside this one's groups, in the other half of a 64-byte slot.
 pub fn iq3_s_nibble(ahead: usize) -> Program<Op> {
+    nibble(ahead, false)
+}
+
+/// IQ3_XXS repacked to signed four-bit levels. The levels and scale factor differ from IQ3_S,
+/// while its eight groups, scale nibbles and floating-point accumulation have the same shape.
+pub fn iq3_xxs_nibble(ahead: usize) -> Program<Op> {
+    nibble(ahead, true)
+}
+
+fn nibble(ahead: usize, xxs: bool) -> Program<Op> {
     assert!((1..8).contains(&ahead), "ahead {ahead}");
-    let mut a = Asm::new(format!("iq3_s_nibble_ahead{ahead}"));
+    let mut a = Asm::new(format!("iq3_{}_nibble_ahead{ahead}", if xxs { "xxs" } else { "s" }));
     let row = a.param("row");
     let n = a.param("sbs");
     let quants = a.param("quants");
@@ -48,7 +59,8 @@ pub fn iq3_s_nibble(ahead: usize) -> Program<Op> {
     a.jz(empty);
 
     a.note("constants");
-    let signed = [1i8, 3, 5, 7, 9, 11, 13, 15, -1, -3, -5, -7, -9, -11, -13, -15];
+    let levels = if xxs { [4i8, 12, 20, 28, 36, 44, 52, 62] } else { [1i8, 3, 5, 7, 9, 11, 13, 15] };
+    let signed = std::array::from_fn::<i8, 16, _>(|i| if i < 8 { levels[i] } else { -levels[i - 8] });
     let lut: [u8; 32] = std::array::from_fn(|i| signed[i % 16] as u8);
     let levels_at = a.u8s(&lut);
     let nibble_at = a.u32s(&[0x0f0f_0f0f]);
@@ -62,6 +74,7 @@ pub fn iq3_s_nibble(ahead: usize) -> Program<Op> {
         nibble_shifts: a.u32s(&[0, 4, 0, 4, 0, 4, 0, 4]),
         nibble: a.u32s(&[15; 8]),
         one: a.u32s(&[1; 8]),
+        quarter: xxs.then(|| a.f32s(&[0.25; 8])),
     };
     let acc = a.ymm("acc");
     a.zero(acc);
@@ -130,6 +143,9 @@ fn group_scales(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr) {
     a.vpor(scale, scale, s.one);
     a.vcvtdq2ps(scale, scale);
     a.vmulps(scale, d, scale);
+    if let Some(quarter) = s.quarter {
+        a.vmulps(scale, scale, quarter);
+    }
     a.vmulps(scale, scale, r.scales.at(32 * sb));
     a.store_vmovaps(to.at(0), scale);
 }

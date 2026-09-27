@@ -6,6 +6,7 @@ use kgen_harness::iq2_xxs::{KERNELS, SUPERBLOCK, dot, reference};
 use kgen_harness::iq3_s;
 use kgen_harness::iq3_s_nibble;
 use kgen_harness::iq3_xxs;
+use kgen_harness::iq3_xxs_nibble;
 use kgen_harness::{Block, supported};
 
 /// xorshift64*: the same numbers on every run.
@@ -272,6 +273,46 @@ fn iq3_s_nibbles_match_the_original_row_to_the_bit() {
         }
     }
     assert_eq!(checked, 8 * 60 * iq3_s_nibble::KERNELS.len());
+}
+
+#[test]
+fn iq3_xxs_nibbles_match_the_original_row_to_the_bit() {
+    if !supported() {
+        eprintln!("skipped: no AVX2, FMA or F16C");
+        return;
+    }
+    let mut rng = Rng(0xcb72_8fa1_5234_0c9e);
+    let levels = [4u8, 12, 20, 28, 36, 44, 52, 62];
+    let grid: [u32; 256] =
+        std::array::from_fn(|_| u32::from_le_bytes(std::array::from_fn(|_| levels[(rng.byte() & 7) as usize])));
+    for sbs in [0, 1, 2, 3, 4, 5, 8, 10] {
+        for trial in 0..60 {
+            let mut original = vec![0u8; sbs * iq3_xxs::SUPERBLOCK];
+            for blk in original.as_chunks_mut::<{ iq3_xxs::SUPERBLOCK }>().0 {
+                blk[..2].copy_from_slice(&finite_half(&mut rng).to_le_bytes());
+                for b in &mut blk[2..] {
+                    *b = rng.byte();
+                }
+            }
+            let packed = iq3_xxs_nibble::repack(&original, &grid);
+            let quants: Vec<Block> = (0..sbs * 8).map(|_| Block(std::array::from_fn(|_| rng.byte() as i8))).collect();
+            let scales: Vec<f32> = (0..sbs * 8)
+                .map(|_| {
+                    let unit = (rng.next() >> 40) as f32 / (1u64 << 24) as f32 - 0.5;
+                    unit * 2f32.powi((rng.next() % 21) as i32 - 10)
+                })
+                .collect();
+            let want = iq3_xxs::reference(&original, &quants, &scales, &grid);
+            for (name, kernel) in iq3_xxs_nibble::KERNELS {
+                let got = iq3_xxs_nibble::dot(kernel, &packed, &quants, &scales);
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "IQ3_XXS nibble {name}, {sbs} superblocks, trial {trial}: {got} against {want}"
+                );
+            }
+        }
+    }
 }
 
 /// BF16 bits with an exponent within 2^-40 of one or a subnormal's, or a signed zero: no sum of

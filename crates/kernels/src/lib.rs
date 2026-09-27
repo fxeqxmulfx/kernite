@@ -13,6 +13,7 @@ pub use iq2_s::iq2_s;
 pub use iq2_xxs::iq2_xxs;
 pub use iq3_s::iq3_s;
 pub use iq3_s_nibble::iq3_s_nibble;
+pub use iq3_s_nibble::iq3_xxs_nibble;
 pub use iq3_xxs::iq3_xxs;
 use kgen_core::Program;
 use kgen_x86::{Hint, Op};
@@ -44,6 +45,11 @@ pub enum Kernel {
     },
     /// [`iq3_s_nibble`].
     Iq3SNibble {
+        /// Groups whose products are made ahead of their sums.
+        ahead: usize,
+    },
+    /// [`iq3_xxs_nibble`].
+    Iq3XxsNibble {
         /// Groups whose products are made ahead of their sums.
         ahead: usize,
     },
@@ -83,6 +89,10 @@ impl Kernel {
                 let ahead = take.int("ahead", 1, 1..=7)? as usize;
                 Kernel::Iq3SNibble { ahead }
             }
+            "iq3_xxs_nibble" => {
+                let ahead = take.int("ahead", 1, 1..=7)? as usize;
+                Kernel::Iq3XxsNibble { ahead }
+            }
             "bf16_pairs" => {
                 let ahead = take.int("ahead", 0, 0..=4096)? as i32;
                 let hint = [Hint::T0, Hint::T1, Hint::T2, Hint::Nta][take.int("hint", 0, 0..=3)? as usize];
@@ -90,7 +100,7 @@ impl Kernel {
             }
             _ => {
                 return Err(format!(
-                    "no kernel `{name}`; there are `iq2_s`, `iq2_xxs`, `iq3_xxs`, `iq3_s`, `iq3_s_nibble` and `bf16_pairs`"
+                    "no kernel `{name}`; there are `iq2_s`, `iq2_xxs`, `iq3_xxs`, `iq3_xxs_nibble`, `iq3_s`, `iq3_s_nibble` and `bf16_pairs`"
                 ));
             }
         };
@@ -106,6 +116,7 @@ impl Kernel {
             Kernel::Iq3Xxs { ahead } => iq3_xxs(ahead),
             Kernel::Iq3S { ahead } => iq3_s(ahead),
             Kernel::Iq3SNibble { ahead } => iq3_s_nibble(ahead),
+            Kernel::Iq3XxsNibble { ahead } => iq3_xxs_nibble(ahead),
             Kernel::Bf16Pairs { ahead, hint } => bf16_pairs(ahead, hint),
         }
     }
@@ -118,6 +129,7 @@ impl Kernel {
         kernels.extend((1..=3).map(|ahead| Kernel::Iq3Xxs { ahead }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq3S { ahead }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq3SNibble { ahead }));
+        kernels.extend((1..=3).map(|ahead| Kernel::Iq3XxsNibble { ahead }));
         kernels.push(Kernel::Bf16Pairs { ahead: 0, hint: Hint::T0 });
         kernels.extend(
             [(512, Hint::T0), (1024, Hint::T0), (512, Hint::T1)].map(|(ahead, hint)| Kernel::Bf16Pairs { ahead, hint }),
