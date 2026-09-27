@@ -1,0 +1,81 @@
+//! Pairs of BF16 rows against one vector of floats.
+
+use crate::supported;
+
+/// The kernels' type: the first row, `x`, `out`, the pairs, bytes from a row to the next, and
+/// blocks of 32 values a row.
+pub type Kernel = unsafe extern "sysv64" fn(*const u16, *const f32, *mut f32, usize, usize, usize);
+
+#[kgen_macros::kernel(bf16_pairs)]
+unsafe extern "sysv64" fn plain(
+    w: *const u16,
+    x: *const f32,
+    out: *mut f32,
+    pairs: usize,
+    stride: usize,
+    blocks: usize,
+);
+
+#[kgen_macros::kernel(bf16_pairs(ahead = 512))]
+unsafe extern "sysv64" fn ahead512(
+    w: *const u16,
+    x: *const f32,
+    out: *mut f32,
+    pairs: usize,
+    stride: usize,
+    blocks: usize,
+);
+
+#[kgen_macros::kernel(bf16_pairs(ahead = 1024))]
+unsafe extern "sysv64" fn ahead1024(
+    w: *const u16,
+    x: *const f32,
+    out: *mut f32,
+    pairs: usize,
+    stride: usize,
+    blocks: usize,
+);
+
+#[kgen_macros::kernel(bf16_pairs(ahead = 512, hint = 1))]
+unsafe extern "sysv64" fn ahead512_t1(
+    w: *const u16,
+    x: *const f32,
+    out: *mut f32,
+    pairs: usize,
+    stride: usize,
+    blocks: usize,
+);
+
+/// Every kernel, by name: `aheadN` asks for each row's line `N` bytes on, into L1 or, with
+/// `t1`, L2.
+pub const KERNELS: [(&str, Kernel); 4] =
+    [("plain", plain), ("ahead512", ahead512), ("ahead1024", ahead1024), ("ahead512-t1", ahead512_t1)];
+
+/// `kernel` on the rows of `w`, `x.len()` values each, into `out`, checked: whole blocks of 32,
+/// a whole number of pairs of rows, one output a row, a CPU that runs it.
+pub fn rows(kernel: Kernel, w: &[u16], x: &[f32], out: &mut [f32]) {
+    let cols = x.len();
+    assert!(cols > 0 && cols.is_multiple_of(32), "whole blocks of 32");
+    assert_eq!(w.len(), out.len() * cols, "one output a row");
+    assert!(out.len() >= 2 && out.len().is_multiple_of(2), "whole pairs");
+    assert!(supported(), "AVX2, FMA and F16C");
+    // The kernel reads `out.len()` rows of `cols` values, `2 * cols` bytes apart, and `cols`
+    // values of `x`, and writes `out.len()` floats: all checked above. What it prefetches past
+    // the rows it never reads.
+    unsafe { kernel(w.as_ptr(), x.as_ptr(), out.as_mut_ptr(), out.len() / 2, 2 * cols, cols / 32) }
+}
+
+/// What the kernels compute for one row, one operation at a time in their order.
+///
+/// A weight is the float whose top half it is. Value `i` goes into lane `i % 8` of accumulator
+/// `i / 8 % 4` with one fused multiply-add, in order; the lanes are `(a0 + a1) + (a2 + a3)`,
+/// summed from lane 0 up.
+pub fn reference(row: &[u16], x: &[f32]) -> f32 {
+    let mut acc = [[0.0f32; 8]; 4];
+    for (i, (&w, &x)) in row.iter().zip(x).enumerate() {
+        let a = &mut acc[i / 8 % 4][i % 8];
+        *a = f32::from_bits(u32::from(w) << 16).mul_add(x, *a);
+    }
+    let v: [f32; 8] = std::array::from_fn(|l| (acc[0][l] + acc[1][l]) + (acc[2][l] + acc[3][l]));
+    v[1..].iter().fold(v[0], |sum, &lane| sum + lane)
+}

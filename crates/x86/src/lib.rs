@@ -16,5 +16,5 @@ mod sysv;
 
 pub use asm::{Asm, Stream};
 pub use op::Op;
-pub use operand::{Addr, Gpr, Slot, Src, Vector, Xmm, Ymm};
+pub use operand::{Addr, Gpr, Hint, Slot, Src, Vector, Xmm, Ymm};
 pub use sysv::SysV;

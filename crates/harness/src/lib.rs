@@ -1,6 +1,7 @@
 //! The kernels as `kgen-macros` delivers them, beside scalar references that spell out the
 //! arithmetic they must reproduce to the bit.
 
+pub mod bf16;
 pub mod iq2_xxs;
 
 /// 32 activation quants, aligned as the kernels load them.

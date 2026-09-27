@@ -1,11 +1,13 @@
 //! The kernels, written in [`kgen_x86::Asm`], and [`Kernel`], which names each with its
 //! parameters the way the macro spells them: `iq2_xxs(ahead = 3, pairs = 2)`.
 
+mod bf16;
 mod iq2_xxs;
 
+pub use bf16::bf16_pairs;
 pub use iq2_xxs::iq2_xxs;
 use kgen_core::Program;
-use kgen_x86::Op;
+use kgen_x86::{Hint, Op};
 
 /// A kernel and its parameters.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,6 +18,13 @@ pub enum Kernel {
         ahead: usize,
         /// How many of each group's two pairs of grid rows are loaded as pairs.
         pairs: usize,
+    },
+    /// [`bf16_pairs`].
+    Bf16Pairs {
+        /// Bytes ahead of each row's reads that it asks for, or none.
+        ahead: i32,
+        /// How close to the core.
+        hint: Hint,
     },
 }
 
@@ -30,7 +39,12 @@ impl Kernel {
                 let pairs = take.int("pairs", 0, 0..=2)? as usize;
                 Kernel::Iq2Xxs { ahead, pairs }
             }
-            _ => return Err(format!("no kernel `{name}`; there is `iq2_xxs`")),
+            "bf16_pairs" => {
+                let ahead = take.int("ahead", 0, 0..=4096)? as i32;
+                let hint = [Hint::T0, Hint::T1, Hint::T2, Hint::Nta][take.int("hint", 0, 0..=3)? as usize];
+                Kernel::Bf16Pairs { ahead, hint }
+            }
+            _ => return Err(format!("no kernel `{name}`; there are `iq2_xxs` and `bf16_pairs`")),
         };
         take.done(name)?;
         Ok(kernel)
@@ -40,6 +54,7 @@ impl Kernel {
     pub fn program(&self) -> Program<Op> {
         match *self {
             Kernel::Iq2Xxs { ahead, pairs } => iq2_xxs(ahead, pairs),
+            Kernel::Bf16Pairs { ahead, hint } => bf16_pairs(ahead, hint),
         }
     }
 
@@ -47,6 +62,10 @@ impl Kernel {
     pub fn snapshots() -> Vec<Kernel> {
         let mut kernels: Vec<Kernel> = (1..=4).map(|ahead| Kernel::Iq2Xxs { ahead, pairs: 0 }).collect();
         kernels.extend((1..=2).map(|pairs| Kernel::Iq2Xxs { ahead: 3, pairs }));
+        kernels.push(Kernel::Bf16Pairs { ahead: 0, hint: Hint::T0 });
+        kernels.extend(
+            [(512, Hint::T0), (1024, Hint::T0), (512, Hint::T1)].map(|(ahead, hint)| Kernel::Bf16Pairs { ahead, hint }),
+        );
         kernels
     }
 }

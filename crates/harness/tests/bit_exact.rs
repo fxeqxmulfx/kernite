@@ -1,5 +1,6 @@
 //! Every generated kernel against its scalar reference, to the bit, on random rows.
 
+use kgen_harness::bf16;
 use kgen_harness::iq2_xxs::{KERNELS, SUPERBLOCK, dot, reference};
 use kgen_harness::{Block, supported};
 
@@ -84,4 +85,51 @@ fn iq2_xxs_matches_its_reference_to_the_bit() {
         }
     }
     assert_eq!(checked, 2 * 8 * 40 * KERNELS.len());
+}
+
+/// BF16 bits with an exponent within 2^-40 of one or a subnormal's, or a signed zero: no sum of
+/// their products overflows.
+fn bf16_bits(rng: &mut Rng) -> u16 {
+    let sign = (rng.next() >> 63) as u16;
+    let man = (rng.next() >> 57) as u16;
+    let exp = match rng.next() % 16 {
+        0 => 0,
+        1 => return sign << 15,
+        _ => (127 - 40 + rng.next() % 81) as u16,
+    };
+    sign << 15 | exp << 7 | man
+}
+
+#[test]
+fn bf16_pairs_match_their_reference_to_the_bit() {
+    if !supported() {
+        eprintln!("skipped: no AVX2, FMA or F16C");
+        return;
+    }
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let mut checked = 0;
+    for cols in [32, 64, 96, 320, 2560] {
+        for rows in [2, 4, 6, 10] {
+            for trial in 0..10 {
+                let w: Vec<u16> = (0..rows * cols).map(|_| bf16_bits(&mut rng)).collect();
+                let x: Vec<f32> = (0..cols)
+                    .map(|_| f32::from_bits(u32::from(bf16_bits(&mut rng)) << 16 | (rng.next() >> 48) as u32))
+                    .collect();
+                let want: Vec<f32> = w.chunks(cols).map(|row| bf16::reference(row, &x)).collect();
+                for (name, kernel) in bf16::KERNELS {
+                    let mut got = vec![f32::NAN; rows];
+                    bf16::rows(kernel, &w, &x, &mut got);
+                    for (r, (g, want)) in got.iter().zip(&want).enumerate() {
+                        assert_eq!(
+                            g.to_bits(),
+                            want.to_bits(),
+                            "{name}, {rows} rows of {cols}, trial {trial}, row {r}: {g} against {want}"
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 5 * 4 * 10 * bf16::KERNELS.len());
 }

@@ -51,6 +51,31 @@ impl Vector for Xmm {
     }
 }
 
+/// How close to the core a prefetch brings its line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hint {
+    /// Every level: `prefetcht0`.
+    T0,
+    /// L2 and below: `prefetcht1`.
+    T1,
+    /// `prefetcht2`, which this generation of Intel cores treats as `T1`.
+    T2,
+    /// Close to the core and out of the way of the rest: `prefetchnta`.
+    Nta,
+}
+
+impl Hint {
+    /// Its suffix, `t0` to `nta`, as a kernel's name spells it.
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Hint::T0 => "t0",
+            Hint::T1 => "t1",
+            Hint::T2 => "t2",
+            Hint::Nta => "nta",
+        }
+    }
+}
+
 /// A slot of the stack frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slot(pub(crate) SlotId);

@@ -1,14 +1,14 @@
 use std::collections::VecDeque;
 
 use kgen_core::Access::{Ignored, Read, ReadWrite, Write};
-use kgen_core::Width::{W8, W16, W32, W64};
+use kgen_core::Width::{W8, W16, W32, W64, W128};
 use kgen_core::{
     Arg, Base, Class, Const, ConstId, Flow, Inst, Item, Label, Operand, Program, RegInfo, Signature, Slot as SlotSpec,
     SlotId, VReg,
 };
 
 use crate::op::Op;
-use crate::operand::{Addr, Gpr, Slot, Src, Vector, Xmm, Ymm, arg, control, gpr, mem, number, src, vec};
+use crate::operand::{Addr, Gpr, Hint, Slot, Src, Vector, Xmm, Ymm, arg, control, gpr, mem, number, src, vec};
 use crate::sysv::{FLOAT_RESULT, INT_PARAMS};
 
 /// Instructions [`Asm::capture`] took out of a kernel, to [`Asm::splice`] back in.
@@ -271,6 +271,23 @@ impl Asm {
         self.jump(Op::Jmp, to, Flow::Jump(to));
     }
 
+    /// `ret`, handing nothing back.
+    pub fn ret(&mut self) {
+        self.inst(Op::Ret, vec![], vec![], Flow::Return);
+    }
+
+    /// `prefetcht0` to `prefetchnta` as `hint` says: asks for the line at `at`. A hint, not a
+    /// load: it cannot fault, whatever the address.
+    pub fn prefetch(&mut self, hint: Hint, at: Addr) {
+        let op = match hint {
+            Hint::T0 => Op::Prefetcht0,
+            Hint::T1 => Op::Prefetcht1,
+            Hint::T2 => Op::Prefetcht2,
+            Hint::Nta => Op::Prefetchnta,
+        };
+        self.emit(op, vec![mem(at, W8)]);
+    }
+
     /// `ret`, handing back the float in the low lane of `value`, which SysV wants in `xmm0`.
     pub fn ret_f32(&mut self, value: Xmm) {
         if !self.p.results.contains(&(value.0, FLOAT_RESULT)) {
@@ -394,6 +411,21 @@ impl Asm {
     /// `vmovdqu`: a load at any alignment.
     pub fn vmovdqu<V: Vector>(&mut self, dst: V, from: Addr) {
         self.emit(Op::Vmovdqu, vec![vec(dst, Write), mem(from, V::WIDTH)]);
+    }
+
+    /// `vmovups`: floats loaded at any alignment.
+    pub fn vmovups<V: Vector>(&mut self, dst: V, from: Addr) {
+        self.emit(Op::Vmovups, vec![vec(dst, Write), mem(from, V::WIDTH)]);
+    }
+
+    /// `vpmovzxwd`: eight 16-bit words from memory, zero-extended to 32-bit lanes.
+    pub fn vpmovzxwd(&mut self, dst: Ymm, from: Addr) {
+        self.emit(Op::Vpmovzxwd, vec![vec(dst, Write), mem(from, W128)]);
+    }
+
+    /// `vmovss [to], v`: the low float stored.
+    pub fn store_vmovss(&mut self, to: Addr, v: Xmm) {
+        self.emit(Op::Vmovss, vec![arg(to.mem(W32), Write), vec(v, Read)]);
     }
 
     /// `vmovdqa [to], v`: an aligned store.
