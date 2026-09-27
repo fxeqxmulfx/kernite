@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use kgen_core::Access::{Ignored, Read, ReadWrite, Write};
 use kgen_core::Width::{W8, W16, W32, W64};
 use kgen_core::{
@@ -8,6 +10,21 @@ use kgen_core::{
 use crate::op::Op;
 use crate::operand::{Addr, Gpr, Slot, Src, Vector, Xmm, Ymm, arg, control, gpr, mem, number, src, vec};
 use crate::sysv::{FLOAT_RESULT, INT_PARAMS};
+
+/// Instructions [`Asm::capture`] took out of a kernel, to [`Asm::splice`] back in.
+pub struct Stream(VecDeque<Item<Op, VReg>>);
+
+impl Stream {
+    /// The instructions left.
+    pub fn len(&self) -> usize {
+        self.0.iter().filter(|i| matches!(i, Item::Inst(_))).count()
+    }
+
+    /// Whether every instruction is back in the kernel.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
 
 /// A kernel being written, one instruction per call.
 ///
@@ -136,6 +153,47 @@ impl Asm {
     /// `values` as floats.
     pub fn f32s(&mut self, values: &[f32]) -> Addr {
         self.u32s(&values.iter().map(|v| v.to_bits()).collect::<Vec<_>>())
+    }
+
+    /// What `write` writes, taken out of the kernel rather than left at its end, for
+    /// [`Asm::splice`] to put back a few instructions at a time among others.
+    ///
+    /// A chain of instructions that wait on each other, written in one piece, fills the
+    /// scheduler with instructions not yet ready while the work behind it waits to get in.
+    /// Spread among independent work, it runs in the gaps. What the chain stores to memory, and
+    /// what others load from there, is the kernel's to keep in order: the allocator sees only
+    /// registers.
+    ///
+    /// # Panics
+    ///
+    /// If `write` places a label or jumps: a branch cannot be spread.
+    pub fn capture(&mut self, write: impl FnOnce(&mut Self)) -> Stream {
+        let from = self.p.body.len();
+        write(self);
+        let items: VecDeque<_> = self.p.body.drain(from..).collect();
+        for item in &items {
+            match item {
+                Item::Label(_) => panic!("a label in a captured stream"),
+                Item::Inst(i) => assert!(i.flow == Flow::Next, "{:?} in a captured stream", i.op),
+                Item::Note(_) => {}
+            }
+        }
+        Stream(items)
+    }
+
+    /// The next `n` instructions of `stream` here, or as many as it has left, with the notes
+    /// before them.
+    pub fn splice(&mut self, stream: &mut Stream, n: usize) {
+        let mut left = n;
+        while let Some(item) = stream.0.front() {
+            if let Item::Inst(_) = item {
+                if left == 0 {
+                    break;
+                }
+                left -= 1;
+            }
+            self.p.body.extend(stream.0.pop_front());
+        }
     }
 
     fn emit(&mut self, op: Op, args: Vec<Arg<VReg>>) {

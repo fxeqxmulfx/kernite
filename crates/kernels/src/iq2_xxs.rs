@@ -90,8 +90,12 @@ pub fn iq2_xxs(ahead: usize) -> Program<Op> {
     a.jz(last);
 
     a.place(top);
-    prepare(&mut a, &s, &r, 1, nxt);
+    // The next superblock's scales and signs, a chain of instructions that wait on each other,
+    // spread over the groups before the first that reads its signs.
+    let mut next = a.capture(|a| prepare(a, &s, &r, 1, nxt));
+    let share = next.len().div_ceil(8 - ahead);
     for g in 0..8 {
+        a.splice(&mut next, share);
         match g + ahead {
             j if j < 8 => products(&mut a, &k, &r, ring[j], 0, cur, j as i32),
             j => products(&mut a, &k, &r, ring[j - 8], 1, nxt, (j - 8) as i32),

@@ -55,10 +55,10 @@ fn main() {
             passes += 64;
         }
         let took = start.elapsed().as_secs_f64();
-        let done = passes as f64 * (rows * cols) as f64;
+        let done = passes * (rows * cols) as u64;
         println!(
-            "iq2_xxs ahead {ahead}: {rows} rows of {cols}, {:.2} G weights/s, {:.1} ns a row  (check {check})",
-            done / took / 1e9,
+            "iq2_xxs ahead {ahead}: {rows} rows of {cols}, {:.2} G weights/s, {:.1} ns a row, {done} weights  (check {check})",
+            done as f64 / took / 1e9,
             took * 1e9 / (passes as f64 * rows as f64)
         );
     }
