@@ -357,6 +357,8 @@ impl Asm {
         vpshufb = Vpshufb;
         /// `vpcmpeqb`: bytes all ones where equal.
         vpcmpeqb = Vpcmpeqb;
+        /// `vpcmpeqd`: dwords all ones where equal.
+        vpcmpeqd = Vpcmpeqd;
         /// `vpsignb`: bytes of `a`, negated where `b`'s are negative, zeroed where zero.
         vpsignb = Vpsignb;
         /// `vpmaddubsw`: unsigned bytes of `a` times signed bytes of `b`, pairs summed to
@@ -421,6 +423,22 @@ impl Asm {
     /// `vpmovzxwd`: eight 16-bit words from memory, zero-extended to 32-bit lanes.
     pub fn vpmovzxwd(&mut self, dst: Ymm, from: Addr) {
         self.emit(Op::Vpmovzxwd, vec![vec(dst, Write), mem(from, W128)]);
+    }
+
+    /// `vpmovzxbd`: eight unsigned bytes from memory to eight 32-bit indices.
+    pub fn vpmovzxbd(&mut self, dst: Ymm, from: Addr) {
+        self.emit(Op::Vpmovzxbd, vec![vec(dst, Write), mem(from, W64)]);
+    }
+
+    /// `vpgatherdd`: eight 32-bit entries, where mask lanes have their high bit set. The
+    /// instruction clears those mask bits as it gathers, and leaves other destination lanes.
+    pub fn vpgatherdd(&mut self, dst: Ymm, from: Addr, mask: Ymm) {
+        self.emit(Op::Vpgatherdd, vec![vec(dst, ReadWrite), mem(from, W32), vec(mask, ReadWrite)]);
+    }
+
+    /// `vpcmpeqd v, v, v`: all 32-bit lanes set, depending on nothing.
+    pub fn ones(&mut self, dst: Ymm) {
+        self.emit(Op::Vpcmpeqd, vec![vec(dst, Write), vec(dst, Ignored), vec(dst, Ignored)]);
     }
 
     /// `vmovss [to], v`: the low float stored.

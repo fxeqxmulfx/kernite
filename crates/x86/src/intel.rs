@@ -242,7 +242,8 @@ fn memory(m: &Mem<PReg>, frame: &Frame, sized: bool) -> String {
         Base::Const(k) => (format!("rip + {{c{}}}", k.0), i64::from(m.disp)),
     };
     if let Some((r, scale)) = m.index {
-        write!(text, " + {}*{scale}", name(r, Width::W64)).unwrap();
+        let width = if r.class == Class::Vec { Width::W256 } else { Width::W64 };
+        write!(text, " + {}*{scale}", name(r, width)).unwrap();
     }
     match disp {
         0 => {}
