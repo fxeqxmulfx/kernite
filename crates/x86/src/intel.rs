@@ -134,7 +134,7 @@ pub fn print(c: &Compiled<Op>) -> Listing {
                     .iter()
                     .map(|a| match a.operand {
                         Operand::Reg(r, w) => name(r, w),
-                        Operand::Mem(m) => memory(&m, &c.frame, inst.op != Op::Lea),
+                        Operand::Mem(m) => memory(&m, &c.frame, inst.op != Op::Lea, inst.op == Op::Vpgatherdq),
                         Operand::Imm(imm) if imm.hex => format!("{:#04x}", imm.value),
                         Operand::Imm(imm) => imm.value.to_string(),
                         Operand::Label(l) => jump_target(l, i, &numbers, &places),
@@ -235,14 +235,14 @@ fn name(r: PReg, width: Width) -> String {
 
 /// A memory operand; `sized` puts the access's size in front, which every instruction but
 /// `lea` wants.
-fn memory(m: &Mem<PReg>, frame: &Frame, sized: bool) -> String {
+fn memory(m: &Mem<PReg>, frame: &Frame, sized: bool, xmm_index: bool) -> String {
     let (mut text, disp) = match m.base {
         Base::Reg(r) => (name(r, Width::W64), i64::from(m.disp)),
         Base::Slot(s) => (name(RSP, Width::W64), i64::from(m.disp) + i64::from(frame.offsets[s.0 as usize])),
         Base::Const(k) => (format!("rip + {{c{}}}", k.0), i64::from(m.disp)),
     };
     if let Some((r, scale)) = m.index {
-        let width = if r.class == Class::Vec { Width::W256 } else { Width::W64 };
+        let width = if r.class == Class::Vec { if xmm_index { Width::W128 } else { Width::W256 } } else { Width::W64 };
         write!(text, " + {}*{scale}", name(r, width)).unwrap();
     }
     match disp {

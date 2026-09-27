@@ -34,8 +34,17 @@ struct Row {
 /// `ahead` groups' products are started before their sums. The next superblock's signs and
 /// scales are prepared while the current one is consumed.
 pub fn iq2_s(ahead: usize) -> Program<Op> {
+    build(ahead, false)
+}
+
+/// IQ2_S in its original 82-byte layout, with four grid rows gathered by AVX2.
+pub fn iq2_s_gather(ahead: usize) -> Program<Op> {
+    build(ahead, true)
+}
+
+fn build(ahead: usize, gather: bool) -> Program<Op> {
     assert!((1..8).contains(&ahead), "ahead {ahead}");
-    let mut a = Asm::new(format!("iq2_s_ahead{ahead}"));
+    let mut a = Asm::new(format!("iq2_s_{}ahead{ahead}", if gather { "gather_" } else { "" }));
     let row = a.param("row");
     let n = a.param("sbs");
     let quants = a.param("quants");
@@ -66,7 +75,7 @@ pub fn iq2_s(ahead: usize) -> Program<Op> {
     let ring: [Ymm; 8] = std::array::from_fn(|g| a.ymm(format!("p{g}")));
     prepare(&mut a, &s, &r, 0, cur);
     for (g, &p) in ring.iter().enumerate().take(ahead) {
-        products(&mut a, &k, &r, p, 0, cur, g as i32);
+        products(&mut a, &k, &r, p, 0, cur, g as i32, gather);
     }
     a.dec(n);
     a.jz(last);
@@ -82,8 +91,8 @@ pub fn iq2_s(ahead: usize) -> Program<Op> {
             a.splice(&mut next_scales, scale_share);
         }
         match g + ahead {
-            j if j < 8 => products(&mut a, &k, &r, ring[j], 0, cur, j as i32),
-            j => products(&mut a, &k, &r, ring[j - 8], 1, nxt, (j - 8) as i32),
+            j if j < 8 => products(&mut a, &k, &r, ring[j], 0, cur, j as i32, gather),
+            j => products(&mut a, &k, &r, ring[j - 8], 1, nxt, (j - 8) as i32, gather),
         }
         sum(&mut a, &k, acc, ring[g], cur, g as i32);
     }
@@ -98,7 +107,7 @@ pub fn iq2_s(ahead: usize) -> Program<Op> {
     a.place(last);
     for g in 0..8 {
         if g + ahead < 8 {
-            products(&mut a, &k, &r, ring[g + ahead], 0, cur, (g + ahead) as i32);
+            products(&mut a, &k, &r, ring[g + ahead], 0, cur, (g + ahead) as i32, gather);
         }
         sum(&mut a, &k, acc, ring[g], cur, g as i32);
     }
@@ -149,29 +158,46 @@ fn group_scales(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr) {
 
 /// Four grid quadwords, with each of their eight activations signed and multiplied.
 #[allow(clippy::too_many_arguments)]
-fn products(a: &mut Asm, k: &Group, r: &Row, p: Ymm, sb: i32, from: Gpr, g: i32) {
+fn products(a: &mut Asm, k: &Group, r: &Row, p: Ymm, sb: i32, from: Gpr, g: i32, gather: bool) {
     a.note(format!("products of group {g} of superblock +{sb}"));
-    let high = a.gpr("high_index_bits");
-    a.movzx_byte(high, r.row.at(82 * sb + 66 + g));
-    let index: [Gpr; 4] = std::array::from_fn(|l| a.gpr(format!("index{l}")));
-    for (l, &i) in index.iter().enumerate() {
-        a.movzx_byte(i, r.row.at(82 * sb + 2 + 4 * g + l as i32));
-        let bits = a.gpr("high_for_entry");
-        a.mov(bits, high);
-        if l != 0 {
-            a.shr(bits, (2 * l) as u8);
+    if gather {
+        let high = a.ymm("high_index_bits");
+        let shifts = a.u32s(&[0, 2, 4, 6]);
+        let mask3 = a.u32s(&[3; 4]);
+        a.vpbroadcastb(high.xmm(), r.row.at(82 * sb + 66 + g));
+        a.vpsrlvd(high.xmm(), high.xmm(), shifts);
+        a.vpand(high.xmm(), high.xmm(), mask3);
+        a.vpslld(high.xmm(), high.xmm(), 8);
+        let index = a.ymm("index");
+        a.vpmovzxbd_xmm(index.xmm(), r.row.at(82 * sb + 2 + 4 * g));
+        a.vpor(index.xmm(), index.xmm(), high.xmm());
+        let gather_mask = a.ymm("gather_mask");
+        a.ones(gather_mask);
+        a.zero(p);
+        a.vpgatherdq(p, r.grid.at(0).index_xmm(index.xmm(), 8), gather_mask);
+    } else {
+        let high = a.gpr("high_index_bits");
+        a.movzx_byte(high, r.row.at(82 * sb + 66 + g));
+        let index: [Gpr; 4] = std::array::from_fn(|l| a.gpr(format!("index{l}")));
+        for (l, &i) in index.iter().enumerate() {
+            a.movzx_byte(i, r.row.at(82 * sb + 2 + 4 * g + l as i32));
+            let bits = a.gpr("high_for_entry");
+            a.mov(bits, high);
+            if l != 0 {
+                a.shr(bits, (2 * l) as u8);
+            }
+            a.and(bits, 3);
+            a.shl(bits, 8);
+            a.or_reg(i, bits);
         }
-        a.and(bits, 3);
-        a.shl(bits, 8);
-        a.or_reg(i, bits);
+        let grid = |i: Gpr| r.grid.at(0).index(i, 8);
+        let rows = a.ymm("rows");
+        a.vmovq(p.xmm(), grid(index[0]));
+        a.vmovhps(p.xmm(), p.xmm(), grid(index[1]));
+        a.vmovq(rows.xmm(), grid(index[2]));
+        a.vmovhps(rows.xmm(), rows.xmm(), grid(index[3]));
+        a.vinserti128(p, p, rows.xmm(), 1);
     }
-    let grid = |i: Gpr| r.grid.at(0).index(i, 8);
-    let rows = a.ymm("rows");
-    a.vmovq(p.xmm(), grid(index[0]));
-    a.vmovhps(p.xmm(), p.xmm(), grid(index[1]));
-    a.vmovq(rows.xmm(), grid(index[2]));
-    a.vmovhps(rows.xmm(), rows.xmm(), grid(index[3]));
-    a.vinserti128(p, p, rows.xmm(), 1);
     let signs = a.ymm("signs");
     a.vpbroadcastd(signs, from.at(64 + 4 * g));
     a.vpshufb(signs, signs, k.spread);

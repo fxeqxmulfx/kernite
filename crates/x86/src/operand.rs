@@ -130,6 +130,14 @@ impl Addr {
         Addr { index: Some((by.0, scale)), ..self }
     }
 
+    /// Plus four 32-bit offsets in an XMM register, for an AVX2 quadword gather.
+    pub fn index_xmm(self, by: Xmm, scale: u8) -> Addr {
+        assert!(matches!(scale, 1 | 2 | 4 | 8), "scale {scale}");
+        assert!(self.index.is_none(), "one index to an address");
+        assert!(!matches!(self.base, Base::Const(_)), "a constant's address takes no index");
+        Addr { index: Some((by.0, scale)), ..self }
+    }
+
     pub(crate) fn mem(self, width: Width) -> Operand<VReg> {
         Operand::Mem(Mem { base: self.base, index: self.index, disp: self.disp, width })
     }

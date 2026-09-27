@@ -32,8 +32,42 @@ unsafe extern "sysv64" fn ahead3(
     grid: *const u64,
 ) -> f32;
 
+#[kgen_macros::kernel(iq2_s_gather(ahead = 1))]
+unsafe extern "sysv64" fn gather1(
+    row: *const u8,
+    sbs: usize,
+    quants: *const i8,
+    scales: *const f32,
+    grid: *const u64,
+) -> f32;
+
+#[kgen_macros::kernel(iq2_s_gather(ahead = 2))]
+unsafe extern "sysv64" fn gather2(
+    row: *const u8,
+    sbs: usize,
+    quants: *const i8,
+    scales: *const f32,
+    grid: *const u64,
+) -> f32;
+
+#[kgen_macros::kernel(iq2_s_gather(ahead = 3))]
+unsafe extern "sysv64" fn gather3(
+    row: *const u8,
+    sbs: usize,
+    quants: *const i8,
+    scales: *const f32,
+    grid: *const u64,
+) -> f32;
+
 /// The scheduled variants to compare.
-pub const KERNELS: [(&str, Kernel); 3] = [("ahead1", ahead1), ("ahead2", ahead2), ("ahead3", ahead3)];
+pub const KERNELS: [(&str, Kernel); 6] = [
+    ("ahead1", ahead1),
+    ("ahead2", ahead2),
+    ("ahead3", ahead3),
+    ("gather1", gather1),
+    ("gather2", gather2),
+    ("gather3", gather3),
+];
 /// Bytes per 256 weights.
 pub const SUPERBLOCK: usize = 82;
 

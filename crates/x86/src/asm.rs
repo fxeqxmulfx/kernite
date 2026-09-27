@@ -453,6 +453,11 @@ impl Asm {
         self.emit(Op::Vpmovzxbd, vec![vec(dst, Write), mem(from, W64)]);
     }
 
+    /// `vpmovzxbd`: four unsigned bytes to four 32-bit offsets.
+    pub fn vpmovzxbd_xmm(&mut self, dst: Xmm, from: Addr) {
+        self.emit(Op::Vpmovzxbd, vec![vec(dst, Write), mem(from, W32)]);
+    }
+
     /// `vpmovzxbd`: eight unsigned bytes from the low half of a register.
     pub fn vpmovzxbd_reg(&mut self, dst: Ymm, from: Xmm) {
         self.emit(Op::Vpmovzxbd, vec![vec(dst, Write), vec(from, Read)]);
@@ -467,6 +472,11 @@ impl Asm {
     /// instruction clears those mask bits as it gathers, and leaves other destination lanes.
     pub fn vpgatherdd(&mut self, dst: Ymm, from: Addr, mask: Ymm) {
         self.emit(Op::Vpgatherdd, vec![vec(dst, ReadWrite), mem(from, W32), vec(mask, ReadWrite)]);
+    }
+
+    /// `vpgatherdq`: four 64-bit entries from four XMM 32-bit offsets.
+    pub fn vpgatherdq(&mut self, dst: Ymm, from: Addr, mask: Ymm) {
+        self.emit(Op::Vpgatherdq, vec![vec(dst, ReadWrite), mem(from, W64), vec(mask, ReadWrite)]);
     }
 
     /// `vpcmpeqd v, v, v`: all 32-bit lanes set, depending on nothing.

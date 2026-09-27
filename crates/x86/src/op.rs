@@ -74,6 +74,7 @@ ops! {
     Vpcmpeqd = "vpcmpeqd",
     Vpermq = "vpermq",
     Vpgatherdd = "vpgatherdd",
+    Vpgatherdq = "vpgatherdq",
     Vpmaddubsw = "vpmaddubsw",
     Vpmaddwd = "vpmaddwd",
     Vpmovzxbd = "vpmovzxbd",
