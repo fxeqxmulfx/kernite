@@ -11,7 +11,7 @@ mod iq4_nl;
 mod nibbles;
 mod q6_k;
 
-pub use bf16::{bf16_pairs, bf16_triples};
+pub use bf16::{bf16_pairs, bf16_triples, bf16_two};
 pub use iq2_s::iq2_s;
 pub use iq2_s::iq2_s_gather;
 pub use iq2_s::iq2_s_packed;
@@ -126,6 +126,13 @@ pub enum Kernel {
         /// How close to the core.
         hint: Hint,
     },
+    /// [`bf16_two`].
+    Bf16Two {
+        /// Bytes ahead of each row's reads that it asks for, or none.
+        ahead: i32,
+        /// How close to the core.
+        hint: Hint,
+    },
 }
 
 impl Kernel {
@@ -207,9 +214,14 @@ impl Kernel {
                 let hint = [Hint::T0, Hint::T1, Hint::T2, Hint::Nta][take.int("hint", 0, 0..=3)? as usize];
                 Kernel::Bf16Triples { ahead, hint }
             }
+            "bf16_two" => {
+                let ahead = take.int("ahead", 0, 0..=4096)? as i32;
+                let hint = [Hint::T0, Hint::T1, Hint::T2, Hint::Nta][take.int("hint", 0, 0..=3)? as usize];
+                Kernel::Bf16Two { ahead, hint }
+            }
             _ => {
                 return Err(format!(
-                    "no kernel `{name}`; there are `iq2_s`, `iq2_s_gather`, `iq2_s_packed`, `iq2_xs_packed`, `iq2_s_nibble`, `iq2_s_planes`, `iq2_xxs`, `iq3_xxs`, `iq3_xxs_nibble`, `iq3_s`, `iq3_s_nibble`, `iq3_s_nibble2`, `iq4_xs`, `iq4_xs2`, `iq4_nl`, `q6_k` and `bf16_pairs`"
+                    "no kernel `{name}`; there are `iq2_s`, `iq2_s_gather`, `iq2_s_packed`, `iq2_xs_packed`, `iq2_s_nibble`, `iq2_s_planes`, `iq2_xxs`, `iq3_xxs`, `iq3_xxs_nibble`, `iq3_s`, `iq3_s_nibble`, `iq3_s_nibble2`, `iq4_xs`, `iq4_xs2`, `iq4_nl`, `q6_k`, `bf16_pairs`, `bf16_triples` and `bf16_two`"
                 ));
             }
         };
@@ -239,6 +251,7 @@ impl Kernel {
             Kernel::Q6KFront => q6_k_front(),
             Kernel::Bf16Pairs { ahead, hint } => bf16_pairs(ahead, hint),
             Kernel::Bf16Triples { ahead, hint } => bf16_triples(ahead, hint),
+            Kernel::Bf16Two { ahead, hint } => bf16_two(ahead, hint),
         }
     }
 
@@ -266,6 +279,7 @@ impl Kernel {
         kernels.extend(
             [(512, Hint::T0), (1024, Hint::T0), (512, Hint::T1)].map(|(ahead, hint)| Kernel::Bf16Pairs { ahead, hint }),
         );
+        kernels.extend([(0, Hint::T0), (2048, Hint::T0)].map(|(ahead, hint)| Kernel::Bf16Two { ahead, hint }));
         kernels
     }
 }

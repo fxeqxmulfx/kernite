@@ -64,6 +64,47 @@ pub const KERNELS: [(&str, Kernel); 4] =
 /// Three-row kernel with its rows asked for 2048 bytes ahead.
 pub const TRIPLES: Kernel = triples_ahead2048;
 
+/// The two-vector kernels' type: the first row, the two vectors back to back, `out`, bytes from
+/// the first vector's outputs to the second's, the rows, and blocks of 32 values a row.
+pub type Two = unsafe extern "sysv64" fn(*const u16, *const f32, *mut f32, usize, usize, usize);
+
+#[kgen_macros::kernel(bf16_two)]
+unsafe extern "sysv64" fn two_plain(
+    w: *const u16,
+    x: *const f32,
+    out: *mut f32,
+    gap: usize,
+    rows: usize,
+    blocks: usize,
+);
+
+#[kgen_macros::kernel(bf16_two(ahead = 2048))]
+unsafe extern "sysv64" fn two_ahead2048(
+    w: *const u16,
+    x: *const f32,
+    out: *mut f32,
+    gap: usize,
+    rows: usize,
+    blocks: usize,
+);
+
+/// Every two-vector kernel, by name.
+pub const TWOS: [(&str, Two); 2] = [("two", two_plain), ("two-ahead2048", two_ahead2048)];
+
+/// `kernel` on the rows of `w` against the two vectors of `x`, back to back, checked: the first
+/// vector's products go into `first` and the second's into `second`, one a row.
+pub fn two(kernel: Two, w: &[u16], x: &[f32], [first, second]: [&mut [f32]; 2]) {
+    let cols = x.len() / 2;
+    assert!(cols > 0 && cols.is_multiple_of(32) && x.len() == 2 * cols, "two vectors of whole blocks of 32");
+    assert!(!first.is_empty() && first.len() == second.len(), "one output a row for each vector");
+    assert_eq!(w.len(), first.len() * cols, "rows as long as a vector");
+    assert!(supported(), "AVX2, FMA and F16C");
+    let gap = (second.as_mut_ptr() as usize).wrapping_sub(first.as_mut_ptr() as usize);
+    // The kernel reads the rows back to back and both vectors, all checked above, and writes one
+    // float a row into `first` and the float `gap` bytes on, in `second`.
+    unsafe { kernel(w.as_ptr(), x.as_ptr(), first.as_mut_ptr(), gap, first.len(), cols / 32) }
+}
+
 /// `kernel` on the rows of `w`, `x.len()` values each, into `out`, checked: whole blocks of 32,
 /// a whole number of pairs of rows, one output a row, a CPU that runs it.
 pub fn rows(kernel: Kernel, w: &[u16], x: &[f32], out: &mut [f32]) {

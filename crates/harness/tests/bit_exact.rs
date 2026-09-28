@@ -688,6 +688,46 @@ fn bf16_pairs_match_their_reference_to_the_bit() {
 }
 
 #[test]
+fn bf16_two_vectors_match_the_reference_for_each_to_the_bit() {
+    if !supported() {
+        return;
+    }
+    let mut rng = Rng(0x1f83_d9ab_5be0_cd19);
+    let mut checked = 0;
+    for cols in [32, 64, 96, 320, 2560] {
+        for rows in [1, 2, 3, 7] {
+            for trial in 0..10 {
+                let w: Vec<u16> = (0..rows * cols).map(|_| bf16_bits(&mut rng)).collect();
+                let x: Vec<f32> = (0..2 * cols)
+                    .map(|_| f32::from_bits(u32::from(bf16_bits(&mut rng)) << 16 | (rng.next() >> 48) as u32))
+                    .collect();
+                for (name, kernel) in bf16::TWOS {
+                    // Room between the two outputs, so the gap is not just the rows.
+                    let mut out = vec![f32::NAN; 3 * rows + 5];
+                    let (first, rest) = out.split_at_mut(rows);
+                    let second = &mut rest[rows + 5..];
+                    bf16::two(kernel, &w, &x, [first, second]);
+                    for (v, got) in [&out[..rows], &out[2 * rows + 5..]].into_iter().enumerate() {
+                        let x = &x[v * cols..][..cols];
+                        for (r, (g, row)) in got.iter().zip(w.chunks(cols)).enumerate() {
+                            let want = bf16::reference(row, x);
+                            assert_eq!(
+                                g.to_bits(),
+                                want.to_bits(),
+                                "{name}, {rows} rows of {cols}, trial {trial}, vector {v}, row {r}: {g} against {want}"
+                            );
+                        }
+                    }
+                    assert!(out[rows..2 * rows + 5].iter().all(|v| v.is_nan()), "{name} wrote between the outputs");
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 5 * 4 * 10 * bf16::TWOS.len());
+}
+
+#[test]
 fn bf16_triples_match_their_reference_to_the_bit() {
     if !supported() {
         return;

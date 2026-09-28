@@ -29,6 +29,75 @@ pub fn bf16_triples(ahead: i32, hint: Hint) -> Program<Op> {
     bf16_rows(3, ahead, hint)
 }
 
+/// BF16 rows against two vectors of floats, each row read once for both:
+///
+/// `fn(w: *const u16, x: *const f32, out: *mut f32, gap: usize, rows: usize, blocks: usize)`
+///
+/// The rows lie back to back from `w`, `32 * blocks` values each, and so do the two vectors
+/// from `x`, as long as a row each; `rows` and `blocks` are at least one. `out[r]` gets row `r`
+/// times the first vector, and the float `gap` bytes on from it row `r` times the second.
+///
+/// Every product has the bits [`bf16_pairs`] gives it: four accumulators to a row and a vector,
+/// summed the same way. A row's values are widened once for both vectors. With `ahead` bytes,
+/// the row asks for its line that far on each time it reads one, as `hint` says.
+pub fn bf16_two(ahead: i32, hint: Hint) -> Program<Op> {
+    assert!((0..=4096).contains(&ahead), "ahead {ahead}");
+    let mut a = Asm::new(match ahead {
+        0 => "bf16_two".to_string(),
+        _ => format!("bf16_two_ahead{ahead}_{}", hint.suffix()),
+    });
+    let w = a.param("w");
+    let x = a.param("x");
+    let out = a.param("out");
+    let gap = a.param("gap");
+    let rows = a.param("rows");
+    let blocks = a.param("blocks");
+    let (row, block) = (a.label(), a.label());
+    let (second, x0, x1, left) = (a.gpr("second"), a.gpr("x0"), a.gpr("x1"), a.gpr("left"));
+    a.note("the second vector, 128 bytes a block past the first");
+    a.mov(second, blocks);
+    a.shl(second, 7);
+    a.lea(second, x.at(0).index(second, 1));
+
+    a.place(row);
+    a.note("a row");
+    let acc: Vec<[Ymm; 4]> = (0..2).map(|v| std::array::from_fn(|k| a.ymm(format!("acc{v}{k}")))).collect();
+    for &v in acc.iter().flatten() {
+        a.zero(v);
+    }
+    a.mov(x0, x);
+    a.mov(x1, second);
+    a.mov(left, blocks);
+
+    a.place(block);
+    a.note("32 values of the row");
+    if ahead > 0 {
+        a.prefetch(hint, w.at(ahead));
+    }
+    for k in 0..4 {
+        let v = a.ymm("w8");
+        a.vpmovzxwd(v, w.at(16 * k));
+        a.vpslld(v, v, 16);
+        a.vfmadd231ps(acc[0][k as usize], v, x0.at(32 * k));
+        a.vfmadd231ps(acc[1][k as usize], v, x1.at(32 * k));
+    }
+    a.add(w, 64);
+    a.add(x0, 128);
+    a.add(x1, 128);
+    a.dec(left);
+    a.jnz(block);
+
+    let sum = reduce(&mut a, &acc[0]);
+    a.store_vmovss(out.at(0), sum);
+    let sum = reduce(&mut a, &acc[1]);
+    a.store_vmovss(out.at(0).index(gap, 1), sum);
+    a.add(out, 4);
+    a.dec(rows);
+    a.jnz(row);
+    a.ret();
+    a.finish()
+}
+
 fn bf16_rows(group: usize, ahead: i32, hint: Hint) -> Program<Op> {
     assert!(group == 2 || group == 3);
     assert!((0..=4096).contains(&ahead), "ahead {ahead}");
@@ -137,6 +206,8 @@ mod tests {
     fn names_say_the_distance_and_the_hint() {
         assert_eq!(bf16_pairs(0, Hint::T0).name, "bf16_pairs");
         assert_eq!(bf16_pairs(1024, Hint::T1).name, "bf16_pairs_ahead1024_t1");
+        assert_eq!(bf16_two(0, Hint::T0).name, "bf16_two");
+        assert_eq!(bf16_two(2048, Hint::T0).name, "bf16_two_ahead2048_t0");
     }
 
     #[test]
