@@ -1,5 +1,5 @@
 use kgen_core::Program;
-use kgen_x86::{Addr, Asm, Gpr, Op, Ymm};
+use kgen_x86::{Addr, Asm, Gpr, Op, Xmm, Ymm};
 
 struct Group {
     spread: Ymm,
@@ -52,6 +52,99 @@ pub fn iq2_s_packed(ahead: usize) -> Program<Op> {
 /// A superblock grows from 74 to 78 bytes and uses the original 512-entry grid.
 pub fn iq2_xs_packed(ahead: usize) -> Program<Op> {
     build(ahead, IndexMode::XsPacked)
+}
+
+/// IQ2_S packed as for [`iq2_s_packed`], against two activation vectors: each group's
+/// indices, grid rows and signs are decoded once for both.
+///
+/// `fn(row: *const u8, sbs: usize, quants: *const i8, scales: *const f32, grid: *const u64, out: *mut f32)`
+///
+/// The vectors lie block by block together, the way a group of two is stored: block `b` of
+/// the first, then block `b` of the second, and their scales the same way. `out` gets the two
+/// dots, each the bits [`iq2_s_packed`] makes of its vector alone.
+pub fn iq2_s_packed2(ahead: usize) -> Program<Op> {
+    assert!((1..8).contains(&ahead), "ahead {ahead}");
+    let mut a = Asm::new(format!("iq2_s_packed2_ahead{ahead}"));
+    let row = a.param("row");
+    let n = a.param("sbs");
+    let quants = a.param("quants");
+    let scales = a.param("scales");
+    let grid = a.param("grid");
+    let out = a.param("out");
+    let r = Row { row, quants, scales, grid };
+    let (empty, top, last) = (a.label(), a.label(), a.label());
+    a.test(n, n);
+    a.jz(empty);
+
+    a.note("constants");
+    let spread: Vec<u8> = (0..32).map(|j| j / 8).collect();
+    let k = Group { spread: a.ymm("spread"), bit: a.ymm("bit"), max8: a.ymm("max8"), one16: a.ymm("one16") };
+    let (spread_at, bit_at) = (a.u8s(&spread), a.u64s(&[0x8040_2010_0804_0201]));
+    let (max8_at, one16_at) = (a.u32s(&[0x7F7F_7F7F]), a.u32s(&[0x0001_0001]));
+    a.vmovdqa(k.spread, spread_at);
+    a.vpbroadcastq(k.bit, bit_at);
+    a.vpbroadcastd(k.max8, max8_at);
+    a.vpbroadcastd(k.one16, one16_at);
+    let s = Superblock { nibble: a.u32s(&[15; 8]), one: a.u32s(&[1; 8]), eighth: a.f32s(&[0.125; 8]) };
+    let acc = [a.ymm("acc0"), a.ymm("acc1")];
+    for v in acc {
+        a.zero(v);
+    }
+    // Aligned to its whole size: the two halves trade places by flipping one address bit.
+    let slot = a.slot(256, 256);
+    let (cur, nxt) = (a.gpr("cur"), a.gpr("nxt"));
+    a.lea(cur, slot.at(0));
+    a.lea(nxt, slot.at(128));
+
+    let ring: [[Ymm; 2]; 8] = std::array::from_fn(|g| [a.ymm(format!("p{g}a")), a.ymm(format!("p{g}b"))]);
+    pair_scales(&mut a, &s, &r, 0, cur);
+    for (g, p) in ring.iter().enumerate().take(ahead) {
+        pair_products(&mut a, &k, &r, p, 0, g as i32);
+    }
+    a.dec(n);
+    a.jz(last);
+
+    a.place(top);
+    let mut next_scales = a.capture(|a| pair_scales(a, &s, &r, 1, nxt));
+    let share = next_scales.len().div_ceil(8);
+    for g in 0..8 {
+        // The sums first: the accumulators' chains are the longest, and the oldest uop ready
+        // is the one a port takes.
+        pair_sums(&mut a, &k, acc, ring[g], cur, g as i32);
+        a.splice(&mut next_scales, share);
+        match g + ahead {
+            j if j < 8 => pair_products(&mut a, &k, &r, &ring[j], 0, j as i32),
+            j => pair_products(&mut a, &k, &r, &ring[j - 8], 1, (j - 8) as i32),
+        }
+    }
+    a.add(r.row, 82);
+    a.add(r.quants, 512);
+    a.add(r.scales, 64);
+    a.xor(cur, 128);
+    a.xor(nxt, 128);
+    a.dec(n);
+    a.jnz(top);
+
+    a.place(last);
+    for g in 0..8 {
+        pair_sums(&mut a, &k, acc, ring[g], cur, g as i32);
+        if g + ahead < 8 {
+            pair_products(&mut a, &k, &r, &ring[g + ahead], 0, (g + ahead) as i32);
+        }
+    }
+    for (v, acc) in acc.into_iter().enumerate() {
+        let result = lanes_summed(&mut a, acc);
+        a.store_vmovss(out.at(4 * v as i32), result);
+    }
+    a.ret();
+
+    a.place(empty);
+    let nothing = a.ymm("nothing");
+    a.zero(nothing);
+    a.store_vmovss(out.at(0), nothing.xmm());
+    a.store_vmovss(out.at(4), nothing.xmm());
+    a.ret();
+    a.finish()
 }
 
 #[derive(Clone, Copy)]
@@ -295,4 +388,105 @@ fn finish(a: &mut Asm, acc: Ymm) {
     let result = a.ymm("result");
     a.vaddss(result.xmm(), sum.xmm(), pair.xmm());
     a.ret_f32(result.xmm());
+}
+
+/// Superblock `+sb`'s group scales times each vector's, in pairs: the low halves' to the 64
+/// bytes at `to`, float `2g + v` for group `g` and vector `v`, and the high halves' to the 64
+/// after. Each is rounded as [`group_scales`] rounds it for one vector.
+fn pair_scales(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr) {
+    a.note(format!("pair scales of superblock +{sb}"));
+    let d = a.ymm("d");
+    a.vpbroadcastw(d.xmm(), r.row.at(82 * sb));
+    a.vcvtph2ps(d, d.xmm());
+    let steps = a.ymm("steps");
+    a.vpmovzxbd(steps, r.row.at(82 * sb + 74));
+    // Groups 0, 1, 4, 5, 2, 3, 6, 7, so that `vshufps` pairs up each lane's first two, or its
+    // last two, in group order.
+    a.vpermq(steps, steps, 0xd8);
+    let (low, high) = (a.ymm("low_scales"), a.ymm("high_scales"));
+    a.vpand(low, steps, s.nibble);
+    a.vpsrld(high, steps, 4);
+    for (at, v) in [(0, low), (64, high)] {
+        a.vpaddd(v, v, v);
+        a.vpor(v, v, s.one);
+        a.vcvtdq2ps(v, v);
+        a.vmulps(v, d, v);
+        a.vmulps(v, v, s.eighth);
+        for (half, control) in [(0, 0x50), (1, 0xfa)] {
+            let pair = a.ymm("pair_scale");
+            a.vshufps(pair, v, v, control);
+            a.vmulps(pair, pair, r.scales.at(64 * sb + 32 * half));
+            a.store_vmovaps(to.at(at + 32 * half), pair);
+        }
+    }
+}
+
+/// Group `g` of superblock `+sb`: its grid rows and signs once, then each vector's signed
+/// activations times the levels, in saturated 16-bit pairs, into `p[v]`.
+fn pair_products(a: &mut Asm, k: &Group, r: &Row, p: &[Ymm; 2], sb: i32, g: i32) {
+    a.note(format!("products of group {g} of superblock +{sb}"));
+    let index: [Gpr; 4] = std::array::from_fn(|l| a.gpr(format!("index{l}")));
+    let bits = a.gpr("packed_indices");
+    a.load_u64(bits, r.row.at(82 * sb + 2 + 5 * g));
+    for (l, &i) in index.iter().enumerate() {
+        a.mov(i, bits);
+        if l != 0 {
+            a.shr(i, (10 * l) as u8);
+        }
+        a.and(i, 1023);
+    }
+    let grid = |i: Gpr| r.grid.at(0).index(i, 8);
+    let (levels, rows) = (a.ymm("levels"), a.ymm("rows"));
+    a.vmovq(levels.xmm(), grid(index[0]));
+    a.vmovhps(levels.xmm(), levels.xmm(), grid(index[1]));
+    a.vmovq(rows.xmm(), grid(index[2]));
+    a.vmovhps(rows.xmm(), rows.xmm(), grid(index[3]));
+    a.vinserti128(levels, levels, rows.xmm(), 1);
+    let signs = a.ymm("signs");
+    a.vpbroadcastd(signs, r.row.at(82 * sb + 42 + 4 * g));
+    a.vpshufb(signs, signs, k.spread);
+    a.vpand(signs, signs, k.bit);
+    a.vpaddb(signs, signs, k.max8);
+    for (v, &p) in p.iter().enumerate() {
+        let x = a.ymm("x");
+        a.vmovdqa(x, r.quants.at(512 * sb + 32 * (2 * g + v as i32)));
+        a.vpsignb(x, x, signs);
+        a.vpmaddubsw(p, levels, x);
+    }
+}
+
+/// Group `g`'s pairs of products summed into lanes and added into each vector's accumulator at
+/// its scales, from the pairs at `from`.
+fn pair_sums(a: &mut Asm, k: &Group, acc: [Ymm; 2], p: [Ymm; 2], from: Gpr, g: i32) {
+    a.note(format!("sums of group {g}"));
+    for v in 0..2 {
+        let lanes = a.ymm("lanes");
+        a.vpmaddwd(lanes, p[v], k.one16);
+        a.vcvtdq2ps(lanes, lanes);
+        let (low, high, scale) = (a.ymm("low_scale"), a.ymm("high_scale"), a.ymm("scale"));
+        let at = 4 * (2 * g + v as i32);
+        a.vbroadcastss(low, from.at(at));
+        a.vbroadcastss(high, from.at(64 + at));
+        a.vpblendd(scale, low, high, 0xf0);
+        a.vfmadd231ps(acc[v], lanes, scale);
+    }
+}
+
+/// `hsum(acc + 0.0)`, as [`finish`] adds it, into the low lane of what it returns.
+fn lanes_summed(a: &mut Asm, acc: Ymm) -> Xmm {
+    a.note("the lanes summed");
+    let zero = a.ymm("zero");
+    a.zero(zero);
+    a.vaddps(acc, acc, zero);
+    let high = a.ymm("high");
+    a.vextractf128(high.xmm(), acc, 1);
+    let sum = a.ymm("sum");
+    a.vaddps(sum.xmm(), acc.xmm(), high.xmm());
+    let pair = a.ymm("pair");
+    a.vmovhlps(pair.xmm(), sum.xmm(), sum.xmm());
+    a.vaddps(sum.xmm(), sum.xmm(), pair.xmm());
+    a.vmovshdup(pair.xmm(), sum.xmm());
+    let result = a.ymm("result");
+    a.vaddss(result.xmm(), sum.xmm(), pair.xmm());
+    result.xmm()
 }

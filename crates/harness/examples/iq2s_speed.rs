@@ -23,6 +23,9 @@ fn main() {
         for (name, _) in iq2_s::KERNELS.into_iter().chain(iq2_s_packed::KERNELS) {
             println!("{name}");
         }
+        for (name, _) in iq2_s_packed::PAIRS {
+            println!("{name}");
+        }
         for (name, _) in iq2_s_nibble::KERNELS {
             println!("nibble-{name}");
         }
@@ -88,6 +91,31 @@ fn main() {
             for _ in 0..64 {
                 for row in packed.chunks_exact(sbs * SUPERBLOCK) {
                     check += iq2_s_packed::dot(kernel, black_box(row), &quants, &scales, &grid);
+                }
+            }
+            passes += 64;
+        }
+        let took = start.elapsed().as_secs_f64();
+        let done = passes * (rows * cols) as u64;
+        println!(
+            "iq2_s {name}: {rows} rows of {cols}, {:.2} G weights/s, {:.1} ns a row, {done} weights  (check {check})",
+            done as f64 / took / 1e9,
+            took * 1e9 / (passes as f64 * rows as f64)
+        );
+    }
+    let pair_quants = kgen_harness::interleave(&quants, &quants.iter().rev().copied().collect::<Vec<_>>());
+    let pair_scales = kgen_harness::interleave(&scales, &scales.iter().rev().copied().collect::<Vec<_>>());
+    for (name, kernel) in iq2_s_packed::PAIRS {
+        if !only.is_empty() && name != only {
+            continue;
+        }
+        let (start, mut passes) = (Instant::now(), 0u64);
+        let mut check = 0.0f32;
+        while start.elapsed().as_secs_f64() < secs {
+            for _ in 0..64 {
+                for row in packed.chunks_exact(sbs * SUPERBLOCK) {
+                    let [a, b] = iq2_s_packed::dot2(kernel, black_box(row), &pair_quants, &pair_scales, &grid);
+                    check += a + b;
                 }
             }
             passes += 64;
