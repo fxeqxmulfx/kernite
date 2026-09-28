@@ -25,7 +25,7 @@ pub use iq3_xxs::iq3_xxs;
 pub use iq4_nl::iq4_nl;
 use kgen_core::Program;
 use kgen_x86::{Hint, Op};
-pub use nibbles::{iq3_s_nibble, iq3_s_nibble2, iq3_xxs_nibble, iq4_xs, iq4_xs2};
+pub use nibbles::{iq3_s_nibble, iq3_s_nibble2, iq3_xxs_nibble, iq3_xxs_nibble2, iq4_xs, iq4_xs2};
 pub use q6_k::q6_k;
 pub use q6_k::q6_k_front;
 
@@ -96,6 +96,11 @@ pub enum Kernel {
     },
     /// [`iq3_xxs_nibble`].
     Iq3XxsNibble {
+        /// Groups whose products are made ahead of their sums.
+        ahead: usize,
+    },
+    /// [`iq3_xxs_nibble2`].
+    Iq3XxsNibble2 {
         /// Groups whose products are made ahead of their sums.
         ahead: usize,
     },
@@ -200,6 +205,10 @@ impl Kernel {
                 let ahead = take.int("ahead", 1, 1..=7)? as usize;
                 Kernel::Iq3XxsNibble { ahead }
             }
+            "iq3_xxs_nibble2" => {
+                let ahead = take.int("ahead", 1, 1..=7)? as usize;
+                Kernel::Iq3XxsNibble2 { ahead }
+            }
             "iq4_xs" => {
                 let ahead = take.int("ahead", 2, 1..=7)? as usize;
                 Kernel::Iq4Xs { ahead }
@@ -231,7 +240,7 @@ impl Kernel {
             }
             _ => {
                 return Err(format!(
-                    "no kernel `{name}`; there are `iq2_s`, `iq2_s_gather`, `iq2_s_packed`, `iq2_s_packed2`, `iq2_xs_packed`, `iq2_s_nibble`, `iq2_s_planes`, `iq2_xxs`, `iq3_xxs`, `iq3_xxs_nibble`, `iq3_s`, `iq3_s_nibble`, `iq3_s_nibble2`, `iq4_xs`, `iq4_xs2`, `iq4_nl`, `q6_k`, `bf16_pairs`, `bf16_triples` and `bf16_two`"
+                    "no kernel `{name}`; there are `iq2_s`, `iq2_s_gather`, `iq2_s_packed`, `iq2_s_packed2`, `iq2_xs_packed`, `iq2_s_nibble`, `iq2_s_planes`, `iq2_xxs`, `iq3_xxs`, `iq3_xxs_nibble`, `iq3_xxs_nibble2`, `iq3_s`, `iq3_s_nibble`, `iq3_s_nibble2`, `iq4_xs`, `iq4_xs2`, `iq4_nl`, `q6_k`, `bf16_pairs`, `bf16_triples` and `bf16_two`"
                 ));
             }
         };
@@ -255,6 +264,7 @@ impl Kernel {
             Kernel::Iq3SNibble { ahead } => iq3_s_nibble(ahead),
             Kernel::Iq3SNibble2 { ahead } => iq3_s_nibble2(ahead),
             Kernel::Iq3XxsNibble { ahead } => iq3_xxs_nibble(ahead),
+            Kernel::Iq3XxsNibble2 { ahead } => iq3_xxs_nibble2(ahead),
             Kernel::Iq4Xs { ahead } => iq4_xs(ahead),
             Kernel::Iq4Xs2 { ahead } => iq4_xs2(ahead),
             Kernel::Iq4Nl { ahead } => iq4_nl(ahead),
@@ -282,6 +292,7 @@ impl Kernel {
         kernels.extend((1..=3).map(|ahead| Kernel::Iq3SNibble { ahead }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq3SNibble2 { ahead }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq3XxsNibble { ahead }));
+        kernels.extend((1..=3).map(|ahead| Kernel::Iq3XxsNibble2 { ahead }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq4Xs { ahead }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq4Xs2 { ahead }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq4Nl { ahead }));

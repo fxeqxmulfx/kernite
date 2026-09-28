@@ -43,6 +43,9 @@ fn main() {
         for (name, _) in iq3_xxs_nibble::KERNELS {
             println!("nibble-{name}");
         }
+        for (name, _) in iq3_xxs_nibble::PAIRS {
+            println!("nibble-{name}");
+        }
         return;
     }
     for (name, kernel) in iq3_xxs::KERNELS {
@@ -73,6 +76,26 @@ fn main() {
             for _ in 0..64 {
                 for row in packed.chunks_exact(sbs * iq3_xxs_nibble::SUPERBLOCK) {
                     check += iq3_xxs_nibble::dot(kernel, black_box(row), &quants, &scales);
+                }
+            }
+            passes += 64;
+        }
+        report(&label, rows, cols, passes, start.elapsed().as_secs_f64(), check);
+    }
+    let pair_quants = kgen_harness::interleave(&quants, &quants.iter().rev().copied().collect::<Vec<_>>());
+    let pair_scales = kgen_harness::interleave(&scales, &scales.iter().rev().copied().collect::<Vec<_>>());
+    for (name, kernel) in iq3_xxs_nibble::PAIRS {
+        let label = format!("nibble-{name}");
+        if !only.is_empty() && only != label {
+            continue;
+        }
+        let start = Instant::now();
+        let (mut passes, mut check) = (0u64, 0.0f32);
+        while start.elapsed().as_secs_f64() < secs {
+            for _ in 0..64 {
+                for row in packed.chunks_exact(sbs * iq3_xxs_nibble::SUPERBLOCK) {
+                    let [a, b] = iq3_xxs_nibble::dot2(kernel, black_box(row), &pair_quants, &pair_scales);
+                    check += a + b;
                 }
             }
             passes += 64;

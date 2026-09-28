@@ -113,6 +113,12 @@ pub fn iq3_s_nibble2(ahead: usize) -> Program<Op> {
     two(&IQ3_S, ahead)
 }
 
+/// IQ3_XXS repacked as for [`iq3_xxs_nibble`], against two vectors, as [`iq3_s_nibble2`] is
+/// IQ3_S's.
+pub fn iq3_xxs_nibble2(ahead: usize) -> Program<Op> {
+    two(&IQ3_XXS, ahead)
+}
+
 /// IQ4_XS against two vectors, as [`iq3_s_nibble2`] is IQ3_S's.
 pub fn iq4_xs2(ahead: usize) -> Program<Op> {
     two(&IQ4_XS, ahead)
