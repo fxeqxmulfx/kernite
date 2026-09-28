@@ -20,10 +20,22 @@ use kgen_x86::{Asm, Hint, Op, Xmm, Ymm};
 /// model's hyper-connection rows. Past a row's end it asks for the next row's lines, and past
 /// the last row's for whatever lies there, which a prefetch may do.
 pub fn bf16_pairs(ahead: i32, hint: Hint) -> Program<Op> {
+    bf16_rows(2, ahead, hint)
+}
+
+/// Three BF16 rows per activation load, with each row reduced in the same order as
+/// [`bf16_pairs`]. The third row uses the otherwise idle vector registers.
+pub fn bf16_triples(ahead: i32, hint: Hint) -> Program<Op> {
+    bf16_rows(3, ahead, hint)
+}
+
+fn bf16_rows(group: usize, ahead: i32, hint: Hint) -> Program<Op> {
+    assert!(group == 2 || group == 3);
     assert!((0..=4096).contains(&ahead), "ahead {ahead}");
+    let base = if group == 2 { "bf16_pairs" } else { "bf16_triples" };
     let mut a = Asm::new(match ahead {
-        0 => "bf16_pairs".to_string(),
-        _ => format!("bf16_pairs_ahead{ahead}_{}", hint.suffix()),
+        0 => base.to_string(),
+        _ => format!("{base}_ahead{ahead}_{}", hint.suffix()),
     });
     let w = a.param("w");
     let x = a.param("x");
@@ -31,18 +43,20 @@ pub fn bf16_pairs(ahead: i32, hint: Hint) -> Program<Op> {
     let pairs = a.param("pairs");
     let stride = a.param("stride");
     let blocks = a.param("blocks");
-    let (pair, block) = (a.label(), a.label());
-    let rows = [a.gpr("row0"), a.gpr("row1")];
+    let (row_group, block) = (a.label(), a.label());
+    let rows: Vec<_> = (0..group).map(|r| a.gpr(format!("row{r}"))).collect();
     let (xs, left) = (a.gpr("xs"), a.gpr("left"));
 
-    a.place(pair);
-    a.note("a pair of rows");
-    let acc: [[Ymm; 4]; 2] = std::array::from_fn(|r| std::array::from_fn(|k| a.ymm(format!("acc{r}{k}"))));
+    a.place(row_group);
+    a.note(if group == 2 { "a pair of rows" } else { "three rows" });
+    let acc: Vec<[Ymm; 4]> = (0..group).map(|r| std::array::from_fn(|k| a.ymm(format!("acc{r}{k}")))).collect();
     for &v in acc.iter().flatten() {
         a.zero(v);
     }
     a.mov(rows[0], w);
-    a.lea(rows[1], w.at(0).index(stride, 1));
+    for (r, &row) in rows.iter().enumerate().skip(1) {
+        a.lea(row, w.at(0).index(stride, r as u8));
+    }
     a.mov(xs, x);
     a.mov(left, blocks);
 
@@ -74,10 +88,13 @@ pub fn bf16_pairs(ahead: i32, hint: Hint) -> Program<Op> {
         let sum = reduce(&mut a, acc);
         a.store_vmovss(out.at(4 * r as i32), sum);
     }
-    a.add(out, 8);
+    a.add(out, (4 * group) as i32);
     a.lea(w, w.at(0).index(stride, 2));
+    if group == 3 {
+        a.lea(w, w.at(0).index(stride, 1));
+    }
     a.dec(pairs);
-    a.jnz(pair);
+    a.jnz(row_group);
     a.ret();
     a.finish()
 }

@@ -528,3 +528,27 @@ fn bf16_pairs_match_their_reference_to_the_bit() {
     }
     assert_eq!(checked, 5 * 4 * 10 * bf16::KERNELS.len());
 }
+
+#[test]
+fn bf16_triples_match_their_reference_to_the_bit() {
+    if !supported() {
+        return;
+    }
+    let mut rng = Rng(0x6789_0413_26da_13f2);
+    for cols in [32, 64, 96, 320, 2560] {
+        for rows in [3, 6, 9, 15] {
+            for trial in 0..10 {
+                let w: Vec<u16> = (0..rows * cols).map(|_| bf16_bits(&mut rng)).collect();
+                let x: Vec<f32> = (0..cols)
+                    .map(|_| f32::from_bits(u32::from(bf16_bits(&mut rng)) << 16 | (rng.next() >> 48) as u32))
+                    .collect();
+                let want: Vec<f32> = w.chunks(cols).map(|row| bf16::reference(row, &x)).collect();
+                let mut got = vec![f32::NAN; rows];
+                bf16::triples(&w, &x, &mut got);
+                for (r, (g, want)) in got.iter().zip(&want).enumerate() {
+                    assert_eq!(g.to_bits(), want.to_bits(), "{rows} rows of {cols}, trial {trial}, row {r}");
+                }
+            }
+        }
+    }
+}

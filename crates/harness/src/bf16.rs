@@ -46,10 +46,23 @@ unsafe extern "sysv64" fn ahead512_t1(
     blocks: usize,
 );
 
+#[kgen_macros::kernel(bf16_triples(ahead = 2048))]
+unsafe extern "sysv64" fn triples_ahead2048(
+    w: *const u16,
+    x: *const f32,
+    out: *mut f32,
+    triples: usize,
+    stride: usize,
+    blocks: usize,
+);
+
 /// Every kernel, by name: `aheadN` asks for each row's line `N` bytes on, into L1 or, with
 /// `t1`, L2.
 pub const KERNELS: [(&str, Kernel); 4] =
     [("plain", plain), ("ahead512", ahead512), ("ahead1024", ahead1024), ("ahead512-t1", ahead512_t1)];
+
+/// Three-row kernel with its rows asked for 2048 bytes ahead.
+pub const TRIPLES: Kernel = triples_ahead2048;
 
 /// `kernel` on the rows of `w`, `x.len()` values each, into `out`, checked: whole blocks of 32,
 /// a whole number of pairs of rows, one output a row, a CPU that runs it.
@@ -63,6 +76,16 @@ pub fn rows(kernel: Kernel, w: &[u16], x: &[f32], out: &mut [f32]) {
     // values of `x`, and writes `out.len()` floats: all checked above. What it prefetches past
     // the rows it never reads.
     unsafe { kernel(w.as_ptr(), x.as_ptr(), out.as_mut_ptr(), out.len() / 2, 2 * cols, cols / 32) }
+}
+
+/// Three rows per call, with the same argument checks as [`rows`].
+pub fn triples(w: &[u16], x: &[f32], out: &mut [f32]) {
+    let cols = x.len();
+    assert!(cols > 0 && cols.is_multiple_of(32), "whole blocks of 32");
+    assert_eq!(w.len(), out.len() * cols, "one output a row");
+    assert!(out.len() >= 3 && out.len().is_multiple_of(3), "whole triples");
+    assert!(supported(), "AVX2, FMA and F16C");
+    unsafe { TRIPLES(w.as_ptr(), x.as_ptr(), out.as_mut_ptr(), out.len() / 3, 2 * cols, cols / 32) }
 }
 
 /// What the kernels compute for one row, one operation at a time in their order.
