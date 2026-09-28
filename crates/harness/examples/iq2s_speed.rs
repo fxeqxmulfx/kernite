@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use kgen_harness::Block;
 use kgen_harness::iq2_s::{self, SUPERBLOCK};
-use kgen_harness::iq2_s_packed;
+use kgen_harness::{iq2_s_nibble, iq2_s_packed, iq2_s_planes};
 
 fn env<T: std::str::FromStr>(name: &str, fallback: T) -> T {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(fallback)
@@ -22,6 +22,12 @@ fn main() {
     if only == "?" {
         for (name, _) in iq2_s::KERNELS.into_iter().chain(iq2_s_packed::KERNELS) {
             println!("{name}");
+        }
+        for (name, _) in iq2_s_nibble::KERNELS {
+            println!("nibble-{name}");
+        }
+        for (name, _) in iq2_s_planes::KERNELS {
+            println!("planes-{name}");
         }
         return;
     }
@@ -48,6 +54,8 @@ fn main() {
     let quants: Vec<Block> = (0..sbs * 8).map(|_| Block(std::array::from_fn(|_| byte() as i8))).collect();
     let scales: Vec<f32> = (0..sbs * 8).map(|i| 0.01 + i as f32 * 1e-4).collect();
     let packed = iq2_s_packed::repack(&weights);
+    let nibble = iq2_s_nibble::repack(&weights, &grid);
+    let planes = iq2_s_planes::repack(&weights, &grid);
     for (name, kernel) in iq2_s::KERNELS {
         if !only.is_empty() && name != only {
             continue;
@@ -91,5 +99,45 @@ fn main() {
             done as f64 / took / 1e9,
             took * 1e9 / (passes as f64 * rows as f64)
         );
+    }
+    for (kind, data, row_bytes, kernels, dot) in [
+        (
+            "nibble",
+            &nibble,
+            sbs * iq2_s_nibble::SUPERBLOCK,
+            &iq2_s_nibble::KERNELS[..],
+            iq2_s_nibble::dot as fn(iq2_s_nibble::Kernel, &[u8], &[Block], &[f32]) -> f32,
+        ),
+        (
+            "planes",
+            &planes,
+            sbs * iq2_s_planes::SUPERBLOCK,
+            &iq2_s_planes::KERNELS[..],
+            iq2_s_planes::dot as fn(iq2_s_planes::Kernel, &[u8], &[Block], &[f32]) -> f32,
+        ),
+    ] {
+        for &(name, kernel) in kernels {
+            let label = format!("{kind}-{name}");
+            if !only.is_empty() && label != only {
+                continue;
+            }
+            let (start, mut passes) = (Instant::now(), 0u64);
+            let mut check = 0.0f32;
+            while start.elapsed().as_secs_f64() < secs {
+                for _ in 0..64 {
+                    for row in data.chunks_exact(row_bytes) {
+                        check += dot(kernel, black_box(row), &quants, &scales);
+                    }
+                }
+                passes += 64;
+            }
+            let took = start.elapsed().as_secs_f64();
+            let done = passes * (rows * cols) as u64;
+            println!(
+                "iq2_s {label}: {cols} columns, {:.2} G weights/s, {:.1} ns a row, {done} weights (check {check})",
+                done as f64 / took / 1e9,
+                took * 1e9 / (passes as f64 * rows as f64),
+            );
+        }
     }
 }
