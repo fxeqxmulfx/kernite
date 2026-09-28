@@ -1,7 +1,7 @@
 use kgen_core::Program;
 use kgen_x86::{Addr, Asm, Gpr, Op, Ymm};
 
-use crate::lanes::lanes_summed;
+use crate::lanes::{lanes_summed, pair_sums, sum};
 
 /// The constants every group uses, in registers.
 struct Group {
@@ -119,7 +119,8 @@ pub fn iq2_xxs(ahead: usize, pairs: usize) -> Program<Op> {
             j if j < 8 => products(&mut a, &k, &r, ring[j], 0, cur, j as i32),
             j => products(&mut a, &k, &r, ring[j - 8], 1, nxt, (j - 8) as i32),
         }
-        sum(&mut a, &k, acc, ring[g], cur, g as i32);
+        a.note(format!("sum of group {g}"));
+        sum(&mut a, k.one16, acc, ring[g], cur.at(4 * g as i32));
     }
     a.add(r.row, 66);
     a.add(r.quants, 256);
@@ -134,7 +135,8 @@ pub fn iq2_xxs(ahead: usize, pairs: usize) -> Program<Op> {
         if g + ahead < 8 {
             products(&mut a, &k, &r, ring[g + ahead], 0, cur, (g + ahead) as i32);
         }
-        sum(&mut a, &k, acc, ring[g], cur, g as i32);
+        a.note(format!("sum of group {g}"));
+        sum(&mut a, k.one16, acc, ring[g], cur.at(4 * g as i32));
     }
     finish(&mut a, acc);
 
@@ -213,7 +215,7 @@ pub fn iq2_xxs2(ahead: usize) -> Program<Op> {
     for g in 0..8 {
         // The sums first: the accumulators' chains are the longest, and the oldest uop ready
         // is the one a port takes.
-        pair_sums(&mut a, &k, acc, ring[g], cur, g as i32);
+        pair_sums(&mut a, k.one16, acc, ring[g], cur, g as i32);
         if g < 8 - ahead {
             a.splice(&mut next_signs, share);
         } else {
@@ -234,7 +236,7 @@ pub fn iq2_xxs2(ahead: usize) -> Program<Op> {
 
     a.place(last);
     for g in 0..8 {
-        pair_sums(&mut a, &k, acc, ring[g], cur, g as i32);
+        pair_sums(&mut a, k.one16, acc, ring[g], cur, g as i32);
         if g + ahead < 8 {
             pair_products(&mut a, &k, &r, &ring[g + ahead], 0, cur, (g + ahead) as i32);
         }
@@ -372,20 +374,6 @@ fn pair_products(a: &mut Asm, k: &Group, r: &Row, p: &[Ymm; 2], sb: i32, from: G
     }
 }
 
-/// Group `g`'s pairs of products summed into lanes and added into each vector's accumulator at
-/// its scale, float `2g + v` of `from`.
-fn pair_sums(a: &mut Asm, k: &Group, acc: [Ymm; 2], p: [Ymm; 2], from: Gpr, g: i32) {
-    a.note(format!("sums of group {g}"));
-    for v in 0..2 {
-        let lanes = a.ymm("lanes");
-        a.vpmaddwd(lanes, p[v], k.one16);
-        a.vcvtdq2ps(lanes, lanes);
-        let scale = a.ymm("group_scale");
-        a.vbroadcastss(scale, from.at(4 * (2 * g + v as i32)));
-        a.vfmadd231ps(acc[v], lanes, scale);
-    }
-}
-
 /// Group `g` of superblock `sb` (0 this one, 1 the next): its 32 levels times its signed
 /// activations, in 16-bit pairs, into `p`. Its signs are word `g` of the second half of
 /// `from`.
@@ -428,18 +416,6 @@ fn products(a: &mut Asm, k: &Group, r: &Row, p: Ymm, sb: i32, from: Gpr, g: i32)
     a.vmovdqa(x, r.quants.at(256 * sb + 32 * g));
     a.vpsignb(x, x, signs);
     a.vpmaddubsw(p, p, x);
-}
-
-/// Group `g`'s pairs `p` summed into lanes and added into `acc` at the group's scale, float
-/// `g` of `from`.
-fn sum(a: &mut Asm, k: &Group, acc: Ymm, p: Ymm, from: Gpr, g: i32) {
-    a.note(format!("sum of group {g}"));
-    let lanes = a.ymm("lanes");
-    a.vpmaddwd(lanes, p, k.one16);
-    a.vcvtdq2ps(lanes, lanes);
-    let scale = a.ymm("group_scale");
-    a.vbroadcastss(scale, from.at(4 * g));
-    a.vfmadd231ps(acc, lanes, scale);
 }
 
 /// `hsum(acc + 0.0)`, returned.

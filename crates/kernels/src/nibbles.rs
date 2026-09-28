@@ -10,7 +10,7 @@
 use kgen_core::Program;
 use kgen_x86::{Addr, Asm, Gpr, Op, Ymm};
 
-use crate::lanes::lanes_summed;
+use crate::lanes::{lanes_summed, pair_sums, sum};
 
 /// What sets one format apart from another.
 struct Format {
@@ -236,7 +236,7 @@ fn one(f: &Format, ahead: usize) -> Program<Op> {
             j => products(&mut a, f, &k, &r, &[ring[j - 8]], 1, (j - 8) as i32),
         }
         a.note(format!("sum of group {g}"));
-        sum(&mut a, &k, acc, ring[g], cur.at(4 * g as i32));
+        sum(&mut a, k.one16, acc, ring[g], cur.at(4 * g as i32));
     }
     a.add(r.row, f.bytes);
     a.add(r.quants, 256);
@@ -252,7 +252,7 @@ fn one(f: &Format, ahead: usize) -> Program<Op> {
             products(&mut a, f, &k, &r, &[ring[g + ahead]], 0, (g + ahead) as i32);
         }
         a.note(format!("sum of group {g}"));
-        sum(&mut a, &k, acc, ring[g], cur.at(4 * g as i32));
+        sum(&mut a, k.one16, acc, ring[g], cur.at(4 * g as i32));
     }
     let result = lanes_summed(&mut a, acc);
     a.ret_f32(result);
@@ -314,7 +314,7 @@ fn two(f: &Format, ahead: usize) -> Program<Op> {
     for g in 0..8 {
         // The sums first: the accumulators' chains are the longest, and the oldest uop ready
         // is the one a port takes.
-        sums(&mut a, &k, acc, ring[g], cur, g as i32);
+        pair_sums(&mut a, k.one16, acc, ring[g], cur, g as i32);
         a.splice(&mut next_scales, share);
         match g + ahead {
             j if j < 8 => products(&mut a, f, &k, &r, &ring[j], 0, j as i32),
@@ -331,7 +331,7 @@ fn two(f: &Format, ahead: usize) -> Program<Op> {
 
     a.place(last);
     for g in 0..8 {
-        sums(&mut a, &k, acc, ring[g], cur, g as i32);
+        pair_sums(&mut a, k.one16, acc, ring[g], cur, g as i32);
         if g + ahead < 8 {
             products(&mut a, f, &k, &r, &ring[g + ahead], 0, (g + ahead) as i32);
         }
@@ -417,21 +417,5 @@ fn products(a: &mut Asm, f: &Format, k: &Group, r: &Row, p: &[Ymm], sb: i32, g: 
         a.vmovdqa(x, r.quants.at(256 * vectors * sb + 32 * (vectors * g + v as i32)));
         a.vpsignb(x, x, signed);
         a.vpmaddubsw(p, levels, x);
-    }
-}
-
-fn sum(a: &mut Asm, k: &Group, acc: Ymm, p: Ymm, scale_at: Addr) {
-    let lanes = a.ymm("lanes");
-    a.vpmaddwd(lanes, p, k.one16);
-    a.vcvtdq2ps(lanes, lanes);
-    let scale = a.ymm("group_scale");
-    a.vbroadcastss(scale, scale_at);
-    a.vfmadd231ps(acc, lanes, scale);
-}
-
-fn sums(a: &mut Asm, k: &Group, acc: [Ymm; 2], p: [Ymm; 2], from: Gpr, g: i32) {
-    a.note(format!("sums of group {g}"));
-    for v in 0..2 {
-        sum(a, k, acc[v], p[v], from.at(4 * (2 * g + v as i32)));
     }
 }

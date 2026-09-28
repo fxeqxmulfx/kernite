@@ -1,6 +1,8 @@
 use kgen_core::Program;
 use kgen_x86::{Addr, Asm, Gpr, Op, Ymm};
 
+use crate::lanes::{lanes_summed, pair_sums, sum};
+
 /// The constants every group uses, in registers.
 struct Group {
     /// Byte `l` of a word to the eight bytes of weights `8l..8l + 8`.
@@ -98,7 +100,7 @@ pub fn iq3_xxs(ahead: usize) -> Program<Op> {
     // scales, which only the next pass reads, over the rest, so that the two chains' variables
     // are not alive together.
     let steps = a.ymm("steps");
-    let mut next_signs = a.capture(|a| group_signs(a, &s, &r, 1, steps, nxt));
+    let mut next_signs = a.capture(|a| group_signs(a, &s, &r, 1, steps, nxt.at(32)));
     let mut next_scales = a.capture(|a| group_scales(a, &s, &r, steps, 1, nxt));
     let (share, scales_share) = (next_signs.len().div_ceil(8 - ahead), next_scales.len().div_ceil(ahead));
     for g in 0..8 {
@@ -111,7 +113,8 @@ pub fn iq3_xxs(ahead: usize) -> Program<Op> {
             j if j < 8 => products(&mut a, &k, &r, ring[j], 0, cur, j as i32),
             j => products(&mut a, &k, &r, ring[j - 8], 1, nxt, (j - 8) as i32),
         }
-        sum(&mut a, &k, acc, ring[g], cur, g as i32);
+        a.note(format!("sum of group {g}"));
+        sum(&mut a, k.one16, acc, ring[g], cur.at(4 * g as i32));
     }
     a.add(r.row, 98);
     a.add(r.quants, 256);
@@ -126,9 +129,11 @@ pub fn iq3_xxs(ahead: usize) -> Program<Op> {
         if g + ahead < 8 {
             products(&mut a, &k, &r, ring[g + ahead], 0, cur, (g + ahead) as i32);
         }
-        sum(&mut a, &k, acc, ring[g], cur, g as i32);
+        a.note(format!("sum of group {g}"));
+        sum(&mut a, k.one16, acc, ring[g], cur.at(4 * g as i32));
     }
-    finish(&mut a, acc);
+    let result = lanes_summed(&mut a, acc);
+    a.ret_f32(result);
 
     a.place(empty);
     let nothing = a.ymm("nothing");
@@ -137,20 +142,129 @@ pub fn iq3_xxs(ahead: usize) -> Program<Op> {
     a.finish()
 }
 
+/// An `IQ3_XXS` row against two activation vectors, each group's grid rows and signs decoded
+/// once for both:
+///
+/// `fn(row: *const u8, sbs: usize, quants: *const i8, scales: *const f32, grid: *const u32, out: *mut f32)`
+///
+/// The vectors lie block by block together, the way a group of two is stored: block `b` of the
+/// first, then block `b` of the second, and their scales the same way. `out` gets the two dots,
+/// each the bits [`iq3_xxs`] makes of its vector alone. A slot half holds a superblock's sixteen
+/// scales, float `2g + v` for group `g` and vector `v`, then its eight words of signs.
+pub fn iq3_xxs2(ahead: usize) -> Program<Op> {
+    assert!((1..8).contains(&ahead), "ahead {ahead}");
+    let mut a = Asm::new(format!("iq3_xxs2_ahead{ahead}"));
+    let row = a.param("row");
+    let n = a.param("sbs");
+    let quants = a.param("quants");
+    let scales = a.param("scales");
+    let grid = a.param("grid");
+    let out = a.param("out");
+    let r = Row { row, quants, scales, grid };
+    let (empty, top, last) = (a.label(), a.label(), a.label());
+    a.test(n, n);
+    a.jz(empty);
+
+    a.note("constants");
+    let spread: Vec<u8> = (0..32).map(|j| j / 8).collect();
+    let (spread_at, bit_at) = (a.u8s(&spread), a.u64s(&[0x8040_2010_0804_0201]));
+    let (max8_at, one16_at) = (a.u32s(&[0x7F7F_7F7F]), a.u32s(&[0x0001_0001]));
+    let k = Group { spread: a.ymm("spread"), bit: a.ymm("bit"), max8: a.ymm("max8"), one16: a.ymm("one16") };
+    a.vmovdqa(k.spread, spread_at);
+    a.vpbroadcastq(k.bit, bit_at);
+    a.vpbroadcastd(k.max8, max8_at);
+    a.vpbroadcastd(k.one16, one16_at);
+    let s = Superblock {
+        fields: [0x7F, 0x7F00, 0x7F_0000, 0x7F00_0000].map(|m| a.u32s(&[m; 8])),
+        tops: a.u32s(&[0x8080_8080; 8]),
+        one: a.u32s(&[1; 8]),
+        one_fourth: a.f32s(&[0.25; 8]),
+    };
+    let acc = [a.ymm("acc0"), a.ymm("acc1")];
+    for v in acc {
+        a.zero(v);
+    }
+    // Aligned to its whole size: the two halves trade places by flipping one address bit.
+    let slot = a.slot(256, 256);
+    let (cur, nxt) = (a.gpr("cur"), a.gpr("nxt"));
+    a.lea(cur, slot.at(0));
+    a.lea(nxt, slot.at(128));
+
+    let ring: [[Ymm; 2]; 8] = std::array::from_fn(|g| [a.ymm(format!("p{g}a")), a.ymm(format!("p{g}b"))]);
+    let steps = a.ymm("steps");
+    group_signs(&mut a, &s, &r, 0, steps, cur.at(64));
+    pair_scales(&mut a, &s, &r, steps, 0, cur);
+    for (g, p) in ring.iter().enumerate().take(ahead) {
+        pair_products(&mut a, &k, &r, p, 0, cur, g as i32);
+    }
+    a.dec(n);
+    a.jz(last);
+
+    a.place(top);
+    // As in [`iq3_xxs`]: the next superblock's signs over the groups before the first that reads
+    // them, its scales over the rest.
+    let steps = a.ymm("steps");
+    let mut next_signs = a.capture(|a| group_signs(a, &s, &r, 1, steps, nxt.at(64)));
+    let mut next_scales = a.capture(|a| pair_scales(a, &s, &r, steps, 1, nxt));
+    let (share, scales_share) = (next_signs.len().div_ceil(8 - ahead), next_scales.len().div_ceil(ahead));
+    for g in 0..8 {
+        // The sums first: the accumulators' chains are the longest, and the oldest uop ready
+        // is the one a port takes.
+        pair_sums(&mut a, k.one16, acc, ring[g], cur, g as i32);
+        if g < 8 - ahead {
+            a.splice(&mut next_signs, share);
+        } else {
+            a.splice(&mut next_scales, scales_share);
+        }
+        match g + ahead {
+            j if j < 8 => pair_products(&mut a, &k, &r, &ring[j], 0, cur, j as i32),
+            j => pair_products(&mut a, &k, &r, &ring[j - 8], 1, nxt, (j - 8) as i32),
+        }
+    }
+    a.add(r.row, 98);
+    a.add(r.quants, 512);
+    a.add(r.scales, 64);
+    a.xor(cur, 128);
+    a.xor(nxt, 128);
+    a.dec(n);
+    a.jnz(top);
+
+    a.place(last);
+    for g in 0..8 {
+        pair_sums(&mut a, k.one16, acc, ring[g], cur, g as i32);
+        if g + ahead < 8 {
+            pair_products(&mut a, &k, &r, &ring[g + ahead], 0, cur, (g + ahead) as i32);
+        }
+    }
+    for (v, acc) in acc.into_iter().enumerate() {
+        let result = lanes_summed(&mut a, acc);
+        a.store_vmovss(out.at(4 * v as i32), result);
+    }
+    a.ret();
+
+    a.place(empty);
+    let nothing = a.ymm("nothing");
+    a.zero(nothing);
+    a.store_vmovss(out.at(0), nothing.xmm());
+    a.store_vmovss(out.at(4), nothing.xmm());
+    a.ret();
+    a.finish()
+}
+
 /// Superblock `sb` (0 this one, 1 the next)'s eight words of signs and eight group scales,
 /// times the activations', to the 64 bytes at `to`.
 fn prepare(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr) {
     let steps = a.ymm("steps");
-    group_signs(a, s, r, sb, steps, to);
+    group_signs(a, s, r, sb, steps, to.at(32));
     group_scales(a, s, r, steps, sb, to);
 }
 
-/// Superblock `sb`'s eight words of signs, to the 32 bytes at `to + 32`, and `steps` of its
-/// group scales.
+/// Superblock `sb`'s eight words of signs, to the 32 bytes at `to`, and `steps` of its group
+/// scales.
 ///
 /// Each group's word at `row + 66 + 4*g` holds its scale in the top nibble and four
 /// 7-bit fields of signs below. `(w >> 27) | 1` is `2 * (w >> 28) + 1`, the odd step.
-fn group_signs(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, steps: Ymm, to: Gpr) {
+fn group_signs(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, steps: Ymm, to: Addr) {
     a.note(format!("signs of superblock +{sb}"));
     let (at, w) = (98 * sb, a.ymm("words"));
     a.vmovdqu(w, r.row.at(at + 66));
@@ -178,7 +292,7 @@ fn group_signs(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, steps: Ymm, to: Gp
     a.vpxor(z, z, t);
     a.vpand(z, z, s.tops);
     a.vpor(y, y, z);
-    a.store_vmovdqa(to.at(32), y);
+    a.store_vmovdqa(to, y);
 }
 
 /// Superblock `sb`'s eight group scales, from `steps` of them, times the activations', to the
@@ -195,6 +309,55 @@ fn group_scales(a: &mut Asm, s: &Superblock, r: &Row, steps: Ymm, sb: i32, to: G
     a.vmulps(scale, scale, s.one_fourth);
     a.vmulps(scale, scale, r.scales.at(32 * sb));
     a.store_vmovaps(to.at(0), scale);
+}
+
+/// Superblock `sb`'s group scales, from `steps` of them, times each vector's, to the 64 bytes
+/// at `to`: float `2g + v` for group `g` and vector `v`, each rounded as [`group_scales`]
+/// rounds it for one vector.
+fn pair_scales(a: &mut Asm, s: &Superblock, r: &Row, steps: Ymm, sb: i32, to: Gpr) {
+    a.note(format!("pair scales of superblock +{sb}"));
+    let d = a.ymm("d");
+    a.vpbroadcastw(d.xmm(), r.row.at(98 * sb));
+    a.vcvtph2ps(d, d.xmm());
+    let scale = a.ymm("scale");
+    a.vpor(scale, steps, s.one);
+    a.vcvtdq2ps(scale, scale);
+    a.vmulps(scale, d, scale);
+    a.vmulps(scale, scale, s.one_fourth);
+    // Groups 0, 1, 4, 5, 2, 3, 6, 7, so that `vshufps` pairs up each lane's first two, or its
+    // last two, in group order: groups 0-3 each twice, then 4-7.
+    a.vpermq(scale, scale, 0xd8);
+    for (half, control) in [(0, 0x50), (1, 0xfa)] {
+        let pair = a.ymm("pair_scale");
+        a.vshufps(pair, scale, scale, control);
+        a.vmulps(pair, pair, r.scales.at(64 * sb + 32 * half));
+        a.store_vmovaps(to.at(32 * half), pair);
+    }
+}
+
+/// Group `g` of superblock `sb`: its grid rows, with one gather, and its signs once, then each
+/// vector's signed activations times the levels, in 16-bit pairs, into `p[v]`. Its signs are
+/// word `g` of the 32 bytes at `from + 64`.
+#[allow(clippy::too_many_arguments)]
+fn pair_products(a: &mut Asm, k: &Group, r: &Row, p: &[Ymm; 2], sb: i32, from: Gpr, g: i32) {
+    a.note(format!("products of group {g} of superblock +{sb}"));
+    let at = 98 * sb + 2 + 8 * g;
+    let (index, mask, levels) = (a.ymm("indices"), a.ymm("gather_mask"), a.ymm("levels"));
+    a.vpmovzxbd(index, r.row.at(at));
+    a.ones(mask);
+    a.zero(levels);
+    a.vpgatherdd(levels, r.grid.at(0).index_ymm(index, 4), mask);
+    let signs = a.ymm("signs");
+    a.vpbroadcastd(signs, from.at(64 + 4 * g));
+    a.vpshufb(signs, signs, k.spread);
+    a.vpand(signs, signs, k.bit);
+    a.vpaddb(signs, signs, k.max8);
+    for (v, &p) in p.iter().enumerate() {
+        let x = a.ymm("x");
+        a.vmovdqa(x, r.quants.at(512 * sb + 32 * (2 * g + v as i32)));
+        a.vpsignb(x, x, signs);
+        a.vpmaddubsw(p, levels, x);
+    }
 }
 
 /// Group `g` of superblock `sb` (0 this one, 1 the next): its 32 levels times its signed
@@ -221,35 +384,4 @@ fn products(a: &mut Asm, k: &Group, r: &Row, p: Ymm, sb: i32, from: Gpr, g: i32)
     a.vmovdqa(x, r.quants.at(256 * sb + 32 * g));
     a.vpsignb(x, x, signs);
     a.vpmaddubsw(p, p, x);
-}
-
-/// Group `g`'s pairs `p` summed into lanes and added into `acc` at the group's scale, float
-/// `g` of `from`.
-fn sum(a: &mut Asm, k: &Group, acc: Ymm, p: Ymm, from: Gpr, g: i32) {
-    a.note(format!("sum of group {g}"));
-    let lanes = a.ymm("lanes");
-    a.vpmaddwd(lanes, p, k.one16);
-    a.vcvtdq2ps(lanes, lanes);
-    let scale = a.ymm("group_scale");
-    a.vbroadcastss(scale, from.at(4 * g));
-    a.vfmadd231ps(acc, lanes, scale);
-}
-
-/// `hsum(acc + 0.0)`, returned.
-fn finish(a: &mut Asm, acc: Ymm) {
-    a.note("the lanes summed");
-    let zero = a.ymm("zero");
-    a.zero(zero);
-    a.vaddps(acc, acc, zero);
-    let high = a.ymm("high");
-    a.vextractf128(high.xmm(), acc, 1);
-    let sum = a.ymm("sum");
-    a.vaddps(sum.xmm(), acc.xmm(), high.xmm());
-    let pair = a.ymm("pair");
-    a.vmovhlps(pair.xmm(), sum.xmm(), sum.xmm());
-    a.vaddps(sum.xmm(), sum.xmm(), pair.xmm());
-    a.vmovshdup(pair.xmm(), sum.xmm());
-    let result = a.ymm("result");
-    a.vaddss(result.xmm(), sum.xmm(), pair.xmm());
-    a.ret_f32(result.xmm());
 }

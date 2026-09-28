@@ -491,6 +491,56 @@ fn iq3_xxs_matches_its_reference_to_the_bit() {
 }
 
 #[test]
+fn iq3_xxs_pairs_match_the_reference_to_the_bit_for_each_vector() {
+    if !supported() {
+        eprintln!("skipped: no AVX2, FMA or F16C");
+        return;
+    }
+    let mut rng = Rng(0x5a1c_e290_73bd_f846);
+    let mut checked = 0;
+    for wild in [false, true] {
+        let grid: [u32; 256] = std::array::from_fn(|_| {
+            u32::from_le_bytes(std::array::from_fn(|_| {
+                if wild { rng.byte() } else { [4, 12, 20, 28, 36, 44, 52, 62][(rng.next() % 8) as usize] }
+            }))
+        });
+        for sbs in [0, 1, 2, 3, 4, 5, 8, 10] {
+            for trial in 0..40 {
+                let mut row = vec![0u8; sbs * iq3_xxs::SUPERBLOCK];
+                for blk in row.as_chunks_mut::<{ iq3_xxs::SUPERBLOCK }>().0 {
+                    blk[..2].copy_from_slice(&finite_half(&mut rng).to_le_bytes());
+                    for b in &mut blk[2..] {
+                        *b = rng.byte();
+                    }
+                }
+                let (q0, s0) = activations(&mut rng, sbs * 8);
+                let (q1, s1) = activations(&mut rng, sbs * 8);
+                let want = [iq3_xxs::reference(&row, &q0, &s0, &grid), iq3_xxs::reference(&row, &q1, &s1, &grid)];
+                let quants = kgen_harness::interleave(&q0, &q1);
+                let scales = kgen_harness::interleave(&s0, &s1);
+                for (name, kernel) in iq3_xxs::PAIRS {
+                    // Its frame is aligned inside, whatever the caller's stack: called from a few
+                    // depths, it has to be right from each.
+                    let mut got = [0.0; 2];
+                    at_depth(trial % 8, &mut || got = iq3_xxs::dot2(kernel, &row, &quants, &scales, &grid));
+                    for v in 0..2 {
+                        assert_eq!(
+                            got[v].to_bits(),
+                            want[v].to_bits(),
+                            "IQ3_XXS {name}, vector {v}, {sbs} superblocks, trial {trial}, wild grid {wild}: {} against {}",
+                            got[v],
+                            want[v]
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 2 * 8 * 40 * iq3_xxs::PAIRS.len());
+}
+
+#[test]
 fn iq3_s_matches_its_reference_to_the_bit() {
     if !supported() {
         eprintln!("skipped: no AVX2, FMA or F16C");

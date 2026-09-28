@@ -1,4 +1,5 @@
-//! Compare IQ3_XXS's grid row with its one-time nibble repack on the same data.
+//! Compare IQ3_XXS's grid row with its one-time nibble repack on the same data, for one vector
+//! and for two.
 //! Run through `./make.py speed SPEED_EXAMPLE=iq3xxs_speed` for a quiet, pinned core.
 
 use std::hint::black_box;
@@ -38,6 +39,9 @@ fn main() {
     let only = std::env::var("KERNEL").unwrap_or_default();
     if only == "?" {
         for (name, _) in iq3_xxs::KERNELS {
+            println!("grid-{name}");
+        }
+        for (name, _) in iq3_xxs::PAIRS {
             println!("grid-{name}");
         }
         for (name, _) in iq3_xxs_nibble::KERNELS {
@@ -84,6 +88,24 @@ fn main() {
     }
     let pair_quants = kgen_harness::interleave(&quants, &quants.iter().rev().copied().collect::<Vec<_>>());
     let pair_scales = kgen_harness::interleave(&scales, &scales.iter().rev().copied().collect::<Vec<_>>());
+    for (name, kernel) in iq3_xxs::PAIRS {
+        let label = format!("grid-{name}");
+        if !only.is_empty() && only != label {
+            continue;
+        }
+        let start = Instant::now();
+        let (mut passes, mut check) = (0u64, 0.0f32);
+        while start.elapsed().as_secs_f64() < secs {
+            for _ in 0..64 {
+                for row in original.chunks_exact(sbs * iq3_xxs::SUPERBLOCK) {
+                    let [a, b] = iq3_xxs::dot2(kernel, black_box(row), &pair_quants, &pair_scales, &grid);
+                    check += a + b;
+                }
+            }
+            passes += 64;
+        }
+        report(&label, rows, cols, passes, start.elapsed().as_secs_f64(), check);
+    }
     for (name, kernel) in iq3_xxs_nibble::PAIRS {
         let label = format!("nibble-{name}");
         if !only.is_empty() && only != label {
