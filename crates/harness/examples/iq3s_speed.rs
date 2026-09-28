@@ -83,8 +83,8 @@ fn main() {
         }
         report(&label, rows, cols, passes, start.elapsed().as_secs_f64(), check);
     }
-    let pair_quants = iq3_s_nibble::interleave(&quants, &quants.iter().rev().copied().collect::<Vec<_>>());
-    let pair_scales = iq3_s_nibble::interleave(&scales, &scales.iter().rev().copied().collect::<Vec<_>>());
+    let pair_quants = kgen_harness::interleave(&quants, &quants.iter().rev().copied().collect::<Vec<_>>());
+    let pair_scales = kgen_harness::interleave(&scales, &scales.iter().rev().copied().collect::<Vec<_>>());
     for (name, kernel) in iq3_s_nibble::PAIRS {
         let label = format!("nibble-{name}");
         if !only.is_empty() && only != label {

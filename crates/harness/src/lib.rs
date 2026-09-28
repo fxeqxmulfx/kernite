@@ -13,6 +13,7 @@ pub mod iq3_s_nibble;
 pub mod iq3_xxs;
 pub mod iq3_xxs_nibble;
 pub mod iq4_nl;
+pub mod iq4_xs;
 pub mod q6_k;
 
 /// 32 activation quants, aligned as the kernels load them.
@@ -32,6 +33,13 @@ pub fn half(bits: u16) -> f32 {
         _ => f32::from_bits((exp + 112) << 23 | man << 13),
     };
     if negative { -magnitude } else { magnitude }
+}
+
+/// Two vectors' blocks, or block scales, stored together as a group of two keeps them: block
+/// `b` of `first`, then of `second`, then block `b + 1` of each.
+pub fn interleave<T: Copy>(first: &[T], second: &[T]) -> Vec<T> {
+    assert_eq!(first.len(), second.len(), "vectors of one length");
+    first.iter().zip(second).flat_map(|(&a, &b)| [a, b]).collect()
 }
 
 /// Whether this CPU runs the kernels: they are AVX2, FMA and F16C code.

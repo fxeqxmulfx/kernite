@@ -46,7 +46,7 @@ pub const PAIRS: [(&str, Pair); 3] =
     [("pair-ahead1", pair_ahead1), ("pair-ahead2", pair_ahead2), ("pair-ahead3", pair_ahead3)];
 
 /// Run a two-vector kernel on checked slices, which hold both vectors' activations as
-/// [`interleave`] lays them out.
+/// [`crate::interleave`] lays them out.
 pub fn dot2(kernel: Pair, row: &[u8], quants: &[Block], scales: &[f32]) -> [f32; 2] {
     assert_eq!(row.len() % SUPERBLOCK, 0, "whole superblocks");
     let sbs = row.len() / SUPERBLOCK;
@@ -55,13 +55,6 @@ pub fn dot2(kernel: Pair, row: &[u8], quants: &[Block], scales: &[f32]) -> [f32;
     let mut out = [0.0; 2];
     unsafe { kernel(row.as_ptr(), sbs, quants.as_ptr().cast(), scales.as_ptr(), out.as_mut_ptr()) };
     out
-}
-
-/// Two vectors' blocks, or block scales, stored together: block `b` of `first`, then of
-/// `second`, then block `b + 1` of each.
-pub fn interleave<T: Copy>(first: &[T], second: &[T]) -> Vec<T> {
-    assert_eq!(first.len(), second.len(), "vectors of one length");
-    first.iter().zip(second).flat_map(|(&a, &b)| [a, b]).collect()
 }
 
 /// Repack the original IQ3_S row once, keeping its half and four scale bytes. Each

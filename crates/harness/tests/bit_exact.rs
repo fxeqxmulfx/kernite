@@ -12,6 +12,7 @@ use kgen_harness::iq3_s_nibble;
 use kgen_harness::iq3_xxs;
 use kgen_harness::iq3_xxs_nibble;
 use kgen_harness::iq4_nl;
+use kgen_harness::iq4_xs;
 use kgen_harness::q6_k;
 use kgen_harness::{Block, supported};
 
@@ -449,8 +450,8 @@ fn iq3_s_nibble_pairs_match_the_original_row_to_the_bit_for_each_vector() {
                     .collect();
                 (quants, scales)
             });
-            let quants = iq3_s_nibble::interleave(&vectors[0].0, &vectors[1].0);
-            let scales = iq3_s_nibble::interleave(&vectors[0].1, &vectors[1].1);
+            let quants = kgen_harness::interleave(&vectors[0].0, &vectors[1].0);
+            let scales = kgen_harness::interleave(&vectors[0].1, &vectors[1].1);
             let want = vectors.each_ref().map(|(q, s)| iq3_s::reference(&original, q, s, &grid));
             for (name, kernel) in iq3_s_nibble::PAIRS {
                 // Its frame is aligned inside, whatever the caller's stack: called from a few
@@ -471,6 +472,95 @@ fn iq3_s_nibble_pairs_match_the_original_row_to_the_bit_for_each_vector() {
         }
     }
     assert_eq!(checked, 8 * 60 * iq3_s_nibble::PAIRS.len());
+}
+
+/// Random IQ4_XS superblocks with finite halves, and a vector's activations for them.
+fn iq4_xs_case(rng: &mut Rng, sbs: usize) -> (Vec<u8>, Vec<Block>, Vec<f32>) {
+    let mut row = vec![0u8; sbs * iq4_xs::SUPERBLOCK];
+    for blk in row.as_chunks_mut::<{ iq4_xs::SUPERBLOCK }>().0 {
+        blk[..2].copy_from_slice(&finite_half(rng).to_le_bytes());
+        for b in &mut blk[2..] {
+            *b = rng.byte();
+        }
+    }
+    let (quants, scales) = activations(rng, sbs * 8);
+    (row, quants, scales)
+}
+
+/// `blocks` random activation blocks, and scales across twenty binades of either sign.
+fn activations(rng: &mut Rng, blocks: usize) -> (Vec<Block>, Vec<f32>) {
+    let quants = (0..blocks).map(|_| Block(std::array::from_fn(|_| rng.byte() as i8))).collect();
+    let scales = (0..blocks)
+        .map(|_| {
+            let unit = (rng.next() >> 40) as f32 / (1u64 << 24) as f32 - 0.5;
+            unit * 2f32.powi((rng.next() % 21) as i32 - 10)
+        })
+        .collect();
+    (quants, scales)
+}
+
+#[test]
+fn iq4_xs_rows_match_the_original_kernel_to_the_bit() {
+    if !supported() {
+        eprintln!("skipped: no AVX2, FMA or F16C");
+        return;
+    }
+    let mut rng = Rng(0x3c7e_19a4_d250_8b61);
+    let mut checked = 0;
+    for sbs in [0, 1, 2, 3, 4, 5, 8, 10] {
+        for trial in 0..60 {
+            let (row, quants, scales) = iq4_xs_case(&mut rng, sbs);
+            let want = iq4_xs::reference(&row, &quants, &scales);
+            for (name, kernel) in iq4_xs::KERNELS {
+                let got = iq4_xs::dot(kernel, &row, &quants, &scales);
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "IQ4_XS {name}, {sbs} superblocks, trial {trial}: {got} against {want}"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 8 * 60 * iq4_xs::KERNELS.len());
+}
+
+#[test]
+fn iq4_xs_pairs_match_the_original_kernel_to_the_bit_for_each_vector() {
+    if !supported() {
+        eprintln!("skipped: no AVX2, FMA or F16C");
+        return;
+    }
+    let mut rng = Rng(0x8d05_f3b2_6e19_c47a);
+    let mut checked = 0;
+    for sbs in [0, 1, 2, 3, 4, 5, 8, 10] {
+        for trial in 0..60 {
+            let (row, first_quants, first_scales) = iq4_xs_case(&mut rng, sbs);
+            let (second_quants, second_scales) = activations(&mut rng, sbs * 8);
+            let quants = kgen_harness::interleave(&first_quants, &second_quants);
+            let scales = kgen_harness::interleave(&first_scales, &second_scales);
+            let want = [
+                iq4_xs::reference(&row, &first_quants, &first_scales),
+                iq4_xs::reference(&row, &second_quants, &second_scales),
+            ];
+            for (name, kernel) in iq4_xs::PAIRS {
+                // Called from a few depths, as the IQ3_S pairs are: its frame is aligned inside.
+                let mut got = [0.0; 2];
+                at_depth(trial % 8, &mut || got = iq4_xs::dot2(kernel, &row, &quants, &scales));
+                for v in 0..2 {
+                    assert_eq!(
+                        got[v].to_bits(),
+                        want[v].to_bits(),
+                        "IQ4_XS {name}, vector {v}, {sbs} superblocks, trial {trial}: {} against {}",
+                        got[v],
+                        want[v]
+                    );
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 8 * 60 * iq4_xs::PAIRS.len());
 }
 
 #[test]
