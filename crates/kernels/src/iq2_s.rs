@@ -63,8 +63,24 @@ pub fn iq2_xs_packed(ahead: usize) -> Program<Op> {
 /// the first, then block `b` of the second, and their scales the same way. `out` gets the two
 /// dots, each the bits [`iq2_s_packed`] makes of its vector alone.
 pub fn iq2_s_packed2(ahead: usize) -> Program<Op> {
+    build_pair(ahead, IndexMode::Packed)
+}
+
+/// IQ2_XS packed as for [`iq2_xs_packed`], against two activation vectors laid out as
+/// [`iq2_s_packed2`] takes them. `out` gets the two dots, each the bits [`iq2_xs_packed`] makes
+/// of its vector alone.
+pub fn iq2_xs_packed2(ahead: usize) -> Program<Op> {
+    build_pair(ahead, IndexMode::XsPacked)
+}
+
+fn build_pair(ahead: usize, mode: IndexMode) -> Program<Op> {
     assert!((1..8).contains(&ahead), "ahead {ahead}");
-    let mut a = Asm::new(format!("iq2_s_packed2_ahead{ahead}"));
+    let name = match mode {
+        IndexMode::Packed => format!("iq2_s_packed2_ahead{ahead}"),
+        IndexMode::XsPacked => format!("iq2_xs_packed2_ahead{ahead}"),
+        IndexMode::Original | IndexMode::Gather => unreachable!("pairs read packed indices"),
+    };
+    let mut a = Asm::new(name);
     let row = a.param("row");
     let n = a.param("sbs");
     let quants = a.param("quants");
@@ -97,15 +113,15 @@ pub fn iq2_s_packed2(ahead: usize) -> Program<Op> {
     a.lea(nxt, slot.at(128));
 
     let ring: [[Ymm; 2]; 8] = std::array::from_fn(|g| [a.ymm(format!("p{g}a")), a.ymm(format!("p{g}b"))]);
-    pair_scales(&mut a, &s, &r, 0, cur);
+    pair_scales(&mut a, &s, &r, 0, cur, mode);
     for (g, p) in ring.iter().enumerate().take(ahead) {
-        pair_products(&mut a, &k, &r, p, 0, g as i32);
+        pair_products(&mut a, &k, &r, p, 0, g as i32, mode);
     }
     a.dec(n);
     a.jz(last);
 
     a.place(top);
-    let mut next_scales = a.capture(|a| pair_scales(a, &s, &r, 1, nxt));
+    let mut next_scales = a.capture(|a| pair_scales(a, &s, &r, 1, nxt, mode));
     let share = next_scales.len().div_ceil(8);
     for g in 0..8 {
         // The sums first: the accumulators' chains are the longest, and the oldest uop ready
@@ -113,11 +129,11 @@ pub fn iq2_s_packed2(ahead: usize) -> Program<Op> {
         pair_sums(&mut a, &k, acc, ring[g], cur, g as i32);
         a.splice(&mut next_scales, share);
         match g + ahead {
-            j if j < 8 => pair_products(&mut a, &k, &r, &ring[j], 0, j as i32),
-            j => pair_products(&mut a, &k, &r, &ring[j - 8], 1, (j - 8) as i32),
+            j if j < 8 => pair_products(&mut a, &k, &r, &ring[j], 0, j as i32, mode),
+            j => pair_products(&mut a, &k, &r, &ring[j - 8], 1, (j - 8) as i32, mode),
         }
     }
-    a.add(r.row, 82);
+    a.add(r.row, mode.stride());
     a.add(r.quants, 512);
     a.add(r.scales, 64);
     a.xor(cur, 128);
@@ -129,7 +145,7 @@ pub fn iq2_s_packed2(ahead: usize) -> Program<Op> {
     for g in 0..8 {
         pair_sums(&mut a, &k, acc, ring[g], cur, g as i32);
         if g + ahead < 8 {
-            pair_products(&mut a, &k, &r, &ring[g + ahead], 0, (g + ahead) as i32);
+            pair_products(&mut a, &k, &r, &ring[g + ahead], 0, (g + ahead) as i32, mode);
         }
     }
     for (v, acc) in acc.into_iter().enumerate() {
@@ -158,6 +174,20 @@ enum IndexMode {
 impl IndexMode {
     fn stride(self) -> i32 {
         if matches!(self, Self::XsPacked) { 78 } else { 82 }
+    }
+
+    /// Where a superblock's sign bytes start.
+    fn signs_at(self) -> i32 {
+        match self {
+            Self::Packed => 42,
+            Self::XsPacked => 38,
+            Self::Original | Self::Gather => 34,
+        }
+    }
+
+    /// Where its eight scale bytes start.
+    fn scales_at(self) -> i32 {
+        if matches!(self, Self::XsPacked) { 70 } else { 74 }
     }
 }
 
@@ -253,12 +283,7 @@ fn prepare(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr, mode: IndexMo
 fn group_signs(a: &mut Asm, r: &Row, sb: i32, to: Gpr, mode: IndexMode) {
     a.note(format!("signs of superblock +{sb}"));
     let signs = a.ymm("packed_signs");
-    let at = match mode {
-        IndexMode::Packed => 42,
-        IndexMode::XsPacked => 38,
-        _ => 34,
-    };
-    a.vmovdqu(signs, r.row.at(mode.stride() * sb + at));
+    a.vmovdqu(signs, r.row.at(mode.stride() * sb + mode.signs_at()));
     a.store_vmovdqa(to.at(64), signs);
 }
 
@@ -269,8 +294,7 @@ fn group_scales(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr, mode: In
     a.vpbroadcastw(d.xmm(), r.row.at(mode.stride() * sb));
     a.vcvtph2ps(d, d.xmm());
     let steps = a.ymm("steps");
-    let scales_at = if matches!(mode, IndexMode::XsPacked) { 70 } else { 74 };
-    a.vpmovzxbd(steps, r.row.at(mode.stride() * sb + scales_at));
+    a.vpmovzxbd(steps, r.row.at(mode.stride() * sb + mode.scales_at()));
     let low = a.ymm("low_scales");
     let high = a.ymm("high_scales");
     a.vpand(low, steps, s.nibble);
@@ -309,23 +333,7 @@ fn products(a: &mut Asm, k: &Group, r: &Row, p: Ymm, sb: i32, from: Gpr, g: i32,
     } else {
         let index: [Gpr; 4] = std::array::from_fn(|l| a.gpr(format!("index{l}")));
         if matches!(mode, IndexMode::Packed | IndexMode::XsPacked) {
-            let bits = a.gpr("packed_indices");
-            let (at, width) = if matches!(mode, IndexMode::XsPacked) {
-                (78 * sb + 2 + 9 * (g / 2) + 4 * (g % 2), 9)
-            } else {
-                (82 * sb + 2 + 5 * g, 10)
-            };
-            a.load_u64(bits, r.row.at(at));
-            if width == 9 && g % 2 != 0 {
-                a.shr(bits, 4);
-            }
-            for (l, &i) in index.iter().enumerate() {
-                a.mov(i, bits);
-                if l != 0 {
-                    a.shr(i, (width * l as i32) as u8);
-                }
-                a.and(i, (1 << width) - 1);
-            }
+            packed_indices(a, r, &index, sb, g, mode);
         } else {
             let high = a.gpr("high_index_bits");
             a.movzx_byte(high, r.row.at(82 * sb + 66 + g));
@@ -393,13 +401,13 @@ fn finish(a: &mut Asm, acc: Ymm) {
 /// Superblock `+sb`'s group scales times each vector's, in pairs: the low halves' to the 64
 /// bytes at `to`, float `2g + v` for group `g` and vector `v`, and the high halves' to the 64
 /// after. Each is rounded as [`group_scales`] rounds it for one vector.
-fn pair_scales(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr) {
+fn pair_scales(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr, mode: IndexMode) {
     a.note(format!("pair scales of superblock +{sb}"));
     let d = a.ymm("d");
-    a.vpbroadcastw(d.xmm(), r.row.at(82 * sb));
+    a.vpbroadcastw(d.xmm(), r.row.at(mode.stride() * sb));
     a.vcvtph2ps(d, d.xmm());
     let steps = a.ymm("steps");
-    a.vpmovzxbd(steps, r.row.at(82 * sb + 74));
+    a.vpmovzxbd(steps, r.row.at(mode.stride() * sb + mode.scales_at()));
     // Groups 0, 1, 4, 5, 2, 3, 6, 7, so that `vshufps` pairs up each lane's first two, or its
     // last two, in group order.
     a.vpermq(steps, steps, 0xd8);
@@ -423,18 +431,11 @@ fn pair_scales(a: &mut Asm, s: &Superblock, r: &Row, sb: i32, to: Gpr) {
 
 /// Group `g` of superblock `+sb`: its grid rows and signs once, then each vector's signed
 /// activations times the levels, in saturated 16-bit pairs, into `p[v]`.
-fn pair_products(a: &mut Asm, k: &Group, r: &Row, p: &[Ymm; 2], sb: i32, g: i32) {
+#[allow(clippy::too_many_arguments)]
+fn pair_products(a: &mut Asm, k: &Group, r: &Row, p: &[Ymm; 2], sb: i32, g: i32, mode: IndexMode) {
     a.note(format!("products of group {g} of superblock +{sb}"));
     let index: [Gpr; 4] = std::array::from_fn(|l| a.gpr(format!("index{l}")));
-    let bits = a.gpr("packed_indices");
-    a.load_u64(bits, r.row.at(82 * sb + 2 + 5 * g));
-    for (l, &i) in index.iter().enumerate() {
-        a.mov(i, bits);
-        if l != 0 {
-            a.shr(i, (10 * l) as u8);
-        }
-        a.and(i, 1023);
-    }
+    packed_indices(a, r, &index, sb, g, mode);
     let grid = |i: Gpr| r.grid.at(0).index(i, 8);
     let (levels, rows) = (a.ymm("levels"), a.ymm("rows"));
     a.vmovq(levels.xmm(), grid(index[0]));
@@ -443,7 +444,7 @@ fn pair_products(a: &mut Asm, k: &Group, r: &Row, p: &[Ymm; 2], sb: i32, g: i32)
     a.vmovhps(rows.xmm(), rows.xmm(), grid(index[3]));
     a.vinserti128(levels, levels, rows.xmm(), 1);
     let signs = a.ymm("signs");
-    a.vpbroadcastd(signs, r.row.at(82 * sb + 42 + 4 * g));
+    a.vpbroadcastd(signs, r.row.at(mode.stride() * sb + mode.signs_at() + 4 * g));
     a.vpshufb(signs, signs, k.spread);
     a.vpand(signs, signs, k.bit);
     a.vpaddb(signs, signs, k.max8);
@@ -452,6 +453,28 @@ fn pair_products(a: &mut Asm, k: &Group, r: &Row, p: &[Ymm; 2], sb: i32, g: i32)
         a.vmovdqa(x, r.quants.at(512 * sb + 32 * (2 * g + v as i32)));
         a.vpsignb(x, x, signs);
         a.vpmaddubsw(p, levels, x);
+    }
+}
+
+/// Group `g` of superblock `+sb`'s four grid indices into `index`: IQ2_S's 10-bit ones five
+/// bytes a group, or IQ2_XS's 9-bit ones nine bytes a pair of groups.
+fn packed_indices(a: &mut Asm, r: &Row, index: &[Gpr; 4], sb: i32, g: i32, mode: IndexMode) {
+    let bits = a.gpr("packed_indices");
+    let (at, width) = if matches!(mode, IndexMode::XsPacked) {
+        (78 * sb + 2 + 9 * (g / 2) + 4 * (g % 2), 9)
+    } else {
+        (82 * sb + 2 + 5 * g, 10)
+    };
+    a.load_u64(bits, r.row.at(at));
+    if width == 9 && g % 2 != 0 {
+        a.shr(bits, 4);
+    }
+    for (l, &i) in index.iter().enumerate() {
+        a.mov(i, bits);
+        if l != 0 {
+            a.shr(i, (width * l as i32) as u8);
+        }
+        a.and(i, (1 << width) - 1);
     }
 }
 
