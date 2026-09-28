@@ -9,7 +9,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use kgen_harness::Block;
-use kgen_harness::iq2_xxs::{KERNELS, SUPERBLOCK, dot};
+use kgen_harness::iq2_xxs::{KERNELS, PAIRS, SUPERBLOCK, dot, dot2};
 
 fn env<T: std::str::FromStr>(name: &str, fallback: T) -> T {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(fallback)
@@ -20,6 +20,9 @@ fn main() {
     let only = std::env::var("KERNEL").unwrap_or_default();
     if only == "?" {
         for (name, _) in KERNELS {
+            println!("{name}");
+        }
+        for (name, _) in PAIRS {
             println!("{name}");
         }
         return;
@@ -56,6 +59,31 @@ fn main() {
             for _ in 0..64 {
                 for row in weights.chunks_exact(sbs * SUPERBLOCK) {
                     check += dot(kernel, black_box(row), &quants, &scales, &grid);
+                }
+            }
+            passes += 64;
+        }
+        let took = start.elapsed().as_secs_f64();
+        let done = passes * (rows * cols) as u64;
+        println!(
+            "iq2_xxs {name}: {rows} rows of {cols}, {:.2} G weights/s, {:.1} ns a row, {done} weights  (check {check})",
+            done as f64 / took / 1e9,
+            took * 1e9 / (passes as f64 * rows as f64)
+        );
+    }
+    let pair_quants = kgen_harness::interleave(&quants, &quants.iter().rev().copied().collect::<Vec<_>>());
+    let pair_scales = kgen_harness::interleave(&scales, &scales.iter().rev().copied().collect::<Vec<_>>());
+    for (name, kernel) in PAIRS {
+        if !only.is_empty() && name != only {
+            continue;
+        }
+        let (start, mut passes) = (Instant::now(), 0u64);
+        let mut check = 0.0f32;
+        while start.elapsed().as_secs_f64() < secs {
+            for _ in 0..64 {
+                for row in weights.chunks_exact(sbs * SUPERBLOCK) {
+                    let [a, b] = dot2(kernel, black_box(row), &pair_quants, &pair_scales, &grid);
+                    check += a + b;
                 }
             }
             passes += 64;

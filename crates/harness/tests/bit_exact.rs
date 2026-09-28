@@ -184,6 +184,47 @@ fn iq2_xxs_matches_its_reference_to_the_bit() {
 }
 
 #[test]
+fn iq2_xxs_pairs_match_the_reference_to_the_bit_for_each_vector() {
+    if !supported() {
+        eprintln!("skipped: no AVX2, FMA or F16C");
+        return;
+    }
+    let mut rng = Rng(0x2f6d_c1a8_94e3_5b07);
+    let mut checked = 0;
+    for wild in [false, true] {
+        let grid = grid(&mut rng, wild);
+        for sbs in [0, 1, 2, 3, 4, 5, 8, 10] {
+            for trial in 0..40 {
+                let (row, q0, s0) = case(&mut rng, sbs);
+                let (_, q1, s1) = case(&mut rng, sbs);
+                let want = [reference(&row, &q0, &s0, &grid), reference(&row, &q1, &s1, &grid)];
+                let quants = kgen_harness::interleave(&q0, &q1);
+                let scales = kgen_harness::interleave(&s0, &s1);
+                for (name, kernel) in kgen_harness::iq2_xxs::PAIRS {
+                    // Its frame is aligned inside, whatever the caller's stack: called from a few
+                    // depths, it has to be right from each.
+                    let mut got = [0.0; 2];
+                    at_depth(trial % 8, &mut || {
+                        got = kgen_harness::iq2_xxs::dot2(kernel, &row, &quants, &scales, &grid)
+                    });
+                    for v in 0..2 {
+                        assert_eq!(
+                            got[v].to_bits(),
+                            want[v].to_bits(),
+                            "IQ2_XXS {name}, vector {v}, {sbs} superblocks, trial {trial}, wild grid {wild}: {} against {}",
+                            got[v],
+                            want[v]
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 2 * 8 * 40 * kgen_harness::iq2_xxs::PAIRS.len());
+}
+
+#[test]
 fn iq2_s_matches_its_reference_to_the_bit() {
     if !supported() {
         eprintln!("skipped: no AVX2, FMA or F16C");

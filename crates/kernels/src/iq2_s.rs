@@ -1,5 +1,7 @@
 use kgen_core::Program;
-use kgen_x86::{Addr, Asm, Gpr, Op, Xmm, Ymm};
+use kgen_x86::{Addr, Asm, Gpr, Op, Ymm};
+
+use crate::lanes::lanes_summed;
 
 struct Group {
     spread: Ymm,
@@ -493,23 +495,4 @@ fn pair_sums(a: &mut Asm, k: &Group, acc: [Ymm; 2], p: [Ymm; 2], from: Gpr, g: i
         a.vpblendd(scale, low, high, 0xf0);
         a.vfmadd231ps(acc[v], lanes, scale);
     }
-}
-
-/// `hsum(acc + 0.0)`, as [`finish`] adds it, into the low lane of what it returns.
-fn lanes_summed(a: &mut Asm, acc: Ymm) -> Xmm {
-    a.note("the lanes summed");
-    let zero = a.ymm("zero");
-    a.zero(zero);
-    a.vaddps(acc, acc, zero);
-    let high = a.ymm("high");
-    a.vextractf128(high.xmm(), acc, 1);
-    let sum = a.ymm("sum");
-    a.vaddps(sum.xmm(), acc.xmm(), high.xmm());
-    let pair = a.ymm("pair");
-    a.vmovhlps(pair.xmm(), sum.xmm(), sum.xmm());
-    a.vaddps(sum.xmm(), sum.xmm(), pair.xmm());
-    a.vmovshdup(pair.xmm(), sum.xmm());
-    let result = a.ymm("result");
-    a.vaddss(result.xmm(), sum.xmm(), pair.xmm());
-    result.xmm()
 }

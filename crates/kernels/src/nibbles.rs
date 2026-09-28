@@ -8,7 +8,9 @@
 //! vector, and the same final horizontal sum.
 
 use kgen_core::Program;
-use kgen_x86::{Addr, Asm, Gpr, Op, Xmm, Ymm};
+use kgen_x86::{Addr, Asm, Gpr, Op, Ymm};
+
+use crate::lanes::lanes_summed;
 
 /// What sets one format apart from another.
 struct Format {
@@ -432,23 +434,4 @@ fn sums(a: &mut Asm, k: &Group, acc: [Ymm; 2], p: [Ymm; 2], from: Gpr, g: i32) {
     for v in 0..2 {
         sum(a, k, acc[v], p[v], from.at(4 * (2 * g + v as i32)));
     }
-}
-
-/// `acc`'s lanes added as the row kernels add them, into the low lane of what it returns.
-fn lanes_summed(a: &mut Asm, acc: Ymm) -> Xmm {
-    a.note("the lanes summed");
-    let zero = a.ymm("zero");
-    a.zero(zero);
-    a.vaddps(acc, acc, zero);
-    let high = a.ymm("high");
-    a.vextractf128(high.xmm(), acc, 1);
-    let sum = a.ymm("sum");
-    a.vaddps(sum.xmm(), acc.xmm(), high.xmm());
-    let pair = a.ymm("pair");
-    a.vmovhlps(pair.xmm(), sum.xmm(), sum.xmm());
-    a.vaddps(sum.xmm(), sum.xmm(), pair.xmm());
-    a.vmovshdup(pair.xmm(), sum.xmm());
-    let result = a.ymm("result");
-    a.vaddss(result.xmm(), sum.xmm(), pair.xmm());
-    result.xmm()
 }

@@ -70,6 +70,33 @@ pub const KERNELS: [(&str, Kernel); 6] = [
     ("ahead3-pairs2", ahead3_pairs2),
 ];
 
+/// Row, superblocks, two vectors' quants and scales stored together block by block, the grid,
+/// and the two dots' destination.
+pub type Pair = unsafe extern "sysv64" fn(*const u8, usize, *const i8, *const f32, *const u64, *mut f32);
+
+#[kgen_macros::kernel(iq2_xxs2(ahead = 1))]
+unsafe extern "sysv64" fn pair_ahead1(
+    row: *const u8,
+    sbs: usize,
+    quants: *const i8,
+    scales: *const f32,
+    grid: *const u64,
+    out: *mut f32,
+);
+
+#[kgen_macros::kernel(iq2_xxs2(ahead = 2))]
+unsafe extern "sysv64" fn pair_ahead2(
+    row: *const u8,
+    sbs: usize,
+    quants: *const i8,
+    scales: *const f32,
+    grid: *const u64,
+    out: *mut f32,
+);
+
+/// Two-vector variants to compare by name.
+pub const PAIRS: [(&str, Pair); 2] = [("pair-ahead1", pair_ahead1), ("pair-ahead2", pair_ahead2)];
+
 /// Bytes to a superblock of 256 weights.
 pub const SUPERBLOCK: usize = 66;
 
@@ -83,6 +110,18 @@ pub fn dot(kernel: Kernel, row: &[u8], quants: &[Block], scales: &[f32], grid: &
     // The kernel reads `sbs` superblocks of `row`, 8 blocks of `quants` (aligned, as `Block`
     // is) and 8 of `scales` for each, and entries of `grid` by byte: all checked above.
     unsafe { kernel(row.as_ptr(), sbs, quants.as_ptr().cast(), scales.as_ptr(), grid.as_ptr()) }
+}
+
+/// Run a two-vector kernel on checked slices, which hold both vectors' activations as
+/// [`crate::interleave`] lays them out.
+pub fn dot2(kernel: Pair, row: &[u8], quants: &[Block], scales: &[f32], grid: &[u64; 256]) -> [f32; 2] {
+    assert_eq!(row.len() % SUPERBLOCK, 0, "whole superblocks");
+    let sbs = row.len() / SUPERBLOCK;
+    assert!(quants.len() >= sbs * 16 && scales.len() >= sbs * 16, "both vectors' activations for every group");
+    assert!(supported(), "AVX2, FMA and F16C");
+    let mut out = [0.0; 2];
+    unsafe { kernel(row.as_ptr(), sbs, quants.as_ptr().cast(), scales.as_ptr(), grid.as_ptr(), out.as_mut_ptr()) };
+    out
 }
 
 /// What the kernels compute, one operation at a time in their order.
