@@ -14,10 +14,51 @@ unsafe extern "sysv64" fn generated(
     half_sums: *const f32,
 ) -> f32;
 
+#[kgen_macros::kernel(q6_k_front)]
+unsafe extern "sysv64" fn generated_front(
+    row: *const u8,
+    sbs: usize,
+    quants: *const i8,
+    scales: *const f32,
+    half_sums: *const f32,
+) -> f32;
+
 /// The generated Q6_K kernel.
 pub const KERNEL: Kernel = generated;
 /// Bytes per superblock of 256 weights.
 pub const SUPERBLOCK: usize = 210;
+/// Bytes per 256 weights after moving scales to an aligned header.
+pub const FRONT_SUPERBLOCK: usize = 224;
+
+/// Put the half scale and the sixteen signed group scales first, then the two code planes
+/// at aligned offsets. The last fourteen header bytes are padding.
+pub fn repack_front(row: &[u8]) -> Vec<u8> {
+    assert_eq!(row.len() % SUPERBLOCK, 0);
+    let mut out = vec![0u8; row.len() / SUPERBLOCK * FRONT_SUPERBLOCK];
+    for (src, dst) in row.as_chunks::<SUPERBLOCK>().0.iter().zip(out.as_chunks_mut::<FRONT_SUPERBLOCK>().0) {
+        dst[..2].copy_from_slice(&src[208..210]);
+        dst[2..18].copy_from_slice(&src[192..208]);
+        dst[32..224].copy_from_slice(&src[..192]);
+    }
+    out
+}
+
+/// Generated Q6_K kernel on the front-scale layout.
+pub fn dot_front(row: &[u8], quants: &[Block], scales: &[f32], half_sums: &[f32]) -> f32 {
+    assert_eq!(row.len() % FRONT_SUPERBLOCK, 0);
+    let blocks = row.len() / FRONT_SUPERBLOCK * 8;
+    assert!(quants.len() >= blocks && scales.len() >= blocks && half_sums.len() >= blocks * 2);
+    assert!(supported());
+    unsafe {
+        generated_front(
+            row.as_ptr(),
+            row.len() / FRONT_SUPERBLOCK,
+            quants.as_ptr().cast(),
+            scales.as_ptr(),
+            half_sums.as_ptr(),
+        )
+    }
+}
 
 /// Run the generated kernel on checked slices.
 pub fn dot(row: &[u8], quants: &[Block], scales: &[f32], half_sums: &[f32]) -> f32 {

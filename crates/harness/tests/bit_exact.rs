@@ -92,6 +92,9 @@ fn q6_k_matches_its_reference_to_the_bit() {
             let want = q6_k::reference(&row, &quants, &scales, &sums);
             let got = q6_k::dot(&row, &quants, &scales, &sums);
             assert_eq!(got.to_bits(), want.to_bits(), "{sbs} superblocks, trial {trial}: {got} versus {want}");
+            let front = q6_k::repack_front(&row);
+            let got = q6_k::dot_front(&front, &quants, &scales, &sums);
+            assert_eq!(got.to_bits(), want.to_bits(), "front {sbs} superblocks, trial {trial}: {got} versus {want}");
         }
     }
 }

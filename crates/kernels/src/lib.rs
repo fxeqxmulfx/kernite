@@ -27,6 +27,7 @@ pub use iq4_nl::iq4_nl;
 use kgen_core::Program;
 use kgen_x86::{Hint, Op};
 pub use q6_k::q6_k;
+pub use q6_k::q6_k_front;
 
 /// A kernel and its parameters.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +96,8 @@ pub enum Kernel {
     },
     /// [`q6_k`].
     Q6K,
+    /// [`q6_k_front`].
+    Q6KFront,
     /// [`bf16_pairs`].
     Bf16Pairs {
         /// Bytes ahead of each row's reads that it asks for, or none.
@@ -167,6 +170,7 @@ impl Kernel {
                 Kernel::Iq4Nl { ahead }
             }
             "q6_k" => Kernel::Q6K,
+            "q6_k_front" => Kernel::Q6KFront,
             "bf16_pairs" => {
                 let ahead = take.int("ahead", 0, 0..=4096)? as i32;
                 let hint = [Hint::T0, Hint::T1, Hint::T2, Hint::Nta][take.int("hint", 0, 0..=3)? as usize];
@@ -203,6 +207,7 @@ impl Kernel {
             Kernel::Iq3XxsNibble { ahead } => iq3_xxs_nibble(ahead),
             Kernel::Iq4Nl { ahead } => iq4_nl(ahead),
             Kernel::Q6K => q6_k(),
+            Kernel::Q6KFront => q6_k_front(),
             Kernel::Bf16Pairs { ahead, hint } => bf16_pairs(ahead, hint),
             Kernel::Bf16Triples { ahead, hint } => bf16_triples(ahead, hint),
         }
@@ -224,6 +229,7 @@ impl Kernel {
         kernels.extend((1..=3).map(|ahead| Kernel::Iq3XxsNibble { ahead }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq4Nl { ahead }));
         kernels.push(Kernel::Q6K);
+        kernels.push(Kernel::Q6KFront);
         kernels.push(Kernel::Bf16Pairs { ahead: 0, hint: Hint::T0 });
         kernels.extend(
             [(512, Hint::T0), (1024, Hint::T0), (512, Hint::T1)].map(|(ahead, hint)| Kernel::Bf16Pairs { ahead, hint }),

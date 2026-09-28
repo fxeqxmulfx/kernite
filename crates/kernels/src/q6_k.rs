@@ -8,7 +8,17 @@ use kgen_x86::{Asm, Gpr, Op, Ymm};
 /// separately from the quant products, in the same order as the original row
 /// kernel, so the returned bits agree with it.
 pub fn q6_k() -> Program<Op> {
-    let mut a = Asm::new("q6_k");
+    build(false)
+}
+
+/// Q6_K with its scale in the first line and aligned code planes after a 32-byte header.
+/// The superblock grows from 210 to 224 bytes, keeping the same exact arithmetic.
+pub fn q6_k_front() -> Program<Op> {
+    build(true)
+}
+
+fn build(front: bool) -> Program<Op> {
+    let mut a = Asm::new(if front { "q6_k_front" } else { "q6_k" });
     let row = a.param("row");
     let n = a.param("superblocks");
     let quants = a.param("quants");
@@ -35,7 +45,7 @@ pub fn q6_k() -> Program<Op> {
 
     a.place(top);
     let dh = a.ymm("half_d");
-    a.vpbroadcastw(dh.xmm(), row.at(208));
+    a.vpbroadcastw(dh.xmm(), row.at(if front { 0 } else { 208 }));
     let d = a.ymm("d");
     a.vcvtph2ps(d, dh.xmm());
 
@@ -43,18 +53,19 @@ pub fn q6_k() -> Program<Op> {
         let ql0 = a.ymm("ql0");
         let ql1 = a.ymm("ql1");
         let qh = a.ymm("qh");
-        a.vmovdqu(ql0, row.at(64 * half));
-        a.vmovdqu(ql1, row.at(64 * half + 32));
-        a.vmovdqu(qh, row.at(128 + 32 * half));
+        let codes = if front { 32 } else { 0 };
+        a.vmovdqu(ql0, row.at(codes + 64 * half));
+        a.vmovdqu(ql1, row.at(codes + 64 * half + 32));
+        a.vmovdqu(qh, row.at(codes + 128 + 32 * half));
         for k in 0..4 {
             let g = half * 4 + k;
-            group(&mut a, row, quants, scales, acc, d, ql0, ql1, qh, low, three, one, pair_shuffle, g);
+            group(&mut a, row, quants, scales, acc, d, ql0, ql1, qh, low, three, one, pair_shuffle, g, front);
         }
     }
 
     for half in 0..2 {
         let eight = a.ymm("eight_scales");
-        a.vmovq(eight.xmm(), row.at(192 + half * 8));
+        a.vmovq(eight.xmm(), row.at((if front { 2 } else { 192 }) + half * 8));
         let wide = a.ymm("wide_scales");
         a.vpmovsxbd_reg(wide, eight.xmm());
         a.vcvtdq2ps(wide, wide);
@@ -64,7 +75,7 @@ pub fn q6_k() -> Program<Op> {
         a.vmovups(dsums, sums.at(half * 32));
         a.vfmadd231ps(off, wide, dsums);
     }
-    a.add(row, 210);
+    a.add(row, if front { 224 } else { 210 });
     a.add(quants, 256);
     a.add(scales, 32);
     a.add(sums, 64);
@@ -96,6 +107,7 @@ fn group(
     one: Ymm,
     pair_shuffle: kgen_x86::Addr,
     g: i32,
+    front: bool,
 ) {
     let k = g % 4;
     let ql = if k % 2 == 0 { ql0 } else { ql1 };
@@ -124,7 +136,7 @@ fn group(
     a.vcvtdq2ps(p, p);
 
     let pair = a.ymm("pair_scales");
-    a.vmovd(pair.xmm(), row.at(192 + 2 * g));
+    a.vmovd(pair.xmm(), row.at((if front { 2 } else { 192 }) + 2 * g));
     a.vpshufb(pair.xmm(), pair.xmm(), pair_shuffle);
     let ws = a.ymm("ws");
     a.vpmovsxbd_reg(ws, pair.xmm());
