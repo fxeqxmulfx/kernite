@@ -1,4 +1,5 @@
-//! IQ3_S's original grid kernel against the one-time nibble repack, on the same rows.
+//! IQ3_S's original grid kernel against the one-time nibble repack, on the same rows, and the
+//! repack against two vectors at once; the rate counts row weights, whatever the vectors.
 //! `ROWS`, `COLS`, `SECS` and `KERNEL` select the case; run pinned after moving other
 //! user processes off the measured core with `../make.py quiet`.
 
@@ -43,6 +44,9 @@ fn main() {
         for (name, _) in iq3_s_nibble::KERNELS {
             println!("nibble-{name}");
         }
+        for (name, _) in iq3_s_nibble::PAIRS {
+            println!("nibble-{name}");
+        }
         return;
     }
     for (name, kernel) in iq3_s::KERNELS {
@@ -73,6 +77,26 @@ fn main() {
             for _ in 0..64 {
                 for row in packed.chunks_exact(sbs * iq3_s_nibble::SUPERBLOCK) {
                     check += iq3_s_nibble::dot(kernel, black_box(row), &quants, &scales);
+                }
+            }
+            passes += 64;
+        }
+        report(&label, rows, cols, passes, start.elapsed().as_secs_f64(), check);
+    }
+    let pair_quants = iq3_s_nibble::interleave(&quants, &quants.iter().rev().copied().collect::<Vec<_>>());
+    let pair_scales = iq3_s_nibble::interleave(&scales, &scales.iter().rev().copied().collect::<Vec<_>>());
+    for (name, kernel) in iq3_s_nibble::PAIRS {
+        let label = format!("nibble-{name}");
+        if !only.is_empty() && only != label {
+            continue;
+        }
+        let (start, mut passes) = (Instant::now(), 0u64);
+        let mut check = 0.0f32;
+        while start.elapsed().as_secs_f64() < secs {
+            for _ in 0..64 {
+                for row in packed.chunks_exact(sbs * iq3_s_nibble::SUPERBLOCK) {
+                    let [a, b] = iq3_s_nibble::dot2(kernel, black_box(row), &pair_quants, &pair_scales);
+                    check += a + b;
                 }
             }
             passes += 64;

@@ -15,6 +15,17 @@ use kgen_harness::iq4_nl;
 use kgen_harness::q6_k;
 use kgen_harness::{Block, supported};
 
+/// `f` called `depth` frames further down the stack, each frame holding a little more.
+#[inline(never)]
+fn at_depth(depth: usize, f: &mut dyn FnMut()) {
+    let pad = [depth as u8; 24];
+    std::hint::black_box(&pad);
+    match depth {
+        0 => f(),
+        _ => at_depth(depth - 1, f),
+    }
+}
+
 /// xorshift64*: the same numbers on every run.
 struct Rng(u64);
 
@@ -406,6 +417,60 @@ fn iq3_s_nibbles_match_the_original_row_to_the_bit() {
         }
     }
     assert_eq!(checked, 8 * 60 * iq3_s_nibble::KERNELS.len());
+}
+
+#[test]
+fn iq3_s_nibble_pairs_match_the_original_row_to_the_bit_for_each_vector() {
+    if !supported() {
+        eprintln!("skipped: no AVX2, FMA or F16C");
+        return;
+    }
+    let mut rng = Rng(0x5a1c_93e0_27b4_d86f);
+    let grid: [u32; 512] =
+        std::array::from_fn(|_| u32::from_le_bytes(std::array::from_fn(|_| 1 + 2 * (rng.byte() % 8))));
+    let mut checked = 0;
+    for sbs in [0, 1, 2, 3, 4, 5, 8, 10] {
+        for trial in 0..60 {
+            let mut original = vec![0u8; sbs * iq3_s::SUPERBLOCK];
+            for blk in original.as_chunks_mut::<{ iq3_s::SUPERBLOCK }>().0 {
+                blk[..2].copy_from_slice(&finite_half(&mut rng).to_le_bytes());
+                for b in &mut blk[2..] {
+                    *b = rng.byte();
+                }
+            }
+            let packed = iq3_s_nibble::repack(&original, &grid);
+            let vectors: [(Vec<Block>, Vec<f32>); 2] = std::array::from_fn(|_| {
+                let quants = (0..sbs * 8).map(|_| Block(std::array::from_fn(|_| rng.byte() as i8))).collect();
+                let scales = (0..sbs * 8)
+                    .map(|_| {
+                        let unit = (rng.next() >> 40) as f32 / (1u64 << 24) as f32 - 0.5;
+                        unit * 2f32.powi((rng.next() % 21) as i32 - 10)
+                    })
+                    .collect();
+                (quants, scales)
+            });
+            let quants = iq3_s_nibble::interleave(&vectors[0].0, &vectors[1].0);
+            let scales = iq3_s_nibble::interleave(&vectors[0].1, &vectors[1].1);
+            let want = vectors.each_ref().map(|(q, s)| iq3_s::reference(&original, q, s, &grid));
+            for (name, kernel) in iq3_s_nibble::PAIRS {
+                // Its frame is aligned inside, whatever the caller's stack: called from a few
+                // depths, it has to be right from each.
+                let mut got = [0.0; 2];
+                at_depth(trial % 8, &mut || got = iq3_s_nibble::dot2(kernel, &packed, &quants, &scales));
+                for v in 0..2 {
+                    assert_eq!(
+                        got[v].to_bits(),
+                        want[v].to_bits(),
+                        "IQ3_S nibble {name}, vector {v}, {sbs} superblocks, trial {trial}: {} against {}",
+                        got[v],
+                        want[v]
+                    );
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 8 * 60 * iq3_s_nibble::PAIRS.len());
 }
 
 #[test]
