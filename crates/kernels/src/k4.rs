@@ -1,5 +1,5 @@
-//! `Q4_K` rows against a group of two or four activation vectors, every block of weights decoded
-//! once for all of them.
+//! `Q4_K` and `Q5_K` rows against a group of two or four activation vectors, every block of
+//! weights decoded once for all of them.
 //!
 //! The arithmetic is the original row kernel's, to the bit: per block and vector one
 //! `vpmaddubsw`, one `vpmaddwd`, one `vcvtdq2ps` and one fused multiply-add at the product of the
@@ -12,10 +12,37 @@
 //! superblock while this one's blocks run.
 
 use kgen_core::Program;
-use kgen_x86::{Addr, Asm, Gpr, Op, Ymm};
+use kgen_x86::{Addr, Asm, Gpr, Hint, Op, Slot, Stream, Ymm};
 
-/// Bytes of a `Q4_K` superblock: `d`, `dmin`, twelve bytes of 6-bit scales and mins, 128 of nibbles.
-const BYTES: i32 = 144;
+/// What sets `Q4_K` and `Q5_K` apart: the size of a superblock, where its nibbles start, and
+/// whether a plane of fifth bits lies between the scales and the nibbles.
+#[derive(Clone, Copy)]
+struct Format {
+    name: &'static str,
+    bytes: i32,
+    codes: i32,
+    five: bool,
+}
+
+/// `d`, `dmin`, twelve bytes of 6-bit scales and mins, 128 bytes of nibbles.
+const Q4_K: Format = Format { name: "q4_k", bytes: 144, codes: 16, five: false };
+/// The same with 32 bytes of fifth bits after the scales: block `j`'s are bit `j` of each.
+const Q5_K: Format = Format { name: "q5_k", bytes: 176, codes: 48, five: true };
+
+/// How a kernel is built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shape {
+    /// Activation vectors a row is multiplied with at once: 2 or 4.
+    pub vectors: usize,
+    /// Whether the next superblock's scales are decoded among this one's blocks, or in one piece
+    /// before them.
+    pub spread: bool,
+    /// Bytes ahead of each superblock that its row's reads ask for, or none.
+    pub ahead: i32,
+    /// How close to the core.
+    pub hint: Hint,
+}
+
 /// Where a half of the scratch slot keeps the superblock's `[d * sc, -dmin * m]` pairs, and
 /// where the products with the activations' scales.
 const PAIRS: i32 = 0;
@@ -23,8 +50,7 @@ const PRODUCTS: i32 = 64;
 /// A half of the scratch slot: the pairs, then a scale product for every block and vector.
 const HALF: i32 = 256;
 
-/// `Q4_K` against `vectors` (2 or 4) activation vectors, one row a call. With `spread` the next
-/// superblock's scales are decoded among the blocks of this one; without, in one piece before them.
+/// `Q4_K` against `shape.vectors` activation vectors, one row a call.
 ///
 /// `fn(row: *const u8, sbs: usize, quants: *const i8, scales: *const f32, half_sums: *const f32,
 /// out: *mut f32)`
@@ -33,10 +59,39 @@ const HALF: i32 = 256;
 /// vector `k` at byte `32 * (vectors * b + k)` of `quants`, its scale at float `vectors * b + k`
 /// of `scales`. The half sums lie vector by vector, sixteen floats a superblock, from
 /// `half_sums` for vector 0. `out[k]` gets the bits the one-vector kernel gives vector `k`.
-pub fn q4_k(vectors: usize, spread: bool) -> Program<Op> {
+pub fn q4_k(shape: Shape) -> Program<Op> {
+    build(&Q4_K, shape)
+}
+
+/// `Q5_K` as [`q4_k`] does `Q4_K`, its 176-byte superblocks read the same way.
+pub fn q5_k(shape: Shape) -> Program<Op> {
+    build(&Q5_K, shape)
+}
+
+struct Loop {
+    f: Format,
+    shape: Shape,
+    row: Gpr,
+    quants: Gpr,
+    cur: Gpr,
+    acc: Vec<Ymm>,
+    offs: Slot,
+    hs: Vec<Gpr>,
+    low: Ymm,
+    one: Ymm,
+    /// The 32 bytes of 0x10, for the fifth bits, where there are some.
+    fifth: Option<Addr>,
+}
+
+fn build(f: &Format, shape: Shape) -> Program<Op> {
+    let Shape { vectors, spread, ahead, hint } = shape;
     assert!(matches!(vectors, 2 | 4), "{vectors} vectors");
     let g = vectors as i32;
-    let mut a = Asm::new(format!("q4_k_x{vectors}{}", if spread { "" } else { "_flat" }));
+    let mut name = format!("{}_x{vectors}{}", f.name, if spread { "" } else { "_flat" });
+    if ahead > 0 {
+        name += &format!("_ahead{ahead}_{}", hint.suffix());
+    }
+    let mut a = Asm::new(name);
     let row = a.param("row");
     let n = a.param("sbs");
     let quants = a.param("quants");
@@ -54,6 +109,7 @@ pub fn q4_k(vectors: usize, spread: bool) -> Program<Op> {
     let one_at = a.u32s(&[0x0001_0001]);
     a.vpbroadcastd(low, low_at);
     a.vpbroadcastd(one, one_at);
+    let fifth = f.five.then(|| a.u8s(&[0x10; 32]));
 
     // One pointer to each vector's half sums, which lie a row's length apart.
     let mut hs = vec![sums];
@@ -85,23 +141,24 @@ pub fn q4_k(vectors: usize, spread: bool) -> Program<Op> {
     a.lea(nxt, slot.at(HALF));
 
     let k = Constants::new(&mut a);
-    prepare(&mut a, &k, row, scales, g, 0, cur);
+    let l = Loop { f: *f, shape, row, quants, cur, acc, offs, hs, low, one, fifth };
+    prepare(&mut a, &k, &l, scales, 0, cur);
     a.dec(n);
     a.jz(last);
 
     a.place(top);
     if spread {
-        let mut next = a.capture(|a| prepare(a, &k, row, scales, g, 1, nxt));
+        let mut next = a.capture(|a| prepare(a, &k, &l, scales, 1, nxt));
         let share = next.len().div_ceil(8);
-        blocks(&mut a, row, quants, cur, &acc, offs, &hs, low, one, g, Some((&mut next, share)));
+        blocks(&mut a, &l, true, Some((&mut next, share)));
     } else {
-        prepare(&mut a, &k, row, scales, g, 1, nxt);
-        blocks(&mut a, row, quants, cur, &acc, offs, &hs, low, one, g, None);
+        prepare(&mut a, &k, &l, scales, 1, nxt);
+        blocks(&mut a, &l, true, None);
     }
-    a.add(row, BYTES);
+    a.add(row, f.bytes);
     a.add(quants, 256 * g);
     a.add(scales, 32 * g);
-    for &h in &hs {
+    for &h in &l.hs {
         a.add(h, 64);
     }
     a.xor(cur, HALF);
@@ -110,10 +167,10 @@ pub fn q4_k(vectors: usize, spread: bool) -> Program<Op> {
     a.jnz(top);
 
     a.place(last);
-    blocks(&mut a, row, quants, cur, &acc, offs, &hs, low, one, g, None);
-    for (v, &acc) in acc.iter().enumerate() {
+    blocks(&mut a, &l, false, None);
+    for (v, &acc) in l.acc.iter().enumerate() {
         let sum = a.ymm("sum");
-        a.vaddps(sum, acc, offs.at(32 * v as i32));
+        a.vaddps(sum, acc, l.offs.at(32 * v as i32));
         let high = a.ymm("high");
         a.vextractf128(high.xmm(), sum, 1);
         a.vaddps(sum.xmm(), sum.xmm(), high.xmm());
@@ -182,9 +239,10 @@ impl Constants {
 /// them at once. Sub-blocks 0 to 3 keep six bits of their scale and min in a byte; 4 to 7 keep
 /// four in the nibbles of the last four bytes and the top two of each in the bits 6 and 7 of the
 /// first eight.
-fn prepare(a: &mut Asm, k: &Constants, row: Gpr, scales: Gpr, g: i32, sb: i32, to: Gpr) {
+fn prepare(a: &mut Asm, k: &Constants, l: &Loop, scales: Gpr, sb: i32, to: Gpr) {
     a.note(format!("scales of superblock +{sb}"));
-    let at = BYTES * sb;
+    let (row, g) = (l.row, l.shape.vectors as i32);
+    let at = l.f.bytes * sb;
     let packed = a.ymm("packed");
     a.vmovdqu(packed.xmm(), row.at(at + 4));
     let low = a.ymm("low_six");
@@ -241,21 +299,18 @@ fn prepare(a: &mut Asm, k: &Constants, row: Gpr, scales: Gpr, g: i32, sb: i32, t
     }
 }
 
-/// The eight blocks of the superblock at `row`, against every vector, and its offsets.
-#[allow(clippy::too_many_arguments)]
-fn blocks(
-    a: &mut Asm,
-    row: Gpr,
-    quants: Gpr,
-    cur: Gpr,
-    acc: &[Ymm],
-    offs: kgen_x86::Slot,
-    hs: &[Gpr],
-    low: Ymm,
-    one: Ymm,
-    g: i32,
-    mut next: Option<(&mut kgen_x86::Stream, usize)>,
-) {
+/// The eight blocks of the superblock at `row`, against every vector, and its offsets. With
+/// `more`, another superblock follows, whose row's reads are asked for ahead of time when the
+/// shape says so.
+fn blocks(a: &mut Asm, l: &Loop, more: bool, mut next: Option<(&mut Stream, usize)>) {
+    let Loop { f, shape, row, quants, cur, acc, offs, hs, low, one, fifth } = l;
+    let (row, quants, cur, offs, low, one) = (*row, *quants, *cur, *offs, *low, *one);
+    let g = shape.vectors as i32;
+    if more && shape.ahead > 0 {
+        for line in 0..(f.bytes + 63) / 64 {
+            a.prefetch(shape.hint, row.at(shape.ahead + 64 * line));
+        }
+    }
     a.note("offsets");
     let (lo, hi) = (a.ymm("offsets_lo"), a.ymm("offsets_hi"));
     a.vmovshdup(lo, cur.at(PAIRS));
@@ -269,7 +324,7 @@ fn blocks(
     }
     for pair in 0..4 {
         let codes = a.ymm("codes");
-        a.vmovdqu(codes, row.at(16 + 32 * pair));
+        a.vmovdqu(codes, row.at(f.codes + 32 * pair));
         let wu = [a.ymm("low_nibbles"), a.ymm("high_nibbles")];
         a.vpand(wu[0], codes, low);
         a.vpsrlw(wu[1], codes, 4);
@@ -277,6 +332,18 @@ fn blocks(
         for (half, &wu) in wu.iter().enumerate() {
             let j = 2 * pair + half as i32;
             a.note(format!("block {j}"));
+            if f.five {
+                // Bit `j` of every fifth-bit byte, moved to bit 4 and put over the nibble.
+                let bit = a.ymm("fifth_bit");
+                a.vmovdqu(bit, row.at(16));
+                match j.cmp(&4) {
+                    std::cmp::Ordering::Less => a.vpsllw(bit, bit, (4 - j) as u8),
+                    std::cmp::Ordering::Greater => a.vpsrlw(bit, bit, (j - 4) as u8),
+                    std::cmp::Ordering::Equal => {}
+                }
+                a.vpand(bit, bit, fifth.expect("a plane of fifth bits"));
+                a.vpor(wu, wu, bit);
+            }
             if let Some((stream, share)) = next.as_mut() {
                 a.splice(stream, *share);
             }

@@ -15,6 +15,7 @@ pub mod iq3_xxs_nibble;
 pub mod iq4_nl;
 pub mod iq4_xs;
 pub mod q4_k;
+pub mod q5_k;
 pub mod q6_k;
 
 /// 32 activation quants, aligned as the kernels load them.
