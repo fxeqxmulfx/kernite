@@ -26,8 +26,18 @@ unsafe extern "sysv64" fn four(
     out: *mut f32,
 );
 
-/// The kernel for each width, to compare by name.
-pub const KERNELS: [(usize, Kernel); 2] = [(2, two), (4, four)];
+#[kgen_macros::kernel(q4_k(vectors = 4, spread = 0))]
+unsafe extern "sysv64" fn four_flat(
+    row: *const u8,
+    sbs: usize,
+    quants: *const i8,
+    scales: *const f32,
+    half_sums: *const f32,
+    out: *mut f32,
+);
+
+/// The kernel for each width and way of scheduling, to compare by name: the vectors it takes.
+pub const KERNELS: [(usize, Kernel); 3] = [(2, two), (4, four), (4, four_flat)];
 /// Bytes per superblock of 256 weights.
 pub const SUPERBLOCK: usize = 144;
 

@@ -143,6 +143,8 @@ pub enum Kernel {
     Q4K {
         /// Activation vectors a row is multiplied with at once: 2 or 4.
         vectors: usize,
+        /// Whether the next superblock's scales are decoded among this one's blocks.
+        spread: bool,
     },
     /// [`q6_k`].
     Q6K,
@@ -263,7 +265,8 @@ impl Kernel {
                 if vectors == 3 {
                     return Err("`vectors` is 2 or 4".to_owned());
                 }
-                Kernel::Q4K { vectors }
+                let spread = take.int("spread", 1, 0..=1)? == 1;
+                Kernel::Q4K { vectors, spread }
             }
             "q6_k" => Kernel::Q6K,
             "q6_k_front" => Kernel::Q6KFront,
@@ -315,7 +318,7 @@ impl Kernel {
             Kernel::Iq4Xs { ahead } => iq4_xs(ahead),
             Kernel::Iq4Xs2 { ahead } => iq4_xs2(ahead),
             Kernel::Iq4Nl { ahead } => iq4_nl(ahead),
-            Kernel::Q4K { vectors } => q4_k(vectors),
+            Kernel::Q4K { vectors, spread } => q4_k(vectors, spread),
             Kernel::Q6K => q6_k(),
             Kernel::Q6KFront => q6_k_front(),
             Kernel::Bf16Pairs { ahead, hint } => bf16_pairs(ahead, hint),
@@ -347,7 +350,8 @@ impl Kernel {
         kernels.extend((1..=3).map(|ahead| Kernel::Iq4Xs { ahead }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq4Xs2 { ahead }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq4Nl { ahead }));
-        kernels.extend([2, 4].map(|vectors| Kernel::Q4K { vectors }));
+        kernels.extend([2, 4].map(|vectors| Kernel::Q4K { vectors, spread: true }));
+        kernels.push(Kernel::Q4K { vectors: 4, spread: false });
         kernels.push(Kernel::Q6K);
         kernels.push(Kernel::Q6KFront);
         kernels.push(Kernel::Bf16Pairs { ahead: 0, hint: Hint::T0 });

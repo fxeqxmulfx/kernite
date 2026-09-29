@@ -23,7 +23,8 @@ const PRODUCTS: i32 = 64;
 /// A half of the scratch slot: the pairs, then a scale product for every block and vector.
 const HALF: i32 = 256;
 
-/// `Q4_K` against `vectors` (2 or 4) activation vectors, one row a call.
+/// `Q4_K` against `vectors` (2 or 4) activation vectors, one row a call. With `spread` the next
+/// superblock's scales are decoded among the blocks of this one; without, in one piece before them.
 ///
 /// `fn(row: *const u8, sbs: usize, quants: *const i8, scales: *const f32, half_sums: *const f32,
 /// out: *mut f32)`
@@ -32,10 +33,10 @@ const HALF: i32 = 256;
 /// vector `k` at byte `32 * (vectors * b + k)` of `quants`, its scale at float `vectors * b + k`
 /// of `scales`. The half sums lie vector by vector, sixteen floats a superblock, from
 /// `half_sums` for vector 0. `out[k]` gets the bits the one-vector kernel gives vector `k`.
-pub fn q4_k(vectors: usize) -> Program<Op> {
+pub fn q4_k(vectors: usize, spread: bool) -> Program<Op> {
     assert!(matches!(vectors, 2 | 4), "{vectors} vectors");
     let g = vectors as i32;
-    let mut a = Asm::new(format!("q4_k_x{vectors}"));
+    let mut a = Asm::new(format!("q4_k_x{vectors}{}", if spread { "" } else { "_flat" }));
     let row = a.param("row");
     let n = a.param("sbs");
     let quants = a.param("quants");
@@ -89,9 +90,14 @@ pub fn q4_k(vectors: usize) -> Program<Op> {
     a.jz(last);
 
     a.place(top);
-    let mut next = a.capture(|a| prepare(a, &k, row, scales, g, 1, nxt));
-    let share = next.len().div_ceil(8);
-    blocks(&mut a, row, quants, cur, &acc, offs, &hs, low, one, g, Some((&mut next, share)));
+    if spread {
+        let mut next = a.capture(|a| prepare(a, &k, row, scales, g, 1, nxt));
+        let share = next.len().div_ceil(8);
+        blocks(&mut a, row, quants, cur, &acc, offs, &hs, low, one, g, Some((&mut next, share)));
+    } else {
+        prepare(&mut a, &k, row, scales, g, 1, nxt);
+        blocks(&mut a, row, quants, cur, &acc, offs, &hs, low, one, g, None);
+    }
     a.add(row, BYTES);
     a.add(quants, 256 * g);
     a.add(scales, 32 * g);
