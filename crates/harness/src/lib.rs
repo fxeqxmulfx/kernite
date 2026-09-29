@@ -17,6 +17,7 @@ pub mod iq4_xs;
 pub mod q4_k;
 pub mod q5_k;
 pub mod q6_k;
+pub mod q6_k_few;
 
 /// 32 activation quants, aligned as the kernels load them.
 #[repr(C, align(32))]

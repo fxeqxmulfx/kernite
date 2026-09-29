@@ -43,6 +43,8 @@ ops! {
     Xor = "xor",
     Vaddps = "vaddps",
     Vaddss = "vaddss",
+    Vbroadcastf128 = "vbroadcastf128",
+    Vbroadcastsd = "vbroadcastsd",
     Vbroadcastss = "vbroadcastss",
     Vcvtdq2ps = "vcvtdq2ps",
     Vcvtph2ps = "vcvtph2ps",

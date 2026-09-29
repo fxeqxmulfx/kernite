@@ -9,6 +9,7 @@ mod iq3_s;
 mod iq3_xxs;
 mod iq4_nl;
 mod k4;
+mod k6;
 mod lanes;
 mod nibbles;
 mod q6_k;
@@ -28,6 +29,7 @@ pub use iq3_s::iq3_s;
 pub use iq3_xxs::{iq3_xxs, iq3_xxs2};
 pub use iq4_nl::iq4_nl;
 pub use k4::{Shape, q4_k, q5_k};
+pub use k6::q6_k_few;
 use kgen_core::Program;
 use kgen_x86::{Hint, Op};
 pub use nibbles::{iq3_s_nibble, iq3_s_nibble2, iq3_xxs_nibble, iq3_xxs_nibble2, iq4_xs, iq4_xs2};
@@ -147,6 +149,8 @@ pub enum Kernel {
     Q6K,
     /// [`q6_k_front`].
     Q6KFront,
+    /// [`q6_k_few`].
+    Q6KFew(Shape),
     /// [`bf16_pairs`].
     Bf16Pairs {
         /// Bytes ahead of each row's reads that it asks for, or none.
@@ -257,7 +261,7 @@ impl Kernel {
                 let ahead = take.int("ahead", 2, 1..=3)? as usize;
                 Kernel::Iq4Nl { ahead }
             }
-            "q4_k" | "q5_k" => {
+            "q4_k" | "q5_k" | "q6_k_few" => {
                 let vectors = take.int("vectors", 4, 2..=4)? as usize;
                 if vectors == 3 {
                     return Err("`vectors` is 2 or 4".to_owned());
@@ -266,7 +270,11 @@ impl Kernel {
                 let ahead = take.int("ahead", 0, 0..=4096)? as i32;
                 let hint = [Hint::T0, Hint::T1, Hint::T2, Hint::Nta][take.int("hint", 1, 0..=3)? as usize];
                 let shape = Shape { vectors, spread, ahead, hint };
-                if name == "q4_k" { Kernel::Q4K(shape) } else { Kernel::Q5K(shape) }
+                match name {
+                    "q4_k" => Kernel::Q4K(shape),
+                    "q5_k" => Kernel::Q5K(shape),
+                    _ => Kernel::Q6KFew(shape),
+                }
             }
             "q6_k" => Kernel::Q6K,
             "q6_k_front" => Kernel::Q6KFront,
@@ -287,7 +295,7 @@ impl Kernel {
             }
             _ => {
                 return Err(format!(
-                    "no kernel `{name}`; there are `iq2_s`, `iq2_s_gather`, `iq2_s_packed`, `iq2_s_packed2`, `iq2_xs_packed`, `iq2_xs_packed2`, `iq2_s_nibble`, `iq2_s_planes`, `iq2_xxs`, `iq2_xxs2`, `iq3_xxs`, `iq3_xxs2`, `iq3_xxs_nibble`, `iq3_xxs_nibble2`, `iq3_s`, `iq3_s_nibble`, `iq3_s_nibble2`, `iq4_xs`, `iq4_xs2`, `iq4_nl`, `q4_k`, `q5_k`, `q6_k`, `bf16_pairs`, `bf16_triples` and `bf16_two`"
+                    "no kernel `{name}`; there are `iq2_s`, `iq2_s_gather`, `iq2_s_packed`, `iq2_s_packed2`, `iq2_xs_packed`, `iq2_xs_packed2`, `iq2_s_nibble`, `iq2_s_planes`, `iq2_xxs`, `iq2_xxs2`, `iq3_xxs`, `iq3_xxs2`, `iq3_xxs_nibble`, `iq3_xxs_nibble2`, `iq3_s`, `iq3_s_nibble`, `iq3_s_nibble2`, `iq4_xs`, `iq4_xs2`, `iq4_nl`, `q4_k`, `q5_k`, `q6_k`, `q6_k_few`, `bf16_pairs`, `bf16_triples` and `bf16_two`"
                 ));
             }
         };
@@ -322,6 +330,7 @@ impl Kernel {
             Kernel::Q5K(shape) => q5_k(shape),
             Kernel::Q6K => q6_k(),
             Kernel::Q6KFront => q6_k_front(),
+            Kernel::Q6KFew(shape) => q6_k_few(shape),
             Kernel::Bf16Pairs { ahead, hint } => bf16_pairs(ahead, hint),
             Kernel::Bf16Triples { ahead, hint } => bf16_triples(ahead, hint),
             Kernel::Bf16Two { ahead, hint } => bf16_two(ahead, hint),
@@ -358,6 +367,9 @@ impl Kernel {
         kernels.extend([2, 4].map(|vectors| Kernel::Q5K(shape(vectors, true, 0))));
         kernels.push(Kernel::Q6K);
         kernels.push(Kernel::Q6KFront);
+        kernels.extend([2, 4].map(|vectors| Kernel::Q6KFew(shape(vectors, true, 0))));
+        kernels.push(Kernel::Q6KFew(shape(4, false, 0)));
+        kernels.extend([2, 4].map(|vectors| Kernel::Q6KFew(shape(vectors, true, 2048))));
         kernels.push(Kernel::Bf16Pairs { ahead: 0, hint: Hint::T0 });
         kernels.extend(
             [(512, Hint::T0), (1024, Hint::T0), (512, Hint::T1)].map(|(ahead, hint)| Kernel::Bf16Pairs { ahead, hint }),

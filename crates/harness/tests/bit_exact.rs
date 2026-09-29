@@ -16,6 +16,7 @@ use kgen_harness::iq4_xs;
 use kgen_harness::q4_k;
 use kgen_harness::q5_k;
 use kgen_harness::q6_k;
+use kgen_harness::q6_k_few;
 use kgen_harness::{Block, supported};
 
 /// `f` called `depth` frames further down the stack, each frame holding a little more.
@@ -1096,4 +1097,19 @@ fn q5_k_vectors_match_the_original_row_to_the_bit_for_each_vector() {
         return;
     }
     k4_vectors_match_the_original_row("Q5_K", q5_k::SUPERBLOCK, &q5_k::KERNELS, q5_k::dot, q5_k::reference);
+}
+
+#[test]
+fn q6_k_vectors_match_the_original_row_to_the_bit_for_each_vector() {
+    if !supported() {
+        eprintln!("skipped: no AVX2, FMA or F16C");
+        return;
+    }
+    k4_vectors_match_the_original_row(
+        "Q6_K",
+        q6_k_few::SUPERBLOCK,
+        &q6_k_few::KERNELS,
+        q6_k_few::dot,
+        q6_k_few::reference,
+    );
 }

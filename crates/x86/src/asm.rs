@@ -479,6 +479,11 @@ impl Asm {
         self.emit(Op::Vpmovzxbd, vec![vec(dst, Write), vec(from, Read)]);
     }
 
+    /// `vpmovsxbd`: eight signed bytes from memory to eight 32-bit lanes.
+    pub fn vpmovsxbd(&mut self, dst: Ymm, from: Addr) {
+        self.emit(Op::Vpmovsxbd, vec![vec(dst, Write), mem(from, W64)]);
+    }
+
     /// `vpmovsxbd`: eight signed bytes from a register to eight 32-bit lanes.
     pub fn vpmovsxbd_reg(&mut self, dst: Ymm, from: Xmm) {
         self.emit(Op::Vpmovsxbd, vec![vec(dst, Write), vec(from, Read)]);
@@ -538,6 +543,16 @@ impl Asm {
     /// `vbroadcastss`: a float from memory to every lane.
     pub fn vbroadcastss<V: Vector>(&mut self, dst: V, from: Addr) {
         self.emit(Op::Vbroadcastss, vec![vec(dst, Write), mem(from, W32)]);
+    }
+
+    /// `vbroadcastsd`: 64 bits from memory to all four quadwords.
+    pub fn vbroadcastsd(&mut self, dst: Ymm, from: Addr) {
+        self.emit(Op::Vbroadcastsd, vec![vec(dst, Write), mem(from, W64)]);
+    }
+
+    /// `vbroadcastf128`: 128 bits from memory to both halves of a register.
+    pub fn vbroadcastf128(&mut self, dst: Ymm, from: Addr) {
+        self.emit(Op::Vbroadcastf128, vec![vec(dst, Write), mem(from, W128)]);
     }
 
     /// `vmovq`: 64 bits from memory to the low quadword, zeros above.
