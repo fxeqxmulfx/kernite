@@ -10,6 +10,7 @@ mod iq3_xxs;
 mod iq4_nl;
 mod lanes;
 mod nibbles;
+mod q4_k;
 mod q6_k;
 
 pub use bf16::{bf16_pairs, bf16_triples, bf16_two};
@@ -29,6 +30,7 @@ pub use iq4_nl::iq4_nl;
 use kgen_core::Program;
 use kgen_x86::{Hint, Op};
 pub use nibbles::{iq3_s_nibble, iq3_s_nibble2, iq3_xxs_nibble, iq3_xxs_nibble2, iq4_xs, iq4_xs2};
+pub use q4_k::q4_k;
 pub use q6_k::q6_k;
 pub use q6_k::q6_k_front;
 
@@ -136,6 +138,11 @@ pub enum Kernel {
     Iq4Nl {
         /// Blocks whose integer products are made ahead of their sums.
         ahead: usize,
+    },
+    /// [`q4_k`].
+    Q4K {
+        /// Activation vectors a row is multiplied with at once: 2 or 4.
+        vectors: usize,
     },
     /// [`q6_k`].
     Q6K,
@@ -251,6 +258,13 @@ impl Kernel {
                 let ahead = take.int("ahead", 2, 1..=3)? as usize;
                 Kernel::Iq4Nl { ahead }
             }
+            "q4_k" => {
+                let vectors = take.int("vectors", 4, 2..=4)? as usize;
+                if vectors == 3 {
+                    return Err("`vectors` is 2 or 4".to_owned());
+                }
+                Kernel::Q4K { vectors }
+            }
             "q6_k" => Kernel::Q6K,
             "q6_k_front" => Kernel::Q6KFront,
             "bf16_pairs" => {
@@ -270,7 +284,7 @@ impl Kernel {
             }
             _ => {
                 return Err(format!(
-                    "no kernel `{name}`; there are `iq2_s`, `iq2_s_gather`, `iq2_s_packed`, `iq2_s_packed2`, `iq2_xs_packed`, `iq2_xs_packed2`, `iq2_s_nibble`, `iq2_s_planes`, `iq2_xxs`, `iq2_xxs2`, `iq3_xxs`, `iq3_xxs2`, `iq3_xxs_nibble`, `iq3_xxs_nibble2`, `iq3_s`, `iq3_s_nibble`, `iq3_s_nibble2`, `iq4_xs`, `iq4_xs2`, `iq4_nl`, `q6_k`, `bf16_pairs`, `bf16_triples` and `bf16_two`"
+                    "no kernel `{name}`; there are `iq2_s`, `iq2_s_gather`, `iq2_s_packed`, `iq2_s_packed2`, `iq2_xs_packed`, `iq2_xs_packed2`, `iq2_s_nibble`, `iq2_s_planes`, `iq2_xxs`, `iq2_xxs2`, `iq3_xxs`, `iq3_xxs2`, `iq3_xxs_nibble`, `iq3_xxs_nibble2`, `iq3_s`, `iq3_s_nibble`, `iq3_s_nibble2`, `iq4_xs`, `iq4_xs2`, `iq4_nl`, `q4_k`, `q6_k`, `bf16_pairs`, `bf16_triples` and `bf16_two`"
                 ));
             }
         };
@@ -301,6 +315,7 @@ impl Kernel {
             Kernel::Iq4Xs { ahead } => iq4_xs(ahead),
             Kernel::Iq4Xs2 { ahead } => iq4_xs2(ahead),
             Kernel::Iq4Nl { ahead } => iq4_nl(ahead),
+            Kernel::Q4K { vectors } => q4_k(vectors),
             Kernel::Q6K => q6_k(),
             Kernel::Q6KFront => q6_k_front(),
             Kernel::Bf16Pairs { ahead, hint } => bf16_pairs(ahead, hint),
@@ -332,6 +347,7 @@ impl Kernel {
         kernels.extend((1..=3).map(|ahead| Kernel::Iq4Xs { ahead }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq4Xs2 { ahead }));
         kernels.extend((1..=3).map(|ahead| Kernel::Iq4Nl { ahead }));
+        kernels.extend([2, 4].map(|vectors| Kernel::Q4K { vectors }));
         kernels.push(Kernel::Q6K);
         kernels.push(Kernel::Q6KFront);
         kernels.push(Kernel::Bf16Pairs { ahead: 0, hint: Hint::T0 });

@@ -13,6 +13,7 @@ use kgen_harness::iq3_xxs;
 use kgen_harness::iq3_xxs_nibble;
 use kgen_harness::iq4_nl;
 use kgen_harness::iq4_xs;
+use kgen_harness::q4_k;
 use kgen_harness::q6_k;
 use kgen_harness::{Block, supported};
 
@@ -1013,4 +1014,60 @@ fn bf16_triples_match_their_reference_to_the_bit() {
             }
         }
     }
+}
+
+/// Random Q4_K superblocks with finite halves for `d` and `dmin`, and the rest any bytes.
+fn q4_k_case(rng: &mut Rng, sbs: usize) -> Vec<u8> {
+    let mut row = vec![0u8; sbs * q4_k::SUPERBLOCK];
+    for blk in row.as_chunks_mut::<{ q4_k::SUPERBLOCK }>().0 {
+        blk[..2].copy_from_slice(&finite_half(rng).to_le_bytes());
+        blk[2..4].copy_from_slice(&finite_half(rng).to_le_bytes());
+        for b in &mut blk[4..] {
+            *b = rng.byte();
+        }
+    }
+    row
+}
+
+#[test]
+fn q4_k_vectors_match_the_original_row_to_the_bit_for_each_vector() {
+    if !supported() {
+        eprintln!("skipped: no AVX2, FMA or F16C");
+        return;
+    }
+    let mut rng = Rng(0x5e2f_9c14_a7d3_0b68);
+    let mut checked = 0;
+    for sbs in [0, 1, 2, 3, 4, 5, 8, 10] {
+        for trial in 0..40 {
+            let row = q4_k_case(&mut rng, sbs);
+            for (vectors, kernel) in q4_k::KERNELS {
+                let each: Vec<_> = (0..vectors)
+                    .map(|_| {
+                        let (quants, scales) = activations(&mut rng, sbs * 8);
+                        let sums: Vec<f32> = (0..sbs * 16)
+                            .map(|_| ((rng.next() >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 16.0)
+                            .collect();
+                        (quants, scales, sums)
+                    })
+                    .collect();
+                let quants = kgen_harness::interleave_all(&each.iter().map(|e| e.0.as_slice()).collect::<Vec<_>>());
+                let scales = kgen_harness::interleave_all(&each.iter().map(|e| e.1.as_slice()).collect::<Vec<_>>());
+                let sums: Vec<f32> = each.iter().flat_map(|e| e.2.iter().copied()).collect();
+                // Called from a few depths: the frame is aligned inside.
+                let mut got = vec![];
+                at_depth(trial % 8, &mut || got = q4_k::dot(vectors, kernel, &row, &quants, &scales, &sums));
+                for (v, (quants, scales, sums)) in each.iter().enumerate() {
+                    let want = q4_k::reference(&row, quants, scales, sums);
+                    assert_eq!(
+                        got[v].to_bits(),
+                        want.to_bits(),
+                        "Q4_K x{vectors}, vector {v}, {sbs} superblocks, trial {trial}: {} against {want}",
+                        got[v]
+                    );
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 8 * 40 * q4_k::KERNELS.len());
 }

@@ -14,6 +14,7 @@ pub mod iq3_xxs;
 pub mod iq3_xxs_nibble;
 pub mod iq4_nl;
 pub mod iq4_xs;
+pub mod q4_k;
 pub mod q6_k;
 
 /// 32 activation quants, aligned as the kernels load them.
@@ -40,6 +41,14 @@ pub fn half(bits: u16) -> f32 {
 pub fn interleave<T: Copy>(first: &[T], second: &[T]) -> Vec<T> {
     assert_eq!(first.len(), second.len(), "vectors of one length");
     first.iter().zip(second).flat_map(|(&a, &b)| [a, b]).collect()
+}
+
+/// Any number of vectors' blocks, or block scales, stored together as a group keeps them: block
+/// `b` of each vector in turn, then block `b + 1` of each.
+pub fn interleave_all<T: Copy>(vectors: &[&[T]]) -> Vec<T> {
+    let len = vectors.first().map_or(0, |v| v.len());
+    assert!(vectors.iter().all(|v| v.len() == len), "vectors of one length");
+    (0..len).flat_map(|b| vectors.iter().map(move |v| v[b])).collect()
 }
 
 /// Whether this CPU runs the kernels: they are AVX2, FMA and F16C code.

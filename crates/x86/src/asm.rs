@@ -390,6 +390,9 @@ impl Asm {
         vmulps = Vmulps;
         /// `vaddps`.
         vaddps = Vaddps;
+        /// `vpunpckldq`: the low two dwords of each 128-bit lane of `a` and `b` interleaved, `a`'s
+        /// first.
+        vpunpckldq = Vpunpckldq;
         /// `vpsllvd`: each dword shifted left by the corresponding dword of `b`.
         vpsllvd = Vpsllvd;
         /// `vpsrlvd`: each dword shifted right by the corresponding dword of `b`.
@@ -421,11 +424,19 @@ impl Asm {
         vcvtdq2ps = Vcvtdq2ps;
         /// `vmovshdup`: each odd float copied down to the even lane below it.
         vmovshdup = Vmovshdup;
+        /// `vmovsldup`: each even float copied up to the odd lane above it.
+        vmovsldup = Vmovsldup;
     }
 
     /// `vfmadd231ps acc, a, b`: `acc += a * b`, rounded once.
     pub fn vfmadd231ps<V: Vector>(&mut self, acc: V, a: V, b: impl Into<Src<V>>) {
         self.emit(Op::Vfmadd231ps, vec![vec(acc, ReadWrite), vec(a, Read), src(b.into())]);
+    }
+
+    /// `vpermps`: the eight floats of `from` picked, across lanes, by the low three bits of
+    /// each dword of `idx`.
+    pub fn vpermps(&mut self, dst: Ymm, idx: Ymm, from: impl Into<Src<Ymm>>) {
+        self.emit(Op::Vpermps, vec![vec(dst, Write), vec(idx, Read), src(from.into())]);
     }
 
     /// `vpermq`: the four quadwords of `a` rearranged across lanes.
