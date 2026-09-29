@@ -45,10 +45,22 @@ const HALF: i32 = 1024;
 /// and the half sums vector by vector, sixteen floats a superblock. `out[k]` gets the bits the
 /// one-vector kernel gives vector `k`.
 pub fn q6_k_few(shape: Shape) -> Program<Op> {
+    q6_k_of(shape, shape.vectors)
+}
+
+/// [`q6_k_few`] on vectors that lie in a group of `group`, which is `shape.vectors` or, for four,
+/// eight: the layout above with `group` in place of `vectors`. A group of eight is two calls,
+/// the second with `quants` moved on 128 bytes, `scales` on four floats and `half_sums` on four
+/// vectors' worth, and `out` on four floats.
+pub fn q6_k_of(shape: Shape, group: usize) -> Program<Op> {
     let Shape { vectors, spread, ahead, hint } = shape;
     assert!(matches!(vectors, 2 | 4), "{vectors} vectors");
+    assert!(group == vectors || (vectors == 4 && group == 8), "{vectors} vectors of a group of {group}");
     let g = vectors as i32;
     let mut name = format!("q6_k_front_x{vectors}{}", if spread { "" } else { "_flat" });
+    if group != vectors {
+        name += &format!("_of{group}");
+    }
     if ahead > 0 {
         name += &format!("_ahead{ahead}_{}", hint.suffix());
     }
@@ -96,7 +108,7 @@ pub fn q6_k_few(shape: Shape) -> Program<Op> {
     let (one, lane) = (a.ymm("one16"), a.ymm("lane"));
     a.vmovdqa(one, k.one);
     a.vmovdqa(lane, k.lane);
-    let l = Loop { shape, row, quants, cur, acc, offs, hs, one, lane };
+    let l = Loop { shape, group: group as i32, row, quants, cur, acc, offs, hs, one, lane };
     prepare(&mut a, &k, &l, scales, 0, cur);
     a.dec(n);
     a.jz(last);
@@ -111,8 +123,8 @@ pub fn q6_k_few(shape: Shape) -> Program<Op> {
         blocks(&mut a, &k, &l, true, None);
     }
     a.add(row, BYTES);
-    a.add(quants, 256 * g);
-    a.add(scales, 32 * g);
+    a.add(quants, 256 * group as i32);
+    a.add(scales, 32 * group as i32);
     for &h in &l.hs {
         a.add(h, 64);
     }
@@ -151,6 +163,8 @@ pub fn q6_k_few(shape: Shape) -> Program<Op> {
 
 struct Loop {
     shape: Shape,
+    /// Vectors in the group the activations lie in, which the strides through them follow.
+    group: i32,
     row: Gpr,
     quants: Gpr,
     cur: Gpr,
@@ -205,7 +219,7 @@ impl Constants {
 /// times -32.
 fn prepare(a: &mut Asm, k: &Constants, l: &Loop, scales: Gpr, sb: i32, to: Gpr) {
     a.note(format!("scales of superblock +{sb}"));
-    let (row, g) = (l.row, l.shape.vectors as i32);
+    let (row, g, group) = (l.row, l.shape.vectors as i32, l.group);
     let at = BYTES * sb;
     let half = a.ymm("half_d");
     a.vpbroadcastw(half.xmm(), row.at(at));
@@ -220,7 +234,7 @@ fn prepare(a: &mut Asm, k: &Constants, l: &Loop, scales: Gpr, sb: i32, to: Gpr) 
         a.vmulps(wide, wide, k.minus32);
         a.store_vmovaps(to.at(FACTORS + 32 * h), wide);
     }
-    let scales_at = 32 * g * sb;
+    let scales_at = 32 * group * sb;
     for j in 0..8i32 {
         let idx = a.ymm("spread");
         a.vmovdqa(idx, k.spread[(j % 4) as usize]);
@@ -228,9 +242,9 @@ fn prepare(a: &mut Asm, k: &Constants, l: &Loop, scales: Gpr, sb: i32, to: Gpr) 
         a.vpermps(product, idx, to.at(WIDE + 32 * (j / 4)));
         let x = a.ymm("activation_scales");
         if g == 4 {
-            a.vbroadcastf128(x, scales.at(scales_at + 16 * j));
+            a.vbroadcastf128(x, scales.at(scales_at + 4 * group * j));
         } else {
-            a.vbroadcastsd(x, scales.at(scales_at + 8 * j));
+            a.vbroadcastsd(x, scales.at(scales_at + 4 * group * j));
         }
         a.vmulps(product, product, x);
         a.store_vmovaps(to.at(PRODUCTS + 64 * j), product);
@@ -241,9 +255,9 @@ fn prepare(a: &mut Asm, k: &Constants, l: &Loop, scales: Gpr, sb: i32, to: Gpr) 
 /// `more`, another superblock follows, whose row's reads are asked for ahead of time when the
 /// shape says so.
 fn blocks(a: &mut Asm, k: &Constants, l: &Loop, more: bool, mut next: Option<(&mut Stream, usize)>) {
-    let Loop { shape, row, quants, cur, acc, offs, hs, one, lane } = l;
+    let Loop { shape, group, row, quants, cur, acc, offs, hs, one, lane } = l;
     let (row, quants, cur, offs, one, lane) = (*row, *quants, *cur, *offs, *one, *lane);
-    let g = shape.vectors as i32;
+    let group = *group;
     if more && shape.ahead > 0 {
         for line in 0..(BYTES + 63) / 64 {
             a.prefetch(shape.hint, row.at(shape.ahead + 64 * line));
@@ -291,7 +305,7 @@ fn blocks(a: &mut Asm, k: &Constants, l: &Loop, more: bool, mut next: Option<(&m
             }
             for (v, &acc) in acc.iter().enumerate() {
                 let p = a.ymm("products");
-                a.vpmaddubsw(p, wu, quants.at(32 * (g * j + v as i32)));
+                a.vpmaddubsw(p, wu, quants.at(32 * (group * j + v as i32)));
                 a.vpmaddwd(p, p, one);
                 a.vcvtdq2ps(p, p);
                 let scale = a.ymm("block_scale");

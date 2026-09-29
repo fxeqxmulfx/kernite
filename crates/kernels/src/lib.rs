@@ -29,7 +29,7 @@ pub use iq3_s::iq3_s;
 pub use iq3_xxs::{iq3_xxs, iq3_xxs2};
 pub use iq4_nl::iq4_nl;
 pub use k4::{Shape, q4_k, q5_k};
-pub use k6::q6_k_few;
+pub use k6::{q6_k_few, q6_k_of};
 use kgen_core::Program;
 use kgen_x86::{Hint, Op};
 pub use nibbles::{iq3_s_nibble, iq3_s_nibble2, iq3_xxs_nibble, iq3_xxs_nibble2, iq4_xs, iq4_xs2};
@@ -149,8 +149,13 @@ pub enum Kernel {
     Q6K,
     /// [`q6_k_front`].
     Q6KFront,
-    /// [`q6_k_few`].
-    Q6KFew(Shape),
+    /// [`q6_k_of`], which is [`q6_k_few`] with the group as wide as the vectors.
+    Q6KFew {
+        /// How the kernel is built.
+        shape: Shape,
+        /// Vectors in the group the activations lie in: `shape.vectors`, or eight for four.
+        group: usize,
+    },
     /// [`bf16_pairs`].
     Bf16Pairs {
         /// Bytes ahead of each row's reads that it asks for, or none.
@@ -273,7 +278,14 @@ impl Kernel {
                 match name {
                     "q4_k" => Kernel::Q4K(shape),
                     "q5_k" => Kernel::Q5K(shape),
-                    _ => Kernel::Q6KFew(shape),
+                    _ => {
+                        let group = take.int("group", 0, 0..=8)? as usize;
+                        let group = if group == 0 { vectors } else { group };
+                        if group != vectors && !(vectors == 4 && group == 8) {
+                            return Err("`group` is `vectors`, or 8 for 4 vectors".to_owned());
+                        }
+                        Kernel::Q6KFew { shape, group }
+                    }
                 }
             }
             "q6_k" => Kernel::Q6K,
@@ -330,7 +342,7 @@ impl Kernel {
             Kernel::Q5K(shape) => q5_k(shape),
             Kernel::Q6K => q6_k(),
             Kernel::Q6KFront => q6_k_front(),
-            Kernel::Q6KFew(shape) => q6_k_few(shape),
+            Kernel::Q6KFew { shape, group } => q6_k_of(shape, group),
             Kernel::Bf16Pairs { ahead, hint } => bf16_pairs(ahead, hint),
             Kernel::Bf16Triples { ahead, hint } => bf16_triples(ahead, hint),
             Kernel::Bf16Two { ahead, hint } => bf16_two(ahead, hint),
@@ -367,9 +379,10 @@ impl Kernel {
         kernels.extend([2, 4].map(|vectors| Kernel::Q5K(shape(vectors, true, 0))));
         kernels.push(Kernel::Q6K);
         kernels.push(Kernel::Q6KFront);
-        kernels.extend([2, 4].map(|vectors| Kernel::Q6KFew(shape(vectors, true, 0))));
-        kernels.push(Kernel::Q6KFew(shape(4, false, 0)));
-        kernels.extend([2, 4].map(|vectors| Kernel::Q6KFew(shape(vectors, true, 2048))));
+        kernels.extend([2, 4].map(|vectors| Kernel::Q6KFew { shape: shape(vectors, true, 0), group: vectors }));
+        kernels.push(Kernel::Q6KFew { shape: shape(4, false, 0), group: 4 });
+        kernels.extend([2, 4].map(|vectors| Kernel::Q6KFew { shape: shape(vectors, true, 2048), group: vectors }));
+        kernels.push(Kernel::Q6KFew { shape: shape(4, true, 2048), group: 8 });
         kernels.push(Kernel::Bf16Pairs { ahead: 0, hint: Hint::T0 });
         kernels.extend(
             [(512, Hint::T0), (1024, Hint::T0), (512, Hint::T1)].map(|(ahead, hint)| Kernel::Bf16Pairs { ahead, hint }),
