@@ -281,6 +281,17 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
             "2:68: `mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32` wants a `u32` variable; this is the integer 1",
         ),
         (
+            "let i: s32; mma.sp.sync.aligned.m16n8k64.row.col.s32.s8.s8.s32((i, i, i, i), (n, n, n, n), (n, n, n, n), \
+             (0, 0, 0, 0), n, 1);",
+            "2:123: `mma.sp.sync.aligned.m16n8k64.row.col.s32.s8.s8.s32` takes 0 here, the one value PTX has for it; \
+             not 1",
+        ),
+        (
+            "let (a, b, c, d): (f32, f32, f32, f32); let g: f16x2; mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32(\
+             (a, b, c, d), (g, g, g, g), (g, g, g, g), (0, 0, 0, 0), n, 2);",
+            "2:167: `mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32` takes 0 or 1 here; 2 is not one of them",
+        ),
+        (
             "movmatrix.sync.aligned.m8n8.trans.b16(_, n);",
             "2:39: `movmatrix.sync.aligned.m8n8.trans.b16` has no result here that it may leave unwritten, `_`",
         ),
@@ -327,6 +338,11 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         ("cp.async.wait_all();", ".version 7.0 .target sm_80"),
         ("mbarrier.arrive.b64(_, [y]);", ".version 7.1 .target sm_80"),
         ("let i: b32; mov.b32(i, reserved_smem_offset_begin);", ".version 7.6 .target sm_80"),
+        (
+            "let (a, b, c, d): (s32, s32, s32, s32); mma.sp__ordered_metadata.sync.aligned.m16n8k64.row.col.s32.s8.s8.s32(\
+             (a, b, c, d), (n, n, n, n), (n, n, n, n), (0, 0, 0, 0), n, 0);",
+            ".version 8.5 .target sm_80",
+        ),
         ("let v: f32; max.xorsign.abs.f32(v, f, f);", ".version 7.2 .target sm_86"),
         ("let v: b128; ld.global.b128(v, [x]);", ".version 8.3 .target sm_70"),
         ("let a: u64; clmad.lo.u64(a, y, y, y);", ".version 9.3 .target sm_80"),
@@ -726,7 +742,8 @@ fn assemble(ptxas: &Path, modules: &[String]) -> Vec<BTreeMap<String, String>> {
 }
 
 /// The kernels `ptxas` refuses of the module `text`, which it reads at `path`. A fatal error
-/// stops it in the kernel it is in, so it goes on without that one.
+/// stops it in the kernel it is in, so it goes on without that one; advice, as that `mma.sp`
+/// is slower than `mma.sp::ordered_metadata`, is no refusal.
 fn refused(ptxas: &Path, text: &str, path: &Path) -> BTreeMap<String, String> {
     let (src, bin) = (path.with_extension("ptx"), path.with_extension("cubin"));
     let sm: u32 = text
@@ -754,6 +771,9 @@ fn refused(ptxas: &Path, text: &str, path: &Path) -> BTreeMap<String, String> {
             let Some((n, message)) = l.split_once(", line ").and_then(|(_, r)| r.split_once(';')) else { continue };
             let Ok(n) = n.parse() else { continue };
             let (k, message) = (kernel_at(&text, n).unwrap_or("?").to_string(), message.trim());
+            if message.starts_with("info") {
+                continue;
+            }
             if message.starts_with("fatal") {
                 fatal = Some(k.clone());
             }
