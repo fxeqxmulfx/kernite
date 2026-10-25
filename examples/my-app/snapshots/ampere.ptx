@@ -1,0 +1,99 @@
+// Written by kgen.
+
+.version 7.0
+.target sm_80
+.address_size 64
+
+.visible .entry matmul(
+	.param .u64 matmul_param_0,
+	.param .u64 matmul_param_1,
+	.param .u64 matmul_param_2,
+	.param .u32 matmul_param_3,
+	.param .u32 matmul_param_4
+)
+{
+	.reg .pred %copies_b, %more;
+	.reg .b32 %a0, %a1, %a2, %a3, %b0, %b1;
+	.reg .u32 %n, %k, %lane, %tiles, %row, %col, %i, %j;
+	.reg .u32 %half, %to_a, %to_b, %from_a, %from_b;
+	.reg .f32 %d0, %d1, %d2, %d3;
+	.reg .u64 %a, %bt, %c, %at_a, %at_b, %at_c;
+	.shared .align 16 .b8 a_tile[512];
+	.shared .align 16 .b8 b_tile[256];
+
+	ld.param.u64 %a, [matmul_param_0];
+	cvta.to.global.u64 %a, %a;
+	ld.param.u64 %bt, [matmul_param_1];
+	cvta.to.global.u64 %bt, %bt;
+	ld.param.u64 %c, [matmul_param_2];
+	cvta.to.global.u64 %c, %c;
+	ld.param.u32 %n, [matmul_param_3];
+	ld.param.u32 %k, [matmul_param_4];
+	mov.u32 %lane, %tid.x;
+	// the tile's first row and column
+	mov.u32 %i, %ctaid.x;
+	shr.u32 %tiles, %n, 3;
+	div.u32 %row, %i, %tiles;
+	rem.u32 %col, %i, %tiles;
+	shl.b32 %row, %row, 4;
+	shl.b32 %col, %col, 3;
+	// what each thread copies: half a row, 8 halves, of `a`'s, and of `bt`'s if one of 16
+	and.b32 %half, %lane, 1;
+	shl.b32 %half, %half, 3;
+	shr.u32 %i, %lane, 1;
+	add.u32 %j, %i, %row;
+	mad.lo.u32 %j, %j, %k, %half;
+	mad.wide.u32 %at_a, %j, 2, %a;
+	add.u32 %j, %i, %col;
+	mad.lo.u32 %j, %j, %k, %half;
+	mad.wide.u32 %at_b, %j, 2, %bt;
+	mov.u32 %to_a, a_tile;
+	mad.lo.u32 %to_a, %lane, 16, %to_a;
+	mov.u32 %to_b, b_tile;
+	mad.lo.u32 %to_b, %lane, 16, %to_b;
+	setp.lt.u32 %copies_b, %lane, 16;
+	// the row each thread gives `ldmatrix`: of the four 8 by 8 of `a`'s, and the two of `bt`'s
+	and.b32 %i, %lane, 15;
+	shr.u32 %j, %lane, 4;
+	mov.u32 %from_a, a_tile;
+	mad.lo.u32 %from_a, %i, 32, %from_a;
+	mad.lo.u32 %from_a, %j, 16, %from_a;
+	and.b32 %i, %lane, 7;
+	shr.u32 %j, %lane, 3;
+	and.b32 %j, %j, 1;
+	mov.u32 %from_b, b_tile;
+	mad.lo.u32 %from_b, %i, 32, %from_b;
+	mad.lo.u32 %from_b, %j, 16, %from_b;
+	mov.f32 %d0, 0f00000000;
+	mov.f32 %d1, 0f00000000;
+	mov.f32 %d2, 0f00000000;
+	mov.f32 %d3, 0f00000000;
+$L0:
+	cp.async.cg.shared.global [%to_a], [%at_a], 16;
+	@%copies_b cp.async.cg.shared.global [%to_b], [%at_b], 16;
+	cp.async.wait_all;
+	bar.sync 0;
+	ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%a0, %a1, %a2, %a3}, [%from_a];
+	ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%b0, %b1}, [%from_b];
+	mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%d0, %d1, %d2, %d3}, {%a0, %a1, %a2, %a3}, {%b0, %b1}, {%d0, %d1, %d2, %d3};
+	// before the next copies overwrite what the other threads load
+	bar.sync 0;
+	add.u64 %at_a, %at_a, 32;
+	add.u64 %at_b, %at_b, 32;
+	sub.u32 %k, %k, 16;
+	setp.ne.u32 %more, %k, 0;
+	@%more bra $L0;
+	// each thread's two of row `lane / 4` from column `2 (lane % 4)`, and the two 8 rows below
+	shr.u32 %i, %lane, 2;
+	add.u32 %i, %i, %row;
+	and.b32 %j, %lane, 3;
+	shl.b32 %j, %j, 1;
+	add.u32 %j, %j, %col;
+	mad.lo.u32 %i, %i, %n, %j;
+	mad.wide.u32 %at_c, %i, 4, %c;
+	st.global.v2.f32 [%at_c], {%d0, %d1};
+	mad.lo.u32 %i, %n, 8, %i;
+	mad.wide.u32 %at_c, %i, 4, %c;
+	st.global.v2.f32 [%at_c], {%d2, %d3};
+	ret;
+}
