@@ -8,8 +8,10 @@ publish.workspace = true
 
 [dependencies]
 kgen-core = { workspace = true }
+kgen-lang = { workspace = true }
 kgen-compile = { workspace = true }
 kgen-x86 = { workspace = true }
+kgen-ptx = { workspace = true }
 
 [lints]
 workspace = true

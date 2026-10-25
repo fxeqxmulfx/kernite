@@ -13,6 +13,13 @@ mod frame;
 pub use error::Error;
 use kgen_core::{Compiled, Inst, Item, Machine, PReg, Program};
 
+/// What [`compile`] checks before it allocates, for a machine that allocates its own
+/// registers: that control stays inside the body, that every jump has its label, and that
+/// every variable but the parameters is written before any path reads it.
+pub fn check<Op>(p: &Program<Op>) -> Result<(), Error> {
+    alloc::analyse(p).map(|_| ())
+}
+
 /// Allocates `p`'s variables to `m`'s registers and lays out its frame.
 pub fn compile<Op: Clone>(p: &Program<Op>, m: &dyn Machine) -> Result<Compiled<Op>, Error> {
     let regs = alloc::allocate(p, m)?;

@@ -1,59 +1,97 @@
 # kgen
 
-Kernels written as x86 instructions over variables, compiled to assembly that changes only when they do.
-
-A kernel is Rust code that calls one builder method per instruction (`a.vpmaddubsw(p, p, x)`), on variables
-instead of registers. `kgen` allocates the registers with no spills: if the variables that are alive together do
-not fit, it fails and names them. It prints Intel syntax, and `kgen-macros` turns that into the body of a
-`#[unsafe(naked)]` function.
-
-This repository is the library alone; the kernels live in the crates that use it.
+Kernels written where they are called, in Rust's syntax read as instructions over variables: compiled for x86-64
+to assembly that changes only when they do, and for NVIDIA GPUs to PTX.
 
 ## A kernel
 
-```rust
-use kgen_x86::Asm;
-
-// `fn(xs: *const f32) -> f32`: the sum of the eight floats at `xs`.
-let mut a = Asm::new("sum8");
-let xs = a.param("xs");
-let v = a.ymm("v");
-a.vmovups(v, xs.at(0));
-let high = a.ymm("high");
-a.vextractf128(high.xmm(), v, 1);
-let sum = a.ymm("sum");
-a.vaddps(sum.xmm(), v.xmm(), high.xmm());
-let pair = a.ymm("pair");
-a.vmovhlps(pair.xmm(), sum.xmm(), sum.xmm());
-a.vaddps(sum.xmm(), sum.xmm(), pair.xmm());
-a.vmovshdup(pair.xmm(), sum.xmm());
-a.vaddss(sum.xmm(), sum.xmm(), pair.xmm());
-a.ret_f32(sum.xmm());
-let listing = kgen::render(&a.finish())?;
-print!("{}", listing.text()); // where each variable lives, the code with its notes, the constants
-```
-
-## As a function
-
-A procedural macro runs only code it depends on, so the attribute that names a kernel is declared beside the
-kernels, by a proc-macro crate that depends on them and on `kgen-macros`:
+`#[kgen_macros::kernels]` on a module compiles each function in it that names an ABI. Its body is instructions,
+called by name, over variables declared with a type and no value; kgen allocates the registers.
 
 ```rust
-#[proc_macro_attribute]
-pub fn kernel(attr: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    // my_kernels::program(name: &str, params: &[(String, i64)]) -> Result<kgen::Program<kgen::Op>, String>
-    kgen_macros::kernel(attr, item, my_kernels::program)
+#[kgen_macros::kernels]
+mod kernels {
+    /// The sum of the eight floats at `xs`.
+    pub unsafe extern "sysv64" fn sum8(xs: *const f32) -> f32 {
+        let v: ymm;
+        vmovups(v, [xs]);
+        let high: ymm;
+        vextractf128(high.xmm, v, 1);
+        let sum: ymm;
+        vaddps(sum.xmm, v.xmm, high.xmm);
+        let pair: ymm;
+        vmovhlps(pair.xmm, sum.xmm, sum.xmm);
+        vaddps(sum.xmm, sum.xmm, pair.xmm);
+        vmovshdup(pair.xmm, sum.xmm);
+        vaddss(sum.xmm, sum.xmm, pair.xmm);
+        ret(sum.xmm);
+    }
 }
+
+let sum = unsafe { kernels::sum8(xs.as_ptr()) };
 ```
 
-Its users declare the function, and the attribute gives it the kernel for a body:
+`sum8` becomes an `#[unsafe(naked)]` function of the signature it declares, its body the kernel in Intel syntax,
+and `kernels::LISTINGS` holds each kernel's listing for snapshots. Everything that is not an instruction happens
+while the kernel compiles: `for` unrolls, `if` on a bool chooses, a function without an ABI is a helper inlined
+where it is called, and `<const N: usize>` makes one generic. [`kgen-lang`](crates/lang/src/lib.rs) describes the
+language.
+
+kgen does not spill. When the variables alive together do not fit in the registers, the error names them, at the
+declaration of the one that found none:
+
+```
+error: no Vec register left for `xs`: all 16 are held by variables live beside it: acc0=0 acc1=1 acc2=2 ... acc15=15
+  --> src/main.rs:14:17
+   |
+14 |             let xs: ymm;
+   |                 ^^
+```
+
+## On a GPU
+
+An `extern "ptx-kernel"` function is compiled to PTX. The module's kernels are one PTX module, `PTX`, which
+`Kernels::load` hands to the CUDA driver; each kernel is then a method that launches it on a grid.
+[`kgen-cuda`](crates/cuda/src/lib.rs) is the driver, opened when a GPU is asked for, so that a program built with
+GPU kernels still runs where there is none.
 
 ```rust
-#[my_kernels_macros::kernel(sum8)]
-pub unsafe extern "sysv64" fn sum8(xs: *const f32) -> f32;
+#[kgen_macros::kernels]
+mod gpu {
+    /// `y[i] = a * x[i] + y[i]` for each `i < n`, rounded once.
+    pub unsafe extern "ptx-kernel" fn saxpy(a: f32, x: *const f32, y: *mut f32, n: u32) {
+        let (block, size, thread, i): (u32, u32, u32, u32);
+        mov.u32(block, ctaid.x);
+        mov.u32(size, ntid.x);
+        mov.u32(thread, tid.x);
+        mad.lo.u32(i, block, size, thread);
+        let past: pred;
+        setp.ge.u32(past, i, n);
+        if past {
+            ret();
+        }
+        ..
+    }
+}
+
+let cuda = kgen_cuda::Cuda::new()?;
+let kernels = gpu::Kernels::load(&cuda)?;
+let (xs, ys) = (cuda.upload(&x)?, cuda.upload(&y)?);
+unsafe { kernels.saxpy(kgen_cuda::Grid::new(n.div_ceil(256), 256), 2.0, xs.ptr(), ys.ptr(), n)? };
+ys.read_into(&mut y)?;
 ```
 
-The declaration is checked against the kernel's signature, and the kernel's constants become statics beside it.
+## Example
+
+[`examples/my-app`](examples/my-app/src/main.rs) uses kgen as a crate outside it would: `sum8` and `dot::<4>` for
+the CPU and `saxpy` for the GPU, written in place, with safe functions over them. Its tests hold each kernel to a
+scalar reference that does the same float operations in the same order, bit for bit, and its listings to
+[`snapshots/`](examples/my-app/snapshots/).
+
+```
+cargo run -p my-app
+KGEN_BLESS=1 cargo test -p my-app   # rewrites the snapshots after a deliberate change, for review
+```
 
 ## Layers
 
@@ -62,12 +100,12 @@ Each crate depends only on the layers inside it. `crates/kgen/tests/architecture
 | layer | crate | what it knows |
 |---|---|---|
 | entities | `kgen-core` | programs over variables and over registers; the `Machine` port |
+| language | `kgen-lang` | kernels in Rust's syntax: parsing, evaluation, the `Target` port |
 | use cases | `kgen-compile` | liveness, register allocation, the frame's layout; tested on a toy machine |
-| adapter | `kgen-x86` | x86-64: the typed instruction builder, SysV, Intel syntax |
-| composition | `kgen` | which machine and syntax the use cases run with |
-| delivery | `kgen-macros` | a kernel as the body of a naked function, for the attribute beside the kernels |
-
-A crate of kernels depends on `kgen-core` and `kgen-x86`; its proc-macro crate depends on it and `kgen-macros`.
+| adapters | `kgen-x86`, `kgen-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
+| composition | `kgen` | which machine and syntax each kernel compiles with |
+| delivery | `kgen-macros` | kernels as functions: `#[unsafe(naked)]`, or launchers of PTX |
+| runtime | `kgen-cuda` | the CUDA driver: memory on the GPU, modules, launches; depends on no other crate |
 
 ## Guarantees
 
@@ -76,7 +114,8 @@ The output is deterministic:
 - clippy forbids hash maps and hash sets.
 
 Checking the generated kernels is for the crates that hold them: a snapshot of every listing, so that any change
-to any layer that moves an instruction shows in review, and runs against scalar references, bit for bit.
+to any layer that moves an instruction shows in review, and runs against scalar references, bit for bit, as in
+the example.
 
 ## Commands
 
@@ -84,3 +123,5 @@ to any layer that moves an instruction shows in review, and runs against scalar 
 ./make.py check    # formatting, clippy and every test
 ./make.py fmt      # formats every crate
 ```
+
+`make.py` runs under [uv](https://docs.astral.sh/uv/).

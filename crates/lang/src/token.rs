@@ -1,0 +1,297 @@
+//! Tokens as `proc_macro` hands them over, with numbered spans in place of its own, and a lexer
+//! that reads the same tokens out of a string.
+
+use crate::Error;
+
+/// Where a token came from, as whoever made the tokens numbers it: an index into the spans of a
+/// procedural macro's input, or a byte offset into a string.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Span(pub u32);
+
+/// The brackets around a group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Delim {
+    /// `( )`.
+    Paren,
+    /// `[ ]`.
+    Bracket,
+    /// `{ }`.
+    Brace,
+}
+
+/// A token, or a group of them in brackets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Tree {
+    /// A name or a keyword.
+    Ident {
+        /// Its text.
+        name: String,
+        /// Where it is.
+        span: Span,
+    },
+    /// One punctuation character.
+    Punct {
+        /// The character.
+        ch: char,
+        /// Whether the next token is punctuation right after it, as in the first `<` of `<<`.
+        joint: bool,
+        /// Where it is.
+        span: Span,
+    },
+    /// A number, string or character, as written.
+    Lit {
+        /// Its text, quotes and suffix included.
+        text: String,
+        /// Where it is.
+        span: Span,
+    },
+    /// Tokens in brackets.
+    Group {
+        /// The brackets.
+        delim: Delim,
+        /// What is inside.
+        trees: Vec<Tree>,
+        /// Where it opens.
+        span: Span,
+    },
+}
+
+impl Tree {
+    /// Where it is.
+    pub fn span(&self) -> Span {
+        match self {
+            Tree::Ident { span, .. } | Tree::Punct { span, .. } | Tree::Lit { span, .. } | Tree::Group { span, .. } => {
+                *span
+            }
+        }
+    }
+}
+
+/// `trees` as they read: words apart, punctuation against what follows.
+pub fn text(trees: &[Tree]) -> String {
+    let mut out = String::new();
+    let mut word = false;
+    for t in trees {
+        match t {
+            Tree::Ident { name: s, .. } | Tree::Lit { text: s, .. } => {
+                if word {
+                    out.push(' ');
+                }
+                out += s;
+                word = true;
+            }
+            Tree::Punct { ch, .. } => {
+                out.push(*ch);
+                word = false;
+            }
+            Tree::Group { delim, trees, .. } => {
+                let (open, close) = match delim {
+                    Delim::Paren => ('(', ')'),
+                    Delim::Bracket => ('[', ']'),
+                    Delim::Brace => ('{', '}'),
+                };
+                out.push(open);
+                out += &text(trees);
+                out.push(close);
+                word = true;
+            }
+        }
+    }
+    out
+}
+
+/// The characters that are punctuation.
+const PUNCT: &str = "+-*/%^!&|=<>@.,;:#$?~";
+
+/// The tokens of `src`, each spanned by its byte offset. Comments are skipped, doc comments too.
+pub fn lex(src: &str) -> Result<Vec<Tree>, Error> {
+    Lexer { src, pos: 0 }.trees(None)
+}
+
+struct Lexer<'a> {
+    src: &'a str,
+    pos: usize,
+}
+
+impl Lexer<'_> {
+    fn peek(&self) -> Option<char> {
+        self.src[self.pos..].chars().next()
+    }
+
+    fn peek2(&self) -> Option<char> {
+        self.src[self.pos..].chars().nth(1)
+    }
+
+    fn span(&self) -> Span {
+        Span(self.pos as u32)
+    }
+
+    fn error(&self, message: impl Into<String>) -> Error {
+        Error { span: self.span(), message: message.into() }
+    }
+
+    /// Tokens up to `close`, or to the end of the input if there is none to wait for.
+    fn trees(&mut self, close: Option<(char, Span)>) -> Result<Vec<Tree>, Error> {
+        let mut out = vec![];
+        loop {
+            self.skip_space()?;
+            let span = self.span();
+            let Some(c) = self.peek() else {
+                return match close {
+                    None => Ok(out),
+                    Some((ch, open)) => Err(Error { span: open, message: format!("this is never closed by `{ch}`") }),
+                };
+            };
+            match c {
+                '(' | '[' | '{' => {
+                    self.pos += 1;
+                    let (delim, closer) = match c {
+                        '(' => (Delim::Paren, ')'),
+                        '[' => (Delim::Bracket, ']'),
+                        _ => (Delim::Brace, '}'),
+                    };
+                    let trees = self.trees(Some((closer, span)))?;
+                    out.push(Tree::Group { delim, trees, span });
+                }
+                ')' | ']' | '}' => {
+                    if close.map(|(ch, _)| ch) != Some(c) {
+                        return Err(self.error(format!("unexpected `{c}`")));
+                    }
+                    self.pos += 1;
+                    return Ok(out);
+                }
+                '"' => out.push(self.string()?),
+                '\'' => out.push(self.char()?),
+                c if c.is_ascii_digit() => out.push(self.number()),
+                c if c == '_' || c.is_alphabetic() => {
+                    let start = self.pos;
+                    if self.src[start..].starts_with("r#") {
+                        self.pos += 2;
+                    }
+                    while let Some(c) = self.peek().filter(|&c| c == '_' || c.is_alphanumeric()) {
+                        self.pos += c.len_utf8();
+                    }
+                    out.push(Tree::Ident { name: self.src[start..self.pos].to_string(), span });
+                }
+                c if PUNCT.contains(c) => {
+                    self.pos += 1;
+                    let joint = self.peek().is_some_and(|n| PUNCT.contains(n));
+                    out.push(Tree::Punct { ch: c, joint, span });
+                }
+                c => return Err(self.error(format!("unexpected `{c}`"))),
+            }
+        }
+    }
+
+    fn skip_space(&mut self) -> Result<(), Error> {
+        loop {
+            let rest = &self.src[self.pos..];
+            if let Some(c) = rest.chars().next()
+                && c.is_whitespace()
+            {
+                self.pos += c.len_utf8();
+            } else if rest.starts_with("//") {
+                self.pos += rest.find('\n').unwrap_or(rest.len());
+            } else if rest.starts_with("/*") {
+                let start = self.span();
+                let mut depth = 0;
+                loop {
+                    let rest = &self.src[self.pos..];
+                    if rest.starts_with("/*") {
+                        depth += 1;
+                        self.pos += 2;
+                    } else if rest.starts_with("*/") {
+                        depth -= 1;
+                        self.pos += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else if let Some(c) = rest.chars().next() {
+                        self.pos += c.len_utf8();
+                    } else {
+                        return Err(Error { span: start, message: "this comment is never closed".into() });
+                    }
+                }
+            } else {
+                return Ok(());
+            }
+        }
+    }
+
+    fn string(&mut self) -> Result<Tree, Error> {
+        let (start, span) = (self.pos, self.span());
+        self.pos += 1;
+        loop {
+            match self.peek() {
+                None => return Err(Error { span, message: "this string is never closed".into() }),
+                Some('\\') => {
+                    self.pos += 1;
+                    if let Some(c) = self.peek() {
+                        self.pos += c.len_utf8();
+                    }
+                }
+                Some('"') => {
+                    self.pos += 1;
+                    return Ok(Tree::Lit { text: self.src[start..self.pos].to_string(), span });
+                }
+                Some(c) => self.pos += c.len_utf8(),
+            }
+        }
+    }
+
+    fn char(&mut self) -> Result<Tree, Error> {
+        let (start, span) = (self.pos, self.span());
+        self.pos += 1;
+        if self.peek() == Some('\\') {
+            self.pos += 1;
+        }
+        match self.peek() {
+            Some(c) => self.pos += c.len_utf8(),
+            None => return Err(self.error("a character literal is never closed")),
+        }
+        if self.peek() != Some('\'') {
+            return Err(Error { span, message: "lifetimes and labels have no place in a kernel".into() });
+        }
+        self.pos += 1;
+        Ok(Tree::Lit { text: self.src[start..self.pos].to_string(), span })
+    }
+
+    /// A number as Rust writes it: `16`, `0x3f`, `1_000`, `0.5`, `1e-5`, `8u8`, `2.0f32`. A
+    /// `.` after the digits belongs to the number only if a digit follows, so that `0..n` is a
+    /// range.
+    fn number(&mut self) -> Tree {
+        let (start, span) = (self.pos, self.span());
+        let word = |c: char| c == '_' || c.is_ascii_alphanumeric();
+        let radix = ["0x", "0o", "0b"].iter().any(|p| self.src[start..].starts_with(p));
+        if radix {
+            self.pos += 2;
+            while self.peek().is_some_and(word) {
+                self.pos += 1;
+            }
+            return Tree::Lit { text: self.src[start..self.pos].to_string(), span };
+        }
+        while self.peek().is_some_and(|c| c == '_' || c.is_ascii_digit()) {
+            self.pos += 1;
+        }
+        if self.peek() == Some('.') && self.peek2().is_some_and(|c| c.is_ascii_digit()) {
+            self.pos += 1;
+            while self.peek().is_some_and(|c| c == '_' || c.is_ascii_digit()) {
+                self.pos += 1;
+            }
+        }
+        if matches!(self.peek(), Some('e' | 'E')) {
+            let rest = &self.src[self.pos + 1..];
+            let digits = rest.strip_prefix(['+', '-']).unwrap_or(rest);
+            if digits.starts_with(|c: char| c.is_ascii_digit()) {
+                self.pos += 1 + (rest.len() - digits.len());
+                while self.peek().is_some_and(|c| c == '_' || c.is_ascii_digit()) {
+                    self.pos += 1;
+                }
+            }
+        }
+        while self.peek().is_some_and(word) {
+            self.pos += 1;
+        }
+        Tree::Lit { text: self.src[start..self.pos].to_string(), span }
+    }
+}

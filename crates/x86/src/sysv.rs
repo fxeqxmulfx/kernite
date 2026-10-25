@@ -14,8 +14,14 @@ pub(crate) const RBP: PReg = gpr(5);
 /// Where the integer and pointer parameters arrive, in order.
 pub(crate) const INT_PARAMS: [PReg; 6] = [gpr(7), gpr(6), gpr(2), gpr(1), gpr(8), gpr(9)];
 
+/// Where the float parameters arrive, in order, counted apart from the integers.
+pub(crate) const FLOAT_PARAMS: [PReg; 8] = [vec(0), vec(1), vec(2), vec(3), vec(4), vec(5), vec(6), vec(7)];
+
 /// Where a float result goes back.
 pub(crate) const FLOAT_RESULT: PReg = vec(0);
+
+/// Where an integer or pointer result goes back.
+pub(crate) const INT_RESULT: PReg = gpr(0);
 
 /// The caller-saved registers first, so that a kernel that fits in them saves nothing. The
 /// stack pointer is never handed out, and neither is `rbp`, which holds the caller's stack
@@ -68,6 +74,7 @@ impl Machine for SysV {
         match class {
             Class::Gpr => &GPRS,
             Class::Vec => &VECS,
+            Class::Pred | Class::Float => &[],
         }
     }
 

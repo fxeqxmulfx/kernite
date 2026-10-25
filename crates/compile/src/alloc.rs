@@ -5,7 +5,7 @@ use crate::bits::Bits;
 use crate::cfg::{self, Block};
 
 /// Which variables are live where, block by block: at the top of each and at the bottom.
-struct Live {
+pub(crate) struct Live {
     ins: Vec<Bits>,
     outs: Vec<Bits>,
 }
@@ -19,13 +19,8 @@ struct Live {
 /// but the program, so the same program always gets the same registers. Nothing spills: a
 /// variable left without a register is an [`Error::OutOfRegisters`], for the program to fix.
 pub(crate) fn allocate<Op>(p: &Program<Op>, m: &dyn Machine) -> Result<Vec<Option<PReg>>, Error> {
-    let blocks = cfg::blocks(&p.body)?;
-    let live = liveness(p, &blocks);
+    let (blocks, live) = analyse(p)?;
     let name = |i: usize| p.regs[i].name.clone();
-    let params: Vec<usize> = p.params.iter().map(|(v, _)| v.id as usize).collect();
-    if let Some(i) = live.ins[0].iter().find(|i| !params.contains(i)) {
-        return Err(Error::ReadBeforeWrite { var: name(i) });
-    }
     let adj = interference(p, &blocks, &live);
 
     let fixed = || p.params.iter().chain(&p.results);
@@ -74,6 +69,18 @@ pub(crate) fn allocate<Op>(p: &Program<Op>, m: &dyn Machine) -> Result<Vec<Optio
         }
     }
     Ok(regs)
+}
+
+/// The body's blocks and what is live at their edges, once control is known to stay inside
+/// the body and every variable but the parameters to be written before any path reads it.
+pub(crate) fn analyse<Op>(p: &Program<Op>) -> Result<(Vec<Block>, Live), Error> {
+    let blocks = cfg::blocks(&p.body)?;
+    let live = liveness(p, &blocks);
+    let params: Vec<usize> = p.params.iter().map(|(v, _)| v.id as usize).collect();
+    if let Some(i) = live.ins[0].iter().find(|i| !params.contains(i)) {
+        return Err(Error::ReadBeforeWrite { var: p.regs[i].name.clone() });
+    }
+    Ok((blocks, live))
 }
 
 /// Solves liveness backwards to a fixed point. A block's reads of variables it has not

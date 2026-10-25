@@ -8,6 +8,10 @@ pub enum Class {
     Gpr,
     /// Vector.
     Vec,
+    /// A predicate: one bit, set by a comparison and read by the instructions it guards.
+    Pred,
+    /// Floats, where a machine keeps them apart from integers.
+    Float,
 }
 
 /// A variable of a program before allocation. It may be written any number of times; it

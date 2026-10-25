@@ -8,6 +8,8 @@ version = "0.1.0"
 dependencies = [
  "kgen-compile",
  "kgen-core",
+ "kgen-lang",
+ "kgen-ptx",
  "kgen-x86",
 ]
 
@@ -23,6 +25,14 @@ name = "kgen-core"
 version = "0.1.0"
 
 [[package]]
+name = "kgen-cuda"
+version = "0.1.0"
+
+[[package]]
+name = "kgen-lang"
+version = "0.1.0"
+
+[[package]]
 name = "kgen-macros"
 version = "0.1.0"
 dependencies = [
@@ -30,8 +40,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "kgen-ptx"
+version = "0.1.0"
+dependencies = [
+ "kgen-core",
+ "kgen-lang",
+]
+
+[[package]]
 name = "kgen-x86"
 version = "0.1.0"
 dependencies = [
  "kgen-core",
+ "kgen-lang",
+]
+
+[[package]]
+name = "my-app"
+version = "0.1.0"
+dependencies = [
+ "kgen-cuda",
+ "kgen-macros",
 ]

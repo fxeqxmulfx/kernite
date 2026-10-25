@@ -1,0 +1,156 @@
+//! Kernels in the language, compiled for x86: what they come to, and what the errors say.
+
+/// The kernels of `examples/my-app`, and the same dot product with sixteen accumulators.
+const KERNELS: &str = r#"
+    /// The sum of the eight floats at `xs`.
+    pub unsafe extern "sysv64" fn sum8(xs: *const f32) -> f32 {
+        let v: ymm;
+        vmovups(v, [xs]);
+        ret_sum(v);
+    }
+
+    pub unsafe extern "sysv64" fn dot_unroll1(x: *const f32, y: *const f32, n: usize) -> f32 {
+        dot::<1>(x, y, n);
+    }
+
+    pub unsafe extern "sysv64" fn dot_unroll4(x: *const f32, y: *const f32, n: usize) -> f32 {
+        dot::<4>(x, y, n);
+    }
+
+    pub unsafe extern "sysv64" fn dot_unroll16(x: *const f32, y: *const f32, n: usize) -> f32 {
+        dot::<16>(x, y, n);
+    }
+
+    fn dot<const UNROLL: usize>(x: gpr, y: gpr, n: gpr) {
+        test(n, n);
+        jz(empty);
+        let acc: [ymm; UNROLL];
+        for k in 0..UNROLL {
+            zero(acc[k]);
+        }
+        label(top);
+        for k in 0..UNROLL {
+            let xs: ymm;
+            vmovups(xs, [x + 32 * k]);
+            vfmadd231ps(acc[k], xs, [y + 32 * k]);
+        }
+        add(x, 32 * UNROLL);
+        add(y, 32 * UNROLL);
+        sub(n, 8 * UNROLL);
+        jnz(top);
+
+        note("the accumulators, in order");
+        for k in 1..UNROLL {
+            vaddps(acc[0], acc[0], acc[k]);
+        }
+        ret_sum(acc[0]);
+
+        label(empty);
+        let zero: ymm;
+        zero(zero);
+        ret(zero.xmm);
+    }
+
+    fn ret_sum(v: ymm) {
+        note("the lanes");
+        let high: ymm;
+        vextractf128(high.xmm, v, 1);
+        let sum: ymm;
+        vaddps(sum.xmm, v.xmm, high.xmm);
+        let pair: ymm;
+        vmovhlps(pair.xmm, sum.xmm, sum.xmm);
+        vaddps(sum.xmm, sum.xmm, pair.xmm);
+        vmovshdup(pair.xmm, sum.xmm);
+        vaddss(sum.xmm, sum.xmm, pair.xmm);
+        ret(sum.xmm);
+    }
+"#;
+
+/// `tests/builder` holds the listings `kgen-x86`'s builder made of these kernels, before the
+/// language: what the language writes must compile to the same instructions in the same registers.
+#[test]
+fn the_examples_kernels_come_out_as_the_builder_wrote_them() {
+    let snapshots = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/builder");
+    for name in ["sum8", "dot_unroll1", "dot_unroll4"] {
+        let listing = kgen::x86_str(KERNELS, name).unwrap();
+        let want = std::fs::read_to_string(snapshots.join(format!("{name}.s"))).unwrap();
+        assert_eq!(listing.text(), want, "{name}");
+    }
+}
+
+#[test]
+fn sixteen_accumulators_and_a_load_do_not_fit_and_the_error_says_where() {
+    let e = kgen::x86_str(KERNELS, "dot_unroll16").unwrap_err();
+    assert!(e.starts_with("30:17: no Vec register left for `xs`: all 16 are held by"), "{e}");
+}
+
+#[test]
+fn up_to_fifteen_accumulators_fit() {
+    let mut src = KERNELS.to_string();
+    for k in 1..=15 {
+        src += &format!(
+            "unsafe extern \"sysv64\" fn dot{k}(x: *const f32, y: *const f32, n: usize) -> f32 {{ dot::<{k}>(x, y, n); }}\n"
+        );
+    }
+    for k in 1..=15 {
+        kgen::x86_str(&src, &format!("dot{k}")).unwrap_or_else(|e| panic!("{k} accumulators: {e}"));
+    }
+}
+
+/// The kernel `k` around `body`, compiled, or the error.
+fn compile(params: &str, body: &str) -> Result<String, String> {
+    let src = format!("unsafe extern \"sysv64\" fn k({params}) {{\n{body}\n}}\n");
+    kgen::x86_str(&src, "k").map(|l| l.code().collect::<Vec<_>>().join("\n"))
+}
+
+#[test]
+fn memory_operands_take_every_form_x86_has() {
+    let code = compile(
+        "x: *const f32, i: usize",
+        "let v: ymm;
+         vmovups(v, [x + i * 4 + 16]);
+         vmovups([x - 32], v);
+         vbroadcastss(v, [2.0]);
+         vmulps(v, v, [[0.5; 8]]);
+         let g: gpr;
+         mov(g.r32, [x + i * 4]);
+         lea(g, [x + i * 8]);",
+    )
+    .unwrap();
+    let want = "vmovups ymm0, ymmword ptr [rdi + rsi*4 + 16]
+vmovups ymmword ptr [rdi - 32], ymm0
+vbroadcastss ymm0, dword ptr [rip + {c0}]
+vmulps ymm0, ymm0, ymmword ptr [rip + {c1}]
+mov eax, dword ptr [rdi + rsi*4]
+lea rax, [rdi + rsi*8]
+vzeroupper
+ret";
+    assert_eq!(code, want);
+}
+
+#[test]
+fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
+    let cases = [
+        ("let v: ymm; vaddps(v, v.xmm, v);", "2:25: `vaddps` wants a ymm; this is an xmm"),
+        ("let v: ymm; vaddps(v, v);", "2:13: `vaddps` takes 3 operands, not 2"),
+        ("let v: ymm; vmovups(v, [1.0]);", "2:24: this reads 32 bytes of a constant of 4"),
+        ("let v: ymm; vmovups(v, [x + x * 3]);", "2:24: x86 wants a base beside a scaled index"),
+        ("let i: gpr; let v: ymm; vmovups(v, [x + i * 3]);", "2:36: x86 scales an index by 1, 2, 4 or 8, not 3"),
+        ("let v: ymm; vaddps(v, v, 1.5);", "2:26: x86 takes floats from memory: `[1.5]`"),
+        ("vfrobps(x);", "2:1: x86 has no instruction `vfrobps` that kgen knows"),
+        ("let v: ymm; vaddps(v, v, w);", "2:26: `w` is not defined"),
+        ("let v: zmm;", "2:8: x86 variables are `gpr`, `ymm` and `xmm`, not `zmm`"),
+        ("let v: ymm; vaddps(v, v, v);", "2:5: `v` is read before anything writes it"),
+    ];
+    for (body, want) in cases {
+        assert_eq!(compile("x: *const f32", body).unwrap_err(), want, "{body}");
+    }
+}
+
+#[test]
+fn a_kernel_takes_what_sysv_passes_in_registers() {
+    let e = compile("a: u32", "").unwrap_err();
+    assert_eq!(e, "1:32: SysV leaves the high bits of a `u32` as they were; take a usize or a u64");
+    let code = compile("a: f32, p: *mut f32, b: f32", "vmovss([p], b.xmm); vaddss(b.xmm, a.xmm, b.xmm);").unwrap();
+    assert_eq!(code, "vmovss dword ptr [rdi], xmm1\nvaddss xmm1, xmm0, xmm1\nvzeroupper\nret");
+}

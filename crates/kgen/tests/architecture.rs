@@ -8,10 +8,13 @@ use std::path::Path;
 /// Each crate and the crates it may depend on.
 const RULE: &[(&str, &[&str])] = &[
     ("kgen-core", &[]),
+    ("kgen-lang", &[]),
     ("kgen-compile", &["kgen-core"]),
-    ("kgen-x86", &["kgen-core"]),
-    ("kgen", &["kgen-core", "kgen-compile", "kgen-x86"]),
+    ("kgen-x86", &["kgen-core", "kgen-lang"]),
+    ("kgen-ptx", &["kgen-core", "kgen-lang"]),
+    ("kgen", &["kgen-core", "kgen-lang", "kgen-compile", "kgen-x86", "kgen-ptx"]),
     ("kgen-macros", &["kgen"]),
+    ("kgen-cuda", &[]),
 ];
 
 /// The package name and every dependency of the manifest at `path`, of any kind.

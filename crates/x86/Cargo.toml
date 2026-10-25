@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 kgen-core = { workspace = true }
+kgen-lang = { workspace = true }
 
 [lints]
 workspace = true

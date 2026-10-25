@@ -1,4 +1,7 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# ///
 """Everything this repository runs, one target each.
 
     ./make.py check                 formatting, clippy and every test

@@ -51,6 +51,8 @@ impl Listing {
         let class = |c: &Class| match c {
             Class::Gpr => "gpr",
             Class::Vec => "vec",
+            Class::Pred => "pred",
+            Class::Float => "float",
         };
         let params: Vec<_> = self.signature.params.iter().map(class).collect();
         let result = self.signature.result.as_ref().map_or("()", class);
@@ -204,6 +206,7 @@ fn full(class: Class) -> Width {
     match class {
         Class::Gpr => Width::W64,
         Class::Vec => Width::W256,
+        Class::Pred | Class::Float => unreachable!("x86 has no {class:?} registers"),
     }
 }
 

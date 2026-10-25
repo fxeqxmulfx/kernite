@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "examples/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,10 +12,13 @@ publish = false
 # manifest against it.
 [workspace.dependencies]
 kgen-core = { path = "crates/core" }
+kgen-lang = { path = "crates/lang" }
 kgen-compile = { path = "crates/compile" }
 kgen-x86 = { path = "crates/x86" }
+kgen-ptx = { path = "crates/ptx" }
 kgen = { path = "crates/kgen" }
 kgen-macros = { path = "crates/macros" }
+kgen-cuda = { path = "crates/cuda" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

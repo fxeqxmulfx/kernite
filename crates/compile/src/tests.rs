@@ -16,7 +16,7 @@ impl Machine for Toy {
     fn allocatable(&self, class: Class) -> &[PReg] {
         match class {
             Class::Gpr => &self.gpr,
-            Class::Vec => &[],
+            Class::Vec | Class::Pred | Class::Float => &[],
         }
     }
 
