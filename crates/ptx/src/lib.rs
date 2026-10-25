@@ -10,12 +10,15 @@
 //!   version and for the GPU their instructions need.
 //!
 //! PTX's registers have no number, and `ptxas` allocates them, so nothing here allocates: a
-//! variable is a register named after it.
+//! variable is a register named after it. Memory a kernel declares, [`Memory`], is named
+//! after its variable too.
 
 pub mod forms;
 pub mod lang;
 
 use kgen_core::{Item, Program};
+
+use crate::forms::Space;
 
 /// A register type of PTX, which is what a variable is declared as, and the types an
 /// instruction's name ends in.
@@ -287,6 +290,20 @@ impl Param {
     }
 }
 
+/// Memory a kernel declares: bytes in shared or local memory, at an address that is a
+/// multiple of `align`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Memory {
+    /// Its name in the PTX: unique in the entry, and in the module if it has no size.
+    pub name: String,
+    /// [`Space::Shared`] or [`Space::Local`].
+    pub space: Space,
+    /// What its address is a multiple of, in bytes: a power of two.
+    pub align: u64,
+    /// How many bytes it is; `None` for the shared memory the launch says the size of.
+    pub bytes: Option<u64>,
+}
+
 /// A kernel written in PTX.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -297,6 +314,8 @@ pub struct Entry {
     /// Each variable's register, its name unique in the entry, and its type, by
     /// [`kgen_core::VReg::id`].
     pub regs: Vec<(String, Ty)>,
+    /// The memory it declares, in order.
+    pub memory: Vec<Memory>,
     /// What it needs, above [`Needs::FLOOR`], and the first instruction or type that needs
     /// it, for when another kernel of the module needs what cannot go with it.
     pub needs: Vec<(Needs, String)>,
@@ -323,6 +342,11 @@ impl Entry {
                 self.regs.iter().filter(|(_, t)| t.decl() == ty).map(|(reg, _)| format!("%{reg}")).collect();
             for some in regs.chunks(8) {
                 out += &format!("\t.reg .{} {};\n", ty.name(), some.join(", "));
+            }
+        }
+        for m in &self.memory {
+            if let Some(bytes) = m.bytes {
+                out += &format!("\t.{} .align {} .b8 {}[{bytes}];\n", m.space.word(), m.align, m.name);
             }
         }
         out += "\n";
@@ -367,6 +391,13 @@ pub fn module(entries: &[Entry]) -> Result<String, String> {
     }
     let mut out =
         format!("// Written by kgen.\n\n.version {}\n.target {}\n.address_size 64\n", needs.version(), needs.target());
+    let sized: Vec<&Memory> = entries.iter().flat_map(|e| &e.memory).filter(|m| m.bytes.is_none()).collect();
+    if !sized.is_empty() {
+        out += "\n";
+    }
+    for m in sized {
+        out += &format!(".extern .shared .align {} .b8 {}[];\n", m.align, m.name);
+    }
     for e in entries {
         out += "\n";
         out += &e.text();

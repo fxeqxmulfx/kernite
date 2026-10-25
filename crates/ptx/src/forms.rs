@@ -23,8 +23,9 @@ use crate::{Kind, Needs, Ty};
 ///
 /// After ` : ` are the operands. One is a type, `T` or `u32`, with `=` before it for one the
 /// instruction writes, `%` for one that must be a variable, `_` for one `_` may stand for,
-/// `!` for a predicate it may read inverted, and `$` for one a special register may be; and
-/// after it `*2` for so many taken together, `*v` for as many as `.v2` or `.v4` say. `a|b` is
+/// `!` for a predicate it may read inverted, `$` for one a special register may be, and `&`
+/// for memory the kernel declares, which stands for its address; and after it `*2` for so
+/// many taken together, `*v` for as many as `.v2` or `.v4` say. `a|b` is
 /// two written at once, and `a[|b]` one or two. `u32<16` is a value below 16, if it is one
 /// known now, `u32/32` a multiple of 32, and `f32(0,1]` a fraction, more than 0 and at most 1.
 /// `[R]`, `[W]` and `[X]` are memory read, written,
@@ -231,6 +232,7 @@ shr(.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64) : =T, T, u32
 
 # Moving data, and converting it.
 mov(.pred|.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64|.f32|.f64) : =T, $T
+mov(.u32|.u64) : =T, &T
 mov.b128 : =T, T @8.3 @sm70
 mov.b16 : =T, b8*2
 mov.b32 : =T, b16*2
@@ -279,6 +281,7 @@ createpolicy.fractional$prio$prio2.b64 : =T, f32(0,1]? @7.4 @sm80
 createpolicy.cvt.L2.b64 : =T, b64 @7.4 @sm80
 isspacep$space : =pred, %u64
 cvta$space.u64 : =T, T
+cvta(.local|.shared|.shared::cta@7.8).u64 : =T, &T
 cvta.to$space.u64 : =T, T
 cvt{.rni|.rzi|.rmi|.rpi|.rn|.rz|.rm|.rp}{.ftz}{.sat}$cvty$cvty : =T, $U +wide +cvt
 cvt(.rn|.rz)~round{.relu@7.0@sm80}{.satfinite@8.1@sm70}(.f16|.bf16@7.0@sm80).f32 : =T, U +wide
@@ -474,6 +477,8 @@ pub struct Spec {
     pub not: bool,
     /// Whether it may be a special register, `tid.x`.
     pub sreg: bool,
+    /// Whether it is memory the kernel declares, which stands for its address there.
+    pub memory: bool,
     /// What a value known now is below, if anything: 16 for a barrier.
     pub below: Option<i64>,
     /// What a value known now is a multiple of, and more than 0: a barrier's threads are
@@ -522,6 +527,18 @@ impl Space {
     /// `.address_size 64`; the others fit 32.
     pub fn wide(self) -> bool {
         matches!(self, Space::Generic | Space::Global)
+    }
+
+    /// The word for it, as in `ld.shared`; nothing for a generic address.
+    pub fn word(self) -> &'static str {
+        match self {
+            Space::Generic => "",
+            Space::Global => "global",
+            Space::Shared => "shared",
+            Space::Local => "local",
+            Space::Const => "const",
+            Space::Param => "param",
+        }
     }
 }
 
@@ -1167,6 +1184,7 @@ fn one(s: &str, line: &str) -> Spec {
         sink: false,
         not: false,
         sreg: false,
+        memory: false,
         below: None,
         step: None,
         fraction: false,
@@ -1193,12 +1211,13 @@ fn one(s: &str, line: &str) -> Spec {
         }
         _ => {
             let mut t = s;
-            while let Some(c) = t.chars().next().filter(|c| "=%_!$".contains(*c)) {
+            while let Some(c) = t.chars().next().filter(|c| "=%_!$&".contains(*c)) {
                 match c {
                     '=' => spec.role = Role::Dst,
                     '%' => spec.reg_only = true,
                     '_' => spec.sink = true,
                     '!' => spec.not = true,
+                    '&' => spec.memory = true,
                     _ => spec.sreg = true,
                 }
                 t = &t[1..];

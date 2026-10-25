@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kgen::lang::{Mem as Address, Operand as Given, Target};
-use kgen_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Spec};
+use kgen_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Space, Spec};
 use kgen_ptx::lang::{Kernel, Var};
 use kgen_ptx::{Entry, Kind, Needs, Ty};
 
@@ -133,16 +133,18 @@ fn ptxas_takes_what_kgen_writes() {
         return;
     };
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    let (src, out) = (dir.join("kernels.ptx"), dir.join("kernels.cubin"));
-    std::fs::write(&src, kgen::ptx_str(KERNELS).unwrap()).unwrap();
-    let run = Command::new(&ptxas)
-        .args(["--gpu-name", "sm_75", "--warning-as-error"])
-        .arg(&src)
-        .arg("-o")
-        .arg(&out)
-        .output()
-        .unwrap();
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    for (name, kernels) in [("kernels", KERNELS), ("shared", SHARED)] {
+        let (src, out) = (dir.join(format!("{name}.ptx")), dir.join(format!("{name}.cubin")));
+        std::fs::write(&src, kgen::ptx_str(kernels).unwrap()).unwrap();
+        let run = Command::new(&ptxas)
+            .args(["--gpu-name", "sm_75", "--warning-as-error"])
+            .arg(&src)
+            .arg("-o")
+            .arg(&out)
+            .output()
+            .unwrap();
+        assert!(run.status.success(), "{name}: {}", String::from_utf8_lossy(&run.stderr));
+    }
 }
 
 /// The kernel `k` around `body`, compiled, or the error.
@@ -361,6 +363,8 @@ enum Style {
     Sinks,
     /// Without the operands that may be left out, and one result where two may be.
     Short,
+    /// Memory the kernel declares for an address in shared or local memory.
+    Memory,
 }
 
 /// The names of `form` the test writes, and the words of each: each word of each element with
@@ -444,6 +448,14 @@ impl Making {
         self.kernel.var(&format!("v{}", self.vars), t.name()).unwrap()
     }
 
+    /// Memory of 256 bytes at a multiple of 16, in local memory for `.local` and in shared
+    /// memory otherwise.
+    fn memory(&mut self, space: Space) -> Var {
+        self.vars += 1;
+        let space = if space == Space::Local { "local" } else { "shared" };
+        self.kernel.var(&format!("s{}", self.vars), &format!("{space}<[u8; 256], 16>")).unwrap()
+    }
+
     /// The operand `spec` of `b`, as `style` gives it.
     fn operand(&mut self, b: &Bound, spec: &Spec, style: Style) -> Given<Var> {
         let lanes = match spec.count {
@@ -454,7 +466,9 @@ impl Making {
         let t = b.ty(spec.ty.expect("a register's operand has a type"));
         let mut parts = vec![];
         for _ in 0..lanes {
-            let part = if style == Style::Sinks && spec.sink && !self.sunk {
+            let part = if spec.memory {
+                Some(Given::Var(self.memory(b.space())))
+            } else if style == Style::Sinks && spec.sink && !self.sunk {
                 self.sunk = true;
                 Some(Given::Special("_".into()))
             } else if style == Style::Sinks && spec.not {
@@ -464,7 +478,7 @@ impl Making {
             } else {
                 None
             };
-            self.differs |= part.is_some();
+            self.differs |= part.is_some() && !spec.memory;
             parts.push(part.unwrap_or_else(|| Given::Var(self.var(t))));
         }
         match lanes {
@@ -487,6 +501,10 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
         }
         args.push(match spec.role {
             Role::Label => Given::Label(0),
+            Role::Addr(_) if style == Style::Memory && matches!(b.space(), Space::Shared | Space::Local) => {
+                m.differs = true;
+                Given::Mem(Address { base: Some(m.memory(b.space())), index: None, disp: 16 })
+            }
             Role::Addr(_) => Given::Mem(Address { base: Some(addr), index: None, disp: 0 }),
             Role::Imm(Imm::Bits(_)) => Given::Int(1),
             Role::Imm(Imm::Exactly(x)) => Given::Int(x),
@@ -709,7 +727,7 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
                 }
             };
             let Some(b) = bound.iter().find(|b| std::ptr::eq(b.form, form)) else { continue };
-            for style in [Style::Vars, Style::Values, Style::Sinks, Style::Short] {
+            for style in [Style::Vars, Style::Values, Style::Sinks, Style::Short, Style::Memory] {
                 n += 1;
                 match instance(n, &name, b, style) {
                     None => {}
@@ -799,4 +817,193 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
     eprintln!("{n} instances in {} modules; {refusals} names kgen refuses", modules.len());
     eprintln!("{} kernels ptxas may only have checked for sm_75:\n{}", unsure.len(), unsure.join("\n"));
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// Kernels that keep what they work on in shared memory: as much as the kernel declares, and
+/// as much as the launch gives.
+const SHARED: &str = r#"
+    /// `y[b]`, the sum of the 256 elements of `x` from `256 b`, for blocks of 256 threads.
+    pub unsafe extern "ptx-kernel" fn block_sum(x: *const f32, y: *mut f32) {
+        let tile: shared<[f32; 256], 16>;
+        let (t, b, i, mine): (u32, u32, u32, u32);
+        mov.u32(t, tid.x);
+        mov.u32(b, ctaid.x);
+        mad.lo.u32(i, b, 256, t);
+        let at: u64;
+        mad.wide.u32(at, i, 4, x);
+        let (v, w): (f32, f32);
+        ld.global.f32(v, [at]);
+        mov.u32(mine, tile);
+        mad.lo.u32(mine, t, 4, mine);
+        st.shared.f32([mine], v);
+        let p: pred;
+        for half in [128, 64, 32, 16, 8, 4, 2, 1] {
+            bar.sync(0);
+            setp.lt.u32(p, t, half);
+            if p {
+                ld.shared.f32(w, [mine + 4 * half]);
+                add.rn.f32(v, v, w);
+                st.shared.f32([mine], v);
+            }
+        }
+        setp.eq.u32(p, t, 0);
+        if p {
+            ld.shared.f32(v, [tile]);
+            mad.wide.u32(at, b, 4, y);
+            st.global.f32([at], v);
+        }
+    }
+
+    /// The `n` elements of `x` from `n b` reversed, for blocks of `n` threads, through the
+    /// shared memory the launch gives: `4 n` bytes.
+    pub unsafe extern "ptx-kernel" fn reverse(x: *mut f32) {
+        let buf: shared<[f32]>;
+        let (t, n, i, j, s): (u32, u32, u32, u32, u32);
+        mov.u32(t, tid.x);
+        mov.u32(n, ntid.x);
+        mov.u32(i, ctaid.x);
+        mad.lo.u32(i, i, n, t);
+        let at: u64;
+        mad.wide.u32(at, i, 4, x);
+        let v: f32;
+        ld.global.f32(v, [at]);
+        mov.u32(s, buf);
+        mad.lo.u32(j, t, 4, s);
+        st.shared.f32([j], v);
+        bar.sync(0);
+        sub.u32(j, n, t);
+        sub.u32(j, j, 1);
+        mad.lo.u32(j, j, 4, s);
+        ld.shared.f32(v, [j]);
+        st.global.f32([at], v);
+    }
+"#;
+
+#[test]
+fn memory_is_declared_where_ptx_has_it() {
+    let ptx = kgen::ptx_str(SHARED).unwrap();
+    let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
+    let want = "// Written by kgen.
+
+.version 7.5
+.target sm_61
+.address_size 64
+
+.extern .shared .align 4 .b8 reverse$buf[];
+
+";
+    assert_eq!(head, want);
+    let block_sum = entries.split(".visible .entry ").next().unwrap();
+    for line in [
+        "\t.reg .u64 %x, %y, %at;\n\t.shared .align 16 .b8 tile[1024];\n\n",
+        "\tmov.u32 %mine, tile;\n",
+        "\t@%p ld.shared.f32 %w, [%mine+512];\n\t@%p add.rn.f32 %v, %v, %w;\n",
+        "\t@%p ld.shared.f32 %v, [tile];\n",
+    ] {
+        assert!(block_sum.contains(line), "{line}");
+    }
+    assert!(entries.contains("\tmov.u32 %s, reverse$buf;\n"));
+}
+
+#[test]
+fn memory_is_reached_in_its_state_space_and_within_it() {
+    let t = "let t: shared<[f32; 256], 16>; let f: f32;";
+    let cases = [
+        ("let t: shared<[f32; 0]>;".to_string(), "2:8: `shared<[f32; 0]>` holds nothing"),
+        ("let t: shared<[f32; 4], 3>;".into(), "2:8: what an address is a multiple of is a power of two, not 3"),
+        ("let t: shared<[f64; 4], 4>;".into(), "2:8: an array of `f64` is aligned to 8 at least, not 4"),
+        (
+            "let t: shared<[pred; 4]>;".into(),
+            "2:8: memory holds no `pred`, which is a register's alone: a `u8` holds a bool",
+        ),
+        (
+            "let t: shared<f32, 16, 2>;".into(),
+            "2:8: `shared<..>` is an array of PTX's types and what its address is a multiple of, `shared<[f32; \
+             256], 16>`, or one, `shared<f32>`; not `shared<f32, 16, 2>`",
+        ),
+        (
+            "let t: local<[f32]>;".into(),
+            "2:8: `local<[f32]>` has no size, which only shared memory may leave to the launch: `local<[f32; 64]>`",
+        ),
+        (
+            "let a: shared<[f32; 8192]>; let b: shared<[f32; 4097]>;".into(),
+            "2:36: this makes the kernel's shared memory 49156 bytes; it declares 48 KB at most, and has more as \
+             `shared<[f32]>`, which the launch gives",
+        ),
+        (
+            "let a: shared<[f32]>; let b: shared<[u32]>;".into(),
+            "2:30: `b` would start where `a` does, after the memory with a size: a kernel has one `shared<[T]>`, \
+             which the launch gives",
+        ),
+        (
+            "let l: local<[u32; 600000]>;".into(),
+            "2:8: this makes a thread's local memory 2400000 bytes, and a thread has 512 KB",
+        ),
+        (format!("{t} ld.global.f32(f, [t]);"), "2:61: `ld.global.f32` reads global memory; `t` is shared memory"),
+        (
+            format!("{t} ld.f32(f, [t]);"),
+            "2:54: `ld.f32` reads at a generic address; `t` is shared memory, which an instruction reaches by its \
+             name only as `.shared`",
+        ),
+        (
+            "let i: u32; let l: local<[u32; 4]>; atom.add.u32(i, [l], 1);".into(),
+            "2:53: `atom.add.u32` reads and writes at a generic address; `l` is local memory, which an instruction \
+             reaches by its name only as `.local`",
+        ),
+        (
+            format!("{t} ld.shared.f32(f, [t + 1024]);"),
+            "2:61: `ld.shared.f32` reads 4 bytes at `[t + 1024]`, past the end of `t`, 1024 bytes",
+        ),
+        (
+            format!("{t} st.shared.f32([t + 1024], f);"),
+            "2:58: `st.shared.f32` writes 4 bytes at `[t + 1024]`, past the end of `t`, 1024 bytes",
+        ),
+        (format!("{t} ld.shared.f32(f, [t - 4]);"), "2:61: `ld.shared.f32` reads at `[t - 4]`, before `t` starts"),
+        (
+            "let d: shared<[f32]>; let f: f32; ld.shared.f32(f, [d - 4]);".into(),
+            "2:52: `ld.shared.f32` reads at `[d - 4]`, before `d` starts",
+        ),
+        (
+            format!("{t} let (a, b, c, d): (f32, f32, f32, f32); ld.shared.v4.f32((a, b, c, d), [t + 8]);"),
+            "2:115: `ld.shared.v4.f32` reads 16 bytes at once, at an address that is a multiple of 16; `[t + 8]` is \
+             not one",
+        ),
+        (
+            format!("{t} let i: u32; atom.shared.add.u32(i, [t + 2], 1);"),
+            "2:79: `atom.shared.add.u32` reads and writes 4 bytes at once, at an address that is a multiple of 4; \
+             `[t + 2]` is not one",
+        ),
+        (
+            "let u: shared<[f32; 64]>; let (a, b): (f32, f32); ld.shared.v2.f32((a, b), [u]);".into(),
+            "2:76: `ld.shared.v2.f32` reads 8 bytes at once, at an address that is a multiple of 8; `u` is at a \
+             multiple of 4: `shared<[f32; 64], 8>`",
+        ),
+        (
+            format!("{t} mov.f32(f, t);"),
+            "2:55: `mov.f32` takes no memory as an operand: `mov.u32(a, t)` puts the address of `t` in `a`, and \
+             `[t]` is what it holds",
+        ),
+        (
+            "let l: local<[u32; 16]>; let g: u64; cvta.shared.u64(g, l);".into(),
+            "2:57: `cvta.shared.u64` takes the address of shared memory; `l` is local memory",
+        ),
+        (
+            format!("{t} if t {{ mov.f32(f, 1.0); }}"),
+            "2:55: an instruction is guarded by a `pred`; this is `t`, shared memory",
+        ),
+        (format!("{t} mov.f32(f, t.x);"), "2:57: `t` is memory, `shared<[f32; 256], 16>`; it is no `x`"),
+    ];
+    for (body, want) in cases {
+        assert_eq!(compile("x: *mut f32, n: u32", &body).unwrap_err(), want, "{body}");
+    }
+    // Memory takes the name it is given, but for one PTX has or the kernel's other names.
+    let ptx = compile(
+        "x: *mut f32, n: u32",
+        "let WARP_SZ: shared<u32>; let k: shared<u32>; let k_param_0: shared<u32>; mov.u32(n, WARP_SZ); \
+         mov.u32(n, k); mov.u32(n, k_param_0);",
+    )
+    .unwrap();
+    for line in ["\tmov.u32 %n, WARP_SZ_;\n", "\tmov.u32 %n, k_1;\n", "\tmov.u32 %n, k_param_0_1;\n"] {
+        assert!(ptx.contains(line), "{line}");
+    }
 }
