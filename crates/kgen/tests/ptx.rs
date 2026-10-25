@@ -133,7 +133,7 @@ fn ptxas_takes_what_kgen_writes() {
         return;
     };
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    for (name, kernels) in [("kernels", KERNELS), ("shared", SHARED)] {
+    for (name, kernels) in [("kernels", KERNELS), ("shared", SHARED), ("tables", TABLES)] {
         let (src, out) = (dir.join(format!("{name}.ptx")), dir.join(format!("{name}.cubin")));
         std::fs::write(&src, kgen::ptx_str(kernels).unwrap()).unwrap();
         let run = Command::new(&ptxas)
@@ -174,6 +174,15 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ("let i: u32; mov.u32(i, tod.x);", "2:28: `tod.x` is not defined"),
         ("let i: u32; if n { mov.u32(i, 1); }", "2:24: an instruction is guarded by a `pred`; this is a `u32`"),
         ("let v: f32; add.rn.f32(v, v, 1.5);", "2:5: `v` is read before anything writes it"),
+        (
+            "let v: f32; brx.idx(n, (a, b)); label(a); mov.f32(v, 1); label(b); st.global.f32([x], v);",
+            "2:5: `v` is read before anything writes it",
+        ),
+        (
+            "let v: f32; let p: pred; setp.eq.u32(p, n, 0); if p { brx.idx(n, (a,)); } st.global.f32([x], v); \
+             label(a); mov.f32(v, 1); st.global.f32([x], v);",
+            "2:5: `v` is read before anything writes it",
+        ),
         (
             "let v: f128;",
             "2:8: PTX variables are `pred`, `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, \
@@ -339,6 +348,19 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
             "2:62: a video instruction takes a part of a 32-bit variable, as `.b0`; this is a `u64`",
         ),
         (
+            "brx.idx(n, a); label(a);",
+            "2:12: `brx.idx` wants labels taken together, as `(a, b)`, for a variable to pick one; this is a label",
+        ),
+        (
+            "brx.idx(n, (a, n)); label(a);",
+            "2:12: `brx.idx` jumps to one of labels taken together; this holds a `u32` variable",
+        ),
+        ("brx.idx(1, (a,)); label(a);", "2:9: `brx.idx` wants a `u32` variable; this is the integer 1"),
+        (
+            "let w: u64; mov.u64(w, 0); brx.idx(w, (a,)); label(a);",
+            "2:36: `brx.idx` wants a `u32` variable; this is a `u64`",
+        ),
+        (
             "let i: u32; mov.u32(i, perctamemorysize);",
             "2:24: `perctamemorysize` is a special register of PTX's that kgen does not read: a kernel has it only \
              with the directive `.minperctamemory`, which kgen does not write",
@@ -359,6 +381,7 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         ("let i: u32; vset4.u32.u32.lt(i, n, n, n);", ".version 3.0 .target sm_30"),
         ("let h: f16x2;", ".version 4.2 .target sm_53"),
         ("let i: u32; dp4a.u32.u32(i, n, n, n);", ".version 5.0 .target sm_61"),
+        ("brx.idx(n, (a, b)); label(a); label(b);", ".version 6.0 .target sm_30"),
         ("nanosleep.u32(n);", ".version 6.2 .target sm_70"),
         ("let i: u32; shfl.idx.b32(i, n, 0, 31); nanosleep.u32(n);", ".version 6.2 .target sm_70"),
         ("let v: f32; tanh.approx.f32(v, f);", ".version 7.0 .target sm_75"),
@@ -428,6 +451,57 @@ fn a_part_of_a_variable_is_written_after_it() {
     ] {
         assert!(ptx.contains(line), "{line}{ptx}");
     }
+}
+
+/// Kernels that jump through tables of labels, under a guard and not.
+const TABLES: &str = r#"
+    /// `x[0] = 1`, `2` or `3` as `n` is 0, 1 or 2, and nothing for another `n`.
+    pub unsafe extern "ptx-kernel" fn pick(x: *mut f32, n: u32) {
+        let p: pred;
+        setp.lt.u32(p, n, 3);
+        if p {
+            brx.idx.uni(n, (one, two, three));
+        }
+        ret();
+        let v: f32;
+        label(one);
+        mov.f32(v, 1);
+        bra(done);
+        label(two);
+        mov.f32(v, 2);
+        bra(done);
+        label(three);
+        mov.f32(v, 3);
+        label(done);
+        st.global.f32([x], v);
+    }
+
+    /// `x[0] = 1` where `n` is even, and `2` where it is odd.
+    pub unsafe extern "ptx-kernel" fn parity(x: *mut f32, n: u32) {
+        let i: u32;
+        and.b32(i, n, 1);
+        let v: f32;
+        brx.idx(i, (even, odd));
+        label(even);
+        mov.f32(v, 1);
+        bra(done);
+        label(odd);
+        mov.f32(v, 2);
+        label(done);
+        st.global.f32([x], v);
+    }
+"#;
+
+#[test]
+fn a_jump_through_a_table_declares_the_table_before_it() {
+    let ptx = kgen::ptx_str(TABLES).unwrap();
+    let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
+    assert!(head.contains(".version 6.0\n.target sm_30\n"), "{head}");
+    let (pick, parity) = entries.split_once(".visible .entry ").unwrap();
+    let line = "\t$T0: .branchtargets $L0, $L1, $L2;\n\t@%p brx.idx.uni %n, $T0;\n\tret;\n$L0:\n";
+    assert!(pick.contains(line), "{line}{pick}");
+    let line = "\t$T0: .branchtargets $L0, $L1;\n\tbrx.idx %i, $T0;\n$L0:\n";
+    assert!(parity.contains(line), "{line}{parity}");
 }
 
 #[test]
@@ -684,6 +758,7 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
         }
         args.push(match spec.role {
             Role::Label => Given::Label(0),
+            Role::Labels => Given::Vector(vec![Given::Label(0)]),
             Role::Addr(_) => match spaces.next().expect("a space for each address") {
                 s @ (Space::Shared | Space::Local) if style == Style::Memory => {
                     m.differs = true;
@@ -717,7 +792,7 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
     if let Err(f) = m.kernel.inst(name, &args, None) {
         return Some(Err(format!("kgen refuses `{name}` as {style:?}: {}", f.message)));
     }
-    if args.iter().any(|a| matches!(a, Given::Label(_))) {
+    if b.form.operands.iter().any(|s| matches!(s.role, Role::Label | Role::Labels)) {
         m.kernel.label(0);
     }
     m.kernel.end().unwrap();
@@ -742,6 +817,7 @@ fn by_hand(n: usize, name: &str, form: &'static Form, choice: Vec<Option<usize>>
         .filter(|s| s.when.is_none_or(|w| b.has(w)))
         .map(|spec| match spec.role {
             Role::Label => "$L0".to_string(),
+            Role::Labels => "$T0".to_string(),
             Role::Addr(_) => "[%a]".to_string(),
             Role::Imm(Imm::Bits(_)) => "1".to_string(),
             Role::Imm(imm @ Imm::Of(_)) => imm.values()[0].to_string(),
@@ -751,9 +827,10 @@ fn by_hand(n: usize, name: &str, form: &'static Form, choice: Vec<Option<usize>>
         .collect();
     let decls: String =
         regs.iter().enumerate().map(|(i, t)| format!("\t.reg .{} %v{};\n", t.decl().name(), i + 1)).collect();
-    let label = if form.operands.iter().any(|s| s.role == Role::Label) { "$L0:\n" } else { "" };
+    let label = if form.operands.iter().any(|s| matches!(s.role, Role::Label | Role::Labels)) { "$L0:\n" } else { "" };
+    let table = if form.operands.iter().any(|s| s.role == Role::Labels) { "\t$T0: .branchtargets $L0;\n" } else { "" };
     format!(
-        ".visible .entry k{n}()\n{{\n\t.reg .b64 %a;\n{decls}\n\t{name} {};\n{label}\tret;\n}}\n",
+        ".visible .entry k{n}()\n{{\n\t.reg .b64 %a;\n{decls}\n{table}\t{name} {};\n{label}\tret;\n}}\n",
         operands.join(", ")
     )
 }

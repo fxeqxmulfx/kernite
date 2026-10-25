@@ -194,6 +194,34 @@ fn a_value_one_path_reads_is_live_across_the_branch() {
 }
 
 #[test]
+fn a_jump_through_a_table_goes_to_any_of_its_labels() {
+    // To label 2 as well as to label 1, past the write of `x`.
+    let mut b = Builder::new();
+    let n = b.param("n", 0);
+    let x = b.var("x");
+    b.inst("jmp", &[(n, Access::Read)], Flow::Table { to: vec![Label(1), Label(2)], or_next: false });
+    b.label(1);
+    b.def(x, &[]);
+    b.label(2);
+    b.ret(x, 1);
+    assert_eq!(compile(&b.0, &toy(2, &[])).unwrap_err(), Error::ReadBeforeWrite { var: "x".into() });
+
+    // And to the next item, where it may.
+    let mut b = Builder::new();
+    let n = b.param("n", 0);
+    let x = b.var("x");
+    b.inst("jmp", &[(n, Access::Read)], Flow::Table { to: vec![Label(1)], or_next: true });
+    b.inst("use", &[(x, Access::Read)], Flow::Next);
+    b.label(1);
+    b.def(x, &[]);
+    b.ret(x, 1);
+    assert_eq!(compile(&b.0, &toy(2, &[])).unwrap_err(), Error::ReadBeforeWrite { var: "x".into() });
+    let Item::Inst(jmp) = &mut b.0.body[0] else { unreachable!("the jump is first") };
+    jmp.flow = Flow::Table { to: vec![Label(1)], or_next: false };
+    assert!(compile(&b.0, &toy(2, &[])).is_ok());
+}
+
+#[test]
 fn callee_saved_registers_are_saved_only_when_used() {
     let mut b = Builder::new();
     let (x, y, z) = (b.var("x"), b.var("y"), b.var("z"));

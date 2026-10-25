@@ -42,14 +42,24 @@ pub(crate) fn blocks<Op, R>(body: &[Item<Op, R>]) -> Result<Vec<Block>, Error> {
     let mut blocks = Vec::with_capacity(ranges.len());
     for (b, items) in ranges.iter().enumerate() {
         let last = body[items.clone()].iter().rev().find_map(|item| match item {
-            Item::Inst(inst) => Some(inst.flow),
+            Item::Inst(inst) => Some(&inst.flow),
             _ => None,
         });
         let next = || if b + 1 < ranges.len() { Ok(b + 1) } else { Err(Error::FallsOffEnd) };
-        let succs = match last.unwrap_or(Flow::Next) {
+        let succs = match last.unwrap_or(&Flow::Next) {
             Flow::Next => vec![next()?],
-            Flow::Jump(Label(l)) => vec![block_at(l)?],
-            Flow::Branch(Label(l)) => vec![block_at(l)?, next()?],
+            Flow::Jump(Label(l)) => vec![block_at(*l)?],
+            Flow::Branch(Label(l)) => vec![block_at(*l)?, next()?],
+            Flow::Table { to, or_next } => {
+                let mut succs = vec![];
+                for s in to.iter().map(|&Label(l)| block_at(l)).chain(or_next.then(next)) {
+                    let s = s?;
+                    if !succs.contains(&s) {
+                        succs.push(s);
+                    }
+                }
+                succs
+            }
             Flow::Return => vec![],
         };
         blocks.push(Block { items: items.clone(), succs });

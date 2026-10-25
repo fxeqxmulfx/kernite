@@ -25,7 +25,8 @@
 //! - A video instruction takes a part of a 32-bit variable, as PTX selects it: `a.b0` is its
 //!   lowest byte, `a.h1` its high half, and `d.b310` three bytes of a result.
 //! - `if p { .. }` runs each instruction inside where `p`, a `pred`, holds, and `if !p` where
-//!   it does not; a guarded `bra(label)` is a branch.
+//!   it does not; a guarded `bra(label)` is a branch. `brx.idx(i, (a, b, c))` jumps to the
+//!   label `i` picks of those taken together, through a table it declares before it.
 //! - A kernel returns nothing: `ret()`, which the end of the body adds if control reaches it.
 //!
 //! What an instruction needs of PTX and of the GPU, its [`Needs`], the kernel needs: an
@@ -88,6 +89,8 @@ pub struct Kernel {
     local: u64,
     partial: Vec<Partial>,
     needs: Vec<(Needs, String)>,
+    /// The tables of labels `brx.idx` jumps through, so far.
+    tables: usize,
 }
 
 /// A write under a guard, which leaves what was there where the guard does not hold. It is
@@ -106,15 +109,17 @@ struct Partial {
     arg: usize,
 }
 
-/// An instruction's operands written out: their text, what they read and write, and the
-/// special registers among them with what those need; and as they are written, how many are
-/// addresses so far, and the bytes the instruction reaches at once at each.
+/// An instruction's operands written out: their text, what they read and write, the special
+/// registers among them with what those need, and the labels of a table it jumps through; and
+/// as they are written, how many are addresses so far, and the bytes the instruction reaches
+/// at once at each.
 #[derive(Default)]
 struct Written {
     texts: Vec<String>,
     args: Vec<Arg<VReg>>,
     needs: Needs,
     sregs: Vec<&'static str>,
+    table: Vec<u32>,
     addrs: usize,
     reach: u64,
 }
@@ -153,6 +158,7 @@ impl Kernel {
             local: 0,
             partial: vec![],
             needs: vec![],
+            tables: 0,
         }
     }
 
@@ -383,6 +389,20 @@ impl Kernel {
             (Role::Label, Given::Label(l)) => {
                 w.args.push(Arg { operand: Operand::Label(Label(*l)), access: Access::Read });
                 Ok(format!("$L{l}"))
+            }
+            // The table is declared before the instruction, under the name it has here.
+            (Role::Labels, Given::Vector(labels)) => {
+                for l in labels {
+                    let Given::Label(l) = l else {
+                        return Err(format!(
+                            "`{name}` jumps to one of labels taken together; this holds {}",
+                            self.given(l)
+                        ));
+                    };
+                    w.table.push(*l);
+                    w.args.push(Arg { operand: Operand::Label(Label(*l)), access: Access::Read });
+                }
+                Ok(format!("$T{}", self.tables))
             }
             (Role::Addr(access), Given::Mem(m)) => self.address(b, m, access, name, w),
             (Role::Imm(imm), Given::Int(x)) => known(imm, *x, name),
@@ -748,7 +768,10 @@ fn lanes(b: &Bound, spec: &Spec) -> usize {
 /// few, an address where it takes one, memory where it takes memory.
 fn shaped(b: &Bound, spec: &Spec, a: &Given<Var>) -> bool {
     match (spec.role, a) {
-        (Role::Addr(_), Given::Mem(_)) | (Role::Label, Given::Label(_)) | (Role::Imm(_), Given::Int(_)) => true,
+        (Role::Addr(_), Given::Mem(_))
+        | (Role::Label, Given::Label(_))
+        | (Role::Labels, Given::Vector(_))
+        | (Role::Imm(_), Given::Int(_)) => true,
         (Role::Dst | Role::Src, Given::Var(v)) => matches!(v, Var::Mem(_)) == spec.memory,
         (Role::Dst | Role::Src, Given::Vector(parts)) => lanes(b, spec) == parts.len(),
         (Role::Dst | Role::Src, Given::Pair(..)) => spec.second.is_some(),
@@ -837,6 +860,7 @@ fn describe(b: &Bound, spec: &Spec) -> String {
     let one = match spec.role {
         Role::Addr(_) => return "an address, as in `[p + 4]`".into(),
         Role::Label => return "a label".into(),
+        Role::Labels => return "labels taken together, as `(a, b)`, for a variable to pick one".into(),
         Role::Imm(_) => return "an integer known now".into(),
         Role::Dst if spec.sink => format!("a `{t}` variable to write, or `_`"),
         Role::Dst => format!("a `{t}` variable to write"),
@@ -1026,12 +1050,20 @@ impl Target for Kernel {
             ("bra", Some(l), None) => Flow::Jump(l),
             ("bra", Some(l), Some(_)) => Flow::Branch(l),
             ("ret" | "exit", _, None) => Flow::Return,
+            _ if !w.table.is_empty() => {
+                Flow::Table { to: w.table.iter().map(|&l| Label(l)).collect(), or_next: guard.is_some() }
+            }
             _ => Flow::Next,
         };
-        let mut line = match guard {
-            Some((pred, negated)) => format!("@{}%{} ", if negated { "!" } else { "" }, self.reg(pred)),
-            None => String::new(),
-        };
+        let mut line = String::new();
+        if !w.table.is_empty() {
+            let labels: Vec<String> = w.table.iter().map(|l| format!("$L{l}")).collect();
+            line += &format!("$T{}: .branchtargets {};\n\t", self.tables, labels.join(", "));
+            self.tables += 1;
+        }
+        if let Some((pred, negated)) = guard {
+            line += &format!("@{}%{} ", if negated { "!" } else { "" }, self.reg(pred));
+        }
         line += name;
         if !w.texts.is_empty() {
             line += " ";
@@ -1044,7 +1076,9 @@ impl Target for Kernel {
 
     fn end(&mut self) -> Result<(), String> {
         let open = match self.p.body.iter().rev().find(|item| !matches!(item, Item::Note(_))) {
-            Some(Item::Inst(inst)) => !matches!(inst.flow, Flow::Return | Flow::Jump(_)),
+            Some(Item::Inst(inst)) => {
+                !matches!(inst.flow, Flow::Return | Flow::Jump(_) | Flow::Table { or_next: false, .. })
+            }
             _ => true,
         };
         if open {

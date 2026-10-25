@@ -34,7 +34,7 @@ pub fn compile<Op: Clone>(p: &Program<Op>, m: &dyn Machine) -> Result<Compiled<O
                 op: inst.op.clone(),
                 args: inst.args.iter().map(|arg| arg.map(reg)).collect(),
                 implicit: inst.implicit.iter().map(|arg| arg.map(reg)).collect(),
-                flow: inst.flow,
+                flow: inst.flow.clone(),
             }),
         })
         .collect();

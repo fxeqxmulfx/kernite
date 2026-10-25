@@ -14,7 +14,7 @@ pub struct SlotId(pub u32);
 pub struct ConstId(pub u32);
 
 /// Where control goes after an instruction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Flow {
     /// To the next item.
     Next,
@@ -22,6 +22,14 @@ pub enum Flow {
     Jump(Label),
     /// To the label or to the next item, as the flags decide.
     Branch(Label),
+    /// To one of the labels, as a value decides, through a table: PTX's `brx.idx`.
+    Table {
+        /// The labels.
+        to: Vec<Label>,
+        /// Whether it may go to the next item instead, as where a predicate it runs under
+        /// does not hold.
+        or_next: bool,
+    },
     /// Out of the kernel, with its result where [`Program::results`] puts it.
     Return,
 }

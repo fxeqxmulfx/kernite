@@ -35,11 +35,12 @@ use crate::{GPUS, Kind, Needs, Ty};
 /// `(.bh)` one that must be: `.bh` a byte or a half, `r.b0` or `r.h1`; `.hxy` two of the
 /// halves of two sources together, `r.h32`, and `.bxyzw` four of their bytes, `r.b7654`;
 /// `.hmask` the halves of a result it writes, `r.h10`, and `.bmask` its bytes, `r.b310`.
-/// `a|b` is two written at once, and `a[|b]` one or two. `u32[0,15]` is one from 0 to 15, if it is one known now,
-/// `u32/32` a multiple of 32, and `f32(0,1]` a fraction, more than 0 and at most 1. `[R]`,
-/// `[W]` and `[X]` are memory read, written, or both; `lab` is a label; `#` is an integer
-/// known now, `#8` one of 8 bits, `#=4|8|16` one of those, and `#^23` a power of two to 2^23. `{w}`
-/// before an operand has it only with the word `w`, and `?` after it lets it be left out.
+/// `a|b` is two written at once, and `a[|b]` one or two. `u32[0,15]` is one from 0 to 15, if
+/// it is one known now, `u32/32` a multiple of 32, and `f32(0,1]` a fraction, more than 0 and
+/// at most 1. `[R]`, `[W]` and `[X]` are memory read, written, or both; `lab` is a label, and
+/// `labs` labels taken together; `#` is an integer known now, `#8` one of 8 bits, `#=4|8|16`
+/// one of those, and `#^23` a power of two to 2^23. `{w}` before an operand has it only with
+/// the word `w`, and `?` after it lets it be left out.
 /// Last, `+wide` lets a register be wider than the instruction's type, as `ld`, `st` and
 /// `cvt` do; `+vec` holds a vector to 128 bits; `+cvt` holds a conversion to PTX's rules for
 /// rounding and saturating, and gives `.ftz` the version it needs there; `+b128sys` gives
@@ -361,6 +362,7 @@ cvt.pack.sat(.u4|.s4|.u2|.s2).s32.b32 : =u32, s32, s32, b32 @6.5 @sm75
 
 # Control.
 bra{.uni} : lab @1.0
+brx.idx{.uni} : %u32, labs @6.0 @sm30
 ret{.uni} @1.0
 exit @1.0
 
@@ -612,6 +614,9 @@ pub enum Role {
     Addr(Access),
     /// A label it jumps to.
     Label,
+    /// Labels taken together, of which a register it reads picks the one it jumps to:
+    /// `brx.idx`'s table.
+    Labels,
     /// An integer known now.
     Imm(Imm),
 }
@@ -1534,6 +1539,7 @@ fn one(s: &'static str, line: &str) -> Spec {
         "[W]" => spec.role = Role::Addr(Access::Write),
         "[X]" => spec.role = Role::Addr(Access::ReadWrite),
         "lab" => spec.role = Role::Label,
+        "labs" => spec.role = Role::Labels,
         "#" => spec.role = Role::Imm(Imm::Bits(32)),
         _ if s.starts_with('#') => {
             let r = &s[1..];
