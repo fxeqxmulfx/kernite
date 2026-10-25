@@ -115,8 +115,9 @@ pub fn ptx(module: &Module, f: &Fn) -> Result<Kernel<Entry>, kgen_lang::Error> {
     Ok(Kernel { code, consts: run.consts })
 }
 
-/// The PTX module of `entries`, for the CUDA driver to load.
-pub fn ptx_module(entries: &[Entry]) -> String {
+/// The PTX module of `entries`, for the CUDA driver to load: of the PTX version and for the
+/// GPU their instructions need. It fails if one needs a GPU older than another needs.
+pub fn ptx_module(entries: &[Entry]) -> Result<String, String> {
     kgen_ptx::module(entries)
 }
 
@@ -132,7 +133,7 @@ pub fn ptx_str(src: &str) -> Result<String, String> {
             entries.push(ptx(&module, f).map_err(|e| e.at(src))?.code);
         }
     }
-    Ok(ptx_module(&entries))
+    ptx_module(&entries)
 }
 
 /// The function `name` of `module`.

@@ -169,7 +169,11 @@ fn expand(body: TokenStream) -> TokenStream {
         out.extend(parse(&(s + "];")));
     }
     if !launchers.is_empty() {
-        out.extend(gpu(&launchers, &entries, &top));
+        let ptx = kgen::ptx_module(&entries).unwrap_or_else(|e| {
+            out.extend(error(at(launchers[0].0.span), &e));
+            String::new()
+        });
+        out.extend(gpu(&launchers, &ptx, &top));
     }
     out
 }
@@ -194,7 +198,7 @@ fn used(module: &lang::Module, read: &[String]) -> TokenStream {
 /// `PTX`, the module the GPU kernels are, and `Kernels`, which loads it on a GPU and has a
 /// method to launch each kernel by its name: one that never runs for a kernel that did not
 /// compile, kernel `None`.
-fn gpu(launchers: &[(&Fn, Option<usize>)], entries: &[kgen::Entry], top: &[TokenTree]) -> TokenStream {
+fn gpu(launchers: &[(&Fn, Option<usize>)], ptx: &str, top: &[TokenTree]) -> TokenStream {
     let names: Vec<String> =
         launchers.iter().filter(|(_, index)| index.is_some()).map(|(f, _)| format!("{:?}", f.name)).collect();
     let mut out = parse(&format!(
@@ -206,7 +210,6 @@ fn gpu(launchers: &[(&Fn, Option<usize>)], entries: &[kgen::Entry], top: &[Token
          pub struct Kernels {{\n    module: ::kgen_cuda::Module,\n}}\n\
          #[allow(dead_code)]\n\
          impl Kernels",
-        ptx = kgen::ptx_module(entries),
     ));
     let mut methods = parse(&format!(
         "/// The kernels, compiled for `cuda`'s GPU by its driver.\n\

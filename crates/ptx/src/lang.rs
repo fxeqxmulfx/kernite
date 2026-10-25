@@ -1,30 +1,38 @@
 //! PTX as the language writes it: [`Kernel`] is the [`Target`] that checks each call against
-//! the types its name gives its operands, and writes the instruction out.
+//! the forms of [`crate::forms`], and writes the instruction out.
 //!
-//! The types are PTX's: `pred`, `b32`, `u32`, `s32`, `f32`, `b64`, `u64` and `s64`. An
-//! instruction is called by its PTX name, words joined with dots, with the operands PTX
-//! writes: `add.rn.f32(acc, acc, x)`, `setp.lt.u32(p, i, n)`, `ld.global.f32(x, [p + 4])`.
-//! Its operands' type is the type its name ends in; `cvt` names two, the result's first, and
-//! `mul.wide` and `mad.wide` write twice the bits they read.
+//! The types are PTX's: `pred`; `b8` to `b128`, bits of no type in particular; `u8` to `u64`
+//! and `s8` to `s64`; `f32` and `f64`; and the floats of 16 bits, `f16` and `bf16`, alone or
+//! two together, `f16x2` and `bf16x2`, and `tf32`. An instruction is called by its PTX name,
+//! words joined with dots, with the operands PTX writes: `add.rn.f32(acc, acc, x)`,
+//! `setp.lt.u32(p, i, n)`, `ld.global.v4.f32((a, b, c, d), [p + 16])`.
 //!
 //! - A float `add`, `sub`, `mul`, `mad`, `fma`, `div`, `sqrt` or `rcp` says how it rounds,
 //!   `.rn`, so that ptxas neither fuses nor approximates it: what it computes is what it says.
-//! - An address is a 64-bit variable and a displacement, `[p + 16]`. A kernel's pointers
-//!   arrive as global addresses, for `ld.global` and `st.global`.
-//! - `tid.x`, `ntid.x`, `ctaid.x` and `nctaid.x`, and their `y` and `z`, are read by `mov`.
+//! - An address is a variable and a displacement, `[p + 16]`; a generic or a global one is
+//!   in 64 bits. A kernel's pointers arrive as global addresses, for `ld.global` and
+//!   `st.global`.
+//! - `mov` and `cvt` read the special registers: `tid.x`, `laneid`, `clock64`.
+//! - Operands taken together are a tuple, `(a, b)`, or variables declared together; two
+//!   results written at once are `p | q`; `_` is a result left unwritten, where PTX lets one
+//!   be; and `!p` is a predicate read inverted.
 //! - `if p { .. }` runs each instruction inside where `p`, a `pred`, holds, and `if !p` where
 //!   it does not; a guarded `bra(label)` is a branch.
 //! - A kernel returns nothing: `ret()`, which the end of the body adds if control reaches it.
+//!
+//! What an instruction needs of PTX and of the GPU, its [`Needs`], the kernel needs: an
+//! instruction that no GPU has with what the kernel needs already is an error where it is.
 
 use std::collections::BTreeSet;
 
-use kgen_core::Width::{W32, W64};
+use kgen_core::Width::{W8, W16, W32, W64, W128};
 use kgen_core::{
-    Access, Arg, Base, Class, Flow, Inst, Item, Label, Mem, Operand, PReg, Program, RegInfo, Signature, VReg,
+    Access, Arg, Base, Class, Flow, Inst, Item, Label, Mem, Operand, PReg, Program, RegInfo, Signature, VReg, Width,
 };
 use kgen_lang::{Fault, Guard, Operand as Given, Target};
 
-use crate::{Entry, Op, Param, Ty};
+use crate::forms::{self, Bound, Count, Imm, Role, Spec};
+use crate::{Entry, Kind, Needs, Op, Param, Ty};
 
 /// A variable: a register of the type it was declared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,70 +41,6 @@ pub struct Var {
     ty: Ty,
 }
 
-/// What an operand of an instruction may be.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
-    /// A variable it writes, of a type that fits.
-    Dst(Ty),
-    /// A variable it reads, of a type that fits, or a value known now.
-    Src(Ty),
-    /// That, or a special register: `tid.x`.
-    Sreg(Ty),
-    /// An address it reads or writes at.
-    Addr(Access),
-    /// A label it jumps to.
-    Goto,
-    /// An integer known now.
-    Int,
-}
-
-use Kind::{Addr, Dst, Goto, Int, Src, Sreg};
-
-/// The special registers `mov` reads.
-const SPECIAL: &[&str] = &[
-    "tid.x", "tid.y", "tid.z", "ntid.x", "ntid.y", "ntid.z", "ctaid.x", "ctaid.y", "ctaid.z", "nctaid.x", "nctaid.y",
-    "nctaid.z", "laneid", "warpid",
-];
-
-/// Names PTX gives special registers, which a variable's register does not take.
-const RESERVED: &[&str] = &[
-    "tid",
-    "ntid",
-    "ctaid",
-    "nctaid",
-    "laneid",
-    "warpid",
-    "nwarpid",
-    "smid",
-    "nsmid",
-    "gridid",
-    "clock",
-    "clock64",
-    "clock_hi",
-    "globaltimer",
-    "globaltimer_lo",
-    "globaltimer_hi",
-    "total_smem_size",
-    "dynamic_smem_size",
-    "aggr_smem_size",
-    "current_graph_exec",
-    "is_explicit_cluster",
-    "clusterid",
-    "nclusterid",
-    "cluster_ctaid",
-    "cluster_nctaid",
-    "cluster_ctarank",
-    "cluster_nctarank",
-];
-
-/// The comparisons of `setp`.
-const COMPARISONS: &[&str] = &[
-    "eq", "ne", "lt", "le", "gt", "ge", "lo", "ls", "hi", "hs", "equ", "neu", "ltu", "leu", "gtu", "geu", "num", "nan",
-];
-
-/// The float instructions that must say how they round.
-const ROUNDED: &[&str] = &["add", "sub", "mul", "mad", "fma", "div", "sqrt", "rcp"];
-
 /// A kernel being written in the language, for PTX.
 pub struct Kernel {
     p: Program<Op>,
@@ -104,6 +48,7 @@ pub struct Kernel {
     regs: Vec<(String, Ty)>,
     taken: BTreeSet<String>,
     partial: Vec<Partial>,
+    needs: Vec<(Needs, String)>,
 }
 
 /// A write under a guard, which leaves what was there where the guard does not hold. It is
@@ -119,6 +64,25 @@ struct Partial {
     /// The instruction, by its place in the body, and the operand among its arguments.
     at: usize,
     arg: usize,
+}
+
+/// An instruction's operands written out: their text, what they read and write, and the
+/// special registers among them with what those need.
+#[derive(Default)]
+struct Written {
+    texts: Vec<String>,
+    args: Vec<Arg<VReg>>,
+    needs: Needs,
+    sregs: Vec<&'static str>,
+}
+
+/// Why operands are not those of a form.
+enum Miss {
+    /// There are too few or too many: it takes from the first to the second.
+    Count(usize, usize),
+    /// One is wrong: how many before it were right, whether it has the shape the form wants
+    /// there, and what is wrong.
+    At(usize, bool, Fault),
 }
 
 impl Kernel {
@@ -139,12 +103,13 @@ impl Kernel {
             regs: vec![],
             taken: BTreeSet::new(),
             partial: vec![],
+            needs: vec![],
         }
     }
 
     /// The kernel as written.
     pub fn finish(self) -> Entry {
-        Entry { program: self.p, params: self.params, regs: self.regs }
+        Entry { program: self.p, params: self.params, regs: self.regs, needs: self.needs }
     }
 
     /// A new variable, its register named after it: with `_` after a special register's
@@ -157,7 +122,7 @@ impl Kernel {
         };
         let id = self.p.regs.len() as u32;
         self.p.regs.push(RegInfo { class, name: name.to_string() });
-        let base = if RESERVED.contains(&name) { format!("{name}_") } else { name.to_string() };
+        let base = if forms::reserved(name) { format!("{name}_") } else { name.to_string() };
         let (mut reg, mut k) = (base.clone(), 1);
         while self.taken.contains(&reg) {
             reg = format!("{base}_{k}");
@@ -170,6 +135,42 @@ impl Kernel {
 
     fn reg(&self, v: Var) -> &str {
         &self.regs[v.reg.id as usize].0
+    }
+
+    /// What the kernel needs so far.
+    fn needed(&self) -> Needs {
+        self.needs.iter().fold(Needs::default(), |n, (m, _)| n.and(*m))
+    }
+
+    /// Notes that the kernel needs `needs` for `what`, an instruction; or says why no GPU has
+    /// it as well as what the kernel needs already.
+    fn require(&mut self, needs: Needs, what: &str) -> Result<(), String> {
+        let had = self.needed();
+        let all = had.and(needs);
+        if !all.possible() {
+            let older = needs.below != 0 && had.sm >= needs.below;
+            let message = if older {
+                let (n, other) = self.needs.iter().max_by_key(|(n, _)| n.sm).expect("something needs that GPU");
+                format!(
+                    "`{what}` is for GPUs older than sm_{}, and `{other}` before it needs sm_{} or newer: no GPU has \
+                     both",
+                    needs.below, n.sm
+                )
+            } else {
+                let (n, other) =
+                    self.needs.iter().find(|(n, _)| n.below != 0 && needs.sm >= n.below).expect("something is older");
+                format!(
+                    "`{what}` needs sm_{} or newer, and `{other}` before it is for GPUs older than sm_{}: no GPU has \
+                     both",
+                    needs.sm, n.below
+                )
+            };
+            return Err(message);
+        }
+        if all.and(Needs::FLOOR) != had.and(Needs::FLOOR) {
+            self.needs.push((needs, what.to_string()));
+        }
+        Ok(())
     }
 
     /// Adds the instruction, keeping account of the writes under guards.
@@ -205,179 +206,320 @@ impl Kernel {
         self.p.body.push(Item::Inst(Inst { op: Op(line), args, implicit: implicit.into_iter().collect(), flow }));
     }
 
-    /// `a` as the operand `kind`, written out, and what it reads or writes.
-    fn operand(&self, kind: Kind, a: &Given<Var>) -> Result<(String, Option<Arg<VReg>>), String> {
-        let var = |v: &Var, access: Access| {
-            let width = if v.ty.bits() == 64 { W64 } else { W32 };
-            (format!("%{}", self.reg(*v)), Some(Arg { operand: Operand::Reg(v.reg, width), access }))
-        };
-        match (kind, a) {
-            (Dst(t), Given::Var(v)) if v.ty.fits(t) => Ok(var(v, Access::Write)),
-            (Src(t) | Sreg(t), Given::Var(v)) if v.ty.fits(t) => Ok(var(v, Access::Read)),
-            (Dst(t) | Src(t) | Sreg(t), Given::Var(v)) => {
-                Err(format!("wants a `{}` variable; this is a `{}`", t.name(), v.ty.name()))
+    /// `args` as the operands of `b`, the form of the instruction `name`.
+    fn operands(&self, b: &Bound, name: &str, args: &[Given<Var>]) -> Result<Written, Miss> {
+        let specs: Vec<&Spec> = b.form.operands.iter().filter(|s| s.when.is_none_or(|w| b.has(w))).collect();
+        let least = specs.iter().filter(|s| !s.optional).count();
+        if !(least..=specs.len()).contains(&args.len()) {
+            return Err(Miss::Count(least, specs.len()));
+        }
+        let mut w = Written::default();
+        for (i, (spec, a)) in specs.iter().zip(args).enumerate() {
+            let text =
+                self.operand(b, spec, a, name, &mut w).map_err(|m| Miss::At(i, shaped(b, spec, a), Fault::at(i, m)))?;
+            w.texts.push(text);
+        }
+        Ok(w)
+    }
+
+    /// `a` as the operand `spec` of `b`, written out, with what it reads and writes added to
+    /// `w`; or what is wrong with it.
+    fn operand(&self, b: &Bound, spec: &Spec, a: &Given<Var>, name: &str, w: &mut Written) -> Result<String, String> {
+        match (spec.role, a) {
+            (Role::Label, Given::Label(l)) => {
+                w.args.push(Arg { operand: Operand::Label(Label(*l)), access: Access::Read });
+                Ok(format!("$L{l}"))
             }
-            (Src(t) | Sreg(t), Given::Int(x)) => Ok((int(t, *x)?, None)),
-            (Src(Ty::F32 | Ty::B32) | Sreg(Ty::F32 | Ty::B32), Given::F32(x)) => Ok((float(*x), None)),
-            (Sreg(_), Given::Special(s)) if SPECIAL.contains(&s.as_str()) => Ok((format!("%{s}"), None)),
-            (_, Given::Data(_)) => Err("takes a value as it is: `1.5`, not `[1.5]`".into()),
-            (Addr(access), Given::Mem(m)) => self.address(m, access),
-            (Goto, Given::Label(l)) => {
-                Ok((format!("$L{l}"), Some(Arg { operand: Operand::Label(Label(*l)), access: Access::Read })))
-            }
-            (Int, Given::Int(x)) => Ok((x.to_string(), None)),
-            (kind, a) => Err(format!("wants {}; this is {}", describe(kind), given(a))),
+            (Role::Addr(access), Given::Mem(m)) => self.address(b, m, access, name, w),
+            (Role::Imm(imm), Given::Int(x)) => known(imm, *x, name),
+            (Role::Dst | Role::Src, _) => self.value(b, spec, a, name, w),
+            (_, Given::Data(_)) => Err(format!("`{name}` takes a value as it is: `1.5`, not `[1.5]`")),
+            (_, a) => Err(format!("`{name}` wants {}; this is {}", describe(b, spec), given(a))),
         }
     }
 
-    fn address(&self, m: &kgen_lang::Mem<Var>, access: Access) -> Result<(String, Option<Arg<VReg>>), String> {
-        if m.index.is_some() {
-            return Err("takes an address of a variable and a displacement; work out `p + 4 * i` first, \
-                        as `mad.wide.u32(a, i, 4, p)` does"
-                .into());
-        }
-        let Some(base) = m.base else {
-            return Err("takes an address that starts at a 64-bit variable".into());
+    /// `a` as the register operand `spec`: one, a few together, or two written at once.
+    fn value(&self, b: &Bound, spec: &Spec, a: &Given<Var>, name: &str, w: &mut Written) -> Result<String, String> {
+        let Some((second, optional)) = &spec.second else {
+            return self.several(b, spec, a, name, w);
         };
-        if base.ty.bits() != 64 {
-            return Err(format!("takes an address in a 64-bit variable; this is a `{}`", base.ty.name()));
+        match a {
+            Given::Pair(x, y) => {
+                let x = self.several(b, spec, x, name, w)?;
+                let y = self.several(b, second, y, name, w)?;
+                if x == "_" && y == "_" {
+                    return Err(format!("`{name}` writes one of the two at least: `p | _` or `_ | q`"));
+                }
+                Ok(format!("{x}|{y}"))
+            }
+            _ if *optional => self.several(b, spec, a, name, w),
+            _ => Err(format!("`{name}` writes two results at once, `p | q`; this is {}", given(a))),
+        }
+    }
+
+    /// `a` as `spec`, as many registers as it takes together.
+    fn several(&self, b: &Bound, spec: &Spec, a: &Given<Var>, name: &str, w: &mut Written) -> Result<String, String> {
+        let n = lanes(b, spec);
+        if n == 1 {
+            return self.one(b, spec, a, name, w);
+        }
+        let Given::Vector(parts) = a else {
+            return Err(format!("`{name}` wants {}; this is {}", describe(b, spec), given(a)));
+        };
+        if parts.len() != n {
+            return Err(format!("`{name}` wants {}; this is {}", describe(b, spec), given(a)));
+        }
+        let mut texts = vec![];
+        for part in parts {
+            texts.push(self.one(b, spec, part, name, w)?);
+        }
+        if texts.iter().all(|t| t == "_") {
+            return Err(format!("`{name}` writes one of them at least"));
+        }
+        Ok(format!("{{{}}}", texts.join(", ")))
+    }
+
+    /// `a` as one register of `spec`: a variable, or what else `spec` lets it be.
+    fn one(&self, b: &Bound, spec: &Spec, a: &Given<Var>, name: &str, w: &mut Written) -> Result<String, String> {
+        let t = b.ty(spec.ty.expect("a register's operand has a type"));
+        let write = spec.role == Role::Dst;
+        let var = |v: &Var, w: &mut Written| {
+            let access = if write { Access::Write } else { Access::Read };
+            w.args.push(Arg { operand: Operand::Reg(v.reg, width(v.ty)), access });
+            format!("%{}", self.reg(*v))
+        };
+        match a {
+            Given::Var(v) => {
+                let fits = if b.form.wide { v.ty.fits_wide(t) } else { v.ty.fits(t) };
+                if !fits {
+                    return Err(format!("`{name}` wants a `{}` variable; this is a `{}`", t.name(), v.ty.name()));
+                }
+                Ok(var(v, w))
+            }
+            Given::Special(s) if s == "_" => match spec.sink {
+                true => Ok("_".into()),
+                false => Err(format!("`{name}` has no result here that it may leave unwritten, `_`")),
+            },
+            Given::Special(s) => match forms::sreg(s) {
+                None => match forms::beyond(s) {
+                    Some(why) => Err(format!("`{s}` is a special register of PTX's that kgen does not read: {why}")),
+                    None => Err(format!("`{s}` is not defined")),
+                },
+                Some(_) if write => {
+                    Err(format!("`{name}` writes a variable; `{s}` is a special register, which it reads"))
+                }
+                Some(r) if !spec.sreg => Err(format!("`{name}` reads no special register; `mov.{}` does", r.ty.name())),
+                Some(r) if !r.read_as(t) => {
+                    Err(format!("`{name}` reads a `{}`; `{s}` is a `{}`", t.name(), r.ty.name()))
+                }
+                Some(r) => {
+                    w.needs = w.needs.and(r.needs);
+                    if r.needs != Needs::default() {
+                        w.sregs.push(&r.name);
+                    }
+                    Ok(format!("%{s}"))
+                }
+            },
+            Given::Not(p) if spec.not => match **p {
+                Given::Var(v) if v.ty == Ty::Pred => Ok(format!("!{}", var(&v, w))),
+                _ => Err(format!("`{name}` reads a predicate inverted, `!p`; this is {} inverted", given(p))),
+            },
+            Given::Not(_) => Err(format!("`{name}` takes no operand inverted")),
+            Given::Neg(_) => Err(format!("`{name}` takes no operand negated")),
+            Given::Data(_) => Err(format!("`{name}` takes a value as it is: `1.5`, not `[1.5]`")),
+            Given::Int(_) | Given::F32(_) | Given::F64(_) | Given::F16(_) | Given::Bf16(_)
+                if write || spec.reg_only =>
+            {
+                Err(format!("`{name}` wants {}; this is {}", describe(b, spec), given(a)))
+            }
+            Given::Int(x) => {
+                if let Some(below) = spec.below
+                    && !(0..below).contains(x)
+                {
+                    return Err(format!("`{name}` takes 0 to {} here; {x} is not one of them", below - 1));
+                }
+                if let Some(step) = spec.step
+                    && (*x <= 0 || x % step != 0)
+                {
+                    return Err(format!("`{name}` takes a multiple of {step} here, and more than 0; {x} is not one"));
+                }
+                if spec.fraction && *x != 1 {
+                    return Err(fraction(name, x));
+                }
+                int(t, *x, name)
+            }
+            Given::F32(x) if spec.fraction && !(*x > 0.0 && *x <= 1.0) => Err(fraction(name, x)),
+            Given::F32(x) => match t {
+                Ty::F32 | Ty::B32 => Ok(format!("0f{:08X}", x.to_bits())),
+                Ty::F64 => Err(format!("`{name}` wants an `f64`; {x} is an `f32`: `{x}f64`")),
+                _ if t.kind() == Kind::Float => Err(half(t, name)),
+                _ => Err(format!("`{name}` wants {}; this is {}", describe(b, spec), given(a))),
+            },
+            Given::F64(x) => match t {
+                Ty::F64 | Ty::B64 => Ok(format!("0d{:016X}", x.to_bits())),
+                Ty::F32 => Err(format!("`{name}` wants an `f32`; {x}f64 is an `f64`")),
+                _ if t.kind() == Kind::Float => Err(half(t, name)),
+                _ => Err(format!("`{name}` wants {}; this is {}", describe(b, spec), given(a))),
+            },
+            Given::F16(x) | Given::Bf16(x) => match t {
+                Ty::B16 => Ok(format!("0x{x:04X}")),
+                _ if t.kind() == Kind::Float => Err(half(t, name)),
+                _ => Err(format!("`{name}` wants {}; this is {}", describe(b, spec), given(a))),
+            },
+            a => Err(format!("`{name}` wants {}; this is {}", describe(b, spec), given(a))),
+        }
+    }
+
+    /// The address `m`, in the state space `b` names.
+    fn address(
+        &self,
+        b: &Bound,
+        m: &kgen_lang::Mem<Var>,
+        access: Access,
+        name: &str,
+        w: &mut Written,
+    ) -> Result<String, String> {
+        if m.index.is_some() {
+            return Err(format!(
+                "`{name}` takes an address of a variable and a displacement; work out `p + 4 * i` first, as \
+                 `mad.wide.u32(a, i, 4, p)` does"
+            ));
+        }
+        let wide = b.space().wide();
+        let Some(base) = m.base else {
+            let bits = if wide { "a 64-bit" } else { "a" };
+            return Err(format!("`{name}` takes an address that starts at {bits} variable"));
+        };
+        if base.ty.kind() == Kind::Float || base.ty.kind() == Kind::Pred {
+            return Err(format!("`{name}` takes an address in an integer variable; this is a `{}`", base.ty.name()));
+        }
+        if wide && base.ty.bits() != 64 {
+            return Err(format!("`{name}` takes an address in a 64-bit variable; this is a `{}`", base.ty.name()));
+        }
+        if !wide && !matches!(base.ty.bits(), 32 | 64) {
+            return Err(format!("`{name}` takes an address in 32 bits or 64; this is a `{}`", base.ty.name()));
         }
         let disp = i32::try_from(m.disp).map_err(|_| format!("{} bytes are too far for an address", m.disp))?;
-        let text = match disp {
+        let mem = Mem { base: Base::Reg(base.reg), index: None, disp, width: W32 };
+        w.args.push(Arg { operand: Operand::Mem(mem), access });
+        Ok(match disp {
             0 => format!("[%{}]", self.reg(base)),
             d => format!("[%{}+{d}]", self.reg(base)),
-        };
-        let mem = Mem { base: Base::Reg(base.reg), index: None, disp, width: W32 };
-        Ok((text, Some(Arg { operand: Operand::Mem(mem), access })))
+        })
     }
 }
 
-/// The operands of the instruction `name`, from the words of its name: the modifiers PTX has
-/// for it, and the types.
-fn operands(name: &str) -> Result<Vec<Kind>, String> {
-    let mut words = name.split('.');
-    let op = words.next().unwrap_or_default();
-    let (mut types, mut mods) = (vec![], vec![]);
-    for w in words {
-        match Ty::parse(w) {
-            Some(t) => types.push(t),
-            None => mods.push(w),
-        }
+/// How many registers `spec` of `b` is.
+fn lanes(b: &Bound, spec: &Spec) -> usize {
+    match spec.count {
+        Count::One => 1,
+        Count::Fixed(n) => n,
+        Count::Vec => b.lanes(),
     }
-    let allowed: &[&str] = match op {
-        "mov" | "and" | "or" | "xor" | "not" | "cnot" | "shl" | "shr" | "selp" | "rem" => &[],
-        "add" | "sub" | "fma" => &["rn", "rz", "rm", "rp", "ftz", "sat"],
-        "mul" | "mad" => &["lo", "hi", "wide", "rn", "rz", "rm", "rp", "ftz", "sat"],
-        "div" => &["rn", "rz", "rm", "rp", "approx", "full", "ftz"],
-        "sqrt" | "rcp" => &["rn", "rz", "rm", "rp", "approx", "ftz"],
-        "min" | "max" | "neg" | "abs" => &["ftz"],
-        "setp" => &[
-            "eq", "ne", "lt", "le", "gt", "ge", "lo", "ls", "hi", "hs", "equ", "neu", "ltu", "leu", "gtu", "geu",
-            "num", "nan", "ftz",
-        ],
-        "cvt" => &["rn", "rz", "rm", "rp", "rni", "rzi", "rmi", "rpi", "ftz", "sat"],
-        "ld" => &["global", "shared", "local", "const", "volatile"],
-        "st" => &["global", "shared", "local", "volatile"],
-        "atom" => &["global", "shared", "add", "min", "max", "inc", "dec", "and", "or", "xor", "exch", "cas"],
-        "red" => &["global", "shared", "add", "min", "max", "inc", "dec", "and", "or", "xor"],
-        "bra" | "ret" | "exit" => &["uni"],
-        "bar" => &["sync"],
-        _ => return Err(format!("PTX has no instruction `{op}` that kgen knows")),
-    };
-    if let Some(m) = mods.iter().find(|m| !allowed.contains(m)) {
-        return Err(format!("PTX's `{op}` has no `.{m}` that kgen knows"));
+}
+
+/// Whether `a` is what `spec` is, but for what it holds: a few together where it takes a
+/// few, an address where it takes one.
+fn shaped(b: &Bound, spec: &Spec, a: &Given<Var>) -> bool {
+    match (spec.role, a) {
+        (Role::Addr(_), Given::Mem(_)) | (Role::Label, Given::Label(_)) | (Role::Imm(_), Given::Int(_)) => true,
+        (Role::Dst | Role::Src, Given::Vector(parts)) => lanes(b, spec) == parts.len(),
+        (Role::Dst | Role::Src, Given::Pair(..)) => spec.second.is_some(),
+        (Role::Dst | Role::Src, Given::Mem(_) | Given::Label(_)) => false,
+        (Role::Dst | Role::Src, _) => lanes(b, spec) == 1,
+        _ => false,
     }
-    let has = |m: &str| mods.contains(&m);
-    match op {
-        "bra" | "ret" | "exit" | "bar" if !types.is_empty() => return Err(format!("`{op}` takes no type")),
-        "bra" => return Ok(vec![Goto]),
-        "ret" | "exit" => return Ok(vec![]),
-        "bar" if has("sync") => return Ok(vec![Int]),
-        "bar" => return Err("kgen knows `bar.sync`".into()),
-        "cvt" => {
-            return match types[..] {
-                [to, from] => Ok(vec![Dst(to), Src(from)]),
-                _ => Err(format!("`{name}` names two types, the result's and then the source's: `cvt.rn.f32.s32`")),
-            };
-        }
-        _ => {}
+}
+
+/// The width of a register of type `t`, for what reads and writes it.
+fn width(t: Ty) -> Width {
+    match t.decl().bits() {
+        8 => W8,
+        16 => W16,
+        64 => W64,
+        128 => W128,
+        _ => W32,
     }
-    let [t] = types[..] else {
-        return Err(format!("`{name}` ends in its operands' type, one of b32, u32, s32, f32, b64, u64, s64 and pred"));
-    };
-    if t == Ty::F32
-        && ROUNDED.contains(&op)
-        && !mods.iter().any(|m| ["rn", "rz", "rm", "rp", "approx", "full"].contains(m))
-    {
-        return Err(format!("`{name}` leaves ptxas to choose how it rounds, and to fuse it; say so: `{op}.rn.f32`"));
-    }
-    let int = !matches!(t, Ty::F32 | Ty::Pred);
-    if int && ["mul", "mad"].contains(&op) && !(has("lo") || has("hi") || has("wide")) {
-        return Err(format!(
-            "`{name}` keeps the low half of the product, the high or both: `{op}.lo`, `{op}.hi`, `{op}.wide`"
-        ));
-    }
-    if ["ld", "st", "atom", "red"].contains(&op) && !["global", "shared", "local", "const"].iter().any(|s| has(s)) {
-        return Err(format!("`{name}` says where it reads or writes: `{op}.global`"));
-    }
-    if op == "setp" && mods.iter().filter(|m| COMPARISONS.contains(m)).count() != 1 {
-        return Err(format!("`{name}` names one comparison, as in `setp.lt.u32`"));
-    }
-    let wide = |t: Ty| match t {
-        Ty::U32 => Ok(Ty::U64),
-        Ty::S32 => Ok(Ty::S64),
-        _ => Err(format!("`{name}` widens a 32-bit integer: `{op}.wide.u32`")),
-    };
-    Ok(match op {
-        "mov" => vec![Dst(t), Sreg(t)],
-        "setp" => vec![Dst(Ty::Pred), Src(t), Src(t)],
-        "selp" => vec![Dst(t), Src(t), Src(t), Src(Ty::Pred)],
-        "ld" => vec![Dst(t), Addr(Access::Read)],
-        "st" => vec![Addr(Access::Write), Src(t)],
-        "atom" if has("cas") => vec![Dst(t), Addr(Access::ReadWrite), Src(t), Src(t)],
-        "atom" => vec![Dst(t), Addr(Access::ReadWrite), Src(t)],
-        "red" => vec![Addr(Access::ReadWrite), Src(t)],
-        "shl" | "shr" => vec![Dst(t), Src(t), Src(Ty::U32)],
-        "mul" if has("wide") => vec![Dst(wide(t)?), Src(t), Src(t)],
-        "mad" if has("wide") => vec![Dst(wide(t)?), Src(t), Src(t), Src(wide(t)?)],
-        "mad" | "fma" => vec![Dst(t), Src(t), Src(t), Src(t)],
-        "not" | "cnot" | "neg" | "abs" | "sqrt" | "rcp" => vec![Dst(t), Src(t)],
-        _ => vec![Dst(t), Src(t), Src(t)],
-    })
 }
 
 /// The integer `x` as an operand of type `t`.
-fn int(t: Ty, x: i64) -> Result<String, String> {
+fn int(t: Ty, x: i64, name: &str) -> Result<String, String> {
     match t {
-        Ty::F32 if (x as f32) as i64 == x => Ok(float(x as f32)),
-        Ty::F32 => Err(format!("wants an `f32`; {x} is not one")),
-        Ty::Pred => Err("wants a predicate, which is a variable `setp` sets".into()),
-        _ if t.bits() == 32 && !(i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(&x) => {
-            Err(format!("wants 32 bits; {x} does not fit them"))
+        Ty::Pred => Err(format!("`{name}` wants a predicate, which is a variable `setp` sets")),
+        Ty::F32 if (x as f32) as i128 == i128::from(x) => Ok(format!("0f{:08X}", (x as f32).to_bits())),
+        Ty::F64 if (x as f64) as i128 == i128::from(x) => Ok(format!("0d{:016X}", (x as f64).to_bits())),
+        Ty::F32 | Ty::F64 => Err(format!("`{name}` wants an `{}`; {x} is not one", t.name())),
+        _ if t.kind() == Kind::Float => Err(half(t, name)),
+        Ty::B128 => Err(format!("`{name}` takes a `b128` only from a variable")),
+        _ => {
+            let bits = t.bits();
+            if bits < 64 && !(-(1i64 << (bits - 1))..(1i64 << bits)).contains(&x) {
+                return Err(format!("`{name}` wants {bits} bits; {x} does not fit them"));
+            }
+            Ok(x.to_string())
         }
-        _ => Ok(x.to_string()),
     }
 }
 
-/// A float as PTX writes it exactly: its bits.
-fn float(x: f32) -> String {
-    format!("0f{:08X}", x.to_bits())
+/// Why `x` is no fraction for `name`.
+fn fraction(name: &str, x: impl std::fmt::Display) -> String {
+    format!("`{name}` takes a fraction here, more than 0 and at most 1; {x} is not one")
 }
 
-fn describe(kind: Kind) -> String {
-    match kind {
-        Dst(t) => format!("a `{}` variable to write", t.name()),
-        Src(t) => format!("a `{}` variable or a value", t.name()),
-        Sreg(t) => format!("a `{}` variable, a value or a special register", t.name()),
-        Addr(_) => "an address, as in `[p + 4]`".into(),
-        Goto => "a label".into(),
-        Int => "an integer".into(),
+/// Why `name` takes no value known now as its operand of type `t`, a float PTX keeps in bits.
+fn half(t: Ty, name: &str) -> String {
+    let fill = match t {
+        Ty::F16 => "mov.b16(h, 1.5f16)",
+        Ty::Bf16 => "mov.b16(h, 1.5bf16)",
+        Ty::F16x2 => "mov.b32(h, (1.5f16, 2.0f16))",
+        Ty::Bf16x2 => "mov.b32(h, (1.5bf16, 2.0bf16))",
+        _ => "mov.b32(t, 1.5)",
+    };
+    format!("`{name}` takes a `{}` only from a variable: `{fill}` puts one in it", t.name())
+}
+
+/// The integer `x` as an operand that must be known now, of what `imm` lets it be.
+fn known(imm: Imm, x: i64, name: &str) -> Result<String, String> {
+    let fits = match imm {
+        Imm::Bits(bits) => (0..1i64 << bits).contains(&x),
+        Imm::Exactly(n) => x == n,
+        Imm::Pow2(p) => x > 0 && x & (x - 1) == 0 && x <= 1 << p,
+    };
+    if fits {
+        return Ok(x.to_string());
+    }
+    Err(match imm {
+        Imm::Bits(bits) => {
+            format!("`{name}` takes {bits} bits here, 0 to {}; {x} is not one of them", (1i64 << bits) - 1)
+        }
+        Imm::Exactly(n) => format!("`{name}` takes {n} here, the one value PTX has for it; not {x}"),
+        Imm::Pow2(p) => format!("`{name}` takes a power of two here, 2^{p} at most; {x} is not one"),
+    })
+}
+
+/// What `spec` of `b` wants, for an error.
+fn describe(b: &Bound, spec: &Spec) -> String {
+    let t = spec.ty.map(|t| b.ty(t).name()).unwrap_or_default();
+    let one = match spec.role {
+        Role::Addr(_) => return "an address, as in `[p + 4]`".into(),
+        Role::Label => return "a label".into(),
+        Role::Imm(_) => return "an integer known now".into(),
+        Role::Dst if spec.sink => format!("a `{t}` variable to write, or `_`"),
+        Role::Dst => format!("a `{t}` variable to write"),
+        Role::Src if spec.reg_only => format!("a `{t}` variable"),
+        Role::Src if spec.sreg => format!("a `{t}` variable, a value or a special register"),
+        Role::Src => format!("a `{t}` variable or a value"),
+    };
+    match lanes(b, spec) {
+        1 => one,
+        n => format!("{n} operands taken together, each {one}"),
     }
 }
 
 fn given(a: &Given<Var>) -> String {
     match a {
         Given::Var(v) => format!("a `{}` variable", v.ty.name()),
+        Given::Special(name) if name == "_" => "`_`".into(),
         Given::Special(name) => format!("`{name}`"),
         Given::Int(x) => format!("the integer {x}"),
         Given::F32(x) => format!("the float {x}"),
@@ -395,6 +537,23 @@ fn given(a: &Given<Var>) -> String {
     }
 }
 
+/// How many operands the forms take, `1 or 2 operands`, from each one's fewest and most.
+fn counts(ranges: &[(usize, usize)]) -> String {
+    let all: BTreeSet<usize> = ranges.iter().flat_map(|&(a, b)| a..=b).collect();
+    let words: Vec<String> = all.iter().map(usize::to_string).collect();
+    match words.as_slice() {
+        [one] if one == "0" => "no operands".into(),
+        [one] if one == "1" => "1 operand".into(),
+        [one] => format!("{one} operands"),
+        [first @ .., last] => format!("{} or {last} operands", first.join(", ")),
+        [] => unreachable!("an instruction has forms"),
+    }
+}
+
+/// The types a variable may be, for an error about one that is none.
+const TYPES: &str = "`pred`, `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, `bf16x2`, \
+                     `tf32`, `f32` and `f64`";
+
 impl Target for Kernel {
     type Var = Var;
 
@@ -402,12 +561,23 @@ impl Target for Kernel {
         let pointer = ty.starts_with("*const ") || ty.starts_with("*mut ");
         let t = match ty {
             _ if pointer => Ty::U64,
+            "u8" => Ty::U8,
+            "i8" => Ty::S8,
+            "u16" => Ty::U16,
+            "i16" => Ty::S16,
             "u32" => Ty::U32,
             "i32" => Ty::S32,
             "u64" | "usize" => Ty::U64,
             "i64" | "isize" => Ty::S64,
+            "f16" => Ty::F16,
+            "bf16" => Ty::Bf16,
             "f32" => Ty::F32,
-            _ => return Err(format!("a GPU kernel takes pointers, integers of 32 and 64 bits and `f32`, not `{ty}`")),
+            "f64" => Ty::F64,
+            _ => {
+                return Err(format!(
+                    "a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, `f32` and `f64`, not `{ty}`"
+                ));
+            }
         };
         let v = self.new_var(name, t);
         self.p.params.push((v.reg, PReg { class: v.reg.class, hw: 0 }));
@@ -424,21 +594,20 @@ impl Target for Kernel {
     }
 
     fn var(&mut self, name: &str, ty: &str) -> Result<Var, String> {
-        match Ty::parse(ty) {
-            Some(t) => Ok(self.new_var(name, t)),
-            None => {
-                Err(format!("PTX variables are `pred`, `b32`, `u32`, `s32`, `f32`, `b64`, `u64` and `s64`, not `{ty}`"))
-            }
+        let Some(t) = Ty::parse(ty) else {
+            return Err(format!("PTX variables are {TYPES}, not `{ty}`"));
+        };
+        if t == Ty::B128 {
+            self.require(Needs { ptx: 83, sm: 70, below: 0 }, &format!("let {name}: b128"))?;
         }
+        Ok(self.new_var(name, t))
     }
 
     fn view(&mut self, v: Var, view: &str) -> Result<Var, String> {
         match Ty::parse(view) {
             Some(t) if v.ty.fits(t) => Ok(v),
             Some(t) => Err(format!("a `{}` variable is no `{}`", v.ty.name(), t.name())),
-            None => Err(format!(
-                "PTX variables are `pred`, `b32`, `u32`, `s32`, `f32`, `b64`, `u64` and `s64`, not `{view}`"
-            )),
+            None => Err(format!("PTX variables are {TYPES}, not `{view}`")),
         }
     }
 
@@ -459,33 +628,38 @@ impl Target for Kernel {
         {
             return Err(Fault::new(format!("an instruction is guarded by a `pred`; this is a `{}`", g.pred.ty.name())));
         }
-        let kinds = operands(name).map_err(Fault::new)?;
-        if kinds.len() != args.len() {
-            return Err(Fault::new(format!("`{name}` takes {} operands, not {}", kinds.len(), args.len())));
-        }
-        let (mut texts, mut built) = (vec![], vec![]);
-        for (i, (&kind, a)) in kinds.iter().zip(args).enumerate() {
-            if let Given::Special(s) = a {
-                let known = SPECIAL.contains(&s.as_str());
-                if !known || !matches!(kind, Sreg(_)) {
-                    let m = if known {
-                        format!("`{name}` reads no special register; `mov.u32` does")
-                    } else {
-                        format!("`{s}` is not defined")
-                    };
-                    return Err(Fault::at(i, m));
+        let bound = forms::find(name).map_err(Fault::new)?;
+        let (mut ranges, mut best, mut found) = (vec![], None::<(usize, bool, Fault)>, None);
+        for b in &bound {
+            match self.operands(b, name, args) {
+                Ok(w) => {
+                    found = Some((b, w));
+                    break;
+                }
+                Err(Miss::Count(least, most)) => ranges.push((least, most)),
+                Err(Miss::At(at, shape, fault)) => {
+                    if best.as_ref().is_none_or(|(a, s, _)| (at, shape) > (*a, *s)) {
+                        best = Some((at, shape, fault));
+                    }
                 }
             }
-            let (text, arg) = self.operand(kind, a).map_err(|m| Fault::at(i, format!("`{name}` {m}")))?;
-            texts.push(text);
-            built.extend(arg);
         }
-        let op = name.split('.').next().unwrap_or_default();
+        let Some((b, w)) = found else {
+            return Err(match best {
+                Some((.., fault)) => fault,
+                None => Fault::new(format!("`{name}` takes {}, not {}", counts(&ranges), args.len())),
+            });
+        };
+        let mut what = name.to_string();
+        for s in &w.sregs {
+            what += &format!(" %{s}");
+        }
+        self.require(b.needs.and(w.needs), &what).map_err(Fault::new)?;
         let label = args.iter().find_map(|a| match a {
             Given::Label(l) => Some(Label(*l)),
             _ => None,
         });
-        let flow = match (op, label, guard) {
+        let flow = match (b.form.op, label, guard) {
             ("bra", Some(l), None) => Flow::Jump(l),
             ("bra", Some(l), Some(_)) => Flow::Branch(l),
             ("ret" | "exit", _, None) => Flow::Return,
@@ -496,12 +670,12 @@ impl Target for Kernel {
             None => String::new(),
         };
         line += name;
-        if !texts.is_empty() {
+        if !w.texts.is_empty() {
             line += " ";
-            line += &texts.join(", ");
+            line += &w.texts.join(", ");
         }
         line += ";";
-        self.push(line, built, guard, flow);
+        self.push(line, w.args, guard, flow);
         Ok(())
     }
 
