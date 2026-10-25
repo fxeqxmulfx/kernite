@@ -430,6 +430,17 @@ impl Kernel {
             w.texts.push(text);
             w.needs = w.needs.and(spec.needs);
         }
+        // PTX leaves undefined an index past the labels, where ptxas 13.4 jumps to the first.
+        if let Some(i) = specs.iter().position(|s| s.role == Role::Labels).and_then(|l| l.checked_sub(1))
+            && let Given::Int(x) = args[i]
+            && !(0..w.table.len() as i64).contains(&x)
+        {
+            let m = match w.table.len() {
+                1 => format!("`{name}` takes 0 here, the index of its one label; not {x}"),
+                n => format!("`{name}` takes 0 to {} here, the index of one of its {n} labels; {x} is not one", n - 1),
+            };
+            return Err(Miss::At(i, true, Fault::at(i, m)));
+        }
         if b.form.checks.contains(&Check::Neg) {
             let negs: Vec<usize> = (0..args.len()).filter(|&i| specs[i].neg).collect();
             let negated = |i: usize| matches!(args[i], Given::Neg(_));
@@ -471,6 +482,10 @@ impl Kernel {
                 self.handle(b, spec, &[Given::Var(v)], name, w)
             }
             (Role::Addr(access), Given::Mem(m)) => self.address(b, m, access, name, w),
+            (Role::Addr(_), Given::Data(_)) => Err(format!(
+                "`{name}` takes an address that starts at a variable, as `[p + 4]`; this is memory holding a value \
+                 known now"
+            )),
             (Role::Func, Given::Func(f)) => self.address_of(f, w),
             (Role::Imm(imm), Given::Int(x)) => known(imm, *x, name),
             (Role::Dst | Role::Src, _) => self.value(b, spec, a, name, w),
@@ -512,6 +527,16 @@ impl Kernel {
                     "`{name}` writes its one result; `_` stands for one of a vector's, as `.v2` and `.v4` write"
                 ));
             }
+            // Nor does it store a special register but of a vector.
+            if let Given::Special(s) = a
+                && let Some(r) = forms::sreg(s).filter(|_| spec.count == Count::Vec && spec.sreg)
+            {
+                return Err(format!(
+                    "`{name}` stores a special register as one of a vector's, as `.v2` and `.v4` store; `mov.{}` \
+                     puts `{s}` in a variable",
+                    r.ty.name()
+                ));
+            }
             return self.one(b, spec, a, name, w);
         }
         let parts = match a {
@@ -529,6 +554,19 @@ impl Kernel {
         }
         if texts.iter().all(|t| t == "_") {
             return Err(format!("`{name}` writes one of them at least"));
+        }
+        if spec.one_var && parts.iter().any(is_value) && !parts.iter().any(anchors) {
+            let part = parts.iter().find_map(|p| match p {
+                Given::Special(s) => s.split_once('.'),
+                _ => None,
+            });
+            return Err(match part {
+                Some((v, x)) => format!(
+                    "`{name}` takes values known now among these only beside a variable: one of the kernel's, or a \
+                     special register but a part of a vector, as `{v}.{x}` is of `{v}`"
+                ),
+                None => format!("`{name}` takes values known now among these only beside a variable"),
+            });
         }
         Ok(format!("{{{}}}", texts.join(", ")))
     }
@@ -556,14 +594,7 @@ impl Kernel {
                     (None, Some(p)) => {
                         return Err(format!("`{name}` takes a whole variable here; this is a part of one, `.{p}`"));
                     }
-                    (Some((sel, true)), None) => {
-                        return Err(format!(
-                            "`{name}` writes {}, and the rest from its last operand; this is a whole `{}` variable",
-                            sel.what(),
-                            ty.name()
-                        ));
-                    }
-                    (Some((sel, _)), Some(p)) if !sel.takes(p) => {
+                    (Some(sel), Some(p)) if !sel.takes(p) => {
                         return Err(format!("`{name}` takes {}; `.{p}` is not one", sel.what()));
                     }
                     _ => {}
@@ -619,7 +650,7 @@ impl Kernel {
                     Ok(format!("%{s}"))
                 }
             },
-            Given::Not(p) if spec.not => match **p {
+            Given::Not(p) if spec.not && t == Ty::Pred => match **p {
                 Given::Var(Var::Reg { reg, ty: Ty::Pred }) => Ok(format!("!{}", var(reg, Ty::Pred, w))),
                 _ => Err(format!("`{name}` reads a predicate inverted, `!p`; this is {} inverted", self.given(p))),
             },
@@ -642,9 +673,9 @@ impl Kernel {
                     return Err(format!("`{name}` takes {lo} to {hi} here; {x} is not one of them"));
                 }
                 if let Some(step) = spec.step
-                    && (*x <= 0 || x % step != 0)
+                    && x % step != 0
                 {
-                    return Err(format!("`{name}` takes a multiple of {step} here, and more than 0; {x} is not one"));
+                    return Err(format!("`{name}` takes a multiple of {step} here; {x} is not one"));
                 }
                 if spec.fraction && *x != 1 {
                     return Err(fraction(name, x));
@@ -714,8 +745,11 @@ impl Kernel {
         }
         let space = b.spaces()[w.addrs];
         w.addrs += 1;
-        let wide = space.wide();
+        let wide = space.wide() && !b.form.checks.contains(&Check::Addr32);
         let (base, ty) = match m.base {
+            // ptxas takes an address known now of local memory, `[256]`, as PTX's ISA has it;
+            // but ptxas lays out local memory, for the kernel's variables and for its own, so
+            // what lies at one is no variable's.
             None => {
                 let bits = if wide { "a 64-bit" } else { "a" };
                 return Err(format!("`{name}` takes an address that starts at {bits} variable"));
@@ -1240,10 +1274,28 @@ fn width(t: Ty) -> Width {
     }
 }
 
+/// Whether `a` is a value known now, as `7` or `1.5`, and not a variable.
+fn is_value(a: &Given<Var>) -> bool {
+    matches!(a, Given::Int(_) | Given::F32(_) | Given::F64(_) | Given::F16(_) | Given::Bf16(_))
+}
+
+/// Whether `a` is a variable that values known now may be beside, in registers taken
+/// together: ptxas 13.4 takes `{%r1, 8}` and `{%laneid, 8}`, but not `{%tid.x, 8}`, though
+/// it takes `{%tid.x, %r1}`.
+fn anchors(a: &Given<Var>) -> bool {
+    match a {
+        Given::Var(Var::Reg { .. } | Var::Part { .. }) => true,
+        Given::Special(s) => s != "_" && !s.contains('.'),
+        _ => false,
+    }
+}
+
 /// The integer `x` as an operand of type `t`.
 fn int(t: Ty, x: i64, name: &str) -> Result<String, String> {
     match t {
-        Ty::Pred => Err(format!("`{name}` wants a predicate, which is a variable `setp` sets")),
+        // An integer is a predicate as PTX's ISA says, 0 false and the rest true; written as
+        // 0 or 1, as ptxas 13.4 reads `set`'s and `setp`'s `c` in its low 32 bits alone.
+        Ty::Pred => Ok(if x == 0 { "0" } else { "1" }.into()),
         Ty::F32 if (x as f32) as i128 == i128::from(x) => Ok(format!("0f{:08X}", (x as f32).to_bits())),
         Ty::F64 if (x as f64) as i128 == i128::from(x) => Ok(format!("0d{:016X}", (x as f64).to_bits())),
         Ty::F32 | Ty::F64 => Err(format!("`{name}` wants an `{}`; {x} is not one", t.name())),
@@ -1308,7 +1360,7 @@ fn describe(b: &Bound, spec: &Spec) -> String {
     let one = match spec.role {
         Role::Addr(_) => return "an address, as in `[p + 4]`".into(),
         Role::Label => return "a label".into(),
-        Role::Labels => return "labels taken together, as `(a, b)`, for a variable to pick one".into(),
+        Role::Labels => return "labels taken together, as `(a, b)`, for an index to pick one".into(),
         Role::Func => return "a function of the module, whose address it takes".into(),
         Role::Handle => {
             let what = if b.form.op.starts_with("su") { "surface" } else { "texture" };
@@ -1337,6 +1389,9 @@ fn describe(b: &Bound, spec: &Spec) -> String {
                 1 => format!("{n} operands taken together, {first} and then {one}"),
                 rest => format!("{n} operands taken together, {first} and then {rest} each {one}"),
             }
+        }
+        (n, None) if spec.one_var => {
+            format!("{n} operands taken together, each {one}, and values only beside a variable")
         }
         (n, None) => format!("{n} operands taken together, each {one}"),
     }

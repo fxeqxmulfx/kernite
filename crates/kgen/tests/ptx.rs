@@ -284,7 +284,7 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         ("add.u32(_, n, n);", "2:9: `add.u32` has no result here that it may leave unwritten, `_`"),
         ("let i: u32; div.u32(i, !n, n);", "2:24: `div.u32` takes no operand inverted"),
         ("bar.sync(16);", "2:10: `bar.sync` takes 0 to 15 here; 16 is not one of them"),
-        ("bar.sync(0, 33);", "2:13: `bar.sync` takes a multiple of 32 here, and more than 0; 33 is not one"),
+        ("bar.sync(0, 33);", "2:13: `bar.sync` takes a multiple of 32 here; 33 is not one"),
         ("bar.arrive(0);", "2:5: `bar.arrive` takes 2 operands, not 1"),
         (
             "let q: b64; createpolicy.fractional.L2__evict_last.b64(q, 1.5);",
@@ -360,11 +360,6 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
             "2:40: `vmad.s32.s32.s32` negates `a * b`, as `-a` or `-b` does, or `c`; not both",
         ),
         (
-            "let d: u32; vadd.u32.u32.u32(d, n, n, n);",
-            "2:30: `vadd.u32.u32.u32` writes a byte or a half of a variable here, `.b0` to `.b3`, `.h0` or `.h1`, \
-             and the rest from its last operand; this is a whole `u32` variable",
-        ),
-        (
             "let d: u32; vadd2.u32.u32.u32(d, n.b0, n, n);",
             "2:36: `vadd2.u32.u32.u32` takes two of the four halves of the two sources here, as `.h10` or `.h32`; \
              `.b0` is not one",
@@ -389,13 +384,17 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         ),
         (
             "brx.idx(n, a); label(a);",
-            "2:12: `brx.idx` wants labels taken together, as `(a, b)`, for a variable to pick one; this is a label",
+            "2:12: `brx.idx` wants labels taken together, as `(a, b)`, for an index to pick one; this is a label",
         ),
         (
             "brx.idx(n, (a, n)); label(a);",
             "2:12: `brx.idx` jumps to one of labels taken together; this holds a `u32` variable",
         ),
-        ("brx.idx(1, (a,)); label(a);", "2:9: `brx.idx` wants a `u32` variable; this is the integer 1"),
+        ("brx.idx(1, (a,)); label(a);", "2:9: `brx.idx` takes 0 here, the index of its one label; not 1"),
+        (
+            "brx.idx(2, (a, b)); label(a); label(b);",
+            "2:9: `brx.idx` takes 0 to 1 here, the index of one of its 2 labels; 2 is not one",
+        ),
         (
             "let w: u64; mov.u64(w, 0); brx.idx(w, (a,)); label(a);",
             "2:36: `brx.idx` wants a `u32` variable; this is a `u64`",
@@ -421,8 +420,8 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         ),
         (
             "let i: u32; suld.b.a1d.b32.trap(i, [s, n]);",
-            "2:36: `suld.b.a1d.b32.trap` wants 2 operands taken together, a `u32` variable or a value and then a \
-             `s32` variable or a value; this is a `u32` variable",
+            "2:36: `suld.b.a1d.b32.trap` wants 2 operands taken together, a `u32` variable, a value or a special \
+             register and then a `s32` variable, a value or a special register; this is a `u32` variable",
         ),
         (
             "let (i, f): (u32, f32); suld.b.a1d.b32.trap(i, [s, (f, n)]);",
@@ -481,7 +480,34 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
             "2:43: PTX's `txq.force_unnormalized_coords` asks of a sampler apart from its texture, in the independent \
              mode, which kgen does not write",
         ),
-        ("let p: pred; istypep.texref(p, [s]);", "2:32: `istypep.texref` wants a `u64` variable; this is an address"),
+        (
+            "let p: pred; istypep.texref(p, [s]);",
+            "2:32: `istypep.texref` wants a `u64` variable or a value; this is an address",
+        ),
+        (
+            "let i: u32; ld.local.u32(i, [256]);",
+            "2:29: `ld.local.u32` takes an address that starts at a variable, as `[p + 4]`; this is memory holding \
+             a value known now",
+        ),
+        (
+            "st.global.u32([x], tid.x);",
+            "2:24: `st.global.u32` stores a special register as one of a vector's, as `.v2` and `.v4` store; \
+             `mov.u32` puts `tid.x` in a variable",
+        ),
+        ("let f: f32; cvt.rn.f32.u32(f, tid.x);", "2:35: `cvt.rn.f32.u32` reads no special register; `mov.u32` does"),
+        (
+            "let (a, b, c, d): (s32, s32, s32, s32); mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32((a, b, c, d), \
+             (tid.x, 8), n, (0, 0, 0, 0));",
+            "2:103: `mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32` takes values known now among these only beside \
+             a variable: one of the kernel's, or a special register but a part of a vector, as `tid.x` is of `tid`",
+        ),
+        (
+            "let (a, b, c, d): (s32, s32, s32, s32); mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32((a, b, c, d), \
+             (7, 8), n, (0, 0, 0, 0));",
+            "2:103: `mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32` takes values known now among these only beside \
+             a variable",
+        ),
+        ("let d: u32; and.b32(d, !n, n);", "2:24: `and.b32` takes no operand inverted"),
     ];
     for (body, want) in cases {
         assert_eq!(compile("x: *mut f32, n: u32, h: f16, s: u64, z: f32", body).unwrap_err(), want, "{body}");
@@ -575,6 +601,26 @@ fn a_fragment_is_braced_even_when_it_is_one_register() {
         "\tldmatrix.sync.aligned.m8n8.x1.b16 {%d}, [%y];\n",
         "\tldmatrix.sync.aligned.m8n8.x1.b16 {%e}, [%y];\n",
         "\tmma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%a, %b}, {%d}, {%e}, {0, %n};\n",
+    ] {
+        assert!(ptx.contains(line), "{line}{ptx}");
+    }
+}
+
+#[test]
+fn an_operand_is_written_wherever_ptxas_takes_it() {
+    let ptx = compile(
+        "x: *mut f32, n: u32",
+        "let d: u32; selp.u32(d, n, 0, 7); st.global.v2.u32([x], (tid.x, tid.y)); let (a, b, c, e): (s32, s32, s32, \
+         s32); mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32((a, b, c, e), (n, 8), n, (0, 0, 0, 0)); \
+         cp.async.ca.shared.global([n], [n], 4); brx.idx(1, (one, two)); label(one); label(two);",
+    )
+    .unwrap();
+    for line in [
+        "\tselp.u32 %d, %n, 0, 1;\n",
+        "\tst.global.v2.u32 [%x], {%tid.x, %tid.y};\n",
+        "\tmma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32 {%a, %b, %c, %e}, {%n, 8}, {%n}, {0, 0, 0, 0};\n",
+        "\tcp.async.ca.shared.global [%n], [%n], 4;\n",
+        "\tbrx.idx 1, $T0;\n",
     ] {
         assert!(ptx.contains(line), "{line}{ptx}");
     }
@@ -1009,9 +1055,10 @@ fn ptxas_takes_a_function_that_never_returns_from_ptx_6_4_and_sm_30() {
     assert!(text.contains("\n.version 6.4\n.target sm_30\n"), "{text}");
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("never");
     std::fs::create_dir_all(&dir).unwrap();
-    assert_eq!(refused(&ptxas, &text, &dir.join("needs")), BTreeMap::new());
+    assert_eq!(refused(&ptxas, &text, gpu_of(&text), &dir.join("needs")), BTreeMap::new());
     for (v, sm) in [(63, 30), (64, 20)] {
-        assert!(!refused(&ptxas, &retarget(&text, v, sm), &dir.join(format!("{v}-{sm}"))).is_empty(), "{v} {sm}");
+        let older = retarget(&text, v, sm);
+        assert!(!refused(&ptxas, &older, gpu_of(&older), &dir.join(format!("{v}-{sm}"))).is_empty(), "{v} {sm}");
     }
 }
 
@@ -1139,7 +1186,8 @@ fn a_function_takes_and_returns_ptx_types() {
 enum Style {
     /// A variable for each, and the first of the integers an operand may be one of.
     Vars,
-    /// A value known now for each that may be one, and the last of those integers.
+    /// A value known now for each that may be one, but the first of registers that take
+    /// values only beside a variable, and the last of those integers.
     Values,
     /// `_` for the first result that may be left unwritten, and `!p` for each predicate that
     /// may be read inverted.
@@ -1153,6 +1201,17 @@ enum Style {
     /// A part of each variable that may be one, as a video instruction selects it, and each
     /// operand that may be negated, negated.
     Parts,
+    /// A special register for each operand that may be one: `tid.x` of 32 bits or fewer, and
+    /// `clock64` of 64.
+    Specials,
+    /// An address in a `u32` variable for each that may be in one: in a state space of 32-bit
+    /// addresses, and in any for a form of `+addr32`.
+    Narrow,
+    /// The least of the values known now that each operand may be, where those are fewer than
+    /// its type's: of a range, or of so many bits, or a power of two.
+    Least,
+    /// The most of those values.
+    Most,
 }
 
 /// The names of `form` the test writes, and the words of each: each word of each element with
@@ -1220,13 +1279,13 @@ fn example(sel: Sel) -> &'static str {
 }
 
 /// A value known now of type `t`, for an operand that may be one: a float that is not
-/// `f32` or `f64` is not, nor a predicate.
+/// `f32` or `f64` is not, nor a `b128`. An integer is a predicate, 1 true.
 fn value(t: Ty, spec: &Spec) -> Option<Given<Var>> {
     match t {
         Ty::F32 if spec.fraction => Some(Given::F32(0.5)),
         Ty::F32 => Some(Given::F32(1.5)),
         Ty::F64 => Some(Given::F64(1.5)),
-        Ty::Pred | Ty::B128 => None,
+        Ty::B128 => None,
         _ if t.kind() == Kind::Float => None,
         _ => Some(Given::Int(spec.step.unwrap_or(1))),
     }
@@ -1255,14 +1314,14 @@ impl Making {
         self.kernel.var(&format!("s{}", self.vars), &format!("{space}<[u8; 256], 32>")).unwrap()
     }
 
-    /// A variable of type `t` for `spec`: a part of one where it must be, and in
-    /// [`Style::Parts`] where it may be, and negated there where it may be.
+    /// A variable of type `t` for `spec`: in [`Style::Parts`], a part of one where it may be,
+    /// and negated where it may be.
     fn reg(&mut self, spec: &Spec, t: Ty, style: Style) -> Given<Var> {
         let mut v = self.var(t);
-        if let Some((sel, must)) = spec.part
-            && (must || style == Style::Parts)
+        if let Some(sel) = spec.part
+            && style == Style::Parts
         {
-            self.differs |= !must;
+            self.differs = true;
             v = self.kernel.field(v, example(sel)).unwrap();
         }
         if spec.neg && style == Style::Parts {
@@ -1293,10 +1352,25 @@ impl Making {
             } else if style == Style::Sinks && sink && !self.sunk {
                 self.sunk = true;
                 Some(Given::Special("_".into()))
-            } else if style == Style::Sinks && spec.not {
+            } else if style == Style::Sinks && spec.not && t == Ty::Pred {
                 Some(Given::Not(Box::new(Given::Var(self.var(t)))))
-            } else if style == Style::Values && spec.role == Role::Src && !spec.reg_only {
+            } else if style == Style::Values && spec.role == Role::Src && !spec.reg_only && !(spec.one_var && k == 0) {
                 value(t, spec)
+            } else if style == Style::Specials
+                && spec.role == Role::Src
+                && spec.sreg
+                && (spec.count != Count::Vec || lanes > 1)
+            {
+                ["tid.x", "clock64"]
+                    .into_iter()
+                    .find(|s| forms::sreg(s).is_some_and(|r| r.read_as(t)))
+                    .map(|s| Given::Special(s.into()))
+            } else if let Some((lo, hi)) = spec.range.filter(|_| spec.role == Role::Src && !spec.reg_only) {
+                match style {
+                    Style::Least => Some(Given::Int(lo)),
+                    Style::Most => Some(Given::Int(hi)),
+                    _ => None,
+                }
             } else {
                 None
             };
@@ -1316,6 +1390,7 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
     let mut m = Making { kernel: Kernel::new(format!("k{n}")), vars: 0, differs: false, sunk: false };
     m.kernel.callee("f", Some(Prototype { params: vec![], returns: Returns::Nothing }));
     let addr = m.kernel.var("a", "u64").unwrap();
+    let narrow = (style == Style::Narrow).then(|| m.kernel.var("n", "u32").unwrap());
     let mut spaces = b.spaces().into_iter();
     let mut args = vec![];
     for spec in b.form.operands.iter().filter(|s| s.when.is_none_or(|w| b.has(w))) {
@@ -1325,7 +1400,7 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
         }
         args.push(match spec.role {
             Role::Label => Given::Label(0),
-            Role::Labels => Given::Vector(vec![Given::Label(0)]),
+            Role::Labels => Given::Vector(vec![Given::Label(0), Given::Label(1)]),
             Role::Func => Given::Func("f".into()),
             Role::Handle => {
                 let items: Vec<Given<Var>> = spec.inner.iter().map(|s| m.operand(b, s, style)).collect();
@@ -1339,15 +1414,36 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
                     m.differs = true;
                     Given::Mem(Address { base: Some(m.memory(s)), index: None, disp: 32 })
                 }
+                s if !s.wide() || b.form.checks.contains(&Check::Addr32) => match narrow {
+                    Some(n) => {
+                        m.differs = true;
+                        Given::Mem(Address { base: Some(n), index: None, disp: 0 })
+                    }
+                    None => Given::Mem(Address { base: Some(addr), index: None, disp: 0 }),
+                },
                 _ => Given::Mem(Address { base: Some(addr), index: None, disp: 0 }),
             },
-            Role::Imm(Imm::Bits(_)) => Given::Int(1),
+            Role::Imm(Imm::Bits(bits)) => {
+                m.differs |= matches!(style, Style::Least | Style::Most);
+                Given::Int(match style {
+                    Style::Least => 0,
+                    Style::Most => (1 << bits) - 1,
+                    _ => 1,
+                })
+            }
             Role::Imm(imm @ Imm::Of(_)) => {
                 let values = imm.values();
                 m.differs |= style == Style::Values && values.len() > 1;
                 Given::Int(if style == Style::Values { values[values.len() - 1] } else { values[0] })
             }
-            Role::Imm(Imm::Pow2(_)) => Given::Int(16),
+            Role::Imm(Imm::Pow2(p)) => {
+                m.differs |= matches!(style, Style::Least | Style::Most);
+                Given::Int(match style {
+                    Style::Least => 1,
+                    Style::Most => 1 << p,
+                    _ => 16,
+                })
+            }
             Role::Dst | Role::Src => {
                 let first = m.operand(b, spec, style);
                 match &spec.second {
@@ -1369,6 +1465,7 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
     }
     if b.form.operands.iter().any(|s| matches!(s.role, Role::Label | Role::Labels)) {
         m.kernel.label(0);
+        m.kernel.label(1);
     }
     m.kernel.end().unwrap();
     Some(Ok(m.kernel.finish()))
@@ -1415,8 +1512,8 @@ fn by_hand(n: usize, name: &str, form: &'static Form, choice: Vec<Option<usize>>
     )
 }
 
-/// Operand `spec` of `b` as registers, each added to `regs`: one, or a part of one where it
-/// must be; a vector, braced even of one; or two written at once.
+/// Operand `spec` of `b` as registers, each added to `regs`: one; a vector, braced even of
+/// one; or two written at once.
 fn registers(b: &Bound, spec: &Spec, regs: &mut Vec<Ty>) -> String {
     let t = b.ty(spec.ty.expect("a register's operand has a type"));
     let lanes = match spec.count {
@@ -1431,11 +1528,7 @@ fn registers(b: &Bound, spec: &Spec, regs: &mut Vec<Ty>) -> String {
         })
         .collect();
     let braced = matches!(spec.count, Count::Fixed(_));
-    let first = match spec.part {
-        Some((sel, true)) => format!("{}.{}", names[0], example(sel)),
-        _ if lanes == 1 && !braced => names[0].clone(),
-        _ => format!("{{{}}}", names.join(", ")),
-    };
+    let first = if lanes == 1 && !braced { names[0].clone() } else { format!("{{{}}}", names.join(", ")) };
     match &spec.second {
         Some((second, _)) => format!("{first}|{}", registers(b, second, regs)),
         None => first,
@@ -1498,9 +1591,9 @@ fn module(entries: &[Entry]) -> String {
     kgen_ptx::module(&all).unwrap()
 }
 
-/// The kernels `ptxas` refuses of each module, by name, each with the first error it finds
-/// in it; `?` for one outside any kernel.
-fn assemble(ptxas: &Path, modules: &[String]) -> Vec<BTreeMap<String, String>> {
+/// The kernels `ptxas` refuses of each module, assembling it for the GPU given with it, by
+/// name, each with the first error it finds in it; `?` for one outside any kernel.
+fn assemble(ptxas: &Path, modules: &[(String, u32)]) -> Vec<BTreeMap<String, String>> {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("forms");
     std::fs::create_dir_all(&dir).unwrap();
     let next = AtomicUsize::new(0);
@@ -1511,8 +1604,8 @@ fn assemble(ptxas: &Path, modules: &[String]) -> Vec<BTreeMap<String, String>> {
             s.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(text) = modules.get(i) else { break };
-                    *out[i].lock().unwrap() = refused(ptxas, text, &dir.join(i.to_string()));
+                    let Some((text, gpu)) = modules.get(i) else { break };
+                    *out[i].lock().unwrap() = refused(ptxas, text, *gpu, &dir.join(i.to_string()));
                 }
             });
         }
@@ -1520,21 +1613,18 @@ fn assemble(ptxas: &Path, modules: &[String]) -> Vec<BTreeMap<String, String>> {
     out.into_iter().map(|m| m.into_inner().unwrap()).collect()
 }
 
-/// The kernels `ptxas` refuses of the module `text`, which it reads at `path`. A fatal error
-/// stops it in the kernel it is in, so it goes on without that one; advice, as that `mma.sp`
-/// is slower than `mma.sp::ordered_metadata`, is no refusal.
-fn refused(ptxas: &Path, text: &str, path: &Path) -> BTreeMap<String, String> {
+/// The kernels `ptxas` refuses of the module `text`, which it reads at `path` and assembles
+/// for the GPU `gpu`. An error may
+/// stop it before the kernels after, so it goes on without those it refused, until it takes
+/// the rest; advice, as that `mma.sp` is slower than `mma.sp::ordered_metadata`, is no
+/// refusal.
+fn refused(ptxas: &Path, text: &str, gpu: u32, path: &Path) -> BTreeMap<String, String> {
     let (src, bin) = (path.with_extension("ptx"), path.with_extension("cubin"));
-    let sm: u32 = text
-        .lines()
-        .find_map(|l| l.strip_prefix(".target sm_"))
-        .and_then(|t| t.parse().ok())
-        .expect("a module has a target");
     let (mut text, mut out) = (text.to_string(), BTreeMap::new());
     loop {
         std::fs::write(&src, &text).unwrap();
         let run = Command::new(ptxas)
-            .args(["--gpu-name", &format!("sm_{}", sm.max(75))])
+            .args(["--gpu-name", &format!("sm_{gpu}")])
             .arg(&src)
             .arg("-o")
             .arg(&bin)
@@ -1545,7 +1635,7 @@ fn refused(ptxas: &Path, text: &str, path: &Path) -> BTreeMap<String, String> {
             return out;
         }
         let stderr = String::from_utf8_lossy(&run.stderr);
-        let mut fatal = None;
+        let mut wrong: Vec<String> = vec![];
         for l in stderr.lines() {
             let Some((n, message)) = l.split_once(", line ").and_then(|(_, r)| r.split_once(';')) else { continue };
             let Ok(n) = n.parse() else { continue };
@@ -1553,22 +1643,19 @@ fn refused(ptxas: &Path, text: &str, path: &Path) -> BTreeMap<String, String> {
             if message.starts_with("info") {
                 continue;
             }
-            if message.starts_with("fatal") {
-                fatal = Some(k.clone());
+            if !wrong.contains(&k) {
+                wrong.push(k.clone());
             }
             out.entry(k).or_insert_with(|| message.to_string());
         }
-        match fatal {
-            Some(k) if k != "?" => text = without(&text, &k),
-            _ => {
-                if out.is_empty() {
-                    // A crash says nothing.
-                    let why =
-                        if stderr.trim().is_empty() { format!("ptxas: {}", run.status) } else { stderr.trim().into() };
-                    out.insert("?".into(), why);
-                }
-                return out;
-            }
+        if wrong.is_empty() || wrong.iter().any(|k| k == "?") {
+            // A crash says nothing.
+            let why = if stderr.trim().is_empty() { format!("ptxas: {}", run.status) } else { stderr.trim().into() };
+            out.entry("?".into()).or_insert(why);
+            return out;
+        }
+        for k in &wrong {
+            text = without(&text, k);
         }
     }
 }
@@ -1587,6 +1674,23 @@ fn without(text: &str, k: &str) -> String {
         .expect("the kernel is in the module");
     let end = start + lines[start..].iter().position(|l| *l == "}").expect("a kernel ends");
     lines[..start].iter().chain(&lines[end + 1..]).map(|l| format!("{l}\n")).collect()
+}
+
+/// The GPU `ptxas` assembles `text` for, but where another is said: the one it is for, or
+/// Turing, `sm_75`, the oldest that ptxas 13.4 assembles for.
+fn gpu_of(text: &str) -> u32 {
+    let sm: u32 = text
+        .lines()
+        .find_map(|l| l.strip_prefix(".target sm_"))
+        .and_then(|t| t.parse().ok())
+        .expect("a module has a target");
+    sm.max(75)
+}
+
+/// The module `text`, which `ptxas` should make `expect` of, for the GPU [`gpu_of`] gives.
+fn at(text: String, expect: Expect) -> (String, u32, Expect) {
+    let g = gpu_of(&text);
+    (text, g, expect)
 }
 
 /// A module's `.version` and `.target`.
@@ -1677,9 +1781,19 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
                 }
             };
             let Some(b) = bound.iter().find(|b| std::ptr::eq(b.form, form)) else { continue };
-            for style in
-                [Style::Vars, Style::Values, Style::Sinks, Style::Short, Style::Single, Style::Memory, Style::Parts]
-            {
+            for style in [
+                Style::Vars,
+                Style::Values,
+                Style::Sinks,
+                Style::Short,
+                Style::Single,
+                Style::Memory,
+                Style::Parts,
+                Style::Specials,
+                Style::Narrow,
+                Style::Least,
+                Style::Most,
+            ] {
                 n += 1;
                 match instance(n, &name, b, style) {
                     None => {}
@@ -1697,10 +1811,13 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
             (entries.len(), entries.iter().take(5).map(|e| what[&e.program.name].as_str()).collect());
         failures.push(format!("{count} kernels need PTX {ptx}, which ptxas reads none of: {}", some.join("; ")));
     }
-    // Each group as kgen writes it, and at the version it needs, for the newest GPU of that
-    // version; and one step older in each way it needs more than PTX 1.0 and Fermi, and for
-    // the GPU it is too new for: then each kernel is wrong.
-    let mut modules: Vec<(String, Expect)> = vec![];
+    // Each group as kgen writes it, for the GPU it is for and for each newer it may run on,
+    // as the driver assembles it for the GPU it runs on; at the version it needs, for the
+    // newest GPU of that version; and at the newest version, for the newest GPU it may be
+    // for, as ptxas takes some older that it refuses newer. And one step older in each way it
+    // needs more than PTX 1.0 and Fermi, and for the GPU it is too new for: then each kernel
+    // is wrong.
+    let mut modules: Vec<(String, u32, Expect)> = vec![];
     for (&(ptx, sm, below, since), entries) in groups.iter().filter(|((ptx, ..), _)| VERSIONS.contains(ptx)) {
         let n = Needs { ptx, sm, below, since };
         let text = module(entries);
@@ -1709,25 +1826,35 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
             let v = format!("{}.{}", ptx / 10, ptx % 10);
             failures.push(format!("{} kernels need PTX {v} and sm_{sm}, which no module of {v} is for", entries.len()));
         }
-        let exact = retarget(&text, ptx, gpu);
-        if exact != text {
-            modules.push((exact, Expect::Takes));
+        let last = VERSIONS[VERSIONS.len() - 1];
+        let (exact, latest) = (retarget(&text, ptx, gpu), retarget(&text, last, newest(last, n)));
+        if latest != text && latest != exact {
+            modules.push(at(latest, Expect::Takes));
         }
-        modules.push((text.clone(), Expect::Takes));
+        if exact != text {
+            modules.push(at(exact, Expect::Takes));
+        }
+        let written = ptx.max(Needs::FLOOR.ptx);
+        for &(g, _) in
+            kgen_ptx::GPUS.iter().filter(|&&(g, _)| g > gpu_of(&text) && (below == 0 || written < since || g < below))
+        {
+            modules.push((text.clone(), g, Expect::Takes));
+        }
+        modules.push(at(text.clone(), Expect::Takes));
         if let Some(v) = before(ptx) {
-            modules.push((retarget(&text, v, newest(v, n)), Expect::Refuses));
+            modules.push(at(retarget(&text, v, newest(v, n)), Expect::Refuses));
         }
         if sm > Needs::FLOOR.sm {
             let i = kgen_ptx::GPUS.iter().position(|&(g, _)| g == sm).expect("a GPU kgen writes for");
             let g = kgen_ptx::GPUS[i - 1].0;
-            modules.push((retarget(&text, ptx.max(came(g)), g), Expect::Refuses));
+            modules.push(at(retarget(&text, ptx.max(came(g)), g), Expect::Refuses));
         }
         if below != 0 {
             let v = ptx.max(came(below));
             if let Some(last) = before(since).filter(|&last| last >= v) {
-                modules.push((retarget(&text, last, below), Expect::Takes));
+                modules.push(at(retarget(&text, last, below), Expect::Takes));
             }
-            modules.push((retarget(&text, v.max(since), below), Expect::Refuses));
+            modules.push(at(retarget(&text, v.max(since), below), Expect::Refuses));
         }
     }
     // And the names kgen refuses, for the newest GPU and at the newest version kgen knows,
@@ -1748,12 +1875,15 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
     for some in hand.chunks(100) {
         let text =
             format!("// Written by hand.\n\n.version 9.4\n.target sm_86\n.address_size 64\n\n{f}\n{}", some.join("\n"));
-        modules.push((text, Expect::Refuses));
+        modules.push(at(text, Expect::Refuses));
     }
-    let texts: Vec<String> = modules.iter().map(|(t, _)| t.clone()).collect();
+    let texts: Vec<(String, u32)> = modules.iter().map(|(t, g, _)| (t.clone(), *g)).collect();
     let results = assemble(&ptxas, &texts);
-    for ((text, expect), refused) in modules.iter().zip(&results) {
-        let header = header(text);
+    for ((text, g, expect), refused) in modules.iter().zip(&results) {
+        let header = match *g == gpu_of(text) {
+            true => header(text),
+            false => format!("{} for sm_{g}", header(text)),
+        };
         if let Some(m) = refused.get("?") {
             failures.push(format!("{header}: {m}"));
             continue;

@@ -191,7 +191,8 @@ impl Ty {
 
     /// Whether a register of this type is an operand an instruction of type `want` takes, as
     /// PTX checks most instructions: one of the same size that is the same type, or untyped
-    /// bits, or an integer where an integer is wanted.
+    /// bits, or an integer where an integer is wanted. ptxas 13.4 takes an `f16x2` for a
+    /// 32-bit integer too, and for a predicate, which PTX's ISA has not.
     pub fn fits(self, want: Ty) -> bool {
         if self == want {
             return true;
