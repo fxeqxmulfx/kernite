@@ -133,7 +133,9 @@ fn ptxas_takes_what_kgen_writes() {
         return;
     };
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    for (name, kernels) in [("kernels", KERNELS), ("shared", SHARED), ("tables", TABLES), ("surfaces", SURFACES)] {
+    for (name, kernels) in
+        [("kernels", KERNELS), ("shared", SHARED), ("tables", TABLES), ("textures", TEXTURES), ("surfaces", SURFACES)]
+    {
         let (src, out) = (dir.join(format!("{name}.ptx")), dir.join(format!("{name}.cubin")));
         std::fs::write(&src, kgen::ptx_str(kernels).unwrap()).unwrap();
         let run = Command::new(&ptxas)
@@ -406,9 +408,40 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
             "2:46: `sured.b.add.1d.u32.trap` wants a `u32` variable; this is a `f32`",
         ),
         ("sured.b.xor._1d.b32.trap([s, n], n);", "2:21: PTX's `sured` has no `.xor` that kgen knows"),
+        (
+            "let (a, b): (f32, f32); tex._1d.v2.f32.f32((a, b), [s, z]);",
+            "2:40: `tex.1d.v2.f32.f32` returns four of a `f32`, `.v4`; two only of an `f16x2`, `.v2`",
+        ),
+        (
+            "let g: f16x2; tex._1d.v2.f16x2.f32((g, _), [s, z]);",
+            "2:36: `tex.1d.v2.f16x2.f32` has no result here that it may leave unwritten, `_`",
+        ),
+        (
+            "let (a, b, c, d): (f32, f32, f32, f32); tex._2d.v4.f32.f32((a, b, c, d), [s, (z, z)], (8, 0));",
+            "2:87: `tex.2d.v4.f32.f32` takes -8 to 7 here; 8 is not one of them",
+        ),
+        (
+            "let (a, b, c, d): (f32, f32, f32, f32); tex.a1d.v4.f32.f32((a, b, c, d), [s, (z, z)]);",
+            "2:74: `tex.a1d.v4.f32.f32` wants a `u32` variable; this is a `f32`",
+        ),
+        (
+            "let (a, b, c, d): (s32, s32, s32, s32); tex.level._2dms.v4.s32.s32((a, b, c, d), [s, (n, n, n, n)], n);",
+            "2:64: PTX's `tex` takes no `.level` with the rest of `tex.level.2dms.v4.s32.s32`: `tex.2dms.v4.s32.s32`",
+        ),
+        (
+            "let (a, b, c, d): (f32, f32, f32, f32); tld4.r._2d.v4.f32.s32((a, b, c, d), [s, (n, n)]);",
+            "2:59: `tld4.r.2d.v4.f32.s32` is no form of `tld4` that kgen knows; the nearest is `tld4.r.2d.v4.f32.f32`",
+        ),
+        ("let i: u32; txq.level.width.b32(i, [s]);", "2:29: `txq.level.width.b32` takes 3 operands, not 2"),
+        (
+            "let i: u32; txq.force_unnormalized_coords.b32(i, [s]);",
+            "2:43: PTX's `txq.force_unnormalized_coords` asks of a sampler apart from its texture, in the independent \
+             mode, which kgen does not write",
+        ),
+        ("let p: pred; istypep.texref(p, [s]);", "2:32: `istypep.texref` wants a `u64` variable; this is an address"),
     ];
     for (body, want) in cases {
-        assert_eq!(compile("x: *mut f32, n: u32, h: f16, s: u64", body).unwrap_err(), want, "{body}");
+        assert_eq!(compile("x: *mut f32, n: u32, h: f16, s: u64, z: f32", body).unwrap_err(), want, "{body}");
     }
 }
 
@@ -455,6 +488,29 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         ("let i: u32; suld.b._2d.b32.trap(i, [y, (n, n)]);", ".version 3.1 .target sm_20"),
         ("let i: u32; suq.memory_layout.b32(i, [y]);", ".version 4.2 .target sm_20"),
         ("sured.b.max._1d.u64.trap([y, 0], y);", ".version 8.1 .target sm_50"),
+        (
+            "let (a, b, c, d): (f32, f32, f32, f32); tex._2d.v4.f32.f32((a, b, c, d), [y, (f, f)]);",
+            ".version 3.1 .target sm_20",
+        ),
+        (
+            "let (a, b, c, d): (s32, s32, s32, s32); tex.a2dms.v4.s32.s32((a, b, c, d), [y, (n, n, n, n)]);",
+            ".version 3.2 .target sm_30",
+        ),
+        (
+            "let (a, b, c, d): (f32, f32, f32, f32); tex._2d.v4.f32.f32((a, b, c, d), [y, (f, f)], (1, -1));",
+            ".version 4.3 .target sm_30",
+        ),
+        (
+            "let (a, b, c, d): (f32, f32, f32, f32); tex.grad.cube.v4.f32.f32((a, b, c, d), [y, (f, f, f, f)], (f, f, \
+             f, f), (f, f, f, f));",
+            ".version 4.3 .target sm_20",
+        ),
+        (
+            "let (a, b, c, d): (f32, f32, f32, f32); let p: pred; tex._2d.v4.f32.f32((a, b, c, d) | p, [y, (f, f)]);",
+            ".version 7.1 .target sm_60",
+        ),
+        ("let i: u32; txq.num_samples.b32(i, [y]);", ".version 4.1 .target sm_30"),
+        ("let p: pred; istypep.texref(p, y);", ".version 4.0 .target sm_30"),
     ];
     for (body, want) in cases {
         let ptx = compile("x: *mut f32, n: u32, f: f32, y: u64", body).unwrap();
@@ -580,6 +636,55 @@ const SURFACES: &str = r#"
         sured.b.add._1d.u32.trap([bins, v], 1);
     }
 "#;
+
+const TEXTURES: &str = r#"
+    /// `y[i]`, for each thread `i` of the block, the first of the four `f32`s of the 2D
+    /// texture `t` at the middle of its texel `(i, 0)`, of its level of detail 0, where it
+    /// takes coordinates in texels.
+    pub unsafe extern "ptx-kernel" fn sample(t: u64, y: *mut f32) {
+        let i: u32;
+        mov.u32(i, tid.x);
+        let x: f32;
+        cvt.rn.f32.u32(x, i);
+        add.rn.f32(x, x, 0.5);
+        let r: f32;
+        tex.level._2d.v4.f32.f32((r, _, _, _), [t, (x, 0.5)], 0);
+        let at: u64;
+        mad.wide.u32(at, i, 4, y);
+        st.global.f32([at], r);
+    }
+
+    /// `y[0]` to `y[3]`, the greens of the four texels around the middle of the 2D texture
+    /// `t`, where it takes coordinates in texels, and `w[0]` its width.
+    pub unsafe extern "ptx-kernel" fn gather(t: u64, y: *mut f32, w: *mut u32) {
+        let (width, height): (u32, u32);
+        txq.width.b32(width, [t]);
+        txq.height.b32(height, [t]);
+        st.global.u32([w], width);
+        let (x, z): (f32, f32);
+        cvt.rn.f32.u32(x, width);
+        cvt.rn.f32.u32(z, height);
+        mul.rn.f32(x, x, 0.5);
+        mul.rn.f32(z, z, 0.5);
+        let (a, b, c, d): (f32, f32, f32, f32);
+        tld4.g._2d.v4.f32.f32((a, b, c, d), [t, (x, z)]);
+        st.global.v4.f32([y], (a, b, c, d));
+    }
+"#;
+
+#[test]
+fn a_texture_is_its_handle_in_brackets_with_the_coordinates_in_it() {
+    let ptx = kgen::ptx_str(TEXTURES).unwrap();
+    let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
+    assert!(head.contains(".version 3.1\n.target sm_20\n"), "{head}");
+    for line in [
+        "\ttex.level.2d.v4.f32.f32 {%r, _, _, _}, [%t, {%x, 0f3F000000}], 0f00000000;\n",
+        "\ttxq.width.b32 %width, [%t];\n",
+        "\ttld4.g.2d.v4.f32.f32 {%a, %b, %c, %d}, [%t, {%x, %z}];\n",
+    ] {
+        assert!(entries.contains(line), "{line}{entries}");
+    }
+}
 
 #[test]
 fn a_surface_is_its_handle_in_brackets_with_the_coordinates_in_it() {

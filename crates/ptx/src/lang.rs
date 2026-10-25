@@ -24,9 +24,10 @@
 //!   be; `!p` is a predicate read inverted, and `-a` a source negated, where PTX negates one.
 //! - A video instruction takes a part of a 32-bit variable, as PTX selects it: `a.b0` is its
 //!   lowest byte, `a.h1` its high half, and `d.b310` three bytes of a result.
-//! - A surface is its handle, the `u64` a kernel takes for a CUDA surface object, in brackets
-//!   with the coordinates in it, an array's layer first: `suld.b._2d.b32.trap(v, [s, (x, y)])`,
-//!   `sust.b.a1d.b32.trap([s, (i, x)], v)`, `suq.width.b32(w, [s])`.
+//! - A texture or a surface is its handle, the `u64` a kernel takes for a CUDA texture or
+//!   surface object, in brackets with the coordinates in it, an array's layer first:
+//!   `tex._2d.v4.f32.f32((r, g, b, a), [t, (x, y)])`, `sust.b.a1d.b32.trap([s, (i, x)], v)`,
+//!   `suq.width.b32(w, [s])`.
 //! - `if p { .. }` runs each instruction inside where `p`, a `pred`, holds, and `if !p` where
 //!   it does not; a guarded `bra(label)` is a branch. `brx.idx(i, (a, b, c))` jumps to the
 //!   label `i` picks of those taken together, through a table it declares before it.

@@ -43,7 +43,8 @@ use crate::{GPUS, Kind, Needs, Ty};
 /// `lab` is a label, and `labs` labels taken together; `#` is an integer known now, `#8` one
 /// of 8 bits, `#=4|8|16` one of those, and `#^23` a power of two to 2^23. `{w}` before an
 /// operand has it only with the word `w`, `@4.3` after it is what it needs where it is
-/// there, and `?` lets it be left out.
+/// there, and `?` lets it be left out; `$m`, of no type, is the operands a line `$m : ..`
+/// stands for.
 /// Last, `+wide` lets a register outside brackets be wider than the instruction's type, as
 /// `ld`, `st` and `cvt` do; `+vec` holds a vector to 128 bits; `+cvt` holds a conversion to
 /// PTX's rules for rounding and saturating, and gives `.ftz` the version it needs there;
@@ -89,6 +90,8 @@ $vop = (.add|.min|.max)
 $bty = (.b8|.b16|.b32|.b64)
 $sucop = {.ca|.cg|.cs|.cv}
 $clamp = (.trap|.clamp|.zero)
+$tdt = (.u32|.s32|.f16@4.2@sm53|.f32|.f16x2@4.2@sm53)
+$texd : {v4}=_T*4[|=pred@7.1@sm60], {v2}=T*2[|=pred@7.1@sm60]
 
 # Integers.
 add$int : =T, T, T @1.0
@@ -366,6 +369,73 @@ cvt.f32.bf16 : =T, U @7.1 @sm80
 cvt.pack.sat(.u16|.s16).s32 : =u32, s32, s32 @6.5 @sm72
 cvt.pack.sat(.u8|.s8).s32.b32 : =u32, s32, s32, b32 @6.5 @sm72
 cvt.pack.sat(.u4|.s4|.u2|.s2).s32.b32 : =u32, s32, s32, b32 @6.5 @sm75
+
+# Textures, each by its handle, the `u64` of a CUDA texture object, which holds its sampler
+# too, in brackets with the coordinates in it, as for surfaces, though some are floats. A
+# texture returns four, but two of `f16x2`; ptxas 13.4 takes `_` for one of four, and not
+# of two, saying that `mov` may not discard its result. The level of detail of `.level`, or
+# the gradients of `.grad`, follow the brackets, then an offset of each coordinate, and a
+# depth to compare with, for `f32` coordinates, which without the offset is a line of its
+# own. There are no `.texref` and `.samplerref` variables, and so no sampler apart from its
+# texture, nor its `force_unnormalized_coords`.
+tex{.base}.1d(.v4|.v2)$tdt.s32 : $texd, [%u64,U*1], s32*1[-8,7]@4.3@sm30? @3.1 +tex
+tex{.base}.1d(.v4|.v2)$tdt.f32 : $texd, [%u64,U*1], s32*1[-8,7]@4.3@sm30?, f32@4.3@sm30? @3.1 +tex
+tex{.base}.1d(.v4|.v2)$tdt.f32 : $texd, [%u64,U*1], f32@4.3@sm30 @3.1 +tex
+tex{.base}.2d(.v4|.v2)$tdt.s32 : $texd, [%u64,U*2], s32*2[-8,7]@4.3@sm30? @3.1 +tex
+tex{.base}.2d(.v4|.v2)$tdt.f32 : $texd, [%u64,U*2], s32*2[-8,7]@4.3@sm30?, f32@4.3@sm30? @3.1 +tex
+tex{.base}.2d(.v4|.v2)$tdt.f32 : $texd, [%u64,U*2], f32@4.3@sm30 @3.1 +tex
+tex{.base}.a1d(.v4|.v2)$tdt.s32 : $texd, [%u64,u32+U*1], s32*1[-8,7]@4.3@sm30? @3.1 +tex
+tex{.base}.a1d(.v4|.v2)$tdt.f32 : $texd, [%u64,u32+U*1], s32*1[-8,7]@4.3@sm30?, f32@4.3@sm30? @3.1 +tex
+tex{.base}.a1d(.v4|.v2)$tdt.f32 : $texd, [%u64,u32+U*1], f32@4.3@sm30 @3.1 +tex
+tex{.base}.a2d(.v4|.v2)$tdt.s32 : $texd, [%u64,u32+U*3], s32*2[-8,7]@4.3@sm30? @3.1 +tex
+tex{.base}.a2d(.v4|.v2)$tdt.f32 : $texd, [%u64,u32+U*3], s32*2[-8,7]@4.3@sm30?, f32@4.3@sm30? @3.1 +tex
+tex{.base}.a2d(.v4|.v2)$tdt.f32 : $texd, [%u64,u32+U*3], f32@4.3@sm30 @3.1 +tex
+tex{.base}.3d(.v4|.v2)$tdt(.s32|.f32) : $texd, [%u64,U*4], s32*4[-8,7]@4.3@sm30? @3.1 +tex
+tex{.base}.cube(.v4|.v2)$tdt.f32 : $texd, [%u64,U*4], f32@4.3@sm30? @3.1 +tex
+tex{.base}.acube(.v4|.v2)$tdt.f32 : $texd, [%u64,u32+U*3], f32@4.3@sm30? @3.1 +tex
+tex{.base}.2dms(.v4|.v2)$tdt.s32 : $texd, [%u64,U*4], s32*2[-8,7]@4.3@sm30? @3.2 @sm30 +tex
+tex{.base}.a2dms(.v4|.v2)$tdt.s32 : $texd, [%u64,U*4], s32*2[-8,7]@4.3@sm30? @3.2 @sm30 +tex
+tex.level.1d(.v4|.v2)$tdt.s32 : $texd, [%u64,U*1], U, s32*1[-8,7]@4.3@sm30? @3.1 +tex
+tex.level.1d(.v4|.v2)$tdt.f32 : $texd, [%u64,U*1], U, s32*1[-8,7]@4.3@sm30?, f32@4.3@sm30? @3.1 +tex
+tex.level.1d(.v4|.v2)$tdt.f32 : $texd, [%u64,U*1], U, f32@4.3@sm30 @3.1 +tex
+tex.level.2d(.v4|.v2)$tdt.s32 : $texd, [%u64,U*2], U, s32*2[-8,7]@4.3@sm30? @3.1 +tex
+tex.level.2d(.v4|.v2)$tdt.f32 : $texd, [%u64,U*2], U, s32*2[-8,7]@4.3@sm30?, f32@4.3@sm30? @3.1 +tex
+tex.level.2d(.v4|.v2)$tdt.f32 : $texd, [%u64,U*2], U, f32@4.3@sm30 @3.1 +tex
+tex.level.a1d(.v4|.v2)$tdt.s32 : $texd, [%u64,u32+U*1], U, s32*1[-8,7]@4.3@sm30? @3.1 +tex
+tex.level.a1d(.v4|.v2)$tdt.f32 : $texd, [%u64,u32+U*1], U, s32*1[-8,7]@4.3@sm30?, f32@4.3@sm30? @3.1 +tex
+tex.level.a1d(.v4|.v2)$tdt.f32 : $texd, [%u64,u32+U*1], U, f32@4.3@sm30 @3.1 +tex
+tex.level.a2d(.v4|.v2)$tdt.s32 : $texd, [%u64,u32+U*3], U, s32*2[-8,7]@4.3@sm30? @3.1 +tex
+tex.level.a2d(.v4|.v2)$tdt.f32 : $texd, [%u64,u32+U*3], U, s32*2[-8,7]@4.3@sm30?, f32@4.3@sm30? @3.1 +tex
+tex.level.a2d(.v4|.v2)$tdt.f32 : $texd, [%u64,u32+U*3], U, f32@4.3@sm30 @3.1 +tex
+tex.level.3d(.v4|.v2)$tdt(.s32|.f32) : $texd, [%u64,U*4], U, s32*4[-8,7]@4.3@sm30? @3.1 +tex
+tex.level.cube(.v4|.v2)$tdt.f32 : $texd, [%u64,U*4], U, f32@4.3@sm30? @3.1 +tex
+tex.level.acube(.v4|.v2)$tdt.f32 : $texd, [%u64,u32+U*3], U, f32@4.3@sm30? @3.1 +tex
+tex.grad.1d(.v4|.v2)$tdt.s32 : $texd, [%u64,U*1], f32*1, f32*1, s32*1[-8,7]@4.3@sm30? @3.1 +tex
+tex.grad.1d(.v4|.v2)$tdt.f32 : $texd, [%u64,U*1], f32*1, f32*1, s32*1[-8,7]@4.3@sm30?, f32@4.3@sm30? @3.1 +tex
+tex.grad.1d(.v4|.v2)$tdt.f32 : $texd, [%u64,U*1], f32*1, f32*1, f32@4.3@sm30 @3.1 +tex
+tex.grad.2d(.v4|.v2)$tdt.s32 : $texd, [%u64,U*2], f32*2, f32*2, s32*2[-8,7]@4.3@sm30? @3.1 +tex
+tex.grad.2d(.v4|.v2)$tdt.f32 : $texd, [%u64,U*2], f32*2, f32*2, s32*2[-8,7]@4.3@sm30?, f32@4.3@sm30? @3.1 +tex
+tex.grad.2d(.v4|.v2)$tdt.f32 : $texd, [%u64,U*2], f32*2, f32*2, f32@4.3@sm30 @3.1 +tex
+tex.grad.a1d(.v4|.v2)$tdt.s32 : $texd, [%u64,u32+U*1], f32*1, f32*1, s32*1[-8,7]@4.3@sm30? @3.1 +tex
+tex.grad.a1d(.v4|.v2)$tdt.f32 : $texd, [%u64,u32+U*1], f32*1, f32*1, s32*1[-8,7]@4.3@sm30?, f32@4.3@sm30? @3.1 +tex
+tex.grad.a1d(.v4|.v2)$tdt.f32 : $texd, [%u64,u32+U*1], f32*1, f32*1, f32@4.3@sm30 @3.1 +tex
+tex.grad.a2d(.v4|.v2)$tdt.s32 : $texd, [%u64,u32+U*3], f32*2, f32*2, s32*2[-8,7]@4.3@sm30? @3.1 +tex
+tex.grad.a2d(.v4|.v2)$tdt.f32 : $texd, [%u64,u32+U*3], f32*2, f32*2, s32*2[-8,7]@4.3@sm30?, f32@4.3@sm30? @3.1 +tex
+tex.grad.a2d(.v4|.v2)$tdt.f32 : $texd, [%u64,u32+U*3], f32*2, f32*2, f32@4.3@sm30 @3.1 +tex
+tex.grad.3d(.v4|.v2)$tdt(.s32|.f32) : $texd, [%u64,U*4], f32*4, f32*4, s32*4[-8,7]@4.3@sm30? @3.1 +tex
+tex.grad.cube(.v4|.v2)$tdt.f32 : $texd, [%u64,U*4], f32*4, f32*4, f32@4.3@sm30? @4.3 +tex
+tex.grad.acube(.v4|.v2)$tdt.f32 : $texd, [%u64,u32+U*3], f32*4, f32*4, f32@4.3@sm30? @4.3 +tex
+tld4(.r|.g|.b|.a).2d.v4(.u32|.s32|.f32).f32 : =_T*4[|=pred@7.1@sm60], [%u64,U*2], s32*2[-8,7]@4.3@sm30?, f32@4.3@sm30? @3.1
+tld4(.r|.g|.b|.a).2d.v4(.u32|.s32|.f32).f32 : =_T*4[|=pred@7.1@sm60], [%u64,U*2], f32@4.3@sm30 @3.1
+tld4(.r|.g|.b|.a).a2d.v4(.u32|.s32|.f32).f32 : =_T*4[|=pred@7.1@sm60], [%u64,u32+U*3], s32*2[-8,7]@4.3@sm30?, f32@4.3@sm30? @4.3 @sm30
+tld4(.r|.g|.b|.a).a2d.v4(.u32|.s32|.f32).f32 : =_T*4[|=pred@7.1@sm60], [%u64,u32+U*3], f32@4.3@sm30 @4.3 @sm30
+tld4(.r|.g|.b|.a).cube.v4(.u32|.s32|.f32).f32 : =_T*4[|=pred@7.1@sm60], [%u64,U*4], f32@4.3@sm30? @4.3 @sm30
+tld4(.r|.g|.b|.a).acube.v4(.u32|.s32|.f32).f32 : =_T*4[|=pred@7.1@sm60], [%u64,u32+U*3], f32@4.3@sm30? @4.3 @sm30
+txq(.width|.height|.depth|.channel_data_type|.channel_order|.normalized_coords).b32 : =T, [%u64] @3.1
+txq(.array_size|.num_mipmap_levels|.num_samples@sm30).b32 : =T, [%u64] @4.1
+txq(.filter_mode|.addr_mode_0|.addr_mode_1|.addr_mode_2).b32 : =T, [%u64] @3.1
+txq.level(.width|.height|.depth).b32 : =T, [%u64], u32 @4.3 @sm30
+istypep(.texref|.samplerref|.surfref) : =pred, %u64 @4.0 @sm30
 
 # Surfaces, each by its handle, the `u64` of a CUDA surface object, in brackets with the
 # coordinates in it: an array's layer first, then four where there would be three, the last
@@ -997,6 +1067,13 @@ const NEWER: &[(&str, &str)] = &[
     ("spdecompress", "sm_107a"),
 ];
 
+/// Words of PTX's, of instructions kgen knows, that kgen leaves out, and why.
+const LEFT_OUT: &[(&str, &str, &str)] = &[(
+    "txq",
+    "force_unnormalized_coords",
+    "asks of a sampler apart from its texture, in the independent mode, which kgen does not write",
+)];
+
 /// The forms the instruction `name` is of, its words as PTX writes them, in the order of
 /// [`TABLE`]; or what is wrong with its name.
 pub fn find(name: &str) -> Result<Vec<Bound>, String> {
@@ -1085,6 +1162,9 @@ fn make(form: &'static Form, choice: Vec<Option<usize>>) -> Bound {
 fn unknown(name: &str, op: &str, words: &[&str], of: &[&'static Form]) -> String {
     let known = |w: &str| of.iter().any(|f| f.elems.iter().any(|e| e.alts.iter().any(|a| a.words.contains(&w))));
     if let Some(w) = words.iter().find(|w| !known(w)) {
+        if let Some((.., why)) = LEFT_OUT.iter().find(|&&(o, x, _)| o == op && x == *w) {
+            return format!("PTX's `{op}.{w}` {why}");
+        }
         return format!("PTX's `{op}` has no `.{w}` that kgen knows");
     }
     let mut best: Option<Near> = None;
@@ -1147,11 +1227,17 @@ fn near(form: &'static Form, words: &[&str]) -> Near {
     let mut left: Vec<&str> = words.to_vec();
     let (mut canon, mut missing, mut short) = (vec![form.op], vec![], 0);
     for e in &form.elems {
-        let mut best: Option<(usize, &Alt)> = None;
-        for a in &e.alts {
-            let k = a.words.iter().filter(|w| left.contains(w)).count();
-            if best.is_none_or(|(b, _)| k > b) {
-                best = Some((k, a));
+        // A type is the next the name has, where it may be: each says what it is of in its
+        // place, as `tld4.r.2d.v4.f32.s32` writes `f32`s of `s32` coordinates.
+        let next = left.iter().find(|w| Ty::parse(w).is_some());
+        let typed = e.slot.and(next).and_then(|w| e.alts.iter().find(|a| a.words == [*w]));
+        let mut best: Option<(usize, &Alt)> = typed.map(|a| (1, a));
+        if typed.is_none() {
+            for a in &e.alts {
+                let k = a.words.iter().filter(|w| left.contains(w)).count();
+                if best.is_none_or(|(b, _)| k > b) {
+                    best = Some((k, a));
+                }
             }
         }
         let Some((k, a)) = best else { continue };
@@ -1393,6 +1479,7 @@ pub fn reserved(name: &str) -> bool {
 
 fn parse(text: &'static str) -> Vec<Form> {
     let mut macros: Vec<(&'static str, Vec<Elem>)> = vec![];
+    let mut operands: Vec<(&'static str, &'static str)> = vec![];
     let mut forms = vec![];
     for line in text.lines() {
         let line = line.trim();
@@ -1400,18 +1487,28 @@ fn parse(text: &'static str) -> Vec<Form> {
             continue;
         }
         if let Some(def) = line.strip_prefix('$') {
+            if let Some((name, ops)) = def.split_once(" : ") {
+                // `$U` is an operand a special register may be.
+                assert!(Ty::parse(name).is_none() && !["T", "U", "V", "W"].contains(&name), "`{line}` is a type");
+                operands.push((name, ops));
+                continue;
+            }
             let (name, elem) = def.split_once(" = ").unwrap_or_else(|| panic!("`{line}` defines `$name = ..`"));
             let (op, elems) = name_of(elem, &macros);
             assert!(op.is_empty(), "`{line}` is elements, not a name");
             macros.push((name, elems));
             continue;
         }
-        forms.push(form(line, &macros));
+        forms.push(form(line, &macros, &operands));
     }
     forms
 }
 
-fn form(line: &'static str, macros: &[(&'static str, Vec<Elem>)]) -> Form {
+fn form(
+    line: &'static str,
+    macros: &[(&'static str, Vec<Elem>)],
+    operand_macros: &[(&'static str, &'static str)],
+) -> Form {
     let (name, rest) = match line.split_once(" : ") {
         Some((name, rest)) => (name, rest),
         None => line.split_once(' ').unwrap_or((line, "")),
@@ -1425,8 +1522,16 @@ fn form(line: &'static str, macros: &[(&'static str, Vec<Elem>)]) -> Form {
             slot += 1;
         }
     }
-    let (mut operands, mut needs, mut wide, mut checks) = (vec![], Needs::default(), false, vec![]);
+    let mut tokens = vec![];
     for token in rest.split_whitespace() {
+        let m = token.trim_end_matches(',').strip_prefix('$');
+        match operand_macros.iter().find(|(name, _)| Some(*name) == m) {
+            Some((_, ops)) => tokens.extend(ops.split_whitespace()),
+            None => tokens.push(token),
+        }
+    }
+    let (mut operands, mut needs, mut wide, mut checks) = (vec![], Needs::default(), false, vec![]);
+    for token in tokens {
         if let Some(r) = token.strip_prefix('@') {
             needs = needs.and(req(r, line));
         } else if let Some(c) = token.strip_prefix('+') {
