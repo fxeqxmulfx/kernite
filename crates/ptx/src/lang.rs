@@ -660,12 +660,13 @@ impl Kernel {
 }
 
 /// How many bytes `b` reaches at once at each address, of `args`: what it loads, stores or
-/// works on, as `ld.v4.b32` 16 and `atom.f16x2` 4; what `cp.async` copies, as its third
-/// operand says; an mbarrier's 8; a row of a matrix `ldmatrix` loads, 16; or 1, for what
-/// reaches no bytes in particular.
+/// works on, as `ld.v4.b32` 16 and `atom.f16x2` 4, and a fragment `wmma` loads or stores,
+/// whose size each row is aligned to; what `cp.async` copies, as its third operand says; an
+/// mbarrier's 8; a row of a matrix `ldmatrix` loads, 16; or 1, for what reaches no bytes in
+/// particular.
 fn reach(b: &Bound, args: &[Given<Var>]) -> u64 {
     match b.form.op {
-        "ld" | "st" | "atom" | "red" => {
+        "ld" | "st" | "atom" | "red" | "wmma" => {
             let data = b.form.operands.iter().find(|s| matches!(s.role, Role::Dst | Role::Src) && s.when.is_none());
             data.map_or(1, |s| u64::from(b.ty(s.ty.expect("data has a type")).bits()) / 8 * lanes(b, s) as u64)
         }

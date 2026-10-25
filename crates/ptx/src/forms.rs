@@ -70,6 +70,9 @@ $prio = (.L2::evict_last|.L2::evict_normal|.L2::evict_first|.L2::evict_unchanged
 $prio2 = {.L2::evict_first|.L2::evict_unchanged}
 $cta = {.cta@7.8}
 $shfl = (.up|.down|.bfly|.idx)
+$gsh = {.global|.shared|.shared::cta@7.8}
+$fshape = (.m16n16k16|.m8n32k16|.m32n8k16)
+$lay = (.row|.col)
 
 # Integers.
 add$int : =T, T, T @1.0
@@ -441,6 +444,54 @@ mma(.sp|.sp::ordered_metadata@8.5).sync.aligned.m16n8k32.row.col{.satfinite}.s32
 mma(.sp|.sp::ordered_metadata@8.5).sync.aligned.m16n8k64.row.col{.satfinite}.s32(.u8|.s8)(.u8|.s8).s32 : =_s32*4, %u32*4, %u32*4, s32*4, %b32, #=0 @7.1 @sm80
 mma(.sp|.sp::ordered_metadata@8.5).sync.aligned.m16n8k64.row.col{.satfinite}.s32(.u4|.s4)(.u4|.s4).s32 : =_s32*4, %u32*2, %u32*2, s32*4, %b32, #=0|1 @7.1 @sm80
 mma(.sp|.sp::ordered_metadata@8.5).sync.aligned.m16n8k128.row.col{.satfinite}.s32(.u4|.s4)(.u4|.s4).s32 : =_s32*4, %u32*4, %u32*4, s32*4, %b32, #=0 @7.1 @sm80
+
+# The same, each fragment loaded and stored by the warp together, its stride in elements.
+# ptxas requires `.aligned` from PTX 6.3 and refuses it before, so kgen, which writes it,
+# writes wmma from 6.3, though the ISA has 6.0 without it; and no `.satfinite` on a float
+# one, which 6.5 removes.
+wmma.load(.a|.b).sync.aligned$lay$fshape$gsh.f16 : =_f16x2*8, [R], u32? @6.3 @sm70
+wmma.load.c.sync.aligned$lay$fshape$gsh.f16 : =_f16x2*4, [R], u32? @6.3 @sm70
+wmma.load.c.sync.aligned$lay$fshape$gsh.f32 : =_f32*8, [R], u32? @6.3 @sm70
+wmma.load(.a|.b).sync.aligned$lay.m16n16k16$gsh(.u8|.s8) : =_u32*2, [R], u32? @6.3 @sm72
+wmma.load.a.sync.aligned$lay.m8n32k16$gsh(.u8|.s8) : =u32*1, [R], u32? @6.3 @sm72
+wmma.load.b.sync.aligned$lay.m8n32k16$gsh(.u8|.s8) : =_u32*4, [R], u32? @6.3 @sm72
+wmma.load.a.sync.aligned$lay.m32n8k16$gsh(.u8|.s8) : =_u32*4, [R], u32? @6.3 @sm72
+wmma.load.b.sync.aligned$lay.m32n8k16$gsh(.u8|.s8) : =u32*1, [R], u32? @6.3 @sm72
+wmma.load.c.sync.aligned$lay$fshape$gsh.s32 : =_s32*8, [R], u32? @6.3 @sm72
+wmma.load.a.sync.aligned.row.m8n8k32$gsh(.u4|.s4) : =u32*1, [R], u32? @6.3 @sm75
+wmma.load.b.sync.aligned.col.m8n8k32$gsh(.u4|.s4) : =u32*1, [R], u32? @6.3 @sm75
+wmma.load.a.sync.aligned.row.m8n8k128$gsh.b1 : =u32*1, [R], u32? @6.3 @sm75
+wmma.load.b.sync.aligned.col.m8n8k128$gsh.b1 : =u32*1, [R], u32? @6.3 @sm75
+wmma.load.c.sync.aligned$lay(.m8n8k32|.m8n8k128)$gsh.s32 : =_s32*2, [R], u32? @6.3 @sm75
+wmma.load(.a|.b).sync.aligned$lay.m16n16k16$gsh.bf16 : =_bf16x2*4, [R], u32? @7.0 @sm80
+wmma.load.a.sync.aligned$lay.m8n32k16$gsh.bf16 : =_bf16x2*2, [R], u32? @7.0 @sm80
+wmma.load.b.sync.aligned$lay.m8n32k16$gsh.bf16 : =_bf16x2*8, [R], u32? @7.0 @sm80
+wmma.load.a.sync.aligned$lay.m32n8k16$gsh.bf16 : =_bf16x2*8, [R], u32? @7.0 @sm80
+wmma.load.b.sync.aligned$lay.m32n8k16$gsh.bf16 : =_bf16x2*2, [R], u32? @7.0 @sm80
+wmma.load(.a|.b).sync.aligned$lay.m16n16k8$gsh.tf32 : =_tf32*4, [R], u32? @7.0 @sm80
+wmma.load.c.sync.aligned$lay.m16n16k8$gsh.f32 : =_f32*8, [R], u32? @7.0 @sm80
+wmma.load(.a|.b).sync.aligned$lay.m8n8k4$gsh.f64 : =f64*1, [R], u32? @7.0 @sm80
+wmma.load.c.sync.aligned$lay.m8n8k4$gsh.f64 : =_f64*2, [R], u32? @7.0 @sm80
+wmma.store.d.sync.aligned$lay$fshape$gsh.f16 : [W], %f16x2*4, u32? @6.3 @sm70
+wmma.store.d.sync.aligned$lay$fshape$gsh.f32 : [W], f32*8, u32? @6.3 @sm70
+wmma.store.d.sync.aligned$lay$fshape$gsh.s32 : [W], s32*8, u32? @6.3 @sm72
+wmma.store.d.sync.aligned$lay(.m8n8k32|.m8n8k128)$gsh.s32 : [W], s32*2, u32? @6.3 @sm75
+wmma.store.d.sync.aligned$lay.m16n16k8$gsh.f32 : [W], f32*8, u32? @7.0 @sm80
+wmma.store.d.sync.aligned$lay.m8n8k4$gsh.f64 : [W], f64*2, u32? @7.0 @sm80
+wmma.mma.sync.aligned$lay$lay$fshape.f16.f16 : =f16x2*4, %f16x2*8, %f16x2*8, %f16x2*4 @6.3 @sm70
+wmma.mma.sync.aligned$lay$lay$fshape.f32.f16 : =f32*8, %f16x2*8, %f16x2*8, %f16x2*4 @6.3 @sm70
+wmma.mma.sync.aligned$lay$lay$fshape.f16.f32 : =f16x2*4, %f16x2*8, %f16x2*8, f32*8 @6.3 @sm70
+wmma.mma.sync.aligned$lay$lay$fshape.f32.f32 : =f32*8, %f16x2*8, %f16x2*8, f32*8 @6.3 @sm70
+wmma.mma.sync.aligned$lay$lay.m16n16k16.s32(.u8.u8|.s8.s8).s32{.satfinite} : =s32*8, u32*2, u32*2, s32*8 @6.3 @sm72
+wmma.mma.sync.aligned$lay$lay.m8n32k16.s32(.u8.u8|.s8.s8).s32{.satfinite} : =s32*8, u32*1, u32*4, s32*8 @6.3 @sm72
+wmma.mma.sync.aligned$lay$lay.m32n8k16.s32(.u8.u8|.s8.s8).s32{.satfinite} : =s32*8, u32*4, u32*1, s32*8 @6.3 @sm72
+wmma.mma.sync.aligned.row.col.m8n8k32.s32(.u4.u4|.s4.s4).s32{.satfinite} : =s32*2, %u32*1, %u32*1, s32*2 @6.3 @sm75
+wmma.mma(.xor|.and@7.1@sm80).popc.sync.aligned.row.col.m8n8k128.s32.b1.b1.s32 : =s32*2, %u32*1, %u32*1, s32*2 @6.3 @sm75
+wmma.mma.sync.aligned$lay$lay.m16n16k16.f32.bf16.bf16.f32 : =f32*8, %bf16x2*4, %bf16x2*4, f32*8 @7.0 @sm80
+wmma.mma.sync.aligned$lay$lay.m8n32k16.f32.bf16.bf16.f32 : =f32*8, %bf16x2*2, %bf16x2*8, f32*8 @7.0 @sm80
+wmma.mma.sync.aligned$lay$lay.m32n8k16.f32.bf16.bf16.f32 : =f32*8, %bf16x2*8, %bf16x2*2, f32*8 @7.0 @sm80
+wmma.mma.sync.aligned$lay$lay.m16n16k8.f32.tf32.tf32.f32 : =f32*8, %tf32*4, %tf32*4, f32*8 @7.0 @sm80
+wmma.mma.sync.aligned$lay$lay.m8n8k4{.rn|.rz|.rm|.rp}.f64.f64.f64.f64 : =f64*2, f64*1, f64*1, f64*2 @7.0 @sm80
 
 # The stack, and the rest.
 stacksave(.u32|.u64) : =T @7.3 @sm52

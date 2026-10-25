@@ -339,6 +339,14 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         ("mbarrier.arrive.b64(_, [y]);", ".version 7.1 .target sm_80"),
         ("let i: b32; mov.b32(i, reserved_smem_offset_begin);", ".version 7.6 .target sm_80"),
         (
+            "let (a, b): ([f16x2; 8], [f16x2; 8]); let c: [f32; 8]; wmma.load.a.sync.aligned.row.m16n16k16.f16(a, \
+             [y]); wmma.load.b.sync.aligned.col.m16n16k16.f16(b, [y], 16); wmma.load.c.sync.aligned.row.m16n16k16.f32(\
+             c, [y]); wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32(c, a, b, c); \
+             wmma.store.d.sync.aligned.row.m16n16k16.f32([y], c, n);",
+            ".version 6.3 .target sm_70",
+        ),
+        ("let a: u32; wmma.load.a.sync.aligned.row.m8n8k32.s4(a, [y]);", ".version 6.3 .target sm_75"),
+        (
             "let (a, b, c, d): (s32, s32, s32, s32); mma.sp__ordered_metadata.sync.aligned.m16n8k64.row.col.s32.s8.s8.s32(\
              (a, b, c, d), (n, n, n, n), (n, n, n, n), (0, 0, 0, 0), n, 0);",
             ".version 8.5 .target sm_80",
@@ -540,12 +548,12 @@ impl Making {
         self.kernel.var(&format!("v{}", self.vars), t.name()).unwrap()
     }
 
-    /// Memory of 256 bytes at a multiple of 16, in local memory for `.local` and in shared
-    /// memory otherwise.
+    /// Memory of 256 bytes at a multiple of 32, as a fragment `wmma` loads is, in local memory
+    /// for `.local` and in shared memory otherwise.
     fn memory(&mut self, space: Space) -> Var {
         self.vars += 1;
         let space = if space == Space::Local { "local" } else { "shared" };
-        self.kernel.var(&format!("s{}", self.vars), &format!("{space}<[u8; 256], 16>")).unwrap()
+        self.kernel.var(&format!("s{}", self.vars), &format!("{space}<[u8; 256], 32>")).unwrap()
     }
 
     /// The operand `spec` of `b`, as `style` gives it.
@@ -597,7 +605,7 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
             Role::Addr(_) => match spaces.next().expect("a space for each address") {
                 s @ (Space::Shared | Space::Local) if style == Style::Memory => {
                     m.differs = true;
-                    Given::Mem(Address { base: Some(m.memory(s)), index: None, disp: 16 })
+                    Given::Mem(Address { base: Some(m.memory(s)), index: None, disp: 32 })
                 }
                 _ => Given::Mem(Address { base: Some(addr), index: None, disp: 0 }),
             },
@@ -1185,6 +1193,18 @@ fn memory_is_reached_in_its_state_space_and_within_it() {
             format!("{t} let d: b32; ldmatrix.sync.aligned.m8n8.x1.shared.b16(d, [t + 1016]);"),
             "2:100: `ldmatrix.sync.aligned.m8n8.x1.shared.b16` reads 16 bytes at `[t + 1016]`, past the end of `t`, \
              1024 bytes",
+        ),
+        (
+            format!("{t} let c: [f32; 8]; wmma.load.c.sync.aligned.row.m16n16k16.shared.f32(c, [t]);"),
+            "2:114: `wmma.load.c.sync.aligned.row.m16n16k16.shared.f32` reads 32 bytes at once, at an address that \
+             is a multiple of 32; `t` is at a multiple of 16: `shared<[f32; 256], 32>`",
+        ),
+        (
+            "let u: shared<[f32; 256], 32>; let c: [f32; 8]; wmma.store.d.sync.aligned.row.m16n16k16.shared.f32([u + \
+             1024], c);"
+                .into(),
+            "2:100: `wmma.store.d.sync.aligned.row.m16n16k16.shared.f32` writes 32 bytes at `[u + 1024]`, past the \
+             end of `u`, 1024 bytes",
         ),
         (
             "let u: shared<[f32; 64]>; let (a, b): (f32, f32); ld.shared.v2.f32((a, b), [u]);".into(),
