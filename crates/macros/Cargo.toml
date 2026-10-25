@@ -1,13 +1,10 @@
 [package]
 name = "kgen-macros"
-description = "A kgen kernel as the naked_asm! body of a Rust function"
+description = "A kgen kernel as the naked_asm! body of a Rust function, for the attribute macro beside the kernels"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-
-[lib]
-proc-macro = true
 
 [dependencies]
 kgen = { workspace = true }

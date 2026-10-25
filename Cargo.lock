@@ -8,7 +8,6 @@ version = "0.1.0"
 dependencies = [
  "kgen-compile",
  "kgen-core",
- "kgen-kernels",
  "kgen-x86",
 ]
 
@@ -22,21 +21,6 @@ dependencies = [
 [[package]]
 name = "kgen-core"
 version = "0.1.0"
-
-[[package]]
-name = "kgen-harness"
-version = "0.1.0"
-dependencies = [
- "kgen-macros",
-]
-
-[[package]]
-name = "kgen-kernels"
-version = "0.1.0"
-dependencies = [
- "kgen-core",
- "kgen-x86",
-]
 
 [[package]]
 name = "kgen-macros"

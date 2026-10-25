@@ -10,7 +10,6 @@ publish.workspace = true
 kgen-core = { workspace = true }
 kgen-compile = { workspace = true }
 kgen-x86 = { workspace = true }
-kgen-kernels = { workspace = true }
 
 [lints]
 workspace = true

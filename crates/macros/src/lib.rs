@@ -1,34 +1,56 @@
 //! `#[kernel(name(key = value, ...))]` on a bodiless `unsafe extern "sysv64" fn`: the
 //! kernel, rendered by `kgen`, as the function's `naked_asm!` body.
 //!
+//! kgen holds no kernels, and a procedural macro runs only code it depends on, so the
+//! attribute is declared by a proc-macro crate beside the kernels. [`kernel`] does its work,
+//! given the way from a kernel's name and parameters to its program:
+//!
 //! ```ignore
-//! #[kgen_macros::kernel(iq2_xxs(ahead = 3))]
-//! pub unsafe extern "sysv64" fn dot(
-//!     row: *const u8, sbs: usize, quants: *const i8, scales: *const f32, grid: *const u64,
-//! ) -> f32;
+//! #[proc_macro_attribute]
+//! pub fn kernel(attr: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
+//!     kgen_macros::kernel(attr, item, my_kernels::program)
+//! }
+//! ```
+//!
+//! ```ignore
+//! #[my_kernels_macros::kernel(sum8)]
+//! pub unsafe extern "sysv64" fn sum8(xs: *const f32) -> f32;
 //! ```
 //!
 //! The declared signature is checked against the kernel's: as many parameters, each of a
 //! type SysV passes where the kernel reads it (a pointer or an integer for a general
 //! register), and the result likewise. The kernel's constants become statics beside the
 //! function, reached through `sym` operands.
+//!
+//! This crate works on `proc_macro`'s tokens, which exist only while a procedural macro runs.
+
+extern crate proc_macro;
 
 use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
 
-use kgen::{Class, Listing};
+use kgen::{Class, Listing, Op, Program};
 
-/// See the crate documentation.
-#[proc_macro_attribute]
-pub fn kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
-    match expand(attr, item) {
+/// The attribute's expansion: `attr` names the kernel, `program` builds it from that name and
+/// its `key = value` parameters or says why it cannot, and `item` is the declaration it
+/// becomes the body of. What goes wrong becomes a `compile_error!`.
+pub fn kernel(
+    attr: TokenStream,
+    item: TokenStream,
+    program: impl FnOnce(&str, &[(String, i64)]) -> Result<Program<Op>, String>,
+) -> TokenStream {
+    match expand(attr, item, program) {
         Ok(tokens) => tokens,
         Err(message) => format!("compile_error!({message:?});").parse().expect("a string literal"),
     }
 }
 
-fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, String> {
+fn expand(
+    attr: TokenStream,
+    item: TokenStream,
+    program: impl FnOnce(&str, &[(String, i64)]) -> Result<Program<Op>, String>,
+) -> Result<TokenStream, String> {
     let (name, params) = kernel_name(attr)?;
-    let listing = kgen::render_named(&name, &params).map_err(|e| format!("kgen: {e}"))?;
+    let listing = kgen::render(&program(&name, &params)?).map_err(|e| format!("kgen: {e}"))?;
     let f = declaration(item)?;
     check(&f, &listing)?;
     emit(&f, &listing).parse().map_err(|e| format!("kgen emitted tokens that do not parse: {e}"))
@@ -36,7 +58,7 @@ fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream, String> {
 
 /// `name` or `name(key = value, ...)`.
 fn kernel_name(attr: TokenStream) -> Result<(String, Vec<(String, i64)>), String> {
-    let usage = "expected a kernel, as in `#[kernel(iq2_xxs(ahead = 3))]`";
+    let usage = "expected a kernel, as in `#[kernel(name)]` or `#[kernel(name(key = 3))]`";
     let mut tokens = attr.into_iter();
     let Some(TokenTree::Ident(name)) = tokens.next() else {
         return Err(usage.into());
