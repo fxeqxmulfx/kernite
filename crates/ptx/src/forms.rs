@@ -1,6 +1,7 @@
 //! The instructions of PTX that kgen knows: those the GPUs from Fermi, `sm_20`, to Ampere,
-//! `sm_86`, run, but `call`, written as the PTX ISA writes them, one [`Form`] each, and the
-//! special registers they read.
+//! `sm_86`, run, written as the PTX ISA writes them, one [`Form`] each, and the special
+//! registers they read; all but `call`, whose operands are what the function it calls takes,
+//! which [`crate::lang`] checks against its prototype.
 //!
 //! A form is a line of [`TABLE`]: the words of an instruction's name, some to choose from
 //! and some to leave out, its operands, and the version of PTX and the GPU it and each of
@@ -40,7 +41,8 @@ use crate::{GPUS, Kind, Needs, Ty};
 /// to 15, if it is one known now, `u32/32` a multiple of 32, and `f32(0,1]` a fraction, more
 /// than 0 and at most 1. `[R]`, `[W]` and `[X]` are memory read, written, or both, and
 /// `[%u64,T*2]` a texture or a surface by its handle, in brackets with the coordinates in it;
-/// `lab` is a label, and `labs` labels taken together; `#` is an integer known now, `#8` one
+/// `lab` is a label, `labs` labels taken together, and `fn` a function of the module or a
+/// kernel, whose address it takes; `#` is an integer known now, `#8` one
 /// of 8 bits, `#=4|8|16` one of those, and `#^23` a power of two to 2^23. `{w}` before an
 /// operand has it only with the word `w`, `@4.3` after it is what it needs where it is
 /// there, and `?` lets it be left out; `$m`, of no type, is the operands a line `$m : ..`
@@ -311,6 +313,7 @@ vset4(.u32|.s32)(.u32|.s32)$cmps{.add} : =u32{.bmask}, %T{.bxyzw}, %U{.bxyzw}, %
 # Moving data, and converting it.
 mov(.pred|.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64|.f32|.f64) : =T, $T @1.0
 mov(.u32|.u64) : =T, &T @1.0
+mov(.u32|.u64|.b32|.b64) : =T, fn @2.1
 mov.b128 : =T, T @8.3 @sm70
 mov.b16 : =T, b8*2 @1.0
 mov.b32 : =T, b16*2 @1.0
@@ -729,6 +732,8 @@ pub enum Role {
     /// Labels taken together, of which a register it reads picks the one it jumps to:
     /// `brx.idx`'s table.
     Labels,
+    /// A function of the module, or a kernel, whose address it takes.
+    Func,
     /// A texture or a surface, by its handle, in brackets with the coordinates in it where it
     /// takes them: `[t, (x, y)]`. What the brackets hold is [`Spec::inner`].
     Handle,
@@ -1091,14 +1096,11 @@ fn newer(op: &str, word: &str) -> Option<&'static str> {
 
 /// What of PTX's kgen leaves out, and why: an instruction, by its name and no word, or a word
 /// of one kgen knows.
-const LEFT_OUT: &[(&str, &str, &str)] = &[
-    ("call", "", "calls a `.func`, which kgen does not write: a function without an ABI is inlined where it is called"),
-    (
-        "txq",
-        "force_unnormalized_coords",
-        "asks of a sampler apart from its texture, in the independent mode, which kgen does not write",
-    ),
-];
+const LEFT_OUT: &[(&str, &str, &str)] = &[(
+    "txq",
+    "force_unnormalized_coords",
+    "asks of a sampler apart from its texture, in the independent mode, which kgen does not write",
+)];
 
 /// The forms the instruction `name` is of, its words as PTX writes them, in the order of
 /// [`TABLE`]; or what is wrong with its name.
@@ -1758,6 +1760,7 @@ fn one(s: &'static str, line: &str) -> Spec {
         "[X]" => spec.role = Role::Addr(Access::ReadWrite),
         "lab" => spec.role = Role::Label,
         "labs" => spec.role = Role::Labels,
+        "fn" => spec.role = Role::Func,
         "#" => spec.role = Role::Imm(Imm::Bits(32)),
         _ if s.starts_with('[') => {
             let inner = s[1..].strip_suffix(']').unwrap_or_else(|| panic!("`{line}`: `{s}` is not closed"));

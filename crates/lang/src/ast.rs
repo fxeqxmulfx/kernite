@@ -289,7 +289,7 @@ pub enum Expr {
     Repeat(Box<Expr>, Box<Expr>, Span),
     /// `(a)`.
     Paren(Box<Expr>, Span),
-    /// `(a, b, ..)` or `(a,)`: operands taken together, as a vector.
+    /// `(a, b, ..)`, `(a,)` or `()`: operands taken together, as a vector, or none.
     Tuple(Vec<Expr>, Span),
     /// `a as T`.
     Cast(Box<Expr>, String, Span),

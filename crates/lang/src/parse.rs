@@ -485,6 +485,9 @@ impl<'a> Parser<'a> {
             }
             Tree::Group { delim: Delim::Paren, trees, span } => {
                 let mut p = Parser::new(trees, *span);
+                if p.done() {
+                    return Ok(Expr::Tuple(vec![], *span));
+                }
                 let first = p.expr()?;
                 if p.done() {
                     return Ok(Expr::Paren(Box::new(first), *span));

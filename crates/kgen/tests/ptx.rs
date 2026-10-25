@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use kgen::lang::{Mem as Address, Operand as Given, Target};
 use kgen_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Sel, Space, Spec};
 use kgen_ptx::lang::{Kernel, Var};
-use kgen_ptx::{Entry, Kind, Needs, Ty};
+use kgen_ptx::{Entry, Kind, Needs, Prototype, Returns, Ty};
 
 const KERNELS: &str = r#"
     /// `x[i] *= a` for each `i < n`, a thread each.
@@ -133,9 +133,14 @@ fn ptxas_takes_what_kgen_writes() {
         return;
     };
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    for (name, kernels) in
-        [("kernels", KERNELS), ("shared", SHARED), ("tables", TABLES), ("textures", TEXTURES), ("surfaces", SURFACES)]
-    {
+    for (name, kernels) in [
+        ("kernels", KERNELS),
+        ("shared", SHARED),
+        ("tables", TABLES),
+        ("textures", TEXTURES),
+        ("surfaces", SURFACES),
+        ("calls", CALLS),
+    ] {
         let (src, out) = (dir.join(format!("{name}.ptx")), dir.join(format!("{name}.cubin")));
         std::fs::write(&src, kgen::ptx_str(kernels).unwrap()).unwrap();
         let run = Command::new(&ptxas)
@@ -262,9 +267,9 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
             "2:13: PTX's `fence` takes `.async` on sm_90 and newer, and kgen writes PTX for sm_20 to sm_86",
         ),
         (
-            "call.uni(n);",
-            "2:6: PTX's `call` calls a `.func`, which kgen does not write: a function without an ABI is inlined \
-             where it is called",
+            "call.sync(n);",
+            "2:6: PTX's `call` is `call`, or `call.uni` where the threads of a warp all call the same function; not \
+             `call.sync`",
         ),
     ];
     for (body, want) in cases {
@@ -549,6 +554,7 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         ),
         ("let i: u32; txq.num_samples.b32(i, [y]);", ".version 4.1 .target sm_30"),
         ("let p: pred; istypep.texref(p, y);", ".version 4.0 .target sm_30"),
+        ("mov.u64(y, k);", ".version 3.1 .target sm_35"),
     ];
     for (body, want) in cases {
         let ptx = compile("x: *mut f32, n: u32, f: f32, y: u64", body).unwrap();
@@ -811,6 +817,323 @@ fn a_kernel_names_the_constants_it_reads() {
     assert_eq!(k.consts, ["ONE"]);
 }
 
+/// Functions the kernels call, and a kernel that calls them each way PTX does.
+const CALLS: &str = r#"
+    /// The greatest common divisor of `a` and `b`, by Euclid's steps.
+    extern "ptx-func" fn gcd(a: u32, b: u32) -> u32 {
+        let p: pred;
+        setp.eq.u32(p, b, 0);
+        if p {
+            ret(a);
+        }
+        let (r, g): (u32, u32);
+        rem.u32(r, a, b);
+        call(g, gcd, (b, r));
+        ret(g);
+    }
+
+    /// 1 if `n` is even, else 0, by `odd`, which comes after it.
+    extern "ptx-func" fn even(n: u32) -> u32 {
+        let p: pred;
+        setp.eq.u32(p, n, 0);
+        if p {
+            ret(1);
+        }
+        let (m, r): (u32, u32);
+        sub.u32(m, n, 1);
+        call(r, odd, m);
+        ret(r);
+    }
+
+    /// 1 if `n` is odd, else 0, by `even`.
+    extern "ptx-func" fn odd(n: u32) -> u32 {
+        let p: pred;
+        setp.eq.u32(p, n, 0);
+        if p {
+            ret(0);
+        }
+        let (m, r): (u32, u32);
+        sub.u32(m, n, 1);
+        call(r, even, m);
+        ret(r);
+    }
+
+    /// `h` as bits, and a byte it leaves be: what PTX passes as bits alone.
+    extern "ptx-func" fn bits(h: f16, b: u8) -> b16 {
+        ret(h);
+    }
+
+    /// Stops the kernel, and with it the launch.
+    extern "ptx-func" fn halt() -> ! {
+        trap();
+    }
+
+    /// `x[0] = gcd(x[0], n)`, worked out each way there is to call `gcd`; and the kernel
+    /// stops where it is 0.
+    pub unsafe extern "ptx-kernel" fn calls(x: *mut u32, n: u32) {
+        let (a, g, e, fp): (u32, u32, u32, u64);
+        ld.global.u32(a, [x]);
+        call(g, gcd, (a, n));
+        call.uni(_, gcd, (a, 12));
+        mov.u64(fp, gcd);
+        call(g, fp, (a, n));
+        call(g, fp, (a, n), (gcd,));
+        call(e, even, 10);
+        let me: u64;
+        mov.u64(me, calls);
+        let (h, hb, c): (f16, b16, u8);
+        mov.b16(h, 1.5f16);
+        cvt.u8.u32(c, a);
+        call(hb, bits, (h, c));
+        call(hb, bits, (1.5f16, 7));
+        st.global.u32([x], g);
+        let p: pred;
+        setp.eq.u32(p, g, 0);
+        if p {
+            call(halt);
+        }
+    }
+"#;
+
+#[test]
+fn a_function_comes_out_as_ptx_writes_it() {
+    let src = r#"
+        pub unsafe extern "ptx-kernel" fn first(x: *mut u32, n: u32) {
+            let (a, g): (u32, u32);
+            ld.global.u32(a, [x]);
+            call(g, gcd, (a, n));
+            st.global.u32([x], g);
+        }
+
+        extern "ptx-func" fn gcd(a: u32, b: u32) -> u32 {
+            let p: pred;
+            setp.eq.u32(p, b, 0);
+            if p {
+                ret(a);
+            }
+            let (r, g): (u32, u32);
+            rem.u32(r, a, b);
+            call(g, gcd, (b, r));
+            ret(g);
+        }
+    "#;
+    let want = "// Written by kgen.
+
+.version 2.3
+.target sm_20
+.address_size 64
+
+.func (.param .u32 gcd_retval) gcd(
+\t.param .u32 gcd_param_0,
+\t.param .u32 gcd_param_1
+);
+
+.visible .entry first(
+\t.param .u64 first_param_0,
+\t.param .u32 first_param_1
+)
+{
+\t.reg .u32 %n, %a, %g;
+\t.reg .u64 %x;
+
+\tld.param.u64 %x, [first_param_0];
+\tcvta.to.global.u64 %x, %x;
+\tld.param.u32 %n, [first_param_1];
+\tld.global.u32 %a, [%x];
+\tcall (%g), gcd, (%a, %n);
+\tst.global.u32 [%x], %g;
+\tret;
+}
+
+.func (.param .u32 gcd_retval) gcd(
+\t.param .u32 gcd_param_0,
+\t.param .u32 gcd_param_1
+)
+{
+\t.reg .pred %p;
+\t.reg .u32 %a, %b, %r, %g;
+
+\tld.param.u32 %a, [gcd_param_0];
+\tld.param.u32 %b, [gcd_param_1];
+\tsetp.eq.u32 %p, %b, 0;
+\t@%p st.param.u32 [gcd_retval], %a;
+\t@%p ret;
+\trem.u32 %r, %a, %b;
+\tcall (%g), gcd, (%b, %r);
+\tst.param.u32 [gcd_retval], %g;
+\tret;
+}
+";
+    assert_eq!(kgen::ptx_str(src).unwrap(), want);
+    // Each way to call one, and what a function of no value and one that never returns are.
+    let ptx = kgen::ptx_str(CALLS).unwrap();
+    for text in [
+        ".version 6.4\n.target sm_35\n",
+        "\n.func (.param .u32 odd_retval) odd(\n\t.param .u32 odd_param_0\n);\n\n.func (.param .u32 even_retval) even(",
+        ".func (.param .b16 bits_retval) bits(\n\t.param .b16 bits_param_0,\n\t.param .b8 bits_param_1\n)\n",
+        "\tld.param.b16 %h, [bits_param_0];\n\tld.param.b8 %b, [bits_param_1];\n\tst.param.b16 [bits_retval], %h;\n",
+        ".func halt(\n) .noreturn\n{\n\n\ttrap;\n}\n",
+        "\tcall.uni (_), gcd, (%a, 12);\n",
+        "\tmov.u64 %fp, gcd;\n",
+        "\t$P0: .callprototype (.param .u32 _) _ (.param .u32 _, .param .u32 _);\n\tcall (%g), %fp, (%a, %n), $P0;\n",
+        "\t$C1: .calltargets gcd;\n\tcall (%g), %fp, (%a, %n), $C1;\n",
+        "\tcall (%e), even, (10);\n",
+        "\tmov.u64 %me, calls;\n",
+        "\tcall (%hb), bits, (%h, %c);\n\tcall (%hb), bits, (0x3E00, 7);\n",
+        "\t@%p call halt;\n\tret;\n",
+    ] {
+        assert!(ptx.contains(text), "{text}\nin\n{ptx}");
+    }
+}
+
+#[test]
+fn ptxas_takes_a_function_that_never_returns_from_ptx_6_4_and_sm_30() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    let src = r#"
+        unsafe extern "ptx-kernel" fn k(n: u32) {
+            let p: pred;
+            setp.eq.u32(p, n, 0);
+            if p {
+                call(halt);
+            }
+        }
+
+        extern "ptx-func" fn halt() -> ! {
+            exit();
+        }
+    "#;
+    let text = kgen::ptx_str(src).unwrap();
+    assert!(text.contains("\n.version 6.4\n.target sm_30\n"), "{text}");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("never");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert_eq!(refused(&ptxas, &text, &dir.join("needs")), BTreeMap::new());
+    for (v, sm) in [(63, 30), (64, 20)] {
+        assert!(!refused(&ptxas, &retarget(&text, v, sm), &dir.join(format!("{v}-{sm}"))).is_empty(), "{v} {sm}");
+    }
+}
+
+/// The kernel `k` around `body`, before the functions it may call, compiled, or the error.
+fn calling(body: &str) -> Result<String, String> {
+    kgen::ptx_str(&format!(
+        "unsafe extern \"ptx-kernel\" fn k(n: u32, f: f32) {{\n{body}\n}}\n\
+         extern \"ptx-func\" fn first(a: u32, b: u32) -> u32 {{ ret(a); }}\n\
+         extern \"ptx-func\" fn nothing() {{}}\n\
+         extern \"ptx-func\" fn never() -> ! {{ trap(); }}\n\
+         unsafe extern \"sysv64\" fn cpu() {{}}\n\
+         fn helper() {{}}\n"
+    ))
+}
+
+#[test]
+fn a_call_passes_what_the_function_takes_and_returns() {
+    let cases = [
+        ("call(n, first, (n,));", "2:16: `first` takes 2 arguments, not 1"),
+        ("call(n, first, (n, f));", "2:16: `first` takes a `u32` as argument 2; this is a `f32` variable"),
+        ("call(n, first, (n, 1.5));", "2:16: `first` takes a `u32` as argument 2; this is the f32 1.5"),
+        (
+            "call(n, first, (n, first));",
+            "2:16: `first` takes a `u32` as argument 2; this is the function `first`: `mov.u64(a, first)` puts its \
+             address in `a`",
+        ),
+        (
+            "call(first, (n, n));",
+            "2:1: `first` returns a `u32`: `call(r, first, ..)` writes it to `r`, or `call(_, first, ..)` to nothing",
+        ),
+        ("call(f, first, (n, n));", "2:6: `first` returns a `u32`; this is a `f32` variable"),
+        ("call(n, nothing);", "2:6: `nothing` returns nothing: `call(nothing, ..)` calls it"),
+        ("call(n, never, ());", "2:6: `never` never returns: `call(never, ..)` calls it"),
+        ("call(k);", "2:6: `k` is a kernel, which the host launches; `call` calls a function"),
+        ("call(cpu);", "2:6: `cpu` is no function of PTX's: a kernel calls those `extern \"ptx-func\"`"),
+        (
+            "call(helper);",
+            "2:6: `helper` is a helper, inlined where it is called, `helper(..)`: no instruction calls it",
+        ),
+        (
+            "first(n, n);",
+            "2:1: `first` names an ABI, so it is compiled on its own, not inlined as a helper is: an instruction \
+             calls it, as `call(r, first, (a, b))` does in PTX",
+        ),
+        (
+            "call(f);",
+            "2:6: `call` calls a function by its name, or at the address in a 32- or 64-bit integer variable; this \
+             is a `f32` variable",
+        ),
+        (
+            "call(n, n, (n, 1));",
+            "2:12: a call through a variable, as the prototype its operands' types make, passes variables: this is \
+             the integer 1; taking the functions it may call last, `call(r, fp, (a, b), (f, g))`, lets it be more",
+        ),
+        (
+            "call(_, n, (n,));",
+            "2:6: a call through a variable, as the prototype its operands' types make, writes variables: this is \
+             `_`; taking the functions it may call last, `call(r, fp, (a, b), (f, g))`, lets it be more",
+        ),
+        (
+            "call(first, (first,));",
+            "2:6: `call` names the function it calls, `first`, or takes its address from a variable, of one of the \
+             functions taken together last; not both",
+        ),
+        ("call(n, n, (n, n), (first, nothing));", "2:6: `nothing` returns nothing: `call(nothing, ..)` calls it"),
+        (
+            "call(n, first, (n, n), n);",
+            "2:1: `call` is `call(f, (a, b))`, or `call(r, f, (a, b))` for a function that returns a value, `f` a \
+             function of the module or a variable that holds the address of one",
+        ),
+        (
+            "let p: pred; call(n, n, (p,));",
+            "2:25: PTX passes no `pred` to a function, nor back: `selp.u32(x, 1, 0, p)` makes it a `u32`",
+        ),
+    ];
+    for (body, want) in cases {
+        assert_eq!(calling(body).unwrap_err(), want, "{body}");
+    }
+}
+
+#[test]
+fn a_function_takes_and_returns_ptx_types() {
+    let cases = [
+        (
+            "extern \"ptx-func\" fn f(p: pred) {}",
+            "1:27: PTX passes no `pred` to a function, nor back: `selp.u32(x, 1, 0, p)` makes it a `u32`",
+        ),
+        (
+            "extern \"ptx-func\" fn f(a: i32) {}",
+            "1:27: a function takes and returns PTX's types, PTX writes it `s32`; not `i32`",
+        ),
+        (
+            "extern \"ptx-func\" fn f(a: *const f32) {}",
+            "1:27: a function takes and returns PTX's types, an address is a `u64`; not `*const f32`",
+        ),
+        (
+            "extern \"ptx-func\" fn f() -> (u32, u32) {}",
+            "1:29: a function returns one value at most, as PTX's do from Fermi on, not a tuple",
+        ),
+        ("extern \"ptx-func\" fn f() -> u32 { ret(); }", "1:35: `f` returns a `u32`, which `ret(v)` gives back"),
+        ("extern \"ptx-func\" fn f() -> u32 { ret(1.5); }", "1:39: `f` returns a `u32`; this is the f32 1.5"),
+        ("extern \"ptx-func\" fn f(a: u32) -> f32 { ret(a); }", "1:45: `f` returns a `f32`; this is a `u32` variable"),
+        (
+            "extern \"ptx-func\" fn f() -> u32 {}",
+            "1:22: control reaches the end of `f`, which returns a `u32`: `ret(v)` gives it back",
+        ),
+        (
+            "extern \"ptx-func\" fn f() -> ! { ret(); }",
+            "1:33: `f` never returns, `-> !`: it ends each way out in `exit()`, `trap()` or a call of a function that \
+             never returns",
+        ),
+        (
+            "extern \"ptx-func\" fn f() -> ! {}",
+            "1:22: control reaches the end of `f`, which never returns, `-> !`: end each way out in `exit()`, \
+             `trap()` or a call of a function that never returns",
+        ),
+    ];
+    for (src, want) in cases {
+        assert_eq!(kgen::ptx_str(src).unwrap_err(), want, "{src}");
+    }
+}
+
 /// How an instance gives its operands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Style {
@@ -991,6 +1314,7 @@ impl Making {
 /// them; `None` if they would be those of [`Style::Vars`], or kgen's refusal.
 fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entry, String>> {
     let mut m = Making { kernel: Kernel::new(format!("k{n}")), vars: 0, differs: false, sunk: false };
+    m.kernel.callee("f", Some(Prototype { params: vec![], returns: Returns::Nothing }));
     let addr = m.kernel.var("a", "u64").unwrap();
     let mut spaces = b.spaces().into_iter();
     let mut args = vec![];
@@ -1002,6 +1326,7 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
         args.push(match spec.role {
             Role::Label => Given::Label(0),
             Role::Labels => Given::Vector(vec![Given::Label(0)]),
+            Role::Func => Given::Func("f".into()),
             Role::Handle => {
                 let items: Vec<Given<Var>> = spec.inner.iter().map(|s| m.operand(b, s, style)).collect();
                 match items.as_slice() {
@@ -1068,6 +1393,7 @@ fn by_hand(n: usize, name: &str, form: &'static Form, choice: Vec<Option<usize>>
         .map(|spec| match spec.role {
             Role::Label => "$L0".to_string(),
             Role::Labels => "$T0".to_string(),
+            Role::Func => "f".to_string(),
             Role::Handle => {
                 let inner: Vec<String> = spec.inner.iter().map(|s| registers(&b, s, &mut regs)).collect();
                 format!("[{}]", inner.join(", "))
@@ -1141,7 +1467,35 @@ fn others(n: &mut usize) -> Vec<Entry> {
     one("mov.b32", Ty::F16x2, Given::Vector(vec![Given::F16(0x3E00), Given::F16(0x4000)]));
     one("mov.b32", Ty::Tf32, Given::F32(1.5));
     one("mov.b64", Ty::F64, Given::F64(1.5));
+    // A kernel's address, its own, for the GPU to launch it.
+    for t in [Ty::U32, Ty::U64, Ty::B32, Ty::B64] {
+        *n += 1;
+        let name = format!("k{n}");
+        let mut kernel = Kernel::new(&name);
+        kernel.callee(&name, None);
+        let v = kernel.var("v", t.name()).unwrap();
+        kernel.inst(&format!("mov.{}", t.name()), &[Given::Var(v), Given::Func(name.clone())], None).unwrap();
+        kernel.end().unwrap();
+        out.push(kernel.finish());
+    }
     out
+}
+
+/// The function an instance that takes a function's address takes it of, in each module of
+/// one that does.
+fn callee() -> Entry {
+    let mut f = Kernel::func("f");
+    f.end().unwrap();
+    f.finish()
+}
+
+/// The module of `entries`, with the function they name.
+fn module(entries: &[Entry]) -> String {
+    let mut all = entries.to_vec();
+    if entries.iter().any(|e| e.calls.iter().any(|c| c == "f")) {
+        all.insert(0, callee());
+    }
+    kgen_ptx::module(&all).unwrap()
 }
 
 /// The kernels `ptxas` refuses of each module, by name, each with the first error it finds
@@ -1349,7 +1703,7 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
     let mut modules: Vec<(String, Expect)> = vec![];
     for (&(ptx, sm, below, since), entries) in groups.iter().filter(|((ptx, ..), _)| VERSIONS.contains(ptx)) {
         let n = Needs { ptx, sm, below, since };
-        let text = kgen_ptx::module(entries).unwrap();
+        let text = module(entries);
         let gpu = newest(ptx, n);
         if gpu < sm {
             let v = format!("{}.{}", ptx / 10, ptx % 10);
@@ -1390,9 +1744,10 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
         why.insert(format!("k{n}"), m);
         hand.push(text);
     }
+    let f = callee().text();
     for some in hand.chunks(100) {
         let text =
-            format!("// Written by hand.\n\n.version 9.4\n.target sm_86\n.address_size 64\n\n{}", some.join("\n"));
+            format!("// Written by hand.\n\n.version 9.4\n.target sm_86\n.address_size 64\n\n{f}\n{}", some.join("\n"));
         modules.push((text, Expect::Refuses));
     }
     let texts: Vec<String> = modules.iter().map(|(t, _)| t.clone()).collect();

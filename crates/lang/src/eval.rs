@@ -15,10 +15,12 @@ pub trait Target {
     /// A variable, seen as one of the machine's types: `ymm`, `v.xmm`, `u32`.
     type Var: Copy + PartialEq + fmt::Debug;
 
-    /// The kernel's next parameter, of the Rust type `ty` as written: `*const f32`, `usize`.
+    /// The function's next parameter, of the type `ty` as written: Rust's, `*const f32` or
+    /// `usize`, or the machine's.
     fn param(&mut self, name: &str, ty: &str) -> Result<Self::Var, String>;
 
-    /// What the kernel returns, of the Rust type `ty`.
+    /// What the function returns, of the type `ty` as written: `()`, `!` for never, Rust's or
+    /// the machine's.
     fn result(&mut self, ty: &str) -> Result<(), String>;
 
     /// A new variable of the machine's type `ty`.
@@ -70,6 +72,9 @@ pub enum Operand<V> {
     Data(Vec<u8>),
     /// A label, for a jump.
     Label(u32),
+    /// A function of the module that names an ABI, by its name: one the machine calls, as
+    /// PTX's `call` does, or whose address it takes.
+    Func(String),
     /// Operands taken together: `(a, b, c, d)`, or variables declared together, `acc`.
     Vector(Vec<Operand<V>>),
     /// `a | b`: two operands in the place of one, as the result and the predicate PTX's `setp`
@@ -136,16 +141,17 @@ pub struct Run {
     pub consts: Vec<String>,
 }
 
-/// Runs kernel `f` of `module` on `target`: its parameters declared, its body evaluated.
+/// Runs `f` of `module` on `target`, a kernel or another function that names an ABI: its
+/// parameters declared, its body evaluated.
 pub fn kernel<T: Target>(module: &Module, f: &Fn, target: &mut T) -> Result<Run, Error> {
     let mut e = Eval::new(module, target);
     if let Some(g) = f.generics.first() {
-        return Err(err(g.span, "a kernel takes no compile-time arguments; a helper does"));
+        return Err(err(g.span, "a function that names an ABI takes no compile-time arguments; a helper does"));
     }
     let mut scope = vec![];
     for p in &f.params {
         let Type::Name(ty, span) = &p.ty else {
-            return Err(err(p.ty.span(), "a kernel's parameters are values the machine passes, not arrays"));
+            return Err(err(p.ty.span(), "a function that names an ABI takes values the machine passes, not arrays"));
         };
         let v = e.target.param(&p.name, ty).map_err(|m| err(*span, m))?;
         e.decls.push((p.name.clone(), p.span));
@@ -212,7 +218,9 @@ struct Eval<'a, T: Target> {
     target: &'a mut T,
     consts: Vec<(&'a Const, State)>,
     helpers: Vec<&'a Fn>,
-    kernels: Vec<&'a str>,
+    /// The functions that name an ABI, each compiled on its own: kernels, and functions the
+    /// machine calls.
+    compiled: Vec<&'a str>,
     /// The names in scope, innermost last. A helper runs in scopes of its own.
     scopes: Vec<Scope<T::Var>>,
     labels: u32,
@@ -223,16 +231,16 @@ struct Eval<'a, T: Target> {
 
 impl<'a, T: Target> Eval<'a, T> {
     fn new(module: &'a Module, target: &'a mut T) -> Self {
-        let (mut consts, mut helpers, mut kernels) = (vec![], vec![], vec![]);
+        let (mut consts, mut helpers, mut compiled) = (vec![], vec![], vec![]);
         for item in &module.items {
             match &item.kind {
                 ItemKind::Const(c) => consts.push((c, State::Waiting)),
-                ItemKind::Fn(f) if f.abi.is_some() => kernels.push(f.name.as_str()),
+                ItemKind::Fn(f) if f.abi.is_some() => compiled.push(f.name.as_str()),
                 ItemKind::Fn(f) => helpers.push(f),
                 ItemKind::Other => {}
             }
         }
-        Eval { target, consts, helpers, kernels, scopes: vec![], labels: 0, guard: None, depth: 0, decls: vec![] }
+        Eval { target, consts, helpers, compiled, scopes: vec![], labels: 0, guard: None, depth: 0, decls: vec![] }
     }
 
     fn bind(&mut self, name: &str, b: Binding<T::Var>) {
@@ -521,7 +529,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 Some(Binding::Value(v)) => scalar(v, *span),
                 Some(Binding::Vars(vs)) => Ok(Operand::Vector(vs.into_iter().map(Operand::Var).collect())),
                 Some(Binding::Label(l)) => Ok(Operand::Label(l)),
-                None => Ok(Operand::Special(path[0].clone())),
+                None => self.unscoped(&path[0], *span),
             },
             Expr::Field(..) => match self.place(e)? {
                 Some(v) => Ok(Operand::Var(v)),
@@ -561,6 +569,21 @@ impl<'a, T: Target> Eval<'a, T> {
             Expr::Str(_, span) => Err(err(*span, "a string is no operand; `note(\"..\")` takes one")),
             _ => scalar(self.value(e, Want::Any)?, e.span()),
         }
+    }
+
+    /// What a name that is nothing in scope gives an instruction: a function of the module
+    /// that names an ABI, or a name the machine has.
+    fn unscoped(&self, name: &str, span: Span) -> Result<Operand<T::Var>, Error> {
+        if self.compiled.contains(&name) {
+            return Ok(Operand::Func(name.to_string()));
+        }
+        if self.helpers.iter().any(|f| f.name == name) {
+            return Err(err(
+                span,
+                format!("`{name}` is a helper, inlined where it is called, `{name}(..)`: no instruction calls it"),
+            ));
+        }
+        Ok(Operand::Special(name.to_string()))
     }
 
     /// `[inner]`: memory at an address, or memory holding a value known now.
@@ -771,10 +794,13 @@ impl<'a, T: Target> Eval<'a, T> {
                 if let Some(&f) = self.helpers.iter().find(|f| f.name == *name) {
                     return self.inline(f, generics, args, *span);
                 }
-                if self.kernels.contains(&name.as_str()) {
+                if self.compiled.contains(&name.as_str()) {
                     return Err(err(
                         *span,
-                        format!("`{name}` is a kernel; a kernel calls helpers, functions with no ABI"),
+                        format!(
+                            "`{name}` names an ABI, so it is compiled on its own, not inlined as a helper is: an \
+                             instruction calls it, as `call(r, {name}, (a, b))` does in PTX"
+                        ),
                     ));
                 }
                 if !generics.is_empty() {

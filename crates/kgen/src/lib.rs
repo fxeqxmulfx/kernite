@@ -48,13 +48,17 @@ pub use kgen_x86::intel::{Line, Listing};
 
 use kgen_lang::{Fn, ItemKind, Module, Span};
 
-/// The ABIs a kernel names, each of which kgen compiles for a machine.
+/// The ABIs a kernel names, or a function kernels call, each of which kgen compiles for a
+/// machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Abi {
     /// `extern "sysv64"`: x86-64 under the System V calling convention.
     Sysv64,
     /// `extern "ptx-kernel"`: an NVIDIA GPU, in PTX.
     PtxKernel,
+    /// `extern "ptx-func"`: a function the PTX kernels of its module call, `.func`, of PTX's
+    /// types.
+    PtxFunc,
 }
 
 impl Abi {
@@ -63,6 +67,7 @@ impl Abi {
         match name {
             "sysv64" => Some(Abi::Sysv64),
             "ptx-kernel" => Some(Abi::PtxKernel),
+            "ptx-func" => Some(Abi::PtxFunc),
             _ => None,
         }
     }
@@ -102,12 +107,30 @@ pub fn x86_str(src: &str, name: &str) -> Result<Listing, String> {
     x86(&module, f).map(|k| k.code).map_err(|e| e.at(src))
 }
 
-/// Kernel `f` of `module`, in PTX: its `.entry`, for [`ptx_module`] to put in a module.
-/// Nothing allocates its registers, which `ptxas` does, but what allocation would find wrong
-/// that does not depend on the registers is found here: a variable read before it is written,
-/// a jump to no label, control running off the end.
+/// Kernel `f` of `module`, in PTX: its `.entry`, or for a function `extern "ptx-func"` its
+/// `.func`, for [`ptx_module`] to put in a module. It may call the module's functions and
+/// take their addresses and its kernels'. Nothing allocates its registers, which `ptxas`
+/// does, but what allocation would find wrong that does not depend on the registers is found
+/// here: a variable read before it is written, a jump to no label, control running off the
+/// end.
 pub fn ptx(module: &Module, f: &Fn) -> Result<Kernel<Entry>, kgen_lang::Error> {
-    let mut kernel = kgen_ptx::lang::Kernel::new(&f.name);
+    let mut kernel = match abi(f) {
+        Some(Abi::PtxFunc) => kgen_ptx::lang::Kernel::func(&f.name),
+        _ => kgen_ptx::lang::Kernel::new(&f.name),
+    };
+    for item in &module.items {
+        let ItemKind::Fn(g) = &item.kind else { continue };
+        match abi(g) {
+            Some(Abi::PtxKernel) => kernel.callee(&g.name, None),
+            // One of no prototype says why where it is compiled.
+            Some(Abi::PtxFunc) => {
+                if let Some(proto) = prototype(g) {
+                    kernel.callee(&g.name, Some(proto));
+                }
+            }
+            _ => {}
+        }
+    }
     let run = kgen_lang::kernel(module, f, &mut kernel)?;
     let code = kernel.finish();
     kgen_compile::check(&code.program)
@@ -121,19 +144,38 @@ pub fn ptx_module(entries: &[Entry]) -> Result<String, String> {
     kgen_ptx::module(entries)
 }
 
-/// Every `extern "ptx-kernel"` kernel of the module in `src`, in one PTX module; an error
-/// reads `line:column: what`.
+/// Every kernel `extern "ptx-kernel"` and function `extern "ptx-func"` of the module in
+/// `src`, in one PTX module; an error reads `line:column: what`.
 pub fn ptx_str(src: &str) -> Result<String, String> {
     let module = kgen_lang::parse(src).map_err(|e| e.at(src))?;
     let mut entries = vec![];
     for item in &module.items {
         if let ItemKind::Fn(f) = &item.kind
-            && f.abi.as_ref().and_then(|(abi, _)| Abi::of(abi)) == Some(Abi::PtxKernel)
+            && matches!(abi(f), Some(Abi::PtxKernel | Abi::PtxFunc))
         {
             entries.push(ptx(&module, f).map_err(|e| e.at(src))?.code);
         }
     }
     ptx_module(&entries)
+}
+
+/// The ABI `f` names, if kgen compiles for it.
+pub fn abi(f: &Fn) -> Option<Abi> {
+    f.abi.as_ref().and_then(|(abi, _)| Abi::of(abi))
+}
+
+/// The prototype of `f`, a function `extern "ptx-func"`, as the kernels that call it see it;
+/// `None` if its types are none PTX passes.
+fn prototype(f: &Fn) -> Option<kgen_ptx::Prototype> {
+    let params: Option<Vec<&str>> = f
+        .params
+        .iter()
+        .map(|p| match &p.ty {
+            kgen_lang::Type::Name(ty, _) => Some(ty.as_str()),
+            _ => None,
+        })
+        .collect();
+    kgen_ptx::Prototype::of(&params?, f.ret.as_ref().map(|r| r.ty.as_str())).ok()
 }
 
 /// The function `name` of `module`.

@@ -32,6 +32,16 @@
 //!   it does not; a guarded `bra(label)` is a branch. `brx.idx(i, (a, b, c))` jumps to the
 //!   label `i` picks of those taken together, through a table it declares before it.
 //! - A kernel returns nothing: `ret()`, which the end of the body adds if control reaches it.
+//!   A function kernels call, [`Kernel::func`], takes and returns PTX's types, `u32` and
+//!   `f16x2` but not `pred`: `ret(v)` gives back what it returns, and one that never returns,
+//!   `-> !`, ends each way out in `exit()`, `trap()` or a call of one that never returns.
+//! - `call(r, f, (a, b))` calls the function `f`, of the prototype [`Kernel::callee`] gives,
+//!   with `a` and `b`, and writes what it returns to `r`, or to nothing, `_`; `call(f, a)`
+//!   passes one, and `call(f)` none. An argument is a variable of the parameter's type, as
+//!   `ptxas` checks one, or a value. `mov.u64(fp, f)` puts the address of `f` in `fp`, which
+//!   `call(r, fp, (a, b))` calls as the prototype the operands' types make, and
+//!   `call(r, fp, (a, b), (f, g))` as one of the functions taken together last, checked
+//!   against each.
 //!
 //! What an instruction needs of PTX and of the GPU, its [`Needs`], the kernel needs: an
 //! instruction that no GPU has with what the kernel needs already is an error where it is.
@@ -45,7 +55,7 @@ use kgen_core::{
 use kgen_lang::{Fault, Guard, Operand as Given, Target};
 
 use crate::forms::{self, Bound, Check, Count, Imm, Part, Role, Space, Spec, TyRef};
-use crate::{Entry, Kind, Memory, Needs, Op, Param, Ty};
+use crate::{Entry, Kind, Memory, Needs, Op, Param, Prototype, Returns, Ty, formal};
 
 /// A variable: a register of the type it was declared, or a part of one, or memory the
 /// kernel declares in a state space, which stands for its address.
@@ -93,8 +103,16 @@ pub struct Kernel {
     local: u64,
     partial: Vec<Partial>,
     needs: Vec<(Needs, String)>,
-    /// The tables of labels `brx.idx` jumps through, so far.
+    /// The tables declared so far: of labels `brx.idx` jumps through, of call targets, and
+    /// prototypes.
     tables: usize,
+    /// For a function, what it returns; `None` for a kernel.
+    func: Option<Returns>,
+    /// The functions it may name: each one it calls, by its prototype, and the kernels, by
+    /// `None`, whose addresses it takes.
+    callees: Vec<(String, Option<Prototype>)>,
+    /// Those it named, each once.
+    calls: Vec<String>,
 }
 
 /// A write under a guard, which leaves what was there where the guard does not hold. It is
@@ -113,9 +131,9 @@ struct Partial {
     arg: usize,
 }
 
-/// An instruction's operands written out: their text, what they read and write, the special
-/// registers among them and what those and the rest need, and the labels of a table it jumps
-/// through; and as they are written, how many are addresses so far, the bytes the
+/// An instruction's operands written out: their text, what they read and write, what they
+/// need and the special registers and kernels among them that need it, the labels of a table
+/// it jumps through, and the functions it names; and as they are written, how many are addresses so far, the bytes the
 /// instruction reaches at once at each, and whether they are those in brackets, where a
 /// register is of the type the form says, though `+wide` lets the others be wider.
 #[derive(Default)]
@@ -123,8 +141,9 @@ struct Written {
     texts: Vec<String>,
     args: Vec<Arg<VReg>>,
     needs: Needs,
-    sregs: Vec<&'static str>,
+    named: Vec<String>,
     table: Vec<u32>,
+    funcs: Vec<String>,
     addrs: usize,
     reach: u64,
     inside: bool,
@@ -165,12 +184,40 @@ impl Kernel {
             partial: vec![],
             needs: vec![],
             tables: 0,
+            func: None,
+            callees: vec![],
+            calls: vec![],
         }
+    }
+
+    /// An empty function called `name`, which kernels call: a `.func`, which returns nothing
+    /// until [`Target::result`] says what it returns.
+    pub fn func(name: impl Into<String>) -> Self {
+        let mut f = Kernel::new(name);
+        f.named.insert(format!("{}_retval", f.p.name));
+        f.func = Some(Returns::Nothing);
+        f
+    }
+
+    /// Lets the kernel name `name`: a function it calls, of the prototype `proto`; or with
+    /// `None` a kernel, whose address it takes for the GPU to launch it.
+    pub fn callee(&mut self, name: impl Into<String>, proto: Option<Prototype>) {
+        let name = name.into();
+        self.named.insert(name.clone());
+        self.callees.push((name, proto));
     }
 
     /// The kernel as written.
     pub fn finish(self) -> Entry {
-        Entry { program: self.p, params: self.params, regs: self.regs, memory: self.memory, needs: self.needs }
+        Entry {
+            program: self.p,
+            params: self.params,
+            regs: self.regs,
+            memory: self.memory,
+            needs: self.needs,
+            func: self.func,
+            calls: self.calls,
+        }
     }
 
     /// A new variable, its register named after it: with `_` after a special register's
@@ -196,6 +243,14 @@ impl Kernel {
 
     fn reg(&self, reg: VReg) -> &str {
         &self.regs[reg.id as usize].0
+    }
+
+    /// What an instruction under `guard` starts with: `@%p `, `@!%p `, or nothing.
+    fn guarded(&self, guard: Option<(VReg, bool)>) -> String {
+        match guard {
+            Some((pred, negated)) => format!("@{}%{} ", if negated { "!" } else { "" }, self.reg(pred)),
+            None => String::new(),
+        }
     }
 
     /// Memory declared as `let name: ty`, where `ty` is `space<args>`: `shared<[f32; 256], 16>`
@@ -416,6 +471,7 @@ impl Kernel {
                 self.handle(b, spec, &[Given::Var(v)], name, w)
             }
             (Role::Addr(access), Given::Mem(m)) => self.address(b, m, access, name, w),
+            (Role::Func, Given::Func(f)) => self.address_of(f, w),
             (Role::Imm(imm), Given::Int(x)) => known(imm, *x, name),
             (Role::Dst | Role::Src, _) => self.value(b, spec, a, name, w),
             (_, Given::Data(_)) => Err(format!("`{name}` takes a value as it is: `1.5`, not `[1.5]`")),
@@ -558,7 +614,7 @@ impl Kernel {
                 Some(r) => {
                     w.needs = w.needs.and(r.needs);
                     if r.needs != Needs::default() {
-                        w.sregs.push(&r.name);
+                        w.named.push(format!("%{}", r.name));
                     }
                     Ok(format!("%{s}"))
                 }
@@ -754,6 +810,349 @@ impl Kernel {
         })
     }
 
+    /// The address of the function or the kernel `f`, which `mov` puts in a variable.
+    fn address_of(&self, f: &str, w: &mut Written) -> Result<String, String> {
+        if self.callee_of(f)?.is_none() {
+            // A kernel's address is for the GPU to launch it, as CUDA's dynamic parallelism
+            // does from Kepler's sm_35 on.
+            w.needs = w.needs.and(Needs { ptx: 31, sm: 35, ..Needs::default() });
+            w.named.push(f.to_string());
+        }
+        w.funcs.push(f.to_string());
+        Ok(f.to_string())
+    }
+
+    /// The prototype of `f`, a function the kernel may name, or `None` for a kernel; or why
+    /// it may name none such.
+    fn callee_of(&self, f: &str) -> Result<Option<&Prototype>, String> {
+        match self.callees.iter().find(|(n, _)| n == f) {
+            Some((_, proto)) => Ok(proto.as_ref()),
+            None => Err(format!("`{f}` is no function of PTX's: a kernel calls those `extern \"ptx-func\"`")),
+        }
+    }
+
+    /// The prototype of `f`, a function the kernel calls by its operand `at`; or why it calls
+    /// no such function.
+    fn called(&self, f: &str, at: usize) -> Result<&Prototype, Fault> {
+        match self.callee_of(f).map_err(|m| Fault::at(at, m))? {
+            Some(proto) => Ok(proto),
+            None => Err(Fault::at(at, format!("`{f}` is a kernel, which the host launches; `call` calls a function"))),
+        }
+    }
+
+    /// `call`: of a function of the module by its name, `call(r, f, (a, b))`, or of the one
+    /// at the address in a variable, `call(r, fp, (a, b))`, as the prototype its operands'
+    /// types make, or as one of the functions taken together last, `call(fp, a, (f, g))`.
+    fn call(&mut self, name: &str, args: &[Given<Var>], guard: Option<(VReg, bool)>) -> Result<(), Fault> {
+        if name != "call" && name != "call.uni" {
+            return Err(Fault::new(format!(
+                "PTX's `call` is `call`, or `call.uni` where the threads of a warp all call the same function; not \
+                 `{name}`"
+            )));
+        }
+        let shape = "`call` is `call(f, (a, b))`, or `call(r, f, (a, b))` for a function that returns a value, \
+                     `f` a function of the module or a variable that holds the address of one";
+        let targets: Option<Vec<&str>> = match args.last() {
+            Some(Given::Vector(fs)) if !fs.is_empty() && fs.iter().all(|f| matches!(f, Given::Func(_))) => {
+                Some(fs.iter().filter_map(|f| if let Given::Func(f) = f { Some(f.as_str()) } else { None }).collect())
+            }
+            _ => None,
+        };
+        let rest = &args[..args.len() - usize::from(targets.is_some())];
+        let at = rest.iter().position(|a| matches!(a, Given::Func(_)));
+        let (result, callee, passed) = match (at, rest.len()) {
+            (Some(0), 1 | 2) => (None, 0, rest.get(1)),
+            (Some(1), 2 | 3) => (Some(0), 1, rest.get(2)),
+            (Some(i), _) if i < 2 => return Err(Fault::new(shape)),
+            (Some(i), _) => return Err(Fault::at(i, shape)),
+            (None, 1 | 2) => (None, 0, rest.get(1)),
+            (None, 3) => (Some(0), 1, rest.get(2)),
+            (None, _) => return Err(Fault::new(shape)),
+        };
+        let passed: Vec<&Given<Var>> = match passed {
+            None => vec![],
+            Some(Given::Vector(xs)) => xs.iter().collect(),
+            Some(a) => vec![a],
+        };
+        let at_args = callee + 1;
+        let mut reads = vec![];
+        let mut line = String::new();
+        let (target, texts, flow) = match (&rest[callee], &targets) {
+            (Given::Func(f), None) => {
+                let proto = self.called(f, callee)?;
+                let texts = self.passing(f, proto, &passed, result.map(|r| &rest[r]), &mut reads, at_args)?;
+                let flow = match (proto.returns, guard) {
+                    (Returns::Never, None) => Flow::Return,
+                    _ => Flow::Next,
+                };
+                self.named_fn(f);
+                (f.clone(), texts, flow)
+            }
+            (Given::Func(f), Some(_)) => {
+                return Err(Fault::at(
+                    callee,
+                    format!(
+                        "`call` names the function it calls, `{f}`, or takes its address from a variable, of one \
+                         of the functions taken together last; not both"
+                    ),
+                ));
+            }
+            (fp, targets) => {
+                let fp = match fp {
+                    Given::Var(Var::Reg { reg, ty })
+                        if matches!(ty.kind(), Kind::Bit | Kind::Unsigned | Kind::Signed)
+                            && matches!(ty.bits(), 32 | 64) =>
+                    {
+                        reads.push(Arg { operand: Operand::Reg(*reg, width(*ty)), access: Access::Read });
+                        format!("%{}", self.reg(*reg))
+                    }
+                    a => {
+                        return Err(Fault::at(
+                            callee,
+                            format!(
+                                "`call` calls a function by its name, or at the address in a 32- or 64-bit \
+                                 integer variable; this is {}",
+                                self.given(a)
+                            ),
+                        ));
+                    }
+                };
+                // As `ptxas` has a call through a variable.
+                self.require(Needs { ptx: 21, sm: 20, ..Needs::default() }, &format!("{name} {fp}"))
+                    .map_err(Fault::new)?;
+                match targets {
+                    Some(targets) => {
+                        let mut texts: Option<Vec<String>> = None;
+                        let mut never = true;
+                        for t in targets {
+                            let proto = self.called(t, args.len() - 1)?;
+                            never &= proto.returns == Returns::Never;
+                            let mut some = vec![];
+                            let these =
+                                self.passing(t, proto, &passed, result.map(|r| &rest[r]), &mut some, at_args)?;
+                            match &texts {
+                                Some(first) if *first != these => {
+                                    return Err(Fault::at(
+                                        at_args,
+                                        format!(
+                                            "`{t}` takes other types than `{}` does, which write a value known \
+                                             now another way: put it in a variable first",
+                                            targets[0]
+                                        ),
+                                    ));
+                                }
+                                Some(_) => {}
+                                None => {
+                                    reads.append(&mut some);
+                                    texts = Some(these);
+                                }
+                            }
+                        }
+                        for t in targets {
+                            self.named_fn(t);
+                        }
+                        line += &format!("$C{}: .calltargets {};\n\t", self.tables, targets.join(", "));
+                        let flow = if never && guard.is_none() { Flow::Return } else { Flow::Next };
+                        let mut texts = texts.expect("a call has a target");
+                        texts.push(format!("$C{}", self.tables));
+                        self.tables += 1;
+                        (fp, texts, flow)
+                    }
+                    None => {
+                        let mut texts = self.prototype(&passed, result.map(|r| &rest[r]), &mut reads, at_args)?;
+                        let proto = texts.pop().expect("the prototype comes last");
+                        line += &format!("$P{}: .callprototype {proto};\n\t", self.tables);
+                        texts.push(format!("$P{}", self.tables));
+                        self.tables += 1;
+                        (fp, texts, Flow::Next)
+                    }
+                }
+            }
+        };
+        line += &self.guarded(guard);
+        // What it returns, the function, its arguments, and the table it is one of.
+        let [r, a, table @ ..] = texts.as_slice() else { unreachable!("a call writes its result and its arguments") };
+        line += name;
+        line += " ";
+        if !r.is_empty() {
+            line += &format!("({r}), ");
+        }
+        line += &target;
+        if !a.is_empty() || !r.is_empty() {
+            line += &format!(", ({a})");
+        }
+        for t in table {
+            line += &format!(", {t}");
+        }
+        line += ";";
+        self.push(line, reads, guard, flow);
+        Ok(())
+    }
+
+    /// Notes that the kernel names the function `f`.
+    fn named_fn(&mut self, f: &str) {
+        if !self.calls.iter().any(|c| c == f) {
+            self.calls.push(f.to_string());
+        }
+    }
+
+    /// The result and the arguments of a call of `f`, of `proto`, written out: the variable it
+    /// writes, `_` or nothing, and the arguments joined, with what they read and write added to
+    /// `args`. The arguments are the operand `at`.
+    fn passing(
+        &self,
+        f: &str,
+        proto: &Prototype,
+        passed: &[&Given<Var>],
+        result: Option<&Given<Var>>,
+        args: &mut Vec<Arg<VReg>>,
+        at: usize,
+    ) -> Result<Vec<String>, Fault> {
+        let r = match (proto.returns, result) {
+            (Returns::Value(t), None) => {
+                return Err(Fault::new(format!(
+                    "`{f}` returns a `{}`: `call(r, {f}, ..)` writes it to `r`, or `call(_, {f}, ..)` to nothing",
+                    t.name()
+                )));
+            }
+            (Returns::Value(t), Some(r)) => match r {
+                Given::Var(Var::Reg { reg, ty }) if ty.fits(t) => {
+                    args.push(Arg { operand: Operand::Reg(*reg, width(*ty)), access: Access::Write });
+                    format!("%{}", self.reg(*reg))
+                }
+                Given::Special(s) if s == "_" => "_".into(),
+                Given::Var(Var::Reg { ty, .. }) => {
+                    return Err(Fault::at(
+                        0,
+                        format!("`{f}` returns a `{}`; this is a `{}` variable", t.name(), ty.name()),
+                    ));
+                }
+                r => {
+                    return Err(Fault::at(
+                        0,
+                        format!("`{f}` returns a `{}`, to a variable or `_`; this is {}", t.name(), self.given(r)),
+                    ));
+                }
+            },
+            (Returns::Nothing, Some(_)) => {
+                return Err(Fault::at(0, format!("`{f}` returns nothing: `call({f}, ..)` calls it")));
+            }
+            (Returns::Never, Some(_)) => {
+                return Err(Fault::at(0, format!("`{f}` never returns: `call({f}, ..)` calls it")));
+            }
+            (_, None) => String::new(),
+        };
+        if passed.len() != proto.params.len() {
+            let takes = match proto.params.len() {
+                0 => "no arguments".into(),
+                1 => "1 argument".into(),
+                n => format!("{n} arguments"),
+            };
+            return Err(Fault::at(at, format!("`{f}` takes {takes}, not {}", passed.len())));
+        }
+        let mut texts = vec![];
+        for (k, (&t, a)) in proto.params.iter().zip(passed).enumerate() {
+            let wants = match proto.params.len() {
+                1 => format!("`{f}` takes a `{}`", t.name()),
+                _ => format!("`{f}` takes a `{}` as argument {}", t.name(), k + 1),
+            };
+            texts.push(self.pass(t, &wants, a, args).map_err(|m| Fault::at(at, m))?);
+        }
+        Ok(vec![r, texts.join(", ")])
+    }
+
+    /// The result and the arguments of a call through a prototype, written out as
+    /// [`Kernel::passing`] writes them, and last the prototype their types make.
+    fn prototype(
+        &self,
+        passed: &[&Given<Var>],
+        result: Option<&Given<Var>>,
+        args: &mut Vec<Arg<VReg>>,
+        at: usize,
+    ) -> Result<Vec<String>, Fault> {
+        let var = |a: &Given<Var>, at: usize, what: &str| match a {
+            Given::Var(Var::Reg { ty: Ty::Pred, .. }) => Err(Fault::at(at, NO_PRED)),
+            Given::Var(Var::Reg { reg, ty }) => Ok((*reg, *ty)),
+            a => Err(Fault::at(
+                at,
+                format!(
+                    "a call through a variable, as the prototype its operands' types make, {what} variables: this \
+                     is {}; taking the functions it may call last, `call(r, fp, (a, b), (f, g))`, lets it be more",
+                    self.given(a)
+                ),
+            )),
+        };
+        let (r, ret) = match result {
+            Some(r) => {
+                let (reg, ty) = var(r, 0, "writes")?;
+                args.push(Arg { operand: Operand::Reg(reg, width(ty)), access: Access::Write });
+                (format!("%{}", self.reg(reg)), format!("(.param .{} _) ", formal(ty).name()))
+            }
+            None => (String::new(), String::new()),
+        };
+        let (mut texts, mut params) = (vec![], vec![]);
+        for a in passed {
+            let (reg, ty) = var(a, at, "passes")?;
+            args.push(Arg { operand: Operand::Reg(reg, width(ty)), access: Access::Read });
+            texts.push(format!("%{}", self.reg(reg)));
+            params.push(format!(".param .{} _", formal(ty).name()));
+        }
+        let proto = match (r.is_empty(), params.is_empty()) {
+            (true, true) => "_ ".into(),
+            _ => format!("{ret}_ ({})", params.join(", ")),
+        };
+        Ok(vec![r, texts.join(", "), proto])
+    }
+
+    /// `a` as a value of type `t` passed to a function or given back from one, written out: a
+    /// variable of a type that fits it, as `ptxas` checks a call, or a value known now, as the
+    /// type writes it; with what it reads added to `args`. `wants` says what it is to be.
+    fn pass(&self, t: Ty, wants: &str, a: &Given<Var>, args: &mut Vec<Arg<VReg>>) -> Result<String, String> {
+        let not = |what: String| format!("{wants}; this is {what}");
+        match a {
+            Given::Var(Var::Reg { reg, ty }) if ty.fits(t) => {
+                args.push(Arg { operand: Operand::Reg(*reg, width(*ty)), access: Access::Read });
+                Ok(format!("%{}", self.reg(*reg)))
+            }
+            Given::Var(Var::Reg { ty, .. }) => Err(not(format!("a `{}` variable", ty.name()))),
+            Given::Int(x) => match t {
+                Ty::F16 => Err(not(format!("the integer {x}: `{x}.0f16` is an `f16`"))),
+                Ty::Bf16 => Err(not(format!("the integer {x}: `{x}.0bf16` is a `bf16`"))),
+                _ => int(t, *x, "").map_err(|_| not(format!("the integer {x}"))),
+            },
+            Given::F32(x) => match t {
+                Ty::F32 | Ty::B32 => Ok(format!("0f{:08X}", x.to_bits())),
+                Ty::F64 => Err(not(format!("the f32 {x}: `{x}f64` is an `f64`"))),
+                _ => Err(not(format!("the f32 {x}"))),
+            },
+            Given::F64(x) => match t {
+                Ty::F64 | Ty::B64 => Ok(format!("0d{:016X}", x.to_bits())),
+                _ => Err(not(format!("the f64 {x}"))),
+            },
+            Given::F16(x) if matches!(t, Ty::F16 | Ty::B16) => Ok(format!("0x{x:04X}")),
+            Given::Bf16(x) if matches!(t, Ty::Bf16 | Ty::B16) => Ok(format!("0x{x:04X}")),
+            Given::Func(f) => Err(not(format!("the function `{f}`: `mov.u64(a, {f})` puts its address in `a`"))),
+            a => Err(not(self.given(a))),
+        }
+    }
+
+    /// `ret(v)`, of a function that returns a value of type `t`: `v`, which it stores where the
+    /// caller finds it, and then returns.
+    fn give_back(&mut self, name: &str, t: Ty, args: &[Given<Var>], guard: Option<(VReg, bool)>) -> Result<(), Fault> {
+        let f = self.p.name.clone();
+        let [a] = args else {
+            return Err(Fault::new(format!("`{f}` returns a `{}`, which `{name}(v)` gives back", t.name())));
+        };
+        let mut reads = vec![];
+        let text =
+            self.pass(t, &format!("`{f}` returns a `{}`", t.name()), a, &mut reads).map_err(|m| Fault::at(0, m))?;
+        let on = self.guarded(guard);
+        let line = format!("{on}st.param.{} [{f}_retval], {text};\n\t{on}{name};", formal(t).name());
+        let flow = if guard.is_none() { Flow::Return } else { Flow::Next };
+        self.push(line, reads, guard, flow);
+        Ok(())
+    }
+
     /// What `a` is, for an error.
     fn given(&self, a: &Given<Var>) -> String {
         match a {
@@ -770,6 +1169,7 @@ impl Kernel {
             Given::Mem(_) => "an address".into(),
             Given::Data(_) => "memory holding data".into(),
             Given::Label(_) => "a label".into(),
+            Given::Func(f) => format!("the function `{f}`"),
             Given::Vector(vs) => format!("{} operands taken together", vs.len()),
             Given::Pair(..) => "two operands joined by `|`".into(),
             Given::Not(_) => "an operand inverted".into(),
@@ -818,6 +1218,7 @@ fn shaped(b: &Bound, spec: &Spec, a: &Given<Var>) -> bool {
         | (Role::Handle, Given::List(_) | Given::Mem(_))
         | (Role::Label, Given::Label(_))
         | (Role::Labels, Given::Vector(_))
+        | (Role::Func, Given::Func(_))
         | (Role::Imm(_), Given::Int(_)) => true,
         (Role::Dst | Role::Src, Given::Var(v)) => matches!(v, Var::Mem(_)) == spec.memory,
         (Role::Dst | Role::Src, Given::Vector(parts)) => lanes(b, spec) == parts.len(),
@@ -908,6 +1309,7 @@ fn describe(b: &Bound, spec: &Spec) -> String {
         Role::Addr(_) => return "an address, as in `[p + 4]`".into(),
         Role::Label => return "a label".into(),
         Role::Labels => return "labels taken together, as `(a, b)`, for a variable to pick one".into(),
+        Role::Func => return "a function of the module, whose address it takes".into(),
         Role::Handle => {
             let what = if b.form.op.starts_with("su") { "surface" } else { "texture" };
             let Some(at) = spec.inner.get(1) else { return format!("a {what}'s handle in brackets, `[t]`") };
@@ -953,6 +1355,10 @@ fn counts(ranges: &[(usize, usize)]) -> String {
     }
 }
 
+/// Why a function takes no predicate.
+pub(crate) const NO_PRED: &str =
+    "PTX passes no `pred` to a function, nor back: `selp.u32(x, 1, 0, p)` makes it a `u32`";
+
 /// The types a variable may be, for an error about one that is none; and those memory holds.
 const TYPES: &str = "`pred`, `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, `bf16x2`, \
                      `tf32`, `f32` and `f64`";
@@ -965,6 +1371,13 @@ impl Target for Kernel {
     fn param(&mut self, name: &str, ty: &str) -> Result<Var, String> {
         let pointer = ty.starts_with("*const ") || ty.starts_with("*mut ");
         let t = match ty {
+            _ if self.func.is_some() => {
+                let t = crate::passable(ty)?;
+                if t.needs() != Needs::default() {
+                    self.require(t.needs(), &format!("{name}: {}", t.name()))?;
+                }
+                t
+            }
             _ if pointer => Ty::U64,
             "u8" => Ty::U8,
             "i8" => Ty::S8,
@@ -993,10 +1406,21 @@ impl Target for Kernel {
     }
 
     fn result(&mut self, ty: &str) -> Result<(), String> {
-        match ty {
-            "()" => Ok(()),
-            _ => Err(format!("a GPU kernel returns nothing, not `{ty}`: it writes what it works out to memory")),
+        if self.func.is_none() {
+            return match ty {
+                "()" => Ok(()),
+                _ => Err(format!("a GPU kernel returns nothing, not `{ty}`: it writes what it works out to memory")),
+            };
         }
+        let returns = crate::returns(ty)?;
+        match returns {
+            Returns::Value(t) if t.needs() != Needs::default() => self.require(t.needs(), &format!("-> {ty}"))?,
+            // As `ptxas` has `.noreturn`.
+            Returns::Never => self.require(Needs { ptx: 64, sm: 30, ..Needs::default() }, "-> !")?,
+            _ => {}
+        }
+        self.func = Some(returns);
+        Ok(())
     }
 
     fn var(&mut self, name: &str, ty: &str) -> Result<Var, String> {
@@ -1080,7 +1504,22 @@ impl Target for Kernel {
                 return Err(Fault::new(format!("an instruction is guarded by a `pred`; this is {what}")));
             }
         };
+        let op = name.split('.').next().unwrap_or_default();
+        if op == "call" {
+            return self.call(name, args, guard);
+        }
         let bound = forms::find(name).map_err(Fault::new)?;
+        match (op, self.func) {
+            ("ret", Some(Returns::Value(t))) => return self.give_back(name, t, args, guard),
+            ("ret", Some(Returns::Never)) => {
+                let f = &self.p.name;
+                return Err(Fault::new(format!(
+                    "`{f}` never returns, `-> !`: it ends each way out in `exit()`, `trap()` or a call of a \
+                     function that never returns"
+                )));
+            }
+            _ => {}
+        }
         let (mut ranges, mut best, mut found) = (vec![], None::<(usize, bool, Fault)>, None);
         for b in &bound {
             match self.operands(b, name, args) {
@@ -1103,10 +1542,13 @@ impl Target for Kernel {
             });
         };
         let mut what = name.to_string();
-        for s in &w.sregs {
-            what += &format!(" %{s}");
+        for s in &w.named {
+            what += &format!(" {s}");
         }
         self.require(b.needs.and(w.needs), &what).map_err(Fault::new)?;
+        for f in &w.funcs {
+            self.named_fn(f);
+        }
         let label = args.iter().find_map(|a| match a {
             Given::Label(l) => Some(Label(*l)),
             _ => None,
@@ -1114,7 +1556,7 @@ impl Target for Kernel {
         let flow = match (b.form.op, label, guard) {
             ("bra", Some(l), None) => Flow::Jump(l),
             ("bra", Some(l), Some(_)) => Flow::Branch(l),
-            ("ret" | "exit", _, None) => Flow::Return,
+            ("ret" | "exit" | "trap", _, None) => Flow::Return,
             _ if !w.table.is_empty() => {
                 Flow::Table { to: w.table.iter().map(|&l| Label(l)).collect(), or_next: guard.is_some() }
             }
@@ -1126,9 +1568,7 @@ impl Target for Kernel {
             line += &format!("$T{}: .branchtargets {};\n\t", self.tables, labels.join(", "));
             self.tables += 1;
         }
-        if let Some((pred, negated)) = guard {
-            line += &format!("@{}%{} ", if negated { "!" } else { "" }, self.reg(pred));
-        }
+        line += &self.guarded(guard);
         line += name;
         if !w.texts.is_empty() {
             line += " ";
@@ -1147,7 +1587,22 @@ impl Target for Kernel {
             _ => true,
         };
         if open {
-            self.push("ret;".into(), vec![], None, Flow::Return);
+            let f = &self.p.name;
+            match self.func {
+                Some(Returns::Value(t)) => {
+                    return Err(format!(
+                        "control reaches the end of `{f}`, which returns a `{}`: `ret(v)` gives it back",
+                        t.name()
+                    ));
+                }
+                Some(Returns::Never) => {
+                    return Err(format!(
+                        "control reaches the end of `{f}`, which never returns, `-> !`: end each way out in \
+                         `exit()`, `trap()` or a call of a function that never returns"
+                    ));
+                }
+                _ => self.push("ret;".into(), vec![], None, Flow::Return),
+            }
         }
         Ok(())
     }

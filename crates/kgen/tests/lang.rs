@@ -311,6 +311,16 @@ fn errors_point_where_the_trouble_is() {
         ("two::<1>(1, 2);", "1:1: `two` takes 0 values in `::<..>`; this gives 1"),
         ("note(\"{gone}\");", "1:6: `gone` is not defined"),
         ("loop {}", "1:1: a kernel has no `loop`: loops are labels and jumps, and `for` is unrolled"),
+        (
+            "let g: gpr; mov(g, two);",
+            "1:20: `two` is a helper, inlined where it is called, `two(..)`: no instruction calls it",
+        ),
+        ("let g: gpr; mov(g, k);", "1:20: an x86 kernel calls no function; `k` names an ABI, so it is one"),
+        (
+            "k();",
+            "1:1: `k` names an ABI, so it is compiled on its own, not inlined as a helper is: an instruction calls \
+             it, as `call(r, k, (a, b))` does in PTX",
+        ),
     ];
     for (body, want) in cases {
         let src = format!(

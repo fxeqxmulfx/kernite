@@ -1,5 +1,6 @@
-//! `#[kernels]` on a module: each function in it that names an ABI is a kernel, written in
-//! the language of `kgen-lang` and compiled for the machine the ABI belongs to, in place.
+//! `#[kernels]` on a module: each function in it that names an ABI is a kernel, or a function
+//! kernels call, written in the language of `kgen-lang` and compiled for the machine the ABI
+//! belongs to, in place.
 //!
 //! ```ignore
 //! #[kgen_macros::kernels]
@@ -28,6 +29,10 @@
 //!   `kgen_cuda::Grid` and the kernel's parameters, a pointer as the `kgen_cuda::Ptr` a
 //!   buffer on the GPU gives, and an `f16` or a `bf16` as kgen-cuda's, Rust having neither.
 //!   A crate with GPU kernels depends on `kgen-cuda` for these.
+//! - An `extern "ptx-func" fn` is a `.func` in `PTX`, which the module's GPU kernels and
+//!   functions call, itself among them, as `call(r, gcd, (a, b))` does. It takes and
+//!   returns PTX's types, `u32` or `f16x2`, or never returns, `-> !`, and leaves nothing
+//!   behind for Rust, which does not call it.
 //! - A function without an ABI is a helper, inlined where a kernel calls it, and leaves
 //!   nothing behind. Constants and every other item stay as written, for Rust to use as well.
 //!   A constant a kernel reads counts as used, as it would if Rust had seen the read: only one
@@ -96,6 +101,9 @@ fn expand(body: TokenStream) -> TokenStream {
     };
     let mut out = TokenStream::new();
     let (mut listings, mut entries, mut launchers, mut read) = (vec![], vec![], vec![], vec![]);
+    // The first function for a GPU, where an error of the module as a whole goes; and how many
+    // kernels it launches.
+    let (mut first, mut launched) = (None, 0);
     for item in &module.items {
         let f = match &item.kind {
             ItemKind::Const(_) | ItemKind::Other => {
@@ -115,15 +123,20 @@ fn expand(body: TokenStream) -> TokenStream {
         let Some(abi) = Abi::of(name) else {
             let message = format!(
                 "kgen compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for \
-                 NVIDIA GPUs; `extern \"{name}\"` is neither"
+                 NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"{name}\"` is none of \
+                 these"
             );
             out.extend(error(at(*abi_span), &message));
             out.extend(stub(f, &top));
             continue;
         };
-        let trusted = top[f.head.clone()].iter().any(|t| is_ident(t, "unsafe"));
+        // A function the kernels call is called by nothing else, so it promises Rust nothing.
+        let trusted = abi == Abi::PtxFunc || top[f.head.clone()].iter().any(|t| is_ident(t, "unsafe"));
         if !trusted {
             out.extend(error(at(f.span), "a kernel trusts the pointers it is given, so it is an `unsafe fn`"));
+        }
+        if abi != Abi::Sysv64 {
+            first.get_or_insert(f.span);
         }
         match abi {
             Abi::Sysv64 => match kgen::x86(&module, f) {
@@ -144,7 +157,8 @@ fn expand(body: TokenStream) -> TokenStream {
             Abi::PtxKernel => match kgen::ptx(&module, f) {
                 Ok(kernel) => {
                     if trusted {
-                        launchers.push((f, Some(entries.len())));
+                        launchers.push((f, Some(launched)));
+                        launched += 1;
                         entries.push(kernel.code);
                     } else {
                         launchers.push((f, None));
@@ -155,6 +169,13 @@ fn expand(body: TokenStream) -> TokenStream {
                     out.extend(error(at(e.span), &e.message));
                     launchers.push((f, None));
                 }
+            },
+            Abi::PtxFunc => match kgen::ptx(&module, f) {
+                Ok(func) => {
+                    entries.push(func.code);
+                    read.extend(func.consts);
+                }
+                Err(e) => out.extend(error(at(e.span), &e.message)),
             },
         }
     }
@@ -169,9 +190,9 @@ fn expand(body: TokenStream) -> TokenStream {
         }
         out.extend(parse(&(s + "];")));
     }
-    if !launchers.is_empty() {
+    if let Some(span) = first {
         let ptx = kgen::ptx_module(&entries).unwrap_or_else(|e| {
-            out.extend(error(at(launchers[0].0.span), &e));
+            out.extend(error(at(span), &e));
             String::new()
         });
         out.extend(gpu(&launchers, &ptx, &top));

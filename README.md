@@ -82,14 +82,20 @@ ys.read_into(&mut y)?;
 ```
 
 The PTX target knows every instruction of PTX's for the GPUs from Fermi, `sm_20`, to Ampere, `sm_86`, in each form
-`ptxas` takes, [`forms`](crates/ptx/src/forms.rs), and checks each operand against them; all but `call`, since a
-helper is inlined where it is called and is no `.func`. Where `ptxas` takes a form or an operand that PTX's ISA does
-not have, kgen keeps to the ISA, and where the ISA says nothing, to `ptxas`. Each form, and each of its words, says
-the oldest version of PTX and the oldest GPU `ptxas` takes it at, back to PTX 1.0, which is at times older than the
-ISA says: `ptxas` takes `ld.mmio.acquire` for `sm_70`, which the ISA has from `sm_75`. A module's `.version` and
-`.target` are the oldest that have every instruction its kernels use: PTX 2.3 and `sm_20` at the least. Where
-`ptxas` is installed, a test hands it every form at what kgen says it needs, which it must take, and at the version
-before and on the GPU before, which it must refuse.
+`ptxas` takes, [`forms`](crates/ptx/src/forms.rs), and checks each operand against them, and a `call`'s against what
+the function it calls takes and returns. Where `ptxas` takes a form or an operand that PTX's ISA does not have, kgen
+keeps to the ISA, and where the ISA says nothing, to `ptxas`. Each form, and each of its words, says the oldest
+version of PTX and the oldest GPU `ptxas` takes it at, back to PTX 1.0, which is at times older than the ISA says:
+`ptxas` takes `ld.mmio.acquire` for `sm_70`, which the ISA has from `sm_75`. A module's `.version` and `.target` are
+the oldest that have every instruction its kernels use: PTX 2.3 and `sm_20` at the least. Where `ptxas` is installed,
+a test hands it every form at what kgen says it needs, which it must take, and at the version before and on the GPU
+before, which it must refuse.
+
+An `extern "ptx-func"` function is a `.func` that the module's kernels and functions call, itself among them. It
+takes and returns PTX's types, and `call(g, gcd, (a, b))` calls it by its name, or `call(g, fp, (a, b))` at the
+address `mov.u64(fp, gcd)` put in `fp`. Each call is checked against what the function takes and returns, and a call
+of one that never returns, `-> !`, ends its caller's path there. A helper, a function without an ABI, is inlined
+instead, and leaves no call behind.
 
 An instruction's name is Rust's words: a word that starts with a digit takes a `_`, a `::` is `__`, and a keyword
 takes `r#`, so `tex.2d` is `tex._2d`, `ld.global.L2::64B` is `ld.global.L2__64B`, and `cp.async` is `cp.r#async`. A

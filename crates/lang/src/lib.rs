@@ -34,16 +34,19 @@
 //!   dots, `ld.global.f32(x, [p + 4])`. An operand is a variable, a value, a label, or memory
 //!   in brackets: `[x + i * 4 + 16]` at an address, `[1.0]` or `[[0.5; 8]]` holding data.
 //!   A name that is nothing in scope goes to the machine as it is, for registers of its own:
-//!   `tid.x`, or `_` for a result nothing reads. Operands taken together, a vector or a
-//!   fragment, are a tuple, `(a, b)`, or variables declared together; `d | p` is two written
-//!   at once, `!p` a predicate read inverted, `-a` an operand negated, and `[t, s, (x, y)]`
-//!   operands in brackets, which the machine reads as one.
+//!   `tid.x`, or `_` for a result nothing reads; the name of a function that names an ABI is
+//!   that function, for the machine to call. Operands taken together, a vector or a fragment,
+//!   are a tuple, `(a, b)`, `()` for none, or variables declared together; `d | p` is two
+//!   written at once, `!p` a predicate read inverted, `-a` an operand negated, and
+//!   `[t, s, (x, y)]` operands in brackets, which the machine reads as one.
 //! - **Names of instructions** are Rust's words: one that starts with a digit takes a `_`,
 //!   `tex._2d`; one that holds a `::` has `__` there, `ld.global.L2__64B`; and a keyword
 //!   takes `r#`, `cp.r#async`. The machine is given them as it writes them.
 //! - **Helpers** are functions with no ABI, inlined where they are called. A parameter takes
 //!   the caller's variable, seen as its type; `<const N: usize>` takes a value, as in
 //!   `dot::<4>(x, y, n)`. A helper sees its own names and the module's constants.
+//! - **Functions that name an ABI** are compiled each on its own: kernels, and functions the
+//!   machine calls by an instruction, as PTX's `call(r, f, (a, b))` calls a `.func`.
 //! - **`for k in 0..n { .. }`** is unrolled, over a range, an array or variables.
 //!   **`if c { .. } else { .. }`** chooses now when `c` is a bool; when `c` is a predicate
 //!   variable it guards each instruction inside, `if !p` the other way.

@@ -4,10 +4,10 @@
 //! - [`lang::Kernel`] is PTX for `kgen-lang`: variables of PTX's register types, and
 //!   instructions by their PTX names, `ld.global.f32(x, [p + 4])`, each checked against the
 //!   forms of [`forms`], the instructions PTX has for the GPUs from Fermi, `sm_20`, to
-//!   Ampere, `sm_86`, all but `call`, since a function without an ABI is inlined.
-//! - [`Entry`] is a kernel written out: the program `kgen-compile` checks, and the `.entry`
-//!   it prints as. [`module`] puts entries in a module for the driver to load, of the PTX
-//!   version and for the GPU their instructions need.
+//!   Ampere, `sm_86`; and `call`, against the [`Prototype`] of the function it calls.
+//! - [`Entry`] is a kernel or a function written out: the program `kgen-compile` checks, and
+//!   the `.entry` or the `.func` it prints as. [`module`] puts them in a module for the
+//!   driver to load, of the PTX version and for the GPU their instructions need.
 //!
 //! PTX's registers have no number, and `ptxas` allocates them, so nothing here allocates: a
 //! variable is a register named after it. Memory a kernel declares, [`Memory`], is named
@@ -336,6 +336,92 @@ pub fn clash(needs: &[(Needs, String)]) -> String {
     }
 }
 
+/// What a function takes and returns, as the kernels that call it see it: PTX's
+/// prototype of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Prototype {
+    /// The type of each parameter, in order.
+    pub params: Vec<Ty>,
+    /// What it returns.
+    pub returns: Returns,
+}
+
+/// What a function returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Returns {
+    /// Nothing, `()`.
+    Nothing,
+    /// A value of this type, which `ret(v)` gives back.
+    Value(Ty),
+    /// It never returns, `-> !`: PTX's `.noreturn`.
+    Never,
+}
+
+impl Prototype {
+    /// The prototype of a function whose parameters are of the types `params` and which
+    /// returns `result`, as Rust writes them: PTX's types, and `!` for one that never
+    /// returns; or why it is none PTX has.
+    pub fn of(params: &[&str], result: Option<&str>) -> Result<Prototype, String> {
+        let params = params.iter().map(|t| passable(t)).collect::<Result<_, _>>()?;
+        let returns = result.map_or(Ok(Returns::Nothing), returns)?;
+        Ok(Prototype { params, returns })
+    }
+}
+
+/// The type of a function's parameter written `ty`, if it is one: one of PTX's, but a
+/// predicate, which PTX passes to no function.
+pub fn passable(ty: &str) -> Result<Ty, String> {
+    match Ty::parse(ty) {
+        Some(Ty::Pred) => Err(lang::NO_PRED.into()),
+        Some(t) => Ok(t),
+        None => {
+            let ptx = match ty {
+                _ if ty.starts_with("*const ") || ty.starts_with("*mut ") => "an address is a `u64`",
+                "i8" => "PTX writes it `s8`",
+                "i16" => "PTX writes it `s16`",
+                "i32" => "PTX writes it `s32`",
+                "i64" | "isize" => "PTX writes it `s64`",
+                "usize" => "PTX writes it `u64`",
+                _ => "as its variables are: `u32`, `f32`, `b64`",
+            };
+            Err(format!("a function takes and returns PTX's types, {ptx}; not `{ty}`"))
+        }
+    }
+}
+
+/// What a function returns, as Rust writes it: `()`, one of PTX's types, or `!` for never.
+fn returns(ty: &str) -> Result<Returns, String> {
+    match ty {
+        "()" => Ok(Returns::Nothing),
+        "!" => Ok(Returns::Never),
+        _ if ty.starts_with('(') => {
+            Err("a function returns one value at most, as PTX's do from Fermi on, not a tuple".into())
+        }
+        _ => passable(ty).map(Returns::Value),
+    }
+}
+
+/// The type a value of type `t` is passed as, and loaded and stored by `ld.param` and
+/// `st.param`: its register's, but bits for a float of 16 bits or two, which `ld` and `st`
+/// have no type for.
+pub fn passed(t: Ty) -> Ty {
+    match t {
+        Ty::F16 => Ty::B16,
+        Ty::F16x2 => Ty::B32,
+        t => t.decl(),
+    }
+}
+
+/// The type of a function's `.param` for a value of type `t`: bits for one of 8 or 16 bits,
+/// which `ptxas` passes to a function only as bits, and otherwise as [`passed`] has it.
+pub fn formal(t: Ty) -> Ty {
+    match t.bits() {
+        8 => Ty::B8,
+        16 => Ty::B16,
+        _ => passed(t),
+    }
+}
+
 /// A PTX instruction as it is written, guard, operands and all; the operands of the
 /// [`kgen_core::Inst`] it is the opcode of say what it reads and writes, for the checks.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -353,13 +439,9 @@ pub struct Param {
 }
 
 impl Param {
-    /// The type it is passed as, and loaded by `ld.param`: its register's, but bits for a
-    /// float of 16, which `ld` has no type for.
+    /// The type it is passed as, and loaded by `ld.param`, as [`passed`] has it.
     pub fn passed(&self) -> Ty {
-        match self.ty {
-            Ty::F16 => Ty::B16,
-            t => t.decl(),
-        }
+        passed(self.ty)
     }
 }
 
@@ -377,7 +459,8 @@ pub struct Memory {
     pub bytes: Option<u64>,
 }
 
-/// A kernel written in PTX.
+/// A kernel written in PTX, an `.entry` the host launches; or a function kernels call, a
+/// `.func`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     /// The kernel as a program, for the checks: each instruction's opcode is its PTX.
@@ -392,6 +475,11 @@ pub struct Entry {
     /// What it needs, above [`Needs::FLOOR`], and the first instruction or type that needs
     /// it, for when another kernel of the module needs what cannot go with it.
     pub needs: Vec<(Needs, String)>,
+    /// For a function, what it returns; `None` for a kernel.
+    pub func: Option<Returns>,
+    /// The functions it names, each once: those it calls, and those whose addresses it takes,
+    /// which a module declares before it if they come after.
+    pub calls: Vec<String>,
 }
 
 impl Entry {
@@ -400,16 +488,44 @@ impl Entry {
         self.needs.iter().fold(Needs::default(), |n, (m, _)| n.and(*m))
     }
 
-    /// The `.entry`: its parameters, its registers, the loads of its parameters into them,
-    /// and its body.
-    pub fn text(&self) -> String {
+    /// What it is called and passed: `.visible .entry` and its parameters, or `.func`, what
+    /// it returns, and its parameters.
+    fn head(&self) -> String {
         let name = &self.program.name;
-        let mut out = format!(".visible .entry {name}(");
+        let mut out = match self.func {
+            None => format!(".visible .entry {name}("),
+            Some(Returns::Value(t)) => format!(".func (.param .{} {name}_retval) {name}(", formal(t).name()),
+            Some(_) => format!(".func {name}("),
+        };
         for (i, p) in self.params.iter().enumerate() {
             out += if i == 0 { "\n" } else { ",\n" };
-            out += &format!("\t.param .{} {name}_param_{i}", p.passed().name());
+            out += &format!("\t.param .{} {name}_param_{i}", self.passed(p).name());
         }
-        out += "\n)\n{\n";
+        out += "\n)";
+        if self.func == Some(Returns::Never) {
+            out += " .noreturn";
+        }
+        out
+    }
+
+    /// The type its parameter `p` is passed as: for a function, its [`formal`] type.
+    fn passed(&self, p: &Param) -> Ty {
+        match self.func {
+            Some(_) => formal(p.ty),
+            None => p.passed(),
+        }
+    }
+
+    /// Its declaration, for a module that names it before it is defined.
+    pub fn declaration(&self) -> String {
+        self.head() + ";\n"
+    }
+
+    /// The `.entry` or the `.func`: its parameters, its registers, the loads of its
+    /// parameters into them, and its body.
+    pub fn text(&self) -> String {
+        let name = &self.program.name;
+        let mut out = self.head() + "\n{\n";
         for ty in Ty::ALL.into_iter().filter(|t| t.decl() == *t) {
             let regs: Vec<String> =
                 self.regs.iter().filter(|(_, t)| t.decl() == ty).map(|(reg, _)| format!("%{reg}")).collect();
@@ -425,7 +541,7 @@ impl Entry {
         out += "\n";
         for (i, p) in self.params.iter().enumerate() {
             let reg = &self.regs[p.reg].0;
-            out += &format!("\tld.param.{} %{reg}, [{name}_param_{i}];\n", p.passed().name());
+            out += &format!("\tld.param.{} %{reg}, [{name}_param_{i}];\n", self.passed(p).name());
             if p.pointer {
                 out += &format!("\tcvta.to.global.u64 %{reg}, %{reg};\n");
             }
@@ -441,10 +557,11 @@ impl Entry {
     }
 }
 
-/// The PTX module of `entries`, of the version and for the GPU the instructions they use
-/// need, and no newer: [`Needs::FLOOR`] if they need nothing more. The driver compiles it for
-/// the GPU it runs on, which may be any as new as its `.target` or newer, unless an
-/// instruction is gone from newer ones.
+/// The PTX module of `entries`, kernels and functions, of the version and for the GPU the
+/// instructions they use need, and no newer: [`Needs::FLOOR`] if they need nothing more. The
+/// driver compiles it for the GPU it runs on, which may be any as new as its `.target` or
+/// newer, unless an instruction is gone from newer ones. Each is where it is among
+/// `entries`, after a declaration of each it names that comes later.
 ///
 /// It fails if one kernel is for GPUs older than another needs, in the version of PTX the
 /// module would be of: PTX has no module for both.
@@ -466,9 +583,20 @@ pub fn module(entries: &[Entry]) -> Result<String, String> {
     for m in launched {
         out += &format!(".extern .shared .align {} .b8 {}[];\n", m.align, m.name);
     }
+    let mut declared: Vec<&str> = vec![];
     for e in entries {
+        for name in &e.calls {
+            if *name != e.program.name && !declared.contains(&name.as_str()) {
+                if let Some(later) = entries.iter().find(|l| l.program.name == *name) {
+                    out += "\n";
+                    out += &later.declaration();
+                }
+                declared.push(name);
+            }
+        }
         out += "\n";
         out += &e.text();
+        declared.push(&e.program.name);
     }
     Ok(out)
 }

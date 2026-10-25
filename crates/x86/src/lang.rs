@@ -562,6 +562,7 @@ fn given(a: &Given<Var>) -> String {
         Given::Not(_) => "an operand inverted".into(),
         Given::Neg(_) => "an operand negated".into(),
         Given::List(_) => "operands in brackets".into(),
+        Given::Func(f) => format!("the function `{f}`"),
     }
 }
 
@@ -668,6 +669,12 @@ impl Target for Kernel {
                 Given::List(_) => return Err(Fault::at(i, "memory is one address in brackets, as in `[x + 4]`")),
                 Given::Label(_) if !JUMPS.iter().any(|(n, _)| *n == name) => {
                     return Err(Fault::at(i, "a label is for a jump"));
+                }
+                Given::Func(f) => {
+                    return Err(Fault::at(
+                        i,
+                        format!("an x86 kernel calls no function; `{f}` names an ABI, so it is one"),
+                    ));
                 }
                 _ => {}
             }
