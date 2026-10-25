@@ -1,0 +1,18 @@
+[package]
+name = "microgpt"
+description = "Karpathy's microgpt, trained and sampled by kernels written in kgen's language: for the CPU in x86, for the GPU in PTX"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+kgen-cuda = { workspace = true }
+kgen-macros = { workspace = true }
+
+# Not the workspace's lints: calling a kernel is unsafe, and this crate is where it happens.
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+disallowed_types = "deny"

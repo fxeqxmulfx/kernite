@@ -81,7 +81,7 @@ unsafe { kernels.saxpy(kgen_cuda::Grid::new(n.div_ceil(256), 256), 2.0, xs.ptr()
 ys.read_into(&mut y)?;
 ```
 
-## Example
+## Examples
 
 [`examples/my-app`](examples/my-app/src/main.rs) uses kgen as a crate outside it would: `sum8` and `dot::<4>` for
 the CPU and `saxpy` for the GPU, written in place, with safe functions over them. Its tests hold each kernel to a
@@ -91,6 +91,24 @@ scalar reference that does the same float operations in the same order, bit for 
 ```
 cargo run -p my-app
 KGEN_BLESS=1 cargo test -p my-app   # rewrites the snapshots after a deliberate change, for review
+```
+
+[`examples/microgpt`](examples/microgpt/src/main.rs) is Karpathy's
+[microgpt](https://gist.github.com/karpathy/8627fe009c40f57531cb18360106ce95): a GPT of one layer that learns from
+32,033 names to make up new ones. It runs on 25 kernels in x86 for the CPU, or on 25 in PTX for the GPU, and on a
+plain Rust reference that does the same float operations in the same order. Its tests hold the three to each other
+bit for bit, one operation at a time.
+
+Its weights come from the same Mersenne Twister draws as Python's, and it trains on the same names in the same
+order, so it prints what microgpt.py prints: the same twenty names, and the same loss at 998 of its 1000 steps. At
+the other two the fourth decimal differs by one, where `f32` rounds differently from Python's `f64`. The tests hold
+it to what Python drew and printed, in [`fixtures/`](examples/microgpt/fixtures/). It downloads the names on its
+first run, as microgpt.py does.
+
+```
+cargo run --release -p microgpt              # the x86 kernels
+cargo run --release -p microgpt -- gpu       # the PTX kernels, on the GPU
+cargo run --release -p microgpt -- reference # plain Rust
 ```
 
 ## Layers
@@ -115,7 +133,7 @@ The output is deterministic:
 
 Checking the generated kernels is for the crates that hold them: a snapshot of every listing, so that any change
 to any layer that moves an instruction shows in review, and runs against scalar references, bit for bit, as in
-the example.
+the examples.
 
 ## Commands
 
