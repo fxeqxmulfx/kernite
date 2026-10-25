@@ -96,13 +96,16 @@ struct Partial {
 }
 
 /// An instruction's operands written out: their text, what they read and write, and the
-/// special registers among them with what those need.
+/// special registers among them with what those need; and as they are written, how many are
+/// addresses so far, and the bytes the instruction reaches at once at each.
 #[derive(Default)]
 struct Written {
     texts: Vec<String>,
     args: Vec<Arg<VReg>>,
     needs: Needs,
     sregs: Vec<&'static str>,
+    addrs: usize,
+    reach: u64,
 }
 
 /// Why operands are not those of a form.
@@ -342,7 +345,7 @@ impl Kernel {
         if !(least..=specs.len()).contains(&args.len()) {
             return Err(Miss::Count(least, specs.len()));
         }
-        let mut w = Written::default();
+        let mut w = Written { reach: reach(b, args), ..Written::default() };
         for (i, (spec, a)) in specs.iter().zip(args).enumerate() {
             let text =
                 self.operand(b, spec, a, name, &mut w).map_err(|m| Miss::At(i, shaped(b, spec, a), Fault::at(i, m)))?;
@@ -483,10 +486,10 @@ impl Kernel {
                 Err(format!("`{name}` wants {}; this is {}", describe(b, spec), self.given(a)))
             }
             Given::Int(x) => {
-                if let Some(below) = spec.below
-                    && !(0..below).contains(x)
+                if let Some((lo, hi)) = spec.range
+                    && !(lo..=hi).contains(x)
                 {
-                    return Err(format!("`{name}` takes 0 to {} here; {x} is not one of them", below - 1));
+                    return Err(format!("`{name}` takes {lo} to {hi} here; {x} is not one of them"));
                 }
                 if let Some(step) = spec.step
                     && (*x <= 0 || x % step != 0)
@@ -520,7 +523,7 @@ impl Kernel {
         }
     }
 
-    /// The address `m`, in the state space `b` names.
+    /// The address `m`, in the state space `b` names in its place.
     fn address(
         &self,
         b: &Bound,
@@ -535,13 +538,15 @@ impl Kernel {
                  `mad.wide.u32(a, i, 4, p)` does"
             ));
         }
-        let wide = b.space().wide();
+        let space = b.spaces()[w.addrs];
+        w.addrs += 1;
+        let wide = space.wide();
         let (base, ty) = match m.base {
             None => {
                 let bits = if wide { "a 64-bit" } else { "a" };
                 return Err(format!("`{name}` takes an address that starts at {bits} variable"));
             }
-            Some(Var::Mem(i)) => return self.symbol(b, i, m.disp, access, name),
+            Some(Var::Mem(i)) => return self.symbol(i, m.disp, space, w.reach, access, name),
             Some(Var::Reg { reg, ty }) => (reg, ty),
         };
         if ty.kind() == Kind::Float || ty.kind() == Kind::Pred {
@@ -562,26 +567,35 @@ impl Kernel {
         })
     }
 
-    /// The address `disp` bytes into memory `i`, where `b` reaches it. PTX leaves undefined
-    /// what reaches memory by its name but in its state space, and an address that is no
-    /// multiple of the bytes reached at once; and what lies past the memory is not its.
-    fn symbol(&self, b: &Bound, i: usize, disp: i64, access: Access, name: &str) -> Result<String, String> {
+    /// The address `disp` bytes into memory `i`, where `name` reaches `size` bytes at once in
+    /// `space`. PTX leaves undefined what reaches memory by its name but in its state space,
+    /// and an address that is no multiple of the bytes reached at once; and what lies past the
+    /// memory is not its.
+    fn symbol(
+        &self,
+        i: usize,
+        disp: i64,
+        space: Space,
+        size: u64,
+        access: Access,
+        name: &str,
+    ) -> Result<String, String> {
         let (m, (v, ty)) = (&self.memory[i], &self.declared[i]);
         let verb = match access {
             Access::Write => "writes",
             Access::ReadWrite => "reads and writes",
             Access::Read | Access::Ignored => "reads",
         };
-        let space = m.space.word();
-        match b.space() {
+        let word = m.space.word();
+        match space {
             s if s == m.space => {}
             Space::Generic => {
                 return Err(format!(
-                    "`{name}` {verb} at a generic address; `{v}` is {space} memory, which an instruction reaches by \
-                     its name only as `.{space}`"
+                    "`{name}` {verb} at a generic address; `{v}` is {word} memory, which an instruction reaches by \
+                     its name only as `.{word}`"
                 ));
             }
-            s => return Err(format!("`{name}` {verb} {} memory; `{v}` is {space} memory", s.word())),
+            s => return Err(format!("`{name}` {verb} {} memory; `{v}` is {word} memory", s.word())),
         }
         let at = match disp {
             0 => format!("[{v}]"),
@@ -591,7 +605,6 @@ impl Kernel {
         if disp < 0 {
             return Err(format!("`{name}` {verb} at `{at}`, before `{v}` starts"));
         }
-        let size = reach(b);
         if let Some(n) = m.bytes
             && disp.unsigned_abs() + size > n
         {
@@ -644,14 +657,23 @@ impl Kernel {
     }
 }
 
-/// How many bytes `b` reaches at once at its address: what it loads, stores or works on, as
-/// `ld.v4.b32` 16 and `atom.f16x2` 4; or 1, for what reaches no bytes in particular.
-fn reach(b: &Bound) -> u64 {
-    if !matches!(b.form.op, "ld" | "st" | "atom" | "red") {
-        return 1;
+/// How many bytes `b` reaches at once at each address, of `args`: what it loads, stores or
+/// works on, as `ld.v4.b32` 16 and `atom.f16x2` 4; what `cp.async` copies, as its third
+/// operand says; an mbarrier's 8; or 1, for what reaches no bytes in particular.
+fn reach(b: &Bound, args: &[Given<Var>]) -> u64 {
+    match b.form.op {
+        "ld" | "st" | "atom" | "red" => {
+            let data = b.form.operands.iter().find(|s| matches!(s.role, Role::Dst | Role::Src) && s.when.is_none());
+            data.map_or(1, |s| u64::from(b.ty(s.ty.expect("data has a type")).bits()) / 8 * lanes(b, s) as u64)
+        }
+        "mbarrier" => 8,
+        "cp" if b.has("mbarrier") => 8,
+        "cp" => match args.get(2) {
+            Some(&Given::Int(n @ (4 | 8 | 16))) => n as u64,
+            _ => 1,
+        },
+        _ => 1,
     }
-    let data = b.form.operands.iter().find(|s| matches!(s.role, Role::Dst | Role::Src) && s.when.is_none());
-    data.map_or(1, |s| u64::from(b.ty(s.ty.expect("data has a type")).bits()) / 8 * lanes(b, s) as u64)
 }
 
 /// How many registers `spec` of `b` is.
@@ -728,7 +750,7 @@ fn half(t: Ty, name: &str) -> String {
 fn known(imm: Imm, x: i64, name: &str) -> Result<String, String> {
     let fits = match imm {
         Imm::Bits(bits) => (0..1i64 << bits).contains(&x),
-        Imm::Exactly(n) => x == n,
+        Imm::Of(_) => imm.values().contains(&x),
         Imm::Pow2(p) => x > 0 && x & (x - 1) == 0 && x <= 1 << p,
     };
     if fits {
@@ -738,7 +760,14 @@ fn known(imm: Imm, x: i64, name: &str) -> Result<String, String> {
         Imm::Bits(bits) => {
             format!("`{name}` takes {bits} bits here, 0 to {}; {x} is not one of them", (1i64 << bits) - 1)
         }
-        Imm::Exactly(n) => format!("`{name}` takes {n} here, the one value PTX has for it; not {x}"),
+        Imm::Of(_) => match imm.values().as_slice() {
+            [n] => format!("`{name}` takes {n} here, the one value PTX has for it; not {x}"),
+            [some @ .., last] => {
+                let some: Vec<String> = some.iter().map(i64::to_string).collect();
+                format!("`{name}` takes {} or {last} here; {x} is not one of them", some.join(", "))
+            }
+            [] => unreachable!("the table gives one value at least"),
+        },
         Imm::Pow2(p) => format!("`{name}` takes a power of two here, 2^{p} at most; {x} is not one"),
     })
 }

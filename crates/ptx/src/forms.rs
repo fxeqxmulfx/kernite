@@ -20,19 +20,20 @@ use crate::{GPUS, Kind, Needs, Ty};
 /// operands name by place: `T` is the first, then `U`, `V` and `W`. `@7.8` after a word or a
 /// form is the version of PTX it needs, as ptxas takes it, which every form says: `@1.0` is
 /// any. `@sm80` is the GPU, for one newer than Fermi, `sm_20`, and `@<sm70/6.4` a GPU older
-/// than that in a module of PTX 6.4 or newer. An address in no state space, a generic one,
-/// needs PTX 2.0 besides. `~round`, `~half` and `~cmp` say what leaving an element out
-/// leaves unsaid.
+/// than that in a module of PTX 6.4 or newer. Each address is in the state space the name
+/// gives in its place, the first in the first, as `cp.async.ca.shared.global` writes shared
+/// memory and reads global; one in none, a generic address, needs PTX 2.0 besides. `~round`,
+/// `~half` and `~cmp` say what leaving an element out leaves unsaid.
 ///
 /// After ` : ` are the operands. One is a type, `T` or `u32`, with `=` before it for one the
 /// instruction writes, `%` for one that must be a variable, `_` for one `_` may stand for,
 /// `!` for a predicate it may read inverted, `$` for one a special register may be, and `&`
 /// for memory the kernel declares, which stands for its address; and after it `*2` for so
 /// many taken together, `*v` for as many as `.v2` or `.v4` say. `a|b` is two written at
-/// once, and `a[|b]` one or two. `u32<16` is a value below 16, if it is one known now,
+/// once, and `a[|b]` one or two. `u32[0,15]` is one from 0 to 15, if it is one known now,
 /// `u32/32` a multiple of 32, and `f32(0,1]` a fraction, more than 0 and at most 1. `[R]`,
 /// `[W]` and `[X]` are memory read, written, or both; `lab` is a label; `#` is an integer
-/// known now, `#8` one of 8 bits, `#=128` that one, and `#^23` a power of two to 2^23. `{w}`
+/// known now, `#8` one of 8 bits, `#=4|8|16` one of those, and `#^23` a power of two to 2^23. `{w}`
 /// before an operand has it only with the word `w`, and `?` after it lets it be left out.
 /// Last, `+wide` lets a register be wider than the instruction's type, as `ld`, `st` and
 /// `cvt` do; `+vec` holds a vector to 128 bits; `+cvt` holds a conversion to PTX's rules for
@@ -306,18 +307,18 @@ ret{.uni} @1.0
 exit @1.0
 
 # Barriers, fences and atomics.
-barrier$cta.sync{.aligned} : u32<16, u32/32? @6.0 @sm30
-barrier$cta.arrive{.aligned} : u32<16, u32/32 @6.0 @sm30
-barrier$cta.red.popc{.aligned}.u32 : =T, u32<16, !pred @6.0 @sm30
-barrier$cta.red.popc{.aligned}.u32 : =T, u32<16, u32/32, !pred @6.0 @sm30
-barrier$cta.red(.and|.or){.aligned}.pred : =T, u32<16, !pred @6.0 @sm30
-barrier$cta.red(.and|.or){.aligned}.pred : =T, u32<16, u32/32, !pred @6.0 @sm30
-bar$cta.sync : u32<16, u32/32? @1.0
-bar$cta.arrive : u32<16, u32/32 @2.0
-bar$cta.red.popc.u32 : =T, u32<16, !pred @2.0
-bar$cta.red.popc.u32 : =T, u32<16, u32/32, !pred @2.0
-bar$cta.red(.and|.or).pred : =T, u32<16, !pred @2.0
-bar$cta.red(.and|.or).pred : =T, u32<16, u32/32, !pred @2.0
+barrier$cta.sync{.aligned} : u32[0,15], u32/32? @6.0 @sm30
+barrier$cta.arrive{.aligned} : u32[0,15], u32/32 @6.0 @sm30
+barrier$cta.red.popc{.aligned}.u32 : =T, u32[0,15], !pred @6.0 @sm30
+barrier$cta.red.popc{.aligned}.u32 : =T, u32[0,15], u32/32, !pred @6.0 @sm30
+barrier$cta.red(.and|.or){.aligned}.pred : =T, u32[0,15], !pred @6.0 @sm30
+barrier$cta.red(.and|.or){.aligned}.pred : =T, u32[0,15], u32/32, !pred @6.0 @sm30
+bar$cta.sync : u32[0,15], u32/32? @1.0
+bar$cta.arrive : u32[0,15], u32/32 @2.0
+bar$cta.red.popc.u32 : =T, u32[0,15], !pred @2.0
+bar$cta.red.popc.u32 : =T, u32[0,15], u32/32, !pred @2.0
+bar$cta.red(.and|.or).pred : =T, u32[0,15], !pred @2.0
+bar$cta.red(.and|.or).pred : =T, u32[0,15], u32/32, !pred @2.0
 bar.warp.sync : u32 @6.0 @sm30
 membar(.cta|.gl|.sys@2.0) @1.4
 membar.proxy.alias @7.5 @sm60
@@ -361,6 +362,32 @@ red$rsem$ascope{.global}.add.noftz$hint.f16 : [X], T, {L2::cache_hint}b64 @6.3 @
 red$rsem$ascope$shared.add.noftz.f16 : [X], T @6.3 @sm70
 red$rsem$ascope{.global}.add.noftz$hint.f16x2 : [X], T, {L2::cache_hint}b64 @6.2 @sm60
 red$rsem$ascope$shared.add.noftz.f16x2 : [X], T @6.2 @sm60
+
+# Copies that go on while the thread does, and the barriers in shared memory that count
+# what arrives. ptxas takes `cp.async.ca.shared::cta` from 7.0, though the ISA says 7.8.
+cp.async.ca(.shared|.shared::cta).global$hint$size : [W], [R], #=4|8|16, {L2::cache_hint}b64 @7.0 @sm80
+cp.async.ca(.shared|.shared::cta).global$hint$size : [W], [R], #=4, u32[0,4], {L2::cache_hint}b64 @7.0 @sm80
+cp.async.ca(.shared|.shared::cta).global$hint$size : [W], [R], #=8, u32[0,8], {L2::cache_hint}b64 @7.0 @sm80
+cp.async.ca(.shared|.shared::cta).global$hint$size : [W], [R], #=16, u32[0,16], {L2::cache_hint}b64 @7.0 @sm80
+cp.async.ca(.shared|.shared::cta).global$hint$size : [W], [R], #=4|8|16, !pred, {L2::cache_hint}b64 @7.5 @sm80
+cp.async.cg(.shared|.shared::cta).global$hint$size : [W], [R], #=16, {L2::cache_hint}b64 @7.0 @sm80
+cp.async.cg(.shared|.shared::cta).global$hint$size : [W], [R], #=16, u32[0,16], {L2::cache_hint}b64 @7.0 @sm80
+cp.async.cg(.shared|.shared::cta).global$hint$size : [W], [R], #=16, !pred, {L2::cache_hint}b64 @7.5 @sm80
+cp.async.commit_group @7.0 @sm80
+cp.async.wait_group : # @7.0 @sm80
+cp.async.wait_all @7.0 @sm80
+cp.async.mbarrier.arrive{.noinc}{.shared|.shared::cta@7.8}.b64 : [X] @7.0 @sm80
+mbarrier.init{.shared|.shared::cta@7.8}.b64 : [W], u32[1,1048575] @7.0 @sm80
+mbarrier.inval{.shared|.shared::cta@7.8}.b64 : [W] @7.0 @sm80
+mbarrier.arrive{.release.cta@8.0}{.shared|.shared::cta@7.8}.b64 : =u64, [X] @7.0 @sm80
+mbarrier.arrive{.release.cta@8.0}{.shared|.shared::cta@7.8}.b64 : =_u64, [X] @7.1 @sm80
+mbarrier.arrive.noComplete{.release.cta@8.0}{.shared|.shared::cta@7.8}.b64 : =u64, [X], u32[1,1048575] @7.0 @sm80
+mbarrier.arrive.noComplete{.release.cta@8.0}{.shared|.shared::cta@7.8}.b64 : =_u64, [X], u32[1,1048575] @7.1 @sm80
+mbarrier.arrive_drop{.release.cta@8.0}{.shared|.shared::cta@7.8}.b64 : =_u64, [X] @7.0 @sm80
+mbarrier.arrive_drop.noComplete{.release.cta@8.0}{.shared|.shared::cta@7.8}.b64 : =_u64, [X], u32[1,1048575] @7.0 @sm80
+mbarrier.test_wait{.acquire.cta@8.0}{.shared|.shared::cta@7.8}.b64 : =pred, [R], u64 @7.0 @sm80
+mbarrier.test_wait.parity{.acquire.cta@8.0}{.shared|.shared::cta@7.8}.b64 : =pred, [R], u32[0,1] @7.1 @sm80
+mbarrier.pending_count.b64 : =u32, u64 @7.0 @sm80
 
 # The threads of a warp together.
 vote(.all|.any|.uni).pred : =T, !pred @1.2 @<sm70/6.4
@@ -446,10 +473,21 @@ pub enum Role {
 pub enum Imm {
     /// One of so many bits, unsigned: `lop3`'s table is 8.
     Bits(u32),
-    /// This one, the only one PTX has for now: `applypriority`'s 128 bytes.
-    Exactly(i64),
+    /// One of these, as the table writes them: `4|8|16`, the bytes `cp.async` copies; `128`,
+    /// the only one `applypriority` has for now.
+    Of(&'static str),
     /// A power of two, to 2 to this power: `alloca`'s alignment.
     Pow2(u32),
+}
+
+impl Imm {
+    /// The values one of [`Imm::Of`] may be, and none for another.
+    pub fn values(self) -> Vec<i64> {
+        match self {
+            Imm::Of(values) => values.split('|').map(|v| v.parse().expect("the table's values are numbers")).collect(),
+            _ => vec![],
+        }
+    }
 }
 
 /// An operand's type.
@@ -491,8 +529,8 @@ pub struct Spec {
     pub sreg: bool,
     /// Whether it is memory the kernel declares, which stands for its address there.
     pub memory: bool,
-    /// What a value known now is below, if anything: 16 for a barrier.
-    pub below: Option<i64>,
+    /// What a value known now is from and to, if anything: 0 to 15 for a barrier.
+    pub range: Option<(i64, i64)>,
     /// What a value known now is a multiple of, and more than 0: a barrier's threads are
     /// warps.
     pub step: Option<i64>,
@@ -539,6 +577,18 @@ impl Space {
     /// `.address_size 64`; the others fit 32.
     pub fn wide(self) -> bool {
         matches!(self, Space::Generic | Space::Global)
+    }
+
+    /// The state space a word of a name is, `shared` or `shared::cta`, if it is one.
+    pub fn of(word: &str) -> Option<Space> {
+        match word.split("::").next().unwrap_or_default() {
+            "global" => Some(Space::Global),
+            "shared" => Some(Space::Shared),
+            "local" => Some(Space::Local),
+            "const" => Some(Space::Const),
+            "param" => Some(Space::Param),
+            _ => None,
+        }
     }
 
     /// The word for it, as in `ld.shared`; nothing for a generic address.
@@ -605,19 +655,19 @@ impl Bound {
         }
     }
 
-    /// Where its addresses point.
+    /// The first state space the name gives, where the memory it takes the address of is:
+    /// `cvta.shared`'s.
     pub fn space(&self) -> Space {
-        for w in self.words() {
-            match w.split("::").next().unwrap_or_default() {
-                "global" => return Space::Global,
-                "shared" => return Space::Shared,
-                "local" => return Space::Local,
-                "const" => return Space::Const,
-                "param" => return Space::Param,
-                _ => {}
-            }
-        }
-        Space::Generic
+        self.words().find_map(Space::of).unwrap_or(Space::Generic)
+    }
+
+    /// Where each of its addresses points, in order: into the state space the name gives in
+    /// the same place, or the last it gives, as `cp.async.ca.shared.global` writes shared
+    /// memory and reads global; anywhere, by a generic address, if it gives none.
+    pub fn spaces(&self) -> Vec<Space> {
+        let given: Vec<Space> = self.words().filter_map(Space::of).collect();
+        let addrs = self.form.operands.iter().filter(|s| matches!(s.role, Role::Addr(_))).count();
+        (0..addrs).map(|i| given.get(i).or(given.last()).copied().unwrap_or(Space::Generic)).collect()
     }
 }
 
@@ -723,7 +773,7 @@ fn make(form: &'static Form, choice: Vec<Option<usize>>) -> Bound {
     }
     let mut b = Bound { form, choice, types, needs };
     // An address in no state space is generic, which PTX has from 2.0 on.
-    if form.operands.iter().any(|s| matches!(s.role, Role::Addr(_))) && b.space() == Space::Generic {
+    if b.spaces().contains(&Space::Generic) {
         b.needs = b.needs.and(Needs { ptx: 20, ..Needs::default() });
     }
     b
@@ -1201,7 +1251,7 @@ fn spec(s: &'static str, line: &str) -> Spec {
         let mut first = one(a, line);
         first.second = Some((Box::new(one(b.strip_suffix(']').unwrap_or(b), line)), true));
         first
-    } else if let Some((a, b)) = s.split_once('|').filter(|_| !s.starts_with('[')) {
+    } else if let Some((a, b)) = s.split_once('|').filter(|_| !s.starts_with(['[', '#'])) {
         let mut first = one(a, line);
         first.second = Some((Box::new(one(b, line)), false));
         first
@@ -1213,7 +1263,7 @@ fn spec(s: &'static str, line: &str) -> Spec {
     first
 }
 
-fn one(s: &str, line: &str) -> Spec {
+fn one(s: &'static str, line: &str) -> Spec {
     let mut spec = Spec {
         role: Role::Src,
         ty: None,
@@ -1223,7 +1273,7 @@ fn one(s: &str, line: &str) -> Spec {
         not: false,
         sreg: false,
         memory: false,
-        below: None,
+        range: None,
         step: None,
         fraction: false,
         when: None,
@@ -1240,7 +1290,8 @@ fn one(s: &str, line: &str) -> Spec {
         _ if s.starts_with('#') => {
             let r = &s[1..];
             spec.role = Role::Imm(if let Some(n) = r.strip_prefix('=') {
-                Imm::Exactly(num(n))
+                n.split('|').for_each(|v| _ = num(v));
+                Imm::Of(n)
             } else if let Some(n) = r.strip_prefix('^') {
                 Imm::Pow2(num(n) as u32)
             } else {
@@ -1260,8 +1311,10 @@ fn one(s: &str, line: &str) -> Spec {
                 }
                 t = &t[1..];
             }
-            if let Some((ty, n)) = t.split_once('<') {
-                spec.below = Some(num(n));
+            if let Some((ty, r)) = t.split_once('[') {
+                let (lo, hi) =
+                    r.strip_suffix(']').and_then(|r| r.split_once(',')).unwrap_or_else(|| panic!("`{line}`: `{s}`"));
+                spec.range = Some((num(lo), num(hi)));
                 t = ty;
             }
             if let Some((ty, n)) = t.split_once('/') {

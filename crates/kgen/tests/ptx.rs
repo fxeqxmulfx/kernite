@@ -258,6 +258,19 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
             "let a: u64; alloca.u64(a, 64, 3);",
             "2:31: `alloca.u64` takes a power of two here, 2^23 at most; 3 is not one",
         ),
+        ("mbarrier.init.b64([x], 0);", "2:24: `mbarrier.init.b64` takes 1 to 1048575 here; 0 is not one of them"),
+        (
+            "cp.async.ca.shared.global([n], [x], 5);",
+            "2:37: `cp.async.ca.shared.global` takes 4, 8 or 16 here; 5 is not one of them",
+        ),
+        (
+            "cp.async.cg.shared.global([n], [x], 8);",
+            "2:37: `cp.async.cg.shared.global` takes 16 here, the one value PTX has for it; not 8",
+        ),
+        (
+            "cp.async.ca.shared.global([n], [x], 8, 9);",
+            "2:40: `cp.async.ca.shared.global` takes 0 to 8 here; 9 is not one of them",
+        ),
         (
             "let g: f16; add.rn.f16(g, h, 1.5);",
             "2:30: `add.rn.f16` takes a `f16` only from a variable: `mov.b16(h, 1.5f16)` puts one in it",
@@ -291,6 +304,8 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         ("nanosleep.u32(n);", ".version 6.2 .target sm_70"),
         ("let i: u32; shfl.idx.b32(i, n, 0, 31); nanosleep.u32(n);", ".version 6.2 .target sm_70"),
         ("let v: f32; tanh.approx.f32(v, f);", ".version 7.0 .target sm_75"),
+        ("cp.async.wait_all();", ".version 7.0 .target sm_80"),
+        ("mbarrier.arrive.b64(_, [y]);", ".version 7.1 .target sm_80"),
         ("let i: b32; mov.b32(i, reserved_smem_offset_begin);", ".version 7.6 .target sm_80"),
         ("let v: f32; max.xorsign.abs.f32(v, f, f);", ".version 7.2 .target sm_86"),
         ("let v: b128; ld.global.b128(v, [x]);", ".version 8.3 .target sm_70"),
@@ -378,9 +393,9 @@ fn a_kernel_names_the_constants_it_reads() {
 /// How an instance gives its operands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Style {
-    /// A variable for each.
+    /// A variable for each, and the first of the integers an operand may be one of.
     Vars,
-    /// A value known now for each that may be one.
+    /// A value known now for each that may be one, and the last of those integers.
     Values,
     /// `_` for the first result that may be left unwritten, and `!p` for each predicate that
     /// may be read inverted.
@@ -517,6 +532,7 @@ impl Making {
 fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entry, String>> {
     let mut m = Making { kernel: Kernel::new(format!("k{n}")), vars: 0, differs: false, sunk: false };
     let addr = m.kernel.var("a", "u64").unwrap();
+    let mut spaces = b.spaces().into_iter();
     let mut args = vec![];
     for spec in b.form.operands.iter().filter(|s| s.when.is_none_or(|w| b.has(w))) {
         if spec.optional && style == Style::Short {
@@ -525,13 +541,19 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
         }
         args.push(match spec.role {
             Role::Label => Given::Label(0),
-            Role::Addr(_) if style == Style::Memory && matches!(b.space(), Space::Shared | Space::Local) => {
-                m.differs = true;
-                Given::Mem(Address { base: Some(m.memory(b.space())), index: None, disp: 16 })
-            }
-            Role::Addr(_) => Given::Mem(Address { base: Some(addr), index: None, disp: 0 }),
+            Role::Addr(_) => match spaces.next().expect("a space for each address") {
+                s @ (Space::Shared | Space::Local) if style == Style::Memory => {
+                    m.differs = true;
+                    Given::Mem(Address { base: Some(m.memory(s)), index: None, disp: 16 })
+                }
+                _ => Given::Mem(Address { base: Some(addr), index: None, disp: 0 }),
+            },
             Role::Imm(Imm::Bits(_)) => Given::Int(1),
-            Role::Imm(Imm::Exactly(x)) => Given::Int(x),
+            Role::Imm(imm @ Imm::Of(_)) => {
+                let values = imm.values();
+                m.differs |= style == Style::Values && values.len() > 1;
+                Given::Int(if style == Style::Values { values[values.len() - 1] } else { values[0] })
+            }
             Role::Imm(Imm::Pow2(_)) => Given::Int(16),
             Role::Dst | Role::Src => {
                 let first = m.operand(b, spec, style);
@@ -579,7 +601,7 @@ fn by_hand(n: usize, name: &str, form: &'static Form, choice: Vec<Option<usize>>
             Role::Label => "$L0".to_string(),
             Role::Addr(_) => "[%a]".to_string(),
             Role::Imm(Imm::Bits(_)) => "1".to_string(),
-            Role::Imm(Imm::Exactly(x)) => x.to_string(),
+            Role::Imm(imm @ Imm::Of(_)) => imm.values()[0].to_string(),
             Role::Imm(Imm::Pow2(_)) => "16".to_string(),
             Role::Dst | Role::Src => registers(&b, spec, &mut regs),
         })
@@ -1072,6 +1094,29 @@ fn memory_is_reached_in_its_state_space_and_within_it() {
             format!("{t} let i: u32; atom.shared.add.u32(i, [t + 2], 1);"),
             "2:79: `atom.shared.add.u32` reads and writes 4 bytes at once, at an address that is a multiple of 4; \
              `[t + 2]` is not one",
+        ),
+        (
+            format!("{t} cp.async.ca.shared.global([t + 4], [x], 16);"),
+            "2:70: `cp.async.ca.shared.global` writes 16 bytes at once, at an address that is a multiple of 16; \
+             `[t + 4]` is not one",
+        ),
+        (
+            format!("{t} cp.async.ca.shared.global([t + 1016], [x], 16);"),
+            "2:70: `cp.async.ca.shared.global` writes 16 bytes at `[t + 1016]`, past the end of `t`, 1024 bytes",
+        ),
+        (
+            format!("{t} cp.async.ca.shared.global([n], [t], 4);"),
+            "2:75: `cp.async.ca.shared.global` reads global memory; `t` is shared memory",
+        ),
+        (
+            format!("{t} let s: u64; mbarrier.arrive.shared.b64(s, [t + 4]);"),
+            "2:86: `mbarrier.arrive.shared.b64` reads and writes 8 bytes at once, at an address that is a multiple \
+             of 8; `[t + 4]` is not one",
+        ),
+        (
+            format!("{t} let s: u64; mbarrier.arrive.b64(s, [t]);"),
+            "2:79: `mbarrier.arrive.b64` reads and writes at a generic address; `t` is shared memory, which an \
+             instruction reaches by its name only as `.shared`",
         ),
         (
             "let u: shared<[f32; 64]>; let (a, b): (f32, f32); ld.shared.v2.f32((a, b), [u]);".into(),
