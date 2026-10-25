@@ -197,6 +197,26 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
     }
 }
 
+/// Each instruction of PTX's that [`forms::NEWER`] has is none that kgen knows, and each word
+/// none that a form of its instruction has, so that the error is the GPU it is for; and each
+/// GPU is newer than kgen writes for.
+#[test]
+fn what_is_for_newer_gpus_says_which() {
+    for (gpu, items) in forms::NEWER.lines().filter_map(|l| l.split_once(": ")) {
+        let number: u32 = gpu["sm_".len()..].trim_end_matches(['a', 'f']).parse().unwrap();
+        assert!(number > 86, "{gpu} is one kgen writes for");
+        for item in items.split_whitespace() {
+            let want = match item.split_once('.') {
+                Some((op, w)) => {
+                    format!("PTX's `{op}` takes `.{w}` on {gpu} and newer, and kgen writes PTX for sm_20 to sm_86")
+                }
+                None => format!("PTX's `{item}` is for {gpu} and newer, and kgen writes PTX for sm_20 to sm_86"),
+            };
+            assert_eq!(forms::find(item).err(), Some(want), "{item}");
+        }
+    }
+}
+
 #[test]
 fn a_wrong_name_is_named_by_what_ptx_has() {
     let cases = [
@@ -216,8 +236,8 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
         ("let i: u8; add.u8(i, i, i);", "2:16: PTX's `add` has no `.u8` that kgen knows"),
         (
             "let (a, b, c, e): (f64, f64, f64, f64); ld.global.v4.f64((a, b, c, e), [x]);",
-            "2:54: `ld.global.v4.f64` moves 256 bits at once; a vector of PTX's holds 128 at most, as `.v4.b32` or \
-             `.v2.b64`",
+            "2:54: `ld.global.v4.f64` moves 256 bits at once, which PTX's `ld` does on sm_100 and newer, and kgen \
+             writes PTX for sm_20 to sm_86: a vector of 128 bits at most, as `.v4.b32` or `.v2.b64`",
         ),
         (
             "let v: f32; cvt.f32.f64(v, d);",
@@ -233,6 +253,14 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
              to the nearest, `cvt.rzi` toward zero",
         ),
         ("elect.sync(n);", "2:7: PTX's `elect` is for sm_90 and newer, and kgen writes PTX for sm_20 to sm_86"),
+        (
+            "let (a, b): (f32, f32); ld.global.v8.f32((a, b, a, b, a, b, a, b), [x]);",
+            "2:38: PTX's `ld` takes `.v8` on sm_100 and newer, and kgen writes PTX for sm_20 to sm_86",
+        ),
+        (
+            "fence.proxy.r#async();",
+            "2:13: PTX's `fence` takes `.async` on sm_90 and newer, and kgen writes PTX for sm_20 to sm_86",
+        ),
         (
             "call.uni(n);",
             "2:6: PTX's `call` calls a `.func`, which kgen does not write: a function without an ABI is inlined \
@@ -413,6 +441,11 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
             "2:46: `sured.b.add.1d.u32.trap` wants a `u32` variable; this is a `f32`",
         ),
         ("sured.b.xor._1d.b32.trap([s, n], n);", "2:21: PTX's `sured` has no `.xor` that kgen knows"),
+        (
+            "let v: b64; suld.b._1d.v4.b64.trap((v, v, v, v), [s, n]);",
+            "2:31: `suld.b.1d.v4.b64.trap` moves 256 bits at once; a vector of PTX's holds 128 at most, as \
+             `.v4.b32` or `.v2.b64`",
+        ),
         (
             "let (a, b): (f32, f32); tex._1d.v2.f32.f32((a, b), [s, z]);",
             "2:40: `tex.1d.v2.f32.f32` returns four of a `f32`, `.v4`; two only of an `f16x2`, `.v2`",

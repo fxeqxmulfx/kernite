@@ -1049,23 +1049,45 @@ pub fn forms() -> &'static [Form] {
     FORMS.get_or_init(|| parse(TABLE))
 }
 
-/// The instructions of PTX's for GPUs newer than kgen writes for, and the oldest each is for.
-const NEWER: &[(&str, &str)] = &[
-    ("elect", "sm_90"),
-    ("getctarank", "sm_90"),
-    ("griddepcontrol", "sm_90"),
-    ("mapa", "sm_90"),
-    ("multimem", "sm_90"),
-    ("stmatrix", "sm_90"),
-    ("tensormap", "sm_90"),
-    ("setmaxnreg", "sm_90a"),
-    ("wgmma", "sm_90a"),
-    ("clusterlaunchcontrol", "sm_100"),
-    ("fabric", "sm_100"),
-    ("tcgen05", "sm_100a"),
-    ("spcompress", "sm_107a"),
-    ("spdecompress", "sm_107a"),
-];
+/// What of PTX's is for GPUs newer than kgen writes for, after the oldest GPU the ISA has it
+/// for: an instruction, by its name, or a word of one kgen knows, after the instruction and a
+/// dot, as `ld.v8` is the `.v8` of `ld.global.v8.f32`. A GPU with an `a` is that GPU's own,
+/// and with an `f` its family's.
+pub const NEWER: &str = "
+sm_89: cvt.e4m3x2 cvt.e5m2x2 mma.e4m3 mma.e5m2
+sm_90: elect getctarank griddepcontrol mapa multimem stmatrix tensormap
+sm_90: ld.cluster ld.shared::cluster ld.proxy::readonly st.cluster st.shared::cluster st.async
+sm_90: atom.cluster atom.shared::cluster atom.v2 atom.v4 atom.v8 atom.b128 atom.bf16 atom.bf16x2
+sm_90: red.cluster red.shared::cluster red.v2 red.v4 red.v8 red.bf16 red.bf16x2 red.async
+sm_90: cp.bulk cp.reduce barrier.cluster isspacep.shared::cluster cvta.shared::cluster
+sm_90: fence.cluster fence.acquire fence.release fence.mbarrier_init fence.async fence.async::generic
+sm_90: fence.tensormap::generic
+sm_90: mbarrier.try_wait mbarrier.expect_tx mbarrier.complete_tx mbarrier.check_layout
+sm_90: mbarrier.layout::v0 mbarrier.layout::v1 mbarrier.relaxed mbarrier.cluster mbarrier.shared::cluster
+sm_90: prefetch.tensormap prefetch.L1::32B prefetch.valid_addr
+sm_90: add.bf16 add.bf16x2 add.u16x2 add.s16x2 sub.bf16 sub.bf16x2 mul.bf16 mul.bf16x2 fma.oob
+sm_90: min.u16x2 min.s16x2 min.relu max.u16x2 max.s16x2 max.relu
+sm_90: set.bf16 set.bf16x2 setp.bf16 setp.bf16x2 tanh.bf16 tanh.bf16x2 ex2.bf16 ex2.bf16x2
+sm_90a: setmaxnreg wgmma
+sm_100: clusterlaunchcontrol fabric createpolicy.fabric
+sm_100: ld.v8 ld.L2::evict_normal ld.L2::evict_first ld.L2::evict_last
+sm_100: st.v8 st.L2::evict_normal st.L2::evict_first st.L2::evict_last st.bulk
+sm_100: add.f32x2 sub.f32x2 mul.f32x2 fma.f32x2 fence.generic::fabric fence.fabric::generic fence.fabric::fabric
+sm_100a: tcgen05 cvt.e2m1x2 cvt.e2m3x2 cvt.e3m2x2 cvt.ue8m0x2 cvt.rs cvt.s2f6x2
+sm_100a: redux.f32 redux.abs redux.NaN ldmatrix.m16n16 ldmatrix.m8n16 ldmatrix.b8
+sm_107a: spcompress spdecompress
+sm_107f: cvt.pzo cvt.scaled::n1::ue8m0 cvt.ue5m3x2
+sm_120a: mma.kind::f8f6f4 mma.kind::mxf8f6f4 mma.kind::mxf4 mma.kind::mxf4nvf4 mma.block_scale
+sm_120a: mma.e3m2 mma.e2m3 mma.e2m1
+";
+
+/// The oldest GPU [`NEWER`] has `word` of the instruction `op` for, or the instruction if
+/// `word` is empty.
+fn newer(op: &str, word: &str) -> Option<&'static str> {
+    NEWER.lines().filter_map(|l| l.split_once(": ")).find_map(|(gpu, items)| {
+        items.split_whitespace().any(|i| i.split_once('.').unwrap_or((i, "")) == (op, word)).then_some(gpu)
+    })
+}
 
 /// What of PTX's kgen leaves out, and why: an instruction, by its name and no word, or a word
 /// of one kgen knows.
@@ -1089,8 +1111,8 @@ pub fn find(name: &str) -> Result<Vec<Bound>, String> {
         if let Some((.., why)) = LEFT_OUT.iter().find(|&&(o, w, _)| o == op && w.is_empty()) {
             return Err(format!("PTX's `{op}` {why}"));
         }
-        return Err(match NEWER.iter().find(|(o, _)| *o == op) {
-            Some((_, gpu)) => format!("PTX's `{op}` is for {gpu} and newer, and kgen writes PTX for sm_20 to sm_86"),
+        return Err(match newer(op, "") {
+            Some(gpu) => format!("PTX's `{op}` is for {gpu} and newer, and kgen writes PTX for sm_20 to sm_86"),
             None => format!("PTX has no instruction `{op}` that kgen knows"),
         });
     }
@@ -1171,6 +1193,9 @@ fn unknown(name: &str, op: &str, words: &[&str], of: &[&'static Form]) -> String
     if let Some(w) = words.iter().find(|w| !known(w)) {
         if let Some((.., why)) = LEFT_OUT.iter().find(|&&(o, x, _)| o == op && x == *w) {
             return format!("PTX's `{op}.{w}` {why}");
+        }
+        if let Some(gpu) = newer(op, w) {
+            return format!("PTX's `{op}` takes `.{w}` on {gpu} and newer, and kgen writes PTX for sm_20 to sm_86");
         }
         return format!("PTX's `{op}` has no `.{w}` that kgen knows");
     }
@@ -1274,6 +1299,13 @@ fn check(b: &Bound, name: &str) -> Result<Needs, String> {
         match c {
             Check::Vec => {
                 let bits = b.lanes() as u32 * b.types[0].bits();
+                let op = b.form.op;
+                if bits == 256 && (op == "ld" || op == "st") {
+                    return Err(format!(
+                        "`{name}` moves 256 bits at once, which PTX's `{op}` does on sm_100 and newer, and kgen writes \
+                         PTX for sm_20 to sm_86: a vector of 128 bits at most, as `.v4.b32` or `.v2.b64`"
+                    ));
+                }
                 if bits > 128 {
                     return Err(format!(
                         "`{name}` moves {bits} bits at once; a vector of PTX's holds 128 at most, as `.v4.b32` or \
