@@ -233,6 +233,11 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
              to the nearest, `cvt.rzi` toward zero",
         ),
         ("elect.sync(n);", "2:7: PTX's `elect` is for sm_90 and newer, and kgen writes PTX for sm_20 to sm_86"),
+        (
+            "call.uni(n);",
+            "2:6: PTX's `call` calls a `.func`, which kgen does not write: a function without an ABI is inlined \
+             where it is called",
+        ),
     ];
     for (body, want) in cases {
         assert_eq!(compile("x: *mut f32, n: u32, d: f64", body).unwrap_err(), want, "{body}");

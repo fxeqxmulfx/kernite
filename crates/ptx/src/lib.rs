@@ -4,7 +4,7 @@
 //! - [`lang::Kernel`] is PTX for `kgen-lang`: variables of PTX's register types, and
 //!   instructions by their PTX names, `ld.global.f32(x, [p + 4])`, each checked against the
 //!   forms of [`forms`], the instructions PTX has for the GPUs from Fermi, `sm_20`, to
-//!   Ampere, `sm_86`.
+//!   Ampere, `sm_86`, all but `call`, since a function without an ABI is inlined.
 //! - [`Entry`] is a kernel written out: the program `kgen-compile` checks, and the `.entry`
 //!   it prints as. [`module`] puts entries in a module for the driver to load, of the PTX
 //!   version and for the GPU their instructions need.

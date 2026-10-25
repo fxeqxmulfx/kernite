@@ -1,6 +1,6 @@
 //! The instructions of PTX that kgen knows: those the GPUs from Fermi, `sm_20`, to Ampere,
-//! `sm_86`, run, written as the PTX ISA writes them, one [`Form`] each, and the special
-//! registers they read.
+//! `sm_86`, run, but `call`, written as the PTX ISA writes them, one [`Form`] each, and the
+//! special registers they read.
 //!
 //! A form is a line of [`TABLE`]: the words of an instruction's name, some to choose from
 //! and some to leave out, its operands, and the version of PTX and the GPU it and each of
@@ -1067,12 +1067,16 @@ const NEWER: &[(&str, &str)] = &[
     ("spdecompress", "sm_107a"),
 ];
 
-/// Words of PTX's, of instructions kgen knows, that kgen leaves out, and why.
-const LEFT_OUT: &[(&str, &str, &str)] = &[(
-    "txq",
-    "force_unnormalized_coords",
-    "asks of a sampler apart from its texture, in the independent mode, which kgen does not write",
-)];
+/// What of PTX's kgen leaves out, and why: an instruction, by its name and no word, or a word
+/// of one kgen knows.
+const LEFT_OUT: &[(&str, &str, &str)] = &[
+    ("call", "", "calls a `.func`, which kgen does not write: a function without an ABI is inlined where it is called"),
+    (
+        "txq",
+        "force_unnormalized_coords",
+        "asks of a sampler apart from its texture, in the independent mode, which kgen does not write",
+    ),
+];
 
 /// The forms the instruction `name` is of, its words as PTX writes them, in the order of
 /// [`TABLE`]; or what is wrong with its name.
@@ -1082,6 +1086,9 @@ pub fn find(name: &str) -> Result<Vec<Bound>, String> {
     let words: Vec<&str> = words.collect();
     let of: Vec<&'static Form> = forms().iter().filter(|f| f.op == op).collect();
     if of.is_empty() {
+        if let Some((.., why)) = LEFT_OUT.iter().find(|&&(o, w, _)| o == op && w.is_empty()) {
+            return Err(format!("PTX's `{op}` {why}"));
+        }
         return Err(match NEWER.iter().find(|(o, _)| *o == op) {
             Some((_, gpu)) => format!("PTX's `{op}` is for {gpu} and newer, and kgen writes PTX for sm_20 to sm_86"),
             None => format!("PTX has no instruction `{op}` that kgen knows"),

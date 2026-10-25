@@ -81,10 +81,19 @@ unsafe { kernels.saxpy(kgen_cuda::Grid::new(n.div_ceil(256), 256), 2.0, xs.ptr()
 ys.read_into(&mut y)?;
 ```
 
-The PTX target knows PTX's instructions for the GPUs from Fermi, `sm_20`, to Ampere, `sm_86`, in each form `ptxas`
-takes, [`forms`](crates/ptx/src/forms.rs), and checks each operand against them. Each form, and each of its words,
-says the oldest version of PTX and the oldest GPU it needs, as `ptxas` has them, back to PTX 1.0. A module's `.version`
-and `.target` are the oldest that have every instruction its kernels use: PTX 2.3 and `sm_20` at the least.
+The PTX target knows every instruction of PTX's for the GPUs from Fermi, `sm_20`, to Ampere, `sm_86`, in each form
+`ptxas` takes, [`forms`](crates/ptx/src/forms.rs), and checks each operand against them; all but `call`, since a
+helper is inlined where it is called and is no `.func`. Where `ptxas` takes more than PTX's ISA says, kgen keeps to
+the ISA, and where the ISA says nothing, to `ptxas`. Each form, and each of its words, says the oldest version of PTX
+and the oldest GPU it needs, as `ptxas` has them, back to PTX 1.0. A module's `.version` and `.target` are the oldest
+that have every instruction its kernels use: PTX 2.3 and `sm_20` at the least. Where `ptxas` is installed, a test
+hands it every form at what kgen says it needs, which it must take, and at the version before and on the GPU before,
+which it must refuse.
+
+An instruction's name is Rust's words: a word that starts with a digit takes a `_`, a `::` is `__`, and a keyword
+takes `r#`, so `tex.2d` is `tex._2d`, `ld.global.L2::64B` is `ld.global.L2__64B`, and `cp.async` is `cp.r#async`. A
+texture or a surface is its handle, the `u64` of a CUDA texture or surface object, in brackets with its coordinates:
+`tex._2d.v4.f32.f32((r, g, b, a), [t, (x, y)])`.
 
 Memory a kernel declares is a variable: `let tile: shared<[f32; 256], 16>;` is 256 floats of shared memory at a
 multiple of 16, reached by its name, `ld.shared.f32(v, [tile + 16])`, and `shared<[f32]>` is as many as the launch
@@ -96,9 +105,10 @@ them.
 
 [`examples/my-app`](examples/my-app/src/main.rs) uses kgen as a crate outside it would: `sum8` and `dot::<4>` for
 the CPU, and for the GPU `saxpy`, `block_sums` and `reverse_runs` in shared memory, and `scale_f16`, written in
-place, with safe functions over them. Its tests hold each kernel to a
-scalar reference that does the same float operations in the same order, bit for bit, and its listings to
-[`snapshots/`](examples/my-app/snapshots/).
+place, with safe functions over them; and `matmul` on the tensor cores, by `cp.async`, `ldmatrix` and `mma`, in a
+module of its own, since it needs an Ampere GPU, `sm_80`. Its tests hold each kernel to a scalar reference that does
+the same float operations in the same order, bit for bit, or the tensor cores, which add in an order of their own,
+to products of integers, exact in any order; and its listings to [`snapshots/`](examples/my-app/snapshots/).
 
 ```
 cargo run -p my-app
