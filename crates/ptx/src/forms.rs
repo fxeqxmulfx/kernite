@@ -461,9 +461,10 @@ redux.sync(.add|.min|.max)(.u32|.s32) : =T, T, u32 @7.0 @sm80
 redux.sync(.and|.or|.xor).b32 : =T, T, u32 @7.0 @sm80
 
 # Matrices a warp loads and multiplies together, each thread holding a fragment of each: so
-# many registers, braced even when one. `mma` takes `_` for what it leaves unwritten. A sparse
-# one's selector is the threads of four that hold the metadata, as the ISA has it for the
-# shape: ptxas takes 0 to 3 for some it has 0 or 1 for.
+# many registers, braced even when one. `mma` takes `_` for what it leaves unwritten, and
+# `movmatrix` doesn't: on `_` there ptxas 13.4 crashes, a segfault, rather than refusing it.
+# A sparse one's selector is the threads of four that hold the metadata, as the ISA has it
+# for the shape: ptxas takes 0 to 3 for some it has 0 or 1 for.
 ldmatrix.sync.aligned.m8n8.x1{.trans}{.shared|.shared::cta@7.8}.b16 : =b32*1, [R] @6.5 @sm75
 ldmatrix.sync.aligned.m8n8.x2{.trans}{.shared|.shared::cta@7.8}.b16 : =_b32*2, [R] @6.5 @sm75
 ldmatrix.sync.aligned.m8n8.x4{.trans}{.shared|.shared::cta@7.8}.b16 : =_b32*4, [R] @6.5 @sm75
