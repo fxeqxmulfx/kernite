@@ -170,6 +170,41 @@ mod gpu {
         st.global.b16([at], v);
     }
 
+    /// `g[i]`, the greatest common divisor of `a[i]` and `b[i]`, for each `i < n`, by `gcd`.
+    pub unsafe extern "ptx-kernel" fn gcds(a: *const u32, b: *const u32, g: *mut u32, n: u32) {
+        let i: u32;
+        global_index(i);
+        let past: pred;
+        setp.ge.u32(past, i, n);
+        if past {
+            ret();
+        }
+        let (at_a, at_b, at_g): (u64, u64, u64);
+        mad.wide.u32(at_a, i, 4, a);
+        mad.wide.u32(at_b, i, 4, b);
+        mad.wide.u32(at_g, i, 4, g);
+        let (x, y, d): (u32, u32, u32);
+        ld.global.u32(x, [at_a]);
+        ld.global.u32(y, [at_b]);
+        call(d, gcd, (x, y));
+        st.global.u32([at_g], d);
+    }
+
+    /// The greatest common divisor of `a` and `b` by Euclid's algorithm, a call of itself a
+    /// step: a `.func`, which the GPU calls, not a helper, inlined, since nothing could inline
+    /// a call that recurses as deep as the values it is given.
+    extern "ptx-func" fn gcd(a: u32, b: u32) -> u32 {
+        let done: pred;
+        setp.eq.u32(done, b, 0);
+        if done {
+            ret(a);
+        }
+        let (r, g): (u32, u32);
+        rem.u32(r, a, b);
+        call(g, gcd, (b, r));
+        ret(g);
+    }
+
     /// The index of this thread among all of the grid's.
     fn global_index(i: u32) {
         let (block, size, thread): (u32, u32, u32);
@@ -370,6 +405,23 @@ fn scale_f16(cuda: &Cuda, kernels: &gpu::Kernels, a: f16, x: &mut [f16]) -> Resu
     xs.read_into(x)
 }
 
+/// The greatest common divisor of each `a[i]` and `b[i]`, on the GPU, by a function that calls
+/// itself; `a` and `b` must be as long as each other.
+fn gcds(cuda: &Cuda, kernels: &gpu::Kernels, a: &[u32], b: &[u32]) -> Result<Vec<u32>, kgen_cuda::Error> {
+    assert_eq!(a.len(), b.len(), "a and b differ in length");
+    let n = u32::try_from(a.len()).expect("fewer than 2^32 pairs");
+    let mut g = vec![0; a.len()];
+    if n == 0 {
+        return Ok(g);
+    }
+    let (xs, ys, out) = (cuda.upload(a)?, cuda.upload(b)?, cuda.alloc::<u32>(g.len())?);
+    // SAFETY: `n` integers behind each pointer, in buffers that last until `read_into` has
+    // waited for the kernel.
+    unsafe { kernels.gcds(Grid::new(n.div_ceil(256), 256), xs.ptr(), ys.ptr(), out.ptr(), n)? };
+    out.read_into(&mut g)?;
+    Ok(g)
+}
+
 /// `a b` in `f32`, of `a`, `m` rows of `k` halves, and `b`, `k` rows of `n`, given as its
 /// transpose `bt`, `n` rows of `k`, on the tensor cores; `m` must be a multiple of 16, `n` of
 /// 8 and `k` of 16. The kernels load only on an Ampere GPU or newer, `sm_80`.
@@ -436,6 +488,10 @@ fn main() {
                 Ok(()) => println!("[0.1, 1000] times 3 in f16: {halves:?}"),
                 Err(e) => println!("scale_f16 failed: {e}"),
             }
+            match gcds(&cuda, &kernels, &[1071, 2_971_215_073], &[462, 1_836_311_903]) {
+                Ok(g) => println!("gcd(1071, 462) = {}, and of two Fibonacci numbers, 46 calls deep: {}", g[0], g[1]),
+                Err(e) => println!("gcds failed: {e}"),
+            }
             if cuda.sm() >= 80 {
                 let a: Vec<f16> = (0..64 * 64).map(|i| f16::from_f32((i % 7) as f32 - 3.0)).collect();
                 let bt: Vec<f16> = (0..64 * 64).map(|i| f16::from_f32((i % 5) as f32 - 2.0)).collect();
@@ -486,17 +542,22 @@ mod tests {
         assert!(changed.is_empty(), "listings changed: {changed:?}; rerun with KGEN_BLESS=1 and review the diff");
     }
 
-    /// Pseudo-random floats in [-1, 1), the same for the same seed.
-    fn floats(n: usize, seed: u32) -> Vec<f32> {
+    /// Pseudo-random integers, the same for the same seed.
+    fn words(n: usize, seed: u32) -> Vec<u32> {
         let mut s = seed;
         (0..n)
             .map(|_| {
                 s ^= s << 13;
                 s ^= s >> 17;
                 s ^= s << 5;
-                (s >> 8) as f32 / (1 << 23) as f32 - 1.0
+                s
             })
             .collect()
+    }
+
+    /// Pseudo-random floats in [-1, 1), the same for the same seed.
+    fn floats(n: usize, seed: u32) -> Vec<f32> {
+        words(n, seed).iter().map(|s| (s >> 8) as f32 / (1 << 23) as f32 - 1.0).collect()
     }
 
     /// What `sum8` does to eight floats, in its order: the high half added to the low, then
@@ -611,6 +672,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The greatest common divisor of `a` and `b`, by Euclid's algorithm, as `gcd` takes it.
+    fn euclid(a: u32, b: u32) -> u32 {
+        if b == 0 { a } else { euclid(b, a % b) }
+    }
+
+    /// `gcds` against Euclid's algorithm in Rust: on zeros, on pairs with a factor in common,
+    /// and on those of the most steps, consecutive Fibonacci numbers, up to the largest pair
+    /// below 2^32, which takes `gcd` 46 calls deep.
+    #[test]
+    fn gcds_are_euclids() {
+        let Some((cuda, kernels)) = cuda() else { return };
+        let mut fibonacci = vec![1u32, 2];
+        while let Some(next) = fibonacci[fibonacci.len() - 2].checked_add(fibonacci[fibonacci.len() - 1]) {
+            fibonacci.push(next);
+        }
+        let mut pairs: Vec<(u32, u32)> = fibonacci.windows(2).map(|w| (w[1], w[0])).collect();
+        pairs.extend([(0, 0), (0, 7), (7, 0), (u32::MAX, u32::MAX), (u32::MAX, 1 << 31), (1071, 462)]);
+        for w in words(30_000, 5).chunks(3) {
+            let common = w[0] % 1000 + 1;
+            pairs.push((w[1] % (u32::MAX / common) * common, w[2] % (u32::MAX / common) * common));
+        }
+        let (a, b): (Vec<u32>, Vec<u32>) = pairs.iter().copied().unzip();
+        let want: Vec<u32> = pairs.iter().map(|&(x, y)| euclid(x, y)).collect();
+        assert_eq!(super::gcds(&cuda, &kernels, &a, &b).unwrap(), want);
     }
 
     /// Integers from -8 to 8, as halves, the same for the same seed.

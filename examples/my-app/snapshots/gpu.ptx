@@ -165,3 +165,61 @@
 	st.global.b16 [%at], %v;
 	ret;
 }
+
+.func (.param .u32 gcd_retval) gcd(
+	.param .u32 gcd_param_0,
+	.param .u32 gcd_param_1
+);
+
+.visible .entry gcds(
+	.param .u64 gcds_param_0,
+	.param .u64 gcds_param_1,
+	.param .u64 gcds_param_2,
+	.param .u32 gcds_param_3
+)
+{
+	.reg .pred %past;
+	.reg .u32 %n, %i, %block, %size, %thread, %x, %y, %d;
+	.reg .u64 %a, %b, %g, %at_a, %at_b, %at_g;
+
+	ld.param.u64 %a, [gcds_param_0];
+	cvta.to.global.u64 %a, %a;
+	ld.param.u64 %b, [gcds_param_1];
+	cvta.to.global.u64 %b, %b;
+	ld.param.u64 %g, [gcds_param_2];
+	cvta.to.global.u64 %g, %g;
+	ld.param.u32 %n, [gcds_param_3];
+	mov.u32 %block, %ctaid.x;
+	mov.u32 %size, %ntid.x;
+	mov.u32 %thread, %tid.x;
+	mad.lo.u32 %i, %block, %size, %thread;
+	setp.ge.u32 %past, %i, %n;
+	@%past ret;
+	mad.wide.u32 %at_a, %i, 4, %a;
+	mad.wide.u32 %at_b, %i, 4, %b;
+	mad.wide.u32 %at_g, %i, 4, %g;
+	ld.global.u32 %x, [%at_a];
+	ld.global.u32 %y, [%at_b];
+	call (%d), gcd, (%x, %y);
+	st.global.u32 [%at_g], %d;
+	ret;
+}
+
+.func (.param .u32 gcd_retval) gcd(
+	.param .u32 gcd_param_0,
+	.param .u32 gcd_param_1
+)
+{
+	.reg .pred %done;
+	.reg .u32 %a, %b, %r, %g;
+
+	ld.param.u32 %a, [gcd_param_0];
+	ld.param.u32 %b, [gcd_param_1];
+	setp.eq.u32 %done, %b, 0;
+	@%done st.param.u32 [gcd_retval], %a;
+	@%done ret;
+	rem.u32 %r, %a, %b;
+	call (%g), gcd, (%b, %r);
+	st.param.u32 [gcd_retval], %g;
+	ret;
+}

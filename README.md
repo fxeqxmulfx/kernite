@@ -110,12 +110,13 @@ them.
 
 ## Examples
 
-[`examples/my-app`](examples/my-app/src/main.rs) uses kgen as a crate outside it would: `sum8` and `dot::<4>` for
-the CPU, and for the GPU `saxpy`, `block_sums` and `reverse_runs` in shared memory, and `scale_f16`, written in
-place, with safe functions over them; and `matmul` on the tensor cores, by `cp.async`, `ldmatrix` and `mma`, in a
-module of its own, since it needs an Ampere GPU, `sm_80`. Its tests hold each kernel to a scalar reference that does
-the same float operations in the same order, bit for bit, or the tensor cores, which add in an order of their own,
-to products of integers, exact in any order; and its listings to [`snapshots/`](examples/my-app/snapshots/).
+[`examples/my-app`](examples/my-app/src/main.rs) uses kgen as a crate outside it would: `sum8` and `dot::<4>` for the
+CPU, and for the GPU `saxpy`, `block_sums` and `reverse_runs` in shared memory, `scale_f16`, written in place, and
+`gcds`, which calls `gcd`, an `extern "ptx-func"` function that calls itself, with safe functions over them; and
+`matmul` on the tensor cores, by `cp.async`, `ldmatrix` and `mma`, in a module of its own, since it needs an Ampere
+GPU, `sm_80`. Its tests hold each kernel to a scalar reference that does the same float operations in the same order,
+bit for bit, or the tensor cores, which add in an order of their own, to products of integers, exact in any order;
+and its listings to [`snapshots/`](examples/my-app/snapshots/).
 
 ```
 cargo run -p my-app
