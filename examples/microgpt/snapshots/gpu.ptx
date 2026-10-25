@@ -1,7 +1,7 @@
 // Written by kgen.
 
-.version 7.5
-.target sm_61
+.version 2.3
+.target sm_20
 .address_size 64
 
 .visible .entry embed(

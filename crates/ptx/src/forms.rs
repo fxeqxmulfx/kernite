@@ -1,4 +1,4 @@
-//! The instructions of PTX that kgen knows: those the GPUs from Pascal, `sm_61`, to Ampere,
+//! The instructions of PTX that kgen knows: those the GPUs from Fermi, `sm_20`, to Ampere,
 //! `sm_86`, run, written as the PTX ISA writes them, one [`Form`] each, and the special
 //! registers they read.
 //!
@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use kgen_core::Access;
 
-use crate::{Kind, Needs, Ty};
+use crate::{GPUS, Kind, Needs, Ty};
 
 /// The forms, a line each.
 ///
@@ -18,23 +18,26 @@ use crate::{Kind, Needs, Ty};
 /// may have, `(.a|.b)` one of these it has, and `$m` the elements a line `$m = ..` stands for.
 /// A word, or a choice of words, that is a type is one of the instruction's types, which its
 /// operands name by place: `T` is the first, then `U`, `V` and `W`. `@7.8` after a word or a
-/// form is the version of PTX it needs, `@sm80` the GPU, and `@<sm70` a GPU older than that.
-/// `~round`, `~half` and `~cmp` say what leaving an element out leaves unsaid.
+/// form is the version of PTX it needs, as ptxas takes it, which every form says: `@1.0` is
+/// any. `@sm80` is the GPU, for one newer than Fermi, `sm_20`, and `@<sm70/6.4` a GPU older
+/// than that in a module of PTX 6.4 or newer. An address in no state space, a generic one,
+/// needs PTX 2.0 besides. `~round`, `~half` and `~cmp` say what leaving an element out
+/// leaves unsaid.
 ///
 /// After ` : ` are the operands. One is a type, `T` or `u32`, with `=` before it for one the
 /// instruction writes, `%` for one that must be a variable, `_` for one `_` may stand for,
 /// `!` for a predicate it may read inverted, `$` for one a special register may be, and `&`
 /// for memory the kernel declares, which stands for its address; and after it `*2` for so
-/// many taken together, `*v` for as many as `.v2` or `.v4` say. `a|b` is
-/// two written at once, and `a[|b]` one or two. `u32<16` is a value below 16, if it is one
-/// known now, `u32/32` a multiple of 32, and `f32(0,1]` a fraction, more than 0 and at most 1.
-/// `[R]`, `[W]` and `[X]` are memory read, written,
-/// or both; `lab` is a label; `#` is an integer known now, `#8` one of 8 bits, `#=128` that
-/// one, and `#^23` a power of two to 2^23. `{w}` before an operand has it only with the word
-/// `w`, and `?` after it lets it be left out. Last, `+wide` lets a register be wider than the
-/// instruction's type, as `ld`, `st`
-/// and `cvt` do; `+vec` holds a vector to 128 bits; `+cvt` holds a conversion to PTX's rules
-/// for rounding and saturating; and `+b128sys` gives `.sys` with `.b128` the version it needs.
+/// many taken together, `*v` for as many as `.v2` or `.v4` say. `a|b` is two written at
+/// once, and `a[|b]` one or two. `u32<16` is a value below 16, if it is one known now,
+/// `u32/32` a multiple of 32, and `f32(0,1]` a fraction, more than 0 and at most 1. `[R]`,
+/// `[W]` and `[X]` are memory read, written, or both; `lab` is a label; `#` is an integer
+/// known now, `#8` one of 8 bits, `#=128` that one, and `#^23` a power of two to 2^23. `{w}`
+/// before an operand has it only with the word `w`, and `?` after it lets it be left out.
+/// Last, `+wide` lets a register be wider than the instruction's type, as `ld`, `st` and
+/// `cvt` do; `+vec` holds a vector to 128 bits; `+cvt` holds a conversion to PTX's rules for
+/// rounding and saturating, and gives `.ftz` the version it needs there; and `+b128sys`
+/// gives `.sys` with `.b128` the version it needs.
 pub const TABLE: &str = r#"
 $int = (.u16|.u32|.u64|.s16|.s32|.s64)
 $bits = (.b16|.b32|.b64)
@@ -45,12 +48,12 @@ $cmps = (.lt|.eq|.ne|.le|.gt|.ge)~cmp
 $cmpu = (.lt|.eq|.ne|.le|.gt|.ge|.lo|.ls|.hi|.hs)~cmp
 $cmpf = (.lt|.eq|.ne|.le|.gt|.ge|.equ|.neu|.ltu|.leu|.gtu|.geu|.num|.nan)~cmp
 $bool = (.and|.or|.xor)
-$cc = (.u32|.s32|.u64|.s64)
-$space = (.const|.global|.local|.shared|.shared::cta@7.8|.param@7.7@sm70|.param::entry@8.3@sm70)
+$cc = (.u32|.s32|.u64@4.3|.s64@4.3)
+$space = (.const@3.1|.global|.local|.shared|.shared::cta@7.8|.param@7.7@sm70|.param::entry@8.3@sm70)
 $ldss = (.const|.local|.param|.param::entry@8.3|.shared|.shared::cta@7.8)
 $shared = (.shared|.shared::cta@7.8)
-$cop = {.ca|.cg|.cs|.lu|.cv}
-$scop = {.wb|.cg|.cs|.wt}
+$cop = {.ca@2.0|.cg@2.0|.cs@2.0|.lu@2.0|.cv@2.0}
+$scop = {.wb@2.0|.cg@2.0|.cs@2.0|.wt@2.0}
 $l1 = {.L1::evict_normal@7.4@sm70|.L1::evict_unchanged@7.4@sm70|.L1::evict_first@7.4@sm70|.L1::evict_last@7.4@sm70|.L1::no_allocate@7.4@sm70}
 $hint = {.L2::cache_hint@7.4@sm80}
 $size = {.L2::64B@7.4@sm75|.L2::128B@7.4@sm75|.L2::256B@7.4@sm80}
@@ -60,7 +63,7 @@ $ty64 = (.b8|.b16|.b32|.b64|.u8|.u16|.u32|.u64|.s8|.s16|.s32|.s64|.f32|.f64)
 $scope = (.cta|.gpu|.sys)
 $sem = {.relaxed@6.0@sm70|.acquire@6.0@sm70|.release@6.0@sm70|.acq_rel@6.0@sm70}
 $rsem = {.relaxed@6.0@sm70|.release@6.0@sm70}
-$ascope = {.cta|.gpu|.sys}
+$ascope = {.cta@5.0@sm60|.gpu@5.0@sm60|.sys@5.0@sm60}
 $cvty = (.u8|.u16|.u32|.u64|.s8|.s16|.s32|.s64|.f16|.f32|.f64)
 $prio = (.L2::evict_last|.L2::evict_normal|.L2::evict_first|.L2::evict_unchanged)
 $prio2 = {.L2::evict_first|.L2::evict_unchanged}
@@ -68,105 +71,110 @@ $cta = {.cta@7.8}
 $shfl = (.up|.down|.bfly|.idx)
 
 # Integers.
-add$int : =T, T, T
-add.sat.s32 : =T, T, T
-sub$int : =T, T, T
-sub.sat.s32 : =T, T, T
-mul(.hi|.lo)~half$int : =T, T, T
-mul.wide~half.u16 : =u32, T, T
-mul.wide~half.u32 : =u64, T, T
-mul.wide~half.s16 : =s32, T, T
-mul.wide~half.s32 : =s64, T, T
-mad(.hi|.lo)~half$int : =T, T, T, T
-mad.hi.sat.s32 : =T, T, T, T
-mad.wide~half.u16 : =u32, T, T, u32
-mad.wide~half.u32 : =u64, T, T, u64
-mad.wide~half.s16 : =s32, T, T, s32
-mad.wide~half.s32 : =s64, T, T, s64
+add$int : =T, T, T @1.0
+add.sat.s32 : =T, T, T @1.0
+sub$int : =T, T, T @1.0
+sub.sat.s32 : =T, T, T @1.0
+mul(.hi|.lo)~half$int : =T, T, T @1.0
+mul.wide~half.u16 : =u32, T, T @1.0
+mul.wide~half.u32 : =u64, T, T @1.0
+mul.wide~half.s16 : =s32, T, T @1.0
+mul.wide~half.s32 : =s64, T, T @1.0
+mad(.hi|.lo)~half$int : =T, T, T, T @1.0
+mad.hi.sat.s32 : =T, T, T, T @1.0
+mad.wide~half.u16 : =u32, T, T, u32 @1.0
+mad.wide~half.u32 : =u64, T, T, u64 @1.0
+mad.wide~half.s16 : =s32, T, T, s32 @1.0
+mad.wide~half.s32 : =s64, T, T, s64 @1.0
 clmad(.hi|.lo).u64 : =T, T, T, T @9.3 @sm80
-mul24(.hi|.lo)(.u32|.s32) : =T, T, T
-mad24(.hi|.lo)(.u32|.s32) : =T, T, T, T
-mad24.hi.sat.s32 : =T, T, T, T
-sad$int : =T, T, T, T
-div$int : =T, T, T
-rem$int : =T, T, T
-abs(.s16|.s32|.s64) : =T, T
-neg(.s16|.s32|.s64) : =T, T
-min$int : =T, T, T
-max$int : =T, T, T
-popc(.b32|.b64) : =u32, T
-clz(.b32|.b64) : =u32, T
-bfind{.shiftamt}(.u32|.u64|.s32|.s64) : =u32, T
-fns.b32 : =T, T, T, s32
-brev(.b32|.b64) : =T, T
-bfe(.u32|.u64|.s32|.s64) : =T, T, u32, u32
-bfi(.b32|.b64) : =T, T, T, u32, u32
+mul24(.hi|.lo)(.u32|.s32) : =T, T, T @1.0
+mad24(.hi|.lo)(.u32|.s32) : =T, T, T, T @1.0
+mad24.hi.sat.s32 : =T, T, T, T @1.0
+sad$int : =T, T, T, T @1.0
+div$int : =T, T, T @1.0
+rem$int : =T, T, T @1.0
+abs(.s16|.s32|.s64) : =T, T @1.0
+neg(.s16|.s32|.s64) : =T, T @1.0
+min$int : =T, T, T @1.0
+max$int : =T, T, T @1.0
+popc(.b32|.b64) : =u32, T @2.0
+clz(.b32|.b64) : =u32, T @2.0
+bfind{.shiftamt}(.u32|.u64|.s32|.s64) : =u32, T @2.0
+fns.b32 : =T, T, T, s32 @6.0 @sm30
+brev(.b32|.b64) : =T, T @2.0
+bfe(.u32|.u64|.s32|.s64) : =T, T, u32, u32 @2.0
+bfi(.b32|.b64) : =T, T, T, u32, u32 @2.0
 szext(.clamp|.wrap)(.u32|.s32) : =T, T, u32 @7.6 @sm70
 bmsk(.clamp|.wrap).b32 : =T, u32, u32 @7.6 @sm70
-dp4a.u32.u32 : =u32, T, U, u32
-dp4a.u32.s32 : =s32, T, U, s32
-dp4a.s32.u32 : =s32, T, U, s32
-dp4a.s32.s32 : =s32, T, U, s32
-dp2a(.lo|.hi).u32.u32 : =u32, T, U, u32
-dp2a(.lo|.hi).u32.s32 : =s32, T, U, s32
-dp2a(.lo|.hi).s32.u32 : =s32, T, U, s32
-dp2a(.lo|.hi).s32.s32 : =s32, T, U, s32
-add.cc$cc : =T, T, T
-addc{.cc}$cc : =T, T, T
-sub.cc$cc : =T, T, T
-subc{.cc}$cc : =T, T, T
-mad(.hi|.lo).cc$cc : =T, T, T, T
-madc(.hi|.lo){.cc}$cc : =T, T, T, T
+dp4a.u32.u32 : =u32, T, U, u32 @5.0 @sm61
+dp4a.u32.s32 : =s32, T, U, s32 @5.0 @sm61
+dp4a.s32.u32 : =s32, T, U, s32 @5.0 @sm61
+dp4a.s32.s32 : =s32, T, U, s32 @5.0 @sm61
+dp2a(.lo|.hi).u32.u32 : =u32, T, U, u32 @5.0 @sm61
+dp2a(.lo|.hi).u32.s32 : =s32, T, U, s32 @5.0 @sm61
+dp2a(.lo|.hi).s32.u32 : =s32, T, U, s32 @5.0 @sm61
+dp2a(.lo|.hi).s32.s32 : =s32, T, U, s32 @5.0 @sm61
+add.cc$cc : =T, T, T @1.2
+addc(.u32|.s32|.u64|.s64) : =T, T, T @1.2
+addc.cc$cc : =T, T, T @1.2
+sub.cc$cc : =T, T, T @1.3
+subc(.u32|.s32|.u64|.s64) : =T, T, T @1.3
+subc.cc$cc : =T, T, T @1.3
+mad(.hi|.lo).cc$cc : =T, T, T, T @3.0
+madc(.hi|.lo)(.u32|.s32|.u64|.s64) : =T, T, T, T @3.0
+madc(.hi|.lo).cc$cc : =T, T, T, T @3.0
 
 # Floats.
-testp(.finite|.infinite|.number|.notanumber|.normal|.subnormal)(.f32|.f64) : =pred, T
-copysign(.f32|.f64) : =T, T, T
-add$rnd{.ftz}{.sat}.f32 : =T, T, T
-add$rnd.f64 : =T, T, T
-sub$rnd{.ftz}{.sat}.f32 : =T, T, T
-sub$rnd.f64 : =T, T, T
-mul$rnd{.ftz}{.sat}.f32 : =T, T, T
-mul$rnd.f64 : =T, T, T
-fma$rnd{.ftz}{.sat}.f32 : =T, T, T, T
-fma$rnd.f64 : =T, T, T, T
-mad$rnd{.ftz}{.sat}.f32 : =T, T, T, T
-mad$rnd.f64 : =T, T, T, T
-div.approx{.ftz}.f32 : =T, T, T
-div.full{.ftz}.f32 : =T, T, T
-div$rnd{.ftz}.f32 : =T, T, T
-div$rnd.f64 : =T, T, T
-abs{.ftz}.f32 : =T, T
-abs.f64 : =T, T
-neg{.ftz}.f32 : =T, T
-neg.f64 : =T, T
-min{.ftz}{.NaN@7.0@sm80}{.xorsign.abs@7.2@sm86}.f32 : =T, T, T
-min.f64 : =T, T, T
-max{.ftz}{.NaN@7.0@sm80}{.xorsign.abs@7.2@sm86}.f32 : =T, T, T
-max.f64 : =T, T, T
-rcp.approx{.ftz}.f32 : =T, T
-rcp$rnd{.ftz}.f32 : =T, T
-rcp$rnd.f64 : =T, T
-rcp.approx.ftz.f64 : =T, T
-sqrt.approx{.ftz}.f32 : =T, T
-sqrt$rnd{.ftz}.f32 : =T, T
-sqrt$rnd.f64 : =T, T
-rsqrt.approx{.ftz}(.f32|.f64) : =T, T
-sin.approx{.ftz}.f32 : =T, T
-cos.approx{.ftz}.f32 : =T, T
-lg2.approx{.ftz}.f32 : =T, T
-ex2.approx{.ftz}.f32 : =T, T
+testp(.finite|.infinite|.number|.notanumber|.normal|.subnormal)(.f32|.f64) : =pred, T @2.0
+copysign(.f32|.f64) : =T, T, T @2.0
+add(.rn|.rz|.rm@2.0|.rp@2.0)~round{.ftz@1.4}{.sat}.f32 : =T, T, T @1.0
+add(.rn|.rz|.rm@1.2|.rp@1.2)~round.f64 : =T, T, T @1.0
+sub(.rn|.rz|.rm@2.0|.rp@2.0)~round{.ftz@1.4}{.sat}.f32 : =T, T, T @1.0
+sub(.rn|.rz|.rm@1.2|.rp@1.2)~round.f64 : =T, T, T @1.0
+mul(.rn|.rz|.rm@2.0|.rp@2.0)~round{.ftz@1.4}{.sat}.f32 : =T, T, T @1.0
+mul(.rn|.rz|.rm@1.2|.rp@1.2)~round.f64 : =T, T, T @1.0
+fma$rnd{.ftz}{.sat}.f32 : =T, T, T, T @2.0
+fma$rnd.f64 : =T, T, T, T @1.4
+mad$rnd{.ftz}{.sat}.f32 : =T, T, T, T @2.0
+mad(.rn|.rz|.rm@1.2|.rp@1.2)~round.f64 : =T, T, T, T @1.0
+div.approx{.ftz}.f32 : =T, T, T @1.4
+div.full{.ftz}.f32 : =T, T, T @1.4
+div$rnd{.ftz}.f32 : =T, T, T @2.0
+div(.rn|.rz@2.0|.rm@2.0|.rp@2.0)~round.f64 : =T, T, T @1.0
+abs{.ftz@1.4}.f32 : =T, T @1.0
+abs.f64 : =T, T @1.0
+neg{.ftz@1.4}.f32 : =T, T @1.0
+neg.f64 : =T, T @1.0
+min{.ftz@1.4}{.NaN@7.0@sm80}{.xorsign.abs@7.2@sm86}.f32 : =T, T, T @1.0
+min.f64 : =T, T, T @1.0
+max{.ftz@1.4}{.NaN@7.0@sm80}{.xorsign.abs@7.2@sm86}.f32 : =T, T, T @1.0
+max.f64 : =T, T, T @1.0
+rcp.approx{.ftz}.f32 : =T, T @1.4
+rcp$rnd{.ftz}.f32 : =T, T @2.0
+rcp(.rn|.rz@2.0|.rm@2.0|.rp@2.0)~round.f64 : =T, T @1.4
+rcp.approx.ftz.f64 : =T, T @2.1
+sqrt.approx{.ftz}.f32 : =T, T @1.4
+sqrt$rnd{.ftz}.f32 : =T, T @2.0
+sqrt(.rn|.rz@2.0|.rm@2.0|.rp@2.0)~round.f64 : =T, T @1.0
+rsqrt.approx{.ftz}.f32 : =T, T @1.4
+rsqrt.approx.f64 : =T, T @1.4
+rsqrt.approx.ftz.f64 : =T, T @4.0
+sin.approx{.ftz}.f32 : =T, T @1.4
+cos.approx{.ftz}.f32 : =T, T @1.4
+lg2.approx{.ftz}.f32 : =T, T @1.4
+ex2.approx{.ftz}.f32 : =T, T @1.4
 tanh.approx.f32 : =T, T @7.0 @sm75
 
 # Floats of 16 bits.
-add.rn~round{.ftz}{.sat}(.f16|.f16x2) : =T, T, T
-sub.rn~round{.ftz}{.sat}(.f16|.f16x2) : =T, T, T
-mul.rn~round{.ftz}{.sat}(.f16|.f16x2) : =T, T, T
-fma.rn~round{.ftz}{.sat}(.f16|.f16x2) : =T, T, T, T
+add.rn~round{.ftz}{.sat}(.f16|.f16x2) : =T, T, T @4.2 @sm53
+sub.rn~round{.ftz}{.sat}(.f16|.f16x2) : =T, T, T @4.2 @sm53
+mul.rn~round{.ftz}{.sat}(.f16|.f16x2) : =T, T, T @4.2 @sm53
+fma.rn~round{.ftz}{.sat}(.f16|.f16x2) : =T, T, T, T @4.2 @sm53
 fma.rn~round{.ftz}.relu(.f16|.f16x2) : =T, T, T, T @7.0 @sm80
 fma.rn~round{.relu}(.bf16|.bf16x2) : =T, T, T, T @7.0 @sm80
-neg{.ftz}(.f16|.f16x2) : =T, T
+neg{.ftz}(.f16|.f16x2) : =T, T @6.0 @sm53
 neg(.bf16|.bf16x2) : =T, T @7.0 @sm80
-abs{.ftz}(.f16|.f16x2) : =T, T
+abs{.ftz}(.f16|.f16x2) : =T, T @6.5 @sm53
 abs(.bf16|.bf16x2) : =T, T @7.0 @sm80
 min{.ftz}{.NaN}{.xorsign.abs@7.2@sm86}(.f16|.f16x2) : =T, T, T @7.0 @sm80
 min{.NaN}{.xorsign.abs@7.2@sm86}(.bf16|.bf16x2) : =T, T, T @7.0 @sm80
@@ -176,115 +184,115 @@ tanh.approx(.f16|.f16x2) : =T, T @7.0 @sm75
 ex2.approx(.f16|.f16x2) : =T, T @7.0 @sm75
 
 # Comparisons and selection.
-setp$cmpb$bits : =_pred[|=_pred], T, T
-setp$cmpb$bool$bits : =_pred[|=_pred], T, T, !pred
-setp$cmpu(.u16|.u32|.u64) : =_pred[|=_pred], T, T
-setp$cmpu$bool(.u16|.u32|.u64) : =_pred[|=_pred], T, T, !pred
-setp$cmps(.s16|.s32|.s64) : =_pred[|=_pred], T, T
-setp$cmps$bool(.s16|.s32|.s64) : =_pred[|=_pred], T, T, !pred
-setp$cmpf{.ftz}.f32 : =_pred[|=_pred], T, T
-setp$cmpf$bool{.ftz}.f32 : =_pred[|=_pred], T, T, !pred
-setp$cmpf.f64 : =_pred[|=_pred], T, T
-setp$cmpf$bool.f64 : =_pred[|=_pred], T, T, !pred
-setp$cmpf{.ftz}.f16 : =pred, T, T
-setp$cmpf$bool{.ftz}.f16 : =pred, T, T, !pred
-setp$cmpf{.ftz}.f16x2 : =pred|=pred, T, T
-setp$cmpf$bool{.ftz}.f16x2 : =pred|=pred, T, T, !pred
-set$cmpb(.u32|.s32|.f32)$bits : =T, U, U
-set$cmpb$bool(.u32|.s32|.f32)$bits : =T, U, U, !pred
-set$cmpu(.u32|.s32|.f32)(.u16|.u32|.u64) : =T, U, U
-set$cmpu$bool(.u32|.s32|.f32)(.u16|.u32|.u64) : =T, U, U, !pred
-set$cmps(.u32|.s32|.f32)(.s16|.s32|.s64) : =T, U, U
-set$cmps$bool(.u32|.s32|.f32)(.s16|.s32|.s64) : =T, U, U, !pred
-set$cmpf{.ftz}(.u32|.s32|.f32).f32 : =T, U, U
-set$cmpf$bool{.ftz}(.u32|.s32|.f32).f32 : =T, U, U, !pred
-set$cmpf(.u32|.s32|.f32).f64 : =T, U, U
-set$cmpf$bool(.u32|.s32|.f32).f64 : =T, U, U, !pred
-set$cmpb.f16$bits : =T, U, U
-set$cmpb$bool.f16$bits : =T, U, U, !pred
-set$cmpu.f16(.u16|.u32|.u64) : =T, U, U
-set$cmpu$bool.f16(.u16|.u32|.u64) : =T, U, U, !pred
-set$cmps.f16(.s16|.s32|.s64) : =T, U, U
-set$cmps$bool.f16(.s16|.s32|.s64) : =T, U, U, !pred
-set$cmpf{.ftz}.f16(.f16|.f32) : =T, U, U
-set$cmpf$bool{.ftz}.f16(.f16|.f32) : =T, U, U, !pred
-set$cmpf.f16.f64 : =T, U, U
-set$cmpf$bool.f16.f64 : =T, U, U, !pred
-set$cmpf{.ftz}(.u16|.s16|.u32|.s32).f16 : =T, U, U @6.5
-set$cmpf$bool{.ftz}(.u16|.s16|.u32|.s32).f16 : =T, U, U, !pred @6.5
-set$cmpf{.ftz}(.f16x2|.u32@6.5|.s32@6.5).f16x2 : =T, U, U
-set$cmpf$bool{.ftz}(.f16x2|.u32@6.5|.s32@6.5).f16x2 : =T, U, U, !pred
-selp$num : =T, T, T, pred
-slct$num.s32 : =T, T, T, U
-slct{.ftz}$num.f32 : =T, T, T, U
+setp$cmpb$bits : =_pred[|=_pred], T, T @1.0
+setp$cmpb$bool$bits : =_pred[|=_pred], T, T, !pred @1.0
+setp$cmpu(.u16|.u32|.u64) : =_pred[|=_pred], T, T @1.0
+setp$cmpu$bool(.u16|.u32|.u64) : =_pred[|=_pred], T, T, !pred @1.0
+setp$cmps(.s16|.s32|.s64) : =_pred[|=_pred], T, T @1.0
+setp$cmps$bool(.s16|.s32|.s64) : =_pred[|=_pred], T, T, !pred @1.0
+setp$cmpf{.ftz@1.4}.f32 : =_pred[|=_pred], T, T @1.0
+setp$cmpf$bool{.ftz@1.4}.f32 : =_pred[|=_pred], T, T, !pred @1.0
+setp$cmpf.f64 : =_pred[|=_pred], T, T @1.0
+setp$cmpf$bool.f64 : =_pred[|=_pred], T, T, !pred @1.0
+setp$cmpf{.ftz}.f16 : =pred, T, T @4.2 @sm53
+setp$cmpf$bool{.ftz}.f16 : =pred, T, T, !pred @4.2 @sm53
+setp$cmpf{.ftz}.f16x2 : =pred|=pred, T, T @4.2 @sm53
+setp$cmpf$bool{.ftz}.f16x2 : =pred|=pred, T, T, !pred @4.2 @sm53
+set$cmpb(.u32|.s32|.f32)$bits : =T, U, U @1.0
+set$cmpb$bool(.u32|.s32|.f32)$bits : =T, U, U, !pred @1.0
+set$cmpu(.u32|.s32|.f32)(.u16|.u32|.u64) : =T, U, U @1.0
+set$cmpu$bool(.u32|.s32|.f32)(.u16|.u32|.u64) : =T, U, U, !pred @1.0
+set$cmps(.u32|.s32|.f32)(.s16|.s32|.s64) : =T, U, U @1.0
+set$cmps$bool(.u32|.s32|.f32)(.s16|.s32|.s64) : =T, U, U, !pred @1.0
+set$cmpf{.ftz@1.4}(.u32|.s32|.f32).f32 : =T, U, U @1.0
+set$cmpf$bool{.ftz@1.4}(.u32|.s32|.f32).f32 : =T, U, U, !pred @1.0
+set$cmpf(.u32|.s32|.f32).f64 : =T, U, U @1.0
+set$cmpf$bool(.u32|.s32|.f32).f64 : =T, U, U, !pred @1.0
+set$cmpb.f16$bits : =T, U, U @4.2 @sm53
+set$cmpb$bool.f16$bits : =T, U, U, !pred @4.2 @sm53
+set$cmpu.f16(.u16|.u32|.u64) : =T, U, U @4.2 @sm53
+set$cmpu$bool.f16(.u16|.u32|.u64) : =T, U, U, !pred @4.2 @sm53
+set$cmps.f16(.s16|.s32|.s64) : =T, U, U @4.2 @sm53
+set$cmps$bool.f16(.s16|.s32|.s64) : =T, U, U, !pred @4.2 @sm53
+set$cmpf{.ftz}.f16(.f16|.f32) : =T, U, U @4.2 @sm53
+set$cmpf$bool{.ftz}.f16(.f16|.f32) : =T, U, U, !pred @4.2 @sm53
+set$cmpf.f16.f64 : =T, U, U @4.2 @sm53
+set$cmpf$bool.f16.f64 : =T, U, U, !pred @4.2 @sm53
+set$cmpf{.ftz}(.u16|.s16|.u32|.s32).f16 : =T, U, U @6.5 @sm53
+set$cmpf$bool{.ftz}(.u16|.s16|.u32|.s32).f16 : =T, U, U, !pred @6.5 @sm53
+set$cmpf{.ftz}(.f16x2|.u32@6.5|.s32@6.5).f16x2 : =T, U, U @4.2 @sm53
+set$cmpf$bool{.ftz}(.f16x2|.u32@6.5|.s32@6.5).f16x2 : =T, U, U, !pred @4.2 @sm53
+selp$num : =T, T, T, pred @1.0
+slct$num.s32 : =T, T, T, U @1.0
+slct{.ftz@1.4}$num.f32 : =T, T, T, U @1.0
 
 # Logic and shifts.
-and(.pred|.b16|.b32|.b64) : =T, T, T
-or(.pred|.b16|.b32|.b64) : =T, T, T
-xor(.pred|.b16|.b32|.b64) : =T, T, T
-not(.pred|.b16|.b32|.b64) : =T, T
-cnot$bits : =T, T
-lop3.b32 : =T, T, T, T, #8
+and(.pred|.b16|.b32|.b64) : =T, T, T @1.0
+or(.pred|.b16|.b32|.b64) : =T, T, T @1.0
+xor(.pred|.b16|.b32|.b64) : =T, T, T @1.0
+not(.pred|.b16|.b32|.b64) : =T, T @1.0
+cnot$bits : =T, T @1.0
+lop3.b32 : =T, T, T, T, #8 @4.3 @sm50
 lop3(.or|.and).b32 : =_T|=pred, T, T, T, #8, pred @8.2 @sm70
-shf(.l|.r)(.clamp|.wrap).b32 : =T, T, T, u32
-shl$bits : =T, T, u32
-shr(.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64) : =T, T, u32
+shf(.l|.r)(.clamp|.wrap).b32 : =T, T, T, u32 @3.1 @sm32
+shl$bits : =T, T, u32 @1.0
+shr(.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64) : =T, T, u32 @1.0
 
 # Moving data, and converting it.
-mov(.pred|.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64|.f32|.f64) : =T, $T
-mov(.u32|.u64) : =T, &T
+mov(.pred|.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64|.f32|.f64) : =T, $T @1.0
+mov(.u32|.u64) : =T, &T @1.0
 mov.b128 : =T, T @8.3 @sm70
-mov.b16 : =T, b8*2
-mov.b32 : =T, b16*2
-mov.b32 : =T, b8*4
-mov.b64 : =T, b32*2
-mov.b64 : =T, b16*4
+mov.b16 : =T, b8*2 @1.0
+mov.b32 : =T, b16*2 @1.0
+mov.b32 : =T, b8*4 @1.0
+mov.b64 : =T, b32*2 @1.0
+mov.b64 : =T, b16*4 @1.0
 mov.b128 : =T, b64*2 @8.3 @sm70
 mov.b128 : =T, b32*4 @8.3 @sm70
-mov.b16 : =_b8*2, %T
-mov.b32 : =_b16*2, %T
-mov.b32 : =_b8*4, %T
-mov.b64 : =_b32*2, %T
-mov.b64 : =_b16*4, %T
+mov.b16 : =_b8*2, %T @1.0
+mov.b32 : =_b16*2, %T @1.0
+mov.b32 : =_b8*4, %T @1.0
+mov.b64 : =_b32*2, %T @1.0
+mov.b64 : =_b16*4, %T @1.0
 mov.b128 : =_b64*2, %T @8.3 @sm70
 mov.b128 : =_b32*4, %T @8.3 @sm70
-shfl$shfl.b32 : =T[|=pred], T, u32, u32 @<sm70
-shfl.sync$shfl.b32 : =T[|=pred], T, u32, u32, u32
-prmt.b32{.f4e|.b4e|.rc8|.ecl|.ecr|.rc16} : =T, T, T, T
-ld{.weak@6.0@sm70}{.global}$cop$hint$size$vec$ty : =T*v, [R], {L2::cache_hint}b64 +wide +vec
-ld{.weak@6.0@sm70}{.global}$l1$hint$size$vec$ty : =T*v, [R], {L2::cache_hint}b64 +wide +vec
-ld{.weak@6.0@sm70}$ldss$cop$vec$ty : =T*v, [R] +wide +vec
-ld.volatile{.global}$size$vec$ty : =T*v, [R] +wide +vec
-ld.volatile(.local@9.1|.shared|.shared::cta@7.8)$vec$ty : =T*v, [R] +wide +vec
+shfl$shfl.b32 : =T[|=pred], T, u32, u32 @3.0 @sm30 @<sm70/6.4
+shfl.sync$shfl.b32 : =T[|=pred], T, u32, u32, u32 @6.0 @sm30
+prmt.b32{.f4e|.b4e|.rc8|.ecl|.ecr|.rc16} : =T, T, T, T @2.0
+ld{.weak@6.0@sm70}{.global}$cop$hint$size$vec$ty : =T*v, [R], {L2::cache_hint}b64 @1.0 +wide +vec
+ld{.weak@6.0@sm70}{.global}$l1$hint$size$vec$ty : =T*v, [R], {L2::cache_hint}b64 @1.0 +wide +vec
+ld{.weak@6.0@sm70}$ldss$cop$vec$ty : =T*v, [R] @1.0 +wide +vec
+ld.volatile{.global}$size$vec$ty : =T*v, [R] @1.1 +wide +vec
+ld.volatile(.local@9.1|.shared|.shared::cta@7.8)$vec$ty : =T*v, [R] @1.1 +wide +vec
 ld(.relaxed|.acquire)$scope{.global}$l1$hint$size$vec$ty : =T*v, [R], {L2::cache_hint}b64 @6.0 @sm70 +wide +vec +b128sys
 ld(.relaxed|.acquire)$scope$shared$vec$ty : =T*v, [R] @6.0 @sm70 +wide +vec +b128sys
 ld.mmio.relaxed.sys{.global}$ty64 : =T, [R] @8.2 @sm70 +wide
-ld.mmio.acquire.sys{.global}$ty64 : =T, [R] @9.3 @sm75 +wide
-ld.global{.ca|.cg|.cs}.nc$hint$size$vec$ty : =T*v, [R], {L2::cache_hint}b64 +wide +vec
-ld.global.nc$l1$hint$size$vec$ty : =T*v, [R], {L2::cache_hint}b64 +wide +vec
-ldu{.global}$vec$ty : =T*v, [R] +wide +vec
-st{.weak@6.0@sm70}{.global}$scop$hint$vec$ty : [W], T*v, {L2::cache_hint}b64 +wide +vec
-st{.weak@6.0@sm70}{.global}$l1$hint$vec$ty : [W], T*v, {L2::cache_hint}b64 +wide +vec
-st{.weak@6.0@sm70}(.local|.shared|.shared::cta@7.8)$scop$vec$ty : [W], T*v +wide +vec
-st.volatile{.global|.local@9.1|.shared|.shared::cta@7.8}$vec$ty : [W], T*v +wide +vec
+ld.mmio.acquire.sys{.global}$ty64 : =T, [R] @9.3 @sm70 +wide
+ld.global{.ca|.cg|.cs}.nc$hint$size$vec$ty : =T*v, [R], {L2::cache_hint}b64 @3.1 @sm32 +wide +vec
+ld.global.nc$l1$hint$size$vec$ty : =T*v, [R], {L2::cache_hint}b64 @3.1 @sm32 +wide +vec
+ldu{.global}$vec$ty : =T*v, [R] @2.0 +wide +vec
+st{.weak@6.0@sm70}{.global}$scop$hint$vec$ty : [W], T*v, {L2::cache_hint}b64 @1.0 +wide +vec
+st{.weak@6.0@sm70}{.global}$l1$hint$vec$ty : [W], T*v, {L2::cache_hint}b64 @1.0 +wide +vec
+st{.weak@6.0@sm70}(.local|.shared|.shared::cta@7.8)$scop$vec$ty : [W], T*v @1.0 +wide +vec
+st.volatile{.global|.local@9.1|.shared|.shared::cta@7.8}$vec$ty : [W], T*v @1.1 +wide +vec
 st(.relaxed|.release)$scope{.global}$l1$hint$vec$ty : [W], T*v, {L2::cache_hint}b64 @6.0 @sm70 +wide +vec +b128sys
 st(.relaxed|.release)$scope$shared$vec$ty : [W], T*v @6.0 @sm70 +wide +vec +b128sys
 st.mmio.relaxed.sys{.global}$ty64 : [W], T @8.2 @sm70 +wide
-st.mmio.release.sys{.global}$ty64 : [W], T @9.3 @sm75 +wide
-prefetch{.global|.local}(.L1|.L2) : [R]
+st.mmio.release.sys{.global}$ty64 : [W], T @9.3 @sm70 +wide
+prefetch{.global|.local}(.L1|.L2) : [R] @2.0
 prefetch.global(.L2::evict_last|.L2::evict_normal) : [R] @7.4 @sm80
-prefetchu.L1 : [R]
+prefetchu.L1 : [R] @2.0
 applypriority{.global}.L2::evict_normal : [R], #=128 @7.4 @sm80
 discard{.global}.L2 : [W], #=128 @7.4 @sm80
 createpolicy.range{.global}$prio$prio2.b64 : =T, [R], u32, u32 @7.4 @sm80
 createpolicy.fractional$prio$prio2.b64 : =T, f32(0,1]? @7.4 @sm80
 createpolicy.cvt.L2.b64 : =T, b64 @7.4 @sm80
-isspacep$space : =pred, %u64
-cvta$space.u64 : =T, T
-cvta(.local|.shared|.shared::cta@7.8).u64 : =T, &T
-cvta.to$space.u64 : =T, T
-cvt{.rni|.rzi|.rmi|.rpi|.rn|.rz|.rm|.rp}{.ftz}{.sat}$cvty$cvty : =T, $U +wide +cvt
-cvt(.rn|.rz)~round{.relu@7.0@sm80}{.satfinite@8.1@sm70}(.f16|.bf16@7.0@sm80).f32 : =T, U +wide
+isspacep$space : =pred, %u64 @2.0
+cvta$space.u64 : =T, T @2.0
+cvta(.local|.shared|.shared::cta@7.8).u64 : =T, &T @2.0
+cvta.to$space.u64 : =T, T @2.0
+cvt{.rni|.rzi|.rmi|.rpi|.rn|.rz|.rm|.rp}{.ftz@1.4}{.sat}$cvty$cvty : =T, $U @1.0 +wide +cvt
+cvt(.rn|.rz)~round{.relu@7.0@sm80}{.satfinite@8.1@sm70}(.f16|.bf16@7.0@sm80).f32 : =T, U @1.0 +wide
 cvt(.rn|.rz)~round{.relu}{.satfinite@8.1}(.f16x2|.bf16x2).f32 : =T, U, U @7.0 @sm80
 cvt.rna{.satfinite@8.1}.tf32.f32 : =T, U @7.0 @sm80
 cvt.f32.bf16 : =T, U @7.1 @sm80
@@ -293,83 +301,87 @@ cvt.pack.sat(.u8|.s8).s32.b32 : =u32, s32, s32, b32 @6.5 @sm72
 cvt.pack.sat(.u4|.s4|.u2|.s2).s32.b32 : =u32, s32, s32, b32 @6.5 @sm75
 
 # Control.
-bra{.uni} : lab
-ret{.uni}
-exit
+bra{.uni} : lab @1.0
+ret{.uni} @1.0
+exit @1.0
 
 # Barriers, fences and atomics.
-barrier$cta.sync{.aligned} : u32<16, u32/32?
-barrier$cta.arrive{.aligned} : u32<16, u32/32
-barrier$cta.red.popc{.aligned}.u32 : =T, u32<16, !pred
-barrier$cta.red.popc{.aligned}.u32 : =T, u32<16, u32/32, !pred
-barrier$cta.red(.and|.or){.aligned}.pred : =T, u32<16, !pred
-barrier$cta.red(.and|.or){.aligned}.pred : =T, u32<16, u32/32, !pred
-bar$cta.sync : u32<16, u32/32?
-bar$cta.arrive : u32<16, u32/32
-bar$cta.red.popc.u32 : =T, u32<16, !pred
-bar$cta.red.popc.u32 : =T, u32<16, u32/32, !pred
-bar$cta.red(.and|.or).pred : =T, u32<16, !pred
-bar$cta.red(.and|.or).pred : =T, u32<16, u32/32, !pred
-bar.warp.sync : u32
-membar(.cta|.gl|.sys)
+barrier$cta.sync{.aligned} : u32<16, u32/32? @6.0 @sm30
+barrier$cta.arrive{.aligned} : u32<16, u32/32 @6.0 @sm30
+barrier$cta.red.popc{.aligned}.u32 : =T, u32<16, !pred @6.0 @sm30
+barrier$cta.red.popc{.aligned}.u32 : =T, u32<16, u32/32, !pred @6.0 @sm30
+barrier$cta.red(.and|.or){.aligned}.pred : =T, u32<16, !pred @6.0 @sm30
+barrier$cta.red(.and|.or){.aligned}.pred : =T, u32<16, u32/32, !pred @6.0 @sm30
+bar$cta.sync : u32<16, u32/32? @1.0
+bar$cta.arrive : u32<16, u32/32 @2.0
+bar$cta.red.popc.u32 : =T, u32<16, !pred @2.0
+bar$cta.red.popc.u32 : =T, u32<16, u32/32, !pred @2.0
+bar$cta.red(.and|.or).pred : =T, u32<16, !pred @2.0
+bar$cta.red(.and|.or).pred : =T, u32<16, u32/32, !pred @2.0
+bar.warp.sync : u32 @6.0 @sm30
+membar(.cta|.gl|.sys@2.0) @1.4
 membar.proxy.alias @7.5 @sm60
 fence{.sc|.acq_rel}$scope @6.0 @sm70
 fence.proxy.alias @7.5 @sm70
-atom$sem$ascope{.global}(.and|.or|.xor)$hint(.b32|.b64) : =T, [X], T, {L2::cache_hint}b64
-atom$sem$ascope$shared(.and|.or|.xor)(.b32|.b64) : =T, [X], T
-atom$sem$ascope{.global}(.add|.inc|.dec|.min|.max)$hint.u32 : =T, [X], T, {L2::cache_hint}b64
-atom$sem$ascope$shared(.add|.inc|.dec|.min|.max).u32 : =T, [X], T
-atom$sem$ascope{.global}(.add|.min|.max)$hint(.s32|.u64) : =T, [X], T, {L2::cache_hint}b64
-atom$sem$ascope$shared(.add|.min|.max)(.s32|.u64) : =T, [X], T
-atom$sem$ascope{.global}(.min|.max)$hint.s64 : =T, [X], T, {L2::cache_hint}b64
-atom$sem$ascope$shared(.min|.max).s64 : =T, [X], T
-atom$sem$ascope{.global}.add$hint(.f32|.f64) : =T, [X], T, {L2::cache_hint}b64
-atom$sem$ascope$shared.add(.f32|.f64) : =T, [X], T
-atom$sem$ascope{.global}.exch$hint(.b32|.b64) : =T, [X], T, {L2::cache_hint}b64
-atom$sem$ascope$shared.exch(.b32|.b64) : =T, [X], T
-atom$sem$ascope{.global}.cas(.b32|.b64) : =T, [X], T, T
-atom$sem$ascope$shared.cas(.b32|.b64) : =T, [X], T, T
+atom$sem$ascope{.global}(.and|.or|.xor)$hint(.b32|.b64@3.1@sm32) : =T, [X], T, {L2::cache_hint}b64 @1.0
+atom$sem$ascope$shared(.and|.or|.xor)(.b32|.b64@3.1@sm32) : =T, [X], T @1.2
+atom$sem$ascope{.global}(.add|.inc|.dec|.min|.max)$hint.u32 : =T, [X], T, {L2::cache_hint}b64 @1.0
+atom$sem$ascope$shared(.add|.inc|.dec|.min|.max).u32 : =T, [X], T @1.2
+atom$sem$ascope{.global}(.add|.min|.max)$hint.s32 : =T, [X], T, {L2::cache_hint}b64 @1.0
+atom$sem$ascope{.global}.add$hint.u64 : =T, [X], T, {L2::cache_hint}b64 @1.2
+atom$sem$ascope$shared(.add|.min|.max).s32 : =T, [X], T @1.2
+atom$sem$ascope$shared.add.u64 : =T, [X], T @2.0
+atom$sem$ascope{.global}(.min|.max)$hint(.u64|.s64) : =T, [X], T, {L2::cache_hint}b64 @3.1 @sm32
+atom$sem$ascope$shared(.min|.max)(.u64|.s64) : =T, [X], T @3.1 @sm32
+atom$sem$ascope{.global}.add$hint(.f32|.f64@5.0@sm60) : =T, [X], T, {L2::cache_hint}b64 @2.0
+atom$sem$ascope$shared.add(.f32|.f64@5.0@sm60) : =T, [X], T @2.0
+atom$sem$ascope{.global}.exch$hint(.b32|.b64@1.2) : =T, [X], T, {L2::cache_hint}b64 @1.0
+atom$sem$ascope$shared.exch(.b32|.b64@2.0) : =T, [X], T @1.2
+atom$sem$ascope{.global}.cas(.b32|.b64@1.2) : =T, [X], T, T @1.0
+atom$sem$ascope$shared.cas(.b32|.b64@2.0) : =T, [X], T, T @1.2
 atom$sem$ascope{.global}.cas.b16 : =T, [X], T, T @6.3 @sm70
 atom$sem$ascope$shared.cas.b16 : =T, [X], T, T @6.3 @sm70
 atom$sem$ascope{.global}.add.noftz$hint.f16 : =T, [X], T, {L2::cache_hint}b64 @6.3 @sm70
 atom$sem$ascope$shared.add.noftz.f16 : =T, [X], T @6.3 @sm70
 atom$sem$ascope{.global}.add.noftz$hint.f16x2 : =T, [X], T, {L2::cache_hint}b64 @6.2 @sm60
 atom$sem$ascope$shared.add.noftz.f16x2 : =T, [X], T @6.2 @sm60
-red$rsem$ascope{.global}(.and|.or|.xor)$hint(.b32|.b64) : [X], T, {L2::cache_hint}b64
-red$rsem$ascope$shared(.and|.or|.xor)(.b32|.b64) : [X], T
-red$rsem$ascope{.global}(.add|.inc|.dec|.min|.max)$hint.u32 : [X], T, {L2::cache_hint}b64
-red$rsem$ascope$shared(.add|.inc|.dec|.min|.max).u32 : [X], T
-red$rsem$ascope{.global}(.add|.min|.max)$hint(.s32|.u64) : [X], T, {L2::cache_hint}b64
-red$rsem$ascope$shared(.add|.min|.max)(.s32|.u64) : [X], T
-red$rsem$ascope{.global}(.min|.max)$hint.s64 : [X], T, {L2::cache_hint}b64
-red$rsem$ascope$shared(.min|.max).s64 : [X], T
-red$rsem$ascope{.global}.add$hint(.f32|.f64) : [X], T, {L2::cache_hint}b64
-red$rsem$ascope$shared.add(.f32|.f64) : [X], T
+red$rsem$ascope{.global}(.and|.or|.xor)$hint(.b32|.b64@3.1@sm32) : [X], T, {L2::cache_hint}b64 @1.2
+red$rsem$ascope$shared(.and|.or|.xor)(.b32|.b64@3.1@sm32) : [X], T @1.2
+red$rsem$ascope{.global}(.add|.inc|.dec|.min|.max)$hint.u32 : [X], T, {L2::cache_hint}b64 @1.2
+red$rsem$ascope$shared(.add|.inc|.dec|.min|.max).u32 : [X], T @1.2
+red$rsem$ascope{.global}(.add|.min|.max)$hint.s32 : [X], T, {L2::cache_hint}b64 @1.2
+red$rsem$ascope{.global}.add$hint.u64 : [X], T, {L2::cache_hint}b64 @1.2
+red$rsem$ascope$shared(.add|.min|.max).s32 : [X], T @1.2
+red$rsem$ascope$shared.add.u64 : [X], T @2.0
+red$rsem$ascope{.global}(.min|.max)$hint(.u64|.s64) : [X], T, {L2::cache_hint}b64 @3.1 @sm32
+red$rsem$ascope$shared(.min|.max)(.u64|.s64) : [X], T @3.1 @sm32
+red$rsem$ascope{.global}.add$hint(.f32|.f64@5.0@sm60) : [X], T, {L2::cache_hint}b64 @2.0
+red$rsem$ascope$shared.add(.f32|.f64@5.0@sm60) : [X], T @2.0
 red$rsem$ascope{.global}.add.noftz$hint.f16 : [X], T, {L2::cache_hint}b64 @6.3 @sm70
 red$rsem$ascope$shared.add.noftz.f16 : [X], T @6.3 @sm70
 red$rsem$ascope{.global}.add.noftz$hint.f16x2 : [X], T, {L2::cache_hint}b64 @6.2 @sm60
 red$rsem$ascope$shared.add.noftz.f16x2 : [X], T @6.2 @sm60
 
 # The threads of a warp together.
-vote(.all|.any|.uni).pred : =T, !pred @<sm70
-vote.ballot.b32 : =T, !pred @<sm70
-vote.sync(.all|.any|.uni).pred : =T, !pred, u32
-vote.sync.ballot.b32 : =T, !pred, u32
-match.any.sync(.b32|.b64) : =b32, T, u32 @sm70
-match.all.sync(.b32|.b64) : =b32[|=_pred], T, u32 @sm70
-activemask.b32 : =T @6.2
+vote(.all|.any|.uni).pred : =T, !pred @1.2 @<sm70/6.4
+vote.ballot.b32 : =T, !pred @2.0 @<sm70/6.4
+vote.sync(.all|.any|.uni).pred : =T, !pred, u32 @6.0 @sm30
+vote.sync.ballot.b32 : =T, !pred, u32 @6.0 @sm30
+match.any.sync(.b32|.b64) : =b32, T, u32 @6.0 @sm70
+match.all.sync(.b32|.b64) : =b32[|=_pred], T, u32 @6.0 @sm70
+activemask.b32 : =T @6.2 @sm30
 redux.sync(.add|.min|.max)(.u32|.s32) : =T, T, u32 @7.0 @sm80
 redux.sync(.and|.or|.xor).b32 : =T, T, u32 @7.0 @sm80
 
 # The stack, and the rest.
-stacksave(.u32|.u64) : =T @7.3
-stackrestore(.u32|.u64) : %T @7.3
-alloca(.u32|.u64) : =T, T, #^23? @7.3
-brkpt
-nanosleep.u32 : T @6.3 @sm70
-pmevent : #4
-pmevent.mask : #16
-trap
+stacksave(.u32|.u64) : =T @7.3 @sm52
+stackrestore(.u32|.u64) : %T @7.3 @sm52
+alloca(.u32|.u64) : =T, T, #^23? @7.3 @sm52
+brkpt @1.0
+nanosleep.u32 : T @6.2 @sm70
+pmevent : #4 @1.4
+pmevent.mask : #16 @3.0
+trap @1.0
 "#;
 
 /// An instruction's form.
@@ -642,7 +654,7 @@ pub fn find(name: &str) -> Result<Vec<Bound>, String> {
     let of: Vec<&'static Form> = forms().iter().filter(|f| f.op == op).collect();
     if of.is_empty() {
         return Err(match NEWER.iter().find(|(o, _)| *o == op) {
-            Some((_, gpu)) => format!("PTX's `{op}` is for {gpu} and newer, and kgen writes PTX for sm_61 to sm_86"),
+            Some((_, gpu)) => format!("PTX's `{op}` is for {gpu} and newer, and kgen writes PTX for sm_20 to sm_86"),
             None => format!("PTX has no instruction `{op}` that kgen knows"),
         });
     }
@@ -709,7 +721,12 @@ fn make(form: &'static Form, choice: Vec<Option<usize>>) -> Bound {
             }
         }
     }
-    Bound { form, choice, types, needs }
+    let mut b = Bound { form, choice, types, needs };
+    // An address in no state space is generic, which PTX has from 2.0 on.
+    if form.operands.iter().any(|s| matches!(s.role, Role::Addr(_))) && b.space() == Space::Generic {
+        b.needs = b.needs.and(Needs { ptx: 20, ..Needs::default() });
+    }
+    b
 }
 
 /// Why a name of `op` is of no form, from the form it comes nearest.
@@ -824,7 +841,7 @@ fn check(b: &Bound, name: &str) -> Result<Needs, String> {
                     needs = needs.and(Needs { ptx: 84, ..Needs::default() });
                 }
             }
-            Check::Cvt => cvt(b, name)?,
+            Check::Cvt => needs = needs.and(cvt(b, name)?),
         }
     }
     Ok(needs)
@@ -833,8 +850,9 @@ fn check(b: &Bound, name: &str) -> Result<Needs, String> {
 /// PTX's rules for `cvt` between integers and floats: it rounds where it loses precision,
 /// to an integer from a float, and only there or where it rounds a float to an integral
 /// value; it flushes subnormals only of an `f32`; and it saturates only where the result can
-/// fall outside what its type holds.
-fn cvt(b: &Bound, name: &str) -> Result<(), String> {
+/// fall outside what its type holds. What it needs beyond its words: ptxas takes `.ftz` from
+/// PTX 1.4 on, but with a few conversions from 1.5.
+fn cvt(b: &Bound, name: &str) -> Result<Needs, String> {
     let (d, a) = (b.types[0], b.types[1]);
     let float = |t: Ty| t.kind() == Kind::Float;
     let irnd = ["rni", "rzi", "rmi", "rpi"].into_iter().find(|w| b.has(w));
@@ -891,7 +909,11 @@ fn cvt(b: &Bound, name: &str) -> Result<(), String> {
     if b.has("sat") && !float(d) && !float(a) && holds(d, a) {
         return Err(format!("`{name}` has nothing to saturate: a `{}` holds every `{}`", d.name(), a.name()));
     }
-    Ok(())
+    let later = [(Ty::F64, Ty::F32), (Ty::F32, Ty::S8), (Ty::F32, Ty::U8), (Ty::S64, Ty::F32), (Ty::U64, Ty::F32)];
+    Ok(match b.has("ftz") && later.contains(&(d, a)) {
+        true => Needs { ptx: 15, ..Needs::default() },
+        false => Needs::default(),
+    })
 }
 
 /// Whether every value of the integer type `a` is one of `d`.
@@ -933,37 +955,39 @@ pub fn sregs() -> &'static [Sreg] {
     SREGS.get_or_init(|| {
         let mut out = vec![];
         let mut add = |name: String, ty: Ty, ptx: u32, sm: u32, fewest: u32| {
-            out.push(Sreg { name, ty, needs: Needs { ptx, sm, below: 0 }, fewest });
+            out.push(Sreg { name, ty, needs: Needs { ptx, sm, ..Needs::default() }, fewest });
         };
         for v in ["tid", "ntid", "ctaid", "nctaid"] {
             for c in ["x", "y", "z"] {
-                add(format!("{v}.{c}"), Ty::U32, 0, 0, 16);
+                add(format!("{v}.{c}"), Ty::U32, 10, 0, 16);
             }
         }
-        for n in
-            ["laneid", "warpid", "nwarpid", "smid", "nsmid", "clock", "clock_hi", "globaltimer_lo", "globaltimer_hi"]
-        {
-            add(n.into(), Ty::U32, 0, 0, 32);
-        }
-        for n in ["lanemask_eq", "lanemask_le", "lanemask_lt", "lanemask_ge", "lanemask_gt"] {
-            add(n.into(), Ty::U32, 0, 0, 32);
-        }
-        add("gridid".into(), Ty::U64, 0, 0, 16);
-        add("clock64".into(), Ty::U64, 0, 0, 64);
-        add("globaltimer".into(), Ty::U64, 0, 0, 64);
-        for i in 0..8 {
-            add(format!("pm{i}"), Ty::U32, 0, 0, 32);
-            add(format!("pm{i}_64"), Ty::U64, 0, 0, 64);
-        }
+        add("gridid".into(), Ty::U64, 10, 0, 16);
+        add("clock".into(), Ty::U32, 10, 0, 32);
         for i in 0..32 {
-            add(format!("envreg{i}"), Ty::B32, 0, 0, 32);
+            add(format!("envreg{i}"), Ty::B32, 10, 0, 32);
         }
+        for n in ["laneid", "warpid", "smid"] {
+            add(n.into(), Ty::U32, 13, 0, 32);
+        }
+        for n in ["nwarpid", "nsmid", "lanemask_eq", "lanemask_le", "lanemask_lt", "lanemask_ge", "lanemask_gt"] {
+            add(n.into(), Ty::U32, 20, 0, 32);
+        }
+        add("clock64".into(), Ty::U64, 20, 0, 64);
+        add("clock_hi".into(), Ty::U32, 50, 0, 32);
+        add("globaltimer".into(), Ty::U64, 31, 30, 64);
+        add("globaltimer_lo".into(), Ty::U32, 31, 30, 32);
+        add("globaltimer_hi".into(), Ty::U32, 31, 30, 32);
+        for i in 0..8 {
+            add(format!("pm{i}"), Ty::U32, if i < 4 { 13 } else { 30 }, 0, 32);
+            add(format!("pm{i}_64"), Ty::U64, 40, 50, 64);
+        }
+        add("total_smem_size".into(), Ty::U32, 41, 0, 32);
+        add("dynamic_smem_size".into(), Ty::U32, 41, 0, 32);
         for n in ["begin", "end", "cap", "0", "1"] {
             add(format!("reserved_smem_offset_{n}"), Ty::B32, 76, 80, 32);
         }
-        add("total_smem_size".into(), Ty::U32, 0, 0, 32);
-        add("dynamic_smem_size".into(), Ty::U32, 0, 0, 32);
-        add("current_graph_exec".into(), Ty::U64, 80, 0, 64);
+        add("current_graph_exec".into(), Ty::U64, 80, 50, 64);
         out
     })
 }
@@ -986,7 +1010,7 @@ const BEYOND: &[(&str, &str)] = &[
     ("perctamemoryoffset", PER_CTA),
     ("perctamemorysize", PER_CTA),
 ];
-const HOPPER: &str = "it needs sm_90, and kgen writes PTX for sm_61 to sm_86";
+const HOPPER: &str = "it needs sm_90, and kgen writes PTX for sm_20 to sm_86";
 const PER_CTA: &str = "a kernel has it only with the directive `.minperctamemory`, which kgen does not write";
 
 /// Why kgen reads no special register `name`, `clusterid.x`, if it is one of PTX's.
@@ -1056,6 +1080,7 @@ fn form(line: &'static str, macros: &[(&'static str, Vec<Elem>)]) -> Form {
             assert!(i < slot, "`{line}` has no type {i}");
         }
     }
+    assert!(needs.ptx != 0, "`{line}` says the version of PTX it needs, `@1.0` for any");
     Form { op, elems, operands, needs, wide, checks, line }
 }
 
@@ -1120,12 +1145,16 @@ fn alt_of(s: &'static str, one: bool, line: &str) -> (Alt, &'static str) {
     let mut needs = Needs::default();
     while let Some(r) = rest.strip_prefix('@') {
         let digits = |from: usize| from + r[from..].find(|c: char| !c.is_ascii_digit()).unwrap_or(r.len() - from);
+        let version = |from: usize| match digits(from) {
+            major if r[major..].starts_with('.') => digits(major + 1),
+            major => major,
+        };
         let end = match r.strip_prefix('<').unwrap_or(r).strip_prefix("sm") {
-            Some(_) => digits(r.find("sm").expect("it starts so") + 2),
-            None => match digits(0) {
-                major if r[major..].starts_with('.') => digits(major + 1),
-                major => major,
+            Some(_) => match digits(r.find("sm").expect("it starts so") + 2) {
+                sm if r[sm..].starts_with('/') => version(sm + 1),
+                sm => sm,
             },
+            None => version(0),
         };
         needs = needs.and(req(&r[..end], line));
         rest = &r[end..];
@@ -1133,16 +1162,25 @@ fn alt_of(s: &'static str, one: bool, line: &str) -> (Alt, &'static str) {
     (Alt { words, needs }, rest)
 }
 
-/// A requirement after `@`: `7.8`, `sm80` or `<sm70`.
+/// A requirement after `@`: `7.8`, `sm80` or `<sm70/6.4`.
 fn req(r: &str, line: &str) -> Needs {
     let num = |s: &str| s.parse::<u32>().unwrap_or_else(|_| panic!("`{line}`: `@{r}` is no requirement"));
+    let gpu = |s: &str| {
+        let sm = num(s);
+        assert!(GPUS.iter().any(|&(g, _)| g == sm), "`{line}`: `@{r}` is no GPU kgen writes for");
+        sm
+    };
+    let version = |s: &str| {
+        let (major, minor) = s.split_once('.').unwrap_or_else(|| panic!("`{line}`: `@{r}` is no version"));
+        num(major) * 10 + num(minor)
+    };
     if let Some(sm) = r.strip_prefix("<sm") {
-        Needs { below: num(sm), ..Needs::default() }
+        let (sm, since) = sm.split_once('/').unwrap_or_else(|| panic!("`{line}`: `@{r}` says from which version"));
+        Needs { below: gpu(sm), since: version(since), ..Needs::default() }
     } else if let Some(sm) = r.strip_prefix("sm") {
-        Needs { sm: num(sm), ..Needs::default() }
+        Needs { sm: gpu(sm), ..Needs::default() }
     } else {
-        let (major, minor) = r.split_once('.').unwrap_or_else(|| panic!("`{line}`: `@{r}` is no version"));
-        Needs { ptx: num(major) * 10 + num(minor), ..Needs::default() }
+        Needs { ptx: version(r), ..Needs::default() }
     }
 }
 

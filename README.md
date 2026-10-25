@@ -81,9 +81,10 @@ unsafe { kernels.saxpy(kgen_cuda::Grid::new(n.div_ceil(256), 256), 2.0, xs.ptr()
 ys.read_into(&mut y)?;
 ```
 
-The PTX target has every instruction PTX has for the GPUs from Pascal, `sm_61`, to Ampere, `sm_86`, in each form
-`ptxas` takes, [`forms`](crates/ptx/src/forms.rs), and checks each operand against them. A module's `.version` and
-`.target` are the oldest that have every instruction its kernels use.
+The PTX target knows PTX's instructions for the GPUs from Fermi, `sm_20`, to Ampere, `sm_86`, in each form `ptxas`
+takes, [`forms`](crates/ptx/src/forms.rs), and checks each operand against them. Each form, and each of its words,
+says the oldest version of PTX and the oldest GPU it needs, as `ptxas` has them, back to PTX 1.0. A module's `.version`
+and `.target` are the oldest that have every instruction its kernels use: PTX 2.3 and `sm_20` at the least.
 
 Memory a kernel declares is a variable: `let tile: shared<[f32; 256], 16>;` is 256 floats of shared memory at a
 multiple of 16, reached by its name, `ld.shared.f32(v, [tile + 16])`, and `shared<[f32]>` is as many as the launch

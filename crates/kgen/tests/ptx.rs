@@ -221,7 +221,7 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
             "2:21: `cvt.u32.f32` converts a float to an integer, so it says how it rounds to one: `cvt.rni.u32.f32` \
              to the nearest, `cvt.rzi` toward zero",
         ),
-        ("elect.sync(n);", "2:7: PTX's `elect` is for sm_90 and newer, and kgen writes PTX for sm_61 to sm_86"),
+        ("elect.sync(n);", "2:7: PTX's `elect` is for sm_90 and newer, and kgen writes PTX for sm_20 to sm_86"),
     ];
     for (body, want) in cases {
         assert_eq!(compile("x: *mut f32, n: u32, d: f64", body).unwrap_err(), want, "{body}");
@@ -267,7 +267,7 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         (
             "let i: u32; mov.u32(i, clusterid.x);",
             "2:34: `clusterid.x` is a special register of PTX's that kgen does not read: it needs sm_90, and kgen \
-             writes PTX for sm_61 to sm_86",
+             writes PTX for sm_20 to sm_86",
         ),
         (
             "let i: u32; mov.u32(i, perctamemorysize);",
@@ -283,14 +283,18 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
 #[test]
 fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
     let cases = [
-        ("", ".version 7.5 .target sm_61"),
-        ("let i: u32; shfl.idx.b32(i, n, 0, 31);", ".version 7.5 .target sm_61"),
-        ("nanosleep.u32(n);", ".version 7.5 .target sm_70"),
-        ("let v: b128; ld.global.b128(v, [x]);", ".version 8.3 .target sm_70"),
-        ("let v: f32; tanh.approx.f32(v, f);", ".version 7.5 .target sm_75"),
+        ("", ".version 2.3 .target sm_20"),
+        ("let i: u32; popc.b32(i, n);", ".version 2.3 .target sm_20"),
+        ("let i: u32; shfl.idx.b32(i, n, 0, 31);", ".version 3.0 .target sm_30"),
+        ("let h: f16x2;", ".version 4.2 .target sm_53"),
+        ("let i: u32; dp4a.u32.u32(i, n, n, n);", ".version 5.0 .target sm_61"),
+        ("nanosleep.u32(n);", ".version 6.2 .target sm_70"),
+        ("let i: u32; shfl.idx.b32(i, n, 0, 31); nanosleep.u32(n);", ".version 6.2 .target sm_70"),
+        ("let v: f32; tanh.approx.f32(v, f);", ".version 7.0 .target sm_75"),
         ("let i: b32; mov.b32(i, reserved_smem_offset_begin);", ".version 7.6 .target sm_80"),
+        ("let v: f32; max.xorsign.abs.f32(v, f, f);", ".version 7.2 .target sm_86"),
+        ("let v: b128; ld.global.b128(v, [x]);", ".version 8.3 .target sm_70"),
         ("let a: u64; clmad.lo.u64(a, y, y, y);", ".version 9.3 .target sm_80"),
-        ("let v: f32; max.xorsign.abs.f32(v, f, f);", ".version 7.5 .target sm_86"),
     ];
     for (body, want) in cases {
         let ptx = compile("x: *mut f32, n: u32, f: f32, y: u64", body).unwrap();
@@ -301,25 +305,45 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
 
 #[test]
 fn a_kernel_or_module_is_for_gpus_that_have_all_it_uses() {
-    let e = compile("n: u32", "let i: u32; shfl.idx.b32(i, n, 0, 31); nanosleep.u32(n);").unwrap_err();
-    assert_eq!(
-        e,
-        "2:50: `nanosleep.u32` needs sm_70 or newer, and `shfl.idx.b32` before it is for GPUs older than sm_70: no \
-         GPU has both"
-    );
+    let cases = [
+        (
+            "let i: u32; let v: f32; shfl.idx.b32(i, n, 0, 31); tanh.approx.f32(v, f);",
+            "2:64: `shfl.idx.b32` before it is for GPUs older than sm_70 from PTX 6.4 on, and `tanh.approx.f32` needs \
+             sm_75 and PTX 7.0: no module has both",
+        ),
+        (
+            "let i: u32; let v: f32; tanh.approx.f32(v, f); shfl.idx.b32(i, n, 0, 31);",
+            "2:57: `shfl.idx.b32` is for GPUs older than sm_70 from PTX 6.4 on, and `tanh.approx.f32` before it needs \
+             sm_75 and PTX 7.0: no module has both",
+        ),
+        (
+            "let i: u32; shfl.idx.b32(i, n, 0, 31); redux.sync.add.u32(i, n, n);",
+            "2:55: `shfl.idx.b32` before it is for GPUs older than sm_70 from PTX 6.4 on, and `redux.sync.add.u32` \
+             needs sm_80, which PTX has from 7.0 on: no module has both",
+        ),
+        (
+            "let i: u32; let g: f16; shfl.idx.b32(i, n, 0, 31); nanosleep.u32(n); abs.f16(g, h);",
+            "2:74: `shfl.idx.b32` before it is for GPUs older than sm_70 from PTX 6.4 on; `nanosleep.u32` before it \
+             needs sm_70, and `abs.f16` PTX 6.5: no module has them all",
+        ),
+    ];
+    for (body, want) in cases {
+        assert_eq!(compile("n: u32, f: f32, h: f16", body).unwrap_err(), want, "{body}");
+    }
     let src = r#"
         unsafe extern "ptx-kernel" fn old(n: u32) {
             let i: u32;
             shfl.idx.b32(i, n, 0, 31);
         }
-        unsafe extern "ptx-kernel" fn new(n: u32) {
-            nanosleep.u32(n);
+        unsafe extern "ptx-kernel" fn new(f: f32) {
+            let v: f32;
+            tanh.approx.f32(v, f);
         }
     "#;
     assert_eq!(
         kgen::ptx_str(src).unwrap_err(),
-        "`shfl.idx.b32` in `old` is for GPUs older than sm_70, and `nanosleep.u32` in `new` needs sm_70 or newer: \
-         one module cannot have both"
+        "`shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and `tanh.approx.f32` in `new` needs \
+         sm_75 and PTX 7.0: no module has both"
     );
 }
 
@@ -619,15 +643,13 @@ fn others(n: &mut usize) -> Vec<Entry> {
     out
 }
 
-/// The errors `ptxas` finds in a module: each line's, by its number.
-type Errors = Vec<(usize, String)>;
-
-/// What `ptxas` makes of each module: `None` if it takes it, or the errors it finds.
-fn assemble(ptxas: &Path, modules: &[String]) -> Vec<Option<Errors>> {
+/// The kernels `ptxas` refuses of each module, by name, each with the first error it finds
+/// in it; `?` for one outside any kernel.
+fn assemble(ptxas: &Path, modules: &[String]) -> Vec<BTreeMap<String, String>> {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("forms");
     std::fs::create_dir_all(&dir).unwrap();
     let next = AtomicUsize::new(0);
-    let out: Vec<Mutex<Option<Errors>>> = modules.iter().map(|_| Mutex::new(None)).collect();
+    let out: Vec<Mutex<BTreeMap<String, String>>> = modules.iter().map(|_| Mutex::default()).collect();
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     std::thread::scope(|s| {
         for _ in 0..threads {
@@ -635,37 +657,7 @@ fn assemble(ptxas: &Path, modules: &[String]) -> Vec<Option<Errors>> {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(text) = modules.get(i) else { break };
-                    let (src, bin) = (dir.join(format!("{i}.ptx")), dir.join(format!("{i}.cubin")));
-                    std::fs::write(&src, text).unwrap();
-                    let sm: u32 = text
-                        .lines()
-                        .find_map(|l| l.strip_prefix(".target sm_"))
-                        .and_then(|t| t.parse().ok())
-                        .expect("a module has a target");
-                    let run = Command::new(ptxas)
-                        .args(["--gpu-name", &format!("sm_{}", sm.max(75))])
-                        .arg(&src)
-                        .arg("-o")
-                        .arg(&bin)
-                        .output()
-                        .unwrap();
-                    if !run.status.success() {
-                        let stderr = String::from_utf8_lossy(&run.stderr);
-                        let mut errors: Errors = stderr
-                            .lines()
-                            .filter(|l| l.contains("error"))
-                            .filter_map(|l| {
-                                let (_, rest) = l.split_once(", line ")?;
-                                let (n, message) = rest.split_once(';')?;
-                                Some((n.parse().ok()?, message.trim().to_string()))
-                            })
-                            .collect();
-                        if errors.is_empty() {
-                            errors.push((0, stderr.trim().to_string()));
-                        }
-                        *out[i].lock().unwrap() = Some(errors);
-                    }
-                    let _ = std::fs::remove_file(&bin);
+                    *out[i].lock().unwrap() = refused(ptxas, text, &dir.join(i.to_string()));
                 }
             });
         }
@@ -673,14 +665,71 @@ fn assemble(ptxas: &Path, modules: &[String]) -> Vec<Option<Errors>> {
     out.into_iter().map(|m| m.into_inner().unwrap()).collect()
 }
 
+/// The kernels `ptxas` refuses of the module `text`, which it reads at `path`. A fatal error
+/// stops it in the kernel it is in, so it goes on without that one.
+fn refused(ptxas: &Path, text: &str, path: &Path) -> BTreeMap<String, String> {
+    let (src, bin) = (path.with_extension("ptx"), path.with_extension("cubin"));
+    let sm: u32 = text
+        .lines()
+        .find_map(|l| l.strip_prefix(".target sm_"))
+        .and_then(|t| t.parse().ok())
+        .expect("a module has a target");
+    let (mut text, mut out) = (text.to_string(), BTreeMap::new());
+    loop {
+        std::fs::write(&src, &text).unwrap();
+        let run = Command::new(ptxas)
+            .args(["--gpu-name", &format!("sm_{}", sm.max(75))])
+            .arg(&src)
+            .arg("-o")
+            .arg(&bin)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&bin);
+        if run.status.success() {
+            return out;
+        }
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        let mut fatal = None;
+        for l in stderr.lines() {
+            let Some((n, message)) = l.split_once(", line ").and_then(|(_, r)| r.split_once(';')) else { continue };
+            let Ok(n) = n.parse() else { continue };
+            let (k, message) = (kernel_at(&text, n).unwrap_or("?").to_string(), message.trim());
+            if message.starts_with("fatal") {
+                fatal = Some(k.clone());
+            }
+            out.entry(k).or_insert_with(|| message.to_string());
+        }
+        match fatal {
+            Some(k) if k != "?" => text = without(&text, &k),
+            _ => {
+                if out.is_empty() {
+                    out.insert("?".into(), stderr.trim().to_string());
+                }
+                return out;
+            }
+        }
+    }
+}
+
 /// For each line of `text`, the kernel it is in, by name.
 fn kernel_at(text: &str, line: usize) -> Option<&str> {
     text.lines().take(line).filter_map(|l| l.strip_prefix(".visible .entry ")).last().and_then(|l| l.split('(').next())
 }
 
-/// What `entries` need, as a module's header writes it: each at least [`Needs::FLOOR`].
-fn key(n: Needs) -> (u32, u32, u32) {
-    (n.ptx.max(Needs::FLOOR.ptx), n.sm.max(Needs::FLOOR.sm), n.below)
+/// The module `text` without its kernel `k`.
+fn without(text: &str, k: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.strip_prefix(".visible .entry ").and_then(|l| l.split('(').next()) == Some(k))
+        .expect("the kernel is in the module");
+    let end = start + lines[start..].iter().position(|l| *l == "}").expect("a kernel ends");
+    lines[..start].iter().chain(&lines[end + 1..]).map(|l| format!("{l}\n")).collect()
+}
+
+/// A module's `.version` and `.target`.
+fn header(text: &str) -> String {
+    text.lines().filter(|l| l.starts_with(".version ") || l.starts_with(".target ")).collect::<Vec<_>>().join(" ")
 }
 
 /// What `ptxas` should make of a module.
@@ -690,14 +739,52 @@ enum Expect {
     Takes,
     /// Each of its kernels is wrong.
     Refuses,
-    /// Each is wrong, if `ptxas` checks it for the module's `.target` and not for sm_75.
-    Unsure,
 }
 
-/// The versions of PTX from kgen's oldest to the newest `ptxas` here reads, and the GPUs
-/// from Pascal to Ampere.
-const VERSIONS: [u32; 18] = [75, 76, 77, 78, 80, 81, 82, 83, 84, 85, 86, 87, 88, 90, 91, 92, 93, 94];
-const GPUS: [u32; 7] = [61, 62, 70, 72, 75, 80, 86];
+/// Every version of PTX the `ptxas` here reads, from 1.0 to 9.4: those before 2.3 without
+/// `.address_size`, which they have not.
+const VERSIONS: [u32; 47] = [
+    10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 30, 31, 32, 40, 41, 42, 43, 50, 60, 61, 62, 63, 64, 65, 70, 71, 72, 73, 74,
+    75, 76, 77, 78, 80, 81, 82, 83, 84, 85, 86, 87, 88, 90, 91, 92, 93, 94,
+];
+
+/// The newest GPU a module of PTX `v` with what `n` needs may be for: before 2.0, one of
+/// Tesla's, `sm_11` or `sm_13`, which kgen writes for neither of.
+fn newest(v: u32, n: Needs) -> u32 {
+    match v {
+        ..12 => 11,
+        12..20 => 13,
+        _ => kgen_ptx::GPUS
+            .iter()
+            .filter(|&&(g, came)| came <= v && (n.below == 0 || g < n.below || v < n.since))
+            .map(|&(g, _)| g)
+            .max()
+            .expect("every version from 2.0 has Fermi"),
+    }
+}
+
+/// The version of PTX before `v`.
+fn before(v: u32) -> Option<u32> {
+    let i = VERSIONS.iter().position(|&x| x == v).expect("a version ptxas reads");
+    i.checked_sub(1).map(|i| VERSIONS[i])
+}
+
+/// The version of PTX that came with the GPU `sm`.
+fn came(sm: u32) -> u32 {
+    kgen_ptx::GPUS.iter().find(|&&(g, _)| g == sm).map(|&(_, v)| v).expect("a GPU kgen writes for")
+}
+
+/// The module `text` as one of PTX `v` for the GPU `sm`.
+fn retarget(text: &str, v: u32, sm: u32) -> String {
+    text.lines()
+        .filter(|l| v >= 23 || *l != ".address_size 64")
+        .map(|l| match l {
+            _ if l.starts_with(".version ") => format!(".version {}.{}\n", v / 10, v % 10),
+            _ if l.starts_with(".target ") => format!(".target sm_{sm}\n"),
+            _ => format!("{l}\n"),
+        })
+        .collect()
+}
 
 #[test]
 fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
@@ -707,14 +794,15 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
     };
     let (mut n, mut failures) = (0, vec![]);
     let mut what: BTreeMap<String, String> = BTreeMap::new();
-    let mut groups: BTreeMap<(u32, u32, u32), Vec<Entry>> = BTreeMap::new();
+    let mut groups: BTreeMap<(u32, u32, u32, u32), Vec<Entry>> = BTreeMap::new();
     let mut add = |e: Entry, what: &mut BTreeMap<String, String>| {
         let line = e.program.body.iter().find_map(|i| match i {
             kgen_core::Item::Inst(inst) => Some(inst.op.0.clone()),
             _ => None,
         });
         what.insert(e.program.name.clone(), line.unwrap_or_default());
-        groups.entry(key(e.needs())).or_default().push(e);
+        let n = e.needs();
+        groups.entry((n.ptx, n.sm, n.below, n.since)).or_default().push(e);
     };
     let mut refused = vec![];
     for form in forms::forms() {
@@ -740,27 +828,42 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
     for e in others(&mut n) {
         add(e, &mut what);
     }
-    // Each group at what it needs, and one step older in each way it needs more than the
-    // floor: then each kernel is wrong. ptxas builds for no GPU older than sm_75, so one
-    // that takes a kernel for an older `.target` may only be checking it for sm_75.
+    for ((ptx, ..), entries) in groups.iter().filter(|((ptx, ..), _)| !VERSIONS.contains(ptx)) {
+        let (count, some): (usize, Vec<&str>) =
+            (entries.len(), entries.iter().take(5).map(|e| what[&e.program.name].as_str()).collect());
+        failures.push(format!("{count} kernels need PTX {ptx}, which ptxas reads none of: {}", some.join("; ")));
+    }
+    // Each group as kgen writes it, and at the version it needs, for the newest GPU of that
+    // version; and one step older in each way it needs more than PTX 1.0 and Fermi, and for
+    // the GPU it is too new for: then each kernel is wrong.
     let mut modules: Vec<(String, Expect)> = vec![];
-    for (&(ptx, sm, below), entries) in &groups {
+    for (&(ptx, sm, below, since), entries) in groups.iter().filter(|((ptx, ..), _)| VERSIONS.contains(ptx)) {
+        let n = Needs { ptx, sm, below, since };
         let text = kgen_ptx::module(entries).unwrap();
+        let gpu = newest(ptx, n);
+        if gpu < sm {
+            let v = format!("{}.{}", ptx / 10, ptx % 10);
+            failures.push(format!("{} kernels need PTX {v} and sm_{sm}, which no module of {v} is for", entries.len()));
+        }
+        let exact = retarget(&text, ptx, gpu);
+        if exact != text {
+            modules.push((exact, Expect::Takes));
+        }
         modules.push((text.clone(), Expect::Takes));
-        let older = |from: &str, to: String| text.replacen(from, &to, 1);
-        if ptx > Needs::FLOOR.ptx {
-            let v = VERSIONS[VERSIONS.iter().position(|&v| v == ptx).unwrap() - 1];
-            let (from, to) =
-                (format!(".version {}.{}\n", ptx / 10, ptx % 10), format!(".version {}.{}\n", v / 10, v % 10));
-            modules.push((older(&from, to), Expect::Refuses));
+        if let Some(v) = before(ptx) {
+            modules.push((retarget(&text, v, newest(v, n)), Expect::Refuses));
         }
         if sm > Needs::FLOOR.sm {
-            let g = GPUS[GPUS.iter().position(|&g| g == sm).unwrap() - 1];
-            let expect = if g < 75 { Expect::Unsure } else { Expect::Refuses };
-            modules.push((older(&format!(".target sm_{sm}\n"), format!(".target sm_{g}\n")), expect));
+            let i = kgen_ptx::GPUS.iter().position(|&(g, _)| g == sm).expect("a GPU kgen writes for");
+            let g = kgen_ptx::GPUS[i - 1].0;
+            modules.push((retarget(&text, ptx.max(came(g)), g), Expect::Refuses));
         }
         if below != 0 {
-            modules.push((older(&format!(".target sm_{sm}\n"), format!(".target sm_{below}\n")), Expect::Refuses));
+            let v = ptx.max(came(below));
+            if let Some(last) = before(since).filter(|&last| last >= v) {
+                modules.push((retarget(&text, last, below), Expect::Takes));
+            }
+            modules.push((retarget(&text, v.max(since), below), Expect::Refuses));
         }
     }
     // And the names kgen refuses, for the newest GPU and at the newest version kgen knows,
@@ -784,38 +887,35 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
     }
     let texts: Vec<String> = modules.iter().map(|(t, _)| t.clone()).collect();
     let results = assemble(&ptxas, &texts);
-    let mut unsure = vec![];
-    for ((text, expect), errors) in modules.iter().zip(&results) {
-        let header: String = text.lines().skip(2).take(2).collect::<Vec<_>>().join(" ");
-        match (expect, errors) {
-            (Expect::Takes, None) => {}
-            (Expect::Takes, Some(errors)) => {
-                for (line, message) in errors {
-                    let k = kernel_at(text, *line).unwrap_or("?");
-                    failures.push(format!("{header}: `{}`: {message}", what.get(k).map_or("?", String::as_str)));
+    for ((text, expect), refused) in modules.iter().zip(&results) {
+        let header = header(text);
+        if let Some(m) = refused.get("?") {
+            failures.push(format!("{header}: {m}"));
+            continue;
+        }
+        let what = |k: &str| what.get(k).map_or("?", String::as_str).to_string();
+        match expect {
+            Expect::Takes => {
+                for (k, message) in refused {
+                    failures.push(format!("{header}: `{}`: {message}", what(k)));
                 }
             }
-            (Expect::Refuses | Expect::Unsure, errors) => {
-                let wrong: Vec<&str> = errors.iter().flatten().filter_map(|(line, _)| kernel_at(text, *line)).collect();
+            Expect::Refuses => {
                 for k in
                     text.lines().filter_map(|l| l.strip_prefix(".visible .entry ")).filter_map(|l| l.split('(').next())
                 {
-                    if !wrong.contains(&k) {
-                        let mut taken = format!("{header}: takes `{}` too", what.get(k).map_or("?", String::as_str));
+                    if !refused.contains_key(k) {
+                        let mut taken = format!("{header}: takes `{}` too", what(k));
                         if let Some(m) = why.get(k) {
                             taken += &format!(", which kgen refuses: {m}");
                         }
-                        match expect {
-                            Expect::Unsure => unsure.push(taken),
-                            _ => failures.push(taken),
-                        }
+                        failures.push(taken);
                     }
                 }
             }
         }
     }
     eprintln!("{n} instances in {} modules; {refusals} names kgen refuses", modules.len());
-    eprintln!("{} kernels ptxas may only have checked for sm_75:\n{}", unsure.len(), unsure.join("\n"));
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
 }
 
@@ -885,8 +985,8 @@ fn memory_is_declared_where_ptx_has_it() {
     let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
     let want = "// Written by kgen.
 
-.version 7.5
-.target sm_61
+.version 2.3
+.target sm_20
 .address_size 64
 
 .extern .shared .align 4 .b8 reverse$buf[];

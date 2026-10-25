@@ -1,7 +1,7 @@
 // Written by kgen.
 
-.version 7.5
-.target sm_61
+.version 4.2
+.target sm_53
 .address_size 64
 
 .extern .shared .align 4 .b8 reverse_runs$run[];

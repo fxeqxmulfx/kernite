@@ -273,32 +273,18 @@ impl Kernel {
         self.needs.iter().fold(Needs::default(), |n, (m, _)| n.and(*m))
     }
 
-    /// Notes that the kernel needs `needs` for `what`, an instruction; or says why no GPU has
-    /// it as well as what the kernel needs already.
+    /// Notes that the kernel needs `needs` for `what`, an instruction; or says why no module
+    /// has it as well as what the kernel needs already.
     fn require(&mut self, needs: Needs, what: &str) -> Result<(), String> {
         let had = self.needed();
         let all = had.and(needs);
         if !all.possible() {
-            let older = needs.below != 0 && had.sm >= needs.below;
-            let message = if older {
-                let (n, other) = self.needs.iter().max_by_key(|(n, _)| n.sm).expect("something needs that GPU");
-                format!(
-                    "`{what}` is for GPUs older than sm_{}, and `{other}` before it needs sm_{} or newer: no GPU has \
-                     both",
-                    needs.below, n.sm
-                )
-            } else {
-                let (n, other) =
-                    self.needs.iter().find(|(n, _)| n.below != 0 && needs.sm >= n.below).expect("something is older");
-                format!(
-                    "`{what}` needs sm_{} or newer, and `{other}` before it is for GPUs older than sm_{}: no GPU has \
-                     both",
-                    needs.sm, n.below
-                )
-            };
-            return Err(message);
+            let mut named: Vec<(Needs, String)> =
+                self.needs.iter().map(|(n, w)| (*n, format!("`{w}` before it"))).collect();
+            named.push((needs, format!("`{what}`")));
+            return Err(crate::clash(&named));
         }
-        if all.and(Needs::FLOOR) != had.and(Needs::FLOOR) {
+        if all != had {
             self.needs.push((needs, what.to_string()));
         }
         Ok(())
@@ -633,6 +619,7 @@ impl Kernel {
             d => format!("[{}+{d}]", m.name),
         })
     }
+
     /// What `a` is, for an error.
     fn given(&self, a: &Given<Var>) -> String {
         match a {
@@ -845,8 +832,8 @@ impl Target for Kernel {
         let Some(t) = Ty::parse(ty) else {
             return Err(format!("PTX variables are {TYPES}, not `{ty}`"));
         };
-        if t == Ty::B128 {
-            self.require(Needs { ptx: 83, sm: 70, below: 0 }, &format!("let {name}: b128"))?;
+        if t.needs() != Needs::default() {
+            self.require(t.needs(), &format!("let {name}: {}", t.name()))?;
         }
         Ok(Var::Reg { reg: self.new_var(name, t), ty: t })
     }
