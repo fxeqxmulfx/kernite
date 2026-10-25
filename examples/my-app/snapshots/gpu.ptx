@@ -4,6 +4,8 @@
 .target sm_61
 .address_size 64
 
+.extern .shared .align 4 .b8 reverse_runs$run[];
+
 .visible .entry saxpy(
 	.param .f32 saxpy_param_0,
 	.param .u64 saxpy_param_1,
@@ -34,5 +36,132 @@
 	ld.global.f32 %yi, [%at_y];
 	fma.rn.f32 %yi, %a, %xi, %yi;
 	st.global.f32 [%at_y], %yi;
+	ret;
+}
+
+.visible .entry block_sums(
+	.param .u64 block_sums_param_0,
+	.param .u64 block_sums_param_1
+)
+{
+	.reg .pred %lower;
+	.reg .u32 %t, %b, %i, %mine;
+	.reg .f32 %v, %w;
+	.reg .u64 %x, %sums, %at;
+	.shared .align 16 .b8 tile[1024];
+
+	ld.param.u64 %x, [block_sums_param_0];
+	cvta.to.global.u64 %x, %x;
+	ld.param.u64 %sums, [block_sums_param_1];
+	cvta.to.global.u64 %sums, %sums;
+	mov.u32 %t, %tid.x;
+	mov.u32 %b, %ctaid.x;
+	mad.lo.u32 %i, %b, 256, %t;
+	mad.wide.u32 %at, %i, 4, %x;
+	ld.global.f32 %v, [%at];
+	mov.u32 %mine, tile;
+	mad.lo.u32 %mine, %t, 4, %mine;
+	st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 128;
+	@%lower ld.shared.f32 %w, [%mine+512];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 64;
+	@%lower ld.shared.f32 %w, [%mine+256];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 32;
+	@%lower ld.shared.f32 %w, [%mine+128];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 16;
+	@%lower ld.shared.f32 %w, [%mine+64];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 8;
+	@%lower ld.shared.f32 %w, [%mine+32];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 4;
+	@%lower ld.shared.f32 %w, [%mine+16];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 2;
+	@%lower ld.shared.f32 %w, [%mine+8];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 1;
+	@%lower ld.shared.f32 %w, [%mine+4];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	setp.eq.u32 %lower, %t, 0;
+	@%lower mad.wide.u32 %at, %b, 4, %sums;
+	@%lower st.global.f32 [%at], %v;
+	ret;
+}
+
+.visible .entry reverse_runs(
+	.param .u64 reverse_runs_param_0
+)
+{
+	.reg .u32 %t, %n, %i, %j, %base, %block, %size, %thread;
+	.reg .f32 %v;
+	.reg .u64 %x, %at;
+
+	ld.param.u64 %x, [reverse_runs_param_0];
+	cvta.to.global.u64 %x, %x;
+	mov.u32 %t, %tid.x;
+	mov.u32 %n, %ntid.x;
+	mov.u32 %block, %ctaid.x;
+	mov.u32 %size, %ntid.x;
+	mov.u32 %thread, %tid.x;
+	mad.lo.u32 %i, %block, %size, %thread;
+	mad.wide.u32 %at, %i, 4, %x;
+	ld.global.f32 %v, [%at];
+	mov.u32 %base, reverse_runs$run;
+	mad.lo.u32 %j, %t, 4, %base;
+	st.shared.f32 [%j], %v;
+	bar.sync 0;
+	sub.u32 %j, %n, %t;
+	sub.u32 %j, %j, 1;
+	mad.lo.u32 %j, %j, 4, %base;
+	ld.shared.f32 %v, [%j];
+	st.global.f32 [%at], %v;
+	ret;
+}
+
+.visible .entry scale_f16(
+	.param .u64 scale_f16_param_0,
+	.param .b16 scale_f16_param_1,
+	.param .u32 scale_f16_param_2
+)
+{
+	.reg .pred %past;
+	.reg .f16 %a, %v;
+	.reg .u32 %n, %i, %block, %size, %thread;
+	.reg .u64 %x, %at;
+
+	ld.param.u64 %x, [scale_f16_param_0];
+	cvta.to.global.u64 %x, %x;
+	ld.param.b16 %a, [scale_f16_param_1];
+	ld.param.u32 %n, [scale_f16_param_2];
+	mov.u32 %block, %ctaid.x;
+	mov.u32 %size, %ntid.x;
+	mov.u32 %thread, %tid.x;
+	mad.lo.u32 %i, %block, %size, %thread;
+	setp.ge.u32 %past, %i, %n;
+	@%past ret;
+	mad.wide.u32 %at, %i, 2, %x;
+	ld.global.b16 %v, [%at];
+	mul.rn.f16 %v, %v, %a;
+	st.global.b16 [%at], %v;
 	ret;
 }

@@ -81,10 +81,21 @@ unsafe { kernels.saxpy(kgen_cuda::Grid::new(n.div_ceil(256), 256), 2.0, xs.ptr()
 ys.read_into(&mut y)?;
 ```
 
+The PTX target has every instruction PTX has for the GPUs from Pascal, `sm_61`, to Ampere, `sm_86`, in each form
+`ptxas` takes, [`forms`](crates/ptx/src/forms.rs), and checks each operand against them. A module's `.version` and
+`.target` are the oldest that have every instruction its kernels use.
+
+Memory a kernel declares is a variable: `let tile: shared<[f32; 256], 16>;` is 256 floats of shared memory at a
+multiple of 16, reached by its name, `ld.shared.f32(v, [tile + 16])`, and `shared<[f32]>` is as many as the launch
+gives, `Grid::new(blocks, threads).with_shared(bytes)`. A kernel's `f16` and `bf16`, which Rust has not, are
+kgen-cuda's [`f16` and `bf16`](crates/cuda/src/half.rs): their bits, converted to and from `f32` as `cvt` converts
+them.
+
 ## Examples
 
 [`examples/my-app`](examples/my-app/src/main.rs) uses kgen as a crate outside it would: `sum8` and `dot::<4>` for
-the CPU and `saxpy` for the GPU, written in place, with safe functions over them. Its tests hold each kernel to a
+the CPU, and for the GPU `saxpy`, `block_sums` and `reverse_runs` in shared memory, and `scale_f16`, written in
+place, with safe functions over them. Its tests hold each kernel to a
 scalar reference that does the same float operations in the same order, bit for bit, and its listings to
 [`snapshots/`](examples/my-app/snapshots/).
 
@@ -123,7 +134,7 @@ Each crate depends only on the layers inside it. `crates/kgen/tests/architecture
 | adapters | `kgen-x86`, `kgen-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kgen` | which machine and syntax each kernel compiles with |
 | delivery | `kgen-macros` | kernels as functions: `#[unsafe(naked)]`, or launchers of PTX |
-| runtime | `kgen-cuda` | the CUDA driver: memory on the GPU, modules, launches; depends on no other crate |
+| runtime | `kgen-cuda` | the CUDA driver: memory on the GPU, modules, launches; `f16` and `bf16`; depends on no other crate |
 
 ## Guarantees
 

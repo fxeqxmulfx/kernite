@@ -391,11 +391,11 @@ pub fn module(entries: &[Entry]) -> Result<String, String> {
     }
     let mut out =
         format!("// Written by kgen.\n\n.version {}\n.target {}\n.address_size 64\n", needs.version(), needs.target());
-    let sized: Vec<&Memory> = entries.iter().flat_map(|e| &e.memory).filter(|m| m.bytes.is_none()).collect();
-    if !sized.is_empty() {
+    let launched: Vec<&Memory> = entries.iter().flat_map(|e| &e.memory).filter(|m| m.bytes.is_none()).collect();
+    if !launched.is_empty() {
         out += "\n";
     }
-    for m in sized {
+    for m in launched {
         out += &format!(".extern .shared .align {} .b8 {}[];\n", m.align, m.name);
     }
     for e in entries {

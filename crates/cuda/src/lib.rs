@@ -1,5 +1,6 @@
 //! The CUDA driver, as far as kgen's kernels need it: memory on a GPU, PTX modules loaded
-//! into it, and their kernels launched.
+//! into it, and their kernels launched; and the floats of 16 bits, [`f16`] and [`bf16`], that
+//! Rust has not.
 //!
 //! The driver is `libcuda.so.1`, which comes with NVIDIA's driver rather than with the
 //! toolkit. It is opened by [`Cuda::new`], not linked: a program that never asks for a GPU
@@ -24,6 +25,10 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ptr;
 use std::rc::Rc;
+
+mod half;
+
+pub use half::{bf16, f16};
 
 /// What every function of the driver returns: 0, or what went wrong.
 type CuResult = c_int;
@@ -69,6 +74,7 @@ api! {
     init = c"cuInit"(c_uint);
     device_get = c"cuDeviceGet"(*mut c_int, c_int);
     device_name = c"cuDeviceGetName"(*mut c_char, c_int, c_int);
+    attribute = c"cuDeviceGetAttribute"(*mut c_int, c_int, c_int);
     retain = c"cuDevicePrimaryCtxRetain"(*mut Handle, c_int);
     release = c"cuDevicePrimaryCtxRelease_v2"(c_int);
     set_current = c"cuCtxSetCurrent"(Handle);
@@ -81,6 +87,7 @@ api! {
     load_module = c"cuModuleLoadDataEx"(*mut Handle, *const c_void, c_uint, *mut c_int, *mut *mut c_void);
     unload_module = c"cuModuleUnload"(Handle);
     function = c"cuModuleGetFunction"(*mut Handle, Handle, *const c_char);
+    set_attribute = c"cuFuncSetAttribute"(Handle, c_int, c_int);
     launch = c"cuLaunchKernel"(
         Handle, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, Handle, *mut *mut c_void, *mut *mut c_void
     );
@@ -184,6 +191,8 @@ impl Drop for Driver {
 pub struct Cuda {
     driver: Rc<Driver>,
     name: String,
+    sm: u32,
+    max_shared: u32,
 }
 
 impl Cuda {
@@ -212,12 +221,31 @@ impl Cuda {
             api.check("cuDeviceGetName", (api.device_name)(name.as_mut_ptr().cast(), name.len() as c_int, device))?;
         }
         let name = CStr::from_bytes_until_nul(&name).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Cuda { driver, name })
+        // CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR and _MINOR, and
+        // CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN.
+        let [major, minor, shared] = [75, 76, 97].map(|a| {
+            let mut v = 0;
+            // SAFETY: it writes the attribute's value to `v`.
+            api.check("cuDeviceGetAttribute", unsafe { (api.attribute)(&mut v, a, device) }).map(|()| v as u32)
+        });
+        Ok(Cuda { sm: major? * 10 + minor?, max_shared: shared?, driver, name })
     }
 
     /// The GPU's name, as its driver gives it.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The GPU's compute capability, as PTX names it after `sm_`: 61 for a GTX 10, 86 for an
+    /// RTX 30.
+    pub fn sm(&self) -> u32 {
+        self.sm
+    }
+
+    /// The most bytes of shared memory a block may have, what its kernel declares and what
+    /// the launch gives together: 48 KB on a GTX 10, 99 KB on an RTX 30.
+    pub fn max_shared(&self) -> u32 {
+        self.max_shared
     }
 
     /// Waits for every kernel launched to finish, and says whether one failed.
@@ -371,26 +399,21 @@ mod sealed {
 pub trait Plain: sealed::Sealed + Copy + Default {}
 
 /// A type a kernel takes as a parameter, passed as the bits its `.param` holds: a pointer as
-/// a [`Ptr`], an integer of 32 or 64 bits or an `f32` as itself.
+/// a [`Ptr`], an integer or a float as itself.
 pub trait Param: sealed::Sealed + Copy {}
 
 macro_rules! plain {
-    ($($t:ty),*) => { $(impl sealed::Sealed for $t {} impl Plain for $t {})* };
+    ($($t:ty),*) => { $(impl sealed::Sealed for $t {} impl Plain for $t {} impl Param for $t {})* };
 }
 
-plain!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64);
+plain!(u8, u16, u32, u64, i8, i16, i32, i64, f16, bf16, f32, f64);
 
 impl sealed::Sealed for usize {}
 impl sealed::Sealed for isize {}
 impl<T> sealed::Sealed for Ptr<T> {}
 
-impl Param for u32 {}
-impl Param for i32 {}
-impl Param for u64 {}
-impl Param for i64 {}
 impl Param for usize {}
 impl Param for isize {}
-impl Param for f32 {}
 impl<T> Param for Ptr<T> {}
 
 /// `x` as [`Module::launch`] takes a parameter: the address of its value, which the driver
@@ -399,22 +422,34 @@ pub fn arg<T: Param>(x: &T) -> *const c_void {
     (x as *const T).cast()
 }
 
-/// How many blocks a kernel is launched in, and how many threads each block has: what it
-/// reads as `nctaid` and `ntid`.
+/// How many blocks a kernel is launched in, how many threads each block has, what it reads
+/// as `nctaid` and `ntid`; and the shared memory the launch gives each block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Grid {
     /// Blocks along x, y and z.
     pub blocks: [u32; 3],
     /// Threads in each block along x, y and z.
     pub threads: [u32; 3],
+    /// Bytes of shared memory for each block beyond what the kernel declares: what its
+    /// `shared<[T]>` holds.
+    pub shared: u32,
 }
 
 impl Grid {
-    /// `blocks` blocks of `threads` threads, along x.
+    /// `blocks` blocks of `threads` threads, along x, and no shared memory but what the
+    /// kernel declares.
     pub fn new(blocks: u32, threads: u32) -> Grid {
-        Grid { blocks: [blocks, 1, 1], threads: [threads, 1, 1] }
+        Grid { blocks: [blocks, 1, 1], threads: [threads, 1, 1], shared: 0 }
+    }
+
+    /// The grid with `bytes` of shared memory for each block, for the kernel's `shared<[T]>`.
+    pub fn with_shared(self, bytes: u32) -> Grid {
+        Grid { shared: bytes, ..self }
     }
 }
+
+/// The shared memory a launch gives a block, at most, unless the kernel is let have more.
+const SHARED: u32 = 48 << 10;
 
 /// A PTX module, compiled by the driver for its GPU, and the kernels of it that were asked for.
 pub struct Module {
@@ -461,7 +496,8 @@ impl Module {
     }
 
     /// Launches kernel `index`, as [`load`](Module::load) was given its name, over `grid`,
-    /// with `args`, each a parameter by [`arg`].
+    /// with `args`, each a parameter by [`arg`]. More than 48 KB of shared memory for a block,
+    /// which a GPU from Volta on can give, the kernel is let have first.
     ///
     /// # Safety
     ///
@@ -471,8 +507,16 @@ impl Module {
     pub unsafe fn launch(&self, index: usize, grid: Grid, args: &[*const c_void]) -> Result<(), Error> {
         let ([bx, by, bz], [tx, ty, tz]) = (grid.blocks, grid.threads);
         let (api, f, params) = (&self.driver.api, self.kernels[index], args.as_ptr().cast_mut().cast());
+        if grid.shared > SHARED {
+            // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, which the driver refuses past
+            // what the GPU has.
+            let bytes = c_int::try_from(grid.shared).unwrap_or(c_int::MAX);
+            // SAFETY: `f` is a kernel of the module, which is loaded.
+            api.check("cuFuncSetAttribute", unsafe { (api.set_attribute)(f, 8, bytes) })?;
+        }
         // SAFETY: the caller's. The driver reads `args`, and through them, as it launches.
-        let launched = unsafe { (api.launch)(f, bx, by, bz, tx, ty, tz, 0, ptr::null_mut(), params, ptr::null_mut()) };
+        let launched =
+            unsafe { (api.launch)(f, bx, by, bz, tx, ty, tz, grid.shared, ptr::null_mut(), params, ptr::null_mut()) };
         api.check("cuLaunchKernel", launched)
     }
 }

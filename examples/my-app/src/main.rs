@@ -97,6 +97,78 @@ mod gpu {
         st.global.f32([at_y], yi);
     }
 
+    /// `sums[b]`, the sum of the 256 floats of `x` from `256 b`: a block of 256 threads each,
+    /// adding in a tree in the shared memory it declares, half as many threads each level.
+    pub unsafe extern "ptx-kernel" fn block_sums(x: *const f32, sums: *mut f32) {
+        let tile: shared<[f32; 256], 16>;
+        let (t, b, i, mine): (u32, u32, u32, u32);
+        mov.u32(t, tid.x);
+        mov.u32(b, ctaid.x);
+        mad.lo.u32(i, b, 256, t);
+        let at: u64;
+        mad.wide.u32(at, i, 4, x);
+        let (v, w): (f32, f32);
+        ld.global.f32(v, [at]);
+        mov.u32(mine, tile);
+        mad.lo.u32(mine, t, 4, mine);
+        st.shared.f32([mine], v);
+        let lower: pred;
+        for half in [128, 64, 32, 16, 8, 4, 2, 1] {
+            bar.sync(0);
+            setp.lt.u32(lower, t, half);
+            if lower {
+                ld.shared.f32(w, [mine + 4 * half]);
+                add.rn.f32(v, v, w);
+                st.shared.f32([mine], v);
+            }
+        }
+        setp.eq.u32(lower, t, 0);
+        if lower {
+            mad.wide.u32(at, b, 4, sums);
+            st.global.f32([at], v);
+        }
+    }
+
+    /// Each block's run of floats of `x`, a thread each, reversed in place through the shared
+    /// memory the launch gives: 4 bytes a thread.
+    pub unsafe extern "ptx-kernel" fn reverse_runs(x: *mut f32) {
+        let run: shared<[f32]>;
+        let (t, n, i, j, base): (u32, u32, u32, u32, u32);
+        mov.u32(t, tid.x);
+        mov.u32(n, ntid.x);
+        global_index(i);
+        let at: u64;
+        mad.wide.u32(at, i, 4, x);
+        let v: f32;
+        ld.global.f32(v, [at]);
+        mov.u32(base, run);
+        mad.lo.u32(j, t, 4, base);
+        st.shared.f32([j], v);
+        bar.sync(0);
+        sub.u32(j, n, t);
+        sub.u32(j, j, 1);
+        mad.lo.u32(j, j, 4, base);
+        ld.shared.f32(v, [j]);
+        st.global.f32([at], v);
+    }
+
+    /// `x[i] *= a` for each `i < n`, in `f16`, rounded once.
+    pub unsafe extern "ptx-kernel" fn scale_f16(x: *mut f16, a: f16, n: u32) {
+        let i: u32;
+        global_index(i);
+        let past: pred;
+        setp.ge.u32(past, i, n);
+        if past {
+            ret();
+        }
+        let at: u64;
+        mad.wide.u32(at, i, 2, x);
+        let v: f16;
+        ld.global.b16(v, [at]);
+        mul.rn.f16(v, v, a);
+        st.global.b16([at], v);
+    }
+
     /// The index of this thread among all of the grid's.
     fn global_index(i: u32) {
         let (block, size, thread): (u32, u32, u32);
@@ -107,7 +179,7 @@ mod gpu {
     }
 }
 
-use kgen_cuda::{Cuda, Grid};
+use kgen_cuda::{Cuda, Grid, f16};
 
 /// Whether this cpu runs the kernels.
 fn supported() -> bool {
@@ -148,6 +220,51 @@ fn saxpy(cuda: &Cuda, kernels: &gpu::Kernels, a: f32, x: &[f32], y: &mut [f32]) 
     ys.read_into(y)
 }
 
+/// The sum of each run of 256 floats of `x`, on the GPU, added in a tree; `x` must be a whole
+/// number of runs.
+fn block_sums(cuda: &Cuda, kernels: &gpu::Kernels, x: &[f32]) -> Result<Vec<f32>, kgen_cuda::Error> {
+    assert!(x.len().is_multiple_of(256), "{} floats are no whole number of runs of 256", x.len());
+    let blocks = u32::try_from(x.len() / 256).expect("fewer than 2^32 runs");
+    let mut sums = vec![0.0; blocks as usize];
+    if blocks == 0 {
+        return Ok(sums);
+    }
+    let (xs, out) = (cuda.upload(x)?, cuda.alloc::<f32>(sums.len())?);
+    // SAFETY: 256 floats a block behind `xs`, and a float a block behind `out`, in buffers
+    // that last until `read_into` has waited for the kernel.
+    unsafe { kernels.block_sums(Grid::new(blocks, 256), xs.ptr(), out.ptr())? };
+    out.read_into(&mut sums)?;
+    Ok(sums)
+}
+
+/// Each run of `run` floats of `x` reversed, on the GPU; `x` must be a whole number of runs,
+/// and a run no more threads than a block has.
+fn reverse_runs(cuda: &Cuda, kernels: &gpu::Kernels, x: &mut [f32], run: usize) -> Result<(), kgen_cuda::Error> {
+    assert!(run > 0 && x.len().is_multiple_of(run), "{} floats are no whole number of runs of {run}", x.len());
+    let (blocks, threads) = (u32::try_from(x.len() / run).expect("fewer than 2^32 runs"), run as u32);
+    if blocks == 0 {
+        return Ok(());
+    }
+    let xs = cuda.upload(x)?;
+    // SAFETY: `run` floats a block behind `xs`, and 4 bytes of shared memory a thread, in a
+    // buffer that lasts until `read_into` has waited for the kernel.
+    unsafe { kernels.reverse_runs(Grid::new(blocks, threads).with_shared(4 * threads), xs.ptr())? };
+    xs.read_into(x)
+}
+
+/// `x *= a` on the GPU, each element in `f16`, rounded once.
+fn scale_f16(cuda: &Cuda, kernels: &gpu::Kernels, a: f16, x: &mut [f16]) -> Result<(), kgen_cuda::Error> {
+    let n = u32::try_from(x.len()).expect("fewer than 2^32 halves");
+    if n == 0 {
+        return Ok(());
+    }
+    let xs = cuda.upload(x)?;
+    // SAFETY: `n` halves behind the pointer, in a buffer that lasts until `read_into` has
+    // waited for the kernel.
+    unsafe { kernels.scale_f16(Grid::new(n.div_ceil(256), 256), xs.ptr(), a, n)? };
+    xs.read_into(x)
+}
+
 fn main() {
     if !supported() {
         eprintln!("this cpu lacks AVX2 or FMA, which the kernels are written in");
@@ -169,6 +286,21 @@ fn main() {
                 Ok(()) => println!("saxpy on the {}: 2 * {} + 1 = {}", cuda.name(), x[999], y[999]),
                 Err(e) => println!("saxpy failed on the {}: {e}", cuda.name()),
             }
+            let ones: Vec<f32> = (0..1024).map(|i| i as f32).collect();
+            match block_sums(&cuda, &kernels, &ones) {
+                Ok(sums) => println!("sums of 0..1024 in runs of 256, in shared memory: {sums:?}"),
+                Err(e) => println!("block_sums failed: {e}"),
+            }
+            let mut run: Vec<f32> = (0..8).map(|i| i as f32).collect();
+            match reverse_runs(&cuda, &kernels, &mut run, 4) {
+                Ok(()) => println!("0..8 reversed in runs of 4, in shared memory the launch gives: {run:?}"),
+                Err(e) => println!("reverse_runs failed: {e}"),
+            }
+            let mut halves = [f16::from_f32(0.1), f16::from_f32(1000.0)];
+            match scale_f16(&cuda, &kernels, f16::from_f32(3.0), &mut halves) {
+                Ok(()) => println!("[0.1, 1000] times 3 in f16: {halves:?}"),
+                Err(e) => println!("scale_f16 failed: {e}"),
+            }
         }
         Err(e) => println!("no GPU to run saxpy on: {e}"),
     }
@@ -179,7 +311,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use kgen_cuda::Cuda;
+    use kgen_cuda::{Cuda, f16};
 
     use super::{gpu, kernels};
 
@@ -267,6 +399,67 @@ mod tests {
                 unsafe { (kernels::dot1(x.as_ptr(), y.as_ptr(), n), kernels::dot4(x.as_ptr(), y.as_ptr(), n)) };
             assert_eq!(one.to_bits(), dot(&x, &y, 1).to_bits(), "{n} floats, one accumulator");
             assert_eq!(four.to_bits(), dot(&x, &y, 4).to_bits(), "{n} floats, four accumulators");
+        }
+    }
+
+    /// The GPU, and its kernels; on a machine with none, `None`, and the test is skipped.
+    fn cuda() -> Option<(Cuda, gpu::Kernels)> {
+        let cuda = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")).ok()?;
+        let kernels = gpu::Kernels::load(&cuda).unwrap();
+        Some((cuda, kernels))
+    }
+
+    /// What `block_sums` does to each run of 256, in its order: each float of the lower half
+    /// added to the one as far into the upper, then the same of what that leaves.
+    fn tree(run: &[f32]) -> f32 {
+        let mut tile = run.to_vec();
+        for half in [128, 64, 32, 16, 8, 4, 2, 1] {
+            for t in 0..half {
+                tile[t] += tile[t + half];
+            }
+        }
+        tile[0]
+    }
+
+    #[test]
+    fn block_sums_is_its_tree_bit_for_bit() {
+        let Some((cuda, kernels)) = cuda() else { return };
+        for runs in [0, 1, 2, 37] {
+            let x = floats(256 * runs, runs as u32 + 7);
+            let want: Vec<u32> = x.chunks(256).map(|run| tree(run).to_bits()).collect();
+            let got = super::block_sums(&cuda, &kernels, &x).unwrap();
+            assert_eq!(got.iter().map(|s| s.to_bits()).collect::<Vec<_>>(), want, "{runs} runs");
+        }
+    }
+
+    #[test]
+    fn reverse_runs_reverses_each_run() {
+        let Some((cuda, kernels)) = cuda() else { return };
+        // A run of 1024 is as many threads as a block has, and 4 KB of shared memory.
+        for (n, run) in [(12, 3), (1024, 1), (4096, 1024), (1000, 40)] {
+            let mut x: Vec<f32> = (0..n).map(|i| i as f32).collect();
+            let want: Vec<f32> = x.chunks(run).flat_map(|r| r.iter().rev().copied()).collect();
+            super::reverse_runs(&cuda, &kernels, &mut x, run).unwrap();
+            assert_eq!(x, want, "{n} floats in runs of {run}");
+        }
+    }
+
+    /// `scale_f16` on every `f16` against the product in `f32`, which is exact, rounded to an
+    /// `f16` once as `mul.rn.f16` rounds it.
+    #[test]
+    fn scale_f16_rounds_the_product_once() {
+        let Some((cuda, kernels)) = cuda() else { return };
+        for a in [3.0, -0.1, 1.0e-3, 600.0] {
+            let a = f16::from_f32(a);
+            let mut x: Vec<f16> = (0..=u16::MAX).map(f16::from_bits).collect();
+            let want: Vec<f16> = x.iter().map(|x| f16::from_f32(x.to_f32() * a.to_f32())).collect();
+            super::scale_f16(&cuda, &kernels, a, &mut x).unwrap();
+            for (bits, (got, want)) in (0..=u16::MAX).zip(x.iter().zip(&want)) {
+                match want.to_f32().is_nan() {
+                    true => assert!(got.to_f32().is_nan(), "{bits:#06x} times {a}"),
+                    false => assert_eq!(got.to_bits(), want.to_bits(), "{bits:#06x} times {a}"),
+                }
+            }
         }
     }
 

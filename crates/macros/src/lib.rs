@@ -26,7 +26,8 @@
 //!   one PTX module, `PTX`, and `Kernels::load(&cuda)` has the driver compile it for the GPU
 //!   it finds; then each kernel is launched by the method of its name, which takes a
 //!   `kgen_cuda::Grid` and the kernel's parameters, a pointer as the `kgen_cuda::Ptr` a
-//!   buffer on the GPU gives. A crate with GPU kernels depends on `kgen-cuda` for these.
+//!   buffer on the GPU gives, and an `f16` or a `bf16` as kgen-cuda's, Rust having neither.
+//!   A crate with GPU kernels depends on `kgen-cuda` for these.
 //! - A function without an ABI is a helper, inlined where a kernel calls it, and leaves
 //!   nothing behind. Constants and every other item stay as written, for Rust to use as well.
 //!   A constant a kernel reads counts as used, as it would if Rust had seen the read: only one
@@ -260,10 +261,10 @@ fn launcher(f: &Fn, index: Option<usize>, top: &[TokenTree]) -> TokenStream {
         match &param[colon + 1..] {
             [star, kind, pointee @ ..] if is_punct(star, '*') && (is_ident(kind, "const") || is_ident(kind, "mut")) => {
                 params.extend(parse("::kgen_cuda::Ptr<"));
-                params.extend(pointee.iter().cloned());
+                params.extend(host(pointee));
                 params.extend(parse(">"));
             }
-            ty => params.extend(ty.iter().cloned()),
+            ty => params.extend(host(ty)),
         }
         params.extend(parse(","));
     }
@@ -393,6 +394,14 @@ fn error(span: Span, message: &str) -> TokenStream {
             t
         })
         .collect()
+}
+
+/// The type `ty` as the host names it: `f16` and `bf16`, which Rust has not, are kgen-cuda's.
+fn host(ty: &[TokenTree]) -> TokenStream {
+    match ty {
+        [t] if is_ident(t, "f16") || is_ident(t, "bf16") => parse(&format!("::kgen_cuda::{t}")),
+        _ => ty.iter().cloned().collect(),
+    }
 }
 
 fn parse(s: &str) -> TokenStream {
