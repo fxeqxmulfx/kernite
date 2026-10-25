@@ -38,13 +38,11 @@ pub mod kernels {
     pub const TAYLOR: [f32; 7] = [1.0 / 720.0, 1.0 / 120.0, 1.0 / 24.0, 1.0 / 6.0, 0.5, 1.0, 1.0];
 
     /// What `matmul` does to each output before it stores it: nothing, adds the residual
-    /// stream's, or keeps it only above zero. Only the kernels read these, which Rust does not
-    /// see.
-    #[allow(dead_code)]
+    /// stream's, or keeps it only above zero.
     pub const STORE: usize = 0;
-    #[allow(dead_code, missing_docs)]
+    #[allow(missing_docs)]
     pub const ADD: usize = 1;
-    #[allow(dead_code, missing_docs)]
+    #[allow(missing_docs)]
     pub const RELU: usize = 2;
 
     /// `x0 = wte[token] + wpe[t]` for rows `t0..n`, `p` the parameters.

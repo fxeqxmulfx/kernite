@@ -154,3 +154,47 @@ fn a_kernel_takes_what_sysv_passes_in_registers() {
     let code = compile("a: f32, p: *mut f32, b: f32", "vmovss([p], b.xmm); vaddss(b.xmm, a.xmm, b.xmm);").unwrap();
     assert_eq!(code, "vmovss dword ptr [rdi], xmm1\nvaddss xmm1, xmm0, xmm1\nvzeroupper\nret");
 }
+
+/// Rust never sees a kernel's body run, so kgen says which of the module's constants it read:
+/// what the macro marks as used, so that only the constants nothing reads are dead code.
+#[test]
+fn a_kernel_names_the_constants_it_reads() {
+    let src = r#"
+        const ADD: usize = 1;
+        const STORE: usize = 0;
+        const OFFSET: usize = 8 * LANE;
+        const LANE: usize = 4;
+        const SPARE: usize = 2;
+        const UNREAD: usize = 3;
+
+        pub unsafe extern "sysv64" fn stores(x: *mut f32, y: *const f32) {
+            let v: ymm;
+            vmovups(v, [y]);
+            then::<STORE>(x, v);
+        }
+
+        pub unsafe extern "sysv64" fn adds(x: *mut f32, y: *const f32) {
+            let v: ymm;
+            vmovups(v, [y]);
+            then::<ADD>(x, v);
+        }
+
+        fn then<const HOW: usize>(x: gpr, v: ymm) {
+            if HOW == ADD {
+                vaddps(v, v, [x + OFFSET]);
+            }
+            vmovups([x], v);
+        }
+
+        fn spare(x: gpr) {
+            add(x, SPARE);
+        }
+    "#;
+    let module = kgen::lang::parse(src).unwrap();
+    let reads = |name| kgen::x86(&module, kgen::function(&module, name).unwrap()).unwrap().consts;
+    // `STORE` as a helper's value and `ADD` in the `if` that chooses, in the module's order;
+    // not `OFFSET`, in the branch not taken, nor `SPARE`, in a helper not called.
+    assert_eq!(reads("stores"), ["ADD", "STORE"]);
+    // `OFFSET` in the branch taken, and `LANE` through it.
+    assert_eq!(reads("adds"), ["ADD", "OFFSET", "LANE"]);
+}

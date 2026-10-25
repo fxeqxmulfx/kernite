@@ -103,10 +103,19 @@ impl Fault {
     }
 }
 
+/// What running a kernel found, besides what it asked of its target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Run {
+    /// Every variable declared, with where: the place to blame for what goes wrong with one
+    /// later, when its registers are allocated.
+    pub decls: Vec<(String, Span)>,
+    /// The module's constants it read, itself or through others, in the module's order. Rust
+    /// never sees a kernel's body run, so it sees none of these reads.
+    pub consts: Vec<String>,
+}
+
 /// Runs kernel `f` of `module` on `target`: its parameters declared, its body evaluated.
-/// Returns every variable declared, with where: the place to blame for what goes wrong with
-/// one later, when its registers are allocated.
-pub fn kernel<T: Target>(module: &Module, f: &Fn, target: &mut T) -> Result<Vec<(String, Span)>, Error> {
+pub fn kernel<T: Target>(module: &Module, f: &Fn, target: &mut T) -> Result<Run, Error> {
     let mut e = Eval::new(module, target);
     if let Some(g) = f.generics.first() {
         return Err(err(g.span, "a kernel takes no compile-time arguments; a helper does"));
@@ -126,7 +135,9 @@ pub fn kernel<T: Target>(module: &Module, f: &Fn, target: &mut T) -> Result<Vec<
     e.scopes.push(scope);
     e.block(f.body.as_ref().map_err(Clone::clone)?)?;
     e.target.end().map_err(|m| err(f.span, m))?;
-    Ok(e.decls)
+    // A constant is evaluated the first time it is named, so the ones evaluated are the ones read.
+    let consts = e.consts.iter().filter(|(_, s)| matches!(s, State::Done(_))).map(|(c, _)| c.name.clone()).collect();
+    Ok(Run { decls: e.decls, consts })
 }
 
 /// How deep helpers may call helpers.

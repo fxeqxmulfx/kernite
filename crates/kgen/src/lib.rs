@@ -74,34 +74,45 @@ pub fn render(program: &Program<Op>) -> Result<Listing, Error> {
     Ok(kgen_x86::intel::print(&compiled))
 }
 
+/// A kernel compiled, and the constants of its module it read. Rust never sees those reads,
+/// so whatever writes the module out for Rust has to say they happened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Kernel<T> {
+    /// What it compiled to: its listing, or its `.entry`.
+    pub code: T,
+    /// The constants, by name, in the module's order.
+    pub consts: Vec<String>,
+}
+
 /// Kernel `f` of `module`, for x86-64 under SysV. What goes wrong is placed where it can be
 /// mended: an instruction where it is called, a register that ran out where its variable is
 /// declared.
-pub fn x86(module: &Module, f: &Fn) -> Result<Listing, kgen_lang::Error> {
+pub fn x86(module: &Module, f: &Fn) -> Result<Kernel<Listing>, kgen_lang::Error> {
     let mut kernel = kgen_x86::lang::Kernel::new(&f.name);
-    let decls = kgen_lang::kernel(module, f, &mut kernel)?;
-    render(&kernel.finish())
-        .map_err(|e| kgen_lang::Error { span: blame(&e, &decls).unwrap_or(f.span), message: e.to_string() })
+    let run = kgen_lang::kernel(module, f, &mut kernel)?;
+    let code = render(&kernel.finish())
+        .map_err(|e| kgen_lang::Error { span: blame(&e, &run.decls).unwrap_or(f.span), message: e.to_string() })?;
+    Ok(Kernel { code, consts: run.consts })
 }
 
 /// Kernel `name` of the module in `src`, for x86-64; an error reads `line:column: what`.
 pub fn x86_str(src: &str, name: &str) -> Result<Listing, String> {
     let module = kgen_lang::parse(src).map_err(|e| e.at(src))?;
     let f = function(&module, name).ok_or_else(|| format!("no kernel `{name}`"))?;
-    x86(&module, f).map_err(|e| e.at(src))
+    x86(&module, f).map(|k| k.code).map_err(|e| e.at(src))
 }
 
 /// Kernel `f` of `module`, in PTX: its `.entry`, for [`ptx_module`] to put in a module.
 /// Nothing allocates its registers, which `ptxas` does, but what allocation would find wrong
 /// that does not depend on the registers is found here: a variable read before it is written,
 /// a jump to no label, control running off the end.
-pub fn ptx(module: &Module, f: &Fn) -> Result<Entry, kgen_lang::Error> {
+pub fn ptx(module: &Module, f: &Fn) -> Result<Kernel<Entry>, kgen_lang::Error> {
     let mut kernel = kgen_ptx::lang::Kernel::new(&f.name);
-    let decls = kgen_lang::kernel(module, f, &mut kernel)?;
-    let entry = kernel.finish();
-    kgen_compile::check(&entry.program)
-        .map_err(|e| kgen_lang::Error { span: blame(&e, &decls).unwrap_or(f.span), message: e.to_string() })?;
-    Ok(entry)
+    let run = kgen_lang::kernel(module, f, &mut kernel)?;
+    let code = kernel.finish();
+    kgen_compile::check(&code.program)
+        .map_err(|e| kgen_lang::Error { span: blame(&e, &run.decls).unwrap_or(f.span), message: e.to_string() })?;
+    Ok(Kernel { code, consts: run.consts })
 }
 
 /// The PTX module of `entries`, for the CUDA driver to load.
@@ -118,7 +129,7 @@ pub fn ptx_str(src: &str) -> Result<String, String> {
         if let ItemKind::Fn(f) = &item.kind
             && f.abi.as_ref().and_then(|(abi, _)| Abi::of(abi)) == Some(Abi::PtxKernel)
         {
-            entries.push(ptx(&module, f).map_err(|e| e.at(src))?);
+            entries.push(ptx(&module, f).map_err(|e| e.at(src))?.code);
         }
     }
     Ok(ptx_module(&entries))

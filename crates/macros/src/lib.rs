@@ -29,6 +29,8 @@
 //!   buffer on the GPU gives. A crate with GPU kernels depends on `kgen-cuda` for these.
 //! - A function without an ABI is a helper, inlined where a kernel calls it, and leaves
 //!   nothing behind. Constants and every other item stay as written, for Rust to use as well.
+//!   A constant a kernel reads counts as used, as it would if Rust had seen the read: only one
+//!   that nothing reads is `dead_code`.
 //!
 //! ```ignore
 //! #[kgen_macros::kernels]
@@ -91,7 +93,7 @@ fn expand(body: TokenStream) -> TokenStream {
         Err(e) => return error(at(e.span), &e.message),
     };
     let mut out = TokenStream::new();
-    let (mut listings, mut entries, mut launchers) = (vec![], vec![], vec![]);
+    let (mut listings, mut entries, mut launchers, mut read) = (vec![], vec![], vec![], vec![]);
     for item in &module.items {
         let f = match &item.kind {
             ItemKind::Const(_) | ItemKind::Other => {
@@ -123,22 +125,30 @@ fn expand(body: TokenStream) -> TokenStream {
         }
         match abi {
             Abi::Sysv64 => match kgen::x86(&module, f) {
-                Ok(listing) if trusted => {
-                    out.extend(naked(f, &listing, &top));
-                    listings.push((f.name.clone(), listing.text()));
+                Ok(kernel) => {
+                    if trusted {
+                        out.extend(naked(f, &kernel.code, &top));
+                        listings.push((f.name.clone(), kernel.code.text()));
+                    } else {
+                        out.extend(stub(f, &top));
+                    }
+                    read.extend(kernel.consts);
                 }
-                Ok(_) => out.extend(stub(f, &top)),
                 Err(e) => {
                     out.extend(error(at(e.span), &e.message));
                     out.extend(stub(f, &top));
                 }
             },
             Abi::PtxKernel => match kgen::ptx(&module, f) {
-                Ok(entry) if trusted => {
-                    launchers.push((f, Some(entries.len())));
-                    entries.push(entry);
+                Ok(kernel) => {
+                    if trusted {
+                        launchers.push((f, Some(entries.len())));
+                        entries.push(kernel.code);
+                    } else {
+                        launchers.push((f, None));
+                    }
+                    read.extend(kernel.consts);
                 }
-                Ok(_) => launchers.push((f, None)),
                 Err(e) => {
                     out.extend(error(at(e.span), &e.message));
                     launchers.push((f, None));
@@ -146,6 +156,7 @@ fn expand(body: TokenStream) -> TokenStream {
             },
         }
     }
+    out.extend(used(&module, &read));
     if !listings.is_empty() {
         let mut s = String::from(
             "/// Each x86 kernel's listing, by name: where its variables live, and its code with\n\
@@ -160,6 +171,23 @@ fn expand(body: TokenStream) -> TokenStream {
         out.extend(gpu(&launchers, &entries, &top));
     }
     out
+}
+
+/// A `const _` that names each constant of `module` in `read`. The kernels read them, but Rust
+/// never sees a kernel's body run, so it would find them unused.
+fn used(module: &lang::Module, read: &[String]) -> TokenStream {
+    let lets: String = module
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::Const(c) if read.contains(&c.name) => Some(format!("let _ = {};\n", c.name)),
+            _ => None,
+        })
+        .collect();
+    if lets.is_empty() {
+        return TokenStream::new();
+    }
+    parse(&format!("const _: () = {{\n{lets}}};"))
 }
 
 /// `PTX`, the module the GPU kernels are, and `Kernels`, which loads it on a GPU and has a

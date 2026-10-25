@@ -177,3 +177,20 @@ fn a_kernel_takes_pointers_and_numbers_and_returns_nothing() {
     let e = kgen::ptx_str("unsafe extern \"ptx-kernel\" fn k() -> f32 {}").unwrap_err();
     assert_eq!(e, "1:38: a GPU kernel returns nothing, not `f32`: it writes what it works out to memory");
 }
+
+#[test]
+fn a_kernel_names_the_constants_it_reads() {
+    let src = r#"
+        const ONE: f32 = 1.0;
+        const UNREAD: u32 = 2;
+
+        pub unsafe extern "ptx-kernel" fn k(x: *mut f32) {
+            let v: f32;
+            mov.f32(v, ONE);
+            st.global.f32([x], v);
+        }
+    "#;
+    let module = kgen::lang::parse(src).unwrap();
+    let k = kgen::ptx(&module, kgen::function(&module, "k").unwrap()).unwrap();
+    assert_eq!(k.consts, ["ONE"]);
+}
