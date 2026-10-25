@@ -83,12 +83,13 @@ ys.read_into(&mut y)?;
 
 The PTX target knows every instruction of PTX's for the GPUs from Fermi, `sm_20`, to Ampere, `sm_86`, in each form
 `ptxas` takes, [`forms`](crates/ptx/src/forms.rs), and checks each operand against them; all but `call`, since a
-helper is inlined where it is called and is no `.func`. Where `ptxas` takes more than PTX's ISA says, kgen keeps to
-the ISA, and where the ISA says nothing, to `ptxas`. Each form, and each of its words, says the oldest version of PTX
-and the oldest GPU it needs, as `ptxas` has them, back to PTX 1.0. A module's `.version` and `.target` are the oldest
-that have every instruction its kernels use: PTX 2.3 and `sm_20` at the least. Where `ptxas` is installed, a test
-hands it every form at what kgen says it needs, which it must take, and at the version before and on the GPU before,
-which it must refuse.
+helper is inlined where it is called and is no `.func`. Where `ptxas` takes a form or an operand that PTX's ISA does
+not have, kgen keeps to the ISA, and where the ISA says nothing, to `ptxas`. Each form, and each of its words, says
+the oldest version of PTX and the oldest GPU `ptxas` takes it at, back to PTX 1.0, which is at times older than the
+ISA says: `ptxas` takes `ld.mmio.acquire` for `sm_70`, which the ISA has from `sm_75`. A module's `.version` and
+`.target` are the oldest that have every instruction its kernels use: PTX 2.3 and `sm_20` at the least. Where
+`ptxas` is installed, a test hands it every form at what kgen says it needs, which it must take, and at the version
+before and on the GPU before, which it must refuse.
 
 An instruction's name is Rust's words: a word that starts with a digit takes a `_`, a `::` is `__`, and a keyword
 takes `r#`, so `tex.2d` is `tex._2d`, `ld.global.L2::64B` is `ld.global.L2__64B`, and `cp.async` is `cp.r#async`. A
