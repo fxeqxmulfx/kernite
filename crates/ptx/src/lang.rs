@@ -24,6 +24,9 @@
 //!   be; `!p` is a predicate read inverted, and `-a` a source negated, where PTX negates one.
 //! - A video instruction takes a part of a 32-bit variable, as PTX selects it: `a.b0` is its
 //!   lowest byte, `a.h1` its high half, and `d.b310` three bytes of a result.
+//! - A surface is its handle, the `u64` a kernel takes for a CUDA surface object, in brackets
+//!   with the coordinates in it, an array's layer first: `suld.b._2d.b32.trap(v, [s, (x, y)])`,
+//!   `sust.b.a1d.b32.trap([s, (i, x)], v)`, `suq.width.b32(w, [s])`.
 //! - `if p { .. }` runs each instruction inside where `p`, a `pred`, holds, and `if !p` where
 //!   it does not; a guarded `bra(label)` is a branch. `brx.idx(i, (a, b, c))` jumps to the
 //!   label `i` picks of those taken together, through a table it declares before it.
@@ -40,7 +43,7 @@ use kgen_core::{
 };
 use kgen_lang::{Fault, Guard, Operand as Given, Target};
 
-use crate::forms::{self, Bound, Check, Count, Imm, Part, Role, Space, Spec};
+use crate::forms::{self, Bound, Check, Count, Imm, Part, Role, Space, Spec, TyRef};
 use crate::{Entry, Kind, Memory, Needs, Op, Param, Ty};
 
 /// A variable: a register of the type it was declared, or a part of one, or memory the
@@ -110,9 +113,10 @@ struct Partial {
 }
 
 /// An instruction's operands written out: their text, what they read and write, the special
-/// registers among them with what those need, and the labels of a table it jumps through; and
-/// as they are written, how many are addresses so far, and the bytes the instruction reaches
-/// at once at each.
+/// registers among them and what those and the rest need, and the labels of a table it jumps
+/// through; and as they are written, how many are addresses so far, the bytes the
+/// instruction reaches at once at each, and whether they are those in brackets, where a
+/// register is of the type the form says, though `+wide` lets the others be wider.
 #[derive(Default)]
 struct Written {
     texts: Vec<String>,
@@ -122,6 +126,7 @@ struct Written {
     table: Vec<u32>,
     addrs: usize,
     reach: u64,
+    inside: bool,
 }
 
 /// Why operands are not those of a form.
@@ -367,6 +372,7 @@ impl Kernel {
             let text =
                 self.operand(b, spec, a, name, &mut w).map_err(|m| Miss::At(i, shaped(b, spec, a), Fault::at(i, m)))?;
             w.texts.push(text);
+            w.needs = w.needs.and(spec.needs);
         }
         if b.form.checks.contains(&Check::Neg) {
             let negs: Vec<usize> = (0..args.len()).filter(|&i| specs[i].neg).collect();
@@ -404,6 +410,10 @@ impl Kernel {
                 }
                 Ok(format!("$T{}", self.tables))
             }
+            (Role::Handle, Given::List(items)) => self.handle(b, spec, items, name, w),
+            (Role::Handle, &Given::Mem(kgen_lang::Mem { base: Some(v), index: None, disp: 0 })) => {
+                self.handle(b, spec, &[Given::Var(v)], name, w)
+            }
             (Role::Addr(access), Given::Mem(m)) => self.address(b, m, access, name, w),
             (Role::Imm(imm), Given::Int(x)) => known(imm, *x, name),
             (Role::Dst | Role::Src, _) => self.value(b, spec, a, name, w),
@@ -421,6 +431,7 @@ impl Kernel {
             Given::Pair(x, y) => {
                 let x = self.several(b, spec, x, name, w)?;
                 let y = self.several(b, second, y, name, w)?;
+                w.needs = w.needs.and(second.needs);
                 if x == "_" && y == "_" {
                     return Err(format!("`{name}` writes one of the two at least: `p | _` or `_ | q`"));
                 }
@@ -437,6 +448,13 @@ impl Kernel {
         let n = lanes(b, spec);
         let braced = matches!(spec.count, Count::Fixed(_));
         if n == 1 && !braced {
+            // ptxas leaves a register of a vector unwritten, but not the one of a name with
+            // neither `.v2` nor `.v4`.
+            if spec.count == Count::Vec && matches!(a, Given::Special(s) if s == "_") {
+                return Err(format!(
+                    "`{name}` writes its one result; `_` stands for one of a vector's, as `.v2` and `.v4` write"
+                ));
+            }
             return self.one(b, spec, a, name, w);
         }
         let parts = match a {
@@ -446,8 +464,11 @@ impl Kernel {
             _ => return Err(format!("`{name}` wants {}; this is {}", describe(b, spec), self.given(a))),
         };
         let mut texts = vec![];
-        for part in parts {
-            texts.push(self.one(b, spec, part, name, w)?);
+        for (k, part) in parts.iter().enumerate() {
+            texts.push(match spec.lead {
+                Some(t) if k == 0 => self.one(b, &Spec { ty: Some(TyRef::Fixed(t)), ..spec.clone() }, part, name, w)?,
+                _ => self.one(b, spec, part, name, w)?,
+            });
         }
         if texts.iter().all(|t| t == "_") {
             return Err(format!("`{name}` writes one of them at least"));
@@ -490,7 +511,7 @@ impl Kernel {
                     }
                     _ => {}
                 }
-                let fits = if b.form.wide { ty.fits_wide(t) } else { ty.fits(t) };
+                let fits = if b.form.wide && !w.inside { ty.fits_wide(t) } else { ty.fits(t) };
                 if !fits {
                     return Err(format!("`{name}` wants a `{}` variable; this is a `{}`", t.name(), ty.name()));
                 }
@@ -593,6 +614,30 @@ impl Kernel {
             },
             a => Err(format!("`{name}` wants {}; this is {}", describe(b, spec), self.given(a))),
         }
+    }
+
+    /// `items`, in brackets, as the texture or surface `spec` is: its handle, and the
+    /// coordinates in it where it takes them.
+    fn handle(
+        &self,
+        b: &Bound,
+        spec: &Spec,
+        items: &[Given<Var>],
+        name: &str,
+        w: &mut Written,
+    ) -> Result<String, String> {
+        if items.len() != spec.inner.len() {
+            let these = match items.len() {
+                1 => "1 operand".into(),
+                n => format!("{n} operands"),
+            };
+            return Err(format!("`{name}` wants {}; this is {these} in brackets", describe(b, spec)));
+        }
+        w.inside = true;
+        let texts: Result<Vec<String>, String> =
+            spec.inner.iter().zip(items).map(|(s, a)| self.several(b, s, a, name, w)).collect();
+        w.inside = false;
+        Ok(format!("[{}]", texts?.join(", ")))
     }
 
     /// The address `m`, in the state space `b` names in its place.
@@ -728,7 +773,7 @@ impl Kernel {
             Given::Pair(..) => "two operands joined by `|`".into(),
             Given::Not(_) => "an operand inverted".into(),
             Given::Neg(_) => "an operand negated".into(),
-            Given::List(_) => "operands in brackets".into(),
+            Given::List(items) => format!("{} operands in brackets", items.len()),
         }
     }
 }
@@ -769,6 +814,7 @@ fn lanes(b: &Bound, spec: &Spec) -> usize {
 fn shaped(b: &Bound, spec: &Spec, a: &Given<Var>) -> bool {
     match (spec.role, a) {
         (Role::Addr(_), Given::Mem(_))
+        | (Role::Handle, Given::List(_) | Given::Mem(_))
         | (Role::Label, Given::Label(_))
         | (Role::Labels, Given::Vector(_))
         | (Role::Imm(_), Given::Int(_)) => true,
@@ -861,6 +907,16 @@ fn describe(b: &Bound, spec: &Spec) -> String {
         Role::Addr(_) => return "an address, as in `[p + 4]`".into(),
         Role::Label => return "a label".into(),
         Role::Labels => return "labels taken together, as `(a, b)`, for a variable to pick one".into(),
+        Role::Handle => {
+            let what = if b.form.op.starts_with("su") { "surface" } else { "texture" };
+            let Some(at) = spec.inner.get(1) else { return format!("a {what}'s handle in brackets, `[t]`") };
+            let names = if at.lead.is_some() { ["i", "x", "y", "z"] } else { ["x", "y", "z", "w"] };
+            let at = match lanes(b, at) {
+                1 => names[0].to_string(),
+                n => format!("({})", names[..n].join(", ")),
+            };
+            return format!("a {what}'s handle and the coordinates in it, in brackets: `[t, {at}]`");
+        }
         Role::Imm(_) => return "an integer known now".into(),
         Role::Dst if spec.sink => format!("a `{t}` variable to write, or `_`"),
         Role::Dst => format!("a `{t}` variable to write"),
@@ -869,9 +925,17 @@ fn describe(b: &Bound, spec: &Spec) -> String {
         Role::Src if spec.sreg => format!("a `{t}` variable, a value or a special register"),
         Role::Src => format!("a `{t}` variable or a value"),
     };
-    match lanes(b, spec) {
-        1 => one,
-        n => format!("{n} operands taken together, each {one}"),
+    match (lanes(b, spec), spec.lead) {
+        (1, _) => one,
+        (n, Some(lead)) => {
+            let first =
+                describe(b, &Spec { ty: Some(TyRef::Fixed(lead)), lead: None, count: Count::One, ..spec.clone() });
+            match n - 1 {
+                1 => format!("{n} operands taken together, {first} and then {one}"),
+                rest => format!("{n} operands taken together, {first} and then {rest} each {one}"),
+            }
+        }
+        (n, None) => format!("{n} operands taken together, each {one}"),
     }
 }
 

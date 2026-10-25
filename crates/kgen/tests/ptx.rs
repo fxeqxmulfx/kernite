@@ -133,7 +133,7 @@ fn ptxas_takes_what_kgen_writes() {
         return;
     };
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    for (name, kernels) in [("kernels", KERNELS), ("shared", SHARED), ("tables", TABLES)] {
+    for (name, kernels) in [("kernels", KERNELS), ("shared", SHARED), ("tables", TABLES), ("surfaces", SURFACES)] {
         let (src, out) = (dir.join(format!("{name}.ptx")), dir.join(format!("{name}.cubin")));
         std::fs::write(&src, kgen::ptx_str(kernels).unwrap()).unwrap();
         let run = Command::new(&ptxas)
@@ -365,9 +365,50 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
             "2:24: `perctamemorysize` is a special register of PTX's that kgen does not read: a kernel has it only \
              with the directive `.minperctamemory`, which kgen does not write",
         ),
+        (
+            "let i: u32; suq.width.b32(i, s);",
+            "2:30: `suq.width.b32` wants a surface's handle in brackets, `[t]`; this is a `u64` variable",
+        ),
+        (
+            "let i: u32; suld.b._2d.b32.trap(i, [s]);",
+            "2:36: `suld.b.2d.b32.trap` wants a surface's handle and the coordinates in it, in brackets: `[t, (x, \
+             y)]`; this is 1 operand in brackets",
+        ),
+        (
+            "let i: u32; suld.b._1d.b32.trap(i, [s + 4]);",
+            "2:36: `suld.b.1d.b32.trap` wants a surface's handle and the coordinates in it, in brackets: `[t, x]`; \
+             this is an address",
+        ),
+        (
+            "let i: u32; suld.b.a1d.b32.trap(i, [s, n]);",
+            "2:36: `suld.b.a1d.b32.trap` wants 2 operands taken together, a `u32` variable or a value and then a \
+             `s32` variable or a value; this is a `u32` variable",
+        ),
+        (
+            "let (i, f): (u32, f32); suld.b.a1d.b32.trap(i, [s, (f, n)]);",
+            "2:48: `suld.b.a1d.b32.trap` wants a `u32` variable; this is a `f32`",
+        ),
+        (
+            "let (i, w): (u64, s64); mov.s64(w, 0); suld.b._1d.b32.trap(i, [s, w]);",
+            "2:63: `suld.b.1d.b32.trap` wants a `s32` variable; this is a `s64`",
+        ),
+        (
+            "let i: u32; suld.b._1d.b32.trap(i, [n, n]);",
+            "2:36: `suld.b.1d.b32.trap` wants a `u64` variable; this is a `u32`",
+        ),
+        (
+            "suld.b._1d.b32.trap(_, [s, n]);",
+            "2:21: `suld.b.1d.b32.trap` writes its one result; `_` stands for one of a vector's, as `.v2` and `.v4` \
+             write",
+        ),
+        (
+            "let v: f32; sured.b.add._1d.u32.trap([s, 4], v);",
+            "2:46: `sured.b.add.1d.u32.trap` wants a `u32` variable; this is a `f32`",
+        ),
+        ("sured.b.xor._1d.b32.trap([s, n], n);", "2:21: PTX's `sured` has no `.xor` that kgen knows"),
     ];
     for (body, want) in cases {
-        assert_eq!(compile("x: *mut f32, n: u32, h: f16", body).unwrap_err(), want, "{body}");
+        assert_eq!(compile("x: *mut f32, n: u32, h: f16, s: u64", body).unwrap_err(), want, "{body}");
     }
 }
 
@@ -411,6 +452,9 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         ("let v: f32; max.xorsign.abs.f32(v, f, f);", ".version 7.2 .target sm_86"),
         ("let v: b128; ld.global.b128(v, [x]);", ".version 8.3 .target sm_70"),
         ("let a: u64; clmad.lo.u64(a, y, y, y);", ".version 9.3 .target sm_80"),
+        ("let i: u32; suld.b._2d.b32.trap(i, [y, (n, n)]);", ".version 3.1 .target sm_20"),
+        ("let i: u32; suq.memory_layout.b32(i, [y]);", ".version 4.2 .target sm_20"),
+        ("sured.b.max._1d.u64.trap([y, 0], y);", ".version 8.1 .target sm_50"),
     ];
     for (body, want) in cases {
         let ptx = compile("x: *mut f32, n: u32, f: f32, y: u64", body).unwrap();
@@ -504,6 +548,54 @@ fn a_jump_through_a_table_declares_the_table_before_it() {
     assert!(parity.contains(line), "{line}{parity}");
 }
 
+const SURFACES: &str = r#"
+    /// The texel at the thread's `(x, y)` of the 2D surface `from`, four `f32`s, copied to the
+    /// same place in `to`.
+    pub unsafe extern "ptx-kernel" fn copy(from: u64, to: u64) {
+        let (x, y): (u32, u32);
+        mov.u32(x, tid.x);
+        mov.u32(y, tid.y);
+        shl.b32(x, x, 4);
+        let (r, g, b, a): (f32, f32, f32, f32);
+        suld.b._2d.v4.b32.clamp((r, g, b, a), [from, (x, y)]);
+        sust.b._2d.v4.b32.clamp([to, (x, y)], (r, g, b, a));
+    }
+
+    /// One more in the bin `x[i]` of the 1D surface `bins`, `u32`s, for each thread `i` of the
+    /// block, and none for a bin past the last.
+    pub unsafe extern "ptx-kernel" fn histogram(x: *const u32, bins: u64) {
+        let i: u32;
+        mov.u32(i, tid.x);
+        let at: u64;
+        mad.wide.u32(at, i, 4, x);
+        let (v, width): (u32, u32);
+        ld.global.u32(v, [at]);
+        suq.width.b32(width, [bins]);
+        let p: pred;
+        setp.ge.u32(p, v, width);
+        if p {
+            ret();
+        }
+        shl.b32(v, v, 2);
+        sured.b.add._1d.u32.trap([bins, v], 1);
+    }
+"#;
+
+#[test]
+fn a_surface_is_its_handle_in_brackets_with_the_coordinates_in_it() {
+    let ptx = kgen::ptx_str(SURFACES).unwrap();
+    let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
+    assert!(head.contains(".version 3.1\n.target sm_20\n"), "{head}");
+    for line in [
+        "\tsuld.b.2d.v4.b32.clamp {%r, %g, %b, %a}, [%from, {%x, %y}];\n",
+        "\tsust.b.2d.v4.b32.clamp [%to, {%x, %y}], {%r, %g, %b, %a};\n",
+        "\tsuq.width.b32 %width, [%bins];\n",
+        "\tsured.b.add.1d.u32.trap [%bins, {%v}], 1;\n",
+    ] {
+        assert!(entries.contains(line), "{line}{entries}");
+    }
+}
+
 #[test]
 fn a_kernel_or_module_is_for_gpus_that_have_all_it_uses() {
     let cases = [
@@ -588,6 +680,8 @@ enum Style {
     Sinks,
     /// Without the operands that may be left out, and one result where two may be.
     Short,
+    /// Every operand, and one result where two may be.
+    Single,
     /// Memory the kernel declares for an address in shared or local memory.
     Memory,
     /// A part of each variable that may be one, as a video instruction selects it, and each
@@ -719,12 +813,18 @@ impl Making {
             Count::Fixed(n) => n,
             Count::Vec => b.lanes(),
         };
-        let t = b.ty(spec.ty.expect("a register's operand has a type"));
+        // `_` stands for a register of a vector, not for the one of a name with neither `.v2`
+        // nor `.v4`.
+        let sink = spec.sink && (spec.count != Count::Vec || lanes > 1);
         let mut parts = vec![];
-        for _ in 0..lanes {
+        for k in 0..lanes {
+            let t = match spec.lead {
+                Some(lead) if k == 0 => lead,
+                _ => b.ty(spec.ty.expect("a register's operand has a type")),
+            };
             let part = if spec.memory {
                 Some(Given::Var(self.memory(b.space())))
-            } else if style == Style::Sinks && spec.sink && !self.sunk {
+            } else if style == Style::Sinks && sink && !self.sunk {
                 self.sunk = true;
                 Some(Given::Special("_".into()))
             } else if style == Style::Sinks && spec.not {
@@ -759,6 +859,13 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
         args.push(match spec.role {
             Role::Label => Given::Label(0),
             Role::Labels => Given::Vector(vec![Given::Label(0)]),
+            Role::Handle => {
+                let items: Vec<Given<Var>> = spec.inner.iter().map(|s| m.operand(b, s, style)).collect();
+                match items.as_slice() {
+                    &[Given::Var(t)] => Given::Mem(Address { base: Some(t), index: None, disp: 0 }),
+                    _ => Given::List(items),
+                }
+            }
             Role::Addr(_) => match spaces.next().expect("a space for each address") {
                 s @ (Space::Shared | Space::Local) if style == Style::Memory => {
                     m.differs = true;
@@ -776,7 +883,7 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
             Role::Dst | Role::Src => {
                 let first = m.operand(b, spec, style);
                 match &spec.second {
-                    Some((_, true)) if style == Style::Short => {
+                    Some((_, true)) if matches!(style, Style::Short | Style::Single) => {
                         m.differs = true;
                         first
                     }
@@ -818,6 +925,10 @@ fn by_hand(n: usize, name: &str, form: &'static Form, choice: Vec<Option<usize>>
         .map(|spec| match spec.role {
             Role::Label => "$L0".to_string(),
             Role::Labels => "$T0".to_string(),
+            Role::Handle => {
+                let inner: Vec<String> = spec.inner.iter().map(|s| registers(&b, s, &mut regs)).collect();
+                format!("[{}]", inner.join(", "))
+            }
             Role::Addr(_) => "[%a]".to_string(),
             Role::Imm(Imm::Bits(_)) => "1".to_string(),
             Role::Imm(imm @ Imm::Of(_)) => imm.values()[0].to_string(),
@@ -845,8 +956,8 @@ fn registers(b: &Bound, spec: &Spec, regs: &mut Vec<Ty>) -> String {
         Count::Vec => b.lanes(),
     };
     let names: Vec<String> = (0..lanes)
-        .map(|_| {
-            regs.push(t);
+        .map(|k| {
+            regs.push(if k == 0 { spec.lead.unwrap_or(t) } else { t });
             format!("%v{}", regs.len())
         })
         .collect();
@@ -954,7 +1065,10 @@ fn refused(ptxas: &Path, text: &str, path: &Path) -> BTreeMap<String, String> {
             Some(k) if k != "?" => text = without(&text, &k),
             _ => {
                 if out.is_empty() {
-                    out.insert("?".into(), stderr.trim().to_string());
+                    // A crash says nothing.
+                    let why =
+                        if stderr.trim().is_empty() { format!("ptxas: {}", run.status) } else { stderr.trim().into() };
+                    out.insert("?".into(), why);
                 }
                 return out;
             }
@@ -1066,7 +1180,9 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
                 }
             };
             let Some(b) = bound.iter().find(|b| std::ptr::eq(b.form, form)) else { continue };
-            for style in [Style::Vars, Style::Values, Style::Sinks, Style::Short, Style::Memory, Style::Parts] {
+            for style in
+                [Style::Vars, Style::Values, Style::Sinks, Style::Short, Style::Single, Style::Memory, Style::Parts]
+            {
                 n += 1;
                 match instance(n, &name, b, style) {
                     None => {}

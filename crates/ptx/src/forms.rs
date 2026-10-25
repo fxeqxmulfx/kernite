@@ -30,22 +30,26 @@ use crate::{GPUS, Kind, Needs, Ty};
 /// instruction writes, `%` for one that must be a variable, `_` for one `_` may stand for,
 /// `!` for a predicate it may read inverted, `-` for one it may negate, `$` for one a special
 /// register may be, and `&` for memory the kernel declares, which stands for its address;
-/// and after it `*2` for so many taken together, `*v` for as many as `.v2` or `.v4` say, and
-/// `{.bh}` for one that may be a part of a variable, as a video instruction selects it, or
-/// `(.bh)` one that must be: `.bh` a byte or a half, `r.b0` or `r.h1`; `.hxy` two of the
-/// halves of two sources together, `r.h32`, and `.bxyzw` four of their bytes, `r.b7654`;
-/// `.hmask` the halves of a result it writes, `r.h10`, and `.bmask` its bytes, `r.b310`.
-/// `a|b` is two written at once, and `a[|b]` one or two. `u32[0,15]` is one from 0 to 15, if
-/// it is one known now, `u32/32` a multiple of 32, and `f32(0,1]` a fraction, more than 0 and
-/// at most 1. `[R]`, `[W]` and `[X]` are memory read, written, or both; `lab` is a label, and
-/// `labs` labels taken together; `#` is an integer known now, `#8` one of 8 bits, `#=4|8|16`
-/// one of those, and `#^23` a power of two to 2^23. `{w}` before an operand has it only with
-/// the word `w`, and `?` after it lets it be left out.
-/// Last, `+wide` lets a register be wider than the instruction's type, as `ld`, `st` and
-/// `cvt` do; `+vec` holds a vector to 128 bits; `+cvt` holds a conversion to PTX's rules for
-/// rounding and saturating, and gives `.ftz` the version it needs there; `+b128sys` gives
-/// `.sys` with `.b128` the version it needs; and `+neg` negates the product of the first two
-/// operands it may negate, as negating one of them does, or the third, not both, as `vmad`.
+/// and after it `*2` for so many taken together, `u32+T*3` for four of which the first is a
+/// `u32`, `*v` for as many as `.v2` or `.v4` say, of which `_` stands only for a register of a
+/// vector, and `{.bh}` for one that may be a part of a variable, as a video instruction
+/// selects it, or `(.bh)` one that must be: `.bh` a byte or a half, `r.b0` or `r.h1`; `.hxy`
+/// two of the halves of two sources together, `r.h32`, and `.bxyzw` four of their bytes,
+/// `r.b7654`; `.hmask` the halves of a result it writes, `r.h10`, and `.bmask` its bytes,
+/// `r.b310`. `a|b` is two written at once, and `a[|b]` one or two. `u32[0,15]` is one from 0
+/// to 15, if it is one known now, `u32/32` a multiple of 32, and `f32(0,1]` a fraction, more
+/// than 0 and at most 1. `[R]`, `[W]` and `[X]` are memory read, written, or both, and
+/// `[%u64,T*2]` a texture or a surface by its handle, in brackets with the coordinates in it;
+/// `lab` is a label, and `labs` labels taken together; `#` is an integer known now, `#8` one
+/// of 8 bits, `#=4|8|16` one of those, and `#^23` a power of two to 2^23. `{w}` before an
+/// operand has it only with the word `w`, `@4.3` after it is what it needs where it is
+/// there, and `?` lets it be left out.
+/// Last, `+wide` lets a register outside brackets be wider than the instruction's type, as
+/// `ld`, `st` and `cvt` do; `+vec` holds a vector to 128 bits; `+cvt` holds a conversion to
+/// PTX's rules for rounding and saturating, and gives `.ftz` the version it needs there;
+/// `+b128sys` gives `.sys` with `.b128` the version it needs; `+neg` negates the product of
+/// the first two operands it may negate, as negating one of them does, or the third, not
+/// both, as `vmad`; and `+tex` has a texture return four, `.v4`, but two of `.f16x2`, `.v2`.
 pub const TABLE: &str = r#"
 $int = (.u16|.u32|.u64|.s16|.s32|.s64)
 $bits = (.b16|.b32|.b64)
@@ -82,6 +86,9 @@ $fshape = (.m16n16k16|.m8n32k16|.m32n8k16)
 $lay = (.row|.col)
 $vty = (.u32|.s32)(.u32|.s32)(.u32|.s32)
 $vop = (.add|.min|.max)
+$bty = (.b8|.b16|.b32|.b64)
+$sucop = {.ca|.cg|.cs|.cv}
+$clamp = (.trap|.clamp|.zero)
 
 # Integers.
 add$int : =T, T, T @1.0
@@ -360,6 +367,40 @@ cvt.pack.sat(.u16|.s16).s32 : =u32, s32, s32 @6.5 @sm72
 cvt.pack.sat(.u8|.s8).s32.b32 : =u32, s32, s32, b32 @6.5 @sm72
 cvt.pack.sat(.u4|.s4|.u2|.s2).s32.b32 : =u32, s32, s32, b32 @6.5 @sm75
 
+# Surfaces, each by its handle, the `u64` of a CUDA surface object, in brackets with the
+# coordinates in it: an array's layer first, then four where there would be three, the last
+# ignored; the lowest in bytes, but in samples for `sust.p` and `sured.p`. `sured` has no
+# `.xor`, on which ptxas 13.4 crashes, a segfault, rather than refusing it.
+suld.b.1d$sucop$vec$bty$clamp : =_T*v, [%u64,s32*1] @3.1 +wide +vec
+suld.b.2d$sucop$vec$bty$clamp : =_T*v, [%u64,s32*2] @3.1 +wide +vec
+suld.b.3d$sucop$vec$bty$clamp : =_T*v, [%u64,s32*4] @3.1 +wide +vec
+suld.b.a1d$sucop$vec$bty$clamp : =_T*v, [%u64,u32+s32*1] @3.1 +wide +vec
+suld.b.a2d$sucop$vec$bty$clamp : =_T*v, [%u64,u32+s32*3] @3.1 +wide +vec
+sust.b.1d$scop$vec$bty$clamp : [%u64,s32*1], T*v @3.1 +wide +vec
+sust.b.2d$scop$vec$bty$clamp : [%u64,s32*2], T*v @3.1 +wide +vec
+sust.b.3d$scop$vec$bty$clamp : [%u64,s32*4], T*v @3.1 +wide +vec
+sust.b.a1d$scop$vec$bty$clamp : [%u64,u32+s32*1], T*v @3.1 +wide +vec
+sust.b.a2d$scop$vec$bty$clamp : [%u64,u32+s32*3], T*v @3.1 +wide +vec
+sust.p.1d$vec.b32$clamp : [%u64,s32*1], T*v @3.1 +wide
+sust.p.2d$vec.b32$clamp : [%u64,s32*2], T*v @3.1 +wide
+sust.p.3d$vec.b32$clamp : [%u64,s32*4], T*v @3.1 +wide
+sured.b.add.1d(.u32|.s32|.u64)$clamp : [%u64,s32*1], T @3.1 +wide
+sured.b.add.2d(.u32|.s32|.u64)$clamp : [%u64,s32*2], T @3.1 +wide
+sured.b.add.3d(.u32|.s32|.u64)$clamp : [%u64,s32*4], T @3.1 +wide
+sured.b(.min|.max).1d(.u32|.s32|.u64@8.1@sm50|.s64@8.1@sm50)$clamp : [%u64,s32*1], T @3.1 +wide
+sured.b(.min|.max).2d(.u32|.s32|.u64@8.1@sm50|.s64@8.1@sm50)$clamp : [%u64,s32*2], T @3.1 +wide
+sured.b(.min|.max).3d(.u32|.s32|.u64@8.1@sm50|.s64@8.1@sm50)$clamp : [%u64,s32*4], T @3.1 +wide
+sured.b(.and|.or).1d.b32$clamp : [%u64,s32*1], T @3.1 +wide
+sured.b(.and|.or).2d.b32$clamp : [%u64,s32*2], T @3.1 +wide
+sured.b(.and|.or).3d.b32$clamp : [%u64,s32*4], T @3.1 +wide
+sured.p(.add|.min|.max|.and|.or).1d.b32$clamp : [%u64,s32*1], T @3.1 +wide
+sured.p(.add|.min|.max|.and|.or).2d.b32$clamp : [%u64,s32*2], T @3.1 +wide
+sured.p(.add|.min|.max|.and|.or).3d.b32$clamp : [%u64,s32*4], T @3.1 +wide
+sured.p(.min|.max).1d.b64$clamp : [%u64,s32*1], T @8.1 @sm50 +wide
+sured.p(.min|.max).2d.b64$clamp : [%u64,s32*2], T @8.1 @sm50 +wide
+sured.p(.min|.max).3d.b64$clamp : [%u64,s32*4], T @8.1 @sm50 +wide
+suq(.width|.height|.depth|.channel_data_type|.channel_order|.array_size@4.1|.memory_layout@4.2).b32 : =T, [%u64] @3.1
+
 # Control.
 bra{.uni} : lab @1.0
 brx.idx{.uni} : %u32, labs @6.0 @sm30
@@ -618,6 +659,9 @@ pub enum Role {
     /// Labels taken together, of which a register it reads picks the one it jumps to:
     /// `brx.idx`'s table.
     Labels,
+    /// A texture or a surface, by its handle, in brackets with the coordinates in it where it
+    /// takes them: `[t, (x, y)]`. What the brackets hold is [`Spec::inner`].
+    Handle,
     /// An integer known now.
     Imm(Imm),
 }
@@ -761,6 +805,9 @@ pub struct Spec {
     pub ty: Option<TyRef>,
     /// How many.
     pub count: Count,
+    /// The type of the first of so many, where it is not the type of the rest: the layer of
+    /// an array, among the coordinates in a texture.
+    pub lead: Option<Ty>,
     /// Whether it must be a variable, not a value known now.
     pub reg_only: bool,
     /// Whether `_` may stand for it.
@@ -788,6 +835,10 @@ pub struct Spec {
     pub optional: bool,
     /// The second of two written at once, `a|b`, and whether it may be left out.
     pub second: Option<(Box<Spec>, bool)>,
+    /// What it needs where it is there, beyond what the form needs: an offset's PTX 4.3.
+    pub needs: Needs,
+    /// The operands in brackets of a [`Role::Handle`].
+    pub inner: Vec<Spec>,
 }
 
 /// A check of a name's words together.
@@ -802,6 +853,8 @@ pub enum Check {
     /// Of the operands that may be negated, the product of the first two, which negating one
     /// of them negates, and the third are not both negated.
     Neg,
+    /// A texture returns four, `.v4`, but two of `.f16x2`, `.v2`.
+    Tex,
 }
 
 /// Where an address points: the state space the name gives it.
@@ -1141,6 +1194,18 @@ fn check(b: &Bound, name: &str) -> Result<Needs, String> {
                 }
             }
             Check::Cvt => needs = needs.and(cvt(b, name)?),
+            Check::Tex => {
+                let t = b.types[0].name();
+                match (b.has("v2"), b.types[0] == Ty::F16x2) {
+                    (true, false) => {
+                        return Err(format!("`{name}` returns four of a `{t}`, `.v4`; two only of an `f16x2`, `.v2`"));
+                    }
+                    (false, true) => {
+                        return Err(format!("`{name}` returns two of an `f16x2`, `.v2`; four only of another type"));
+                    }
+                    _ => {}
+                }
+            }
             // Of the operands, which the target checks.
             Check::Neg => {}
         }
@@ -1371,6 +1436,7 @@ fn form(line: &'static str, macros: &[(&'static str, Vec<Elem>)]) -> Form {
                 "cvt" => checks.push(Check::Cvt),
                 "b128sys" => checks.push(Check::B128Sys),
                 "neg" => checks.push(Check::Neg),
+                "tex" => checks.push(Check::Tex),
                 _ => panic!("`{line}`: no check `+{c}`"),
             }
         } else {
@@ -1516,10 +1582,15 @@ fn spec(s: &'static str, line: &str) -> Spec {
 }
 
 fn one(s: &'static str, line: &str) -> Spec {
+    let (s, needs) = match s.split_once('@') {
+        Some((s, r)) => (s, r.split('@').fold(Needs::default(), |n, r| n.and(req(r, line)))),
+        None => (s, Needs::default()),
+    };
     let mut spec = Spec {
         role: Role::Src,
         ty: None,
         count: Count::One,
+        lead: None,
         reg_only: false,
         sink: false,
         not: false,
@@ -1533,6 +1604,8 @@ fn one(s: &'static str, line: &str) -> Spec {
         when: None,
         optional: false,
         second: None,
+        needs,
+        inner: vec![],
     };
     let num = |n: &str| n.parse::<i64>().unwrap_or_else(|_| panic!("`{line}`: `{s}` has no number `{n}`"));
     match s {
@@ -1542,6 +1615,11 @@ fn one(s: &'static str, line: &str) -> Spec {
         "lab" => spec.role = Role::Label,
         "labs" => spec.role = Role::Labels,
         "#" => spec.role = Role::Imm(Imm::Bits(32)),
+        _ if s.starts_with('[') => {
+            let inner = s[1..].strip_suffix(']').unwrap_or_else(|| panic!("`{line}`: `{s}` is not closed"));
+            spec.role = Role::Handle;
+            spec.inner = inner.split(',').map(|o| one(o, line)).collect();
+        }
         _ if s.starts_with('#') => {
             let r = &s[1..];
             spec.role = Role::Imm(if let Some(n) = r.strip_prefix('=') {
@@ -1566,6 +1644,10 @@ fn one(s: &'static str, line: &str) -> Spec {
                     _ => spec.sreg = true,
                 }
                 t = &t[1..];
+            }
+            if let Some((lead, r)) = t.split_once('+') {
+                spec.lead = Some(Ty::parse(lead).unwrap_or_else(|| panic!("`{line}`: `{lead}` is no type")));
+                t = r;
             }
             if let Some((ty, r)) = t.split_once("{.").or(t.split_once("(.")) {
                 let must = t[ty.len()..].starts_with('(');
@@ -1598,6 +1680,11 @@ fn one(s: &'static str, line: &str) -> Spec {
                 Some((ty, "v")) => (ty, Count::Vec),
                 Some((ty, n)) => (ty, Count::Fixed(n.parse().unwrap_or_else(|_| panic!("`{line}`: `{s}`")))),
                 None => (t, Count::One),
+            };
+            let count = match (count, spec.lead) {
+                (_, None) => count,
+                (Count::Fixed(n), Some(_)) => Count::Fixed(n + 1),
+                _ => panic!("`{line}`: `{s}` leads so many taken together, `u32+T*3`"),
             };
             spec.ty = Some(match ty {
                 "T" => TyRef::Slot(0),
