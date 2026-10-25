@@ -6,6 +6,7 @@
 //! and some to leave out, its operands, and the version of PTX and the GPU it and each of
 //! its words need. [`find`] gives the forms a name is of, or why it is of none.
 
+use std::fmt;
 use std::sync::OnceLock;
 
 use kgen_core::Access;
@@ -27,18 +28,23 @@ use crate::{GPUS, Kind, Needs, Ty};
 ///
 /// After ` : ` are the operands. One is a type, `T` or `u32`, with `=` before it for one the
 /// instruction writes, `%` for one that must be a variable, `_` for one `_` may stand for,
-/// `!` for a predicate it may read inverted, `$` for one a special register may be, and `&`
-/// for memory the kernel declares, which stands for its address; and after it `*2` for so
-/// many taken together, `*v` for as many as `.v2` or `.v4` say. `a|b` is two written at
-/// once, and `a[|b]` one or two. `u32[0,15]` is one from 0 to 15, if it is one known now,
+/// `!` for a predicate it may read inverted, `-` for one it may negate, `$` for one a special
+/// register may be, and `&` for memory the kernel declares, which stands for its address;
+/// and after it `*2` for so many taken together, `*v` for as many as `.v2` or `.v4` say, and
+/// `{.bh}` for one that may be a part of a variable, as a video instruction selects it, or
+/// `(.bh)` one that must be: `.bh` a byte or a half, `r.b0` or `r.h1`; `.hxy` two of the
+/// halves of two sources together, `r.h32`, and `.bxyzw` four of their bytes, `r.b7654`;
+/// `.hmask` the halves of a result it writes, `r.h10`, and `.bmask` its bytes, `r.b310`.
+/// `a|b` is two written at once, and `a[|b]` one or two. `u32[0,15]` is one from 0 to 15, if it is one known now,
 /// `u32/32` a multiple of 32, and `f32(0,1]` a fraction, more than 0 and at most 1. `[R]`,
 /// `[W]` and `[X]` are memory read, written, or both; `lab` is a label; `#` is an integer
 /// known now, `#8` one of 8 bits, `#=4|8|16` one of those, and `#^23` a power of two to 2^23. `{w}`
 /// before an operand has it only with the word `w`, and `?` after it lets it be left out.
 /// Last, `+wide` lets a register be wider than the instruction's type, as `ld`, `st` and
 /// `cvt` do; `+vec` holds a vector to 128 bits; `+cvt` holds a conversion to PTX's rules for
-/// rounding and saturating, and gives `.ftz` the version it needs there; and `+b128sys`
-/// gives `.sys` with `.b128` the version it needs.
+/// rounding and saturating, and gives `.ftz` the version it needs there; `+b128sys` gives
+/// `.sys` with `.b128` the version it needs; and `+neg` negates the product of the first two
+/// operands it may negate, as negating one of them does, or the third, not both, as `vmad`.
 pub const TABLE: &str = r#"
 $int = (.u16|.u32|.u64|.s16|.s32|.s64)
 $bits = (.b16|.b32|.b64)
@@ -73,6 +79,8 @@ $shfl = (.up|.down|.bfly|.idx)
 $gsh = {.global|.shared|.shared::cta@7.8}
 $fshape = (.m16n16k16|.m8n32k16|.m32n8k16)
 $lay = (.row|.col)
+$vty = (.u32|.s32)(.u32|.s32)(.u32|.s32)
+$vop = (.add|.min|.max)
 
 # Integers.
 add$int : =T, T, T @1.0
@@ -241,6 +249,53 @@ lop3(.or|.and).b32 : =_T|=pred, T, T, T, #8, pred @8.2 @sm70
 shf(.l|.r)(.clamp|.wrap).b32 : =T, T, T, u32 @3.1 @sm32
 shl$bits : =T, T, u32 @1.0
 shr(.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64) : =T, T, u32 @1.0
+
+# Video: arithmetic on bytes and halves of 32-bit variables. A source may be a part of one,
+# `a.b0`, which it extends as its type says. A scalar one works the last operand in, `.add`,
+# or writes a part of its result, `d.h1`, and the rest from the last operand. A SIMD one
+# selects what it works on from the halves or bytes of its two sources together, `a.h32`
+# being two of the second, and adds the last operand, `.add`, or writes those of its result
+# that `d.h1` says and the rest from the last; and takes no value known now.
+vadd$vty{.sat} : =T, U{.bh}, V{.bh} @2.0
+vadd$vty{.sat}$vop : =T, U{.bh}, V{.bh}, T @2.0
+vadd$vty{.sat} : =T(.bh), U{.bh}, V{.bh}, T @2.0
+vsub$vty{.sat} : =T, U{.bh}, V{.bh} @2.0
+vsub$vty{.sat}$vop : =T, U{.bh}, V{.bh}, T @2.0
+vsub$vty{.sat} : =T(.bh), U{.bh}, V{.bh}, T @2.0
+vabsdiff$vty{.sat} : =T, U{.bh}, V{.bh} @2.0
+vabsdiff$vty{.sat}$vop : =T, U{.bh}, V{.bh}, T @2.0
+vabsdiff$vty{.sat} : =T(.bh), U{.bh}, V{.bh}, T @2.0
+vmin$vty{.sat} : =T, U{.bh}, V{.bh} @2.0
+vmin$vty{.sat}$vop : =T, U{.bh}, V{.bh}, T @2.0
+vmin$vty{.sat} : =T(.bh), U{.bh}, V{.bh}, T @2.0
+vmax$vty{.sat} : =T, U{.bh}, V{.bh} @2.0
+vmax$vty{.sat}$vop : =T, U{.bh}, V{.bh}, T @2.0
+vmax$vty{.sat} : =T(.bh), U{.bh}, V{.bh}, T @2.0
+vshl(.u32|.s32)(.u32|.s32).u32{.sat}(.clamp|.wrap) : =T, U{.bh}, V{.bh} @2.0
+vshl(.u32|.s32)(.u32|.s32).u32{.sat}(.clamp|.wrap)$vop : =T, U{.bh}, V{.bh}, T @2.0
+vshl(.u32|.s32)(.u32|.s32).u32{.sat}(.clamp|.wrap) : =T(.bh), U{.bh}, V{.bh}, T @2.0
+vshr(.u32|.s32)(.u32|.s32).u32{.sat}(.clamp|.wrap) : =T, U{.bh}, V{.bh} @2.0
+vshr(.u32|.s32)(.u32|.s32).u32{.sat}(.clamp|.wrap)$vop : =T, U{.bh}, V{.bh}, T @2.0
+vshr(.u32|.s32)(.u32|.s32).u32{.sat}(.clamp|.wrap) : =T(.bh), U{.bh}, V{.bh}, T @2.0
+vmad$vty{.sat}{.shr7|.shr15} : =T, -U{.bh}, -V{.bh}, -T @2.0 +neg
+vmad$vty.po{.sat}{.shr7|.shr15} : =T, U{.bh}, V{.bh}, T @2.0
+vset(.u32|.s32)(.u32|.s32)$cmps : =u32, T{.bh}, U{.bh} @2.0
+vset(.u32|.s32)(.u32|.s32)$cmps$vop : =u32, T{.bh}, U{.bh}, u32 @2.0
+vset(.u32|.s32)(.u32|.s32)$cmps : =u32(.bh), T{.bh}, U{.bh}, u32 @2.0
+vadd2$vty{.sat|.add} : =T{.hmask}, %U{.hxy}, %V{.hxy}, %T @3.0 @sm30
+vsub2$vty{.sat|.add} : =T{.hmask}, %U{.hxy}, %V{.hxy}, %T @3.0 @sm30
+vavrg2$vty{.sat|.add} : =T{.hmask}, %U{.hxy}, %V{.hxy}, %T @3.0 @sm30
+vabsdiff2$vty{.sat|.add} : =T{.hmask}, %U{.hxy}, %V{.hxy}, %T @3.0 @sm30
+vmin2$vty{.sat|.add} : =T{.hmask}, %U{.hxy}, %V{.hxy}, %T @3.0 @sm30
+vmax2$vty{.sat|.add} : =T{.hmask}, %U{.hxy}, %V{.hxy}, %T @3.0 @sm30
+vset2(.u32|.s32)(.u32|.s32)$cmps{.add} : =u32{.hmask}, %T{.hxy}, %U{.hxy}, %u32 @3.0 @sm30
+vadd4$vty{.sat|.add} : =T{.bmask}, %U{.bxyzw}, %V{.bxyzw}, %T @3.0 @sm30
+vsub4$vty{.sat|.add} : =T{.bmask}, %U{.bxyzw}, %V{.bxyzw}, %T @3.0 @sm30
+vavrg4$vty{.sat|.add} : =T{.bmask}, %U{.bxyzw}, %V{.bxyzw}, %T @3.0 @sm30
+vabsdiff4$vty{.sat|.add} : =T{.bmask}, %U{.bxyzw}, %V{.bxyzw}, %T @3.0 @sm30
+vmin4$vty{.sat|.add} : =T{.bmask}, %U{.bxyzw}, %V{.bxyzw}, %T @3.0 @sm30
+vmax4$vty{.sat|.add} : =T{.bmask}, %U{.bxyzw}, %V{.bxyzw}, %T @3.0 @sm30
+vset4(.u32|.s32)(.u32|.s32)$cmps{.add} : =u32{.bmask}, %T{.bxyzw}, %U{.bxyzw}, %u32 @3.0 @sm30
 
 # Moving data, and converting it.
 mov(.pred|.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64|.f32|.f64) : =T, $T @1.0
@@ -603,6 +658,94 @@ pub enum Count {
     Vec,
 }
 
+/// The parts of a register an operand may be, as a video instruction selects them after a
+/// dot: of a source, the bytes or halves it works on; of a result, those it writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sel {
+    /// `.bh`: a byte or a half, `.b0` to `.b3`, `.h0` or `.h1`.
+    One,
+    /// `.hxy`: two of the four halves of the two sources together, as `.h10` or `.h32`.
+    Halves,
+    /// `.bxyzw`: four of their eight bytes, as `.b3210` or `.b7654`.
+    Bytes,
+    /// `.hmask`: the halves of the result it writes, `.h0`, `.h1` or `.h10`.
+    HalfMask,
+    /// `.bmask`: the bytes, from the highest down, each once at most: `.b3210`, `.b31`.
+    ByteMask,
+}
+
+impl Sel {
+    /// Whether an operand of these parts may be `part`.
+    pub fn takes(self, part: Part) -> bool {
+        let w = part.which();
+        match self {
+            Sel::One => w.len() == 1 && w[0] <= if part.halves { 1 } else { 3 },
+            Sel::Halves => part.halves && w.len() == 2,
+            Sel::Bytes => !part.halves && w.len() == 4,
+            Sel::HalfMask => part.halves && matches!(w, [0] | [1] | [1, 0]),
+            Sel::ByteMask => !part.halves && w.iter().all(|&x| x <= 3) && w.windows(2).all(|p| p[0] > p[1]),
+        }
+    }
+
+    /// What they are, for an error.
+    pub fn what(self) -> &'static str {
+        match self {
+            Sel::One => "a byte or a half of a variable here, `.b0` to `.b3`, `.h0` or `.h1`",
+            Sel::Halves => "two of the four halves of the two sources here, as `.h10` or `.h32`",
+            Sel::Bytes => "four of the eight bytes of the two sources here, as `.b3210` or `.b7654`",
+            Sel::HalfMask => "the halves of the result it writes here, `.h0`, `.h1` or `.h10`",
+            Sel::ByteMask => {
+                "the bytes of the result it writes here, from `.b3` down to `.b0`, each once at most, as `.b31`"
+            }
+        }
+    }
+}
+
+/// A part of a register, as a video instruction selects it after a dot: bytes, `b`, or halves,
+/// `h`, numbered from the lowest, as `b0` and `h10` are; of two sources together, those of the
+/// second after the first's, as `b7654` is the bytes of the second.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Part {
+    /// Whether it is halves, not bytes.
+    pub halves: bool,
+    /// Which, as written, and how many.
+    which: [u8; 4],
+    len: u8,
+}
+
+impl Part {
+    /// The part `field` names, if a video instruction has it: four bytes at most, each 0 to
+    /// 7, or two halves, each 0 to 3.
+    pub fn parse(field: &str) -> Option<Part> {
+        let (halves, digits) = match field.as_bytes() {
+            [b'b', d @ ..] => (false, d),
+            [b'h', d @ ..] => (true, d),
+            _ => return None,
+        };
+        let (most, top) = if halves { (2, b'3') } else { (4, b'7') };
+        if digits.is_empty() || digits.len() > most || !digits.iter().all(|d| (b'0'..=top).contains(d)) {
+            return None;
+        }
+        let mut which = [0; 4];
+        for (w, d) in which.iter_mut().zip(digits) {
+            *w = d - b'0';
+        }
+        Some(Part { halves, which, len: digits.len() as u8 })
+    }
+
+    /// Which bytes or halves, as written.
+    pub fn which(&self) -> &[u8] {
+        &self.which[..usize::from(self.len)]
+    }
+}
+
+impl fmt::Display for Part {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(if self.halves { "h" } else { "b" })?;
+        self.which().iter().try_for_each(|w| write!(f, "{w}"))
+    }
+}
+
 /// An operand of a form.
 #[derive(Clone, Debug)]
 pub struct Spec {
@@ -618,6 +761,8 @@ pub struct Spec {
     pub sink: bool,
     /// Whether it may be read inverted, `!p`.
     pub not: bool,
+    /// Whether it may be negated, `-a`.
+    pub neg: bool,
     /// Whether it may be a special register, `tid.x`.
     pub sreg: bool,
     /// Whether it is memory the kernel declares, which stands for its address there.
@@ -629,6 +774,8 @@ pub struct Spec {
     pub step: Option<i64>,
     /// Whether a value known now is a fraction, more than 0 and at most 1.
     pub fraction: bool,
+    /// The parts of a register it may be, and whether it must be one of them.
+    pub part: Option<(Sel, bool)>,
     /// The word the name has when it is there: the policy of `.L2::cache_hint`.
     pub when: Option<&'static str>,
     /// Whether it may be left out, at the end.
@@ -646,6 +793,9 @@ pub enum Check {
     Cvt,
     /// `.sys` with `.b128` needs PTX 8.4.
     B128Sys,
+    /// Of the operands that may be negated, the product of the first two, which negating one
+    /// of them negates, and the third are not both negated.
+    Neg,
 }
 
 /// Where an address points: the state space the name gives it.
@@ -985,6 +1135,8 @@ fn check(b: &Bound, name: &str) -> Result<Needs, String> {
                 }
             }
             Check::Cvt => needs = needs.and(cvt(b, name)?),
+            // Of the operands, which the target checks.
+            Check::Neg => {}
         }
     }
     Ok(needs)
@@ -1212,6 +1364,7 @@ fn form(line: &'static str, macros: &[(&'static str, Vec<Elem>)]) -> Form {
                 "vec" => checks.push(Check::Vec),
                 "cvt" => checks.push(Check::Cvt),
                 "b128sys" => checks.push(Check::B128Sys),
+                "neg" => checks.push(Check::Neg),
                 _ => panic!("`{line}`: no check `+{c}`"),
             }
         } else {
@@ -1364,11 +1517,13 @@ fn one(s: &'static str, line: &str) -> Spec {
         reg_only: false,
         sink: false,
         not: false,
+        neg: false,
         sreg: false,
         memory: false,
         range: None,
         step: None,
         fraction: false,
+        part: None,
         when: None,
         optional: false,
         second: None,
@@ -1393,16 +1548,30 @@ fn one(s: &'static str, line: &str) -> Spec {
         }
         _ => {
             let mut t = s;
-            while let Some(c) = t.chars().next().filter(|c| "=%_!$&".contains(*c)) {
+            while let Some(c) = t.chars().next().filter(|c| "=%_!-$&".contains(*c)) {
                 match c {
                     '=' => spec.role = Role::Dst,
                     '%' => spec.reg_only = true,
                     '_' => spec.sink = true,
                     '!' => spec.not = true,
+                    '-' => spec.neg = true,
                     '&' => spec.memory = true,
                     _ => spec.sreg = true,
                 }
                 t = &t[1..];
+            }
+            if let Some((ty, r)) = t.split_once("{.").or(t.split_once("(.")) {
+                let must = t[ty.len()..].starts_with('(');
+                let sel = match r.strip_suffix(if must { ')' } else { '}' }) {
+                    Some("bh") => Sel::One,
+                    Some("hxy") => Sel::Halves,
+                    Some("bxyzw") => Sel::Bytes,
+                    Some("hmask") => Sel::HalfMask,
+                    Some("bmask") => Sel::ByteMask,
+                    _ => panic!("`{line}`: `{s}` has no parts that kgen knows"),
+                };
+                spec.part = Some((sel, must));
+                t = ty;
             }
             if let Some((ty, r)) = t.split_once('[') {
                 let (lo, hi) =

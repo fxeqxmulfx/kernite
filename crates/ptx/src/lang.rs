@@ -21,7 +21,9 @@
 //! - `mov` and `cvt` read the special registers: `tid.x`, `laneid`, `clock64`.
 //! - Operands taken together are a tuple, `(a, b)`, or variables declared together; two
 //!   results written at once are `p | q`; `_` is a result left unwritten, where PTX lets one
-//!   be; and `!p` is a predicate read inverted.
+//!   be; `!p` is a predicate read inverted, and `-a` a source negated, where PTX negates one.
+//! - A video instruction takes a part of a 32-bit variable, as PTX selects it: `a.b0` is its
+//!   lowest byte, `a.h1` its high half, and `d.b310` three bytes of a result.
 //! - `if p { .. }` runs each instruction inside where `p`, a `pred`, holds, and `if !p` where
 //!   it does not; a guarded `bra(label)` is a branch.
 //! - A kernel returns nothing: `ret()`, which the end of the body adds if control reaches it.
@@ -37,11 +39,11 @@ use kgen_core::{
 };
 use kgen_lang::{Fault, Guard, Operand as Given, Target};
 
-use crate::forms::{self, Bound, Count, Imm, Role, Space, Spec};
+use crate::forms::{self, Bound, Check, Count, Imm, Part, Role, Space, Spec};
 use crate::{Entry, Kind, Memory, Needs, Op, Param, Ty};
 
-/// A variable: a register of the type it was declared, or memory the kernel declares in a
-/// state space, which stands for its address.
+/// A variable: a register of the type it was declared, or a part of one, or memory the
+/// kernel declares in a state space, which stands for its address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Var {
     /// A register.
@@ -50,6 +52,15 @@ pub enum Var {
         reg: VReg,
         /// Its type.
         ty: Ty,
+    },
+    /// A part of a 32-bit register, as a video instruction selects it: `r.b0`.
+    Part {
+        /// Which register.
+        reg: VReg,
+        /// Its type.
+        ty: Ty,
+        /// Which part.
+        part: Part,
     },
     /// Memory, by its place among the kernel's.
     Mem(usize),
@@ -351,6 +362,17 @@ impl Kernel {
                 self.operand(b, spec, a, name, &mut w).map_err(|m| Miss::At(i, shaped(b, spec, a), Fault::at(i, m)))?;
             w.texts.push(text);
         }
+        if b.form.checks.contains(&Check::Neg) {
+            let negs: Vec<usize> = (0..args.len()).filter(|&i| specs[i].neg).collect();
+            let negated = |i: usize| matches!(args[i], Given::Neg(_));
+            if let &[x, y, z] = negs.as_slice()
+                && negated(x) != negated(y)
+                && negated(z)
+            {
+                let m = format!("`{name}` negates `a * b`, as `-a` or `-b` does, or `c`; not both");
+                return Err(Miss::At(z, true, Fault::at(z, m)));
+            }
+        }
         Ok(w)
     }
 
@@ -423,16 +445,40 @@ impl Kernel {
             format!("%{}", self.reg(reg))
         };
         match a {
-            Given::Var(Var::Reg { ty, .. }) if spec.memory => Err(format!(
+            Given::Var(Var::Reg { ty, .. } | Var::Part { ty, .. }) if spec.memory => Err(format!(
                 "`{name}` takes the address of memory the kernel declares here, as `tile`; this is a `{}` variable",
                 ty.name()
             )),
-            Given::Var(Var::Reg { reg, ty }) => {
+            Given::Var(v @ (Var::Reg { reg, ty } | Var::Part { reg, ty, .. })) => {
+                let part = match v {
+                    Var::Part { part, .. } => Some(*part),
+                    _ => None,
+                };
+                match (spec.part, part) {
+                    (None, Some(p)) => {
+                        return Err(format!("`{name}` takes a whole variable here; this is a part of one, `.{p}`"));
+                    }
+                    (Some((sel, true)), None) => {
+                        return Err(format!(
+                            "`{name}` writes {}, and the rest from its last operand; this is a whole `{}` variable",
+                            sel.what(),
+                            ty.name()
+                        ));
+                    }
+                    (Some((sel, _)), Some(p)) if !sel.takes(p) => {
+                        return Err(format!("`{name}` takes {}; `.{p}` is not one", sel.what()));
+                    }
+                    _ => {}
+                }
                 let fits = if b.form.wide { ty.fits_wide(t) } else { ty.fits(t) };
                 if !fits {
                     return Err(format!("`{name}` wants a `{}` variable; this is a `{}`", t.name(), ty.name()));
                 }
-                Ok(var(*reg, *ty, w))
+                let text = var(*reg, *ty, w);
+                Ok(match part {
+                    Some(p) => format!("{text}.{p}"),
+                    None => text,
+                })
             }
             Given::Var(Var::Mem(i)) => {
                 let (m, (v, _)) = (&self.memory[*i], &self.declared[*i]);
@@ -480,6 +526,10 @@ impl Kernel {
                 _ => Err(format!("`{name}` reads a predicate inverted, `!p`; this is {} inverted", self.given(p))),
             },
             Given::Not(_) => Err(format!("`{name}` takes no operand inverted")),
+            Given::Neg(v) if spec.neg => match **v {
+                Given::Var(Var::Reg { .. } | Var::Part { .. }) => Ok(format!("-{}", self.one(b, spec, v, name, w)?)),
+                _ => Err(format!("`{name}` negates a variable, `-a`; this is {} negated", self.given(v))),
+            },
             Given::Neg(_) => Err(format!("`{name}` takes no operand negated")),
             Given::Data(_) => Err(format!("`{name}` takes a value as it is: `1.5`, not `[1.5]`")),
             Given::Int(_) | Given::F32(_) | Given::F64(_) | Given::F16(_) | Given::Bf16(_)
@@ -549,6 +599,9 @@ impl Kernel {
                 return Err(format!("`{name}` takes an address that starts at {bits} variable"));
             }
             Some(Var::Mem(i)) => return self.symbol(i, m.disp, space, w.reach, access, name),
+            Some(Var::Part { part, .. }) => {
+                return Err(format!("`{name}` takes an address in a whole variable; this is a part of one, `.{part}`"));
+            }
             Some(Var::Reg { reg, ty }) => (reg, ty),
         };
         if ty.kind() == Kind::Float || ty.kind() == Kind::Pred {
@@ -639,6 +692,7 @@ impl Kernel {
     fn given(&self, a: &Given<Var>) -> String {
         match a {
             Given::Var(Var::Reg { ty, .. }) => format!("a `{}` variable", ty.name()),
+            Given::Var(Var::Part { ty, part, .. }) => format!("a part of a `{}` variable, `.{part}`", ty.name()),
             Given::Var(Var::Mem(i)) => format!("`{}`, {} memory", self.declared[*i].0, self.memory[*i].space.word()),
             Given::Special(name) if name == "_" => "`_`".into(),
             Given::Special(name) => format!("`{name}`"),
@@ -875,6 +929,13 @@ impl Target for Kernel {
     fn view(&mut self, v: Var, view: &str) -> Result<Var, String> {
         let ty = match v {
             Var::Reg { ty, .. } => ty,
+            // As a helper's parameter, it is the part still.
+            Var::Part { ty, part, .. } => {
+                return match Ty::parse(view) {
+                    Some(t) if ty.fits(t) => Ok(v),
+                    _ => Err(format!("a part of a `{}` variable, `.{part}`, is no `{view}`", ty.name())),
+                };
+            }
             Var::Mem(i) => {
                 let (name, ty) = &self.declared[i];
                 return match view == ty {
@@ -890,6 +951,20 @@ impl Target for Kernel {
                 Err(format!("a `{}` variable is no memory, `{view}`", ty.name()))
             }
             None => Err(format!("PTX variables are {TYPES}, not `{view}`")),
+        }
+    }
+
+    /// A part of a 32-bit variable, `r.b0`, before the variable seen as a type: `r.b32` is
+    /// its bytes 3 and 2, as a video instruction writes them.
+    fn field(&mut self, v: Var, field: &str) -> Result<Var, String> {
+        match (v, Part::parse(field)) {
+            (Var::Reg { reg, ty }, Some(part)) if ty.bits() == 32 => Ok(Var::Part { reg, ty, part }),
+            (Var::Reg { ty, .. }, Some(part)) if Ty::parse(field).is_none() => Err(format!(
+                "a video instruction takes a part of a 32-bit variable, as `.{part}`; this is a `{}`",
+                ty.name()
+            )),
+            (Var::Part { part, .. }, Some(_)) => Err(format!("this is a part of a variable already, `.{part}`")),
+            _ => self.view(v, field),
         }
     }
 

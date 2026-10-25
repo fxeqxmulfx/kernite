@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kgen::lang::{Mem as Address, Operand as Given, Target};
-use kgen_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Space, Spec};
+use kgen_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Sel, Space, Spec};
 use kgen_ptx::lang::{Kernel, Var};
 use kgen_ptx::{Entry, Kind, Needs, Ty};
 
@@ -307,6 +307,38 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
              writes PTX for sm_20 to sm_86",
         ),
         (
+            "let d: s32; vmad.s32.s32.s32(d, -n, n, -n);",
+            "2:40: `vmad.s32.s32.s32` negates `a * b`, as `-a` or `-b` does, or `c`; not both",
+        ),
+        (
+            "let d: u32; vadd.u32.u32.u32(d, n, n, n);",
+            "2:30: `vadd.u32.u32.u32` writes a byte or a half of a variable here, `.b0` to `.b3`, `.h0` or `.h1`, \
+             and the rest from its last operand; this is a whole `u32` variable",
+        ),
+        (
+            "let d: u32; vadd2.u32.u32.u32(d, n.b0, n, n);",
+            "2:36: `vadd2.u32.u32.u32` takes two of the four halves of the two sources here, as `.h10` or `.h32`; \
+             `.b0` is not one",
+        ),
+        (
+            "let d: u32; vadd4.u32.u32.u32(d.b01, n, n, n);",
+            "2:33: `vadd4.u32.u32.u32` takes the bytes of the result it writes here, from `.b3` down to `.b0`, each \
+             once at most, as `.b31`; `.b01` is not one",
+        ),
+        (
+            "let d: u32; add.u32(d, n.b0, n);",
+            "2:26: `add.u32` takes a whole variable here; this is a part of one, `.b0`",
+        ),
+        (
+            "let d: u32; vadd4.u32.u32.u32(d, n, n, 1);",
+            "2:40: `vadd4.u32.u32.u32` wants a `u32` variable; this is the integer 1",
+        ),
+        ("let d: u32; vadd.u32.u32.u32(d, -n, n);", "2:33: `vadd.u32.u32.u32` takes no operand negated"),
+        (
+            "let (d, w): (u32, u64); mov.u64(w, 0); vadd.u32.u32.u32(d, w.b0, n);",
+            "2:62: a video instruction takes a part of a 32-bit variable, as `.b0`; this is a `u64`",
+        ),
+        (
             "let i: u32; mov.u32(i, perctamemorysize);",
             "2:24: `perctamemorysize` is a special register of PTX's that kgen does not read: a kernel has it only \
              with the directive `.minperctamemory`, which kgen does not write",
@@ -323,6 +355,8 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         ("", ".version 2.3 .target sm_20"),
         ("let i: u32; popc.b32(i, n);", ".version 2.3 .target sm_20"),
         ("let i: u32; shfl.idx.b32(i, n, 0, 31);", ".version 3.0 .target sm_30"),
+        ("let i: u32; vadd.u32.u32.u32(i, n.b0, n.h1);", ".version 2.3 .target sm_20"),
+        ("let i: u32; vset4.u32.u32.lt(i, n, n, n);", ".version 3.0 .target sm_30"),
         ("let h: f16x2;", ".version 4.2 .target sm_53"),
         ("let i: u32; dp4a.u32.u32(i, n, n, n);", ".version 5.0 .target sm_61"),
         ("nanosleep.u32(n);", ".version 6.2 .target sm_70"),
@@ -374,6 +408,23 @@ fn a_fragment_is_braced_even_when_it_is_one_register() {
         "\tldmatrix.sync.aligned.m8n8.x1.b16 {%d}, [%y];\n",
         "\tldmatrix.sync.aligned.m8n8.x1.b16 {%e}, [%y];\n",
         "\tmma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%a, %b}, {%d}, {%e}, {0, %n};\n",
+    ] {
+        assert!(ptx.contains(line), "{line}{ptx}");
+    }
+}
+
+#[test]
+fn a_part_of_a_variable_is_written_after_it() {
+    let ptx = compile(
+        "n: u32",
+        "let (d, e): (u32, s32); vadd.u32.u32.u32.sat(d.h1, n.b0, n.h1, n); vmad.s32.u32.u32.shr7(e, -n.b3, n, n); \
+         vadd4.u32.u32.u32(d.b32, n.b7654, n.b3210, d);",
+    )
+    .unwrap();
+    for line in [
+        "\tvadd.u32.u32.u32.sat %d.h1, %n.b0, %n.h1, %n;\n",
+        "\tvmad.s32.u32.u32.shr7 %e, -%n.b3, %n, %n;\n",
+        "\tvadd4.u32.u32.u32 %d.b32, %n.b7654, %n.b3210, %d;\n",
     ] {
         assert!(ptx.contains(line), "{line}{ptx}");
     }
@@ -465,6 +516,9 @@ enum Style {
     Short,
     /// Memory the kernel declares for an address in shared or local memory.
     Memory,
+    /// A part of each variable that may be one, as a video instruction selects it, and each
+    /// operand that may be negated, negated.
+    Parts,
 }
 
 /// The names of `form` the test writes, and the words of each: each word of each element with
@@ -520,6 +574,17 @@ fn names(form: &Form) -> Vec<(String, Vec<Option<usize>>)> {
     names
 }
 
+/// A part of a variable an operand of `sel` may be: none that would go without saying.
+fn example(sel: Sel) -> &'static str {
+    match sel {
+        Sel::One => "b2",
+        Sel::Halves => "h21",
+        Sel::Bytes => "b6420",
+        Sel::HalfMask => "h1",
+        Sel::ByteMask => "b31",
+    }
+}
+
 /// A value known now of type `t`, for an operand that may be one: a float that is not
 /// `f32` or `f64` is not, nor a predicate.
 fn value(t: Ty, spec: &Spec) -> Option<Given<Var>> {
@@ -556,6 +621,23 @@ impl Making {
         self.kernel.var(&format!("s{}", self.vars), &format!("{space}<[u8; 256], 32>")).unwrap()
     }
 
+    /// A variable of type `t` for `spec`: a part of one where it must be, and in
+    /// [`Style::Parts`] where it may be, and negated there where it may be.
+    fn reg(&mut self, spec: &Spec, t: Ty, style: Style) -> Given<Var> {
+        let mut v = self.var(t);
+        if let Some((sel, must)) = spec.part
+            && (must || style == Style::Parts)
+        {
+            self.differs |= !must;
+            v = self.kernel.field(v, example(sel)).unwrap();
+        }
+        if spec.neg && style == Style::Parts {
+            self.differs = true;
+            return Given::Neg(Box::new(Given::Var(v)));
+        }
+        Given::Var(v)
+    }
+
     /// The operand `spec` of `b`, as `style` gives it.
     fn operand(&mut self, b: &Bound, spec: &Spec, style: Style) -> Given<Var> {
         let lanes = match spec.count {
@@ -579,7 +661,7 @@ impl Making {
                 None
             };
             self.differs |= part.is_some() && !spec.memory;
-            parts.push(part.unwrap_or_else(|| Given::Var(self.var(t))));
+            parts.push(part.unwrap_or_else(|| self.reg(spec, t, style)));
         }
         match lanes {
             1 => parts.pop().expect("one"),
@@ -676,8 +758,8 @@ fn by_hand(n: usize, name: &str, form: &'static Form, choice: Vec<Option<usize>>
     )
 }
 
-/// Operand `spec` of `b` as registers, each added to `regs`: one, a vector, braced even of
-/// one, or two written at once.
+/// Operand `spec` of `b` as registers, each added to `regs`: one, or a part of one where it
+/// must be; a vector, braced even of one; or two written at once.
 fn registers(b: &Bound, spec: &Spec, regs: &mut Vec<Ty>) -> String {
     let t = b.ty(spec.ty.expect("a register's operand has a type"));
     let lanes = match spec.count {
@@ -692,7 +774,11 @@ fn registers(b: &Bound, spec: &Spec, regs: &mut Vec<Ty>) -> String {
         })
         .collect();
     let braced = matches!(spec.count, Count::Fixed(_));
-    let first = if lanes == 1 && !braced { names[0].clone() } else { format!("{{{}}}", names.join(", ")) };
+    let first = match spec.part {
+        Some((sel, true)) => format!("{}.{}", names[0], example(sel)),
+        _ if lanes == 1 && !braced => names[0].clone(),
+        _ => format!("{{{}}}", names.join(", ")),
+    };
     match &spec.second {
         Some((second, _)) => format!("{first}|{}", registers(b, second, regs)),
         None => first,
@@ -903,7 +989,7 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
                 }
             };
             let Some(b) = bound.iter().find(|b| std::ptr::eq(b.form, form)) else { continue };
-            for style in [Style::Vars, Style::Values, Style::Sinks, Style::Short, Style::Memory] {
+            for style in [Style::Vars, Style::Values, Style::Sinks, Style::Short, Style::Memory, Style::Parts] {
                 n += 1;
                 match instance(n, &name, b, style) {
                     None => {}

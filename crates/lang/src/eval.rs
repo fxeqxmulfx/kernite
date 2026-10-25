@@ -27,6 +27,12 @@ pub trait Target {
     /// `var` seen as `view`: a field, as in `v.xmm`, or the type of a helper's parameter.
     fn view(&mut self, var: Self::Var, view: &str) -> Result<Self::Var, String>;
 
+    /// `var.field`: `var` seen as `field`, unless the machine has parts of a variable too, as
+    /// PTX selects a byte of one, `r.b0`.
+    fn field(&mut self, var: Self::Var, field: &str) -> Result<Self::Var, String> {
+        self.view(var, field)
+    }
+
     /// Places label `label` here. The evaluator numbers labels, each once.
     fn label(&mut self, label: u32);
 
@@ -468,8 +474,8 @@ impl<'a, T: Target> Eval<'a, T> {
                     None => Err(err(*span, format!("`{}` has {} variables; there is no [{i}]", path[0], vs.len()))),
                 }
             }
-            Expr::Field(base, view, span) => match self.place(base)? {
-                Some(v) => self.target.view(v, view).map(Some).map_err(|m| err(*span, m)),
+            Expr::Field(base, field, span) => match self.place(base)? {
+                Some(v) => self.target.field(v, field).map(Some).map_err(|m| err(*span, m)),
                 None => Ok(None),
             },
             Expr::Paren(inner, _) => self.place(inner),
