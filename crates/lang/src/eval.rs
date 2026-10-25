@@ -46,7 +46,7 @@ pub enum Operand<V> {
     /// A variable.
     Var(V),
     /// A name that is nothing in scope, for a machine that has registers of its own by name:
-    /// `tid.x`.
+    /// `tid.x`. `_` is one, for an operand the machine lets be left out.
     Special(String),
     /// An integer known now.
     Int(i64),
@@ -54,12 +54,28 @@ pub enum Operand<V> {
     F32(f32),
     /// An `f64` known now.
     F64(f64),
+    /// An `f16` known now, as its bits.
+    F16(u16),
+    /// A `bf16` known now, as its bits.
+    Bf16(u16),
     /// Memory at an address: `[x + i * 4 + 16]`.
     Mem(Mem<V>),
     /// Memory holding a value known now, as bytes: `[1.0]`, `[[0.5; 8]]`.
     Data(Vec<u8>),
     /// A label, for a jump.
     Label(u32),
+    /// Operands taken together: `(a, b, c, d)`, or variables declared together, `acc`.
+    Vector(Vec<Operand<V>>),
+    /// `a | b`: two operands in the place of one, as the result and the predicate PTX's `setp`
+    /// writes.
+    Pair(Box<Operand<V>>, Box<Operand<V>>),
+    /// `!p`: an operand read inverted.
+    Not(Box<Operand<V>>),
+    /// `-a`: an operand read negated.
+    Neg(Box<Operand<V>>),
+    /// `[a, b, ..]`: operands in brackets, more than one, as a texture's handle and where it
+    /// is read.
+    List(Vec<Operand<V>>),
 }
 
 /// An address: `base + index * scale + disp`.
@@ -279,7 +295,36 @@ impl<'a, T: Target> Eval<'a, T> {
                     other => Err(err(span, format!("this is {}, not an array", other.kind()))),
                 }
             }
+            Type::Slice(..) | Type::Generic(..) => {
+                Err(err(ty.span(), "a value known now is a number, a bool, or an array of them, `[T; N]`"))
+            }
         }
+    }
+
+    /// The type `t` as the target reads it, with what its arguments name worked out:
+    /// `shared<[f32; 256], 16>`.
+    fn type_name(&mut self, t: &Type) -> Result<String, Error> {
+        Ok(match t {
+            Type::Name(name, _) => name.clone(),
+            Type::Array(elem, len, _) => format!("[{}; {}]", self.type_name(elem)?, self.count(len)?),
+            Type::Slice(elem, _) => format!("[{}]", self.type_name(elem)?),
+            Type::Generic(name, args, _) => {
+                let mut out = vec![];
+                for a in args {
+                    out.push(match a {
+                        Type::Name(n, span) if n.starts_with(|c: char| c.is_ascii_digit()) => {
+                            value::literal(n, Want::Any).map_err(|m| err(*span, m))?.to_string()
+                        }
+                        Type::Name(n, span) => match self.lookup(n, *span)? {
+                            Some(Binding::Value(v)) => v.to_string(),
+                            _ => n.clone(),
+                        },
+                        _ => self.type_name(a)?,
+                    });
+                }
+                format!("{name}<{}>", out.join(", "))
+            }
+        })
     }
 
     /// A length or a count: a `usize` known now.
@@ -331,7 +376,13 @@ impl<'a, T: Target> Eval<'a, T> {
                         ("f64", Value::Int(b, _)) => u64::try_from(b)
                             .map(|b| Value::F64(f64::from_bits(b)))
                             .map_err(|_| at(format!("{b} is not 64 bits"))),
-                        _ => Err(at("`from_bits` makes an f32 or f64 of an integer".into())),
+                        ("f16", Value::Int(b, _)) => {
+                            u16::try_from(b).map(Value::F16).map_err(|_| at(format!("{b} is not 16 bits")))
+                        }
+                        ("bf16", Value::Int(b, _)) => {
+                            u16::try_from(b).map(Value::Bf16).map_err(|_| at(format!("{b} is not 16 bits")))
+                        }
+                        _ => Err(at("`from_bits` makes an f32, f64, f16 or bf16 of an integer".into())),
                     }
                 }
                 _ => Err(at("a call is a statement: an instruction or a helper, not a value".into())),
@@ -349,11 +400,9 @@ impl<'a, T: Target> Eval<'a, T> {
                 let a = self.value(a, want)?;
                 // The right side takes the left's type, as an unsuffixed literal does in Rust;
                 // a shift's count is a type of its own.
-                let want_b = match (&a, op) {
-                    (_, BinOp::Shl | BinOp::Shr) => Want::Any,
-                    (Value::Int(_, Some(t)), _) => Want::Int(*t),
-                    (Value::F64(_), _) => Want::F64,
-                    _ => want,
+                let want_b = match op {
+                    BinOp::Shl | BinOp::Shr => Want::Any,
+                    _ => Want::like(&a, want),
                 };
                 let b = self.value(b, want_b)?;
                 value::binary(*op, &a, &b).map_err(at)
@@ -392,6 +441,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 Ok(Value::Array(vec![v; n]))
             }
             Expr::Paren(inner, _) => self.value(inner, want),
+            Expr::Tuple(..) => Err(at("a tuple is operands taken together, not a value".into())),
             Expr::Cast(inner, ty, _) => {
                 let v = self.value(inner, Want::Any)?;
                 value::cast(&v, ty).map_err(at)
@@ -441,15 +491,29 @@ impl<'a, T: Target> Eval<'a, T> {
         }
     }
 
+    /// Whether `e` is known only when the kernel runs: a variable or a name the machine has,
+    /// or one of them inverted, negated or joined to another.
+    fn runtime(&mut self, e: &Expr) -> Result<bool, Error> {
+        Ok(match e {
+            Expr::Path(path, span) if path.len() == 1 => {
+                !matches!(self.lookup(&path[0], *span)?, Some(Binding::Value(_)))
+            }
+            Expr::Field(..) => self.place(e)?.is_some() || dotted(e).is_some(),
+            Expr::Index(..) => self.place(e)?.is_some(),
+            Expr::Unary(_, inner, _) | Expr::Paren(inner, _) => self.runtime(inner)?,
+            Expr::Binary(BinOp::Or, a, b, _) => self.runtime(a)? || self.runtime(b)?,
+            Expr::Tuple(..) => true,
+            _ => false,
+        })
+    }
+
     /// What `e` gives an instruction.
     fn operand(&mut self, e: &Expr) -> Result<Operand<T::Var>, Error> {
         match e {
             Expr::Path(path, span) if path.len() == 1 => match self.lookup(&path[0], *span)? {
                 Some(Binding::Var(v)) => Ok(Operand::Var(v)),
                 Some(Binding::Value(v)) => scalar(v, *span),
-                Some(Binding::Vars(vs)) => {
-                    Err(err(*span, format!("`{0}` is {1} variables; name one, as in `{0}[0]`", path[0], vs.len())))
-                }
+                Some(Binding::Vars(vs)) => Ok(Operand::Vector(vs.into_iter().map(Operand::Var).collect())),
                 Some(Binding::Label(l)) => Ok(Operand::Label(l)),
                 None => Ok(Operand::Special(path[0].clone())),
             },
@@ -468,8 +532,23 @@ impl<'a, T: Target> Eval<'a, T> {
             },
             Expr::Array(items, span) => match items.as_slice() {
                 [inner] => self.memory(inner, *span),
-                _ => Err(err(*span, "memory is one address in brackets, as in `[x + 4]`")),
+                [] => Err(err(*span, "memory is one address in brackets, as in `[x + 4]`")),
+                _ => items.iter().map(|x| self.operand(x)).collect::<Result<_, _>>().map(Operand::List),
             },
+            Expr::Tuple(items, _) => {
+                items.iter().map(|x| self.operand(x)).collect::<Result<_, _>>().map(Operand::Vector)
+            }
+            Expr::Paren(inner, _) => self.operand(inner),
+            Expr::Unary(op, inner, _) if self.runtime(inner)? => {
+                let inner = Box::new(self.operand(inner)?);
+                Ok(match op {
+                    UnOp::Not => Operand::Not(inner),
+                    UnOp::Neg => Operand::Neg(inner),
+                })
+            }
+            Expr::Binary(BinOp::Or, a, b, _) if self.runtime(e)? => {
+                Ok(Operand::Pair(Box::new(self.operand(a)?), Box::new(self.operand(b)?)))
+            }
             Expr::Repeat(_, _, span) => {
                 Err(err(*span, "an array is data; in brackets, `[[x; n]]`, it is memory that holds it"))
             }
@@ -597,10 +676,14 @@ impl<'a, T: Target> Eval<'a, T> {
 
     fn let_(&mut self, name: &str, span: Span, ty: Option<&Type>, value: Option<&Expr>) -> Result<(), Error> {
         let b = match (ty, value) {
-            (Some(Type::Name(t, tspan)), None) => {
-                let v = self.target.var(name, t).map_err(|m| err(*tspan, m))?;
+            (Some(t @ (Type::Name(..) | Type::Generic(..))), None) => {
+                let ty = self.type_name(t)?;
+                let v = self.target.var(name, &ty).map_err(|m| err(t.span(), m))?;
                 self.decls.push((name.to_string(), span));
                 Binding::Var(v)
+            }
+            (Some(Type::Slice(_, tspan)), None) => {
+                return Err(err(*tspan, format!("variables are declared so many at once: `let {name}: [u32; 4];`")));
             }
             (Some(Type::Array(elem, len, _)), None) => {
                 let Type::Name(t, tspan) = &**elem else {
@@ -706,7 +789,7 @@ impl<'a, T: Target> Eval<'a, T> {
     fn inst(&mut self, name: &str, args: &[Expr], span: Span) -> Result<(), Error> {
         let ops = args.iter().map(|a| self.operand(a)).collect::<Result<Vec<_>, _>>()?;
         self.target
-            .inst(name, &ops, self.guard)
+            .inst(&spelled(name), &ops, self.guard)
             .map_err(|f| Error { span: f.arg.and_then(|i| args.get(i)).map_or(span, Expr::span), message: f.message })
     }
 
@@ -804,7 +887,10 @@ impl<'a, T: Target> Eval<'a, T> {
         for ((p, e), b) in f.params.iter().zip(args).zip(given) {
             let at = |m: String| err(e.span(), format!("`{}`: {m}", p.name));
             let b = match (&p.ty, b) {
-                (Type::Name(t, _), Binding::Var(v)) => Binding::Var(self.target.view(v, t).map_err(at)?),
+                (t @ (Type::Name(..) | Type::Generic(..)), Binding::Var(v)) => {
+                    let t = self.type_name(t)?;
+                    Binding::Var(self.target.view(v, &t).map_err(at)?)
+                }
                 (Type::Array(elem, len, _), Binding::Vars(vs)) => {
                     let Type::Name(t, _) = &**elem else {
                         return Err(err(elem.span(), "variables are passed in arrays one deep"));
@@ -815,11 +901,15 @@ impl<'a, T: Target> Eval<'a, T> {
                     }
                     Binding::Vars(vs.into_iter().map(|v| self.target.view(v, t)).collect::<Result<_, _>>().map_err(at)?)
                 }
-                (Type::Name(t, _), b) => {
+                (t @ (Type::Name(..) | Type::Generic(..)), b) => {
+                    let t = self.type_name(t)?;
                     return Err(at(format!("wants a variable of type `{t}`; this is {}", b.kind())));
                 }
                 (Type::Array(..), b) => {
                     return Err(at(format!("wants variables declared together; this is {}", b.kind())));
+                }
+                (Type::Slice(..), _) => {
+                    return Err(err(p.ty.span(), "variables are passed so many at once: `[u32; N]`"));
                 }
             };
             self.bind(&p.name, b);
@@ -837,6 +927,8 @@ fn scalar<V>(v: Value, span: Span) -> Result<Operand<V>, Error> {
             .map_err(|_| err(span, format!("{x} is wider than 64 bits"))),
         Value::F32(x) => Ok(Operand::F32(x)),
         Value::F64(x) => Ok(Operand::F64(x)),
+        Value::F16(x) => Ok(Operand::F16(x)),
+        Value::Bf16(x) => Ok(Operand::Bf16(x)),
         Value::Bool(_) => Err(err(span, "a bool is no operand")),
         Value::Array(_) => Err(err(span, "an array is data; in brackets, `[[..]]`, it is memory that holds it")),
     }
@@ -862,6 +954,16 @@ fn dotted(e: &Expr) -> Option<String> {
     }
 }
 
+/// An instruction's name as the machine writes it: a word that starts with a digit has a `_`
+/// before it in Rust, as in `tex._2d`, and a `::` is `__`, as in `L2__64B`.
+fn spelled(name: &str) -> String {
+    let words = name.split('.').map(|w| {
+        let w = w.strip_prefix('_').filter(|w| w.starts_with(|c: char| c.is_ascii_digit())).unwrap_or(w);
+        w.replace("__", "::")
+    });
+    words.collect::<Vec<_>>().join(".")
+}
+
 /// The label a statement places, if it is `label(name)`.
 fn placed_label(s: &Stmt) -> Option<(&str, Span)> {
     let Stmt::Expr(Expr::Call { func, generics, args, .. }) = s else { return None };
@@ -877,6 +979,7 @@ fn placed_label(s: &Stmt) -> Option<(&str, Span)> {
 fn want(ty: &Type) -> Want {
     match ty {
         Type::Name(name, _) => Want::of(name.trim_start_matches("&[").trim_end_matches(']')),
-        Type::Array(elem, ..) => want(elem),
+        Type::Array(elem, ..) | Type::Slice(elem, _) => want(elem),
+        Type::Generic(..) => Want::Any,
     }
 }

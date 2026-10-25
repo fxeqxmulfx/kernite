@@ -30,7 +30,8 @@
 //! - A function without an ABI is a helper, inlined where a kernel calls it, and leaves
 //!   nothing behind. Constants and every other item stay as written, for Rust to use as well.
 //!   A constant a kernel reads counts as used, as it would if Rust had seen the read: only one
-//!   that nothing reads is `dead_code`.
+//!   that nothing reads is `dead_code`. Rust has no `bf16`, and its `f16` is unstable, so a
+//!   constant of either goes in the kernel that reads it, where `const` is the language's alone.
 //!
 //! ```ignore
 //! #[kgen_macros::kernels]

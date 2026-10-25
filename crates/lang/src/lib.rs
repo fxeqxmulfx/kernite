@@ -22,15 +22,25 @@
 //!   `let acc: [ymm; 4];`, which are `acc0` to `acc3`, or `let (x, y): (u64, f32);`, each
 //!   of its own type. Any number of instructions may write
 //!   one; the allocator gives each a register, or says which were alive together when there
-//!   were not enough. A field is a view of one: `v.xmm`, `g.r32`.
+//!   were not enough. A field is a view of one: `v.xmm`, `g.r32`. A type of the machine's
+//!   that takes arguments is written as Rust writes a generic one, `shared<[f32; N * 4], 16>`,
+//!   and the machine is given it with values in place of the names they are bound to:
+//!   `shared<[f32; 256], 16>`.
 //! - **Values** are known now: `const` items, `let k = 4;`, a helper's `<const N: usize>`,
 //!   a loop's counter. Integers are checked for overflow; floats are `f32` unless written or
-//!   declared `f64`, and their arithmetic is the machine's.
+//!   declared `f64`, `f16` or `bf16`, and their arithmetic is the machine's. The 16-bit ones
+//!   are worked out in `f64` and rounded once, to the nearest, as the machine rounds them.
 //! - **Instructions** are calls by name, `vaddps(sum, sum, pair)`, or by words joined with
 //!   dots, `ld.global.f32(x, [p + 4])`. An operand is a variable, a value, a label, or memory
 //!   in brackets: `[x + i * 4 + 16]` at an address, `[1.0]` or `[[0.5; 8]]` holding data.
 //!   A name that is nothing in scope goes to the machine as it is, for registers of its own:
-//!   `tid.x`.
+//!   `tid.x`, or `_` for a result nothing reads. Operands taken together, a vector or a
+//!   fragment, are a tuple, `(a, b)`, or variables declared together; `d | p` is two written
+//!   at once, `!p` a predicate read inverted, `-a` an operand negated, and `[t, s, (x, y)]`
+//!   operands in brackets, which the machine reads as one.
+//! - **Names of instructions** are Rust's words: one that starts with a digit takes a `_`,
+//!   `tex._2d`; one that holds a `::` has `__` there, `ld.global.L2__64B`; and a keyword
+//!   takes `r#`, `cp.r#async`. The machine is given them as it writes them.
 //! - **Helpers** are functions with no ABI, inlined where they are called. A parameter takes
 //!   the caller's variable, seen as its type; `<const N: usize>` takes a value, as in
 //!   `dot::<4>(x, y, n)`. A helper sees its own names and the module's constants.

@@ -13,7 +13,7 @@ use kgen_core::Width::{self, W8, W16, W32, W64, W128, W256};
 use kgen_core::{
     Arg, Base, Class, Const, ConstId, Flow, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo, Signature, VReg,
 };
-use kgen_lang::{Fault, Guard, Operand as Given, Target};
+use kgen_lang::{Fault, Guard, Operand as Given, Target, Value};
 
 use crate::op::Op;
 use crate::sysv::{FLOAT_PARAMS, FLOAT_RESULT, INT_PARAMS, INT_RESULT};
@@ -552,9 +552,16 @@ fn given(a: &Given<Var>) -> String {
         Given::Int(x) => format!("the integer {x}"),
         Given::F32(x) => format!("the float {x}"),
         Given::F64(x) => format!("the float {x}"),
+        Given::F16(x) => format!("the f16 {}", Value::F16(*x)),
+        Given::Bf16(x) => format!("the bf16 {}", Value::Bf16(*x)),
         Given::Mem(_) => "memory".into(),
         Given::Data(_) => "memory holding data".into(),
         Given::Label(_) => "a label".into(),
+        Given::Vector(vs) => format!("{} operands taken together", vs.len()),
+        Given::Pair(..) => "two operands joined by `|`".into(),
+        Given::Not(_) => "an operand inverted".into(),
+        Given::Neg(_) => "an operand negated".into(),
+        Given::List(_) => "operands in brackets".into(),
     }
 }
 
@@ -639,6 +646,26 @@ impl Target for Kernel {
                 Given::Special(name) => return Err(Fault::at(i, format!("`{name}` is not defined"))),
                 Given::F32(x) => return Err(Fault::at(i, format!("x86 takes floats from memory: `[{x:?}]`"))),
                 Given::F64(x) => return Err(Fault::at(i, format!("x86 takes floats from memory: `[{x:?}f64]`"))),
+                Given::F16(x) => {
+                    return Err(Fault::at(i, format!("x86 takes floats from memory: `[{}f16]`", Value::F16(*x))));
+                }
+                Given::Bf16(x) => {
+                    return Err(Fault::at(i, format!("x86 takes floats from memory: `[{}bf16]`", Value::Bf16(*x))));
+                }
+                Given::Vector(vs) => {
+                    return Err(Fault::at(
+                        i,
+                        format!(
+                            "x86 takes a variable here, and these are {} together: name one, as in `a[0]`",
+                            vs.len()
+                        ),
+                    ));
+                }
+                Given::Pair(..) => return Err(Fault::at(i, "x86 has no instruction that writes `a | b`, two at once")),
+                Given::Not(_) | Given::Neg(_) => {
+                    return Err(Fault::at(i, "x86 reads no operand inverted or negated; `!p` and `-a` are PTX's"));
+                }
+                Given::List(_) => return Err(Fault::at(i, "memory is one address in brackets, as in `[x + 4]`")),
                 Given::Label(_) if !JUMPS.iter().any(|(n, _)| *n == name) => {
                     return Err(Fault::at(i, "a label is for a jump"));
                 }

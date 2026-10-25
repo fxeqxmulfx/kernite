@@ -237,6 +237,43 @@ fn values_are_computed_as_rust_computes_them() {
 }
 
 #[test]
+fn sixteen_bit_floats_are_values_and_data() {
+    let src = r#"
+        const THIRD: f16 = 1.0 / 3.0;
+
+        pub unsafe extern "sysv64" fn h() {
+            const SUM: f16 = 0.1f16 + 0.2f16;
+            const B: bf16 = 1.0bf16 / 3.0;
+            const HUGE: f16 = 65520.0;
+            const TIE: bf16 = 1.00390625;
+            const LEAST: f16 = f16::from_bits(1);
+            const BITS: u16 = THIRD.to_bits();
+            const WIDE: f32 = THIRD as f32;
+            let k: f16 = -2.5;
+            note("{THIRD} {SUM} {B} {HUGE} {TIE} {LEAST} {BITS} {WIDE} {k}");
+            let v: ymm;
+            vpbroadcastw(v, [THIRD]);
+            vpbroadcastw(v, [[1.5bf16, -2.0bf16]]);
+        }
+    "#;
+    // Each is rounded once, to the nearest, the middle to even: 0.1 + 0.2 lands on a middle.
+    let want = "# h() -> ()
+# frame: 0 bytes aligned to 0, saves []
+# v=ymm0
+    # 0.3333 0.2998 0.334 inf 1 0.00000006 13653 0.33325195 -2.5
+    vpbroadcastw ymm0, word ptr [rip + {c0}]
+    vpbroadcastw ymm0, word ptr [rip + {c1}]
+    vzeroupper
+    ret
+# c0, aligned to 2:
+#   55 35
+# c1, aligned to 4:
+#   c0 3f 00 c0
+";
+    assert_eq!(x86(src, "h"), want);
+}
+
+#[test]
 fn errors_point_where_the_trouble_is() {
     let cases: &[(&str, &str)] = &[
         ("let k = nope;", "1:9: `nope` is not defined"),
@@ -246,7 +283,25 @@ fn errors_point_where_the_trouble_is() {
         ("deep();", "5:13: helpers call helpers 64 deep here; does `deep` call itself?"),
         ("const X: u8 = 255 + 1;", "1:19: 256 is out of range for u8"),
         ("let k = A;", "7:18: `A` is defined in terms of itself"),
-        ("let a: [ymm; 2]; vaddps(a, a, a);", "1:25: `a` is 2 variables; name one, as in `a[0]`"),
+        (
+            "let a: [ymm; 2]; vaddps(a, a, a);",
+            "1:25: x86 takes a variable here, and these are 2 together: name one, as in `a[0]`",
+        ),
+        (
+            "let v: ymm; vaddps(v, v, (v, v));",
+            "1:26: x86 takes a variable here, and these are 2 together: name one, as in `a[0]`",
+        ),
+        ("let v: ymm; vaddps(v, v, !v);", "1:26: x86 reads no operand inverted or negated; `!p` and `-a` are PTX's"),
+        ("let v: ymm; vaddps(v, v | v, v);", "1:25: x86 has no instruction that writes `a | b`, two at once"),
+        ("let v: ymm; vmovups(v, [v, 4]);", "1:24: memory is one address in brackets, as in `[x + 4]`"),
+        ("let g: gpr; mov(g, 1.5f16);", "1:20: x86 takes floats from memory: `[1.5f16]`"),
+        (
+            "const K: usize = 4; let t: shared<[f32; 2 * K], 16>;",
+            "1:28: x86 variables are `gpr`, `ymm` and `xmm`, not `shared<[f32; 8], 16>`",
+        ),
+        ("let t: [f32];", "1:8: variables are declared so many at once: `let t: [u32; 4];`"),
+        // The machine is given a name as it writes it, not as Rust must.
+        ("let v: ymm; vaddps._2d__x(v);", "1:20: x86 has no instruction `vaddps.2d::x` that kgen knows"),
         ("let a: [ymm; 2]; zero(a[2]);", "1:24: `a` has 2 variables; there is no [2]"),
         ("let v: ymm; vmovups(v, [v * v]);", "1:27: an address multiplies a variable by a number, not by a variable"),
         (
@@ -276,6 +331,16 @@ fn errors_point_where_the_trouble_is() {
         (
             "let p: pred; if p { label(x); }",
             "2:21: a label takes no predicate: control arrives there whatever it holds",
+        ),
+        // Rust has no word that starts with a digit, nor `::` after a field: the source a
+        // macro is given says `._2d` and `__`, and a string is told so.
+        (
+            "tex.2d.v4.f32.f32(a, [t, (x, y)]);",
+            "2:5: a word after a dot starts with a letter or `_`: `.2d` is written `._2d`",
+        ),
+        (
+            "ld.global.L2::64B.b32(a, [x]);",
+            "2:13: a word of a name is joined to the next by `__`, which PTX writes `::`: `L2__64B`",
         ),
     ];
     for (body, want) in cases {

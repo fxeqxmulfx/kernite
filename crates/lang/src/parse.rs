@@ -258,13 +258,30 @@ impl<'a> Parser<'a> {
         if let Some((inner, span)) = self.group(Delim::Bracket) {
             let mut p = Parser::new(inner, span);
             let elem = p.ty()?;
+            if p.done() {
+                return Ok(Type::Slice(Box::new(elem), span));
+            }
             p.expect_op(";")?;
             let len = p.expr()?;
             p.finish()?;
             return Ok(Type::Array(Box::new(elem), len, span));
         }
+        if let Some(Tree::Ident { name, span }) = self.peek()
+            && matches!(self.peek_at(1), Some(Tree::Punct { ch: '<', .. }))
+        {
+            self.pos += 2;
+            let mut args = vec![];
+            while !self.eat_op(">") {
+                args.push(self.ty()?);
+                if !self.eat_op(",") {
+                    self.expect_op(">")?;
+                    break;
+                }
+            }
+            return Ok(Type::Generic(name.strip_prefix("r#").unwrap_or(name).to_string(), args, *span));
+        }
         let (from, span) = (self.pos, self.span());
-        while !self.done() && !self.is_op("=") && !self.is_op(";") && !self.is_op(",") {
+        while !self.done() && !["=", ";", ",", ">"].iter().any(|op| self.is_op(op)) {
             self.pos += 1;
         }
         if from == self.pos {
@@ -468,9 +485,16 @@ impl<'a> Parser<'a> {
             }
             Tree::Group { delim: Delim::Paren, trees, span } => {
                 let mut p = Parser::new(trees, *span);
-                let e = p.expr()?;
+                let first = p.expr()?;
+                if p.done() {
+                    return Ok(Expr::Paren(Box::new(first), *span));
+                }
+                let mut items = vec![first];
+                while p.eat_op(",") && !p.done() {
+                    items.push(p.expr()?);
+                }
                 p.finish()?;
-                Ok(Expr::Paren(Box::new(e), *span))
+                Ok(Expr::Tuple(items, *span))
             }
             Tree::Group { delim: Delim::Bracket, trees, span } => {
                 let mut p = Parser::new(trees, *span);
@@ -503,6 +527,14 @@ impl<'a> Parser<'a> {
         loop {
             if self.is_op(".") && !self.is_op("..") {
                 self.pos += 1;
+                if let Some(Tree::Lit { text, span }) = self.peek() {
+                    return Err(Error {
+                        span: *span,
+                        message: format!(
+                            "a word after a dot starts with a letter or `_`: `.{text}` is written `._{text}`"
+                        ),
+                    });
+                }
                 let (name, span) = self.ident()?;
                 e = match self.group(Delim::Paren) {
                     Some((trees, _)) => Expr::Method { recv: Box::new(e), name, args: args(trees)?, span },
@@ -524,6 +556,8 @@ impl<'a> Parser<'a> {
                     return self.error(format!("expected the arguments, found {}", self.found()));
                 };
                 e = Expr::Call { func: Box::new(e), generics, args: args(trees)?, span };
+            } else if self.is_op("::") && matches!(e, Expr::Field(..)) {
+                return self.error("a word of a name is joined to the next by `__`, which PTX writes `::`: `L2__64B`");
             } else {
                 return Ok(e);
             }

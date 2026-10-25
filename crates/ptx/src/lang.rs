@@ -382,9 +382,16 @@ fn given(a: &Given<Var>) -> String {
         Given::Int(x) => format!("the integer {x}"),
         Given::F32(x) => format!("the float {x}"),
         Given::F64(x) => format!("the f64 {x}"),
+        Given::F16(x) => format!("the f16 {}", kgen_lang::Value::F16(*x)),
+        Given::Bf16(x) => format!("the bf16 {}", kgen_lang::Value::Bf16(*x)),
         Given::Mem(_) => "an address".into(),
         Given::Data(_) => "memory holding data".into(),
         Given::Label(_) => "a label".into(),
+        Given::Vector(vs) => format!("{} operands taken together", vs.len()),
+        Given::Pair(..) => "two operands joined by `|`".into(),
+        Given::Not(_) => "an operand inverted".into(),
+        Given::Neg(_) => "an operand negated".into(),
+        Given::List(_) => "operands in brackets".into(),
     }
 }
 

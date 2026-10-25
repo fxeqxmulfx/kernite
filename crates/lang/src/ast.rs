@@ -103,20 +103,25 @@ pub struct Ret {
     pub tokens: Range<usize>,
 }
 
-/// A type: a name, or an array of variables, `[ymm; N]`.
+/// A type: a name, an array of variables, `[ymm; N]`, or a name with arguments,
+/// `shared<[f32; 256], 16>`.
 #[derive(Clone, Debug)]
 pub enum Type {
     /// A type by its name, as written: `ymm`, `*const f32`.
     Name(String, Span),
     /// `[elem; len]`.
     Array(Box<Type>, Expr, Span),
+    /// `[elem]`, of a length the program learns when it runs.
+    Slice(Box<Type>, Span),
+    /// `name<args>`, its arguments types or values: `shared<[f32; 256], 16>`.
+    Generic(String, Vec<Type>, Span),
 }
 
 impl Type {
     /// Where it is.
     pub fn span(&self) -> Span {
         match self {
-            Type::Name(_, span) | Type::Array(_, _, span) => *span,
+            Type::Name(_, span) | Type::Array(_, _, span) | Type::Slice(_, span) | Type::Generic(_, _, span) => *span,
         }
     }
 }
@@ -284,6 +289,8 @@ pub enum Expr {
     Repeat(Box<Expr>, Box<Expr>, Span),
     /// `(a)`.
     Paren(Box<Expr>, Span),
+    /// `(a, b, ..)` or `(a,)`: operands taken together, as a vector.
+    Tuple(Vec<Expr>, Span),
     /// `a as T`.
     Cast(Box<Expr>, String, Span),
 }
@@ -306,6 +313,7 @@ impl Expr {
             | Expr::Array(_, s)
             | Expr::Repeat(_, _, s)
             | Expr::Paren(_, s)
+            | Expr::Tuple(_, s)
             | Expr::Cast(_, _, s) => *s,
         }
     }

@@ -1,6 +1,7 @@
 //! Values the compiler computes with: what constants, generics and loop counters hold. Floats
-//! are `f32` unless written or declared `f64`, and their arithmetic is the machine's, so a
-//! constant comes out as Rust computes it.
+//! are `f32` unless written or declared `f64`, `f16` or `bf16`, and their arithmetic is the
+//! machine's, so a constant comes out as Rust computes it. A 16-bit float is held as its bits;
+//! its arithmetic is worked out in `f64` and rounded once, which comes to what its own does.
 
 use std::fmt;
 
@@ -91,6 +92,10 @@ pub enum Value {
     F32(f32),
     /// An `f64`.
     F64(f64),
+    /// An `f16`, IEEE's half precision, as its bits.
+    F16(u16),
+    /// A `bf16`, an `f32` cut to its high 16 bits, as its bits.
+    Bf16(u16),
     /// A `bool`.
     Bool(bool),
     /// An array: a range, a list, data.
@@ -104,6 +109,8 @@ impl Value {
             Value::Int(..) => "an integer",
             Value::F32(_) => "an f32",
             Value::F64(_) => "an f64",
+            Value::F16(_) => "an f16",
+            Value::Bf16(_) => "a bf16",
             Value::Bool(_) => "a bool",
             Value::Array(_) => "an array",
         }
@@ -116,6 +123,8 @@ impl fmt::Display for Value {
             Value::Int(x, _) => write!(f, "{x}"),
             Value::F32(x) => write!(f, "{x}"),
             Value::F64(x) => write!(f, "{x}"),
+            Value::F16(x) => f.write_str(&F16.shortest(*x)),
+            Value::Bf16(x) => f.write_str(&BF16.shortest(*x)),
             Value::Bool(x) => write!(f, "{x}"),
             Value::Array(xs) => {
                 write!(f, "[")?;
@@ -137,6 +146,10 @@ pub enum Want {
     Int(IntTy),
     /// An `f64`.
     F64,
+    /// An `f16`.
+    F16,
+    /// A `bf16`.
+    Bf16,
 }
 
 impl Want {
@@ -145,12 +158,110 @@ impl Want {
         match (IntTy::parse(ty), ty) {
             (Some(t), _) => Want::Int(t),
             (None, "f64") => Want::F64,
+            (None, "f16") => Want::F16,
+            (None, "bf16") => Want::Bf16,
             _ => Want::Any,
+        }
+    }
+
+    /// What the other side of an operator wants, given this side's value: its type.
+    pub fn like(v: &Value, otherwise: Want) -> Want {
+        match v {
+            Value::Int(_, Some(t)) => Want::Int(*t),
+            Value::F64(_) => Want::F64,
+            Value::F16(_) => Want::F16,
+            Value::Bf16(_) => Want::Bf16,
+            _ => otherwise,
         }
     }
 }
 
-/// A number literal: `16`, `0x3f`, `8u8`, `0.5`, `1e-5`, `2.0f64`.
+/// A binary float narrower than `f64`, by the bits of its exponent and of its mantissa.
+#[derive(Clone, Copy, Debug)]
+struct Format {
+    exp: u32,
+    man: u32,
+}
+
+/// IEEE's half precision, Rust's `f16`.
+const F16: Format = Format { exp: 5, man: 10 };
+
+/// The high half of an `f32`.
+const BF16: Format = Format { exp: 8, man: 7 };
+
+impl Format {
+    /// `x` rounded to the nearest float of this format, ties to even, as its bits.
+    fn round(self, x: f64) -> u16 {
+        let (e, m) = (self.exp, self.man);
+        let b = x.to_bits();
+        let sign = ((b >> 63) << (e + m)) as u16;
+        let inf = (((1u32 << e) - 1) << m) as u16;
+        let exp = ((b >> 52) & 0x7ff) as i64;
+        let frac = b & ((1 << 52) - 1);
+        if exp == 0x7ff {
+            // An infinity, or a NaN kept quiet.
+            return sign | inf | if frac == 0 { 0 } else { 1 << (m - 1) };
+        }
+        if exp == 0 {
+            // An `f64` this small is under half of the least of either format.
+            return sign;
+        }
+        let biased = exp - 1023 + (1 << (e - 1)) - 1;
+        // The bits below the format's last, which go: more of them for a result too small
+        // to be normal.
+        let shift = i64::from(52 - m) + (1 - biased).max(0);
+        if shift > 53 {
+            return sign;
+        }
+        let (whole, shift) = (frac | (1 << 52), shift as u32);
+        let kept = (whole + (1 << (shift - 1)) - 1 + ((whole >> shift) & 1)) >> shift;
+        // A normal one's kept bits hold its leading 1, which carries into the exponent.
+        let bits = if biased >= 1 { (((biased - 1) as u64) << m) + kept } else { kept };
+        if bits >= u64::from(inf) { sign | inf } else { sign | bits as u16 }
+    }
+
+    /// The float these bits are, exactly.
+    fn widen(self, bits: u16) -> f64 {
+        let (e, m) = (self.exp, self.man);
+        let bits = u64::from(bits);
+        let sign = if (bits >> (e + m)) & 1 == 1 { -1.0 } else { 1.0 };
+        let exp = (bits >> m) & ((1 << e) - 1);
+        let frac = bits & ((1 << m) - 1);
+        if exp == (1 << e) - 1 {
+            return if frac == 0 { sign * f64::INFINITY } else { f64::NAN };
+        }
+        let (whole, exp) = if exp == 0 { (frac, 1) } else { (frac | (1 << m), exp as i64) };
+        let scale = exp - ((1 << (e - 1)) - 1) - i64::from(m);
+        sign * whole as f64 * f64::from_bits(((scale + 1023) as u64) << 52)
+    }
+
+    /// The shortest decimal that reads back as these bits: `0.1`, not `0.099975586`.
+    fn shortest(self, bits: u16) -> String {
+        let x = self.widen(bits);
+        if !x.is_finite() {
+            return (x as f32).to_string();
+        }
+        for digits in 0..17 {
+            let y: f64 = format!("{x:.digits$e}").parse().expect("Rust reads the floats it writes");
+            if self.round(y) == bits {
+                return y.to_string();
+            }
+        }
+        x.to_string()
+    }
+}
+
+/// `x` as an `f64` rounded to odd: its last bit set if bits beyond it were. It rounds to a
+/// format of fewer bits as `x` itself would.
+fn odd(x: i128) -> f64 {
+    let m = x.unsigned_abs();
+    let shift = (128 - m.leading_zeros()).saturating_sub(53);
+    let kept = (m >> shift) | u128::from(m & ((1 << shift) - 1) != 0);
+    let v = kept as f64 * f64::from_bits(u64::from(shift + 1023) << 52);
+    if x < 0 { -v } else { v }
+}
+
+/// A number literal: `16`, `0x3f`, `8u8`, `0.5`, `1e-5`, `2.0f64`, `0.5f16`, `1bf16`.
 pub fn literal(text: &str, want: Want) -> Result<Value, String> {
     let t: String = text.chars().filter(|&c| c != '_').collect();
     let int_want = match want {
@@ -178,6 +289,13 @@ pub fn literal(text: &str, want: Want) -> Result<Value, String> {
     if let Some(digits) = t.strip_suffix("f64") {
         return digits.parse().map(Value::F64).map_err(|_| bad());
     }
+    // `bf16` before `f16`, which it ends in.
+    if let Some(digits) = t.strip_suffix("bf16") {
+        return digits.parse().map(|x| Value::Bf16(BF16.round(x))).map_err(|_| bad());
+    }
+    if let Some(digits) = t.strip_suffix("f16") {
+        return digits.parse().map(|x| Value::F16(F16.round(x))).map_err(|_| bad());
+    }
     if let Some(&(name, ty)) = INT_TYS.iter().find(|(name, _)| t.ends_with(name)) {
         let x = t[..t.len() - name.len()].parse().map_err(|_| bad())?;
         return int(x, Some(ty));
@@ -185,6 +303,8 @@ pub fn literal(text: &str, want: Want) -> Result<Value, String> {
     if t.contains(['.', 'e', 'E']) {
         return match want {
             Want::F64 => t.parse().map(Value::F64).map_err(|_| bad()),
+            Want::F16 => t.parse().map(|x| Value::F16(F16.round(x))).map_err(|_| bad()),
+            Want::Bf16 => t.parse().map(|x| Value::Bf16(BF16.round(x))).map_err(|_| bad()),
             _ => t.parse().map(Value::F32).map_err(|_| bad()),
         };
     }
@@ -298,6 +418,8 @@ pub fn binary(op: BinOp, a: &Value, b: &Value) -> Result<Value, String> {
             },
             _ => return Err(mismatch()),
         }),
+        (&Value::F16(x), &Value::F16(y)) => half(op, F16, x, y, Value::F16).ok_or_else(mismatch),
+        (&Value::Bf16(x), &Value::Bf16(y)) => half(op, BF16, x, y, Value::Bf16).ok_or_else(mismatch),
         (&Value::Bool(x), &Value::Bool(y)) => Ok(Value::Bool(match op {
             And | AndAnd => x && y,
             Or | OrOr => x || y,
@@ -309,6 +431,15 @@ pub fn binary(op: BinOp, a: &Value, b: &Value) -> Result<Value, String> {
     }
 }
 
+/// `a op b` between two floats of `f`, made a value by `make`, or a comparison's bool; `None`
+/// for an operator floats have no use for.
+fn half(op: BinOp, f: Format, a: u16, b: u16, make: fn(u16) -> Value) -> Option<Value> {
+    match binary(op, &Value::F64(f.widen(a)), &Value::F64(f.widen(b))).ok()? {
+        Value::F64(x) => Some(make(f.round(x))),
+        v => Some(v),
+    }
+}
+
 /// `op a`.
 pub fn unary(op: UnOp, a: &Value) -> Result<Value, String> {
     match (op, a) {
@@ -316,6 +447,8 @@ pub fn unary(op: UnOp, a: &Value) -> Result<Value, String> {
         (UnOp::Neg, &Value::Int(x, t)) => int(-x, t),
         (UnOp::Neg, &Value::F32(x)) => Ok(Value::F32(-x)),
         (UnOp::Neg, &Value::F64(x)) => Ok(Value::F64(-x)),
+        (UnOp::Neg, &Value::F16(x)) => Ok(Value::F16(x ^ 0x8000)),
+        (UnOp::Neg, &Value::Bf16(x)) => Ok(Value::Bf16(x ^ 0x8000)),
         (UnOp::Not, &Value::Bool(x)) => Ok(Value::Bool(!x)),
         (UnOp::Not, &Value::Int(x, t)) => Ok(Value::Int(t.map_or(!x, |t| t.wrap(!x)), t)),
         (UnOp::Neg, _) => Err(format!("{} cannot be negated", a.kind())),
@@ -333,19 +466,29 @@ pub fn cast(a: &Value, ty: &str) -> Result<Value, String> {
                 Value::Int(x, _) => t.wrap(x),
                 Value::F32(x) => (x as i128).clamp(lo, hi),
                 Value::F64(x) => (x as i128).clamp(lo, hi),
+                Value::F16(x) => (F16.widen(x) as i128).clamp(lo, hi),
+                Value::Bf16(x) => (BF16.widen(x) as i128).clamp(lo, hi),
                 Value::Bool(x) => x.into(),
                 Value::Array(_) => return fail(),
             },
             Some(t),
         ));
     }
+    // A float as it is, exactly; an integer rounded to odd, which rounds once more as itself.
+    let wide = match *a {
+        Value::Int(x, _) => odd(x),
+        Value::F32(x) => x.into(),
+        Value::F64(x) => x,
+        Value::F16(x) => F16.widen(x),
+        Value::Bf16(x) => BF16.widen(x),
+        Value::Bool(_) | Value::Array(_) => return fail(),
+    };
     match (ty, a) {
-        ("f32", &Value::Int(x, _)) => Ok(Value::F32(x as f32)),
-        ("f32", &Value::F32(x)) => Ok(Value::F32(x)),
-        ("f32", &Value::F64(x)) => Ok(Value::F32(x as f32)),
         ("f64", &Value::Int(x, _)) => Ok(Value::F64(x as f64)),
-        ("f64", &Value::F32(x)) => Ok(Value::F64(x.into())),
-        ("f64", &Value::F64(x)) => Ok(Value::F64(x)),
+        ("f32", _) => Ok(Value::F32(wide as f32)),
+        ("f64", _) => Ok(Value::F64(wide)),
+        ("f16", _) => Ok(Value::F16(F16.round(wide))),
+        ("bf16", _) => Ok(Value::Bf16(BF16.round(wide))),
         _ => fail(),
     }
 }
@@ -362,9 +505,11 @@ pub fn typed(a: Value, ty: &str) -> Result<Value, String> {
                 wrong(&a)
             }
         }
-        (None, "f32", a @ Value::F32(_)) | (None, "f64", a @ Value::F64(_)) | (None, "bool", a @ Value::Bool(_)) => {
-            Ok(a)
-        }
+        (None, "f32", a @ Value::F32(_))
+        | (None, "f64", a @ Value::F64(_))
+        | (None, "f16", a @ Value::F16(_))
+        | (None, "bf16", a @ Value::Bf16(_))
+        | (None, "bool", a @ Value::Bool(_)) => Ok(a),
         (_, _, a) => wrong(&a),
     }
 }
@@ -383,15 +528,20 @@ pub fn method(recv: &Value, name: &str, args: &[Value]) -> Result<Value, String>
         }
         ("to_bits", &Value::F32(x), []) => Ok(Value::Int(x.to_bits().into(), Some(IntTy::U32))),
         ("to_bits", &Value::F64(x), []) => Ok(Value::Int(x.to_bits().into(), Some(IntTy::U64))),
+        ("to_bits", &(Value::F16(x) | Value::Bf16(x)), []) => Ok(Value::Int(x.into(), Some(IntTy::U16))),
         ("sqrt", &Value::F32(x), []) => Ok(Value::F32(x.sqrt())),
         ("sqrt", &Value::F64(x), []) => Ok(Value::F64(x.sqrt())),
+        ("sqrt", &Value::F16(x), []) => Ok(Value::F16(F16.round(F16.widen(x).sqrt()))),
+        ("sqrt", &Value::Bf16(x), []) => Ok(Value::Bf16(BF16.round(BF16.widen(x).sqrt()))),
         ("recip", &Value::F32(x), []) => Ok(Value::F32(1.0 / x)),
         ("recip", &Value::F64(x), []) => Ok(Value::F64(1.0 / x)),
+        ("recip", &Value::F16(x), []) => Ok(Value::F16(F16.round(1.0 / F16.widen(x)))),
+        ("recip", &Value::Bf16(x), []) => Ok(Value::Bf16(BF16.round(1.0 / BF16.widen(x)))),
         _ => Err(format!("{} has no method `{name}` taking {} arguments", recv.kind(), args.len())),
     }
 }
 
-/// The constants named by paths: `f32::INFINITY`, `u32::MAX`.
+/// The constants named by paths: `f32::INFINITY`, `u32::MAX`, `bf16::MAX`.
 pub fn path(p: &str) -> Option<Value> {
     Some(match p {
         "f32::INFINITY" => Value::F32(f32::INFINITY),
@@ -404,6 +554,18 @@ pub fn path(p: &str) -> Option<Value> {
         "f64::NEG_INFINITY" => Value::F64(f64::NEG_INFINITY),
         "f64::MAX" => Value::F64(f64::MAX),
         "f64::MIN" => Value::F64(f64::MIN),
+        "f16::INFINITY" => Value::F16(0x7c00),
+        "f16::NEG_INFINITY" => Value::F16(0xfc00),
+        "f16::MAX" => Value::F16(0x7bff),
+        "f16::MIN" => Value::F16(0xfbff),
+        "f16::MIN_POSITIVE" => Value::F16(0x0400),
+        "f16::EPSILON" => Value::F16(0x1400),
+        "bf16::INFINITY" => Value::Bf16(0x7f80),
+        "bf16::NEG_INFINITY" => Value::Bf16(0xff80),
+        "bf16::MAX" => Value::Bf16(0x7f7f),
+        "bf16::MIN" => Value::Bf16(0xff7f),
+        "bf16::MIN_POSITIVE" => Value::Bf16(0x0080),
+        "bf16::EPSILON" => Value::Bf16(0x3c00),
         "f32::consts::LN_2" => Value::F32(std::f32::consts::LN_2),
         "f32::consts::LOG2_E" => Value::F32(std::f32::consts::LOG2_E),
         "f32::consts::PI" => Value::F32(std::f32::consts::PI),
@@ -445,6 +607,7 @@ pub fn bytes(v: &Value) -> Result<Vec<u8>, String> {
             }
             Value::F32(x) => out.extend_from_slice(&x.to_le_bytes()),
             Value::F64(x) => out.extend_from_slice(&x.to_le_bytes()),
+            Value::F16(x) | Value::Bf16(x) => out.extend_from_slice(&x.to_le_bytes()),
             Value::Bool(_) => return Err("a bool is not data".into()),
             Value::Array(ref xs) => {
                 for x in xs {
