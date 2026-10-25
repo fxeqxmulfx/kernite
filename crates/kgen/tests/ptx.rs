@@ -272,6 +272,19 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
             "2:40: `cp.async.ca.shared.global` takes 0 to 8 here; 9 is not one of them",
         ),
         (
+            "let (a, b): (f32, f32); mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32((a, b), n, n, (a, b));",
+            "2:74: `mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32` wants 4 operands taken together, each a `f32` \
+             variable to write, or `_`; this is 2 operands taken together",
+        ),
+        (
+            "let i: s32; mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32((i, i), 1, n, (0, 0));",
+            "2:68: `mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32` wants a `u32` variable; this is the integer 1",
+        ),
+        (
+            "movmatrix.sync.aligned.m8n8.trans.b16(_, n);",
+            "2:39: `movmatrix.sync.aligned.m8n8.trans.b16` has no result here that it may leave unwritten, `_`",
+        ),
+        (
             "let g: f16; add.rn.f16(g, h, 1.5);",
             "2:30: `add.rn.f16` takes a `f16` only from a variable: `mov.b16(h, 1.5f16)` puts one in it",
         ),
@@ -304,6 +317,13 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         ("nanosleep.u32(n);", ".version 6.2 .target sm_70"),
         ("let i: u32; shfl.idx.b32(i, n, 0, 31); nanosleep.u32(n);", ".version 6.2 .target sm_70"),
         ("let v: f32; tanh.approx.f32(v, f);", ".version 7.0 .target sm_75"),
+        ("let d: b32; ldmatrix.sync.aligned.m8n8.x1.b16(d, [y]);", ".version 6.5 .target sm_75"),
+        ("let d: b32; movmatrix.sync.aligned.m8n8.trans.b16(d, n);", ".version 7.8 .target sm_75"),
+        (
+            "let (a, b, c, d): (s32, s32, s32, s32); mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32((a, b, c, d), \
+             (n, n), n, (0, 0, 0, 0));",
+            ".version 7.0 .target sm_80",
+        ),
         ("cp.async.wait_all();", ".version 7.0 .target sm_80"),
         ("mbarrier.arrive.b64(_, [y]);", ".version 7.1 .target sm_80"),
         ("let i: b32; mov.b32(i, reserved_smem_offset_begin);", ".version 7.6 .target sm_80"),
@@ -315,6 +335,23 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         let ptx = compile("x: *mut f32, n: u32, f: f32, y: u64", body).unwrap();
         let header: Vec<&str> = ptx.lines().filter(|l| l.starts_with(".version") || l.starts_with(".target")).collect();
         assert_eq!(header.join(" "), want, "{body}");
+    }
+}
+
+#[test]
+fn a_fragment_is_braced_even_when_it_is_one_register() {
+    let ptx = compile(
+        "y: u64, n: u32",
+        "let (d, e): (b32, b32); ldmatrix.sync.aligned.m8n8.x1.b16(d, [y]); ldmatrix.sync.aligned.m8n8.x1.b16((e,), \
+         [y]); let (a, b): (s32, s32); mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32((a, b), d, (e,), (0, n));",
+    )
+    .unwrap();
+    for line in [
+        "\tldmatrix.sync.aligned.m8n8.x1.b16 {%d}, [%y];\n",
+        "\tldmatrix.sync.aligned.m8n8.x1.b16 {%e}, [%y];\n",
+        "\tmma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%a, %b}, {%d}, {%e}, {0, %n};\n",
+    ] {
+        assert!(ptx.contains(line), "{line}{ptx}");
     }
 }
 
@@ -615,8 +652,8 @@ fn by_hand(n: usize, name: &str, form: &'static Form, choice: Vec<Option<usize>>
     )
 }
 
-/// Operand `spec` of `b` as registers, each added to `regs`: one, a vector, or two written
-/// at once.
+/// Operand `spec` of `b` as registers, each added to `regs`: one, a vector, braced even of
+/// one, or two written at once.
 fn registers(b: &Bound, spec: &Spec, regs: &mut Vec<Ty>) -> String {
     let t = b.ty(spec.ty.expect("a register's operand has a type"));
     let lanes = match spec.count {
@@ -630,7 +667,8 @@ fn registers(b: &Bound, spec: &Spec, regs: &mut Vec<Ty>) -> String {
             format!("%v{}", regs.len())
         })
         .collect();
-    let first = if lanes == 1 { names[0].clone() } else { format!("{{{}}}", names.join(", ")) };
+    let braced = matches!(spec.count, Count::Fixed(_));
+    let first = if lanes == 1 && !braced { names[0].clone() } else { format!("{{{}}}", names.join(", ")) };
     match &spec.second {
         Some((second, _)) => format!("{first}|{}", registers(b, second, regs)),
         None => first,
@@ -1117,6 +1155,16 @@ fn memory_is_reached_in_its_state_space_and_within_it() {
             format!("{t} let s: u64; mbarrier.arrive.b64(s, [t]);"),
             "2:79: `mbarrier.arrive.b64` reads and writes at a generic address; `t` is shared memory, which an \
              instruction reaches by its name only as `.shared`",
+        ),
+        (
+            format!("{t} let d: b32; ldmatrix.sync.aligned.m8n8.x1.shared.b16(d, [t + 8]);"),
+            "2:100: `ldmatrix.sync.aligned.m8n8.x1.shared.b16` reads 16 bytes at once, at an address that is a \
+             multiple of 16; `[t + 8]` is not one",
+        ),
+        (
+            format!("{t} let d: b32; ldmatrix.sync.aligned.m8n8.x1.shared.b16(d, [t + 1016]);"),
+            "2:100: `ldmatrix.sync.aligned.m8n8.x1.shared.b16` reads 16 bytes at `[t + 1016]`, past the end of `t`, \
+             1024 bytes",
         ),
         (
             "let u: shared<[f32; 64]>; let (a, b): (f32, f32); ld.shared.v2.f32((a, b), [u]);".into(),

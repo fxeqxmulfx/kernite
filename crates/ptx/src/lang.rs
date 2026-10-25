@@ -389,18 +389,20 @@ impl Kernel {
         }
     }
 
-    /// `a` as `spec`, as many registers as it takes together.
+    /// `a` as `spec`, as many registers as it takes together: braced, as PTX writes a fragment
+    /// even of one, `{%r1}`, which may be given as one, `d`, or as one taken together, `(d,)`.
     fn several(&self, b: &Bound, spec: &Spec, a: &Given<Var>, name: &str, w: &mut Written) -> Result<String, String> {
         let n = lanes(b, spec);
-        if n == 1 {
+        let braced = matches!(spec.count, Count::Fixed(_));
+        if n == 1 && !braced {
             return self.one(b, spec, a, name, w);
         }
-        let Given::Vector(parts) = a else {
-            return Err(format!("`{name}` wants {}; this is {}", describe(b, spec), self.given(a)));
+        let parts = match a {
+            Given::Vector(parts) if parts.len() == n => parts.as_slice(),
+            Given::Vector(_) => return Err(format!("`{name}` wants {}; this is {}", describe(b, spec), self.given(a))),
+            _ if n == 1 => std::slice::from_ref(a),
+            _ => return Err(format!("`{name}` wants {}; this is {}", describe(b, spec), self.given(a))),
         };
-        if parts.len() != n {
-            return Err(format!("`{name}` wants {}; this is {}", describe(b, spec), self.given(a)));
-        }
         let mut texts = vec![];
         for part in parts {
             texts.push(self.one(b, spec, part, name, w)?);
@@ -659,7 +661,8 @@ impl Kernel {
 
 /// How many bytes `b` reaches at once at each address, of `args`: what it loads, stores or
 /// works on, as `ld.v4.b32` 16 and `atom.f16x2` 4; what `cp.async` copies, as its third
-/// operand says; an mbarrier's 8; or 1, for what reaches no bytes in particular.
+/// operand says; an mbarrier's 8; a row of a matrix `ldmatrix` loads, 16; or 1, for what
+/// reaches no bytes in particular.
 fn reach(b: &Bound, args: &[Given<Var>]) -> u64 {
     match b.form.op {
         "ld" | "st" | "atom" | "red" => {
@@ -667,6 +670,7 @@ fn reach(b: &Bound, args: &[Given<Var>]) -> u64 {
             data.map_or(1, |s| u64::from(b.ty(s.ty.expect("data has a type")).bits()) / 8 * lanes(b, s) as u64)
         }
         "mbarrier" => 8,
+        "ldmatrix" => 16,
         "cp" if b.has("mbarrier") => 8,
         "cp" => match args.get(2) {
             Some(&Given::Int(n @ (4 | 8 | 16))) => n as u64,

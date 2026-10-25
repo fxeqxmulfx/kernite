@@ -400,6 +400,34 @@ activemask.b32 : =T @6.2 @sm30
 redux.sync(.add|.min|.max)(.u32|.s32) : =T, T, u32 @7.0 @sm80
 redux.sync(.and|.or|.xor).b32 : =T, T, u32 @7.0 @sm80
 
+# Matrices a warp loads and multiplies together, each thread holding a fragment of each: so
+# many registers, braced even when one. `mma` takes `_` for what it leaves unwritten.
+ldmatrix.sync.aligned.m8n8.x1{.trans}{.shared|.shared::cta@7.8}.b16 : =b32*1, [R] @6.5 @sm75
+ldmatrix.sync.aligned.m8n8.x2{.trans}{.shared|.shared::cta@7.8}.b16 : =_b32*2, [R] @6.5 @sm75
+ldmatrix.sync.aligned.m8n8.x4{.trans}{.shared|.shared::cta@7.8}.b16 : =_b32*4, [R] @6.5 @sm75
+movmatrix.sync.aligned.m8n8.trans.b16 : =b32, %b32 @7.8 @sm75
+mma.sync.aligned.m8n8k4(.row|.col)(.row|.col).f16.f16.f16.f16 : =_f16x2*4, %f16x2*2, %f16x2*2, %f16x2*4 @6.4 @sm70
+mma.sync.aligned.m8n8k4(.row|.col)(.row|.col).f32.f16.f16.f16 : =_f32*8, %f16x2*2, %f16x2*2, %f16x2*4 @6.4 @sm70
+mma.sync.aligned.m8n8k4(.row|.col)(.row|.col).f32.f16.f16.f32 : =_f32*8, %f16x2*2, %f16x2*2, f32*8 @6.4 @sm70
+mma.sync.aligned.m16n8k8.row.col.f16.f16.f16.f16 : =_f16x2*2, %f16x2*2, %f16x2*1, %f16x2*2 @6.5 @sm75
+mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 : =_f32*4, %f16x2*2, %f16x2*1, f32*4 @6.5 @sm75
+mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 : =_f16x2*2, %f16x2*4, %f16x2*2, %f16x2*2 @7.0 @sm80
+mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 : =_f32*4, %f16x2*4, %f16x2*2, f32*4 @7.0 @sm80
+mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32 : =_f32*4, %tf32*2, %tf32*1, f32*4 @7.0 @sm80
+mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 : =_f32*4, %tf32*4, %tf32*2, f32*4 @7.0 @sm80
+mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32 : =_f32*4, %bf16x2*2, %bf16x2*1, f32*4 @7.0 @sm80
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 : =_f32*4, %bf16x2*4, %bf16x2*2, f32*4 @7.0 @sm80
+mma.sync.aligned.m8n8k4.row.col{.rn|.rz|.rm|.rp}.f64.f64.f64.f64 : =_f64*2, f64*1, f64*1, f64*2 @7.0 @sm80
+mma.sync.aligned.m8n8k16.row.col{.satfinite}.s32(.u8|.s8)(.u8|.s8).s32 : =_s32*2, %u32*1, %u32*1, s32*2 @6.5 @sm75
+mma.sync.aligned.m8n8k32.row.col{.satfinite}.s32(.u4|.s4)(.u4|.s4).s32 : =_s32*2, %u32*1, %u32*1, s32*2 @6.5 @sm75
+mma.sync.aligned.m16n8k16.row.col{.satfinite}.s32(.u8|.s8)(.u8|.s8).s32 : =_s32*4, %u32*2, %u32*1, s32*4 @7.0 @sm80
+mma.sync.aligned.m16n8k32.row.col{.satfinite}.s32(.u8|.s8)(.u8|.s8).s32 : =_s32*4, %u32*4, %u32*2, s32*4 @7.0 @sm80
+mma.sync.aligned.m16n8k32.row.col{.satfinite}.s32(.u4|.s4)(.u4|.s4).s32 : =_s32*4, %u32*2, %u32*1, s32*4 @7.0 @sm80
+mma.sync.aligned.m16n8k64.row.col{.satfinite}.s32(.u4|.s4)(.u4|.s4).s32 : =_s32*4, %u32*4, %u32*2, s32*4 @7.0 @sm80
+mma.sync.aligned.m8n8k128.row.col.s32.b1.b1.s32(.xor|.and@7.1@sm80).popc : =_s32*2, %b32*1, %b32*1, s32*2 @7.0 @sm75
+mma.sync.aligned.m16n8k128.row.col.s32.b1.b1.s32(.xor|.and@7.1).popc : =_s32*4, %b32*2, %b32*1, s32*4 @7.0 @sm80
+mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32(.xor|.and@7.1).popc : =_s32*4, %b32*4, %b32*2, s32*4 @7.0 @sm80
+
 # The stack, and the rest.
 stacksave(.u32|.u64) : =T @7.3 @sm52
 stackrestore(.u32|.u64) : %T @7.3 @sm52
