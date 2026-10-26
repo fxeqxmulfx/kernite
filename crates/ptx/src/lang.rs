@@ -18,6 +18,13 @@
 //!   an instruction of its state space, as far as its end: `ld.shared.f32(v, [tile + 16])`.
 //!   `mov.u32(a, tile)` puts the address in a variable, and `cvta.shared.u64(g, tile)` the
 //!   generic one.
+//! - Memory of the module's, a [`Static`] the kernel is let name by
+//!   [`Kernel::module_memory`], is named so too: `static COUNTS: global<[u32; 16]>;` is 16
+//!   words of global memory, `atom.global.add.u32(old, [COUNTS + 8], 1)`, and
+//!   `static TABLE: constant<[f32; 4]> = [..];` four floats of constant memory, which the
+//!   kernels only read, `ld.const.f32(w, [TABLE + 4])`. A global address is 64 bits,
+//!   `mov.u64(a, COUNTS)`, and `cvta.global.u64(g, COUNTS)` the generic one; a constant one
+//!   fits in 32, `mov.u32(a, TABLE)`.
 //! - `mov` and `cvt` read the special registers: `tid.x`, `laneid`, `clock64`.
 //! - Operands taken together are a tuple, `(a, b)`, or variables declared together; two
 //!   results written at once are `p | q`; `_` is a result left unwritten, where PTX lets one
@@ -55,7 +62,7 @@ use kgen_core::{
 use kgen_lang::{Fault, Guard, Operand as Given, Target};
 
 use crate::forms::{self, Bound, Check, Count, Imm, Part, Role, Space, Spec, TyRef};
-use crate::{Entry, Kind, Memory, Needs, Op, Param, Prototype, Returns, Ty, formal};
+use crate::{Entry, Kind, Memory, Needs, Op, Param, Prototype, Returns, Static, Ty, formal};
 
 /// A variable: a register of the type it was declared, or a part of one, or memory the
 /// kernel declares in a state space, which stands for its address.
@@ -116,6 +123,8 @@ pub struct Kernel {
     callees: Vec<Callee>,
     /// Those it named, each once, by their symbols.
     calls: Vec<String>,
+    /// The module's memory it may name.
+    statics: Vec<Static>,
 }
 
 /// A function or a kernel that a kernel may name: by what the source calls it, as an operand
@@ -201,6 +210,7 @@ impl Kernel {
             func: None,
             callees: vec![],
             calls: vec![],
+            statics: vec![],
         }
     }
 
@@ -222,14 +232,23 @@ impl Kernel {
         self.callees.push(Callee { name: name.into(), symbol, proto });
     }
 
+    /// Lets the kernel name `s`, memory of the module's, by its name in the source, as it names
+    /// memory it declares: in its state space, as far as its end.
+    pub fn module_memory(&mut self, s: &Static) {
+        self.named.insert(s.memory.name.clone());
+        self.statics.push(s.clone());
+    }
+
     /// The kernel as written.
     pub fn finish(self) -> Entry {
+        // The module's memory the module declares.
+        let memory = self.memory.into_iter().filter(|m| matches!(m.space, Space::Shared | Space::Local)).collect();
         Entry {
             name: self.name,
             program: self.p,
             params: self.params,
             regs: self.regs,
-            memory: self.memory,
+            memory,
             needs: self.needs,
             func: self.func,
             calls: self.calls,
@@ -270,69 +289,24 @@ impl Kernel {
         }
     }
 
-    /// Memory declared as `let name: ty`, where `ty` is `space<args>`: `shared<[f32; 256], 16>`
-    /// with `args` `[f32; 256], 16>`.
-    fn new_memory(&mut self, name: &str, ty: &str, space: Space, args: &str) -> Result<Var, String> {
-        let word = space.word();
-        let shape = || {
-            format!(
-                "`{word}<..>` is an array of PTX's types and what its address is a multiple of, `{word}<[f32; 256], \
-                 16>`, or one, `{word}<f32>`; not `{ty}`"
-            )
-        };
-        let args = args.strip_suffix('>').ok_or_else(shape)?;
-        let (array, align) = match args.rsplit_once(", ") {
-            Some((array, align)) => (array, Some(align)),
-            None => (args, None),
-        };
-        if array.contains(", ") {
-            return Err(shape());
+    /// Memory declared as `let name: ty`, where `ty` is `space<args>`: `shared<[f32; 256], 16>`.
+    fn new_memory(&mut self, name: &str, ty: &str, space: Space) -> Result<Var, String> {
+        let (elem, bytes, align) = shape(ty, space.word())?;
+        if bytes.is_none() && space != Space::Shared {
+            return Err(format!(
+                "`{ty}` has no size, which only shared memory may leave to the launch: `local<[{}; 64]>`",
+                elem.name()
+            ));
         }
-        let (elem, len) = match array.strip_prefix('[').and_then(|a| a.strip_suffix(']')) {
-            Some(inner) => match inner.split_once("; ") {
-                Some((elem, len)) => (elem, Some(len.parse::<u64>().map_err(|_| shape())?)),
-                None => (inner, None),
-            },
-            None => (array, Some(1)),
-        };
-        let elem = match Ty::parse(elem) {
-            Some(Ty::Pred) => {
-                return Err("memory holds no `pred`, which is a register's alone: a `u8` holds a bool".into());
-            }
-            None => return Err(format!("memory holds {HELD}; not `{elem}`")),
-            Some(t) => t,
-        };
-        let size = u64::from(elem.bits()) / 8;
-        let align = match align {
-            None => size,
-            Some(a) => match a.parse::<u64>() {
-                Ok(a) if a.is_power_of_two() && a >= size => a,
-                Ok(a) if a.is_power_of_two() => {
-                    return Err(format!("an array of `{}` is aligned to {size} at least, not {a}", elem.name()));
-                }
-                _ => return Err(format!("what an address is a multiple of is a power of two, not {a}")),
-            },
-        };
-        let bytes = match len {
-            Some(0) => return Err(format!("`{ty}` holds nothing")),
-            Some(n) => Some(n.checked_mul(size).ok_or_else(|| format!("`{ty}` is more bytes than there are"))?),
-            None if space == Space::Shared => {
-                if let Some(other) = self.memory.iter().position(|m| m.bytes.is_none()) {
-                    return Err(format!(
-                        "`{name}` would start where `{}` does, after the memory with a size: a kernel has one \
-                         `shared<[T]>`, which the launch gives",
-                        self.declared[other].0
-                    ));
-                }
-                None
-            }
-            None => {
-                return Err(format!(
-                    "`{ty}` has no size, which only shared memory may leave to the launch: `local<[{}; 64]>`",
-                    elem.name()
-                ));
-            }
-        };
+        if bytes.is_none()
+            && let Some(other) = self.memory.iter().position(|m| m.bytes.is_none())
+        {
+            return Err(format!(
+                "`{name}` would start where `{}` does, after the memory with a size: a kernel has one \
+                 `shared<[T]>`, which the launch gives",
+                self.declared[other].0
+            ));
+        }
         if let Some(n) = bytes {
             let (had, most) = match space {
                 Space::Shared => (&mut self.shared, SHARED),
@@ -643,16 +617,25 @@ impl Kernel {
             Given::Var(Var::Mem(i)) => {
                 let (m, (v, _)) = (&self.memory[*i], &self.declared[*i]);
                 if !spec.memory || write {
+                    let mov = if m.space == Space::Global { "mov.u64" } else { "mov.u32" };
                     return Err(format!(
-                        "`{name}` takes no memory as an operand: `mov.u32(a, {v})` puts the address of `{v}` in \
-                         `a`, and `[{v}]` is what it holds"
+                        "`{name}` takes no memory as an operand: `{mov}(a, {v})` puts the address of `{v}` in `a`, \
+                         and `[{v}]` is what it holds"
                     ));
                 }
                 if b.space() != Space::Generic && b.space() != m.space {
                     return Err(format!(
                         "`{name}` takes the address of {} memory; `{v}` is {} memory",
-                        b.space().word(),
-                        m.space.word()
+                        b.space().noun(),
+                        m.space.noun()
+                    ));
+                }
+                // ptxas 13.4 refuses a global address in 32 bits: "32-Bit compilation is no
+                // longer supported".
+                if m.space == Space::Global && t.bits() != 64 {
+                    return Err(format!(
+                        "`{name}` puts a global address in {} bits; it is 64, `mov.u64(a, {v})`",
+                        t.bits()
                     ));
                 }
                 Ok(m.name.clone())
@@ -841,16 +824,16 @@ impl Kernel {
             Access::ReadWrite => "reads and writes",
             Access::Read | Access::Ignored => "reads",
         };
-        let word = m.space.word();
+        let (noun, word) = (m.space.noun(), m.space.word());
         match space {
             s if s == m.space => {}
             Space::Generic => {
                 return Err(format!(
-                    "`{name}` {verb} at a generic address; `{v}` is {word} memory, which an instruction reaches by \
+                    "`{name}` {verb} at a generic address; `{v}` is {noun} memory, which an instruction reaches by \
                      its name only as `.{word}`"
                 ));
             }
-            s => return Err(format!("`{name}` {verb} {} memory; `{v}` is {word} memory", s.word())),
+            s => return Err(format!("`{name}` {verb} {} memory; `{v}` is {noun} memory", s.noun())),
         }
         let at = match disp {
             0 => format!("[{v}]"),
@@ -1241,7 +1224,7 @@ impl Kernel {
         match a {
             Given::Var(Var::Reg { ty, .. }) => format!("a `{}` variable", ty.name()),
             Given::Var(Var::Part { ty, part, .. }) => format!("a part of a `{}` variable, `.{part}`", ty.name()),
-            Given::Var(Var::Mem(i)) => format!("`{}`, {} memory", self.declared[*i].0, self.memory[*i].space.word()),
+            Given::Var(Var::Mem(i)) => format!("`{}`, {} memory", self.declared[*i].0, self.memory[*i].space.noun()),
             Given::Special(name) if name == "_" => "`_`".into(),
             Given::Special(name) => format!("`{name}`"),
             Given::Int(x) => format!("the integer {x}"),
@@ -1482,6 +1465,56 @@ const TYPES: &str = "`pred`, `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`
 const HELD: &str = "`b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, `bf16x2`, `tf32`, `f32` and \
                     `f64`";
 
+/// What memory of the type `ty`, `word<args>`, holds: the type of its elements; how many bytes,
+/// `None` for an array of no length, `[f32]`; and what its address is a multiple of, a power
+/// of two, its element's bytes unless it says more: `shared<[f32; 256], 16>`.
+pub(crate) fn shape(ty: &str, word: &str) -> Result<(Ty, Option<u64>, u64), String> {
+    let wrong = || {
+        format!(
+            "`{word}<..>` is an array of PTX's types and what its address is a multiple of, `{word}<[f32; 256], 16>`, \
+             or one, `{word}<f32>`; not `{ty}`"
+        )
+    };
+    let args = ty.strip_prefix(word).and_then(|t| t.strip_prefix('<')).and_then(|t| t.strip_suffix('>'));
+    let args = args.ok_or_else(wrong)?;
+    let (array, align) = match args.rsplit_once(", ") {
+        Some((array, align)) => (array, Some(align)),
+        None => (args, None),
+    };
+    if array.contains(", ") {
+        return Err(wrong());
+    }
+    let (elem, len) = match array.strip_prefix('[').and_then(|a| a.strip_suffix(']')) {
+        Some(inner) => match inner.split_once("; ") {
+            Some((elem, len)) => (elem, Some(len.parse::<u64>().map_err(|_| wrong())?)),
+            None => (inner, None),
+        },
+        None => (array, Some(1)),
+    };
+    let elem = match Ty::parse(elem) {
+        Some(Ty::Pred) => return Err("memory holds no `pred`, which is a register's alone: a `u8` holds a bool".into()),
+        None => return Err(format!("memory holds {HELD}; not `{elem}`")),
+        Some(t) => t,
+    };
+    let size = u64::from(elem.bits()) / 8;
+    let align = match align {
+        None => size,
+        Some(a) => match a.parse::<u64>() {
+            Ok(a) if a.is_power_of_two() && a >= size => a,
+            Ok(a) if a.is_power_of_two() => {
+                return Err(format!("an array of `{}` is aligned to {size} at least, not {a}", elem.name()));
+            }
+            _ => return Err(format!("what an address is a multiple of is a power of two, not {a}")),
+        },
+    };
+    let bytes = match len {
+        Some(0) => return Err(format!("`{ty}` holds nothing")),
+        Some(n) => Some(n.checked_mul(size).ok_or_else(|| format!("`{ty}` is more bytes than there are"))?),
+        None => None,
+    };
+    Ok((elem, bytes, align))
+}
+
 impl Target for Kernel {
     type Var = Var;
 
@@ -1541,11 +1574,17 @@ impl Target for Kernel {
     }
 
     fn var(&mut self, name: &str, ty: &str) -> Result<Var, String> {
-        if let Some(args) = ty.strip_prefix("shared<") {
-            return self.new_memory(name, ty, Space::Shared, args);
+        if ty.starts_with("shared<") {
+            return self.new_memory(name, ty, Space::Shared);
         }
-        if let Some(args) = ty.strip_prefix("local<") {
-            return self.new_memory(name, ty, Space::Local, args);
+        if ty.starts_with("local<") {
+            return self.new_memory(name, ty, Space::Local);
+        }
+        if ty.starts_with("global<") || ty.starts_with("constant<") {
+            return Err(format!(
+                "global and constant memory are the module's, which a static declares, as `static {name}: {ty};` \
+                 beside the kernels: a kernel declares shared memory, `shared<..>`, and local, `local<..>`"
+            ));
         }
         let Some(t) = Ty::parse(ty) else {
             return Err(format!("PTX variables are {TYPES}, not `{ty}`"));
@@ -1554,6 +1593,16 @@ impl Target for Kernel {
             self.require(t.needs(), &format!("let {name}: {}", t.name()))?;
         }
         Ok(Var::Reg { reg: self.new_var(name, t), ty: t })
+    }
+
+    fn global(&mut self, name: &str) -> Result<Var, String> {
+        let Some(s) = self.statics.iter().find(|s| s.name == name) else {
+            return Err(format!("`{name}` does not compile, so no kernel names it"));
+        };
+        let (memory, declared) = (s.memory.clone(), (s.name.clone(), s.ty.clone()));
+        self.memory.push(memory);
+        self.declared.push(declared);
+        Ok(Var::Mem(self.memory.len() - 1))
     }
 
     fn view(&mut self, v: Var, view: &str) -> Result<Var, String> {
@@ -1577,7 +1626,7 @@ impl Target for Kernel {
         match Ty::parse(view) {
             Some(t) if ty.fits(t) => Ok(v),
             Some(t) => Err(format!("a `{}` variable is no `{}`", ty.name(), t.name())),
-            None if view.starts_with("shared<") || view.starts_with("local<") => {
+            None if ["shared<", "local<", "global<", "constant<"].iter().any(|w| view.starts_with(w)) => {
                 Err(format!("a `{}` variable is no memory, `{view}`", ty.name()))
             }
             None => Err(format!("PTX variables are {TYPES}, not `{view}`")),

@@ -28,6 +28,9 @@ pub enum ItemKind {
     Const(Const),
     /// A kernel if it names an ABI, else a helper, inlined where it is called.
     Fn(Fn),
+    /// Memory of the module's, which its kernels name, and which keeps what they write from one
+    /// launch to the next.
+    Static(Static),
     /// Anything else: Rust that passes through.
     Other,
 }
@@ -43,6 +46,25 @@ pub struct Const {
     pub ty: Type,
     /// Its value.
     pub value: Expr,
+}
+
+/// `static NAME: TYPE;`, or `static NAME: TYPE = VALUE;`: memory of the module's, of a type of
+/// the machine's, `global<[u32; 16]>`, which each of its kernels names, and which holds `VALUE`
+/// until something writes it, or zeros.
+#[derive(Clone, Debug)]
+pub struct Static {
+    /// Its outer attributes, doc comments among them, by index into the module's tokens.
+    pub attrs: Range<usize>,
+    /// Its visibility, `pub` or `pub(..)`, by index into the module's tokens; none if empty.
+    pub vis: Range<usize>,
+    /// Its name.
+    pub name: String,
+    /// Where its name is.
+    pub span: Span,
+    /// Its type.
+    pub ty: Type,
+    /// What it holds until something writes it, if it says.
+    pub value: Option<Expr>,
 }
 
 /// A function: a kernel or a helper.

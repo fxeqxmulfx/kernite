@@ -279,3 +279,15 @@ fn a_kernel_names_the_constants_it_reads() {
     // `OFFSET` in the branch taken, and `LANE` through it.
     assert_eq!(reads("adds"), ["ADD", "OFFSET", "LANE"]);
 }
+
+/// A static is memory of a GPU's module, which an x86 kernel has none of: it takes memory by
+/// pointer.
+#[test]
+fn a_static_is_no_memory_of_an_x86_kernel() {
+    let src =
+        "static COUNTS: global<[u32; 8]>;\nunsafe extern \"sysv64\" fn k() {\nlet v: ymm;\nvmovups(v, [COUNTS]);\n}\n";
+    assert_eq!(
+        kgen::x86_str(src, "k").unwrap_err(),
+        "4:13: `COUNTS` is memory of the module's, and this machine has none: its kernels take memory by pointer"
+    );
+}

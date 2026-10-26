@@ -66,7 +66,8 @@ impl IntTy {
         }
     }
 
-    fn signed(self) -> bool {
+    /// Whether it is signed.
+    pub fn signed(self) -> bool {
         matches!(self, IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::Isize)
     }
 

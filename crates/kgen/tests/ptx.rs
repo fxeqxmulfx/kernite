@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use kgen::lang::{IntTy, Mem as Address, Operand as Given, Target, Value};
 use kgen_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Sel, Space, Spec};
 use kgen_ptx::lang::{Kernel, Var};
-use kgen_ptx::{Entry, Kind, Needs, Prototype, Returns, Ty};
+use kgen_ptx::{Entry, Kind, Needs, Prototype, Returns, Static, Ty};
 
 const KERNELS: &str = r#"
     /// `x[i] *= a` for each `i < n`, a thread each.
@@ -142,6 +142,9 @@ fn ptxas_takes_what_kgen_writes() {
         ("calls", CALLS),
         ("instances", INSTANCES),
         ("names", NAMES),
+        ("statics", STATICS),
+        // Every byte of constant memory, and what it holds, on one line.
+        ("constant", "static ALL: constant<[u8; 65536]> = [1; 65536];"),
     ] {
         let (src, out) = (dir.join(format!("{name}.ptx")), dir.join(format!("{name}.cubin")));
         std::fs::write(&src, kgen::ptx_str(kernels).unwrap()).unwrap();
@@ -1220,6 +1223,10 @@ fn the_tools_that_read_ptx_show_each_name_as_rust_has_it() {
     }
     symbols.push(kgen_ptx::symbol("", "tile", &[Value::Int(4, None), Value::Bool(true)]));
     want.push("tile<(int)4, (bool)1>".into());
+    // A static, as a variable of its namespace.
+    let statics = kgen::lang::parse(STATICS).unwrap();
+    symbols.push(kgen::ptx_statics(&statics, &scope).remove(0).unwrap().code.memory.name);
+    want.push("my_workspace::my_app::gpu::COUNTS".into());
     // A name beyond ASCII as Rust's legacy mangling writes it.
     symbols.push(kgen_ptx::symbol(&kgen::ptx_scope(&["app", "мо"]), "σ", &[Value::Bool(false)]));
     want.push("app::$u43c$$u43e$::$u3c3$<(bool)0>".into());
@@ -1433,7 +1440,8 @@ enum Style {
     Short,
     /// Every operand, and one result where two may be.
     Single,
-    /// Memory the kernel declares for an address in shared or local memory.
+    /// Memory the kernel declares for an address in shared or local memory, and the module's
+    /// for one in global or constant memory.
     Memory,
     /// A part of each variable that may be one, as a video instruction selects it, and each
     /// operand that may be negated, negated.
@@ -1528,6 +1536,22 @@ fn value(t: Ty, spec: &Spec) -> Option<Given<Var>> {
     }
 }
 
+/// The module's memory the instances reach: 256 bytes at a multiple of 32, as a fragment
+/// `wmma` loads is, in global memory, `g`, and in constant memory, `c`.
+fn statics() -> [Static; 2] {
+    [("g", "global"), ("c", "constant")]
+        .map(|(name, space)| Static::new(name, name, &format!("{space}<[u8; 256], 32>")).unwrap())
+}
+
+/// Kernel `k{n}`, which names the module's memory, [`statics`].
+fn kernel(n: usize) -> Kernel {
+    let mut kernel = Kernel::new(format!("k{n}"), format!("k{n}"));
+    for s in statics() {
+        kernel.module_memory(&s);
+    }
+    kernel
+}
+
 /// An instance being made: the kernel, and whether its operands differ from those of
 /// [`Style::Vars`].
 struct Making {
@@ -1543,9 +1567,15 @@ impl Making {
         self.kernel.var(&format!("v{}", self.vars), t.name()).unwrap()
     }
 
-    /// Memory of 256 bytes at a multiple of 32, as a fragment `wmma` loads is, in local memory
-    /// for `.local` and in shared memory otherwise.
+    /// Memory of 256 bytes at a multiple of 32, as a fragment `wmma` loads is: the module's,
+    /// [`statics`], for `.global` and `.const`, and else the kernel's, in local memory for
+    /// `.local` and in shared memory otherwise.
     fn memory(&mut self, space: Space) -> Var {
+        match space {
+            Space::Global => return self.kernel.global("g").unwrap(),
+            Space::Const => return self.kernel.global("c").unwrap(),
+            _ => {}
+        }
         self.vars += 1;
         let space = if space == Space::Local { "local" } else { "shared" };
         self.kernel.var(&format!("s{}", self.vars), &format!("{space}<[u8; 256], 32>")).unwrap()
@@ -1626,7 +1656,7 @@ impl Making {
 /// Kernel `k{n}`, of the one instruction `name`, of form `b`, its operands as `style` gives
 /// them; `None` if they would be those of [`Style::Vars`], or kgen's refusal.
 fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entry, String>> {
-    let mut m = Making { kernel: Kernel::new(format!("k{n}"), format!("k{n}")), vars: 0, differs: false, sunk: false };
+    let mut m = Making { kernel: kernel(n), vars: 0, differs: false, sunk: false };
     m.kernel.callee("f", "f", Some(Prototype { params: vec![], returns: Returns::Nothing }));
     let addr = m.kernel.var("a", "u64").unwrap();
     let narrow = (style == Style::Narrow).then(|| m.kernel.var("n", "u32").unwrap());
@@ -1649,7 +1679,7 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
                 }
             }
             Role::Addr(_) => match spaces.next().expect("a space for each address") {
-                s @ (Space::Shared | Space::Local) if style == Style::Memory => {
+                s @ (Space::Shared | Space::Local | Space::Global | Space::Const) if style == Style::Memory => {
                     m.differs = true;
                     Given::Mem(Address { base: Some(m.memory(s)), index: None, disp: 32 })
                 }
@@ -1799,6 +1829,17 @@ fn others(n: &mut usize) -> Vec<Entry> {
     one("mov.b32", Ty::F16x2, Given::Vector(vec![Given::F16(0x3E00), Given::F16(0x4000)]));
     one("mov.b32", Ty::Tf32, Given::F32(1.5));
     one("mov.b64", Ty::F64, Given::F64(1.5));
+    // The address of the module's memory, in the bits ptxas takes it in: 64 for global
+    // memory's, which it refuses in 32.
+    let all = [(Ty::U64, "g"), (Ty::B64, "g"), (Ty::S64, "g"), (Ty::U64, "c"), (Ty::U32, "c"), (Ty::S32, "c")];
+    for (t, name) in all {
+        *n += 1;
+        let mut kernel = kernel(*n);
+        let (v, m) = (kernel.var("v", t.name()).unwrap(), kernel.global(name).unwrap());
+        kernel.inst(&format!("mov.{}", t.name()), &[Given::Var(v), Given::Var(m)], None).unwrap();
+        kernel.end().unwrap();
+        out.push(kernel.finish());
+    }
     // A kernel's address, its own, for the GPU to launch it.
     for t in [Ty::U32, Ty::U64, Ty::B32, Ty::B64] {
         *n += 1;
@@ -1821,13 +1862,14 @@ fn callee() -> Entry {
     f.finish()
 }
 
-/// The module of `entries`, with the function they name.
+/// The module of `entries`, with the function they name and the memory they reach,
+/// [`statics`].
 fn module(entries: &[Entry]) -> String {
     let mut all = entries.to_vec();
     if entries.iter().any(|e| e.calls.iter().any(|c| c == "f")) {
         all.insert(0, callee());
     }
-    kgen_ptx::module(&all).unwrap()
+    kgen_ptx::module(&all, &statics()).unwrap()
 }
 
 /// The kernels `ptxas` refuses of each module, assembling it for the GPU given with it, by
@@ -2385,4 +2427,256 @@ fn memory_is_reached_in_its_state_space_and_within_it() {
     for line in ["\tmov.u32 %n, WARP_SZ_;\n", "\tmov.u32 %n, k_1;\n", "\tmov.u32 %n, k_param_0_1;\n"] {
         assert!(ptx.contains(line), "{line}");
     }
+}
+
+/// Memory of the module's, which its kernels name: a histogram they keep from launch to
+/// launch, and what they read.
+const STATICS: &str = r#"
+    const N: usize = 16;
+
+    /// How many of each value `count` has seen.
+    pub static COUNTS: global<[u32; N]>;
+    /// What `scale` multiplies by.
+    static TABLE: constant<[f32; 4], 16> = [1.0, 2.0, 0.5, -1.0];
+    static SEEN: global<u64> = 7;
+    static HALVES: constant<[f16; 2]> = [1.5, 0.0];
+    static SIGNED: global<[s8; 3]> = [-1, 2, 0];
+
+    /// Counts `x[i]`, each below 16, for each `i < n`.
+    pub unsafe extern "ptx-kernel" fn count(x: *const u32, n: u32) {
+        let (i, v): (u32, u32);
+        mov.u32(i, tid.x);
+        let past: pred;
+        setp.ge.u32(past, i, n);
+        if past {
+            ret();
+        }
+        let at: u64;
+        mad.wide.u32(at, i, 4, x);
+        ld.global.u32(v, [at]);
+        mov.u64(at, COUNTS);
+        mad.wide.u32(at, v, 4, at);
+        red.global.add.u32([at], 1);
+        atom.global.add.u32(v, [COUNTS + 8], 1);
+        let s: u64;
+        ld.global.u64(s, [SEEN]);
+        cvta.global.u64(at, COUNTS);
+        let b: s8;
+        ld.global.s8(b, [SIGNED + 2]);
+    }
+
+    /// `x[0] *= TABLE[1]`.
+    pub unsafe extern "ptx-kernel" fn scale(x: *mut f32) {
+        let (v, w): (f32, f32);
+        ld.global.f32(v, [x]);
+        ld.const.f32(w, [TABLE + 4]);
+        mul.rn.f32(v, v, w);
+        st.global.f32([x], v);
+        let a: u32;
+        mov.u32(a, TABLE);
+        let g: u64;
+        cvta.const.u64(g, TABLE);
+        let h: f16;
+        ld.const.b16(h, [HALVES + 2]);
+    }
+"#;
+
+#[test]
+fn a_static_is_declared_once_for_each_kernel_to_name() {
+    let ptx = kgen::ptx_str(STATICS).unwrap();
+    let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
+    let want = "// Written by kgen.
+
+.version 3.1
+.target sm_20
+.address_size 64
+
+.global .align 4 .b8 COUNTS[64];
+.const .align 16 .b8 TABLE[16] = {0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 0, 63, 0, 0, 128, 191};
+.global .align 8 .b8 SEEN[8] = {7};
+.const .align 2 .b8 HALVES[4] = {0, 62};
+.global .align 1 .b8 SIGNED[3] = {255, 2};
+
+";
+    assert_eq!(head, want);
+    for line in [
+        "\tmov.u64 %at, COUNTS;\n",
+        "\tatom.global.add.u32 %v, [COUNTS+8], 1;\n",
+        "\tld.global.u64 %s, [SEEN];\n",
+        "\tcvta.global.u64 %at, COUNTS;\n",
+        "\tld.const.f32 %w, [TABLE+4];\n",
+        "\tmov.u32 %a, TABLE;\n",
+        "\tcvta.const.u64 %g, TABLE;\n",
+        "\tld.const.b16 %h, [HALVES+2];\n",
+    ] {
+        assert!(entries.contains(line), "{line}");
+    }
+    // In a scope, each is named as C++ names a variable of its namespace, as a kernel is.
+    let module = kgen::lang::parse(STATICS).unwrap();
+    let scope = kgen::ptx_scope(&["kgen", "my_app", "gpu"]);
+    let statics: Vec<_> = kgen::ptx_statics(&module, &scope).into_iter().map(Result::unwrap).collect();
+    assert_eq!(statics[0].code.memory.name, "_ZN4kgen6my_app3gpu6COUNTSE");
+    assert_eq!(statics[0].consts, ["N"]);
+    assert!(statics[1..].iter().all(|s| s.consts.is_empty()));
+    let count = kgen::ptx(&module, kgen::function(&module, "count").unwrap(), &[], &scope).unwrap();
+    assert!(count.code.text().contains("\tmov.u64 %at, _ZN4kgen6my_app3gpu6COUNTSE;\n"));
+}
+
+#[test]
+fn a_static_is_memory_of_a_type_the_host_reads_holding_what_it_says() {
+    let cases = [
+        (
+            "static mut A: global<u32>;",
+            "1:8: a static of the module is memory, and its type says what writes it, as in `static COUNTS: \
+             global<[u32; 16]>;`: it takes no `mut`",
+        ),
+        ("static A: global<u32>; static A: global<u32>;", "1:31: `A` names another static of the module as well"),
+        ("const A: u32 = 1; static A: global<u32>;", "1:26: `A` names a constant of the module as well"),
+        ("static k: global<u32>;", "1:8: `k` names a function of the module as well"),
+        (
+            "static A: shared<[u32; 4]>;",
+            "1:11: a static of the module is memory: in global memory, `global<[u32; 16]>`, or in constant memory, \
+             which its kernels only read, `constant<[f32; 4]>`; not `shared<[u32; 4]>`",
+        ),
+        (
+            "static A: u32;",
+            "1:11: a static of the module is memory: in global memory, `global<[u32; 16]>`, or in constant memory, \
+             which its kernels only read, `constant<[f32; 4]>`; not `u32`",
+        ),
+        (
+            "static A: global<[u32]>;",
+            "1:11: `global<[u32]>` has no size, which only shared memory may leave to the launch: `global<[u32; 64]>`",
+        ),
+        (
+            "static A: global<[pred; 4]>;",
+            "1:11: memory holds no `pred`, which is a register's alone: a `u8` holds a bool",
+        ),
+        (
+            "static A: global<[f16x2; 4]>;",
+            "1:11: a static holds numbers the host reads as Rust's: `b8` to `b64`, `u8` to `u64`, `s8` to `s64`, \
+             `f16`, `bf16`, `f32` and `f64`; not `f16x2`",
+        ),
+        ("static A: global<[u32; 0]>;", "1:11: `global<[u32; 0]>` holds nothing"),
+        ("static A: global<[u32; 4], 3>;", "1:11: what an address is a multiple of is a power of two, not 3"),
+        ("static A: global<[u32; M]>;", "1:24: `M` is not defined"),
+        ("static A: global<[u32; 2]> = [1, 2, 3];", "1:30: `global<[u32; 2]>` holds 2 elements; this has 3"),
+        ("static A: global<[u32; 2]> = 1;", "1:30: `global<[u32; 2]>` holds an array of `u32`; this is an integer"),
+        ("static A: global<[u32; 2]> = [1.5, 2];", "1:30: element 0 is an f32, not a `u32`"),
+        ("static A: global<[u32; 2]> = [1, -1];", "1:34: a u32 cannot be negated"),
+        ("static A: global<u32> = [1];", "1:25: this is an array, not a `u32`"),
+        ("static A: global<u32> = true;", "1:25: this is a bool, not a `u32`"),
+        ("static A: global<f32> = 1;", "1:25: this is an integer, and an `f32` a float: `1.0`"),
+        ("static A: global<u8> = 256;", "1:24: 256 is out of range for u8"),
+        ("static A: global<s8> = 128;", "1:24: this is 128, out of range for `s8`"),
+        ("static A: global<[b8; 2]> = [255, -129];", "1:29: element 1 is -129, out of range for `b8`"),
+        ("static A: global<f16> = 65520.0;", "1:25: 65520.0 is out of range for f16"),
+        ("static A: global<u32> = M;", "1:25: `M` is not defined"),
+        (
+            "static A: constant<[u8; 65536]>; static B: constant<u8>;",
+            "1:44: this makes the module's constant memory 65537 bytes, and a module has 64 KB",
+        ),
+        (
+            "static A: constant<[u8; 65535]>; static B: constant<[u32; 1]>;",
+            "1:44: this makes the module's constant memory 65540 bytes, and a module has 64 KB",
+        ),
+        (
+            "static A: global<[u8; 4294967295]>; static B: global<u8>;",
+            "1:47: this makes the module's global memory as much as 4294967296 bytes, each static aligned, and \
+             `ptxas` writes its size in 32 bits: a module has less than 4 GB",
+        ),
+        (
+            "static A: global<[u8; 18446744073709551615]>;",
+            "1:11: this makes the module's global memory as much as 18446744073709551615 bytes, each static aligned, \
+             and `ptxas` writes its size in 32 bits: a module has less than 4 GB",
+        ),
+        ("static k_param_0: global<u32>;", "`k_param_0` is `k_param_0` in PTX, as a parameter of `k` is"),
+        ("static WARP_SZ: global<u32>;", "`WARP_SZ` is `WARP_SZ` in PTX, as PTX's own `WARP_SZ` is"),
+        // A kernel that names one that does not compile says so, and why, where it is declared.
+        (
+            "static A: global<[u32; 2]> = [1]; unsafe extern \"ptx-kernel\" fn j() { ld.global.u32(v, [A]); }",
+            "1:30: `global<[u32; 2]>` holds 2 elements; this has 1",
+        ),
+    ];
+    let k = "unsafe extern \"ptx-kernel\" fn k(x: *mut u32) {}";
+    for (items, want) in cases {
+        assert_eq!(kgen::ptx_str(&format!("{items}\n{k}")).unwrap_err(), want, "{items}");
+    }
+    // Every byte of constant memory, and a `b` type's integers of either sign.
+    let ptx = kgen::ptx_str("static A: constant<[u8; 65535]>; static B: constant<u8>;").unwrap();
+    assert!(ptx.contains(".const .align 1 .b8 A[65535];\n.const .align 1 .b8 B[1];\n"));
+    let ptx = kgen::ptx_str("static A: global<[b8; 2]> = [255, -128];").unwrap();
+    assert!(ptx.contains(".global .align 1 .b8 A[2] = {255, 128};\n"));
+}
+
+#[test]
+fn a_static_is_reached_in_its_state_space_and_within_it() {
+    let (a, c) = ("static A: global<[u32; 4]>;", "static C: constant<[u32; 4]>;");
+    let cases = [
+        (
+            a,
+            "ld.global.u32(v, [A + 16]);",
+            "3:18: `ld.global.u32` reads 4 bytes at `[A + 16]`, past the end of `A`, 16 bytes",
+        ),
+        (a, "ld.global.u32(v, [A - 4]);", "3:18: `ld.global.u32` reads at `[A - 4]`, before `A` starts"),
+        (
+            a,
+            "ld.global.u32(v, [A + 2]);",
+            "3:18: `ld.global.u32` reads 4 bytes at once, at an address that is a multiple of 4; `[A + 2]` is not \
+             one",
+        ),
+        (a, "ld.shared.u32(v, [A]);", "3:18: `ld.shared.u32` reads shared memory; `A` is global memory"),
+        (
+            a,
+            "ld.u32(v, [A]);",
+            "3:11: `ld.u32` reads at a generic address; `A` is global memory, which an instruction reaches by its \
+             name only as `.global`",
+        ),
+        (
+            c,
+            "atom.global.add.u32(v, [C], 1);",
+            "3:24: `atom.global.add.u32` reads and writes global memory; `C` is constant memory",
+        ),
+        (c, "st.const.u32([C], v);", "3:10: PTX's `st` has no `.const` that kgen knows"),
+        // ptxas refuses a global address in 32 bits, and takes a constant one.
+        (a, "mov.u32(v, A);", "3:12: `mov.u32` puts a global address in 32 bits; it is 64, `mov.u64(a, A)`"),
+        (a, "mov.b32(v, A);", "3:12: `mov.b32` puts a global address in 32 bits; it is 64, `mov.u64(a, A)`"),
+        (
+            a,
+            "st.global.u32([A], A);",
+            "3:20: `st.global.u32` takes no memory as an operand: `mov.u64(a, A)` puts the address of `A` in `a`, \
+             and `[A]` is what it holds",
+        ),
+        (
+            a,
+            "let b: u64; cvta.shared.u64(b, A);",
+            "3:32: `cvta.shared.u64` takes the address of shared memory; `A` is global memory",
+        ),
+        (
+            c,
+            "let b: u64; cvta.global.u64(b, C);",
+            "3:32: `cvta.global.u64` takes the address of global memory; `C` is constant memory",
+        ),
+        (a, "mov.u32(v, A.x);", "3:14: `A` is memory, `global<[u32; 4]>`; it is no `x`"),
+        (a, "if A { ret(); }", "3:8: an instruction is guarded by a `pred`; this is `A`, global memory"),
+        (
+            a,
+            "let a: global<[u32; 4]>;",
+            "3:8: global and constant memory are the module's, which a static declares, as `static a: global<[u32; \
+             4]>;` beside the kernels: a kernel declares shared memory, `shared<..>`, and local, `local<..>`",
+        ),
+        (
+            a,
+            "let a: constant<u32>;",
+            "3:8: global and constant memory are the module's, which a static declares, as `static a: \
+             constant<u32>;` beside the kernels: a kernel declares shared memory, `shared<..>`, and local, \
+             `local<..>`",
+        ),
+    ];
+    for (items, body, want) in cases {
+        let src = format!("{items}\nunsafe extern \"ptx-kernel\" fn k(x: *mut u32) {{ let v: u32;\n{body}\n}}\n");
+        assert_eq!(kgen::ptx_str(&src).unwrap_err(), want, "{body}");
+    }
+    // A variable of the kernel's own takes the name it is given, before the module's.
+    let ptx = kgen::ptx_str(&format!("{a}\nunsafe extern \"ptx-kernel\" fn k() {{ let A: u32; mov.u32(A, 1); }}\n"));
+    assert!(ptx.unwrap().contains("\tmov.u32 %A, 1;\n"));
 }

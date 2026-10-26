@@ -2,7 +2,7 @@
 
 use crate::Error;
 use crate::ast::{
-    BinOp, Block, Const, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret, Stmt, Type, UnOp,
+    BinOp, Block, Const, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret, Static, Stmt, Type, UnOp,
 };
 use crate::token::{Delim, Span, Tree, text};
 
@@ -172,6 +172,13 @@ impl<'a> Parser<'a> {
         if self.eat_ident("pub") {
             self.group(Delim::Paren);
         }
+        if self.eat_ident("static") {
+            if let Some(e) = misplaced {
+                return Err(e);
+            }
+            let s = self.static_rest(attrs, head..self.pos - 1)?;
+            return Ok(Item { tokens: start..self.pos, kind: ItemKind::Static(s) });
+        }
         let qualifier = |t: Option<&Tree>| matches!(t, Some(Tree::Ident { name, .. }) if ["fn", "unsafe", "extern", "async"].contains(&name.as_str()));
         if self.is_ident("const") && !qualifier(self.peek_at(1)) {
             if let Some(e) = misplaced {
@@ -228,6 +235,22 @@ impl<'a> Parser<'a> {
         let value = self.expr()?;
         self.expect_op(";")?;
         Ok(Const { name, span, ty, value })
+    }
+
+    /// What follows `static`: `NAME: TYPE;` or `NAME: TYPE = VALUE;`.
+    fn static_rest(&mut self, attrs: std::ops::Range<usize>, vis: std::ops::Range<usize>) -> Result<Static, Error> {
+        if self.is_ident("mut") {
+            return self.error(
+                "a static of the module is memory, and its type says what writes it, as in `static COUNTS: \
+                 global<[u32; 16]>;`: it takes no `mut`",
+            );
+        }
+        let (name, span) = self.ident()?;
+        self.expect_op(":")?;
+        let ty = self.ty()?;
+        let value = if self.eat_op("=") { Some(self.expr()?) } else { None };
+        self.expect_op(";")?;
+        Ok(Static { attrs, vis, name, span, ty, value })
     }
 
     fn function(

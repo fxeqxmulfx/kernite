@@ -33,8 +33,17 @@
 //!   functions call, itself among them, as `call(r, gcd, (a, b))` does. It takes and
 //!   returns PTX's types, `u32` or `f16x2`, or never returns, `-> !`, and leaves nothing
 //!   behind for Rust, which does not call it.
+//! - A `static` is memory of the module's on the GPU, declared once in `PTX`, which each of
+//!   its GPU kernels names as it names memory it declares: `static COUNTS: global<[u32; 16]>;`
+//!   in global memory, or `static WEIGHTS: constant<[f32; 4]> = [1.0, 0.5, 0.25, 2.0];` in
+//!   constant memory, which the kernels only read. It holds what it says until something
+//!   writes it, or zeros, and keeps what is written from one launch to the next. `Kernels` has
+//!   a method of its name that gives it on the GPU, a `kgen_cuda::Global` of the type of
+//!   Rust's its elements are read as, `u32` for a `b32`, for the host to read and write:
+//!   `kernels.COUNTS().read()?`.
 //! - A function without an ABI is a helper, inlined where a kernel calls it, and leaves
-//!   nothing behind. Constants and every other item stay as written, for Rust to use as well.
+//!   nothing behind. Constants and every other item but a `static` stay as written, for Rust
+//!   to use as well.
 //!   A constant a kernel reads counts as used, as it would if Rust had seen the read: only one
 //!   that nothing reads is `dead_code`. Rust has no `bf16`, and its `f16` is unstable, so a
 //!   constant of either goes in the kernel that reads it, where `const` is the language's alone.
@@ -66,8 +75,9 @@
 //! A GPU kernel is named in PTX as C++ names a function in namespaces, those of the
 //! workspace, the crate and its modules, mangled under Itanium's ABI:
 //! `_ZN4kgen6my_app3gpu5scaleE`, which `cu++filt`, Nsight and `cuda-gdb` show as
-//! `kgen::my_app::gpu::scale`, and an instance as a template's,
-//! `kgen::my_app::gpu::block_sums<(unsigned int)1024>`. The workspace is named as the
+//! `kgen::my_app::gpu::scale`, an instance as a template's,
+//! `kgen::my_app::gpu::block_sums<(unsigned int)1024>`, and a static as a variable of the
+//! namespaces, `kgen::my_app::gpu::COUNTS`. The workspace is named as the
 //! directory of its `Cargo.toml` is, or as the manifest names it, which a clone keeps
 //! wherever it is; `name = ""` leaves it out. A package of no workspace is named as the
 //! package is.
@@ -87,8 +97,8 @@ use std::path::{Path, PathBuf};
 
 use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 
-use kgen::Abi;
 use kgen::lang::{self, Delim, Fn, ItemKind, Tree, Value};
+use kgen::{Abi, Static};
 
 /// See the crate documentation.
 #[proc_macro_attribute]
@@ -139,13 +149,28 @@ fn expand(body: TokenStream) -> TokenStream {
     let scope = kgen::ptx_scope(&names) + HOLE;
     let mut out = TokenStream::new();
     let (mut listings, mut entries, mut launchers, mut read) = (vec![], vec![], vec![], vec![]);
-    // The first function for a GPU, where an error of the module as a whole goes; and the
-    // symbol of each kernel it launches, by index.
-    let (mut first, mut symbols) = (None, vec![]);
+    // The first function for a GPU, or static, where an error of the module as a whole goes;
+    // the symbol of each kernel it launches, by index; and each static, compiled or not.
+    let (mut first, mut symbols, mut memory) = (None, vec![], vec![]);
+    let mut statics = kgen::ptx_statics(&module, &scope).into_iter();
     for item in &module.items {
         let f = match &item.kind {
             ItemKind::Const(_) | ItemKind::Other => {
                 out.extend(top[item.tokens.clone()].iter().cloned());
+                continue;
+            }
+            ItemKind::Static(s) => {
+                first.get_or_insert(s.span);
+                match statics.next().expect("each static is compiled") {
+                    Ok(made) => {
+                        read.extend(made.consts);
+                        memory.push((s, Some(made.code)));
+                    }
+                    Err(e) => {
+                        out.extend(error(at(e.span), &e.message));
+                        memory.push((s, None));
+                    }
+                }
                 continue;
             }
             ItemKind::Fn(f) => f,
@@ -254,11 +279,12 @@ fn expand(body: TokenStream) -> TokenStream {
         out.extend(parse(&(s + "];")));
     }
     if let Some(span) = first {
-        let ptx = kgen::ptx_module(&entries).unwrap_or_else(|e| {
+        let made: Vec<Static> = memory.iter().filter_map(|(_, m)| m.clone()).collect();
+        let ptx = kgen::ptx_module(&entries, &made).unwrap_or_else(|e| {
             out.extend(error(at(span), &e));
             String::new()
         });
-        out.extend(gpu(&launchers, &symbols, &ptx, &top));
+        out.extend(gpu(&launchers, &symbols, &memory, &ptx, &top));
         // The workspace's name is in the PTX, so it is built again when it changes.
         if let Some(manifest) = manifest.as_deref().and_then(Path::to_str) {
             out.extend(parse(&format!("const _: &[u8] = ::core::include_bytes!({manifest:?});")));
@@ -331,9 +357,17 @@ fn used(module: &lang::Module, read: &[String]) -> TokenStream {
 /// `PTX`, the module the GPU kernels are, and `Kernels`, which loads it on a GPU and has a
 /// method to launch each kernel by its name: of each instance, for a kernel of compile-time
 /// arguments; one that never runs for a kernel that did not compile, launched `None`. Each of
-/// `symbols` is a kernel's name in `ptx`, by its index.
-fn gpu(launchers: &[(&Fn, Option<Vec<Launched>>)], symbols: &[String], ptx: &str, top: &[TokenTree]) -> TokenStream {
+/// `symbols` is a kernel's name in `ptx`, by its index. Each static of `memory` has a method
+/// of its name too, which gives its memory on the GPU, or never runs, if it did not compile.
+fn gpu(
+    launchers: &[(&Fn, Option<Vec<Launched>>)],
+    symbols: &[String],
+    memory: &[(&lang::Static, Option<Static>)],
+    ptx: &str,
+    top: &[TokenTree],
+) -> TokenStream {
     let names: Vec<String> = symbols.iter().map(|s| named(s)).collect();
+    let globals: Vec<String> = memory.iter().filter_map(|(_, m)| Some(named(&m.as_ref()?.memory.name))).collect();
     let mut out = parse(&format!(
         "/// The module's GPU kernels, in PTX, for the CUDA driver to compile for the GPU it finds.\n\
          /// Each is named as C++ names it in the namespaces of the workspace, the crate and the\n\
@@ -341,7 +375,8 @@ fn gpu(launchers: &[(&Fn, Option<Vec<Launched>>)], symbols: &[String], ptx: &str
          /// `kgen::my_app::gpu::tile<(unsigned long)4>`.\n\
          #[allow(dead_code)]\n\
          pub const PTX: &str = {};\n\
-         /// The module's GPU kernels, loaded on a GPU: each is launched by the method of its name.\n\
+         /// The module's GPU kernels, loaded on a GPU: each is launched by the method of its name,\n\
+         /// and the memory of each static is the `kgen_cuda::Global` the method of its name gives.\n\
          #[allow(dead_code)]\n\
          pub struct Kernels {{\n    module: ::kgen_cuda::Module,\n}}\n\
          #[allow(dead_code)]\n\
@@ -352,14 +387,44 @@ fn gpu(launchers: &[(&Fn, Option<Vec<Launched>>)], symbols: &[String], ptx: &str
         "/// The kernels, compiled for `cuda`'s GPU by its driver.\n\
          pub fn load(cuda: &::kgen_cuda::Cuda) -> ::core::result::Result<Kernels, ::kgen_cuda::Error> {{\n\
              const NAMES: &[&str] = &[{}];\n\
-             ::core::result::Result::Ok(Kernels {{ module: ::kgen_cuda::Module::load(cuda, PTX, NAMES, &[])? }})\n\
+             const GLOBALS: &[&str] = &[{}];\n\
+             ::core::result::Result::Ok(Kernels {{ module: ::kgen_cuda::Module::load(cuda, PTX, NAMES, GLOBALS)? }})\n\
          }}",
-        names.join(", ")
+        names.join(", "),
+        globals.join(", ")
     ));
     for (f, launched) in launchers {
         methods.extend(launcher(f, launched.as_deref(), top));
     }
+    for (k, (s, made)) in memory.iter().enumerate() {
+        // Its index among the variables the module has, those of the statics that compiled.
+        let i = memory[..k].iter().filter(|(_, m)| m.is_some()).count();
+        methods.extend(accessor(s, made.as_ref().map(|m| (m, i)), top));
+    }
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, methods))]);
+    out
+}
+
+/// The method that gives static `s`'s memory on the GPU, `made`, by its index among the
+/// module's variables, as the `kgen_cuda::Global` of the type of Rust's its elements are read
+/// as; or one that never runs, for a static that did not compile.
+fn accessor(s: &lang::Static, made: Option<(&Static, usize)>, top: &[TokenTree]) -> TokenStream {
+    let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
+    out.extend(parse("#[allow(non_snake_case)]"));
+    out.extend(top[s.vis.clone()].iter().cloned());
+    out.extend(parse("fn"));
+    // Its name as written, after `static`.
+    out.extend([top[s.vis.end + 1].clone()]);
+    out.extend(parse(&match made {
+        Some((m, i)) => {
+            let ty = match m.elem.host().expect("a static is of a type the host reads") {
+                ty @ ("f16" | "bf16") => format!("::kgen_cuda::{ty}"),
+                ty => ty.to_string(),
+            };
+            format!("(&self) -> ::kgen_cuda::Global<'_, {ty}> {{ self.module.global({i}) }}")
+        }
+        None => "<T: ::kgen_cuda::Plain>(&self) -> ::kgen_cuda::Global<'_, T> { ::core::unreachable!() }".to_string(),
+    }));
     out
 }
 

@@ -330,7 +330,9 @@ vset4(.u32|.s32)(.u32|.s32)$cmps{.add} : =u32{.bmask}, %T{.bxyzw}, %U{.bxyzw}, %
 # Moving data, and converting it. `mov` packs no `_`, as the ISA has it, where ptxas 13.4
 # takes one and packs zeros: `mov.b32 d, {_, h}`.
 mov(.pred|.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64|.f32|.f64) : =T, !$T @1.0
-mov(.u32|.u64) : =T, &T @1.0
+# A variable's address, which the ISA puts in a `u32` or a `u64`, and ptxas 13.4 in a `b` or
+# an `s` type of their sizes as well, as the same bits.
+mov(.u32|.u64|.b32|.b64|.s32|.s64) : =T, &T @1.0
 mov(.u32|.u64|.b32|.b64) : =T, fn @2.1
 mov.b128 : =T, T @8.3 @sm70
 mov.b16 : =T, b8*2 @1.0
@@ -388,7 +390,7 @@ createpolicy.cvt.L2.b64 : =T, b64 @7.4 @sm80
 isspacep$space : =pred, u64 @2.0
 isspacep$space : =pred, %u32 @2.0
 cvta$space.u64 : =T, T @2.0
-cvta(.local|.shared|.shared::cta@7.8).u64 : =T, &T @2.0
+cvta(.const@3.1|.global|.local|.shared|.shared::cta@7.8).u64 : =T, &T @2.0
 cvta.to$space.u64 : =T, T @2.0
 # A special register is converted to an integer only: ptxas 13.4 converts none to a float.
 cvt{.rni|.rzi|.rmi|.rpi|.rn|.rz|.rm|.rp}{.ftz@1.4}{.sat}$cvti$cvty : =T, $U @1.0 +wide +cvt
@@ -1025,6 +1027,14 @@ impl Space {
             "const" => Some(Space::Const),
             "param" => Some(Space::Param),
             _ => None,
+        }
+    }
+
+    /// What its memory is called: `constant` for `.const`, and its word for the rest.
+    pub fn noun(self) -> &'static str {
+        match self {
+            Space::Const => "constant",
+            s => s.word(),
         }
     }
 

@@ -42,7 +42,7 @@
 pub use kgen_compile::Error;
 pub use kgen_core::{Class, Program, Signature};
 pub use kgen_lang as lang;
-pub use kgen_ptx::Entry;
+pub use kgen_ptx::{Entry, Static};
 pub use kgen_x86::Op;
 pub use kgen_x86::intel::{Line, Listing};
 
@@ -79,11 +79,11 @@ pub fn render(program: &Program<Op>) -> Result<Listing, Error> {
     Ok(kgen_x86::intel::print(&compiled))
 }
 
-/// A kernel compiled, and the constants of its module it read. Rust never sees those reads,
-/// so whatever writes the module out for Rust has to say they happened.
+/// A kernel compiled, or a static, and the constants of its module it read. Rust never sees
+/// those reads, so whatever writes the module out for Rust has to say they happened.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Kernel<T> {
-    /// What it compiled to: its listing, or its `.entry`.
+pub struct Compiled<T> {
+    /// What it compiled to: its listing, its `.entry`, or the memory a static is.
     pub code: T,
     /// The constants, by name, in the module's order.
     pub consts: Vec<String>,
@@ -93,7 +93,7 @@ pub struct Kernel<T> {
 /// those of one of its [`instances`](kgen_lang::instances), none for a kernel that takes none.
 /// What goes wrong is placed where it can be mended: an instruction where it is called, a
 /// register that ran out where its variable is declared. For an instance, it says which.
-pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Kernel<Listing>, kgen_lang::Error> {
+pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>, kgen_lang::Error> {
     let name = kgen_lang::instance(f, args)?;
     let mut kernel = kgen_x86::lang::Kernel::new(&name);
     let run = kgen_lang::kernel(module, f, args, &mut kernel).map_err(|e| within(&name, args, e))?;
@@ -101,7 +101,7 @@ pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Kernel<Listing>, k
         let e = kgen_lang::Error { span: blame(&e, &run.decls).unwrap_or(f.span), message: e.to_string() };
         within(&name, args, e)
     })?;
-    Ok(Kernel { code, consts: run.consts })
+    Ok(Compiled { code, consts: run.consts })
 }
 
 /// Kernel `name` of the module in `src`, for x86-64, or its instance `tile::<4>`; an error
@@ -123,13 +123,18 @@ pub fn x86_str(src: &str, name: &str) -> Result<Listing, String> {
 /// It is named in PTX, as the functions it names are, by its [`symbol`](kgen_ptx::symbol) in
 /// `scope`, the namespaces [`ptx_scope`] writes: C++'s name for it, which the tools that read
 /// PTX show. With no scope, `""`, one that takes no compile-time arguments is its own name.
-pub fn ptx(module: &Module, f: &Fn, args: &[Value], scope: &str) -> Result<Kernel<Entry>, kgen_lang::Error> {
+/// It names the module's memory, its statics, as [`ptx_statics`] has them in `scope`.
+pub fn ptx(module: &Module, f: &Fn, args: &[Value], scope: &str) -> Result<Compiled<Entry>, kgen_lang::Error> {
     let name = kgen_lang::instance(f, args)?;
     let symbol = kgen_ptx::symbol(scope, &f.name, args);
     let mut kernel = match abi(f) {
         Some(Abi::PtxFunc) => kgen_ptx::lang::Kernel::func(&name, symbol),
         _ => kgen_ptx::lang::Kernel::new(&name, symbol),
     };
+    // One that does not compile says why where it is declared.
+    for s in ptx_statics(module, scope).into_iter().flatten() {
+        kernel.module_memory(&s.code);
+    }
     for item in &module.items {
         let ItemKind::Fn(g) = &item.kind else { continue };
         let proto = match abi(g) {
@@ -154,7 +159,7 @@ pub fn ptx(module: &Module, f: &Fn, args: &[Value], scope: &str) -> Result<Kerne
         let e = kgen_lang::Error { span: blame(&e, &run.decls).unwrap_or(f.span), message: e.to_string() };
         within(&name, args, e)
     })?;
-    Ok(Kernel { code, consts: run.consts })
+    Ok(Compiled { code, consts: run.consts })
 }
 
 /// `path`, the namespaces a module's PTX kernels are in for [`ptx`], each in the one before:
@@ -163,17 +168,47 @@ pub fn ptx_scope(path: &[&str]) -> String {
     kgen_ptx::scope(path)
 }
 
+/// The statics of `module`, its memory in PTX, in order: each named by its
+/// [`symbol`](kgen_ptx::symbol) in `scope`, as [`ptx`] names a kernel, for its kernels to name
+/// and [`ptx_module`] to declare; or why it is none, where it can be mended: at its type, at
+/// what it holds, or at its name, if another item of the module's has it. One that does not
+/// fit beside those before it, in the constant memory a module has or the global, is none.
+pub fn ptx_statics(module: &Module, scope: &str) -> Vec<Result<Compiled<Static>, kgen_lang::Error>> {
+    let mut out: Vec<Result<Compiled<Static>, kgen_lang::Error>> = vec![];
+    for item in &module.items {
+        let ItemKind::Static(s) = &item.kind else { continue };
+        let made = kgen_lang::memory(module, s).and_then(|memory| {
+            let at = |span: Span| move |message: String| kgen_lang::Error { span, message };
+            let symbol = kgen_ptx::symbol(scope, &s.name, &[]);
+            let mut made = Static::new(&s.name, &symbol, &memory.ty).map_err(at(s.ty.span()))?;
+            if let (Some(value), Some(e)) = (&memory.value, &s.value) {
+                made.init(value).map_err(at(e.span()))?;
+            }
+            let before: Vec<Static> = out.iter().flatten().map(|s| s.code.clone()).collect();
+            kgen_ptx::fits(&before, &made).map_err(at(s.ty.span()))?;
+            Ok(Compiled { code: made, consts: memory.consts })
+        });
+        out.push(made);
+    }
+    out
+}
+
 /// The PTX module of `entries`, for the CUDA driver to load: of the PTX version and for the
-/// GPU their instructions need. It fails if one needs a GPU older than another needs.
-pub fn ptx_module(entries: &[Entry]) -> Result<String, String> {
-    kgen_ptx::module(entries)
+/// GPU their instructions need, with `statics`, the module's memory. It fails if one needs a
+/// GPU older than another needs.
+pub fn ptx_module(entries: &[Entry], statics: &[Static]) -> Result<String, String> {
+    kgen_ptx::module(entries, statics)
 }
 
 /// Every kernel `extern "ptx-kernel"` and function `extern "ptx-func"` of the module in
-/// `src`, each instance of each, in one PTX module, in no scope; an error reads
-/// `line:column: what`. A helper's `#[instances(..)]` is one.
+/// `src`, each instance of each, in one PTX module, in no scope, with its statics; an error
+/// reads `line:column: what`. A helper's `#[instances(..)]` is one.
 pub fn ptx_str(src: &str) -> Result<String, String> {
     let module = kgen_lang::parse(src).map_err(|e| e.at(src))?;
+    let mut statics = vec![];
+    for s in ptx_statics(&module, "") {
+        statics.push(s.map_err(|e| e.at(src))?.code);
+    }
     let mut entries = vec![];
     for item in &module.items {
         let ItemKind::Fn(f) = &item.kind else { continue };
@@ -184,7 +219,7 @@ pub fn ptx_str(src: &str) -> Result<String, String> {
             entries.push(ptx(&module, f, &args, "").map_err(|e| e.at(src))?.code);
         }
     }
-    ptx_module(&entries)
+    ptx_module(&entries, &statics)
 }
 
 /// The ABI `f` names, if kgen compiles for it.

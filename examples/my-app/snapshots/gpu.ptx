@@ -4,6 +4,9 @@
 .target sm_53
 .address_size 64
 
+.global .align 4 .b8 _ZN4kgen6my_app3gpu6COUNTSE[64];
+.const .align 4 .b8 _ZN4kgen6my_app3gpu7WEIGHTSE[16] = {0, 0, 128, 63, 0, 0, 0, 63, 0, 0, 128, 62, 0, 0, 0, 64};
+
 .extern .shared .align 4 .b8 _ZZN4kgen6my_app3gpu12reverse_runsEE3run[];
 
 .visible .entry _ZN4kgen6my_app3gpu5saxpyE(
@@ -300,5 +303,62 @@
 	rem.u32 %r, %a, %b;
 	call (%g), _ZN4kgen6my_app3gpu3gcdE, (%b, %r);
 	st.param.u32 [_ZN4kgen6my_app3gpu3gcdE_retval], %g;
+	ret;
+}
+
+.visible .entry _ZN4kgen6my_app3gpu9histogramE(
+	.param .u64 _ZN4kgen6my_app3gpu9histogramE_param_0,
+	.param .u32 _ZN4kgen6my_app3gpu9histogramE_param_1
+)
+{
+	.reg .pred %past;
+	.reg .u32 %n, %i, %block, %size, %thread, %bin;
+	.reg .u64 %x, %at;
+
+	ld.param.u64 %x, [_ZN4kgen6my_app3gpu9histogramE_param_0];
+	cvta.to.global.u64 %x, %x;
+	ld.param.u32 %n, [_ZN4kgen6my_app3gpu9histogramE_param_1];
+	mov.u32 %block, %ctaid.x;
+	mov.u32 %size, %ntid.x;
+	mov.u32 %thread, %tid.x;
+	mad.lo.u32 %i, %block, %size, %thread;
+	setp.ge.u32 %past, %i, %n;
+	@%past ret;
+	mad.wide.u32 %at, %i, 4, %x;
+	ld.global.u32 %bin, [%at];
+	shr.u32 %bin, %bin, 28;
+	mov.u64 %at, _ZN4kgen6my_app3gpu6COUNTSE;
+	mad.wide.u32 %at, %bin, 4, %at;
+	red.global.add.u32 [%at], 1;
+	ret;
+}
+
+.visible .entry _ZN4kgen6my_app3gpu5weighE(
+	.param .u64 _ZN4kgen6my_app3gpu5weighE_param_0,
+	.param .u32 _ZN4kgen6my_app3gpu5weighE_param_1
+)
+{
+	.reg .pred %past;
+	.reg .u32 %n, %i, %block, %size, %thread, %weight, %table;
+	.reg .f32 %v, %w;
+	.reg .u64 %x, %at;
+
+	ld.param.u64 %x, [_ZN4kgen6my_app3gpu5weighE_param_0];
+	cvta.to.global.u64 %x, %x;
+	ld.param.u32 %n, [_ZN4kgen6my_app3gpu5weighE_param_1];
+	mov.u32 %block, %ctaid.x;
+	mov.u32 %size, %ntid.x;
+	mov.u32 %thread, %tid.x;
+	mad.lo.u32 %i, %block, %size, %thread;
+	setp.ge.u32 %past, %i, %n;
+	@%past ret;
+	mad.wide.u32 %at, %i, 4, %x;
+	ld.global.f32 %v, [%at];
+	and.b32 %weight, %i, 3;
+	mov.u32 %table, _ZN4kgen6my_app3gpu7WEIGHTSE;
+	mad.lo.u32 %weight, %weight, 4, %table;
+	ld.const.f32 %w, [%weight];
+	mul.rn.f32 %v, %v, %w;
+	st.global.f32 [%at], %v;
 	ret;
 }

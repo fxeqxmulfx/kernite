@@ -4,7 +4,7 @@
 use std::fmt;
 
 use crate::Error;
-use crate::ast::{BinOp, Block, Const, Expr, Fn, Generic, ItemKind, Module, Stmt, Type, UnOp};
+use crate::ast::{BinOp, Block, Const, Expr, Fn, Generic, ItemKind, Module, Static, Stmt, Type, UnOp};
 use crate::token::Span;
 use crate::value::{self, Value, Want};
 
@@ -25,6 +25,14 @@ pub trait Target {
 
     /// A new variable of the machine's type `ty`.
     fn var(&mut self, name: &str, ty: &str) -> Result<Self::Var, String>;
+
+    /// The module's memory `name`, which a `static` of the module declares, as a variable, the
+    /// first time the function names it. A machine has none unless it says so.
+    fn global(&mut self, name: &str) -> Result<Self::Var, String> {
+        Err(format!(
+            "`{name}` is memory of the module's, and this machine has none: its kernels take memory by pointer"
+        ))
+    }
 
     /// `var` seen as `view`: a field, as in `v.xmm`, or the type of a helper's parameter.
     fn view(&mut self, var: Self::Var, view: &str) -> Result<Self::Var, String>;
@@ -139,6 +147,52 @@ pub struct Run {
     /// The module's constants it read, itself or through others, in the module's order. Rust
     /// never sees a kernel's body run, so it sees none of these reads.
     pub consts: Vec<String>,
+}
+
+/// A static of a module, as [`memory`] evaluates it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Memory {
+    /// Its type as the target reads it, with what its arguments name worked out among the
+    /// module's constants: `global<[f32; 256], 16>`.
+    pub ty: String,
+    /// What it holds until something writes it, if it says: a value known now, its literals
+    /// of the type its type's first argument holds, `[0.5; 256]`.
+    pub value: Option<Value>,
+    /// The module's constants it read, itself or through others, in the module's order. Rust
+    /// never sees its type or its value worked out, so it sees none of these reads.
+    pub consts: Vec<String>,
+}
+
+/// `s`, a static of `module`, worked out among the module's constants; or why not, or that
+/// another item of the module has its name.
+pub fn memory(module: &Module, s: &Static) -> Result<Memory, Error> {
+    // Of two statics of a name, the second is in the way.
+    let mut before = true;
+    for item in &module.items {
+        let (name, what) = match &item.kind {
+            ItemKind::Const(c) => (&c.name, "a constant"),
+            ItemKind::Fn(f) => (&f.name, "a function"),
+            ItemKind::Static(t) if std::ptr::eq(t, s) => {
+                before = false;
+                continue;
+            }
+            ItemKind::Static(t) if before => (&t.name, "another static"),
+            _ => continue,
+        };
+        if *name == s.name {
+            return Err(err(s.span, format!("`{name}` names {what} of the module as well")));
+        }
+    }
+    let mut consts = Consts;
+    let mut e = Eval::new(module, &mut consts);
+    let ty = e.type_name(&s.ty)?;
+    let held = match &s.ty {
+        Type::Generic(_, args, _) => args.first().map_or(Want::Any, want),
+        t => want(t),
+    };
+    let value = s.value.as_ref().map(|v| e.value(v, held)).transpose()?;
+    let consts = e.consts.iter().filter(|(_, state)| matches!(state, State::Done(_))).map(|(c, _)| c.name.clone());
+    Ok(Memory { ty, value, consts: consts.collect() })
 }
 
 /// Runs `f` of `module` on `target`, a kernel or another function that names an ABI, for the
@@ -277,6 +331,9 @@ enum Binding<V> {
     Vars(Vec<V>),
     /// A label of the block.
     Label(u32),
+    /// Memory of the module's, by its place among the module's statics: a variable the
+    /// target makes the first time the function names it.
+    Static(usize),
 }
 
 impl<V> Binding<V> {
@@ -286,6 +343,7 @@ impl<V> Binding<V> {
             Binding::Var(_) => "a variable".into(),
             Binding::Vars(vs) => format!("{} variables", vs.len()),
             Binding::Label(_) => "a label".into(),
+            Binding::Static(_) => "memory of the module's".into(),
         }
     }
 }
@@ -308,6 +366,8 @@ enum Lin<V> {
 struct Eval<'a, T: Target> {
     target: &'a mut T,
     consts: Vec<(&'a Const, State)>,
+    /// The module's statics, each with its variable once the function names it.
+    statics: Vec<(&'a Static, Option<T::Var>)>,
     helpers: Vec<&'a Fn>,
     /// The functions that name an ABI, each compiled on its own: kernels, and functions the
     /// machine calls.
@@ -322,16 +382,18 @@ struct Eval<'a, T: Target> {
 
 impl<'a, T: Target> Eval<'a, T> {
     fn new(module: &'a Module, target: &'a mut T) -> Self {
-        let (mut consts, mut helpers, mut compiled) = (vec![], vec![], vec![]);
+        let (mut consts, mut statics, mut helpers, mut compiled) = (vec![], vec![], vec![], vec![]);
         for item in &module.items {
             match &item.kind {
                 ItemKind::Const(c) => consts.push((c, State::Waiting)),
+                ItemKind::Static(s) => statics.push((s, None)),
                 ItemKind::Fn(f) if f.abi.is_some() => compiled.push(f),
                 ItemKind::Fn(f) => helpers.push(f),
                 ItemKind::Other => {}
             }
         }
-        Eval { target, consts, helpers, compiled, scopes: vec![], labels: 0, guard: None, depth: 0, decls: vec![] }
+        let scopes = vec![];
+        Eval { target, consts, statics, helpers, compiled, scopes, labels: 0, guard: None, depth: 0, decls: vec![] }
     }
 
     fn bind(&mut self, name: &str, b: Binding<T::Var>) {
@@ -344,7 +406,21 @@ impl<'a, T: Target> Eval<'a, T> {
                 return Ok(Some(b.clone()));
             }
         }
-        Ok(self.global(name, span)?.map(Binding::Value))
+        if let Some(v) = self.global(name, span)? {
+            return Ok(Some(Binding::Value(v)));
+        }
+        Ok(self.statics.iter().position(|(s, _)| s.name == name).map(Binding::Static))
+    }
+
+    /// The variable the module's static `i` is, named at `span`: the target makes it the first
+    /// time.
+    fn static_var(&mut self, i: usize, span: Span) -> Result<T::Var, Error> {
+        if let Some(v) = self.statics[i].1 {
+            return Ok(v);
+        }
+        let v = self.target.global(&self.statics[i].0.name).map_err(|m| err(span, m))?;
+        self.statics[i].1 = Some(v);
+        Ok(v)
     }
 
     /// The module constant `name`, evaluated the first time it is named, in a scope of
@@ -645,6 +721,7 @@ impl<'a, T: Target> Eval<'a, T> {
         match e {
             Expr::Path(path, span) if path.len() == 1 => match self.lookup(&path[0], *span)? {
                 Some(Binding::Var(v)) => Ok(Some(v)),
+                Some(Binding::Static(i)) => self.static_var(i, *span).map(Some),
                 _ => Ok(None),
             },
             Expr::Index(base, index, span) => {
@@ -674,7 +751,10 @@ impl<'a, T: Target> Eval<'a, T> {
             && path.len() == 1
             && let Some(b) = self.lookup(&path[0], *span)?
         {
-            return Ok(b);
+            return match b {
+                Binding::Static(i) => self.static_var(i, *span).map(Binding::Var),
+                b => Ok(b),
+            };
         }
         match self.place(e)? {
             Some(v) => Ok(Binding::Var(v)),
@@ -703,6 +783,7 @@ impl<'a, T: Target> Eval<'a, T> {
         match e {
             Expr::Path(path, span) if path.len() == 1 => match self.lookup(&path[0], *span)? {
                 Some(Binding::Var(v)) => Ok(Operand::Var(v)),
+                Some(Binding::Static(i)) => self.static_var(i, *span).map(Operand::Var),
                 Some(Binding::Value(v)) => scalar(v, *span),
                 Some(Binding::Vars(vs)) => Ok(Operand::Vector(vs.into_iter().map(Operand::Var).collect())),
                 Some(Binding::Label(l)) => Ok(Operand::Label(l)),

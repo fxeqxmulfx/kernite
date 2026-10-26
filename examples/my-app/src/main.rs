@@ -201,6 +201,56 @@ mod gpu {
         ret(g);
     }
 
+    /// How many of the integers `histogram` has seen fall in each of 16 bins, by their top four
+    /// bits: memory of the module's, kept on the GPU from one launch to the next.
+    pub static COUNTS: global<[u32; 16]>;
+
+    /// What `weigh` multiplies each float by, by its place in a run of four: in constant
+    /// memory, which every thread reads and the host writes.
+    pub static WEIGHTS: constant<[f32; 4]> = [1.0, 0.5, 0.25, 2.0];
+
+    /// Adds each `x[i]`, `i < n`, to its bin of `COUNTS`, the one its top four bits say.
+    pub unsafe extern "ptx-kernel" fn histogram(x: *const u32, n: u32) {
+        let i: u32;
+        global_index(i);
+        let past: pred;
+        setp.ge.u32(past, i, n);
+        if past {
+            ret();
+        }
+        let at: u64;
+        mad.wide.u32(at, i, 4, x);
+        let bin: u32;
+        ld.global.u32(bin, [at]);
+        shr.u32(bin, bin, 28);
+        mov.u64(at, COUNTS);
+        mad.wide.u32(at, bin, 4, at);
+        red.global.add.u32([at], 1);
+    }
+
+    /// `x[i] *= WEIGHTS[i % 4]` for each `i < n`, rounded once.
+    pub unsafe extern "ptx-kernel" fn weigh(x: *mut f32, n: u32) {
+        let i: u32;
+        global_index(i);
+        let past: pred;
+        setp.ge.u32(past, i, n);
+        if past {
+            ret();
+        }
+        let at: u64;
+        mad.wide.u32(at, i, 4, x);
+        let (v, w): (f32, f32);
+        ld.global.f32(v, [at]);
+        let weight: u32;
+        and.b32(weight, i, 3);
+        let table: u32;
+        mov.u32(table, WEIGHTS);
+        mad.lo.u32(weight, weight, 4, table);
+        ld.r#const.f32(w, [weight]);
+        mul.rn.f32(v, v, w);
+        st.global.f32([at], v);
+    }
+
     /// The index of this thread among all of the grid's.
     fn global_index(i: u32) {
         let (block, size, thread): (u32, u32, u32);
@@ -420,6 +470,35 @@ fn gcds(cuda: &Cuda, kernels: &gpu::Kernels, a: &[u32], b: &[u32]) -> Result<Vec
     Ok(g)
 }
 
+/// Adds each of `x` to its bin of `gpu::COUNTS`, by its top four bits, on the GPU, which keeps
+/// the counts from one call to the next: `kernels.COUNTS()` reads them, writes them, and
+/// zeroes them.
+fn histogram(cuda: &Cuda, kernels: &gpu::Kernels, x: &[u32]) -> Result<(), kgen_cuda::Error> {
+    let n = u32::try_from(x.len()).expect("fewer than 2^32 integers");
+    if n == 0 {
+        return Ok(());
+    }
+    let xs = cuda.upload(x)?;
+    // SAFETY: `n` integers behind the pointer, in a buffer that lasts until `sync` has waited
+    // for the kernel.
+    unsafe { kernels.histogram(Grid::new(n.div_ceil(256), 256), xs.ptr(), n)? };
+    cuda.sync()
+}
+
+/// `x[i] *= w[i % 4]` on the GPU, each product rounded once, of `w` the weights in its
+/// constant memory, `gpu::WEIGHTS`: `[1, 0.5, 0.25, 2]` until `kernels.WEIGHTS()` writes others.
+fn weigh(cuda: &Cuda, kernels: &gpu::Kernels, x: &mut [f32]) -> Result<(), kgen_cuda::Error> {
+    let n = u32::try_from(x.len()).expect("fewer than 2^32 floats");
+    if n == 0 {
+        return Ok(());
+    }
+    let xs = cuda.upload(x)?;
+    // SAFETY: `n` floats behind the pointer, in a buffer that lasts until `read_into` has
+    // waited for the kernel.
+    unsafe { kernels.weigh(Grid::new(n.div_ceil(256), 256), xs.ptr(), n)? };
+    xs.read_into(x)
+}
+
 /// `a b` in `f32`, of `a`, `m` rows of `k` halves, and `b`, `k` rows of `n`, given as its
 /// transpose `bt`, `n` rows of `k`, on the tensor cores; `m` must be a multiple of 16, `n` of
 /// 8 and `k` of 16. The kernels load only on an Ampere GPU or newer, `sm_80`.
@@ -495,6 +574,20 @@ fn main() {
             match gcds(&cuda, &kernels, &[1071, 2_971_215_073], &[462, 1_836_311_903]) {
                 Ok(g) => println!("gcd(1071, 462) = {}, and of two Fibonacci numbers, 46 calls deep: {}", g[0], g[1]),
                 Err(e) => println!("gcds failed: {e}"),
+            }
+            let seen = (0..2).try_fold(vec![], |mut seen, launch| {
+                histogram(&cuda, &kernels, &[launch << 28, 0x1000_0000, u32::MAX])?;
+                seen.push(kernels.COUNTS().read()?[..4].to_vec());
+                Ok::<_, kgen_cuda::Error>(seen)
+            });
+            match seen {
+                Ok(seen) => println!("4 of the 16 bins after a launch of 3 integers, and after another: {seen:?}"),
+                Err(e) => println!("histogram failed: {e}"),
+            }
+            let mut x = [1.0; 6];
+            match weigh(&cuda, &kernels, &mut x) {
+                Ok(()) => println!("six ones weighed by the weights in constant memory: {x:?}"),
+                Err(e) => println!("weigh failed: {e}"),
             }
             if cuda.sm() >= 80 {
                 let a: Vec<f16> = (0..64 * 64).map(|i| f16::from_f32((i % 7) as f32 - 3.0)).collect();
@@ -712,6 +805,51 @@ mod tests {
         let (a, b): (Vec<u32>, Vec<u32>) = pairs.iter().copied().unzip();
         let want: Vec<u32> = pairs.iter().map(|&(x, y)| euclid(x, y)).collect();
         assert_eq!(super::gcds(&cuda, &kernels, &a, &b).unwrap(), want);
+    }
+
+    /// `histogram` against the counts of each bin in Rust, kept on the GPU from one launch to
+    /// the next, and from what the host writes.
+    #[test]
+    fn histogram_keeps_its_counts_from_launch_to_launch() {
+        let Some((cuda, kernels)) = cuda() else { return };
+        let counts = kernels.COUNTS();
+        assert_eq!(counts.len(), 16);
+        assert_eq!(counts.read().unwrap(), [0; 16], "zeros until something writes them");
+        let mut want = [0u32; 16];
+        for (n, seed) in [(1000, 1), (0, 2), (1, 3), (100_000, 4)] {
+            let x = words(n, seed);
+            for v in &x {
+                want[(v >> 28) as usize] += 1;
+            }
+            super::histogram(&cuda, &kernels, &x).unwrap();
+            assert_eq!(counts.read().unwrap(), want, "after {n} more integers");
+        }
+        counts.write(&[7; 16]).unwrap();
+        super::histogram(&cuda, &kernels, &[0, u32::MAX, u32::MAX]).unwrap();
+        let mut want = [7; 16];
+        want[0] += 1;
+        want[15] += 2;
+        assert_eq!(counts.read().unwrap(), want, "after the host's");
+        counts.zero().unwrap();
+        assert_eq!(counts.read().unwrap(), [0; 16]);
+    }
+
+    /// `weigh` against each float times its weight in Rust, which rounds once as `mul.rn.f32`
+    /// does: by the weights the module starts with, and then by those the host writes.
+    #[test]
+    fn weigh_multiplies_by_the_weights_in_constant_memory() {
+        let Some((cuda, kernels)) = cuda() else { return };
+        let weights = kernels.WEIGHTS();
+        assert_eq!(weights.read().unwrap(), [1.0, 0.5, 0.25, 2.0]);
+        for w in [[1.0, 0.5, 0.25, 2.0], [3.0, -0.1, 1.0e-30, 7.5]] {
+            weights.write(&w).unwrap();
+            for n in [0, 1, 257, 10_000] {
+                let mut x = floats(n, n as u32 + 9);
+                let want: Vec<u32> = x.iter().enumerate().map(|(i, x)| (x * w[i % 4]).to_bits()).collect();
+                super::weigh(&cuda, &kernels, &mut x).unwrap();
+                assert_eq!(x.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), want, "{n} floats by {w:?}");
+            }
+        }
     }
 
     /// Integers from -8 to 8, as halves, the same for the same seed.

@@ -116,13 +116,23 @@ gives, `Grid::new(blocks, threads).with_shared(bytes)`. A kernel's `f16` and `bf
 kgen-cuda's [`f16` and `bf16`](crates/cuda/src/half.rs): their bits, converted to and from `f32` as `cvt` converts
 them.
 
+Memory of the module's is a `static` beside its kernels, declared once in `PTX`, which each kernel names as it names its
+own, and which keeps what they write from one launch to the next: `static COUNTS: global<[u32; 16]>;` is 16 words of
+global memory, `red.global.add.u32([COUNTS + 8], 1)`, and `static WEIGHTS: constant<[f32; 4]> = [1.0, 0.5, 0.25, 2.0];`
+four floats of constant memory, which the kernels only read, `ld.r#const.f32(w, [WEIGHTS + 4])`, holding what it says
+until something writes it. The host reads and writes each as `Kernels` gives it, a
+[`Global`](crates/cuda/src/lib.rs) of Rust's type for its elements: `kernels.COUNTS().read()?`,
+`kernels.WEIGHTS().write(&[2.0; 4])?`. kgen refuses what a module cannot hold: more than the 64 KB of constant memory it
+has, or 4 GB of global memory, whose size `ptxas` writes in 32 bits.
+
 A kernel is named in PTX as C++ names a function in the namespaces of its workspace, its crate and its modules, so
 that a profiler tells two crates' `saxpy` apart: `_ZN4kgen6my_app3gpu5saxpyE`, which `cu++filt`, Nsight and
 `cuda-gdb` show as `kgen::my_app::gpu::saxpy`. An instance of a generic kernel is named as a template's,
 `kgen::my_app::gpu::block_sums<(unsigned int)1024>`, and launched as Rust calls a generic method,
 `kernels.block_sums::<1024>(grid, x, sums)`; the shared memory the launch gives is named as the kernel's static,
-`kgen::my_app::gpu::reverse_runs::run`. The workspace is named as the directory of its `Cargo.toml` is, unless the
-manifest names it, as kgen's does, so that a clone keeps the names wherever it is:
+`kgen::my_app::gpu::reverse_runs::run`, and a static of the module's as a variable of its namespace,
+`kgen::my_app::gpu::COUNTS`. The workspace is named as the directory of its `Cargo.toml` is, unless the manifest names
+it, as kgen's does, so that a clone keeps the names wherever it is:
 
 ```toml
 [workspace.metadata.kgen]
@@ -133,8 +143,9 @@ name = "kgen"
 
 [`examples/my-app`](examples/my-app/src/main.rs) uses kgen as a crate outside it would: `sum8`, and `dot` for one
 accumulator and for four, for the CPU, and for the GPU `saxpy`, `block_sums` for blocks of 256 threads and of 1024
-and `reverse_runs` in shared memory, `scale_f16`, written in place, and
-`gcds`, which calls `gcd`, an `extern "ptx-func"` function that calls itself, with safe functions over them; and
+and `reverse_runs` in shared memory, `scale_f16`, written in place, `gcds`, which calls `gcd`, an `extern "ptx-func"`
+function that calls itself, `histogram`, which counts in the module's global memory from launch to launch, and
+`weigh`, by weights in its constant memory, with safe functions over them; and
 `matmul` on the tensor cores, by `cp.async`, `ldmatrix` and `mma`, in a module of its own, since it needs an Ampere
 GPU, `sm_80`. Its tests hold each kernel to a scalar reference that does the same float operations in the same order,
 bit for bit, or the tensor cores, which add in an order of their own, to products of integers, exact in any order;

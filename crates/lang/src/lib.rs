@@ -58,6 +58,12 @@
 //! - **Labels** are placed by `label(top);` and named by jumps, before or after. Each block
 //!   numbers its labels afresh every time it runs, so a loop's body or a helper's gets new
 //!   ones each time. `note("acc {k}")` is a remark for the listing, `{name}` a value's.
+//! - **Statics** are memory of the module's, of a type of the machine's that takes arguments,
+//!   `static COUNTS: global<[u32; 16]>;`, which each of its functions names, helpers among
+//!   them, as memory a function declares is named, and which keeps what they write from one
+//!   run to the next. `= [1.5, 2.0]` is what it holds until something writes it, zeros if it
+//!   says nothing; [`memory`] works out its type and that value. A machine without such
+//!   memory refuses it where a function names it.
 //!
 //! This crate knows no machine: [`kernel`] runs a function's body against a [`Target`], which
 //! an instruction set implements to check and build its instructions. Tokens come from
@@ -73,9 +79,9 @@ mod value;
 use std::fmt;
 
 pub use ast::{
-    BinOp, Block, Const, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret, Stmt, Type, UnOp,
+    BinOp, Block, Const, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret, Static, Stmt, Type, UnOp,
 };
-pub use eval::{Fault, Guard, Mem, Operand, Run, Target, instance, instances, kernel};
+pub use eval::{Fault, Guard, Mem, Memory, Operand, Run, Target, instance, instances, kernel, memory};
 pub use parse::module;
 pub use token::{Delim, Span, Tree, lex, text};
 pub use value::{IntTy, Value};
