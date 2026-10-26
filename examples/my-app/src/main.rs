@@ -51,6 +51,75 @@ mod kernels {
         ret(zero.xmm);
     }
 
+    /// Adds to `counts[b]` how many of the `n` bytes at `bytes` are `b`, for each of the 256
+    /// values, wrapping past `u32::MAX`. `TABLES` tables of 256 counts in the kernel's stack
+    /// memory take turns, a byte each, so that a run of one value does not wait on its own last
+    /// count; the bytes past a whole turn go to the first. Stack memory holds whatever was
+    /// there, so the tables are cleared first, and added to `counts` last. Compiled for 4
+    /// tables, 4 KB, and for 16, whose 16 KB the prologue touches a page at a time in a loop.
+    #[instances(4, 16)]
+    pub unsafe extern "sysv64" fn count_bytes<const TABLES: usize>(bytes: *const u8, n: usize, counts: *mut u32) {
+        let tables: local<[u32; 256 * TABLES], 32>;
+        note("the tables cleared");
+        let z: ymm;
+        zero(z);
+        let i: gpr;
+        zero(i);
+        label(clear);
+        for k in 0..4 {
+            vmovaps([tables + i + 32 * k], z);
+        }
+        add(i, 128);
+        cmp(i, 1024 * TABLES);
+        jnz(clear);
+
+        note("a byte to each table in turn");
+        cmp(n, TABLES);
+        jb(tail);
+        label(turn);
+        for k in 0..TABLES {
+            let b: gpr;
+            movzx(b.r32, [bytes + k]);
+            let count: gpr;
+            mov(count.r32, [tables + b * 4 + 1024 * k]);
+            inc(count);
+            mov([tables + b * 4 + 1024 * k], count.r32);
+        }
+        add(bytes, TABLES);
+        sub(n, TABLES);
+        cmp(n, TABLES);
+        jae(turn);
+
+        label(tail);
+        test(n, n);
+        jz(fold);
+        label(rest);
+        let b: gpr;
+        movzx(b.r32, [bytes]);
+        let count: gpr;
+        mov(count.r32, [tables + b * 4]);
+        inc(count);
+        mov([tables + b * 4], count.r32);
+        inc(bytes);
+        dec(n);
+        jnz(rest);
+
+        label(fold);
+        note("the tables added to the counts");
+        zero(i);
+        label(sum);
+        let s: ymm;
+        vmovdqa(s, [tables + i]);
+        for k in 1..TABLES {
+            vpaddd(s, s, [tables + i + 1024 * k]);
+        }
+        vpaddd(s, s, [counts + i]);
+        vmovdqu([counts + i], s);
+        add(i, 32);
+        cmp(i, 1024);
+        jnz(sum);
+    }
+
     /// Returns the sum of `v`'s lanes: the high half added to the low, then the high pair of
     /// that to the low pair, then the second float to the first.
     fn ret_sum(v: ymm) {
@@ -556,6 +625,15 @@ fn dot(x: &[f32], y: &[f32]) -> f32 {
     unsafe { kernel(x.as_ptr(), y.as_ptr(), x.len()) }
 }
 
+/// Adds to `counts[b]` how many of `bytes` are `b`, for each byte `b`, wrapping past
+/// `u32::MAX`, by four tables in turn.
+fn count_bytes(bytes: &[u8], counts: &mut [u32; 256]) {
+    assert!(supported(), "the kernels need AVX2 and FMA");
+    // SAFETY: `bytes.len()` bytes are there to read and 256 counts to write, and the cpu has
+    // what the kernel needs.
+    unsafe { kernels::count_bytes::<4>(bytes.as_ptr(), bytes.len(), counts.as_mut_ptr()) }
+}
+
 /// `y = a * x + y` on the GPU, each element rounded once; `x` and `y` must be as long as each
 /// other.
 fn saxpy(cuda: &Cuda, kernels: &gpu::Kernels, a: f32, x: &[f32], y: &mut [f32]) -> Result<(), kgen_cuda::Error> {
@@ -739,6 +817,14 @@ fn main() {
         let naive: f32 = x.iter().zip(&y).map(|(a, b)| a * b).sum();
         println!("dot of {n} floats = {}; a loop in Rust says {naive}", dot(&x, &y));
     }
+    let mut counts = [0; 256];
+    count_bytes(b"hello, world", &mut counts);
+    println!(
+        "in \"hello, world\", counted in tables on the stack: {} l, {} o and {} h",
+        counts[usize::from(b'l')],
+        counts[usize::from(b'o')],
+        counts[usize::from(b'h')]
+    );
     let gpu = Cuda::new().and_then(|cuda| gpu::Kernels::load(&cuda).map(|kernels| (cuda, kernels)));
     match gpu {
         Ok((cuda, kernels)) => {
@@ -931,6 +1017,69 @@ mod tests {
             assert_eq!(one.to_bits(), dot(&x, &y, 1).to_bits(), "{n} floats, one accumulator");
             assert_eq!(four.to_bits(), dot(&x, &y, 4).to_bits(), "{n} floats, four accumulators");
         }
+    }
+
+    /// Each count, from counts that start anywhere, some near `u32::MAX`, and called again and
+    /// again on the same stack, so that tables left uncleared would show; at lengths short of a
+    /// turn of the tables, past one, and a run of one byte.
+    #[test]
+    fn count_bytes_counts_each_byte() {
+        assert!(super::supported(), "the kernels need AVX2 and FMA");
+        let start: [u32; 256] = std::array::from_fn(|b| (b as u32).wrapping_mul(0x9e37_79b9));
+        let mut inputs: Vec<Vec<u8>> = [0, 1, 3, 4, 5, 15, 16, 17, 1000, 4097, 100_000]
+            .iter()
+            .map(|&n| words(n, n as u32 + 7).iter().map(|w| (w >> 24) as u8).collect())
+            .collect();
+        inputs.push(vec![7; 1001]);
+        for bytes in &inputs {
+            let mut want = start;
+            for &b in bytes {
+                want[usize::from(b)] = want[usize::from(b)].wrapping_add(1);
+            }
+            let (mut four, mut sixteen) = (start, start);
+            // SAFETY: `bytes.len()` bytes and 256 counts, and a cpu that runs the kernels.
+            unsafe {
+                kernels::count_bytes::<4>(bytes.as_ptr(), bytes.len(), four.as_mut_ptr());
+                kernels::count_bytes::<16>(bytes.as_ptr(), bytes.len(), sixteen.as_mut_ptr());
+            }
+            assert_eq!(four, want, "{} bytes, four tables", bytes.len());
+            assert_eq!(sixteen, want, "{} bytes, sixteen tables", bytes.len());
+        }
+    }
+
+    /// A kernel for the tests alone.
+    #[kgen_macros::kernels]
+    mod deep {
+        /// Clears the first and the last word of a megabyte of stack memory.
+        pub unsafe extern "sysv64" fn deep() {
+            let words: local<[u64; 131072]>;
+            let zero: gpr;
+            zero(zero);
+            mov([words], zero);
+            mov([words + 8 * 131071], zero);
+        }
+    }
+
+    /// A frame past the end of a thread's stack faults at the guard page below the stack, which
+    /// Rust reports as the overflow it is, since the prologue touches the frame a page at a
+    /// time: a frame taken at once would reach past the guard page, into memory of another's
+    /// or none. The test runs itself again in a process of its own, which the overflow aborts.
+    #[test]
+    fn a_frame_past_the_end_of_the_stack_faults_at_its_guard_page() {
+        if std::env::var_os("MY_APP_DEEP").is_some() {
+            let thread = std::thread::Builder::new().name("deep".into()).stack_size(64 << 10);
+            // SAFETY: the kernel reaches no memory but its own stack's.
+            thread.spawn(|| unsafe { deep::deep() }).unwrap().join().unwrap();
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::a_frame_past_the_end_of_the_stack_faults_at_its_guard_page", "--nocapture"])
+            .env("MY_APP_DEEP", "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let overflowed = stderr.contains("thread 'deep'") && stderr.contains("has overflowed its stack");
+        assert!(!out.status.success() && overflowed, "{stderr}");
     }
 
     /// The GPU, and its kernels; on a machine with none, `None`, and the test is skipped.

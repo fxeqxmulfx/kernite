@@ -1,8 +1,8 @@
 # Closing the CPU's gaps with the GPU
 
-Notes for work paused on 2026-10-26 on the branch `cpu-grid`, which starts at master e9426cf. No
-code has changed yet. Below is what reading the code found, and the plan, in the agreed order:
-stack memory, then spilling, then a CPU grid.
+Notes for the work on the branch `cpu-grid`, which starts at master e9426cf: what reading the code
+found before it started, and the plan, in the agreed order: stack memory, then spilling, then a
+CPU grid. The State section at the end says how far it has come.
 
 ## What is there already
 
@@ -43,8 +43,10 @@ multiple of 32. Brackets name it, as in `vmovaps([buf + 32], v)`, `vmovss(x, [bu
   these:
   - cap the frame at about a page, counting the alignment padding;
   - or touch each page on the way down, as Rust's own `probestack` does.
+
+  Decided: touch each page.
 - Until written, stack memory holds whatever was there, like PTX's local memory. To decide:
-  document this, or zero the memory in the prologue.
+  document this, or zero the memory in the prologue. Decided: document it.
 - Tests:
   - exact listings, and errors with line:column, in `crates/kgen/tests/x86.rs`;
   - a my-app kernel that uses it, with a `.s` snapshot, tested against a reference.
@@ -79,7 +81,7 @@ The plan:
 - **Reporting.** No spill is silent: the listing says what spilled and where, with a note at each
   load and store and a line in its header.
 - **To decide:** spill always, or keep the error unless the kernel asks for spilling (an
-  attribute)? I'd spill always, with the listing naming each spill.
+  attribute)? I'd spill always, with the listing naming each spill. Decided: spill always.
 
 ## 3. A CPU grid
 
@@ -122,6 +124,15 @@ the GPU.
 
 ## State
 
-- The branch `cpu-grid` starts at master e9426cf. No code has changed; this file is its only
-  commit.
-- master is 9 commits ahead of origin/master, and not pushed.
+- The branch `cpu-grid` starts at master e9426cf, which is pushed.
+- Step 1, stack memory, is done:
+  - `local<..>` in `crates/x86/src/lang.rs`: `new_memory`, `shape`, and `within`, which checks an
+    address where the index is 0.
+  - The probes in `prologue` (`crates/x86/src/intel.rs`): unrolled up to three pages, a loop
+    past that. The stack pointer is a multiple of 8 already, so a frame aligned to 8 or less
+    has no `and`, and its alignment adds nothing to the count.
+  - my-app's `count_bytes`, for 4 tables and for 16, whose 16 KB the probe loop touches; its
+    tests run both against a reference. A test runs a kernel with a 1 MB frame on a thread of
+    64 KB in a process of its own, and sees Rust report the overflow at the guard page. Without
+    the probes the same kernel dies of a plain segfault, past the guard page.
+- Next: step 2, spilling.

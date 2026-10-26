@@ -39,6 +39,13 @@ where it is called, and `<const N: usize>` makes one generic. A generic kernel i
 `kernels::dot::<4>(x, y, n)`; a value it does not list fails to build. [`kgen-lang`](crates/lang/src/lib.rs)
 describes the language.
 
+Stack memory a kernel declares is a variable, as a GPU kernel's local memory is: `let tables: local<[u32; 1024], 32>;`
+is 4 KB of its frame at a multiple of 32, reached by its name, `mov(c.r32, [tables + b * 4])`, and `lea(p, [tables])`
+takes its address. Until written, it holds whatever was there. kgen checks an address in it where the index is 0: what
+it reaches lies inside, and `vmovaps` and `vmovdqa` reach it at a multiple of what they move; the index is the kernel's
+to keep inside. A frame of more than a page is touched a page at a time on the way down, as Rust's functions are, so
+that one past the end of the stack faults at the guard page there rather than reach past it.
+
 kgen does not spill. When the variables alive together do not fit in the registers, the error names them, at the
 declaration of the one that found none:
 
@@ -150,8 +157,8 @@ name = "kgen"
 
 ## Examples
 
-[`examples/my-app`](examples/my-app/src/main.rs) uses kgen as a crate outside it would: `sum8`, and `dot` for one
-accumulator and for four, for the CPU, and for the GPU `saxpy`, `block_sums` for blocks of 256 threads and of 1024
+[`examples/my-app`](examples/my-app/src/main.rs) uses kgen as a crate outside it would: `sum8`, `dot` for one
+accumulator and for four, and `count_bytes`, by tables in its stack memory, for the CPU, and for the GPU `saxpy`, `block_sums` for blocks of 256 threads and of 1024
 and `reverse_runs` in shared memory, `scale_f16`, written in place, `gcds`, which calls `gcd`, an `extern "ptx-func"`
 function that calls itself, `histogram`, which counts in the module's global memory from launch to launch, and
 `weigh`, by weights in its constant memory, with safe functions over them; and
