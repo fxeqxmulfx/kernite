@@ -236,8 +236,8 @@ impl Kernel {
         }
     }
 
-    /// A new variable, its register named after it: with `_` after a special register's
-    /// name, and then a number if another has the name.
+    /// A new variable, its register named after it, as `ident` writes it: with `_` after a
+    /// special register's name, and then a number if another has the name.
     fn new_var(&mut self, name: &str, ty: Ty) -> VReg {
         let class = match ty {
             Ty::Pred => Class::Pred,
@@ -246,7 +246,8 @@ impl Kernel {
         };
         let id = self.p.regs.len() as u32;
         self.p.regs.push(RegInfo { class, name: name.to_string() });
-        let base = if forms::reserved(name) { format!("{name}_") } else { name.to_string() };
+        let base = crate::ident(name);
+        let base = if forms::reserved(&base) { format!("{base}_") } else { base };
         let (mut reg, mut k) = (base.clone(), 1);
         while self.taken.contains(&reg) {
             reg = format!("{base}_{k}");
@@ -356,7 +357,7 @@ impl Kernel {
         let base = match bytes {
             None => crate::local(&self.p.name, name),
             Some(_) if name == "WARP_SZ" => format!("{name}_"),
-            Some(_) => name.to_string(),
+            Some(_) => crate::ident(name),
         };
         let (mut text, mut k) = (base.clone(), 1);
         while self.named.contains(&text) {

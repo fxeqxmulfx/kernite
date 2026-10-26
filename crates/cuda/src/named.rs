@@ -14,32 +14,37 @@ pub const fn scope_len(path: &str) -> usize {
     let (mut n, mut at) = (0, 0);
     while at < b.len() {
         let (start, end) = name(b, at);
-        n += digits(end - start) + end - start;
+        let len = written_len(b, start, end);
+        n += digits(len, 10) + len;
         at = end + 2;
     }
     n
 }
 
 /// `path`'s names as C++ mangles them, `<length><name>` each, for `N` the bytes
-/// [`scope_len`] says they take. A raw name, `r#type`, is the name, `type`; and a byte that
-/// cannot be in a name of PTX's is `_`, as each of a name in Cyrillic is.
+/// [`scope_len`] says they take. A raw name, `r#type`, is the name, `type`; and a character
+/// that cannot be in a name of PTX's, which takes nothing beyond ASCII, is written as kgen-ptx
+/// writes it, as Rust's legacy mangling does: `σ` as `$u3c3$`.
 pub const fn scope<const N: usize>(path: &str) -> [u8; N] {
     let b = path.as_bytes();
     let mut out = [0; N];
     let (mut i, mut at) = (0, 0);
     while at < b.len() {
         let (start, end) = name(b, at);
-        let (len, d) = (end - start, digits(end - start));
-        let mut k = 0;
-        while k < d {
-            out[i + d - 1 - k] = b'0' + (len / 10usize.pow(k as u32) % 10) as u8;
-            k += 1;
-        }
-        i += d;
+        i = number(&mut out, i, written_len(b, start, end), 10);
         let mut j = start;
         while j < end {
-            out[i] = if b[j].is_ascii_alphanumeric() || b[j] == b'_' { b[j] } else { b'_' };
-            (i, j) = (i + 1, j + 1);
+            let (c, len) = char_at(b, j);
+            if c >= 0x80 {
+                (out[i], out[i + 1]) = (b'$', b'u');
+                i = number(&mut out, i + 2, c as usize, 16);
+                out[i] = b'$';
+            } else if (c as u8).is_ascii_alphanumeric() || c as u8 == b'_' {
+                out[i] = c as u8;
+            } else {
+                out[i] = b'_';
+            }
+            (i, j) = (i + 1, j + len);
         }
         at = end + 2;
     }
@@ -57,13 +62,54 @@ const fn name(b: &[u8], at: usize) -> (usize, usize) {
     (start, end)
 }
 
-/// How many digits `n` is written in.
-const fn digits(mut n: usize) -> usize {
+/// How many bytes the name `b[start..end]` takes as [`scope`] writes it.
+const fn written_len(b: &[u8], start: usize, end: usize) -> usize {
+    let (mut n, mut j) = (0, start);
+    while j < end {
+        let (c, len) = char_at(b, j);
+        n += if c >= 0x80 { 3 + digits(c as usize, 16) } else { 1 };
+        j += len;
+    }
+    n
+}
+
+/// The character of `b`, UTF-8, that starts at `j`, and how many bytes it takes.
+const fn char_at(b: &[u8], j: usize) -> (u32, usize) {
+    let lead = b[j] as u32;
+    let (mut c, len) = match lead {
+        0..=0x7f => return (lead, 1),
+        0xc0..=0xdf => (lead & 0x1f, 2),
+        0xe0..=0xef => (lead & 0x0f, 3),
+        _ => (lead & 0x07, 4),
+    };
+    let mut k = 1;
+    while k < len {
+        c = c << 6 | (b[j + k] & 0x3f) as u32;
+        k += 1;
+    }
+    (c, len)
+}
+
+/// How many digits `n` is written in, in `base`.
+const fn digits(mut n: usize, base: usize) -> usize {
     let mut d = 1;
-    while n >= 10 {
-        (n, d) = (n / 10, d + 1);
+    while n >= base {
+        (n, d) = (n / base, d + 1);
     }
     d
+}
+
+/// Writes `n` in `base`, its digits after 9 lowercase letters, at `i` of `out`; and says where
+/// it ends.
+const fn number<const N: usize>(out: &mut [u8; N], i: usize, mut n: usize, base: usize) -> usize {
+    let d = digits(n, base);
+    let mut k = d;
+    while k > 0 {
+        let digit = (n % base) as u8;
+        out[i + k - 1] = if digit < 10 { b'0' + digit } else { b'a' + digit - 10 };
+        (n, k) = (n / base, k - 1);
+    }
+    i + d
 }
 
 /// How many bytes `pieces` take joined, with `hole` between each two.
@@ -143,23 +189,25 @@ mod tests {
     }
 
     #[test]
-    fn a_raw_name_is_the_name_and_what_ptx_cannot_name_is_an_underscore() {
+    fn a_raw_name_is_the_name_and_what_ptx_cannot_name_is_escaped_as_rust_escapes_it() {
         assert_eq!(scope_len("r#type::r#match"), 11);
         assert_eq!(scope::<11>("r#type::r#match"), *b"4type5match");
-        // `м` and `о` are two bytes each.
-        assert_eq!(scope_len("app::мо"), 9);
-        assert_eq!(scope::<9>("app::мо"), *b"3app4____");
+        // `м` and `о` are U+043C and U+043E; `σ` is U+03C3, and `𝔸` U+1D538, four bytes.
+        assert_eq!(scope_len("app::мо"), 18);
+        assert_eq!(scope::<18>("app::мо"), *b"3app12$u43c$$u43e$");
+        assert_eq!(scope::<17>("σ::a𝔸"), *b"6$u3c3$9a$u1d538$");
     }
 
     #[test]
     fn a_length_of_many_digits_is_written_in_all_of_them() {
         let path = ["x"; 120].concat();
-        assert_eq!(digits(path.len()), 3);
+        assert_eq!(digits(path.len(), 10), 3);
         assert_eq!(scope_len(&path), 123);
         let out = scope::<123>(&path);
         assert_eq!(&out[..4], b"120x");
         for n in [0, 9, 10, 99, 100, 101, 1000] {
-            assert_eq!(digits(n), n.to_string().len(), "{n}");
+            assert_eq!(digits(n, 10), n.to_string().len(), "{n}");
+            assert_eq!(digits(n, 16), format!("{n:x}").len(), "{n}");
         }
     }
 }

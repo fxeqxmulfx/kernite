@@ -141,6 +141,7 @@ fn ptxas_takes_what_kgen_writes() {
         ("surfaces", SURFACES),
         ("calls", CALLS),
         ("instances", INSTANCES),
+        ("names", NAMES),
     ] {
         let (src, out) = (dir.join(format!("{name}.ptx")), dir.join(format!("{name}.cubin")));
         std::fs::write(&src, kgen::ptx_str(kernels).unwrap()).unwrap();
@@ -1219,9 +1220,53 @@ fn the_tools_that_read_ptx_show_each_name_as_rust_has_it() {
     }
     symbols.push(kgen_ptx::symbol("", "tile", &[Value::Int(4, None), Value::Bool(true)]));
     want.push("tile<(int)4, (bool)1>".into());
+    // A name beyond ASCII as Rust's legacy mangling writes it.
+    symbols.push(kgen_ptx::symbol(&kgen::ptx_scope(&["app", "мо"]), "σ", &[Value::Bool(false)]));
+    want.push("app::$u43c$$u43e$::$u3c3$<(bool)0>".into());
     let shown = Command::new(&filt).args(&symbols).output().unwrap();
     let shown = String::from_utf8(shown.stdout).unwrap();
     assert_eq!(shown.lines().collect::<Vec<_>>(), want, "{symbols:?}");
+}
+
+/// A kernel, its parameter, its variables and its memory named beyond ASCII, which PTX's names
+/// are not, and a variable by its raw name.
+const NAMES: &str = r#"
+    /// `ξ[0] = 2 ξ[0]`, through shared memory of each kind.
+    pub unsafe extern "ptx-kernel" fn δ(ξ: *mut f32) {
+        let σ: f32;
+        ld.global.f32(σ, [ξ]);
+        let (мем, буф): (shared<[f32; 4]>, shared<[f32]>);
+        st.shared.f32([мем], σ);
+        ld.shared.f32(σ, [мем]);
+        add.rn.f32(σ, σ, σ);
+        st.shared.f32([буф], σ);
+        let r#type: f32;
+        ld.shared.f32(r#type, [буф]);
+        st.global.f32([ξ], r#type);
+    }
+"#;
+
+#[test]
+fn a_name_beyond_ascii_is_written_as_rust_writes_one_in_a_symbol() {
+    let ptx = kgen::ptx_str(NAMES).unwrap();
+    for text in [
+        ".extern .shared .align 4 .b8 _ZZ6$u3b4$E18$u431$$u443$$u444$[];\n",
+        ".visible .entry $u3b4$(\n\t.param .u64 $u3b4$_param_0\n)\n",
+        "\t.shared .align 4 .b8 $u43c$$u435$$u43c$[16];\n",
+        "\tld.global.f32 %$u3c3$, [%$u3be$];\n",
+        "\tst.shared.f32 [$u43c$$u435$$u43c$], %$u3c3$;\n",
+        "\tst.shared.f32 [_ZZ6$u3b4$E18$u431$$u443$$u444$], %$u3c3$;\n",
+        "\tld.shared.f32 %type, [_ZZ6$u3b4$E18$u431$$u443$$u444$];\n",
+    ] {
+        assert!(ptx.contains(text), "{text}\nin\n{ptx}");
+    }
+    // In a scope as well, as kgen-cuda writes a module's path.
+    assert_eq!(kgen::ptx_scope(&["app", "мо"]), "3app12$u43c$$u43e$");
+    let module = kgen::lang::parse(NAMES).unwrap();
+    let delta = kgen::function(&module, "δ").unwrap();
+    let entry = kgen::ptx(&module, delta, &[], &kgen::ptx_scope(&["kgen", "app"])).unwrap().code;
+    assert_eq!(entry.program.name, "_ZN4kgen3app6$u3b4$E");
+    assert!(entry.text().contains("\tst.shared.f32 [_ZZN4kgen3app6$u3b4$EE18$u431$$u443$$u444$], %$u3c3$;\n"));
 }
 
 #[test]
