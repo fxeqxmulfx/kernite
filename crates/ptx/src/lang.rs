@@ -433,12 +433,22 @@ impl Kernel {
         // PTX leaves undefined an index past the labels, where ptxas 13.4 jumps to the first.
         if let Some(i) = specs.iter().position(|s| s.role == Role::Labels).and_then(|l| l.checked_sub(1))
             && let Given::Int(x) = args[i]
-            && !(0..w.table.len() as i64).contains(&x)
+            && !(0..w.table.len() as i128).contains(&x)
         {
             let m = match w.table.len() {
                 1 => format!("`{name}` takes 0 here, the index of its one label; not {x}"),
                 n => format!("`{name}` takes 0 to {} here, the index of one of its {n} labels; {x} is not one", n - 1),
             };
+            return Err(Miss::At(i, true, Fault::at(i, m)));
+        }
+        // A policy's primary size is part of its total, as the ISA has it, and ptxas 13.4
+        // refuses more known now.
+        if b.form.op == "createpolicy"
+            && let [.., Given::Int(primary), Given::Int(total)] = args
+            && read_as(Ty::U32, *primary) > read_as(Ty::U32, *total)
+        {
+            let i = args.len() - 2;
+            let m = format!("`{name}` takes a primary size here no more than the total, {total}; {primary} is more");
             return Err(Miss::At(i, true, Fault::at(i, m)));
         }
         if b.form.checks.contains(&Check::Neg) {
@@ -666,23 +676,36 @@ impl Kernel {
             {
                 Err(format!("`{name}` wants {}; this is {}", describe(b, spec), self.given(a)))
             }
+            Given::Int(x) if spec.fraction => match x {
+                1 => int(t, 1, name),
+                _ => Err(fraction(name, spec.step, x)),
+            },
             Given::Int(x) => {
+                let v = read_as(t, *x);
                 if let Some((lo, hi)) = spec.range
-                    && !(lo..=hi).contains(x)
+                    && !(i128::from(lo)..=i128::from(hi)).contains(&v)
                 {
                     return Err(format!("`{name}` takes {lo} to {hi} here; {x} is not one of them"));
                 }
                 if let Some(step) = spec.step
-                    && x % step != 0
+                    && v % i128::from(step) != 0
                 {
                     return Err(format!("`{name}` takes a multiple of {step} here; {x} is not one"));
                 }
-                if spec.fraction && *x != 1 {
-                    return Err(fraction(name, x));
+                if let Some(mask) = spec.mask
+                    && v & !i128::from(mask) != 0
+                {
+                    let x = if v < 0 { x.to_string() } else { format!("{v:#x}") };
+                    return Err(format!("`{name}` takes no bits here but those of {mask:#x}; {x} has others"));
                 }
                 int(t, *x, name)
             }
-            Given::F32(x) if spec.fraction && !(*x > 0.0 && *x <= 1.0) => Err(fraction(name, x)),
+            Given::F32(x)
+                if spec.fraction
+                    && !(*x > 0.0 && *x <= 1.0 && spec.step.is_none_or(|n| (x * n as f32).fract() == 0.0)) =>
+            {
+                Err(fraction(name, spec.step, x))
+            }
             Given::F32(x) => match t {
                 Ty::F32 | Ty::B32 => Ok(format!("0f{:08X}", x.to_bits())),
                 Ty::F64 => Err(format!("`{name}` wants an `f64`; {x} is an `f32`: `{x}f64`")),
@@ -1291,29 +1314,42 @@ fn anchors(a: &Given<Var>) -> bool {
 }
 
 /// The integer `x` as an operand of type `t`.
-fn int(t: Ty, x: i64, name: &str) -> Result<String, String> {
+fn int(t: Ty, x: i128, name: &str) -> Result<String, String> {
     match t {
         // An integer is a predicate as PTX's ISA says, 0 false and the rest true; written as
         // 0 or 1, as ptxas 13.4 reads `set`'s and `setp`'s `c` in its low 32 bits alone.
         Ty::Pred => Ok(if x == 0 { "0" } else { "1" }.into()),
-        Ty::F32 if (x as f32) as i128 == i128::from(x) => Ok(format!("0f{:08X}", (x as f32).to_bits())),
-        Ty::F64 if (x as f64) as i128 == i128::from(x) => Ok(format!("0d{:016X}", (x as f64).to_bits())),
+        Ty::F32 if (x as f32) as i128 == x => Ok(format!("0f{:08X}", (x as f32).to_bits())),
+        Ty::F64 if (x as f64) as i128 == x => Ok(format!("0d{:016X}", (x as f64).to_bits())),
         Ty::F32 | Ty::F64 => Err(format!("`{name}` wants an `{}`; {x} is not one", t.name())),
         _ if t.kind() == Kind::Float => Err(half(t, name)),
         Ty::B128 => Err(format!("`{name}` takes a `b128` only from a variable")),
         _ => {
             let bits = t.bits();
-            if bits < 64 && !(-(1i64 << (bits - 1))..(1i64 << bits)).contains(&x) {
+            if !(-(1i128 << (bits - 1))..(1i128 << bits)).contains(&x) {
                 return Err(format!("`{name}` wants {bits} bits; {x} does not fit them"));
             }
-            Ok(x.to_string())
+            // Past 2^63 as the 64 bits are, which ptxas reads the same.
+            Ok((x as i64).to_string())
         }
     }
 }
 
-/// Why `x` is no fraction for `name`.
-fn fraction(name: &str, x: impl std::fmt::Display) -> String {
-    format!("`{name}` takes a fraction here, more than 0 and at most 1; {x} is not one")
+/// `x` as an integer of type `t` reads it, where it fits its bits: to an `s32`, 2^32 - 1 is
+/// -1, and to a `u32`, -1 is 2^32 - 1.
+fn read_as(t: Ty, x: i128) -> i128 {
+    let bits = t.bits();
+    match t.kind() {
+        Kind::Unsigned if (-(1i128 << (bits - 1))..0).contains(&x) => x + (1i128 << bits),
+        Kind::Signed if (1i128 << (bits - 1)..1i128 << bits).contains(&x) => x - (1i128 << bits),
+        _ => x,
+    }
+}
+
+/// Why `x` is no fraction for `name`, which takes a multiple of one over `step`, if any.
+fn fraction(name: &str, step: Option<i64>, x: impl std::fmt::Display) -> String {
+    let of = step.map(|n| format!(", a multiple of 1/{n}")).unwrap_or_default();
+    format!("`{name}` takes a fraction here{of}, more than 0 and at most 1; {x} is not one")
 }
 
 /// Why `name` takes no value known now as its operand of type `t`, a float PTX keeps in bits.
@@ -1329,10 +1365,10 @@ fn half(t: Ty, name: &str) -> String {
 }
 
 /// The integer `x` as an operand that must be known now, of what `imm` lets it be.
-fn known(imm: Imm, x: i64, name: &str) -> Result<String, String> {
+fn known(imm: Imm, x: i128, name: &str) -> Result<String, String> {
     let fits = match imm {
-        Imm::Bits(bits) => (0..1i64 << bits).contains(&x),
-        Imm::Of(_) => imm.values().contains(&x),
+        Imm::Bits(bits) => (0..1i128 << bits).contains(&x),
+        Imm::Of(_) => imm.values().iter().any(|&v| i128::from(v) == x),
         Imm::Pow2(p) => x > 0 && x & (x - 1) == 0 && x <= 1 << p,
     };
     if fits {

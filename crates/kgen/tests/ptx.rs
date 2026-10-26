@@ -288,8 +288,8 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         ("bar.arrive(0);", "2:5: `bar.arrive` takes 2 operands, not 1"),
         (
             "let q: b64; createpolicy.fractional.L2__evict_last.b64(q, 1.5);",
-            "2:59: `createpolicy.fractional.L2::evict_last.b64` takes a fraction here, more than 0 and at most 1; 1.5 \
-             is not one",
+            "2:59: `createpolicy.fractional.L2::evict_last.b64` takes a fraction here, a multiple of 1/16, more than 0 \
+             and at most 1; 1.5 is not one",
         ),
         (
             "let i: u32; lop3.b32(i, n, n, n, 256);",
@@ -508,6 +508,59 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
              a variable",
         ),
         ("let d: u32; and.b32(d, !n, n);", "2:24: `and.b32` takes no operand inverted"),
+        ("bar.sync(0, 1056);", "2:13: `bar.sync` takes 0 to 1024 here; 1056 is not one of them"),
+        ("bar.arrive(0, 2048);", "2:15: `bar.arrive` takes 32 to 1024 here; 2048 is not one of them"),
+        (
+            "let q: b64; createpolicy.fractional.L2__evict_last.b64(q, 0.1);",
+            "2:59: `createpolicy.fractional.L2::evict_last.b64` takes a fraction here, a multiple of 1/16, more than \
+             0 and at most 1; 0.1 is not one",
+        ),
+        (
+            "let q: b64; createpolicy.range.L2__evict_last.b64(q, [x], 128, 64);",
+            "2:59: `createpolicy.range.L2::evict_last.b64` takes a primary size here no more than the total, 64; 128 \
+             is more",
+        ),
+        ("let i: u32; bfe.u32(i, n, 256, 8);", "2:27: `bfe.u32` takes 0 to 255 here; 256 is not one of them"),
+        ("let i: u32; bfi.b32(i, n, n, 0, 300);", "2:33: `bfi.b32` takes 0 to 255 here; 300 is not one of them"),
+        ("cp.async.wait_group(64);", "2:21: `cp.async.wait_group` takes 6 bits here, 0 to 63; 64 is not one of them"),
+        (
+            "let i: u32; mul24.lo.u32(i, n, 0x100_0001);",
+            "2:32: `mul24.lo.u32` takes 0 to 16777215 here; 16777217 is not one of them",
+        ),
+        (
+            "let i: s32; mad24.hi.s32(i, i, 8388608, i);",
+            "2:32: `mad24.hi.s32` takes -8388608 to 8388607 here; 8388608 is not one of them",
+        ),
+        (
+            "let i: u32; shfl.sync.idx.b32(i, n, 32, 0x1f, 0xffff_ffff);",
+            "2:37: `shfl.sync.idx.b32` takes 0 to 31 here; 32 is not one of them",
+        ),
+        (
+            "let i: u32; shfl.sync.idx.b32(i, n, 0, 0x201f, 0xffff_ffff);",
+            "2:40: `shfl.sync.idx.b32` takes no bits here but those of 0x1f1f; 0x201f has others",
+        ),
+        (
+            "let i: u32; shfl.sync.idx.b32(i, n, 0, -1, 0xffff_ffff);",
+            "2:40: `shfl.sync.idx.b32` takes no bits here but those of 0x1f1f; 0xffffffff has others",
+        ),
+        (
+            "let i: u32; prmt.b32(i, n, n, 0x1_0000);",
+            "2:31: `prmt.b32` takes 0 to 65535 here; 65536 is not one of them",
+        ),
+        ("let i: u32; prmt.b32.f4e(i, n, n, 4);", "2:35: `prmt.b32.f4e` takes 0 to 3 here; 4 is not one of them"),
+        ("let i: u32; fns.b32(i, n, 32, 1);", "2:27: `fns.b32` takes 0 to 31 here; 32 is not one of them"),
+        (
+            "let (i, s): (u32, s32); cvt.pack.sat.u8.s32.b32(i, s, s, 0x1_0000);",
+            "2:58: `cvt.pack.sat.u8.s32.b32` takes 0 to 65535 here; 65536 is not one of them",
+        ),
+        (
+            "let (i, s): (u32, s32); cvt.pack.sat.u2.s32.b32(i, s, s, 0x1000_0000);",
+            "2:58: `cvt.pack.sat.u2.s32.b32` takes 0 to 268435455 here; 268435456 is not one of them",
+        ),
+        (
+            "let i: u32; add.u32(i, n, 0xffff_ffff_ffff_ffff);",
+            "2:27: `add.u32` wants 32 bits; 18446744073709551615 does not fit them",
+        ),
     ];
     for (body, want) in cases {
         assert_eq!(compile("x: *mut f32, n: u32, h: f16, s: u64, z: f32", body).unwrap_err(), want, "{body}");
@@ -612,7 +665,8 @@ fn an_operand_is_written_wherever_ptxas_takes_it() {
         "x: *mut f32, n: u32",
         "let d: u32; selp.u32(d, n, 0, 7); st.global.v2.u32([x], (tid.x, tid.y)); let (a, b, c, e): (s32, s32, s32, \
          s32); mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32((a, b, c, e), (n, 8), n, (0, 0, 0, 0)); \
-         cp.async.ca.shared.global([n], [n], 4); brx.idx(1, (one, two)); label(one); label(two);",
+         cp.async.ca.shared.global([n], [n], 4); brx.idx(1, (one, two)); label(one); label(two); \
+         mul24.lo.s32(a, a, 0xffff_ffff);",
     )
     .unwrap();
     for line in [
@@ -621,6 +675,7 @@ fn an_operand_is_written_wherever_ptxas_takes_it() {
         "\tmma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32 {%a, %b, %c, %e}, {%n, 8}, {%n}, {0, 0, 0, 0};\n",
         "\tcp.async.ca.shared.global [%n], [%n], 4;\n",
         "\tbrx.idx 1, $T0;\n",
+        "\tmul24.lo.s32 %a, %a, 4294967295;\n",
     ] {
         assert!(ptx.contains(line), "{line}{ptx}");
     }
@@ -1287,7 +1342,7 @@ fn value(t: Ty, spec: &Spec) -> Option<Given<Var>> {
         Ty::F64 => Some(Given::F64(1.5)),
         Ty::B128 => None,
         _ if t.kind() == Kind::Float => None,
-        _ => Some(Given::Int(spec.step.unwrap_or(1))),
+        _ => Some(Given::Int(spec.step.unwrap_or(1).into())),
     }
 }
 
@@ -1365,10 +1420,12 @@ impl Making {
                     .into_iter()
                     .find(|s| forms::sreg(s).is_some_and(|r| r.read_as(t)))
                     .map(|s| Given::Special(s.into()))
-            } else if let Some((lo, hi)) = spec.range.filter(|_| spec.role == Role::Src && !spec.reg_only) {
+            } else if let Some((lo, hi)) =
+                spec.range.or(spec.mask.map(|m| (0, m))).filter(|_| spec.role == Role::Src && !spec.reg_only)
+            {
                 match style {
-                    Style::Least => Some(Given::Int(lo)),
-                    Style::Most => Some(Given::Int(hi)),
+                    Style::Least => Some(Given::Int(lo.into())),
+                    Style::Most => Some(Given::Int(hi.into())),
                     _ => None,
                 }
             } else {
@@ -1434,7 +1491,7 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
             Role::Imm(imm @ Imm::Of(_)) => {
                 let values = imm.values();
                 m.differs |= style == Style::Values && values.len() > 1;
-                Given::Int(if style == Style::Values { values[values.len() - 1] } else { values[0] })
+                Given::Int(if style == Style::Values { values[values.len() - 1] } else { values[0] }.into())
             }
             Role::Imm(Imm::Pow2(p)) => {
                 m.differs |= matches!(style, Style::Least | Style::Most);

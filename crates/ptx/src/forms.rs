@@ -40,7 +40,8 @@ use crate::{GPUS, Kind, Needs, Ty};
 /// four of their bytes, `r.b7654`; `.hmask` the halves of a result it writes, `r.h10`, and
 /// `.bmask` its bytes, `r.b310`. `a|b` is two written at once, and `a[|b]` one or two.
 /// `u32[0,15]` is one from 0 to 15, if it is one known now, `u32/32` a multiple of 32, and
-/// `u32[0,4064]/32` both; `f32(0,1]` is a fraction, more than 0 and at most 1. `[R]`, `[W]`
+/// `u32[0,1024]/32` both; `u32&0x1f1f` is one with no bits but those of 0x1f1f. `f32(0,1]`
+/// is a fraction, more than 0 and at most 1, and `f32(0,1]/16` one of sixteenths. `[R]`, `[W]`
 /// and `[X]` are memory read, written, or both, and `[%u64,T*2]` a texture or a surface by
 /// its handle, in brackets with the coordinates in it; `lab` is a label, `labs` labels
 /// taken together, and `fn` a function of the module or a kernel, whose address it takes;
@@ -117,9 +118,14 @@ mad.wide~half.u32 : =u64, T, T, u64 @1.0
 mad.wide~half.s16 : =s32, T, T, s32 @1.0
 mad.wide~half.s32 : =s64, T, T, s64 @1.0
 clmad(.hi|.lo).u64 : =T, T, T, T @9.3 @sm80
-mul24(.hi|.lo)(.u32|.s32) : =T, T, T @1.0
-mad24(.hi|.lo)(.u32|.s32) : =T, T, T, T @1.0
-mad24.hi.sat.s32 : =T, T, T, T @1.0
+# `mul24` and `mad24` multiply the low 24 bits of `a` and `b`, as the ISA has it: ptxas 13.4
+# takes more known now, and keeps those bits, so that 2^24 + 1 is 1, and 2^23 is -2^23 in an
+# `s32`.
+mul24(.hi|.lo).u32 : =T, T[0,16777215], T[0,16777215] @1.0
+mul24(.hi|.lo).s32 : =T, T[-8388608,8388607], T[-8388608,8388607] @1.0
+mad24(.hi|.lo).u32 : =T, T[0,16777215], T[0,16777215], T @1.0
+mad24(.hi|.lo).s32 : =T, T[-8388608,8388607], T[-8388608,8388607], T @1.0
+mad24.hi.sat.s32 : =T, T[-8388608,8388607], T[-8388608,8388607], T @1.0
 sad$int : =T, T, T, T @1.0
 div$int : =T, T, T @1.0
 rem$int : =T, T, T @1.0
@@ -130,10 +136,13 @@ max$int : =T, T, T @1.0
 popc(.b32|.b64) : =u32, T @2.0
 clz(.b32|.b64) : =u32, T @2.0
 bfind{.shiftamt}(.u32|.u64|.s32|.s64) : =u32, T @2.0
-fns.b32 : =T, T, T, s32 @6.0 @sm30
+# `fns` finds from a bit 0 to 31, as the ISA has it, which leaves it undefined past them, where
+# ptxas 13.4 finds none. `bfe` and `bfi` take a field's start and length 0 to 255, as the ISA
+# and ptxas 13.4 have it.
+fns.b32 : =T, T, T[0,31], s32 @6.0 @sm30
 brev(.b32|.b64) : =T, T @2.0
-bfe(.u32|.u64|.s32|.s64) : =T, T, u32, u32 @2.0
-bfi(.b32|.b64) : =T, T, T, u32, u32 @2.0
+bfe(.u32|.u64|.s32|.s64) : =T, T, u32[0,255], u32[0,255] @2.0
+bfi(.b32|.b64) : =T, T, T, u32[0,255], u32[0,255] @2.0
 szext(.clamp|.wrap)(.u32|.s32) : =T, T, u32 @7.6 @sm70
 bmsk(.clamp|.wrap).b32 : =T, u32, u32 @7.6 @sm70
 dp4a.u32.u32 : =u32, T, U, u32 @5.0 @sm61
@@ -338,9 +347,13 @@ mov.b64 : =_b32*2, $T @1.0
 mov.b64 : =_b16*4, $T @1.0
 mov.b128 : =_b64*2, %T @8.3 @sm70
 mov.b128 : =_b32*4, %T @8.3 @sm70
-shfl$shfl.b32 : =T[|=_pred], T, u32, u32 @3.0 @sm30 @<sm70/6.4
-shfl.sync$shfl.b32 : =T[|=_pred], T, u32, u32, u32 @6.0 @sm30
-prmt.b32{.f4e|.b4e|.rc8|.ecl|.ecr|.rc16} : =T, T, T, T @2.0
+# `shfl` reads a lane in the low 5 bits of `b`, and a clamp and a mask of lanes in the bits
+# 0x1f1f of `c`; `prmt` its selector in the low 16 bits of `c`, or, with a mode, the low 2;
+# as the ISA has it: ptxas 13.4 takes more known now, and the GPU reads no more.
+shfl$shfl.b32 : =T[|=_pred], T, u32[0,31], u32&0x1f1f @3.0 @sm30 @<sm70/6.4
+shfl.sync$shfl.b32 : =T[|=_pred], T, u32[0,31], u32&0x1f1f, u32 @6.0 @sm30
+prmt.b32 : =T, T, T, T[0,65535] @2.0
+prmt.b32(.f4e|.b4e|.rc8|.ecl|.ecr|.rc16) : =T, T, T, T[0,3] @2.0
 ld{.weak@6.0@sm70}{.global}$cop$hint$size$vec$ty : =_T*v, [R], {L2::cache_hint}b64 @1.0 +wide +vec
 ld{.weak@6.0@sm70}{.global}$l1$hint$size$vec$ty : =_T*v, [R], {L2::cache_hint}b64 @1.0 +wide +vec
 ld{.weak@6.0@sm70}$ldss$cop$vec$ty : =_T*v, [R] @1.0 +wide +vec
@@ -366,8 +379,10 @@ prefetch.global(.L2::evict_last|.L2::evict_normal) : [R] @7.4 @sm80
 prefetchu.L1 : [R] @2.0
 applypriority{.global}.L2::evict_normal : [R], #=128 @7.4 @sm80
 discard{.global}.L2 : [W], #=128 @7.4 @sm80
+# A policy's primary size is part of its total, as the ISA has it, and ptxas 13.4 refuses more
+# known now; its fraction is of sixteenths, as ptxas 13.4 rounds any up to a sixteenth.
 createpolicy.range{.global}$prio$prio2.b64 : =T, [R], u32, u32 @7.4 @sm80 +addr32
-createpolicy.fractional$prio$prio2.b64 : =T, f32(0,1]? @7.4 @sm80
+createpolicy.fractional$prio$prio2.b64 : =T, f32(0,1]/16? @7.4 @sm80
 createpolicy.cvt.L2.b64 : =T, b64 @7.4 @sm80
 isspacep$space : =pred, u64 @2.0
 isspacep$space : =pred, %u32 @2.0
@@ -382,8 +397,11 @@ cvt(.rn|.rz)~round{.relu}{.satfinite@8.1}(.f16x2|.bf16x2).f32 : =T, U, U @7.0 @s
 cvt.rna{.satfinite@8.1}.tf32.f32 : =T, U @7.0 @sm80
 cvt.f32.bf16 : =T, U @7.1 @sm80
 cvt.pack.sat(.u16|.s16).s32 : =u32, s32, s32 @6.5 @sm72 +wide
-cvt.pack.sat(.u8|.s8).s32.b32 : =u32, s32, s32, b32 @6.5 @sm72 +wide
-cvt.pack.sat(.u4|.s4|.u2|.s2).s32.b32 : =u32, s32, s32, b32 @6.5 @sm75 +wide
+# `cvt.pack` fills the bits above the two it packs with the low bits of `c`, as the ISA has
+# it: ptxas 13.4 takes more known now, and keeps no more.
+cvt.pack.sat(.u8|.s8).s32.b32 : =u32, s32, s32, b32[0,65535] @6.5 @sm72 +wide
+cvt.pack.sat(.u4|.s4).s32.b32 : =u32, s32, s32, b32[0,16777215] @6.5 @sm75 +wide
+cvt.pack.sat(.u2|.s2).s32.b32 : =u32, s32, s32, b32[0,268435455] @6.5 @sm75 +wide
 
 # Textures, each by its handle, the `u64` of a CUDA texture object, which holds its sampler
 # too, in brackets with the coordinates in it, as for surfaces, though some are floats. A
@@ -499,20 +517,20 @@ ret{.uni} @1.0
 exit @1.0
 
 # Barriers, fences and atomics. A barrier's count of threads is a multiple of 32, as the ISA
-# has it, to 4064: ptxas 13.4 takes any, and keeps its low 12 bits, so that 4096 is 0, which
-# it reads as every thread.
-barrier$cta.sync{.aligned} : u32[0,15], u32[0,4064]/32? @6.0 @sm30
-barrier$cta.arrive{.aligned} : u32[0,15], u32[32,4064]/32 @6.0 @sm30
+# has it, to 1024, the most threads a CTA has, past which it would wait for ever: ptxas 13.4
+# takes any, and keeps its low 12 bits, so that 4096 is 0, which it reads as every thread.
+barrier$cta.sync{.aligned} : u32[0,15], u32[0,1024]/32? @6.0 @sm30
+barrier$cta.arrive{.aligned} : u32[0,15], u32[32,1024]/32 @6.0 @sm30
 barrier$cta.red.popc{.aligned}.u32 : =T, u32[0,15], !pred @6.0 @sm30
-barrier$cta.red.popc{.aligned}.u32 : =T, u32[0,15], u32[0,4064]/32, !pred @6.0 @sm30
+barrier$cta.red.popc{.aligned}.u32 : =T, u32[0,15], u32[0,1024]/32, !pred @6.0 @sm30
 barrier$cta.red(.and|.or){.aligned}.pred : =T, u32[0,15], !pred @6.0 @sm30
-barrier$cta.red(.and|.or){.aligned}.pred : =T, u32[0,15], u32[0,4064]/32, !pred @6.0 @sm30
-bar$cta.sync : u32[0,15], u32[0,4064]/32? @1.0
-bar$cta.arrive : u32[0,15], u32[32,4064]/32 @2.0
+barrier$cta.red(.and|.or){.aligned}.pred : =T, u32[0,15], u32[0,1024]/32, !pred @6.0 @sm30
+bar$cta.sync : u32[0,15], u32[0,1024]/32? @1.0
+bar$cta.arrive : u32[0,15], u32[32,1024]/32 @2.0
 bar$cta.red.popc.u32 : =T, u32[0,15], !pred @2.0
-bar$cta.red.popc.u32 : =T, u32[0,15], u32[0,4064]/32, !pred @2.0
+bar$cta.red.popc.u32 : =T, u32[0,15], u32[0,1024]/32, !pred @2.0
 bar$cta.red(.and|.or).pred : =T, u32[0,15], !pred @2.0
-bar$cta.red(.and|.or).pred : =T, u32[0,15], u32[0,4064]/32, !pred @2.0
+bar$cta.red(.and|.or).pred : =T, u32[0,15], u32[0,1024]/32, !pred @2.0
 bar.warp.sync : u32 @6.0 @sm30
 membar(.cta|.gl|.sys@2.0) @1.4
 membar.proxy.alias @7.5 @sm60
@@ -561,10 +579,10 @@ red$rsem$ascope$shared.add.noftz.f16x2 : [X], T @6.2 @sm60
 # what arrives. ptxas takes `cp.async.ca.shared::cta` from 7.0, though the ISA says 7.8.
 # After the bytes a copy moves may come how many of them it reads, the rest zeros, or, from
 # 7.5, a predicate that has it read none; that is a variable, as the ISA has it, so that a
-# value known now is how many. `cp.async.wait_group` takes a count of 32 bits: ptxas 13.4
-# takes any, and keeps its low 32 bits. An `mbarrier`'s count is 1 to 2^20 - 1, as the ISA
-# has it: ptxas checks it for `init` alone, and adds a bigger one for `arrive` past the 20
-# bits it is counted in.
+# value known now is how many. `cp.async.wait_group` waits till 0 to 63 groups are left:
+# ptxas 13.4 takes more, and waits till 63 are, as its SASS holds no more. An `mbarrier`'s
+# count is 1 to 2^20 - 1, as the ISA has it: ptxas checks it for `init` alone, and adds a
+# bigger one for `arrive` past the 20 bits it is counted in.
 cp.async.ca(.shared|.shared::cta).global$hint$size : [W], [R], #=4|8|16, {L2::cache_hint}b64 @7.0 @sm80 +addr32
 cp.async.ca(.shared|.shared::cta).global$hint$size : [W], [R], #=4, u32[0,4], {L2::cache_hint}b64 @7.0 @sm80 +addr32
 cp.async.ca(.shared|.shared::cta).global$hint$size : [W], [R], #=8, u32[0,8], {L2::cache_hint}b64 @7.0 @sm80 +addr32
@@ -574,7 +592,7 @@ cp.async.cg(.shared|.shared::cta).global$hint$size : [W], [R], #=16, {L2::cache_
 cp.async.cg(.shared|.shared::cta).global$hint$size : [W], [R], #=16, u32[0,16], {L2::cache_hint}b64 @7.0 @sm80 +addr32
 cp.async.cg(.shared|.shared::cta).global$hint$size : [W], [R], #=16, %!pred, {L2::cache_hint}b64 @7.5 @sm80 +addr32
 cp.async.commit_group @7.0 @sm80
-cp.async.wait_group : # @7.0 @sm80
+cp.async.wait_group : #6 @7.0 @sm80
 cp.async.wait_all @7.0 @sm80
 cp.async.mbarrier.arrive{.noinc}{.shared|.shared::cta@7.8}.b64 : [X] @7.0 @sm80 +addr32
 mbarrier.init{.shared|.shared::cta@7.8}.b64 : [W], u32[1,1048575] @7.0 @sm80
@@ -932,8 +950,11 @@ pub struct Spec {
     pub memory: bool,
     /// What a value known now is from and to, if anything: 0 to 15 for a barrier.
     pub range: Option<(i64, i64)>,
-    /// What a value known now is a multiple of: a barrier's threads are warps.
+    /// What a value known now is a multiple of: a barrier's threads are warps. A fraction is
+    /// a multiple of one over it.
     pub step: Option<i64>,
+    /// The bits a value known now may have, if not any: `shfl`'s clamp and mask of lanes.
+    pub mask: Option<i64>,
     /// Whether a value known now is a fraction, more than 0 and at most 1.
     pub fraction: bool,
     /// The parts of a register it may be.
@@ -1784,6 +1805,7 @@ fn one(s: &'static str, line: &str) -> Spec {
         memory: false,
         range: None,
         step: None,
+        mask: None,
         fraction: false,
         part: None,
         when: None,
@@ -1850,6 +1872,11 @@ fn one(s: &'static str, line: &str) -> Spec {
             }
             if let Some((ty, n)) = t.split_once('/') {
                 spec.step = Some(num(n));
+                t = ty;
+            }
+            if let Some((ty, m)) = t.split_once('&') {
+                let m = m.strip_prefix("0x").and_then(|m| i64::from_str_radix(m, 16).ok());
+                spec.mask = Some(m.unwrap_or_else(|| panic!("`{line}`: `{s}` has no mask in hex, `&0x1f1f`")));
                 t = ty;
             }
             if let Some((ty, r)) = t.split_once('[') {

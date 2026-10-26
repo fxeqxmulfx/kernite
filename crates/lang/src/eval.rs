@@ -56,8 +56,8 @@ pub enum Operand<V> {
     /// A name that is nothing in scope, for a machine that has registers of its own by name:
     /// `tid.x`. `_` is one, for an operand the machine lets be left out.
     Special(String),
-    /// An integer known now.
-    Int(i64),
+    /// An integer known now, from -2^63 to 2^64 - 1, as the 64 bits of an `i64` or a `u64` are.
+    Int(i128),
     /// An `f32` known now.
     F32(f32),
     /// An `f64` known now.
@@ -953,10 +953,8 @@ impl<'a, T: Target> Eval<'a, T> {
 /// What a value known now gives an instruction.
 fn scalar<V>(v: Value, span: Span) -> Result<Operand<V>, Error> {
     match v {
-        Value::Int(x, _) => i64::try_from(x)
-            .or_else(|_| u64::try_from(x).map(|x| x as i64))
-            .map(Operand::Int)
-            .map_err(|_| err(span, format!("{x} is wider than 64 bits"))),
+        Value::Int(x, _) if (i128::from(i64::MIN)..=i128::from(u64::MAX)).contains(&x) => Ok(Operand::Int(x)),
+        Value::Int(x, _) => Err(err(span, format!("{x} is wider than 64 bits"))),
         Value::F32(x) => Ok(Operand::F32(x)),
         Value::F64(x) => Ok(Operand::F64(x)),
         Value::F16(x) => Ok(Operand::F16(x)),

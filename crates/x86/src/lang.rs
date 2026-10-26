@@ -437,7 +437,7 @@ impl Kernel {
                 _ => Err(Fault::at(i, format!("wants {}; this is {}", describe(kind, width), given(a)))),
             };
             let memory = matches!(a, Given::Mem(_) | Given::Data(_));
-            let int = |range: std::ops::RangeInclusive<i64>| match a {
+            let int = |range: std::ops::RangeInclusive<i128>| match a {
                 Given::Int(x) if range.contains(x) => Ok(()),
                 _ => Err(Fault::at(i, format!("wants {}; this is {}", describe(kind, width), given(a)))),
             };
@@ -455,7 +455,7 @@ impl Kernel {
                     _ => return Err(Fault::at(i, format!("wants {}; this is {}", describe(kind, width), given(a)))),
                 },
                 I => int(i32::MIN.into()..=i32::MAX.into())?,
-                Q => int(i64::MIN..=i64::MAX)?,
+                Q => int(i64::MIN.into()..=u64::MAX.into())?,
                 C => int(0..=255)?,
                 Mv | M(_) => return Err(Fault::at(i, format!("wants memory; this is {}", given(a)))),
             }
@@ -470,7 +470,8 @@ impl Kernel {
         for (i, (&(kind, access), a)) in form.iter().zip(args).enumerate() {
             let operand = match a {
                 Given::Var(v) => Operand::Reg(v.reg, v.view.width()),
-                Given::Int(x) => Operand::Imm(Imm { value: *x, hex: kind == C }),
+                // Past 2^63 as the 64 bits are, as `mov` takes them.
+                Given::Int(x) => Operand::Imm(Imm { value: *x as i64, hex: kind == C }),
                 Given::Mem(_) | Given::Data(_) => {
                     let w = match kind {
                         Xm(w) | M(w) => w,
