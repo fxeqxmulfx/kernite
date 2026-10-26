@@ -284,31 +284,45 @@ pub fn literal(text: &str, want: Want) -> Result<Value, String> {
         return int(x, ty);
     }
     if let Some(digits) = t.strip_suffix("f32") {
-        return digits.parse().map(Value::F32).map_err(|_| bad());
+        return finite(text, digits.parse().map(Value::F32).map_err(|_| bad())?);
     }
     if let Some(digits) = t.strip_suffix("f64") {
-        return digits.parse().map(Value::F64).map_err(|_| bad());
+        return finite(text, digits.parse().map(Value::F64).map_err(|_| bad())?);
     }
     // `bf16` before `f16`, which it ends in.
     if let Some(digits) = t.strip_suffix("bf16") {
-        return digits.parse().map(|x| Value::Bf16(BF16.round(x))).map_err(|_| bad());
+        return finite(text, digits.parse().map(|x| Value::Bf16(BF16.round(x))).map_err(|_| bad())?);
     }
     if let Some(digits) = t.strip_suffix("f16") {
-        return digits.parse().map(|x| Value::F16(F16.round(x))).map_err(|_| bad());
+        return finite(text, digits.parse().map(|x| Value::F16(F16.round(x))).map_err(|_| bad())?);
     }
     if let Some(&(name, ty)) = INT_TYS.iter().find(|(name, _)| t.ends_with(name)) {
         let x = t[..t.len() - name.len()].parse().map_err(|_| bad())?;
         return int(x, Some(ty));
     }
     if t.contains(['.', 'e', 'E']) {
-        return match want {
-            Want::F64 => t.parse().map(Value::F64).map_err(|_| bad()),
-            Want::F16 => t.parse().map(|x| Value::F16(F16.round(x))).map_err(|_| bad()),
-            Want::Bf16 => t.parse().map(|x| Value::Bf16(BF16.round(x))).map_err(|_| bad()),
-            _ => t.parse().map(Value::F32).map_err(|_| bad()),
+        let v = match want {
+            Want::F64 => t.parse().map(Value::F64),
+            Want::F16 => t.parse().map(|x| Value::F16(F16.round(x))),
+            Want::Bf16 => t.parse().map(|x| Value::Bf16(BF16.round(x))),
+            _ => t.parse().map(Value::F32),
         };
+        return finite(text, v.map_err(|_| bad())?);
     }
     int(t.parse().map_err(|_| bad())?, int_want)
+}
+
+/// `v`, which the literal `text` reads as, unless it is too big for its type: out of range, as
+/// Rust has it, and not infinite, which `f32::INFINITY` is.
+fn finite(text: &str, v: Value) -> Result<Value, String> {
+    let ty = match v {
+        Value::F32(x) if x.is_infinite() => "f32",
+        Value::F64(x) if x.is_infinite() => "f64",
+        Value::F16(h) if F16.widen(h).is_infinite() => "f16",
+        Value::Bf16(h) if BF16.widen(h).is_infinite() => "bf16",
+        _ => return Ok(v),
+    };
+    Err(format!("{text} is out of range for {ty}"))
 }
 
 /// `x` as an integer of type `ty`, if it is in range.

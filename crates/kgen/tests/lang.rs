@@ -244,7 +244,7 @@ fn sixteen_bit_floats_are_values_and_data() {
         pub unsafe extern "sysv64" fn h() {
             const SUM: f16 = 0.1f16 + 0.2f16;
             const B: bf16 = 1.0bf16 / 3.0;
-            const HUGE: f16 = 65520.0;
+            const HUGE: f16 = f16::MAX * 2.0;
             const TIE: bf16 = 1.00390625;
             const LEAST: f16 = f16::from_bits(1);
             const BITS: u16 = THIRD.to_bits();
@@ -257,6 +257,7 @@ fn sixteen_bit_floats_are_values_and_data() {
         }
     "#;
     // Each is rounded once, to the nearest, the middle to even: 0.1 + 0.2 lands on a middle.
+    // Past the largest, a product is infinite, as a literal may not be.
     let want = "# h() -> ()
 # frame: 0 bytes aligned to 0, saves []
 # v=ymm0
@@ -282,6 +283,11 @@ fn errors_point_where_the_trouble_is() {
         ("two(1);", "1:1: `two` takes 2 arguments; this gives 1"),
         ("deep();", "5:13: helpers call helpers 64 deep here; does `deep` call itself?"),
         ("const X: u8 = 255 + 1;", "1:19: 256 is out of range for u8"),
+        // A float too big for its type is out of range, as Rust has it, and not infinite.
+        ("const F: f32 = 1e39;", "1:16: 1e39 is out of range for f32"),
+        ("const F: f64 = 2e308f64;", "1:16: 2e308f64 is out of range for f64"),
+        ("const F: f16 = 65520.0;", "1:16: 65520.0 is out of range for f16"),
+        ("const F: bf16 = 3.4e38bf16;", "1:17: 3.4e38bf16 is out of range for bf16"),
         ("let k = A;", "7:18: `A` is defined in terms of itself"),
         (
             "let a: [ymm; 2]; vaddps(a, a, a);",
