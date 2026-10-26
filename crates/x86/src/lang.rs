@@ -430,7 +430,7 @@ impl Kernel {
             ));
         };
         let narrow = |n: u64| u32::try_from(n).expect("a frame of 2^31 bytes at most");
-        self.p.slots.push(Slot { name: name.to_string(), size: narrow(bytes), align: narrow(align) });
+        self.p.slots.push(Slot { name: name.to_string(), size: narrow(bytes), align: narrow(align), spill: false });
         self.declared.push(ty.to_string());
         Ok(Var(Place::Stack(SlotId(self.p.slots.len() as u32 - 1))))
     }

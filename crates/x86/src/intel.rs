@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use kgen_core::{Base, Class, Compiled, Const, Flow, Frame, Item, Label, Mem, Operand, PReg, Signature, Width};
+use kgen_core::{Access, Base, Class, Compiled, Const, Flow, Frame, Item, Label, Mem, Operand, PReg, Signature, Width};
 
 use crate::op::Op;
 use crate::sysv::{PAGE, R11, RBP, RSP};
@@ -45,8 +45,8 @@ impl Listing {
     }
 
     /// Everything, for people and for snapshot files: the signature, the frame and where each
-    /// of its slots is, where each variable lives, the code with its notes, and the constants'
-    /// bytes.
+    /// of its slots is, a variable that spilled among them, where each variable lives, the code
+    /// with its notes, and the constants' bytes.
     pub fn text(&self) -> String {
         let mut out = String::new();
         let class = |c: &Class| match c {
@@ -70,7 +70,8 @@ impl Listing {
         for (slot, &at) in self.frame.slots.iter().zip(&self.frame.offsets) {
             let sp = name(RSP, Width::W64);
             let at = if at == 0 { sp } else { format!("{sp} + {at}") };
-            writeln!(out, "# {}: {} at {at}", slot.name, crate::bytes(slot.size.into())).unwrap();
+            let spilled = if slot.spill { ", spilled" } else { "" };
+            writeln!(out, "# {}{spilled}: {} at {at}", slot.name, crate::bytes(slot.size.into())).unwrap();
         }
         // A name the kernel gives many variables, one per place it writes one, shows once
         // with every register those got.
@@ -105,7 +106,8 @@ impl Listing {
     }
 }
 
-/// `c` in Intel syntax, with the frame set up on entry and taken down before every `ret`.
+/// `c` in Intel syntax, with the frame set up on entry and taken down before every `ret`, and
+/// a note before each store of a variable that spilled and each load of it back.
 ///
 /// Labels become local numbers, which `naked_asm!` asks for so that the same code can be
 /// emitted twice. Numbers made of ones and zeros alone are skipped: Intel syntax reads
@@ -142,6 +144,17 @@ pub fn print(c: &Compiled<Op>) -> Listing {
                 lines.extend(epilogue(&c.frame, vector).into_iter().map(Line::Code));
             }
             Item::Inst(inst) => {
+                let spill = inst.args.iter().find_map(|a| match a.operand {
+                    Operand::Mem(Mem { base: Base::Slot(s), .. }) if c.frame.slots[s.0 as usize].spill => {
+                        Some((&c.frame.slots[s.0 as usize].name, a.access))
+                    }
+                    _ => None,
+                });
+                match spill {
+                    Some((var, Access::Write)) => lines.push(Line::Note(format!("{var} spilled"))),
+                    Some((var, _)) => lines.push(Line::Note(format!("{var} reloaded"))),
+                    None => {}
+                }
                 let operands: Vec<String> = inst
                     .args
                     .iter()

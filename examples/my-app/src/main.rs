@@ -15,12 +15,13 @@ mod kernels {
     }
 
     /// The dot product of the `n` floats at `x` and the `n` at `y`, `n` a multiple of
-    /// `8 UNROLL`, compiled for one accumulator and for four. `UNROLL` accumulators of eight
-    /// lanes take turns, so that a fused multiply-add does not wait for the one before it; then
-    /// they are added in order, and the lanes summed as in `sum8`. Each holds a register
-    /// through the loop and the load needs one more, so sixteen would take 17 of the 16 there
-    /// are: kgen does not spill, it says which variables hold them.
-    #[instances(1, 4)]
+    /// `8 UNROLL`, compiled for one accumulator, for four and for sixteen. `UNROLL`
+    /// accumulators of eight lanes take turns, so that a fused multiply-add does not wait for
+    /// the one before it; then they are added in order, and the lanes summed as in `sum8`.
+    /// Each holds a register through the loop and the load needs one more, so sixteen take 17
+    /// of the 16 there are: two spill to the stack, loaded before their multiply-adds and
+    /// stored after, as the listing says.
+    #[instances(1, 4, 16)]
     pub unsafe extern "sysv64" fn dot<const UNROLL: usize>(x: *const f32, y: *const f32, n: usize) -> f32 {
         test(n, n);
         jz(empty);
@@ -1005,10 +1006,12 @@ mod tests {
         }
     }
 
+    /// For one accumulator and for four, and for sixteen, two of which spill, where `n` is a
+    /// multiple of the 128 floats they take in a turn.
     #[test]
     fn dot_is_its_reference_bit_for_bit() {
         assert!(super::supported(), "the kernels need AVX2 and FMA");
-        for n in [0, 32, 96, 1024, 4000] {
+        for n in [0, 32, 96, 128, 1024, 3968, 4000] {
             let (x, y) = (floats(n, 2 * n as u32 + 1), floats(n, 2 * n as u32 + 2));
             // SAFETY: `n` floats behind each pointer, a multiple of 32, and a cpu that runs
             // the kernels.
@@ -1016,6 +1019,11 @@ mod tests {
                 unsafe { (kernels::dot::<1>(x.as_ptr(), y.as_ptr(), n), kernels::dot::<4>(x.as_ptr(), y.as_ptr(), n)) };
             assert_eq!(one.to_bits(), dot(&x, &y, 1).to_bits(), "{n} floats, one accumulator");
             assert_eq!(four.to_bits(), dot(&x, &y, 4).to_bits(), "{n} floats, four accumulators");
+            if n.is_multiple_of(128) {
+                // SAFETY: as above, and a multiple of 128.
+                let sixteen = unsafe { kernels::dot::<16>(x.as_ptr(), y.as_ptr(), n) };
+                assert_eq!(sixteen.to_bits(), dot(&x, &y, 16).to_bits(), "{n} floats, sixteen accumulators");
+            }
         }
     }
 

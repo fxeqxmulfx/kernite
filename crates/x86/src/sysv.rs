@@ -1,4 +1,6 @@
-use kgen_core::{Class, Machine, PReg};
+use kgen_core::{Access, Arg, Base, Class, Flow, Inst, Machine, Mem, Operand, PReg, SlotId, Spill, VReg, Width};
+
+use crate::op::Op;
 
 const fn gpr(hw: u8) -> PReg {
     PReg { class: Class::Gpr, hw }
@@ -75,7 +77,9 @@ const VECS: [PReg; 16] = [
 const SAVED: [PReg; 5] = [gpr(3), gpr(12), gpr(13), gpr(14), gpr(15)];
 
 /// x86-64 under the System V calling convention: sixteen general registers and sixteen
-/// vector ones, every vector register the caller's to save.
+/// vector ones, every vector register the caller's to save. A general register spills with
+/// `mov`, a vector one with `vmovups`, all 256 bits, to a slot aligned to its size; neither
+/// touches the flags.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SysV;
 
@@ -90,5 +94,36 @@ impl Machine for SysV {
 
     fn callee_saved(&self) -> &[PReg] {
         &SAVED
+    }
+}
+
+impl SysV {
+    /// The instruction that moves all of `var` to `slot`, or back.
+    fn spill(&self, slot: SlotId, var: VReg, store: bool) -> Inst<Op, VReg> {
+        let width = self.width(var.class);
+        let op = if var.class == Class::Gpr { Op::Mov } else { Op::Vmovups };
+        let mem = Operand::Mem(Mem { base: Base::Slot(slot), index: None, disp: 0, width });
+        let reg = Operand::Reg(var, width);
+        let (to, from) = if store { (mem, reg) } else { (reg, mem) };
+        let args = vec![Arg { operand: to, access: Access::Write }, Arg { operand: from, access: Access::Read }];
+        Inst { op, args, implicit: vec![], flow: Flow::Next }
+    }
+}
+
+impl Spill<Op> for SysV {
+    fn width(&self, class: Class) -> Width {
+        match class {
+            Class::Gpr => Width::W64,
+            Class::Vec => Width::W256,
+            Class::Pred | Class::Float => unreachable!("x86 has no {class:?} registers"),
+        }
+    }
+
+    fn store(&self, slot: SlotId, var: VReg) -> Inst<Op, VReg> {
+        self.spill(slot, var, true)
+    }
+
+    fn load(&self, var: VReg, slot: SlotId) -> Inst<Op, VReg> {
+        self.spill(slot, var, false)
     }
 }

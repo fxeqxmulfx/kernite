@@ -1,28 +1,71 @@
-use kgen_core::{Arg, Item, Machine, PReg, Program, VReg};
+use kgen_core::{Arg, Item, Machine, PReg, Program, Spill, VReg};
 
 use crate::Error;
 use crate::bits::Bits;
 use crate::cfg::{self, Block};
+use crate::spill;
 
 /// Which variables are live where, block by block: at the top of each and at the bottom.
 pub(crate) struct Live {
     ins: Vec<Bits>,
-    outs: Vec<Bits>,
+    pub(crate) outs: Vec<Bits>,
 }
 
-/// Each variable's register, by [`VReg::id`]; `None` for a variable the body never names.
+/// `p` as allocated, and each of its variables' registers, by [`VReg::id`]; `None` for a
+/// variable the body never names.
 ///
 /// Liveness is solved over the blocks to a fixed point; two variables interfere when one is
 /// written while the other is live; then each variable, in the order the body first names it
 /// and after the ones the calling convention places, takes the first register the machine
-/// offers that none of the variables it interferes with holds. No choice depends on anything
-/// but the program, so the same program always gets the same registers. Nothing spills: a
-/// variable left without a register is an [`Error::OutOfRegisters`], for the program to fix.
-pub(crate) fn allocate<Op>(p: &Program<Op>, m: &dyn Machine) -> Result<Vec<Option<PReg>>, Error> {
-    let (blocks, live) = analyse(p)?;
-    let name = |i: usize| p.regs[i].name.clone();
-    let adj = interference(p, &blocks, &live);
+/// offers that none of the variables it interferes with holds.
+///
+/// A variable left without one spills, or one of those holding the registers it could have
+/// does, whichever [`spill::choose`] finds cheapest to keep on the stack; [`spill::rewrite`]
+/// keeps it in a slot of its own, and the program is allocated again, until every variable has
+/// a register. Each of the program's variables spills once at most, and none that spilling
+/// made. No choice depends on anything but the program, so the same program always gets the
+/// same registers and the same spills.
+pub(crate) fn allocate<Op: Clone>(
+    p: &Program<Op>,
+    m: &dyn Machine,
+    s: &dyn Spill<Op>,
+) -> Result<(Program<Op>, Vec<Option<PReg>>), Error> {
+    let mut p = p.clone();
+    // Which variables may still spill: the program's own, until they do.
+    let mut may = vec![true; p.regs.len()];
+    loop {
+        let (blocks, live) = analyse(&p)?;
+        let adj = interference(&p, &blocks, &live);
+        let (v, held) = match colour(&p, m, &adj, fixed(&p, &adj)?) {
+            Ok(regs) => return Ok((p, regs)),
+            Err(short) => short,
+        };
+        let class = p.regs[v].class;
+        let have = m.allocatable(class).len();
+        let candidates: Vec<usize> = std::iter::once(v)
+            .chain(held.iter().map(|&(u, _)| u))
+            .filter(|&u| have > 0 && may.get(u) == Some(&true) && spill::may(&p, u))
+            .collect();
+        let Some(spilled) = spill::choose(&p, &blocks, &live, &candidates) else {
+            let name = |i: usize| p.regs[i].name.clone();
+            let first = first_mentions(&p)[v].expect("a variable coloured is named");
+            let near = p.body[..first].iter().rev().find_map(|item| match item {
+                Item::Note(note) => Some(note.clone()),
+                _ => None,
+            });
+            let taken = held.into_iter().map(|(u, r)| (name(u), r)).collect();
+            return Err(Error::OutOfRegisters { class, var: name(v), near, taken, have });
+        };
+        may[spilled] = false;
+        spill::rewrite(&mut p, spilled, s);
+    }
+}
 
+/// The registers of the variables the calling convention places, the parameters and the
+/// results, once it is known that it places none twice, nor two in one register while both
+/// are live.
+fn fixed<Op>(p: &Program<Op>, adj: &[Bits]) -> Result<Vec<Option<PReg>>, Error> {
+    let name = |i: usize| p.regs[i].name.clone();
     let fixed = || p.params.iter().chain(&p.results);
     let mut regs: Vec<Option<PReg>> = vec![None; p.regs.len()];
     for &(v, r) in fixed() {
@@ -36,6 +79,21 @@ pub(crate) fn allocate<Op>(p: &Program<Op>, m: &dyn Machine) -> Result<Vec<Optio
             return Err(Error::FixedClash { a: name(v.id as usize), b: name(u), reg: r });
         }
     }
+    Ok(regs)
+}
+
+/// A variable colouring left without a register, and the variables beside it that hold one,
+/// each with the register it holds.
+type Short = (usize, Vec<(usize, PReg)>);
+
+/// `regs`, the placed variables' registers, with one for every other variable the body names;
+/// or the first variable left without one.
+fn colour<Op>(
+    p: &Program<Op>,
+    m: &dyn Machine,
+    adj: &[Bits],
+    mut regs: Vec<Option<PReg>>,
+) -> Result<Vec<Option<PReg>>, Short> {
     let first = first_mentions(p);
     let mut order: Vec<usize> = (0..p.regs.len()).filter(|&v| first[v].is_some()).collect();
     order.sort_by_key(|&v| first[v]);
@@ -43,29 +101,21 @@ pub(crate) fn allocate<Op>(p: &Program<Op>, m: &dyn Machine) -> Result<Vec<Optio
         if regs[v].is_some() {
             continue;
         }
-        let class = p.regs[v].class;
         let held: Vec<(usize, PReg)> = adj[v].iter().filter_map(|u| regs[u].map(|r| (u, r))).collect();
-        let offered = m.allocatable(class);
-        match offered.iter().find(|r| held.iter().all(|(_, h)| h != *r)) {
+        match m.allocatable(p.regs[v].class).iter().find(|r| held.iter().all(|(_, h)| h != *r)) {
             Some(&r) => regs[v] = Some(r),
-            None => {
-                let near = p.body[..first[v].expect("mentioned")].iter().rev().find_map(|item| match item {
-                    Item::Note(note) => Some(note.clone()),
-                    _ => None,
-                });
-                return Err(Error::OutOfRegisters {
-                    class,
-                    var: name(v),
-                    near,
-                    taken: held.into_iter().map(|(u, r)| (name(u), r)).collect(),
-                    have: offered.len(),
-                });
-            }
+            None => return Err((v, held)),
         }
     }
     for (v, row) in adj.iter().enumerate() {
         for u in row.iter() {
-            debug_assert!(regs[v] != regs[u], "{} and {} interfere and share {:?}", name(v), name(u), regs[v]);
+            debug_assert!(
+                regs[v] != regs[u],
+                "{} and {} interfere and share {:?}",
+                p.regs[v].name,
+                p.regs[u].name,
+                regs[v]
+            );
         }
     }
     Ok(regs)

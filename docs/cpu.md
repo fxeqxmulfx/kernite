@@ -135,4 +135,22 @@ the GPU.
     tests run both against a reference. A test runs a kernel with a 1 MB frame on a thread of
     64 KB in a process of its own, and sees Rust report the overflow at the guard page. Without
     the probes the same kernel dies of a plain segfault, past the guard page.
-- Next: step 2, spilling.
+- Step 2, spilling, is done:
+  - The port is `Spill`, beside `Machine` in `crates/core/src/machine.rs`: how wide a register
+    of a file is, and the instructions that store one in a slot and load it back. `SysV` uses
+    `mov` and `vmovups`, to slots aligned to their size. The Toy machine's are a fake; its tests
+    run each program before allocation and after, on a small interpreter, and compare.
+  - `allocate` (`crates/compile/src/alloc.rs`) colours as before. When a variable is left
+    without a register, `spill::choose` takes, of it and the variables that hold the registers
+    it could have, the one with the fewest loads and stores for how long it is live, one in a
+    loop counting ten times. `spill::rewrite` gives that one a slot, a store after each write
+    and a load before each read, each into a variable of its own; then it colours again. A
+    parameter is stored on entry, and a result loaded into its register before each return.
+  - Nothing spills twice, nor a variable spilling made, nor one an instruction writes as it
+    jumps. When nothing else may, `OutOfRegisters` is the error still.
+  - The listing's header names each slot that keeps a spill, `# acc15, spilled: 32 bytes at
+    rsp`, and a note before each load and store says `acc15 reloaded` or `acc15 spilled`.
+  - my-app's `dot::<16>` spills two accumulators and matches its reference bit for bit.
+  - Not done: one slot for variables never live together, a load folded into the instruction
+    that reads it, a loaded value kept for the next read.
+- Next: step 3, the CPU grid.

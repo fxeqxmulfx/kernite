@@ -37,8 +37,10 @@ pub enum Error {
         /// The register both need.
         reg: PReg,
     },
-    /// More variables of a file live at once than it has registers. The program has to keep
-    /// fewer alive; nothing here spills.
+    /// More variables of a file live at once than it has registers, and none of them may
+    /// spill to make room, as when one instruction names more than there are: those spilling
+    /// made are as short as they can be, and one an instruction writes as it jumps has no
+    /// place for its store. The program has to keep fewer alive.
     OutOfRegisters {
         /// The file.
         class: Class,

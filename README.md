@@ -46,16 +46,30 @@ it reaches lies inside, and `vmovaps` and `vmovdqa` reach it at a multiple of wh
 to keep inside. A frame of more than a page is touched a page at a time on the way down, as Rust's functions are, so
 that one past the end of the stack faults at the guard page there rather than reach past it.
 
-kgen does not spill. When the variables alive together do not fit in the registers, the error names them, at the
-declaration of the one that found none:
+When the variables alive together do not fit in the registers, kgen spills one to a slot of the frame: it stores it
+after each instruction that writes it and loads it before each one that reads it. It spills, of the variable left
+without a register and those holding the ones it could have, the one whose loads and stores are fewest for how long
+it is alive, one in a loop counting ten times one outside, and spills again until all fit. The listing names each
+spill, in its header and at each load and store. Sixteen accumulators of `dot` and the load beside them take 17 of the
+16 vector registers, and two spill:
 
 ```
-error: no Vec register left for `xs`: all 16 are held by variables live beside it: acc0=0 acc1=1 acc2=2 ... acc15=15
-  --> src/main.rs:14:17
-   |
-14 |             let xs: ymm;
-   |                 ^^
+# dot::<16>(gpr, gpr, gpr) -> vec
+# frame: 64 bytes aligned to 32, saves []
+# acc15, spilled: 32 bytes at rsp
+# acc14, spilled: 32 bytes at rsp + 32
+...
+    vmovups ymm14, ymmword ptr [rdi + 480]
+    # acc15 reloaded
+    vmovups ymm15, ymmword ptr [rsp]
+    vfmadd231ps ymm15, ymm14, ymmword ptr [rsi + 480]
+    # acc15 spilled
+    vmovups ymmword ptr [rsp], ymm15
 ```
+
+A spill moves a register with `mov` or `vmovups`, which leave the flags as they were, so it may go between a
+comparison and its jump. Only when no spill makes room, as when one instruction names more variables than there are
+registers, is it an error, which names the variables at the declaration of the one that found none.
 
 ## On a GPU
 
@@ -158,7 +172,7 @@ name = "kgen"
 ## Examples
 
 [`examples/my-app`](examples/my-app/src/main.rs) uses kgen as a crate outside it would: `sum8`, `dot` for one
-accumulator and for four, and `count_bytes`, by tables in its stack memory, for the CPU, and for the GPU `saxpy`, `block_sums` for blocks of 256 threads and of 1024
+accumulator, for four and for sixteen, two of which spill, and `count_bytes`, by tables in its stack memory, for the CPU, and for the GPU `saxpy`, `block_sums` for blocks of 256 threads and of 1024
 and `reverse_runs` in shared memory, `scale_f16`, written in place, `gcds`, which calls `gcd`, an `extern "ptx-func"`
 function that calls itself, `histogram`, which counts in the module's global memory from launch to launch, and
 `weigh`, by weights in its constant memory, with safe functions over them; and
@@ -198,9 +212,9 @@ Each crate depends only on the layers inside it. `crates/kgen/tests/architecture
 
 | layer | crate | what it knows |
 |---|---|---|
-| entities | `kgen-core` | programs over variables and over registers; the `Machine` port |
+| entities | `kgen-core` | programs over variables and over registers; the `Machine` and `Spill` ports |
 | language | `kgen-lang` | kernels in Rust's syntax: parsing, evaluation, the `Target` port |
-| use cases | `kgen-compile` | liveness, register allocation, the frame's layout; tested on a toy machine |
+| use cases | `kgen-compile` | liveness, register allocation, spilling, the frame's layout; tested on a toy machine |
 | adapters | `kgen-x86`, `kgen-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kgen` | which machine and syntax each kernel compiles with |
 | delivery | `kgen-macros` | kernels as functions: `#[unsafe(naked)]`, or launchers of PTX |

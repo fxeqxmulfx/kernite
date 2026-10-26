@@ -6,9 +6,9 @@
 //!
 //! | layer | crate | what it knows |
 //! |---|---|---|
-//! | entities | `kgen-core` | programs over variables and over registers; the `Machine` port |
+//! | entities | `kgen-core` | programs over variables and over registers; the `Machine` and `Spill` ports |
 //! | language | `kgen-lang` | kernels in Rust's syntax: parsing, evaluation, the `Target` port |
-//! | use cases | `kgen-compile` | liveness, register allocation, the frame's layout |
+//! | use cases | `kgen-compile` | liveness, register allocation, spilling, the frame's layout |
 //! | adapters | `kgen-x86`, `kgen-ptx` | x86-64: SysV, Intel syntax; PTX for NVIDIA GPUs |
 //! | composition | `kgen`, this crate | which machine and syntax each kernel compiles with |
 //! | delivery | `kgen-macros` | kernels as functions, `#[unsafe(naked)]` or launched on a GPU |

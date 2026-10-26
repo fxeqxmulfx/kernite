@@ -81,14 +81,30 @@ fn the_examples_kernels_come_out_as_the_builder_wrote_them() {
     }
 }
 
+/// Sixteen accumulators and the load beside them take 17 of the 16 vector registers: the two
+/// that cost least to keep on the stack, of those that hold one through the loop, spill.
 #[test]
-fn sixteen_accumulators_and_a_load_do_not_fit_and_the_error_says_where() {
-    let e = kgen::x86_str(KERNELS, "dot_unroll16").unwrap_err();
-    assert!(e.starts_with("30:17: no Vec register left for `xs`: all 16 are held by"), "{e}");
+fn sixteen_accumulators_and_a_load_spill_two_and_the_listing_says_where() {
+    let text = kgen::x86_str(KERNELS, "dot_unroll16").unwrap().text();
+    let header = "# dot_unroll16(gpr, gpr, gpr) -> vec
+# frame: 64 bytes aligned to 32, saves []
+# acc15, spilled: 32 bytes at rsp
+# acc14, spilled: 32 bytes at rsp + 32
+";
+    assert!(text.starts_with(header), "{text}");
+    let last = "    vmovups ymm14, ymmword ptr [rdi + 480]
+    # acc15 reloaded
+    vmovups ymm15, ymmword ptr [rsp]
+    vfmadd231ps ymm15, ymm14, ymmword ptr [rsi + 480]
+    # acc15 spilled
+    vmovups ymmword ptr [rsp], ymm15
+    add rdi, 512
+";
+    assert!(text.contains(last), "{text}");
 }
 
 #[test]
-fn up_to_fifteen_accumulators_fit() {
+fn up_to_fifteen_accumulators_fit_without_spilling() {
     let mut src = KERNELS.to_string();
     for k in 1..=15 {
         src += &format!(
@@ -96,7 +112,45 @@ fn up_to_fifteen_accumulators_fit() {
         );
     }
     for k in 1..=15 {
-        kgen::x86_str(&src, &format!("dot{k}")).unwrap_or_else(|e| panic!("{k} accumulators: {e}"));
+        let listing = kgen::x86_str(&src, &format!("dot{k}")).unwrap_or_else(|e| panic!("{k} accumulators: {e}"));
+        assert!(listing.frame.slots.is_empty(), "{k} accumulators:\n{}", listing.text());
+    }
+}
+
+/// Thirteen sums, the pointer and the count take 15 of the 14 general registers the allocator
+/// has. The count spills, a parameter stored from where it arrives; then a sum, for the count to
+/// be loaded beside the others. Its store goes between the `sub` and the `jnz` that reads its
+/// flags, which a `mov` leaves as they were.
+#[test]
+fn a_general_register_spills_with_mov_a_parameter_from_where_it_arrives() {
+    let src = "unsafe extern \"sysv64\" fn k(p: *mut u64, n: usize) {
+        let g: [gpr; 13];
+        for k in 0..13 { mov(g[k], [p + 8 * k]); }
+        label(top);
+        for k in 0..13 { add(g[k], [p + 8 * k]); }
+        sub(n, 1);
+        jnz(top);
+        for k in 0..13 { mov([p + 8 * k], g[k]); }
+    }";
+    let text = kgen::x86_str(src, "k").unwrap().text();
+    let parts = [
+        "# frame: 16 bytes aligned to 8, saves [rbx, r12, r13, r14, r15]
+# n, spilled: 8 bytes at rsp
+# g12, spilled: 8 bytes at rsp + 8
+# p=rdi n=rsi,r15 g0=rax",
+        "    sub rsp, 16
+    # n spilled
+    mov qword ptr [rsp], rsi
+    mov rax, qword ptr [rdi]",
+        "    # n reloaded
+    mov r15, qword ptr [rsp]
+    sub r15, 1
+    # n spilled
+    mov qword ptr [rsp], r15
+    jnz 2b",
+    ];
+    for part in parts {
+        assert!(text.contains(part), "{part}\nin\n{text}");
     }
 }
 

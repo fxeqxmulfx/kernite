@@ -86,15 +86,17 @@ pub struct RegInfo {
     pub name: String,
 }
 
-/// Stack memory a kernel asks for.
+/// Stack memory: what a kernel asks for, or where the allocator keeps a variable that spilled.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Slot {
-    /// A name for people, which listings call it by.
+    /// A name for people, which listings call it by: a spilled variable's own.
     pub name: String,
     /// Bytes.
     pub size: u32,
     /// Alignment, a power of two.
     pub align: u32,
+    /// Whether it keeps a variable that spilled, rather than memory the kernel asked for.
+    pub spill: bool,
 }
 
 /// Read-only data a kernel reads.
@@ -167,7 +169,8 @@ pub struct Compiled<Op> {
     pub frame: Frame,
     /// Read-only data, by [`ConstId`].
     pub consts: Vec<Const>,
-    /// Every variable of the program and the register it got, by [`VReg::id`]; `None` for
-    /// one that is never used.
+    /// Every variable and the register it got, by [`VReg::id`]: the program's, then those
+    /// the allocator made to load and store one that spilled, each named as that one is;
+    /// `None` for one the code does not name, as one that spilled is not.
     pub assignment: Vec<(RegInfo, Option<PReg>)>,
 }

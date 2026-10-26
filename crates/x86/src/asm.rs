@@ -30,7 +30,8 @@ impl Stream {
 ///
 /// Variables stand where registers would: [`Asm::gpr`] and [`Asm::ymm`] make new ones, and
 /// any number of instructions may write the same one. The allocator gives each a register
-/// for its whole life, or says which ones were alive together when there were not enough.
+/// for its whole life, or keeps one on the stack when there are not enough, which the listing
+/// says.
 /// Every method takes the operands its instruction takes, so an instruction the machine
 /// has no encoding for does not compile.
 pub struct Asm {
@@ -115,7 +116,7 @@ impl Asm {
     /// page at a time on the way down, and a larger alignment could skip one.
     pub fn slot(&mut self, name: impl Into<String>, size: u32, align: u32) -> Slot {
         assert!(align.is_power_of_two() && align <= PAGE, "alignment {align}");
-        self.p.slots.push(SlotSpec { name: name.into(), size, align });
+        self.p.slots.push(SlotSpec { name: name.into(), size, align, spill: false });
         Slot(SlotId(self.p.slots.len() as u32 - 1))
     }
 

@@ -21,8 +21,8 @@
 //! - **Variables** are declared with a type and no value, `let v: ymm;`, or many at once:
 //!   `let acc: [ymm; 4];`, which are `acc0` to `acc3`, or `let (x, y): (u64, f32);`, each
 //!   of its own type. Any number of instructions may write
-//!   one; the allocator gives each a register, or says which were alive together when there
-//!   were not enough. A field is a view of one: `v.xmm`, `g.r32`. A type of the machine's
+//!   one; the allocator gives each a register, and where there are not enough, keeps some on
+//!   the stack, which the listing says. A field is a view of one: `v.xmm`, `g.r32`. A type of the machine's
 //!   that takes arguments is written as Rust writes a generic one, `shared<[f32; N * 4], 16>`,
 //!   and the machine is given it with values in place of the names they are bound to:
 //!   `shared<[f32; 256], 16>`.
