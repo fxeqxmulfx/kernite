@@ -291,3 +291,14 @@ fn a_static_is_no_memory_of_an_x86_kernel() {
         "4:13: `COUNTS` is memory of the module's, and this machine has none: its kernels take memory by pointer"
     );
 }
+
+/// A cooperative kernel is a GPU's, whose blocks the GPU runs all at once.
+#[test]
+fn an_x86_kernel_is_not_cooperative() {
+    let src = "#[cooperative]\nunsafe extern \"sysv64\" fn k() {}\n";
+    assert_eq!(
+        kgen::x86_str(src, "k").unwrap_err(),
+        "1:3: `#[cooperative]` goes on a GPU kernel, `extern \"ptx-kernel\"`, whose blocks wait for each other; `k` \
+         is a kernel for x86-64, which no GPU launches"
+    );
+}

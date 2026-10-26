@@ -74,6 +74,8 @@ pub struct Fn {
     pub attrs: Range<usize>,
     /// Its `#[instances(..)]`, among them, if it has one.
     pub instances: Option<Instances>,
+    /// Its `#[cooperative]`, among them, if it has one.
+    pub cooperative: Option<Cooperative>,
     /// What comes before `fn`: visibility, `unsafe`, `extern "abi"`.
     pub head: Range<usize>,
     /// The ABI it names, which makes it a kernel for the machine that ABI belongs to.
@@ -102,6 +104,17 @@ pub struct Instances {
     /// Each instance's arguments, as written.
     pub values: Vec<Expr>,
     /// Where `instances` is.
+    pub span: Span,
+    /// The attribute's tokens, by index into the module's tokens: Rust has no such attribute,
+    /// so it is not passed on.
+    pub tokens: Range<usize>,
+}
+
+/// `#[cooperative]`: a kernel whose parts wait for each other, as the blocks of a GPU kernel
+/// wait at `grid.sync()`, so that its machine runs them all at once.
+#[derive(Clone, Debug)]
+pub struct Cooperative {
+    /// Where `cooperative` is.
     pub span: Span,
     /// The attribute's tokens, by index into the module's tokens: Rust has no such attribute,
     /// so it is not passed on.

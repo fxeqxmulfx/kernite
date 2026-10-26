@@ -143,6 +143,7 @@ fn ptxas_takes_what_kgen_writes() {
         ("instances", INSTANCES),
         ("names", NAMES),
         ("statics", STATICS),
+        ("cooperative", COOPERATIVE),
         // Every byte of constant memory, and what it holds, on one line.
         ("constant", "static ALL: constant<[u8; 65536]> = [1; 65536];"),
     ] {
@@ -2679,4 +2680,201 @@ fn a_static_is_reached_in_its_state_space_and_within_it() {
     // A variable of the kernel's own takes the name it is given, before the module's.
     let ptx = kgen::ptx_str(&format!("{a}\nunsafe extern \"ptx-kernel\" fn k() {{ let A: u32; mov.u32(A, 1); }}\n"));
     assert!(ptx.unwrap().contains("\tmov.u32 %A, 1;\n"));
+}
+
+/// A kernel whose blocks wait for each other, in its body and in a helper's, with variables
+/// of the names the barrier's registers have, which stay its own.
+const COOPERATIVE: &str = r#"
+    /// `x[i] = x[n - 1 - i]` for each `i < n`, a thread each, of the `x` before: every thread
+    /// reads its pair, the grid waits, then each writes. Then the grid waits again, in a
+    /// helper, before the kernel ends.
+    #[cooperative]
+    pub unsafe extern "ptx-kernel" fn reverse(x: *mut u32, n: u32) {
+        let (i, t): (u32, u32);
+        mov.u32(t, ntid.x);
+        mov.u32(i, ctaid.x);
+        mul.lo.u32(i, i, t);
+        mov.u32(t, tid.x);
+        add.u32(i, i, t);
+        let others: pred;
+        setp.ge.u32(others, i, n);
+        let at: u64;
+        if !others {
+            sub.u32(t, n, i);
+            sub.u32(t, t, 1);
+            mad.wide.u32(at, t, 4, x);
+            ld.global.u32(t, [at]);
+        }
+        grid.sync();
+        if !others {
+            mad.wide.u32(at, i, 4, x);
+            st.global.u32([at], t);
+        }
+        wait();
+    }
+
+    fn wait() {
+        grid.sync();
+    }
+"#;
+
+#[test]
+fn a_cooperative_kernel_waits_for_its_grid_as_cuda_does() {
+    let ptx = kgen::ptx_str(COOPERATIVE).unwrap();
+    // A cooperative launch is from Pascal's GPUs on, and PTX 5.0.
+    let (head, reverse) = ptx.split_once(".visible .entry ").unwrap();
+    assert_eq!(head, "// Written by kgen.\n\n.version 5.0\n.target sm_60\n.address_size 64\n\n");
+    // Each block's first thread adds to the count of the driver's barrier for the grid, the
+    // first block's so that it turns over its top bit once all have, and waits for that.
+    let sync = "\t{
+\t.reg .pred %others, %wait;
+\t.reg .b32 %t, %u, %add, %old;
+\t.reg .b64 %barrier;
+\tbar.sync 0;
+\tmov.u32 %t, %tid.x;
+\tmov.u32 %u, %tid.y;
+\tor.b32 %t, %t, %u;
+\tmov.u32 %u, %tid.z;
+\tor.b32 %t, %t, %u;
+\tsetp.ne.u32 %others, %t, 0;
+\t@%others bra $Lgrid_done;
+\tmov.u32 %t, %envreg1;
+\tmov.u32 %u, %envreg2;
+\tmov.b64 %barrier, {%u, %t};
+\tsetp.eq.u64 %wait, %barrier, 0;
+\t@%wait trap;
+\tadd.u64 %barrier, %barrier, 4;
+\tmov.u32 %t, %nctaid.x;
+\tmov.u32 %u, %nctaid.y;
+\tmul.lo.u32 %t, %t, %u;
+\tmov.u32 %u, %nctaid.z;
+\tmul.lo.u32 %t, %t, %u;
+\tsub.u32 %add, 2147483649, %t;
+\tmov.u32 %t, %ctaid.x;
+\tmov.u32 %u, %ctaid.y;
+\tor.b32 %t, %t, %u;
+\tmov.u32 %u, %ctaid.z;
+\tor.b32 %t, %t, %u;
+\tsetp.eq.u32 %wait, %t, 0;
+\tselp.b32 %add, %add, 1, %wait;
+\tmembar.gl;
+\tatom.add.u32 %old, [%barrier], %add;
+$Lgrid_wait:
+\tld.volatile.u32 %t, [%barrier];
+\txor.b32 %t, %t, %old;
+\tsetp.ge.s32 %wait, %t, 0;
+\t@%wait bra $Lgrid_wait;
+\tmembar.gl;
+$Lgrid_done:
+\tbar.sync 0;
+\t}
+";
+    let want = format!(
+        "reverse(
+\t.param .u64 reverse_param_0,
+\t.param .u32 reverse_param_1
+)
+{{
+\t.reg .pred %others;
+\t.reg .u32 %n, %i, %t;
+\t.reg .u64 %x, %at;
+
+\tld.param.u64 %x, [reverse_param_0];
+\tcvta.to.global.u64 %x, %x;
+\tld.param.u32 %n, [reverse_param_1];
+\tmov.u32 %t, %ntid.x;
+\tmov.u32 %i, %ctaid.x;
+\tmul.lo.u32 %i, %i, %t;
+\tmov.u32 %t, %tid.x;
+\tadd.u32 %i, %i, %t;
+\tsetp.ge.u32 %others, %i, %n;
+\t@!%others sub.u32 %t, %n, %i;
+\t@!%others sub.u32 %t, %t, 1;
+\t@!%others mad.wide.u32 %at, %t, 4, %x;
+\t@!%others ld.global.u32 %t, [%at];
+{sync}\t@!%others mad.wide.u32 %at, %i, 4, %x;
+\t@!%others st.global.u32 [%at], %t;
+{sync}\tret;
+}}
+"
+    );
+    assert_eq!(reverse, want);
+}
+
+#[test]
+fn grid_sync_is_where_every_thread_of_the_grid_comes_to_it() {
+    let cases = [
+        (
+            "",
+            "grid.sync();",
+            "3:6: `grid.sync()` waits for every block of the grid, which runs all at once only if `k` is \
+             `#[cooperative]`",
+        ),
+        // A helper's waits for the grid of the kernel it is inlined in.
+        (
+            "",
+            "h();",
+            "9:10: `grid.sync()` waits for every block of the grid, which runs all at once only if `k` is \
+             `#[cooperative]`",
+        ),
+        ("#[cooperative]", "grid.sync(n);", "3:6: `grid.sync` takes no operands, not 1"),
+        ("#[cooperative]", "grid.wait();", "3:6: kgen's barrier for the grid is `grid.sync()`; not `grid.wait`"),
+        (
+            "#[cooperative]",
+            "grid.sync.all();",
+            "3:11: kgen's barrier for the grid is `grid.sync()`; not `grid.sync.all`",
+        ),
+        (
+            "#[cooperative]",
+            "let p: pred; setp.eq.u32(p, n, 0); if !p { grid.sync(); }",
+            "3:49: `grid.sync()` is for every thread of the grid, under no `if`: the grid waits for ever for one \
+             that does not come to it",
+        ),
+        // A function the kernels call may be called by one whose grid is not all running.
+        (
+            "#[cooperative]",
+            "call(f);",
+            "6:10: `grid.sync()` goes in a `#[cooperative]` kernel, or in a helper inlined there: a function the \
+             kernels call may be called by a kernel that is not",
+        ),
+    ];
+    for (attr, body, want) in cases {
+        let src = format!(
+            "{attr}\nunsafe extern \"ptx-kernel\" fn k(x: *mut u32, n: u32) {{\n{body}\n}}\n\
+             extern \"ptx-func\" fn f() {{\n    grid.sync();\n}}\nfn h() {{\n    grid.sync();\n}}\n"
+        );
+        assert_eq!(kgen::ptx_str(&src).unwrap_err(), want, "{body}");
+    }
+}
+
+#[test]
+fn cooperative_is_said_of_a_gpu_kernel_alone() {
+    let not = "`#[cooperative]` goes on a GPU kernel, `extern \"ptx-kernel\"`, whose blocks wait for each other";
+    let nothing = "1:3: `#[cooperative]` takes nothing: it says that a kernel's blocks wait for each other";
+    let cases = [
+        (
+            "#[cooperative] extern \"ptx-func\" fn f() {}",
+            format!(
+                "1:3: {not}; `f` is a function the kernels call, which runs as the kernel that calls it is launched"
+            ),
+        ),
+        ("#[cooperative] fn h() {}", format!("1:3: {not}; `h` is a helper, inlined where it is called")),
+        ("#[cooperative] static A: global<u32>;", format!("1:3: {not}")),
+        ("#[cooperative] const A: u32 = 1;", format!("1:3: {not}")),
+        (
+            "#[cooperative] #[cooperative] unsafe extern \"ptx-kernel\" fn j() {}",
+            "1:18: a kernel has one `#[cooperative]`".into(),
+        ),
+        ("#[cooperative(2)] unsafe extern \"ptx-kernel\" fn j() {}", nothing.into()),
+        ("#[cooperative = 2] unsafe extern \"ptx-kernel\" fn j() {}", nothing.into()),
+    ];
+    for (items, want) in cases {
+        let src = format!("{items}\nunsafe extern \"ptx-kernel\" fn k(x: *mut u32) {{}}");
+        assert_eq!(kgen::ptx_str(&src).unwrap_err(), want, "{items}");
+    }
+    // Beside `#[instances(..)]`, either first, it makes each instance cooperative.
+    for attrs in ["#[cooperative] #[instances(1, 2)]", "#[instances(1, 2)] #[cooperative]"] {
+        let src = format!("{attrs}\nunsafe extern \"ptx-kernel\" fn k<const N: u32>() {{ grid.sync(); }}");
+        assert_eq!(kgen::ptx_str(&src).unwrap().matches("\tatom.add.u32 %old, [%barrier], %add;\n").count(), 2);
+    }
 }

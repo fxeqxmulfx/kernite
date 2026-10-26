@@ -95,6 +95,7 @@ pub struct Compiled<T> {
 /// register that ran out where its variable is declared. For an instance, it says which.
 pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>, kgen_lang::Error> {
     let name = kgen_lang::instance(f, args)?;
+    cooperative(f)?;
     let mut kernel = kgen_x86::lang::Kernel::new(&name);
     let run = kgen_lang::kernel(module, f, args, &mut kernel).map_err(|e| within(&name, args, e))?;
     let code = render(&kernel.finish()).map_err(|e| {
@@ -123,7 +124,8 @@ pub fn x86_str(src: &str, name: &str) -> Result<Listing, String> {
 /// It is named in PTX, as the functions it names are, by its [`symbol`](kgen_ptx::symbol) in
 /// `scope`, the namespaces [`ptx_scope`] writes: C++'s name for it, which the tools that read
 /// PTX show. With no scope, `""`, one that takes no compile-time arguments is its own name.
-/// It names the module's memory, its statics, as [`ptx_statics`] has them in `scope`.
+/// It names the module's memory, its statics, as [`ptx_statics`] has them in `scope`. A kernel
+/// that is [`cooperative`] may wait for its grid, `grid.sync()`.
 pub fn ptx(module: &Module, f: &Fn, args: &[Value], scope: &str) -> Result<Compiled<Entry>, kgen_lang::Error> {
     let name = kgen_lang::instance(f, args)?;
     let symbol = kgen_ptx::symbol(scope, &f.name, args);
@@ -131,6 +133,9 @@ pub fn ptx(module: &Module, f: &Fn, args: &[Value], scope: &str) -> Result<Compi
         Some(Abi::PtxFunc) => kgen_ptx::lang::Kernel::func(&name, symbol),
         _ => kgen_ptx::lang::Kernel::new(&name, symbol),
     };
+    if cooperative(f)? {
+        kernel.cooperative();
+    }
     // One that does not compile says why where it is declared.
     for s in ptx_statics(module, scope).into_iter().flatten() {
         kernel.module_memory(&s.code);
@@ -202,7 +207,7 @@ pub fn ptx_module(entries: &[Entry], statics: &[Static]) -> Result<String, Strin
 
 /// Every kernel `extern "ptx-kernel"` and function `extern "ptx-func"` of the module in
 /// `src`, each instance of each, in one PTX module, in no scope, with its statics; an error
-/// reads `line:column: what`. A helper's `#[instances(..)]` is one.
+/// reads `line:column: what`. A helper's `#[instances(..)]` is one, and its `#[cooperative]`.
 pub fn ptx_str(src: &str) -> Result<String, String> {
     let module = kgen_lang::parse(src).map_err(|e| e.at(src))?;
     let mut statics = vec![];
@@ -215,6 +220,7 @@ pub fn ptx_str(src: &str) -> Result<String, String> {
         if !matches!(abi(f), None | Some(Abi::PtxKernel | Abi::PtxFunc)) {
             continue;
         }
+        cooperative(f).map_err(|e| e.at(src))?;
         for args in kgen_lang::instances(&module, f).map_err(|e| e.at(src))? {
             entries.push(ptx(&module, f, &args, "").map_err(|e| e.at(src))?.code);
         }
@@ -225,6 +231,26 @@ pub fn ptx_str(src: &str) -> Result<String, String> {
 /// The ABI `f` names, if kgen compiles for it.
 pub fn abi(f: &Fn) -> Option<Abi> {
     f.abi.as_ref().and_then(|(abi, _)| Abi::of(abi))
+}
+
+/// Whether `f` is a GPU kernel whose blocks wait for each other, `#[cooperative]`, which
+/// every launch runs all at once; or why it may not say so, if it says so and is not a GPU
+/// kernel. One of an ABI kgen knows nothing of is none, whatever it says.
+pub fn cooperative(f: &Fn) -> Result<bool, kgen_lang::Error> {
+    let Some(c) = &f.cooperative else { return Ok(false) };
+    let what = match (abi(f), &f.abi) {
+        (Some(Abi::PtxKernel), _) => return Ok(true),
+        (Some(Abi::PtxFunc), _) => "a function the kernels call, which runs as the kernel that calls it is launched",
+        (Some(Abi::Sysv64), _) => "a kernel for x86-64, which no GPU launches",
+        (None, Some(_)) => return Ok(false),
+        (None, None) => "a helper, inlined where it is called",
+    };
+    let message = format!(
+        "`#[cooperative]` goes on a GPU kernel, `extern \"ptx-kernel\"`, whose blocks wait for each other; `{}` is \
+         {what}",
+        f.name
+    );
+    Err(kgen_lang::Error { span: c.span, message })
 }
 
 /// The prototype of `f`, a function `extern "ptx-func"`, as the kernels that call it see it;

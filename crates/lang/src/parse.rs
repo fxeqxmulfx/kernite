@@ -2,7 +2,8 @@
 
 use crate::Error;
 use crate::ast::{
-    BinOp, Block, Const, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret, Static, Stmt, Type, UnOp,
+    BinOp, Block, Const, Cooperative, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret, Static, Stmt,
+    Type, UnOp,
 };
 use crate::token::{Delim, Span, Tree, text};
 
@@ -146,28 +147,57 @@ impl<'a> Parser<'a> {
             self.pos += 3;
             return Ok(Item { tokens: start..self.pos, kind: ItemKind::Other });
         }
-        let mut instances = None;
+        let (mut instances, mut cooperative) = (None, None);
         while self.is_op("#") && matches!(self.peek_at(1), Some(Tree::Group { delim: Delim::Bracket, .. })) {
             if let Some(Tree::Group { trees, .. }) = self.peek_at(1)
                 && let [Tree::Ident { name, span }, rest @ ..] = trees.as_slice()
-                && name == "instances"
             {
                 let at = |message: &str| Err(Error { span: *span, message: message.into() });
-                let [Tree::Group { delim: Delim::Paren, trees: values, .. }] = rest else {
-                    return at("`#[instances(..)]` lists what a function is compiled for, as in `#[instances(4, 8)]`");
-                };
-                if instances.is_some() {
-                    return at("a function has one `#[instances(..)]`, which lists each instance it is compiled for");
+                let tokens = self.pos..self.pos + 2;
+                match name.as_str() {
+                    "instances" => {
+                        let [Tree::Group { delim: Delim::Paren, trees: values, .. }] = rest else {
+                            return at(
+                                "`#[instances(..)]` lists what a function is compiled for, as in `#[instances(4, 8)]`",
+                            );
+                        };
+                        if instances.is_some() {
+                            return at(
+                                "a function has one `#[instances(..)]`, which lists each instance it is compiled for",
+                            );
+                        }
+                        instances = Some(Instances { values: args(values)?, span: *span, tokens });
+                    }
+                    "cooperative" => {
+                        if !rest.is_empty() {
+                            return at(
+                                "`#[cooperative]` takes nothing: it says that a kernel's blocks wait for each other",
+                            );
+                        }
+                        if cooperative.is_some() {
+                            return at("a kernel has one `#[cooperative]`");
+                        }
+                        cooperative = Some(Cooperative { span: *span, tokens });
+                    }
+                    _ => {}
                 }
-                instances = Some(Instances { values: args(values)?, span: *span, tokens: self.pos..self.pos + 2 });
             }
             self.pos += 2;
         }
         let attrs = start..self.pos;
-        let misplaced = instances.as_ref().map(|i| Error {
-            span: i.span,
-            message: "`#[instances(..)]` goes on a function that names an ABI, which it lists the instances of".into(),
-        });
+        let misplaced = instances
+            .as_ref()
+            .map(|i| Error {
+                span: i.span,
+                message: "`#[instances(..)]` goes on a function that names an ABI, which it lists the instances of"
+                    .into(),
+            })
+            .or(cooperative.as_ref().map(|c| Error {
+                span: c.span,
+                message: "`#[cooperative]` goes on a GPU kernel, `extern \"ptx-kernel\"`, whose blocks wait for each \
+                          other"
+                    .into(),
+            }));
         let head = self.pos;
         if self.eat_ident("pub") {
             self.group(Delim::Paren);
@@ -209,7 +239,7 @@ impl<'a> Parser<'a> {
             break;
         }
         if self.eat_ident("fn") {
-            let f = self.function(attrs, instances, head..self.pos - 1, abi)?;
+            let f = self.function(attrs, (instances, cooperative), head..self.pos - 1, abi)?;
             return Ok(Item { tokens: start..self.pos, kind: ItemKind::Fn(f) });
         }
         if let Some(e) = misplaced {
@@ -256,7 +286,7 @@ impl<'a> Parser<'a> {
     fn function(
         &mut self,
         attrs: std::ops::Range<usize>,
-        instances: Option<Instances>,
+        (instances, cooperative): (Option<Instances>, Option<Cooperative>),
         head: std::ops::Range<usize>,
         abi: Option<(String, Span)>,
     ) -> Result<Fn, Error> {
@@ -301,7 +331,7 @@ impl<'a> Parser<'a> {
             return self.error(format!("a kernel is written in its body, and `{name}` has none"));
         };
         let body = block(body, span_body);
-        Ok(Fn { attrs, instances, head, abi, name, span, generics, params, params_at, ret, body })
+        Ok(Fn { attrs, instances, cooperative, head, abi, name, span, generics, params, params_at, ret, body })
     }
 
     fn ty(&mut self) -> Result<Type, Error> {

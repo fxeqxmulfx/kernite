@@ -26,6 +26,10 @@
 //!   `mov.u64(a, COUNTS)`, and `cvta.global.u64(g, COUNTS)` the generic one; a constant one
 //!   fits in 32, `mov.u32(a, TABLE)`.
 //! - `mov` and `cvt` read the special registers: `tid.x`, `laneid`, `clock64`.
+//! - `grid.sync()` waits until every thread of the grid has come to it, as CUDA's
+//!   `grid.sync()` does, in a kernel the language marks `#[cooperative]`,
+//!   [`Kernel::cooperative`], which every launch runs all at once. Each thread of the grid
+//!   comes to it as often as the others, under no `if`, or the grid waits for ever.
 //! - Operands taken together are a tuple, `(a, b)`, or variables declared together; two
 //!   results written at once are `p | q`; `_` is a result left unwritten, where PTX lets one
 //!   be; `!p` is a predicate read inverted, and `-a` a source negated, where PTX negates one.
@@ -125,6 +129,9 @@ pub struct Kernel {
     calls: Vec<String>,
     /// The module's memory it may name.
     statics: Vec<Static>,
+    /// Whether every launch runs each block of its grid at once, so that it may wait for its
+    /// grid.
+    cooperative: bool,
 }
 
 /// A function or a kernel that a kernel may name: by what the source calls it, as an operand
@@ -211,6 +218,7 @@ impl Kernel {
             callees: vec![],
             calls: vec![],
             statics: vec![],
+            cooperative: false,
         }
     }
 
@@ -237,6 +245,14 @@ impl Kernel {
     pub fn module_memory(&mut self, s: &Static) {
         self.named.insert(s.memory.name.clone());
         self.statics.push(s.clone());
+    }
+
+    /// Makes the kernel cooperative: every launch of it runs each block of its grid at once, so
+    /// that the blocks may wait for each other, as `grid.sync()` waits. A GPU launches a kernel
+    /// so from Pascal's on, `sm_60`, which the kernel needs.
+    pub fn cooperative(&mut self) {
+        self.cooperative = true;
+        self.needs.push((Needs { ptx: 50, sm: 60, ..Needs::default() }, "#[cooperative]".into()));
     }
 
     /// The kernel as written.
@@ -1055,6 +1071,43 @@ impl Kernel {
         Ok(())
     }
 
+    /// `grid.sync()`, which waits until every thread of the grid has come to it: [`GRID_SYNC`],
+    /// in a kernel that every launch runs all at once.
+    fn grid_sync(&mut self, name: &str, args: &[Given<Var>], guard: Option<(VReg, bool)>) -> Result<(), Fault> {
+        if name != "grid.sync" {
+            return Err(Fault::new(format!("kgen's barrier for the grid is `grid.sync()`; not `{name}`")));
+        }
+        if !args.is_empty() {
+            return Err(Fault::new(format!("`{name}` takes {}, not {}", counts(&[(0, 0)]), args.len())));
+        }
+        if self.func.is_some() {
+            return Err(Fault::new(
+                "`grid.sync()` goes in a `#[cooperative]` kernel, or in a helper inlined there: a function the \
+                 kernels call may be called by a kernel that is not",
+            ));
+        }
+        if !self.cooperative {
+            return Err(Fault::new(format!(
+                "`grid.sync()` waits for every block of the grid, which runs all at once only if `{}` is \
+                 `#[cooperative]`",
+                self.name
+            )));
+        }
+        if guard.is_some() {
+            return Err(Fault::new(
+                "`grid.sync()` is for every thread of the grid, under no `if`: the grid waits for ever for one that \
+                 does not come to it",
+            ));
+        }
+        let lines: Vec<String> = GRID_SYNC
+            .iter()
+            .enumerate()
+            .map(|(i, line)| if i == 0 || line.starts_with('$') { line.to_string() } else { format!("\t{line}") })
+            .collect();
+        self.push(lines.join("\n"), vec![], None, Flow::Next);
+        Ok(())
+    }
+
     /// Notes that the kernel names the function of the symbol `f`.
     fn named_fn(&mut self, f: &str) {
         if !self.calls.iter().any(|c| c == f) {
@@ -1455,6 +1508,63 @@ fn counts(ranges: &[(usize, usize)]) -> String {
     }
 }
 
+/// What `grid.sync()` is in PTX: a block of its own, whose registers and labels are its own,
+/// in which thread 0 of each block of the grid adds to the grid's barrier once the block's
+/// threads are all there, and waits for the barrier's top bit to turn over. The first block
+/// adds 2^31 less one for each other block, and each other block 1, so the last to add turns
+/// it, and leaves the low bits as they were, for the next. As CUDA's `grid.sync()` does, it
+/// fences before it adds and after it waits, so that what the grid wrote before is seen
+/// after: `membar.gl` and a volatile load, as Pascal has them, which newer GPUs take too.
+///
+/// The barrier is the second word of the workspace that the driver gives a cooperative launch,
+/// at the address `%envreg1:%envreg2` give, high word first, as CUDA's cooperative groups read
+/// it. A launch that is not cooperative finds none there, null, and traps; but only until the
+/// context has had a cooperative one, whose workspace every launch finds after.
+const GRID_SYNC: &[&str] = &[
+    "{",
+    ".reg .pred %others, %wait;",
+    ".reg .b32 %t, %u, %add, %old;",
+    ".reg .b64 %barrier;",
+    "bar.sync 0;",
+    "mov.u32 %t, %tid.x;",
+    "mov.u32 %u, %tid.y;",
+    "or.b32 %t, %t, %u;",
+    "mov.u32 %u, %tid.z;",
+    "or.b32 %t, %t, %u;",
+    "setp.ne.u32 %others, %t, 0;",
+    "@%others bra $Lgrid_done;",
+    "mov.u32 %t, %envreg1;",
+    "mov.u32 %u, %envreg2;",
+    "mov.b64 %barrier, {%u, %t};",
+    "setp.eq.u64 %wait, %barrier, 0;",
+    "@%wait trap;",
+    "add.u64 %barrier, %barrier, 4;",
+    "mov.u32 %t, %nctaid.x;",
+    "mov.u32 %u, %nctaid.y;",
+    "mul.lo.u32 %t, %t, %u;",
+    "mov.u32 %u, %nctaid.z;",
+    "mul.lo.u32 %t, %t, %u;",
+    "sub.u32 %add, 2147483649, %t;",
+    "mov.u32 %t, %ctaid.x;",
+    "mov.u32 %u, %ctaid.y;",
+    "or.b32 %t, %t, %u;",
+    "mov.u32 %u, %ctaid.z;",
+    "or.b32 %t, %t, %u;",
+    "setp.eq.u32 %wait, %t, 0;",
+    "selp.b32 %add, %add, 1, %wait;",
+    "membar.gl;",
+    "atom.add.u32 %old, [%barrier], %add;",
+    "$Lgrid_wait:",
+    "ld.volatile.u32 %t, [%barrier];",
+    "xor.b32 %t, %t, %old;",
+    "setp.ge.s32 %wait, %t, 0;",
+    "@%wait bra $Lgrid_wait;",
+    "membar.gl;",
+    "$Lgrid_done:",
+    "bar.sync 0;",
+    "}",
+];
+
 /// Why a function takes no predicate.
 pub(crate) const NO_PRED: &str =
     "PTX passes no `pred` to a function, nor back: `selp.u32(x, 1, 0, p)` makes it a `u32`";
@@ -1673,6 +1783,9 @@ impl Target for Kernel {
         let op = name.split('.').next().unwrap_or_default();
         if op == "call" {
             return self.call(name, args, guard);
+        }
+        if op == "grid" {
+            return self.grid_sync(name, args, guard);
         }
         let bound = forms::find(name).map_err(Fault::new)?;
         match (op, self.func) {
