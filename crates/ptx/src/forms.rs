@@ -349,9 +349,10 @@ mov.b128 : =_b64*2, %T @8.3 @sm70
 mov.b128 : =_b32*4, %T @8.3 @sm70
 # `shfl` reads a lane in the low 5 bits of `b`, and a clamp and a mask of lanes in the bits
 # 0x1f1f of `c`; `prmt` its selector in the low 16 bits of `c`, or, with a mode, the low 2;
-# as the ISA has it: ptxas 13.4 takes more known now, and the GPU reads no more.
+# as the ISA has it: ptxas 13.4 takes more known now, and the GPU reads no more. As
+# `vote.sync`'s below, `shfl.sync`'s mask of lanes is never 0.
 shfl$shfl.b32 : =T[|=_pred], T, u32[0,31], u32&0x1f1f @3.0 @sm30 @<sm70/6.4
-shfl.sync$shfl.b32 : =T[|=_pred], T, u32[0,31], u32&0x1f1f, u32 @6.0 @sm30
+shfl.sync$shfl.b32 : =T[|=_pred], T, u32[0,31], u32&0x1f1f, u32[1,4294967295] @6.0 @sm30
 prmt.b32 : =T, T, T, T[0,65535] @2.0
 prmt.b32(.f4e|.b4e|.rc8|.ecl|.ecr|.rc16) : =T, T, T, T[0,3] @2.0
 ld{.weak@6.0@sm70}{.global}$cop$hint$size$vec$ty : =_T*v, [R], {L2::cache_hint}b64 @1.0 +wide +vec
@@ -531,7 +532,6 @@ bar$cta.red.popc.u32 : =T, u32[0,15], !pred @2.0
 bar$cta.red.popc.u32 : =T, u32[0,15], u32[0,1024]/32, !pred @2.0
 bar$cta.red(.and|.or).pred : =T, u32[0,15], !pred @2.0
 bar$cta.red(.and|.or).pred : =T, u32[0,15], u32[0,1024]/32, !pred @2.0
-bar.warp.sync : u32 @6.0 @sm30
 membar(.cta|.gl|.sys@2.0) @1.4
 membar.proxy.alias @7.5 @sm60
 fence{.sc|.acq_rel}$scope @6.0 @sm70
@@ -607,16 +607,18 @@ mbarrier.test_wait{.acquire.cta@8.0}{.shared|.shared::cta@7.8}.b64 : =pred, [R],
 mbarrier.test_wait.parity{.acquire.cta@8.0}{.shared|.shared::cta@7.8}.b64 : =pred, [R], u32[0,1] @7.1 @sm80
 mbarrier.pending_count.b64 : =u32, u64 @7.0 @sm80
 
-# The threads of a warp together.
+# The threads of a warp together. A mask of lanes holds the thread that runs the instruction,
+# or the ISA leaves it undefined, so it is never 0: ptxas 13.4 takes 0, and syncs no lane.
+bar.warp.sync : u32[1,4294967295] @6.0 @sm30
 vote(.all|.any|.uni).pred : =T, !pred @1.2 @<sm70/6.4
 vote.ballot.b32 : =T, !pred @2.0 @<sm70/6.4
-vote.sync(.all|.any|.uni).pred : =T, !pred, u32 @6.0 @sm30
-vote.sync.ballot.b32 : =T, !pred, u32 @6.0 @sm30
-match.any.sync(.b32|.b64) : =b32, T, u32 @6.0 @sm70
-match.all.sync(.b32|.b64) : =_b32[|=_pred], T, u32 @6.0 @sm70
+vote.sync(.all|.any|.uni).pred : =T, !pred, u32[1,4294967295] @6.0 @sm30
+vote.sync.ballot.b32 : =T, !pred, u32[1,4294967295] @6.0 @sm30
+match.any.sync(.b32|.b64) : =b32, T, u32[1,4294967295] @6.0 @sm70
+match.all.sync(.b32|.b64) : =_b32[|=_pred], T, u32[1,4294967295] @6.0 @sm70
 activemask.b32 : =T @6.2 @sm30
-redux.sync(.add|.min|.max)(.u32|.s32) : =T, T, u32 @7.0 @sm80
-redux.sync(.and|.or|.xor).b32 : =T, T, u32 @7.0 @sm80
+redux.sync(.add|.min|.max)(.u32|.s32) : =T, T, u32[1,4294967295] @7.0 @sm80
+redux.sync(.and|.or|.xor).b32 : =T, T, u32[1,4294967295] @7.0 @sm80
 
 # Matrices a warp loads and multiplies together, each thread holding a fragment of each: so
 # many registers, braced even when one. `mma` takes `_` for what it leaves unwritten, and

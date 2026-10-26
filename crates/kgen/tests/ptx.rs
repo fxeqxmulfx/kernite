@@ -510,6 +510,7 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         ("let d: u32; and.b32(d, !n, n);", "2:24: `and.b32` takes no operand inverted"),
         ("bar.sync(0, 1056);", "2:13: `bar.sync` takes 0 to 1024 here; 1056 is not one of them"),
         ("bar.arrive(0, 2048);", "2:15: `bar.arrive` takes 32 to 1024 here; 2048 is not one of them"),
+        ("bar.warp.sync(0);", "2:15: `bar.warp.sync` takes 1 to 4294967295 here; 0 is not one of them"),
         (
             "let q: b64; createpolicy.fractional.L2__evict_last.b64(q, 0.1);",
             "2:59: `createpolicy.fractional.L2::evict_last.b64` takes a fraction here, a multiple of 1/16, more than \
@@ -542,6 +543,14 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         (
             "let i: u32; shfl.sync.idx.b32(i, n, 0, -1, 0xffff_ffff);",
             "2:40: `shfl.sync.idx.b32` takes no bits here but those of 0x1f1f; 0xffffffff has others",
+        ),
+        (
+            "let i: u32; shfl.sync.idx.b32(i, n, 0, 0x1f, 0);",
+            "2:46: `shfl.sync.idx.b32` takes 1 to 4294967295 here; 0 is not one of them",
+        ),
+        (
+            "let (i, p): (u32, pred); vote.sync.ballot.b32(i, p, 0);",
+            "2:53: `vote.sync.ballot.b32` takes 1 to 4294967295 here; 0 is not one of them",
         ),
         (
             "let i: u32; prmt.b32(i, n, n, 0x1_0000);",
