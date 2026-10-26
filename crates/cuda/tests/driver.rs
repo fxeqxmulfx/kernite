@@ -444,3 +444,83 @@ fn memory_the_module_has_not_is_named() {
     assert_eq!(e.call, "cuModuleGetGlobal");
     assert!(e.message.starts_with("CUDA_ERROR_NOT_FOUND") && e.message.ends_with("for `nothing`"), "{e}");
 }
+
+/// Where the driver's workspace for the grid is, as `%envreg1:%envreg2` give its address, high
+/// word first, which thread 0 of each block writes to `at[block]`: a cooperative launch has
+/// one, whose second word is the grid's barrier. Another launch finds none, null, until the
+/// context has had a cooperative one, and then that one's.
+const WORKSPACE: &str = "
+.version 5.0
+.target sm_60
+.address_size 64
+
+.visible .entry workspace(.param .u64 at_param)
+{
+	.reg .pred %p;
+	.reg .u32 %hi, %lo, %t, %b;
+	.reg .u64 %at, %ws;
+
+	ld.param.u64 %at, [at_param];
+	cvta.to.global.u64 %at, %at;
+	mov.u32 %t, %tid.x;
+	setp.ne.u32 %p, %t, 0;
+	@%p bra done;
+	mov.u32 %hi, %envreg1;
+	mov.u32 %lo, %envreg2;
+	mov.b64 %ws, {%lo, %hi};
+	mov.u32 %b, %ctaid.x;
+	mad.wide.u32 %at, %b, 8, %at;
+	st.global.u64 [%at], %ws;
+done:
+	ret;
+}
+";
+
+#[test]
+fn a_cooperative_launch_has_a_workspace_for_the_grid() {
+    let Some(cuda) = cuda() else { return };
+    if !cuda.cooperative() {
+        eprintln!("{} launches no kernel cooperatively: skipped", cuda.name());
+        return;
+    }
+    let module = Module::load(&cuda, WORKSPACE, &["workspace"], &[]).unwrap();
+    let at = cuda.alloc::<u64>(3).unwrap();
+    // SAFETY: `workspace` takes a pointer, and writes a word of 8 bytes there for each block.
+    unsafe { module.launch_cooperative(0, Grid::new(3, 64), &[arg(&at.ptr())]) }.unwrap();
+    let ws = at.read().unwrap();
+    // An address on the GPU, which the barrier after its first word is aligned in.
+    assert!(ws[0] != 0 && ws[0].is_multiple_of(8) && ws.iter().all(|&w| w == ws[0]), "{ws:#x?}");
+}
+
+#[test]
+fn a_cooperative_launch_has_at_most_the_blocks_the_gpu_runs_at_once() {
+    let Some(cuda) = cuda() else { return };
+    if !cuda.cooperative() {
+        eprintln!("{} launches no kernel cooperatively: skipped", cuda.name());
+        return;
+    }
+    let module = Module::load(&cuda, WORKSPACE, &["workspace"], &[]).unwrap();
+    let most = module.resident(0, 256, 0).unwrap();
+    // Every SM holds a block of 256 threads, and none more than 2048 threads.
+    let sms = cuda.multiprocessors();
+    assert!((sms..=sms * 8).contains(&most), "{most} blocks on {sms} SMs");
+    // Fewer threads, more blocks, up to as many as an SM holds.
+    assert!(module.resident(0, 32, 0).unwrap() > most);
+    let mut at = cuda.alloc::<u64>(most as usize + 1).unwrap();
+    // SAFETY: `workspace` takes a pointer, and writes a word of 8 bytes there for each block.
+    unsafe { module.launch_cooperative(0, Grid::new(most, 256), &[arg(&at.ptr())]) }.unwrap();
+    cuda.sync().unwrap();
+    // SAFETY: as above.
+    let e = unsafe { module.launch_cooperative(0, Grid::new(most + 1, 256), &[arg(&at.ptr())]) }.unwrap_err();
+    assert_eq!(e.call, "cuLaunchCooperativeKernel");
+    assert!(e.message.starts_with("CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE (720): "), "{e}");
+    let tail = format!(": the grid has {} blocks, and the GPU runs {most} of these at once", most + 1);
+    assert!(e.message.ends_with(&tail), "{e}");
+    // The launch was refused, and the GPU goes on.
+    cuda.sync().unwrap();
+    at.zero().unwrap();
+    // SAFETY: as above.
+    unsafe { module.launch_cooperative(0, Grid::new(most, 256), &[arg(&at.ptr())]) }.unwrap();
+    let ws = at.read().unwrap();
+    assert!(ws[0] != 0 && ws[..most as usize].iter().all(|&w| w == ws[0]) && ws[most as usize] == 0, "{ws:#x?}");
+}

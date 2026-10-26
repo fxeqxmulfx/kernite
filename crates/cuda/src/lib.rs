@@ -19,6 +19,10 @@
 //! there, and the buffers and modules hold on to it, so none of them is `Send`. Kernels run
 //! in the order they are launched, and a copy to or from a buffer waits for those launched
 //! before it; [`Cuda::sync`] waits for all of them, and says whether one failed.
+//!
+//! A kernel whose blocks wait for each other is launched cooperatively,
+//! [`Module::launch_cooperative`]: every block of the grid runs at once, so there are at most
+//! [`Module::resident`] of them, and the driver gives the launch a barrier for the grid.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::fmt;
@@ -94,6 +98,10 @@ api! {
     launch = c"cuLaunchKernel"(
         Handle, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, Handle, *mut *mut c_void, *mut *mut c_void
     );
+    launch_cooperative = c"cuLaunchCooperativeKernel"(
+        Handle, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, Handle, *mut *mut c_void
+    );
+    occupancy = c"cuOccupancyMaxActiveBlocksPerMultiprocessor"(*mut c_int, Handle, c_int, usize);
     error_name = c"cuGetErrorName"(CuResult, *mut *const c_char);
     error_string = c"cuGetErrorString"(CuResult, *mut *const c_char);
 }
@@ -221,6 +229,8 @@ pub struct Cuda {
     name: String,
     sm: u32,
     max_shared: u32,
+    multiprocessors: u32,
+    cooperative: bool,
 }
 
 impl Cuda {
@@ -249,14 +259,22 @@ impl Cuda {
             api.check("cuDeviceGetName", (api.device_name)(name.as_mut_ptr().cast(), name.len() as c_int, device))?;
         }
         let name = CStr::from_bytes_until_nul(&name).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        // CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR and _MINOR, and
-        // CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN.
-        let [major, minor, shared] = [75, 76, 97].map(|a| {
+        // CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR and _MINOR,
+        // CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, _MULTIPROCESSOR_COUNT and
+        // _COOPERATIVE_LAUNCH.
+        let [major, minor, shared, multiprocessors, cooperative] = [75, 76, 97, 16, 95].map(|a| {
             let mut v = 0;
             // SAFETY: it writes the attribute's value to `v`.
             api.check("cuDeviceGetAttribute", unsafe { (api.attribute)(&mut v, a, device) }).map(|()| v as u32)
         });
-        Ok(Cuda { sm: major? * 10 + minor?, max_shared: shared?, driver, name })
+        Ok(Cuda {
+            sm: major? * 10 + minor?,
+            max_shared: shared?,
+            multiprocessors: multiprocessors?,
+            cooperative: cooperative? != 0,
+            driver,
+            name,
+        })
     }
 
     /// The GPU's name, as its driver gives it.
@@ -274,6 +292,18 @@ impl Cuda {
     /// the launch gives together: 48 KB on a GTX 10, 99 KB on an RTX 30.
     pub fn max_shared(&self) -> u32 {
         self.max_shared
+    }
+
+    /// How many multiprocessors, SMs, the GPU has: each runs as many blocks at once as its
+    /// registers, its shared memory and its threads hold.
+    pub fn multiprocessors(&self) -> u32 {
+        self.multiprocessors
+    }
+
+    /// Whether the GPU launches a kernel cooperatively, every block of the grid at once, as
+    /// one whose blocks wait for each other needs: a GPU from Pascal's, `sm_60`, on does.
+    pub fn cooperative(&self) -> bool {
+        self.cooperative
     }
 
     /// Waits for every kernel launched to finish, and says whether one failed.
@@ -476,6 +506,9 @@ pub struct Module {
     kernels: Vec<Handle>,
     /// Where each of its variables asked for is on the GPU, and how many bytes it has.
     globals: Vec<(u64, usize)>,
+    /// The GPU's, as [`Cuda`] has them.
+    multiprocessors: u32,
+    cooperative: bool,
 }
 
 impl Module {
@@ -500,7 +533,14 @@ impl Module {
             e.log = CStr::from_bytes_until_nul(&log).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             return Err(e);
         }
-        let mut m = Module { driver: cuda.driver.clone(), module, kernels: vec![], globals: vec![] };
+        let mut m = Module {
+            driver: cuda.driver.clone(),
+            module,
+            kernels: vec![],
+            globals: vec![],
+            multiprocessors: cuda.multiprocessors,
+            cooperative: cuda.cooperative,
+        };
         for name in names {
             let c =
                 CString::new(*name).map_err(|_| Error::new("cuModuleGetFunction", format!("{name:?} has a NUL")))?;
@@ -549,17 +589,73 @@ impl Module {
     pub unsafe fn launch(&self, index: usize, grid: Grid, args: &[*const c_void]) -> Result<(), Error> {
         let ([bx, by, bz], [tx, ty, tz]) = (grid.blocks, grid.threads);
         let (api, f, params) = (&self.driver.api, self.kernels[index], args.as_ptr().cast_mut().cast());
-        if grid.shared > SHARED {
-            // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, which the driver refuses past
-            // what the GPU has.
-            let bytes = c_int::try_from(grid.shared).unwrap_or(c_int::MAX);
-            // SAFETY: `f` is a kernel of the module, which is loaded.
-            api.check("cuFuncSetAttribute", unsafe { (api.set_attribute)(f, 8, bytes) })?;
-        }
+        self.let_have(f, grid.shared)?;
         // SAFETY: the caller's. The driver reads `args`, and through them, as it launches.
         let launched =
             unsafe { (api.launch)(f, bx, by, bz, tx, ty, tz, grid.shared, ptr::null_mut(), params, ptr::null_mut()) };
         api.check("cuLaunchKernel", launched)
+    }
+
+    /// Launches kernel `index` as [`launch`](Module::launch) does, but cooperatively: every
+    /// block of `grid` runs at once, so that each may wait for the others, and the driver gives
+    /// the launch a barrier for the grid, which a kernel's `grid.sync()` waits at. A grid of
+    /// more blocks than the GPU runs at once, [`resident`](Module::resident), is refused, as is
+    /// a GPU that launches none cooperatively, one before Pascal's.
+    ///
+    /// # Safety
+    ///
+    /// As for [`launch`](Module::launch).
+    pub unsafe fn launch_cooperative(&self, index: usize, grid: Grid, args: &[*const c_void]) -> Result<(), Error> {
+        if !self.cooperative {
+            let message = "the GPU launches no kernel cooperatively; one from Pascal's on, `sm_60`, does";
+            return Err(Error::new("cuLaunchCooperativeKernel", message.into()));
+        }
+        let ([bx, by, bz], [tx, ty, tz]) = (grid.blocks, grid.threads);
+        let (api, f, params) = (&self.driver.api, self.kernels[index], args.as_ptr().cast_mut().cast());
+        self.let_have(f, grid.shared)?;
+        // SAFETY: the caller's. The driver reads `args`, and through them, as it launches.
+        let launched =
+            unsafe { (api.launch_cooperative)(f, bx, by, bz, tx, ty, tz, grid.shared, ptr::null_mut(), params) };
+        api.check("cuLaunchCooperativeKernel", launched).map_err(|mut e| {
+            // CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE, which says no more.
+            let threads = u32::try_from(u64::from(tx) * u64::from(ty) * u64::from(tz)).unwrap_or(u32::MAX);
+            if launched == 720
+                && let Ok(most) = self.resident(index, threads, grid.shared)
+            {
+                let blocks = u64::from(bx) * u64::from(by) * u64::from(bz);
+                e.message += &format!(": the grid has {blocks} blocks, and the GPU runs {most} of these at once");
+            }
+            e
+        })
+    }
+
+    /// How many blocks of kernel `index` the GPU runs at once, of `threads` threads each and
+    /// `shared` bytes of the launch's shared memory: as many as one of its SMs holds, by the
+    /// registers, the shared memory and the threads each takes, times how many SMs it has. A
+    /// cooperative launch of the kernel has at most this many.
+    pub fn resident(&self, index: usize, threads: u32, shared: u32) -> Result<u32, Error> {
+        let (api, f) = (&self.driver.api, self.kernels[index]);
+        self.let_have(f, shared)?;
+        let (threads, mut blocks) = (c_int::try_from(threads).unwrap_or(c_int::MAX), 0);
+        // SAFETY: `f` is a kernel of the module, which is loaded; it writes the count to
+        // `blocks`.
+        let found = unsafe { (api.occupancy)(&mut blocks, f, threads, shared as usize) };
+        api.check("cuOccupancyMaxActiveBlocksPerMultiprocessor", found)?;
+        Ok(blocks as u32 * self.multiprocessors)
+    }
+
+    /// Lets kernel `f` have `shared` bytes of shared memory from a launch, if that is more than
+    /// 48 KB, which a GPU from Volta on can give.
+    fn let_have(&self, f: Handle, shared: u32) -> Result<(), Error> {
+        if shared <= SHARED {
+            return Ok(());
+        }
+        let api = &self.driver.api;
+        // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, which the driver refuses past what
+        // the GPU has.
+        let bytes = c_int::try_from(shared).unwrap_or(c_int::MAX);
+        // SAFETY: `f` is a kernel of the module, which is loaded.
+        api.check("cuFuncSetAttribute", unsafe { (api.set_attribute)(f, 8, bytes) })
     }
 }
 
