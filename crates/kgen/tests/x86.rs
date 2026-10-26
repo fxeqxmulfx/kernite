@@ -1,5 +1,9 @@
-//! Kernels in the language, compiled for x86: what they come to, and what the errors say; and
-//! what the builder refuses.
+//! Kernels in the language, compiled for x86: what they come to, and what the errors say; every
+//! form of every instruction kgen takes, which `llvm-mc` assembles; and what the builder refuses.
+
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::Mutex;
 
 use kgen_x86::Asm;
 
@@ -219,6 +223,9 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
             "let v: ymm; vpblendd(v, v, v, 256);",
             "2:31: `vpblendd` wants a control byte, 0 to 255; this is the integer 256",
         ),
+        ("let v: ymm; vbroadcastsd(v.xmm, [x]);", "2:28: `vbroadcastsd` wants a ymm; this is an xmm"),
+        ("let v: ymm; vpermps(v, v, v.xmm);", "2:29: `vpermps` wants a ymm or memory; this is an xmm"),
+        ("let v: ymm; vpermq(v, v.xmm, 1);", "2:25: `vpermq` wants a ymm or memory; this is an xmm"),
     ];
     for (body, want) in cases {
         assert_eq!(compile("x: *const f32", body).unwrap_err(), want, "{body}");
@@ -1444,4 +1451,117 @@ fn a_function_that_never_returns_is_checked() {
     for (src, want) in cases {
         assert_eq!(kgen::x86_str(src, "k").unwrap_err(), want, "{src}");
     }
+}
+
+/// `llvm-mc`, LLVM's assembler, which assembles a kernel's `naked_asm!` as rustc does:
+/// `$LLVM_MC`, or on the path.
+fn llvm_mc() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("LLVM_MC") {
+        return Some(p.into());
+    }
+    let here = Command::new("llvm-mc").arg("--version").output().is_ok_and(|o| o.status.success());
+    here.then(|| "llvm-mc".into())
+}
+
+/// What the language gives an x86 instruction in a place: a ymm, an xmm, a gpr, its r32,
+/// memory, and integers of 8, 32 and 64 bits.
+const OPERANDS: &[&str] = &["ymm", "xmm", "gpr", "r32", "[x]", "1", "100000", "0x123456789"];
+
+/// `name` called with an operand of each of `kinds`, each variable one of its own, written
+/// before and read after, by an instruction of another name: no two share a register, so that
+/// kgen leaves out no move of one to another, as it leaves out a move of a register to itself.
+fn called(name: &str, kinds: &[&str]) -> String {
+    let mut body = String::new();
+    let mut after = String::new();
+    let mut args = vec![];
+    for (i, &kind) in kinds.iter().enumerate() {
+        args.push(match kind {
+            "ymm" | "xmm" => {
+                body += &format!("let v{i}: ymm; zero(v{i});\n");
+                after += &format!("\n{}([x], v{i});", if name == "vmovups" { "vmovdqu" } else { "vmovups" });
+                if kind == "ymm" { format!("v{i}") } else { format!("v{i}.xmm") }
+            }
+            "gpr" | "r32" => {
+                body += &format!("let g{i}: gpr; zero(g{i});\n");
+                after += &format!("\n{}(g{i}, g{i});", if name == "test" { "cmp" } else { "test" });
+                if kind == "gpr" { format!("g{i}") } else { format!("g{i}.r32") }
+            }
+            given => given.to_string(),
+        });
+    }
+    format!("{body}{name}({});{after}", args.join(", "))
+}
+
+/// Every instruction the language names, given every operand in each of up to four places,
+/// takes what x86 has: `llvm-mc` assembles each line kgen writes, and encodes none with EVEX,
+/// which only AVX-512 reads. `llvm-mc` assembles AVX-512 for any machine, so the test refuses
+/// it itself.
+#[test]
+fn llvm_mc_takes_every_form_kgen_writes() {
+    let Some(mc) = llvm_mc() else {
+        eprintln!("no llvm-mc here: skipped; set LLVM_MC to run it");
+        return;
+    };
+    // The jumps take a label, and `ret`, `zero` and `ones` are kgen's own.
+    let names: Vec<_> =
+        kgen_x86::lang::mnemonics().filter(|n| !n.starts_with('j') && !["ret", "zero", "ones"].contains(n)).collect();
+    let mut tuples: Vec<Vec<&str>> = vec![vec![]];
+    let mut every = tuples.clone();
+    for _ in 0..4 {
+        tuples = tuples.iter().flat_map(|t| OPERANDS.iter().map(move |o| [t.as_slice(), &[*o]].concat())).collect();
+        every.extend(tuples.iter().cloned());
+    }
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let written = Mutex::new(vec![]);
+    std::thread::scope(|s| {
+        for chunk in names.chunks(names.len().div_ceil(threads)) {
+            let (every, written) = (&every, &written);
+            s.spawn(move || {
+                for name in chunk {
+                    for kinds in every {
+                        let call = called(name, kinds);
+                        let Ok(code) = compile("x: *mut f32", &call) else { continue };
+                        let line = code.lines().rfind(|l| l.split(' ').next() == Some(*name));
+                        let line = line.unwrap_or_else(|| panic!("no `{name}` in\n{code}"));
+                        written.lock().unwrap().push((name.to_string(), call, line.to_string()));
+                    }
+                }
+            });
+        }
+    });
+    let mut written = written.into_inner().unwrap();
+    written.sort();
+    for name in &names {
+        assert!(written.iter().any(|(n, ..)| n == name), "`{name}` took none of the operands tried");
+    }
+
+    let src = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("x86-forms.s");
+    let lines: String = written.iter().map(|(.., line)| format!("{line}\n")).collect();
+    std::fs::write(&src, format!(".intel_syntax noprefix\n{lines}")).unwrap();
+    let run = Command::new(&mc)
+        .args(["-triple=x86_64", "-x86-asm-syntax=intel", "-show-encoding"])
+        .arg(&src)
+        .output()
+        .unwrap();
+    // `path:line:column: error: why`, the file's first line being the directive.
+    let refused: Vec<String> = String::from_utf8_lossy(&run.stderr)
+        .lines()
+        .filter_map(|e| {
+            let (at, why) = e.split_once(": error: ")?;
+            let line: usize = at.rsplit(':').nth(1)?.parse().ok()?;
+            let (_, call, written) = &written[line - 2];
+            Some(format!("{written}: {why}, from\n{call}"))
+        })
+        .collect();
+    assert!(
+        refused.is_empty() && run.status.success(),
+        "llvm-mc refuses what kgen writes:\n\n{}",
+        refused.join("\n\n")
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let encodings: Vec<&str> = stdout.lines().filter_map(|l| l.split_once("encoding: [").map(|(_, e)| e)).collect();
+    assert_eq!(encodings.len(), written.len());
+    let evex: Vec<_> =
+        written.iter().zip(&encodings).filter(|(_, e)| e.starts_with("0x62")).map(|((.., line), _)| line).collect();
+    assert!(evex.is_empty(), "kgen writes AVX-512's EVEX: {evex:#?}");
 }

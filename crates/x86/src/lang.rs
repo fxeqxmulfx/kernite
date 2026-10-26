@@ -180,6 +180,8 @@ enum Kind {
     Mv,
     /// A vector, whole.
     Y,
+    /// That, or memory of 256 bits.
+    Ym,
     /// A vector's low 128 bits.
     X,
     /// That, or memory of this width.
@@ -205,7 +207,7 @@ enum Kind {
     Lanes,
 }
 
-use Kind::{C, G, I, Lanes, M, Mv, N, Q, V, Vm, X, Xm, Y};
+use Kind::{C, G, I, Lanes, M, Mv, N, Q, V, Vm, X, Xm, Y, Ym};
 
 type Form = &'static [(Kind, Access)];
 
@@ -292,8 +294,12 @@ const GROUPS: &[Group] = &[
     Group { ops: &[("vpbroadcastb", Op::Vpbroadcastb)], forms: &[&[(V, Write), (M(W8), Read)]] },
     Group { ops: &[("vpbroadcastw", Op::Vpbroadcastw)], forms: &[&[(V, Write), (M(W16), Read)]] },
     Group {
-        ops: &[("vpbroadcastq", Op::Vpbroadcastq), ("vbroadcastsd", Op::Vbroadcastsd)],
+        ops: &[("vpbroadcastq", Op::Vpbroadcastq)],
         forms: &[&[(V, Write), (M(W64), Read)], &[(V, Write), (X, Read)]],
+    },
+    Group {
+        ops: &[("vbroadcastsd", Op::Vbroadcastsd)],
+        forms: &[&[(Y, Write), (M(W64), Read)], &[(Y, Write), (X, Read)]],
     },
     Group { ops: &[("vbroadcastf128", Op::Vbroadcastf128)], forms: &[&[(Y, Write), (M(W128), Read)]] },
     Group {
@@ -341,8 +347,8 @@ const GROUPS: &[Group] = &[
         ops: &[("vinsertf128", Op::Vinsertf128), ("vinserti128", Op::Vinserti128)],
         forms: &[&[(Y, Write), (Y, Read), (Xm(W128), Read), (N(1), Read)]],
     },
-    Group { ops: &[("vpermps", Op::Vpermps)], forms: &[&[(Y, Write), (Y, Read), (Vm, Read)]] },
-    Group { ops: &[("vpermq", Op::Vpermq)], forms: &[&[(Y, Write), (Vm, Read), (C(8), Read)]] },
+    Group { ops: &[("vpermps", Op::Vpermps)], forms: &[&[(Y, Write), (Y, Read), (Ym, Read)]] },
+    Group { ops: &[("vpermq", Op::Vpermq)], forms: &[&[(Y, Write), (Ym, Read), (C(8), Read)]] },
     Group { ops: &[("vmovhlps", Op::Vmovhlps)], forms: &[&[(X, Write), (X, Read), (X, Read)]] },
     Group { ops: &[("vmovhps", Op::Vmovhps)], forms: &[&[(X, Write), (X, Read), (M(W64), Read)]] },
     Group { ops: &[("vcvtph2ps", Op::Vcvtph2ps)], forms: &[&[(Y, Write), (Xm(W128), Read)]] },
@@ -1289,6 +1295,8 @@ impl Kernel {
                 Vm if memory => {}
                 Vm => vector(width.map(view_of))?,
                 Y => vector(Some(View::Ymm))?,
+                Ym if memory => {}
+                Ym => vector(Some(View::Ymm))?,
                 X => vector(Some(View::Xmm))?,
                 Xm(_) if memory => {}
                 Xm(_) => vector(Some(View::Xmm))?,
@@ -1322,6 +1330,7 @@ impl Kernel {
                 Given::Mem(_) | Given::Data(_) | Given::Code(_) => {
                     let w = match kind {
                         Xm(w) | M(w) => w,
+                        Ym => W256,
                         _ => width.expect("a form with vector memory has a vector"),
                     };
                     Operand::Mem(self.memory(a, w, access, name).map_err(|m| Fault::at(i, m))?)
@@ -1596,6 +1605,7 @@ fn describe(kind: Kind, width: Option<Width>) -> String {
         Vm => format!("{vector} or memory"),
         Mv => "memory".into(),
         Y => "a ymm".into(),
+        Ym => "a ymm or memory".into(),
         X => "an xmm".into(),
         Xm(w) => format!("an xmm or {} bytes of memory", w.bytes()),
         M(w) => format!("{} bytes of memory", w.bytes()),
