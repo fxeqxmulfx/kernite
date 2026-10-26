@@ -1,4 +1,5 @@
 # embed_bwd(gpr, gpr, gpr, gpr) -> ()
+# needs: avx
 # frame: 0 bytes aligned to 0, saves []
 # g=rdi dx0=rsi tokens=rdx n=rcx at=rax tok=r8
 # d=ymm0 s=ymm1

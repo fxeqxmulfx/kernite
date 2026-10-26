@@ -1,22 +1,40 @@
+use std::borrow::Cow;
+
+/// An instruction, by the name the language calls it: x86's mnemonic, `lock.` before it for the
+/// lock prefix, as in `lock.xadd`. [`crate::forms`] has the forms of each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Op(pub(crate) &'static str);
+
+impl Op {
+    /// The name the language calls it: `vaddps`, `lock.xadd`.
+    pub fn name(self) -> &'static str {
+        self.0
+    }
+
+    /// The name the assembler knows it by, its prefix and all: `vaddps`, `lock xadd`.
+    pub fn mnemonic(self) -> Cow<'static, str> {
+        match self.0.strip_prefix("lock.") {
+            Some(op) => format!("lock {op}").into(),
+            None => self.0.into(),
+        }
+    }
+}
+
 macro_rules! ops {
     ($($name:ident = $text:literal,)*) => {
-        /// The instructions kernels use, by mnemonic.
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub enum Op {
+        /// The instructions kgen writes of its own: the builder's, and those around a kernel's
+        /// body.
+        #[allow(non_upper_case_globals)]
+        impl Op {
             $(
                 #[doc = concat!("`", $text, "`")]
-                $name,
+                pub const $name: Op = Op($text);
             )*
         }
 
-        impl Op {
-            /// The name the assembler knows it by.
-            pub fn mnemonic(self) -> &'static str {
-                match self {
-                    $(Op::$name => $text,)*
-                }
-            }
-        }
+        /// Every instruction kgen writes of its own.
+        #[cfg(test)]
+        const OWN: &[Op] = &[$(Op::$name),*];
     };
 }
 
@@ -26,26 +44,14 @@ ops! {
     Call = "call",
     Cmp = "cmp",
     Dec = "dec",
-    Imul = "imul",
     Inc = "inc",
-    Ja = "ja",
-    Jae = "jae",
-    Jb = "jb",
-    Jbe = "jbe",
-    Jg = "jg",
-    Jge = "jge",
-    Jl = "jl",
-    Jle = "jle",
     Jmp = "jmp",
-    Jns = "jns",
     Jnz = "jnz",
-    Js = "js",
     Jz = "jz",
     Lea = "lea",
-    LockXadd = "lock xadd",
+    LockXadd = "lock.xadd",
     Mov = "mov",
     Movzx = "movzx",
-    Neg = "neg",
     Or = "or",
     Pause = "pause",
     Prefetchnta = "prefetchnta",
@@ -53,7 +59,6 @@ ops! {
     Prefetcht1 = "prefetcht1",
     Prefetcht2 = "prefetcht2",
     Ret = "ret",
-    Sar = "sar",
     Sub = "sub",
     Shl = "shl",
     Shr = "shr",
@@ -62,37 +67,19 @@ ops! {
     Xor = "xor",
     Vaddps = "vaddps",
     Vaddss = "vaddss",
-    Vandnps = "vandnps",
-    Vandps = "vandps",
-    Vblendvps = "vblendvps",
     Vbroadcastf128 = "vbroadcastf128",
     Vbroadcastsd = "vbroadcastsd",
     Vbroadcastss = "vbroadcastss",
-    Vcmpps = "vcmpps",
-    Vcomiss = "vcomiss",
     Vcvtdq2ps = "vcvtdq2ps",
     Vcvtph2ps = "vcvtph2ps",
-    Vcvtps2dq = "vcvtps2dq",
-    Vcvttps2dq = "vcvttps2dq",
-    Vdivps = "vdivps",
-    Vdivss = "vdivss",
     Vextractf128 = "vextractf128",
-    Vfmadd213ps = "vfmadd213ps",
-    Vfmadd213ss = "vfmadd213ss",
     Vfmadd231ps = "vfmadd231ps",
-    Vfmadd231ss = "vfmadd231ss",
-    Vfnmadd231ps = "vfnmadd231ps",
-    Vfnmadd231ss = "vfnmadd231ss",
-    Vinsertf128 = "vinsertf128",
     Vinserti128 = "vinserti128",
-    Vmaxps = "vmaxps",
-    Vmaxss = "vmaxss",
-    Vminps = "vminps",
-    Vminss = "vminss",
-    Vmovaps = "vmovaps",
+    Vldmxcsr = "vldmxcsr",
     Vmovd = "vmovd",
     Vmovdqa = "vmovdqa",
     Vmovdqu = "vmovdqu",
+    Vmovaps = "vmovaps",
     Vmovhlps = "vmovhlps",
     Vmovhps = "vmovhps",
     Vmovq = "vmovq",
@@ -101,51 +88,55 @@ ops! {
     Vmovss = "vmovss",
     Vmovups = "vmovups",
     Vmulps = "vmulps",
-    Vmulss = "vmulss",
-    Vorps = "vorps",
     Vpaddb = "vpaddb",
     Vpaddd = "vpaddd",
     Vpaddw = "vpaddw",
     Vpabsb = "vpabsb",
     Vpand = "vpand",
     Vpblendd = "vpblendd",
-    Vpbroadcastd = "vpbroadcastd",
     Vpbroadcastb = "vpbroadcastb",
+    Vpbroadcastd = "vpbroadcastd",
     Vpbroadcastq = "vpbroadcastq",
     Vpbroadcastw = "vpbroadcastw",
     Vpcmpeqb = "vpcmpeqb",
     Vpcmpeqd = "vpcmpeqd",
-    Vpcmpgtd = "vpcmpgtd",
     Vpermps = "vpermps",
     Vpermq = "vpermq",
     Vpgatherdd = "vpgatherdd",
     Vpgatherdq = "vpgatherdq",
     Vpmaddubsw = "vpmaddubsw",
     Vpmaddwd = "vpmaddwd",
-    Vpmovzxbd = "vpmovzxbd",
     Vpmovsxbd = "vpmovsxbd",
+    Vpmovzxbd = "vpmovzxbd",
     Vpmovzxwd = "vpmovzxwd",
-    Vpmulld = "vpmulld",
     Vpor = "vpor",
     Vpshufb = "vpshufb",
-    Vpunpckldq = "vpunpckldq",
     Vpsignb = "vpsignb",
     Vpslld = "vpslld",
     Vpsllvd = "vpsllvd",
     Vpsllw = "vpsllw",
-    Vpsrad = "vpsrad",
     Vpsrld = "vpsrld",
     Vpsrlvd = "vpsrlvd",
     Vpsrlw = "vpsrlw",
-    Vpsubd = "vpsubd",
+    Vpunpckldq = "vpunpckldq",
     Vpxor = "vpxor",
-    Vroundps = "vroundps",
-    Vroundss = "vroundss",
     Vshufps = "vshufps",
-    Vsqrtps = "vsqrtps",
-    Vsqrtss = "vsqrtss",
-    Vsubps = "vsubps",
-    Vsubss = "vsubss",
-    Vucomiss = "vucomiss",
+    Vstmxcsr = "vstmxcsr",
     Vxorps = "vxorps",
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::forms;
+
+    /// What kgen writes of its own, x86 has, but `ret`, which a kernel's epilogue writes, and
+    /// `call`, which the language writes as kgen's calls are.
+    #[test]
+    fn x86_has_every_instruction_kgen_writes_of_its_own() {
+        for op in OWN.iter().filter(|&&op| op != Op::Ret && op != Op::Call) {
+            assert!(forms::of(op.name()).is_some(), "`{}`", op.name());
+        }
+        assert_eq!(Op::LockXadd.mnemonic(), "lock xadd");
+    }
 }

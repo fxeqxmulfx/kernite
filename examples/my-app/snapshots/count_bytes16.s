@@ -1,4 +1,5 @@
 # count_bytes::<16>(gpr, gpr, gpr) -> ()
+# needs: avx, avx2
 # frame: 16384 bytes aligned to 32, saves []
 # tables: 16384 bytes at rsp
 # bytes=rdi n=rsi counts=rdx z=ymm0 i=rax b=rax

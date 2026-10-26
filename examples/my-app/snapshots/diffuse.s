@@ -1,4 +1,5 @@
 # diffuse(gpr, gpr, gpr, gpr, gpr) -> ()
+# needs: avx
 # frame: 0 bytes aligned to 0, saves [rbx]
 # x=rdi y=rsi n=rdx steps=rcx from=rax to=rsi
 # c=r9 i=r10 end=r11 j=rbx quarter=ymm0 grid=r8

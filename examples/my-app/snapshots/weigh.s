@@ -1,4 +1,5 @@
 # weigh(gpr, gpr) -> ()
+# needs: avx
 # frame: 0 bytes aligned to 0, saves []
 # x=rdi n=rsi w=ymm0 v=ymm1 weights=rax i=rcx
     vbroadcastf128 ymm0, xmmword ptr [rip + {WEIGHTS}]

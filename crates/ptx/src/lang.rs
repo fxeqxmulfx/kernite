@@ -1313,6 +1313,7 @@ impl Kernel {
             Given::Bf16(x) => format!("the bf16 {}", kgen_lang::Value::Bf16(*x)),
             Given::Mem(_) => "an address".into(),
             Given::Data(_) => "memory holding data".into(),
+            Given::Sized(word, _) => format!("`{word}[..]`"),
             Given::Label(_) => "a label".into(),
             Given::Func(f) => format!("the function `{f}`"),
             Given::Code(f) => {
@@ -1809,6 +1810,13 @@ impl Target for Kernel {
                 return Err(Fault::new(format!("an instruction is guarded by a `pred`; this is {what}")));
             }
         };
+        // A word before brackets names x86's memory's size; to PTX it is a name like any other.
+        if let Some((i, word)) = args.iter().enumerate().find_map(|(i, a)| match a {
+            Given::Sized(word, _) => Some((i, word)),
+            _ => None,
+        }) {
+            return Err(Fault::at(i, format!("`{word}` is not defined")));
+        }
         let op = name.split('.').next().unwrap_or_default();
         if op == "call" {
             return self.call(name, args, guard);

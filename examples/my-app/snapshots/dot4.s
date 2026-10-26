@@ -1,4 +1,5 @@
 # dot::<4>(gpr, gpr, gpr) -> vec
+# needs: avx, fma
 # frame: 0 bytes aligned to 0, saves []
 # x=rdi y=rsi n=rdx acc0=ymm0 acc1=ymm1 acc2=ymm2
 # acc3=ymm3 xs=ymm4 sum=ymm0 high=ymm1 pair=ymm1 zero=ymm0

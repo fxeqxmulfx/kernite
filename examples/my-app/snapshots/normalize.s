@@ -1,4 +1,5 @@
 # normalize(gpr, gpr, gpr, gpr) -> ()
+# needs: avx, avx2
 # frame: 4096 bytes aligned to 32, saves []
 # tail: 4096 bytes at rsp
 # x=rdi sums=rsi n=rdx whole=rax rest=r8 c=r9

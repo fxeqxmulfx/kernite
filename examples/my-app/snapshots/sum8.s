@@ -1,4 +1,5 @@
 # sum8(gpr) -> vec
+# needs: avx
 # frame: 0 bytes aligned to 0, saves []
 # xs=rdi v=ymm0 sum=ymm0 high=ymm1 pair=ymm1
     vmovups ymm0, ymmword ptr [rdi]

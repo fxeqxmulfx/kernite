@@ -1,19 +1,40 @@
 //! x86-64 as the language writes it: [`Kernel`] is the [`Target`] that checks each call
-//! against the forms x86 has for its instruction, and builds the program the builder would.
+//! against the forms x86 has for its instruction, which [`forms`] holds, and builds the program
+//! the builder would.
 //!
-//! The types are `gpr`, `ymm` and `xmm`, and the views `v.ymm`, `v.xmm`, `g.r32`, whose
-//! writes clear the rest of the register as the machine's do. A kernel's parameters arrive
-//! as SysV passes them: pointers and 64-bit integers in general registers, `f32` and `f64`
-//! in vector ones, counted apart. It hands back a float in `xmm0` or an integer in `rax` with
-//! `ret(v)`, or nothing with `ret()`, which the end of the body adds if control reaches it.
-//! Besides the instructions, `zero(v)` and `ones(v)` set a variable without reading it.
+//! The types are `gpr`, `ymm` and `xmm`, and the views `v.ymm`, `v.xmm`, `g.r32`, `g.r16` and
+//! `g.r8`. A write to a vector's `xmm` or to a gpr's `r32` clears the rest of the register, as
+//! the machine's do; one to a gpr's `r16` or `r8` keeps the rest, so it reads it, and something
+//! must have written it before. A kernel's parameters arrive as SysV passes them: pointers and
+//! 64-bit integers in general registers, `f32` and `f64` in vector ones, counted apart. It hands
+//! back a float in `xmm0` or an integer in `rax` with `ret(v)`, or nothing with `ret()`, which
+//! the end of the body adds if control reaches it. Besides the instructions, `zero(v)` and
+//! `ones(v)` set a variable without reading it.
+//!
+//! An instruction is called by the name the assembler knows it by, `vaddps(v, v, w)`, SSE's as
+//! AVX writes them, and `lock.` before it is the lock prefix: `lock.xadd([p], g)`. [`forms`]
+//! says which instructions kgen knows. One takes the operands of each form
+//! `llvm-mc` takes it in, but those of registers of its own, as `shl` by `cl` and `mul` into
+//! `rdx:rax`, which come later. Memory is as big as the instruction's other operands make it, as
+//! `vmovups(v, [p])` loads the 32 bytes of a ymm; where they leave that open, Intel's word before
+//! the brackets says how much: `movzx(g.r32, byte[p])`, `add(dword[p], 1)`, with `byte`, `word`,
+//! `dword`, `qword`, `xmmword` or `ymmword`. Memory holding data known now, `[[1u16; 4]]`, is as
+//! big as its data there. A gather reads memory at a vector of indices, as in
+//! `vpgatherdd(v, [p + i * 4], mask)`, and faults unless its result, its indices and its mask are
+//! three registers.
+//!
+//! A form needs the CPU features it is of past x86-64's own: AVX for every vector instruction,
+//! AVX2 for integers in a ymm, and FMA, F16C, BMI1, BMI2, LZCNT, POPCNT, MOVBE and SSE4.2's
+//! `crc32` for theirs. A kernel's listing names what it needs, which kgen does not check for when
+//! it runs. A kernel that loads MXCSR, the control of floats, with `vldmxcsr`, stores the
+//! caller's as it starts and loads it back before it returns, as SysV asks.
 //!
 //! Stack memory is declared as PTX's local memory is: `let buf: local<[f32; 64], 32>;` is 256
 //! bytes of the kernel's frame at a multiple of 32, and `local<u64>` one `u64`, at a multiple of
 //! its 8 bytes. Brackets name what it holds, `vmovaps(v, [buf + 32])`, `vmovss(x, [buf + i * 4])`,
 //! and `lea(p, [buf])` takes its address. Until written, it holds whatever was there before.
 //! kgen checks an address in it where the index is 0: what it reaches lies inside, the address
-//! reaching as far as one past the end for `lea`; and for `vmovaps` and `vmovdqa`, which fault
+//! reaching as far as one past the end for `lea`; and for `vmovaps` and the rest that fault
 //! elsewhere, it is a multiple of the bytes they move. The index is the kernel's to keep inside,
 //! and at such a multiple.
 //!
@@ -58,7 +79,7 @@
 //! in a call of one that never returns.
 
 use kgen_core::Access::{self, Ignored, Read, ReadWrite, Write};
-use kgen_core::Width::{self, W8, W16, W32, W64, W128, W256};
+use kgen_core::Width::{self, W32, W64, W128, W256};
 use kgen_core::{
     Arg, Base, Class, Const, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo, Signature,
     Slot, SlotId, Spill, StaticId, VReg,
@@ -66,8 +87,12 @@ use kgen_core::{
 use kgen_lang::{Fault, Guard, Operand as Given, Target, Value};
 
 use crate::bytes;
+use crate::forms::{self, Form, Kind, Miss, Shape};
 use crate::op::Op;
 use crate::sysv::{CALL_CLOBBERS, FLOAT_PARAMS, FLOAT_RESULT, INT_PARAMS, INT_RESULT, PAGE, SysV};
+
+/// The operands of an instruction.
+type Args = Vec<Arg<VReg>>;
 
 /// The most bytes of stack memory a kernel has: as far past the stack pointer as an address
 /// reaches, whose displacement is 32 bits, signed.
@@ -127,6 +152,11 @@ impl Var {
             Place::Stack(_) | Place::Static(_) => None,
         }
     }
+
+    /// Whether it is a vector, as memory's vector of indices is.
+    fn vector(self) -> bool {
+        self.reg().is_some_and(|(reg, _)| reg.class == Class::Vec)
+    }
 }
 
 /// The register and the view of an operand that is a variable, unless it is memory.
@@ -143,6 +173,10 @@ enum View {
     R64,
     /// Its low 32 bits.
     R32,
+    /// Its low 16 bits.
+    R16,
+    /// Its low 8 bits.
+    R8,
     /// A vector register, whole.
     Ymm,
     /// Its low 128 bits.
@@ -154,6 +188,8 @@ impl View {
         match self {
             View::R64 => W64,
             View::R32 => W32,
+            View::R16 => Width::W16,
+            View::R8 => Width::W8,
             View::Ymm => W256,
             View::Xmm => W128,
         }
@@ -163,272 +199,18 @@ impl View {
         match self {
             View::R64 => "a gpr",
             View::R32 => "a gpr's r32",
+            View::R16 => "a gpr's r16",
+            View::R8 => "a gpr's r8",
             View::Ymm => "a ymm",
             View::Xmm => "an xmm",
         }
     }
 }
 
-/// What an operand of a form may be.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
-    /// A vector as wide as the form's: ymm or xmm, as the first of them says.
-    V,
-    /// That, or memory as wide.
-    Vm,
-    /// Memory as wide as the form's vectors.
-    Mv,
-    /// A vector, whole.
-    Y,
-    /// That, or memory of 256 bits.
-    Ym,
-    /// A vector's low 128 bits.
-    X,
-    /// That, or memory of this width.
-    Xm(Width),
-    /// Memory of this width.
-    M(Width),
-    /// A general register at this width.
-    G(Width),
-    /// An integer of 32 signed bits.
-    I,
-    /// Any integer of 64 bits.
-    Q,
-    /// An integer of so many bits, unsigned, which are all x86 reads of it: a gpr is shifted by
-    /// the low 6 bits of a count, a vector's lanes by a byte, which empties them past their
-    /// bits, and the half of a ymm is bit 0.
-    N(u32),
-    /// A control byte, of so many bits as x86 reads, which a listing shows in hex: `vcmpps`
-    /// reads its predicate in the low 5, and `vroundps` and `vroundss` the rounding in the low
-    /// 4.
-    C(u32),
-    /// A control byte of a bit for each 32-bit lane of the form's vectors, which a listing shows
-    /// in hex: 8 of a ymm, and 4 of an xmm, as `vpblendd` reads no more.
-    Lanes,
-}
-
-use Kind::{C, G, I, Lanes, M, Mv, N, Q, V, Vm, X, Xm, Y, Ym};
-
-type Form = &'static [(Kind, Access)];
-
-/// Instructions that take the same forms.
-struct Group {
-    ops: &'static [(&'static str, Op)],
-    forms: &'static [Form],
-}
-
-/// Every instruction the language calls by name, but the jumps and `ret`.
-const GROUPS: &[Group] = &[
-    Group {
-        ops: &[
-            ("vaddps", Op::Vaddps),
-            ("vsubps", Op::Vsubps),
-            ("vmulps", Op::Vmulps),
-            ("vdivps", Op::Vdivps),
-            ("vmaxps", Op::Vmaxps),
-            ("vminps", Op::Vminps),
-            ("vandps", Op::Vandps),
-            ("vandnps", Op::Vandnps),
-            ("vorps", Op::Vorps),
-            ("vxorps", Op::Vxorps),
-            ("vpaddb", Op::Vpaddb),
-            ("vpaddw", Op::Vpaddw),
-            ("vpaddd", Op::Vpaddd),
-            ("vpsubd", Op::Vpsubd),
-            ("vpmulld", Op::Vpmulld),
-            ("vpand", Op::Vpand),
-            ("vpor", Op::Vpor),
-            ("vpxor", Op::Vpxor),
-            ("vpcmpeqb", Op::Vpcmpeqb),
-            ("vpcmpeqd", Op::Vpcmpeqd),
-            ("vpcmpgtd", Op::Vpcmpgtd),
-            ("vpshufb", Op::Vpshufb),
-            ("vpsignb", Op::Vpsignb),
-            ("vpmaddubsw", Op::Vpmaddubsw),
-            ("vpmaddwd", Op::Vpmaddwd),
-            ("vpunpckldq", Op::Vpunpckldq),
-            ("vpsllvd", Op::Vpsllvd),
-            ("vpsrlvd", Op::Vpsrlvd),
-        ],
-        forms: &[&[(V, Write), (V, Read), (Vm, Read)]],
-    },
-    Group {
-        ops: &[("vfmadd231ps", Op::Vfmadd231ps), ("vfnmadd231ps", Op::Vfnmadd231ps), ("vfmadd213ps", Op::Vfmadd213ps)],
-        forms: &[&[(V, ReadWrite), (V, Read), (Vm, Read)]],
-    },
-    Group {
-        ops: &[
-            ("vsqrtps", Op::Vsqrtps),
-            ("vcvtdq2ps", Op::Vcvtdq2ps),
-            ("vcvtps2dq", Op::Vcvtps2dq),
-            ("vcvttps2dq", Op::Vcvttps2dq),
-            ("vmovshdup", Op::Vmovshdup),
-            ("vmovsldup", Op::Vmovsldup),
-            ("vpabsb", Op::Vpabsb),
-        ],
-        forms: &[&[(V, Write), (Vm, Read)]],
-    },
-    Group { ops: &[("vcmpps", Op::Vcmpps)], forms: &[&[(V, Write), (V, Read), (Vm, Read), (C(5), Read)]] },
-    Group { ops: &[("vshufps", Op::Vshufps)], forms: &[&[(V, Write), (V, Read), (Vm, Read), (C(8), Read)]] },
-    Group { ops: &[("vpblendd", Op::Vpblendd)], forms: &[&[(V, Write), (V, Read), (Vm, Read), (Lanes, Read)]] },
-    Group { ops: &[("vroundps", Op::Vroundps)], forms: &[&[(V, Write), (Vm, Read), (C(4), Read)]] },
-    Group { ops: &[("vblendvps", Op::Vblendvps)], forms: &[&[(V, Write), (V, Read), (Vm, Read), (V, Read)]] },
-    Group {
-        ops: &[
-            ("vpslld", Op::Vpslld),
-            ("vpsrld", Op::Vpsrld),
-            ("vpsrad", Op::Vpsrad),
-            ("vpsllw", Op::Vpsllw),
-            ("vpsrlw", Op::Vpsrlw),
-        ],
-        forms: &[&[(V, Write), (V, Read), (N(8), Read)]],
-    },
-    Group {
-        ops: &[("vmovups", Op::Vmovups), ("vmovaps", Op::Vmovaps), ("vmovdqu", Op::Vmovdqu), ("vmovdqa", Op::Vmovdqa)],
-        forms: &[&[(V, Write), (Mv, Read)], &[(Mv, Write), (V, Read)], &[(V, Write), (V, Read)]],
-    },
-    Group {
-        ops: &[("vbroadcastss", Op::Vbroadcastss), ("vpbroadcastd", Op::Vpbroadcastd)],
-        forms: &[&[(V, Write), (M(W32), Read)], &[(V, Write), (X, Read)]],
-    },
-    Group { ops: &[("vpbroadcastb", Op::Vpbroadcastb)], forms: &[&[(V, Write), (M(W8), Read)]] },
-    Group { ops: &[("vpbroadcastw", Op::Vpbroadcastw)], forms: &[&[(V, Write), (M(W16), Read)]] },
-    Group {
-        ops: &[("vpbroadcastq", Op::Vpbroadcastq)],
-        forms: &[&[(V, Write), (M(W64), Read)], &[(V, Write), (X, Read)]],
-    },
-    Group {
-        ops: &[("vbroadcastsd", Op::Vbroadcastsd)],
-        forms: &[&[(Y, Write), (M(W64), Read)], &[(Y, Write), (X, Read)]],
-    },
-    Group { ops: &[("vbroadcastf128", Op::Vbroadcastf128)], forms: &[&[(Y, Write), (M(W128), Read)]] },
-    Group {
-        ops: &[
-            ("vaddss", Op::Vaddss),
-            ("vsubss", Op::Vsubss),
-            ("vmulss", Op::Vmulss),
-            ("vdivss", Op::Vdivss),
-            ("vmaxss", Op::Vmaxss),
-            ("vminss", Op::Vminss),
-            ("vsqrtss", Op::Vsqrtss),
-        ],
-        forms: &[&[(X, Write), (X, Read), (Xm(W32), Read)]],
-    },
-    Group {
-        ops: &[("vfmadd231ss", Op::Vfmadd231ss), ("vfnmadd231ss", Op::Vfnmadd231ss), ("vfmadd213ss", Op::Vfmadd213ss)],
-        forms: &[&[(X, ReadWrite), (X, Read), (Xm(W32), Read)]],
-    },
-    Group { ops: &[("vroundss", Op::Vroundss)], forms: &[&[(X, Write), (X, Read), (Xm(W32), Read), (C(4), Read)]] },
-    Group {
-        ops: &[("vmovss", Op::Vmovss)],
-        forms: &[&[(X, Write), (M(W32), Read)], &[(M(W32), Write), (X, Read)], &[(X, Write), (X, Read), (X, Read)]],
-    },
-    Group {
-        ops: &[("vmovd", Op::Vmovd)],
-        forms: &[
-            &[(X, Write), (M(W32), Read)],
-            &[(M(W32), Write), (X, Read)],
-            &[(X, Write), (G(W32), Read)],
-            &[(G(W32), Write), (X, Read)],
-        ],
-    },
-    Group {
-        ops: &[("vmovq", Op::Vmovq)],
-        forms: &[
-            &[(X, Write), (M(W64), Read)],
-            &[(M(W64), Write), (X, Read)],
-            &[(X, Write), (G(W64), Read)],
-            &[(G(W64), Write), (X, Read)],
-        ],
-    },
-    Group { ops: &[("vcomiss", Op::Vcomiss), ("vucomiss", Op::Vucomiss)], forms: &[&[(X, Read), (Xm(W32), Read)]] },
-    Group { ops: &[("vextractf128", Op::Vextractf128)], forms: &[&[(X, Write), (Y, Read), (N(1), Read)]] },
-    Group {
-        ops: &[("vinsertf128", Op::Vinsertf128), ("vinserti128", Op::Vinserti128)],
-        forms: &[&[(Y, Write), (Y, Read), (Xm(W128), Read), (N(1), Read)]],
-    },
-    Group { ops: &[("vpermps", Op::Vpermps)], forms: &[&[(Y, Write), (Y, Read), (Ym, Read)]] },
-    Group { ops: &[("vpermq", Op::Vpermq)], forms: &[&[(Y, Write), (Ym, Read), (C(8), Read)]] },
-    Group { ops: &[("vmovhlps", Op::Vmovhlps)], forms: &[&[(X, Write), (X, Read), (X, Read)]] },
-    Group { ops: &[("vmovhps", Op::Vmovhps)], forms: &[&[(X, Write), (X, Read), (M(W64), Read)]] },
-    Group { ops: &[("vcvtph2ps", Op::Vcvtph2ps)], forms: &[&[(Y, Write), (Xm(W128), Read)]] },
-    Group {
-        ops: &[("vpmovzxbd", Op::Vpmovzxbd)],
-        forms: &[&[(Y, Write), (M(W64), Read)], &[(X, Write), (M(W32), Read)], &[(Y, Write), (X, Read)]],
-    },
-    Group { ops: &[("vpmovsxbd", Op::Vpmovsxbd)], forms: &[&[(Y, Write), (M(W64), Read)], &[(Y, Write), (X, Read)]] },
-    Group { ops: &[("vpmovzxwd", Op::Vpmovzxwd)], forms: &[&[(Y, Write), (M(W128), Read)]] },
-    Group {
-        ops: &[("mov", Op::Mov)],
-        forms: &[
-            &[(G(W64), Write), (G(W64), Read)],
-            &[(G(W32), Write), (G(W32), Read)],
-            &[(G(W64), Write), (Q, Read)],
-            &[(G(W64), Write), (M(W64), Read)],
-            &[(G(W32), Write), (M(W32), Read)],
-            &[(M(W64), Write), (G(W64), Read)],
-            &[(M(W32), Write), (G(W32), Read)],
-        ],
-    },
-    Group {
-        ops: &[("movzx", Op::Movzx)],
-        forms: &[&[(G(W32), Write), (M(W8), Read)], &[(G(W32), Write), (M(W16), Read)]],
-    },
-    Group { ops: &[("lea", Op::Lea)], forms: &[&[(G(W64), Write), (M(W64), Read)]] },
-    Group {
-        ops: &[("add", Op::Add), ("sub", Op::Sub), ("and", Op::And), ("or", Op::Or), ("xor", Op::Xor)],
-        forms: &[
-            &[(G(W64), ReadWrite), (I, Read)],
-            &[(G(W64), ReadWrite), (G(W64), Read)],
-            &[(G(W64), ReadWrite), (M(W64), Read)],
-        ],
-    },
-    Group {
-        ops: &[("imul", Op::Imul)],
-        forms: &[&[(G(W64), ReadWrite), (G(W64), Read)], &[(G(W64), Write), (G(W64), Read), (I, Read)]],
-    },
-    Group {
-        ops: &[("shl", Op::Shl), ("shr", Op::Shr), ("sar", Op::Sar)],
-        forms: &[&[(G(W64), ReadWrite), (N(6), Read)]],
-    },
-    Group { ops: &[("inc", Op::Inc), ("dec", Op::Dec), ("neg", Op::Neg)], forms: &[&[(G(W64), ReadWrite)]] },
-    Group {
-        ops: &[("cmp", Op::Cmp)],
-        forms: &[&[(G(W64), Read), (G(W64), Read)], &[(G(W64), Read), (I, Read)], &[(G(W64), Read), (M(W64), Read)]],
-    },
-    Group { ops: &[("test", Op::Test)], forms: &[&[(G(W64), Read), (G(W64), Read)], &[(G(W64), Read), (I, Read)]] },
-    Group {
-        ops: &[
-            ("prefetcht0", Op::Prefetcht0),
-            ("prefetcht1", Op::Prefetcht1),
-            ("prefetcht2", Op::Prefetcht2),
-            ("prefetchnta", Op::Prefetchnta),
-        ],
-        forms: &[&[(M(W8), Read)]],
-    },
-];
-
-/// The jumps, each to a label: `jmp` always, the rest as the flags say.
-const JUMPS: &[(&str, Op)] = &[
-    ("jmp", Op::Jmp),
-    ("jz", Op::Jz),
-    ("jnz", Op::Jnz),
-    ("ja", Op::Ja),
-    ("jae", Op::Jae),
-    ("jb", Op::Jb),
-    ("jbe", Op::Jbe),
-    ("jg", Op::Jg),
-    ("jge", Op::Jge),
-    ("jl", Op::Jl),
-    ("jle", Op::Jle),
-    ("js", Op::Js),
-    ("jns", Op::Jns),
-];
-
-/// The names the language calls x86 instructions by, `ret` and the jumps among them.
+/// The names the language calls x86 instructions by, `ret`, `call` and kgen's own `zero` and
+/// `ones` among them.
 pub fn mnemonics() -> impl Iterator<Item = &'static str> {
-    let groups = GROUPS.iter().flat_map(|g| g.ops.iter().map(|(name, _)| *name));
-    groups.chain(JUMPS.iter().map(|(name, _)| *name)).chain(["ret", "call", "ud2", "zero", "ones"])
+    forms::names().chain(["ret", "call", "zero", "ones"])
 }
 
 /// A type SysV passes in a register: an integer or a pointer in a general one, a float in the
@@ -676,6 +458,8 @@ pub struct Kernel {
     /// The next label of the kernel's own code, `grid.sync()`'s. They count down from the
     /// last, and the evaluator's up from 0, so that the two never meet.
     labels: u32,
+    /// Where the caller's MXCSR is kept, once the kernel loads its own.
+    mxcsr: Option<SlotId>,
 }
 
 impl Kernel {
@@ -705,6 +489,7 @@ impl Kernel {
             cooperative: false,
             grid: None,
             labels: u32::MAX,
+            mxcsr: None,
         }
     }
 
@@ -1057,12 +842,38 @@ impl Kernel {
     }
 
     /// The kernel as written. A cooperative one takes its place in the grid, read or not, as
-    /// the launcher passes it.
+    /// the launcher passes it; and one that loads MXCSR gives the caller's back.
     pub fn finish(mut self) -> Program<Op> {
         if self.cooperative {
             self.grid();
         }
+        if let Some(s) = self.mxcsr {
+            self.keep_mxcsr(s);
+        }
         self.p
+    }
+
+    /// Stores the caller's MXCSR in `s` as the kernel starts, and loads it back before each
+    /// `ret`: SysV has a function keep the control bits of MXCSR, its rounding among them, as
+    /// it found them.
+    fn keep_mxcsr(&mut self, s: SlotId) {
+        let at = |access| Arg {
+            operand: Operand::Mem(Mem { base: Base::Slot(s), index: None, disp: 0, width: W32 }),
+            access,
+        };
+        let inst = |op, access| {
+            Item::Inst(Inst { op, args: vec![at(access)], implicit: vec![], flow: Flow::Next, clobbers: vec![] })
+        };
+        let mut body = vec![Item::Note("the caller's mxcsr, which it gets back".into()), inst(Op::Vstmxcsr, Write)];
+        for item in std::mem::take(&mut self.p.body) {
+            // Not before `ud2` or a call of a function that never returns, which come back to no
+            // caller.
+            if matches!(&item, Item::Inst(i) if i.op == Op::Ret) {
+                body.push(inst(Op::Vldmxcsr, Read));
+            }
+            body.push(item);
+        }
+        self.p.body = body;
     }
 
     /// The variable a cooperative kernel's thread is given its place in the grid in: a
@@ -1087,8 +898,8 @@ impl Kernel {
     }
 
     /// The memory that `name`, which is no variable, is if it is the grid's: `grid.thread` or
-    /// `grid.threads`, in the place a cooperative kernel's thread is given. `None` for a name
-    /// that is not the grid's.
+    /// `grid.threads`, 8 bytes in the place a cooperative kernel's thread is given. `None` for a
+    /// name that is not the grid's.
     fn grid_value(&mut self, name: &str) -> Result<Option<Given<Var>>, String> {
         let disp = match name {
             "grid.thread" => THREAD,
@@ -1108,7 +919,8 @@ impl Kernel {
             ));
         }
         let base = Var(Place::Reg(self.grid(), View::R64));
-        Ok(Some(Given::Mem(kgen_lang::Mem { base: Some(base), index: None, disp: disp.into() })))
+        let place = Given::Mem(kgen_lang::Mem { base: Some(base), index: None, disp: disp.into() });
+        Ok(Some(Given::Sized(forms::word(W64).into(), Box::new(place))))
     }
 
     /// `grid.sync()`, which waits until every thread of the grid has come to it: code of the
@@ -1258,95 +1070,85 @@ impl Kernel {
         Ok(())
     }
 
-    /// The width of the form's vectors: its first vector's that has a variable, else the
-    /// width its fixed vectors name.
-    fn width(form: Form, args: &[Given<Var>]) -> Option<Width> {
-        let given = form.iter().zip(args).find_map(|((kind, _), a)| match kind {
-            V | Vm => reg_of(a).filter(|(reg, _)| reg.class == Class::Vec).map(|(_, view)| view.width()),
-            _ => None,
-        });
-        given.or_else(|| {
-            form.iter().find_map(|(kind, _)| match kind {
-                Y => Some(W256),
-                X => Some(W128),
-                _ => None,
-            })
-        })
+    /// The operands of `form` built from `args`, which fit it, for the instruction `name`; and
+    /// those it reaches without writing them out: the vector of indices of a gather's memory,
+    /// at its width.
+    fn build(&mut self, form: &Form, args: &[Given<Var>], name: &str) -> Result<(Args, Args), Fault> {
+        let (mut out, mut implicit) = (vec![], vec![]);
+        for (i, (spec, a)) in form.operands.iter().zip(args).enumerate() {
+            let mut access = spec.access;
+            let operand = match a {
+                Given::Var(v) => {
+                    let (reg, view) = v.reg().expect("stack memory is refused as an operand");
+                    // A write to a gpr's r16 or r8 keeps the rest of it, which it so reads.
+                    if access == Write && matches!(view, View::R16 | View::R8) {
+                        access = ReadWrite;
+                    }
+                    Operand::Reg(reg, view.width())
+                }
+                // Past 2^63 as the 64 bits are, as `mov` takes them.
+                Given::Int(x) => Operand::Imm(Imm { value: *x as i64, hex: matches!(spec.kind, Kind::Control(_)) }),
+                Given::Mem(_) | Given::Data(_) | Given::Sized(..) | Given::Code(_) => {
+                    let m = self.memory(a, spec.kind, access, name).map_err(|m| Fault::at(i, m))?;
+                    if let (Kind::Vsib(_, w), Some((index, _))) = (spec.kind, m.index) {
+                        implicit.push(Arg { operand: Operand::Reg(index, w), access: Read });
+                    }
+                    Operand::Mem(m)
+                }
+                Given::Label(l) => Operand::Label(Label(*l)),
+                _ => unreachable!("the form fits"),
+            };
+            out.push(Arg { operand, access });
+        }
+        if let [Arg { operand: Operand::Reg(index, _), .. }] = implicit.as_slice() {
+            self.apart(name, &out, *index)?;
+        }
+        Ok((out, implicit))
     }
 
-    /// Whether `args` fit `form`, or the first that does not and why.
-    fn fits(form: Form, args: &[Given<Var>]) -> Result<(), Fault> {
-        if form.len() != args.len() {
-            return Err(Fault::new(format!("takes {} operands, not {}", form.len(), args.len())));
-        }
-        let width = Self::width(form, args);
-        for (i, (&(kind, _), a)) in form.iter().zip(args).enumerate() {
-            let vector = |want: Option<View>| match reg_of(a) {
-                Some((reg, view)) if reg.class == Class::Vec && want.is_none_or(|w| w == view) => Ok(()),
-                _ => Err(Fault::at(i, format!("wants {}; this is {}", describe(kind, width), given(a)))),
-            };
-            let memory = matches!(a, Given::Mem(_) | Given::Data(_) | Given::Code(_));
-            let int = |range: std::ops::RangeInclusive<i128>| match a {
-                Given::Int(x) if range.contains(x) => Ok(()),
-                _ => Err(Fault::at(i, format!("wants {}; this is {}", describe(kind, width), given(a)))),
-            };
-            match kind {
-                V => vector(width.map(view_of))?,
-                Vm if memory => {}
-                Vm => vector(width.map(view_of))?,
-                Y => vector(Some(View::Ymm))?,
-                Ym if memory => {}
-                Ym => vector(Some(View::Ymm))?,
-                X => vector(Some(View::Xmm))?,
-                Xm(_) if memory => {}
-                Xm(_) => vector(Some(View::Xmm))?,
-                Mv | M(_) if memory => {}
-                G(w) => match reg_of(a) {
-                    Some((reg, view)) if reg.class == Class::Gpr && view.width() == w => {}
-                    _ => return Err(Fault::at(i, format!("wants {}; this is {}", describe(kind, width), given(a)))),
-                },
-                I => int(i32::MIN.into()..=i32::MAX.into())?,
-                Q => int(i64::MIN.into()..=u64::MAX.into())?,
-                N(bits) | C(bits) => int(0..=(1 << bits) - 1)?,
-                Lanes => int(0..=if width == Some(W256) { 255 } else { 15 })?,
-                Mv | M(_) => return Err(Fault::at(i, format!("wants memory; this is {}", given(a)))),
+    /// Whether the gather `name`, of the operands `out` and at indices in `index`, has its
+    /// result, its indices and its mask in three registers, without which it faults; else why
+    /// not.
+    fn apart(&self, name: &str, out: &[Arg<VReg>], index: VReg) -> Result<(), Fault> {
+        let reg = |a: &Arg<VReg>| match a.operand {
+            Operand::Reg(reg, _) => reg,
+            _ => unreachable!("a gather's result and mask are vectors"),
+        };
+        let (result, mask) = (reg(&out[0]), reg(&out[2]));
+        let pairs = [
+            (result, "result", mask, "mask", 2),
+            (result, "result", index, "indices", 1),
+            (index, "indices", mask, "mask", 2),
+        ];
+        for (a, one, b, other, at) in pairs {
+            if a == b {
+                let v = &self.p.regs[a.id as usize].name;
+                return Err(Fault::at(
+                    at,
+                    format!(
+                        "`{name}` faults unless its result, its indices and its mask are three registers; `{v}` is its \
+                         {one} and its {other}"
+                    ),
+                ));
             }
         }
         Ok(())
     }
 
-    /// The operands of `form` built from `args`, which fit it, for the instruction `name`.
-    fn build(&mut self, form: Form, args: &[Given<Var>], name: &str) -> Result<Vec<Arg<VReg>>, Fault> {
-        let width = Self::width(form, args);
-        let mut out = vec![];
-        for (i, (&(kind, access), a)) in form.iter().zip(args).enumerate() {
-            let operand = match a {
-                Given::Var(v) => {
-                    let (reg, view) = v.reg().expect("stack memory is refused as an operand");
-                    Operand::Reg(reg, view.width())
-                }
-                // Past 2^63 as the 64 bits are, as `mov` takes them.
-                Given::Int(x) => Operand::Imm(Imm { value: *x as i64, hex: matches!(kind, C(_) | Lanes) }),
-                Given::Mem(_) | Given::Data(_) | Given::Code(_) => {
-                    let w = match kind {
-                        Xm(w) | M(w) => w,
-                        Ym => W256,
-                        _ => width.expect("a form with vector memory has a vector"),
-                    };
-                    Operand::Mem(self.memory(a, w, access, name).map_err(|m| Fault::at(i, m))?)
-                }
-                _ => unreachable!("the form fits"),
-            };
-            out.push(Arg { operand, access });
-        }
-        Ok(out)
-    }
-
-    /// The address `a`, where the instruction `name` reaches `width` with `access`.
-    fn memory(&mut self, a: &Given<Var>, width: Width, access: Access, name: &str) -> Result<Mem<VReg>, String> {
+    /// The memory `a`, where the instruction `name` reaches what `kind` says with `access`.
+    fn memory(&mut self, a: &Given<Var>, kind: Kind, access: Access, name: &str) -> Result<Mem<VReg>, String> {
+        let a = match a {
+            Given::Sized(_, inner) => inner.as_ref(),
+            a => a,
+        };
+        // `lea` reaches nothing, and prints no size.
+        let width = kind.size().unwrap_or(W64);
         let m = match a {
             Given::Data(bytes) => {
-                if width.bytes() as usize > bytes.len() {
+                if matches!(access, Write | ReadWrite) {
+                    return Err(format!("`{name}` writes this memory, which holds data known now and is read-only"));
+                }
+                if kind != Kind::Addr && width.bytes() as usize > bytes.len() {
                     return Err(format!("this reads {} bytes of a constant of {}", width.bytes(), bytes.len()));
                 }
                 return Ok(Mem { base: Base::Const(self.constant(bytes)), index: None, disp: 0, width });
@@ -1358,13 +1160,18 @@ impl Kernel {
             Given::Mem(m) => m,
             _ => unreachable!("memory"),
         };
-        // Memory stands for its address, which comes first, added as it is.
+        // Memory stands for its address, which comes first, and a vector of indices is the
+        // index; each may be added as it is.
         let (mut base, mut index) = (m.base, m.index);
         if let (Some(b), Some((i, 1))) = (base, index)
-            && b.reg().is_some()
-            && i.reg().is_none()
+            && ((b.reg().is_some() && i.reg().is_none()) || (b.vector() && !i.vector()))
         {
             (base, index) = (Some(i), Some((b, 1)));
+        }
+        if let (Some(b), None) = (base, index)
+            && b.vector()
+        {
+            (base, index) = (None, Some((b, 1)));
         }
         if let Some((i, k)) = index
             && let Some((held, _)) = self.declared(i)
@@ -1377,6 +1184,14 @@ impl Kernel {
                         "an address adds memory as it is, as in `[{held} + {added}]`; this multiplies `{held}` by {k}"
                     )
                 }
+            });
+        }
+        if let Some(b) = base
+            && b.vector()
+        {
+            return Err(match index {
+                Some((i, _)) if i.vector() => "an address is at one vector of indices at most".into(),
+                _ => "an address multiplies its vector of indices, as in `[p + v * 4]`; this multiplies a gpr".into(),
             });
         }
         let held = base.filter(|b| b.reg().is_none());
@@ -1396,10 +1211,17 @@ impl Kernel {
         };
         let base = if held.is_some() { None } else { base.map(whole).transpose()? };
         let index = match index {
-            Some((v, k)) => match u8::try_from(k) {
-                Ok(scale @ (1 | 2 | 4 | 8)) => Some((whole(v)?, scale)),
-                _ => return Err(format!("x86 scales an index by 1, 2, 4 or 8, not {k}")),
-            },
+            Some((v, k)) => {
+                let Ok(scale @ (1 | 2 | 4 | 8)) = u8::try_from(k) else {
+                    return Err(format!("x86 scales an index by 1, 2, 4 or 8, not {k}"));
+                };
+                // A vector of indices, which the form fits at its width, is seen whole or not.
+                let reg = match v.reg() {
+                    Some((reg, _)) if reg.class == Class::Vec => reg,
+                    _ => whole(v)?,
+                };
+                Some((reg, scale))
+            }
             None => None,
         };
         match held.map(|v| v.0) {
@@ -1407,13 +1229,13 @@ impl Kernel {
                 let slot = &self.p.slots[s.0 as usize];
                 let ty = &self.declared[s.0 as usize];
                 let memory = Region { name: &slot.name, bytes: slot.size.into(), align: slot.align.into(), ty };
-                self.within(memory, index, m.disp, width, access, name)?;
+                self.within(memory, index, m.disp, kind, access, name)?;
                 let disp = i32::try_from(m.disp).expect("inside a frame of 2^31 bytes at most");
                 return Ok(Mem { base: Base::Slot(s), index, disp, width });
             }
             Some(Place::Static(s)) => {
                 let st = &self.statics[s.0 as usize];
-                if st.constant && name != "lea" && matches!(access, Write | ReadWrite) {
+                if st.constant && kind != Kind::Addr && matches!(access, Write | ReadWrite) {
                     return Err(format!(
                         "`{name}` {} `{}`, which is constant memory: the kernels only read it",
                         verb(access),
@@ -1421,7 +1243,7 @@ impl Kernel {
                     ));
                 }
                 let memory = Region { name: &st.name, bytes: st.bytes(), align: st.align, ty: &st.ty };
-                self.within(memory, None, m.disp, width, access, name)?;
+                self.within(memory, None, m.disp, kind, access, name)?;
                 let disp = i32::try_from(m.disp).expect("inside a static of 2^31 bytes at most");
                 return Ok(Mem { base: Base::Static(s), index: None, disp, width });
             }
@@ -1430,6 +1252,9 @@ impl Kernel {
         let disp = i32::try_from(m.disp).map_err(|_| format!("{} bytes are too far for an address", m.disp))?;
         let (base, index) = match (base, index) {
             (Some(b), index) => (b, index),
+            (None, Some(_)) if matches!(kind, Kind::Vsib(..)) => {
+                return Err("x86 adds a gpr to a vector of indices, as in `[p + v * 4]`".into());
+            }
             (None, Some((r, 1))) => (r, None),
             (None, _) => return Err("x86 wants a base beside a scaled index".into()),
         };
@@ -1437,17 +1262,17 @@ impl Kernel {
     }
 
     /// Whether the instruction `name` stays inside `memory`, of the stack or of the module's,
-    /// reaching `width` with `access` at `disp` bytes into it and `index` past that; else why
-    /// not. The address is checked where the index is 0, the rest being the kernel's to keep
-    /// inside: it lies in the memory, or as far as one past its end for `lea`, which reaches
-    /// nothing; and for `vmovaps` and `vmovdqa`, which fault elsewhere, at a multiple of the
-    /// bytes they move.
+    /// reaching what `kind` says with `access` at `disp` bytes into it and `index` past that;
+    /// else why not. The address is checked where the index is 0, the rest being the kernel's
+    /// to keep inside: it lies in the memory, or as far as one past its end for `lea`, which
+    /// reaches nothing; and for `vmovaps` and the rest that fault elsewhere, at a multiple of
+    /// the bytes they move.
     fn within(
         &self,
         memory: Region,
         index: Option<(VReg, u8)>,
         disp: i64,
-        width: Width,
+        kind: Kind,
         access: Access,
         name: &str,
     ) -> Result<(), String> {
@@ -1455,9 +1280,12 @@ impl Kernel {
         let mut at = format!("[{v}");
         let mut when = String::new();
         if let Some((i, k)) = index {
-            let i = &self.p.regs[i.id as usize].name;
-            at += &if k == 1 { format!(" + {i}") } else { format!(" + {i} * {k}") };
-            when = format!(", when `{i}` is 0");
+            let name = &self.p.regs[i.id as usize].name;
+            at += &if k == 1 { format!(" + {name}") } else { format!(" + {name} * {k}") };
+            when = match i.class {
+                Class::Vec => format!(", when the indices in `{name}` are 0"),
+                _ => format!(", when `{name}` is 0"),
+            };
         }
         match disp {
             0 => {}
@@ -1465,16 +1293,16 @@ impl Kernel {
             d => at += &format!(" + {d}"),
         }
         at.push(']');
-        if name == "lea" {
+        let Some(width) = kind.size() else {
             return match disp {
-                d if d < 0 => Err(format!("`lea` takes the address `{at}`, before `{v}` starts{when}")),
+                d if d < 0 => Err(format!("`{name}` takes the address `{at}`, before `{v}` starts{when}")),
                 d if d.unsigned_abs() > n => Err(format!(
-                    "`lea` takes the address `{at}`, more than one past the end of `{v}`, {}{when}",
+                    "`{name}` takes the address `{at}`, more than one past the end of `{v}`, {}{when}",
                     bytes(n)
                 )),
                 _ => Ok(()),
             };
-        }
+        };
         let verb = verb(access);
         let size = u64::from(width.bytes());
         if disp < 0 {
@@ -1487,20 +1315,22 @@ impl Kernel {
                 bytes(n)
             ));
         }
-        let anywhere = match name {
-            "vmovaps" => "vmovups",
-            "vmovdqa" => "vmovdqu",
-            _ => return Ok(()),
-        };
+        let Kind::Aligned(_) = kind else { return Ok(()) };
         if memory.align < size {
             let stem = ty.strip_suffix('>').unwrap_or(ty);
             let stem = match stem.rsplit_once(", ") {
                 Some((stem, align)) if align.parse::<u64>().is_ok() => stem,
                 _ => stem,
             };
+            let anywhere = match name {
+                "vmovaps" => ", or `vmovups` at any",
+                "vmovapd" => ", or `vmovupd` at any",
+                "vmovdqa" => ", or `vmovdqu` at any",
+                _ => "",
+            };
             return Err(format!(
                 "`{name}` {verb} {size} bytes at once, at an address that is a multiple of {size}; `{v}` is at a \
-                 multiple of {}: `{stem}, {size}>`, or `{anywhere}` at any",
+                 multiple of {}: `{stem}, {size}>`{anywhere}",
                 memory.align
             ));
         }
@@ -1590,36 +1420,74 @@ fn shape(ty: &str, word: &str) -> Result<(&'static str, u64, Option<u64>, u64), 
     Ok((elem, size, len, align))
 }
 
-fn view_of(w: Width) -> View {
-    if w == W256 { View::Ymm } else { View::Xmm }
+/// What `a`, an operand the checks of [`Target::inst`] let through, is to the forms.
+fn operand_shape(a: &Given<Var>) -> Shape {
+    match a {
+        Given::Var(v) => match v.reg().expect("stack memory is refused as an operand") {
+            (reg, view) if reg.class == Class::Vec => Shape::Vec(view.width()),
+            (_, view) => Shape::Gpr(view.width()),
+        },
+        Given::Int(x) => Shape::Int(*x),
+        Given::Mem(m) => Shape::Mem { size: None, data: None, vsib: vector_index(m) },
+        Given::Data(bytes) => Shape::Mem { size: None, data: Some(bytes.len()), vsib: None },
+        Given::Code(_) => Shape::Mem { size: None, data: None, vsib: None },
+        Given::Sized(word, inner) => match operand_shape(inner) {
+            Shape::Mem { data, vsib, .. } => Shape::Mem { size: forms::width_of(word), data, vsib },
+            _ => unreachable!("a size is memory's"),
+        },
+        Given::Label(_) => Shape::Label,
+        _ => unreachable!("refused before"),
+    }
 }
 
-fn describe(kind: Kind, width: Option<Width>) -> String {
-    let vector = match width {
-        Some(W256) => "a ymm",
-        Some(_) => "an xmm",
-        None => "a vector",
-    };
-    match kind {
-        V => vector.to_string(),
-        Vm => format!("{vector} or memory"),
-        Mv => "memory".into(),
-        Y => "a ymm".into(),
-        Ym => "a ymm or memory".into(),
-        X => "an xmm".into(),
-        Xm(w) => format!("an xmm or {} bytes of memory", w.bytes()),
-        M(w) => format!("{} bytes of memory", w.bytes()),
-        G(W32) => "a gpr's r32".into(),
-        G(_) => "a gpr".into(),
-        I => "an integer of 32 bits".into(),
-        Q => "an integer".into(),
-        N(bits) => format!("an integer, 0 to {}", (1 << bits) - 1),
-        C(bits) => format!("a control byte, 0 to {}", (1 << bits) - 1),
-        Lanes => match width {
-            Some(W256) => "a control byte, 0 to 255".into(),
-            Some(_) => "a control byte, 0 to 15".into(),
-            None => "a control byte of a bit for each lane".into(),
-        },
+/// The width of the vector of indices memory `m` is at, if it adds one.
+fn vector_index(m: &kgen_lang::Mem<Var>) -> Option<Width> {
+    let index = m.index.map(|(v, _)| v);
+    [index, m.base].into_iter().flatten().find_map(|v| match v.reg() {
+        Some((reg, view)) if reg.class == Class::Vec => Some(view.width()),
+        _ => None,
+    })
+}
+
+/// Why no form of `name` fits `args`, which are `shapes` to the forms, those of `grid` being
+/// the grid's values by their names.
+fn missed(name: &str, args: &[Given<Var>], shapes: &[Shape], grid: &[(usize, String)], miss: Miss) -> Fault {
+    let later = forms::LATER_FORMS.iter().find(|&&(n, count, _)| n == name && count == args.len());
+    match miss {
+        Miss::Count(_) if let Some((_, count, why)) = later => {
+            let n = if *count == 1 { "1 operand".to_string() } else { format!("{count} operands") };
+            Fault::new(format!("kgen does not yet write `{name}` of {n}, which {why}"))
+        }
+        Miss::Count(counts) => {
+            let n = match counts.as_slice() {
+                [0] => "no operands".to_string(),
+                [1] => "1 operand".to_string(),
+                counts => {
+                    let counts: Vec<String> = counts.iter().map(ToString::to_string).collect();
+                    format!("{} operands", forms::list(&counts))
+                }
+            };
+            Fault::new(format!("`{name}` takes {n}, not {}", args.len()))
+        }
+        Miss::Wants { at, wants } => {
+            let this = match grid.iter().find(|(i, _)| *i == at) {
+                Some((_, s)) => format!("`{s}`, 8 bytes of memory"),
+                None => given(&args[at]),
+            };
+            Fault::at(at, format!("`{name}` wants {}; this is {this}", forms::wanted(&wants, shapes[at])))
+        }
+        Miss::Size { at, sizes } => {
+            let n: Vec<String> = sizes.iter().map(|w| w.bytes().to_string()).collect();
+            let words: Vec<String> = sizes.iter().map(|&w| format!("`{}[..]`", forms::word(w))).collect();
+            Fault::at(
+                at,
+                format!(
+                    "`{name}` reaches {} bytes of memory here: say which, {}",
+                    forms::list(&n),
+                    forms::list(&words)
+                ),
+            )
+        }
     }
 }
 
@@ -1636,8 +1504,17 @@ fn given(a: &Given<Var>) -> String {
         Given::F64(x) => format!("the float {x}"),
         Given::F16(x) => format!("the f16 {}", Value::F16(*x)),
         Given::Bf16(x) => format!("the bf16 {}", Value::Bf16(*x)),
-        Given::Mem(_) => "memory".into(),
+        Given::Mem(m) => match vector_index(m) {
+            Some(W256) => "memory at a ymm of indices".into(),
+            Some(_) => "memory at an xmm of indices".into(),
+            None if m.index.is_some() => "memory at an index in a gpr".into(),
+            None => "memory".into(),
+        },
         Given::Data(_) => "memory holding data".into(),
+        Given::Sized(word, inner) => {
+            let n = forms::width_of(word).map_or(0, |w| w.bytes());
+            format!("{} of {}", bytes(n.into()), given(inner))
+        }
         Given::Label(_) => "a label".into(),
         Given::Vector(vs) => format!("{} operands taken together", vs.len()),
         Given::Pair(..) => "two operands joined by `|`".into(),
@@ -1739,11 +1616,13 @@ impl Target for Kernel {
             (Class::Vec, "vec") => from,
             (Class::Gpr, "gpr") => View::R64,
             (Class::Gpr, "r32") => View::R32,
+            (Class::Gpr, "r16") => View::R16,
+            (Class::Gpr, "r8") => View::R8,
             _ if ["local<", "global<", "constant<"].iter().any(|w| view.starts_with(w)) => {
                 return Err(format!("{} is no memory, `{view}`", from.name()));
             }
             (Class::Vec, _) => return Err(format!("a vector is seen as `ymm`, `xmm` or `vec`, not `{view}`")),
-            _ => return Err(format!("a gpr is seen as `gpr` or `r32`, not `{view}`")),
+            _ => return Err(format!("a gpr is seen as `gpr`, `r32`, `r16` or `r8`, not `{view}`")),
         };
         Ok(Var(Place::Reg(reg, to)))
     }
@@ -1777,6 +1656,8 @@ impl Target for Kernel {
         if name == "call" {
             return self.call(args);
         }
+        let forms = forms::of(name);
+        let jumps = forms.is_some_and(|f| f.iter().any(|f| f.operands.iter().any(|s| s.kind == Kind::Label)));
         for (i, a) in args.iter().enumerate() {
             match a {
                 Given::Var(v) if v.reg().is_none() => {
@@ -1789,7 +1670,25 @@ impl Target for Kernel {
                         ),
                     ));
                 }
-                Given::Special(name) => return Err(Fault::at(i, format!("`{name}` is not defined"))),
+                Given::Special(s) if s == "cl" && forms::BY_CL.contains(&name) => {
+                    return Err(Fault::at(
+                        i,
+                        format!(
+                            "kgen does not yet write `{name}` by `cl`, a register of its own: shift by a number, or \
+                             by a gpr with `shlx`, `shrx` or `sarx`"
+                        ),
+                    ));
+                }
+                Given::Special(s) => return Err(Fault::at(i, format!("`{s}` is not defined"))),
+                Given::Sized(word, _) if forms::width_of(word).is_none() => {
+                    return Err(Fault::at(
+                        i,
+                        format!(
+                            "`{word}` is not defined; before brackets, x86 names how much memory an instruction \
+                             reaches: `byte`, `word`, `dword`, `qword`, `xmmword` or `ymmword`"
+                        ),
+                    ));
+                }
                 Given::F32(x) => return Err(Fault::at(i, format!("x86 takes floats from memory: `[{x:?}]`"))),
                 Given::F64(x) => return Err(Fault::at(i, format!("x86 takes floats from memory: `[{x:?}f64]`"))),
                 Given::F16(x) => {
@@ -1812,9 +1711,7 @@ impl Target for Kernel {
                     return Err(Fault::at(i, "x86 reads no operand inverted or negated; `!p` and `-a` are PTX's"));
                 }
                 Given::List(_) => return Err(Fault::at(i, "memory is one address in brackets, as in `[x + 4]`")),
-                Given::Label(_) if !JUMPS.iter().any(|(n, _)| *n == name) => {
-                    return Err(Fault::at(i, "a label is for a jump"));
-                }
+                Given::Label(_) if !jumps => return Err(Fault::at(i, "a label is for a jump")),
                 Given::Func(f) => {
                     return Err(Fault::at(
                         i,
@@ -1824,68 +1721,67 @@ impl Target for Kernel {
                         ),
                     ));
                 }
-                Given::Code(f) if name != "lea" => {
-                    return Err(Fault::at(
-                        i,
-                        format!("`{name}` takes no function's code: `lea(p, [{f}])` puts the address of `{f}` in `p`"),
-                    ));
+                Given::Code(f) if name != "lea" => return Err(Fault::at(i, no_code(name, f))),
+                Given::Sized(_, inner)
+                    if name != "lea"
+                        && let Given::Code(f) = inner.as_ref() =>
+                {
+                    return Err(Fault::at(i, no_code(name, f)));
                 }
                 _ => {}
             }
         }
         match name {
             "ret" => return self.ret(args),
-            "ud2" if args.is_empty() => {
-                self.push(Op::Ud2, vec![], vec![], Flow::Return);
-                return Ok(());
-            }
-            "ud2" => return Err(Fault::new(format!("`ud2` takes no operands, not {}", args.len()))),
             "zero" => return self.fill(false, args),
             "ones" => return self.fill(true, args),
             _ => {}
         }
-        if let Some(&(_, op)) = JUMPS.iter().find(|(n, _)| *n == name) {
-            let [Given::Label(l)] = args else {
-                return Err(Fault::new(format!("`{name}` takes a label")));
-            };
-            let flow = if op == Op::Jmp { Flow::Jump(Label(*l)) } else { Flow::Branch(Label(*l)) };
-            self.push(op, vec![Arg { operand: Operand::Label(Label(*l)), access: Read }], vec![], flow);
-            return Ok(());
-        }
-        let Some((group, op)) =
-            GROUPS.iter().find_map(|g| g.ops.iter().find(|(n, _)| *n == name).map(|&(_, op)| (g, op)))
-        else {
-            return Err(Fault::new(format!("x86 has no instruction `{name}` that kgen knows")));
+        let Some(forms) = forms else {
+            let later = |name: &str| forms::LATER.iter().find(|(n, _)| *n == name);
+            let vex = format!("v{name}");
+            return Err(Fault::new(match later(name) {
+                Some((_, why)) => format!("kgen does not yet write `{name}`, which {why}"),
+                None if forms::of(&vex).is_some() || later(&vex).is_some() => {
+                    format!("kgen writes `{name}` as AVX does: `{vex}`")
+                }
+                None => format!("x86 has no instruction `{name}` that kgen knows"),
+            }));
         };
-        // The form that fits, or the complaint of the one that fit furthest.
-        let mut best: Option<Fault> = None;
-        for &form in group.forms {
-            match Self::fits(form, args) {
-                Ok(()) => {
-                    let built = self.build(form, args, name)?;
-                    for (i, s) in &grid {
-                        let wrong = if op == Op::Lea {
-                            "`lea` takes the address of the kernel's memory"
-                        } else if built[*i].access != Read {
-                            "the launcher writes it"
-                        } else {
-                            continue;
-                        };
-                        return Err(Fault::at(*i, format!("`{s}` is read, as in `mov(t, {s})`; {wrong}")));
-                    }
-                    self.push(op, built, vec![], Flow::Next);
-                    return Ok(());
-                }
-                Err(f) => {
-                    if best.as_ref().is_none_or(|b| f.arg > b.arg) {
-                        best = Some(f);
-                    }
-                }
+        if name == "lea" {
+            if let Some((i, s)) = grid.first() {
+                return Err(Fault::at(
+                    *i,
+                    format!("`{s}` is read, as in `mov(t, {s})`; `lea` takes the address of the kernel's memory"),
+                ));
+            }
+            if let Some(i) = args.iter().position(|a| matches!(a, Given::Sized(..))) {
+                return Err(Fault::at(i, "`lea` takes an address and reaches no memory: no size before the brackets"));
             }
         }
-        let mut f = best.expect("a group has forms");
-        f.message = format!("`{name}` {}", f.message);
-        Err(f)
+        let shapes: Vec<Shape> = args.iter().map(operand_shape).collect();
+        let form = forms::choose(forms, &shapes).map_err(|miss| missed(name, args, &shapes, &grid, miss))?;
+        let (built, implicit) = self.build(form, args, name)?;
+        for (i, s) in &grid {
+            if built[*i].access != Read {
+                return Err(Fault::at(*i, format!("`{s}` is read, as in `mov(t, {s})`; the launcher writes it")));
+            }
+        }
+        if form.op == Op::Vldmxcsr && self.mxcsr.is_none() {
+            let Var(Place::Stack(kept)) = self.new_memory("mxcsr", "local<u32>").map_err(Fault::new)? else {
+                unreachable!("stack memory is a slot")
+            };
+            self.mxcsr = Some(kept);
+        }
+        let flow = match built.iter().find_map(|a| if let Operand::Label(l) = a.operand { Some(l) } else { None }) {
+            Some(l) if form.op == Op::Jmp => Flow::Jump(l),
+            Some(l) => Flow::Branch(l),
+            // `ud2` faults, and so ends a way out as `ret` does.
+            None if form.op == Op::Ud2 => Flow::Return,
+            None => Flow::Next,
+        };
+        self.push(form.op, built, implicit, flow);
+        Ok(())
     }
 
     fn end(&mut self) -> Result<(), String> {
@@ -1908,6 +1804,11 @@ impl Target for Kernel {
             )),
         }
     }
+}
+
+/// Why the instruction `name`, which is not `lea`, takes no memory that is the code of `f`.
+fn no_code(name: &str, f: &str) -> String {
+    format!("`{name}` takes no function's code: `lea(p, [{f}])` puts the address of `{f}` in `p`")
 }
 
 /// `mov(to.r32, from.r32)`, which clears the rest of `to`.

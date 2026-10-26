@@ -95,7 +95,7 @@ mod kernels {
         label(turn);
         for k in 0..TABLES {
             let b: gpr;
-            movzx(b.r32, [bytes + k]);
+            movzx(b.r32, byte[bytes + k]);
             let count: gpr;
             mov(count.r32, [tables + b * 4 + 1024 * k]);
             inc(count);
@@ -111,7 +111,7 @@ mod kernels {
         jz(fold);
         label(rest);
         let b: gpr;
-        movzx(b.r32, [bytes]);
+        movzx(b.r32, byte[bytes]);
         let count: gpr;
         mov(count.r32, [tables + b * 4]);
         inc(count);

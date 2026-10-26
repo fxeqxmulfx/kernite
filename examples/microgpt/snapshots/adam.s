@@ -1,4 +1,5 @@
 # adam(gpr, gpr, gpr, gpr, gpr, vec, vec, vec, vec, vec, vec, vec, vec) -> ()
+# needs: avx, avx2, fma
 # frame: 0 bytes aligned to 0, saves []
 # p=rdi g=rsi m=rdx v=rcx n=r8 lr=ymm0
 # b1=ymm1 ob1=ymm2 b2=ymm3 ob2=ymm4 bc1=ymm5 bc2=ymm6

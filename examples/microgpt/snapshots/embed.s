@@ -1,4 +1,5 @@
 # embed(gpr, gpr, gpr, gpr, gpr) -> ()
+# needs: avx
 # frame: 0 bytes aligned to 0, saves []
 # x0=rdi p=rsi tokens=rdx t0=rcx n=r8 tok=rax
 # at=r9 x=ymm0

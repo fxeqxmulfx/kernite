@@ -1,4 +1,5 @@
 # wo(gpr, gpr, gpr, gpr, gpr) -> ()
+# needs: avx, fma
 # frame: 0 bytes aligned to 0, saves []
 # y=rdi x=rsi w=rdx res=rcx n=r8 acc0=ymm0
 # acc1=ymm1 b=ymm2

@@ -44,9 +44,9 @@ pub use kgen_compile::Error;
 pub use kgen_core::{Class, Program, Signature};
 pub use kgen_lang as lang;
 pub use kgen_ptx::{Entry, Static};
-pub use kgen_x86::Op;
 pub use kgen_x86::intel::{Line, Listing};
 pub use kgen_x86::lang::Static as X86Static;
+pub use kgen_x86::{Feature, Op};
 
 use kgen_lang::{Fn, ItemKind, Module, Span, Value};
 

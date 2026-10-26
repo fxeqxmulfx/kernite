@@ -1,4 +1,5 @@
 # attention_bwd(gpr, gpr, gpr, gpr, gpr) -> ()
+# needs: avx, avx2, fma
 # frame: 0 bytes aligned to 0, saves [rbx, r12, r13, r14]
 # dqkv=rdi qkv=rsi aw=rdx datt=rcx n=r8 t=rax
 # w=r9 at=r10 dout0=ymm0 dout1=ymm1 dout2=ymm2 dout3=ymm3

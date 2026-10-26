@@ -1,4 +1,5 @@
 # dot_unroll1(gpr, gpr, gpr) -> vec
+# needs: avx, fma
 # frame: 0 bytes aligned to 0, saves []
 # x=rdi y=rsi n=rdx acc0=ymm0 xs=ymm1 high=ymm1
 # sum=ymm0 pair=ymm1 zero=ymm0

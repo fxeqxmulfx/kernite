@@ -1,4 +1,5 @@
 # rmsnorm_bwd(gpr, gpr, gpr, gpr, gpr) -> ()
+# needs: avx, avx2, fma
 # frame: 0 bytes aligned to 0, saves []
 # dx=rdi dy=rsi x=rdx r=rcx n=r8 dot=ymm0
 # v=ymm1 s=ymm1 c=ymm2 g=ymm0

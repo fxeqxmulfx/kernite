@@ -46,6 +46,20 @@ them as the module's own, and Rust sees them there by a `use` the macro writes. 
 and holds `pub` consts of what kernels read, numbers, floats, `bool`s, arrays of them and expressions of these; a
 module that takes them may not have an item of its own of one of their names.
 
+The x86 target knows every instruction of x86-64-v3, in each form `llvm-mc` takes, [`forms`](crates/x86/src/forms.rs):
+x86-64's own on integers of 8 to 64 bits, SSE's to SSE4.2's as AVX writes them, `vaddps` and not `addps`, and AVX's,
+AVX2's, FMA's, F16C's, BMI1's, BMI2's, LZCNT's, POPCNT's and MOVBE's. It leaves out the stack's, which is the frame's,
+the strings', `loop`, x87's, MMX's and the system's; and it does not yet write those that take registers of their own,
+as `mul` takes `rax` and `rdx` and `shl` may take `cl`, which it names as such. A gpr is `g`, or `g.r32`, `g.r16` or
+`g.r8`, and a write to `r16` or `r8` keeps the rest of it, as x86 does. Memory is as much as the other operands say, or,
+where an instruction's forms differ by that alone, as Intel's word before the brackets says, `movzx(g.r32, byte[x])`,
+which kgen checks wherever it is given. A gather, `vpgatherdd(v, [x + i * 4], mask)`, takes its result, indices and
+mask in three registers, as x86 faults otherwise. The listing's header and the function's doc name the CPU features a
+kernel needs, `# needs: avx, fma`, which nothing checks for when it runs; and a kernel that loads MXCSR stores the
+caller's first and loads it back before it returns, as SysV says. Where `llvm-mc` and GNU `as` are installed, a test
+hands them every form, with each integer the least the form takes and the most: `llvm-mc` must take it, and GNU `as`
+must take it at the feature kgen says it needs, without a warning, and refuse it at the features before.
+
 Stack memory a kernel declares is a variable, as a GPU kernel's local memory is: `let tables: local<[u32; 1024], 32>;`
 is 4 KB of its frame at a multiple of 32, reached by its name, `mov(c.r32, [tables + b * 4])`, and `lea(p, [tables])`
 takes its address. Until written, it holds whatever was there. kgen checks an address in it where the index is 0: what
@@ -62,6 +76,7 @@ spill, in its header and at each load and store. Sixteen accumulators of `dot` a
 
 ```
 # dot::<16>(gpr, gpr, gpr) -> vec
+# needs: avx, fma
 # frame: 64 bytes aligned to 32, saves []
 # acc15, spilled: 32 bytes at rsp
 # acc14, spilled: 32 bytes at rsp + 32

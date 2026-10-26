@@ -1,4 +1,5 @@
 # relu_bwd(gpr, gpr, gpr) -> ()
+# needs: avx
 # frame: 0 bytes aligned to 0, saves []
 # dh=rdi h=rsi n=rdx z=ymm0 keep=ymm1
     test rdx, rdx

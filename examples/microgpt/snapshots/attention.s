@@ -1,4 +1,5 @@
 # attention(gpr, gpr, gpr, gpr, gpr) -> ()
+# needs: avx, avx2, fma
 # frame: 0 bytes aligned to 0, saves [rbx, r12]
 # att=rdi aw=rsi qkv=rdx t0=rcx n=r8 one=ymm0
 # q=rax w=r9 out=r10 qj0=ymm1 qj1=ymm2 qj2=ymm3

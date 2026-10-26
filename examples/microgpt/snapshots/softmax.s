@@ -1,4 +1,5 @@
 # softmax(gpr, gpr, vec, gpr) -> ()
+# needs: avx, avx2, fma
 # frame: 0 bytes aligned to 0, saves []
 # probs=rdi logits=rsi inv_temp=ymm0 n=rdx one=ymm1 p=ymm2,ymm3,ymm5,ymm4
 # m=ymm2 k=ymm4,ymm2 total=ymm2 inv=ymm2

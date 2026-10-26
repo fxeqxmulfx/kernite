@@ -78,6 +78,9 @@ pub enum Operand<V> {
     Mem(Mem<V>),
     /// Memory holding a value known now, as bytes: `[1.0]`, `[[0.5; 8]]`.
     Data(Vec<u8>),
+    /// Memory, `Mem` or `Data`, after a name that is nothing in scope, for a machine that names
+    /// how much of it an instruction reaches, as x86 does: `dword[x + 4]`.
+    Sized(String, Box<Operand<V>>),
     /// A label, for a jump.
     Label(u32),
     /// A function of the module that names an ABI, by its name: one the machine calls, as
@@ -818,9 +821,12 @@ impl<'a, T: Target> Eval<'a, T> {
                     _ => Err(err(e.span(), "a field is a view of a variable, as in `v.xmm`")),
                 },
             },
-            Expr::Index(..) => match self.place(e)? {
+            Expr::Index(base, index, span) => match self.place(e)? {
                 Some(v) => Ok(Operand::Var(v)),
-                None => scalar(self.value(e, Want::Any)?, e.span()),
+                None => match self.unbound(base)? {
+                    Some(word) => Ok(Operand::Sized(word, Box::new(self.memory(index, *span)?))),
+                    None => scalar(self.value(e, Want::Any)?, e.span()),
+                },
             },
             Expr::Array(items, span) => match items.as_slice() {
                 [inner] => self.memory(inner, *span),
@@ -848,6 +854,15 @@ impl<'a, T: Target> Eval<'a, T> {
             Expr::Str(_, span) => Err(err(*span, "a string is no operand; `note(\"..\")` takes one")),
             _ => scalar(self.value(e, Want::Any)?, e.span()),
         }
+    }
+
+    /// The name `e` is, if it is nothing in scope and no function of the module: `dword` of
+    /// `dword[x]`.
+    fn unbound(&mut self, e: &Expr) -> Result<Option<String>, Error> {
+        let Expr::Path(path, span) = e else { return Ok(None) };
+        let [name] = path.as_slice() else { return Ok(None) };
+        let function = self.compiled.iter().chain(&self.helpers).any(|f| f.name == *name);
+        Ok((self.lookup(name, *span)?.is_none() && !function).then(|| name.clone()))
     }
 
     /// What a name that is nothing in scope gives an instruction: a function of the module

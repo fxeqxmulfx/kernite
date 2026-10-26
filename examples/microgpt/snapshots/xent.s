@@ -1,4 +1,5 @@
 # xent(gpr, gpr, gpr, vec, gpr) -> ()
+# needs: avx, avx2
 # frame: 0 bytes aligned to 0, saves []
 # d=rdi probs=rsi targets=rdx inv_n=ymm0 n=rcx g=ymm1
 # j=rax

@@ -1,11 +1,13 @@
 //! Kernels in the language, compiled for x86: what they come to, and what the errors say; every
-//! form of every instruction kgen takes, which `llvm-mc` assembles; and what the builder refuses.
+//! form of every instruction kgen knows, which `llvm-mc` assembles and GNU as takes on a machine
+//! of its feature; and what the builder refuses.
 
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 
-use kgen_x86::Asm;
+use kgen_x86::forms::{self, Form, Kind};
+use kgen_x86::{Asm, Feature};
 
 /// The kernels of `examples/my-app`, and the same dot product with sixteen accumulators.
 const KERNELS: &str = r#"
@@ -91,6 +93,7 @@ fn the_examples_kernels_come_out_as_the_builder_wrote_them() {
 fn sixteen_accumulators_and_a_load_spill_two_and_the_listing_says_where() {
     let text = kgen::x86_str(KERNELS, "dot_unroll16").unwrap().text();
     let header = "# dot_unroll16(gpr, gpr, gpr) -> vec
+# needs: avx, fma
 # frame: 64 bytes aligned to 32, saves []
 # acc15, spilled: 32 bytes at rsp
 # acc14, spilled: 32 bytes at rsp + 32
@@ -189,6 +192,78 @@ ret";
     assert_eq!(code, want);
 }
 
+/// Memory is as much as the other operands say, or, where an instruction's forms differ by that
+/// alone, as Intel's word before the brackets says. A write to `r16` or `r8` keeps the rest of
+/// the register, so it needs a value there first.
+#[test]
+fn memory_is_as_much_as_the_operands_or_a_word_before_it_say() {
+    let code = compile(
+        "x: *mut u64",
+        "let g: gpr; zero(g); movzx(g.r32, byte[x]); add(dword[x], 1); mov(g.r16, word[x]); mov(g.r8, [[7u8]]); \
+         add(qword[x], g); add([x], g);",
+    )
+    .unwrap();
+    let want = "xor eax, eax
+movzx eax, byte ptr [rdi]
+add dword ptr [rdi], 1
+mov ax, word ptr [rdi]
+mov al, byte ptr [rip + {c0}]
+add qword ptr [rdi], rax
+add qword ptr [rdi], rax
+ret";
+    assert_eq!(code, want);
+}
+
+/// A gather reads memory at a vector of indices, `[p + v * 4]`, under a mask, and needs AVX2.
+#[test]
+fn a_gather_reads_memory_at_a_vector_of_indices() {
+    let src = "unsafe extern \"sysv64\" fn k(x: *const f32) {
+        let v: ymm; let m: ymm; let i: ymm;
+        zero(v); ones(m); zero(i);
+        vpgatherdd(v, [x + i * 4], m);
+        vpgatherdq(v, [x + i.xmm * 8], m);
+        vgatherqps(v.xmm, [x + i * 4], m.xmm);
+    }";
+    let listing = kgen::x86_str(src, "k").unwrap();
+    assert_eq!(listing.features, [Feature::Avx, Feature::Avx2]);
+    let code: Vec<&str> = listing.code().collect();
+    let want = [
+        "vxorps xmm0, xmm0, xmm0",
+        "vpcmpeqd ymm1, ymm1, ymm1",
+        "vxorps xmm2, xmm2, xmm2",
+        "vpgatherdd ymm0, dword ptr [rdi + ymm2*4], ymm1",
+        "vpgatherdq ymm0, qword ptr [rdi + xmm2*8], ymm1",
+        "vgatherqps xmm0, dword ptr [rdi + ymm2*4], xmm1",
+        "vzeroupper",
+        "ret",
+    ];
+    assert_eq!(code, want);
+}
+
+/// SysV leaves MXCSR's control bits as the caller set them, so a kernel that loads MXCSR stores
+/// the caller's first, in its frame, and loads it back before it returns.
+#[test]
+fn a_kernel_that_loads_mxcsr_gives_the_callers_back() {
+    let src = "unsafe extern \"sysv64\" fn k(x: *const u32) {\nvldmxcsr([x]);\n}\n";
+    let want = "# k(gpr) -> ()
+# needs: avx
+# frame: 4 bytes aligned to 4, saves []
+# mxcsr: 4 bytes at rsp
+# x=rdi
+    push rbp
+    mov rbp, rsp
+    sub rsp, 4
+    # the caller's mxcsr, which it gets back
+    vstmxcsr dword ptr [rsp]
+    vldmxcsr dword ptr [rdi]
+    vldmxcsr dword ptr [rsp]
+    mov rsp, rbp
+    pop rbp
+    ret
+";
+    assert_eq!(kgen::x86_str(src, "k").unwrap().text(), want);
+}
+
 #[test]
 fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
     let cases = [
@@ -224,8 +299,73 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
             "2:31: `vpblendd` wants a control byte, 0 to 255; this is the integer 256",
         ),
         ("let v: ymm; vbroadcastsd(v.xmm, [x]);", "2:28: `vbroadcastsd` wants a ymm; this is an xmm"),
-        ("let v: ymm; vpermps(v, v, v.xmm);", "2:29: `vpermps` wants a ymm or memory; this is an xmm"),
-        ("let v: ymm; vpermq(v, v.xmm, 1);", "2:25: `vpermq` wants a ymm or memory; this is an xmm"),
+        ("let v: ymm; vpermps(v, v, v.xmm);", "2:29: `vpermps` wants a ymm; this is an xmm"),
+        ("let v: ymm; vpermq(v, v.xmm, 1);", "2:25: `vpermq` wants a ymm; this is an xmm"),
+        (
+            "let g: gpr; zero(g); vmovd(g.r16, g);",
+            "2:30: `vmovd` wants a gpr (whole or as r32) or an xmm; this is a gpr's r16",
+        ),
+        (
+            "let g: gpr; zero(g); movzx(g, 1);",
+            "2:31: `movzx` wants a gpr (as r16 or r8) or memory of 1 or 2 bytes; this is the integer 1",
+        ),
+        ("let g: gpr; mov(g.r8, 1);", "2:5: `g` is read before anything writes it"),
+        (
+            "let g: gpr; movzx(g.r32, [x]);",
+            "2:26: `movzx` reaches 1 or 2 bytes of memory here: say which, `byte[..]` or `word[..]`",
+        ),
+        (
+            "add([x], 1);",
+            "2:5: `add` reaches 1, 2, 4 or 8 bytes of memory here: say which, `byte[..]`, `word[..]`, `dword[..]` or \
+             `qword[..]`",
+        ),
+        (
+            "let g: gpr; mov(g, dwrd[x]);",
+            "2:24: `dwrd` is not defined; before brackets, x86 names how much memory an instruction reaches: `byte`, \
+             `word`, `dword`, `qword`, `xmmword` or `ymmword`",
+        ),
+        ("let g: gpr; zero(g); mov(g, byte[x]);", "2:33: `mov` wants 8 bytes of memory; this is 1 byte of memory"),
+        ("let v: ymm; vmovups(v, qword[x]);", "2:29: `vmovups` wants 32 bytes of memory; this is 8 bytes of memory"),
+        (
+            "let g: gpr; lea(g, qword[x]);",
+            "2:25: `lea` takes an address and reaches no memory: no size before the brackets",
+        ),
+        (
+            "let v: ymm; zero(v); vmovups([[1.0; 8]], v);",
+            "2:30: `vmovups` writes this memory, which holds data known now and is read-only",
+        ),
+        (
+            "let v: ymm; let m: ymm; zero(v); ones(m); vpgatherdd(v, [x + v * 4], m);",
+            "2:57: `vpgatherdd` faults unless its result, its indices and its mask are three registers; `v` is its \
+             result and its indices",
+        ),
+        (
+            "let v: ymm; let m: ymm; zero(v); ones(m); vpgatherdd(v, [x + m * 4], m);",
+            "2:70: `vpgatherdd` faults unless its result, its indices and its mask are three registers; `m` is its \
+             indices and its mask",
+        ),
+        (
+            "let v: ymm; let m: ymm; zero(v); ones(m); vpgatherdd(v, [x + x * 4], m);",
+            "2:57: `vpgatherdd` wants 4 bytes of memory at a ymm of indices; this is memory at an index in a gpr",
+        ),
+        (
+            "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, [i * 4], m);",
+            "2:78: x86 adds a gpr to a vector of indices, as in `[p + v * 4]`",
+        ),
+        ("jmp(x);", "2:5: `jmp` wants a label; this is a gpr"),
+        ("let g: gpr; add(g, top); label(top);", "2:20: a label is for a jump"),
+        ("rdtscp();", "2:1: x86 has no instruction `rdtscp` that kgen knows"),
+        ("let v: ymm; addps(v.xmm, v.xmm);", "2:13: kgen writes `addps` as AVX does: `vaddps`"),
+        ("vzeroupper();", "2:1: kgen does not yet write `vzeroupper`, which clears the upper half of every vector"),
+        ("pcmpestri(x, x, 0);", "2:1: kgen writes `pcmpestri` as AVX does: `vpcmpestri`"),
+        ("mul(x);", "2:1: kgen does not yet write `mul`, which multiplies `rax` into `rdx:rax`"),
+        ("imul(x);", "2:1: kgen does not yet write `imul` of 1 operand, which multiplies `rax` into `rdx:rax`"),
+        ("shld(x, x);", "2:1: kgen does not yet write `shld` of 2 operands, which shifts by `cl`"),
+        (
+            "shl(x, cl);",
+            "2:8: kgen does not yet write `shl` by `cl`, a register of its own: shift by a number, or by a gpr with \
+             `shlx`, `shrx` or `sarx`",
+        ),
     ];
     for (body, want) in cases {
         assert_eq!(compile("x: *const f32", body).unwrap_err(), want, "{body}");
@@ -363,7 +503,7 @@ const STATICS: &str = r#"
         jz(done);
         lea(p, [COUNTS]);
         label(top);
-        movzx(v.r32, [x]);
+        movzx(v.r32, byte[x]);
         mov(c.r32, [p + v * 4]);
         inc(c);
         mov([p + v * 4], c.r32);
@@ -385,7 +525,7 @@ const STATICS: &str = r#"
         let c: gpr;
         mov(c.r32, [COUNTS + 8]);
         mov([x + 32], c.r32);
-        movzx(c.r32, [SIGNED + 2]);
+        movzx(c.r32, byte[SIGNED + 2]);
         mov([x + 36], c.r32);
     }
 "#;
@@ -420,6 +560,7 @@ fn a_static_is_reached_at_a_displacement_from_rip() {
     assert_eq!(count.statics, ["SEEN", "COUNTS"]);
     let weigh = kgen::x86_str(STATICS, "weigh").unwrap();
     let want = "# weigh(gpr) -> ()
+# needs: avx
 # frame: 0 bytes aligned to 0, saves []
 # x=rdi v=ymm0 w=ymm1 c=rax
     vmovups ymm0, ymmword ptr [rdi]
@@ -519,6 +660,10 @@ fn a_static_is_reached_within_it() {
             "4:30: `vmovaps` writes `W`, which is constant memory: the kernels only read it",
         ),
         (
+            "add(dword[W + 4], 1);",
+            "4:10: `add` reads and writes `W`, which is constant memory: the kernels only read it",
+        ),
+        (
             "let v: ymm; vmovaps(v, [C]);",
             "4:24: `vmovaps` reads 32 bytes at once, at an address that is a multiple of 32; `C` is at a multiple of \
              4: `global<[u32; 16], 32>`, or `vmovups` at any",
@@ -553,11 +698,15 @@ fn a_static_is_reached_within_it() {
         let src = format!("{statics}unsafe extern \"sysv64\" fn k(x: *const f32) {{\n{body}\n}}\n");
         assert_eq!(kgen::x86_str(&src, "k").unwrap_err(), want, "{body}");
     }
-    // As far as one past the end for `lea`, which reaches nothing, of constant memory as well.
-    let src =
-        format!("{statics}unsafe extern \"sysv64\" fn k() {{\nlet g: gpr;\nlea(g, [C + 64]);\nlea(g, [W]);\n}}\n");
+    // As far as one past the end for `lea`, which reaches nothing, of constant memory as well;
+    // and an instruction that reads and writes memory of the module's, which is no constant.
+    let src = format!(
+        "{statics}unsafe extern \"sysv64\" fn k() {{\nlet g: gpr;\nlea(g, [C + 64]);\nlea(g, [W]);\nadd(dword[C + 8], \
+         1);\n}}\n"
+    );
     let code = kgen::x86_str(&src, "k").unwrap();
-    assert_eq!(code.code().collect::<Vec<_>>(), ["lea rax, [rip + {C} + 64]", "lea rax, [rip + {W}]", "ret"]);
+    let want = ["lea rax, [rip + {C} + 64]", "lea rax, [rip + {W}]", "add dword ptr [rip + {C} + 8], 1", "ret"];
+    assert_eq!(code.code().collect::<Vec<_>>(), want);
 }
 
 /// A static of an x86 kernel's module is of Rust's numbers, as the host reads them, of a size
@@ -801,7 +950,7 @@ fn the_grid_is_a_cooperative_kernels_to_read_and_wait_for() {
              `grid.block`",
         ),
         ("mov(grid.thread, x);", "3:10: `grid.thread` is read, as in `mov(t, grid.thread)`; the launcher writes it"),
-        ("inc(grid.threads);", "3:10: `inc` wants a gpr; this is memory"),
+        ("inc(grid.threads);", "3:10: `grid.threads` is read, as in `mov(t, grid.threads)`; the launcher writes it"),
         (
             "let t: gpr; lea(t, grid.thread);",
             "3:25: `grid.thread` is read, as in `mov(t, grid.thread)`; `lea` takes the address of the kernel's memory",
@@ -869,6 +1018,7 @@ fn stack_memory_is_part_of_the_frame() {
         }
     "#;
     let want = "# k(gpr, gpr) -> vec
+# needs: avx
 # frame: 96 bytes aligned to 32, saves []
 # n: 8 bytes at rsp
 # buf: 64 bytes at rsp + 32
@@ -1012,8 +1162,8 @@ fn stack_memory_is_checked_where_kgen_can() {
             "2:55: `vmovups` writes 32 bytes at `[b + 36]`, past the end of `b`, 64 bytes",
         ),
         (
-            "let b: local<u8>; let g: gpr; movzx(g.r32, [b]); mov([b], g.r32);",
-            "2:54: `mov` writes 4 bytes at `[b]`, past the end of `b`, 1 byte",
+            "let b: local<u8>; let g: gpr; movzx(g.r32, byte[b]); mov([b], g.r32);",
+            "2:58: `mov` writes 4 bytes at `[b]`, past the end of `b`, 1 byte",
         ),
         (
             "let b: local<[f32; 16]>; let v: ymm; vmovups(v, [b + 5000000000]);",
@@ -1190,6 +1340,7 @@ fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
 ";
     assert_eq!(kgen::x86_str(CALLERS, "plus").unwrap().text(), want);
     let want = "# keep(gpr) -> ()
+# needs: avx
 # frame: 32 bytes aligned to 32, saves [rbx]
 # v, spilled: 32 bytes at rsp
 # p=rbx,rdi v=ymm0
@@ -1376,6 +1527,14 @@ fn a_call_is_checked_against_its_callee() {
             "2:24: `vmovups` takes no function's code: `lea(p, [gcd])` puts the address of `gcd` in `p`",
         ),
         (
+            "let v: ymm; vmovups(v, ymmword[gcd]);",
+            "2:31: `vmovups` takes no function's code: `lea(p, [gcd])` puts the address of `gcd` in `p`",
+        ),
+        (
+            "let p: gpr; lea(p, qword[gcd]);",
+            "2:25: `lea` takes an address and reaches no memory: no size before the brackets",
+        ),
+        (
             "let p: gpr; lea(p, [together]);",
             "2:20: `together` is `#[cooperative]`: its threads run on a grid, which its launcher starts, so no \
              kernel calls it",
@@ -1453,77 +1612,132 @@ fn a_function_that_never_returns_is_checked() {
     }
 }
 
-/// `llvm-mc`, LLVM's assembler, which assembles a kernel's `naked_asm!` as rustc does:
-/// `$LLVM_MC`, or on the path.
-fn llvm_mc() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("LLVM_MC") {
+/// A program of the toolchain: `$var`, or `name` on the path, if it runs.
+fn tool(var: &str, name: &str) -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os(var) {
         return Some(p.into());
     }
-    let here = Command::new("llvm-mc").arg("--version").output().is_ok_and(|o| o.status.success());
-    here.then(|| "llvm-mc".into())
+    let here = Command::new(name).arg("--version").output().is_ok_and(|o| o.status.success());
+    here.then(|| name.into())
 }
 
-/// What the language gives an x86 instruction in a place: a ymm, an xmm, a gpr, its r32,
-/// memory, and integers of 8, 32 and 64 bits.
-const OPERANDS: &[&str] = &["ymm", "xmm", "gpr", "r32", "[x]", "1", "100000", "0x123456789"];
-
-/// `name` called with an operand of each of `kinds`, each variable one of its own, written
-/// before and read after, by an instruction of another name: no two share a register, so that
-/// kgen leaves out no move of one to another, as it leaves out a move of a register to itself.
-fn called(name: &str, kinds: &[&str]) -> String {
+/// The kernel `k` around a call of `name` in `form`: each operand a variable of its own, written
+/// before and read after by an instruction of another name, so that no two share a register and
+/// kgen leaves out no move of one to another, as it leaves out a move of a register to itself;
+/// memory at `x` of the size the form reaches, a vector of indices beside it; and each integer
+/// the least the form takes there, or the most.
+fn call(name: &str, form: &Form, most: bool) -> String {
     let mut body = String::new();
     let mut after = String::new();
     let mut args = vec![];
-    for (i, &kind) in kinds.iter().enumerate() {
-        args.push(match kind {
-            "ymm" | "xmm" => {
-                body += &format!("let v{i}: ymm; zero(v{i});\n");
-                after += &format!("\n{}([x], v{i});", if name == "vmovups" { "vmovdqu" } else { "vmovups" });
-                if kind == "ymm" { format!("v{i}") } else { format!("v{i}.xmm") }
-            }
-            "gpr" | "r32" => {
+    let store = if name == "vmovups" { "vmovdqu" } else { "vmovups" };
+    let test = if name == "test" { "cmp" } else { "test" };
+    for (i, spec) in form.operands.iter().enumerate() {
+        let mut vector = |bytes: u32| {
+            body += &format!("let v{i}: ymm; zero(v{i});\n");
+            after += &format!("\n{store}([x], v{i});");
+            if bytes == 32 { format!("v{i}") } else { format!("v{i}.xmm") }
+        };
+        args.push(match spec.kind {
+            Kind::Gpr(w) => {
                 body += &format!("let g{i}: gpr; zero(g{i});\n");
-                after += &format!("\n{}(g{i}, g{i});", if name == "test" { "cmp" } else { "test" });
-                if kind == "gpr" { format!("g{i}") } else { format!("g{i}.r32") }
+                after += &format!("\n{test}(g{i}, g{i});");
+                if w.bytes() == 8 { format!("g{i}") } else { format!("g{i}.r{}", w.bytes() * 8) }
             }
-            given => given.to_string(),
+            Kind::Vec(w) => vector(w.bytes()),
+            Kind::Mem(w) | Kind::Aligned(w) => format!("{}[x]", forms::word(w)),
+            Kind::Addr => "[x]".into(),
+            Kind::Vsib(elem, index) => format!("{}[x + {} * 4]", forms::word(elem), vector(index.bytes())),
+            Kind::Label => "end".into(),
+            kind => {
+                let (least, most_) = kind.ints().expect("an integer");
+                (if most { most_ } else { least }).to_string()
+            }
         });
     }
-    format!("{body}{name}({});{after}", args.join(", "))
+    let end = if form.operands.iter().any(|s| s.kind == Kind::Label) { "\nlabel(end);" } else { "" };
+    format!("{body}{name}({});{after}{end}", args.join(", "))
 }
 
-/// Every instruction the language names, given every operand in each of up to four places,
-/// takes what x86 has: `llvm-mc` assembles each line kgen writes, and encodes none with EVEX,
-/// which only AVX-512 reads. `llvm-mc` assembles AVX-512 for any machine, so the test refuses
-/// it itself.
+/// `lines` as a file the assemblers read, Intel's syntax, and a jump's label after it: the file,
+/// and the line of it each of `lines` is, counted from 1.
+fn source(lines: &[&str]) -> (String, Vec<usize>) {
+    let mut text = String::from(".intel_syntax noprefix\n");
+    let (mut at, mut n) = (vec![], 1);
+    for line in lines {
+        text += &format!("{line}\n");
+        n += 1;
+        at.push(n);
+        // A jump names its label ahead, `jz 2f`.
+        let label = line.rsplit(' ').next().and_then(|t| t.strip_suffix('f')).filter(|t| t.parse::<u32>().is_ok());
+        if let Some(label) = label {
+            text += &format!("{label}:\n");
+            n += 1;
+        }
+    }
+    (text, at)
+}
+
+/// `program` run with `args` on `text`, written to the test's directory as `name`: whether it
+/// succeeded, what it wrote, and the lines of `text` it says something of, by number, with what.
+fn assemble(program: &PathBuf, args: &[&str], name: &str, text: &str) -> (bool, String, Vec<(usize, String)>) {
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::write(&path, text).unwrap();
+    let run = Command::new(program).args(args).arg(&path).output().unwrap();
+    let file = path.to_string_lossy().into_owned();
+    // `path:line: Error: why` from GNU as, `path:line:column: error: why` from llvm-mc.
+    let said = String::from_utf8_lossy(&run.stderr)
+        .lines()
+        .filter_map(|e| {
+            let rest = e.strip_prefix(&file)?.strip_prefix(':')?;
+            let (line, why) = rest.split_once(':')?;
+            Some((line.parse().ok()?, why.trim().to_string()))
+        })
+        .collect();
+    (run.status.success(), String::from_utf8_lossy(&run.stdout).into_owned(), said)
+}
+
+/// GNU as's name for `f`, in `-march`.
+fn gas(f: Feature) -> &'static str {
+    match f {
+        Feature::Bmi1 => "bmi",
+        f => f.name(),
+    }
+}
+
+/// Every form of every instruction kgen knows comes out of the language as a line `llvm-mc`
+/// assembles, which assembles a kernel's `naked_asm!` as rustc does, with each integer the
+/// least the form takes and the most; and encodes none with EVEX, which only AVX-512 reads,
+/// and which `llvm-mc` assembles for any machine. GNU as, which knows what each feature adds,
+/// takes each line on a machine of the CPU feature its form names, and refuses it on a machine
+/// of every feature before that one; and the listing names the feature.
 #[test]
-fn llvm_mc_takes_every_form_kgen_writes() {
-    let Some(mc) = llvm_mc() else {
-        eprintln!("no llvm-mc here: skipped; set LLVM_MC to run it");
+fn every_form_kgen_knows_assembles_on_a_machine_of_its_feature() {
+    let (Some(mc), Some(gnu)) = (tool("LLVM_MC", "llvm-mc"), tool("GNU_AS", "as")) else {
+        eprintln!("no llvm-mc or GNU as here: skipped; set LLVM_MC and GNU_AS to run it");
         return;
     };
-    // The jumps take a label, and `ret`, `zero` and `ones` are kgen's own.
-    let names: Vec<_> =
-        kgen_x86::lang::mnemonics().filter(|n| !n.starts_with('j') && !["ret", "zero", "ones"].contains(n)).collect();
-    let mut tuples: Vec<Vec<&str>> = vec![vec![]];
-    let mut every = tuples.clone();
-    for _ in 0..4 {
-        tuples = tuples.iter().flat_map(|t| OPERANDS.iter().map(move |o| [t.as_slice(), &[*o]].concat())).collect();
-        every.extend(tuples.iter().cloned());
-    }
+    let all: Vec<&Form> = forms::names().flat_map(|n| forms::of(n).unwrap()).collect();
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let written = Mutex::new(vec![]);
     std::thread::scope(|s| {
-        for chunk in names.chunks(names.len().div_ceil(threads)) {
-            let (every, written) = (&every, &written);
+        for chunk in all.chunks(all.len().div_ceil(threads)) {
+            let written = &written;
             s.spawn(move || {
-                for name in chunk {
-                    for kinds in every {
-                        let call = called(name, kinds);
-                        let Ok(code) = compile("x: *mut f32", &call) else { continue };
-                        let line = code.lines().rfind(|l| l.split(' ').next() == Some(*name));
-                        let line = line.unwrap_or_else(|| panic!("no `{name}` in\n{code}"));
-                        written.lock().unwrap().push((name.to_string(), call, line.to_string()));
+                for form in chunk {
+                    let ints = form.operands.iter().any(|s| s.kind.ints().is_some());
+                    for most in [false, true].into_iter().take(if ints { 2 } else { 1 }) {
+                        let call = call(form.op.name(), form, most);
+                        let src = format!("unsafe extern \"sysv64\" fn k(x: *mut f32) {{\n{call}\n}}\n");
+                        let listing = kgen::x86_str(&src, "k").unwrap_or_else(|e| panic!("{e}, of\n{call}"));
+                        if let Some(f) = form.feature {
+                            assert!(listing.features.contains(&f), "no {f:?} in {:?}, of\n{call}", listing.features);
+                        }
+                        let mnemonic = form.op.mnemonic();
+                        let line =
+                            listing.code().filter(|l| *l == mnemonic || l.starts_with(&format!("{mnemonic} "))).last();
+                        let line = line.unwrap_or_else(|| panic!("no `{mnemonic}` in\n{}", listing.text()));
+                        written.lock().unwrap().push((form.feature, line.to_string(), call));
                     }
                 }
             });
@@ -1531,37 +1745,120 @@ fn llvm_mc_takes_every_form_kgen_writes() {
     });
     let mut written = written.into_inner().unwrap();
     written.sort();
-    for name in &names {
-        assert!(written.iter().any(|(n, ..)| n == name), "`{name}` took none of the operands tried");
-    }
 
-    let src = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("x86-forms.s");
-    let lines: String = written.iter().map(|(.., line)| format!("{line}\n")).collect();
-    std::fs::write(&src, format!(".intel_syntax noprefix\n{lines}")).unwrap();
-    let run = Command::new(&mc)
-        .args(["-triple=x86_64", "-x86-asm-syntax=intel", "-show-encoding"])
-        .arg(&src)
-        .output()
-        .unwrap();
-    // `path:line:column: error: why`, the file's first line being the directive.
-    let refused: Vec<String> = String::from_utf8_lossy(&run.stderr)
-        .lines()
-        .filter_map(|e| {
-            let (at, why) = e.split_once(": error: ")?;
-            let line: usize = at.rsplit(':').nth(1)?.parse().ok()?;
-            let (_, call, written) = &written[line - 2];
-            Some(format!("{written}: {why}, from\n{call}"))
+    let lines: Vec<&str> = written.iter().map(|(_, line, _)| line.as_str()).collect();
+    let (text, at) = source(&lines);
+    let of = |n: usize| at.iter().position(|&a| a == n).map(|i| &written[i]);
+    let (ok, out, said) = assemble(&mc, &["-triple=x86_64", "-x86-asm-syntax=intel", "-show-encoding"], "x86.s", &text);
+    let refused: Vec<String> = said
+        .iter()
+        .map(|(n, why)| match of(*n) {
+            Some((_, line, call)) => format!("{line}: {why}, of\n{call}"),
+            None => format!("line {n}: {why}"),
         })
         .collect();
-    assert!(
-        refused.is_empty() && run.status.success(),
-        "llvm-mc refuses what kgen writes:\n\n{}",
-        refused.join("\n\n")
-    );
-    let stdout = String::from_utf8_lossy(&run.stdout);
-    let encodings: Vec<&str> = stdout.lines().filter_map(|l| l.split_once("encoding: [").map(|(_, e)| e)).collect();
-    assert_eq!(encodings.len(), written.len());
-    let evex: Vec<_> =
-        written.iter().zip(&encodings).filter(|(_, e)| e.starts_with("0x62")).map(|((.., line), _)| line).collect();
+    assert!(refused.is_empty() && ok, "llvm-mc refuses what kgen writes:\n\n{}", refused.join("\n\n"));
+    let encodings: Vec<&str> = out.lines().filter_map(|l| l.split_once("encoding: [").map(|(_, e)| e)).collect();
+    assert_eq!(encodings.len(), lines.len());
+    let evex: Vec<_> = lines.iter().zip(&encodings).filter(|(_, e)| e.starts_with("0x62")).map(|(l, _)| l).collect();
     assert!(evex.is_empty(), "kgen writes AVX-512's EVEX: {evex:#?}");
+
+    let features = [None].into_iter().chain(Feature::ALL.map(Some));
+    for (k, feature) in features.enumerate() {
+        let group: Vec<_> = written.iter().filter(|(f, ..)| *f == feature).collect();
+        let lines: Vec<&str> = group.iter().map(|(_, line, _)| line.as_str()).collect();
+        let (text, at) = source(&lines);
+        let name = format!("x86-{}.s", feature.map_or("x86-64", Feature::name));
+        let of = |n: usize| at.iter().position(|&a| a == n).map(|i| group[i]);
+        let march = |fs: &[Feature]| {
+            format!("-march=generic64{}", fs.iter().map(|&f| format!("+{}", gas(f))).collect::<String>())
+        };
+        let on = march(feature.as_slice());
+        let (ok, _, said) = assemble(&gnu, &["--64", &on, "-o", "/dev/null"], &name, &text);
+        let refused: Vec<String> = said
+            .iter()
+            .map(|(n, why)| match of(*n) {
+                Some((_, line, call)) => format!("{line}: {why}, of\n{call}"),
+                None => format!("line {n}: {why}"),
+            })
+            .collect();
+        assert!(refused.is_empty() && ok, "GNU as {on} says, of what kgen writes:\n\n{}", refused.join("\n\n"));
+        if feature.is_none() {
+            continue;
+        }
+        // Every feature before this one, which builds on none after it.
+        let before = march(&Feature::ALL[..k - 1]);
+        let (_, _, said) = assemble(&gnu, &["--64", &before, "-o", "/dev/null"], &name, &text);
+        let taken: Vec<&str> = at
+            .iter()
+            .zip(&lines)
+            .filter(|(n, _)| !said.iter().any(|(m, why)| m == *n && why.starts_with("Error")))
+            .map(|(_, l)| *l)
+            .collect();
+        assert!(taken.is_empty(), "GNU as {before} takes what kgen says needs {feature:?}: {taken:#?}");
+    }
+}
+
+/// Every instruction of x86-64-v3 that `llvm-mc` takes without AVX-512, kgen knows, or names as
+/// one it does not yet write, and why; and kgen knows no other. They are x86-64's own on
+/// integers, SSE's to SSE4.2's as AVX writes them, and those of AVX, AVX2, FMA, F16C, BMI1,
+/// BMI2, LZCNT, POPCNT and MOVBE; not the stack's, the strings', `loop`, x87's, MMX's or the
+/// system's.
+#[test]
+fn kgen_knows_every_instruction_of_x86_64_v3() {
+    const V3: &str = "
+        adc add and andn bextr blsi blsmsk blsr bsf bsr bswap bt btc btr bts bzhi cbw cdq cdqe clc clflush cmc cmp
+        cmpxchg cmpxchg16b cmpxchg8b cpuid cqo crc32 cwd cwde dec div idiv imul inc int3 jmp lahf lea lfence lock.adc
+        lock.add lock.and lock.btc lock.btr lock.bts lock.cmpxchg lock.dec lock.inc lock.neg lock.not lock.or lock.sbb
+        lock.sub lock.xadd lock.xchg lock.xor lzcnt mfence mov movbe movnti movsx movsxd movzx mul mulx neg nop not or
+        pause pdep pext popcnt prefetchnta prefetcht0 prefetcht1 prefetcht2 rcl rcr rdtsc rol ror rorx sahf sal sar sarx
+        sbb sfence shl shld shlx shr shrd shrx stc sub test tzcnt ud2 vaddpd vaddps vaddsd vaddss vaddsubpd vaddsubps
+        vandnpd vandnps vandpd vandps vblendpd vblendps vblendvpd vblendvps vbroadcastf128 vbroadcasti128 vbroadcastsd
+        vbroadcastss vcmppd vcmpps vcmpsd vcmpss vcomisd vcomiss vcvtdq2pd vcvtdq2ps vcvtpd2dq vcvtpd2ps vcvtph2ps
+        vcvtps2dq vcvtps2pd vcvtps2ph vcvtsd2si vcvtsd2ss vcvtsi2sd vcvtsi2ss vcvtss2sd vcvtss2si vcvttpd2dq vcvttps2dq
+        vcvttsd2si vcvttss2si vdivpd vdivps vdivsd vdivss vdppd vdpps vextractf128 vextracti128 vextractps vfmadd132pd
+        vfmadd132ps vfmadd132sd vfmadd132ss vfmadd213pd vfmadd213ps vfmadd213sd vfmadd213ss vfmadd231pd vfmadd231ps
+        vfmadd231sd vfmadd231ss vfmaddsub132pd vfmaddsub132ps vfmaddsub213pd vfmaddsub213ps vfmaddsub231pd
+        vfmaddsub231ps vfmsub132pd vfmsub132ps vfmsub132sd vfmsub132ss vfmsub213pd vfmsub213ps vfmsub213sd vfmsub213ss
+        vfmsub231pd vfmsub231ps vfmsub231sd vfmsub231ss vfmsubadd132pd vfmsubadd132ps vfmsubadd213pd vfmsubadd213ps
+        vfmsubadd231pd vfmsubadd231ps vfnmadd132pd vfnmadd132ps vfnmadd132sd vfnmadd132ss vfnmadd213pd vfnmadd213ps
+        vfnmadd213sd vfnmadd213ss vfnmadd231pd vfnmadd231ps vfnmadd231sd vfnmadd231ss vfnmsub132pd vfnmsub132ps
+        vfnmsub132sd vfnmsub132ss vfnmsub213pd vfnmsub213ps vfnmsub213sd vfnmsub213ss vfnmsub231pd vfnmsub231ps
+        vfnmsub231sd vfnmsub231ss vgatherdpd vgatherdps vgatherqpd vgatherqps vhaddpd vhaddps vhsubpd vhsubps
+        vinsertf128 vinserti128 vinsertps vlddqu vldmxcsr vmaskmovdqu vmaskmovpd vmaskmovps vmaxpd vmaxps vmaxsd vmaxss
+        vminpd vminps vminsd vminss vmovapd vmovaps vmovd vmovddup vmovdqa vmovdqu vmovhlps vmovhpd vmovhps vmovlhps
+        vmovlpd vmovlps vmovmskpd vmovmskps vmovntdq vmovntdqa vmovntpd vmovntps vmovq vmovsd vmovshdup vmovsldup vmovss
+        vmovupd vmovups vmpsadbw vmulpd vmulps vmulsd vmulss vorpd vorps vpabsb vpabsd vpabsw vpackssdw vpacksswb
+        vpackusdw vpackuswb vpaddb vpaddd vpaddq vpaddsb vpaddsw vpaddusb vpaddusw vpaddw vpalignr vpand vpandn vpavgb
+        vpavgw vpblendd vpblendvb vpblendw vpbroadcastb vpbroadcastd vpbroadcastq vpbroadcastw vpcmpeqb vpcmpeqd
+        vpcmpeqq vpcmpeqw vpcmpestri vpcmpestrm vpcmpgtb vpcmpgtd vpcmpgtq vpcmpgtw vpcmpistri vpcmpistrm vperm2f128
+        vperm2i128 vpermd vpermilpd vpermilps vpermpd vpermps vpermq vpextrb vpextrd vpextrq vpextrw vpgatherdd
+        vpgatherdq vpgatherqd vpgatherqq vphaddd vphaddsw vphaddw vphminposuw vphsubd vphsubsw vphsubw vpinsrb vpinsrd
+        vpinsrq vpinsrw vpmaddubsw vpmaddwd vpmaskmovd vpmaskmovq vpmaxsb vpmaxsd vpmaxsw vpmaxub vpmaxud vpmaxuw
+        vpminsb vpminsd vpminsw vpminub vpminud vpminuw vpmovmskb vpmovsxbd vpmovsxbq vpmovsxbw vpmovsxdq vpmovsxwd
+        vpmovsxwq vpmovzxbd vpmovzxbq vpmovzxbw vpmovzxdq vpmovzxwd vpmovzxwq vpmuldq vpmulhrsw vpmulhuw vpmulhw vpmulld
+        vpmullw vpmuludq vpor vpsadbw vpshufb vpshufd vpshufhw vpshuflw vpsignb vpsignd vpsignw vpslld vpslldq vpsllq
+        vpsllvd vpsllvq vpsllw vpsrad vpsravd vpsraw vpsrld vpsrldq vpsrlq vpsrlvd vpsrlvq vpsrlw vpsubb vpsubd vpsubq
+        vpsubsb vpsubsw vpsubusb vpsubusw vpsubw vptest vpunpckhbw vpunpckhdq vpunpckhqdq vpunpckhwd vpunpcklbw
+        vpunpckldq vpunpcklqdq vpunpcklwd vpxor vrcpps vrcpss vroundpd vroundps vroundsd vroundss vrsqrtps vrsqrtss
+        vshufpd vshufps vsqrtpd vsqrtps vsqrtsd vsqrtss vstmxcsr vsubpd vsubps vsubsd vsubss vtestpd vtestps vucomisd
+        vucomiss vunpckhpd vunpckhps vunpcklpd vunpcklps vxorpd vxorps vzeroall vzeroupper xadd xchg xgetbv xor
+    ";
+    let conditions = "a ae b be c e g ge l le na nae nb nbe nc ne ng nge nl nle no np ns nz o p pe po s z";
+    let predicates = "eq lt le unord neq nlt nle ord eq_uq nge ngt false neq_oq ge gt true eq_os lt_oq le_oq unord_s \
+                      neq_us nlt_uq nle_uq ord_s eq_us nge_uq ngt_uq false_os neq_os ge_oq gt_oq true_us";
+    let mut v3: Vec<String> = V3.split_whitespace().map(String::from).collect();
+    for c in conditions.split(' ') {
+        v3.extend([format!("j{c}"), format!("cmov{c}"), format!("set{c}")]);
+    }
+    for p in predicates.split(' ') {
+        v3.extend(["ps", "pd", "ss", "sd"].map(|t| format!("vcmp{p}{t}")));
+    }
+    for name in &v3 {
+        let later = forms::LATER.iter().any(|(n, _)| n == name);
+        assert!(forms::of(name).is_some() != later, "`{name}` is known or later, and not both");
+    }
+    for name in forms::names() {
+        assert!(v3.iter().any(|n| n == name), "`{name}` is not of x86-64-v3");
+    }
 }

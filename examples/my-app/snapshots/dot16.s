@@ -1,4 +1,5 @@
 # dot::<16>(gpr, gpr, gpr) -> vec
+# needs: avx, fma
 # frame: 64 bytes aligned to 32, saves []
 # acc15, spilled: 32 bytes at rsp
 # acc14, spilled: 32 bytes at rsp + 32

@@ -1,4 +1,5 @@
 # sum16(gpr) -> vec
+# needs: avx
 # frame: 32 bytes aligned to 32, saves [rbx]
 # low, spilled: 32 bytes at rsp
 # xs=rbx,rdi high=ymm0 low=ymm0,ymm1

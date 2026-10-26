@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use kgen_core::Access::{Ignored, Read, ReadWrite, Write};
-use kgen_core::Width::{W8, W16, W32, W64, W128};
+use kgen_core::Width::{self, W8, W16, W32, W64, W128, W256};
 use kgen_core::{
     Arg, Base, Class, Const, ConstId, Flow, Inst, Item, Label, Operand, Program, RegInfo, Signature, Slot as SlotSpec,
     SlotId, VReg,
@@ -520,13 +520,41 @@ impl Asm {
 
     /// `vpgatherdd`: eight 32-bit entries, where mask lanes have their high bit set. The
     /// instruction clears those mask bits as it gathers, and leaves other destination lanes.
+    ///
+    /// # Panics
+    ///
+    /// Unless `from` is at a ymm of indices, and `dst`, the indices and `mask` are three
+    /// registers, without which the instruction faults.
     pub fn vpgatherdd(&mut self, dst: Ymm, from: Addr, mask: Ymm) {
-        self.emit(Op::Vpgatherdd, vec![vec(dst, ReadWrite), mem(from, W32), vec(mask, ReadWrite)]);
+        self.gather(Op::Vpgatherdd, dst.0, (from, W32, W256), mask.0);
     }
 
     /// `vpgatherdq`: four 64-bit entries from four XMM 32-bit offsets.
+    ///
+    /// # Panics
+    ///
+    /// Unless `from` is at an xmm of indices, and `dst`, the indices and `mask` are three
+    /// registers, without which the instruction faults.
     pub fn vpgatherdq(&mut self, dst: Ymm, from: Addr, mask: Ymm) {
-        self.emit(Op::Vpgatherdq, vec![vec(dst, ReadWrite), mem(from, W64), vec(mask, ReadWrite)]);
+        self.gather(Op::Vpgatherdq, dst.0, (from, W64, W128), mask.0);
+    }
+
+    /// A gather into `dst` of elements of `width` from `from`, at indices in a vector of
+    /// `index_width`, under `mask`: the vector of indices is an operand it reads, at that width,
+    /// which the operands do not write out.
+    fn gather(&mut self, op: Op, dst: VReg, (from, width, index_width): (Addr, Width, Width), mask: VReg) {
+        let index = match from.index {
+            Some((i, _)) if i.class == Class::Vec => i,
+            _ => panic!("`{}` reads memory at a vector of indices", op.name()),
+        };
+        assert!(
+            dst != mask && dst != index && index != mask,
+            "`{}` faults unless its result, indices and mask are three registers",
+            op.name()
+        );
+        let implicit = vec![arg(Operand::Reg(index, index_width), Read)];
+        let wide = |v: VReg| arg(Operand::Reg(v, W256), ReadWrite);
+        self.inst(op, vec![wide(dst), mem(from, width), wide(mask)], implicit, Flow::Next);
     }
 
     /// `vpcmpeqd v, v, v`: all 32-bit lanes set, depending on nothing.

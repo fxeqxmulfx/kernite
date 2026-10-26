@@ -1036,7 +1036,9 @@ fn naked(
         && args.is_empty()
         && !cooperative
     {
-        out.extend(contract(attrs(f, top), named));
+        let mut docs = attrs(f, top);
+        docs.extend(needs(instances));
+        out.extend(contract(docs, named));
         out.extend(parse("#[unsafe(naked)]"));
         out.extend(signature(f, top));
         let code = asm(
@@ -1074,10 +1076,12 @@ fn naked(
             arms.push((args.clone(), format!("{hidden}::I{k} as {ty}")));
         }
         if cooperative {
-            out.extend(grid_launcher(f, Some(&arms), named, top));
+            out.extend(grid_launcher(f, Some(&arms), needs(instances), named, top));
         } else {
             let names: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
-            out.extend(contract(attrs(f, top), named));
+            let mut docs = attrs(f, top);
+            docs.extend(needs(instances));
+            out.extend(contract(docs, named));
             out.extend(parse("#[inline(always)]"));
             out.extend(signature(f, top));
             let body = format!("unsafe {{ ({})({}) }}", pick(f, &arms), names.join(", "));
@@ -1245,10 +1249,17 @@ fn callees(module: &lang::Module, listing: &kgen::Listing, inside: bool) -> Vec<
 /// instance `kernels` has for `f`'s compile-time arguments, given its place in the grid. A
 /// pointer reaches the threads as the address it is, which each makes a pointer again, as
 /// Rust's pointers do not cross threads. Without `kernels`, it never runs, for a kernel that
-/// did not compile. Its safety contract says that nothing else touches `named`, the module's
-/// memory, while the threads run.
-fn grid_launcher(f: &Fn, kernels: Option<&[(Vec<Value>, String)]>, named: &[&str], top: &[TokenTree]) -> TokenStream {
+/// did not compile. `needs` is the doc of the CPU features the kernels need. Its safety
+/// contract says that nothing else touches `named`, the module's memory, while the threads run.
+fn grid_launcher(
+    f: &Fn,
+    kernels: Option<&[(Vec<Value>, String)]>,
+    needs: TokenStream,
+    named: &[&str],
+    top: &[TokenTree],
+) -> TokenStream {
     let mut out = attrs(f, top);
+    out.extend(needs);
     out.extend(parse(
         "#[doc = \"\"]\n#[doc = \" Every thread of the grid runs at once, as `grid.sync()` needs, each on a core, so a \
          grid of more threads than [`kgen_cpu::most`] says the machine runs is an error.\"]",
@@ -1314,6 +1325,24 @@ fn grid_launcher(f: &Fn, kernels: Option<&[(Vec<Value>, String)]>, named: &[&str
     out
 }
 
+/// The doc that names the CPU features past x86-64's own the code of `instances` needs, which
+/// nothing checks for when it runs; none if it needs none.
+fn needs(instances: &[(Vec<Value>, kgen::Listing)]) -> TokenStream {
+    let mut features: Vec<&str> = instances.iter().flat_map(|(_, l)| l.features.iter().map(|f| f.name())).collect();
+    features.sort();
+    features.dedup();
+    let named: Vec<String> = features.iter().map(|f| format!("`{f}`")).collect();
+    let (list, noun) = match named.as_slice() {
+        [] => return TokenStream::new(),
+        [one] => (one.clone(), "feature"),
+        [rest @ .., last] => (format!("{} and {last}", rest.join(", ")), "features"),
+    };
+    parse(&format!(
+        "#[doc = \"\"]\n#[doc = \" Needs the CPU {noun} {list}, past x86-64's own, which nothing checks for when it \
+         runs.\"]"
+    ))
+}
+
 /// `f`, an x86 kernel that does not compile, as a function that never runs: of `f`'s
 /// signature, or of its launcher's, for a cooperative kernel. One of compile-time arguments has
 /// its `instances` in its hidden module too, as [`naked`] would put them there, for kernels
@@ -1321,7 +1350,7 @@ fn grid_launcher(f: &Fn, kernels: Option<&[(Vec<Value>, String)]>, named: &[&str
 /// module's memory.
 fn x86_stub(f: &Fn, instances: usize, named: &[&str], top: &[TokenTree]) -> TokenStream {
     if f.cooperative.is_some() {
-        return grid_launcher(f, None, named, top);
+        return grid_launcher(f, None, TokenStream::new(), named, top);
     }
     let mut out = stub(f, top);
     if !f.generics.is_empty() && instances > 0 {

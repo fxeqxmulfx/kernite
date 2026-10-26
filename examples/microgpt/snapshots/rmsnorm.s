@@ -1,4 +1,5 @@
 # rmsnorm(gpr, gpr, gpr, gpr) -> ()
+# needs: avx, avx2, fma
 # frame: 0 bytes aligned to 0, saves []
 # y=rdi r=rsi x=rdx n=rcx one=ymm0 ss=ymm1
 # v=ymm2,ymm1 s=ymm1

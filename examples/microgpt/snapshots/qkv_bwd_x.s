@@ -1,4 +1,5 @@
 # qkv_bwd_x(gpr, gpr, gpr, gpr) -> ()
+# needs: avx, fma
 # frame: 0 bytes aligned to 0, saves []
 # dx=rdi dy=rsi w=rdx n=rcx wi=rax xi=r8
 # left=r9 acc0=ymm0 acc1=ymm1 acc2=ymm2 acc3=ymm3 g=ymm4

@@ -1,4 +1,5 @@
 # fc1(gpr, gpr, gpr, gpr) -> ()
+# needs: avx, fma
 # frame: 0 bytes aligned to 0, saves []
 # y=rdi x=rsi w=rdx n=rcx z=ymm0 acc0=ymm1
 # acc1=ymm2 acc2=ymm3 acc3=ymm4 acc4=ymm5 acc5=ymm6 acc6=ymm7

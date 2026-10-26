@@ -1,4 +1,5 @@
 # fc2_bwd_w(gpr, gpr, gpr, gpr) -> ()
+# needs: avx, fma
 # frame: 0 bytes aligned to 0, saves []
 # g=rdi x=rsi dy=rdx n=rcx i=rax acc0=ymm0
 # acc1=ymm1 xt=r8 dyt=r9 left=r10 b=ymm2

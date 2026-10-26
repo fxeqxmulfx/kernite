@@ -34,6 +34,8 @@
 //! - **Instructions** are calls by name, `vaddps(sum, sum, pair)`, or by words joined with
 //!   dots, `ld.global.f32(x, [p + 4])`. An operand is a variable, a value, a label, or memory
 //!   in brackets: `[x + i * 4 + 16]` at an address, `[1.0]` or `[[0.5; 8]]` holding data.
+//!   Before the brackets, a name that is nothing in scope goes to the machine with the memory,
+//!   for one that names how much of it an instruction reaches: `dword[x]`.
 //!   A name that is nothing in scope goes to the machine as it is, for registers of its own:
 //!   `tid.x`, or `_` for a result nothing reads; the name of a function that names an ABI is
 //!   that function, for the machine to call. Operands taken together, a vector or a fragment,

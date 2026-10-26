@@ -1,4 +1,5 @@
 # lm(gpr, gpr, gpr, gpr) -> ()
+# needs: avx, fma
 # frame: 0 bytes aligned to 0, saves []
 # y=rdi x=rsi w=rdx n=rcx acc0=ymm0 acc1=ymm1
 # acc2=ymm2 acc3=ymm3 b=ymm4

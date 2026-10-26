@@ -31,6 +31,7 @@ fn a_kernel_runs_its_helpers_in_place() {
         }
     "#;
     let want = "# fifth(gpr) -> vec
+# needs: avx
 # frame: 0 bytes aligned to 0, saves []
 # xs=rdi v=ymm0 high=ymm0
     vmovups ymm0, ymmword ptr [rdi]
@@ -75,6 +76,7 @@ fn loops_unroll_and_number_their_labels_afresh() {
     "#;
     // The language's labels 0, 1 and 2, which x86 writes from 2: `0b` and `1b` would be binary.
     let want = "# k(gpr, gpr) -> ()
+# needs: avx, fma
 # frame: 0 bytes aligned to 0, saves []
 # x=rdi n=rsi acc0=ymm0 acc1=ymm1
     vxorps xmm0, xmm0, xmm0
@@ -116,6 +118,7 @@ fn brackets_are_memory_at_an_address_or_holding_data() {
         }
     "#;
     let want = "# m(gpr, gpr) -> ()
+# needs: avx, avx2
 # frame: 0 bytes aligned to 0, saves []
 # x=rdi i=rsi v=ymm0
     vmovups ymm0, ymmword ptr [rdi + rsi*4 + 16]
@@ -218,6 +221,7 @@ fn values_are_computed_as_rust_computes_them() {
     "#;
     // `HALF` is held as the f64 it is declared, `ONE` as an f32.
     let want = "# v() -> ()
+# needs: avx
 # frame: 0 bytes aligned to 0, saves []
 # g=rax h=ymm0
     # 2147483648 0.5 -2147483648 44 -2 -inf 3 1065353216 1 3 [1, -2, 3]
@@ -259,6 +263,7 @@ fn sixteen_bit_floats_are_values_and_data() {
     // Each is rounded once, to the nearest, the middle to even: 0.1 + 0.2 lands on a middle.
     // Past the largest, a product is infinite, as a literal may not be.
     let want = "# h() -> ()
+# needs: avx2
 # frame: 0 bytes aligned to 0, saves []
 # v=ymm0
     # 0.3333 0.2998 0.334 inf 1 0.00000006 13653 0.33325195 -2.5
@@ -497,6 +502,7 @@ fn array_parameters_take_variables_declared_together() {
         }
     "#;
     let want = "# k(gpr) -> vec
+# needs: avx
 # frame: 0 bytes aligned to 0, saves []
 # x=rdi acc0=ymm0 acc1=ymm1 acc2=ymm2
     vmovups ymm0, ymmword ptr [rdi]

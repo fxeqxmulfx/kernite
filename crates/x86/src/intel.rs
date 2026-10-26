@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 
 use kgen_core::{Access, Arg, Base, Class, Compiled, Const, Frame, Item, Label, Mem, Operand, PReg, Signature, Width};
 
+use crate::forms::{self, Feature};
 use crate::op::Op;
 use crate::sysv::{PAGE, R11, RBP, RSP};
 
@@ -24,6 +25,9 @@ pub struct Listing {
     pub name: String,
     /// What it takes and gives.
     pub signature: Signature,
+    /// The CPU features past x86-64's own its instructions need, by name, which nothing
+    /// checks for when it runs.
+    pub features: Vec<Feature>,
     /// The code, prologue and epilogues included. Constant `i`'s address reads `{ci}`, for
     /// the operand of `naked_asm!` that names it.
     pub lines: Vec<Line>,
@@ -54,9 +58,10 @@ impl Listing {
         })
     }
 
-    /// Everything, for people and for snapshot files: the signature, the frame and where each
-    /// of its slots is, a variable that spilled among them, where each variable lives, the code
-    /// with its notes, the functions it names, and the constants' bytes.
+    /// Everything, for people and for snapshot files: the signature, the CPU features it
+    /// needs, the frame and where each of its slots is, a variable that spilled among them,
+    /// where each variable lives, the code with its notes, the functions it names, and the
+    /// constants' bytes.
     pub fn text(&self) -> String {
         let mut out = String::new();
         let class = |c: &Class| match c {
@@ -72,6 +77,10 @@ impl Listing {
             false => "!",
         };
         writeln!(out, "# {}({}) -> {}", self.name, params.join(", "), result).unwrap();
+        if !self.features.is_empty() {
+            let features: Vec<_> = self.features.iter().map(|f| f.name()).collect();
+            writeln!(out, "# needs: {}", features.join(", ")).unwrap();
+        }
         let saved: Vec<_> = self.frame.saved.iter().map(|&r| name(r, Width::W64)).collect();
         let padded = match self.padding {
             0 => String::new(),
@@ -196,12 +205,20 @@ pub fn print(c: &Compiled<Op>) -> Listing {
                     Some((var, _)) => lines.push(Line::Note(format!("{var} reloaded"))),
                     None => {}
                 }
+                // A gather's vector of indices is among the operands it does not write out, at
+                // its width.
+                let vector_index = |m: &Mem<PReg>| {
+                    inst.implicit.iter().find_map(|a| match (a.operand, m.index) {
+                        (Operand::Reg(r, w), Some((i, _))) if r == i && r.class == Class::Vec => Some(w),
+                        _ => None,
+                    })
+                };
                 let operands: Vec<String> = inst
                     .args
                     .iter()
                     .map(|a| match a.operand {
                         Operand::Reg(r, w) => name(r, w),
-                        Operand::Mem(m) => memory(&m, c, inst.op != Op::Lea, inst.op == Op::Vpgatherdq),
+                        Operand::Mem(m) => memory(&m, c, inst.op != Op::Lea, vector_index(&m)),
                         Operand::Imm(imm) if imm.hex => format!("{:#04x}", imm.value),
                         Operand::Imm(imm) => imm.value.to_string(),
                         Operand::Label(l) => jump_target(l, i, &numbers, &places),
@@ -217,9 +234,20 @@ pub fn print(c: &Compiled<Op>) -> Listing {
             }
         }
     }
+    let mut features: Vec<Feature> = c
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            Item::Inst(inst) => forms::feature(inst.op, &inst.args, &inst.implicit),
+            _ => None,
+        })
+        .collect();
+    features.sort_by_key(|f| f.name());
+    features.dedup();
     Listing {
         name: c.name.clone(),
         signature: c.signature.clone(),
+        features,
         lines,
         consts: c.consts.clone(),
         funcs: c.funcs.clone(),
@@ -367,8 +395,12 @@ fn name(r: PReg, width: Width) -> String {
 }
 
 /// A memory operand; `sized` puts the access's size in front, which every instruction but
-/// `lea` wants.
-fn memory(m: &Mem<PReg>, c: &Compiled<Op>, sized: bool, xmm_index: bool) -> String {
+/// `lea` wants. `vector_index` is the width of its vector of indices, if it is at one.
+///
+/// # Panics
+///
+/// If its index is a vector of no width given, which whoever built the instruction left out.
+fn memory(m: &Mem<PReg>, c: &Compiled<Op>, sized: bool, vector_index: Option<Width>) -> String {
     let (mut text, disp) = match m.base {
         Base::Reg(r) => (name(r, Width::W64), i64::from(m.disp)),
         Base::Slot(s) => (name(RSP, Width::W64), i64::from(m.disp) + i64::from(c.frame.offsets[s.0 as usize])),
@@ -377,7 +409,10 @@ fn memory(m: &Mem<PReg>, c: &Compiled<Op>, sized: bool, xmm_index: bool) -> Stri
         Base::Static(s) => (format!("rip + {{{}}}", c.statics[s.0 as usize]), i64::from(m.disp)),
     };
     if let Some((r, scale)) = m.index {
-        let width = if r.class == Class::Vec { if xmm_index { Width::W128 } else { Width::W256 } } else { Width::W64 };
+        let width = match r.class {
+            Class::Vec => vector_index.expect("a vector of indices among the operands an instruction reads unwritten"),
+            _ => Width::W64,
+        };
         write!(text, " + {}*{scale}", name(r, width)).unwrap();
     }
     match disp {
