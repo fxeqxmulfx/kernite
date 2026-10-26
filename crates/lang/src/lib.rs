@@ -26,10 +26,11 @@
 //!   that takes arguments is written as Rust writes a generic one, `shared<[f32; N * 4], 16>`,
 //!   and the machine is given it with values in place of the names they are bound to:
 //!   `shared<[f32; 256], 16>`.
-//! - **Values** are known now: `const` items, `let k = 4;`, a helper's `<const N: usize>`,
-//!   a loop's counter. Integers are checked for overflow; floats are `f32` unless written or
-//!   declared `f64`, `f16` or `bf16`, and their arithmetic is the machine's. The 16-bit ones
-//!   are worked out in `f64` and rounded once, to the nearest, as the machine rounds them.
+//! - **Values** are known now: `const` items, `let k = 4;`, the `<const N: usize>` of a helper
+//!   or of an instance, a loop's counter. Integers are checked for overflow; floats are `f32`
+//!   unless written or declared `f64`, `f16` or `bf16`, and their arithmetic is the machine's.
+//!   The 16-bit ones are worked out in `f64` and rounded once, to the nearest, as the machine
+//!   rounds them.
 //! - **Instructions** are calls by name, `vaddps(sum, sum, pair)`, or by words joined with
 //!   dots, `ld.global.f32(x, [p + 4])`. An operand is a variable, a value, a label, or memory
 //!   in brackets: `[x + i * 4 + 16]` at an address, `[1.0]` or `[[0.5; 8]]` holding data.
@@ -46,7 +47,11 @@
 //!   the caller's variable, seen as its type; `<const N: usize>` takes a value, as in
 //!   `dot::<4>(x, y, n)`. A helper sees its own names and the module's constants.
 //! - **Functions that name an ABI** are compiled each on its own: kernels, and functions the
-//!   machine calls by an instruction, as PTX's `call(r, f, (a, b))` calls a `.func`.
+//!   machine calls by an instruction, as PTX's `call(r, f, (a, b))` calls a `.func`. One with
+//!   `<const N: u32>`, an integer or a `bool`, is compiled for each instance its
+//!   `#[instances(256, 1024)]` lists, of values known now, or for two
+//!   `#[instances((3, true), (-2, false))]`; [`instances`] lists them, and an instruction
+//!   names one as `f::<256>`.
 //! - **`for k in 0..n { .. }`** is unrolled, over a range, an array or variables.
 //!   **`if c { .. } else { .. }`** chooses now when `c` is a bool; when `c` is a predicate
 //!   variable it guards each instruction inside, `if !p` the other way.

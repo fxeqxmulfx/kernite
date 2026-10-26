@@ -34,8 +34,10 @@ let sum = unsafe { kernels::sum8(xs.as_ptr()) };
 `sum8` becomes an `#[unsafe(naked)]` function of the signature it declares, its body the kernel in Intel syntax,
 and `kernels::LISTINGS` holds each kernel's listing for snapshots. Everything that is not an instruction happens
 while the kernel compiles: `for` unrolls, `if` on a bool chooses, a function without an ABI is a helper inlined
-where it is called, and `<const N: usize>` makes one generic. [`kgen-lang`](crates/lang/src/lib.rs) describes the
-language.
+where it is called, and `<const N: usize>` makes one generic. A generic kernel is compiled for each value its
+`#[instances(1, 4)]` lists, each a kernel of its own, which Rust calls as it calls a generic function,
+`kernels::dot::<4>(x, y, n)`; a value it does not list fails to build. [`kgen-lang`](crates/lang/src/lib.rs)
+describes the language.
 
 kgen does not spill. When the variables alive together do not fit in the registers, the error names them, at the
 declaration of the one that found none:
@@ -114,10 +116,24 @@ gives, `Grid::new(blocks, threads).with_shared(bytes)`. A kernel's `f16` and `bf
 kgen-cuda's [`f16` and `bf16`](crates/cuda/src/half.rs): their bits, converted to and from `f32` as `cvt` converts
 them.
 
+A kernel is named in PTX as C++ names a function in the namespaces of its workspace, its crate and its modules, so
+that a profiler tells two crates' `saxpy` apart: `_ZN4kgen6my_app3gpu5saxpyE`, which `cu++filt`, Nsight and
+`cuda-gdb` show as `kgen::my_app::gpu::saxpy`. An instance of a generic kernel is named as a template's,
+`kgen::my_app::gpu::block_sums<(unsigned int)1024>`, and launched as Rust calls a generic method,
+`kernels.block_sums::<1024>(grid, x, sums)`; the shared memory the launch gives is named as the kernel's static,
+`kgen::my_app::gpu::reverse_runs::run`. The workspace is named as the directory of its `Cargo.toml` is, unless the
+manifest names it, as kgen's does, so that a clone keeps the names wherever it is:
+
+```toml
+[workspace.metadata.kgen]
+name = "kgen"
+```
+
 ## Examples
 
-[`examples/my-app`](examples/my-app/src/main.rs) uses kgen as a crate outside it would: `sum8` and `dot::<4>` for the
-CPU, and for the GPU `saxpy`, `block_sums` and `reverse_runs` in shared memory, `scale_f16`, written in place, and
+[`examples/my-app`](examples/my-app/src/main.rs) uses kgen as a crate outside it would: `sum8`, and `dot` for one
+accumulator and for four, for the CPU, and for the GPU `saxpy`, `block_sums` for blocks of 256 threads and of 1024
+and `reverse_runs` in shared memory, `scale_f16`, written in place, and
 `gcds`, which calls `gcd`, an `extern "ptx-func"` function that calls itself, with safe functions over them; and
 `matmul` on the tensor cores, by `cp.async`, `ldmatrix` and `mma`, in a module of its own, since it needs an Ampere
 GPU, `sm_80`. Its tests hold each kernel to a scalar reference that does the same float operations in the same order,

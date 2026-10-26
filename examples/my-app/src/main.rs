@@ -14,22 +14,14 @@ mod kernels {
         ret_sum(v);
     }
 
-    /// The dot product of the `n` floats at `x` and the `n` at `y`, `n` a multiple of 8.
-    pub unsafe extern "sysv64" fn dot1(x: *const f32, y: *const f32, n: usize) -> f32 {
-        dot::<1>(x, y, n);
-    }
-
-    /// The same, `n` a multiple of 32, by four accumulators.
-    pub unsafe extern "sysv64" fn dot4(x: *const f32, y: *const f32, n: usize) -> f32 {
-        dot::<4>(x, y, n);
-    }
-
-    /// `UNROLL` accumulators of eight lanes take turns, so that a fused multiply-add does not
-    /// wait for the one before it; then they are added in order, and the lanes summed as in
-    /// `sum8`. Each holds a register through the loop and the load needs one more, so sixteen
-    /// would take 17 of the 16 there are: kgen does not spill, it says which variables hold
-    /// them.
-    fn dot<const UNROLL: usize>(x: gpr, y: gpr, n: gpr) {
+    /// The dot product of the `n` floats at `x` and the `n` at `y`, `n` a multiple of
+    /// `8 UNROLL`, compiled for one accumulator and for four. `UNROLL` accumulators of eight
+    /// lanes take turns, so that a fused multiply-add does not wait for the one before it; then
+    /// they are added in order, and the lanes summed as in `sum8`. Each holds a register
+    /// through the loop and the load needs one more, so sixteen would take 17 of the 16 there
+    /// are: kgen does not spill, it says which variables hold them.
+    #[instances(1, 4)]
+    pub unsafe extern "sysv64" fn dot<const UNROLL: usize>(x: *const f32, y: *const f32, n: usize) -> f32 {
         test(n, n);
         jz(empty);
         let acc: [ymm; UNROLL];
@@ -98,14 +90,16 @@ mod gpu {
         st.global.f32([at_y], yi);
     }
 
-    /// `sums[b]`, the sum of the 256 floats of `x` from `256 b`: a block of 256 threads each,
+    /// `sums[b]`, the sum of the `N` floats of `x` from `N b`: a block of `N` threads each,
     /// adding in a tree in the shared memory it declares, half as many threads each level.
-    pub unsafe extern "ptx-kernel" fn block_sums(x: *const f32, sums: *mut f32) {
-        let tile: shared<[f32; 256], 16>;
+    /// `N` is a power of two, compiled for 256 and for 1024, as many threads as a block has.
+    #[instances(256, 1024)]
+    pub unsafe extern "ptx-kernel" fn block_sums<const N: u32>(x: *const f32, sums: *mut f32) {
+        let tile: shared<[f32; N], 16>;
         let (t, b, i, mine): (u32, u32, u32, u32);
         mov.u32(t, tid.x);
         mov.u32(b, ctaid.x);
-        mad.lo.u32(i, b, 256, t);
+        mad.lo.u32(i, b, N, t);
         let at: u64;
         mad.wide.u32(at, i, 4, x);
         let (v, w): (f32, f32);
@@ -114,13 +108,15 @@ mod gpu {
         mad.lo.u32(mine, t, 4, mine);
         st.shared.f32([mine], v);
         let lower: pred;
-        for half in [128, 64, 32, 16, 8, 4, 2, 1] {
-            bar.sync(0);
-            setp.lt.u32(lower, t, half);
-            if lower {
-                ld.shared.f32(w, [mine + 4 * half]);
-                add.rn.f32(v, v, w);
-                st.shared.f32([mine], v);
+        for half in [512, 256, 128, 64, 32, 16, 8, 4, 2, 1] {
+            if half < N {
+                bar.sync(0);
+                setp.lt.u32(lower, t, half);
+                if lower {
+                    ld.shared.f32(w, [mine + 4 * half]);
+                    add.rn.f32(v, v, w);
+                    st.shared.f32([mine], v);
+                }
             }
         }
         setp.eq.u32(lower, t, 0);
@@ -339,7 +335,7 @@ fn dot(x: &[f32], y: &[f32]) -> f32 {
     assert!(supported(), "the kernels need AVX2 and FMA");
     assert_eq!(x.len(), y.len(), "x and y differ in length");
     assert!(x.len().is_multiple_of(8), "{} floats are not a multiple of eight", x.len());
-    let kernel = if x.len().is_multiple_of(32) { kernels::dot4 } else { kernels::dot1 };
+    let kernel = if x.len().is_multiple_of(32) { kernels::dot::<4> } else { kernels::dot::<1> };
     // SAFETY: `x.len()` floats are there to read behind each pointer, a whole number of the
     // kernel's steps, and the cpu has what it needs.
     unsafe { kernel(x.as_ptr(), y.as_ptr(), x.len()) }
@@ -360,19 +356,21 @@ fn saxpy(cuda: &Cuda, kernels: &gpu::Kernels, a: f32, x: &[f32], y: &mut [f32]) 
     ys.read_into(y)
 }
 
-/// The sum of each run of 256 floats of `x`, on the GPU, added in a tree; `x` must be a whole
-/// number of runs.
-fn block_sums(cuda: &Cuda, kernels: &gpu::Kernels, x: &[f32]) -> Result<Vec<f32>, kgen_cuda::Error> {
-    assert!(x.len().is_multiple_of(256), "{} floats are no whole number of runs of 256", x.len());
-    let blocks = u32::try_from(x.len() / 256).expect("fewer than 2^32 runs");
+/// The sum of each run of `N` floats of `x`, on the GPU, added in a tree; `x` must be a whole
+/// number of runs, and `N` a run `gpu::block_sums` is compiled for, 256 or 1024: another is
+/// a compile error.
+fn block_sums<const N: u32>(cuda: &Cuda, kernels: &gpu::Kernels, x: &[f32]) -> Result<Vec<f32>, kgen_cuda::Error> {
+    let run = N as usize;
+    assert!(x.len().is_multiple_of(run), "{} floats are no whole number of runs of {N}", x.len());
+    let blocks = u32::try_from(x.len() / run).expect("fewer than 2^32 runs");
     let mut sums = vec![0.0; blocks as usize];
     if blocks == 0 {
         return Ok(sums);
     }
     let (xs, out) = (cuda.upload(x)?, cuda.alloc::<f32>(sums.len())?);
-    // SAFETY: 256 floats a block behind `xs`, and a float a block behind `out`, in buffers
+    // SAFETY: `N` floats a block behind `xs`, and a float a block behind `out`, in buffers
     // that last until `read_into` has waited for the kernel.
-    unsafe { kernels.block_sums(Grid::new(blocks, 256), xs.ptr(), out.ptr())? };
+    unsafe { kernels.block_sums::<N>(Grid::new(blocks, N), xs.ptr(), out.ptr())? };
     out.read_into(&mut sums)?;
     Ok(sums)
 }
@@ -474,8 +472,14 @@ fn main() {
                 Err(e) => println!("saxpy failed on the {}: {e}", cuda.name()),
             }
             let ones: Vec<f32> = (0..1024).map(|i| i as f32).collect();
-            match block_sums(&cuda, &kernels, &ones) {
-                Ok(sums) => println!("sums of 0..1024 in runs of 256, in shared memory: {sums:?}"),
+            match block_sums::<256>(&cuda, &kernels, &ones)
+                .and_then(|q| Ok((q, block_sums::<1024>(&cuda, &kernels, &ones)?)))
+            {
+                Ok((quarters, whole)) => {
+                    println!(
+                        "sums of 0..1024 in runs of 256, in shared memory: {quarters:?}; in one of 1024: {whole:?}"
+                    )
+                }
                 Err(e) => println!("block_sums failed: {e}"),
             }
             let mut run: Vec<f32> = (0..8).map(|i| i as f32).collect();
@@ -528,7 +532,9 @@ mod tests {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("snapshots");
         let bless = std::env::var_os("KGEN_BLESS").is_some();
         let mut changed = vec![];
-        let files = kernels::LISTINGS.iter().map(|&(name, text)| (format!("{name}.s"), text));
+        // An instance's listing, of `dot::<4>`, is `dot4.s`.
+        let files =
+            kernels::LISTINGS.iter().map(|&(name, text)| (format!("{}.s", name.replace(['<', '>', ':'], "")), text));
         let ptx = [("gpu.ptx".to_string(), gpu::PTX), ("ampere.ptx".to_string(), ampere::PTX)];
         for (name, text) in files.chain(ptx) {
             let path = dir.join(&name);
@@ -607,7 +613,7 @@ mod tests {
             // SAFETY: `n` floats behind each pointer, a multiple of 32, and a cpu that runs
             // the kernels.
             let (one, four) =
-                unsafe { (kernels::dot1(x.as_ptr(), y.as_ptr(), n), kernels::dot4(x.as_ptr(), y.as_ptr(), n)) };
+                unsafe { (kernels::dot::<1>(x.as_ptr(), y.as_ptr(), n), kernels::dot::<4>(x.as_ptr(), y.as_ptr(), n)) };
             assert_eq!(one.to_bits(), dot(&x, &y, 1).to_bits(), "{n} floats, one accumulator");
             assert_eq!(four.to_bits(), dot(&x, &y, 4).to_bits(), "{n} floats, four accumulators");
         }
@@ -620,14 +626,17 @@ mod tests {
         Some((cuda, kernels))
     }
 
-    /// What `block_sums` does to each run of 256, in its order: each float of the lower half
-    /// added to the one as far into the upper, then the same of what that leaves.
+    /// What `block_sums` does to each run, a power of two long, in its order: each float of
+    /// the lower half added to the one as far into the upper, then the same of what that
+    /// leaves.
     fn tree(run: &[f32]) -> f32 {
         let mut tile = run.to_vec();
-        for half in [128, 64, 32, 16, 8, 4, 2, 1] {
+        let mut half = tile.len() / 2;
+        while half > 0 {
             for t in 0..half {
                 tile[t] += tile[t + half];
             }
+            half /= 2;
         }
         tile[0]
     }
@@ -636,10 +645,15 @@ mod tests {
     fn block_sums_is_its_tree_bit_for_bit() {
         let Some((cuda, kernels)) = cuda() else { return };
         for runs in [0, 1, 2, 37] {
-            let x = floats(256 * runs, runs as u32 + 7);
-            let want: Vec<u32> = x.chunks(256).map(|run| tree(run).to_bits()).collect();
-            let got = super::block_sums(&cuda, &kernels, &x).unwrap();
-            assert_eq!(got.iter().map(|s| s.to_bits()).collect::<Vec<_>>(), want, "{runs} runs");
+            let x = floats(1024 * runs, runs as u32 + 7);
+            let sums = |run: usize| x.chunks(run).map(|run| tree(run).to_bits()).collect::<Vec<_>>();
+            let bits = |got: Vec<f32>| got.iter().map(|s| s.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(super::block_sums::<256>(&cuda, &kernels, &x).unwrap()), sums(256), "{runs} runs of 1024");
+            assert_eq!(
+                bits(super::block_sums::<1024>(&cuda, &kernels, &x).unwrap()),
+                sums(1024),
+                "{runs} runs of 1024"
+            );
         }
     }
 

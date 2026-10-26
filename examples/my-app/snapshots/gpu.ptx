@@ -39,9 +39,9 @@
 	ret;
 }
 
-.visible .entry _ZN4kgen6my_app3gpu10block_sumsE(
-	.param .u64 _ZN4kgen6my_app3gpu10block_sumsE_param_0,
-	.param .u64 _ZN4kgen6my_app3gpu10block_sumsE_param_1
+.visible .entry _ZN4kgen6my_app3gpu10block_sumsILj256EEE(
+	.param .u64 _ZN4kgen6my_app3gpu10block_sumsILj256EEE_param_0,
+	.param .u64 _ZN4kgen6my_app3gpu10block_sumsILj256EEE_param_1
 )
 {
 	.reg .pred %lower;
@@ -50,9 +50,9 @@
 	.reg .u64 %x, %sums, %at;
 	.shared .align 16 .b8 tile[1024];
 
-	ld.param.u64 %x, [_ZN4kgen6my_app3gpu10block_sumsE_param_0];
+	ld.param.u64 %x, [_ZN4kgen6my_app3gpu10block_sumsILj256EEE_param_0];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u64 %sums, [_ZN4kgen6my_app3gpu10block_sumsE_param_1];
+	ld.param.u64 %sums, [_ZN4kgen6my_app3gpu10block_sumsILj256EEE_param_1];
 	cvta.to.global.u64 %sums, %sums;
 	mov.u32 %t, %tid.x;
 	mov.u32 %b, %ctaid.x;
@@ -62,6 +62,85 @@
 	mov.u32 %mine, tile;
 	mad.lo.u32 %mine, %t, 4, %mine;
 	st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 128;
+	@%lower ld.shared.f32 %w, [%mine+512];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 64;
+	@%lower ld.shared.f32 %w, [%mine+256];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 32;
+	@%lower ld.shared.f32 %w, [%mine+128];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 16;
+	@%lower ld.shared.f32 %w, [%mine+64];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 8;
+	@%lower ld.shared.f32 %w, [%mine+32];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 4;
+	@%lower ld.shared.f32 %w, [%mine+16];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 2;
+	@%lower ld.shared.f32 %w, [%mine+8];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 1;
+	@%lower ld.shared.f32 %w, [%mine+4];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	setp.eq.u32 %lower, %t, 0;
+	@%lower mad.wide.u32 %at, %b, 4, %sums;
+	@%lower st.global.f32 [%at], %v;
+	ret;
+}
+
+.visible .entry _ZN4kgen6my_app3gpu10block_sumsILj1024EEE(
+	.param .u64 _ZN4kgen6my_app3gpu10block_sumsILj1024EEE_param_0,
+	.param .u64 _ZN4kgen6my_app3gpu10block_sumsILj1024EEE_param_1
+)
+{
+	.reg .pred %lower;
+	.reg .u32 %t, %b, %i, %mine;
+	.reg .f32 %v, %w;
+	.reg .u64 %x, %sums, %at;
+	.shared .align 16 .b8 tile[4096];
+
+	ld.param.u64 %x, [_ZN4kgen6my_app3gpu10block_sumsILj1024EEE_param_0];
+	cvta.to.global.u64 %x, %x;
+	ld.param.u64 %sums, [_ZN4kgen6my_app3gpu10block_sumsILj1024EEE_param_1];
+	cvta.to.global.u64 %sums, %sums;
+	mov.u32 %t, %tid.x;
+	mov.u32 %b, %ctaid.x;
+	mad.lo.u32 %i, %b, 1024, %t;
+	mad.wide.u32 %at, %i, 4, %x;
+	ld.global.f32 %v, [%at];
+	mov.u32 %mine, tile;
+	mad.lo.u32 %mine, %t, 4, %mine;
+	st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 512;
+	@%lower ld.shared.f32 %w, [%mine+2048];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
+	bar.sync 0;
+	setp.lt.u32 %lower, %t, 256;
+	@%lower ld.shared.f32 %w, [%mine+1024];
+	@%lower add.rn.f32 %v, %v, %w;
+	@%lower st.shared.f32 [%mine], %v;
 	bar.sync 0;
 	setp.lt.u32 %lower, %t, 128;
 	@%lower ld.shared.f32 %w, [%mine+512];

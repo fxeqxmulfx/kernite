@@ -54,6 +54,29 @@
 //! unsafe { kernels.scale(kgen_cuda::Grid::new(1, 32), xs.ptr(), 2.0, 3)? };
 //! ```
 //!
+//! A kernel with const generics, integers or `bool`s, is compiled for each instance its
+//! `#[instances(..)]` lists, each a kernel of its own, of values known now, the module's
+//! constants among them: `#[instances(256, 1024)]` on `fn block_sums<const N: u32>`, or
+//! `#[instances((3, true), (-2, false))]` for two. On x86 the kernel is a generic function,
+//! `cpu::dot::<4>(x, y, n)`, and `LISTINGS` holds each instance's listing by its name,
+//! `dot::<4>`; on a GPU its launcher is generic, `kernels.block_sums::<1024>(grid, x, sums)`.
+//! An instance it does not list is a compile error where Rust compiles the call, in
+//! `cargo build`; `cargo check` evaluates no generic function's constants, and misses it.
+//!
+//! A GPU kernel is named in PTX as C++ names a function in namespaces, those of the
+//! workspace, the crate and its modules, mangled under Itanium's ABI:
+//! `_ZN4kgen6my_app3gpu5scaleE`, which `cu++filt`, Nsight and `cuda-gdb` show as
+//! `kgen::my_app::gpu::scale`, and an instance as a template's,
+//! `kgen::my_app::gpu::block_sums<(unsigned int)1024>`. The workspace is named as the
+//! directory of its `Cargo.toml` is, or as the manifest names it, which a clone keeps
+//! wherever it is; `name = ""` leaves it out. A package of no workspace is named as the
+//! package is.
+//!
+//! ```toml
+//! [workspace.metadata.kgen]
+//! name = "kgen"
+//! ```
+//!
 //! A kernel is `unsafe`: it trusts the pointers it is given. One that does not compile is a
 //! `compile_error!` where the trouble is, beside a stub of its signature or its launcher, so
 //! that its callers are not errors as well.
