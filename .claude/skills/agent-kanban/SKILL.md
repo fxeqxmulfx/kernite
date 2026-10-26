@@ -1,0 +1,26 @@
+---
+name: agent-kanban
+description: Use the agent-kanban task board. Claim the next task, hand it in for review with evidence, review the work of other agents, plan tasks and dependencies, inspect, dump or restore the board. Use when the project has a .kanban directory or when asked to pick up, review, plan or list tasks.
+---
+
+agent-kanban: task board for LLM agents. Replies are short text; errors go to stderr, exit 1.
+Say who you are with --agent NAME or env AGENT_KANBAN_AGENT. Ids are numbers (replies show #7).
+WORK
+  claim-next -> #7 [rev2] TITLE, changes|NOTES (rework only), then a line per test: IDX|DESCRIBE|INPUT|OUTPUT (a reviewer's lines end |RESULT|EVIDENCE); or `idle` (`idle, N open`: tasks exist but are held, blocked or in review)
+  claim ID: the same for one task. Claiming again renews the lease (--lease SECS, default 3600).
+DEVELOPER
+  submit-review ID --pass IDX EVIDENCE | --fail IDX EVIDENCE   one per test -> #7 review rev1
+  changes = the reviewer's notes from a rejection: fix, submit again. release ID gives a task back.
+REVIEWER
+  approve ID [--notes T] -> #7 done [unblocked:IDS]     request-changes ID --notes T
+PLANNING
+  add --title T [--priority low|medium|high|urgent] [--tag T]... --test DESC INPUT OUTPUT (1+) [--after IDS]
+  edit ID [same flags, --tag/--test replace all] [--drop-after IDS]   only unclaimed tasks outside review/done
+  move ID backlog|todo    remove ID    agent register NAME [--role developer|reviewer]
+  --after IDS: tasks that must be done first (a DAG, cycles refused); developers cannot claim before that.
+BOARD
+  list [--status S] [--tag T] [--executor NAME] [--priority P] [--all] [--limit N] -> `#7 high in_progress@alice after:3 Title`; done hidden without --all
+  show ID [--history]   status   agent list|remove NAME   init   guide|skill [developer|reviewer|planning|board]   --db PATH
+  dump: all tasks (done too) as show --history, a blank line apart; big board: dump > FILE
+  dump --full > FILE: the whole board for git; load FILE [--replace] restores it
+In `|` lines \| \\ \n mean | \ and newline.

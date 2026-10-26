@@ -1,2 +1,7 @@
 /target
 __pycache__/
+# Claude Code's worktrees and local settings
+/.claude/worktrees/
+/.claude/settings.local.json
+# agent-kanban's task board, and the notes beside it
+/.kanban/
