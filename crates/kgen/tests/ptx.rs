@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kgen::lang::{IntTy, Mem as Address, Operand as Given, Target, Value};
 use kgen_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Sel, Space, Spec};
-use kgen_ptx::lang::{Kernel, Var};
+use kgen_ptx::lang::{Callee, Kernel, Var};
 use kgen_ptx::{Entry, Kind, Needs, Prototype, Returns, Static, Ty};
 
 const KERNELS: &str = r#"
@@ -1314,6 +1314,7 @@ fn calling(body: &str) -> Result<String, String> {
          extern \"ptx-func\" fn first(a: u32, b: u32) -> u32 {{ ret(a); }}\n\
          extern \"ptx-func\" fn nothing() {{}}\n\
          extern \"ptx-func\" fn never() -> ! {{ trap(); }}\n\
+         extern \"ptx-func\" fn narrow(a: i32) {{}}\n\
          unsafe extern \"sysv64\" fn cpu() {{}}\n\
          fn helper() {{}}\n"
     ))
@@ -1339,6 +1340,8 @@ fn a_call_passes_what_the_function_takes_and_returns() {
         ("call(n, never, ());", "2:6: `never` never returns: `call(never, ..)` calls it"),
         ("call(k);", "2:6: `k` is a kernel, which the host launches; `call` calls a function"),
         ("call(cpu);", "2:6: `cpu` is no function of PTX's: a kernel calls those `extern \"ptx-func\"`"),
+        ("call(narrow, n);", "2:6: `narrow` does not compile, so no kernel calls it"),
+        ("let fp: u64; mov.u64(fp, narrow);", "2:26: `narrow` does not compile, so no kernel names it"),
         (
             "call(helper);",
             "2:6: `helper` is a helper, inlined where it is called, `helper(..)`: no instruction calls it",
@@ -1658,7 +1661,7 @@ impl Making {
 /// them; `None` if they would be those of [`Style::Vars`], or kgen's refusal.
 fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entry, String>> {
     let mut m = Making { kernel: kernel(n), vars: 0, differs: false, sunk: false };
-    m.kernel.callee("f", "f", Some(Prototype { params: vec![], returns: Returns::Nothing }));
+    m.kernel.callee("f", "f", Callee::Calls(Prototype { params: vec![], returns: Returns::Nothing }));
     let addr = m.kernel.var("a", "u64").unwrap();
     let narrow = (style == Style::Narrow).then(|| m.kernel.var("n", "u32").unwrap());
     let mut spaces = b.spaces().into_iter();
@@ -1846,7 +1849,7 @@ fn others(n: &mut usize) -> Vec<Entry> {
         *n += 1;
         let name = format!("k{n}");
         let mut kernel = Kernel::new(&name, &name);
-        kernel.callee(&name, &name, None);
+        kernel.callee(&name, &name, Callee::Kernel);
         let v = kernel.var("v", t.name()).unwrap();
         kernel.inst(&format!("mov.{}", t.name()), &[Given::Var(v), Given::Func(name.clone())], None).unwrap();
         kernel.end().unwrap();

@@ -124,7 +124,7 @@ pub struct Kernel {
     func: Option<Returns>,
     /// The functions it may name: each one it calls, and the kernels, whose addresses it
     /// takes.
-    callees: Vec<Callee>,
+    callees: Vec<Named>,
     /// Those it named, each once, by their symbols.
     calls: Vec<String>,
     /// The module's memory it may name.
@@ -134,13 +134,24 @@ pub struct Kernel {
     cooperative: bool,
 }
 
+/// What a kernel makes of a function or a kernel of its module, which it may name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Callee {
+    /// A function `extern "ptx-func"`, which it calls, and which takes and gives back what the
+    /// prototype says.
+    Calls(Prototype),
+    /// A kernel, whose address it takes for the GPU to launch it.
+    Kernel,
+    /// A function that does not compile, which says why where it is declared.
+    Broken,
+}
+
 /// A function or a kernel that a kernel may name: by what the source calls it, as an operand
-/// names it, and by its symbol in PTX; and for a function, which it calls, its prototype,
-/// `None` for a kernel, whose address it takes.
-struct Callee {
+/// names it, and by its symbol in PTX; and what the kernel makes of it.
+struct Named {
     name: String,
     symbol: String,
-    proto: Option<Prototype>,
+    callee: Callee,
 }
 
 /// A write under a guard, which leaves what was there where the guard does not hold. It is
@@ -233,13 +244,12 @@ impl Kernel {
         f
     }
 
-    /// Lets the kernel name `name`, which is `symbol` in PTX: a function it calls, of the
-    /// prototype `proto`; or with `None` a kernel, whose address it takes for the GPU to launch
-    /// it.
-    pub fn callee(&mut self, name: impl Into<String>, symbol: impl Into<String>, proto: Option<Prototype>) {
+    /// Lets the kernel name `name`, which is `symbol` in PTX: a function it calls, or a kernel,
+    /// whose address it takes for the GPU to launch it, as `callee` says.
+    pub fn callee(&mut self, name: impl Into<String>, symbol: impl Into<String>, callee: Callee) {
         let symbol = symbol.into();
         self.named.insert(symbol.clone());
-        self.callees.push(Callee { name: name.into(), symbol, proto });
+        self.callees.push(Named { name: name.into(), symbol, callee });
     }
 
     /// Lets the kernel name `s`, memory of the module's, by its name in the source, as it names
@@ -897,20 +907,24 @@ impl Kernel {
 
     /// The address of the function or the kernel `f`, which `mov` puts in a variable.
     fn address_of(&self, f: &str, w: &mut Written) -> Result<String, String> {
-        let callee = self.callee_of(f)?;
-        if callee.proto.is_none() {
+        let named = self.callee_of(f)?;
+        match named.callee {
+            Callee::Calls(_) => {}
             // A kernel's address is for the GPU to launch it, as CUDA's dynamic parallelism
             // does from Kepler's sm_35 on.
-            w.needs = w.needs.and(Needs { ptx: 31, sm: 35, ..Needs::default() });
-            w.named.push(f.to_string());
+            Callee::Kernel => {
+                w.needs = w.needs.and(Needs { ptx: 31, sm: 35, ..Needs::default() });
+                w.named.push(f.to_string());
+            }
+            Callee::Broken => return Err(format!("`{f}` does not compile, so no kernel names it")),
         }
-        w.funcs.push(callee.symbol.clone());
-        Ok(callee.symbol.clone())
+        w.funcs.push(named.symbol.clone());
+        Ok(named.symbol.clone())
     }
 
     /// The function or the kernel `f`, which the kernel may name; or why it may name none
     /// such.
-    fn callee_of(&self, f: &str) -> Result<&Callee, String> {
+    fn callee_of(&self, f: &str) -> Result<&Named, String> {
         match self.callees.iter().find(|c| c.name == f) {
             Some(callee) => Ok(callee),
             None => Err(format!("`{f}` is no function of PTX's: a kernel calls those `extern \"ptx-func\"`")),
@@ -920,10 +934,13 @@ impl Kernel {
     /// The prototype of `f`, a function the kernel calls by its operand `at`, and its symbol;
     /// or why it calls no such function.
     fn called(&self, f: &str, at: usize) -> Result<(&Prototype, &str), Fault> {
-        let callee = self.callee_of(f).map_err(|m| Fault::at(at, m))?;
-        match &callee.proto {
-            Some(proto) => Ok((proto, &callee.symbol)),
-            None => Err(Fault::at(at, format!("`{f}` is a kernel, which the host launches; `call` calls a function"))),
+        let named = self.callee_of(f).map_err(|m| Fault::at(at, m))?;
+        match &named.callee {
+            Callee::Calls(proto) => Ok((proto, &named.symbol)),
+            Callee::Kernel => {
+                Err(Fault::at(at, format!("`{f}` is a kernel, which the host launches; `call` calls a function")))
+            }
+            Callee::Broken => Err(Fault::at(at, format!("`{f}` does not compile, so no kernel calls it"))),
         }
     }
 
@@ -1353,7 +1370,7 @@ fn shaped(b: &Bound, spec: &Spec, a: &Given<Var>) -> bool {
         (Role::Dst | Role::Src, Given::Var(v)) => matches!(v, Var::Mem(_)) == spec.memory,
         (Role::Dst | Role::Src, Given::Vector(parts)) => lanes(b, spec) == parts.len(),
         (Role::Dst | Role::Src, Given::Pair(..)) => spec.second.is_some(),
-        (Role::Dst | Role::Src, Given::Mem(_) | Given::Label(_)) => false,
+        (Role::Dst | Role::Src, Given::Mem(_) | Given::Label(_) | Given::Func(_)) => false,
         (Role::Dst | Role::Src, _) => lanes(b, spec) == 1,
         _ => false,
     }

@@ -48,7 +48,6 @@ pub use kgen_x86::Op;
 pub use kgen_x86::intel::{Line, Listing};
 
 use kgen_lang::{Fn, ItemKind, Module, Span, Value};
-use kgen_x86::lang::Callee;
 
 /// The ABIs a kernel names, or a function kernels call, each of which kgen compiles for a
 /// machine.
@@ -105,11 +104,13 @@ pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>,
         kernel.cooperative();
     }
     for item in &module.items {
+        use kgen_x86::lang::Callee;
         let ItemKind::Fn(g) = &item.kind else { continue };
         if abi(g) != Some(Abi::Sysv64) {
             continue;
         }
-        // One of no prototype, or whose instances are wrong, says why where it is compiled.
+        // One of no prototype, or whose instances are wrong, says why where it is compiled; a
+        // kernel that calls it, that it does not compile.
         let callee = match cooperative(g) {
             Ok(false) => x86_prototype(g).map_or(Callee::Broken, Callee::Calls),
             Ok(true) => Callee::Cooperative,
@@ -165,20 +166,18 @@ pub fn ptx(module: &Module, f: &Fn, args: &[Value], scope: &str) -> Result<Compi
         kernel.module_memory(&s.code);
     }
     for item in &module.items {
+        use kgen_ptx::lang::Callee;
         let ItemKind::Fn(g) = &item.kind else { continue };
-        let proto = match abi(g) {
-            Some(Abi::PtxKernel) => None,
-            // One of no prototype says why where it is compiled, as one whose instances are
-            // wrong does.
-            Some(Abi::PtxFunc) => match prototype(g) {
-                Some(proto) => Some(proto),
-                None => continue,
-            },
+        // One of no prototype says why where it is compiled, as one whose instances are wrong
+        // does; a kernel that calls it, that it does not compile.
+        let callee = match abi(g) {
+            Some(Abi::PtxKernel) => Callee::Kernel,
+            Some(Abi::PtxFunc) => prototype(g).map_or(Callee::Broken, Callee::Calls),
             _ => continue,
         };
         for args in kgen_lang::instances(module, g).unwrap_or_default() {
             if let Ok(name) = kgen_lang::instance(g, &args) {
-                kernel.callee(name, kgen_ptx::symbol(scope, &g.name, &args), proto.clone());
+                kernel.callee(name, kgen_ptx::symbol(scope, &g.name, &args), callee.clone());
             }
         }
     }
