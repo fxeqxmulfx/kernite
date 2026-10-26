@@ -352,7 +352,7 @@ fn gpu(launchers: &[(&Fn, Option<Vec<Launched>>)], symbols: &[String], ptx: &str
         "/// The kernels, compiled for `cuda`'s GPU by its driver.\n\
          pub fn load(cuda: &::kgen_cuda::Cuda) -> ::core::result::Result<Kernels, ::kgen_cuda::Error> {{\n\
              const NAMES: &[&str] = &[{}];\n\
-             ::core::result::Result::Ok(Kernels {{ module: ::kgen_cuda::Module::load(cuda, PTX, NAMES)? }})\n\
+             ::core::result::Result::Ok(Kernels {{ module: ::kgen_cuda::Module::load(cuda, PTX, NAMES, &[])? }})\n\
          }}",
         names.join(", ")
     ));

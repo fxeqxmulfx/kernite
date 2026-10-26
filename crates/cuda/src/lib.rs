@@ -1,6 +1,6 @@
 //! The CUDA driver, as far as kgen's kernels need it: memory on a GPU, PTX modules loaded
-//! into it, and their kernels launched; and the floats of 16 bits, [`f16`](struct@f16) and [`bf16`], that
-//! Rust has not.
+//! into it, their kernels launched and their memory read and written; and the floats of 16
+//! bits, [`f16`](struct@f16) and [`bf16`], that Rust has not.
 //!
 //! The driver is `libcuda.so.1`, which comes with NVIDIA's driver rather than with the
 //! toolkit. It is opened by [`Cuda::new`], not linked: a program that never asks for a GPU
@@ -89,6 +89,7 @@ api! {
     load_module = c"cuModuleLoadDataEx"(*mut Handle, *const c_void, c_uint, *mut c_int, *mut *mut c_void);
     unload_module = c"cuModuleUnload"(Handle);
     function = c"cuModuleGetFunction"(*mut Handle, Handle, *const c_char);
+    global = c"cuModuleGetGlobal_v2"(*mut u64, *mut usize, Handle, *const c_char);
     set_attribute = c"cuFuncSetAttribute"(Handle, c_int, c_int);
     launch = c"cuLaunchKernel"(
         Handle, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, Handle, *mut *mut c_void, *mut *mut c_void
@@ -180,6 +181,31 @@ impl std::error::Error for Error {}
 struct Driver {
     api: Api,
     device: c_int,
+}
+
+impl Driver {
+    /// Copies `data` to the GPU at `ptr`, after the kernels launched before have run.
+    fn write<T: Plain>(&self, ptr: u64, data: &[T]) -> Result<(), Error> {
+        // SAFETY: it reads as many bytes from `data` as it has.
+        let copied = unsafe { (self.api.to_device)(ptr, data.as_ptr().cast(), size_of_val(data)) };
+        self.api.check("cuMemcpyHtoD", copied)
+    }
+
+    /// Copies what the GPU holds at `ptr` to `out`, after the kernels launched before have
+    /// run.
+    fn read_into<T: Plain>(&self, ptr: u64, out: &mut [T]) -> Result<(), Error> {
+        // SAFETY: it writes as many bytes to `out` as it has, and any bits are a `T`, as
+        // `Plain` promises.
+        let copied = unsafe { (self.api.to_host)(out.as_mut_ptr().cast(), ptr, size_of_val(out)) };
+        self.api.check("cuMemcpyDtoH", copied)
+    }
+
+    /// Sets the `bytes` bytes at `ptr` on the GPU to zero, after the kernels launched before
+    /// have run.
+    fn zero(&self, ptr: u64, bytes: usize) -> Result<(), Error> {
+        // SAFETY: it writes on the GPU alone.
+        self.api.check("cuMemsetD8", unsafe { (self.api.memset)(ptr, 0, bytes) })
+    }
 }
 
 impl Drop for Driver {
@@ -316,9 +342,7 @@ impl<T: Plain> Buffer<T> {
     /// not as many elements.
     pub fn write(&mut self, data: &[T]) -> Result<(), Error> {
         assert_eq!(data.len(), self.len, "a buffer of {} elements written with {}", self.len, data.len());
-        let api = &self.driver.api;
-        // SAFETY: it reads as many bytes from `data` as it has, into a buffer as long.
-        api.check("cuMemcpyHtoD", unsafe { (api.to_device)(self.ptr, data.as_ptr().cast(), self.bytes()) })
+        self.driver.write(self.ptr, data)
     }
 
     /// What it holds, after the kernels launched before have run.
@@ -332,21 +356,12 @@ impl<T: Plain> Buffer<T> {
     /// `out` has not as many elements.
     pub fn read_into(&self, out: &mut [T]) -> Result<(), Error> {
         assert_eq!(out.len(), self.len, "a buffer of {} elements read into {}", self.len, out.len());
-        let api = &self.driver.api;
-        // SAFETY: it writes as many bytes to `out` as it has, and any bits are a `T`, as
-        // `Plain` promises.
-        api.check("cuMemcpyDtoH", unsafe { (api.to_host)(out.as_mut_ptr().cast(), self.ptr, self.bytes()) })
+        self.driver.read_into(self.ptr, out)
     }
 
     /// Sets every element to zero, after the kernels launched before have run.
     pub fn zero(&mut self) -> Result<(), Error> {
-        let api = &self.driver.api;
-        // SAFETY: it writes the buffer's bytes, and no others.
-        api.check("cuMemsetD8", unsafe { (api.memset)(self.ptr, 0, self.bytes()) })
-    }
-
-    fn bytes(&self) -> usize {
-        self.len * size_of::<T>()
+        self.driver.zero(self.ptr, self.len * size_of::<T>())
     }
 }
 
@@ -453,17 +468,21 @@ impl Grid {
 /// The shared memory a launch gives a block, at most, unless the kernel is let have more.
 const SHARED: u32 = 48 << 10;
 
-/// A PTX module, compiled by the driver for its GPU, and the kernels of it that were asked for.
+/// A PTX module, compiled by the driver for its GPU, and the kernels and the memory of it that
+/// were asked for.
 pub struct Module {
     driver: Rc<Driver>,
     module: Handle,
     kernels: Vec<Handle>,
+    /// Where each of its variables asked for is on the GPU, and how many bytes it has.
+    globals: Vec<(u64, usize)>,
 }
 
 impl Module {
-    /// `ptx` compiled for `cuda`'s GPU, with its kernels `names`, in that order. If the driver
+    /// `ptx` compiled for `cuda`'s GPU, with its kernels `names` and its memory `globals`, its
+    /// variables in global or constant memory, each by its name, in that order. If the driver
     /// will not compile it, the error's `log` is what its compiler said.
-    pub fn load(cuda: &Cuda, ptx: &str, names: &[&str]) -> Result<Module, Error> {
+    pub fn load(cuda: &Cuda, ptx: &str, names: &[&str], globals: &[&str]) -> Result<Module, Error> {
         let api = &cuda.driver.api;
         let image =
             CString::new(ptx).map_err(|_| Error::new("cuModuleLoadDataEx", "the PTX has a NUL in it".into()))?;
@@ -481,7 +500,7 @@ impl Module {
             e.log = CStr::from_bytes_until_nul(&log).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             return Err(e);
         }
-        let mut m = Module { driver: cuda.driver.clone(), module, kernels: vec![] };
+        let mut m = Module { driver: cuda.driver.clone(), module, kernels: vec![], globals: vec![] };
         for name in names {
             let c =
                 CString::new(*name).map_err(|_| Error::new("cuModuleGetFunction", format!("{name:?} has a NUL")))?;
@@ -494,7 +513,28 @@ impl Module {
             })?;
             m.kernels.push(f);
         }
+        for name in globals {
+            let c = CString::new(*name).map_err(|_| Error::new("cuModuleGetGlobal", format!("{name:?} has a NUL")))?;
+            let (mut ptr, mut bytes) = (0, 0);
+            // SAFETY: the module is loaded, and the name is a C string; it writes the address
+            // and the size of the variable to `ptr` and `bytes`.
+            let found = unsafe { (api.global)(&mut ptr, &mut bytes, module, c.as_ptr()) };
+            api.check("cuModuleGetGlobal", found).map_err(|mut e| {
+                e.message += &format!(", for `{name}`");
+                e
+            })?;
+            m.globals.push((ptr, bytes));
+        }
         Ok(m)
+    }
+
+    /// The module's memory `index`, as [`load`](Module::load) was given its name, as elements
+    /// of `T`. Panics if its bytes are no whole number of them.
+    pub fn global<T: Plain>(&self, index: usize) -> Global<'_, T> {
+        let (ptr, bytes) = self.globals[index];
+        let size = size_of::<T>();
+        assert!(bytes.is_multiple_of(size), "{bytes} bytes are no whole number of elements of {size}");
+        Global { module: self, ptr, len: bytes / size, of: PhantomData }
     }
 
     /// Launches kernel `index`, as [`load`](Module::load) was given its name, over `grid`,
@@ -527,5 +567,73 @@ impl Drop for Module {
     fn drop(&mut self) {
         // SAFETY: the module was loaded, and is unloaded once, here.
         unsafe { (self.driver.api.unload_module)(self.module) };
+    }
+}
+
+/// A module's memory on the GPU, one of its variables in global or constant memory, as
+/// elements of `T`: memory its kernels name, which keeps what they write from launch to launch.
+/// The driver allocated it as it loaded the module, holding what the PTX declares, zeros or
+/// what it is initialized to, and frees it with the module. It is written through the module
+/// shared, as a launch writes it.
+pub struct Global<'m, T: Plain> {
+    module: &'m Module,
+    ptr: u64,
+    len: usize,
+    of: PhantomData<T>,
+}
+
+impl<T: Plain> Global<'_, T> {
+    /// Its address, for a kernel to be given; it points at something while the module lasts.
+    pub fn ptr(&self) -> Ptr<T> {
+        self.at(0)
+    }
+
+    /// The address of its element `i`, for a kernel to be given the part from there on.
+    /// Panics if `i` is past its end.
+    pub fn at(&self, i: usize) -> Ptr<T> {
+        assert!(i <= self.len, "element {i} of a module's memory of {}", self.len);
+        Ptr { addr: self.ptr + (i * size_of::<T>()) as u64, of: PhantomData }
+    }
+
+    /// How many elements it has.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether it has none.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Copies `data` to it, after the kernels launched before have run. Panics if `data` has
+    /// not as many elements.
+    pub fn write(&self, data: &[T]) -> Result<(), Error> {
+        assert_eq!(data.len(), self.len, "a module's memory of {} elements written with {}", self.len, data.len());
+        self.module.driver.write(self.ptr, data)
+    }
+
+    /// What it holds, after the kernels launched before have run.
+    pub fn read(&self) -> Result<Vec<T>, Error> {
+        let mut out = vec![T::default(); self.len];
+        self.read_into(&mut out)?;
+        Ok(out)
+    }
+
+    /// Copies what it holds to `out`, after the kernels launched before have run. Panics if
+    /// `out` has not as many elements.
+    pub fn read_into(&self, out: &mut [T]) -> Result<(), Error> {
+        assert_eq!(out.len(), self.len, "a module's memory of {} elements read into {}", self.len, out.len());
+        self.module.driver.read_into(self.ptr, out)
+    }
+
+    /// Sets every element to zero, after the kernels launched before have run.
+    pub fn zero(&self) -> Result<(), Error> {
+        self.module.driver.zero(self.ptr, self.len * size_of::<T>())
+    }
+}
+
+impl<T: Plain> fmt::Debug for Global<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Global({} elements at {:#x})", self.len, self.ptr)
     }
 }

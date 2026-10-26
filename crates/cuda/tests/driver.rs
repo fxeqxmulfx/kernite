@@ -43,7 +43,7 @@ fn a_kernel_runs_on_what_was_uploaded() {
     let Some(cuda) = cuda() else { return };
     let xs: Vec<f32> = (0..1000).map(|i| i as f32 / 3.0).collect();
     let buf = cuda.upload(&xs).unwrap();
-    let module = Module::load(&cuda, PTX, &["add_one"]).unwrap();
+    let module = Module::load(&cuda, PTX, &["add_one"], &[]).unwrap();
     // Threads past the first 999, to see the bounds checked.
     let (x, n) = (buf.ptr(), 999u32);
     // SAFETY: `add_one` takes a pointer and a `u32`, and writes only the first `n` of the
@@ -72,7 +72,7 @@ fn a_buffer_is_zero_until_written_and_reads_back_what_was() {
 #[test]
 fn ptx_the_driver_will_not_compile_is_logged() {
     let Some(cuda) = cuda() else { return };
-    let e = Module::load(&cuda, &PTX.replace("add.rn.f32", "add.rn.f99"), &["add_one"]).err().unwrap();
+    let e = Module::load(&cuda, &PTX.replace("add.rn.f32", "add.rn.f99"), &["add_one"], &[]).err().unwrap();
     assert_eq!(e.call, "cuModuleLoadDataEx");
     assert!(e.message.starts_with("CUDA_ERROR_INVALID_PTX"), "{e}");
     assert!(e.log.contains("f99"), "{e}");
@@ -81,7 +81,7 @@ fn ptx_the_driver_will_not_compile_is_logged() {
 #[test]
 fn a_kernel_the_module_has_not_is_named() {
     let Some(cuda) = cuda() else { return };
-    let e = Module::load(&cuda, PTX, &["add_one", "add_two"]).err().unwrap();
+    let e = Module::load(&cuda, PTX, &["add_one", "add_two"], &[]).err().unwrap();
     assert_eq!(e.call, "cuModuleGetFunction");
     assert!(e.message.starts_with("CUDA_ERROR_NOT_FOUND") && e.message.ends_with("for `add_two`"), "{e}");
 }
@@ -141,7 +141,7 @@ const SHARED: &str = "
 #[test]
 fn a_launch_gives_the_shared_memory_it_says() {
     let Some(cuda) = cuda() else { return };
-    let module = Module::load(&cuda, SHARED, &["reverse", "last"]).unwrap();
+    let module = Module::load(&cuda, SHARED, &["reverse", "last"], &[]).unwrap();
     let buf = cuda.upload(&(0..512).collect::<Vec<u32>>()).unwrap();
     let x = buf.ptr();
     // SAFETY: `reverse` takes a pointer, and reads and writes there the 256 words of each of
@@ -250,7 +250,7 @@ fn floats_of_16_bits_convert_as_the_gpu_converts_them() {
         eprintln!("{}, sm_{}, has no `cvt.rn.bf16.f32`: skipped", cuda.name(), cuda.sm());
         return;
     }
-    let module = Module::load(&cuda, HALF, &["widen", "narrow"]).unwrap();
+    let module = Module::load(&cuda, HALF, &["widen", "narrow"], &[]).unwrap();
     let grid = |n: usize| Grid::new(n.div_ceil(256) as u32, 256);
     // Every f16.
     let all: Vec<f16> = (0..=u16::MAX).map(f16::from_bits).collect();
@@ -341,7 +341,7 @@ const PARAMS: &str = "
 #[test]
 fn a_kernel_is_given_the_bits_of_each_parameter() {
     let Some(cuda) = cuda() else { return };
-    let module = Module::load(&cuda, PARAMS, &["params"]).unwrap();
+    let module = Module::load(&cuda, PARAMS, &["params"], &[]).unwrap();
     let out = cuda.alloc::<u8>(16).unwrap();
     let (h, b, c, s, d) = (f16::from_f32(1.5), bf16::from_f32(-2.25), 0xa5u8, -12345i16, 1.0e300f64);
     let args = [arg(&out.ptr()), arg(&h), arg(&b), arg(&c), arg(&s), arg(&d)];
@@ -355,4 +355,92 @@ fn a_kernel_is_given_the_bits_of_each_parameter() {
     want[6..8].copy_from_slice(&s.to_le_bytes());
     want[8..16].copy_from_slice(&d.to_le_bytes());
     assert_eq!(got, want);
+}
+
+/// Memory of the module's own, which its kernels name, and which keeps what they write from one
+/// launch to the next: `count` adds 1 to word `i` of `counts` in each thread, and `copy` writes
+/// the two words of `seen` and the two floats of `table` to `out`. `counts` is the module's
+/// alone, as kgen declares its memory, and `seen` visible, as nvcc declares it for a program
+/// linked in parts.
+const GLOBALS: &str = "
+.version 7.5
+.target sm_61
+.address_size 64
+
+.global .align 4 .b8 counts[16];
+.visible .global .align 4 .b8 seen[8] = {7, 0, 0, 0, 9};
+.const .align 4 .b8 table[8] = {0, 0, 128, 63, 0, 0, 0, 64};
+
+.visible .entry count(.param .u32 i_param)
+{
+	.reg .u32 %i;
+	.reg .u64 %base, %at;
+
+	ld.param.u32 %i, [i_param];
+	mov.u64 %base, counts;
+	mad.wide.u32 %at, %i, 4, %base;
+	red.global.add.u32 [%at], 1;
+	ret;
+}
+
+.visible .entry copy(.param .u64 out_param)
+{
+	.reg .u32 %a, %b;
+	.reg .f32 %x, %y;
+	.reg .u64 %out;
+
+	ld.param.u64 %out, [out_param];
+	cvta.to.global.u64 %out, %out;
+	ld.global.u32 %a, [seen];
+	ld.global.u32 %b, [seen+4];
+	ld.const.f32 %x, [table];
+	ld.const.f32 %y, [table+4];
+	st.global.u32 [%out], %a;
+	st.global.u32 [%out+4], %b;
+	st.global.f32 [%out+8], %x;
+	st.global.f32 [%out+12], %y;
+	ret;
+}
+";
+
+#[test]
+fn a_module_s_memory_keeps_what_is_written_from_launch_to_launch() {
+    let Some(cuda) = cuda() else { return };
+    let module = Module::load(&cuda, GLOBALS, &["count", "copy"], &["counts", "seen", "table"]).unwrap();
+    let (counts, seen, table) = (module.global::<u32>(0), module.global::<u32>(1), module.global::<f32>(2));
+    // What the PTX declares: zeros, or what it is initialized to, and zeros after.
+    assert_eq!(counts.read().unwrap(), [0; 4]);
+    assert_eq!(seen.read().unwrap(), [7, 9]);
+    assert_eq!(table.read().unwrap(), [1.0, 2.0]);
+    let count = |i: u32, threads: u32| {
+        // SAFETY: `count` takes a `u32`, and adds to word `i` of the four of `counts`.
+        unsafe { module.launch(0, Grid::new(1, threads), &[arg(&i)]) }.unwrap()
+    };
+    count(2, 64);
+    count(2, 32);
+    count(0, 3);
+    assert_eq!(counts.read().unwrap(), [3, 0, 96, 0]);
+    counts.write(&[10, 20, 30, 40]).unwrap();
+    count(1, 1);
+    assert_eq!(counts.read().unwrap(), [10, 21, 30, 40]);
+    counts.zero().unwrap();
+    count(3, 5);
+    assert_eq!(counts.read().unwrap(), [0, 0, 0, 5]);
+    // Constant memory, which its kernels only read, the host writes.
+    seen.write(&[5, 6]).unwrap();
+    table.write(&[3.0, 4.0]).unwrap();
+    // SAFETY: `copy` takes a pointer, and writes 16 bytes there, as many as `counts` has.
+    unsafe { module.launch(1, Grid::new(1, 1), &[arg(&counts.ptr())]) }.unwrap();
+    assert_eq!(counts.read().unwrap(), [5, 6, 3.0f32.to_bits(), 4.0f32.to_bits()]);
+    // Its bytes as elements of any size they are a whole number of.
+    assert_eq!((module.global::<u8>(1).len(), module.global::<u64>(0).len()), (8, 2));
+    assert_eq!(counts.at(3).addr(), counts.ptr().addr() + 12);
+}
+
+#[test]
+fn memory_the_module_has_not_is_named() {
+    let Some(cuda) = cuda() else { return };
+    let e = Module::load(&cuda, GLOBALS, &[], &["counts", "nothing"]).err().unwrap();
+    assert_eq!(e.call, "cuModuleGetGlobal");
+    assert!(e.message.starts_with("CUDA_ERROR_NOT_FOUND") && e.message.ends_with("for `nothing`"), "{e}");
 }
