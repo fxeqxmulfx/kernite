@@ -80,11 +80,20 @@ enum Kind {
     I,
     /// Any integer of 64 bits.
     Q,
-    /// A control byte, 0 to 255, which a listing shows in hex.
-    C,
+    /// An integer of so many bits, unsigned, which are all x86 reads of it: a gpr is shifted by
+    /// the low 6 bits of a count, a vector's lanes by a byte, which empties them past their
+    /// bits, and the half of a ymm is bit 0.
+    N(u32),
+    /// A control byte, of so many bits as x86 reads, which a listing shows in hex: `vcmpps`
+    /// reads its predicate in the low 5, and `vroundps` and `vroundss` the rounding in the low
+    /// 4.
+    C(u32),
+    /// A control byte of a bit for each 32-bit lane of the form's vectors, which a listing shows
+    /// in hex: 8 of a ymm, and 4 of an xmm, as `vpblendd` reads no more.
+    Lanes,
 }
 
-use Kind::{C, G, I, M, Mv, Q, V, Vm, X, Xm, Y};
+use Kind::{C, G, I, Lanes, M, Mv, N, Q, V, Vm, X, Xm, Y};
 
 type Form = &'static [(Kind, Access)];
 
@@ -145,11 +154,10 @@ const GROUPS: &[Group] = &[
         ],
         forms: &[&[(V, Write), (Vm, Read)]],
     },
-    Group {
-        ops: &[("vcmpps", Op::Vcmpps), ("vshufps", Op::Vshufps), ("vpblendd", Op::Vpblendd)],
-        forms: &[&[(V, Write), (V, Read), (Vm, Read), (C, Read)]],
-    },
-    Group { ops: &[("vroundps", Op::Vroundps)], forms: &[&[(V, Write), (Vm, Read), (C, Read)]] },
+    Group { ops: &[("vcmpps", Op::Vcmpps)], forms: &[&[(V, Write), (V, Read), (Vm, Read), (C(5), Read)]] },
+    Group { ops: &[("vshufps", Op::Vshufps)], forms: &[&[(V, Write), (V, Read), (Vm, Read), (C(8), Read)]] },
+    Group { ops: &[("vpblendd", Op::Vpblendd)], forms: &[&[(V, Write), (V, Read), (Vm, Read), (Lanes, Read)]] },
+    Group { ops: &[("vroundps", Op::Vroundps)], forms: &[&[(V, Write), (Vm, Read), (C(4), Read)]] },
     Group { ops: &[("vblendvps", Op::Vblendvps)], forms: &[&[(V, Write), (V, Read), (Vm, Read), (V, Read)]] },
     Group {
         ops: &[
@@ -159,7 +167,7 @@ const GROUPS: &[Group] = &[
             ("vpsllw", Op::Vpsllw),
             ("vpsrlw", Op::Vpsrlw),
         ],
-        forms: &[&[(V, Write), (V, Read), (I, Read)]],
+        forms: &[&[(V, Write), (V, Read), (N(8), Read)]],
     },
     Group {
         ops: &[("vmovups", Op::Vmovups), ("vmovaps", Op::Vmovaps), ("vmovdqu", Op::Vmovdqu), ("vmovdqa", Op::Vmovdqa)],
@@ -192,7 +200,7 @@ const GROUPS: &[Group] = &[
         ops: &[("vfmadd231ss", Op::Vfmadd231ss), ("vfnmadd231ss", Op::Vfnmadd231ss), ("vfmadd213ss", Op::Vfmadd213ss)],
         forms: &[&[(X, ReadWrite), (X, Read), (Xm(W32), Read)]],
     },
-    Group { ops: &[("vroundss", Op::Vroundss)], forms: &[&[(X, Write), (X, Read), (Xm(W32), Read), (C, Read)]] },
+    Group { ops: &[("vroundss", Op::Vroundss)], forms: &[&[(X, Write), (X, Read), (Xm(W32), Read), (C(4), Read)]] },
     Group {
         ops: &[("vmovss", Op::Vmovss)],
         forms: &[&[(X, Write), (M(W32), Read)], &[(M(W32), Write), (X, Read)], &[(X, Write), (X, Read), (X, Read)]],
@@ -216,13 +224,13 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group { ops: &[("vcomiss", Op::Vcomiss), ("vucomiss", Op::Vucomiss)], forms: &[&[(X, Read), (Xm(W32), Read)]] },
-    Group { ops: &[("vextractf128", Op::Vextractf128)], forms: &[&[(X, Write), (Y, Read), (I, Read)]] },
+    Group { ops: &[("vextractf128", Op::Vextractf128)], forms: &[&[(X, Write), (Y, Read), (N(1), Read)]] },
     Group {
         ops: &[("vinsertf128", Op::Vinsertf128), ("vinserti128", Op::Vinserti128)],
-        forms: &[&[(Y, Write), (Y, Read), (Xm(W128), Read), (I, Read)]],
+        forms: &[&[(Y, Write), (Y, Read), (Xm(W128), Read), (N(1), Read)]],
     },
     Group { ops: &[("vpermps", Op::Vpermps)], forms: &[&[(Y, Write), (Y, Read), (Vm, Read)]] },
-    Group { ops: &[("vpermq", Op::Vpermq)], forms: &[&[(Y, Write), (Vm, Read), (C, Read)]] },
+    Group { ops: &[("vpermq", Op::Vpermq)], forms: &[&[(Y, Write), (Vm, Read), (C(8), Read)]] },
     Group { ops: &[("vmovhlps", Op::Vmovhlps)], forms: &[&[(X, Write), (X, Read), (X, Read)]] },
     Group { ops: &[("vmovhps", Op::Vmovhps)], forms: &[&[(X, Write), (X, Read), (M(W64), Read)]] },
     Group { ops: &[("vcvtph2ps", Op::Vcvtph2ps)], forms: &[&[(Y, Write), (Xm(W128), Read)]] },
@@ -261,7 +269,10 @@ const GROUPS: &[Group] = &[
         ops: &[("imul", Op::Imul)],
         forms: &[&[(G(W64), ReadWrite), (G(W64), Read)], &[(G(W64), Write), (G(W64), Read), (I, Read)]],
     },
-    Group { ops: &[("shl", Op::Shl), ("shr", Op::Shr), ("sar", Op::Sar)], forms: &[&[(G(W64), ReadWrite), (I, Read)]] },
+    Group {
+        ops: &[("shl", Op::Shl), ("shr", Op::Shr), ("sar", Op::Sar)],
+        forms: &[&[(G(W64), ReadWrite), (N(6), Read)]],
+    },
     Group { ops: &[("inc", Op::Inc), ("dec", Op::Dec), ("neg", Op::Neg)], forms: &[&[(G(W64), ReadWrite)]] },
     Group {
         ops: &[("cmp", Op::Cmp)],
@@ -456,7 +467,8 @@ impl Kernel {
                 },
                 I => int(i32::MIN.into()..=i32::MAX.into())?,
                 Q => int(i64::MIN.into()..=u64::MAX.into())?,
-                C => int(0..=255)?,
+                N(bits) | C(bits) => int(0..=(1 << bits) - 1)?,
+                Lanes => int(0..=if width == Some(W256) { 255 } else { 15 })?,
                 Mv | M(_) => return Err(Fault::at(i, format!("wants memory; this is {}", given(a)))),
             }
         }
@@ -471,7 +483,7 @@ impl Kernel {
             let operand = match a {
                 Given::Var(v) => Operand::Reg(v.reg, v.view.width()),
                 // Past 2^63 as the 64 bits are, as `mov` takes them.
-                Given::Int(x) => Operand::Imm(Imm { value: *x as i64, hex: kind == C }),
+                Given::Int(x) => Operand::Imm(Imm { value: *x as i64, hex: matches!(kind, C(_) | Lanes) }),
                 Given::Mem(_) | Given::Data(_) => {
                     let w = match kind {
                         Xm(w) | M(w) => w,
@@ -542,7 +554,13 @@ fn describe(kind: Kind, width: Option<Width>) -> String {
         G(_) => "a gpr".into(),
         I => "an integer of 32 bits".into(),
         Q => "an integer".into(),
-        C => "a control byte, 0 to 255".into(),
+        N(bits) => format!("an integer, 0 to {}", (1 << bits) - 1),
+        C(bits) => format!("a control byte, 0 to {}", (1 << bits) - 1),
+        Lanes => match width {
+            Some(W256) => "a control byte, 0 to 255".into(),
+            Some(_) => "a control byte, 0 to 15".into(),
+            None => "a control byte of a bit for each lane".into(),
+        },
     }
 }
 

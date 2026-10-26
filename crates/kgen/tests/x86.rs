@@ -1,4 +1,7 @@
-//! Kernels in the language, compiled for x86: what they come to, and what the errors say.
+//! Kernels in the language, compiled for x86: what they come to, and what the errors say; and
+//! what the builder refuses.
+
+use kgen_x86::Asm;
 
 /// The kernels of `examples/my-app`, and the same dot product with sixteen accumulators.
 const KERNELS: &str = r#"
@@ -141,10 +144,88 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ("let v: ymm; vaddps(v, v, w);", "2:26: `w` is not defined"),
         ("let v: zmm;", "2:8: x86 variables are `gpr`, `ymm` and `xmm`, not `zmm`"),
         ("let v: ymm; vaddps(v, v, v);", "2:5: `v` is read before anything writes it"),
+        ("shl(x, 64);", "2:8: `shl` wants an integer, 0 to 63; this is the integer 64"),
+        ("sar(x, -1);", "2:8: `sar` wants an integer, 0 to 63; this is the integer -1"),
+        ("let v: ymm; vpslld(v, v, 256);", "2:26: `vpslld` wants an integer, 0 to 255; this is the integer 256"),
+        (
+            "let v: ymm; vextractf128(v.xmm, v, 2);",
+            "2:36: `vextractf128` wants an integer, 0 to 1; this is the integer 2",
+        ),
+        (
+            "let v: ymm; vinsertf128(v, v, v.xmm, 2);",
+            "2:38: `vinsertf128` wants an integer, 0 to 1; this is the integer 2",
+        ),
+        ("let v: ymm; vcmpps(v, v, v, 32);", "2:29: `vcmpps` wants a control byte, 0 to 31; this is the integer 32"),
+        ("let v: ymm; vroundps(v, v, 16);", "2:28: `vroundps` wants a control byte, 0 to 15; this is the integer 16"),
+        (
+            "let v: ymm; vpblendd(v.xmm, v.xmm, v.xmm, 16);",
+            "2:43: `vpblendd` wants a control byte, 0 to 15; this is the integer 16",
+        ),
+        (
+            "let v: ymm; vpblendd(v, v, v, 256);",
+            "2:31: `vpblendd` wants a control byte, 0 to 255; this is the integer 256",
+        ),
     ];
     for (body, want) in cases {
         assert_eq!(compile("x: *const f32", body).unwrap_err(), want, "{body}");
     }
+}
+
+/// An immediate x86 reads in part is no more than it reads: 6 bits of a shift's count, 5 of
+/// `vcmpps`'s control byte, 1 of a ymm's half, and a bit for each lane `vpblendd` blends.
+#[test]
+fn an_immediate_is_what_x86_reads_of_it() {
+    let code = compile(
+        "x: *const f32",
+        "let v: ymm; vmovups(v, [x]); shl(x, 63); vcmpps(v, v, v, 31); vextractf128(v.xmm, v, 1); vpslld(v, v, \
+         255); vpblendd(v, v, v, 0xff); vpblendd(v.xmm, v.xmm, v.xmm, 0xf);",
+    )
+    .unwrap();
+    let want = "vmovups ymm0, ymmword ptr [rdi]
+shl rdi, 63
+vcmpps ymm0, ymm0, ymm0, 0x1f
+vextractf128 xmm0, ymm0, 1
+vpslld ymm0, ymm0, 255
+vpblendd ymm0, ymm0, ymm0, 0xff
+vpblendd xmm0, xmm0, xmm0, 0x0f
+vzeroupper
+ret";
+    assert_eq!(code, want);
+}
+
+/// The builder takes no more of an immediate than x86 reads, as the language does not.
+#[test]
+fn the_builder_refuses_what_x86_would_not_read() {
+    let refused = |want: &str, build: fn(&mut Asm)| {
+        let e = std::panic::catch_unwind(|| build(&mut Asm::new("k"))).expect_err(want);
+        assert_eq!(e.downcast_ref::<String>().map(String::as_str), Some(want));
+    };
+    refused("shl by 64: x86 shifts a gpr by 0 to 63", |a| {
+        let g = a.gpr("g");
+        a.shl(g, 64);
+    });
+    refused("shr by 255: x86 shifts a gpr by 0 to 63", |a| {
+        let g = a.gpr("g");
+        a.shr(g, 255);
+    });
+    refused("vextractf128 of lane 2: a ymm has 2", |a| {
+        let v = a.ymm("v");
+        a.vextractf128(v.xmm(), v, 2);
+    });
+    refused("vinserti128 of lane 3: a ymm has 2", |a| {
+        let v = a.ymm("v");
+        a.vinserti128(v, v, v.xmm(), 3);
+    });
+    refused("vpblendd of 4 lanes by 0x10", |a| {
+        let v = a.ymm("v").xmm();
+        a.vpblendd(v, v, v, 0x10);
+    });
+    let mut a = Asm::new("k");
+    let (g, v) = (a.gpr("g"), a.ymm("v"));
+    a.shl(g, 63);
+    a.vextractf128(v.xmm(), v, 1);
+    a.vpblendd(v, v, v, 0xff);
+    a.vpblendd(v.xmm(), v.xmm(), v.xmm(), 0x0f);
 }
 
 #[test]

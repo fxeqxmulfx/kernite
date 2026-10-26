@@ -252,12 +252,22 @@ impl Asm {
     }
 
     /// `shl dst, count`.
+    ///
+    /// # Panics
+    ///
+    /// Past 63, as x86 shifts a gpr by the low 6 bits of its count alone.
     pub fn shl(&mut self, dst: Gpr, count: u8) {
+        assert!(count < 64, "shl by {count}: x86 shifts a gpr by 0 to 63");
         self.emit(Op::Shl, vec![gpr(dst, W64, ReadWrite), number(count.into())]);
     }
 
     /// `shr dst, count`.
+    ///
+    /// # Panics
+    ///
+    /// Past 63, as x86 shifts a gpr by the low 6 bits of its count alone.
     pub fn shr(&mut self, dst: Gpr, count: u8) {
+        assert!(count < 64, "shr by {count}: x86 shifts a gpr by 0 to 63");
         self.emit(Op::Shr, vec![gpr(dst, W64, ReadWrite), number(count.into())]);
     }
 
@@ -402,8 +412,17 @@ impl Asm {
     three_control! {
         /// `vshufps`: floats of `a` to the low two of each lane's four, of `b` to the high.
         vshufps = Vshufps;
-        /// `vpblendd`: 32-bit lanes from `b` where the control byte's bit is set.
-        vpblendd = Vpblendd;
+    }
+
+    /// `vpblendd`: 32-bit lanes from `b` where the control byte's bit is set.
+    ///
+    /// # Panics
+    ///
+    /// On an xmm, past `0x0f`, as x86 reads a bit for each of its 4 lanes alone.
+    pub fn vpblendd<V: Vector>(&mut self, dst: V, a: V, b: impl Into<Src<V>>, control_byte: u8) {
+        let lanes = V::WIDTH.bytes() / 4;
+        assert!(u32::from(control_byte) >> lanes == 0, "vpblendd of {lanes} lanes by {control_byte:#04x}");
+        self.emit(Op::Vpblendd, vec![vec(dst, Write), vec(a, Read), src(b.into()), control(control_byte)]);
     }
 
     shift! {
@@ -576,12 +595,22 @@ impl Asm {
     }
 
     /// `vextractf128`: one 128-bit lane of `a`.
+    ///
+    /// # Panics
+    ///
+    /// Past lane 1, as x86 reads bit 0 of `lane` alone.
     pub fn vextractf128(&mut self, dst: Xmm, a: Ymm, lane: u8) {
+        assert!(lane < 2, "vextractf128 of lane {lane}: a ymm has 2");
         self.emit(Op::Vextractf128, vec![vec(dst, Write), vec(a, Read), number(lane.into())]);
     }
 
     /// `vinserti128`: `a` with its 128-bit lane `lane` replaced by `b`.
+    ///
+    /// # Panics
+    ///
+    /// Past lane 1, as x86 reads bit 0 of `lane` alone.
     pub fn vinserti128(&mut self, dst: Ymm, a: Ymm, b: impl Into<Src<Xmm>>, lane: u8) {
+        assert!(lane < 2, "vinserti128 of lane {lane}: a ymm has 2");
         self.emit(Op::Vinserti128, vec![vec(dst, Write), vec(a, Read), src(b.into()), number(lane.into())]);
     }
 
