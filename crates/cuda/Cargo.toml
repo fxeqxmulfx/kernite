@@ -3,6 +3,7 @@ name = "kgen-cuda"
 description = "The CUDA driver, opened when a GPU is asked for: memory on it, PTX modules, and their kernels launched"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 

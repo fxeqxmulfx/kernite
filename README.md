@@ -216,4 +216,5 @@ the examples.
 ./make.py fmt      # formats every crate
 ```
 
-`make.py` runs under [uv](https://docs.astral.sh/uv/).
+kgen builds with Rust 1.99.1 and later, as the workspace's `rust-version` says. `make.py` runs under
+[uv](https://docs.astral.sh/uv/).

@@ -3,6 +3,7 @@ name = "my-app"
 description = "An example user of kgen: kernels written where they are called, held to scalar references bit for bit"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 

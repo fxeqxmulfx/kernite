@@ -3,6 +3,7 @@ name = "kgen"
 description = "Kernels written as instructions over variables, compiled to assembly that changes only when they do"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 

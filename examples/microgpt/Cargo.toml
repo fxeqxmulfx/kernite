@@ -3,6 +3,7 @@ name = "microgpt"
 description = "Karpathy's microgpt, trained and sampled by kernels written in kgen's language: for the CPU in x86, for the GPU in PTX"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 

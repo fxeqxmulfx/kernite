@@ -3,6 +3,7 @@ name = "kgen-macros"
 description = "Kernels written in place: `#[kernels]` on a module compiles each function in it that names an ABI"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
