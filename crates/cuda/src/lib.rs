@@ -1,5 +1,5 @@
 //! The CUDA driver, as far as kgen's kernels need it: memory on a GPU, PTX modules loaded
-//! into it, and their kernels launched; and the floats of 16 bits, [`f16`] and [`bf16`], that
+//! into it, and their kernels launched; and the floats of 16 bits, [`f16`](struct@f16) and [`bf16`], that
 //! Rust has not.
 //!
 //! The driver is `libcuda.so.1`, which comes with NVIDIA's driver rather than with the

@@ -7,7 +7,7 @@
 //! and trained on the same names in the same order, so that what it prints can be held to what
 //! microgpt.py prints. Its numbers are `f32` where Python's are `f64`, so the two agree only
 //! as far as that allows. The backends agree with each other bit for bit: each computes the
-//! operations [`model`] lists in the order [`reference`] gives.
+//! operations [`model`] lists in the order [`reference`](mod@reference) gives.
 //!
 //! ```text
 //! cargo run --release -p microgpt              # the x86 kernels

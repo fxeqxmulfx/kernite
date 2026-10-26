@@ -4,7 +4,7 @@
 # ///
 """Everything this repository runs, one target each.
 
-    ./make.py check                 formatting, clippy and every test
+    ./make.py check                 formatting, clippy, every test, and the docs
     ./make.py fmt                   formats every crate
 
 An argument NAME=VALUE sets a variable in the environment of everything the targets run.
@@ -62,10 +62,11 @@ def usage():
 
 @target("check")
 def check():
-    """formatting, clippy on every target, and every test"""
+    """formatting, clippy on every target, every test, and the docs, without a warning"""
     sh(["cargo", "fmt", "--check"])
     sh(["cargo", "clippy", "-q", "--all-targets", "--", "-D", "warnings"])
     sh(["cargo", "test", "-q"])
+    sh(["cargo", "doc", "-q", "--no-deps", "--workspace"], env={"RUSTDOCFLAGS": "-D warnings"})
 
 
 @target("fmt")

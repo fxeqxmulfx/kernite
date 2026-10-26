@@ -190,7 +190,7 @@ the examples.
 ## Commands
 
 ```
-./make.py check    # formatting, clippy and every test
+./make.py check    # formatting, clippy, every test, and the docs
 ./make.py fmt      # formats every crate
 ```
 
