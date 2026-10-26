@@ -3,8 +3,8 @@
 Notes for the work, in the agreed order: what reading the code found before each part started, and
 the plan. Steps 1 to 3, stack memory, spilling and a CPU grid, were done on the branch `cpu-grid`,
 from master e9426cf, and merged into master at 1a154ab. Steps 4 to 6, calls, memory of the
-module's, and consts from outside a module, are on `cpu-calls`, from there. The State section at
-the end says how far it has come.
+module's, and consts from outside a module, were done on `cpu-calls`, from there, and merged into
+master. The State section at the end says how far it has come.
 
 ## What is there already
 
@@ -444,3 +444,4 @@ The plan:
     raw name, and a module given consts with a generic kernel, a cooperative one, a static, an
     `impl` and a GPU kernel were checked in crates of their own.
   - Not done: consts from another crate, whose macro is the crate's alone, as planned.
+- Steps 4 to 6 are done, the last at cca66bf, and merged into master, which is not pushed.
