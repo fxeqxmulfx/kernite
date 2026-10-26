@@ -3,40 +3,14 @@
 //! bit for bit: a sum in order is a chain of scalar fused multiply-adds, and what is the same
 //! for each of a row's elements is done eight at a time.
 
-use crate::model::{Adam, Buf, D, E, FC1, FC2, H, LM, Layer, M, Ops, PARAMS, QKV, T, Then, V, VP, WO, WPE, WTE};
-use crate::reference;
+use crate::model::{Adam, Buf, E, FC1, FC2, LM, Layer, M, Ops, PARAMS, QKV, T, Then, V, WO, WTE};
 
 /// The kernels. Pointers are to rows of the buffers [`Buf`] names, and a count `n` is of rows
 /// unless it says otherwise; each kernel trusts that its pointers have that many rows to read
-/// and write.
-#[kgen_macros::kernels]
+/// and write. They read the model's sizes and `exp`'s constants as [`crate::model::consts`]
+/// has them.
+#[kgen_macros::kernels(consts = crate::model::consts)]
 pub mod kernels {
-    /// The model's sizes, as [`crate::model`] has them, which the crate checks as it compiles.
-    pub const E: usize = 16;
-    #[allow(missing_docs)]
-    pub const H: usize = 4;
-    #[allow(missing_docs)]
-    pub const D: usize = 4;
-    #[allow(missing_docs)]
-    pub const T: usize = 16;
-    #[allow(missing_docs)]
-    pub const V: usize = 27;
-    #[allow(missing_docs)]
-    pub const VP: usize = 32;
-    #[allow(missing_docs)]
-    pub const M: usize = 64;
-    #[allow(missing_docs)]
-    pub const WPE: usize = 432;
-    /// Where `QKV`'s queries, keys and values are in a row of them.
-    pub const QKV_COLS: usize = 3 * E;
-
-    /// `reference::exp`'s constants.
-    pub const LN2_HI: f32 = 355.0 / 512.0;
-    #[allow(missing_docs)]
-    pub const LN2_LO: f32 = -2.121_944_4e-4;
-    #[allow(missing_docs)]
-    pub const TAYLOR: [f32; 7] = [1.0 / 720.0, 1.0 / 120.0, 1.0 / 24.0, 1.0 / 6.0, 0.5, 1.0, 1.0];
-
     /// What `matmul` does to each output before it stores it: nothing, adds the residual
     /// stream's, or keeps it only above zero.
     pub const STORE: usize = 0;
@@ -777,17 +751,9 @@ fn rows(t0: usize, n: usize) -> usize {
     n - t0
 }
 
-/// The kernels' sizes and constants are the model's.
+/// What the kernels take of the model's sizes.
 const _: () = {
-    assert!(kernels::QKV_COLS == QKV.cols);
-    assert!(kernels::LN2_HI == reference::LN2_HI && kernels::LN2_LO == reference::LN2_LO);
-    let mut i = 0;
-    while i < kernels::TAYLOR.len() {
-        assert!(kernels::TAYLOR[i] == reference::TAYLOR[i]);
-        i += 1;
-    }
-    assert!(kernels::E == E && kernels::H == H && kernels::D == D && kernels::T == T && kernels::M == M);
-    assert!(kernels::V == V && kernels::VP == VP && kernels::WPE == WPE && WTE == 0);
+    assert!(WTE == 0, "embed and embed_bwd find a token's row as its offset from the parameters");
     assert!(E * 4 == 1 << 6, "embed and embed_bwd find a token's row by shifting it left 6");
     assert!(V % 8 == 3, "softmax keeps three lanes of the last vector");
     assert!(PARAMS.is_multiple_of(8) && M.is_multiple_of(8));

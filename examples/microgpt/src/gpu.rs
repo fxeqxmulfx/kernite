@@ -5,39 +5,13 @@
 
 use kgen_cuda::{Buffer, Cuda, Error, Grid, Ptr};
 
-use crate::model::{Adam, Buf, D, E, FC1, FC2, H, LM, Layer, M, Ops, PARAMS, QKV, T, Then, V, VP, WO, WPE, WTE};
-use crate::reference;
+use crate::model::{Adam, Buf, E, FC1, FC2, H, LM, Layer, M, Ops, PARAMS, QKV, T, Then, V, VP, WO, WTE};
 
 /// The kernels. Pointers are to the first row of the buffers [`Buf`] names; a kernel works
-/// out its rows from its block and thread, and trusts that they are there.
-#[kgen_macros::kernels]
+/// out its rows from its block and thread, and trusts that they are there. They read the
+/// model's sizes and `exp`'s constants as [`crate::model::consts`] has them.
+#[kgen_macros::kernels(consts = crate::model::consts)]
 pub mod kernels {
-    /// The model's sizes, as [`crate::model`] has them, which the crate checks as it compiles.
-    pub const E: usize = 16;
-    #[allow(missing_docs)]
-    pub const H: usize = 4;
-    #[allow(missing_docs)]
-    pub const D: usize = 4;
-    #[allow(missing_docs)]
-    pub const T: usize = 16;
-    #[allow(missing_docs)]
-    pub const V: usize = 27;
-    #[allow(missing_docs)]
-    pub const VP: usize = 32;
-    #[allow(missing_docs)]
-    pub const M: usize = 64;
-    #[allow(missing_docs)]
-    pub const WPE: usize = 432;
-    /// The width of a row of queries, keys and values.
-    pub const QKV_COLS: usize = 3 * E;
-
-    /// `reference::exp`'s constants.
-    pub const LN2_HI: f32 = 355.0 / 512.0;
-    #[allow(missing_docs)]
-    pub const LN2_LO: f32 = -2.121_944_4e-4;
-    #[allow(missing_docs)]
-    pub const TAYLOR: [f32; 7] = [1.0 / 720.0, 1.0 / 120.0, 1.0 / 24.0, 1.0 / 6.0, 0.5, 1.0, 1.0];
-
     /// What `matmul` does to each output before it stores it: nothing, adds the residual
     /// stream's, or keeps it only above zero.
     pub const STORE: usize = 0;
@@ -731,17 +705,7 @@ pub mod kernels {
 }
 
 /// The kernels' sizes and constants are the model's.
-const _: () = {
-    assert!(kernels::QKV_COLS == QKV.cols);
-    assert!(kernels::LN2_HI == reference::LN2_HI && kernels::LN2_LO == reference::LN2_LO);
-    let mut i = 0;
-    while i < kernels::TAYLOR.len() {
-        assert!(kernels::TAYLOR[i] == reference::TAYLOR[i]);
-        i += 1;
-    }
-    assert!(kernels::E == E && kernels::H == H && kernels::D == D && kernels::T == T && kernels::M == M);
-    assert!(kernels::V == V && kernels::VP == VP && kernels::WPE == WPE && WTE == 0);
-};
+const _: () = assert!(WTE == 0, "embed and embed_bwd find a token's row as its offset from the parameters");
 
 /// The model's buffers on the GPU, and the kernels over them.
 pub struct Gpu {

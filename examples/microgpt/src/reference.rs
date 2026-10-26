@@ -5,15 +5,7 @@
 //! multiply-add, which rounds once. `e^x` is [`exp`], a polynomial the kernels evaluate the
 //! same way, where a library's would differ by machine.
 
-use crate::model::{Adam, Buf, D, E, H, Layer, M, Ops, PARAMS, T, Then, V, VP, WPE, WTE};
-
-/// ln 2 in two parts, Cephes's: the first of nine bits, so that `k ln 2` loses nothing for the
-/// `k` that `exp` takes, and the rest.
-pub const LN2_HI: f32 = 355.0 / 512.0;
-/// The rest of ln 2.
-pub const LN2_LO: f32 = -2.121_944_4e-4;
-/// The Taylor series of e^r to the sixth power, highest first.
-pub const TAYLOR: [f32; 7] = [1.0 / 720.0, 1.0 / 120.0, 1.0 / 24.0, 1.0 / 6.0, 0.5, 1.0, 1.0];
+use crate::model::{Adam, Buf, D, E, H, LN2_HI, LN2_LO, Layer, M, Ops, PARAMS, T, TAYLOR, Then, V, VP, WPE, WTE};
 
 /// e^x for `x <= 0`, as every backend works it out: x is cut to `k ln 2 + r`, `k` the nearest
 /// integer to `x / ln 2` and `|r| <= ln 2 / 2`; e^r by its Taylor series; and 2^k by its bits.

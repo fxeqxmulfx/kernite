@@ -83,6 +83,55 @@
 //! An instance it does not list is a compile error where Rust compiles the call, in
 //! `cargo build`; `cargo check` evaluates no generic function's constants, and misses it.
 //!
+//! A module of kernels takes the consts it shares with others from a module `#[consts]` is
+//! on, which it names by its path, as Rust reads one where the module is:
+//! `#[kernels(consts = crate::model::sizes)]`, or `consts = sizes` for one beside it. Its
+//! kernels read them as the module's own, and Rust sees them there by a `use` the macro
+//! writes; a const, function or static of the module's own of one of their names is an error.
+//! A module of consts holds `pub` consts alone, of what kernels read: numbers, floats,
+//! `bool`s, arrays of them, and expressions of these. It is of the same crate, for the macro
+//! that hands its consts on is the crate's alone.
+//!
+//! ```
+//! #[kgen_macros::consts]
+//! pub mod sizes {
+//!     /// How far a value moves.
+//!     pub const STEP: u64 = 3;
+//! }
+//!
+//! #[kgen_macros::kernels(consts = crate::sizes)]
+//! pub mod cpu {
+//!     /// `x` a step on.
+//!     pub unsafe extern "sysv64" fn step(x: u64) -> u64 {
+//!         add(x, STEP);
+//!         ret(x);
+//!     }
+//!
+//!     /// Two steps, as Rust counts them.
+//!     pub const TWO: u64 = 2 * STEP;
+//! }
+//!
+//! fn main() {
+//!     assert_eq!(unsafe { cpu::step(1) }, 4);
+//!     assert_eq!(cpu::TWO, 6);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! #[kgen_macros::consts]
+//! pub mod sizes {
+//!     pub const STEP: u64 = 3;
+//! }
+//!
+//! #[kgen_macros::kernels(consts = crate::sizes)]
+//! pub mod cpu {
+//!     // `STEP` names one of the consts the module takes from `crate::sizes` as well.
+//!     pub const STEP: u64 = 4;
+//! }
+//!
+//! fn main() {}
+//! ```
+//!
 //! A GPU kernel whose blocks wait for each other, at `grid.sync()`, is `#[cooperative]`: its
 //! launcher launches it cooperatively, every block of the grid at once, so the grid has at
 //! most as many blocks as the GPU runs at once, which the method of its name and `_blocks`
@@ -122,6 +171,7 @@
 
 extern crate proc_macro;
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
 use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
@@ -132,25 +182,196 @@ use kgen::{Abi, Owner, Static, X86Static};
 /// See the crate documentation.
 #[proc_macro_attribute]
 pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr: Vec<TokenTree> = attr.into_iter().collect();
+    let tokens: Vec<TokenTree> = item.into_iter().collect();
+    let Some((braces, head)) = braced(&tokens) else {
+        let span = tokens.first().map_or_else(Span::call_site, TokenTree::span);
+        return error(
+            span,
+            "`#[kernels]` goes on a module written in braces, `mod name { .. }`, where the kernels are",
+        );
+    };
+    if attr.is_empty() {
+        return module(head, braces, expand(None, braces.stream()));
+    }
+    let path = match &attr[..] {
+        [c, eq, path @ ..] if is_ident(c, "consts") && is_punct(eq, '=') && is_path(path) => path,
+        _ => {
+            let message = "`#[kernels]` takes the module of consts its kernels read, as `consts = crate::model::sizes`, \
+                           a module `#[kgen_macros::consts]` is on; or nothing";
+            return error(attr[0].span(), message);
+        }
+    };
+    // The macro the consts' module has calls `__kernels!` back with the consts, their module's
+    // path, and this module.
+    let mut out: TokenStream = path.iter().cloned().collect();
+    out.extend(parse("::__kgen_consts!"));
+    let mut given: TokenStream =
+        [TokenTree::Group(Group::new(Delimiter::Parenthesis, path.iter().cloned().collect()))].into_iter().collect();
+    given.extend(tokens);
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, given))]);
+    out
+}
+
+/// See the crate documentation.
+#[proc_macro_attribute]
+pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
     if let Some(t) = attr.into_iter().next() {
-        return error(t.span(), "`#[kernels]` takes no arguments");
+        return error(t.span(), "`#[consts]` takes no arguments");
     }
     let tokens: Vec<TokenTree> = item.into_iter().collect();
-    match tokens.split_last() {
-        Some((TokenTree::Group(body), head))
-            if body.delimiter() == Delimiter::Brace && head.iter().any(|t| is_ident(t, "mod")) =>
-        {
-            let mut out: TokenStream = head.iter().cloned().collect();
-            let mut inner = Group::new(Delimiter::Brace, expand(body.stream()));
-            inner.set_span(body.span());
-            out.extend([TokenTree::Group(inner)]);
-            out
-        }
-        _ => {
-            let span = tokens.first().map_or_else(Span::call_site, TokenTree::span);
-            error(span, "`#[kernels]` goes on a module written in braces, `mod name { .. }`, where the kernels are")
+    let Some((braces, head)) = braced(&tokens) else {
+        let span = tokens.first().map_or_else(Span::call_site, TokenTree::span);
+        return error(
+            span,
+            "`#[consts]` goes on a module written in braces, `mod name { .. }`, of the consts kernels read",
+        );
+    };
+    let top = flatten(braces.stream());
+    let mut spans = vec![];
+    let trees: Vec<Tree> = top.iter().map(|t| tree(t, &mut spans)).collect();
+    let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(Span::call_site);
+    // The module as it is, for Rust; and the consts kgen reads, for the kernels.
+    let mut inner: TokenStream = top.iter().cloned().collect();
+    let mut given = TokenStream::new();
+    match lang::module(&trees) {
+        Err(e) => inner.extend(error(at(e.span), &e.message)),
+        Ok(module) => {
+            for item in &module.items {
+                let tokens = &top[item.tokens.clone()];
+                let named = &tokens[attrs_len(tokens)..];
+                match &item.kind {
+                    ItemKind::Const(_) if !named.first().is_some_and(|t| is_ident(t, "pub")) => {
+                        let message = "a const of a module of consts is `pub`, for the modules of kernels that take \
+                                       it to see";
+                        inner.extend(error(named[0].span(), message));
+                    }
+                    ItemKind::Const(c) => match lang::constant(&module, c) {
+                        Ok(_) => given.extend(tokens.iter().cloned()),
+                        Err(e) => inner.extend(error(at(e.span), &e.message)),
+                    },
+                    // The module's own attribute, `#![..]`, is Rust's.
+                    ItemKind::Other if inner_attribute(tokens) => {}
+                    _ => {
+                        let message = "a module of consts holds the consts kernels read, as `pub const E: usize = \
+                                       16;`, and nothing else";
+                        inner.extend(error(named.first().unwrap_or(&tokens[0]).span(), message));
+                    }
+                }
+            }
         }
     }
+    // The macro `#[kernels(consts = ..)]` calls, by the module's path, which calls `__kernels!`
+    // back with the consts that compile first.
+    let mut call = parse("::kgen_macros::__kernels!");
+    let mut args: TokenStream = [TokenTree::Group(Group::new(Delimiter::Bracket, given))].into_iter().collect();
+    args.extend(parse("$($module)*"));
+    call.extend([TokenTree::Group(Group::new(Delimiter::Brace, args))]);
+    let mut rule = parse("($($module:tt)*) =>");
+    rule.extend([TokenTree::Group(Group::new(Delimiter::Brace, call))]);
+    rule.extend(parse(";"));
+    inner.extend(parse("#[doc(hidden)] #[allow(unused_macros)] macro_rules! __kgen_consts"));
+    inner.extend([TokenTree::Group(Group::new(Delimiter::Brace, rule))]);
+    inner.extend(parse("#[doc(hidden)] #[allow(unused_imports)] pub(crate) use __kgen_consts;"));
+    module(head, braces, inner)
+}
+
+/// What `#[kernels(consts = path)]` on a module becomes once the macro of the module of consts
+/// at `path` has handed it their tokens: `[consts] (path) module`.
+#[doc(hidden)]
+#[proc_macro]
+pub fn __kernels(input: TokenStream) -> TokenStream {
+    let tokens: Vec<TokenTree> = input.into_iter().collect();
+    let [TokenTree::Group(consts), TokenTree::Group(path), rest @ ..] = &tokens[..] else {
+        return error(Span::call_site(), "`__kernels!` is how `#[kernels(consts = ..)]` is given its consts");
+    };
+    let Some((braces, head)) = braced(rest) else {
+        return error(Span::call_site(), "`__kernels!` is how `#[kernels(consts = ..)]` is given its consts");
+    };
+    let path: Vec<TokenTree> = path.stream().into_iter().collect();
+    // What the macro writes resolves where the module is, not inside the consts' macro.
+    let site = Site::at(path.first().map_or_else(Span::call_site, TokenTree::span));
+    let inner = expand(Some((consts.stream(), &path)), braces.stream());
+    drop(site);
+    module(head, braces, inner)
+}
+
+thread_local! {
+    /// The span of each token the macro writes, which says where Rust resolves its names: none
+    /// for the macro's own call site; or, for a module given consts, the path
+    /// `#[kernels(consts = path)]` names them by, where the module is, since `__kernels!` is
+    /// called from inside the consts' macro.
+    static SITE: Cell<Option<Span>> = const { Cell::new(None) };
+}
+
+/// `SITE` at a span until this is dropped, the macro panicking or not: a span of one call of
+/// the macro is none in the next, and the thread that runs it may run the next.
+struct Site;
+
+impl Site {
+    fn at(span: Span) -> Site {
+        SITE.set(Some(span));
+        Site
+    }
+}
+
+impl Drop for Site {
+    fn drop(&mut self) {
+        SITE.set(None);
+    }
+}
+
+/// The braces of the module `tokens` are, and what is before them, if it is written in braces.
+fn braced(tokens: &[TokenTree]) -> Option<(&Group, &[TokenTree])> {
+    match tokens.split_last() {
+        Some((TokenTree::Group(braces), head))
+            if braces.delimiter() == Delimiter::Brace && head.iter().any(|t| is_ident(t, "mod")) =>
+        {
+            Some((braces, head))
+        }
+        _ => None,
+    }
+}
+
+/// The module `head` begins, its braces at `braces`, holding `inner`.
+fn module(head: &[TokenTree], braces: &Group, inner: TokenStream) -> TokenStream {
+    let mut out: TokenStream = head.iter().cloned().collect();
+    let mut group = Group::new(Delimiter::Brace, inner);
+    group.set_span(braces.span());
+    out.extend([TokenTree::Group(group)]);
+    out
+}
+
+/// Whether `tokens` are a path, `crate::model::sizes`.
+fn is_path(tokens: &[TokenTree]) -> bool {
+    let mut rest = match tokens {
+        [a, b, rest @ ..] if is_punct(a, ':') && is_punct(b, ':') => rest,
+        _ => tokens,
+    };
+    loop {
+        match rest {
+            [TokenTree::Ident(_)] => return true,
+            [TokenTree::Ident(_), a, b, tail @ ..] if is_punct(a, ':') && is_punct(b, ':') => rest = tail,
+            _ => return false,
+        }
+    }
+}
+
+/// Whether `tokens`, an item's, are an attribute of the module's own, `#![..]`.
+fn inner_attribute(tokens: &[TokenTree]) -> bool {
+    matches!(tokens, [hash, bang, ..] if is_punct(hash, '#') && is_punct(bang, '!'))
+}
+
+/// How many of `tokens`, an item's, are its attributes, `#[..]` each.
+fn attrs_len(tokens: &[TokenTree]) -> usize {
+    let mut n = 0;
+    while let [hash, TokenTree::Group(g), ..] = &tokens[n..]
+        && is_punct(hash, '#')
+        && g.delimiter() == Delimiter::Bracket
+    {
+        n += 2;
+    }
+    n
 }
 
 /// Where the module's path goes in its PTX and in its kernels' names. A macro is not told
@@ -165,21 +386,35 @@ type Launched = (Vec<Value>, usize);
 /// Each instance of an x86 function, by its compile-time arguments, compiled or not.
 type X86Instances = Vec<(Vec<Value>, Result<kgen::Compiled<kgen::Listing>, lang::Error>)>;
 
-/// What the module's braces hold once its kernels are compiled.
-fn expand(body: TokenStream) -> TokenStream {
-    let top = flatten(body);
+/// What the module's braces hold once its kernels are compiled; `given`, the consts it takes
+/// from outside, and the path of their module, as `#[kernels(consts = path)]` writes it.
+fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStream) -> TokenStream {
+    // The consts given come first, for the kernels to read as the module's own.
+    let outside = given.as_ref().map_or_else(Vec::new, |(consts, _)| flatten(consts.clone()));
+    let n = outside.len();
+    let top: Vec<TokenTree> = outside.into_iter().chain(flatten(body)).collect();
     let mut spans = vec![];
     let trees: Vec<Tree> = top.iter().map(|t| tree(t, &mut spans)).collect();
-    let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(Span::call_site);
-    let module = match lang::module(&trees) {
+    let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(site);
+    let mut module = match lang::module(&trees) {
         Ok(module) => module,
         Err(e) => return error(at(e.span), &e.message),
     };
+    // The module's own attributes, `#![..]`, before anything the macro writes, where Rust has
+    // them.
+    let mut out: TokenStream = module
+        .items
+        .iter()
+        .filter(|item| inner_attribute(&top[item.tokens.clone()]))
+        .flat_map(|item| top[item.tokens.clone()].iter().cloned())
+        .collect();
+    if let Some((_, path)) = given {
+        out.extend(take(&mut module, n, &top, path, &at));
+    }
     // The GPU kernels' namespaces: the workspace's, then the module's path.
     let (workspace, manifest) = workspace();
     let names: Vec<&str> = [workspace.as_str()].into_iter().filter(|n| !n.is_empty()).collect();
     let scope = kgen::ptx_scope(&names) + HOLE;
-    let mut out = TokenStream::new();
     let (mut listings, mut entries, mut launchers, mut read) = (vec![], vec![], vec![], vec![]);
     // The first function for a GPU, or static of the GPU's, where an error of the module as a
     // whole goes; the symbol of each kernel it launches, by index; and each static of the GPU's,
@@ -218,6 +453,9 @@ fn expand(body: TokenStream) -> TokenStream {
     for (i, item) in module.items.iter().enumerate() {
         let named = &touched[i];
         let f = match &item.kind {
+            // A const given is Rust's where its module is; the module's own attributes are first.
+            ItemKind::Const(_) if item.tokens.start < n => continue,
+            ItemKind::Other if inner_attribute(&top[item.tokens.clone()]) => continue,
             ItemKind::Const(_) | ItemKind::Other => {
                 out.extend(top[item.tokens.clone()].iter().cloned());
                 continue;
@@ -349,7 +587,7 @@ fn expand(body: TokenStream) -> TokenStream {
             out.extend(error(at(e.span), &e.message));
         }
     }
-    out.extend(used(&module, &read));
+    out.extend(used(&module, &read, &top));
     if !listings.is_empty() {
         let mut s = String::from(
             "/// Each x86 kernel's listing, by name, an instance's as `tile::<4>`: where its variables\n\
@@ -373,6 +611,62 @@ fn expand(body: TokenStream) -> TokenStream {
             out.extend(parse(&format!("const _: &[u8] = ::core::include_bytes!({manifest:?});")));
         }
     }
+    out
+}
+
+/// What Rust's code in `module` sees the consts it is given by, the first of its items, those of
+/// its first `n` tokens: `use path::{E, H};`, the path written from inside the module. A name
+/// both have is an error at the module's own, whose the name is for kgen too.
+fn take(
+    module: &mut lang::Module,
+    n: usize,
+    top: &[TokenTree],
+    path: &[TokenTree],
+    at: &dyn std::ops::Fn(lang::Span) -> Span,
+) -> TokenStream {
+    let name_of = |kind: &ItemKind| match kind {
+        ItemKind::Const(c) => Some((c.name.clone(), c.span)),
+        ItemKind::Fn(f) => Some((f.name.clone(), f.span)),
+        ItemKind::Static(s) => Some((s.name.clone(), s.span)),
+        ItemKind::Other => None,
+    };
+    let (given, own): (Vec<_>, Vec<_>) = module.items.iter().partition(|item| item.tokens.start < n);
+    let written: String = path.iter().map(TokenTree::to_string).collect();
+    let mut out = TokenStream::new();
+    let mut twice = vec![];
+    for (name, span) in own.iter().filter_map(|item| name_of(&item.kind)) {
+        if given.iter().any(|item| name_of(&item.kind).is_some_and(|(g, _)| g == name)) {
+            let message = format!("`{name}` names one of the consts the module takes from `{written}` as well");
+            out.extend(error(at(span), &message));
+            twice.push(name);
+        }
+    }
+    // Each const given by its name as written, `r#type` as well.
+    let mut names = TokenStream::new();
+    for item in &given {
+        let Some((name, _)) = name_of(&item.kind) else { continue };
+        if twice.contains(&name) {
+            continue;
+        }
+        names.extend([const_name(item, top)]);
+        names.extend(parse(","));
+    }
+    module.items.retain(|item| item.tokens.start >= n || name_of(&item.kind).is_none_or(|(g, _)| !twice.contains(&g)));
+    out.extend(parse("#[allow(unused_imports)] use"));
+    match path {
+        [first, ..] if is_ident(first, "crate") || is_punct(first, ':') => out.extend(path.iter().cloned()),
+        [first, rest @ ..] if is_ident(first, "self") => {
+            out.extend(parse("super"));
+            out.extend(rest.iter().cloned());
+        }
+        _ => {
+            out.extend(parse("super::"));
+            out.extend(path.iter().cloned());
+        }
+    }
+    out.extend(parse("::"));
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, names))]);
+    out.extend(parse(";"));
     out
 }
 
@@ -463,21 +757,37 @@ fn metadata_name(manifest: &str) -> Option<String> {
     None
 }
 
-/// A `const _` that names each constant of `module` in `read`. The kernels read them, but Rust
-/// never sees a kernel's body run, so it would find them unused.
-fn used(module: &lang::Module, read: &[String]) -> TokenStream {
-    let lets: String = module
-        .items
-        .iter()
-        .filter_map(|item| match &item.kind {
-            ItemKind::Const(c) if read.contains(&c.name) => Some(format!("let _ = {};\n", c.name)),
-            _ => None,
-        })
-        .collect();
+/// A `const _` that names each constant of `module` in `read`, by its name as `top` writes it,
+/// `r#type` as well. The kernels read them, but Rust never sees a kernel's body run, so it
+/// would find them unused.
+fn used(module: &lang::Module, read: &[String], top: &[TokenTree]) -> TokenStream {
+    let mut lets = TokenStream::new();
+    for item in &module.items {
+        if let ItemKind::Const(c) = &item.kind
+            && read.contains(&c.name)
+        {
+            lets.extend(parse("let _ ="));
+            lets.extend([const_name(item, top)]);
+            lets.extend(parse(";"));
+        }
+    }
     if lets.is_empty() {
         return TokenStream::new();
     }
-    parse(&format!("const _: () = {{\n{lets}}};"))
+    let mut out = parse("const _: () =");
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, lets))]);
+    out.extend(parse(";"));
+    out
+}
+
+/// The name of `item`, a const, as `top` writes it, `r#type` as well, of the span the macro
+/// writes.
+fn const_name(item: &lang::Item, top: &[TokenTree]) -> TokenTree {
+    let tokens = &top[item.tokens.clone()];
+    let at = tokens.iter().position(|t| is_ident(t, "const")).expect("a const") + 1;
+    let mut name = tokens[at].clone();
+    name.set_span(site());
+    name
 }
 
 /// `PTX`, the module the GPU kernels are, and `Kernels`, which loads it on a GPU and has a
@@ -1127,8 +1437,36 @@ fn host(ty: &[TokenTree]) -> TokenStream {
     }
 }
 
+/// The tokens `s` writes, each of the span [`SITE`] says.
 fn parse(s: &str) -> TokenStream {
-    s.parse().expect("kgen-macros writes tokens that parse")
+    let tokens: TokenStream = s.parse().expect("kgen-macros writes tokens that parse");
+    match SITE.get() {
+        Some(span) => respan(tokens, span),
+        None => tokens,
+    }
+}
+
+/// The span of the tokens the macro writes: [`SITE`]'s, or its call site.
+fn site() -> Span {
+    SITE.get().unwrap_or_else(Span::call_site)
+}
+
+/// `tokens`, each of the span `span`.
+fn respan(tokens: TokenStream, span: Span) -> TokenStream {
+    tokens
+        .into_iter()
+        .map(|t| match t {
+            TokenTree::Group(g) => {
+                let mut inner = Group::new(g.delimiter(), respan(g.stream(), span));
+                inner.set_span(span);
+                TokenTree::Group(inner)
+            }
+            mut t => {
+                t.set_span(span);
+                t
+            }
+        })
+        .collect()
 }
 
 fn is_ident(t: &TokenTree, name: &str) -> bool {

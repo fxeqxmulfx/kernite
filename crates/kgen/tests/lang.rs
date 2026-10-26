@@ -509,3 +509,34 @@ fn array_parameters_take_variables_declared_together() {
 ";
     assert_eq!(x86(src, "k"), want);
 }
+
+/// A constant of a module works out on its own, in terms of the module's others, before or
+/// after it, as a module of consts has each checked; or says why it is no value known now.
+#[test]
+fn a_constant_works_out_on_its_own() {
+    let src = "const D: usize = E / H;\nconst E: usize = 16;\nconst H: usize = 4;\nconst W: [f32; 2] = [0.5, -1.0];\n\
+               const LOOP: u32 = LOOP + 1;\nconst BAD: u32 = 1.5;\nconst GONE: u32 = NOPE;\n\
+               unsafe extern \"sysv64\" fn k() {}\n";
+    let module = kgen::lang::parse(src).unwrap();
+    let value = |name: &str| {
+        let c = module
+            .items
+            .iter()
+            .find_map(|item| match &item.kind {
+                kgen::lang::ItemKind::Const(c) if c.name == name => Some(c),
+                _ => None,
+            })
+            .unwrap();
+        kgen::lang::constant(&module, c).map(|v| v.to_string()).map_err(|e| e.at(src))
+    };
+    let cases = [
+        ("D", Ok("4")),
+        ("W", Ok("[0.5, -1]")),
+        ("LOOP", Err("5:19: `LOOP` is defined in terms of itself")),
+        ("BAD", Err("6:18: this is an f32, not u32")),
+        ("GONE", Err("7:19: `NOPE` is not defined")),
+    ];
+    for (name, want) in cases {
+        assert_eq!(value(name), want.map(String::from).map_err(String::from), "{name}");
+    }
+}

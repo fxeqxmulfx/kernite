@@ -39,6 +39,13 @@ where it is called, and `<const N: usize>` makes one generic. A generic kernel i
 `kernels::dot::<4>(x, y, n)`; a value it does not list fails to build. [`kgen-lang`](crates/lang/src/lib.rs)
 describes the language.
 
+The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
+CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kgen_macros::consts]` is on, and a
+module of kernels takes them by its path, `#[kgen_macros::kernels(consts = crate::model::sizes)]`: its kernels read
+them as the module's own, and Rust sees them there by a `use` the macro writes. A module of consts is the crate's own,
+and holds `pub` consts of what kernels read, numbers, floats, `bool`s, arrays of them and expressions of these; a
+module that takes them may not have an item of its own of one of their names.
+
 Stack memory a kernel declares is a variable, as a GPU kernel's local memory is: `let tables: local<[u32; 1024], 32>;`
 is 4 KB of its frame at a multiple of 32, reached by its name, `mov(c.r32, [tables + b * 4])`, and `lea(p, [tables])`
 takes its address. Until written, it holds whatever was there. kgen checks an address in it where the index is 0: what
@@ -243,8 +250,9 @@ KGEN_BLESS=1 cargo test -p my-app   # rewrites the snapshots after a deliberate 
 [`examples/microgpt`](examples/microgpt/src/main.rs) is Karpathy's
 [microgpt](https://gist.github.com/karpathy/8627fe009c40f57531cb18360106ce95): a GPT of one layer that learns from
 32,033 names to make up new ones. It runs on 25 kernels in x86 for the CPU, or on 25 in PTX for the GPU, and on a
-plain Rust reference that does the same float operations in the same order. Its tests hold the three to each other
-bit for bit, one operation at a time.
+plain Rust reference that does the same float operations in the same order; all three read the model's sizes and
+`exp`'s constants from one module of consts. Its tests hold the three to each other bit for bit, one operation at a
+time.
 
 Its weights come from the same Mersenne Twister draws as Python's, and it trains on the same names in the same
 order, so it prints what microgpt.py prints: the same twenty names, and the same loss at 998 of its 1000 steps. At

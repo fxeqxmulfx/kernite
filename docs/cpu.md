@@ -411,4 +411,36 @@ The plan:
     through calls, recursion among them.
   - Not done: an instruction that writes the memory it reads, as `add([COUNTS + 8], 1)`, which
     kgen's x86 forms have for no memory yet, so a kernel loads, adds and stores; and `movsx`.
-- Step 6 is next.
+- Step 6, consts from outside a module, is done, on `cpu-calls`:
+  - `#[kgen_macros::consts]` (`consts` in `crates/macros/src/lib.rs`) gives its module to Rust as
+    it is, and refuses what kernels could not read there: a const that is not `pub`, one whose
+    value kgen cannot work out (`kgen_lang::constant`, which works out one constant of a module),
+    and any item but a const. It adds `__kgen_consts!`, a `macro_rules!` re-exported
+    `pub(crate)`, which calls `kgen_macros::__kernels!` with the consts' tokens and the tokens it
+    is given.
+  - `#[kernels(consts = path)]` becomes `path::__kgen_consts! { (path) module }`, and
+    `__kernels!` reads the consts before the module's items, so that its kernels read them as
+    its own. Rust's code in the module sees them by `use path::{E, ..};`, the path as Rust reads
+    it where the module is: from `crate` or `::` as it is, `self` as `super`, and any other with
+    `super::` before it. A const, function or static of the module's own of one of their names
+    is an error at it.
+  - A proc macro called from a `macro_rules!` has that macro's call site, whose local names are
+    the macro's own, so a name the macro wrote missed the same name in the module's tokens:
+    "cannot find value `x`". Each token the macro writes takes the span of the path instead,
+    which is the module's (`SITE`), and a guard resets it, panicking or not.
+  - A const named as a keyword, `r#type`, is named so where the macro marks it read, which was
+    `let _ = type;` before, for a module's own consts as well.
+  - The module's own attributes, `//!` among them, come first in what the macro writes, as Rust
+    has them. The `use` went before them, and so did step 5's error of a module of both kinds of
+    kernel and a static, which Rust refused as well.
+  - microgpt's `model::consts` holds its sizes, where its embeddings are, and `exp`'s constants,
+    each once. `model` re-exports them, `cpu.rs` and `gpu.rs` take them, and the reference reads
+    `exp`'s constants there. It is `consts`, not `sizes`, since it holds more than sizes. The
+    copies are gone, and the asserts that they agree; what is left asserts what the kernels take
+    of the sizes, as `WTE == 0`.
+  - Tests: the doctests of `kgen-macros`, one that runs and a `compile_fail` one for a name given
+    twice; `a_constant_works_out_on_its_own` in `crates/kgen/tests/lang.rs`; and microgpt, which
+    builds, whose tests pass, and whose listings are as they were. Every error, a relative path, a
+    raw name, and a module given consts with a generic kernel, a cooperative one, a static, an
+    `impl` and a GPU kernel were checked in crates of their own.
+  - Not done: consts from another crate, whose macro is the crate's alone, as planned.

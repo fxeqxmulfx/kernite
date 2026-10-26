@@ -26,11 +26,11 @@
 //!   that takes arguments is written as Rust writes a generic one, `shared<[f32; N * 4], 16>`,
 //!   and the machine is given it with values in place of the names they are bound to:
 //!   `shared<[f32; 256], 16>`.
-//! - **Values** are known now: `const` items, `let k = 4;`, the `<const N: usize>` of a helper
-//!   or of an instance, a loop's counter. Integers are checked for overflow; floats are `f32`
-//!   unless written or declared `f64`, `f16` or `bf16`, and their arithmetic is the machine's.
-//!   The 16-bit ones are worked out in `f64` and rounded once, to the nearest, as the machine
-//!   rounds them.
+//! - **Values** are known now: `const` items, each of which [`constant`] works out on its own,
+//!   `let k = 4;`, the `<const N: usize>` of a helper or of an instance, a loop's counter.
+//!   Integers are checked for overflow; floats are `f32` unless written or declared `f64`,
+//!   `f16` or `bf16`, and their arithmetic is the machine's. The 16-bit ones are worked out in
+//!   `f64` and rounded once, to the nearest, as the machine rounds them.
 //! - **Instructions** are calls by name, `vaddps(sum, sum, pair)`, or by words joined with
 //!   dots, `ld.global.f32(x, [p + 4])`. An operand is a variable, a value, a label, or memory
 //!   in brackets: `[x + i * 4 + 16]` at an address, `[1.0]` or `[[0.5; 8]]` holding data.
@@ -84,7 +84,7 @@ pub use ast::{
     BinOp, Block, Const, Cooperative, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret, Static, Stmt,
     Type, UnOp,
 };
-pub use eval::{Fault, Guard, Mem, Memory, Operand, Run, Target, instance, instances, kernel, memory};
+pub use eval::{Fault, Guard, Mem, Memory, Operand, Run, Target, constant, instance, instances, kernel, memory};
 pub use parse::module;
 pub use token::{Delim, Span, Tree, lex, text};
 pub use value::{IntTy, Value};

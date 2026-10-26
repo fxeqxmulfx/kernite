@@ -8,22 +8,44 @@
 
 use crate::random::Random;
 
-/// Tokens: the 26 letters, and `BOS`.
-pub const V: usize = 27;
-/// The vocabulary padded to a multiple of eight: the width of a row of logits.
-pub const VP: usize = 32;
-/// The width of the embedding.
-pub const E: usize = 16;
-/// Heads of attention.
-pub const H: usize = 4;
-/// The width of each head.
-pub const D: usize = E / H;
-/// The longest context: positions 0 to 15.
-pub const T: usize = 16;
-/// The width of the MLP's hidden layer.
-pub const M: usize = 4 * E;
-/// The token that begins and ends each name.
-pub const BOS: u32 = 26;
+pub use consts::*;
+
+/// What the kernels read of the model, once for every backend: its sizes, where its
+/// embeddings are, and `exp`'s constants. Each module of kernels takes them as its own,
+/// `#[kgen_macros::kernels(consts = crate::model::consts)]`, and the rest of the crate as the
+/// model's, `model::E`.
+#[kgen_macros::consts]
+pub mod consts {
+    /// Tokens: the 26 letters, and `BOS`.
+    pub const V: usize = 27;
+    /// The vocabulary padded to a multiple of eight: the width of a row of logits.
+    pub const VP: usize = 32;
+    /// The width of the embedding.
+    pub const E: usize = 16;
+    /// Heads of attention.
+    pub const H: usize = 4;
+    /// The width of each head.
+    pub const D: usize = E / H;
+    /// The longest context: positions 0 to 15.
+    pub const T: usize = 16;
+    /// The width of the MLP's hidden layer.
+    pub const M: usize = 4 * E;
+    /// The token that begins and ends each name.
+    pub const BOS: u32 = 26;
+    /// The token embeddings, a row of `E` for each token.
+    pub const WTE: usize = 0;
+    /// The position embeddings, a row of `E` for each position.
+    pub const WPE: usize = WTE + V * E;
+    /// The width of a row of queries, keys and values, side by side.
+    pub const QKV_COLS: usize = 3 * E;
+    /// ln 2 in two parts, Cephes's: the first of nine bits, so that `k ln 2` loses nothing for
+    /// the `k` that [`exp`](crate::reference::exp) takes, and the rest.
+    pub const LN2_HI: f32 = 355.0 / 512.0;
+    /// The rest of ln 2.
+    pub const LN2_LO: f32 = -2.121_944_4e-4;
+    /// The Taylor series of e^r to the sixth power, highest first.
+    pub const TAYLOR: [f32; 7] = [1.0 / 720.0, 1.0 / 120.0, 1.0 / 24.0, 1.0 / 6.0, 0.5, 1.0, 1.0];
+}
 
 /// A matrix of weights, `rows` inputs by `cols` outputs, stored a row of outputs to each
 /// input: the transpose of microgpt.py's, so that a row's outputs are side by side.
@@ -37,12 +59,8 @@ pub struct Layer {
     pub cols: usize,
 }
 
-/// The token embeddings, a row of `E` for each token.
-pub const WTE: usize = 0;
-/// The position embeddings, a row of `E` for each position.
-pub const WPE: usize = WTE + V * E;
 /// Queries, keys and values side by side: `wq`, `wk` and `wv`.
-pub const QKV: Layer = Layer { at: WPE + T * E, rows: E, cols: 3 * E };
+pub const QKV: Layer = Layer { at: WPE + T * E, rows: E, cols: QKV_COLS };
 /// Attention's output projection.
 pub const WO: Layer = Layer { at: QKV.at + E * 3 * E, rows: E, cols: E };
 /// The MLP's first layer.

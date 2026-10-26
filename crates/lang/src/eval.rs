@@ -198,6 +198,18 @@ pub fn memory(module: &Module, s: &Static) -> Result<Memory, Error> {
     Ok(Memory { ty, value, consts: consts.collect() })
 }
 
+/// `c`, a constant of `module`, worked out among the module's constants; or why it is no value
+/// known now.
+pub fn constant(module: &Module, c: &Const) -> Result<Value, Error> {
+    let mut consts = Consts;
+    let mut e = Eval::new(module, &mut consts);
+    let i = e.consts.iter().position(|(k, _)| std::ptr::eq(*k, c)).expect("a constant of the module");
+    e.consts[i].1 = State::Busy;
+    let v = e.constant(c)?;
+    e.consts[i].1 = State::Done(v.clone());
+    Ok(v)
+}
+
 /// Runs `f` of `module` on `target`, a kernel or another function that names an ABI, for the
 /// compile-time arguments `args`, those of one of its [`instances`]: its parameters declared,
 /// its body evaluated.
