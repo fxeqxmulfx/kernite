@@ -2848,9 +2848,10 @@ fn grid_sync_is_where_every_thread_of_the_grid_comes_to_it() {
 }
 
 #[test]
-fn cooperative_is_said_of_a_gpu_kernel_alone() {
-    let not = "`#[cooperative]` goes on a GPU kernel, `extern \"ptx-kernel\"`, whose blocks wait for each other";
-    let nothing = "1:3: `#[cooperative]` takes nothing: it says that a kernel's blocks wait for each other";
+fn cooperative_is_said_of_a_kernel_alone() {
+    let not = "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, `extern \"ptx-kernel\"` \
+               or `extern \"sysv64\"`";
+    let nothing = "1:3: `#[cooperative]` takes nothing: it says that a kernel's blocks or threads wait for each other";
     let cases = [
         (
             "#[cooperative] extern \"ptx-func\" fn f() {}",

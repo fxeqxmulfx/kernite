@@ -110,8 +110,8 @@ pub struct Instances {
     pub tokens: Range<usize>,
 }
 
-/// `#[cooperative]`: a kernel whose parts wait for each other, as the blocks of a GPU kernel
-/// wait at `grid.sync()`, so that its machine runs them all at once.
+/// `#[cooperative]`: a kernel whose parts wait for each other at `grid.sync()`, the blocks of
+/// a GPU kernel or the threads of an x86 one, so that its machine runs them all at once.
 #[derive(Clone, Debug)]
 pub struct Cooperative {
     /// Where `cooperative` is.

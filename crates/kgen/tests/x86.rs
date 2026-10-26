@@ -346,14 +346,152 @@ fn a_static_is_no_memory_of_an_x86_kernel() {
     );
 }
 
-/// A cooperative kernel is a GPU's, whose blocks the GPU runs all at once.
+/// A cooperative kernel's thread reads its place in the grid from the register after its
+/// parameters, and `grid.sync()` is code of the kernel's own, in its body and in a helper's:
+/// each thread counts itself in with `lock xadd`, and the last lets the others go, who spin
+/// on the generation with `pause`. Its labels are the kernel's own, beside the body's.
 #[test]
-fn an_x86_kernel_is_not_cooperative() {
-    let src = "#[cooperative]\nunsafe extern \"sysv64\" fn k() {}\n";
+fn a_cooperative_kernel_waits_for_its_grid_at_a_barrier_of_its_own() {
+    let src = r#"
+        #[cooperative]
+        unsafe extern "sysv64" fn k(x: *mut u64) {
+            let (t, u): (gpr, gpr);
+            mov(t, grid.thread);
+            mov([x + t * 8], t);
+            grid.sync();
+            note("the next thread's index");
+            inc(t);
+            cmp(t, grid.threads);
+            jnz(read);
+            zero(t);
+            label(read);
+            mov(u, [x + t * 8]);
+            wait();
+            mov([x + t * 8], u);
+        }
+
+        fn wait() {
+            grid.sync();
+        }
+    "#;
+    let want = "# k(gpr, gpr) -> ()
+# frame: 0 bytes aligned to 0, saves []
+# x=rdi t=rax u=rcx grid=rsi barrier=rcx,rdx generation=rdx,r8
+# arrived=r8,r9
+    mov rax, qword ptr [rsi]
+    mov qword ptr [rdi + rax*8], rax
+    # grid.sync()
+    mov rcx, qword ptr [rsi + 16]
+    mov rdx, qword ptr [rcx + 8]
+    mov r8, 1
+    lock xadd qword ptr [rcx], r8
+    inc r8
+    cmp r8, qword ptr [rsi + 8]
+    jnz 2f
+    # the last to come lets the others go
+    mov qword ptr [rcx], 0
+    inc rdx
+    mov qword ptr [rcx + 8], rdx
+    jmp 3f
+2:
+    # the others wait for it
+    pause
+    cmp rdx, qword ptr [rcx + 8]
+    jz 2b
+3:
+    # the next thread's index
+    inc rax
+    cmp rax, qword ptr [rsi + 8]
+    jnz 4f
+    xor eax, eax
+4:
+    mov rcx, qword ptr [rdi + rax*8]
+    # grid.sync()
+    mov rdx, qword ptr [rsi + 16]
+    mov r8, qword ptr [rdx + 8]
+    mov r9, 1
+    lock xadd qword ptr [rdx], r9
+    inc r9
+    cmp r9, qword ptr [rsi + 8]
+    jnz 5f
+    # the last to come lets the others go
+    mov qword ptr [rdx], 0
+    inc r8
+    mov qword ptr [rdx + 8], r8
+    jmp 6f
+5:
+    # the others wait for it
+    pause
+    cmp r8, qword ptr [rdx + 8]
+    jz 5b
+6:
+    mov qword ptr [rdi + rax*8], rcx
+    ret
+";
+    assert_eq!(kgen::x86_str(src, "k").unwrap().text(), want);
+}
+
+/// The cooperative kernel `k` around `body`, compiled, or the error.
+fn cooperative(params: &str, body: &str) -> Result<String, String> {
+    let src = format!("#[cooperative]\nunsafe extern \"sysv64\" fn k({params}) {{\n{body}\n}}\n");
+    kgen::x86_str(&src, "k").map(|l| l.code().collect::<Vec<_>>().join("\n"))
+}
+
+/// What a thread may do with the grid: read where it is, which is memory, and wait for every
+/// thread, in a kernel that runs on a grid, `#[cooperative]`, which takes five integers at
+/// most and returns nothing.
+#[test]
+fn the_grid_is_a_cooperative_kernels_to_read_and_wait_for() {
+    let cases = [
+        (
+            "let t: gpr; mov(t, grid.block);",
+            "3:25: a thread reads `grid.thread`, its index in the grid, and `grid.threads`, how many there are; not \
+             `grid.block`",
+        ),
+        ("mov(grid.thread, x);", "3:10: `grid.thread` is read, as in `mov(t, grid.thread)`; the launcher writes it"),
+        ("inc(grid.threads);", "3:10: `inc` wants a gpr; this is memory"),
+        (
+            "let t: gpr; lea(t, grid.thread);",
+            "3:25: `grid.thread` is read, as in `mov(t, grid.thread)`; `lea` takes the address of the kernel's memory",
+        ),
+        ("grid.wait();", "3:6: kgen's barrier for the grid is `grid.sync()`; not `grid.wait`"),
+        ("grid();", "3:1: kgen's barrier for the grid is `grid.sync()`; not `grid`"),
+        ("grid.sync(x);", "3:6: `grid.sync` takes no operands, not 1"),
+        (
+            "let g: gpr; zero(g); if g { grid.sync(); }",
+            "3:34: `grid.sync()` is for every thread of the grid, under no `if`: the grid waits for ever for one that \
+             does not come to it",
+        ),
+    ];
+    for (body, want) in cases {
+        assert_eq!(cooperative("x: usize", body).unwrap_err(), want, "{body}");
+    }
+    let not = [
+        (
+            "let t: gpr; mov(t, grid.thread);",
+            "2:25: `grid.thread` is of the grid a kernel runs on when it is `#[cooperative]`, and `k` is not",
+        ),
+        (
+            "grid.sync();",
+            "2:6: `grid.sync()` waits for every thread of the grid, which runs all at once only if `k` is \
+             `#[cooperative]`",
+        ),
+    ];
+    for (body, want) in not {
+        assert_eq!(compile("x: usize", body).unwrap_err(), want, "{body}");
+    }
+    // The place takes the sixth integer register; floats go in registers of their own.
+    let five = "a: usize, b: usize, c: usize, d: usize, e: usize";
+    assert_eq!(cooperative(&format!("{five}, x: f32"), "").unwrap(), "ret");
+    assert_eq!(
+        cooperative(&format!("{five}, f: usize"), "").unwrap_err(),
+        "2:82: a cooperative kernel takes five integers at most: SysV passes six in registers, and the sixth is the \
+         thread's place in the grid"
+    );
+    let src = "#[cooperative]\nunsafe extern \"sysv64\" fn k() -> f32 {}\n";
     assert_eq!(
         kgen::x86_str(src, "k").unwrap_err(),
-        "1:3: `#[cooperative]` goes on a GPU kernel, `extern \"ptx-kernel\"`, whose blocks wait for each other; `k` \
-         is a kernel for x86-64, which no GPU launches"
+        "2:34: a cooperative kernel's threads return nothing: they write what they compute to memory"
     );
 }
 

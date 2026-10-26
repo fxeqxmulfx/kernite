@@ -171,7 +171,8 @@ impl<'a> Parser<'a> {
                     "cooperative" => {
                         if !rest.is_empty() {
                             return at(
-                                "`#[cooperative]` takes nothing: it says that a kernel's blocks wait for each other",
+                                "`#[cooperative]` takes nothing: it says that a kernel's blocks or threads wait for \
+                                 each other",
                             );
                         }
                         if cooperative.is_some() {
@@ -194,8 +195,8 @@ impl<'a> Parser<'a> {
             })
             .or(cooperative.as_ref().map(|c| Error {
                 span: c.span,
-                message: "`#[cooperative]` goes on a GPU kernel, `extern \"ptx-kernel\"`, whose blocks wait for each \
-                          other"
+                message: "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, `extern \
+                          \"ptx-kernel\"` or `extern \"sysv64\"`"
                     .into(),
             }));
         let head = self.pos;

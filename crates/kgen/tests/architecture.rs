@@ -15,6 +15,7 @@ const RULE: &[(&str, &[&str])] = &[
     ("kgen", &["kgen-core", "kgen-lang", "kgen-compile", "kgen-x86", "kgen-ptx"]),
     ("kgen-macros", &["kgen"]),
     ("kgen-cuda", &[]),
+    ("kgen-cpu", &[]),
 ];
 
 /// The package name and every dependency of the manifest at `path`, of any kind.

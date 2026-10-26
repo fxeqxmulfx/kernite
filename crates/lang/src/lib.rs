@@ -52,8 +52,8 @@
 //!   `#[instances(256, 1024)]` lists, of values known now, or for two
 //!   `#[instances((3, true), (-2, false))]`; [`instances`] lists them, and an instruction
 //!   names one as `f::<256>`. `#[cooperative]` on a kernel says that its parts wait for each
-//!   other, as a GPU kernel's blocks wait at `grid.sync()`, so that it is launched with them
-//!   all running at once.
+//!   other at `grid.sync()`, a GPU kernel's blocks or an x86 kernel's threads, so that it is
+//!   launched with them all running at once.
 //! - **`for k in 0..n { .. }`** is unrolled, over a range, an array or variables.
 //!   **`if c { .. } else { .. }`** chooses now when `c` is a bool; when `c` is a predicate
 //!   variable it guards each instruction inside, `if !p` the other way.

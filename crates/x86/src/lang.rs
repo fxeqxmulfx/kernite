@@ -16,6 +16,23 @@
 //! reaching as far as one past the end for `lea`; and for `vmovaps` and `vmovdqa`, which fault
 //! elsewhere, it is a multiple of the bytes they move. The index is the kernel's to keep inside,
 //! and at such a multiple.
+//!
+//! A `#[cooperative]` kernel runs on the threads of a grid, each the same code, as a GPU kernel
+//! runs on blocks. A thread reads where it is as memory, 8 bytes each: `grid.thread`, its index
+//! from 0, and `grid.threads`, how many there are, as in `mov(t, grid.thread)` or
+//! `cmp(i, grid.threads)`. `grid.sync()` waits until every thread has come to it, so that what
+//! each wrote before, every one reads after. It is code of the kernel's own, which calls
+//! nothing: a thread counts itself in with `lock xadd`, and the last to come lets the others
+//! go, who spin with `pause` until it does, so each thread needs a core. Every thread comes to
+//! each `grid.sync()`, or the others wait for ever: kgen refuses one under an `if`, and a jump
+//! around one is the kernel's to keep from.
+//!
+//! The launcher gives each thread the address of its place in the grid, in the register after
+//! the kernel's parameters, as SysV passes the next integer, so a cooperative kernel takes five
+//! integers at most; and its threads return nothing, but write what they compute to memory.
+//! The place is three words: the thread's index, how many threads there are, and the address
+//! of the grid's barrier, which is two: how many threads have come to it, and how many times
+//! all have.
 
 use kgen_core::Access::{self, Ignored, Read, ReadWrite, Write};
 use kgen_core::Width::{self, W8, W16, W32, W64, W128, W256};
@@ -32,6 +49,17 @@ use crate::sysv::{FLOAT_PARAMS, FLOAT_RESULT, INT_PARAMS, INT_RESULT, PAGE};
 /// The most bytes of stack memory a kernel has: as far past the stack pointer as an address
 /// reaches, whose displacement is 32 bits, signed.
 const FRAME: u64 = i32::MAX as u64;
+
+/// Where a thread's place in the grid has each of its words: its index, how many threads
+/// there are, and the barrier's address. kgen-cpu lays it out so.
+const THREAD: i32 = 0;
+const THREADS: i32 = 8;
+const BARRIER: i32 = 16;
+
+/// Where the barrier has each of its words: how many threads have come to it, and how many
+/// times all have, its generation.
+const ARRIVED: i32 = 0;
+const GENERATION: i32 = 8;
 
 /// Rust's numbers, which stack memory holds, and the bytes of each.
 const HELD: &[(&str, u64)] = &[
@@ -384,6 +412,13 @@ pub struct Kernel {
     result: Option<Class>,
     /// Each slot's type as declared, `local<[f32; 64], 32>`, by [`SlotId`].
     declared: Vec<String>,
+    /// Whether it runs on the threads of a grid, `#[cooperative]`.
+    cooperative: bool,
+    /// The variable a thread's place in the grid arrives in, once there is one.
+    grid: Option<VReg>,
+    /// The next label of the kernel's own code, `grid.sync()`'s. They count down from the
+    /// last, and the evaluator's up from 0, so that the two never meet.
+    labels: u32,
 }
 
 impl Kernel {
@@ -404,7 +439,17 @@ impl Kernel {
             floats: 0,
             result: None,
             declared: vec![],
+            cooperative: false,
+            grid: None,
+            labels: u32::MAX,
         }
+    }
+
+    /// Makes the kernel one that runs on the threads of a grid, `#[cooperative]`, before its
+    /// parameters are declared: each thread is given its place in the grid after them, and
+    /// may wait for the others at `grid.sync()`.
+    pub fn cooperative(&mut self) {
+        self.cooperative = true;
     }
 
     /// Stack memory declared as `let name: ty`, `ty` being `local<[f32; 64], 32>`.
@@ -435,9 +480,120 @@ impl Kernel {
         Ok(Var(Place::Stack(SlotId(self.p.slots.len() as u32 - 1))))
     }
 
-    /// The kernel as written.
-    pub fn finish(self) -> Program<Op> {
+    /// The kernel as written. A cooperative one takes its place in the grid, read or not, as
+    /// the launcher passes it.
+    pub fn finish(mut self) -> Program<Op> {
+        if self.cooperative {
+            self.grid();
+        }
         self.p
+    }
+
+    /// The variable a cooperative kernel's thread is given its place in the grid in: a
+    /// parameter after the others, in the register SysV passes the next integer in, which
+    /// [`Target::param`] leaves free.
+    fn grid(&mut self) -> VReg {
+        if let Some(g) = self.grid {
+            return g;
+        }
+        let at = INT_PARAMS[self.ints];
+        let g = self.new_var(Class::Gpr, "grid");
+        self.p.params.push((g, at));
+        self.p.signature.params.push(Class::Gpr);
+        self.grid = Some(g);
+        g
+    }
+
+    /// A label of the kernel's own code.
+    fn own_label(&mut self) -> Label {
+        self.labels -= 1;
+        Label(self.labels + 1)
+    }
+
+    /// The memory that `name`, which is no variable, is if it is the grid's: `grid.thread` or
+    /// `grid.threads`, in the place a cooperative kernel's thread is given. `None` for a name
+    /// that is not the grid's.
+    fn grid_value(&mut self, name: &str) -> Result<Option<Given<Var>>, String> {
+        let disp = match name {
+            "grid.thread" => THREAD,
+            "grid.threads" => THREADS,
+            _ if name.starts_with("grid.") => {
+                return Err(format!(
+                    "a thread reads `grid.thread`, its index in the grid, and `grid.threads`, how many there are; \
+                     not `{name}`"
+                ));
+            }
+            _ => return Ok(None),
+        };
+        if !self.cooperative {
+            return Err(format!(
+                "`{name}` is of the grid a kernel runs on when it is `#[cooperative]`, and `{}` is not",
+                self.p.name
+            ));
+        }
+        let base = Var(Place::Reg(self.grid(), View::R64));
+        Ok(Some(Given::Mem(kgen_lang::Mem { base: Some(base), index: None, disp: disp.into() })))
+    }
+
+    /// `grid.sync()`, which waits until every thread of the grid has come to it: code of the
+    /// kernel's own, for it calls nothing. A thread reads the barrier's generation, then counts
+    /// itself in with `lock xadd`, which first makes what it wrote seen by every thread. The last
+    /// to come resets the count for the next time, then moves the generation on, which lets the
+    /// others go; they wait for it with `pause`, as Intel asks of a loop that spins. x86 makes a
+    /// thread's stores seen in the order it makes them, so one that sees the new generation sees
+    /// the count reset, and what every thread wrote before it came.
+    fn sync(&mut self, name: &str, args: &[Given<Var>], guard: bool) -> Result<(), Fault> {
+        if name != "grid.sync" {
+            return Err(Fault::new(format!("kgen's barrier for the grid is `grid.sync()`; not `{name}`")));
+        }
+        if !args.is_empty() {
+            return Err(Fault::new(format!("`{name}` takes no operands, not {}", args.len())));
+        }
+        if !self.cooperative {
+            return Err(Fault::new(format!(
+                "`grid.sync()` waits for every thread of the grid, which runs all at once only if `{}` is \
+                 `#[cooperative]`",
+                self.p.name
+            )));
+        }
+        if guard {
+            return Err(Fault::new(
+                "`grid.sync()` is for every thread of the grid, under no `if`: the grid waits for ever for one that \
+                 does not come to it",
+            ));
+        }
+        let grid = self.grid();
+        let (wait, done) = (self.own_label(), self.own_label());
+        let barrier = self.new_var(Class::Gpr, "barrier");
+        let generation = self.new_var(Class::Gpr, "generation");
+        let arrived = self.new_var(Class::Gpr, "arrived");
+        let reg = |v: VReg, access: Access| Arg { operand: Operand::Reg(v, W64), access };
+        let mem = |base: VReg, disp: i32, access: Access| Arg {
+            operand: Operand::Mem(Mem { base: Base::Reg(base), index: None, disp, width: W64 }),
+            access,
+        };
+        let int = |value: i64| Arg { operand: Operand::Imm(Imm { value, hex: false }), access: Read };
+        let to = |l: Label| vec![Arg { operand: Operand::Label(l), access: Read }];
+        self.p.body.push(Item::Note("grid.sync()".into()));
+        self.push(Op::Mov, vec![reg(barrier, Write), mem(grid, BARRIER, Read)], vec![], Flow::Next);
+        self.push(Op::Mov, vec![reg(generation, Write), mem(barrier, GENERATION, Read)], vec![], Flow::Next);
+        self.push(Op::Mov, vec![reg(arrived, Write), int(1)], vec![], Flow::Next);
+        self.push(Op::LockXadd, vec![mem(barrier, ARRIVED, ReadWrite), reg(arrived, ReadWrite)], vec![], Flow::Next);
+        self.push(Op::Inc, vec![reg(arrived, ReadWrite)], vec![], Flow::Next);
+        self.push(Op::Cmp, vec![reg(arrived, Read), mem(grid, THREADS, Read)], vec![], Flow::Next);
+        self.push(Op::Jnz, to(wait), vec![], Flow::Branch(wait));
+        self.p.body.push(Item::Note("the last to come lets the others go".into()));
+        self.push(Op::Mov, vec![mem(barrier, ARRIVED, Write), int(0)], vec![], Flow::Next);
+        self.push(Op::Inc, vec![reg(generation, ReadWrite)], vec![], Flow::Next);
+        self.push(Op::Mov, vec![mem(barrier, GENERATION, Write), reg(generation, Read)], vec![], Flow::Next);
+        self.push(Op::Jmp, to(done), vec![], Flow::Jump(done));
+        self.p.body.push(Item::Label(wait));
+        self.p.body.push(Item::Note("the others wait for it".into()));
+        self.push(Op::Pause, vec![], vec![], Flow::Next);
+        self.push(Op::Cmp, vec![reg(generation, Read), mem(barrier, GENERATION, Read)], vec![], Flow::Next);
+        self.push(Op::Jz, to(wait), vec![], Flow::Branch(wait));
+        self.p.body.push(Item::Label(done));
+        Ok(())
     }
 
     fn new_var(&mut self, class: Class, name: &str) -> VReg {
@@ -868,6 +1024,11 @@ impl Target for Kernel {
             (Class::Vec, at, View::Xmm)
         } else if ty.starts_with("*const ") || ty.starts_with("*mut ") || ["usize", "isize", "u64", "i64"].contains(&ty)
         {
+            if self.cooperative && self.ints == INT_PARAMS.len() - 1 {
+                return Err("a cooperative kernel takes five integers at most: SysV passes six in registers, and the \
+                            sixth is the thread's place in the grid"
+                    .into());
+            }
             let at = *INT_PARAMS
                 .get(self.ints)
                 .ok_or("SysV passes a seventh integer on the stack, which kgen does not read")?;
@@ -888,6 +1049,11 @@ impl Target for Kernel {
         let ints = ["usize", "isize", "u64", "i64", "u32", "i32", "u16", "i16", "u8", "i8", "bool"];
         let class = match ty {
             "()" => return Ok(()),
+            _ if self.cooperative => {
+                return Err(
+                    "a cooperative kernel's threads return nothing: they write what they compute to memory".into()
+                );
+            }
             "f32" | "f64" => Class::Vec,
             _ if ty.starts_with("*const ") || ty.starts_with("*mut ") || ints.contains(&ty) => Class::Gpr,
             _ => return Err(format!("a kernel returns a float, an integer or a pointer, not `{ty}`")),
@@ -951,9 +1117,23 @@ impl Target for Kernel {
     }
 
     fn inst(&mut self, name: &str, args: &[Given<Var>], guard: Option<Guard<Var>>) -> Result<(), Fault> {
+        if name == "grid" || name.starts_with("grid.") {
+            return self.sync(name, args, guard.is_some());
+        }
         if guard.is_some() {
             return Err(Fault::new("x86 runs an instruction whatever a predicate says; jump around it"));
         }
+        // The grid's values are memory, which an instruction reads, by its name as written.
+        let mut args = args.to_vec();
+        let mut grid = vec![];
+        for (i, a) in args.iter_mut().enumerate() {
+            let Given::Special(s) = a else { continue };
+            if let Some(m) = self.grid_value(s).map_err(|m| Fault::at(i, m))? {
+                grid.push((i, std::mem::take(s)));
+                *a = m;
+            }
+        }
+        let args = args.as_slice();
         for (i, a) in args.iter().enumerate() {
             match a {
                 Given::Var(Var(Place::Stack(s))) => {
@@ -1026,6 +1206,16 @@ impl Target for Kernel {
             match Self::fits(form, args) {
                 Ok(()) => {
                     let built = self.build(form, args, name)?;
+                    for (i, s) in &grid {
+                        let wrong = if op == Op::Lea {
+                            "`lea` takes the address of the kernel's memory"
+                        } else if built[*i].access != Read {
+                            "the launcher writes it"
+                        } else {
+                            continue;
+                        };
+                        return Err(Fault::at(*i, format!("`{s}` is read, as in `mov(t, {s})`; {wrong}")));
+                    }
                     self.push(op, built, vec![], Flow::Next);
                     return Ok(());
                 }

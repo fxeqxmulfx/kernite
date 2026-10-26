@@ -71,6 +71,36 @@ A spill moves a register with `mov` or `vmovups`, which leave the flags as they 
 comparison and its jump. Only when no spill makes room, as when one instruction names more variables than there are
 registers, is it an error, which names the variables at the declaration of the one that found none.
 
+A kernel whose threads wait for each other is `#[cooperative]`, and runs on the threads of a grid, as a GPU kernel runs
+on its blocks: each thread runs all of it, and reads where it is as memory, `grid.thread` of `grid.threads`, as in
+`mov(t, grid.thread)`. Its `grid.sync()` waits until every thread has come to it, so that what each wrote before, every
+one reads after. It is code of the kernel's own, which calls nothing: a thread counts itself in with `lock xadd`, and
+the last to come lets the others go, who spin with `pause` until it does. kgen refuses one under an `if`, where a
+thread might not come to it.
+
+```rust
+#[kgen_macros::kernels]
+mod kernels {
+    /// `x[i] /= s` for each `i < n`, `s` the sum of `x`, on the threads of a grid.
+    #[cooperative]
+    pub unsafe extern "sysv64" fn normalize(x: *mut f32, sums: *mut f32, n: usize) {
+        let c: gpr;
+        mov(c, grid.thread);
+        ..
+        grid.sync();
+        ..
+    }
+}
+
+let mut sums = vec![0.0; x.len().div_ceil(1024)];
+unsafe { kernels::normalize(kgen_cpu::Grid::new(4), x.as_mut_ptr(), sums.as_mut_ptr(), x.len())? };
+```
+
+`normalize` becomes the function that launches it, which takes a [`kgen_cpu::Grid`](crates/cpu/src/lib.rs) and the
+kernel's parameters, runs the kernel on a thread for each of the grid's, the caller's the first, and returns when all
+have ended. A thread that waits spins, so it needs a core: a grid of more threads than the machine runs at once,
+`kgen_cpu::most()`, is an error, as a GPU's grid of more blocks than it runs at once is.
+
 ## On a GPU
 
 An `extern "ptx-kernel"` function is compiled to PTX. The module's kernels are one PTX module, `PTX`, which
@@ -171,9 +201,10 @@ name = "kgen"
 
 ## Examples
 
-[`examples/my-app`](examples/my-app/src/main.rs) uses kgen as a crate outside it would: `sum8`, `dot` for one
-accumulator, for four and for sixteen, two of which spill, and `count_bytes`, by tables in its stack memory, for the CPU, and for the GPU `saxpy`, `block_sums` for blocks of 256 threads and of 1024
-and `reverse_runs` in shared memory, `scale_f16`, written in place, `gcds`, which calls `gcd`, an `extern "ptx-func"`
+[`examples/my-app`](examples/my-app/src/main.rs) uses kgen as a crate outside it would: for the CPU `sum8`, `dot` for
+one accumulator, for four and for sixteen, two of which spill, `count_bytes`, by tables in its stack memory, and
+`normalize` and `diffuse` on the threads of a grid, which compute what the GPU's do, bit for bit; and for the GPU
+`saxpy`, `block_sums` for blocks of 256 threads and of 1024 and `reverse_runs` in shared memory, `scale_f16`, written in place, `gcds`, which calls `gcd`, an `extern "ptx-func"`
 function that calls itself, `histogram`, which counts in the module's global memory from launch to launch, and
 `weigh`, by weights in its constant memory, with safe functions over them; and
 `matmul` on the tensor cores, by `cp.async`, `ldmatrix` and `mma`, in a module of its own, since it needs an Ampere
@@ -217,8 +248,9 @@ Each crate depends only on the layers inside it. `crates/kgen/tests/architecture
 | use cases | `kgen-compile` | liveness, register allocation, spilling, the frame's layout; tested on a toy machine |
 | adapters | `kgen-x86`, `kgen-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kgen` | which machine and syntax each kernel compiles with |
-| delivery | `kgen-macros` | kernels as functions: `#[unsafe(naked)]`, or launchers of PTX |
+| delivery | `kgen-macros` | kernels as functions: `#[unsafe(naked)]`, launchers of a grid's threads, or launchers of PTX |
 | runtime | `kgen-cuda` | the CUDA driver: memory on the GPU, modules, launches; `f16` and `bf16`; depends on no other crate |
+| runtime | `kgen-cpu` | the threads of a cooperative x86 kernel's grid, and the barrier they wait at; depends on no other crate |
 
 ## Guarantees
 

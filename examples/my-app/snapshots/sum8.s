@@ -1,6 +1,6 @@
 # sum8(gpr) -> vec
 # frame: 0 bytes aligned to 0, saves []
-# xs=rdi v=ymm0 high=ymm1 sum=ymm0 pair=ymm1
+# xs=rdi v=ymm0 sum=ymm0 high=ymm1 pair=ymm1
     vmovups ymm0, ymmword ptr [rdi]
     # the lanes
     vextractf128 xmm1, ymm0, 1

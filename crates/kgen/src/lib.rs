@@ -11,8 +11,9 @@
 //! | use cases | `kgen-compile` | liveness, register allocation, spilling, the frame's layout |
 //! | adapters | `kgen-x86`, `kgen-ptx` | x86-64: SysV, Intel syntax; PTX for NVIDIA GPUs |
 //! | composition | `kgen`, this crate | which machine and syntax each kernel compiles with |
-//! | delivery | `kgen-macros` | kernels as functions, `#[unsafe(naked)]` or launched on a GPU |
-//! | runtime | `kgen-cuda` | the CUDA driver the launchers call; it depends on no other crate |
+//! | delivery | `kgen-macros` | kernels as functions, `#[unsafe(naked)]`, or launched on a grid |
+//! | runtime | `kgen-cuda` | the CUDA driver a GPU kernel's launcher calls; it depends on no other crate |
+//! | runtime | `kgen-cpu` | the threads a cooperative x86 kernel runs on; it depends on no other crate |
 //!
 //! None of them has a dependency outside the workspace, and none iterates a hash map, so a
 //! kernel's text is a function of its source alone.
@@ -92,11 +93,15 @@ pub struct Compiled<T> {
 /// Kernel `f` of `module`, for x86-64 under SysV, for the compile-time arguments `args`:
 /// those of one of its [`instances`](kgen_lang::instances), none for a kernel that takes none.
 /// What goes wrong is placed where it can be mended: an instruction where it is called, a
-/// register that ran out where its variable is declared. For an instance, it says which.
+/// register that ran out where its variable is declared. For an instance, it says which. A
+/// kernel that is [`cooperative`] runs on the threads of a grid, and may wait for them,
+/// `grid.sync()`.
 pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>, kgen_lang::Error> {
     let name = kgen_lang::instance(f, args)?;
-    cooperative(f)?;
     let mut kernel = kgen_x86::lang::Kernel::new(&name);
+    if cooperative(f)? {
+        kernel.cooperative();
+    }
     let run = kgen_lang::kernel(module, f, args, &mut kernel).map_err(|e| within(&name, args, e))?;
     let code = render(&kernel.finish()).map_err(|e| {
         let e = kgen_lang::Error { span: blame(&e, &run.decls).unwrap_or(f.span), message: e.to_string() };
@@ -233,21 +238,21 @@ pub fn abi(f: &Fn) -> Option<Abi> {
     f.abi.as_ref().and_then(|(abi, _)| Abi::of(abi))
 }
 
-/// Whether `f` is a GPU kernel whose blocks wait for each other, `#[cooperative]`, which
-/// every launch runs all at once; or why it may not say so, if it says so and is not a GPU
-/// kernel. One of an ABI kgen knows nothing of is none, whatever it says.
+/// Whether `f` is a kernel whose parts wait for each other, `#[cooperative]`, which every
+/// launch runs all at once: a GPU kernel's blocks, or an x86 kernel's threads. Or why it may
+/// not say so, if it says so and is no kernel. One of an ABI kgen knows nothing of is none,
+/// whatever it says.
 pub fn cooperative(f: &Fn) -> Result<bool, kgen_lang::Error> {
     let Some(c) = &f.cooperative else { return Ok(false) };
     let what = match (abi(f), &f.abi) {
-        (Some(Abi::PtxKernel), _) => return Ok(true),
+        (Some(Abi::PtxKernel | Abi::Sysv64), _) => return Ok(true),
         (Some(Abi::PtxFunc), _) => "a function the kernels call, which runs as the kernel that calls it is launched",
-        (Some(Abi::Sysv64), _) => "a kernel for x86-64, which no GPU launches",
         (None, Some(_)) => return Ok(false),
         (None, None) => "a helper, inlined where it is called",
     };
     let message = format!(
-        "`#[cooperative]` goes on a GPU kernel, `extern \"ptx-kernel\"`, whose blocks wait for each other; `{}` is \
-         {what}",
+        "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, `extern \"ptx-kernel\"` or \
+         `extern \"sysv64\"`; `{}` is {what}",
         f.name
     );
     Err(kgen_lang::Error { span: c.span, message })

@@ -5,7 +5,7 @@
 # x=rdi y=rsi n=rdx acc0=ymm0 acc1=ymm1 acc2=ymm2
 # acc3=ymm3 acc4=ymm4 acc5=ymm5 acc6=ymm6 acc7=ymm7 acc8=ymm8
 # acc9=ymm9 acc10=ymm10 acc11=ymm11 acc12=ymm12 acc13=ymm13 xs=ymm14
-# high=ymm1 sum=ymm0 pair=ymm1 zero=ymm0 acc15=ymm14,ymm15,ymm1 acc14=ymm14,ymm15,ymm1
+# sum=ymm0 high=ymm1 pair=ymm1 zero=ymm0 acc15=ymm14,ymm15,ymm1 acc14=ymm14,ymm15,ymm1
     push rbp
     mov rbp, rsp
     sub rsp, 64

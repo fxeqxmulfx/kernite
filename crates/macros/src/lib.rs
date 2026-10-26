@@ -79,6 +79,15 @@
 //! `kernels.normalize_blocks(256, 0)?`. A grid of more is an error, and so is a GPU before
 //! Pascal's, `sm_60`, which launches none cooperatively.
 //!
+//! An x86 kernel whose threads wait for each other is `#[cooperative]` too, and runs on the
+//! threads of a grid, each given its place there, `grid.thread` of `grid.threads`: it becomes
+//! the function of its name that takes a `kgen_cpu::Grid` and the kernel's parameters, runs
+//! the kernel on every thread at once, and returns when all have ended:
+//! `cpu::normalize(kgen_cpu::Grid::new(4), x.as_mut_ptr(), sums.as_mut_ptr(), n)?`. A thread
+//! spins at `grid.sync()` until the last comes, so a grid has at most as many threads as the
+//! machine runs at once, `kgen_cpu::most()`, and more is an error. A crate with such kernels
+//! depends on `kgen-cpu` for these.
+//!
 //! A GPU kernel is named in PTX as C++ names a function in namespaces, those of the
 //! workspace, the crate and its modules, mangled under Itanium's ABI:
 //! `_ZN4kgen6my_app3gpu5scaleE`, which `cu++filt`, Nsight and `cuda-gdb` show as
@@ -218,7 +227,7 @@ fn expand(body: TokenStream) -> TokenStream {
             Err(e) => {
                 out.extend(error(at(e.span), &e.message));
                 match abi {
-                    Abi::Sysv64 => out.extend(stub(f, &top)),
+                    Abi::Sysv64 => out.extend(x86_stub(f, &top)),
                     Abi::PtxKernel => launchers.push((f, None)),
                     Abi::PtxFunc => {}
                 }
@@ -245,7 +254,7 @@ fn expand(body: TokenStream) -> TokenStream {
                         listings.push((lang::instance(f, args).unwrap_or_default(), listing.text()));
                     }
                 } else {
-                    out.extend(stub(f, &top));
+                    out.extend(x86_stub(f, &top));
                 }
             }
             Abi::PtxKernel | Abi::PtxFunc => {
@@ -494,9 +503,7 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     out.extend(parse("unsafe fn"));
     out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
     let mut params = parse("&self, grid: ::kgen_cuda::Grid, ");
-    let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
-    let tokens = flatten(group.stream());
-    for param in tokens.split(|t| is_punct(t, ',')).filter(|p| !p.is_empty()) {
+    for param in written_params(f, top) {
         let colon = param.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type");
         params.extend(param[..=colon].iter().cloned());
         match &param[colon + 1..] {
@@ -592,47 +599,59 @@ fn pick(f: &Fn, arms: &[(Vec<Value>, String)]) -> String {
 /// `f` as an `#[unsafe(naked)]` function whose body is the listing of its one instance, and
 /// the statics its constants are, in a module beside it. For a function of compile-time
 /// arguments, each instance is such a function in that module, and `f` is one that calls the
-/// instance its arguments pick.
+/// instance its arguments pick. So is each instance of a cooperative kernel, which takes the
+/// thread's place in the grid after `f`'s parameters, and `f` is its [`grid_launcher`].
 fn naked(f: &Fn, instances: &[(Vec<Value>, kgen::Listing)], top: &[TokenTree]) -> TokenStream {
     let module = format!("__kgen_{}", f.name);
-    let mut out = attrs(f, top);
+    let cooperative = f.cooperative.is_some();
+    let mut out = TokenStream::new();
     let mut items = String::new();
     let mut statics = vec![];
     if let [(args, listing)] = instances
         && args.is_empty()
+        && !cooperative
     {
+        out.extend(attrs(f, top));
         out.extend(parse("#[unsafe(naked)]"));
         out.extend(signature(f, top));
         out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&asm(listing, &format!("{module}::C")))))]);
         statics.push(("C".to_string(), listing));
     } else {
-        // The function's type, and the names of its parameters, which it passes on.
-        let params: TokenStream = [top[f.params_at].clone()].into_iter().collect();
+        // Each instance's parameters and their types: `f`'s, then a cooperative kernel's place.
+        let (mut params, mut tys) = (vec![], vec![]);
+        for param in written_params(f, top) {
+            let colon = param.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type");
+            params.push(param.iter().cloned().collect::<TokenStream>().to_string());
+            tys.push(param[colon + 1..].iter().cloned().collect::<TokenStream>().to_string());
+        }
+        if cooperative {
+            params.push("_: &::kgen_cpu::Place".to_string());
+            tys.push("&::kgen_cpu::Place".to_string());
+        }
         let ret: TokenStream = f.ret.as_ref().map_or_else(TokenStream::new, |r| {
             parse("->").into_iter().chain(top[r.tokens.clone()].iter().cloned()).collect()
         });
-        let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
-        let tokens = flatten(group.stream());
-        let tys: Vec<String> = tokens
-            .split(|t| is_punct(t, ','))
-            .filter(|p| !p.is_empty())
-            .map(|p| p.iter().skip_while(|t| !is_punct(t, ':')).skip(1).cloned().collect::<TokenStream>().to_string())
-            .collect();
         let ty = format!("unsafe extern \"sysv64\" fn({}) {ret}", tys.join(", "));
-        let names: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
         let mut arms = vec![];
         for (k, (args, listing)) in instances.iter().enumerate() {
             items += &format!(
-                "#[unsafe(naked)]\npub unsafe extern \"sysv64\" fn I{k}{params} {ret} {{ {} }}\n",
+                "#[unsafe(naked)]\npub unsafe extern \"sysv64\" fn I{k}({}) {ret} {{ {} }}\n",
+                params.join(", "),
                 asm(listing, &format!("I{k}C"))
             );
             statics.push((format!("I{k}C"), listing));
             arms.push((args.clone(), format!("{module}::I{k} as {ty}")));
         }
-        out.extend(parse("#[inline(always)]"));
-        out.extend(signature(f, top));
-        let body = format!("unsafe {{ ({})({}) }}", pick(f, &arms), names.join(", "));
-        out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&body)))]);
+        if cooperative {
+            out.extend(grid_launcher(f, Some(&arms), top));
+        } else {
+            let names: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+            out.extend(attrs(f, top));
+            out.extend(parse("#[inline(always)]"));
+            out.extend(signature(f, top));
+            let body = format!("unsafe {{ ({})({}) }}", pick(f, &arms), names.join(", "));
+            out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&body)))]);
+        }
     }
     let mut aligns: Vec<u32> = statics.iter().flat_map(|(_, l)| l.consts.iter().map(|c| c.align)).collect();
     aligns.sort();
@@ -670,6 +689,84 @@ fn asm(listing: &kgen::Listing, statics: &str) -> String {
         asm += &format!("c{i} = sym {statics}{i}, ");
     }
     asm + ")"
+}
+
+/// The function that runs `f`, a cooperative x86 kernel, on the threads of a grid, of `f`'s
+/// name and generics: it takes the grid, then `f`'s parameters, and each thread calls the
+/// instance `kernels` has for `f`'s compile-time arguments, given its place in the grid. A
+/// pointer reaches the threads as the address it is, which each makes a pointer again, as
+/// Rust's pointers do not cross threads. Without `kernels`, it never runs, for a kernel that
+/// did not compile.
+fn grid_launcher(f: &Fn, kernels: Option<&[(Vec<Value>, String)]>, top: &[TokenTree]) -> TokenStream {
+    let mut out = attrs(f, top);
+    out.extend(parse(
+        "#[doc = \"\"]\n#[doc = \" Every thread of the grid runs at once, as `grid.sync()` needs, each on a core, so a \
+         grid of more threads than [`kgen_cpu::most`] says the machine runs is an error.\"]",
+    ));
+    if !out.to_string().contains("# Safety") {
+        out.extend(parse(
+            "#[doc = \"\"]\n#[doc = \" # Safety\"]\n#[doc = \"\"]\n\
+             #[doc = \" The kernel trusts the pointers it is given: each must be to memory as long as the kernel's \
+             threads read and write through it, which nothing else touches while they run.\"]",
+        ));
+    }
+    out.extend(parse(if kernels.is_some() {
+        "#[allow(clippy::too_many_arguments)]"
+    } else {
+        "#[allow(clippy::too_many_arguments, unused_variables)]"
+    }));
+    // Its visibility, then `unsafe fn` and its name and generics as written.
+    out.extend(visibility(f, top).iter().cloned());
+    out.extend(parse("unsafe fn"));
+    out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
+    let mut params = parse("grid: ::kgen_cpu::Grid, ");
+    for param in written_params(f, top) {
+        params.extend(param);
+        params.extend(parse(","));
+    }
+    out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, params))]);
+    out.extend(parse("-> ::core::result::Result<(), ::kgen_cpu::Error>"));
+    let body = match kernels {
+        Some(kernels) => {
+            let kernel = match kernels {
+                [(args, kernel)] if args.is_empty() => kernel.clone(),
+                _ => pick(f, kernels),
+            };
+            let (mut addresses, mut args) = (String::new(), vec![]);
+            for (p, param) in f.params.iter().zip(written_params(f, top)) {
+                let colon = param.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type");
+                match &param[colon + 1..] {
+                    [star, kind, ..] if is_punct(star, '*') && (is_ident(kind, "const") || is_ident(kind, "mut")) => {
+                        let again = if is_ident(kind, "mut") { "_mut" } else { "" };
+                        addresses += &format!("let {0} = {0}.expose_provenance();\n", p.name);
+                        args.push(format!("::core::ptr::with_exposed_provenance{again}({})", p.name));
+                    }
+                    _ => args.push(p.name.clone()),
+                }
+            }
+            args.push("grid".to_string());
+            format!(
+                "{addresses}::kgen_cpu::launch(grid, &|grid: &::kgen_cpu::Place| unsafe {{ ({kernel})({}) }})",
+                args.join(", ")
+            )
+        }
+        None => "::core::unreachable!()".to_string(),
+    };
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&body)))]);
+    out
+}
+
+/// `f`, an x86 kernel that does not compile, as a function that never runs: of `f`'s
+/// signature, or of its launcher's, for a cooperative kernel.
+fn x86_stub(f: &Fn, top: &[TokenTree]) -> TokenStream {
+    if f.cooperative.is_some() { grid_launcher(f, None, top) } else { stub(f, top) }
+}
+
+/// `f`'s parameters as written, each its tokens, `x: *mut f32`.
+fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<Vec<TokenTree>> {
+    let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
+    let tokens = flatten(group.stream());
+    tokens.split(|t| is_punct(t, ',')).filter(|p| !p.is_empty()).map(<[TokenTree]>::to_vec).collect()
 }
 
 /// `f` with a body that never runs, for a kernel that does not compile.

@@ -25,6 +25,10 @@ name = "kgen-core"
 version = "0.1.0"
 
 [[package]]
+name = "kgen-cpu"
+version = "0.1.0"
+
+[[package]]
 name = "kgen-cuda"
 version = "0.1.0"
 
@@ -67,6 +71,7 @@ dependencies = [
 name = "my-app"
 version = "0.1.0"
 dependencies = [
+ "kgen-cpu",
  "kgen-cuda",
  "kgen-macros",
 ]

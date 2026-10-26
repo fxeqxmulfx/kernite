@@ -121,20 +121,274 @@ mod kernels {
         jnz(sum);
     }
 
-    /// Returns the sum of `v`'s lanes: the high half added to the low, then the high pair of
-    /// that to the low pair, then the second float to the first.
+    /// `x[i] /= s` for each `i < n`, `s` the sum of `x`, in one launch on the threads of a grid,
+    /// bit for bit as `pascal::normalize` computes it on a GPU. The floats are in chunks of
+    /// 1024, as the GPU's are in blocks of 256 threads of four, and the threads take the chunks
+    /// in turn, each its index's and every `grid.threads`th after. A chunk's sum is its
+    /// block's: a lane of 32 vectors for each GPU thread, whose four floats, 256 apart, are
+    /// added in order; then the vectors in the block's tree, the upper half added to the lower
+    /// down to one, whose lanes are added as `sum8` adds them, which is the tree's order too.
+    /// The last chunk, if it is partial, is summed in the kernel's stack memory, with zeros
+    /// after its floats. The sums go to `sums`, a float a chunk; the grid waits; then each
+    /// thread adds them in order, and divides its floats by that, rounded once.
+    #[cooperative]
+    pub unsafe extern "sysv64" fn normalize(x: *mut f32, sums: *mut f32, n: usize) {
+        let tail: local<[f32; 1024], 32>;
+        let (whole, rest, c, p, i): (gpr, gpr, gpr, gpr, gpr);
+        mov(whole, n);
+        shr(whole, 10);
+        mov(rest, n);
+        and(rest, 1023);
+
+        note("each of the thread's chunks summed");
+        mov(c, grid.thread);
+        label(chunk);
+        mov(p, c);
+        shl(p, 12);
+        add(p, x);
+        cmp(c, whole);
+        jb(sum);
+        jnz(summed);
+        test(rest, rest);
+        jz(summed);
+
+        note("the last chunk, partial, copied to the stack, zeros after it");
+        let f: ymm;
+        zero(f);
+        zero(i);
+        label(clear);
+        for k in 0..4 {
+            vmovaps([tail + i + 32 * k], f);
+        }
+        add(i, 128);
+        cmp(i, 4096);
+        jnz(clear);
+        zero(i);
+        label(copy);
+        vmovss(f.xmm, [p + i * 4]);
+        vmovss([tail + i * 4], f.xmm);
+        inc(i);
+        cmp(i, rest);
+        jnz(copy);
+        lea(p, [tail]);
+
+        label(sum);
+        note("a GPU thread's four floats to a lane, then the tree's first two halvings");
+        let tree: [ymm; 8];
+        for j in 0..8 {
+            let v: [ymm; 4];
+            for q in 0..4 {
+                vmovups(v[q], [p + 32 * (j + 8 * q)]);
+                for k in 1..4 {
+                    vaddps(v[q], v[q], [p + 1024 * k + 32 * (j + 8 * q)]);
+                }
+            }
+            vaddps(v[0], v[0], v[2]);
+            vaddps(v[1], v[1], v[3]);
+            vaddps(tree[j], v[0], v[1]);
+        }
+        note("the rest of the tree");
+        for half in [4, 2, 1] {
+            for j in 0..half {
+                vaddps(tree[j], tree[j], tree[j + half]);
+            }
+        }
+        let s: ymm;
+        add_lanes(s, tree[0]);
+        vmovss([sums + c * 4], s.xmm);
+        add(c, grid.threads);
+        jmp(chunk);
+
+        label(summed);
+        grid.sync();
+
+        note("the chunks' sums, in order");
+        let all: gpr;
+        lea(all, [n + 1023]);
+        shr(all, 10);
+        zero(s);
+        zero(c);
+        label(next);
+        cmp(c, all);
+        jz(divide);
+        vaddss(s.xmm, s.xmm, [sums + c * 4]);
+        inc(c);
+        jmp(next);
+
+        label(divide);
+        note("the thread's floats over the sum");
+        let d: ymm;
+        vbroadcastss(d, s.xmm);
+        mov(c, grid.thread);
+        label(over);
+        mov(p, c);
+        shl(p, 12);
+        add(p, x);
+        cmp(c, whole);
+        jae(part);
+        zero(i);
+        label(each);
+        for k in 0..4 {
+            let v: ymm;
+            vmovups(v, [p + i + 32 * k]);
+            vdivps(v, v, d);
+            vmovups([p + i + 32 * k], v);
+        }
+        add(i, 128);
+        cmp(i, 4096);
+        jnz(each);
+        add(c, grid.threads);
+        jmp(over);
+
+        label(part);
+        jnz(done);
+        test(rest, rest);
+        jz(done);
+        zero(i);
+        label(one);
+        vmovss(f.xmm, [p + i * 4]);
+        vdivss(f.xmm, f.xmm, s.xmm);
+        vmovss([p + i * 4], f.xmm);
+        inc(i);
+        cmp(i, rest);
+        jnz(one);
+        label(done);
+    }
+
+    /// `steps` steps of heat spreading along the `n` floats of `x`, in one launch on the threads
+    /// of a grid, bit for bit as `pascal::diffuse` computes them on a GPU: in each, each float
+    /// becomes `x[i] + (x[i - 1] - x[i]) / 4 + (x[i + 1] - x[i]) / 4` of the floats before,
+    /// each operation rounded once, an end's missing neighbour as warm as the end. The threads
+    /// take chunks of 1024 floats in turn, as in `normalize`, eight floats at once where their
+    /// neighbours are all there, else one. A step reads `x` and writes `y`, the next the other
+    /// way, and the grid waits between them; after an odd number, each thread copies its chunks
+    /// back to `x`. `y` is as long as `x`.
+    #[cooperative]
+    pub unsafe extern "sysv64" fn diffuse(x: *mut f32, y: *mut f32, n: usize, steps: usize) {
+        let (from, to, c, i, end, j): (gpr, gpr, gpr, gpr, gpr, gpr);
+        mov(from, x);
+        mov(to, y);
+        let quarter: ymm;
+        vbroadcastss(quarter, [0.25]);
+        test(steps, steps);
+        jz(done);
+
+        label(step);
+        mov(c, grid.thread);
+        label(chunk);
+        mov(i, c);
+        shl(i, 10);
+        cmp(i, n);
+        jae(stepped);
+        lea(end, [i + 1024]);
+        cmp(end, n);
+        jbe(each);
+        mov(end, n);
+        label(each);
+        cmp(i, end);
+        jz(chunked);
+        note("eight floats at once, if their neighbours are all there");
+        test(i, i);
+        jz(one);
+        lea(j, [i + 9]);
+        cmp(j, n);
+        ja(one);
+        lea(j, [i + 8]);
+        cmp(j, end);
+        ja(one);
+        let (v, l, r): (ymm, ymm, ymm);
+        vmovups(v, [from + i * 4]);
+        vmovups(l, [from + i * 4 - 4]);
+        vmovups(r, [from + i * 4 + 4]);
+        vsubps(l, l, v);
+        vmulps(l, l, quarter);
+        vsubps(r, r, v);
+        vmulps(r, r, quarter);
+        vaddps(v, v, l);
+        vaddps(v, v, r);
+        vmovups([to + i * 4], v);
+        add(i, 8);
+        jmp(each);
+
+        label(one);
+        note("one float, an end's missing neighbour the end itself");
+        vmovss(v.xmm, [from + i * 4]);
+        vmovaps(l.xmm, v.xmm);
+        vmovaps(r.xmm, v.xmm);
+        test(i, i);
+        jz(left);
+        vmovss(l.xmm, [from + i * 4 - 4]);
+        label(left);
+        lea(j, [i + 1]);
+        cmp(j, n);
+        jz(right);
+        vmovss(r.xmm, [from + i * 4 + 4]);
+        label(right);
+        vsubss(l.xmm, l.xmm, v.xmm);
+        vmulss(l.xmm, l.xmm, quarter.xmm);
+        vsubss(r.xmm, r.xmm, v.xmm);
+        vmulss(r.xmm, r.xmm, quarter.xmm);
+        vaddss(v.xmm, v.xmm, l.xmm);
+        vaddss(v.xmm, v.xmm, r.xmm);
+        vmovss([to + i * 4], v.xmm);
+        inc(i);
+        jmp(each);
+
+        label(chunked);
+        add(c, grid.threads);
+        jmp(chunk);
+
+        label(stepped);
+        grid.sync();
+        mov(j, from);
+        mov(from, to);
+        mov(to, j);
+        dec(steps);
+        jnz(step);
+
+        note("after an odd number of steps, the thread's chunks back to `x`");
+        cmp(from, x);
+        jz(done);
+        mov(c, grid.thread);
+        label(back);
+        mov(i, c);
+        shl(i, 10);
+        cmp(i, n);
+        jae(done);
+        lea(end, [i + 1024]);
+        cmp(end, n);
+        jbe(copy);
+        mov(end, n);
+        label(copy);
+        vmovss(v.xmm, [from + i * 4]);
+        vmovss([x + i * 4], v.xmm);
+        inc(i);
+        cmp(i, end);
+        jnz(copy);
+        add(c, grid.threads);
+        jmp(back);
+        label(done);
+    }
+
+    /// Returns the sum of `v`'s lanes, as `add_lanes` adds them.
     fn ret_sum(v: ymm) {
+        let sum: ymm;
+        add_lanes(sum, v);
+        ret(sum.xmm);
+    }
+
+    /// The sum of `v`'s lanes, in `sum`'s first: the high half added to the low, then the high
+    /// pair of that to the low pair, then the second float to the first.
+    fn add_lanes(sum: ymm, v: ymm) {
         note("the lanes");
         let high: ymm;
         vextractf128(high.xmm, v, 1);
-        let sum: ymm;
         vaddps(sum.xmm, v.xmm, high.xmm);
         let pair: ymm;
         vmovhlps(pair.xmm, sum.xmm, sum.xmm);
         vaddps(sum.xmm, sum.xmm, pair.xmm);
         vmovshdup(pair.xmm, sum.xmm);
         vaddss(sum.xmm, sum.xmm, pair.xmm);
-        ret(sum.xmm);
     }
 }
 
@@ -635,6 +889,30 @@ fn count_bytes(bytes: &[u8], counts: &mut [u32; 256]) {
     unsafe { kernels::count_bytes::<4>(bytes.as_ptr(), bytes.len(), counts.as_mut_ptr()) }
 }
 
+/// `x / s` on `threads` threads of the cpu, `s` the sum of `x`, in one launch: each thread
+/// sums its chunks of 1024 floats while the others sum theirs, then waits for them to add the
+/// chunks' sums, bit for bit as `normalize` does on the GPU. `threads` is one at least, and at
+/// most as many as the machine runs at once, `kgen_cpu::most()`; else it is an error.
+fn normalize_on_threads(x: &mut [f32], threads: usize) -> Result<(), kgen_cpu::Error> {
+    assert!(supported(), "the kernels need AVX2 and FMA");
+    let mut sums = vec![0.0; x.len().div_ceil(1024)];
+    // SAFETY: `x.len()` floats behind `x` and a float a chunk behind `sums`, which nothing
+    // else touches while the threads run, and the cpu has what the kernel needs.
+    unsafe { kernels::normalize(kgen_cpu::Grid::new(threads), x.as_mut_ptr(), sums.as_mut_ptr(), x.len()) }
+}
+
+/// `steps` steps of heat spreading along `x` on `threads` threads of the cpu, in one launch,
+/// the threads waiting for each other between steps, bit for bit as `diffuse` does on the
+/// GPU. `threads` is one at least, and at most as many as the machine runs at once,
+/// `kgen_cpu::most()`; else it is an error.
+fn diffuse_on_threads(x: &mut [f32], steps: usize, threads: usize) -> Result<(), kgen_cpu::Error> {
+    assert!(supported(), "the kernels need AVX2 and FMA");
+    let mut y = vec![0.0; x.len()];
+    // SAFETY: `x.len()` floats behind each pointer, which nothing else touches while the
+    // threads run, and the cpu has what the kernel needs.
+    unsafe { kernels::diffuse(kgen_cpu::Grid::new(threads), x.as_mut_ptr(), y.as_mut_ptr(), x.len(), steps) }
+}
+
 /// `y = a * x + y` on the GPU, each element rounded once; `x` and `y` must be as long as each
 /// other.
 fn saxpy(cuda: &Cuda, kernels: &gpu::Kernels, a: f32, x: &[f32], y: &mut [f32]) -> Result<(), kgen_cuda::Error> {
@@ -826,6 +1104,21 @@ fn main() {
         counts[usize::from(b'o')],
         counts[usize::from(b'h')]
     );
+    let cooperative = kgen_cpu::most().and_then(|most| {
+        let threads = most.min(4);
+        let mut x = [1.0, 2.0, 3.0, 4.0];
+        normalize_on_threads(&mut x, threads)?;
+        let mut heat = [0.0, 0.0, 0.0, 16.0, 0.0, 0.0, 0.0];
+        diffuse_on_threads(&mut heat, 2, threads)?;
+        Ok((threads, x, heat))
+    });
+    match cooperative {
+        Ok((threads, x, heat)) => {
+            println!("1 to 4 over their sum, on {threads} threads of the cpu that wait for each other: {x:?}");
+            println!("16 among cold floats, after two steps of heat spreading on {threads} threads: {heat:?}");
+        }
+        Err(e) => println!("the cpu's cooperative kernels failed: {e}"),
+    }
     let gpu = Cuda::new().and_then(|cuda| gpu::Kernels::load(&cuda).map(|kernels| (cuda, kernels)));
     match gpu {
         Ok((cuda, kernels)) => {
@@ -1349,6 +1642,70 @@ mod tests {
             assert_eq!(got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), want, "{n} floats, {steps} steps");
         }
         too_large(super::diffuse(&cuda, &kernels, &mut vec![0.0; all + 1], 1).unwrap_err(), most + 1, most);
+    }
+
+    /// How many threads the cpu tests run on at most: four, or as many as the machine runs at
+    /// once if fewer, since `cargo test` runs tests beside each other and each thread spins at
+    /// a barrier.
+    fn threads() -> usize {
+        kgen_cpu::most().unwrap().min(4)
+    }
+
+    /// The error of a grid of more threads than the machine runs at once.
+    fn too_many(e: kgen_cpu::Error) {
+        let most = kgen_cpu::most().unwrap();
+        assert_eq!(e.message, format!("the grid has {} threads, and the machine runs {most} at once", most + 1));
+    }
+
+    /// The cpu's `normalize` against [`normalized`], the GPU's reference, bit for bit, on one
+    /// thread to four, each time of ten: of no float and of one, of a chunk and a float less and
+    /// more, and of chunks enough that each thread has several, the last partial, so that a
+    /// thread that went on before the others had written their sums would show; and a grid of
+    /// more threads than the machine runs is an error.
+    #[test]
+    fn normalize_on_threads_is_the_gpus_reference_bit_for_bit() {
+        assert!(super::supported(), "the kernels need AVX2 and FMA");
+        for threads in 1..=threads() {
+            for n in [0, 1, 1023, 1024, 1025, 10_000, 41_000] {
+                // In [0.5, 1.5), so that the sum is far from 0.
+                let x: Vec<f32> = floats(n, n as u32 + 11).iter().map(|x| x / 2.0 + 1.0).collect();
+                let want: Vec<u32> = normalized(&x).iter().map(|v| v.to_bits()).collect();
+                for _ in 0..10 {
+                    let mut got = x.clone();
+                    super::normalize_on_threads(&mut got, threads).unwrap();
+                    assert_eq!(
+                        got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        want,
+                        "{n} floats, {threads} threads"
+                    );
+                }
+            }
+        }
+        too_many(super::normalize_on_threads(&mut [1.0], kgen_cpu::most().unwrap() + 1).unwrap_err());
+    }
+
+    /// The cpu's `diffuse` against [`diffused`], the GPU's reference, bit for bit, on one thread
+    /// to four: of floats fewer than a vector and its neighbours, of a chunk and one more, and
+    /// of chunks enough that each thread has several, over a thousand steps, each a wait of the
+    /// grid, so that a thread that read a neighbour of another step would show; and a grid of
+    /// more threads than the machine runs is an error.
+    #[test]
+    fn diffuse_on_threads_is_the_gpus_reference_bit_for_bit() {
+        assert!(super::supported(), "the kernels need AVX2 and FMA");
+        for threads in 1..=threads() {
+            for (n, steps) in [(1, 3), (2, 1), (9, 2), (10, 3), (17, 4), (1000, 0), (1025, 1), (9000, 1000)] {
+                let x = floats(n, n as u32 + 13);
+                let want: Vec<u32> = diffused(&x, steps).iter().map(|v| v.to_bits()).collect();
+                let mut got = x.clone();
+                super::diffuse_on_threads(&mut got, steps as usize, threads).unwrap();
+                assert_eq!(
+                    got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    want,
+                    "{n} floats, {steps} steps, {threads} threads"
+                );
+            }
+        }
+        too_many(super::diffuse_on_threads(&mut [1.0], 1, kgen_cpu::most().unwrap() + 1).unwrap_err());
     }
 
     /// `saxpy` on the GPU against `f32::mul_add`, which rounds once as `fma.rn.f32` does; on a

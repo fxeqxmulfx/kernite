@@ -25,6 +25,7 @@ kgen-ptx = { path = "crates/ptx" }
 kgen = { path = "crates/kgen" }
 kgen-macros = { path = "crates/macros" }
 kgen-cuda = { path = "crates/cuda" }
+kgen-cpu = { path = "crates/cpu" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -153,4 +153,34 @@ the GPU.
   - my-app's `dot::<16>` spills two accumulators and matches its reference bit for bit.
   - Not done: one slot for variables never live together, a load folded into the instruction
     that reads it, a loaded value kept for the next read.
-- Next: step 3, the CPU grid.
+- Step 3, the CPU grid, is done:
+  - `#[cooperative]` goes on an `extern "sysv64"` kernel too (`cooperative()` in
+    `crates/kgen/src/lib.rs`). The x86 target (`crates/x86/src/lang.rs`) gives such a kernel one
+    hidden parameter after the others: the address of the thread's place, three words that
+    `kgen-cpu` lays out, the thread's index, the thread count, and the barrier's address. So a
+    cooperative kernel takes five integers at most, and returns nothing.
+  - `grid.thread` and `grid.threads` are memory in the place, which a thread reads, as in
+    `mov(t, grid.thread)`; kgen refuses a write, `lea`, another `grid.` name, and either in a
+    kernel that is not cooperative.
+  - `grid.sync()` is inline (`sync`). A thread reads the generation, counts itself in with
+    `lock xadd`, and the last to come resets the count and moves the generation on; the others
+    spin on it with `pause`. x86-TSO makes this enough: the locked add orders what each thread
+    wrote before it, and the reset is stored before the new generation. kgen refuses it under
+    an `if`, with operands, and in a kernel that is not cooperative; another `grid.` call is no
+    barrier. `crates/x86/src/op.rs` has `lock xadd` and `pause`.
+  - The runtime is a crate of its own, `kgen-cpu` (`crates/cpu`), std only and without
+    `unsafe`. `launch` starts a thread for each of the grid's but the first, which is the
+    caller's, behind a gate, so that none runs the kernel unless all have started. It refuses
+    a grid of no threads, and of more than `most()`, `available_parallelism`.
+  - The macro (`grid_launcher` in `crates/macros/src/lib.rs`) puts the naked functions in the
+    hidden module, each taking the place last, and makes the kernel's name the launcher:
+    `kernels::normalize(kgen_cpu::Grid::new(4), x, sums, n)?`. A pointer crosses to the threads
+    as its address, `expose_provenance`, and each thread makes it a pointer again. A kernel that
+    does not compile leaves a launcher that never runs.
+  - Tests: the barrier's exact listing, in a kernel's body and in a helper's, and each error,
+    in `crates/kgen/tests/x86.rs`; my-app's `normalize` and `diffuse` for the CPU, against the
+    GPU's references bit for bit, on one thread to four, with their snapshots. Both pass on all
+    12 threads of this machine as well.
+  - The tests run on four threads at most, since `cargo test` runs tests beside each other and
+    a spinning thread takes a core.
+- All three steps are done.
