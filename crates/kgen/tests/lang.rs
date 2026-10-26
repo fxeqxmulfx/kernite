@@ -283,6 +283,10 @@ fn errors_point_where_the_trouble_is() {
         ("two(1);", "1:1: `two` takes 2 arguments; this gives 1"),
         ("deep();", "5:13: helpers call helpers 64 deep here; does `deep` call itself?"),
         ("const X: u8 = 255 + 1;", "1:19: 256 is out of range for u8"),
+        // A literal negated is one number, as Rust reads it: `-128i8` is in range.
+        ("const X: i8 = -129;", "1:15: -129 is out of range for i8"),
+        ("const X: i8 = -(128);", "1:17: 128 is out of range for i8"),
+        ("const X: u8 = -0;", "1:15: a u8 cannot be negated"),
         // A float too big for its type is out of range, as Rust has it, and not infinite.
         ("const F: f32 = 1e39;", "1:16: 1e39 is out of range for f32"),
         ("const F: f64 = 2e308f64;", "1:16: 2e308f64 is out of range for f64"),

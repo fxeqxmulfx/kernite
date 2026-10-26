@@ -216,6 +216,7 @@ impl Kernel {
                 slots: vec![],
                 consts: vec![],
                 funcs: vec![],
+                statics: vec![],
             },
             params: vec![],
             regs: vec![],

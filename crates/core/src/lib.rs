@@ -15,5 +15,6 @@ pub use machine::{Machine, Spill};
 pub use operand::{Access, Arg, Base, Imm, Mem, Operand, Width};
 pub use program::{
     Compiled, Const, ConstId, Flow, Frame, FuncId, Inst, Item, Label, Program, RegInfo, Signature, Slot, SlotId,
+    StaticId,
 };
 pub use reg::{Class, PReg, Register, VReg};

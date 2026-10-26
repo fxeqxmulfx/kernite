@@ -54,6 +54,7 @@ impl Asm {
                 slots: vec![],
                 consts: vec![],
                 funcs: vec![],
+                statics: vec![],
             },
             labels: 0,
         }

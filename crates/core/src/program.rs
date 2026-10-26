@@ -17,6 +17,10 @@ pub struct ConstId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FuncId(pub u32);
 
+/// Memory of the module's that the kernel names, by its index in [`Program::statics`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StaticId(pub u32);
+
 /// Where control goes after an instruction.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Flow {
@@ -156,6 +160,9 @@ pub struct Program<Op> {
     /// The functions it names, by [`FuncId`], each by what the source calls it: `gcd`, or an
     /// instance, `tile::<4>`.
     pub funcs: Vec<String>,
+    /// The memory of the module's it names, its statics, by [`StaticId`], each by what the
+    /// source calls it: `COUNTS`.
+    pub statics: Vec<String>,
 }
 
 /// The stack frame of an allocated kernel.
@@ -189,6 +196,8 @@ pub struct Compiled<Op> {
     pub consts: Vec<Const>,
     /// The functions it names, by [`FuncId`].
     pub funcs: Vec<String>,
+    /// The memory of the module's it names, by [`StaticId`].
+    pub statics: Vec<String>,
     /// Every variable and the register it got, by [`VReg::id`]: the program's, then those
     /// the allocator made, each named as the one it was made for is: to load and store one that
     /// spilled, or to hold a parameter or a result that moved. `None` for one the code does not

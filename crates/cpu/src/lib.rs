@@ -1,6 +1,10 @@
-//! The threads a cooperative x86 kernel runs on, for the launchers `#[kgen_macros::kernels]`
-//! writes: [`launch`] runs a kernel on each thread of a [`Grid`], given its [`Place`] there,
-//! which holds the barrier its `grid.sync()` waits at.
+//! What x86 kernels need of the process beyond their code, for what `#[kgen_macros::kernels]`
+//! writes: the threads a cooperative kernel runs on, and the memory of a module's.
+//!
+//! - [`launch`] runs a kernel on each thread of a [`Grid`], given its [`Place`] there, which
+//!   holds the barrier its `grid.sync()` waits at.
+//! - [`Global`] is a static of the module's, which its kernels name and the host reads and
+//!   writes: `kernels::COUNTS.read()`.
 //!
 //! ```ignore
 //! #[kgen_macros::kernels]
@@ -22,9 +26,37 @@
 //! its own while it waits, as each block of a cooperative GPU kernel needs room on the GPU: a
 //! grid has at most as many threads as the machine runs at once, [`most`].
 //!
+//! A static of a module of x86 kernels is a [`Global`] of its elements, which the kernels reach
+//! at a displacement from `rip`, and which keeps what they write from one call to the next:
+//!
+//! ```ignore
+//! #[kgen_macros::kernels]
+//! mod cpu {
+//!     /// How many times `bump` has run.
+//!     pub static RUNS: global<u64>;
+//!
+//!     pub unsafe extern "sysv64" fn bump() {
+//!         let n: gpr;
+//!         mov(n, [RUNS]);
+//!         inc(n);
+//!         mov([RUNS], n);
+//!     }
+//! }
+//!
+//! unsafe { cpu::bump() };
+//! assert_eq!(cpu::RUNS.read(), [1]);
+//! ```
+//!
 //! The crate depends on no other. kgen-x86 writes the kernels, which read a place as [`Place`]
 //! lays it out, and the macro writes the launchers, which call [`launch`] and, in each thread,
-//! the kernel. Nothing here is `unsafe`: calling the kernel is, and the launcher does that.
+//! the kernel, and the statics. Nothing here is `unsafe`: calling the kernel is, and the
+//! launcher does that.
+
+mod global;
+
+#[doc(hidden)]
+pub use global::Stub;
+pub use global::{Align, Alignment, Element, Global};
 
 use std::fmt;
 use std::num::NonZero;

@@ -33,6 +33,9 @@ pub struct Listing {
     /// `tile::<4>`. Function `i`'s address reads `{fi}`, for the operand of `naked_asm!` that
     /// names it.
     pub funcs: Vec<String>,
+    /// The memory of the module's it names, its statics, each by what the source calls it.
+    /// Static `COUNTS`'s address reads `{COUNTS}`, for the operand of `naked_asm!` that names it.
+    pub statics: Vec<String>,
     /// Each variable's name and its register's.
     pub regs: Vec<(String, String)>,
     /// The frame.
@@ -124,6 +127,13 @@ impl Listing {
     }
 }
 
+/// Whether a listing names a constant or a function by `name`, `{c0}` or `{f0}`, as it names a
+/// static by its own, `{COUNTS}`: a static of that name would be taken for one of them.
+pub fn taken(name: &str) -> bool {
+    let digits = name.strip_prefix(['c', 'f']).unwrap_or("");
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// `c` in Intel syntax, with the frame set up on entry and taken down before every `ret`, and
 /// a note before each store of a variable that spilled and each load of it back. A kernel that
 /// calls has its stack pointer at a multiple of 16 for each call; a move of a register to
@@ -191,7 +201,7 @@ pub fn print(c: &Compiled<Op>) -> Listing {
                     .iter()
                     .map(|a| match a.operand {
                         Operand::Reg(r, w) => name(r, w),
-                        Operand::Mem(m) => memory(&m, &c.frame, inst.op != Op::Lea, inst.op == Op::Vpgatherdq),
+                        Operand::Mem(m) => memory(&m, c, inst.op != Op::Lea, inst.op == Op::Vpgatherdq),
                         Operand::Imm(imm) if imm.hex => format!("{:#04x}", imm.value),
                         Operand::Imm(imm) => imm.value.to_string(),
                         Operand::Label(l) => jump_target(l, i, &numbers, &places),
@@ -213,6 +223,7 @@ pub fn print(c: &Compiled<Op>) -> Listing {
         lines,
         consts: c.consts.clone(),
         funcs: c.funcs.clone(),
+        statics: c.statics.clone(),
         regs: c
             .assignment
             .iter()
@@ -357,12 +368,13 @@ fn name(r: PReg, width: Width) -> String {
 
 /// A memory operand; `sized` puts the access's size in front, which every instruction but
 /// `lea` wants.
-fn memory(m: &Mem<PReg>, frame: &Frame, sized: bool, xmm_index: bool) -> String {
+fn memory(m: &Mem<PReg>, c: &Compiled<Op>, sized: bool, xmm_index: bool) -> String {
     let (mut text, disp) = match m.base {
         Base::Reg(r) => (name(r, Width::W64), i64::from(m.disp)),
-        Base::Slot(s) => (name(RSP, Width::W64), i64::from(m.disp) + i64::from(frame.offsets[s.0 as usize])),
+        Base::Slot(s) => (name(RSP, Width::W64), i64::from(m.disp) + i64::from(c.frame.offsets[s.0 as usize])),
         Base::Const(k) => (format!("rip + {{c{}}}", k.0), i64::from(m.disp)),
         Base::Func(f) => (format!("rip + {{f{}}}", f.0), i64::from(m.disp)),
+        Base::Static(s) => (format!("rip + {{{}}}", c.statics[s.0 as usize]), i64::from(m.disp)),
     };
     if let Some((r, scale)) = m.index {
         let width = if r.class == Class::Vec { if xmm_index { Width::W128 } else { Width::W256 } } else { Width::W64 };

@@ -52,6 +52,7 @@ pub fn compile<Op: Clone + PartialEq>(p: &Program<Op>, m: &(impl Machine + Spill
         frame: frame::layout(&p.slots, &used, m),
         consts: p.consts.clone(),
         funcs: p.funcs.clone(),
+        statics: p.statics.clone(),
         assignment: p.regs.iter().cloned().zip(regs).collect(),
     })
 }

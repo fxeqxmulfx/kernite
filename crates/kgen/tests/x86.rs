@@ -334,16 +334,361 @@ fn a_kernel_names_the_constants_it_reads() {
     assert_eq!(reads("adds"), ["ADD", "OFFSET", "LANE"]);
 }
 
-/// A static is memory of a GPU's module, which an x86 kernel has none of: it takes memory by
-/// pointer.
+/// Memory of the module's, which its x86 kernels name: a histogram they keep from call to
+/// call, and what they read.
+const STATICS: &str = r#"
+    const N: usize = 16;
+
+    /// How many of each value `count` has seen.
+    pub static COUNTS: global<[u32; N]>;
+    /// What `weigh` multiplies by, 32 bytes at once.
+    static WEIGHTS: constant<[f32; 8], 32> = [1.0, 0.5, 0.25, 2.0, -1.0, 0.0, 3.0, 1.5];
+    static SEEN: global<u64> = 7;
+    static SIGNED: global<[i8; 3]> = [-1, 2, -128];
+
+    /// Counts `x[i]`, each below 16, for each `i < n`, and how many it has seen in all.
+    pub unsafe extern "sysv64" fn count(x: *const u8, n: usize) {
+        let (p, v, c): (gpr, gpr, gpr);
+        mov(c, [SEEN]);
+        add(c, n);
+        mov([SEEN], c);
+        test(n, n);
+        jz(done);
+        lea(p, [COUNTS]);
+        label(top);
+        movzx(v.r32, [x]);
+        mov(c.r32, [p + v * 4]);
+        inc(c);
+        mov([p + v * 4], c.r32);
+        inc(x);
+        dec(n);
+        jnz(top);
+        label(done);
+    }
+
+    /// `x[0..8] * WEIGHTS` twice, the twos `count` has seen in `x[8]`, and the last of
+    /// `SIGNED` in `x[9]`.
+    pub unsafe extern "sysv64" fn weigh(x: *mut f32) {
+        let (v, w): (ymm, ymm);
+        vmovups(v, [x]);
+        vmovaps(w, [WEIGHTS]);
+        vmulps(v, v, w);
+        vmulps(v, v, [WEIGHTS]);
+        vmovups([x], v);
+        let c: gpr;
+        mov(c.r32, [COUNTS + 8]);
+        mov([x + 32], c.r32);
+        movzx(c.r32, [SIGNED + 2]);
+        mov([x + 36], c.r32);
+    }
+"#;
+
+/// A kernel reaches a static at a displacement from `rip`, with no register beside it, and
+/// takes its address for an index; its listing names each static it names, `{COUNTS}`, for the
+/// macro to pass by `sym`.
 #[test]
-fn a_static_is_no_memory_of_an_x86_kernel() {
-    let src =
-        "static COUNTS: global<[u32; 8]>;\nunsafe extern \"sysv64\" fn k() {\nlet v: ymm;\nvmovups(v, [COUNTS]);\n}\n";
+fn a_static_is_reached_at_a_displacement_from_rip() {
+    let count = kgen::x86_str(STATICS, "count").unwrap();
+    let want = "# count(gpr, gpr) -> ()
+# frame: 0 bytes aligned to 0, saves []
+# x=rdi n=rsi p=rcx v=rdx c=rax
+    mov rax, qword ptr [rip + {SEEN}]
+    add rax, rsi
+    mov qword ptr [rip + {SEEN}], rax
+    test rsi, rsi
+    jz 3f
+    lea rcx, [rip + {COUNTS}]
+2:
+    movzx edx, byte ptr [rdi]
+    mov eax, dword ptr [rcx + rdx*4]
+    inc rax
+    mov dword ptr [rcx + rdx*4], eax
+    inc rdi
+    dec rsi
+    jnz 2b
+3:
+    ret
+";
+    assert_eq!(count.text(), want);
+    assert_eq!(count.statics, ["SEEN", "COUNTS"]);
+    let weigh = kgen::x86_str(STATICS, "weigh").unwrap();
+    let want = "# weigh(gpr) -> ()
+# frame: 0 bytes aligned to 0, saves []
+# x=rdi v=ymm0 w=ymm1 c=rax
+    vmovups ymm0, ymmword ptr [rdi]
+    vmovaps ymm1, ymmword ptr [rip + {WEIGHTS}]
+    vmulps ymm0, ymm0, ymm1
+    vmulps ymm0, ymm0, ymmword ptr [rip + {WEIGHTS}]
+    vmovups ymmword ptr [rdi], ymm0
+    mov eax, dword ptr [rip + {COUNTS} + 8]
+    mov dword ptr [rdi + 32], eax
+    movzx eax, byte ptr [rip + {SIGNED} + 2]
+    mov dword ptr [rdi + 36], eax
+    vzeroupper
+    ret
+";
+    assert_eq!(weigh.text(), want);
+    assert_eq!(weigh.statics, ["WEIGHTS", "COUNTS", "SIGNED"]);
+}
+
+/// Each static is an array of one of Rust's numbers, at the multiple its type says, holding
+/// what it says, its bytes the lowest first, or zeros; and the constants it read.
+#[test]
+fn a_static_is_rusts_numbers_holding_what_it_says() {
+    let module = kgen::lang::parse(STATICS).unwrap();
+    let statics: Vec<_> = kgen::x86_statics(&module).into_iter().map(Result::unwrap).collect();
+    let shape = |s: &kgen::X86Static| (s.name.clone(), s.elem, s.size, s.len, s.align, s.constant);
+    let shapes: Vec<_> = statics.iter().map(|s| shape(&s.code)).collect();
     assert_eq!(
-        kgen::x86_str(src, "k").unwrap_err(),
-        "4:13: `COUNTS` is memory of the module's, and this machine has none: its kernels take memory by pointer"
+        shapes,
+        [
+            ("COUNTS".to_string(), "u32", 4, 16, 4, false),
+            ("WEIGHTS".to_string(), "f32", 4, 8, 32, true),
+            ("SEEN".to_string(), "u64", 8, 1, 8, false),
+            ("SIGNED".to_string(), "i8", 1, 3, 1, false),
+        ]
     );
+    let floats: Vec<u8> = [1.0f32, 0.5, 0.25, 2.0, -1.0, 0.0, 3.0, 1.5].iter().flat_map(|x| x.to_le_bytes()).collect();
+    assert_eq!(statics[0].code.init, []);
+    assert_eq!(statics[1].code.init, floats);
+    assert_eq!(statics[2].code.init, [7, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(statics[3].code.init, [255, 2, 128]);
+    assert_eq!(statics[0].consts, ["N"]);
+    assert!(statics[1..].iter().all(|s| s.consts.is_empty()));
+}
+
+/// A helper takes memory of the module's as it takes stack memory: of the type it is declared.
+#[test]
+fn a_helper_takes_a_static_of_its_type() {
+    let src = |param: &str| {
+        format!(
+            "static C: global<[u32; 16]>;\nunsafe extern \"sysv64\" fn k() {{\nbump(C);\n}}\nfn bump(c: {param}) \
+             {{\nlet t: gpr;\nmov(t.r32, [c + 8]);\ninc(t);\nmov([c + 8], t.r32);\n}}\n"
+        )
+    };
+    let code = kgen::x86_str(&src("global<[u32; 16]>"), "k").unwrap();
+    assert!(code.code().any(|l| l == "mov dword ptr [rip + {C} + 8], eax"), "{}", code.text());
+    let e = kgen::x86_str(&src("global<[u32; 8]>"), "k").unwrap_err();
+    assert_eq!(e, "3:6: `c`: `C` is memory, `global<[u32; 16]>`; it is no `global<[u32; 8]>`");
+    let e = kgen::x86_str(&src("gpr"), "k").unwrap_err();
+    assert_eq!(e, "3:6: `c`: `C` is memory, `global<[u32; 16]>`; it is no `gpr`");
+    let src = "unsafe extern \"sysv64\" fn k(x: *const f32) {\nload(x);\n}\nfn load(b: constant<u64>) {}\n";
+    assert_eq!(kgen::x86_str(src, "k").unwrap_err(), "2:6: `b`: a gpr is no memory, `constant<u64>`");
+}
+
+/// What kgen can check of an address in a static, it does, as it does for stack memory; and
+/// it refuses a write to constant memory, and an index beside a static's name, which x86 has
+/// no address for.
+#[test]
+fn a_static_is_reached_within_it() {
+    let cases = [
+        (
+            "let g: gpr; zero(g); mov(g.r32, [C + g * 4]);",
+            "4:33: x86 reaches memory of the module's at a displacement from `rip`, with no register beside it: \
+             `lea(p, [C])` puts the address of `C` in `p`, for `[p + g * 4]`",
+        ),
+        (
+            "let g: gpr; zero(g); mov(g.r32, [g + C]);",
+            "4:33: x86 reaches memory of the module's at a displacement from `rip`, with no register beside it: \
+             `lea(p, [C])` puts the address of `C` in `p`, for `[p + g]`",
+        ),
+        ("let g: gpr; mov(g.r32, [C + 64]);", "4:24: `mov` reads 4 bytes at `[C + 64]`, past the end of `C`, 64 bytes"),
+        ("let g: gpr; mov(g.r32, [C + 62]);", "4:24: `mov` reads 4 bytes at `[C + 62]`, past the end of `C`, 64 bytes"),
+        ("let g: gpr; mov(g.r32, [C - 4]);", "4:24: `mov` reads at `[C - 4]`, before `C` starts"),
+        (
+            "let g: gpr; mov(g, [C + 5000000000]);",
+            "4:20: `mov` reads 8 bytes at `[C + 5000000000]`, past the end of `C`, 64 bytes",
+        ),
+        (
+            "let g: gpr; lea(g, [C + 68]);",
+            "4:20: `lea` takes the address `[C + 68]`, more than one past the end of `C`, 64 bytes",
+        ),
+        (
+            "let g: gpr; zero(g); mov([W], g.r32);",
+            "4:26: `mov` writes `W`, which is constant memory: the kernels only read it",
+        ),
+        (
+            "let v: ymm; zero(v); vmovaps([W + 32], v);",
+            "4:30: `vmovaps` writes `W`, which is constant memory: the kernels only read it",
+        ),
+        (
+            "let v: ymm; vmovaps(v, [C]);",
+            "4:24: `vmovaps` reads 32 bytes at once, at an address that is a multiple of 32; `C` is at a multiple of \
+             4: `global<[u32; 16], 32>`, or `vmovups` at any",
+        ),
+        (
+            "let v: ymm; vmovaps(v, [W + 16]);",
+            "4:24: `vmovaps` reads 32 bytes at once, at an address that is a multiple of 32; `[W + 16]` is not one",
+        ),
+        ("let g: gpr; mov(g, [C + W]);", "4:20: an address names one memory at most; `C` and `W` are two"),
+        (
+            "let g: gpr; mov(g, [x + C * 4]);",
+            "4:20: an address adds memory as it is, as in `[C + 8]`; this multiplies `C` by 4",
+        ),
+        (
+            "let g: gpr; mov(g, C);",
+            "4:20: `mov` takes no memory as an operand: `lea(p, [C])` puts the address of `C` in `p`, and `[C]` is \
+             what it holds",
+        ),
+        (
+            "let x: global<[u32; 4]>;",
+            "4:8: global and constant memory are the module's, which a static declares, as `static x: global<[u32; \
+             4]>;` beside the kernels: a kernel declares stack memory, `local<..>`",
+        ),
+        (
+            "let x: constant<f32>;",
+            "4:8: global and constant memory are the module's, which a static declares, as `static x: \
+             constant<f32>;` beside the kernels: a kernel declares stack memory, `local<..>`",
+        ),
+    ];
+    let statics = "static C: global<[u32; 16]>;\nstatic W: constant<[f32; 16], 32> = [1.0; 16];\n";
+    for (body, want) in cases {
+        let src = format!("{statics}unsafe extern \"sysv64\" fn k(x: *const f32) {{\n{body}\n}}\n");
+        assert_eq!(kgen::x86_str(&src, "k").unwrap_err(), want, "{body}");
+    }
+    // As far as one past the end for `lea`, which reaches nothing, of constant memory as well.
+    let src =
+        format!("{statics}unsafe extern \"sysv64\" fn k() {{\nlet g: gpr;\nlea(g, [C + 64]);\nlea(g, [W]);\n}}\n");
+    let code = kgen::x86_str(&src, "k").unwrap();
+    assert_eq!(code.code().collect::<Vec<_>>(), ["lea rax, [rip + {C} + 64]", "lea rax, [rip + {W}]", "ret"]);
+}
+
+/// A static of an x86 kernel's module is of Rust's numbers, as the host reads them, of a size
+/// a displacement from `rip` reaches; it holds what it says, and has a name of its own.
+#[test]
+fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() {
+    let cases = [
+        (
+            "static mut A: global<u32>;",
+            "1:8: a static of the module is memory, and its type says what writes it, as in `static COUNTS: \
+             global<[u32; 16]>;`: it takes no `mut`",
+        ),
+        ("static A: global<u32>; static A: global<u32>;", "1:31: `A` names another static of the module as well"),
+        ("const A: u32 = 1; static A: global<u32>;", "1:26: `A` names a constant of the module as well"),
+        ("static k: global<u32>;", "1:8: `k` names a function of the module as well"),
+        (
+            "static c0: global<u32>;",
+            "1:8: a kernel's listing names a constant `{c0}` and a function `{f0}`, and a static by its name, so one \
+             is not named `c0`",
+        ),
+        (
+            "static f12: global<u32>;",
+            "1:8: a kernel's listing names a constant `{c0}` and a function `{f0}`, and a static by its name, so one \
+             is not named `f12`",
+        ),
+        (
+            "static A: shared<[u32; 4]>;",
+            "1:11: a static of the module is memory: `global<[u32; 16]>`, which its kernels read and write, or \
+             `constant<[f32; 4]>`, which they only read; not `shared<[u32; 4]>`",
+        ),
+        (
+            "static A: u32;",
+            "1:11: a static of the module is memory: `global<[u32; 16]>`, which its kernels read and write, or \
+             `constant<[f32; 4]>`, which they only read; not `u32`",
+        ),
+        ("static A: global<[u32]>;", "1:11: `global<[u32]>` has no size: a static has one, as in `global<[u32; 64]>`"),
+        ("static A: global<[u32; 0]>;", "1:11: `global<[u32; 0]>` holds nothing"),
+        (
+            "static A: global<[f16; 4]>;",
+            "1:11: a static holds Rust's numbers, `u8` to `u64`, `i8` to `i64`, `usize`, `isize`, `f32` and `f64`; \
+             not `f16`",
+        ),
+        ("static A: global<[u32; 4], 3>;", "1:11: what an address is a multiple of is a power of two, not 3"),
+        ("static A: global<[u32; 4], 2>;", "1:11: an array of `u32` is aligned to 4 at least, not 2"),
+        ("static A: constant<[u32; 4], 8192>;", "1:11: a static is aligned to a page at most, 4096; not 8192"),
+        (
+            "static A: global<[u32; 4], 16, 2>;",
+            "1:11: `global<..>` is an array of Rust's numbers and what its address is a multiple of, `global<[f32; \
+             64], 32>`, or one, `global<u64>`; not `global<[u32; 4], 16, 2>`",
+        ),
+        ("static A: global<[u32; M]>;", "1:24: `M` is not defined"),
+        (
+            "static A: global<[u8; 2147483648]>;",
+            "1:11: `global<[u8; 2147483648]>` is more than 2147483647 bytes: a kernel reaches memory of the module's \
+             at a displacement from `rip`, of 32 bits, signed",
+        ),
+        (
+            "static A: global<[u64; 18446744073709551615]>;",
+            "1:11: `global<[u64; 18446744073709551615]>` is more than 2147483647 bytes: a kernel reaches memory of \
+             the module's at a displacement from `rip`, of 32 bits, signed",
+        ),
+        ("static A: global<[u32; 2]> = [1, 2, 3];", "1:30: `global<[u32; 2]>` holds 2 elements; this has 3"),
+        ("static A: global<[u32; 2]> = 1;", "1:30: `global<[u32; 2]>` holds an array of `u32`; this is an integer"),
+        ("static A: global<[u32; 2]> = [1.5, 2];", "1:30: element 0 is an f32, not a `u32`"),
+        ("static A: global<[u32; 2]> = [1, -1];", "1:34: a u32 cannot be negated"),
+        ("static A: global<u32> = [1];", "1:25: this is an array, not a `u32`"),
+        ("static A: global<u32> = true;", "1:25: this is a bool, not a `u32`"),
+        ("static A: global<u32> = 1u8;", "1:25: this is a `u8`, not a `u32`"),
+        ("static A: global<f32> = 1;", "1:25: this is an integer, and an `f32` a float: `1.0`"),
+        ("static A: global<f32> = 1.5f64;", "1:25: this is an f64, not an `f32`"),
+        ("static A: global<u8> = 256;", "1:24: 256 is out of range for u8"),
+        ("static A: global<i8> = 128;", "1:24: 128 is out of range for i8"),
+        ("static A: global<u32> = M;", "1:25: `M` is not defined"),
+        // A kernel that names one that does not compile says so, and why, where it is declared.
+        (
+            "static A: global<[u32; 2]> = [1]; unsafe extern \"sysv64\" fn j() { let g: gpr; mov(g.r32, [A]); }",
+            "1:30: `global<[u32; 2]>` holds 2 elements; this has 1",
+        ),
+    ];
+    let k = "unsafe extern \"sysv64\" fn k(x: *mut u32) {}";
+    for (items, want) in cases {
+        assert_eq!(kgen::x86_str(&format!("{items}\n{k}"), "k").unwrap_err(), want, "{items}");
+    }
+    // The kernel itself says that it names one that does not compile.
+    let src =
+        "static A: global<[u32; 2]> = [1];\nunsafe extern \"sysv64\" fn j() {\nlet g: gpr;\nmov(g.r32, [A]);\n}\n";
+    let module = kgen::lang::parse(src).unwrap();
+    let e = kgen::x86(&module, kgen::function(&module, "j").unwrap(), &[]).unwrap_err();
+    assert_eq!(e.at(src), "4:13: `A` does not compile, so no kernel names it");
+    // Every number of each type, and a name like a listing's that is none of its.
+    for items in [
+        "static A: global<[i8; 2]> = [-128, 127];",
+        "static A: global<[i64; 2]> = [-9223372036854775808, 9223372036854775807];",
+        "static A: global<[isize; 2]> = [-0x8000_0000_0000_0000, -1];",
+        "static A: global<[u64; 2]> = [0, 18446744073709551615];",
+        "static A: global<[f64; 2]> = [1.5, -0.0];",
+        "static A: global<[u8; 2147483647]>;",
+        "static c: global<u32>; static cf1: global<u32>; static c0x: global<u32>;",
+    ] {
+        kgen::x86_str(&format!("{items}\n{k}"), "k").unwrap();
+    }
+}
+
+/// A module's statics are its kernels' memory: the process's for x86 kernels, and the GPU's
+/// for PTX ones, or for none. A module of both kinds of kernel and a static is two modules,
+/// which its first static says, whatever comes before it.
+#[test]
+fn a_static_is_its_kernels_memory() {
+    use kgen::Owner::{Gpu, Process};
+    let x86 = "unsafe extern \"sysv64\" fn k(x: u64) -> u64 { ret(x); }";
+    let gpu = "unsafe extern \"ptx-kernel\" fn g(x: *mut u32) { st.global.u32([x], 1); }";
+    let func = "extern \"ptx-func\" fn f(x: u32) -> u32 { ret(x); }";
+    let helper = "fn h(x: gpr) { inc(x); }";
+    let other = "extern \"C\" fn c() {}";
+    let (s, t) = ("static S: global<u32>;", "static T: constant<u32> = 1;");
+    let whose = |items: &[&str]| {
+        let src = items.join("\n");
+        kgen::owner(&kgen::lang::parse(&src).unwrap()).map_err(|e| e.at(&src))
+    };
+    let split = "a static is memory of the module's kernels: the GPU's, for PTX kernels, or the process's, for x86 \
+                 ones; and this module has both, so it is two modules, one of each kind of kernel and the statics they \
+                 name";
+    let cases: [(&[&str], _); 11] = [
+        (&[s, x86, t], Ok(Process)),
+        (&[x86], Ok(Process)),
+        (&[helper, s, x86, other], Ok(Process)),
+        (&[s, t], Ok(Gpu)),
+        (&[gpu, s], Ok(Gpu)),
+        (&[func, s, other], Ok(Gpu)),
+        (&[gpu, x86], Ok(Gpu)),
+        (&[gpu, x86, func, helper], Ok(Gpu)),
+        (&[gpu, s, x86, t], Err(format!("2:8: {split}"))),
+        (&[x86, t, s, func], Err(format!("2:8: {split}"))),
+        (&[helper, x86, func, s], Err(format!("4:8: {split}"))),
+    ];
+    for (items, want) in cases {
+        assert_eq!(whose(items), want, "{items:?}");
+    }
 }
 
 /// A cooperative kernel's thread reads its place in the grid from the register after its

@@ -13,7 +13,7 @@
 //! | composition | `kgen`, this crate | which machine and syntax each kernel compiles with |
 //! | delivery | `kgen-macros` | kernels as functions, `#[unsafe(naked)]`, or launched on a grid |
 //! | runtime | `kgen-cuda` | the CUDA driver a GPU kernel's launcher calls; it depends on no other crate |
-//! | runtime | `kgen-cpu` | the threads a cooperative x86 kernel runs on; it depends on no other crate |
+//! | runtime | `kgen-cpu` | the threads a cooperative x86 kernel runs on, and the memory of a module of x86 kernels; it depends on no other crate |
 //!
 //! None of them has a dependency outside the workspace, and none iterates a hash map, so a
 //! kernel's text is a function of its source alone.
@@ -46,6 +46,7 @@ pub use kgen_lang as lang;
 pub use kgen_ptx::{Entry, Static};
 pub use kgen_x86::Op;
 pub use kgen_x86::intel::{Line, Listing};
+pub use kgen_x86::lang::Static as X86Static;
 
 use kgen_lang::{Fn, ItemKind, Module, Span, Value};
 
@@ -96,12 +97,18 @@ pub struct Compiled<T> {
 /// register that ran out where its variable is declared. For an instance, it says which. A
 /// kernel that is [`cooperative`] runs on the threads of a grid, and may wait for them,
 /// `grid.sync()`. It may call the module's functions `extern "sysv64"`, and each instance of
-/// one, but the cooperative, which its listing names in [`Listing::funcs`].
+/// one, but the cooperative, which its listing names in [`Listing::funcs`]. It names the
+/// module's memory, its statics, as [`x86_statics`] has them, which its listing names in
+/// [`Listing::statics`].
 pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>, kgen_lang::Error> {
     let name = kgen_lang::instance(f, args)?;
     let mut kernel = kgen_x86::lang::Kernel::new(&name);
     if cooperative(f)? {
         kernel.cooperative();
+    }
+    // One that does not compile says why where it is declared.
+    for s in x86_statics(module).into_iter().flatten() {
+        kernel.module_memory(&s.code);
     }
     for item in &module.items {
         use kgen_x86::lang::Callee;
@@ -130,10 +137,41 @@ pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>,
     Ok(Compiled { code, consts: run.consts })
 }
 
+/// The statics of `module`, its memory in the process's, in order, for its x86 kernels to name
+/// and Rust to lay out: each of Rust's numbers, holding what it says or zeros. Or why one is
+/// none, where it can be mended: at its type, at what it holds, or at its name, if another item
+/// of the module's has it or a listing names a constant or a function so, `c0` or `f0`.
+pub fn x86_statics(module: &Module) -> Vec<Result<Compiled<X86Static>, kgen_lang::Error>> {
+    let mut out = vec![];
+    for item in &module.items {
+        let ItemKind::Static(s) = &item.kind else { continue };
+        let made = kgen_lang::memory(module, s).and_then(|memory| {
+            let at = |span: Span| move |message: String| kgen_lang::Error { span, message };
+            if kgen_x86::intel::taken(&s.name) {
+                return Err(at(s.span)(format!(
+                    "a kernel's listing names a constant `{{c0}}` and a function `{{f0}}`, and a static by its \
+                     name, so one is not named `{}`",
+                    s.name
+                )));
+            }
+            let mut made = X86Static::new(&s.name, &memory.ty).map_err(at(s.ty.span()))?;
+            if let (Some(value), Some(e)) = (&memory.value, &s.value) {
+                made.init(value).map_err(at(e.span()))?;
+            }
+            Ok(Compiled { code: made, consts: memory.consts })
+        });
+        out.push(made);
+    }
+    out
+}
+
 /// Kernel `name` of the module in `src`, for x86-64, or its instance `tile::<4>`; an error
-/// reads `line:column: what`.
+/// reads `line:column: what`, a static's that does not compile among them.
 pub fn x86_str(src: &str, name: &str) -> Result<Listing, String> {
     let module = kgen_lang::parse(src).map_err(|e| e.at(src))?;
+    for s in x86_statics(&module) {
+        s.map_err(|e| e.at(src))?;
+    }
     let (f, args) = instance(&module, name).map_err(|e| e.at(src))?.ok_or_else(|| format!("no kernel `{name}`"))?;
     x86(&module, f, &args).map(|k| k.code).map_err(|e| e.at(src))
 }
@@ -254,6 +292,50 @@ pub fn ptx_str(src: &str) -> Result<String, String> {
 /// The ABI `f` names, if kgen compiles for it.
 pub fn abi(f: &Fn) -> Option<Abi> {
     f.abi.as_ref().and_then(|(abi, _)| Abi::of(abi))
+}
+
+/// Whose memory a module's statics are: its kernels'.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owner {
+    /// The process's, for x86 kernels, as [`x86_statics`] has them.
+    Process,
+    /// The GPU's, for PTX kernels, as [`ptx_statics`] has them.
+    Gpu,
+}
+
+/// Whose memory the statics of `module` are, its kernels': the process's when its functions of
+/// an ABI kgen compiles for are all `extern "sysv64"`, and else the GPU's, those of a module of
+/// statics and no kernels among them. A module of both kinds of kernel and a static is two
+/// modules, one of each, which the error at its first static says; its statics are then the
+/// GPU's, which its x86 kernels do not reach.
+pub fn owner(module: &Module) -> Result<Owner, kgen_lang::Error> {
+    let abis: Vec<Abi> = module
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::Fn(f) => abi(f),
+            _ => None,
+        })
+        .collect();
+    if !abis.contains(&Abi::Sysv64) {
+        return Ok(Owner::Gpu);
+    }
+    if abis.iter().all(|&a| a == Abi::Sysv64) {
+        return Ok(Owner::Process);
+    }
+    match module.items.iter().find_map(|item| match &item.kind {
+        ItemKind::Static(s) => Some(s),
+        _ => None,
+    }) {
+        Some(s) => Err(kgen_lang::Error {
+            span: s.span,
+            message: "a static is memory of the module's kernels: the GPU's, for PTX kernels, or the process's, \
+                      for x86 ones; and this module has both, so it is two modules, one of each kind of kernel and \
+                      the statics they name"
+                .to_string(),
+        }),
+        None => Ok(Owner::Gpu),
+    }
 }
 
 /// Whether `f` is a kernel whose parts wait for each other, `#[cooperative]`, which every

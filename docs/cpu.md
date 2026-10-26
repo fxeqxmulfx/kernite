@@ -379,4 +379,36 @@ The plan:
   - Decided: `div` later, so the CPU's `gcd` is Stein's.
   - Not done: a value moved to the register a call wants though it is there already (`mov rbx,
     rdi` then `mov rdi, rbx`), and a tail call, which is a call and a `ret`.
-- Steps 5 and 6 are next. Decided, for step 5: a module's statics are its kernels'.
+- Step 5, memory of the module's, is done, on `cpu-calls`:
+  - Decided: a module's statics are its kernels'. `kgen::owner` (`crates/kgen/src/lib.rs`)
+    says whose: the process's when its functions are all `extern "sysv64"`, else the GPU's. A
+    module of both kinds of kernel and a static is an error at its first static.
+  - `kgen-core` has `StaticId` and `Base::Static`, and a program names its statics,
+    `Program::statics`. The listing writes an address in one as `[rip + {COUNTS} + 8]`
+    (`crates/x86/src/intel.rs`), so `kgen::x86_statics` refuses a static named as a listing
+    names a constant or a function, `c0` or `f0`.
+  - The x86 target (`crates/x86/src/lang.rs`) has `Static`, a static as the host lays it out:
+    its element, length, alignment, and the bytes it holds. `Target::global` gives a kernel the
+    statics `kgen::x86` hands it, and `within` checks an address in one as it does one in stack
+    memory: inside it, or one past its end for `lea`, at the multiple `vmovaps` needs, with no
+    index beside the static's name, and no write to constant memory. A static is of Rust's
+    numbers, 2 GB at most, which a displacement of 32 bits reaches, aligned to a page at most.
+  - The language reads a negated literal as one number, as Rust does, so `-128i8` is in range
+    (`value` in `crates/lang/src/eval.rs`).
+  - `kgen_cpu::Global<T, N, A>` (`crates/cpu/src/global.rs`) is a static's memory: an atomic of
+    each element's width, at a multiple of `A`, made in a `const fn` from what the static holds.
+    The host reads, writes and zeroes it without `unsafe`, and nothing it does fails.
+  - The macro makes each static a Rust `static` of its name, `::kgen_cpu::Global<u32, 16, 4>`,
+    and passes `COUNTS = sym COUNTS` to each kernel whose listing names it. A kernel's safety
+    contract names the statics that it, and the functions it calls on down, name; one that names
+    none says nothing of them. In a module of both kinds of kernel, an x86 kernel that names a
+    static is a stub beside the error.
+  - Tests: every listing and error in `crates/kgen/tests/x86.rs`, `kgen::owner`'s among
+    them; `Global`'s layout and the host's reads and writes in kgen-cpu; my-app's `histogram`
+    and `weigh` for the CPU, against the GPU's references, with their snapshots, the counts kept
+    from call to call, written by the host, and wrapping past `u32::MAX`. The safety contracts
+    were checked by hand, in the expansion of my-app and of a crate whose kernels reach statics
+    through calls, recursion among them.
+  - Not done: an instruction that writes the memory it reads, as `add([COUNTS + 8], 1)`, which
+    kgen's x86 forms have for no memory yet, so a kernel loads, adds and stores; and `movsx`.
+- Step 6 is next.

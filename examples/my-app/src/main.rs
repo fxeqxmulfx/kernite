@@ -4,8 +4,9 @@
 //! an order of their own, to products of integers, exact in any order; and its listing to the
 //! one in `snapshots/`.
 
-/// The kernels for the cpu. Each reads what its pointers point at, and all but `gcds` and
-/// `gcd`, which take integers, need AVX2 and FMA.
+/// The kernels for the cpu, and the memory of the module's, `COUNTS` and `WEIGHTS`, which they
+/// keep from call to call. Each reads what its pointers point at, and all but `gcds`, `gcd` and
+/// `histogram`, which take integers, need AVX2 and FMA.
 #[kgen_macros::kernels]
 mod kernels {
     /// The sum of the eight floats at `xs`.
@@ -448,6 +449,75 @@ mod kernels {
         shr(b, 1);
         call(g, gcd, (a, b));
         ret(g);
+    }
+
+    /// How many of the integers `histogram` has seen fall in each of 16 bins, by their top four
+    /// bits: memory of the module's, in the process's, kept from one call to the next.
+    pub static COUNTS: global<[u32; 16]>;
+
+    /// What `weigh` multiplies each float by, by its place in a run of four: constant memory,
+    /// which the kernel only reads, and the host writes.
+    pub static WEIGHTS: constant<[f32; 4]> = [1.0, 0.5, 0.25, 2.0];
+
+    /// Adds each of the `n` integers at `x` to its bin of `COUNTS`, the one its top four bits
+    /// say, wrapping past `u32::MAX`, as `histogram` does on the GPU.
+    pub unsafe extern "sysv64" fn histogram(x: *const u32, n: usize) {
+        test(n, n);
+        jz(done);
+        let (bins, bin, count): (gpr, gpr, gpr);
+        note("the bins' address, for an index");
+        lea(bins, [COUNTS]);
+        label(next);
+        mov(bin.r32, [x]);
+        shr(bin, 28);
+        mov(count.r32, [bins + bin * 4]);
+        inc(count);
+        mov([bins + bin * 4], count.r32);
+        add(x, 4);
+        dec(n);
+        jnz(next);
+        label(done);
+    }
+
+    /// `x[i] *= WEIGHTS[i % 4]` for each `i < n`, rounded once, as `weigh` does on the GPU:
+    /// eight floats at a time, by the four weights twice; then four, by them once; then each of
+    /// the rest by its own.
+    pub unsafe extern "sysv64" fn weigh(x: *mut f32, n: usize) {
+        let (w, v): (ymm, ymm);
+        vbroadcastf128(w, [WEIGHTS]);
+        cmp(n, 8);
+        jb(four);
+        label(eight);
+        vmulps(v, w, [x]);
+        vmovups([x], v);
+        add(x, 32);
+        sub(n, 8);
+        cmp(n, 8);
+        jae(eight);
+
+        label(four);
+        cmp(n, 4);
+        jb(rest);
+        vmulps(v.xmm, w.xmm, [x]);
+        vmovups([x], v.xmm);
+        add(x, 16);
+        sub(n, 4);
+
+        label(rest);
+        test(n, n);
+        jz(done);
+        let (weights, i): (gpr, gpr);
+        note("the weights' address, for an index");
+        lea(weights, [WEIGHTS]);
+        zero(i);
+        label(one);
+        vmovss(v.xmm, [x + i * 4]);
+        vmulss(v.xmm, v.xmm, [weights + i * 4]);
+        vmovss([x + i * 4], v.xmm);
+        inc(i);
+        cmp(i, n);
+        jnz(one);
+        label(done);
     }
 
     /// Returns the sum of `v`'s lanes, as `add_lanes` adds them.
@@ -934,6 +1004,8 @@ mod pascal {
     }
 }
 
+use std::sync::{Mutex, PoisonError};
+
 use kgen_cuda::{Cuda, Grid, f16};
 
 /// Whether this cpu runs the kernels.
@@ -985,6 +1057,31 @@ fn gcds_on_cpu(a: &[u32], b: &[u32]) -> Vec<u32> {
     // needs no more of the cpu than x86-64 has.
     unsafe { kernels::gcds(a.as_ptr(), b.as_ptr(), g.as_mut_ptr(), a.len()) };
     g
+}
+
+/// Keeps the module's memory, `kernels::COUNTS` and `kernels::WEIGHTS`, to one call of the
+/// kernels that name it at a time, as their safety contract asks: each call holds it.
+static MEMORY: Mutex<()> = Mutex::new(());
+
+/// Adds each of `x` to its bin of `kernels::COUNTS`, by its top four bits, on the cpu, which
+/// keeps the counts from one call to the next, as `histogram` does on the GPU: the host reads,
+/// writes and zeroes them there.
+fn histogram_on_cpu(x: &[u32]) {
+    let _held = MEMORY.lock().unwrap_or_else(PoisonError::into_inner);
+    // SAFETY: `x.len()` integers are there to read, no other call touches `COUNTS` while the
+    // lock is held, and the kernel needs no more of the cpu than x86-64 has.
+    unsafe { kernels::histogram(x.as_ptr(), x.len()) }
+}
+
+/// `x[i] *= w[i % 4]` on the cpu, each product rounded once, as `weigh` does on the GPU, of `w`
+/// the weights in the module's constant memory, `kernels::WEIGHTS`: `[1, 0.5, 0.25, 2]` until
+/// the host writes others.
+fn weigh_on_cpu(x: &mut [f32]) {
+    assert!(supported(), "the kernels need AVX2 and FMA");
+    let _held = MEMORY.lock().unwrap_or_else(PoisonError::into_inner);
+    // SAFETY: `x.len()` floats are there to read and write, no other call touches `WEIGHTS`
+    // while the lock is held, and the cpu has what the kernel needs.
+    unsafe { kernels::weigh(x.as_mut_ptr(), x.len()) }
 }
 
 /// `x / s` on `threads` threads of the cpu, `s` the sum of `x`, in one launch: each thread
@@ -1206,6 +1303,16 @@ fn main() {
     );
     let g = gcds_on_cpu(&[1071, 2_971_215_073], &[462, 1_836_311_903]);
     println!("by Stein's algorithm on the cpu: gcd(1071, 462) = {}, and of two Fibonacci numbers: {}", g[0], g[1]);
+    let seen: Vec<Vec<u32>> = (0..2)
+        .map(|call| {
+            histogram_on_cpu(&[call << 28, 0x1000_0000, u32::MAX]);
+            kernels::COUNTS.read()[..4].to_vec()
+        })
+        .collect();
+    println!("4 of the 16 bins in the process's memory after a call of 3 integers, and after another: {seen:?}");
+    let mut x = [1.0; 6];
+    weigh_on_cpu(&mut x);
+    println!("six ones weighed on the cpu by the weights in the module's constant memory: {x:?}");
     let cooperative = kgen_cpu::most().and_then(|most| {
         let threads = most.min(4);
         let mut x = [1.0, 2.0, 3.0, 4.0];
@@ -1460,6 +1567,56 @@ mod tests {
         for (x, y) in pairs {
             // SAFETY: `gcd` reaches no memory but its own stack's.
             assert_eq!(unsafe { kernels::gcd(x, y) }, euclid(x, y), "gcd({x}, {y})");
+        }
+    }
+
+    /// `histogram` on the cpu against the counts of each bin in Rust, as on the GPU: kept in the
+    /// module's memory from one call to the next, and from what the host writes, wrapping past
+    /// `u32::MAX`.
+    #[test]
+    fn histogram_on_the_cpu_keeps_its_counts_from_call_to_call() {
+        let counts = &kernels::COUNTS;
+        assert_eq!((counts.len(), counts.is_empty()), (16, false));
+        assert_eq!(counts.read(), [0; 16], "zeros until something writes them");
+        let mut want = [0u32; 16];
+        for (n, seed) in [(1000, 1), (0, 2), (1, 3), (100_000, 4)] {
+            let x = words(n, seed);
+            for v in &x {
+                want[(v >> 28) as usize] += 1;
+            }
+            super::histogram_on_cpu(&x);
+            assert_eq!(counts.read(), want, "after {n} more integers");
+        }
+        counts.write(&[7; 16]);
+        super::histogram_on_cpu(&[0, u32::MAX, u32::MAX]);
+        let mut want = [7; 16];
+        want[0] += 1;
+        want[15] += 2;
+        assert_eq!(counts.read(), want, "after the host's");
+        counts.write(&[u32::MAX; 16]);
+        super::histogram_on_cpu(&[0x1234_5678]);
+        let mut read = [0; 16];
+        counts.read_into(&mut read);
+        assert_eq!((read[0], read[1]), (u32::MAX, 0), "past `u32::MAX`");
+        counts.zero();
+        assert_eq!(counts.read(), [0; 16]);
+    }
+
+    /// `weigh` on the cpu against each float times its weight in Rust, rounded once, as on the
+    /// GPU: by the weights the module starts with, and then by those the host writes; eight at
+    /// a time, four, and one.
+    #[test]
+    fn weigh_on_the_cpu_multiplies_by_the_weights_in_constant_memory() {
+        let weights = &kernels::WEIGHTS;
+        assert_eq!(weights.read(), [1.0, 0.5, 0.25, 2.0]);
+        for w in [[1.0, 0.5, 0.25, 2.0], [3.0, -0.1, 1.0e-30, 7.5]] {
+            weights.write(&w);
+            for n in [0, 1, 3, 4, 7, 8, 12, 15, 257, 10_000] {
+                let mut x = floats(n, n as u32 + 9);
+                let want: Vec<u32> = x.iter().enumerate().map(|(i, x)| (x * w[i % 4]).to_bits()).collect();
+                super::weigh_on_cpu(&mut x);
+                assert_eq!(x.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), want, "{n} floats by {w:?}");
+            }
         }
     }
 

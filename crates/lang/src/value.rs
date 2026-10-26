@@ -264,6 +264,27 @@ fn odd(x: i128) -> f64 {
 
 /// A number literal: `16`, `0x3f`, `8u8`, `0.5`, `1e-5`, `2.0f64`, `0.5f16`, `1bf16`.
 pub fn literal(text: &str, want: Want) -> Result<Value, String> {
+    number(text, want, false)
+}
+
+/// A number literal negated, `-128i8`, read as one number, as Rust reads it: the least of a
+/// signed type is in range, though its magnitude alone is not.
+pub fn negated(text: &str, want: Want) -> Result<Value, String> {
+    number(text, want, true)
+}
+
+/// The number literal `text`, or its negation, if `negative`.
+fn number(text: &str, want: Want, negative: bool) -> Result<Value, String> {
+    // An integer of the magnitude `x`, of type `ty`, which an unsigned one may not be negated.
+    let whole = |x: i128, ty: Option<IntTy>| match ty {
+        Some(t) if negative && !t.signed() => Err(format!("a {} cannot be negated", t.name())),
+        ty => int(if negative { -x } else { x }, ty),
+    };
+    // A float, negated if it is.
+    let float = |v: Result<Value, String>| match negative {
+        true => v.and_then(|v| unary(UnOp::Neg, &v)),
+        false => v,
+    };
     let t: String = text.chars().filter(|&c| c != '_').collect();
     let int_want = match want {
         Want::Int(ty) => Some(ty),
@@ -282,24 +303,24 @@ pub fn literal(text: &str, want: Want) -> Result<Value, String> {
         let (digits, suffix) = body.split_at(split);
         let ty = if suffix.is_empty() { int_want } else { Some(IntTy::parse(suffix).ok_or_else(bad)?) };
         let x = i128::from_str_radix(digits, radix).map_err(|_| bad())?;
-        return int(x, ty);
+        return whole(x, ty);
     }
     if let Some(digits) = t.strip_suffix("f32") {
-        return finite(text, digits.parse().map(Value::F32).map_err(|_| bad())?);
+        return float(finite(text, digits.parse().map(Value::F32).map_err(|_| bad())?));
     }
     if let Some(digits) = t.strip_suffix("f64") {
-        return finite(text, digits.parse().map(Value::F64).map_err(|_| bad())?);
+        return float(finite(text, digits.parse().map(Value::F64).map_err(|_| bad())?));
     }
     // `bf16` before `f16`, which it ends in.
     if let Some(digits) = t.strip_suffix("bf16") {
-        return finite(text, digits.parse().map(|x| Value::Bf16(BF16.round(x))).map_err(|_| bad())?);
+        return float(finite(text, digits.parse().map(|x| Value::Bf16(BF16.round(x))).map_err(|_| bad())?));
     }
     if let Some(digits) = t.strip_suffix("f16") {
-        return finite(text, digits.parse().map(|x| Value::F16(F16.round(x))).map_err(|_| bad())?);
+        return float(finite(text, digits.parse().map(|x| Value::F16(F16.round(x))).map_err(|_| bad())?));
     }
     if let Some(&(name, ty)) = INT_TYS.iter().find(|(name, _)| t.ends_with(name)) {
         let x = t[..t.len() - name.len()].parse().map_err(|_| bad())?;
-        return int(x, Some(ty));
+        return whole(x, Some(ty));
     }
     if t.contains(['.', 'e', 'E']) {
         let v = match want {
@@ -308,9 +329,9 @@ pub fn literal(text: &str, want: Want) -> Result<Value, String> {
             Want::Bf16 => t.parse().map(|x| Value::Bf16(BF16.round(x))),
             _ => t.parse().map(Value::F32),
         };
-        return finite(text, v.map_err(|_| bad())?);
+        return float(finite(text, v.map_err(|_| bad())?));
     }
-    int(t.parse().map_err(|_| bad())?, int_want)
+    whole(t.parse().map_err(|_| bad())?, int_want)
 }
 
 /// `v`, which the literal `text` reads as, unless it is too big for its type: out of range, as

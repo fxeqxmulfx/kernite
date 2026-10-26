@@ -17,6 +17,15 @@
 //! elsewhere, it is a multiple of the bytes they move. The index is the kernel's to keep inside,
 //! and at such a multiple.
 //!
+//! Memory of the module's, a [`Static`] the kernel is let name by [`Kernel::module_memory`], is
+//! declared as PTX's is, beside the kernels, of Rust's numbers: `static COUNTS: global<[u32; 16]>;`
+//! in the process's memory, which keeps what the kernels write from call to call, and
+//! `static WEIGHTS: constant<[f32; 4]> = [..];`, which they only read. A kernel reaches it at a
+//! displacement from `rip`, with no register beside it, `mov(t.r32, [COUNTS + 8])`; for an
+//! index, `lea(p, [COUNTS])` puts its address in `p`, and `[p + i * 4]` is what it holds there.
+//! kgen checks what an address reaches as it does stack memory's, and refuses a write to
+//! constant memory: a write through an address `lea` took is the kernel's to keep from.
+//!
 //! A `#[cooperative]` kernel runs on the threads of a grid, each the same code, as a GPU kernel
 //! runs on blocks. A thread reads where it is as memory, 8 bytes each: `grid.thread`, its index
 //! from 0, and `grid.threads`, how many there are, as in `mov(t, grid.thread)` or
@@ -52,7 +61,7 @@ use kgen_core::Access::{self, Ignored, Read, ReadWrite, Write};
 use kgen_core::Width::{self, W8, W16, W32, W64, W128, W256};
 use kgen_core::{
     Arg, Base, Class, Const, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo, Signature,
-    Slot, SlotId, Spill, VReg,
+    Slot, SlotId, Spill, StaticId, VReg,
 };
 use kgen_lang::{Fault, Guard, Operand as Given, Target, Value};
 
@@ -63,6 +72,10 @@ use crate::sysv::{CALL_CLOBBERS, FLOAT_PARAMS, FLOAT_RESULT, INT_PARAMS, INT_RES
 /// The most bytes of stack memory a kernel has: as far past the stack pointer as an address
 /// reaches, whose displacement is 32 bits, signed.
 const FRAME: u64 = i32::MAX as u64;
+
+/// The most bytes of a static: an address reaches one at a displacement from `rip`, of 32 bits,
+/// signed.
+const FAR: u64 = i32::MAX as u64;
 
 /// Where a thread's place in the grid has each of its words: its index, how many threads
 /// there are, and the barrier's address. kgen-cpu lays it out so.
@@ -91,8 +104,8 @@ const HELD: &[(&str, u64)] = &[
     ("f64", 8),
 ];
 
-/// A variable and the view the language has of it, or memory of the kernel's stack, which
-/// stands for its address.
+/// A variable and the view the language has of it, or memory, of the kernel's stack or of the
+/// module's, which stands for its address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Var(Place);
 
@@ -102,6 +115,8 @@ enum Place {
     Reg(VReg, View),
     /// Memory of the stack frame, by its slot.
     Stack(SlotId),
+    /// Memory of the module's, a static, by its index among those the kernel names.
+    Static(StaticId),
 }
 
 impl Var {
@@ -109,15 +124,7 @@ impl Var {
     fn reg(self) -> Option<(VReg, View)> {
         match self.0 {
             Place::Reg(reg, view) => Some((reg, view)),
-            Place::Stack(_) => None,
-        }
-    }
-
-    /// Its slot, if it is memory.
-    fn slot(self) -> Option<SlotId> {
-        match self.0 {
-            Place::Reg(..) => None,
-            Place::Stack(s) => Some(s),
+            Place::Stack(_) | Place::Static(_) => None,
         }
     }
 }
@@ -521,6 +528,118 @@ impl Prototype {
     }
 }
 
+/// Memory of the module's, which a `static` of the source declares: elements of one of Rust's
+/// numbers, in the process's memory, which each kernel of the module names, which the host
+/// reads and writes, and which keeps what is written from one call to the next. Constant
+/// memory the kernels only read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Static {
+    /// What the source calls it, which a kernel and its listing name it by: `COUNTS`.
+    pub name: String,
+    /// Its type, as the source declares it: `global<[u32; 16]>`.
+    pub ty: String,
+    /// Its elements' type, one of Rust's numbers: `u32`.
+    pub elem: &'static str,
+    /// The bytes of each element.
+    pub size: u64,
+    /// How many elements it has.
+    pub len: u64,
+    /// What its address is a multiple of: a power of two up to a page, its element's bytes
+    /// unless it says more.
+    pub align: u64,
+    /// Whether it is constant memory, `constant<..>`, which the kernels only read.
+    pub constant: bool,
+    /// What it holds until something writes it, as bytes, the lowest first; zeros past their
+    /// end.
+    pub init: Vec<u8>,
+}
+
+impl Static {
+    /// The static `name`, of the type `ty` as the source declares it, `global<[u32; 16]>`, or
+    /// `constant<[f32; 8], 32>` at a multiple of 32: holding zeros until
+    /// [`init`](Static::init) says otherwise. Or why it is none.
+    pub fn new(name: &str, ty: &str) -> Result<Static, String> {
+        let (word, constant) = match ty.split_once('<').map(|(word, _)| word) {
+            Some("global") => ("global", false),
+            Some("constant") => ("constant", true),
+            _ => {
+                return Err(format!(
+                    "a static of the module is memory: `global<[u32; 16]>`, which its kernels read and write, or \
+                     `constant<[f32; 4]>`, which they only read; not `{ty}`"
+                ));
+            }
+        };
+        let (elem, size, len, align) = shape(ty, word)?;
+        let Some(len) = len else {
+            return Err(format!("`{ty}` has no size: a static has one, as in `{word}<[{elem}; 64]>`"));
+        };
+        if len.checked_mul(size).is_none_or(|bytes| bytes > FAR) {
+            return Err(format!(
+                "`{ty}` is more than {FAR} bytes: a kernel reaches memory of the module's at a displacement from \
+                 `rip`, of 32 bits, signed"
+            ));
+        }
+        Ok(Static { name: name.to_string(), ty: ty.to_string(), elem, size, len, align, constant, init: vec![] })
+    }
+
+    /// Makes it hold `value` until something writes it: an array of as many elements as it
+    /// has, each of its element's type, `[1.5, 2.0]`; or one, for memory of one that is no
+    /// array, `global<f32>`. Or why it cannot.
+    pub fn init(&mut self, value: &Value) -> Result<(), String> {
+        let (ty, elem) = (&self.ty, self.elem);
+        let array = ty.split_once('<').is_some_and(|(_, args)| args.starts_with('['));
+        let items = match (value, array) {
+            (Value::Array(xs), true) if xs.len() as u64 == self.len => xs.as_slice(),
+            (Value::Array(xs), true) => {
+                return Err(format!("`{ty}` holds {} elements; this has {}", self.len, xs.len()));
+            }
+            (x, true) => return Err(format!("`{ty}` holds an array of `{elem}`; this is {}", x.kind())),
+            (x, false) => std::slice::from_ref(x),
+        };
+        let mut init = vec![];
+        for (i, x) in items.iter().enumerate() {
+            let what = if array { format!("element {i}") } else { "this".into() };
+            init.extend(datum(elem, self.size, x, &what)?);
+        }
+        self.init = init;
+        Ok(())
+    }
+
+    /// How many bytes it is.
+    pub fn bytes(&self) -> u64 {
+        self.len * self.size
+    }
+}
+
+/// `x` as the bytes of a `t`, one of Rust's numbers, of `size` bytes, in memory, the lowest
+/// first; or why it is none, of `x` as `what` names it, `this` or `element 2`.
+fn datum(t: &str, size: u64, x: &Value, what: &str) -> Result<Vec<u8>, String> {
+    // A type's name as it is read: an `i8`, an `f32`, a `u64`.
+    let a = |name: &str| if name.starts_with(['f', 'i']) { "an" } else { "a" };
+    let bits = size * 8;
+    match *x {
+        Value::Int(v, ty) if !t.starts_with('f') => {
+            if let Some(ty) = ty
+                && ty.name() != t
+            {
+                return Err(format!("{what} is {} `{}`, not {} `{t}`", a(ty.name()), ty.name(), a(t)));
+            }
+            let (lo, hi) = match t.starts_with('i') {
+                true => (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1),
+                false => (0, (1i128 << bits) - 1),
+            };
+            if !(lo..=hi).contains(&v) {
+                return Err(format!("{what} is {v}, out of range for `{t}`"));
+            }
+            Ok(v.to_le_bytes()[..size as usize].to_vec())
+        }
+        Value::Int(v, _) => Err(format!("{what} is an integer, and {} `{t}` a float: `{v}.0`", a(t))),
+        Value::F32(v) if t == "f32" => Ok(v.to_le_bytes().to_vec()),
+        Value::F64(v) if t == "f64" => Ok(v.to_le_bytes().to_vec()),
+        ref x => Err(format!("{what} is {}, not {} `{t}`", x.kind(), a(t))),
+    }
+}
+
 /// Why a function takes no more integers, or no more floats.
 const SEVENTH: &str = "SysV passes a seventh integer on the stack, which kgen does not read";
 const NINTH: &str = "SysV passes a ninth float on the stack, which kgen does not read";
@@ -540,6 +659,10 @@ pub struct Kernel {
     callees: Vec<(String, Callee)>,
     /// Each slot's type as declared, `local<[f32; 64], 32>`, by [`SlotId`].
     declared: Vec<String>,
+    /// The memory of the module's it may name: each static of the module that compiles.
+    module: Vec<Static>,
+    /// The memory of the module's it names, by [`StaticId`], as the program names them.
+    statics: Vec<Static>,
     /// Whether it runs on the threads of a grid, `#[cooperative]`.
     cooperative: bool,
     /// The variable a thread's place in the grid arrives in, once there is one.
@@ -564,12 +687,15 @@ impl Kernel {
                 slots: vec![],
                 consts: vec![],
                 funcs: vec![],
+                statics: vec![],
             },
             ints: 0,
             floats: 0,
             returns: Returns::Nothing,
             callees: vec![],
             declared: vec![],
+            module: vec![],
+            statics: vec![],
             cooperative: false,
             grid: None,
             labels: u32::MAX,
@@ -580,6 +706,25 @@ impl Kernel {
     /// of one, `tile::<4>`, which it calls or may not, as `callee` says.
     pub fn callee(&mut self, name: impl Into<String>, callee: Callee) {
         self.callees.push((name.into(), callee));
+    }
+
+    /// Lets the kernel name `s`, memory of the module's, by its name in the source, as it names
+    /// stack memory: at a displacement from `rip`, as far as its end.
+    pub fn module_memory(&mut self, s: &Static) {
+        self.module.push(s.clone());
+    }
+
+    /// The name of memory `v`, of the stack or of the module's, and its type as declared; `None`
+    /// for a register.
+    fn declared(&self, v: Var) -> Option<(&str, &str)> {
+        match v.0 {
+            Place::Reg(..) => None,
+            Place::Stack(s) => Some((&self.p.slots[s.0 as usize].name, &self.declared[s.0 as usize])),
+            Place::Static(s) => {
+                let s = &self.statics[s.0 as usize];
+                Some((&s.name, &s.ty))
+            }
+        }
     }
 
     /// The prototype of `f`, a function the kernel names by its operand `at`; or why it may not
@@ -879,7 +1024,7 @@ impl Kernel {
 
     /// Stack memory declared as `let name: ty`, `ty` being `local<[f32; 64], 32>`.
     fn new_memory(&mut self, name: &str, ty: &str) -> Result<Var, String> {
-        let (elem, size, len, align) = shape(ty)?;
+        let (elem, size, len, align) = shape(ty, "local")?;
         let Some(len) = len else {
             return Err(format!("`{ty}` has no size: stack memory has one, as in `local<[{elem}; 64]>`"));
         };
@@ -1204,37 +1349,43 @@ impl Kernel {
             Given::Mem(m) => m,
             _ => unreachable!("memory"),
         };
-        // Stack memory stands for its address, which comes first, added as it is.
+        // Memory stands for its address, which comes first, added as it is.
         let (mut base, mut index) = (m.base, m.index);
         if let (Some(b), Some((i, 1))) = (base, index)
-            && b.slot().is_none()
-            && i.slot().is_some()
+            && b.reg().is_some()
+            && i.reg().is_none()
         {
             (base, index) = (Some(i), Some((b, 1)));
         }
         if let Some((i, k)) = index
-            && let Some(s) = i.slot()
+            && let Some((held, _)) = self.declared(i)
         {
-            let held = &self.p.slots[s.0 as usize].name;
-            return Err(match base.and_then(Var::slot) {
-                Some(b) => {
+            return Err(match base.and_then(|b| self.declared(b)) {
+                Some((other, _)) => format!("an address names one memory at most; `{other}` and `{held}` are two"),
+                None => {
+                    let added = if matches!(i.0, Place::Static(_)) { "8" } else { "i * 4" };
                     format!(
-                        "an address names one memory at most; `{}` and `{held}` are two",
-                        self.p.slots[b.0 as usize].name
+                        "an address adds memory as it is, as in `[{held} + {added}]`; this multiplies `{held}` by {k}"
                     )
                 }
-                None => format!(
-                    "an address adds memory as it is, as in `[{held} + i * 4]`; this multiplies `{held}` by {k}"
-                ),
             });
+        }
+        let held = base.filter(|b| b.reg().is_none());
+        if let (Some(Var(Place::Static(s))), Some((i, k))) = (held, index) {
+            let (held, i) = (&self.statics[s.0 as usize].name, i.reg().expect("an index is a register").0);
+            let i = &self.p.regs[i.id as usize].name;
+            let scaled = if k == 1 { i.clone() } else { format!("{i} * {k}") };
+            return Err(format!(
+                "x86 reaches memory of the module's at a displacement from `rip`, with no register beside it: \
+                 `lea(p, [{held}])` puts the address of `{held}` in `p`, for `[p + {scaled}]`"
+            ));
         }
         let whole = |v: Var| match v.0 {
             Place::Reg(reg, View::R64) => Ok(reg),
             Place::Reg(_, view) => Err(format!("an address is made of gprs seen whole; this is {}", view.name())),
-            Place::Stack(_) => unreachable!("stack memory is the base"),
+            Place::Stack(_) | Place::Static(_) => unreachable!("memory is the base"),
         };
-        let slot = base.and_then(Var::slot);
-        let base = if slot.is_some() { None } else { base.map(whole).transpose()? };
+        let base = if held.is_some() { None } else { base.map(whole).transpose()? };
         let index = match index {
             Some((v, k)) => match u8::try_from(k) {
                 Ok(scale @ (1 | 2 | 4 | 8)) => Some((whole(v)?, scale)),
@@ -1242,10 +1393,30 @@ impl Kernel {
             },
             None => None,
         };
-        if let Some(s) = slot {
-            self.within(s, index, m.disp, width, access, name)?;
-            let disp = i32::try_from(m.disp).expect("inside a frame of 2^31 bytes at most");
-            return Ok(Mem { base: Base::Slot(s), index, disp, width });
+        match held.map(|v| v.0) {
+            Some(Place::Stack(s)) => {
+                let slot = &self.p.slots[s.0 as usize];
+                let ty = &self.declared[s.0 as usize];
+                let memory = Region { name: &slot.name, bytes: slot.size.into(), align: slot.align.into(), ty };
+                self.within(memory, index, m.disp, width, access, name)?;
+                let disp = i32::try_from(m.disp).expect("inside a frame of 2^31 bytes at most");
+                return Ok(Mem { base: Base::Slot(s), index, disp, width });
+            }
+            Some(Place::Static(s)) => {
+                let st = &self.statics[s.0 as usize];
+                if st.constant && name != "lea" && matches!(access, Write | ReadWrite) {
+                    return Err(format!(
+                        "`{name}` {} `{}`, which is constant memory: the kernels only read it",
+                        verb(access),
+                        st.name
+                    ));
+                }
+                let memory = Region { name: &st.name, bytes: st.bytes(), align: st.align, ty: &st.ty };
+                self.within(memory, None, m.disp, width, access, name)?;
+                let disp = i32::try_from(m.disp).expect("inside a static of 2^31 bytes at most");
+                return Ok(Mem { base: Base::Static(s), index: None, disp, width });
+            }
+            _ => {}
         }
         let disp = i32::try_from(m.disp).map_err(|_| format!("{} bytes are too far for an address", m.disp))?;
         let (base, index) = match (base, index) {
@@ -1256,22 +1427,22 @@ impl Kernel {
         Ok(Mem { base: Base::Reg(base), index, disp, width })
     }
 
-    /// Whether the instruction `name` stays inside stack memory `s`, reaching `width` with
-    /// `access` at `disp` bytes into it and `index` past that; else why not. The address is
-    /// checked where the index is 0, the rest being the kernel's to keep inside: it lies in the
-    /// memory, or as far as one past its end for `lea`, which reaches nothing; and for
-    /// `vmovaps` and `vmovdqa`, which fault elsewhere, at a multiple of the bytes they move.
+    /// Whether the instruction `name` stays inside `memory`, of the stack or of the module's,
+    /// reaching `width` with `access` at `disp` bytes into it and `index` past that; else why
+    /// not. The address is checked where the index is 0, the rest being the kernel's to keep
+    /// inside: it lies in the memory, or as far as one past its end for `lea`, which reaches
+    /// nothing; and for `vmovaps` and `vmovdqa`, which fault elsewhere, at a multiple of the
+    /// bytes they move.
     fn within(
         &self,
-        s: SlotId,
+        memory: Region,
         index: Option<(VReg, u8)>,
         disp: i64,
         width: Width,
         access: Access,
         name: &str,
     ) -> Result<(), String> {
-        let (slot, ty) = (&self.p.slots[s.0 as usize], &self.declared[s.0 as usize]);
-        let v = &slot.name;
+        let (v, n, ty) = (memory.name, memory.bytes, memory.ty);
         let mut at = format!("[{v}");
         let mut when = String::new();
         if let Some((i, k)) = index {
@@ -1285,7 +1456,6 @@ impl Kernel {
             d => at += &format!(" + {d}"),
         }
         at.push(']');
-        let n = u64::from(slot.size);
         if name == "lea" {
             return match disp {
                 d if d < 0 => Err(format!("`lea` takes the address `{at}`, before `{v}` starts{when}")),
@@ -1296,11 +1466,7 @@ impl Kernel {
                 _ => Ok(()),
             };
         }
-        let verb = match access {
-            Write => "writes",
-            ReadWrite => "reads and writes",
-            Read | Ignored => "reads",
-        };
+        let verb = verb(access);
         let size = u64::from(width.bytes());
         if disp < 0 {
             return Err(format!("`{name}` {verb} at `{at}`, before `{v}` starts{when}"));
@@ -1317,7 +1483,7 @@ impl Kernel {
             "vmovdqa" => "vmovdqu",
             _ => return Ok(()),
         };
-        if u64::from(slot.align) < size {
+        if memory.align < size {
             let stem = ty.strip_suffix('>').unwrap_or(ty);
             let stem = match stem.rsplit_once(", ") {
                 Some((stem, align)) if align.parse::<u64>().is_ok() => stem,
@@ -1326,7 +1492,7 @@ impl Kernel {
             return Err(format!(
                 "`{name}` {verb} {size} bytes at once, at an address that is a multiple of {size}; `{v}` is at a \
                  multiple of {}: `{stem}, {size}>`, or `{anywhere}` at any",
-                slot.align
+                memory.align
             ));
         }
         if !disp.unsigned_abs().is_multiple_of(size) {
@@ -1339,18 +1505,43 @@ impl Kernel {
     }
 }
 
-/// What stack memory of the type `ty`, `local<args>`, holds: its elements' type and their
-/// bytes; how many, `None` for an array of no length, `[f32]`; and what its address is a
-/// multiple of, a power of two up to a page, its element's bytes unless it says more:
-/// `local<[f32; 64], 32>`.
-fn shape(ty: &str) -> Result<(&'static str, u64, Option<u64>, u64), String> {
+/// Memory a kernel names, of its stack or of the module's, as [`Kernel::within`] checks an
+/// address in it.
+struct Region<'a> {
+    /// What the source calls it.
+    name: &'a str,
+    /// How many bytes it is.
+    bytes: u64,
+    /// What its address is a multiple of.
+    align: u64,
+    /// Its type, as declared: `local<[f32; 64], 32>`.
+    ty: &'a str,
+}
+
+/// What an instruction does to memory it reaches with `access`, in words.
+fn verb(access: Access) -> &'static str {
+    match access {
+        Write => "writes",
+        ReadWrite => "reads and writes",
+        Read | Ignored => "reads",
+    }
+}
+
+/// What memory of the type `ty`, `word<args>`, holds, stack memory `local<..>` or the module's,
+/// `global<..>` or `constant<..>`: its elements' type and their bytes; how many, `None` for an
+/// array of no length, `[f32]`; and what its address is a multiple of, a power of two up to a
+/// page, its element's bytes unless it says more: `local<[f32; 64], 32>`.
+fn shape(ty: &str, word: &str) -> Result<(&'static str, u64, Option<u64>, u64), String> {
     let wrong = || {
         format!(
-            "`local<..>` is an array of Rust's numbers and what its address is a multiple of, \
-             `local<[f32; 64], 32>`, or one, `local<u64>`; not `{ty}`"
+            "`{word}<..>` is an array of Rust's numbers and what its address is a multiple of, \
+             `{word}<[f32; 64], 32>`, or one, `{word}<u64>`; not `{ty}`"
         )
     };
-    let args = ty.strip_prefix("local<").and_then(|t| t.strip_suffix('>')).ok_or_else(wrong)?;
+    // What the memory is, in words.
+    let what = if word == "local" { "stack memory" } else { "a static" };
+    let args = ty.strip_prefix(word).and_then(|t| t.strip_prefix('<')).and_then(|t| t.strip_suffix('>'));
+    let args = args.ok_or_else(wrong)?;
     let (array, align) = match args.rsplit_once(", ") {
         Some((array, align)) => (array, Some(align)),
         None => (args, None),
@@ -1367,8 +1558,8 @@ fn shape(ty: &str) -> Result<(&'static str, u64, Option<u64>, u64), String> {
     };
     let Some(&(elem, size)) = HELD.iter().find(|(e, _)| *e == elem) else {
         return Err(format!(
-            "stack memory holds Rust's numbers, `u8` to `u64`, `i8` to `i64`, `usize`, `isize`, `f32` and \
-             `f64`; not `{elem}`"
+            "{what} holds Rust's numbers, `u8` to `u64`, `i8` to `i64`, `usize`, `isize`, `f32` and `f64`; \
+             not `{elem}`"
         ));
     };
     let align = match align {
@@ -1378,7 +1569,7 @@ fn shape(ty: &str) -> Result<(&'static str, u64, Option<u64>, u64), String> {
                 return Err(format!("an array of `{elem}` is aligned to {size} at least, not {a}"));
             }
             Ok(a) if a.is_power_of_two() && a > u64::from(PAGE) => {
-                return Err(format!("stack memory is aligned to a page at most, {PAGE}; not {a}"));
+                return Err(format!("{what} is aligned to a page at most, {PAGE}; not {a}"));
             }
             Ok(a) if a.is_power_of_two() => a,
             _ => return Err(format!("what an address is a multiple of is a power of two, not {a}")),
@@ -1424,9 +1615,10 @@ fn describe(kind: Kind, width: Option<Width>) -> String {
 
 fn given(a: &Given<Var>) -> String {
     match a {
-        Given::Var(v) => match v.reg() {
-            Some((_, view)) => view.name().into(),
-            None => "stack memory".into(),
+        Given::Var(v) => match v.0 {
+            Place::Reg(_, view) => view.name().into(),
+            Place::Stack(_) => "stack memory".into(),
+            Place::Static(_) => "memory of the module's".into(),
         },
         Given::Special(name) => format!("`{name}`"),
         Given::Int(x) => format!("the integer {x}"),
@@ -1487,10 +1679,14 @@ impl Target for Kernel {
         if ty.starts_with("local<") {
             return self.new_memory(name, ty);
         }
-        for word in ["shared", "global", "constant"] {
-            if let Some(rest) = ty.strip_prefix(word).and_then(|t| t.strip_prefix('<')) {
-                return Err(format!("`{word}<..>` is a GPU's memory; an x86 kernel has stack memory, `local<{rest}`"));
-            }
+        if let Some(rest) = ty.strip_prefix("shared<") {
+            return Err(format!("`shared<..>` is a GPU's memory; an x86 kernel has stack memory, `local<{rest}`"));
+        }
+        if ty.starts_with("global<") || ty.starts_with("constant<") {
+            return Err(format!(
+                "global and constant memory are the module's, which a static declares, as `static {name}: {ty};` \
+                 beside the kernels: a kernel declares stack memory, `local<..>`"
+            ));
         }
         let (class, view) = match ty {
             "gpr" => (Class::Gpr, View::R64),
@@ -1503,25 +1699,39 @@ impl Target for Kernel {
         Ok(Var(Place::Reg(self.new_var(class, name), view)))
     }
 
-    fn view(&mut self, v: Var, view: &str) -> Result<Var, String> {
-        let (reg, from) = match v.0 {
-            Place::Reg(reg, from) => (reg, from),
-            // As a helper's parameter, it is the memory it was declared.
-            Place::Stack(s) => {
-                let (name, ty) = (&self.p.slots[s.0 as usize].name, &self.declared[s.0 as usize]);
-                return match view == ty {
-                    true => Ok(v),
-                    false => Err(format!("`{name}` is memory, `{ty}`; it is no `{view}`")),
-                };
+    fn global(&mut self, name: &str) -> Result<Var, String> {
+        let Some(s) = self.module.iter().find(|s| s.name == name) else {
+            return Err(format!("`{name}` does not compile, so no kernel names it"));
+        };
+        let at = match self.p.statics.iter().position(|n| n == name) {
+            Some(at) => at,
+            None => {
+                self.statics.push(s.clone());
+                self.p.statics.push(name.to_string());
+                self.p.statics.len() - 1
             }
         };
+        Ok(Var(Place::Static(StaticId(at as u32))))
+    }
+
+    fn view(&mut self, v: Var, view: &str) -> Result<Var, String> {
+        // As a helper's parameter, memory is the memory it was declared.
+        if let Some((name, ty)) = self.declared(v) {
+            return match view == ty {
+                true => Ok(v),
+                false => Err(format!("`{name}` is memory, `{ty}`; it is no `{view}`")),
+            };
+        }
+        let Place::Reg(reg, from) = v.0 else { unreachable!("a variable that is no memory is a register") };
         let to = match (reg.class, view) {
             (Class::Vec, "ymm") => View::Ymm,
             (Class::Vec, "xmm") => View::Xmm,
             (Class::Vec, "vec") => from,
             (Class::Gpr, "gpr") => View::R64,
             (Class::Gpr, "r32") => View::R32,
-            _ if view.starts_with("local<") => return Err(format!("{} is no memory, `{view}`", from.name())),
+            _ if ["local<", "global<", "constant<"].iter().any(|w| view.starts_with(w)) => {
+                return Err(format!("{} is no memory, `{view}`", from.name()));
+            }
             (Class::Vec, _) => return Err(format!("a vector is seen as `ymm`, `xmm` or `vec`, not `{view}`")),
             _ => return Err(format!("a gpr is seen as `gpr` or `r32`, not `{view}`")),
         };
@@ -1559,8 +1769,8 @@ impl Target for Kernel {
         }
         for (i, a) in args.iter().enumerate() {
             match a {
-                Given::Var(Var(Place::Stack(s))) => {
-                    let held = &self.p.slots[s.0 as usize].name;
+                Given::Var(v) if v.reg().is_none() => {
+                    let (held, _) = self.declared(*v).expect("a variable that is no register is memory");
                     return Err(Fault::at(
                         i,
                         format!(

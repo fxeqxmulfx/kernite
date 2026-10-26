@@ -199,6 +199,7 @@ impl Builder {
                 slots: vec![],
                 consts: vec![],
                 funcs: vec![],
+                statics: vec![],
             },
             0,
         )

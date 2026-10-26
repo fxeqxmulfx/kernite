@@ -662,6 +662,11 @@ impl<'a, T: Target> Eval<'a, T> {
                 let args = args.iter().map(|a| self.value(a, Want::Any)).collect::<Result<Vec<_>, _>>()?;
                 value::method(&recv, name, &args).map_err(at)
             }
+            // A literal negated is one number, as Rust reads `-128i8`.
+            Expr::Unary(UnOp::Neg, inner, _) if matches!(**inner, Expr::Lit(..)) => {
+                let Expr::Lit(text, _) = &**inner else { unreachable!("a literal") };
+                value::negated(text, want).map_err(at)
+            }
             Expr::Unary(op, inner, _) => {
                 let v = self.value(inner, want)?;
                 value::unary(*op, &v).map_err(at)

@@ -108,6 +108,18 @@ call is kept in a register the callee leaves as it was, `rbx` or `r12` to `r15`,
 caller; a vector spills, since the callee may change any. The stack pointer is a multiple of 16 at each call. A kernel
 that never returns, `-> !`, ends each way out in `ud2()` or in a call of one that does not.
 
+Memory of the module's is a `static` beside its kernels, in the process's memory, which each kernel names as it names its
+own, and which keeps what they write from one call to the next: `static COUNTS: global<[u32; 16]>;` is 16 words the
+kernels read and write, and `static WEIGHTS: constant<[f32; 4]> = [1.0, 0.5, 0.25, 2.0];` four floats they only read,
+holding what it says until something writes it. A kernel reaches a static at a displacement from `rip`,
+`vbroadcastf128(w, [WEIGHTS])`, and `lea(p, [COUNTS])` takes its address, for an index, `[p + i * 4]`. kgen checks an
+address in it as it does one in stack memory, and refuses a write to constant memory. The host reads and writes each as
+the module has it, a [`kgen_cpu::Global`](crates/cpu/src/global.rs) of Rust's type for its elements:
+`kernels::COUNTS.read()`, `kernels::WEIGHTS.write(&[2.0; 4])`. Its elements are atomics, which the host loads and
+stores, and a kernel's safety contract says that nothing else touches the memory of the module's it names while it
+runs. A module's statics are its kernels': on the GPU for GPU kernels, so a module with kernels of both kinds and a
+static is an error, which says to make it two.
+
 ## On a GPU
 
 An `extern "ptx-kernel"` function is compiled to PTX. The module's kernels are one PTX module, `PTX`, which
@@ -209,8 +221,10 @@ name = "kgen"
 ## Examples
 
 [`examples/my-app`](examples/my-app/src/main.rs) uses kgen as a crate outside it would: for the CPU `sum8`, `dot` for
-one accumulator, for four and for sixteen, two of which spill, `count_bytes`, by tables in its stack memory, and
-`normalize` and `diffuse` on the threads of a grid, which compute what the GPU's do, bit for bit; and for the GPU
+one accumulator, for four and for sixteen, two of which spill, `count_bytes`, by tables in its stack memory, `sum16`,
+which calls `sum8` for each half, `gcds`, which calls Stein's `gcd`, which calls itself, `histogram`, which counts in
+the module's memory from call to call, `weigh`, by weights in its constant memory, and `normalize` and `diffuse` on the
+threads of a grid, which compute what the GPU's do, bit for bit; and for the GPU
 `saxpy`, `block_sums` for blocks of 256 threads and of 1024 and `reverse_runs` in shared memory, `scale_f16`, written in place, `gcds`, which calls `gcd`, an `extern "ptx-func"`
 function that calls itself, `histogram`, which counts in the module's global memory from launch to launch, and
 `weigh`, by weights in its constant memory, with safe functions over them; and
@@ -257,7 +271,7 @@ Each crate depends only on the layers inside it. `crates/kgen/tests/architecture
 | composition | `kgen` | which machine and syntax each kernel compiles with |
 | delivery | `kgen-macros` | kernels as functions: `#[unsafe(naked)]`, launchers of a grid's threads, or launchers of PTX |
 | runtime | `kgen-cuda` | the CUDA driver: memory on the GPU, modules, launches; `f16` and `bf16`; depends on no other crate |
-| runtime | `kgen-cpu` | the threads of a cooperative x86 kernel's grid, and the barrier they wait at; depends on no other crate |
+| runtime | `kgen-cpu` | the threads of a cooperative x86 kernel's grid, and the memory of a module of x86 kernels; depends on no other crate |
 
 ## Guarantees
 
