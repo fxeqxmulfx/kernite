@@ -1,7 +1,9 @@
 //! The parser: a module's tokens to its items, a body's to statements.
 
 use crate::Error;
-use crate::ast::{BinOp, Block, Const, Expr, Fn, Generic, Item, ItemKind, Module, Param, Ret, Stmt, Type, UnOp};
+use crate::ast::{
+    BinOp, Block, Const, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret, Stmt, Type, UnOp,
+};
 use crate::token::{Delim, Span, Tree, text};
 
 /// The items of a module, from the tokens inside its braces.
@@ -144,16 +146,37 @@ impl<'a> Parser<'a> {
             self.pos += 3;
             return Ok(Item { tokens: start..self.pos, kind: ItemKind::Other });
         }
+        let mut instances = None;
         while self.is_op("#") && matches!(self.peek_at(1), Some(Tree::Group { delim: Delim::Bracket, .. })) {
+            if let Some(Tree::Group { trees, .. }) = self.peek_at(1)
+                && let [Tree::Ident { name, span }, rest @ ..] = trees.as_slice()
+                && name == "instances"
+            {
+                let at = |message: &str| Err(Error { span: *span, message: message.into() });
+                let [Tree::Group { delim: Delim::Paren, trees: values, .. }] = rest else {
+                    return at("`#[instances(..)]` lists what a function is compiled for, as in `#[instances(4, 8)]`");
+                };
+                if instances.is_some() {
+                    return at("a function has one `#[instances(..)]`, which lists each instance it is compiled for");
+                }
+                instances = Some(Instances { values: args(values)?, span: *span, tokens: self.pos..self.pos + 2 });
+            }
             self.pos += 2;
         }
         let attrs = start..self.pos;
+        let misplaced = instances.as_ref().map(|i| Error {
+            span: i.span,
+            message: "`#[instances(..)]` goes on a function that names an ABI, which it lists the instances of".into(),
+        });
         let head = self.pos;
         if self.eat_ident("pub") {
             self.group(Delim::Paren);
         }
         let qualifier = |t: Option<&Tree>| matches!(t, Some(Tree::Ident { name, .. }) if ["fn", "unsafe", "extern", "async"].contains(&name.as_str()));
         if self.is_ident("const") && !qualifier(self.peek_at(1)) {
+            if let Some(e) = misplaced {
+                return Err(e);
+            }
             self.pos += 1;
             let c = self.const_rest()?;
             return Ok(Item { tokens: start..self.pos, kind: ItemKind::Const(c) });
@@ -179,8 +202,11 @@ impl<'a> Parser<'a> {
             break;
         }
         if self.eat_ident("fn") {
-            let f = self.function(attrs, head..self.pos - 1, abi)?;
+            let f = self.function(attrs, instances, head..self.pos - 1, abi)?;
             return Ok(Item { tokens: start..self.pos, kind: ItemKind::Fn(f) });
+        }
+        if let Some(e) = misplaced {
+            return Err(e);
         }
         // Anything else ends at its first `;` or brace group. An item cut short there, as `use
         // a::{b, c};` is, goes on as another; they pass through in order all the same.
@@ -207,6 +233,7 @@ impl<'a> Parser<'a> {
     fn function(
         &mut self,
         attrs: std::ops::Range<usize>,
+        instances: Option<Instances>,
         head: std::ops::Range<usize>,
         abi: Option<(String, Span)>,
     ) -> Result<Fn, Error> {
@@ -215,7 +242,7 @@ impl<'a> Parser<'a> {
         if self.eat_op("<") {
             while !self.eat_op(">") {
                 if !self.eat_ident("const") {
-                    return self.error("a helper's generics are values, as in `<const N: usize>`");
+                    return self.error("a function's generics are values, as in `<const N: usize>`");
                 }
                 let (name, span) = self.ident()?;
                 self.expect_op(":")?;
@@ -251,7 +278,7 @@ impl<'a> Parser<'a> {
             return self.error(format!("a kernel is written in its body, and `{name}` has none"));
         };
         let body = block(body, span_body);
-        Ok(Fn { attrs, head, abi, name, span, generics, params, params_at, ret, body })
+        Ok(Fn { attrs, instances, head, abi, name, span, generics, params, params_at, ret, body })
     }
 
     fn ty(&mut self) -> Result<Type, Error> {
@@ -555,10 +582,10 @@ impl<'a> Parser<'a> {
                 self.pos += 3;
                 let generics = self.generic_args()?;
                 let span = e.span();
-                let Some((trees, _)) = self.group(Delim::Paren) else {
-                    return self.error(format!("expected the arguments, found {}", self.found()));
+                e = match self.group(Delim::Paren) {
+                    Some((trees, _)) => Expr::Call { func: Box::new(e), generics, args: args(trees)?, span },
+                    None => Expr::Instance { func: Box::new(e), generics, span },
                 };
-                e = Expr::Call { func: Box::new(e), generics, args: args(trees)?, span };
             } else if self.is_op("::") && matches!(e, Expr::Field(..)) {
                 return self.error("a word of a name is joined to the next by `__`, which PTX writes `::`: `L2__64B`");
             } else {

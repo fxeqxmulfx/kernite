@@ -17,6 +17,7 @@ pub mod forms;
 pub mod lang;
 
 use kgen_core::{Item, Program};
+use kgen_lang::{IntTy, Value};
 
 use crate::forms::Space;
 
@@ -464,7 +465,10 @@ pub struct Memory {
 /// `.func`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
-    /// The kernel as a program, for the checks: each instruction's opcode is its PTX.
+    /// What the source calls it, for messages: `saxpy`, or `tile::<4>` for an instance.
+    pub name: String,
+    /// The kernel as a program, for the checks: its name is its symbol in PTX, and each
+    /// instruction's opcode is its PTX.
     pub program: Program<Op>,
     /// Its parameters, in order.
     pub params: Vec<Param>,
@@ -478,8 +482,8 @@ pub struct Entry {
     pub needs: Vec<(Needs, String)>,
     /// For a function, what it returns; `None` for a kernel.
     pub func: Option<Returns>,
-    /// The functions it names, each once: those it calls, and those whose addresses it takes,
-    /// which a module declares before it if they come after.
+    /// The functions it names, each once, by their symbols: those it calls, and those whose
+    /// addresses it takes, which a module declares before it if they come after.
     pub calls: Vec<String>,
 }
 
@@ -571,7 +575,7 @@ pub fn module(entries: &[Entry]) -> Result<String, String> {
     if !needs.possible() {
         let named: Vec<(Needs, String)> = entries
             .iter()
-            .flat_map(|e| e.needs.iter().map(move |(n, why)| (*n, format!("`{why}` in `{}`", e.program.name))))
+            .flat_map(|e| e.needs.iter().map(move |(n, why)| (*n, format!("`{why}` in `{}`", e.name))))
             .collect();
         return Err(clash(&named));
     }
@@ -600,4 +604,80 @@ pub fn module(entries: &[Entry]) -> Result<String, String> {
         declared.push(&e.program.name);
     }
     Ok(out)
+}
+
+/// `path`, namespaces each in the one before, as C++ mangles their names for [`symbol`]:
+/// `<length><name>` each, `["kgen", "my_app"]` as `4kgen6my_app`. A character that cannot be
+/// in a name of PTX's is `_`, and a name that starts with a digit has `_` before it.
+pub fn scope(path: &[&str]) -> String {
+    let mut out = String::new();
+    for name in path {
+        let mut name: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+        if name.starts_with(|c: char| c.is_ascii_digit()) {
+            name.insert(0, '_');
+        }
+        out += &format!("{}{name}", name.len());
+    }
+    out
+}
+
+/// The symbol of `name`, a kernel or a function, in `scope`, which [`scope`] writes, for the
+/// compile-time arguments `args`: as C++ mangles the name of a template's instance there,
+/// under Itanium's ABI, which the tools that read PTX demangle. `cu++filt`, as Nsight and
+/// `cuda-gdb` do, shows `_ZN4kgen6my_app3gpu5saxpyE` as `kgen::my_app::gpu::saxpy`, and
+/// `_ZN4kgen3gpu4tileILm4EEE` as `kgen::gpu::tile<(unsigned long)4>`. Without a scope and
+/// without arguments, the symbol is `name`.
+///
+/// `args` are integers and `bool`s, as a kernel's compile-time arguments are: an integer of
+/// its type, C++'s of its size, and one of no type an `i32`, as Rust has it.
+pub fn symbol(scope: &str, name: &str, args: &[Value]) -> String {
+    if scope.is_empty() && args.is_empty() {
+        return name.to_string();
+    }
+    let mut out = match scope {
+        "" => "_Z".to_string(),
+        _ => format!("_ZN{scope}"),
+    };
+    out += &self::scope(&[name]);
+    if !args.is_empty() {
+        out += "I";
+        for a in args {
+            out += &match a {
+                Value::Bool(b) => format!("Lb{}E", u8::from(*b)),
+                Value::Int(x, ty) => {
+                    let ty = match ty.unwrap_or(IntTy::I32) {
+                        IntTy::I8 => 'a',
+                        IntTy::I16 => 's',
+                        IntTy::I32 => 'i',
+                        IntTy::I64 | IntTy::Isize => 'l',
+                        IntTy::U8 => 'h',
+                        IntTy::U16 => 't',
+                        IntTy::U32 => 'j',
+                        IntTy::U64 | IntTy::Usize => 'm',
+                    };
+                    let sign = if *x < 0 { "n" } else { "" };
+                    format!("L{ty}{sign}{}E", x.unsigned_abs())
+                }
+                other => unreachable!("a kernel's compile-time argument is an integer or a bool, not {}", other.kind()),
+            };
+        }
+        out += "E";
+    }
+    if !scope.is_empty() {
+        out += "E";
+    }
+    out
+}
+
+/// The symbol of `name`, memory of the function whose symbol is `function` that is the
+/// module's rather than the function's, as C++ names a function's static and `nvcc` a
+/// kernel's `__shared__` memory: `_ZZ`, the function, `E`, the name. `cu++filt` shows
+/// `_ZZN4kgen3gpu7reverseEE3buf` as `kgen::gpu::reverse::buf`, and `_ZZ7reverseE3buf` as
+/// `reverse::buf`.
+fn local(function: &str, name: &str) -> String {
+    let function = match function.strip_prefix("_Z") {
+        Some(mangled) => mangled.to_string(),
+        None => scope(&[function]),
+    };
+    format!("_ZZ{function}E{}", scope(&[name]))
 }

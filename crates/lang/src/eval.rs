@@ -4,7 +4,7 @@
 use std::fmt;
 
 use crate::Error;
-use crate::ast::{BinOp, Block, Const, Expr, Fn, ItemKind, Module, Stmt, Type, UnOp};
+use crate::ast::{BinOp, Block, Const, Expr, Fn, Generic, ItemKind, Module, Stmt, Type, UnOp};
 use crate::token::Span;
 use crate::value::{self, Value, Want};
 
@@ -141,14 +141,14 @@ pub struct Run {
     pub consts: Vec<String>,
 }
 
-/// Runs `f` of `module` on `target`, a kernel or another function that names an ABI: its
-/// parameters declared, its body evaluated.
-pub fn kernel<T: Target>(module: &Module, f: &Fn, target: &mut T) -> Result<Run, Error> {
+/// Runs `f` of `module` on `target`, a kernel or another function that names an ABI, for the
+/// compile-time arguments `args`, those of one of its [`instances`]: its parameters declared,
+/// its body evaluated.
+pub fn kernel<T: Target>(module: &Module, f: &Fn, args: &[Value], target: &mut T) -> Result<Run, Error> {
+    instance(f, args)?;
     let mut e = Eval::new(module, target);
-    if let Some(g) = f.generics.first() {
-        return Err(err(g.span, "a function that names an ABI takes no compile-time arguments; a helper does"));
-    }
-    let mut scope = vec![];
+    let mut scope: Scope<T::Var> =
+        f.generics.iter().zip(args).map(|(g, a)| (g.name.clone(), Binding::Value(a.clone()))).collect();
     for p in &f.params {
         let Type::Name(ty, span) = &p.ty else {
             return Err(err(p.ty.span(), "a function that names an ABI takes values the machine passes, not arrays"));
@@ -166,6 +166,97 @@ pub fn kernel<T: Target>(module: &Module, f: &Fn, target: &mut T) -> Result<Run,
     // A constant is evaluated the first time it is named, so the ones evaluated are the ones read.
     let consts = e.consts.iter().filter(|(_, s)| matches!(s, State::Done(_))).map(|(c, _)| c.name.clone()).collect();
     Ok(Run { decls: e.decls, consts })
+}
+
+/// The compile-time arguments of each instance of `f`, a function of `module`, in the order
+/// of its generics: what its `#[instances(..)]` lists, each a value of its generic's type,
+/// evaluated among the module's constants. A function that names an ABI and takes none has one
+/// instance, of none; a helper has none, being compiled where it is called.
+pub fn instances(module: &Module, f: &Fn) -> Result<Vec<Vec<Value>>, Error> {
+    Eval::new(module, &mut Consts).listed(f)
+}
+
+/// What `f` is called for the compile-time arguments `args`, as Rust names its instance:
+/// `tile::<4>`, or `saxpy` for none; or why they are not of its generics' types, each an
+/// integer or a `bool`.
+pub fn instance(f: &Fn, args: &[Value]) -> Result<String, Error> {
+    if args.len() != f.generics.len() {
+        return Err(err(
+            f.span,
+            format!("`{}` takes {} compile-time arguments; this gives {}", f.name, f.generics.len(), args.len()),
+        ));
+    }
+    for (g, a) in f.generics.iter().zip(args) {
+        machine_generic(g)?;
+        if value::typed(a.clone(), &g.ty).as_ref() != Ok(a) {
+            return Err(err(g.span, format!("`{}` takes a `{}` for `{}`; this is {}", f.name, g.ty, g.name, a.kind())));
+        }
+    }
+    Ok(named(&f.name, args))
+}
+
+/// `name::<args>`, an instance's name; `name` for none.
+fn named(name: &str, args: &[Value]) -> String {
+    if args.is_empty() {
+        return name.to_string();
+    }
+    let args: Vec<String> = args.iter().map(Value::to_string).collect();
+    format!("{name}::<{}>", args.join(", "))
+}
+
+/// Why `g`, a generic of a function that names an ABI, cannot be one, if it cannot: Rust's
+/// const generics, which the kernel's instances are picked by, are integers and `bool`s.
+fn machine_generic(g: &Generic) -> Result<(), Error> {
+    if value::IntTy::parse(&g.ty).is_some() || g.ty == "bool" {
+        return Ok(());
+    }
+    Err(err(
+        g.span,
+        format!(
+            "a function that names an ABI takes integers and `bool`s at compile time, as Rust's const generics are; \
+             `{}` is neither",
+            g.ty
+        ),
+    ))
+}
+
+/// No machine, for values known now alone: the instances a function lists. Nothing that
+/// evaluates them reaches it.
+struct Consts;
+
+/// What [`Consts`] says to whatever reaches it.
+const NO_MACHINE: &str = "this is evaluated for a value known now, with no machine to run on";
+
+impl Target for Consts {
+    type Var = ();
+
+    fn param(&mut self, _: &str, _: &str) -> Result<(), String> {
+        Err(NO_MACHINE.into())
+    }
+
+    fn result(&mut self, _: &str) -> Result<(), String> {
+        Err(NO_MACHINE.into())
+    }
+
+    fn var(&mut self, _: &str, _: &str) -> Result<(), String> {
+        Err(NO_MACHINE.into())
+    }
+
+    fn view(&mut self, (): (), _: &str) -> Result<(), String> {
+        Err(NO_MACHINE.into())
+    }
+
+    fn label(&mut self, _: u32) {}
+
+    fn note(&mut self, _: &str) {}
+
+    fn inst(&mut self, _: &str, _: &[Operand<()>], _: Option<Guard<()>>) -> Result<(), Fault> {
+        Err(Fault::new(NO_MACHINE))
+    }
+
+    fn end(&mut self) -> Result<(), String> {
+        Err(NO_MACHINE.into())
+    }
 }
 
 /// How deep helpers may call helpers.
@@ -220,7 +311,7 @@ struct Eval<'a, T: Target> {
     helpers: Vec<&'a Fn>,
     /// The functions that name an ABI, each compiled on its own: kernels, and functions the
     /// machine calls.
-    compiled: Vec<&'a str>,
+    compiled: Vec<&'a Fn>,
     /// The names in scope, innermost last. A helper runs in scopes of its own.
     scopes: Vec<Scope<T::Var>>,
     labels: u32,
@@ -235,7 +326,7 @@ impl<'a, T: Target> Eval<'a, T> {
         for item in &module.items {
             match &item.kind {
                 ItemKind::Const(c) => consts.push((c, State::Waiting)),
-                ItemKind::Fn(f) if f.abi.is_some() => compiled.push(f.name.as_str()),
+                ItemKind::Fn(f) if f.abi.is_some() => compiled.push(f),
                 ItemKind::Fn(f) => helpers.push(f),
                 ItemKind::Other => {}
             }
@@ -275,6 +366,89 @@ impl<'a, T: Target> Eval<'a, T> {
         let v = v?;
         self.consts[i].1 = State::Done(v.clone());
         Ok(Some(v))
+    }
+
+    /// The compile-time arguments of each of `f`'s instances, as [`instances`] has them: those
+    /// its `#[instances(..)]` lists, evaluated in a scope of constants alone.
+    fn listed(&mut self, f: &Fn) -> Result<Vec<Vec<Value>>, Error> {
+        let name = &f.name;
+        let Some(list) = &f.instances else {
+            return match (&f.abi, f.generics.first()) {
+                (None, _) => Ok(vec![]),
+                (Some(_), None) => Ok(vec![vec![]]),
+                (Some(_), Some(g)) => Err(err(
+                    g.span,
+                    format!(
+                        "`{name}` takes compile-time arguments, so it is compiled for each instance its \
+                         `#[instances(..)]` lists, as in `#[instances(4, 8)]`"
+                    ),
+                )),
+            };
+        };
+        if f.abi.is_none() {
+            return Err(err(
+                list.span,
+                "a helper is compiled where it is called, for what `::<..>` gives it there: `#[instances(..)]` lists \
+                 what a function that names an ABI is compiled for",
+            ));
+        }
+        if f.generics.is_empty() {
+            return Err(err(
+                list.span,
+                format!("`{name}` takes no compile-time arguments, so it is compiled once, with no `#[instances(..)]`"),
+            ));
+        }
+        for g in &f.generics {
+            machine_generic(g)?;
+        }
+        if list.values.is_empty() {
+            return Err(err(list.span, "`#[instances(..)]` lists each instance, and this lists none"));
+        }
+        let outer = std::mem::take(&mut self.scopes);
+        let listed = self.instances_of(f, &list.values);
+        self.scopes = outer;
+        listed
+    }
+
+    /// The compile-time arguments of `f` that each of `values` gives, as `#[instances(..)]`
+    /// lists them, each instance once.
+    fn instances_of(&mut self, f: &Fn, values: &[Expr]) -> Result<Vec<Vec<Value>>, Error> {
+        let mut out: Vec<Vec<Value>> = vec![];
+        for e in values {
+            let given = match (f.generics.len(), e) {
+                (1, e) => vec![e],
+                (n, Expr::Tuple(items, _)) if items.len() == n => items.iter().collect(),
+                (_, e) => {
+                    let names: Vec<&str> = f.generics.iter().map(|g| g.name.as_str()).collect();
+                    return Err(err(
+                        e.span(),
+                        format!(
+                            "an instance of `{}` gives its {} compile-time arguments in parentheses, as `({})`",
+                            f.name,
+                            names.len(),
+                            names.join(", ")
+                        ),
+                    ));
+                }
+            };
+            let args = self.generics(f, given)?;
+            if out.contains(&args) {
+                return Err(err(e.span(), format!("`{}` is listed twice", named(&f.name, &args))));
+            }
+            out.push(args);
+        }
+        Ok(out)
+    }
+
+    /// The values `given` for `f`'s generics, each of its generic's type.
+    fn generics<'e>(&mut self, f: &Fn, given: impl IntoIterator<Item = &'e Expr>) -> Result<Vec<Value>, Error> {
+        let mut out = vec![];
+        for (g, e) in f.generics.iter().zip(given) {
+            let ty = Type::Name(g.ty.clone(), g.span);
+            let v = self.value(e, want(&ty))?;
+            out.push(self.typed(v, &ty, e.span())?);
+        }
+        Ok(out)
     }
 
     fn constant(&mut self, c: &Const) -> Result<Value, Error> {
@@ -370,6 +544,9 @@ impl<'a, T: Target> Eval<'a, T> {
                 value::path(&p).ok_or_else(|| at(format!("`{p}` is not a constant kgen knows")))
             }
             Expr::Field(..) => Err(at("a field is a view of a variable, not a value".into())),
+            Expr::Instance { .. } => {
+                Err(at("an instance of a function is for an instruction to name, as `call` does, not a value".into()))
+            }
             Expr::Index(base, index, _) => {
                 let i = self.count(index)?;
                 match self.value(base, want)? {
@@ -553,6 +730,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 items.iter().map(|x| self.operand(x)).collect::<Result<_, _>>().map(Operand::Vector)
             }
             Expr::Paren(inner, _) => self.operand(inner),
+            Expr::Instance { func, generics, span } => self.instance_named(func, generics, *span),
             Expr::Unary(op, inner, _) if self.runtime(inner)? => {
                 let inner = Box::new(self.operand(inner)?);
                 Ok(match op {
@@ -574,7 +752,13 @@ impl<'a, T: Target> Eval<'a, T> {
     /// What a name that is nothing in scope gives an instruction: a function of the module
     /// that names an ABI, or a name the machine has.
     fn unscoped(&self, name: &str, span: Span) -> Result<Operand<T::Var>, Error> {
-        if self.compiled.contains(&name) {
+        if let Some(f) = self.compiled.iter().find(|f| f.name == name) {
+            if !f.generics.is_empty() {
+                return Err(err(
+                    span,
+                    format!("`{name}` is compiled for each of its instances: an instruction names one, `{name}::<..>`"),
+                ));
+            }
             return Ok(Operand::Func(name.to_string()));
         }
         if self.helpers.iter().any(|f| f.name == name) {
@@ -584,6 +768,48 @@ impl<'a, T: Target> Eval<'a, T> {
             ));
         }
         Ok(Operand::Special(name.to_string()))
+    }
+
+    /// `func::<generics>`, an instance of a function of the module that names an ABI, as an
+    /// instruction names it: one its `#[instances(..)]` lists.
+    fn instance_named(&mut self, func: &Expr, generics: &[Expr], span: Span) -> Result<Operand<T::Var>, Error> {
+        let name = match func {
+            Expr::Path(path, _) if path.len() == 1 => &path[0],
+            _ => return Err(err(span, "an instance is of a function of the module, by its name, as `tile::<4>`")),
+        };
+        let Some(&f) = self.compiled.iter().find(|f| f.name == *name) else {
+            let what = match self.helpers.iter().any(|f| f.name == *name) {
+                true => "a helper, inlined where it is called",
+                false => "no function of the module",
+            };
+            return Err(err(span, format!("`{name}` is {what}: an instruction names a function that names an ABI")));
+        };
+        if f.generics.is_empty() {
+            return Err(err(
+                span,
+                format!("`{name}` takes no compile-time arguments: an instruction names it, `{name}`"),
+            ));
+        }
+        if generics.len() != f.generics.len() {
+            return Err(err(
+                span,
+                format!("`{name}` takes {} values in `::<..>`; this gives {}", f.generics.len(), generics.len()),
+            ));
+        }
+        let args = self.generics(f, generics)?;
+        let listed = self.listed(f)?;
+        if !listed.contains(&args) {
+            let listed: Vec<String> = listed.iter().map(|a| format!("`{}`", named(name, a))).collect();
+            return Err(err(
+                span,
+                format!(
+                    "`{}` is not compiled: `{name}`'s `#[instances(..)]` lists {}",
+                    named(name, &args),
+                    listed.join(", ")
+                ),
+            ));
+        }
+        Ok(Operand::Func(named(name, &args)))
     }
 
     /// `[inner]`: memory at an address, or memory holding a value known now.
@@ -794,7 +1020,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 if let Some(&f) = self.helpers.iter().find(|f| f.name == *name) {
                     return self.inline(f, generics, args, *span);
                 }
-                if self.compiled.contains(&name.as_str()) {
+                if self.compiled.iter().any(|f| f.name == *name) {
                     return Err(err(
                         *span,
                         format!(
@@ -896,12 +1122,8 @@ impl<'a, T: Target> Eval<'a, T> {
                 format!("`{}` takes {} arguments; this gives {}", f.name, f.params.len(), args.len()),
             ));
         }
-        let mut scope = vec![];
-        for (g, e) in f.generics.iter().zip(generics) {
-            let ty = Type::Name(g.ty.clone(), g.span);
-            let v = self.value(e, want(&ty))?;
-            scope.push((g.name.clone(), Binding::Value(self.typed(v, &ty, e.span())?)));
-        }
+        let values = self.generics(f, generics)?;
+        let scope = f.generics.iter().zip(values).map(|(g, v)| (g.name.clone(), Binding::Value(v))).collect();
         let given = args.iter().map(|a| self.binding(a)).collect::<Result<Vec<_>, _>>()?;
         let outer = std::mem::replace(&mut self.scopes, vec![scope]);
         let r = self.params(f, args, given).and_then(|()| {

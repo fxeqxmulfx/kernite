@@ -89,6 +89,9 @@ const LOCAL: u64 = 512 << 10;
 
 /// A kernel being written in the language, for PTX.
 pub struct Kernel {
+    /// What the source calls it, for messages: `saxpy`, or `tile::<4>` for an instance. Its
+    /// program is called by its symbol, as PTX names it.
+    name: String,
     p: Program<Op>,
     params: Vec<Param>,
     regs: Vec<(String, Ty)>,
@@ -108,11 +111,20 @@ pub struct Kernel {
     tables: usize,
     /// For a function, what it returns; `None` for a kernel.
     func: Option<Returns>,
-    /// The functions it may name: each one it calls, by its prototype, and the kernels, by
-    /// `None`, whose addresses it takes.
-    callees: Vec<(String, Option<Prototype>)>,
-    /// Those it named, each once.
+    /// The functions it may name: each one it calls, and the kernels, whose addresses it
+    /// takes.
+    callees: Vec<Callee>,
+    /// Those it named, each once, by their symbols.
     calls: Vec<String>,
+}
+
+/// A function or a kernel that a kernel may name: by what the source calls it, as an operand
+/// names it, and by its symbol in PTX; and for a function, which it calls, its prototype,
+/// `None` for a kernel, whose address it takes.
+struct Callee {
+    name: String,
+    symbol: String,
+    proto: Option<Prototype>,
 }
 
 /// A write under a guard, which leaves what was there where the guard does not hold. It is
@@ -159,13 +171,15 @@ enum Miss {
 }
 
 impl Kernel {
-    /// An empty kernel called `name`.
-    pub fn new(name: impl Into<String>) -> Self {
-        let name = name.into();
+    /// An empty kernel called `name` in messages, and `symbol` in PTX: what
+    /// [`symbol`](crate::symbol) writes for it.
+    pub fn new(name: impl Into<String>, symbol: impl Into<String>) -> Self {
+        let symbol = symbol.into();
         Kernel {
-            named: BTreeSet::from([name.clone()]),
+            name: name.into(),
+            named: BTreeSet::from([symbol.clone()]),
             p: Program {
-                name,
+                name: symbol,
                 signature: Signature { params: vec![], result: None },
                 regs: vec![],
                 params: vec![],
@@ -190,26 +204,28 @@ impl Kernel {
         }
     }
 
-    /// An empty function called `name`, which kernels call: a `.func`, which returns nothing
-    /// until [`Target::result`] says what it returns.
-    pub fn func(name: impl Into<String>) -> Self {
-        let mut f = Kernel::new(name);
+    /// An empty function called `name` in messages, and `symbol` in PTX, which kernels call: a
+    /// `.func`, which returns nothing until [`Target::result`] says what it returns.
+    pub fn func(name: impl Into<String>, symbol: impl Into<String>) -> Self {
+        let mut f = Kernel::new(name, symbol);
         f.named.insert(format!("{}_retval", f.p.name));
         f.func = Some(Returns::Nothing);
         f
     }
 
-    /// Lets the kernel name `name`: a function it calls, of the prototype `proto`; or with
-    /// `None` a kernel, whose address it takes for the GPU to launch it.
-    pub fn callee(&mut self, name: impl Into<String>, proto: Option<Prototype>) {
-        let name = name.into();
-        self.named.insert(name.clone());
-        self.callees.push((name, proto));
+    /// Lets the kernel name `name`, which is `symbol` in PTX: a function it calls, of the
+    /// prototype `proto`; or with `None` a kernel, whose address it takes for the GPU to launch
+    /// it.
+    pub fn callee(&mut self, name: impl Into<String>, symbol: impl Into<String>, proto: Option<Prototype>) {
+        let symbol = symbol.into();
+        self.named.insert(symbol.clone());
+        self.callees.push(Callee { name: name.into(), symbol, proto });
     }
 
     /// The kernel as written.
     pub fn finish(self) -> Entry {
         Entry {
+            name: self.name,
             program: self.p,
             params: self.params,
             regs: self.regs,
@@ -335,9 +351,13 @@ impl Kernel {
             }
             *had = all;
         }
-        // PTX predefines `WARP_SZ`. Memory without a size is the module's, after the kernel.
-        let base = if name == "WARP_SZ" { format!("{name}_") } else { name.to_string() };
-        let base = if bytes.is_some() { base } else { format!("{}${base}", self.p.name) };
+        // PTX predefines `WARP_SZ`. Memory without a size is the module's, after the kernel,
+        // named as C++ names a function's static.
+        let base = match bytes {
+            None => crate::local(&self.p.name, name),
+            Some(_) if name == "WARP_SZ" => format!("{name}_"),
+            Some(_) => name.to_string(),
+        };
         let (mut text, mut k) = (base.clone(), 1);
         while self.named.contains(&text) {
             text = format!("{base}_{k}");
@@ -869,30 +889,32 @@ impl Kernel {
 
     /// The address of the function or the kernel `f`, which `mov` puts in a variable.
     fn address_of(&self, f: &str, w: &mut Written) -> Result<String, String> {
-        if self.callee_of(f)?.is_none() {
+        let callee = self.callee_of(f)?;
+        if callee.proto.is_none() {
             // A kernel's address is for the GPU to launch it, as CUDA's dynamic parallelism
             // does from Kepler's sm_35 on.
             w.needs = w.needs.and(Needs { ptx: 31, sm: 35, ..Needs::default() });
             w.named.push(f.to_string());
         }
-        w.funcs.push(f.to_string());
-        Ok(f.to_string())
+        w.funcs.push(callee.symbol.clone());
+        Ok(callee.symbol.clone())
     }
 
-    /// The prototype of `f`, a function the kernel may name, or `None` for a kernel; or why
-    /// it may name none such.
-    fn callee_of(&self, f: &str) -> Result<Option<&Prototype>, String> {
-        match self.callees.iter().find(|(n, _)| n == f) {
-            Some((_, proto)) => Ok(proto.as_ref()),
+    /// The function or the kernel `f`, which the kernel may name; or why it may name none
+    /// such.
+    fn callee_of(&self, f: &str) -> Result<&Callee, String> {
+        match self.callees.iter().find(|c| c.name == f) {
+            Some(callee) => Ok(callee),
             None => Err(format!("`{f}` is no function of PTX's: a kernel calls those `extern \"ptx-func\"`")),
         }
     }
 
-    /// The prototype of `f`, a function the kernel calls by its operand `at`; or why it calls
-    /// no such function.
-    fn called(&self, f: &str, at: usize) -> Result<&Prototype, Fault> {
-        match self.callee_of(f).map_err(|m| Fault::at(at, m))? {
-            Some(proto) => Ok(proto),
+    /// The prototype of `f`, a function the kernel calls by its operand `at`, and its symbol;
+    /// or why it calls no such function.
+    fn called(&self, f: &str, at: usize) -> Result<(&Prototype, &str), Fault> {
+        let callee = self.callee_of(f).map_err(|m| Fault::at(at, m))?;
+        match &callee.proto {
+            Some(proto) => Ok((proto, &callee.symbol)),
             None => Err(Fault::at(at, format!("`{f}` is a kernel, which the host launches; `call` calls a function"))),
         }
     }
@@ -936,14 +958,15 @@ impl Kernel {
         let mut line = String::new();
         let (target, texts, flow) = match (&rest[callee], &targets) {
             (Given::Func(f), None) => {
-                let proto = self.called(f, callee)?;
+                let (proto, symbol) = self.called(f, callee)?;
                 let texts = self.passing(f, proto, &passed, result.map(|r| &rest[r]), &mut reads, at_args)?;
                 let flow = match (proto.returns, guard) {
                     (Returns::Never, None) => Flow::Return,
                     _ => Flow::Next,
                 };
-                self.named_fn(f);
-                (f.clone(), texts, flow)
+                let symbol = symbol.to_string();
+                self.named_fn(&symbol);
+                (symbol, texts, flow)
             }
             (Given::Func(f), Some(_)) => {
                 return Err(Fault::at(
@@ -981,8 +1004,10 @@ impl Kernel {
                     Some(targets) => {
                         let mut texts: Option<Vec<String>> = None;
                         let mut never = true;
+                        let mut symbols = vec![];
                         for t in targets {
-                            let proto = self.called(t, args.len() - 1)?;
+                            let (proto, symbol) = self.called(t, args.len() - 1)?;
+                            symbols.push(symbol.to_string());
                             never &= proto.returns == Returns::Never;
                             let mut some = vec![];
                             let these =
@@ -1005,10 +1030,10 @@ impl Kernel {
                                 }
                             }
                         }
-                        for t in targets {
-                            self.named_fn(t);
+                        for symbol in &symbols {
+                            self.named_fn(symbol);
                         }
-                        line += &format!("$C{}: .calltargets {};\n\t", self.tables, targets.join(", "));
+                        line += &format!("$C{}: .calltargets {};\n\t", self.tables, symbols.join(", "));
                         let flow = if never && guard.is_none() { Flow::Return } else { Flow::Next };
                         let mut texts = texts.expect("a call has a target");
                         texts.push(format!("$C{}", self.tables));
@@ -1046,7 +1071,7 @@ impl Kernel {
         Ok(())
     }
 
-    /// Notes that the kernel names the function `f`.
+    /// Notes that the kernel names the function of the symbol `f`.
     fn named_fn(&mut self, f: &str) {
         if !self.calls.iter().any(|c| c == f) {
             self.calls.push(f.to_string());
@@ -1196,7 +1221,7 @@ impl Kernel {
     /// `ret(v)`, of a function that returns a value of type `t`: `v`, which it stores where the
     /// caller finds it, and then returns.
     fn give_back(&mut self, name: &str, t: Ty, args: &[Given<Var>], guard: Option<(VReg, bool)>) -> Result<(), Fault> {
-        let f = self.p.name.clone();
+        let (f, symbol) = (self.name.clone(), self.p.name.clone());
         let [a] = args else {
             return Err(Fault::new(format!("`{f}` returns a `{}`, which `{name}(v)` gives back", t.name())));
         };
@@ -1204,7 +1229,7 @@ impl Kernel {
         let text =
             self.pass(t, &format!("`{f}` returns a `{}`", t.name()), a, &mut reads).map_err(|m| Fault::at(0, m))?;
         let on = self.guarded(guard);
-        let line = format!("{on}st.param.{} [{f}_retval], {text};\n\t{on}{name};", formal(t).name());
+        let line = format!("{on}st.param.{} [{symbol}_retval], {text};\n\t{on}{name};", formal(t).name());
         let flow = if guard.is_none() { Flow::Return } else { Flow::Next };
         self.push(line, reads, guard, flow);
         Ok(())
@@ -1603,7 +1628,7 @@ impl Target for Kernel {
         match (op, self.func) {
             ("ret", Some(Returns::Value(t))) => return self.give_back(name, t, args, guard),
             ("ret", Some(Returns::Never)) => {
-                let f = &self.p.name;
+                let f = &self.name;
                 return Err(Fault::new(format!(
                     "`{f}` never returns, `-> !`: it ends each way out in `exit()`, `trap()` or a call of a \
                      function that never returns"
@@ -1678,7 +1703,7 @@ impl Target for Kernel {
             _ => true,
         };
         if open {
-            let f = &self.p.name;
+            let f = &self.name;
             match self.func {
                 Some(Returns::Value(t)) => {
                     return Err(format!(

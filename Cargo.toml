@@ -2,6 +2,11 @@
 resolver = "3"
 members = ["crates/*", "examples/*"]
 
+# The first namespace of the GPU kernels' names in PTX, which is the directory's name
+# otherwise: a clone keeps them, wherever it is.
+[workspace.metadata.kgen]
+name = "kgen"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"

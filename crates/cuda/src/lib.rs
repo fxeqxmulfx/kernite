@@ -27,6 +27,8 @@ use std::ptr;
 use std::rc::Rc;
 
 mod half;
+#[doc(hidden)]
+pub mod named;
 
 pub use half::{bf16, f16};
 

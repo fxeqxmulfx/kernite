@@ -67,8 +67,10 @@ mod value;
 
 use std::fmt;
 
-pub use ast::{BinOp, Block, Const, Expr, Fn, Generic, Item, ItemKind, Module, Param, Ret, Stmt, Type, UnOp};
-pub use eval::{Fault, Guard, Mem, Operand, Run, Target, kernel};
+pub use ast::{
+    BinOp, Block, Const, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret, Stmt, Type, UnOp,
+};
+pub use eval::{Fault, Guard, Mem, Operand, Run, Target, instance, instances, kernel};
 pub use parse::module;
 pub use token::{Delim, Span, Tree, lex, text};
 pub use value::{IntTy, Value};

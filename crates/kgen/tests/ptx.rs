@@ -9,7 +9,7 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use kgen::lang::{Mem as Address, Operand as Given, Target};
+use kgen::lang::{IntTy, Mem as Address, Operand as Given, Target, Value};
 use kgen_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Sel, Space, Spec};
 use kgen_ptx::lang::{Kernel, Var};
 use kgen_ptx::{Entry, Kind, Needs, Prototype, Returns, Ty};
@@ -140,6 +140,7 @@ fn ptxas_takes_what_kgen_writes() {
         ("textures", TEXTURES),
         ("surfaces", SURFACES),
         ("calls", CALLS),
+        ("instances", INSTANCES),
     ] {
         let (src, out) = (dir.join(format!("{name}.ptx")), dir.join(format!("{name}.cubin")));
         std::fs::write(&src, kgen::ptx_str(kernels).unwrap()).unwrap();
@@ -923,7 +924,7 @@ fn a_kernel_names_the_constants_it_reads() {
         }
     "#;
     let module = kgen::lang::parse(src).unwrap();
-    let k = kgen::ptx(&module, kgen::function(&module, "k").unwrap()).unwrap();
+    let k = kgen::ptx(&module, kgen::function(&module, "k").unwrap(), &[], "").unwrap();
     assert_eq!(k.consts, ["ONE"]);
 }
 
@@ -1094,6 +1095,133 @@ fn a_function_comes_out_as_ptx_writes_it() {
     ] {
         assert!(ptx.contains(text), "{text}\nin\n{ptx}");
     }
+}
+
+/// A kernel and a function each compiled for every instance their `#[instances(..)]` lists,
+/// and a kernel, before the function, that names some.
+const INSTANCES: &str = r#"
+    const WIDE: u32 = 8;
+
+    /// `x[0] <<= S`.
+    #[instances(1, WIDE)]
+    pub unsafe extern "ptx-kernel" fn shift<const S: u32>(x: *mut u32) {
+        let a: u32;
+        ld.global.u32(a, [x]);
+        shl.b32(a, a, S);
+        st.global.u32([x], a);
+    }
+
+    /// `x[0] = affine::<-2, false>(affine::<3, true>(x[0]))`, and the address of `shift::<8>`
+    /// for the GPU to launch it.
+    pub unsafe extern "ptx-kernel" fn uses(x: *mut i32) {
+        let (a, b): (s32, s32);
+        ld.global.s32(a, [x]);
+        call(b, affine::<3, true>, a);
+        call(b, affine::<{ 1 - 3 }, false>, b);
+        st.global.s32([x], b);
+        let k: u64;
+        mov.u64(k, shift::<WIDE>);
+    }
+
+    /// `a * M`, and 1 more if `MORE`.
+    #[instances((3, true), (-2, false))]
+    extern "ptx-func" fn affine<const M: i32, const MORE: bool>(a: s32) -> s32 {
+        let r: s32;
+        mul.lo.s32(r, a, M);
+        if MORE {
+            add.s32(r, r, 1);
+        }
+        ret(r);
+    }
+"#;
+
+#[test]
+fn each_instance_is_a_kernel_of_its_own_named_as_cpp_names_it() {
+    let ptx = kgen::ptx_str(INSTANCES).unwrap();
+    for text in [
+        ".visible .entry _Z5shiftILj1EE(\n\t.param .u64 _Z5shiftILj1EE_param_0\n)\n",
+        "\tld.param.u64 %x, [_Z5shiftILj1EE_param_0];\n",
+        "\tshl.b32 %a, %a, 1;\n",
+        ".visible .entry _Z5shiftILj8EE(",
+        "\tshl.b32 %a, %a, 8;\n",
+        // Declared before `uses`, which names them first.
+        "\n.func (.param .s32 _Z6affineILi3ELb1EE_retval) _Z6affineILi3ELb1EE(\n\t.param .s32 \
+         _Z6affineILi3ELb1EE_param_0\n);\n\n.func (.param .s32 _Z6affineILin2ELb0EE_retval) \
+         _Z6affineILin2ELb0EE(\n\t.param .s32 _Z6affineILin2ELb0EE_param_0\n);\n\n.visible .entry uses(",
+        "\tcall (%b), _Z6affineILi3ELb1EE, (%a);\n\tcall (%b), _Z6affineILin2ELb0EE, (%b);\n",
+        "\tmov.u64 %k, _Z5shiftILj8EE;\n",
+        "\tmul.lo.s32 %r, %a, 3;\n\tadd.s32 %r, %r, 1;\n\tst.param.s32 [_Z6affineILi3ELb1EE_retval], %r;\n",
+        "\tmul.lo.s32 %r, %a, -2;\n\tst.param.s32 [_Z6affineILin2ELb0EE_retval], %r;\n",
+    ] {
+        assert!(ptx.contains(text), "{text}\nin\n{ptx}");
+    }
+    // In a scope, as `#[kernels]` names them, each name is in it.
+    let module = kgen::lang::parse(INSTANCES).unwrap();
+    let scope = kgen::ptx_scope(&["kgen", "app", "gpu"]);
+    let uses = kgen::ptx(&module, kgen::function(&module, "uses").unwrap(), &[], &scope).unwrap().code;
+    assert_eq!(uses.program.name, "_ZN4kgen3app3gpu4usesE");
+    assert_eq!(
+        uses.calls,
+        ["_ZN4kgen3app3gpu6affineILi3ELb1EEE", "_ZN4kgen3app3gpu6affineILin2ELb0EEE", "_ZN4kgen3app3gpu5shiftILj8EEE"]
+    );
+    assert!(uses.text().contains("\tmov.u64 %k, _ZN4kgen3app3gpu5shiftILj8EEE;\n"));
+}
+
+/// NVIDIA's demangler, beside `ptxas`, which Nsight and `cuda-gdb` demangle as.
+fn cu_filt() -> Option<PathBuf> {
+    let filt = ptxas()?.with_file_name("cu++filt");
+    Command::new(&filt).arg("_Z1fv").output().is_ok_and(|o| o.status.success()).then_some(filt)
+}
+
+#[test]
+fn the_tools_that_read_ptx_show_each_name_as_rust_has_it() {
+    let Some(filt) = cu_filt() else {
+        eprintln!("no cu++filt beside ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    let module = kgen::lang::parse(INSTANCES).unwrap();
+    // A name that is no name in C++ is made one.
+    let scope = kgen::ptx_scope(&["my-workspace", "my_app", "gpu"]);
+    let mut symbols = vec![];
+    for name in ["shift", "uses", "affine"] {
+        let f = kgen::function(&module, name).unwrap();
+        for args in kgen::lang::instances(&module, f).unwrap() {
+            symbols.push(kgen::ptx(&module, f, &args, &scope).unwrap().code.program.name);
+        }
+    }
+    let mut want = vec![
+        "my_workspace::my_app::gpu::shift<(unsigned int)1>".to_string(),
+        "my_workspace::my_app::gpu::shift<(unsigned int)8>".into(),
+        "my_workspace::my_app::gpu::uses".into(),
+        "my_workspace::my_app::gpu::affine<(int)3, (bool)1>".into(),
+        "my_workspace::my_app::gpu::affine<(int)-2, (bool)0>".into(),
+    ];
+    // Each type of integer, as C++ has the one of its size, and at its edges.
+    for (ty, cpp) in [
+        (IntTy::I8, "signed char"),
+        (IntTy::I16, "short"),
+        (IntTy::I32, "int"),
+        (IntTy::I64, "long"),
+        (IntTy::Isize, "long"),
+        (IntTy::U8, "unsigned char"),
+        (IntTy::U16, "unsigned short"),
+        (IntTy::U32, "unsigned int"),
+        (IntTy::U64, "unsigned long"),
+        (IntTy::Usize, "unsigned long"),
+    ] {
+        let x = match ty {
+            IntTy::I8 | IntTy::I16 | IntTy::I32 => -5,
+            IntTy::I64 | IntTy::Isize => i128::from(i64::MIN),
+            _ => i128::from(u64::MAX),
+        };
+        symbols.push(kgen_ptx::symbol(&kgen::ptx_scope(&["2d"]), "tile", &[Value::Int(x, Some(ty))]));
+        want.push(format!("_2d::tile<({cpp}){x}>"));
+    }
+    symbols.push(kgen_ptx::symbol("", "tile", &[Value::Int(4, None), Value::Bool(true)]));
+    want.push("tile<(int)4, (bool)1>".into());
+    let shown = Command::new(&filt).args(&symbols).output().unwrap();
+    let shown = String::from_utf8(shown.stdout).unwrap();
+    assert_eq!(shown.lines().collect::<Vec<_>>(), want, "{symbols:?}");
 }
 
 #[test]
@@ -1453,8 +1581,8 @@ impl Making {
 /// Kernel `k{n}`, of the one instruction `name`, of form `b`, its operands as `style` gives
 /// them; `None` if they would be those of [`Style::Vars`], or kgen's refusal.
 fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entry, String>> {
-    let mut m = Making { kernel: Kernel::new(format!("k{n}")), vars: 0, differs: false, sunk: false };
-    m.kernel.callee("f", Some(Prototype { params: vec![], returns: Returns::Nothing }));
+    let mut m = Making { kernel: Kernel::new(format!("k{n}"), format!("k{n}")), vars: 0, differs: false, sunk: false };
+    m.kernel.callee("f", "f", Some(Prototype { params: vec![], returns: Returns::Nothing }));
     let addr = m.kernel.var("a", "u64").unwrap();
     let narrow = (style == Style::Narrow).then(|| m.kernel.var("n", "u32").unwrap());
     let mut spaces = b.spaces().into_iter();
@@ -1608,7 +1736,7 @@ fn others(n: &mut usize) -> Vec<Entry> {
     let mut out = vec![];
     let mut one = |name: &str, t: Ty, a: Given<Var>| {
         *n += 1;
-        let mut kernel = Kernel::new(format!("k{n}"));
+        let mut kernel = Kernel::new(format!("k{n}"), format!("k{n}"));
         let v = kernel.var("v", t.name()).unwrap();
         kernel.inst(name, &[Given::Var(v), a], None).unwrap_or_else(|f| panic!("kgen refuses `{name}`: {}", f.message));
         kernel.end().unwrap();
@@ -1630,8 +1758,8 @@ fn others(n: &mut usize) -> Vec<Entry> {
     for t in [Ty::U32, Ty::U64, Ty::B32, Ty::B64] {
         *n += 1;
         let name = format!("k{n}");
-        let mut kernel = Kernel::new(&name);
-        kernel.callee(&name, None);
+        let mut kernel = Kernel::new(&name, &name);
+        kernel.callee(&name, &name, None);
         let v = kernel.var("v", t.name()).unwrap();
         kernel.inst(&format!("mov.{}", t.name()), &[Given::Var(v), Given::Func(name.clone())], None).unwrap();
         kernel.end().unwrap();
@@ -1643,7 +1771,7 @@ fn others(n: &mut usize) -> Vec<Entry> {
 /// The function an instance that takes a function's address takes it of, in each module of
 /// one that does.
 fn callee() -> Entry {
-    let mut f = Kernel::func("f");
+    let mut f = Kernel::func("f", "f");
     f.end().unwrap();
     f.finish()
 }
@@ -2050,7 +2178,7 @@ fn memory_is_declared_where_ptx_has_it() {
 .target sm_20
 .address_size 64
 
-.extern .shared .align 4 .b8 reverse$buf[];
+.extern .shared .align 4 .b8 _ZZ7reverseE3buf[];
 
 ";
     assert_eq!(head, want);
@@ -2063,7 +2191,7 @@ fn memory_is_declared_where_ptx_has_it() {
     ] {
         assert!(block_sum.contains(line), "{line}");
     }
-    assert!(entries.contains("\tmov.u32 %s, reverse$buf;\n"));
+    assert!(entries.contains("\tmov.u32 %s, _ZZ7reverseE3buf;\n"));
 }
 
 #[test]

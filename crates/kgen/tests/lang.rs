@@ -366,6 +366,99 @@ fn errors_point_where_the_trouble_is() {
 }
 
 #[test]
+fn a_kernel_with_compile_time_arguments_is_compiled_for_each_instance_it_lists() {
+    // Each case comes before these, so its lines are its own.
+    let after = r#"
+const WIDE: u32 = 8;
+#[instances(1, WIDE)]
+unsafe extern "ptx-kernel" fn shift<const S: u32>(x: *mut u32) {}
+unsafe extern "ptx-kernel" fn plain() {}
+fn h<const N: u32>() {}
+"#;
+    let k = "unsafe extern \"ptx-kernel\" fn k";
+    let cases: &[(&str, &str)] = &[
+        (
+            "unsafe extern \"ptx-kernel\" fn k<const N: u32>() {}",
+            "1:39: `k` takes compile-time arguments, so it is compiled for each instance its `#[instances(..)]` lists, \
+             as in `#[instances(4, 8)]`",
+        ),
+        (
+            "#[instances(1)]\nK() {}",
+            "1:3: `k` takes no compile-time arguments, so it is compiled once, with no `#[instances(..)]`",
+        ),
+        (
+            "#[instances(1)]\nfn g<const N: u32>() {}",
+            "1:3: a helper is compiled where it is called, for what `::<..>` gives it there: `#[instances(..)]` lists \
+             what a function that names an ABI is compiled for",
+        ),
+        (
+            "#[instances(1, (2, 3))]\nK<const A: u32, const B: u32>() {}",
+            "1:13: an instance of `k` gives its 2 compile-time arguments in parentheses, as `(A, B)`",
+        ),
+        (
+            "#[instances((1, 2, 3))]\nK<const A: u32, const B: u32>() {}",
+            "1:13: an instance of `k` gives its 2 compile-time arguments in parentheses, as `(A, B)`",
+        ),
+        ("#[instances(4, 2 + 2)]\nK<const N: u32>() {}", "1:18: `k::<4>` is listed twice"),
+        ("#[instances()]\nK<const N: u32>() {}", "1:3: `#[instances(..)]` lists each instance, and this lists none"),
+        (
+            "#[instances(1.0)]\nK<const X: f32>() {}",
+            "2:39: a function that names an ABI takes integers and `bool`s at compile time, as Rust's const generics \
+             are; `f32` is neither",
+        ),
+        ("#[instances(256)]\nK<const N: u8>() {}", "1:13: 256 is out of range for u8"),
+        ("#[instances(1)]\nK<const N: bool>() {}", "1:13: this is an integer, not bool"),
+        ("#[instances(MISSING)]\nK<const N: u32>() {}", "1:13: `MISSING` is not defined"),
+        (
+            "#[instances(1)]\nconst C: u32 = 1;",
+            "1:3: `#[instances(..)]` goes on a function that names an ABI, which it lists the instances of",
+        ),
+        (
+            "#[instances]\nK<const N: u32>() {}",
+            "1:3: `#[instances(..)]` lists what a function is compiled for, as in `#[instances(4, 8)]`",
+        ),
+        (
+            "#[instances(1)]\n#[instances(2)]\nK<const N: u32>() {}",
+            "2:3: a function has one `#[instances(..)]`, which lists each instance it is compiled for",
+        ),
+        // An instruction names an instance that is listed, by its values, however written.
+        (
+            "K() { let a: u64; mov.u64(a, shift::<3>); }",
+            "1:60: `shift::<3>` is not compiled: `shift`'s `#[instances(..)]` lists `shift::<1>`, `shift::<8>`",
+        ),
+        (
+            "K() { let a: u64; mov.u64(a, shift); }",
+            "1:60: `shift` is compiled for each of its instances: an instruction names one, `shift::<..>`",
+        ),
+        (
+            "K() { let a: u64; mov.u64(a, plain::<1>); }",
+            "1:60: `plain` takes no compile-time arguments: an instruction names it, `plain`",
+        ),
+        (
+            "K() { let a: u64; mov.u64(a, h::<1>); }",
+            "1:60: `h` is a helper, inlined where it is called: an instruction names a function that names an ABI",
+        ),
+        ("K() { let a: u64; mov.u64(a, shift::<1, 2>); }", "1:60: `shift` takes 1 values in `::<..>`; this gives 2"),
+        (
+            "K() { let n = shift::<1>; }",
+            "1:45: an instance of a function is for an instruction to name, as `call` does, not a value",
+        ),
+        // What goes wrong in one instance alone says which.
+        (
+            "#[instances(1, 16)]\nK<const B: u32>() { bar.sync(B); }",
+            "2:60: in `k::<16>`: `bar.sync` takes 0 to 15 here; 16 is not one of them",
+        ),
+    ];
+    for (case, want) in cases {
+        let src = case.replacen('K', k, 1) + after;
+        assert_eq!(kgen::ptx_str(&src).unwrap_err(), *want, "{case}");
+    }
+    let named = "K() { let a: u64; mov.u64(a, shift::<{ WIDE / 8 }>); mov.u64(a, shift::<8u32>); }";
+    let ptx = kgen::ptx_str(&(named.replacen('K', k, 1) + after)).unwrap();
+    assert!(ptx.contains("\tmov.u64 %a, _Z5shiftILj1EE;\n\tmov.u64 %a, _Z5shiftILj8EE;\n"), "{ptx}");
+}
+
+#[test]
 fn a_helper_sees_none_of_its_callers_names() {
     let src = r#"
         pub unsafe extern "sysv64" fn k() {

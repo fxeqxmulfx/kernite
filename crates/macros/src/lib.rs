@@ -60,10 +60,12 @@
 
 extern crate proc_macro;
 
+use std::path::{Path, PathBuf};
+
 use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 
 use kgen::Abi;
-use kgen::lang::{self, Delim, Fn, ItemKind, Tree};
+use kgen::lang::{self, Delim, Fn, ItemKind, Tree, Value};
 
 /// See the crate documentation.
 #[proc_macro_attribute]
@@ -89,6 +91,15 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Where the module's path goes in its PTX and in its kernels' names. A macro is not told
+/// the module it is in, so `kgen_cuda::__named!` writes `module_path!()` there once Rust
+/// knows it, as C++ mangles a namespace's names.
+const HOLE: &str = "\0";
+
+/// What a kernel's instance is: its compile-time arguments, none for a kernel that takes
+/// none, and its index among the module's kernels.
+type Launched = (Vec<Value>, usize);
+
 /// What the module's braces hold once its kernels are compiled.
 fn expand(body: TokenStream) -> TokenStream {
     let top = flatten(body);
@@ -99,11 +110,15 @@ fn expand(body: TokenStream) -> TokenStream {
         Ok(module) => module,
         Err(e) => return error(at(e.span), &e.message),
     };
+    // The GPU kernels' namespaces: the workspace's, then the module's path.
+    let (workspace, manifest) = workspace();
+    let names: Vec<&str> = [workspace.as_str()].into_iter().filter(|n| !n.is_empty()).collect();
+    let scope = kgen::ptx_scope(&names) + HOLE;
     let mut out = TokenStream::new();
     let (mut listings, mut entries, mut launchers, mut read) = (vec![], vec![], vec![], vec![]);
-    // The first function for a GPU, where an error of the module as a whole goes; and how many
-    // kernels it launches.
-    let (mut first, mut launched) = (None, 0);
+    // The first function for a GPU, where an error of the module as a whole goes; and the
+    // symbol of each kernel it launches, by index.
+    let (mut first, mut symbols) = (None, vec![]);
     for item in &module.items {
         let f = match &item.kind {
             ItemKind::Const(_) | ItemKind::Other => {
@@ -112,10 +127,11 @@ fn expand(body: TokenStream) -> TokenStream {
             }
             ItemKind::Fn(f) => f,
         };
+        let instances = lang::instances(&module, f);
         let Some((name, abi_span)) = &f.abi else {
             // A helper is checked where it is called; one that does not parse is an error
-            // whether it is called or not.
-            if let Err(e) = &f.body {
+            // whether it is called or not, as one that lists instances is.
+            for e in [f.body.as_ref().err(), instances.as_ref().err()].into_iter().flatten() {
                 out.extend(error(at(e.span), &e.message));
             }
             continue;
@@ -138,52 +154,76 @@ fn expand(body: TokenStream) -> TokenStream {
         if abi != Abi::Sysv64 {
             first.get_or_insert(f.span);
         }
-        match abi {
-            Abi::Sysv64 => match kgen::x86(&module, f) {
-                Ok(kernel) => {
-                    if trusted {
-                        out.extend(naked(f, &kernel.code, &top));
-                        listings.push((f.name.clone(), kernel.code.text()));
-                    } else {
-                        out.extend(stub(f, &top));
-                    }
-                    read.extend(kernel.consts);
+        let instances = match instances {
+            Ok(instances) => instances,
+            Err(e) => {
+                out.extend(error(at(e.span), &e.message));
+                match abi {
+                    Abi::Sysv64 => out.extend(stub(f, &top)),
+                    Abi::PtxKernel => launchers.push((f, None)),
+                    Abi::PtxFunc => {}
                 }
-                Err(e) => {
-                    out.extend(error(at(e.span), &e.message));
+                continue;
+            }
+        };
+        // Each instance compiled, or the errors of those that do not compile.
+        let mut errors = vec![];
+        match abi {
+            Abi::Sysv64 => {
+                let mut compiled = vec![];
+                for args in instances {
+                    match kgen::x86(&module, f, &args) {
+                        Ok(kernel) => {
+                            read.extend(kernel.consts);
+                            compiled.push((args, kernel.code));
+                        }
+                        Err(e) => errors.push(e),
+                    }
+                }
+                if trusted && errors.is_empty() {
+                    out.extend(naked(f, &compiled, &top));
+                    for (args, listing) in &compiled {
+                        listings.push((lang::instance(f, args).unwrap_or_default(), listing.text()));
+                    }
+                } else {
                     out.extend(stub(f, &top));
                 }
-            },
-            Abi::PtxKernel => match kgen::ptx(&module, f) {
-                Ok(kernel) => {
-                    if trusted {
-                        launchers.push((f, Some(launched)));
-                        launched += 1;
-                        entries.push(kernel.code);
-                    } else {
-                        launchers.push((f, None));
+            }
+            Abi::PtxKernel | Abi::PtxFunc => {
+                let mut compiled = vec![];
+                for args in instances {
+                    match kgen::ptx(&module, f, &args, &scope) {
+                        Ok(kernel) => {
+                            read.extend(kernel.consts);
+                            compiled.push((args, kernel.code));
+                        }
+                        Err(e) => errors.push(e),
                     }
-                    read.extend(kernel.consts);
                 }
-                Err(e) => {
-                    out.extend(error(at(e.span), &e.message));
-                    launchers.push((f, None));
+                let ok = trusted && errors.is_empty();
+                let mut launched = vec![];
+                for (args, entry) in compiled {
+                    if ok && abi == Abi::PtxKernel {
+                        launched.push((args, symbols.len()));
+                        symbols.push(entry.program.name.clone());
+                    }
+                    entries.push(entry);
                 }
-            },
-            Abi::PtxFunc => match kgen::ptx(&module, f) {
-                Ok(func) => {
-                    entries.push(func.code);
-                    read.extend(func.consts);
+                if abi == Abi::PtxKernel {
+                    launchers.push((f, ok.then_some(launched)));
                 }
-                Err(e) => out.extend(error(at(e.span), &e.message)),
-            },
+            }
+        }
+        for e in errors {
+            out.extend(error(at(e.span), &e.message));
         }
     }
     out.extend(used(&module, &read));
     if !listings.is_empty() {
         let mut s = String::from(
-            "/// Each x86 kernel's listing, by name: where its variables live, and its code with\n\
-             /// its notes, for snapshots.\n#[allow(dead_code)]\npub const LISTINGS: &[(&str, &str)] = &[",
+            "/// Each x86 kernel's listing, by name, an instance's as `tile::<4>`: where its variables\n\
+             /// live, and its code with its notes, for snapshots.\n#[allow(dead_code)]\n\
+             pub const LISTINGS: &[(&str, &str)] = &[",
         );
         for (name, text) in &listings {
             s += &format!("({name:?}, {text:?}), ");
@@ -195,9 +235,57 @@ fn expand(body: TokenStream) -> TokenStream {
             out.extend(error(at(span), &e));
             String::new()
         });
-        out.extend(gpu(&launchers, &ptx, &top));
+        out.extend(gpu(&launchers, &symbols, &ptx, &top));
+        // The workspace's name is in the PTX, so it is built again when it changes.
+        if let Some(manifest) = manifest.as_deref().and_then(Path::to_str) {
+            out.extend(parse(&format!("const _: &[u8] = ::core::include_bytes!({manifest:?});")));
+        }
     }
     out
+}
+
+/// The workspace the crate is built in, by name, the first namespace its GPU kernels are in:
+/// as its manifest has it, `name` in `[workspace.metadata.kgen]`, or the name of the directory
+/// the manifest is in, with that manifest. A package of no workspace is one of its own, named
+/// as the package is.
+fn workspace() -> (String, Option<PathBuf>) {
+    let package = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
+    let Some(dir) = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from) else {
+        return (package, None);
+    };
+    for dir in dir.ancestors() {
+        let manifest = dir.join("Cargo.toml");
+        let Ok(text) = std::fs::read_to_string(&manifest) else { continue };
+        if !text.lines().filter_map(table).any(|t| t == "workspace" || t.starts_with("workspace.")) {
+            continue;
+        }
+        let named = metadata_name(&text).or_else(|| dir.file_name()?.to_str().map(String::from));
+        return (named.unwrap_or(package), Some(manifest));
+    }
+    (package, None)
+}
+
+/// The table a line of a manifest opens, `[name]`, if it opens one.
+fn table(line: &str) -> Option<&str> {
+    line.trim().strip_prefix('[')?.split(']').next().map(str::trim)
+}
+
+/// `name = ".."` in `[workspace.metadata.kgen]` of `manifest`, if it is there.
+fn metadata_name(manifest: &str) -> Option<String> {
+    let mut inside = false;
+    for line in manifest.lines() {
+        if let Some(t) = table(line) {
+            inside = t == "workspace.metadata.kgen";
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=').filter(|_| inside) else { continue };
+        if key.trim() == "name" {
+            let value = value.trim();
+            let quote = value.chars().next().filter(|&c| c == '"' || c == '\'')?;
+            return value[1..].split(quote).next().map(String::from);
+        }
+    }
+    None
 }
 
 /// A `const _` that names each constant of `module` in `read`. The kernels read them, but Rust
@@ -218,39 +306,51 @@ fn used(module: &lang::Module, read: &[String]) -> TokenStream {
 }
 
 /// `PTX`, the module the GPU kernels are, and `Kernels`, which loads it on a GPU and has a
-/// method to launch each kernel by its name: one that never runs for a kernel that did not
-/// compile, kernel `None`.
-fn gpu(launchers: &[(&Fn, Option<usize>)], ptx: &str, top: &[TokenTree]) -> TokenStream {
-    let names: Vec<String> =
-        launchers.iter().filter(|(_, index)| index.is_some()).map(|(f, _)| format!("{:?}", f.name)).collect();
+/// method to launch each kernel by its name: of each instance, for a kernel of compile-time
+/// arguments; one that never runs for a kernel that did not compile, launched `None`. Each of
+/// `symbols` is a kernel's name in `ptx`, by its index.
+fn gpu(launchers: &[(&Fn, Option<Vec<Launched>>)], symbols: &[String], ptx: &str, top: &[TokenTree]) -> TokenStream {
+    let names: Vec<String> = symbols.iter().map(|s| named(s)).collect();
     let mut out = parse(&format!(
         "/// The module's GPU kernels, in PTX, for the CUDA driver to compile for the GPU it finds.\n\
+         /// Each is named as C++ names it in the namespaces of the workspace, the crate and the\n\
+         /// module, with its compile-time arguments, for the tools that read PTX to show:\n\
+         /// `kgen::my_app::gpu::tile<(unsigned long)4>`.\n\
          #[allow(dead_code)]\n\
-         pub const PTX: &str = {ptx:?};\n\
+         pub const PTX: &str = {};\n\
          /// The module's GPU kernels, loaded on a GPU: each is launched by the method of its name.\n\
          #[allow(dead_code)]\n\
          pub struct Kernels {{\n    module: ::kgen_cuda::Module,\n}}\n\
          #[allow(dead_code)]\n\
          impl Kernels",
+        named(ptx)
     ));
     let mut methods = parse(&format!(
         "/// The kernels, compiled for `cuda`'s GPU by its driver.\n\
          pub fn load(cuda: &::kgen_cuda::Cuda) -> ::core::result::Result<Kernels, ::kgen_cuda::Error> {{\n\
-             ::core::result::Result::Ok(Kernels {{ module: ::kgen_cuda::Module::load(cuda, PTX, &[{}])? }})\n\
+             const NAMES: &[&str] = &[{}];\n\
+             ::core::result::Result::Ok(Kernels {{ module: ::kgen_cuda::Module::load(cuda, PTX, NAMES)? }})\n\
          }}",
         names.join(", ")
     ));
-    for (f, index) in launchers {
-        methods.extend(launcher(f, *index, top));
+    for (f, launched) in launchers {
+        methods.extend(launcher(f, launched.as_deref(), top));
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, methods))]);
     out
 }
 
-/// The method that launches `f`, kernel `index` of the module, over a grid: its parameters
-/// those of `f`, a pointer as the address on the GPU it is, `::kgen_cuda::Ptr`.
-fn launcher(f: &Fn, index: Option<usize>, top: &[TokenTree]) -> TokenStream {
-    let mut out: TokenStream = top[f.attrs.clone()].iter().cloned().collect();
+/// `text`, with the module's path written where each [`HOLE`] is, as the constant it is.
+fn named(text: &str) -> String {
+    let pieces: Vec<String> = text.split(HOLE).map(|p| format!("{p:?}")).collect();
+    format!("::kgen_cuda::__named!(::core::module_path!(), [{}])", pieces.join(", "))
+}
+
+/// The method that launches `f` over a grid, each of its instances `launched`: its parameters
+/// those of `f`, a pointer as the address on the GPU it is, `::kgen_cuda::Ptr`; and its
+/// compile-time arguments those of `f`, which pick the instance.
+fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStream {
+    let mut out = attrs(f, top);
     if !out.to_string().contains("# Safety") {
         out.extend(parse(
             "#[doc = \"\"]\n#[doc = \" # Safety\"]\n#[doc = \"\"]\n\
@@ -258,12 +358,13 @@ fn launcher(f: &Fn, index: Option<usize>, top: &[TokenTree]) -> TokenStream {
              kernel reads and writes through it.\"]",
         ));
     }
-    out.extend(parse(if index.is_some() {
+    out.extend(parse(if launched.is_some() {
         "#[allow(clippy::too_many_arguments)]"
     } else {
         "#[allow(clippy::too_many_arguments, unused_variables)]"
     }));
-    // Its visibility, `pub` or `pub(..)`, then `unsafe fn` and its name as written.
+    // Its visibility, `pub` or `pub(..)`, then `unsafe fn` and its name and generics as
+    // written.
     let head = &top[f.head.clone()];
     let vis = match head {
         [pub_, TokenTree::Group(g), ..] if is_ident(pub_, "pub") && g.delimiter() == Delimiter::Parenthesis => 2,
@@ -272,7 +373,7 @@ fn launcher(f: &Fn, index: Option<usize>, top: &[TokenTree]) -> TokenStream {
     };
     out.extend(head[..vis].iter().cloned());
     out.extend(parse("unsafe fn"));
-    out.extend([top[f.head.end + 1].clone()]);
+    out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
     let mut params = parse("&self, grid: ::kgen_cuda::Grid, ");
     let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
     let tokens = flatten(group.stream());
@@ -291,10 +392,13 @@ fn launcher(f: &Fn, index: Option<usize>, top: &[TokenTree]) -> TokenStream {
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, params))]);
     out.extend(parse("-> ::core::result::Result<(), ::kgen_cuda::Error>"));
-    let body = match index {
-        Some(i) => {
-            let args: Vec<String> = f.params.iter().map(|p| format!("::kgen_cuda::arg(&{})", p.name)).collect();
-            format!("unsafe {{ self.module.launch({i}, grid, &[{}]) }}", args.join(", "))
+    let args: Vec<String> = f.params.iter().map(|p| format!("::kgen_cuda::arg(&{})", p.name)).collect();
+    let launch = |index: &str| format!("unsafe {{ self.module.launch({index}, grid, &[{}]) }}", args.join(", "));
+    let body = match launched {
+        Some([(args, i)]) if args.is_empty() => launch(&i.to_string()),
+        Some(instances) => {
+            let arms: Vec<(Vec<Value>, String)> = instances.iter().map(|(a, i)| (a.clone(), i.to_string())).collect();
+            format!("let index = {};\n{}", pick(f, &arms), launch("index"))
         }
         None => "::core::unreachable!()".to_string(),
     };
@@ -302,50 +406,117 @@ fn launcher(f: &Fn, index: Option<usize>, top: &[TokenTree]) -> TokenStream {
     out
 }
 
-/// `f` as an `#[unsafe(naked)]` function whose body is `listing`, and the statics its
-/// constants are.
-fn naked(f: &Fn, listing: &kgen::Listing, top: &[TokenTree]) -> TokenStream {
-    let consts = format!("__kgen_{}", f.name);
-    let mut out: TokenStream = top[f.attrs.clone()].iter().cloned().collect();
-    out.extend(parse("#[unsafe(naked)]"));
-    out.extend(signature(f, top));
-    let mut asm = String::from("::core::arch::naked_asm!(");
-    for line in listing.code() {
-        asm += &format!("{line:?}, ");
+/// `const { match .. }` on `f`'s compile-time arguments: what `arms` gives for each instance, by
+/// its arguments. Another is no instance, and Rust refuses to compile the call.
+fn pick(f: &Fn, arms: &[(Vec<Value>, String)]) -> String {
+    let tuple = |xs: Vec<String>| if xs.len() == 1 { xs.join("") } else { format!("({})", xs.join(", ")) };
+    let on = tuple(f.generics.iter().map(|g| g.name.clone()).collect());
+    let mut out = format!("const {{ match {on} {{ ");
+    let mut listed = vec![];
+    for (args, then) in arms {
+        out += &format!("{} => {then}, ", tuple(args.iter().map(Value::to_string).collect()));
+        listed.push(format!("`{}`", lang::instance(f, args).unwrap_or_default()));
     }
-    for i in 0..listing.consts.len() {
-        asm += &format!("c{i} = sym {consts}::C{i}, ");
-    }
-    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&(asm + ")"))))]);
-    if !listing.consts.is_empty() {
-        let mut aligns: Vec<u32> = listing.consts.iter().map(|c| c.align).collect();
-        aligns.sort();
-        aligns.dedup();
-        let mut s = format!("#[doc(hidden)]\n#[allow(dead_code, non_snake_case)]\nmod {consts} {{\n");
-        for a in &aligns {
-            s += &format!("    #[repr(C, align({a}))]\n    pub struct A{a}<T>(pub T);\n");
+    let message = format!("`{}` is compiled for {} alone, as its `#[instances(..)]` lists", f.name, listed.join(", "));
+    out + &format!("_ => ::core::panic!({message:?}) }} }}")
+}
+
+/// `f` as an `#[unsafe(naked)]` function whose body is the listing of its one instance, and
+/// the statics its constants are, in a module beside it. For a function of compile-time
+/// arguments, each instance is such a function in that module, and `f` is one that calls the
+/// instance its arguments pick.
+fn naked(f: &Fn, instances: &[(Vec<Value>, kgen::Listing)], top: &[TokenTree]) -> TokenStream {
+    let module = format!("__kgen_{}", f.name);
+    let mut out = attrs(f, top);
+    let mut items = String::new();
+    let mut statics = vec![];
+    if let [(args, listing)] = instances
+        && args.is_empty()
+    {
+        out.extend(parse("#[unsafe(naked)]"));
+        out.extend(signature(f, top));
+        out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&asm(listing, &format!("{module}::C")))))]);
+        statics.push(("C".to_string(), listing));
+    } else {
+        // The function's type, and the names of its parameters, which it passes on.
+        let params: TokenStream = [top[f.params_at].clone()].into_iter().collect();
+        let ret: TokenStream = f.ret.as_ref().map_or_else(TokenStream::new, |r| {
+            parse("->").into_iter().chain(top[r.tokens.clone()].iter().cloned()).collect()
+        });
+        let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
+        let tokens = flatten(group.stream());
+        let tys: Vec<String> = tokens
+            .split(|t| is_punct(t, ','))
+            .filter(|p| !p.is_empty())
+            .map(|p| p.iter().skip_while(|t| !is_punct(t, ':')).skip(1).cloned().collect::<TokenStream>().to_string())
+            .collect();
+        let ty = format!("unsafe extern \"sysv64\" fn({}) {ret}", tys.join(", "));
+        let names: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+        let mut arms = vec![];
+        for (k, (args, listing)) in instances.iter().enumerate() {
+            items += &format!(
+                "#[unsafe(naked)]\npub unsafe extern \"sysv64\" fn I{k}{params} {ret} {{ {} }}\n",
+                asm(listing, &format!("I{k}C"))
+            );
+            statics.push((format!("I{k}C"), listing));
+            arms.push((args.clone(), format!("{module}::I{k} as {ty}")));
         }
+        out.extend(parse("#[inline(always)]"));
+        out.extend(signature(f, top));
+        let body = format!("unsafe {{ ({})({}) }}", pick(f, &arms), names.join(", "));
+        out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&body)))]);
+    }
+    let mut aligns: Vec<u32> = statics.iter().flat_map(|(_, l)| l.consts.iter().map(|c| c.align)).collect();
+    aligns.sort();
+    aligns.dedup();
+    for a in &aligns {
+        items += &format!("#[repr(C, align({a}))]\npub struct A{a}<T>(pub T);\n");
+    }
+    for (prefix, listing) in &statics {
         for (i, c) in listing.consts.iter().enumerate() {
             let bytes: Vec<String> = c.bytes.iter().map(u8::to_string).collect();
-            s += &format!(
-                "    pub static C{i}: A{a}<[u8; {n}]> = A{a}([{bytes}]);\n",
+            items += &format!(
+                "pub static {prefix}{i}: A{a}<[u8; {n}]> = A{a}([{bytes}]);\n",
                 a = c.align,
                 n = c.bytes.len(),
                 bytes = bytes.join(", ")
             );
         }
-        out.extend(parse(&(s + "}\n")));
+    }
+    if !items.is_empty() {
+        out.extend(parse(&format!(
+            "#[doc(hidden)]\n#[allow(dead_code, non_snake_case)]\nmod {module} {{\n{items}}}\n"
+        )));
     }
     out
 }
 
+/// The body of a naked function whose code is `listing`'s, its constants the statics
+/// `{statics}0`, `{statics}1` and on.
+fn asm(listing: &kgen::Listing, statics: &str) -> String {
+    let mut asm = String::from("::core::arch::naked_asm!(");
+    for line in listing.code() {
+        asm += &format!("{line:?}, ");
+    }
+    for i in 0..listing.consts.len() {
+        asm += &format!("c{i} = sym {statics}{i}, ");
+    }
+    asm + ")"
+}
+
 /// `f` with a body that never runs, for a kernel that does not compile.
 fn stub(f: &Fn, top: &[TokenTree]) -> TokenStream {
-    let mut out: TokenStream = top[f.attrs.clone()].iter().cloned().collect();
+    let mut out = attrs(f, top);
     out.extend(parse("#[allow(unused_variables)]"));
     out.extend(signature(f, top));
     out.extend(parse("{ ::core::unreachable!() }"));
     out
+}
+
+/// `f`'s attributes as written, but `#[instances(..)]`, which Rust does not know.
+fn attrs(f: &Fn, top: &[TokenTree]) -> TokenStream {
+    let kgen = f.instances.as_ref().map_or(0..0, |i| i.tokens.clone());
+    f.attrs.clone().filter(|i| !kgen.contains(i)).map(|i| top[i].clone()).collect()
 }
 
 /// `f`'s signature as written, from its visibility to its result.

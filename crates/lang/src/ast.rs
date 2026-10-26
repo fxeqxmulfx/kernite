@@ -50,6 +50,8 @@ pub struct Const {
 pub struct Fn {
     /// Its outer attributes, doc comments among them, by index into the module's tokens.
     pub attrs: Range<usize>,
+    /// Its `#[instances(..)]`, among them, if it has one.
+    pub instances: Option<Instances>,
     /// What comes before `fn`: visibility, `unsafe`, `extern "abi"`.
     pub head: Range<usize>,
     /// The ABI it names, which makes it a kernel for the machine that ABI belongs to.
@@ -58,7 +60,7 @@ pub struct Fn {
     pub name: String,
     /// Where its name is.
     pub span: Span,
-    /// Its const parameters, a helper's compile-time arguments.
+    /// Its const parameters: its compile-time arguments.
     pub generics: Vec<Generic>,
     /// Its parameters.
     pub params: Vec<Param>,
@@ -70,7 +72,21 @@ pub struct Fn {
     pub body: Result<Block, Error>,
 }
 
-/// `const N: usize` among a helper's generics.
+/// `#[instances(4, 8)]`: the compile-time arguments a function that names an ABI is compiled
+/// for, each instance its own kernel. For more than one generic, each instance gives them in
+/// parentheses, `#[instances((16, 8), (32, 8))]`.
+#[derive(Clone, Debug)]
+pub struct Instances {
+    /// Each instance's arguments, as written.
+    pub values: Vec<Expr>,
+    /// Where `instances` is.
+    pub span: Span,
+    /// The attribute's tokens, by index into the module's tokens: Rust has no such attribute,
+    /// so it is not passed on.
+    pub tokens: Range<usize>,
+}
+
+/// `const N: usize` among a function's generics.
 #[derive(Clone, Debug)]
 pub struct Generic {
     /// Its name.
@@ -246,6 +262,16 @@ pub enum Expr {
     Field(Box<Expr>, String, Span),
     /// `base[index]`.
     Index(Box<Expr>, Box<Expr>, Span),
+    /// `func::<generics>`: the instance of a function that names an ABI, for an instruction
+    /// that names it.
+    Instance {
+        /// The function.
+        func: Box<Expr>,
+        /// Its compile-time arguments.
+        generics: Vec<Expr>,
+        /// Where it is.
+        span: Span,
+    },
     /// `func(args)` or `func::<generics>(args)`.
     Call {
         /// What is called.
@@ -305,6 +331,7 @@ impl Expr {
             | Expr::Path(_, s)
             | Expr::Field(_, _, s)
             | Expr::Index(_, _, s)
+            | Expr::Instance { span: s, .. }
             | Expr::Call { span: s, .. }
             | Expr::Method { span: s, .. }
             | Expr::Unary(_, _, s)

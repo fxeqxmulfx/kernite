@@ -272,7 +272,7 @@ fn a_kernel_names_the_constants_it_reads() {
         }
     "#;
     let module = kgen::lang::parse(src).unwrap();
-    let reads = |name| kgen::x86(&module, kgen::function(&module, name).unwrap()).unwrap().consts;
+    let reads = |name| kgen::x86(&module, kgen::function(&module, name).unwrap(), &[]).unwrap().consts;
     // `STORE` as a helper's value and `ADD` in the `if` that chooses, in the module's order;
     // not `OFFSET`, in the branch not taken, nor `SPARE`, in a helper not called.
     assert_eq!(reads("stores"), ["ADD", "STORE"]);
