@@ -1,8 +1,10 @@
 # Closing the CPU's gaps with the GPU
 
-Notes for the work on the branch `cpu-grid`, which starts at master e9426cf: what reading the code
-found before it started, and the plan, in the agreed order: stack memory, then spilling, then a
-CPU grid. The State section at the end says how far it has come.
+Notes for the work, in the agreed order: what reading the code found before each part started, and
+the plan. Steps 1 to 3, stack memory, spilling and a CPU grid, were done on the branch `cpu-grid`,
+from master e9426cf, and merged into master at 1a154ab. Steps 4 to 6, calls, memory of the
+module's, and consts from outside a module, are on `cpu-calls`, from there. The State section at
+the end says how far it has come.
 
 ## What is there already
 
@@ -122,6 +124,173 @@ the GPU.
   - my-app's `normalize` and `diffuse`, run on the CPU grid and checked bit for bit against the
     GPU's references.
 
+## 4. Calls
+
+PTX's kernels call functions; an x86 kernel calls none.
+
+- What PTX has (`call` in `crates/ptx/src/lang.rs`):
+  - An `extern "ptx-func"` function is a `.func` that the module's kernels and functions call,
+    itself among them.
+  - `call(r, f, (a, b))`, `call(f, a)` and `call(f)` call it by its name. `mov.u64(fp, f)` takes
+    its address; `call(r, fp, (a, b))` calls through it as the operands' types say, and
+    `call(r, fp, (a, b), (f, g))` as one of the functions given, checked against each.
+  - Each call is checked against what the function takes and returns. A call of one that never
+    returns, `-> !`, ends its caller's path.
+- What x86 has:
+  - The language hands the target a function's name as `Given::Func`, which x86's `inst` refuses:
+    "an x86 kernel calls no function".
+  - The allocator gives each variable one register for its whole life, and pins each parameter
+    and result to its register throughout (`Program::params`, `Program::results`). Nothing else
+    names a register: no instruction kgen has for x86 reads or writes one of its own.
+  - The prologue counts on the stack pointer being a multiple of 8 (`ALIGNED` in
+    `crates/x86/src/intel.rs`). A call needs a multiple of 16.
+
+The plan:
+
+- **What a kernel calls.** Any `extern "sysv64"` function of its module that is not
+  `#[cooperative]`, itself among them, and an instance as `f::<4>`. On x86 a function the kernels
+  call is one Rust can call too, so it needs no ABI of its own, as PTX's `.func` does. A
+  cooperative kernel runs on a grid: it is launched, not called.
+- **The language** is PTX's: `call(r, f, (a, b))`, `call(f, (a, b))`, `call(f, a)`, `call(f)`.
+  An argument is a variable of the class SysV passes the parameter in, a `gpr` for an integer or
+  a pointer and an `xmm` for a float, or an integer known now. `r` is a `gpr` or an `xmm`, as the
+  function returns. `lea(fp, [f])` puts `f`'s address in `fp`, for `call(r, fp, (a, b))` and
+  `call(r, fp, (a, b), (f, g))`. A function `-> !` ends each way out in `ud2`, a new
+  instruction, or in a call of one that never returns.
+- **What SysV asks of a call.** The callee keeps to it:
+  - the integers in `rdi`, `rsi`, `rdx`, `rcx`, `r8` and `r9`, the floats in `xmm0` to `xmm7`,
+    and the result back in `rax` or `xmm0`;
+  - the callee may change `rax`, `rcx`, `rdx`, `rsi`, `rdi`, `r8` to `r11` and every vector
+    register, and keeps `rbx`, `rbp` and `r12` to `r15`;
+  - the stack pointer is a multiple of 16 at the `call`.
+- **The registers a call changes.** An instruction says which registers it changes besides its
+  operands. A variable live across it takes none of them. So a `gpr` live across a call is kept
+  in `rbx` or `r12` to `r15`. A vector live across a call spills, since the callee may change
+  any vector register.
+- **Arguments and results in their registers.**
+  - The x86 target moves each argument to a variable of its own, which it pins to the register
+    SysV passes it in. It moves the result from one pinned to `rax` or `xmm0`: `mov rdi, rbx`,
+    `call {f0}`, `mov rbx, rax`.
+  - Each lives from its move to the call, or from the call to its move, so pinning it throughout
+    costs nothing.
+  - A variable moved to or from one prefers its register, so that a move is often to the register
+    the value is in already. Kernels that call nothing are allocated as before.
+  - The listing leaves out a move to the register it is from, where that changes nothing: a
+    64-bit `mov`, and a `vmovaps` or `vmovups` of a `ymm`. A move of a 32-bit register or of an
+    `xmm` clears the rest, so it stays. This drops `diffuse`'s `mov rsi, rsi` too.
+- **A parameter or a result in the way.** One pinned throughout clashes with a call that changes
+  its register while it is live, and with an argument pinned there. Then it splits:
+  - a parameter moves on entry to a variable of its own, of its name, which the allocator places
+    as any other: `x=rdi,rbx` in the header;
+  - a result moves into its register before each return.
+
+  Each splits once at most, as each spills once at most. The move is a new instruction of the
+  `Spill` port: `mov`, or `vmovaps`.
+- **The stack.** SysV calls a function with the stack pointer 8 past a multiple of 16. A kernel
+  that calls pads its frame by 8 where its pushes and its slots would leave it there, so that the
+  stack pointer is a multiple of 16 at each call.
+- **The macro.** A call is `call {f0}`, an operand of `naked_asm!`: `f0 = sym gcd`, or the
+  instance's function in the hidden module, by a path from where the caller is. The listing ends
+  with what each `{f0}` names. A function that does not compile leaves a stub of its name and of
+  each of its instances, so that its callers still compile.
+- **Not in it: dividing.** `div` reads and writes `rdx:rax`, registers of its own, as a call does,
+  and the pinned variables would make it possible later. So the CPU's `gcd` is Stein's, by shifts
+  and subtractions, where the GPU's is Euclid's, by remainders. To decide: `div` now, for Euclid's
+  on both, or later. I'd do it later.
+- **Tests:**
+  - kgen-compile's Toy machine calls too. Its interpreter writes junk to every register a call
+    changes, so a test fails if a value was kept in one across a call. Splits are run on the
+    interpreter as well.
+  - Exact listings in `crates/kgen/tests/x86.rs`:
+    - a call and its moves;
+    - a value kept in `rbx` across one, and a vector spilled across one;
+    - the padding;
+    - a function that calls itself;
+    - a call through a variable;
+    - a function that never returns.
+
+    Each error is checked too, with line:column.
+  - my-app's `gcds` for the CPU calls `gcd` for each pair. It keeps its pointers, its count and
+    its index in the registers a callee keeps. It is checked against the reference the GPU's is
+    held to.
+  - my-app's `sum_halves` is a float sum that adds each half by a call of itself, so that a
+    vector lives across a call. It is checked against a scalar reference bit for bit.
+
+## 5. Memory of the module's
+
+PTX's kernels share memory of their module's; an x86 kernel takes memory by pointer alone.
+
+- What PTX has:
+  - `static COUNTS: global<[u32; 16]>;` and `static WEIGHTS: constant<[f32; 4]> = [..];` beside
+    the kernels.
+  - A kernel names a static as it names memory it declares, `[COUNTS + 8]`. A static keeps what
+    the kernels write from launch to launch, and the kernels only read `constant` memory.
+  - The host reads and writes each through `kernels.COUNTS()`, a `kgen_cuda::Global`.
+- What x86 has:
+  - The language asks the target for a static by `Target::global`, which x86 leaves at its
+    default: "this machine has none" (`crates/lang/src/eval.rs`).
+  - Its `var` refuses `global<..>` and `constant<..>` as a GPU's memory.
+  - The macro compiles every static for PTX, and a static alone gives a module `PTX` and
+    `Kernels` (`expand` in `crates/macros/src/lib.rs`).
+
+The plan:
+
+- **Whose memory.** A module's statics are its kernels': in the GPU's memory when they are PTX
+  kernels, and in the process's when they are x86 ones. A module with kernels of both and a
+  static is an error that says to split it. A module of statics and no kernels is the GPU's, as
+  now. To decide: this, or a type of the CPU's own for its statics. I'd do this, so that
+  `global` and `constant` say the same on both.
+- **The types** are PTX's. The kernels read and write `global<..>`, and only read
+  `constant<..>`, which kgen checks, as it does for PTX. The host writes both.
+- **Reaching it.**
+  - x86 reaches a static at a displacement from `rip`, with no register beside it:
+    `vmovups(w, [WEIGHTS])`, `mov([COUNTS + 8], t)`.
+  - `lea(p, [COUNTS])` puts its address in a register, for an index: `[p + i * 4]`. An index
+    beside the static's name is an error that says so.
+  - kgen checks the displacement against the static's bounds, as it does stack memory's, and the
+    alignment `vmovaps` needs against the static's. It refuses a write to `constant` memory. A
+    write through an address `lea` took is the kernel's to keep from.
+- **The listing** writes the address as `[rip + {COUNTS} + 8]`, an operand of `naked_asm!` that
+  the macro names by `sym`.
+- **The host's side.**
+  - The macro makes each static a Rust `static` of the module's: a `kgen_cpu::Global` of its
+    elements.
+  - Its methods are `kgen_cuda::Global`'s, `kernels::COUNTS.read()`, `.write(&[..])` and
+    `.zero()`, but they return no `Result`, since nothing fails.
+  - kgen-cpu has no `unsafe`, so the elements are atomics of their width. The host loads and
+    stores them, and the kernels reach them as the plain memory they are.
+  - A kernel's safety contract says that nothing else touches the module's memory it uses while
+    it runs.
+- **Tests:**
+  - listings and errors in `crates/kgen/tests/x86.rs`;
+  - my-app's `histogram` and `weigh` for the CPU, against the references the GPU's are held to,
+    the counts kept from call to call.
+
+## 6. Consts from outside a module
+
+microgpt has its sizes in `examples/microgpt/src/model.rs`, and again in each of its kernel
+modules, `cpu.rs` and `gpu.rs`, which assert that the copies agree. `#[kernels]` takes no
+arguments (`crates/macros/src/lib.rs:122`). A macro sees only its own tokens, so it cannot read a
+const of Rust's.
+
+The plan:
+
+- `#[kgen_macros::consts]` on a module of consts gives the module to Rust as it is. It adds a
+  hidden macro that hands the consts' tokens on to the macro it is given.
+- `#[kgen_macros::kernels(consts = crate::model::sizes)]` expands to a call of that macro, which
+  calls the kernels macro back with the consts first.
+  - The kernels read them as the module's own.
+  - Rust's code in the module sees them by a `use` that the macro adds.
+  - A name that both the module and the consts have is an error.
+- Tried on rustc 1.99.1: a `macro_rules!` that a macro makes, re-exported by `pub(crate) use`, can
+  be called by its path from any module of the crate, before it or after. So the consts are the
+  crate's own, not another crate's.
+- A module of consts holds what kgen reads: numbers, floats, bools, arrays of them, and
+  expressions over them. microgpt's `Layer`s stay in `model.rs`, written in terms of them.
+- microgpt then has each size and each of `exp`'s constants once, and its asserts that the copies
+  agree go. That it builds and its tests pass is the test, with a doctest for the error of a name
+  given twice.
+
 ## State
 
 - The branch `cpu-grid` starts at master e9426cf, which is pushed.
@@ -183,4 +352,7 @@ the GPU.
     12 threads of this machine as well.
   - The tests run on four threads at most, since `cargo test` runs tests beside each other and
     a spinning thread takes a core.
-- All three steps are done.
+- Steps 1 to 3 are done, and merged into master at 1a154ab, which is not pushed.
+- Steps 4 to 6 are planned on the branch `cpu-calls`; none has started. To decide:
+  - in step 4, `div` now, for Euclid's `gcd` on the CPU as on the GPU, or later;
+  - in step 5, whose a module's statics are: its kernels', or the CPU's by a type of its own.
