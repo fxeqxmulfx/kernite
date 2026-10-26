@@ -101,6 +101,13 @@ kernel's parameters, runs the kernel on a thread for each of the grid's, the cal
 have ended. A thread that waits spins, so it needs a core: a grid of more threads than the machine runs at once,
 `kgen_cpu::most()`, is an error, as a GPU's grid of more blocks than it runs at once is.
 
+A kernel calls the module's others, itself among them, as SysV calls a function: `call(g, gcd, (a, b))` moves `a` to
+`rdi` and `b` to `rsi`, and `g` from `rax`, and is checked against what `gcd` takes and returns. `lea(fp, [gcd])` takes
+an address to call at, `call(g, fp, (a, b), (gcd, sum))`, checked against each function given. A value alive across a
+call is kept in a register the callee leaves as it was, `rbx` or `r12` to `r15`, which the kernel saves for its own
+caller; a vector spills, since the callee may change any. The stack pointer is a multiple of 16 at each call. A kernel
+that never returns, `-> !`, ends each way out in `ud2()` or in a call of one that does not.
+
 ## On a GPU
 
 An `extern "ptx-kernel"` function is compiled to PTX. The module's kernels are one PTX module, `PTX`, which

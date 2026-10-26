@@ -200,9 +200,11 @@ impl Kernel {
                 regs: vec![],
                 params: vec![],
                 results: vec![],
+                pinned: vec![],
                 body: vec![],
                 slots: vec![],
                 consts: vec![],
+                funcs: vec![],
             },
             params: vec![],
             regs: vec![],
@@ -424,7 +426,13 @@ impl Kernel {
             }
         }
         let implicit = guard.map(|(pred, _)| Arg { operand: Operand::Reg(pred, W32), access: Access::Read });
-        self.p.body.push(Item::Inst(Inst { op: Op(line), args, implicit: implicit.into_iter().collect(), flow }));
+        self.p.body.push(Item::Inst(Inst {
+            op: Op(line),
+            args,
+            implicit: implicit.into_iter().collect(),
+            flow,
+            clobbers: vec![],
+        }));
     }
 
     /// `args` as the operands of `b`, the form of the instruction `name`.
@@ -1289,6 +1297,9 @@ impl Kernel {
             Given::Data(_) => "memory holding data".into(),
             Given::Label(_) => "a label".into(),
             Given::Func(f) => format!("the function `{f}`"),
+            Given::Code(f) => {
+                format!("`[{f}]`, the code of `{f}` as x86 names it: `mov.u64(a, {f})` puts its address in `a`")
+            }
             Given::Vector(vs) => format!("{} operands taken together", vs.len()),
             Given::Pair(..) => "two operands joined by `|`".into(),
             Given::Not(_) => "an operand inverted".into(),

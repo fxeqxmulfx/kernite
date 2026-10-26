@@ -1346,7 +1346,7 @@ fn a_call_passes_what_the_function_takes_and_returns() {
         (
             "first(n, n);",
             "2:1: `first` names an ABI, so it is compiled on its own, not inlined as a helper is: an instruction \
-             calls it, as `call(r, first, (a, b))` does in PTX",
+             calls it, `call(r, first, (a, b))`",
         ),
         (
             "call(f);",

@@ -48,6 +48,7 @@ pub use kgen_x86::Op;
 pub use kgen_x86::intel::{Line, Listing};
 
 use kgen_lang::{Fn, ItemKind, Module, Span, Value};
+use kgen_x86::lang::Callee;
 
 /// The ABIs a kernel names, or a function kernels call, each of which kgen compiles for a
 /// machine.
@@ -95,12 +96,30 @@ pub struct Compiled<T> {
 /// What goes wrong is placed where it can be mended: an instruction where it is called, a
 /// register that ran out where its variable is declared. For an instance, it says which. A
 /// kernel that is [`cooperative`] runs on the threads of a grid, and may wait for them,
-/// `grid.sync()`.
+/// `grid.sync()`. It may call the module's functions `extern "sysv64"`, and each instance of
+/// one, but the cooperative, which its listing names in [`Listing::funcs`].
 pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>, kgen_lang::Error> {
     let name = kgen_lang::instance(f, args)?;
     let mut kernel = kgen_x86::lang::Kernel::new(&name);
     if cooperative(f)? {
         kernel.cooperative();
+    }
+    for item in &module.items {
+        let ItemKind::Fn(g) = &item.kind else { continue };
+        if abi(g) != Some(Abi::Sysv64) {
+            continue;
+        }
+        // One of no prototype, or whose instances are wrong, says why where it is compiled.
+        let callee = match cooperative(g) {
+            Ok(false) => x86_prototype(g).map_or(Callee::Broken, Callee::Calls),
+            Ok(true) => Callee::Cooperative,
+            Err(_) => Callee::Broken,
+        };
+        for args in kgen_lang::instances(module, g).unwrap_or_default() {
+            if let Ok(name) = kgen_lang::instance(g, &args) {
+                kernel.callee(name, callee.clone());
+            }
+        }
     }
     let run = kgen_lang::kernel(module, f, args, &mut kernel).map_err(|e| within(&name, args, e))?;
     let code = render(&kernel.finish()).map_err(|e| {
@@ -272,6 +291,20 @@ fn prototype(f: &Fn) -> Option<kgen_ptx::Prototype> {
     kgen_ptx::Prototype::of(&params?, f.ret.as_ref().map(|r| r.ty.as_str())).ok()
 }
 
+/// The prototype of `f`, a function `extern "sysv64"`, as the kernels that call it see it;
+/// `None` if SysV passes its types in no registers.
+fn x86_prototype(f: &Fn) -> Option<kgen_x86::lang::Prototype> {
+    let params: Option<Vec<(&str, &str)>> = f
+        .params
+        .iter()
+        .map(|p| match &p.ty {
+            kgen_lang::Type::Name(ty, _) => Some((p.name.as_str(), ty.as_str())),
+            _ => None,
+        })
+        .collect();
+    kgen_x86::lang::Prototype::of(&params?, f.ret.as_ref().map(|r| r.ty.as_str())).ok()
+}
+
 /// The function `name` of `module`.
 pub fn function<'a>(module: &'a Module, name: &str) -> Option<&'a Fn> {
     module.items.iter().find_map(|item| match &item.kind {
@@ -303,7 +336,10 @@ fn within(name: &str, args: &[Value], e: kgen_lang::Error) -> kgen_lang::Error {
 /// Where the variable an allocation error names was declared.
 fn blame(e: &Error, decls: &[(String, Span)]) -> Option<Span> {
     let var = match e {
-        Error::ReadBeforeWrite { var } | Error::FixedTwice { var } | Error::OutOfRegisters { var, .. } => var,
+        Error::ReadBeforeWrite { var }
+        | Error::FixedTwice { var }
+        | Error::FixedChanged { var, .. }
+        | Error::OutOfRegisters { var, .. } => var,
         Error::FixedClash { a, .. } => a,
         Error::LabelTwice { .. } | Error::NoSuchLabel { .. } | Error::FallsOffEnd => return None,
     };

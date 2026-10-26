@@ -23,6 +23,7 @@ macro_rules! ops {
 ops! {
     Add = "add",
     And = "and",
+    Call = "call",
     Cmp = "cmp",
     Dec = "dec",
     Imul = "imul",
@@ -57,6 +58,7 @@ ops! {
     Shl = "shl",
     Shr = "shr",
     Test = "test",
+    Ud2 = "ud2",
     Xor = "xor",
     Vaddps = "vaddps",
     Vaddss = "vaddss",

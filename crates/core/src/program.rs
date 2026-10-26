@@ -13,6 +13,10 @@ pub struct SlotId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConstId(pub u32);
 
+/// A function the kernel names, by its index in [`Program::funcs`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FuncId(pub u32);
+
 /// Where control goes after an instruction.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Flow {
@@ -30,7 +34,8 @@ pub enum Flow {
         /// does not hold.
         or_next: bool,
     },
-    /// Out of the kernel, with its result where [`Program::results`] puts it.
+    /// Out of the kernel, with its result where [`Program::results`] puts it; or nowhere, as
+    /// after a trap, or a call of a function that never returns.
     Return,
 }
 
@@ -42,10 +47,14 @@ pub struct Inst<Op, R> {
     pub op: Op,
     /// The operands, in the order the instruction set writes them.
     pub args: Vec<Arg<R>>,
-    /// Operands it uses without writing them out: the value a `ret` hands back.
+    /// Operands it uses without writing them out: the value a `ret` hands back, the arguments
+    /// a call passes and the result it gives back.
     pub implicit: Vec<Arg<R>>,
     /// Where control goes next.
     pub flow: Flow,
+    /// The machine registers it changes besides its operands: those a call's callee may. A
+    /// variable live across it, which it does not write, takes none of them.
+    pub clobbers: Vec<PReg>,
 }
 
 impl<Op, R: Register> Inst<Op, R> {
@@ -130,14 +139,23 @@ pub struct Program<Op> {
     pub params: Vec<(VReg, PReg)>,
     /// The values returned, each with the register it must be in at its return.
     ///
-    /// Parameters and results keep their registers throughout.
+    /// Parameters and results keep their registers throughout, unless that cannot be: then
+    /// the allocator moves one to a variable of its own on entry, or into its register before
+    /// each return.
     pub results: Vec<(VReg, PReg)>,
+    /// Variables each in one register wherever they are live: a call's arguments, each moved
+    /// there just before it, and its result, moved from there just after. Each is short-lived,
+    /// so it stays where it is.
+    pub pinned: Vec<(VReg, PReg)>,
     /// The code.
     pub body: Vec<Item<Op, VReg>>,
     /// Stack memory, by [`SlotId`].
     pub slots: Vec<Slot>,
     /// Read-only data, by [`ConstId`].
     pub consts: Vec<Const>,
+    /// The functions it names, by [`FuncId`], each by what the source calls it: `gcd`, or an
+    /// instance, `tile::<4>`.
+    pub funcs: Vec<String>,
 }
 
 /// The stack frame of an allocated kernel.
@@ -169,8 +187,11 @@ pub struct Compiled<Op> {
     pub frame: Frame,
     /// Read-only data, by [`ConstId`].
     pub consts: Vec<Const>,
+    /// The functions it names, by [`FuncId`].
+    pub funcs: Vec<String>,
     /// Every variable and the register it got, by [`VReg::id`]: the program's, then those
-    /// the allocator made to load and store one that spilled, each named as that one is;
-    /// `None` for one the code does not name, as one that spilled is not.
+    /// the allocator made, each named as the one it was made for is: to load and store one that
+    /// spilled, or to hold a parameter or a result that moved. `None` for one the code does not
+    /// name, as one that spilled is not.
     pub assignment: Vec<(RegInfo, Option<PReg>)>,
 }

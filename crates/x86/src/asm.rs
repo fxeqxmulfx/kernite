@@ -49,9 +49,11 @@ impl Asm {
                 regs: vec![],
                 params: vec![],
                 results: vec![],
+                pinned: vec![],
                 body: vec![],
                 slots: vec![],
                 consts: vec![],
+                funcs: vec![],
             },
             labels: 0,
         }
@@ -208,7 +210,7 @@ impl Asm {
     }
 
     fn inst(&mut self, op: Op, args: Vec<Arg<VReg>>, implicit: Vec<Arg<VReg>>, flow: Flow) {
-        self.p.body.push(Item::Inst(Inst { op, args, implicit, flow }));
+        self.p.body.push(Item::Inst(Inst { op, args, implicit, flow, clobbers: vec![] }));
     }
 
     fn jump(&mut self, op: Op, to: Label, flow: Flow) {

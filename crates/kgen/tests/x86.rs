@@ -718,3 +718,385 @@ fn stack_memory_is_checked_where_kgen_can() {
         assert_eq!(compile("x: *const f32", body).unwrap_err(), want, "{body}");
     }
 }
+
+/// Functions that call: `gcd` itself, and the rest `gcd`, each other and the functions they
+/// take the address of.
+const CALLERS: &str = r#"
+    /// The greatest common divisor of `a` and `b`, by subtraction.
+    unsafe extern "sysv64" fn gcd(a: u64, b: u64) -> u64 {
+        let (t, g): (gpr, gpr);
+        test(b, b);
+        jnz(more);
+        ret(a);
+        label(more);
+        cmp(a, b);
+        jae(ordered);
+        mov(t, a);
+        mov(a, b);
+        mov(b, t);
+        label(ordered);
+        sub(a, b);
+        call(g, gcd, (a, b));
+        ret(g);
+    }
+
+    /// `x` and the gcd of `x` and 6.
+    unsafe extern "sysv64" fn plus(x: u64) -> u64 {
+        let y: gpr;
+        call(y, gcd, (x, 6));
+        add(y, x);
+        ret(y);
+    }
+
+    /// The eight floats at `p`, kept across a call.
+    unsafe extern "sysv64" fn keep(p: *mut f32) {
+        let v: ymm;
+        vmovups(v, [p]);
+        call(nothing);
+        vmovups([p], v);
+    }
+
+    unsafe extern "sysv64" fn nothing() {}
+
+    unsafe extern "sysv64" fn sum(a: u64, b: u64) -> u64 {
+        add(a, b);
+        ret(a);
+    }
+
+    /// The gcd of `a` and itself, called at the address in a gpr.
+    unsafe extern "sysv64" fn through(a: u64) -> u64 {
+        let (fp, r): (gpr, gpr);
+        lea(fp, [gcd]);
+        call(r, fp, (a, a), (gcd, sum));
+        ret(r);
+    }
+
+    /// Stops the program at `ud2`, which raises SIGILL.
+    unsafe extern "sysv64" fn fail() -> ! {
+        ud2();
+    }
+
+    /// The `i`th of the `n` integers at `xs`; past them, a stop, at `fail`.
+    unsafe extern "sysv64" fn at(xs: *const u64, n: usize, i: usize) -> u64 {
+        let x: gpr;
+        cmp(i, n);
+        jae(past);
+        mov(x, [xs + i * 8]);
+        ret(x);
+        label(past);
+        call(fail);
+    }
+"#;
+
+/// A call passes its arguments where SysV does, the integers in rdi, rsi, rdx, rcx, r8 and r9,
+/// and its callee gives back in rax: here, where the arguments were, but for the swap. The
+/// stack pointer is a multiple of 16 at the call, 8 below where it was at the kernel's.
+#[test]
+fn a_function_calls_itself_with_its_arguments_where_sysv_passes_them() {
+    let want = "# gcd(gpr, gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# a=rdi,rax b=rsi t=rax g=rax
+    sub rsp, 8
+    test rsi, rsi
+    jnz 2f
+    mov rax, rdi
+    add rsp, 8
+    ret
+2:
+    cmp rdi, rsi
+    jae 3f
+    mov rax, rdi
+    mov rdi, rsi
+    mov rsi, rax
+3:
+    sub rdi, rsi
+    call {f0}
+    add rsp, 8
+    ret
+# f0: gcd
+";
+    assert_eq!(kgen::x86_str(CALLERS, "gcd").unwrap().text(), want);
+}
+
+/// A call changes the registers SysV lets it, all but rbx, rbp and r12 to r15: an integer
+/// live across one is kept in rbx, which the kernel saves for its own caller; a vector, of
+/// which the call may change any, is spilled to the frame.
+#[test]
+fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
+    let want = "# plus(gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves [rbx]
+# x=rbx,rdi y=rax b=rsi
+    push rbx
+    mov rbx, rdi
+    mov rdi, rbx
+    mov rsi, 6
+    call {f0}
+    add rax, rbx
+    pop rbx
+    ret
+# f0: gcd
+";
+    assert_eq!(kgen::x86_str(CALLERS, "plus").unwrap().text(), want);
+    let want = "# keep(gpr) -> ()
+# frame: 32 bytes aligned to 32, saves [rbx]
+# v, spilled: 32 bytes at rsp
+# p=rbx,rdi v=ymm0
+    push rbx
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    and rsp, -32
+    mov rbx, rdi
+    vmovups ymm0, ymmword ptr [rbx]
+    # v spilled
+    vmovups ymmword ptr [rsp], ymm0
+    call {f0}
+    # v reloaded
+    vmovups ymm0, ymmword ptr [rsp]
+    vmovups ymmword ptr [rbx], ymm0
+    mov rsp, rbp
+    pop rbp
+    pop rbx
+    vzeroupper
+    ret
+# f0: nothing
+";
+    assert_eq!(kgen::x86_str(CALLERS, "keep").unwrap().text(), want);
+}
+
+/// `lea` takes the address of a function of the module, rip-relative, and a call through the
+/// gpr that holds it calls one of the functions taken together last, which take what it
+/// passes.
+#[test]
+fn a_call_through_a_gpr_calls_one_of_the_functions_taken_together_last() {
+    let want = "# through(gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# a=rsi,rdi fp=rax r=rax
+    sub rsp, 8
+    mov rsi, rdi
+    lea rax, [rip + {f0}]
+    mov rdi, rsi
+    call rax
+    add rsp, 8
+    ret
+# f0: gcd
+";
+    assert_eq!(kgen::x86_str(CALLERS, "through").unwrap().text(), want);
+}
+
+/// A function that never returns, `-> !`, ends each way out in `ud2` or in a call of such a
+/// function, which no epilogue follows.
+#[test]
+fn a_function_that_never_returns_ends_in_ud2_or_a_call_of_one() {
+    let want = "# fail() -> !
+# frame: 0 bytes aligned to 0, saves []
+    ud2
+";
+    assert_eq!(kgen::x86_str(CALLERS, "fail").unwrap().text(), want);
+    let want = "# at(gpr, gpr, gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# xs=rdi n=rsi i=rdx x=rax
+    sub rsp, 8
+    cmp rdx, rsi
+    jae 2f
+    mov rax, qword ptr [rdi + rdx*8]
+    add rsp, 8
+    ret
+2:
+    call {f0}
+# f0: fail
+";
+    assert_eq!(kgen::x86_str(CALLERS, "at").unwrap().text(), want);
+}
+
+/// Functions of the module for `k` to call, and some it may not.
+const CALLEES: &str = r#"
+unsafe extern "sysv64" fn gcd(a: u64, b: u64) -> u64 { ret(a); }
+unsafe extern "sysv64" fn half(x: f32) -> f32 { ret(x); }
+unsafe extern "sysv64" fn scale(x: f64, n: usize) -> f64 { ret(x); }
+unsafe extern "sysv64" fn nothing() {}
+unsafe extern "sysv64" fn stop() -> ! { ud2(); }
+#[instances(1, 2)]
+unsafe extern "sysv64" fn tile<const N: usize>(p: *mut f32) {}
+#[cooperative]
+unsafe extern "sysv64" fn together(x: *mut u64) {}
+extern "ptx-func" fn on_gpu(a: u32) -> u32 { ret(a); }
+unsafe extern "sysv64" fn narrow(a: u32) {}
+"#;
+
+/// The kernel `k` around `body`, returning `ret`, in a module of [`CALLEES`], compiled, or
+/// the error.
+fn calling(params: &str, ret: &str, body: &str) -> Result<String, String> {
+    let src = format!("unsafe extern \"sysv64\" fn k({params}){ret} {{\n{body}\n}}\n{CALLEES}");
+    kgen::x86_str(&src, "k").map(|l| l.code().collect::<Vec<_>>().join("\n"))
+}
+
+/// The stack pointer is a multiple of 16 plus 8 on entry, and each push and the frame move
+/// it: a kernel that calls moves it 8 more where that leaves it short of a multiple of 16.
+#[test]
+fn the_stack_pointer_is_a_multiple_of_16_at_a_call() {
+    let cases = [
+        ("x: u64", "call(nothing);", "sub rsp, 8\ncall {f0}\nadd rsp, 8\nret"),
+        ("x: u64", "call(nothing); add(x, x);", "push rbx\nmov rbx, rdi\ncall {f0}\nadd rbx, rbx\npop rbx\nret"),
+        (
+            "x: u64, y: u64",
+            "call(nothing); add(x, y);",
+            "push rbx\npush r12\nsub rsp, 8\nmov rbx, rsi\nmov r12, rdi\ncall {f0}\nadd r12, rbx\nadd rsp, 8\npop \
+             r12\npop rbx\nret",
+        ),
+        (
+            "x: u64",
+            "let n: local<u64>; mov([n], x); call(nothing); mov(x, [n]);",
+            "push rbp\nmov rbp, rsp\nsub rsp, 16\nmov qword ptr [rsp], rdi\ncall {f0}\nmov rdi, qword ptr [rsp]\nmov \
+             rsp, rbp\npop rbp\nret",
+        ),
+        (
+            "x: u64",
+            "let n: local<[u64; 2], 16>; mov([n], x); call(nothing); mov(x, [n]);",
+            "push rbp\nmov rbp, rsp\nsub rsp, 16\nand rsp, -16\nmov qword ptr [rsp], rdi\ncall {f0}\nmov rdi, qword \
+             ptr [rsp]\nmov rsp, rbp\npop rbp\nret",
+        ),
+    ];
+    for (params, body, want) in cases {
+        assert_eq!(calling(params, "", body).unwrap(), want, "{body}");
+    }
+}
+
+/// A gpr's r32 passes its 32 bits, the rest clear, and takes the result's; a float known now
+/// is read from memory, as x86 takes floats.
+#[test]
+fn a_call_passes_what_its_callee_takes() {
+    let code = calling("x: u64", " -> u64", "let r: gpr; call(r.r32, gcd, (x.r32, x)); ret(r);").unwrap();
+    assert_eq!(code, "sub rsp, 8\nmov rsi, rdi\nmov edi, esi\ncall {f0}\nmov eax, eax\nadd rsp, 8\nret");
+    let code = calling("x: *mut f32", "", "let v: ymm; call(v.xmm, half, 2.5); vmovss([x], v.xmm);").unwrap();
+    let want = "push rbx\nmov rbx, rdi\nvmovss xmm0, dword ptr [rip + {c0}]\ncall {f0}\nvmovss dword ptr [rbx], \
+                xmm0\npop rbx\nvzeroupper\nret";
+    assert_eq!(code, want);
+    let code = calling("x: *mut f64", "", "let v: ymm; call(v.xmm, scale, (2.5f64, x)); vmovq([x], v.xmm);").unwrap();
+    let want = "push rbx\nmov rbx, rdi\nvmovq xmm0, qword ptr [rip + {c0}]\nmov rdi, rbx\ncall {f0}\nvmovq qword ptr \
+                [rbx], xmm0\npop rbx\nvzeroupper\nret";
+    assert_eq!(code, want);
+}
+
+/// A call takes the module's functions SysV calls, which pass what it passes and give back
+/// what it takes, and a gpr's address of one.
+#[test]
+fn a_call_is_checked_against_its_callee() {
+    let cases = [
+        ("let r: gpr; call(r, gcd, (x));", "2:26: `gcd` takes 2 arguments, not 1"),
+        (
+            "let (r, v): (gpr, ymm); zero(v); call(r, gcd, (x, v));",
+            "2:47: `gcd` takes an integer `b` as argument 2; this is a ymm",
+        ),
+        (
+            "call(gcd, (x, x));",
+            "2:1: `gcd` returns an integer: `call(r, gcd, ..)` writes it to `r`, or `call(_, gcd, ..)` to nothing",
+        ),
+        ("let r: gpr; call(r, nothing);", "2:18: `nothing` returns nothing: `call(nothing, ..)` calls it"),
+        ("let r: gpr; call(r, stop);", "2:18: `stop` never returns: `call(stop, ..)` calls it"),
+        ("let v: ymm; call(v, gcd, (x, x));", "2:18: `gcd` returns an integer, to a gpr or `_`; this is a ymm"),
+        ("let v: ymm; call(v, half, 1.5f64);", "2:27: `half` takes an `f32` `x`; this is the f64 1.5"),
+        (
+            "let v: ymm; call(v, scale, (2.5, x));",
+            "2:28: `scale` takes an `f64` `x` as argument 1; this is the f32 2.5: `2.5f64` is an `f64`",
+        ),
+        ("let v: ymm; call(v, half, 2);", "2:27: `half` takes an `f32` `x`; this is the integer 2: `2.0` is an `f32`"),
+        (
+            "let v: ymm; call(v, half, gcd);",
+            "2:27: `half` takes an `f32` `x`; this is the function `gcd`: `lea(p, [gcd])` puts its address in `p`",
+        ),
+        (
+            "call(together, x);",
+            "2:6: `together` is `#[cooperative]`: its threads run on a grid, which its launcher starts, so no kernel \
+             calls it",
+        ),
+        (
+            "call(on_gpu, x);",
+            "2:6: `on_gpu` is no x86 function: an x86 kernel calls those of its module `extern \"sysv64\"`",
+        ),
+        ("call(tile, x);", "2:6: `tile` is compiled for each of its instances: an instruction names one, `tile::<..>`"),
+        (
+            "call(tile::<3>, x);",
+            "2:6: `tile::<3>` is not compiled: `tile`'s `#[instances(..)]` lists `tile::<1>`, `tile::<2>`",
+        ),
+        (
+            "let v: ymm; vmovups(v, [gcd]);",
+            "2:24: `vmovups` takes no function's code: `lea(p, [gcd])` puts the address of `gcd` in `p`",
+        ),
+        (
+            "let p: gpr; lea(p, [together]);",
+            "2:20: `together` is `#[cooperative]`: its threads run on a grid, which its launcher starts, so no \
+             kernel calls it",
+        ),
+        (
+            "let p: gpr; mov(p, gcd);",
+            "2:20: `mov` takes no function; `call(r, gcd, (a, b))` calls `gcd`, and `lea(p, [gcd])` puts its \
+             address in `p`",
+        ),
+        (
+            "let p: gpr; lea(p, [gcd]); call(p, (x, 1));",
+            "2:36: a call through a gpr passes variables, each in the file it is of: this is the integer 1; taking \
+             the functions it may call last, `call(r, fp, (a, b), (f, g))`, lets it be more",
+        ),
+        (
+            "let (p, r): (gpr, gpr); lea(p, [gcd]); call(r, p, (x, x), (gcd, half));",
+            "2:45: `half` returns an `f32`, to a vector or `_`; this is a gpr",
+        ),
+        (
+            "let r: gpr; call(r, gcd, (x, x), (gcd, half));",
+            "2:21: `call` names the function it calls, `gcd`, or takes its address from a gpr, of one of the \
+             functions taken together last; not both",
+        ),
+        (
+            "let v: ymm; zero(v); call(v, v, (x));",
+            "2:30: `call` calls a function by its name, or at the address in a gpr; this is a ymm",
+        ),
+        (
+            "call();",
+            "2:1: `call` is `call(f, (a, b))`, or `call(r, f, (a, b))` for a function that returns a value, `f` a \
+             function of the module or a gpr that holds the address of one",
+        ),
+        (
+            "let p: gpr; lea(p, [gcd]); call(p, (x, x, x, x, x, x, x));",
+            "2:36: this passes too many: SysV passes a seventh integer on the stack, which kgen does not read",
+        ),
+        (
+            "let v: ymm; zero(v); let p: gpr; lea(p, [gcd]); call(p, (v, v, v, v, v, v, v, v, v));",
+            "2:57: this passes too many: SysV passes a ninth float on the stack, which kgen does not read",
+        ),
+        ("call(narrow, x);", "2:6: `narrow` does not compile, so no kernel calls it"),
+        ("ud2(x);", "2:1: `ud2` takes no operands, not 1"),
+    ];
+    for (body, want) in cases {
+        assert_eq!(calling("x: u64", "", body).unwrap_err(), want, "{body}");
+    }
+}
+
+/// A function that never returns, `-> !`, may not, and a cooperative kernel returns.
+#[test]
+fn a_function_that_never_returns_is_checked() {
+    let cases = [
+        (
+            "unsafe extern \"sysv64\" fn k() -> ! {\nret();\n}",
+            "2:1: `k` never returns, `-> !`: it ends each way out in `ud2()` or in a call of a function that never \
+             returns",
+        ),
+        (
+            "unsafe extern \"sysv64\" fn k(x: u64) -> ! {\ntest(x, x);\njz(out);\nud2();\nlabel(out);\n}",
+            "1:27: control reaches the end of the body, and `k` never returns, `-> !`: it ends each way out in \
+             `ud2()` or in a call of a function that never returns",
+        ),
+        (
+            "unsafe extern \"sysv64\" fn k() -> ! {\ncall(nothing);\n}\nunsafe extern \"sysv64\" fn nothing() {}",
+            "1:27: control reaches the end of the body, and `k` never returns, `-> !`: it ends each way out in \
+             `ud2()` or in a call of a function that never returns",
+        ),
+        (
+            "#[cooperative]\nunsafe extern \"sysv64\" fn k() -> ! {\nud2();\n}",
+            "2:34: a cooperative kernel's threads return nothing: they write what they compute to memory",
+        ),
+    ];
+    for (src, want) in cases {
+        assert_eq!(kgen::x86_str(src, "k").unwrap_err(), want, "{src}");
+    }
+}

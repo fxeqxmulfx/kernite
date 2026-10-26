@@ -76,10 +76,40 @@ const VECS: [PReg; 16] = [
 
 const SAVED: [PReg; 5] = [gpr(3), gpr(12), gpr(13), gpr(14), gpr(15)];
 
+/// The registers a callee may change, which a call clobbers: every one but the callee-saved, the
+/// stack pointer and `rbp`.
+pub(crate) const CALL_CLOBBERS: [PReg; 25] = [
+    gpr(0),
+    gpr(1),
+    gpr(2),
+    gpr(6),
+    gpr(7),
+    gpr(8),
+    gpr(9),
+    gpr(10),
+    gpr(11),
+    vec(0),
+    vec(1),
+    vec(2),
+    vec(3),
+    vec(4),
+    vec(5),
+    vec(6),
+    vec(7),
+    vec(8),
+    vec(9),
+    vec(10),
+    vec(11),
+    vec(12),
+    vec(13),
+    vec(14),
+    vec(15),
+];
+
 /// x86-64 under the System V calling convention: sixteen general registers and sixteen
 /// vector ones, every vector register the caller's to save. A general register spills with
-/// `mov`, a vector one with `vmovups`, all 256 bits, to a slot aligned to its size; neither
-/// touches the flags.
+/// `mov`, a vector one with `vmovups`, all 256 bits, to a slot aligned to its size, and
+/// moves to another register whole too, with `mov` or `vmovaps`; none touches the flags.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SysV;
 
@@ -106,7 +136,7 @@ impl SysV {
         let reg = Operand::Reg(var, width);
         let (to, from) = if store { (mem, reg) } else { (reg, mem) };
         let args = vec![Arg { operand: to, access: Access::Write }, Arg { operand: from, access: Access::Read }];
-        Inst { op, args, implicit: vec![], flow: Flow::Next }
+        Inst { op, args, implicit: vec![], flow: Flow::Next, clobbers: vec![] }
     }
 }
 
@@ -125,5 +155,18 @@ impl Spill<Op> for SysV {
 
     fn load(&self, var: VReg, slot: SlotId) -> Inst<Op, VReg> {
         self.spill(slot, var, false)
+    }
+
+    fn copy(&self, to: VReg, from: VReg) -> Inst<Op, VReg> {
+        let width = self.width(to.class);
+        let op = if to.class == Class::Gpr { Op::Mov } else { Op::Vmovaps };
+        let arg = |v, access| Arg { operand: Operand::Reg(v, width), access };
+        Inst {
+            op,
+            args: vec![arg(to, Access::Write), arg(from, Access::Read)],
+            implicit: vec![],
+            flow: Flow::Next,
+            clobbers: vec![],
+        }
     }
 }

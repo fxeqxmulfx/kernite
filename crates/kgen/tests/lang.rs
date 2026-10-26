@@ -321,11 +321,14 @@ fn errors_point_where_the_trouble_is() {
             "let g: gpr; mov(g, two);",
             "1:20: `two` is a helper, inlined where it is called, `two(..)`: no instruction calls it",
         ),
-        ("let g: gpr; mov(g, k);", "1:20: an x86 kernel calls no function; `k` names an ABI, so it is one"),
+        (
+            "let g: gpr; mov(g, k);",
+            "1:20: `mov` takes no function; `call(r, k, (a, b))` calls `k`, and `lea(p, [k])` puts its address in `p`",
+        ),
         (
             "k();",
             "1:1: `k` names an ABI, so it is compiled on its own, not inlined as a helper is: an instruction calls \
-             it, as `call(r, k, (a, b))` does in PTX",
+             it, `call(r, k, (a, b))`",
         ),
     ];
     for (body, want) in cases {

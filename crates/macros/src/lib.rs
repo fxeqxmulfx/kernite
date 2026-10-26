@@ -23,6 +23,10 @@
 //! - An `unsafe extern "sysv64" fn` is compiled for x86-64 and becomes an `#[unsafe(naked)]`
 //!   function of the signature it declares, its body the kernel's `naked_asm!`; constants it
 //!   reads are statics beside it. `LISTINGS` holds each one's listing, by name, for snapshots.
+//!   The module's kernels call each other, themselves among them, as `call(r, gcd, (a, b))`
+//!   does, or at the address `lea(fp, [gcd])` takes; all but a `#[cooperative]` one, which
+//!   its launcher runs. One that never returns, `-> !`, ends each way out in `ud2()` or in a
+//!   call of one that does not.
 //! - An `unsafe extern "ptx-kernel" fn` is compiled to PTX, for NVIDIA GPUs. The module's are
 //!   one PTX module, `PTX`, and `Kernels::load(&cuda)` has the driver compile it for the GPU
 //!   it finds; then each kernel is launched by the method of its name, which takes a
@@ -227,7 +231,7 @@ fn expand(body: TokenStream) -> TokenStream {
             Err(e) => {
                 out.extend(error(at(e.span), &e.message));
                 match abi {
-                    Abi::Sysv64 => out.extend(x86_stub(f, &top)),
+                    Abi::Sysv64 => out.extend(x86_stub(f, 0, &top)),
                     Abi::PtxKernel => launchers.push((f, None)),
                     Abi::PtxFunc => {}
                 }
@@ -239,7 +243,7 @@ fn expand(body: TokenStream) -> TokenStream {
         match abi {
             Abi::Sysv64 => {
                 let mut compiled = vec![];
-                for args in instances {
+                for args in instances.iter().cloned() {
                     match kgen::x86(&module, f, &args) {
                         Ok(kernel) => {
                             read.extend(kernel.consts);
@@ -249,12 +253,12 @@ fn expand(body: TokenStream) -> TokenStream {
                     }
                 }
                 if trusted && errors.is_empty() {
-                    out.extend(naked(f, &compiled, &top));
+                    out.extend(naked(&module, f, &compiled, &top));
                     for (args, listing) in &compiled {
                         listings.push((lang::instance(f, args).unwrap_or_default(), listing.text()));
                     }
                 } else {
-                    out.extend(x86_stub(f, &top));
+                    out.extend(x86_stub(f, instances.len(), &top));
                 }
             }
             Abi::PtxKernel | Abi::PtxFunc => {
@@ -600,9 +604,10 @@ fn pick(f: &Fn, arms: &[(Vec<Value>, String)]) -> String {
 /// the statics its constants are, in a module beside it. For a function of compile-time
 /// arguments, each instance is such a function in that module, and `f` is one that calls the
 /// instance its arguments pick. So is each instance of a cooperative kernel, which takes the
-/// thread's place in the grid after `f`'s parameters, and `f` is its [`grid_launcher`].
-fn naked(f: &Fn, instances: &[(Vec<Value>, kgen::Listing)], top: &[TokenTree]) -> TokenStream {
-    let module = format!("__kgen_{}", f.name);
+/// thread's place in the grid after `f`'s parameters, and `f` is its [`grid_launcher`]. Each
+/// names the functions of `module` it calls by the paths [`callees`] gives.
+fn naked(module: &lang::Module, f: &Fn, instances: &[(Vec<Value>, kgen::Listing)], top: &[TokenTree]) -> TokenStream {
+    let hidden = format!("__kgen_{}", f.name);
     let cooperative = f.cooperative.is_some();
     let mut out = TokenStream::new();
     let mut items = String::new();
@@ -614,7 +619,8 @@ fn naked(f: &Fn, instances: &[(Vec<Value>, kgen::Listing)], top: &[TokenTree]) -
         out.extend(attrs(f, top));
         out.extend(parse("#[unsafe(naked)]"));
         out.extend(signature(f, top));
-        out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&asm(listing, &format!("{module}::C")))))]);
+        let code = asm(listing, &format!("{hidden}::C"), &callees(module, listing, false));
+        out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&code)))]);
         statics.push(("C".to_string(), listing));
     } else {
         // Each instance's parameters and their types: `f`'s, then a cooperative kernel's place.
@@ -637,10 +643,10 @@ fn naked(f: &Fn, instances: &[(Vec<Value>, kgen::Listing)], top: &[TokenTree]) -
             items += &format!(
                 "#[unsafe(naked)]\npub unsafe extern \"sysv64\" fn I{k}({}) {ret} {{ {} }}\n",
                 params.join(", "),
-                asm(listing, &format!("I{k}C"))
+                asm(listing, &format!("I{k}C"), &callees(module, listing, true))
             );
             statics.push((format!("I{k}C"), listing));
-            arms.push((args.clone(), format!("{module}::I{k} as {ty}")));
+            arms.push((args.clone(), format!("{hidden}::I{k} as {ty}")));
         }
         if cooperative {
             out.extend(grid_launcher(f, Some(&arms), top));
@@ -672,15 +678,15 @@ fn naked(f: &Fn, instances: &[(Vec<Value>, kgen::Listing)], top: &[TokenTree]) -
     }
     if !items.is_empty() {
         out.extend(parse(&format!(
-            "#[doc(hidden)]\n#[allow(dead_code, non_snake_case)]\nmod {module} {{\n{items}}}\n"
+            "#[doc(hidden)]\n#[allow(dead_code, non_snake_case)]\nmod {hidden} {{\n{items}}}\n"
         )));
     }
     out
 }
 
 /// The body of a naked function whose code is `listing`'s, its constants the statics
-/// `{statics}0`, `{statics}1` and on.
-fn asm(listing: &kgen::Listing, statics: &str) -> String {
+/// `{statics}0`, `{statics}1` and on, and the functions it calls at the paths `funcs`.
+fn asm(listing: &kgen::Listing, statics: &str, funcs: &[String]) -> String {
     let mut asm = String::from("::core::arch::naked_asm!(");
     for line in listing.code() {
         asm += &format!("{line:?}, ");
@@ -688,7 +694,30 @@ fn asm(listing: &kgen::Listing, statics: &str) -> String {
     for i in 0..listing.consts.len() {
         asm += &format!("c{i} = sym {statics}{i}, ");
     }
+    for (i, path) in funcs.iter().enumerate() {
+        asm += &format!("f{i} = sym {path}, ");
+    }
     asm + ")"
+}
+
+/// The paths by which the code of `listing`, of a kernel of `module`, names each function it
+/// calls, from beside the kernels or from `inside` a kernel's hidden module: a function of no
+/// compile-time arguments by its name, and an instance, `tile::<4>`, as the function in its
+/// function's hidden module, `__kgen_tile::I0`, that [`naked`] makes it.
+fn callees(module: &lang::Module, listing: &kgen::Listing, inside: bool) -> Vec<String> {
+    let up = if inside { "super::" } else { "" };
+    let path = |name: &str| {
+        let base = name.split("::<").next().unwrap_or(name);
+        match kgen::function(module, base) {
+            Some(g) if !g.generics.is_empty() => {
+                let instances = lang::instances(module, g).unwrap_or_default();
+                let k = instances.iter().position(|args| lang::instance(g, args).is_ok_and(|n| n == name));
+                format!("{up}__kgen_{base}::I{}", k.expect("a kernel calls an instance its function lists"))
+            }
+            _ => format!("{up}{base}"),
+        }
+    };
+    listing.funcs.iter().map(|name| path(name)).collect()
 }
 
 /// The function that runs `f`, a cooperative x86 kernel, on the threads of a grid, of `f`'s
@@ -757,9 +786,24 @@ fn grid_launcher(f: &Fn, kernels: Option<&[(Vec<Value>, String)]>, top: &[TokenT
 }
 
 /// `f`, an x86 kernel that does not compile, as a function that never runs: of `f`'s
-/// signature, or of its launcher's, for a cooperative kernel.
-fn x86_stub(f: &Fn, top: &[TokenTree]) -> TokenStream {
-    if f.cooperative.is_some() { grid_launcher(f, None, top) } else { stub(f, top) }
+/// signature, or of its launcher's, for a cooperative kernel. One of compile-time arguments has
+/// its `instances` in its hidden module too, as [`naked`] would put them there, for kernels
+/// that call one to name.
+fn x86_stub(f: &Fn, instances: usize, top: &[TokenTree]) -> TokenStream {
+    if f.cooperative.is_some() {
+        return grid_launcher(f, None, top);
+    }
+    let mut out = stub(f, top);
+    if !f.generics.is_empty() && instances > 0 {
+        let items: String = (0..instances)
+            .map(|k| format!("pub unsafe extern \"sysv64\" fn I{k}() {{ ::core::unreachable!() }}\n"))
+            .collect();
+        out.extend(parse(&format!(
+            "#[doc(hidden)]\n#[allow(dead_code, non_snake_case)]\nmod __kgen_{} {{\n{items}}}\n",
+            f.name
+        )));
+    }
+    out
 }
 
 /// `f`'s parameters as written, each its tokens, `x: *mut f32`.

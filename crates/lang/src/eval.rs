@@ -83,6 +83,9 @@ pub enum Operand<V> {
     /// A function of the module that names an ABI, by its name: one the machine calls, as
     /// PTX's `call` does, or whose address it takes.
     Func(String),
+    /// The code of a function of the module that names an ABI, `[f]`: memory whose address x86's
+    /// `lea` takes.
+    Code(String),
     /// Operands taken together: `(a, b, c, d)`, or variables declared together, `acc`.
     Vector(Vec<Operand<V>>),
     /// `a | b`: two operands in the place of one, as the result and the predicate PTX's `setp`
@@ -893,8 +896,19 @@ impl<'a, T: Target> Eval<'a, T> {
         Ok(Operand::Func(named(name, &args)))
     }
 
-    /// `[inner]`: memory at an address, or memory holding a value known now.
+    /// `[inner]`: memory at an address, memory holding a value known now, or the code of a
+    /// function of the module that names an ABI, `[f]` or `[tile::<4>]`.
     fn memory(&mut self, inner: &Expr, span: Span) -> Result<Operand<T::Var>, Error> {
+        let func = match inner {
+            Expr::Path(path, at) if path.len() == 1 && self.lookup(&path[0], *at)?.is_none() => {
+                Some(self.unscoped(&path[0], *at)?)
+            }
+            Expr::Instance { func, generics, span } => Some(self.instance_named(func, generics, *span)?),
+            _ => None,
+        };
+        if let Some(Operand::Func(f)) = func {
+            return Ok(Operand::Code(f));
+        }
         let (terms, disp) = match self.linear(inner)? {
             Lin::Value(v) => return value::bytes(&v).map(Operand::Data).map_err(|m| err(inner.span(), m)),
             Lin::Sum(terms, disp) => (terms, disp),
@@ -1106,7 +1120,7 @@ impl<'a, T: Target> Eval<'a, T> {
                         *span,
                         format!(
                             "`{name}` names an ABI, so it is compiled on its own, not inlined as a helper is: an \
-                             instruction calls it, as `call(r, {name}, (a, b))` does in PTX"
+                             instruction calls it, `call(r, {name}, (a, b))`"
                         ),
                     ));
                 }

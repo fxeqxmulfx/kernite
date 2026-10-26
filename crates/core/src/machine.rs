@@ -16,11 +16,11 @@ pub trait Machine {
 }
 
 /// How a machine of the instruction set `Op` keeps a variable on the stack when the allocator
-/// runs out of registers: how wide a register is, and the instructions that store one in a
-/// slot of the frame and load it back.
+/// runs out of registers, and moves one to another: how wide a register is, and the
+/// instructions that store one in a slot of the frame, load it back, and copy it.
 ///
 /// The allocator puts them between any two instructions, between a comparison and the jump
-/// that reads its flags among them, so neither may change anything but what it writes: the
+/// that reads its flags among them, so none may change anything but what it writes: the
 /// slot, or the register.
 pub trait Spill<Op> {
     /// How wide a register of `class` is, a file [`Machine::allocatable`] has registers of:
@@ -32,4 +32,10 @@ pub trait Spill<Op> {
 
     /// An instruction that loads all of `var`'s register from `slot`.
     fn load(&self, var: VReg, slot: SlotId) -> Inst<Op, VReg>;
+
+    /// An instruction that copies all of `from`'s register to `to`'s, of the same file. The
+    /// allocator moves a parameter or a result with it; a machine's own code may move a call's
+    /// arguments and its result with it too, and the allocator, seeing such a move, places the
+    /// two in one register where it can.
+    fn copy(&self, to: VReg, from: VReg) -> Inst<Op, VReg>;
 }

@@ -33,18 +33,32 @@
 //! The place is three words: the thread's index, how many threads there are, and the address
 //! of the grid's barrier, which is two: how many threads have come to it, and how many times
 //! all have.
+//!
+//! A kernel calls the functions of its module `extern "sysv64"`, itself among them, but those
+//! `#[cooperative]`, which run on a grid; [`Kernel::callee`] gives each, or each instance,
+//! `tile::<4>`. `call(r, f, (a, b))` calls `f` with `a` and `b` and writes what it returns to
+//! `r`, or to nothing, `_`; `call(f, a)` passes one, and `call(f)` none. An argument is a
+//! variable of the parameter's file, a gpr's `r32` passing its 32 bits with the rest clear, or a
+//! value known now; the result is written to a variable of its file. kgen moves each to the
+//! register SysV passes it in, and the result from the one it comes back in; a value live
+//! across the call stays in a register the callee keeps, `rbx` or `r12` to `r15`, or else in
+//! the stack frame, as every vector does. `lea(fp, [f])` puts the address of `f` in `fp`, which
+//! `call(r, fp, (a, b))` calls, passing each in the file its variable is of, and
+//! `call(r, fp, (a, b), (f, g))` as one of the functions taken together last, checked against
+//! each. A function that never returns, `-> !`, ends each way out in `ud2()`, which faults, or
+//! in a call of one that never returns.
 
 use kgen_core::Access::{self, Ignored, Read, ReadWrite, Write};
 use kgen_core::Width::{self, W8, W16, W32, W64, W128, W256};
 use kgen_core::{
-    Arg, Base, Class, Const, ConstId, Flow, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo, Signature, Slot,
-    SlotId, VReg,
+    Arg, Base, Class, Const, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo, Signature,
+    Slot, SlotId, Spill, VReg,
 };
 use kgen_lang::{Fault, Guard, Operand as Given, Target, Value};
 
 use crate::bytes;
 use crate::op::Op;
-use crate::sysv::{FLOAT_PARAMS, FLOAT_RESULT, INT_PARAMS, INT_RESULT, PAGE};
+use crate::sysv::{CALL_CLOBBERS, FLOAT_PARAMS, FLOAT_RESULT, INT_PARAMS, INT_RESULT, PAGE, SysV};
 
 /// The most bytes of stack memory a kernel has: as far past the stack pointer as an address
 /// reaches, whose displacement is 32 bits, signed.
@@ -401,15 +415,129 @@ const JUMPS: &[(&str, Op)] = &[
 /// The names the language calls x86 instructions by, `ret` and the jumps among them.
 pub fn mnemonics() -> impl Iterator<Item = &'static str> {
     let groups = GROUPS.iter().flat_map(|g| g.ops.iter().map(|(name, _)| *name));
-    groups.chain(JUMPS.iter().map(|(name, _)| *name)).chain(["ret", "zero", "ones"])
+    groups.chain(JUMPS.iter().map(|(name, _)| *name)).chain(["ret", "call", "ud2", "zero", "ones"])
 }
+
+/// A type SysV passes in a register: an integer or a pointer in a general one, a float in the
+/// low lanes of a vector one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ty {
+    Int,
+    F32,
+    F64,
+}
+
+impl Ty {
+    /// The type of a parameter written `ty`, `*const f32`; or why SysV passes none such whole.
+    fn param(ty: &str) -> Result<Ty, String> {
+        match ty {
+            "f32" => Ok(Ty::F32),
+            "f64" => Ok(Ty::F64),
+            _ if ty.starts_with("*const ") || ty.starts_with("*mut ") => Ok(Ty::Int),
+            "usize" | "isize" | "u64" | "i64" => Ok(Ty::Int),
+            "u32" | "i32" | "u16" | "i16" | "u8" | "i8" | "bool" => {
+                Err(format!("SysV leaves the high bits of a `{ty}` as they were; take a usize or a u64"))
+            }
+            _ => Err(format!("a kernel takes pointers, 64-bit integers and floats, not `{ty}`")),
+        }
+    }
+
+    fn class(self) -> Class {
+        if self == Ty::Int { Class::Gpr } else { Class::Vec }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Ty::Int => "an integer",
+            Ty::F32 => "an `f32`",
+            Ty::F64 => "an `f64`",
+        }
+    }
+}
+
+/// What a function gives back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Returns {
+    /// Nothing, `()`.
+    Nothing,
+    /// A value: an integer in `rax`, a float in `xmm0`.
+    Value(Ty),
+    /// It never returns, `-> !`.
+    Never,
+}
+
+impl Returns {
+    /// What a function whose result is written `ty` gives back, an integer narrower than 64 bits
+    /// as all of `rax`; or why SysV gives back none such in a register.
+    fn of(ty: &str) -> Result<Returns, String> {
+        match ty {
+            "()" => Ok(Returns::Nothing),
+            "!" => Ok(Returns::Never),
+            "f32" => Ok(Returns::Value(Ty::F32)),
+            "f64" => Ok(Returns::Value(Ty::F64)),
+            _ if ty.starts_with("*const ") || ty.starts_with("*mut ") => Ok(Returns::Value(Ty::Int)),
+            "usize" | "isize" | "u64" | "i64" | "u32" | "i32" | "u16" | "i16" | "u8" | "i8" | "bool" => {
+                Ok(Returns::Value(Ty::Int))
+            }
+            _ => Err(format!("a kernel returns a float, an integer or a pointer, or never, `!`; not `{ty}`")),
+        }
+    }
+}
+
+/// What a kernel makes of a function of its module `extern "sysv64"`, which it may name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Callee {
+    /// One it calls, which takes and gives back what the prototype says.
+    Calls(Prototype),
+    /// A cooperative kernel, whose threads run on a grid its launcher starts.
+    Cooperative,
+    /// One that does not compile, which says why where it is declared.
+    Broken,
+}
+
+/// What a function of the module takes and gives, as a kernel that calls it passes them: each
+/// parameter by its name and its type, and what it returns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Prototype {
+    params: Vec<(String, Ty)>,
+    returns: Returns,
+}
+
+impl Prototype {
+    /// The prototype of a function of the parameters `params`, each a name and a type as
+    /// written, `("x", "*const f32")`, and of the result `ret`, `None` for none; or why SysV
+    /// passes them in no registers.
+    pub fn of(params: &[(&str, &str)], ret: Option<&str>) -> Result<Prototype, String> {
+        let params: Vec<(String, Ty)> =
+            params.iter().map(|&(name, ty)| Ty::param(ty).map(|t| (name.to_string(), t))).collect::<Result<_, _>>()?;
+        let ints = params.iter().filter(|(_, t)| *t == Ty::Int).count();
+        if ints > INT_PARAMS.len() {
+            return Err(SEVENTH.into());
+        }
+        if params.len() - ints > FLOAT_PARAMS.len() {
+            return Err(NINTH.into());
+        }
+        Ok(Prototype { params, returns: Returns::of(ret.unwrap_or("()"))? })
+    }
+}
+
+/// Why a function takes no more integers, or no more floats.
+const SEVENTH: &str = "SysV passes a seventh integer on the stack, which kgen does not read";
+const NINTH: &str = "SysV passes a ninth float on the stack, which kgen does not read";
+
+/// How a function that never returns ends.
+const NEVER: &str = "it ends each way out in `ud2()` or in a call of a function that never returns";
 
 /// A kernel being written in the language, for x86-64 under SysV.
 pub struct Kernel {
     p: Program<Op>,
     ints: usize,
     floats: usize,
-    result: Option<Class>,
+    /// What it gives back.
+    returns: Returns,
+    /// The functions it may call, each by what the source calls it, with its prototype; `None`
+    /// for a cooperative kernel, which it may not.
+    callees: Vec<(String, Callee)>,
     /// Each slot's type as declared, `local<[f32; 64], 32>`, by [`SlotId`].
     declared: Vec<String>,
     /// Whether it runs on the threads of a grid, `#[cooperative]`.
@@ -431,18 +559,315 @@ impl Kernel {
                 regs: vec![],
                 params: vec![],
                 results: vec![],
+                pinned: vec![],
                 body: vec![],
                 slots: vec![],
                 consts: vec![],
+                funcs: vec![],
             },
             ints: 0,
             floats: 0,
-            result: None,
+            returns: Returns::Nothing,
+            callees: vec![],
             declared: vec![],
             cooperative: false,
             grid: None,
             labels: u32::MAX,
         }
+    }
+
+    /// Lets the kernel name `name`, a function of its module `extern "sysv64"`, or an instance
+    /// of one, `tile::<4>`, which it calls or may not, as `callee` says.
+    pub fn callee(&mut self, name: impl Into<String>, callee: Callee) {
+        self.callees.push((name.into(), callee));
+    }
+
+    /// The prototype of `f`, a function the kernel names by its operand `at`; or why it may not
+    /// call it.
+    fn called(&self, f: &str, at: usize) -> Result<Prototype, Fault> {
+        match self.callees.iter().find(|(name, _)| name == f) {
+            Some((_, Callee::Calls(proto))) => Ok(proto.clone()),
+            Some((_, Callee::Cooperative)) => Err(Fault::at(
+                at,
+                format!(
+                    "`{f}` is `#[cooperative]`: its threads run on a grid, which its launcher starts, so no kernel \
+                     calls it"
+                ),
+            )),
+            Some((_, Callee::Broken)) => Err(Fault::at(at, format!("`{f}` does not compile, so no kernel calls it"))),
+            None => Err(Fault::at(
+                at,
+                format!("`{f}` is no x86 function: an x86 kernel calls those of its module `extern \"sysv64\"`"),
+            )),
+        }
+    }
+
+    /// The function `f`, as the program names it: each once.
+    fn func(&mut self, f: &str) -> FuncId {
+        let at = match self.p.funcs.iter().position(|g| g == f) {
+            Some(at) => at,
+            None => {
+                self.p.funcs.push(f.to_string());
+                self.p.funcs.len() - 1
+            }
+        };
+        FuncId(at as u32)
+    }
+
+    /// `call`: of a function of the module by its name, `call(r, f, (a, b))`, or of the one at
+    /// the address in a gpr, `call(r, fp, (a, b))`, which passes each in the file its variable
+    /// is of, or as one of the functions taken together last, `call(r, fp, (a, b), (f, g))`.
+    /// Each argument is moved to a variable of its own in the register SysV passes it in, and
+    /// the result back from one in the register it comes back in, for the allocator to keep
+    /// there while the call needs it; the call changes every register a callee may.
+    fn call(&mut self, args: &[Given<Var>]) -> Result<(), Fault> {
+        let shape = "`call` is `call(f, (a, b))`, or `call(r, f, (a, b))` for a function that returns a value, `f` \
+                     a function of the module or a gpr that holds the address of one";
+        let targets: Option<Vec<&str>> = match args.last() {
+            Some(Given::Vector(fs)) if !fs.is_empty() && fs.iter().all(|f| matches!(f, Given::Func(_))) => {
+                Some(fs.iter().filter_map(|f| if let Given::Func(f) = f { Some(f.as_str()) } else { None }).collect())
+            }
+            _ => None,
+        };
+        let rest = &args[..args.len() - usize::from(targets.is_some())];
+        let (result, callee, passed) = match (rest.iter().position(|a| matches!(a, Given::Func(_))), rest.len()) {
+            (Some(0), 1 | 2) | (None, 1 | 2) => (None, 0, rest.get(1)),
+            (Some(1), 2 | 3) | (None, 3) => (Some(&rest[0]), 1, rest.get(2)),
+            (Some(i), _) if i >= 2 => return Err(Fault::at(i, shape)),
+            _ => return Err(Fault::new(shape)),
+        };
+        let passed: Vec<&Given<Var>> = match passed {
+            None => vec![],
+            Some(Given::Vector(xs)) => xs.iter().collect(),
+            Some(a) => vec![a],
+        };
+        let at = callee + 1;
+        // What the call passes and gives back, whether it returns, and the names of its callee's
+        // parameters, which name the variables that pass values known now.
+        let (target, (tys, kept), never, names) = match (&rest[callee], &targets) {
+            (Given::Func(f), None) => {
+                let proto = self.called(f, callee)?;
+                let passing = self.passing(f, &proto, &passed, result, at)?;
+                let names = proto.params.into_iter().map(|(name, _)| name).collect();
+                (Operand::Func(self.func(f)), passing, proto.returns == Returns::Never, names)
+            }
+            (Given::Func(f), Some(_)) => {
+                return Err(Fault::at(
+                    callee,
+                    format!(
+                        "`call` names the function it calls, `{f}`, or takes its address from a gpr, of one of the \
+                         functions taken together last; not both"
+                    ),
+                ));
+            }
+            (fp, targets) => {
+                let fp = match reg_of(fp) {
+                    Some((reg, View::R64)) if reg.class == Class::Gpr => reg,
+                    _ => {
+                        return Err(Fault::at(
+                            callee,
+                            format!(
+                                "`call` calls a function by its name, or at the address in a gpr; this is {}",
+                                given(fp)
+                            ),
+                        ));
+                    }
+                };
+                match targets {
+                    // Each of the functions must take what the call passes. They take it the same
+                    // way: a variable passes as it is, whatever its callee makes of it, and a value
+                    // known now is of one type.
+                    Some(targets) => {
+                        let (mut passing, mut never) = (None, true);
+                        for t in targets {
+                            let proto = self.called(t, args.len() - 1)?;
+                            never &= proto.returns == Returns::Never;
+                            passing = Some(self.passing(t, &proto, &passed, result, at)?);
+                        }
+                        (Operand::Reg(fp, W64), passing.expect("a call has a target"), never, vec![])
+                    }
+                    None => (Operand::Reg(fp, W64), self.shaped(&passed, result, at)?, false, vec![]),
+                }
+            }
+        };
+        // Each argument to the register it goes in, in order; then the call; then the result.
+        let mut implicit = vec![];
+        let (mut ints, mut floats) = (0, 0);
+        for (k, (a, ty)) in passed.iter().zip(&tys).enumerate() {
+            let (count, regs) =
+                if *ty == Ty::Int { (&mut ints, &INT_PARAMS[..]) } else { (&mut floats, &FLOAT_PARAMS[..]) };
+            let Some(&to) = regs.get(*count) else {
+                let why = if *ty == Ty::Int { SEVENTH } else { NINTH };
+                return Err(Fault::at(at, format!("this passes too many: {why}")));
+            };
+            *count += 1;
+            let name = match reg_of(a) {
+                Some((reg, _)) => self.p.regs[reg.id as usize].name.clone(),
+                None => names.get(k).cloned().unwrap_or_else(|| format!("argument {}", k + 1)),
+            };
+            let pinned = self.new_var(to.class, &name);
+            self.p.pinned.push((pinned, to));
+            self.pass(pinned, a, *ty);
+            implicit.push(Arg { operand: Operand::Reg(pinned, SysV.width(to.class)), access: Read });
+        }
+        let back = match (result.and_then(reg_of), kept) {
+            (Some((reg, view)), Some(ty)) => {
+                let from = if ty == Ty::Int { INT_RESULT } else { FLOAT_RESULT };
+                let pinned = self.new_var(from.class, &self.p.regs[reg.id as usize].name.clone());
+                self.p.pinned.push((pinned, from));
+                implicit.push(Arg { operand: Operand::Reg(pinned, SysV.width(from.class)), access: Write });
+                Some((reg, view, pinned))
+            }
+            _ => None,
+        };
+        let flow = if never { Flow::Return } else { Flow::Next };
+        let call = Inst {
+            op: Op::Call,
+            args: vec![Arg { operand: target, access: Read }],
+            implicit,
+            flow,
+            clobbers: CALL_CLOBBERS.to_vec(),
+        };
+        self.p.body.push(Item::Inst(call));
+        if let Some((reg, view, pinned)) = back {
+            self.p.body.push(Item::Inst(match view {
+                View::R32 => move_r32(reg, pinned),
+                _ => SysV.copy(reg, pinned),
+            }));
+        }
+        Ok(())
+    }
+
+    /// Moves `a`, an argument of type `ty`, to `to`, the variable SysV passes it in: a variable
+    /// whole, or a gpr's `r32` with the rest clear; an integer known now; or a float known now,
+    /// from memory.
+    fn pass(&mut self, to: VReg, a: &Given<Var>, ty: Ty) {
+        let inst = match (a, ty) {
+            (Given::Var(v), _) => match v.reg().expect("an argument is a variable of a register") {
+                (reg, View::R32) => move_r32(to, reg),
+                (reg, _) => SysV.copy(to, reg),
+            },
+            (Given::Int(x), _) => {
+                let value = Arg { operand: Operand::Imm(Imm { value: *x as i64, hex: false }), access: Read };
+                let to = Arg { operand: Operand::Reg(to, W64), access: Write };
+                Inst { op: Op::Mov, args: vec![to, value], implicit: vec![], flow: Flow::Next, clobbers: vec![] }
+            }
+            (Given::F32(x), _) => self.load_float(to, &x.to_le_bytes(), Op::Vmovss, W32),
+            (Given::F64(x), _) => self.load_float(to, &x.to_le_bytes(), Op::Vmovq, W64),
+            _ => unreachable!("an argument is a variable or a value known now"),
+        };
+        self.p.body.push(Item::Inst(inst));
+    }
+
+    /// `op(to.xmm, [bytes])`: a float known now, as a constant.
+    fn load_float(&mut self, to: VReg, bytes: &[u8], op: Op, width: Width) -> Inst<Op, VReg> {
+        let at = Mem { base: Base::Const(self.constant(bytes)), index: None, disp: 0, width };
+        let args = vec![
+            Arg { operand: Operand::Reg(to, W128), access: Write },
+            Arg { operand: Operand::Mem(at), access: Read },
+        ];
+        Inst { op, args, implicit: vec![], flow: Flow::Next, clobbers: vec![] }
+    }
+
+    /// How a call of `f`, of `proto`, passes `passed`, the operand `at`, and gives back to
+    /// `result`: each argument's type, and the result's, unless nothing keeps it; or what is
+    /// wrong.
+    fn passing(
+        &self,
+        f: &str,
+        proto: &Prototype,
+        passed: &[&Given<Var>],
+        result: Option<&Given<Var>>,
+        at: usize,
+    ) -> Result<(Vec<Ty>, Option<Ty>), Fault> {
+        let kept = match (proto.returns, result) {
+            (Returns::Value(t), None) => {
+                return Err(Fault::new(format!(
+                    "`{f}` returns {}: `call(r, {f}, ..)` writes it to `r`, or `call(_, {f}, ..)` to nothing",
+                    t.noun()
+                )));
+            }
+            (Returns::Value(_), Some(Given::Special(s))) if s == "_" => None,
+            (Returns::Value(t), Some(r)) => match reg_of(r) {
+                Some((reg, _)) if reg.class == t.class() => Some(t),
+                _ => {
+                    let into = if t == Ty::Int { "a gpr" } else { "a vector" };
+                    return Err(Fault::at(
+                        0,
+                        format!("`{f}` returns {}, to {into} or `_`; this is {}", t.noun(), given(r)),
+                    ));
+                }
+            },
+            (Returns::Nothing, Some(_)) => {
+                return Err(Fault::at(0, format!("`{f}` returns nothing: `call({f}, ..)` calls it")));
+            }
+            (Returns::Never, Some(_)) => {
+                return Err(Fault::at(0, format!("`{f}` never returns: `call({f}, ..)` calls it")));
+            }
+            (_, None) => None,
+        };
+        if passed.len() != proto.params.len() {
+            let takes = match proto.params.len() {
+                0 => "no arguments".into(),
+                1 => "1 argument".into(),
+                n => format!("{n} arguments"),
+            };
+            return Err(Fault::at(at, format!("`{f}` takes {takes}, not {}", passed.len())));
+        }
+        let mut tys = vec![];
+        for (k, ((name, t), a)) in proto.params.iter().zip(passed).enumerate() {
+            let fits = match (t, a) {
+                (_, Given::Var(v)) => v.reg().is_some_and(|(reg, _)| reg.class == t.class()),
+                (Ty::Int, Given::Int(x)) => (i128::from(i64::MIN)..=i128::from(u64::MAX)).contains(x),
+                (Ty::F32, Given::F32(_)) | (Ty::F64, Given::F64(_)) => true,
+                _ => false,
+            };
+            if !fits {
+                let what = match (t, a) {
+                    (_, Given::Func(g)) => format!("the function `{g}`: `lea(p, [{g}])` puts its address in `p`"),
+                    (Ty::F64, Given::F32(x)) => format!("the f32 {x}: `{x:?}f64` is an `f64`"),
+                    (Ty::F32, Given::Int(x)) => format!("the integer {x}: `{x}.0` is an `f32`"),
+                    (Ty::F64, Given::Int(x)) => format!("the integer {x}: `{x}.0f64` is an `f64`"),
+                    (_, Given::F32(x)) => format!("the f32 {x}"),
+                    (_, Given::F64(x)) => format!("the f64 {x}"),
+                    (_, a) => given(a),
+                };
+                let which = if proto.params.len() == 1 { String::new() } else { format!(" as argument {}", k + 1) };
+                return Err(Fault::at(at, format!("`{f}` takes {} `{name}`{which}; this is {what}", t.noun())));
+            }
+            tys.push(*t);
+        }
+        Ok((tys, kept))
+    }
+
+    /// How a call through a variable, of no functions taken together, passes `passed`, the
+    /// operand `at`, and gives back to `result`: each in the file its variable is of, so each
+    /// is a variable; or what is wrong.
+    fn shaped(
+        &self,
+        passed: &[&Given<Var>],
+        result: Option<&Given<Var>>,
+        at: usize,
+    ) -> Result<(Vec<Ty>, Option<Ty>), Fault> {
+        let ty = |a: &Given<Var>, at: usize, what: &str| match reg_of(a) {
+            Some((reg, _)) if reg.class == Class::Gpr => Ok(Ty::Int),
+            Some(_) => Ok(Ty::F64),
+            None => Err(Fault::at(
+                at,
+                format!(
+                    "a call through a gpr {what} variables, each in the file it is of: this is {}; taking the \
+                     functions it may call last, `call(r, fp, (a, b), (f, g))`, lets it be more",
+                    given(a)
+                ),
+            )),
+        };
+        let kept = match result {
+            Some(Given::Special(s)) if s == "_" => None,
+            Some(r) => Some(ty(r, 0, "writes")?),
+            None => None,
+        };
+        let tys = passed.iter().map(|a| ty(a, at, "passes")).collect::<Result<_, _>>()?;
+        Ok((tys, kept))
     }
 
     /// Makes the kernel one that runs on the threads of a grid, `#[cooperative]`, before its
@@ -603,7 +1028,7 @@ impl Kernel {
     }
 
     fn push(&mut self, op: Op, args: Vec<Arg<VReg>>, implicit: Vec<Arg<VReg>>, flow: Flow) {
-        self.p.body.push(Item::Inst(Inst { op, args, implicit, flow }));
+        self.p.body.push(Item::Inst(Inst { op, args, implicit, flow, clobbers: vec![] }));
     }
 
     /// Read-only `bytes`, aligned to their size up to 32, stored once however often asked for.
@@ -627,16 +1052,21 @@ impl Kernel {
             [a] => reg_of(a).map(|(reg, _)| reg),
             _ => None,
         };
-        let (reg, width, at) = match (self.result, args, given) {
-            (None, [], _) => {
+        let (reg, width, at) = match (self.returns, args, given) {
+            (Returns::Nothing, [], _) => {
                 self.push(Op::Ret, vec![], vec![], Flow::Return);
                 return Ok(());
             }
-            (Some(Class::Vec), _, Some(r)) if r.class == Class::Vec => (r, W128, FLOAT_RESULT),
-            (Some(Class::Gpr), _, Some(r)) if r.class == Class::Gpr => (r, W64, INT_RESULT),
-            (None, ..) => return Err(Fault::new("this kernel returns nothing: `ret()`")),
-            (Some(Class::Vec), ..) => return Err(Fault::new("this kernel returns a float: `ret(v)`, `v` a vector")),
-            (Some(_), ..) => return Err(Fault::new("this kernel returns an integer: `ret(g)`, `g` a gpr")),
+            (Returns::Value(Ty::Int), _, Some(r)) if r.class == Class::Gpr => (r, W64, INT_RESULT),
+            (Returns::Value(_), _, Some(r)) if r.class == Class::Vec => (r, W128, FLOAT_RESULT),
+            (Returns::Nothing, ..) => return Err(Fault::new("this kernel returns nothing: `ret()`")),
+            (Returns::Never, ..) => {
+                return Err(Fault::new(format!("`{}` never returns, `-> !`: {NEVER}", self.p.name)));
+            }
+            (Returns::Value(Ty::Int), ..) => {
+                return Err(Fault::new("this kernel returns an integer: `ret(g)`, `g` a gpr"));
+            }
+            (Returns::Value(_), ..) => return Err(Fault::new("this kernel returns a float: `ret(v)`, `v` a vector")),
         };
         if !self.p.results.contains(&(reg, at)) {
             self.p.results.push((reg, at));
@@ -704,7 +1134,7 @@ impl Kernel {
                 Some((reg, view)) if reg.class == Class::Vec && want.is_none_or(|w| w == view) => Ok(()),
                 _ => Err(Fault::at(i, format!("wants {}; this is {}", describe(kind, width), given(a)))),
             };
-            let memory = matches!(a, Given::Mem(_) | Given::Data(_));
+            let memory = matches!(a, Given::Mem(_) | Given::Data(_) | Given::Code(_));
             let int = |range: std::ops::RangeInclusive<i128>| match a {
                 Given::Int(x) if range.contains(x) => Ok(()),
                 _ => Err(Fault::at(i, format!("wants {}; this is {}", describe(kind, width), given(a)))),
@@ -744,7 +1174,7 @@ impl Kernel {
                 }
                 // Past 2^63 as the 64 bits are, as `mov` takes them.
                 Given::Int(x) => Operand::Imm(Imm { value: *x as i64, hex: matches!(kind, C(_) | Lanes) }),
-                Given::Mem(_) | Given::Data(_) => {
+                Given::Mem(_) | Given::Data(_) | Given::Code(_) => {
                     let w = match kind {
                         Xm(w) | M(w) => w,
                         _ => width.expect("a form with vector memory has a vector"),
@@ -766,6 +1196,10 @@ impl Kernel {
                     return Err(format!("this reads {} bytes of a constant of {}", width.bytes(), bytes.len()));
                 }
                 return Ok(Mem { base: Base::Const(self.constant(bytes)), index: None, disp: 0, width });
+            }
+            Given::Code(f) => {
+                self.called(f, 0).map_err(|e| e.message)?;
+                return Ok(Mem { base: Base::Func(self.func(f)), index: None, disp: 0, width });
             }
             Given::Mem(m) => m,
             _ => unreachable!("memory"),
@@ -1009,6 +1443,7 @@ fn given(a: &Given<Var>) -> String {
         Given::Neg(_) => "an operand negated".into(),
         Given::List(_) => "operands in brackets".into(),
         Given::Func(f) => format!("the function `{f}`"),
+        Given::Code(f) => format!("the code of `{f}`"),
     }
 }
 
@@ -1016,28 +1451,19 @@ impl Target for Kernel {
     type Var = Var;
 
     fn param(&mut self, name: &str, ty: &str) -> Result<Var, String> {
-        let (class, at, view) = if ty == "f32" || ty == "f64" {
-            let at = *FLOAT_PARAMS
-                .get(self.floats)
-                .ok_or("SysV passes a ninth float on the stack, which kgen does not read")?;
-            self.floats += 1;
-            (Class::Vec, at, View::Xmm)
-        } else if ty.starts_with("*const ") || ty.starts_with("*mut ") || ["usize", "isize", "u64", "i64"].contains(&ty)
-        {
+        let (class, at, view) = if Ty::param(ty)? == Ty::Int {
             if self.cooperative && self.ints == INT_PARAMS.len() - 1 {
                 return Err("a cooperative kernel takes five integers at most: SysV passes six in registers, and the \
                             sixth is the thread's place in the grid"
                     .into());
             }
-            let at = *INT_PARAMS
-                .get(self.ints)
-                .ok_or("SysV passes a seventh integer on the stack, which kgen does not read")?;
+            let at = *INT_PARAMS.get(self.ints).ok_or(SEVENTH)?;
             self.ints += 1;
             (Class::Gpr, at, View::R64)
-        } else if ["u32", "i32", "u16", "i16", "u8", "i8", "bool"].contains(&ty) {
-            return Err(format!("SysV leaves the high bits of a `{ty}` as they were; take a usize or a u64"));
         } else {
-            return Err(format!("a kernel takes pointers, 64-bit integers and floats, not `{ty}`"));
+            let at = *FLOAT_PARAMS.get(self.floats).ok_or(NINTH)?;
+            self.floats += 1;
+            (Class::Vec, at, View::Xmm)
         };
         let reg = self.new_var(class, name);
         self.p.params.push((reg, at));
@@ -1046,20 +1472,14 @@ impl Target for Kernel {
     }
 
     fn result(&mut self, ty: &str) -> Result<(), String> {
-        let ints = ["usize", "isize", "u64", "i64", "u32", "i32", "u16", "i16", "u8", "i8", "bool"];
-        let class = match ty {
-            "()" => return Ok(()),
-            _ if self.cooperative => {
-                return Err(
-                    "a cooperative kernel's threads return nothing: they write what they compute to memory".into()
-                );
-            }
-            "f32" | "f64" => Class::Vec,
-            _ if ty.starts_with("*const ") || ty.starts_with("*mut ") || ints.contains(&ty) => Class::Gpr,
-            _ => return Err(format!("a kernel returns a float, an integer or a pointer, not `{ty}`")),
-        };
-        self.result = Some(class);
-        self.p.signature.result = Some(class);
+        let returns = Returns::of(ty)?;
+        if self.cooperative && returns != Returns::Nothing {
+            return Err("a cooperative kernel's threads return nothing: they write what they compute to memory".into());
+        }
+        if let Returns::Value(t) = returns {
+            self.p.signature.result = Some(t.class());
+        }
+        self.returns = returns;
         Ok(())
     }
 
@@ -1134,6 +1554,9 @@ impl Target for Kernel {
             }
         }
         let args = args.as_slice();
+        if name == "call" {
+            return self.call(args);
+        }
         for (i, a) in args.iter().enumerate() {
             match a {
                 Given::Var(Var(Place::Stack(s))) => {
@@ -1175,7 +1598,16 @@ impl Target for Kernel {
                 Given::Func(f) => {
                     return Err(Fault::at(
                         i,
-                        format!("an x86 kernel calls no function; `{f}` names an ABI, so it is one"),
+                        format!(
+                            "`{name}` takes no function; `call(r, {f}, (a, b))` calls `{f}`, and `lea(p, [{f}])` puts \
+                             its address in `p`"
+                        ),
+                    ));
+                }
+                Given::Code(f) if name != "lea" => {
+                    return Err(Fault::at(
+                        i,
+                        format!("`{name}` takes no function's code: `lea(p, [{f}])` puts the address of `{f}` in `p`"),
                     ));
                 }
                 _ => {}
@@ -1183,6 +1615,11 @@ impl Target for Kernel {
         }
         match name {
             "ret" => return self.ret(args),
+            "ud2" if args.is_empty() => {
+                self.push(Op::Ud2, vec![], vec![], Flow::Return);
+                return Ok(());
+            }
+            "ud2" => return Err(Fault::new(format!("`ud2` takes no operands, not {}", args.len()))),
             "zero" => return self.fill(false, args),
             "ones" => return self.fill(true, args),
             _ => {}
@@ -1236,15 +1673,28 @@ impl Target for Kernel {
             Some(Item::Inst(inst)) => !matches!(inst.flow, Flow::Return | Flow::Jump(_)),
             _ => true,
         };
-        match (open, self.result) {
+        match (open, self.returns) {
             (false, _) => Ok(()),
-            (true, None) => {
+            (true, Returns::Nothing) => {
                 self.push(Op::Ret, vec![], vec![], Flow::Return);
                 Ok(())
             }
-            (true, Some(_)) => Err("control reaches the end of the body, and the kernel returns a value; \
-                                    end each way out with `ret(v)`"
+            (true, Returns::Value(_)) => Err("control reaches the end of the body, and the kernel returns a value; \
+                                              end each way out with `ret(v)`"
                 .into()),
+            (true, Returns::Never) => Err(format!(
+                "control reaches the end of the body, and `{}` never returns, `-> !`: {NEVER}",
+                self.p.name
+            )),
         }
     }
+}
+
+/// `mov(to.r32, from.r32)`, which clears the rest of `to`.
+fn move_r32(to: VReg, from: VReg) -> Inst<Op, VReg> {
+    let args = vec![
+        Arg { operand: Operand::Reg(to, W32), access: Write },
+        Arg { operand: Operand::Reg(from, W32), access: Read },
+    ];
+    Inst { op: Op::Mov, args, implicit: vec![], flow: Flow::Next, clobbers: vec![] }
 }

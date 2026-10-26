@@ -5,7 +5,6 @@
 # v=ymm1 l=ymm2 r=ymm3 barrier=r9 generation=r10 arrived=r11
     push rbx
     mov rax, rdi
-    mov rsi, rsi
     vbroadcastss ymm0, dword ptr [rip + {c0}]
     test rcx, rcx
     jz 16f

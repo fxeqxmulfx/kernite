@@ -4,7 +4,8 @@
 //! an order of their own, to products of integers, exact in any order; and its listing to the
 //! one in `snapshots/`.
 
-/// The kernels. Each reads the floats its pointers point at, and needs AVX2 and FMA.
+/// The kernels for the cpu. Each reads what its pointers point at, and all but `gcds` and
+/// `gcd`, which take integers, need AVX2 and FMA.
 #[kgen_macros::kernels]
 mod kernels {
     /// The sum of the eight floats at `xs`.
@@ -12,6 +13,19 @@ mod kernels {
         let v: ymm;
         vmovups(v, [xs]);
         ret_sum(v);
+    }
+
+    /// The sum of the sixteen floats at `xs`: `sum8` of each half, added. A call may change
+    /// every vector, so the first half's sum waits out the second call in the kernel's stack
+    /// memory, as the listing says; and `xs` in rbx, which a call leaves as it was, and which
+    /// the kernel saves for its own caller.
+    pub unsafe extern "sysv64" fn sum16(xs: *const f32) -> f32 {
+        let (low, high): (ymm, ymm);
+        call(low.xmm, sum8, xs);
+        add(xs, 32);
+        call(high.xmm, sum8, xs);
+        vaddss(high.xmm, low.xmm, high.xmm);
+        ret(high.xmm);
     }
 
     /// The dot product of the `n` floats at `x` and the `n` at `y`, `n` a multiple of
@@ -368,6 +382,72 @@ mod kernels {
         add(c, grid.threads);
         jmp(back);
         label(done);
+    }
+
+    /// `g[i]`, the greatest common divisor of `a[i]` and `b[i]`, for each `i < n`, by `gcd`.
+    /// What lives across the calls, the pointers, `n` and `i`, is in the registers a call
+    /// leaves as they were, which the kernel saves for its own caller.
+    pub unsafe extern "sysv64" fn gcds(a: *const u32, b: *const u32, g: *mut u32, n: usize) {
+        test(n, n);
+        jz(done);
+        let i: gpr;
+        zero(i);
+        label(next);
+        let (x, y, d): (gpr, gpr, gpr);
+        mov(x.r32, [a + i * 4]);
+        mov(y.r32, [b + i * 4]);
+        call(d, gcd, (x, y));
+        mov([g + i * 4], d.r32);
+        inc(i);
+        cmp(i, n);
+        jnz(next);
+        label(done);
+    }
+
+    /// The greatest common divisor of `a` and `b` by Stein's algorithm, which halves and
+    /// subtracts where Euclid's divides, a call of itself a step. A step takes a bit off one of
+    /// them at least, so the calls go no deeper than the two have bits, 128.
+    pub unsafe extern "sysv64" fn gcd(a: u64, b: u64) -> u64 {
+        let (t, g): (gpr, gpr);
+        note("`a` the larger");
+        cmp(a, b);
+        jae(ordered);
+        mov(t, a);
+        mov(a, b);
+        mov(b, t);
+        label(ordered);
+        test(b, b);
+        jnz(step);
+        ret(a);
+
+        label(step);
+        test(a, 1);
+        jnz(a_odd);
+        test(b, 1);
+        jnz(halve_a);
+        note("both even: twice the gcd of their halves");
+        shr(a, 1);
+        shr(b, 1);
+        call(g, gcd, (a, b));
+        add(g, g);
+        ret(g);
+
+        label(a_odd);
+        test(b, 1);
+        jz(halve_b);
+        note("both odd: their difference, which is even, for `a`");
+        sub(a, b);
+        label(halve_a);
+        note("`a` even and `b` odd: `a` halved");
+        shr(a, 1);
+        call(g, gcd, (a, b));
+        ret(g);
+
+        label(halve_b);
+        note("`b` even and `a` odd: `b` halved");
+        shr(b, 1);
+        call(g, gcd, (a, b));
+        ret(g);
     }
 
     /// Returns the sum of `v`'s lanes, as `add_lanes` adds them.
@@ -868,6 +948,13 @@ fn sum8(xs: &[f32; 8]) -> f32 {
     unsafe { kernels::sum8(xs.as_ptr()) }
 }
 
+/// The sum of `xs`, by `sum8` of each half.
+fn sum16(xs: &[f32; 16]) -> f32 {
+    assert!(supported(), "the kernels need AVX2 and FMA");
+    // SAFETY: sixteen floats are there to read, and the cpu has what the kernel needs.
+    unsafe { kernels::sum16(xs.as_ptr()) }
+}
+
 /// The dot product of `x` and `y`, which must be as long as each other and a multiple of
 /// eight floats: by four accumulators when it is a multiple of 32, else by one.
 fn dot(x: &[f32], y: &[f32]) -> f32 {
@@ -887,6 +974,17 @@ fn count_bytes(bytes: &[u8], counts: &mut [u32; 256]) {
     // SAFETY: `bytes.len()` bytes are there to read and 256 counts to write, and the cpu has
     // what the kernel needs.
     unsafe { kernels::count_bytes::<4>(bytes.as_ptr(), bytes.len(), counts.as_mut_ptr()) }
+}
+
+/// The greatest common divisor of each `a[i]` and `b[i]` on the cpu, by Stein's algorithm in
+/// a function that calls itself; `a` and `b` must be as long as each other.
+fn gcds_on_cpu(a: &[u32], b: &[u32]) -> Vec<u32> {
+    assert_eq!(a.len(), b.len(), "a and b differ in length");
+    let mut g = vec![0; a.len()];
+    // SAFETY: `a.len()` integers behind each pointer, to read and to write, and the kernel
+    // needs no more of the cpu than x86-64 has.
+    unsafe { kernels::gcds(a.as_ptr(), b.as_ptr(), g.as_mut_ptr(), a.len()) };
+    g
 }
 
 /// `x / s` on `threads` threads of the cpu, `s` the sum of `x`, in one launch: each thread
@@ -1090,6 +1188,8 @@ fn main() {
         std::process::exit(1);
     }
     println!("sum8(1, ..., 8) = {}", sum8(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]));
+    let ones: [f32; 16] = std::array::from_fn(|i| (i + 1) as f32);
+    println!("sum16(1, ..., 16), which calls sum8 for each half = {}", sum16(&ones));
     for n in [1024, 1000] {
         let x: Vec<f32> = (0..n).map(|i| (i % 7) as f32 - 3.0).collect();
         let y: Vec<f32> = (0..n).map(|i| (i % 5) as f32 / 2.0).collect();
@@ -1104,6 +1204,8 @@ fn main() {
         counts[usize::from(b'o')],
         counts[usize::from(b'h')]
     );
+    let g = gcds_on_cpu(&[1071, 2_971_215_073], &[462, 1_836_311_903]);
+    println!("by Stein's algorithm on the cpu: gcd(1071, 462) = {}, and of two Fibonacci numbers: {}", g[0], g[1]);
     let cooperative = kgen_cpu::most().and_then(|most| {
         let threads = most.min(4);
         let mut x = [1.0, 2.0, 3.0, 4.0];
@@ -1301,6 +1403,66 @@ mod tests {
 
     /// For one accumulator and for four, and for sixteen, two of which spill, where `n` is a
     /// multiple of the 128 floats they take in a turn.
+    /// `sum16` against `sum8`'s reference of each half, added: what it returns has been in the
+    /// kernel's stack memory and back, across a call.
+    #[test]
+    fn sum16_is_sum8_of_each_half_bit_for_bit() {
+        assert!(super::supported(), "the kernels need AVX2 and FMA");
+        for seed in 1..=1000 {
+            let xs: [f32; 16] = floats(16, seed).try_into().unwrap();
+            let want = sum_lanes(xs[..8].try_into().unwrap()) + sum_lanes(xs[8..].try_into().unwrap());
+            // SAFETY: sixteen floats, and a cpu that runs the kernels.
+            let got = unsafe { kernels::sum16(xs.as_ptr()) };
+            assert_eq!(got.to_bits(), want.to_bits(), "{xs:?}");
+        }
+    }
+
+    /// The greatest common divisor of `a` and `b`, by Euclid's algorithm, as the GPU's `gcd`
+    /// takes it.
+    fn euclid(a: u64, b: u64) -> u64 {
+        if b == 0 { a } else { euclid(b, a % b) }
+    }
+
+    /// Pairs for `gcds`, and their greatest common divisors by `euclid`: zeros, pairs with a
+    /// factor in common, and those of the most steps of Euclid's, consecutive Fibonacci
+    /// numbers, up to the largest pair below 2^32, which takes the GPU's `gcd` 46 calls deep.
+    fn gcd_pairs() -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+        let mut fibonacci = vec![1u32, 2];
+        while let Some(next) = fibonacci[fibonacci.len() - 2].checked_add(fibonacci[fibonacci.len() - 1]) {
+            fibonacci.push(next);
+        }
+        let mut pairs: Vec<(u32, u32)> = fibonacci.windows(2).map(|w| (w[1], w[0])).collect();
+        pairs.extend([(0, 0), (0, 7), (7, 0), (u32::MAX, u32::MAX), (u32::MAX, 1 << 31), (1071, 462)]);
+        for w in words(30_000, 5).chunks(3) {
+            let common = w[0] % 1000 + 1;
+            pairs.push((w[1] % (u32::MAX / common) * common, w[2] % (u32::MAX / common) * common));
+        }
+        // A divisor of two `u32`s is a `u32`.
+        let want = pairs.iter().map(|&(x, y)| euclid(x.into(), y.into()) as u32).collect();
+        let (a, b) = pairs.into_iter().unzip();
+        (a, b, want)
+    }
+
+    /// `gcds` on the cpu against Euclid's algorithm in Rust, on the GPU's pairs; and `gcd`
+    /// alone on 64 bits, at the ends of the range and on pairs with a factor in common, a
+    /// power of two in it, which Stein's algorithm halves away a call a bit.
+    #[test]
+    fn gcds_on_the_cpu_are_euclids() {
+        let (a, b, want) = gcd_pairs();
+        assert_eq!(super::gcds_on_cpu(&a, &b), want);
+        let mut pairs =
+            vec![(u64::MAX, u64::MAX), (u64::MAX, 1 << 63), (1 << 63, 1 << 62), (0, u64::MAX), (u64::MAX, 0)];
+        for w in words(60_000, 9).chunks(6) {
+            let common = u64::from(w[0] % 1000 + 1) << (w[1] % 24);
+            let wide = |hi: u32, lo: u32| (u64::from(hi) << 32 | u64::from(lo)) % (u64::MAX / common) * common;
+            pairs.push((wide(w[2], w[3]), wide(w[4], w[5])));
+        }
+        for (x, y) in pairs {
+            // SAFETY: `gcd` reaches no memory but its own stack's.
+            assert_eq!(unsafe { kernels::gcd(x, y) }, euclid(x, y), "gcd({x}, {y})");
+        }
+    }
+
     #[test]
     fn dot_is_its_reference_bit_for_bit() {
         assert!(super::supported(), "the kernels need AVX2 and FMA");
@@ -1452,29 +1614,11 @@ mod tests {
         }
     }
 
-    /// The greatest common divisor of `a` and `b`, by Euclid's algorithm, as `gcd` takes it.
-    fn euclid(a: u32, b: u32) -> u32 {
-        if b == 0 { a } else { euclid(b, a % b) }
-    }
-
-    /// `gcds` against Euclid's algorithm in Rust: on zeros, on pairs with a factor in common,
-    /// and on those of the most steps, consecutive Fibonacci numbers, up to the largest pair
-    /// below 2^32, which takes `gcd` 46 calls deep.
+    /// `gcds` on the GPU against Euclid's algorithm in Rust, on `gcd_pairs`.
     #[test]
     fn gcds_are_euclids() {
         let Some((cuda, kernels)) = cuda() else { return };
-        let mut fibonacci = vec![1u32, 2];
-        while let Some(next) = fibonacci[fibonacci.len() - 2].checked_add(fibonacci[fibonacci.len() - 1]) {
-            fibonacci.push(next);
-        }
-        let mut pairs: Vec<(u32, u32)> = fibonacci.windows(2).map(|w| (w[1], w[0])).collect();
-        pairs.extend([(0, 0), (0, 7), (7, 0), (u32::MAX, u32::MAX), (u32::MAX, 1 << 31), (1071, 462)]);
-        for w in words(30_000, 5).chunks(3) {
-            let common = w[0] % 1000 + 1;
-            pairs.push((w[1] % (u32::MAX / common) * common, w[2] % (u32::MAX / common) * common));
-        }
-        let (a, b): (Vec<u32>, Vec<u32>) = pairs.iter().copied().unzip();
-        let want: Vec<u32> = pairs.iter().map(|&(x, y)| euclid(x, y)).collect();
+        let (a, b, want) = gcd_pairs();
         assert_eq!(super::gcds(&cuda, &kernels, &a, &b).unwrap(), want);
     }
 

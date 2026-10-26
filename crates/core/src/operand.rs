@@ -1,4 +1,4 @@
-use crate::program::{ConstId, Label, SlotId};
+use crate::program::{ConstId, FuncId, Label, SlotId};
 use crate::reg::Register;
 
 /// How many bits an operand covers: which view of a register, or how much memory.
@@ -41,6 +41,9 @@ pub enum Base<R> {
     Slot(SlotId),
     /// A constant of the program, whose place the machine decides.
     Const(ConstId),
+    /// The code of a function the program names, whose place the machine decides: what `lea`
+    /// takes the address of.
+    Func(FuncId),
 }
 
 /// A memory operand: `width` bits at `base + index * scale + disp`.
@@ -77,6 +80,8 @@ pub enum Operand<R> {
     Imm(Imm),
     /// A jump's target.
     Label(Label),
+    /// A function the program names: a call's target.
+    Func(FuncId),
 }
 
 /// What an instruction does with an operand's register. The registers that form a memory
@@ -112,7 +117,7 @@ impl<R: Register> Arg<R> {
             Operand::Mem(m) => (
                 match m.base {
                     Base::Reg(r) => Some(r),
-                    Base::Slot(_) | Base::Const(_) => None,
+                    Base::Slot(_) | Base::Const(_) | Base::Func(_) => None,
                 },
                 m.index.map(|(r, _)| r),
             ),
@@ -128,11 +133,11 @@ impl<R: Register> Arg<R> {
             Operand::Mem(m) => (
                 match m.base {
                     Base::Reg(r) => Some(r),
-                    Base::Slot(_) | Base::Const(_) => None,
+                    Base::Slot(_) | Base::Const(_) | Base::Func(_) => None,
                 },
                 m.index.map(|(r, _)| r),
             ),
-            Operand::Imm(_) | Operand::Label(_) => (None, None),
+            Operand::Imm(_) | Operand::Label(_) | Operand::Func(_) => (None, None),
         };
         first.into_iter().chain(second)
     }
@@ -154,6 +159,7 @@ impl<R: Register> Arg<R> {
                     Base::Reg(r) => Base::Reg(f(r)),
                     Base::Slot(s) => Base::Slot(s),
                     Base::Const(c) => Base::Const(c),
+                    Base::Func(f) => Base::Func(f),
                 },
                 index: m.index.map(|(r, scale)| (f(r), scale)),
                 disp: m.disp,
@@ -161,6 +167,7 @@ impl<R: Register> Arg<R> {
             }),
             Operand::Imm(i) => Operand::Imm(i),
             Operand::Label(l) => Operand::Label(l),
+            Operand::Func(f) => Operand::Func(f),
         };
         Arg { operand, access: self.access }
     }

@@ -32,35 +32,60 @@ fn slot_arg<R>(slot: SlotId, access: Access) -> Arg<R> {
     Arg { operand: Operand::Mem(Mem { base: Base::Slot(slot), index: None, disp: 0, width: Width::W64 }), access }
 }
 
+fn reg_arg<R>(r: R, access: Access) -> Arg<R> {
+    Arg { operand: Operand::Reg(r, Width::W64), access }
+}
+
+/// An instruction of the toy's that goes on to the next and changes nothing but its operands.
+fn plain<R>(op: &'static str, args: Vec<Arg<R>>) -> Inst<&'static str, R> {
+    Inst { op, args, implicit: vec![], flow: Flow::Next, clobbers: vec![] }
+}
+
 impl Spill<&'static str> for Toy {
     fn width(&self, _: Class) -> Width {
         Width::W64
     }
 
     fn store(&self, slot: SlotId, var: VReg) -> Inst<&'static str, VReg> {
-        let args =
-            vec![slot_arg(slot, Access::Write), Arg { operand: Operand::Reg(var, Width::W64), access: Access::Read }];
-        Inst { op: "store", args, implicit: vec![], flow: Flow::Next }
+        plain("store", vec![slot_arg(slot, Access::Write), reg_arg(var, Access::Read)])
     }
 
     fn load(&self, var: VReg, slot: SlotId) -> Inst<&'static str, VReg> {
-        let args =
-            vec![Arg { operand: Operand::Reg(var, Width::W64), access: Access::Write }, slot_arg(slot, Access::Read)];
-        Inst { op: "load", args, implicit: vec![], flow: Flow::Next }
+        plain("load", vec![reg_arg(var, Access::Write), slot_arg(slot, Access::Read)])
     }
+
+    fn copy(&self, to: VReg, from: VReg) -> Inst<&'static str, VReg> {
+        plain("copy", vec![reg_arg(to, Access::Write), reg_arg(from, Access::Read)])
+    }
+}
+
+/// The FNV hash of `values`, which `op` and `call` write.
+fn hash(values: impl IntoIterator<Item = u64>) -> u64 {
+    values.into_iter().fold(0xcbf2_9ce4_8422_2325u64, |h, x| (h ^ x).wrapping_mul(0x100_0000_01b3))
 }
 
 /// What `body` returns, run from registers that hold `params` and `slots` slots of memory
 /// that hold zero: `op` writes a hash of its immediate and the registers it reads, `add` adds
 /// the second to the first, `dec` takes one from its register and jumps unless that leaves
-/// zero, `load` and `store` move a register's value to a slot and back, and `ret` returns what
-/// it reads. Reading a register nothing wrote, or running past ten thousand instructions,
-/// panics.
-fn run<R: Register + Ord>(body: &[Item<&'static str, R>], params: &[(R, u64)], slots: usize) -> u64 {
+/// zero, `load` and `store` move a register's value to a slot and back, `copy` moves one to
+/// another, `call` writes a hash of the arguments it reads to its result, if it has one, and
+/// `ret` returns what it reads. Reading a register nothing wrote, or running past ten thousand
+/// instructions, panics.
+///
+/// A call writes junk to each of the machine's registers it changes, its `clobbers`, that
+/// `reg` says is a register of `R`'s, as a callee may; the result goes in after. So a value
+/// kept in one across a call is lost, and the run returns something else.
+fn run<R: Register + Ord>(
+    body: &[Item<&'static str, R>],
+    params: &[(R, u64)],
+    slots: usize,
+    reg: fn(PReg) -> Option<R>,
+) -> u64 {
     let mut regs: BTreeMap<R, u64> = params.iter().copied().collect();
     let mut mem = vec![0u64; slots];
     let place = |l: Label| body.iter().position(|item| *item == Item::Label(l)).expect("placed");
     let mut at = 0;
+    let mut calls = 0;
     for _ in 0..10_000 {
         let Item::Inst(inst) = &body[at] else {
             at += 1;
@@ -72,7 +97,7 @@ fn run<R: Register + Ord>(body: &[Item<&'static str, R>], params: &[(R, u64)], s
             Operand::Imm(imm) => imm.value as u64,
             _ => unreachable!("the toy has no {:?}", a.operand),
         };
-        let reg = |a: &Arg<R>| match a.operand {
+        let reg_of = |a: &Arg<R>| match a.operand {
             Operand::Reg(r, _) => r,
             _ => unreachable!("{:?} is no register", a.operand),
         };
@@ -80,26 +105,37 @@ fn run<R: Register + Ord>(body: &[Item<&'static str, R>], params: &[(R, u64)], s
         match inst.op {
             "op" => {
                 let read = inst.args[1..].iter().filter(|a| a.access == Access::Read);
-                let hash =
-                    read.fold(0xcbf2_9ce4_8422_2325u64, |h, a| (h ^ value(a, &regs)).wrapping_mul(0x100_0000_01b3));
-                regs.insert(reg(&inst.args[0]), hash);
+                let h = hash(read.map(|a| value(a, &regs)));
+                regs.insert(reg_of(&inst.args[0]), h);
             }
             "add" => {
                 let sum = value(&inst.args[0], &regs).wrapping_add(value(&inst.args[1], &regs));
-                regs.insert(reg(&inst.args[0]), sum);
+                regs.insert(reg_of(&inst.args[0]), sum);
             }
             "dec" => {
                 let left = value(&inst.args[0], &regs) - 1;
-                regs.insert(reg(&inst.args[0]), left);
+                regs.insert(reg_of(&inst.args[0]), left);
                 jump = left != 0;
             }
-            "load" => {
+            "load" | "copy" => {
                 let v = value(&inst.args[1], &regs);
-                regs.insert(reg(&inst.args[0]), v);
+                regs.insert(reg_of(&inst.args[0]), v);
             }
             "store" => {
                 let Operand::Mem(Mem { base: Base::Slot(s), .. }) = inst.args[0].operand else { unreachable!() };
                 mem[s.0 as usize] = value(&inst.args[1], &regs);
+            }
+            "call" => {
+                let h = hash(inst.implicit.iter().filter(|a| a.access == Access::Read).map(|a| value(a, &regs)));
+                calls += 1;
+                for (k, &c) in inst.clobbers.iter().enumerate() {
+                    if let Some(c) = reg(c) {
+                        regs.insert(c, 0xdead_0000 + calls * 64 + k as u64);
+                    }
+                }
+                if let Some(result) = inst.implicit.iter().find(|a| a.access == Access::Write) {
+                    regs.insert(reg_of(result), h);
+                }
             }
             "ret" => return value(inst.operands().next().expect("a result"), &regs),
             op => unreachable!("the toy does not run `{op}`"),
@@ -120,13 +156,22 @@ fn same(p: &Program<&'static str>, m: &Toy, args: &[u64]) -> Compiled<&'static s
     let c = compile(p, m).unwrap();
     let before: Vec<(VReg, u64)> = p.params.iter().map(|&(v, _)| v).zip(args.iter().copied()).collect();
     let after: Vec<(PReg, u64)> = p.params.iter().map(|&(_, r)| r).zip(args.iter().copied()).collect();
-    assert_eq!(run(&c.body, &after, c.frame.slots.len()), run(&p.body, &before, p.slots.len()), "for {args:?}");
+    assert_eq!(
+        run(&c.body, &after, c.frame.slots.len(), Some),
+        run(&p.body, &before, p.slots.len(), |_| None),
+        "for {args:?}"
+    );
     c
 }
 
 /// The names of the variables `c` spilled, in the order they did.
 fn spilled(c: &Compiled<&'static str>) -> Vec<String> {
     c.frame.slots.iter().filter(|s| s.spill).map(|s| s.name.clone()).collect()
+}
+
+/// The opcodes of `c`, in order.
+fn ops(c: &Compiled<&'static str>) -> Vec<&'static str> {
+    c.body.iter().filter_map(|i| if let Item::Inst(i) = i { Some(i.op) } else { None }).collect()
 }
 
 fn r(hw: u8) -> PReg {
@@ -149,9 +194,11 @@ impl Builder {
                 regs: vec![],
                 params: vec![],
                 results: vec![],
+                pinned: vec![],
                 body: vec![],
                 slots: vec![],
                 consts: vec![],
+                funcs: vec![],
             },
             0,
         )
@@ -170,17 +217,44 @@ impl Builder {
     }
 
     fn inst(&mut self, op: &'static str, args: &[(VReg, Access)], flow: Flow) {
-        let args = args.iter().map(|&(v, access)| Arg { operand: Operand::Reg(v, Width::W64), access }).collect();
-        self.0.body.push(Item::Inst(Inst { op, args, implicit: vec![], flow }));
+        let args = args.iter().map(|&(v, access)| reg_arg(v, access)).collect();
+        self.0.body.push(Item::Inst(Inst { op, args, implicit: vec![], flow, clobbers: vec![] }));
     }
 
     /// `dst = op(srcs)`, with an immediate of its own, so that no two compute the same.
     fn def(&mut self, dst: VReg, srcs: &[VReg]) {
         self.1 += 1;
-        let mut args = vec![Arg { operand: Operand::Reg(dst, Width::W64), access: Access::Write }];
+        let mut args = vec![reg_arg(dst, Access::Write)];
         args.push(Arg { operand: Operand::Imm(Imm { value: self.1, hex: false }), access: Access::Read });
-        args.extend(srcs.iter().map(|&s| Arg { operand: Operand::Reg(s, Width::W64), access: Access::Read }));
-        self.0.body.push(Item::Inst(Inst { op: "op", args, implicit: vec![], flow: Flow::Next }));
+        args.extend(srcs.iter().map(|&s| reg_arg(s, Access::Read)));
+        self.0.body.push(Item::Inst(plain("op", args)));
+    }
+
+    /// A call that changes the registers `clobbers`, as a machine's code makes one: each of
+    /// `args` copied to a variable of its own, pinned in the register given with it, and the
+    /// result, if `dst` says where it goes, given back in a variable pinned in the register
+    /// given with it and copied to `dst`.
+    fn call(&mut self, dst: Option<(VReg, u8)>, args: &[(VReg, u8)], clobbers: &[u8]) {
+        let mut implicit = vec![];
+        for &(a, hw) in args {
+            let name = self.0.regs[a.id as usize].name.clone();
+            let pinned = self.var(&name);
+            self.0.pinned.push((pinned, r(hw)));
+            self.0.body.push(Item::Inst(Toy::copy(&toy(0, &[]), pinned, a)));
+            implicit.push(reg_arg(pinned, Access::Read));
+        }
+        let back = dst.map(|(d, hw)| {
+            let name = self.0.regs[d.id as usize].name.clone();
+            let pinned = self.var(&name);
+            self.0.pinned.push((pinned, r(hw)));
+            implicit.push(reg_arg(pinned, Access::Write));
+            (d, pinned)
+        });
+        let clobbers = clobbers.iter().map(|&h| r(h)).collect();
+        self.0.body.push(Item::Inst(Inst { op: "call", args: vec![], implicit, flow: Flow::Next, clobbers }));
+        if let Some((d, pinned)) = back {
+            self.0.body.push(Item::Inst(Toy::copy(&toy(0, &[]), d, pinned)));
+        }
     }
 
     fn label(&mut self, l: u32) {
@@ -194,8 +268,15 @@ impl Builder {
     }
 }
 
+/// The register of the first variable named `name`: the program's own, before any that
+/// splitting or spilling made of it.
 fn reg_of(c: &kgen_core::Compiled<&'static str>, name: &str) -> PReg {
     c.assignment.iter().find(|(info, _)| info.name == name).and_then(|(_, r)| *r).unwrap()
+}
+
+/// The registers of every variable named `name`, in order.
+fn regs_of(c: &kgen_core::Compiled<&'static str>, name: &str) -> Vec<PReg> {
+    c.assignment.iter().filter(|(info, _)| info.name == name).filter_map(|(_, r)| *r).collect()
 }
 
 #[test]
@@ -227,6 +308,7 @@ fn an_instruction_that_reads_two_values_needs_two_registers_whatever_spills() {
             var: "y".into(),
             near: Some("sum".into()),
             taken: vec![("x".into(), r(0))],
+            changed: vec![],
             have: 1,
         }
     );
@@ -257,6 +339,7 @@ fn a_value_live_around_a_loop_keeps_its_register_inside() {
         var: "t".into(),
         near: None,
         taken: vec![("n".into(), r(1)), ("acc".into(), r(0))],
+        changed: vec![],
         have: 2,
     };
     assert_eq!(compile(&b.0, &toy(2, &[])).unwrap_err(), short);
@@ -269,15 +352,19 @@ fn a_parameter_and_a_result_share_a_register_when_they_do_not_overlap() {
     let q = b.var("q");
     b.def(q, &[p]);
     b.ret(q, 0);
-    assert_eq!(reg_of(&compile(&b.0, &toy(1, &[])).unwrap(), "q"), r(0));
+    let c = same(&b.0, &toy(1, &[]), &[5]);
+    assert_eq!((reg_of(&c, "q"), ops(&c)), (r(0), vec!["op", "ret"]));
 
+    // When they overlap, the result moves to its register just before the return.
     let mut b = Builder::new();
     let p = b.param("p", 0);
-    let q = b.var("q");
+    let (q, u) = (b.var("q"), b.var("u"));
     b.def(q, &[p]);
-    b.inst("use", &[(p, Access::Read)], Flow::Next);
+    b.def(u, &[p]);
     b.ret(q, 0);
-    assert_eq!(compile(&b.0, &toy(2, &[])).unwrap_err(), Error::FixedClash { a: "p".into(), b: "q".into(), reg: r(0) });
+    let c = same(&b.0, &toy(2, &[]), &[5]);
+    assert_eq!(regs_of(&c, "q"), [r(1), r(0)]);
+    assert_eq!(ops(&c), ["op", "op", "copy", "ret"]);
 }
 
 #[test]
@@ -464,4 +551,171 @@ fn a_result_spills_and_comes_back_to_the_register_it_leaves_in() {
     let Item::Inst(load) = last[1] else { panic!("a load before the return") };
     assert_eq!((load.op, load.args[0].operand), ("load", Operand::Reg(r(0), Width::W64)));
     assert_eq!(reg_of(&c, "res"), r(0));
+}
+
+#[test]
+fn a_value_live_across_a_call_is_kept_in_a_register_the_call_does_not_change() {
+    let build = |call: bool| {
+        let mut b = Builder::new();
+        let (x, y) = (b.var("x"), b.var("y"));
+        b.def(x, &[]);
+        if call {
+            b.call(None, &[], &[0, 1, 2]);
+        }
+        b.def(y, &[x]);
+        b.ret(y, 0);
+        b
+    };
+    assert_eq!(reg_of(&same(&build(false).0, &toy(4, &[3]), &[]), "x"), r(0));
+    let c = same(&build(true).0, &toy(4, &[3]), &[]);
+    assert_eq!((reg_of(&c, "x"), c.frame.saved.clone()), (r(3), vec![r(3)]));
+}
+
+#[test]
+fn a_value_live_across_a_call_that_changes_every_register_spills() {
+    let mut b = Builder::new();
+    let (x, y) = (b.var("x"), b.var("y"));
+    b.def(x, &[]);
+    b.call(None, &[], &[0, 1, 2]);
+    b.def(y, &[x]);
+    b.ret(y, 0);
+    let c = same(&b.0, &toy(3, &[]), &[]);
+    assert_eq!(spilled(&c), ["x"]);
+    assert_eq!(ops(&c), ["op", "store", "call", "load", "op", "ret"]);
+}
+
+#[test]
+fn a_call_is_given_its_arguments_in_their_registers_and_gives_back_its_result() {
+    let mut b = Builder::new();
+    let (x, y, res) = (b.var("x"), b.var("y"), b.var("res"));
+    b.def(x, &[]);
+    b.def(y, &[]);
+    b.call(Some((res, 0)), &[(x, 1), (y, 2)], &[0, 1, 2]);
+    b.ret(res, 0);
+    let c = same(&b.0, &toy(4, &[3]), &[]);
+    // Each of `x` and `y` is made where its argument goes, so that its copy moves nothing.
+    assert_eq!([reg_of(&c, "x"), reg_of(&c, "y"), reg_of(&c, "res")], [r(1), r(2), r(0)]);
+    let moves: Vec<(PReg, PReg)> = c
+        .body
+        .iter()
+        .filter_map(|i| match i {
+            Item::Inst(Inst { op: "copy", args, .. }) => match (args[0].operand, args[1].operand) {
+                (Operand::Reg(to, _), Operand::Reg(from, _)) => Some((to, from)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(moves, [(r(1), r(1)), (r(2), r(2)), (r(0), r(0))]);
+    assert!(c.frame.saved.is_empty());
+}
+
+#[test]
+fn arguments_that_swap_registers_go_through_a_third() {
+    let mut b = Builder::new();
+    let (p, q) = (b.param("p", 0), b.param("q", 1));
+    let res = b.var("res");
+    b.call(Some((res, 0)), &[(q, 0), (p, 1)], &[0, 1, 2]);
+    b.ret(res, 0);
+    let c = same(&b.0, &toy(3, &[]), &[7, 9]);
+    // `p` arrives in r0, which `q` is copied to while `p` is still to be read: so it moves
+    // to a variable of its own on entry, in r2, and is copied from there to its argument, in r1.
+    assert_eq!(regs_of(&c, "p"), [r(2), r(1), r(0)]);
+    assert_eq!(ops(&c), ["copy", "copy", "copy", "call", "copy", "ret"]);
+}
+
+#[test]
+fn a_parameter_live_across_a_call_moves_on_entry() {
+    let mut b = Builder::new();
+    let p = b.param("p", 0);
+    let y = b.var("y");
+    b.call(None, &[], &[0, 1]);
+    b.def(y, &[p]);
+    b.ret(y, 0);
+    let c = same(&b.0, &toy(3, &[2]), &[7]);
+    // The variable `p` is made in r2, which the call keeps, and the one it arrives in is
+    // copied there.
+    assert_eq!(regs_of(&c, "p"), [r(2), r(0)]);
+    assert_eq!(ops(&c), ["copy", "call", "op", "ret"]);
+    assert_eq!(c.frame.saved, [r(2)]);
+}
+
+#[test]
+fn a_result_live_across_a_call_moves_into_its_register_before_the_return() {
+    let mut b = Builder::new();
+    let x = b.var("x");
+    b.def(x, &[]);
+    b.call(None, &[], &[0, 1]);
+    b.ret(x, 0);
+    let c = same(&b.0, &toy(3, &[2]), &[]);
+    assert_eq!(regs_of(&c, "x"), [r(2), r(0)]);
+    assert_eq!(ops(&c), ["op", "call", "copy", "ret"]);
+}
+
+#[test]
+fn a_parameter_returned_in_another_register_is_copied_there() {
+    let mut b = Builder::new();
+    let p = b.param("p", 1);
+    b.ret(p, 0);
+    let c = same(&b.0, &toy(2, &[]), &[3]);
+    assert_eq!(regs_of(&c, "p"), [r(1), r(0)]);
+    assert_eq!(ops(&c), ["copy", "ret"]);
+}
+
+#[test]
+fn two_arguments_in_one_register_at_once_are_an_error() {
+    let mut b = Builder::new();
+    let (x, y) = (b.var("x"), b.var("y"));
+    b.def(x, &[]);
+    b.def(y, &[]);
+    b.call(None, &[(x, 0), (y, 0)], &[0, 1]);
+    let z = b.var("z");
+    b.def(z, &[]);
+    b.ret(z, 0);
+    assert_eq!(compile(&b.0, &toy(3, &[])).unwrap_err(), Error::FixedClash { a: "x".into(), b: "y".into(), reg: r(0) });
+}
+
+#[test]
+fn a_value_that_may_not_spill_and_is_live_across_a_call_that_changes_every_register_is_an_error() {
+    // `x` is written as `dec` jumps, which leaves no place for a store.
+    let mut b = Builder::new();
+    let n = b.param("n", 0);
+    let x = b.var("x");
+    b.def(x, &[n]);
+    b.label(1);
+    b.inst("dec", &[(x, Access::ReadWrite)], Flow::Branch(Label(1)));
+    b.call(None, &[], &[0, 1]);
+    let y = b.var("y");
+    b.def(y, &[x]);
+    b.ret(y, 0);
+    let err = compile(&b.0, &toy(2, &[])).unwrap_err();
+    assert_eq!(
+        err,
+        Error::OutOfRegisters {
+            class: Class::Gpr,
+            var: "x".into(),
+            near: None,
+            taken: vec![],
+            changed: vec![r(0), r(1)],
+            have: 2,
+        }
+    );
+    assert_eq!(
+        err.to_string(),
+        "no Gpr register left for `x`: an instruction it is live across changes all 2, as a call does"
+    );
+}
+
+#[test]
+fn a_pinned_value_live_across_a_call_that_changes_its_register_is_an_error() {
+    let mut b = Builder::new();
+    let a = b.var("a");
+    b.0.pinned.push((a, r(0)));
+    b.def(a, &[]);
+    b.call(None, &[], &[0, 1]);
+    let y = b.var("y");
+    b.def(y, &[a]);
+    b.ret(y, 0);
+    let err = compile(&b.0, &toy(3, &[])).unwrap_err();
+    assert_eq!(err, Error::FixedChanged { var: "a".into(), reg: r(0) });
 }

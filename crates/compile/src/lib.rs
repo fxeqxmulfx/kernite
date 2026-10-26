@@ -24,7 +24,7 @@ pub fn check<Op>(p: &Program<Op>) -> Result<(), Error> {
 
 /// Allocates `p`'s variables to `m`'s registers, spilling to the stack the ones that do not
 /// fit, and lays out its frame.
-pub fn compile<Op: Clone>(p: &Program<Op>, m: &(impl Machine + Spill<Op>)) -> Result<Compiled<Op>, Error> {
+pub fn compile<Op: Clone + PartialEq>(p: &Program<Op>, m: &(impl Machine + Spill<Op>)) -> Result<Compiled<Op>, Error> {
     let (p, regs) = alloc::allocate(p, m, m)?;
     let reg = |v: kgen_core::VReg| regs[v.id as usize].expect("every variable named has a register");
     let body = p
@@ -38,6 +38,7 @@ pub fn compile<Op: Clone>(p: &Program<Op>, m: &(impl Machine + Spill<Op>)) -> Re
                 args: inst.args.iter().map(|arg| arg.map(reg)).collect(),
                 implicit: inst.implicit.iter().map(|arg| arg.map(reg)).collect(),
                 flow: inst.flow.clone(),
+                clobbers: inst.clobbers.clone(),
             }),
         })
         .collect();
@@ -50,6 +51,7 @@ pub fn compile<Op: Clone>(p: &Program<Op>, m: &(impl Machine + Spill<Op>)) -> Re
         body,
         frame: frame::layout(&p.slots, &used, m),
         consts: p.consts.clone(),
+        funcs: p.funcs.clone(),
         assignment: p.regs.iter().cloned().zip(regs).collect(),
     })
 }

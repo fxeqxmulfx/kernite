@@ -14,6 +14,6 @@ mod reg;
 pub use machine::{Machine, Spill};
 pub use operand::{Access, Arg, Base, Imm, Mem, Operand, Width};
 pub use program::{
-    Compiled, Const, ConstId, Flow, Frame, Inst, Item, Label, Program, RegInfo, Signature, Slot, SlotId,
+    Compiled, Const, ConstId, Flow, Frame, FuncId, Inst, Item, Label, Program, RegInfo, Signature, Slot, SlotId,
 };
 pub use reg::{Class, PReg, Register, VReg};

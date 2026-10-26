@@ -153,8 +153,8 @@ The plan:
   cooperative kernel runs on a grid: it is launched, not called.
 - **The language** is PTX's: `call(r, f, (a, b))`, `call(f, (a, b))`, `call(f, a)`, `call(f)`.
   An argument is a variable of the class SysV passes the parameter in, a `gpr` for an integer or
-  a pointer and an `xmm` for a float, or an integer known now. `r` is a `gpr` or an `xmm`, as the
-  function returns. `lea(fp, [f])` puts `f`'s address in `fp`, for `call(r, fp, (a, b))` and
+  a pointer and an `xmm` for a float, or a value known now: an integer, or a float, which x86
+  reads from memory. `r` is a `gpr` or an `xmm`, as the function returns. `lea(fp, [f])` puts `f`'s address in `fp`, for `call(r, fp, (a, b))` and
   `call(r, fp, (a, b), (f, g))`. A function `-> !` ends each way out in `ud2`, a new
   instruction, or in a call of one that never returns.
 - **What SysV asks of a call.** The callee keeps to it:
@@ -195,8 +195,7 @@ The plan:
   each of its instances, so that its callers still compile.
 - **Not in it: dividing.** `div` reads and writes `rdx:rax`, registers of its own, as a call does,
   and the pinned variables would make it possible later. So the CPU's `gcd` is Stein's, by shifts
-  and subtractions, where the GPU's is Euclid's, by remainders. To decide: `div` now, for Euclid's
-  on both, or later. I'd do it later.
+  and subtractions, where the GPU's is Euclid's, by remainders. Decided: later.
 - **Tests:**
   - kgen-compile's Toy machine calls too. Its interpreter writes junk to every register a call
     changes, so a test fails if a value was kept in one across a call. Splits are run on the
@@ -213,8 +212,8 @@ The plan:
   - my-app's `gcds` for the CPU calls `gcd` for each pair. It keeps its pointers, its count and
     its index in the registers a callee keeps. It is checked against the reference the GPU's is
     held to.
-  - my-app's `sum_halves` is a float sum that adds each half by a call of itself, so that a
-    vector lives across a call. It is checked against a scalar reference bit for bit.
+  - my-app's `sum16` adds what `sum8` gives for each half, so that a float lives across a call.
+    It is checked against `sum8`'s reference bit for bit.
 
 ## 5. Memory of the module's
 
@@ -238,8 +237,8 @@ The plan:
 - **Whose memory.** A module's statics are its kernels': in the GPU's memory when they are PTX
   kernels, and in the process's when they are x86 ones. A module with kernels of both and a
   static is an error that says to split it. A module of statics and no kernels is the GPU's, as
-  now. To decide: this, or a type of the CPU's own for its statics. I'd do this, so that
-  `global` and `constant` say the same on both.
+  now. Decided: this, so that `global` and `constant` say the same on both, rather than a type
+  of the CPU's own for its statics.
 - **The types** are PTX's. The kernels read and write `global<..>`, and only read
   `constant<..>`, which kgen checks, as it does for PTX. The host writes both.
 - **Reaching it.**
@@ -352,7 +351,32 @@ The plan:
     12 threads of this machine as well.
   - The tests run on four threads at most, since `cargo test` runs tests beside each other and
     a spinning thread takes a core.
-- Steps 1 to 3 are done, and merged into master at 1a154ab, which is not pushed.
-- Steps 4 to 6 are planned on the branch `cpu-calls`; none has started. To decide:
-  - in step 4, `div` now, for Euclid's `gcd` on the CPU as on the GPU, or later;
-  - in step 5, whose a module's statics are: its kernels', or the CPU's by a type of its own.
+- Steps 1 to 3 are done, and merged into master at 1a154ab, which is pushed.
+- Step 4, calls, is done, on the branch `cpu-calls`:
+  - The allocator (`crates/compile/src/alloc.rs`). An instruction's `clobbers` are the registers
+    it changes besides its operands, which no variable live across it takes. `Program::pinned`
+    holds the variables that stay in one register throughout, which never split or spill: a
+    call's arguments and its result. A parameter or a result that clashes with a call, or with
+    an argument, splits once, into a variable of its own (`x=rdi,rbx` in the header). A variable
+    moved to or from a pinned one prefers its register. The new errors are `FixedTwice`,
+    `FixedClash` and `FixedChanged`; `OutOfRegisters` says when a call changed the registers.
+  - The x86 target (`call` in `crates/x86/src/lang.rs`) has `call(r, f, (a, b))` and its shorter
+    forms, `lea(fp, [f])`, `call(r, fp, (a, b))` of variables, `call(r, fp, (a, b), (f, g))`,
+    `ud2`, and `-> !`. `crates/kgen/src/lib.rs` gives it the `Prototype` of each of the module's
+    `extern "sysv64"` functions and instances, which each call is checked against; a cooperative
+    one it may not call. The checks of a call through a gpr with the functions given are each
+    function's: a variable passes the same whatever its callee makes of it, and a value known
+    now is of one type, so they cannot disagree.
+  - The listing (`crates/x86/src/intel.rs`) has `call {f0}`, `lea rax, [rip + {f0}]`, and what
+    each names at its end, `# f0: gcd`. The header says the padding, `and 8 more so that it calls
+    at a multiple of 16`, and `-> !` when no way out returns. A move to the register it is from
+    is left out where it changes nothing.
+  - The macro passes `f0 = sym gcd`, or `sym super::__kgen_tile::I1` for an instance, and leaves
+    a stub for each instance of a function that does not compile.
+  - Tests: the Toy machine's, its interpreter writing junk to each register a call changes; the
+    exact listings and every error in `crates/kgen/tests/x86.rs`; my-app's `gcds`, Stein's `gcd`
+    on 64 bits, and `sum16`, against Euclid's and `sum8`'s references, with their snapshots.
+  - Decided: `div` later, so the CPU's `gcd` is Stein's.
+  - Not done: a value moved to the register a call wants though it is there already (`mov rbx,
+    rdi` then `mov rdi, rbx`), and a tail call, which is a call and a `ret`.
+- Steps 5 and 6 are next. Decided, for step 5: a module's statics are its kernels'.
