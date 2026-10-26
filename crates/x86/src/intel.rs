@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use kgen_core::{Base, Class, Compiled, Const, Flow, Frame, Item, Label, Mem, Operand, PReg, Signature, Width};
 
 use crate::op::Op;
-use crate::sysv::{RBP, RSP};
+use crate::sysv::{PAGE, R11, RBP, RSP};
 
 /// A line of a listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,8 +44,9 @@ impl Listing {
         })
     }
 
-    /// Everything, for people and for snapshot files: the signature, where each variable
-    /// lives, the code with its notes, and the constants' bytes.
+    /// Everything, for people and for snapshot files: the signature, the frame and where each
+    /// of its slots is, where each variable lives, the code with its notes, and the constants'
+    /// bytes.
     pub fn text(&self) -> String {
         let mut out = String::new();
         let class = |c: &Class| match c {
@@ -66,6 +67,11 @@ impl Listing {
             saved.join(", ")
         )
         .unwrap();
+        for (slot, &at) in self.frame.slots.iter().zip(&self.frame.offsets) {
+            let sp = name(RSP, Width::W64);
+            let at = if at == 0 { sp } else { format!("{sp} + {at}") };
+            writeln!(out, "# {}: {} at {at}", slot.name, crate::bytes(slot.size.into())).unwrap();
+        }
         // A name the kernel gives many variables, one per place it writes one, shows once
         // with every register those got.
         let mut names: Vec<(&str, Vec<&str>)> = vec![];
@@ -108,21 +114,26 @@ pub fn print(c: &Compiled<Op>) -> Listing {
     let mut numbers = BTreeMap::new();
     let mut places = BTreeMap::new();
     let mut next = 2;
+    let mut number = || {
+        while next.to_string().chars().all(|d| d == '0' || d == '1') {
+            next += 1;
+        }
+        next += 1;
+        next - 1
+    };
+    // The prologue's loop, if it has one, comes first.
+    let looped = (probes(&c.frame) > UNROLLED).then(&mut number);
     for (i, item) in c.body.iter().enumerate() {
         if let Item::Label(l) = item {
-            while next.to_string().chars().all(|d| d == '0' || d == '1') {
-                next += 1;
-            }
-            numbers.insert(*l, next);
+            numbers.insert(*l, number());
             places.insert(*l, i);
-            next += 1;
         }
     }
     let vector = c.body.iter().any(|item| match item {
         Item::Inst(inst) => inst.operands().any(|a| a.regs().any(|r| r.class == Class::Vec)),
         _ => false,
     });
-    let mut lines: Vec<Line> = prologue(&c.frame).into_iter().map(Line::Code).collect();
+    let mut lines = prologue(&c.frame, looped);
     for (i, item) in c.body.iter().enumerate() {
         match item {
             Item::Label(l) => lines.push(Line::Code(format!("{}:", numbers[l]))),
@@ -170,18 +181,62 @@ fn jump_target(l: Label, from: usize, numbers: &BTreeMap<Label, u32>, places: &B
     format!("{}{way}", numbers[&l])
 }
 
-/// Saves the callee-saved registers the body writes, then, if there are slots, keeps the
-/// caller's stack pointer in `rbp` and aligns the stack below it.
-fn prologue(frame: &Frame) -> Vec<String> {
+/// Pages past this many are touched in a loop.
+const UNROLLED: u32 = 3;
+
+/// How many bytes the stack pointer is a multiple of, always: SysV calls a function at a
+/// multiple of 16, and each push moves it by 8.
+const ALIGNED: u32 = 8;
+
+/// How many pages the prologue touches on the way down to `frame`'s bottom, a page apart: as
+/// many as leave no more than a page untouched above the bottom, counting the most the
+/// alignment may add.
+fn probes(frame: &Frame) -> u32 {
+    match frame.size {
+        0 => 0,
+        size => (size + frame.align.saturating_sub(ALIGNED)).saturating_sub(PAGE).div_ceil(PAGE),
+    }
+}
+
+/// Saves the callee-saved registers the body writes; then, if there are slots, keeps the
+/// caller's stack pointer in `rbp`, and moves the stack pointer down past them and to their
+/// alignment.
+///
+/// The stack pointer never moves more than a page below memory the kernel has touched, so that
+/// a frame that runs past the end of the stack faults at the guard page there rather than step
+/// over it, as Rust's own functions do: a frame of more, its alignment counted, is touched a
+/// page at a time on the way down, past [`UNROLLED`] pages in a loop at label `looped`, which
+/// keeps its end in `r11`. The alignment comes last, a page at most, unless the stack pointer
+/// has it already.
+fn prologue(frame: &Frame, looped: Option<u32>) -> Vec<Line> {
     let (sp, fp) = (name(RSP, Width::W64), name(RBP, Width::W64));
-    let mut lines: Vec<String> = frame.saved.iter().map(|&r| format!("push {}", name(r, Width::W64))).collect();
-    if frame.size > 0 {
-        lines.extend([
-            format!("push {fp}"),
-            format!("mov {fp}, {sp}"),
-            format!("and {sp}, -{}", frame.align),
-            format!("sub {sp}, {}", frame.size),
-        ]);
+    let code = Line::Code;
+    let mut lines: Vec<Line> = frame.saved.iter().map(|&r| code(format!("push {}", name(r, Width::W64)))).collect();
+    if frame.size == 0 {
+        return lines;
+    }
+    assert!(frame.align <= PAGE, "a frame aligned to {}: the prologue might step over a page", frame.align);
+    lines.extend([code(format!("push {fp}")), code(format!("mov {fp}, {sp}"))]);
+    let pages = probes(frame);
+    if pages > 0 {
+        lines.push(Line::Note("the frame a page at a time, each touched, so that an overflow faults".into()));
+        let probe = [code(format!("sub {sp}, {PAGE}")), code(format!("or qword ptr [{sp}], 0"))];
+        match looped {
+            None => (0..pages).for_each(|_| lines.extend(probe.clone())),
+            Some(l) => {
+                let end = name(R11, Width::W64);
+                lines.extend([code(format!("lea {end}, [{sp} - {}]", pages * PAGE)), code(format!("{l}:"))]);
+                lines.extend(probe);
+                lines.extend([code(format!("cmp {sp}, {end}")), code(format!("jne {l}b"))]);
+            }
+        }
+    }
+    let rest = frame.size - pages * PAGE;
+    if rest > 0 {
+        lines.push(code(format!("sub {sp}, {rest}")));
+    }
+    if frame.align > ALIGNED {
+        lines.push(code(format!("and {sp}, -{}", frame.align)));
     }
     lines
 }

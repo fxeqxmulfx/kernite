@@ -87,8 +87,10 @@ pub struct RegInfo {
 }
 
 /// Stack memory a kernel asks for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Slot {
+    /// A name for people, which listings call it by.
+    pub name: String,
     /// Bytes.
     pub size: u32,
     /// Alignment, a power of two.
@@ -142,6 +144,8 @@ pub struct Frame {
     /// The callee-saved registers the body writes, to save on entry and restore at every
     /// return, in the order they are saved.
     pub saved: Vec<PReg>,
+    /// The slots, by [`SlotId`].
+    pub slots: Vec<Slot>,
     /// Each slot's offset from the stack pointer once it is aligned.
     pub offsets: Vec<u32>,
     /// Bytes the slots take together, a multiple of `align`; 0 with no slots.

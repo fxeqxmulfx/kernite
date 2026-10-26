@@ -22,3 +22,11 @@ pub use asm::{Asm, Stream};
 pub use op::Op;
 pub use operand::{Addr, Gpr, Hint, Slot, Src, Vector, Xmm, Ymm};
 pub use sysv::SysV;
+
+/// `n` bytes, in words: `1 byte`, `4 bytes`.
+fn bytes(n: u64) -> String {
+    match n {
+        1 => "1 byte".into(),
+        n => format!("{n} bytes"),
+    }
+}

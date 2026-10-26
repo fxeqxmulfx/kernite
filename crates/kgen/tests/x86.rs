@@ -142,7 +142,7 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ("let v: ymm; vaddps(v, v, 1.5);", "2:26: x86 takes floats from memory: `[1.5]`"),
         ("vfrobps(x);", "2:1: x86 has no instruction `vfrobps` that kgen knows"),
         ("let v: ymm; vaddps(v, v, w);", "2:26: `w` is not defined"),
-        ("let v: zmm;", "2:8: x86 variables are `gpr`, `ymm` and `xmm`, not `zmm`"),
+        ("let v: zmm;", "2:8: x86 variables are `gpr`, `ymm`, `xmm` and stack memory, `local<..>`; not `zmm`"),
         ("let v: ymm; vaddps(v, v, v);", "2:5: `v` is read before anything writes it"),
         ("shl(x, 64);", "2:8: `shl` wants an integer, 0 to 63; this is the integer 64"),
         ("sar(x, -1);", "2:8: `sar` wants an integer, 0 to 63; this is the integer -1"),
@@ -301,4 +301,228 @@ fn an_x86_kernel_is_not_cooperative() {
         "1:3: `#[cooperative]` goes on a GPU kernel, `extern \"ptx-kernel\"`, whose blocks wait for each other; `k` \
          is a kernel for x86-64, which no GPU launches"
     );
+}
+
+/// Stack memory is the kernel's frame: the header says where each slot lies, and brackets reach
+/// it from `rsp`, an index beside it.
+#[test]
+fn stack_memory_is_part_of_the_frame() {
+    let src = r#"
+        unsafe extern "sysv64" fn k(x: *const f32, i: usize) -> f32 {
+            let n: local<u64>;
+            let buf: local<[f32; 16], 32>;
+            let v: ymm;
+            vmovups(v, [x]);
+            vmovaps([buf + 32], v);
+            vmovaps([buf], v);
+            mov([n], i);
+            let p: gpr;
+            lea(p, [buf + 64]);
+            vmovss(v.xmm, [i + buf]);
+            vaddss(v.xmm, v.xmm, [buf + i * 4 + 60]);
+            add(i, [n]);
+            ret(v.xmm);
+        }
+    "#;
+    let want = "# k(gpr, gpr) -> vec
+# frame: 96 bytes aligned to 32, saves []
+# n: 8 bytes at rsp
+# buf: 64 bytes at rsp + 32
+# x=rdi i=rsi v=ymm0 p=rax
+    push rbp
+    mov rbp, rsp
+    sub rsp, 96
+    and rsp, -32
+    vmovups ymm0, ymmword ptr [rdi]
+    vmovaps ymmword ptr [rsp + 64], ymm0
+    vmovaps ymmword ptr [rsp + 32], ymm0
+    mov qword ptr [rsp], rsi
+    lea rax, [rsp + 96]
+    vmovss xmm0, dword ptr [rsp + rsi*1 + 32]
+    vaddss xmm0, xmm0, dword ptr [rsp + rsi*4 + 92]
+    add rsi, qword ptr [rsp]
+    mov rsp, rbp
+    pop rbp
+    vzeroupper
+    ret
+";
+    assert_eq!(kgen::x86_str(src, "k").unwrap().text(), want);
+}
+
+/// The stack pointer moves no more than a page below memory the kernel has touched, as Rust's
+/// functions do, so that a frame past the end of the stack faults at the guard page there
+/// rather than step over it: a bigger frame is touched a page at a time, in a loop past three
+/// pages. What the alignment may add counts, and the stack pointer is a multiple of 8 already.
+#[test]
+fn a_frame_of_more_than_a_page_is_touched_a_page_at_a_time() {
+    let prologue = |ty: &str| {
+        let code = compile("", &format!("let b: {ty}; let g: gpr; mov(g, [b]);")).unwrap();
+        let end = code.find("\nmov rax").unwrap();
+        code[..end].to_string()
+    };
+    let page = "sub rsp, 4096\nor qword ptr [rsp], 0";
+    let cases = [
+        ("local<u64>", "push rbp\nmov rbp, rsp\nsub rsp, 8".to_string()),
+        ("local<[u8; 4096]>", "push rbp\nmov rbp, rsp\nsub rsp, 4096".into()),
+        ("local<[u8; 4097]>", format!("push rbp\nmov rbp, rsp\n{page}\nsub rsp, 1")),
+        ("local<[u8; 4064], 32>", "push rbp\nmov rbp, rsp\nsub rsp, 4064\nand rsp, -32".into()),
+        ("local<[u8; 4096], 16>", format!("push rbp\nmov rbp, rsp\n{page}\nand rsp, -16")),
+        ("local<[u8; 4096], 4096>", format!("push rbp\nmov rbp, rsp\n{page}\nand rsp, -4096")),
+        ("local<[u8; 16384]>", format!("push rbp\nmov rbp, rsp\n{page}\n{page}\n{page}\nsub rsp, 4096")),
+        (
+            "local<[u8; 16385]>",
+            format!("push rbp\nmov rbp, rsp\nlea r11, [rsp - 16384]\n2:\n{page}\ncmp rsp, r11\njne 2b\nsub rsp, 1"),
+        ),
+    ];
+    for (ty, want) in cases {
+        assert_eq!(prologue(ty), want, "{ty}");
+    }
+}
+
+/// The prologue's loop takes the first label, and the body's come after it.
+#[test]
+fn the_prologues_loop_comes_before_the_bodys_labels() {
+    let code =
+        compile("n: usize", "let b: local<[u64; 4096]>;\nlabel(top);\nmov([b], n);\ndec(n);\njnz(top);").unwrap();
+    let want = "push rbp
+mov rbp, rsp
+lea r11, [rsp - 28672]
+2:
+sub rsp, 4096
+or qword ptr [rsp], 0
+cmp rsp, r11
+jne 2b
+sub rsp, 4096
+3:
+mov qword ptr [rsp], rdi
+dec rdi
+jnz 3b
+mov rsp, rbp
+pop rbp
+ret";
+    assert_eq!(code, want);
+}
+
+/// A helper takes stack memory as a parameter of the type it was declared.
+#[test]
+fn a_helper_takes_stack_memory_of_its_type() {
+    let src = |param: &str| {
+        format!(
+            "unsafe extern \"sysv64\" fn k() {{\nlet buf: local<[f32; 16], 32>;\nlet v: ymm;\nzero(v);\nstore(buf, \
+             v);\n}}\nfn store(b: {param}, v: ymm) {{\nvmovaps([b + 32], v);\n}}\n"
+        )
+    };
+    let code = kgen::x86_str(&src("local<[f32; 16], 32>"), "k").unwrap();
+    assert!(code.code().any(|l| l == "vmovaps ymmword ptr [rsp + 32], ymm0"), "{}", code.text());
+    let e = kgen::x86_str(&src("local<[f32; 16]>"), "k").unwrap_err();
+    assert_eq!(e, "5:7: `b`: `buf` is memory, `local<[f32; 16], 32>`; it is no `local<[f32; 16]>`");
+    let e = kgen::x86_str(&src("ymm"), "k").unwrap_err();
+    assert_eq!(e, "5:7: `b`: `buf` is memory, `local<[f32; 16], 32>`; it is no `ymm`");
+    let src = "unsafe extern \"sysv64\" fn k(x: *const f32) {\nload(x);\n}\nfn load(b: local<u64>) {}\n";
+    assert_eq!(kgen::x86_str(src, "k").unwrap_err(), "2:6: `b`: a gpr is no memory, `local<u64>`");
+}
+
+/// What kgen can check of stack memory, it does: its type, and an address where the index is 0.
+#[test]
+fn stack_memory_is_checked_where_kgen_can() {
+    let cases = [
+        ("let b: local<[f32]>;", "2:8: `local<[f32]>` has no size: stack memory has one, as in `local<[f32; 64]>`"),
+        ("let b: local<[f32; 0]>;", "2:8: `local<[f32; 0]>` holds nothing"),
+        ("let b: local<[f32; 4], 2>;", "2:8: an array of `f32` is aligned to 4 at least, not 2"),
+        ("let b: local<[f32; 4], 3>;", "2:8: what an address is a multiple of is a power of two, not 3"),
+        ("let b: local<[f32; 4], 8192>;", "2:8: stack memory is aligned to a page at most, 4096; not 8192"),
+        (
+            "let b: local<[bool; 4]>;",
+            "2:8: stack memory holds Rust's numbers, `u8` to `u64`, `i8` to `i64`, `usize`, `isize`, `f32` and `f64`; \
+             not `bool`",
+        ),
+        (
+            "let b: local<[f32; 4], 16, 2>;",
+            "2:8: `local<..>` is an array of Rust's numbers and what its address is a multiple of, `local<[f32; 64], \
+             32>`, or one, `local<u64>`; not `local<[f32; 4], 16, 2>`",
+        ),
+        (
+            "let b: shared<[f32; 4]>;",
+            "2:8: `shared<..>` is a GPU's memory; an x86 kernel has stack memory, `local<[f32; 4]>`",
+        ),
+        (
+            "let b: local<[u64; 300000000]>;",
+            "2:8: this makes the kernel's stack memory more than 2147483647 bytes, the most an address reaches past \
+             the stack pointer",
+        ),
+        (
+            "let b: local<[u8; 2147483647]>; let c: local<u8>;",
+            "2:40: this makes the kernel's stack memory more than 2147483647 bytes, the most an address reaches past \
+             the stack pointer",
+        ),
+        (
+            "let b: local<[f32; 16]>; let v: ymm; vmovups(v, [b - 4]);",
+            "2:49: `vmovups` reads at `[b - 4]`, before `b` starts",
+        ),
+        (
+            "let b: local<[f32; 16]>; let v: ymm; vmovups(v, [b + 40]);",
+            "2:49: `vmovups` reads 32 bytes at `[b + 40]`, past the end of `b`, 64 bytes",
+        ),
+        (
+            "let b: local<[f32; 16]>; let v: ymm; zero(v); vmovups([b + 36], v);",
+            "2:55: `vmovups` writes 32 bytes at `[b + 36]`, past the end of `b`, 64 bytes",
+        ),
+        (
+            "let b: local<u8>; let g: gpr; movzx(g.r32, [b]); mov([b], g.r32);",
+            "2:54: `mov` writes 4 bytes at `[b]`, past the end of `b`, 1 byte",
+        ),
+        (
+            "let b: local<[f32; 16]>; let v: ymm; vmovups(v, [b + 5000000000]);",
+            "2:49: `vmovups` reads 32 bytes at `[b + 5000000000]`, past the end of `b`, 64 bytes",
+        ),
+        (
+            "let b: local<[f32; 16]>; let v: ymm; vmovaps(v, [b]);",
+            "2:49: `vmovaps` reads 32 bytes at once, at an address that is a multiple of 32; `b` is at a multiple of \
+             4: `local<[f32; 16], 32>`, or `vmovups` at any",
+        ),
+        (
+            "let b: local<[f32; 16], 32>; let v: ymm; vmovaps(v, [b + 16]);",
+            "2:53: `vmovaps` reads 32 bytes at once, at an address that is a multiple of 32; `[b + 16]` is not one",
+        ),
+        (
+            "let b: local<[f32; 16], 32>; let v: ymm; vmovdqa(v.xmm, [b + 8]);",
+            "2:57: `vmovdqa` reads 16 bytes at once, at an address that is a multiple of 16; `[b + 8]` is not one",
+        ),
+        (
+            "let b: local<[f32; 16]>; let i: gpr; zero(i); let v: ymm; vmovss(v.xmm, [b + i * 4 + 64]);",
+            "2:73: `vmovss` reads 4 bytes at `[b + i * 4 + 64]`, past the end of `b`, 64 bytes, when `i` is 0",
+        ),
+        (
+            "let b: local<[f32; 16]>; let i: gpr; zero(i); let v: ymm; vmovss(v.xmm, [b + i * 4 - 4]);",
+            "2:73: `vmovss` reads at `[b + i * 4 - 4]`, before `b` starts, when `i` is 0",
+        ),
+        (
+            "let b: local<[f32; 16]>; let p: gpr; lea(p, [b + 68]);",
+            "2:45: `lea` takes the address `[b + 68]`, more than one past the end of `b`, 64 bytes",
+        ),
+        (
+            "let b: local<[f32; 16]>; let p: gpr; lea(p, [b - 4]);",
+            "2:45: `lea` takes the address `[b - 4]`, before `b` starts",
+        ),
+        (
+            "let b: local<[f32; 16]>; let v: ymm; vaddps(v, v, b);",
+            "2:51: `vaddps` takes no memory as an operand: `lea(p, [b])` puts the address of `b` in `p`, and `[b]` is \
+             what it holds",
+        ),
+        (
+            "let b: local<[f32; 16]>; let c: local<u64>; let g: gpr; mov(g, [b + c]);",
+            "2:64: an address names one memory at most; `b` and `c` are two",
+        ),
+        (
+            "let b: local<[f32; 16]>; let g: gpr; mov(g, [x + b * 4]);",
+            "2:45: an address adds memory as it is, as in `[b + i * 4]`; this multiplies `b` by 4",
+        ),
+        (
+            "let b: local<[f32; 16]>; let g: gpr; zero(g); mov(g, [b + g.r32 * 4]);",
+            "2:54: an address is made of gprs seen whole; this is a gpr's r32",
+        ),
+    ];
+    for (body, want) in cases {
+        assert_eq!(compile("x: *const f32", body).unwrap_err(), want, "{body}");
+    }
 }

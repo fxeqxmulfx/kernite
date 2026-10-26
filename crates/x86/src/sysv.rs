@@ -11,6 +11,16 @@ const fn vec(hw: u8) -> PReg {
 pub(crate) const RSP: PReg = gpr(4);
 pub(crate) const RBP: PReg = gpr(5);
 
+/// `r11`, which the prologue may use before the body runs: no parameter arrives in it, and the
+/// caller keeps nothing there.
+pub(crate) const R11: PReg = gpr(11);
+
+/// A page: below the end of a thread's stack lies one the thread may not touch, at least, so
+/// that running past the end faults. A frame touches its pages in turn, never moving the stack
+/// pointer more than this below memory it has touched, or it could step over that page into
+/// memory of another's.
+pub(crate) const PAGE: u32 = 4096;
+
 /// Where the integer and pointer parameters arrive, in order.
 pub(crate) const INT_PARAMS: [PReg; 6] = [gpr(7), gpr(6), gpr(2), gpr(1), gpr(8), gpr(9)];
 

@@ -9,7 +9,7 @@ use kgen_core::{
 
 use crate::op::Op;
 use crate::operand::{Addr, Gpr, Hint, Slot, Src, Vector, Xmm, Ymm, arg, control, gpr, mem, number, src, vec};
-use crate::sysv::{FLOAT_RESULT, INT_PARAMS};
+use crate::sysv::{FLOAT_RESULT, INT_PARAMS, PAGE};
 
 /// Instructions [`Asm::capture`] took out of a kernel, to [`Asm::splice`] back in.
 pub struct Stream(VecDeque<Item<Op, VReg>>);
@@ -106,10 +106,16 @@ impl Asm {
         self.p.body.push(Item::Note(text.into()));
     }
 
-    /// `size` bytes of stack, aligned to `align`.
-    pub fn slot(&mut self, size: u32, align: u32) -> Slot {
-        assert!(align.is_power_of_two(), "alignment {align}");
-        self.p.slots.push(SlotSpec { size, align });
+    /// `size` bytes of stack called `name`, aligned to `align`. Until written, they hold
+    /// whatever was there.
+    ///
+    /// # Panics
+    ///
+    /// On an alignment that is no power of two, or more than a page: the frame is touched a
+    /// page at a time on the way down, and a larger alignment could skip one.
+    pub fn slot(&mut self, name: impl Into<String>, size: u32, align: u32) -> Slot {
+        assert!(align.is_power_of_two() && align <= PAGE, "alignment {align}");
+        self.p.slots.push(SlotSpec { name: name.into(), size, align });
         Slot(SlotId(self.p.slots.len() as u32 - 1))
     }
 

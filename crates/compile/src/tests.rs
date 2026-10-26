@@ -247,9 +247,11 @@ fn slots_are_laid_out_at_their_alignment() {
     let x = b.var("x");
     b.def(x, &[]);
     b.ret(x, 0);
-    b.0.slots = vec![Slot { size: 4, align: 4 }, Slot { size: 32, align: 32 }, Slot { size: 8, align: 8 }];
+    let slot = |name: &str, size, align| Slot { name: name.into(), size, align };
+    b.0.slots = vec![slot("a", 4, 4), slot("b", 32, 32), slot("c", 8, 8)];
     let frame = compile(&b.0, &toy(1, &[])).unwrap().frame;
     assert_eq!((frame.offsets, frame.size, frame.align), (vec![0, 32, 64], 96, 32));
+    assert_eq!(frame.slots, b.0.slots);
 }
 
 #[test]

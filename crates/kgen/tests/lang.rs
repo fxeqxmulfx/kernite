@@ -303,7 +303,7 @@ fn errors_point_where_the_trouble_is() {
         ("let g: gpr; mov(g, 1.5f16);", "1:20: x86 takes floats from memory: `[1.5f16]`"),
         (
             "const K: usize = 4; let t: shared<[f32; 2 * K], 16>;",
-            "1:28: x86 variables are `gpr`, `ymm` and `xmm`, not `shared<[f32; 8], 16>`",
+            "1:28: `shared<..>` is a GPU's memory; an x86 kernel has stack memory, `local<[f32; 8], 16>`",
         ),
         ("let t: [f32];", "1:8: variables are declared so many at once: `let t: [u32; 4];`"),
         // The machine is given a name as it writes it, not as Rust must.

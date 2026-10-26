@@ -12,5 +12,5 @@ pub(crate) fn layout(slots: &[Slot], used: &[PReg], m: &dyn Machine) -> Frame {
         align = align.max(slot.align);
     }
     let size = if align == 0 { 0 } else { end.next_multiple_of(align) };
-    Frame { saved, offsets, size, align }
+    Frame { saved, slots: slots.to_vec(), offsets, size, align }
 }
