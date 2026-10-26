@@ -72,6 +72,13 @@
 //! An instance it does not list is a compile error where Rust compiles the call, in
 //! `cargo build`; `cargo check` evaluates no generic function's constants, and misses it.
 //!
+//! A GPU kernel whose blocks wait for each other, at `grid.sync()`, is `#[cooperative]`: its
+//! launcher launches it cooperatively, every block of the grid at once, so the grid has at
+//! most as many blocks as the GPU runs at once, which the method of its name and `_blocks`
+//! says, of so many threads a block and so many bytes of the launch's shared memory:
+//! `kernels.normalize_blocks(256, 0)?`. A grid of more is an error, and so is a GPU before
+//! Pascal's, `sm_60`, which launches none cooperatively.
+//!
 //! A GPU kernel is named in PTX as C++ names a function in namespaces, those of the
 //! workspace, the crate and its modules, mangled under Itanium's ABI:
 //! `_ZN4kgen6my_app3gpu5scaleE`, which `cu++filt`, Nsight and `cuda-gdb` show as
@@ -176,10 +183,13 @@ fn expand(body: TokenStream) -> TokenStream {
             ItemKind::Fn(f) => f,
         };
         let instances = lang::instances(&module, f);
+        let cooperative = kgen::cooperative(f);
         let Some((name, abi_span)) = &f.abi else {
             // A helper is checked where it is called; one that does not parse is an error
-            // whether it is called or not, as one that lists instances is.
-            for e in [f.body.as_ref().err(), instances.as_ref().err()].into_iter().flatten() {
+            // whether it is called or not, as one that lists instances is, or says it is
+            // cooperative.
+            let errors = [f.body.as_ref().err(), instances.as_ref().err(), cooperative.as_ref().err()];
+            for e in errors.into_iter().flatten() {
                 out.extend(error(at(e.span), &e.message));
             }
             continue;
@@ -202,7 +212,8 @@ fn expand(body: TokenStream) -> TokenStream {
         if abi != Abi::Sysv64 {
             first.get_or_insert(f.span);
         }
-        let instances = match instances {
+        // A `#[cooperative]` that is no GPU kernel's is said once, not for each instance.
+        let instances = match cooperative.and(instances) {
             Ok(instances) => instances,
             Err(e) => {
                 out.extend(error(at(e.span), &e.message));
@@ -284,7 +295,7 @@ fn expand(body: TokenStream) -> TokenStream {
             out.extend(error(at(span), &e));
             String::new()
         });
-        out.extend(gpu(&launchers, &symbols, &memory, &ptx, &top));
+        out.extend(gpu(&launchers, &symbols, &memory, &ptx, &top, &at));
         // The workspace's name is in the PTX, so it is built again when it changes.
         if let Some(manifest) = manifest.as_deref().and_then(Path::to_str) {
             out.extend(parse(&format!("const _: &[u8] = ::core::include_bytes!({manifest:?});")));
@@ -358,13 +369,16 @@ fn used(module: &lang::Module, read: &[String]) -> TokenStream {
 /// method to launch each kernel by its name: of each instance, for a kernel of compile-time
 /// arguments; one that never runs for a kernel that did not compile, launched `None`. Each of
 /// `symbols` is a kernel's name in `ptx`, by its index. Each static of `memory` has a method
-/// of its name too, which gives its memory on the GPU, or never runs, if it did not compile.
+/// of its name too, which gives its memory on the GPU, or never runs, if it did not compile;
+/// and each cooperative kernel has one that says how many blocks its grid has at most, unless
+/// a kernel or a static has that name, which is an error where `at` says.
 fn gpu(
     launchers: &[(&Fn, Option<Vec<Launched>>)],
     symbols: &[String],
     memory: &[(&lang::Static, Option<Static>)],
     ptx: &str,
     top: &[TokenTree],
+    at: &dyn std::ops::Fn(lang::Span) -> Span,
 ) -> TokenStream {
     let names: Vec<String> = symbols.iter().map(|s| named(s)).collect();
     let globals: Vec<String> = memory.iter().filter_map(|(_, m)| Some(named(&m.as_ref()?.memory.name))).collect();
@@ -393,8 +407,23 @@ fn gpu(
         names.join(", "),
         globals.join(", ")
     ));
+    let mut errors = TokenStream::new();
+    let taken: Vec<&str> =
+        launchers.iter().map(|(f, _)| f.name.as_str()).chain(memory.iter().map(|(s, _)| s.name.as_str())).collect();
     for (f, launched) in launchers {
         methods.extend(launcher(f, launched.as_deref(), top));
+        let Some(c) = &f.cooperative else { continue };
+        let name = blocks_name(f);
+        if taken.contains(&name.as_str()) {
+            let message = format!(
+                "`#[cooperative]` gives `Kernels` a method `{name}`, which says how many blocks a grid of `{}` has \
+                 at most, and a kernel or a static of the module is named `{name}` as well",
+                f.name
+            );
+            errors.extend(error(at(c.span), &message));
+            continue;
+        }
+        methods.extend(blocks(f, launched.as_deref(), top));
     }
     for (k, (s, made)) in memory.iter().enumerate() {
         // Its index among the variables the module has, those of the statics that compiled.
@@ -402,6 +431,7 @@ fn gpu(
         methods.extend(accessor(s, made.as_ref().map(|m| (m, i)), top));
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, methods))]);
+    out.extend(errors);
     out
 }
 
@@ -436,9 +466,17 @@ fn named(text: &str) -> String {
 
 /// The method that launches `f` over a grid, each of its instances `launched`: its parameters
 /// those of `f`, a pointer as the address on the GPU it is, `::kgen_cuda::Ptr`; and its
-/// compile-time arguments those of `f`, which pick the instance.
+/// compile-time arguments those of `f`, which pick the instance. A cooperative kernel is
+/// launched cooperatively, every block of its grid at once.
 fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStream {
     let mut out = attrs(f, top);
+    if f.cooperative.is_some() {
+        out.extend(parse(&format!(
+            "#[doc = \"\"]\n#[doc = \" Every block of the grid runs at once, as `grid.sync()` needs, so a grid of more \
+             blocks than [`{0}`](Self::{0}) says the GPU runs is an error.\"]",
+            blocks_name(f)
+        )));
+    }
     if !out.to_string().contains("# Safety") {
         out.extend(parse(
             "#[doc = \"\"]\n#[doc = \" # Safety\"]\n#[doc = \"\"]\n\
@@ -451,15 +489,8 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     } else {
         "#[allow(clippy::too_many_arguments, unused_variables)]"
     }));
-    // Its visibility, `pub` or `pub(..)`, then `unsafe fn` and its name and generics as
-    // written.
-    let head = &top[f.head.clone()];
-    let vis = match head {
-        [pub_, TokenTree::Group(g), ..] if is_ident(pub_, "pub") && g.delimiter() == Delimiter::Parenthesis => 2,
-        [pub_, ..] if is_ident(pub_, "pub") => 1,
-        _ => 0,
-    };
-    out.extend(head[..vis].iter().cloned());
+    // Its visibility, then `unsafe fn` and its name and generics as written.
+    out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("unsafe fn"));
     out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
     let mut params = parse("&self, grid: ::kgen_cuda::Grid, ");
@@ -481,17 +512,66 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, params))]);
     out.extend(parse("-> ::core::result::Result<(), ::kgen_cuda::Error>"));
     let args: Vec<String> = f.params.iter().map(|p| format!("::kgen_cuda::arg(&{})", p.name)).collect();
-    let launch = |index: &str| format!("unsafe {{ self.module.launch({index}, grid, &[{}]) }}", args.join(", "));
+    let how = if f.cooperative.is_some() { "launch_cooperative" } else { "launch" };
+    out.extend(body(f, launched, |index| {
+        format!("unsafe {{ self.module.{how}({index}, grid, &[{}]) }}", args.join(", "))
+    }));
+    out
+}
+
+/// The method that says how many blocks a grid of `f`, a cooperative kernel, has at most, for
+/// each of its instances `launched`: as many as the GPU runs at once, of so many threads and
+/// so much of the launch's shared memory.
+fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStream {
+    let mut out = parse(&format!(
+        "/// How many blocks a grid of [`{0}`](Self::{0}) has at most, of `threads` threads each and\n\
+         /// `shared` bytes of the launch's shared memory: as many as the GPU runs at once, for it\n\
+         /// runs them all together.",
+        f.name
+    ));
+    if launched.is_none() {
+        out.extend(parse("#[allow(unused_variables)]"));
+    }
+    // Its visibility, then `fn`, its name and the generics of `f` as written: its name is
+    // where `f`'s is, for an error or a reader to find.
+    out.extend(visibility(f, top).iter().cloned());
+    out.extend(parse("fn"));
+    out.extend([TokenTree::Ident(Ident::new(&blocks_name(f), top[f.head.end + 1].span()))]);
+    out.extend(top[f.head.end + 2..f.params_at].iter().cloned());
+    out.extend(parse("(&self, threads: u32, shared: u32) -> ::core::result::Result<u32, ::kgen_cuda::Error>"));
+    out.extend(body(f, launched, |index| format!("self.module.resident({index}, threads, shared)")));
+    out
+}
+
+/// The name of the method that says how many blocks a grid of `f` has at most.
+fn blocks_name(f: &Fn) -> String {
+    format!("{}_blocks", f.name.trim_start_matches("r#"))
+}
+
+/// `f`'s visibility as written, `pub` or `pub(..)`, or none.
+fn visibility<'a>(f: &Fn, top: &'a [TokenTree]) -> &'a [TokenTree] {
+    let head = &top[f.head.clone()];
+    let vis = match head {
+        [pub_, TokenTree::Group(g), ..] if is_ident(pub_, "pub") && g.delimiter() == Delimiter::Parenthesis => 2,
+        [pub_, ..] if is_ident(pub_, "pub") => 1,
+        _ => 0,
+    };
+    &head[..vis]
+}
+
+/// The body of a method of `f`, which does `then` with the index of the instance among
+/// `launched` its compile-time arguments pick; or never runs, for a kernel that did not
+/// compile.
+fn body(f: &Fn, launched: Option<&[Launched]>, then: impl std::ops::Fn(&str) -> String) -> TokenStream {
     let body = match launched {
-        Some([(args, i)]) if args.is_empty() => launch(&i.to_string()),
+        Some([(args, i)]) if args.is_empty() => then(&i.to_string()),
         Some(instances) => {
             let arms: Vec<(Vec<Value>, String)> = instances.iter().map(|(a, i)| (a.clone(), i.to_string())).collect();
-            format!("let index = {};\n{}", pick(f, &arms), launch("index"))
+            format!("let index = {};\n{}", pick(f, &arms), then("index"))
         }
         None => "::core::unreachable!()".to_string(),
     };
-    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&body)))]);
-    out
+    [TokenTree::Group(Group::new(Delimiter::Brace, parse(&body)))].into_iter().collect()
 }
 
 /// `const { match .. }` on `f`'s compile-time arguments: what `arms` gives for each instance, by
@@ -601,10 +681,12 @@ fn stub(f: &Fn, top: &[TokenTree]) -> TokenStream {
     out
 }
 
-/// `f`'s attributes as written, but `#[instances(..)]`, which Rust does not know.
+/// `f`'s attributes as written, but `#[instances(..)]` and `#[cooperative]`, which Rust does not
+/// know.
 fn attrs(f: &Fn, top: &[TokenTree]) -> TokenStream {
-    let kgen = f.instances.as_ref().map_or(0..0, |i| i.tokens.clone());
-    f.attrs.clone().filter(|i| !kgen.contains(i)).map(|i| top[i].clone()).collect()
+    let instances = f.instances.as_ref().map_or(0..0, |i| i.tokens.clone());
+    let cooperative = f.cooperative.as_ref().map_or(0..0, |c| c.tokens.clone());
+    f.attrs.clone().filter(|i| !instances.contains(i) && !cooperative.contains(i)).map(|i| top[i].clone()).collect()
 }
 
 /// `f`'s signature as written, from its visibility to its result.

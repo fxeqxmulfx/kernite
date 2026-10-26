@@ -125,6 +125,15 @@ until something writes it. The host reads and writes each as `Kernels` gives it,
 `kernels.WEIGHTS().write(&[2.0; 4])?`. kgen refuses what a module cannot hold: more than the 64 KB of constant memory it
 has, or 4 GB of global memory, whose size `ptxas` writes in 32 bits.
 
+A kernel whose blocks wait for each other is `#[cooperative]`, and its `grid.sync()` waits until every thread of the
+grid has come to it, as CUDA's does. The driver launches it cooperatively, every block of the grid at once, so what a
+thread keeps in its registers, or a block in its shared memory, lasts across the wait, where two kernels would write it
+to memory and read it back. Its grid has at most as many blocks as the GPU runs at once, which `Kernels` says by a
+method of the kernel's name: `kernels.normalize_blocks(256, 0)?` for blocks of 256 threads and no shared memory from
+the launch. A grid of more is an error, which says how many. Such a kernel needs a GPU from Pascal's on, `sm_60`, and
+kgen refuses `grid.sync()` where a thread of the grid might not come to it: under an `if`, in an `extern "ptx-func"`
+function, or in a kernel that is not cooperative.
+
 A kernel is named in PTX as C++ names a function in the namespaces of its workspace, its crate and its modules, so
 that a profiler tells two crates' `saxpy` apart: `_ZN4kgen6my_app3gpu5saxpyE`, which `cu++filt`, Nsight and
 `cuda-gdb` show as `kgen::my_app::gpu::saxpy`. An instance of a generic kernel is named as a template's,
@@ -147,7 +156,9 @@ and `reverse_runs` in shared memory, `scale_f16`, written in place, `gcds`, whic
 function that calls itself, `histogram`, which counts in the module's global memory from launch to launch, and
 `weigh`, by weights in its constant memory, with safe functions over them; and
 `matmul` on the tensor cores, by `cp.async`, `ldmatrix` and `mma`, in a module of its own, since it needs an Ampere
-GPU, `sm_80`. Its tests hold each kernel to a scalar reference that does the same float operations in the same order,
+GPU, `sm_80`; and in another, for Pascal's, `sm_60`, `normalize`, whose threads keep their floats in registers while
+the grid waits for every block's sum, and `diffuse`, which takes any number of steps in one launch, the grid waiting
+between them. Its tests hold each kernel to a scalar reference that does the same float operations in the same order,
 bit for bit, or the tensor cores, which add in an order of their own, to products of integers, exact in any order;
 and its listings to [`snapshots/`](examples/my-app/snapshots/).
 

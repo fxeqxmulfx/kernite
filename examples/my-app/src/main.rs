@@ -365,6 +365,171 @@ mod ampere {
     }
 }
 
+/// The kernels whose blocks wait for each other, `#[cooperative]`, which a GPU from Pascal's
+/// on, `sm_60`, launches all at once, in a module of their own: a module's `.target` is the
+/// newest any of its kernels needs, and `gpu`'s load on older GPUs.
+#[kgen_macros::kernels]
+mod pascal {
+    /// How many floats each thread of `normalize` keeps in its registers.
+    pub const K: u32 = 4;
+
+    /// `x[i] /= s` for each `i < n`, `s` the sum of `x`, in one launch of blocks of 256
+    /// threads, where it would take two kernels if the grid could not wait: one for the sum,
+    /// and the floats to memory and back before the other divides them. Each thread loads `K`
+    /// floats, `x[256 (K b + k) + t]` for each `k < K`, 0 past `n`, and keeps them in its
+    /// registers; their sum, in order, goes in a tree in the block's shared memory, as in
+    /// `gpu::block_sums`, and the block's to `sums[b]`. The grid waits; then the block's first
+    /// thread adds the blocks' sums, in order, and each thread divides its floats by that,
+    /// rounded once.
+    #[cooperative]
+    pub unsafe extern "ptx-kernel" fn normalize(x: *mut f32, sums: *mut f32, n: u32) {
+        let tile: shared<[f32; 256], 16>;
+        let (t, b, i, j, mine): (u32, u32, u32, u32, u32);
+        mov.u32(t, tid.x);
+        mov.u32(b, ctaid.x);
+        mad.lo.u32(i, b, 256 * K, t);
+        let (at, inside): (u64, pred);
+        mad.wide.u32(at, i, 4, x);
+        let v: [f32; K];
+        for k in 0..K {
+            mov.f32(v[k], 0);
+            add.u32(j, i, 256 * k);
+            setp.lt.u32(inside, j, n);
+            if inside {
+                ld.global.f32(v[k], [at + 1024 * k]);
+            }
+        }
+
+        note("the thread's sum, then the block's, in a tree");
+        let (s, w): (f32, f32);
+        mov.f32(s, v[0]);
+        for k in 1..K {
+            add.rn.f32(s, s, v[k]);
+        }
+        mov.u32(mine, tile);
+        mad.lo.u32(mine, t, 4, mine);
+        st.shared.f32([mine], s);
+        let lower: pred;
+        for half in [128, 64, 32, 16, 8, 4, 2, 1] {
+            bar.sync(0);
+            setp.lt.u32(lower, t, half);
+            if lower {
+                ld.shared.f32(w, [mine + 4 * half]);
+                add.rn.f32(s, s, w);
+                st.shared.f32([mine], s);
+            }
+        }
+        let (others, to): (pred, u64);
+        setp.ne.u32(others, t, 0);
+        if !others {
+            mad.wide.u32(to, b, 4, sums);
+            st.global.f32([to], s);
+        }
+        grid.sync();
+
+        note("the first thread adds the blocks' sums, in order, for the others to read");
+        if others {
+            bra(added);
+        }
+        let (blocks, more): (u32, pred);
+        mov.u32(blocks, nctaid.x);
+        mov.f32(s, 0);
+        mov.u64(to, sums);
+        label(next);
+        ld.global.f32(w, [to]);
+        add.rn.f32(s, s, w);
+        add.u64(to, to, 4);
+        sub.u32(blocks, blocks, 1);
+        setp.ne.u32(more, blocks, 0);
+        if more {
+            bra(next);
+        }
+        st.shared.f32([tile], s);
+        label(added);
+        bar.sync(0);
+        ld.shared.f32(s, [tile]);
+        for k in 0..K {
+            add.u32(j, i, 256 * k);
+            setp.lt.u32(inside, j, n);
+            if inside {
+                div.rn.f32(v[k], v[k], s);
+                st.global.f32([at + 1024 * k], v[k]);
+            }
+        }
+    }
+
+    /// `steps` steps of heat spreading along the `n` floats of `x`, in one launch of blocks of
+    /// 256 threads, where it would take a launch a step: in each, each float becomes
+    /// `x[i] + (x[i - 1] - x[i]) / 4 + (x[i + 1] - x[i]) / 4` of the floats before, each
+    /// operation rounded once, an end's missing neighbour as warm as the end. Each thread keeps
+    /// its float in a register, and writes it for its neighbours to `x` and to `y` by turns,
+    /// the one they are not reading; the grid waits between steps. `y` is as long as `x`.
+    #[cooperative]
+    pub unsafe extern "ptx-kernel" fn diffuse(x: *mut f32, y: *mut f32, n: u32, steps: u32) {
+        let (i, j): (u32, u32);
+        mov.u32(i, ctaid.x);
+        mov.u32(j, tid.x);
+        mad.lo.u32(i, i, 256, j);
+        let (outside, end, more): (pred, pred, pred);
+        setp.ge.u32(outside, i, n);
+        let (from, to, at): (u64, u64, u64);
+        mov.u64(from, x);
+        mov.u64(to, y);
+        let (v, l, r): (f32, f32, f32);
+        mov.f32(v, 0);
+        if !outside {
+            mad.wide.u32(at, i, 4, x);
+            ld.global.f32(v, [at]);
+        }
+        setp.eq.u32(end, steps, 0);
+        if end {
+            bra(done);
+        }
+
+        label(step);
+        note("a thread past `n` has no float, and only waits");
+        if outside {
+            bra(wrote);
+        }
+        mad.wide.u32(at, i, 4, from);
+        mov.f32(l, v);
+        mov.f32(r, v);
+        setp.ne.u32(end, i, 0);
+        if end {
+            ld.global.f32(l, [at - 4]);
+        }
+        add.u32(j, i, 1);
+        setp.ne.u32(end, j, n);
+        if end {
+            ld.global.f32(r, [at + 4]);
+        }
+        sub.rn.f32(l, l, v);
+        mul.rn.f32(l, l, 0.25);
+        sub.rn.f32(r, r, v);
+        mul.rn.f32(r, r, 0.25);
+        add.rn.f32(v, v, l);
+        add.rn.f32(v, v, r);
+        mad.wide.u32(at, i, 4, to);
+        st.global.f32([at], v);
+        label(wrote);
+        grid.sync();
+        mov.u64(at, from);
+        mov.u64(from, to);
+        mov.u64(to, at);
+        sub.u32(steps, steps, 1);
+        setp.ne.u32(more, steps, 0);
+        if more {
+            bra(step);
+        }
+
+        label(done);
+        if !outside {
+            mad.wide.u32(at, i, 4, x);
+            st.global.f32([at], v);
+        }
+    }
+}
+
 use kgen_cuda::{Cuda, Grid, f16};
 
 /// Whether this cpu runs the kernels.
@@ -529,6 +694,39 @@ fn matmul(
     Ok(c)
 }
 
+/// `x / s` on the GPU, `s` the sum of `x`, in one launch: each thread keeps its floats in its
+/// registers while the grid waits for every block's sum. `x` is at most as many floats as the
+/// GPU holds at once, `256 pascal::K` a block of as many blocks as it runs at once,
+/// `kernels.normalize_blocks(256, 0)`; more is an error.
+fn normalize(cuda: &Cuda, kernels: &pascal::Kernels, x: &mut [f32]) -> Result<(), kgen_cuda::Error> {
+    let n = u32::try_from(x.len()).expect("fewer than 2^32 floats");
+    if n == 0 {
+        return Ok(());
+    }
+    let blocks = n.div_ceil(256 * pascal::K);
+    let (xs, sums) = (cuda.upload(x)?, cuda.alloc::<f32>(blocks as usize)?);
+    // SAFETY: `n` floats behind `xs`, and a float a block behind `sums`, in buffers that last
+    // until `read_into` has waited for the kernel.
+    unsafe { kernels.normalize(Grid::new(blocks, 256), xs.ptr(), sums.ptr(), n)? };
+    xs.read_into(x)
+}
+
+/// `steps` steps of heat spreading along `x` on the GPU, in one launch: in each, each float
+/// becomes `x[i] + (x[i - 1] - x[i]) / 4 + (x[i + 1] - x[i]) / 4` of the floats before, an
+/// end's missing neighbour as warm as the end. `x` is at most a float a thread of as many
+/// blocks of 256 as the GPU runs at once, `kernels.diffuse_blocks(256, 0)`; more is an error.
+fn diffuse(cuda: &Cuda, kernels: &pascal::Kernels, x: &mut [f32], steps: u32) -> Result<(), kgen_cuda::Error> {
+    let n = u32::try_from(x.len()).expect("fewer than 2^32 floats");
+    if n == 0 {
+        return Ok(());
+    }
+    let (xs, ys) = (cuda.upload(x)?, cuda.alloc::<f32>(x.len())?);
+    // SAFETY: `n` floats behind each pointer, in buffers that last until `read_into` has
+    // waited for the kernel.
+    unsafe { kernels.diffuse(Grid::new(n.div_ceil(256), 256), xs.ptr(), ys.ptr(), n, steps)? };
+    xs.read_into(x)
+}
+
 fn main() {
     if !supported() {
         eprintln!("this cpu lacks AVX2 or FMA, which the kernels are written in");
@@ -603,6 +801,25 @@ fn main() {
             } else {
                 println!("the {} is older than Ampere, sm_80, for the tensor cores' matmul", cuda.name());
             }
+            if cuda.sm() >= 60 {
+                let cooperative = pascal::Kernels::load(&cuda).and_then(|kernels| {
+                    let mut x = [1.0, 2.0, 3.0, 4.0];
+                    normalize(&cuda, &kernels, &mut x)?;
+                    let mut heat = [0.0, 0.0, 0.0, 16.0, 0.0, 0.0, 0.0];
+                    diffuse(&cuda, &kernels, &mut heat, 2)?;
+                    Ok((x, heat, kernels.normalize_blocks(256, 0)? * 256 * pascal::K))
+                });
+                match cooperative {
+                    Ok((x, heat, most)) => {
+                        println!("1 to 4 over their sum, in a launch whose grid waits for every block's: {x:?}");
+                        println!("the {} keeps {most} floats in its registers so, at most", cuda.name());
+                        println!("16 among cold floats, after two steps of heat spreading in one launch: {heat:?}");
+                    }
+                    Err(e) => println!("the cooperative kernels failed: {e}"),
+                }
+            } else {
+                println!("the {} is older than Pascal, sm_60, for a kernel whose grid waits", cuda.name());
+            }
         }
         Err(e) => println!("no GPU to run saxpy on: {e}"),
     }
@@ -615,7 +832,7 @@ mod tests {
 
     use kgen_cuda::{Cuda, f16};
 
-    use super::{ampere, gpu, kernels};
+    use super::{ampere, gpu, kernels, pascal};
 
     /// Each kernel's listing against the one in `snapshots/`, and the GPU kernels' PTX, so that
     /// a change to kgen or to a kernel that moves an instruction shows in review. With
@@ -628,7 +845,11 @@ mod tests {
         // An instance's listing, of `dot::<4>`, is `dot4.s`.
         let files =
             kernels::LISTINGS.iter().map(|&(name, text)| (format!("{}.s", name.replace(['<', '>', ':'], "")), text));
-        let ptx = [("gpu.ptx".to_string(), gpu::PTX), ("ampere.ptx".to_string(), ampere::PTX)];
+        let ptx = [
+            ("gpu.ptx".to_string(), gpu::PTX),
+            ("ampere.ptx".to_string(), ampere::PTX),
+            ("pascal.ptx".to_string(), pascal::PTX),
+        ];
         for (name, text) in files.chain(ptx) {
             let path = dir.join(&name);
             if bless {
@@ -878,6 +1099,99 @@ mod tests {
             let got = super::matmul(&cuda, &kernels, &a, &bt, (m, n, k)).unwrap();
             assert_eq!(got, want, "{m} by {n} by {k}");
         }
+    }
+
+    /// The GPU, and its kernels whose blocks wait for each other; on a machine with none, or
+    /// with one older than Pascal, `sm_60`, `None`, and the test is skipped.
+    fn pascal() -> Option<(Cuda, pascal::Kernels)> {
+        let (cuda, _) = cuda()?;
+        if cuda.sm() < 60 {
+            eprintln!("the {} is older than Pascal, sm_60: skipped", cuda.name());
+            return None;
+        }
+        let kernels = pascal::Kernels::load(&cuda).unwrap();
+        Some((cuda, kernels))
+    }
+
+    /// What `normalize` computes, in its order: each thread's `K` floats added in order, 0 past
+    /// the end, then the sums of a block's threads in a tree, then the blocks' in order from 0,
+    /// and each float divided by that.
+    fn normalized(x: &[f32]) -> Vec<f32> {
+        let k = pascal::K as usize;
+        let sum = x
+            .chunks(256 * k)
+            .map(|block| {
+                let at = |j: usize| block.get(j).copied().unwrap_or(0.0);
+                let threads: Vec<f32> = (0..256).map(|t| (1..k).fold(at(t), |s, k| s + at(256 * k + t))).collect();
+                tree(&threads)
+            })
+            .fold(0.0, |s, b| s + b);
+        x.iter().map(|v| v / sum).collect()
+    }
+
+    /// The end of the error of a cooperative launch of `blocks` blocks, which is more than the
+    /// GPU runs at once, `most`.
+    fn too_large(e: kgen_cuda::Error, blocks: u32, most: u32) {
+        assert!(e.message.starts_with("CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE (720): "), "{e}");
+        assert!(
+            e.message.ends_with(&format!(": the grid has {blocks} blocks, and the GPU runs {most} of these at once")),
+            "{e}"
+        );
+    }
+
+    /// `normalize` against [`normalized`], bit for bit, each time of ten: of a float, of a block
+    /// and a float more, and of as many as the GPU holds at once, so that a block that went on
+    /// before the others had written their sums would show; and one more is an error.
+    #[test]
+    fn normalize_is_its_reference_bit_for_bit() {
+        let Some((cuda, kernels)) = pascal() else { return };
+        let most = kernels.normalize_blocks(256, 0).unwrap();
+        let all = (most * 256 * pascal::K) as usize;
+        for n in [1, 1023, 1025, 10_000, all] {
+            // In [0.5, 1.5), so that the sum is far from 0.
+            let x: Vec<f32> = floats(n, n as u32 + 11).iter().map(|x| x / 2.0 + 1.0).collect();
+            let want: Vec<u32> = normalized(&x).iter().map(|v| v.to_bits()).collect();
+            for _ in 0..10 {
+                let mut got = x.clone();
+                super::normalize(&cuda, &kernels, &mut got).unwrap();
+                assert_eq!(got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), want, "{n} floats");
+            }
+        }
+        too_large(super::normalize(&cuda, &kernels, &mut vec![1.0; all + 1]).unwrap_err(), most + 1, most);
+    }
+
+    /// What `diffuse` computes, a step at a time, in its order.
+    fn diffused(x: &[f32], steps: u32) -> Vec<f32> {
+        let mut x = x.to_vec();
+        for _ in 0..steps {
+            x = (0..x.len())
+                .map(|i| {
+                    let v = x[i];
+                    let (l, r) = (if i > 0 { x[i - 1] } else { v }, x.get(i + 1).copied().unwrap_or(v));
+                    v + (l - v) * 0.25 + (r - v) * 0.25
+                })
+                .collect();
+        }
+        x
+    }
+
+    /// `diffuse` against [`diffused`], bit for bit: of a float, of a block and a float more,
+    /// and of as many as the GPU holds at once over a thousand steps, each a wait of the grid,
+    /// so that a thread that read a neighbour of another step would show; and one more is an
+    /// error.
+    #[test]
+    fn diffuse_is_its_reference_bit_for_bit() {
+        let Some((cuda, kernels)) = pascal() else { return };
+        let most = kernels.diffuse_blocks(256, 0).unwrap();
+        let all = (most * 256) as usize;
+        for (n, steps) in [(1, 3), (2, 1), (257, 2), (1000, 0), (all, 1000)] {
+            let x = floats(n, n as u32 + 13);
+            let want: Vec<u32> = diffused(&x, steps).iter().map(|v| v.to_bits()).collect();
+            let mut got = x.clone();
+            super::diffuse(&cuda, &kernels, &mut got, steps).unwrap();
+            assert_eq!(got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), want, "{n} floats, {steps} steps");
+        }
+        too_large(super::diffuse(&cuda, &kernels, &mut vec![0.0; all + 1], 1).unwrap_err(), most + 1, most);
     }
 
     /// `saxpy` on the GPU against `f32::mul_add`, which rounds once as `fma.rn.f32` does; on a
