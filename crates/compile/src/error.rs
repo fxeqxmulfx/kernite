@@ -56,7 +56,7 @@ pub enum Error {
         class: Class,
         /// The variable left without one.
         var: String,
-        /// The last note before its first write.
+        /// The last note before its first mention, read or write.
         near: Option<String>,
         /// The variables live beside it that hold one it could have had, with the register
         /// each holds.
@@ -67,6 +67,20 @@ pub enum Error {
         /// Registers of the file there are.
         have: usize,
     },
+}
+
+impl Error {
+    /// The variable to blame, if it names one.
+    pub fn var(&self) -> Option<&str> {
+        match self {
+            Error::ReadBeforeWrite { var }
+            | Error::FixedTwice { var }
+            | Error::FixedChanged { var, .. }
+            | Error::OutOfRegisters { var, .. } => Some(var),
+            Error::FixedClash { a, .. } => Some(a),
+            Error::LabelTwice { .. } | Error::NoSuchLabel { .. } | Error::FallsOffEnd => None,
+        }
+    }
 }
 
 impl fmt::Display for Error {

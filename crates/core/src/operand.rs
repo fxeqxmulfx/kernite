@@ -1,4 +1,3 @@
-use crate::program::{ConstId, FuncId, Label, SlotId, StaticId};
 use crate::reg::Register;
 
 /// How many bits an operand covers: which view of a register, or how much memory.
@@ -31,6 +30,27 @@ impl Width {
         }
     }
 }
+
+/// A place in the body that jumps can name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Label(pub u32);
+
+/// A slot of the stack frame, by its index in [`Program::slots`](crate::Program::slots).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SlotId(pub u32);
+
+/// A constant, by its index in [`Program::consts`](crate::Program::consts).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConstId(pub u32);
+
+/// A function the kernel names, by its index in [`Program::funcs`](crate::Program::funcs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FuncId(pub u32);
+
+/// Memory of the module's that the kernel names, by its index in
+/// [`Program::statics`](crate::Program::statics).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StaticId(pub u32);
 
 /// Where a memory operand's address starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

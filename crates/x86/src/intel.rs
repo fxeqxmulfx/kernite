@@ -3,11 +3,13 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use kgen_core::{Access, Arg, Base, Class, Compiled, Const, Frame, Item, Label, Mem, Operand, PReg, Signature, Width};
+use kgen_compile::{Allocated, Frame};
+use kgen_core::{Base, Class, Const, Item, Label, Mem, Operand, PReg, Signature, Width};
 
-use crate::forms::{self, Feature};
+use crate::forms::Feature;
+use crate::frame;
 use crate::op::Op;
-use crate::sysv::{PAGE, R11, RBP, RSP};
+use crate::sysv::RSP;
 
 /// A line of a listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +49,8 @@ pub struct Listing {
     /// Bytes the prologue moves the stack pointer down besides the frame's, so that a kernel
     /// that calls calls at a multiple of 16, as SysV asks.
     pub padding: u32,
+    /// Whether control returns: whether the code has a `ret`. One with none never returns.
+    pub returns: bool,
 }
 
 impl Listing {
@@ -71,8 +75,7 @@ impl Listing {
             Class::Float => "float",
         };
         let params: Vec<_> = self.signature.params.iter().map(class).collect();
-        // Code with no `ret` never returns.
-        let result = match self.code().any(|c| c == "ret") {
+        let result = match self.returns {
             true => self.signature.result.as_ref().map_or("()", class),
             false => "!",
         };
@@ -146,65 +149,34 @@ pub fn taken(name: &str) -> bool {
 /// `c` in Intel syntax, with the frame set up on entry and taken down before every `ret`, and
 /// a note before each store of a variable that spilled and each load of it back. A kernel that
 /// calls has its stack pointer at a multiple of 16 for each call; a move of a register to
-/// itself that changes nothing is left out.
+/// itself that changes nothing is left out. Or why not: a frame past what an address reaches.
 ///
-/// Labels become local numbers, which `naked_asm!` asks for so that the same code can be
-/// emitted twice. Numbers made of ones and zeros alone are skipped: Intel syntax reads
-/// `10b` as binary ten, not as label 10 behind.
-pub fn print(c: &Compiled<Op>) -> Listing {
+/// Labels become local numbers, in the order they are placed, which `naked_asm!` asks for so
+/// that the same code can be emitted twice. Numbers made of ones and zeros alone are skipped:
+/// Intel syntax reads `10b` as binary ten, not as label 10 behind.
+pub fn print(c: &Allocated<Op>) -> Result<Listing, String> {
+    let lowered = frame::lower(c)?;
     let mut numbers = BTreeMap::new();
     let mut places = BTreeMap::new();
     let mut next = 2;
-    let mut number = || {
-        while next.to_string().chars().all(|d| d == '0' || d == '1') {
+    for (i, item) in lowered.body.iter().enumerate() {
+        if let Item::Label(l) = item {
+            while next.to_string().chars().all(|d| d == '0' || d == '1') {
+                next += 1;
+            }
+            numbers.insert(*l, next);
+            places.insert(*l, i);
             next += 1;
         }
-        next += 1;
-        next - 1
-    };
-    let calls = c.body.iter().any(|item| matches!(item, Item::Inst(inst) if inst.op == Op::Call));
-    let pad = padding(&c.frame, calls);
-    // The prologue's loop, if it has one, comes first.
-    let looped = (probes(&c.frame, pad) > UNROLLED).then(&mut number);
-    for (i, item) in c.body.iter().enumerate() {
-        if let Item::Label(l) = item {
-            numbers.insert(*l, number());
-            places.insert(*l, i);
-        }
     }
-    let vector = c.body.iter().any(|item| match item {
-        Item::Inst(inst) => inst.operands().any(|a| a.regs().any(|r| r.class == Class::Vec)),
-        _ => false,
-    });
-    let mut lines = prologue(&c.frame, pad, looped);
-    for (i, item) in c.body.iter().enumerate() {
-        match item {
-            Item::Label(l) => lines.push(Line::Code(format!("{}:", numbers[l]))),
-            Item::Note(note) => lines.push(Line::Note(note.clone())),
-            Item::Inst(inst) if inst.op == Op::Ret => {
-                lines.extend(epilogue(&c.frame, pad, vector).into_iter().map(Line::Code));
-            }
-            // All 64 bits, or all 256, to the same register: but one of 32 bits clears the upper
-            // half, and one of an xmm the upper lanes.
-            Item::Inst(inst)
-                if matches!(inst.op, Op::Mov | Op::Vmovaps | Op::Vmovups | Op::Vmovdqa | Op::Vmovdqu)
-                    && matches!(
-                        inst.args.as_slice(),
-                        [Arg { operand: Operand::Reg(a, w), .. }, Arg { operand: Operand::Reg(b, v), .. }]
-                            if a == b && w == v && matches!(w, Width::W64 | Width::W256)
-                    ) => {}
+    let lines = lowered
+        .body
+        .iter()
+        .enumerate()
+        .map(|(i, item)| match item {
+            Item::Label(l) => Line::Code(format!("{}:", numbers[l])),
+            Item::Note(note) => Line::Note(note.clone()),
             Item::Inst(inst) => {
-                let spill = inst.args.iter().find_map(|a| match a.operand {
-                    Operand::Mem(Mem { base: Base::Slot(s), .. }) if c.frame.slots[s.0 as usize].spill => {
-                        Some((&c.frame.slots[s.0 as usize].name, a.access))
-                    }
-                    _ => None,
-                });
-                match spill {
-                    Some((var, Access::Write)) => lines.push(Line::Note(format!("{var} spilled"))),
-                    Some((var, _)) => lines.push(Line::Note(format!("{var} reloaded"))),
-                    None => {}
-                }
                 // A gather's vector of indices is among the operands it does not write out, at
                 // its width.
                 let vector_index = |m: &Mem<PReg>| {
@@ -226,28 +198,18 @@ pub fn print(c: &Compiled<Op>) -> Listing {
                     })
                     .collect();
                 let mnemonic = inst.op.mnemonic();
-                lines.push(Line::Code(if operands.is_empty() {
+                Line::Code(if operands.is_empty() {
                     mnemonic.to_string()
                 } else {
                     format!("{mnemonic} {}", operands.join(", "))
-                }));
+                })
             }
-        }
-    }
-    let mut features: Vec<Feature> = c
-        .body
-        .iter()
-        .filter_map(|item| match item {
-            Item::Inst(inst) => forms::feature(inst.op, &inst.args, &inst.implicit),
-            _ => None,
         })
         .collect();
-    features.sort_by_key(|f| f.name());
-    features.dedup();
-    Listing {
+    Ok(Listing {
         name: c.name.clone(),
         signature: c.signature.clone(),
-        features,
+        features: lowered.features,
         lines,
         consts: c.consts.clone(),
         funcs: c.funcs.clone(),
@@ -258,106 +220,14 @@ pub fn print(c: &Compiled<Op>) -> Listing {
             .filter_map(|(info, r)| r.map(|r| (info.name.clone(), name(r, full(r.class)))))
             .collect(),
         frame: c.frame.clone(),
-        padding: pad,
-    }
+        padding: lowered.padding,
+        returns: lowered.returns,
+    })
 }
 
 fn jump_target(l: Label, from: usize, numbers: &BTreeMap<Label, u32>, places: &BTreeMap<Label, usize>) -> String {
     let way = if places[&l] < from { 'b' } else { 'f' };
     format!("{}{way}", numbers[&l])
-}
-
-/// Pages past this many are touched in a loop.
-const UNROLLED: u32 = 3;
-
-/// How many bytes the stack pointer is a multiple of, always: SysV calls a function at a
-/// multiple of 16, and each push moves it by 8.
-const ALIGNED: u32 = 8;
-
-/// How many pages the prologue touches on the way down to `frame`'s bottom, a page apart: as
-/// many as leave no more than a page untouched above the bottom, counting `pad` and the most
-/// the alignment may add.
-fn probes(frame: &Frame, pad: u32) -> u32 {
-    match frame.size {
-        0 => 0,
-        size => (size + pad + frame.align.saturating_sub(ALIGNED)).saturating_sub(PAGE).div_ceil(PAGE),
-    }
-}
-
-/// Bytes the prologue moves the stack pointer down besides `frame`, if the kernel `calls`, so
-/// that it calls at a multiple of 16: on entry it is 8 past one, the return address below it,
-/// and each push moves it 8 more, the frame's `rbp` among them. A frame aligned to 16 or more
-/// needs none.
-fn padding(frame: &Frame, calls: bool) -> u32 {
-    if !calls || frame.align >= 16 {
-        return 0;
-    }
-    let pushes = frame.saved.len() as u32 + u32::from(frame.size > 0);
-    (16 - (8 + 8 * pushes + frame.size) % 16) % 16
-}
-
-/// Saves the callee-saved registers the body writes; then, if there are slots, keeps the
-/// caller's stack pointer in `rbp`, and moves the stack pointer down past them and `pad`, and
-/// to their alignment; else down past `pad` alone.
-///
-/// The stack pointer never moves more than a page below memory the kernel has touched, so that
-/// a frame that runs past the end of the stack faults at the guard page there rather than step
-/// over it, as Rust's own functions do: a frame of more, its alignment counted, is touched a
-/// page at a time on the way down, past [`UNROLLED`] pages in a loop at label `looped`, which
-/// keeps its end in `r11`. The alignment comes last, a page at most, unless the stack pointer
-/// has it already.
-fn prologue(frame: &Frame, pad: u32, looped: Option<u32>) -> Vec<Line> {
-    let (sp, fp) = (name(RSP, Width::W64), name(RBP, Width::W64));
-    let code = Line::Code;
-    let mut lines: Vec<Line> = frame.saved.iter().map(|&r| code(format!("push {}", name(r, Width::W64)))).collect();
-    if frame.size == 0 {
-        if pad > 0 {
-            lines.push(code(format!("sub {sp}, {pad}")));
-        }
-        return lines;
-    }
-    assert!(frame.align <= PAGE, "a frame aligned to {}: the prologue might step over a page", frame.align);
-    lines.extend([code(format!("push {fp}")), code(format!("mov {fp}, {sp}"))]);
-    let pages = probes(frame, pad);
-    if pages > 0 {
-        lines.push(Line::Note("the frame a page at a time, each touched, so that an overflow faults".into()));
-        let probe = [code(format!("sub {sp}, {PAGE}")), code(format!("or qword ptr [{sp}], 0"))];
-        match looped {
-            None => (0..pages).for_each(|_| lines.extend(probe.clone())),
-            Some(l) => {
-                let end = name(R11, Width::W64);
-                lines.extend([code(format!("lea {end}, [{sp} - {}]", pages * PAGE)), code(format!("{l}:"))]);
-                lines.extend(probe);
-                lines.extend([code(format!("cmp {sp}, {end}")), code(format!("jne {l}b"))]);
-            }
-        }
-    }
-    let rest = frame.size + pad - pages * PAGE;
-    if rest > 0 {
-        lines.push(code(format!("sub {sp}, {rest}")));
-    }
-    if frame.align > ALIGNED {
-        lines.push(code(format!("and {sp}, -{}", frame.align)));
-    }
-    lines
-}
-
-/// Undoes [`prologue`], and clears the vector registers' upper halves if the body used any,
-/// so the caller's SSE code does not pay for them.
-fn epilogue(frame: &Frame, pad: u32, vector: bool) -> Vec<String> {
-    let (sp, fp) = (name(RSP, Width::W64), name(RBP, Width::W64));
-    let mut lines = vec![];
-    if frame.size > 0 {
-        lines.extend([format!("mov {sp}, {fp}"), format!("pop {fp}")]);
-    } else if pad > 0 {
-        lines.push(format!("add {sp}, {pad}"));
-    }
-    lines.extend(frame.saved.iter().rev().map(|&r| format!("pop {}", name(r, Width::W64))));
-    if vector {
-        lines.push("vzeroupper".to_string());
-    }
-    lines.push("ret".to_string());
-    lines
 }
 
 fn full(class: Class) -> Width {
@@ -400,7 +270,7 @@ fn name(r: PReg, width: Width) -> String {
 /// # Panics
 ///
 /// If its index is a vector of no width given, which whoever built the instruction left out.
-fn memory(m: &Mem<PReg>, c: &Compiled<Op>, sized: bool, vector_index: Option<Width>) -> String {
+fn memory(m: &Mem<PReg>, c: &Allocated<Op>, sized: bool, vector_index: Option<Width>) -> String {
     let (mut text, disp) = match m.base {
         Base::Reg(r) => (name(r, Width::W64), i64::from(m.disp)),
         Base::Slot(s) => (name(RSP, Width::W64), i64::from(m.disp) + i64::from(c.frame.offsets[s.0 as usize])),

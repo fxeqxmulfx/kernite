@@ -4,11 +4,11 @@
 use std::collections::BTreeMap;
 
 use kgen_core::{
-    Access, Arg, Base, Class, Compiled, Flow, Imm, Inst, Item, Label, Machine, Mem, Operand, PReg, Program, RegInfo,
-    Register, Signature, Slot, SlotId, Spill, VReg, Width,
+    Access, Arg, Base, Class, Flow, Imm, Inst, Item, Label, Mem, Operand, PReg, Program, RegInfo, Register, Signature,
+    Slot, SlotId, VReg, Width,
 };
 
-use crate::{Error, compile};
+use crate::{Allocated, Error, Machine, Spill, compile};
 
 struct Toy {
     gpr: Vec<PReg>,
@@ -152,7 +152,7 @@ fn run<R: Register + Ord>(
 
 /// What `p` returns for the parameters `args`, and what it returns compiled for `m`, which
 /// must be the same.
-fn same(p: &Program<&'static str>, m: &Toy, args: &[u64]) -> Compiled<&'static str> {
+fn same(p: &Program<&'static str>, m: &Toy, args: &[u64]) -> Allocated<&'static str> {
     let c = compile(p, m).unwrap();
     let before: Vec<(VReg, u64)> = p.params.iter().map(|&(v, _)| v).zip(args.iter().copied()).collect();
     let after: Vec<(PReg, u64)> = p.params.iter().map(|&(_, r)| r).zip(args.iter().copied()).collect();
@@ -165,12 +165,12 @@ fn same(p: &Program<&'static str>, m: &Toy, args: &[u64]) -> Compiled<&'static s
 }
 
 /// The names of the variables `c` spilled, in the order they did.
-fn spilled(c: &Compiled<&'static str>) -> Vec<String> {
+fn spilled(c: &Allocated<&'static str>) -> Vec<String> {
     c.frame.slots.iter().filter(|s| s.spill).map(|s| s.name.clone()).collect()
 }
 
 /// The opcodes of `c`, in order.
-fn ops(c: &Compiled<&'static str>) -> Vec<&'static str> {
+fn ops(c: &Allocated<&'static str>) -> Vec<&'static str> {
     c.body.iter().filter_map(|i| if let Item::Inst(i) = i { Some(i.op) } else { None }).collect()
 }
 
@@ -271,12 +271,12 @@ impl Builder {
 
 /// The register of the first variable named `name`: the program's own, before any that
 /// splitting or spilling made of it.
-fn reg_of(c: &kgen_core::Compiled<&'static str>, name: &str) -> PReg {
+fn reg_of(c: &crate::Allocated<&'static str>, name: &str) -> PReg {
     c.assignment.iter().find(|(info, _)| info.name == name).and_then(|(_, r)| *r).unwrap()
 }
 
 /// The registers of every variable named `name`, in order.
-fn regs_of(c: &kgen_core::Compiled<&'static str>, name: &str) -> Vec<PReg> {
+fn regs_of(c: &crate::Allocated<&'static str>, name: &str) -> Vec<PReg> {
     c.assignment.iter().filter(|(info, _)| info.name == name).filter_map(|(_, r)| *r).collect()
 }
 
@@ -516,6 +516,34 @@ fn accumulators_around_a_loop_spill_rather_than_what_a_turn_loads() {
     assert!(spilled(&same(&b.0, &toy(5, &[]), &[3])).is_empty());
 }
 
+/// A load or a store in a loop counts ten times one outside it. `inside` is read and written
+/// once a turn; `outside`, `k` times before the loop: each is alive across it, beside the count,
+/// in two registers. With 9, `outside` costs less for how long it is alive, and spills first,
+/// as it would not if a turn counted 9 times; with 10, `inside` does, as it would not if a turn
+/// counted 11 times.
+#[test]
+fn one_in_a_loop_counts_ten_times_one_outside() {
+    let first = |k: usize| {
+        let mut b = Builder::new();
+        let n = b.param("n", 0);
+        let (inside, outside) = (b.var("inside"), b.var("outside"));
+        b.def(inside, &[]);
+        b.def(outside, &[]);
+        for _ in 0..k {
+            b.def(outside, &[outside]);
+        }
+        b.label(1);
+        b.def(inside, &[inside, n]);
+        b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+        let sum = b.var("sum");
+        b.def(sum, &[inside, outside]);
+        b.ret(sum, 0);
+        spilled(&same(&b.0, &toy(2, &[]), &[3]))[0].clone()
+    };
+    assert_eq!(first(9), "outside");
+    assert_eq!(first(10), "inside");
+}
+
 #[test]
 fn a_parameter_spills_from_the_register_it_arrives_in() {
     let mut b = Builder::new();
@@ -719,4 +747,88 @@ fn a_pinned_value_live_across_a_call_that_changes_its_register_is_an_error() {
     b.ret(y, 0);
     let err = compile(&b.0, &toy(3, &[])).unwrap_err();
     assert_eq!(err, Error::FixedChanged { var: "a".into(), reg: r(0) });
+}
+
+#[test]
+fn an_error_names_the_variable_to_blame() {
+    let out = Error::OutOfRegisters {
+        class: Class::Gpr,
+        var: "x".into(),
+        near: None,
+        taken: vec![("y".into(), r(1))],
+        changed: vec![r(0)],
+        have: 2,
+    };
+    let cases = [
+        (Error::ReadBeforeWrite { var: "x".into() }, Some("x")),
+        (Error::FixedTwice { var: "x".into() }, Some("x")),
+        (Error::FixedChanged { var: "x".into(), reg: r(0) }, Some("x")),
+        (out, Some("x")),
+        // Of two that clash, the first.
+        (Error::FixedClash { a: "x".into(), b: "y".into(), reg: r(0) }, Some("x")),
+        (Error::LabelTwice { label: 7 }, None),
+        (Error::NoSuchLabel { label: 7 }, None),
+        (Error::FallsOffEnd, None),
+    ];
+    for (e, var) in cases {
+        assert_eq!(e.var(), var, "{e:?}");
+    }
+}
+
+#[test]
+fn a_variable_pinned_to_two_registers_is_refused() {
+    let mut b = Builder::new();
+    let a = b.var("a");
+    b.0.pinned.push((a, r(0)));
+    b.0.pinned.push((a, r(1)));
+    b.def(a, &[]);
+    let y = b.var("y");
+    b.def(y, &[a]);
+    b.ret(y, 0);
+    let err = compile(&b.0, &toy(3, &[])).unwrap_err();
+    assert_eq!(err, Error::FixedTwice { var: "a".into() });
+    assert_eq!(err.to_string(), "`a` must be in two different registers");
+}
+
+#[test]
+fn each_error_says_what_is_wrong_in_words() {
+    let out = |near: Option<&str>, taken: Vec<(&str, PReg)>, changed: Vec<PReg>| Error::OutOfRegisters {
+        class: Class::Gpr,
+        var: "x".into(),
+        near: near.map(String::from),
+        taken: taken.into_iter().map(|(name, reg)| (name.to_string(), reg)).collect(),
+        changed,
+        have: 2,
+    };
+    let cases = [
+        (Error::LabelTwice { label: 7 }, "label 7 is placed twice"),
+        (Error::NoSuchLabel { label: 7 }, "a jump goes to label 7, which is never placed"),
+        (Error::FallsOffEnd, "control runs past the last instruction"),
+        (Error::ReadBeforeWrite { var: "x".into() }, "`x` is read before anything writes it"),
+        (Error::FixedTwice { var: "a".into() }, "`a` must be in two different registers"),
+        (
+            Error::FixedClash { a: "x".into(), b: "y".into(), reg: r(0) },
+            "`x` and `y` are live at once and both must be in PReg { class: Gpr, hw: 0 }",
+        ),
+        (
+            Error::FixedChanged { var: "a".into(), reg: r(0) },
+            "`a` must be in PReg { class: Gpr, hw: 0 }, which an instruction it is live across changes",
+        ),
+        (
+            out(Some("a note"), vec![("y", r(0)), ("z", r(1))], vec![]),
+            "no Gpr register left for `x` (a note): all 2 are held by variables live beside it: y=0 z=1",
+        ),
+        (
+            out(None, vec![], vec![r(0), r(1)]),
+            "no Gpr register left for `x`: an instruction it is live across changes all 2, as a call does",
+        ),
+        (
+            out(None, vec![("y", r(1))], vec![r(0)]),
+            "no Gpr register left for `x`: an instruction it is live across changes 1 of the 2, as a call does, and \
+             variables live beside it hold the rest: y=1",
+        ),
+    ];
+    for (e, want) in cases {
+        assert_eq!(e.to_string(), want, "{e:?}");
+    }
 }

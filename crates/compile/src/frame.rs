@@ -1,4 +1,6 @@
-use kgen_core::{Frame, Machine, PReg, Slot};
+use kgen_core::{PReg, Slot};
+
+use crate::{Frame, Machine};
 
 /// The frame a kernel needs: the callee-saved registers among `used`, in the machine's
 /// order, and the slots one after another, each at its alignment.

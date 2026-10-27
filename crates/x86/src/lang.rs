@@ -78,11 +78,12 @@
 //! each. A function that never returns, `-> !`, ends each way out in `ud2()`, which faults, or
 //! in a call of one that never returns.
 
+use kgen_compile::Spill;
 use kgen_core::Access::{self, Ignored, Read, ReadWrite, Write};
 use kgen_core::Width::{self, W32, W64, W128, W256};
 use kgen_core::{
     Arg, Base, Class, Const, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo, Signature,
-    Slot, SlotId, Spill, StaticId, VReg,
+    Slot, SlotId, StaticId, VReg,
 };
 use kgen_lang::{Fault, Guard, Operand as Given, Target, Value};
 
@@ -301,7 +302,7 @@ pub struct Prototype {
 impl Prototype {
     /// The prototype of a function of the parameters `params`, each a name and a type as
     /// written, `("x", "*const f32")`, and of the result `ret`, `None` for none; or why SysV
-    /// passes them in no registers.
+    /// does not pass one of them whole in a register.
     pub fn of(params: &[(&str, &str)], ret: Option<&str>) -> Result<Prototype, String> {
         let params: Vec<(String, Ty)> =
             params.iter().map(|&(name, ty)| Ty::param(ty).map(|t| (name.to_string(), t))).collect::<Result<_, _>>()?;

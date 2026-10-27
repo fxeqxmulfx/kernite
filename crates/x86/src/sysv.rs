@@ -1,4 +1,5 @@
-use kgen_core::{Access, Arg, Base, Class, Flow, Inst, Machine, Mem, Operand, PReg, SlotId, Spill, VReg, Width};
+use kgen_compile::{Machine, Spill};
+use kgen_core::{Access, Arg, Base, Class, Flow, Inst, Mem, Operand, PReg, SlotId, VReg, Width};
 
 use crate::op::Op;
 
@@ -168,5 +169,20 @@ impl Spill<Op> for SysV {
             flow: Flow::Next,
             clobbers: vec![],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A call changes every register the allocator hands out but those SysV has the callee save.
+    #[test]
+    fn a_call_changes_every_register_sysv_does_not_save() {
+        let mut want: Vec<PReg> = GPRS.iter().chain(&VECS).filter(|r| !SAVED.contains(r)).copied().collect();
+        let mut clobbers = CALL_CLOBBERS.to_vec();
+        want.sort();
+        clobbers.sort();
+        assert_eq!(clobbers, want);
     }
 }

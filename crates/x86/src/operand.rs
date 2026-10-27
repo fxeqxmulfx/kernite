@@ -170,7 +170,7 @@ impl<V: Vector> From<Addr> for Src<V> {
     }
 }
 
-pub(crate) fn arg(operand: Operand<VReg>, access: Access) -> Arg<VReg> {
+pub(crate) fn arg<R>(operand: Operand<R>, access: Access) -> Arg<R> {
     Arg { operand, access }
 }
 
@@ -199,6 +199,6 @@ pub(crate) fn control(value: u8) -> Arg<VReg> {
 }
 
 /// A count or an addend, which a listing shows in decimal.
-pub(crate) fn number(value: i64) -> Arg<VReg> {
+pub(crate) fn number<R>(value: i64) -> Arg<R> {
     arg(Operand::Imm(Imm { value, hex: false }), Access::Read)
 }

@@ -193,6 +193,67 @@ fn a_predicate_guards_what_its_if_holds() {
     assert_eq!(ptx(src), want);
 }
 
+/// An `if` on a variable guards each instruction inside, and the target checks the variable as
+/// it guards one. A block that runs none would check nothing, so it is refused at the `if`, an
+/// `else` too, whatever the variable is. Both blocks run before either count is read, so what is
+/// wrong inside either is said first.
+#[test]
+fn an_if_that_guards_no_instruction_is_refused() {
+    let block = "an `if` on a variable guards each instruction inside, and its block runs none";
+    // x86 takes no predicate, and a note is no instruction.
+    for body in [r#"let g: gpr; zero(g); if g { note("x"); }"#, "let g: gpr; zero(g); if g {}"] {
+        let got = kgen::x86_str(&format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\n"), "k").unwrap_err();
+        assert_eq!(got, format!("2:22: {block}"), "{body}");
+    }
+    // PTX takes a `pred` alone, and `r` is a `u32`. A block counts what it runs, not what it
+    // holds: a `for` over nothing runs none, and so does a call of `h`, which is empty. A block
+    // that runs none is refused though its `else` runs one, and an `else` that runs none is
+    // refused too. A store in the `else` that `r` guards is refused first, at the store.
+    let cases = [
+        ("let r: u32; mov.u32(r, n); if r {}", format!("2:28: {block}")),
+        ("let r: u32; mov.u32(r, n); if r { for i in 0..0 { st.global.u32([out], n); } }", format!("2:28: {block}")),
+        ("let p: pred; setp.ne.u32(p, n, 0); if p { h(); }", format!("2:36: {block}")),
+        ("let p: pred; setp.ne.u32(p, n, 0); if p {} else { st.global.u32([out], n); }", format!("2:36: {block}")),
+        (
+            r#"let p: pred; setp.ne.u32(p, n, 0); if p { st.global.u32([out], n); } else { note("x"); }"#,
+            "2:36: an `if` on a variable guards each instruction inside, and its `else` runs none".to_string(),
+        ),
+        (
+            "let r: u32; mov.u32(r, n); if r {} else { st.global.u32([out], n); }",
+            "2:53: an instruction is guarded by a `pred`; this is a `u32`".to_string(),
+        ),
+    ];
+    for (body, want) in cases {
+        let src = format!("unsafe extern \"ptx-kernel\" fn k(n: u32, out: *mut u32) {{\n{body}\n}}\nfn h() {{}}\n");
+        assert_eq!(kgen::ptx_str(&src).unwrap_err(), want, "{body}");
+    }
+    // An `if` that guards an instruction takes a note beside it, and counts one that a loop, an
+    // `if` on a bool or a helper runs.
+    let src = r#"
+        pub unsafe extern "ptx-kernel" fn k(n: u32, out: *mut u32) {
+            let p: pred;
+            setp.ne.u32(p, n, 0);
+            if p {
+                note("x");
+                st.global.u32([out], n);
+            }
+            if p {
+                for k in 0..2 {
+                    if k == 0 {
+                        s(out, n);
+                    }
+                }
+            }
+        }
+
+        fn s(o: u64, v: u32) {
+            st.global.u32([o], v);
+        }
+    "#;
+    let entry = ptx(src);
+    assert!(entry.contains("\t// x\n\t@%p st.global.u32 [%out], %n;\n\t@%p st.global.u32 [%out], %n;\n"), "{entry}");
+}
+
 #[test]
 fn values_are_computed_as_rust_computes_them() {
     let src = r#"
@@ -238,6 +299,65 @@ fn values_are_computed_as_rust_computes_them() {
 #   00 00 80 3f
 ";
     assert_eq!(x86(src, "v"), want);
+}
+
+/// A shift or a `!` is checked for overflow, as `+` is. One of an integer with a type is wrapped
+/// to the type's width, as Rust does, so it stays in range, as the note says. One of an integer
+/// with no type is held to the range every other is, `i64::MIN` to `u64::MAX`, and refused past
+/// it, at the operator: past it, a value would reach the ends of `i128`, and the third would
+/// divide `i128::MIN` by -1.
+#[test]
+fn a_shift_and_a_not_are_checked_for_overflow() {
+    let src = r#"
+        const HIGH: u64 = 3 << 63;
+        const MASK: u8 = !0;
+
+        pub unsafe extern "sysv64" fn k() {
+            note("{HIGH} {MASK}");
+        }
+    "#;
+    let want = "# k() -> ()
+# frame: 0 bytes aligned to 0, saves []
+    # 9223372036854775808 255
+    ret
+";
+    assert_eq!(x86(src, "k"), want);
+    let cases = [
+        ("const X: u64 = (3 << 63) as u64;", "2:19: 27670116110564327424 is out of range for an integer"),
+        ("const X: u64 = !18446744073709551615 as u64;", "2:16: -18446744073709551616 is out of range for an integer"),
+        (
+            "const X: u64 = ((((-1 << 63) << 63) << 1) / -1) as u64;",
+            "2:30: -85070591730234615865843651857942052864 is out of range for an integer",
+        ),
+    ];
+    for (body, want) in cases {
+        let got = kgen::x86_str(&format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\n"), "k").unwrap_err();
+        assert_eq!(got, want, "{body}");
+    }
+}
+
+/// A const is what kernels read: a number, a float, a `bool`, or an array of them. The kernel
+/// reads one of each, and adds only if each is what it was declared. One of another type is no
+/// value known now, and the error says what one is.
+#[test]
+fn a_const_is_a_number_a_float_a_bool_or_an_array_of_them() {
+    let src = |ty: &str| {
+        format!(
+            "const N: u64 = 1;\nconst F: f32 = 2.5;\nconst B: bool = true;\nconst XS: {ty} = [1, 2];\n\
+             unsafe extern \"sysv64\" fn k(x: u64) -> u64 {{\nif B && F > 2.0 {{\nadd(x, N + XS[1]);\n}}\n\
+             ret(x);\n}}\n"
+        )
+    };
+    let want = "# k(gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves []
+# x=rdi,rax
+    add rdi, 3
+    mov rax, rdi
+    ret
+";
+    assert_eq!(x86(&src("[u64; 2]"), "k"), want);
+    let e = kgen::x86_str(&src("[u64]"), "k").unwrap_err();
+    assert_eq!(e, "4:11: a value known now is a number, a bool, or an array of them, `[T; N]`");
 }
 
 #[test]

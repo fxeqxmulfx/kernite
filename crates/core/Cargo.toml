@@ -1,6 +1,6 @@
 [package]
 name = "kgen-core"
-description = "A kernel as instructions over registers, and the port a machine implements"
+description = "A kernel as instructions over registers"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

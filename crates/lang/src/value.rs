@@ -420,7 +420,7 @@ pub fn binary(op: BinOp, a: &Value, b: &Value) -> Result<Value, String> {
                         return Err(format!("a shift by {y} is wider than its {bits} bits"));
                     }
                     let shifted = if op == Shl { x << y } else { x >> y };
-                    return Ok(Value::Int(tx.map_or(shifted, |t| t.wrap(shifted)), tx));
+                    tx.map_or(shifted, |t| t.wrap(shifted))
                 }
                 And => x & y,
                 Or => x | y,
@@ -486,7 +486,7 @@ pub fn unary(op: UnOp, a: &Value) -> Result<Value, String> {
         (UnOp::Neg, &Value::F16(x)) => Ok(Value::F16(x ^ 0x8000)),
         (UnOp::Neg, &Value::Bf16(x)) => Ok(Value::Bf16(x ^ 0x8000)),
         (UnOp::Not, &Value::Bool(x)) => Ok(Value::Bool(!x)),
-        (UnOp::Not, &Value::Int(x, t)) => Ok(Value::Int(t.map_or(!x, |t| t.wrap(!x)), t)),
+        (UnOp::Not, &Value::Int(x, t)) => int(t.map_or(!x, |t| t.wrap(!x)), t),
         (UnOp::Neg, _) => Err(format!("{} cannot be negated", a.kind())),
         (UnOp::Not, _) => Err(format!("`!` has no meaning on {}", a.kind())),
     }

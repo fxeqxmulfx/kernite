@@ -80,6 +80,8 @@ pub struct Fn {
     pub head: Range<usize>,
     /// The ABI it names, which makes it a kernel for the machine that ABI belongs to.
     pub abi: Option<(String, Span)>,
+    /// Whether it is an `unsafe fn`.
+    pub unsafe_fn: bool,
     /// Its name.
     pub name: String,
     /// Where its name is.

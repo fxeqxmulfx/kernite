@@ -87,6 +87,21 @@ fn the_examples_kernels_come_out_as_the_builder_wrote_them() {
     }
 }
 
+/// A kernel's assembly changes only when the kernel does: it is the same each time it compiles,
+/// and the same whatever else its module holds.
+#[test]
+fn a_kernels_assembly_changes_only_when_it_does() {
+    let k = "unsafe extern \"sysv64\" fn k(x: *mut u64) {\nlet g: gpr;\nmov(g, [x]);\nadd(g, STEP);\nmov([x], g);\n}\n";
+    let alone = format!("const STEP: u64 = 3;\n{k}");
+    let among = format!(
+        "static S: global<u64>;\nconst STEP: u64 = 3;\nconst FAR: u64 = 9;\nfn far(g: gpr) {{\nadd(g, FAR);\n}}\n\
+         unsafe extern \"sysv64\" fn j(x: *mut u64) {{\nlet g: gpr;\nmov(g, [x]);\nfar(g);\nmov([x], g);\n}}\n{k}"
+    );
+    let listing = |src: &str| kgen::x86_str(src, "k").unwrap().text();
+    assert_eq!(listing(&alone), listing(&alone));
+    assert_eq!(listing(&among), listing(&alone));
+}
+
 /// Sixteen accumulators and the load beside them take 17 of the 16 vector registers: the two
 /// that cost least to keep on the stack, of those that hold one through the loop, spill.
 #[test]
@@ -214,6 +229,59 @@ ret";
     assert_eq!(code, want);
 }
 
+/// The word before the brackets is checked wherever it is given: on stack memory, on memory that
+/// holds data, on a static, and on memory at a vector of indices, as on memory at a pointer.
+#[test]
+fn the_word_before_the_brackets_is_checked_wherever_it_is_given() {
+    let cases = [
+        (
+            "let b: local<u64>; let g: gpr; zero(g); mov(qword[b], g); mov(g, dword[b]);",
+            "3:71: `mov` wants 8 bytes of memory; this is 4 bytes of memory",
+        ),
+        (
+            "let g: gpr; mov(g, dword[[1u64]]);",
+            "3:25: `mov` wants 8 bytes of memory; this is 4 bytes of memory holding data",
+        ),
+        ("let g: gpr; mov(g, dword[S]);", "3:25: `mov` wants 8 bytes of memory; this is 4 bytes of memory"),
+        (
+            "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, qword[x + i * 4], m);",
+            "3:83: `vpgatherdd` wants 4 bytes of memory at a ymm of indices; this is 8 bytes of memory at a ymm of \
+             indices",
+        ),
+    ];
+    for (body, want) in cases {
+        let src = format!("static S: global<u64>;\nunsafe extern \"sysv64\" fn k(x: *const u32) {{\n{body}\n}}\n");
+        assert_eq!(kgen::x86_str(&src, "k").unwrap_err(), want, "{body}");
+    }
+}
+
+/// A gpr is `g`, or `g.r32`, `g.r16` or `g.r8`, its low 32, 16 or 8 bits, and nothing else.
+#[test]
+fn a_gpr_is_g_or_g_r32_g_r16_or_g_r8() {
+    let code =
+        compile("x: *mut u64", "let g: gpr; mov(g, [x]); mov(g.r32, 1); mov(g.r16, 2); mov(g.r8, 3); mov([x], g);");
+    let want = "mov rax, qword ptr [rdi]
+mov eax, 1
+mov ax, 2
+mov al, 3
+mov qword ptr [rdi], rax
+ret";
+    assert_eq!(code.unwrap(), want);
+    let e = compile("x: *mut u64", "let g: gpr; mov(g.r64, 1);").unwrap_err();
+    assert_eq!(e, "2:19: a gpr is seen as `gpr`, `r32`, `r16` or `r8`, not `r64`");
+}
+
+/// A write to `r16` or `r8` keeps the rest of the gpr, as x86 does, so it reads the gpr, which
+/// must hold a value first. One to `r32` clears the rest, as x86 does, and reads nothing.
+#[test]
+fn a_write_to_r16_or_r8_keeps_the_rest_of_the_gpr() {
+    for body in ["let g: gpr; mov(g.r16, 1); mov([x], g);", "let g: gpr; mov(g.r8, 1); mov([x], g);"] {
+        assert_eq!(compile("x: *mut u64", body).unwrap_err(), "2:5: `g` is read before anything writes it", "{body}");
+    }
+    let code = compile("x: *mut u64", "let g: gpr; mov(g.r32, 1); mov([x], g);");
+    assert_eq!(code.unwrap(), "mov eax, 1\nmov qword ptr [rdi], rax\nret");
+}
+
 /// A gather reads memory at a vector of indices, `[p + v * 4]`, under a mask, and needs AVX2.
 #[test]
 fn a_gather_reads_memory_at_a_vector_of_indices() {
@@ -240,6 +308,29 @@ fn a_gather_reads_memory_at_a_vector_of_indices() {
     assert_eq!(code, want);
 }
 
+/// A gather takes its result, its indices and its mask in three registers, as x86 faults
+/// otherwise: kgen keeps them apart where nothing reads the indices or the mask again, and
+/// refuses a variable that is two of them, here the result and the mask.
+#[test]
+fn a_gather_takes_its_result_indices_and_mask_in_three_registers() {
+    let body = "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, [x + i * 4], m); \
+                vmovups([x], v);";
+    let want = "vxorps xmm0, xmm0, xmm0
+vpcmpeqd ymm1, ymm1, ymm1
+vxorps xmm2, xmm2, xmm2
+vpgatherdd ymm0, dword ptr [rdi + ymm2*4], ymm1
+vmovups ymmword ptr [rdi], ymm0
+vzeroupper
+ret";
+    assert_eq!(compile("x: *mut u32", body).unwrap(), want);
+    let e = compile("x: *mut u32", "let v: ymm; let i: ymm; zero(v); zero(i); vpgatherdd(v, [x + i * 4], v);");
+    assert_eq!(
+        e.unwrap_err(),
+        "2:70: `vpgatherdd` faults unless its result, its indices and its mask are three registers; `v` is its \
+         result and its mask"
+    );
+}
+
 /// SysV leaves MXCSR's control bits as the caller set them, so a kernel that loads MXCSR stores
 /// the caller's first, in its frame, and loads it back before it returns.
 #[test]
@@ -256,6 +347,39 @@ fn a_kernel_that_loads_mxcsr_gives_the_callers_back() {
     # the caller's mxcsr, which it gets back
     vstmxcsr dword ptr [rsp]
     vldmxcsr dword ptr [rdi]
+    vldmxcsr dword ptr [rsp]
+    mov rsp, rbp
+    pop rbp
+    ret
+";
+    assert_eq!(kgen::x86_str(src, "k").unwrap().text(), want);
+}
+
+/// A kernel that loads MXCSR twice and returns in two places stores the caller's once, before
+/// its first load, and loads it back before each return.
+#[test]
+fn a_kernel_that_loads_mxcsr_loads_the_callers_back_before_each_return() {
+    let src = "unsafe extern \"sysv64\" fn k(x: *const u32, n: u64) {\nvldmxcsr([x]);\ntest(n, n);\njz(done);\n\
+               vldmxcsr([x + 4]);\nret();\nlabel(done);\n}\n";
+    let want = "# k(gpr, gpr) -> ()
+# needs: avx
+# frame: 4 bytes aligned to 4, saves []
+# mxcsr: 4 bytes at rsp
+# x=rdi n=rsi
+    push rbp
+    mov rbp, rsp
+    sub rsp, 4
+    # the caller's mxcsr, which it gets back
+    vstmxcsr dword ptr [rsp]
+    vldmxcsr dword ptr [rdi]
+    test rsi, rsi
+    jz 2f
+    vldmxcsr dword ptr [rdi + 4]
+    vldmxcsr dword ptr [rsp]
+    mov rsp, rbp
+    pop rbp
+    ret
+2:
     vldmxcsr dword ptr [rsp]
     mov rsp, rbp
     pop rbp
@@ -732,6 +856,12 @@ fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() {
             "1:8: a kernel's listing names a constant `{c0}` and a function `{f0}`, and a static by its name, so one \
              is not named `f12`",
         ),
+        // The name is checked before the type.
+        (
+            "static c0: u32;",
+            "1:8: a kernel's listing names a constant `{c0}` and a function `{f0}`, and a static by its name, so one \
+             is not named `c0`",
+        ),
         (
             "static A: shared<[u32; 4]>;",
             "1:11: a static of the module is memory: `global<[u32; 16]>`, which its kernels read and write, or \
@@ -1043,6 +1173,26 @@ fn stack_memory_is_part_of_the_frame() {
     assert_eq!(kgen::x86_str(src, "k").unwrap().text(), want);
 }
 
+/// Until written, stack memory holds whatever was there: kgen clears none of it, and takes a
+/// read of it before any write, as it does not of a variable.
+#[test]
+fn stack_memory_holds_whatever_was_there_until_written() {
+    let src = "unsafe extern \"sysv64\" fn k() -> u64 {\nlet b: local<u64>;\nlet g: gpr;\nmov(g, [b]);\nret(g);\n}\n";
+    let want = "# k() -> gpr
+# frame: 8 bytes aligned to 8, saves []
+# b: 8 bytes at rsp
+# g=rax
+    push rbp
+    mov rbp, rsp
+    sub rsp, 8
+    mov rax, qword ptr [rsp]
+    mov rsp, rbp
+    pop rbp
+    ret
+";
+    assert_eq!(kgen::x86_str(src, "k").unwrap().text(), want);
+}
+
 /// The stack pointer moves no more than a page below memory the kernel has touched, as Rust's
 /// functions do, so that a frame past the end of the stack faults at the guard page there
 /// rather than step over it: a bigger frame is touched a page at a time, in a loop past three
@@ -1071,6 +1221,32 @@ fn a_frame_of_more_than_a_page_is_touched_a_page_at_a_time() {
     for (ty, want) in cases {
         assert_eq!(prologue(ty), want, "{ty}");
     }
+}
+
+/// A frame of more than 2^31 bytes, its stack memory and the variables that spilled, is more than
+/// an address reaches past the stack pointer, and the kernel is refused at its name. Seventeen
+/// vectors alive at once spill two, after stack memory of `N` bytes. A frame of 2^31 bytes
+/// compiles, its last spill at the furthest an address reaches and its loop's end at the furthest
+/// down; a byte more of stack memory makes it 32 bytes more, as a spill is aligned to 32.
+#[test]
+fn a_frame_past_what_an_address_reaches_is_refused() {
+    let loads: String = (0..17).map(|i| format!("let v{i}: ymm;\nvmovups(v{i}, [x + {}]);\n", 32 * i)).collect();
+    let sums: String = (1..17).map(|i| format!("vaddps(v0, v0, v{i});\n")).collect();
+    let src = format!(
+        "#[instances(2147483584, 2147483585)]\nunsafe extern \"sysv64\" fn k<const N: usize>(x: *mut f32) {{\n\
+         let big: local<[u8; N], 32>;\n{loads}{sums}vmovups([big], v0);\n}}\n"
+    );
+    let text = kgen::x86_str(&src, "k::<2147483584>").unwrap().text();
+    let frame = "# frame: 2147483648 bytes aligned to 32, saves []
+# big: 2147483584 bytes at rsp
+# v16, spilled: 32 bytes at rsp + 2147483584
+# v15, spilled: 32 bytes at rsp + 2147483616
+";
+    assert!(text.contains(frame), "{text}");
+    assert!(text.contains("\n    lea r11, [rsp - 2147483648]\n"), "{text}");
+    let want = "2:27: in `k::<2147483585>`: the kernel's frame, its stack memory and the variables that spilled, is \
+                2147483680 bytes: more than an address reaches past the stack pointer";
+    assert_eq!(kgen::x86_str(&src, "k::<2147483585>").unwrap_err(), want);
 }
 
 /// The prologue's loop takes the first label, and the body's come after it.
@@ -1365,6 +1541,20 @@ fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
 # f0: nothing
 ";
     assert_eq!(kgen::x86_str(CALLERS, "keep").unwrap().text(), want);
+}
+
+/// The registers a call leaves as they were are rbx and r12 to r15, and an integer alive
+/// across one is kept in them alone: five are, each saved for the kernel's caller, and a
+/// sixth is spilled to the frame.
+#[test]
+fn a_value_alive_across_a_call_is_kept_in_rbx_or_r12_to_r15() {
+    let body = "call(nothing); add(a, b); add(a, c); add(a, d); add(a, e); add(a, f); ret(a);";
+    let code = calling("a: u64, b: u64, c: u64, d: u64, e: u64, f: u64", " -> u64", body).unwrap();
+    let want = "push rbx\npush r12\npush r13\npush r14\npush r15\npush rbp\nmov rbp, rsp\nsub rsp, 8\nmov qword ptr \
+                [rsp], r9\nmov rbx, r8\nmov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\ncall {f0}\nadd r15, \
+                r14\nadd r15, r13\nadd r15, r12\nadd r15, rbx\nmov rax, qword ptr [rsp]\nadd r15, rax\nmov rax, \
+                r15\nmov rsp, rbp\npop rbp\npop r15\npop r14\npop r13\npop r12\npop rbx\nret";
+    assert_eq!(code, want);
 }
 
 /// `lea` takes the address of a function of the module, rip-relative, and a call through the
@@ -1861,4 +2051,111 @@ fn kgen_knows_every_instruction_of_x86_64_v3() {
     for name in forms::names() {
         assert!(v3.iter().any(|n| n == name), "`{name}` is not of x86-64-v3");
     }
+}
+
+/// The `vzeroupper` a kernel that touches vector registers runs before it returns is AVX's, so
+/// it needs AVX though nothing else it runs does, unless it needs FMA, F16C or AVX2, which build
+/// on AVX. AVX takes its place among the other needs, which are listed by name.
+#[test]
+fn vzeroupper_needs_avx_where_nothing_else_says_so() {
+    let cases = [
+        (
+            "pub unsafe extern \"sysv64\" fn f(x: f32) -> f32 { ret(x); }",
+            "# f(vec) -> vec
+# needs: avx
+# frame: 0 bytes aligned to 0, saves []
+# x=ymm0
+    vzeroupper
+    ret
+",
+        ),
+        (
+            "pub unsafe extern \"sysv64\" fn f(x: f32, n: u64) -> f32 { popcnt(n, n); ret(x); }",
+            "# f(vec, gpr) -> vec
+# needs: avx, popcnt
+# frame: 0 bytes aligned to 0, saves []
+# x=ymm0 n=rdi
+    popcnt rdi, rdi
+    vzeroupper
+    ret
+",
+        ),
+        (
+            "pub unsafe extern \"sysv64\" fn f(x: f32, y: f32, z: f32) -> f32 { vfmadd231ss(x, y, z); ret(x); }",
+            "# f(vec, vec, vec) -> vec
+# needs: fma
+# frame: 0 bytes aligned to 0, saves []
+# x=ymm0 y=ymm1 z=ymm2
+    vfmadd231ss xmm0, xmm1, xmm2
+    vzeroupper
+    ret
+",
+        ),
+        (
+            "pub unsafe extern \"sysv64\" fn f(x: f32, y: f32) -> f32 { vcvtph2ps(x, y); ret(x); }",
+            "# f(vec, vec) -> vec
+# needs: f16c
+# frame: 0 bytes aligned to 0, saves []
+# x=ymm0 y=ymm1
+    vcvtph2ps xmm0, xmm1
+    vzeroupper
+    ret
+",
+        ),
+        (
+            "pub unsafe extern \"sysv64\" fn f(x: f32, y: f32) -> f32 { vpbroadcastd(x, y); ret(x); }",
+            "# f(vec, vec) -> vec
+# needs: avx2
+# frame: 0 bytes aligned to 0, saves []
+# x=ymm0 y=ymm1
+    vpbroadcastd xmm0, xmm1
+    vzeroupper
+    ret
+",
+        ),
+        (
+            "pub unsafe extern \"sysv64\" fn f(x: f32, n: u64) -> f32 { popcnt(n, n); vcvtph2ps(x, x); popcnt(n, n); \
+             ret(x); }",
+            "# f(vec, gpr) -> vec
+# needs: f16c, popcnt
+# frame: 0 bytes aligned to 0, saves []
+# x=ymm0 n=rdi
+    popcnt rdi, rdi
+    vcvtph2ps xmm0, xmm0
+    popcnt rdi, rdi
+    vzeroupper
+    ret
+",
+        ),
+    ];
+    for (src, want) in cases {
+        assert_eq!(kgen::x86_str(src, "f").unwrap().text(), want, "{src}");
+    }
+}
+
+/// A kernel needs what the instructions its listing prints need. A move of a register to itself
+/// that the listing leaves out needs nothing: `never` passes `x` on in `ymm0`, the register it
+/// arrives in, and does not return, so it runs no instruction of AVX's. A move of an xmm to
+/// itself clears the upper lanes, so the listing prints it, and `kept` needs AVX for it.
+#[test]
+fn a_kernels_needs_are_those_of_the_instructions_it_prints() {
+    let src = "pub unsafe extern \"sysv64\" fn die(x: f32) -> ! { ud2(); }
+pub unsafe extern \"sysv64\" fn never(x: f32) -> ! { call(die, x); }
+pub unsafe extern \"sysv64\" fn kept(x: f32) -> ! { vmovaps(x, x); ud2(); }";
+    let want = "# never(vec) -> !
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# x=ymm0
+    sub rsp, 8
+    call {f0}
+# f0: die
+";
+    assert_eq!(kgen::x86_str(src, "never").unwrap().text(), want);
+    let want = "# kept(vec) -> !
+# needs: avx
+# frame: 0 bytes aligned to 0, saves []
+# x=ymm0
+    vmovaps xmm0, xmm0
+    ud2
+";
+    assert_eq!(kgen::x86_str(src, "kept").unwrap().text(), want);
 }

@@ -1,25 +1,5 @@
-use crate::operand::Arg;
+use crate::operand::{Arg, Label};
 use crate::reg::{Class, PReg, Register, VReg};
-
-/// A place in the body that jumps can name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Label(pub u32);
-
-/// A slot of the stack frame, by its index in [`Program::slots`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SlotId(pub u32);
-
-/// A constant, by its index in [`Program::consts`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ConstId(pub u32);
-
-/// A function the kernel names, by its index in [`Program::funcs`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FuncId(pub u32);
-
-/// Memory of the module's that the kernel names, by its index in [`Program::statics`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StaticId(pub u32);
 
 /// Where control goes after an instruction.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -153,54 +133,14 @@ pub struct Program<Op> {
     pub pinned: Vec<(VReg, PReg)>,
     /// The code.
     pub body: Vec<Item<Op, VReg>>,
-    /// Stack memory, by [`SlotId`].
+    /// Stack memory, by [`SlotId`](crate::SlotId).
     pub slots: Vec<Slot>,
-    /// Read-only data, by [`ConstId`].
+    /// Read-only data, by [`ConstId`](crate::ConstId).
     pub consts: Vec<Const>,
-    /// The functions it names, by [`FuncId`], each by what the source calls it: `gcd`, or an
-    /// instance, `tile::<4>`.
+    /// The functions it names, by [`FuncId`](crate::FuncId), each by what the source calls
+    /// it: `gcd`, or an instance, `tile::<4>`.
     pub funcs: Vec<String>,
-    /// The memory of the module's it names, its statics, by [`StaticId`], each by what the
-    /// source calls it: `COUNTS`.
+    /// The memory of the module's it names, its statics, by [`StaticId`](crate::StaticId),
+    /// each by what the source calls it: `COUNTS`.
     pub statics: Vec<String>,
-}
-
-/// The stack frame of an allocated kernel.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Frame {
-    /// The callee-saved registers the body writes, to save on entry and restore at every
-    /// return, in the order they are saved.
-    pub saved: Vec<PReg>,
-    /// The slots, by [`SlotId`].
-    pub slots: Vec<Slot>,
-    /// Each slot's offset from the stack pointer once it is aligned.
-    pub offsets: Vec<u32>,
-    /// Bytes the slots take together, a multiple of `align`; 0 with no slots.
-    pub size: u32,
-    /// The alignment the slots need; 0 with no slots.
-    pub align: u32,
-}
-
-/// A kernel after allocation: machine registers only, and a frame laid out.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Compiled<Op> {
-    /// What it is called.
-    pub name: String,
-    /// What it takes and gives.
-    pub signature: Signature,
-    /// The code.
-    pub body: Vec<Item<Op, PReg>>,
-    /// Its stack frame.
-    pub frame: Frame,
-    /// Read-only data, by [`ConstId`].
-    pub consts: Vec<Const>,
-    /// The functions it names, by [`FuncId`].
-    pub funcs: Vec<String>,
-    /// The memory of the module's it names, by [`StaticId`].
-    pub statics: Vec<String>,
-    /// Every variable and the register it got, by [`VReg::id`]: the program's, then those
-    /// the allocator made, each named as the one it was made for is: to load and store one that
-    /// spilled, or to hold a parameter or a result that moved. `None` for one the code does not
-    /// name, as one that spilled is not.
-    pub assignment: Vec<(RegInfo, Option<PReg>)>,
 }

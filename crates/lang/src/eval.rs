@@ -1,148 +1,11 @@
 //! The evaluator: a kernel's body run at compile time, its loops unrolled and its helpers
 //! inlined, as calls into the [`Target`] that builds the machine's instructions.
 
-use std::fmt;
-
 use crate::Error;
 use crate::ast::{BinOp, Block, Const, Expr, Fn, Generic, ItemKind, Module, Static, Stmt, Type, UnOp};
+use crate::target::{Fault, Guard, Mem, Operand, Target};
 use crate::token::Span;
 use crate::value::{self, Value, Want};
-
-/// An instruction set, as the evaluator sees it: variables of the machine's types, and
-/// instructions by name. It checks what it is given and builds the program; the evaluator
-/// knows no machine.
-pub trait Target {
-    /// A variable, seen as one of the machine's types: `ymm`, `v.xmm`, `u32`.
-    type Var: Copy + PartialEq + fmt::Debug;
-
-    /// The function's next parameter, of the type `ty` as written: Rust's, `*const f32` or
-    /// `usize`, or the machine's.
-    fn param(&mut self, name: &str, ty: &str) -> Result<Self::Var, String>;
-
-    /// What the function returns, of the type `ty` as written: `()`, `!` for never, Rust's or
-    /// the machine's.
-    fn result(&mut self, ty: &str) -> Result<(), String>;
-
-    /// A new variable of the machine's type `ty`.
-    fn var(&mut self, name: &str, ty: &str) -> Result<Self::Var, String>;
-
-    /// The module's memory `name`, which a `static` of the module declares, as a variable, the
-    /// first time the function names it. A machine has none unless it says so.
-    fn global(&mut self, name: &str) -> Result<Self::Var, String> {
-        Err(format!(
-            "`{name}` is memory of the module's, and this machine has none: its kernels take memory by pointer"
-        ))
-    }
-
-    /// `var` seen as `view`: a field, as in `v.xmm`, or the type of a helper's parameter.
-    fn view(&mut self, var: Self::Var, view: &str) -> Result<Self::Var, String>;
-
-    /// `var.field`: `var` seen as `field`, unless the machine has parts of a variable too, as
-    /// PTX selects a byte of one, `r.b0`.
-    fn field(&mut self, var: Self::Var, field: &str) -> Result<Self::Var, String> {
-        self.view(var, field)
-    }
-
-    /// Places label `label` here. The evaluator numbers labels, each once.
-    fn label(&mut self, label: u32);
-
-    /// A remark for whoever reads the listing.
-    fn note(&mut self, text: &str);
-
-    /// The instruction `name` over `args`, run only where `guard` holds if there is one.
-    fn inst(&mut self, name: &str, args: &[Operand<Self::Var>], guard: Option<Guard<Self::Var>>) -> Result<(), Fault>;
-
-    /// The end of the body, for whatever the machine puts there.
-    fn end(&mut self) -> Result<(), String>;
-}
-
-/// What an instruction is given.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Operand<V> {
-    /// A variable.
-    Var(V),
-    /// A name that is nothing in scope, for a machine that has registers of its own by name:
-    /// `tid.x`. `_` is one, for an operand the machine lets be left out.
-    Special(String),
-    /// An integer known now, from -2^63 to 2^64 - 1, as the 64 bits of an `i64` or a `u64` are.
-    Int(i128),
-    /// An `f32` known now.
-    F32(f32),
-    /// An `f64` known now.
-    F64(f64),
-    /// An `f16` known now, as its bits.
-    F16(u16),
-    /// A `bf16` known now, as its bits.
-    Bf16(u16),
-    /// Memory at an address: `[x + i * 4 + 16]`.
-    Mem(Mem<V>),
-    /// Memory holding a value known now, as bytes: `[1.0]`, `[[0.5; 8]]`.
-    Data(Vec<u8>),
-    /// Memory, `Mem` or `Data`, after a name that is nothing in scope, for a machine that names
-    /// how much of it an instruction reaches, as x86 does: `dword[x + 4]`.
-    Sized(String, Box<Operand<V>>),
-    /// A label, for a jump.
-    Label(u32),
-    /// A function of the module that names an ABI, by its name: one the machine calls, as
-    /// PTX's `call` does, or whose address it takes.
-    Func(String),
-    /// The code of a function of the module that names an ABI, `[f]`: memory whose address x86's
-    /// `lea` takes.
-    Code(String),
-    /// Operands taken together: `(a, b, c, d)`, or variables declared together, `acc`.
-    Vector(Vec<Operand<V>>),
-    /// `a | b`: two operands in the place of one, as the result and the predicate PTX's `setp`
-    /// writes.
-    Pair(Box<Operand<V>>, Box<Operand<V>>),
-    /// `!p`: an operand read inverted.
-    Not(Box<Operand<V>>),
-    /// `-a`: an operand read negated.
-    Neg(Box<Operand<V>>),
-    /// `[a, b, ..]`: operands in brackets, more than one, as a texture's handle and where it
-    /// is read.
-    List(Vec<Operand<V>>),
-}
-
-/// An address: `base + index * scale + disp`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Mem<V> {
-    /// The variable added as it is.
-    pub base: Option<V>,
-    /// The variable multiplied, and by what.
-    pub index: Option<(V, i64)>,
-    /// Bytes added.
-    pub disp: i64,
-}
-
-/// The predicate an instruction runs under: `if p { .. }`, `if !p { .. }`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Guard<V> {
-    /// The predicate.
-    pub pred: V,
-    /// Whether the instruction runs where it is false.
-    pub negated: bool,
-}
-
-/// Why a target refuses an instruction, and which argument it blames, if one.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Fault {
-    /// The argument at fault, by position.
-    pub arg: Option<usize>,
-    /// What is wrong.
-    pub message: String,
-}
-
-impl Fault {
-    /// The instruction as a whole is wrong.
-    pub fn new(message: impl Into<String>) -> Self {
-        Fault { arg: None, message: message.into() }
-    }
-
-    /// Argument `arg` is wrong.
-    pub fn at(arg: usize, message: impl Into<String>) -> Self {
-        Fault { arg: Some(arg), message: message.into() }
-    }
-}
 
 /// What running a kernel found, besides what it asked of its target.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,8 +13,9 @@ pub struct Run {
     /// Every variable declared, with where: the place to blame for what goes wrong with one
     /// later, when its registers are allocated.
     pub decls: Vec<(String, Span)>,
-    /// The module's constants it read, itself or through others, in the module's order. Rust
-    /// never sees a kernel's body run, so it sees none of these reads.
+    /// The module's constants it read, itself or through others, in its body or its
+    /// `#[instances(..)]`, in the module's order. Rust never sees a kernel's body run, nor its
+    /// list worked out, so it sees none of these reads.
     pub consts: Vec<String>,
 }
 
@@ -219,6 +83,7 @@ pub fn constant(module: &Module, c: &Const) -> Result<Value, Error> {
 pub fn kernel<T: Target>(module: &Module, f: &Fn, args: &[Value], target: &mut T) -> Result<Run, Error> {
     instance(f, args)?;
     let mut e = Eval::new(module, target);
+    e.listed(f)?;
     let mut scope: Scope<T::Var> =
         f.generics.iter().zip(args).map(|(g, a)| (g.name.clone(), Binding::Value(a.clone()))).collect();
     for p in &f.params {
@@ -394,6 +259,8 @@ struct Eval<'a, T: Target> {
     scopes: Vec<Scope<T::Var>>,
     labels: u32,
     guard: Option<Guard<T::Var>>,
+    /// How many instructions have run.
+    insts: usize,
     depth: usize,
     decls: Vec<(String, Span)>,
 }
@@ -410,8 +277,8 @@ impl<'a, T: Target> Eval<'a, T> {
                 ItemKind::Other => {}
             }
         }
-        let scopes = vec![];
-        Eval { target, consts, statics, helpers, compiled, scopes, labels: 0, guard: None, depth: 0, decls: vec![] }
+        let (scopes, decls) = (vec![], vec![]);
+        Eval { target, consts, statics, helpers, compiled, scopes, labels: 0, guard: None, insts: 0, depth: 0, decls }
     }
 
     fn bind(&mut self, name: &str, b: Binding<T::Var>) {
@@ -1107,16 +974,30 @@ impl<'a, T: Target> Eval<'a, T> {
         if self.guard.is_some() {
             return Err(err(span, "a predicate's `if` inside another's: one predicate guards an instruction"));
         }
-        self.guard = Some(Guard { pred, negated });
-        let r = self.block(then).and_then(|()| match otherwise {
-            Some(s) => {
-                self.guard = Some(Guard { pred, negated: !negated });
-                self.stmt(s)
-            }
-            None => Ok(()),
-        });
+        // The target checks the variable as it guards an instruction: a block that runs none
+        // checks nothing. Both blocks run before either count is read, so what is wrong inside
+        // either is said first.
+        let ran = self.guarded(Guard { pred, negated }, |e| e.block(then))?;
+        let other = otherwise.map_or(Ok(true), |s| self.guarded(Guard { pred, negated: !negated }, |e| e.stmt(s)))?;
+        let which = match (ran, other) {
+            (true, true) => return Ok(()),
+            (false, _) => "its block",
+            (true, false) => "its `else`",
+        };
+        Err(err(span, format!("an `if` on a variable guards each instruction inside, and {which} runs none")))
+    }
+
+    /// Runs `body`, each instruction it runs under `guard`: whether it ran one.
+    fn guarded(
+        &mut self,
+        guard: Guard<T::Var>,
+        body: impl FnOnce(&mut Self) -> Result<(), Error>,
+    ) -> Result<bool, Error> {
+        let ran = self.insts;
+        self.guard = Some(guard);
+        let r = body(self);
         self.guard = None;
-        r
+        r.map(|()| self.insts > ran)
     }
 
     /// The variable a condition tests, and whether it is negated: `p`, `!p`.
@@ -1173,6 +1054,7 @@ impl<'a, T: Target> Eval<'a, T> {
 
     fn inst(&mut self, name: &str, args: &[Expr], span: Span) -> Result<(), Error> {
         let ops = args.iter().map(|a| self.operand(a)).collect::<Result<Vec<_>, _>>()?;
+        self.insts += 1;
         self.target
             .inst(&spelled(name), &ops, self.guard)
             .map_err(|f| Error { span: f.arg.and_then(|i| args.get(i)).map_or(span, Expr::span), message: f.message })
