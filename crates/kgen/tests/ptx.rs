@@ -1330,6 +1330,11 @@ fn the_tools_that_read_ptx_show_each_name_as_rust_has_it() {
     let statics = kgen::lang::parse(STATICS).unwrap();
     symbols.push(kgen::ptx_statics(&statics, &scope).remove(0).unwrap().code.memory.name);
     want.push("my_workspace::my_app::gpu::COUNTS".into());
+    // The shared memory a launch gives, as the kernel's static.
+    let shared = kgen::lang::parse(SHARED).unwrap();
+    let reverse = kgen::function(&shared, "reverse").unwrap();
+    symbols.push(kgen::ptx(&shared, reverse, &[], &scope).unwrap().code.memory.remove(0).name);
+    want.push("my_workspace::my_app::gpu::reverse::buf".into());
     // A name beyond ASCII as Rust's legacy mangling writes it.
     symbols.push(kgen_ptx::symbol(&kgen::ptx_scope(&["app", "мо"]), "σ", &[Value::Bool(false)]));
     want.push("app::$u43c$$u43e$::$u3c3$<(bool)0>".into());
