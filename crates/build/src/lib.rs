@@ -19,7 +19,6 @@ pub use dto::{Bytes, Compiled, DeviceStatic, HostStatic, Naked};
 pub use facade::{all, one};
 pub use function::{Prepared, compile, prepare, statics};
 pub use port::{Backend, Called, Device, Native, StaticError, Unfinished};
-pub use present::within;
 
 #[cfg(test)]
 mod tests;

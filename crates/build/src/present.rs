@@ -41,8 +41,8 @@ pub(crate) fn said(r: Refusal<'_>, span: Span) -> Error {
     Error { span, message }
 }
 
-/// `e`, which happened in `name`, the instance of a function for `args`, saying so.
-pub fn within(name: &str, args: &[Value], e: kgen_lang::Error) -> kgen_lang::Error {
+/// `e`, which happened in instance `name` of a function, for `args`, saying so if it has any.
+pub(crate) fn within(name: &str, args: &[Value], e: kgen_lang::Error) -> kgen_lang::Error {
     match args {
         [] => e,
         _ => kgen_lang::Error { message: format!("in `{name}`: {}", e.message), ..e },

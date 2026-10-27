@@ -3,7 +3,8 @@
 
 use kgen_lang::{Error, Expr, Fn, ItemKind, Module, Value};
 
-use crate::{Backend, Called, Compiled, StaticError, cooperative, within};
+use crate::present::within;
+use crate::{Backend, Called, Compiled, StaticError, cooperative};
 
 /// Each static of `module`, in order, laid out by `backend` after those before it that were;
 /// or why not, where it can be mended: at its name, its type or what it holds, as the machine
