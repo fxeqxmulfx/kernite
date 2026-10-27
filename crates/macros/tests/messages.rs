@@ -301,6 +301,14 @@ fn the_functions_docs_name_the_cpu_features_a_kernel_needs() {
     );
 }
 
+/// The module's `LISTINGS` holds each x86 kernel's listing by its name, and an instance's by
+/// its name and arguments, as `plus::<2>`. The fixture asserts each, name and listing, as it
+/// builds.
+#[test]
+fn listings_holds_each_kernels_listing_by_its_name() {
+    builds_quietly("listings");
+}
+
 #[test]
 fn a_kernel_that_does_not_compile_leaves_a_stub() {
     // Rust calls each stub, and a kernel calls two, and none of these calls is an error.
@@ -318,6 +326,8 @@ fn a_kernel_that_does_not_compile_leaves_a_stub() {
     );
 }
 
+/// A module of kernels takes its consts by any path Rust has, and Rust sees them in it, those of
+/// the module the path names: the fixture asserts, as it builds, which `STEP` each sees.
 #[test]
 fn consts_are_taken_by_any_path() {
     builds_quietly("paths");
