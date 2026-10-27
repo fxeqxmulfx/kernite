@@ -13,8 +13,8 @@ use std::sync::{Mutex, PoisonError};
 /// waits for another's lock says so.
 static CARGO: Mutex<()> = Mutex::new(());
 
-/// Where in `CARGO_TARGET_TMPDIR` each fixture is a crate, `kgen-macros/name`, and where they
-/// are built, `kgen-macros/target`.
+/// Where in `CARGO_TARGET_TMPDIR` each fixture is a crate, `kgen-macros/name/project`, so that
+/// its workspace is not named as the crate is; and where they are built, `kgen-macros/target`.
 const ROOT: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/kgen-macros");
 
 /// Whether Cargo did `command`, `["build"]` say, for fixture `name`, and what it said, a line
@@ -23,12 +23,15 @@ const ROOT: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/kgen-macros");
 /// The fixture is the `src/lib.rs` of a crate that depends on kgen-macros, kgen-cuda and
 /// kgen-cpu, as a user's does. The crate is a workspace of its own in `CARGO_TARGET_TMPDIR`,
 /// built offline into a target directory beside it, so that it never waits for the build that
-/// runs these tests. What the environment would change of a build is taken out of it.
+/// runs these tests. What the environment would change of a build is taken out of it. Its
+/// manifest ends with what `{name}.toml` beside the fixture says of the workspace, if there is
+/// one.
 fn cargo(command: &[&str], name: &str) -> (bool, Vec<String>) {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     let crates = here.parent().expect("kgen-macros is in crates/");
+    let fixtures = here.join("tests/fixtures");
     let root = Path::new(ROOT);
-    let dir = root.join(name);
+    let dir = root.join(name).join("project");
     fs::create_dir_all(dir.join("src")).unwrap();
     let path = |c: &str| crates.join(c).display().to_string();
     let (macros, cuda, cpu) = (path("macros"), path("cuda"), path("cpu"));
@@ -47,8 +50,9 @@ kgen-cpu = {{ path = {cpu:?} }}
 [workspace]
 "#
     );
-    fs::write(dir.join("Cargo.toml"), manifest).unwrap();
-    fs::copy(here.join("tests/fixtures").join(format!("{name}.rs")), dir.join("src/lib.rs")).unwrap();
+    let workspace = fs::read_to_string(fixtures.join(format!("{name}.toml"))).unwrap_or_default();
+    fs::write(dir.join("Cargo.toml"), manifest + &workspace).unwrap();
+    fs::copy(fixtures.join(format!("{name}.rs")), dir.join("src/lib.rs")).unwrap();
     let _one = CARGO.lock().unwrap_or_else(PoisonError::into_inner);
     let mut run = Command::new(env!("CARGO"));
     run.args(command);
@@ -134,6 +138,14 @@ fn an_instance_not_listed_stops_the_build() {
             "error: could not compile `instances` (lib) due to 2 previous errors",
         ],
     );
+}
+
+#[test]
+fn the_workspace_is_named_as_its_directory_is_unless_its_manifest_names_it() {
+    // Each fixture asserts, as it builds, what its kernel is named in PTX: as the directory of
+    // its workspace, `project`, is; or as `renamed.toml` names the workspace.
+    builds_quietly("named");
+    builds_quietly("renamed");
 }
 
 #[test]
