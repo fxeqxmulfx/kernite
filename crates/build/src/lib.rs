@@ -8,3 +8,6 @@ mod dto;
 
 pub use classify::{Abi, Owner, abi, cooperative, function, instance, owner};
 pub use dto::Compiled;
+
+#[cfg(test)]
+mod tests;
