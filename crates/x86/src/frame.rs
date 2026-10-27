@@ -28,7 +28,9 @@ pub(crate) struct Lowered {
 pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     let calls = insts(&c.body).any(|inst| inst.op == Op::Call);
     let returns = insts(&c.body).any(|inst| inst.op == Op::Ret);
-    let vector = insts(&c.body).any(|inst| inst.operands().any(|a| a.regs().any(|r| r.class == Class::Vec)));
+    let vector = insts(&c.body)
+        .filter(|inst| !idle(inst))
+        .any(|inst| inst.operands().any(|a| a.regs().any(|r| r.class == Class::Vec)));
     // The prologue's loop takes the least value no label of the body has: going up the body's
     // labels in order, each one that has the value looked for moves it one on.
     let labels: BTreeSet<u32> = c
@@ -45,18 +47,7 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     for item in &c.body {
         match item {
             Item::Inst(inst) if inst.op == Op::Ret => body.extend(epilogue(&c.frame, padding, vector)),
-            // All 64 bits, or all 256, to the same register: but one of 32 bits clears the upper
-            // half, and one of an xmm the upper lanes.
-            Item::Inst(inst)
-                if matches!(inst.op, Op::Mov | Op::Vmovaps | Op::Vmovups | Op::Vmovdqa | Op::Vmovdqu)
-                    && matches!(
-                        inst.args.as_slice(),
-                        [Arg { operand: Operand::Reg(a, w), .. }, Arg { operand: Operand::Reg(b, v), .. }]
-                            if a == b && w == v && matches!(w, Width::W64 | Width::W256)
-                    ) =>
-            {
-                continue;
-            }
+            Item::Inst(inst) if idle(inst) => continue,
             Item::Inst(inst) => {
                 let spill = inst.args.iter().find_map(|a| match a.operand {
                     Operand::Mem(Mem { base: Base::Slot(s), .. }) if c.frame.slots[s.0 as usize].spill => {
@@ -93,6 +84,18 @@ fn insts(body: &[Item<Op, PReg>]) -> impl Iterator<Item = &Inst<Op, PReg>> {
         Item::Inst(inst) => Some(inst),
         Item::Label(_) | Item::Note(_) => None,
     })
+}
+
+/// Whether `inst` changes nothing, so the listing leaves it out: a move of all 64 bits, or all
+/// 256, to the same register. But one of 32 bits clears the upper half, and one of an xmm the
+/// upper lanes.
+fn idle(inst: &Inst<Op, PReg>) -> bool {
+    matches!(inst.op, Op::Mov | Op::Vmovaps | Op::Vmovups | Op::Vmovdqa | Op::Vmovdqu)
+        && matches!(
+            inst.args.as_slice(),
+            [Arg { operand: Operand::Reg(a, w), .. }, Arg { operand: Operand::Reg(b, v), .. }]
+                if a == b && w == v && matches!(w, Width::W64 | Width::W256)
+        )
 }
 
 /// Pages past this many are touched in a loop.
@@ -197,7 +200,8 @@ fn prologue(frame: &Frame, pad: u32, free: Label) -> Result<Vec<Item<Op, PReg>>,
 }
 
 /// What runs before a `ret`: undoes [`prologue`], and clears the vector registers' upper halves
-/// if the body used any, so the caller's SSE code does not pay for them.
+/// if the body used any, so the caller's SSE code does not pay for them. A move that the listing
+/// leaves out uses none.
 fn epilogue(frame: &Frame, pad: u32, vector: bool) -> Vec<Item<Op, PReg>> {
     let mut items = vec![];
     if frame.size > 0 {
@@ -334,21 +338,20 @@ mod tests {
 
     /// A move of a register to itself, of all 64 bits by `mov` or all 256 by `vmovaps`, `vmovups`,
     /// `vmovdqa` or `vmovdqu`, changes nothing, and is left out; one of 32 bits clears the upper
-    /// half, and one of an xmm the upper lanes, and stay.
+    /// half, and one of an xmm the upper lanes, and stay. A move left out asks for no
+    /// `vzeroupper`.
     #[test]
     fn a_move_of_a_register_to_itself_is_left_out() {
         let frame = Frame { saved: vec![], slots: vec![], offsets: vec![], size: 0, align: 0 };
-        let body = vec![
-            mov(Op::Mov, RAX, RAX, Width::W64),
-            mov(Op::Mov, RAX, RAX, Width::W32),
-            mov(Op::Vmovaps, YMM0, YMM0, Width::W256),
-            mov(Op::Vmovups, YMM0, YMM0, Width::W256),
-            mov(Op::Vmovdqa, YMM0, YMM0, Width::W256),
-            mov(Op::Vmovdqu, YMM0, YMM0, Width::W256),
-            mov(Op::Vmovaps, YMM0, YMM0, Width::W128),
-            mov(Op::Mov, RAX, RCX, Width::W64),
-            inst(Op::Ret, vec![]),
-        ];
-        assert_eq!(code(&kernel(body, frame)), "mov eax, eax\nvmovaps xmm0, xmm0\nmov rax, rcx\nvzeroupper\nret");
+        let wide = [Op::Vmovaps, Op::Vmovups, Op::Vmovdqa, Op::Vmovdqu].map(|op| mov(op, YMM0, YMM0, Width::W256));
+        let ret = inst(Op::Ret, vec![]);
+        let mut body = vec![mov(Op::Mov, RAX, RAX, Width::W64), mov(Op::Mov, RAX, RAX, Width::W32)];
+        body.extend(wide.clone());
+        body.extend([mov(Op::Vmovaps, YMM0, YMM0, Width::W128), mov(Op::Mov, RAX, RCX, Width::W64), ret.clone()]);
+        assert_eq!(
+            code(&kernel(body, frame.clone())),
+            "mov eax, eax\nvmovaps xmm0, xmm0\nmov rax, rcx\nvzeroupper\nret"
+        );
+        assert_eq!(code(&kernel([&wide[..], &[ret]].concat(), frame)), "ret");
     }
 }
