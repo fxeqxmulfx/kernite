@@ -732,6 +732,12 @@ fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() {
             "1:8: a kernel's listing names a constant `{c0}` and a function `{f0}`, and a static by its name, so one \
              is not named `f12`",
         ),
+        // The name is checked before the type.
+        (
+            "static c0: u32;",
+            "1:8: a kernel's listing names a constant `{c0}` and a function `{f0}`, and a static by its name, so one \
+             is not named `c0`",
+        ),
         (
             "static A: shared<[u32; 4]>;",
             "1:11: a static of the module is memory: `global<[u32; 16]>`, which its kernels read and write, or \

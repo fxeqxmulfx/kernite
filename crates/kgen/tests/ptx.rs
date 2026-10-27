@@ -2737,6 +2737,11 @@ fn a_static_is_memory_of_a_type_the_host_reads_holding_what_it_says() {
             "1:11: this makes the module's global memory as much as 18446744073709551615 bytes, each static aligned, \
              and `ptxas` writes its size in 32 bits: a module has less than 4 GB",
         ),
+        // The value is checked before the room left.
+        (
+            "static A: constant<[u8; 65536]>; static B: constant<[u8; 2]> = [1, 2, 3];",
+            "1:64: `constant<[u8; 2]>` holds 2 elements; this has 3",
+        ),
         ("static k_param_0: global<u32>;", "`k_param_0` is `k_param_0` in PTX, as a parameter of `k` is"),
         ("static WARP_SZ: global<u32>;", "`WARP_SZ` is `WARP_SZ` in PTX, as PTX's own `WARP_SZ` is"),
         // A kernel that names one that does not compile says so, and why, where it is declared.
@@ -2754,6 +2759,13 @@ fn a_static_is_memory_of_a_type_the_host_reads_holding_what_it_says() {
     assert!(ptx.contains(".const .align 1 .b8 A[65535];\n.const .align 1 .b8 B[1];\n"));
     let ptx = kgen::ptx_str("static A: global<[b8; 2]> = [255, -128];").unwrap();
     assert!(ptx.contains(".global .align 1 .b8 A[2] = {255, 128};\n"));
+    // A static that fails takes no room: `A` fails at its value, and `B` lays out. `ptx_str` stops
+    // at `A`, so only `ptx_statics` shows it.
+    let src = "static A: constant<[u8; 65536]> = 1; static B: constant<u8>;";
+    let made = kgen::ptx_statics(&kgen::lang::parse(src).unwrap(), "");
+    let want = "1:35: `constant<[u8; 65536]>` holds an array of `u8`; this is an integer";
+    assert_eq!(made[0].as_ref().unwrap_err().at(src), want);
+    assert_eq!(made[1].as_ref().err(), None);
 }
 
 #[test]

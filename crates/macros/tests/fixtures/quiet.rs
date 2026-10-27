@@ -25,7 +25,10 @@ mod cpu {
     /// Read by a kernel alone.
     const STEP: u64 = 3;
 
-    pub static COUNTS: global<[u32; 4]>;
+    /// Read by a static alone.
+    const LEN: usize = 4;
+
+    pub static COUNTS: global<[u32; LEN]>;
 
     pub unsafe extern "sysv64" fn step(x: u64) -> u64 {
         add(x, STEP);
@@ -52,7 +55,10 @@ mod gpu {
     /// Read by a kernel alone.
     const SCALE: f32 = 2.0;
 
-    pub static COUNTS: global<[u32; 4]>;
+    /// Read by a static alone.
+    const LEN: usize = 4;
+
+    pub static COUNTS: global<[u32; LEN]>;
 
     pub unsafe extern "ptx-kernel" fn scale(x: *mut f32, a: f32) {
         let v: f32;

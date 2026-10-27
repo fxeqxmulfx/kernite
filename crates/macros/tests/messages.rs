@@ -168,6 +168,33 @@ fn errors_inside_a_module_point_into_it() {
 }
 
 #[test]
+fn what_a_module_says_when_its_parts_fail() {
+    // The module given `STEP` comes last: Rust expands it a step later, when the macro of the
+    // module of consts calls `__kernels!` back.
+    refuses(
+        "parts",
+        &[
+            "src/lib.rs:8:7: error: `bad` takes no compile-time arguments, so it is compiled once, with no \
+             `#[instances(..)]`",
+            "src/lib.rs:12:7: error: `#[cooperative]` goes on a kernel whose blocks or threads wait for each other, \
+             `extern \"ptx-kernel\"` or `extern \"sysv64\"`; `f` is a function the kernels call, which runs as the \
+             kernel that calls it is launched",
+            "src/lib.rs:17:32: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
+            "src/lib.rs:9:39: error: `shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and \
+             `tanh.approx.f32` in `new` needs sm_75 and PTX 7.0: no module has both",
+            "src/lib.rs:47:12: error: a static is memory of the module's kernels: the GPU's, for PTX kernels, or the \
+             process's, for x86 ones; and this module has both, so it is two modules, one of each kind of kernel and \
+             the statics they name",
+            "src/lib.rs:55:23: error: kgen compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \
+             \"ptx-kernel\"` ones, for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \
+             \"C\"` is none of these",
+            "src/lib.rs:36:16: error: `STEP` names one of the consts the module takes from `crate::sizes` as well",
+            "error: could not compile `parts` (lib) due to 7 previous errors",
+        ],
+    );
+}
+
+#[test]
 fn a_static_that_does_not_compile_is_said_once() {
     // Once where it is, not for each kernel that names it; each of those says it cannot.
     refuses(
