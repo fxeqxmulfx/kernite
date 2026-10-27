@@ -245,6 +245,13 @@ pub fn print(c: &Compiled<Op>) -> Listing {
         .collect();
     features.sort_by_key(|f| f.name());
     features.dedup();
+    // The epilogue's `vzeroupper` is AVX's: it needs AVX where nothing else listed implies it.
+    let implies_avx = [Feature::Avx, Feature::Avx2, Feature::Fma, Feature::F16c];
+    let returns = c.body.iter().any(|item| matches!(item, Item::Inst(inst) if inst.op == Op::Ret));
+    if vector && returns && !features.iter().any(|f| implies_avx.contains(f)) {
+        features.push(Feature::Avx);
+        features.sort_by_key(|f| f.name());
+    }
     Listing {
         name: c.name.clone(),
         signature: c.signature.clone(),
