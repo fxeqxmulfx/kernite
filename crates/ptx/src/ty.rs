@@ -171,9 +171,8 @@ impl Ty {
         matches!(self.kind(), Kind::Unsigned | Kind::Signed)
     }
 
-    /// The type of Rust's the host reads one of as, for memory the host reads: `u32` for a
-    /// `b32` or a `u32`, `i32` for an `s32`, and kgen-cuda's `f16` and `bf16`; `None` for one
-    /// it has none of.
+    /// The number the host reads one of as, in memory it reads, by the language's name: `u32` for a
+    /// `b32` or a `u32`, `i32` for an `s32`, `bf16` for a `bf16`; `None` for one it has none of.
     pub fn host(self) -> Option<&'static str> {
         Some(match self {
             Ty::B8 | Ty::U8 => "u8",
