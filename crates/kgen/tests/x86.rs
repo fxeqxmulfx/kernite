@@ -214,6 +214,22 @@ ret";
     assert_eq!(code, want);
 }
 
+/// A gpr is `g`, or `g.r32`, `g.r16` or `g.r8`, its low 32, 16 or 8 bits, and nothing else.
+#[test]
+fn a_gpr_is_g_or_g_r32_g_r16_or_g_r8() {
+    let code =
+        compile("x: *mut u64", "let g: gpr; mov(g, [x]); mov(g.r32, 1); mov(g.r16, 2); mov(g.r8, 3); mov([x], g);");
+    let want = "mov rax, qword ptr [rdi]
+mov eax, 1
+mov ax, 2
+mov al, 3
+mov qword ptr [rdi], rax
+ret";
+    assert_eq!(code.unwrap(), want);
+    let e = compile("x: *mut u64", "let g: gpr; mov(g.r64, 1);").unwrap_err();
+    assert_eq!(e, "2:19: a gpr is seen as `gpr`, `r32`, `r16` or `r8`, not `r64`");
+}
+
 /// A gather reads memory at a vector of indices, `[p + v * 4]`, under a mask, and needs AVX2.
 #[test]
 fn a_gather_reads_memory_at_a_vector_of_indices() {
@@ -1044,6 +1060,26 @@ fn stack_memory_is_part_of_the_frame() {
     mov rsp, rbp
     pop rbp
     vzeroupper
+    ret
+";
+    assert_eq!(kgen::x86_str(src, "k").unwrap().text(), want);
+}
+
+/// Until written, stack memory holds whatever was there: kgen clears none of it, and takes a
+/// read of it before any write, as it does not of a variable.
+#[test]
+fn stack_memory_holds_whatever_was_there_until_written() {
+    let src = "unsafe extern \"sysv64\" fn k() -> u64 {\nlet b: local<u64>;\nlet g: gpr;\nmov(g, [b]);\nret(g);\n}\n";
+    let want = "# k() -> gpr
+# frame: 8 bytes aligned to 8, saves []
+# b: 8 bytes at rsp
+# g=rax
+    push rbp
+    mov rbp, rsp
+    sub rsp, 8
+    mov rax, qword ptr [rsp]
+    mov rsp, rbp
+    pop rbp
     ret
 ";
     assert_eq!(kgen::x86_str(src, "k").unwrap().text(), want);
