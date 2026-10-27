@@ -20,6 +20,7 @@ publish = false
 kgen-core = { path = "crates/core" }
 kgen-lang = { path = "crates/lang" }
 kgen-compile = { path = "crates/compile" }
+kgen-build = { path = "crates/build" }
 kgen-x86 = { path = "crates/x86" }
 kgen-ptx = { path = "crates/ptx" }
 kgen = { path = "crates/kgen" }

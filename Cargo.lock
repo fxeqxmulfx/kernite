@@ -6,11 +6,19 @@ version = 4
 name = "kgen"
 version = "0.1.0"
 dependencies = [
+ "kgen-build",
  "kgen-compile",
  "kgen-core",
  "kgen-lang",
  "kgen-ptx",
  "kgen-x86",
+]
+
+[[package]]
+name = "kgen-build"
+version = "0.1.0"
+dependencies = [
+ "kgen-lang",
 ]
 
 [[package]]

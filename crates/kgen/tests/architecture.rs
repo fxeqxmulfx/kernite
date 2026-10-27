@@ -12,10 +12,11 @@ const RULE: &[(&str, &[&str])] = &[
     ("kgen-compile", &["kgen-core"]),
     ("kgen-x86", &["kgen-core", "kgen-lang", "kgen-compile", "kgen-build"]),
     ("kgen-ptx", &["kgen-core", "kgen-lang"]),
-    ("kgen", &["kgen-core", "kgen-lang", "kgen-compile", "kgen-x86", "kgen-ptx"]),
+    ("kgen", &["kgen-core", "kgen-lang", "kgen-compile", "kgen-build", "kgen-x86", "kgen-ptx"]),
     ("kgen-macros", &["kgen"]),
     ("kgen-cuda", &[]),
     ("kgen-cpu", &[]),
+    ("kgen-build", &["kgen-lang"]),
 ];
 
 /// The name of the package of the manifest at `path`.
