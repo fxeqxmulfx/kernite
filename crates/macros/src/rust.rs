@@ -98,7 +98,9 @@ pub(crate) fn visibility<'a>(f: &Fn, top: &'a [TokenTree]) -> &'a [TokenTree] {
 
 /// `const { match .. }` on `f`'s compile-time arguments, by their names as written, `r#in` as
 /// well: what `arms` gives for each instance, by its arguments. Another is no instance, and Rust
-/// refuses to compile the call.
+/// refuses to compile the call. That arm allows that no value reaches it, as none does where the
+/// instances are every value, `true` and `false` of a `bool`: Rust decides which values reach it,
+/// and the macro states no rule of which values a type has.
 pub(crate) fn pick(f: &Fn, arms: &[(Vec<Value>, String)], top: &[TokenTree]) -> String {
     let tuple = |xs: Vec<String>| if xs.len() == 1 { xs.join("") } else { format!("({})", xs.join(", ")) };
     let on = tuple(const_names(&top[f.head.end + 2..f.params_at]).map(TokenTree::to_string).collect());
@@ -109,7 +111,7 @@ pub(crate) fn pick(f: &Fn, arms: &[(Vec<Value>, String)], top: &[TokenTree]) -> 
         listed.push(format!("`{}`", lang::instance(f, args).unwrap_or_default()));
     }
     let message = format!("`{}` is compiled for {} alone, as its `#[instances(..)]` lists", f.name, listed.join(", "));
-    out + &format!("_ => ::core::panic!({message:?}) }} }}")
+    out + &format!("#[allow(unreachable_patterns)] _ => ::core::panic!({message:?}) }} }}")
 }
 
 /// The name after each `const` of `tokens`, as written, `r#type` as well: a const's, or those of

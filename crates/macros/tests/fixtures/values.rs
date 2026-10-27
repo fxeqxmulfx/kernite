@@ -27,6 +27,17 @@ pub mod kernels {
         }
         ret(x);
     }
+
+    // Its instances are both values of a `bool`, so no value reaches the arm the macro writes for
+    // an instance not listed. Rust says nothing of it.
+    /// `x`, moved a step if `M`.
+    #[instances(true, false)]
+    pub unsafe extern "sysv64" fn moved<const M: bool>(x: u64) -> u64 {
+        if M {
+            add(x, STEP);
+        }
+        ret(x);
+    }
 }
 
 // Rust's `FAR` is 6, and the kernel adds 6. Rust checks both as it builds, the listing as
