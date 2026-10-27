@@ -6,6 +6,8 @@
 //! - [`lang::Kernel`] is x86 for `kgen-lang`, the language kernels are written in where
 //!   they are called: its types and views, and every instruction it calls by name, checked
 //!   against the forms x86 has for it.
+//! - [`X86`] is x86 for `kgen-build`, the machine its use cases compile a module's kernels
+//!   and statics with: kernels Rust calls in the process, and memory Rust lays out there.
 //! - [`Asm`] builds the same programs from Rust: one method per instruction, operands typed
 //!   by what the instruction accepts, variables instead of registers.
 //! - [`SysV`] is the [`kgen_compile::Machine`] the allocator runs against: the registers of the
@@ -14,6 +16,7 @@
 //!   takes them, and a listing for people.
 
 mod asm;
+mod backend;
 pub mod forms;
 pub mod intel;
 pub mod lang;
@@ -22,6 +25,7 @@ mod operand;
 mod sysv;
 
 pub use asm::{Asm, Stream};
+pub use backend::X86;
 pub use forms::Feature;
 pub use op::Op;
 pub use operand::{Addr, Gpr, Hint, Slot, Src, Vector, Xmm, Ymm};
