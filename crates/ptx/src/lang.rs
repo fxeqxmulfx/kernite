@@ -65,8 +65,12 @@ use kgen_core::{
 };
 use kgen_lang::{Fault, Guard, Operand as Given, Target};
 
+use crate::call::{NO_PRED, Prototype, Returns, formal};
+use crate::entry::{Entry, Op, Param};
 use crate::forms::{self, Bound, Check, Count, Imm, Part, Role, Space, Spec, TyRef};
-use crate::{Entry, Kind, Memory, Needs, Op, Param, Prototype, Returns, Static, Ty, formal};
+use crate::needs::Needs;
+use crate::statics::{Memory, Static, shape};
+use crate::ty::{Kind, Ty};
 
 /// A variable: a register of the type it was declared, or a part of one, or memory the
 /// kernel declares in a state space, which stands for its address.
@@ -294,7 +298,7 @@ impl Kernel {
         };
         let id = self.p.regs.len() as u32;
         self.p.regs.push(RegInfo { class, name: name.to_string() });
-        let base = crate::ident(name);
+        let base = crate::naming::ident(name);
         let base = if forms::reserved(&base) { format!("{base}_") } else { base };
         let (mut reg, mut k) = (base.clone(), 1);
         while self.taken.contains(&reg) {
@@ -358,9 +362,9 @@ impl Kernel {
         // PTX predefines `WARP_SZ`. Memory without a size is the module's, after the kernel,
         // named as C++ names a function's static.
         let base = match bytes {
-            None => crate::local(&self.p.name, name),
+            None => crate::naming::local(&self.p.name, name),
             Some(_) if name == "WARP_SZ" => format!("{name}_"),
-            Some(_) => crate::ident(name),
+            Some(_) => crate::naming::ident(name),
         };
         let (mut text, mut k) = (base.clone(), 1);
         while self.named.contains(&text) {
@@ -387,7 +391,7 @@ impl Kernel {
             let mut named: Vec<(Needs, String)> =
                 self.needs.iter().map(|(n, w)| (*n, format!("`{w}` before it"))).collect();
             named.push((needs, format!("`{what}`")));
-            return Err(crate::clash(&named));
+            return Err(crate::needs::clash(&named));
         }
         if all != had {
             self.needs.push((needs, what.to_string()));
@@ -1595,65 +1599,9 @@ const GRID_SYNC: &[&str] = &[
     "}",
 ];
 
-/// Why a function takes no predicate.
-pub(crate) const NO_PRED: &str =
-    "PTX passes no `pred` to a function, nor back: `selp.u32(x, 1, 0, p)` makes it a `u32`";
-
-/// The types a variable may be, for an error about one that is none; and those memory holds.
+/// The types a variable may be, for an error about one that is none.
 const TYPES: &str = "`pred`, `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, `bf16x2`, \
                      `tf32`, `f32` and `f64`";
-const HELD: &str = "`b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, `bf16x2`, `tf32`, `f32` and \
-                    `f64`";
-
-/// What memory of the type `ty`, `word<args>`, holds: the type of its elements; how many bytes,
-/// `None` for an array of no length, `[f32]`; and what its address is a multiple of, a power
-/// of two, its element's bytes unless it says more: `shared<[f32; 256], 16>`.
-pub(crate) fn shape(ty: &str, word: &str) -> Result<(Ty, Option<u64>, u64), String> {
-    let wrong = || {
-        format!(
-            "`{word}<..>` is an array of PTX's types and what its address is a multiple of, `{word}<[f32; 256], 16>`, \
-             or one, `{word}<f32>`; not `{ty}`"
-        )
-    };
-    let args = ty.strip_prefix(word).and_then(|t| t.strip_prefix('<')).and_then(|t| t.strip_suffix('>'));
-    let args = args.ok_or_else(wrong)?;
-    let (array, align) = match args.rsplit_once(", ") {
-        Some((array, align)) => (array, Some(align)),
-        None => (args, None),
-    };
-    if array.contains(", ") {
-        return Err(wrong());
-    }
-    let (elem, len) = match array.strip_prefix('[').and_then(|a| a.strip_suffix(']')) {
-        Some(inner) => match inner.split_once("; ") {
-            Some((elem, len)) => (elem, Some(len.parse::<u64>().map_err(|_| wrong())?)),
-            None => (inner, None),
-        },
-        None => (array, Some(1)),
-    };
-    let elem = match Ty::parse(elem) {
-        Some(Ty::Pred) => return Err("memory holds no `pred`, which is a register's alone: a `u8` holds a bool".into()),
-        None => return Err(format!("memory holds {HELD}; not `{elem}`")),
-        Some(t) => t,
-    };
-    let size = u64::from(elem.bits()) / 8;
-    let align = match align {
-        None => size,
-        Some(a) => match a.parse::<u64>() {
-            Ok(a) if a.is_power_of_two() && a >= size => a,
-            Ok(a) if a.is_power_of_two() => {
-                return Err(format!("an array of `{}` is aligned to {size} at least, not {a}", elem.name()));
-            }
-            _ => return Err(format!("what an address is a multiple of is a power of two, not {a}")),
-        },
-    };
-    let bytes = match len {
-        Some(0) => return Err(format!("`{ty}` holds nothing")),
-        Some(n) => Some(n.checked_mul(size).ok_or_else(|| format!("`{ty}` is more bytes than there are"))?),
-        None => None,
-    };
-    Ok((elem, bytes, align))
-}
 
 impl Target for Kernel {
     type Var = Var;
@@ -1662,7 +1610,7 @@ impl Target for Kernel {
         let pointer = ty.starts_with("*const ") || ty.starts_with("*mut ");
         let t = match ty {
             _ if self.func.is_some() => {
-                let t = crate::passable(ty)?;
+                let t = crate::call::passable(ty)?;
                 if t.needs() != Needs::default() {
                     self.require(t.needs(), &format!("{name}: {}", t.name()))?;
                 }
@@ -1702,7 +1650,7 @@ impl Target for Kernel {
                 _ => Err(format!("a GPU kernel returns nothing, not `{ty}`: it writes what it works out to memory")),
             };
         }
-        let returns = crate::returns(ty)?;
+        let returns = crate::call::returns(ty)?;
         match returns {
             Returns::Value(t) if t.needs() != Needs::default() => self.require(t.needs(), &format!("-> {ty}"))?,
             // As `ptxas` has `.noreturn`.
