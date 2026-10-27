@@ -46,6 +46,7 @@ ops! {
     Dec = "dec",
     Inc = "inc",
     Jmp = "jmp",
+    Jne = "jne",
     Jnz = "jnz",
     Jz = "jz",
     Lea = "lea",
@@ -54,10 +55,12 @@ ops! {
     Movzx = "movzx",
     Or = "or",
     Pause = "pause",
+    Pop = "pop",
     Prefetchnta = "prefetchnta",
     Prefetcht0 = "prefetcht0",
     Prefetcht1 = "prefetcht1",
     Prefetcht2 = "prefetcht2",
+    Push = "push",
     Ret = "ret",
     Sub = "sub",
     Shl = "shl",
@@ -123,6 +126,7 @@ ops! {
     Vshufps = "vshufps",
     Vstmxcsr = "vstmxcsr",
     Vxorps = "vxorps",
+    Vzeroupper = "vzeroupper",
 }
 
 #[cfg(test)]
@@ -130,11 +134,13 @@ mod tests {
     use super::*;
     use crate::forms;
 
-    /// What kgen writes of its own, x86 has, but `ret`, which a kernel's epilogue writes, and
-    /// `call`, which the language writes as kgen's calls are.
+    /// What kgen writes of its own, x86 has, but what the table leaves out: `ret` and `call`,
+    /// which the language writes as kgen's returns and calls are, and the frame's `push`, `pop`
+    /// and `vzeroupper`.
     #[test]
     fn x86_has_every_instruction_kgen_writes_of_its_own() {
-        for op in OWN.iter().filter(|&&op| op != Op::Ret && op != Op::Call) {
+        let left_out = [Op::Ret, Op::Call, Op::Push, Op::Pop, Op::Vzeroupper];
+        for op in OWN.iter().filter(|op| !left_out.contains(op)) {
             assert!(forms::of(op.name()).is_some(), "`{}`", op.name());
         }
         assert_eq!(Op::LockXadd.mnemonic(), "lock xadd");

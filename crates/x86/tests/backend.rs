@@ -1,7 +1,7 @@
 //! `X86` through the ports kgen-build calls, driven by hand as a use case drives them: each
 //! static laid out and each callee seen, then the kernel told of them, written and finished.
 
-use kgen_build::{Backend, Bytes, Called, HostStatic, Naked, Native, StaticError, function};
+use kgen_build::{Backend, Bytes, Called, HostStatic, Naked, Native, StaticError, Unfinished, function};
 use kgen_lang::{ItemKind, parse};
 use kgen_x86::X86;
 use kgen_x86::lang::Callee;
@@ -108,4 +108,24 @@ fn a_call_to_a_cooperative_function_is_refused() {
     let want = "4:6: `together` is `#[cooperative]`: its threads run on a grid, which its launcher starts, so no kernel \
                 calls it";
     assert_eq!(e.at(src), want);
+}
+
+/// A frame of more than 2^31 bytes, past what an address reaches, is the kernel's to blame and
+/// not a variable's: the port says why, and names no variable. Seventeen vectors alive at once
+/// spill two, after stack memory of 2^31 - 63 bytes.
+#[test]
+fn a_frame_past_what_an_address_reaches_blames_no_variable() {
+    let loads: String = (0..17).map(|i| format!("let v{i}: ymm;\nvmovups(v{i}, [x + {}]);\n", 32 * i)).collect();
+    let sums: String = (1..17).map(|i| format!("vaddps(v0, v0, v{i});\n")).collect();
+    let src = format!(
+        "unsafe extern \"sysv64\" fn k(x: *mut f32) {{\nlet big: local<[u8; 2147483585], 32>;\n{loads}{sums}\
+         vmovups([big], v0);\n}}"
+    );
+    let module = parse(&src).unwrap();
+    let k = function(&module, "k").unwrap();
+    let mut kernel = X86.kernel(k, "k", &[], false, &[], &[]);
+    kgen_lang::kernel(&module, k, &[], &mut kernel).unwrap();
+    let message = "the kernel's frame, its stack memory and the variables that spilled, is 2147483680 bytes: more \
+                   than an address reaches past the stack pointer";
+    assert_eq!(X86.finish(kernel), Err(Unfinished { var: None, message: message.into() }));
 }

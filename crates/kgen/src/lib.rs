@@ -51,12 +51,6 @@ pub use kgen_x86::{Feature, Op};
 
 use kgen_lang::{Fn, ItemKind, Module, Span, Value};
 
-/// `program` for x86-64 under SysV, in Intel syntax.
-pub fn render(program: &Program<Op>) -> Result<Listing, Error> {
-    let compiled = kgen_compile::compile(program, &kgen_x86::SysV)?;
-    Ok(kgen_x86::intel::print(&compiled))
-}
-
 /// Kernel `f` of `module`, for x86-64 under SysV, for the compile-time arguments `args`:
 /// those of one of its [`instances`](kgen_lang::instances), none for a kernel that takes none.
 /// What goes wrong is placed where it can be mended: an instruction where it is called, a
@@ -96,10 +90,13 @@ pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>,
         }
     }
     let run = kgen_lang::kernel(module, f, args, &mut kernel).map_err(|e| within(&name, args, e))?;
-    let code = render(&kernel.finish()).map_err(|e| {
+    let compiled = kgen_compile::compile(&kernel.finish(), &kgen_x86::SysV).map_err(|e| {
         let e = kgen_lang::Error { span: blame(&e, &run.decls).unwrap_or(f.span), message: e.to_string() };
         within(&name, args, e)
     })?;
+    // A frame past what an address reaches is the kernel's.
+    let code = kgen_x86::intel::print(&compiled)
+        .map_err(|message| within(&name, args, kgen_lang::Error { span: f.span, message }))?;
     Ok(Compiled { code, consts: run.consts })
 }
 

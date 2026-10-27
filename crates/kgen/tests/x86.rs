@@ -1223,6 +1223,32 @@ fn a_frame_of_more_than_a_page_is_touched_a_page_at_a_time() {
     }
 }
 
+/// A frame of more than 2^31 bytes, its stack memory and the variables that spilled, is more than
+/// an address reaches past the stack pointer, and the kernel is refused at its name. Seventeen
+/// vectors alive at once spill two, after stack memory of `N` bytes. A frame of 2^31 bytes
+/// compiles, its last spill at the furthest an address reaches and its loop's end at the furthest
+/// down; a byte more of stack memory makes it 32 bytes more, as a spill is aligned to 32.
+#[test]
+fn a_frame_past_what_an_address_reaches_is_refused() {
+    let loads: String = (0..17).map(|i| format!("let v{i}: ymm;\nvmovups(v{i}, [x + {}]);\n", 32 * i)).collect();
+    let sums: String = (1..17).map(|i| format!("vaddps(v0, v0, v{i});\n")).collect();
+    let src = format!(
+        "#[instances(2147483584, 2147483585)]\nunsafe extern \"sysv64\" fn k<const N: usize>(x: *mut f32) {{\n\
+         let big: local<[u8; N], 32>;\n{loads}{sums}vmovups([big], v0);\n}}\n"
+    );
+    let text = kgen::x86_str(&src, "k::<2147483584>").unwrap().text();
+    let frame = "# frame: 2147483648 bytes aligned to 32, saves []
+# big: 2147483584 bytes at rsp
+# v16, spilled: 32 bytes at rsp + 2147483584
+# v15, spilled: 32 bytes at rsp + 2147483616
+";
+    assert!(text.contains(frame), "{text}");
+    assert!(text.contains("\n    lea r11, [rsp - 2147483648]\n"), "{text}");
+    let want = "2:27: in `k::<2147483585>`: the kernel's frame, its stack memory and the variables that spilled, is \
+                2147483680 bytes: more than an address reaches past the stack pointer";
+    assert_eq!(kgen::x86_str(&src, "k::<2147483585>").unwrap_err(), want);
+}
+
 /// The prologue's loop takes the first label, and the body's come after it.
 #[test]
 fn the_prologues_loop_comes_before_the_bodys_labels() {

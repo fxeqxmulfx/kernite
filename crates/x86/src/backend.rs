@@ -68,7 +68,7 @@ impl Backend for X86 {
     fn finish(&self, kernel: Kernel) -> Result<Listing, Unfinished> {
         let compiled = kgen_compile::compile(&kernel.finish(), &SysV)
             .map_err(|e| Unfinished { var: e.var().map(Into::into), message: e.to_string() })?;
-        Ok(intel::print(&compiled))
+        intel::print(&compiled).map_err(|message| Unfinished { var: None, message })
     }
 }
 
