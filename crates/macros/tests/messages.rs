@@ -362,6 +362,19 @@ fn what_a_module_of_consts_hands_on_and_refuses() {
 }
 
 #[test]
+fn a_module_that_takes_consts_has_no_const_function_or_static_of_their_names() {
+    // The function is refused at its name. The struct and the type are in Rust's other namespace,
+    // which the `use` of the consts does not reach, and no kernel names them.
+    refuses(
+        "names",
+        &[
+            "src/lib.rs:20:35: error: `STEP` names one of the consts the module takes from `crate::sizes` as well",
+            "error: could not compile `names` (lib) due to 1 previous error",
+        ],
+    );
+}
+
+#[test]
 fn kernels_that_compile_say_nothing() {
     builds_quietly("quiet");
 }
