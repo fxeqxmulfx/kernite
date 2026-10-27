@@ -1,25 +1,5 @@
-use crate::operand::Arg;
+use crate::operand::{Arg, Label};
 use crate::reg::{Class, PReg, Register, VReg};
-
-/// A place in the body that jumps can name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Label(pub u32);
-
-/// A slot of the stack frame, by its index in [`Program::slots`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SlotId(pub u32);
-
-/// A constant, by its index in [`Program::consts`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ConstId(pub u32);
-
-/// A function the kernel names, by its index in [`Program::funcs`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FuncId(pub u32);
-
-/// Memory of the module's that the kernel names, by its index in [`Program::statics`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StaticId(pub u32);
 
 /// Where control goes after an instruction.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -153,14 +133,14 @@ pub struct Program<Op> {
     pub pinned: Vec<(VReg, PReg)>,
     /// The code.
     pub body: Vec<Item<Op, VReg>>,
-    /// Stack memory, by [`SlotId`].
+    /// Stack memory, by [`SlotId`](crate::SlotId).
     pub slots: Vec<Slot>,
-    /// Read-only data, by [`ConstId`].
+    /// Read-only data, by [`ConstId`](crate::ConstId).
     pub consts: Vec<Const>,
-    /// The functions it names, by [`FuncId`], each by what the source calls it: `gcd`, or an
-    /// instance, `tile::<4>`.
+    /// The functions it names, by [`FuncId`](crate::FuncId), each by what the source calls
+    /// it: `gcd`, or an instance, `tile::<4>`.
     pub funcs: Vec<String>,
-    /// The memory of the module's it names, its statics, by [`StaticId`], each by what the
-    /// source calls it: `COUNTS`.
+    /// The memory of the module's it names, its statics, by [`StaticId`](crate::StaticId),
+    /// each by what the source calls it: `COUNTS`.
     pub statics: Vec<String>,
 }

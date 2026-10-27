@@ -9,8 +9,6 @@ mod operand;
 mod program;
 mod reg;
 
-pub use operand::{Access, Arg, Base, Imm, Mem, Operand, Width};
-pub use program::{
-    Const, ConstId, Flow, FuncId, Inst, Item, Label, Program, RegInfo, Signature, Slot, SlotId, StaticId,
-};
+pub use operand::{Access, Arg, Base, ConstId, FuncId, Imm, Label, Mem, Operand, SlotId, StaticId, Width};
+pub use program::{Const, Flow, Inst, Item, Program, RegInfo, Signature, Slot};
 pub use reg::{Class, PReg, Register, VReg};
