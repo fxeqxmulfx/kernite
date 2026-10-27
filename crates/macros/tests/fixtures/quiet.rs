@@ -17,6 +17,8 @@ pub fn on_the_gpu(kernels: &gpu::Kernels, x: kgen_cuda::Ptr<f32>) -> Result<u32,
         kernels.together(kgen_cuda::Grid::new(1, 1), x)?;
     }
     kernels.COUNTS().write(&[0; 4])?;
+    let _: kgen_cuda::Global<'_, kgen_cuda::f16> = kernels.F16S();
+    let _: kgen_cuda::Global<'_, kgen_cuda::bf16> = kernels.BF16S();
     kernels.together_blocks(32, 0)
 }
 
@@ -65,6 +67,8 @@ mod gpu {
     const TWO: u32 = 2;
 
     pub static COUNTS: global<[u32; LEN]>;
+    pub static F16S: global<[f16; 2]>;
+    pub static BF16S: global<[bf16; 2]>;
 
     pub unsafe extern "ptx-kernel" fn scale(x: *mut f32, a: f32) {
         let v: f32;

@@ -257,8 +257,8 @@ fn a_kernels_safety_contract_says_nothing_else_touches_the_memory_it_names() {
 
 /// The function's docs name the CPU features its kernel needs past x86-64's own, which nothing
 /// checks for when it runs, as the listing's header does: three, two, one, or, for a kernel
-/// that needs none, no paragraph. A generic kernel's docs name those of every instance, and a
-/// grid's kernel's launcher's those of the kernel.
+/// that needs none, no paragraph. A generic kernel's docs name those of every instance, each
+/// once, in the order of their names, and a grid's kernel's launcher's those of the kernel.
 #[test]
 fn the_functions_docs_name_the_cpu_features_a_kernel_needs() {
     // The paragraphs of the function's docs, as rustdoc writes them.
@@ -288,6 +288,14 @@ fn the_functions_docs_name_the_cpu_features_a_kernel_needs() {
         docs("pick"),
         [
             "<p>How many zeros lead <code>x</code>, or how many of its bits are set.</p>".to_string(),
+            needs("features <code>lzcnt</code> and <code>popcnt</code>"),
+        ]
+    );
+    assert_eq!(
+        docs("count"),
+        [
+            "<p>How many bits of <code>x</code> are set, or how many zeros lead it, when <code>N</code> is 2.</p>"
+                .to_string(),
             needs("features <code>lzcnt</code> and <code>popcnt</code>"),
         ]
     );

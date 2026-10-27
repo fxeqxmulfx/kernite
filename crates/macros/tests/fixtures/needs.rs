@@ -1,6 +1,6 @@
 //! Kernels that need CPU features past x86-64's own, three, two, one and none, whose docs say
-//! which: a generic kernel's say those of every instance, and a grid's kernel's launcher's those
-//! of the kernel.
+//! which: a generic kernel's say those of every instance, each once, in the order of their
+//! names, and a grid's kernel's launcher's those of the kernel.
 
 #[kgen_macros::kernels]
 pub mod kernels {
@@ -42,6 +42,17 @@ pub mod kernels {
     #[instances(1, 2)]
     pub unsafe extern "sysv64" fn pick<const N: u64>(x: u64) -> u64 {
         if N == 1 {
+            lzcnt(x, x);
+        } else {
+            popcnt(x, x);
+        }
+        ret(x);
+    }
+
+    /// How many bits of `x` are set, or how many zeros lead it, when `N` is 2.
+    #[instances(1, 2, 3)]
+    pub unsafe extern "sysv64" fn count<const N: u64>(x: u64) -> u64 {
+        if N == 2 {
             lzcnt(x, x);
         } else {
             popcnt(x, x);
