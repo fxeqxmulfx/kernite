@@ -5,7 +5,7 @@
 //! crate's `src/lib.rs`, so the line an error names is that line of the fixture.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, PoisonError};
 
@@ -17,21 +17,21 @@ static CARGO: Mutex<()> = Mutex::new(());
 /// its workspace is not named as the crate is; and where they are built, `kgen-macros/target`.
 const ROOT: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/kgen-macros");
 
-/// Whether Cargo did `command`, `["build"]` say, for fixture `name`, and what it said, a line
-/// each, in order.
-///
-/// The fixture is the `src/lib.rs` of a crate that depends on kgen-macros, kgen-cuda and
-/// kgen-cpu, as a user's does. The crate is a workspace of its own in `CARGO_TARGET_TMPDIR`,
-/// built offline into a target directory beside it, so that it never waits for the build that
-/// runs these tests. What the environment would change of a build is taken out of it. Its
-/// manifest ends with what `{name}.toml` beside the fixture says of the workspace, if there is
-/// one.
+/// Whether Cargo did `command`, `["build"]` say, for fixture `name`, written afresh, and what it
+/// said, a line each, in order.
 fn cargo(command: &[&str], name: &str) -> (bool, Vec<String>) {
+    cargo_in(command, &written(name))
+}
+
+/// Fixture `name` written as the `src/lib.rs` of a crate that depends on kgen-macros, kgen-cuda
+/// and kgen-cpu, as a user's does: the crate's directory. The crate is a workspace of its own in
+/// `CARGO_TARGET_TMPDIR`. Its manifest ends with what `{name}.toml` beside the fixture says of
+/// the workspace, if there is one.
+fn written(name: &str) -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     let crates = here.parent().expect("kgen-macros is in crates/");
     let fixtures = here.join("tests/fixtures");
-    let root = Path::new(ROOT);
-    let dir = root.join(name).join("project");
+    let dir = Path::new(ROOT).join(name).join("project");
     fs::create_dir_all(dir.join("src")).unwrap();
     let path = |c: &str| crates.join(c).display().to_string();
     let (macros, cuda, cpu) = (path("macros"), path("cuda"), path("cpu"));
@@ -53,11 +53,18 @@ kgen-cpu = {{ path = {cpu:?} }}
     let workspace = fs::read_to_string(fixtures.join(format!("{name}.toml"))).unwrap_or_default();
     fs::write(dir.join("Cargo.toml"), manifest + &workspace).unwrap();
     fs::copy(fixtures.join(format!("{name}.rs")), dir.join("src/lib.rs")).unwrap();
+    dir
+}
+
+/// Whether Cargo did `command` in the crate at `dir`, and what it said, a line each, in order.
+/// The crate is built offline into `kgen-macros/target`, so that it never waits for the build that
+/// runs these tests. What the environment would change of a build is taken out of it.
+fn cargo_in(command: &[&str], dir: &Path) -> (bool, Vec<String>) {
     let _one = CARGO.lock().unwrap_or_else(PoisonError::into_inner);
     let mut run = Command::new(env!("CARGO"));
     run.args(command);
     run.args(["--offline", "--quiet", "--message-format=short", "--color=never", "--target-dir"]);
-    run.arg(root.join("target")).current_dir(&dir);
+    run.arg(Path::new(ROOT).join("target")).current_dir(dir);
     for var in [
         "RUSTFLAGS",
         "CARGO_ENCODED_RUSTFLAGS",
@@ -169,6 +176,36 @@ fn a_workspace_named_nothing_is_left_out_of_its_kernels_names() {
     // The fixture asserts, as it builds, that its kernel is named in PTX in its crate's namespace
     // and its module's alone: `unnamed.toml` names the workspace `''`.
     builds_quietly("unnamed");
+}
+
+#[test]
+fn a_crate_is_built_again_when_its_workspace_is_renamed() {
+    // The crate is a member of a workspace one directory up, as a user's is, each example among
+    // them. It is not a workspace of its own, where its manifest and the workspace's would be one
+    // file: the macro includes the workspace's manifest, not the crate's own, and this test tells
+    // the two apart. The test writes the workspace's manifest, naming it `before`, and the fixture
+    // asserts, as it builds, that its kernel is named so. The test then names it `after`, and
+    // Cargo builds the crate again: the kernel is `after::rebuilt::gpu::k` now, and the assert
+    // fails. Cargo names the file from the workspace's root, `project/src/lib.rs`.
+    let dir = written("rebuilt");
+    let manifest = dir.join("Cargo.toml");
+    let member = fs::read_to_string(&manifest).unwrap().replace("[workspace]\n", "");
+    fs::write(&manifest, member).unwrap();
+    let named = |name: &str| {
+        let workspace = format!(
+            "[workspace]\nresolver = \"3\"\nmembers = [\"project\"]\n\n[workspace.metadata.kgen]\nname = {name:?}\n"
+        );
+        fs::write(Path::new(ROOT).join("rebuilt/Cargo.toml"), workspace).unwrap();
+    };
+    named("before");
+    let (built, said) = cargo_in(&["build"], &dir);
+    assert!(built && said.is_empty(), "fixtures/rebuilt.rs: built {built}, and Cargo said:\n{}", said.join("\n"));
+    named("after");
+    let (built, said) = cargo_in(&["build"], &dir);
+    assert!(!built, "fixtures/rebuilt.rs built, its workspace named `after`");
+    let error = "project/src/lib.rs:18:41: error[E0080]: evaluation panicked: the kernel is not named \
+                 before::rebuilt::gpu::k: evaluation of `_` failed here";
+    assert_eq!(said, [error, "error: could not compile `rebuilt` (lib) due to 1 previous error"]);
 }
 
 #[test]
