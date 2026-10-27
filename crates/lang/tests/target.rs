@@ -3,9 +3,10 @@
 
 use kgen_lang::{Error, Fault, Guard, ItemKind, Mem, Operand, Run, Target};
 
-/// A kernel with a pointer, a `ymm`, a loop of `v.xmm` views, which the evaluator unrolls, a label
-/// and a helper, which declares a variable of its own. [`Trace`] is a machine of its own, which
-/// takes every type and instruction. Each variable is written before it is read: `add` writes `t`.
+/// A kernel with a pointer, a `ymm`, a loop of `v.xmm` fields, which the evaluator unrolls, a
+/// label and a helper, whose parameter is a view of what it is given, and which declares a
+/// variable of its own. [`Trace`] is a machine of its own, which takes every type and instruction.
+/// Each variable is written before it is read: `add` writes `t`.
 const KERNEL: &str = r#"
 pub unsafe extern "sysv64" fn k(xs: *const f32, n: u64) -> u64 {
     let v: ymm;
@@ -32,8 +33,22 @@ pub unsafe extern "sysv64" fn k() {
 }
 "#;
 
-/// A target that writes a line for each call, makes a variable for each `param`, `var` and
-/// `view`, and refuses one instruction, by its name, with a given fault.
+/// A module of two statics, and a kernel that names them after an `add`: `B`, then `A`, then `B`
+/// again, in an address.
+const STATICS: &str = r#"
+static A: global<u64>;
+static B: global<u64>;
+
+pub unsafe extern "sysv64" fn k(n: u64) {
+    add(n, n, n);
+    mov(n, B);
+    mov(n, A);
+    mov(n, [B + 8]);
+}
+"#;
+
+/// A target that writes a line for each call, makes a variable for each `param`, `var`, `global`,
+/// `view` and `field`, and refuses one instruction, by its name, with a given fault.
 #[derive(Default)]
 struct Trace {
     /// A line for each call, in the order of the calls.
@@ -69,8 +84,16 @@ impl Target for Trace {
         Ok(self.make(format!("var {name}: {ty}")))
     }
 
+    fn global(&mut self, name: &str) -> Result<usize, String> {
+        Ok(self.make(format!("global {name}")))
+    }
+
     fn view(&mut self, var: usize, view: &str) -> Result<usize, String> {
         Ok(self.make(format!("view v{var} as {view}")))
+    }
+
+    fn field(&mut self, var: usize, field: &str) -> Result<usize, String> {
+        Ok(self.make(format!("field v{var}.{field}")))
     }
 
     fn label(&mut self, label: u32) {
@@ -139,9 +162,9 @@ fn the_evaluator_asks_its_target_in_source_order() {
         "param n: u64 = v1",
         "result u64",
         "var v: ymm = v2",
-        "view v2 as xmm = v3",
+        "field v2.xmm = v3",
         "vmovups v3, [v0]",
-        "view v2 as xmm = v4",
+        "field v2.xmm = v4",
         "vmovups v4, [v0 + 16]",
         "label 0",
         "view v1 as u64 = v5",
@@ -150,6 +173,23 @@ fn the_evaluator_asks_its_target_in_source_order() {
         "add v6, v5, v5",
         "jnz label 0",
         "ret v1",
+        "end",
+    ];
+    assert_eq!(trace.lines, want);
+}
+
+#[test]
+fn a_static_is_made_once_the_first_time_the_kernel_names_it() {
+    let mut trace = Trace::default();
+    run(STATICS, &mut trace).unwrap();
+    let want = [
+        "param n: u64 = v0",
+        "add v0, v0, v0",
+        "global B = v1",
+        "mov v0, v1",
+        "global A = v2",
+        "mov v0, v2",
+        "mov v0, [v1 + 8]",
         "end",
     ];
     assert_eq!(trace.lines, want);
