@@ -1,11 +1,11 @@
 //! Spilling: which variable goes to the stack when colouring runs out of registers, and the
 //! program that keeps it there.
 
-use kgen_core::{Flow, Item, Program, RegInfo, Slot, SlotId, VReg};
+use kgen_core::{Arg, Flow, Inst, Item, Program, RegInfo, Slot, SlotId, VReg};
 
 use crate::Spill;
-use crate::alloc::{Live, renamed};
 use crate::cfg::Block;
+use crate::live::Live;
 
 /// Whether variable `v` of `p` may spill: every instruction that writes it goes on to the next
 /// item, where its store goes.
@@ -105,4 +105,16 @@ pub(crate) fn rewrite<Op>(p: &mut Program<Op>, v: usize, s: &dyn Spill<Op>) {
         }
     }
     p.body = body;
+}
+
+/// `inst` with `to` wherever it names `from`.
+pub(crate) fn renamed<Op>(inst: Inst<Op, VReg>, from: VReg, to: VReg) -> Inst<Op, VReg> {
+    let rename = |a: Arg<VReg>| a.map(|r| if r == from { to } else { r });
+    Inst {
+        op: inst.op,
+        args: inst.args.into_iter().map(rename).collect(),
+        implicit: inst.implicit.into_iter().map(rename).collect(),
+        flow: inst.flow,
+        clobbers: inst.clobbers,
+    }
 }

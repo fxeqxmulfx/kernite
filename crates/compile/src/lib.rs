@@ -11,6 +11,7 @@ mod cfg;
 mod compiled;
 mod error;
 mod frame;
+mod live;
 mod port;
 mod spill;
 
@@ -23,7 +24,7 @@ pub use port::{Machine, Spill};
 /// registers: that control stays inside the body, that every jump has its label, and that
 /// every variable but the parameters is written before any path reads it.
 pub fn check<Op>(p: &Program<Op>) -> Result<(), Error> {
-    alloc::analyse(p).map(|_| ())
+    live::analyse(p).map(|_| ())
 }
 
 /// Allocates `p`'s variables to `m`'s registers, spilling to the stack the ones that do not
