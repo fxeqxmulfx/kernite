@@ -2028,16 +2028,34 @@ fn kgen_knows_every_instruction_of_x86_64_v3() {
 }
 
 /// The `vzeroupper` a kernel that touches vector registers runs before it returns is AVX's, so
-/// it needs AVX though nothing else it runs does.
+/// it needs AVX though nothing else it runs does. AVX takes its place among the other needs,
+/// which are listed by name.
 #[test]
 fn vzeroupper_needs_avx_where_nothing_else_says_so() {
-    let src = "pub unsafe extern \"sysv64\" fn f(x: f32) -> f32 { ret(x); }";
-    let want = "# f(vec) -> vec
+    let cases = [
+        (
+            "pub unsafe extern \"sysv64\" fn f(x: f32) -> f32 { ret(x); }",
+            "# f(vec) -> vec
 # needs: avx
 # frame: 0 bytes aligned to 0, saves []
 # x=ymm0
     vzeroupper
     ret
-";
-    assert_eq!(kgen::x86_str(src, "f").unwrap().text(), want);
+",
+        ),
+        (
+            "pub unsafe extern \"sysv64\" fn f(x: f32, n: u64) -> f32 { popcnt(n, n); ret(x); }",
+            "# f(vec, gpr) -> vec
+# needs: avx, popcnt
+# frame: 0 bytes aligned to 0, saves []
+# x=ymm0 n=rdi
+    popcnt rdi, rdi
+    vzeroupper
+    ret
+",
+        ),
+    ];
+    for (src, want) in cases {
+        assert_eq!(kgen::x86_str(src, "f").unwrap().text(), want, "{src}");
+    }
 }
