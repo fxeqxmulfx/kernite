@@ -12,7 +12,7 @@ const RULE: &[(&str, &[&str])] = &[
     ("kgen-lang", &[]),
     ("kgen-compile", &["kgen-core"]),
     ("kgen-x86", &["kgen-core", "kgen-lang", "kgen-compile", "kgen-build"]),
-    ("kgen-ptx", &["kgen-core", "kgen-lang"]),
+    ("kgen-ptx", &["kgen-core", "kgen-lang", "kgen-compile", "kgen-build"]),
     ("kgen", &["kgen-core", "kgen-lang", "kgen-compile", "kgen-build", "kgen-x86", "kgen-ptx"]),
     ("kgen-macros", &["kgen"]),
     ("kgen-cuda", &[]),

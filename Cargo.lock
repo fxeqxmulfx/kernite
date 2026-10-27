@@ -55,6 +55,8 @@ dependencies = [
 name = "kgen-ptx"
 version = "0.1.0"
 dependencies = [
+ "kgen-build",
+ "kgen-compile",
  "kgen-core",
  "kgen-lang",
 ]
