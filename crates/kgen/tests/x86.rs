@@ -1367,6 +1367,20 @@ fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
     assert_eq!(kgen::x86_str(CALLERS, "keep").unwrap().text(), want);
 }
 
+/// The registers a call leaves as they were are rbx and r12 to r15, and an integer alive
+/// across one is kept in them alone: five are, each saved for the kernel's caller, and a
+/// sixth is spilled to the frame.
+#[test]
+fn a_value_alive_across_a_call_is_kept_in_rbx_or_r12_to_r15() {
+    let body = "call(nothing); add(a, b); add(a, c); add(a, d); add(a, e); add(a, f); ret(a);";
+    let code = calling("a: u64, b: u64, c: u64, d: u64, e: u64, f: u64", " -> u64", body).unwrap();
+    let want = "push rbx\npush r12\npush r13\npush r14\npush r15\npush rbp\nmov rbp, rsp\nsub rsp, 8\nmov qword ptr \
+                [rsp], r9\nmov rbx, r8\nmov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\ncall {f0}\nadd r15, \
+                r14\nadd r15, r13\nadd r15, r12\nadd r15, rbx\nmov rax, qword ptr [rsp]\nadd r15, rax\nmov rax, \
+                r15\nmov rsp, rbp\npop rbp\npop r15\npop r14\npop r13\npop r12\npop rbx\nret";
+    assert_eq!(code, want);
+}
+
 /// `lea` takes the address of a function of the module, rip-relative, and a call through the
 /// gpr that holds it calls one of the functions taken together last, which take what it
 /// passes.

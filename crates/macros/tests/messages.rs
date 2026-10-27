@@ -1,8 +1,8 @@
 //! What the macro says of the kernels it is given: each error where it is, at its
-//! `line:column`, in the order Cargo prints them. Each fixture is built as a user's crate is,
-//! and what Cargo says of it is compared line for line, the errors in rustc's short form,
-//! `src/lib.rs:4:1: error: ..`. A fixture is a crate's `src/lib.rs`, so the line an error names
-//! is that line of the fixture.
+//! `line:column`, in the order Cargo prints them, and each kernel's safety contract, in its
+//! docs. Each fixture is built as a user's crate is, and what Cargo says of it is compared line
+//! for line, the errors in rustc's short form, `src/lib.rs:4:1: error: ..`. A fixture is a
+//! crate's `src/lib.rs`, so the line an error names is that line of the fixture.
 
 use std::fs;
 use std::path::Path;
@@ -13,16 +13,21 @@ use std::sync::{Mutex, PoisonError};
 /// waits for another's lock says so.
 static CARGO: Mutex<()> = Mutex::new(());
 
-/// Whether `cargo build` built fixture `name`, and what it said, a line each, in order.
+/// Where in `CARGO_TARGET_TMPDIR` each fixture is a crate, `kgen-macros/name`, and where they
+/// are built, `kgen-macros/target`.
+const ROOT: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/kgen-macros");
+
+/// Whether Cargo did `command`, `["build"]` say, for fixture `name`, and what it said, a line
+/// each, in order.
 ///
 /// The fixture is the `src/lib.rs` of a crate that depends on kgen-macros, kgen-cuda and
 /// kgen-cpu, as a user's does. The crate is a workspace of its own in `CARGO_TARGET_TMPDIR`,
 /// built offline into a target directory beside it, so that it never waits for the build that
 /// runs these tests. What the environment would change of a build is taken out of it.
-fn build(name: &str) -> (bool, Vec<String>) {
+fn cargo(command: &[&str], name: &str) -> (bool, Vec<String>) {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     let crates = here.parent().expect("kgen-macros is in crates/");
-    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("kgen-macros");
+    let root = Path::new(ROOT);
     let dir = root.join(name);
     fs::create_dir_all(dir.join("src")).unwrap();
     let path = |c: &str| crates.join(c).display().to_string();
@@ -45,9 +50,10 @@ kgen-cpu = {{ path = {cpu:?} }}
     fs::write(dir.join("Cargo.toml"), manifest).unwrap();
     fs::copy(here.join("tests/fixtures").join(format!("{name}.rs")), dir.join("src/lib.rs")).unwrap();
     let _one = CARGO.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut cargo = Command::new(env!("CARGO"));
-    cargo.args(["build", "--offline", "--quiet", "--message-format=short", "--color=never", "--target-dir"]);
-    cargo.arg(root.join("target")).current_dir(&dir);
+    let mut run = Command::new(env!("CARGO"));
+    run.args(command);
+    run.args(["--offline", "--quiet", "--message-format=short", "--color=never", "--target-dir"]);
+    run.arg(root.join("target")).current_dir(&dir);
     for var in [
         "RUSTFLAGS",
         "CARGO_ENCODED_RUSTFLAGS",
@@ -57,22 +63,22 @@ kgen-cpu = {{ path = {cpu:?} }}
         "CARGO_TARGET_DIR",
         "CARGO_BUILD_TARGET_DIR",
     ] {
-        cargo.env_remove(var);
+        run.env_remove(var);
     }
-    let out = cargo.output().expect("Cargo runs");
+    let out = run.output().expect("Cargo runs");
     let said = String::from_utf8(out.stderr).expect("Cargo writes UTF-8");
     (out.status.success(), said.lines().map(String::from).collect())
 }
 
 /// That Cargo builds fixture `name` without a word.
 fn builds_quietly(name: &str) {
-    let (built, said) = build(name);
+    let (built, said) = cargo(&["build"], name);
     assert!(built && said.is_empty(), "fixtures/{name}.rs: built {built}, and Cargo said:\n{}", said.join("\n"));
 }
 
 /// That Cargo does not build fixture `name`, and says `lines`, in that order, and nothing else.
 fn refuses(name: &str, lines: &[&str]) {
-    let (built, said) = build(name);
+    let (built, said) = cargo(&["build"], name);
     assert!(!built, "fixtures/{name}.rs built");
     assert_eq!(said, lines, "fixtures/{name}.rs: Cargo said:\n{}", said.join("\n"));
 }
@@ -163,6 +169,44 @@ fn a_static_that_does_not_compile_is_said_once() {
             "src/lib.rs:29:21: error: `COUNTS` does not compile, so no kernel names it",
             "error: could not compile `statics` (lib) due to 6 previous errors",
         ],
+    );
+}
+
+/// A kernel's safety contract says that nothing else touches the memory of the module's it
+/// names while it runs, with what the functions it calls name: in a `# Safety` of its own, or
+/// after the one its docs have; and for a grid's kernel, while its threads run.
+#[test]
+fn a_kernels_safety_contract_says_nothing_else_touches_the_memory_it_names() {
+    let (documented, said) = cargo(&["doc", "--no-deps"], "contract");
+    assert!(
+        documented && said.is_empty(),
+        "fixtures/contract.rs: documented {documented}, and Cargo said:\n{}",
+        said.join("\n")
+    );
+    // The paragraphs of the kernel's `# Safety`, as rustdoc writes them.
+    let safety = |f: &str| {
+        let page = fs::read_to_string(Path::new(ROOT).join(format!("target/doc/contract/cpu/fn.{f}.html"))).unwrap();
+        let (_, section) = page.split_once(">Safety</h2>\n").expect("a section `# Safety`");
+        section.split_once("</div>").expect("the docs end").0.lines().map(String::from).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        safety("run"),
+        ["<p>The kernel trusts the pointers it is given: each must be to memory as long as the kernel reads and \
+             writes through it. Nothing else touches the module’s memory, <code>RUNS</code>, while it runs.</p>"]
+    );
+    assert_eq!(
+        safety("scale"),
+        [
+            "<p><code>x</code> points at an integer.</p>",
+            "<p>Nothing else touches the module’s memory, <code>RUNS</code> and <code>FACTORS</code>, while it \
+             runs.</p>",
+        ]
+    );
+    assert_eq!(
+        safety("runs"),
+        ["<p>The kernel trusts the pointers it is given: each must be to memory as long as the kernel’s threads \
+             read and write through it, which nothing else touches while they run. Nothing else touches the \
+             module’s memory, <code>RUNS</code>, while they run.</p>"]
     );
 }
 

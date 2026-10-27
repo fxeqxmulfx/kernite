@@ -208,6 +208,8 @@ impl Gate {
 mod tests {
     use std::mem::{offset_of, size_of};
     use std::sync::Mutex;
+    use std::thread;
+    use std::time::Duration;
 
     use super::{Barrier, Grid, Place, launch, most};
 
@@ -221,6 +223,26 @@ mod tests {
             let want: Vec<(u64, u64)> = (0..threads as u64).map(|t| (t, threads as u64)).collect();
             assert_eq!(seen, want);
         }
+    }
+
+    /// The caller's thread is the grid's first, and the launch returns once every thread has
+    /// ended: the others take a while, and each has run when it does.
+    #[test]
+    fn the_callers_thread_is_the_first_and_the_launch_returns_when_all_have_ended() {
+        let caller = thread::current().id();
+        let threads = most().unwrap().min(4);
+        let ran = Mutex::new(vec![]);
+        launch(Grid::new(threads), &|place| {
+            if place.thread() > 0 {
+                thread::sleep(Duration::from_millis(20));
+            }
+            ran.lock().unwrap().push((place.thread(), thread::current().id() == caller));
+        })
+        .unwrap();
+        let mut ran = ran.into_inner().unwrap();
+        ran.sort();
+        let want: Vec<(u64, bool)> = (0..threads as u64).map(|t| (t, t == 0)).collect();
+        assert_eq!(ran, want);
     }
 
     #[test]
