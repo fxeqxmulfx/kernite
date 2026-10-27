@@ -1,4 +1,4 @@
-//! The use cases of `kgen`: from a [`Program`] over variables to a [`Compiled`] kernel over
+//! The use cases of `kgen`: from a [`Program`] over variables to an [`Allocated`] kernel over
 //! machine registers, what did not fit in them spilled to the stack, with its frame laid out.
 //!
 //! What they know of the machine comes through the [`Machine`] and [`Spill`] ports, so they
@@ -6,16 +6,16 @@
 //! registers.
 
 mod alloc;
+mod allocated;
 mod bits;
 mod cfg;
-mod compiled;
 mod error;
 mod frame;
 mod live;
 mod port;
 mod spill;
 
-pub use compiled::{Compiled, Frame};
+pub use allocated::{Allocated, Frame};
 pub use error::Error;
 use kgen_core::{Inst, Item, PReg, Program};
 pub use port::{Machine, Spill};
@@ -29,7 +29,7 @@ pub fn check<Op>(p: &Program<Op>) -> Result<(), Error> {
 
 /// Allocates `p`'s variables to `m`'s registers, spilling to the stack the ones that do not
 /// fit, and lays out its frame.
-pub fn compile<Op: Clone + PartialEq>(p: &Program<Op>, m: &(impl Machine + Spill<Op>)) -> Result<Compiled<Op>, Error> {
+pub fn compile<Op: Clone + PartialEq>(p: &Program<Op>, m: &(impl Machine + Spill<Op>)) -> Result<Allocated<Op>, Error> {
     let (p, regs) = alloc::allocate(p, m, m)?;
     let reg = |v: kgen_core::VReg| regs[v.id as usize].expect("every variable named has a register");
     let body = p
@@ -50,7 +50,7 @@ pub fn compile<Op: Clone + PartialEq>(p: &Program<Op>, m: &(impl Machine + Spill
     let mut used: Vec<PReg> = regs.iter().flatten().copied().collect();
     used.sort();
     used.dedup();
-    Ok(Compiled {
+    Ok(Allocated {
         name: p.name.clone(),
         signature: p.signature.clone(),
         body,

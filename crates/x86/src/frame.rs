@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use kgen_compile::{Compiled, Frame};
+use kgen_compile::{Allocated, Frame};
 use kgen_core::{Access, Arg, Base, Class, Flow, Inst, Item, Label, Mem, Operand, PReg, Width};
 
 use crate::forms::{self, Feature};
@@ -25,7 +25,7 @@ pub(crate) struct Lowered {
 }
 
 /// `c` with its frame made instructions, as [`print`](crate::intel::print) says; or why not.
-pub(crate) fn lower(c: &Compiled<Op>) -> Result<Lowered, String> {
+pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     let insts = || {
         c.body.iter().filter_map(|item| match item {
             Item::Inst(inst) => Some(inst),
@@ -242,9 +242,9 @@ mod tests {
     const YMM0: PReg = PReg { class: Class::Vec, hw: 0 };
 
     /// A kernel of `body` in `frame`, allocated by hand.
-    fn kernel(body: Vec<Item<Op, PReg>>, frame: Frame) -> Compiled<Op> {
+    fn kernel(body: Vec<Item<Op, PReg>>, frame: Frame) -> Allocated<Op> {
         let signature = Signature { params: vec![], result: None };
-        Compiled {
+        Allocated {
             name: "k".into(),
             signature,
             body,
@@ -268,7 +268,7 @@ mod tests {
     }
 
     /// The code of `c`'s listing, a line each.
-    fn code(c: &Compiled<Op>) -> String {
+    fn code(c: &Allocated<Op>) -> String {
         intel::print(c).unwrap().code().collect::<Vec<_>>().join("\n")
     }
 

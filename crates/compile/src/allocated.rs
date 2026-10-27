@@ -18,7 +18,7 @@ pub struct Frame {
 
 /// A kernel after allocation: machine registers only, and a frame laid out.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Compiled<Op> {
+pub struct Allocated<Op> {
     /// What it is called.
     pub name: String,
     /// What it takes and gives.

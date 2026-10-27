@@ -8,7 +8,7 @@ use kgen_core::{
     Slot, SlotId, VReg, Width,
 };
 
-use crate::{Compiled, Error, Machine, Spill, compile};
+use crate::{Allocated, Error, Machine, Spill, compile};
 
 struct Toy {
     gpr: Vec<PReg>,
@@ -152,7 +152,7 @@ fn run<R: Register + Ord>(
 
 /// What `p` returns for the parameters `args`, and what it returns compiled for `m`, which
 /// must be the same.
-fn same(p: &Program<&'static str>, m: &Toy, args: &[u64]) -> Compiled<&'static str> {
+fn same(p: &Program<&'static str>, m: &Toy, args: &[u64]) -> Allocated<&'static str> {
     let c = compile(p, m).unwrap();
     let before: Vec<(VReg, u64)> = p.params.iter().map(|&(v, _)| v).zip(args.iter().copied()).collect();
     let after: Vec<(PReg, u64)> = p.params.iter().map(|&(_, r)| r).zip(args.iter().copied()).collect();
@@ -165,12 +165,12 @@ fn same(p: &Program<&'static str>, m: &Toy, args: &[u64]) -> Compiled<&'static s
 }
 
 /// The names of the variables `c` spilled, in the order they did.
-fn spilled(c: &Compiled<&'static str>) -> Vec<String> {
+fn spilled(c: &Allocated<&'static str>) -> Vec<String> {
     c.frame.slots.iter().filter(|s| s.spill).map(|s| s.name.clone()).collect()
 }
 
 /// The opcodes of `c`, in order.
-fn ops(c: &Compiled<&'static str>) -> Vec<&'static str> {
+fn ops(c: &Allocated<&'static str>) -> Vec<&'static str> {
     c.body.iter().filter_map(|i| if let Item::Inst(i) = i { Some(i.op) } else { None }).collect()
 }
 
@@ -271,12 +271,12 @@ impl Builder {
 
 /// The register of the first variable named `name`: the program's own, before any that
 /// splitting or spilling made of it.
-fn reg_of(c: &crate::Compiled<&'static str>, name: &str) -> PReg {
+fn reg_of(c: &crate::Allocated<&'static str>, name: &str) -> PReg {
     c.assignment.iter().find(|(info, _)| info.name == name).and_then(|(_, r)| *r).unwrap()
 }
 
 /// The registers of every variable named `name`, in order.
-fn regs_of(c: &crate::Compiled<&'static str>, name: &str) -> Vec<PReg> {
+fn regs_of(c: &crate::Allocated<&'static str>, name: &str) -> Vec<PReg> {
     c.assignment.iter().filter(|(info, _)| info.name == name).filter_map(|(_, r)| *r).collect()
 }
 

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use kgen_compile::{Compiled, Frame};
+use kgen_compile::{Allocated, Frame};
 use kgen_core::{Base, Class, Const, Item, Label, Mem, Operand, PReg, Signature, Width};
 
 use crate::forms::Feature;
@@ -154,7 +154,7 @@ pub fn taken(name: &str) -> bool {
 /// Labels become local numbers, in the order they are placed, which `naked_asm!` asks for so
 /// that the same code can be emitted twice. Numbers made of ones and zeros alone are skipped:
 /// Intel syntax reads `10b` as binary ten, not as label 10 behind.
-pub fn print(c: &Compiled<Op>) -> Result<Listing, String> {
+pub fn print(c: &Allocated<Op>) -> Result<Listing, String> {
     let lowered = frame::lower(c)?;
     let mut numbers = BTreeMap::new();
     let mut places = BTreeMap::new();
@@ -270,7 +270,7 @@ fn name(r: PReg, width: Width) -> String {
 /// # Panics
 ///
 /// If its index is a vector of no width given, which whoever built the instruction left out.
-fn memory(m: &Mem<PReg>, c: &Compiled<Op>, sized: bool, vector_index: Option<Width>) -> String {
+fn memory(m: &Mem<PReg>, c: &Allocated<Op>, sized: bool, vector_index: Option<Width>) -> String {
     let (mut text, disp) = match m.base {
         Base::Reg(r) => (name(r, Width::W64), i64::from(m.disp)),
         Base::Slot(s) => (name(RSP, Width::W64), i64::from(m.disp) + i64::from(c.frame.offsets[s.0 as usize])),

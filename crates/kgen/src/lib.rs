@@ -90,12 +90,12 @@ pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>,
         }
     }
     let run = kgen_lang::kernel(module, f, args, &mut kernel).map_err(|e| within(&name, args, e))?;
-    let compiled = kgen_compile::compile(&kernel.finish(), &kgen_x86::SysV).map_err(|e| {
+    let allocated = kgen_compile::compile(&kernel.finish(), &kgen_x86::SysV).map_err(|e| {
         let e = kgen_lang::Error { span: blame(&e, &run.decls).unwrap_or(f.span), message: e.to_string() };
         within(&name, args, e)
     })?;
     // A frame past what an address reaches is the kernel's.
-    let code = kgen_x86::intel::print(&compiled)
+    let code = kgen_x86::intel::print(&allocated)
         .map_err(|message| within(&name, args, kgen_lang::Error { span: f.span, message }))?;
     Ok(Compiled { code, consts: run.consts })
 }
