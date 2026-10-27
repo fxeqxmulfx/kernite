@@ -301,6 +301,41 @@ fn values_are_computed_as_rust_computes_them() {
     assert_eq!(x86(src, "v"), want);
 }
 
+/// A shift or a `!` is checked for overflow, as `+` is. One of an integer with a type is wrapped
+/// to the type's width, as Rust does, so it stays in range, as the note says. One of an integer
+/// with no type is held to the range every other is, `i64::MIN` to `u64::MAX`, and refused past
+/// it, at the operator: past it, a value would reach the ends of `i128`, and the third would
+/// divide `i128::MIN` by -1.
+#[test]
+fn a_shift_and_a_not_are_checked_for_overflow() {
+    let src = r#"
+        const HIGH: u64 = 3 << 63;
+        const MASK: u8 = !0;
+
+        pub unsafe extern "sysv64" fn k() {
+            note("{HIGH} {MASK}");
+        }
+    "#;
+    let want = "# k() -> ()
+# frame: 0 bytes aligned to 0, saves []
+    # 9223372036854775808 255
+    ret
+";
+    assert_eq!(x86(src, "k"), want);
+    let cases = [
+        ("const X: u64 = (3 << 63) as u64;", "2:19: 27670116110564327424 is out of range for an integer"),
+        ("const X: u64 = !18446744073709551615 as u64;", "2:16: -18446744073709551616 is out of range for an integer"),
+        (
+            "const X: u64 = ((((-1 << 63) << 63) << 1) / -1) as u64;",
+            "2:30: -85070591730234615865843651857942052864 is out of range for an integer",
+        ),
+    ];
+    for (body, want) in cases {
+        let got = kgen::x86_str(&format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\n"), "k").unwrap_err();
+        assert_eq!(got, want, "{body}");
+    }
+}
+
 /// A const is what kernels read: a number, a float, a `bool`, or an array of them. The kernel
 /// reads one of each, and adds only if each is what it was declared. One of another type is no
 /// value known now, and the error says what one is.
