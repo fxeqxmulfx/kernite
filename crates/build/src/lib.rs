@@ -5,6 +5,7 @@
 
 mod classify;
 mod dto;
+mod present;
 
 pub use classify::{Abi, Owner, abi, cooperative, function, instance, owner};
 pub use dto::Compiled;

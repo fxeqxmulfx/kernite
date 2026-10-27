@@ -4,6 +4,8 @@
 
 use kgen_lang::{Fn, ItemKind, Module, Value};
 
+use crate::present::{Of, Refusal, said};
+
 /// The ABIs a kernel names, or a function kernels call, each of which kgen compiles for a
 /// machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,13 +69,7 @@ pub fn owner(module: &Module) -> Result<Owner, kgen_lang::Error> {
         ItemKind::Static(s) => Some(s),
         _ => None,
     }) {
-        Some(s) => Err(kgen_lang::Error {
-            span: s.span,
-            message: "a static is memory of the module's kernels: the GPU's, for PTX kernels, or the process's, \
-                      for x86 ones; and this module has both, so it is two modules, one of each kind of kernel and \
-                      the statics they name"
-                .to_string(),
-        }),
+        Some(s) => Err(said(Refusal::TwoKinds, s.span)),
         None => Ok(Owner::Gpu),
     }
 }
@@ -84,18 +80,13 @@ pub fn owner(module: &Module) -> Result<Owner, kgen_lang::Error> {
 /// whatever it says.
 pub fn cooperative(f: &Fn) -> Result<bool, kgen_lang::Error> {
     let Some(c) = &f.cooperative else { return Ok(false) };
-    let what = match (abi(f), &f.abi) {
+    let of = match (abi(f), &f.abi) {
         (Some(Abi::PtxKernel | Abi::Sysv64), _) => return Ok(true),
-        (Some(Abi::PtxFunc), _) => "a function the kernels call, which runs as the kernel that calls it is launched",
+        (Some(Abi::PtxFunc), _) => Of::Func,
         (None, Some(_)) => return Ok(false),
-        (None, None) => "a helper, inlined where it is called",
+        (None, None) => Of::Helper,
     };
-    let message = format!(
-        "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, `extern \"ptx-kernel\"` or \
-         `extern \"sysv64\"`; `{}` is {what}",
-        f.name
-    );
-    Err(kgen_lang::Error { span: c.span, message })
+    Err(said(Refusal::Cooperative { name: &f.name, of }, c.span))
 }
 
 /// The function `name` of `module`.
