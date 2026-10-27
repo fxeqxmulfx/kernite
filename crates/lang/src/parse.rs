@@ -221,8 +221,13 @@ impl<'a> Parser<'a> {
         }
         let qualifiers = self.pos;
         let mut abi = None;
+        let mut unsafe_fn = false;
         loop {
-            if self.eat_ident("const") || self.eat_ident("unsafe") || self.eat_ident("async") {
+            if self.eat_ident("const") || self.eat_ident("async") {
+                continue;
+            }
+            if self.eat_ident("unsafe") {
+                unsafe_fn = true;
                 continue;
             }
             if self.is_ident("extern") {
@@ -240,7 +245,7 @@ impl<'a> Parser<'a> {
             break;
         }
         if self.eat_ident("fn") {
-            let f = self.function(attrs, (instances, cooperative), head..self.pos - 1, abi)?;
+            let f = self.function(attrs, (instances, cooperative), head..self.pos - 1, abi, unsafe_fn)?;
             return Ok(Item { tokens: start..self.pos, kind: ItemKind::Fn(f) });
         }
         if let Some(e) = misplaced {
@@ -290,6 +295,7 @@ impl<'a> Parser<'a> {
         (instances, cooperative): (Option<Instances>, Option<Cooperative>),
         head: std::ops::Range<usize>,
         abi: Option<(String, Span)>,
+        unsafe_fn: bool,
     ) -> Result<Fn, Error> {
         let (name, span) = self.ident()?;
         let mut generics = vec![];
@@ -332,7 +338,21 @@ impl<'a> Parser<'a> {
             return self.error(format!("a kernel is written in its body, and `{name}` has none"));
         };
         let body = block(body, span_body);
-        Ok(Fn { attrs, instances, cooperative, head, abi, name, span, generics, params, params_at, ret, body })
+        Ok(Fn {
+            attrs,
+            instances,
+            cooperative,
+            head,
+            abi,
+            unsafe_fn,
+            name,
+            span,
+            generics,
+            params,
+            params_at,
+            ret,
+            body,
+        })
     }
 
     fn ty(&mut self) -> Result<Type, Error> {

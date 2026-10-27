@@ -1,5 +1,6 @@
-//! The lexer, and the rounding of 16-bit floats. The rest of the language is tested where it
-//! meets the targets it is compiled for, in `kgen`'s `tests/lang.rs`.
+//! The lexer, the rounding of 16-bit floats, and whether a function is `unsafe`. The rest of
+//! the language is tested where it meets the targets it is compiled for, in `kgen`'s
+//! `tests/lang.rs`.
 
 use crate::value::{Value, cast};
 
@@ -36,4 +37,24 @@ fn sixteen_bit_floats_round_to_nearest_even() {
         assert_eq!(round(f64::INFINITY), make(inf));
         assert!(matches!(round(f64::NAN), Value::F16(h) | Value::Bf16(h) if h & inf == inf && h != inf));
     }
+}
+
+#[test]
+fn a_function_says_whether_it_is_unsafe() {
+    let src = r#"
+        pub unsafe extern "sysv64" fn k() {}
+        extern "ptx-func" fn f() {}
+        unsafe fn h() {}
+        pub(crate) const unsafe extern "C" fn c() {}
+    "#;
+    let module = crate::parse(src).unwrap();
+    let said: Vec<(&str, bool)> = module
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            crate::ItemKind::Fn(f) => Some((f.name.as_str(), f.unsafe_fn)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said, [("k", true), ("f", false), ("h", true), ("c", true)]);
 }
