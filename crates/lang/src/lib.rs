@@ -77,6 +77,7 @@
 mod ast;
 mod eval;
 mod parse;
+mod target;
 mod token;
 mod value;
 
@@ -86,8 +87,9 @@ pub use ast::{
     BinOp, Block, Const, Cooperative, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret, Static, Stmt,
     Type, UnOp,
 };
-pub use eval::{Fault, Guard, Mem, Memory, Operand, Run, Target, constant, instance, instances, kernel, memory};
+pub use eval::{Memory, Run, constant, instance, instances, kernel, memory};
 pub use parse::module;
+pub use target::{Fault, Guard, Mem, Operand, Target};
 pub use token::{Delim, Span, Tree, lex, text};
 pub use value::{IntTy, Value};
 
