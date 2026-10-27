@@ -5,6 +5,23 @@ kgen compiles kernels written in Rust's syntax, instructions over variables in a
 and to PTX for NVIDIA GPUs. [README.md](README.md) describes the language, the targets and the
 guarantees: read it before changing what kgen does.
 
+## Goals
+
+Every change serves these five.
+
+1. **Zero cost.** A kernel runs as fast as the best code written by hand for it. kgen adds no
+   check, copy or call at run time that the kernel does not ask for.
+2. **Minimum code.** The least code that does the job: no rule written twice, no dead code, no
+   type or function that only hands a value on. A change that deletes code beats one that adds
+   it.
+3. **The whole spec.** kgen takes all of each target's spec, x86-64-v3 and PTX's ISA, in every
+   form, and refuses what the spec leaves undefined. Every rule README states has a test.
+4. **Safe where it can be.** A kernel kgen can prove safe is called without `unsafe`, as in
+   NVIDIA's cuda-oxide for SIMT, where each thread writes only its own part of the output. Where
+   safety would cost speed, zero cost wins: the call stays `unsafe`, and says why.
+5. **Clean architecture.** Each layer depends only on the layers inside it, and a port belongs
+   to the code that calls it. Every step leaves the architecture cleaner than it found it.
+
 ## Commands
 
 - `./make.py check`: formatting, clippy on every target with `-D warnings`, every test, and the docs
