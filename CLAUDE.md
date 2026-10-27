@@ -44,6 +44,9 @@ kind of dependency, and a new crate needs its line there. Change both when the c
 - `kgen-lang`: the language: tokens, the parser, values, the evaluator, and the `Target` port a machine
   implements.
 - `kgen-compile`: liveness, register allocation, spilling, and the frame's slots.
+- `kgen-build`: what kgen does with a module of kernels, whatever machine compiles them: what its
+  items are, the ports `Backend`, `Native` and `Device` a machine implements, and the use cases that
+  call them. It depends on kgen-lang alone.
 - `kgen-x86`, `kgen-ptx`: each machine: its forms, the language's binding to it, its printer.
 - `kgen`: what compiles each kernel with which machine. `kgen-macros`: the proc macros.
 - `kgen-cuda`, `kgen-cpu`: what the generated code runs on: the CUDA driver, and an x86 grid's threads
@@ -52,7 +55,7 @@ kind of dependency, and a new crate needs its line there. Change both when the c
   kernel to a scalar reference, bit for bit, and each listing to `snapshots/`.
 
 A rewrite to clean architecture is under way on the branch `clean-architecture`. Its plan is on the
-board (below). Until it is merged, master's layout is the one above.
+board (below). Master has the part of it merged so far, and the layout above is master's.
 
 ## Rules the code keeps
 
