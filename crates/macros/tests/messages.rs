@@ -62,6 +62,9 @@ kgen-cpu = {{ path = {cpu:?} }}
         "RUSTFLAGS",
         "CARGO_ENCODED_RUSTFLAGS",
         "CARGO_BUILD_RUSTFLAGS",
+        "RUSTDOCFLAGS",
+        "CARGO_ENCODED_RUSTDOCFLAGS",
+        "CARGO_BUILD_RUSTDOCFLAGS",
         "RUSTC_WRAPPER",
         "RUSTC_WORKSPACE_WRAPPER",
         "CARGO_TARGET_DIR",
@@ -78,6 +81,19 @@ kgen-cpu = {{ path = {cpu:?} }}
 fn builds_quietly(name: &str) {
     let (built, said) = cargo(&["build"], name);
     assert!(built && said.is_empty(), "fixtures/{name}.rs: built {built}, and Cargo said:\n{}", said.join("\n"));
+}
+
+/// That Cargo documents fixture `name` without a word; then, of each function `f` of its module
+/// `module`, the lines rustdoc wrote of it, from `start` to the `</div>` after it.
+fn documented(name: &str, module: &str, start: &str) -> impl Fn(&str) -> Vec<String> {
+    let (done, said) = cargo(&["doc", "--no-deps"], name);
+    assert!(done && said.is_empty(), "fixtures/{name}.rs: documented {done}, and Cargo said:\n{}", said.join("\n"));
+    let dir = Path::new(ROOT).join("target/doc").join(name).join(module);
+    move |f: &str| {
+        let page = fs::read_to_string(dir.join(format!("fn.{f}.html"))).unwrap();
+        let (_, docs) = page.split_once(start).unwrap_or_else(|| panic!("fn.{f}.html has no `{start}`"));
+        docs.split_once("</div>").expect("the docs end").0.lines().map(String::from).collect()
+    }
 }
 
 /// That Cargo does not build fixture `name`, and says `lines`, in that order, and nothing else.
@@ -216,18 +232,8 @@ fn a_static_that_does_not_compile_is_said_once() {
 /// after the one its docs have; and for a grid's kernel, while its threads run.
 #[test]
 fn a_kernels_safety_contract_says_nothing_else_touches_the_memory_it_names() {
-    let (documented, said) = cargo(&["doc", "--no-deps"], "contract");
-    assert!(
-        documented && said.is_empty(),
-        "fixtures/contract.rs: documented {documented}, and Cargo said:\n{}",
-        said.join("\n")
-    );
     // The paragraphs of the kernel's `# Safety`, as rustdoc writes them.
-    let safety = |f: &str| {
-        let page = fs::read_to_string(Path::new(ROOT).join(format!("target/doc/contract/cpu/fn.{f}.html"))).unwrap();
-        let (_, section) = page.split_once(">Safety</h2>\n").expect("a section `# Safety`");
-        section.split_once("</div>").expect("the docs end").0.lines().map(String::from).collect::<Vec<_>>()
-    };
+    let safety = documented("contract", "cpu", ">Safety</h2>\n");
     assert_eq!(
         safety("run"),
         ["<p>The kernel trusts the pointers it is given: each must be to memory as long as the kernel reads and \
@@ -246,6 +252,52 @@ fn a_kernels_safety_contract_says_nothing_else_touches_the_memory_it_names() {
         ["<p>The kernel trusts the pointers it is given: each must be to memory as long as the kernel’s threads \
              read and write through it, which nothing else touches while they run. Nothing else touches the \
              module’s memory, <code>RUNS</code>, while they run.</p>"]
+    );
+}
+
+/// The function's docs name the CPU features its kernel needs past x86-64's own, which nothing
+/// checks for when it runs, as the listing's header does: three, two, one, or, for a kernel
+/// that needs none, no paragraph. A generic kernel's docs name those of every instance, and a
+/// grid's kernel's launcher's those of the kernel.
+#[test]
+fn the_functions_docs_name_the_cpu_features_a_kernel_needs() {
+    // The paragraphs of the function's docs, as rustdoc writes them.
+    let docs = documented("needs", "kernels", "<div class=\"docblock\">");
+    let needs =
+        |list: &str| format!("<p>Needs the CPU {list}, past x86-64’s own, which nothing checks for when it runs.</p>");
+    assert_eq!(
+        docs("bits"),
+        [
+            "<p>How many bits of <code>x</code> are set, lead and trail, summed.</p>".to_string(),
+            needs("features <code>bmi1</code>, <code>lzcnt</code> and <code>popcnt</code>"),
+        ]
+    );
+    assert_eq!(
+        docs("axpy"),
+        [
+            "<p><code>y += a * x</code>, eight floats at once.</p>".to_string(),
+            needs("features <code>avx</code> and <code>fma</code>"),
+        ]
+    );
+    assert_eq!(
+        docs("ones"),
+        ["<p>How many bits of <code>x</code> are set.</p>".to_string(), needs("feature <code>popcnt</code>")]
+    );
+    assert_eq!(docs("next"), ["<p><code>x</code> and one.</p>"]);
+    assert_eq!(
+        docs("pick"),
+        [
+            "<p>How many zeros lead <code>x</code>, or how many of its bits are set.</p>".to_string(),
+            needs("features <code>lzcnt</code> and <code>popcnt</code>"),
+        ]
+    );
+    assert_eq!(
+        docs("together")[..2],
+        [
+            "<p>How many bits are set of the word at <code>x</code>, once every thread of the grid is there.</p>"
+                .to_string(),
+            needs("feature <code>popcnt</code>"),
+        ]
     );
 }
 
@@ -269,6 +321,15 @@ fn a_kernel_that_does_not_compile_leaves_a_stub() {
 #[test]
 fn consts_are_taken_by_any_path() {
     builds_quietly("paths");
+}
+
+/// The kernels read the module's consts as values known now, and so does Rust: those of a
+/// module of consts too, numbers, floats, `bool`s, arrays of them and expressions of these,
+/// which Rust sees in the module of kernels that takes them. The fixture asserts, as it builds,
+/// that a kernel reads what Rust does.
+#[test]
+fn the_kernels_read_the_consts_as_values_known_now_and_so_does_rust() {
+    builds_quietly("values");
 }
 
 #[test]
