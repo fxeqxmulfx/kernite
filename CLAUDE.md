@@ -100,3 +100,6 @@ Work is planned on [agent-kanban](.claude/skills/agent-kanban/SKILL.md), a task 
 it in with evidence for each of its tests. A reviewer approves it, or sends it back with what must
 change. `agent-kanban guide` says how. Notes for the work in hand live beside the board in
 `.kanban/notes/`, never in the repository.
+
+The reviewer merges only code that is 10/10, with nothing left to change. Anything less goes back
+for polishing, with every finding listed at once, so that one more round can finish it.
