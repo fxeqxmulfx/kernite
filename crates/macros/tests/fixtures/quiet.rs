@@ -28,6 +28,9 @@ mod cpu {
     /// Read by a static alone.
     const LEN: usize = 4;
 
+    /// Read by `#[instances(..)]` alone.
+    const TWO: u64 = 2;
+
     pub static COUNTS: global<[u32; LEN]>;
 
     pub unsafe extern "sysv64" fn step(x: u64) -> u64 {
@@ -35,7 +38,7 @@ mod cpu {
         ret(x);
     }
 
-    #[instances(1, 2)]
+    #[instances(1, TWO)]
     pub unsafe extern "sysv64" fn tile<const N: u64>(x: u64) -> u64 {
         add(x, N);
         ret(x);
@@ -58,6 +61,9 @@ mod gpu {
     /// Read by a static alone.
     const LEN: usize = 4;
 
+    /// Read by `#[instances(..)]` alone.
+    const TWO: u32 = 2;
+
     pub static COUNTS: global<[u32; LEN]>;
 
     pub unsafe extern "ptx-kernel" fn scale(x: *mut f32, a: f32) {
@@ -68,7 +74,7 @@ mod gpu {
         st.global.f32([x], v);
     }
 
-    #[instances(1, 2)]
+    #[instances(1, TWO)]
     pub unsafe extern "ptx-kernel" fn tile<const N: u32>(x: *mut f32) {
         let at: u64;
         mov.u64(at, COUNTS);

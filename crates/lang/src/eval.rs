@@ -13,8 +13,9 @@ pub struct Run {
     /// Every variable declared, with where: the place to blame for what goes wrong with one
     /// later, when its registers are allocated.
     pub decls: Vec<(String, Span)>,
-    /// The module's constants it read, itself or through others, in the module's order. Rust
-    /// never sees a kernel's body run, so it sees none of these reads.
+    /// The module's constants it read, itself or through others, in its body or its
+    /// `#[instances(..)]`, in the module's order. Rust never sees a kernel's body run, nor its
+    /// list worked out, so it sees none of these reads.
     pub consts: Vec<String>,
 }
 
@@ -82,6 +83,7 @@ pub fn constant(module: &Module, c: &Const) -> Result<Value, Error> {
 pub fn kernel<T: Target>(module: &Module, f: &Fn, args: &[Value], target: &mut T) -> Result<Run, Error> {
     instance(f, args)?;
     let mut e = Eval::new(module, target);
+    e.listed(f)?;
     let mut scope: Scope<T::Var> =
         f.generics.iter().zip(args).map(|(g, a)| (g.name.clone(), Binding::Value(a.clone()))).collect();
     for p in &f.params {
