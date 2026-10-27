@@ -85,7 +85,7 @@ use kgen_core::{
     Arg, Base, Class, Const, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo, Signature,
     Slot, SlotId, StaticId, VReg,
 };
-use kgen_lang::{Fault, Guard, Operand as Given, Target, Value};
+use kgen_lang::{Fault, Guard, Operand as Given, Span, Target, Value};
 
 use crate::bytes;
 use crate::forms::{self, Form, Kind, Miss, Shape};
@@ -461,6 +461,9 @@ pub struct Kernel {
     labels: u32,
     /// Where the caller's MXCSR is kept, once the kernel loads its own.
     mxcsr: Option<SlotId>,
+    /// Each variable the source declares in a register, and where: what goes wrong with it
+    /// when registers are allocated is placed there.
+    pub(crate) decls: Vec<(VReg, Span)>,
 }
 
 impl Kernel {
@@ -491,6 +494,7 @@ impl Kernel {
             grid: None,
             labels: u32::MAX,
             mxcsr: None,
+            decls: vec![],
         }
     }
 
@@ -1803,6 +1807,12 @@ impl Target for Kernel {
                 "control reaches the end of the body, and `{}` never returns, `-> !`: {NEVER}",
                 self.p.name
             )),
+        }
+    }
+
+    fn declared_at(&mut self, var: Var, at: Span) {
+        if let Some((reg, _)) = var.reg() {
+            self.decls.push((reg, at));
         }
     }
 }

@@ -307,6 +307,8 @@ fn an_instruction_that_reads_two_values_needs_two_registers_whatever_spills() {
         Error::OutOfRegisters {
             class: Class::Gpr,
             var: "y".into(),
+            // The variable spilling made for the instruction alone, of `y`'s name.
+            vreg: VReg { id: 6, class: Class::Gpr },
             near: Some("sum".into()),
             taken: vec![("x".into(), r(0))],
             changed: vec![],
@@ -338,6 +340,8 @@ fn a_value_live_around_a_loop_keeps_its_register_inside() {
     let short = Error::OutOfRegisters {
         class: Class::Gpr,
         var: "t".into(),
+        // The variable spilling made for the add alone, of `t`'s name.
+        vreg: VReg { id: 6, class: Class::Gpr },
         near: None,
         taken: vec![("n".into(), r(1)), ("acc".into(), r(0))],
         changed: vec![],
@@ -374,7 +378,7 @@ fn a_read_before_any_write_is_an_error_but_an_idiom_is_not() {
     let x = b.var("x");
     b.inst("inc", &[(x, Access::ReadWrite)], Flow::Next);
     b.ret(x, 0);
-    assert_eq!(compile(&b.0, &toy(1, &[])).unwrap_err(), Error::ReadBeforeWrite { var: "x".into() });
+    assert_eq!(compile(&b.0, &toy(1, &[])).unwrap_err(), Error::ReadBeforeWrite { var: "x".into(), vreg: x });
 
     let mut b = Builder::new();
     let x = b.var("x");
@@ -410,7 +414,7 @@ fn a_jump_through_a_table_goes_to_any_of_its_labels() {
     b.def(x, &[]);
     b.label(2);
     b.ret(x, 1);
-    assert_eq!(compile(&b.0, &toy(2, &[])).unwrap_err(), Error::ReadBeforeWrite { var: "x".into() });
+    assert_eq!(compile(&b.0, &toy(2, &[])).unwrap_err(), Error::ReadBeforeWrite { var: "x".into(), vreg: x });
 
     // And to the next item, where it may.
     let mut b = Builder::new();
@@ -421,7 +425,7 @@ fn a_jump_through_a_table_goes_to_any_of_its_labels() {
     b.label(1);
     b.def(x, &[]);
     b.ret(x, 1);
-    assert_eq!(compile(&b.0, &toy(2, &[])).unwrap_err(), Error::ReadBeforeWrite { var: "x".into() });
+    assert_eq!(compile(&b.0, &toy(2, &[])).unwrap_err(), Error::ReadBeforeWrite { var: "x".into(), vreg: x });
     let Item::Inst(jmp) = &mut b.0.body[0] else { unreachable!("the jump is first") };
     jmp.flow = Flow::Table { to: vec![Label(1)], or_next: false };
     assert!(compile(&b.0, &toy(2, &[])).is_ok());
@@ -701,7 +705,12 @@ fn two_arguments_in_one_register_at_once_are_an_error() {
     let z = b.var("z");
     b.def(z, &[]);
     b.ret(z, 0);
-    assert_eq!(compile(&b.0, &toy(3, &[])).unwrap_err(), Error::FixedClash { a: "x".into(), b: "y".into(), reg: r(0) });
+    // The variable the call copies `x` to, which it pins.
+    let pinned = VReg { id: 2, class: Class::Gpr };
+    assert_eq!(
+        compile(&b.0, &toy(3, &[])).unwrap_err(),
+        Error::FixedClash { a: "x".into(), vreg: pinned, b: "y".into(), reg: r(0) }
+    );
 }
 
 #[test]
@@ -723,6 +732,7 @@ fn a_value_that_may_not_spill_and_is_live_across_a_call_that_changes_every_regis
         Error::OutOfRegisters {
             class: Class::Gpr,
             var: "x".into(),
+            vreg: x,
             near: None,
             taken: vec![],
             changed: vec![r(0), r(1)],
@@ -738,34 +748,35 @@ fn a_value_that_may_not_spill_and_is_live_across_a_call_that_changes_every_regis
 #[test]
 fn a_pinned_value_live_across_a_call_that_changes_its_register_is_an_error() {
     let mut b = Builder::new();
-    let a = b.var("a");
+    let (y, a) = (b.var("y"), b.var("a"));
     b.0.pinned.push((a, r(0)));
     b.def(a, &[]);
     b.call(None, &[], &[0, 1]);
-    let y = b.var("y");
     b.def(y, &[a]);
     b.ret(y, 0);
     let err = compile(&b.0, &toy(3, &[])).unwrap_err();
-    assert_eq!(err, Error::FixedChanged { var: "a".into(), reg: r(0) });
+    assert_eq!(err, Error::FixedChanged { var: "a".into(), vreg: a, reg: r(0) });
 }
 
 #[test]
 fn an_error_names_the_variable_to_blame() {
+    let x = VReg { id: 7, class: Class::Gpr };
     let out = Error::OutOfRegisters {
         class: Class::Gpr,
         var: "x".into(),
+        vreg: x,
         near: None,
         taken: vec![("y".into(), r(1))],
         changed: vec![r(0)],
         have: 2,
     };
     let cases = [
-        (Error::ReadBeforeWrite { var: "x".into() }, Some("x")),
-        (Error::FixedTwice { var: "x".into() }, Some("x")),
-        (Error::FixedChanged { var: "x".into(), reg: r(0) }, Some("x")),
-        (out, Some("x")),
+        (Error::ReadBeforeWrite { var: "x".into(), vreg: x }, Some(("x", x))),
+        (Error::FixedTwice { var: "x".into(), vreg: x }, Some(("x", x))),
+        (Error::FixedChanged { var: "x".into(), vreg: x, reg: r(0) }, Some(("x", x))),
+        (out, Some(("x", x))),
         // Of two that clash, the first.
-        (Error::FixedClash { a: "x".into(), b: "y".into(), reg: r(0) }, Some("x")),
+        (Error::FixedClash { a: "x".into(), vreg: x, b: "y".into(), reg: r(0) }, Some(("x", x))),
         (Error::LabelTwice { label: 7 }, None),
         (Error::NoSuchLabel { label: 7 }, None),
         (Error::FallsOffEnd, None),
@@ -778,23 +789,24 @@ fn an_error_names_the_variable_to_blame() {
 #[test]
 fn a_variable_pinned_to_two_registers_is_refused() {
     let mut b = Builder::new();
-    let a = b.var("a");
+    let (y, a) = (b.var("y"), b.var("a"));
     b.0.pinned.push((a, r(0)));
     b.0.pinned.push((a, r(1)));
     b.def(a, &[]);
-    let y = b.var("y");
     b.def(y, &[a]);
     b.ret(y, 0);
     let err = compile(&b.0, &toy(3, &[])).unwrap_err();
-    assert_eq!(err, Error::FixedTwice { var: "a".into() });
+    assert_eq!(err, Error::FixedTwice { var: "a".into(), vreg: a });
     assert_eq!(err.to_string(), "`a` must be in two different registers");
 }
 
 #[test]
 fn each_error_says_what_is_wrong_in_words() {
+    let v = VReg { id: 0, class: Class::Gpr };
     let out = |near: Option<&str>, taken: Vec<(&str, PReg)>, changed: Vec<PReg>| Error::OutOfRegisters {
         class: Class::Gpr,
         var: "x".into(),
+        vreg: v,
         near: near.map(String::from),
         taken: taken.into_iter().map(|(name, reg)| (name.to_string(), reg)).collect(),
         changed,
@@ -804,14 +816,14 @@ fn each_error_says_what_is_wrong_in_words() {
         (Error::LabelTwice { label: 7 }, "label 7 is placed twice"),
         (Error::NoSuchLabel { label: 7 }, "a jump goes to label 7, which is never placed"),
         (Error::FallsOffEnd, "control runs past the last instruction"),
-        (Error::ReadBeforeWrite { var: "x".into() }, "`x` is read before anything writes it"),
-        (Error::FixedTwice { var: "a".into() }, "`a` must be in two different registers"),
+        (Error::ReadBeforeWrite { var: "x".into(), vreg: v }, "`x` is read before anything writes it"),
+        (Error::FixedTwice { var: "a".into(), vreg: v }, "`a` must be in two different registers"),
         (
-            Error::FixedClash { a: "x".into(), b: "y".into(), reg: r(0) },
+            Error::FixedClash { a: "x".into(), vreg: v, b: "y".into(), reg: r(0) },
             "`x` and `y` are live at once and both must be in PReg { class: Gpr, hw: 0 }",
         ),
         (
-            Error::FixedChanged { var: "a".into(), reg: r(0) },
+            Error::FixedChanged { var: "a".into(), vreg: v, reg: r(0) },
             "`a` must be in PReg { class: Gpr, hw: 0 }, which an instruction it is live across changes",
         ),
         (

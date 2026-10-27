@@ -72,7 +72,7 @@ pub(crate) fn choose<Op>(p: &Program<Op>, blocks: &[Block], live: &Live, candida
 /// it leaves in.
 pub(crate) fn rewrite<Op>(p: &mut Program<Op>, v: usize, s: &dyn Spill<Op>) {
     let RegInfo { class, name } = p.regs[v].clone();
-    let var = VReg { id: v as u32, class };
+    let var = p.vreg(v);
     let bytes = s.width(class).bytes();
     let slot = SlotId(p.slots.len() as u32);
     p.slots.push(Slot { name: name.clone(), size: bytes, align: bytes, spill: true });

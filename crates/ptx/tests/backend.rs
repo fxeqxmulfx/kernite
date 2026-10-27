@@ -3,7 +3,7 @@
 //! written and finished, and the module of them all.
 
 use kgen_build::{Backend, Called, Device, DeviceStatic, StaticError, Unfinished};
-use kgen_lang::{ItemKind, Module};
+use kgen_lang::{ItemKind, Module, Span};
 use kgen_ptx::lang::{Callee, Kernel};
 use kgen_ptx::{Prototype, Ptx, Returns, Static, Ty};
 
@@ -189,6 +189,8 @@ fn each_refusal_says_what_to_blame() {
     assert_eq!(lay_out(&ptx, &module, "EMPTY", &[]), Err(empty));
     let big = StaticError::Value("this is 128, out of range for `s8`".into());
     assert_eq!(lay_out(&ptx, &module, "BIG", &[]), Err(big));
-    let unfinished = Unfinished { var: Some("x".into()), message: "`x` is read before anything writes it".into() };
+    // Where `x` is declared: a byte of the source, as a string's spans are.
+    let at = Some(Span(src.find("x: u32").unwrap() as u32));
+    let unfinished = Unfinished { var: Some("x".into()), at, message: "`x` is read before anything writes it".into() };
     assert_eq!(ptx.finish(written(&ptx, &module, "unwritten", &[], &[])), Err(unfinished));
 }

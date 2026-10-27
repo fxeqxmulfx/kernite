@@ -1,7 +1,7 @@
 //! The ports a machine implements, which the use cases call: [`Backend`] for every machine,
 //! and [`Native`] or [`Device`] for where its kernels run.
 
-use kgen_lang::{Fn, Memory, Target, Value};
+use kgen_lang::{Fn, Memory, Span, Target, Value};
 
 use crate::{DeviceStatic, HostStatic, Naked};
 
@@ -84,8 +84,20 @@ pub enum StaticError {
 /// Why a kernel's code is not finished: what is wrong, and the variable to blame, if any.
 #[derive(Debug, PartialEq)]
 pub struct Unfinished {
-    /// The variable to blame, by name: the error is placed where it is declared.
+    /// The variable to blame, by name.
     pub var: Option<String>,
+    /// Where it is declared, if the machine knows: the error is placed there, or else where
+    /// the first variable of its name is declared.
+    pub at: Option<Span>,
     /// What is wrong.
     pub message: String,
+}
+
+impl Unfinished {
+    /// `message`, blaming the variable `var` names, if any, by its name and the machine's own
+    /// key for it: placed where `decls`, each key with where it is declared, says.
+    pub fn blaming<V: PartialEq>(var: Option<(&str, V)>, decls: &[(V, Span)], message: String) -> Unfinished {
+        let at = var.as_ref().and_then(|(_, v)| decls.iter().find(|(d, _)| d == v)).map(|&(_, at)| at);
+        Unfinished { var: var.map(|(name, _)| name.into()), at, message }
+    }
 }

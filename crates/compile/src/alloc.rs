@@ -72,6 +72,7 @@ pub(crate) fn allocate<Op: Clone + PartialEq>(
             .collect();
         let Some(spilled) = spill::choose(&p, &blocks, &live, &candidates) else {
             let name = |i: usize| p.regs[i].name.clone();
+            let vreg = p.vreg(v);
             let first = first_mentions(&p)[v].expect("a variable coloured is named");
             let near = p.body[..first].iter().rev().find_map(|item| match item {
                 Item::Note(note) => Some(note.clone()),
@@ -79,7 +80,7 @@ pub(crate) fn allocate<Op: Clone + PartialEq>(
             });
             let changed = offered.iter().filter(|r| changed[v].contains(r)).copied().collect();
             let taken = taken.into_iter().map(|(u, r)| (name(u), r)).collect();
-            return Err(Error::OutOfRegisters { class, var: name(v), near, taken, changed, have });
+            return Err(Error::OutOfRegisters { class, var: name(v), vreg, near, taken, changed, have });
         };
         may[spilled] = false;
         spill::rewrite(&mut p, spilled, s);
@@ -117,9 +118,9 @@ impl Clash {
     fn error<Op>(self, p: &Program<Op>) -> Error {
         let name = |i: usize| p.regs[i].name.clone();
         match self {
-            Clash::Twice(v) => Error::FixedTwice { var: name(v) },
-            Clash::Shared(a, b, reg) => Error::FixedClash { a: name(a), b: name(b), reg },
-            Clash::Changed(v, reg) => Error::FixedChanged { var: name(v), reg },
+            Clash::Twice(v) => Error::FixedTwice { var: name(v), vreg: p.vreg(v) },
+            Clash::Shared(a, b, reg) => Error::FixedClash { a: name(a), vreg: p.vreg(a), b: name(b), reg },
+            Clash::Changed(v, reg) => Error::FixedChanged { var: name(v), vreg: p.vreg(v), reg },
         }
     }
 }
@@ -155,7 +156,7 @@ fn fixed<Op>(p: &Program<Op>, adj: &[Bits], changed: &[Vec<PReg>]) -> Result<Vec
 /// It returns the variable made.
 fn split<Op>(p: &mut Program<Op>, v: usize, s: &dyn Spill<Op>) -> usize {
     let info = p.regs[v].clone();
-    let var = VReg { id: v as u32, class: info.class };
+    let var = p.vreg(v);
     let made = VReg { id: p.regs.len() as u32, class: info.class };
     p.regs.push(info);
     match p.results.iter().position(|&(r, _)| r == var) {

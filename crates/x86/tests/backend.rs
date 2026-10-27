@@ -146,5 +146,5 @@ fn a_frame_past_what_an_address_reaches_blames_no_variable() {
     kgen_lang::kernel(&module, k, &[], &mut kernel).unwrap();
     let message = "the kernel's frame, its stack memory and the variables that spilled, is 2147483680 bytes: more \
                    than an address reaches past the stack pointer";
-    assert_eq!(X86.finish(kernel), Err(Unfinished { var: None, message: message.into() }));
+    assert_eq!(X86.finish(kernel), Err(Unfinished { var: None, at: None, message: message.into() }));
 }

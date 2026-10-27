@@ -63,7 +63,7 @@ use kgen_core::Width::{W8, W16, W32, W64, W128};
 use kgen_core::{
     Access, Arg, Base, Class, Flow, Inst, Item, Label, Mem, Operand, PReg, Program, RegInfo, Signature, VReg, Width,
 };
-use kgen_lang::{Fault, Guard, Operand as Given, Target};
+use kgen_lang::{Fault, Guard, Operand as Given, Span, Target};
 
 use crate::call::{NO_PRED, Prototype, Returns, formal};
 use crate::entry::{Entry, Op, Param};
@@ -136,6 +136,9 @@ pub struct Kernel {
     /// Whether every launch runs each block of its grid at once, so that it may wait for its
     /// grid.
     cooperative: bool,
+    /// Each variable the source declares in a register, and where: what goes wrong with it
+    /// when the program is checked is placed there.
+    pub(crate) decls: Vec<(VReg, Span)>,
 }
 
 /// What a kernel makes of a function or a kernel of its module, which it may name.
@@ -237,6 +240,7 @@ impl Kernel {
             calls: vec![],
             statics: vec![],
             cooperative: false,
+            decls: vec![],
         }
     }
 
@@ -1869,5 +1873,11 @@ impl Target for Kernel {
             }
         }
         Ok(())
+    }
+
+    fn declared_at(&mut self, var: Var, at: Span) {
+        if let Var::Reg { reg, .. } = var {
+            self.decls.push((reg, at));
+        }
     }
 }

@@ -177,7 +177,7 @@ impl Backend for Echo {
                 "fail" => None,
                 _ => continue,
             };
-            return Err(Unfinished { var: blamed, message: format!("`{var}` fails") });
+            return Err(Unfinished { var: blamed, at: None, message: format!("`{var}` fails") });
         }
         Ok(kernel)
     }

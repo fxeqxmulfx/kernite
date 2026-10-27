@@ -1,7 +1,8 @@
 //! What the evaluator asks of its target, in order. [`Trace`] is a fake target that writes a line
-//! for each call, so these tests pin the calls, and what each is given, with no machine.
+//! for each call, or keeps what it is told, so these tests pin the calls, and what each is given,
+//! with no machine.
 
-use kgen_lang::{Error, Fault, Guard, ItemKind, Mem, Operand, Run, Target};
+use kgen_lang::{Error, Fault, Guard, ItemKind, Mem, Operand, Run, Span, Target};
 
 /// A kernel with a pointer, a `ymm`, a loop of `v.xmm` fields, which the evaluator unrolls, a
 /// label and a helper, whose parameter is a view of what it is given, and which declares a
@@ -47,8 +48,9 @@ pub unsafe extern "sysv64" fn k(n: u64) {
 }
 "#;
 
-/// A target that writes a line for each call, makes a variable for each `param`, `var`, `global`,
-/// `view` and `field`, and refuses one instruction, by its name, with a given fault.
+/// A target that writes a line for each call but `declared_at`, whose variable and place it keeps,
+/// makes a variable for each `param`, `var`, `global`, `view` and `field`, and refuses one
+/// instruction, by its name, with a given fault.
 #[derive(Default)]
 struct Trace {
     /// A line for each call, in the order of the calls.
@@ -57,6 +59,8 @@ struct Trace {
     vars: usize,
     /// The instruction it refuses, and why.
     refuse: Option<(&'static str, Fault)>,
+    /// Each variable it is told is declared, with where, in the order it is told.
+    declared: Vec<(usize, Span)>,
 }
 
 impl Trace {
@@ -122,6 +126,10 @@ impl Target for Trace {
     fn end(&mut self) -> Result<(), String> {
         self.lines.push("end".into());
         Ok(())
+    }
+
+    fn declared_at(&mut self, var: usize, at: Span) {
+        self.declared.push((var, at));
     }
 }
 
@@ -206,6 +214,15 @@ fn each_declaration_is_one_param_or_var() {
     assert_eq!(decls(KERNEL), ["2:33: xs", "2:49: n", "3:9: v", "15:9: t"]);
     // An array is a declaration for each of its variables.
     assert_eq!(decls(ARRAY), ["3:9: a0", "3:9: a1", "3:9: a2"]);
+
+    // The target is told where each declaration is, by the variable it made for it.
+    let told = |src: &str| -> Vec<String> {
+        let mut trace = Trace::default();
+        run(src, &mut trace).unwrap();
+        trace.declared.into_iter().map(|(v, span)| Error { span, message: format!("v{v}") }.at(src)).collect()
+    };
+    assert_eq!(told(KERNEL), ["2:33: v0", "2:49: v1", "3:9: v2", "15:9: v6"]);
+    assert_eq!(told(ARRAY), ["3:9: v0", "3:9: v1", "3:9: v2"]);
 }
 
 #[test]

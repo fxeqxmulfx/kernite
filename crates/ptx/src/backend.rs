@@ -74,10 +74,10 @@ impl Backend for Ptx {
         kernel
     }
 
-    fn finish(&self, kernel: Kernel) -> Result<Entry, Unfinished> {
+    fn finish(&self, mut kernel: Kernel) -> Result<Entry, Unfinished> {
+        let decls = std::mem::take(&mut kernel.decls);
         let code = kernel.finish();
-        kgen_compile::check(&code.program)
-            .map_err(|e| Unfinished { var: e.var().map(Into::into), message: e.to_string() })?;
+        kgen_compile::check(&code.program).map_err(|e| Unfinished::blaming(e.var(), &decls, e.to_string()))?;
         Ok(code)
     }
 }

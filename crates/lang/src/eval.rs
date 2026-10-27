@@ -92,6 +92,7 @@ pub fn kernel<T: Target>(module: &Module, f: &Fn, args: &[Value], target: &mut T
         };
         let v = e.target.param(&p.name, ty).map_err(|m| err(*span, m))?;
         e.decls.push((p.name.clone(), p.span));
+        e.target.declared_at(v, p.span);
         scope.push((p.name.clone(), Binding::Var(v)));
     }
     if let Some(r) = &f.ret {
@@ -929,6 +930,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 let ty = self.type_name(t)?;
                 let v = self.target.var(name, &ty).map_err(|m| err(t.span(), m))?;
                 self.decls.push((name.to_string(), span));
+                self.target.declared_at(v, span);
                 Binding::Var(v)
             }
             (Some(Type::Slice(_, tspan)), None) => {
@@ -942,8 +944,10 @@ impl<'a, T: Target> Eval<'a, T> {
                 let mut vs = Vec::with_capacity(n);
                 for i in 0..n {
                     let each = format!("{name}{i}");
-                    vs.push(self.target.var(&each, t).map_err(|m| err(*tspan, m))?);
+                    let v = self.target.var(&each, t).map_err(|m| err(*tspan, m))?;
                     self.decls.push((each, span));
+                    self.target.declared_at(v, span);
+                    vs.push(v);
                 }
                 Binding::Vars(vs)
             }

@@ -527,6 +527,28 @@ fn errors_point_where_the_trouble_is() {
     }
 }
 
+/// What the machine finds wrong with a variable once the body is written is placed where that
+/// variable is declared, though others of its name are declared before it or after: a helper's,
+/// an array's, or one declared again.
+#[test]
+fn an_error_is_placed_at_its_own_variable_s_declaration() {
+    let cases: &[(&str, &str)] = &[
+        ("let v: ymm; h(); let v: ymm;", "4:14: `v` is read before anything writes it"),
+        // An array's variables are called `v0` and `v1`.
+        ("let v0: ymm; let v: [ymm; 2]; vaddps(v[0], v[0], v[0]);", "2:18: `v0` is read before anything writes it"),
+        ("let v1: ymm; let v: [ymm; 2]; vaddps(v[1], v[1], v[1]);", "2:18: `v1` is read before anything writes it"),
+    ];
+    for (body, want) in cases {
+        let src =
+            format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\nfn h() {{ let v: ymm; vaddps(v, v, v); }}\n");
+        let got = kgen::x86_str(&src, "k").unwrap_err();
+        assert_eq!(got, *want, "{body}");
+    }
+    let body = "let v: f32; let v: f32; add.rn.f32(v, v, 1.5); let v: f32;";
+    let got = kgen::ptx_str(&format!("unsafe extern \"ptx-kernel\" fn k() {{\n{body}\n}}\n")).unwrap_err();
+    assert_eq!(got, "2:17: `v` is read before anything writes it");
+}
+
 #[test]
 fn a_kernel_with_compile_time_arguments_is_compiled_for_each_instance_it_lists() {
     // Each case comes before these, so its lines are its own.
