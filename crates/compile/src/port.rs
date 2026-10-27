@@ -1,6 +1,4 @@
-use crate::operand::Width;
-use crate::program::{Inst, SlotId};
-use crate::reg::{Class, PReg, VReg};
+use kgen_core::{Class, Inst, PReg, SlotId, VReg, Width};
 
 /// What the use cases need to know about a machine and its calling convention: which
 /// registers they may hand out, and which of those a kernel must give back as it found them.
@@ -37,5 +35,8 @@ pub trait Spill<Op> {
     /// allocator moves a parameter or a result with it; a machine's own code may move a call's
     /// arguments and its result with it too, and the allocator, seeing such a move, places the
     /// two in one register where it can.
+    ///
+    /// The allocator knows such a move only by its being equal to what this returns: one of
+    /// another width, as x86's `mov(to.r32, from.r32)` is, stays a move.
     fn copy(&self, to: VReg, from: VReg) -> Inst<Op, VReg>;
 }

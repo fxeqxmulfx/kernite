@@ -1,9 +1,10 @@
-use kgen_core::{Arg, Flow, Inst, Item, Machine, PReg, Program, Spill, VReg};
+use kgen_core::{Arg, Flow, Inst, Item, PReg, Program, VReg};
 
 use crate::Error;
 use crate::bits::Bits;
 use crate::cfg::{self, Block};
 use crate::spill;
+use crate::{Machine, Spill};
 
 /// Which variables are live where, block by block: at the top of each and at the bottom.
 pub(crate) struct Live {

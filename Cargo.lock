@@ -55,6 +55,7 @@ dependencies = [
 name = "kgen-x86"
 version = "0.1.0"
 dependencies = [
+ "kgen-compile",
  "kgen-core",
  "kgen-lang",
 ]

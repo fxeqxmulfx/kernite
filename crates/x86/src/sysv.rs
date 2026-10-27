@@ -1,4 +1,5 @@
-use kgen_core::{Access, Arg, Base, Class, Flow, Inst, Machine, Mem, Operand, PReg, SlotId, Spill, VReg, Width};
+use kgen_compile::{Machine, Spill};
+use kgen_core::{Access, Arg, Base, Class, Flow, Inst, Mem, Operand, PReg, SlotId, VReg, Width};
 
 use crate::op::Op;
 

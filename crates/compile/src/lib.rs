@@ -8,12 +8,16 @@
 mod alloc;
 mod bits;
 mod cfg;
+mod compiled;
 mod error;
 mod frame;
+mod port;
 mod spill;
 
+pub use compiled::{Compiled, Frame};
 pub use error::Error;
-use kgen_core::{Compiled, Inst, Item, Machine, PReg, Program, Spill};
+use kgen_core::{Inst, Item, PReg, Program};
+pub use port::{Machine, Spill};
 
 /// What [`compile`] checks before it allocates, for a machine that allocates its own
 /// registers: that control stays inside the body, that every jump has its label, and that

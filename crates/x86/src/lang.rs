@@ -78,11 +78,12 @@
 //! each. A function that never returns, `-> !`, ends each way out in `ud2()`, which faults, or
 //! in a call of one that never returns.
 
+use kgen_compile::Spill;
 use kgen_core::Access::{self, Ignored, Read, ReadWrite, Write};
 use kgen_core::Width::{self, W32, W64, W128, W256};
 use kgen_core::{
     Arg, Base, Class, Const, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo, Signature,
-    Slot, SlotId, Spill, StaticId, VReg,
+    Slot, SlotId, StaticId, VReg,
 };
 use kgen_lang::{Fault, Guard, Operand as Given, Target, Value};
 

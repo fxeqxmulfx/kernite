@@ -4,11 +4,11 @@
 use std::collections::BTreeMap;
 
 use kgen_core::{
-    Access, Arg, Base, Class, Compiled, Flow, Imm, Inst, Item, Label, Machine, Mem, Operand, PReg, Program, RegInfo,
-    Register, Signature, Slot, SlotId, Spill, VReg, Width,
+    Access, Arg, Base, Class, Flow, Imm, Inst, Item, Label, Mem, Operand, PReg, Program, RegInfo, Register, Signature,
+    Slot, SlotId, VReg, Width,
 };
 
-use crate::{Error, compile};
+use crate::{Compiled, Error, Machine, Spill, compile};
 
 struct Toy {
     gpr: Vec<PReg>,
@@ -271,12 +271,12 @@ impl Builder {
 
 /// The register of the first variable named `name`: the program's own, before any that
 /// splitting or spilling made of it.
-fn reg_of(c: &kgen_core::Compiled<&'static str>, name: &str) -> PReg {
+fn reg_of(c: &crate::Compiled<&'static str>, name: &str) -> PReg {
     c.assignment.iter().find(|(info, _)| info.name == name).and_then(|(_, r)| *r).unwrap()
 }
 
 /// The registers of every variable named `name`, in order.
-fn regs_of(c: &kgen_core::Compiled<&'static str>, name: &str) -> Vec<PReg> {
+fn regs_of(c: &crate::Compiled<&'static str>, name: &str) -> Vec<PReg> {
     c.assignment.iter().filter(|(info, _)| info.name == name).filter_map(|(_, r)| *r).collect()
 }
 

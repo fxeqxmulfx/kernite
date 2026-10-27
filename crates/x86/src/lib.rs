@@ -8,7 +8,7 @@
 //!   against the forms x86 has for it.
 //! - [`Asm`] builds the same programs from Rust: one method per instruction, operands typed
 //!   by what the instruction accepts, variables instead of registers.
-//! - [`SysV`] is the [`kgen_core::Machine`] the allocator runs against: the registers of the
+//! - [`SysV`] is the [`kgen_compile::Machine`] the allocator runs against: the registers of the
 //!   System V calling convention and the ones it wants back.
 //! - [`intel::print`] turns an allocated kernel into Intel-syntax lines, as `naked_asm!`
 //!   takes them, and a listing for people.

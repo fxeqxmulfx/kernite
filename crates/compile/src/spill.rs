@@ -1,8 +1,9 @@
 //! Spilling: which variable goes to the stack when colouring runs out of registers, and the
 //! program that keeps it there.
 
-use kgen_core::{Flow, Item, Program, RegInfo, Slot, SlotId, Spill, VReg};
+use kgen_core::{Flow, Item, Program, RegInfo, Slot, SlotId, VReg};
 
+use crate::Spill;
 use crate::alloc::{Live, renamed};
 use crate::cfg::Block;
 
