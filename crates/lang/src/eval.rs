@@ -257,6 +257,8 @@ struct Eval<'a, T: Target> {
     scopes: Vec<Scope<T::Var>>,
     labels: u32,
     guard: Option<Guard<T::Var>>,
+    /// How many instructions have run.
+    insts: usize,
     depth: usize,
     decls: Vec<(String, Span)>,
 }
@@ -273,8 +275,8 @@ impl<'a, T: Target> Eval<'a, T> {
                 ItemKind::Other => {}
             }
         }
-        let scopes = vec![];
-        Eval { target, consts, statics, helpers, compiled, scopes, labels: 0, guard: None, depth: 0, decls: vec![] }
+        let (scopes, decls) = (vec![], vec![]);
+        Eval { target, consts, statics, helpers, compiled, scopes, labels: 0, guard: None, insts: 0, depth: 0, decls }
     }
 
     fn bind(&mut self, name: &str, b: Binding<T::Var>) {
@@ -970,16 +972,30 @@ impl<'a, T: Target> Eval<'a, T> {
         if self.guard.is_some() {
             return Err(err(span, "a predicate's `if` inside another's: one predicate guards an instruction"));
         }
-        self.guard = Some(Guard { pred, negated });
-        let r = self.block(then).and_then(|()| match otherwise {
-            Some(s) => {
-                self.guard = Some(Guard { pred, negated: !negated });
-                self.stmt(s)
-            }
-            None => Ok(()),
-        });
+        // The target checks the variable as it guards an instruction: a block that runs none
+        // checks nothing. Both blocks run before either count is read, so what is wrong inside
+        // either is said first.
+        let ran = self.guarded(Guard { pred, negated }, |e| e.block(then))?;
+        let other = otherwise.map_or(Ok(true), |s| self.guarded(Guard { pred, negated: !negated }, |e| e.stmt(s)))?;
+        let which = match (ran, other) {
+            (true, true) => return Ok(()),
+            (false, _) => "its block",
+            (true, false) => "its `else`",
+        };
+        Err(err(span, format!("an `if` on a variable guards each instruction inside, and {which} runs none")))
+    }
+
+    /// Runs `body`, each instruction it runs under `guard`: whether it ran one.
+    fn guarded(
+        &mut self,
+        guard: Guard<T::Var>,
+        body: impl FnOnce(&mut Self) -> Result<(), Error>,
+    ) -> Result<bool, Error> {
+        let ran = self.insts;
+        self.guard = Some(guard);
+        let r = body(self);
         self.guard = None;
-        r
+        r.map(|()| self.insts > ran)
     }
 
     /// The variable a condition tests, and whether it is negated: `p`, `!p`.
@@ -1036,6 +1052,7 @@ impl<'a, T: Target> Eval<'a, T> {
 
     fn inst(&mut self, name: &str, args: &[Expr], span: Span) -> Result<(), Error> {
         let ops = args.iter().map(|a| self.operand(a)).collect::<Result<Vec<_>, _>>()?;
+        self.insts += 1;
         self.target
             .inst(&spelled(name), &ops, self.guard)
             .map_err(|f| Error { span: f.arg.and_then(|i| args.get(i)).map_or(span, Expr::span), message: f.message })

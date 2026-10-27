@@ -193,6 +193,67 @@ fn a_predicate_guards_what_its_if_holds() {
     assert_eq!(ptx(src), want);
 }
 
+/// An `if` on a variable guards each instruction inside, and the target checks the variable as
+/// it guards one. A block that runs none would check nothing, so it is refused at the `if`, an
+/// `else` too, whatever the variable is. Both blocks run before either count is read, so what is
+/// wrong inside either is said first.
+#[test]
+fn an_if_that_guards_no_instruction_is_refused() {
+    let block = "an `if` on a variable guards each instruction inside, and its block runs none";
+    // x86 takes no predicate, and a note is no instruction.
+    for body in [r#"let g: gpr; zero(g); if g { note("x"); }"#, "let g: gpr; zero(g); if g {}"] {
+        let got = kgen::x86_str(&format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\n"), "k").unwrap_err();
+        assert_eq!(got, format!("2:22: {block}"), "{body}");
+    }
+    // PTX takes a `pred` alone, and `r` is a `u32`. A block counts what it runs, not what it
+    // holds: a `for` over nothing runs none, and so does a call of `h`, which is empty. A block
+    // that runs none is refused though its `else` runs one, and an `else` that runs none is
+    // refused too. A store in the `else` that `r` guards is refused first, at the store.
+    let cases = [
+        ("let r: u32; mov.u32(r, n); if r {}", format!("2:28: {block}")),
+        ("let r: u32; mov.u32(r, n); if r { for i in 0..0 { st.global.u32([out], n); } }", format!("2:28: {block}")),
+        ("let p: pred; setp.ne.u32(p, n, 0); if p { h(); }", format!("2:36: {block}")),
+        ("let p: pred; setp.ne.u32(p, n, 0); if p {} else { st.global.u32([out], n); }", format!("2:36: {block}")),
+        (
+            r#"let p: pred; setp.ne.u32(p, n, 0); if p { st.global.u32([out], n); } else { note("x"); }"#,
+            "2:36: an `if` on a variable guards each instruction inside, and its `else` runs none".to_string(),
+        ),
+        (
+            "let r: u32; mov.u32(r, n); if r {} else { st.global.u32([out], n); }",
+            "2:53: an instruction is guarded by a `pred`; this is a `u32`".to_string(),
+        ),
+    ];
+    for (body, want) in cases {
+        let src = format!("unsafe extern \"ptx-kernel\" fn k(n: u32, out: *mut u32) {{\n{body}\n}}\nfn h() {{}}\n");
+        assert_eq!(kgen::ptx_str(&src).unwrap_err(), want, "{body}");
+    }
+    // An `if` that guards an instruction takes a note beside it, and counts one that a loop, an
+    // `if` on a bool or a helper runs.
+    let src = r#"
+        pub unsafe extern "ptx-kernel" fn k(n: u32, out: *mut u32) {
+            let p: pred;
+            setp.ne.u32(p, n, 0);
+            if p {
+                note("x");
+                st.global.u32([out], n);
+            }
+            if p {
+                for k in 0..2 {
+                    if k == 0 {
+                        s(out, n);
+                    }
+                }
+            }
+        }
+
+        fn s(o: u64, v: u32) {
+            st.global.u32([o], v);
+        }
+    "#;
+    let entry = ptx(src);
+    assert!(entry.contains("\t// x\n\t@%p st.global.u32 [%out], %n;\n\t@%p st.global.u32 [%out], %n;\n"), "{entry}");
+}
+
 #[test]
 fn values_are_computed_as_rust_computes_them() {
     let src = r#"
