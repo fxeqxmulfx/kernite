@@ -176,7 +176,9 @@ ys.read_into(&mut y)?;
 ```
 
 The PTX target knows every instruction of PTX's for the GPUs from Fermi, `sm_20`, to Ampere, `sm_86`, in each form
-`ptxas` takes, [`forms`](crates/ptx/src/forms.rs), and checks each operand against them, and a `call`'s against what the
+`ptxas` takes, [`forms`](crates/ptx/src/forms.rs), but one. `txq.force_unnormalized_coords` asks of a sampler apart from
+its texture, in the independent mode, which kgen does not write: kgen writes no `.samplerref`, so the ISA leaves the
+answer undefined. kgen checks each operand against the forms, and a `call`'s against what the
 function it calls takes and returns. Where `ptxas` takes more than PTX's ISA has, and reads it as the ISA reads the
 rest, kgen takes it too: `sust.p` with a cache operation, as `sust.b` has, or an `mma` fragment `(a, 8)`, a value beside
 a variable. Where a value known now would be cut to fewer bits, by `ptxas` or by the instruction as the ISA has it, or
