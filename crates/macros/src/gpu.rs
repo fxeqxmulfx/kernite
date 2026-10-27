@@ -3,10 +3,10 @@
 
 use proc_macro::{Delimiter, Group, Ident, Span, TokenStream, TokenTree};
 
-use kgen::Static;
+use kgen::DeviceStatic;
 use kgen::lang::{self, Fn, Value};
 
-use crate::rust::{attrs, error, host, is_ident, is_punct, parse, pick, visibility, written_params};
+use crate::rust::{attrs, error, host, is_ident, is_punct, parse, pick, site, visibility, written_params};
 
 /// Where the module's path goes in its PTX and in its kernels' names. A macro is not told
 /// the module it is in, so `kgen_cuda::__named!` writes `module_path!()` there once Rust
@@ -27,13 +27,13 @@ type Launched = (Vec<Value>, usize);
 pub(crate) fn gpu(
     launchers: &[(&Fn, Option<Vec<Launched>>)],
     symbols: &[String],
-    memory: &[(&lang::Static, Option<Static>)],
+    memory: &[(&lang::Static, Option<DeviceStatic>)],
     ptx: &str,
     top: &[TokenTree],
     at: &dyn std::ops::Fn(lang::Span) -> Span,
 ) -> TokenStream {
     let names: Vec<String> = symbols.iter().map(|s| named(s)).collect();
-    let globals: Vec<String> = memory.iter().filter_map(|(_, m)| Some(named(&m.as_ref()?.memory.name))).collect();
+    let globals: Vec<String> = memory.iter().filter_map(|(_, m)| Some(named(&m.as_ref()?.symbol))).collect();
     let mut out = parse(&format!(
         "/// The module's GPU kernels, in PTX, for the CUDA driver to compile for the GPU it finds.\n\
          /// Each is named as C++ names it in the namespaces of the workspace, the crate and the\n\
@@ -90,7 +90,7 @@ pub(crate) fn gpu(
 /// The method that gives static `s`'s memory on the GPU, `made`, by its index among the
 /// module's variables, as the `kgen_cuda::Global` of the type of Rust's its elements are read
 /// as; or one that never runs, for a static that did not compile.
-fn accessor(s: &lang::Static, made: Option<(&Static, usize)>, top: &[TokenTree]) -> TokenStream {
+fn accessor(s: &lang::Static, made: Option<(&DeviceStatic, usize)>, top: &[TokenTree]) -> TokenStream {
     let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
     out.extend(parse("#[allow(non_snake_case)]"));
     out.extend(top[s.vis.clone()].iter().cloned());
@@ -99,10 +99,7 @@ fn accessor(s: &lang::Static, made: Option<(&Static, usize)>, top: &[TokenTree])
     out.extend([top[s.vis.end + 1].clone()]);
     out.extend(parse(&match made {
         Some((m, i)) => {
-            let ty = match m.elem.host().expect("a static is of a type the host reads") {
-                ty @ ("f16" | "bf16") => format!("::kgen_cuda::{ty}"),
-                ty => ty.to_string(),
-            };
+            let ty = host(&[TokenTree::Ident(Ident::new(&m.host, site()))]);
             format!("(&self) -> ::kgen_cuda::Global<'_, {ty}> {{ self.module.global({i}) }}")
         }
         None => "<T: ::kgen_cuda::Plain>(&self) -> ::kgen_cuda::Global<'_, T> { ::core::unreachable!() }".to_string(),

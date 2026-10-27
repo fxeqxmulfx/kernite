@@ -3,8 +3,8 @@
 
 use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
 
-use kgen::X86Static;
 use kgen::lang::{self, Fn, ItemKind, Value};
+use kgen::{HostStatic, Naked};
 
 use crate::rust::{attrs, is_ident, is_punct, parse, pick, signature, stub, visibility, written_params};
 
@@ -19,7 +19,7 @@ use crate::rust::{attrs, is_ident, is_punct, parse, pick, signature, stub, visib
 pub(crate) fn naked(
     module: &lang::Module,
     f: &Fn,
-    instances: &[(Vec<Value>, kgen::Listing)],
+    instances: &[(Vec<Value>, Naked)],
     named: &[&str],
     top: &[TokenTree],
 ) -> TokenStream {
@@ -117,9 +117,9 @@ pub(crate) fn naked(
 /// The body of a naked function whose code is `listing`'s, its constants the statics
 /// `{statics}0`, `{statics}1` and on, the functions it calls at the paths `funcs`, and the
 /// module's memory it names as `memory` has it: each operand's name, and the path to it.
-fn asm(listing: &kgen::Listing, statics: &str, funcs: &[String], memory: &[(String, String)]) -> String {
+fn asm(listing: &Naked, statics: &str, funcs: &[String], memory: &[(String, String)]) -> String {
     let mut asm = String::from("::core::arch::naked_asm!(");
-    for line in listing.code() {
+    for line in &listing.code {
         asm += &format!("{line:?}, ");
     }
     for i in 0..listing.consts.len() {
@@ -137,7 +137,7 @@ fn asm(listing: &kgen::Listing, statics: &str, funcs: &[String], memory: &[(Stri
 /// The operand by which the code of `listing`, of a kernel of `module`, names each static it
 /// names, and the path to the static from beside the kernels or from `inside` a kernel's hidden
 /// module: its name as written, `COUNTS`, or `r#type`, whose `{type}` in the code names it.
-fn reached(module: &lang::Module, listing: &kgen::Listing, inside: bool, top: &[TokenTree]) -> Vec<(String, String)> {
+fn reached(module: &lang::Module, listing: &Naked, inside: bool, top: &[TokenTree]) -> Vec<(String, String)> {
     let up = if inside { "super::" } else { "" };
     let written = |name: &str| {
         let s = module.items.iter().find_map(|item| match &item.kind {
@@ -184,7 +184,7 @@ fn list(names: &[&str]) -> String {
 /// Static `s` of a module of x86 kernels as Rust has it, as written but for its type and what it
 /// holds: `made`, a `kgen_cpu::Global` of its elements at the multiple its type says, holding
 /// what it says or zeros; or what stands for a static that did not compile, beside its error.
-pub(crate) fn cpu_static(s: &lang::Static, made: Option<&X86Static>, top: &[TokenTree]) -> TokenStream {
+pub(crate) fn cpu_static(s: &lang::Static, made: Option<&HostStatic>, top: &[TokenTree]) -> TokenStream {
     let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
     out.extend(top[s.vis.clone()].iter().cloned());
     out.extend(parse("static"));
@@ -205,7 +205,7 @@ pub(crate) fn cpu_static(s: &lang::Static, made: Option<&X86Static>, top: &[Toke
 
 /// What each element of `m` holds at first, as Rust writes it: `7u32`, `-1i8`, or a float by its
 /// bits, `f32::from_bits(0x3f800000)`, so that it is the same bits.
-fn elements(m: &X86Static) -> Vec<String> {
+fn elements(m: &HostStatic) -> Vec<String> {
     let size = m.size as usize;
     (0..m.len as usize)
         .map(|i| {
@@ -216,7 +216,7 @@ fn elements(m: &X86Static) -> Vec<String> {
             let bits = u64::from_le_bytes(word);
             // The bits as a signed number of the element's width.
             let signed = ((bits << (64 - 8 * size)) as i64) >> (64 - 8 * size);
-            match m.elem {
+            match m.elem.as_str() {
                 t @ ("f32" | "f64") => format!("{t}::from_bits({bits:#x})"),
                 t if t.starts_with('i') => format!("{signed}{t}"),
                 t => format!("{bits}{t}"),
@@ -229,7 +229,7 @@ fn elements(m: &X86Static) -> Vec<String> {
 /// calls, from beside the kernels or from `inside` a kernel's hidden module: a function of no
 /// compile-time arguments by its name as written, `r#fn` as well, and an instance, `tile::<4>`,
 /// as the function in its function's hidden module, `__kgen_tile::I0`, that [`naked`] makes it.
-fn callees(module: &lang::Module, listing: &kgen::Listing, inside: bool, top: &[TokenTree]) -> Vec<String> {
+fn callees(module: &lang::Module, listing: &Naked, inside: bool, top: &[TokenTree]) -> Vec<String> {
     let up = if inside { "super::" } else { "" };
     let path = |name: &str| {
         let base = name.split("::<").next().unwrap_or(name);
@@ -329,8 +329,8 @@ fn grid_launcher(
 
 /// The doc that names the CPU features past x86-64's own the code of `instances` needs, which
 /// nothing checks for when it runs; none if it needs none.
-fn needs(instances: &[(Vec<Value>, kgen::Listing)]) -> TokenStream {
-    let mut features: Vec<&str> = instances.iter().flat_map(|(_, l)| l.features.iter().map(|f| f.name())).collect();
+fn needs(instances: &[(Vec<Value>, Naked)]) -> TokenStream {
+    let mut features: Vec<&str> = instances.iter().flat_map(|(_, l)| l.needs.iter().map(String::as_str)).collect();
     features.sort();
     features.dedup();
     let named: Vec<String> = features.iter().map(|f| format!("`{f}`")).collect();

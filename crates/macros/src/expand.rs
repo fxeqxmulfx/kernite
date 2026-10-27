@@ -5,7 +5,7 @@ use std::path::Path;
 use proc_macro::{Delimiter, Group, Span, TokenStream, TokenTree};
 
 use kgen::lang::{self, ItemKind, Tree, Value};
-use kgen::{Abi, Owner, Static};
+use kgen::{Abi, Naked, Owner};
 
 use crate::gpu::{HOLE, gpu};
 use crate::rust::{const_names, error, flatten, inner_attribute, is_ident, is_punct, parse, site, stub, tree};
@@ -13,7 +13,7 @@ use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
 
 /// Each instance of an x86 function, by its compile-time arguments, compiled or not.
-type X86Instances = Vec<(Vec<Value>, Result<kgen::Compiled<kgen::Listing>, lang::Error>)>;
+type X86Instances = Vec<(Vec<Value>, Result<kgen::Compiled<Naked>, lang::Error>)>;
 
 /// What the module's braces hold once its kernels are compiled; `given`, the consts it takes
 /// from outside, and the path of their module, as `#[kernels(consts = path)]` writes it.
@@ -46,9 +46,9 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
     let scope = kgen::ptx_scope(&names) + HOLE;
     let (mut listings, mut entries, mut launchers, mut read) = (vec![], vec![], vec![], vec![]);
     // The first function for a GPU, or static of the GPU's, where an error of the module as a
-    // whole goes; the symbol of each kernel it launches, by index; and each static of the GPU's,
-    // compiled or not.
-    let (mut first, mut symbols, mut memory) = (None, vec![], vec![]);
+    // whole goes; the symbol of each kernel it launches, by index; each static of the GPU's,
+    // compiled or not, as the host reads it; and those that compiled, as PTX lays them out.
+    let (mut first, mut symbols, mut memory, mut laid) = (None, vec![], vec![], vec![]);
     // The statics are the x86 kernels' when the module has no others, and else the GPU's; a
     // module of both kinds of kernel and a static is an error, and its x86 kernels name none.
     let whose = kgen::owner(&module);
@@ -72,7 +72,8 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
                 return None;
             }
             let instances = kgen::cooperative(f).and(lang::instances(&module, f)).ok()?;
-            Some(instances.into_iter().map(|args| (args.clone(), kgen::x86(&module, f, &args))).collect())
+            let plain = |k: kgen::Compiled<_>| kgen::Compiled { code: kgen::naked(&k.code), consts: k.consts };
+            Some(instances.into_iter().map(|args| (args.clone(), kgen::x86(&module, f, &args).map(plain))).collect())
         })
         .collect();
     let touched = match cpu {
@@ -93,7 +94,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
                 match cpu_statics.next().expect("each static is compiled") {
                     Ok(made) => {
                         read.extend(made.consts);
-                        out.extend(cpu_static(s, Some(&made.code), &top));
+                        out.extend(cpu_static(s, Some(&kgen::host_static(&made.code)), &top));
                     }
                     Err(e) => {
                         out.extend(error(at(e.span), &e.message));
@@ -107,7 +108,8 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
                 match statics.next().expect("each static is compiled") {
                     Ok(made) => {
                         read.extend(made.consts);
-                        memory.push((s, Some(made.code)));
+                        memory.push((s, Some(kgen::device_static(&made.code, &scope))));
+                        laid.push(made.code);
                     }
                     Err(e) => {
                         out.extend(error(at(e.span), &e.message));
@@ -181,7 +183,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
                 if trusted && errors.is_empty() && reaches {
                     out.extend(naked(&module, f, &compiled, named, &top));
                     for (args, listing) in &compiled {
-                        listings.push((lang::instance(f, args).unwrap_or_default(), listing.text()));
+                        listings.push((lang::instance(f, args).unwrap_or_default(), listing.text.clone()));
                     }
                 } else {
                     out.extend(x86_stub(f, instances.len(), named, &top));
@@ -229,8 +231,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
         out.extend(parse(&(s + "];")));
     }
     if let Some(span) = first {
-        let made: Vec<Static> = memory.iter().filter_map(|(_, m)| m.clone()).collect();
-        let ptx = kgen::ptx_module(&entries, &made).unwrap_or_else(|e| {
+        let ptx = kgen::ptx_module(&entries, &laid).unwrap_or_else(|e| {
             out.extend(error(at(span), &e));
             String::new()
         });
@@ -304,7 +305,7 @@ fn take(
 /// instances `compiled` names, and what the functions that code names name, and on.
 fn touched<'m>(module: &'m lang::Module, compiled: &[Option<X86Instances>]) -> Vec<Vec<&'m str>> {
     // Each instance that compiled, by name, `gcd` or `tile::<4>`, and its listing.
-    let mut listings: Vec<(String, &kgen::Listing)> = vec![];
+    let mut listings: Vec<(String, &Naked)> = vec![];
     for (item, instances) in module.items.iter().zip(compiled) {
         let (ItemKind::Fn(f), Some(instances)) = (&item.kind, instances) else { continue };
         for (args, kernel) in instances {
@@ -323,8 +324,7 @@ fn touched<'m>(module: &'m lang::Module, compiled: &[Option<X86Instances>]) -> V
         .collect();
     let touched = |instances: &X86Instances| {
         // Its instances' code, then that of the functions they name, and on.
-        let mut reached: Vec<&kgen::Listing> =
-            instances.iter().filter_map(|(_, k)| Some(&k.as_ref().ok()?.code)).collect();
+        let mut reached: Vec<&Naked> = instances.iter().filter_map(|(_, k)| Some(&k.as_ref().ok()?.code)).collect();
         let mut at = 0;
         while at < reached.len() {
             let listing = reached[at];
