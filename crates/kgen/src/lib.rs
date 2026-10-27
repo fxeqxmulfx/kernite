@@ -49,6 +49,7 @@ pub use kgen_x86::intel::{Line, Listing};
 pub use kgen_x86::lang::Static as X86Static;
 pub use kgen_x86::{Feature, Op};
 
+use kgen_build::within;
 use kgen_lang::{Fn, ItemKind, Module, Span, Value};
 
 /// Kernel `f` of `module`, for x86-64 under SysV, for the compile-time arguments `args`:
@@ -278,14 +279,6 @@ fn x86_prototype(f: &Fn) -> Option<kgen_x86::lang::Prototype> {
         })
         .collect();
     kgen_x86::lang::Prototype::of(&params?, f.ret.as_ref().map(|r| r.ty.as_str())).ok()
-}
-
-/// `e`, which happened in `name`, the instance of a function for `args`, saying so.
-fn within(name: &str, args: &[Value], e: kgen_lang::Error) -> kgen_lang::Error {
-    match args {
-        [] => e,
-        _ => kgen_lang::Error { message: format!("in `{name}`: {}", e.message), ..e },
-    }
 }
 
 /// Where the variable an allocation error names was declared.

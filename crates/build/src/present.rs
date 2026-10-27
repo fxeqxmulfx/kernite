@@ -1,6 +1,6 @@
 //! kgen-build's refusals in words: what is wrong, where it can be mended.
 
-use kgen_lang::{Error, Span};
+use kgen_lang::{Error, Span, Value};
 
 /// What a function is that may not be cooperative.
 pub(crate) enum Of {
@@ -39,4 +39,12 @@ pub(crate) fn said(r: Refusal<'_>, span: Span) -> Error {
         }
     };
     Error { span, message }
+}
+
+/// `e`, which happened in `name`, the instance of a function for `args`, saying so.
+pub fn within(name: &str, args: &[Value], e: kgen_lang::Error) -> kgen_lang::Error {
+    match args {
+        [] => e,
+        _ => kgen_lang::Error { message: format!("in `{name}`: {}", e.message), ..e },
+    }
 }
