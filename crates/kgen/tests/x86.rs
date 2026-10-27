@@ -87,6 +87,21 @@ fn the_examples_kernels_come_out_as_the_builder_wrote_them() {
     }
 }
 
+/// A kernel's assembly changes only when the kernel does: it is the same each time it compiles,
+/// and the same whatever else its module holds.
+#[test]
+fn a_kernels_assembly_changes_only_when_it_does() {
+    let k = "unsafe extern \"sysv64\" fn k(x: *mut u64) {\nlet g: gpr;\nmov(g, [x]);\nadd(g, STEP);\nmov([x], g);\n}\n";
+    let alone = format!("const STEP: u64 = 3;\n{k}");
+    let among = format!(
+        "static S: global<u64>;\nconst STEP: u64 = 3;\nconst FAR: u64 = 9;\nfn far(g: gpr) {{\nadd(g, FAR);\n}}\n\
+         unsafe extern \"sysv64\" fn j(x: *mut u64) {{\nlet g: gpr;\nmov(g, [x]);\nfar(g);\nmov([x], g);\n}}\n{k}"
+    );
+    let listing = |src: &str| kgen::x86_str(src, "k").unwrap().text();
+    assert_eq!(listing(&alone), listing(&alone));
+    assert_eq!(listing(&among), listing(&alone));
+}
+
 /// Sixteen accumulators and the load beside them take 17 of the 16 vector registers: the two
 /// that cost least to keep on the stack, of those that hold one through the loop, spill.
 #[test]
@@ -214,6 +229,32 @@ ret";
     assert_eq!(code, want);
 }
 
+/// The word before the brackets is checked wherever it is given: on stack memory, on memory that
+/// holds data, on a static, and on memory at a vector of indices, as on memory at a pointer.
+#[test]
+fn the_word_before_the_brackets_is_checked_wherever_it_is_given() {
+    let cases = [
+        (
+            "let b: local<u64>; let g: gpr; zero(g); mov(qword[b], g); mov(g, dword[b]);",
+            "3:71: `mov` wants 8 bytes of memory; this is 4 bytes of memory",
+        ),
+        (
+            "let g: gpr; mov(g, dword[[1u64]]);",
+            "3:25: `mov` wants 8 bytes of memory; this is 4 bytes of memory holding data",
+        ),
+        ("let g: gpr; mov(g, dword[S]);", "3:25: `mov` wants 8 bytes of memory; this is 4 bytes of memory"),
+        (
+            "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, qword[x + i * 4], m);",
+            "3:83: `vpgatherdd` wants 4 bytes of memory at a ymm of indices; this is 8 bytes of memory at a ymm of \
+             indices",
+        ),
+    ];
+    for (body, want) in cases {
+        let src = format!("static S: global<u64>;\nunsafe extern \"sysv64\" fn k(x: *const u32) {{\n{body}\n}}\n");
+        assert_eq!(kgen::x86_str(&src, "k").unwrap_err(), want, "{body}");
+    }
+}
+
 /// A gpr is `g`, or `g.r32`, `g.r16` or `g.r8`, its low 32, 16 or 8 bits, and nothing else.
 #[test]
 fn a_gpr_is_g_or_g_r32_g_r16_or_g_r8() {
@@ -228,6 +269,17 @@ ret";
     assert_eq!(code.unwrap(), want);
     let e = compile("x: *mut u64", "let g: gpr; mov(g.r64, 1);").unwrap_err();
     assert_eq!(e, "2:19: a gpr is seen as `gpr`, `r32`, `r16` or `r8`, not `r64`");
+}
+
+/// A write to `r16` or `r8` keeps the rest of the gpr, as x86 does, so it reads the gpr, which
+/// must hold a value first. One to `r32` clears the rest, as x86 does, and reads nothing.
+#[test]
+fn a_write_to_r16_or_r8_keeps_the_rest_of_the_gpr() {
+    for body in ["let g: gpr; mov(g.r16, 1); mov([x], g);", "let g: gpr; mov(g.r8, 1); mov([x], g);"] {
+        assert_eq!(compile("x: *mut u64", body).unwrap_err(), "2:5: `g` is read before anything writes it", "{body}");
+    }
+    let code = compile("x: *mut u64", "let g: gpr; mov(g.r32, 1); mov([x], g);");
+    assert_eq!(code.unwrap(), "mov eax, 1\nmov qword ptr [rdi], rax\nret");
 }
 
 /// A gather reads memory at a vector of indices, `[p + v * 4]`, under a mask, and needs AVX2.
@@ -256,6 +308,29 @@ fn a_gather_reads_memory_at_a_vector_of_indices() {
     assert_eq!(code, want);
 }
 
+/// A gather takes its result, its indices and its mask in three registers, as x86 faults
+/// otherwise: kgen keeps them apart where nothing reads the indices or the mask again, and
+/// refuses a variable that is two of them, here the result and the mask.
+#[test]
+fn a_gather_takes_its_result_indices_and_mask_in_three_registers() {
+    let body = "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, [x + i * 4], m); \
+                vmovups([x], v);";
+    let want = "vxorps xmm0, xmm0, xmm0
+vpcmpeqd ymm1, ymm1, ymm1
+vxorps xmm2, xmm2, xmm2
+vpgatherdd ymm0, dword ptr [rdi + ymm2*4], ymm1
+vmovups ymmword ptr [rdi], ymm0
+vzeroupper
+ret";
+    assert_eq!(compile("x: *mut u32", body).unwrap(), want);
+    let e = compile("x: *mut u32", "let v: ymm; let i: ymm; zero(v); zero(i); vpgatherdd(v, [x + i * 4], v);");
+    assert_eq!(
+        e.unwrap_err(),
+        "2:70: `vpgatherdd` faults unless its result, its indices and its mask are three registers; `v` is its \
+         result and its mask"
+    );
+}
+
 /// SysV leaves MXCSR's control bits as the caller set them, so a kernel that loads MXCSR stores
 /// the caller's first, in its frame, and loads it back before it returns.
 #[test]
@@ -272,6 +347,39 @@ fn a_kernel_that_loads_mxcsr_gives_the_callers_back() {
     # the caller's mxcsr, which it gets back
     vstmxcsr dword ptr [rsp]
     vldmxcsr dword ptr [rdi]
+    vldmxcsr dword ptr [rsp]
+    mov rsp, rbp
+    pop rbp
+    ret
+";
+    assert_eq!(kgen::x86_str(src, "k").unwrap().text(), want);
+}
+
+/// A kernel that loads MXCSR twice and returns in two places stores the caller's once, before
+/// its first load, and loads it back before each return.
+#[test]
+fn a_kernel_that_loads_mxcsr_loads_the_callers_back_before_each_return() {
+    let src = "unsafe extern \"sysv64\" fn k(x: *const u32, n: u64) {\nvldmxcsr([x]);\ntest(n, n);\njz(done);\n\
+               vldmxcsr([x + 4]);\nret();\nlabel(done);\n}\n";
+    let want = "# k(gpr, gpr) -> ()
+# needs: avx
+# frame: 4 bytes aligned to 4, saves []
+# mxcsr: 4 bytes at rsp
+# x=rdi n=rsi
+    push rbp
+    mov rbp, rsp
+    sub rsp, 4
+    # the caller's mxcsr, which it gets back
+    vstmxcsr dword ptr [rsp]
+    vldmxcsr dword ptr [rdi]
+    test rsi, rsi
+    jz 2f
+    vldmxcsr dword ptr [rdi + 4]
+    vldmxcsr dword ptr [rsp]
+    mov rsp, rbp
+    pop rbp
+    ret
+2:
     vldmxcsr dword ptr [rsp]
     mov rsp, rbp
     pop rbp
