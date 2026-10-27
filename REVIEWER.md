@@ -31,8 +31,8 @@ For each task in review, in the order they arrive:
    commits, the files, and the test code touched.
 4. Read design.md's row and changes for the task, the text it points to, and the whole diff
    (`review.py diff ID [PATH..]`). Refuse when any of these fails:
-   - **Does what the text says, and only that.** Nothing half-moved but design.md §4's three
-     staged copies, no dead code left behind, no unrelated change, no TODO in place of the work.
+   - **Does what the text says, and only that.** Nothing half-moved but design.md §4's staged
+     copies, no dead code left behind, no unrelated change, no TODO in place of the work.
    - **Layers.** Every new `use` and every dependency points inward, as RULE says. No adapter
      type reaches the macro. A port is owned by its caller. No use-case rule is copied into an
      adapter.
@@ -46,15 +46,17 @@ For each task in review, in the order they arrive:
      `git diff --color-moved=dimmed-zebra clean-architecture...HEAD` in its worktree.
    - **Words.** Docs and messages in README's plain words; every public item documented; commit
      messages as CLAUDE.md says, with the Co-Authored-By line.
-   - **Size.** Reviewable: a big diff must be a mechanical move, and say so.
+   - **Size.** Reviewable: a big diff is a mechanical move and says so, or is about the size its
+     text gives, in commits of one step each that build and pass.
    - **Goals** (CLAUDE.md's five, design.md §4 rule 8). Clean architecture: the Layers check
      above, and the task leaves the code cleaner than it found it. Zero cost: the gate holds
      the generated code.
      Minimum code: no line the task does not need, no type or function that only hands a value
      on, nothing left dead; the gate's "code outside tests" line shows what the task added, and
-     growth its text does not call for is refused. The whole spec: nothing kgen took before is
-     refused now, and every new rule has a test. Safety: nothing to build in this rewrite, but no
-     change may make a safe call harder to add later.
+     growth its text does not call for is refused. The whole spec: kgen refuses no form of a
+     target's spec that it took before, and refuses what it took against its own rules only as
+     decision 3 fixes a defect; every new rule has a test. Safety: nothing to build in this
+     rewrite, but no change may make a safe call harder to add later.
 
    For a big or risky task, also have two or three agents read the diff adversarially (one lens
    each: behaviour, layering, tests) and weigh what they find. They advise; the verdict is the

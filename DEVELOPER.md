@@ -27,7 +27,8 @@ Read, in this order:
 1. `.kanban/notes/design/design.md`: §4, the rules every task keeps, and your task's row and
    changes in §5;
 2. the text your task's row points to, at those lines: it says what to do, in which files, by
-   which tests;
+   which tests. Its `file:line`s of code are START's, or the commit it names: design.md's second
+   paragraph says how to read them;
 3. the code you will change, in full, before you change it.
 
 The map of the code as it was is `.kanban/notes/architecture-map.md`; its §9 lists the risks of
@@ -73,8 +74,9 @@ Change files only in your worktree. Never touch another worktree, the main check
   - every test keeps its name. Tests may move, and their code may follow a new API. But every
     string literal of the start's test code stays in test code: a file in a `tests` directory,
     a file named `tests.rs`, or the body of a `#[cfg(test)]` item;
-  - `examples/` stays byte for byte, and the Rust the macro writes for them stays token for
-    token;
+  - `examples/` stays byte for byte, and the Rust the macro writes for them, and for the gate's
+    crates in `.kanban/notes/expand-fixtures/`, stays token for token, but for changes a review
+    approved;
   - no `#[ignore]`, no package from outside, no `HashMap` or `HashSet`, and no `unsafe` outside
     kgen-cuda;
   - docs on every public item, and every crate on `[lints] workspace = true`;
@@ -82,7 +84,7 @@ Change files only in your worktree. Never touch another worktree, the main check
 - design.md §4 adds these rules:
   - a move is a move;
   - old paths keep working;
-  - three staged copies, and no others;
+  - the staged copies design.md lists, and no others;
   - the stop rule for the conditional tasks;
   - edits placed where two tasks meet.
 - Keep CLAUDE.md's five goals: zero cost, minimum code, the whole spec, safe where it can be,
