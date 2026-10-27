@@ -1,9 +1,10 @@
 //! The dependency rule: each crate depends only on the layers inside it, and nothing depends
 //! on a crate outside the workspace. Every crate must have a line here, so a new one cannot
-//! join without its place being decided.
+//! join without its place being decided. Inside a crate, no modules use each other in a cycle.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Each crate and the crates it may depend on.
 const RULE: &[(&str, &[&str])] = &[
@@ -127,4 +128,203 @@ dependencies = [
 "#;
     let want = [("kgen-core", vec![]), ("kgen-macros", vec!["kgen", "kgen-x86"]), ("kgen-x86", vec!["kgen-core"])];
     assert_eq!(locked(lock), want);
+}
+
+/// Whether `c` can be part of a name.
+fn word(c: char) -> bool {
+    c == '_' || c.is_alphanumeric()
+}
+
+/// The code of `src`, a Rust file, as text: each comment, string and character a space, and each
+/// item `#[cfg(test)]` is on left out, to the `;` or `}` that ends it.
+fn code(src: &str) -> String {
+    let mut out = String::new();
+    let mut rest = src;
+    while let Some(c) = rest.chars().next() {
+        let hashes = rest.strip_prefix('r').map_or(0, |r| r.len() - r.trim_start_matches('#').len());
+        let len = if rest.starts_with("//") {
+            rest.find('\n').unwrap_or(rest.len())
+        } else if rest.starts_with("/*") {
+            // Comments nest: each `/*` waits for a `*/` of its own.
+            let (mut depth, mut len) = (0, 0);
+            loop {
+                let here = &rest[len..];
+                if here.starts_with("/*") {
+                    (depth, len) = (depth + 1, len + 2);
+                } else if here.starts_with("*/") {
+                    (depth, len) = (depth - 1, len + 2);
+                } else {
+                    len += here.chars().next().unwrap().len_utf8();
+                }
+                if depth == 0 {
+                    break len;
+                }
+            }
+        } else if c == 'r' && rest[1 + hashes..].starts_with('"') {
+            let end = format!("\"{}", "#".repeat(hashes));
+            2 + hashes + rest[2 + hashes..].find(&end).unwrap() + end.len()
+        } else if c == '"' {
+            let mut chars = rest.char_indices().skip(1);
+            loop {
+                match chars.next().unwrap() {
+                    (_, '\\') => _ = chars.next(),
+                    (i, '"') => break i + 1,
+                    _ => {}
+                }
+            }
+        } else if c == '\'' {
+            // A character, unless it is a lifetime or a label, as `'a` is.
+            let mut then = rest[1..].chars();
+            match (then.next(), then.next()) {
+                (Some('\\'), _) => 4 + rest[3..].find('\'').unwrap(),
+                (Some(x), Some('\'')) => 2 + x.len_utf8(),
+                _ => 0,
+            }
+        } else {
+            0
+        };
+        out.push(if len == 0 { c } else { ' ' });
+        rest = &rest[len.max(c.len_utf8())..];
+    }
+    let mut kept = String::new();
+    let mut rest = out.as_str();
+    while let Some(at) = rest.find("#[cfg(test)]") {
+        kept += &rest[..at];
+        let mut depth = 0;
+        let end = rest[at..].find(|c: char| {
+            depth += match c {
+                '(' | '[' | '{' => 1,
+                ')' | ']' | '}' => -1,
+                _ => 0,
+            };
+            depth <= 0 && matches!(c, ';' | '}')
+        });
+        rest = &rest[at + end.unwrap() + 1..];
+    }
+    kept + rest
+}
+
+/// The modules each of a crate's modules uses: those it names after `crate::`, or after
+/// `crate::{` and each `,` in those braces, and those it reaches by a name the crate's root takes
+/// from them with `use`. `root` is the root's code, and `modules` each module's, by its name.
+fn uses<'a>(root: &'a str, modules: &'a BTreeMap<String, String>) -> BTreeMap<&'a str, BTreeSet<&'a str>> {
+    let module = |name: &str| modules.get_key_value(name).map(|(m, _)| m.as_str());
+    // The module each name the root takes with `use` comes from.
+    let mut taken = BTreeMap::new();
+    for (at, _) in root.match_indices("use ").filter(|&(at, _)| !root[..at].ends_with(word)) {
+        let path = root[at + 4..].split(';').next().unwrap().trim_start().trim_start_matches("crate::");
+        let Some(from) = module(path.split(|c: char| !word(c)).next().unwrap()) else { continue };
+        for leaf in path.split([',', '{', '}']).filter(|l| !l.trim_end().ends_with("::")) {
+            taken.extend(leaf.rsplit(|c: char| !word(c)).find(|w| !w.is_empty()).map(|name| (name, from)));
+        }
+    }
+    let mut uses = BTreeMap::new();
+    for (name, text) in modules {
+        let used: &mut BTreeSet<&str> = uses.entry(name.as_str()).or_default();
+        for (at, _) in text.match_indices("crate::").filter(|&(at, _)| !text[..at].ends_with(word)) {
+            // A name, or paths in braces, each of which starts with one.
+            let rest = &text[at + "crate::".len()..];
+            let (mut depth, mut starts) = (0, true);
+            for (i, c) in rest.char_indices() {
+                if starts && word(c) {
+                    let named = rest[i..].split(|c: char| !word(c)).next().unwrap();
+                    used.extend(module(named).or_else(|| taken.get(named).copied()));
+                }
+                depth += match c {
+                    '{' => 1,
+                    '}' => -1,
+                    _ => 0,
+                };
+                starts = depth == 1 && matches!(c, '{' | ',') || starts && c.is_whitespace();
+                if depth == 0 && !starts {
+                    break;
+                }
+            }
+        }
+        used.remove(name.as_str());
+    }
+    uses
+}
+
+/// A cycle in `uses`, each module and the modules it uses: the modules in it in order, the first
+/// again at the end.
+fn cycle<'a>(uses: &BTreeMap<&'a str, BTreeSet<&'a str>>) -> Option<Vec<&'a str>> {
+    // A module that uses none of those left is in no cycle, so it goes.
+    let mut left = uses.clone();
+    while let Some(m) = left.iter().find(|(_, used)| used.iter().all(|u| !left.contains_key(u))).map(|(m, _)| *m) {
+        left.remove(m);
+    }
+    // Each module left uses one left: a walk from the first comes back to a module it has passed.
+    let mut path = vec![*left.keys().next()?];
+    loop {
+        let next = *left[path.last().unwrap()].iter().find(|u| left.contains_key(*u)).unwrap();
+        if let Some(at) = path.iter().position(|&m| m == next) {
+            return Some([&path[at..], &[next]].concat());
+        }
+        path.push(next);
+    }
+}
+
+/// The files in `dir`, and in each directory in it.
+fn files(dir: &Path) -> Vec<PathBuf> {
+    let paths = fs::read_dir(dir).unwrap().map(|e| e.unwrap().path());
+    paths.flat_map(|p| if p.is_dir() { files(&p) } else { vec![p] }).collect()
+}
+
+#[test]
+fn each_modules_uses_are_read_from_its_code() {
+    // A crate whose modules a, b and c use each other in a cycle, which d uses. a uses b by a name
+    // the root takes from b. It names c only in comments, in strings, and in a test whose
+    // characters must not end it early.
+    let root = code("pub use b::{one, inner::Two as Three};\nuse crate::c::Five;\nfn four() {}\n");
+    let a = r###"use crate::{Three, four};
+/// [`crate::c`]
+fn f<'a>(s: &'a str) -> &'a str { /* crate::c /* crate::c */ crate::c */ s }
+const S: [&str; 2] = ["crate::c \" crate::c", r##"crate::c " crate::c"##];
+#[cfg(test)]
+mod tests { const C: [char; 3] = ['}', '"', '\'']; use crate::c; }
+"###;
+    // b uses c by `$crate::`, and itself, which does not count. c uses a; the paths in a's braces
+    // name a's items, not the root's. d uses c by a name the root takes with `use crate::`.
+    let b = "macro_rules! m { () => { $crate::c::f() } }\nfn g() { crate::b::g() }\n";
+    let c = "use crate::{a::{b, one}};\n";
+    let d = "fn h() -> crate::Five { todo!() }\n";
+    let modules = BTreeMap::from([("a", a), ("b", b), ("c", c), ("d", d)].map(|(m, text)| (m.to_string(), code(text))));
+    // Each module, and the one it uses.
+    let graph = |pairs: &[(&'static str, &'static str)]| -> BTreeMap<_, _> {
+        pairs.iter().map(|&(m, used)| (m, BTreeSet::from([used]))).collect()
+    };
+    let uses = uses(&root, &modules);
+    assert_eq!(uses, graph(&[("a", "b"), ("b", "c"), ("c", "a"), ("d", "c")]));
+    assert_eq!(cycle(&uses), Some(vec!["a", "b", "c", "a"]));
+    // A module that uses a cycle is not part of it. Without a cycle there is none.
+    assert_eq!(cycle(&graph(&[("a", "b"), ("b", "c"), ("c", "b")])), Some(vec!["b", "c", "b"]));
+    assert_eq!(cycle(&graph(&[("a", "b")])), None);
+}
+
+/// No crate's modules use each other in a cycle. A module's code is in its file, or in the files
+/// of its directory, and not in those named tests.rs: a test may use what it tests.
+#[test]
+fn no_crates_modules_use_each_other_in_a_cycle() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut cycles = vec![];
+    for entry in fs::read_dir(&crates).unwrap() {
+        let dir = entry.unwrap().path();
+        let src = dir.join("src");
+        let mut modules = BTreeMap::<String, String>::new();
+        for file in files(&src) {
+            if file.extension().is_some_and(|e| e == "rs") && !file.ends_with("tests.rs") {
+                let name = file.strip_prefix(&src).unwrap().iter().next().unwrap().to_str().unwrap();
+                *modules.entry(name.trim_end_matches(".rs").to_string()).or_default() +=
+                    &code(&fs::read_to_string(&file).unwrap());
+            }
+        }
+        let root = modules.remove("lib").unwrap();
+        if let Some(cycle) = cycle(&uses(&root, &modules)) {
+            let name = package(&dir.join("Cargo.toml"));
+            let path = cycle[1..].join(", which uses ");
+            cycles.push(format!("{name}'s modules use each other in a cycle: {} uses {path}", cycle[0]));
+        }
+    }
+    assert!(cycles.is_empty(), "{}", cycles.join("\n"));
 }
