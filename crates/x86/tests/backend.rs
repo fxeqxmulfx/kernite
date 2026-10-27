@@ -71,10 +71,11 @@ fn x86_compiles_a_kernel_through_the_port() {
 }
 
 /// A listing names a constant `{c0}` and a function `{f0}`, and a static by its name, so no
-/// static is named as a constant or a function is: the port refuses it at its name.
+/// static is named as a constant or a function is: the port refuses it at its name. It checks
+/// the name before the type: `c0`, whose type holds nothing, is refused at its name.
 #[test]
 fn a_static_named_as_a_listing_names_a_constant_is_refused() {
-    let module = parse("static c0: global<u32>;\nstatic f12: global<u32>;").unwrap();
+    let module = parse("static c0: global<[u32; 0]>;\nstatic f12: global<u32>;").unwrap();
     let cases = [
         "a kernel's listing names a constant `{c0}` and a function `{f0}`, and a static by its name, so one is not \
          named `c0`",
@@ -108,6 +109,24 @@ fn a_call_to_a_cooperative_function_is_refused() {
     let want = "4:6: `together` is `#[cooperative]`: its threads run on a grid, which its launcher starts, so no kernel \
                 calls it";
     assert_eq!(e.at(src), want);
+}
+
+/// The port sees a function `extern "sysv64"` that takes what SysV does not pass whole in a
+/// register as broken: an array, or a `u32`, whose high bits SysV leaves as they were. A
+/// function of another ABI, `extern "ptx-func"`, or a helper, which names no ABI, is one its
+/// kernels cannot name.
+#[test]
+fn the_port_sees_each_function_by_its_abi_and_its_types() {
+    let src = "unsafe extern \"sysv64\" fn pair(a: [u64; 2]) {}\n\
+               unsafe extern \"sysv64\" fn narrow(x: u32) {}\n\
+               pub unsafe extern \"ptx-func\" fn far() {}\n\
+               fn h() {}";
+    let module = parse(src).unwrap();
+    let callee = |name| X86.callee(function(&module, name).unwrap());
+    assert_eq!(callee("pair"), Some(Callee::Broken));
+    assert_eq!(callee("narrow"), Some(Callee::Broken));
+    assert_eq!(callee("far"), None);
+    assert_eq!(callee("h"), None);
 }
 
 /// A frame of more than 2^31 bytes, past what an address reaches, is the kernel's to blame and

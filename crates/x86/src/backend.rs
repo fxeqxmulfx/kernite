@@ -90,7 +90,7 @@ impl Native for X86 {
 }
 
 /// The prototype of `f`, a function `extern "sysv64"`, as the kernels that call it see it;
-/// `None` if SysV passes its types in no registers.
+/// `None` if SysV does not pass one of its types whole in a register.
 fn prototype(f: &Fn) -> Option<Prototype> {
     let params: Option<Vec<(&str, &str)>> = f
         .params

@@ -302,7 +302,7 @@ pub struct Prototype {
 impl Prototype {
     /// The prototype of a function of the parameters `params`, each a name and a type as
     /// written, `("x", "*const f32")`, and of the result `ret`, `None` for none; or why SysV
-    /// passes them in no registers.
+    /// does not pass one of them whole in a register.
     pub fn of(params: &[(&str, &str)], ret: Option<&str>) -> Result<Prototype, String> {
         let params: Vec<(String, Ty)> =
             params.iter().map(|&(name, ty)| Ty::param(ty).map(|t| (name.to_string(), t))).collect::<Result<_, _>>()?;
