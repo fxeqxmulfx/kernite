@@ -1384,6 +1384,50 @@ fn a_name_beyond_ascii_is_written_as_rust_writes_one_in_a_symbol() {
     assert!(entry.text().contains("\tst.shared.f32 [_ZZN4kgen3app6$u3b4$EE18$u431$$u443$$u444$], %$u3c3$;\n"));
 }
 
+/// A variable's register is named after it, with `_` after the name of a special register, one
+/// kgen reads or one it reads none of, and then a number if another register has the name.
+#[test]
+fn a_variable_named_as_a_special_register_takes_a_trailing_underscore() {
+    let src = r#"
+        pub unsafe extern "ptx-kernel" fn k(out: *mut u32) {
+            let clusterid: u32;
+            let tid: u32;
+            let tid_: u32;
+            mov.u32(clusterid, 1);
+            mov.u32(tid, 2);
+            mov.u32(tid_, 3);
+            add.u32(clusterid, clusterid, tid);
+            add.u32(clusterid, clusterid, tid_);
+            st.global.u32([out], clusterid);
+        }
+    "#;
+    let want = "// Written by kgen.
+
+.version 2.3
+.target sm_20
+.address_size 64
+
+.visible .entry k(
+\t.param .u64 k_param_0
+)
+{
+\t.reg .u32 %clusterid_, %tid_, %tid__1;
+\t.reg .u64 %out;
+
+\tld.param.u64 %out, [k_param_0];
+\tcvta.to.global.u64 %out, %out;
+\tmov.u32 %clusterid_, 1;
+\tmov.u32 %tid_, 2;
+\tmov.u32 %tid__1, 3;
+\tadd.u32 %clusterid_, %clusterid_, %tid_;
+\tadd.u32 %clusterid_, %clusterid_, %tid__1;
+\tst.global.u32 [%out], %clusterid_;
+\tret;
+}
+";
+    assert_eq!(kgen::ptx_str(src).unwrap(), want);
+}
+
 #[test]
 fn ptxas_takes_a_function_that_never_returns_from_ptx_6_4_and_sm_30() {
     let Some(ptxas) = ptxas() else {
