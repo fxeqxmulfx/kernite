@@ -189,6 +189,25 @@ fn consts_are_taken_by_any_path() {
 }
 
 #[test]
+fn what_a_module_of_consts_hands_on_and_refuses() {
+    // Its items in order, each past its doc: its own attribute passes; the const that is not `pub`
+    // is refused for that, before kgen works it out; the `pub` one at the call kgen cannot work
+    // out; then the function. None is handed on, so the module of kernels keeps a `STEP` of its
+    // own and says nothing.
+    refuses(
+        "consts",
+        &[
+            "src/lib.rs:10:5: error: a const of a module of consts is `pub`, for the modules of kernels that take it \
+             to see",
+            "src/lib.rs:13:27: error: a call is a statement: an instruction or a helper, not a value",
+            "src/lib.rs:16:5: error: a module of consts holds the consts kernels read, as `pub const E: usize = 16;`, \
+             and nothing else",
+            "error: could not compile `consts` (lib) due to 3 previous errors",
+        ],
+    );
+}
+
+#[test]
 fn kernels_that_compile_say_nothing() {
     builds_quietly("quiet");
 }
