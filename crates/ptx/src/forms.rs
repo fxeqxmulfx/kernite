@@ -1164,8 +1164,7 @@ fn newer(op: &str, word: &str) -> Option<&'static str> {
     })
 }
 
-/// The GPUs kgen writes PTX for, as its messages name them: `sm_20 to sm_86`, the first of
-/// [`GPUS`] to the last.
+/// The GPUs kgen writes PTX for, from the first of [`GPUS`] to the last, as its messages name them.
 fn gpus() -> String {
     let [(first, _), .., (last, _)] = GPUS;
     format!("sm_{first} to sm_{last}")
