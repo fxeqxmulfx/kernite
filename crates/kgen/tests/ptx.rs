@@ -208,6 +208,73 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
     }
 }
 
+/// A name of each instruction PTX's ISA has for the GPUs from `sm_20` to `sm_86`, by the
+/// sections of its chapter of them, is of a form kgen knows; and the first word of each form
+/// is that of one of them, so that the list misses no first word kgen knows. `call` is not
+/// among them: its operands are what the function it calls takes, as
+/// `a_call_passes_what_the_function_takes_and_returns` checks.
+#[test]
+fn kgen_knows_every_instruction_ptx_has_for_sm_20_to_sm_86() {
+    let isa = [
+        // Integer arithmetic.
+        "add.s32 sub.s32 mul.lo.s32 mad.lo.s32 mul24.lo.s32 mad24.lo.s32 sad.s32 div.s32 rem.s32 abs.s32 neg.s32 \
+         min.s32 max.s32 popc.b32 clz.b32 bfind.u32 fns.b32 brev.b32 bfe.u32 bfi.b32 szext.wrap.u32 bmsk.wrap.b32 \
+         dp4a.u32.u32 dp2a.lo.u32.u32 clmad.lo.u64",
+        // Extended-precision integer arithmetic.
+        "add.cc.u32 addc.u32 sub.cc.u32 subc.u32 mad.lo.cc.u32 madc.lo.u32",
+        // Floating point.
+        "testp.finite.f32 copysign.f32 add.rn.f32 sub.rn.f32 mul.rn.f32 fma.rn.f32 mad.rn.f32 div.rn.f32 abs.f32 \
+         neg.f32 min.f32 max.f32 rcp.rn.f32 rcp.approx.ftz.f64 sqrt.rn.f32 rsqrt.approx.f32 rsqrt.approx.ftz.f64 \
+         sin.approx.f32 cos.approx.f32 lg2.approx.f32 ex2.approx.f32 tanh.approx.f32",
+        // Half precision floating point.
+        "add.rn.f16 sub.rn.f16 mul.rn.f16 fma.rn.f16 neg.f16 abs.f16 min.f16 max.f16 tanh.approx.f16 ex2.approx.f16",
+        // Comparison and selection, and half precision comparison.
+        "set.lt.u32.s32 setp.lt.s32 selp.s32 slct.s32.s32 set.lt.u32.f16 setp.lt.f16",
+        // Logic and shift.
+        "and.b32 or.b32 xor.b32 not.b32 cnot.b32 lop3.b32 shf.l.clamp.b32 shl.b32 shr.u32",
+        // Data movement and conversion.
+        "mov.u32 shfl.idx.b32 shfl.sync.idx.b32 prmt.b32 ld.global.f32 ld.global.nc.f32 ldu.global.f32 st.global.f32 \
+         prefetch.global.L1 prefetchu.L1 applypriority.global.L2::evict_normal discard.global.L2 \
+         createpolicy.fractional.L2::evict_last.b64 isspacep.global cvta.global.u64 cvt.rn.f32.f64 \
+         cvt.pack.sat.u8.s32.b32 cp.async.ca.shared.global cp.async.commit_group cp.async.wait_group cp.async.wait_all",
+        // Texture, and surface.
+        "tex.2d.v4.f32.f32 tld4.r.2d.v4.f32.f32 txq.width.b32 istypep.texref suld.b.2d.b32.trap sust.b.2d.b32.trap \
+         sust.p.2d.b32.trap sured.b.add.1d.u32.trap suq.width.b32",
+        // Control flow.
+        "bra brx.idx ret exit",
+        // Parallel synchronization and communication.
+        "bar.sync barrier.sync bar.warp.sync membar.gl fence.sc.gpu fence.proxy.alias atom.global.add.u32 \
+         red.global.add.u32 vote.all.pred vote.sync.all.pred match.any.sync.b32 activemask.b32 redux.sync.add.u32 \
+         mbarrier.init.b64 mbarrier.inval.b64 mbarrier.arrive.b64 mbarrier.arrive_drop.b64 \
+         cp.async.mbarrier.arrive.b64 mbarrier.test_wait.b64 mbarrier.pending_count.b64",
+        // Warp level matrix multiply and accumulate.
+        "wmma.load.a.sync.aligned.row.m16n16k16.f16 wmma.store.d.sync.aligned.row.m16n16k16.f32 \
+         wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32 \
+         ldmatrix.sync.aligned.m8n8.x1.b16 movmatrix.sync.aligned.m8n8.trans.b16 \
+         mma.sp.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32",
+        // Stack manipulation.
+        "stacksave.u64 stackrestore.u64 alloca.u64",
+        // Video, and SIMD video.
+        "vadd.u32.u32.u32 vsub.u32.u32.u32 vabsdiff.u32.u32.u32 vmin.u32.u32.u32 vmax.u32.u32.u32 \
+         vshl.u32.u32.u32.clamp vshr.u32.u32.u32.clamp vmad.u32.u32.u32 vset.u32.u32.lt vadd2.u32.u32.u32 \
+         vsub2.u32.u32.u32 vavrg2.u32.u32.u32 vabsdiff2.u32.u32.u32 vmin2.u32.u32.u32 vmax2.u32.u32.u32 \
+         vset2.u32.u32.lt vadd4.u32.u32.u32 vsub4.u32.u32.u32 vavrg4.u32.u32.u32 vabsdiff4.u32.u32.u32 \
+         vmin4.u32.u32.u32 vmax4.u32.u32.u32 vset4.u32.u32.lt",
+        // Miscellaneous.
+        "brkpt nanosleep.u32 pmevent trap",
+    ];
+    let names: Vec<&str> = isa.iter().flat_map(|s| s.split_whitespace()).collect();
+    for name in &names {
+        if let Err(e) = forms::find(name) {
+            panic!("{name}: {e}");
+        }
+    }
+    for form in forms::forms() {
+        let op = Some(form.op);
+        assert!(names.iter().any(|n| n.split('.').next() == op), "no name here is of `{}`", form.line);
+    }
+}
+
 /// Each instruction of PTX's that [`forms::NEWER`] has is none that kgen knows, and each word
 /// none that a form of its instruction has, so that the error is the GPU it is for; and each
 /// GPU is newer than kgen writes for.
@@ -280,6 +347,25 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
     ];
     for (body, want) in cases {
         assert_eq!(compile("x: *mut f32, n: u32, d: f64", body).unwrap_err(), want, "{body}");
+    }
+}
+
+/// The three names README.md gives: `tex.2d` is `tex._2d`, `ld.global.L2::64B` is
+/// `ld.global.L2__64B`, and `cp.async` is `cp.r#async`.
+#[test]
+fn an_instructions_name_is_rusts_words() {
+    let ptx = compile(
+        "p: *mut u32, t: u64, x: f32, y: f32",
+        "let (r, g, b, a): (f32, f32, f32, f32); tex._2d.v4.f32.f32((r, g, b, a), [t, (x, y)]); let v: b32; \
+         ld.global.L2__64B.b32(v, [p]); let tile: shared<[u32; 4], 16>; cp.r#async.ca.shared.global([tile], [p], 4);",
+    )
+    .unwrap();
+    for line in [
+        "\ttex.2d.v4.f32.f32 {%r, %g, %b, %a}, [%t, {%x, %y}];\n",
+        "\tld.global.L2::64B.b32 %v, [%p];\n",
+        "\tcp.async.ca.shared.global [tile], [%p], 4;\n",
+    ] {
+        assert!(ptx.contains(line), "{line}{ptx}");
     }
 }
 
@@ -621,6 +707,8 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         ),
         ("let v: f32; max.xorsign.abs.f32(v, f, f);", ".version 7.2 .target sm_86"),
         ("let v: b128; ld.global.b128(v, [x]);", ".version 8.3 .target sm_70"),
+        // The ISA has it from sm_75, and ptxas takes it for sm_70.
+        ("let i: u32; ld.mmio.acquire.sys.global.u32(i, [y]);", ".version 9.3 .target sm_70"),
         ("let a: u64; clmad.lo.u64(a, y, y, y);", ".version 9.3 .target sm_80"),
         ("let i: u32; suld.b._2d.b32.trap(i, [y, (n, n)]);", ".version 3.1 .target sm_20"),
         ("let i: u32; suq.memory_layout.b32(i, [y]);", ".version 4.2 .target sm_20"),
@@ -858,6 +946,20 @@ fn a_surface_is_its_handle_in_brackets_with_the_coordinates_in_it() {
         "\tsured.b.add.1d.u32.trap [%bins, {%v}], 1;\n",
     ] {
         assert!(entries.contains(line), "{line}{entries}");
+    }
+}
+
+/// PTX's ISA has a cache operation on `sust.b`, and none on `sust.p`, which `ptxas` takes one
+/// on too.
+#[test]
+fn sust_p_takes_a_cache_operation_as_sust_b_has() {
+    let ptx = compile(
+        "s: u64, x: i32, y: i32",
+        "let v: b32; mov.b32(v, 7); sust.b._2d.cg.b32.trap([s, (x, y)], v); sust.p._2d.cg.b32.trap([s, (x, y)], v);",
+    )
+    .unwrap();
+    for line in ["\tsust.b.2d.cg.b32.trap [%s, {%x, %y}], %v;\n", "\tsust.p.2d.cg.b32.trap [%s, {%x, %y}], %v;\n"] {
+        assert!(ptx.contains(line), "{line}{ptx}");
     }
 }
 
@@ -1305,6 +1407,43 @@ fn ptxas_takes_a_function_that_never_returns_from_ptx_6_4_and_sm_30() {
         let older = retarget(&text, v, sm);
         assert!(!refused(&ptxas, &older, gpu_of(&older), &dir.join(format!("{v}-{sm}"))).is_empty(), "{v} {sm}");
     }
+}
+
+/// The path that calls `halt` ends there, and the one that calls `back` goes on: so `v` is
+/// written on each path that reaches its store, and `first` returns a value on each that
+/// reaches its end, only where the call is of `halt`.
+#[test]
+fn a_call_of_a_function_that_never_returns_ends_its_callers_path_there() {
+    let src = |kernel_calls: &str, first_calls: &str| {
+        format!(
+            "unsafe extern \"ptx-kernel\" fn k(x: *mut u32, n: u32) {{\n\
+             let (p, v): (pred, u32);\n\
+             setp.eq.u32(p, n, 0);\n\
+             if p {{ bra(stop); }}\n\
+             mov.u32(v, n);\n\
+             bra(store);\n\
+             label(stop);\n\
+             call({kernel_calls});\n\
+             label(store);\n\
+             st.global.u32([x], v);\n\
+             }}\n\
+             extern \"ptx-func\" fn first(n: u32) -> u32 {{\n\
+             let p: pred;\n\
+             setp.ne.u32(p, n, 0);\n\
+             if p {{ ret(n); }}\n\
+             call({first_calls});\n\
+             }}\n\
+             extern \"ptx-func\" fn halt() -> ! {{ trap(); }}\n\
+             extern \"ptx-func\" fn back() {{}}\n"
+        )
+    };
+    let ptx = kgen::ptx_str(&src("halt", "halt")).unwrap();
+    assert!(ptx.contains("\t@%p ret;\n\tcall halt;\n}\n"), "{ptx}");
+    assert_eq!(kgen::ptx_str(&src("back", "halt")).unwrap_err(), "2:9: `v` is read before anything writes it");
+    assert_eq!(
+        kgen::ptx_str(&src("halt", "back")).unwrap_err(),
+        "12:22: control reaches the end of `first`, which returns a `u32`: `ret(v)` gives it back"
+    );
 }
 
 /// The kernel `k` around `body`, before the functions it may call, compiled, or the error.
