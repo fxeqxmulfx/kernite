@@ -165,6 +165,13 @@ fn the_workspace_is_named_as_its_directory_is_unless_its_manifest_names_it() {
 }
 
 #[test]
+fn a_workspace_named_nothing_is_left_out_of_its_kernels_names() {
+    // The fixture asserts, as it builds, that its kernel is named in PTX in its crate's namespace
+    // and its module's alone: `unnamed.toml` names the workspace `''`.
+    builds_quietly("unnamed");
+}
+
+#[test]
 fn errors_inside_a_module_point_into_it() {
     // Rust's parser speaks first; then the macro, of the module as a whole, then of each item.
     refuses(
