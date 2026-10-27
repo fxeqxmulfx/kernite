@@ -240,6 +240,30 @@ fn values_are_computed_as_rust_computes_them() {
     assert_eq!(x86(src, "v"), want);
 }
 
+/// A const is what kernels read: a number, a float, a `bool`, or an array of them. The kernel
+/// reads one of each, and adds only if each is what it was declared. One of another type is no
+/// value known now, and the error says what one is.
+#[test]
+fn a_const_is_a_number_a_float_a_bool_or_an_array_of_them() {
+    let src = |ty: &str| {
+        format!(
+            "const N: u64 = 1;\nconst F: f32 = 2.5;\nconst B: bool = true;\nconst XS: {ty} = [1, 2];\n\
+             unsafe extern \"sysv64\" fn k(x: u64) -> u64 {{\nif B && F > 2.0 {{\nadd(x, N + XS[1]);\n}}\n\
+             ret(x);\n}}\n"
+        )
+    };
+    let want = "# k(gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves []
+# x=rdi,rax
+    add rdi, 3
+    mov rax, rdi
+    ret
+";
+    assert_eq!(x86(&src("[u64; 2]"), "k"), want);
+    let e = kgen::x86_str(&src("[u64]"), "k").unwrap_err();
+    assert_eq!(e, "4:11: a value known now is a number, a bool, or an array of them, `[T; N]`");
+}
+
 #[test]
 fn sixteen_bit_floats_are_values_and_data() {
     let src = r#"
