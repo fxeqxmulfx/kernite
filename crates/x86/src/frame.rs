@@ -26,25 +26,9 @@ pub(crate) struct Lowered {
 
 /// `c` with its frame made instructions, as [`print`](crate::intel::print) says; or why not.
 pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
-    let insts = || {
-        c.body.iter().filter_map(|item| match item {
-            Item::Inst(inst) => Some(inst),
-            Item::Label(_) | Item::Note(_) => None,
-        })
-    };
-    let calls = insts().any(|inst| inst.op == Op::Call);
-    let returns = insts().any(|inst| inst.op == Op::Ret);
-    let vector = insts().any(|inst| inst.operands().any(|a| a.regs().any(|r| r.class == Class::Vec)));
-    let mut features: Vec<Feature> =
-        insts().filter_map(|inst| forms::feature(inst.op, &inst.args, &inst.implicit)).collect();
-    // The epilogue's `vzeroupper` is AVX's: a kernel that writes it needs AVX, unless it lists AVX
-    // or a feature that builds on it.
-    let implies_avx = [Feature::Avx, Feature::Avx2, Feature::Fma, Feature::F16c];
-    if vector && returns && !features.iter().any(|f| implies_avx.contains(f)) {
-        features.push(Feature::Avx);
-    }
-    features.sort_by_key(|f| f.name());
-    features.dedup();
+    let calls = insts(&c.body).any(|inst| inst.op == Op::Call);
+    let returns = insts(&c.body).any(|inst| inst.op == Op::Ret);
+    let vector = insts(&c.body).any(|inst| inst.operands().any(|a| a.regs().any(|r| r.class == Class::Vec)));
     // The prologue's loop takes the least value no label of the body has: going up the body's
     // labels in order, each one that has the value looked for moves it one on.
     let labels: BTreeSet<u32> = c
@@ -90,7 +74,25 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
         }
         body.push(item.clone());
     }
+    let mut features: Vec<Feature> =
+        insts(&body).filter_map(|inst| forms::feature(inst.op, &inst.args, &inst.implicit)).collect();
+    // The epilogue's `vzeroupper` is AVX's: a kernel that writes it needs AVX, unless it lists a
+    // feature that builds on it.
+    let implies_avx = [Feature::Avx2, Feature::Fma, Feature::F16c];
+    if insts(&body).any(|inst| inst.op == Op::Vzeroupper) && !features.iter().any(|f| implies_avx.contains(f)) {
+        features.push(Feature::Avx);
+    }
+    features.sort_by_key(|f| f.name());
+    features.dedup();
     Ok(Lowered { body, features, padding, returns })
+}
+
+/// The instructions of `body`, in order.
+fn insts(body: &[Item<Op, PReg>]) -> impl Iterator<Item = &Inst<Op, PReg>> {
+    body.iter().filter_map(|item| match item {
+        Item::Inst(inst) => Some(inst),
+        Item::Label(_) | Item::Note(_) => None,
+    })
 }
 
 /// Pages past this many are touched in a loop.

@@ -2054,8 +2054,8 @@ fn kgen_knows_every_instruction_of_x86_64_v3() {
 }
 
 /// The `vzeroupper` a kernel that touches vector registers runs before it returns is AVX's, so
-/// it needs AVX though nothing else it runs does. AVX takes its place among the other needs,
-/// which are listed by name.
+/// it needs AVX though nothing else it runs does, unless it needs FMA, F16C or AVX2, which build
+/// on AVX. AVX takes its place among the other needs, which are listed by name.
 #[test]
 fn vzeroupper_needs_avx_where_nothing_else_says_so() {
     let cases = [
@@ -2080,8 +2080,82 @@ fn vzeroupper_needs_avx_where_nothing_else_says_so() {
     ret
 ",
         ),
+        (
+            "pub unsafe extern \"sysv64\" fn f(x: f32, y: f32, z: f32) -> f32 { vfmadd231ss(x, y, z); ret(x); }",
+            "# f(vec, vec, vec) -> vec
+# needs: fma
+# frame: 0 bytes aligned to 0, saves []
+# x=ymm0 y=ymm1 z=ymm2
+    vfmadd231ss xmm0, xmm1, xmm2
+    vzeroupper
+    ret
+",
+        ),
+        (
+            "pub unsafe extern \"sysv64\" fn f(x: f32, y: f32) -> f32 { vcvtph2ps(x, y); ret(x); }",
+            "# f(vec, vec) -> vec
+# needs: f16c
+# frame: 0 bytes aligned to 0, saves []
+# x=ymm0 y=ymm1
+    vcvtph2ps xmm0, xmm1
+    vzeroupper
+    ret
+",
+        ),
+        (
+            "pub unsafe extern \"sysv64\" fn f(x: f32, y: f32) -> f32 { vpbroadcastd(x, y); ret(x); }",
+            "# f(vec, vec) -> vec
+# needs: avx2
+# frame: 0 bytes aligned to 0, saves []
+# x=ymm0 y=ymm1
+    vpbroadcastd xmm0, xmm1
+    vzeroupper
+    ret
+",
+        ),
+        (
+            "pub unsafe extern \"sysv64\" fn f(x: f32, n: u64) -> f32 { popcnt(n, n); vcvtph2ps(x, x); popcnt(n, n); \
+             ret(x); }",
+            "# f(vec, gpr) -> vec
+# needs: f16c, popcnt
+# frame: 0 bytes aligned to 0, saves []
+# x=ymm0 n=rdi
+    popcnt rdi, rdi
+    vcvtph2ps xmm0, xmm0
+    popcnt rdi, rdi
+    vzeroupper
+    ret
+",
+        ),
     ];
     for (src, want) in cases {
         assert_eq!(kgen::x86_str(src, "f").unwrap().text(), want, "{src}");
     }
+}
+
+/// A kernel needs what the instructions its listing prints need. A move of a register to itself
+/// that the listing leaves out needs nothing: `never` passes `x` on in `ymm0`, the register it
+/// arrives in, and does not return, so it runs no instruction of AVX's. A move of an xmm to
+/// itself clears the upper lanes, so the listing prints it, and `kept` needs AVX for it.
+#[test]
+fn a_kernels_needs_are_those_of_the_instructions_it_prints() {
+    let src = "pub unsafe extern \"sysv64\" fn die(x: f32) -> ! { ud2(); }
+pub unsafe extern \"sysv64\" fn never(x: f32) -> ! { call(die, x); }
+pub unsafe extern \"sysv64\" fn kept(x: f32) -> ! { vmovaps(x, x); ud2(); }";
+    let want = "# never(vec) -> !
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# x=ymm0
+    sub rsp, 8
+    call {f0}
+# f0: die
+";
+    assert_eq!(kgen::x86_str(src, "never").unwrap().text(), want);
+    let want = "# kept(vec) -> !
+# needs: avx
+# frame: 0 bytes aligned to 0, saves []
+# x=ymm0
+    vmovaps xmm0, xmm0
+    ud2
+";
+    assert_eq!(kgen::x86_str(src, "kept").unwrap().text(), want);
 }
