@@ -516,6 +516,34 @@ fn accumulators_around_a_loop_spill_rather_than_what_a_turn_loads() {
     assert!(spilled(&same(&b.0, &toy(5, &[]), &[3])).is_empty());
 }
 
+/// A load or a store in a loop counts ten times one outside it. `inside` is read and written
+/// once a turn; `outside`, `k` times before the loop: each is alive across it, beside the count,
+/// in two registers. With 9, `outside` costs less for how long it is alive, and spills first,
+/// as it would not if a turn counted 9 times; with 10, `inside` does, as it would not if a turn
+/// counted 11 times.
+#[test]
+fn one_in_a_loop_counts_ten_times_one_outside() {
+    let first = |k: usize| {
+        let mut b = Builder::new();
+        let n = b.param("n", 0);
+        let (inside, outside) = (b.var("inside"), b.var("outside"));
+        b.def(inside, &[]);
+        b.def(outside, &[]);
+        for _ in 0..k {
+            b.def(outside, &[outside]);
+        }
+        b.label(1);
+        b.def(inside, &[inside, n]);
+        b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+        let sum = b.var("sum");
+        b.def(sum, &[inside, outside]);
+        b.ret(sum, 0);
+        spilled(&same(&b.0, &toy(2, &[]), &[3]))[0].clone()
+    };
+    assert_eq!(first(9), "outside");
+    assert_eq!(first(10), "inside");
+}
+
 #[test]
 fn a_parameter_spills_from_the_register_it_arrives_in() {
     let mut b = Builder::new();
