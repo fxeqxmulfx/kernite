@@ -146,8 +146,10 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     out.extend(parse("unsafe fn"));
     out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
     let mut params = parse("&self, grid: ::kgen_cuda::Grid, ");
-    for param in written_params(f, top) {
-        let colon = param.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type");
+    let mut args = vec![];
+    for (param, colon) in written_params(f, top) {
+        // Its name as written, before the colon.
+        args.push(format!("::kgen_cuda::arg(&{})", param[colon - 1]));
         params.extend(param[..=colon].iter().cloned());
         match &param[colon + 1..] {
             [star, kind, pointee @ ..] if is_punct(star, '*') && (is_ident(kind, "const") || is_ident(kind, "mut")) => {
@@ -161,9 +163,8 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, params))]);
     out.extend(parse("-> ::core::result::Result<(), ::kgen_cuda::Error>"));
-    let args: Vec<String> = f.params.iter().map(|p| format!("::kgen_cuda::arg(&{})", p.name)).collect();
     let how = if f.cooperative.is_some() { "launch_cooperative" } else { "launch" };
-    out.extend(body(f, launched, |index| {
+    out.extend(body(f, launched, top, |index| {
         format!("unsafe {{ self.module.{how}({index}, grid, &[{}]) }}", args.join(", "))
     }));
     out
@@ -189,24 +190,29 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
     out.extend([TokenTree::Ident(Ident::new(&blocks_name(f), top[f.head.end + 1].span()))]);
     out.extend(top[f.head.end + 2..f.params_at].iter().cloned());
     out.extend(parse("(&self, threads: u32, shared: u32) -> ::core::result::Result<u32, ::kgen_cuda::Error>"));
-    out.extend(body(f, launched, |index| format!("self.module.resident({index}, threads, shared)")));
+    out.extend(body(f, launched, top, |index| format!("self.module.resident({index}, threads, shared)")));
     out
 }
 
 /// The name of the method that says how many blocks a grid of `f` has at most.
 fn blocks_name(f: &Fn) -> String {
-    format!("{}_blocks", f.name.trim_start_matches("r#"))
+    format!("{}_blocks", f.name)
 }
 
 /// The body of a method of `f`, which does `then` with the index of the instance among
 /// `launched` its compile-time arguments pick; or never runs, for a kernel that did not
 /// compile.
-fn body(f: &Fn, launched: Option<&[Launched]>, then: impl std::ops::Fn(&str) -> String) -> TokenStream {
+fn body(
+    f: &Fn,
+    launched: Option<&[Launched]>,
+    top: &[TokenTree],
+    then: impl std::ops::Fn(&str) -> String,
+) -> TokenStream {
     let body = match launched {
         Some([(args, i)]) if args.is_empty() => then(&i.to_string()),
         Some(instances) => {
             let arms: Vec<(Vec<Value>, String)> = instances.iter().map(|(a, i)| (a.clone(), i.to_string())).collect();
-            format!("let index = {};\n{}", pick(f, &arms), then("index"))
+            format!("let index = {};\n{}", pick(f, &arms, top), then("index"))
         }
         None => "::core::unreachable!()".to_string(),
     };

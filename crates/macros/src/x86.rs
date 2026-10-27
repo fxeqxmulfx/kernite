@@ -40,18 +40,19 @@ pub(crate) fn naked(
         let code = asm(
             listing,
             &format!("{hidden}::C"),
-            &callees(module, listing, false),
+            &callees(module, listing, false, top),
             &reached(module, listing, false, top),
         );
         out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&code)))]);
         statics.push(("C".to_string(), listing));
     } else {
         // Each instance's parameters and their types: `f`'s, then a cooperative kernel's place.
-        let (mut params, mut tys) = (vec![], vec![]);
-        for param in written_params(f, top) {
-            let colon = param.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type");
+        // `f` passes its own on by their names as written, before the colon.
+        let (mut params, mut tys, mut names) = (vec![], vec![], vec![]);
+        for (param, colon) in written_params(f, top) {
             params.push(param.iter().cloned().collect::<TokenStream>().to_string());
             tys.push(param[colon + 1..].iter().cloned().collect::<TokenStream>().to_string());
+            names.push(param[colon - 1].to_string());
         }
         if cooperative {
             params.push("_: &::kgen_cpu::Place".to_string());
@@ -66,7 +67,12 @@ pub(crate) fn naked(
             items += &format!(
                 "#[unsafe(naked)]\npub unsafe extern \"sysv64\" fn I{k}({}) {ret} {{ {} }}\n",
                 params.join(", "),
-                asm(listing, &format!("I{k}C"), &callees(module, listing, true), &reached(module, listing, true, top))
+                asm(
+                    listing,
+                    &format!("I{k}C"),
+                    &callees(module, listing, true, top),
+                    &reached(module, listing, true, top)
+                )
             );
             statics.push((format!("I{k}C"), listing));
             arms.push((args.clone(), format!("{hidden}::I{k} as {ty}")));
@@ -74,13 +80,12 @@ pub(crate) fn naked(
         if cooperative {
             out.extend(grid_launcher(f, Some(&arms), needs(instances), named, top));
         } else {
-            let names: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
             let mut docs = attrs(f, top);
             docs.extend(needs(instances));
             out.extend(contract(docs, named));
             out.extend(parse("#[inline(always)]"));
             out.extend(signature(f, top));
-            let body = format!("unsafe {{ ({})({}) }}", pick(f, &arms), names.join(", "));
+            let body = format!("unsafe {{ ({})({}) }}", pick(f, &arms, top), names.join(", "));
             out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&body)))]);
         }
     }
@@ -222,20 +227,20 @@ fn elements(m: &X86Static) -> Vec<String> {
 
 /// The paths by which the code of `listing`, of a kernel of `module`, names each function it
 /// calls, from beside the kernels or from `inside` a kernel's hidden module: a function of no
-/// compile-time arguments by its name, and an instance, `tile::<4>`, as the function in its
-/// function's hidden module, `__kgen_tile::I0`, that [`naked`] makes it.
-fn callees(module: &lang::Module, listing: &kgen::Listing, inside: bool) -> Vec<String> {
+/// compile-time arguments by its name as written, `r#fn` as well, and an instance, `tile::<4>`,
+/// as the function in its function's hidden module, `__kgen_tile::I0`, that [`naked`] makes it.
+fn callees(module: &lang::Module, listing: &kgen::Listing, inside: bool, top: &[TokenTree]) -> Vec<String> {
     let up = if inside { "super::" } else { "" };
     let path = |name: &str| {
         let base = name.split("::<").next().unwrap_or(name);
-        match kgen::function(module, base) {
-            Some(g) if !g.generics.is_empty() => {
-                let instances = lang::instances(module, g).unwrap_or_default();
-                let k = instances.iter().position(|args| lang::instance(g, args).is_ok_and(|n| n == name));
-                format!("{up}__kgen_{base}::I{}", k.expect("a kernel calls an instance its function lists"))
-            }
-            _ => format!("{up}{base}"),
+        let g = kgen::function(module, base).expect("a kernel calls a function of its module");
+        if g.generics.is_empty() {
+            // Its name as written, after `fn`.
+            return format!("{up}{}", top[g.head.end + 1]);
         }
+        let instances = lang::instances(module, g).unwrap_or_default();
+        let k = instances.iter().position(|args| lang::instance(g, args).is_ok_and(|n| n == name));
+        format!("{up}__kgen_{base}::I{}", k.expect("a kernel calls an instance its function lists"))
     };
     listing.funcs.iter().map(|name| path(name)).collect()
 }
@@ -285,7 +290,7 @@ fn grid_launcher(
     out.extend(parse("unsafe fn"));
     out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
     let mut params = parse("grid: ::kgen_cpu::Grid, ");
-    for param in written_params(f, top) {
+    for (param, _) in written_params(f, top) {
         params.extend(param);
         params.extend(parse(","));
     }
@@ -295,18 +300,19 @@ fn grid_launcher(
         Some(kernels) => {
             let kernel = match kernels {
                 [(args, kernel)] if args.is_empty() => kernel.clone(),
-                _ => pick(f, kernels),
+                _ => pick(f, kernels, top),
             };
             let (mut addresses, mut args) = (String::new(), vec![]);
-            for (p, param) in f.params.iter().zip(written_params(f, top)) {
-                let colon = param.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type");
+            for (param, colon) in written_params(f, top) {
+                // Its name as written, before the colon.
+                let name = &param[colon - 1];
                 match &param[colon + 1..] {
                     [star, kind, ..] if is_punct(star, '*') && (is_ident(kind, "const") || is_ident(kind, "mut")) => {
                         let again = if is_ident(kind, "mut") { "_mut" } else { "" };
-                        addresses += &format!("let {0} = {0}.expose_provenance();\n", p.name);
-                        args.push(format!("::core::ptr::with_exposed_provenance{again}({})", p.name));
+                        addresses += &format!("let {name} = {name}.expose_provenance();\n");
+                        args.push(format!("::core::ptr::with_exposed_provenance{again}({name})"));
                     }
-                    _ => args.push(p.name.clone()),
+                    _ => args.push(name.to_string()),
                 }
             }
             args.push("grid".to_string());

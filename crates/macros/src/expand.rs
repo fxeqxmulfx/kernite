@@ -8,7 +8,7 @@ use kgen::lang::{self, ItemKind, Tree, Value};
 use kgen::{Abi, Owner, Static};
 
 use crate::gpu::{HOLE, gpu};
-use crate::rust::{error, flatten, inner_attribute, is_ident, is_punct, parse, site, stub, tree};
+use crate::rust::{const_names, error, flatten, inner_attribute, is_ident, is_punct, parse, site, stub, tree};
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
 
@@ -368,9 +368,7 @@ fn used(module: &lang::Module, read: &[String], top: &[TokenTree]) -> TokenStrea
 /// The name of `item`, a const, as `top` writes it, `r#type` as well, of the span the macro
 /// writes.
 fn const_name(item: &lang::Item, top: &[TokenTree]) -> TokenTree {
-    let tokens = &top[item.tokens.clone()];
-    let at = tokens.iter().position(|t| is_ident(t, "const")).expect("a const") + 1;
-    let mut name = tokens[at].clone();
+    let mut name = const_names(&top[item.tokens.clone()]).next().expect("a const").clone();
     name.set_span(site());
     name
 }

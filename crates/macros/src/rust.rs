@@ -96,11 +96,12 @@ pub(crate) fn visibility<'a>(f: &Fn, top: &'a [TokenTree]) -> &'a [TokenTree] {
     &head[..vis]
 }
 
-/// `const { match .. }` on `f`'s compile-time arguments: what `arms` gives for each instance, by
-/// its arguments. Another is no instance, and Rust refuses to compile the call.
-pub(crate) fn pick(f: &Fn, arms: &[(Vec<Value>, String)]) -> String {
+/// `const { match .. }` on `f`'s compile-time arguments, by their names as written, `r#in` as
+/// well: what `arms` gives for each instance, by its arguments. Another is no instance, and Rust
+/// refuses to compile the call.
+pub(crate) fn pick(f: &Fn, arms: &[(Vec<Value>, String)], top: &[TokenTree]) -> String {
     let tuple = |xs: Vec<String>| if xs.len() == 1 { xs.join("") } else { format!("({})", xs.join(", ")) };
-    let on = tuple(f.generics.iter().map(|g| g.name.clone()).collect());
+    let on = tuple(const_names(&top[f.head.end + 2..f.params_at]).map(TokenTree::to_string).collect());
     let mut out = format!("const {{ match {on} {{ ");
     let mut listed = vec![];
     for (args, then) in arms {
@@ -111,11 +112,18 @@ pub(crate) fn pick(f: &Fn, arms: &[(Vec<Value>, String)]) -> String {
     out + &format!("_ => ::core::panic!({message:?}) }} }}")
 }
 
-/// `f`'s parameters as written, each its tokens, `x: *mut f32`.
-pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<Vec<TokenTree>> {
+/// The name after each `const` of `tokens`, as written, `r#type` as well: a const's, or those of
+/// a function's compile-time arguments.
+pub(crate) fn const_names(tokens: &[TokenTree]) -> impl Iterator<Item = &TokenTree> {
+    tokens.windows(2).filter(|w| is_ident(&w[0], "const")).map(|w| &w[1])
+}
+
+/// `f`'s parameters as written, each its tokens, `x: *mut f32`, and the place of its colon.
+pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, usize)> {
     let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
     let tokens = flatten(group.stream());
-    tokens.split(|t| is_punct(t, ',')).filter(|p| !p.is_empty()).map(<[TokenTree]>::to_vec).collect()
+    let params = tokens.split(|t| is_punct(t, ',')).filter(|p| !p.is_empty());
+    params.map(|p| (p.to_vec(), p.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type"))).collect()
 }
 
 /// `f` with a body that never runs, for a kernel that does not compile.

@@ -378,3 +378,11 @@ fn a_module_that_takes_consts_has_no_const_function_or_static_of_their_names() {
 fn kernels_that_compile_say_nothing() {
     builds_quietly("quiet");
 }
+
+/// A name written raw, `r#type`, reaches Rust as written: a parameter's and a compile-time
+/// argument's, in each kind of kernel that passes them on, a kernel's, a function's that a kernel
+/// calls, a static's and a const's.
+#[test]
+fn names_written_raw_reach_rust_as_written() {
+    builds_quietly("raw");
+}
