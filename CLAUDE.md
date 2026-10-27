@@ -96,10 +96,15 @@ board (below). Until it is merged, master's layout is the one above.
 ## Planning and review
 
 Work is planned on [agent-kanban](.claude/skills/agent-kanban/SKILL.md), a task board in
-`.kanban/board.db`, which git ignores. Developers claim a task, do it on a branch of its own, and hand
-it in with evidence for each of its tests. A reviewer approves it, or sends it back with what must
-change. `agent-kanban guide` says how. Notes for the work in hand live beside the board in
-`.kanban/notes/`, never in the repository.
+`.kanban/board.db`, which git ignores. `agent-kanban guide` says how to use it.
+
+- [DEVELOPER.md](DEVELOPER.md): a developer claims a task, does it on a branch of its own, and hands
+  it in with evidence for each of its tests.
+- [REVIEWER.md](REVIEWER.md): the reviewer merges it and approves it, or sends it back with what
+  must change.
+
+Notes for the work in hand, its design, plan and gate, live beside the board in `.kanban/notes/`,
+never in the repository.
 
 The reviewer merges only code that is 10/10, with nothing left to change. Anything less goes back
 for polishing, with every finding listed at once, so that one more round can finish it.
