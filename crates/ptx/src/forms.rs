@@ -1164,6 +1164,13 @@ fn newer(op: &str, word: &str) -> Option<&'static str> {
     })
 }
 
+/// The GPUs kgen writes PTX for, as its messages name them: `sm_20 to sm_86`, the first of
+/// [`GPUS`] to the last.
+fn gpus() -> String {
+    let [(first, _), .., (last, _)] = GPUS;
+    format!("sm_{first} to sm_{last}")
+}
+
 /// What of PTX's kgen leaves out, and why: an instruction, by its name and no word, or a word
 /// of one kgen knows.
 const LEFT_OUT: &[(&str, &str, &str)] = &[(
@@ -1184,7 +1191,7 @@ pub fn find(name: &str) -> Result<Vec<Bound>, String> {
             return Err(format!("PTX's `{op}` {why}"));
         }
         return Err(match newer(op, "") {
-            Some(gpu) => format!("PTX's `{op}` is for {gpu} and newer, and kgen writes PTX for sm_20 to sm_86"),
+            Some(gpu) => format!("PTX's `{op}` is for {gpu} and newer, and kgen writes PTX for {}", gpus()),
             None => format!("PTX has no instruction `{op}` that kgen knows"),
         });
     }
@@ -1267,7 +1274,7 @@ fn unknown(name: &str, op: &str, words: &[&str], of: &[&'static Form]) -> String
             return format!("PTX's `{op}.{w}` {why}");
         }
         if let Some(gpu) = newer(op, w) {
-            return format!("PTX's `{op}` takes `.{w}` on {gpu} and newer, and kgen writes PTX for sm_20 to sm_86");
+            return format!("PTX's `{op}` takes `.{w}` on {gpu} and newer, and kgen writes PTX for {}", gpus());
         }
         return format!("PTX's `{op}` has no `.{w}` that kgen knows");
     }
@@ -1375,7 +1382,8 @@ fn check(b: &Bound, name: &str) -> Result<Needs, String> {
                 if bits == 256 && (op == "ld" || op == "st") {
                     return Err(format!(
                         "`{name}` moves 256 bits at once, which PTX's `{op}` does on sm_100 and newer, and kgen writes \
-                         PTX for sm_20 to sm_86: a vector of 128 bits at most, as `.v4.b32` or `.v2.b64`"
+                         PTX for {}: a vector of 128 bits at most, as `.v4.b32` or `.v2.b64`",
+                        gpus()
                     ));
                 }
                 if bits > 128 {
@@ -1560,26 +1568,37 @@ pub fn sreg(name: &str) -> Option<&'static Sreg> {
     sregs().iter().find(|s| s.name == name)
 }
 
+/// A function that says why kgen reads none of some special registers of PTX's.
+type Why = fn() -> String;
+
 /// The special registers of PTX's that kgen reads none of, and why.
-const BEYOND: &[(&str, &str)] = &[
-    ("is_explicit_cluster", HOPPER),
-    ("clusterid", HOPPER),
-    ("nclusterid", HOPPER),
-    ("cluster_ctaid", HOPPER),
-    ("cluster_nctaid", HOPPER),
-    ("cluster_ctarank", HOPPER),
-    ("cluster_nctarank", HOPPER),
-    ("aggr_smem_size", HOPPER),
-    ("perctamemoryoffset", PER_CTA),
-    ("perctamemorysize", PER_CTA),
+const BEYOND: &[(&str, Why)] = &[
+    ("is_explicit_cluster", hopper),
+    ("clusterid", hopper),
+    ("nclusterid", hopper),
+    ("cluster_ctaid", hopper),
+    ("cluster_nctaid", hopper),
+    ("cluster_ctarank", hopper),
+    ("cluster_nctarank", hopper),
+    ("aggr_smem_size", hopper),
+    ("perctamemoryoffset", per_cta),
+    ("perctamemorysize", per_cta),
 ];
-const HOPPER: &str = "it needs sm_90, and kgen writes PTX for sm_20 to sm_86";
-const PER_CTA: &str = "a kernel has it only with the directive `.minperctamemory`, which kgen does not write";
+
+/// Why kgen reads none of the special registers that came with Hopper, `sm_90`.
+fn hopper() -> String {
+    format!("it needs sm_90, and kgen writes PTX for {}", gpus())
+}
+
+/// Why kgen reads neither `%perctamemoryoffset` nor `%perctamemorysize`.
+fn per_cta() -> String {
+    "a kernel has it only with the directive `.minperctamemory`, which kgen does not write".into()
+}
 
 /// Why kgen reads no special register `name`, `clusterid.x`, if it is one of PTX's.
-pub fn beyond(name: &str) -> Option<&'static str> {
+pub fn beyond(name: &str) -> Option<String> {
     let first = name.split('.').next().unwrap_or(name);
-    BEYOND.iter().find(|(n, _)| *n == first).map(|&(_, why)| why)
+    BEYOND.iter().find(|(n, _)| *n == first).map(|&(_, why)| why())
 }
 
 /// Whether a register named `name` would be one of PTX's special registers, or of their
