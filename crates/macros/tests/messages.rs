@@ -1,8 +1,8 @@
 //! What the macro says of the kernels it is given: each error where it is, at its
-//! `line:column`, in the order Cargo prints them. Each crate of `fixtures/` is built as a user's
-//! crate is, and what Cargo says of it is compared line for line, the errors in rustc's short
-//! form, `src/lib.rs:4:1: error: ..`. A fixture is a crate's `src/lib.rs`, so the line an error
-//! names is that line of the fixture.
+//! `line:column`, in the order Cargo prints them. Each fixture is built as a user's crate is,
+//! and what Cargo says of it is compared line for line, the errors in rustc's short form,
+//! `src/lib.rs:4:1: error: ..`. A fixture is a crate's `src/lib.rs`, so the line an error names
+//! is that line of the fixture.
 
 use std::fs;
 use std::path::Path;
@@ -28,9 +28,19 @@ fn build(name: &str) -> (bool, Vec<String>) {
     let path = |c: &str| crates.join(c).display().to_string();
     let (macros, cuda, cpu) = (path("macros"), path("cuda"), path("cpu"));
     let manifest = format!(
-        "[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\n\
-         kgen-macros = {{ path = {macros:?} }}\nkgen-cuda = {{ path = {cuda:?} }}\nkgen-cpu = {{ path = {cpu:?} }}\n\n\
-         [workspace]\n"
+        r#"[package]
+name = {name:?}
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+kgen-macros = {{ path = {macros:?} }}
+kgen-cuda = {{ path = {cuda:?} }}
+kgen-cpu = {{ path = {cpu:?} }}
+
+[workspace]
+"#
     );
     fs::write(dir.join("Cargo.toml"), manifest).unwrap();
     fs::copy(here.join("tests/fixtures").join(format!("{name}.rs")), dir.join("src/lib.rs")).unwrap();
