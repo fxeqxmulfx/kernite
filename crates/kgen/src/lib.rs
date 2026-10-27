@@ -416,13 +416,6 @@ fn within(name: &str, args: &[Value], e: kgen_lang::Error) -> kgen_lang::Error {
 
 /// Where the variable an allocation error names was declared.
 fn blame(e: &Error, decls: &[(String, Span)]) -> Option<Span> {
-    let var = match e {
-        Error::ReadBeforeWrite { var }
-        | Error::FixedTwice { var }
-        | Error::FixedChanged { var, .. }
-        | Error::OutOfRegisters { var, .. } => var,
-        Error::FixedClash { a, .. } => a,
-        Error::LabelTwice { .. } | Error::NoSuchLabel { .. } | Error::FallsOffEnd => return None,
-    };
+    let var = e.var()?;
     decls.iter().find(|(name, _)| name == var).map(|&(_, span)| span)
 }

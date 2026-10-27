@@ -720,3 +720,87 @@ fn a_pinned_value_live_across_a_call_that_changes_its_register_is_an_error() {
     let err = compile(&b.0, &toy(3, &[])).unwrap_err();
     assert_eq!(err, Error::FixedChanged { var: "a".into(), reg: r(0) });
 }
+
+#[test]
+fn an_error_names_the_variable_to_blame() {
+    let out = Error::OutOfRegisters {
+        class: Class::Gpr,
+        var: "x".into(),
+        near: None,
+        taken: vec![("y".into(), r(1))],
+        changed: vec![r(0)],
+        have: 2,
+    };
+    let cases = [
+        (Error::ReadBeforeWrite { var: "x".into() }, Some("x")),
+        (Error::FixedTwice { var: "x".into() }, Some("x")),
+        (Error::FixedChanged { var: "x".into(), reg: r(0) }, Some("x")),
+        (out, Some("x")),
+        // Of two that clash, the first.
+        (Error::FixedClash { a: "x".into(), b: "y".into(), reg: r(0) }, Some("x")),
+        (Error::LabelTwice { label: 7 }, None),
+        (Error::NoSuchLabel { label: 7 }, None),
+        (Error::FallsOffEnd, None),
+    ];
+    for (e, var) in cases {
+        assert_eq!(e.var(), var, "{e:?}");
+    }
+}
+
+#[test]
+fn a_variable_pinned_to_two_registers_is_refused() {
+    let mut b = Builder::new();
+    let a = b.var("a");
+    b.0.pinned.push((a, r(0)));
+    b.0.pinned.push((a, r(1)));
+    b.def(a, &[]);
+    let y = b.var("y");
+    b.def(y, &[a]);
+    b.ret(y, 0);
+    let err = compile(&b.0, &toy(3, &[])).unwrap_err();
+    assert_eq!(err, Error::FixedTwice { var: "a".into() });
+    assert_eq!(err.to_string(), "`a` must be in two different registers");
+}
+
+#[test]
+fn each_error_says_what_is_wrong_in_words() {
+    let out = |near: Option<&str>, taken: Vec<(&str, PReg)>, changed: Vec<PReg>| Error::OutOfRegisters {
+        class: Class::Gpr,
+        var: "x".into(),
+        near: near.map(String::from),
+        taken: taken.into_iter().map(|(name, reg)| (name.to_string(), reg)).collect(),
+        changed,
+        have: 2,
+    };
+    let cases = [
+        (Error::LabelTwice { label: 7 }, "label 7 is placed twice"),
+        (Error::NoSuchLabel { label: 7 }, "a jump goes to label 7, which is never placed"),
+        (Error::FallsOffEnd, "control runs past the last instruction"),
+        (Error::ReadBeforeWrite { var: "x".into() }, "`x` is read before anything writes it"),
+        (Error::FixedTwice { var: "a".into() }, "`a` must be in two different registers"),
+        (
+            Error::FixedClash { a: "x".into(), b: "y".into(), reg: r(0) },
+            "`x` and `y` are live at once and both must be in PReg { class: Gpr, hw: 0 }",
+        ),
+        (
+            Error::FixedChanged { var: "a".into(), reg: r(0) },
+            "`a` must be in PReg { class: Gpr, hw: 0 }, which an instruction it is live across changes",
+        ),
+        (
+            out(Some("a note"), vec![("y", r(0)), ("z", r(1))], vec![]),
+            "no Gpr register left for `x` (a note): all 2 are held by variables live beside it: y=0 z=1",
+        ),
+        (
+            out(None, vec![], vec![r(0), r(1)]),
+            "no Gpr register left for `x`: an instruction it is live across changes all 2, as a call does",
+        ),
+        (
+            out(None, vec![("y", r(1))], vec![r(0)]),
+            "no Gpr register left for `x`: an instruction it is live across changes 1 of the 2, as a call does, and \
+             variables live beside it hold the rest: y=1",
+        ),
+    ];
+    for (e, want) in cases {
+        assert_eq!(e.to_string(), want, "{e:?}");
+    }
+}
