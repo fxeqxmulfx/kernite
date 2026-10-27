@@ -29,6 +29,15 @@ impl Abi {
             _ => None,
         }
     }
+
+    /// Whether the process runs functions of this ABI, as Rust calls them: `extern "sysv64"`
+    /// alone. A GPU runs the others.
+    pub fn native(self) -> bool {
+        match self {
+            Abi::Sysv64 => true,
+            Abi::PtxKernel | Abi::PtxFunc => false,
+        }
+    }
 }
 
 /// The ABI `f` names, if kgen compiles for it.
@@ -59,10 +68,10 @@ pub fn owner(module: &Module) -> Result<Owner, kgen_lang::Error> {
             _ => None,
         })
         .collect();
-    if !abis.contains(&Abi::Sysv64) {
+    if !abis.iter().any(|a| a.native()) {
         return Ok(Owner::Gpu);
     }
-    if abis.iter().all(|&a| a == Abi::Sysv64) {
+    if abis.iter().all(|a| a.native()) {
         return Ok(Owner::Process);
     }
     match module.items.iter().find_map(|item| match &item.kind {

@@ -3,7 +3,29 @@
 
 use kgen_lang::{IntTy, Value, parse};
 
-use crate::{Owner, cooperative, function, instance, owner};
+use crate::{Abi, Owner, abi, cooperative, function, instance, owner};
+
+/// An ABI is one kgen compiles for, by the name Rust writes it as, or none. Of them, the process
+/// runs `extern "sysv64"` alone.
+#[test]
+fn an_abi_is_one_kgen_compiles_for() {
+    let named = [("sysv64", Abi::Sysv64), ("ptx-kernel", Abi::PtxKernel), ("ptx-func", Abi::PtxFunc)];
+    for (name, want) in named {
+        assert_eq!(Abi::of(name), Some(want), "{name}");
+    }
+    for name in ["C", "Rust", "win64", "system", "ptx"] {
+        assert_eq!(Abi::of(name), None, "{name}");
+    }
+    let native: Vec<Abi> = named.iter().map(|&(_, abi)| abi).filter(|abi| abi.native()).collect();
+    assert_eq!(native, [Abi::Sysv64]);
+    let src = "unsafe extern \"sysv64\" fn k(x: u64) -> u64 { ret(x); }\n\
+               unsafe extern \"ptx-kernel\" fn g(x: *mut u32) { st.global.u32([x], 1); }\n\
+               extern \"C\" fn c() {}\n\
+               fn h() {}";
+    let module = parse(src).unwrap();
+    let of = |name| abi(function(&module, name).unwrap());
+    assert_eq!([of("k"), of("g"), of("c"), of("h")], [Some(Abi::Sysv64), Some(Abi::PtxKernel), None, None]);
+}
 
 /// The statics of a module whose kernels are x86's are the process's; those of a module of PTX
 /// kernels, or of none, the GPU's. A module of both kinds of kernel and a static is two modules,
