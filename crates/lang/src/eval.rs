@@ -582,20 +582,27 @@ impl<'a, T: Target> Eval<'a, T> {
                     _ => tl.or(*th),
                 };
                 let end = if *inclusive { *h + 1 } else { *h };
-                if end - *l > 1 << 20 {
-                    return Err(at(format!("{l}..{end} unrolls to too many")));
-                }
+                value::fits((end - *l).max(0) as u128).map_err(at)?;
                 Ok(Value::Array((*l..end).map(|x| Value::Int(x, ty)).collect()))
             }
             Expr::Array(items, _) => {
-                items.iter().map(|x| self.value(x, want)).collect::<Result<Vec<_>, _>>().map(Value::Array)
+                // Items past the most are worked out only to count what they hold, for the error,
+                // and not kept.
+                let (mut xs, mut held) = (vec![], 0);
+                for x in items {
+                    let x = self.value(x, want)?;
+                    held += value::held(&x);
+                    if value::fits(held).is_ok() {
+                        xs.push(x);
+                    }
+                }
+                value::fits(value::array(held, items.len())).map_err(at)?;
+                Ok(Value::Array(xs))
             }
             Expr::Repeat(item, len, _) => {
                 let v = self.value(item, want)?;
                 let n = self.count(len)?;
-                if n > 1 << 20 {
-                    return Err(at(format!("{n} elements are too many")));
-                }
+                value::fits(value::array(n as u128 * value::held(&v), n)).map_err(at)?;
                 Ok(Value::Array(vec![v; n]))
             }
             Expr::Paren(inner, _) => self.value(inner, want),

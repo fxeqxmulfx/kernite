@@ -13,6 +13,11 @@ fn ptx(src: &str) -> String {
     module.split(".visible .entry ").nth(1).expect("an entry").to_string()
 }
 
+/// Why kernel `k`, whose body is `body` from its second line on, does not compile.
+fn refused(body: &str) -> String {
+    kgen::x86_str(&format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\n"), "k").unwrap_err()
+}
+
 #[test]
 fn a_kernel_runs_its_helpers_in_place() {
     let src = r#"
@@ -232,8 +237,7 @@ fn an_if_that_guards_no_instruction_is_refused() {
     let block = "an `if` on a variable guards each instruction inside, and its block runs none";
     // x86 takes no predicate, and a note is no instruction.
     for body in [r#"let g: gpr; zero(g); if g { note("x"); }"#, "let g: gpr; zero(g); if g {}"] {
-        let got = kgen::x86_str(&format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\n"), "k").unwrap_err();
-        assert_eq!(got, format!("2:22: {block}"), "{body}");
+        assert_eq!(refused(body), format!("2:22: {block}"), "{body}");
     }
     // PTX takes a `pred` alone, and `r` is a `u32`. A block counts what it runs, not what it
     // holds: a `for` over nothing runs none, and so does a call of `h`, which is empty. A block
@@ -361,8 +365,7 @@ fn a_shift_and_a_not_are_checked_for_overflow() {
         ),
     ];
     for (body, want) in cases {
-        let got = kgen::x86_str(&format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\n"), "k").unwrap_err();
-        assert_eq!(got, want, "{body}");
+        assert_eq!(refused(body), want, "{body}");
     }
 }
 
@@ -717,4 +720,96 @@ fn a_constant_works_out_on_its_own() {
     for (name, want) in cases {
         assert_eq!(value(name), want.map(String::from).map_err(String::from), "{name}");
     }
+}
+
+/// A range unrolls to no more numbers than a value holds, 1048576 at most.
+#[test]
+fn a_range_of_more_than_a_value_holds_is_refused() {
+    assert_eq!(refused("for i in 0..1048577 {}"), "2:11: 1048577 elements are too many: a value holds 1048576 at most");
+}
+
+/// A repeat of more elements than a value holds is refused there, before it is built, and so is one
+/// of empty arrays or of arrays of one, which hold no more than one each but cost memory of their
+/// own.
+#[test]
+fn a_repeat_of_more_than_a_value_holds_is_refused() {
+    let cases = [
+        (
+            "const X: [u32; 1048577] = [0; 1048577];",
+            "2:27: 1048577 elements are too many: a value holds 1048576 at most",
+        ),
+        (
+            "const X: [[u32; 0]; 1048577] = [[]; 1048577];",
+            "2:32: 1048577 elements are too many: a value holds 1048576 at most",
+        ),
+        (
+            "const X: [[[u32; 1]; 1]; 524288] = [[[0]]; 524288];",
+            "2:36: 1572864 elements are too many: a value holds 1048576 at most",
+        ),
+    ];
+    for (body, want) in cases {
+        assert_eq!(refused(body), want, "{body}");
+    }
+}
+
+/// A repeat of repeats, each within the most a value holds, is refused at the outer one when they
+/// hold more in all, however deep they nest, before it is built: the first would hold
+/// 1099511627776 numbers.
+#[test]
+fn a_repeat_of_repeats_holding_more_in_all_is_refused() {
+    let cases = [
+        (
+            "const X: [[u32; 1 << 20]; 1 << 20] = [[0; 1 << 20]; 1 << 20];",
+            "2:38: 1099511627776 elements are too many: a value holds 1048576 at most",
+        ),
+        (
+            "const X: [[[u32; 1 << 10]; 1 << 10]; 2] = [[[0; 1 << 10]; 1 << 10]; 2];",
+            "2:43: 2097152 elements are too many: a value holds 1048576 at most",
+        ),
+    ];
+    for (body, want) in cases {
+        assert_eq!(refused(body), want, "{body}");
+    }
+}
+
+/// An array of repeats, each within the most a value holds, is refused at the array when they hold
+/// more in all, and its error counts what every item holds; so is an array of one that holds the
+/// most, which counts as one more.
+#[test]
+fn an_array_of_repeats_holding_more_in_all_is_refused() {
+    let cases = [
+        (
+            "const X: [[u32; 1 << 20]; 3] = [[0; 1 << 20], [0; 1 << 20], [0; 1 << 20]];",
+            "2:32: 3145728 elements are too many: a value holds 1048576 at most",
+        ),
+        (
+            "const X: [[u32; 1 << 20]; 1] = [[0; 1 << 20]];",
+            "2:32: 1048577 elements are too many: a value holds 1048576 at most",
+        ),
+    ];
+    for (body, want) in cases {
+        assert_eq!(refused(body), want, "{body}");
+    }
+}
+
+/// A value that holds the most, 1048576 elements, keeps every item, and a range unrolls to as many.
+#[test]
+fn a_value_holding_the_most_keeps_every_item() {
+    let src = r#"pub unsafe extern "sysv64" fn k(x: u64) -> u64 {
+    for i in 0..1048576 {}
+    for half in [[0; 1 << 19], [0; 1 << 19]] {
+        add(x, 1);
+    }
+    ret(x);
+}
+"#;
+    let want = "# k(gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves []
+# x=rdi,rax
+    add rdi, 1
+    add rdi, 1
+    mov rax, rdi
+    ret
+";
+    assert_eq!(x86(src, "k"), want);
 }

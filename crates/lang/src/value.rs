@@ -138,6 +138,32 @@ impl fmt::Display for Value {
     }
 }
 
+/// The most elements a value holds in all, however its arrays nest.
+pub const MOST: u128 = 1 << 20;
+
+/// How many elements `v` holds in all, however its arrays nest: each number, float and `bool`
+/// it is made of, and each array of none or one item; or `v` itself if it is no array.
+pub fn held(v: &Value) -> u128 {
+    match v {
+        Value::Array(xs) => array(xs.iter().map(held).sum(), xs.len()),
+        _ => 1,
+    }
+}
+
+/// How many elements an array of `len` items holds in all, if they hold `items`: one more if it
+/// has fewer than two, so that a value that holds n elements is made of fewer than 2n values.
+pub fn array(items: u128, len: usize) -> u128 {
+    items + u128::from(len < 2)
+}
+
+/// Nothing, if a value that holds `n` elements holds no more than `MOST`; else why not.
+pub fn fits(n: u128) -> Result<(), String> {
+    if n > MOST {
+        return Err(format!("{n} elements are too many: a value holds {MOST} at most"));
+    }
+    Ok(())
+}
+
 /// The type a value is wanted at, which an unsuffixed literal takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Want {

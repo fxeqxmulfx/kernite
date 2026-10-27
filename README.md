@@ -36,7 +36,9 @@ and `kernels::LISTINGS` holds each kernel's listing for snapshots. Everything th
 while the kernel compiles: `for` unrolls, `if` on a bool chooses, a function without an ABI is a helper inlined
 where it is called, and `<const N: usize>` makes one generic. A generic kernel is compiled for each value its
 `#[instances(1, 4)]` lists, each a kernel of its own, which Rust calls as it calls a generic function,
-`kernels::dot::<4>(x, y, n)`; a value it does not list fails to build. [`kgen-lang`](crates/lang/src/lib.rs)
+`kernels::dot::<4>(x, y, n)`; a value it does not list fails to build. A value known now holds at most 1048576
+elements in all, however its arrays nest, and a range as many. Each number, float and `bool` is an element, and
+so is each array of none or one item, which costs memory of its own. [`kgen-lang`](crates/lang/src/lib.rs)
 describes the language.
 
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
