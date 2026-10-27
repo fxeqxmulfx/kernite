@@ -81,6 +81,24 @@ fn every_crate_depends_only_inward() {
 }
 
 #[test]
+fn no_crate_depends_on_anything_outside_the_workspace() {
+    // The lock holds every package that the workspace's crates depend on, and every package those
+    // depend on, whether from a registry, git or a path. Each is one of the workspace's crates,
+    // those of crates/ and examples/.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut crates = vec![];
+    for dir in ["crates", "examples"] {
+        for entry in fs::read_dir(root.join(dir)).unwrap() {
+            crates.push(package(&entry.unwrap().path().join("Cargo.toml")));
+        }
+    }
+    let lock = fs::read_to_string(root.join("Cargo.lock")).unwrap();
+    for (name, _) in locked(&lock) {
+        assert!(crates.iter().any(|c| c == name), "a crate depends on {name}, from outside the workspace");
+    }
+}
+
+#[test]
 fn each_crates_dependencies_are_read_from_the_lock() {
     // A lock as cargo writes it. kgen-macros depends on kgen-x86 here, as it would by
     // `[dependencies.kgen-x86]` in its manifest, or by any other way of writing it.
