@@ -15,14 +15,17 @@ use crate::rust::{
 const CPU: &str = "kernite-cpu";
 
 /// `f` as an `#[unsafe(naked)]` function whose body is the listing of its one instance, and
-/// the statics its constants are, in a module beside it. For a function of compile-time
-/// arguments, each instance is such a function in that module, and `f` is one that calls the
-/// instance its arguments pick. So is each instance of a cooperative kernel, which takes the
-/// thread's place in the grid after `f`'s parameters, and `f` is its [`grid_launcher`]. Each
-/// names the functions of `module` it calls by the paths [`callees`] gives, and its statics by
-/// those [`reached`] gives. Its safety contract says that nothing else touches `named`, the
-/// module's memory, while it runs. A cooperative kernel of a crate without `kernite-cpu` is
-/// [`x86_stub`]'s instead, with the error that says so.
+/// the statics its constants are, in a hidden module beside it. For a function of compile-time
+/// arguments, each instance is such a function, of the name [`instance_name`] gives it, and `f`
+/// is one that calls the instance its arguments pick. So is each instance of a cooperative
+/// kernel, which takes the thread's place in the grid after `f`'s parameters, and `f` is its
+/// [`grid_launcher`]. An instance is a function of the module of kernels, as `f` is, and not of
+/// a module of its own: it takes `f`'s parameters as they are written, and in a module of its
+/// own `super::W`, or a `W` that a `use` of the module brings in, would not mean what it means
+/// in `f`. Each names the functions of `module` it calls by the names [`callees`] gives, and its
+/// statics by those [`reached`] gives. Its safety contract says that nothing else touches
+/// `named`, the module's memory, while it runs. A cooperative kernel of a crate without
+/// `kernite-cpu` is [`x86_stub`]'s instead, with the error that says so.
 pub(crate) fn naked(
     module: &lang::Module,
     f: &Fn,
@@ -36,7 +39,6 @@ pub(crate) fn naked(
         return x86_stub(f, instances.len(), named, top);
     }
     let mut out = TokenStream::new();
-    let mut items = String::new();
     let mut statics = vec![];
     if let [one] = instances
         && one.args.is_empty()
@@ -48,12 +50,8 @@ pub(crate) fn naked(
         out.extend(contract(docs, named));
         out.extend(parse("#[unsafe(naked)]"));
         out.extend(signature(f, top));
-        let code = asm(
-            listing,
-            &format!("{hidden}::C"),
-            &callees(module, &one.calls, false, top),
-            &reached(module, listing, false, top),
-        );
+        let code =
+            asm(listing, &format!("{hidden}::C"), &callees(module, &one.calls, top), &reached(module, listing, top));
         out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&code)))]);
         statics.push(("C".to_string(), listing));
     } else {
@@ -73,21 +71,21 @@ pub(crate) fn naked(
             parse("->").into_iter().chain(top[r.tokens.clone()].iter().cloned()).collect()
         });
         let ty = format!("unsafe extern \"sysv64\" fn({}) {ret}", tys.join(", "));
-        let mut arms = vec![];
+        let (mut arms, mut fns) = (vec![], String::new());
         for (k, instance) in instances.iter().enumerate() {
-            let listing = &instance.naked;
-            items += &format!(
-                "#[unsafe(naked)]\npub unsafe extern \"sysv64\" fn I{k}({}) {ret} {{ {} }}\n",
-                params.join(", "),
-                asm(
-                    listing,
-                    &format!("I{k}C"),
-                    &callees(module, &instance.calls, true, top),
-                    &reached(module, listing, true, top)
-                )
+            let (listing, name) = (&instance.naked, instance_name(&f.name, k));
+            let code = asm(
+                listing,
+                &format!("{hidden}::I{k}C"),
+                &callees(module, &instance.calls, top),
+                &reached(module, listing, top),
+            );
+            fns += &format!(
+                "#[doc(hidden)]\n#[unsafe(naked)]\nunsafe extern \"sysv64\" fn {name}({}) {ret} {{ {code} }}\n",
+                params.join(", ")
             );
             statics.push((format!("I{k}C"), listing));
-            arms.push((instance.args.clone(), format!("{hidden}::I{k} as {ty}")));
+            arms.push((instance.args.clone(), format!("{name} as {ty}")));
         }
         if cooperative {
             out.extend(grid_launcher(f, Some(&arms), needs(instances), named, top));
@@ -100,7 +98,9 @@ pub(crate) fn naked(
             let body = format!("unsafe {{ ({})({}) }}", pick(f, &arms, top), names.join(", "));
             out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&body)))]);
         }
+        out.extend(parse(&fns));
     }
+    let mut items = String::new();
     let mut aligns: Vec<u32> = statics.iter().flat_map(|(_, l)| l.consts.iter().map(|c| c.align)).collect();
     aligns.sort();
     aligns.dedup();
@@ -125,9 +125,9 @@ pub(crate) fn naked(
 }
 
 /// The body of a naked function whose code is `listing`'s, its constants the statics
-/// `{statics}0`, `{statics}1` and on, the functions it calls at the paths `funcs`, and the
-/// module's memory it names as `memory` has it: each operand's name, and the path to it.
-fn asm(listing: &Naked, statics: &str, funcs: &[String], memory: &[(String, String)]) -> String {
+/// `{statics}0`, `{statics}1` and on, the functions it calls by the names `funcs`, and the
+/// module's memory it names, which `memory` gives by the name of each static.
+fn asm(listing: &Naked, statics: &str, funcs: &[String], memory: &[String]) -> String {
     let mut asm = String::from("::core::arch::naked_asm!(");
     for line in &listing.code {
         asm += &format!("{line:?}, ");
@@ -138,17 +138,16 @@ fn asm(listing: &Naked, statics: &str, funcs: &[String], memory: &[(String, Stri
     for (i, path) in funcs.iter().enumerate() {
         asm += &format!("f{i} = sym {path}, ");
     }
-    for (name, path) in memory {
-        asm += &format!("{name} = sym {path}, ");
+    for name in memory {
+        asm += &format!("{name} = sym {name}, ");
     }
     asm + ")"
 }
 
-/// The operand by which the code of `listing`, of a kernel of `module`, names each static it
-/// names, and the path to the static from beside the kernels or from `inside` a kernel's hidden
-/// module: its name as written, `COUNTS`, or `r#type`, whose `{type}` in the code names it.
-fn reached(module: &lang::Module, listing: &Naked, inside: bool, top: &[TokenTree]) -> Vec<(String, String)> {
-    let up = if inside { "super::" } else { "" };
+/// The name by which the code of `listing`, of a kernel of `module`, names each static it
+/// names, which is the static's name in `module` as written, `COUNTS`, or `r#type`, whose
+/// `{type}` in the code names it.
+fn reached(module: &lang::Module, listing: &Naked, top: &[TokenTree]) -> Vec<String> {
     let written = |name: &str| {
         let s = module.items.iter().find_map(|item| match &item.kind {
             ItemKind::Static(s) if s.name == name => Some(s),
@@ -156,7 +155,7 @@ fn reached(module: &lang::Module, listing: &Naked, inside: bool, top: &[TokenTre
         });
         top[s.expect("a kernel names a static of its module").vis.end + 1].to_string()
     };
-    listing.statics.iter().map(|name| written(name)).map(|w| (w.clone(), format!("{up}{w}"))).collect()
+    listing.statics.iter().map(|name| written(name)).collect()
 }
 
 /// `docs`, a kernel's attributes, with what its safety contract says of `named`, the memory of
@@ -243,21 +242,25 @@ fn elements(m: &HostStatic) -> Vec<String> {
         .collect()
 }
 
-/// The paths by which the code of an instance of a kernel of `module` names each function it
-/// `calls`, from beside the kernels or from `inside` a kernel's hidden module: a function of no
-/// compile-time arguments by its name as written, `r#fn` as well, and an instance, `tile::<4>`, as
-/// the function in its function's hidden module, `__kernite_tile::I0`, that [`naked`] makes it.
-fn callees(module: &lang::Module, calls: &[Call], inside: bool, top: &[TokenTree]) -> Vec<String> {
-    let up = if inside { "super::" } else { "" };
-    let path = |call: &Call| match call.instance {
-        Some(k) => format!("{up}__kernite_{}::I{k}", call.function),
+/// The names by which the code of an instance of a kernel of `module` names each function it
+/// `calls`: a function of no compile-time arguments by its name as written, `r#fn` as well, and an
+/// instance, `tile::<4>`, by the name [`instance_name`] gives the function [`naked`] makes of it.
+fn callees(module: &lang::Module, calls: &[Call], top: &[TokenTree]) -> Vec<String> {
+    let name = |call: &Call| match call.instance {
+        Some(k) => instance_name(&call.function, k),
         None => {
             let g = kernite::function(module, &call.function).expect("a kernel calls a function of its module");
             // Its name as written, after `fn`.
-            format!("{up}{}", top[g.head.end + 1])
+            top[g.head.end + 1].to_string()
         }
     };
-    calls.iter().map(path).collect()
+    calls.iter().map(name).collect()
+}
+
+/// The name of the function that [`naked`] makes of instance `k` of the kernel `function` of
+/// compile-time arguments. The code of a kernel that calls the instance names it by this name.
+fn instance_name(function: &str, k: usize) -> String {
+    format!("__kernite_{function}_I{k}")
 }
 
 /// The function that runs `f`, a cooperative x86 kernel, on the threads of a grid, of `f`'s
@@ -380,19 +383,21 @@ fn needs(instances: &[NativeInstance]) -> TokenStream {
 
 /// `f`, an x86 kernel that does not compile, or a cooperative one in a crate without
 /// `kernite-cpu`, as a function that never runs: of `f`'s signature, or of its launcher's, for a
-/// cooperative kernel. One of compile-time arguments has its `instances` in its hidden module
-/// too, as [`naked`] would put them there, for kernels that call one to name. Its safety contract
-/// says what the kernel's would of `named`, the module's memory.
+/// cooperative kernel. One of compile-time arguments has its `instances` as functions too, named
+/// as [`naked`] would name them, for kernels that call one to name. Its safety contract says
+/// what the kernel's would of `named`, the module's memory.
 pub(crate) fn x86_stub(f: &Fn, instances: usize, named: &[String], top: &[TokenTree]) -> TokenStream {
     if f.cooperative.is_some() {
         return grid_launcher(f, None, TokenStream::new(), named, top);
     }
     let mut out = stub(f, top);
-    if !f.generics.is_empty() && instances > 0 {
-        let items: String = (0..instances)
-            .map(|k| format!("pub unsafe extern \"sysv64\" fn I{k}() {{ ::core::unreachable!() }}\n"))
-            .collect();
-        out.extend(parse(&format!("#[doc(hidden)]\nmod __kernite_{} {{\n{items}}}\n", f.name)));
+    if !f.generics.is_empty() {
+        for k in 0..instances {
+            let name = instance_name(&f.name, k);
+            out.extend(parse(&format!(
+                "#[doc(hidden)]\nunsafe extern \"sysv64\" fn {name}() {{ ::core::unreachable!() }}\n"
+            )));
+        }
     }
     out
 }

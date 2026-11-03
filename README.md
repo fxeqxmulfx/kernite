@@ -50,6 +50,9 @@ held to 64 levels, so that no kernel can run the compiler out of stack. Brackets
 together with the expression inside them, along the helpers that call one another.
 [`kernite-lang`](crates/lang/src/lib.rs) describes the language.
 
+A type in a kernel's parameters or return means what it means in any function of the module: `super::W` is the `W`
+beside the module of kernels, and `self::W` the one in it.
+
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kernite_macros::consts]` is on, and a
 module of kernels takes them by its path, `#[kernite_macros::kernels(consts = crate::model::sizes)]`: its kernels read

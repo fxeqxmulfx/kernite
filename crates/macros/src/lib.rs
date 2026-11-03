@@ -91,6 +91,9 @@
 //! as one of them, for Rust cannot keep a const apart from a parameter of its name: that is
 //! an error at its name.
 //!
+//! A type in a kernel's parameters or return means what it means in any function of the module,
+//! `super::W` and `self::W` among them.
+//!
 //! The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one,
 //! `dead_code` say, and build its kernels: Rust lints the names and the code a kernel is
 //! written with, and none that the macro adds. Clippy's `too_many_arguments` is the one lint a

@@ -2,11 +2,12 @@
 //! `line:column`, in the order Cargo prints them, and each kernel's safety contract, in its
 //! docs. Each fixture is built as a user's crate is, and what Cargo says of it is compared line
 //! for line, the errors in rustc's short form, `src/lib.rs:4:1: error: ..`. A fixture is a
-//! crate's `src/lib.rs`, so the line an error names is that line of the fixture.
+//! crate's `src/lib.rs`, so the line an error names is that line of the fixture. One that holds
+//! tests is run as well, to show that its kernels do what they are written to.
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::{Mutex, PoisonError};
 
 /// Held while Cargo builds a fixture: the fixtures share a target directory, and a Cargo that
@@ -67,9 +68,16 @@ fn edited(name: &str, edits: &[(&str, &str)]) -> PathBuf {
 }
 
 /// Whether Cargo did `command` in the crate at `dir`, and what it said, a line each, in order.
-/// The crate is built offline into `kernite-macros/target`, so that it never waits for the build
-/// that runs these tests. What the environment would change of a build is taken out of it.
 fn cargo_in(command: &[&str], dir: &Path) -> (bool, Vec<String>) {
+    let out = cargo_out(command, dir);
+    let said = String::from_utf8(out.stderr).expect("Cargo writes UTF-8");
+    (out.status.success(), said.lines().map(String::from).collect())
+}
+
+/// What Cargo did when it ran `command` in the crate at `dir`. The crate is built offline into
+/// `kernite-macros/target`, so that it never waits for the build that runs these tests. What the
+/// environment would change of a build is taken out of it.
+fn cargo_out(command: &[&str], dir: &Path) -> Output {
     let _one = CARGO.lock().unwrap_or_else(PoisonError::into_inner);
     let mut run = Command::new(env!("CARGO"));
     run.args(command);
@@ -89,15 +97,24 @@ fn cargo_in(command: &[&str], dir: &Path) -> (bool, Vec<String>) {
     ] {
         run.env_remove(var);
     }
-    let out = run.output().expect("Cargo runs");
-    let said = String::from_utf8(out.stderr).expect("Cargo writes UTF-8");
-    (out.status.success(), said.lines().map(String::from).collect())
+    run.output().expect("Cargo runs")
 }
 
 /// That Cargo builds fixture `name` without a word.
 fn builds_quietly(name: &str) {
     let (built, said) = cargo(&["build"], name);
     assert!(built && said.is_empty(), "fixtures/{name}.rs: built {built}, and Cargo said:\n{}", said.join("\n"));
+}
+
+/// That Cargo builds fixture `name` without a word, and the tests in it pass, its own and its doc
+/// tests, which are crates that call it: the kernels run, as a crate that uses them runs them.
+/// Returns what the tests printed.
+fn runs_quietly(name: &str) -> String {
+    let out = cargo_out(&["test"], &written(name));
+    let (said, printed) = (String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
+    let passed = out.status.success() && said.is_empty();
+    assert!(passed, "fixtures/{name}.rs: ran {}, and Cargo said:\n{said}\n{printed}", out.status.success());
+    printed.into_owned()
 }
 
 /// That Cargo documents fixture `name` without a word; then where rustdoc wrote its pages.
@@ -558,6 +575,19 @@ fn kernels_that_compile_say_nothing() {
 #[test]
 fn a_kernels_parameters_keep_their_names_beside_those_the_macros_rust_binds() {
     builds_quietly("parameters");
+}
+
+/// A parameter's type means in every x86 kernel what it means in any function of the module, whether
+/// the kernel is called as it is written, of compile-time arguments, or cooperative: `super::W`,
+/// `crate::W`, `self::W`, a `W` the module takes from beside it or holds, and `super::super::W`
+/// where the module of kernels is nested. A GPU kernel's launcher takes them as before. Rust builds
+/// the crate without a word, and the test the fixture holds runs each x86 kernel, which writes
+/// through its pointer. So does its doc test, from another crate.
+#[test]
+fn a_parameters_type_means_what_it_means_where_the_kernel_is_written() {
+    let printed = runs_quietly("beside");
+    let passed = printed.matches("1 passed").count();
+    assert_eq!(passed, 2, "fixtures/beside.rs ran its test and its doc test, and printed:\n{printed}");
 }
 
 /// A compile-time argument is no local, and no span of stable Rust keeps it apart from one of its
