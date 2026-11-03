@@ -22,22 +22,25 @@ pub mod kernels {
     /// of `n`, where `shape` points at `m`, `n` and `k`, in a row: each element of `c` a chain
     /// of fused multiply-adds over `k` in order, from +0.
     ///
-    /// For each block of `KC` steps of `k`, `a` is packed into slivers of `MR` rows at `ap`,
-    /// which has room for `m` rows, rounded up to `MR`, of `min(k, KC)` floats; and `b`, a block
-    /// of `NC` columns at a time, into slivers of `NR` columns at `bp`, which has room for
-    /// `min(k, KC)` rows of `min(n, NC)` floats, rounded up to `NR`. Each has 15 floats more, to
-    /// start at a multiple of 64 bytes. The micro-kernel multiplies a sliver of each into a tile
-    /// of `c` in registers: from +0 for the first block of `k`, and from what the tile holds for
-    /// each after, so that each chain goes on in order. Past the edges of `c` the slivers hold
-    /// zeros, and of a tile there only what lies in `c` is read and written.
+    /// For each block of `KC` steps of `k`, `a` is packed into slivers of `MR` rows at `packed`,
+    /// which has room for `m` rows, rounded up to `MR`, of `min(k, KC)` floats, and for 15 more,
+    /// to start at a multiple of 64 bytes: they grow with `m`, so the caller hands them in. Then
+    /// `b`, a block of `NC` columns at a time, is packed into slivers of `NR` columns in the
+    /// kernel's stack memory, which stays a thread's own, in its core's L2. It takes 384 KB: a
+    /// thread Rust starts has 2 MB of stack unless told otherwise, and where less is left,
+    /// kernite's probes stop the kernel at the stack's guard page. The micro-kernel multiplies a
+    /// sliver of each into a tile of `c` in registers: from +0 for the first block of `k`, and
+    /// from what the tile holds for each after, so that each chain goes on in order. Past the
+    /// edges of `c` the slivers hold zeros, and of a tile there only what lies in `c` is read
+    /// and written.
     pub unsafe extern "sysv64" fn sgemm(
         c: *mut f32,
         a: *const f32,
         b: *const f32,
         shape: *const usize,
-        ap: *mut f32,
-        bp: *mut f32,
+        packed: *mut f32,
     ) {
+        let block: local<[f32; KC * NC], 64>;
         let (m, n, k): (gpr, gpr, gpr);
         mov(m, [shape]);
         mov(n, [shape + 8]);
@@ -46,10 +49,8 @@ pub mod kernels {
         jz(done);
         test(n, n);
         jz(done);
-        add(ap, 63);
-        and(ap, -64);
-        add(bp, 63);
-        and(bp, -64);
+        add(packed, 63);
+        and(packed, -64);
         note("the bytes from a row of b or c to the next");
         let ld: gpr;
         mov(ld, n);
@@ -65,7 +66,7 @@ pub mod kernels {
         mov(kc, k);
         sub(kc, pc);
         at_most::<KC>(kc);
-        pack_a(ap, ak, k, m, kc);
+        pack_a(packed, ak, k, m, kc);
 
         note("blocks of NC columns of b, and of c");
         let (bj, cj, nleft): (gpr, gpr, gpr);
@@ -73,20 +74,21 @@ pub mod kernels {
         mov(cj, c);
         mov(nleft, n);
         label(columns);
-        let nc: gpr;
+        let (nc, to): (gpr, gpr);
         mov(nc, nleft);
         at_most::<NC>(nc);
-        pack_b(bp, bj, ld, nc, kc);
+        lea(to, [block]);
+        pack_b(to, bj, ld, nc, kc);
 
         note("slivers of MR rows of a, and of c");
         let (pa, ci, hleft): (gpr, gpr, gpr);
-        mov(pa, ap);
+        mov(pa, packed);
         mov(ci, cj);
         mov(hleft, m);
         label(rows);
         note("slivers of NR columns of the block, a tile of c each");
         let (pb, ct, wleft, x): (gpr, gpr, gpr, gpr);
-        mov(pb, bp);
+        lea(pb, [block]);
         mov(ct, ci);
         mov(wleft, nc);
         label(tile);
@@ -350,13 +352,10 @@ pub fn sgemm(c: &mut [f32], a: &[f32], b: &[f32], shape: crate::Shape) {
     let (m, n, k) = shape;
     assert!(supported(), "the kernels need AVX2 and FMA");
     crate::operands((a.len(), b.len(), c.len()), shape);
-    use kernels::{KC, MR, NC, NR};
-    let depth = k.min(KC);
-    let mut ap = Vec::with_capacity(m.next_multiple_of(MR) * depth + 15);
-    let mut bp = Vec::with_capacity(depth * n.min(NC).next_multiple_of(NR) + 15);
-    let (c, a, b) = (c.as_mut_ptr(), a.as_ptr(), b.as_ptr());
+    use kernels::{KC, MR};
+    let mut packed = Vec::with_capacity(m.next_multiple_of(MR) * k.min(KC) + 15);
     // SAFETY: `m` rows of `k` floats behind `a`, `k` rows of `n` behind `b` and `m` rows of `n`
-    // behind `c`, as `shape` says; room for what the kernel packs behind `ap` and `bp`; and the
-    // CPU has what the kernel needs.
-    unsafe { kernels::sgemm(c, a, b, [m, n, k].as_ptr(), ap.as_mut_ptr(), bp.as_mut_ptr()) }
+    // behind `c`, as `shape` says; room for `a`'s slivers in `packed`; and the CPU has what the
+    // kernel needs.
+    unsafe { kernels::sgemm(c.as_mut_ptr(), a.as_ptr(), b.as_ptr(), [m, n, k].as_ptr(), packed.as_mut_ptr()) }
 }
