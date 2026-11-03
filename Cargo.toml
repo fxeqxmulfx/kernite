@@ -12,7 +12,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
 license = "MIT"
-repository = "https://github.com/fxeqxmulfx/kgen"
+repository = "https://github.com/fxeqxmulfx/kernite"
 keywords = ["gpu", "cuda", "ptx", "x86", "assembly"]
 categories = ["compilers", "hardware-support"]
 
