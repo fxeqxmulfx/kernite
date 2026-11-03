@@ -87,7 +87,7 @@
     # k reloaded
     mov rdx, qword ptr [rsp + 16]
     sub rdx, rcx
-    mov rsi, 256
+    mov rsi, 384
     cmp rdx, rsi
     cmova rdx, rsi
     test rdx, rdx
@@ -177,7 +177,7 @@
 13:
     # nleft reloaded
     mov rsi, qword ptr [rsp + 72]
-    mov rdi, 384
+    mov rdi, 256
     cmp rsi, rdi
     cmova rsi, rdi
     test rdx, rdx
@@ -494,32 +494,32 @@
     ja 17b
     # bj reloaded
     mov rsi, qword ptr [rsp + 56]
-    add rsi, 1536
+    add rsi, 1024
     # bj spilled
     mov qword ptr [rsp + 56], rsi
     # cj reloaded
     mov rsi, qword ptr [rsp + 64]
-    add rsi, 1536
+    add rsi, 1024
     # cj spilled
     mov qword ptr [rsp + 64], rsi
     # nleft reloaded
     mov rsi, qword ptr [rsp + 72]
-    sub rsi, 384
+    sub rsi, 256
     # nleft spilled
     mov qword ptr [rsp + 72], rsi
     ja 13b
     # ak reloaded
     mov rdx, qword ptr [rsp + 24]
-    add rdx, 1024
+    add rdx, 1536
     # ak spilled
     mov qword ptr [rsp + 24], rdx
-    imul rdx, rax, 256
+    imul rdx, rax, 384
     # bk reloaded
     mov rsi, qword ptr [rsp + 32]
     add rsi, rdx
     # bk spilled
     mov qword ptr [rsp + 32], rsi
-    add rcx, 256
+    add rcx, 384
     # k reloaded
     mov rdx, qword ptr [rsp + 16]
     cmp rcx, rdx

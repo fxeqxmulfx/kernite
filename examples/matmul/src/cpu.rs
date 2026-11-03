@@ -9,12 +9,12 @@ pub mod kernels {
     /// Columns of `c` it keeps in registers: two vectors of eight a row, twelve of the sixteen
     /// `ymm`s, with two for a row of `b` and one for a float of `a`.
     pub const NR: usize = 16;
-    /// Steps of `k` a block takes: a sliver of `a`, `MR` rows of `KC` floats, 6 KB, stays in L1
-    /// while the slivers of `b`'s block pass it.
-    pub const KC: usize = 256;
+    /// Steps of `k` a block takes: a sliver of `a`, `MR` rows of `KC` floats, 9 KB, is read from
+    /// L1 while the slivers of `b`'s block pass it.
+    pub const KC: usize = 384;
     /// Columns of `b` a block takes: `KC` rows of `NC` floats, 384 KB, stay in L2 while the
     /// slivers of `a` pass them.
-    pub const NC: usize = 384;
+    pub const NC: usize = 256;
     /// Steps of `k` a turn of the micro-kernel's loop takes.
     pub const UNROLL: usize = 4;
 
