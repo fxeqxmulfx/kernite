@@ -164,7 +164,8 @@ static when it does not.
 An `extern "ptx-kernel"` function is compiled to PTX. The module's kernels are one PTX module, `PTX`, which
 `Kernels::load` hands to the CUDA driver; each kernel is then a method that launches it on a grid.
 [`kernite-cuda`](crates/cuda/src/lib.rs) is the driver, opened when a GPU is asked for, so that a program built with
-GPU kernels still runs where there is none.
+GPU kernels still runs where there is none. A crate with a module of GPU kernels depends on `kernite-cuda`, and kernite
+says at the module when it does not.
 
 ```rust
 #[kernite_macros::kernels]

@@ -32,7 +32,8 @@
 //!   it finds; then each kernel is launched by the method of its name, which takes a
 //!   `kernite_cuda::Grid` and the kernel's parameters, a pointer as the `kernite_cuda::Ptr` a
 //!   buffer on the GPU gives, and an `f16` or a `bf16` as kernite-cuda's, Rust having neither.
-//!   A crate with GPU kernels depends on `kernite-cuda` for these.
+//!   A crate with a module of GPU kernels depends on `kernite-cuda` for these, and the error is
+//!   at the module when it does not.
 //! - An `extern "ptx-func" fn` is a `.func` in `PTX`, which the module's GPU kernels and
 //!   functions call, itself among them, as `call(r, gcd, (a, b))` does. It takes and
 //!   returns PTX's types, `u32` or `f16x2`, or never returns, `-> !`, and leaves nothing

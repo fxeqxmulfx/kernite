@@ -7,9 +7,12 @@ use kernite::DeviceStatic;
 use kernite::lang::{self, Fn, Value};
 
 use crate::rust::{
-    attrs, clashes, error, flatten, host, hygienic, is_ident, is_punct, never, parse, pick, site, visibility,
-    written_params,
+    attrs, clashes, depends_on, error, flatten, host, hygienic, is_ident, is_punct, missing, never, parse, pick, site,
+    visibility, written_params,
 };
+
+/// The crate the Rust of a module of GPU kernels names.
+const CUDA: &str = "kernite-cuda";
 
 /// Where the module's path goes in its PTX and in its kernels' names. A macro is not told
 /// the module it is in, so `kernite_cuda::__named!` writes `module_path!()` there once Rust
@@ -26,7 +29,9 @@ type Launched = (Vec<Value>, usize);
 /// `symbols` is a kernel's name in `ptx`, by its index. Each static of `memory` has a method
 /// of its name too, which gives its memory on the GPU, or never runs, if it did not compile;
 /// and each cooperative kernel has one that says how many blocks its grid has at most, unless
-/// a kernel or a static has that name, which is an error where `at` says.
+/// a kernel or a static has that name, which is an error where `at` says. A crate without
+/// `kernite-cuda` has `PTX` empty and a `Kernels` that is the error, said once, at the module:
+/// nothing else is said of the code that loads it or launches a kernel.
 pub(crate) fn gpu(
     launchers: &[(&Fn, Option<&[Launched]>)],
     symbols: &[String],
@@ -35,6 +40,12 @@ pub(crate) fn gpu(
     top: &[TokenTree],
     at: &dyn std::ops::Fn(lang::Span) -> Span,
 ) -> TokenStream {
+    if !depends_on(CUDA) {
+        let mut out = parse("pub const PTX: &str = \"\"; pub type Kernels =");
+        out.extend(missing(site(), "a module of GPU kernels", CUDA));
+        out.extend(parse(";"));
+        return out;
+    }
     let names: Vec<String> = symbols.iter().map(|s| named(s)).collect();
     let globals: Vec<String> = memory.iter().filter_map(|(_, m)| m.map(|m| named(&m.symbol))).collect();
     let mut out = parse(&format!(

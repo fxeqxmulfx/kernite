@@ -56,6 +56,16 @@ kernite-cpu = {{ path = {cpu:?} }}
     dir
 }
 
+/// Fixture `name` as `written` writes it, but of a crate that does not depend on `krate`.
+fn written_without(name: &str, krate: &str) -> PathBuf {
+    let dir = written(name);
+    let manifest = dir.join("Cargo.toml");
+    let text = fs::read_to_string(&manifest).unwrap();
+    let without: Vec<&str> = text.lines().filter(|line| !line.starts_with(krate)).collect();
+    fs::write(&manifest, without.join("\n") + "\n").unwrap();
+    dir
+}
+
 /// Whether Cargo did `command` in the crate at `dir`, and what it said, a line each, in order.
 /// The crate is built offline into `kernite-macros/target`, so that it never waits for the build
 /// that runs these tests. What the environment would change of a build is taken out of it.
@@ -317,12 +327,7 @@ fn a_static_that_does_not_compile_is_said_once() {
 /// say that `kernite_cpu` is not found, at the attribute.
 #[test]
 fn a_crate_without_kernite_cpu_is_told_at_what_needs_it() {
-    let dir = written("no_cpu");
-    let manifest = dir.join("Cargo.toml");
-    let text = fs::read_to_string(&manifest).unwrap();
-    let without: Vec<&str> = text.lines().filter(|line| !line.starts_with("kernite-cpu")).collect();
-    fs::write(&manifest, without.join("\n") + "\n").unwrap();
-    let (built, said) = cargo_in(&["build"], &dir);
+    let (built, said) = cargo_in(&["build"], &written_without("no_cpu", "kernite-cpu"));
     assert!(!built, "fixtures/no_cpu.rs built");
     assert_eq!(
         said,
@@ -333,6 +338,23 @@ fn a_crate_without_kernite_cpu_is_told_at_what_needs_it() {
             "src/lib.rs:28:35: error: a cooperative x86 kernel needs `kernite-cpu`, which this crate does not depend \
              on",
             "error: could not compile `no_cpu` (lib) due to 3 previous errors",
+        ]
+    );
+}
+
+/// A crate that does not depend on `kernite-cuda` is told where it needs the crate, once at each
+/// module of GPU kernels, by kernite and not by Rust, which would say that `kernite_cuda` is not
+/// found, at the attribute; and nothing is said of the code that uses the module.
+#[test]
+fn a_crate_without_kernite_cuda_is_told_at_each_module_of_gpu_kernels() {
+    let (built, said) = cargo_in(&["build"], &written_without("no_cuda", "kernite-cuda"));
+    assert!(!built, "fixtures/no_cuda.rs built");
+    assert_eq!(
+        said,
+        [
+            "src/lib.rs:6:1: error: a module of GPU kernels needs `kernite-cuda`, which this crate does not depend on",
+            "src/lib.rs:30:1: error: a module of GPU kernels needs `kernite-cuda`, which this crate does not depend on",
+            "error: could not compile `no_cuda` (lib) due to 2 previous errors",
         ]
     );
 }
