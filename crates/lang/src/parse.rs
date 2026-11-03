@@ -245,6 +245,22 @@ impl<'a> Parser<'a> {
             break;
         }
         if self.eat_ident("fn") {
+            // A helper may be `const`: kgen runs it while the kernel compiles. The error is at the
+            // first word refused.
+            let refused = self.trees[qualifiers..self.pos - 1].iter().find_map(|t| match t {
+                Tree::Ident { name, span } if name == "async" => {
+                    Some((*span, "a function runs when it is called, so it is not `async`"))
+                }
+                Tree::Ident { name, span } if name == "const" && abi.is_some() => Some((
+                    *span,
+                    "a function that names an ABI runs on its machine, never while Rust compiles, so it is not \
+                     `const`",
+                )),
+                _ => None,
+            });
+            if let Some((span, message)) = refused {
+                return Err(Error { span, message: message.into() });
+            }
             let f = self.function(attrs, (instances, cooperative), head..self.pos - 1, abi, unsafe_fn)?;
             return Ok(Item { tokens: start..self.pos, kind: ItemKind::Fn(f) });
         }

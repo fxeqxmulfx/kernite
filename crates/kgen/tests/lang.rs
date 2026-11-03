@@ -44,6 +44,36 @@ fn a_kernel_runs_its_helpers_in_place() {
 }
 
 #[test]
+fn a_function_that_names_an_abi_is_not_const_and_no_function_is_async() {
+    let constant = "a function that names an ABI runs on its machine, never while Rust compiles, so it is not `const`";
+    let asynchronous = "a function runs when it is called, so it is not `async`";
+    for (src, at, message) in [
+        (r#"pub const unsafe extern "sysv64" fn k() {}"#, "1:5", constant),
+        (r#"pub async unsafe extern "sysv64" fn k() {}"#, "1:5", asynchronous),
+        // Of two words, the first is the one refused.
+        (r#"pub const async unsafe extern "sysv64" fn k() {}"#, "1:5", constant),
+        (r#"pub async const unsafe extern "sysv64" fn k() {}"#, "1:5", asynchronous),
+    ] {
+        assert_eq!(kgen::x86_str(src, "k").unwrap_err(), format!("{at}: {message}"), "{src}");
+    }
+    for (helper, at) in [("async fn h() {}", "2:1"), ("const async fn h() {}", "2:7")] {
+        let src = format!("pub unsafe extern \"sysv64\" fn k() {{ h(); }}\n{helper}");
+        assert_eq!(kgen::x86_str(&src, "k").unwrap_err(), format!("{at}: {asynchronous}"), "{src}");
+    }
+    for (src, at, message) in [
+        (r#"pub const unsafe extern "ptx-kernel" fn k() {}"#, "1:5", constant),
+        (r#"pub async unsafe extern "ptx-kernel" fn k() {}"#, "1:5", asynchronous),
+        (r#"const extern "ptx-func" fn f() {}"#, "1:1", constant),
+    ] {
+        assert_eq!(kgen::ptx_str(src).unwrap_err(), format!("{at}: {message}"), "{src}");
+    }
+    // A helper may be `const`: kgen runs it while the kernel compiles, as Rust may run a
+    // `const fn`.
+    let src = "pub unsafe extern \"sysv64\" fn k() { h(); }\nconst fn h() { note(\"it runs now\"); }";
+    assert_eq!(x86(src, "k"), "# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # it runs now\n    ret\n");
+}
+
+#[test]
 fn loops_unroll_and_number_their_labels_afresh() {
     let src = r#"
         const STEP: usize = 32;

@@ -45,7 +45,7 @@ fn a_function_says_whether_it_is_unsafe() {
         pub unsafe extern "sysv64" fn k() {}
         extern "ptx-func" fn f() {}
         unsafe fn h() {}
-        pub(crate) const unsafe extern "C" fn c() {}
+        pub(crate) unsafe extern "C" fn c() {}
     "#;
     let module = crate::parse(src).unwrap();
     let said: Vec<(&str, bool)> = module
