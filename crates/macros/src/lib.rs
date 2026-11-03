@@ -48,8 +48,9 @@
 //!     `kernels.COUNTS().read()?`. A module of statics alone is the GPU's.
 //!   - In a module of x86 kernels it is in the process's memory, which the kernels reach at a
 //!     displacement from `rip`, `[COUNTS + 8]`: a `static` of Rust's, a `kernite_cpu::Global` of
-//!     its elements, for the host to read and write: `cpu::COUNTS.read()`. A crate with such a
-//!     module depends on `kernite-cpu` for it.
+//!     its elements, for the host to read and write: `cpu::COUNTS.read()`. A crate with a static
+//!     in such a module depends on `kernite-cpu` for it, and the error is at the static when it
+//!     does not.
 //!   - A module of both kinds of kernel and a static is an error: it is two modules, one of
 //!     each kind of kernel, with the statics each names.
 //! - A function without an ABI is a helper, inlined where a kernel calls it, and leaves
@@ -157,8 +158,8 @@
 //! the kernel on every thread at once, and returns when all have ended:
 //! `cpu::normalize(kernite_cpu::Grid::new(4), x.as_mut_ptr(), sums.as_mut_ptr(), n)?`. A thread
 //! spins at `grid.sync()` until the last comes, so a grid has at most as many threads as the
-//! machine runs at once, `kernite_cpu::most()`, and more is an error. A crate with such kernels
-//! depends on `kernite-cpu` for these.
+//! machine runs at once, `kernite_cpu::most()`, and more is an error. A crate with such a kernel
+//! depends on `kernite-cpu` for it, and the error is at the kernel when it does not.
 //!
 //! A GPU kernel is named in PTX as C++ names a function in namespaces, those of the
 //! workspace, the crate and its modules, mangled under Itanium's ABI:

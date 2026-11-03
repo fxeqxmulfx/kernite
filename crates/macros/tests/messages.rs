@@ -312,6 +312,31 @@ fn a_static_that_does_not_compile_is_said_once() {
     );
 }
 
+/// A crate that does not depend on `kernite-cpu` is told where it needs the crate, at each static of
+/// a module of x86 kernels and at each cooperative kernel, by kernite and not by Rust, which would
+/// say that `kernite_cpu` is not found, at the attribute.
+#[test]
+fn a_crate_without_kernite_cpu_is_told_at_what_needs_it() {
+    let dir = written("no_cpu");
+    let manifest = dir.join("Cargo.toml");
+    let text = fs::read_to_string(&manifest).unwrap();
+    let without: Vec<&str> = text.lines().filter(|line| !line.starts_with("kernite-cpu")).collect();
+    fs::write(&manifest, without.join("\n") + "\n").unwrap();
+    let (built, said) = cargo_in(&["build"], &dir);
+    assert!(!built, "fixtures/no_cpu.rs built");
+    assert_eq!(
+        said,
+        [
+            "src/lib.rs:8:16: error: a static of x86 kernels needs `kernite-cpu`, which this crate does not depend on",
+            "src/lib.rs:21:35: error: a cooperative x86 kernel needs `kernite-cpu`, which this crate does not depend \
+             on",
+            "src/lib.rs:28:35: error: a cooperative x86 kernel needs `kernite-cpu`, which this crate does not depend \
+             on",
+            "error: could not compile `no_cpu` (lib) due to 3 previous errors",
+        ]
+    );
+}
+
 /// A kernel's safety contract says that nothing else touches the memory of the module's it
 /// names while it runs, with what the functions it calls name, whether it calls them by name
 /// or at an address: in a `# Safety` of its own, or after the one its docs have; and for a
