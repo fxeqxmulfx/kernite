@@ -65,7 +65,7 @@ fn on_cpu(sizes: &[usize]) -> ExitCode {
     for &n in sizes {
         let shape = (n, n, n);
         let (a, b, mut c) = (floats(n * n, 1), floats(n * n, 2), vec![0.0; n * n]);
-        let time = best(|| cpu::sgemm(&mut c, &a, &b, shape));
+        let time = average(|| cpu::sgemm(&mut c, &a, &b, shape));
         println!("{n:>6} {:>14.1}", gflops(shape, 1, time));
     }
     ExitCode::SUCCESS
@@ -121,23 +121,22 @@ fn gpu_operands(lens: (usize, usize, usize), shape: Shape) -> (u32, u32, u32) {
     (m as u32, n as u32, k as u32)
 }
 
-/// The least time `run` takes: of one run to warm up, then as many as fill a second, and five
-/// at the least.
-fn best(mut run: impl FnMut()) -> Duration {
-    run();
-    let (start, mut least, mut runs) = (Instant::now(), Duration::MAX, 0);
-    while runs < 5 || start.elapsed() < Duration::from_secs(1) {
-        let t = Instant::now();
+/// The average time `run` takes, of 10 runs after 3 to warm up.
+fn average(mut run: impl FnMut()) -> Duration {
+    for _ in 0..3 {
         run();
-        least = least.min(t.elapsed());
-        runs += 1;
     }
-    least
+    let start = Instant::now();
+    for _ in 0..10 {
+        run();
+    }
+    start.elapsed() / 10
 }
 
 /// The GFLOPS of the product of `a` and `b` of `shape` that `launch` starts on the GPU, given
-/// `c`, `a` and `b` there, at its best: as many back to back between waits as make a gigaflop or
-/// more, so that a wait costs little of the time. There is no going on once the GPU fails.
+/// `c`, `a` and `b` there, on average: a run is as many back to back, then a wait, as make a
+/// gigaflop or more, so that the wait costs little of the time. There is no going on once the GPU
+/// fails.
 fn gpu_gflops<T: Plain>(
     cuda: &Cuda,
     a: &[T],
@@ -149,7 +148,7 @@ fn gpu_gflops<T: Plain>(
     let (a, b, c) = (cuda.upload(a)?, cuda.upload(b)?, cuda.alloc::<f32>(m * n)?);
     let count = (1 << 30) / (2 * m * n * k).max(1) + 1;
     let check = |done: Result<(), Error>| done.unwrap_or_else(|e| panic!("the GPU failed: {e}"));
-    let time = best(|| {
+    let time = average(|| {
         for _ in 0..count {
             check(launch(&c, &a, &b));
         }
