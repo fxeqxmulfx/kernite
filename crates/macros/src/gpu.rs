@@ -6,7 +6,7 @@ use proc_macro::{Delimiter, Group, Ident, Span, TokenStream, TokenTree};
 use kgen::DeviceStatic;
 use kgen::lang::{self, Fn, Value};
 
-use crate::rust::{attrs, error, host, is_ident, is_punct, parse, pick, site, visibility, written_params};
+use crate::rust::{attrs, error, flatten, host, is_ident, is_punct, parse, pick, site, visibility, written_params};
 
 /// Where the module's path goes in its PTX and in its kernels' names. A macro is not told
 /// the module it is in, so `kgen_cuda::__named!` writes `module_path!()` there once Rust
@@ -169,7 +169,13 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
 
 /// The method that says how many blocks a grid of `f`, a cooperative kernel, has at most, for
 /// each of its instances `launched`: as many as the GPU runs at once, of so many threads and
-/// so much of the launch's shared memory.
+/// so much of the launch's shared memory. It keeps what `f` says of lints and of whether it is
+/// there, and nothing else: each `allow`, `warn`, `deny` and `forbid` as written, each `expect`
+/// as an `allow` of the same lints, and `cfg`, `deprecated` and `doc(hidden)`; each alone or in a
+/// `cfg_attr(..)`. It has docs of its own, not those of `f`. The launcher alone keeps what `f`
+/// says of its code or its symbol, as `target_feature` and `export_name` do. The launcher meets
+/// an expectation of a parameter of `f`, and this method, which takes none of them, might not: so
+/// an `expect` is an `allow` here.
 fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStream {
     let mut out = parse(&format!(
         "/// How many blocks a grid of [`{0}`](Self::{0}) has at most, of `threads` threads each and\n\
@@ -177,6 +183,13 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
          /// runs them all together.",
         f.name
     ));
+    for attr in attrs(f, top).into_iter().collect::<Vec<_>>().chunks(2) {
+        let [hash, TokenTree::Group(group)] = attr else { unreachable!("an attribute is `#` and brackets") };
+        let Some(meta) = carried(flatten(group.stream())) else { continue };
+        let mut kept = Group::new(Delimiter::Bracket, meta.into_iter().collect());
+        kept.set_span(group.span());
+        out.extend([hash.clone(), kept.into()]);
+    }
     if launched.is_none() {
         out.extend(parse("#[allow(unused_variables)]"));
     }
@@ -189,6 +202,44 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
     out.extend(parse("(&self, threads: u32, shared: u32) -> ::core::result::Result<u32, ::kgen_cuda::Error>"));
     out.extend(body(f, launched, top, |index| format!("self.module.resident({index}, threads, shared)")));
     out
+}
+
+/// What the method of `blocks` keeps of an attribute of a kernel's, `meta` the tokens in its
+/// brackets; `None` if nothing. Of a `cfg_attr(..)`, it keeps the condition and what it keeps of
+/// the list, or nothing if that is nothing: a `cfg_attr(..)` of a condition alone is an error.
+fn carried(mut meta: Vec<TokenTree>) -> Option<Vec<TokenTree>> {
+    // Rust reads an attribute's name written raw, `r#allow`, as the name.
+    let named = |t: &TokenTree, name: &str| is_ident(t, name) || is_ident(t, &format!("r#{name}"));
+    match &meta[..] {
+        [doc, TokenTree::Group(list)] if named(doc, "doc") => flatten(list.stream())
+            .iter()
+            .any(|t| named(t, "hidden"))
+            .then(|| parse("doc(hidden)").into_iter().collect()),
+        [expect, TokenTree::Group(_)] if named(expect, "expect") => {
+            meta[0] = Ident::new("allow", expect.span()).into();
+            Some(meta)
+        }
+        [cfg_attr, TokenTree::Group(list)] if named(cfg_attr, "cfg_attr") => {
+            let tokens = flatten(list.stream());
+            let mut parts = tokens.split(|t| is_punct(t, ','));
+            let mut kept = parts.next().expect("a split has a first part").to_vec();
+            let condition = kept.len();
+            for part in parts.filter_map(|part| carried(part.to_vec())) {
+                kept.extend(parse(","));
+                kept.extend(part);
+            }
+            if kept.len() == condition {
+                return None;
+            }
+            let mut group = Group::new(Delimiter::Parenthesis, kept.into_iter().collect());
+            group.set_span(list.span());
+            Some(vec![cfg_attr.clone(), group.into()])
+        }
+        [name, ..] if ["allow", "warn", "deny", "forbid", "cfg", "deprecated"].iter().any(|n| named(name, n)) => {
+            Some(meta)
+        }
+        _ => None,
+    }
 }
 
 /// The name of the method that says how many blocks a grid of `f` has at most.

@@ -90,12 +90,17 @@ fn builds_quietly(name: &str) {
     assert!(built && said.is_empty(), "fixtures/{name}.rs: built {built}, and Cargo said:\n{}", said.join("\n"));
 }
 
+/// That Cargo documents fixture `name` without a word; then where rustdoc wrote its pages.
+fn documents_quietly(name: &str) -> PathBuf {
+    let (done, said) = cargo(&["doc", "--no-deps"], name);
+    assert!(done && said.is_empty(), "fixtures/{name}.rs: documented {done}, and Cargo said:\n{}", said.join("\n"));
+    Path::new(ROOT).join("target/doc").join(name)
+}
+
 /// That Cargo documents fixture `name` without a word; then, of each function `f` of its module
 /// `module`, the lines rustdoc wrote of it, from `start` to the `</div>` after it.
 fn documented(name: &str, module: &str, start: &str) -> impl Fn(&str) -> Vec<String> {
-    let (done, said) = cargo(&["doc", "--no-deps"], name);
-    assert!(done && said.is_empty(), "fixtures/{name}.rs: documented {done}, and Cargo said:\n{}", said.join("\n"));
-    let dir = Path::new(ROOT).join("target/doc").join(name).join(module);
+    let dir = documents_quietly(name).join(module);
     move |f: &str| {
         let page = fs::read_to_string(dir.join(format!("fn.{f}.html"))).unwrap();
         let (_, docs) = page.split_once(start).unwrap_or_else(|| panic!("fn.{f}.html has no `{start}`"));
@@ -437,4 +442,75 @@ fn kernels_that_compile_say_nothing() {
 #[test]
 fn names_written_raw_reach_rust_as_written() {
     builds_quietly("raw");
+}
+
+/// The method that says how many blocks a cooperative GPU kernel's grid has at most, `k_blocks`,
+/// keeps what the kernel says of lints and of whether it is there, and nothing else. A name written
+/// raw, `r#allow`, is the name. Rust builds each case without a word: a lint allowed, warned of or
+/// expected, of a compile-time argument named in lower case or of a parameter, alone, after docs,
+/// in a `cfg_attr(..)` or in two, or written by a macro; a kernel left out; one deprecated, whose
+/// `k_blocks` a function calls and expects a warning of; a kernel that says what its code needs, or
+/// its symbol; and one found in the docs by the name `k_blocks`. Where the kernel has docs, plain
+/// or in a `cfg_attr(..)`, `k_blocks` has its own alone, and where the kernel is hidden from the
+/// docs, so is `k_blocks`, whatever else the kernel's `doc(..)` says. Where the kernel denies or
+/// forbids a lint, or warns of one its module denies, Rust refuses the build: each lint of `n` is
+/// said at both methods, at one place, which Cargo's short form prints as one line.
+#[test]
+fn a_cooperative_kernels_blocks_method_keeps_what_it_says_of_lints() {
+    builds_quietly("blocks");
+    let docs = documents_quietly("blocks");
+    let page = |module: &str| fs::read_to_string(docs.join(module).join("struct.Kernels.html")).unwrap();
+    // The docblock after `k_blocks`' anchor, as rustdoc writes it.
+    let own = |module: &str| -> Vec<String> {
+        let page = page(module);
+        let (_, method) =
+            page.split_once("id=\"method.k_blocks\"").unwrap_or_else(|| panic!("{module} has no `k_blocks`"));
+        let (_, block) = method.split_once("<div class=\"docblock\">").expect("`k_blocks` has docs");
+        block.split_once("</div>").expect("the docs end").0.lines().map(String::from).collect()
+    };
+    for module in ["listed", "conditional_docs_and_lint", "raw_names"] {
+        let want = [
+            format!(
+                "<p>How many blocks a grid of <a href=\"struct.Kernels.html#method.k\" title=\"method \
+                 blocks::{module}::Kernels::k\"><code>k</code></a> has at most, of <code>threads</code> threads each and"
+            ),
+            "<code>shared</code> bytes of the launch’s shared memory: as many as the GPU runs at once, for it".into(),
+            "runs them all together.</p>".into(),
+        ];
+        assert_eq!(own(module), want, "{module}");
+    }
+    for module in ["hidden", "raw_hidden", "hidden_aliased"] {
+        assert!(!page(module).contains("k_blocks"), "the docs of `{module}`'s `Kernels` show `k_blocks`");
+    }
+    refuses(
+        "denied",
+        &[
+            "src/lib.rs:13:47: error: const parameter `n` should have an upper case name",
+            "src/lib.rs:24:47: error: const parameter `n` should have an upper case name",
+            "src/lib.rs:39:51: warning: const parameter `n` should have an upper case name",
+            "error: could not compile `denied` (lib) due to 4 previous errors; 2 warnings emitted",
+        ],
+    );
+}
+
+/// An error in an attribute that `k_blocks` keeps is said once, where the kernel has it, and not
+/// again where the macro is.
+#[test]
+fn an_error_in_an_attribute_k_blocks_keeps_is_said_once() {
+    refuses(
+        "malformed",
+        &[
+            "src/lib.rs:32:7: error[E0805]: malformed `cfg_attr` attribute input",
+            "src/lib.rs:12:5: error: malformed `expect` attribute input",
+            "src/lib.rs:22:23: error: malformed `expect` attribute input",
+            "error: could not compile `malformed` (lib) due to 3 previous errors",
+        ],
+    );
+    refuses(
+        "twice",
+        &[
+            "src/lib.rs:9:5: error: multiple `deprecated` attributes: help: remove this attribute",
+            "error: could not compile `twice` (lib) due to 2 previous errors",
+        ],
+    );
 }
