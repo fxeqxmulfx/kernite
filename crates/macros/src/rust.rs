@@ -249,6 +249,29 @@ pub(crate) fn error(span: Span, message: &str) -> TokenStream {
         .collect()
 }
 
+/// Whether the crate being compiled depends on the crate `name`, one the Rust the macro writes
+/// names: `kernite-cpu` or `kernite-cuda`.
+pub(crate) fn depends_on(name: &str) -> bool {
+    given(&std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>(), name)
+}
+
+/// Whether `args`, the arguments Rust runs with, give the crate `name`: `--extern kernite_cpu=..`
+/// for `kernite-cpu`. When they give no crate at all, as when an editor runs the macro in a process
+/// of its own, nothing says it is missing.
+fn given(args: &[String], name: &str) -> bool {
+    let name = name.replace('-', "_");
+    !args.iter().any(|a| a.starts_with("--extern")) || args.iter().any(|a| a.contains(&name))
+}
+
+/// A type that stands for one of the crate `name`'s in a crate without it, and says at `span` that
+/// `what` needs the crate. It is an array whose length is the error, which Rust reports once and
+/// takes for a type it has reported, so that it says nothing of the code that uses it.
+pub(crate) fn missing(span: Span, what: &str, name: &str) -> TokenStream {
+    let mut length = parse("();");
+    length.extend(error(span, &format!("{what} needs `{name}`, which this crate does not depend on")));
+    TokenTree::Group(Group::new(Delimiter::Bracket, length)).into()
+}
+
 /// The type `ty` as the host names it: `f16` and `bf16`, which Rust has not, are kernite-cuda's.
 pub(crate) fn host(ty: &[TokenTree]) -> TokenStream {
     match ty {
@@ -324,4 +347,26 @@ pub(crate) fn is_ident(t: &TokenTree, name: &str) -> bool {
 
 pub(crate) fn is_punct(t: &TokenTree, ch: char) -> bool {
     matches!(t, TokenTree::Punct(p) if p.as_char() == ch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::given;
+
+    /// Whether `given` says the crate `name` is there, of the arguments `args` writes.
+    fn run(args: &str, name: &str) -> bool {
+        given(&args.split_whitespace().map(String::from).collect::<Vec<_>>(), name)
+    }
+
+    #[test]
+    fn a_crate_is_there_when_rust_gives_it_and_when_it_gives_no_crate_at_all() {
+        let build = "rustc --crate-name app --extern kernite_macros=/t/libkernite_macros.so";
+        assert!(run(&format!("{build} --extern kernite_cpu=/t/libkernite_cpu.rlib"), "kernite-cpu"));
+        assert!(run(&format!("{build} --extern=kernite_cuda=/t/libkernite_cuda.rlib"), "kernite-cuda"));
+        // Each crate is found by its own name: the other's is not it.
+        assert!(!run(&format!("{build} --extern kernite_cpu=/t/libkernite_cpu.rlib"), "kernite-cuda"));
+        assert!(!run(build, "kernite-cuda"));
+        // An editor runs the macro in a process of its own, which Rust's arguments do not reach.
+        assert!(run("rust-analyzer-proc-macro-srv", "kernite-cuda"));
+    }
 }

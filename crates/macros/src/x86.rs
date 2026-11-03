@@ -1,15 +1,18 @@
 //! What x86 kernels become in Rust: naked functions and their safety contracts, the launchers
 //! of cooperative ones, stubs for those that do not compile, and the module's statics.
 
-use proc_macro::{Delimiter, Group, Span, TokenStream, TokenTree};
+use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
 
 use kernite::lang::{self, Fn, ItemKind, Value};
 use kernite::{Call, HostStatic, Naked, NativeInstance};
 
 use crate::rust::{
-    attrs, clashes, error, hygienic, is_ident, is_punct, never, parse, pick, signature, stub, visibility,
+    attrs, clashes, depends_on, hygienic, is_ident, is_punct, missing, never, parse, pick, signature, stub, visibility,
     written_params,
 };
+
+/// The crate the Rust of a static or a cooperative kernel names.
+const CPU: &str = "kernite-cpu";
 
 /// `f` as an `#[unsafe(naked)]` function whose body is the listing of its one instance, and
 /// the statics its constants are, in a module beside it. For a function of compile-time
@@ -29,7 +32,7 @@ pub(crate) fn naked(
 ) -> TokenStream {
     let hidden = format!("__kernite_{}", f.name);
     let cooperative = f.cooperative.is_some();
-    if cooperative && !has_cpu() {
+    if cooperative && !depends_on(CPU) {
         return x86_stub(f, instances.len(), named, top);
     }
     let mut out = TokenStream::new();
@@ -199,9 +202,9 @@ pub(crate) fn cpu_static(s: &lang::Static, made: Option<&HostStatic>, top: &[Tok
     // Its name as written, after `static`.
     let name = &top[s.vis.end + 1];
     out.extend([name.clone()]);
-    if !has_cpu() {
+    if !depends_on(CPU) {
         out.extend(parse(":"));
-        out.extend(missing(name.span(), "a static of x86 kernels"));
+        out.extend(missing(name.span(), "a static of x86 kernels", CPU));
         out.extend(parse("= [];"));
         return out;
     }
@@ -216,28 +219,6 @@ pub(crate) fn cpu_static(s: &lang::Static, made: Option<&HostStatic>, top: &[Tok
         None => ": ::kernite_cpu::Stub = ::kernite_cpu::Stub;".to_string(),
     }));
     out
-}
-
-/// Whether the crate being compiled depends on `kernite-cpu`, which the Rust of a static or a
-/// cooperative kernel names.
-fn has_cpu() -> bool {
-    given(&std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>())
-}
-
-/// Whether `args`, the arguments Rust runs with, give the crate `kernite_cpu`: `--extern
-/// kernite_cpu=..`. When they give no crate at all, as when an editor runs the macro in a process
-/// of its own, nothing says it is missing.
-fn given(args: &[String]) -> bool {
-    !args.iter().any(|a| a.starts_with("--extern")) || args.iter().any(|a| a.contains("kernite_cpu"))
-}
-
-/// A type that stands for one of `kernite_cpu`'s in a crate without it, and says at `span` that
-/// `what` needs the crate. It is an array whose length is the error, which Rust reports once and
-/// takes for a type it has reported, so that it says nothing of the code that uses it.
-fn missing(span: Span, what: &str) -> TokenStream {
-    let mut length = parse("();");
-    length.extend(error(span, &format!("{what} needs `kernite-cpu`, which this crate does not depend on")));
-    TokenTree::Group(Group::new(Delimiter::Bracket, length)).into()
 }
 
 /// What each element of `m` holds at first, as Rust writes it: `7u32`, `-1i8`, or a float by its
@@ -330,9 +311,12 @@ fn grid_launcher(
     out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
     // Its types are `kernite_cpu`'s, but where the crate has none: any grid goes in, and the error,
     // said once, comes out.
-    let (grid, result) = match has_cpu() {
+    let (grid, result) = match depends_on(CPU) {
         true => (parse("::kernite_cpu::Grid"), parse("::core::result::Result<(), ::kernite_cpu::Error>")),
-        false => (parse("impl ::core::marker::Sized"), missing(top[f.head.end + 1].span(), "a cooperative x86 kernel")),
+        false => {
+            let name = top[f.head.end + 1].span();
+            (parse("impl ::core::marker::Sized"), missing(name, "a cooperative x86 kernel", CPU))
+        }
     };
     let mut params = hygienic("$grid:", kernels.is_some());
     params.extend(grid);
@@ -411,24 +395,4 @@ pub(crate) fn x86_stub(f: &Fn, instances: usize, named: &[String], top: &[TokenT
         out.extend(parse(&format!("#[doc(hidden)]\nmod __kernite_{} {{\n{items}}}\n", f.name)));
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::given;
-
-    /// Whether `given` says the crate has `kernite_cpu`, of the arguments `args` writes.
-    fn run(args: &str) -> bool {
-        given(&args.split_whitespace().map(String::from).collect::<Vec<_>>())
-    }
-
-    #[test]
-    fn a_crate_has_kernite_cpu_when_rust_gives_it_and_when_it_gives_no_crate_at_all() {
-        let build = "rustc --crate-name app --extern kernite_macros=/t/libkernite_macros.so";
-        assert!(run(&format!("{build} --extern kernite_cpu=/t/libkernite_cpu.rlib")));
-        assert!(run(&format!("{build} --extern=kernite_cpu=/t/libkernite_cpu.rlib")));
-        assert!(!run(build));
-        // An editor runs the macro in a process of its own, which Rust's arguments do not reach.
-        assert!(run("rust-analyzer-proc-macro-srv"));
-    }
 }
