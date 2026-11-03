@@ -54,8 +54,8 @@
 //! each wrote before, every one reads after. It is code of the kernel's own, which calls
 //! nothing: a thread counts itself in with `lock xadd`, and the last to come lets the others
 //! go, who spin with `pause` until it does, so each thread needs a core. Every thread comes to
-//! each `grid.sync()`, or the others wait for ever: kgen refuses one under an `if`, and a jump
-//! around one is the kernel's to keep from.
+//! each `grid.sync()`, or the others wait for ever. kgen refuses one under an `if`, and a jump
+//! around one is the kernel's to see to: every thread takes it, or none does.
 //!
 //! The launcher gives each thread the address of its place in the grid, in the register after
 //! the kernel's parameters, as SysV passes the next integer, so a cooperative kernel takes five
@@ -85,7 +85,7 @@ use kgen_core::{
     Arg, Base, Class, Const, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo, Signature,
     Slot, SlotId, StaticId, VReg,
 };
-use kgen_lang::{Fault, Guard, Operand as Given, Target, Value};
+use kgen_lang::{Fault, Guard, Operand as Given, Span, Target, Value};
 
 use crate::bytes;
 use crate::forms::{self, Form, Kind, Miss, Shape};
@@ -461,6 +461,12 @@ pub struct Kernel {
     labels: u32,
     /// Where the caller's MXCSR is kept, once the kernel loads its own.
     mxcsr: Option<SlotId>,
+    /// Each variable the source declares in a register, and where: what goes wrong with it
+    /// when registers are allocated is placed there.
+    pub(crate) decls: Vec<(VReg, Span)>,
+    /// The functions a call at an address may reach, each once, by what the source calls it:
+    /// those taken together last in `call(fp, (a, b), (f, g))`. The code names none of them.
+    pub(crate) reach: Vec<String>,
 }
 
 impl Kernel {
@@ -491,6 +497,8 @@ impl Kernel {
             grid: None,
             labels: u32::MAX,
             mxcsr: None,
+            decls: vec![],
+            reach: vec![],
         }
     }
 
@@ -553,10 +561,11 @@ impl Kernel {
 
     /// `call`: of a function of the module by its name, `call(r, f, (a, b))`, or of the one at
     /// the address in a gpr, `call(r, fp, (a, b))`, which passes each in the file its variable
-    /// is of, or as one of the functions taken together last, `call(r, fp, (a, b), (f, g))`.
-    /// Each argument is moved to a variable of its own in the register SysV passes it in, and
-    /// the result back from one in the register it comes back in, for the allocator to keep
-    /// there while the call needs it; the call changes every register a callee may.
+    /// is of, or as one of the functions taken together last, `call(r, fp, (a, b), (f, g))`,
+    /// which the kernel keeps in `reach`. Each argument is moved to a variable of its own in the
+    /// register SysV passes it in, and the result back from one in the register it comes back
+    /// in, for the allocator to keep there while the call needs it; the call changes every
+    /// register a callee may.
     fn call(&mut self, args: &[Given<Var>]) -> Result<(), Fault> {
         let shape = "`call` is `call(f, (a, b))`, or `call(r, f, (a, b))` for a function that returns a value, `f` \
                      a function of the module or a gpr that holds the address of one";
@@ -613,13 +622,16 @@ impl Kernel {
                 match targets {
                     // Each of the functions must take what the call passes. They take it the same
                     // way: a variable passes as it is, whatever its callee makes of it, and a value
-                    // known now is of one type.
+                    // known now is of one type. The kernel keeps each, for the memory it names.
                     Some(targets) => {
                         let (mut passing, mut never) = (None, true);
                         for t in targets {
                             let proto = self.called(t, args.len() - 1)?;
                             never &= proto.returns == Returns::Never;
                             passing = Some(self.passing(t, &proto, &passed, result, at)?);
+                            if !self.reach.iter().any(|r| r == t) {
+                                self.reach.push(t.to_string());
+                            }
                         }
                         (Operand::Reg(fp, W64), passing.expect("a call has a target"), never, vec![])
                     }
@@ -947,8 +959,8 @@ impl Kernel {
         }
         if guard {
             return Err(Fault::new(
-                "`grid.sync()` is for every thread of the grid, under no `if`: the grid waits for ever for one that \
-                 does not come to it",
+                "`grid.sync()` is for every thread of the grid, under no `if`: kgen writes it with no guard, and a \
+                 kernel that wants it under a condition the same in every thread jumps around it",
             ));
         }
         let grid = self.grid();
@@ -1803,6 +1815,12 @@ impl Target for Kernel {
                 "control reaches the end of the body, and `{}` never returns, `-> !`: {NEVER}",
                 self.p.name
             )),
+        }
+    }
+
+    fn declared_at(&mut self, var: Var, at: Span) {
+        if let Some((reg, _)) = var.reg() {
+            self.decls.push((reg, at));
         }
     }
 }

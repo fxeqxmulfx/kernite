@@ -1,18 +1,17 @@
 //! The evaluator: a kernel's body run at compile time, its loops unrolled and its helpers
 //! inlined, as calls into the [`Target`] that builds the machine's instructions.
 
-use crate::Error;
+use std::rc::Rc;
+
 use crate::ast::{BinOp, Block, Const, Expr, Fn, Generic, ItemKind, Module, Static, Stmt, Type, UnOp};
 use crate::target::{Fault, Guard, Mem, Operand, Target};
 use crate::token::Span;
 use crate::value::{self, Value, Want};
+use crate::{DEPTH, Error, nested};
 
 /// What running a kernel found, besides what it asked of its target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Run {
-    /// Every variable declared, with where: the place to blame for what goes wrong with one
-    /// later, when its registers are allocated.
-    pub decls: Vec<(String, Span)>,
     /// The module's constants it read, itself or through others, in its body or its
     /// `#[instances(..)]`, in the module's order. Rust never sees a kernel's body run, nor its
     /// list worked out, so it sees none of these reads.
@@ -33,26 +32,8 @@ pub struct Memory {
     pub consts: Vec<String>,
 }
 
-/// `s`, a static of `module`, worked out among the module's constants; or why not, or that
-/// another item of the module has its name.
+/// `s`, a static of `module`, worked out among the module's constants; or why not.
 pub fn memory(module: &Module, s: &Static) -> Result<Memory, Error> {
-    // Of two statics of a name, the second is in the way.
-    let mut before = true;
-    for item in &module.items {
-        let (name, what) = match &item.kind {
-            ItemKind::Const(c) => (&c.name, "a constant"),
-            ItemKind::Fn(f) => (&f.name, "a function"),
-            ItemKind::Static(t) if std::ptr::eq(t, s) => {
-                before = false;
-                continue;
-            }
-            ItemKind::Static(t) if before => (&t.name, "another static"),
-            _ => continue,
-        };
-        if *name == s.name {
-            return Err(err(s.span, format!("`{name}` names {what} of the module as well")));
-        }
-    }
     let mut consts = Consts;
     let mut e = Eval::new(module, &mut consts);
     let ty = e.type_name(&s.ty)?;
@@ -72,9 +53,7 @@ pub fn constant(module: &Module, c: &Const) -> Result<Value, Error> {
     let mut e = Eval::new(module, &mut consts);
     let i = e.consts.iter().position(|(k, _)| std::ptr::eq(*k, c)).expect("a constant of the module");
     e.consts[i].1 = State::Busy;
-    let v = e.constant(c)?;
-    e.consts[i].1 = State::Done(v.clone());
-    Ok(v)
+    e.constant(c)
 }
 
 /// Runs `f` of `module` on `target`, a kernel or another function that names an ABI, for the
@@ -85,13 +64,13 @@ pub fn kernel<T: Target>(module: &Module, f: &Fn, args: &[Value], target: &mut T
     let mut e = Eval::new(module, target);
     e.listed(f)?;
     let mut scope: Scope<T::Var> =
-        f.generics.iter().zip(args).map(|(g, a)| (g.name.clone(), Binding::Value(a.clone()))).collect();
+        f.generics.iter().zip(args).map(|(g, a)| (g.name.clone(), Binding::Value(Rc::new(a.clone())))).collect();
     for p in &f.params {
         let Type::Name(ty, span) = &p.ty else {
             return Err(err(p.ty.span(), "a function that names an ABI takes values the machine passes, not arrays"));
         };
         let v = e.target.param(&p.name, ty).map_err(|m| err(*span, m))?;
-        e.decls.push((p.name.clone(), p.span));
+        e.target.declared_at(v, p.span);
         scope.push((p.name.clone(), Binding::Var(v)));
     }
     if let Some(r) = &f.ret {
@@ -102,7 +81,7 @@ pub fn kernel<T: Target>(module: &Module, f: &Fn, args: &[Value], target: &mut T
     e.target.end().map_err(|m| err(f.span, m))?;
     // A constant is evaluated the first time it is named, so the ones evaluated are the ones read.
     let consts = e.consts.iter().filter(|(_, s)| matches!(s, State::Done(_))).map(|(c, _)| c.name.clone()).collect();
-    Ok(Run { decls: e.decls, consts })
+    Ok(Run { consts })
 }
 
 /// The compile-time arguments of each instance of `f`, a function of `module`, in the order
@@ -196,8 +175,17 @@ impl Target for Consts {
     }
 }
 
-/// How deep helpers may call helpers.
-const DEPTH: usize = 64;
+/// The most variables a kernel declares by `let`, however its loops and helpers repeat them: x86's
+/// allocator keeps a set of them for each of them, a bit each, so this many take 512 MiB.
+const VARIABLES: usize = 1 << 16;
+
+/// The most steps working out a function takes. A step is a turn of a `for`; an instruction, a
+/// call, a label or a note; a number of a range; an item of an array listed, as `[a, b]`; or an
+/// element of an `[x; n]`, of an array a method makes, of one copied from a name, as
+/// `let b: [u32; 4] = a;` and `for x in a` copy it, or of a value an index takes or a note shows. A
+/// number read by name or worked out costs none. Loops that nest and helpers that call themselves
+/// repeat each other's work, and this holds the work to what finishes.
+const STEPS: u128 = 1 << 22;
 
 fn err(span: Span, message: impl Into<String>) -> Error {
     Error { span, message: message.into() }
@@ -207,7 +195,7 @@ fn err(span: Span, message: impl Into<String>) -> Error {
 #[derive(Clone, Debug)]
 enum Binding<V> {
     /// A value known now.
-    Value(Value),
+    Value(Rc<Value>),
     /// A variable.
     Var(V),
     /// Variables declared together, `let acc: [ymm; 4]`.
@@ -237,7 +225,7 @@ type Scope<V> = Vec<(String, Binding<V>)>;
 enum State {
     Waiting,
     Busy,
-    Done(Value),
+    Done(Rc<Value>),
 }
 
 /// An address on its way: variables with what each is multiplied by, and bytes added.
@@ -261,8 +249,14 @@ struct Eval<'a, T: Target> {
     guard: Option<Guard<T::Var>>,
     /// How many instructions have run.
     insts: usize,
+    /// How many helpers are running, each in the one before.
     depth: usize,
-    decls: Vec<(String, Span)>,
+    /// How many levels of expressions and statements are running, each in the one before.
+    nest: usize,
+    /// How many variables `let` has declared, in the kernel and in the helpers it called.
+    declared: usize,
+    /// How many steps working out has taken, in the kernel and in the helpers it called.
+    steps: u128,
 }
 
 impl<'a, T: Target> Eval<'a, T> {
@@ -277,8 +271,21 @@ impl<'a, T: Target> Eval<'a, T> {
                 ItemKind::Other => {}
             }
         }
-        let (scopes, decls) = (vec![], vec![]);
-        Eval { target, consts, statics, helpers, compiled, scopes, labels: 0, guard: None, insts: 0, depth: 0, decls }
+        Eval {
+            target,
+            consts,
+            statics,
+            helpers,
+            compiled,
+            scopes: vec![],
+            labels: 0,
+            guard: None,
+            insts: 0,
+            depth: 0,
+            nest: 0,
+            declared: 0,
+            steps: 0,
+        }
     }
 
     fn bind(&mut self, name: &str, b: Binding<T::Var>) {
@@ -297,6 +304,23 @@ impl<'a, T: Target> Eval<'a, T> {
         Ok(self.statics.iter().position(|(s, _)| s.name == name).map(Binding::Static))
     }
 
+    /// The value of `e`, which must be known now: lent where it is held, if `e` names it.
+    fn lent(&mut self, e: &Expr, want: Want) -> Result<Rc<Value>, Error> {
+        let at = |m: String| err(e.span(), m);
+        match e {
+            Expr::Path(path, span) if path.len() == 1 => match self.lookup(&path[0], *span)? {
+                Some(Binding::Value(v)) => Ok(v),
+                Some(b) => Err(at(format!(
+                    "`{}` is {}, known only when the kernel runs; this wants a value known now",
+                    path[0],
+                    b.kind()
+                ))),
+                None => Err(at(format!("`{}` is not defined", path[0]))),
+            },
+            _ => self.value(e, want).map(Rc::new),
+        }
+    }
+
     /// The variable the module's static `i` is, named at `span`: the target makes it the first
     /// time.
     fn static_var(&mut self, i: usize, span: Span) -> Result<T::Var, Error> {
@@ -310,7 +334,7 @@ impl<'a, T: Target> Eval<'a, T> {
 
     /// The module constant `name`, evaluated the first time it is named, in a scope of
     /// constants alone.
-    fn global(&mut self, name: &str, span: Span) -> Result<Option<Value>, Error> {
+    fn global(&mut self, name: &str, span: Span) -> Result<Option<Rc<Value>>, Error> {
         let Some(i) = self.consts.iter().position(|(c, _)| c.name == name) else {
             return Ok(None);
         };
@@ -324,7 +348,7 @@ impl<'a, T: Target> Eval<'a, T> {
         let outer = std::mem::take(&mut self.scopes);
         let v = self.constant(c);
         self.scopes = outer;
-        let v = v?;
+        let v = Rc::new(v?);
         self.consts[i].1 = State::Done(v.clone());
         Ok(Some(v))
     }
@@ -484,22 +508,32 @@ impl<'a, T: Target> Eval<'a, T> {
         }
     }
 
+    /// Runs `f` one level down in what is running, or says that it nests too deep, where its
+    /// level starts at `span`.
+    fn within<R>(&mut self, span: Span, f: impl FnOnce(&mut Self) -> Result<R, Error>) -> Result<R, Error> {
+        nested(self.nest, span)?;
+        self.nest += 1;
+        let r = f(self);
+        self.nest -= 1;
+        r
+    }
+
     /// The value of `e`, which must be known now.
     fn value(&mut self, e: &Expr, want: Want) -> Result<Value, Error> {
+        self.within(e.span(), |this| this.value_of(e, want))
+    }
+
+    fn value_of(&mut self, e: &Expr, want: Want) -> Result<Value, Error> {
         let at = |m: String| err(e.span(), m);
         match e {
             Expr::Lit(text, _) => value::literal(text, want).map_err(at),
             Expr::Bool(b, _) => Ok(Value::Bool(*b)),
             Expr::Str(..) => Err(at("a string is no value here; `note(\"..\")` takes one".into())),
-            Expr::Path(path, span) if path.len() == 1 => match self.lookup(&path[0], *span)? {
-                Some(Binding::Value(v)) => Ok(v),
-                Some(b) => Err(at(format!(
-                    "`{}` is {}, known only when the kernel runs; this wants a value known now",
-                    path[0],
-                    b.kind()
-                ))),
-                None => Err(at(format!("`{}` is not defined", path[0]))),
-            },
+            Expr::Path(path, _) if path.len() == 1 => {
+                let v = self.lent(e, want)?;
+                self.elements(&v, e.span())?;
+                Ok(Rc::unwrap_or_clone(v))
+            }
             Expr::Path(path, _) => {
                 let p = path.join("::");
                 value::path(&p).ok_or_else(|| at(format!("`{p}` is not a constant kgen knows")))
@@ -510,11 +544,15 @@ impl<'a, T: Target> Eval<'a, T> {
             }
             Expr::Index(base, index, _) => {
                 let i = self.count(index)?;
-                match self.value(base, want)? {
-                    Value::Array(xs) => xs
-                        .get(i)
-                        .cloned()
-                        .ok_or_else(|| at(format!("index {i} is past the end of {} elements", xs.len()))),
+                let lent = self.lent(base, want)?;
+                match &*lent {
+                    Value::Array(xs) => {
+                        let x = xs
+                            .get(i)
+                            .ok_or_else(|| at(format!("index {i} is past the end of {} elements", xs.len())))?;
+                        self.step(value::held(x), e.span())?;
+                        Ok(x.clone())
+                    }
                     other => Err(at(format!("{} has no elements to index", other.kind()))),
                 }
             }
@@ -540,9 +578,11 @@ impl<'a, T: Target> Eval<'a, T> {
                 _ => Err(at("a call is a statement: an instruction or a helper, not a value".into())),
             },
             Expr::Method { recv, name, args, .. } => {
-                let recv = self.value(recv, want)?;
+                let recv = self.lent(recv, want)?;
                 let args = args.iter().map(|a| self.value(a, Want::Any)).collect::<Result<Vec<_>, _>>()?;
-                value::method(&recv, name, &args).map_err(at)
+                let v = value::method(&recv, name, &args).map_err(at)?;
+                self.elements(&v, e.span())?;
+                Ok(v)
             }
             // A literal negated is one number, as Rust reads `-128i8`.
             Expr::Unary(UnOp::Neg, inner, _) if matches!(**inner, Expr::Lit(..)) => {
@@ -581,20 +621,35 @@ impl<'a, T: Target> Eval<'a, T> {
                     _ => tl.or(*th),
                 };
                 let end = if *inclusive { *h + 1 } else { *h };
-                if end - *l > 1 << 20 {
-                    return Err(at(format!("{l}..{end} unrolls to too many")));
-                }
+                let n = (end - *l).max(0) as u128;
+                value::fits(n).map_err(at)?;
+                self.step(n, e.span())?;
                 Ok(Value::Array((*l..end).map(|x| Value::Int(x, ty)).collect()))
             }
             Expr::Array(items, _) => {
-                items.iter().map(|x| self.value(x, want)).collect::<Result<Vec<_>, _>>().map(Value::Array)
+                // Items past the most are worked out only to count what they hold, for the error,
+                // and not kept.
+                let (mut xs, mut held) = (vec![], 0);
+                for x in items {
+                    let x = self.value(x, want)?;
+                    nested(value::nests(&x), e.span())?;
+                    held += value::held(&x);
+                    if value::fits(held).is_ok() {
+                        xs.push(x);
+                    }
+                }
+                value::fits(value::array(held, items.len())).map_err(at)?;
+                // Its items were counted where they were made: it holds them, and copies none.
+                self.step(items.len() as u128, e.span())?;
+                Ok(Value::Array(xs))
             }
             Expr::Repeat(item, len, _) => {
                 let v = self.value(item, want)?;
+                nested(value::nests(&v), e.span())?;
                 let n = self.count(len)?;
-                if n > 1 << 20 {
-                    return Err(at(format!("{n} elements are too many")));
-                }
+                let held = value::array(n as u128 * value::held(&v), n);
+                value::fits(held).map_err(at)?;
+                self.step(held, e.span())?;
                 Ok(Value::Array(vec![v; n]))
             }
             Expr::Paren(inner, _) => self.value(inner, want),
@@ -648,7 +703,7 @@ impl<'a, T: Target> Eval<'a, T> {
         }
         match self.place(e)? {
             Some(v) => Ok(Binding::Var(v)),
-            None => Ok(Binding::Value(self.value(e, Want::Any)?)),
+            None => Ok(Binding::Value(Rc::new(self.value(e, Want::Any)?))),
         }
     }
 
@@ -674,7 +729,7 @@ impl<'a, T: Target> Eval<'a, T> {
             Expr::Path(path, span) if path.len() == 1 => match self.lookup(&path[0], *span)? {
                 Some(Binding::Var(v)) => Ok(Operand::Var(v)),
                 Some(Binding::Static(i)) => self.static_var(i, *span).map(Operand::Var),
-                Some(Binding::Value(v)) => scalar(v, *span),
+                Some(Binding::Value(v)) => scalar(&v, *span),
                 Some(Binding::Vars(vs)) => Ok(Operand::Vector(vs.into_iter().map(Operand::Var).collect())),
                 Some(Binding::Label(l)) => Ok(Operand::Label(l)),
                 None => self.unscoped(&path[0], *span),
@@ -692,7 +747,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 Some(v) => Ok(Operand::Var(v)),
                 None => match self.unbound(base)? {
                     Some(word) => Ok(Operand::Sized(word, Box::new(self.memory(index, *span)?))),
-                    None => scalar(self.value(e, Want::Any)?, e.span()),
+                    None => scalar(&self.value(e, Want::Any)?, e.span()),
                 },
             },
             Expr::Array(items, span) => match items.as_slice() {
@@ -719,7 +774,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 Err(err(*span, "an array is data; in brackets, `[[x; n]]`, it is memory that holds it"))
             }
             Expr::Str(_, span) => Err(err(*span, "a string is no operand; `note(\"..\")` takes one")),
-            _ => scalar(self.value(e, Want::Any)?, e.span()),
+            _ => scalar(&self.value(e, Want::Any)?, e.span()),
         }
     }
 
@@ -890,17 +945,35 @@ impl<'a, T: Target> Eval<'a, T> {
         b.stmts.iter().try_for_each(|s| self.stmt(s))
     }
 
+    /// A statement. One that holds others, `for`, `if` or a block, is a level of nesting for
+    /// them, and so is each `else if`; a helper's body and a kernel's are not.
     fn stmt(&mut self, s: &Stmt) -> Result<(), Error> {
+        match s {
+            Stmt::For { span, .. } | Stmt::If { span, .. } => self.within(*span, |this| this.stmt_of(s)),
+            Stmt::Block(b) => self.within(b.span, |this| this.stmt_of(s)),
+            _ => self.stmt_of(s),
+        }
+    }
+
+    fn stmt_of(&mut self, s: &Stmt) -> Result<(), Error> {
         match s {
             Stmt::Let { name, span, ty, value } => self.let_(name, *span, ty.as_ref(), value.as_ref()),
             Stmt::Const(c) => {
                 let v = self.constant(c)?;
-                self.bind(&c.name, Binding::Value(v));
+                self.bind(&c.name, Binding::Value(Rc::new(v)));
                 Ok(())
             }
             Stmt::For { var, iter, body, .. } => {
                 let items: Vec<Binding<T::Var>> = match self.binding(iter)? {
-                    Binding::Value(Value::Array(xs)) => xs.into_iter().map(Binding::Value).collect(),
+                    Binding::Value(ref v) if let Value::Array(xs) = &**v => {
+                        // An array made by the header and one that is lent are both copied below,
+                        // item by item. The count of the one made stands for its copy, and the one
+                        // lent is counted here.
+                        if Rc::strong_count(v) > 1 {
+                            self.step(value::held(v), iter.span())?;
+                        }
+                        xs.iter().map(|x| Binding::Value(Rc::new(x.clone()))).collect()
+                    }
                     Binding::Vars(vs) => vs.into_iter().map(Binding::Var).collect(),
                     other => {
                         return Err(err(
@@ -910,6 +983,7 @@ impl<'a, T: Target> Eval<'a, T> {
                     }
                 };
                 for item in items {
+                    self.step(1, iter.span())?;
                     self.scopes.push(vec![(var.clone(), item)]);
                     let r = self.block(body);
                     self.scopes.pop();
@@ -919,7 +993,40 @@ impl<'a, T: Target> Eval<'a, T> {
             }
             Stmt::If { cond, then, otherwise, span } => self.if_(cond, then, otherwise.as_deref(), *span),
             Stmt::Block(b) => self.block(b),
-            Stmt::Expr(e) => self.call(e),
+            Stmt::Expr(e) => {
+                self.step(1, e.span())?;
+                self.call(e)
+            }
+        }
+    }
+
+    /// Counts `n` more variables declared by `let`. The kernel that would pass the most is refused
+    /// at `at`, before any is made.
+    fn declare(&mut self, n: usize, at: Span) -> Result<(), Error> {
+        let all = self.declared as u128 + n as u128;
+        if all > VARIABLES as u128 {
+            return Err(err(at, format!("{all} variables are too many: a kernel declares {VARIABLES} at most")));
+        }
+        self.declared += n;
+        Ok(())
+    }
+
+    /// Counts `n` more steps. The function that would pass the most is refused at `at`, where it
+    /// takes the step.
+    fn step(&mut self, n: u128, at: Span) -> Result<(), Error> {
+        self.steps += n;
+        if self.steps > STEPS {
+            return Err(err(at, format!("this takes more than {STEPS} steps to work out")));
+        }
+        Ok(())
+    }
+
+    /// Counts the elements of `v` at `at`, if it is an array copied from a name or made by a
+    /// method. A number read by name or made by a method costs none.
+    fn elements(&mut self, v: &Value, at: Span) -> Result<(), Error> {
+        match v {
+            Value::Array(_) => self.step(value::held(v), at),
+            _ => Ok(()),
         }
     }
 
@@ -927,8 +1034,9 @@ impl<'a, T: Target> Eval<'a, T> {
         let b = match (ty, value) {
             (Some(t @ (Type::Name(..) | Type::Generic(..))), None) => {
                 let ty = self.type_name(t)?;
+                self.declare(1, span)?;
                 let v = self.target.var(name, &ty).map_err(|m| err(t.span(), m))?;
-                self.decls.push((name.to_string(), span));
+                self.target.declared_at(v, span);
                 Binding::Var(v)
             }
             (Some(Type::Slice(_, tspan)), None) => {
@@ -939,18 +1047,20 @@ impl<'a, T: Target> Eval<'a, T> {
                     return Err(err(elem.span(), "variables are declared in arrays one deep"));
                 };
                 let n = self.count(len)?;
+                self.declare(n, len.span())?;
                 let mut vs = Vec::with_capacity(n);
                 for i in 0..n {
                     let each = format!("{name}{i}");
-                    vs.push(self.target.var(&each, t).map_err(|m| err(*tspan, m))?);
-                    self.decls.push((each, span));
+                    let v = self.target.var(&each, t).map_err(|m| err(*tspan, m))?;
+                    self.target.declared_at(v, span);
+                    vs.push(v);
                 }
                 Binding::Vars(vs)
             }
             (None, Some(e)) => self.binding(e)?,
             (Some(t), Some(e)) => {
                 let v = self.value(e, want(t))?;
-                Binding::Value(self.typed(v, t, e.span())?)
+                Binding::Value(Rc::new(self.typed(v, t, e.span())?))
             }
             (None, None) => {
                 return Err(err(
@@ -1055,6 +1165,7 @@ impl<'a, T: Target> Eval<'a, T> {
     fn inst(&mut self, name: &str, args: &[Expr], span: Span) -> Result<(), Error> {
         let ops = args.iter().map(|a| self.operand(a)).collect::<Result<Vec<_>, _>>()?;
         self.insts += 1;
+        self.target.inst_at(span);
         self.target
             .inst(&spelled(name), &ops, self.guard)
             .map_err(|f| Error { span: f.arg.and_then(|i| args.get(i)).map_or(span, Expr::span), message: f.message })
@@ -1099,7 +1210,10 @@ impl<'a, T: Target> Eval<'a, T> {
             };
             let name = tail[1..close].trim();
             match self.lookup(name, *sspan)? {
-                Some(Binding::Value(v)) => out += &v.to_string(),
+                Some(Binding::Value(v)) => {
+                    self.step(value::held(&v), *sspan)?;
+                    out += &v.to_string();
+                }
                 Some(b) => return Err(err(*sspan, format!("`{name}` is {}, and a note shows values", b.kind()))),
                 None => return Err(err(*sspan, format!("`{name}` is not defined"))),
             }
@@ -1132,7 +1246,7 @@ impl<'a, T: Target> Eval<'a, T> {
             ));
         }
         let values = self.generics(f, generics)?;
-        let scope = f.generics.iter().zip(values).map(|(g, v)| (g.name.clone(), Binding::Value(v))).collect();
+        let scope = f.generics.iter().zip(values).map(|(g, v)| (g.name.clone(), Binding::Value(Rc::new(v)))).collect();
         let given = args.iter().map(|a| self.binding(a)).collect::<Result<Vec<_>, _>>()?;
         let outer = std::mem::replace(&mut self.scopes, vec![scope]);
         let r = self.params(f, args, given).and_then(|()| {
@@ -1182,8 +1296,8 @@ impl<'a, T: Target> Eval<'a, T> {
 }
 
 /// What a value known now gives an instruction.
-fn scalar<V>(v: Value, span: Span) -> Result<Operand<V>, Error> {
-    match v {
+fn scalar<V>(v: &Value, span: Span) -> Result<Operand<V>, Error> {
+    match *v {
         Value::Int(x, _) if (i128::from(i64::MIN)..=i128::from(u64::MAX)).contains(&x) => Ok(Operand::Int(x)),
         Value::Int(x, _) => Err(err(span, format!("{x} is wider than 64 bits"))),
         Value::F32(x) => Ok(Operand::F32(x)),

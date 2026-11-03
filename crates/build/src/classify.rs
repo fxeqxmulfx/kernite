@@ -1,5 +1,6 @@
-//! What a module's items are, whatever machine compiles them: the ABI each function names, whose
-//! memory its statics are, which kernels are cooperative, and which function an instance's name
+//! What a module's items are, whatever machine compiles them: the ABI each function names,
+//! whether a kernel is the `unsafe fn` it must be, whose memory the module's statics are, which
+//! kernels are cooperative, what is wrong with a helper, and which function an instance's name
 //! names.
 
 use kgen_lang::{Fn, ItemKind, Module, Value};
@@ -43,6 +44,13 @@ impl Abi {
 /// The ABI `f` names, if kgen compiles for it.
 pub fn abi(f: &Fn) -> Option<Abi> {
     f.abi.as_ref().and_then(|(abi, _)| Abi::of(abi))
+}
+
+/// Whether `f`, of ABI `abi`, is an `unsafe fn` if it must be: a kernel trusts the pointers it is
+/// given, so it is one. A function the kernels call is called by nothing else, so it promises
+/// Rust nothing, and need not be.
+pub(crate) fn trusted(f: &Fn, abi: Abi) -> bool {
+    abi == Abi::PtxFunc || f.unsafe_fn
 }
 
 /// Whose memory a module's statics are: its kernels'.
@@ -98,6 +106,14 @@ pub fn cooperative(f: &Fn) -> Result<bool, kgen_lang::Error> {
     Err(said(Refusal::Cooperative { name: &f.name, of }, c.span))
 }
 
+/// What is wrong with `f`, a helper of `module`, whether it is called or not: its body, if it
+/// does not parse, its `#[instances(..)]`, then its `#[cooperative]`, in that order. The rest is
+/// checked where it is called.
+pub(crate) fn helper(module: &Module, f: &Fn) -> Vec<kgen_lang::Error> {
+    let errors = [f.body.as_ref().err().cloned(), kgen_lang::instances(module, f).err(), cooperative(f).err()];
+    errors.into_iter().flatten().collect()
+}
+
 /// The function `name` of `module`.
 pub fn function<'a>(module: &'a Module, name: &str) -> Option<&'a Fn> {
     module.items.iter().find_map(|item| match &item.kind {
@@ -106,13 +122,18 @@ pub fn function<'a>(module: &'a Module, name: &str) -> Option<&'a Fn> {
     })
 }
 
-/// The function of `module` that `name` names, with the compile-time arguments of its instance
-/// that `name` is, as `tile::<4>` is; none for a function that takes none.
-pub fn instance<'a>(module: &'a Module, name: &str) -> Result<Option<(&'a Fn, Vec<Value>)>, kgen_lang::Error> {
+/// What [`instance`] finds.
+type Found<'a> = (&'a Fn, Vec<Value>, usize);
+
+/// The function of `module` that `name` names, the compile-time arguments of the instance of it
+/// that `name` is, as `tile::<4>` is, and the instance's place among those the function lists.
+/// A function that names an ABI and takes no compile-time arguments has one instance, of none,
+/// and a helper has none.
+pub fn instance<'a>(module: &'a Module, name: &str) -> Result<Option<Found<'a>>, kgen_lang::Error> {
     let Some(f) = function(module, name.split("::<").next().unwrap_or(name)) else { return Ok(None) };
-    for args in kgen_lang::instances(module, f)? {
+    for (at, args) in kgen_lang::instances(module, f)?.into_iter().enumerate() {
         if kgen_lang::instance(f, &args)? == name {
-            return Ok(Some((f, args)));
+            return Ok(Some((f, args, at)));
         }
     }
     Ok(None)

@@ -16,6 +16,14 @@ pub mod cpu {
         mov([RUNS], n);
     }
 
+    /// Does nothing.
+    pub unsafe extern "sysv64" fn idle() {}
+
+    /// Runs `idle` or `run`, whichever is at the address in `fp`.
+    pub unsafe extern "sysv64" fn either(fp: u64) {
+        call(fp, (idle, run));
+    }
+
     /// `x[0] *= FACTORS[0]`, counted as a run.
     ///
     /// # Safety

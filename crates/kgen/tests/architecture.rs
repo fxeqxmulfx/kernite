@@ -1,6 +1,8 @@
 //! The dependency rule: each crate depends only on the layers inside it, and nothing depends
 //! on a crate outside the workspace. Every crate must have a line here, so a new one cannot
 //! join without its place being decided. Inside a crate, no modules use each other in a cycle.
+//! The composition hands on only the language and the use cases, and the macro names only
+//! those, `module` and `ptx_scope`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -11,13 +13,14 @@ const RULE: &[(&str, &[&str])] = &[
     ("kgen-core", &[]),
     ("kgen-lang", &[]),
     ("kgen-compile", &["kgen-core"]),
+    ("kgen-build", &["kgen-lang"]),
     ("kgen-x86", &["kgen-core", "kgen-lang", "kgen-compile", "kgen-build"]),
     ("kgen-ptx", &["kgen-core", "kgen-lang", "kgen-compile", "kgen-build"]),
-    ("kgen", &["kgen-core", "kgen-lang", "kgen-compile", "kgen-build", "kgen-x86", "kgen-ptx"]),
+    // kgen-core is a dev-dependency: the tests of PTX read the items of an entry.
+    ("kgen", &["kgen-core", "kgen-lang", "kgen-build", "kgen-x86", "kgen-ptx"]),
     ("kgen-macros", &["kgen"]),
     ("kgen-cuda", &[]),
     ("kgen-cpu", &[]),
-    ("kgen-build", &["kgen-lang"]),
 ];
 
 /// The name of the package of the manifest at `path`.
@@ -271,6 +274,16 @@ fn files(dir: &Path) -> Vec<PathBuf> {
     paths.flat_map(|p| if p.is_dir() { files(&p) } else { vec![p] }).collect()
 }
 
+/// The path and the code of each Rust file in `src`, a crate's directory of them.
+fn sources(src: &Path) -> Vec<(PathBuf, String)> {
+    let rust = files(src).into_iter().filter(|f| f.extension().is_some_and(|e| e == "rs"));
+    rust.map(|f| {
+        let text = code(&fs::read_to_string(&f).unwrap());
+        (f, text)
+    })
+    .collect()
+}
+
 #[test]
 fn each_modules_uses_are_read_from_its_code() {
     // A crate whose modules a, b and c use each other in a cycle, which d uses. a uses b by a name
@@ -312,11 +325,10 @@ fn no_crates_modules_use_each_other_in_a_cycle() {
         let dir = entry.unwrap().path();
         let src = dir.join("src");
         let mut modules = BTreeMap::<String, String>::new();
-        for file in files(&src) {
-            if file.extension().is_some_and(|e| e == "rs") && !file.ends_with("tests.rs") {
+        for (file, text) in sources(&src) {
+            if !file.ends_with("tests.rs") {
                 let name = file.strip_prefix(&src).unwrap().iter().next().unwrap().to_str().unwrap();
-                *modules.entry(name.trim_end_matches(".rs").to_string()).or_default() +=
-                    &code(&fs::read_to_string(&file).unwrap());
+                *modules.entry(name.trim_end_matches(".rs").to_string()).or_default() += &text;
             }
         }
         let root = modules.remove("lib").unwrap();
@@ -327,4 +339,96 @@ fn no_crates_modules_use_each_other_in_a_cycle() {
         }
     }
     assert!(cycles.is_empty(), "{}", cycles.join("\n"));
+}
+
+/// The first name of each path that `code` writes after `prefix`: of the one path, or of each path
+/// in the braces that follow, as in `use kgen::{lang::{self, Tree}, Given}`, which gives `lang`
+/// and `Given` after `kgen::`, and `self` and `Tree` after `lang::`.
+fn starts<'a>(code: &'a str, prefix: &str) -> Vec<&'a str> {
+    let mut names = vec![];
+    for (at, _) in code.match_indices(prefix).filter(|&(at, _)| !code[..at].ends_with(word)) {
+        let rest = &code[at + prefix.len()..];
+        let first = |s: &'a str| s.split(|c: char| !word(c)).next().unwrap();
+        let Some(group) = rest.strip_prefix('{') else {
+            names.push(first(rest));
+            continue;
+        };
+        let (mut depth, mut new) = (0, true);
+        for (i, c) in group.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' if depth == 0 => break,
+                '}' => depth -= 1,
+                ',' if depth == 0 => new = true,
+                c if new && word(c) => {
+                    names.push(first(&group[i..]));
+                    new = false;
+                }
+                _ => {}
+            }
+        }
+    }
+    names
+}
+
+#[test]
+fn what_kgen_hands_on_and_what_the_macro_names_are_read_from_their_code() {
+    // A `pub use` of one line or of many, but not in a comment, and not `pub(crate)`.
+    let lib = code(
+        "//! pub use no::Comment;\npub use a::{\n    B,\n    C,\n};\npub use d as e;\npub(crate) use f::G;\nuse h::I;\n",
+    );
+    assert_eq!(starts(&lib, "pub use "), ["a", "d"]);
+    assert_eq!(starts(&lib, "pub use a::"), ["B", "C"]);
+    // The path or each path in braces, not the names inside a path; not in a comment, in a string,
+    // or after another name.
+    let src = code(
+        "use kgen::{lang::{self, Tree}, Given};\nuse kgen::lang::{constant as c};\n\
+         fn f() { kgen::module(m); xkgen::no(); /* kgen::no */ \"kgen::no\"; kgen::lang::kernel(); }\n",
+    );
+    assert_eq!(starts(&src, "kgen::"), ["lang", "Given", "lang", "module", "lang"]);
+    assert_eq!(starts(&src, "lang::"), ["self", "Tree", "constant", "kernel"]);
+}
+
+/// kgen hands on the language and the use cases, which is what its callers need. The types of a
+/// machine, of the allocator and of an instruction are none of those: whoever needs one depends
+/// on the crate that has it.
+#[test]
+fn kgen_re_exports_only_the_language_and_the_use_cases() {
+    for (file, code) in sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src")) {
+        for from in starts(&code, "pub use ") {
+            assert!(
+                ["kgen_lang", "kgen_build"].contains(&from),
+                "{} hands on what `{from}` has; it may hand on kgen_lang's and kgen_build's only",
+                file.display()
+            );
+        }
+    }
+}
+
+/// The macro writes Rust for what kgen has decided, and decides nothing. It names the language,
+/// the use cases kgen hands on, `module`, which calls them, and `ptx_scope`. It calls none of the
+/// language's functions that evaluate: `kgen::module` does that. `lang::instance` names an
+/// instance and evaluates nothing, so it stays.
+#[test]
+fn the_macro_names_only_the_language_the_use_cases_and_ptx_scope() {
+    let kgen = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let lib = sources(&kgen.join("src"));
+    let built: Vec<_> = lib.iter().flat_map(|(_, code)| starts(code, "pub use kgen_build::")).collect();
+    let allowed = [&["lang", "module", "ptx_scope"][..], &built].concat();
+    for (file, code) in sources(&kgen.join("../macros/src")) {
+        for name in starts(&code, "kgen::") {
+            assert!(
+                allowed.contains(&name),
+                "{} names `kgen::{name}`; it may name the language, the use cases, `module` and `ptx_scope`",
+                file.display()
+            );
+        }
+        for name in starts(&code, "lang::") {
+            assert!(
+                !["constant", "kernel", "instances", "memory"].contains(&name),
+                "{} names `lang::{name}`, which evaluates; `kgen::module` does that",
+                file.display()
+            );
+        }
+    }
 }

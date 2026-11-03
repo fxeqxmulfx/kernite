@@ -1,20 +1,58 @@
 //! The parser: a module's tokens to its items, a body's to statements.
 
-use crate::Error;
+use std::collections::BTreeSet;
+
 use crate::ast::{
     BinOp, Block, Const, Cooperative, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret, Static, Stmt,
     Type, UnOp,
 };
 use crate::token::{Delim, Span, Tree, text};
+use crate::{Error, nested};
 
-/// The items of a module, from the tokens inside its braces.
-pub fn module(trees: &[Tree]) -> Result<Module, Error> {
+/// The items of a module, from the tokens inside its braces. Each const, function and static
+/// has a name of its own. The first `given` tokens are consts the module takes from another;
+/// an item of the module's own that has the name of one is for the caller to refuse, as it can
+/// say where they come from.
+pub fn module(trees: &[Tree], given: usize) -> Result<Module, Error> {
     let mut p = Parser::new(trees, trees.last().map_or(Span::default(), Tree::span));
     let mut items = vec![];
     while !p.done() {
         items.push(p.item()?);
     }
+    named_once(&items, given)?;
     Ok(Module { items })
+}
+
+/// An error at the name of the first item that another const, function or static has the name
+/// of, but for the consts of the first `given` tokens. Of the two, the static is the one in the
+/// way, else the function, else the second.
+fn named_once(items: &[Item], given: usize) -> Result<(), Error> {
+    const KINDS: [&str; 3] = ["constant", "function", "static"];
+    // Each item's name, where it is, its kind as an index of `KINDS`, and whether it is the
+    // module's own. Of two items of a name, the one of the later kind in `KINDS` is in the
+    // way, else the later one.
+    let named: Vec<_> = items
+        .iter()
+        .filter_map(|item| {
+            let (name, span, kind) = match &item.kind {
+                ItemKind::Const(c) => (c.name.as_str(), c.span, 0),
+                ItemKind::Fn(f) => (f.name.as_str(), f.span, 1),
+                ItemKind::Static(s) => (s.name.as_str(), s.span, 2),
+                ItemKind::Other => return None,
+            };
+            Some((name, span, kind, item.tokens.start >= given))
+        })
+        .collect();
+    for (i, &(name, span, kind, _)) in named.iter().enumerate() {
+        for (j, &(same, _, other, own)) in named.iter().enumerate() {
+            if own && same == name && (other, j) < (kind, i) {
+                let what = if other == kind { "another" } else { "a" };
+                let message = format!("`{name}` names {what} {} of the module as well", KINDS[other]);
+                return Err(Error { span, message });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The binary operators, longest first where one starts another, with their precedence.
@@ -245,6 +283,22 @@ impl<'a> Parser<'a> {
             break;
         }
         if self.eat_ident("fn") {
+            // A helper may be `const`: kgen runs it while the kernel compiles. The error is at the
+            // first word refused.
+            let refused = self.trees[qualifiers..self.pos - 1].iter().find_map(|t| match t {
+                Tree::Ident { name, span } if name == "async" => {
+                    Some((*span, "a function runs when it is called, so it is not `async`"))
+                }
+                Tree::Ident { name, span } if name == "const" && abi.is_some() => Some((
+                    *span,
+                    "a function that names an ABI runs on its machine, never while Rust compiles, so it is not \
+                     `const`",
+                )),
+                _ => None,
+            });
+            if let Some((span, message)) = refused {
+                return Err(Error { span, message: message.into() });
+            }
             let f = self.function(attrs, (instances, cooperative), head..self.pos - 1, abi, unsafe_fn)?;
             return Ok(Item { tokens: start..self.pos, kind: ItemKind::Fn(f) });
         }
@@ -266,7 +320,7 @@ impl<'a> Parser<'a> {
     fn const_rest(&mut self) -> Result<Const, Error> {
         let (name, span) = self.ident()?;
         self.expect_op(":")?;
-        let ty = self.ty()?;
+        let ty = self.ty(1)?;
         self.expect_op("=")?;
         let value = self.expr()?;
         self.expect_op(";")?;
@@ -283,7 +337,7 @@ impl<'a> Parser<'a> {
         }
         let (name, span) = self.ident()?;
         self.expect_op(":")?;
-        let ty = self.ty()?;
+        let ty = self.ty(1)?;
         let value = if self.eat_op("=") { Some(self.expr()?) } else { None };
         self.expect_op(";")?;
         Ok(Static { attrs, vis, name, span, ty, value })
@@ -319,6 +373,17 @@ impl<'a> Parser<'a> {
             return self.error(format!("expected `(`, found {}", self.found()));
         };
         let params = params(inner)?;
+        // A name binds once among a function's generics and parameters, as in Rust; `_` binds none.
+        let mut seen = BTreeSet::new();
+        let names = generics.iter().map(|g| (&g.name, g.span)).chain(params.iter().map(|p| (&p.name, p.span)));
+        for (name, span) in names {
+            if name != "_" && !seen.insert(name) {
+                return Err(Error {
+                    span,
+                    message: format!("`{name}` names another parameter of the function as well"),
+                });
+            }
+        }
         let ret = if self.eat_op("->") {
             let (from, span) = (self.pos, self.span());
             while !self.done() && !matches!(self.peek(), Some(Tree::Group { delim: Delim::Brace, .. })) {
@@ -355,10 +420,13 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn ty(&mut self) -> Result<Type, Error> {
+    /// A type, at level `open` of the type it is in, 1 if it is the outer one. `[T; N]` and
+    /// `Name<T>` hold a level more.
+    fn ty(&mut self, open: usize) -> Result<Type, Error> {
         if let Some((inner, span)) = self.group(Delim::Bracket) {
+            nested(open, span)?;
             let mut p = Parser::new(inner, span);
-            let elem = p.ty()?;
+            let elem = p.ty(open + 1)?;
             if p.done() {
                 return Ok(Type::Slice(Box::new(elem), span));
             }
@@ -370,10 +438,11 @@ impl<'a> Parser<'a> {
         if let Some(Tree::Ident { name, span }) = self.peek()
             && matches!(self.peek_at(1), Some(Tree::Punct { ch: '<', .. }))
         {
+            nested(open, *span)?;
             self.pos += 2;
             let mut args = vec![];
             while !self.eat_op(">") {
-                args.push(self.ty()?);
+                args.push(self.ty(open + 1)?);
                 if !self.eat_op(",") {
                     self.expect_op(">")?;
                     break;
@@ -422,7 +491,7 @@ impl<'a> Parser<'a> {
             let mut p = Parser::new(inner, span);
             let mut given = vec![];
             while !p.done() {
-                given.push(Some(p.ty()?));
+                given.push(Some(p.ty(1)?));
                 if !p.done() {
                     p.expect_op(",")?;
                 }
@@ -450,7 +519,7 @@ impl<'a> Parser<'a> {
         if self.eat_ident("let") {
             self.eat_ident("mut");
             let (name, span) = self.ident()?;
-            let ty = if self.eat_op(":") { Some(self.ty()?) } else { None };
+            let ty = if self.eat_op(":") { Some(self.ty(1)?) } else { None };
             let value = if self.eat_op("=") { Some(self.expr()?) } else { None };
             self.expect_op(";")?;
             return Ok(Stmt::Let { name, span, ty, value });
@@ -488,17 +557,29 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Expr(e))
     }
 
+    /// An `if` and the `else if`s and `else` after it, each nested in the one before. They are read
+    /// in a loop, and not by a call for each, so that a long row of them is no deeper to the parser
+    /// than one.
     fn if_stmt(&mut self) -> Result<Stmt, Error> {
-        let span = self.span();
-        self.pos += 1;
-        let cond = self.expr()?;
-        let then = self.braced()?;
-        let otherwise = if self.eat_ident("else") {
-            Some(Box::new(if self.is_ident("if") { self.if_stmt()? } else { Stmt::Block(self.braced()?) }))
-        } else {
-            None
+        let mut links = vec![];
+        let ending = loop {
+            let span = self.span();
+            nested(links.len() + 1, span)?;
+            self.pos += 1;
+            let (cond, then) = (self.expr()?, self.braced()?);
+            links.push((cond, then, span));
+            if !self.eat_ident("else") {
+                break None;
+            }
+            if !self.is_ident("if") {
+                break Some(Box::new(Stmt::Block(self.braced()?)));
+            }
         };
-        Ok(Stmt::If { cond, then, otherwise, span })
+        let chain = links
+            .into_iter()
+            .rev()
+            .fold(ending, |otherwise, (cond, then, span)| Some(Box::new(Stmt::If { cond, then, otherwise, span })));
+        Ok(*chain.expect("an `if` is a link"))
     }
 
     fn braced(&mut self) -> Result<Block, Error> {
@@ -508,7 +589,14 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// An expression, which nests no deeper than the most.
     fn expr(&mut self) -> Result<Expr, Error> {
+        let e = self.range()?;
+        tall(&e, 0)?;
+        Ok(e)
+    }
+
+    fn range(&mut self) -> Result<Expr, Error> {
         let lo = self.binary(0)?;
         let span = self.span();
         let inclusive = if self.eat_op("..=") {
@@ -525,11 +613,14 @@ impl<'a> Parser<'a> {
     /// Operators of precedence `min` and up, left to right.
     fn binary(&mut self, min: u8) -> Result<Expr, Error> {
         let mut lhs = self.cast()?;
+        let mut chained = 0;
         while let Some(&(op_text, op, prec)) = BINARY.iter().find(|(t, ..)| self.is_op(t)) {
             if prec < min {
                 break;
             }
             let span = self.span();
+            chained += 1;
+            nested(chained, span)?;
             self.pos += op_text.len();
             let rhs = self.binary(prec + 1)?;
             lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs), span);
@@ -539,8 +630,11 @@ impl<'a> Parser<'a> {
 
     fn cast(&mut self) -> Result<Expr, Error> {
         let mut e = self.unary()?;
+        let mut chained = 0;
         while self.is_ident("as") {
             let span = self.span();
+            chained += 1;
+            nested(chained, span)?;
             self.pos += 1;
             let (ty, _) = self.ident()?;
             e = Expr::Cast(Box::new(e), ty, span);
@@ -548,18 +642,26 @@ impl<'a> Parser<'a> {
         Ok(e)
     }
 
+    /// The `-`s and `!`s before an expression, and it. They are read in a loop, and not by a call
+    /// for each, so that a long row of them is no deeper to the parser than one.
     fn unary(&mut self) -> Result<Expr, Error> {
-        let span = self.span();
-        let op = if self.is_op("-") {
-            UnOp::Neg
-        } else if self.is_op("!") && !self.is_op("!=") {
-            UnOp::Not
-        } else {
-            let e = self.primary()?;
-            return self.postfix(e);
-        };
-        self.pos += 1;
-        Ok(Expr::Unary(op, Box::new(self.unary()?), span))
+        let mut ops = vec![];
+        loop {
+            let span = self.span();
+            let op = if self.is_op("-") {
+                UnOp::Neg
+            } else if self.is_op("!") && !self.is_op("!=") {
+                UnOp::Not
+            } else {
+                break;
+            };
+            ops.push((op, span));
+            nested(ops.len(), span)?;
+            self.pos += 1;
+        }
+        let e = self.primary()?;
+        let e = self.postfix(e)?;
+        Ok(ops.into_iter().rev().fold(e, |e, (op, span)| Expr::Unary(op, Box::new(e), span)))
     }
 
     fn primary(&mut self) -> Result<Expr, Error> {
@@ -628,6 +730,7 @@ impl<'a> Parser<'a> {
     }
 
     fn postfix(&mut self, mut e: Expr) -> Result<Expr, Error> {
+        let mut chained = 0;
         loop {
             if self.is_op(".") && !self.is_op("..") {
                 self.pos += 1;
@@ -665,6 +768,8 @@ impl<'a> Parser<'a> {
             } else {
                 return Ok(e);
             }
+            chained += 1;
+            nested(chained, e.span())?;
         }
     }
 
@@ -689,6 +794,29 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(out)
+    }
+}
+
+/// Nothing, if `e` nests within the most, with `open` levels around it; else why not, where the
+/// first level past it starts.
+fn tall(e: &Expr, open: usize) -> Result<(), Error> {
+    nested(open, e.span())?;
+    let next = open + 1;
+    match e {
+        Expr::Lit(..) | Expr::Str(..) | Expr::Bool(..) | Expr::Path(..) => Ok(()),
+        Expr::Field(a, ..) | Expr::Unary(_, a, _) | Expr::Paren(a, _) | Expr::Cast(a, ..) => tall(a, next),
+        Expr::Index(a, b, _) | Expr::Binary(_, a, b, _) | Expr::Repeat(a, b, _) => {
+            tall(a, next).and_then(|()| tall(b, next))
+        }
+        Expr::Range { lo, hi, .. } => tall(lo, next).and_then(|()| tall(hi, next)),
+        Expr::Array(xs, _) | Expr::Tuple(xs, _) => xs.iter().try_for_each(|x| tall(x, next)),
+        Expr::Instance { func, generics, .. } => {
+            tall(func, next).and_then(|()| generics.iter().try_for_each(|x| tall(x, next)))
+        }
+        Expr::Call { func, generics, args, .. } => {
+            tall(func, next).and_then(|()| generics.iter().chain(args).try_for_each(|x| tall(x, next)))
+        }
+        Expr::Method { recv, args, .. } => tall(recv, next).and_then(|()| args.iter().try_for_each(|x| tall(x, next))),
     }
 }
 
@@ -730,7 +858,7 @@ fn params(trees: &[Tree]) -> Result<Vec<Param>, Error> {
         p.eat_ident("mut");
         let (name, span) = p.ident()?;
         p.expect_op(":")?;
-        let ty = p.ty()?;
+        let ty = p.ty(1)?;
         out.push(Param { name, span, ty });
         if !p.done() {
             p.expect_op(",")?;

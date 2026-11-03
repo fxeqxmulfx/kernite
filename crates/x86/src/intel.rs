@@ -39,6 +39,9 @@ pub struct Listing {
     /// `tile::<4>`. Function `i`'s address reads `{fi}`, for the operand of `naked_asm!` that
     /// names it.
     pub funcs: Vec<String>,
+    /// The functions a call at an address may reach, each once, by what the source calls it.
+    /// The code names none of them, so `funcs` does not.
+    pub reach: Vec<String>,
     /// The memory of the module's it names, its statics, each by what the source calls it.
     /// Static `COUNTS`'s address reads `{COUNTS}`, for the operand of `naked_asm!` that names it.
     pub statics: Vec<String>,
@@ -154,7 +157,9 @@ pub fn taken(name: &str) -> bool {
 /// Labels become local numbers, in the order they are placed, which `naked_asm!` asks for so
 /// that the same code can be emitted twice. Numbers made of ones and zeros alone are skipped:
 /// Intel syntax reads `10b` as binary ten, not as label 10 behind.
-pub fn print(c: &Allocated<Op>) -> Result<Listing, String> {
+///
+/// `reach` is what a call at an address may reach, which `c` does not name: the listing keeps it.
+pub fn print(c: &Allocated<Op>, reach: Vec<String>) -> Result<Listing, String> {
     let lowered = frame::lower(c)?;
     let mut numbers = BTreeMap::new();
     let mut places = BTreeMap::new();
@@ -213,6 +218,7 @@ pub fn print(c: &Allocated<Op>) -> Result<Listing, String> {
         lines,
         consts: c.consts.clone(),
         funcs: c.funcs.clone(),
+        reach,
         statics: c.statics.clone(),
         regs: c
             .assignment

@@ -3,7 +3,7 @@
 //! written and finished, and the module of them all.
 
 use kgen_build::{Backend, Called, Device, DeviceStatic, StaticError, Unfinished};
-use kgen_lang::{ItemKind, Module};
+use kgen_lang::{ItemKind, Module, Span};
 use kgen_ptx::lang::{Callee, Kernel};
 use kgen_ptx::{Prototype, Ptx, Returns, Static, Ty};
 
@@ -19,7 +19,7 @@ fn lay_out(ptx: &Ptx, module: &Module, name: &str, before: &[Static]) -> Result<
 /// The kernel `ptx` makes of `name`, a function of `module` or an instance of one, told of
 /// `statics` and `callees`, with its body written, for `finish`.
 fn written(ptx: &Ptx, module: &Module, name: &str, statics: &[Static], callees: &[Called<Callee>]) -> Kernel {
-    let (f, args) = kgen_build::instance(module, name).unwrap().unwrap();
+    let (f, args, _) = kgen_build::instance(module, name).unwrap().unwrap();
     let mut kernel = ptx.kernel(f, name, &args, kgen_build::cooperative(f).unwrap(), statics, callees);
     kgen_lang::kernel(module, f, &args, &mut kernel).unwrap();
     kernel
@@ -128,7 +128,7 @@ fn a_function_the_kernels_call_is_a_func() {
     assert_eq!(callee("pair"), Some(Callee::Broken));
     assert_eq!(callee("k"), Some(Callee::Kernel));
     assert_eq!(callee("nothing"), None);
-    let (_, args) = kgen_build::instance(&module, "times::<2>").unwrap().unwrap();
+    let (_, args, _) = kgen_build::instance(&module, "times::<2>").unwrap().unwrap();
     let called = Called { name: "times::<2>".into(), function: "times".into(), args, callee: calls };
     let times = ptx.finish(written(&ptx, &module, "times::<2>", &[], &[])).unwrap();
     let k = ptx.finish(written(&ptx, &module, "k::<1>", &[], &[called])).unwrap();
@@ -189,6 +189,37 @@ fn each_refusal_says_what_to_blame() {
     assert_eq!(lay_out(&ptx, &module, "EMPTY", &[]), Err(empty));
     let big = StaticError::Value("this is 128, out of range for `s8`".into());
     assert_eq!(lay_out(&ptx, &module, "BIG", &[]), Err(big));
-    let unfinished = Unfinished { var: Some("x".into()), message: "`x` is read before anything writes it".into() };
+    // Where `x` is declared: a byte of the source, as a string's spans are.
+    let at = Some(Span(src.find("x: u32").unwrap() as u32));
+    let unfinished = Unfinished { at, message: "`x` is read before anything writes it".into() };
     assert_eq!(ptx.finish(written(&ptx, &module, "unwritten", &[], &[])), Err(unfinished));
+}
+
+/// A mask of lanes that leaves out lane 0, on an instruction that thread 0 runs, is refused when
+/// the kernel is finished, and says where the instruction is, for kgen-build to place it there;
+/// under a guard it is taken.
+#[test]
+fn a_mask_without_lane_0_is_refused_at_its_instruction() {
+    let src = r#"
+        pub unsafe extern "ptx-kernel" fn masked(n: u32) {
+            bar.warp.sync(2);
+        }
+
+        pub unsafe extern "ptx-kernel" fn guarded(n: u32) {
+            let p: pred;
+            setp.eq.u32(p, n, 0);
+            if p {
+                bar.warp.sync(2);
+            }
+        }
+    "#;
+    let module = kgen_lang::parse(src).unwrap();
+    let ptx = Ptx::new("");
+    // At the last word of the instruction's name, as an error of the instruction's is.
+    let at = Some(Span(src.find("sync(2)").unwrap() as u32));
+    let message = "`bar.warp.sync` is run by thread 0, which is in lane 0; this mask leaves lane 0 out, and PTX \
+                   leaves the instruction undefined in a thread outside its mask";
+    let unfinished = Unfinished { at, message: message.into() };
+    assert_eq!(ptx.finish(written(&ptx, &module, "masked", &[], &[])), Err(unfinished));
+    assert!(ptx.finish(written(&ptx, &module, "guarded", &[], &[])).is_ok());
 }

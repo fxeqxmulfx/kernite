@@ -1,6 +1,6 @@
 [package]
 name = "kgen-compile"
-description = "The use cases: liveness, register allocation that spills, the frame's layout"
+description = "The allocator: liveness, register allocation that spills, the frame's layout"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

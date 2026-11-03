@@ -83,6 +83,18 @@
 //! An instance it does not list is a compile error where Rust compiles the call, in
 //! `cargo build`; `cargo check` evaluates no generic function's constants, and misses it.
 //!
+//! A kernel's parameters keep the names they are written with beside those the Rust the
+//! macro writes binds for itself: `grid`, the launcher's, and `threads` and `shared`, those
+//! of a cooperative GPU kernel's `_blocks` method. A compile-time argument may not be named
+//! as one of them, for Rust cannot keep a const apart from a parameter of its name: that is
+//! an error at its name.
+//!
+//! The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one,
+//! `dead_code` say, and build its kernels: Rust lints the names and the code a kernel is
+//! written with, and none that the macro adds. Clippy's `too_many_arguments` is the one lint a
+//! crate of kernels may not forbid: Clippy says it of a launcher of more than seven parameters,
+//! whoever wrote it, and each launcher allows it.
+//!
 //! A module of kernels takes the consts it shares with others from a module `#[consts]` is
 //! on, which it names by its path, as Rust reads one where the module is:
 //! `#[kernels(consts = crate::model::sizes)]`, or `consts = sizes` for one beside it. Its
@@ -153,10 +165,13 @@
 //! `_ZN4kgen6my_app3gpu5scaleE`, which `cu++filt`, Nsight and `cuda-gdb` show as
 //! `kgen::my_app::gpu::scale`, an instance as a template's,
 //! `kgen::my_app::gpu::block_sums<(unsigned int)1024>`, and a static as a variable of the
-//! namespaces, `kgen::my_app::gpu::COUNTS`. The workspace is named as the
-//! directory of its `Cargo.toml` is, or as the manifest names it, which a clone keeps
-//! wherever it is; `name = ""` leaves it out. A package of no workspace is named as the
-//! package is.
+//! namespaces, `kgen::my_app::gpu::COUNTS`. The workspace's manifest is the one Cargo takes
+//! for the package. kgen reads a relative `CARGO_HOME` from the directory rustc runs in,
+//! and Cargo from the one it was run in, which may be another. The workspace is named as
+//! the directory of its manifest is, or as the manifest names it, which a clone keeps
+//! wherever it is. `name = ""` leaves the workspace out of the names. A `name` that is not
+//! a string is an error at the module. The error names the manifest. A package with no
+//! workspace's manifest is one of its own, named as the package is.
 //!
 //! ```toml
 //! [workspace.metadata.kgen]
@@ -165,9 +180,9 @@
 //!
 //! A kernel is `unsafe`: it trusts the pointers it is given, and that nothing else touches the
 //! memory of the module's it names while it runs, as an x86 kernel's safety contract says, by
-//! name, of the statics it and the functions it calls name. One that does not compile is a
-//! `compile_error!` where the trouble is, beside a stub of its signature or its launcher, so
-//! that its callers are not errors as well.
+//! name, of the statics it and the functions it calls name, whether it calls them by name or
+//! at an address. One that does not compile is a `compile_error!` where the trouble is, beside
+//! a stub of its signature or its launcher, so that its callers are not errors as well.
 
 extern crate proc_macro;
 
@@ -179,11 +194,12 @@ mod x86;
 
 use proc_macro::{Delimiter, Group, Span, TokenStream, TokenTree};
 
-use kgen::lang::{self, ItemKind, Tree};
+use kgen::ConstItem;
+use kgen::lang;
 
 use crate::expand::expand;
 use crate::rust::{
-    Site, attrs_len, braced, error, flatten, inner_attribute, is_ident, is_path, is_punct, module, parse, tree,
+    Site, attrs_len, braced, error, flatten, inner_attribute, is_ident, is_path, is_punct, lex, module, parse,
 };
 
 /// See the crate documentation.
@@ -235,31 +251,28 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
         );
     };
     let top = flatten(braces.stream());
-    let mut spans = vec![];
-    let trees: Vec<Tree> = top.iter().map(|t| tree(t, &mut spans)).collect();
+    let (trees, spans) = lex(&top);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(Span::call_site);
     // The module as it is, for Rust; and the consts kgen reads, for the kernels.
     let mut inner: TokenStream = top.iter().cloned().collect();
     let mut given = TokenStream::new();
-    match lang::module(&trees) {
+    match trees.and_then(|trees| lang::module(&trees, 0)) {
         Err(e) => inner.extend(error(at(e.span), &e.message)),
         Ok(module) => {
-            for item in &module.items {
+            for (item, verdict) in module.items.iter().zip(kgen::consts(&module)) {
                 let tokens = &top[item.tokens.clone()];
                 let named = &tokens[attrs_len(tokens)..];
-                match &item.kind {
-                    ItemKind::Const(_) if !named.first().is_some_and(|t| is_ident(t, "pub")) => {
+                match verdict {
+                    ConstItem::Given | ConstItem::Wrong(_) if !named.first().is_some_and(|t| is_ident(t, "pub")) => {
                         let message = "a const of a module of consts is `pub`, for the modules of kernels that take \
                                        it to see";
                         inner.extend(error(named[0].span(), message));
                     }
-                    ItemKind::Const(c) => match lang::constant(&module, c) {
-                        Ok(_) => given.extend(tokens.iter().cloned()),
-                        Err(e) => inner.extend(error(at(e.span), &e.message)),
-                    },
+                    ConstItem::Given => given.extend(tokens.iter().cloned()),
+                    ConstItem::Wrong(e) => inner.extend(error(at(e.span), &e.message)),
                     // The module's own attribute, `#![..]`, is Rust's.
-                    ItemKind::Other if inner_attribute(tokens) => {}
-                    _ => {
+                    ConstItem::NotAConst if inner_attribute(tokens) => {}
+                    ConstItem::NotAConst => {
                         let message = "a module of consts holds the consts kernels read, as `pub const E: usize = \
                                        16;`, and nothing else";
                         inner.extend(error(named.first().unwrap_or(&tokens[0]).span(), message));
@@ -277,9 +290,9 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut rule = parse("($($module:tt)*) =>");
     rule.extend([TokenTree::Group(Group::new(Delimiter::Brace, call))]);
     rule.extend(parse(";"));
-    inner.extend(parse("#[doc(hidden)] #[allow(unused_macros)] macro_rules! __kgen_consts"));
+    inner.extend(parse("#[doc(hidden)] macro_rules! __kgen_consts"));
     inner.extend([TokenTree::Group(Group::new(Delimiter::Brace, rule))]);
-    inner.extend(parse("#[doc(hidden)] #[allow(unused_imports)] pub(crate) use __kgen_consts;"));
+    inner.extend(parse("#[doc(hidden)] pub(crate) use __kgen_consts;"));
     module(head, braces, inner)
 }
 
@@ -295,9 +308,13 @@ pub fn __kernels(input: TokenStream) -> TokenStream {
     let Some((braces, head)) = braced(rest) else {
         return error(Span::call_site(), "`__kernels!` is how `#[kernels(consts = ..)]` is given its consts");
     };
+    // What the macro writes is of the hygiene of the group `#[kernels]` made of the path, which is
+    // the attribute's: it resolves where the module is, not inside the consts' macro, and Rust,
+    // which takes it for the macro's, lints none of it. It is where the path begins, for an error
+    // to point at.
+    let at = path.span();
     let path: Vec<TokenTree> = path.stream().into_iter().collect();
-    // What the macro writes resolves where the module is, not inside the consts' macro.
-    let site = Site::at(path.first().map_or_else(Span::call_site, TokenTree::span));
+    let site = Site::at(path.first().map_or(at, |t| t.span().resolved_at(at)));
     let inner = expand(Some((consts.stream(), &path)), braces.stream());
     drop(site);
     module(head, braces, inner)

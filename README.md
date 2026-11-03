@@ -34,17 +34,29 @@ let sum = unsafe { kernels::sum8(xs.as_ptr()) };
 `sum8` becomes an `#[unsafe(naked)]` function of the signature it declares, its body the kernel in Intel syntax,
 and `kernels::LISTINGS` holds each kernel's listing for snapshots. Everything that is not an instruction happens
 while the kernel compiles: `for` unrolls, `if` on a bool chooses, a function without an ABI is a helper inlined
-where it is called, and `<const N: usize>` makes one generic. A generic kernel is compiled for each value its
-`#[instances(1, 4)]` lists, each a kernel of its own, which Rust calls as it calls a generic function,
-`kernels::dot::<4>(x, y, n)`; a value it does not list fails to build. [`kgen-lang`](crates/lang/src/lib.rs)
-describes the language.
+where it is called, and `<const N: usize>` makes one generic. Each parameter and generic of a function has a
+name of its own, but `_`. A generic kernel is compiled for each value its `#[instances(1, 4)]` lists, each a
+kernel of its own, which Rust calls as it calls a generic function, `kernels::dot::<4>(x, y, n)`; a value it
+does not list fails to build. A value known now holds at most 1048576 elements in all, however its arrays nest,
+and a range as many. Each number, float and `bool` is an element, and so is each array of none or one item,
+which costs memory of its own. A kernel declares at most 65536 variables, however its loops and helpers repeat
+them. Working out a function takes at most 4194304 steps: each turn of a `for`, each instruction, call, label or
+note, each number of a range, each item an array lists, as `[a, b]`, and each element of each `[x; n]`, of each
+array a method makes, of each one copied from a name, as `let b: [u32; 4] = a;` and `for x in a` copy it, and of
+each value an index takes or a note shows. A number read by name or worked out costs none of its own. Nesting is
+held to 64 levels, so that no kernel can run the compiler out of stack. Brackets, types, expressions, rows of
+`else if`s, consts that name consts and a value's arrays each nest 64 deep at most, and each operator in
+`a + b + c` is a level of its expression. A block, a `for` and an `if` are a level for what they hold, and count
+together with the expression inside them, along the helpers that call one another.
+[`kgen-lang`](crates/lang/src/lib.rs) describes the language.
 
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kgen_macros::consts]` is on, and a
 module of kernels takes them by its path, `#[kgen_macros::kernels(consts = crate::model::sizes)]`: its kernels read
 them as the module's own, and Rust sees them there by a `use` the macro writes. A module of consts is the crate's own,
 and holds `pub` consts of what kernels read, numbers, floats, `bool`s, arrays of them and expressions of these; a
-module that takes them may not have a const, a function or a static of its own of one of their names.
+module that takes them may not have a const, a function or a static of its own of one of their names. Each const,
+function and static of a module has a name of its own.
 
 The x86 target knows every instruction of x86-64-v3, in each form `llvm-mc` takes, [`forms`](crates/x86/src/forms.rs):
 x86-64's own on integers of 8 to 64 bits, SSE's to SSE4.2's as AVX writes them, `vaddps` and not `addps`, and AVX's,
@@ -121,7 +133,9 @@ unsafe { kernels::normalize(kgen_cpu::Grid::new(4), x.as_mut_ptr(), sums.as_mut_
 `normalize` becomes the function that launches it, which takes a [`kgen_cpu::Grid`](crates/cpu/src/lib.rs) and the
 kernel's parameters, runs the kernel on a thread for each of the grid's, the caller's the first, and returns when all
 have ended. A thread that waits spins, so it needs a core: a grid of more threads than the machine runs at once,
-`kgen_cpu::most()`, is an error, as a GPU's grid of more blocks than it runs at once is.
+`kgen_cpu::most()`, is an error, as a GPU's grid of more blocks than it runs at once is. The kernel's parameters keep
+the names they are written with, `grid` among them. A compile-time argument may not be named `grid`, for Rust cannot
+keep a const apart from a parameter of its name: that is an error at its name.
 
 A kernel calls the module's others, itself among them, as SysV calls a function: `call(g, gcd, (a, b))` moves `a` to
 `rdi` and `b` to `rsi`, and `g` from `rax`, and is checked against what `gcd` takes and returns. `lea(fp, [gcd])` takes
@@ -138,9 +152,10 @@ holding what it says until something writes it. A kernel reaches a static at a d
 address in it as it does one in stack memory, and refuses a write to constant memory. The host reads and writes each as
 the module has it, a [`kgen_cpu::Global`](crates/cpu/src/global.rs) of Rust's type for its elements:
 `kernels::COUNTS.read()`, `kernels::WEIGHTS.write(&[2.0; 4])`. Its elements are atomics, which the host loads and
-stores, and a kernel's safety contract says that nothing else touches the memory of the module's it names while it
-runs. A module's statics are its kernels': on the GPU for GPU kernels, so a module with kernels of both kinds and a
-static is an error, which says to make it two.
+stores, and a kernel's safety contract says that nothing else touches the memory of the module's it names while it runs,
+nor any that the functions it calls name, whether it calls them by name or at an address. A module's statics are its
+kernels': on the GPU for GPU kernels, so a module with kernels of both kinds and a static is an error, which says to
+make it two.
 
 ## On a GPU
 
@@ -175,6 +190,11 @@ unsafe { kernels.saxpy(kgen_cuda::Grid::new(n.div_ceil(256), 256), 2.0, xs.ptr()
 ys.read_into(&mut y)?;
 ```
 
+`saxpy` becomes the method that launches it, which takes the grid and then the kernel's parameters. They keep the names
+they are written with, `grid` among them. A compile-time argument may not be named `grid`, nor, on a cooperative kernel,
+`threads` or `shared`, which are parameters of the method that says how many blocks its grid has at most, below. Rust
+cannot keep a const apart from a parameter of its name: that is an error at its name.
+
 The PTX target knows every instruction of PTX's for the GPUs from Fermi, `sm_20`, to Ampere, `sm_86`, in each form
 `ptxas` takes, [`forms`](crates/ptx/src/forms.rs), but one. `txq.force_unnormalized_coords` asks of a sampler apart from
 its texture, in the independent mode, which kgen does not write: kgen writes no `.samplerref`, so the ISA leaves the
@@ -184,14 +204,18 @@ rest, kgen takes it too: `sust.p` with a cache operation, as `sust.b` has, or an
 a variable. Where a value known now would be cut to fewer bits, by `ptxas` or by the instruction as the ISA has it, or
 is one the ISA leaves undefined, kgen refuses it, and the table says so: `lop3`'s table is 8 bits, and `ptxas` takes a
 bigger one and keeps its low 8; `shfl` reads its lane in the low 5 bits of `b`; and a barrier counts 1024 threads at
-most, the most a CTA has. Where `ptxas` takes less, kgen does too: `st` stores a special register only as one of a
-vector's. And kgen checks what `ptxas` leaves to the program: that an access stays in the memory it names, at a multiple
-of the bytes it moves. Each form, and each of its words, says the oldest version of PTX and the oldest GPU `ptxas` takes
-it at, back to PTX 1.0, which is at times older than the ISA says: `ptxas` takes `ld.mmio.acquire` for `sm_70`, which
-the ISA has from `sm_75`. A module's `.version` and `.target` are the oldest that have every instruction its kernels
-use: PTX 2.3 and `sm_20` at the least. Where `ptxas` is installed, a test hands it every form at what kgen says it
-needs, at the newest version, and for each newer GPU to `sm_86`, which the driver compiles a module for when it runs
-there, and `ptxas` must take it each time; and at the version before and on the GPU before, which it must refuse.
+most, the most a CTA has. A mask of lanes, which names the threads of a warp that take part, may not leave out lane 0
+where thread 0 runs the instruction: thread 0 is in lane 0, and the ISA leaves the instruction undefined in a thread
+outside its mask. Thread 0 runs the instruction where no `if` guards it and no `ret`, `exit`, `trap`, call or jump keeps
+thread 0 from it. kgen refuses a mask known now that leaves out lane 0 there, and takes one in a variable. It does not
+look inside a function that kernels call. Where `ptxas` takes less, kgen does too: `st` stores a special register only
+as one of a vector's. And kgen checks what `ptxas` leaves to the program: that an access stays in the memory it names,
+at a multiple of the bytes it moves. Each form, and each of its words, says the oldest version of PTX and the oldest GPU
+`ptxas` takes it at, back to PTX 1.0, which is at times older than the ISA says: `ptxas` takes `ld.mmio.acquire` for
+`sm_70`, which the ISA has from `sm_75`. A module's `.version` and `.target` are the oldest that have every instruction
+its kernels use: PTX 2.3 and `sm_20` at the least. Where `ptxas` is installed, a test hands it every form at what kgen
+says it needs, at the newest version, and for each newer GPU to `sm_86`, which the driver compiles a module for when it
+runs there, and `ptxas` must take it each time; and at the version before and on the GPU before, which it must refuse.
 
 An `extern "ptx-func"` function is a `.func` that the module's kernels and functions call, itself among them. It
 takes and returns PTX's types, and `call(g, gcd, (a, b))` calls it by its name, or `call(g, fp, (a, b))` at the
@@ -225,8 +249,8 @@ thread keeps in its registers, or a block in its shared memory, lasts across the
 to memory and read it back. Its grid has at most as many blocks as the GPU runs at once, which `Kernels` says by a
 method of the kernel's name: `kernels.normalize_blocks(256, 0)?` for blocks of 256 threads and no shared memory from
 the launch. A grid of more is an error, which says how many. Such a kernel needs a GPU from Pascal's on, `sm_60`, and
-kgen refuses `grid.sync()` where a thread of the grid might not come to it: under an `if`, in an `extern "ptx-func"`
-function, or in a kernel that is not cooperative.
+kgen refuses `grid.sync()` under an `if`, in an `extern "ptx-func"` function, or in a kernel that is not cooperative. A
+jump around one is the kernel's to see to: every thread of the grid takes it, or none does.
 
 A kernel is named in PTX as C++ names a function in the namespaces of its workspace, its crate and its modules, so
 that a profiler tells two crates' `saxpy` apart: `_ZN4kgen6my_app3gpu5saxpyE`, which `cu++filt`, Nsight and
@@ -234,13 +258,19 @@ that a profiler tells two crates' `saxpy` apart: `_ZN4kgen6my_app3gpu5saxpyE`, w
 `kgen::my_app::gpu::block_sums<(unsigned int)1024>`, and launched as Rust calls a generic method,
 `kernels.block_sums::<1024>(grid, x, sums)`; the shared memory the launch gives is named as the kernel's static,
 `kgen::my_app::gpu::reverse_runs::run`, and a static of the module's as a variable of its namespace,
-`kgen::my_app::gpu::COUNTS`. The workspace is named as the directory of its `Cargo.toml` is, unless the manifest names
-it, as kgen's does, so that a clone keeps the names wherever it is:
+`kgen::my_app::gpu::COUNTS`. The workspace's manifest is the one Cargo takes for the package. kgen reads a relative
+`CARGO_HOME` from the directory rustc runs in, and Cargo from the one it was run in, which may be another. The
+workspace is named as the directory of its manifest is, unless the manifest names it, as kgen's does, so that a
+clone keeps the names wherever it is:
 
 ```toml
 [workspace.metadata.kgen]
 name = "kgen"
 ```
+
+`name = ""` leaves the workspace out of the names: `my_app::gpu::saxpy`. A `name` that is not a string is an error at
+the module. The error names the manifest. A package with no workspace's manifest is one of its own, named as the package
+is.
 
 ## Examples
 
@@ -289,9 +319,10 @@ Each crate depends only on the layers inside it. `crates/kgen/tests/architecture
 
 | layer | crate | what it knows |
 |---|---|---|
-| entities | `kgen-core` | programs over variables and over registers; the `Machine` and `Spill` ports |
+| entities | `kgen-core` | programs over variables and over registers |
 | language | `kgen-lang` | kernels in Rust's syntax: parsing, evaluation, the `Target` port |
-| use cases | `kgen-compile` | liveness, register allocation, spilling, the frame's layout; tested on a toy machine |
+| entity service | `kgen-compile` | the allocator: liveness, register allocation, spilling, the frame's layout; which items every path of a program runs; the `Machine` and `Spill` ports; tested on a toy machine |
+| use cases | `kgen-build` | what kgen does with a module: ABIs, its rules, compiling each function; the ports a machine implements |
 | adapters | `kgen-x86`, `kgen-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kgen` | which machine and syntax each kernel compiles with |
 | delivery | `kgen-macros` | kernels as functions: `#[unsafe(naked)]`, launchers of a grid's threads, or launchers of PTX |
@@ -303,6 +334,11 @@ Each crate depends only on the layers inside it. `crates/kgen/tests/architecture
 The output is deterministic:
 - no crate depends on anything outside the workspace;
 - clippy forbids hash maps and hash sets.
+
+The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one, `dead_code` say, and build
+its kernels: Rust lints the names and the code a kernel is written with, and none that the macro adds. Clippy's
+`too_many_arguments` is the one lint a crate of kernels may not forbid: Clippy says it of a launcher of more than seven
+parameters, whoever wrote it, and each launcher allows it.
 
 Checking the generated kernels is for the crates that hold them: a snapshot of every listing, so that any change
 to any layer that moves an instruction shows in review, and runs against scalar references, bit for bit, as in

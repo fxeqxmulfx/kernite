@@ -1,7 +1,7 @@
 //! Tokens as `proc_macro` hands them over, with numbered spans in place of its own, and a lexer
 //! that reads the same tokens out of a string.
 
-use crate::Error;
+use crate::{Error, nested};
 
 /// Where a token came from, as whoever made the tokens numbers it: an index into the spans of a
 /// procedural macro's input, or a byte offset into a string.
@@ -105,7 +105,7 @@ const PUNCT: &str = "+-*/%^!&|=<>@.,;:#$?~";
 
 /// The tokens of `src`, each spanned by its byte offset. Comments are skipped, doc comments too.
 pub fn lex(src: &str) -> Result<Vec<Tree>, Error> {
-    Lexer { src, pos: 0 }.trees(None)
+    Lexer { src, pos: 0 }.trees(None, 0)
 }
 
 struct Lexer<'a> {
@@ -130,8 +130,9 @@ impl Lexer<'_> {
         Error { span: self.span(), message: message.into() }
     }
 
-    /// Tokens up to `close`, or to the end of the input if there is none to wait for.
-    fn trees(&mut self, close: Option<(char, Span)>) -> Result<Vec<Tree>, Error> {
+    /// Tokens up to `close`, or to the end of the input if there is none to wait for, `depth`
+    /// brackets down.
+    fn trees(&mut self, close: Option<(char, Span)>, depth: usize) -> Result<Vec<Tree>, Error> {
         let mut out = vec![];
         loop {
             self.skip_space()?;
@@ -144,13 +145,14 @@ impl Lexer<'_> {
             };
             match c {
                 '(' | '[' | '{' => {
+                    nested(depth, span)?;
                     self.pos += 1;
                     let (delim, closer) = match c {
                         '(' => (Delim::Paren, ')'),
                         '[' => (Delim::Bracket, ']'),
                         _ => (Delim::Brace, '}'),
                     };
-                    let trees = self.trees(Some((closer, span)))?;
+                    let trees = self.trees(Some((closer, span)), depth + 1)?;
                     out.push(Tree::Group { delim, trees, span });
                 }
                 ')' | ']' | '}' => {

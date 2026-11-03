@@ -1,7 +1,7 @@
 use kgen_core::{Class, Inst, PReg, SlotId, VReg, Width};
 
-/// What the use cases need to know about a machine and its calling convention: which
-/// registers they may hand out, and which of those a kernel must give back as it found them.
+/// What the allocator needs to know about a machine and its calling convention: which
+/// registers it may hand out, and which of those a kernel must give back as it found them.
 ///
 /// The instruction sets implement it; the allocator's tests implement it with a handful of
 /// registers, to run out on purpose.

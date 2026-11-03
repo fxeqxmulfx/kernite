@@ -13,6 +13,16 @@ fn ptx(src: &str) -> String {
     module.split(".visible .entry ").nth(1).expect("an entry").to_string()
 }
 
+/// Kernel `k`, whose body is `body` from its second line on.
+fn kernel(body: &str) -> String {
+    format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\n")
+}
+
+/// Why kernel `k`, whose body is `body` from its second line on, does not compile.
+fn refused(body: &str) -> String {
+    kgen::x86_str(&kernel(body), "k").unwrap_err()
+}
+
 #[test]
 fn a_kernel_runs_its_helpers_in_place() {
     let src = r#"
@@ -41,6 +51,74 @@ fn a_kernel_runs_its_helpers_in_place() {
     ret
 ";
     assert_eq!(x86(src, "fifth"), want);
+}
+
+#[test]
+fn a_function_that_names_an_abi_is_not_const_and_no_function_is_async() {
+    let constant = "a function that names an ABI runs on its machine, never while Rust compiles, so it is not `const`";
+    let asynchronous = "a function runs when it is called, so it is not `async`";
+    for (src, at, message) in [
+        (r#"pub const unsafe extern "sysv64" fn k() {}"#, "1:5", constant),
+        (r#"pub async unsafe extern "sysv64" fn k() {}"#, "1:5", asynchronous),
+        // Of two words, the first is the one refused.
+        (r#"pub const async unsafe extern "sysv64" fn k() {}"#, "1:5", constant),
+        (r#"pub async const unsafe extern "sysv64" fn k() {}"#, "1:5", asynchronous),
+    ] {
+        assert_eq!(kgen::x86_str(src, "k").unwrap_err(), format!("{at}: {message}"), "{src}");
+    }
+    for (helper, at) in [("async fn h() {}", "2:1"), ("const async fn h() {}", "2:7")] {
+        let src = format!("pub unsafe extern \"sysv64\" fn k() {{ h(); }}\n{helper}");
+        assert_eq!(kgen::x86_str(&src, "k").unwrap_err(), format!("{at}: {asynchronous}"), "{src}");
+    }
+    for (src, at, message) in [
+        (r#"pub const unsafe extern "ptx-kernel" fn k() {}"#, "1:5", constant),
+        (r#"pub async unsafe extern "ptx-kernel" fn k() {}"#, "1:5", asynchronous),
+        (r#"const extern "ptx-func" fn f() {}"#, "1:1", constant),
+    ] {
+        assert_eq!(kgen::ptx_str(src).unwrap_err(), format!("{at}: {message}"), "{src}");
+    }
+    // A helper may be `const`: kgen runs it while the kernel compiles, as Rust may run a
+    // `const fn`.
+    let src = "pub unsafe extern \"sysv64\" fn k() { h(); }\nconst fn h() { note(\"it runs now\"); }";
+    assert_eq!(x86(src, "k"), "# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # it runs now\n    ret\n");
+}
+
+#[test]
+fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
+    // Rust refuses a name bound twice among a function's generics and parameters, E0403 and E0415;
+    // without the check the body's `x` is the second, and the first goes without a word.
+    let twice = |name: &str| format!("`{name}` names another parameter of the function as well");
+    for (src, kernel, at, name) in [
+        (r#"pub unsafe extern "sysv64" fn k(x: u64, x: u64) {}"#, "k", "1:41", "x"),
+        // The twin need not be next to it.
+        (r#"pub unsafe extern "sysv64" fn k(x: u64, y: u64, x: u64) {}"#, "k", "1:49", "x"),
+        // A name written raw is the name.
+        (r#"pub unsafe extern "sysv64" fn k(x: u64, r#x: u64) {}"#, "k", "1:41", "x"),
+        // Only `_` alone names none.
+        (r#"pub unsafe extern "sysv64" fn k(_x: u64, _x: u64) {}"#, "k", "1:42", "_x"),
+        // A helper is never written out as Rust, so only kgen refuses one, called or not.
+        ("pub unsafe extern \"sysv64\" fn k() {}\nfn h(x: ymm, x: ymm) { vaddps(x, x, x); }", "k", "2:14", "x"),
+        // A generic kernel is compiled for the instances it lists, and each is named by its values.
+        (
+            "#[instances((1, 2))]\npub unsafe extern \"sysv64\" fn k<const N: u32, const N: u32>() {}",
+            "k::<1, 2>",
+            "2:53",
+            "N",
+        ),
+        ("#[instances(1)]\npub unsafe extern \"sysv64\" fn k<const N: u64>(N: u64) {}", "k::<1>", "2:47", "N"),
+    ] {
+        assert_eq!(kgen::x86_str(src, kernel).unwrap_err(), format!("{at}: {}", twice(name)), "{src}");
+    }
+    // A GPU kernel and a GPU function are read as an x86 kernel is.
+    for (src, at) in [
+        (r#"pub unsafe extern "ptx-kernel" fn k(x: u64, x: u64) {}"#, "1:45"),
+        (r#"pub unsafe extern "ptx-func" fn f(x: u64, x: u64) {}"#, "1:43"),
+    ] {
+        assert_eq!(kgen::ptx_str(src).unwrap_err(), format!("{at}: {}", twice("x")), "{src}");
+    }
+    // `_` names none, so two stay, as Rust takes them.
+    let src = r#"pub unsafe extern "sysv64" fn k(_: u64, _: u64) {}"#;
+    assert!(x86(src, "k").starts_with("# k(gpr, gpr) -> ()\n"), "{src}");
 }
 
 #[test]
@@ -202,8 +280,7 @@ fn an_if_that_guards_no_instruction_is_refused() {
     let block = "an `if` on a variable guards each instruction inside, and its block runs none";
     // x86 takes no predicate, and a note is no instruction.
     for body in [r#"let g: gpr; zero(g); if g { note("x"); }"#, "let g: gpr; zero(g); if g {}"] {
-        let got = kgen::x86_str(&format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\n"), "k").unwrap_err();
-        assert_eq!(got, format!("2:22: {block}"), "{body}");
+        assert_eq!(refused(body), format!("2:22: {block}"), "{body}");
     }
     // PTX takes a `pred` alone, and `r` is a `u32`. A block counts what it runs, not what it
     // holds: a `for` over nothing runs none, and so does a call of `h`, which is empty. A block
@@ -331,8 +408,7 @@ fn a_shift_and_a_not_are_checked_for_overflow() {
         ),
     ];
     for (body, want) in cases {
-        let got = kgen::x86_str(&format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\n"), "k").unwrap_err();
-        assert_eq!(got, want, "{body}");
+        assert_eq!(refused(body), want, "{body}");
     }
 }
 
@@ -497,6 +573,28 @@ fn errors_point_where_the_trouble_is() {
     }
 }
 
+/// What the machine finds wrong with a variable once the body is written is placed where that
+/// variable is declared, though others of its name are declared before it or after: a helper's,
+/// an array's, or one declared again.
+#[test]
+fn an_error_is_placed_at_its_own_variable_s_declaration() {
+    let cases: &[(&str, &str)] = &[
+        ("let v: ymm; h(); let v: ymm;", "4:14: `v` is read before anything writes it"),
+        // An array's variables are called `v0` and `v1`.
+        ("let v0: ymm; let v: [ymm; 2]; vaddps(v[0], v[0], v[0]);", "2:18: `v0` is read before anything writes it"),
+        ("let v1: ymm; let v: [ymm; 2]; vaddps(v[1], v[1], v[1]);", "2:18: `v1` is read before anything writes it"),
+    ];
+    for (body, want) in cases {
+        let src =
+            format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\nfn h() {{ let v: ymm; vaddps(v, v, v); }}\n");
+        let got = kgen::x86_str(&src, "k").unwrap_err();
+        assert_eq!(got, *want, "{body}");
+    }
+    let body = "let v: f32; let v: f32; add.rn.f32(v, v, 1.5); let v: f32;";
+    let got = kgen::ptx_str(&format!("unsafe extern \"ptx-kernel\" fn k() {{\n{body}\n}}\n")).unwrap_err();
+    assert_eq!(got, "2:17: `v` is read before anything writes it");
+}
+
 #[test]
 fn a_kernel_with_compile_time_arguments_is_compiled_for_each_instance_it_lists() {
     // Each case comes before these, so its lines are its own.
@@ -604,6 +702,42 @@ fn a_helper_sees_none_of_its_callers_names() {
     assert_eq!(kgen::x86_str(src, "k").unwrap_err(), "7:18: `secret` is not defined");
 }
 
+/// Each const, function and static of a module has a name of its own: of two of one name, the
+/// static is refused, else the function, else the second, at its name.
+#[test]
+fn each_const_function_and_static_has_a_name_of_its_own() {
+    let cases = [
+        ("fn h() {} fn h() {}", "1:14: `h` names another function of the module as well"),
+        (r#"fn k() {} pub unsafe extern "sysv64" fn k() {}"#, "1:41: `k` names another function of the module as well"),
+        // A kernel of compile-time arguments and one of none are two kernels of a name.
+        (
+            r#"#[instances(4, 2)] pub unsafe extern "sysv64" fn tile<const N: usize>() {} pub unsafe extern "sysv64" fn tile() {}"#,
+            "1:106: `tile` names another function of the module as well",
+        ),
+        // Two under a `#[cfg]` each are two as well: kgen reads every item.
+        (
+            r#"#[cfg(a)] pub unsafe extern "sysv64" fn k() {} #[cfg(not(a))] pub unsafe extern "sysv64" fn k() {}"#,
+            "1:93: `k` names another function of the module as well",
+        ),
+        // A const and a function: the function is refused, whichever is first.
+        ("const h: u32 = 1; fn h() {}", "1:22: `h` names a constant of the module as well"),
+        ("fn h() {} const h: u32 = 1;", "1:4: `h` names a constant of the module as well"),
+        ("const N: u32 = 1; const N: u32 = 2;", "1:25: `N` names another constant of the module as well"),
+        // Of two items refused, the first in the module is the one: here `b`, though the const
+        // it is refused for comes last.
+        ("fn a() {} fn b() {} fn a() {} const b: u32 = 1;", "1:14: `b` names a constant of the module as well"),
+        (
+            r#"pub unsafe extern "sysv64" fn k() {} static k: global<u32>;"#,
+            "1:45: `k` names a function of the module as well",
+        ),
+    ];
+    for (src, want) in cases {
+        assert_eq!(kgen::x86_str(src, "k").unwrap_err(), want, "{src}");
+    }
+    let src = r#"pub unsafe extern "ptx-kernel" fn k() {} pub unsafe extern "ptx-kernel" fn k() {}"#;
+    assert_eq!(kgen::ptx_str(src).unwrap_err(), "1:76: `k` names another function of the module as well");
+}
+
 #[test]
 fn array_parameters_take_variables_declared_together() {
     let src = r#"
@@ -664,5 +798,315 @@ fn a_constant_works_out_on_its_own() {
     ];
     for (name, want) in cases {
         assert_eq!(value(name), want.map(String::from).map_err(String::from), "{name}");
+    }
+}
+
+/// A range unrolls to no more numbers than a value holds, 1048576 at most.
+#[test]
+fn a_range_of_more_than_a_value_holds_is_refused() {
+    assert_eq!(refused("for i in 0..1048577 {}"), "2:11: 1048577 elements are too many: a value holds 1048576 at most");
+}
+
+/// A repeat of more elements than a value holds is refused there, before it is built, and so is one
+/// of empty arrays or of arrays of one, which hold no more than one each but cost memory of their
+/// own.
+#[test]
+fn a_repeat_of_more_than_a_value_holds_is_refused() {
+    let cases = [
+        (
+            "const X: [u32; 1048577] = [0; 1048577];",
+            "2:27: 1048577 elements are too many: a value holds 1048576 at most",
+        ),
+        (
+            "const X: [[u32; 0]; 1048577] = [[]; 1048577];",
+            "2:32: 1048577 elements are too many: a value holds 1048576 at most",
+        ),
+        (
+            "const X: [[[u32; 1]; 1]; 524288] = [[[0]]; 524288];",
+            "2:36: 1572864 elements are too many: a value holds 1048576 at most",
+        ),
+    ];
+    for (body, want) in cases {
+        assert_eq!(refused(body), want, "{body}");
+    }
+}
+
+/// A repeat of repeats, each within the most a value holds, is refused at the outer one when they
+/// hold more in all, however deep they nest, before it is built: the first would hold
+/// 1099511627776 numbers.
+#[test]
+fn a_repeat_of_repeats_holding_more_in_all_is_refused() {
+    let cases = [
+        (
+            "const X: [[u32; 1 << 20]; 1 << 20] = [[0; 1 << 20]; 1 << 20];",
+            "2:38: 1099511627776 elements are too many: a value holds 1048576 at most",
+        ),
+        (
+            "const X: [[[u32; 1 << 10]; 1 << 10]; 2] = [[[0; 1 << 10]; 1 << 10]; 2];",
+            "2:43: 2097152 elements are too many: a value holds 1048576 at most",
+        ),
+    ];
+    for (body, want) in cases {
+        assert_eq!(refused(body), want, "{body}");
+    }
+}
+
+/// An array of repeats, each within the most a value holds, is refused at the array when they hold
+/// more in all, and its error counts what every item holds; so is an array of one that holds the
+/// most, which counts as one more.
+#[test]
+fn an_array_of_repeats_holding_more_in_all_is_refused() {
+    let cases = [
+        (
+            "const X: [[u32; 1 << 20]; 3] = [[0; 1 << 20], [0; 1 << 20], [0; 1 << 20]];",
+            "2:32: 3145728 elements are too many: a value holds 1048576 at most",
+        ),
+        (
+            "const X: [[u32; 1 << 20]; 1] = [[0; 1 << 20]];",
+            "2:32: 1048577 elements are too many: a value holds 1048576 at most",
+        ),
+    ];
+    for (body, want) in cases {
+        assert_eq!(refused(body), want, "{body}");
+    }
+}
+
+/// A value that holds the most, 1048576 elements, keeps every item, and a range unrolls to as many.
+#[test]
+fn a_value_holding_the_most_keeps_every_item() {
+    let src = r#"pub unsafe extern "sysv64" fn k(x: u64) -> u64 {
+    for i in 0..1048576 {}
+    for half in [[0; 1 << 19], [0; 1 << 19]] {
+        add(x, 1);
+    }
+    ret(x);
+}
+"#;
+    let want = "# k(gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves []
+# x=rdi,rax
+    add rdi, 1
+    add rdi, 1
+    mov rax, rdi
+    ret
+";
+    assert_eq!(x86(src, "k"), want);
+}
+
+/// A kernel declares at most 65536 variables by `let`, however its loops repeat them. The `let`
+/// that would pass the most is refused where it stands, before it makes any variable: an array of
+/// 2^40 would abort the process.
+#[test]
+fn a_let_that_would_pass_the_most_variables_is_refused_before_any_is_made() {
+    let cases = [
+        ("let v: [gpr; 1099511627776];", "2:14: 1099511627776 variables are too many: a kernel declares 65536 at most"),
+        (
+            "let v: [gpr; 18446744073709551615];",
+            "2:14: 18446744073709551615 variables are too many: a kernel declares 65536 at most",
+        ),
+        ("for i in 0..262144 { let x: gpr; }", "2:26: 65537 variables are too many: a kernel declares 65536 at most"),
+        (
+            "let a: [gpr; 32768]; let b: [gpr; 32769];",
+            "2:35: 65537 variables are too many: a kernel declares 65536 at most",
+        ),
+    ];
+    for (body, want) in cases {
+        assert_eq!(refused(body), want, "{body}");
+    }
+}
+
+/// The variables a helper declares count for the kernel that calls it: here `t` makes 65537.
+#[test]
+fn a_helpers_variables_count_for_the_kernel_that_calls_it() {
+    let src = "unsafe extern \"sysv64\" fn k() {\nlet a: [gpr; 65535]; h();\n}\nfn h() { let t: [gpr; 2]; }\n";
+    assert_eq!(
+        kgen::x86_str(src, "k").unwrap_err(),
+        "4:23: 65537 variables are too many: a kernel declares 65536 at most"
+    );
+}
+
+/// A kernel that declares exactly the most compiles, its parameters not counted among them. PTX
+/// builds no graph of its variables, so this takes no time to speak of.
+#[test]
+fn a_kernel_that_declares_exactly_the_most_variables_compiles() {
+    kgen::ptx_str("unsafe extern \"ptx-kernel\" fn k(x: *mut u32) {\nlet v: [u32; 65536];\n}\n").unwrap();
+}
+
+/// A row of operators, of brackets, of `else if`s or of arrays nests 64 deep at most. A row of the
+/// most compiles, and the level past it is refused where it starts. So is a row of 5000, which
+/// the parser or the evaluator would follow, each level a call, until a thread of 2 MiB ran out
+/// of stack.
+#[test]
+fn what_nests_past_64_deep_is_refused_where_the_level_starts() {
+    // A name, the body of a row of `n`, the most `n` that compiles, and where one more is refused.
+    type Shape = (&'static str, fn(usize) -> String, usize, &'static str);
+    let shapes: [Shape; 11] = [
+        ("a sum", |n| format!("let y = 1{};", " + 1".repeat(n)), 63, "2:263"),
+        ("a difference", |n| format!("let y = 1{};", " - 1".repeat(n)), 63, "2:263"),
+        ("casts", |n| format!("let y = 1{};", " as u32".repeat(n)), 63, "2:452"),
+        ("methods", |n| format!("let y = 1{};", ".min(1)".repeat(n)), 63, "2:452"),
+        ("minus signs", |n| format!("let y = {}1;", "-".repeat(n)), 63, "2:72"),
+        ("nots", |n| format!("let y = {}true;", "!".repeat(n)), 63, "2:72"),
+        ("parentheses", |n| format!("let y = {}1{};", "(".repeat(n), ")".repeat(n)), 63, "2:72"),
+        ("blocks", |n| format!("{}{}", "{".repeat(n), "}".repeat(n)), 63, "2:64"),
+        ("`else if`s", |n| format!("if false {{}}{}", " else if false {}".repeat(n)), 62, "2:1072"),
+        ("arrays of an array", |n| format!("let w = 0;{}", "\nlet w = [w];".repeat(n)), 64, "67:9"),
+        ("arrays of a repeat", |n| format!("let w = 0;{}", "\nlet w = [w; 1];".repeat(n)), 64, "67:9"),
+    ];
+    for (name, body, most, at) in shapes {
+        x86(&kernel(&body(most)), "k");
+        let why = format!("{at}: this nests 64 deep at most");
+        assert_eq!(refused(&body(most + 1)), why, "{name}");
+        assert_eq!(refused(&body(5000)), why, "{name}, 5000 of them");
+    }
+}
+
+/// Consts that name consts nest like the expressions that name them: a chain of 64 works out, and
+/// one of 65, or of 5000, is refused where the 65th const is written.
+#[test]
+fn consts_that_name_consts_nest_64_deep_at_most() {
+    let module = |n: usize| {
+        let consts: String = (0..n).map(|i| format!("const A{i}: u32 = A{};\n", i + 1)).collect();
+        format!("{consts}const A{n}: u32 = 1;\n{}", kernel("let y = A0;"))
+    };
+    x86(&module(63), "k");
+    for n in [64, 5000] {
+        assert_eq!(kgen::x86_str(&module(n), "k").unwrap_err(), "65:18: this nests 64 deep at most", "{n}");
+    }
+}
+
+/// A type nests 64 deep at most, and `Name<T>` and `[T; N]` are a level each: the parser refuses
+/// the level past it where it starts, however long the row, before it reads the rest. A type of 64
+/// is read, and then it is the machine that has no such variable.
+#[test]
+fn a_type_nests_64_deep_at_most() {
+    let body = |n: usize| format!("let x: {}u32{};", "a<".repeat(n), ">".repeat(n));
+    assert!(refused(&body(63)).starts_with("2:8: x86 variables are "));
+    for n in [64, 5000] {
+        assert_eq!(refused(&body(n)), "2:134: this nests 64 deep at most", "{n}");
+    }
+}
+
+/// A row inside brackets inside a row is counted whole: 62 fields in parentheses in 62 fields, and
+/// so on, is 3906 deep, which the evaluator would follow, with no count of its own for a field,
+/// until a stack of 6 MiB ran out. It is refused at the first level past 64.
+#[test]
+fn a_row_inside_brackets_inside_a_row_is_counted_whole() {
+    let deep = (0..62).fold("x".to_string(), |e, _| format!("({e}){}", ".f".repeat(62)));
+    assert_eq!(refused(&format!("let y = {deep};")), "2:194: this nests 64 deep at most");
+}
+
+/// A block, a `for` and an `if` are a level for what they hold, and count with the expression in
+/// them: 62 of them around `1 + 1` compile, and 63 are refused where the 65th level starts.
+#[test]
+fn blocks_loops_and_ifs_nest_with_their_expressions_64_deep_at_most() {
+    for (open, at) in [("{", "2:72"), ("if true {", "2:576"), ("for i in 0..1 {", "2:940")] {
+        let body = |n: usize| format!("{}let y = 1 + 1;{}", open.repeat(n), "}".repeat(n));
+        x86(&kernel(&body(62)), "k");
+        assert_eq!(refused(&body(63)), format!("{at}: this nests 64 deep at most"), "{open}");
+    }
+}
+
+/// A helper's blocks count with its caller's, for the stack is one: 62 helpers, each calling the
+/// next from a `for`, compile, and the 63rd `for` is refused at its range.
+#[test]
+fn the_loops_of_helpers_that_call_helpers_nest_64_deep_at_most() {
+    let module = |n: usize| {
+        let helpers: String = (0..n)
+            .map(|i| {
+                let inside = if i + 1 < n { format!("h{}();", i + 1) } else { "let y = 1;".to_string() };
+                format!("fn h{i}() {{ for i in 0..1 {{ {inside} }} }}\n")
+            })
+            .collect();
+        format!("{helpers}{}", kernel("h0();"))
+    };
+    x86(&module(62), "k");
+    assert_eq!(kgen::x86_str(&module(63), "k").unwrap_err(), "63:21: this nests 64 deep at most");
+}
+
+/// The deepest kernel the rules allow, helpers 64 deep and a sum of 64 terms in the last, compiles
+/// on the stack of a test, 2 MiB: 64 is what fits it, with room to spare.
+#[test]
+fn the_deepest_kernel_fits_the_stack_of_a_test() {
+    let helpers: String = (0..64)
+        .map(|i| {
+            let inside = if i < 63 { format!("h{}();", i + 1) } else { format!("let y = 1{};", " + 1".repeat(63)) };
+            format!("fn h{i}() {{ {inside} }}\n")
+        })
+        .collect();
+    x86(&format!("{helpers}{}", kernel("h0();")), "k");
+}
+
+/// The step past the most, 4194304, is refused where it is taken, in seconds. Without the count,
+/// loops that nest take 2^40 turns, a helper that calls itself twice takes 2^40 calls, and a const
+/// of 2^20 elements shown 2^20 times takes 2^40 elements: days, or an abort out of memory.
+#[test]
+fn work_past_the_most_steps_is_refused_where_the_step_past_it_is_taken() {
+    let twice =
+        "fn h<const N: usize>() {\n    if N > 0 {\n        h::<{ N - 1 }>();\n        h::<{ N - 1 }>();\n    }\n}\n";
+    let table = "const A: [u32; 1 << 20] = [0; 1 << 20]; ";
+    let rows = "const M: [[u32; 1024]; 1024] = [[0; 1024]; 1024]; ";
+    let cases = [
+        ("loops that nest", kernel("for i in 0..1 << 20 { for j in 0..1 << 20 {} }"), "2:33"),
+        ("a note of a const", kernel(&format!("{table}for i in 0..1 << 20 {{ note(\"{{A}}\"); }}")), "2:68"),
+        ("a helper that calls itself twice", format!("{twice}{}", kernel("h::<40>();")), "4:9"),
+        ("an array built in a loop", kernel("for i in 0..1 << 20 { let a = [0; 1 << 20]; }"), "2:31"),
+        (
+            "a const copied in a loop",
+            kernel(&format!("{table}for i in 0..1 << 20 {{ let b: [u32; 1 << 20] = A; }}")),
+            "2:87",
+        ),
+        ("a method's array in a loop", kernel(&format!("{table}for i in 0..1 << 20 {{ let b = A.rev(); }}")), "2:73"),
+        (
+            "the rows of a const in a loop",
+            kernel(&format!("{rows}for i in 0..1 << 20 {{ for row in M {{}} }}")),
+            "2:84",
+        ),
+        ("a row indexed in a loop", kernel(&format!("{rows}for i in 0..1 << 20 {{ let row = M[0]; }}")), "2:84"),
+        (
+            "data in memory in a loop",
+            kernel(&format!("{table}let x: gpr; for i in 0..1 << 20 {{ lea(x, [A]); }}")),
+            "2:83",
+        ),
+    ];
+    for (name, src, at) in cases {
+        let want = format!("{at}: this takes more than 4194304 steps to work out");
+        assert_eq!(kgen::x86_str(&src, "k").unwrap_err(), want, "{name}");
+    }
+}
+
+/// Work of exactly the most steps compiles, and a note after it is the step past, refused. A loop
+/// of `n` turns is `2n` steps, its range and its turns, so two loops fill what each case leaves, a
+/// range holding 2^20 at most. A case would pass the most if it counted one step more than README
+/// says, and fall short if it counted one less: loops add, and do not multiply; a number read by
+/// name or worked out costs none; an array listed costs its items, not its elements; an `[x; n]`,
+/// an array a method makes and one copied from a name, by a typed `let` or by `for`, cost their
+/// elements; and a label costs one, a number an index takes or a note shows costs one, and an array
+/// there costs its elements.
+#[test]
+fn work_within_the_most_steps_compiles() {
+    let cases = [
+        ("a loop's range and turns", "for i in 0..1048576 {}", 2 * 1048576),
+        ("a number read by name or worked out", "for i in 0..1000 { let b = i + 1; }", 2 * 1000),
+        ("an array listed", "let a = [[0, 0], [0, 0]];", 2 + 2 + 2),
+        ("an `[x; n]`", "let a = [0; 1000];", 1000),
+        ("an array a method makes", "let a = [0; 1000]; let b = a.rev();", 1000 + 1000),
+        ("an array copied by a typed `let`", "let a = [0; 1000]; let b: [u32; 1000] = a;", 1000 + 1000),
+        ("an array copied by `for`", "let a = [0; 1000]; for x in a {}", 1000 + 1000 + 1000),
+        ("a label", "for i in 0..1000 { label(a); }", 3 * 1000),
+        ("a number an index takes", "let a = [0, 0]; for i in 0..1000 { let b = a[0]; }", 2 + 3 * 1000),
+        ("an array an index takes", "let a = [[0; 1000]; 2]; let b = a[0];", 1000 + 2 * 1000 + 1000),
+        ("a number a note shows", "let a = 7; for i in 0..1000 { note(\"{a}\"); }", 4 * 1000),
+        ("an array a note shows", "let a = [0; 1000]; note(\"{a}\"); note(\"{a}\");", 1000 + 2 * (1 + 1000)),
+    ];
+    for (name, work, steps) in cases {
+        let turns = (4194304 - steps) / 2;
+        let body = format!("{work} for k in 0..{} {{}} for l in 0..{} {{}}", turns / 2, turns - turns / 2);
+        if let Err(e) = kgen::x86_str(&kernel(&body), "k") {
+            panic!("{name}: {e}");
+        }
+        let past = kgen::x86_str(&kernel(&format!("{body} note(\"\");")), "k");
+        let want = format!("2:{}: this takes more than 4194304 steps to work out", body.len() + 2);
+        assert_eq!(past.err(), Some(want), "{name}");
     }
 }

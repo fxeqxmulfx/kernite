@@ -709,7 +709,7 @@ fn a_static_is_reached_at_a_displacement_from_rip() {
 fn a_static_is_rusts_numbers_holding_what_it_says() {
     let module = kgen::lang::parse(STATICS).unwrap();
     let statics: Vec<_> = kgen::x86_statics(&module).into_iter().map(Result::unwrap).collect();
-    let shape = |s: &kgen::X86Static| (s.name.clone(), s.elem, s.size, s.len, s.align, s.constant);
+    let shape = |s: &kgen_x86::lang::Static| (s.name.clone(), s.elem, s.size, s.len, s.align, s.constant);
     let shapes: Vec<_> = statics.iter().map(|s| shape(&s.code)).collect();
     assert_eq!(
         shapes,
@@ -1090,8 +1090,8 @@ fn the_grid_is_a_cooperative_kernels_to_read_and_wait_for() {
         ("grid.sync(x);", "3:6: `grid.sync` takes no operands, not 1"),
         (
             "let g: gpr; zero(g); if g { grid.sync(); }",
-            "3:34: `grid.sync()` is for every thread of the grid, under no `if`: the grid waits for ever for one that \
-             does not come to it",
+            "3:34: `grid.sync()` is for every thread of the grid, under no `if`: kgen writes it with no guard, and a \
+             kernel that wants it under a condition the same in every thread jumps around it",
         ),
     ];
     for (body, want) in cases {

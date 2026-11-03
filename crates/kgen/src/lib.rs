@@ -6,9 +6,10 @@
 //!
 //! | layer | crate | what it knows |
 //! |---|---|---|
-//! | entities | `kgen-core` | programs over variables and over registers; the `Machine` and `Spill` ports |
+//! | entities | `kgen-core` | programs over variables and over registers |
 //! | language | `kgen-lang` | kernels in Rust's syntax: parsing, evaluation, the `Target` port |
-//! | use cases | `kgen-compile` | liveness, register allocation, spilling, the frame's layout |
+//! | entity service | `kgen-compile` | the allocator: liveness, register allocation, spilling, the frame's layout; the `Machine` and `Spill` ports; tested on a toy machine |
+//! | use cases | `kgen-build` | what kgen does with a module: ABIs, its rules, compiling each function; the ports a machine implements |
 //! | adapters | `kgen-x86`, `kgen-ptx` | x86-64: SysV, Intel syntax; PTX for NVIDIA GPUs |
 //! | composition | `kgen`, this crate | which machine and syntax each kernel compiles with |
 //! | delivery | `kgen-macros` | kernels as functions, `#[unsafe(naked)]`, or launched on a grid |
@@ -41,20 +42,17 @@
 //! ```
 
 pub use kgen_build::{
-    Abi, Compiled, DeviceStatic, HostStatic, Naked, Owner, abi, cooperative, function, instance, owner,
+    Abi, Call, Compiled, ConstItem, DeviceFnOut, DeviceOut, DeviceStatic, Given, HostStatic, ItemOut, Launcher,
+    ModuleOut, Naked, NativeInstance, NativeOut, Owner, abi, consts, cooperative, function, instance, owner,
 };
-pub use kgen_compile::Error;
-pub use kgen_core::{Class, Program, Signature};
 pub use kgen_lang as lang;
-pub use kgen_ptx::{Entry, Static};
-pub use kgen_x86::intel::{Line, Listing};
-pub use kgen_x86::lang::Static as X86Static;
-pub use kgen_x86::{Feature, Op};
 
-use kgen_build::{Device, Native, all, compile, one, prepare, statics};
+use kgen_build::{all, compile, one, prepare, statics};
 use kgen_lang::{Fn, Module, Value};
-use kgen_ptx::Ptx;
+use kgen_ptx::{Entry, Ptx, Static};
 use kgen_x86::X86;
+use kgen_x86::intel::Listing;
+use kgen_x86::lang::Static as X86Static;
 
 /// Kernel `f` of `module`, for x86-64 under SysV, for the compile-time arguments `args`:
 /// those of one of its [`instances`](kgen_lang::instances), none for a kernel that takes none.
@@ -69,22 +67,23 @@ pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>,
     compile(module, &prepare(module, &X86), &X86, f, args)
 }
 
-/// `l`, an x86 kernel's listing, as `naked_asm!` takes it, for Rust to call in the process.
-pub fn naked(l: &Listing) -> Naked {
-    X86.naked(l)
-}
-
 /// The statics of `module`, its memory in the process's, in order, for its x86 kernels to name
 /// and Rust to lay out: each of Rust's numbers, holding what it says or zeros. Or why one is
-/// none, where it can be mended: at its type, at what it holds, or at its name, if another item
-/// of the module's has it or a listing names a constant or a function so, `c0` or `f0`.
+/// none, where it can be mended: at its type, at what it holds, or at its name, if a listing
+/// names a constant or a function so, `c0` or `f0`.
 pub fn x86_statics(module: &Module) -> Vec<Result<Compiled<X86Static>, kgen_lang::Error>> {
     statics(module, &X86)
 }
 
-/// `s`, a static of a module of x86 kernels, as Rust lays it out in the process.
-pub fn host_static(s: &X86Static) -> HostStatic {
-    X86.host_static(s)
+/// `module`, a module of kernels, compiled: each function `extern "sysv64"` for x86-64, as
+/// [`x86`] has it, and each the GPU runs for PTX, as [`ptx`] has it, into one module the GPU
+/// loads, with the statics each machine lays out as [`x86_statics`] and [`ptx_statics`] have
+/// them. `scope` is the namespaces its GPU kernels are in, as [`ptx_scope`] writes them, and
+/// `given` the consts it takes from a module of consts. What is wrong is said where it can be
+/// mended, and each item of the module is what [`ModuleOut`] says, for whatever writes the
+/// module out for Rust.
+pub fn module(module: Module, given: Option<Given>, scope: &str) -> ModuleOut {
+    kgen_build::module(module, given, &X86, &Ptx::new(scope))
 }
 
 /// Kernel `name` of the module in `src`, for x86-64, or its instance `tile::<4>`; an error
@@ -96,7 +95,7 @@ pub fn x86_str(src: &str, name: &str) -> Result<Listing, String> {
 
 /// Kernel `f` of `module`, in PTX, for the compile-time arguments `args`, those of one of its
 /// [`instances`](kgen_lang::instances): its `.entry`, or for a function `extern "ptx-func"` its
-/// `.func`, for [`ptx_module`] to put in a module. It may call the module's functions and
+/// `.func`, for [`kgen_ptx::module`] to put in a module. It may call the module's functions and
 /// take their addresses and its kernels'. Nothing allocates its registers, which `ptxas`
 /// does, but what allocation would find wrong that does not depend on the registers is found
 /// here: a variable read before it is written, a jump to no label, control running off the
@@ -120,24 +119,11 @@ pub fn ptx_scope(path: &[&str]) -> String {
 
 /// The statics of `module`, its memory in PTX, in order: each named by its
 /// [`symbol`](kgen_ptx::symbol) in `scope`, as [`ptx`] names a kernel, for its kernels to name
-/// and [`ptx_module`] to declare; or why it is none, where it can be mended: at its type, at
-/// what it holds, or at its name, if another item of the module's has it. One that does not
-/// fit beside those before it, in the constant memory a module has or the global, is none.
+/// and [`kgen_ptx::module`] to declare; or why it is none, where it can be mended: at its
+/// type, or at what it holds. One that does not fit beside those before it, in the constant
+/// memory a module has or the global, is none.
 pub fn ptx_statics(module: &Module, scope: &str) -> Vec<Result<Compiled<Static>, kgen_lang::Error>> {
     statics(module, &Ptx::new(scope))
-}
-
-/// `s`, a static of a module of PTX kernels that [`ptx_statics`] laid out in `scope`, as the
-/// host reads it: the symbol the driver finds it by, and the number each element is read as.
-pub fn device_static(s: &Static, scope: &str) -> DeviceStatic {
-    Ptx::new(scope).device_static(s)
-}
-
-/// The PTX module of `entries`, for the CUDA driver to load: of the PTX version and for the
-/// GPU their instructions need, with `statics`, the module's memory. It fails if one needs a
-/// GPU older than another needs.
-pub fn ptx_module(entries: &[Entry], statics: &[Static]) -> Result<String, String> {
-    kgen_ptx::module(entries, statics)
 }
 
 /// Every kernel `extern "ptx-kernel"` and function `extern "ptx-func"` of the module in

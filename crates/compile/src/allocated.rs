@@ -33,9 +33,9 @@ pub struct Allocated<Op> {
     pub funcs: Vec<String>,
     /// The memory of the module's it names, by [`kgen_core::StaticId`].
     pub statics: Vec<String>,
-    /// Every variable and the register it got, by [`kgen_core::VReg::id`]: the program's, then those
-    /// the allocator made, each named as the one it was made for is: to load and store one that
-    /// spilled, or to hold a parameter or a result that moved. `None` for one the code does not
-    /// name, as one that spilled is not.
+    /// Every variable and the register it got, by [`kgen_core::VReg::id`]: the program's, then
+    /// those the allocator made, each named as the one it was made for is: to load and store one
+    /// that spilled, or to hold a parameter or a result that moved. `None` for one the code does
+    /// not name, as one that spilled is not.
     pub assignment: Vec<(RegInfo, Option<PReg>)>,
 }

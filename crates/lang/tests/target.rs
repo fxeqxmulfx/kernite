@@ -1,7 +1,8 @@
 //! What the evaluator asks of its target, in order. [`Trace`] is a fake target that writes a line
-//! for each call, so these tests pin the calls, and what each is given, with no machine.
+//! for each call, or keeps what it is told, so these tests pin the calls, and what each is given,
+//! with no machine.
 
-use kgen_lang::{Error, Fault, Guard, ItemKind, Mem, Operand, Run, Target};
+use kgen_lang::{Error, Fault, Guard, ItemKind, Mem, Operand, Run, Span, Target};
 
 /// A kernel with a pointer, a `ymm`, a loop of `v.xmm` fields, which the evaluator unrolls, a
 /// label and a helper, whose parameter is a view of what it is given, and which declares a
@@ -47,8 +48,9 @@ pub unsafe extern "sysv64" fn k(n: u64) {
 }
 "#;
 
-/// A target that writes a line for each call, makes a variable for each `param`, `var`, `global`,
-/// `view` and `field`, and refuses one instruction, by its name, with a given fault.
+/// A target that writes a line for each call but `declared_at` and `inst_at`, whose places it
+/// keeps, makes a variable for each `param`, `var`, `global`, `view` and `field`, and refuses one
+/// instruction, by its name, with a given fault.
 #[derive(Default)]
 struct Trace {
     /// A line for each call, in the order of the calls.
@@ -57,6 +59,13 @@ struct Trace {
     vars: usize,
     /// The instruction it refuses, and why.
     refuse: Option<(&'static str, Fault)>,
+    /// Each variable it is told is declared, with where, in the order it is told.
+    declared: Vec<(usize, Span)>,
+    /// The place it was last told of an instruction, until `inst` takes it.
+    at: Option<Span>,
+    /// Each instruction it is given, with the place it was told of before: `None` if it was
+    /// told of none.
+    placed: Vec<(String, Option<Span>)>,
 }
 
 impl Trace {
@@ -105,6 +114,7 @@ impl Target for Trace {
     }
 
     fn inst(&mut self, name: &str, args: &[Operand<usize>], guard: Option<Guard<usize>>) -> Result<(), Fault> {
+        self.placed.push((name.to_string(), self.at.take()));
         let mut line = match guard {
             Some(g) => format!("if {}v{}: {name}", if g.negated { "!" } else { "" }, g.pred),
             None => name.to_string(),
@@ -122,6 +132,14 @@ impl Target for Trace {
     fn end(&mut self) -> Result<(), String> {
         self.lines.push("end".into());
         Ok(())
+    }
+
+    fn declared_at(&mut self, var: usize, at: Span) {
+        self.declared.push((var, at));
+    }
+
+    fn inst_at(&mut self, at: Span) {
+        self.at = Some(at);
     }
 }
 
@@ -197,15 +215,32 @@ fn a_static_is_made_once_the_first_time_the_kernel_names_it() {
 
 #[test]
 fn each_declaration_is_one_param_or_var() {
-    // Each declaration where an error about it would point: `2:33: xs`.
-    let decls = |src: &str| -> Vec<String> {
-        let decls = run(src, &mut Trace::default()).unwrap().decls;
-        decls.into_iter().map(|(name, span)| Error { span, message: name }.at(src)).collect()
+    // The target is told where each declaration is, by the variable it made for it: `2:33: v0`.
+    // A helper's parameter is a view of what it is given, so not a declaration. An array is a
+    // declaration for each of its variables.
+    let told = |src: &str| -> Vec<String> {
+        let mut trace = Trace::default();
+        run(src, &mut trace).unwrap();
+        trace.declared.into_iter().map(|(v, span)| Error { span, message: format!("v{v}") }.at(src)).collect()
     };
-    // A helper's parameter is a view of what it is given, so not a declaration.
-    assert_eq!(decls(KERNEL), ["2:33: xs", "2:49: n", "3:9: v", "15:9: t"]);
-    // An array is a declaration for each of its variables.
-    assert_eq!(decls(ARRAY), ["3:9: a0", "3:9: a1", "3:9: a2"]);
+    assert_eq!(told(KERNEL), ["2:33: v0", "2:49: v1", "3:9: v2", "15:9: v6"]);
+    assert_eq!(told(ARRAY), ["3:9: v0", "3:9: v1", "3:9: v2"]);
+}
+
+#[test]
+fn the_target_is_told_where_each_instruction_is_before_it_is_given_it() {
+    // An instruction is at its name. One in a loop is at the same place each time it runs, and one
+    // of a helper is in the helper.
+    let told = |src: &str| -> Vec<String> {
+        let mut trace = Trace::default();
+        run(src, &mut trace).unwrap();
+        let place = |(name, at): (String, Option<Span>)| match at {
+            Some(span) => Error { span, message: name }.at(src),
+            None => format!("{name} is not placed"),
+        };
+        trace.placed.into_iter().map(place).collect()
+    };
+    assert_eq!(told(KERNEL), ["5:9: vmovups", "5:9: vmovups", "16:5: add", "9:5: jnz", "10:5: ret"]);
 }
 
 #[test]

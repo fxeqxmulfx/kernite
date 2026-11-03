@@ -29,7 +29,14 @@
 //! - `grid.sync()` waits until every thread of the grid has come to it, as CUDA's
 //!   `grid.sync()` does, in a kernel the language marks `#[cooperative]`,
 //!   [`Kernel::cooperative`], which every launch runs all at once. Each thread of the grid
-//!   comes to it as often as the others, under no `if`, or the grid waits for ever.
+//!   comes to it as often as the others, or the grid waits for ever. kgen refuses one under an
+//!   `if`, and a jump around one is the kernel's to see to: every thread takes it, or none
+//!   does.
+//! - A mask of lanes known now, as `bar.warp.sync(2)` takes, may leave out lane 0 only where
+//!   thread 0 does not run the instruction. Thread 0 is in lane 0, and PTX leaves the
+//!   instruction undefined in a thread outside its mask. [`Ptx`](crate::Ptx) refuses one when
+//!   it finishes the kernel, if no `if` guards the instruction and no `ret`, `exit`, `trap`,
+//!   call or jump keeps thread 0 from it. A function kernels call is not looked at.
 //! - Operands taken together are a tuple, `(a, b)`, or variables declared together; two
 //!   results written at once are `p | q`; `_` is a result left unwritten, where PTX lets one
 //!   be; `!p` is a predicate read inverted, and `-a` a source negated, where PTX negates one.
@@ -63,7 +70,7 @@ use kgen_core::Width::{W8, W16, W32, W64, W128};
 use kgen_core::{
     Access, Arg, Base, Class, Flow, Inst, Item, Label, Mem, Operand, PReg, Program, RegInfo, Signature, VReg, Width,
 };
-use kgen_lang::{Fault, Guard, Operand as Given, Target};
+use kgen_lang::{Fault, Guard, Operand as Given, Span, Target};
 
 use crate::call::{NO_PRED, Prototype, Returns, formal};
 use crate::entry::{Entry, Op, Param};
@@ -136,6 +143,17 @@ pub struct Kernel {
     /// Whether every launch runs each block of its grid at once, so that it may wait for its
     /// grid.
     cooperative: bool,
+    /// Each variable the source declares in a register, and where: what goes wrong with it
+    /// when the program is checked is placed there.
+    pub(crate) decls: Vec<(VReg, Span)>,
+    /// Where the instruction that `inst` is given next is, as [`Target::inst_at`] tells.
+    at: Span,
+    /// Each instruction of a kernel, by its place in the body, that has a mask of lanes known now
+    /// leaving out lane 0 and no guard, with where it is and why it is refused if thread 0 runs it.
+    pub(crate) masks: Vec<(usize, Span, String)>,
+    /// Each instruction of a kernel, by its place in the body, where a thread may end or never
+    /// come back while others go on: a guarded `ret`, `exit` or `trap`, or a call.
+    pub(crate) leaves: Vec<usize>,
 }
 
 /// What a kernel makes of a function or a kernel of its module, which it may name.
@@ -190,6 +208,8 @@ struct Written {
     addrs: usize,
     reach: u64,
     inside: bool,
+    /// Whether a mask of lanes known now leaves out lane 0.
+    no_lane_0: bool,
 }
 
 /// Why operands are not those of a form.
@@ -237,6 +257,10 @@ impl Kernel {
             calls: vec![],
             statics: vec![],
             cooperative: false,
+            decls: vec![],
+            at: Span::default(),
+            masks: vec![],
+            leaves: vec![],
         }
     }
 
@@ -397,6 +421,15 @@ impl Kernel {
             self.needs.push((needs, what.to_string()));
         }
         Ok(())
+    }
+
+    /// Notes that a thread may end at the instruction pushed next, or never come back from it,
+    /// while others go on: a guarded `ret`, `exit` or `trap`, or a call, which may run one. Those
+    /// of a kernel are kept; a function is not looked at.
+    fn may_leave(&mut self) {
+        if self.func.is_none() {
+            self.leaves.push(self.p.body.len());
+        }
     }
 
     /// Adds the instruction, under the predicate `guard` if there is one, held or not; keeping
@@ -741,6 +774,7 @@ impl Kernel {
                     let x = if v < 0 { x.to_string() } else { format!("{v:#x}") };
                     return Err(format!("`{name}` takes no bits here but those of {mask:#x}; {x} has others"));
                 }
+                w.no_lane_0 |= spec.lanes && v & 1 == 0;
                 int(t, *x, name)
             }
             Given::F32(x)
@@ -1097,6 +1131,9 @@ impl Kernel {
             line += &format!(", {t}");
         }
         line += ";";
+        if flow == Flow::Next {
+            self.may_leave();
+        }
         self.push(line, reads, guard, flow);
         Ok(())
     }
@@ -1125,8 +1162,8 @@ impl Kernel {
         }
         if guard.is_some() {
             return Err(Fault::new(
-                "`grid.sync()` is for every thread of the grid, under no `if`: the grid waits for ever for one that \
-                 does not come to it",
+                "`grid.sync()` is for every thread of the grid, under no `if`: kgen writes it with no guard, and a \
+                 kernel that wants it under a condition the same in every thread jumps around it",
             ));
         }
         let lines: Vec<String> = GRID_SYNC
@@ -1839,6 +1876,16 @@ impl Target for Kernel {
             line += &w.texts.join(", ");
         }
         line += ";";
+        if w.no_lane_0 && guard.is_none() && self.func.is_none() {
+            let message = format!(
+                "`{name}` is run by thread 0, which is in lane 0; this mask leaves lane 0 out, and PTX leaves the \
+                 instruction undefined in a thread outside its mask"
+            );
+            self.masks.push((self.p.body.len(), self.at, message));
+        }
+        if guard.is_some() && matches!(b.form.op, "ret" | "exit" | "trap") {
+            self.may_leave();
+        }
         self.push(line, w.args, guard, flow);
         Ok(())
     }
@@ -1869,5 +1916,15 @@ impl Target for Kernel {
             }
         }
         Ok(())
+    }
+
+    fn declared_at(&mut self, var: Var, at: Span) {
+        if let Var::Reg { reg, .. } = var {
+            self.decls.push((reg, at));
+        }
+    }
+
+    fn inst_at(&mut self, at: Span) {
+        self.at = at;
     }
 }

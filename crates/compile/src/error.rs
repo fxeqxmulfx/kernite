@@ -1,6 +1,6 @@
 use std::fmt;
 
-use kgen_core::{Class, PReg};
+use kgen_core::{Class, PReg, VReg};
 
 /// Why a program does not compile. Every case names the variables involved by the names the
 /// program gave them, and where it could, the last note before the trouble.
@@ -22,18 +22,24 @@ pub enum Error {
     ReadBeforeWrite {
         /// The variable.
         var: String,
+        /// Which it is, of those of its name.
+        vreg: VReg,
     },
     /// A variable the calling convention places twice, in different registers, which cannot
     /// move to another: one placed for a while alone, as a call's argument is.
     FixedTwice {
         /// The variable.
         var: String,
+        /// Which it is, of those of its name.
+        vreg: VReg,
     },
     /// Two variables live at once that the calling convention puts in the same register, and
     /// neither of which can move to another.
     FixedClash {
         /// One.
         a: String,
+        /// Which `a` is, of those of its name.
+        vreg: VReg,
         /// The other.
         b: String,
         /// The register both need.
@@ -44,6 +50,8 @@ pub enum Error {
     FixedChanged {
         /// The variable.
         var: String,
+        /// Which it is, of those of its name.
+        vreg: VReg,
         /// Its register.
         reg: PReg,
     },
@@ -56,6 +64,8 @@ pub enum Error {
         class: Class,
         /// The variable left without one.
         var: String,
+        /// Which it is, of those of its name.
+        vreg: VReg,
         /// The last note before its first mention, read or write.
         near: Option<String>,
         /// The variables live beside it that hold one it could have had, with the register
@@ -70,14 +80,14 @@ pub enum Error {
 }
 
 impl Error {
-    /// The variable to blame, if it names one.
-    pub fn var(&self) -> Option<&str> {
+    /// The variable to blame, if it names one: which it is of those of its name.
+    pub fn var(&self) -> Option<VReg> {
         match self {
-            Error::ReadBeforeWrite { var }
-            | Error::FixedTwice { var }
-            | Error::FixedChanged { var, .. }
-            | Error::OutOfRegisters { var, .. } => Some(var),
-            Error::FixedClash { a, .. } => Some(a),
+            Error::ReadBeforeWrite { vreg, .. }
+            | Error::FixedTwice { vreg, .. }
+            | Error::FixedChanged { vreg, .. }
+            | Error::OutOfRegisters { vreg, .. }
+            | Error::FixedClash { vreg, .. } => Some(*vreg),
             Error::LabelTwice { .. } | Error::NoSuchLabel { .. } | Error::FallsOffEnd => None,
         }
     }
@@ -89,15 +99,15 @@ impl fmt::Display for Error {
             Error::LabelTwice { label } => write!(f, "label {label} is placed twice"),
             Error::NoSuchLabel { label } => write!(f, "a jump goes to label {label}, which is never placed"),
             Error::FallsOffEnd => write!(f, "control runs past the last instruction"),
-            Error::ReadBeforeWrite { var } => write!(f, "`{var}` is read before anything writes it"),
-            Error::FixedTwice { var } => write!(f, "`{var}` must be in two different registers"),
-            Error::FixedClash { a, b, reg } => {
+            Error::ReadBeforeWrite { var, .. } => write!(f, "`{var}` is read before anything writes it"),
+            Error::FixedTwice { var, .. } => write!(f, "`{var}` must be in two different registers"),
+            Error::FixedClash { a, b, reg, .. } => {
                 write!(f, "`{a}` and `{b}` are live at once and both must be in {reg:?}")
             }
-            Error::FixedChanged { var, reg } => {
+            Error::FixedChanged { var, reg, .. } => {
                 write!(f, "`{var}` must be in {reg:?}, which an instruction it is live across changes")
             }
-            Error::OutOfRegisters { class, var, near, taken, changed, have } => {
+            Error::OutOfRegisters { class, var, near, taken, changed, have, .. } => {
                 write!(f, "no {class:?} register left for `{var}`")?;
                 if let Some(near) = near {
                     write!(f, " ({near})")?;

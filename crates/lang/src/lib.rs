@@ -49,13 +49,14 @@
 //!   the caller's variable, seen as its type; `<const N: usize>` takes a value, as in
 //!   `dot::<4>(x, y, n)`. A helper sees its own names and the module's constants.
 //! - **Functions that name an ABI** are compiled each on its own: kernels, and functions the
-//!   machine calls by an instruction, as PTX's `call(r, f, (a, b))` calls a `.func`. One with
-//!   `<const N: u32>`, an integer or a `bool`, is compiled for each instance its
-//!   `#[instances(256, 1024)]` lists, of values known now, or for two
-//!   `#[instances((3, true), (-2, false))]`; [`instances`] lists them, and an instruction
-//!   names one as `f::<256>`. `#[cooperative]` on a kernel says that its parts wait for each
-//!   other at `grid.sync()`, a GPU kernel's blocks or an x86 kernel's threads, so that it is
-//!   launched with them all running at once.
+//!   machine calls by an instruction, as PTX's `call(r, f, (a, b))` calls a `.func`. Each runs
+//!   on its machine, never while Rust compiles, so it is not `const`; and no function is
+//!   `async`, for a function runs when it is called. One with `<const N: u32>`, an integer or
+//!   a `bool`, is compiled for each instance its `#[instances(256, 1024)]` lists, of values
+//!   known now, or for two `#[instances((3, true), (-2, false))]`; [`instances`] lists them,
+//!   and an instruction names one as `f::<256>`. `#[cooperative]` on a kernel says that its
+//!   parts wait for each other at `grid.sync()`, a GPU kernel's blocks or an x86 kernel's
+//!   threads, so that it is launched with them all running at once.
 //! - **`for k in 0..n { .. }`** is unrolled, over a range, an array or variables.
 //!   **`if c { .. } else { .. }`** chooses now when `c` is a bool; when `c` is a predicate
 //!   variable it guards each instruction inside, `if !p` the other way.
@@ -121,9 +122,22 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// How deep helpers call helpers, and how deep brackets, types, expressions, blocks and the arrays
+/// of a value nest, at most.
+const DEPTH: usize = 64;
+
+/// Nothing, if a level inside `open` others is within the most; else why not, at `span`, where
+/// the level starts.
+pub fn nested(open: usize, span: Span) -> Result<(), Error> {
+    if open >= DEPTH {
+        return Err(Error { span, message: format!("this nests {DEPTH} deep at most") });
+    }
+    Ok(())
+}
+
 /// The module in `src`, as a string holds it.
 pub fn parse(src: &str) -> Result<Module, Error> {
-    module(&lex(src)?)
+    module(&lex(src)?, 0)
 }
 
 #[cfg(test)]

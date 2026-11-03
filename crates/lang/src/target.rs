@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::token::Span;
+
 /// An instruction set, as the evaluator sees it: variables of the machine's types, and
 /// instructions by name. It checks what it is given and builds the program; the evaluator
 /// knows no machine.
@@ -48,6 +50,14 @@ pub trait Target {
 
     /// The end of the body, for whatever the machine puts there.
     fn end(&mut self) -> Result<(), String>;
+
+    /// `var`, a parameter or a variable the body declares, is declared at `at`: where an error
+    /// the machine finds with it later is placed. A machine need not keep it.
+    fn declared_at(&mut self, _var: Self::Var, _at: Span) {}
+
+    /// The instruction that `inst` is given next is at `at`: where an error the machine finds
+    /// with it later is placed. A machine need not keep it.
+    fn inst_at(&mut self, _at: Span) {}
 }
 
 /// What an instruction is given.

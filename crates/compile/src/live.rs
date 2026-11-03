@@ -19,7 +19,7 @@ pub(crate) fn analyse<Op>(p: &Program<Op>) -> Result<(Vec<Block>, Live), Error> 
     let live = liveness(p, &blocks);
     let params: Vec<usize> = p.params.iter().map(|(v, _)| v.id as usize).collect();
     if let Some(i) = live.ins[0].iter().find(|i| !params.contains(i)) {
-        return Err(Error::ReadBeforeWrite { var: p.regs[i].name.clone() });
+        return Err(Error::ReadBeforeWrite { var: p.regs[i].name.clone(), vreg: p.vreg(i) });
     }
     Ok((blocks, live))
 }

@@ -2,11 +2,12 @@
 //! language parses: the use cases on [`Echo`], a fake machine. Each kernel in them compiles, for
 //! its machine, but those written to fail.
 
-use kgen_lang::{Fault, Fn, Guard, IntTy, Memory, Operand, Target, Value, parse};
+use kgen_lang::{Error, Fault, Fn, Guard, IntTy, Memory, Operand, Span, Target, Value, parse};
 
 use crate::{
-    Abi, Backend, Called, Compiled, Device, DeviceStatic, Owner, StaticError, Unfinished, abi, all, compile,
-    cooperative, function, instance, one, owner, prepare, statics,
+    Abi, Backend, Call, Called, Compiled, ConstItem, Device, DeviceStatic, Given, HostStatic, ItemOut, Launcher,
+    ModuleOut, Naked, Native, NativeOut, Owner, StaticError, Unfinished, abi, all, compile, consts, cooperative,
+    function, instance, module, one, owner, prepare, statics,
 };
 
 /// An ABI is one kgen compiles for, by the name Rust writes it as, or none. Of them, the process
@@ -79,17 +80,18 @@ fn a_cooperative_helper_is_refused() {
 }
 
 /// A name names a function that takes no compile-time arguments, or an instance of one, as
-/// `tile::<4>` names `tile` for 4. A name of no function, or of no instance its function has,
-/// names none.
+/// `tile::<4>` names `tile` for 4, the second it lists. A name of no function, or of no instance
+/// its function has, names none.
 #[test]
 fn an_instance_is_found_by_its_name() {
     let tile =
         "#[instances(2, 4)] unsafe extern \"sysv64\" fn tile<const N: u64>(x: u64) -> u64 { add(x, N); ret(x); }";
     let src = format!("{tile}\nunsafe extern \"sysv64\" fn k(x: u64) -> u64 {{ ret(x); }}");
     let module = parse(&src).unwrap();
-    let found = |name| instance(&module, name).unwrap().map(|(f, args)| (f.name.as_str(), args));
-    assert_eq!(found("tile::<4>"), Some(("tile", vec![Value::Int(4, Some(IntTy::U64))])));
-    assert_eq!(found("k"), Some(("k", vec![])));
+    let found = |name| instance(&module, name).unwrap().map(|(f, args, at)| (f.name.as_str(), args, at));
+    assert_eq!(found("tile::<2>"), Some(("tile", vec![Value::Int(2, Some(IntTy::U64))], 0)));
+    assert_eq!(found("tile::<4>"), Some(("tile", vec![Value::Int(4, Some(IntTy::U64))], 1)));
+    assert_eq!(found("k"), Some(("k", vec![], 0)));
     for none in ["tile::<3>", "tile", "k::<4>", "j"] {
         assert_eq!(found(none), None, "{none}");
     }
@@ -114,11 +116,19 @@ fn laid(name: &str, held: &str, before: &[&str]) -> Laid {
 }
 
 /// A kernel as Echo writes it, and its code: its name, a line for each thing it was told, and
-/// its variables, by name. A variable is its place among them.
+/// its variables, by name, with where each is declared, as `declared_at` tells it. A variable
+/// is its place among them. Beside them, the statics it was told of, and the functions its body
+/// names, those it may reach at an address, and the statics it names, each once, in the order
+/// first named.
 struct Told {
     name: String,
     lines: Vec<String>,
     vars: Vec<String>,
+    declared: Vec<(usize, Span)>,
+    memory: Vec<String>,
+    funcs: Vec<String>,
+    reach: Vec<String>,
+    statics: Vec<String>,
 }
 
 impl Backend for Echo {
@@ -166,18 +176,28 @@ impl Backend for Echo {
         for c in callees {
             lines.push(format!("callee {}: {} [{}] {:?}", c.name, c.function, listed(&c.args), c.callee));
         }
-        Told { name: name.into(), lines, vars: vec![] }
+        let memory = statics.iter().map(|s| s.name.clone()).collect();
+        Told {
+            name: name.into(),
+            lines,
+            vars: vec![],
+            declared: vec![],
+            memory,
+            funcs: vec![],
+            reach: vec![],
+            statics: vec![],
+        }
     }
 
     /// Fails for a variable named `fail_v`, which it blames, or one named `fail`, blaming none.
     fn finish(&self, kernel: Told) -> Result<Told, Unfinished> {
-        for var in &kernel.vars {
+        for (i, var) in kernel.vars.iter().enumerate() {
             let blamed = match var.as_str() {
-                "fail_v" => Some(var.clone()),
+                "fail_v" => Some(i),
                 "fail" => None,
                 _ => continue,
             };
-            return Err(Unfinished { var: blamed, message: format!("`{var}` fails") });
+            return Err(Unfinished::blaming(blamed, &kernel.declared, format!("`{var}` fails")));
         }
         Ok(kernel)
     }
@@ -203,6 +223,28 @@ impl Device for Echo {
     }
 }
 
+impl Native for Echo {
+    /// The lines, and the listing they make, the functions the body names and may reach at an
+    /// address, and the statics it names. It needs no feature, and reads no constant from
+    /// memory.
+    fn naked(&self, code: &Told) -> Naked {
+        Naked {
+            code: code.lines.clone(),
+            text: code.lines.join("\n"),
+            needs: vec![],
+            consts: vec![],
+            funcs: code.funcs.clone(),
+            reach: code.reach.clone(),
+            statics: code.statics.clone(),
+        }
+    }
+
+    /// What the static holds, as one element of no bytes: Echo makes no memory.
+    fn host_static(&self, s: &Laid) -> HostStatic {
+        HostStatic { elem: s.held.clone(), size: 0, len: 1, align: 1, init: vec![] }
+    }
+}
+
 impl Told {
     /// Variable `name`, declared by `line`.
     fn declare(&mut self, line: String, name: &str) -> usize {
@@ -213,7 +255,7 @@ impl Told {
 }
 
 /// Echo's kernel writes each instruction by its name and its operands, and a view of a variable
-/// is the variable.
+/// is the variable. It takes each static it was told of as a variable of its name.
 impl Target for Told {
     type Var = usize;
 
@@ -230,6 +272,14 @@ impl Target for Told {
         Ok(self.declare(format!("var {name} {ty}"), name))
     }
 
+    fn global(&mut self, name: &str) -> Result<usize, String> {
+        if !self.memory.iter().any(|m| m == name) {
+            return Err(format!("`{name}` does not compile, so no kernel names it"));
+        }
+        self.statics.push(name.into());
+        Ok(self.declare(format!("global {name}"), name))
+    }
+
     fn view(&mut self, var: usize, _: &str) -> Result<usize, String> {
         Ok(var)
     }
@@ -243,6 +293,23 @@ impl Target for Told {
     }
 
     fn inst(&mut self, name: &str, args: &[Operand<usize>], _: Option<Guard<usize>>) -> Result<(), Fault> {
+        for a in args {
+            if let Operand::Func(f) | Operand::Code(f) = a
+                && !self.funcs.contains(f)
+            {
+                self.funcs.push(f.clone());
+            }
+        }
+        // The functions taken together last: a call at an address may reach each.
+        if let Some(Operand::Vector(fs)) = args.last() {
+            for f in fs {
+                if let Operand::Func(f) = f
+                    && !self.reach.contains(f)
+                {
+                    self.reach.push(f.clone());
+                }
+            }
+        }
         let args: Vec<String> = args
             .iter()
             .map(|a| match a {
@@ -258,6 +325,10 @@ impl Target for Told {
     fn end(&mut self) -> Result<(), String> {
         self.lines.push("end".into());
         Ok(())
+    }
+
+    fn declared_at(&mut self, var: usize, at: Span) {
+        self.declared.push((var, at));
     }
 }
 
@@ -340,8 +411,8 @@ fn a_kernel_hears_of_its_statics_and_callees_in_order() {
     assert_eq!(told, Ok(Compiled { code: heard.map(String::from).to_vec(), consts: vec!["ONE".into()] }));
 }
 
-/// What Echo blames on a variable is placed where the variable is first declared, and what it
-/// blames on none, at the function.
+/// What Echo blames on a variable is placed where that variable is declared, and what it blames
+/// on none, at the function.
 #[test]
 fn an_unfinished_kernel_is_blamed_where_its_variable_is_declared() {
     let src = "unsafe extern \"ptx-kernel\" fn k(x: u32) {\n\
@@ -374,14 +445,14 @@ fn an_instance_says_which_when_it_fails() {
     let prepared = prepare(&module, &Echo);
     let compiled = |f, args: &[Value]| compile(&module, &prepared, &Echo, f, args).map(|_| ()).map_err(|e| e.at(src));
     let named = |name| instance(&module, name).unwrap().unwrap();
-    let (tile, four) = named("tile::<4>");
+    let (tile, four, _) = named("tile::<4>");
     assert_eq!(compiled(tile, &four), Err("2:17: in `tile::<4>`: a bool is no operand".into()));
-    let (_, two) = named("tile::<2>");
+    let (_, two, _) = named("tile::<2>");
     assert_eq!(compiled(tile, &two), Err("3:17: in `tile::<2>`: `fail_v` fails".into()));
-    let (k, none) = named("k");
+    let (k, none, _) = named("k");
     assert_eq!(compiled(k, &four), Err("5:31: `k` takes 0 compile-time arguments; this gives 1".into()));
     assert_eq!(compiled(k, &none), Err("5:41: a bool is no operand".into()));
-    let (f, one) = named("f::<1>");
+    let (f, one, _) = named("f::<1>");
     assert_eq!(compiled(f, &[]), Err("6:53: `f` takes 1 compile-time arguments; this gives 0".into()));
     let not = "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, `extern \"ptx-kernel\"` \
                or `extern \"sysv64\"`; `f` is a function the kernels call, which runs as the kernel that calls it is \
@@ -389,11 +460,13 @@ fn an_instance_says_which_when_it_fails() {
     assert_eq!(compiled(f, &one), Err(format!("6:3: {not}")));
 }
 
-/// `one` compiles what a name names: a function that takes no compile-time arguments, or an
-/// instance of one that does. A name of no function, of no instance or of a helper names none.
-/// A name of a function that does not compile, or whose `#[instances(..)]` is wrong, is the
-/// error. So is the first static that is not laid out, whatever the name. What it compiles is
-/// told its function and its compile-time arguments, and the module's statics and callees.
+/// `one` compiles what a name names: a function the process runs that takes no compile-time
+/// arguments, or an instance of one that does. A name of no function, of no instance, of a
+/// helper or of a function the GPU runs names none. A name of a function that does not compile,
+/// or whose `#[instances(..)]` is wrong, is the error. So is the first static that is not laid
+/// out, whatever the name. What it compiles is told its function and its compile-time arguments,
+/// and the module's statics and callees. Once it has compiled, what is wrong with the rest of
+/// the module is the error as well.
 #[test]
 fn one_names_no_kernel_it_does_not_find() {
     let src = "#[instances(2, 4)] unsafe extern \"ptx-kernel\" fn tile<const N: u32>() {}\n\
@@ -404,16 +477,14 @@ fn one_names_no_kernel_it_does_not_find() {
                static A: global<u32>;";
     let module = parse(src).unwrap();
     let found = |name| one(&module, &Echo, name).map(|k| k.map(|k| k.code.lines.join("\n"))).map_err(|e| e.at(src));
-    let heard = "memory A\ncallee tile::<2>: tile [2] PtxKernel\ncallee tile::<4>: tile [4] PtxKernel\n\
-                 callee k: k [] Sysv64\ncallee bad: bad [] Sysv64\nend";
-    assert_eq!(found("tile::<4>"), Ok(Some(format!("new tile::<4>: tile [4]\n{heard}"))));
-    assert_eq!(found("k"), Ok(Some(format!("new k: k []\n{heard}"))));
-    for none in ["j", "tile::<3>", "tile", "h"] {
+    for none in ["j", "tile::<3>", "tile", "tile::<4>", "h"] {
         assert_eq!(found(none), Ok(None), "{none}");
     }
     assert_eq!(found("bad"), Err("4:39: a bool is no operand".into()));
     let once = "`once` takes no compile-time arguments, so it is compiled once, with no `#[instances(..)]`";
     assert_eq!(found("once"), Err(format!("5:3: {once}")));
+    // `k` compiles, but with `tile` and the static the module is two modules.
+    assert!(found("k").unwrap_err().starts_with("6:8: a static is memory of the module's kernels"));
     let refusing = [
         (format!("static B: global<u32> = 13;\nstatic T: constant<u32>;\n{src}"), "1:25"),
         (format!("{src}\nstatic B: global<u32> = 13;"), "7:25"),
@@ -425,27 +496,37 @@ fn one_names_no_kernel_it_does_not_find() {
             assert_eq!(refused, Err(format!("{at}: Echo holds no 13")), "{name}");
         }
     }
+    // Where the rest of the module is right, what a name names is compiled, and told the module.
+    let src = "#[instances(2, 4)] unsafe extern \"sysv64\" fn tile<const N: u32>() {}\n\
+               fn h() {}\n\
+               unsafe extern \"sysv64\" fn k() {}\n\
+               static A: global<u32>;";
+    let module = parse(src).unwrap();
+    let found = |name| one(&module, &Echo, name).map(|k| k.map(|k| k.code.lines.join("\n"))).map_err(|e| e.at(src));
+    let heard = "memory A\ncallee tile::<2>: tile [2] Sysv64\ncallee tile::<4>: tile [4] Sysv64\n\
+                 callee k: k [] Sysv64\nend";
+    assert_eq!(found("tile::<4>"), Ok(Some(format!("new tile::<4>: tile [4]\n{heard}"))));
+    assert_eq!(found("k"), Ok(Some(format!("new k: k []\n{heard}"))));
 }
 
-/// `all` compiles each instance of each function the process does not run, in the module's
-/// order, into one module with the statics: a PTX kernel or function, and one of an ABI kgen
-/// knows nothing of, but no `extern "sysv64"` one. Each is told its function and its
-/// compile-time arguments. A helper has no instance, but its `#[cooperative]` is the error,
-/// before its `#[instances(..)]` and a later kernel's, and its `#[instances(..)]` is one. So is
-/// a kernel that does not compile. The first static that is not laid out is the error before
-/// them all, and a module the device refuses is refused as a whole.
+/// `all` compiles each instance of each function the GPU runs, in the module's order, into one
+/// module with the statics: a PTX kernel or function, but no `extern "sysv64"` one and none of
+/// an ABI kgen knows nothing of. Each is told its function and its compile-time arguments. A
+/// helper has no instance, but its `#[cooperative]` is the error, before its `#[instances(..)]`
+/// and a later kernel's, and its `#[instances(..)]` is one. So is a kernel that does not
+/// compile. The first static that is not laid out is the error before them all, and a module the
+/// device refuses is refused as a whole. Once the device has made its module, a module of both
+/// kinds of kernel and a static is the error, and so is a function of an ABI kgen knows nothing
+/// of.
 #[test]
 fn all_compiles_each_instance_in_order() {
     let src = "static A: global<u32>;\n\
-               unsafe extern \"sysv64\" fn x() {}\n\
                #[instances(4, 2)] extern \"ptx-func\" fn tile<const N: u32>() {}\n\
                fn h() {}\n\
-               extern \"C\" fn c() {}\n\
                unsafe extern \"ptx-kernel\" fn k() {}";
-    let heard = "memory A\ncallee x: x [] Sysv64\ncallee tile::<4>: tile [4] PtxFunc\ncallee tile::<2>: tile [2] PtxFunc\n\
+    let heard = "memory A\ncallee tile::<4>: tile [4] PtxFunc\ncallee tile::<2>: tile [2] PtxFunc\n\
                  callee k: k [] PtxKernel\nend";
-    let codes =
-        ["tile::<4>: tile [4]", "tile::<2>: tile [2]", "c: c []", "k: k []"].map(|line| format!("new {line}\n{heard}"));
+    let codes = ["tile::<4>: tile [4]", "tile::<2>: tile [2]", "k: k []"].map(|line| format!("new {line}\n{heard}"));
     assert_eq!(all(&parse(src).unwrap(), &Echo), Ok(Ok(format!("static A\n{}", codes.join("\n")))));
     let x86 = "unsafe extern \"sysv64\" fn x() {}";
     assert_eq!(all(&parse(x86).unwrap(), &Echo), Ok(Err("nothing to load".into())));
@@ -453,6 +534,11 @@ fn all_compiles_each_instance_in_order() {
                or `extern \"sysv64\"`; `h` is a helper, inlined where it is called";
     let helper = "a helper is compiled where it is called, for what `::<..>` gives it there: `#[instances(..)]` lists \
                   what a function that names an ABI is compiled for";
+    let two = "a static is memory of the module's kernels: the GPU's, for PTX kernels, or the process's, for x86 \
+               ones; and this module has both, so it is two modules, one of each kind of kernel and the statics \
+               they name";
+    let abi = "kgen compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for NVIDIA \
+               GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` is none of these";
     let failing = [
         (
             "#[cooperative] fn h() {}\nstatic B: global<u32> = 13;\nstatic T: constant<u32>;",
@@ -465,8 +551,432 @@ fn all_compiles_each_instance_in_order() {
         ),
         ("#[instances(1)] fn h() {}", format!("1:3: {helper}")),
         ("unsafe extern \"ptx-kernel\" fn k() { nop(true); }", "1:41: a bool is no operand".into()),
+        (
+            "static A: global<u32>;\nunsafe extern \"sysv64\" fn x() {}\nunsafe extern \"ptx-kernel\" fn k() {}",
+            format!("1:8: {two}"),
+        ),
+        ("unsafe extern \"ptx-kernel\" fn k() {}\nextern \"C\" fn c() {}", format!("2:8: {abi}")),
     ];
     for (src, want) in failing {
         assert_eq!(all(&parse(src).unwrap(), &Echo).map_err(|e| e.at(src)), Err(want));
     }
+}
+
+/// The module in `src`, given no consts, its kernels compiled by Echo, the process's and the
+/// GPU's alike.
+fn echoed(src: &str) -> ModuleOut {
+    module(parse(src).unwrap(), None, &Echo, &Echo)
+}
+
+/// Each item of a module comes out as what it is, in the module's order: Rust passes through, a
+/// static is laid out or says why not, and a function is a helper, of an ABI kgen does not know,
+/// the process's or the GPU's. A kernel the process runs whose `#[instances(..)]` is wrong
+/// compiles nothing, and one whose instances do not all compile says why of each that does not,
+/// in order; neither is written. The listings of the kernels the process runs, and the code of
+/// the functions the GPU runs, are in the module's order as well.
+#[test]
+fn a_module_s_items_come_out_in_order() {
+    let src = "const ONE: u64 = 1;\n\
+               const TWO: u64 = 2;\n\
+               static A: global<[u32; 4]>;\n\
+               static U: global<u32> = 13;\n\
+               fn h() {}\n\
+               extern \"C\" fn c() {}\n\
+               unsafe extern \"sysv64\" fn k(x: u64) { add(x, ONE); add(x, TWO); }\n\
+               #[instances(2, 4)] unsafe extern \"sysv64\" fn tile<const N: u64>(x: u64) { lea(x, [A]); }\n\
+               #[instances(1)] unsafe extern \"sysv64\" fn once(x: u64) {}\n\
+               #[instances(1, 2, 3)] unsafe extern \"sysv64\" fn half<const N: u64>(x: u64) {\n\
+               if N >= 2 { lea(x, [U]); }\n\
+               }\n\
+               struct S;";
+    let out = echoed(src);
+    let [
+        ItemOut::Rust,
+        ItemOut::Rust,
+        ItemOut::HostStatic(Ok(a)),
+        ItemOut::HostStatic(Err(u)),
+        ItemOut::Helper(h),
+        ItemOut::Unknown(c),
+        ItemOut::Native(k),
+        ItemOut::Native(tile),
+        ItemOut::Native(once),
+        ItemOut::Native(half),
+        ItemOut::Rust,
+    ] = &out.items[..]
+    else {
+        panic!("{:?}", out.items);
+    };
+    assert_eq!(a, &HostStatic { elem: "[u32; 4]".into(), size: 0, len: 1, align: 1, init: vec![] });
+    assert_eq!(u.at(src), "4:25: Echo holds no 13");
+    assert!(h.is_empty() && c.at(src).starts_with("6:8: "));
+    let args: Vec<_> = tile.instances.iter().map(|i| i.args.clone()).collect();
+    assert_eq!(args, [[Value::Int(2, Some(IntTy::U64))], [Value::Int(4, Some(IntTy::U64))]]);
+    assert!(k.written && tile.written);
+    let listing = |name: &str, kernel: &NativeOut, i: usize| (name.to_string(), kernel.instances[i].naked.text.clone());
+    assert_eq!(out.listings, [listing("k", k, 0), listing("tile::<2>", tile, 0), listing("tile::<4>", tile, 1)]);
+    let once_said = "`once` takes no compile-time arguments, so it is compiled once, with no `#[instances(..)]`";
+    assert_eq!(once.said.as_ref().map(|e| e.at(src)), Some(format!("9:3: {once_said}")));
+    assert_eq!((once.count, once.instances.len(), once.errors.len(), once.written), (0, 0, 0, false));
+    let half_said: Vec<_> = half.errors.iter().map(|e| e.at(src)).collect();
+    assert_eq!(
+        half_said,
+        [
+            "11:21: in `half::<2>`: `U` does not compile, so no kernel names it",
+            "11:21: in `half::<3>`: `U` does not compile, so no kernel names it",
+        ]
+    );
+    assert_eq!((half.said.is_none(), half.count, half.instances.len(), half.written), (true, 3, 1, false));
+    assert!(out.given.is_empty() && out.owner.is_none() && out.device.is_none());
+    let src = "static T: global<u32> = 13;\n\
+               static B: global<u32>;\n\
+               unsafe extern \"ptx-kernel\" fn g() {}\n\
+               #[instances(1)] extern \"ptx-func\" fn f<const K: u32>() {}";
+    let out = echoed(src);
+    let [ItemOut::DeviceStatic(Err(t)), ItemOut::DeviceStatic(Ok(b)), ItemOut::Device(_), ItemOut::Device(_)] =
+        &out.items[..]
+    else {
+        panic!("{:?}", out.items);
+    };
+    assert_eq!(t.at(src), "1:25: Echo holds no 13");
+    assert_eq!(b, &DeviceStatic { symbol: "B".into(), host: "u32".into() });
+    let device = out.device.unwrap();
+    let made: Vec<_> = device.text.lines().filter(|line| !line.starts_with("callee ")).collect();
+    assert_eq!(made, ["static B", "new g: g []", "memory B", "end", "new f::<1>: f [1]", "memory B", "end"]);
+}
+
+/// A const the module is given that an item of its own is named as too is left out, and the item
+/// of its own says so, where it is named, in the order of its own items. What no name belongs to,
+/// among the consts given, stays.
+#[test]
+fn a_const_given_twice_is_refused_at_the_module_s_own() {
+    let src = "struct G;\n\
+               const A: u64 = 1;\n\
+               const W: u64 = 2;\n\
+               const k: u64 = 5;\n\
+               const STEP: u64 = 3;\n\
+               const STEP: u64 = 4;\n\
+               static A: global<u32>;\n\
+               unsafe extern \"sysv64\" fn k(x: u64) { add(x, STEP); add(x, W); }";
+    // The first five items are the consts given: the macro tells the parser how many tokens they
+    // are, and the parser leaves an item of the module's own named as one of them to `module`.
+    let before = kgen_lang::lex(&src[..src.find("const STEP: u64 = 4;").unwrap()]).unwrap().len();
+    let parsed = kgen_lang::module(&kgen_lang::lex(src).unwrap(), before).unwrap();
+    let kept = [0, 2, 5, 6, 7].map(|i| parsed.items[i].tokens.clone());
+    let out = module(parsed, Some(Given { before, from: "crate::sizes".into() }), &Echo, &Echo);
+    let said: Vec<_> = out.given.iter().map(|e| e.at(src)).collect();
+    assert_eq!(
+        said,
+        [
+            "6:7: `STEP` names one of the consts the module takes from `crate::sizes` as well",
+            "7:8: `A` names one of the consts the module takes from `crate::sizes` as well",
+            "8:27: `k` names one of the consts the module takes from `crate::sizes` as well",
+        ]
+    );
+    let tokens: Vec<_> = out.module.items.iter().map(|item| item.tokens.clone()).collect();
+    assert_eq!(tokens, kept);
+    let [ItemOut::Rust, ItemOut::Given, ItemOut::Rust, ItemOut::HostStatic(Ok(_)), ItemOut::Native(_)] = &out.items[..]
+    else {
+        panic!("{:?}", out.items);
+    };
+}
+
+/// A kernel that is not an `unsafe fn` is refused where it is named, though it is compiled: one
+/// the process runs is not written, and one the GPU runs is never launched, though its code is in
+/// the GPU's module. A function the kernels call promises Rust nothing, so it need not be one.
+#[test]
+fn a_kernel_that_is_not_unsafe_is_refused() {
+    let not = "a kernel trusts the pointers it is given, so it is an `unsafe fn`";
+    let src = "extern \"sysv64\" fn k(x: u64) { add(x, 1); }";
+    let out = echoed(src);
+    let [ItemOut::Native(k)] = &out.items[..] else { panic!("{:?}", out.items) };
+    assert_eq!(k.not_unsafe.as_ref().map(|e| e.at(src)), Some(format!("1:20: {not}")));
+    assert_eq!((k.instances.len(), k.count, k.written), (1, 1, false));
+    assert!(out.listings.is_empty());
+    let src = "extern \"ptx-kernel\" fn g() {}\nextern \"ptx-func\" fn f() {}";
+    let out = echoed(src);
+    let [ItemOut::Device(g), ItemOut::Device(f)] = &out.items[..] else { panic!("{:?}", out.items) };
+    assert_eq!(g.not_unsafe.as_ref().map(|e| e.at(src)), Some(format!("1:24: {not}")));
+    assert_eq!(g.launcher, Some(Launcher::Never));
+    assert!(f.not_unsafe.is_none());
+    let device = out.device.unwrap();
+    let made: Vec<_> = device.text.lines().filter(|line| line.starts_with("new ")).collect();
+    assert_eq!(made, ["new g: g []", "new f: f []"]);
+    assert!(device.symbols.is_empty());
+}
+
+/// A function of an ABI kgen compiles nothing for is refused where its ABI is named, and is
+/// none of the GPU's.
+#[test]
+fn a_function_of_an_abi_kgen_does_not_know_is_refused() {
+    let src = "unsafe extern \"C\" fn f() {}";
+    let out = echoed(src);
+    let [ItemOut::Unknown(e)] = &out.items[..] else { panic!("{:?}", out.items) };
+    let none = "1:15: kgen compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for \
+                NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` is none of these";
+    assert_eq!(e.at(src), none);
+    assert!(out.device.is_none());
+}
+
+/// A helper is checked where it is called, but what is wrong with it whether it is called or not
+/// is said where it is: a body that does not parse, an `#[instances(..)]`, then a
+/// `#[cooperative]`, in that order.
+#[test]
+fn a_helper_says_what_is_wrong_with_it_whether_called_or_not() {
+    let src = "#[cooperative] #[instances(1)] fn h() { let = 1; }\n\
+               #[cooperative] fn g(x: gpr) { add(x, 1); }\n\
+               unsafe extern \"sysv64\" fn k(x: u64) { g(x); }";
+    let out = echoed(src);
+    let [ItemOut::Helper(h), ItemOut::Helper(g), ItemOut::Native(k)] = &out.items[..] else {
+        panic!("{:?}", out.items);
+    };
+    let said = |errors: &[Error]| errors.iter().map(|e| e.at(src)).collect::<Vec<_>>();
+    let not = |name| {
+        format!(
+            "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, `extern \"ptx-kernel\"` \
+             or `extern \"sysv64\"`; `{name}` is a helper, inlined where it is called"
+        )
+    };
+    let helper = "a helper is compiled where it is called, for what `::<..>` gives it there: `#[instances(..)]` lists \
+                  what a function that names an ABI is compiled for";
+    assert_eq!(
+        said(h),
+        ["1:45: expected a name, found `=`".to_string(), format!("1:18: {helper}"), format!("1:3: {}", not("h"))]
+    );
+    assert_eq!(said(g), [format!("2:3: {}", not("g"))]);
+    assert!(k.written);
+}
+
+/// A kernel names the statics the code of its instances names, those the functions it calls name,
+/// and on, in the module's order: though it calls a function declared after it, which names them
+/// in another order. Of a function's instances, it names those of the one it calls alone. Two
+/// kernels that call each other name the same, and a kernel is not written to name them.
+#[test]
+fn a_kernel_names_the_statics_its_callees_reach() {
+    let src = "static A: global<u32>;\n\
+               static B: global<u32>;\n\
+               unsafe extern \"sysv64\" fn outer(x: u64) { call(inner, x); }\n\
+               unsafe extern \"sysv64\" fn inner(x: u64) { lea(x, [B]); lea(x, [A]); }\n\
+               unsafe extern \"sysv64\" fn top(x: u64) { call(outer, x); }\n\
+               #[instances(2, 4)] unsafe extern \"sysv64\" fn tile<const N: u64>(x: u64) {\n\
+               if N == 4 { lea(x, [B]); }\n\
+               }\n\
+               unsafe extern \"sysv64\" fn two(x: u64) { call(tile::<2>, x); }\n\
+               unsafe extern \"sysv64\" fn four(x: u64) { call(tile::<4>, x); }\n\
+               unsafe extern \"sysv64\" fn ping(x: u64) { call(pong, x); }\n\
+               unsafe extern \"sysv64\" fn pong(x: u64) { call(ping, x); lea(x, [A]); }\n\
+               extern \"sysv64\" fn plain(x: u64) { lea(x, [A]); }";
+    let out = echoed(src);
+    let [
+        _,
+        _,
+        ItemOut::Native(outer),
+        ItemOut::Native(inner),
+        ItemOut::Native(top),
+        ItemOut::Native(tile),
+        ItemOut::Native(two),
+        ItemOut::Native(four),
+        ItemOut::Native(ping),
+        ItemOut::Native(pong),
+        ItemOut::Native(plain),
+    ] = &out.items[..]
+    else {
+        panic!("{:?}", out.items);
+    };
+    assert_eq!(inner.instances[0].naked.statics, ["B", "A"]);
+    assert_eq!(outer.touched, ["A", "B"]);
+    assert_eq!(inner.touched, ["A", "B"]);
+    assert_eq!(top.touched, ["A", "B"]);
+    assert_eq!(tile.touched, ["B"]);
+    assert!(two.touched.is_empty());
+    assert_eq!(four.touched, ["B"]);
+    assert_eq!(ping.touched, ["A"]);
+    assert_eq!(pong.touched, ["A"]);
+    assert!(plain.touched == ["A"] && !plain.written);
+}
+
+/// A kernel names the statics of each function it may call at an address, those taken together
+/// last, though its code names none of them: `idle` names none and `run` one, the last of the two.
+/// A kernel that calls it by name names them as well.
+#[test]
+fn a_kernel_names_the_statics_of_the_functions_it_may_call_at_an_address() {
+    let src = "static A: global<u32>;\n\
+               static B: global<u32>;\n\
+               unsafe extern \"sysv64\" fn idle() {}\n\
+               unsafe extern \"sysv64\" fn run() { let p: gpr; lea(p, [A]); }\n\
+               unsafe extern \"sysv64\" fn far() { let p: gpr; lea(p, [B]); }\n\
+               unsafe extern \"sysv64\" fn either(fp: u64) { call(fp, (idle, run)); }\n\
+               unsafe extern \"sysv64\" fn top(fp: u64) { call(either, fp); }";
+    let out = echoed(src);
+    let [_, _, _, ItemOut::Native(run), _, ItemOut::Native(either), ItemOut::Native(top)] = &out.items[..] else {
+        panic!("{:?}", out.items);
+    };
+    let naked = &either.instances[0].naked;
+    assert!(naked.funcs.is_empty());
+    assert_eq!(naked.reach, ["idle", "run"]);
+    assert_eq!(run.touched, ["A"]);
+    assert_eq!(either.touched, ["A"]);
+    assert_eq!(top.touched, ["A"]);
+}
+
+/// In a module of both kinds of kernel and a static, the statics are the GPU's, as the first of
+/// them says, and a kernel the process runs that names one, in any of its instances, does not
+/// reach it, so it is not written. One that names none is written, and so is one of a module of
+/// both kinds and no static, whose statics are the GPU's.
+#[test]
+fn an_x86_kernel_of_a_module_of_both_kinds_is_written_unless_it_names_a_static() {
+    let src = "static S: global<u32>;\n\
+               #[instances(1, 2, 3)] unsafe extern \"sysv64\" fn a<const N: u64>(x: u64) {\n\
+               if N == 2 { lea(x, [S]); }\n\
+               }\n\
+               unsafe extern \"sysv64\" fn b(x: u64) { add(x, 1); }\n\
+               unsafe extern \"ptx-kernel\" fn g() {}";
+    let out = echoed(src);
+    assert!(out.owner.is_some_and(|e| e.at(src).starts_with("1:8: a static is memory of the module's kernels")));
+    let [ItemOut::DeviceStatic(Ok(_)), ItemOut::Native(a), ItemOut::Native(b), ItemOut::Device(_)] = &out.items[..]
+    else {
+        panic!("{:?}", out.items);
+    };
+    assert!(a.not_unsafe.is_none() && a.errors.is_empty() && a.touched.is_empty());
+    assert_eq!(a.instances[1].naked.statics, ["S"]);
+    assert_eq!((a.written, b.written), (false, true));
+    let src = "unsafe extern \"sysv64\" fn c(x: u64) { add(x, 1); }\nunsafe extern \"ptx-kernel\" fn g() {}";
+    let out = echoed(src);
+    let [ItemOut::Native(c), ItemOut::Device(_)] = &out.items[..] else { panic!("{:?}", out.items) };
+    assert!(out.owner.is_none() && c.written);
+}
+
+/// Rust launches each instance of each kernel the GPU runs by the index of its symbol, in the
+/// module's order. A kernel one of whose instances does not compile is never launched, and takes
+/// no index, though the code of those that compile is in the GPU's module; it says why of each
+/// that does not, in order. Nor is a kernel whose attributes are wrong, of which nothing is
+/// compiled; each says what is wrong with it. A function the kernels call is not launched.
+#[test]
+fn the_gpu_s_kernels_are_launched_by_index() {
+    let src = "unsafe extern \"ptx-kernel\" fn k() {}\n\
+               #[instances(2, 4)] unsafe extern \"ptx-kernel\" fn tile<const N: u32>() {}\n\
+               #[instances(1)] extern \"ptx-func\" fn f<const N: u32>() {}\n\
+               #[instances(1, 2, 3)] unsafe extern \"ptx-kernel\" fn half<const N: u32>() {\n\
+               if N >= 2 { let fail_v: u32; }\n\
+               }\n\
+               unsafe extern \"ptx-kernel\" fn last() {}\n\
+               #[instances(1)] unsafe extern \"ptx-kernel\" fn once() {}";
+    let out = echoed(src);
+    let functions: Vec<_> = out
+        .items
+        .iter()
+        .map(|item| match item {
+            ItemOut::Device(d) => d,
+            item => panic!("{item:?}"),
+        })
+        .collect();
+    let launchers: Vec<_> = functions.iter().map(|d| d.launcher.as_ref()).collect();
+    let n = |n| vec![Value::Int(n, Some(IntTy::U32))];
+    let tile = Launcher::Of(vec![(n(2), 1), (n(4), 2)]);
+    let want = [
+        Some(&Launcher::Of(vec![(vec![], 0)])),
+        Some(&tile),
+        None,
+        Some(&Launcher::Never),
+        Some(&Launcher::Of(vec![(vec![], 3)])),
+        Some(&Launcher::Never),
+    ];
+    assert_eq!(launchers, want);
+    let [_, _, _, half, _, once] = &functions[..] else { panic!("{:?}", out.items) };
+    let said = "`once` takes no compile-time arguments, so it is compiled once, with no `#[instances(..)]`";
+    assert_eq!(once.said.as_ref().map(|e| e.at(src)), Some(format!("8:3: {said}")));
+    let errors: Vec<_> = half.errors.iter().map(|e| e.at(src)).collect();
+    assert_eq!(errors, ["5:17: in `half::<2>`: `fail_v` fails", "5:17: in `half::<3>`: `fail_v` fails"]);
+    let device = out.device.unwrap();
+    assert_eq!(device.symbols, ["k", "tile::<2>", "tile::<4>", "last"]);
+    let made: Vec<_> = device.text.lines().filter(|line| line.starts_with("new ")).collect();
+    let all = [
+        "k: k []",
+        "tile::<2>: tile [2]",
+        "tile::<4>: tile [4]",
+        "f::<1>: f [1]",
+        "half::<1>: half [1]",
+        "last: last []",
+    ];
+    assert_eq!(made, all.map(|line| format!("new {line}")));
+}
+
+/// Why the GPU's module is none is said at the module's first item that is the GPU's: a function
+/// it runs, whatever is wrong with it, or a static of its memory. A helper, and a function of an
+/// ABI kgen does not know, are not the GPU's.
+#[test]
+fn the_module_s_error_goes_at_its_first_gpu_item() {
+    let src = "fn h() {}\n\
+               extern \"C\" fn c() {}\n\
+               #[instances(1)] extern \"ptx-kernel\" fn k() {}\n\
+               unsafe extern \"ptx-kernel\" fn j() { let fail_v: u32; }";
+    let device = echoed(src).device.unwrap();
+    assert_eq!(device.error.map(|e| e.at(src)), Some("3:40: nothing to load".into()));
+    assert!(device.text.is_empty());
+    let src = "extern \"ptx-func\" fn f() { let fail_v: u32; }\nstatic A: global<u32>;\nstatic B: global<u32>;";
+    let device = echoed(src).device.unwrap();
+    assert_eq!(device.error.map(|e| e.at(src)), Some("1:22: nothing to load".into()));
+    let src = "static A: global<u32>;";
+    let out = echoed(src);
+    let [ItemOut::DeviceStatic(Ok(a))] = &out.items[..] else { panic!("{:?}", out.items) };
+    assert_eq!(a, &DeviceStatic { symbol: "A".into(), host: "u32".into() });
+    assert_eq!(out.device.unwrap().error.map(|e| e.at(src)), Some("1:8: nothing to load".into()));
+}
+
+/// A function a kernel's code calls, or whose code it takes, as `[tile::<4>]`, is named once
+/// however often the code names it: by its function and, for one that takes compile-time
+/// arguments, by the index of the instance among those its `#[instances(..)]` lists, not by its
+/// place among their values sorted, nor by its value. A kernel Rust does not get the code of names
+/// none.
+#[test]
+fn a_call_reaches_the_instance_its_code_names() {
+    let src = "unsafe extern \"sysv64\" fn step(x: u64) { add(x, 1); }\n\
+               #[instances(4, 2)] unsafe extern \"sysv64\" fn tile<const N: u64>(x: u64) { add(x, N); }\n\
+               unsafe extern \"sysv64\" fn twice(x: u64) { call(tile::<2>, x); call(step, x); }\n\
+               unsafe extern \"sysv64\" fn address(x: u64) { lea(x, [tile::<4>]); lea(x, [tile::<4>]); }\n\
+               extern \"sysv64\" fn plain(x: u64) { call(step, x); }";
+    let out = echoed(src);
+    let [_, _, ItemOut::Native(twice), ItemOut::Native(address), ItemOut::Native(plain)] = &out.items[..] else {
+        panic!("{:?}", out.items);
+    };
+    let call = |function: &str, instance| Call { function: function.into(), instance };
+    assert_eq!(twice.instances[0].calls, [call("tile", Some(1)), call("step", None)]);
+    assert_eq!(address.instances[0].calls, [call("tile", Some(0))]);
+    assert!(plain.instances[0].calls.is_empty() && !plain.written);
+}
+
+/// A function that takes no compile-time arguments and lists instances is wrong at its own item,
+/// which says so. A kernel that calls it still names it, whole, as it names any function of none.
+#[test]
+fn a_call_to_a_function_with_instances_it_cannot_have_names_it_whole() {
+    let src = "#[instances(2)] unsafe extern \"sysv64\" fn g(x: u64) { add(x, 1); }\n\
+               unsafe extern \"sysv64\" fn k(x: u64) { call(g, x); }";
+    let out = echoed(src);
+    let [ItemOut::Native(g), ItemOut::Native(k)] = &out.items[..] else { panic!("{:?}", out.items) };
+    let wrong = "1:3: `g` takes no compile-time arguments, so it is compiled once, with no `#[instances(..)]`";
+    assert_eq!(g.said.as_ref().map(|e| e.at(src)), Some(wrong.into()));
+    assert_eq!(k.instances[0].calls, [Call { function: "g".into(), instance: None }]);
+}
+
+/// Each item of a module of consts is a const known now, a const that is not, with why, or no
+/// const; a const is worked out on its own, `pub` or not, whichever of the consts it reads comes
+/// first.
+#[test]
+fn a_module_of_consts_says_what_each_of_its_items_is() {
+    let src = "#![allow(dead_code)]\n\
+               pub const A: u64 = 3;\n\
+               const B: u64 = A * 2;\n\
+               pub const C: u64 = double(3);\n\
+               pub const D: u64 = E + 1;\n\
+               const E: u64 = 4;\n\
+               pub const fn double(x: u64) -> u64 { 2 * x }";
+    let said: Vec<String> = consts(&parse(src).unwrap())
+        .iter()
+        .map(|item| match item {
+            ConstItem::Given => "given".to_string(),
+            ConstItem::Wrong(e) => e.at(src),
+            ConstItem::NotAConst => "not a const".to_string(),
+        })
+        .collect();
+    let call = "4:20: a call is a statement: an instruction or a helper, not a value";
+    assert_eq!(said, ["not a const", "given", "given", call, "given", "given", "not a const"]);
 }

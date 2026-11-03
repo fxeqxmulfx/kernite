@@ -4,9 +4,11 @@
 use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
 
 use kgen::lang::{self, Fn, ItemKind, Value};
-use kgen::{HostStatic, Naked};
+use kgen::{Call, HostStatic, Naked, NativeInstance};
 
-use crate::rust::{attrs, is_ident, is_punct, parse, pick, signature, stub, visibility, written_params};
+use crate::rust::{
+    attrs, clashes, hygienic, is_ident, is_punct, never, parse, pick, signature, stub, visibility, written_params,
+};
 
 /// `f` as an `#[unsafe(naked)]` function whose body is the listing of its one instance, and
 /// the statics its constants are, in a module beside it. For a function of compile-time
@@ -19,8 +21,8 @@ use crate::rust::{attrs, is_ident, is_punct, parse, pick, signature, stub, visib
 pub(crate) fn naked(
     module: &lang::Module,
     f: &Fn,
-    instances: &[(Vec<Value>, Naked)],
-    named: &[&str],
+    instances: &[NativeInstance],
+    named: &[String],
     top: &[TokenTree],
 ) -> TokenStream {
     let hidden = format!("__kgen_{}", f.name);
@@ -28,10 +30,11 @@ pub(crate) fn naked(
     let mut out = TokenStream::new();
     let mut items = String::new();
     let mut statics = vec![];
-    if let [(args, listing)] = instances
-        && args.is_empty()
+    if let [one] = instances
+        && one.args.is_empty()
         && !cooperative
     {
+        let listing = &one.naked;
         let mut docs = attrs(f, top);
         docs.extend(needs(instances));
         out.extend(contract(docs, named));
@@ -40,7 +43,7 @@ pub(crate) fn naked(
         let code = asm(
             listing,
             &format!("{hidden}::C"),
-            &callees(module, listing, false, top),
+            &callees(module, &one.calls, false, top),
             &reached(module, listing, false, top),
         );
         out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&code)))]);
@@ -63,19 +66,20 @@ pub(crate) fn naked(
         });
         let ty = format!("unsafe extern \"sysv64\" fn({}) {ret}", tys.join(", "));
         let mut arms = vec![];
-        for (k, (args, listing)) in instances.iter().enumerate() {
+        for (k, instance) in instances.iter().enumerate() {
+            let listing = &instance.naked;
             items += &format!(
                 "#[unsafe(naked)]\npub unsafe extern \"sysv64\" fn I{k}({}) {ret} {{ {} }}\n",
                 params.join(", "),
                 asm(
                     listing,
                     &format!("I{k}C"),
-                    &callees(module, listing, true, top),
+                    &callees(module, &instance.calls, true, top),
                     &reached(module, listing, true, top)
                 )
             );
             statics.push((format!("I{k}C"), listing));
-            arms.push((args.clone(), format!("{hidden}::I{k} as {ty}")));
+            arms.push((instance.args.clone(), format!("{hidden}::I{k} as {ty}")));
         }
         if cooperative {
             out.extend(grid_launcher(f, Some(&arms), needs(instances), named, top));
@@ -107,9 +111,7 @@ pub(crate) fn naked(
         }
     }
     if !items.is_empty() {
-        out.extend(parse(&format!(
-            "#[doc(hidden)]\n#[allow(dead_code, non_snake_case)]\nmod {hidden} {{\n{items}}}\n"
-        )));
+        out.extend(parse(&format!("#[doc(hidden)]\nmod {hidden} {{\n{items}}}\n")));
     }
     out
 }
@@ -152,7 +154,7 @@ fn reached(module: &lang::Module, listing: &Naked, inside: bool, top: &[TokenTre
 /// `docs`, a kernel's attributes, with what its safety contract says of `named`, the memory of
 /// the module's: that nothing else touches it while the kernel runs. A contract the docs do not
 /// have says that the kernel trusts the pointers it is given as well.
-fn contract(mut docs: TokenStream, named: &[&str]) -> TokenStream {
+fn contract(mut docs: TokenStream, named: &[String]) -> TokenStream {
     if named.is_empty() {
         return docs;
     }
@@ -172,7 +174,7 @@ fn contract(mut docs: TokenStream, named: &[&str]) -> TokenStream {
 }
 
 /// `names` in words, each in backticks: `` `A` ``, `` `A` and `B` ``, `` `A`, `B` and `C` ``.
-fn list(names: &[&str]) -> String {
+fn list(names: &[String]) -> String {
     let quoted: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
     match quoted.split_last() {
         Some((last, [])) => last.clone(),
@@ -225,24 +227,21 @@ fn elements(m: &HostStatic) -> Vec<String> {
         .collect()
 }
 
-/// The paths by which the code of `listing`, of a kernel of `module`, names each function it
-/// calls, from beside the kernels or from `inside` a kernel's hidden module: a function of no
+/// The paths by which the code of an instance of a kernel of `module` names each function it
+/// `calls`, from beside the kernels or from `inside` a kernel's hidden module: a function of no
 /// compile-time arguments by its name as written, `r#fn` as well, and an instance, `tile::<4>`,
 /// as the function in its function's hidden module, `__kgen_tile::I0`, that [`naked`] makes it.
-fn callees(module: &lang::Module, listing: &Naked, inside: bool, top: &[TokenTree]) -> Vec<String> {
+fn callees(module: &lang::Module, calls: &[Call], inside: bool, top: &[TokenTree]) -> Vec<String> {
     let up = if inside { "super::" } else { "" };
-    let path = |name: &str| {
-        let base = name.split("::<").next().unwrap_or(name);
-        let g = kgen::function(module, base).expect("a kernel calls a function of its module");
-        if g.generics.is_empty() {
+    let path = |call: &Call| match call.instance {
+        Some(k) => format!("{up}__kgen_{}::I{k}", call.function),
+        None => {
+            let g = kgen::function(module, &call.function).expect("a kernel calls a function of its module");
             // Its name as written, after `fn`.
-            return format!("{up}{}", top[g.head.end + 1]);
+            format!("{up}{}", top[g.head.end + 1])
         }
-        let instances = lang::instances(module, g).unwrap_or_default();
-        let k = instances.iter().position(|args| lang::instance(g, args).is_ok_and(|n| n == name));
-        format!("{up}__kgen_{base}::I{}", k.expect("a kernel calls an instance its function lists"))
     };
-    listing.funcs.iter().map(|name| path(name)).collect()
+    calls.iter().map(path).collect()
 }
 
 /// The function that runs `f`, a cooperative x86 kernel, on the threads of a grid, of `f`'s
@@ -252,13 +251,18 @@ fn callees(module: &lang::Module, listing: &Naked, inside: bool, top: &[TokenTre
 /// Rust's pointers do not cross threads. Without `kernels`, it never runs, for a kernel that
 /// did not compile. `needs` is the doc of the CPU features the kernels need. Its safety
 /// contract says that nothing else touches `named`, the module's memory, while the threads run.
+/// It binds `grid` for itself, which a parameter of `f` may be named as well; a compile-time
+/// argument may not, which is an error at its name, and the function never runs, as one of a
+/// kernel that did not compile.
 fn grid_launcher(
     f: &Fn,
     kernels: Option<&[(Vec<Value>, String)]>,
     needs: TokenStream,
-    named: &[&str],
+    named: &[String],
     top: &[TokenTree],
 ) -> TokenStream {
+    let clashes = clashes(f, &["grid"], "the launcher", top);
+    let kernels = if clashes.is_empty() { kernels } else { None };
     let mut out = attrs(f, top);
     out.extend(needs);
     out.extend(parse(
@@ -280,16 +284,15 @@ fn grid_launcher(
     } else if !memory.is_empty() {
         out.extend(parse(&format!("#[doc = \"\"]\n#[doc = {memory:?}]")));
     }
-    out.extend(parse(if kernels.is_some() {
-        "#[allow(clippy::too_many_arguments)]"
-    } else {
-        "#[allow(clippy::too_many_arguments, unused_variables)]"
-    }));
+    // Clippy says "too many arguments" of a function of more than seven parameters wherever its
+    // tokens come from, and the launcher takes the grid as well: so it allows that, and a crate of
+    // kernels may not forbid `clippy::too_many_arguments`.
+    out.extend(parse("#[allow(clippy::too_many_arguments)]"));
     // Its visibility, then `unsafe fn` and its name and generics as written.
     out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("unsafe fn"));
     out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
-    let mut params = parse("grid: ::kgen_cpu::Grid, ");
+    let mut params = hygienic("$grid: ::kgen_cpu::Grid, ", kernels.is_some());
     for (param, _) in written_params(f, top) {
         params.extend(param);
         params.extend(parse(","));
@@ -315,22 +318,23 @@ fn grid_launcher(
                     _ => args.push(name.to_string()),
                 }
             }
-            args.push("grid".to_string());
+            args.push("$grid".to_string());
             format!(
-                "{addresses}::kgen_cpu::launch(grid, &|grid: &::kgen_cpu::Place| unsafe {{ ({kernel})({}) }})",
+                "{addresses}::kgen_cpu::launch($grid, &|$grid: &::kgen_cpu::Place| unsafe {{ ({kernel})({}) }})",
                 args.join(", ")
             )
         }
-        None => "::core::unreachable!()".to_string(),
+        None => never(f, top),
     };
-    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&body)))]);
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, hygienic(&body, kernels.is_some())))]);
+    out.extend(clashes);
     out
 }
 
 /// The doc that names the CPU features past x86-64's own the code of `instances` needs, which
 /// nothing checks for when it runs; none if it needs none.
-fn needs(instances: &[(Vec<Value>, Naked)]) -> TokenStream {
-    let mut features: Vec<&str> = instances.iter().flat_map(|(_, l)| l.needs.iter().map(String::as_str)).collect();
+fn needs(instances: &[NativeInstance]) -> TokenStream {
+    let mut features: Vec<&str> = instances.iter().flat_map(|k| k.naked.needs.iter().map(String::as_str)).collect();
     features.sort();
     features.dedup();
     let named: Vec<String> = features.iter().map(|f| format!("`{f}`")).collect();
@@ -350,7 +354,7 @@ fn needs(instances: &[(Vec<Value>, Naked)]) -> TokenStream {
 /// its `instances` in its hidden module too, as [`naked`] would put them there, for kernels
 /// that call one to name. Its safety contract says what the kernel's would of `named`, the
 /// module's memory.
-pub(crate) fn x86_stub(f: &Fn, instances: usize, named: &[&str], top: &[TokenTree]) -> TokenStream {
+pub(crate) fn x86_stub(f: &Fn, instances: usize, named: &[String], top: &[TokenTree]) -> TokenStream {
     if f.cooperative.is_some() {
         return grid_launcher(f, None, TokenStream::new(), named, top);
     }
@@ -359,10 +363,7 @@ pub(crate) fn x86_stub(f: &Fn, instances: usize, named: &[&str], top: &[TokenTre
         let items: String = (0..instances)
             .map(|k| format!("pub unsafe extern \"sysv64\" fn I{k}() {{ ::core::unreachable!() }}\n"))
             .collect();
-        out.extend(parse(&format!(
-            "#[doc(hidden)]\n#[allow(dead_code, non_snake_case)]\nmod __kgen_{} {{\n{items}}}\n",
-            f.name
-        )));
+        out.extend(parse(&format!("#[doc(hidden)]\nmod __kgen_{} {{\n{items}}}\n", f.name)));
     }
     out
 }

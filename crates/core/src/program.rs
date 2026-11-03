@@ -144,3 +144,10 @@ pub struct Program<Op> {
     /// each by what the source calls it: `COUNTS`.
     pub statics: Vec<String>,
 }
+
+impl<Op> Program<Op> {
+    /// The variable `regs[i]` describes.
+    pub fn vreg(&self, i: usize) -> VReg {
+        VReg { id: i as u32, class: self.regs[i].class }
+    }
+}

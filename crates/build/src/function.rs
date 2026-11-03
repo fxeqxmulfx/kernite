@@ -60,8 +60,8 @@ pub fn prepare<B: Backend>(module: &Module, backend: &B) -> Prepared<B> {
 
 /// Instance `args` of `f`, a function of `module`, compiled by `backend` and told what
 /// `prepared` holds; or why not, where it can be mended: an instruction where it is called,
-/// what the machine finds wrong with the code where the variable it blames is first declared,
-/// or at `f` if it blames none. For an instance, an error in its body or its code says which.
+/// what the machine finds wrong with the code where the variable it blames is declared, or at
+/// `f` if it blames none. For an instance, an error in its body or its code says which.
 pub fn compile<B: Backend>(
     module: &Module,
     prepared: &Prepared<B>,
@@ -73,10 +73,8 @@ pub fn compile<B: Backend>(
     let cooperative = cooperative(f)?;
     let mut kernel = backend.kernel(f, &name, args, cooperative, &prepared.made, &prepared.callees);
     let run = kgen_lang::kernel(module, f, args, &mut kernel).map_err(|e| within(&name, args, e))?;
-    let code = backend.finish(kernel).map_err(|u| {
-        let declared = u.var.and_then(|var| run.decls.iter().find(|(v, _)| *v == var));
-        let span = declared.map_or(f.span, |&(_, span)| span);
-        within(&name, args, Error { span, message: u.message })
-    })?;
+    let code = backend
+        .finish(kernel)
+        .map_err(|u| within(&name, args, Error { span: u.at.unwrap_or(f.span), message: u.message }))?;
     Ok(Compiled { code, consts: run.consts })
 }

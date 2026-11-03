@@ -1,9 +1,11 @@
-//! The use cases of `kgen`: from a [`Program`] over variables to an [`Allocated`] kernel over
+//! The allocator of `kgen`: from a [`Program`] over variables to an [`Allocated`] kernel over
 //! machine registers, what did not fit in them spilled to the stack, with its frame laid out.
 //!
-//! What they know of the machine comes through the [`Machine`] and [`Spill`] ports, so they
-//! run the same for any instruction set, and their tests run them on a toy machine with a few
+//! What it knows of the machine comes through the [`Machine`] and [`Spill`] ports, so it
+//! runs the same for any instruction set, and its tests run it on a toy machine with a few
 //! registers.
+//!
+//! [`on_every_path`] says which items of a program every path from its start to its end runs.
 
 mod alloc;
 mod allocated;
@@ -16,6 +18,7 @@ mod port;
 mod spill;
 
 pub use allocated::{Allocated, Frame};
+pub use cfg::on_every_path;
 pub use error::Error;
 use kgen_core::{Inst, Item, PReg, Program};
 pub use port::{Machine, Spill};
