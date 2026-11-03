@@ -39,7 +39,8 @@ name of its own, but `_`. A generic kernel is compiled for each value its `#[ins
 kernel of its own, which Rust calls as it calls a generic function, `kernels::dot::<4>(x, y, n)`; a value it
 does not list fails to build. A value known now holds at most 1048576 elements in all, however its arrays nest,
 and a range as many. Each number, float and `bool` is an element, and so is each array of none or one item,
-which costs memory of its own. [`kgen-lang`](crates/lang/src/lib.rs) describes the language.
+which costs memory of its own. A kernel declares at most 65536 variables, however its loops and helpers repeat
+them. [`kgen-lang`](crates/lang/src/lib.rs) describes the language.
 
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kgen_macros::consts]` is on, and a

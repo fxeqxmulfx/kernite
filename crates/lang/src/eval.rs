@@ -200,6 +200,10 @@ impl Target for Consts {
 /// How deep helpers may call helpers.
 const DEPTH: usize = 64;
 
+/// The most variables a kernel declares by `let`, however its loops and helpers repeat them: x86's
+/// allocator keeps a set of them for each of them, a bit each, so this many take 512 MiB.
+const VARIABLES: usize = 1 << 16;
+
 fn err(span: Span, message: impl Into<String>) -> Error {
     Error { span, message: message.into() }
 }
@@ -264,6 +268,8 @@ struct Eval<'a, T: Target> {
     insts: usize,
     depth: usize,
     decls: Vec<(String, Span)>,
+    /// How many variables `let` has declared, in the kernel and in the helpers it called.
+    declared: usize,
 }
 
 impl<'a, T: Target> Eval<'a, T> {
@@ -278,8 +284,20 @@ impl<'a, T: Target> Eval<'a, T> {
                 ItemKind::Other => {}
             }
         }
-        let (scopes, decls) = (vec![], vec![]);
-        Eval { target, consts, statics, helpers, compiled, scopes, labels: 0, guard: None, insts: 0, depth: 0, decls }
+        Eval {
+            target,
+            consts,
+            statics,
+            helpers,
+            compiled,
+            scopes: vec![],
+            labels: 0,
+            guard: None,
+            insts: 0,
+            depth: 0,
+            decls: vec![],
+            declared: 0,
+        }
     }
 
     fn bind(&mut self, name: &str, b: Binding<T::Var>) {
@@ -931,10 +949,22 @@ impl<'a, T: Target> Eval<'a, T> {
         }
     }
 
+    /// Counts `n` more variables declared by `let`. The kernel that would pass the most is refused
+    /// at `at`, before any is made.
+    fn declare(&mut self, n: usize, at: Span) -> Result<(), Error> {
+        let all = self.declared as u128 + n as u128;
+        if all > VARIABLES as u128 {
+            return Err(err(at, format!("{all} variables are too many: a kernel declares {VARIABLES} at most")));
+        }
+        self.declared += n;
+        Ok(())
+    }
+
     fn let_(&mut self, name: &str, span: Span, ty: Option<&Type>, value: Option<&Expr>) -> Result<(), Error> {
         let b = match (ty, value) {
             (Some(t @ (Type::Name(..) | Type::Generic(..))), None) => {
                 let ty = self.type_name(t)?;
+                self.declare(1, span)?;
                 let v = self.target.var(name, &ty).map_err(|m| err(t.span(), m))?;
                 self.decls.push((name.to_string(), span));
                 self.target.declared_at(v, span);
@@ -948,6 +978,7 @@ impl<'a, T: Target> Eval<'a, T> {
                     return Err(err(elem.span(), "variables are declared in arrays one deep"));
                 };
                 let n = self.count(len)?;
+                self.declare(n, len.span())?;
                 let mut vs = Vec::with_capacity(n);
                 for i in 0..n {
                     let each = format!("{name}{i}");

@@ -851,3 +851,42 @@ fn a_value_holding_the_most_keeps_every_item() {
 ";
     assert_eq!(x86(src, "k"), want);
 }
+
+/// A kernel declares at most 65536 variables by `let`, however its loops repeat them. The `let`
+/// that would pass the most is refused where it stands, before it makes any variable: an array of
+/// 2^40 would abort the process.
+#[test]
+fn a_let_that_would_pass_the_most_variables_is_refused_before_any_is_made() {
+    let cases = [
+        ("let v: [gpr; 1099511627776];", "2:14: 1099511627776 variables are too many: a kernel declares 65536 at most"),
+        (
+            "let v: [gpr; 18446744073709551615];",
+            "2:14: 18446744073709551615 variables are too many: a kernel declares 65536 at most",
+        ),
+        ("for i in 0..262144 { let x: gpr; }", "2:26: 65537 variables are too many: a kernel declares 65536 at most"),
+        (
+            "let a: [gpr; 32768]; let b: [gpr; 32769];",
+            "2:35: 65537 variables are too many: a kernel declares 65536 at most",
+        ),
+    ];
+    for (body, want) in cases {
+        assert_eq!(refused(body), want, "{body}");
+    }
+}
+
+/// The variables a helper declares count for the kernel that calls it: here `t` makes 65537.
+#[test]
+fn a_helpers_variables_count_for_the_kernel_that_calls_it() {
+    let src = "unsafe extern \"sysv64\" fn k() {\nlet a: [gpr; 65535]; h();\n}\nfn h() { let t: [gpr; 2]; }\n";
+    assert_eq!(
+        kgen::x86_str(src, "k").unwrap_err(),
+        "4:23: 65537 variables are too many: a kernel declares 65536 at most"
+    );
+}
+
+/// A kernel that declares exactly the most compiles, its parameters not counted among them. PTX
+/// builds no graph of its variables, so this takes no time to speak of.
+#[test]
+fn a_kernel_that_declares_exactly_the_most_variables_compiles() {
+    kgen::ptx_str("unsafe extern \"ptx-kernel\" fn k(x: *mut u32) {\nlet v: [u32; 65536];\n}\n").unwrap();
+}
