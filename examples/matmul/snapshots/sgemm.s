@@ -14,14 +14,14 @@
 # bp, spilled: 8 bytes at rsp + 80
 # c=rdi,rsi a=rsi b=rdx shape=rcx ap=r8,rax,rdi bp=r9,rax,rdi,r10
 # ld=rax pc=rcx kc=rdx most=rsi,rdi,r11,r15 lda=rsi q=rdi
-# p=r8,r10,r13 left=r9 r=r10 at=rdi s=r12,ymm14 d=r11
-# l=rbx,r11,r13 f=r13 nc=rsi col=r8 mask0=ymm1,ymm12,ymm13 mask1=ymm0,ymm13,ymm12
-# t=r10,r14,rdx lanes=ymm0,ymm12 v=ymm2 pa=rdi ci=r8 hleft=r9
-# pb=r10 ct=r11 wleft=rbx x=r12 acc0=ymm0 acc1=ymm1
-# acc2=ymm2 acc3=ymm3 acc4=ymm4 acc5=ymm5 acc6=ymm6 acc7=ymm7
-# acc8=ymm8 acc9=ymm9 acc10=ymm10 acc11=ymm11 b0=ymm12 b1=ymm13
-# n=rax,rsi k=rax,rdx,rsi ak=rsi,r8,rdx bk=rdx,rsi m=rax,r9 bj=rsi,r8
-# cj=rsi,r8 nleft=rsi
+# p=r8,r10,r13 left=r9 s=r10,ymm14 s3=r11 l=rbx,r11,r13 f=r12
+# r=r10 at=rdi from_row=r12 d=r11 n=rbx,rax,rsi g=r13
+# nc=rsi col=r8 mask0=ymm1,ymm12,ymm13 mask1=ymm0,ymm13,ymm12 t=r10,r14,rdx lanes=ymm0,ymm12
+# v=ymm2 pa=rdi ci=r8 hleft=r9 pb=r10 ct=r11
+# wleft=rbx x=r12 acc0=ymm0 acc1=ymm1 acc2=ymm2 acc3=ymm3
+# acc4=ymm4 acc5=ymm5 acc6=ymm6 acc7=ymm7 acc8=ymm8 acc9=ymm9
+# acc10=ymm10 acc11=ymm11 b0=ymm12 b1=ymm13 k=rax,rdx,rsi ak=rsi,r8,rdx
+# bk=rdx,rsi m=rax,r9 bj=rsi,r8 cj=rsi,r8 nleft=rsi
     push rbx
     push r12
     push r13
@@ -48,11 +48,11 @@
     # m reloaded
     mov rax, qword ptr [rsp + 40]
     test rax, rax
-    jz 26f
+    jz 28f
     # n reloaded
     mov rax, qword ptr [rsp + 8]
     test rax, rax
-    jz 26f
+    jz 28f
     # ap reloaded
     mov rax, qword ptr [rsp + 48]
     add rax, 63
@@ -91,7 +91,7 @@
     cmp rdx, rsi
     cmova rdx, rsi
     test rdx, rdx
-    jz 8f
+    jz 12f
     # k reloaded
     mov rsi, qword ptr [rsp + 16]
     shl rsi, 2
@@ -102,36 +102,65 @@
     # m reloaded
     mov r9, qword ptr [rsp + 40]
 3:
-    xor r10d, r10d
+    cmp r9, 6
+    jb 5f
+    # a whole sliver, a step at a time: rows 0 to 2 from s, and 3 to 5 from s3
+    mov r10, r8
+    lea r11, [r8 + rsi*2]
+    add r11, rsi
+    mov rbx, rdx
 4:
+    mov r12d, dword ptr [r10]
+    mov dword ptr [rdi], r12d
+    mov r12d, dword ptr [r10 + rsi*1]
+    mov dword ptr [rdi + 4], r12d
+    mov r12d, dword ptr [r10 + rsi*2]
+    mov dword ptr [rdi + 8], r12d
+    mov r12d, dword ptr [r11]
+    mov dword ptr [rdi + 12], r12d
+    mov r12d, dword ptr [r11 + rsi*1]
+    mov dword ptr [rdi + 16], r12d
+    mov r12d, dword ptr [r11 + rsi*2]
+    mov dword ptr [rdi + 20], r12d
+    add r10, 4
+    add r11, 4
+    add rdi, 24
+    dec rbx
+    jnz 4b
+    lea r8, [r8 + rsi*4]
+    lea r8, [r8 + rsi*2]
+    sub r9, 6
+    ja 3b
+    jmp 12f
+    # the last sliver, short of MR rows: a row at a time, then zeros
+5:
+    xor r10d, r10d
+6:
     mov r11, rdi
     mov rbx, rdx
     cmp r10, r9
-    jae 6f
+    jae 8f
     mov r12, r8
-5:
+7:
     mov r13d, dword ptr [r12]
     mov dword ptr [r11], r13d
     add r12, 4
     add r11, 24
     dec rbx
-    jnz 5b
-    jmp 7f
-6:
+    jnz 7b
+    jmp 9f
+8:
     mov dword ptr [r11], 0
     add r11, 24
     dec rbx
-    jnz 6b
-7:
+    jnz 8b
+9:
     add r8, rsi
     add rdi, 4
     inc r10
     cmp r10, 6
-    jb 4b
-    lea rdi, [r11 - 20]
-    sub r9, 6
-    ja 3b
-8:
+    jb 6b
+12:
     # blocks of NC columns of b, and of c
     # bk reloaded
     mov rsi, qword ptr [rsp + 32]
@@ -145,20 +174,20 @@
     mov rsi, qword ptr [rsp + 8]
     # nleft spilled
     mov qword ptr [rsp + 72], rsi
-9:
+13:
     # nleft reloaded
     mov rsi, qword ptr [rsp + 72]
     mov rdi, 384
     cmp rsi, rdi
     cmova rsi, rdi
     test rdx, rdx
-    jz 14f
+    jz 16f
     # bp reloaded
     mov rdi, qword ptr [rsp + 80]
     # bj reloaded
     mov r8, qword ptr [rsp + 56]
     mov r9, rsi
-12:
+14:
     mov r10, r9
     mov r11, 16
     cmp r10, r11
@@ -169,7 +198,7 @@
     vpcmpgtd ymm0, ymm0, ymmword ptr [rip + {c1}]
     mov r10, r8
     mov r11, rdx
-13:
+15:
     vmaskmovps ymm2, ymm1, ymmword ptr [r10]
     vmovaps ymmword ptr [rdi], ymm2
     vmaskmovps ymm2, ymm0, ymmword ptr [r10 + 32]
@@ -177,11 +206,11 @@
     add r10, rax
     add rdi, 64
     dec r11
-    jnz 13b
+    jnz 15b
     add r8, 64
     sub r9, 16
-    ja 12b
-14:
+    ja 14b
+16:
     # slivers of MR rows of a, and of c
     # ap reloaded
     mov rdi, qword ptr [rsp + 48]
@@ -189,13 +218,13 @@
     mov r8, qword ptr [rsp + 64]
     # m reloaded
     mov r9, qword ptr [rsp + 40]
-15:
+17:
     # slivers of NR columns of the block, a tile of c each
     # bp reloaded
     mov r10, qword ptr [rsp + 80]
     mov r11, r8
     mov rbx, rsi
-16:
+18:
     mov r12, rdi
     vxorps xmm0, xmm0, xmm0
     vxorps xmm1, xmm1, xmm1
@@ -210,12 +239,12 @@
     vxorps xmm10, xmm10, xmm10
     vxorps xmm11, xmm11, xmm11
     test rcx, rcx
-    jz 19f
+    jz 21f
     mov r13, r11
     cmp r9, 6
-    jb 17f
+    jb 19f
     cmp rbx, 16
-    jb 17f
+    jb 19f
     vmovups ymm0, ymmword ptr [r13]
     vmovups ymm1, ymmword ptr [r13 + 32]
     add r13, rax
@@ -234,8 +263,8 @@
     vmovups ymm10, ymmword ptr [r13]
     vmovups ymm11, ymmword ptr [r13 + 32]
     add r13, rax
-    jmp 18f
-17:
+    jmp 20f
+19:
     mov r14, rbx
     mov r15, 16
     cmp r14, r15
@@ -248,37 +277,37 @@
     vmaskmovps ymm1, ymm13, ymmword ptr [r13 + 32]
     add r13, rax
     cmp r9, 1
-    jbe 18f
+    jbe 20f
     vmaskmovps ymm2, ymm12, ymmword ptr [r13]
     vmaskmovps ymm3, ymm13, ymmword ptr [r13 + 32]
     add r13, rax
     cmp r9, 2
-    jbe 18f
+    jbe 20f
     vmaskmovps ymm4, ymm12, ymmword ptr [r13]
     vmaskmovps ymm5, ymm13, ymmword ptr [r13 + 32]
     add r13, rax
     cmp r9, 3
-    jbe 18f
+    jbe 20f
     vmaskmovps ymm6, ymm12, ymmword ptr [r13]
     vmaskmovps ymm7, ymm13, ymmword ptr [r13 + 32]
     add r13, rax
     cmp r9, 4
-    jbe 18f
+    jbe 20f
     vmaskmovps ymm8, ymm12, ymmword ptr [r13]
     vmaskmovps ymm9, ymm13, ymmword ptr [r13 + 32]
     add r13, rax
     cmp r9, 5
-    jbe 18f
+    jbe 20f
     vmaskmovps ymm10, ymm12, ymmword ptr [r13]
     vmaskmovps ymm11, ymm13, ymmword ptr [r13 + 32]
     add r13, rax
-18:
-19:
+20:
+21:
     # UNROLL steps of k a turn
     mov r13, rdx
     sub r13, 4
-    jb 21f
-20:
+    jb 23f
+22:
     vmovaps ymm12, ymmword ptr [r10]
     vmovaps ymm13, ymmword ptr [r10 + 32]
     vbroadcastss ymm14, dword ptr [r12]
@@ -362,12 +391,12 @@
     add r12, 96
     add r10, 256
     sub r13, 4
-    jae 20b
-21:
+    jae 22b
+23:
     # the steps past the last whole turn
     add r13, 4
-    jz 23f
-22:
+    jz 25f
+24:
     vmovaps ymm12, ymmword ptr [r10]
     vmovaps ymm13, ymmword ptr [r10 + 32]
     vbroadcastss ymm14, dword ptr [r12]
@@ -391,13 +420,13 @@
     add r12, 24
     add r10, 64
     dec r13
-    jnz 22b
-23:
+    jnz 24b
+25:
     mov r13, r11
     cmp r9, 6
-    jb 24f
+    jb 26f
     cmp rbx, 16
-    jb 24f
+    jb 26f
     vmovups ymmword ptr [r13], ymm0
     vmovups ymmword ptr [r13 + 32], ymm1
     add r13, rax
@@ -416,8 +445,8 @@
     vmovups ymmword ptr [r13], ymm10
     vmovups ymmword ptr [r13 + 32], ymm11
     add r13, rax
-    jmp 25f
-24:
+    jmp 27f
+26:
     mov r14, rbx
     mov r15, 16
     cmp r14, r15
@@ -430,39 +459,39 @@
     vmaskmovps ymmword ptr [r13 + 32], ymm12, ymm1
     add r13, rax
     cmp r9, 1
-    jbe 25f
+    jbe 27f
     vmaskmovps ymmword ptr [r13], ymm13, ymm2
     vmaskmovps ymmword ptr [r13 + 32], ymm12, ymm3
     add r13, rax
     cmp r9, 2
-    jbe 25f
+    jbe 27f
     vmaskmovps ymmword ptr [r13], ymm13, ymm4
     vmaskmovps ymmword ptr [r13 + 32], ymm12, ymm5
     add r13, rax
     cmp r9, 3
-    jbe 25f
+    jbe 27f
     vmaskmovps ymmword ptr [r13], ymm13, ymm6
     vmaskmovps ymmword ptr [r13 + 32], ymm12, ymm7
     add r13, rax
     cmp r9, 4
-    jbe 25f
+    jbe 27f
     vmaskmovps ymmword ptr [r13], ymm13, ymm8
     vmaskmovps ymmword ptr [r13 + 32], ymm12, ymm9
     add r13, rax
     cmp r9, 5
-    jbe 25f
+    jbe 27f
     vmaskmovps ymmword ptr [r13], ymm13, ymm10
     vmaskmovps ymmword ptr [r13 + 32], ymm12, ymm11
     add r13, rax
-25:
+27:
     add r11, 64
     sub rbx, 16
-    ja 16b
+    ja 18b
     mov rdi, r12
     lea r8, [r8 + rax*4]
     lea r8, [r8 + rax*2]
     sub r9, 6
-    ja 15b
+    ja 17b
     # bj reloaded
     mov rsi, qword ptr [rsp + 56]
     add rsi, 1536
@@ -478,7 +507,7 @@
     sub rsi, 384
     # nleft spilled
     mov qword ptr [rsp + 72], rsi
-    ja 9b
+    ja 13b
     # ak reloaded
     mov rdx, qword ptr [rsp + 24]
     add rdx, 1024
@@ -495,7 +524,7 @@
     mov rdx, qword ptr [rsp + 16]
     cmp rcx, rdx
     jb 2b
-26:
+28:
     mov rsp, rbp
     pop rbp
     pop r15

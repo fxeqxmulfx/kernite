@@ -168,28 +168,59 @@ pub mod kernels {
         mov(p, from);
         mov(left, mc);
         label(sliver);
+        cmp(left, MR);
+        jb(edge);
+        note("a whole sliver, a step at a time: rows 0 to 2 from s, and 3 to 5 from s3");
+        let (s, s3, l): (gpr, gpr, gpr);
+        mov(s, p);
+        lea(s3, [p + lda * 2]);
+        add(s3, lda);
+        mov(l, kc);
+        label(step);
+        for r in 0..MR {
+            let f: gpr;
+            if r < 3 {
+                mov(f.r32, [s + lda * r]);
+            } else {
+                mov(f.r32, [s3 + lda * (r - 3)]);
+            }
+            mov([q + 4 * r], f.r32);
+        }
+        add(s, 4);
+        add(s3, 4);
+        add(q, 4 * MR);
+        dec(l);
+        jnz(step);
+        lea(p, [p + lda * 4]);
+        lea(p, [p + lda * 2]);
+        sub(left, MR);
+        ja(sliver);
+        jmp(end);
+
+        note("the last sliver, short of MR rows: a row at a time, then zeros");
+        label(edge);
         let (r, at): (gpr, gpr);
         zero(r);
         mov(at, q);
         label(row);
-        let (s, d, l, f): (gpr, gpr, gpr, gpr);
+        let (from_row, d, n, g): (gpr, gpr, gpr, gpr);
         mov(d, at);
-        mov(l, kc);
+        mov(n, kc);
         cmp(r, left);
         jae(pad);
-        mov(s, p);
+        mov(from_row, p);
         label(each);
-        mov(f.r32, [s]);
-        mov([d], f.r32);
-        add(s, 4);
+        mov(g.r32, [from_row]);
+        mov([d], g.r32);
+        add(from_row, 4);
         add(d, 4 * MR);
-        dec(l);
+        dec(n);
         jnz(each);
         jmp(next);
         label(pad);
         mov(dword[d], 0);
         add(d, 4 * MR);
-        dec(l);
+        dec(n);
         jnz(pad);
         label(next);
         add(p, lda);
@@ -197,9 +228,6 @@ pub mod kernels {
         inc(r);
         cmp(r, MR);
         jb(row);
-        lea(q, [d - 4 * (MR - 1)]);
-        sub(left, MR);
-        ja(sliver);
         label(end);
     }
 
