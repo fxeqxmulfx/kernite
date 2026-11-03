@@ -353,7 +353,7 @@ pub fn sgemm(c: &mut [f32], a: &[f32], b: &[f32], shape: crate::Shape) {
     assert!(supported(), "the kernels need AVX2 and FMA");
     crate::operands((a.len(), b.len(), c.len()), shape);
     use kernels::{KC, MR};
-    let mut packed = Vec::with_capacity(m.next_multiple_of(MR) * k.min(KC) + 15);
+    let mut packed = Vec::with_capacity(MR * k.min(KC) * m.div_ceil(MR) + 15);
     // SAFETY: `m` rows of `k` floats behind `a`, `k` rows of `n` behind `b` and `m` rows of `n`
     // behind `c`, as `shape` says; room for `a`'s slivers in `packed`; and the CPU has what the
     // kernel needs.

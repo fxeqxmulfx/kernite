@@ -67,6 +67,11 @@ fn cpu_sgemm_refuses_a_shape_too_large_to_count() {
 }
 
 #[test]
+fn cpu_sgemm_takes_usize_max_rows_of_nothing() {
+    cpu::sgemm(&mut [], &[], &[], (usize::MAX, 0, 0));
+}
+
+#[test]
 fn gpu_sgemm_is_the_reference_bit_for_bit() {
     let Some(cuda) = cuda() else { return };
     let kernels = gpu::kernels::Kernels::load(&cuda).unwrap();
