@@ -65,8 +65,12 @@ fn on_cpu(sizes: &[usize]) -> ExitCode {
     for &n in sizes {
         let shape = (n, n, n);
         let (a, b, mut c) = (floats(n * n, 1), floats(n * n, 2), vec![0.0; n * n]);
-        let time = average(|| cpu::sgemm(&mut c, &a, &b, shape));
-        println!("{n:>6} {:>14.1}", gflops(shape, 1, time));
+        let time = average(|count| {
+            for _ in 0..count {
+                cpu::sgemm(&mut c, &a, &b, shape);
+            }
+        });
+        println!("{n:>6} {:>14.1}", gflops(shape, time));
     }
     ExitCode::SUCCESS
 }
@@ -121,22 +125,27 @@ fn gpu_operands(lens: (usize, usize, usize), shape: Shape) -> (u32, u32, u32) {
     (m as u32, n as u32, k as u32)
 }
 
-/// The average time `run` takes, of 10 runs after 3 to warm up.
-fn average(mut run: impl FnMut()) -> Duration {
+/// The average time of one call, where `calls(count)` makes `count` calls back to back and waits
+/// for them: of 10 runs after 3 to warm up. A run is as many calls as take 100 ms or more, for the
+/// clocks to come up and the wait to cost little; the count doubles until a run does.
+fn average(mut calls: impl FnMut(u32)) -> Duration {
+    let mut run = |count| {
+        let start = Instant::now();
+        calls(count);
+        start.elapsed()
+    };
+    let mut count = 1;
+    while run(count) < Duration::from_millis(100) {
+        count *= 2;
+    }
     for _ in 0..3 {
-        run();
+        run(count);
     }
-    let start = Instant::now();
-    for _ in 0..10 {
-        run();
-    }
-    start.elapsed() / 10
+    (0..10).map(|_| run(count)).sum::<Duration>() / (10 * count)
 }
 
 /// The GFLOPS of the product of `a` and `b` of `shape` that `launch` starts on the GPU, given
-/// `c`, `a` and `b` there, on average: a run is as many back to back, then a wait, as make a
-/// gigaflop or more, so that the wait costs little of the time. There is no going on once the GPU
-/// fails.
+/// `c`, `a` and `b` there, timed by [`average`]. There is no going on once the GPU fails.
 fn gpu_gflops<T: Plain>(
     cuda: &Cuda,
     a: &[T],
@@ -144,20 +153,19 @@ fn gpu_gflops<T: Plain>(
     shape: Shape,
     launch: impl Fn(&Buffer<f32>, &Buffer<T>, &Buffer<T>) -> Result<(), Error>,
 ) -> Result<f64, Error> {
-    let (m, n, k) = shape;
+    let (m, n, _) = shape;
     let (a, b, c) = (cuda.upload(a)?, cuda.upload(b)?, cuda.alloc::<f32>(m * n)?);
-    let count = (1 << 30) / (2 * m * n * k).max(1) + 1;
     let check = |done: Result<(), Error>| done.unwrap_or_else(|e| panic!("the GPU failed: {e}"));
-    let time = average(|| {
+    let time = average(|count| {
         for _ in 0..count {
             check(launch(&c, &a, &b));
         }
         check(cuda.sync());
     });
-    Ok(gflops(shape, count, time))
+    Ok(gflops(shape, time))
 }
 
-/// The GFLOPS of `count` products of `shape` in `time`.
-fn gflops((m, n, k): Shape, count: usize, time: Duration) -> f64 {
-    (2 * m * n * k * count) as f64 / time.as_secs_f64() / 1e9
+/// The GFLOPS of a product of `shape` in `time`.
+fn gflops((m, n, k): Shape, time: Duration) -> f64 {
+    (2 * m * n * k) as f64 / time.as_secs_f64() / 1e9
 }
