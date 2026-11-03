@@ -6,67 +6,52 @@ still write differently. Anything less goes back with `request-changes` for poli
 every finding listed at once, each with its `file:line` and what to write instead, so that one
 more round finishes it. A finding of taste is still a finding; say that it is one. A point
 outside the task's lines that the task did not make worse is not a reason to hold it: put it
-on the task that touches those lines next (design.md §5), or on a task of its own.
+on the task that touches those lines next, or on a task of its own.
 
-This guide is for the clean-architecture rewrite. Run its commands from the main checkout. Its
-notes are in `.kanban/notes/`: below, `design.md` means `.kanban/notes/design/design.md`, "the
-map" means `.kanban/notes/architecture-map.md`, and `review.py` means
-`uv run .kanban/notes/review.py`. How a developer does a task is [DEVELOPER.md](DEVELOPER.md).
+Developers are subagents on Sonnet 5.5, and each bug in kernite is a task of its own, as
+CLAUDE.md says. The reviewer starts each developer with a brief that names the task, the effort's
+brief, the files, the commands and the evidence to bring, as [DEVELOPER.md](DEVELOPER.md) has a
+developer work. Only one developer whose task measures runs at a time, as another's build or
+benchmark spoils its numbers. The reviewer checks a bug against the code before it files it, and
+a limit README states is not a bug; it does not fix a bug itself.
 
-For each task in review, in the order they arrive:
+Run the commands from the main checkout, where `review.py` means
+`uv run .kanban/notes/<effort>/review.py`, of the task's effort. For each task in review, as it
+comes:
 
-1. `agent-kanban claim ID --agent reviewer`
-2. A design task (Dn): read the file it wrote, and check a sample of its claims against the code
-   in `.claude/worktrees/clean-arch`. Refuse a file whose findings are not checked or not true,
-   or that leaves part of its lens unread. Then weigh each finding, as design.md §6 says:
-   - answer it in `.kanban/notes/design/revision-notes.md`: taken, and how, or refused, and
-     why;
-   - a finding taken: change design.md, and `agent-kanban edit` every unclaimed task it
-     touches, before approving, since approving frees the tasks that wait (D3 frees T07);
-   - a finding on a task already claimed: keep it for that task's review;
-   - record board changes in `.kanban/notes/plan.md`.
+1. `agent-kanban claim ID --agent reviewer`.
+2. `review.py show ID`: the history and evidence, the commits, the files, and the test code
+   touched.
+3. Read the task's tests, the effort's brief, and the whole diff, `review.py diff ID [PATH..]`.
+   Refuse when any of these fails:
+   - **Does what the task says, and only that.** No dead code left behind, no unrelated change,
+     no TODO in place of the work.
+   - **Layers.** Every new `use` and every dependency points inward, as
+     `crates/kernite/tests/architecture.rs` says. A port is owned by its caller.
+   - **Behaviour.** A listing changes only where the task changes the generated code, and every
+     message kernite gives keeps its text and its `line:column` unless the task changes it.
+   - **Tests.** New behaviour has a new test, a fake or the real thing, never a mock. No test is
+     weakened. Every rule README states has a test, and a test that skips says so.
+   - **Words.** Docs, messages and commit messages in README's plain words, as CLAUDE.md says;
+     every public item documented.
+   - **Size.** Commits of one step each, that build and pass, with each later fix folded into
+     the commit it belongs to.
+   - **Goals,** CLAUDE.md's five. Zero cost: a measured task's numbers are measured again by the
+     reviewer, through `bench.py`, beside the library's in the same sitting. Minimum code: no
+     line the task does not need, no function that only hands a value on, nothing left dead.
+     The whole spec: no form refused that the target encodes, checked with its tools where in
+     doubt. Safe where it can be. Clean architecture. An old form of an API kept beside the new
+     one is a finding.
 
-   Then approve, and go to 6.
-3. An implementation task (Tnn): `review.py show ID` shows the history and evidence, the
-   commits, the files, and the test code touched.
-4. Read design.md's row and changes for the task, the text it points to, and the whole diff
-   (`review.py diff ID [PATH..]`). Refuse when any of these fails:
-   - **Does what the text says, and only that.** Nothing half-moved but design.md §4's staged
-     copies, no dead code left behind, no unrelated change, no TODO in place of the work.
-   - **Layers.** Every new `use` and every dependency points inward, as RULE says. No adapter
-     type reaches the macro. A port is owned by its caller. No use-case rule is copied into an
-     adapter.
-   - **Behaviour.** Anything that could change an order (of VRegs, labels, slots, names,
-     declarations, `Target` calls, the messages that win) is justified by the text or the code.
-     The map's §9 lists these risks.
-   - **Tests.** Test code changes only to follow an API or to move. New behaviour has a new test
-     (a fake or the real thing, never a mock). No test weakened: no assertion dropped or
-     loosened.
-   - **Moves.** A mechanical task's diff is moves, plus `use`, `mod`, visibility and paths:
-     `git diff --color-moved=dimmed-zebra clean-architecture...HEAD` in its worktree.
-   - **Words.** Docs and messages in README's plain words; every public item documented; commit
-     messages as CLAUDE.md says, with the Co-Authored-By line.
-   - **Size.** Reviewable: a big diff is a mechanical move and says so, or is about the size its
-     text gives, in commits of one step each that build and pass.
-   - **Goals** (CLAUDE.md's five, design.md §4 rule 8). Clean architecture: the Layers check
-     above, and the task leaves the code cleaner than it found it. Zero cost: the gate holds
-     the generated code.
-     Minimum code: no line the task does not need, no type or function that only hands a value
-     on, nothing left dead; the gate's "code outside tests" line shows what the task added, and
-     growth its text does not call for is refused. The whole spec: kernite refuses no form of a
-     target's spec that it took before, and refuses what it took against its own rules only as
-     decision 3 fixes a defect; every new rule has a test. Safety: nothing to build in this
-     rewrite, but no change may make a safe call harder to add later.
+   What only the hardware can settle, settle with a small program on this machine, not with a
+   vendor's manual.
+4. `review.py merge ID`: it rebases the branch onto the effort's if needed, runs the gate, and
+   fast-forwards the effort's branch. A conflict or a failed gate is a request for changes, with
+   the output.
+5. `agent-kanban approve ID --agent reviewer --notes "merged as <sha>: <what was checked>"`,
+   then `review.py clean ID`; or `agent-kanban request-changes ID --agent reviewer --notes
+   "<each finding, where, what to write instead>"`. Either way, message the developer the
+   verdict.
 
-   For a big or risky task, also have two or three agents read the diff adversarially (one lens
-   each: behaviour, layering, tests) and weigh what they find. They advise; the verdict is the
-   reviewer's.
-5. `review.py merge ID`: it rebases onto `clean-architecture` if needed, runs the gate (check 8
-   holds the macro's Rust), and fast-forwards. A conflict or a failed gate is a request for
-   changes, with the output.
-6. `agent-kanban approve ID --agent reviewer --notes "merged as <sha>: <what was checked>"`, or
-   `agent-kanban request-changes ID --agent reviewer --notes "<each problem, where, what to do>"`.
-7. After approving an implementation task: `review.py clean ID`.
-
-Approve an implementation task only after its merge, so the tasks it unblocks start from code
-that holds it.
+Approve only after the merge, so that the tasks it unblocks start from code that holds it.
+Merging an effort's branch into master is the user's call.

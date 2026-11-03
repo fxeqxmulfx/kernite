@@ -94,6 +94,8 @@ every kind of dependency, and a new crate needs its line there. Change both when
 - Don't push, and don't merge into master: both are the user's call.
 - Don't stop to ask. Choose the sensible default, say what you chose, and keep going. Ask only before
   something that cannot be undone or that leaves this machine.
+- A crate's API may change where a task needs it. Make the least change that does the job, and keep
+  no old form beside the new one.
 - Write as the README does: plain, short words, a value "known now" rather than at compile time, one
   thing a sentence. Doc comments, error messages and commit messages alike.
 
@@ -106,6 +108,14 @@ Work is planned on [agent-kanban](.claude/skills/agent-kanban/SKILL.md), a task 
   it in with evidence for each of its tests.
 - [REVIEWER.md](REVIEWER.md): the reviewer merges it and approves it, or sends it back with what
   must change.
+
+Developers are subagents the reviewer starts, each on Sonnet 5.5: the Agent tool's
+`model: "sonnet"`. Their commits end `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
+
+A bug found in kernite, in a review, a test or a task, becomes a task of its own on the board,
+tagged `kernite`, with tests that show it, and a developer resolves it. The reviewer files it and
+reviews the fix, and does not fix it. A developer who meets one outside its task does not fix it
+there: its hand-in gives the smallest kernel that shows it, and any way around it the task took.
 
 Notes for the work in hand, its design, plan and gate, live beside the board in `.kanban/notes/`,
 never in the repository.
