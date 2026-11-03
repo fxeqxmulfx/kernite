@@ -75,15 +75,17 @@ as `mul` takes `rax` and `rdx` and `shl` may take `cl`, which it names as such. 
 `g.r8`, and a write to `r16` or `r8` keeps the rest of it, as x86 does. Memory is as much as the other operands say, or,
 where an instruction's forms differ by that alone, as Intel's word before the brackets says, `movzx(g.r32, byte[x])`,
 which kernite checks wherever it is given. An address is a base gpr, an index gpr times 1, 2, 4 or 8, and a number,
-`[x + i * 4 + 8]`. A gpr that comes twice has its scales added, so `[i + i * 2]` is `[i * 3]`. A gpr whose scales come
-to 0 is left out, so `[x + i * N]` is `[x]` where the const `N` is 0. With no base, a gpr times 3, 5 or 9 is that gpr
-added to itself times 2, 4 or 8, as x86 has it: `[i * 5]` is `[i + i * 4]`. Any other scale is an error, `[x + i * 3]`
-or `[i * 6]`. A gather, `vpgatherdd(v, [x + i * 4], mask)`, takes its result, indices and mask in three registers, as
-x86 faults otherwise. The listing's header and the function's doc name the CPU features a kernel needs,
-`# needs: avx, fma`, which nothing checks for when it runs; and a kernel that loads MXCSR stores the caller's first and
-loads it back before it returns, as SysV says. Where `llvm-mc` and GNU `as` are installed, a test hands them every form,
-with each integer the least the form takes and the most: `llvm-mc` must take it, and GNU `as` must take it at the
-feature kernite says it needs, without a warning, and refuse it at the features before.
+`[x + i * 4 + 8]`. The base may be left out, `[i * 4 + 8]`, and x86 writes it so, with a 32-bit displacement. A gpr that
+comes twice has its scales added, so `[x + x * 3]` is `[x * 4]`. A gpr whose scales come to 0 is left out, so
+`[x + i * N]` is `[x]` where the const `N` is 0. With no base, a gpr times 3, 5 or 9 is that gpr added to itself times
+2, 4 or 8, as x86 has it: `[i * 5]` is `[i + i * 4]`. Any other scale is an error, `[x + i * 3]` or `[i * 6]`. A gather,
+`vpgatherdd(v, [x + i * 4], mask)`, has a vector of indices in `i`, and its base may be left out too, `[i * 4]`. It
+takes its result, indices and mask in three registers, as x86 faults otherwise. The listing's header and the function's
+doc name the CPU features a kernel needs, `# needs: avx, fma`, which nothing checks for when it runs; and a kernel that
+loads MXCSR stores the caller's first and loads it back before it returns, as SysV says. Where `llvm-mc` and GNU `as`
+are installed, a test hands them every form, with each integer the least the form takes and the most: `llvm-mc` must
+take it, and GNU `as` must take it at the feature kernite says it needs, without a warning, and refuse it at the
+features before.
 
 Stack memory a kernel declares is a variable, as a GPU kernel's local memory is: `let tables: local<[u32; 1024], 32>;`
 is 4 KB of its frame at a multiple of 32, reached by its name, `mov(c.r32, [tables + b * 4])`, and `lea(p, [tables])`

@@ -252,13 +252,53 @@ fn a_base_takes_an_index_times_1_2_4_or_8_and_a_number() {
     addresses_encode("scales", &cases);
 }
 
-/// Each of `cases`, a kernel's body, the first line of its listing and the bytes x86 encodes that
-/// line as, holds: the kernel compiles to that line, and `llvm-mc` and GNU as, where they are
-/// here, make those bytes of it. `name` is for the files they read.
+/// x86 has an index with no base, `[rcx*4]`, and writes it with a 32-bit displacement, 0 where
+/// there is none. `[x + x * 3]` is `[x * 4]`, since a variable that comes twice in an address has
+/// its scales added. A gather's vector of indices is an index too, `[ymm2*4]`, of a ymm or an xmm.
+/// `llvm-mc` and GNU as assemble each as x86 encodes it.
+#[test]
+fn an_index_with_no_base_has_a_32_bit_displacement() {
+    let cases = [
+        ("lea(x, [n * 4]);", "lea rdi, [rsi*4]", "48 8d 3c b5 00 00 00 00"),
+        ("lea(x, [n * 2]);", "lea rdi, [rsi*2]", "48 8d 3c 75 00 00 00 00"),
+        ("lea(x, [n * 4 - 8]);", "lea rdi, [rsi*4 - 8]", "48 8d 3c b5 f8 ff ff ff"),
+        (
+            "let v: ymm; vmovups(v, [n * 8 + 32]);",
+            "vmovups ymm0, ymmword ptr [rsi*8 + 32]",
+            "c5 fc 10 04 f5 20 00 00 00",
+        ),
+        ("let v: ymm; vmovups(v, [x + x * 3]);", "vmovups ymm0, ymmword ptr [rdi*4]", "c5 fc 10 04 bd 00 00 00 00"),
+        (
+            "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, [i * 4], m);",
+            "vpgatherdd ymm0, dword ptr [ymm2*4], ymm1",
+            "c4 e2 75 90 04 95 00 00 00 00",
+        ),
+        (
+            "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, [i * 8 - 8], m);",
+            "vpgatherdd ymm0, dword ptr [ymm2*8 - 8], ymm1",
+            "c4 e2 75 90 04 d5 f8 ff ff ff",
+        ),
+        (
+            "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, [i], m);",
+            "vpgatherdd ymm0, dword ptr [ymm2*1], ymm1",
+            "c4 e2 75 90 04 15 00 00 00 00",
+        ),
+        (
+            "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdq(v, [i.xmm * 8], m);",
+            "vpgatherdq ymm0, qword ptr [xmm2*8], ymm1",
+            "c4 e2 f5 90 04 d5 00 00 00 00",
+        ),
+    ];
+    addresses_encode("no-base", &cases);
+}
+
+/// Each of `cases`, a kernel's body, a line of its listing and the bytes x86 encodes that line
+/// as, holds: the kernel compiles to a listing with that line, and `llvm-mc` and GNU as, where
+/// they are here, make those bytes of it. `name` is for the files they read.
 fn addresses_encode(name: &str, cases: &[(&str, &str, &str)]) {
     for &(body, line, _) in cases {
         let code = compile("x: *const f32, n: usize", body).unwrap_or_else(|e| panic!("{e}, of {body}"));
-        assert_eq!(code.lines().next(), Some(line), "{body}");
+        assert!(code.lines().any(|l| l == line), "{line} is not a line of\n{code}\nof {body}");
     }
     let (Some(mc), Some(gnu)) = (tool("LLVM_MC", "llvm-mc"), tool("GNU_AS", "as")) else {
         eprintln!("no llvm-mc or GNU as here: skipped; set LLVM_MC and GNU_AS to run it");
@@ -480,7 +520,6 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ("let v: ymm; vaddps(v, v.xmm, v);", "2:25: `vaddps` wants a ymm; this is an xmm"),
         ("let v: ymm; vaddps(v, v);", "2:13: `vaddps` takes 3 operands, not 2"),
         ("let v: ymm; vmovups(v, [1.0]);", "2:24: this reads 32 bytes of a constant of 4"),
-        ("let v: ymm; vmovups(v, [x + x * 3]);", "2:24: x86 wants a base beside a scaled index"),
         ("let i: gpr; let v: ymm; vmovups(v, [x + i * 3]);", "2:36: x86 scales an index by 1, 2, 4 or 8, not 3"),
         ("let i: gpr; let v: ymm; vmovups(v, [i * 3 + x]);", "2:36: x86 scales an index by 1, 2, 4 or 8, not 3"),
         (
@@ -567,8 +606,16 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
             "2:57: `vpgatherdd` wants 4 bytes of memory at a ymm of indices; this is memory at an index in a gpr",
         ),
         (
-            "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, [i * 4], m);",
-            "2:78: x86 adds a gpr to a vector of indices, as in `[p + v * 4]`",
+            "let v: ymm; let m: ymm; zero(v); ones(m); vpgatherdd(v, [x * 4], m);",
+            "2:57: `vpgatherdd` wants 4 bytes of memory at a ymm of indices; this is memory at an index in a gpr",
+        ),
+        (
+            "let v: ymm; let m: ymm; zero(v); ones(m); vpgatherdd(v, [x], m);",
+            "2:57: `vpgatherdd` wants 4 bytes of memory at a ymm of indices; this is memory",
+        ),
+        (
+            "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, [i * 3], m);",
+            "2:78: x86 scales an index by 1, 2, 4 or 8, not 3",
         ),
         ("jmp(x);", "2:5: `jmp` wants a label; this is a gpr"),
         ("let g: gpr; add(g, top); label(top);", "2:20: a label is for a jump"),
