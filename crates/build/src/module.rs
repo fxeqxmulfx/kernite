@@ -159,6 +159,27 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
     ModuleOut { module, given: twice, owner: whose.err(), items, read, listings, device: loaded }
 }
 
+/// What an item of a module of consts is to the modules of kernels that take its consts.
+#[derive(Debug, PartialEq)]
+pub enum ConstItem {
+    /// A const that is a value known now, which kernels may read.
+    Given,
+    /// A const that is no value known now, and why.
+    Wrong(Error),
+    /// An item that is no const.
+    NotAConst,
+}
+
+/// What each item of `module`, a module of consts, is, in order: each const worked out on its
+/// own, `pub` or not: only its tokens say which, and the macro reads them.
+pub fn consts(module: &Module) -> Vec<ConstItem> {
+    let item = |item: &Item| match &item.kind {
+        ItemKind::Const(c) => kgen_lang::constant(module, c).map_or_else(ConstItem::Wrong, |_| ConstItem::Given),
+        _ => ConstItem::NotAConst,
+    };
+    module.items.iter().map(item).collect()
+}
+
 /// Leaves out of `module` each const `given` gives that an item of the module's own is named as
 /// well, and says so at the module's own, which keeps the name.
 fn take(module: &mut Module, given: &Given) -> Vec<Error> {

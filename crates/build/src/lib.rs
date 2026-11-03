@@ -6,8 +6,8 @@
 //! a module's [`statics`] laid out, what [`prepare`] gathers for every kernel, an instance
 //! [`compile`]d, the cores of kgen's façades, [`one`] kernel by its name and [`all`] that a
 //! device runs, and a whole [`fn@module`], each of its items as whatever writes it out for Rust
-//! needs it. It depends on the language alone, so it cannot reach a machine's code: it names the
-//! machines only in words.
+//! needs it, and what each item of a module of [`consts`] is. It depends on the language alone,
+//! so it cannot reach a machine's code: it names the machines only in words.
 
 mod classify;
 mod dto;
@@ -24,7 +24,7 @@ pub use dto::{
 };
 pub use facade::{all, one};
 pub use function::{Prepared, compile, prepare, statics};
-pub use module::module;
+pub use module::{ConstItem, consts, module};
 pub use port::{Backend, Called, Device, Native, StaticError, Unfinished};
 
 #[cfg(test)]

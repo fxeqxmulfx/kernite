@@ -5,9 +5,9 @@
 use kgen_lang::{Error, Fault, Fn, Guard, IntTy, Memory, Operand, Target, Value, parse};
 
 use crate::{
-    Abi, Backend, Call, Called, Compiled, Device, DeviceStatic, Given, HostStatic, ItemOut, Launcher, ModuleOut, Naked,
-    Native, NativeOut, Owner, StaticError, Unfinished, abi, all, compile, cooperative, function, instance, module, one,
-    owner, prepare, statics,
+    Abi, Backend, Call, Called, Compiled, ConstItem, Device, DeviceStatic, Given, HostStatic, ItemOut, Launcher,
+    ModuleOut, Naked, Native, NativeOut, Owner, StaticError, Unfinished, abi, all, compile, consts, cooperative,
+    function, instance, module, one, owner, prepare, statics,
 };
 
 /// An ABI is one kgen compiles for, by the name Rust writes it as, or none. Of them, the process
@@ -867,4 +867,28 @@ fn a_call_reaches_the_instance_its_code_names() {
     assert_eq!(twice.instances[0].calls, [call("tile", Some(1)), call("step", None)]);
     assert_eq!(address.instances[0].calls, [call("tile", Some(0))]);
     assert!(plain.instances[0].calls.is_empty() && !plain.written);
+}
+
+/// Each item of a module of consts is a const known now, a const that is not, with why, or no
+/// const; a const is worked out on its own, `pub` or not, whichever of the consts it reads comes
+/// first.
+#[test]
+fn a_module_of_consts_says_what_each_of_its_items_is() {
+    let src = "#![allow(dead_code)]\n\
+               pub const A: u64 = 3;\n\
+               const B: u64 = A * 2;\n\
+               pub const C: u64 = double(3);\n\
+               pub const D: u64 = E + 1;\n\
+               const E: u64 = 4;\n\
+               pub const fn double(x: u64) -> u64 { 2 * x }";
+    let said: Vec<String> = consts(&parse(src).unwrap())
+        .iter()
+        .map(|item| match item {
+            ConstItem::Given => "given".to_string(),
+            ConstItem::Wrong(e) => e.at(src),
+            ConstItem::NotAConst => "not a const".to_string(),
+        })
+        .collect();
+    let call = "4:20: a call is a statement: an instruction or a helper, not a value";
+    assert_eq!(said, ["not a const", "given", "given", call, "given", "given", "not a const"]);
 }
