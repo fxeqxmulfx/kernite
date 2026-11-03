@@ -92,7 +92,8 @@
 //! an error at its name.
 //!
 //! A type in a kernel's parameters or return means what it means in any function of the module,
-//! `super::W` and `self::W` among them.
+//! `super::W` and `self::W` among them, and it may name the kernel's compile-time arguments, as in
+//! any generic function: `*mut [u8; N]` in `fn arr<const N: usize>`.
 //!
 //! The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one,
 //! `dead_code` say, and build its kernels: Rust lints the names and the code a kernel is

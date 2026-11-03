@@ -590,6 +590,43 @@ fn a_parameters_type_means_what_it_means_where_the_kernel_is_written() {
     assert_eq!(passed, 2, "fixtures/beside.rs ran its test and its doc test, and printed:\n{printed}");
 }
 
+/// A type in a kernel's parameters or return may name the kernel's compile-time arguments, as in any
+/// generic function, in each instance of an x86 kernel: a pointer to an array of the length an
+/// argument gives, alone or in braces, a result, a type of the crate's that takes it, with one
+/// argument, two and a `bool`, in a kernel that is cooperative, and in one that calls an instance,
+/// of any arguments. A GPU kernel's launcher takes it as before. Rust builds the crate without a
+/// word, and the tests the fixture holds run each x86 kernel, which writes through its pointer. So
+/// does its doc test, from another crate.
+#[test]
+fn a_type_in_a_kernel_may_name_its_compile_time_arguments() {
+    let printed = runs_quietly("argument_pointers");
+    for passed in ["test result: ok. 9 passed", "test result: ok. 1 passed"] {
+        assert!(
+            printed.contains(passed),
+            "fixtures/argument_pointers.rs ran its tests and its doc test, and printed:\n{printed}"
+        );
+    }
+}
+
+/// Rust takes a compile-time argument in a type alone, `[u8; N]` or `[u8; { N }]`, and no expression
+/// of it, `[u8; N + 1]`, in any generic function. The macro adds no refusal to Rust's: the error is
+/// at the type as the kernel writes it. It is at the attribute once more, as is every error in a
+/// type of a kernel of instances or of a cooperative kernel: `naked` writes each instance's types,
+/// and the casts of `pick`, from their text, which has the attribute's place.
+#[test]
+fn an_expression_of_a_compile_time_argument_in_a_type_is_rusts_error() {
+    let error = "error: generic parameters may not be used in const operations: cannot perform const operation \
+                 using `N`";
+    refuses(
+        "argument_expression",
+        &[
+            &format!("src/lib.rs:8:68: {error}"),
+            &format!("src/lib.rs:5:1: {error}"),
+            "error: could not compile `argument_expression` (lib) due to 2 previous errors",
+        ],
+    );
+}
+
 /// A kernel takes a pointer to any type, as it takes one to a number: to an array, a pointer, a
 /// tuple, a function's pointer, `fn(u32) -> u32`, or a type of the crate's with two arguments,
 /// `Pair<u8, 2>`, whose comma ends no parameter, even when an argument is a function's pointer,

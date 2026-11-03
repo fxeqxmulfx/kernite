@@ -51,7 +51,9 @@ together with the expression inside them, along the helpers that call one anothe
 [`kernite-lang`](crates/lang/src/lib.rs) describes the language.
 
 A type in a kernel's parameters or return means what it means in any function of the module: `super::W` is the `W`
-beside the module of kernels, and `self::W` the one in it.
+beside the module of kernels, and `self::W` the one in it. It may name the kernel's compile-time arguments, as in
+any generic function: in `fn arr<const N: usize>(p: *mut [u8; N])`, `arr::<2>` takes a pointer to two bytes. Rust
+takes the argument in a type alone, `N` or `{ N }`, and no expression of it, `N + 1`.
 
 A kernel's pointer to a type with a size, `*const T` or `*mut T`, is one register: `*const [usize; 3]` and
 `*mut *const f32` are taken as `*const f32` is, on x86 and on a GPU. A pointer to a slice, a `str` or a `dyn`, or to a

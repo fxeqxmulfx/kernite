@@ -257,16 +257,16 @@ fn touched(module: &Module, items: &[ItemOut]) -> Vec<Vec<String>> {
 }
 
 /// Each function of `module` that `funcs` names, `gcd` or `tile::<4>`, as the code of an
-/// instance names them: by the function's name, and the index of the instance among those its
-/// `#[instances(..)]` lists, if it takes compile-time arguments.
+/// instance names them: by the function's name, and, if it takes compile-time arguments, by the
+/// index of the instance among those its `#[instances(..)]` lists and by its arguments.
 fn calls(module: &Module, funcs: &[String]) -> Vec<Call> {
     let call = |name: &String| {
         // A function that takes no compile-time arguments and lists instances is wrong at its
         // own item, and `instance` refuses it: the call names it whole, as it names any
         // function of none.
         let Ok(found) = instance(module, name) else { return Call { function: name.clone(), instance: None } };
-        let (g, _, k) = found.expect("a kernel calls an instance its function lists");
-        Call { function: g.name.clone(), instance: (!g.generics.is_empty()).then_some(k) }
+        let (g, args, k) = found.expect("a kernel calls an instance its function lists");
+        Call { function: g.name.clone(), instance: (!g.generics.is_empty()).then_some((k, args)) }
     };
     funcs.iter().map(call).collect()
 }

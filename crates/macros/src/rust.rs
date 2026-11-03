@@ -104,7 +104,7 @@ pub(crate) fn visibility<'a>(f: &Fn, top: &'a [TokenTree]) -> &'a [TokenTree] {
 /// every value, `true` and `false` of a `bool`, no value reaches a `match`'s last arm, and Rust
 /// warns of it; and the macro states no rule of which values a type has.
 pub(crate) fn pick(f: &Fn, arms: &[(Vec<Value>, String)], top: &[TokenTree]) -> String {
-    let names: Vec<String> = const_names(&top[f.head.end + 2..f.params_at]).map(TokenTree::to_string).collect();
+    let names: Vec<String> = const_names(written_generics(f, top)).map(TokenTree::to_string).collect();
     let mut out = String::from("const { ");
     let mut listed = vec![];
     for (args, then) in arms {
@@ -114,6 +114,11 @@ pub(crate) fn pick(f: &Fn, arms: &[(Vec<Value>, String)], top: &[TokenTree]) -> 
     }
     let message = format!("`{}` is compiled for {} alone, as its `#[instances(..)]` lists", f.name, listed.join(", "));
     out + &format!("{{ ::core::panic!({message:?}) }} }}")
+}
+
+/// `f`'s generics as written, `<const N: usize>`; none if it has none.
+pub(crate) fn written_generics<'a>(f: &Fn, top: &'a [TokenTree]) -> &'a [TokenTree] {
+    &top[f.head.end + 2..f.params_at]
 }
 
 /// The name after each `const` of `tokens`, as written, `r#type` as well: a const's, or those of
@@ -127,7 +132,7 @@ pub(crate) fn const_names(tokens: &[TokenTree]) -> impl Iterator<Item = &TokenTr
 /// keeps it apart from one of its name, as it does a parameter's.
 pub(crate) fn clashes(f: &Fn, own: &[&str], method: &str, top: &[TokenTree]) -> TokenStream {
     let mut errors = TokenStream::new();
-    for name in const_names(&top[f.head.end + 2..f.params_at]) {
+    for name in const_names(written_generics(f, top)) {
         let written = name.to_string();
         let name_of = written.trim_start_matches("r#");
         if own.contains(&name_of) {

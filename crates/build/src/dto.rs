@@ -155,15 +155,16 @@ pub struct NativeInstance {
     pub calls: Vec<Call>,
 }
 
-/// A function a kernel's code names, `{fi}`: by its name, and its instance's index among those
-/// its `#[instances(..)]` lists, if it takes compile-time arguments.
+/// A function a kernel's code names, `{fi}`: by its name, and its instance, if it takes
+/// compile-time arguments.
 #[derive(Debug, PartialEq)]
 pub struct Call {
     /// The function's name, `tile`.
     pub function: String,
-    /// The instance's index in its function's `#[instances(..)]`; none for a function that
-    /// takes no compile-time arguments.
-    pub instance: Option<usize>,
+    /// The instance, for a function that takes compile-time arguments: its index in the function's
+    /// `#[instances(..)]`, and its arguments, `[4]` for `tile::<4>`; none for a function that takes
+    /// none.
+    pub instance: Option<(usize, Vec<Value>)>,
 }
 
 /// A function the GPU runs, compiled into the module it loads.

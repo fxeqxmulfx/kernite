@@ -924,8 +924,8 @@ fn the_module_s_error_goes_at_its_first_gpu_item() {
 
 /// A function a kernel's code calls, or whose code it takes, as `[tile::<4>]`, is named once
 /// however often the code names it: by its function and, for one that takes compile-time
-/// arguments, by the index of the instance among those its `#[instances(..)]` lists, not by its
-/// place among their values sorted, nor by its value. A kernel Rust does not get the code of names
+/// arguments, by their values and the index of the instance among those its `#[instances(..)]`
+/// lists, not by its place among their values sorted. A kernel Rust does not get the code of names
 /// none.
 #[test]
 fn a_call_reaches_the_instance_its_code_names() {
@@ -939,8 +939,9 @@ fn a_call_reaches_the_instance_its_code_names() {
         panic!("{:?}", out.items);
     };
     let call = |function: &str, instance| Call { function: function.into(), instance };
-    assert_eq!(twice.instances[0].calls, [call("tile", Some(1)), call("step", None)]);
-    assert_eq!(address.instances[0].calls, [call("tile", Some(0))]);
+    let tile = |at, n| call("tile", Some((at, vec![Value::Int(n, Some(IntTy::U64))])));
+    assert_eq!(twice.instances[0].calls, [tile(1, 2), call("step", None)]);
+    assert_eq!(address.instances[0].calls, [tile(0, 4)]);
     assert!(plain.instances[0].calls.is_empty() && !plain.written);
 }
 
