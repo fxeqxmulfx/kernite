@@ -56,13 +56,13 @@ kernite-cpu = {{ path = {cpu:?} }}
     dir
 }
 
-/// Fixture `name` as `written` writes it, but of a crate that does not depend on `krate`.
-fn written_without(name: &str, krate: &str) -> PathBuf {
+/// Fixture `name` as `written` writes it, but with each `from` of `edits` in its manifest written as its `to`.
+/// A dependency is left out by making its line a comment: `("kernite-cuda =", "# kernite-cuda =")`.
+fn edited(name: &str, edits: &[(&str, &str)]) -> PathBuf {
     let dir = written(name);
     let manifest = dir.join("Cargo.toml");
     let text = fs::read_to_string(&manifest).unwrap();
-    let without: Vec<&str> = text.lines().filter(|line| !line.starts_with(krate)).collect();
-    fs::write(&manifest, without.join("\n") + "\n").unwrap();
+    fs::write(&manifest, edits.iter().fold(text, |text, (from, to)| text.replace(from, to))).unwrap();
     dir
 }
 
@@ -327,16 +327,17 @@ fn a_static_that_does_not_compile_is_said_once() {
 /// say that `kernite_cpu` is not found, at the attribute.
 #[test]
 fn a_crate_without_kernite_cpu_is_told_at_what_needs_it() {
-    let (built, said) = cargo_in(&["build"], &written_without("no_cpu", "kernite-cpu"));
+    let (built, said) = cargo_in(&["build"], &edited("no_cpu", &[("kernite-cpu =", "# kernite-cpu =")]));
     assert!(!built, "fixtures/no_cpu.rs built");
     assert_eq!(
         said,
         [
-            "src/lib.rs:8:16: error: a static of x86 kernels needs `kernite-cpu`, which this crate does not depend on",
-            "src/lib.rs:21:35: error: a cooperative x86 kernel needs `kernite-cpu`, which this crate does not depend \
-             on",
-            "src/lib.rs:28:35: error: a cooperative x86 kernel needs `kernite-cpu`, which this crate does not depend \
-             on",
+            "src/lib.rs:8:16: error: a static of x86 kernels needs a dependency named `kernite-cpu`, \
+             which this crate does not have",
+            "src/lib.rs:21:35: error: a cooperative x86 kernel needs a dependency named `kernite-cpu`, \
+             which this crate does not have",
+            "src/lib.rs:28:35: error: a cooperative x86 kernel needs a dependency named `kernite-cpu`, \
+             which this crate does not have",
             "error: could not compile `no_cpu` (lib) due to 3 previous errors",
         ]
     );
@@ -344,17 +345,46 @@ fn a_crate_without_kernite_cpu_is_told_at_what_needs_it() {
 
 /// A crate that does not depend on `kernite-cuda` is told where it needs the crate, once at each
 /// module of GPU kernels, by kernite and not by Rust, which would say that `kernite_cuda` is not
-/// found, at the attribute; and nothing is said of the code that uses the module.
+/// found, at the attribute; and nothing is said of the code that uses the module. The crate's own
+/// name holds `kernite-cuda`, which does not make it a dependency.
 #[test]
 fn a_crate_without_kernite_cuda_is_told_at_each_module_of_gpu_kernels() {
-    let (built, said) = cargo_in(&["build"], &written_without("no_cuda", "kernite-cuda"));
+    let edits = [("kernite-cuda =", "# kernite-cuda ="), ("\"no_cuda\"", "\"my-kernite-cuda-app\"")];
+    let (built, said) = cargo_in(&["build"], &edited("no_cuda", &edits));
     assert!(!built, "fixtures/no_cuda.rs built");
     assert_eq!(
         said,
         [
-            "src/lib.rs:6:1: error: a module of GPU kernels needs `kernite-cuda`, which this crate does not depend on",
-            "src/lib.rs:30:1: error: a module of GPU kernels needs `kernite-cuda`, which this crate does not depend on",
-            "error: could not compile `no_cuda` (lib) due to 2 previous errors",
+            "src/lib.rs:6:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
+             which this crate does not have",
+            "src/lib.rs:30:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
+             which this crate does not have",
+            "error: could not compile `my-kernite-cuda-app` (lib) due to 2 previous errors",
+        ]
+    );
+}
+
+/// A crate whose dependencies on `kernite-cuda` and `kernite-cpu` are renamed in its manifest,
+/// `cuda = { package = "kernite-cuda", .. }`, is told as one that has none is, for the Rust kernite
+/// writes names `kernite_cuda` and `kernite_cpu`, which it has not; and Rust says nothing.
+#[test]
+fn a_crate_that_renames_kernite_cuda_and_kernite_cpu_is_told_it_has_none() {
+    let edits = [
+        ("kernite-cuda = {", "cuda = { package = \"kernite-cuda\","),
+        ("kernite-cpu = {", "cpu = { package = \"kernite-cpu\","),
+    ];
+    let (built, said) = cargo_in(&["build"], &edited("renamed_deps", &edits));
+    assert!(!built, "fixtures/renamed_deps.rs built");
+    assert_eq!(
+        said,
+        [
+            "src/lib.rs:6:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
+             which this crate does not have",
+            "src/lib.rs:15:16: error: a static of x86 kernels needs a dependency named `kernite-cpu`, \
+             which this crate does not have",
+            "src/lib.rs:18:35: error: a cooperative x86 kernel needs a dependency named `kernite-cpu`, \
+             which this crate does not have",
+            "error: could not compile `renamed_deps` (lib) due to 3 previous errors",
         ]
     );
 }

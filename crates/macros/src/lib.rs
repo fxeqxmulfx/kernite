@@ -32,8 +32,8 @@
 //!   it finds; then each kernel is launched by the method of its name, which takes a
 //!   `kernite_cuda::Grid` and the kernel's parameters, a pointer as the `kernite_cuda::Ptr` a
 //!   buffer on the GPU gives, and an `f16` or a `bf16` as kernite-cuda's, Rust having neither.
-//!   A crate with a module of GPU kernels depends on `kernite-cuda` for these, and the error is
-//!   at the module when it does not.
+//!   A crate with a module of GPU kernels needs a dependency named `kernite-cuda` for these, not
+//!   renamed in `Cargo.toml`, and the error is at the module when it has none.
 //! - An `extern "ptx-func" fn` is a `.func` in `PTX`, which the module's GPU kernels and
 //!   functions call, itself among them, as `call(r, gcd, (a, b))` does. It takes and
 //!   returns PTX's types, `u32` or `f16x2`, or never returns, `-> !`, and leaves nothing
@@ -50,8 +50,8 @@
 //!   - In a module of x86 kernels it is in the process's memory, which the kernels reach at a
 //!     displacement from `rip`, `[COUNTS + 8]`: a `static` of Rust's, a `kernite_cpu::Global` of
 //!     its elements, for the host to read and write: `cpu::COUNTS.read()`. A crate with a static
-//!     in such a module depends on `kernite-cpu` for it, and the error is at the static when it
-//!     does not.
+//!     in such a module needs a dependency named `kernite-cpu` for it, not renamed in
+//!     `Cargo.toml`, and the error is at the static when it has none.
 //!   - A module of both kinds of kernel and a static is an error: it is two modules, one of
 //!     each kind of kernel, with the statics each names.
 //! - A function without an ABI is a helper, inlined where a kernel calls it, and leaves
@@ -160,7 +160,8 @@
 //! `cpu::normalize(kernite_cpu::Grid::new(4), x.as_mut_ptr(), sums.as_mut_ptr(), n)?`. A thread
 //! spins at `grid.sync()` until the last comes, so a grid has at most as many threads as the
 //! machine runs at once, `kernite_cpu::most()`, and more is an error. A crate with such a kernel
-//! depends on `kernite-cpu` for it, and the error is at the kernel when it does not.
+//! needs a dependency named `kernite-cpu` for it, not renamed in `Cargo.toml`, and the error is at
+//! the kernel when it has none.
 //!
 //! A GPU kernel is named in PTX as C++ names a function in namespaces, those of the
 //! workspace, the crate and its modules, mangled under Itanium's ABI:

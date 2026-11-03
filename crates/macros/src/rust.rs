@@ -249,26 +249,42 @@ pub(crate) fn error(span: Span, message: &str) -> TokenStream {
         .collect()
 }
 
-/// Whether the crate being compiled depends on the crate `name`, one the Rust the macro writes
-/// names: `kernite-cpu` or `kernite-cuda`.
+/// Whether the crate being compiled has a dependency named `name`, `kernite-cpu` or `kernite-cuda`,
+/// which is how the Rust the macro writes names it. One renamed in `Cargo.toml` has another name.
 pub(crate) fn depends_on(name: &str) -> bool {
     given(&std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>(), name)
 }
 
-/// Whether `args`, the arguments Rust runs with, give the crate `name`: `--extern kernite_cpu=..`
-/// for `kernite-cpu`. When they give no crate at all, as when an editor runs the macro in a process
-/// of its own, nothing says it is missing.
+/// Whether `args`, the arguments Rust runs with, give the crate `name` by an `--extern`, as
+/// `--extern kernite_cpu=..` gives `kernite-cpu`. When they give no crate at all, as when an editor
+/// runs the macro in a process of its own, nothing says it is missing.
 fn given(args: &[String], name: &str) -> bool {
     let name = name.replace('-', "_");
-    !args.iter().any(|a| a.starts_with("--extern")) || args.iter().any(|a| a.contains(&name))
+    // What each `--extern` gives, `[options:]name[=path]`, written `--extern x` or `--extern=x`.
+    let externs: Vec<&str> = args
+        .iter()
+        .enumerate()
+        .filter_map(|(i, a)| match a.strip_prefix("--extern")? {
+            "" => args.get(i + 1).map(String::as_str),
+            value => value.strip_prefix('='),
+        })
+        .collect();
+    externs.is_empty() || externs.iter().any(|e| extern_name(e) == name)
 }
 
-/// A type that stands for one of the crate `name`'s in a crate without it, and says at `span` that
-/// `what` needs the crate. It is an array whose length is the error, which Rust reports once and
-/// takes for a type it has reported, so that it says nothing of the code that uses it.
+/// The name of the crate that `value`, an `--extern`'s `[options:]name[=path]`, gives.
+fn extern_name(value: &str) -> &str {
+    let spec = value.split_once('=').map_or(value, |(spec, _path)| spec);
+    spec.rsplit_once(':').map_or(spec, |(_options, name)| name)
+}
+
+/// A type that stands for one of the crate `name`'s in a crate that has no dependency named so, and
+/// says at `span` that `what` needs one. It is an array whose length is the error, which Rust
+/// reports once and takes for a type it has reported, so that it says nothing of the code that
+/// uses it.
 pub(crate) fn missing(span: Span, what: &str, name: &str) -> TokenStream {
     let mut length = parse("();");
-    length.extend(error(span, &format!("{what} needs `{name}`, which this crate does not depend on")));
+    length.extend(error(span, &format!("{what} needs a dependency named `{name}`, which this crate does not have")));
     TokenTree::Group(Group::new(Delimiter::Bracket, length)).into()
 }
 
@@ -353,20 +369,54 @@ pub(crate) fn is_punct(t: &TokenTree, ch: char) -> bool {
 mod tests {
     use super::given;
 
-    /// Whether `given` says the crate `name` is there, of the arguments `args` writes.
+    /// Whether `given` says the crate `name` is there, of the arguments of a build that has
+    /// `kernite_macros` and no other crate, and `args` besides.
     fn run(args: &str, name: &str) -> bool {
-        given(&args.split_whitespace().map(String::from).collect::<Vec<_>>(), name)
+        let build = format!("rustc --extern kernite_macros=/t/libkernite_macros.so {args}");
+        given(&build.split_whitespace().map(String::from).collect::<Vec<_>>(), name)
     }
 
     #[test]
-    fn a_crate_is_there_when_rust_gives_it_and_when_it_gives_no_crate_at_all() {
-        let build = "rustc --crate-name app --extern kernite_macros=/t/libkernite_macros.so";
-        assert!(run(&format!("{build} --extern kernite_cpu=/t/libkernite_cpu.rlib"), "kernite-cpu"));
-        assert!(run(&format!("{build} --extern=kernite_cuda=/t/libkernite_cuda.rlib"), "kernite-cuda"));
+    fn nothing_but_an_extern_gives_a_crate() {
+        // A crate's own name, a directory, a path to search and a crate of a longer name hold the
+        // crate's, and so does a flag of rustdoc's: none of them is an `--extern` of it.
+        for (args, name) in [
+            ("--crate-name my_kernite_cuda_app", "kernite-cuda"),
+            ("--out-dir /home/u/kernite_cpu_demo/target/debug/deps", "kernite-cpu"),
+            ("-L dependency=/home/u/kernite_cuda/target/debug/deps", "kernite-cuda"),
+            ("--extern kernite_cuda_demo=/t/libkernite_cuda_demo.rlib", "kernite-cuda"),
+            ("--extern-html-root-url kernite_cuda=https://docs.rs/kernite-cuda", "kernite-cuda"),
+        ] {
+            assert!(!run(args, name), "{args}");
+        }
+    }
+
+    #[test]
+    fn a_crate_renamed_in_cargo_toml_is_given_by_its_new_name() {
+        // `cuda = { package = "kernite-cuda", .. }`
+        assert!(!run("--extern cuda=/t/libkernite_cuda-1a2b.rlib", "kernite-cuda"));
+    }
+
+    #[test]
+    fn each_spelling_of_extern_gives_its_crate() {
+        for spelling in [
+            "--extern kernite_cuda=/t/a.rlib",
+            "--extern=kernite_cuda=/t/a.rlib",
+            "--extern priv:kernite_cuda=/t/a.rlib",
+            "--extern=noprelude:kernite_cuda=C:/t/a.rlib",
+            "--extern kernite_cuda",
+            "--extern=kernite_cuda",
+        ] {
+            assert!(run(spelling, "kernite-cuda"), "{spelling}");
+        }
         // Each crate is found by its own name: the other's is not it.
-        assert!(!run(&format!("{build} --extern kernite_cpu=/t/libkernite_cpu.rlib"), "kernite-cuda"));
-        assert!(!run(build, "kernite-cuda"));
+        assert!(run("--extern kernite_cpu=/t/a.rlib", "kernite-cpu"));
+        assert!(!run("--extern kernite_cpu=/t/a.rlib", "kernite-cuda"));
+    }
+
+    #[test]
+    fn a_crate_is_there_when_rust_gives_no_crate_at_all() {
         // An editor runs the macro in a process of its own, which Rust's arguments do not reach.
-        assert!(run("rust-analyzer-proc-macro-srv", "kernite-cuda"));
+        assert!(given(&["rust-analyzer-proc-macro-srv".to_string()], "kernite-cuda"));
     }
 }

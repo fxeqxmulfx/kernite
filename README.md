@@ -135,8 +135,8 @@ kernel's parameters, runs the kernel on a thread for each of the grid's, the cal
 have ended. A thread that waits spins, so it needs a core: a grid of more threads than the machine runs at once,
 `kernite_cpu::most()`, is an error, as a GPU's grid of more blocks than it runs at once is. The kernel's parameters keep
 the names they are written with, `grid` among them. A compile-time argument may not be named `grid`, for Rust cannot
-keep a const apart from a parameter of its name: that is an error at its name. A crate with a cooperative kernel depends
-on `kernite-cpu` for the grid, and kernite says at the kernel when it does not.
+keep a const apart from a parameter of its name: that is an error at its name. A crate with a cooperative kernel needs a
+dependency named `kernite-cpu` for the grid, not renamed in `Cargo.toml`. kernite says at the kernel when it has none.
 
 A kernel calls the module's others, itself among them, as SysV calls a function: `call(g, gcd, (a, b))` moves `a` to
 `rdi` and `b` to `rsi`, and `g` from `rax`, and is checked against what `gcd` takes and returns. `lea(fp, [gcd])` takes
@@ -156,16 +156,16 @@ the module has it, a [`kernite_cpu::Global`](crates/cpu/src/global.rs) of Rust's
 stores, and a kernel's safety contract says that nothing else touches the memory of the module's it names while it runs,
 nor any that the functions it calls name, whether it calls them by name or at an address. A module's statics are its
 kernels': on the GPU for GPU kernels, so a module with kernels of both kinds and a static is an error, which says to
-make it two. A crate with a static in a module of x86 kernels depends on `kernite-cpu` for it, and kernite says at the
-static when it does not.
+make it two. A crate with a static in a module of x86 kernels needs a dependency named `kernite-cpu` for it, not renamed
+in `Cargo.toml`. kernite says at the static when it has none.
 
 ## On a GPU
 
 An `extern "ptx-kernel"` function is compiled to PTX. The module's kernels are one PTX module, `PTX`, which
 `Kernels::load` hands to the CUDA driver; each kernel is then a method that launches it on a grid.
 [`kernite-cuda`](crates/cuda/src/lib.rs) is the driver, opened when a GPU is asked for, so that a program built with
-GPU kernels still runs where there is none. A crate with a module of GPU kernels depends on `kernite-cuda`, and kernite
-says at the module when it does not.
+GPU kernels still runs where there is none. A crate with a module of GPU kernels needs a dependency named
+`kernite-cuda`, not renamed in `Cargo.toml`. kernite says at the module when it has none.
 
 ```rust
 #[kernite_macros::kernels]
