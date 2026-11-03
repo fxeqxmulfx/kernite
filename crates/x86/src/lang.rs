@@ -1207,6 +1207,13 @@ impl Kernel {
                 _ => "an address multiplies its vector of indices, as in `[p + v * 4]`; this multiplies a gpr".into(),
             });
         }
+        // x86 scales by 1, 2, 4 or 8, so an index with no base beside it, times 3, 5 or 9, is its
+        // own base: `[n * 5]` is `[n + n * 4]`.
+        if let (None, Some((i, k @ (3 | 5 | 9)))) = (base, index)
+            && !i.vector()
+        {
+            (base, index) = (Some(i), Some((i, k - 1)));
+        }
         let held = base.filter(|b| b.reg().is_none());
         if let (Some(Var(Place::Static(s))), Some((i, k))) = (held, index) {
             let (held, i) = (&self.statics[s.0 as usize].name, i.reg().expect("an index is a register").0);

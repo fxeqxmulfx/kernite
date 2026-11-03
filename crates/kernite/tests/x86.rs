@@ -207,6 +207,92 @@ ret";
     assert_eq!(code, want);
 }
 
+/// x86 scales an index by 1, 2, 4 or 8, so an index with no base beside it, times 3, 5 or 9, is
+/// its own base: `[n + n * 2]`, which `[n * 3]` is too, since a variable that comes twice in an
+/// address has its scales added. `llvm-mc` and GNU as assemble each as x86 encodes it.
+#[test]
+fn an_index_with_no_base_times_3_5_or_9_is_its_own_base() {
+    let cases = [
+        ("lea(x, [n + n * 2]);", "lea rdi, [rsi + rsi*2]", "48 8d 3c 76"),
+        ("lea(x, [n * 3]);", "lea rdi, [rsi + rsi*2]", "48 8d 3c 76"),
+        ("lea(x, [n * 5]);", "lea rdi, [rsi + rsi*4]", "48 8d 3c b6"),
+        (
+            "let v: ymm; vmovups(v, [n + n * 4 + 8]);",
+            "vmovups ymm0, ymmword ptr [rsi + rsi*4 + 8]",
+            "c5 fc 10 44 b6 08",
+        ),
+        ("lea(x, [n + n * 8]);", "lea rdi, [rsi + rsi*8]", "48 8d 3c f6"),
+        ("lea(x, [n * 9]);", "lea rdi, [rsi + rsi*8]", "48 8d 3c f6"),
+    ];
+    addresses_encode("own-base", &cases);
+}
+
+/// A gpr whose scales come to 0 is left out: `[x + n * 0]`, `[x + n - n]` and `[x + n * N]` where
+/// the const `N` is 0 are all `[x]`. `llvm-mc` and GNU as assemble each as x86 encodes it.
+#[test]
+fn a_gpr_whose_scales_come_to_0_is_left_out() {
+    let cases = [
+        ("lea(x, [x + n * 0]);", "lea rdi, [rdi]", "48 8d 3f"),
+        ("lea(x, [x + n - n]);", "lea rdi, [rdi]", "48 8d 3f"),
+        ("const N: usize = 0; lea(x, [x + n * N]);", "lea rdi, [rdi]", "48 8d 3f"),
+    ];
+    addresses_encode("left-out", &cases);
+}
+
+/// A base takes an index times 1, 2, 4 or 8, and a number. `llvm-mc` and GNU as assemble each as
+/// x86 encodes it.
+#[test]
+fn a_base_takes_an_index_times_1_2_4_or_8_and_a_number() {
+    let cases = [
+        ("lea(x, [x + n]);", "lea rdi, [rdi + rsi*1]", "48 8d 3c 37"),
+        ("lea(x, [x + n * 2]);", "lea rdi, [rdi + rsi*2]", "48 8d 3c 77"),
+        ("lea(x, [x + n * 4 + 8]);", "lea rdi, [rdi + rsi*4 + 8]", "48 8d 7c b7 08"),
+        ("lea(x, [x + n * 8 - 8]);", "lea rdi, [rdi + rsi*8 - 8]", "48 8d 7c f7 f8"),
+    ];
+    addresses_encode("scales", &cases);
+}
+
+/// Each of `cases`, a kernel's body, the first line of its listing and the bytes x86 encodes that
+/// line as, holds: the kernel compiles to that line, and `llvm-mc` and GNU as, where they are
+/// here, make those bytes of it. `name` is for the files they read.
+fn addresses_encode(name: &str, cases: &[(&str, &str, &str)]) {
+    for &(body, line, _) in cases {
+        let code = compile("x: *const f32, n: usize", body).unwrap_or_else(|e| panic!("{e}, of {body}"));
+        assert_eq!(code.lines().next(), Some(line), "{body}");
+    }
+    let (Some(mc), Some(gnu)) = (tool("LLVM_MC", "llvm-mc"), tool("GNU_AS", "as")) else {
+        eprintln!("no llvm-mc or GNU as here: skipped; set LLVM_MC and GNU_AS to run it");
+        return;
+    };
+    let lines: Vec<&str> = cases.iter().map(|&(_, line, _)| line).collect();
+    let (text, at) = source(&lines);
+    let (ok, out, said) =
+        assemble(&mc, &["-triple=x86_64", "-x86-asm-syntax=intel", "-show-encoding"], &format!("{name}-mc.s"), &text);
+    assert!(ok && said.is_empty(), "llvm-mc says {said:?}, of\n{text}");
+    // `leaq (,%rsi,4), %rdi  # encoding: [0x48,0x8d,0x3c,0xb5,0x00,0x00,0x00,0x00]`
+    let made = out.lines().filter_map(|l| l.split_once("encoding: [")).map(|(_, e)| {
+        e.trim_end_matches(']').split(',').map(|b| b.trim_start_matches("0x")).collect::<Vec<_>>().join(" ")
+    });
+    for ((_, line, want), made) in cases.iter().zip(made) {
+        assert_eq!(made, *want, "llvm-mc, of {line}");
+    }
+    // GNU as's listing has a line's number, its offset and up to four of its bytes in hex in a
+    // row, and more rows below it for the rest of them.
+    let (ok, out, said) = assemble(&gnu, &["--64", "-al", "-o", "/dev/null"], &format!("{name}-gnu.s"), &text);
+    assert!(ok && said.is_empty(), "GNU as says {said:?}, of\n{text}");
+    let mut made: Vec<Vec<&str>> = vec![vec![]; cases.len()];
+    for row in out.lines() {
+        let n = row.get(..4).and_then(|n| n.trim().parse().ok());
+        let hex = row.get(10..).and_then(|r| r.split('\t').next()).map_or("", str::trim);
+        if let Some(i) = at.iter().position(|&a| Some(a) == n) {
+            made[i].extend((0..hex.len()).step_by(2).map(|k| &hex[k..k + 2]));
+        }
+    }
+    for ((_, line, want), made) in cases.iter().zip(made) {
+        assert_eq!(made.join(" ").to_lowercase(), *want, "GNU as, of {line}");
+    }
+}
+
 /// Memory is as much as the other operands say, or, where an instruction's forms differ by that
 /// alone, as Intel's word before the brackets says. A write to `r16` or `r8` keeps the rest of
 /// the register, so it needs a value there first.
@@ -396,6 +482,14 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ("let v: ymm; vmovups(v, [1.0]);", "2:24: this reads 32 bytes of a constant of 4"),
         ("let v: ymm; vmovups(v, [x + x * 3]);", "2:24: x86 wants a base beside a scaled index"),
         ("let i: gpr; let v: ymm; vmovups(v, [x + i * 3]);", "2:36: x86 scales an index by 1, 2, 4 or 8, not 3"),
+        ("let i: gpr; let v: ymm; vmovups(v, [i * 3 + x]);", "2:36: x86 scales an index by 1, 2, 4 or 8, not 3"),
+        (
+            "let b: local<[f32; 16]>; let i: gpr; let p: gpr; lea(p, [b + i * 3]);",
+            "2:57: x86 scales an index by 1, 2, 4 or 8, not 3",
+        ),
+        ("let i: gpr; let v: ymm; vmovups(v, [x + i * 16]);", "2:36: x86 scales an index by 1, 2, 4 or 8, not 16"),
+        ("let i: gpr; let v: ymm; vmovups(v, [i * 6]);", "2:36: x86 scales an index by 1, 2, 4 or 8, not 6"),
+        ("let i: gpr; let v: ymm; vmovups(v, [i + i * 5]);", "2:36: x86 scales an index by 1, 2, 4 or 8, not 6"),
         ("let v: ymm; vaddps(v, v, 1.5);", "2:26: x86 takes floats from memory: `[1.5]`"),
         ("vfrobps(x);", "2:1: x86 has no instruction `vfrobps` that kernite knows"),
         ("let v: ymm; vaddps(v, v, w);", "2:26: `w` is not defined"),
