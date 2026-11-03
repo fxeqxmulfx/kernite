@@ -110,9 +110,9 @@ fn floats(n: usize, seed: u32) -> Vec<f32> {
 
 /// Asserts that `lens`, the lengths of `a`, `b` and `c`, are those of a product of `shape`.
 fn operands((a, b, c): (usize, usize, usize), (m, n, k): Shape) {
-    assert_eq!(a, m * k, "a is not {m} rows of {k}");
-    assert_eq!(b, k * n, "b is not {k} rows of {n}");
-    assert_eq!(c, m * n, "c is not {m} rows of {n}");
+    assert_eq!(Some(a), m.checked_mul(k), "a is not {m} rows of {k}");
+    assert_eq!(Some(b), k.checked_mul(n), "b is not {k} rows of {n}");
+    assert_eq!(Some(c), m.checked_mul(n), "c is not {m} rows of {n}");
 }
 
 /// As [`operands`] asserts, for a GPU kernel, which counts in 32 bits: and that each of them
