@@ -1,5 +1,7 @@
 //! The parser: a module's tokens to its items, a body's to statements.
 
+use std::collections::BTreeSet;
+
 use crate::Error;
 use crate::ast::{
     BinOp, Block, Const, Cooperative, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret, Static, Stmt,
@@ -335,6 +337,17 @@ impl<'a> Parser<'a> {
             return self.error(format!("expected `(`, found {}", self.found()));
         };
         let params = params(inner)?;
+        // A name binds once among a function's generics and parameters, as in Rust; `_` binds none.
+        let mut seen = BTreeSet::new();
+        let names = generics.iter().map(|g| (&g.name, g.span)).chain(params.iter().map(|p| (&p.name, p.span)));
+        for (name, span) in names {
+            if name != "_" && !seen.insert(name) {
+                return Err(Error {
+                    span,
+                    message: format!("`{name}` names another parameter of the function as well"),
+                });
+            }
+        }
         let ret = if self.eat_op("->") {
             let (from, span) = (self.pos, self.span());
             while !self.done() && !matches!(self.peek(), Some(Tree::Group { delim: Delim::Brace, .. })) {

@@ -79,6 +79,44 @@ fn a_function_that_names_an_abi_is_not_const_and_no_function_is_async() {
 }
 
 #[test]
+fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
+    // Rust refuses a name bound twice among a function's generics and parameters, E0403 and E0415;
+    // without the check the body's `x` is the second, and the first goes without a word.
+    let twice = |name: &str| format!("`{name}` names another parameter of the function as well");
+    for (src, kernel, at, name) in [
+        (r#"pub unsafe extern "sysv64" fn k(x: u64, x: u64) {}"#, "k", "1:41", "x"),
+        // The twin need not be next to it.
+        (r#"pub unsafe extern "sysv64" fn k(x: u64, y: u64, x: u64) {}"#, "k", "1:49", "x"),
+        // A name written raw is the name.
+        (r#"pub unsafe extern "sysv64" fn k(x: u64, r#x: u64) {}"#, "k", "1:41", "x"),
+        // Only `_` alone names none.
+        (r#"pub unsafe extern "sysv64" fn k(_x: u64, _x: u64) {}"#, "k", "1:42", "_x"),
+        // A helper is never written out as Rust, so only kgen refuses one, called or not.
+        ("pub unsafe extern \"sysv64\" fn k() {}\nfn h(x: ymm, x: ymm) { vaddps(x, x, x); }", "k", "2:14", "x"),
+        // A generic kernel is compiled for the instances it lists, and each is named by its values.
+        (
+            "#[instances((1, 2))]\npub unsafe extern \"sysv64\" fn k<const N: u32, const N: u32>() {}",
+            "k::<1, 2>",
+            "2:53",
+            "N",
+        ),
+        ("#[instances(1)]\npub unsafe extern \"sysv64\" fn k<const N: u64>(N: u64) {}", "k::<1>", "2:47", "N"),
+    ] {
+        assert_eq!(kgen::x86_str(src, kernel).unwrap_err(), format!("{at}: {}", twice(name)), "{src}");
+    }
+    // A GPU kernel and a GPU function are read as an x86 kernel is.
+    for (src, at) in [
+        (r#"pub unsafe extern "ptx-kernel" fn k(x: u64, x: u64) {}"#, "1:45"),
+        (r#"pub unsafe extern "ptx-func" fn f(x: u64, x: u64) {}"#, "1:43"),
+    ] {
+        assert_eq!(kgen::ptx_str(src).unwrap_err(), format!("{at}: {}", twice("x")), "{src}");
+    }
+    // `_` names none, so two stay, as Rust takes them.
+    let src = r#"pub unsafe extern "sysv64" fn k(_: u64, _: u64) {}"#;
+    assert!(x86(src, "k").starts_with("# k(gpr, gpr) -> ()\n"), "{src}");
+}
+
+#[test]
 fn loops_unroll_and_number_their_labels_afresh() {
     let src = r#"
         const STEP: usize = 32;
