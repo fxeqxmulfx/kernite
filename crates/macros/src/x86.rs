@@ -6,7 +6,9 @@ use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
 use kgen::lang::{self, Fn, ItemKind, Value};
 use kgen::{Call, HostStatic, Naked, NativeInstance};
 
-use crate::rust::{attrs, is_ident, is_punct, parse, pick, signature, stub, visibility, written_params};
+use crate::rust::{
+    attrs, clashes, hygienic, is_ident, is_punct, parse, pick, signature, stub, visibility, written_params,
+};
 
 /// `f` as an `#[unsafe(naked)]` function whose body is the listing of its one instance, and
 /// the statics its constants are, in a module beside it. For a function of compile-time
@@ -251,6 +253,9 @@ fn callees(module: &lang::Module, calls: &[Call], inside: bool, top: &[TokenTree
 /// Rust's pointers do not cross threads. Without `kernels`, it never runs, for a kernel that
 /// did not compile. `needs` is the doc of the CPU features the kernels need. Its safety
 /// contract says that nothing else touches `named`, the module's memory, while the threads run.
+/// It binds `grid` for itself, which a parameter of `f` may be named as well; a compile-time
+/// argument may not, which is an error at its name, and the function never runs, as one of a
+/// kernel that did not compile.
 fn grid_launcher(
     f: &Fn,
     kernels: Option<&[(Vec<Value>, String)]>,
@@ -258,6 +263,8 @@ fn grid_launcher(
     named: &[String],
     top: &[TokenTree],
 ) -> TokenStream {
+    let clashes = clashes(f, &["grid"], "the launcher", top);
+    let kernels = if clashes.is_empty() { kernels } else { None };
     let mut out = attrs(f, top);
     out.extend(needs);
     out.extend(parse(
@@ -288,7 +295,7 @@ fn grid_launcher(
     out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("unsafe fn"));
     out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
-    let mut params = parse("grid: ::kgen_cpu::Grid, ");
+    let mut params = hygienic("$grid: ::kgen_cpu::Grid, ", kernels.is_some());
     for (param, _) in written_params(f, top) {
         params.extend(param);
         params.extend(parse(","));
@@ -314,15 +321,16 @@ fn grid_launcher(
                     _ => args.push(name.to_string()),
                 }
             }
-            args.push("grid".to_string());
+            args.push("$grid".to_string());
             format!(
-                "{addresses}::kgen_cpu::launch(grid, &|grid: &::kgen_cpu::Place| unsafe {{ ({kernel})({}) }})",
+                "{addresses}::kgen_cpu::launch($grid, &|$grid: &::kgen_cpu::Place| unsafe {{ ({kernel})({}) }})",
                 args.join(", ")
             )
         }
         None => "::core::unreachable!()".to_string(),
     };
-    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&body)))]);
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, hygienic(&body, kernels.is_some())))]);
+    out.extend(clashes);
     out
 }
 

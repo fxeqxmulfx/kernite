@@ -83,6 +83,12 @@
 //! An instance it does not list is a compile error where Rust compiles the call, in
 //! `cargo build`; `cargo check` evaluates no generic function's constants, and misses it.
 //!
+//! A kernel's parameters keep the names they are written with beside those the Rust the
+//! macro writes binds for itself: `grid`, the launcher's, and `threads` and `shared`, those
+//! of a cooperative GPU kernel's `_blocks` method. A compile-time argument may not be named
+//! as one of them, for Rust cannot keep a const apart from a parameter of its name: that is
+//! an error at its name.
+//!
 //! A module of kernels takes the consts it shares with others from a module `#[consts]` is
 //! on, which it names by its path, as Rust reads one where the module is:
 //! `#[kernels(consts = crate::model::sizes)]`, or `consts = sizes` for one beside it. Its

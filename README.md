@@ -124,7 +124,9 @@ unsafe { kernels::normalize(kgen_cpu::Grid::new(4), x.as_mut_ptr(), sums.as_mut_
 `normalize` becomes the function that launches it, which takes a [`kgen_cpu::Grid`](crates/cpu/src/lib.rs) and the
 kernel's parameters, runs the kernel on a thread for each of the grid's, the caller's the first, and returns when all
 have ended. A thread that waits spins, so it needs a core: a grid of more threads than the machine runs at once,
-`kgen_cpu::most()`, is an error, as a GPU's grid of more blocks than it runs at once is.
+`kgen_cpu::most()`, is an error, as a GPU's grid of more blocks than it runs at once is. The kernel's parameters keep
+the names they are written with, `grid` among them. A compile-time argument may not be named `grid`, for Rust cannot
+keep a const apart from a parameter of its name: that is an error at its name.
 
 A kernel calls the module's others, itself among them, as SysV calls a function: `call(g, gcd, (a, b))` moves `a` to
 `rdi` and `b` to `rsi`, and `g` from `rax`, and is checked against what `gcd` takes and returns. `lea(fp, [gcd])` takes
@@ -177,6 +179,11 @@ let (xs, ys) = (cuda.upload(&x)?, cuda.upload(&y)?);
 unsafe { kernels.saxpy(kgen_cuda::Grid::new(n.div_ceil(256), 256), 2.0, xs.ptr(), ys.ptr(), n)? };
 ys.read_into(&mut y)?;
 ```
+
+`saxpy` becomes the method that launches it, which takes the grid and then the kernel's parameters. They keep the names
+they are written with, `grid` among them. A compile-time argument may not be named `grid`, nor, on a cooperative kernel,
+`threads` or `shared`, which are parameters of the method that says how many blocks its grid has at most, below. Rust
+cannot keep a const apart from a parameter of its name: that is an error at its name.
 
 The PTX target knows every instruction of PTX's for the GPUs from Fermi, `sm_20`, to Ampere, `sm_86`, in each form
 `ptxas` takes, [`forms`](crates/ptx/src/forms.rs), but one. `txq.force_unnormalized_coords` asks of a sampler apart from

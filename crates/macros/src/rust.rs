@@ -120,6 +120,21 @@ pub(crate) fn const_names(tokens: &[TokenTree]) -> impl Iterator<Item = &TokenTr
     tokens.windows(2).filter(|w| is_ident(&w[0], "const")).map(|w| &w[1])
 }
 
+/// An error at each of `f`'s compile-time arguments named as one of `own`, the locals the Rust of
+/// `method` binds for itself. A compile-time argument is no local, and no span of stable Rust
+/// keeps it apart from one of its name, as it does a parameter's.
+pub(crate) fn clashes(f: &Fn, own: &[&str], method: &str, top: &[TokenTree]) -> TokenStream {
+    let mut errors = TokenStream::new();
+    for name in const_names(&top[f.head.end + 2..f.params_at]) {
+        let written = name.to_string();
+        let name_of = written.trim_start_matches("r#");
+        if own.contains(&name_of) {
+            errors.extend(error(name.span(), &format!("`{name_of}` names a parameter of {method} as well")));
+        }
+    }
+    errors
+}
+
 /// `f`'s parameters as written, each its tokens, `x: *mut f32`, and the place of its colon.
 pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, usize)> {
     let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
@@ -229,6 +244,35 @@ pub(crate) fn parse(s: &str) -> TokenStream {
         Some(span) => respan(tokens, span),
         None => tokens,
     }
+}
+
+/// The tokens `s` writes, as [`parse`] gives them, but for each name after a `$`: a local the
+/// macro binds for itself, of the span `Span::mixed_site()`. No name the user wrote finds it, nor
+/// does it find theirs, so a parameter of a kernel may be named as the macro's launcher names its
+/// own. Where the Rust never `runs`, each is `_`, for a compile-time argument may be named so, and
+/// Rust reads a binding of a const's name as that const.
+pub(crate) fn hygienic(s: &str, runs: bool) -> TokenStream {
+    fn own(tokens: TokenStream, runs: bool) -> TokenStream {
+        let mut tokens = tokens.into_iter();
+        let mut out = TokenStream::new();
+        while let Some(t) = tokens.next() {
+            out.extend([match t {
+                TokenTree::Punct(p) if p.as_char() == '$' => {
+                    let name = tokens.next().expect("a `$` has a name after it");
+                    let name = if runs { name.to_string() } else { "_".to_string() };
+                    TokenTree::Ident(Ident::new(&name, Span::mixed_site()))
+                }
+                TokenTree::Group(g) => {
+                    let mut inner = Group::new(g.delimiter(), own(g.stream(), runs));
+                    inner.set_span(g.span());
+                    TokenTree::Group(inner)
+                }
+                t => t,
+            }]);
+        }
+        out
+    }
+    own(parse(s), runs)
 }
 
 /// The span of the tokens the macro writes: [`SITE`]'s, or its call site.

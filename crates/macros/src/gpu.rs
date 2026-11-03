@@ -6,7 +6,9 @@ use proc_macro::{Delimiter, Group, Ident, Span, TokenStream, TokenTree};
 use kgen::DeviceStatic;
 use kgen::lang::{self, Fn, Value};
 
-use crate::rust::{attrs, error, flatten, host, is_ident, is_punct, parse, pick, site, visibility, written_params};
+use crate::rust::{
+    attrs, clashes, error, flatten, host, hygienic, is_ident, is_punct, parse, pick, site, visibility, written_params,
+};
 
 /// Where the module's path goes in its PTX and in its kernels' names. A macro is not told
 /// the module it is in, so `kgen_cuda::__named!` writes `module_path!()` there once Rust
@@ -116,8 +118,12 @@ fn named(text: &str) -> String {
 /// The method that launches `f` over a grid, each of its instances `launched`: its parameters
 /// those of `f`, a pointer as the address on the GPU it is, `::kgen_cuda::Ptr`; and its
 /// compile-time arguments those of `f`, which pick the instance. A cooperative kernel is
-/// launched cooperatively, every block of its grid at once.
+/// launched cooperatively, every block of its grid at once. The launcher binds `grid` for
+/// itself, which a parameter of `f` may be named as well; a compile-time argument may not, which
+/// is an error at its name, and the launcher never runs, as one of a kernel that did not compile.
 fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStream {
+    let clashes = clashes(f, &["grid"], "the launcher", top);
+    let launched = if clashes.is_empty() { launched } else { None };
     let mut out = attrs(f, top);
     if f.cooperative.is_some() {
         out.extend(parse(&format!(
@@ -142,7 +148,7 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("unsafe fn"));
     out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
-    let mut params = parse("&self, grid: ::kgen_cuda::Grid, ");
+    let mut params = hygienic("&self, $grid: ::kgen_cuda::Grid, ", launched.is_some());
     let mut args = vec![];
     for (param, colon) in written_params(f, top) {
         // Its name as written, before the colon.
@@ -162,8 +168,9 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     out.extend(parse("-> ::core::result::Result<(), ::kgen_cuda::Error>"));
     let how = if f.cooperative.is_some() { "launch_cooperative" } else { "launch" };
     out.extend(body(f, launched, top, |index| {
-        format!("unsafe {{ self.module.{how}({index}, grid, &[{}]) }}", args.join(", "))
+        format!("unsafe {{ self.module.{how}({index}, $grid, &[{}]) }}", args.join(", "))
     }));
+    out.extend(clashes);
     out
 }
 
@@ -175,8 +182,12 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
 /// `cfg_attr(..)`. It has docs of its own, not those of `f`. The launcher alone keeps what `f`
 /// says of its code or its symbol, as `target_feature` and `export_name` do. The launcher meets
 /// an expectation of a parameter of `f`, and this method, which takes none of them, might not: so
-/// an `expect` is an `allow` here.
+/// an `expect` is an `allow` here. The method binds `threads` and `shared` for itself, which a
+/// compile-time argument of `f` may not be named: an error at its name, and the method never runs,
+/// as one of a kernel that did not compile.
 fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStream {
+    let clashes = clashes(f, &["threads", "shared"], &format!("`{}`", blocks_name(f)), top);
+    let launched = if clashes.is_empty() { launched } else { None };
     let mut out = parse(&format!(
         "/// How many blocks a grid of [`{0}`](Self::{0}) has at most, of `threads` threads each and\n\
          /// `shared` bytes of the launch's shared memory: as many as the GPU runs at once, for it\n\
@@ -190,17 +201,18 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
         kept.set_span(group.span());
         out.extend([hash.clone(), kept.into()]);
     }
-    if launched.is_none() {
-        out.extend(parse("#[allow(unused_variables)]"));
-    }
     // Its visibility, then `fn`, its name and the generics of `f` as written: its name is
     // where `f`'s is, for an error or a reader to find.
     out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("fn"));
     out.extend([TokenTree::Ident(Ident::new(&blocks_name(f), top[f.head.end + 1].span()))]);
     out.extend(top[f.head.end + 2..f.params_at].iter().cloned());
-    out.extend(parse("(&self, threads: u32, shared: u32) -> ::core::result::Result<u32, ::kgen_cuda::Error>"));
-    out.extend(body(f, launched, top, |index| format!("self.module.resident({index}, threads, shared)")));
+    out.extend(hygienic(
+        "(&self, $threads: u32, $shared: u32) -> ::core::result::Result<u32, ::kgen_cuda::Error>",
+        launched.is_some(),
+    ));
+    out.extend(body(f, launched, top, |index| format!("self.module.resident({index}, $threads, $shared)")));
+    out.extend(clashes);
     out
 }
 
@@ -248,8 +260,8 @@ fn blocks_name(f: &Fn) -> String {
 }
 
 /// The body of a method of `f`, which does `then` with the index of the instance among
-/// `launched` its compile-time arguments pick; or never runs, for a kernel that did not
-/// compile.
+/// `launched` its compile-time arguments pick, as an expression; or never runs, for a kernel
+/// that did not compile.
 fn body(
     f: &Fn,
     launched: Option<&[Launched]>,
@@ -260,9 +272,9 @@ fn body(
         Some([(args, i)]) if args.is_empty() => then(&i.to_string()),
         Some(instances) => {
             let arms: Vec<(Vec<Value>, String)> = instances.iter().map(|(a, i)| (a.clone(), i.to_string())).collect();
-            format!("let index = {};\n{}", pick(f, &arms, top), then("index"))
+            then(&pick(f, &arms, top))
         }
         None => "::core::unreachable!()".to_string(),
     };
-    [TokenTree::Group(Group::new(Delimiter::Brace, parse(&body)))].into_iter().collect()
+    [TokenTree::Group(Group::new(Delimiter::Brace, hygienic(&body, launched.is_some())))].into_iter().collect()
 }

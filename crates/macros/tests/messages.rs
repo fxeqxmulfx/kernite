@@ -436,6 +436,33 @@ fn kernels_that_compile_say_nothing() {
     builds_quietly("quiet");
 }
 
+/// A parameter named as a local the macro's Rust binds for itself, `index`, `grid`, `threads` or
+/// `shared`, is the kernel's own, and reaches it: Rust builds the module without a word, where the
+/// launcher's own `index` hid it, and Rust said "unused variable: `index`". So is a compile-time
+/// argument, where no launcher or method binds its name.
+#[test]
+fn a_kernels_parameters_keep_their_names_beside_those_the_macros_rust_binds() {
+    builds_quietly("parameters");
+}
+
+/// A compile-time argument is no local, and no span of stable Rust keeps it apart from one of its
+/// name: `grid`, the launcher's, and `threads` and `shared`, of a cooperative kernel's `_blocks`.
+/// Each is refused at its name, and nothing at the module's attribute, where Rust would say
+/// "expected `Grid`, found `u32`", as the launcher or method never runs.
+#[test]
+fn a_compile_time_argument_named_as_the_launchers_parameters_is_refused_at_its_name() {
+    refuses(
+        "arguments",
+        &[
+            "src/lib.rs:27:47: error: `grid` names a parameter of the launcher as well",
+            "src/lib.rs:38:47: error: `threads` names a parameter of `k_blocks` as well",
+            "src/lib.rs:49:47: error: `shared` names a parameter of `k_blocks` as well",
+            "src/lib.rs:60:43: error: `grid` names a parameter of the launcher as well",
+            "error: could not compile `arguments` (lib) due to 4 previous errors",
+        ],
+    );
+}
+
 /// A name written raw, `r#type`, reaches Rust as written: a parameter's and a compile-time
 /// argument's, in each kind of kernel that passes them on, a kernel's, a function's that a kernel
 /// calls, a static's and a const's.
