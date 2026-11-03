@@ -9,7 +9,7 @@ use crate::classify::{helper, trusted};
 use crate::present::{Refusal, said};
 use crate::{
     Abi, Call, Device, DeviceFnOut, DeviceOut, Given, ItemOut, Launcher, ModuleOut, Naked, Native, NativeInstance,
-    NativeOut, Owner, compile, cooperative, function, owner, prepare,
+    NativeOut, Owner, compile, cooperative, instance, owner, prepare,
 };
 
 /// `module`, given the consts `given` says, its kernels compiled: each function the process runs
@@ -261,14 +261,12 @@ fn touched(module: &Module, items: &[ItemOut]) -> Vec<Vec<String>> {
 /// `#[instances(..)]` lists, if it takes compile-time arguments.
 fn calls(module: &Module, funcs: &[String]) -> Vec<Call> {
     let call = |name: &String| {
-        let g = function(module, name.split("::<").next().unwrap_or(name))
-            .expect("a kernel calls a function of its module");
-        let instance = (!g.generics.is_empty()).then(|| {
-            let listed = kgen_lang::instances(module, g).unwrap_or_default();
-            let k = listed.iter().position(|args| kgen_lang::instance(g, args).is_ok_and(|n| n == *name));
-            k.expect("a kernel calls an instance its function lists")
-        });
-        Call { function: g.name.clone(), instance }
+        // A function that takes no compile-time arguments and lists instances is wrong at its
+        // own item, and `instance` refuses it: the call names it whole, as it names any
+        // function of none.
+        let Ok(found) = instance(module, name) else { return Call { function: name.clone(), instance: None } };
+        let (g, _, k) = found.expect("a kernel calls an instance its function lists");
+        Call { function: g.name.clone(), instance: (!g.generics.is_empty()).then_some(k) }
     };
     funcs.iter().map(call).collect()
 }

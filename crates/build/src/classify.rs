@@ -122,13 +122,18 @@ pub fn function<'a>(module: &'a Module, name: &str) -> Option<&'a Fn> {
     })
 }
 
-/// The function of `module` that `name` names, with the compile-time arguments of its instance
-/// that `name` is, as `tile::<4>` is; none for a function that takes none.
-pub fn instance<'a>(module: &'a Module, name: &str) -> Result<Option<(&'a Fn, Vec<Value>)>, kgen_lang::Error> {
+/// What [`instance`] finds.
+type Found<'a> = (&'a Fn, Vec<Value>, usize);
+
+/// The function of `module` that `name` names, the compile-time arguments of the instance of it
+/// that `name` is, as `tile::<4>` is, and the instance's place among those the function lists.
+/// A function that names an ABI and takes no compile-time arguments has one instance, of none,
+/// and a helper has none.
+pub fn instance<'a>(module: &'a Module, name: &str) -> Result<Option<Found<'a>>, kgen_lang::Error> {
     let Some(f) = function(module, name.split("::<").next().unwrap_or(name)) else { return Ok(None) };
-    for args in kgen_lang::instances(module, f)? {
+    for (at, args) in kgen_lang::instances(module, f)?.into_iter().enumerate() {
         if kgen_lang::instance(f, &args)? == name {
-            return Ok(Some((f, args)));
+            return Ok(Some((f, args, at)));
         }
     }
     Ok(None)

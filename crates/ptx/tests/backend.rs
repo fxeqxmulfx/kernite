@@ -19,7 +19,7 @@ fn lay_out(ptx: &Ptx, module: &Module, name: &str, before: &[Static]) -> Result<
 /// The kernel `ptx` makes of `name`, a function of `module` or an instance of one, told of
 /// `statics` and `callees`, with its body written, for `finish`.
 fn written(ptx: &Ptx, module: &Module, name: &str, statics: &[Static], callees: &[Called<Callee>]) -> Kernel {
-    let (f, args) = kgen_build::instance(module, name).unwrap().unwrap();
+    let (f, args, _) = kgen_build::instance(module, name).unwrap().unwrap();
     let mut kernel = ptx.kernel(f, name, &args, kgen_build::cooperative(f).unwrap(), statics, callees);
     kgen_lang::kernel(module, f, &args, &mut kernel).unwrap();
     kernel
@@ -128,7 +128,7 @@ fn a_function_the_kernels_call_is_a_func() {
     assert_eq!(callee("pair"), Some(Callee::Broken));
     assert_eq!(callee("k"), Some(Callee::Kernel));
     assert_eq!(callee("nothing"), None);
-    let (_, args) = kgen_build::instance(&module, "times::<2>").unwrap().unwrap();
+    let (_, args, _) = kgen_build::instance(&module, "times::<2>").unwrap().unwrap();
     let called = Called { name: "times::<2>".into(), function: "times".into(), args, callee: calls };
     let times = ptx.finish(written(&ptx, &module, "times::<2>", &[], &[])).unwrap();
     let k = ptx.finish(written(&ptx, &module, "k::<1>", &[], &[called])).unwrap();

@@ -80,17 +80,18 @@ fn a_cooperative_helper_is_refused() {
 }
 
 /// A name names a function that takes no compile-time arguments, or an instance of one, as
-/// `tile::<4>` names `tile` for 4. A name of no function, or of no instance its function has,
-/// names none.
+/// `tile::<4>` names `tile` for 4, the second it lists. A name of no function, or of no instance
+/// its function has, names none.
 #[test]
 fn an_instance_is_found_by_its_name() {
     let tile =
         "#[instances(2, 4)] unsafe extern \"sysv64\" fn tile<const N: u64>(x: u64) -> u64 { add(x, N); ret(x); }";
     let src = format!("{tile}\nunsafe extern \"sysv64\" fn k(x: u64) -> u64 {{ ret(x); }}");
     let module = parse(&src).unwrap();
-    let found = |name| instance(&module, name).unwrap().map(|(f, args)| (f.name.as_str(), args));
-    assert_eq!(found("tile::<4>"), Some(("tile", vec![Value::Int(4, Some(IntTy::U64))])));
-    assert_eq!(found("k"), Some(("k", vec![])));
+    let found = |name| instance(&module, name).unwrap().map(|(f, args, at)| (f.name.as_str(), args, at));
+    assert_eq!(found("tile::<2>"), Some(("tile", vec![Value::Int(2, Some(IntTy::U64))], 0)));
+    assert_eq!(found("tile::<4>"), Some(("tile", vec![Value::Int(4, Some(IntTy::U64))], 1)));
+    assert_eq!(found("k"), Some(("k", vec![], 0)));
     for none in ["tile::<3>", "tile", "k::<4>", "j"] {
         assert_eq!(found(none), None, "{none}");
     }
@@ -444,14 +445,14 @@ fn an_instance_says_which_when_it_fails() {
     let prepared = prepare(&module, &Echo);
     let compiled = |f, args: &[Value]| compile(&module, &prepared, &Echo, f, args).map(|_| ()).map_err(|e| e.at(src));
     let named = |name| instance(&module, name).unwrap().unwrap();
-    let (tile, four) = named("tile::<4>");
+    let (tile, four, _) = named("tile::<4>");
     assert_eq!(compiled(tile, &four), Err("2:17: in `tile::<4>`: a bool is no operand".into()));
-    let (_, two) = named("tile::<2>");
+    let (_, two, _) = named("tile::<2>");
     assert_eq!(compiled(tile, &two), Err("3:17: in `tile::<2>`: `fail_v` fails".into()));
-    let (k, none) = named("k");
+    let (k, none, _) = named("k");
     assert_eq!(compiled(k, &four), Err("5:31: `k` takes 0 compile-time arguments; this gives 1".into()));
     assert_eq!(compiled(k, &none), Err("5:41: a bool is no operand".into()));
-    let (f, one) = named("f::<1>");
+    let (f, one, _) = named("f::<1>");
     assert_eq!(compiled(f, &[]), Err("6:53: `f` takes 1 compile-time arguments; this gives 0".into()));
     let not = "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, `extern \"ptx-kernel\"` \
                or `extern \"sysv64\"`; `f` is a function the kernels call, which runs as the kernel that calls it is \
@@ -941,6 +942,19 @@ fn a_call_reaches_the_instance_its_code_names() {
     assert_eq!(twice.instances[0].calls, [call("tile", Some(1)), call("step", None)]);
     assert_eq!(address.instances[0].calls, [call("tile", Some(0))]);
     assert!(plain.instances[0].calls.is_empty() && !plain.written);
+}
+
+/// A function that takes no compile-time arguments and lists instances is wrong at its own item,
+/// which says so. A kernel that calls it still names it, whole, as it names any function of none.
+#[test]
+fn a_call_to_a_function_with_instances_it_cannot_have_names_it_whole() {
+    let src = "#[instances(2)] unsafe extern \"sysv64\" fn g(x: u64) { add(x, 1); }\n\
+               unsafe extern \"sysv64\" fn k(x: u64) { call(g, x); }";
+    let out = echoed(src);
+    let [ItemOut::Native(g), ItemOut::Native(k)] = &out.items[..] else { panic!("{:?}", out.items) };
+    let wrong = "1:3: `g` takes no compile-time arguments, so it is compiled once, with no `#[instances(..)]`";
+    assert_eq!(g.said.as_ref().map(|e| e.at(src)), Some(wrong.into()));
+    assert_eq!(k.instances[0].calls, [Call { function: "g".into(), instance: None }]);
 }
 
 /// Each item of a module of consts is a const known now, a const that is not, with why, or no

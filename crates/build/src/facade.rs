@@ -20,7 +20,7 @@ pub fn one<N: Native>(module: &Module, native: &N, name: &str) -> Result<Option<
     for s in &prepared.statics {
         s.as_ref().map_err(Clone::clone)?;
     }
-    let Some((f, args)) = instance(module, name)? else { return Ok(None) };
+    let Some((f, args, _)) = instance(module, name)? else { return Ok(None) };
     if !abi(f).is_some_and(Abi::native) {
         return Ok(None);
     }
