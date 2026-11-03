@@ -7,7 +7,8 @@ use kernite_cuda::{Buffer, Cuda, Error, Plain, f16};
 
 use crate::{Shape, cpu, floats, gpu, reference, tensor};
 
-/// The products each kernel is held to: the least, none, and of each size up to a few hundred.
+/// The products the GPU's kernels are held to: the least, none, and of each size up to a few
+/// hundred.
 const SHAPES: [Shape; 7] = [(1, 8, 1), (0, 8, 4), (5, 8, 0), (3, 16, 5), (6, 24, 33), (64, 64, 64), (100, 200, 300)];
 
 /// Asserts that `got` is `want` bit for bit, as products of `shape`.
@@ -35,9 +36,24 @@ fn on_gpu<T: Plain>(
     c.read().unwrap()
 }
 
+/// The products `cpu::sgemm` is held to: none in each of `m`, `n` and `k`, and the least; then
+/// each size the kernel works in, one less, equal and one more, the others small: `MR` and
+/// `MC` of `m`, `NR` and `NC` of `n`, `UNROLL` and `KC` of `k`; and one past a block in each at
+/// once.
+fn cpu_shapes() -> Vec<Shape> {
+    use cpu::kernels::{KC, MC, MR, NC, NR, UNROLL};
+    let around = |x: usize| [x - 1, x, x + 1];
+    let mut shapes = vec![(0, NR, 3), (MR, 0, 3), (MR, NR, 0), (1, 1, 1)];
+    shapes.extend([MR, MC].into_iter().flat_map(around).map(|m| (m, NR + 1, 9)));
+    shapes.extend([NR, NC].into_iter().flat_map(around).map(|n| (MR + 1, n, 9)));
+    shapes.extend([UNROLL, KC].into_iter().flat_map(around).map(|k| (MR + 1, NR + 1, k)));
+    shapes.push((MC + 1, 3 * NR + 5, 2 * KC + 1));
+    shapes
+}
+
 #[test]
 fn cpu_sgemm_is_the_reference_bit_for_bit() {
-    for shape @ (m, n, k) in SHAPES {
+    for shape @ (m, n, k) in cpu_shapes() {
         let (a, b) = (floats(m * k, 1), floats(k * n, 2));
         let mut c = vec![f32::NAN; m * n];
         cpu::sgemm(&mut c, &a, &b, shape);
