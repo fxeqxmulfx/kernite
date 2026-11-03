@@ -1,6 +1,8 @@
 //! The evaluator: a kernel's body run at compile time, its loops unrolled and its helpers
 //! inlined, as calls into the [`Target`] that builds the machine's instructions.
 
+use std::rc::Rc;
+
 use crate::ast::{BinOp, Block, Const, Expr, Fn, Generic, ItemKind, Module, Static, Stmt, Type, UnOp};
 use crate::target::{Fault, Guard, Mem, Operand, Target};
 use crate::token::Span;
@@ -51,9 +53,7 @@ pub fn constant(module: &Module, c: &Const) -> Result<Value, Error> {
     let mut e = Eval::new(module, &mut consts);
     let i = e.consts.iter().position(|(k, _)| std::ptr::eq(*k, c)).expect("a constant of the module");
     e.consts[i].1 = State::Busy;
-    let v = e.constant(c)?;
-    e.consts[i].1 = State::Done(v.clone());
-    Ok(v)
+    e.constant(c)
 }
 
 /// Runs `f` of `module` on `target`, a kernel or another function that names an ABI, for the
@@ -64,7 +64,7 @@ pub fn kernel<T: Target>(module: &Module, f: &Fn, args: &[Value], target: &mut T
     let mut e = Eval::new(module, target);
     e.listed(f)?;
     let mut scope: Scope<T::Var> =
-        f.generics.iter().zip(args).map(|(g, a)| (g.name.clone(), Binding::Value(a.clone()))).collect();
+        f.generics.iter().zip(args).map(|(g, a)| (g.name.clone(), Binding::Value(Rc::new(a.clone())))).collect();
     for p in &f.params {
         let Type::Name(ty, span) = &p.ty else {
             return Err(err(p.ty.span(), "a function that names an ABI takes values the machine passes, not arrays"));
@@ -187,7 +187,7 @@ fn err(span: Span, message: impl Into<String>) -> Error {
 #[derive(Clone, Debug)]
 enum Binding<V> {
     /// A value known now.
-    Value(Value),
+    Value(Rc<Value>),
     /// A variable.
     Var(V),
     /// Variables declared together, `let acc: [ymm; 4]`.
@@ -217,7 +217,7 @@ type Scope<V> = Vec<(String, Binding<V>)>;
 enum State {
     Waiting,
     Busy,
-    Done(Value),
+    Done(Rc<Value>),
 }
 
 /// An address on its way: variables with what each is multiplied by, and bytes added.
@@ -293,6 +293,23 @@ impl<'a, T: Target> Eval<'a, T> {
         Ok(self.statics.iter().position(|(s, _)| s.name == name).map(Binding::Static))
     }
 
+    /// The value of `e`, which must be known now: lent where it is held, if `e` names it.
+    fn lent(&mut self, e: &Expr, want: Want) -> Result<Rc<Value>, Error> {
+        let at = |m: String| err(e.span(), m);
+        match e {
+            Expr::Path(path, span) if path.len() == 1 => match self.lookup(&path[0], *span)? {
+                Some(Binding::Value(v)) => Ok(v),
+                Some(b) => Err(at(format!(
+                    "`{}` is {}, known only when the kernel runs; this wants a value known now",
+                    path[0],
+                    b.kind()
+                ))),
+                None => Err(at(format!("`{}` is not defined", path[0]))),
+            },
+            _ => self.value(e, want).map(Rc::new),
+        }
+    }
+
     /// The variable the module's static `i` is, named at `span`: the target makes it the first
     /// time.
     fn static_var(&mut self, i: usize, span: Span) -> Result<T::Var, Error> {
@@ -306,7 +323,7 @@ impl<'a, T: Target> Eval<'a, T> {
 
     /// The module constant `name`, evaluated the first time it is named, in a scope of
     /// constants alone.
-    fn global(&mut self, name: &str, span: Span) -> Result<Option<Value>, Error> {
+    fn global(&mut self, name: &str, span: Span) -> Result<Option<Rc<Value>>, Error> {
         let Some(i) = self.consts.iter().position(|(c, _)| c.name == name) else {
             return Ok(None);
         };
@@ -320,7 +337,7 @@ impl<'a, T: Target> Eval<'a, T> {
         let outer = std::mem::take(&mut self.scopes);
         let v = self.constant(c);
         self.scopes = outer;
-        let v = v?;
+        let v = Rc::new(v?);
         self.consts[i].1 = State::Done(v.clone());
         Ok(Some(v))
     }
@@ -501,15 +518,7 @@ impl<'a, T: Target> Eval<'a, T> {
             Expr::Lit(text, _) => value::literal(text, want).map_err(at),
             Expr::Bool(b, _) => Ok(Value::Bool(*b)),
             Expr::Str(..) => Err(at("a string is no value here; `note(\"..\")` takes one".into())),
-            Expr::Path(path, span) if path.len() == 1 => match self.lookup(&path[0], *span)? {
-                Some(Binding::Value(v)) => Ok(v),
-                Some(b) => Err(at(format!(
-                    "`{}` is {}, known only when the kernel runs; this wants a value known now",
-                    path[0],
-                    b.kind()
-                ))),
-                None => Err(at(format!("`{}` is not defined", path[0]))),
-            },
+            Expr::Path(path, _) if path.len() == 1 => self.lent(e, want).map(Rc::unwrap_or_clone),
             Expr::Path(path, _) => {
                 let p = path.join("::");
                 value::path(&p).ok_or_else(|| at(format!("`{p}` is not a constant kgen knows")))
@@ -520,7 +529,7 @@ impl<'a, T: Target> Eval<'a, T> {
             }
             Expr::Index(base, index, _) => {
                 let i = self.count(index)?;
-                match self.value(base, want)? {
+                match &*self.lent(base, want)? {
                     Value::Array(xs) => xs
                         .get(i)
                         .cloned()
@@ -550,7 +559,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 _ => Err(at("a call is a statement: an instruction or a helper, not a value".into())),
             },
             Expr::Method { recv, name, args, .. } => {
-                let recv = self.value(recv, want)?;
+                let recv = self.lent(recv, want)?;
                 let args = args.iter().map(|a| self.value(a, Want::Any)).collect::<Result<Vec<_>, _>>()?;
                 value::method(&recv, name, &args).map_err(at)
             }
@@ -667,7 +676,7 @@ impl<'a, T: Target> Eval<'a, T> {
         }
         match self.place(e)? {
             Some(v) => Ok(Binding::Var(v)),
-            None => Ok(Binding::Value(self.value(e, Want::Any)?)),
+            None => Ok(Binding::Value(Rc::new(self.value(e, Want::Any)?))),
         }
     }
 
@@ -693,7 +702,7 @@ impl<'a, T: Target> Eval<'a, T> {
             Expr::Path(path, span) if path.len() == 1 => match self.lookup(&path[0], *span)? {
                 Some(Binding::Var(v)) => Ok(Operand::Var(v)),
                 Some(Binding::Static(i)) => self.static_var(i, *span).map(Operand::Var),
-                Some(Binding::Value(v)) => scalar(v, *span),
+                Some(Binding::Value(v)) => scalar(&v, *span),
                 Some(Binding::Vars(vs)) => Ok(Operand::Vector(vs.into_iter().map(Operand::Var).collect())),
                 Some(Binding::Label(l)) => Ok(Operand::Label(l)),
                 None => self.unscoped(&path[0], *span),
@@ -711,7 +720,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 Some(v) => Ok(Operand::Var(v)),
                 None => match self.unbound(base)? {
                     Some(word) => Ok(Operand::Sized(word, Box::new(self.memory(index, *span)?))),
-                    None => scalar(self.value(e, Want::Any)?, e.span()),
+                    None => scalar(&self.value(e, Want::Any)?, e.span()),
                 },
             },
             Expr::Array(items, span) => match items.as_slice() {
@@ -738,7 +747,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 Err(err(*span, "an array is data; in brackets, `[[x; n]]`, it is memory that holds it"))
             }
             Expr::Str(_, span) => Err(err(*span, "a string is no operand; `note(\"..\")` takes one")),
-            _ => scalar(self.value(e, Want::Any)?, e.span()),
+            _ => scalar(&self.value(e, Want::Any)?, e.span()),
         }
     }
 
@@ -924,12 +933,14 @@ impl<'a, T: Target> Eval<'a, T> {
             Stmt::Let { name, span, ty, value } => self.let_(name, *span, ty.as_ref(), value.as_ref()),
             Stmt::Const(c) => {
                 let v = self.constant(c)?;
-                self.bind(&c.name, Binding::Value(v));
+                self.bind(&c.name, Binding::Value(Rc::new(v)));
                 Ok(())
             }
             Stmt::For { var, iter, body, .. } => {
                 let items: Vec<Binding<T::Var>> = match self.binding(iter)? {
-                    Binding::Value(Value::Array(xs)) => xs.into_iter().map(Binding::Value).collect(),
+                    Binding::Value(ref v) if let Value::Array(xs) = &**v => {
+                        xs.iter().map(|x| Binding::Value(Rc::new(x.clone()))).collect()
+                    }
                     Binding::Vars(vs) => vs.into_iter().map(Binding::Var).collect(),
                     other => {
                         return Err(err(
@@ -993,7 +1004,7 @@ impl<'a, T: Target> Eval<'a, T> {
             (None, Some(e)) => self.binding(e)?,
             (Some(t), Some(e)) => {
                 let v = self.value(e, want(t))?;
-                Binding::Value(self.typed(v, t, e.span())?)
+                Binding::Value(Rc::new(self.typed(v, t, e.span())?))
             }
             (None, None) => {
                 return Err(err(
@@ -1175,7 +1186,7 @@ impl<'a, T: Target> Eval<'a, T> {
             ));
         }
         let values = self.generics(f, generics)?;
-        let scope = f.generics.iter().zip(values).map(|(g, v)| (g.name.clone(), Binding::Value(v))).collect();
+        let scope = f.generics.iter().zip(values).map(|(g, v)| (g.name.clone(), Binding::Value(Rc::new(v)))).collect();
         let given = args.iter().map(|a| self.binding(a)).collect::<Result<Vec<_>, _>>()?;
         let outer = std::mem::replace(&mut self.scopes, vec![scope]);
         let r = self.params(f, args, given).and_then(|()| {
@@ -1225,8 +1236,8 @@ impl<'a, T: Target> Eval<'a, T> {
 }
 
 /// What a value known now gives an instruction.
-fn scalar<V>(v: Value, span: Span) -> Result<Operand<V>, Error> {
-    match v {
+fn scalar<V>(v: &Value, span: Span) -> Result<Operand<V>, Error> {
+    match *v {
         Value::Int(x, _) if (i128::from(i64::MIN)..=i128::from(u64::MAX)).contains(&x) => Ok(Operand::Int(x)),
         Value::Int(x, _) => Err(err(span, format!("{x} is wider than 64 bits"))),
         Value::F32(x) => Ok(Operand::F32(x)),
