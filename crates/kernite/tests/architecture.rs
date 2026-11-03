@@ -16,8 +16,9 @@ const RULE: &[(&str, &[&str])] = &[
     ("kernite-build", &["kernite-lang"]),
     ("kernite-x86", &["kernite-core", "kernite-lang", "kernite-compile", "kernite-build"]),
     ("kernite-ptx", &["kernite-core", "kernite-lang", "kernite-compile", "kernite-build"]),
-    // kernite-core is a dev-dependency: the tests of PTX read the items of an entry.
-    ("kernite", &["kernite-core", "kernite-lang", "kernite-build", "kernite-x86", "kernite-ptx"]),
+    // kernite-core and kernite-compile are dev-dependencies: the tests of PTX read the items of an
+    // entry, and those of x86 compile what the builder wrote.
+    ("kernite", &["kernite-core", "kernite-compile", "kernite-lang", "kernite-build", "kernite-x86", "kernite-ptx"]),
     ("kernite-macros", &["kernite"]),
     ("kernite-cuda", &[]),
     ("kernite-cpu", &[]),

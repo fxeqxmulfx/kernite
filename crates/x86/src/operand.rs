@@ -88,7 +88,8 @@ impl Slot {
 }
 
 /// An address: a base, maybe an index register times a scale, and a displacement. How
-/// much it covers, the instruction says.
+/// much it covers, the instruction says. [`Gpr::times`], [`Ymm::times`] and [`Xmm::times`] make
+/// one with an index and no base.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Addr {
     pub(crate) base: Base<VReg>,
@@ -101,9 +102,46 @@ impl Gpr {
     pub fn at(self, disp: i32) -> Addr {
         Addr { base: Base::Reg(self.0), index: None, disp }
     }
+
+    /// The address of it times `scale`, with no base: `[g*4]`. x86 writes it with a 32-bit
+    /// displacement, 0 unless [`Addr::plus`] adds one.
+    ///
+    /// # Panics
+    ///
+    /// On a scale other than 1, 2, 4 or 8, as [`Addr::index`] does.
+    pub fn times(self, scale: u8) -> Addr {
+        Addr::NOTHING.index(self, scale)
+    }
+}
+
+impl Ymm {
+    /// The address of eight 32-bit offsets in it times `scale`, with no base: `[v*4]`, for an AVX2
+    /// gather. x86 writes it with a 32-bit displacement, 0 unless [`Addr::plus`] adds one.
+    ///
+    /// # Panics
+    ///
+    /// On a scale other than 1, 2, 4 or 8, as [`Addr::index`] does.
+    pub fn times(self, scale: u8) -> Addr {
+        Addr::NOTHING.index_ymm(self, scale)
+    }
+}
+
+impl Xmm {
+    /// The address of four 32-bit offsets in it times `scale`, with no base: `[v*8]`, for an AVX2
+    /// quadword gather. x86 writes it with a 32-bit displacement, 0 unless [`Addr::plus`] adds one.
+    ///
+    /// # Panics
+    ///
+    /// On a scale other than 1, 2, 4 or 8, as [`Addr::index`] does.
+    pub fn times(self, scale: u8) -> Addr {
+        Addr::NOTHING.index_xmm(self, scale)
+    }
 }
 
 impl Addr {
+    /// No base, no index and no displacement: what an address that is an index alone starts as.
+    const NOTHING: Addr = Addr { base: Base::None, index: None, disp: 0 };
+
     /// `disp` bytes further on.
     pub fn plus(self, disp: i32) -> Addr {
         Addr { disp: self.disp + disp, ..self }
@@ -116,26 +154,33 @@ impl Addr {
     /// On a scale other than 1, 2, 4 or 8, a second index, or an index on a constant,
     /// whose address is relative to the instruction and takes none.
     pub fn index(self, by: Gpr, scale: u8) -> Addr {
-        assert!(matches!(scale, 1 | 2 | 4 | 8), "scale {scale}");
-        assert!(self.index.is_none(), "one index to an address");
-        assert!(!matches!(self.base, Base::Const(_)), "a constant's address takes no index");
-        Addr { index: Some((by.0, scale)), ..self }
+        self.indexed(by.0, scale)
     }
 
     /// Plus eight 32-bit offsets in a YMM register, for an AVX2 gather.
+    ///
+    /// # Panics
+    ///
+    /// As [`Addr::index`] does.
     pub fn index_ymm(self, by: Ymm, scale: u8) -> Addr {
-        assert!(matches!(scale, 1 | 2 | 4 | 8), "scale {scale}");
-        assert!(self.index.is_none(), "one index to an address");
-        assert!(!matches!(self.base, Base::Const(_)), "a constant's address takes no index");
-        Addr { index: Some((by.0, scale)), ..self }
+        self.indexed(by.0, scale)
     }
 
     /// Plus four 32-bit offsets in an XMM register, for an AVX2 quadword gather.
+    ///
+    /// # Panics
+    ///
+    /// As [`Addr::index`] does.
     pub fn index_xmm(self, by: Xmm, scale: u8) -> Addr {
+        self.indexed(by.0, scale)
+    }
+
+    /// `by` times `scale` as the one index of the address: the rules for an index are kept here.
+    fn indexed(self, by: VReg, scale: u8) -> Addr {
         assert!(matches!(scale, 1 | 2 | 4 | 8), "scale {scale}");
         assert!(self.index.is_none(), "one index to an address");
         assert!(!matches!(self.base, Base::Const(_)), "a constant's address takes no index");
-        Addr { index: Some((by.0, scale)), ..self }
+        Addr { index: Some((by, scale)), ..self }
     }
 
     pub(crate) fn mem(self, width: Width) -> Operand<VReg> {

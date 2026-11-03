@@ -7,7 +7,7 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use kernite_x86::forms::{self, Form, Kind};
-use kernite_x86::{Asm, Feature};
+use kernite_x86::{Asm, Feature, SysV, intel};
 
 /// The kernels of `examples/my-app`, and the same dot product with sixteen accumulators.
 const KERNELS: &str = r#"
@@ -261,6 +261,7 @@ fn an_index_with_no_base_has_a_32_bit_displacement() {
     let cases = [
         ("lea(x, [n * 4]);", "lea rdi, [rsi*4]", "48 8d 3c b5 00 00 00 00"),
         ("lea(x, [n * 2]);", "lea rdi, [rsi*2]", "48 8d 3c 75 00 00 00 00"),
+        ("lea(x, [n * 4 + 8]);", "lea rdi, [rsi*4 + 8]", "48 8d 3c b5 08 00 00 00"),
         ("lea(x, [n * 4 - 8]);", "lea rdi, [rsi*4 - 8]", "48 8d 3c b5 f8 ff ff ff"),
         (
             "let v: ymm; vmovups(v, [n * 8 + 32]);",
@@ -300,11 +301,18 @@ fn addresses_encode(name: &str, cases: &[(&str, &str, &str)]) {
         let code = compile("x: *const f32, n: usize", body).unwrap_or_else(|e| panic!("{e}, of {body}"));
         assert!(code.lines().any(|l| l == line), "{line} is not a line of\n{code}\nof {body}");
     }
+    let encoded: Vec<_> = cases.iter().map(|&(_, line, bytes)| (line, bytes)).collect();
+    encode(name, &encoded);
+}
+
+/// Each of `cases`, a line of a listing and the bytes x86 encodes it as, holds: `llvm-mc` and GNU
+/// as, where they are here, make those bytes of it. `name` is for the files they read.
+fn encode(name: &str, cases: &[(&str, &str)]) {
     let (Some(mc), Some(gnu)) = (tool("LLVM_MC", "llvm-mc"), tool("GNU_AS", "as")) else {
         eprintln!("no llvm-mc or GNU as here: skipped; set LLVM_MC and GNU_AS to run it");
         return;
     };
-    let lines: Vec<&str> = cases.iter().map(|&(_, line, _)| line).collect();
+    let lines: Vec<&str> = cases.iter().map(|&(line, _)| line).collect();
     let (text, at) = source(&lines);
     let (ok, out, said) =
         assemble(&mc, &["-triple=x86_64", "-x86-asm-syntax=intel", "-show-encoding"], &format!("{name}-mc.s"), &text);
@@ -313,7 +321,7 @@ fn addresses_encode(name: &str, cases: &[(&str, &str, &str)]) {
     let made = out.lines().filter_map(|l| l.split_once("encoding: [")).map(|(_, e)| {
         e.trim_end_matches(']').split(',').map(|b| b.trim_start_matches("0x")).collect::<Vec<_>>().join(" ")
     });
-    for ((_, line, want), made) in cases.iter().zip(made) {
+    for ((line, want), made) in cases.iter().zip(made) {
         assert_eq!(made, *want, "llvm-mc, of {line}");
     }
     // GNU as's listing has a line's number, its offset and up to four of its bytes in hex in a
@@ -328,7 +336,7 @@ fn addresses_encode(name: &str, cases: &[(&str, &str, &str)]) {
             made[i].extend((0..hex.len()).step_by(2).map(|k| &hex[k..k + 2]));
         }
     }
-    for ((_, line, want), made) in cases.iter().zip(made) {
+    for ((line, want), made) in cases.iter().zip(made) {
         assert_eq!(made.join(" ").to_lowercase(), *want, "GNU as, of {line}");
     }
 }
@@ -659,12 +667,56 @@ ret";
     assert_eq!(code, want);
 }
 
-/// The builder takes no more of an immediate than x86 reads, as the language does not.
+/// A program built in Rust writes an index with no base as the language does: `n.times(4)` is
+/// `[rsi*4]`, and `plus` puts a displacement after it, in the bytes of the language's `[n * 4]` and
+/// `[n * 4 + 8]`. A gather's vector of indices is written so too: `i.times(4)` is `[ymm2*4]`, and
+/// `i.xmm().times(8)` is `[xmm2*8]`, in the bytes of the language's `vpgatherdd(v, [i * 4], m)` and
+/// `vpgatherdq(v, [i.xmm * 8], m)`. Only the builder writes a scale of 1 of a gpr, `[rsi*1]`, where
+/// the language writes a base, `[n]`.
+#[test]
+fn the_builder_writes_an_index_with_no_base() {
+    let mut a = Asm::new("k");
+    let (x, n) = (a.param("x"), a.param("n"));
+    let (v, m, i) = (a.ymm("v"), a.ymm("m"), a.ymm("i"));
+    a.zero(v);
+    a.ones(m);
+    a.zero(i);
+    a.lea(x, n.times(1));
+    a.lea(x, n.times(2));
+    a.lea(x, n.times(4));
+    a.lea(x, n.times(4).plus(8));
+    a.lea(x, n.times(8).plus(-8));
+    a.vpgatherdd(v, i.times(4), m);
+    a.ones(m);
+    a.vpgatherdd(v, i.times(8).plus(-8), m);
+    a.ones(m);
+    a.vpgatherdq(v, i.xmm().times(8), m);
+    a.ret();
+    let listing = intel::print(&kernite_compile::compile(&a.finish(), &SysV).unwrap(), vec![]).unwrap();
+    let cases = [
+        ("lea rdi, [rsi*1]", "48 8d 3c 35 00 00 00 00"),
+        ("lea rdi, [rsi*2]", "48 8d 3c 75 00 00 00 00"),
+        ("lea rdi, [rsi*4]", "48 8d 3c b5 00 00 00 00"),
+        ("lea rdi, [rsi*4 + 8]", "48 8d 3c b5 08 00 00 00"),
+        ("lea rdi, [rsi*8 - 8]", "48 8d 3c f5 f8 ff ff ff"),
+        ("vpgatherdd ymm0, dword ptr [ymm2*4], ymm1", "c4 e2 75 90 04 95 00 00 00 00"),
+        ("vpgatherdd ymm0, dword ptr [ymm2*8 - 8], ymm1", "c4 e2 75 90 04 d5 f8 ff ff ff"),
+        ("vpgatherdq ymm0, qword ptr [xmm2*8], ymm1", "c4 e2 f5 90 04 d5 00 00 00 00"),
+    ];
+    for (line, _) in cases {
+        assert!(listing.code().any(|l| l == line), "{line} is not a line of\n{}", listing.text());
+    }
+    encode("builder", &cases);
+}
+
+/// The builder takes no more of an immediate than x86 reads, nor a scale x86 has not, as the
+/// language does not.
 #[test]
 fn the_builder_refuses_what_x86_would_not_read() {
     let refused = |want: &str, build: fn(&mut Asm)| {
         let e = std::panic::catch_unwind(|| build(&mut Asm::new("k"))).expect_err(want);
-        assert_eq!(e.downcast_ref::<String>().map(String::as_str), Some(want));
+        let said = e.downcast_ref::<String>().map(String::as_str).or(e.downcast_ref::<&str>().copied());
+        assert_eq!(said, Some(want));
     };
     refused("shl by 64: x86 shifts a gpr by 0 to 63", |a| {
         let g = a.gpr("g");
@@ -685,6 +737,23 @@ fn the_builder_refuses_what_x86_would_not_read() {
     refused("vpblendd of 4 lanes by 0x10", |a| {
         let v = a.ymm("v").xmm();
         a.vpblendd(v, v, v, 0x10);
+    });
+    refused("scale 3", |a| {
+        a.gpr("g").times(3);
+    });
+    refused("scale 16", |a| {
+        a.ymm("v").times(16);
+    });
+    refused("scale 0", |a| {
+        a.ymm("v").xmm().times(0);
+    });
+    refused("one index to an address", |a| {
+        let (g, v) = (a.gpr("g"), a.ymm("v"));
+        g.at(0).index(g, 4).index_ymm(v, 4);
+    });
+    refused("a constant's address takes no index", |a| {
+        let g = a.gpr("g");
+        a.u32s(&[1]).index(g, 4);
     });
     let mut a = Asm::new("k");
     let (g, v) = (a.gpr("g"), a.ymm("v"));
