@@ -709,7 +709,7 @@ fn a_static_is_reached_at_a_displacement_from_rip() {
 fn a_static_is_rusts_numbers_holding_what_it_says() {
     let module = kgen::lang::parse(STATICS).unwrap();
     let statics: Vec<_> = kgen::x86_statics(&module).into_iter().map(Result::unwrap).collect();
-    let shape = |s: &kgen::X86Static| (s.name.clone(), s.elem, s.size, s.len, s.align, s.constant);
+    let shape = |s: &kgen_x86::lang::Static| (s.name.clone(), s.elem, s.size, s.len, s.align, s.constant);
     let shapes: Vec<_> = statics.iter().map(|s| shape(&s.code)).collect();
     assert_eq!(
         shapes,
