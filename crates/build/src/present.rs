@@ -16,6 +16,12 @@ pub(crate) enum Refusal<'a> {
     TwoKinds,
     /// `#[cooperative]` on function `name`, which is no kernel but `of`.
     Cooperative { name: &'a str, of: Of },
+    /// A function of ABI `abi`, which kgen compiles nothing for.
+    UnknownAbi { abi: &'a str },
+    /// A kernel that is not an `unsafe fn`.
+    NotUnsafe,
+    /// An item of the module's own named `name`, as a const it takes from module `from` is.
+    GivenTwice { name: &'a str, from: &'a str },
 }
 
 /// `r`, in words, at `span`.
@@ -36,6 +42,14 @@ pub(crate) fn said(r: Refusal<'_>, span: Span) -> Error {
                 "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, `extern \"ptx-kernel\"` \
                  or `extern \"sysv64\"`; `{name}` is {what}"
             )
+        }
+        Refusal::UnknownAbi { abi } => format!(
+            "kgen compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for NVIDIA \
+             GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"{abi}\"` is none of these"
+        ),
+        Refusal::NotUnsafe => "a kernel trusts the pointers it is given, so it is an `unsafe fn`".to_string(),
+        Refusal::GivenTwice { name, from } => {
+            format!("`{name}` names one of the consts the module takes from `{from}` as well")
         }
     };
     Error { span, message }

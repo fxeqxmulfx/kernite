@@ -1,5 +1,6 @@
-//! What a module's items are, whatever machine compiles them: the ABI each function names, whose
-//! memory its statics are, which kernels are cooperative, and which function an instance's name
+//! What a module's items are, whatever machine compiles them: the ABI each function names,
+//! whether a kernel is the `unsafe fn` it must be, whose memory the module's statics are, which
+//! kernels are cooperative, what is wrong with a helper, and which function an instance's name
 //! names.
 
 use kgen_lang::{Fn, ItemKind, Module, Value};
@@ -43,6 +44,13 @@ impl Abi {
 /// The ABI `f` names, if kgen compiles for it.
 pub fn abi(f: &Fn) -> Option<Abi> {
     f.abi.as_ref().and_then(|(abi, _)| Abi::of(abi))
+}
+
+/// Whether `f`, of ABI `abi`, is an `unsafe fn` if it must be: a kernel trusts the pointers it is
+/// given, so it is one. A function the kernels call is called by nothing else, so it promises
+/// Rust nothing, and need not be.
+pub(crate) fn trusted(f: &Fn, abi: Abi) -> bool {
+    abi == Abi::PtxFunc || f.unsafe_fn
 }
 
 /// Whose memory a module's statics are: its kernels'.
@@ -96,6 +104,14 @@ pub fn cooperative(f: &Fn) -> Result<bool, kgen_lang::Error> {
         (None, None) => Of::Helper,
     };
     Err(said(Refusal::Cooperative { name: &f.name, of }, c.span))
+}
+
+/// What is wrong with `f`, a helper of `module`, whether it is called or not: its body, if it
+/// does not parse, its `#[instances(..)]`, then its `#[cooperative]`, in that order. The rest is
+/// checked where it is called.
+pub(crate) fn helper(module: &Module, f: &Fn) -> Vec<kgen_lang::Error> {
+    let errors = [f.body.as_ref().err().cloned(), kgen_lang::instances(module, f).err(), cooperative(f).err()];
+    errors.into_iter().flatten().collect()
 }
 
 /// The function `name` of `module`.
