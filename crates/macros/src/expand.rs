@@ -103,7 +103,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
     if !made.listings.is_empty() {
         let mut s = String::from(
             "/// Each x86 kernel's listing, by name, an instance's as `tile::<4>`: where its variables\n\
-             /// live, and its code with its notes, for snapshots.\n#[allow(dead_code)]\n\
+             /// live, and its code with its notes, for snapshots.\n\
              pub const LISTINGS: &[(&str, &str)] = &[",
         );
         for (name, text) in &made.listings {
@@ -133,7 +133,7 @@ fn take(made: &ModuleOut, top: &[TokenTree], path: &[TokenTree]) -> TokenStream 
             names.extend(parse(","));
         }
     }
-    let mut out = parse("#[allow(unused_imports)] use");
+    let mut out = parse("use");
     match path {
         [first, ..] if is_ident(first, "crate") || is_punct(first, ':') => out.extend(path.iter().cloned()),
         [first, rest @ ..] if is_ident(first, "self") => {

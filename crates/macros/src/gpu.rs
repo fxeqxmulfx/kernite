@@ -7,7 +7,8 @@ use kgen::DeviceStatic;
 use kgen::lang::{self, Fn, Value};
 
 use crate::rust::{
-    attrs, clashes, error, flatten, host, hygienic, is_ident, is_punct, parse, pick, site, visibility, written_params,
+    attrs, clashes, error, flatten, host, hygienic, is_ident, is_punct, never, parse, pick, site, visibility,
+    written_params,
 };
 
 /// Where the module's path goes in its PTX and in its kernels' names. A macro is not told
@@ -41,13 +42,10 @@ pub(crate) fn gpu(
          /// Each is named as C++ names it in the namespaces of the workspace, the crate and the\n\
          /// module, with its compile-time arguments, for the tools that read PTX to show:\n\
          /// `kgen::my_app::gpu::tile<(unsigned long)4>`.\n\
-         #[allow(dead_code)]\n\
          pub const PTX: &str = {};\n\
          /// The module's GPU kernels, loaded on a GPU: each is launched by the method of its name,\n\
          /// and the memory of each static is the `kgen_cuda::Global` the method of its name gives.\n\
-         #[allow(dead_code)]\n\
          pub struct Kernels {{\n    module: ::kgen_cuda::Module,\n}}\n\
-         #[allow(dead_code)]\n\
          impl Kernels",
         named(ptx)
     ));
@@ -94,11 +92,13 @@ pub(crate) fn gpu(
 /// as; or one that never runs, for a static that did not compile.
 fn accessor(s: &lang::Static, made: Option<(&DeviceStatic, usize)>, top: &[TokenTree]) -> TokenStream {
     let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
-    out.extend(parse("#[allow(non_snake_case)]"));
     out.extend(top[s.vis.clone()].iter().cloned());
     out.extend(parse("fn"));
-    // Its name as written, after `static`.
-    out.extend([top[s.vis.end + 1].clone()]);
+    // Its name as written, after `static`, where it is but of the macro's span: Rust lints the case
+    // of a name the user wrote, and `COUNTS` is the name of a method, not of a static.
+    let mut name = top[s.vis.end + 1].clone();
+    name.set_span(name.span().resolved_at(site()));
+    out.extend([name]);
     out.extend(parse(&match made {
         Some((m, i)) => {
             let ty = host(&[TokenTree::Ident(Ident::new(&m.host, site()))]);
@@ -139,11 +139,10 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
              kernel reads and writes through it.\"]",
         ));
     }
-    out.extend(parse(if launched.is_some() {
-        "#[allow(clippy::too_many_arguments)]"
-    } else {
-        "#[allow(clippy::too_many_arguments, unused_variables)]"
-    }));
+    // Clippy says "too many arguments" of a function of more than seven parameters wherever its
+    // tokens come from, and the launcher takes `self` and the grid as well: so it allows that, and
+    // a crate of kernels may not forbid `clippy::too_many_arguments`.
+    out.extend(parse("#[allow(clippy::too_many_arguments)]"));
     // Its visibility, then `unsafe fn` and its name and generics as written.
     out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("unsafe fn"));
@@ -167,24 +166,23 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, params))]);
     out.extend(parse("-> ::core::result::Result<(), ::kgen_cuda::Error>"));
     let how = if f.cooperative.is_some() { "launch_cooperative" } else { "launch" };
-    out.extend(body(f, launched, top, |index| {
+    out.extend(body(f, launched, top, &never(f, top), |index| {
         format!("unsafe {{ self.module.{how}({index}, $grid, &[{}]) }}", args.join(", "))
     }));
     out.extend(clashes);
     out
 }
 
-/// The method that says how many blocks a grid of `f`, a cooperative kernel, has at most, for
-/// each of its instances `launched`: as many as the GPU runs at once, of so many threads and
-/// so much of the launch's shared memory. It keeps what `f` says of lints and of whether it is
-/// there, and nothing else: each `allow`, `warn`, `deny` and `forbid` as written, each `expect`
-/// as an `allow` of the same lints, and `cfg`, `deprecated` and `doc(hidden)`; each alone or in a
-/// `cfg_attr(..)`. It has docs of its own, not those of `f`. The launcher alone keeps what `f`
-/// says of its code or its symbol, as `target_feature` and `export_name` do. The launcher meets
-/// an expectation of a parameter of `f`, and this method, which takes none of them, might not: so
-/// an `expect` is an `allow` here. The method binds `threads` and `shared` for itself, which a
-/// compile-time argument of `f` may not be named: an error at its name, and the method never runs,
-/// as one of a kernel that did not compile.
+/// The method that says how many blocks a grid of `f`, a cooperative kernel, has at most, for each
+/// of its instances `launched`: as many as the GPU runs at once, of so many threads and so much of
+/// the launch's shared memory. It keeps what `f` says of whether it is there, and nothing else:
+/// `cfg`, `deprecated` and `doc(hidden)`, each alone or in a `cfg_attr(..)`. It has docs of its
+/// own, not those of `f`. The launcher alone keeps what `f` says of lints, of its code or of its
+/// symbol, as `allow`, `target_feature` and `export_name` do. The method's name and generics are
+/// where `f` has its own, but of the macro's span: Rust lints neither, and says a lint of a
+/// compile-time argument once, at the launcher. The method binds `threads` and `shared` for itself,
+/// which a compile-time argument of `f` may not be named: an error at its name, and the method
+/// never runs, as one of a kernel that did not compile.
 fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStream {
     let clashes = clashes(f, &["threads", "shared"], &format!("`{}`", blocks_name(f)), top);
     let launched = if clashes.is_empty() { launched } else { None };
@@ -201,17 +199,24 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
         kept.set_span(group.span());
         out.extend([hash.clone(), kept.into()]);
     }
-    // Its visibility, then `fn`, its name and the generics of `f` as written: its name is
-    // where `f`'s is, for an error or a reader to find.
+    // Its visibility, then `fn`, its name and the generics of `f`: the name and the generics
+    // where `f` has its own, for an error or a reader to find, but of the macro's span.
     out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("fn"));
-    out.extend([TokenTree::Ident(Ident::new(&blocks_name(f), top[f.head.end + 1].span()))]);
-    out.extend(top[f.head.end + 2..f.params_at].iter().cloned());
+    let name = top[f.head.end + 1].span().resolved_at(site());
+    out.extend([TokenTree::Ident(Ident::new(&blocks_name(f), name))]);
+    out.extend(top[f.head.end + 2..f.params_at].iter().map(|t| {
+        let mut t = t.clone();
+        t.set_span(t.span().resolved_at(site()));
+        t
+    }));
     out.extend(hygienic(
         "(&self, $threads: u32, $shared: u32) -> ::core::result::Result<u32, ::kgen_cuda::Error>",
         launched.is_some(),
     ));
-    out.extend(body(f, launched, top, |index| format!("self.module.resident({index}, $threads, $shared)")));
+    out.extend(body(f, launched, top, "::core::unreachable!()", |index| {
+        format!("self.module.resident({index}, $threads, $shared)")
+    }));
     out.extend(clashes);
     out
 }
@@ -219,18 +224,14 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
 /// What the method of `blocks` keeps of an attribute of a kernel's, `meta` the tokens in its
 /// brackets; `None` if nothing. Of a `cfg_attr(..)`, it keeps the condition and what it keeps of
 /// the list, or nothing if that is nothing: a `cfg_attr(..)` of a condition alone is an error.
-fn carried(mut meta: Vec<TokenTree>) -> Option<Vec<TokenTree>> {
-    // Rust reads an attribute's name written raw, `r#allow`, as the name.
+fn carried(meta: Vec<TokenTree>) -> Option<Vec<TokenTree>> {
+    // Rust reads an attribute's name written raw, `r#cfg`, as the name.
     let named = |t: &TokenTree, name: &str| is_ident(t, name) || is_ident(t, &format!("r#{name}"));
     match &meta[..] {
         [doc, TokenTree::Group(list)] if named(doc, "doc") => flatten(list.stream())
             .iter()
             .any(|t| named(t, "hidden"))
             .then(|| parse("doc(hidden)").into_iter().collect()),
-        [expect, TokenTree::Group(_)] if named(expect, "expect") => {
-            meta[0] = Ident::new("allow", expect.span()).into();
-            Some(meta)
-        }
         [cfg_attr, TokenTree::Group(list)] if named(cfg_attr, "cfg_attr") => {
             let tokens = flatten(list.stream());
             let mut parts = tokens.split(|t| is_punct(t, ','));
@@ -247,9 +248,7 @@ fn carried(mut meta: Vec<TokenTree>) -> Option<Vec<TokenTree>> {
             group.set_span(list.span());
             Some(vec![cfg_attr.clone(), group.into()])
         }
-        [name, ..] if ["allow", "warn", "deny", "forbid", "cfg", "deprecated"].iter().any(|n| named(name, n)) => {
-            Some(meta)
-        }
+        [name, ..] if ["cfg", "deprecated"].iter().any(|n| named(name, n)) => Some(meta),
         _ => None,
     }
 }
@@ -260,12 +259,13 @@ fn blocks_name(f: &Fn) -> String {
 }
 
 /// The body of a method of `f`, which does `then` with the index of the instance among
-/// `launched` its compile-time arguments pick, as an expression; or never runs, for a kernel
-/// that did not compile.
+/// `launched` its compile-time arguments pick, as an expression; or `never`, for a kernel that
+/// did not compile.
 fn body(
     f: &Fn,
     launched: Option<&[Launched]>,
     top: &[TokenTree],
+    never: &str,
     then: impl std::ops::Fn(&str) -> String,
 ) -> TokenStream {
     let body = match launched {
@@ -274,7 +274,7 @@ fn body(
             let arms: Vec<(Vec<Value>, String)> = instances.iter().map(|(a, i)| (a.clone(), i.to_string())).collect();
             then(&pick(f, &arms, top))
         }
-        None => "::core::unreachable!()".to_string(),
+        None => never.to_string(),
     };
     [TokenTree::Group(Group::new(Delimiter::Brace, hygienic(&body, launched.is_some())))].into_iter().collect()
 }

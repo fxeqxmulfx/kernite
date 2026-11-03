@@ -8,10 +8,12 @@ use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenSt
 use kgen::lang::{self, Delim, Fn, Tree, Value};
 
 thread_local! {
-    /// The span of each token the macro writes, which says where Rust resolves its names: none
-    /// for the macro's own call site; or, for a module given consts, the path
-    /// `#[kernels(consts = path)]` names them by, where the module is, since `__kernels!` is
-    /// called from inside the consts' macro.
+    /// The span of each token the macro writes, which says where Rust resolves its names, and
+    /// whether it lints them, as it does the user's tokens and not the macro's: none for the
+    /// macro's own call site; or, for a module given consts, the path's first token with the
+    /// attribute's hygiene, which `#[kernels(consts = path)]` hands on in the group of the path.
+    /// That is where the module is, since `__kernels!` is called from inside the consts' macro,
+    /// whose call site is not; and Rust, which takes it for the macro's, lints none of it.
     static SITE: Cell<Option<Span>> = const { Cell::new(None) };
 }
 
@@ -96,22 +98,22 @@ pub(crate) fn visibility<'a>(f: &Fn, top: &'a [TokenTree]) -> &'a [TokenTree] {
     &head[..vis]
 }
 
-/// `const { match .. }` on `f`'s compile-time arguments, by their names as written, `r#in` as
-/// well: what `arms` gives for each instance, by its arguments. Another is no instance, and Rust
-/// refuses to compile the call. That arm allows that no value reaches it, as none does where the
-/// instances are every value, `true` and `false` of a `bool`: Rust decides which values reach it,
-/// and the macro states no rule of which values a type has.
+/// `const { if .. }` on `f`'s compile-time arguments, by their names as written, `r#in` as well:
+/// what `arms` gives for each instance, by its arguments. Another is no instance, and Rust
+/// refuses to compile the call. It is a chain of `if`, not a `match`: where the instances are
+/// every value, `true` and `false` of a `bool`, no value reaches a `match`'s last arm, and Rust
+/// warns of it; and the macro states no rule of which values a type has.
 pub(crate) fn pick(f: &Fn, arms: &[(Vec<Value>, String)], top: &[TokenTree]) -> String {
-    let tuple = |xs: Vec<String>| if xs.len() == 1 { xs.join("") } else { format!("({})", xs.join(", ")) };
-    let on = tuple(const_names(&top[f.head.end + 2..f.params_at]).map(TokenTree::to_string).collect());
-    let mut out = format!("const {{ match {on} {{ ");
+    let names: Vec<String> = const_names(&top[f.head.end + 2..f.params_at]).map(TokenTree::to_string).collect();
+    let mut out = String::from("const { ");
     let mut listed = vec![];
     for (args, then) in arms {
-        out += &format!("{} => {then}, ", tuple(args.iter().map(Value::to_string).collect()));
+        let equal: Vec<String> = names.iter().zip(args).map(|(name, arg)| format!("{name} == {arg}")).collect();
+        out += &format!("if {} {{ {then} }} else ", equal.join(" && "));
         listed.push(format!("`{}`", lang::instance(f, args).unwrap_or_default()));
     }
     let message = format!("`{}` is compiled for {} alone, as its `#[instances(..)]` lists", f.name, listed.join(", "));
-    out + &format!("#[allow(unreachable_patterns)] _ => ::core::panic!({message:?}) }} }}")
+    out + &format!("{{ ::core::panic!({message:?}) }} }}")
 }
 
 /// The name after each `const` of `tokens`, as written, `r#type` as well: a const's, or those of
@@ -146,10 +148,17 @@ pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, 
 /// `f` with a body that never runs, for a kernel that does not compile.
 pub(crate) fn stub(f: &Fn, top: &[TokenTree]) -> TokenStream {
     let mut out = attrs(f, top);
-    out.extend(parse("#[allow(unused_variables)]"));
     out.extend(signature(f, top));
-    out.extend(parse("{ ::core::unreachable!() }"));
+    out.extend(parse(&format!("{{ {} }}", never(f, top))));
     out
+}
+
+/// What a function of `f`'s parameters does when it never runs, for a kernel that does not
+/// compile: it uses each parameter, by its name as written, which Rust would find unused.
+pub(crate) fn never(f: &Fn, top: &[TokenTree]) -> String {
+    let uses: String =
+        written_params(f, top).iter().map(|(param, colon)| format!("let _ = {};", param[colon - 1])).collect();
+    uses + "::core::unreachable!()"
 }
 
 /// `f`'s attributes as written, but `#[instances(..)]` and `#[cooperative]`, which Rust does not

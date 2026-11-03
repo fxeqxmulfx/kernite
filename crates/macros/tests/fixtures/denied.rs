@@ -1,10 +1,10 @@
-//! What `k_blocks` keeps of lints that a build without a word cannot show: each `deny`, `forbid`
-//! and `warn`, which say a word when their lint fires. Rust says each lint of `n` twice, for the
-//! launcher and for `k_blocks`, at one place: Cargo's short form prints the two as one line, and
-//! counts both.
+//! What a kernel says of lints that a build without a word cannot show: each `deny`, `forbid` and
+//! `warn`, which say a word when their lint fires. The launcher keeps each, and Rust says each
+//! lint of `n` once, there: `k_blocks` keeps none of them, and Rust lints neither its name nor
+//! the compile-time arguments it takes.
 
-/// A compile-time argument named in lower case, which the kernel denies: `k_blocks` errs with the
-/// launcher, and does not warn.
+/// A compile-time argument named in lower case, which the kernel denies: the launcher errs, and
+/// `k_blocks` says nothing.
 #[kgen_macros::kernels]
 pub mod denied {
     #[instances(1, 2)]
@@ -26,8 +26,8 @@ pub mod forbidden {
     }
 }
 
-/// A module that denies the lint, with a kernel that only warns of it: `k_blocks` warns with the
-/// launcher, and does not err.
+/// A module that denies the lint, with a kernel that only warns of it: the launcher warns, and
+/// `k_blocks` says nothing.
 #[deny(non_upper_case_globals)]
 pub mod strict {
     /// The kernel that warns.

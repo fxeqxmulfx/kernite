@@ -115,6 +115,15 @@ fn refuses(name: &str, lines: &[&str]) {
     assert_eq!(said, lines, "fixtures/{name}.rs: Cargo said:\n{}", said.join("\n"));
 }
 
+/// Whether this machine has Clippy, which the tests that run it skip without, and say so.
+fn clippy_here() -> bool {
+    let has = Command::new(env!("CARGO")).args(["clippy", "--version"]).output().is_ok_and(|out| out.status.success());
+    if !has {
+        eprintln!("no Clippy here: skipped");
+    }
+    has
+}
+
 #[test]
 fn the_macro_says_what_it_refuses_where_it_is() {
     // The modules given `STEP` come last: Rust expands each a step later, when the macro of the
@@ -491,6 +500,93 @@ fn a_compile_time_argument_named_as_the_launchers_parameters_is_refused_at_its_n
     );
 }
 
+/// A crate may forbid each lint the macro used to `allow`, and builds its kernels without a word.
+#[test]
+fn a_crate_that_forbids_lints_builds_its_kernels_without_a_word() {
+    builds_quietly("forbidden");
+}
+
+/// The same crate is told of a kernel that does not compile where it does not, and of nothing
+/// else: its stub and its launcher, which never run, use what they take.
+#[test]
+fn a_crate_that_forbids_lints_is_told_of_a_kernel_that_does_not_compile_and_of_nothing_else() {
+    // The modules given consts come last, and the second first: Rust expands them a step later.
+    refuses(
+        "forbidden_stubs",
+        &[
+            "src/lib.rs:23:13: error: `y` is not defined",
+            "src/lib.rs:28:13: error: in `tile::<1>`: `y` is not defined",
+            "src/lib.rs:28:13: error: in `tile::<2>`: `y` is not defined",
+            "src/lib.rs:33:18: error: `y` is not defined",
+            "src/lib.rs:40:28: error: `y` is not defined",
+            "src/lib.rs:45:28: error: `y` is not defined",
+            "src/lib.rs:64:28: error: `y` is not defined",
+            "src/lib.rs:69:28: error: `y` is not defined",
+            "src/lib.rs:52:13: error: `y` is not defined",
+            "src/lib.rs:57:18: error: `y` is not defined",
+            "error: could not compile `forbidden_stubs` (lib) due to 10 previous errors",
+        ],
+    );
+}
+
+/// The launcher of a cooperative kernel keeps the kernel's `expect` as written, so that one nothing
+/// meets is refused once, where the kernel has it: `k_blocks` keeps no lint.
+#[test]
+fn the_launcher_keeps_a_kernels_expect_as_written() {
+    refuses(
+        "unmet",
+        &[
+            "src/lib.rs:10:14: error: this lint expectation is unfulfilled",
+            "error: could not compile `unmet` (lib) due to 1 previous error",
+        ],
+    );
+}
+
+/// A crate that forbids a lint a cooperative kernel expects is refused once, at the `expect`: the
+/// launcher keeps it as written, and `k_blocks` keeps no lint.
+#[test]
+fn a_crate_that_forbids_a_lint_a_kernel_expects_is_refused_once_at_the_expect() {
+    refuses(
+        "forbidden_expect",
+        &[
+            "src/lib.rs:10:14: error[E0453]: expect(non_snake_case) incompatible with previous forbid: overruled by \
+             previous forbid",
+            "error: could not compile `forbidden_expect` (lib) due to 1 previous error",
+        ],
+    );
+}
+
+/// Clippy says "too many arguments" of a function of more than seven parameters wherever its tokens
+/// come from, and a launcher takes `self` and the grid as well as the kernel's parameters: so each
+/// launcher allows it, and Clippy says nothing of one of eight or nine, of each kind of kernel. It
+/// says nothing of the kernels that forbid lints either, whose instances include `bool`s.
+#[test]
+fn clippy_says_nothing_of_the_rust_the_macro_writes() {
+    if clippy_here() {
+        for name in ["many", "forbidden"] {
+            let (done, said) = cargo(&["clippy"], name);
+            assert!(done && said.is_empty(), "fixtures/{name}.rs: Clippy {done}, and said:\n{}", said.join("\n"));
+        }
+    }
+}
+
+/// That lint is the one a crate of kernels may not forbid: each launcher allows it, of however many
+/// parameters, so Clippy refuses each module that has one, at its attribute.
+#[test]
+fn a_crate_of_kernels_may_not_forbid_clippys_too_many_arguments() {
+    if clippy_here() {
+        let (done, said) = cargo(&["clippy"], "many_forbidden");
+        let allowed =
+            "allow(clippy::too_many_arguments) incompatible with previous forbid: overruled by previous forbid";
+        let lines = [
+            format!("src/lib.rs:6:1: error[E0453]: {allowed}"),
+            format!("src/lib.rs:15:1: error[E0453]: {allowed}"),
+            "error: could not compile `many_forbidden` (lib) due to 2 previous errors".to_string(),
+        ];
+        assert!(!done && said == lines, "fixtures/many_forbidden.rs: Clippy said:\n{}", said.join("\n"));
+    }
+}
+
 /// A name written raw, `r#type`, reaches Rust as written: a parameter's and a compile-time
 /// argument's, in each kind of kernel that passes them on, a kernel's, a function's that a kernel
 /// calls, a static's and a const's.
@@ -500,16 +596,18 @@ fn names_written_raw_reach_rust_as_written() {
 }
 
 /// The method that says how many blocks a cooperative GPU kernel's grid has at most, `k_blocks`,
-/// keeps what the kernel says of lints and of whether it is there, and nothing else. A name written
-/// raw, `r#allow`, is the name. Rust builds each case without a word: a lint allowed, warned of or
-/// expected, of a compile-time argument named in lower case or of a parameter, alone, after docs,
-/// in a `cfg_attr(..)` or in two, or written by a macro; a kernel left out; one deprecated, whose
-/// `k_blocks` a function calls and expects a warning of; a kernel that says what its code needs, or
-/// its symbol; and one found in the docs by the name `k_blocks`. Where the kernel has docs, plain
-/// or in a `cfg_attr(..)`, `k_blocks` has its own alone, and where the kernel is hidden from the
-/// docs, so is `k_blocks`, whatever else the kernel's `doc(..)` says. Where the kernel denies or
-/// forbids a lint, or warns of one its module denies, Rust refuses the build: each lint of `n` is
-/// said at both methods, at one place, which Cargo's short form prints as one line.
+/// keeps what the kernel says of lints by giving Rust nothing of the kernel's to lint: its name and
+/// the compile-time arguments it takes are of the macro's span. Of the kernel's attributes it keeps
+/// those of whether it is there, and nothing else. A name written raw, `r#doc`, is the name. Rust
+/// builds each case without a word: a lint allowed, warned of or expected, of a compile-time
+/// argument named in lower case or of a parameter, alone, after docs, in a `cfg_attr(..)` or in
+/// two; a kernel left out, beside a method of the crate's own named `k_blocks`; one deprecated,
+/// whose `k_blocks` a function calls and expects a warning of; a kernel that says what its code
+/// needs, or its symbol; and one found in the docs by the name `k_blocks`. Where the kernel has
+/// docs, plain or in a `cfg_attr(..)`, `k_blocks` has its own alone, and where the kernel is hidden
+/// from the docs, so is `k_blocks`: whatever else the kernel's `doc(..)` says, in a `cfg_attr(..)`
+/// or in two, or written by a macro. Where the kernel denies or forbids a lint, or warns of one its
+/// module denies, Rust refuses the build, and says each lint of `n` once, at the launcher.
 #[test]
 fn a_cooperative_kernels_blocks_method_keeps_what_it_says_of_lints() {
     builds_quietly("blocks");
@@ -534,7 +632,8 @@ fn a_cooperative_kernels_blocks_method_keeps_what_it_says_of_lints() {
         ];
         assert_eq!(own(module), want, "{module}");
     }
-    for module in ["hidden", "raw_hidden", "hidden_aliased"] {
+    for module in ["hidden", "raw_hidden", "hidden_aliased", "conditional", "nested", "written", "written_in_cfg_attr"]
+    {
         assert!(!page(module).contains("k_blocks"), "the docs of `{module}`'s `Kernels` show `k_blocks`");
     }
     refuses(
@@ -543,7 +642,7 @@ fn a_cooperative_kernels_blocks_method_keeps_what_it_says_of_lints() {
             "src/lib.rs:13:47: error: const parameter `n` should have an upper case name",
             "src/lib.rs:24:47: error: const parameter `n` should have an upper case name",
             "src/lib.rs:39:51: warning: const parameter `n` should have an upper case name",
-            "error: could not compile `denied` (lib) due to 4 previous errors; 2 warnings emitted",
+            "error: could not compile `denied` (lib) due to 2 previous errors; 1 warning emitted",
         ],
     );
 }

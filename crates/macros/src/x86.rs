@@ -7,7 +7,7 @@ use kgen::lang::{self, Fn, ItemKind, Value};
 use kgen::{Call, HostStatic, Naked, NativeInstance};
 
 use crate::rust::{
-    attrs, clashes, hygienic, is_ident, is_punct, parse, pick, signature, stub, visibility, written_params,
+    attrs, clashes, hygienic, is_ident, is_punct, never, parse, pick, signature, stub, visibility, written_params,
 };
 
 /// `f` as an `#[unsafe(naked)]` function whose body is the listing of its one instance, and
@@ -111,9 +111,7 @@ pub(crate) fn naked(
         }
     }
     if !items.is_empty() {
-        out.extend(parse(&format!(
-            "#[doc(hidden)]\n#[allow(dead_code, non_snake_case)]\nmod {hidden} {{\n{items}}}\n"
-        )));
+        out.extend(parse(&format!("#[doc(hidden)]\nmod {hidden} {{\n{items}}}\n")));
     }
     out
 }
@@ -286,11 +284,10 @@ fn grid_launcher(
     } else if !memory.is_empty() {
         out.extend(parse(&format!("#[doc = \"\"]\n#[doc = {memory:?}]")));
     }
-    out.extend(parse(if kernels.is_some() {
-        "#[allow(clippy::too_many_arguments)]"
-    } else {
-        "#[allow(clippy::too_many_arguments, unused_variables)]"
-    }));
+    // Clippy says "too many arguments" of a function of more than seven parameters wherever its
+    // tokens come from, and the launcher takes the grid as well: so it allows that, and a crate of
+    // kernels may not forbid `clippy::too_many_arguments`.
+    out.extend(parse("#[allow(clippy::too_many_arguments)]"));
     // Its visibility, then `unsafe fn` and its name and generics as written.
     out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("unsafe fn"));
@@ -327,7 +324,7 @@ fn grid_launcher(
                 args.join(", ")
             )
         }
-        None => "::core::unreachable!()".to_string(),
+        None => never(f, top),
     };
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, hygienic(&body, kernels.is_some())))]);
     out.extend(clashes);
@@ -366,10 +363,7 @@ pub(crate) fn x86_stub(f: &Fn, instances: usize, named: &[String], top: &[TokenT
         let items: String = (0..instances)
             .map(|k| format!("pub unsafe extern \"sysv64\" fn I{k}() {{ ::core::unreachable!() }}\n"))
             .collect();
-        out.extend(parse(&format!(
-            "#[doc(hidden)]\n#[allow(dead_code, non_snake_case)]\nmod __kgen_{} {{\n{items}}}\n",
-            f.name
-        )));
+        out.extend(parse(&format!("#[doc(hidden)]\nmod __kgen_{} {{\n{items}}}\n", f.name)));
     }
     out
 }

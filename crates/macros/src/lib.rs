@@ -89,6 +89,12 @@
 //! as one of them, for Rust cannot keep a const apart from a parameter of its name: that is
 //! an error at its name.
 //!
+//! The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one,
+//! `dead_code` say, and build its kernels: Rust lints the names and the code a kernel is
+//! written with, and none that the macro adds. Clippy's `too_many_arguments` is the one lint a
+//! crate of kernels may not forbid: Clippy says it of a launcher of more than seven parameters,
+//! whoever wrote it, and each launcher allows it.
+//!
 //! A module of kernels takes the consts it shares with others from a module `#[consts]` is
 //! on, which it names by its path, as Rust reads one where the module is:
 //! `#[kernels(consts = crate::model::sizes)]`, or `consts = sizes` for one beside it. Its
@@ -284,9 +290,9 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut rule = parse("($($module:tt)*) =>");
     rule.extend([TokenTree::Group(Group::new(Delimiter::Brace, call))]);
     rule.extend(parse(";"));
-    inner.extend(parse("#[doc(hidden)] #[allow(unused_macros)] macro_rules! __kgen_consts"));
+    inner.extend(parse("#[doc(hidden)] macro_rules! __kgen_consts"));
     inner.extend([TokenTree::Group(Group::new(Delimiter::Brace, rule))]);
-    inner.extend(parse("#[doc(hidden)] #[allow(unused_imports)] pub(crate) use __kgen_consts;"));
+    inner.extend(parse("#[doc(hidden)] pub(crate) use __kgen_consts;"));
     module(head, braces, inner)
 }
 
@@ -302,9 +308,13 @@ pub fn __kernels(input: TokenStream) -> TokenStream {
     let Some((braces, head)) = braced(rest) else {
         return error(Span::call_site(), "`__kernels!` is how `#[kernels(consts = ..)]` is given its consts");
     };
+    // What the macro writes is of the hygiene of the group `#[kernels]` made of the path, which is
+    // the attribute's: it resolves where the module is, not inside the consts' macro, and Rust,
+    // which takes it for the macro's, lints none of it. It is where the path begins, for an error
+    // to point at.
+    let at = path.span();
     let path: Vec<TokenTree> = path.stream().into_iter().collect();
-    // What the macro writes resolves where the module is, not inside the consts' macro.
-    let site = Site::at(path.first().map_or_else(Span::call_site, TokenTree::span));
+    let site = Site::at(path.first().map_or(at, |t| t.span().resolved_at(at)));
     let inner = expand(Some((consts.stream(), &path)), braces.stream());
     drop(site);
     module(head, braces, inner)

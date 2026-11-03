@@ -330,6 +330,11 @@ The output is deterministic:
 - no crate depends on anything outside the workspace;
 - clippy forbids hash maps and hash sets.
 
+The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one, `dead_code` say, and build
+its kernels: Rust lints the names and the code a kernel is written with, and none that the macro adds. Clippy's
+`too_many_arguments` is the one lint a crate of kernels may not forbid: Clippy says it of a launcher of more than seven
+parameters, whoever wrote it, and each launcher allows it.
+
 Checking the generated kernels is for the crates that hold them: a snapshot of every listing, so that any change
 to any layer that moves an instruction shows in review, and runs against scalar references, bit for bit, as in
 the examples.

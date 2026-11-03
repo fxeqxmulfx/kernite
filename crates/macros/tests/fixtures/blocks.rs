@@ -1,10 +1,10 @@
 //! The method that says how many blocks a cooperative GPU kernel's grid has at most, `k_blocks`,
-//! keeps what the kernel says of lints and of whether it is there, and nothing else. It keeps
-//! each `allow`, `warn`, `deny` and `forbid` as written, each `expect` as an `allow`, and `cfg`,
-//! `deprecated` and `doc(hidden)`; each alone, in a `cfg_attr(..)`, or written by a macro. A name
-//! written raw, `r#allow`, is the name. It leaves out the kernel's docs, and what the kernel says
-//! of its code or its symbol. Each case is a module of its own, and Rust builds each as written,
-//! without a word.
+//! keeps what the kernel says of whether it is there, and nothing else: `cfg`, `deprecated` and
+//! `doc(hidden)`; each alone, in a `cfg_attr(..)`, or written by a macro. A name written raw,
+//! `r#doc`, is the name. It leaves out the kernel's docs, what the kernel says of its code or its
+//! symbol, and what it says of lints: Rust lints neither the name of `k_blocks` nor the
+//! compile-time arguments it takes, and says a lint of those at the launcher alone. Each case is
+//! a module of its own, and Rust builds each as written, without a word.
 
 /// A compile-time argument named in lower case, which the kernel allows.
 #[kgen_macros::kernels]
@@ -51,8 +51,8 @@ pub mod met {
     }
 }
 
-/// Docs, then lints, one warned of and then allowed: `k_blocks` keeps each lint after the docs,
-/// in order, and has docs of its own alone.
+/// Docs, then lints, one warned of and then allowed: `k_blocks` keeps none of them, and has docs
+/// of its own alone.
 #[kgen_macros::kernels]
 pub mod listed {
     /// What the kernel does, which `k_blocks` does not say.
@@ -66,25 +66,32 @@ pub mod listed {
     }
 }
 
-/// A kernel left out, with a compile-time argument named in lower case and no lint allowed:
-/// `k_blocks` goes with its launcher.
+/// A kernel left out: `k_blocks` goes with its launcher, and the method of that name that the
+/// crate has of its own, below, is the only one.
 #[kgen_macros::kernels]
 pub mod gone {
-    #[instances(1, 2)]
     #[cooperative]
     #[cfg(false)]
-    pub unsafe extern "ptx-kernel" fn k<const n: u32>(xs: *mut u32) {
-        st.global.u32([xs], n);
+    pub unsafe extern "ptx-kernel" fn k(xs: *mut u32) {
+        st.global.u32([xs], 1);
     }
 }
 
-/// Lints expected in a `cfg_attr(..)`, with a comma after them, of both kinds: `k_blocks` takes
-/// `n` and not `xsPtr`.
+/// `gone`'s `Kernels` with a method `k_blocks` of the crate's own: Rust would say the name is
+/// defined twice if the kernel's had stayed.
+impl gone::Kernels {
+    /// Does nothing.
+    pub fn k_blocks(&self) {}
+}
+
+/// Lints expected of both kinds and the kernel hidden, in a `cfg_attr(..)` with a comma after
+/// them: `k_blocks` takes `n` and not `xsPtr`, keeps none of the lints, and is hidden with the
+/// kernel.
 #[kgen_macros::kernels]
 pub mod conditional {
     #[instances(1, 2)]
     #[cooperative]
-    #[cfg_attr(all(), expect(non_snake_case, non_upper_case_globals),)]
+    #[cfg_attr(all(), expect(non_snake_case, non_upper_case_globals), doc(hidden),)]
     pub unsafe extern "ptx-kernel" fn k<const n: u32>(xsPtr: *mut u32) {
         st.global.u32([xsPtr], n);
     }
@@ -95,41 +102,39 @@ pub mod conditional {
 pub mod nested {
     #[instances(1, 2)]
     #[cooperative]
-    #[cfg_attr(all(), cfg_attr(all(), expect(non_snake_case, non_upper_case_globals)))]
+    #[cfg_attr(all(), cfg_attr(all(), expect(non_snake_case, non_upper_case_globals), doc(hidden)))]
     pub unsafe extern "ptx-kernel" fn k<const n: u32>(xsPtr: *mut u32) {
         st.global.u32([xsPtr], n);
     }
 }
 
-/// The same lints, which a macro writes, `#[$lint]` and `#[cfg_attr(all(), $lint)]`: the fragment
-/// arrives in an invisible group, and the macro reads the `expect` in it.
+/// The kernel hidden by an attribute a macro writes, `#[$kept]` and `#[cfg_attr(all(), $kept)]`:
+/// the fragment arrives in an invisible group, and the macro reads the `doc(hidden)` in it.
 macro_rules! written {
-    ($lint:meta) => {
+    ($kept:meta) => {
         /// The attribute alone.
         #[kgen_macros::kernels]
         pub mod written {
-            #[instances(1, 2)]
             #[cooperative]
-            #[$lint]
-            pub unsafe extern "ptx-kernel" fn k<const n: u32>(xsPtr: *mut u32) {
-                st.global.u32([xsPtr], n);
+            #[$kept]
+            pub unsafe extern "ptx-kernel" fn k(xs: *mut u32) {
+                st.global.u32([xs], 1);
             }
         }
 
         /// The attribute in a `cfg_attr(..)`.
         #[kgen_macros::kernels]
         pub mod written_in_cfg_attr {
-            #[instances(1, 2)]
             #[cooperative]
-            #[cfg_attr(all(), $lint)]
-            pub unsafe extern "ptx-kernel" fn k<const n: u32>(xsPtr: *mut u32) {
-                st.global.u32([xsPtr], n);
+            #[cfg_attr(all(), $kept)]
+            pub unsafe extern "ptx-kernel" fn k(xs: *mut u32) {
+                st.global.u32([xs], 1);
             }
         }
     };
 }
 
-written!(expect(non_snake_case, non_upper_case_globals));
+written!(doc(hidden));
 
 /// Docs alone in a `cfg_attr(..)`: `k_blocks` keeps none of it, for a `cfg_attr(..)` of its
 /// condition alone is an error.
@@ -142,7 +147,7 @@ pub mod conditional_docs {
     }
 }
 
-/// Docs and a lint in a `cfg_attr(..)`: `k_blocks` keeps the lint, and has docs of its own alone.
+/// Docs and a lint in a `cfg_attr(..)`: `k_blocks` keeps neither, and has docs of its own alone.
 #[kgen_macros::kernels]
 pub mod conditional_docs_and_lint {
     #[instances(1, 2)]
@@ -164,8 +169,8 @@ pub mod raw_allow {
     }
 }
 
-/// Docs, then a lint expected in a `cfg_attr(..)`, each name written raw: `k_blocks` keeps the
-/// lint, and has docs of its own alone.
+/// Docs, then a lint expected in a `cfg_attr(..)`, each name written raw: `k_blocks` keeps
+/// neither, and has docs of its own alone.
 #[kgen_macros::kernels]
 pub mod raw_names {
     #[r#doc = "What the kernel does, which `k_blocks` does not say."]
