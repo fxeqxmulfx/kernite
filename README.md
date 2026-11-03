@@ -135,7 +135,8 @@ kernel's parameters, runs the kernel on a thread for each of the grid's, the cal
 have ended. A thread that waits spins, so it needs a core: a grid of more threads than the machine runs at once,
 `kernite_cpu::most()`, is an error, as a GPU's grid of more blocks than it runs at once is. The kernel's parameters keep
 the names they are written with, `grid` among them. A compile-time argument may not be named `grid`, for Rust cannot
-keep a const apart from a parameter of its name: that is an error at its name.
+keep a const apart from a parameter of its name: that is an error at its name. A crate with a cooperative kernel depends
+on `kernite-cpu` for the grid.
 
 A kernel calls the module's others, itself among them, as SysV calls a function: `call(g, gcd, (a, b))` moves `a` to
 `rdi` and `b` to `rsi`, and `g` from `rax`, and is checked against what `gcd` takes and returns. `lea(fp, [gcd])` takes
@@ -155,7 +156,7 @@ the module has it, a [`kernite_cpu::Global`](crates/cpu/src/global.rs) of Rust's
 stores, and a kernel's safety contract says that nothing else touches the memory of the module's it names while it runs,
 nor any that the functions it calls name, whether it calls them by name or at an address. A module's statics are its
 kernels': on the GPU for GPU kernels, so a module with kernels of both kinds and a static is an error, which says to
-make it two.
+make it two. A crate with a static in a module of x86 kernels depends on `kernite-cpu` for it.
 
 ## On a GPU
 
