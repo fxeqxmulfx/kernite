@@ -1178,6 +1178,34 @@ fn a_kernel_takes_a_pointer_to_any_type() {
     }
 }
 
+/// A type may hold an arrow, `->`, one operator whose `>` ends no type and closes no `<`: a pointer to
+/// a function's pointer, or to a type with one among its arguments, is an address as any pointer is,
+/// and the parameter after it is the next.
+#[test]
+fn a_kernel_takes_a_pointer_to_a_type_that_holds_an_arrow() {
+    for params in [
+        "call: *const fn(u32) -> u32, table: *mut Pair<fn() -> u8, 2>, \
+         boxed: *const Box<dyn Fn(u8) -> u8 + Send>, n: u64",
+        "call: *const fn(u32)->u32, table: *mut Pair<fn()->&u8,2>, boxed: *const Box<dyn Fn(u8)->u8+Send>,n: u64",
+    ] {
+        let ptx =
+            compile(params, "st.global.u64([call], n); st.global.u64([table], n); st.global.u64([boxed], n);").unwrap();
+        for (i, name) in ["call", "table", "boxed"].iter().enumerate() {
+            let part = format!("\tld.param.u64 %{name}, [k_param_{i}];\n\tcvta.to.global.u64 %{name}, %{name};\n");
+            assert!(ptx.contains(&part), "{part}\nin\n{ptx}");
+        }
+        assert!(ptx.contains("\tld.param.u64 %n, [k_param_3];\n"), "{ptx}");
+    }
+    let to = "dyn Fn(u8) -> u8";
+    let why = format!(
+        "a pointer to `{to}` has two words, an address and a length or a table, and a kernel's pointer has one"
+    );
+    assert_eq!(compile("p: *const dyn Fn(u8)->u8, n: u64", "").unwrap_err(), format!("1:36: {why}"));
+    let func = "a function takes and returns PTX's types, an address is a `u64`";
+    let src = "extern \"ptx-func\" fn f(a: *const fn(u32)->u32) {}";
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:27: {func}; not `*const fn(u32) -> u32`"));
+}
+
 /// A type in a message is written as Rust writes it, whatever the source spaced: a parameter by
 /// value, a result, a variable.
 #[test]
@@ -1190,6 +1218,12 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
         ("a: Box<dyn A+B>", "Box<dyn A + B>"),
         ("a: Box<dyn Iterator<Item=u8>>", "Box<dyn Iterator<Item = u8>>"),
         ("a: Box<dyn Iterator<Item = u8> + Send>", "Box<dyn Iterator<Item = u8> + Send>"),
+        ("f: fn(u32) -> u32", "fn(u32) -> u32"),
+        ("f: fn(u32)->u32, n: u32", "fn(u32) -> u32"),
+        ("a: fn(fn()->u8)->&u8", "fn(fn() -> u8) -> &u8"),
+        ("a: fn()->!", "fn() -> !"),
+        ("a: Pair<fn()->u8,2>", "Pair<fn() -> u8, 2>"),
+        ("a: Box<dyn Fn(u8)->u8+Send>", "Box<dyn Fn(u8) -> u8 + Send>"),
     ] {
         assert_eq!(compile(params, "").unwrap_err(), format!("1:36: {takes} `{ty}`"), "{params}");
     }
@@ -1201,6 +1235,7 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
     let vars = "PTX variables are `pred`, `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, \
                 `bf16x2`, `tf32`, `f32` and `f64`, not";
     assert_eq!(compile("", "let v: *const[u8;4];").unwrap_err(), format!("2:8: {vars} `*const [u8; 4]`"));
+    assert_eq!(compile("", "let v: fn(u32)->u32;").unwrap_err(), format!("2:8: {vars} `fn(u32) -> u32`"));
     let funcs = "a function takes and returns PTX's types, as its variables are: `u32`, `f32`, `b64`; not";
     let src = "extern \"ptx-func\" fn f(a: [usize;3]) {}";
     assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:27: {funcs} `[usize; 3]`"));

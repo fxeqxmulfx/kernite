@@ -41,6 +41,7 @@ const N: usize = 3;
 
 pub unsafe extern "sysv64" fn k(
     a: *const[usize;3], b: *  mut*const f32, c: [u64;N], d: (u8 ,u8), e: Box<dyn A+B>,
+    f: *const fn(u32)->u32, g: Pair<fn()->u8,2>, h: Box<dyn Fn(u8)->u8+Send>,
 ) -> &mut[f32] {}
 "#;
 
@@ -216,6 +217,9 @@ fn a_type_is_given_to_the_target_as_rust_writes_it() {
         "param c: [u64; 3] = v2",
         "param d: (u8, u8) = v3",
         "param e: Box<dyn A + B> = v4",
+        "param f: *const fn(u32) -> u32 = v5",
+        "param g: Pair<fn() -> u8, 2> = v6",
+        "param h: Box<dyn Fn(u8) -> u8 + Send> = v7",
         "result &mut [f32]",
         "end",
     ];

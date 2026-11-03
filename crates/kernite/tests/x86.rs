@@ -806,6 +806,28 @@ fn a_kernel_takes_a_pointer_to_any_type_in_a_register() {
     }
 }
 
+/// A type may hold an arrow, `->`, one operator whose `>` ends no type and closes no `<`: a pointer to
+/// a function's pointer, or to a type with one among its arguments, is one register as any pointer is,
+/// and the parameter after it is read from the next.
+#[test]
+fn a_kernel_takes_a_pointer_to_a_type_that_holds_an_arrow() {
+    for params in [
+        "call: *const fn(u32) -> u32, table: *mut Pair<fn() -> u8, 2>, \
+         boxed: *const Box<dyn Fn(u8) -> u8 + Send>, n: usize",
+        "call: *const fn(u32)->u32, table: *mut Pair<fn()->&u8,2>, boxed: *const Box<dyn Fn(u8)->u8+Send>,n: usize",
+    ] {
+        let code = compile(params, "mov([call], n); mov([table], n); mov([boxed], n);").unwrap();
+        assert_eq!(code, "mov qword ptr [rdi], rcx\nmov qword ptr [rsi], rcx\nmov qword ptr [rdx], rcx\nret");
+    }
+    let src = "unsafe extern \"sysv64\" fn k(p: *const fn(u32) -> u32) -> *mut fn(u32) -> u32 { ret(p); }";
+    assert_eq!(kernite::x86_str(src, "k").unwrap().code().collect::<Vec<_>>(), ["mov rax, rdi", "ret"]);
+    let to = "dyn Fn(u8) -> u8";
+    let why = format!(
+        "a pointer to `{to}` has two words, an address and a length or a table, and a kernel's pointer has one"
+    );
+    assert_eq!(compile("p: *const dyn Fn(u8)->u8, n: usize", "").unwrap_err(), format!("1:32: {why}"));
+}
+
 /// A type in a message is written as Rust writes it, whatever the source spaced: a parameter by
 /// value, a result, a variable.
 #[test]
@@ -818,6 +840,12 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
         ("a: Box<dyn A+B>", "Box<dyn A + B>"),
         ("a: Box<dyn Iterator<Item=u8>>", "Box<dyn Iterator<Item = u8>>"),
         ("a: Box<dyn Iterator<Item = u8> + Send>", "Box<dyn Iterator<Item = u8> + Send>"),
+        ("f: fn(u32) -> u32", "fn(u32) -> u32"),
+        ("f: fn(u32)->u32, n: usize", "fn(u32) -> u32"),
+        ("a: fn(fn()->u8)->&u8", "fn(fn() -> u8) -> &u8"),
+        ("a: fn()->!", "fn() -> !"),
+        ("a: Pair<fn()->u8,2>", "Pair<fn() -> u8, 2>"),
+        ("a: Box<dyn Fn(u8)->u8+Send>", "Box<dyn Fn(u8) -> u8 + Send>"),
     ] {
         assert_eq!(compile(params, "").unwrap_err(), format!("1:32: {takes} `{ty}`"), "{params}");
     }
@@ -828,8 +856,12 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
     let src = "unsafe extern \"sysv64\" fn k() -> (u32,u32) {}";
     let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `(u32, u32)`";
     assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    let src = "unsafe extern \"sysv64\" fn k() -> fn(u32)->u32 {}";
+    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `fn(u32) -> u32`";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
     let vars = "x86 variables are `gpr`, `ymm`, `xmm` and stack memory, `local<..>`; not";
     assert_eq!(compile("", "let v: *const[u8;4];").unwrap_err(), format!("2:8: {vars} `*const [u8; 4]`"));
+    assert_eq!(compile("", "let v: fn(u32)->u32;").unwrap_err(), format!("2:8: {vars} `fn(u32) -> u32`"));
 }
 
 /// Rust never sees a kernel's body run, so kernite says which of the module's constants it read:

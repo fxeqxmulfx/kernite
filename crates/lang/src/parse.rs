@@ -460,6 +460,10 @@ impl<'a> Parser<'a> {
                 angles += 1;
             } else if self.is_op(">") {
                 angles -= 1;
+            } else if self.is_op("->") {
+                // The arrow of a function's type, `fn(u8) -> u8`, is one operator: its `>` neither ends the
+                // type nor closes a `<`.
+                self.pos += 1;
             }
             self.pos += 1;
         }

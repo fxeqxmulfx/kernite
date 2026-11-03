@@ -12,8 +12,9 @@ fn the_lexer_reads_what_rust_writes() {
 }
 
 /// A type is written as Rust writes it, however its source spaced it: a space between words, after
-/// `,` and `;`, after `const` and `mut`, and on each side of a `+` or a `=` that no operator holds,
-/// and none beside the rest, nor inside an operator, `+=`, `==`, `=>`, `<=` or `..=`.
+/// `,` and `;`, after `const` and `mut`, on each side of a `+` or a `=` that no operator holds and of
+/// an arrow, `->`, and none beside the rest, nor inside an operator, `+=`, `==`, `=>`, `<=`, `..=` or
+/// `->`.
 #[test]
 fn a_type_is_written_as_rust_writes_it() {
     let written = |src: &str| crate::text(&crate::lex(src).unwrap());
@@ -28,8 +29,12 @@ fn a_type_is_written_as_rust_writes_it() {
         "*const (u8, *mut u8)",
         "*const [[u8; 4]; 2]",
         "*const fn(u32)",
+        "*const fn(u32) -> u32",
+        "*const fn() -> !",
+        "*const fn(fn() -> u8) -> &u8",
         "*const dyn Fn(u32)",
         "*const Foo<u8, u16>",
+        "*const Pair<fn() -> u8, 2>",
         "*const a::b::C",
         "*const (dyn A + Send)",
         "Box<dyn A + B + C>",
@@ -37,6 +42,8 @@ fn a_type_is_written_as_rust_writes_it() {
         "Box<dyn Iterator<Item = u8> + Send>",
         "*const (dyn Iterator<Item = u8> + Send)",
         "*const Foo<T = u8, U = u16>",
+        "Box<dyn Fn(u8) -> u8 + Send>",
+        "*const (dyn Fn(u8) -> u8 + Send)",
     ] {
         assert_eq!(written(ty), ty);
     }
@@ -52,6 +59,11 @@ fn a_type_is_written_as_rust_writes_it() {
     assert_eq!(written("Box<dyn Iterator<Item=&u8>>"), "Box<dyn Iterator<Item = &u8>>");
     assert_eq!(written("Box<dyn Iterator<Item = u8>+Send>"), "Box<dyn Iterator<Item = u8> + Send>");
     assert_eq!(written("*const dyn A+?Sized"), "*const dyn A + ?Sized");
+    // The `>` of an arrow, with punctuation right after it, `->&`, is the arrow's and no other's.
+    assert_eq!(written("*const fn(u32)->u32"), "*const fn(u32) -> u32");
+    assert_eq!(written("Pair<fn()->&u8,2>"), "Pair<fn() -> &u8, 2>");
+    assert_eq!(written("Box<dyn Fn(u8)->u8+Send>"), "Box<dyn Fn(u8) -> u8 + Send>");
+    assert_eq!(written("fn(fn()->!)  ->  !"), "fn(fn() -> !) -> !");
 }
 
 /// A pointer is one word, unless it is to a slice, a `str` or a `dyn`: those are an address and a
@@ -75,6 +87,10 @@ fn a_pointer_has_one_word_unless_it_is_to_what_has_no_size() {
         "*const (Foo<A, dyn B>)",
         "*const (Foo<A, [f32]>, u32)",
         "*const fn(u32)",
+        "*const fn(u32) -> u32",
+        "*const Pair<fn() -> u8, 2>",
+        "*const (u8, fn() -> u8)",
+        "*const (u8, Foo<fn() -> u8, dyn A>)",
         "*mut Foo<u8>",
     ] {
         assert_eq!(crate::pointer(ty), Ok(true), "{ty}");
@@ -98,6 +114,9 @@ fn a_pointer_has_one_word_unless_it_is_to_what_has_no_size() {
         "(u32, dyn Foo<A, B>)",
         "(dyn Foo,)",
         "([f32],)",
+        "dyn Fn(u32) -> u32",
+        "(fn() -> u8, dyn Foo)",
+        "(Foo<fn() -> u8, 2>, [f32])",
     ] {
         let why = format!(
             "a pointer to `{to}` has two words, an address and a length or a table, and a kernel's pointer has one"

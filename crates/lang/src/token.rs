@@ -67,7 +67,7 @@ impl Tree {
     }
 }
 
-/// `trees` as Rust writes a type: `*const [usize; 3]`, `(u32, u32)`, `&mut [f32]`.
+/// `trees` as Rust writes a type: `*const [usize; 3]`, `(u32, u32)`, `&mut [f32]`, `fn(u8) -> u8`.
 pub fn text(trees: &[Tree]) -> String {
     let mut out = String::new();
     for (i, t) in trees.iter().enumerate() {
@@ -92,10 +92,20 @@ pub fn text(trees: &[Tree]) -> String {
     out
 }
 
+/// Whether `trees[i]` is the `>` of an arrow, `->`, as in `fn(u8) -> u8`: one operator, whose `>`
+/// closes no `<`.
+fn arrow_head(trees: &[Tree], i: usize) -> bool {
+    matches!(
+        i.checked_sub(1).and_then(|j| trees.get(j..=i)),
+        Some([Tree::Punct { ch: '-', joint: true, .. }, Tree::Punct { ch: '>', .. }])
+    )
+}
+
 /// Whether Rust writes a space between `trees[i - 1]` and `trees[i]`: after `const` and `mut`,
-/// which a type follows, after `,` and `;`, between words, and on each side of a `+` or a `=` that
-/// no operator holds, as in `dyn A + B` and `Item = &u8`. The operators that hold one, `+=`, `==`,
-/// `=>`, `<=` and `..=`, are written close. Other punctuation and brackets are against the word
+/// which a type follows, after `,` and `;`, between words, on each side of a `+` or a `=` that no
+/// operator holds, as in `dyn A + B` and `Item = &u8`, and on each side of an arrow, `fn(u8) -> u8`.
+/// The operators that hold a `+` or a `=`, `+=`, `==`, `=>`, `<=` and `..=`, are written close, and
+/// so are the two characters of an arrow. Other punctuation and brackets are against the word
 /// before them.
 fn spaced(trees: &[Tree], i: usize) -> bool {
     // The `joint` mark says that punctuation follows, not that an operator is made, as the `&` after
@@ -111,7 +121,9 @@ fn spaced(trees: &[Tree], i: usize) -> bool {
             _ => false,
         }
     };
-    apart(i - 1)
+    arrow_head(trees, i - 1)
+        || arrow_head(trees, i + 1)
+        || apart(i - 1)
         || apart(i)
         || match (&trees[i - 1], &trees[i]) {
             (Tree::Ident { name, .. }, _) if name == "const" || name == "mut" => true,
@@ -165,8 +177,8 @@ fn last_field(mut fields: &[Tree]) -> &[Tree] {
     for (i, t) in fields.iter().enumerate() {
         match t {
             Tree::Punct { ch: '<', .. } => open += 1,
-            // The `>` of an arrow, `->`, has no `<` to close.
-            Tree::Punct { ch: '>', .. } => open = open.saturating_sub(1),
+            // The `>` of an arrow closes no `<`; nor does one with none open, which Rust refuses.
+            Tree::Punct { ch: '>', .. } if !arrow_head(fields, i) => open = open.saturating_sub(1),
             Tree::Punct { ch: ',', .. } if open == 0 => from = i + 1,
             _ => {}
         }
