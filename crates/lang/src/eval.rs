@@ -179,6 +179,14 @@ impl Target for Consts {
 /// allocator keeps a set of them for each of them, a bit each, so this many take 512 MiB.
 const VARIABLES: usize = 1 << 16;
 
+/// The most steps working out a function takes. A step is a turn of a `for`; an instruction, a
+/// call, a label or a note; a number of a range; an item of an array listed, as `[a, b]`; or an
+/// element of an `[x; n]`, of an array a method makes, of one copied from a name, as
+/// `let b: [u32; 4] = a;` and `for x in a` copy it, or of a value an index takes or a note shows. A
+/// number read by name or worked out costs none. Loops that nest and helpers that call themselves
+/// repeat each other's work, and this holds the work to what finishes.
+const STEPS: u128 = 1 << 22;
+
 fn err(span: Span, message: impl Into<String>) -> Error {
     Error { span, message: message.into() }
 }
@@ -247,6 +255,8 @@ struct Eval<'a, T: Target> {
     nest: usize,
     /// How many variables `let` has declared, in the kernel and in the helpers it called.
     declared: usize,
+    /// How many steps working out has taken, in the kernel and in the helpers it called.
+    steps: u128,
 }
 
 impl<'a, T: Target> Eval<'a, T> {
@@ -274,6 +284,7 @@ impl<'a, T: Target> Eval<'a, T> {
             depth: 0,
             nest: 0,
             declared: 0,
+            steps: 0,
         }
     }
 
@@ -518,7 +529,11 @@ impl<'a, T: Target> Eval<'a, T> {
             Expr::Lit(text, _) => value::literal(text, want).map_err(at),
             Expr::Bool(b, _) => Ok(Value::Bool(*b)),
             Expr::Str(..) => Err(at("a string is no value here; `note(\"..\")` takes one".into())),
-            Expr::Path(path, _) if path.len() == 1 => self.lent(e, want).map(Rc::unwrap_or_clone),
+            Expr::Path(path, _) if path.len() == 1 => {
+                let v = self.lent(e, want)?;
+                self.elements(&v, e.span())?;
+                Ok(Rc::unwrap_or_clone(v))
+            }
             Expr::Path(path, _) => {
                 let p = path.join("::");
                 value::path(&p).ok_or_else(|| at(format!("`{p}` is not a constant kgen knows")))
@@ -529,11 +544,15 @@ impl<'a, T: Target> Eval<'a, T> {
             }
             Expr::Index(base, index, _) => {
                 let i = self.count(index)?;
-                match &*self.lent(base, want)? {
-                    Value::Array(xs) => xs
-                        .get(i)
-                        .cloned()
-                        .ok_or_else(|| at(format!("index {i} is past the end of {} elements", xs.len()))),
+                let lent = self.lent(base, want)?;
+                match &*lent {
+                    Value::Array(xs) => {
+                        let x = xs
+                            .get(i)
+                            .ok_or_else(|| at(format!("index {i} is past the end of {} elements", xs.len())))?;
+                        self.step(value::held(x), e.span())?;
+                        Ok(x.clone())
+                    }
                     other => Err(at(format!("{} has no elements to index", other.kind()))),
                 }
             }
@@ -561,7 +580,9 @@ impl<'a, T: Target> Eval<'a, T> {
             Expr::Method { recv, name, args, .. } => {
                 let recv = self.lent(recv, want)?;
                 let args = args.iter().map(|a| self.value(a, Want::Any)).collect::<Result<Vec<_>, _>>()?;
-                value::method(&recv, name, &args).map_err(at)
+                let v = value::method(&recv, name, &args).map_err(at)?;
+                self.elements(&v, e.span())?;
+                Ok(v)
             }
             // A literal negated is one number, as Rust reads `-128i8`.
             Expr::Unary(UnOp::Neg, inner, _) if matches!(**inner, Expr::Lit(..)) => {
@@ -600,7 +621,9 @@ impl<'a, T: Target> Eval<'a, T> {
                     _ => tl.or(*th),
                 };
                 let end = if *inclusive { *h + 1 } else { *h };
-                value::fits((end - *l).max(0) as u128).map_err(at)?;
+                let n = (end - *l).max(0) as u128;
+                value::fits(n).map_err(at)?;
+                self.step(n, e.span())?;
                 Ok(Value::Array((*l..end).map(|x| Value::Int(x, ty)).collect()))
             }
             Expr::Array(items, _) => {
@@ -616,13 +639,17 @@ impl<'a, T: Target> Eval<'a, T> {
                     }
                 }
                 value::fits(value::array(held, items.len())).map_err(at)?;
+                // Its items were counted where they were made: it holds them, and copies none.
+                self.step(items.len() as u128, e.span())?;
                 Ok(Value::Array(xs))
             }
             Expr::Repeat(item, len, _) => {
                 let v = self.value(item, want)?;
                 nested(value::nests(&v), e.span())?;
                 let n = self.count(len)?;
-                value::fits(value::array(n as u128 * value::held(&v), n)).map_err(at)?;
+                let held = value::array(n as u128 * value::held(&v), n);
+                value::fits(held).map_err(at)?;
+                self.step(held, e.span())?;
                 Ok(Value::Array(vec![v; n]))
             }
             Expr::Paren(inner, _) => self.value(inner, want),
@@ -939,6 +966,12 @@ impl<'a, T: Target> Eval<'a, T> {
             Stmt::For { var, iter, body, .. } => {
                 let items: Vec<Binding<T::Var>> = match self.binding(iter)? {
                     Binding::Value(ref v) if let Value::Array(xs) = &**v => {
+                        // An array made by the header and one that is lent are both copied below,
+                        // item by item. The count of the one made stands for its copy, and the one
+                        // lent is counted here.
+                        if Rc::strong_count(v) > 1 {
+                            self.step(value::held(v), iter.span())?;
+                        }
                         xs.iter().map(|x| Binding::Value(Rc::new(x.clone()))).collect()
                     }
                     Binding::Vars(vs) => vs.into_iter().map(Binding::Var).collect(),
@@ -950,6 +983,7 @@ impl<'a, T: Target> Eval<'a, T> {
                     }
                 };
                 for item in items {
+                    self.step(1, iter.span())?;
                     self.scopes.push(vec![(var.clone(), item)]);
                     let r = self.block(body);
                     self.scopes.pop();
@@ -959,7 +993,10 @@ impl<'a, T: Target> Eval<'a, T> {
             }
             Stmt::If { cond, then, otherwise, span } => self.if_(cond, then, otherwise.as_deref(), *span),
             Stmt::Block(b) => self.block(b),
-            Stmt::Expr(e) => self.call(e),
+            Stmt::Expr(e) => {
+                self.step(1, e.span())?;
+                self.call(e)
+            }
         }
     }
 
@@ -972,6 +1009,25 @@ impl<'a, T: Target> Eval<'a, T> {
         }
         self.declared += n;
         Ok(())
+    }
+
+    /// Counts `n` more steps. The function that would pass the most is refused at `at`, where it
+    /// takes the step.
+    fn step(&mut self, n: u128, at: Span) -> Result<(), Error> {
+        self.steps += n;
+        if self.steps > STEPS {
+            return Err(err(at, format!("this takes more than {STEPS} steps to work out")));
+        }
+        Ok(())
+    }
+
+    /// Counts the elements of `v` at `at`, if it is an array copied from a name or made by a
+    /// method. A number read by name or made by a method costs none.
+    fn elements(&mut self, v: &Value, at: Span) -> Result<(), Error> {
+        match v {
+            Value::Array(_) => self.step(value::held(v), at),
+            _ => Ok(()),
+        }
     }
 
     fn let_(&mut self, name: &str, span: Span, ty: Option<&Type>, value: Option<&Expr>) -> Result<(), Error> {
@@ -1154,7 +1210,10 @@ impl<'a, T: Target> Eval<'a, T> {
             };
             let name = tail[1..close].trim();
             match self.lookup(name, *sspan)? {
-                Some(Binding::Value(v)) => out += &v.to_string(),
+                Some(Binding::Value(v)) => {
+                    self.step(value::held(&v), *sspan)?;
+                    out += &v.to_string();
+                }
                 Some(b) => return Err(err(*sspan, format!("`{name}` is {}, and a note shows values", b.kind()))),
                 None => return Err(err(*sspan, format!("`{name}` is not defined"))),
             }

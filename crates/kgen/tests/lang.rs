@@ -1036,3 +1036,77 @@ fn the_deepest_kernel_fits_the_stack_of_a_test() {
         .collect();
     x86(&format!("{helpers}{}", kernel("h0();")), "k");
 }
+
+/// The step past the most, 4194304, is refused where it is taken, in seconds. Without the count,
+/// loops that nest take 2^40 turns, a helper that calls itself twice takes 2^40 calls, and a const
+/// of 2^20 elements shown 2^20 times takes 2^40 elements: days, or an abort out of memory.
+#[test]
+fn work_past_the_most_steps_is_refused_where_the_step_past_it_is_taken() {
+    let twice =
+        "fn h<const N: usize>() {\n    if N > 0 {\n        h::<{ N - 1 }>();\n        h::<{ N - 1 }>();\n    }\n}\n";
+    let table = "const A: [u32; 1 << 20] = [0; 1 << 20]; ";
+    let rows = "const M: [[u32; 1024]; 1024] = [[0; 1024]; 1024]; ";
+    let cases = [
+        ("loops that nest", kernel("for i in 0..1 << 20 { for j in 0..1 << 20 {} }"), "2:33"),
+        ("a note of a const", kernel(&format!("{table}for i in 0..1 << 20 {{ note(\"{{A}}\"); }}")), "2:68"),
+        ("a helper that calls itself twice", format!("{twice}{}", kernel("h::<40>();")), "4:9"),
+        ("an array built in a loop", kernel("for i in 0..1 << 20 { let a = [0; 1 << 20]; }"), "2:31"),
+        (
+            "a const copied in a loop",
+            kernel(&format!("{table}for i in 0..1 << 20 {{ let b: [u32; 1 << 20] = A; }}")),
+            "2:87",
+        ),
+        ("a method's array in a loop", kernel(&format!("{table}for i in 0..1 << 20 {{ let b = A.rev(); }}")), "2:73"),
+        (
+            "the rows of a const in a loop",
+            kernel(&format!("{rows}for i in 0..1 << 20 {{ for row in M {{}} }}")),
+            "2:84",
+        ),
+        ("a row indexed in a loop", kernel(&format!("{rows}for i in 0..1 << 20 {{ let row = M[0]; }}")), "2:84"),
+        (
+            "data in memory in a loop",
+            kernel(&format!("{table}let x: gpr; for i in 0..1 << 20 {{ lea(x, [A]); }}")),
+            "2:83",
+        ),
+    ];
+    for (name, src, at) in cases {
+        let want = format!("{at}: this takes more than 4194304 steps to work out");
+        assert_eq!(kgen::x86_str(&src, "k").unwrap_err(), want, "{name}");
+    }
+}
+
+/// Work of exactly the most steps compiles, and a note after it is the step past, refused. A loop
+/// of `n` turns is `2n` steps, its range and its turns, so two loops fill what each case leaves, a
+/// range holding 2^20 at most. A case would pass the most if it counted one step more than README
+/// says, and fall short if it counted one less: loops add, and do not multiply; a number read by
+/// name or worked out costs none; an array listed costs its items, not its elements; an `[x; n]`,
+/// an array a method makes and one copied from a name, by a typed `let` or by `for`, cost their
+/// elements; and a label costs one, a number an index takes or a note shows costs one, and an array
+/// there costs its elements.
+#[test]
+fn work_within_the_most_steps_compiles() {
+    let cases = [
+        ("a loop's range and turns", "for i in 0..1048576 {}", 2 * 1048576),
+        ("a number read by name or worked out", "for i in 0..1000 { let b = i + 1; }", 2 * 1000),
+        ("an array listed", "let a = [[0, 0], [0, 0]];", 2 + 2 + 2),
+        ("an `[x; n]`", "let a = [0; 1000];", 1000),
+        ("an array a method makes", "let a = [0; 1000]; let b = a.rev();", 1000 + 1000),
+        ("an array copied by a typed `let`", "let a = [0; 1000]; let b: [u32; 1000] = a;", 1000 + 1000),
+        ("an array copied by `for`", "let a = [0; 1000]; for x in a {}", 1000 + 1000 + 1000),
+        ("a label", "for i in 0..1000 { label(a); }", 3 * 1000),
+        ("a number an index takes", "let a = [0, 0]; for i in 0..1000 { let b = a[0]; }", 2 + 3 * 1000),
+        ("an array an index takes", "let a = [[0; 1000]; 2]; let b = a[0];", 1000 + 2 * 1000 + 1000),
+        ("a number a note shows", "let a = 7; for i in 0..1000 { note(\"{a}\"); }", 4 * 1000),
+        ("an array a note shows", "let a = [0; 1000]; note(\"{a}\"); note(\"{a}\");", 1000 + 2 * (1 + 1000)),
+    ];
+    for (name, work, steps) in cases {
+        let turns = (4194304 - steps) / 2;
+        let body = format!("{work} for k in 0..{} {{}} for l in 0..{} {{}}", turns / 2, turns - turns / 2);
+        if let Err(e) = kgen::x86_str(&kernel(&body), "k") {
+            panic!("{name}: {e}");
+        }
+        let past = kgen::x86_str(&kernel(&format!("{body} note(\"\");")), "k");
+        let want = format!("2:{}: this takes more than 4194304 steps to work out", body.len() + 2);
+        assert_eq!(past.err(), Some(want), "{name}");
+    }
+}
