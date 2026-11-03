@@ -1,0 +1,19 @@
+[package]
+name = "matmul"
+description = "Matrix products by kernels written in kernite's language: for the CPU in x86, for the GPU in PTX, on its cores and on its tensor cores"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+kernite-cuda = { workspace = true }
+kernite-macros = { workspace = true }
+
+# Not the workspace's lints: calling a kernel is unsafe, and this crate is where it happens.
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+disallowed_types = "deny"

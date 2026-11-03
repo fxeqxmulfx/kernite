@@ -314,6 +314,16 @@ cargo run --release -p microgpt -- gpu       # the PTX kernels, on the GPU
 cargo run --release -p microgpt -- reference # plain Rust
 ```
 
+[`examples/matmul`](examples/matmul/src/main.rs) multiplies matrices, `c = a b` into `f32`: `sgemm` in x86 on the
+CPU, `sgemm` in PTX on the GPU's cores, and `hgemm` from `f16`, for its tensor cores. Its tests hold each kernel to
+a scalar reference, bit for bit, or `hgemm` to products of integers, exact in any order; and its listings to
+[`snapshots/`](examples/matmul/snapshots/). It times them, in GFLOPS:
+
+```
+cargo run --release -p matmul -- cpu             # the x86 kernel
+cargo run --release -p matmul -- gpu 1024 4096   # the PTX kernels, on the GPU, at these sizes
+```
+
 ## Layers
 
 Each crate depends only on the layers inside it. `crates/kernite/tests/architecture.rs` checks this rule.

@@ -1,0 +1,64 @@
+// Written by kernite.
+
+.version 2.3
+.target sm_20
+.address_size 64
+
+.visible .entry _ZN7kernite6matmul6tensor7kernels5hgemmE(
+	.param .u64 _ZN7kernite6matmul6tensor7kernels5hgemmE_param_0,
+	.param .u64 _ZN7kernite6matmul6tensor7kernels5hgemmE_param_1,
+	.param .u64 _ZN7kernite6matmul6tensor7kernels5hgemmE_param_2,
+	.param .u32 _ZN7kernite6matmul6tensor7kernels5hgemmE_param_3,
+	.param .u32 _ZN7kernite6matmul6tensor7kernels5hgemmE_param_4,
+	.param .u32 _ZN7kernite6matmul6tensor7kernels5hgemmE_param_5
+)
+{
+	.reg .pred %past, %more;
+	.reg .f16 %p, %q;
+	.reg .u32 %m, %n, %k, %block, %size, %thread, %i, %row;
+	.reg .u32 %col;
+	.reg .f32 %acc, %u, %v;
+	.reg .u64 %c, %a, %b, %x, %y, %down, %z;
+
+	ld.param.u64 %c, [_ZN7kernite6matmul6tensor7kernels5hgemmE_param_0];
+	cvta.to.global.u64 %c, %c;
+	ld.param.u64 %a, [_ZN7kernite6matmul6tensor7kernels5hgemmE_param_1];
+	cvta.to.global.u64 %a, %a;
+	ld.param.u64 %b, [_ZN7kernite6matmul6tensor7kernels5hgemmE_param_2];
+	cvta.to.global.u64 %b, %b;
+	ld.param.u32 %m, [_ZN7kernite6matmul6tensor7kernels5hgemmE_param_3];
+	ld.param.u32 %n, [_ZN7kernite6matmul6tensor7kernels5hgemmE_param_4];
+	ld.param.u32 %k, [_ZN7kernite6matmul6tensor7kernels5hgemmE_param_5];
+	mov.u32 %block, %ctaid.x;
+	mov.u32 %size, %ntid.x;
+	mov.u32 %thread, %tid.x;
+	mad.lo.u32 %i, %block, %size, %thread;
+	div.u32 %row, %i, %n;
+	rem.u32 %col, %i, %n;
+	setp.ge.u32 %past, %row, %m;
+	@%past ret;
+	// along row `row` of `a`, down column `col` of `b`
+	mul.lo.u32 %i, %row, %k;
+	mad.wide.u32 %x, %i, 2, %a;
+	mad.wide.u32 %y, %col, 2, %b;
+	mul.wide.u32 %down, %n, 2;
+	mov.f32 %acc, 0f00000000;
+	setp.ne.u32 %more, %k, 0;
+	@!%more bra $L1;
+$L0:
+	ld.global.b16 %p, [%x];
+	ld.global.b16 %q, [%y];
+	cvt.f32.f16 %u, %p;
+	cvt.f32.f16 %v, %q;
+	fma.rn.f32 %acc, %u, %v, %acc;
+	add.u64 %x, %x, 2;
+	add.u64 %y, %y, %down;
+	sub.u32 %k, %k, 1;
+	setp.ne.u32 %more, %k, 0;
+	@%more bra $L0;
+$L1:
+	mad.lo.u32 %i, %row, %n, %col;
+	mad.wide.u32 %z, %i, 4, %c;
+	st.global.f32 [%z], %acc;
+	ret;
+}

@@ -55,8 +55,9 @@ every kind of dependency, and a new crate needs its line there. Change both when
   compiling. `kernite-macros`: the proc macros.
 - `kernite-cuda`, `kernite-cpu`: what the generated code runs on: the CUDA driver, and an x86 grid's
   threads and module memory. Neither depends on another crate.
-- `examples/my-app`, `examples/microgpt`: kernite used as a crate outside it would be. Their tests hold each
-  kernel to a scalar reference, bit for bit, and each listing to `snapshots/`.
+- `examples/my-app`, `examples/microgpt`, `examples/matmul`: kernite used as a crate outside it
+  would be. Their tests hold each kernel to a scalar reference, bit for bit, and each listing to
+  `snapshots/`.
 
 ## Rules the code keeps
 

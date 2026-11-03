@@ -71,6 +71,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "matmul"
+version = "0.1.0"
+dependencies = [
+ "kernite-cuda",
+ "kernite-macros",
+]
+
+[[package]]
 name = "microgpt"
 version = "0.1.0"
 dependencies = [
