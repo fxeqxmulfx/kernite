@@ -365,7 +365,7 @@ fn grid_launcher(
             }
             args.push("$grid".to_string());
             format!(
-                "{addresses}::kernite_cpu::launch($grid, &|$grid: &::kernite_cpu::Place| unsafe {{ ({kernel})({}) }})",
+                "{addresses}::kernite_cpu::launch($grid, move |$grid: &::kernite_cpu::Place| unsafe {{ ({kernel})({}) }})",
                 args.join(", ")
             )
         }

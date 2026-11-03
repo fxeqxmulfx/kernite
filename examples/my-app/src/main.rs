@@ -1680,6 +1680,28 @@ mod tests {
         }
     }
 
+    /// A cooperative kernel for the tests alone.
+    #[kernite_macros::kernels]
+    mod framed {
+        /// Each thread writes `t + 1` to the first word of a frame of 192 KB, and `t + 2` to the
+        /// last; waits for the others; and stores the sum of the two words it reads back in
+        /// `out[t]`, `t` its index in the grid.
+        #[cooperative]
+        pub unsafe extern "sysv64" fn framed(out: *mut u64) {
+            let words: local<[u64; 24576]>;
+            let (t, v): (gpr, gpr);
+            mov(t, grid.thread);
+            lea(v, [t + 1]);
+            mov([words], v);
+            lea(v, [t + 2]);
+            mov([words + 8 * 24575], v);
+            grid.sync();
+            mov(v, [words]);
+            add(v, [words + 8 * 24575]);
+            mov([out + t * 8], v);
+        }
+    }
+
     /// A frame past the end of a thread's stack faults at the guard page below the stack, which
     /// Rust reports as the overflow it is, since the prologue touches the frame a page at a
     /// time: a frame taken at once would reach past the guard page, into memory of another's
@@ -2007,6 +2029,52 @@ mod tests {
             }
         }
         too_many(super::diffuse_on_threads(&mut [1.0], 1, kernite_cpu::most().unwrap() + 1).unwrap_err());
+    }
+
+    /// A frame of 192 KB is on the stack of the thread the kernel runs on, each of the grid's,
+    /// whose own it is, launch after launch on the threads the launches before kept: each reads
+    /// back what it wrote, though all wrote before any read.
+    #[test]
+    fn a_frame_of_192_kb_is_each_threads_own_launch_after_launch() {
+        for threads in 1..=threads() {
+            let want: Vec<u64> = (0..threads as u64).map(|t| 2 * t + 3).collect();
+            for launch in 0..50 {
+                let mut out = vec![0u64; threads];
+                // SAFETY: a word a thread behind `out`, which nothing else touches while the
+                // threads run, and the kernel reaches nothing else.
+                unsafe { framed::framed(kernite_cpu::Grid::new(threads), out.as_mut_ptr()) }.unwrap();
+                assert_eq!(out, want, "{threads} threads, launch {launch}");
+            }
+        }
+    }
+
+    /// Launches from two threads at once, one of `normalize` and one of `diffuse`, each wait at
+    /// a barrier of their grid's own: each result is the reference's, bit for bit, as when
+    /// they launch alone, a hundred times over.
+    #[test]
+    fn launches_from_two_threads_at_once_wait_at_barriers_of_their_own() {
+        assert!(super::supported(), "the kernels need AVX2 and FMA");
+        let threads = threads().min(2);
+        let x = floats(41_000, 17).iter().map(|x| x / 2.0 + 1.0).collect::<Vec<f32>>();
+        let heat = floats(9000, 19);
+        let bits = |v: &[f32]| v.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        let (normal, spread) = (bits(&normalized(&x)), bits(&diffused(&heat, 50)));
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                for _ in 0..100 {
+                    let mut got = x.clone();
+                    super::normalize_on_threads(&mut got, threads).unwrap();
+                    assert_eq!(bits(&got), normal);
+                }
+            });
+            s.spawn(|| {
+                for _ in 0..100 {
+                    let mut got = heat.clone();
+                    super::diffuse_on_threads(&mut got, 50, threads).unwrap();
+                    assert_eq!(bits(&got), spread);
+                }
+            });
+        });
     }
 
     /// `saxpy` on the GPU against `f32::mul_add`, which rounds once as `fma.rn.f32` does; on a
