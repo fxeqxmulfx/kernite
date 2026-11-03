@@ -41,7 +41,8 @@
 //! ```
 
 pub use kgen_build::{
-    Abi, Compiled, DeviceStatic, HostStatic, Naked, Owner, abi, cooperative, function, instance, owner,
+    Abi, Call, Compiled, ConstItem, DeviceFnOut, DeviceOut, DeviceStatic, Given, HostStatic, ItemOut, Launcher,
+    ModuleOut, Naked, NativeInstance, NativeOut, Owner, abi, consts, cooperative, function, instance, owner,
 };
 pub use kgen_compile::Error;
 pub use kgen_core::{Class, Program, Signature};
@@ -85,6 +86,17 @@ pub fn x86_statics(module: &Module) -> Vec<Result<Compiled<X86Static>, kgen_lang
 /// `s`, a static of a module of x86 kernels, as Rust lays it out in the process.
 pub fn host_static(s: &X86Static) -> HostStatic {
     X86.host_static(s)
+}
+
+/// `module`, a module of kernels, compiled: each function `extern "sysv64"` for x86-64, as
+/// [`x86`] has it, and each the GPU runs for PTX, as [`ptx`] has it, into one module the GPU
+/// loads, with the statics each machine lays out as [`x86_statics`] and [`ptx_statics`] have
+/// them. `scope` is the namespaces its GPU kernels are in, as [`ptx_scope`] writes them, and
+/// `given` the consts it takes from a module of consts. What is wrong is said where it can be
+/// mended, and each item of the module is what [`ModuleOut`] says, for whatever writes the
+/// module out for Rust.
+pub fn module(module: Module, given: Option<Given>, scope: &str) -> ModuleOut {
+    kgen_build::module(module, given, &X86, &Ptx::new(scope))
 }
 
 /// Kernel `name` of the module in `src`, for x86-64, or its instance `tile::<4>`; an error
