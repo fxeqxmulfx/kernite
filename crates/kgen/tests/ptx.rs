@@ -3030,8 +3030,8 @@ fn grid_sync_is_where_every_thread_of_the_grid_comes_to_it() {
         (
             "#[cooperative]",
             "let p: pred; setp.eq.u32(p, n, 0); if !p { grid.sync(); }",
-            "3:49: `grid.sync()` is for every thread of the grid, under no `if`: the grid waits for ever for one \
-             that does not come to it",
+            "3:49: `grid.sync()` is for every thread of the grid, under no `if`: kgen writes it with no guard, and a \
+             kernel that wants it under a condition the same in every thread jumps around it",
         ),
         // A function the kernels call may be called by one whose grid is not all running.
         (

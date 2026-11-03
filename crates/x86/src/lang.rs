@@ -54,8 +54,8 @@
 //! each wrote before, every one reads after. It is code of the kernel's own, which calls
 //! nothing: a thread counts itself in with `lock xadd`, and the last to come lets the others
 //! go, who spin with `pause` until it does, so each thread needs a core. Every thread comes to
-//! each `grid.sync()`, or the others wait for ever: kgen refuses one under an `if`, and a jump
-//! around one is the kernel's to keep from.
+//! each `grid.sync()`, or the others wait for ever. kgen refuses one under an `if`, and a jump
+//! around one is the kernel's to see to: every thread takes it, or none does.
 //!
 //! The launcher gives each thread the address of its place in the grid, in the register after
 //! the kernel's parameters, as SysV passes the next integer, so a cooperative kernel takes five
@@ -959,8 +959,8 @@ impl Kernel {
         }
         if guard {
             return Err(Fault::new(
-                "`grid.sync()` is for every thread of the grid, under no `if`: the grid waits for ever for one that \
-                 does not come to it",
+                "`grid.sync()` is for every thread of the grid, under no `if`: kgen writes it with no guard, and a \
+                 kernel that wants it under a condition the same in every thread jumps around it",
             ));
         }
         let grid = self.grid();

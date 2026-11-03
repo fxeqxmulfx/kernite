@@ -29,7 +29,9 @@
 //! - `grid.sync()` waits until every thread of the grid has come to it, as CUDA's
 //!   `grid.sync()` does, in a kernel the language marks `#[cooperative]`,
 //!   [`Kernel::cooperative`], which every launch runs all at once. Each thread of the grid
-//!   comes to it as often as the others, under no `if`, or the grid waits for ever.
+//!   comes to it as often as the others, or the grid waits for ever. kgen refuses one under an
+//!   `if`, and a jump around one is the kernel's to see to: every thread takes it, or none
+//!   does.
 //! - Operands taken together are a tuple, `(a, b)`, or variables declared together; two
 //!   results written at once are `p | q`; `_` is a result left unwritten, where PTX lets one
 //!   be; `!p` is a predicate read inverted, and `-a` a source negated, where PTX negates one.
@@ -1129,8 +1131,8 @@ impl Kernel {
         }
         if guard.is_some() {
             return Err(Fault::new(
-                "`grid.sync()` is for every thread of the grid, under no `if`: the grid waits for ever for one that \
-                 does not come to it",
+                "`grid.sync()` is for every thread of the grid, under no `if`: kgen writes it with no guard, and a \
+                 kernel that wants it under a condition the same in every thread jumps around it",
             ));
         }
         let lines: Vec<String> = GRID_SYNC

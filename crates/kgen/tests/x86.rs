@@ -1090,8 +1090,8 @@ fn the_grid_is_a_cooperative_kernels_to_read_and_wait_for() {
         ("grid.sync(x);", "3:6: `grid.sync` takes no operands, not 1"),
         (
             "let g: gpr; zero(g); if g { grid.sync(); }",
-            "3:34: `grid.sync()` is for every thread of the grid, under no `if`: the grid waits for ever for one that \
-             does not come to it",
+            "3:34: `grid.sync()` is for every thread of the grid, under no `if`: kgen writes it with no guard, and a \
+             kernel that wants it under a condition the same in every thread jumps around it",
         ),
     ];
     for (body, want) in cases {

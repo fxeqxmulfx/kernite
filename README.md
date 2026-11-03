@@ -241,8 +241,8 @@ thread keeps in its registers, or a block in its shared memory, lasts across the
 to memory and read it back. Its grid has at most as many blocks as the GPU runs at once, which `Kernels` says by a
 method of the kernel's name: `kernels.normalize_blocks(256, 0)?` for blocks of 256 threads and no shared memory from
 the launch. A grid of more is an error, which says how many. Such a kernel needs a GPU from Pascal's on, `sm_60`, and
-kgen refuses `grid.sync()` where a thread of the grid might not come to it: under an `if`, in an `extern "ptx-func"`
-function, or in a kernel that is not cooperative.
+kgen refuses `grid.sync()` under an `if`, in an `extern "ptx-func"` function, or in a kernel that is not cooperative. A
+jump around one is the kernel's to see to: every thread of the grid takes it, or none does.
 
 A kernel is named in PTX as C++ names a function in the namespaces of its workspace, its crate and its modules, so
 that a profiler tells two crates' `saxpy` apart: `_ZN4kgen6my_app3gpu5saxpyE`, which `cu++filt`, Nsight and
