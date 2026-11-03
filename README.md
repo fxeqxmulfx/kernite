@@ -254,9 +254,10 @@ that a profiler tells two crates' `saxpy` apart: `_ZN4kgen6my_app3gpu5saxpyE`, w
 `kgen::my_app::gpu::block_sums<(unsigned int)1024>`, and launched as Rust calls a generic method,
 `kernels.block_sums::<1024>(grid, x, sums)`; the shared memory the launch gives is named as the kernel's static,
 `kgen::my_app::gpu::reverse_runs::run`, and a static of the module's as a variable of its namespace,
-`kgen::my_app::gpu::COUNTS`. The workspace's manifest is the nearest `Cargo.toml` from the package's directory up
-that has a `[workspace]` table, or a table inside it. The workspace is named as the directory of its manifest is,
-unless the manifest names it, as kgen's does, so that a clone keeps the names wherever it is:
+`kgen::my_app::gpu::COUNTS`. The workspace's manifest is the one Cargo takes for the package. kgen reads a relative
+`CARGO_HOME` from the directory rustc runs in, and Cargo from the one it was run in, which may be another. The
+workspace is named as the directory of its manifest is, unless the manifest names it, as kgen's does, so that a
+clone keeps the names wherever it is:
 
 ```toml
 [workspace.metadata.kgen]

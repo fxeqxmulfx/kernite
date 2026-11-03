@@ -165,13 +165,13 @@
 //! `_ZN4kgen6my_app3gpu5scaleE`, which `cu++filt`, Nsight and `cuda-gdb` show as
 //! `kgen::my_app::gpu::scale`, an instance as a template's,
 //! `kgen::my_app::gpu::block_sums<(unsigned int)1024>`, and a static as a variable of the
-//! namespaces, `kgen::my_app::gpu::COUNTS`. The workspace's manifest is the nearest
-//! `Cargo.toml` from the package's directory up that has a `[workspace]` table, or a table
-//! inside it. The workspace is named as the directory of its manifest is, or as the
-//! manifest names it, which a clone keeps wherever it is. `name = ""` leaves the workspace
-//! out of the names. A `name` that is not a string is an error at the module. The error
-//! names the manifest. A package with no workspace's manifest is one of its own, named as
-//! the package is.
+//! namespaces, `kgen::my_app::gpu::COUNTS`. The workspace's manifest is the one Cargo takes
+//! for the package. kgen reads a relative `CARGO_HOME` from the directory rustc runs in,
+//! and Cargo from the one it was run in, which may be another. The workspace is named as
+//! the directory of its manifest is, or as the manifest names it, which a clone keeps
+//! wherever it is. `name = ""` leaves the workspace out of the names. A `name` that is not
+//! a string is an error at the module. The error names the manifest. A package with no
+//! workspace's manifest is one of its own, named as the package is.
 //!
 //! ```toml
 //! [workspace.metadata.kgen]
