@@ -54,6 +54,10 @@ pub trait Target {
     /// `var`, a parameter or a variable the body declares, is declared at `at`: where an error
     /// the machine finds with it later is placed. A machine need not keep it.
     fn declared_at(&mut self, _var: Self::Var, _at: Span) {}
+
+    /// The instruction that `inst` is given next is at `at`: where an error the machine finds
+    /// with it later is placed. A machine need not keep it.
+    fn inst_at(&mut self, _at: Span) {}
 }
 
 /// What an instruction is given.

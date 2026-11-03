@@ -4,6 +4,8 @@
 //! What it knows of the machine comes through the [`Machine`] and [`Spill`] ports, so it
 //! runs the same for any instruction set, and its tests run it on a toy machine with a few
 //! registers.
+//!
+//! [`on_every_path`] says which items of a program every path from its start to its end runs.
 
 mod alloc;
 mod allocated;
@@ -16,6 +18,7 @@ mod port;
 mod spill;
 
 pub use allocated::{Allocated, Frame};
+pub use cfg::on_every_path;
 pub use error::Error;
 use kgen_core::{Inst, Item, PReg, Program};
 pub use port::{Machine, Spill};

@@ -668,6 +668,122 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
     }
 }
 
+/// The mask of lanes that `name` is refused for: thread 0 is in lane 0, and the mask has not.
+fn without_lane_0(name: &str) -> String {
+    format!(
+        "`{name}` is run by thread 0, which is in lane 0; this mask leaves lane 0 out, and PTX leaves the \
+         instruction undefined in a thread outside its mask"
+    )
+}
+
+#[test]
+fn a_mask_known_now_without_lane_0_is_refused_where_thread_0_runs_the_instruction() {
+    // Every kernel has a thread 0, and it is in lane 0. An instruction that no guard, `ret`,
+    // call or jump keeps it from is run by it, with the mask given.
+    assert_eq!(
+        compile("n: u32", "bar.warp.sync(2);").unwrap_err(),
+        "2:10: `bar.warp.sync` is run by thread 0, which is in lane 0; this mask leaves lane 0 out, and PTX leaves \
+         the instruction undefined in a thread outside its mask"
+    );
+    let cases = [
+        // Each instruction that has a mask of lanes, at the start of the kernel.
+        ("let i: u32; shfl.sync.idx.b32(i, n, 0, 0x1f, 0xffff_fffe);", "2:27", "shfl.sync.idx.b32"),
+        ("let (p, q): (pred, pred); setp.eq.u32(p, n, 0); vote.sync.any.pred(q, p, 6);", "2:63", "vote.sync.any.pred"),
+        ("let i: b32; r#match.any.sync.b32(i, n, 0x8000_0000);", "2:30", "match.any.sync.b32"),
+        ("let i: u32; redux.sync.add.u32(i, n, 0xffff_0000);", "2:28", "redux.sync.add.u32"),
+        // After an `if` that guards another instruction: thread 0 may skip that one, and runs
+        // this.
+        (
+            "let (i, p): (u32, pred); setp.eq.u32(p, n, 0); if p { mov.u32(i, 1); } bar.warp.sync(2);",
+            "2:81",
+            "bar.warp.sync",
+        ),
+        // After a jump that comes back before it: the loop has a way out, which every thread
+        // takes in the end.
+        (
+            "let p: pred; label(again); setp.eq.u32(p, n, 0); if p { bra(again); } bar.warp.sync(2);",
+            "2:80",
+            "bar.warp.sync",
+        ),
+        // In the body of a loop, each round of which runs it.
+        (
+            "let (i, p): (u32, pred); mov.u32(i, 0); label(top); bar.warp.sync(2); add.u32(i, i, 1); \
+             setp.lt.u32(p, i, n); if p { bra(top); }",
+            "2:62",
+            "bar.warp.sync",
+        ),
+        // The first of two.
+        ("bar.warp.sync(2); bar.warp.sync(4);", "2:10", "bar.warp.sync"),
+    ];
+    for (body, at, name) in cases {
+        let want = format!("{at}: {}", without_lane_0(name));
+        assert_eq!(compile("x: *mut f32, n: u32", body).unwrap_err(), want, "{body}");
+    }
+}
+
+#[test]
+fn a_mask_without_lane_0_is_taken_where_thread_0_may_not_run_the_instruction() {
+    let cases = [
+        // Under a guard.
+        "let p: pred; setp.eq.u32(p, n, 0); if p { bar.warp.sync(2); }",
+        // After a `ret` that a guard keeps from some threads.
+        "let p: pred; setp.eq.u32(p, n, 0); if p { ret(); } bar.warp.sync(2);",
+        "let p: pred; setp.eq.u32(p, n, 0); if p { exit(); } bar.warp.sync(2);",
+        "let p: pred; setp.eq.u32(p, n, 0); if p { trap(); } bar.warp.sync(2);",
+        // And with a label between, where a block of its own begins.
+        "let p: pred; setp.eq.u32(p, n, 0); if p { ret(); } label(on); bar.warp.sync(2);",
+        // Behind a jump that skips it.
+        "let p: pred; setp.eq.u32(p, n, 0); if p { bra(done); } bar.warp.sync(2); label(done);",
+        // In a loop that has a way out, but not every round.
+        "let (i, p): (u32, pred); mov.u32(i, 0); label(top); setp.lt.u32(p, i, n); if p { bra(skip); } \
+         bar.warp.sync(2); label(skip); add.u32(i, i, 1); setp.lt.u32(p, i, n); if p { bra(top); }",
+        // Beside a loop that has no way out, which a thread may go into instead, and after one.
+        "let p: pred; setp.eq.u32(p, n, 0); if p { bra(spin); } bar.warp.sync(2); ret(); label(spin); bra(spin);",
+        "label(spin); bra(spin); bar.warp.sync(2);",
+        // With lane 0 in the mask, however many others.
+        "bar.warp.sync(1);",
+        "bar.warp.sync(3);",
+        "bar.warp.sync(0xffff_ffff);",
+        "bar.warp.sync(-1);",
+        // A mask that is not known now.
+        "let m: u32; mov.u32(m, 2); bar.warp.sync(m);",
+        "bar.warp.sync(n);",
+    ];
+    for body in cases {
+        if let Err(e) = compile("x: *mut f32, n: u32", body) {
+            panic!("{body}: {e}");
+        }
+    }
+    // After a call, which may end the thread, or keep it for ever.
+    let ptx = kgen::ptx_str(
+        "unsafe extern \"ptx-kernel\" fn k() { call(nothing); bar.warp.sync(2); }\n\
+         extern \"ptx-func\" fn nothing() {}\n",
+    )
+    .unwrap();
+    assert!(ptx.contains("\tcall nothing;\n\tbar.warp.sync 2;\n"), "{ptx}");
+    // In a function kernels call, which thread 0 runs wherever it runs a call of it.
+    let ptx = kgen::ptx_str(
+        "unsafe extern \"ptx-kernel\" fn k() { call(warp); }\n\
+         extern \"ptx-func\" fn warp() { bar.warp.sync(2); }\n",
+    )
+    .unwrap();
+    assert!(ptx.contains("\tbar.warp.sync 2;\n\tret;\n}\n"), "{ptx}");
+}
+
+/// Each form with a mask of lanes is marked: those of `bar.warp.sync`, `vote.sync`, `match.sync`,
+/// `redux.sync` and `shfl.sync`, and no others.
+#[test]
+fn a_mask_of_lanes_is_marked_in_each_form_that_has_one() {
+    let with = ["bar.warp.sync", "vote.sync", "match.", "redux.sync", "shfl.sync"];
+    let mut marked = 0;
+    for form in forms::forms() {
+        let has = form.operands.iter().any(|s| s.lanes);
+        assert_eq!(has, with.iter().any(|w| form.line.starts_with(w)), "{}", form.line);
+        marked += usize::from(has);
+    }
+    assert_eq!(marked, 8);
+}
+
 #[test]
 fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
     let cases = [

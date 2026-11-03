@@ -9,6 +9,13 @@ impl Bits {
         Bits(vec![0; n.div_ceil(64)])
     }
 
+    /// Every member of `0..n`.
+    pub(crate) fn full(n: usize) -> Self {
+        let mut all = Bits::new(n);
+        (0..n).for_each(|i| all.insert(i));
+        all
+    }
+
     pub(crate) fn insert(&mut self, i: usize) {
         self.0[i / 64] |= 1 << (i % 64);
     }
@@ -25,6 +32,13 @@ impl Bits {
     pub(crate) fn union_with(&mut self, other: &Bits) {
         for (a, b) in self.0.iter_mut().zip(&other.0) {
             *a |= b;
+        }
+    }
+
+    /// Removes every one that is not a member of `other`.
+    pub(crate) fn intersect_with(&mut self, other: &Bits) {
+        for (a, b) in self.0.iter_mut().zip(&other.0) {
+            *a &= b;
         }
     }
 
@@ -62,5 +76,17 @@ mod tests {
         b.remove(64);
         assert_eq!(b.iter().collect::<Vec<_>>(), [3, 63, 130, 199]);
         assert!(b.contains(199) && !b.contains(64));
+    }
+
+    #[test]
+    fn keeps_the_members_of_both() {
+        let mut a = Bits::full(70);
+        let mut b = Bits::new(70);
+        for i in [0, 5, 69] {
+            b.insert(i);
+        }
+        assert_eq!(a.iter().count(), 70);
+        a.intersect_with(&b);
+        assert_eq!(a, b);
     }
 }

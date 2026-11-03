@@ -84,8 +84,8 @@ pub enum StaticError {
 /// Why a kernel's code is not finished: what is wrong, and where.
 #[derive(Debug, PartialEq)]
 pub struct Unfinished {
-    /// Where the variable to blame is declared, if it blames one: the error is placed there, or
-    /// else at the function.
+    /// Where the error is placed, if the machine knows: where the variable to blame is
+    /// declared, or the instruction to blame is; else at the function.
     pub at: Option<Span>,
     /// What is wrong.
     pub message: String,

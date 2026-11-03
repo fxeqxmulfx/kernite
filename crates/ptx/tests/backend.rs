@@ -194,3 +194,32 @@ fn each_refusal_says_what_to_blame() {
     let unfinished = Unfinished { at, message: "`x` is read before anything writes it".into() };
     assert_eq!(ptx.finish(written(&ptx, &module, "unwritten", &[], &[])), Err(unfinished));
 }
+
+/// A mask of lanes that leaves out lane 0, on an instruction that thread 0 runs, is refused when
+/// the kernel is finished, and says where the instruction is, for kgen-build to place it there;
+/// under a guard it is taken.
+#[test]
+fn a_mask_without_lane_0_is_refused_at_its_instruction() {
+    let src = r#"
+        pub unsafe extern "ptx-kernel" fn masked(n: u32) {
+            bar.warp.sync(2);
+        }
+
+        pub unsafe extern "ptx-kernel" fn guarded(n: u32) {
+            let p: pred;
+            setp.eq.u32(p, n, 0);
+            if p {
+                bar.warp.sync(2);
+            }
+        }
+    "#;
+    let module = kgen_lang::parse(src).unwrap();
+    let ptx = Ptx::new("");
+    // At the last word of the instruction's name, as an error of the instruction's is.
+    let at = Some(Span(src.find("sync(2)").unwrap() as u32));
+    let message = "`bar.warp.sync` is run by thread 0, which is in lane 0; this mask leaves lane 0 out, and PTX \
+                   leaves the instruction undefined in a thread outside its mask";
+    let unfinished = Unfinished { at, message: message.into() };
+    assert_eq!(ptx.finish(written(&ptx, &module, "masked", &[], &[])), Err(unfinished));
+    assert!(ptx.finish(written(&ptx, &module, "guarded", &[], &[])).is_ok());
+}

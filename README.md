@@ -200,14 +200,18 @@ rest, kgen takes it too: `sust.p` with a cache operation, as `sust.b` has, or an
 a variable. Where a value known now would be cut to fewer bits, by `ptxas` or by the instruction as the ISA has it, or
 is one the ISA leaves undefined, kgen refuses it, and the table says so: `lop3`'s table is 8 bits, and `ptxas` takes a
 bigger one and keeps its low 8; `shfl` reads its lane in the low 5 bits of `b`; and a barrier counts 1024 threads at
-most, the most a CTA has. Where `ptxas` takes less, kgen does too: `st` stores a special register only as one of a
-vector's. And kgen checks what `ptxas` leaves to the program: that an access stays in the memory it names, at a multiple
-of the bytes it moves. Each form, and each of its words, says the oldest version of PTX and the oldest GPU `ptxas` takes
-it at, back to PTX 1.0, which is at times older than the ISA says: `ptxas` takes `ld.mmio.acquire` for `sm_70`, which
-the ISA has from `sm_75`. A module's `.version` and `.target` are the oldest that have every instruction its kernels
-use: PTX 2.3 and `sm_20` at the least. Where `ptxas` is installed, a test hands it every form at what kgen says it
-needs, at the newest version, and for each newer GPU to `sm_86`, which the driver compiles a module for when it runs
-there, and `ptxas` must take it each time; and at the version before and on the GPU before, which it must refuse.
+most, the most a CTA has. A mask of lanes, which names the threads of a warp that take part, may not leave out lane 0
+where thread 0 runs the instruction: thread 0 is in lane 0, and the ISA leaves the instruction undefined in a thread
+outside its mask. Thread 0 runs the instruction where no `if` guards it and no `ret`, `exit`, `trap`, call or jump keeps
+thread 0 from it. kgen refuses a mask known now that leaves out lane 0 there, and takes one in a variable. It does not
+look inside a function that kernels call. Where `ptxas` takes less, kgen does too: `st` stores a special register only
+as one of a vector's. And kgen checks what `ptxas` leaves to the program: that an access stays in the memory it names,
+at a multiple of the bytes it moves. Each form, and each of its words, says the oldest version of PTX and the oldest GPU
+`ptxas` takes it at, back to PTX 1.0, which is at times older than the ISA says: `ptxas` takes `ld.mmio.acquire` for
+`sm_70`, which the ISA has from `sm_75`. A module's `.version` and `.target` are the oldest that have every instruction
+its kernels use: PTX 2.3 and `sm_20` at the least. Where `ptxas` is installed, a test hands it every form at what kgen
+says it needs, at the newest version, and for each newer GPU to `sm_86`, which the driver compiles a module for when it
+runs there, and `ptxas` must take it each time; and at the version before and on the GPU before, which it must refuse.
 
 An `extern "ptx-func"` function is a `.func` that the module's kernels and functions call, itself among them. It
 takes and returns PTX's types, and `call(g, gcd, (a, b))` calls it by its name, or `call(g, fp, (a, b))` at the
@@ -312,7 +316,7 @@ Each crate depends only on the layers inside it. `crates/kgen/tests/architecture
 |---|---|---|
 | entities | `kgen-core` | programs over variables and over registers |
 | language | `kgen-lang` | kernels in Rust's syntax: parsing, evaluation, the `Target` port |
-| entity service | `kgen-compile` | the allocator: liveness, register allocation, spilling, the frame's layout; the `Machine` and `Spill` ports; tested on a toy machine |
+| entity service | `kgen-compile` | the allocator: liveness, register allocation, spilling, the frame's layout; which items every path of a program runs; the `Machine` and `Spill` ports; tested on a toy machine |
 | use cases | `kgen-build` | what kgen does with a module: ABIs, its rules, compiling each function; the ports a machine implements |
 | adapters | `kgen-x86`, `kgen-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kgen` | which machine and syntax each kernel compiles with |

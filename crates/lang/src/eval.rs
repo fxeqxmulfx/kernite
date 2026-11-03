@@ -1109,6 +1109,7 @@ impl<'a, T: Target> Eval<'a, T> {
     fn inst(&mut self, name: &str, args: &[Expr], span: Span) -> Result<(), Error> {
         let ops = args.iter().map(|a| self.operand(a)).collect::<Result<Vec<_>, _>>()?;
         self.insts += 1;
+        self.target.inst_at(span);
         self.target
             .inst(&spelled(name), &ops, self.guard)
             .map_err(|f| Error { span: f.arg.and_then(|i| args.get(i)).map_or(span, Expr::span), message: f.message })

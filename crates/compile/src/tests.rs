@@ -844,3 +844,126 @@ fn each_error_says_what_is_wrong_in_words() {
         assert_eq!(e.to_string(), want, "{e:?}");
     }
 }
+
+/// Which items of the body every path from the start to the end runs, `x` for each that does
+/// and `.` for each that does not; with `leaves`, where a thread may end or never come back.
+fn paths(b: &Builder, leaves: &[usize]) -> String {
+    let on = crate::on_every_path(&b.0, leaves).unwrap();
+    on.iter().map(|&on| if on { 'x' } else { '.' }).collect()
+}
+
+#[test]
+fn an_item_that_a_jump_can_skip_is_not_on_every_path() {
+    let mut b = Builder::new();
+    let (p, x, y) = (b.var("p"), b.var("x"), b.var("y"));
+    b.def(p, &[]);
+    b.inst("br", &[(p, Access::Read)], Flow::Branch(Label(1)));
+    b.def(x, &[]);
+    b.label(1);
+    b.def(y, &[]);
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(paths(&b, &[]), "xx.xxx");
+
+    // Past a jump that always skips it, an item is on no path at all.
+    let mut b = Builder::new();
+    let x = b.var("x");
+    b.inst("jmp", &[], Flow::Jump(Label(1)));
+    b.def(x, &[]);
+    b.label(1);
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(paths(&b, &[]), "x.xx");
+}
+
+#[test]
+fn a_jump_through_a_table_is_a_branch_to_each_of_its_labels() {
+    let mut b = Builder::new();
+    let (n, x, y) = (b.param("n", 0), b.var("x"), b.var("y"));
+    b.inst("jmp", &[(n, Access::Read)], Flow::Table { to: vec![Label(1), Label(2)], or_next: false });
+    b.label(1);
+    b.def(x, &[]);
+    b.label(2);
+    b.def(y, &[]);
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(paths(&b, &[]), "x..xxx");
+}
+
+#[test]
+fn what_follows_a_leave_is_not_on_every_path() {
+    let mut b = Builder::new();
+    let (p, x) = (b.var("p"), b.var("x"));
+    b.def(p, &[]);
+    b.inst("ret_if", &[(p, Access::Read)], Flow::Next);
+    b.def(x, &[]);
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(paths(&b, &[]), "xxxx");
+    assert_eq!(paths(&b, &[1]), "xx..");
+
+    // Nor what follows it past a label: a leave is a way to the end from its block.
+    let mut b = Builder::new();
+    let (p, x) = (b.var("p"), b.var("x"));
+    b.def(p, &[]);
+    b.inst("ret_if", &[(p, Access::Read)], Flow::Next);
+    b.label(1);
+    b.def(x, &[]);
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(paths(&b, &[1]), "xx...");
+
+    // The first of two leaves in a block is where the rest stops.
+    let mut b = Builder::new();
+    let (p, x, y) = (b.var("p"), b.var("x"), b.var("y"));
+    b.def(p, &[]);
+    b.inst("ret_if", &[(p, Access::Read)], Flow::Next);
+    b.def(x, &[]);
+    b.inst("ret_if", &[(p, Access::Read)], Flow::Next);
+    b.def(y, &[]);
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(paths(&b, &[1, 3]), "xx....");
+}
+
+#[test]
+fn a_loop_with_a_way_out_is_run_by_the_threads_that_leave_it() {
+    let mut b = Builder::new();
+    let (p, x) = (b.var("p"), b.var("x"));
+    b.label(1);
+    b.def(p, &[]);
+    b.inst("br", &[(p, Access::Read)], Flow::Branch(Label(1)));
+    b.def(x, &[]);
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(paths(&b, &[]), "xxxxx");
+}
+
+#[test]
+fn a_loop_with_no_way_out_may_end_where_it_jumps_back() {
+    // What each round runs is on every path; what a round may skip is not.
+    let mut b = Builder::new();
+    let (p, x, y) = (b.var("p"), b.var("x"), b.var("y"));
+    b.def(p, &[]);
+    b.label(1);
+    b.def(x, &[]);
+    b.inst("br", &[(p, Access::Read)], Flow::Branch(Label(2)));
+    b.def(y, &[]);
+    b.label(2);
+    b.inst("jmp", &[], Flow::Jump(Label(1)));
+    assert_eq!(paths(&b, &[]), "xxxx.xx");
+
+    // Nor is what a thread that goes into the loop never runs, though the loop never ends.
+    let mut b = Builder::new();
+    let (p, x) = (b.var("p"), b.var("x"));
+    b.def(p, &[]);
+    b.inst("br", &[(p, Access::Read)], Flow::Branch(Label(1)));
+    b.def(x, &[]);
+    b.inst("ret", &[], Flow::Return);
+    b.label(1);
+    b.inst("jmp", &[], Flow::Jump(Label(1)));
+    assert_eq!(paths(&b, &[]), "xx....");
+}
+
+#[test]
+fn control_must_stay_inside_the_body_for_the_paths_too() {
+    let mut b = Builder::new();
+    let x = b.var("x");
+    b.def(x, &[]);
+    assert_eq!(crate::on_every_path(&b.0, &[]).unwrap_err(), Error::FallsOffEnd);
+    b.inst("jmp", &[], Flow::Jump(Label(7)));
+    assert_eq!(crate::on_every_path(&b.0, &[]).unwrap_err(), Error::NoSuchLabel { label: 7 });
+}

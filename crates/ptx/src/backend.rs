@@ -76,8 +76,18 @@ impl Backend for Ptx {
 
     fn finish(&self, mut kernel: Kernel) -> Result<Entry, Unfinished> {
         let decls = std::mem::take(&mut kernel.decls);
+        let (masks, leaves) = (std::mem::take(&mut kernel.masks), std::mem::take(&mut kernel.leaves));
         let code = kernel.finish();
-        kgen_compile::check(&code.program).map_err(|e| Unfinished::blaming(e.var(), &decls, e.to_string()))?;
+        let blame = |e: kgen_compile::Error| Unfinished::blaming(e.var(), &decls, e.to_string());
+        kgen_compile::check(&code.program).map_err(blame)?;
+        // Thread 0 is in lane 0 and runs each instruction that is on every path, which PTX leaves
+        // undefined for one whose mask leaves lane 0 out.
+        if !masks.is_empty() {
+            let on = kgen_compile::on_every_path(&code.program, &leaves).map_err(blame)?;
+            if let Some((_, at, message)) = masks.into_iter().find(|&(i, ..)| on[i]) {
+                return Err(Unfinished { at: Some(at), message });
+            }
+        }
         Ok(code)
     }
 }
