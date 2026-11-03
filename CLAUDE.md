@@ -40,22 +40,23 @@ The crates are layers, each depending only on those inside it. README.md's "Laye
 each knows. `crates/kgen/tests/architecture.rs` holds the rule of which may depend on which, of every
 kind of dependency, and a new crate needs its line there. Change both when the crates change.
 
-- `kgen-core`: programs over variables and over registers, and the allocator's ports `Machine` and `Spill`.
+- `kgen-core`: programs over variables and over registers.
 - `kgen-lang`: the language: tokens, the parser, values, the evaluator, and the `Target` port a machine
   implements.
-- `kgen-compile`: liveness, register allocation, spilling, and the frame's slots.
+- `kgen-compile`: the allocator: liveness, register allocation, spilling, and the frame's slots; the
+  ports `Machine` and `Spill` a machine implements for it. It also says which items every path of a
+  program runs.
 - `kgen-build`: what kgen does with a module of kernels, whatever machine compiles them: what its
   items are, the ports `Backend`, `Native` and `Device` a machine implements, and the use cases that
   call them. It depends on kgen-lang alone.
-- `kgen-x86`, `kgen-ptx`: each machine: its forms, the language's binding to it, its printer.
-- `kgen`: what compiles each kernel with which machine. `kgen-macros`: the proc macros.
+- `kgen-x86`, `kgen-ptx`: each machine, `X86` and `Ptx`: its forms, the language's binding to it, its
+  printer.
+- `kgen`: which machine each kernel compiles with, `X86` or `Ptx`; kgen-build's use cases do the
+  compiling. `kgen-macros`: the proc macros.
 - `kgen-cuda`, `kgen-cpu`: what the generated code runs on: the CUDA driver, and an x86 grid's threads
   and module memory. Neither depends on another crate.
 - `examples/my-app`, `examples/microgpt`: kgen used as a crate outside it would be. Their tests hold each
   kernel to a scalar reference, bit for bit, and each listing to `snapshots/`.
-
-A rewrite to clean architecture is under way on the branch `clean-architecture`. Its plan is on the
-board (below). Master has the part of it merged so far, and the layout above is master's.
 
 ## Rules the code keeps
 
