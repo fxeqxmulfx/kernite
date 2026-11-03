@@ -250,7 +250,7 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
     // The module as it is, for Rust; and the consts kgen reads, for the kernels.
     let mut inner: TokenStream = top.iter().cloned().collect();
     let mut given = TokenStream::new();
-    match trees.and_then(|trees| lang::module(&trees)) {
+    match trees.and_then(|trees| lang::module(&trees, 0)) {
         Err(e) => inner.extend(error(at(e.span), &e.message)),
         Ok(module) => {
             for (item, verdict) in module.items.iter().zip(kgen::consts(&module)) {

@@ -656,8 +656,10 @@ fn a_const_given_twice_is_refused_at_the_module_s_own() {
                const STEP: u64 = 4;\n\
                static A: global<u32>;\n\
                unsafe extern \"sysv64\" fn k(x: u64) { add(x, STEP); add(x, W); }";
-    let parsed = parse(src).unwrap();
-    let before = parsed.items[5].tokens.start;
+    // The first five items are the consts given: the macro tells the parser how many tokens they
+    // are, and the parser leaves an item of the module's own named as one of them to `module`.
+    let before = kgen_lang::lex(&src[..src.find("const STEP: u64 = 4;").unwrap()]).unwrap().len();
+    let parsed = kgen_lang::module(&kgen_lang::lex(src).unwrap(), before).unwrap();
     let kept = [0, 2, 5, 6, 7].map(|i| parsed.items[i].tokens.clone());
     let out = module(parsed, Some(Given { before, from: "crate::sizes".into() }), &Echo, &Echo);
     let said: Vec<_> = out.given.iter().map(|e| e.at(src)).collect();

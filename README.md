@@ -51,7 +51,8 @@ CPU kernels and GPU kernels share its sizes, are a module of their own, which `#
 module of kernels takes them by its path, `#[kgen_macros::kernels(consts = crate::model::sizes)]`: its kernels read
 them as the module's own, and Rust sees them there by a `use` the macro writes. A module of consts is the crate's own,
 and holds `pub` consts of what kernels read, numbers, floats, `bool`s, arrays of them and expressions of these; a
-module that takes them may not have a const, a function or a static of its own of one of their names.
+module that takes them may not have a const, a function or a static of its own of one of their names. Each const,
+function and static of a module has a name of its own.
 
 The x86 target knows every instruction of x86-64-v3, in each form `llvm-mc` takes, [`forms`](crates/x86/src/forms.rs):
 x86-64's own on integers of 8 to 64 bits, SSE's to SSE4.2's as AVX writes them, `vaddps` and not `addps`, and AVX's,

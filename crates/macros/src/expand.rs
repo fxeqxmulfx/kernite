@@ -23,7 +23,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
     let (trees, spans) = lex(&top);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(site);
     let said = |e: &lang::Error| error(at(e.span), &e.message);
-    let module = match trees.and_then(|trees| lang::module(&trees)) {
+    let module = match trees.and_then(|trees| lang::module(&trees, n)) {
         Ok(module) => module,
         Err(e) => return said(&e),
     };

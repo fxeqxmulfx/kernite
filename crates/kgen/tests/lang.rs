@@ -702,6 +702,42 @@ fn a_helper_sees_none_of_its_callers_names() {
     assert_eq!(kgen::x86_str(src, "k").unwrap_err(), "7:18: `secret` is not defined");
 }
 
+/// Each const, function and static of a module has a name of its own: of two of one name, the
+/// static is refused, else the function, else the second, at its name.
+#[test]
+fn each_const_function_and_static_has_a_name_of_its_own() {
+    let cases = [
+        ("fn h() {} fn h() {}", "1:14: `h` names another function of the module as well"),
+        (r#"fn k() {} pub unsafe extern "sysv64" fn k() {}"#, "1:41: `k` names another function of the module as well"),
+        // A kernel of compile-time arguments and one of none are two kernels of a name.
+        (
+            r#"#[instances(4, 2)] pub unsafe extern "sysv64" fn tile<const N: usize>() {} pub unsafe extern "sysv64" fn tile() {}"#,
+            "1:106: `tile` names another function of the module as well",
+        ),
+        // Two under a `#[cfg]` each are two as well: kgen reads every item.
+        (
+            r#"#[cfg(a)] pub unsafe extern "sysv64" fn k() {} #[cfg(not(a))] pub unsafe extern "sysv64" fn k() {}"#,
+            "1:93: `k` names another function of the module as well",
+        ),
+        // A const and a function: the function is refused, whichever is first.
+        ("const h: u32 = 1; fn h() {}", "1:22: `h` names a constant of the module as well"),
+        ("fn h() {} const h: u32 = 1;", "1:4: `h` names a constant of the module as well"),
+        ("const N: u32 = 1; const N: u32 = 2;", "1:25: `N` names another constant of the module as well"),
+        // Of two items refused, the first in the module is the one: here `b`, though the const
+        // it is refused for comes last.
+        ("fn a() {} fn b() {} fn a() {} const b: u32 = 1;", "1:14: `b` names a constant of the module as well"),
+        (
+            r#"pub unsafe extern "sysv64" fn k() {} static k: global<u32>;"#,
+            "1:45: `k` names a function of the module as well",
+        ),
+    ];
+    for (src, want) in cases {
+        assert_eq!(kgen::x86_str(src, "k").unwrap_err(), want, "{src}");
+    }
+    let src = r#"pub unsafe extern "ptx-kernel" fn k() {} pub unsafe extern "ptx-kernel" fn k() {}"#;
+    assert_eq!(kgen::ptx_str(src).unwrap_err(), "1:76: `k` names another function of the module as well");
+}
+
 #[test]
 fn array_parameters_take_variables_declared_together() {
     let src = r#"

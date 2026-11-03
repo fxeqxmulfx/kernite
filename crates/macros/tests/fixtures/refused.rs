@@ -66,3 +66,9 @@ pub mod kernels_no_module_of_ptx_has_both {
         tanh.approx.f32(v, f);
     }
 }
+
+#[kgen_macros::kernels(consts = crate::sizes)]
+pub mod two_functions_of_a_name_given_consts {
+    fn h() {}
+    fn h() {}
+}

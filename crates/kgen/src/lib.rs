@@ -69,8 +69,8 @@ pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>,
 
 /// The statics of `module`, its memory in the process's, in order, for its x86 kernels to name
 /// and Rust to lay out: each of Rust's numbers, holding what it says or zeros. Or why one is
-/// none, where it can be mended: at its type, at what it holds, or at its name, if another item
-/// of the module's has it or a listing names a constant or a function so, `c0` or `f0`.
+/// none, where it can be mended: at its type, at what it holds, or at its name, if a listing
+/// names a constant or a function so, `c0` or `f0`.
 pub fn x86_statics(module: &Module) -> Vec<Result<Compiled<X86Static>, kgen_lang::Error>> {
     statics(module, &X86)
 }
@@ -119,9 +119,9 @@ pub fn ptx_scope(path: &[&str]) -> String {
 
 /// The statics of `module`, its memory in PTX, in order: each named by its
 /// [`symbol`](kgen_ptx::symbol) in `scope`, as [`ptx`] names a kernel, for its kernels to name
-/// and [`kgen_ptx::module`] to declare; or why it is none, where it can be mended: at its type, at
-/// what it holds, or at its name, if another item of the module's has it. One that does not
-/// fit beside those before it, in the constant memory a module has or the global, is none.
+/// and [`kgen_ptx::module`] to declare; or why it is none, where it can be mended: at its
+/// type, or at what it holds. One that does not fit beside those before it, in the constant
+/// memory a module has or the global, is none.
 pub fn ptx_statics(module: &Module, scope: &str) -> Vec<Result<Compiled<Static>, kgen_lang::Error>> {
     statics(module, &Ptx::new(scope))
 }

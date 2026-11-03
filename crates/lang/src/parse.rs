@@ -9,14 +9,50 @@ use crate::ast::{
 use crate::token::{Delim, Span, Tree, text};
 use crate::{Error, nested};
 
-/// The items of a module, from the tokens inside its braces.
-pub fn module(trees: &[Tree]) -> Result<Module, Error> {
+/// The items of a module, from the tokens inside its braces. Each const, function and static
+/// has a name of its own. The first `given` tokens are consts the module takes from another;
+/// an item of the module's own that has the name of one is for the caller to refuse, as it can
+/// say where they come from.
+pub fn module(trees: &[Tree], given: usize) -> Result<Module, Error> {
     let mut p = Parser::new(trees, trees.last().map_or(Span::default(), Tree::span));
     let mut items = vec![];
     while !p.done() {
         items.push(p.item()?);
     }
+    named_once(&items, given)?;
     Ok(Module { items })
+}
+
+/// An error at the name of the first item that another const, function or static has the name
+/// of, but for the consts of the first `given` tokens. Of the two, the static is the one in the
+/// way, else the function, else the second.
+fn named_once(items: &[Item], given: usize) -> Result<(), Error> {
+    const KINDS: [&str; 3] = ["constant", "function", "static"];
+    // Each item's name, where it is, its kind as an index of `KINDS`, and whether it is the
+    // module's own. Of two items of a name, the one of the later kind in `KINDS` is in the
+    // way, else the later one.
+    let named: Vec<_> = items
+        .iter()
+        .filter_map(|item| {
+            let (name, span, kind) = match &item.kind {
+                ItemKind::Const(c) => (c.name.as_str(), c.span, 0),
+                ItemKind::Fn(f) => (f.name.as_str(), f.span, 1),
+                ItemKind::Static(s) => (s.name.as_str(), s.span, 2),
+                ItemKind::Other => return None,
+            };
+            Some((name, span, kind, item.tokens.start >= given))
+        })
+        .collect();
+    for (i, &(name, span, kind, _)) in named.iter().enumerate() {
+        for (j, &(same, _, other, own)) in named.iter().enumerate() {
+            if own && same == name && (other, j) < (kind, i) {
+                let what = if other == kind { "another" } else { "a" };
+                let message = format!("`{name}` names {what} {} of the module as well", KINDS[other]);
+                return Err(Error { span, message });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The binary operators, longest first where one starts another, with their precedence.

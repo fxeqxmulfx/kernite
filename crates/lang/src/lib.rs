@@ -137,7 +137,7 @@ pub fn nested(open: usize, span: Span) -> Result<(), Error> {
 
 /// The module in `src`, as a string holds it.
 pub fn parse(src: &str) -> Result<Module, Error> {
-    module(&lex(src)?)
+    module(&lex(src)?, 0)
 }
 
 #[cfg(test)]

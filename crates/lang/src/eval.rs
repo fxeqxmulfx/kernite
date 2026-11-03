@@ -30,26 +30,8 @@ pub struct Memory {
     pub consts: Vec<String>,
 }
 
-/// `s`, a static of `module`, worked out among the module's constants; or why not, or that
-/// another item of the module has its name.
+/// `s`, a static of `module`, worked out among the module's constants; or why not.
 pub fn memory(module: &Module, s: &Static) -> Result<Memory, Error> {
-    // Of two statics of a name, the second is in the way.
-    let mut before = true;
-    for item in &module.items {
-        let (name, what) = match &item.kind {
-            ItemKind::Const(c) => (&c.name, "a constant"),
-            ItemKind::Fn(f) => (&f.name, "a function"),
-            ItemKind::Static(t) if std::ptr::eq(t, s) => {
-                before = false;
-                continue;
-            }
-            ItemKind::Static(t) if before => (&t.name, "another static"),
-            _ => continue,
-        };
-        if *name == s.name {
-            return Err(err(s.span, format!("`{name}` names {what} of the module as well")));
-        }
-    }
     let mut consts = Consts;
     let mut e = Eval::new(module, &mut consts);
     let ty = e.type_name(&s.ty)?;

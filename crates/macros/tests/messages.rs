@@ -117,8 +117,8 @@ fn refuses(name: &str, lines: &[&str]) {
 
 #[test]
 fn the_macro_says_what_it_refuses_where_it_is() {
-    // The module given `STEP` that has its own comes last: Rust expands it a step later, when the
-    // macro of the module of consts calls `__kernels!` back.
+    // The modules given `STEP` come last: Rust expands each a step later, when the macro of the
+    // module of consts calls `__kernels!` back.
     refuses(
         "refused",
         &[
@@ -143,8 +143,9 @@ fn the_macro_says_what_it_refuses_where_it_is() {
              a grid of `k` has at most, and a kernel or a static of the module is named `k_blocks` as well",
             "src/lib.rs:59:39: error: `shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and \
              `tanh.approx.f32` in `new` needs sm_75 and PTX 7.0: no module has both",
+            "src/lib.rs:73:8: error: `h` names another function of the module as well",
             "src/lib.rs:46:15: error: `STEP` names one of the consts the module takes from `crate::sizes` as well",
-            "error: could not compile `refused` (lib) due to 13 previous errors",
+            "error: could not compile `refused` (lib) due to 14 previous errors",
         ],
     );
 }
