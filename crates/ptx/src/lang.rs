@@ -1644,7 +1644,7 @@ impl Target for Kernel {
     type Var = Var;
 
     fn param(&mut self, name: &str, ty: &str) -> Result<Var, String> {
-        let pointer = ty.starts_with("*const ") || ty.starts_with("*mut ");
+        let pointer = self.func.is_none() && kernite_lang::pointer(ty)?;
         let t = match ty {
             _ if self.func.is_some() => {
                 let t = crate::call::passable(ty)?;

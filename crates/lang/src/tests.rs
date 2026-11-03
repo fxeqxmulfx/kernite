@@ -1,6 +1,6 @@
-//! The lexer, the rounding of 16-bit floats, and whether a function is `unsafe`. The rest of
-//! the language is tested where it meets the targets it is compiled for, in `kernite`'s
-//! `tests/lang.rs`.
+//! The lexer, how a type is written and which types are pointers, the rounding of 16-bit floats,
+//! and whether a function is `unsafe`. The rest of the language is tested where it meets the
+//! targets it is compiled for, in `kernite`'s `tests/lang.rs`.
 
 use crate::value::{Value, cast};
 
@@ -8,7 +8,110 @@ use crate::value::{Value, cast};
 fn the_lexer_reads_what_rust_writes() {
     let src = "a.b(0..n, 1.5e-3, 0x1F_u8, r#type, \"s\\\"q\", 1..=2) /* c /* nested */ */ // end";
     let trees = crate::lex(src).unwrap();
-    assert_eq!(crate::text(&trees), r#"a.b(0..n,1.5e-3,0x1F_u8,r#type,"s\"q",1..=2)"#);
+    assert_eq!(crate::text(&trees), r#"a.b(0..n, 1.5e-3, 0x1F_u8, r#type, "s\"q", 1..=2)"#);
+}
+
+/// A type is written as Rust writes it, however its source spaced it: a space between words, after
+/// `,` and `;`, after `const` and `mut`, and on each side of a `+` or a `=` that no operator holds,
+/// and none beside the rest, nor inside an operator, `+=`, `==`, `=>`, `<=` or `..=`.
+#[test]
+fn a_type_is_written_as_rust_writes_it() {
+    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+    for ty in [
+        "*const [usize; 3]",
+        "*mut *const f32",
+        "*const *mut *const u8",
+        "(u32, u32)",
+        "&mut [f32]",
+        "&[u32]",
+        "*const ()",
+        "*const (u8, *mut u8)",
+        "*const [[u8; 4]; 2]",
+        "*const fn(u32)",
+        "*const dyn Fn(u32)",
+        "*const Foo<u8, u16>",
+        "*const a::b::C",
+        "*const (dyn A + Send)",
+        "Box<dyn A + B + C>",
+        "Box<dyn Iterator<Item = u8>>",
+        "Box<dyn Iterator<Item = u8> + Send>",
+        "*const (dyn Iterator<Item = u8> + Send)",
+        "*const Foo<T = u8, U = u16>",
+    ] {
+        assert_eq!(written(ty), ty);
+    }
+    // The text of an expression has such operators, which get no space inside or beside them.
+    for expr in ["a+=b", "a==b", "a=>b", "a<=b", "0..=n"] {
+        assert_eq!(written(expr), expr);
+    }
+    assert_eq!(written("*  mut*const[ usize ;3 ]"), "*mut *const [usize; 3]");
+    assert_eq!(written("(u32 ,u32 , )"), "(u32, u32,)");
+    assert_eq!(written("Box<dyn A+B>"), "Box<dyn A + B>");
+    assert_eq!(written("dyn  Iterator<Item=u8>"), "dyn Iterator<Item = u8>");
+    // Punctuation beside a `=` or a `+` does not hold it: `=&`, `>+` and `+?` are no operators.
+    assert_eq!(written("Box<dyn Iterator<Item=&u8>>"), "Box<dyn Iterator<Item = &u8>>");
+    assert_eq!(written("Box<dyn Iterator<Item = u8>+Send>"), "Box<dyn Iterator<Item = u8> + Send>");
+    assert_eq!(written("*const dyn A+?Sized"), "*const dyn A + ?Sized");
+}
+
+/// A pointer is one word, unless it is to a slice, a `str` or a `dyn`: those are an address and a
+/// length or a table. Parentheses around a type do not hide it, and a tuple that ends in one has no
+/// size either. A pointer to what the lexer refuses, a lifetime, which the macro hands on, is
+/// refused in the lexer's words, not taken for one word.
+#[test]
+fn a_pointer_has_one_word_unless_it_is_to_what_has_no_size() {
+    for ty in [
+        "*const f32",
+        "*mut *const f32",
+        "*const [usize; 3]",
+        "*const [[u8; 4]; 2]",
+        "*const [*const u8; 2]",
+        "*const *const [u8]",
+        "*const (u32, u32)",
+        "*const ()",
+        "*const (u32,)",
+        "*const ((u32, [f32; 2]), u8)",
+        "*const (Pair<u8, 2>)",
+        "*const (Foo<A, dyn B>)",
+        "*const (Foo<A, [f32]>, u32)",
+        "*const fn(u32)",
+        "*mut Foo<u8>",
+    ] {
+        assert_eq!(crate::pointer(ty), Ok(true), "{ty}");
+    }
+    for ty in ["f32", "usize", "[usize; 3]", "(u32, u32)", "&mut [f32]", "&f32", "Foo<*const u8>"] {
+        assert_eq!(crate::pointer(ty), Ok(false), "{ty}");
+    }
+    for to in [
+        "[f32]",
+        "[[u8; 4]]",
+        "[*const u8]",
+        "str",
+        "dyn Foo",
+        "dyn Fn(u32)",
+        "(dyn A + Send)",
+        "([f32])",
+        "(str)",
+        "((dyn Foo))",
+        "(dyn Foo<A, B>)",
+        "(u32, [f32])",
+        "(u32, dyn Foo<A, B>)",
+        "(dyn Foo,)",
+        "([f32],)",
+    ] {
+        let why = format!(
+            "a pointer to `{to}` has two words, an address and a length or a table, and a kernel's pointer has one"
+        );
+        for kind in ["const", "mut"] {
+            assert_eq!(crate::pointer(&format!("*{kind} {to}")), Err(why.clone()));
+        }
+    }
+    for to in ["[&'static str]", "(dyn Debug + 'static)", "&'a u8", "Foo<'a>"] {
+        for kind in ["const", "mut"] {
+            let lifetimes = "lifetimes and labels have no place in a kernel";
+            assert_eq!(crate::pointer(&format!("*{kind} {to}")), Err(lifetimes.into()), "{to}");
+        }
+    }
 }
 
 /// Every 16-bit float reads back as itself, and a number between two of them rounds to the

@@ -11,8 +11,8 @@ pub trait Target {
     /// A variable, seen as one of the machine's types: `ymm`, `v.xmm`, `u32`.
     type Var: Copy + PartialEq + fmt::Debug;
 
-    /// The function's next parameter, of the type `ty` as written: Rust's, `*const f32` or
-    /// `usize`, or the machine's.
+    /// The function's next parameter, of the type `ty` as Rust writes it: Rust's, `*const f32` or
+    /// `usize`, or the machine's. [`pointer`](crate::pointer) says whether it is a pointer.
     fn param(&mut self, name: &str, ty: &str) -> Result<Self::Var, String>;
 
     /// What the function returns, of the type `ty` as written: `()`, `!` for never, Rust's or

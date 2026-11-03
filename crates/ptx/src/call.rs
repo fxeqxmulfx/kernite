@@ -42,7 +42,7 @@ pub fn passable(ty: &str) -> Result<Ty, String> {
         Some(t) => Ok(t),
         None => {
             let ptx = match ty {
-                _ if ty.starts_with("*const ") || ty.starts_with("*mut ") => "an address is a `u64`",
+                _ if kernite_lang::pointer(ty) != Ok(false) => "an address is a `u64`",
                 "i8" => "PTX writes it `s8`",
                 "i16" => "PTX writes it `s16`",
                 "i32" => "PTX writes it `s32`",

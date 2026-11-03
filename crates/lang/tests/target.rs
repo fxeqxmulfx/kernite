@@ -34,6 +34,16 @@ pub unsafe extern "sysv64" fn k() {
 }
 "#;
 
+/// A kernel whose parameters and result are of each shape of type, spaced as no one writes them,
+/// with an array's length a const's. [`Trace`] takes every type.
+const TYPES: &str = r#"
+const N: usize = 3;
+
+pub unsafe extern "sysv64" fn k(
+    a: *const[usize;3], b: *  mut*const f32, c: [u64;N], d: (u8 ,u8), e: Box<dyn A+B>,
+) -> &mut[f32] {}
+"#;
+
 /// A module of two statics, and a kernel that names them after an `add`: `B`, then `A`, then `B`
 /// again, in an address.
 const STATICS: &str = r#"
@@ -191,6 +201,22 @@ fn the_evaluator_asks_its_target_in_source_order() {
         "add v6, v5, v5",
         "jnz label 0",
         "ret v1",
+        "end",
+    ];
+    assert_eq!(trace.lines, want);
+}
+
+#[test]
+fn a_type_is_given_to_the_target_as_rust_writes_it() {
+    let mut trace = Trace::default();
+    run(TYPES, &mut trace).unwrap();
+    let want = [
+        "param a: *const [usize; 3] = v0",
+        "param b: *mut *const f32 = v1",
+        "param c: [u64; 3] = v2",
+        "param d: (u8, u8) = v3",
+        "param e: Box<dyn A + B> = v4",
+        "result &mut [f32]",
         "end",
     ];
     assert_eq!(trace.lines, want);

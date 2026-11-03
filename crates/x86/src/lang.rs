@@ -85,7 +85,7 @@ use kernite_core::{
     Arg, Base, Class, Const, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo, Signature,
     Slot, SlotId, StaticId, VReg,
 };
-use kernite_lang::{Fault, Guard, Operand as Given, Span, Target, Value};
+use kernite_lang::{Fault, Guard, Operand as Given, Span, Target, Value, pointer};
 
 use crate::bytes;
 use crate::forms::{self, Form, Kind, Miss, Shape};
@@ -229,7 +229,7 @@ impl Ty {
         match ty {
             "f32" => Ok(Ty::F32),
             "f64" => Ok(Ty::F64),
-            _ if ty.starts_with("*const ") || ty.starts_with("*mut ") => Ok(Ty::Int),
+            _ if pointer(ty)? => Ok(Ty::Int),
             "usize" | "isize" | "u64" | "i64" => Ok(Ty::Int),
             "u32" | "i32" | "u16" | "i16" | "u8" | "i8" | "bool" => {
                 Err(format!("SysV leaves the high bits of a `{ty}` as they were; take a usize or a u64"))
@@ -271,7 +271,7 @@ impl Returns {
             "!" => Ok(Returns::Never),
             "f32" => Ok(Returns::Value(Ty::F32)),
             "f64" => Ok(Returns::Value(Ty::F64)),
-            _ if ty.starts_with("*const ") || ty.starts_with("*mut ") => Ok(Returns::Value(Ty::Int)),
+            _ if pointer(ty)? => Ok(Returns::Value(Ty::Int)),
             "usize" | "isize" | "u64" | "i64" | "u32" | "i32" | "u16" | "i16" | "u8" | "i8" | "bool" => {
                 Ok(Returns::Value(Ty::Int))
             }

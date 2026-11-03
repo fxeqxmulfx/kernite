@@ -53,6 +53,12 @@ together with the expression inside them, along the helpers that call one anothe
 A type in a kernel's parameters or return means what it means in any function of the module: `super::W` is the `W`
 beside the module of kernels, and `self::W` the one in it.
 
+A kernel's pointer to a type with a size, `*const T` or `*mut T`, is one register: `*const [usize; 3]` and
+`*mut *const f32` are taken as `*const f32` is, on x86 and on a GPU. A pointer to a slice, a `str` or a `dyn`, or to a
+tuple that ends in one, in parentheses or not, has two words, an address and a length or a table, so it is an error at
+its type: take the address and the length as two parameters. A type in a message is written as Rust writes it,
+`[usize; 3]`.
+
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kernite_macros::consts]` is on, and a
 module of kernels takes them by its path, `#[kernite_macros::kernels(consts = crate::model::sizes)]`: its kernels read

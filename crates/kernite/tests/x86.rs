@@ -561,6 +561,64 @@ fn a_kernel_takes_what_sysv_passes_in_registers() {
     assert_eq!(code, "vmovss dword ptr [rdi], xmm1\nvaddss xmm1, xmm0, xmm1\nvzeroupper\nret");
 }
 
+/// A pointer is one register, whatever it points to: an array, a pointer, a tuple.
+/// A pointer to what has no size, a slice, a `str` or a `dyn`, in parentheses or not, or a tuple that
+/// ends in one, is two words in Rust, and an error.
+#[test]
+fn a_kernel_takes_a_pointer_to_any_type_in_a_register() {
+    let params = "shape: *const [usize; 3], out: *mut *const f32, pair: *const (u32, u32), n: usize";
+    let code = compile(params, "mov(n, [shape + 8]); mov([out], pair); mov([pair], n);").unwrap();
+    assert_eq!(code, "mov rcx, qword ptr [rdi + 8]\nmov qword ptr [rsi], rdx\nmov qword ptr [rdx], rcx\nret");
+    let src = "unsafe extern \"sysv64\" fn k(p: *const [usize; 3]) -> *mut [usize; 3] { ret(p); }";
+    assert_eq!(kernite::x86_str(src, "k").unwrap().code().collect::<Vec<_>>(), ["mov rax, rdi", "ret"]);
+    for to in ["()", "(u32,)", "(u32, u32)"] {
+        assert_eq!(compile(&format!("p: *const {to}"), "").unwrap(), "ret", "{to}");
+    }
+    for to in [
+        "[f32]",
+        "[[u8; 4]]",
+        "str",
+        "dyn Foo",
+        "(dyn A + Send)",
+        "([f32])",
+        "(str)",
+        "((dyn Foo))",
+        "(dyn Foo<A, B>)",
+        "(u32, [f32])",
+    ] {
+        let why = format!(
+            "a pointer to `{to}` has two words, an address and a length or a table, and a kernel's pointer has one"
+        );
+        assert_eq!(compile(&format!("p: *const {to}"), "").unwrap_err(), format!("1:32: {why}"), "{to}");
+        let src = format!("unsafe extern \"sysv64\" fn k() -> *mut {to} {{}}");
+        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("1:34: {why}"), "-> {to}");
+    }
+}
+
+/// A type in a message is written as Rust writes it, whatever the source spaced: a parameter by
+/// value, a result, a variable.
+#[test]
+fn a_type_in_a_message_is_written_as_rust_writes_it() {
+    let takes = "a kernel takes pointers, 64-bit integers and floats, not";
+    for (params, ty) in [
+        ("a: [usize;3]", "[usize; 3]"),
+        ("a: (u32 ,u32)", "(u32, u32)"),
+        ("a: &mut[f32]", "&mut [f32]"),
+        ("a: Box<dyn A+B>", "Box<dyn A + B>"),
+    ] {
+        assert_eq!(compile(params, "").unwrap_err(), format!("1:32: {takes} `{ty}`"), "{params}");
+    }
+    let two = "has two words, an address and a length or a table, and a kernel's pointer has one";
+    assert_eq!(compile("p: *const dyn A+Send", "").unwrap_err(), format!("1:32: a pointer to `dyn A + Send` {two}"));
+    let src = "#[instances(2)]\nunsafe extern \"sysv64\" fn k<const N: usize>(a: [usize; N]) {}";
+    assert_eq!(kernite::x86_str(src, "k::<2>").unwrap_err(), format!("2:48: in `k::<2>`: {takes} `[usize; 2]`"));
+    let src = "unsafe extern \"sysv64\" fn k() -> (u32,u32) {}";
+    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `(u32, u32)`";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    let vars = "x86 variables are `gpr`, `ymm`, `xmm` and stack memory, `local<..>`; not";
+    assert_eq!(compile("", "let v: *const[u8;4];").unwrap_err(), format!("2:8: {vars} `*const [u8; 4]`"));
+}
+
 /// Rust never sees a kernel's body run, so kernite says which of the module's constants it read:
 /// what the macro marks as used, so that only the constants nothing reads are dead code.
 #[test]

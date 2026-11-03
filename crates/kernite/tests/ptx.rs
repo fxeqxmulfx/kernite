@@ -1134,6 +1134,75 @@ fn a_kernel_takes_pointers_and_numbers_and_returns_nothing() {
     assert_eq!(e, "1:38: a GPU kernel returns nothing, not `f32`: it writes what it works out to memory");
 }
 
+/// A kernel's pointer is an address on the GPU whatever it points to: an array, a pointer, a tuple.
+/// One to what has no size, a slice, a `str` or a `dyn`, in parentheses or not, or a tuple that
+/// ends in one, is two words in Rust, and an error; and a function takes no pointer at all,
+/// whatever it points to.
+#[test]
+fn a_kernel_takes_a_pointer_to_any_type() {
+    let ptx = compile(
+        "shape: *const [usize; 3], out: *mut *const f32, pair: *const (u32, u32)",
+        "let v: u64; ld.global.u64(v, [shape + 8]); st.global.u64([out], v); st.global.u64([pair], v);",
+    )
+    .unwrap();
+    for (i, name) in ["shape", "out", "pair"].iter().enumerate() {
+        let part = format!("\tld.param.u64 %{name}, [k_param_{i}];\n\tcvta.to.global.u64 %{name}, %{name};\n");
+        assert!(ptx.contains(&part), "{part}\nin\n{ptx}");
+    }
+    for to in ["()", "(u32,)", "(u32, u32)"] {
+        compile(&format!("p: *const {to}"), "").unwrap();
+    }
+    for to in [
+        "[f32]",
+        "[[u8; 4]]",
+        "str",
+        "dyn Foo",
+        "(dyn A + Send)",
+        "([f32])",
+        "(str)",
+        "((dyn Foo))",
+        "(dyn Foo<A, B>)",
+        "(u32, [f32])",
+    ] {
+        let why = format!(
+            "a pointer to `{to}` has two words, an address and a length or a table, and a kernel's pointer has one"
+        );
+        assert_eq!(compile(&format!("p: *const {to}"), "").unwrap_err(), format!("1:36: {why}"), "{to}");
+    }
+    let func = "a function takes and returns PTX's types, an address is a `u64`";
+    for to in ["[usize; 3]", "[f32]", "str", "dyn Foo", "(dyn A + Send)", "f32"] {
+        let src = format!("extern \"ptx-func\" fn f(a: *const {to}) {{}}");
+        let want = format!("1:27: {func}; not `*const {to}`");
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "function {to}");
+    }
+}
+
+/// A type in a message is written as Rust writes it, whatever the source spaced: a parameter by
+/// value, a result, a variable.
+#[test]
+fn a_type_in_a_message_is_written_as_rust_writes_it() {
+    let takes = "a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, `f32` and `f64`, not";
+    for (params, ty) in [
+        ("a: [usize;3]", "[usize; 3]"),
+        ("a: (u32 ,u32)", "(u32, u32)"),
+        ("a: &mut[f32]", "&mut [f32]"),
+        ("a: Box<dyn A+B>", "Box<dyn A + B>"),
+    ] {
+        assert_eq!(compile(params, "").unwrap_err(), format!("1:36: {takes} `{ty}`"), "{params}");
+    }
+    let two = "has two words, an address and a length or a table, and a kernel's pointer has one";
+    assert_eq!(compile("p: *const dyn A+Send", "").unwrap_err(), format!("1:36: a pointer to `dyn A + Send` {two}"));
+    let src = "unsafe extern \"ptx-kernel\" fn k() -> (u32,u32) {}";
+    let returns = "a GPU kernel returns nothing, not `(u32, u32)`: it writes what it works out to memory";
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:38: {returns}"));
+    let vars = "PTX variables are `pred`, `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, \
+                `bf16x2`, `tf32`, `f32` and `f64`, not";
+    assert_eq!(compile("", "let v: *const[u8;4];").unwrap_err(), format!("2:8: {vars} `*const [u8; 4]`"));
+    let funcs = "a function takes and returns PTX's types, as its variables are: `u32`, `f32`, `b64`; not";
+    let src = "extern \"ptx-func\" fn f(a: [usize;3]) {}";
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:27: {funcs} `[usize; 3]`"));
+}
+
 #[test]
 fn a_kernel_names_the_constants_it_reads() {
     let src = r#"

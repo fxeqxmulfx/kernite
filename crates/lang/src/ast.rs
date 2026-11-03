@@ -148,7 +148,7 @@ pub struct Param {
 /// What a function returns.
 #[derive(Clone, Debug)]
 pub struct Ret {
-    /// The type, as written.
+    /// The type, as Rust writes it.
     pub ty: String,
     /// Where it is.
     pub span: Span,
@@ -160,7 +160,7 @@ pub struct Ret {
 /// `shared<[f32; 256], 16>`.
 #[derive(Clone, Debug)]
 pub enum Type {
-    /// A type by its name, as written: `ymm`, `*const f32`.
+    /// A type by its name, as Rust writes it: `ymm`, `*const f32`, `*const [usize; 3]`.
     Name(String, Span),
     /// `[elem; len]`.
     Array(Box<Type>, Expr, Span),

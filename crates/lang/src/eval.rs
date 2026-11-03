@@ -63,20 +63,17 @@ pub fn kernel<T: Target>(module: &Module, f: &Fn, args: &[Value], target: &mut T
     instance(f, args)?;
     let mut e = Eval::new(module, target);
     e.listed(f)?;
-    let mut scope: Scope<T::Var> =
-        f.generics.iter().zip(args).map(|(g, a)| (g.name.clone(), Binding::Value(Rc::new(a.clone())))).collect();
+    e.scopes
+        .push(f.generics.iter().zip(args).map(|(g, a)| (g.name.clone(), Binding::Value(Rc::new(a.clone())))).collect());
     for p in &f.params {
-        let Type::Name(ty, span) = &p.ty else {
-            return Err(err(p.ty.span(), "a function that names an ABI takes values the machine passes, not arrays"));
-        };
-        let v = e.target.param(&p.name, ty).map_err(|m| err(*span, m))?;
+        let ty = e.type_name(&p.ty)?;
+        let v = e.target.param(&p.name, &ty).map_err(|m| err(p.ty.span(), m))?;
         e.target.declared_at(v, p.span);
-        scope.push((p.name.clone(), Binding::Var(v)));
+        e.bind(&p.name, Binding::Var(v));
     }
     if let Some(r) = &f.ret {
         e.target.result(&r.ty).map_err(|m| err(r.span, m))?;
     }
-    e.scopes.push(scope);
     e.block(f.body.as_ref().map_err(Clone::clone)?)?;
     e.target.end().map_err(|m| err(f.span, m))?;
     // A constant is evaluated the first time it is named, so the ones evaluated are the ones read.

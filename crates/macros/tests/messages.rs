@@ -590,6 +590,23 @@ fn a_parameters_type_means_what_it_means_where_the_kernel_is_written() {
     assert_eq!(passed, 2, "fixtures/beside.rs ran its test and its doc test, and printed:\n{printed}");
 }
 
+/// A lifetime has no place in a kernel, and the macro hands one on as punctuation, where the lexer
+/// of a string refuses it. A pointer to a type that names one, `*const [&'static str]` or
+/// `*const (dyn core::fmt::Debug + 'static)`, which Rust passes in two registers, is refused at its
+/// type in the lexer's words, not taken for one register, with the next parameter read from the
+/// wrong one.
+#[test]
+fn a_pointer_to_a_type_with_a_lifetime_is_refused_at_its_type() {
+    refuses(
+        "lifetimes",
+        &[
+            "src/lib.rs:8:44: error: lifetimes and labels have no place in a kernel",
+            "src/lib.rs:12:45: error: lifetimes and labels have no place in a kernel",
+            "error: could not compile `lifetimes` (lib) due to 2 previous errors",
+        ],
+    );
+}
+
 /// A compile-time argument is no local, and no span of stable Rust keeps it apart from one of its
 /// name: `grid`, the launcher's, and `threads` and `shared`, of a cooperative kernel's `_blocks`.
 /// Each is refused at its name, and nothing at the module's attribute, where Rust would say
