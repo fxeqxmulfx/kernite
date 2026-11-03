@@ -181,7 +181,8 @@ mod x86;
 
 use proc_macro::{Delimiter, Group, Span, TokenStream, TokenTree};
 
-use kgen::lang::{self, ItemKind, Tree};
+use kgen::ConstItem;
+use kgen::lang::{self, Tree};
 
 use crate::expand::expand;
 use crate::rust::{
@@ -246,22 +247,20 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
     match lang::module(&trees) {
         Err(e) => inner.extend(error(at(e.span), &e.message)),
         Ok(module) => {
-            for item in &module.items {
+            for (item, verdict) in module.items.iter().zip(kgen::consts(&module)) {
                 let tokens = &top[item.tokens.clone()];
                 let named = &tokens[attrs_len(tokens)..];
-                match &item.kind {
-                    ItemKind::Const(_) if !named.first().is_some_and(|t| is_ident(t, "pub")) => {
+                match verdict {
+                    ConstItem::Given | ConstItem::Wrong(_) if !named.first().is_some_and(|t| is_ident(t, "pub")) => {
                         let message = "a const of a module of consts is `pub`, for the modules of kernels that take \
                                        it to see";
                         inner.extend(error(named[0].span(), message));
                     }
-                    ItemKind::Const(c) => match lang::constant(&module, c) {
-                        Ok(_) => given.extend(tokens.iter().cloned()),
-                        Err(e) => inner.extend(error(at(e.span), &e.message)),
-                    },
+                    ConstItem::Given => given.extend(tokens.iter().cloned()),
+                    ConstItem::Wrong(e) => inner.extend(error(at(e.span), &e.message)),
                     // The module's own attribute, `#![..]`, is Rust's.
-                    ItemKind::Other if inner_attribute(tokens) => {}
-                    _ => {
+                    ConstItem::NotAConst if inner_attribute(tokens) => {}
+                    ConstItem::NotAConst => {
                         let message = "a module of consts holds the consts kernels read, as `pub const E: usize = \
                                        16;`, and nothing else";
                         inner.extend(error(named.first().unwrap_or(&tokens[0]).span(), message));

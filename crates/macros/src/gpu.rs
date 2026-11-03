@@ -25,15 +25,15 @@ type Launched = (Vec<Value>, usize);
 /// and each cooperative kernel has one that says how many blocks its grid has at most, unless
 /// a kernel or a static has that name, which is an error where `at` says.
 pub(crate) fn gpu(
-    launchers: &[(&Fn, Option<Vec<Launched>>)],
+    launchers: &[(&Fn, Option<&[Launched]>)],
     symbols: &[String],
-    memory: &[(&lang::Static, Option<DeviceStatic>)],
+    memory: &[(&lang::Static, Option<&DeviceStatic>)],
     ptx: &str,
     top: &[TokenTree],
     at: &dyn std::ops::Fn(lang::Span) -> Span,
 ) -> TokenStream {
     let names: Vec<String> = symbols.iter().map(|s| named(s)).collect();
-    let globals: Vec<String> = memory.iter().filter_map(|(_, m)| Some(named(&m.as_ref()?.symbol))).collect();
+    let globals: Vec<String> = memory.iter().filter_map(|(_, m)| m.map(|m| named(&m.symbol))).collect();
     let mut out = parse(&format!(
         "/// The module's GPU kernels, in PTX, for the CUDA driver to compile for the GPU it finds.\n\
          /// Each is named as C++ names it in the namespaces of the workspace, the crate and the\n\
@@ -63,7 +63,7 @@ pub(crate) fn gpu(
     let taken: Vec<&str> =
         launchers.iter().map(|(f, _)| f.name.as_str()).chain(memory.iter().map(|(s, _)| s.name.as_str())).collect();
     for (f, launched) in launchers {
-        methods.extend(launcher(f, launched.as_deref(), top));
+        methods.extend(launcher(f, *launched, top));
         let Some(c) = &f.cooperative else { continue };
         let name = blocks_name(f);
         if taken.contains(&name.as_str()) {
@@ -75,12 +75,12 @@ pub(crate) fn gpu(
             errors.extend(error(at(c.span), &message));
             continue;
         }
-        methods.extend(blocks(f, launched.as_deref(), top));
+        methods.extend(blocks(f, *launched, top));
     }
     for (k, (s, made)) in memory.iter().enumerate() {
         // Its index among the variables the module has, those of the statics that compiled.
         let i = memory[..k].iter().filter(|(_, m)| m.is_some()).count();
-        methods.extend(accessor(s, made.as_ref().map(|m| (m, i)), top));
+        methods.extend(accessor(s, made.map(|m| (m, i)), top));
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, methods))]);
     out.extend(errors);

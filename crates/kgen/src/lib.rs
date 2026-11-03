@@ -52,7 +52,7 @@ pub use kgen_x86::intel::{Line, Listing};
 pub use kgen_x86::lang::Static as X86Static;
 pub use kgen_x86::{Feature, Op};
 
-use kgen_build::{Device, Native, all, compile, one, prepare, statics};
+use kgen_build::{all, compile, one, prepare, statics};
 use kgen_lang::{Fn, Module, Value};
 use kgen_ptx::Ptx;
 use kgen_x86::X86;
@@ -70,22 +70,12 @@ pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>,
     compile(module, &prepare(module, &X86), &X86, f, args)
 }
 
-/// `l`, an x86 kernel's listing, as `naked_asm!` takes it, for Rust to call in the process.
-pub fn naked(l: &Listing) -> Naked {
-    X86.naked(l)
-}
-
 /// The statics of `module`, its memory in the process's, in order, for its x86 kernels to name
 /// and Rust to lay out: each of Rust's numbers, holding what it says or zeros. Or why one is
 /// none, where it can be mended: at its type, at what it holds, or at its name, if another item
 /// of the module's has it or a listing names a constant or a function so, `c0` or `f0`.
 pub fn x86_statics(module: &Module) -> Vec<Result<Compiled<X86Static>, kgen_lang::Error>> {
     statics(module, &X86)
-}
-
-/// `s`, a static of a module of x86 kernels, as Rust lays it out in the process.
-pub fn host_static(s: &X86Static) -> HostStatic {
-    X86.host_static(s)
 }
 
 /// `module`, a module of kernels, compiled: each function `extern "sysv64"` for x86-64, as
@@ -137,12 +127,6 @@ pub fn ptx_scope(path: &[&str]) -> String {
 /// fit beside those before it, in the constant memory a module has or the global, is none.
 pub fn ptx_statics(module: &Module, scope: &str) -> Vec<Result<Compiled<Static>, kgen_lang::Error>> {
     statics(module, &Ptx::new(scope))
-}
-
-/// `s`, a static of a module of PTX kernels that [`ptx_statics`] laid out in `scope`, as the
-/// host reads it: the symbol the driver finds it by, and the number each element is read as.
-pub fn device_static(s: &Static, scope: &str) -> DeviceStatic {
-    Ptx::new(scope).device_static(s)
 }
 
 /// The PTX module of `entries`, for the CUDA driver to load: of the PTX version and for the
