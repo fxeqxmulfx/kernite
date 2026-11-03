@@ -37,17 +37,16 @@ fn on_gpu<T: Plain>(
 }
 
 /// The products `cpu::sgemm` is held to: none in each of `m`, `n` and `k`, and the least; then
-/// each size the kernel works in, one less, equal and one more, the others small: `MR` and
-/// `MC` of `m`, `NR` and `NC` of `n`, `UNROLL` and `KC` of `k`; and one past a block in each at
-/// once.
+/// each size the kernel works in, one less, equal and one more, the others small: `MR` of `m`,
+/// `NR` and `NC` of `n`, `UNROLL` and `KC` of `k`; and one past a block in each at once.
 fn cpu_shapes() -> Vec<Shape> {
-    use cpu::kernels::{KC, MC, MR, NC, NR, UNROLL};
+    use cpu::kernels::{KC, MR, NC, NR, UNROLL};
     let around = |x: usize| [x - 1, x, x + 1];
     let mut shapes = vec![(0, NR, 3), (MR, 0, 3), (MR, NR, 0), (1, 1, 1)];
-    shapes.extend([MR, MC].into_iter().flat_map(around).map(|m| (m, NR + 1, 9)));
+    shapes.extend(around(MR).map(|m| (m, NR + 1, 9)));
     shapes.extend([NR, NC].into_iter().flat_map(around).map(|n| (MR + 1, n, 9)));
     shapes.extend([UNROLL, KC].into_iter().flat_map(around).map(|k| (MR + 1, NR + 1, k)));
-    shapes.push((MC + 1, 3 * NR + 5, 2 * KC + 1));
+    shapes.push((3 * MR + 1, NC + NR + 5, 2 * KC + 1));
     shapes
 }
 

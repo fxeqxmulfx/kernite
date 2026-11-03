@@ -1,5 +1,5 @@
 //! The product on the CPU: a kernel in x86, which needs AVX2 and FMA, blocked as GotoBLAS and
-//! BLIS block it, so that each operand is read from the cache that holds it.
+//! OpenBLAS block it, so that each operand is read from the cache that holds it.
 
 /// The kernels.
 #[kernite_macros::kernels]
@@ -9,13 +9,12 @@ pub mod kernels {
     /// Columns of `c` it keeps in registers: two vectors of eight a row, twelve of the sixteen
     /// `ymm`s, with two for a row of `b` and one for a float of `a`.
     pub const NR: usize = 16;
-    /// Steps of `k` a block takes: a sliver of `b`'s panel, `KC` rows of `NR` floats, 16 KB,
-    /// stays in L1 while the slivers of `a`'s block pass it.
+    /// Steps of `k` a block takes: a sliver of `a`, `MR` rows of `KC` floats, 6 KB, stays in L1
+    /// while the slivers of `b`'s block pass it.
     pub const KC: usize = 256;
-    /// Rows of `a` a block takes: `MC` by `KC` floats, 144 KB, stay in L2.
-    pub const MC: usize = 144;
-    /// Columns of `b` a panel takes: `KC` by `NC` floats, 4 MB, stay in L3.
-    pub const NC: usize = 4096;
+    /// Columns of `b` a block takes: `KC` rows of `NC` floats, 384 KB, stay in L2 while the
+    /// slivers of `a` pass them.
+    pub const NC: usize = 384;
     /// Steps of `k` a turn of the micro-kernel's loop takes.
     pub const UNROLL: usize = 4;
 
@@ -23,22 +22,22 @@ pub mod kernels {
     /// of `n`, where `shape` points at `m`, `n` and `k`, in a row: each element of `c` a chain
     /// of fused multiply-adds over `k` in order, from +0.
     ///
-    /// `b` is packed a panel at a time, `KC` rows of `NC` columns at most, into `packed`, which
-    /// has room for `min(k, KC)` rows of `min(n, NC)` columns rounded up to `NR`, and for 15
-    /// floats more before them, to reach a multiple of 64 bytes. `a` is packed a block at a
-    /// time, `MC` rows of `KC`, into the kernel's stack memory. The micro-kernel multiplies a
-    /// sliver of each, `MR` rows of `a` and `NR` columns of `b`, into a tile of `c` in
-    /// registers: from +0 for the first block of `k`, and from what the tile holds for each
-    /// after, so that each chain goes on in order. Past the edges of `c` the slivers hold
+    /// For each block of `KC` steps of `k`, `a` is packed into slivers of `MR` rows at `ap`,
+    /// which has room for `m` rows, rounded up to `MR`, of `min(k, KC)` floats; and `b`, a block
+    /// of `NC` columns at a time, into slivers of `NR` columns at `bp`, which has room for
+    /// `min(k, KC)` rows of `min(n, NC)` floats, rounded up to `NR`. Each has 15 floats more, to
+    /// start at a multiple of 64 bytes. The micro-kernel multiplies a sliver of each into a tile
+    /// of `c` in registers: from +0 for the first block of `k`, and from what the tile holds for
+    /// each after, so that each chain goes on in order. Past the edges of `c` the slivers hold
     /// zeros, and of a tile there only what lies in `c` is read and written.
     pub unsafe extern "sysv64" fn sgemm(
         c: *mut f32,
         a: *const f32,
         b: *const f32,
         shape: *const usize,
-        packed: *mut f32,
+        ap: *mut f32,
+        bp: *mut f32,
     ) {
-        let block: local<[f32; MC * KC], 64>;
         let (m, n, k): (gpr, gpr, gpr);
         mov(m, [shape]);
         mov(n, [shape + 8]);
@@ -47,88 +46,73 @@ pub mod kernels {
         jz(done);
         test(n, n);
         jz(done);
-        add(packed, 63);
-        and(packed, -64);
+        add(ap, 63);
+        and(ap, -64);
+        add(bp, 63);
+        and(bp, -64);
         note("the bytes from a row of b or c to the next");
         let ld: gpr;
         mov(ld, n);
         shl(ld, 2);
 
-        note("panels of NC columns of b, and of c");
-        let (bj, cj, nleft): (gpr, gpr, gpr);
-        mov(bj, b);
-        mov(cj, c);
-        mov(nleft, n);
-        label(panel);
-        let nc: gpr;
-        mov(nc, nleft);
-        at_most::<NC>(nc);
-
         note("blocks of KC steps of k from step pc, each chain going on from the block before");
-        let (pc, bk): (gpr, gpr);
+        let (pc, ak, bk): (gpr, gpr, gpr);
         zero(pc);
-        mov(bk, bj);
+        mov(ak, a);
+        mov(bk, b);
         label(depth);
         let kc: gpr;
         mov(kc, k);
         sub(kc, pc);
         at_most::<KC>(kc);
-        pack_b(packed, bk, ld, nc, kc);
+        pack_a(ap, ak, k, m, kc);
 
-        note("blocks of MC rows of a, and of c");
-        let (ai, ci, mleft): (gpr, gpr, gpr);
-        lea(ai, [a + pc * 4]);
-        mov(ci, cj);
-        mov(mleft, m);
-        label(rows);
-        let (mc, pa): (gpr, gpr);
-        mov(mc, mleft);
-        at_most::<MC>(mc);
-        lea(pa, [block]);
-        pack_a(pa, ai, k, mc, kc);
-
-        note("slivers of NR columns of the panel");
-        let (pb, cs, wleft): (gpr, gpr, gpr);
-        mov(pb, packed);
-        mov(cs, ci);
-        mov(wleft, nc);
+        note("blocks of NC columns of b, and of c");
+        let (bj, cj, nleft): (gpr, gpr, gpr);
+        mov(bj, bk);
+        mov(cj, c);
+        mov(nleft, n);
         label(columns);
-        let (ct, hleft): (gpr, gpr);
-        lea(pa, [block]);
-        mov(ct, cs);
-        mov(hleft, mc);
-        note("slivers of MR rows of the block, a tile of c each");
-        label(tile);
-        micro(ct, ld, pa, pb, kc, pc, hleft, wleft);
-        lea(ct, [ct + ld * 4]);
-        lea(ct, [ct + ld * 2]);
-        sub(hleft, MR);
-        ja(tile);
-        let t: gpr;
-        mov(t, kc);
-        shl(t, 6);
-        add(pb, t);
-        add(cs, 4 * NR);
-        sub(wleft, NR);
-        ja(columns);
+        let nc: gpr;
+        mov(nc, nleft);
+        at_most::<NC>(nc);
+        pack_b(bp, bj, ld, nc, kc);
 
-        imul(t, k, 4 * MC);
-        add(ai, t);
-        imul(t, ld, MC);
-        add(ci, t);
-        sub(mleft, MC);
+        note("slivers of MR rows of a, and of c");
+        let (pa, ci, hleft): (gpr, gpr, gpr);
+        mov(pa, ap);
+        mov(ci, cj);
+        mov(hleft, m);
+        label(rows);
+        note("slivers of NR columns of the block, a tile of c each");
+        let (pb, ct, wleft, x): (gpr, gpr, gpr, gpr);
+        mov(pb, bp);
+        mov(ct, ci);
+        mov(wleft, nc);
+        label(tile);
+        mov(x, pa);
+        micro(ct, ld, x, pb, kc, pc, hleft, wleft);
+        add(ct, 4 * NR);
+        sub(wleft, NR);
+        ja(tile);
+        mov(pa, x);
+        lea(ci, [ci + ld * 4]);
+        lea(ci, [ci + ld * 2]);
+        sub(hleft, MR);
         ja(rows);
 
+        add(bj, 4 * NC);
+        add(cj, 4 * NC);
+        sub(nleft, NC);
+        ja(columns);
+
+        add(ak, 4 * KC);
+        let t: gpr;
         imul(t, ld, KC);
         add(bk, t);
         add(pc, KC);
         cmp(pc, k);
         jb(depth);
-
-        add(bj, 4 * NC);
-        add(cj, 4 * NC);
-        sub(nleft, NC);
-        ja(panel);
         label(done);
     }
 
@@ -233,8 +217,8 @@ pub mod kernels {
 
     /// The tile of `c` at `c`, rows `ld` bytes apart, plus the product of the `kc` steps of the
     /// slivers at `x`, of `a`, and at `y`, of `b`; or the product alone where `pc` is 0, the
-    /// first block of `k`. Of the tile, `h` rows and `w` columns lie in `c`. `x` ends at the
-    /// next sliver of `a`.
+    /// first block of `k`. Of the tile, `h` rows and `w` columns lie in `c`. `x` and `y` end
+    /// past their slivers.
     fn micro(c: gpr, ld: gpr, x: gpr, y: gpr, kc: gpr, pc: gpr, h: gpr, w: gpr) {
         let acc: [ymm; 2 * MR];
         for i in 0..2 * MR {
@@ -246,17 +230,16 @@ pub mod kernels {
 
         label(steps);
         note("UNROLL steps of k a turn");
-        let (p, l): (gpr, gpr);
-        mov(p, y);
+        let l: gpr;
         mov(l, kc);
         sub(l, UNROLL);
         jb(rest);
         label(turn);
         for s in 0..UNROLL {
-            step::<s>(acc, x, p);
+            step::<s>(acc, x, y);
         }
         add(x, 4 * MR * UNROLL);
-        add(p, 4 * NR * UNROLL);
+        add(y, 4 * NR * UNROLL);
         sub(l, UNROLL);
         jae(turn);
         label(rest);
@@ -264,9 +247,9 @@ pub mod kernels {
         add(l, UNROLL);
         jz(store);
         label(one);
-        step::<0>(acc, x, p);
+        step::<0>(acc, x, y);
         add(x, 4 * MR);
-        add(p, 4 * NR);
+        add(y, 4 * NR);
         dec(l);
         jnz(one);
         label(store);
@@ -339,10 +322,13 @@ pub fn sgemm(c: &mut [f32], a: &[f32], b: &[f32], shape: crate::Shape) {
     let (m, n, k) = shape;
     assert!(supported(), "the kernels need AVX2 and FMA");
     crate::operands((a.len(), b.len(), c.len()), shape);
-    use kernels::{KC, NC, NR};
-    let mut packed = Vec::with_capacity(k.min(KC) * n.min(NC).next_multiple_of(NR) + 15);
+    use kernels::{KC, MR, NC, NR};
+    let depth = k.min(KC);
+    let mut ap = Vec::with_capacity(m.next_multiple_of(MR) * depth + 15);
+    let mut bp = Vec::with_capacity(depth * n.min(NC).next_multiple_of(NR) + 15);
+    let (c, a, b) = (c.as_mut_ptr(), a.as_ptr(), b.as_ptr());
     // SAFETY: `m` rows of `k` floats behind `a`, `k` rows of `n` behind `b` and `m` rows of `n`
-    // behind `c`, as `shape` says; room for a panel of `b` in `packed`, and the CPU has what the
-    // kernel needs.
-    unsafe { kernels::sgemm(c.as_mut_ptr(), a.as_ptr(), b.as_ptr(), [m, n, k].as_ptr(), packed.as_mut_ptr()) }
+    // behind `c`, as `shape` says; room for what the kernel packs behind `ap` and `bp`; and the
+    // CPU has what the kernel needs.
+    unsafe { kernels::sgemm(c, a, b, [m, n, k].as_ptr(), ap.as_mut_ptr(), bp.as_mut_ptr()) }
 }
