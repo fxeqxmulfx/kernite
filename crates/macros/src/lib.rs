@@ -174,9 +174,9 @@
 //!
 //! A kernel is `unsafe`: it trusts the pointers it is given, and that nothing else touches the
 //! memory of the module's it names while it runs, as an x86 kernel's safety contract says, by
-//! name, of the statics it and the functions it calls name. One that does not compile is a
-//! `compile_error!` where the trouble is, beside a stub of its signature or its launcher, so
-//! that its callers are not errors as well.
+//! name, of the statics it and the functions it calls name, whether it calls them by name or
+//! at an address. One that does not compile is a `compile_error!` where the trouble is, beside
+//! a stub of its signature or its launcher, so that its callers are not errors as well.
 
 extern crate proc_macro;
 

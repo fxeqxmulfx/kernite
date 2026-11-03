@@ -67,9 +67,10 @@ impl Backend for X86 {
 
     fn finish(&self, mut kernel: Kernel) -> Result<Listing, Unfinished> {
         let decls = std::mem::take(&mut kernel.decls);
+        let reach = std::mem::take(&mut kernel.reach);
         let allocated = kgen_compile::compile(&kernel.finish(), &SysV)
             .map_err(|e| Unfinished::blaming(e.var(), &decls, e.to_string()))?;
-        intel::print(&allocated).map_err(|message| Unfinished { at: None, message })
+        intel::print(&allocated, reach).map_err(|message| Unfinished { at: None, message })
     }
 }
 
@@ -81,6 +82,7 @@ impl Native for X86 {
             needs: code.features.iter().map(|f| f.name().into()).collect(),
             consts: code.consts.iter().map(|c| Bytes { bytes: c.bytes.clone(), align: c.align }).collect(),
             funcs: code.funcs.clone(),
+            reach: code.reach.clone(),
             statics: code.statics.clone(),
         }
     }

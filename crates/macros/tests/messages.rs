@@ -302,17 +302,19 @@ fn a_static_that_does_not_compile_is_said_once() {
 }
 
 /// A kernel's safety contract says that nothing else touches the memory of the module's it
-/// names while it runs, with what the functions it calls name: in a `# Safety` of its own, or
-/// after the one its docs have; and for a grid's kernel, while its threads run.
+/// names while it runs, with what the functions it calls name, whether it calls them by name
+/// or at an address: in a `# Safety` of its own, or after the one its docs have; and for a
+/// grid's kernel, while its threads run.
 #[test]
 fn a_kernels_safety_contract_says_nothing_else_touches_the_memory_it_names() {
     // The paragraphs of the kernel's `# Safety`, as rustdoc writes them.
     let safety = documented("contract", "cpu", ">Safety</h2>\n");
-    assert_eq!(
-        safety("run"),
-        ["<p>The kernel trusts the pointers it is given: each must be to memory as long as the kernel reads and \
-             writes through it. Nothing else touches the module’s memory, <code>RUNS</code>, while it runs.</p>"]
-    );
+    let runs = "<p>The kernel trusts the pointers it is given: each must be to memory as long as the kernel reads and \
+                writes through it. Nothing else touches the module’s memory, <code>RUNS</code>, while it runs.</p>";
+    assert_eq!(safety("run"), [runs]);
+    // A call at an address names no function in the code, and the contract names the memory of
+    // each it may reach: `run` is the last of the two, and `idle` names none.
+    assert_eq!(safety("either"), [runs]);
     assert_eq!(
         safety("scale"),
         [

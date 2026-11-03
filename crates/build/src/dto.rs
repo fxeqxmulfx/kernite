@@ -28,6 +28,9 @@ pub struct Naked {
     pub consts: Vec<Bytes>,
     /// The functions it names, by index, each by what the source calls it: `gcd`, `tile::<4>`.
     pub funcs: Vec<String>,
+    /// The functions a call at an address may reach, each once, by what the source calls it,
+    /// `gcd` or `tile::<4>`. The code names none of them, so `funcs` does not.
+    pub reach: Vec<String>,
     /// The statics it names, each by what the source calls it: `COUNTS`.
     pub statics: Vec<String>,
 }
@@ -134,8 +137,8 @@ pub struct NativeOut {
     pub written: bool,
     /// How many instances it lists, compiled or not; none if its attributes are wrong.
     pub count: usize,
-    /// The statics its code names, those the functions it names name, and on, in the module's
-    /// order; none unless the process owns the statics.
+    /// The statics its code names, those the functions it names or may reach at an address
+    /// name, and on, in the module's order; none unless the process owns the statics.
     pub touched: Vec<String>,
     /// Why each instance that did not compile did not, in order.
     pub errors: Vec<Error>,

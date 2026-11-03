@@ -147,9 +147,10 @@ holding what it says until something writes it. A kernel reaches a static at a d
 address in it as it does one in stack memory, and refuses a write to constant memory. The host reads and writes each as
 the module has it, a [`kgen_cpu::Global`](crates/cpu/src/global.rs) of Rust's type for its elements:
 `kernels::COUNTS.read()`, `kernels::WEIGHTS.write(&[2.0; 4])`. Its elements are atomics, which the host loads and
-stores, and a kernel's safety contract says that nothing else touches the memory of the module's it names while it
-runs. A module's statics are its kernels': on the GPU for GPU kernels, so a module with kernels of both kinds and a
-static is an error, which says to make it two.
+stores, and a kernel's safety contract says that nothing else touches the memory of the module's it names while it runs,
+nor any that the functions it calls name, whether it calls them by name or at an address. A module's statics are its
+kernels': on the GPU for GPU kernels, so a module with kernels of both kinds and a static is an error, which says to
+make it two.
 
 ## On a GPU
 

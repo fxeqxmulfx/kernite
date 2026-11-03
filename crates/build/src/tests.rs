@@ -116,8 +116,9 @@ fn laid(name: &str, held: &str, before: &[&str]) -> Laid {
 
 /// A kernel as Echo writes it, and its code: its name, a line for each thing it was told, and
 /// its variables, by name, with where each is declared, as `declared_at` tells it. A variable
-/// is its place among them. Beside them, the statics it was told of, and the functions and the
-/// statics its body names, each once, in the order first named.
+/// is its place among them. Beside them, the statics it was told of, and the functions its body
+/// names, those it may reach at an address, and the statics it names, each once, in the order
+/// first named.
 struct Told {
     name: String,
     lines: Vec<String>,
@@ -125,6 +126,7 @@ struct Told {
     declared: Vec<(usize, Span)>,
     memory: Vec<String>,
     funcs: Vec<String>,
+    reach: Vec<String>,
     statics: Vec<String>,
 }
 
@@ -174,7 +176,16 @@ impl Backend for Echo {
             lines.push(format!("callee {}: {} [{}] {:?}", c.name, c.function, listed(&c.args), c.callee));
         }
         let memory = statics.iter().map(|s| s.name.clone()).collect();
-        Told { name: name.into(), lines, vars: vec![], declared: vec![], memory, funcs: vec![], statics: vec![] }
+        Told {
+            name: name.into(),
+            lines,
+            vars: vec![],
+            declared: vec![],
+            memory,
+            funcs: vec![],
+            reach: vec![],
+            statics: vec![],
+        }
     }
 
     /// Fails for a variable named `fail_v`, which it blames, or one named `fail`, blaming none.
@@ -212,8 +223,9 @@ impl Device for Echo {
 }
 
 impl Native for Echo {
-    /// The lines, and the listing they make, and the functions and the statics the body names.
-    /// It needs no feature, and reads no constant from memory.
+    /// The lines, and the listing they make, the functions the body names and may reach at an
+    /// address, and the statics it names. It needs no feature, and reads no constant from
+    /// memory.
     fn naked(&self, code: &Told) -> Naked {
         Naked {
             code: code.lines.clone(),
@@ -221,6 +233,7 @@ impl Native for Echo {
             needs: vec![],
             consts: vec![],
             funcs: code.funcs.clone(),
+            reach: code.reach.clone(),
             statics: code.statics.clone(),
         }
     }
@@ -284,6 +297,16 @@ impl Target for Told {
                 && !self.funcs.contains(f)
             {
                 self.funcs.push(f.clone());
+            }
+        }
+        // The functions taken together last: a call at an address may reach each.
+        if let Some(Operand::Vector(fs)) = args.last() {
+            for f in fs {
+                if let Operand::Func(f) = f
+                    && !self.reach.contains(f)
+                {
+                    self.reach.push(f.clone());
+                }
             }
         }
         let args: Vec<String> = args
@@ -766,6 +789,30 @@ fn a_kernel_names_the_statics_its_callees_reach() {
     assert_eq!(ping.touched, ["A"]);
     assert_eq!(pong.touched, ["A"]);
     assert!(plain.touched == ["A"] && !plain.written);
+}
+
+/// A kernel names the statics of each function it may call at an address, those taken together
+/// last, though its code names none of them: `idle` names none and `run` one, the last of the two.
+/// A kernel that calls it by name names them as well.
+#[test]
+fn a_kernel_names_the_statics_of_the_functions_it_may_call_at_an_address() {
+    let src = "static A: global<u32>;\n\
+               static B: global<u32>;\n\
+               unsafe extern \"sysv64\" fn idle() {}\n\
+               unsafe extern \"sysv64\" fn run() { let p: gpr; lea(p, [A]); }\n\
+               unsafe extern \"sysv64\" fn far() { let p: gpr; lea(p, [B]); }\n\
+               unsafe extern \"sysv64\" fn either(fp: u64) { call(fp, (idle, run)); }\n\
+               unsafe extern \"sysv64\" fn top(fp: u64) { call(either, fp); }";
+    let out = echoed(src);
+    let [_, _, _, ItemOut::Native(run), _, ItemOut::Native(either), ItemOut::Native(top)] = &out.items[..] else {
+        panic!("{:?}", out.items);
+    };
+    let naked = &either.instances[0].naked;
+    assert!(naked.funcs.is_empty());
+    assert_eq!(naked.reach, ["idle", "run"]);
+    assert_eq!(run.touched, ["A"]);
+    assert_eq!(either.touched, ["A"]);
+    assert_eq!(top.touched, ["A"]);
 }
 
 /// In a module of both kinds of kernel and a static, the statics are the GPU's, as the first of

@@ -206,7 +206,7 @@ fn take(module: &mut Module, given: &Given) -> Vec<Error> {
 
 /// The statics of `module` each function the process runs names, by its index among `items`, in
 /// the module's order: those the code of its instances names, those the functions that code
-/// names name, and on.
+/// names or may reach name, and on.
 fn touched(module: &Module, items: &[ItemOut]) -> Vec<Vec<String>> {
     // Each instance that compiled, by name, `gcd` or `tile::<4>`, and its code.
     let mut named: Vec<(String, &Naked)> = vec![];
@@ -227,12 +227,12 @@ fn touched(module: &Module, items: &[ItemOut]) -> Vec<Vec<String>> {
         })
         .collect();
     let touched = |out: &NativeOut| {
-        // Its instances' code, then that of the functions they name, and on.
+        // Its instances' code, then that of the functions they name or may reach, and on.
         let mut reached: Vec<&Naked> = out.instances.iter().map(|k| &k.naked).collect();
         let mut at = 0;
         while at < reached.len() {
             let code = reached[at];
-            for name in &code.funcs {
+            for name in code.funcs.iter().chain(&code.reach) {
                 if let Some(&(_, called)) = named.iter().find(|(n, _)| n == name)
                     && !reached.iter().any(|r| std::ptr::eq(*r, called))
                 {

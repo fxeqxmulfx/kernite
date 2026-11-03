@@ -275,7 +275,7 @@ mod tests {
 
     /// The code of `c`'s listing, a line each.
     fn code(c: &Allocated<Op>) -> String {
-        intel::print(c).unwrap().code().collect::<Vec<_>>().join("\n")
+        intel::print(c, vec![]).unwrap().code().collect::<Vec<_>>().join("\n")
     }
 
     /// The prologue and the epilogue are instructions of the body before the printer sees it,

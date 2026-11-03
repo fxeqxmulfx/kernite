@@ -63,11 +63,38 @@ fn x86_compiles_a_kernel_through_the_port() {
         needs: vec!["avx".into()],
         consts: vec![Bytes { bytes: 2.5f32.to_le_bytes().to_vec(), align: 4 }],
         funcs: vec!["half".into()],
+        reach: vec![],
         statics: vec!["COUNTS".into()],
     };
     assert_eq!(X86.naked(&code), want);
     let want = HostStatic { elem: "u32".into(), size: 4, len: 2, align: 4, init: vec![1, 0, 0, 0, 2, 0, 0, 0] };
     assert_eq!(X86.host_static(&statics[0]), want);
+}
+
+/// A call at an address names no function in the code, so `funcs` has none: the functions taken
+/// together last come out of the port in a list of their own, each once, in the order the source
+/// gives them.
+#[test]
+fn a_call_at_an_address_hands_on_the_functions_it_may_reach() {
+    let src = "unsafe extern \"sysv64\" fn half(x: f32) -> f32 { ret(x); }\n\
+               unsafe extern \"sysv64\" fn twice(x: f32) -> f32 { ret(x); }\n\
+               unsafe extern \"sysv64\" fn third(x: f32) -> f32 { ret(x); }\n\
+               unsafe extern \"sysv64\" fn k(fp: u64) {\n\
+               let v: ymm;\n\
+               call(v.xmm, fp, 2.5, (half, twice));\n\
+               call(v.xmm, fp, 1.5, (third, half));\n\
+               }";
+    let module = parse(src).unwrap();
+    let callees = ["half", "twice", "third"].map(|name| {
+        let callee = X86.callee(function(&module, name).unwrap()).unwrap();
+        Called { name: name.into(), function: name.into(), args: vec![], callee }
+    });
+    let k = function(&module, "k").unwrap();
+    let mut kernel = X86.kernel(k, "k", &[], false, &[], &callees);
+    kgen_lang::kernel(&module, k, &[], &mut kernel).unwrap();
+    let naked = X86.naked(&X86.finish(kernel).unwrap());
+    assert!(naked.funcs.is_empty());
+    assert_eq!(naked.reach, ["half", "twice", "third"]);
 }
 
 /// A listing names a constant `{c0}` and a function `{f0}`, and a static by its name, so no
