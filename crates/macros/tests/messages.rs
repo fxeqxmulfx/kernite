@@ -591,9 +591,10 @@ fn a_parameters_type_means_what_it_means_where_the_kernel_is_written() {
 }
 
 /// A kernel takes a pointer to any type, as it takes one to a number: to an array, a pointer, a
-/// tuple, or a type of the crate's with two arguments, `Pair<u8, 2>`, whose comma ends no
-/// parameter. Each kernel's launcher or call takes the pointee as written, and Rust builds the
-/// module without a word.
+/// tuple, a function's pointer, `fn(u32) -> u32`, or a type of the crate's with two arguments,
+/// `Pair<u8, 2>`, whose comma ends no parameter, even when an argument is a function's pointer,
+/// `Pair<fn() -> u8, 2>`, whose arrow closes no `<`. Each kernel's launcher or call takes the
+/// pointee as written, and Rust builds the module without a word.
 #[test]
 fn a_kernel_takes_a_pointer_to_any_type() {
     builds_quietly("pointers");

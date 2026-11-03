@@ -138,19 +138,21 @@ pub(crate) fn clashes(f: &Fn, own: &[&str], method: &str, top: &[TokenTree]) -> 
 }
 
 /// `f`'s parameters as written, each its tokens, `x: *mut f32`, and the place of its colon. A comma
-/// ends a parameter unless it is among the arguments of a type's, `x: *mut Pair<u8, 2>`.
+/// ends a parameter unless it is among the arguments of a type's, `x: *mut Pair<u8, 2>`. The `>` of
+/// an arrow, `fn() -> u8`, closes no `<` of them.
 pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, usize)> {
     let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
     let tokens = flatten(group.stream());
-    let mut open = 0usize;
+    let (mut open, mut dash) = (0usize, false);
     let params = tokens
         .split(|t| {
             if is_punct(t, '<') {
                 open += 1;
-            } else if is_punct(t, '>') {
-                // The `>` of an arrow, `->`, has no `<` to close.
+            } else if is_punct(t, '>') && !dash {
                 open = open.saturating_sub(1);
             }
+            // A `>` after a `-` joint to it is an arrow's, `->`.
+            dash = matches!(t, TokenTree::Punct(p) if p.as_char() == '-' && p.spacing() == Spacing::Joint);
             open == 0 && is_punct(t, ',')
         })
         .filter(|p| !p.is_empty());
