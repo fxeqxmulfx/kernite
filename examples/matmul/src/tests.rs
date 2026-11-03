@@ -54,9 +54,12 @@ fn cpu_shapes() -> Vec<Shape> {
 fn cpu_sgemm_is_the_reference_bit_for_bit() {
     for shape @ (m, n, k) in cpu_shapes() {
         let (a, b) = (floats(m * k, 1), floats(k * n, 2));
-        let mut c = vec![f32::NAN; m * n];
-        cpu::sgemm(&mut c, &a, &b, shape);
-        same_bits(&c, &reference::sgemm(&a, &b, shape), shape);
+        // `c`, then a row and a tile more, which the kernel leaves as they are.
+        let mut c = vec![f32::NAN; m * n + n + cpu::kernels::NR];
+        let (c, past) = c.split_at_mut(m * n);
+        cpu::sgemm(c, &a, &b, shape);
+        same_bits(c, &reference::sgemm(&a, &b, shape), shape);
+        assert!(past.iter().all(|x| x.is_nan()), "{shape:?}: c written past its end");
     }
 }
 
