@@ -451,7 +451,16 @@ impl<'a> Parser<'a> {
             return Ok(Type::Generic(name.strip_prefix("r#").unwrap_or(name).to_string(), args, *span));
         }
         let (from, span) = (self.pos, self.span());
-        while !self.done() && !["=", ";", ",", ">"].iter().any(|op| self.is_op(op)) {
+        // The arguments of a name in it, `*const Foo<u8>`, end at their own `>`. A level starts at
+        // the name, as `Name<T>` above does.
+        let mut angles = 0;
+        while !self.done() && (angles > 0 || !["=", ";", ",", ">"].iter().any(|op| self.is_op(op))) {
+            if self.is_op("<") {
+                nested(open + angles, self.trees[from..self.pos].last().map_or(self.span(), Tree::span))?;
+                angles += 1;
+            } else if self.is_op(">") {
+                angles -= 1;
+            }
             self.pos += 1;
         }
         if from == self.pos {

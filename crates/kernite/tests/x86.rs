@@ -561,14 +561,15 @@ fn a_kernel_takes_what_sysv_passes_in_registers() {
     assert_eq!(code, "vmovss dword ptr [rdi], xmm1\nvaddss xmm1, xmm0, xmm1\nvzeroupper\nret");
 }
 
-/// A pointer is one register, whatever it points to: an array, a pointer, a tuple.
+/// A pointer is one register, whatever it points to: an array, a pointer, a tuple, a generic type.
 /// A pointer to what has no size, a slice, a `str` or a `dyn`, in parentheses or not, or a tuple that
 /// ends in one, is two words in Rust, and an error.
 #[test]
 fn a_kernel_takes_a_pointer_to_any_type_in_a_register() {
-    let params = "shape: *const [usize; 3], out: *mut *const f32, pair: *const (u32, u32), n: usize";
-    let code = compile(params, "mov(n, [shape + 8]); mov([out], pair); mov([pair], n);").unwrap();
-    assert_eq!(code, "mov rcx, qword ptr [rdi + 8]\nmov qword ptr [rsi], rdx\nmov qword ptr [rdx], rcx\nret");
+    let params = "shape: *const [usize; 3], out: *mut *const f32, pair: *const (u32, u32), \
+                  cell: *const Cell<u8, 2>, n: usize";
+    let code = compile(params, "mov(n, [shape + 8]); mov([out], pair); mov([cell], n);").unwrap();
+    assert_eq!(code, "mov r8, qword ptr [rdi + 8]\nmov qword ptr [rsi], rdx\nmov qword ptr [rcx], r8\nret");
     let src = "unsafe extern \"sysv64\" fn k(p: *const [usize; 3]) -> *mut [usize; 3] { ret(p); }";
     assert_eq!(kernite::x86_str(src, "k").unwrap().code().collect::<Vec<_>>(), ["mov rax, rdi", "ret"]);
     for to in ["()", "(u32,)", "(u32, u32)"] {
@@ -605,6 +606,8 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
         ("a: (u32 ,u32)", "(u32, u32)"),
         ("a: &mut[f32]", "&mut [f32]"),
         ("a: Box<dyn A+B>", "Box<dyn A + B>"),
+        ("a: Box<dyn Iterator<Item=u8>>", "Box<dyn Iterator<Item = u8>>"),
+        ("a: Box<dyn Iterator<Item = u8> + Send>", "Box<dyn Iterator<Item = u8> + Send>"),
     ] {
         assert_eq!(compile(params, "").unwrap_err(), format!("1:32: {takes} `{ty}`"), "{params}");
     }

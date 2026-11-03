@@ -975,15 +975,17 @@ fn consts_that_name_consts_nest_64_deep_at_most() {
     }
 }
 
-/// A type nests 64 deep at most, and `Name<T>` and `[T; N]` are a level each: the parser refuses
-/// the level past it where it starts, however long the row, before it reads the rest. A type of 64
-/// is read, and then it is the machine that has no such variable.
+/// A type nests 64 deep at most, and `Name<T>` and `[T; N]` are a level each, in a pointer to them
+/// as well: the parser refuses the level past it where it starts, however long the row, before it
+/// reads the rest. A type of 64 is read, and then it is the machine that has no such variable.
 #[test]
 fn a_type_nests_64_deep_at_most() {
-    let body = |n: usize| format!("let x: {}u32{};", "a<".repeat(n), ">".repeat(n));
-    assert!(refused(&body(63)).starts_with("2:8: x86 variables are "));
-    for n in [64, 5000] {
-        assert_eq!(refused(&body(n)), "2:134: this nests 64 deep at most", "{n}");
+    for (pointer, at) in [("", "2:134"), ("*const ", "2:141")] {
+        let body = |n: usize| format!("let x: {pointer}{}u32{};", "a<".repeat(n), ">".repeat(n));
+        assert!(refused(&body(63)).starts_with("2:8: x86 variables are "), "{pointer}");
+        for n in [64, 5000] {
+            assert_eq!(refused(&body(n)), format!("{at}: this nests 64 deep at most"), "{pointer}{n}");
+        }
     }
 }
 

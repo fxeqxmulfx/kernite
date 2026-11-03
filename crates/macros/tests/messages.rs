@@ -590,6 +590,15 @@ fn a_parameters_type_means_what_it_means_where_the_kernel_is_written() {
     assert_eq!(passed, 2, "fixtures/beside.rs ran its test and its doc test, and printed:\n{printed}");
 }
 
+/// A kernel takes a pointer to any type, as it takes one to a number: to an array, a pointer, a
+/// tuple, or a type of the crate's with two arguments, `Pair<u8, 2>`, whose comma ends no
+/// parameter. Each kernel's launcher or call takes the pointee as written, and Rust builds the
+/// module without a word.
+#[test]
+fn a_kernel_takes_a_pointer_to_any_type() {
+    builds_quietly("pointers");
+}
+
 /// A lifetime has no place in a kernel, and the macro hands one on as punctuation, where the lexer
 /// of a string refuses it. A pointer to a type that names one, `*const [&'static str]` or
 /// `*const (dyn core::fmt::Debug + 'static)`, which Rust passes in two registers, is refused at its

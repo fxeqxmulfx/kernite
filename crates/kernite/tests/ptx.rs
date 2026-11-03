@@ -1134,18 +1134,19 @@ fn a_kernel_takes_pointers_and_numbers_and_returns_nothing() {
     assert_eq!(e, "1:38: a GPU kernel returns nothing, not `f32`: it writes what it works out to memory");
 }
 
-/// A kernel's pointer is an address on the GPU whatever it points to: an array, a pointer, a tuple.
-/// One to what has no size, a slice, a `str` or a `dyn`, in parentheses or not, or a tuple that
-/// ends in one, is two words in Rust, and an error; and a function takes no pointer at all,
-/// whatever it points to.
+/// A kernel's pointer is an address on the GPU whatever it points to: an array, a pointer, a tuple,
+/// a generic type. One to what has no size, a slice, a `str` or a `dyn`, in parentheses or not, or
+/// a tuple that ends in one, is two words in Rust, and an error; and a function takes no pointer
+/// at all, whatever it points to.
 #[test]
 fn a_kernel_takes_a_pointer_to_any_type() {
     let ptx = compile(
-        "shape: *const [usize; 3], out: *mut *const f32, pair: *const (u32, u32)",
-        "let v: u64; ld.global.u64(v, [shape + 8]); st.global.u64([out], v); st.global.u64([pair], v);",
+        "shape: *const [usize; 3], out: *mut *const f32, pair: *const (u32, u32), cell: *const Cell<u8, 2>",
+        "let v: u64; ld.global.u64(v, [shape + 8]); st.global.u64([out], v); st.global.u64([pair], v);\n\
+         st.global.u64([cell], v);",
     )
     .unwrap();
-    for (i, name) in ["shape", "out", "pair"].iter().enumerate() {
+    for (i, name) in ["shape", "out", "pair", "cell"].iter().enumerate() {
         let part = format!("\tld.param.u64 %{name}, [k_param_{i}];\n\tcvta.to.global.u64 %{name}, %{name};\n");
         assert!(ptx.contains(&part), "{part}\nin\n{ptx}");
     }
@@ -1187,6 +1188,8 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
         ("a: (u32 ,u32)", "(u32, u32)"),
         ("a: &mut[f32]", "&mut [f32]"),
         ("a: Box<dyn A+B>", "Box<dyn A + B>"),
+        ("a: Box<dyn Iterator<Item=u8>>", "Box<dyn Iterator<Item = u8>>"),
+        ("a: Box<dyn Iterator<Item = u8> + Send>", "Box<dyn Iterator<Item = u8> + Send>"),
     ] {
         assert_eq!(compile(params, "").unwrap_err(), format!("1:36: {takes} `{ty}`"), "{params}");
     }

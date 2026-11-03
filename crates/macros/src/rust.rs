@@ -137,11 +137,23 @@ pub(crate) fn clashes(f: &Fn, own: &[&str], method: &str, top: &[TokenTree]) -> 
     errors
 }
 
-/// `f`'s parameters as written, each its tokens, `x: *mut f32`, and the place of its colon.
+/// `f`'s parameters as written, each its tokens, `x: *mut f32`, and the place of its colon. A comma
+/// ends a parameter unless it is among the arguments of a type's, `x: *mut Pair<u8, 2>`.
 pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, usize)> {
     let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
     let tokens = flatten(group.stream());
-    let params = tokens.split(|t| is_punct(t, ',')).filter(|p| !p.is_empty());
+    let mut open = 0usize;
+    let params = tokens
+        .split(|t| {
+            if is_punct(t, '<') {
+                open += 1;
+            } else if is_punct(t, '>') {
+                // The `>` of an arrow, `->`, has no `<` to close.
+                open = open.saturating_sub(1);
+            }
+            open == 0 && is_punct(t, ',')
+        })
+        .filter(|p| !p.is_empty());
     params.map(|p| (p.to_vec(), p.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type"))).collect()
 }
 
