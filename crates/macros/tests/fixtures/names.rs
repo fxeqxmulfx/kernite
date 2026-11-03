@@ -2,7 +2,7 @@
 //! named as one, which the macro refuses at its name, and a struct in braces and a type named as
 //! others, which Rust keeps in its other namespace, and of which nothing is said.
 
-#[kgen_macros::consts]
+#[kernite_macros::consts]
 pub mod sizes {
     /// How far a value moves.
     pub const STEP: u64 = 3;
@@ -14,7 +14,7 @@ pub mod sizes {
     pub const ROWS: usize = 2;
 }
 
-#[kgen_macros::kernels(consts = crate::sizes)]
+#[kernite_macros::kernels(consts = crate::sizes)]
 pub mod kernels {
     /// Named as a const the module takes, which its kernels read.
     pub unsafe extern "sysv64" fn STEP() {}

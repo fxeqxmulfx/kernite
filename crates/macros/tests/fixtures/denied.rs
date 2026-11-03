@@ -5,7 +5,7 @@
 
 /// A compile-time argument named in lower case, which the kernel denies: the launcher errs, and
 /// `k_blocks` says nothing.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod denied {
     #[instances(1, 2)]
     #[cooperative]
@@ -16,7 +16,7 @@ pub mod denied {
 }
 
 /// The same, forbidden.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod forbidden {
     #[instances(1, 2)]
     #[cooperative]
@@ -31,7 +31,7 @@ pub mod forbidden {
 #[deny(non_upper_case_globals)]
 pub mod strict {
     /// The kernel that warns.
-    #[kgen_macros::kernels]
+    #[kernite_macros::kernels]
     pub mod warned {
         #[instances(1, 2)]
         #[cooperative]

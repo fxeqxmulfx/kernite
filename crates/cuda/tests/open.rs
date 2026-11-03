@@ -2,7 +2,7 @@
 //! GPU kernels runs where there is none. A test of its own, as a program of its own: one that
 //! shares a process with the driver's tests could find it opened by one of them.
 
-use kgen_cuda::Cuda;
+use kernite_cuda::Cuda;
 
 /// Whether this process has the driver in its memory: a file whose name starts `libcuda.so`,
 /// as `libcuda.so.1` and the file it links to do.

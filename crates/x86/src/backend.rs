@@ -1,7 +1,9 @@
-//! x86-64 under SysV as kgen-build sees it: a machine whose kernels Rust calls in the process.
+//! x86-64 under SysV as kernite-build sees it: a machine whose kernels Rust calls in the process.
 
-use kgen_build::{Abi, Backend, Bytes, Called, HostStatic, Naked, Native, StaticError, Unfinished, abi, cooperative};
-use kgen_lang::{Fn, Memory, Value};
+use kernite_build::{
+    Abi, Backend, Bytes, Called, HostStatic, Naked, Native, StaticError, Unfinished, abi, cooperative,
+};
+use kernite_lang::{Fn, Memory, Value};
 
 use crate::SysV;
 use crate::intel::{self, Listing};
@@ -68,7 +70,7 @@ impl Backend for X86 {
     fn finish(&self, mut kernel: Kernel) -> Result<Listing, Unfinished> {
         let decls = std::mem::take(&mut kernel.decls);
         let reach = std::mem::take(&mut kernel.reach);
-        let allocated = kgen_compile::compile(&kernel.finish(), &SysV)
+        let allocated = kernite_compile::compile(&kernel.finish(), &SysV)
             .map_err(|e| Unfinished::blaming(e.var(), &decls, e.to_string()))?;
         intel::print(&allocated, reach).map_err(|message| Unfinished { at: None, message })
     }
@@ -99,7 +101,7 @@ fn prototype(f: &Fn) -> Option<Prototype> {
         .params
         .iter()
         .map(|p| match &p.ty {
-            kgen_lang::Type::Name(ty, _) => Some((p.name.as_str(), ty.as_str())),
+            kernite_lang::Type::Name(ty, _) => Some((p.name.as_str(), ty.as_str())),
             _ => None,
         })
         .collect();

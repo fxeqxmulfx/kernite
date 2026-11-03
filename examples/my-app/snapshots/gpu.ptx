@@ -1,19 +1,19 @@
-// Written by kgen.
+// Written by kernite.
 
 .version 4.2
 .target sm_53
 .address_size 64
 
-.global .align 4 .b8 _ZN4kgen6my_app3gpu6COUNTSE[64];
-.const .align 4 .b8 _ZN4kgen6my_app3gpu7WEIGHTSE[16] = {0, 0, 128, 63, 0, 0, 0, 63, 0, 0, 128, 62, 0, 0, 0, 64};
+.global .align 4 .b8 _ZN7kernite6my_app3gpu6COUNTSE[64];
+.const .align 4 .b8 _ZN7kernite6my_app3gpu7WEIGHTSE[16] = {0, 0, 128, 63, 0, 0, 0, 63, 0, 0, 128, 62, 0, 0, 0, 64};
 
-.extern .shared .align 4 .b8 _ZZN4kgen6my_app3gpu12reverse_runsEE3run[];
+.extern .shared .align 4 .b8 _ZZN7kernite6my_app3gpu12reverse_runsEE3run[];
 
-.visible .entry _ZN4kgen6my_app3gpu5saxpyE(
-	.param .f32 _ZN4kgen6my_app3gpu5saxpyE_param_0,
-	.param .u64 _ZN4kgen6my_app3gpu5saxpyE_param_1,
-	.param .u64 _ZN4kgen6my_app3gpu5saxpyE_param_2,
-	.param .u32 _ZN4kgen6my_app3gpu5saxpyE_param_3
+.visible .entry _ZN7kernite6my_app3gpu5saxpyE(
+	.param .f32 _ZN7kernite6my_app3gpu5saxpyE_param_0,
+	.param .u64 _ZN7kernite6my_app3gpu5saxpyE_param_1,
+	.param .u64 _ZN7kernite6my_app3gpu5saxpyE_param_2,
+	.param .u32 _ZN7kernite6my_app3gpu5saxpyE_param_3
 )
 {
 	.reg .pred %past;
@@ -21,12 +21,12 @@
 	.reg .f32 %a, %xi, %yi;
 	.reg .u64 %x, %y, %at_x, %at_y;
 
-	ld.param.f32 %a, [_ZN4kgen6my_app3gpu5saxpyE_param_0];
-	ld.param.u64 %x, [_ZN4kgen6my_app3gpu5saxpyE_param_1];
+	ld.param.f32 %a, [_ZN7kernite6my_app3gpu5saxpyE_param_0];
+	ld.param.u64 %x, [_ZN7kernite6my_app3gpu5saxpyE_param_1];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u64 %y, [_ZN4kgen6my_app3gpu5saxpyE_param_2];
+	ld.param.u64 %y, [_ZN7kernite6my_app3gpu5saxpyE_param_2];
 	cvta.to.global.u64 %y, %y;
-	ld.param.u32 %n, [_ZN4kgen6my_app3gpu5saxpyE_param_3];
+	ld.param.u32 %n, [_ZN7kernite6my_app3gpu5saxpyE_param_3];
 	mov.u32 %block, %ctaid.x;
 	mov.u32 %size, %ntid.x;
 	mov.u32 %thread, %tid.x;
@@ -42,9 +42,9 @@
 	ret;
 }
 
-.visible .entry _ZN4kgen6my_app3gpu10block_sumsILj256EEE(
-	.param .u64 _ZN4kgen6my_app3gpu10block_sumsILj256EEE_param_0,
-	.param .u64 _ZN4kgen6my_app3gpu10block_sumsILj256EEE_param_1
+.visible .entry _ZN7kernite6my_app3gpu10block_sumsILj256EEE(
+	.param .u64 _ZN7kernite6my_app3gpu10block_sumsILj256EEE_param_0,
+	.param .u64 _ZN7kernite6my_app3gpu10block_sumsILj256EEE_param_1
 )
 {
 	.reg .pred %lower;
@@ -53,9 +53,9 @@
 	.reg .u64 %x, %sums, %at;
 	.shared .align 16 .b8 tile[1024];
 
-	ld.param.u64 %x, [_ZN4kgen6my_app3gpu10block_sumsILj256EEE_param_0];
+	ld.param.u64 %x, [_ZN7kernite6my_app3gpu10block_sumsILj256EEE_param_0];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u64 %sums, [_ZN4kgen6my_app3gpu10block_sumsILj256EEE_param_1];
+	ld.param.u64 %sums, [_ZN7kernite6my_app3gpu10block_sumsILj256EEE_param_1];
 	cvta.to.global.u64 %sums, %sums;
 	mov.u32 %t, %tid.x;
 	mov.u32 %b, %ctaid.x;
@@ -111,9 +111,9 @@
 	ret;
 }
 
-.visible .entry _ZN4kgen6my_app3gpu10block_sumsILj1024EEE(
-	.param .u64 _ZN4kgen6my_app3gpu10block_sumsILj1024EEE_param_0,
-	.param .u64 _ZN4kgen6my_app3gpu10block_sumsILj1024EEE_param_1
+.visible .entry _ZN7kernite6my_app3gpu10block_sumsILj1024EEE(
+	.param .u64 _ZN7kernite6my_app3gpu10block_sumsILj1024EEE_param_0,
+	.param .u64 _ZN7kernite6my_app3gpu10block_sumsILj1024EEE_param_1
 )
 {
 	.reg .pred %lower;
@@ -122,9 +122,9 @@
 	.reg .u64 %x, %sums, %at;
 	.shared .align 16 .b8 tile[4096];
 
-	ld.param.u64 %x, [_ZN4kgen6my_app3gpu10block_sumsILj1024EEE_param_0];
+	ld.param.u64 %x, [_ZN7kernite6my_app3gpu10block_sumsILj1024EEE_param_0];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u64 %sums, [_ZN4kgen6my_app3gpu10block_sumsILj1024EEE_param_1];
+	ld.param.u64 %sums, [_ZN7kernite6my_app3gpu10block_sumsILj1024EEE_param_1];
 	cvta.to.global.u64 %sums, %sums;
 	mov.u32 %t, %tid.x;
 	mov.u32 %b, %ctaid.x;
@@ -190,15 +190,15 @@
 	ret;
 }
 
-.visible .entry _ZN4kgen6my_app3gpu12reverse_runsE(
-	.param .u64 _ZN4kgen6my_app3gpu12reverse_runsE_param_0
+.visible .entry _ZN7kernite6my_app3gpu12reverse_runsE(
+	.param .u64 _ZN7kernite6my_app3gpu12reverse_runsE_param_0
 )
 {
 	.reg .u32 %t, %n, %i, %j, %base, %block, %size, %thread;
 	.reg .f32 %v;
 	.reg .u64 %x, %at;
 
-	ld.param.u64 %x, [_ZN4kgen6my_app3gpu12reverse_runsE_param_0];
+	ld.param.u64 %x, [_ZN7kernite6my_app3gpu12reverse_runsE_param_0];
 	cvta.to.global.u64 %x, %x;
 	mov.u32 %t, %tid.x;
 	mov.u32 %n, %ntid.x;
@@ -208,7 +208,7 @@
 	mad.lo.u32 %i, %block, %size, %thread;
 	mad.wide.u32 %at, %i, 4, %x;
 	ld.global.f32 %v, [%at];
-	mov.u32 %base, _ZZN4kgen6my_app3gpu12reverse_runsEE3run;
+	mov.u32 %base, _ZZN7kernite6my_app3gpu12reverse_runsEE3run;
 	mad.lo.u32 %j, %t, 4, %base;
 	st.shared.f32 [%j], %v;
 	bar.sync 0;
@@ -220,10 +220,10 @@
 	ret;
 }
 
-.visible .entry _ZN4kgen6my_app3gpu9scale_f16E(
-	.param .u64 _ZN4kgen6my_app3gpu9scale_f16E_param_0,
-	.param .b16 _ZN4kgen6my_app3gpu9scale_f16E_param_1,
-	.param .u32 _ZN4kgen6my_app3gpu9scale_f16E_param_2
+.visible .entry _ZN7kernite6my_app3gpu9scale_f16E(
+	.param .u64 _ZN7kernite6my_app3gpu9scale_f16E_param_0,
+	.param .b16 _ZN7kernite6my_app3gpu9scale_f16E_param_1,
+	.param .u32 _ZN7kernite6my_app3gpu9scale_f16E_param_2
 )
 {
 	.reg .pred %past;
@@ -231,10 +231,10 @@
 	.reg .u32 %n, %i, %block, %size, %thread;
 	.reg .u64 %x, %at;
 
-	ld.param.u64 %x, [_ZN4kgen6my_app3gpu9scale_f16E_param_0];
+	ld.param.u64 %x, [_ZN7kernite6my_app3gpu9scale_f16E_param_0];
 	cvta.to.global.u64 %x, %x;
-	ld.param.b16 %a, [_ZN4kgen6my_app3gpu9scale_f16E_param_1];
-	ld.param.u32 %n, [_ZN4kgen6my_app3gpu9scale_f16E_param_2];
+	ld.param.b16 %a, [_ZN7kernite6my_app3gpu9scale_f16E_param_1];
+	ld.param.u32 %n, [_ZN7kernite6my_app3gpu9scale_f16E_param_2];
 	mov.u32 %block, %ctaid.x;
 	mov.u32 %size, %ntid.x;
 	mov.u32 %thread, %tid.x;
@@ -248,29 +248,29 @@
 	ret;
 }
 
-.func (.param .u32 _ZN4kgen6my_app3gpu3gcdE_retval) _ZN4kgen6my_app3gpu3gcdE(
-	.param .u32 _ZN4kgen6my_app3gpu3gcdE_param_0,
-	.param .u32 _ZN4kgen6my_app3gpu3gcdE_param_1
+.func (.param .u32 _ZN7kernite6my_app3gpu3gcdE_retval) _ZN7kernite6my_app3gpu3gcdE(
+	.param .u32 _ZN7kernite6my_app3gpu3gcdE_param_0,
+	.param .u32 _ZN7kernite6my_app3gpu3gcdE_param_1
 );
 
-.visible .entry _ZN4kgen6my_app3gpu4gcdsE(
-	.param .u64 _ZN4kgen6my_app3gpu4gcdsE_param_0,
-	.param .u64 _ZN4kgen6my_app3gpu4gcdsE_param_1,
-	.param .u64 _ZN4kgen6my_app3gpu4gcdsE_param_2,
-	.param .u32 _ZN4kgen6my_app3gpu4gcdsE_param_3
+.visible .entry _ZN7kernite6my_app3gpu4gcdsE(
+	.param .u64 _ZN7kernite6my_app3gpu4gcdsE_param_0,
+	.param .u64 _ZN7kernite6my_app3gpu4gcdsE_param_1,
+	.param .u64 _ZN7kernite6my_app3gpu4gcdsE_param_2,
+	.param .u32 _ZN7kernite6my_app3gpu4gcdsE_param_3
 )
 {
 	.reg .pred %past;
 	.reg .u32 %n, %i, %block, %size, %thread, %x, %y, %d;
 	.reg .u64 %a, %b, %g, %at_a, %at_b, %at_g;
 
-	ld.param.u64 %a, [_ZN4kgen6my_app3gpu4gcdsE_param_0];
+	ld.param.u64 %a, [_ZN7kernite6my_app3gpu4gcdsE_param_0];
 	cvta.to.global.u64 %a, %a;
-	ld.param.u64 %b, [_ZN4kgen6my_app3gpu4gcdsE_param_1];
+	ld.param.u64 %b, [_ZN7kernite6my_app3gpu4gcdsE_param_1];
 	cvta.to.global.u64 %b, %b;
-	ld.param.u64 %g, [_ZN4kgen6my_app3gpu4gcdsE_param_2];
+	ld.param.u64 %g, [_ZN7kernite6my_app3gpu4gcdsE_param_2];
 	cvta.to.global.u64 %g, %g;
-	ld.param.u32 %n, [_ZN4kgen6my_app3gpu4gcdsE_param_3];
+	ld.param.u32 %n, [_ZN7kernite6my_app3gpu4gcdsE_param_3];
 	mov.u32 %block, %ctaid.x;
 	mov.u32 %size, %ntid.x;
 	mov.u32 %thread, %tid.x;
@@ -282,42 +282,42 @@
 	mad.wide.u32 %at_g, %i, 4, %g;
 	ld.global.u32 %x, [%at_a];
 	ld.global.u32 %y, [%at_b];
-	call (%d), _ZN4kgen6my_app3gpu3gcdE, (%x, %y);
+	call (%d), _ZN7kernite6my_app3gpu3gcdE, (%x, %y);
 	st.global.u32 [%at_g], %d;
 	ret;
 }
 
-.func (.param .u32 _ZN4kgen6my_app3gpu3gcdE_retval) _ZN4kgen6my_app3gpu3gcdE(
-	.param .u32 _ZN4kgen6my_app3gpu3gcdE_param_0,
-	.param .u32 _ZN4kgen6my_app3gpu3gcdE_param_1
+.func (.param .u32 _ZN7kernite6my_app3gpu3gcdE_retval) _ZN7kernite6my_app3gpu3gcdE(
+	.param .u32 _ZN7kernite6my_app3gpu3gcdE_param_0,
+	.param .u32 _ZN7kernite6my_app3gpu3gcdE_param_1
 )
 {
 	.reg .pred %done;
 	.reg .u32 %a, %b, %r, %g;
 
-	ld.param.u32 %a, [_ZN4kgen6my_app3gpu3gcdE_param_0];
-	ld.param.u32 %b, [_ZN4kgen6my_app3gpu3gcdE_param_1];
+	ld.param.u32 %a, [_ZN7kernite6my_app3gpu3gcdE_param_0];
+	ld.param.u32 %b, [_ZN7kernite6my_app3gpu3gcdE_param_1];
 	setp.eq.u32 %done, %b, 0;
-	@%done st.param.u32 [_ZN4kgen6my_app3gpu3gcdE_retval], %a;
+	@%done st.param.u32 [_ZN7kernite6my_app3gpu3gcdE_retval], %a;
 	@%done ret;
 	rem.u32 %r, %a, %b;
-	call (%g), _ZN4kgen6my_app3gpu3gcdE, (%b, %r);
-	st.param.u32 [_ZN4kgen6my_app3gpu3gcdE_retval], %g;
+	call (%g), _ZN7kernite6my_app3gpu3gcdE, (%b, %r);
+	st.param.u32 [_ZN7kernite6my_app3gpu3gcdE_retval], %g;
 	ret;
 }
 
-.visible .entry _ZN4kgen6my_app3gpu9histogramE(
-	.param .u64 _ZN4kgen6my_app3gpu9histogramE_param_0,
-	.param .u32 _ZN4kgen6my_app3gpu9histogramE_param_1
+.visible .entry _ZN7kernite6my_app3gpu9histogramE(
+	.param .u64 _ZN7kernite6my_app3gpu9histogramE_param_0,
+	.param .u32 _ZN7kernite6my_app3gpu9histogramE_param_1
 )
 {
 	.reg .pred %past;
 	.reg .u32 %n, %i, %block, %size, %thread, %bin;
 	.reg .u64 %x, %at;
 
-	ld.param.u64 %x, [_ZN4kgen6my_app3gpu9histogramE_param_0];
+	ld.param.u64 %x, [_ZN7kernite6my_app3gpu9histogramE_param_0];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u32 %n, [_ZN4kgen6my_app3gpu9histogramE_param_1];
+	ld.param.u32 %n, [_ZN7kernite6my_app3gpu9histogramE_param_1];
 	mov.u32 %block, %ctaid.x;
 	mov.u32 %size, %ntid.x;
 	mov.u32 %thread, %tid.x;
@@ -327,15 +327,15 @@
 	mad.wide.u32 %at, %i, 4, %x;
 	ld.global.u32 %bin, [%at];
 	shr.u32 %bin, %bin, 28;
-	mov.u64 %at, _ZN4kgen6my_app3gpu6COUNTSE;
+	mov.u64 %at, _ZN7kernite6my_app3gpu6COUNTSE;
 	mad.wide.u32 %at, %bin, 4, %at;
 	red.global.add.u32 [%at], 1;
 	ret;
 }
 
-.visible .entry _ZN4kgen6my_app3gpu5weighE(
-	.param .u64 _ZN4kgen6my_app3gpu5weighE_param_0,
-	.param .u32 _ZN4kgen6my_app3gpu5weighE_param_1
+.visible .entry _ZN7kernite6my_app3gpu5weighE(
+	.param .u64 _ZN7kernite6my_app3gpu5weighE_param_0,
+	.param .u32 _ZN7kernite6my_app3gpu5weighE_param_1
 )
 {
 	.reg .pred %past;
@@ -343,9 +343,9 @@
 	.reg .f32 %v, %w;
 	.reg .u64 %x, %at;
 
-	ld.param.u64 %x, [_ZN4kgen6my_app3gpu5weighE_param_0];
+	ld.param.u64 %x, [_ZN7kernite6my_app3gpu5weighE_param_0];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u32 %n, [_ZN4kgen6my_app3gpu5weighE_param_1];
+	ld.param.u32 %n, [_ZN7kernite6my_app3gpu5weighE_param_1];
 	mov.u32 %block, %ctaid.x;
 	mov.u32 %size, %ntid.x;
 	mov.u32 %thread, %tid.x;
@@ -355,7 +355,7 @@
 	mad.wide.u32 %at, %i, 4, %x;
 	ld.global.f32 %v, [%at];
 	and.b32 %weight, %i, 3;
-	mov.u32 %table, _ZN4kgen6my_app3gpu7WEIGHTSE;
+	mov.u32 %table, _ZN7kernite6my_app3gpu7WEIGHTSE;
 	mad.lo.u32 %weight, %weight, 4, %table;
 	ld.const.f32 %w, [%weight];
 	mul.rn.f32 %v, %v, %w;

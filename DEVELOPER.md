@@ -62,14 +62,14 @@ Change files only in your worktree. Never touch another worktree, the main check
 - Build and test with `CARGO_BUILD_JOBS=2`, and only what you need: `cargo check -p <crate>`,
   `cargo test -p <crate> [name]`, `cargo clippy -p <crate> --all-targets -- -D warnings`. Many
   sessions share twelve CPUs and 29 GB.
-- Do not run `./make.py check`, the tests of `kgen-cuda`, or the examples' tests yourself: they
+- Do not run `./make.py check`, the tests of `kernite-cuda`, or the examples' tests yourself: they
   use the GPU, which has 4 GB, and the gate runs them a few at a time.
 - Keep to your task's text and design.md's changes to it. If the text is wrong about the code, do
   what the design means and keep every rule below. Write down what you did differently, and why,
   in your commit message and your hand-in. If it cannot be done as designed, say so: do not fake
   it.
 - The rules every task keeps, which the gate checks:
-  - the 45 listings stay byte for byte, and every message kgen gives stays byte for byte, at its
+  - the 45 listings stay byte for byte, and every message kernite gives stays byte for byte, at its
     position;
   - every test keeps its name. Tests may move, and their code may follow a new API. But every
     string literal of the start's test code stays in test code: a file in a `tests` directory,
@@ -78,7 +78,7 @@ Change files only in your worktree. Never touch another worktree, the main check
     crates in `.kanban/notes/expand-fixtures/`, stays token for token, but for changes a review
     approved;
   - no `#[ignore]`, no package from outside, no `HashMap` or `HashSet`, and no `unsafe` outside
-    kgen-cuda;
+    kernite-cuda;
   - docs on every public item, and every crate on `[lints] workspace = true`;
   - tests use fakes or the real thing, never mocks.
 - design.md §4 adds these rules:

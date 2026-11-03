@@ -16,7 +16,7 @@ use std::sync::atomic::{
 /// the module's memory it names while it runs, so what the host reads after a call is what the
 /// kernel left.
 ///
-/// `#[kgen_macros::kernels]` makes one of each static of a module of x86 kernels, as
+/// `#[kernite_macros::kernels]` makes one of each static of a module of x86 kernels, as
 /// `static COUNTS: global<[u32; 16]>;` declares it.
 #[repr(C)]
 pub struct Global<T: Element, const N: usize, const A: usize = 1>

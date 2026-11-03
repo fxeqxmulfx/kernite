@@ -1,13 +1,13 @@
 //! Kernels in the language, compiled for x86: what they come to, and what the errors say; every
-//! form of every instruction kgen knows, which `llvm-mc` assembles and GNU as takes on a machine
+//! form of every instruction kernite knows, which `llvm-mc` assembles and GNU as takes on a machine
 //! of its feature; and what the builder refuses.
 
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 
-use kgen_x86::forms::{self, Form, Kind};
-use kgen_x86::{Asm, Feature};
+use kernite_x86::forms::{self, Form, Kind};
+use kernite_x86::{Asm, Feature};
 
 /// The kernels of `examples/my-app`, and the same dot product with sixteen accumulators.
 const KERNELS: &str = r#"
@@ -75,13 +75,13 @@ const KERNELS: &str = r#"
     }
 "#;
 
-/// `tests/builder` holds the listings `kgen-x86`'s builder made of these kernels, before the
+/// `tests/builder` holds the listings `kernite-x86`'s builder made of these kernels, before the
 /// language: what the language writes must compile to the same instructions in the same registers.
 #[test]
 fn the_examples_kernels_come_out_as_the_builder_wrote_them() {
     let snapshots = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/builder");
     for name in ["sum8", "dot_unroll1", "dot_unroll4"] {
-        let listing = kgen::x86_str(KERNELS, name).unwrap();
+        let listing = kernite::x86_str(KERNELS, name).unwrap();
         let want = std::fs::read_to_string(snapshots.join(format!("{name}.s"))).unwrap();
         assert_eq!(listing.text(), want, "{name}");
     }
@@ -97,7 +97,7 @@ fn a_kernels_assembly_changes_only_when_it_does() {
         "static S: global<u64>;\nconst STEP: u64 = 3;\nconst FAR: u64 = 9;\nfn far(g: gpr) {{\nadd(g, FAR);\n}}\n\
          unsafe extern \"sysv64\" fn j(x: *mut u64) {{\nlet g: gpr;\nmov(g, [x]);\nfar(g);\nmov([x], g);\n}}\n{k}"
     );
-    let listing = |src: &str| kgen::x86_str(src, "k").unwrap().text();
+    let listing = |src: &str| kernite::x86_str(src, "k").unwrap().text();
     assert_eq!(listing(&alone), listing(&alone));
     assert_eq!(listing(&among), listing(&alone));
 }
@@ -106,7 +106,7 @@ fn a_kernels_assembly_changes_only_when_it_does() {
 /// that cost least to keep on the stack, of those that hold one through the loop, spill.
 #[test]
 fn sixteen_accumulators_and_a_load_spill_two_and_the_listing_says_where() {
-    let text = kgen::x86_str(KERNELS, "dot_unroll16").unwrap().text();
+    let text = kernite::x86_str(KERNELS, "dot_unroll16").unwrap().text();
     let header = "# dot_unroll16(gpr, gpr, gpr) -> vec
 # needs: avx, fma
 # frame: 64 bytes aligned to 32, saves []
@@ -134,7 +134,7 @@ fn up_to_fifteen_accumulators_fit_without_spilling() {
         );
     }
     for k in 1..=15 {
-        let listing = kgen::x86_str(&src, &format!("dot{k}")).unwrap_or_else(|e| panic!("{k} accumulators: {e}"));
+        let listing = kernite::x86_str(&src, &format!("dot{k}")).unwrap_or_else(|e| panic!("{k} accumulators: {e}"));
         assert!(listing.frame.slots.is_empty(), "{k} accumulators:\n{}", listing.text());
     }
 }
@@ -154,7 +154,7 @@ fn a_general_register_spills_with_mov_a_parameter_from_where_it_arrives() {
         jnz(top);
         for k in 0..13 { mov([p + 8 * k], g[k]); }
     }";
-    let text = kgen::x86_str(src, "k").unwrap().text();
+    let text = kernite::x86_str(src, "k").unwrap().text();
     let parts = [
         "# frame: 16 bytes aligned to 8, saves [rbx, r12, r13, r14, r15]
 # n, spilled: 8 bytes at rsp
@@ -179,7 +179,7 @@ fn a_general_register_spills_with_mov_a_parameter_from_where_it_arrives() {
 /// The kernel `k` around `body`, compiled, or the error.
 fn compile(params: &str, body: &str) -> Result<String, String> {
     let src = format!("unsafe extern \"sysv64\" fn k({params}) {{\n{body}\n}}\n");
-    kgen::x86_str(&src, "k").map(|l| l.code().collect::<Vec<_>>().join("\n"))
+    kernite::x86_str(&src, "k").map(|l| l.code().collect::<Vec<_>>().join("\n"))
 }
 
 #[test]
@@ -251,7 +251,7 @@ fn the_word_before_the_brackets_is_checked_wherever_it_is_given() {
     ];
     for (body, want) in cases {
         let src = format!("static S: global<u64>;\nunsafe extern \"sysv64\" fn k(x: *const u32) {{\n{body}\n}}\n");
-        assert_eq!(kgen::x86_str(&src, "k").unwrap_err(), want, "{body}");
+        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), want, "{body}");
     }
 }
 
@@ -292,7 +292,7 @@ fn a_gather_reads_memory_at_a_vector_of_indices() {
         vpgatherdq(v, [x + i.xmm * 8], m);
         vgatherqps(v.xmm, [x + i * 4], m.xmm);
     }";
-    let listing = kgen::x86_str(src, "k").unwrap();
+    let listing = kernite::x86_str(src, "k").unwrap();
     assert_eq!(listing.features, [Feature::Avx, Feature::Avx2]);
     let code: Vec<&str> = listing.code().collect();
     let want = [
@@ -309,7 +309,7 @@ fn a_gather_reads_memory_at_a_vector_of_indices() {
 }
 
 /// A gather takes its result, its indices and its mask in three registers, as x86 faults
-/// otherwise: kgen keeps them apart where nothing reads the indices or the mask again, and
+/// otherwise: kernite keeps them apart where nothing reads the indices or the mask again, and
 /// refuses a variable that is two of them, here the result and the mask.
 #[test]
 fn a_gather_takes_its_result_indices_and_mask_in_three_registers() {
@@ -352,7 +352,7 @@ fn a_kernel_that_loads_mxcsr_gives_the_callers_back() {
     pop rbp
     ret
 ";
-    assert_eq!(kgen::x86_str(src, "k").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
 }
 
 /// A kernel that loads MXCSR twice and returns in two places stores the caller's once, before
@@ -385,7 +385,7 @@ fn a_kernel_that_loads_mxcsr_loads_the_callers_back_before_each_return() {
     pop rbp
     ret
 ";
-    assert_eq!(kgen::x86_str(src, "k").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
 }
 
 #[test]
@@ -397,7 +397,7 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ("let v: ymm; vmovups(v, [x + x * 3]);", "2:24: x86 wants a base beside a scaled index"),
         ("let i: gpr; let v: ymm; vmovups(v, [x + i * 3]);", "2:36: x86 scales an index by 1, 2, 4 or 8, not 3"),
         ("let v: ymm; vaddps(v, v, 1.5);", "2:26: x86 takes floats from memory: `[1.5]`"),
-        ("vfrobps(x);", "2:1: x86 has no instruction `vfrobps` that kgen knows"),
+        ("vfrobps(x);", "2:1: x86 has no instruction `vfrobps` that kernite knows"),
         ("let v: ymm; vaddps(v, v, w);", "2:26: `w` is not defined"),
         ("let v: zmm;", "2:8: x86 variables are `gpr`, `ymm`, `xmm` and stack memory, `local<..>`; not `zmm`"),
         ("let v: ymm; vaddps(v, v, v);", "2:5: `v` is read before anything writes it"),
@@ -478,16 +478,16 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ),
         ("jmp(x);", "2:5: `jmp` wants a label; this is a gpr"),
         ("let g: gpr; add(g, top); label(top);", "2:20: a label is for a jump"),
-        ("rdtscp();", "2:1: x86 has no instruction `rdtscp` that kgen knows"),
-        ("let v: ymm; addps(v.xmm, v.xmm);", "2:13: kgen writes `addps` as AVX does: `vaddps`"),
-        ("vzeroupper();", "2:1: kgen does not yet write `vzeroupper`, which clears the upper half of every vector"),
-        ("pcmpestri(x, x, 0);", "2:1: kgen writes `pcmpestri` as AVX does: `vpcmpestri`"),
-        ("mul(x);", "2:1: kgen does not yet write `mul`, which multiplies `rax` into `rdx:rax`"),
-        ("imul(x);", "2:1: kgen does not yet write `imul` of 1 operand, which multiplies `rax` into `rdx:rax`"),
-        ("shld(x, x);", "2:1: kgen does not yet write `shld` of 2 operands, which shifts by `cl`"),
+        ("rdtscp();", "2:1: x86 has no instruction `rdtscp` that kernite knows"),
+        ("let v: ymm; addps(v.xmm, v.xmm);", "2:13: kernite writes `addps` as AVX does: `vaddps`"),
+        ("vzeroupper();", "2:1: kernite does not yet write `vzeroupper`, which clears the upper half of every vector"),
+        ("pcmpestri(x, x, 0);", "2:1: kernite writes `pcmpestri` as AVX does: `vpcmpestri`"),
+        ("mul(x);", "2:1: kernite does not yet write `mul`, which multiplies `rax` into `rdx:rax`"),
+        ("imul(x);", "2:1: kernite does not yet write `imul` of 1 operand, which multiplies `rax` into `rdx:rax`"),
+        ("shld(x, x);", "2:1: kernite does not yet write `shld` of 2 operands, which shifts by `cl`"),
         (
             "shl(x, cl);",
-            "2:8: kgen does not yet write `shl` by `cl`, a register of its own: shift by a number, or by a gpr with \
+            "2:8: kernite does not yet write `shl` by `cl`, a register of its own: shift by a number, or by a gpr with \
              `shlx`, `shrx` or `sarx`",
         ),
     ];
@@ -561,7 +561,7 @@ fn a_kernel_takes_what_sysv_passes_in_registers() {
     assert_eq!(code, "vmovss dword ptr [rdi], xmm1\nvaddss xmm1, xmm0, xmm1\nvzeroupper\nret");
 }
 
-/// Rust never sees a kernel's body run, so kgen says which of the module's constants it read:
+/// Rust never sees a kernel's body run, so kernite says which of the module's constants it read:
 /// what the macro marks as used, so that only the constants nothing reads are dead code.
 #[test]
 fn a_kernel_names_the_constants_it_reads() {
@@ -596,8 +596,8 @@ fn a_kernel_names_the_constants_it_reads() {
             add(x, SPARE);
         }
     "#;
-    let module = kgen::lang::parse(src).unwrap();
-    let reads = |name| kgen::x86(&module, kgen::function(&module, name).unwrap(), &[]).unwrap().consts;
+    let module = kernite::lang::parse(src).unwrap();
+    let reads = |name| kernite::x86(&module, kernite::function(&module, name).unwrap(), &[]).unwrap().consts;
     // `STORE` as a helper's value and `ADD` in the `if` that chooses, in the module's order;
     // not `OFFSET`, in the branch not taken, nor `SPARE`, in a helper not called.
     assert_eq!(reads("stores"), ["ADD", "STORE"]);
@@ -659,7 +659,7 @@ const STATICS: &str = r#"
 /// macro to pass by `sym`.
 #[test]
 fn a_static_is_reached_at_a_displacement_from_rip() {
-    let count = kgen::x86_str(STATICS, "count").unwrap();
+    let count = kernite::x86_str(STATICS, "count").unwrap();
     let want = "# count(gpr, gpr) -> ()
 # frame: 0 bytes aligned to 0, saves []
 # x=rdi n=rsi p=rcx v=rdx c=rax
@@ -682,7 +682,7 @@ fn a_static_is_reached_at_a_displacement_from_rip() {
 ";
     assert_eq!(count.text(), want);
     assert_eq!(count.statics, ["SEEN", "COUNTS"]);
-    let weigh = kgen::x86_str(STATICS, "weigh").unwrap();
+    let weigh = kernite::x86_str(STATICS, "weigh").unwrap();
     let want = "# weigh(gpr) -> ()
 # needs: avx
 # frame: 0 bytes aligned to 0, saves []
@@ -707,9 +707,9 @@ fn a_static_is_reached_at_a_displacement_from_rip() {
 /// what it says, its bytes the lowest first, or zeros; and the constants it read.
 #[test]
 fn a_static_is_rusts_numbers_holding_what_it_says() {
-    let module = kgen::lang::parse(STATICS).unwrap();
-    let statics: Vec<_> = kgen::x86_statics(&module).into_iter().map(Result::unwrap).collect();
-    let shape = |s: &kgen_x86::lang::Static| (s.name.clone(), s.elem, s.size, s.len, s.align, s.constant);
+    let module = kernite::lang::parse(STATICS).unwrap();
+    let statics: Vec<_> = kernite::x86_statics(&module).into_iter().map(Result::unwrap).collect();
+    let shape = |s: &kernite_x86::lang::Static| (s.name.clone(), s.elem, s.size, s.len, s.align, s.constant);
     let shapes: Vec<_> = statics.iter().map(|s| shape(&s.code)).collect();
     assert_eq!(
         shapes,
@@ -738,17 +738,17 @@ fn a_helper_takes_a_static_of_its_type() {
              {{\nlet t: gpr;\nmov(t.r32, [c + 8]);\ninc(t);\nmov([c + 8], t.r32);\n}}\n"
         )
     };
-    let code = kgen::x86_str(&src("global<[u32; 16]>"), "k").unwrap();
+    let code = kernite::x86_str(&src("global<[u32; 16]>"), "k").unwrap();
     assert!(code.code().any(|l| l == "mov dword ptr [rip + {C} + 8], eax"), "{}", code.text());
-    let e = kgen::x86_str(&src("global<[u32; 8]>"), "k").unwrap_err();
+    let e = kernite::x86_str(&src("global<[u32; 8]>"), "k").unwrap_err();
     assert_eq!(e, "3:6: `c`: `C` is memory, `global<[u32; 16]>`; it is no `global<[u32; 8]>`");
-    let e = kgen::x86_str(&src("gpr"), "k").unwrap_err();
+    let e = kernite::x86_str(&src("gpr"), "k").unwrap_err();
     assert_eq!(e, "3:6: `c`: `C` is memory, `global<[u32; 16]>`; it is no `gpr`");
     let src = "unsafe extern \"sysv64\" fn k(x: *const f32) {\nload(x);\n}\nfn load(b: constant<u64>) {}\n";
-    assert_eq!(kgen::x86_str(src, "k").unwrap_err(), "2:6: `b`: a gpr is no memory, `constant<u64>`");
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), "2:6: `b`: a gpr is no memory, `constant<u64>`");
 }
 
-/// What kgen can check of an address in a static, it does, as it does for stack memory; and
+/// What kernite can check of an address in a static, it does, as it does for stack memory; and
 /// it refuses a write to constant memory, and an index beside a static's name, which x86 has
 /// no address for.
 #[test]
@@ -820,7 +820,7 @@ fn a_static_is_reached_within_it() {
     let statics = "static C: global<[u32; 16]>;\nstatic W: constant<[f32; 16], 32> = [1.0; 16];\n";
     for (body, want) in cases {
         let src = format!("{statics}unsafe extern \"sysv64\" fn k(x: *const f32) {{\n{body}\n}}\n");
-        assert_eq!(kgen::x86_str(&src, "k").unwrap_err(), want, "{body}");
+        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), want, "{body}");
     }
     // As far as one past the end for `lea`, which reaches nothing, of constant memory as well;
     // and an instruction that reads and writes memory of the module's, which is no constant.
@@ -828,7 +828,7 @@ fn a_static_is_reached_within_it() {
         "{statics}unsafe extern \"sysv64\" fn k() {{\nlet g: gpr;\nlea(g, [C + 64]);\nlea(g, [W]);\nadd(dword[C + 8], \
          1);\n}}\n"
     );
-    let code = kgen::x86_str(&src, "k").unwrap();
+    let code = kernite::x86_str(&src, "k").unwrap();
     let want = ["lea rax, [rip + {C} + 64]", "lea rax, [rip + {W}]", "add dword ptr [rip + {C} + 8], 1", "ret"];
     assert_eq!(code.code().collect::<Vec<_>>(), want);
 }
@@ -918,13 +918,13 @@ fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() {
     ];
     let k = "unsafe extern \"sysv64\" fn k(x: *mut u32) {}";
     for (items, want) in cases {
-        assert_eq!(kgen::x86_str(&format!("{items}\n{k}"), "k").unwrap_err(), want, "{items}");
+        assert_eq!(kernite::x86_str(&format!("{items}\n{k}"), "k").unwrap_err(), want, "{items}");
     }
     // The kernel itself says that it names one that does not compile.
     let src =
         "static A: global<[u32; 2]> = [1];\nunsafe extern \"sysv64\" fn j() {\nlet g: gpr;\nmov(g.r32, [A]);\n}\n";
-    let module = kgen::lang::parse(src).unwrap();
-    let e = kgen::x86(&module, kgen::function(&module, "j").unwrap(), &[]).unwrap_err();
+    let module = kernite::lang::parse(src).unwrap();
+    let e = kernite::x86(&module, kernite::function(&module, "j").unwrap(), &[]).unwrap_err();
     assert_eq!(e.at(src), "4:13: `A` does not compile, so no kernel names it");
     // Every number of each type, and a name like a listing's that is none of its.
     for items in [
@@ -936,7 +936,7 @@ fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() {
         "static A: global<[u8; 2147483647]>;",
         "static c: global<u32>; static cf1: global<u32>; static c0x: global<u32>;",
     ] {
-        kgen::x86_str(&format!("{items}\n{k}"), "k").unwrap();
+        kernite::x86_str(&format!("{items}\n{k}"), "k").unwrap();
     }
 }
 
@@ -945,7 +945,7 @@ fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() {
 /// which its first static says, whatever comes before it.
 #[test]
 fn a_static_is_its_kernels_memory() {
-    use kgen::Owner::{Gpu, Process};
+    use kernite::Owner::{Gpu, Process};
     let x86 = "unsafe extern \"sysv64\" fn k(x: u64) -> u64 { ret(x); }";
     let gpu = "unsafe extern \"ptx-kernel\" fn g(x: *mut u32) { st.global.u32([x], 1); }";
     let func = "extern \"ptx-func\" fn f(x: u32) -> u32 { ret(x); }";
@@ -954,7 +954,7 @@ fn a_static_is_its_kernels_memory() {
     let (s, t) = ("static S: global<u32>;", "static T: constant<u32> = 1;");
     let whose = |items: &[&str]| {
         let src = items.join("\n");
-        kgen::owner(&kgen::lang::parse(&src).unwrap()).map_err(|e| e.at(&src))
+        kernite::owner(&kernite::lang::parse(&src).unwrap()).map_err(|e| e.at(&src))
     };
     let split = "a static is memory of the module's kernels: the GPU's, for PTX kernels, or the process's, for x86 \
                  ones; and this module has both, so it is two modules, one of each kind of kernel and the statics they \
@@ -1059,13 +1059,13 @@ fn a_cooperative_kernel_waits_for_its_grid_at_a_barrier_of_its_own() {
     mov qword ptr [rdi + rax*8], rcx
     ret
 ";
-    assert_eq!(kgen::x86_str(src, "k").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
 }
 
 /// The cooperative kernel `k` around `body`, compiled, or the error.
 fn cooperative(params: &str, body: &str) -> Result<String, String> {
     let src = format!("#[cooperative]\nunsafe extern \"sysv64\" fn k({params}) {{\n{body}\n}}\n");
-    kgen::x86_str(&src, "k").map(|l| l.code().collect::<Vec<_>>().join("\n"))
+    kernite::x86_str(&src, "k").map(|l| l.code().collect::<Vec<_>>().join("\n"))
 }
 
 /// What a thread may do with the grid: read where it is, which is memory, and wait for every
@@ -1085,12 +1085,12 @@ fn the_grid_is_a_cooperative_kernels_to_read_and_wait_for() {
             "let t: gpr; lea(t, grid.thread);",
             "3:25: `grid.thread` is read, as in `mov(t, grid.thread)`; `lea` takes the address of the kernel's memory",
         ),
-        ("grid.wait();", "3:6: kgen's barrier for the grid is `grid.sync()`; not `grid.wait`"),
-        ("grid();", "3:1: kgen's barrier for the grid is `grid.sync()`; not `grid`"),
+        ("grid.wait();", "3:6: kernite's barrier for the grid is `grid.sync()`; not `grid.wait`"),
+        ("grid();", "3:1: kernite's barrier for the grid is `grid.sync()`; not `grid`"),
         ("grid.sync(x);", "3:6: `grid.sync` takes no operands, not 1"),
         (
             "let g: gpr; zero(g); if g { grid.sync(); }",
-            "3:34: `grid.sync()` is for every thread of the grid, under no `if`: kgen writes it with no guard, and a \
+            "3:34: `grid.sync()` is for every thread of the grid, under no `if`: kernite writes it with no guard, and a \
              kernel that wants it under a condition the same in every thread jumps around it",
         ),
     ];
@@ -1121,7 +1121,7 @@ fn the_grid_is_a_cooperative_kernels_to_read_and_wait_for() {
     );
     let src = "#[cooperative]\nunsafe extern \"sysv64\" fn k() -> f32 {}\n";
     assert_eq!(
-        kgen::x86_str(src, "k").unwrap_err(),
+        kernite::x86_str(src, "k").unwrap_err(),
         "2:34: a cooperative kernel's threads return nothing: they write what they compute to memory"
     );
 }
@@ -1170,10 +1170,10 @@ fn stack_memory_is_part_of_the_frame() {
     vzeroupper
     ret
 ";
-    assert_eq!(kgen::x86_str(src, "k").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
 }
 
-/// Until written, stack memory holds whatever was there: kgen clears none of it, and takes a
+/// Until written, stack memory holds whatever was there: kernite clears none of it, and takes a
 /// read of it before any write, as it does not of a variable.
 #[test]
 fn stack_memory_holds_whatever_was_there_until_written() {
@@ -1190,7 +1190,7 @@ fn stack_memory_holds_whatever_was_there_until_written() {
     pop rbp
     ret
 ";
-    assert_eq!(kgen::x86_str(src, "k").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
 }
 
 /// The stack pointer moves no more than a page below memory the kernel has touched, as Rust's
@@ -1236,7 +1236,7 @@ fn a_frame_past_what_an_address_reaches_is_refused() {
         "#[instances(2147483584, 2147483585)]\nunsafe extern \"sysv64\" fn k<const N: usize>(x: *mut f32) {{\n\
          let big: local<[u8; N], 32>;\n{loads}{sums}vmovups([big], v0);\n}}\n"
     );
-    let text = kgen::x86_str(&src, "k::<2147483584>").unwrap().text();
+    let text = kernite::x86_str(&src, "k::<2147483584>").unwrap().text();
     let frame = "# frame: 2147483648 bytes aligned to 32, saves []
 # big: 2147483584 bytes at rsp
 # v16, spilled: 32 bytes at rsp + 2147483584
@@ -1246,7 +1246,7 @@ fn a_frame_past_what_an_address_reaches_is_refused() {
     assert!(text.contains("\n    lea r11, [rsp - 2147483648]\n"), "{text}");
     let want = "2:27: in `k::<2147483585>`: the kernel's frame, its stack memory and the variables that spilled, is \
                 2147483680 bytes: more than an address reaches past the stack pointer";
-    assert_eq!(kgen::x86_str(&src, "k::<2147483585>").unwrap_err(), want);
+    assert_eq!(kernite::x86_str(&src, "k::<2147483585>").unwrap_err(), want);
 }
 
 /// The prologue's loop takes the first label, and the body's come after it.
@@ -1282,19 +1282,19 @@ fn a_helper_takes_stack_memory_of_its_type() {
              v);\n}}\nfn store(b: {param}, v: ymm) {{\nvmovaps([b + 32], v);\n}}\n"
         )
     };
-    let code = kgen::x86_str(&src("local<[f32; 16], 32>"), "k").unwrap();
+    let code = kernite::x86_str(&src("local<[f32; 16], 32>"), "k").unwrap();
     assert!(code.code().any(|l| l == "vmovaps ymmword ptr [rsp + 32], ymm0"), "{}", code.text());
-    let e = kgen::x86_str(&src("local<[f32; 16]>"), "k").unwrap_err();
+    let e = kernite::x86_str(&src("local<[f32; 16]>"), "k").unwrap_err();
     assert_eq!(e, "5:7: `b`: `buf` is memory, `local<[f32; 16], 32>`; it is no `local<[f32; 16]>`");
-    let e = kgen::x86_str(&src("ymm"), "k").unwrap_err();
+    let e = kernite::x86_str(&src("ymm"), "k").unwrap_err();
     assert_eq!(e, "5:7: `b`: `buf` is memory, `local<[f32; 16], 32>`; it is no `ymm`");
     let src = "unsafe extern \"sysv64\" fn k(x: *const f32) {\nload(x);\n}\nfn load(b: local<u64>) {}\n";
-    assert_eq!(kgen::x86_str(src, "k").unwrap_err(), "2:6: `b`: a gpr is no memory, `local<u64>`");
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), "2:6: `b`: a gpr is no memory, `local<u64>`");
 }
 
-/// What kgen can check of stack memory, it does: its type, and an address where the index is 0.
+/// What kernite can check of stack memory, it does: its type, and an address where the index is 0.
 #[test]
-fn stack_memory_is_checked_where_kgen_can() {
+fn stack_memory_is_checked_where_kernite_can() {
     let cases = [
         ("let b: local<[f32]>;", "2:8: `local<[f32]>` has no size: stack memory has one, as in `local<[f32; 64]>`"),
         ("let b: local<[f32; 0]>;", "2:8: `local<[f32; 0]>` holds nothing"),
@@ -1493,7 +1493,7 @@ fn a_function_calls_itself_with_its_arguments_where_sysv_passes_them() {
     ret
 # f0: gcd
 ";
-    assert_eq!(kgen::x86_str(CALLERS, "gcd").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(CALLERS, "gcd").unwrap().text(), want);
 }
 
 /// A call changes the registers SysV lets it, all but rbx, rbp and r12 to r15: an integer
@@ -1514,7 +1514,7 @@ fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
     ret
 # f0: gcd
 ";
-    assert_eq!(kgen::x86_str(CALLERS, "plus").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(CALLERS, "plus").unwrap().text(), want);
     let want = "# keep(gpr) -> ()
 # needs: avx
 # frame: 32 bytes aligned to 32, saves [rbx]
@@ -1540,7 +1540,7 @@ fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
     ret
 # f0: nothing
 ";
-    assert_eq!(kgen::x86_str(CALLERS, "keep").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(CALLERS, "keep").unwrap().text(), want);
 }
 
 /// The registers a call leaves as they were are rbx and r12 to r15, and an integer alive
@@ -1574,7 +1574,7 @@ fn a_call_through_a_gpr_calls_one_of_the_functions_taken_together_last() {
     ret
 # f0: gcd
 ";
-    assert_eq!(kgen::x86_str(CALLERS, "through").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(CALLERS, "through").unwrap().text(), want);
 }
 
 /// A function that never returns, `-> !`, ends each way out in `ud2` or in a call of such a
@@ -1585,7 +1585,7 @@ fn a_function_that_never_returns_ends_in_ud2_or_a_call_of_one() {
 # frame: 0 bytes aligned to 0, saves []
     ud2
 ";
-    assert_eq!(kgen::x86_str(CALLERS, "fail").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(CALLERS, "fail").unwrap().text(), want);
     let want = "# at(gpr, gpr, gpr) -> gpr
 # frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
 # xs=rdi n=rsi i=rdx x=rax
@@ -1599,7 +1599,7 @@ fn a_function_that_never_returns_ends_in_ud2_or_a_call_of_one() {
     call {f0}
 # f0: fail
 ";
-    assert_eq!(kgen::x86_str(CALLERS, "at").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(CALLERS, "at").unwrap().text(), want);
 }
 
 /// Functions of the module for `k` to call, and some it may not.
@@ -1621,7 +1621,7 @@ unsafe extern "sysv64" fn narrow(a: u32) {}
 /// the error.
 fn calling(params: &str, ret: &str, body: &str) -> Result<String, String> {
     let src = format!("unsafe extern \"sysv64\" fn k({params}){ret} {{\n{body}\n}}\n{CALLEES}");
-    kgen::x86_str(&src, "k").map(|l| l.code().collect::<Vec<_>>().join("\n"))
+    kernite::x86_str(&src, "k").map(|l| l.code().collect::<Vec<_>>().join("\n"))
 }
 
 /// The stack pointer is a multiple of 16 plus 8 on entry, and each push and the frame move
@@ -1759,11 +1759,11 @@ fn a_call_is_checked_against_its_callee() {
         ),
         (
             "let p: gpr; lea(p, [gcd]); call(p, (x, x, x, x, x, x, x));",
-            "2:36: this passes too many: SysV passes a seventh integer on the stack, which kgen does not read",
+            "2:36: this passes too many: SysV passes a seventh integer on the stack, which kernite does not read",
         ),
         (
             "let v: ymm; zero(v); let p: gpr; lea(p, [gcd]); call(p, (v, v, v, v, v, v, v, v, v));",
-            "2:57: this passes too many: SysV passes a ninth float on the stack, which kgen does not read",
+            "2:57: this passes too many: SysV passes a ninth float on the stack, which kernite does not read",
         ),
         ("call(narrow, x);", "2:6: `narrow` does not compile, so no kernel calls it"),
         ("ud2(x);", "2:1: `ud2` takes no operands, not 1"),
@@ -1798,7 +1798,7 @@ fn a_function_that_never_returns_is_checked() {
         ),
     ];
     for (src, want) in cases {
-        assert_eq!(kgen::x86_str(src, "k").unwrap_err(), want, "{src}");
+        assert_eq!(kernite::x86_str(src, "k").unwrap_err(), want, "{src}");
     }
 }
 
@@ -1813,7 +1813,7 @@ fn tool(var: &str, name: &str) -> Option<PathBuf> {
 
 /// The kernel `k` around a call of `name` in `form`: each operand a variable of its own, written
 /// before and read after by an instruction of another name, so that no two share a register and
-/// kgen leaves out no move of one to another, as it leaves out a move of a register to itself;
+/// kernite leaves out no move of one to another, as it leaves out a move of a register to itself;
 /// memory at `x` of the size the form reaches, a vector of indices beside it; and each integer
 /// the least the form takes there, or the most.
 fn call(name: &str, form: &Form, most: bool) -> String {
@@ -1895,14 +1895,14 @@ fn gas(f: Feature) -> &'static str {
     }
 }
 
-/// Every form of every instruction kgen knows comes out of the language as a line `llvm-mc`
+/// Every form of every instruction kernite knows comes out of the language as a line `llvm-mc`
 /// assembles, which assembles a kernel's `naked_asm!` as rustc does, with each integer the
 /// least the form takes and the most; and encodes none with EVEX, which only AVX-512 reads,
 /// and which `llvm-mc` assembles for any machine. GNU as, which knows what each feature adds,
 /// takes each line on a machine of the CPU feature its form names, and refuses it on a machine
 /// of every feature before that one; and the listing names the feature.
 #[test]
-fn every_form_kgen_knows_assembles_on_a_machine_of_its_feature() {
+fn every_form_kernite_knows_assembles_on_a_machine_of_its_feature() {
     let (Some(mc), Some(gnu)) = (tool("LLVM_MC", "llvm-mc"), tool("GNU_AS", "as")) else {
         eprintln!("no llvm-mc or GNU as here: skipped; set LLVM_MC and GNU_AS to run it");
         return;
@@ -1919,7 +1919,7 @@ fn every_form_kgen_knows_assembles_on_a_machine_of_its_feature() {
                     for most in [false, true].into_iter().take(if ints { 2 } else { 1 }) {
                         let call = call(form.op.name(), form, most);
                         let src = format!("unsafe extern \"sysv64\" fn k(x: *mut f32) {{\n{call}\n}}\n");
-                        let listing = kgen::x86_str(&src, "k").unwrap_or_else(|e| panic!("{e}, of\n{call}"));
+                        let listing = kernite::x86_str(&src, "k").unwrap_or_else(|e| panic!("{e}, of\n{call}"));
                         if let Some(f) = form.feature {
                             assert!(listing.features.contains(&f), "no {f:?} in {:?}, of\n{call}", listing.features);
                         }
@@ -1947,11 +1947,11 @@ fn every_form_kgen_knows_assembles_on_a_machine_of_its_feature() {
             None => format!("line {n}: {why}"),
         })
         .collect();
-    assert!(refused.is_empty() && ok, "llvm-mc refuses what kgen writes:\n\n{}", refused.join("\n\n"));
+    assert!(refused.is_empty() && ok, "llvm-mc refuses what kernite writes:\n\n{}", refused.join("\n\n"));
     let encodings: Vec<&str> = out.lines().filter_map(|l| l.split_once("encoding: [").map(|(_, e)| e)).collect();
     assert_eq!(encodings.len(), lines.len());
     let evex: Vec<_> = lines.iter().zip(&encodings).filter(|(_, e)| e.starts_with("0x62")).map(|(l, _)| l).collect();
-    assert!(evex.is_empty(), "kgen writes AVX-512's EVEX: {evex:#?}");
+    assert!(evex.is_empty(), "kernite writes AVX-512's EVEX: {evex:#?}");
 
     let features = [None].into_iter().chain(Feature::ALL.map(Some));
     for (k, feature) in features.enumerate() {
@@ -1972,7 +1972,7 @@ fn every_form_kgen_knows_assembles_on_a_machine_of_its_feature() {
                 None => format!("line {n}: {why}"),
             })
             .collect();
-        assert!(refused.is_empty() && ok, "GNU as {on} says, of what kgen writes:\n\n{}", refused.join("\n\n"));
+        assert!(refused.is_empty() && ok, "GNU as {on} says, of what kernite writes:\n\n{}", refused.join("\n\n"));
         if feature.is_none() {
             continue;
         }
@@ -1985,17 +1985,17 @@ fn every_form_kgen_knows_assembles_on_a_machine_of_its_feature() {
             .filter(|(n, _)| !said.iter().any(|(m, why)| m == *n && why.starts_with("Error")))
             .map(|(_, l)| *l)
             .collect();
-        assert!(taken.is_empty(), "GNU as {before} takes what kgen says needs {feature:?}: {taken:#?}");
+        assert!(taken.is_empty(), "GNU as {before} takes what kernite says needs {feature:?}: {taken:#?}");
     }
 }
 
-/// Every instruction of x86-64-v3 that `llvm-mc` takes without AVX-512, kgen knows, or names as
-/// one it does not yet write, and why; and kgen knows no other. They are x86-64's own on
+/// Every instruction of x86-64-v3 that `llvm-mc` takes without AVX-512, kernite knows, or names
+/// as one it does not yet write, and why; and kernite knows no other. They are x86-64's own on
 /// integers, SSE's to SSE4.2's as AVX writes them, and those of AVX, AVX2, FMA, F16C, BMI1,
 /// BMI2, LZCNT, POPCNT and MOVBE; not the stack's, the strings', `loop`, x87's, MMX's or the
 /// system's.
 #[test]
-fn kgen_knows_every_instruction_of_x86_64_v3() {
+fn kernite_knows_every_instruction_of_x86_64_v3() {
     const V3: &str = "
         adc add and andn bextr blsi blsmsk blsr bsf bsr bswap bt btc btr bts bzhi cbw cdq cdqe clc clflush cmc cmp
         cmpxchg cmpxchg16b cmpxchg8b cpuid cqo crc32 cwd cwde dec div idiv imul inc int3 jmp lahf lea lfence lock.adc
@@ -2129,7 +2129,7 @@ fn vzeroupper_needs_avx_where_nothing_else_says_so() {
         ),
     ];
     for (src, want) in cases {
-        assert_eq!(kgen::x86_str(src, "f").unwrap().text(), want, "{src}");
+        assert_eq!(kernite::x86_str(src, "f").unwrap().text(), want, "{src}");
     }
 }
 
@@ -2149,7 +2149,7 @@ pub unsafe extern \"sysv64\" fn kept(x: f32) -> ! { vmovaps(x, x); ud2(); }";
     call {f0}
 # f0: die
 ";
-    assert_eq!(kgen::x86_str(src, "never").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(src, "never").unwrap().text(), want);
     let want = "# kept(vec) -> !
 # needs: avx
 # frame: 0 bytes aligned to 0, saves []
@@ -2157,5 +2157,5 @@ pub unsafe extern \"sysv64\" fn kept(x: f32) -> ! { vmovaps(x, x); ud2(); }";
     vmovaps xmm0, xmm0
     ud2
 ";
-    assert_eq!(kgen::x86_str(src, "kept").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(src, "kept").unwrap().text(), want);
 }

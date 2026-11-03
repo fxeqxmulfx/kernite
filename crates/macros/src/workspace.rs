@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 /// The workspace the crate is built in, by name, the first namespace its GPU kernels are in: the
 /// one Cargo takes for the package. Its name is as its manifest has it, `name` in
-/// `[workspace.metadata.kgen]`, or the name of the directory the manifest is in, with that
+/// `[workspace.metadata.kernite]`, or the name of the directory the manifest is in, with that
 /// manifest. A package of no workspace is one of its own, named as the package is. The error says
 /// that `name` is not a string, where it can be mended.
 pub(crate) fn workspace() -> Result<(String, Option<PathBuf>), String> {
@@ -27,7 +27,7 @@ fn cargo_home(var: Option<OsString>, user: Option<PathBuf>) -> Option<PathBuf> {
 }
 
 /// The path of the workspace's name in a manifest.
-const NAME: [&str; 4] = ["workspace", "metadata", "kgen", "name"];
+const NAME: [&str; 4] = ["workspace", "metadata", "kernite", "name"];
 
 /// [`workspace`], for the package `package` whose manifest is in `dir`, and Cargo's home `home`:
 /// the workspace is [`root`]'s. Each manifest is read by `read`; one it does not give, or that
@@ -43,8 +43,8 @@ fn workspace_from(
         Some((path, Some(name))) if *path == NAME => name.clone(),
         Some(_) => {
             return Err(format!(
-                "`name` in `[workspace.metadata.kgen]` of {} is not a string: a workspace is named by one, as \
-                 `name = \"kgen\"`",
+                "`name` in `[workspace.metadata.kernite]` of {} is not a string: a workspace is named by one, as \
+                 `name = \"kernite\"`",
                 manifest.display()
             ));
         }
@@ -343,15 +343,15 @@ mod tests {
 
     #[test]
     fn the_workspace_is_named_by_its_metadata() {
-        // A manifest with no `[workspace]`, only `[workspace.metadata.kgen]`, is a workspace's,
+        // A manifest with no `[workspace]`, only `[workspace.metadata.kernite]`, is a workspace's,
         // and the name may be in single quotes.
-        let read = files(&[("/home/w/Cargo.toml", "[workspace.metadata.kgen]\nname = 'acme'\n")]);
+        let read = files(&[("/home/w/Cargo.toml", "[workspace.metadata.kernite]\nname = 'acme'\n")]);
         let got = workspace_from("app".into(), Some(Path::new("/home/w")), None, &read);
         assert_eq!(got, Ok(("acme".into(), Some(PathBuf::from("/home/w/Cargo.toml")))));
         // `""` names the workspace nothing, rather than as its directory is: its kernels' names
         // leave it out. The manifest is still given: the macro includes it, so that the PTX is
         // built again when the name changes.
-        let read = files(&[("/home/w/Cargo.toml", "[workspace.metadata.kgen]\nname = \"\"\n")]);
+        let read = files(&[("/home/w/Cargo.toml", "[workspace.metadata.kernite]\nname = \"\"\n")]);
         let got = workspace_from("app".into(), Some(Path::new("/home/w")), None, &read);
         assert_eq!(got, Ok((String::new(), Some(PathBuf::from("/home/w/Cargo.toml")))));
     }
@@ -360,13 +360,13 @@ mod tests {
     fn the_workspace_is_named_by_its_directory() {
         // From a member's directory up, its own manifest, of no workspace, and one that is not
         // there are passed by. The nearest manifest of a workspace names it by its directory,
-        // though that manifest names a package too: its `[workspace.metadata.kgen]` has no
+        // though that manifest names a package too: its `[workspace.metadata.kernite]` has no
         // `name`, and no other table's `name` is read. One farther up does not name it.
         const ACME: &str = r#"
             [workspace]
             members = ["crates/*"]
 
-            [workspace.metadata.kgen]
+            [workspace.metadata.kernite]
 
             [workspace.metadata.docs]
             name = "docs"
@@ -374,7 +374,7 @@ mod tests {
             [package]
             name = "root"
 
-            [package.metadata.kgen]
+            [package.metadata.kernite]
             name = "root"
         "#;
         let read = files(&[
@@ -416,8 +416,8 @@ mod tests {
 
     #[test]
     fn a_name_is_a_string_of_any_of_the_four_kinds_with_its_escapes_read() {
-        // Each is `name = ..` in `[workspace.metadata.kgen]`, with the name it says. A long string
-        // trims the newline after its quotes, and a backslash at the end of a line with the
+        // Each is `name = ..` in `[workspace.metadata.kernite]`, with the name it says. A long
+        // string trims the newline after its quotes, and a backslash at the end of a line with the
         // whitespace that follows, TOML's: a U+00A0 or a U+3000 is the name's. It holds one quote
         // or two, and, at its end, two before its own.
         for (value, name) in [
@@ -439,31 +439,31 @@ mod tests {
             ("'''a'''''", "a''"),
             ("\"é\\u00e9\"", "éé"),
         ] {
-            let manifest = format!("[workspace.metadata.kgen]\nname = {value}\n");
+            let manifest = format!("[workspace.metadata.kernite]\nname = {value}\n");
             assert_eq!(only(&manifest), named(name), "{value}");
         }
     }
 
     #[test]
     fn a_name_is_found_by_any_form_of_key_and_table() {
-        // Each of these says `workspace.metadata.kgen.name`: with dotted keys, inline tables,
+        // Each of these says `workspace.metadata.kernite.name`: with dotted keys, inline tables,
         // quoted keys, spaces about the dots, a comment, and CRLF for newlines.
         for manifest in [
-            "[workspace.metadata]\nkgen.name = \"acme\"\n",
-            "[workspace.metadata]\nkgen = { name = \"acme\" }\n",
-            "[workspace]\nmetadata.kgen.name = \"acme\"\n",
-            "workspace.metadata.kgen.name = \"acme\"\n",
-            "workspace = { metadata = { kgen = { name = \"acme\" } } }\n",
-            "[workspace.metadata.\"kgen\"]\nname = \"acme\"\n",
-            "[workspace.metadata.'kgen']\nname = \"acme\"\n",
-            "[\"workspace\".metadata.kgen]\nname = \"acme\"\n",
-            "[workspace.metadata.\"k\\u0067en\"]\nname = \"acme\"\n",
-            "[workspace . metadata . kgen]\nname = \"acme\"\n",
-            "[ workspace.metadata.kgen ] # kgen\n\"name\" = \"acme\" # the name\n",
-            "[workspace.metadata]\nkgen . name = \"acme\"\n",
-            "[workspace.metadata]\nkgen = {\n  name = \"acme\", # a trailing comma\n}\n",
-            "[workspace.metadata.kgen]\r\nname = \"acme\"\r\n",
-            "\u{feff}[workspace.metadata.kgen]\nname = \"acme\"\n",
+            "[workspace.metadata]\nkernite.name = \"acme\"\n",
+            "[workspace.metadata]\nkernite = { name = \"acme\" }\n",
+            "[workspace]\nmetadata.kernite.name = \"acme\"\n",
+            "workspace.metadata.kernite.name = \"acme\"\n",
+            "workspace = { metadata = { kernite = { name = \"acme\" } } }\n",
+            "[workspace.metadata.\"kernite\"]\nname = \"acme\"\n",
+            "[workspace.metadata.'kernite']\nname = \"acme\"\n",
+            "[\"workspace\".metadata.kernite]\nname = \"acme\"\n",
+            "[workspace.metadata.\"k\\u0065rnite\"]\nname = \"acme\"\n",
+            "[workspace . metadata . kernite]\nname = \"acme\"\n",
+            "[ workspace.metadata.kernite ] # kernite\n\"name\" = \"acme\" # the name\n",
+            "[workspace.metadata]\nkernite . name = \"acme\"\n",
+            "[workspace.metadata]\nkernite = {\n  name = \"acme\", # a trailing comma\n}\n",
+            "[workspace.metadata.kernite]\r\nname = \"acme\"\r\n",
+            "\u{feff}[workspace.metadata.kernite]\nname = \"acme\"\n",
         ] {
             assert_eq!(only(manifest), named("acme"), "{manifest:?}");
         }
@@ -471,29 +471,30 @@ mod tests {
 
     #[test]
     fn a_name_that_is_not_a_string_is_refused_naming_the_manifest() {
-        // Cargo reads each of these as a `workspace.metadata.kgen.name` that is not a string: a
+        // Cargo reads each of these as a `workspace.metadata.kernite.name` that is not a string: a
         // number, a boolean, an array, an inline table, a date, or a table: of its own, by a dotted
         // key, or by a table inside it.
-        let refused = Err("`name` in `[workspace.metadata.kgen]` of /home/w/Cargo.toml is not a string: a workspace \
-                            is named by one, as `name = \"kgen\"`"
-            .into());
+        let refused =
+            Err("`name` in `[workspace.metadata.kernite]` of /home/w/Cargo.toml is not a string: a workspace \
+                            is named by one, as `name = \"kernite\"`"
+                .into());
         for manifest in [
-            "[workspace.metadata.kgen]\nname = 5\n",
-            "[workspace.metadata.kgen]\nname = true\n",
-            "[workspace.metadata.kgen]\nname = [\"acme\"]\n",
-            "[workspace.metadata.kgen]\nname = { a = \"acme\" }\n",
-            "[workspace.metadata.kgen]\nname = 1979-05-27 07:32:00\n",
-            "[workspace.metadata.kgen.name]\na = \"acme\"\n",
-            "workspace.metadata.kgen.name = 5\n",
-            "[workspace.metadata]\nkgen = { name = 5 }\n",
-            "[workspace.metadata.kgen]\nname.first = \"acme\"\n",
-            "[workspace.metadata.kgen.name.first]\n",
+            "[workspace.metadata.kernite]\nname = 5\n",
+            "[workspace.metadata.kernite]\nname = true\n",
+            "[workspace.metadata.kernite]\nname = [\"acme\"]\n",
+            "[workspace.metadata.kernite]\nname = { a = \"acme\" }\n",
+            "[workspace.metadata.kernite]\nname = 1979-05-27 07:32:00\n",
+            "[workspace.metadata.kernite.name]\na = \"acme\"\n",
+            "workspace.metadata.kernite.name = 5\n",
+            "[workspace.metadata]\nkernite = { name = 5 }\n",
+            "[workspace.metadata.kernite]\nname.first = \"acme\"\n",
+            "[workspace.metadata.kernite.name.first]\n",
         ] {
             assert_eq!(only(manifest), refused, "{manifest:?}");
         }
         // The nearest manifest of a workspace is the one named: a farther one is not read.
         let read = files(&[
-            ("/home/w/Cargo.toml", "[workspace.metadata.kgen]\nname = 5\n"),
+            ("/home/w/Cargo.toml", "[workspace.metadata.kernite]\nname = 5\n"),
             ("/home/Cargo.toml", "[workspace]\n"),
         ]);
         assert_eq!(workspace_from("app".into(), Some(Path::new("/home/w")), None, &read), refused);
@@ -501,24 +502,24 @@ mod tests {
 
     #[test]
     fn a_name_that_is_not_where_cargo_reads_it_is_passed_by() {
-        // The workspace is named as its directory is. `name` is another table's, or `kgen` or
+        // The workspace is named as its directory is. `name` is another table's, or `kernite` or
         // `metadata` is not a table: an array of tables, or an array with a table in it. A table
         // under an array of tables is in the array's last element.
         for manifest in [
-            "[workspace]\n[package.metadata.kgen]\nname = \"acme\"\n",
-            "[workspace.metadata]\nkgen.nam = \"acme\"\n",
-            "[workspace.metadata.kgen.sub]\nname = \"acme\"\n",
-            "[workspace.metadata]\nsub.kgen.name = \"acme\"\n",
-            "[[workspace.metadata.kgen]]\nname = \"acme\"\n",
-            "[workspace.metadata]\nx = [{ kgen = { name = \"acme\" } }]\n",
-            "[workspace.metadata]\nkgen = [{ name = \"acme\" }]\n",
-            "[[workspace.metadata]]\n[workspace.metadata.kgen]\nname = \"acme\"\n",
-            "[[workspace.metadata]]\n[[workspace.metadata.kgen]]\n[workspace.metadata.kgen.x]\n",
+            "[workspace]\n[package.metadata.kernite]\nname = \"acme\"\n",
+            "[workspace.metadata]\nkernite.nam = \"acme\"\n",
+            "[workspace.metadata.kernite.sub]\nname = \"acme\"\n",
+            "[workspace.metadata]\nsub.kernite.name = \"acme\"\n",
+            "[[workspace.metadata.kernite]]\nname = \"acme\"\n",
+            "[workspace.metadata]\nx = [{ kernite = { name = \"acme\" } }]\n",
+            "[workspace.metadata]\nkernite = [{ name = \"acme\" }]\n",
+            "[[workspace.metadata]]\n[workspace.metadata.kernite]\nname = \"acme\"\n",
+            "[[workspace.metadata]]\n[[workspace.metadata.kernite]]\n[workspace.metadata.kernite.x]\n",
         ] {
             assert_eq!(only(manifest), named("w"), "{manifest:?}");
         }
-        // A table of an array of tables is that array's last, and `kgen` is the table beside it.
-        let manifest = "[[workspace.metadata.kgen.x]]\n[workspace.metadata.kgen]\nname = \"acme\"\n";
+        // A table of an array of tables is that array's last, and `kernite` is the table beside it.
+        let manifest = "[[workspace.metadata.kernite.x]]\n[workspace.metadata.kernite]\nname = \"acme\"\n";
         assert_eq!(only(manifest), named("acme"));
     }
 
@@ -531,7 +532,7 @@ mod tests {
             "workspace.members = [\"app\"]\n\n[package]\nname = \"w\"\n",
             "workspace = { members = [\"app\"] }\n\n[package]\nname = \"w\"\n",
             "[package]\nname = \"w\"\n\n[[workspace.metadata.x]]\n",
-            "[package]\nname = \"w\"\n\n[workspace.metadata.kgen]\n",
+            "[package]\nname = \"w\"\n\n[workspace.metadata.kernite]\n",
             "\u{feff}[workspace]\nmembers = [\"app\"]\n",
             "[package]\nkeywords = [\"[workspace]\", ['x'], # ]\n  [[\"]\"]],\n]\n\n[workspace]\n",
             "\"workspace\" = {}\n",

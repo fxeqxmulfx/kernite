@@ -1,4 +1,4 @@
-//! The instructions of PTX that kgen knows: those the GPUs from Fermi, `sm_20`, to Ampere,
+//! The instructions of PTX that kernite knows: those the GPUs from Fermi, `sm_20`, to Ampere,
 //! `sm_86`, run, written as the PTX ISA writes them, one [`Form`] each, and the special
 //! registers they read; all but `call`, whose operands are what the function it calls takes,
 //! which [`crate::lang`] checks against its prototype.
@@ -10,7 +10,7 @@
 use std::fmt;
 use std::sync::OnceLock;
 
-use kgen_core::Access;
+use kernite_core::Access;
 
 use crate::{GPUS, Kind, Needs, Ty};
 
@@ -671,12 +671,12 @@ mma(.sp|.sp::ordered_metadata@8.5).sync.aligned.m16n8k64.row.col{.satfinite}.s32
 mma(.sp|.sp::ordered_metadata@8.5).sync.aligned.m16n8k128.row.col{.satfinite}.s32(.u4|.s4)(.u4|.s4).s32 : =_s32*4, ^$u32*4, ^$u32*4, $s32*4, %b32, #=0 @7.1 @sm80
 
 # The same, each fragment loaded and stored by the warp together, its stride in elements.
-# ptxas requires `.aligned` from PTX 6.3 and refuses it before, so kgen, which writes it,
+# ptxas requires `.aligned` from PTX 6.3 and refuses it before, so kernite, which writes it,
 # writes wmma from 6.3, though the ISA has 6.0 without it; and no `.satfinite` on a float
 # one, which 6.5 removes. The driver compiles a module for the GPU it runs on, and ptxas
 # 13.4 takes `_` for one of `mma`'s results for Turing, `sm_75`, of `f16.f32` and of the
 # integers alone, though for Ampere, `sm_80`, of every type; and a special register in `a`
-# or `b` of `u8` or `s8` for Ampere alone: so kgen takes these only where both do.
+# or `b` of `u8` or `s8` for Ampere alone: so kernite takes these only where both do.
 wmma.load(.a|.b).sync.aligned$lay$fshape$gsh.f16 : =_f16x2*8, [R], u32? @6.3 @sm70 +addr32
 wmma.load.c.sync.aligned$lay$fshape$gsh.f16 : =_f16x2*4, [R], u32? @6.3 @sm70 +addr32
 wmma.load.c.sync.aligned$lay$fshape$gsh.f32 : =_f32*8, [R], u32? @6.3 @sm70 +addr32
@@ -1129,10 +1129,10 @@ pub fn forms() -> &'static [Form] {
     FORMS.get_or_init(|| parse(TABLE))
 }
 
-/// What of PTX's is for GPUs newer than kgen writes for, after the oldest GPU the ISA has it
-/// for: an instruction, by its name, or a word of one kgen knows, after the instruction and a
-/// dot, as `ld.v8` is the `.v8` of `ld.global.v8.f32`. A GPU with an `a` is that GPU's own,
-/// and with an `f` its family's.
+/// What of PTX's is for GPUs newer than kernite writes for, after the oldest GPU the ISA has it
+/// for: an instruction, by its name, or a word of one kernite knows, after the instruction and a
+/// dot, as `ld.v8` is the `.v8` of `ld.global.v8.f32`. A GPU with an `a` is that GPU's own, and
+/// with an `f` its family's.
 pub const NEWER: &str = "
 sm_89: cvt.e4m3x2 cvt.e5m2x2 mma.e4m3 mma.e5m2
 sm_90: elect getctarank griddepcontrol mapa multimem stmatrix tensormap
@@ -1169,18 +1169,19 @@ fn newer(op: &str, word: &str) -> Option<&'static str> {
     })
 }
 
-/// The GPUs kgen writes PTX for, from the first of [`GPUS`] to the last, as its messages name them.
+/// The GPUs kernite writes PTX for, from the first of [`GPUS`] to the last, as its messages name
+/// them.
 fn gpus() -> String {
     let [(first, _), .., (last, _)] = GPUS;
     format!("sm_{first} to sm_{last}")
 }
 
-/// What of PTX's kgen leaves out, and why: an instruction, by its name and no word, or a word
-/// of one kgen knows.
+/// What of PTX's kernite leaves out, and why: an instruction, by its name and no word, or a word
+/// of one kernite knows.
 const LEFT_OUT: &[(&str, &str, &str)] = &[(
     "txq",
     "force_unnormalized_coords",
-    "asks of a sampler apart from its texture, in the independent mode, which kgen does not write",
+    "asks of a sampler apart from its texture, in the independent mode, which kernite does not write",
 )];
 
 /// The forms the instruction `name` is of, its words as PTX writes them, in the order of
@@ -1195,8 +1196,8 @@ pub fn find(name: &str) -> Result<Vec<Bound>, String> {
             return Err(format!("PTX's `{op}` {why}"));
         }
         return Err(match newer(op, "") {
-            Some(gpu) => format!("PTX's `{op}` is for {gpu} and newer, and kgen writes PTX for {}", gpus()),
-            None => format!("PTX has no instruction `{op}` that kgen knows"),
+            Some(gpu) => format!("PTX's `{op}` is for {gpu} and newer, and kernite writes PTX for {}", gpus()),
+            None => format!("PTX has no instruction `{op}` that kernite knows"),
         });
     }
     let mut bound = vec![];
@@ -1278,9 +1279,9 @@ fn unknown(name: &str, op: &str, words: &[&str], of: &[&'static Form]) -> String
             return format!("PTX's `{op}.{w}` {why}");
         }
         if let Some(gpu) = newer(op, w) {
-            return format!("PTX's `{op}` takes `.{w}` on {gpu} and newer, and kgen writes PTX for {}", gpus());
+            return format!("PTX's `{op}` takes `.{w}` on {gpu} and newer, and kernite writes PTX for {}", gpus());
         }
-        return format!("PTX's `{op}` has no `.{w}` that kgen knows");
+        return format!("PTX's `{op}` has no `.{w}` that kernite knows");
     }
     let mut best: Option<Near> = None;
     for f in of {
@@ -1293,7 +1294,7 @@ fn unknown(name: &str, op: &str, words: &[&str], of: &[&'static Form]) -> String
             best = Some(n);
         }
     }
-    let n = best.expect("an instruction kgen knows has forms");
+    let n = best.expect("an instruction kernite knows has forms");
     let canon = n.canon.join(".");
     if n.distance == 0 {
         return format!("PTX writes `{name}` as `{canon}`, its words in that order");
@@ -1316,7 +1317,7 @@ fn unknown(name: &str, op: &str, words: &[&str], of: &[&'static Form]) -> String
             }
         },
         ([], [w]) => format!("PTX's `{op}` takes no `.{w}` with the rest of `{name}`: `{canon}`"),
-        _ => format!("`{name}` is no form of `{op}` that kgen knows; the nearest is `{canon}`"),
+        _ => format!("`{name}` is no form of `{op}` that kernite knows; the nearest is `{canon}`"),
     }
 }
 
@@ -1385,7 +1386,7 @@ fn check(b: &Bound, name: &str) -> Result<Needs, String> {
                 let op = b.form.op;
                 if bits == 256 && (op == "ld" || op == "st") {
                     return Err(format!(
-                        "`{name}` moves 256 bits at once, which PTX's `{op}` does on sm_100 and newer, and kgen writes \
+                        "`{name}` moves 256 bits at once, which PTX's `{op}` does on sm_100 and newer, and kernite writes \
                          PTX for {}: a vector of 128 bits at most, as `.v4.b32` or `.v2.b64`",
                         gpus()
                     ));
@@ -1524,7 +1525,7 @@ impl Sreg {
     }
 }
 
-/// Every special register kgen knows.
+/// Every special register kernite knows.
 pub fn sregs() -> &'static [Sreg] {
     static SREGS: OnceLock<Vec<Sreg>> = OnceLock::new();
     SREGS.get_or_init(|| {
@@ -1572,10 +1573,10 @@ pub fn sreg(name: &str) -> Option<&'static Sreg> {
     sregs().iter().find(|s| s.name == name)
 }
 
-/// A function that says why kgen reads none of some special registers of PTX's.
+/// A function that says why kernite reads none of some special registers of PTX's.
 type Why = fn() -> String;
 
-/// The special registers of PTX's that kgen reads none of, and why.
+/// The special registers of PTX's that kernite reads none of, and why.
 const BEYOND: &[(&str, Why)] = &[
     ("is_explicit_cluster", hopper),
     ("clusterid", hopper),
@@ -1589,24 +1590,24 @@ const BEYOND: &[(&str, Why)] = &[
     ("perctamemorysize", per_cta),
 ];
 
-/// Why kgen reads none of the special registers that came with Hopper, `sm_90`.
+/// Why kernite reads none of the special registers that came with Hopper, `sm_90`.
 fn hopper() -> String {
-    format!("it needs sm_90, and kgen writes PTX for {}", gpus())
+    format!("it needs sm_90, and kernite writes PTX for {}", gpus())
 }
 
-/// Why kgen reads neither `%perctamemoryoffset` nor `%perctamemorysize`.
+/// Why kernite reads neither `%perctamemoryoffset` nor `%perctamemorysize`.
 fn per_cta() -> String {
-    "a kernel has it only with the directive `.minperctamemory`, which kgen does not write".into()
+    "a kernel has it only with the directive `.minperctamemory`, which kernite does not write".into()
 }
 
-/// Why kgen reads no special register `name`, `clusterid.x`, if it is one of PTX's.
+/// Why kernite reads no special register `name`, `clusterid.x`, if it is one of PTX's.
 pub fn beyond(name: &str) -> Option<String> {
     let first = name.split('.').next().unwrap_or(name);
     BEYOND.iter().find(|(n, _)| *n == first).map(|&(_, why)| why())
 }
 
 /// Whether a register named `name` would be one of PTX's special registers, or of their
-/// vectors: `%tid` is, and so are those kgen reads none of.
+/// vectors: `%tid` is, and so are those kernite reads none of.
 pub fn reserved(name: &str) -> bool {
     BEYOND.iter().any(|(n, _)| *n == name) || sregs().iter().any(|s| s.name.split('.').next() == Some(name))
 }
@@ -1775,7 +1776,7 @@ fn req(r: &str, line: &str) -> Needs {
     let num = |s: &str| s.parse::<u32>().unwrap_or_else(|_| panic!("`{line}`: `@{r}` is no requirement"));
     let gpu = |s: &str| {
         let sm = num(s);
-        assert!(GPUS.iter().any(|&(g, _)| g == sm), "`{line}`: `@{r}` is no GPU kgen writes for");
+        assert!(GPUS.iter().any(|&(g, _)| g == sm), "`{line}`: `@{r}` is no GPU kernite writes for");
         sm
     };
     let version = |s: &str| {
@@ -1906,7 +1907,7 @@ fn one(s: &'static str, line: &str) -> Spec {
                     Some("bxyzw") => Sel::Bytes,
                     Some("hmask") => Sel::HalfMask,
                     Some("bmask") => Sel::ByteMask,
-                    _ => panic!("`{line}`: `{s}` has no parts that kgen knows"),
+                    _ => panic!("`{line}`: `{s}` has no parts that kernite knows"),
                 };
                 spec.part = Some(sel);
                 t = ty;

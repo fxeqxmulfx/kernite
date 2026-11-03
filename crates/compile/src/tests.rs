@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use kgen_core::{
+use kernite_core::{
     Access, Arg, Base, Class, Flow, Imm, Inst, Item, Label, Mem, Operand, PReg, Program, RegInfo, Register, Signature,
     Slot, SlotId, VReg, Width,
 };

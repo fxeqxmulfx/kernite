@@ -7,8 +7,8 @@
 //! word.
 
 /// Each GPU kernel, launched as Rust launches it, with the names it takes.
-pub fn on_the_gpu(kernels: &gpu::Kernels, xs: kgen_cuda::Ptr<u32>) -> Result<u32, kgen_cuda::Error> {
-    let grid = kgen_cuda::Grid::new(1, 1);
+pub fn on_the_gpu(kernels: &gpu::Kernels, xs: kernite_cuda::Ptr<u32>) -> Result<u32, kernite_cuda::Error> {
+    let grid = kernite_cuda::Grid::new(1, 1);
     unsafe {
         kernels.indexed::<2>(grid, xs, 40)?;
         kernels.gridded(grid, xs, 7)?;
@@ -20,16 +20,16 @@ pub fn on_the_gpu(kernels: &gpu::Kernels, xs: kgen_cuda::Ptr<u32>) -> Result<u32
 }
 
 /// Each x86 kernel, called as Rust calls it, with the names it takes.
-pub fn on_the_cpu(xs: *mut u64) -> Result<u64, kgen_cpu::Error> {
+pub fn on_the_cpu(xs: *mut u64) -> Result<u64, kernite_cpu::Error> {
     unsafe {
-        cpu::together(kgen_cpu::Grid::new(1), xs, 1, 2, 3)?;
+        cpu::together(kernite_cpu::Grid::new(1), xs, 1, 2, 3)?;
         Ok(cpu::indexed::<2>(40) + cpu::gridded::<3>(4))
     }
 }
 
 /// GPU kernels. `indexed` stores `index + N`; `counted` is of instances picked by an `index`, and
 /// `sized` of `threads` and `shared`, which it has no method to bind, as it is not cooperative.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod gpu {
     #[instances(1, 2)]
     pub unsafe extern "ptx-kernel" fn indexed<const N: u32>(xs: *mut u32, index: u32) {
@@ -68,7 +68,7 @@ pub mod gpu {
 /// launcher passes each parameter on, the pointer `grid` as the address it is, which the thread
 /// makes a pointer again; `gridded` has a compile-time argument `grid`, and no launcher to bind it,
 /// as it is not cooperative.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod cpu {
     #[instances(1, 2)]
     pub unsafe extern "sysv64" fn indexed<const N: u64>(index: u64) -> u64 {

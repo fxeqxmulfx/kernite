@@ -1,11 +1,11 @@
-//! `Ptx` through the ports kgen-build calls, driven by hand as a use case drives them: each
+//! `Ptx` through the ports kernite-build calls, driven by hand as a use case drives them: each
 //! static laid out after those before it and each callee seen, then each kernel told of them,
 //! written and finished, and the module of them all.
 
-use kgen_build::{Backend, Called, Device, DeviceStatic, StaticError, Unfinished};
-use kgen_lang::{ItemKind, Module, Span};
-use kgen_ptx::lang::{Callee, Kernel};
-use kgen_ptx::{Prototype, Ptx, Returns, Static, Ty};
+use kernite_build::{Backend, Called, Device, DeviceStatic, StaticError, Unfinished};
+use kernite_lang::{ItemKind, Module, Span};
+use kernite_ptx::lang::{Callee, Kernel};
+use kernite_ptx::{Prototype, Ptx, Returns, Static, Ty};
 
 /// Static `name` of `module`, laid out by `ptx` after `before`.
 fn lay_out(ptx: &Ptx, module: &Module, name: &str, before: &[Static]) -> Result<Static, StaticError> {
@@ -13,22 +13,22 @@ fn lay_out(ptx: &Ptx, module: &Module, name: &str, before: &[Static]) -> Result<
         ItemKind::Static(s) if s.name == name => Some(s),
         _ => None,
     });
-    ptx.lay_out(name, &kgen_lang::memory(module, s.unwrap()).unwrap(), before)
+    ptx.lay_out(name, &kernite_lang::memory(module, s.unwrap()).unwrap(), before)
 }
 
 /// The kernel `ptx` makes of `name`, a function of `module` or an instance of one, told of
 /// `statics` and `callees`, with its body written, for `finish`.
 fn written(ptx: &Ptx, module: &Module, name: &str, statics: &[Static], callees: &[Called<Callee>]) -> Kernel {
-    let (f, args, _) = kgen_build::instance(module, name).unwrap().unwrap();
-    let mut kernel = ptx.kernel(f, name, &args, kgen_build::cooperative(f).unwrap(), statics, callees);
-    kgen_lang::kernel(module, f, &args, &mut kernel).unwrap();
+    let (f, args, _) = kernite_build::instance(module, name).unwrap().unwrap();
+    let mut kernel = ptx.kernel(f, name, &args, kernite_build::cooperative(f).unwrap(), statics, callees);
+    kernite_lang::kernel(module, f, &args, &mut kernel).unwrap();
     kernel
 }
 
 /// A `#[cooperative]` kernel that names memory of its module comes out of the port as the
 /// driver loads it: one module of the static, holding what it says, and the kernel, for `sm_60`
 /// as a cooperative launch needs. Each is named by its symbol in the scope, taken as it is
-/// given, here the namespaces `kgen::gpu`. The host finds the static by its symbol and reads its
+/// given, here the namespaces `kernite::gpu`. The host finds the static by its symbol and reads its
 /// `b32`s as `u32`s.
 #[test]
 fn ptx_compiles_a_kernel_through_the_port() {
@@ -40,29 +40,29 @@ fn ptx_compiles_a_kernel_through_the_port() {
             red.global.add.u32([COUNTS + 4], x);
         }
     "#;
-    let module = kgen_lang::parse(src).unwrap();
-    let ptx = Ptx::new("4kgen3gpu");
+    let module = kernite_lang::parse(src).unwrap();
+    let ptx = Ptx::new("7kernite3gpu");
     let counts = lay_out(&ptx, &module, "COUNTS", &[]).unwrap();
     let count = ptx.finish(written(&ptx, &module, "count", std::slice::from_ref(&counts), &[])).unwrap();
-    assert_eq!(ptx.symbol(&count), "_ZN4kgen3gpu5countE");
-    let host = DeviceStatic { symbol: "_ZN4kgen3gpu6COUNTSE".into(), host: "u32".into() };
+    assert_eq!(ptx.symbol(&count), "_ZN7kernite3gpu5countE");
+    let host = DeviceStatic { symbol: "_ZN7kernite3gpu6COUNTSE".into(), host: "u32".into() };
     assert_eq!(ptx.device_static(&counts), host);
-    let want = "// Written by kgen.
+    let want = "// Written by kernite.
 
 .version 5.0
 .target sm_60
 .address_size 64
 
-.global .align 4 .b8 _ZN4kgen3gpu6COUNTSE[16] = {1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4};
+.global .align 4 .b8 _ZN7kernite3gpu6COUNTSE[16] = {1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4};
 
-.visible .entry _ZN4kgen3gpu5countE(
-\t.param .u32 _ZN4kgen3gpu5countE_param_0
+.visible .entry _ZN7kernite3gpu5countE(
+\t.param .u32 _ZN7kernite3gpu5countE_param_0
 )
 {
 \t.reg .u32 %x;
 
-\tld.param.u32 %x, [_ZN4kgen3gpu5countE_param_0];
-\tred.global.add.u32 [_ZN4kgen3gpu6COUNTSE+4], %x;
+\tld.param.u32 %x, [_ZN7kernite3gpu5countE_param_0];
+\tred.global.add.u32 [_ZN7kernite3gpu6COUNTSE+4], %x;
 \tret;
 }
 ";
@@ -79,7 +79,7 @@ fn a_static_that_does_not_fit_beside_those_before_it_is_refused() {
         static B: constant<[u32; 1]>;
         static C: constant<[u32; 2]> = [1, 2, 3];
     ";
-    let module = kgen_lang::parse(src).unwrap();
+    let module = kernite_lang::parse(src).unwrap();
     let ptx = Ptx::new("");
     let a = lay_out(&ptx, &module, "A", &[]).unwrap();
     lay_out(&ptx, &module, "B", &[]).unwrap();
@@ -119,49 +119,49 @@ fn a_function_the_kernels_call_is_a_func() {
 
         unsafe extern "sysv64" fn nothing() {}
     "#;
-    let module = kgen_lang::parse(src).unwrap();
-    let ptx = Ptx::new("4kgen3gpu");
-    let callee = |name| ptx.callee(kgen_build::function(&module, name).unwrap());
+    let module = kernite_lang::parse(src).unwrap();
+    let ptx = Ptx::new("7kernite3gpu");
+    let callee = |name| ptx.callee(kernite_build::function(&module, name).unwrap());
     let calls = Callee::Calls(Prototype { params: vec![Ty::U32], returns: Returns::Value(Ty::U32) });
     assert_eq!(callee("times"), Some(calls.clone()));
     assert_eq!(callee("flag"), Some(Callee::Broken));
     assert_eq!(callee("pair"), Some(Callee::Broken));
     assert_eq!(callee("k"), Some(Callee::Kernel));
     assert_eq!(callee("nothing"), None);
-    let (_, args, _) = kgen_build::instance(&module, "times::<2>").unwrap().unwrap();
+    let (_, args, _) = kernite_build::instance(&module, "times::<2>").unwrap().unwrap();
     let called = Called { name: "times::<2>".into(), function: "times".into(), args, callee: calls };
     let times = ptx.finish(written(&ptx, &module, "times::<2>", &[], &[])).unwrap();
     let k = ptx.finish(written(&ptx, &module, "k::<1>", &[], &[called])).unwrap();
     assert_eq!([&times.name, &k.name], ["times::<2>", "k::<1>"]);
-    let want = "// Written by kgen.
+    let want = "// Written by kernite.
 
 .version 2.3
 .target sm_20
 .address_size 64
 
-.func (.param .u32 _ZN4kgen3gpu5timesILj2EEE_retval) _ZN4kgen3gpu5timesILj2EEE(
-\t.param .u32 _ZN4kgen3gpu5timesILj2EEE_param_0
+.func (.param .u32 _ZN7kernite3gpu5timesILj2EEE_retval) _ZN7kernite3gpu5timesILj2EEE(
+\t.param .u32 _ZN7kernite3gpu5timesILj2EEE_param_0
 )
 {
 \t.reg .u32 %x, %y;
 
-\tld.param.u32 %x, [_ZN4kgen3gpu5timesILj2EEE_param_0];
+\tld.param.u32 %x, [_ZN7kernite3gpu5timesILj2EEE_param_0];
 \tmul.lo.u32 %y, %x, 2;
-\tst.param.u32 [_ZN4kgen3gpu5timesILj2EEE_retval], %y;
+\tst.param.u32 [_ZN7kernite3gpu5timesILj2EEE_retval], %y;
 \tret;
 }
 
-.visible .entry _ZN4kgen3gpu1kILj1EEE(
-\t.param .u64 _ZN4kgen3gpu1kILj1EEE_param_0
+.visible .entry _ZN7kernite3gpu1kILj1EEE(
+\t.param .u64 _ZN7kernite3gpu1kILj1EEE_param_0
 )
 {
 \t.reg .u32 %x;
 \t.reg .u64 %p;
 
-\tld.param.u64 %p, [_ZN4kgen3gpu1kILj1EEE_param_0];
+\tld.param.u64 %p, [_ZN7kernite3gpu1kILj1EEE_param_0];
 \tcvta.to.global.u64 %p, %p;
 \tld.global.u32 %x, [%p];
-\tcall (%x), _ZN4kgen3gpu5timesILj2EEE, (%x);
+\tcall (%x), _ZN7kernite3gpu5timesILj2EEE, (%x);
 \tshl.b32 %x, %x, 1;
 \tst.global.u32 [%p], %x;
 \tret;
@@ -170,7 +170,7 @@ fn a_function_the_kernels_call_is_a_func() {
     assert_eq!(ptx.module(&[times, k], &[]).unwrap(), want);
 }
 
-/// Each refusal says what to blame, for kgen-build to place it: the part of a static that is
+/// Each refusal says what to blame, for kernite-build to place it: the part of a static that is
 /// wrong, or the variable a kernel reads before anything writes it.
 #[test]
 fn each_refusal_says_what_to_blame() {
@@ -183,7 +183,7 @@ fn each_refusal_says_what_to_blame() {
             st.global.u32([p], x);
         }
     "#;
-    let module = kgen_lang::parse(src).unwrap();
+    let module = kernite_lang::parse(src).unwrap();
     let ptx = Ptx::new("");
     let empty = StaticError::Type("`global<[u32; 0]>` holds nothing".into());
     assert_eq!(lay_out(&ptx, &module, "EMPTY", &[]), Err(empty));
@@ -196,7 +196,7 @@ fn each_refusal_says_what_to_blame() {
 }
 
 /// A mask of lanes that leaves out lane 0, on an instruction that thread 0 runs, is refused when
-/// the kernel is finished, and says where the instruction is, for kgen-build to place it there;
+/// the kernel is finished, and says where the instruction is, for kernite-build to place it there;
 /// under a guard it is taken.
 #[test]
 fn a_mask_without_lane_0_is_refused_at_its_instruction() {
@@ -213,7 +213,7 @@ fn a_mask_without_lane_0_is_refused_at_its_instruction() {
             }
         }
     "#;
-    let module = kgen_lang::parse(src).unwrap();
+    let module = kernite_lang::parse(src).unwrap();
     let ptx = Ptx::new("");
     // At the last word of the instruction's name, as an error of the instruction's is.
     let at = Some(Span(src.find("sync(2)").unwrap() as u32));

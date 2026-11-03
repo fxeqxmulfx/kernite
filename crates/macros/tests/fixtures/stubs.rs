@@ -2,7 +2,7 @@
 //! its launcher, which Rust and the module's kernels call as they would the kernel: nothing
 //! else is said of them.
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod cpu {
     pub unsafe extern "sysv64" fn broken(x: u64) -> u64 {
         ret(y);
@@ -26,7 +26,7 @@ pub mod cpu {
     }
 }
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod gpu {
     pub unsafe extern "ptx-kernel" fn broken(x: *mut u32) {
         st.global.u32([x], y);
@@ -39,18 +39,18 @@ pub mod gpu {
 }
 
 /// Each x86 kernel, called as Rust calls it.
-pub fn on_the_cpu(x: *mut u64) -> Result<u64, kgen_cpu::Error> {
+pub fn on_the_cpu(x: *mut u64) -> Result<u64, kernite_cpu::Error> {
     unsafe {
-        cpu::together(kgen_cpu::Grid::new(1), x)?;
+        cpu::together(kernite_cpu::Grid::new(1), x)?;
         Ok(cpu::broken(1) + cpu::tile::<1>(1) + cpu::caller(1))
     }
 }
 
 /// Each GPU kernel, launched as Rust launches it.
-pub fn on_the_gpu(kernels: &gpu::Kernels, x: kgen_cuda::Ptr<u32>) -> Result<u32, kgen_cuda::Error> {
+pub fn on_the_gpu(kernels: &gpu::Kernels, x: kernite_cuda::Ptr<u32>) -> Result<u32, kernite_cuda::Error> {
     unsafe {
-        kernels.broken(kgen_cuda::Grid::new(1, 1), x)?;
-        kernels.together(kgen_cuda::Grid::new(1, 1), x)?;
+        kernels.broken(kernite_cuda::Grid::new(1, 1), x)?;
+        kernels.together(kernite_cuda::Grid::new(1, 1), x)?;
     }
     kernels.together_blocks(32, 0)
 }

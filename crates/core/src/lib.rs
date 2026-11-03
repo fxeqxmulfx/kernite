@@ -1,4 +1,4 @@
-//! The entities of `kgen`: a kernel as instructions over registers, before allocation and
+//! The entities of `kernite`: a kernel as instructions over registers, before allocation and
 //! after.
 //!
 //! Nothing here knows an instruction set. An instruction's opcode is a type parameter the

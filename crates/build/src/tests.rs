@@ -1,8 +1,8 @@
-//! What kgen-build decides of a module's items, and what its use cases do, on modules the
+//! What kernite-build decides of a module's items, and what its use cases do, on modules the
 //! language parses: the use cases on [`Echo`], a fake machine. Each kernel in them compiles, for
 //! its machine, but those written to fail.
 
-use kgen_lang::{Error, Fault, Fn, Guard, IntTy, Memory, Operand, Span, Target, Value, parse};
+use kernite_lang::{Error, Fault, Fn, Guard, IntTy, Memory, Operand, Span, Target, Value, parse};
 
 use crate::{
     Abi, Backend, Call, Called, Compiled, ConstItem, Device, DeviceStatic, Given, HostStatic, ItemOut, Launcher,
@@ -10,10 +10,10 @@ use crate::{
     function, instance, module, one, owner, prepare, statics,
 };
 
-/// An ABI is one kgen compiles for, by the name Rust writes it as, or none. Of them, the process
+/// An ABI is one kernite compiles for, by the name Rust writes it as, or none. Of them, the process
 /// runs `extern "sysv64"` alone.
 #[test]
-fn an_abi_is_one_kgen_compiles_for() {
+fn an_abi_is_one_kernite_compiles_for() {
     let named = [("sysv64", Abi::Sysv64), ("ptx-kernel", Abi::PtxKernel), ("ptx-func", Abi::PtxFunc)];
     for (name, want) in named {
         assert_eq!(Abi::of(name), Some(want), "{name}");
@@ -56,7 +56,7 @@ fn a_module_of_x86_kernels_owns_its_statics() {
 }
 
 /// `#[cooperative]` goes on a kernel alone, of either kind: a helper, or a function the kernels
-/// call, that says it is refused where it says so. A function of an ABI kgen knows nothing of is
+/// call, that says it is refused where it says so. A function of an ABI kernite knows nothing of is
 /// no kernel, whatever it says, and one that says nothing is not cooperative.
 #[test]
 fn a_cooperative_helper_is_refused() {
@@ -153,7 +153,7 @@ impl Backend for Echo {
         Ok(Laid { name: name.into(), held: held.into(), before: before.iter().map(|s| s.name.clone()).collect() })
     }
 
-    /// Its kernels call each function of an ABI kgen compiles for, as that ABI.
+    /// Its kernels call each function of an ABI kernite compiles for, as that ABI.
     fn callee(&self, g: &Fn) -> Option<Abi> {
         abi(g)
     }
@@ -511,13 +511,13 @@ fn one_names_no_kernel_it_does_not_find() {
 
 /// `all` compiles each instance of each function the GPU runs, in the module's order, into one
 /// module with the statics: a PTX kernel or function, but no `extern "sysv64"` one and none of
-/// an ABI kgen knows nothing of. Each is told its function and its compile-time arguments. A
+/// an ABI kernite knows nothing of. Each is told its function and its compile-time arguments. A
 /// helper has no instance, but its `#[cooperative]` is the error, before its `#[instances(..)]`
 /// and a later kernel's, and its `#[instances(..)]` is one. So is a kernel that does not
 /// compile. The first static that is not laid out is the error before them all, and a module the
 /// device refuses is refused as a whole. Once the device has made its module, a module of both
-/// kinds of kernel and a static is the error, and so is a function of an ABI kgen knows nothing
-/// of.
+/// kinds of kernel and a static is the error, and so is a function of an ABI kernite knows
+/// nothing of.
 #[test]
 fn all_compiles_each_instance_in_order() {
     let src = "static A: global<u32>;\n\
@@ -537,7 +537,7 @@ fn all_compiles_each_instance_in_order() {
     let two = "a static is memory of the module's kernels: the GPU's, for PTX kernels, or the process's, for x86 \
                ones; and this module has both, so it is two modules, one of each kind of kernel and the statics \
                they name";
-    let abi = "kgen compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for NVIDIA \
+    let abi = "kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for NVIDIA \
                GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` is none of these";
     let failing = [
         (
@@ -569,8 +569,8 @@ fn echoed(src: &str) -> ModuleOut {
 }
 
 /// Each item of a module comes out as what it is, in the module's order: Rust passes through, a
-/// static is laid out or says why not, and a function is a helper, of an ABI kgen does not know,
-/// the process's or the GPU's. A kernel the process runs whose `#[instances(..)]` is wrong
+/// static is laid out or says why not, and a function is a helper, of an ABI kernite does not
+/// know, the process's or the GPU's. A kernel the process runs whose `#[instances(..)]` is wrong
 /// compiles nothing, and one whose instances do not all compile says why of each that does not,
 /// in order; neither is written. The listings of the kernels the process runs, and the code of
 /// the functions the GPU runs, are in the module's order as well.
@@ -659,8 +659,8 @@ fn a_const_given_twice_is_refused_at_the_module_s_own() {
                unsafe extern \"sysv64\" fn k(x: u64) { add(x, STEP); add(x, W); }";
     // The first five items are the consts given: the macro tells the parser how many tokens they
     // are, and the parser leaves an item of the module's own named as one of them to `module`.
-    let before = kgen_lang::lex(&src[..src.find("const STEP: u64 = 4;").unwrap()]).unwrap().len();
-    let parsed = kgen_lang::module(&kgen_lang::lex(src).unwrap(), before).unwrap();
+    let before = kernite_lang::lex(&src[..src.find("const STEP: u64 = 4;").unwrap()]).unwrap().len();
+    let parsed = kernite_lang::module(&kernite_lang::lex(src).unwrap(), before).unwrap();
     let kept = [0, 2, 5, 6, 7].map(|i| parsed.items[i].tokens.clone());
     let out = module(parsed, Some(Given { before, from: "crate::sizes".into() }), &Echo, &Echo);
     let said: Vec<_> = out.given.iter().map(|e| e.at(src)).collect();
@@ -704,14 +704,14 @@ fn a_kernel_that_is_not_unsafe_is_refused() {
     assert!(device.symbols.is_empty());
 }
 
-/// A function of an ABI kgen compiles nothing for is refused where its ABI is named, and is
+/// A function of an ABI kernite compiles nothing for is refused where its ABI is named, and is
 /// none of the GPU's.
 #[test]
-fn a_function_of_an_abi_kgen_does_not_know_is_refused() {
+fn a_function_of_an_abi_kernite_does_not_know_is_refused() {
     let src = "unsafe extern \"C\" fn f() {}";
     let out = echoed(src);
     let [ItemOut::Unknown(e)] = &out.items[..] else { panic!("{:?}", out.items) };
-    let none = "1:15: kgen compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for \
+    let none = "1:15: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for \
                 NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` is none of these";
     assert_eq!(e.at(src), none);
     assert!(out.device.is_none());
@@ -902,7 +902,7 @@ fn the_gpu_s_kernels_are_launched_by_index() {
 
 /// Why the GPU's module is none is said at the module's first item that is the GPU's: a function
 /// it runs, whatever is wrong with it, or a static of its memory. A helper, and a function of an
-/// ABI kgen does not know, are not the GPU's.
+/// ABI kernite does not know, are not the GPU's.
 #[test]
 fn the_module_s_error_goes_at_its_first_gpu_item() {
     let src = "fn h() {}\n\

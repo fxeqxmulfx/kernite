@@ -3,11 +3,11 @@
 //! kernels are cooperative, what is wrong with a helper, and which function an instance's name
 //! names.
 
-use kgen_lang::{Fn, ItemKind, Module, Value};
+use kernite_lang::{Fn, ItemKind, Module, Value};
 
 use crate::present::{Of, Refusal, said};
 
-/// The ABIs a kernel names, or a function kernels call, each of which kgen compiles for a
+/// The ABIs a kernel names, or a function kernels call, each of which kernite compiles for a
 /// machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Abi {
@@ -21,7 +21,7 @@ pub enum Abi {
 }
 
 impl Abi {
-    /// The ABI Rust writes as `name`, if kgen compiles for it.
+    /// The ABI Rust writes as `name`, if kernite compiles for it.
     pub fn of(name: &str) -> Option<Abi> {
         match name {
             "sysv64" => Some(Abi::Sysv64),
@@ -41,7 +41,7 @@ impl Abi {
     }
 }
 
-/// The ABI `f` names, if kgen compiles for it.
+/// The ABI `f` names, if kernite compiles for it.
 pub fn abi(f: &Fn) -> Option<Abi> {
     f.abi.as_ref().and_then(|(abi, _)| Abi::of(abi))
 }
@@ -63,11 +63,11 @@ pub enum Owner {
 }
 
 /// Whose memory the statics of `module` are, its kernels': the process's when its functions of
-/// an ABI kgen compiles for are all `extern "sysv64"`, and else the GPU's, those of a module of
-/// statics and no kernels among them. A module of both kinds of kernel and a static is two
+/// an ABI kernite compiles for are all `extern "sysv64"`, and else the GPU's, those of a module
+/// of statics and no kernels among them. A module of both kinds of kernel and a static is two
 /// modules, one of each, which the error at its first static says; its statics are then the
 /// GPU's, which its x86 kernels do not reach.
-pub fn owner(module: &Module) -> Result<Owner, kgen_lang::Error> {
+pub fn owner(module: &Module) -> Result<Owner, kernite_lang::Error> {
     let abis: Vec<Abi> = module
         .items
         .iter()
@@ -93,9 +93,9 @@ pub fn owner(module: &Module) -> Result<Owner, kgen_lang::Error> {
 
 /// Whether `f` is a kernel whose parts wait for each other, `#[cooperative]`, which every
 /// launch runs all at once: a GPU kernel's blocks, or an x86 kernel's threads. Or why it may
-/// not say so, if it says so and is no kernel. One of an ABI kgen knows nothing of is none,
+/// not say so, if it says so and is no kernel. One of an ABI kernite knows nothing of is none,
 /// whatever it says.
-pub fn cooperative(f: &Fn) -> Result<bool, kgen_lang::Error> {
+pub fn cooperative(f: &Fn) -> Result<bool, kernite_lang::Error> {
     let Some(c) = &f.cooperative else { return Ok(false) };
     let of = match (abi(f), &f.abi) {
         (Some(Abi::PtxKernel | Abi::Sysv64), _) => return Ok(true),
@@ -109,8 +109,8 @@ pub fn cooperative(f: &Fn) -> Result<bool, kgen_lang::Error> {
 /// What is wrong with `f`, a helper of `module`, whether it is called or not: its body, if it
 /// does not parse, its `#[instances(..)]`, then its `#[cooperative]`, in that order. The rest is
 /// checked where it is called.
-pub(crate) fn helper(module: &Module, f: &Fn) -> Vec<kgen_lang::Error> {
-    let errors = [f.body.as_ref().err().cloned(), kgen_lang::instances(module, f).err(), cooperative(f).err()];
+pub(crate) fn helper(module: &Module, f: &Fn) -> Vec<kernite_lang::Error> {
+    let errors = [f.body.as_ref().err().cloned(), kernite_lang::instances(module, f).err(), cooperative(f).err()];
     errors.into_iter().flatten().collect()
 }
 
@@ -129,10 +129,10 @@ type Found<'a> = (&'a Fn, Vec<Value>, usize);
 /// that `name` is, as `tile::<4>` is, and the instance's place among those the function lists.
 /// A function that names an ABI and takes no compile-time arguments has one instance, of none,
 /// and a helper has none.
-pub fn instance<'a>(module: &'a Module, name: &str) -> Result<Option<Found<'a>>, kgen_lang::Error> {
+pub fn instance<'a>(module: &'a Module, name: &str) -> Result<Option<Found<'a>>, kernite_lang::Error> {
     let Some(f) = function(module, name.split("::<").next().unwrap_or(name)) else { return Ok(None) };
-    for (at, args) in kgen_lang::instances(module, f)?.into_iter().enumerate() {
-        if kgen_lang::instance(f, &args)? == name {
+    for (at, args) in kernite_lang::instances(module, f)?.into_iter().enumerate() {
+        if kernite_lang::instance(f, &args)? == name {
             return Ok(Some((f, args, at)));
         }
     }

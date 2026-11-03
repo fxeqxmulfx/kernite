@@ -3,8 +3,8 @@
 
 use std::collections::BTreeSet;
 
-use kgen_compile::{Allocated, Frame};
-use kgen_core::{Access, Arg, Base, Class, Flow, Inst, Item, Label, Mem, Operand, PReg, Width};
+use kernite_compile::{Allocated, Frame};
+use kernite_core::{Access, Arg, Base, Class, Flow, Inst, Item, Label, Mem, Operand, PReg, Width};
 
 use crate::forms::{self, Feature};
 use crate::op::Op;
@@ -236,7 +236,7 @@ fn sp(op: Op, bytes: u32) -> Item<Op, PReg> {
 
 #[cfg(test)]
 mod tests {
-    use kgen_core::{Signature, Slot, SlotId};
+    use kernite_core::{Signature, Slot, SlotId};
 
     use super::*;
     use crate::intel;

@@ -6,7 +6,7 @@
 //! attribute stops the build before lints run, so no lint is in this fixture.
 
 /// An `expect` of no lint.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod bare {
     #[cooperative]
     #[expect]
@@ -16,7 +16,7 @@ pub mod bare {
 }
 
 /// The same, in a `cfg_attr(..)`.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod conditional {
     #[cooperative]
     #[cfg_attr(all(), expect)]
@@ -26,7 +26,7 @@ pub mod conditional {
 }
 
 /// A `cfg_attr(..)` whose condition, `not()`, has nothing to negate, and `deprecated` after it.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod condition {
     #[cooperative]
     #[cfg_attr(not(), deprecated)]

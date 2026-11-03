@@ -22,7 +22,7 @@ impl Op {
 
 macro_rules! ops {
     ($($name:ident = $text:literal,)*) => {
-        /// The instructions kgen writes of its own: the builder's, and those around a kernel's
+        /// The instructions kernite writes of its own: the builder's, and those around a kernel's
         /// body.
         #[allow(non_upper_case_globals)]
         impl Op {
@@ -32,7 +32,7 @@ macro_rules! ops {
             )*
         }
 
-        /// Every instruction kgen writes of its own.
+        /// Every instruction kernite writes of its own.
         #[cfg(test)]
         const OWN: &[Op] = &[$(Op::$name),*];
     };
@@ -134,11 +134,11 @@ mod tests {
     use super::*;
     use crate::forms;
 
-    /// What kgen writes of its own, x86 has, but what the table leaves out: `ret` and `call`,
-    /// which the language writes as kgen's returns and calls are, and the frame's `push`, `pop`
+    /// What kernite writes of its own, x86 has, but what the table leaves out: `ret` and `call`,
+    /// which the language writes as kernite's returns and calls are, and the frame's `push`, `pop`
     /// and `vzeroupper`.
     #[test]
-    fn x86_has_every_instruction_kgen_writes_of_its_own() {
+    fn x86_has_every_instruction_kernite_writes_of_its_own() {
         let left_out = [Op::Ret, Op::Call, Op::Push, Op::Pop, Op::Vzeroupper];
         for op in OWN.iter().filter(|op| !left_out.contains(op)) {
             assert!(forms::of(op.name()).is_some(), "`{}`", op.name());

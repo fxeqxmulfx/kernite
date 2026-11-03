@@ -9,18 +9,18 @@ pub fn callers(
     grid: &gpu_grid::Kernels,
     threads: &gpu_threads::Kernels,
     shared: &gpu_shared::Kernels,
-    xs: kgen_cuda::Ptr<u32>,
+    xs: kernite_cuda::Ptr<u32>,
     x: *mut u64,
 ) -> Result<u32, Box<dyn std::error::Error>> {
     unsafe {
-        grid.k::<1>(kgen_cuda::Grid::new(1, 1), xs)?;
-        cpu_grid::k::<1>(kgen_cpu::Grid::new(1), x)?;
+        grid.k::<1>(kernite_cuda::Grid::new(1, 1), xs)?;
+        cpu_grid::k::<1>(kernite_cpu::Grid::new(1), x)?;
     }
     Ok(threads.k_blocks::<1>(32, 0)? + shared.k_blocks::<2>(32, 0)?)
 }
 
 /// A GPU kernel whose compile-time argument is the launcher's `grid`.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod gpu_grid {
     #[instances(1, 2)]
     #[allow(non_upper_case_globals)]
@@ -30,7 +30,7 @@ pub mod gpu_grid {
 }
 
 /// A cooperative GPU kernel whose compile-time argument is `threads`, a parameter of `k_blocks`.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod gpu_threads {
     #[instances(1, 2)]
     #[cooperative]
@@ -41,7 +41,7 @@ pub mod gpu_threads {
 }
 
 /// The same, with `shared`, the other parameter of `k_blocks`.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod gpu_shared {
     #[instances(1, 2)]
     #[cooperative]
@@ -52,7 +52,7 @@ pub mod gpu_shared {
 }
 
 /// A cooperative x86 kernel whose compile-time argument is the launcher's `grid`.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod cpu_grid {
     #[instances(1, 2)]
     #[cooperative]

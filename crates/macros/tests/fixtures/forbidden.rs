@@ -14,8 +14,8 @@
 )]
 
 /// Each x86 kernel, called as Rust calls it.
-pub fn on_the_cpu(x: &mut u32) -> Result<u64, kgen_cpu::Error> {
-    let grid = kgen_cpu::Grid::new(1);
+pub fn on_the_cpu(x: &mut u32) -> Result<u64, kernite_cpu::Error> {
+    let grid = kernite_cpu::Grid::new(1);
     unsafe {
         cpu::together(grid, x)?;
         cpu::rounds::<2>(grid, x)?;
@@ -24,8 +24,8 @@ pub fn on_the_cpu(x: &mut u32) -> Result<u64, kgen_cpu::Error> {
 }
 
 /// Each GPU kernel, launched as Rust launches it.
-pub fn on_the_gpu(kernels: &gpu::Kernels, x: kgen_cuda::Ptr<f32>) -> Result<u32, kgen_cuda::Error> {
-    let grid = kgen_cuda::Grid::new(1, 1);
+pub fn on_the_gpu(kernels: &gpu::Kernels, x: kernite_cuda::Ptr<f32>) -> Result<u32, kernite_cuda::Error> {
+    let grid = kernite_cuda::Grid::new(1, 1);
     unsafe {
         kernels.scale(grid, x, 2.0)?;
         kernels.tile::<2>(grid, x)?;
@@ -43,10 +43,10 @@ pub fn on_the_gpu(kernels: &gpu::Kernels, x: kgen_cuda::Ptr<f32>) -> Result<u32,
 /// Each kernel of the modules that take consts, called as Rust calls it.
 pub fn with_consts(
     kernels: &gpu_taking::Kernels,
-    x: kgen_cuda::Ptr<f32>,
+    x: kernite_cuda::Ptr<f32>,
     y: &mut u32,
 ) -> Result<u64, Box<dyn std::error::Error>> {
-    let grid = kgen_cuda::Grid::new(1, 1);
+    let grid = kernite_cuda::Grid::new(1, 1);
     unsafe {
         kernels.scale(grid, x)?;
         kernels.tile::<2>(grid, x)?;
@@ -59,7 +59,7 @@ pub fn with_consts(
     kernels.together_blocks(32, 0)?;
     kernels.rounds_blocks::<2>(32, 0)?;
     kernels.k__blocks(32, 0)?;
-    let grid = kgen_cpu::Grid::new(1);
+    let grid = kernite_cpu::Grid::new(1);
     unsafe {
         cpu_taking::together(grid, y)?;
         cpu_taking::rounds::<2>(grid, y)?;
@@ -69,7 +69,7 @@ pub fn with_consts(
 }
 
 /// Consts that kernels share, one of which no kernel reads.
-#[kgen_macros::consts]
+#[kernite_macros::consts]
 pub mod sizes {
     /// The length of a static.
     pub const LEN: usize = 4;
@@ -82,13 +82,13 @@ pub mod sizes {
 }
 
 /// Consts that no module of kernels takes.
-#[kgen_macros::consts]
+#[kernite_macros::consts]
 pub mod spare {
     /// Read by no kernel.
     pub const NOBODY: u32 = 1;
 }
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 mod cpu {
     /// Read by a kernel alone.
     const STEP: u64 = 3;
@@ -134,7 +134,7 @@ mod cpu {
     }
 }
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 mod gpu {
     /// Read by a kernel alone.
     const SCALE: f32 = 2.0;
@@ -190,7 +190,7 @@ mod gpu {
     }
 }
 
-#[kgen_macros::kernels(consts = crate::sizes)]
+#[kernite_macros::kernels(consts = crate::sizes)]
 mod cpu_taking {
     pub static COUNTS: global<[u32; LEN]>;
 
@@ -230,7 +230,7 @@ mod cpu_taking {
     }
 }
 
-#[kgen_macros::kernels(consts = crate::sizes)]
+#[kernite_macros::kernels(consts = crate::sizes)]
 mod gpu_taking {
     pub static COUNTS: global<[u32; LEN]>;
 

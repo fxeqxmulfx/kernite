@@ -1,10 +1,10 @@
-//! `X86` through the ports kgen-build calls, driven by hand as a use case drives them: each
+//! `X86` through the ports kernite-build calls, driven by hand as a use case drives them: each
 //! static laid out and each callee seen, then the kernel told of them, written and finished.
 
-use kgen_build::{Backend, Bytes, Called, HostStatic, Naked, Native, StaticError, Unfinished, function};
-use kgen_lang::{ItemKind, parse};
-use kgen_x86::X86;
-use kgen_x86::lang::Callee;
+use kernite_build::{Backend, Bytes, Called, HostStatic, Naked, Native, StaticError, Unfinished, function};
+use kernite_lang::{ItemKind, parse};
+use kernite_x86::X86;
+use kernite_x86::lang::Callee;
 
 /// A kernel that names memory of its module and calls a function of it comes out of the port as
 /// Rust takes it: its code as `naked_asm!` reads it, its listing, the CPU features it needs, the
@@ -23,11 +23,11 @@ fn x86_compiles_a_kernel_through_the_port() {
     let module = parse(src).unwrap();
     let ItemKind::Static(counts) = &module.items[0].kind else { panic!("a static first") };
     let (half, k) = (function(&module, "half").unwrap(), function(&module, "k").unwrap());
-    let statics = [X86.lay_out("COUNTS", &kgen_lang::memory(&module, counts).unwrap(), &[]).unwrap()];
+    let statics = [X86.lay_out("COUNTS", &kernite_lang::memory(&module, counts).unwrap(), &[]).unwrap()];
     let callee = X86.callee(half).unwrap();
     let callees = [Called { name: "half".into(), function: "half".into(), args: vec![], callee }];
     let mut kernel = X86.kernel(k, "k", &[], false, &statics, &callees);
-    kgen_lang::kernel(&module, k, &[], &mut kernel).unwrap();
+    kernite_lang::kernel(&module, k, &[], &mut kernel).unwrap();
     let code = X86.finish(kernel).unwrap();
     let text = "# k(gpr) -> ()
 # needs: avx
@@ -91,7 +91,7 @@ fn a_call_at_an_address_hands_on_the_functions_it_may_reach() {
     });
     let k = function(&module, "k").unwrap();
     let mut kernel = X86.kernel(k, "k", &[], false, &[], &callees);
-    kgen_lang::kernel(&module, k, &[], &mut kernel).unwrap();
+    kernite_lang::kernel(&module, k, &[], &mut kernel).unwrap();
     let naked = X86.naked(&X86.finish(kernel).unwrap());
     assert!(naked.funcs.is_empty());
     assert_eq!(naked.reach, ["half", "twice", "third"]);
@@ -111,7 +111,7 @@ fn a_static_named_as_a_listing_names_a_constant_is_refused() {
     ];
     for (item, want) in module.items.iter().zip(cases) {
         let ItemKind::Static(s) = &item.kind else { panic!("statics alone") };
-        let memory = kgen_lang::memory(&module, s).unwrap();
+        let memory = kernite_lang::memory(&module, s).unwrap();
         assert_eq!(X86.lay_out(&s.name, &memory, &[]), Err(StaticError::Name(want.into())));
     }
 }
@@ -132,7 +132,7 @@ fn a_call_to_a_cooperative_function_is_refused() {
     let callees =
         [Called { name: "together".into(), function: "together".into(), args: vec![], callee: Callee::Cooperative }];
     let mut kernel = X86.kernel(k, "k", &[], false, &[], &callees);
-    let e = kgen_lang::kernel(&module, k, &[], &mut kernel).unwrap_err();
+    let e = kernite_lang::kernel(&module, k, &[], &mut kernel).unwrap_err();
     let want = "4:6: `together` is `#[cooperative]`: its threads run on a grid, which its launcher starts, so no kernel \
                 calls it";
     assert_eq!(e.at(src), want);
@@ -170,7 +170,7 @@ fn a_frame_past_what_an_address_reaches_blames_no_variable() {
     let module = parse(&src).unwrap();
     let k = function(&module, "k").unwrap();
     let mut kernel = X86.kernel(k, "k", &[], false, &[], &[]);
-    kgen_lang::kernel(&module, k, &[], &mut kernel).unwrap();
+    kernite_lang::kernel(&module, k, &[], &mut kernel).unwrap();
     let message = "the kernel's frame, its stack memory and the variables that spilled, is 2147483680 bytes: more \
                    than an address reaches past the stack pointer";
     assert_eq!(X86.finish(kernel), Err(Unfinished { at: None, message: message.into() }));

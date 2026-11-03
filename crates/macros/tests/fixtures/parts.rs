@@ -1,7 +1,7 @@
 //! What a module says when its parts fail: which of a part's errors is said, what goes into the
 //! module all the same, and where the module's own error goes.
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod gpu {
     // Its instances' error. It is the module's first GPU function, so the module's error goes here
     // too, though this one fails.
@@ -25,20 +25,20 @@ pub mod gpu {
     }
 }
 
-#[kgen_macros::consts]
+#[kernite_macros::consts]
 pub mod sizes {
     pub const STEP: u64 = 3;
 }
 
 // One error, at the static: what comes after reads the module without the const given.
-#[kgen_macros::kernels(consts = crate::sizes)]
+#[kernite_macros::kernels(consts = crate::sizes)]
 pub mod a_static_named_as_a_const_given {
     pub static STEP: global<[u32; 4]>;
 }
 
 // The error of a static in a module of both kinds alone: x86 does not lay `A` out, so it does not
 // refuse its `f16`.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod both {
     pub unsafe extern "sysv64" fn x() {}
 
@@ -49,13 +49,13 @@ pub mod both {
 
 // The ABI's error alone: `c` is no kernel, so `#[cooperative]` says nothing, and its stub is the
 // function as written, which `outside` calls.
-#[kgen_macros::kernels]
-pub mod an_abi_kgen_does_not_know {
+#[kernite_macros::kernels]
+pub mod an_abi_kernite_does_not_know {
     #[cooperative]
     pub unsafe extern "C" fn c() {}
 }
 
 /// Calls `c` as it is written.
 pub fn outside() {
-    unsafe { an_abi_kgen_does_not_know::c() }
+    unsafe { an_abi_kernite_does_not_know::c() }
 }

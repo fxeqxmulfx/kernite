@@ -4,12 +4,12 @@
 
 /// Kernel `name` of `src`, for x86: its listing, as a snapshot holds it.
 fn x86(src: &str, name: &str) -> String {
-    kgen::x86_str(src, name).unwrap_or_else(|e| panic!("{e}")).text()
+    kernite::x86_str(src, name).unwrap_or_else(|e| panic!("{e}")).text()
 }
 
 /// The `.entry` of the one kernel in `src`, in PTX, from its name on.
 fn ptx(src: &str) -> String {
-    let module = kgen::ptx_str(src).unwrap_or_else(|e| panic!("{e}"));
+    let module = kernite::ptx_str(src).unwrap_or_else(|e| panic!("{e}"));
     module.split(".visible .entry ").nth(1).expect("an entry").to_string()
 }
 
@@ -20,7 +20,7 @@ fn kernel(body: &str) -> String {
 
 /// Why kernel `k`, whose body is `body` from its second line on, does not compile.
 fn refused(body: &str) -> String {
-    kgen::x86_str(&kernel(body), "k").unwrap_err()
+    kernite::x86_str(&kernel(body), "k").unwrap_err()
 }
 
 #[test]
@@ -64,20 +64,20 @@ fn a_function_that_names_an_abi_is_not_const_and_no_function_is_async() {
         (r#"pub const async unsafe extern "sysv64" fn k() {}"#, "1:5", constant),
         (r#"pub async const unsafe extern "sysv64" fn k() {}"#, "1:5", asynchronous),
     ] {
-        assert_eq!(kgen::x86_str(src, "k").unwrap_err(), format!("{at}: {message}"), "{src}");
+        assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("{at}: {message}"), "{src}");
     }
     for (helper, at) in [("async fn h() {}", "2:1"), ("const async fn h() {}", "2:7")] {
         let src = format!("pub unsafe extern \"sysv64\" fn k() {{ h(); }}\n{helper}");
-        assert_eq!(kgen::x86_str(&src, "k").unwrap_err(), format!("{at}: {asynchronous}"), "{src}");
+        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("{at}: {asynchronous}"), "{src}");
     }
     for (src, at, message) in [
         (r#"pub const unsafe extern "ptx-kernel" fn k() {}"#, "1:5", constant),
         (r#"pub async unsafe extern "ptx-kernel" fn k() {}"#, "1:5", asynchronous),
         (r#"const extern "ptx-func" fn f() {}"#, "1:1", constant),
     ] {
-        assert_eq!(kgen::ptx_str(src).unwrap_err(), format!("{at}: {message}"), "{src}");
+        assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("{at}: {message}"), "{src}");
     }
-    // A helper may be `const`: kgen runs it while the kernel compiles, as Rust may run a
+    // A helper may be `const`: kernite runs it while the kernel compiles, as Rust may run a
     // `const fn`.
     let src = "pub unsafe extern \"sysv64\" fn k() { h(); }\nconst fn h() { note(\"it runs now\"); }";
     assert_eq!(x86(src, "k"), "# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # it runs now\n    ret\n");
@@ -96,7 +96,7 @@ fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
         (r#"pub unsafe extern "sysv64" fn k(x: u64, r#x: u64) {}"#, "k", "1:41", "x"),
         // Only `_` alone names none.
         (r#"pub unsafe extern "sysv64" fn k(_x: u64, _x: u64) {}"#, "k", "1:42", "_x"),
-        // A helper is never written out as Rust, so only kgen refuses one, called or not.
+        // A helper is never written out as Rust, so only kernite refuses one, called or not.
         ("pub unsafe extern \"sysv64\" fn k() {}\nfn h(x: ymm, x: ymm) { vaddps(x, x, x); }", "k", "2:14", "x"),
         // A generic kernel is compiled for the instances it lists, and each is named by its values.
         (
@@ -107,14 +107,14 @@ fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
         ),
         ("#[instances(1)]\npub unsafe extern \"sysv64\" fn k<const N: u64>(N: u64) {}", "k::<1>", "2:47", "N"),
     ] {
-        assert_eq!(kgen::x86_str(src, kernel).unwrap_err(), format!("{at}: {}", twice(name)), "{src}");
+        assert_eq!(kernite::x86_str(src, kernel).unwrap_err(), format!("{at}: {}", twice(name)), "{src}");
     }
     // A GPU kernel and a GPU function are read as an x86 kernel is.
     for (src, at) in [
         (r#"pub unsafe extern "ptx-kernel" fn k(x: u64, x: u64) {}"#, "1:45"),
         (r#"pub unsafe extern "ptx-func" fn f(x: u64, x: u64) {}"#, "1:43"),
     ] {
-        assert_eq!(kgen::ptx_str(src).unwrap_err(), format!("{at}: {}", twice("x")), "{src}");
+        assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("{at}: {}", twice("x")), "{src}");
     }
     // `_` names none, so two stay, as Rust takes them.
     let src = r#"pub unsafe extern "sysv64" fn k(_: u64, _: u64) {}"#;
@@ -302,7 +302,7 @@ fn an_if_that_guards_no_instruction_is_refused() {
     ];
     for (body, want) in cases {
         let src = format!("unsafe extern \"ptx-kernel\" fn k(n: u32, out: *mut u32) {{\n{body}\n}}\nfn h() {{}}\n");
-        assert_eq!(kgen::ptx_str(&src).unwrap_err(), want, "{body}");
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{body}");
     }
     // An `if` that guards an instruction takes a note beside it, and counts one that a loop, an
     // `if` on a bool or a helper runs.
@@ -432,7 +432,7 @@ fn a_const_is_a_number_a_float_a_bool_or_an_array_of_them() {
     ret
 ";
     assert_eq!(x86(&src("[u64; 2]"), "k"), want);
-    let e = kgen::x86_str(&src("[u64]"), "k").unwrap_err();
+    let e = kernite::x86_str(&src("[u64]"), "k").unwrap_err();
     assert_eq!(e, "4:11: a value known now is a number, a bool, or an array of them, `[T; N]`");
 }
 
@@ -512,7 +512,7 @@ fn errors_point_where_the_trouble_is() {
         ),
         ("let t: [f32];", "1:8: variables are declared so many at once: `let t: [u32; 4];`"),
         // The machine is given a name as it writes it, not as Rust must.
-        ("let v: ymm; vaddps._2d__x(v);", "1:20: x86 has no instruction `vaddps.2d::x` that kgen knows"),
+        ("let v: ymm; vaddps._2d__x(v);", "1:20: x86 has no instruction `vaddps.2d::x` that kernite knows"),
         ("let a: [ymm; 2]; zero(a[2]);", "1:24: `a` has 2 variables; there is no [2]"),
         ("let v: ymm; vmovups(v, [v * v]);", "1:27: an address multiplies a variable by a number, not by a variable"),
         (
@@ -541,7 +541,7 @@ fn errors_point_where_the_trouble_is() {
             "unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\nfn two(a: ymm, b: ymm) {{}}\nfn deep() {{ deep(); }}\n\
              const A: usize = B;\nconst B: usize = A;\n"
         );
-        let got = kgen::x86_str(&src, "k").unwrap_err();
+        let got = kernite::x86_str(&src, "k").unwrap_err();
         // The body is on the second line.
         let want = want.replacen("1:", "2:", 1);
         assert_eq!(got, want, "{body}");
@@ -568,7 +568,7 @@ fn errors_point_where_the_trouble_is() {
         ),
     ];
     for (body, want) in cases {
-        let got = kgen::ptx_str(&format!("unsafe extern \"ptx-kernel\" fn k() {{\n{body}\n}}\n")).unwrap_err();
+        let got = kernite::ptx_str(&format!("unsafe extern \"ptx-kernel\" fn k() {{\n{body}\n}}\n")).unwrap_err();
         assert_eq!(got, *want, "{body}");
     }
 }
@@ -587,11 +587,11 @@ fn an_error_is_placed_at_its_own_variable_s_declaration() {
     for (body, want) in cases {
         let src =
             format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\nfn h() {{ let v: ymm; vaddps(v, v, v); }}\n");
-        let got = kgen::x86_str(&src, "k").unwrap_err();
+        let got = kernite::x86_str(&src, "k").unwrap_err();
         assert_eq!(got, *want, "{body}");
     }
     let body = "let v: f32; let v: f32; add.rn.f32(v, v, 1.5); let v: f32;";
-    let got = kgen::ptx_str(&format!("unsafe extern \"ptx-kernel\" fn k() {{\n{body}\n}}\n")).unwrap_err();
+    let got = kernite::ptx_str(&format!("unsafe extern \"ptx-kernel\" fn k() {{\n{body}\n}}\n")).unwrap_err();
     assert_eq!(got, "2:17: `v` is read before anything writes it");
 }
 
@@ -681,10 +681,10 @@ fn h<const N: u32>() {}
     ];
     for (case, want) in cases {
         let src = case.replacen('K', k, 1) + after;
-        assert_eq!(kgen::ptx_str(&src).unwrap_err(), *want, "{case}");
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), *want, "{case}");
     }
     let named = "K() { let a: u64; mov.u64(a, shift::<{ WIDE / 8 }>); mov.u64(a, shift::<8u32>); }";
-    let ptx = kgen::ptx_str(&(named.replacen('K', k, 1) + after)).unwrap();
+    let ptx = kernite::ptx_str(&(named.replacen('K', k, 1) + after)).unwrap();
     assert!(ptx.contains("\tmov.u64 %a, _Z5shiftILj1EE;\n\tmov.u64 %a, _Z5shiftILj8EE;\n"), "{ptx}");
 }
 
@@ -699,7 +699,7 @@ fn a_helper_sees_none_of_its_callers_names() {
             note("{secret}");
         }
     "#;
-    assert_eq!(kgen::x86_str(src, "k").unwrap_err(), "7:18: `secret` is not defined");
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), "7:18: `secret` is not defined");
 }
 
 /// Each const, function and static of a module has a name of its own: of two of one name, the
@@ -714,7 +714,7 @@ fn each_const_function_and_static_has_a_name_of_its_own() {
             r#"#[instances(4, 2)] pub unsafe extern "sysv64" fn tile<const N: usize>() {} pub unsafe extern "sysv64" fn tile() {}"#,
             "1:106: `tile` names another function of the module as well",
         ),
-        // Two under a `#[cfg]` each are two as well: kgen reads every item.
+        // Two under a `#[cfg]` each are two as well: kernite reads every item.
         (
             r#"#[cfg(a)] pub unsafe extern "sysv64" fn k() {} #[cfg(not(a))] pub unsafe extern "sysv64" fn k() {}"#,
             "1:93: `k` names another function of the module as well",
@@ -732,10 +732,10 @@ fn each_const_function_and_static_has_a_name_of_its_own() {
         ),
     ];
     for (src, want) in cases {
-        assert_eq!(kgen::x86_str(src, "k").unwrap_err(), want, "{src}");
+        assert_eq!(kernite::x86_str(src, "k").unwrap_err(), want, "{src}");
     }
     let src = r#"pub unsafe extern "ptx-kernel" fn k() {} pub unsafe extern "ptx-kernel" fn k() {}"#;
-    assert_eq!(kgen::ptx_str(src).unwrap_err(), "1:76: `k` names another function of the module as well");
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), "1:76: `k` names another function of the module as well");
 }
 
 #[test]
@@ -777,17 +777,17 @@ fn a_constant_works_out_on_its_own() {
     let src = "const D: usize = E / H;\nconst E: usize = 16;\nconst H: usize = 4;\nconst W: [f32; 2] = [0.5, -1.0];\n\
                const LOOP: u32 = LOOP + 1;\nconst BAD: u32 = 1.5;\nconst GONE: u32 = NOPE;\n\
                unsafe extern \"sysv64\" fn k() {}\n";
-    let module = kgen::lang::parse(src).unwrap();
+    let module = kernite::lang::parse(src).unwrap();
     let value = |name: &str| {
         let c = module
             .items
             .iter()
             .find_map(|item| match &item.kind {
-                kgen::lang::ItemKind::Const(c) if c.name == name => Some(c),
+                kernite::lang::ItemKind::Const(c) if c.name == name => Some(c),
                 _ => None,
             })
             .unwrap();
-        kgen::lang::constant(&module, c).map(|v| v.to_string()).map_err(|e| e.at(src))
+        kernite::lang::constant(&module, c).map(|v| v.to_string()).map_err(|e| e.at(src))
     };
     let cases = [
         ("D", Ok("4")),
@@ -920,7 +920,7 @@ fn a_let_that_would_pass_the_most_variables_is_refused_before_any_is_made() {
 fn a_helpers_variables_count_for_the_kernel_that_calls_it() {
     let src = "unsafe extern \"sysv64\" fn k() {\nlet a: [gpr; 65535]; h();\n}\nfn h() { let t: [gpr; 2]; }\n";
     assert_eq!(
-        kgen::x86_str(src, "k").unwrap_err(),
+        kernite::x86_str(src, "k").unwrap_err(),
         "4:23: 65537 variables are too many: a kernel declares 65536 at most"
     );
 }
@@ -929,7 +929,7 @@ fn a_helpers_variables_count_for_the_kernel_that_calls_it() {
 /// builds no graph of its variables, so this takes no time to speak of.
 #[test]
 fn a_kernel_that_declares_exactly_the_most_variables_compiles() {
-    kgen::ptx_str("unsafe extern \"ptx-kernel\" fn k(x: *mut u32) {\nlet v: [u32; 65536];\n}\n").unwrap();
+    kernite::ptx_str("unsafe extern \"ptx-kernel\" fn k(x: *mut u32) {\nlet v: [u32; 65536];\n}\n").unwrap();
 }
 
 /// A row of operators, of brackets, of `else if`s or of arrays nests 64 deep at most. A row of the
@@ -971,7 +971,7 @@ fn consts_that_name_consts_nest_64_deep_at_most() {
     };
     x86(&module(63), "k");
     for n in [64, 5000] {
-        assert_eq!(kgen::x86_str(&module(n), "k").unwrap_err(), "65:18: this nests 64 deep at most", "{n}");
+        assert_eq!(kernite::x86_str(&module(n), "k").unwrap_err(), "65:18: this nests 64 deep at most", "{n}");
     }
 }
 
@@ -1021,7 +1021,7 @@ fn the_loops_of_helpers_that_call_helpers_nest_64_deep_at_most() {
         format!("{helpers}{}", kernel("h0();"))
     };
     x86(&module(62), "k");
-    assert_eq!(kgen::x86_str(&module(63), "k").unwrap_err(), "63:21: this nests 64 deep at most");
+    assert_eq!(kernite::x86_str(&module(63), "k").unwrap_err(), "63:21: this nests 64 deep at most");
 }
 
 /// The deepest kernel the rules allow, helpers 64 deep and a sum of 64 terms in the last, compiles
@@ -1071,7 +1071,7 @@ fn work_past_the_most_steps_is_refused_where_the_step_past_it_is_taken() {
     ];
     for (name, src, at) in cases {
         let want = format!("{at}: this takes more than 4194304 steps to work out");
-        assert_eq!(kgen::x86_str(&src, "k").unwrap_err(), want, "{name}");
+        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), want, "{name}");
     }
 }
 
@@ -1102,10 +1102,10 @@ fn work_within_the_most_steps_compiles() {
     for (name, work, steps) in cases {
         let turns = (4194304 - steps) / 2;
         let body = format!("{work} for k in 0..{} {{}} for l in 0..{} {{}}", turns / 2, turns - turns / 2);
-        if let Err(e) = kgen::x86_str(&kernel(&body), "k") {
+        if let Err(e) = kernite::x86_str(&kernel(&body), "k") {
             panic!("{name}: {e}");
         }
-        let past = kgen::x86_str(&kernel(&format!("{body} note(\"\");")), "k");
+        let past = kernite::x86_str(&kernel(&format!("{body} note(\"\");")), "k");
         let want = format!("2:{}: this takes more than 4194304 steps to work out", body.len() + 2);
         assert_eq!(past.err(), Some(want), "{name}");
     }

@@ -1,7 +1,7 @@
 //! Memory a kernel declares, and the module's, a `static`: its shape, what it holds, and
 //! whether the module has room for it.
 
-use kgen_lang::{IntTy, Value};
+use kernite_lang::{IntTy, Value};
 
 use crate::forms::Space;
 use crate::ty::{Kind, Ty};

@@ -1,6 +1,6 @@
 //! Errors of the language inside a module, each where it is in the module.
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod both {
     pub unsafe extern "sysv64" fn add(n: u64) {
         let v: ymm;

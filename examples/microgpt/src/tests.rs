@@ -39,7 +39,7 @@ fn python_start() -> (Random, Names) {
 
 /// A model of `params` on the GPU; or, where there is no GPU to test, `None`, and why.
 fn on_gpu(params: &[f32]) -> Option<Gpu> {
-    match kgen_cuda::Cuda::new() {
+    match kernite_cuda::Cuda::new() {
         Ok(_) => Some(Gpu::new(params).unwrap_or_else(|e| panic!("{e}"))),
         Err(e) => {
             eprintln!("no GPU: skipped. {e}");
@@ -215,12 +215,12 @@ fn gpu_runs_as_the_reference_does() {
 }
 
 /// Each x86 kernel's listing against the one in `snapshots/`, and the GPU kernels' PTX, so that
-/// a change to kgen or to a kernel that moves an instruction shows in review. With
-/// `KGEN_BLESS=1` the files are written instead, for the diff to be reviewed and committed.
+/// a change to kernite or to a kernel that moves an instruction shows in review. With
+/// `KERNITE_BLESS=1` the files are written instead, for the diff to be reviewed and committed.
 #[test]
 fn listings_match_their_snapshots() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("snapshots");
-    let bless = std::env::var_os("KGEN_BLESS").is_some();
+    let bless = std::env::var_os("KERNITE_BLESS").is_some();
     let mut changed = vec![];
     let files = cpu::kernels::LISTINGS.iter().map(|&(name, text)| (format!("{name}.s"), text));
     for (name, text) in files.chain([("gpu.ptx".to_string(), gpu::kernels::PTX)]) {
@@ -232,5 +232,5 @@ fn listings_match_their_snapshots() {
             changed.push(name);
         }
     }
-    assert!(changed.is_empty(), "listings changed: {changed:?}; rerun with KGEN_BLESS=1 and review the diff");
+    assert!(changed.is_empty(), "listings changed: {changed:?}; rerun with KERNITE_BLESS=1 and review the diff");
 }

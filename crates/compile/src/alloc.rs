@@ -1,4 +1,4 @@
-use kgen_core::{Flow, Item, PReg, Program, VReg};
+use kernite_core::{Flow, Item, PReg, Program, VReg};
 
 use crate::Error;
 use crate::bits::Bits;

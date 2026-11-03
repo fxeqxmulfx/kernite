@@ -1,6 +1,6 @@
 //! Liveness: which variables are live where, and which interfere.
 
-use kgen_core::{Arg, Item, PReg, Program, VReg};
+use kernite_core::{Arg, Item, PReg, Program, VReg};
 
 use crate::Error;
 use crate::bits::Bits;

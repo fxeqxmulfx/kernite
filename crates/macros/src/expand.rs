@@ -1,12 +1,12 @@
-//! What a module of kernels becomes once kgen has compiled its kernels: each item as what
-//! `kgen::module` says it is, written out for Rust.
+//! What a module of kernels becomes once kernite has compiled its kernels: each item as what
+//! `kernite::module` says it is, written out for Rust.
 
 use std::path::Path;
 
 use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
 
-use kgen::lang::{self, ItemKind};
-use kgen::{ItemOut, Launcher, ModuleOut};
+use kernite::lang::{self, ItemKind};
+use kernite::{ItemOut, Launcher, ModuleOut};
 
 use crate::gpu::{HOLE, gpu};
 use crate::rust::{const_names, error, flatten, inner_attribute, is_ident, is_punct, lex, parse, site, stub};
@@ -35,11 +35,11 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
         Err(message) => (String::new(), None, Some(message)),
     };
     let names: Vec<&str> = [workspace.as_str()].into_iter().filter(|n| !n.is_empty()).collect();
-    let scope = kgen::ptx_scope(&names) + HOLE;
+    let scope = kernite::ptx_scope(&names) + HOLE;
     let consts = given
         .as_ref()
-        .map(|(_, path)| kgen::Given { before: n, from: path.iter().map(TokenTree::to_string).collect() });
-    let made = kgen::module(module, consts, &scope);
+        .map(|(_, path)| kernite::Given { before: n, from: path.iter().map(TokenTree::to_string).collect() });
+    let made = kernite::module(module, consts, &scope);
     let module = &made.module;
     // The module's own attributes, `#![..]`, before anything the macro writes, where Rust has
     // them.
@@ -96,7 +96,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
                     Launcher::Of(launched) => (f, Some(launched.as_slice())),
                 }));
             }
-            _ => unreachable!("kgen::module says what each item is"),
+            _ => unreachable!("kernite::module says what each item is"),
         }
     }
     out.extend(used(module, &made.read, &top));

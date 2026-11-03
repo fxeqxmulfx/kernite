@@ -330,7 +330,7 @@ fn number(text: &str, want: Want, negative: bool) -> Result<Value, String> {
         Some("0b") => 2,
         _ => 10,
     };
-    let bad = || format!("`{text}` is not a number kgen reads");
+    let bad = || format!("`{text}` is not a number kernite reads");
     if radix != 10 {
         let body = &t[2..];
         let split = body.find(|c: char| !c.is_digit(radix)).unwrap_or(body.len());

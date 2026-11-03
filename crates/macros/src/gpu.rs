@@ -3,8 +3,8 @@
 
 use proc_macro::{Delimiter, Group, Ident, Span, TokenStream, TokenTree};
 
-use kgen::DeviceStatic;
-use kgen::lang::{self, Fn, Value};
+use kernite::DeviceStatic;
+use kernite::lang::{self, Fn, Value};
 
 use crate::rust::{
     attrs, clashes, error, flatten, host, hygienic, is_ident, is_punct, never, parse, pick, site, visibility,
@@ -12,7 +12,7 @@ use crate::rust::{
 };
 
 /// Where the module's path goes in its PTX and in its kernels' names. A macro is not told
-/// the module it is in, so `kgen_cuda::__named!` writes `module_path!()` there once Rust
+/// the module it is in, so `kernite_cuda::__named!` writes `module_path!()` there once Rust
 /// knows it, as C++ mangles a namespace's names.
 pub(crate) const HOLE: &str = "\0";
 
@@ -41,20 +41,20 @@ pub(crate) fn gpu(
         "/// The module's GPU kernels, in PTX, for the CUDA driver to compile for the GPU it finds.\n\
          /// Each is named as C++ names it in the namespaces of the workspace, the crate and the\n\
          /// module, with its compile-time arguments, for the tools that read PTX to show:\n\
-         /// `kgen::my_app::gpu::tile<(unsigned long)4>`.\n\
+         /// `kernite::my_app::gpu::tile<(unsigned long)4>`.\n\
          pub const PTX: &str = {};\n\
          /// The module's GPU kernels, loaded on a GPU: each is launched by the method of its name,\n\
-         /// and the memory of each static is the `kgen_cuda::Global` the method of its name gives.\n\
-         pub struct Kernels {{\n    module: ::kgen_cuda::Module,\n}}\n\
+         /// and the memory of each static is the `kernite_cuda::Global` the method of its name gives.\n\
+         pub struct Kernels {{\n    module: ::kernite_cuda::Module,\n}}\n\
          impl Kernels",
         named(ptx)
     ));
     let mut methods = parse(&format!(
         "/// The kernels, compiled for `cuda`'s GPU by its driver.\n\
-         pub fn load(cuda: &::kgen_cuda::Cuda) -> ::core::result::Result<Kernels, ::kgen_cuda::Error> {{\n\
+         pub fn load(cuda: &::kernite_cuda::Cuda) -> ::core::result::Result<Kernels, ::kernite_cuda::Error> {{\n\
              const NAMES: &[&str] = &[{}];\n\
              const GLOBALS: &[&str] = &[{}];\n\
-             ::core::result::Result::Ok(Kernels {{ module: ::kgen_cuda::Module::load(cuda, PTX, NAMES, GLOBALS)? }})\n\
+             ::core::result::Result::Ok(Kernels {{ module: ::kernite_cuda::Module::load(cuda, PTX, NAMES, GLOBALS)? }})\n\
          }}",
         names.join(", "),
         globals.join(", ")
@@ -88,8 +88,8 @@ pub(crate) fn gpu(
 }
 
 /// The method that gives static `s`'s memory on the GPU, `made`, by its index among the
-/// module's variables, as the `kgen_cuda::Global` of the type of Rust's its elements are read
-/// as; or one that never runs, for a static that did not compile.
+/// module's variables, as the `kernite_cuda::Global` of the type of Rust's its elements are
+/// read as; or one that never runs, for a static that did not compile.
 fn accessor(s: &lang::Static, made: Option<(&DeviceStatic, usize)>, top: &[TokenTree]) -> TokenStream {
     let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
     out.extend(top[s.vis.clone()].iter().cloned());
@@ -102,9 +102,11 @@ fn accessor(s: &lang::Static, made: Option<(&DeviceStatic, usize)>, top: &[Token
     out.extend(parse(&match made {
         Some((m, i)) => {
             let ty = host(&[TokenTree::Ident(Ident::new(&m.host, site()))]);
-            format!("(&self) -> ::kgen_cuda::Global<'_, {ty}> {{ self.module.global({i}) }}")
+            format!("(&self) -> ::kernite_cuda::Global<'_, {ty}> {{ self.module.global({i}) }}")
         }
-        None => "<T: ::kgen_cuda::Plain>(&self) -> ::kgen_cuda::Global<'_, T> { ::core::unreachable!() }".to_string(),
+        None => {
+            "<T: ::kernite_cuda::Plain>(&self) -> ::kernite_cuda::Global<'_, T> { ::core::unreachable!() }".to_string()
+        }
     }));
     out
 }
@@ -112,11 +114,11 @@ fn accessor(s: &lang::Static, made: Option<(&DeviceStatic, usize)>, top: &[Token
 /// `text`, with the module's path written where each [`HOLE`] is, as the constant it is.
 fn named(text: &str) -> String {
     let pieces: Vec<String> = text.split(HOLE).map(|p| format!("{p:?}")).collect();
-    format!("::kgen_cuda::__named!(::core::module_path!(), [{}])", pieces.join(", "))
+    format!("::kernite_cuda::__named!(::core::module_path!(), [{}])", pieces.join(", "))
 }
 
 /// The method that launches `f` over a grid, each of its instances `launched`: its parameters
-/// those of `f`, a pointer as the address on the GPU it is, `::kgen_cuda::Ptr`; and its
+/// those of `f`, a pointer as the address on the GPU it is, `::kernite_cuda::Ptr`; and its
 /// compile-time arguments those of `f`, which pick the instance. A cooperative kernel is
 /// launched cooperatively, every block of its grid at once. The launcher binds `grid` for
 /// itself, which a parameter of `f` may be named as well; a compile-time argument may not, which
@@ -147,15 +149,15 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("unsafe fn"));
     out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
-    let mut params = hygienic("&self, $grid: ::kgen_cuda::Grid, ", launched.is_some());
+    let mut params = hygienic("&self, $grid: ::kernite_cuda::Grid, ", launched.is_some());
     let mut args = vec![];
     for (param, colon) in written_params(f, top) {
         // Its name as written, before the colon.
-        args.push(format!("::kgen_cuda::arg(&{})", param[colon - 1]));
+        args.push(format!("::kernite_cuda::arg(&{})", param[colon - 1]));
         params.extend(param[..=colon].iter().cloned());
         match &param[colon + 1..] {
             [star, kind, pointee @ ..] if is_punct(star, '*') && (is_ident(kind, "const") || is_ident(kind, "mut")) => {
-                params.extend(parse("::kgen_cuda::Ptr<"));
+                params.extend(parse("::kernite_cuda::Ptr<"));
                 params.extend(host(pointee));
                 params.extend(parse(">"));
             }
@@ -164,7 +166,7 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
         params.extend(parse(","));
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, params))]);
-    out.extend(parse("-> ::core::result::Result<(), ::kgen_cuda::Error>"));
+    out.extend(parse("-> ::core::result::Result<(), ::kernite_cuda::Error>"));
     let how = if f.cooperative.is_some() { "launch_cooperative" } else { "launch" };
     out.extend(body(f, launched, top, &never(f, top), |index| {
         format!("unsafe {{ self.module.{how}({index}, $grid, &[{}]) }}", args.join(", "))
@@ -211,7 +213,7 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
         t
     }));
     out.extend(hygienic(
-        "(&self, $threads: u32, $shared: u32) -> ::core::result::Result<u32, ::kgen_cuda::Error>",
+        "(&self, $threads: u32, $shared: u32) -> ::core::result::Result<u32, ::kernite_cuda::Error>",
         launched.is_some(),
     ));
     out.extend(body(f, launched, top, "::core::unreachable!()", |index| {

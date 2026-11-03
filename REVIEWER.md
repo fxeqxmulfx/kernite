@@ -53,7 +53,7 @@ For each task in review, in the order they arrive:
      the generated code.
      Minimum code: no line the task does not need, no type or function that only hands a value
      on, nothing left dead; the gate's "code outside tests" line shows what the task added, and
-     growth its text does not call for is refused. The whole spec: kgen refuses no form of a
+     growth its text does not call for is refused. The whole spec: kernite refuses no form of a
      target's spec that it took before, and refuses what it took against its own rules only as
      decision 3 fixes a defect; every new rule has a test. Safety: nothing to build in this
      rewrite, but no change may make a safe call harder to add later.

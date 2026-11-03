@@ -1,9 +1,9 @@
 //! The text of a module's GPU kernels, and their names, with the Rust module they are in
-//! written into them as Rust compiles it. kgen-macros writes the text before Rust knows the
+//! written into them as Rust compiles it. kernite-macros writes the text before Rust knows the
 //! module, which a macro is not told, so it leaves a hole wherever the module's path goes, and
 //! [`__named!`](crate::__named) fills each with `module_path!()` as C++ mangles a namespace's
 //! names, `<length><name>` each: `my_app::gpu` is `6my_app3gpu`. The tools that read PTX
-//! show `_ZN4kgen6my_app3gpu5saxpyE` as `kgen::my_app::gpu::saxpy`.
+//! show `_ZN7kernite6my_app3gpu5saxpyE` as `kernite::my_app::gpu::saxpy`.
 //!
 //! It is all `const`, so the text is a constant all the same: nothing is written as the
 //! program runs.
@@ -23,7 +23,7 @@ pub const fn scope_len(path: &str) -> usize {
 
 /// `path`'s names as C++ mangles them, `<length><name>` each, for `N` the bytes
 /// [`scope_len`] says they take. A raw name, `r#type`, is the name, `type`; and a character
-/// that cannot be in a name of PTX's, which takes nothing beyond ASCII, is written as kgen-ptx
+/// that cannot be in a name of PTX's, which takes nothing beyond ASCII, is written as kernite-ptx
 /// writes it, as Rust's legacy mangling does: `σ` as `$u3c3$`.
 pub const fn scope<const N: usize>(path: &str) -> [u8; N] {
     let b = path.as_bytes();
@@ -153,7 +153,7 @@ pub const fn text(bytes: &'static [u8]) -> &'static str {
 }
 
 /// `pieces` joined, a constant `&'static str`, with the names of `path`, a Rust module's path,
-/// between each two, as C++ mangles a namespace's names: what kgen-macros writes for a
+/// between each two, as C++ mangles a namespace's names: what kernite-macros writes for a
 /// module's PTX and its kernels' names, `path` its `module_path!()`.
 #[doc(hidden)]
 #[macro_export]
@@ -173,11 +173,11 @@ mod tests {
 
     #[test]
     fn each_name_of_the_path_is_its_length_and_itself() {
-        const NAME: &str = crate::__named!("my_app::gpu", ["_ZN4kgen", "5saxpyE"]);
-        assert_eq!(NAME, "_ZN4kgen6my_app3gpu5saxpyE");
+        const NAME: &str = crate::__named!("my_app::gpu", ["_ZN7kernite", "5saxpyE"]);
+        assert_eq!(NAME, "_ZN7kernite6my_app3gpu5saxpyE");
         const LONG: &str = crate::__named!("a::abcdefghijklmnopqrstuvwxyz_0123456789::b", ["_ZN", "1fE"]);
         assert_eq!(LONG, "_ZN1a37abcdefghijklmnopqrstuvwxyz_01234567891b1fE");
-        assert_eq!(crate::__named!(module_path!(), ["_ZN", "1kE"]), "_ZN9kgen_cuda5named5tests1kE");
+        assert_eq!(crate::__named!(module_path!(), ["_ZN", "1kE"]), "_ZN12kernite_cuda5named5tests1kE");
     }
 
     #[test]

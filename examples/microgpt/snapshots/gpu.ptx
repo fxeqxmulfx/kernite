@@ -1,27 +1,27 @@
-// Written by kgen.
+// Written by kernite.
 
 .version 2.3
 .target sm_20
 .address_size 64
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels5embedE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels5embedE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels5embedE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels5embedE_param_2,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels5embedE_param_3
+.visible .entry _ZN7kernite8microgpt3gpu7kernels5embedE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels5embedE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels5embedE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels5embedE_param_2,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels5embedE_param_3
 )
 {
 	.reg .u32 %t0, %t, %e, %tok, %i;
 	.reg .f32 %a, %b;
 	.reg .u64 %x0, %p, %tokens, %at, %at_1, %at_2, %at_3;
 
-	ld.param.u64 %x0, [_ZN4kgen8microgpt3gpu7kernels5embedE_param_0];
+	ld.param.u64 %x0, [_ZN7kernite8microgpt3gpu7kernels5embedE_param_0];
 	cvta.to.global.u64 %x0, %x0;
-	ld.param.u64 %p, [_ZN4kgen8microgpt3gpu7kernels5embedE_param_1];
+	ld.param.u64 %p, [_ZN7kernite8microgpt3gpu7kernels5embedE_param_1];
 	cvta.to.global.u64 %p, %p;
-	ld.param.u64 %tokens, [_ZN4kgen8microgpt3gpu7kernels5embedE_param_2];
+	ld.param.u64 %tokens, [_ZN7kernite8microgpt3gpu7kernels5embedE_param_2];
 	cvta.to.global.u64 %tokens, %tokens;
-	ld.param.u32 %t0, [_ZN4kgen8microgpt3gpu7kernels5embedE_param_3];
+	ld.param.u32 %t0, [_ZN7kernite8microgpt3gpu7kernels5embedE_param_3];
 	mov.u32 %t, %ctaid.x;
 	add.u32 %t, %t, %t0;
 	mov.u32 %e, %tid.x;
@@ -41,11 +41,11 @@
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels7rmsnormE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels7rmsnormE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels7rmsnormE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels7rmsnormE_param_2,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels7rmsnormE_param_3
+.visible .entry _ZN7kernite8microgpt3gpu7kernels7rmsnormE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels7rmsnormE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels7rmsnormE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels7rmsnormE_param_2,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels7rmsnormE_param_3
 )
 {
 	.reg .u32 %t0, %t;
@@ -54,13 +54,13 @@
 	.reg .f32 %ss, %s;
 	.reg .u64 %y, %r, %x, %xs, %ys, %at;
 
-	ld.param.u64 %y, [_ZN4kgen8microgpt3gpu7kernels7rmsnormE_param_0];
+	ld.param.u64 %y, [_ZN7kernite8microgpt3gpu7kernels7rmsnormE_param_0];
 	cvta.to.global.u64 %y, %y;
-	ld.param.u64 %r, [_ZN4kgen8microgpt3gpu7kernels7rmsnormE_param_1];
+	ld.param.u64 %r, [_ZN7kernite8microgpt3gpu7kernels7rmsnormE_param_1];
 	cvta.to.global.u64 %r, %r;
-	ld.param.u64 %x, [_ZN4kgen8microgpt3gpu7kernels7rmsnormE_param_2];
+	ld.param.u64 %x, [_ZN7kernite8microgpt3gpu7kernels7rmsnormE_param_2];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u32 %t0, [_ZN4kgen8microgpt3gpu7kernels7rmsnormE_param_3];
+	ld.param.u32 %t0, [_ZN7kernite8microgpt3gpu7kernels7rmsnormE_param_3];
 	mov.u32 %t, %tid.x;
 	add.u32 %t, %t, %t0;
 	mad.wide.u32 %xs, %t, 64, %x;
@@ -139,11 +139,11 @@
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels3qkvE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels3qkvE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels3qkvE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels3qkvE_param_2,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels3qkvE_param_3
+.visible .entry _ZN7kernite8microgpt3gpu7kernels3qkvE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels3qkvE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels3qkvE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels3qkvE_param_2,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels3qkvE_param_3
 )
 {
 	.reg .u32 %t0, %t, %o, %j;
@@ -154,13 +154,13 @@
 	.reg .f32 %wi_15;
 	.reg .u64 %y, %x, %w, %xs, %ws, %at;
 
-	ld.param.u64 %y, [_ZN4kgen8microgpt3gpu7kernels3qkvE_param_0];
+	ld.param.u64 %y, [_ZN7kernite8microgpt3gpu7kernels3qkvE_param_0];
 	cvta.to.global.u64 %y, %y;
-	ld.param.u64 %x, [_ZN4kgen8microgpt3gpu7kernels3qkvE_param_1];
+	ld.param.u64 %x, [_ZN7kernite8microgpt3gpu7kernels3qkvE_param_1];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u64 %w, [_ZN4kgen8microgpt3gpu7kernels3qkvE_param_2];
+	ld.param.u64 %w, [_ZN7kernite8microgpt3gpu7kernels3qkvE_param_2];
 	cvta.to.global.u64 %w, %w;
-	ld.param.u32 %t0, [_ZN4kgen8microgpt3gpu7kernels3qkvE_param_3];
+	ld.param.u32 %t0, [_ZN7kernite8microgpt3gpu7kernels3qkvE_param_3];
 	mov.u32 %t, %ctaid.x;
 	add.u32 %t, %t, %t0;
 	mov.u32 %o, %tid.x;
@@ -221,12 +221,12 @@
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels2woE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels2woE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels2woE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels2woE_param_2,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels2woE_param_3,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels2woE_param_4
+.visible .entry _ZN7kernite8microgpt3gpu7kernels2woE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels2woE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels2woE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels2woE_param_2,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels2woE_param_3,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels2woE_param_4
 )
 {
 	.reg .u32 %t0, %t, %o, %j;
@@ -237,15 +237,15 @@
 	.reg .f32 %wi_15, %r;
 	.reg .u64 %y, %x, %w, %res, %xs, %ws, %at, %at_1;
 
-	ld.param.u64 %y, [_ZN4kgen8microgpt3gpu7kernels2woE_param_0];
+	ld.param.u64 %y, [_ZN7kernite8microgpt3gpu7kernels2woE_param_0];
 	cvta.to.global.u64 %y, %y;
-	ld.param.u64 %x, [_ZN4kgen8microgpt3gpu7kernels2woE_param_1];
+	ld.param.u64 %x, [_ZN7kernite8microgpt3gpu7kernels2woE_param_1];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u64 %w, [_ZN4kgen8microgpt3gpu7kernels2woE_param_2];
+	ld.param.u64 %w, [_ZN7kernite8microgpt3gpu7kernels2woE_param_2];
 	cvta.to.global.u64 %w, %w;
-	ld.param.u64 %res, [_ZN4kgen8microgpt3gpu7kernels2woE_param_3];
+	ld.param.u64 %res, [_ZN7kernite8microgpt3gpu7kernels2woE_param_3];
 	cvta.to.global.u64 %res, %res;
-	ld.param.u32 %t0, [_ZN4kgen8microgpt3gpu7kernels2woE_param_4];
+	ld.param.u32 %t0, [_ZN7kernite8microgpt3gpu7kernels2woE_param_4];
 	mov.u32 %t, %ctaid.x;
 	add.u32 %t, %t, %t0;
 	mov.u32 %o, %tid.x;
@@ -309,11 +309,11 @@
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels3fc1E(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels3fc1E_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels3fc1E_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels3fc1E_param_2,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels3fc1E_param_3
+.visible .entry _ZN7kernite8microgpt3gpu7kernels3fc1E(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels3fc1E_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels3fc1E_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels3fc1E_param_2,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels3fc1E_param_3
 )
 {
 	.reg .pred %above;
@@ -325,13 +325,13 @@
 	.reg .f32 %wi_15;
 	.reg .u64 %y, %x, %w, %xs, %ws, %at;
 
-	ld.param.u64 %y, [_ZN4kgen8microgpt3gpu7kernels3fc1E_param_0];
+	ld.param.u64 %y, [_ZN7kernite8microgpt3gpu7kernels3fc1E_param_0];
 	cvta.to.global.u64 %y, %y;
-	ld.param.u64 %x, [_ZN4kgen8microgpt3gpu7kernels3fc1E_param_1];
+	ld.param.u64 %x, [_ZN7kernite8microgpt3gpu7kernels3fc1E_param_1];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u64 %w, [_ZN4kgen8microgpt3gpu7kernels3fc1E_param_2];
+	ld.param.u64 %w, [_ZN7kernite8microgpt3gpu7kernels3fc1E_param_2];
 	cvta.to.global.u64 %w, %w;
-	ld.param.u32 %t0, [_ZN4kgen8microgpt3gpu7kernels3fc1E_param_3];
+	ld.param.u32 %t0, [_ZN7kernite8microgpt3gpu7kernels3fc1E_param_3];
 	mov.u32 %t, %ctaid.x;
 	add.u32 %t, %t, %t0;
 	mov.u32 %o, %tid.x;
@@ -394,12 +394,12 @@
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels3fc2E(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels3fc2E_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels3fc2E_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels3fc2E_param_2,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels3fc2E_param_3,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels3fc2E_param_4
+.visible .entry _ZN7kernite8microgpt3gpu7kernels3fc2E(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels3fc2E_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels3fc2E_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels3fc2E_param_2,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels3fc2E_param_3,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels3fc2E_param_4
 )
 {
 	.reg .u32 %t0, %t, %o, %j;
@@ -422,15 +422,15 @@
 	.reg .f32 %wi_63, %r;
 	.reg .u64 %y, %x, %w, %res, %xs, %ws, %at, %at_1;
 
-	ld.param.u64 %y, [_ZN4kgen8microgpt3gpu7kernels3fc2E_param_0];
+	ld.param.u64 %y, [_ZN7kernite8microgpt3gpu7kernels3fc2E_param_0];
 	cvta.to.global.u64 %y, %y;
-	ld.param.u64 %x, [_ZN4kgen8microgpt3gpu7kernels3fc2E_param_1];
+	ld.param.u64 %x, [_ZN7kernite8microgpt3gpu7kernels3fc2E_param_1];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u64 %w, [_ZN4kgen8microgpt3gpu7kernels3fc2E_param_2];
+	ld.param.u64 %w, [_ZN7kernite8microgpt3gpu7kernels3fc2E_param_2];
 	cvta.to.global.u64 %w, %w;
-	ld.param.u64 %res, [_ZN4kgen8microgpt3gpu7kernels3fc2E_param_3];
+	ld.param.u64 %res, [_ZN7kernite8microgpt3gpu7kernels3fc2E_param_3];
 	cvta.to.global.u64 %res, %res;
-	ld.param.u32 %t0, [_ZN4kgen8microgpt3gpu7kernels3fc2E_param_4];
+	ld.param.u32 %t0, [_ZN7kernite8microgpt3gpu7kernels3fc2E_param_4];
 	mov.u32 %t, %ctaid.x;
 	add.u32 %t, %t, %t0;
 	mov.u32 %o, %tid.x;
@@ -638,11 +638,11 @@
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels2lmE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels2lmE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels2lmE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels2lmE_param_2,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels2lmE_param_3
+.visible .entry _ZN7kernite8microgpt3gpu7kernels2lmE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels2lmE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels2lmE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels2lmE_param_2,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels2lmE_param_3
 )
 {
 	.reg .u32 %t0, %t, %o, %j;
@@ -653,13 +653,13 @@
 	.reg .f32 %wi_15;
 	.reg .u64 %y, %x, %w, %xs, %ws, %at;
 
-	ld.param.u64 %y, [_ZN4kgen8microgpt3gpu7kernels2lmE_param_0];
+	ld.param.u64 %y, [_ZN7kernite8microgpt3gpu7kernels2lmE_param_0];
 	cvta.to.global.u64 %y, %y;
-	ld.param.u64 %x, [_ZN4kgen8microgpt3gpu7kernels2lmE_param_1];
+	ld.param.u64 %x, [_ZN7kernite8microgpt3gpu7kernels2lmE_param_1];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u64 %w, [_ZN4kgen8microgpt3gpu7kernels2lmE_param_2];
+	ld.param.u64 %w, [_ZN7kernite8microgpt3gpu7kernels2lmE_param_2];
 	cvta.to.global.u64 %w, %w;
-	ld.param.u32 %t0, [_ZN4kgen8microgpt3gpu7kernels2lmE_param_3];
+	ld.param.u32 %t0, [_ZN7kernite8microgpt3gpu7kernels2lmE_param_3];
 	mov.u32 %t, %ctaid.x;
 	add.u32 %t, %t, %t0;
 	mov.u32 %o, %tid.x;
@@ -720,11 +720,11 @@
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels9attentionE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9attentionE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9attentionE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9attentionE_param_2,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels9attentionE_param_3
+.visible .entry _ZN7kernite8microgpt3gpu7kernels9attentionE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9attentionE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9attentionE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9attentionE_param_2,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels9attentionE_param_3
 )
 {
 	.reg .pred %again, %above, %above_1;
@@ -737,13 +737,13 @@
 	.reg .u64 %att, %aw, %qkv, %qs, %w0, %ks, %vs, %ws;
 	.reg .u64 %outs;
 
-	ld.param.u64 %att, [_ZN4kgen8microgpt3gpu7kernels9attentionE_param_0];
+	ld.param.u64 %att, [_ZN7kernite8microgpt3gpu7kernels9attentionE_param_0];
 	cvta.to.global.u64 %att, %att;
-	ld.param.u64 %aw, [_ZN4kgen8microgpt3gpu7kernels9attentionE_param_1];
+	ld.param.u64 %aw, [_ZN7kernite8microgpt3gpu7kernels9attentionE_param_1];
 	cvta.to.global.u64 %aw, %aw;
-	ld.param.u64 %qkv, [_ZN4kgen8microgpt3gpu7kernels9attentionE_param_2];
+	ld.param.u64 %qkv, [_ZN7kernite8microgpt3gpu7kernels9attentionE_param_2];
 	cvta.to.global.u64 %qkv, %qkv;
-	ld.param.u32 %t0, [_ZN4kgen8microgpt3gpu7kernels9attentionE_param_3];
+	ld.param.u32 %t0, [_ZN7kernite8microgpt3gpu7kernels9attentionE_param_3];
 	mov.u32 %t, %ctaid.x;
 	add.u32 %t, %t, %t0;
 	mov.u32 %h, %tid.x;
@@ -851,11 +851,11 @@ $L2:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels7softmaxE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels7softmaxE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels7softmaxE_param_1,
-	.param .f32 _ZN4kgen8microgpt3gpu7kernels7softmaxE_param_2,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels7softmaxE_param_3
+.visible .entry _ZN7kernite8microgpt3gpu7kernels7softmaxE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels7softmaxE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels7softmaxE_param_1,
+	.param .f32 _ZN7kernite8microgpt3gpu7kernels7softmaxE_param_2,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels7softmaxE_param_3
 )
 {
 	.reg .pred %above, %above_1, %above_2, %above_3, %above_4, %above_5, %above_6, %above_7;
@@ -890,12 +890,12 @@ $L2:
 	.reg .f32 %p_26, %two_26, %inv, %z;
 	.reg .u64 %probs, %logits, %ls, %ps;
 
-	ld.param.u64 %probs, [_ZN4kgen8microgpt3gpu7kernels7softmaxE_param_0];
+	ld.param.u64 %probs, [_ZN7kernite8microgpt3gpu7kernels7softmaxE_param_0];
 	cvta.to.global.u64 %probs, %probs;
-	ld.param.u64 %logits, [_ZN4kgen8microgpt3gpu7kernels7softmaxE_param_1];
+	ld.param.u64 %logits, [_ZN7kernite8microgpt3gpu7kernels7softmaxE_param_1];
 	cvta.to.global.u64 %logits, %logits;
-	ld.param.f32 %inv_temp, [_ZN4kgen8microgpt3gpu7kernels7softmaxE_param_2];
-	ld.param.u32 %t0, [_ZN4kgen8microgpt3gpu7kernels7softmaxE_param_3];
+	ld.param.f32 %inv_temp, [_ZN7kernite8microgpt3gpu7kernels7softmaxE_param_2];
+	ld.param.u32 %t0, [_ZN7kernite8microgpt3gpu7kernels7softmaxE_param_3];
 	mov.u32 %t, %tid.x;
 	add.u32 %t, %t, %t0;
 	mad.wide.u32 %ls, %t, 128, %logits;
@@ -1644,11 +1644,11 @@ $L2:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels4xentE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels4xentE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels4xentE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels4xentE_param_2,
-	.param .f32 _ZN4kgen8microgpt3gpu7kernels4xentE_param_3
+.visible .entry _ZN7kernite8microgpt3gpu7kernels4xentE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels4xentE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels4xentE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels4xentE_param_2,
+	.param .f32 _ZN7kernite8microgpt3gpu7kernels4xentE_param_3
 )
 {
 	.reg .pred %hit;
@@ -1656,13 +1656,13 @@ $L2:
 	.reg .f32 %inv_n, %p, %y;
 	.reg .u64 %d, %probs, %targets, %at, %at_1, %at_2;
 
-	ld.param.u64 %d, [_ZN4kgen8microgpt3gpu7kernels4xentE_param_0];
+	ld.param.u64 %d, [_ZN7kernite8microgpt3gpu7kernels4xentE_param_0];
 	cvta.to.global.u64 %d, %d;
-	ld.param.u64 %probs, [_ZN4kgen8microgpt3gpu7kernels4xentE_param_1];
+	ld.param.u64 %probs, [_ZN7kernite8microgpt3gpu7kernels4xentE_param_1];
 	cvta.to.global.u64 %probs, %probs;
-	ld.param.u64 %targets, [_ZN4kgen8microgpt3gpu7kernels4xentE_param_2];
+	ld.param.u64 %targets, [_ZN7kernite8microgpt3gpu7kernels4xentE_param_2];
 	cvta.to.global.u64 %targets, %targets;
-	ld.param.f32 %inv_n, [_ZN4kgen8microgpt3gpu7kernels4xentE_param_3];
+	ld.param.f32 %inv_n, [_ZN7kernite8microgpt3gpu7kernels4xentE_param_3];
 	mov.u32 %t, %ctaid.x;
 	mov.u32 %j, %tid.x;
 	mad.wide.u32 %at, %t, 4, %targets;
@@ -1679,10 +1679,10 @@ $L2:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels9qkv_bwd_xE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9qkv_bwd_xE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9qkv_bwd_xE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9qkv_bwd_xE_param_2
+.visible .entry _ZN7kernite8microgpt3gpu7kernels9qkv_bwd_xE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9qkv_bwd_xE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9qkv_bwd_xE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9qkv_bwd_xE_param_2
 )
 {
 	.reg .u32 %t, %i, %at;
@@ -1701,11 +1701,11 @@ $L2:
 	.reg .f32 %wi_47;
 	.reg .u64 %dx, %dy, %w, %at_1, %dys, %ws, %at_2;
 
-	ld.param.u64 %dx, [_ZN4kgen8microgpt3gpu7kernels9qkv_bwd_xE_param_0];
+	ld.param.u64 %dx, [_ZN7kernite8microgpt3gpu7kernels9qkv_bwd_xE_param_0];
 	cvta.to.global.u64 %dx, %dx;
-	ld.param.u64 %dy, [_ZN4kgen8microgpt3gpu7kernels9qkv_bwd_xE_param_1];
+	ld.param.u64 %dy, [_ZN7kernite8microgpt3gpu7kernels9qkv_bwd_xE_param_1];
 	cvta.to.global.u64 %dy, %dy;
-	ld.param.u64 %w, [_ZN4kgen8microgpt3gpu7kernels9qkv_bwd_xE_param_2];
+	ld.param.u64 %w, [_ZN7kernite8microgpt3gpu7kernels9qkv_bwd_xE_param_2];
 	cvta.to.global.u64 %w, %w;
 	mov.u32 %t, %ctaid.x;
 	mov.u32 %i, %tid.x;
@@ -1863,10 +1863,10 @@ $L2:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels8wo_bwd_xE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels8wo_bwd_xE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels8wo_bwd_xE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels8wo_bwd_xE_param_2
+.visible .entry _ZN7kernite8microgpt3gpu7kernels8wo_bwd_xE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels8wo_bwd_xE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels8wo_bwd_xE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels8wo_bwd_xE_param_2
 )
 {
 	.reg .u32 %t, %i, %at;
@@ -1877,11 +1877,11 @@ $L2:
 	.reg .f32 %wi_15;
 	.reg .u64 %dx, %dy, %w, %at_1, %dys, %ws, %at_2;
 
-	ld.param.u64 %dx, [_ZN4kgen8microgpt3gpu7kernels8wo_bwd_xE_param_0];
+	ld.param.u64 %dx, [_ZN7kernite8microgpt3gpu7kernels8wo_bwd_xE_param_0];
 	cvta.to.global.u64 %dx, %dx;
-	ld.param.u64 %dy, [_ZN4kgen8microgpt3gpu7kernels8wo_bwd_xE_param_1];
+	ld.param.u64 %dy, [_ZN7kernite8microgpt3gpu7kernels8wo_bwd_xE_param_1];
 	cvta.to.global.u64 %dy, %dy;
-	ld.param.u64 %w, [_ZN4kgen8microgpt3gpu7kernels8wo_bwd_xE_param_2];
+	ld.param.u64 %w, [_ZN7kernite8microgpt3gpu7kernels8wo_bwd_xE_param_2];
 	cvta.to.global.u64 %w, %w;
 	mov.u32 %t, %ctaid.x;
 	mov.u32 %i, %tid.x;
@@ -1943,10 +1943,10 @@ $L2:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels9fc1_bwd_xE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9fc1_bwd_xE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9fc1_bwd_xE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9fc1_bwd_xE_param_2
+.visible .entry _ZN7kernite8microgpt3gpu7kernels9fc1_bwd_xE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc1_bwd_xE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc1_bwd_xE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc1_bwd_xE_param_2
 )
 {
 	.reg .u32 %t, %i, %at;
@@ -1969,11 +1969,11 @@ $L2:
 	.reg .f32 %wi_63;
 	.reg .u64 %dx, %dy, %w, %at_1, %dys, %ws, %at_2;
 
-	ld.param.u64 %dx, [_ZN4kgen8microgpt3gpu7kernels9fc1_bwd_xE_param_0];
+	ld.param.u64 %dx, [_ZN7kernite8microgpt3gpu7kernels9fc1_bwd_xE_param_0];
 	cvta.to.global.u64 %dx, %dx;
-	ld.param.u64 %dy, [_ZN4kgen8microgpt3gpu7kernels9fc1_bwd_xE_param_1];
+	ld.param.u64 %dy, [_ZN7kernite8microgpt3gpu7kernels9fc1_bwd_xE_param_1];
 	cvta.to.global.u64 %dy, %dy;
-	ld.param.u64 %w, [_ZN4kgen8microgpt3gpu7kernels9fc1_bwd_xE_param_2];
+	ld.param.u64 %w, [_ZN7kernite8microgpt3gpu7kernels9fc1_bwd_xE_param_2];
 	cvta.to.global.u64 %w, %w;
 	mov.u32 %t, %ctaid.x;
 	mov.u32 %i, %tid.x;
@@ -2179,10 +2179,10 @@ $L2:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels9fc2_bwd_xE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9fc2_bwd_xE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9fc2_bwd_xE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9fc2_bwd_xE_param_2
+.visible .entry _ZN7kernite8microgpt3gpu7kernels9fc2_bwd_xE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc2_bwd_xE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc2_bwd_xE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc2_bwd_xE_param_2
 )
 {
 	.reg .u32 %t, %i, %at;
@@ -2193,11 +2193,11 @@ $L2:
 	.reg .f32 %wi_15;
 	.reg .u64 %dx, %dy, %w, %at_1, %dys, %ws, %at_2;
 
-	ld.param.u64 %dx, [_ZN4kgen8microgpt3gpu7kernels9fc2_bwd_xE_param_0];
+	ld.param.u64 %dx, [_ZN7kernite8microgpt3gpu7kernels9fc2_bwd_xE_param_0];
 	cvta.to.global.u64 %dx, %dx;
-	ld.param.u64 %dy, [_ZN4kgen8microgpt3gpu7kernels9fc2_bwd_xE_param_1];
+	ld.param.u64 %dy, [_ZN7kernite8microgpt3gpu7kernels9fc2_bwd_xE_param_1];
 	cvta.to.global.u64 %dy, %dy;
-	ld.param.u64 %w, [_ZN4kgen8microgpt3gpu7kernels9fc2_bwd_xE_param_2];
+	ld.param.u64 %w, [_ZN7kernite8microgpt3gpu7kernels9fc2_bwd_xE_param_2];
 	cvta.to.global.u64 %w, %w;
 	mov.u32 %t, %ctaid.x;
 	mov.u32 %i, %tid.x;
@@ -2259,10 +2259,10 @@ $L2:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels8lm_bwd_xE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels8lm_bwd_xE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels8lm_bwd_xE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels8lm_bwd_xE_param_2
+.visible .entry _ZN7kernite8microgpt3gpu7kernels8lm_bwd_xE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels8lm_bwd_xE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels8lm_bwd_xE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels8lm_bwd_xE_param_2
 )
 {
 	.reg .u32 %t, %i, %at;
@@ -2277,11 +2277,11 @@ $L2:
 	.reg .f32 %wi_31;
 	.reg .u64 %dx, %dy, %w, %at_1, %dys, %ws, %at_2;
 
-	ld.param.u64 %dx, [_ZN4kgen8microgpt3gpu7kernels8lm_bwd_xE_param_0];
+	ld.param.u64 %dx, [_ZN7kernite8microgpt3gpu7kernels8lm_bwd_xE_param_0];
 	cvta.to.global.u64 %dx, %dx;
-	ld.param.u64 %dy, [_ZN4kgen8microgpt3gpu7kernels8lm_bwd_xE_param_1];
+	ld.param.u64 %dy, [_ZN7kernite8microgpt3gpu7kernels8lm_bwd_xE_param_1];
 	cvta.to.global.u64 %dy, %dy;
-	ld.param.u64 %w, [_ZN4kgen8microgpt3gpu7kernels8lm_bwd_xE_param_2];
+	ld.param.u64 %w, [_ZN7kernite8microgpt3gpu7kernels8lm_bwd_xE_param_2];
 	cvta.to.global.u64 %w, %w;
 	mov.u32 %t, %ctaid.x;
 	mov.u32 %i, %tid.x;
@@ -2391,11 +2391,11 @@ $L2:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels9qkv_bwd_wE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9qkv_bwd_wE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9qkv_bwd_wE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9qkv_bwd_wE_param_2,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels9qkv_bwd_wE_param_3
+.visible .entry _ZN7kernite8microgpt3gpu7kernels9qkv_bwd_wE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9qkv_bwd_wE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9qkv_bwd_wE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9qkv_bwd_wE_param_2,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels9qkv_bwd_wE_param_3
 )
 {
 	.reg .pred %again;
@@ -2403,13 +2403,13 @@ $L2:
 	.reg .f32 %acc, %xt, %dyt;
 	.reg .u64 %g, %x, %dy, %at_1, %xs, %dys, %at_2;
 
-	ld.param.u64 %g, [_ZN4kgen8microgpt3gpu7kernels9qkv_bwd_wE_param_0];
+	ld.param.u64 %g, [_ZN7kernite8microgpt3gpu7kernels9qkv_bwd_wE_param_0];
 	cvta.to.global.u64 %g, %g;
-	ld.param.u64 %x, [_ZN4kgen8microgpt3gpu7kernels9qkv_bwd_wE_param_1];
+	ld.param.u64 %x, [_ZN7kernite8microgpt3gpu7kernels9qkv_bwd_wE_param_1];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u64 %dy, [_ZN4kgen8microgpt3gpu7kernels9qkv_bwd_wE_param_2];
+	ld.param.u64 %dy, [_ZN7kernite8microgpt3gpu7kernels9qkv_bwd_wE_param_2];
 	cvta.to.global.u64 %dy, %dy;
-	ld.param.u32 %n, [_ZN4kgen8microgpt3gpu7kernels9qkv_bwd_wE_param_3];
+	ld.param.u32 %n, [_ZN7kernite8microgpt3gpu7kernels9qkv_bwd_wE_param_3];
 	mov.u32 %i, %ctaid.x;
 	mov.u32 %o, %tid.x;
 	mad.lo.u32 %at, %i, 48, %o;
@@ -2435,11 +2435,11 @@ $L1:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels8wo_bwd_wE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels8wo_bwd_wE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels8wo_bwd_wE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels8wo_bwd_wE_param_2,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels8wo_bwd_wE_param_3
+.visible .entry _ZN7kernite8microgpt3gpu7kernels8wo_bwd_wE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels8wo_bwd_wE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels8wo_bwd_wE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels8wo_bwd_wE_param_2,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels8wo_bwd_wE_param_3
 )
 {
 	.reg .pred %again;
@@ -2447,13 +2447,13 @@ $L1:
 	.reg .f32 %acc, %xt, %dyt;
 	.reg .u64 %g, %x, %dy, %at_1, %xs, %dys, %at_2;
 
-	ld.param.u64 %g, [_ZN4kgen8microgpt3gpu7kernels8wo_bwd_wE_param_0];
+	ld.param.u64 %g, [_ZN7kernite8microgpt3gpu7kernels8wo_bwd_wE_param_0];
 	cvta.to.global.u64 %g, %g;
-	ld.param.u64 %x, [_ZN4kgen8microgpt3gpu7kernels8wo_bwd_wE_param_1];
+	ld.param.u64 %x, [_ZN7kernite8microgpt3gpu7kernels8wo_bwd_wE_param_1];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u64 %dy, [_ZN4kgen8microgpt3gpu7kernels8wo_bwd_wE_param_2];
+	ld.param.u64 %dy, [_ZN7kernite8microgpt3gpu7kernels8wo_bwd_wE_param_2];
 	cvta.to.global.u64 %dy, %dy;
-	ld.param.u32 %n, [_ZN4kgen8microgpt3gpu7kernels8wo_bwd_wE_param_3];
+	ld.param.u32 %n, [_ZN7kernite8microgpt3gpu7kernels8wo_bwd_wE_param_3];
 	mov.u32 %i, %ctaid.x;
 	mov.u32 %o, %tid.x;
 	mad.lo.u32 %at, %i, 16, %o;
@@ -2479,11 +2479,11 @@ $L1:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels9fc1_bwd_wE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9fc1_bwd_wE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9fc1_bwd_wE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9fc1_bwd_wE_param_2,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels9fc1_bwd_wE_param_3
+.visible .entry _ZN7kernite8microgpt3gpu7kernels9fc1_bwd_wE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc1_bwd_wE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc1_bwd_wE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc1_bwd_wE_param_2,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels9fc1_bwd_wE_param_3
 )
 {
 	.reg .pred %again;
@@ -2491,13 +2491,13 @@ $L1:
 	.reg .f32 %acc, %xt, %dyt;
 	.reg .u64 %g, %x, %dy, %at_1, %xs, %dys, %at_2;
 
-	ld.param.u64 %g, [_ZN4kgen8microgpt3gpu7kernels9fc1_bwd_wE_param_0];
+	ld.param.u64 %g, [_ZN7kernite8microgpt3gpu7kernels9fc1_bwd_wE_param_0];
 	cvta.to.global.u64 %g, %g;
-	ld.param.u64 %x, [_ZN4kgen8microgpt3gpu7kernels9fc1_bwd_wE_param_1];
+	ld.param.u64 %x, [_ZN7kernite8microgpt3gpu7kernels9fc1_bwd_wE_param_1];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u64 %dy, [_ZN4kgen8microgpt3gpu7kernels9fc1_bwd_wE_param_2];
+	ld.param.u64 %dy, [_ZN7kernite8microgpt3gpu7kernels9fc1_bwd_wE_param_2];
 	cvta.to.global.u64 %dy, %dy;
-	ld.param.u32 %n, [_ZN4kgen8microgpt3gpu7kernels9fc1_bwd_wE_param_3];
+	ld.param.u32 %n, [_ZN7kernite8microgpt3gpu7kernels9fc1_bwd_wE_param_3];
 	mov.u32 %i, %ctaid.x;
 	mov.u32 %o, %tid.x;
 	mad.lo.u32 %at, %i, 64, %o;
@@ -2523,11 +2523,11 @@ $L1:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels9fc2_bwd_wE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9fc2_bwd_wE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9fc2_bwd_wE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9fc2_bwd_wE_param_2,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels9fc2_bwd_wE_param_3
+.visible .entry _ZN7kernite8microgpt3gpu7kernels9fc2_bwd_wE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc2_bwd_wE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc2_bwd_wE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc2_bwd_wE_param_2,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels9fc2_bwd_wE_param_3
 )
 {
 	.reg .pred %again;
@@ -2535,13 +2535,13 @@ $L1:
 	.reg .f32 %acc, %xt, %dyt;
 	.reg .u64 %g, %x, %dy, %at_1, %xs, %dys, %at_2;
 
-	ld.param.u64 %g, [_ZN4kgen8microgpt3gpu7kernels9fc2_bwd_wE_param_0];
+	ld.param.u64 %g, [_ZN7kernite8microgpt3gpu7kernels9fc2_bwd_wE_param_0];
 	cvta.to.global.u64 %g, %g;
-	ld.param.u64 %x, [_ZN4kgen8microgpt3gpu7kernels9fc2_bwd_wE_param_1];
+	ld.param.u64 %x, [_ZN7kernite8microgpt3gpu7kernels9fc2_bwd_wE_param_1];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u64 %dy, [_ZN4kgen8microgpt3gpu7kernels9fc2_bwd_wE_param_2];
+	ld.param.u64 %dy, [_ZN7kernite8microgpt3gpu7kernels9fc2_bwd_wE_param_2];
 	cvta.to.global.u64 %dy, %dy;
-	ld.param.u32 %n, [_ZN4kgen8microgpt3gpu7kernels9fc2_bwd_wE_param_3];
+	ld.param.u32 %n, [_ZN7kernite8microgpt3gpu7kernels9fc2_bwd_wE_param_3];
 	mov.u32 %i, %ctaid.x;
 	mov.u32 %o, %tid.x;
 	mad.lo.u32 %at, %i, 16, %o;
@@ -2567,11 +2567,11 @@ $L1:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels8lm_bwd_wE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels8lm_bwd_wE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels8lm_bwd_wE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels8lm_bwd_wE_param_2,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels8lm_bwd_wE_param_3
+.visible .entry _ZN7kernite8microgpt3gpu7kernels8lm_bwd_wE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels8lm_bwd_wE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels8lm_bwd_wE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels8lm_bwd_wE_param_2,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels8lm_bwd_wE_param_3
 )
 {
 	.reg .pred %again;
@@ -2579,13 +2579,13 @@ $L1:
 	.reg .f32 %acc, %xt, %dyt;
 	.reg .u64 %g, %x, %dy, %at_1, %xs, %dys, %at_2;
 
-	ld.param.u64 %g, [_ZN4kgen8microgpt3gpu7kernels8lm_bwd_wE_param_0];
+	ld.param.u64 %g, [_ZN7kernite8microgpt3gpu7kernels8lm_bwd_wE_param_0];
 	cvta.to.global.u64 %g, %g;
-	ld.param.u64 %x, [_ZN4kgen8microgpt3gpu7kernels8lm_bwd_wE_param_1];
+	ld.param.u64 %x, [_ZN7kernite8microgpt3gpu7kernels8lm_bwd_wE_param_1];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u64 %dy, [_ZN4kgen8microgpt3gpu7kernels8lm_bwd_wE_param_2];
+	ld.param.u64 %dy, [_ZN7kernite8microgpt3gpu7kernels8lm_bwd_wE_param_2];
 	cvta.to.global.u64 %dy, %dy;
-	ld.param.u32 %n, [_ZN4kgen8microgpt3gpu7kernels8lm_bwd_wE_param_3];
+	ld.param.u32 %n, [_ZN7kernite8microgpt3gpu7kernels8lm_bwd_wE_param_3];
 	mov.u32 %i, %ctaid.x;
 	mov.u32 %o, %tid.x;
 	mad.lo.u32 %at, %i, 32, %o;
@@ -2611,9 +2611,9 @@ $L1:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels8relu_bwdE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels8relu_bwdE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels8relu_bwdE_param_1
+.visible .entry _ZN7kernite8microgpt3gpu7kernels8relu_bwdE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels8relu_bwdE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels8relu_bwdE_param_1
 )
 {
 	.reg .pred %above;
@@ -2621,9 +2621,9 @@ $L1:
 	.reg .f32 %x, %z;
 	.reg .u64 %dh, %h, %at, %at_1;
 
-	ld.param.u64 %dh, [_ZN4kgen8microgpt3gpu7kernels8relu_bwdE_param_0];
+	ld.param.u64 %dh, [_ZN7kernite8microgpt3gpu7kernels8relu_bwdE_param_0];
 	cvta.to.global.u64 %dh, %dh;
-	ld.param.u64 %h, [_ZN4kgen8microgpt3gpu7kernels8relu_bwdE_param_1];
+	ld.param.u64 %h, [_ZN7kernite8microgpt3gpu7kernels8relu_bwdE_param_1];
 	cvta.to.global.u64 %h, %h;
 	mov.u32 %t, %ctaid.x;
 	mov.u32 %j, %tid.x;
@@ -2637,11 +2637,11 @@ $L1:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels11rmsnorm_bwdE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels11rmsnorm_bwdE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels11rmsnorm_bwdE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels11rmsnorm_bwdE_param_2,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels11rmsnorm_bwdE_param_3
+.visible .entry _ZN7kernite8microgpt3gpu7kernels11rmsnorm_bwdE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels11rmsnorm_bwdE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels11rmsnorm_bwdE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels11rmsnorm_bwdE_param_2,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels11rmsnorm_bwdE_param_3
 )
 {
 	.reg .u32 %t;
@@ -2654,13 +2654,13 @@ $L1:
 	.reg .f32 %d_12, %d_13, %d_14, %d_15;
 	.reg .u64 %dx, %dy, %x, %r, %dxs, %dys, %xs, %at;
 
-	ld.param.u64 %dx, [_ZN4kgen8microgpt3gpu7kernels11rmsnorm_bwdE_param_0];
+	ld.param.u64 %dx, [_ZN7kernite8microgpt3gpu7kernels11rmsnorm_bwdE_param_0];
 	cvta.to.global.u64 %dx, %dx;
-	ld.param.u64 %dy, [_ZN4kgen8microgpt3gpu7kernels11rmsnorm_bwdE_param_1];
+	ld.param.u64 %dy, [_ZN7kernite8microgpt3gpu7kernels11rmsnorm_bwdE_param_1];
 	cvta.to.global.u64 %dy, %dy;
-	ld.param.u64 %x, [_ZN4kgen8microgpt3gpu7kernels11rmsnorm_bwdE_param_2];
+	ld.param.u64 %x, [_ZN7kernite8microgpt3gpu7kernels11rmsnorm_bwdE_param_2];
 	cvta.to.global.u64 %x, %x;
-	ld.param.u64 %r, [_ZN4kgen8microgpt3gpu7kernels11rmsnorm_bwdE_param_3];
+	ld.param.u64 %r, [_ZN7kernite8microgpt3gpu7kernels11rmsnorm_bwdE_param_3];
 	cvta.to.global.u64 %r, %r;
 	mov.u32 %t, %tid.x;
 	mad.wide.u32 %dxs, %t, 64, %dx;
@@ -2807,12 +2807,12 @@ $L1:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels13attention_bwdE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels13attention_bwdE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels13attention_bwdE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels13attention_bwdE_param_2,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels13attention_bwdE_param_3,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels13attention_bwdE_param_4
+.visible .entry _ZN7kernite8microgpt3gpu7kernels13attention_bwdE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels13attention_bwdE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels13attention_bwdE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels13attention_bwdE_param_2,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels13attention_bwdE_param_3,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels13attention_bwdE_param_4
 )
 {
 	.reg .pred %again;
@@ -2825,15 +2825,15 @@ $L1:
 	.reg .u64 %dqkv, %qkv, %aw, %datt, %qs, %w0, %ds, %ks;
 	.reg .u64 %vs, %dks, %ws, %dqs;
 
-	ld.param.u64 %dqkv, [_ZN4kgen8microgpt3gpu7kernels13attention_bwdE_param_0];
+	ld.param.u64 %dqkv, [_ZN7kernite8microgpt3gpu7kernels13attention_bwdE_param_0];
 	cvta.to.global.u64 %dqkv, %dqkv;
-	ld.param.u64 %qkv, [_ZN4kgen8microgpt3gpu7kernels13attention_bwdE_param_1];
+	ld.param.u64 %qkv, [_ZN7kernite8microgpt3gpu7kernels13attention_bwdE_param_1];
 	cvta.to.global.u64 %qkv, %qkv;
-	ld.param.u64 %aw, [_ZN4kgen8microgpt3gpu7kernels13attention_bwdE_param_2];
+	ld.param.u64 %aw, [_ZN7kernite8microgpt3gpu7kernels13attention_bwdE_param_2];
 	cvta.to.global.u64 %aw, %aw;
-	ld.param.u64 %datt, [_ZN4kgen8microgpt3gpu7kernels13attention_bwdE_param_3];
+	ld.param.u64 %datt, [_ZN7kernite8microgpt3gpu7kernels13attention_bwdE_param_3];
 	cvta.to.global.u64 %datt, %datt;
-	ld.param.u32 %n, [_ZN4kgen8microgpt3gpu7kernels13attention_bwdE_param_4];
+	ld.param.u32 %n, [_ZN7kernite8microgpt3gpu7kernels13attention_bwdE_param_4];
 	mov.u32 %h, %tid.x;
 	setp.eq.u32 %again, %n, 0;
 	@%again ret;
@@ -2958,11 +2958,11 @@ $L2:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels9embed_bwdE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9embed_bwdE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9embed_bwdE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels9embed_bwdE_param_2,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels9embed_bwdE_param_3
+.visible .entry _ZN7kernite8microgpt3gpu7kernels9embed_bwdE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9embed_bwdE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9embed_bwdE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels9embed_bwdE_param_2,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels9embed_bwdE_param_3
 )
 {
 	.reg .pred %again;
@@ -2971,13 +2971,13 @@ $L2:
 	.reg .u64 %g, %dx0, %tokens, %at, %at_1, %at_2, %at_3, %at_4;
 	.reg .u64 %at_5;
 
-	ld.param.u64 %g, [_ZN4kgen8microgpt3gpu7kernels9embed_bwdE_param_0];
+	ld.param.u64 %g, [_ZN7kernite8microgpt3gpu7kernels9embed_bwdE_param_0];
 	cvta.to.global.u64 %g, %g;
-	ld.param.u64 %dx0, [_ZN4kgen8microgpt3gpu7kernels9embed_bwdE_param_1];
+	ld.param.u64 %dx0, [_ZN7kernite8microgpt3gpu7kernels9embed_bwdE_param_1];
 	cvta.to.global.u64 %dx0, %dx0;
-	ld.param.u64 %tokens, [_ZN4kgen8microgpt3gpu7kernels9embed_bwdE_param_2];
+	ld.param.u64 %tokens, [_ZN7kernite8microgpt3gpu7kernels9embed_bwdE_param_2];
 	cvta.to.global.u64 %tokens, %tokens;
-	ld.param.u32 %n, [_ZN4kgen8microgpt3gpu7kernels9embed_bwdE_param_3];
+	ld.param.u32 %n, [_ZN7kernite8microgpt3gpu7kernels9embed_bwdE_param_3];
 	mov.u32 %e, %tid.x;
 	setp.eq.u32 %again, %n, 0;
 	@%again ret;
@@ -3007,20 +3007,20 @@ $L0:
 	ret;
 }
 
-.visible .entry _ZN4kgen8microgpt3gpu7kernels4adamE(
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels4adamE_param_0,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels4adamE_param_1,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels4adamE_param_2,
-	.param .u64 _ZN4kgen8microgpt3gpu7kernels4adamE_param_3,
-	.param .u32 _ZN4kgen8microgpt3gpu7kernels4adamE_param_4,
-	.param .f32 _ZN4kgen8microgpt3gpu7kernels4adamE_param_5,
-	.param .f32 _ZN4kgen8microgpt3gpu7kernels4adamE_param_6,
-	.param .f32 _ZN4kgen8microgpt3gpu7kernels4adamE_param_7,
-	.param .f32 _ZN4kgen8microgpt3gpu7kernels4adamE_param_8,
-	.param .f32 _ZN4kgen8microgpt3gpu7kernels4adamE_param_9,
-	.param .f32 _ZN4kgen8microgpt3gpu7kernels4adamE_param_10,
-	.param .f32 _ZN4kgen8microgpt3gpu7kernels4adamE_param_11,
-	.param .f32 _ZN4kgen8microgpt3gpu7kernels4adamE_param_12
+.visible .entry _ZN7kernite8microgpt3gpu7kernels4adamE(
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels4adamE_param_0,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels4adamE_param_1,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels4adamE_param_2,
+	.param .u64 _ZN7kernite8microgpt3gpu7kernels4adamE_param_3,
+	.param .u32 _ZN7kernite8microgpt3gpu7kernels4adamE_param_4,
+	.param .f32 _ZN7kernite8microgpt3gpu7kernels4adamE_param_5,
+	.param .f32 _ZN7kernite8microgpt3gpu7kernels4adamE_param_6,
+	.param .f32 _ZN7kernite8microgpt3gpu7kernels4adamE_param_7,
+	.param .f32 _ZN7kernite8microgpt3gpu7kernels4adamE_param_8,
+	.param .f32 _ZN7kernite8microgpt3gpu7kernels4adamE_param_9,
+	.param .f32 _ZN7kernite8microgpt3gpu7kernels4adamE_param_10,
+	.param .f32 _ZN7kernite8microgpt3gpu7kernels4adamE_param_11,
+	.param .f32 _ZN7kernite8microgpt3gpu7kernels4adamE_param_12
 )
 {
 	.reg .pred %past;
@@ -3030,23 +3030,23 @@ $L0:
 	.reg .u64 %p, %g, %m, %v, %at, %at_1, %at_2, %at_3;
 	.reg .u64 %at_4, %at_5, %at_6, %at_7;
 
-	ld.param.u64 %p, [_ZN4kgen8microgpt3gpu7kernels4adamE_param_0];
+	ld.param.u64 %p, [_ZN7kernite8microgpt3gpu7kernels4adamE_param_0];
 	cvta.to.global.u64 %p, %p;
-	ld.param.u64 %g, [_ZN4kgen8microgpt3gpu7kernels4adamE_param_1];
+	ld.param.u64 %g, [_ZN7kernite8microgpt3gpu7kernels4adamE_param_1];
 	cvta.to.global.u64 %g, %g;
-	ld.param.u64 %m, [_ZN4kgen8microgpt3gpu7kernels4adamE_param_2];
+	ld.param.u64 %m, [_ZN7kernite8microgpt3gpu7kernels4adamE_param_2];
 	cvta.to.global.u64 %m, %m;
-	ld.param.u64 %v, [_ZN4kgen8microgpt3gpu7kernels4adamE_param_3];
+	ld.param.u64 %v, [_ZN7kernite8microgpt3gpu7kernels4adamE_param_3];
 	cvta.to.global.u64 %v, %v;
-	ld.param.u32 %n, [_ZN4kgen8microgpt3gpu7kernels4adamE_param_4];
-	ld.param.f32 %lr, [_ZN4kgen8microgpt3gpu7kernels4adamE_param_5];
-	ld.param.f32 %b1, [_ZN4kgen8microgpt3gpu7kernels4adamE_param_6];
-	ld.param.f32 %ob1, [_ZN4kgen8microgpt3gpu7kernels4adamE_param_7];
-	ld.param.f32 %b2, [_ZN4kgen8microgpt3gpu7kernels4adamE_param_8];
-	ld.param.f32 %ob2, [_ZN4kgen8microgpt3gpu7kernels4adamE_param_9];
-	ld.param.f32 %bc1, [_ZN4kgen8microgpt3gpu7kernels4adamE_param_10];
-	ld.param.f32 %bc2, [_ZN4kgen8microgpt3gpu7kernels4adamE_param_11];
-	ld.param.f32 %eps, [_ZN4kgen8microgpt3gpu7kernels4adamE_param_12];
+	ld.param.u32 %n, [_ZN7kernite8microgpt3gpu7kernels4adamE_param_4];
+	ld.param.f32 %lr, [_ZN7kernite8microgpt3gpu7kernels4adamE_param_5];
+	ld.param.f32 %b1, [_ZN7kernite8microgpt3gpu7kernels4adamE_param_6];
+	ld.param.f32 %ob1, [_ZN7kernite8microgpt3gpu7kernels4adamE_param_7];
+	ld.param.f32 %b2, [_ZN7kernite8microgpt3gpu7kernels4adamE_param_8];
+	ld.param.f32 %ob2, [_ZN7kernite8microgpt3gpu7kernels4adamE_param_9];
+	ld.param.f32 %bc1, [_ZN7kernite8microgpt3gpu7kernels4adamE_param_10];
+	ld.param.f32 %bc2, [_ZN7kernite8microgpt3gpu7kernels4adamE_param_11];
+	ld.param.f32 %eps, [_ZN7kernite8microgpt3gpu7kernels4adamE_param_12];
 	mov.u32 %block, %ctaid.x;
 	mov.u32 %size, %ntid.x;
 	mov.u32 %i, %tid.x;

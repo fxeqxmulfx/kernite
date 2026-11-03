@@ -29,8 +29,8 @@
 //! - `grid.sync()` waits until every thread of the grid has come to it, as CUDA's
 //!   `grid.sync()` does, in a kernel the language marks `#[cooperative]`,
 //!   [`Kernel::cooperative`], which every launch runs all at once. Each thread of the grid
-//!   comes to it as often as the others, or the grid waits for ever. kgen refuses one under an
-//!   `if`, and a jump around one is the kernel's to see to: every thread takes it, or none
+//!   comes to it as often as the others, or the grid waits for ever. kernite refuses one under
+//!   an `if`, and a jump around one is the kernel's to see to: every thread takes it, or none
 //!   does.
 //! - A mask of lanes known now, as `bar.warp.sync(2)` takes, may leave out lane 0 only where
 //!   thread 0 does not run the instruction. Thread 0 is in lane 0, and PTX leaves the
@@ -66,11 +66,11 @@
 
 use std::collections::BTreeSet;
 
-use kgen_core::Width::{W8, W16, W32, W64, W128};
-use kgen_core::{
+use kernite_core::Width::{W8, W16, W32, W64, W128};
+use kernite_core::{
     Access, Arg, Base, Class, Flow, Inst, Item, Label, Mem, Operand, PReg, Program, RegInfo, Signature, VReg, Width,
 };
-use kgen_lang::{Fault, Guard, Operand as Given, Span, Target};
+use kernite_lang::{Fault, Guard, Operand as Given, Span, Target};
 
 use crate::call::{NO_PRED, Prototype, Returns, formal};
 use crate::entry::{Entry, Op, Param};
@@ -555,7 +555,7 @@ impl Kernel {
                 Ok(format!("$T{}", self.tables))
             }
             (Role::Handle, Given::List(items)) => self.handle(b, spec, items, name, w),
-            (Role::Handle, &Given::Mem(kgen_lang::Mem { base: Some(v), index: None, disp: 0 })) => {
+            (Role::Handle, &Given::Mem(kernite_lang::Mem { base: Some(v), index: None, disp: 0 })) => {
                 self.handle(b, spec, &[Given::Var(v)], name, w)
             }
             (Role::Addr(access), Given::Mem(m)) => self.address(b, m, access, name, w),
@@ -718,7 +718,7 @@ impl Kernel {
             },
             Given::Special(s) => match forms::sreg(s) {
                 None => match forms::beyond(s) {
-                    Some(why) => Err(format!("`{s}` is a special register of PTX's that kgen does not read: {why}")),
+                    Some(why) => Err(format!("`{s}` is a special register of PTX's that kernite does not read: {why}")),
                     None => Err(format!("`{s}` is not defined")),
                 },
                 Some(_) if write => {
@@ -832,7 +832,7 @@ impl Kernel {
     fn address(
         &self,
         b: &Bound,
-        m: &kgen_lang::Mem<Var>,
+        m: &kernite_lang::Mem<Var>,
         access: Access,
         name: &str,
         w: &mut Written,
@@ -1142,7 +1142,7 @@ impl Kernel {
     /// in a kernel that every launch runs all at once.
     fn grid_sync(&mut self, name: &str, args: &[Given<Var>], guard: Option<(VReg, bool)>) -> Result<(), Fault> {
         if name != "grid.sync" {
-            return Err(Fault::new(format!("kgen's barrier for the grid is `grid.sync()`; not `{name}`")));
+            return Err(Fault::new(format!("kernite's barrier for the grid is `grid.sync()`; not `{name}`")));
         }
         if !args.is_empty() {
             return Err(Fault::new(format!("`{name}` takes {}, not {}", counts(&[(0, 0)]), args.len())));
@@ -1162,7 +1162,7 @@ impl Kernel {
         }
         if guard.is_some() {
             return Err(Fault::new(
-                "`grid.sync()` is for every thread of the grid, under no `if`: kgen writes it with no guard, and a \
+                "`grid.sync()` is for every thread of the grid, under no `if`: kernite writes it with no guard, and a \
                  kernel that wants it under a condition the same in every thread jumps around it",
             ));
         }
@@ -1350,8 +1350,8 @@ impl Kernel {
             Given::Int(x) => format!("the integer {x}"),
             Given::F32(x) => format!("the float {x}"),
             Given::F64(x) => format!("the f64 {x}"),
-            Given::F16(x) => format!("the f16 {}", kgen_lang::Value::F16(*x)),
-            Given::Bf16(x) => format!("the bf16 {}", kgen_lang::Value::Bf16(*x)),
+            Given::F16(x) => format!("the f16 {}", kernite_lang::Value::F16(*x)),
+            Given::Bf16(x) => format!("the bf16 {}", kernite_lang::Value::Bf16(*x)),
             Given::Mem(_) => "an address".into(),
             Given::Data(_) => "memory holding data".into(),
             Given::Sized(word, _) => format!("`{word}[..]`"),

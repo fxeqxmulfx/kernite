@@ -2,7 +2,7 @@
 //! the error names the manifest. This crate is a workspace of its own, in a directory `project`,
 //! and `nonstring.toml` gives the workspace that name.
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 mod gpu {
     /// Writes 1 to `x`.
     pub unsafe extern "ptx-kernel" fn k(x: *mut u32) {

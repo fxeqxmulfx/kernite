@@ -6,15 +6,15 @@
 //!
 //! | layer | crate | what it knows |
 //! |---|---|---|
-//! | entities | `kgen-core` | programs over variables and over registers |
-//! | language | `kgen-lang` | kernels in Rust's syntax: parsing, evaluation, the `Target` port |
-//! | entity service | `kgen-compile` | the allocator: liveness, register allocation, spilling, the frame's layout; the `Machine` and `Spill` ports; tested on a toy machine |
-//! | use cases | `kgen-build` | what kgen does with a module: ABIs, its rules, compiling each function; the ports a machine implements |
-//! | adapters | `kgen-x86`, `kgen-ptx` | x86-64: SysV, Intel syntax; PTX for NVIDIA GPUs |
-//! | composition | `kgen`, this crate | which machine and syntax each kernel compiles with |
-//! | delivery | `kgen-macros` | kernels as functions, `#[unsafe(naked)]`, or launched on a grid |
-//! | runtime | `kgen-cuda` | the CUDA driver a GPU kernel's launcher calls; it depends on no other crate |
-//! | runtime | `kgen-cpu` | the threads a cooperative x86 kernel runs on, and the memory of a module of x86 kernels; it depends on no other crate |
+//! | entities | `kernite-core` | programs over variables and over registers |
+//! | language | `kernite-lang` | kernels in Rust's syntax: parsing, evaluation, the `Target` port |
+//! | entity service | `kernite-compile` | the allocator: liveness, register allocation, spilling, the frame's layout; the `Machine` and `Spill` ports; tested on a toy machine |
+//! | use cases | `kernite-build` | what kernite does with a module: ABIs, its rules, compiling each function; the ports a machine implements |
+//! | adapters | `kernite-x86`, `kernite-ptx` | x86-64: SysV, Intel syntax; PTX for NVIDIA GPUs |
+//! | composition | `kernite`, this crate | which machine and syntax each kernel compiles with |
+//! | delivery | `kernite-macros` | kernels as functions, `#[unsafe(naked)]`, or launched on a grid |
+//! | runtime | `kernite-cuda` | the CUDA driver a GPU kernel's launcher calls; it depends on no other crate |
+//! | runtime | `kernite-cpu` | the threads a cooperative x86 kernel runs on, and the memory of a module of x86 kernels; it depends on no other crate |
 //!
 //! None of them has a dependency outside the workspace, and none iterates a hash map, so a
 //! kernel's text is a function of its source alone.
@@ -36,26 +36,26 @@
 //!         ret(sum.xmm);
 //!     }
 //! "#;
-//! let listing = kgen::x86_str(src, "sum8")?;
+//! let listing = kernite::x86_str(src, "sum8")?;
 //! print!("{}", listing.text());
 //! # Ok::<(), String>(())
 //! ```
 
-pub use kgen_build::{
+pub use kernite_build::{
     Abi, Call, Compiled, ConstItem, DeviceFnOut, DeviceOut, DeviceStatic, Given, HostStatic, ItemOut, Launcher,
     ModuleOut, Naked, NativeInstance, NativeOut, Owner, abi, consts, cooperative, function, instance, owner,
 };
-pub use kgen_lang as lang;
+pub use kernite_lang as lang;
 
-use kgen_build::{all, compile, one, prepare, statics};
-use kgen_lang::{Fn, Module, Value};
-use kgen_ptx::{Entry, Ptx, Static};
-use kgen_x86::X86;
-use kgen_x86::intel::Listing;
-use kgen_x86::lang::Static as X86Static;
+use kernite_build::{all, compile, one, prepare, statics};
+use kernite_lang::{Fn, Module, Value};
+use kernite_ptx::{Entry, Ptx, Static};
+use kernite_x86::X86;
+use kernite_x86::intel::Listing;
+use kernite_x86::lang::Static as X86Static;
 
 /// Kernel `f` of `module`, for x86-64 under SysV, for the compile-time arguments `args`:
-/// those of one of its [`instances`](kgen_lang::instances), none for a kernel that takes none.
+/// those of one of its [`instances`](kernite_lang::instances), none for a kernel that takes none.
 /// What goes wrong is placed where it can be mended: an instruction where it is called, a
 /// register that ran out where its variable is declared. For an instance, it says which. A
 /// kernel that is [`cooperative`] runs on the threads of a grid, and may wait for them,
@@ -63,7 +63,7 @@ use kgen_x86::lang::Static as X86Static;
 /// one, but the cooperative, which its listing names in [`Listing::funcs`]. It names the
 /// module's memory, its statics, as [`x86_statics`] has them, which its listing names in
 /// [`Listing::statics`].
-pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>, kgen_lang::Error> {
+pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>, kernite_lang::Error> {
     compile(module, &prepare(module, &X86), &X86, f, args)
 }
 
@@ -71,7 +71,7 @@ pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>,
 /// and Rust to lay out: each of Rust's numbers, holding what it says or zeros. Or why one is
 /// none, where it can be mended: at its type, at what it holds, or at its name, if a listing
 /// names a constant or a function so, `c0` or `f0`.
-pub fn x86_statics(module: &Module) -> Vec<Result<Compiled<X86Static>, kgen_lang::Error>> {
+pub fn x86_statics(module: &Module) -> Vec<Result<Compiled<X86Static>, kernite_lang::Error>> {
     statics(module, &X86)
 }
 
@@ -83,30 +83,30 @@ pub fn x86_statics(module: &Module) -> Vec<Result<Compiled<X86Static>, kgen_lang
 /// mended, and each item of the module is what [`ModuleOut`] says, for whatever writes the
 /// module out for Rust.
 pub fn module(module: Module, given: Option<Given>, scope: &str) -> ModuleOut {
-    kgen_build::module(module, given, &X86, &Ptx::new(scope))
+    kernite_build::module(module, given, &X86, &Ptx::new(scope))
 }
 
 /// Kernel `name` of the module in `src`, for x86-64, or its instance `tile::<4>`; an error
 /// reads `line:column: what`, a static's that does not compile among them.
 pub fn x86_str(src: &str, name: &str) -> Result<Listing, String> {
-    let module = kgen_lang::parse(src).map_err(|e| e.at(src))?;
+    let module = kernite_lang::parse(src).map_err(|e| e.at(src))?;
     one(&module, &X86, name).map_err(|e| e.at(src))?.map(|k| k.code).ok_or_else(|| format!("no kernel `{name}`"))
 }
 
 /// Kernel `f` of `module`, in PTX, for the compile-time arguments `args`, those of one of its
-/// [`instances`](kgen_lang::instances): its `.entry`, or for a function `extern "ptx-func"` its
-/// `.func`, for [`kgen_ptx::module`] to put in a module. It may call the module's functions and
+/// [`instances`](kernite_lang::instances): its `.entry`, or for a function `extern "ptx-func"` its
+/// `.func`, for [`kernite_ptx::module`] to put in a module. It may call the module's functions and
 /// take their addresses and its kernels'. Nothing allocates its registers, which `ptxas`
 /// does, but what allocation would find wrong that does not depend on the registers is found
 /// here: a variable read before it is written, a jump to no label, control running off the
 /// end. For an instance, it says which.
 ///
-/// It is named in PTX, as the functions it names are, by its [`symbol`](kgen_ptx::symbol) in
+/// It is named in PTX, as the functions it names are, by its [`symbol`](kernite_ptx::symbol) in
 /// `scope`, the namespaces [`ptx_scope`] writes: C++'s name for it, which the tools that read
 /// PTX show. With no scope, `""`, one that takes no compile-time arguments is its own name.
 /// It names the module's memory, its statics, as [`ptx_statics`] has them in `scope`. A kernel
 /// that is [`cooperative`] may wait for its grid, `grid.sync()`.
-pub fn ptx(module: &Module, f: &Fn, args: &[Value], scope: &str) -> Result<Compiled<Entry>, kgen_lang::Error> {
+pub fn ptx(module: &Module, f: &Fn, args: &[Value], scope: &str) -> Result<Compiled<Entry>, kernite_lang::Error> {
     let machine = Ptx::new(scope);
     compile(module, &prepare(module, &machine), &machine, f, args)
 }
@@ -114,15 +114,15 @@ pub fn ptx(module: &Module, f: &Fn, args: &[Value], scope: &str) -> Result<Compi
 /// `path`, the namespaces a module's PTX kernels are in for [`ptx`], each in the one before:
 /// their names as C++ mangles them, `<length><name>` each.
 pub fn ptx_scope(path: &[&str]) -> String {
-    kgen_ptx::scope(path)
+    kernite_ptx::scope(path)
 }
 
 /// The statics of `module`, its memory in PTX, in order: each named by its
-/// [`symbol`](kgen_ptx::symbol) in `scope`, as [`ptx`] names a kernel, for its kernels to name
-/// and [`kgen_ptx::module`] to declare; or why it is none, where it can be mended: at its
+/// [`symbol`](kernite_ptx::symbol) in `scope`, as [`ptx`] names a kernel, for its kernels to name
+/// and [`kernite_ptx::module`] to declare; or why it is none, where it can be mended: at its
 /// type, or at what it holds. One that does not fit beside those before it, in the constant
 /// memory a module has or the global, is none.
-pub fn ptx_statics(module: &Module, scope: &str) -> Vec<Result<Compiled<Static>, kgen_lang::Error>> {
+pub fn ptx_statics(module: &Module, scope: &str) -> Vec<Result<Compiled<Static>, kernite_lang::Error>> {
     statics(module, &Ptx::new(scope))
 }
 
@@ -130,6 +130,6 @@ pub fn ptx_statics(module: &Module, scope: &str) -> Vec<Result<Compiled<Static>,
 /// `src`, each instance of each, in one PTX module, in no scope, with its statics; an error
 /// reads `line:column: what`. A helper's `#[instances(..)]` is one, and its `#[cooperative]`.
 pub fn ptx_str(src: &str) -> Result<String, String> {
-    let module = kgen_lang::parse(src).map_err(|e| e.at(src))?;
+    let module = kernite_lang::parse(src).map_err(|e| e.at(src))?;
     all(&module, &Ptx::new("")).map_err(|e| e.at(src))?
 }

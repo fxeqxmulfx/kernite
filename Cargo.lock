@@ -3,86 +3,86 @@
 version = 4
 
 [[package]]
-name = "kgen"
+name = "kernite"
 version = "0.1.0"
 dependencies = [
- "kgen-build",
- "kgen-core",
- "kgen-lang",
- "kgen-ptx",
- "kgen-x86",
+ "kernite-build",
+ "kernite-core",
+ "kernite-lang",
+ "kernite-ptx",
+ "kernite-x86",
 ]
 
 [[package]]
-name = "kgen-build"
+name = "kernite-build"
 version = "0.1.0"
 dependencies = [
- "kgen-lang",
+ "kernite-lang",
 ]
 
 [[package]]
-name = "kgen-compile"
+name = "kernite-compile"
 version = "0.1.0"
 dependencies = [
- "kgen-core",
+ "kernite-core",
 ]
 
 [[package]]
-name = "kgen-core"
+name = "kernite-core"
 version = "0.1.0"
 
 [[package]]
-name = "kgen-cpu"
+name = "kernite-cpu"
 version = "0.1.0"
 
 [[package]]
-name = "kgen-cuda"
+name = "kernite-cuda"
 version = "0.1.0"
 
 [[package]]
-name = "kgen-lang"
+name = "kernite-lang"
 version = "0.1.0"
 
 [[package]]
-name = "kgen-macros"
+name = "kernite-macros"
 version = "0.1.0"
 dependencies = [
- "kgen",
+ "kernite",
 ]
 
 [[package]]
-name = "kgen-ptx"
+name = "kernite-ptx"
 version = "0.1.0"
 dependencies = [
- "kgen-build",
- "kgen-compile",
- "kgen-core",
- "kgen-lang",
+ "kernite-build",
+ "kernite-compile",
+ "kernite-core",
+ "kernite-lang",
 ]
 
 [[package]]
-name = "kgen-x86"
+name = "kernite-x86"
 version = "0.1.0"
 dependencies = [
- "kgen-build",
- "kgen-compile",
- "kgen-core",
- "kgen-lang",
+ "kernite-build",
+ "kernite-compile",
+ "kernite-core",
+ "kernite-lang",
 ]
 
 [[package]]
 name = "microgpt"
 version = "0.1.0"
 dependencies = [
- "kgen-cuda",
- "kgen-macros",
+ "kernite-cuda",
+ "kernite-macros",
 ]
 
 [[package]]
 name = "my-app"
 version = "0.1.0"
 dependencies = [
- "kgen-cpu",
- "kgen-cuda",
- "kgen-macros",
+ "kernite-cpu",
+ "kernite-cuda",
+ "kernite-macros",
 ]

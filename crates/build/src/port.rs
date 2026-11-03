@@ -1,11 +1,11 @@
 //! The ports a machine implements, which the use cases call: [`Backend`] for every machine,
 //! and [`Native`] or [`Device`] for where its kernels run.
 
-use kgen_lang::{Fn, Memory, Span, Target, Value};
+use kernite_lang::{Fn, Memory, Span, Target, Value};
 
 use crate::{DeviceStatic, HostStatic, Naked};
 
-/// A machine kgen compiles a module's functions for: its kernels while their bodies are
+/// A machine kernite compiles a module's functions for: its kernels while their bodies are
 /// written, its statics, how its kernels see the functions they call, and its code.
 pub trait Backend {
     /// A kernel whose body the language is writing.

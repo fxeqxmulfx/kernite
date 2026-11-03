@@ -1,7 +1,7 @@
 //! The use cases for a function of a module, whatever machine compiles it: the module's
 //! statics laid out, what every kernel is told, and an instance compiled.
 
-use kgen_lang::{Error, Expr, Fn, ItemKind, Module, Value};
+use kernite_lang::{Error, Expr, Fn, ItemKind, Module, Value};
 
 use crate::present::within;
 use crate::{Backend, Called, Compiled, StaticError, cooperative};
@@ -32,7 +32,7 @@ pub fn prepare<B: Backend>(module: &Module, backend: &B) -> Prepared<B> {
     let mut made = vec![];
     for item in &module.items {
         let ItemKind::Static(s) = &item.kind else { continue };
-        let laid = kgen_lang::memory(module, s).and_then(|memory| {
+        let laid = kernite_lang::memory(module, s).and_then(|memory| {
             let code = backend.lay_out(&s.name, &memory, &made).map_err(|e| match e {
                 StaticError::Name(message) => Error { span: s.span, message },
                 StaticError::Type(message) => Error { span: s.ty.span(), message },
@@ -49,8 +49,8 @@ pub fn prepare<B: Backend>(module: &Module, backend: &B) -> Prepared<B> {
     for item in &module.items {
         let ItemKind::Fn(g) = &item.kind else { continue };
         let Some(callee) = backend.callee(g) else { continue };
-        for args in kgen_lang::instances(module, g).unwrap_or_default() {
-            if let Ok(name) = kgen_lang::instance(g, &args) {
+        for args in kernite_lang::instances(module, g).unwrap_or_default() {
+            if let Ok(name) = kernite_lang::instance(g, &args) {
                 callees.push(Called { name, function: g.name.clone(), args, callee: callee.clone() });
             }
         }
@@ -69,10 +69,10 @@ pub fn compile<B: Backend>(
     f: &Fn,
     args: &[Value],
 ) -> Result<Compiled<B::Code>, Error> {
-    let name = kgen_lang::instance(f, args)?;
+    let name = kernite_lang::instance(f, args)?;
     let cooperative = cooperative(f)?;
     let mut kernel = backend.kernel(f, &name, args, cooperative, &prepared.made, &prepared.callees);
-    let run = kgen_lang::kernel(module, f, args, &mut kernel).map_err(|e| within(&name, args, e))?;
+    let run = kernite_lang::kernel(module, f, args, &mut kernel).map_err(|e| within(&name, args, e))?;
     let code = backend
         .finish(kernel)
         .map_err(|u| within(&name, args, Error { span: u.at.unwrap_or(f.span), message: u.message }))?;

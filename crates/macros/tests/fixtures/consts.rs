@@ -2,14 +2,15 @@
 //! that is not `pub`, a `pub` one that is no value known now, and a function. The macro says each
 //! where it is, in order, and hands none on, so the module of kernels that takes it says nothing.
 
-#[kgen_macros::consts]
+#[kernite_macros::consts]
 pub mod sizes {
     #![allow(dead_code)]
 
     /// Half a step, which no module of kernels sees.
     const HALF: u64 = double(1) / 2;
 
-    /// How far a value moves: Rust calls `double` for it, and kgen calls no function for a value.
+    /// How far a value moves: Rust calls `double` for it, and kernite calls no function for a
+    /// value.
     pub const STEP: u64 = double(3);
 
     /// Twice `x`.
@@ -18,7 +19,7 @@ pub mod sizes {
     }
 }
 
-#[kgen_macros::kernels(consts = crate::sizes)]
+#[kernite_macros::kernels(consts = crate::sizes)]
 pub mod kernels {
     /// The module's own, which it may have: `sizes` hands on no `STEP`.
     const STEP: u64 = 3;

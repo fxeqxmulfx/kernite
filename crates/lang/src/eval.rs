@@ -536,7 +536,7 @@ impl<'a, T: Target> Eval<'a, T> {
             }
             Expr::Path(path, _) => {
                 let p = path.join("::");
-                value::path(&p).ok_or_else(|| at(format!("`{p}` is not a constant kgen knows")))
+                value::path(&p).ok_or_else(|| at(format!("`{p}` is not a constant kernite knows")))
             }
             Expr::Field(..) => Err(at("a field is a view of a variable, not a value".into())),
             Expr::Instance { .. } => {
@@ -1127,7 +1127,7 @@ impl<'a, T: Target> Eval<'a, T> {
                     return Err(err(*span, "what is called is an instruction or a helper, by name"));
                 };
                 let [name] = path.as_slice() else {
-                    return Err(err(*span, format!("`{}` names nothing kgen calls", path.join("::"))));
+                    return Err(err(*span, format!("`{}` names nothing kernite calls", path.join("::"))));
                 };
                 if generics.is_empty() && name == "label" {
                     return self.place_label(args, *span);

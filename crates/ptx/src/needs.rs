@@ -16,7 +16,7 @@ pub struct Needs {
     pub since: u32,
 }
 
-/// The GPUs kgen writes for, by their `sm_` numbers, and the version of PTX that came with
+/// The GPUs kernite writes for, by their `sm_` numbers, and the version of PTX that came with
 /// each, which a module for it is of at least.
 pub const GPUS: [(u32, u32); 17] = [
     (20, 20),

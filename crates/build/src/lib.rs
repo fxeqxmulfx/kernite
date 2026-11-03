@@ -1,13 +1,13 @@
-//! What kgen does with a module of kernels, whatever machine compiles them. It decides what the
+//! What kernite does with a module of kernels, whatever machine compiles them. It decides what the
 //! module's items are: the ABI each function names, whether a kernel is the `unsafe fn` it must
 //! be, whose memory the module's statics are, which kernels are cooperative, what is wrong with a
 //! helper, and which function an instance's name names. It has the ports a machine implements,
 //! [`Backend`] with [`Native`] or [`Device`], and the data they hand on. Its use cases call them:
 //! a module's [`statics`] laid out, what [`prepare`] gathers for every kernel, an instance
-//! [`compile`]d, the cores of kgen's façades, [`one`] kernel by its name and [`all`] that a
+//! [`compile`]d, the cores of kernite's façades, [`one`] kernel by its name and [`all`] that a
 //! device runs, and a whole [`fn@module`], each of its items as whatever writes it out for Rust
-//! needs it, and what each item of a module of [`consts`] is. It depends on the language alone,
-//! so it cannot reach a machine's code: it names the machines only in words.
+//! needs it, and what each item of a module of [`consts`] is. It depends on the language alone, so
+//! it cannot reach a machine's code: it names the machines only in words.
 
 mod classify;
 mod dto;

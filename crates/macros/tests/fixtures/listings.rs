@@ -2,7 +2,7 @@
 //! kernel's, an instance each, as `plus::<2>`, and a grid's kernel's. Rust checks each as it
 //! builds.
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod kernels {
     /// `x` and `N`.
     #[instances(2, 3)]

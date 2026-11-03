@@ -1,13 +1,13 @@
-//! An example user of kgen: kernels written where they are called, in `#[kgen_macros::kernels]`,
-//! and safe functions over them. The tests hold each kernel to a scalar reference that does
-//! the same float operations in the same order, bit for bit, or the tensor cores, which add in
-//! an order of their own, to products of integers, exact in any order; and its listing to the
-//! one in `snapshots/`.
+//! An example user of kernite: kernels written where they are called, in
+//! `#[kernite_macros::kernels]`, and safe functions over them. The tests hold each kernel to a
+//! scalar reference that does the same float operations in the same order, bit for bit, or the
+//! tensor cores, which add in an order of their own, to products of integers, exact in any order;
+//! and its listing to the one in `snapshots/`.
 
 /// The kernels for the cpu, and the memory of the module's, `COUNTS` and `WEIGHTS`, which they
 /// keep from call to call. Each reads what its pointers point at, and all but `gcds`, `gcd` and
 /// `histogram`, which take integers, need AVX2 and FMA.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 mod kernels {
     /// The sum of the eight floats at `xs`.
     pub unsafe extern "sysv64" fn sum8(xs: *const f32) -> f32 {
@@ -543,7 +543,7 @@ mod kernels {
 }
 
 /// The GPU kernels, for NVIDIA GPUs: a thread each element.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 mod gpu {
     /// `y[i] = a * x[i] + y[i]` for each `i < n`, rounded once.
     pub unsafe extern "ptx-kernel" fn saxpy(a: f32, x: *const f32, y: *mut f32, n: u32) {
@@ -738,7 +738,7 @@ mod gpu {
 /// The kernels for the tensor cores of Ampere's GPUs and newer, `sm_80`, in a module of their
 /// own: a module's `.target` is the newest any of its kernels needs, and `gpu`'s load on
 /// older GPUs.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 mod ampere {
     /// `c = a b` in `f32`, of `a`, rows of `k` halves, and `b`, `k` rows of `n`, given as its
     /// transpose `bt`, `n` rows of `k`: a warp a block, for 16 rows by 8 columns of `c`. It
@@ -842,7 +842,7 @@ mod ampere {
 /// The kernels whose blocks wait for each other, `#[cooperative]`, which a GPU from Pascal's
 /// on, `sm_60`, launches all at once, in a module of their own: a module's `.target` is the
 /// newest any of its kernels needs, and `gpu`'s load on older GPUs.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 mod pascal {
     /// How many floats each thread of `normalize` keeps in its registers.
     pub const K: u32 = 4;
@@ -1006,7 +1006,7 @@ mod pascal {
 
 use std::sync::{Mutex, PoisonError};
 
-use kgen_cuda::{Cuda, Grid, f16};
+use kernite_cuda::{Cuda, Grid, f16};
 
 /// Whether this cpu runs the kernels.
 fn supported() -> bool {
@@ -1087,30 +1087,30 @@ fn weigh_on_cpu(x: &mut [f32]) {
 /// `x / s` on `threads` threads of the cpu, `s` the sum of `x`, in one launch: each thread
 /// sums its chunks of 1024 floats while the others sum theirs, then waits for them to add the
 /// chunks' sums, bit for bit as `normalize` does on the GPU. `threads` is one at least, and at
-/// most as many as the machine runs at once, `kgen_cpu::most()`; else it is an error.
-fn normalize_on_threads(x: &mut [f32], threads: usize) -> Result<(), kgen_cpu::Error> {
+/// most as many as the machine runs at once, `kernite_cpu::most()`; else it is an error.
+fn normalize_on_threads(x: &mut [f32], threads: usize) -> Result<(), kernite_cpu::Error> {
     assert!(supported(), "the kernels need AVX2 and FMA");
     let mut sums = vec![0.0; x.len().div_ceil(1024)];
     // SAFETY: `x.len()` floats behind `x` and a float a chunk behind `sums`, which nothing
     // else touches while the threads run, and the cpu has what the kernel needs.
-    unsafe { kernels::normalize(kgen_cpu::Grid::new(threads), x.as_mut_ptr(), sums.as_mut_ptr(), x.len()) }
+    unsafe { kernels::normalize(kernite_cpu::Grid::new(threads), x.as_mut_ptr(), sums.as_mut_ptr(), x.len()) }
 }
 
 /// `steps` steps of heat spreading along `x` on `threads` threads of the cpu, in one launch,
 /// the threads waiting for each other between steps, bit for bit as `diffuse` does on the
 /// GPU. `threads` is one at least, and at most as many as the machine runs at once,
-/// `kgen_cpu::most()`; else it is an error.
-fn diffuse_on_threads(x: &mut [f32], steps: usize, threads: usize) -> Result<(), kgen_cpu::Error> {
+/// `kernite_cpu::most()`; else it is an error.
+fn diffuse_on_threads(x: &mut [f32], steps: usize, threads: usize) -> Result<(), kernite_cpu::Error> {
     assert!(supported(), "the kernels need AVX2 and FMA");
     let mut y = vec![0.0; x.len()];
     // SAFETY: `x.len()` floats behind each pointer, which nothing else touches while the
     // threads run, and the cpu has what the kernel needs.
-    unsafe { kernels::diffuse(kgen_cpu::Grid::new(threads), x.as_mut_ptr(), y.as_mut_ptr(), x.len(), steps) }
+    unsafe { kernels::diffuse(kernite_cpu::Grid::new(threads), x.as_mut_ptr(), y.as_mut_ptr(), x.len(), steps) }
 }
 
 /// `y = a * x + y` on the GPU, each element rounded once; `x` and `y` must be as long as each
 /// other.
-fn saxpy(cuda: &Cuda, kernels: &gpu::Kernels, a: f32, x: &[f32], y: &mut [f32]) -> Result<(), kgen_cuda::Error> {
+fn saxpy(cuda: &Cuda, kernels: &gpu::Kernels, a: f32, x: &[f32], y: &mut [f32]) -> Result<(), kernite_cuda::Error> {
     assert_eq!(x.len(), y.len(), "x and y differ in length");
     let n = u32::try_from(x.len()).expect("fewer than 2^32 floats");
     if n == 0 {
@@ -1126,7 +1126,7 @@ fn saxpy(cuda: &Cuda, kernels: &gpu::Kernels, a: f32, x: &[f32], y: &mut [f32]) 
 /// The sum of each run of `N` floats of `x`, on the GPU, added in a tree; `x` must be a whole
 /// number of runs, and `N` a run `gpu::block_sums` is compiled for, 256 or 1024: another is
 /// a compile error.
-fn block_sums<const N: u32>(cuda: &Cuda, kernels: &gpu::Kernels, x: &[f32]) -> Result<Vec<f32>, kgen_cuda::Error> {
+fn block_sums<const N: u32>(cuda: &Cuda, kernels: &gpu::Kernels, x: &[f32]) -> Result<Vec<f32>, kernite_cuda::Error> {
     let run = N as usize;
     assert!(x.len().is_multiple_of(run), "{} floats are no whole number of runs of {N}", x.len());
     let blocks = u32::try_from(x.len() / run).expect("fewer than 2^32 runs");
@@ -1144,7 +1144,7 @@ fn block_sums<const N: u32>(cuda: &Cuda, kernels: &gpu::Kernels, x: &[f32]) -> R
 
 /// Each run of `run` floats of `x` reversed, on the GPU; `x` must be a whole number of runs,
 /// and a run no more threads than a block has.
-fn reverse_runs(cuda: &Cuda, kernels: &gpu::Kernels, x: &mut [f32], run: usize) -> Result<(), kgen_cuda::Error> {
+fn reverse_runs(cuda: &Cuda, kernels: &gpu::Kernels, x: &mut [f32], run: usize) -> Result<(), kernite_cuda::Error> {
     assert!(run > 0 && x.len().is_multiple_of(run), "{} floats are no whole number of runs of {run}", x.len());
     let (blocks, threads) = (u32::try_from(x.len() / run).expect("fewer than 2^32 runs"), run as u32);
     if blocks == 0 {
@@ -1158,7 +1158,7 @@ fn reverse_runs(cuda: &Cuda, kernels: &gpu::Kernels, x: &mut [f32], run: usize) 
 }
 
 /// `x *= a` on the GPU, each element in `f16`, rounded once.
-fn scale_f16(cuda: &Cuda, kernels: &gpu::Kernels, a: f16, x: &mut [f16]) -> Result<(), kgen_cuda::Error> {
+fn scale_f16(cuda: &Cuda, kernels: &gpu::Kernels, a: f16, x: &mut [f16]) -> Result<(), kernite_cuda::Error> {
     let n = u32::try_from(x.len()).expect("fewer than 2^32 halves");
     if n == 0 {
         return Ok(());
@@ -1172,7 +1172,7 @@ fn scale_f16(cuda: &Cuda, kernels: &gpu::Kernels, a: f16, x: &mut [f16]) -> Resu
 
 /// The greatest common divisor of each `a[i]` and `b[i]`, on the GPU, by a function that calls
 /// itself; `a` and `b` must be as long as each other.
-fn gcds(cuda: &Cuda, kernels: &gpu::Kernels, a: &[u32], b: &[u32]) -> Result<Vec<u32>, kgen_cuda::Error> {
+fn gcds(cuda: &Cuda, kernels: &gpu::Kernels, a: &[u32], b: &[u32]) -> Result<Vec<u32>, kernite_cuda::Error> {
     assert_eq!(a.len(), b.len(), "a and b differ in length");
     let n = u32::try_from(a.len()).expect("fewer than 2^32 pairs");
     let mut g = vec![0; a.len()];
@@ -1190,7 +1190,7 @@ fn gcds(cuda: &Cuda, kernels: &gpu::Kernels, a: &[u32], b: &[u32]) -> Result<Vec
 /// Adds each of `x` to its bin of `gpu::COUNTS`, by its top four bits, on the GPU, which keeps
 /// the counts from one call to the next: `kernels.COUNTS()` reads them, writes them, and
 /// zeroes them.
-fn histogram(cuda: &Cuda, kernels: &gpu::Kernels, x: &[u32]) -> Result<(), kgen_cuda::Error> {
+fn histogram(cuda: &Cuda, kernels: &gpu::Kernels, x: &[u32]) -> Result<(), kernite_cuda::Error> {
     let n = u32::try_from(x.len()).expect("fewer than 2^32 integers");
     if n == 0 {
         return Ok(());
@@ -1204,7 +1204,7 @@ fn histogram(cuda: &Cuda, kernels: &gpu::Kernels, x: &[u32]) -> Result<(), kgen_
 
 /// `x[i] *= w[i % 4]` on the GPU, each product rounded once, of `w` the weights in its
 /// constant memory, `gpu::WEIGHTS`: `[1, 0.5, 0.25, 2]` until `kernels.WEIGHTS()` writes others.
-fn weigh(cuda: &Cuda, kernels: &gpu::Kernels, x: &mut [f32]) -> Result<(), kgen_cuda::Error> {
+fn weigh(cuda: &Cuda, kernels: &gpu::Kernels, x: &mut [f32]) -> Result<(), kernite_cuda::Error> {
     let n = u32::try_from(x.len()).expect("fewer than 2^32 floats");
     if n == 0 {
         return Ok(());
@@ -1225,7 +1225,7 @@ fn matmul(
     a: &[f16],
     bt: &[f16],
     (m, n, k): (usize, usize, usize),
-) -> Result<Vec<f32>, kgen_cuda::Error> {
+) -> Result<Vec<f32>, kernite_cuda::Error> {
     let whole = m.is_multiple_of(16) && n.is_multiple_of(8) && k.is_multiple_of(16);
     assert!(whole, "{m} by {n} by {k} is no whole number of tiles of 16 by 8 by 16");
     assert_eq!(a.len(), m * k, "a is not {m} rows of {k}");
@@ -1250,7 +1250,7 @@ fn matmul(
 /// registers while the grid waits for every block's sum. `x` is at most as many floats as the
 /// GPU holds at once, `256 pascal::K` a block of as many blocks as it runs at once,
 /// `kernels.normalize_blocks(256, 0)`; more is an error.
-fn normalize(cuda: &Cuda, kernels: &pascal::Kernels, x: &mut [f32]) -> Result<(), kgen_cuda::Error> {
+fn normalize(cuda: &Cuda, kernels: &pascal::Kernels, x: &mut [f32]) -> Result<(), kernite_cuda::Error> {
     let n = u32::try_from(x.len()).expect("fewer than 2^32 floats");
     if n == 0 {
         return Ok(());
@@ -1267,7 +1267,7 @@ fn normalize(cuda: &Cuda, kernels: &pascal::Kernels, x: &mut [f32]) -> Result<()
 /// becomes `x[i] + (x[i - 1] - x[i]) / 4 + (x[i + 1] - x[i]) / 4` of the floats before, an
 /// end's missing neighbour as warm as the end. `x` is at most a float a thread of as many
 /// blocks of 256 as the GPU runs at once, `kernels.diffuse_blocks(256, 0)`; more is an error.
-fn diffuse(cuda: &Cuda, kernels: &pascal::Kernels, x: &mut [f32], steps: u32) -> Result<(), kgen_cuda::Error> {
+fn diffuse(cuda: &Cuda, kernels: &pascal::Kernels, x: &mut [f32], steps: u32) -> Result<(), kernite_cuda::Error> {
     let n = u32::try_from(x.len()).expect("fewer than 2^32 floats");
     if n == 0 {
         return Ok(());
@@ -1313,7 +1313,7 @@ fn main() {
     let mut x = [1.0; 6];
     weigh_on_cpu(&mut x);
     println!("six ones weighed on the cpu by the weights in the module's constant memory: {x:?}");
-    let cooperative = kgen_cpu::most().and_then(|most| {
+    let cooperative = kernite_cpu::most().and_then(|most| {
         let threads = most.min(4);
         let mut x = [1.0, 2.0, 3.0, 4.0];
         normalize_on_threads(&mut x, threads)?;
@@ -1365,7 +1365,7 @@ fn main() {
             let seen = (0..2).try_fold(vec![], |mut seen, launch| {
                 histogram(&cuda, &kernels, &[launch << 28, 0x1000_0000, u32::MAX])?;
                 seen.push(kernels.COUNTS().read()?[..4].to_vec());
-                Ok::<_, kgen_cuda::Error>(seen)
+                Ok::<_, kernite_cuda::Error>(seen)
             });
             match seen {
                 Ok(seen) => println!("4 of the 16 bins after a launch of 3 integers, and after another: {seen:?}"),
@@ -1419,17 +1419,17 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use kgen_cuda::{Cuda, f16};
+    use kernite_cuda::{Cuda, f16};
 
     use super::{ampere, gpu, kernels, pascal};
 
-    /// Each kernel's listing against the one in `snapshots/`, and the GPU kernels' PTX, so that
-    /// a change to kgen or to a kernel that moves an instruction shows in review. With
-    /// `KGEN_BLESS=1` the files are written instead, for the diff to be reviewed and committed.
+    /// Each kernel's listing against the one in `snapshots/`, and the GPU kernels' PTX, so that a
+    /// change to kernite or to a kernel that moves an instruction shows in review. With
+    /// `KERNITE_BLESS=1` the files are written instead, for the diff to be reviewed and committed.
     #[test]
     fn listings_match_their_snapshots() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("snapshots");
-        let bless = std::env::var_os("KGEN_BLESS").is_some();
+        let bless = std::env::var_os("KERNITE_BLESS").is_some();
         let mut changed = vec![];
         // An instance's listing, of `dot::<4>`, is `dot4.s`.
         let files =
@@ -1448,7 +1448,7 @@ mod tests {
                 changed.push(name);
             }
         }
-        assert!(changed.is_empty(), "listings changed: {changed:?}; rerun with KGEN_BLESS=1 and review the diff");
+        assert!(changed.is_empty(), "listings changed: {changed:?}; rerun with KERNITE_BLESS=1 and review the diff");
     }
 
     /// Pseudo-random integers, the same for the same seed.
@@ -1668,7 +1668,7 @@ mod tests {
     }
 
     /// A kernel for the tests alone.
-    #[kgen_macros::kernels]
+    #[kernite_macros::kernels]
     mod deep {
         /// Clears the first and the last word of a megabyte of stack memory.
         pub unsafe extern "sysv64" fn deep() {
@@ -1882,7 +1882,7 @@ mod tests {
 
     /// The end of the error of a cooperative launch of `blocks` blocks, which is more than the
     /// GPU runs at once, `most`.
-    fn too_large(e: kgen_cuda::Error, blocks: u32, most: u32) {
+    fn too_large(e: kernite_cuda::Error, blocks: u32, most: u32) {
         assert!(e.message.starts_with("CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE (720): "), "{e}");
         assert!(
             e.message.ends_with(&format!(": the grid has {blocks} blocks, and the GPU runs {most} of these at once")),
@@ -1949,12 +1949,12 @@ mod tests {
     /// once if fewer, since `cargo test` runs tests beside each other and each thread spins at
     /// a barrier.
     fn threads() -> usize {
-        kgen_cpu::most().unwrap().min(4)
+        kernite_cpu::most().unwrap().min(4)
     }
 
     /// The error of a grid of more threads than the machine runs at once.
-    fn too_many(e: kgen_cpu::Error) {
-        let most = kgen_cpu::most().unwrap();
+    fn too_many(e: kernite_cpu::Error) {
+        let most = kernite_cpu::most().unwrap();
         assert_eq!(e.message, format!("the grid has {} threads, and the machine runs {most} at once", most + 1));
     }
 
@@ -1982,7 +1982,7 @@ mod tests {
                 }
             }
         }
-        too_many(super::normalize_on_threads(&mut [1.0], kgen_cpu::most().unwrap() + 1).unwrap_err());
+        too_many(super::normalize_on_threads(&mut [1.0], kernite_cpu::most().unwrap() + 1).unwrap_err());
     }
 
     /// The cpu's `diffuse` against [`diffused`], the GPU's reference, bit for bit, on one thread
@@ -2006,7 +2006,7 @@ mod tests {
                 );
             }
         }
-        too_many(super::diffuse_on_threads(&mut [1.0], 1, kgen_cpu::most().unwrap() + 1).unwrap_err());
+        too_many(super::diffuse_on_threads(&mut [1.0], 1, kernite_cpu::most().unwrap() + 1).unwrap_err());
     }
 
     /// `saxpy` on the GPU against `f32::mul_add`, which rounds once as `fma.rn.f32` does; on a

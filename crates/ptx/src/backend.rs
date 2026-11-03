@@ -1,7 +1,7 @@
-//! PTX as kgen-build sees it: a machine whose kernels a driver loads as one module.
+//! PTX as kernite-build sees it: a machine whose kernels a driver loads as one module.
 
-use kgen_build::{Abi, Backend, Called, Device, DeviceStatic, StaticError, Unfinished, abi};
-use kgen_lang::{Fn, Memory, Value};
+use kernite_build::{Abi, Backend, Called, Device, DeviceStatic, StaticError, Unfinished, abi};
+use kernite_lang::{Fn, Memory, Value};
 
 use crate::lang::{Callee, Kernel};
 use crate::{Entry, Prototype, Static, fits};
@@ -78,12 +78,12 @@ impl Backend for Ptx {
         let decls = std::mem::take(&mut kernel.decls);
         let (masks, leaves) = (std::mem::take(&mut kernel.masks), std::mem::take(&mut kernel.leaves));
         let code = kernel.finish();
-        let blame = |e: kgen_compile::Error| Unfinished::blaming(e.var(), &decls, e.to_string());
-        kgen_compile::check(&code.program).map_err(blame)?;
+        let blame = |e: kernite_compile::Error| Unfinished::blaming(e.var(), &decls, e.to_string());
+        kernite_compile::check(&code.program).map_err(blame)?;
         // Thread 0 is in lane 0 and runs each instruction that is on every path, which PTX leaves
         // undefined for one whose mask leaves lane 0 out.
         if !masks.is_empty() {
-            let on = kgen_compile::on_every_path(&code.program, &leaves).map_err(blame)?;
+            let on = kernite_compile::on_every_path(&code.program, &leaves).map_err(blame)?;
             if let Some((_, at, message)) = masks.into_iter().find(|&(i, ..)| on[i]) {
                 return Err(Unfinished { at: Some(at), message });
             }
@@ -114,7 +114,7 @@ fn prototype(f: &Fn) -> Option<Prototype> {
         .params
         .iter()
         .map(|p| match &p.ty {
-            kgen_lang::Type::Name(ty, _) => Some(ty.as_str()),
+            kernite_lang::Type::Name(ty, _) => Some(ty.as_str()),
             _ => None,
         })
         .collect();

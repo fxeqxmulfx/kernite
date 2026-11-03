@@ -4,13 +4,13 @@
 
 extern crate self as paths;
 
-#[kgen_macros::consts]
+#[kernite_macros::consts]
 pub mod sizes {
     /// How far a value moves.
     pub const STEP: u64 = 3;
 }
 
-#[kgen_macros::kernels(consts = crate::sizes)]
+#[kernite_macros::kernels(consts = crate::sizes)]
 pub mod by_crate {
     /// The `STEP` Rust sees here.
     pub const SEEN: u64 = STEP;
@@ -22,7 +22,7 @@ pub mod by_crate {
     }
 }
 
-#[kgen_macros::kernels(consts = ::paths::sizes)]
+#[kernite_macros::kernels(consts = ::paths::sizes)]
 pub mod by_extern {
     /// The `STEP` Rust sees here.
     pub const SEEN: u64 = STEP;
@@ -34,7 +34,7 @@ pub mod by_extern {
     }
 }
 
-#[kgen_macros::kernels(consts = sizes)]
+#[kernite_macros::kernels(consts = sizes)]
 pub mod by_name {
     /// The `STEP` Rust sees here.
     pub const SEEN: u64 = STEP;
@@ -48,13 +48,13 @@ pub mod by_name {
 
 /// Modules of kernels beside a module of consts of their own.
 pub mod model {
-    #[kgen_macros::consts]
+    #[kernite_macros::consts]
     pub mod sizes {
         /// How far a value moves here.
         pub const STEP: u64 = 5;
     }
 
-    #[kgen_macros::kernels(consts = self::sizes)]
+    #[kernite_macros::kernels(consts = self::sizes)]
     pub mod by_self {
         /// The `STEP` Rust sees here.
         pub const SEEN: u64 = STEP;
@@ -66,7 +66,7 @@ pub mod model {
         }
     }
 
-    #[kgen_macros::kernels(consts = super::sizes)]
+    #[kernite_macros::kernels(consts = super::sizes)]
     pub mod by_super {
         /// The `STEP` Rust sees here.
         pub const SEEN: u64 = STEP;

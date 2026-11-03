@@ -7,7 +7,7 @@
 //! a module of its own, and Rust builds each as written, without a word.
 
 /// A compile-time argument named in lower case, which the kernel allows.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod lower {
     #[instances(1, 2)]
     #[cooperative]
@@ -18,7 +18,7 @@ pub mod lower {
 }
 
 /// The same, named raw, `r#in`.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod raw {
     #[instances(1, 2)]
     #[cooperative]
@@ -30,7 +30,7 @@ pub mod raw {
 
 /// A parameter named in camel case, which the kernel expects Rust to warn of: the launcher takes
 /// it, and `k_blocks` does not.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod expected {
     #[cooperative]
     #[expect(non_snake_case)]
@@ -41,7 +41,7 @@ pub mod expected {
 
 /// A compile-time argument named in lower case, which the kernel expects Rust to warn of: both
 /// methods take it.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod met {
     #[instances(1, 2)]
     #[cooperative]
@@ -53,7 +53,7 @@ pub mod met {
 
 /// Docs, then lints, one warned of and then allowed: `k_blocks` keeps none of them, and has docs
 /// of its own alone.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod listed {
     /// What the kernel does, which `k_blocks` does not say.
     #[instances(1, 2)]
@@ -68,7 +68,7 @@ pub mod listed {
 
 /// A kernel left out: `k_blocks` goes with its launcher, and the method of that name that the
 /// crate has of its own, below, is the only one.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod gone {
     #[cooperative]
     #[cfg(false)]
@@ -87,7 +87,7 @@ impl gone::Kernels {
 /// Lints expected of both kinds and the kernel hidden, in a `cfg_attr(..)` with a comma after
 /// them: `k_blocks` takes `n` and not `xsPtr`, keeps none of the lints, and is hidden with the
 /// kernel.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod conditional {
     #[instances(1, 2)]
     #[cooperative]
@@ -98,7 +98,7 @@ pub mod conditional {
 }
 
 /// The same, in a `cfg_attr(..)` inside another.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod nested {
     #[instances(1, 2)]
     #[cooperative]
@@ -113,7 +113,7 @@ pub mod nested {
 macro_rules! written {
     ($kept:meta) => {
         /// The attribute alone.
-        #[kgen_macros::kernels]
+        #[kernite_macros::kernels]
         pub mod written {
             #[cooperative]
             #[$kept]
@@ -123,7 +123,7 @@ macro_rules! written {
         }
 
         /// The attribute in a `cfg_attr(..)`.
-        #[kgen_macros::kernels]
+        #[kernite_macros::kernels]
         pub mod written_in_cfg_attr {
             #[cooperative]
             #[cfg_attr(all(), $kept)]
@@ -138,7 +138,7 @@ written!(doc(hidden));
 
 /// Docs alone in a `cfg_attr(..)`: `k_blocks` keeps none of it, for a `cfg_attr(..)` of its
 /// condition alone is an error.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod conditional_docs {
     #[cooperative]
     #[cfg_attr(all(), doc = "What the kernel does, which `k_blocks` does not say.")]
@@ -148,7 +148,7 @@ pub mod conditional_docs {
 }
 
 /// Docs and a lint in a `cfg_attr(..)`: `k_blocks` keeps neither, and has docs of its own alone.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod conditional_docs_and_lint {
     #[instances(1, 2)]
     #[cooperative]
@@ -159,7 +159,7 @@ pub mod conditional_docs_and_lint {
 }
 
 /// A lint allowed by a name written raw, `r#allow`, which Rust reads as `allow`.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod raw_allow {
     #[instances(1, 2)]
     #[cooperative]
@@ -171,7 +171,7 @@ pub mod raw_allow {
 
 /// Docs, then a lint expected in a `cfg_attr(..)`, each name written raw: `k_blocks` keeps
 /// neither, and has docs of its own alone.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod raw_names {
     #[r#doc = "What the kernel does, which `k_blocks` does not say."]
     #[instances(1, 2)]
@@ -183,7 +183,7 @@ pub mod raw_names {
 }
 
 /// A kernel hidden from the docs: `k_blocks` is hidden with it.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod hidden {
     #[cooperative]
     #[doc(hidden)]
@@ -193,7 +193,7 @@ pub mod hidden {
 }
 
 /// The same, by names written raw, `r#doc(r#hidden)`.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod raw_hidden {
     #[cooperative]
     #[r#doc(r#hidden)]
@@ -204,7 +204,7 @@ pub mod raw_hidden {
 
 /// A kernel hidden from the docs among other words of its `doc(..)`: `k_blocks` is hidden with it,
 /// and takes none of the others, here an alias that would be its own name.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod hidden_aliased {
     #[cooperative]
     #[doc(hidden, alias = "k_blocks")]
@@ -215,7 +215,7 @@ pub mod hidden_aliased {
 
 /// A kernel found in the docs by another name, `k_blocks`: the method of that name does not take
 /// the alias, which would be its own.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod aliased {
     #[cooperative]
     #[doc(alias = "k_blocks")]
@@ -225,7 +225,7 @@ pub mod aliased {
 }
 
 /// A kernel deprecated: `k_blocks` is too, and a call of it warns so, as expected below.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod retired {
     #[cooperative]
     #[deprecated]
@@ -236,13 +236,13 @@ pub mod retired {
 
 /// How many blocks a grid of `retired`'s kernel has at most, of 256 threads each.
 #[expect(deprecated)]
-pub fn retired_blocks(kernels: &retired::Kernels) -> Result<u32, kgen_cuda::Error> {
+pub fn retired_blocks(kernels: &retired::Kernels) -> Result<u32, kernite_cuda::Error> {
     kernels.k_blocks(256, 0)
 }
 
 /// A kernel whose launcher needs a CPU feature: `k_blocks` does not, and is called without
 /// `unsafe`, below.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod featured {
     #[cooperative]
     #[target_feature(enable = "avx2")]
@@ -252,12 +252,12 @@ pub mod featured {
 }
 
 /// How many blocks a grid of `featured`'s kernel has at most, of 256 threads each.
-pub fn featured_blocks(kernels: &featured::Kernels) -> Result<u32, kgen_cuda::Error> {
+pub fn featured_blocks(kernels: &featured::Kernels) -> Result<u32, kernite_cuda::Error> {
     kernels.k_blocks(256, 0)
 }
 
 /// A kernel whose launcher has a symbol of its own: `k_blocks` does not take it as well.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod exported {
     #[cooperative]
     #[unsafe(export_name = "blocks_exported_k")]

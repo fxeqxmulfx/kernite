@@ -13,7 +13,7 @@
 //!
 //! An instruction is called by the name the assembler knows it by, `vaddps(v, v, w)`, SSE's as
 //! AVX writes them, and `lock.` before it is the lock prefix: `lock.xadd([p], g)`. [`forms`]
-//! says which instructions kgen knows. One takes the operands of each form
+//! says which instructions kernite knows. One takes the operands of each form
 //! `llvm-mc` takes it in, but those of registers of its own, as `shl` by `cl` and `mul` into
 //! `rdx:rax`, which come later. Memory is as big as the instruction's other operands make it, as
 //! `vmovups(v, [p])` loads the 32 bytes of a ymm; where they leave that open, Intel's word before
@@ -25,15 +25,15 @@
 //!
 //! A form needs the CPU features it is of past x86-64's own: AVX for every vector instruction,
 //! AVX2 for integers in a ymm, and FMA, F16C, BMI1, BMI2, LZCNT, POPCNT, MOVBE and SSE4.2's
-//! `crc32` for theirs. A kernel's listing names what it needs, which kgen does not check for when
-//! it runs. A kernel that loads MXCSR, the control of floats, with `vldmxcsr`, stores the
+//! `crc32` for theirs. A kernel's listing names what it needs, which kernite does not check for
+//! when it runs. A kernel that loads MXCSR, the control of floats, with `vldmxcsr`, stores the
 //! caller's as it starts and loads it back before it returns, as SysV asks.
 //!
 //! Stack memory is declared as PTX's local memory is: `let buf: local<[f32; 64], 32>;` is 256
 //! bytes of the kernel's frame at a multiple of 32, and `local<u64>` one `u64`, at a multiple of
 //! its 8 bytes. Brackets name what it holds, `vmovaps(v, [buf + 32])`, `vmovss(x, [buf + i * 4])`,
 //! and `lea(p, [buf])` takes its address. Until written, it holds whatever was there before.
-//! kgen checks an address in it where the index is 0: what it reaches lies inside, the address
+//! kernite checks an address in it where the index is 0: what it reaches lies inside, the address
 //! reaching as far as one past the end for `lea`; and for `vmovaps` and the rest that fault
 //! elsewhere, it is a multiple of the bytes they move. The index is the kernel's to keep inside,
 //! and at such a multiple.
@@ -44,7 +44,7 @@
 //! `static WEIGHTS: constant<[f32; 4]> = [..];`, which they only read. A kernel reaches it at a
 //! displacement from `rip`, with no register beside it, `mov(t.r32, [COUNTS + 8])`; for an
 //! index, `lea(p, [COUNTS])` puts its address in `p`, and `[p + i * 4]` is what it holds there.
-//! kgen checks what an address reaches as it does stack memory's, and refuses a write to
+//! kernite checks what an address reaches as it does stack memory's, and refuses a write to
 //! constant memory: a write through an address `lea` took is the kernel's to keep from.
 //!
 //! A `#[cooperative]` kernel runs on the threads of a grid, each the same code, as a GPU kernel
@@ -54,8 +54,8 @@
 //! each wrote before, every one reads after. It is code of the kernel's own, which calls
 //! nothing: a thread counts itself in with `lock xadd`, and the last to come lets the others
 //! go, who spin with `pause` until it does, so each thread needs a core. Every thread comes to
-//! each `grid.sync()`, or the others wait for ever. kgen refuses one under an `if`, and a jump
-//! around one is the kernel's to see to: every thread takes it, or none does.
+//! each `grid.sync()`, or the others wait for ever. kernite refuses one under an `if`, and a
+//! jump around one is the kernel's to see to: every thread takes it, or none does.
 //!
 //! The launcher gives each thread the address of its place in the grid, in the register after
 //! the kernel's parameters, as SysV passes the next integer, so a cooperative kernel takes five
@@ -69,7 +69,7 @@
 //! `tile::<4>`. `call(r, f, (a, b))` calls `f` with `a` and `b` and writes what it returns to
 //! `r`, or to nothing, `_`; `call(f, a)` passes one, and `call(f)` none. An argument is a
 //! variable of the parameter's file, a gpr's `r32` passing its 32 bits with the rest clear, or a
-//! value known now; the result is written to a variable of its file. kgen moves each to the
+//! value known now; the result is written to a variable of its file. kernite moves each to the
 //! register SysV passes it in, and the result from the one it comes back in; a value live
 //! across the call stays in a register the callee keeps, `rbx` or `r12` to `r15`, or else in
 //! the stack frame, as every vector does. `lea(fp, [f])` puts the address of `f` in `fp`, which
@@ -78,14 +78,14 @@
 //! each. A function that never returns, `-> !`, ends each way out in `ud2()`, which faults, or
 //! in a call of one that never returns.
 
-use kgen_compile::Spill;
-use kgen_core::Access::{self, Ignored, Read, ReadWrite, Write};
-use kgen_core::Width::{self, W32, W64, W128, W256};
-use kgen_core::{
+use kernite_compile::Spill;
+use kernite_core::Access::{self, Ignored, Read, ReadWrite, Write};
+use kernite_core::Width::{self, W32, W64, W128, W256};
+use kernite_core::{
     Arg, Base, Class, Const, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo, Signature,
     Slot, SlotId, StaticId, VReg,
 };
-use kgen_lang::{Fault, Guard, Operand as Given, Span, Target, Value};
+use kernite_lang::{Fault, Guard, Operand as Given, Span, Target, Value};
 
 use crate::bytes;
 use crate::forms::{self, Form, Kind, Miss, Shape};
@@ -104,7 +104,7 @@ const FRAME: u64 = i32::MAX as u64;
 const FAR: u64 = i32::MAX as u64;
 
 /// Where a thread's place in the grid has each of its words: its index, how many threads
-/// there are, and the barrier's address. kgen-cpu lays it out so.
+/// there are, and the barrier's address. kernite-cpu lays it out so.
 const THREAD: i32 = 0;
 const THREADS: i32 = 8;
 const BARRIER: i32 = 16;
@@ -208,7 +208,7 @@ impl View {
     }
 }
 
-/// The names the language calls x86 instructions by, `ret`, `call` and kgen's own `zero` and
+/// The names the language calls x86 instructions by, `ret`, `call` and kernite's own `zero` and
 /// `ones` among them.
 pub fn mnemonics() -> impl Iterator<Item = &'static str> {
     forms::names().chain(["ret", "call", "zero", "ones"])
@@ -430,8 +430,8 @@ fn datum(t: &str, size: u64, x: &Value, what: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Why a function takes no more integers, or no more floats.
-const SEVENTH: &str = "SysV passes a seventh integer on the stack, which kgen does not read";
-const NINTH: &str = "SysV passes a ninth float on the stack, which kgen does not read";
+const SEVENTH: &str = "SysV passes a seventh integer on the stack, which kernite does not read";
+const NINTH: &str = "SysV passes a ninth float on the stack, which kernite does not read";
 
 /// How a function that never returns ends.
 const NEVER: &str = "it ends each way out in `ud2()` or in a call of a function that never returns";
@@ -932,7 +932,7 @@ impl Kernel {
             ));
         }
         let base = Var(Place::Reg(self.grid(), View::R64));
-        let place = Given::Mem(kgen_lang::Mem { base: Some(base), index: None, disp: disp.into() });
+        let place = Given::Mem(kernite_lang::Mem { base: Some(base), index: None, disp: disp.into() });
         Ok(Some(Given::Sized(forms::word(W64).into(), Box::new(place))))
     }
 
@@ -945,7 +945,7 @@ impl Kernel {
     /// the count reset, and what every thread wrote before it came.
     fn sync(&mut self, name: &str, args: &[Given<Var>], guard: bool) -> Result<(), Fault> {
         if name != "grid.sync" {
-            return Err(Fault::new(format!("kgen's barrier for the grid is `grid.sync()`; not `{name}`")));
+            return Err(Fault::new(format!("kernite's barrier for the grid is `grid.sync()`; not `{name}`")));
         }
         if !args.is_empty() {
             return Err(Fault::new(format!("`{name}` takes no operands, not {}", args.len())));
@@ -959,7 +959,7 @@ impl Kernel {
         }
         if guard {
             return Err(Fault::new(
-                "`grid.sync()` is for every thread of the grid, under no `if`: kgen writes it with no guard, and a \
+                "`grid.sync()` is for every thread of the grid, under no `if`: kernite writes it with no guard, and a \
                  kernel that wants it under a condition the same in every thread jumps around it",
             ));
         }
@@ -1454,7 +1454,7 @@ fn operand_shape(a: &Given<Var>) -> Shape {
 }
 
 /// The width of the vector of indices memory `m` is at, if it adds one.
-fn vector_index(m: &kgen_lang::Mem<Var>) -> Option<Width> {
+fn vector_index(m: &kernite_lang::Mem<Var>) -> Option<Width> {
     let index = m.index.map(|(v, _)| v);
     [index, m.base].into_iter().flatten().find_map(|v| match v.reg() {
         Some((reg, view)) if reg.class == Class::Vec => Some(view.width()),
@@ -1469,7 +1469,7 @@ fn missed(name: &str, args: &[Given<Var>], shapes: &[Shape], grid: &[(usize, Str
     match miss {
         Miss::Count(_) if let Some((_, count, why)) = later => {
             let n = if *count == 1 { "1 operand".to_string() } else { format!("{count} operands") };
-            Fault::new(format!("kgen does not yet write `{name}` of {n}, which {why}"))
+            Fault::new(format!("kernite does not yet write `{name}` of {n}, which {why}"))
         }
         Miss::Count(counts) => {
             let n = match counts.as_slice() {
@@ -1687,7 +1687,7 @@ impl Target for Kernel {
                     return Err(Fault::at(
                         i,
                         format!(
-                            "kgen does not yet write `{name}` by `cl`, a register of its own: shift by a number, or \
+                            "kernite does not yet write `{name}` by `cl`, a register of its own: shift by a number, or \
                              by a gpr with `shlx`, `shrx` or `sarx`"
                         ),
                     ));
@@ -1754,11 +1754,11 @@ impl Target for Kernel {
             let later = |name: &str| forms::LATER.iter().find(|(n, _)| *n == name);
             let vex = format!("v{name}");
             return Err(Fault::new(match later(name) {
-                Some((_, why)) => format!("kgen does not yet write `{name}`, which {why}"),
+                Some((_, why)) => format!("kernite does not yet write `{name}`, which {why}"),
                 None if forms::of(&vex).is_some() || later(&vex).is_some() => {
-                    format!("kgen writes `{name}` as AVX does: `{vex}`")
+                    format!("kernite writes `{name}` as AVX does: `{vex}`")
                 }
-                None => format!("x86 has no instruction `{name}` that kgen knows"),
+                None => format!("x86 has no instruction `{name}` that kernite knows"),
             }));
         };
         if name == "lea" {

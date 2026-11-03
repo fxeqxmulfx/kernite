@@ -3,7 +3,7 @@
 
 use std::cell::LazyCell;
 
-use kgen_lang::{Error, Item, ItemKind, Module};
+use kernite_lang::{Error, Item, ItemKind, Module};
 
 use crate::classify::{helper, trusted};
 use crate::present::{Refusal, said};
@@ -73,7 +73,7 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
             continue;
         };
         let not_unsafe = (!trusted(f, abi)).then(|| said(Refusal::NotUnsafe, f.span));
-        let (said, listed) = match cooperative(f).and(kgen_lang::instances(m, f)) {
+        let (said, listed) = match cooperative(f).and(kernite_lang::instances(m, f)) {
             Ok(listed) => (None, listed),
             Err(e) => (Some(e), vec![]),
         };
@@ -96,7 +96,7 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
             if written {
                 for k in &mut instances {
                     k.calls = calls(m, &k.naked.funcs);
-                    listings.push((kgen_lang::instance(f, &k.args).unwrap_or_default(), k.naked.text.clone()));
+                    listings.push((kernite_lang::instance(f, &k.args).unwrap_or_default(), k.naked.text.clone()));
                 }
             }
             let out = NativeOut { not_unsafe, said, instances, written, count, touched: vec![], errors };
@@ -174,7 +174,7 @@ pub enum ConstItem {
 /// own, `pub` or not: only its tokens say which, and the macro reads them.
 pub fn consts(module: &Module) -> Vec<ConstItem> {
     let item = |item: &Item| match &item.kind {
-        ItemKind::Const(c) => kgen_lang::constant(module, c).map_or_else(ConstItem::Wrong, |_| ConstItem::Given),
+        ItemKind::Const(c) => kernite_lang::constant(module, c).map_or_else(ConstItem::Wrong, |_| ConstItem::Given),
         _ => ConstItem::NotAConst,
     };
     module.items.iter().map(item).collect()
@@ -213,7 +213,7 @@ fn touched(module: &Module, items: &[ItemOut]) -> Vec<Vec<String>> {
     for (item, out) in module.items.iter().zip(items) {
         let (ItemKind::Fn(f), ItemOut::Native(out)) = (&item.kind, out) else { continue };
         for k in &out.instances {
-            if let Ok(name) = kgen_lang::instance(f, &k.args) {
+            if let Ok(name) = kernite_lang::instance(f, &k.args) {
                 named.push((name, &k.naked));
             }
         }

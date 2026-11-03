@@ -11,13 +11,13 @@
     unreachable_patterns
 )]
 
-#[kgen_macros::consts]
+#[kernite_macros::consts]
 pub mod sizes {
     /// How far a value moves.
     pub const STEP: u64 = 3;
 }
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod cpu {
     pub unsafe extern "sysv64" fn broken(x: u64) -> u64 {
         ret(y);
@@ -34,7 +34,7 @@ pub mod cpu {
     }
 }
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod gpu {
     pub unsafe extern "ptx-kernel" fn broken(x: *mut u32) {
         st.global.u32([x], y);
@@ -46,7 +46,7 @@ pub mod gpu {
     }
 }
 
-#[kgen_macros::kernels(consts = crate::sizes)]
+#[kernite_macros::kernels(consts = crate::sizes)]
 pub mod cpu_taking {
     pub unsafe extern "sysv64" fn broken(x: u64) -> u64 {
         ret(y);
@@ -58,7 +58,7 @@ pub mod cpu_taking {
     }
 }
 
-#[kgen_macros::kernels(consts = crate::sizes)]
+#[kernite_macros::kernels(consts = crate::sizes)]
 pub mod gpu_taking {
     pub unsafe extern "ptx-kernel" fn broken(x: *mut u32) {
         st.global.u32([x], y);

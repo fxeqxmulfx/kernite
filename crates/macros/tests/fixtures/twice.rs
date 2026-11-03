@@ -2,7 +2,7 @@
 //! `k_blocks` keeps both where the kernel has them, so the error is said there alone: for the
 //! launcher and for `k_blocks`, at one place, which Cargo's short form prints as one line.
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod twice {
     #[cooperative]
     #[deprecated]

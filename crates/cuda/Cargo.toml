@@ -1,5 +1,5 @@
 [package]
-name = "kgen-cuda"
+name = "kernite-cuda"
 description = "The CUDA driver, opened when a GPU is asked for: memory on it, PTX modules, and their kernels launched"
 version.workspace = true
 edition.workspace = true

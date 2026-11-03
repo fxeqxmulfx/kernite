@@ -1,7 +1,7 @@
 //! x86 kernels whose safety contracts say what memory of the module's nothing else touches
 //! while they run: what each names, and what the functions it calls name.
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod cpu {
     /// How many times `run` has run.
     pub static RUNS: global<u64>;

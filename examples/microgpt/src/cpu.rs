@@ -9,7 +9,7 @@ use crate::model::{Adam, Buf, E, FC1, FC2, LM, Layer, M, Ops, PARAMS, QKV, T, Th
 /// unless it says otherwise; each kernel trusts that its pointers have that many rows to read
 /// and write. They read the model's sizes and `exp`'s constants as [`crate::model::consts`]
 /// has them.
-#[kgen_macros::kernels(consts = crate::model::consts)]
+#[kernite_macros::kernels(consts = crate::model::consts)]
 pub mod kernels {
     /// What `matmul` does to each output before it stores it: nothing, adds the residual
     /// stream's, or keeps it only above zero.

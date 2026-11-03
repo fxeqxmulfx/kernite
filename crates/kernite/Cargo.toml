@@ -1,5 +1,5 @@
 [package]
-name = "kgen"
+name = "kernite"
 description = "Kernels written as instructions over variables, compiled to assembly that changes only when they do"
 version.workspace = true
 edition.workspace = true
@@ -8,13 +8,13 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-kgen-lang = { workspace = true }
-kgen-build = { workspace = true }
-kgen-x86 = { workspace = true }
-kgen-ptx = { workspace = true }
+kernite-lang = { workspace = true }
+kernite-build = { workspace = true }
+kernite-x86 = { workspace = true }
+kernite-ptx = { workspace = true }
 
 [dev-dependencies]
-kgen-core = { workspace = true }
+kernite-core = { workspace = true }
 
 [lints]
 workspace = true

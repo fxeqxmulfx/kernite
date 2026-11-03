@@ -3,14 +3,14 @@
 //! a sum in order is a chain in one thread, and the threads take apart only what is the same
 //! for each element.
 
-use kgen_cuda::{Buffer, Cuda, Error, Grid, Ptr};
+use kernite_cuda::{Buffer, Cuda, Error, Grid, Ptr};
 
 use crate::model::{Adam, Buf, E, FC1, FC2, H, LM, Layer, M, Ops, PARAMS, QKV, T, Then, V, VP, WO, WTE};
 
 /// The kernels. Pointers are to the first row of the buffers [`Buf`] names; a kernel works
 /// out its rows from its block and thread, and trusts that they are there. They read the
 /// model's sizes and `exp`'s constants as [`crate::model::consts`] has them.
-#[kgen_macros::kernels(consts = crate::model::consts)]
+#[kernite_macros::kernels(consts = crate::model::consts)]
 pub mod kernels {
     /// What `matmul` does to each output before it stores it: nothing, adds the residual
     /// stream's, or keeps it only above zero.

@@ -1,7 +1,7 @@
 //! Kernels in the language, compiled to PTX: what they come to, that `ptxas` takes them, and
-//! what the errors say; and every form of every instruction kgen knows, which `ptxas` takes
-//! at the version and for the GPU kgen says it needs, and not at one older, and the names of
-//! them kgen refuses, which `ptxas` refuses too.
+//! what the errors say; and every form of every instruction kernite knows, which `ptxas` takes
+//! at the version and for the GPU kernite says it needs, and not at one older, and the names of
+//! them kernite refuses, which `ptxas` refuses too.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -9,10 +9,10 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use kgen::lang::{IntTy, Mem as Address, Operand as Given, Target, Value};
-use kgen_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Sel, Space, Spec};
-use kgen_ptx::lang::{Callee, Kernel, Var};
-use kgen_ptx::{Entry, Kind, Needs, Prototype, Returns, Static, Ty};
+use kernite::lang::{IntTy, Mem as Address, Operand as Given, Target, Value};
+use kernite_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Sel, Space, Spec};
+use kernite_ptx::lang::{Callee, Kernel, Var};
+use kernite_ptx::{Entry, Kind, Needs, Prototype, Returns, Static, Ty};
 
 const KERNELS: &str = r#"
     /// `x[i] *= a` for each `i < n`, a thread each.
@@ -71,7 +71,7 @@ const KERNELS: &str = r#"
 
 #[test]
 fn a_kernel_comes_out_as_ptx_writes_it() {
-    let ptx = kgen::ptx_str(KERNELS).unwrap();
+    let ptx = kernite::ptx_str(KERNELS).unwrap();
     println!("{ptx}");
     let scale = ptx.split(".visible .entry ").nth(1).unwrap();
     let want = "scale(
@@ -127,7 +127,7 @@ fn ptxas() -> Option<PathBuf> {
 }
 
 #[test]
-fn ptxas_takes_what_kgen_writes() {
+fn ptxas_takes_what_kernite_writes() {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
         return;
@@ -148,7 +148,7 @@ fn ptxas_takes_what_kgen_writes() {
         ("constant", "static ALL: constant<[u8; 65536]> = [1; 65536];"),
     ] {
         let (src, out) = (dir.join(format!("{name}.ptx")), dir.join(format!("{name}.cubin")));
-        std::fs::write(&src, kgen::ptx_str(kernels).unwrap()).unwrap();
+        std::fs::write(&src, kernite::ptx_str(kernels).unwrap()).unwrap();
         let run = Command::new(&ptxas)
             .args(["--gpu-name", "sm_75", "--warning-as-error"])
             .arg(&src)
@@ -162,7 +162,7 @@ fn ptxas_takes_what_kgen_writes() {
 
 /// The kernel `k` around `body`, compiled, or the error.
 fn compile(params: &str, body: &str) -> Result<String, String> {
-    kgen::ptx_str(&format!("unsafe extern \"ptx-kernel\" fn k({params}) {{\n{body}\n}}\n"))
+    kernite::ptx_str(&format!("unsafe extern \"ptx-kernel\" fn k({params}) {{\n{body}\n}}\n"))
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
             "2:30: `ld.global.f32` takes an address of a variable and a displacement; work out `p + 4 * i` first, as `mad.wide.u32(a, i, 4, p)` does",
         ),
         ("let v: f32; ld.f32(v, [n]);", "2:23: `ld.f32` takes an address in a 64-bit variable; this is a `u32`"),
-        ("let v: f32; ld.glob.f32(v, [x]);", "2:21: PTX's `ld` has no `.glob` that kgen knows"),
+        ("let v: f32; ld.glob.f32(v, [x]);", "2:21: PTX's `ld` has no `.glob` that kernite knows"),
         ("let i: u32; add.u32(i, tid.x, 1);", "2:28: `add.u32` reads no special register; `mov.u32` does"),
         ("let i: u32; mov.u32(i, tod.x);", "2:28: `tod.x` is not defined"),
         ("let i: u32; if n { mov.u32(i, 1); }", "2:24: an instruction is guarded by a `pred`; this is a `u32`"),
@@ -201,7 +201,7 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
             "2:8: PTX variables are `pred`, `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, \
              `bf16x2`, `tf32`, `f32` and `f64`, not `f128`",
         ),
-        ("vfrob.f32(x);", "2:7: PTX has no instruction `vfrob` that kgen knows"),
+        ("vfrob.f32(x);", "2:7: PTX has no instruction `vfrob` that kernite knows"),
     ];
     for (body, want) in cases {
         assert_eq!(compile("x: *mut f32, n: u32", body).unwrap_err(), want, "{body}");
@@ -209,12 +209,12 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
 }
 
 /// A name of each instruction PTX's ISA has for the GPUs from `sm_20` to `sm_86`, by the
-/// sections of its chapter of them, is of a form kgen knows; and the first word of each form
-/// is that of one of them, so that the list misses no first word kgen knows. `call` is not
+/// sections of its chapter of them, is of a form kernite knows; and the first word of each form
+/// is that of one of them, so that the list misses no first word kernite knows. `call` is not
 /// among them: its operands are what the function it calls takes, as
 /// `a_call_passes_what_the_function_takes_and_returns` checks.
 #[test]
-fn kgen_knows_every_instruction_ptx_has_for_sm_20_to_sm_86() {
+fn kernite_knows_every_instruction_ptx_has_for_sm_20_to_sm_86() {
     let isa = [
         // Integer arithmetic.
         "add.s32 sub.s32 mul.lo.s32 mad.lo.s32 mul24.lo.s32 mad24.lo.s32 sad.s32 div.s32 rem.s32 abs.s32 neg.s32 \
@@ -275,20 +275,20 @@ fn kgen_knows_every_instruction_ptx_has_for_sm_20_to_sm_86() {
     }
 }
 
-/// Each instruction of PTX's that [`forms::NEWER`] has is none that kgen knows, and each word
-/// none that a form of its instruction has, so that the error is the GPU it is for; and each
-/// GPU is newer than kgen writes for.
+/// Each instruction of PTX's that [`forms::NEWER`] has is none that kernite knows, and each word
+/// none that a form of its instruction has, so that the error is the GPU it is for; and each GPU is
+/// newer than kernite writes for.
 #[test]
 fn what_is_for_newer_gpus_says_which() {
     for (gpu, items) in forms::NEWER.lines().filter_map(|l| l.split_once(": ")) {
         let number: u32 = gpu["sm_".len()..].trim_end_matches(['a', 'f']).parse().unwrap();
-        assert!(number > 86, "{gpu} is one kgen writes for");
+        assert!(number > 86, "{gpu} is one kernite writes for");
         for item in items.split_whitespace() {
             let want = match item.split_once('.') {
                 Some((op, w)) => {
-                    format!("PTX's `{op}` takes `.{w}` on {gpu} and newer, and kgen writes PTX for sm_20 to sm_86")
+                    format!("PTX's `{op}` takes `.{w}` on {gpu} and newer, and kernite writes PTX for sm_20 to sm_86")
                 }
-                None => format!("PTX's `{item}` is for {gpu} and newer, and kgen writes PTX for sm_20 to sm_86"),
+                None => format!("PTX's `{item}` is for {gpu} and newer, and kernite writes PTX for sm_20 to sm_86"),
             };
             assert_eq!(forms::find(item).err(), Some(want), "{item}");
         }
@@ -311,10 +311,10 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
             "let i: u32; add.sat.u32(i, n, n);",
             "2:21: PTX's `add` takes no `.sat` with the rest of `add.sat.u32`: `add.u32`",
         ),
-        ("let i: u8; add.u8(i, i, i);", "2:16: PTX's `add` has no `.u8` that kgen knows"),
+        ("let i: u8; add.u8(i, i, i);", "2:16: PTX's `add` has no `.u8` that kernite knows"),
         (
             "let (a, b, c, e): (f64, f64, f64, f64); ld.global.v4.f64((a, b, c, e), [x]);",
-            "2:54: `ld.global.v4.f64` moves 256 bits at once, which PTX's `ld` does on sm_100 and newer, and kgen \
+            "2:54: `ld.global.v4.f64` moves 256 bits at once, which PTX's `ld` does on sm_100 and newer, and kernite \
              writes PTX for sm_20 to sm_86: a vector of 128 bits at most, as `.v4.b32` or `.v2.b64`",
         ),
         (
@@ -330,14 +330,14 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
             "2:21: `cvt.u32.f32` converts a float to an integer, so it says how it rounds to one: `cvt.rni.u32.f32` \
              to the nearest, `cvt.rzi` toward zero",
         ),
-        ("elect.sync(n);", "2:7: PTX's `elect` is for sm_90 and newer, and kgen writes PTX for sm_20 to sm_86"),
+        ("elect.sync(n);", "2:7: PTX's `elect` is for sm_90 and newer, and kernite writes PTX for sm_20 to sm_86"),
         (
             "let (a, b): (f32, f32); ld.global.v8.f32((a, b, a, b, a, b, a, b), [x]);",
-            "2:38: PTX's `ld` takes `.v8` on sm_100 and newer, and kgen writes PTX for sm_20 to sm_86",
+            "2:38: PTX's `ld` takes `.v8` on sm_100 and newer, and kernite writes PTX for sm_20 to sm_86",
         ),
         (
             "fence.proxy.r#async();",
-            "2:13: PTX's `fence` takes `.async` on sm_90 and newer, and kgen writes PTX for sm_20 to sm_86",
+            "2:13: PTX's `fence` takes `.async` on sm_90 and newer, and kernite writes PTX for sm_20 to sm_86",
         ),
         (
             "call.sync(n);",
@@ -444,7 +444,7 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         ("let i: u16; mov.u16(i, clock);", "2:24: `mov.u16` reads a `u16`; `clock` is a `u32`"),
         (
             "let i: u32; mov.u32(i, clusterid.x);",
-            "2:34: `clusterid.x` is a special register of PTX's that kgen does not read: it needs sm_90, and kgen \
+            "2:34: `clusterid.x` is a special register of PTX's that kernite does not read: it needs sm_90, and kernite \
              writes PTX for sm_20 to sm_86",
         ),
         (
@@ -493,8 +493,8 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         ),
         (
             "let i: u32; mov.u32(i, perctamemorysize);",
-            "2:24: `perctamemorysize` is a special register of PTX's that kgen does not read: a kernel has it only \
-             with the directive `.minperctamemory`, which kgen does not write",
+            "2:24: `perctamemorysize` is a special register of PTX's that kernite does not read: a kernel has it only \
+             with the directive `.minperctamemory`, which kernite does not write",
         ),
         (
             "let i: u32; suq.width.b32(i, s);",
@@ -536,7 +536,7 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
             "let v: f32; sured.b.add._1d.u32.trap([s, 4], v);",
             "2:46: `sured.b.add.1d.u32.trap` wants a `u32` variable; this is a `f32`",
         ),
-        ("sured.b.xor._1d.b32.trap([s, n], n);", "2:21: PTX's `sured` has no `.xor` that kgen knows"),
+        ("sured.b.xor._1d.b32.trap([s, n], n);", "2:21: PTX's `sured` has no `.xor` that kernite knows"),
         (
             "let v: b64; suld.b._1d.v4.b64.trap((v, v, v, v), [s, n]);",
             "2:31: `suld.b.1d.v4.b64.trap` moves 256 bits at once; a vector of PTX's holds 128 at most, as \
@@ -564,13 +564,13 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         ),
         (
             "let (a, b, c, d): (f32, f32, f32, f32); tld4.r._2d.v4.f32.s32((a, b, c, d), [s, (n, n)]);",
-            "2:59: `tld4.r.2d.v4.f32.s32` is no form of `tld4` that kgen knows; the nearest is `tld4.r.2d.v4.f32.f32`",
+            "2:59: `tld4.r.2d.v4.f32.s32` is no form of `tld4` that kernite knows; the nearest is `tld4.r.2d.v4.f32.f32`",
         ),
         ("let i: u32; txq.level.width.b32(i, [s]);", "2:29: `txq.level.width.b32` takes 3 operands, not 2"),
         (
             "let i: u32; txq.force_unnormalized_coords.b32(i, [s]);",
             "2:43: PTX's `txq.force_unnormalized_coords` asks of a sampler apart from its texture, in the independent \
-             mode, which kgen does not write",
+             mode, which kernite does not write",
         ),
         (
             "let p: pred; istypep.texref(p, [s]);",
@@ -755,14 +755,14 @@ fn a_mask_without_lane_0_is_taken_where_thread_0_may_not_run_the_instruction() {
         }
     }
     // After a call, which may end the thread, or keep it for ever.
-    let ptx = kgen::ptx_str(
+    let ptx = kernite::ptx_str(
         "unsafe extern \"ptx-kernel\" fn k() { call(nothing); bar.warp.sync(2); }\n\
          extern \"ptx-func\" fn nothing() {}\n",
     )
     .unwrap();
     assert!(ptx.contains("\tcall nothing;\n\tbar.warp.sync 2;\n"), "{ptx}");
     // In a function kernels call, which thread 0 runs wherever it runs a call of it.
-    let ptx = kgen::ptx_str(
+    let ptx = kernite::ptx_str(
         "unsafe extern \"ptx-kernel\" fn k() { call(warp); }\n\
          extern \"ptx-func\" fn warp() { bar.warp.sync(2); }\n",
     )
@@ -958,7 +958,7 @@ const TABLES: &str = r#"
 
 #[test]
 fn a_jump_through_a_table_declares_the_table_before_it() {
-    let ptx = kgen::ptx_str(TABLES).unwrap();
+    let ptx = kernite::ptx_str(TABLES).unwrap();
     let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
     assert!(head.contains(".version 6.0\n.target sm_30\n"), "{head}");
     let (pick, parity) = entries.split_once(".visible .entry ").unwrap();
@@ -1038,7 +1038,7 @@ const TEXTURES: &str = r#"
 
 #[test]
 fn a_texture_is_its_handle_in_brackets_with_the_coordinates_in_it() {
-    let ptx = kgen::ptx_str(TEXTURES).unwrap();
+    let ptx = kernite::ptx_str(TEXTURES).unwrap();
     let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
     assert!(head.contains(".version 3.1\n.target sm_20\n"), "{head}");
     for line in [
@@ -1052,7 +1052,7 @@ fn a_texture_is_its_handle_in_brackets_with_the_coordinates_in_it() {
 
 #[test]
 fn a_surface_is_its_handle_in_brackets_with_the_coordinates_in_it() {
-    let ptx = kgen::ptx_str(SURFACES).unwrap();
+    let ptx = kernite::ptx_str(SURFACES).unwrap();
     let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
     assert!(head.contains(".version 3.1\n.target sm_20\n"), "{head}");
     for line in [
@@ -1117,7 +1117,7 @@ fn a_kernel_or_module_is_for_gpus_that_have_all_it_uses() {
         }
     "#;
     assert_eq!(
-        kgen::ptx_str(src).unwrap_err(),
+        kernite::ptx_str(src).unwrap_err(),
         "`shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and `tanh.approx.f32` in `new` needs \
          sm_75 and PTX 7.0: no module has both"
     );
@@ -1130,7 +1130,7 @@ fn a_kernel_takes_pointers_and_numbers_and_returns_nothing() {
         e,
         "1:36: a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, `f32` and `f64`, not `bool`"
     );
-    let e = kgen::ptx_str("unsafe extern \"ptx-kernel\" fn k() -> f32 {}").unwrap_err();
+    let e = kernite::ptx_str("unsafe extern \"ptx-kernel\" fn k() -> f32 {}").unwrap_err();
     assert_eq!(e, "1:38: a GPU kernel returns nothing, not `f32`: it writes what it works out to memory");
 }
 
@@ -1146,8 +1146,8 @@ fn a_kernel_names_the_constants_it_reads() {
             st.global.f32([x], v);
         }
     "#;
-    let module = kgen::lang::parse(src).unwrap();
-    let k = kgen::ptx(&module, kgen::function(&module, "k").unwrap(), &[], "").unwrap();
+    let module = kernite::lang::parse(src).unwrap();
+    let k = kernite::ptx(&module, kernite::function(&module, "k").unwrap(), &[], "").unwrap();
     assert_eq!(k.consts, ["ONE"]);
 }
 
@@ -1251,7 +1251,7 @@ fn a_function_comes_out_as_ptx_writes_it() {
             ret(g);
         }
     "#;
-    let want = "// Written by kgen.
+    let want = "// Written by kernite.
 
 .version 2.3
 .target sm_20
@@ -1298,9 +1298,9 @@ fn a_function_comes_out_as_ptx_writes_it() {
 \tret;
 }
 ";
-    assert_eq!(kgen::ptx_str(src).unwrap(), want);
+    assert_eq!(kernite::ptx_str(src).unwrap(), want);
     // Each way to call one, and what a function of no value and one that never returns are.
-    let ptx = kgen::ptx_str(CALLS).unwrap();
+    let ptx = kernite::ptx_str(CALLS).unwrap();
     for text in [
         ".version 6.4\n.target sm_35\n",
         "\n.func (.param .u32 odd_retval) odd(\n\t.param .u32 odd_param_0\n);\n\n.func (.param .u32 even_retval) even(",
@@ -1360,7 +1360,7 @@ const INSTANCES: &str = r#"
 
 #[test]
 fn each_instance_is_a_kernel_of_its_own_named_as_cpp_names_it() {
-    let ptx = kgen::ptx_str(INSTANCES).unwrap();
+    let ptx = kernite::ptx_str(INSTANCES).unwrap();
     for text in [
         ".visible .entry _Z5shiftILj1EE(\n\t.param .u64 _Z5shiftILj1EE_param_0\n)\n",
         "\tld.param.u64 %x, [_Z5shiftILj1EE_param_0];\n",
@@ -1379,15 +1379,19 @@ fn each_instance_is_a_kernel_of_its_own_named_as_cpp_names_it() {
         assert!(ptx.contains(text), "{text}\nin\n{ptx}");
     }
     // In a scope, as `#[kernels]` names them, each name is in it.
-    let module = kgen::lang::parse(INSTANCES).unwrap();
-    let scope = kgen::ptx_scope(&["kgen", "app", "gpu"]);
-    let uses = kgen::ptx(&module, kgen::function(&module, "uses").unwrap(), &[], &scope).unwrap().code;
-    assert_eq!(uses.program.name, "_ZN4kgen3app3gpu4usesE");
+    let module = kernite::lang::parse(INSTANCES).unwrap();
+    let scope = kernite::ptx_scope(&["kernite", "app", "gpu"]);
+    let uses = kernite::ptx(&module, kernite::function(&module, "uses").unwrap(), &[], &scope).unwrap().code;
+    assert_eq!(uses.program.name, "_ZN7kernite3app3gpu4usesE");
     assert_eq!(
         uses.calls,
-        ["_ZN4kgen3app3gpu6affineILi3ELb1EEE", "_ZN4kgen3app3gpu6affineILin2ELb0EEE", "_ZN4kgen3app3gpu5shiftILj8EEE"]
+        [
+            "_ZN7kernite3app3gpu6affineILi3ELb1EEE",
+            "_ZN7kernite3app3gpu6affineILin2ELb0EEE",
+            "_ZN7kernite3app3gpu5shiftILj8EEE"
+        ]
     );
-    assert!(uses.text().contains("\tmov.u64 %k, _ZN4kgen3app3gpu5shiftILj8EEE;\n"));
+    assert!(uses.text().contains("\tmov.u64 %k, _ZN7kernite3app3gpu5shiftILj8EEE;\n"));
 }
 
 /// NVIDIA's demangler, beside `ptxas`, which Nsight and `cuda-gdb` demangle as.
@@ -1402,14 +1406,14 @@ fn the_tools_that_read_ptx_show_each_name_as_rust_has_it() {
         eprintln!("no cu++filt beside ptxas here: skipped; set PTXAS to run it");
         return;
     };
-    let module = kgen::lang::parse(INSTANCES).unwrap();
+    let module = kernite::lang::parse(INSTANCES).unwrap();
     // A name that is no name in C++ is made one.
-    let scope = kgen::ptx_scope(&["my-workspace", "my_app", "gpu"]);
+    let scope = kernite::ptx_scope(&["my-workspace", "my_app", "gpu"]);
     let mut symbols = vec![];
     for name in ["shift", "uses", "affine"] {
-        let f = kgen::function(&module, name).unwrap();
-        for args in kgen::lang::instances(&module, f).unwrap() {
-            symbols.push(kgen::ptx(&module, f, &args, &scope).unwrap().code.program.name);
+        let f = kernite::function(&module, name).unwrap();
+        for args in kernite::lang::instances(&module, f).unwrap() {
+            symbols.push(kernite::ptx(&module, f, &args, &scope).unwrap().code.program.name);
         }
     }
     let mut want = vec![
@@ -1437,22 +1441,22 @@ fn the_tools_that_read_ptx_show_each_name_as_rust_has_it() {
             IntTy::I64 | IntTy::Isize => i128::from(i64::MIN),
             _ => i128::from(u64::MAX),
         };
-        symbols.push(kgen_ptx::symbol(&kgen::ptx_scope(&["2d"]), "tile", &[Value::Int(x, Some(ty))]));
+        symbols.push(kernite_ptx::symbol(&kernite::ptx_scope(&["2d"]), "tile", &[Value::Int(x, Some(ty))]));
         want.push(format!("_2d::tile<({cpp}){x}>"));
     }
-    symbols.push(kgen_ptx::symbol("", "tile", &[Value::Int(4, None), Value::Bool(true)]));
+    symbols.push(kernite_ptx::symbol("", "tile", &[Value::Int(4, None), Value::Bool(true)]));
     want.push("tile<(int)4, (bool)1>".into());
     // A static, as a variable of its namespace.
-    let statics = kgen::lang::parse(STATICS).unwrap();
-    symbols.push(kgen::ptx_statics(&statics, &scope).remove(0).unwrap().code.memory.name);
+    let statics = kernite::lang::parse(STATICS).unwrap();
+    symbols.push(kernite::ptx_statics(&statics, &scope).remove(0).unwrap().code.memory.name);
     want.push("my_workspace::my_app::gpu::COUNTS".into());
     // The shared memory a launch gives, as the kernel's static.
-    let shared = kgen::lang::parse(SHARED).unwrap();
-    let reverse = kgen::function(&shared, "reverse").unwrap();
-    symbols.push(kgen::ptx(&shared, reverse, &[], &scope).unwrap().code.memory.remove(0).name);
+    let shared = kernite::lang::parse(SHARED).unwrap();
+    let reverse = kernite::function(&shared, "reverse").unwrap();
+    symbols.push(kernite::ptx(&shared, reverse, &[], &scope).unwrap().code.memory.remove(0).name);
     want.push("my_workspace::my_app::gpu::reverse::buf".into());
     // A name beyond ASCII as Rust's legacy mangling writes it.
-    symbols.push(kgen_ptx::symbol(&kgen::ptx_scope(&["app", "мо"]), "σ", &[Value::Bool(false)]));
+    symbols.push(kernite_ptx::symbol(&kernite::ptx_scope(&["app", "мо"]), "σ", &[Value::Bool(false)]));
     want.push("app::$u43c$$u43e$::$u3c3$<(bool)0>".into());
     let shown = Command::new(&filt).args(&symbols).output().unwrap();
     let shown = String::from_utf8(shown.stdout).unwrap();
@@ -1479,7 +1483,7 @@ const NAMES: &str = r#"
 
 #[test]
 fn a_name_beyond_ascii_is_written_as_rust_writes_one_in_a_symbol() {
-    let ptx = kgen::ptx_str(NAMES).unwrap();
+    let ptx = kernite::ptx_str(NAMES).unwrap();
     for text in [
         ".extern .shared .align 4 .b8 _ZZ6$u3b4$E18$u431$$u443$$u444$[];\n",
         ".visible .entry $u3b4$(\n\t.param .u64 $u3b4$_param_0\n)\n",
@@ -1491,17 +1495,17 @@ fn a_name_beyond_ascii_is_written_as_rust_writes_one_in_a_symbol() {
     ] {
         assert!(ptx.contains(text), "{text}\nin\n{ptx}");
     }
-    // In a scope as well, as kgen-cuda writes a module's path.
-    assert_eq!(kgen::ptx_scope(&["app", "мо"]), "3app12$u43c$$u43e$");
-    let module = kgen::lang::parse(NAMES).unwrap();
-    let delta = kgen::function(&module, "δ").unwrap();
-    let entry = kgen::ptx(&module, delta, &[], &kgen::ptx_scope(&["kgen", "app"])).unwrap().code;
-    assert_eq!(entry.program.name, "_ZN4kgen3app6$u3b4$E");
-    assert!(entry.text().contains("\tst.shared.f32 [_ZZN4kgen3app6$u3b4$EE18$u431$$u443$$u444$], %$u3c3$;\n"));
+    // In a scope as well, as kernite-cuda writes a module's path.
+    assert_eq!(kernite::ptx_scope(&["app", "мо"]), "3app12$u43c$$u43e$");
+    let module = kernite::lang::parse(NAMES).unwrap();
+    let delta = kernite::function(&module, "δ").unwrap();
+    let entry = kernite::ptx(&module, delta, &[], &kernite::ptx_scope(&["kernite", "app"])).unwrap().code;
+    assert_eq!(entry.program.name, "_ZN7kernite3app6$u3b4$E");
+    assert!(entry.text().contains("\tst.shared.f32 [_ZZN7kernite3app6$u3b4$EE18$u431$$u443$$u444$], %$u3c3$;\n"));
 }
 
 /// A variable's register is named after it, with `_` after the name of a special register, one
-/// kgen reads or one it reads none of, and then a number if another register has the name.
+/// kernite reads or one it reads none of, and then a number if another register has the name.
 #[test]
 fn a_variable_named_as_a_special_register_takes_a_trailing_underscore() {
     let src = r#"
@@ -1517,7 +1521,7 @@ fn a_variable_named_as_a_special_register_takes_a_trailing_underscore() {
             st.global.u32([out], clusterid);
         }
     "#;
-    let want = "// Written by kgen.
+    let want = "// Written by kernite.
 
 .version 2.3
 .target sm_20
@@ -1541,7 +1545,7 @@ fn a_variable_named_as_a_special_register_takes_a_trailing_underscore() {
 \tret;
 }
 ";
-    assert_eq!(kgen::ptx_str(src).unwrap(), want);
+    assert_eq!(kernite::ptx_str(src).unwrap(), want);
 }
 
 #[test]
@@ -1563,7 +1567,7 @@ fn ptxas_takes_a_function_that_never_returns_from_ptx_6_4_and_sm_30() {
             exit();
         }
     "#;
-    let text = kgen::ptx_str(src).unwrap();
+    let text = kernite::ptx_str(src).unwrap();
     assert!(text.contains("\n.version 6.4\n.target sm_30\n"), "{text}");
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("never");
     std::fs::create_dir_all(&dir).unwrap();
@@ -1602,18 +1606,18 @@ fn a_call_of_a_function_that_never_returns_ends_its_callers_path_there() {
              extern \"ptx-func\" fn back() {{}}\n"
         )
     };
-    let ptx = kgen::ptx_str(&src("halt", "halt")).unwrap();
+    let ptx = kernite::ptx_str(&src("halt", "halt")).unwrap();
     assert!(ptx.contains("\t@%p ret;\n\tcall halt;\n}\n"), "{ptx}");
-    assert_eq!(kgen::ptx_str(&src("back", "halt")).unwrap_err(), "2:9: `v` is read before anything writes it");
+    assert_eq!(kernite::ptx_str(&src("back", "halt")).unwrap_err(), "2:9: `v` is read before anything writes it");
     assert_eq!(
-        kgen::ptx_str(&src("halt", "back")).unwrap_err(),
+        kernite::ptx_str(&src("halt", "back")).unwrap_err(),
         "12:22: control reaches the end of `first`, which returns a `u32`: `ret(v)` gives it back"
     );
 }
 
 /// The kernel `k` around `body`, before the functions it may call, compiled, or the error.
 fn calling(body: &str) -> Result<String, String> {
-    kgen::ptx_str(&format!(
+    kernite::ptx_str(&format!(
         "unsafe extern \"ptx-kernel\" fn k(n: u32, f: f32) {{\n{body}\n}}\n\
          extern \"ptx-func\" fn first(a: u32, b: u32) -> u32 {{ ret(a); }}\n\
          extern \"ptx-func\" fn nothing() {{}}\n\
@@ -1729,7 +1733,7 @@ fn a_function_takes_and_returns_ptx_types() {
         ),
     ];
     for (src, want) in cases {
-        assert_eq!(kgen::ptx_str(src).unwrap_err(), want, "{src}");
+        assert_eq!(kernite::ptx_str(src).unwrap_err(), want, "{src}");
     }
 }
 
@@ -1962,7 +1966,7 @@ impl Making {
 }
 
 /// Kernel `k{n}`, of the one instruction `name`, of form `b`, its operands as `style` gives
-/// them; `None` if they would be those of [`Style::Vars`], or kgen's refusal.
+/// them; `None` if they would be those of [`Style::Vars`], or kernite's refusal.
 fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entry, String>> {
     let mut m = Making { kernel: kernel(n), vars: 0, differs: false, sunk: false };
     m.kernel.callee("f", "f", Callee::Calls(Prototype { params: vec![], returns: Returns::Nothing }));
@@ -2038,7 +2042,7 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
         return None;
     }
     if let Err(f) = m.kernel.inst(name, &args, None) {
-        return Some(Err(format!("kgen refuses `{name}` as {style:?}: {}", f.message)));
+        return Some(Err(format!("kernite refuses `{name}` as {style:?}: {}", f.message)));
     }
     if b.form.operands.iter().any(|s| matches!(s.role, Role::Label | Role::Labels)) {
         m.kernel.label(0);
@@ -2049,7 +2053,7 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
 }
 
 /// Kernel `k{n}` of the one instruction `name`, of `form` with the words `choice`, written
-/// as kgen would write it if it took it: for a name it refuses, which `ptxas` should too.
+/// as kernite would write it if it took it: for a name it refuses, which `ptxas` should too.
 fn by_hand(n: usize, name: &str, form: &'static Form, choice: Vec<Option<usize>>) -> String {
     let mut types = vec![];
     for (e, k) in form.elems.iter().zip(&choice) {
@@ -2112,7 +2116,7 @@ fn registers(b: &Bound, spec: &Spec, regs: &mut Vec<Ty>) -> String {
     }
 }
 
-/// The kernels of the instructions kgen reads from no form's operands: each special
+/// The kernels of the instructions kernite reads from no form's operands: each special
 /// register read, as it is and as the fewer bits PTX lets `mov` read of it, and the floats
 /// of 16 bits known now that a `b16` takes.
 fn others(n: &mut usize) -> Vec<Entry> {
@@ -2121,7 +2125,9 @@ fn others(n: &mut usize) -> Vec<Entry> {
         *n += 1;
         let mut kernel = Kernel::new(format!("k{n}"), format!("k{n}"));
         let v = kernel.var("v", t.name()).unwrap();
-        kernel.inst(name, &[Given::Var(v), a], None).unwrap_or_else(|f| panic!("kgen refuses `{name}`: {}", f.message));
+        kernel
+            .inst(name, &[Given::Var(v), a], None)
+            .unwrap_or_else(|f| panic!("kernite refuses `{name}`: {}", f.message));
         kernel.end().unwrap();
         out.push(kernel.finish());
     };
@@ -2177,7 +2183,7 @@ fn module(entries: &[Entry]) -> String {
     if entries.iter().any(|e| e.calls.iter().any(|c| c == "f")) {
         all.insert(0, callee());
     }
-    kgen_ptx::module(&all, &statics()).unwrap()
+    kernite_ptx::module(&all, &statics()).unwrap()
 }
 
 /// The kernels `ptxas` refuses of each module, assembling it for the GPU given with it, by
@@ -2304,12 +2310,12 @@ const VERSIONS: [u32; 47] = [
 ];
 
 /// The newest GPU a module of PTX `v` with what `n` needs may be for: before 2.0, one of
-/// Tesla's, `sm_11` or `sm_13`, which kgen writes for neither of.
+/// Tesla's, `sm_11` or `sm_13`, which kernite writes for neither of.
 fn newest(v: u32, n: Needs) -> u32 {
     match v {
         ..12 => 11,
         12..20 => 13,
-        _ => kgen_ptx::GPUS
+        _ => kernite_ptx::GPUS
             .iter()
             .filter(|&&(g, came)| came <= v && (n.below == 0 || g < n.below || v < n.since))
             .map(|&(g, _)| g)
@@ -2326,7 +2332,7 @@ fn before(v: u32) -> Option<u32> {
 
 /// The version of PTX that came with the GPU `sm`.
 fn came(sm: u32) -> u32 {
-    kgen_ptx::GPUS.iter().find(|&&(g, _)| g == sm).map(|&(_, v)| v).expect("a GPU kgen writes for")
+    kernite_ptx::GPUS.iter().find(|&&(g, _)| g == sm).map(|&(_, v)| v).expect("a GPU kernite writes for")
 }
 
 /// The module `text` as one of PTX `v` for the GPU `sm`.
@@ -2342,7 +2348,7 @@ fn retarget(text: &str, v: u32, sm: u32) -> String {
 }
 
 #[test]
-fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
+fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
         return;
@@ -2352,7 +2358,7 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
     let mut groups: BTreeMap<(u32, u32, u32, u32), Vec<Entry>> = BTreeMap::new();
     let mut add = |e: Entry, what: &mut BTreeMap<String, String>| {
         let line = e.program.body.iter().find_map(|i| match i {
-            kgen_core::Item::Inst(inst) => Some(inst.op.0.clone()),
+            kernite_core::Item::Inst(inst) => Some(inst.op.0.clone()),
             _ => None,
         });
         what.insert(e.program.name.clone(), line.unwrap_or_default());
@@ -2400,8 +2406,8 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
             (entries.len(), entries.iter().take(5).map(|e| what[&e.program.name].as_str()).collect());
         failures.push(format!("{count} kernels need PTX {ptx}, which ptxas reads none of: {}", some.join("; ")));
     }
-    // Each group as kgen writes it, for the GPU it is for and for each newer it may run on,
-    // as the driver assembles it for the GPU it runs on; at the version it needs, for the
+    // Each group as kernite writes it, for the GPU it is for and for each newer it may run
+    // on, as the driver assembles it for the GPU it runs on; at the version it needs, for the
     // newest GPU of that version; and at the newest version, for the newest GPU it may be
     // for, as ptxas takes some older that it refuses newer. And one step older in each way it
     // needs more than PTX 1.0 and Fermi, and for the GPU it is too new for: then each kernel
@@ -2424,8 +2430,9 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
             modules.push(at(exact, Expect::Takes));
         }
         let written = ptx.max(Needs::FLOOR.ptx);
-        for &(g, _) in
-            kgen_ptx::GPUS.iter().filter(|&&(g, _)| g > gpu_of(&text) && (below == 0 || written < since || g < below))
+        for &(g, _) in kernite_ptx::GPUS
+            .iter()
+            .filter(|&&(g, _)| g > gpu_of(&text) && (below == 0 || written < since || g < below))
         {
             modules.push((text.clone(), g, Expect::Takes));
         }
@@ -2434,8 +2441,8 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
             modules.push(at(retarget(&text, v, newest(v, n)), Expect::Refuses));
         }
         if sm > Needs::FLOOR.sm {
-            let i = kgen_ptx::GPUS.iter().position(|&(g, _)| g == sm).expect("a GPU kgen writes for");
-            let g = kgen_ptx::GPUS[i - 1].0;
+            let i = kernite_ptx::GPUS.iter().position(|&(g, _)| g == sm).expect("a GPU kernite writes for");
+            let g = kernite_ptx::GPUS[i - 1].0;
             modules.push(at(retarget(&text, ptx.max(came(g)), g), Expect::Refuses));
         }
         if below != 0 {
@@ -2446,7 +2453,7 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
             modules.push(at(retarget(&text, v.max(since), below), Expect::Refuses));
         }
     }
-    // And the names kgen refuses, for the newest GPU and at the newest version kgen knows,
+    // And the names kernite refuses, for the newest GPU and at the newest version kernite knows,
     // where nothing but the name is wrong.
     let mut why: BTreeMap<String, String> = BTreeMap::new();
     let refusals = refused.len();
@@ -2491,7 +2498,7 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
                     if !refused.contains_key(k) {
                         let mut taken = format!("{header}: takes `{}` too", what(k));
                         if let Some(m) = why.get(k) {
-                            taken += &format!(", which kgen refuses: {m}");
+                            taken += &format!(", which kernite refuses: {m}");
                         }
                         failures.push(taken);
                     }
@@ -2499,7 +2506,7 @@ fn ptxas_takes_every_form_kgen_knows_where_kgen_says() {
             }
         }
     }
-    eprintln!("{n} instances in {} modules; {refusals} names kgen refuses", modules.len());
+    eprintln!("{n} instances in {} modules; {refusals} names kernite refuses", modules.len());
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
 }
 
@@ -2565,9 +2572,9 @@ const SHARED: &str = r#"
 
 #[test]
 fn memory_is_declared_where_ptx_has_it() {
-    let ptx = kgen::ptx_str(SHARED).unwrap();
+    let ptx = kernite::ptx_str(SHARED).unwrap();
     let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
-    let want = "// Written by kgen.
+    let want = "// Written by kernite.
 
 .version 2.3
 .target sm_20
@@ -2791,9 +2798,9 @@ const STATICS: &str = r#"
 
 #[test]
 fn a_static_is_declared_once_for_each_kernel_to_name() {
-    let ptx = kgen::ptx_str(STATICS).unwrap();
+    let ptx = kernite::ptx_str(STATICS).unwrap();
     let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
-    let want = "// Written by kgen.
+    let want = "// Written by kernite.
 
 .version 3.1
 .target sm_20
@@ -2820,14 +2827,14 @@ fn a_static_is_declared_once_for_each_kernel_to_name() {
         assert!(entries.contains(line), "{line}");
     }
     // In a scope, each is named as C++ names a variable of its namespace, as a kernel is.
-    let module = kgen::lang::parse(STATICS).unwrap();
-    let scope = kgen::ptx_scope(&["kgen", "my_app", "gpu"]);
-    let statics: Vec<_> = kgen::ptx_statics(&module, &scope).into_iter().map(Result::unwrap).collect();
-    assert_eq!(statics[0].code.memory.name, "_ZN4kgen6my_app3gpu6COUNTSE");
+    let module = kernite::lang::parse(STATICS).unwrap();
+    let scope = kernite::ptx_scope(&["kernite", "my_app", "gpu"]);
+    let statics: Vec<_> = kernite::ptx_statics(&module, &scope).into_iter().map(Result::unwrap).collect();
+    assert_eq!(statics[0].code.memory.name, "_ZN7kernite6my_app3gpu6COUNTSE");
     assert_eq!(statics[0].consts, ["N"]);
     assert!(statics[1..].iter().all(|s| s.consts.is_empty()));
-    let count = kgen::ptx(&module, kgen::function(&module, "count").unwrap(), &[], &scope).unwrap();
-    assert!(count.code.text().contains("\tmov.u64 %at, _ZN4kgen6my_app3gpu6COUNTSE;\n"));
+    let count = kernite::ptx(&module, kernite::function(&module, "count").unwrap(), &[], &scope).unwrap();
+    assert!(count.code.text().contains("\tmov.u64 %at, _ZN7kernite6my_app3gpu6COUNTSE;\n"));
 }
 
 #[test]
@@ -2912,17 +2919,17 @@ fn a_static_is_memory_of_a_type_the_host_reads_holding_what_it_says() {
     ];
     let k = "unsafe extern \"ptx-kernel\" fn k(x: *mut u32) {}";
     for (items, want) in cases {
-        assert_eq!(kgen::ptx_str(&format!("{items}\n{k}")).unwrap_err(), want, "{items}");
+        assert_eq!(kernite::ptx_str(&format!("{items}\n{k}")).unwrap_err(), want, "{items}");
     }
     // Every byte of constant memory, and a `b` type's integers of either sign.
-    let ptx = kgen::ptx_str("static A: constant<[u8; 65535]>; static B: constant<u8>;").unwrap();
+    let ptx = kernite::ptx_str("static A: constant<[u8; 65535]>; static B: constant<u8>;").unwrap();
     assert!(ptx.contains(".const .align 1 .b8 A[65535];\n.const .align 1 .b8 B[1];\n"));
-    let ptx = kgen::ptx_str("static A: global<[b8; 2]> = [255, -128];").unwrap();
+    let ptx = kernite::ptx_str("static A: global<[b8; 2]> = [255, -128];").unwrap();
     assert!(ptx.contains(".global .align 1 .b8 A[2] = {255, 128};\n"));
     // A static that fails takes no room: `A` fails at its value, and `B` lays out. `ptx_str` stops
     // at `A`, so only `ptx_statics` shows it.
     let src = "static A: constant<[u8; 65536]> = 1; static B: constant<u8>;";
-    let made = kgen::ptx_statics(&kgen::lang::parse(src).unwrap(), "");
+    let made = kernite::ptx_statics(&kernite::lang::parse(src).unwrap(), "");
     let want = "1:35: `constant<[u8; 65536]>` holds an array of `u8`; this is an integer";
     assert_eq!(made[0].as_ref().unwrap_err().at(src), want);
     assert_eq!(made[1].as_ref().err(), None);
@@ -2956,7 +2963,7 @@ fn a_static_is_reached_in_its_state_space_and_within_it() {
             "atom.global.add.u32(v, [C], 1);",
             "3:24: `atom.global.add.u32` reads and writes global memory; `C` is constant memory",
         ),
-        (c, "st.const.u32([C], v);", "3:10: PTX's `st` has no `.const` that kgen knows"),
+        (c, "st.const.u32([C], v);", "3:10: PTX's `st` has no `.const` that kernite knows"),
         // ptxas refuses a global address in 32 bits, and takes a constant one.
         (a, "mov.u32(v, A);", "3:12: `mov.u32` puts a global address in 32 bits; it is 64, `mov.u64(a, A)`"),
         (a, "mov.b32(v, A);", "3:12: `mov.b32` puts a global address in 32 bits; it is 64, `mov.u64(a, A)`"),
@@ -2994,10 +3001,10 @@ fn a_static_is_reached_in_its_state_space_and_within_it() {
     ];
     for (items, body, want) in cases {
         let src = format!("{items}\nunsafe extern \"ptx-kernel\" fn k(x: *mut u32) {{ let v: u32;\n{body}\n}}\n");
-        assert_eq!(kgen::ptx_str(&src).unwrap_err(), want, "{body}");
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{body}");
     }
     // A variable of the kernel's own takes the name it is given, before the module's.
-    let ptx = kgen::ptx_str(&format!("{a}\nunsafe extern \"ptx-kernel\" fn k() {{ let A: u32; mov.u32(A, 1); }}\n"));
+    let ptx = kernite::ptx_str(&format!("{a}\nunsafe extern \"ptx-kernel\" fn k() {{ let A: u32; mov.u32(A, 1); }}\n"));
     assert!(ptx.unwrap().contains("\tmov.u32 %A, 1;\n"));
 }
 
@@ -3039,10 +3046,10 @@ const COOPERATIVE: &str = r#"
 
 #[test]
 fn a_cooperative_kernel_waits_for_its_grid_as_cuda_does() {
-    let ptx = kgen::ptx_str(COOPERATIVE).unwrap();
+    let ptx = kernite::ptx_str(COOPERATIVE).unwrap();
     // A cooperative launch is from Pascal's GPUs on, and PTX 5.0.
     let (head, reverse) = ptx.split_once(".visible .entry ").unwrap();
-    assert_eq!(head, "// Written by kgen.\n\n.version 5.0\n.target sm_60\n.address_size 64\n\n");
+    assert_eq!(head, "// Written by kernite.\n\n.version 5.0\n.target sm_60\n.address_size 64\n\n");
     // Each block's first thread adds to the count of the driver's barrier for the grid, the
     // first block's so that it turns over its top bit once all have, and waits for that.
     let sync = "\t{
@@ -3137,16 +3144,16 @@ fn grid_sync_is_where_every_thread_of_the_grid_comes_to_it() {
              `#[cooperative]`",
         ),
         ("#[cooperative]", "grid.sync(n);", "3:6: `grid.sync` takes no operands, not 1"),
-        ("#[cooperative]", "grid.wait();", "3:6: kgen's barrier for the grid is `grid.sync()`; not `grid.wait`"),
+        ("#[cooperative]", "grid.wait();", "3:6: kernite's barrier for the grid is `grid.sync()`; not `grid.wait`"),
         (
             "#[cooperative]",
             "grid.sync.all();",
-            "3:11: kgen's barrier for the grid is `grid.sync()`; not `grid.sync.all`",
+            "3:11: kernite's barrier for the grid is `grid.sync()`; not `grid.sync.all`",
         ),
         (
             "#[cooperative]",
             "let p: pred; setp.eq.u32(p, n, 0); if !p { grid.sync(); }",
-            "3:49: `grid.sync()` is for every thread of the grid, under no `if`: kgen writes it with no guard, and a \
+            "3:49: `grid.sync()` is for every thread of the grid, under no `if`: kernite writes it with no guard, and a \
              kernel that wants it under a condition the same in every thread jumps around it",
         ),
         // A function the kernels call may be called by one whose grid is not all running.
@@ -3162,7 +3169,7 @@ fn grid_sync_is_where_every_thread_of_the_grid_comes_to_it() {
             "{attr}\nunsafe extern \"ptx-kernel\" fn k(x: *mut u32, n: u32) {{\n{body}\n}}\n\
              extern \"ptx-func\" fn f() {{\n    grid.sync();\n}}\nfn h() {{\n    grid.sync();\n}}\n"
         );
-        assert_eq!(kgen::ptx_str(&src).unwrap_err(), want, "{body}");
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{body}");
     }
 }
 
@@ -3190,11 +3197,11 @@ fn cooperative_is_said_of_a_kernel_alone() {
     ];
     for (items, want) in cases {
         let src = format!("{items}\nunsafe extern \"ptx-kernel\" fn k(x: *mut u32) {{}}");
-        assert_eq!(kgen::ptx_str(&src).unwrap_err(), want, "{items}");
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{items}");
     }
     // Beside `#[instances(..)]`, either first, it makes each instance cooperative.
     for attrs in ["#[cooperative] #[instances(1, 2)]", "#[instances(1, 2)] #[cooperative]"] {
         let src = format!("{attrs}\nunsafe extern \"ptx-kernel\" fn k<const N: u32>() {{ grid.sync(); }}");
-        assert_eq!(kgen::ptx_str(&src).unwrap().matches("\tatom.add.u32 %old, [%barrier], %add;\n").count(), 2);
+        assert_eq!(kernite::ptx_str(&src).unwrap().matches("\tatom.add.u32 %old, [%barrier], %add;\n").count(), 2);
     }
 }

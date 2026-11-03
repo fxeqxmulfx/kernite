@@ -85,7 +85,7 @@ impl Random {
 
     /// `random.getrandbits(k)`, for `k` from 1 to 32.
     pub fn bits(&mut self, k: u32) -> u32 {
-        assert!((1..=32).contains(&k), "kgen's port draws 1 to 32 bits, not {k}");
+        assert!((1..=32).contains(&k), "kernite's port draws 1 to 32 bits, not {k}");
         self.next_u32() >> (32 - k)
     }
 

@@ -5,7 +5,7 @@
 
 /// A GPU kernel's compile-time argument, which picks its instance, and its parameter, which its
 /// launcher passes on.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod launched {
     #[instances(1, 2)]
     #[allow(non_upper_case_globals)]
@@ -18,7 +18,7 @@ pub mod launched {
 
 /// An x86 kernel's compile-time argument, which picks its instance, and its parameter, which
 /// the instance is given.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod instances {
     #[instances(1, 2)]
     #[allow(non_upper_case_globals)]
@@ -30,7 +30,7 @@ pub mod instances {
 
 /// A cooperative x86 kernel's compile-time argument, which picks its instance, and its pointer
 /// and number, which its launcher hands each thread.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod cooperative {
     #[instances(1, 2)]
     #[cooperative]
@@ -43,7 +43,7 @@ pub mod cooperative {
 }
 
 /// An x86 function, which a kernel calls.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod calls {
     pub unsafe extern "sysv64" fn r#fn(x: u64) -> u64 {
         add(x, 1);
@@ -59,7 +59,7 @@ pub mod calls {
 
 /// GPU kernels, one of them cooperative: the launcher of each, and the method that says how many
 /// blocks a grid of the cooperative one has at most, `loop_blocks`.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod gpu_kernels {
     pub unsafe extern "ptx-kernel" fn r#type(xs: *mut u32) {
         st.global.u32([xs], 1);
@@ -72,7 +72,7 @@ pub mod gpu_kernels {
 }
 
 /// x86 kernels: a plain one, one of instances, which the plain one calls, and a cooperative one.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod cpu_kernels {
     pub unsafe extern "sysv64" fn r#type(x: u64) -> u64 {
         let r: gpr;
@@ -94,7 +94,7 @@ pub mod cpu_kernels {
 }
 
 /// An x86 static, which a kernel names.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod cpu_memory {
     #[allow(non_upper_case_globals)]
     pub static r#static: global<[u32; 4]>;
@@ -106,7 +106,7 @@ pub mod cpu_memory {
 }
 
 /// A GPU static, which a kernel names.
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod gpu_memory {
     pub static r#static: global<[u32; 4]>;
 
@@ -118,13 +118,13 @@ pub mod gpu_memory {
 }
 
 /// A const of a module of consts, which a kernel of the module that takes it reads.
-#[kgen_macros::consts]
+#[kernite_macros::consts]
 pub mod sizes {
     #[allow(non_upper_case_globals)]
     pub const r#const: u64 = 3;
 }
 
-#[kgen_macros::kernels(consts = crate::sizes)]
+#[kernite_macros::kernels(consts = crate::sizes)]
 pub mod reads {
     pub unsafe extern "sysv64" fn k(x: u64) -> u64 {
         add(x, r#const);

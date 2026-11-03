@@ -2,7 +2,7 @@
 //! for each call, or keeps what it is told, so these tests pin the calls, and what each is given,
 //! with no machine.
 
-use kgen_lang::{Error, Fault, Guard, ItemKind, Mem, Operand, Run, Span, Target};
+use kernite_lang::{Error, Fault, Guard, ItemKind, Mem, Operand, Run, Span, Target};
 
 /// A kernel with a pointer, a `ymm`, a loop of `v.xmm` fields, which the evaluator unrolls, a
 /// label and a helper, whose parameter is a view of what it is given, and which declares a
@@ -163,12 +163,12 @@ fn operand(o: &Operand<usize>) -> String {
 
 /// Runs the kernel `k` of `src` on `trace`; or the error, at its line and column.
 fn run(src: &str, trace: &mut Trace) -> Result<Run, String> {
-    let module = kgen_lang::parse(src).map_err(|e| e.at(src))?;
+    let module = kernite_lang::parse(src).map_err(|e| e.at(src))?;
     let k = module.items.iter().find_map(|item| match &item.kind {
         ItemKind::Fn(f) if f.name == "k" => Some(f),
         _ => None,
     });
-    kgen_lang::kernel(&module, k.expect("a kernel `k`"), &[], trace).map_err(|e| e.at(src))
+    kernite_lang::kernel(&module, k.expect("a kernel `k`"), &[], trace).map_err(|e| e.at(src))
 }
 
 #[test]

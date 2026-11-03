@@ -3,8 +3,8 @@
 
 use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
 
-use kgen::lang::{self, Fn, ItemKind, Value};
-use kgen::{Call, HostStatic, Naked, NativeInstance};
+use kernite::lang::{self, Fn, ItemKind, Value};
+use kernite::{Call, HostStatic, Naked, NativeInstance};
 
 use crate::rust::{
     attrs, clashes, hygienic, is_ident, is_punct, never, parse, pick, signature, stub, visibility, written_params,
@@ -25,7 +25,7 @@ pub(crate) fn naked(
     named: &[String],
     top: &[TokenTree],
 ) -> TokenStream {
-    let hidden = format!("__kgen_{}", f.name);
+    let hidden = format!("__kernite_{}", f.name);
     let cooperative = f.cooperative.is_some();
     let mut out = TokenStream::new();
     let mut items = String::new();
@@ -58,8 +58,8 @@ pub(crate) fn naked(
             names.push(param[colon - 1].to_string());
         }
         if cooperative {
-            params.push("_: &::kgen_cpu::Place".to_string());
-            tys.push("&::kgen_cpu::Place".to_string());
+            params.push("_: &::kernite_cpu::Place".to_string());
+            tys.push("&::kernite_cpu::Place".to_string());
         }
         let ret: TokenStream = f.ret.as_ref().map_or_else(TokenStream::new, |r| {
             parse("->").into_iter().chain(top[r.tokens.clone()].iter().cloned()).collect()
@@ -184,7 +184,7 @@ fn list(names: &[String]) -> String {
 }
 
 /// Static `s` of a module of x86 kernels as Rust has it, as written but for its type and what it
-/// holds: `made`, a `kgen_cpu::Global` of its elements at the multiple its type says, holding
+/// holds: `made`, a `kernite_cpu::Global` of its elements at the multiple its type says, holding
 /// what it says or zeros; or what stands for a static that did not compile, beside its error.
 pub(crate) fn cpu_static(s: &lang::Static, made: Option<&HostStatic>, top: &[TokenTree]) -> TokenStream {
     let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
@@ -194,13 +194,13 @@ pub(crate) fn cpu_static(s: &lang::Static, made: Option<&HostStatic>, top: &[Tok
     out.extend([top[s.vis.end + 1].clone()]);
     out.extend(parse(&match made {
         Some(m) => {
-            let ty = format!("::kgen_cpu::Global<{}, {}, {}>", m.elem, m.len, m.align);
+            let ty = format!("::kernite_cpu::Global<{}, {}, {}>", m.elem, m.len, m.align);
             match m.init.iter().all(|&b| b == 0) {
                 true => format!(": {ty} = <{ty}>::zeroed();"),
                 false => format!(": {ty} = <{ty}>::new([{}]);", elements(m).join(", ")),
             }
         }
-        None => ": ::kgen_cpu::Stub = ::kgen_cpu::Stub;".to_string(),
+        None => ": ::kernite_cpu::Stub = ::kernite_cpu::Stub;".to_string(),
     }));
     out
 }
@@ -229,14 +229,14 @@ fn elements(m: &HostStatic) -> Vec<String> {
 
 /// The paths by which the code of an instance of a kernel of `module` names each function it
 /// `calls`, from beside the kernels or from `inside` a kernel's hidden module: a function of no
-/// compile-time arguments by its name as written, `r#fn` as well, and an instance, `tile::<4>`,
-/// as the function in its function's hidden module, `__kgen_tile::I0`, that [`naked`] makes it.
+/// compile-time arguments by its name as written, `r#fn` as well, and an instance, `tile::<4>`, as
+/// the function in its function's hidden module, `__kernite_tile::I0`, that [`naked`] makes it.
 fn callees(module: &lang::Module, calls: &[Call], inside: bool, top: &[TokenTree]) -> Vec<String> {
     let up = if inside { "super::" } else { "" };
     let path = |call: &Call| match call.instance {
-        Some(k) => format!("{up}__kgen_{}::I{k}", call.function),
+        Some(k) => format!("{up}__kernite_{}::I{k}", call.function),
         None => {
-            let g = kgen::function(module, &call.function).expect("a kernel calls a function of its module");
+            let g = kernite::function(module, &call.function).expect("a kernel calls a function of its module");
             // Its name as written, after `fn`.
             format!("{up}{}", top[g.head.end + 1])
         }
@@ -267,7 +267,7 @@ fn grid_launcher(
     out.extend(needs);
     out.extend(parse(
         "#[doc = \"\"]\n#[doc = \" Every thread of the grid runs at once, as `grid.sync()` needs, each on a core, so a \
-         grid of more threads than [`kgen_cpu::most`] says the machine runs is an error.\"]",
+         grid of more threads than [`kernite_cpu::most`] says the machine runs is an error.\"]",
     ));
     let memory = match named {
         [] => String::new(),
@@ -292,13 +292,13 @@ fn grid_launcher(
     out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("unsafe fn"));
     out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
-    let mut params = hygienic("$grid: ::kgen_cpu::Grid, ", kernels.is_some());
+    let mut params = hygienic("$grid: ::kernite_cpu::Grid, ", kernels.is_some());
     for (param, _) in written_params(f, top) {
         params.extend(param);
         params.extend(parse(","));
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, params))]);
-    out.extend(parse("-> ::core::result::Result<(), ::kgen_cpu::Error>"));
+    out.extend(parse("-> ::core::result::Result<(), ::kernite_cpu::Error>"));
     let body = match kernels {
         Some(kernels) => {
             let kernel = match kernels {
@@ -320,7 +320,7 @@ fn grid_launcher(
             }
             args.push("$grid".to_string());
             format!(
-                "{addresses}::kgen_cpu::launch($grid, &|$grid: &::kgen_cpu::Place| unsafe {{ ({kernel})({}) }})",
+                "{addresses}::kernite_cpu::launch($grid, &|$grid: &::kernite_cpu::Place| unsafe {{ ({kernel})({}) }})",
                 args.join(", ")
             )
         }
@@ -363,7 +363,7 @@ pub(crate) fn x86_stub(f: &Fn, instances: usize, named: &[String], top: &[TokenT
         let items: String = (0..instances)
             .map(|k| format!("pub unsafe extern \"sysv64\" fn I{k}() {{ ::core::unreachable!() }}\n"))
             .collect();
-        out.extend(parse(&format!("#[doc(hidden)]\nmod __kgen_{} {{\n{items}}}\n", f.name)));
+        out.extend(parse(&format!("#[doc(hidden)]\nmod __kernite_{} {{\n{items}}}\n", f.name)));
     }
     out
 }

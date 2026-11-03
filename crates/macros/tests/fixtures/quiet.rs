@@ -2,27 +2,27 @@
 //! it builds them without a word.
 
 /// Each x86 kernel, called as Rust calls it.
-pub fn on_the_cpu(x: *mut u32) -> Result<u64, kgen_cpu::Error> {
+pub fn on_the_cpu(x: *mut u32) -> Result<u64, kernite_cpu::Error> {
     unsafe {
-        cpu::together(kgen_cpu::Grid::new(1), x)?;
+        cpu::together(kernite_cpu::Grid::new(1), x)?;
         Ok(cpu::step(1) + cpu::tile::<2>(1) + cpu::COUNTS.read()[0] as u64)
     }
 }
 
 /// Each GPU kernel, launched as Rust launches it.
-pub fn on_the_gpu(kernels: &gpu::Kernels, x: kgen_cuda::Ptr<f32>) -> Result<u32, kgen_cuda::Error> {
+pub fn on_the_gpu(kernels: &gpu::Kernels, x: kernite_cuda::Ptr<f32>) -> Result<u32, kernite_cuda::Error> {
     unsafe {
-        kernels.scale(kgen_cuda::Grid::new(1, 1), x, 2.0)?;
-        kernels.tile::<2>(kgen_cuda::Grid::new(1, 1), x)?;
-        kernels.together(kgen_cuda::Grid::new(1, 1), x)?;
+        kernels.scale(kernite_cuda::Grid::new(1, 1), x, 2.0)?;
+        kernels.tile::<2>(kernite_cuda::Grid::new(1, 1), x)?;
+        kernels.together(kernite_cuda::Grid::new(1, 1), x)?;
     }
     kernels.COUNTS().write(&[0; 4])?;
-    let _: kgen_cuda::Global<'_, kgen_cuda::f16> = kernels.F16S();
-    let _: kgen_cuda::Global<'_, kgen_cuda::bf16> = kernels.BF16S();
+    let _: kernite_cuda::Global<'_, kernite_cuda::f16> = kernels.F16S();
+    let _: kernite_cuda::Global<'_, kernite_cuda::bf16> = kernels.BF16S();
     kernels.together_blocks(32, 0)
 }
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 mod cpu {
     /// Read by a kernel alone.
     const STEP: u64 = 3;
@@ -55,7 +55,7 @@ mod cpu {
     }
 }
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 mod gpu {
     /// Read by a kernel alone.
     const SCALE: f32 = 2.0;

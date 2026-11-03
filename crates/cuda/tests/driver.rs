@@ -1,6 +1,6 @@
-//! The driver as kgen calls it, on the GPU here, if there is one.
+//! The driver as kernite calls it, on the GPU here, if there is one.
 
-use kgen_cuda::{Cuda, Grid, Module, arg, bf16, f16};
+use kernite_cuda::{Cuda, Grid, Module, arg, bf16, f16};
 
 /// `x[i] += 1` for each `i < n`, a thread each, written by hand.
 const PTX: &str = "
@@ -360,7 +360,7 @@ fn a_kernel_is_given_the_bits_of_each_parameter() {
 /// Memory of the module's own, which its kernels name, and which keeps what they write from one
 /// launch to the next: `count` adds 1 to word `i` of `counts` in each thread, and `copy` writes
 /// the two words of `seen` and the two floats of `table` to `out`. `counts` is the module's
-/// alone, as kgen declares its memory, and `seen` visible, as nvcc declares it for a program
+/// alone, as kernite declares its memory, and `seen` visible, as nvcc declares it for a program
 /// linked in parts.
 const GLOBALS: &str = "
 .version 7.5

@@ -13,9 +13,9 @@ use std::sync::{Mutex, PoisonError};
 /// waits for another's lock says so.
 static CARGO: Mutex<()> = Mutex::new(());
 
-/// Where in `CARGO_TARGET_TMPDIR` each fixture is a crate, `kgen-macros/name/project`, so that
-/// its workspace is not named as the crate is; and where they are built, `kgen-macros/target`.
-const ROOT: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/kgen-macros");
+/// Where in `CARGO_TARGET_TMPDIR` each fixture is a crate, `kernite-macros/name/project`, so that
+/// its workspace is not named as the crate is; and where they are built, `kernite-macros/target`.
+const ROOT: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/kernite-macros");
 
 /// Whether Cargo did `command`, `["build"]` say, for fixture `name`, written afresh, and what it
 /// said, a line each, in order.
@@ -23,13 +23,13 @@ fn cargo(command: &[&str], name: &str) -> (bool, Vec<String>) {
     cargo_in(command, &written(name))
 }
 
-/// Fixture `name` written as the `src/lib.rs` of a crate that depends on kgen-macros, kgen-cuda
-/// and kgen-cpu, as a user's does: the crate's directory. The crate is a workspace of its own in
-/// `CARGO_TARGET_TMPDIR`. Its manifest ends with what `{name}.toml` beside the fixture says of
-/// the workspace, if there is one.
+/// Fixture `name` written as the `src/lib.rs` of a crate that depends on kernite-macros,
+/// kernite-cuda and kernite-cpu, as a user's does: the crate's directory. The crate is a workspace
+/// of its own in `CARGO_TARGET_TMPDIR`. Its manifest ends with what `{name}.toml` beside the
+/// fixture says of the workspace, if there is one.
 fn written(name: &str) -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let crates = here.parent().expect("kgen-macros is in crates/");
+    let crates = here.parent().expect("kernite-macros is in crates/");
     let fixtures = here.join("tests/fixtures");
     let dir = Path::new(ROOT).join(name).join("project");
     fs::create_dir_all(dir.join("src")).unwrap();
@@ -43,9 +43,9 @@ edition = "2024"
 publish = false
 
 [dependencies]
-kgen-macros = {{ path = {macros:?} }}
-kgen-cuda = {{ path = {cuda:?} }}
-kgen-cpu = {{ path = {cpu:?} }}
+kernite-macros = {{ path = {macros:?} }}
+kernite-cuda = {{ path = {cuda:?} }}
+kernite-cpu = {{ path = {cpu:?} }}
 
 [workspace]
 "#
@@ -57,8 +57,8 @@ kgen-cpu = {{ path = {cpu:?} }}
 }
 
 /// Whether Cargo did `command` in the crate at `dir`, and what it said, a line each, in order.
-/// The crate is built offline into `kgen-macros/target`, so that it never waits for the build that
-/// runs these tests. What the environment would change of a build is taken out of it.
+/// The crate is built offline into `kernite-macros/target`, so that it never waits for the build
+/// that runs these tests. What the environment would change of a build is taken out of it.
 fn cargo_in(command: &[&str], dir: &Path) -> (bool, Vec<String>) {
     let _one = CARGO.lock().unwrap_or_else(PoisonError::into_inner);
     let mut run = Command::new(env!("CARGO"));
@@ -133,9 +133,9 @@ fn the_macro_says_what_it_refuses_where_it_is() {
         &[
             "src/lib.rs:4:1: error: `#[kernels]` goes on a module written in braces, `mod name { .. }`, where the \
              kernels are",
-            "src/lib.rs:6:24: error: `#[kernels]` takes the module of consts its kernels read, as `consts = \
-             crate::model::sizes`, a module `#[kgen_macros::consts]` is on; or nothing",
-            "src/lib.rs:9:23: error: `#[consts]` takes no arguments",
+            "src/lib.rs:6:27: error: `#[kernels]` takes the module of consts its kernels read, as `consts = \
+             crate::model::sizes`, a module `#[kernite_macros::consts]` is on; or nothing",
+            "src/lib.rs:9:26: error: `#[consts]` takes no arguments",
             "src/lib.rs:13:1: error: `#[consts]` goes on a module written in braces, `mod name { .. }`, of the consts \
              kernels read",
             "src/lib.rs:17:5: error: a const of a module of consts is `pub`, for the modules of kernels that take it \
@@ -144,7 +144,7 @@ fn the_macro_says_what_it_refuses_where_it_is() {
              and nothing else",
             "src/lib.rs:25:1: error: `__kernels!` is how `#[kernels(consts = ..)]` is given its consts",
             "src/lib.rs:27:1: error: `__kernels!` is how `#[kernels(consts = ..)]` is given its consts",
-            "src/lib.rs:31:23: error: kgen compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \
+            "src/lib.rs:31:23: error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \
              \"ptx-kernel\"` ones, for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \
              \"C\"` is none of these",
             "src/lib.rs:36:28: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
@@ -161,7 +161,8 @@ fn the_macro_says_what_it_refuses_where_it_is() {
 
 #[test]
 fn brackets_nested_past_64_deep_are_refused_where_they_open() {
-    // The 64th parenthesis is the first past the most, as `kgen::x86_str` counts the same tokens.
+    // The 64th parenthesis is the first past the most, as `kernite::x86_str` counts the same
+    // tokens.
     refuses(
         "nested",
         &[
@@ -220,7 +221,7 @@ fn a_crate_is_built_again_when_its_workspace_is_renamed() {
     fs::write(&manifest, member).unwrap();
     let named = |name: &str| {
         let workspace = format!(
-            "[workspace]\nresolver = \"3\"\nmembers = [\"project\"]\n\n[workspace.metadata.kgen]\nname = {name:?}\n"
+            "[workspace]\nresolver = \"3\"\nmembers = [\"project\"]\n\n[workspace.metadata.kernite]\nname = {name:?}\n"
         );
         fs::write(Path::new(ROOT).join("rebuilt/Cargo.toml"), workspace).unwrap();
     };
@@ -241,8 +242,8 @@ fn a_workspace_named_by_what_is_not_a_string_is_refused_where_the_module_is() {
     // a workspace of its own. The kernel compiles, so the error is the only one.
     let manifest = Path::new(ROOT).join("nonstring/project/Cargo.toml");
     let error = format!(
-        "src/lib.rs:5:1: error: `name` in `[workspace.metadata.kgen]` of {} is not a string: a workspace is named by \
-         one, as `name = \"kgen\"`",
+        "src/lib.rs:5:1: error: `name` in `[workspace.metadata.kernite]` of {} is not a string: a workspace is named by \
+         one, as `name = \"kernite\"`",
         manifest.display()
     );
     refuses("nonstring", &[&error, "error: could not compile `nonstring` (lib) due to 1 previous error"]);
@@ -285,7 +286,7 @@ fn what_a_module_says_when_its_parts_fail() {
             "src/lib.rs:47:12: error: a static is memory of the module's kernels: the GPU's, for PTX kernels, or the \
              process's, for x86 ones; and this module has both, so it is two modules, one of each kind of kernel and \
              the statics they name",
-            "src/lib.rs:55:23: error: kgen compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \
+            "src/lib.rs:55:23: error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \
              \"ptx-kernel\"` ones, for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \
              \"C\"` is none of these",
             "src/lib.rs:36:16: error: `STEP` names one of the consts the module takes from `crate::sizes` as well",
@@ -439,16 +440,16 @@ fn the_kernels_read_the_consts_as_values_known_now_and_so_does_rust() {
 #[test]
 fn what_a_module_of_consts_hands_on_and_refuses() {
     // Its items in order, each past its doc: its own attribute passes; the const that is not `pub`
-    // is refused for that, before kgen works it out; the `pub` one at the call kgen cannot work
-    // out; then the function. None is handed on, so the module of kernels keeps a `STEP` of its
-    // own and says nothing.
+    // is refused for that, before kernite works it out; the `pub` one at the call kernite cannot
+    // work out; then the function. None is handed on, so the module of kernels keeps a `STEP` of
+    // its own and says nothing.
     refuses(
         "consts",
         &[
             "src/lib.rs:10:5: error: a const of a module of consts is `pub`, for the modules of kernels that take it \
              to see",
-            "src/lib.rs:13:27: error: a call is a statement: an instruction or a helper, not a value",
-            "src/lib.rs:16:5: error: a module of consts holds the consts kernels read, as `pub const E: usize = 16;`, \
+            "src/lib.rs:14:27: error: a call is a statement: an instruction or a helper, not a value",
+            "src/lib.rs:17:5: error: a module of consts holds the consts kernels read, as `pub const E: usize = 16;`, \
              and nothing else",
             "error: could not compile `consts` (lib) due to 3 previous errors",
         ],

@@ -1,6 +1,6 @@
-//! The data kgen-build and the machines hand on: plain values, whatever the machine.
+//! The data kernite-build and the machines hand on: plain values, whatever the machine.
 
-use kgen_lang::{Error, Module, Value};
+use kernite_lang::{Error, Module, Value};
 
 /// A kernel compiled, or a static, and the constants of its module it read. Rust never sees
 /// those reads, so whatever writes the module out for Rust has to say they happened.
@@ -103,7 +103,7 @@ pub struct ModuleOut {
 /// What an item of a module is, its kernels compiled.
 #[derive(Debug)]
 pub enum ItemOut {
-    /// Rust, which passes through: a const of the module's own, or what kgen does not read.
+    /// Rust, which passes through: a const of the module's own, or what kernite does not read.
     Rust,
     /// A const given, Rust's where its module is.
     Given,
@@ -115,7 +115,7 @@ pub enum ItemOut {
     /// A helper, and what is wrong with it whether it is called or not: its body, its
     /// `#[instances(..)]`, then its `#[cooperative]`.
     Helper(Vec<Error>),
-    /// A function of an ABI kgen compiles nothing for, which says so.
+    /// A function of an ABI kernite compiles nothing for, which says so.
     Unknown(Error),
     /// A function the process runs.
     Native(NativeOut),

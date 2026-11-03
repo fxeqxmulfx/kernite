@@ -4,8 +4,8 @@ members = ["crates/*", "examples/*"]
 
 # The first namespace of the GPU kernels' names in PTX, which is the directory's name
 # otherwise: a clone keeps them, wherever it is.
-[workspace.metadata.kgen]
-name = "kgen"
+[workspace.metadata.kernite]
+name = "kernite"
 
 [workspace.package]
 version = "0.1.0"
@@ -14,19 +14,19 @@ rust-version = "1.99.1"
 license = "MIT"
 publish = false
 
-# The dependency rule, innermost first. `crates/kgen/tests/architecture.rs` checks every
+# The dependency rule, innermost first. `crates/kernite/tests/architecture.rs` checks every
 # manifest against it.
 [workspace.dependencies]
-kgen-core = { path = "crates/core" }
-kgen-lang = { path = "crates/lang" }
-kgen-compile = { path = "crates/compile" }
-kgen-build = { path = "crates/build" }
-kgen-x86 = { path = "crates/x86" }
-kgen-ptx = { path = "crates/ptx" }
-kgen = { path = "crates/kgen" }
-kgen-macros = { path = "crates/macros" }
-kgen-cuda = { path = "crates/cuda" }
-kgen-cpu = { path = "crates/cpu" }
+kernite-core = { path = "crates/core" }
+kernite-lang = { path = "crates/lang" }
+kernite-compile = { path = "crates/compile" }
+kernite-build = { path = "crates/build" }
+kernite-x86 = { path = "crates/x86" }
+kernite-ptx = { path = "crates/ptx" }
+kernite = { path = "crates/kernite" }
+kernite-macros = { path = "crates/macros" }
+kernite-cuda = { path = "crates/cuda" }
+kernite-cpu = { path = "crates/cpu" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

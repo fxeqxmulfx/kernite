@@ -1,5 +1,5 @@
 [package]
-name = "kgen-cpu"
+name = "kernite-cpu"
 description = "What x86 kernels need of the process: the threads a cooperative one runs on, each given its place in a grid, and the memory of a module's"
 version.workspace = true
 edition.workspace = true

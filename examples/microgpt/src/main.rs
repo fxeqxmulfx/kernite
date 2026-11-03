@@ -1,5 +1,5 @@
 //! Karpathy's [microgpt](https://gist.github.com/karpathy/8627fe009c40f57531cb18360106ce95),
-//! trained and sampled by kernels written in kgen's language: x86 ones on the CPU, PTX ones on
+//! trained and sampled by kernels written in kernite's language: x86 ones on the CPU, PTX ones on
 //! the GPU.
 //!
 //! microgpt.py trains a GPT of one layer to make up names, in pure Python, a scalar at a time.

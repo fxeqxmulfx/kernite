@@ -1,6 +1,6 @@
 [package]
-name = "kgen-ptx"
-description = "PTX for NVIDIA GPUs as kgen-lang writes it: each instruction checked against the types its name gives, printed for the driver"
+name = "kernite-ptx"
+description = "PTX for NVIDIA GPUs as kernite-lang writes it: each instruction checked against the types its name gives, printed for the driver"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,10 +8,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-kgen-core = { workspace = true }
-kgen-lang = { workspace = true }
-kgen-compile = { workspace = true }
-kgen-build = { workspace = true }
+kernite-core = { workspace = true }
+kernite-lang = { workspace = true }
+kernite-compile = { workspace = true }
+kernite-build = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "my-app"
-description = "An example user of kgen: kernels written where they are called, held to scalar references bit for bit"
+description = "An example user of kernite: kernels written where they are called, held to scalar references bit for bit"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,9 +8,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-kgen-cpu = { workspace = true }
-kgen-cuda = { workspace = true }
-kgen-macros = { workspace = true }
+kernite-cpu = { workspace = true }
+kernite-cuda = { workspace = true }
+kernite-macros = { workspace = true }
 
 # Not the workspace's lints: calling a kernel is unsafe, and this crate is where it happens.
 [lints.rust]

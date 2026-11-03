@@ -283,8 +283,8 @@ impl<'a> Parser<'a> {
             break;
         }
         if self.eat_ident("fn") {
-            // A helper may be `const`: kgen runs it while the kernel compiles. The error is at the
-            // first word refused.
+            // A helper may be `const`: kernite runs it while the kernel compiles. The error is at
+            // the first word refused.
             let refused = self.trees[qualifiers..self.pos - 1].iter().find_map(|t| match t {
                 Tree::Ident { name, span } if name == "async" => {
                     Some((*span, "a function runs when it is called, so it is not `async`"))
@@ -889,7 +889,7 @@ fn unquote(lit: &str, span: Span) -> Result<String, Error> {
             other => {
                 return Err(Error {
                     span,
-                    message: format!("the escape `\\{}` is not one kgen reads", other.unwrap_or(' ')),
+                    message: format!("the escape `\\{}` is not one kernite reads", other.unwrap_or(' ')),
                 });
             }
         });

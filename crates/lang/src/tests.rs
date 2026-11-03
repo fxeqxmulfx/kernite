@@ -1,5 +1,5 @@
 //! The lexer, the rounding of 16-bit floats, and whether a function is `unsafe`. The rest of
-//! the language is tested where it meets the targets it is compiled for, in `kgen`'s
+//! the language is tested where it meets the targets it is compiled for, in `kernite`'s
 //! `tests/lang.rs`.
 
 use crate::value::{Value, cast};

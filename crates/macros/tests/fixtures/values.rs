@@ -3,7 +3,7 @@
 //! that takes them, where Rust sees them by the `use` the macro writes. Rust checks as it builds
 //! that a kernel reads what Rust does.
 
-#[kgen_macros::consts]
+#[kernite_macros::consts]
 pub mod sizes {
     /// How far a value moves.
     pub const STEP: u64 = 3;
@@ -15,7 +15,7 @@ pub mod sizes {
     pub const HALF: f32 = 0.5;
 }
 
-#[kgen_macros::kernels(consts = crate::sizes)]
+#[kernite_macros::kernels(consts = crate::sizes)]
 pub mod kernels {
     /// The furthest a value moves, of the steps the module takes.
     pub const FAR: u64 = STEPS[1];

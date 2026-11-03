@@ -1,4 +1,4 @@
-//! The allocator of `kgen`: from a [`Program`] over variables to an [`Allocated`] kernel over
+//! The allocator of `kernite`: from a [`Program`] over variables to an [`Allocated`] kernel over
 //! machine registers, what did not fit in them spilled to the stack, with its frame laid out.
 //!
 //! What it knows of the machine comes through the [`Machine`] and [`Spill`] ports, so it
@@ -20,7 +20,7 @@ mod spill;
 pub use allocated::{Allocated, Frame};
 pub use cfg::on_every_path;
 pub use error::Error;
-use kgen_core::{Inst, Item, PReg, Program};
+use kernite_core::{Inst, Item, PReg, Program};
 pub use port::{Machine, Spill};
 
 /// What [`compile`] checks before it allocates, for a machine that allocates its own
@@ -34,7 +34,7 @@ pub fn check<Op>(p: &Program<Op>) -> Result<(), Error> {
 /// fit, and lays out its frame.
 pub fn compile<Op: Clone + PartialEq>(p: &Program<Op>, m: &(impl Machine + Spill<Op>)) -> Result<Allocated<Op>, Error> {
     let (p, regs) = alloc::allocate(p, m, m)?;
-    let reg = |v: kgen_core::VReg| regs[v.id as usize].expect("every variable named has a register");
+    let reg = |v: kernite_core::VReg| regs[v.id as usize].expect("every variable named has a register");
     let body = p
         .body
         .iter()

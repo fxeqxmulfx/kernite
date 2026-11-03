@@ -2,7 +2,7 @@
 //! which: a generic kernel's say those of every instance, each once, in the order of their
 //! names, and a grid's kernel's launcher's those of the kernel.
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod kernels {
     /// How many bits of `x` are set, lead and trail, summed.
     pub unsafe extern "sysv64" fn bits(x: u64) -> u64 {

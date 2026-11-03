@@ -1,4 +1,4 @@
-use kgen_core::{PReg, Slot};
+use kernite_core::{PReg, Slot};
 
 use crate::{Frame, Machine};
 

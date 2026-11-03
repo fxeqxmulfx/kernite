@@ -1,4 +1,4 @@
-//! The CUDA driver, as far as kgen's kernels need it: memory on a GPU, PTX modules loaded
+//! The CUDA driver, as far as kernite's kernels need it: memory on a GPU, PTX modules loaded
 //! into it, their kernels launched and their memory read and written; and the floats of 16
 //! bits, [`f16`](struct@f16) and [`bf16`], that Rust has not.
 //!
@@ -7,12 +7,12 @@
 //! builds and runs where there is none, and one that asks is told why it got none.
 //!
 //! ```no_run
-//! let cuda = kgen_cuda::Cuda::new()?;
+//! let cuda = kernite_cuda::Cuda::new()?;
 //! let xs = cuda.upload(&[1.0f32, 2.0, 3.0])?;
 //! // A kernel is launched on `xs.ptr()` here.
 //! cuda.sync()?;
 //! println!("{:?}", xs.read()?);
-//! # Ok::<(), kgen_cuda::Error>(())
+//! # Ok::<(), kernite_cuda::Error>(())
 //! ```
 //!
 //! Everything is for the thread that made the [`Cuda`]: the GPU's primary context is current
@@ -52,7 +52,7 @@ unsafe extern "C" {
 /// `dlopen` binds the library's own references to others as it opens it.
 const RTLD_NOW: c_int = 2;
 
-/// The driver's functions that kgen calls, each by the name `cuda.h` gives it under its own:
+/// The driver's functions that kernite calls, each by the name `cuda.h` gives it under its own:
 /// `cuMemAlloc` is `cuMemAlloc_v2`.
 macro_rules! api {
     ($($field:ident = $symbol:literal($($arg:ty),*);)*) => {

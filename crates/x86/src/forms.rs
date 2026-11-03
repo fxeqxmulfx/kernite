@@ -1,5 +1,5 @@
-//! The instructions of x86-64-v3 that kgen knows, each in every form `llvm-mc` takes for it,
-//! which assembles Rust's `naked_asm!`, but those only AVX-512 encodes: one [`Form`] each,
+//! The instructions of x86-64-v3 that kernite knows, each in every form `llvm-mc` takes for
+//! it, which assembles Rust's `naked_asm!`, but those only AVX-512 encodes: one [`Form`] each,
 //! with the CPU feature it needs. They are x86-64's own on integers, SSE's to SSE4.2's as AVX
 //! writes them, `vaddps` and not `addps`, and those of AVX, AVX2, FMA, F16C, BMI1, BMI2,
 //! LZCNT, POPCNT and MOVBE; not the stack's, which is the frame's, nor the strings', `loop`,
@@ -13,9 +13,9 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use kgen_core::Access::{self, Ignored, Read, ReadWrite, Write};
-use kgen_core::Width::{self, W8, W16, W32, W64, W128, W256};
-use kgen_core::{Arg, Class, Operand, Register};
+use kernite_core::Access::{self, Ignored, Read, ReadWrite, Write};
+use kernite_core::Width::{self, W8, W16, W32, W64, W128, W256};
+use kernite_core::{Arg, Class, Operand, Register};
 
 use crate::op::Op;
 
@@ -251,8 +251,8 @@ vldmxcsr @avx : m32
 vstmxcsr @avx : =m32
 "#;
 
-/// The instructions of x86-64-v3 kgen does not yet write, each with what it does that keeps
-/// it out: most reach registers of their own, which wait for kgen to place a kernel's variables
+/// The instructions of x86-64-v3 kernite does not yet write, each with what it does that keeps
+/// it out: most reach registers of their own, which wait for kernite to place a kernel's variables
 /// in the registers such an instruction names, as it places a call's arguments. Of those in
 /// [`TABLE`], the forms of [`LATER_FORMS`] and shifts by `cl`, [`BY_CL`], wait so too.
 pub const LATER: &[(&str, &str)] = &[
@@ -284,11 +284,11 @@ pub const LATER: &[(&str, &str)] = &[
     ("xgetbv", "reads `ecx`, and writes `edx:eax`"),
 ];
 
-/// The instructions of [`TABLE`] that also shift or rotate by `cl`, which kgen does not yet
+/// The instructions of [`TABLE`] that also shift or rotate by `cl`, which kernite does not yet
 /// write.
 pub const BY_CL: &[&str] = &["rcl", "rcr", "rol", "ror", "sal", "sar", "shl", "shld", "shr", "shrd"];
 
-/// Forms of the instructions of [`TABLE`] that kgen does not yet write, by their number of
+/// Forms of the instructions of [`TABLE`] that kernite does not yet write, by their number of
 /// operands, each with what it does that keeps it out, as [`LATER`] has it.
 pub const LATER_FORMS: &[(&str, usize, &str)] =
     &[("imul", 1, "multiplies `rax` into `rdx:rax`"), ("shld", 2, "shifts by `cl`"), ("shrd", 2, "shifts by `cl`")];
@@ -307,9 +307,9 @@ pub enum Feature {
     Bmi1,
     /// BMI2: `bzhi`, `pdep`, `pext`, `rorx`, `sarx`, `shlx` and `shrx`.
     Bmi2,
-    /// SSE4.2, of which kgen writes `crc32`, the rest being AVX's.
+    /// SSE4.2, of which kernite writes `crc32`, the rest being AVX's.
     Sse42,
-    /// AVX: vectors of 256 bits, and every vector instruction kgen writes.
+    /// AVX: vectors of 256 bits, and every vector instruction kernite writes.
     Avx,
     /// F16C: `vcvtph2ps` and `vcvtps2ph`.
     F16c,
@@ -393,7 +393,7 @@ impl Kind {
     /// Whether `operand` of an instruction is of this kind, `implicit` being the operands it
     /// does not write out, among which is the vector of indices of memory at one, at its width.
     fn takes<R: Register>(self, operand: &Operand<R>, implicit: &[Arg<R>]) -> bool {
-        let vector_index = |m: &kgen_core::Mem<R>| match m.index {
+        let vector_index = |m: &kernite_core::Mem<R>| match m.index {
             Some((r, _)) if r.class() == Class::Vec => implicit.iter().find_map(|a| match a.operand {
                 Operand::Reg(i, w) if i == r => Some(w),
                 _ => None,
@@ -692,17 +692,17 @@ pub fn width_of(word: &str) -> Option<Width> {
     [W8, W16, W32, W64, W128, W256].into_iter().find(|&w| self::word(w) == word)
 }
 
-/// The forms of the instruction the language calls `name`, if kgen knows it.
+/// The forms of the instruction the language calls `name`, if kernite knows it.
 pub fn of(name: &str) -> Option<&'static [Form]> {
     forms().get(name).map(Vec::as_slice)
 }
 
-/// The names of the instructions kgen knows, in order.
+/// The names of the instructions kernite knows, in order.
 pub fn names() -> impl Iterator<Item = &'static str> {
     forms().keys().copied()
 }
 
-/// The CPU feature an instruction kgen wrote needs past x86-64's own, if any: `None` for one
+/// The CPU feature an instruction kernite wrote needs past x86-64's own, if any: `None` for one
 /// the table does not have, as `ret`.
 ///
 /// # Panics

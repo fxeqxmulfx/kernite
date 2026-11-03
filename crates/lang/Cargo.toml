@@ -1,5 +1,5 @@
 [package]
-name = "kgen-lang"
+name = "kernite-lang"
 description = "The language kernels are written in, in place: a Rust function's body read as instructions over variables"
 version.workspace = true
 edition.workspace = true

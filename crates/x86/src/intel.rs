@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use kgen_compile::{Allocated, Frame};
-use kgen_core::{Base, Class, Const, Item, Label, Mem, Operand, PReg, Signature, Width};
+use kernite_compile::{Allocated, Frame};
+use kernite_core::{Base, Class, Const, Item, Label, Mem, Operand, PReg, Signature, Width};
 
 use crate::forms::Feature;
 use crate::frame;

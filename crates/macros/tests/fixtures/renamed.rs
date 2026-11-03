@@ -3,7 +3,7 @@
 //! `renamed.toml` names the workspace `acme`, so its GPU kernel is `acme::renamed::gpu::k`, as
 //! Rust checks as it builds.
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 mod gpu {
     /// Writes 1 to `x`.
     pub unsafe extern "ptx-kernel" fn k(x: *mut u32) {

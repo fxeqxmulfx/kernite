@@ -1,15 +1,15 @@
-// Written by kgen.
+// Written by kernite.
 
 .version 7.0
 .target sm_80
 .address_size 64
 
-.visible .entry _ZN4kgen6my_app6ampere6matmulE(
-	.param .u64 _ZN4kgen6my_app6ampere6matmulE_param_0,
-	.param .u64 _ZN4kgen6my_app6ampere6matmulE_param_1,
-	.param .u64 _ZN4kgen6my_app6ampere6matmulE_param_2,
-	.param .u32 _ZN4kgen6my_app6ampere6matmulE_param_3,
-	.param .u32 _ZN4kgen6my_app6ampere6matmulE_param_4
+.visible .entry _ZN7kernite6my_app6ampere6matmulE(
+	.param .u64 _ZN7kernite6my_app6ampere6matmulE_param_0,
+	.param .u64 _ZN7kernite6my_app6ampere6matmulE_param_1,
+	.param .u64 _ZN7kernite6my_app6ampere6matmulE_param_2,
+	.param .u32 _ZN7kernite6my_app6ampere6matmulE_param_3,
+	.param .u32 _ZN7kernite6my_app6ampere6matmulE_param_4
 )
 {
 	.reg .pred %copies_b, %more;
@@ -21,14 +21,14 @@
 	.shared .align 16 .b8 a_tile[512];
 	.shared .align 16 .b8 b_tile[256];
 
-	ld.param.u64 %a, [_ZN4kgen6my_app6ampere6matmulE_param_0];
+	ld.param.u64 %a, [_ZN7kernite6my_app6ampere6matmulE_param_0];
 	cvta.to.global.u64 %a, %a;
-	ld.param.u64 %bt, [_ZN4kgen6my_app6ampere6matmulE_param_1];
+	ld.param.u64 %bt, [_ZN7kernite6my_app6ampere6matmulE_param_1];
 	cvta.to.global.u64 %bt, %bt;
-	ld.param.u64 %c, [_ZN4kgen6my_app6ampere6matmulE_param_2];
+	ld.param.u64 %c, [_ZN7kernite6my_app6ampere6matmulE_param_2];
 	cvta.to.global.u64 %c, %c;
-	ld.param.u32 %n, [_ZN4kgen6my_app6ampere6matmulE_param_3];
-	ld.param.u32 %k, [_ZN4kgen6my_app6ampere6matmulE_param_4];
+	ld.param.u32 %n, [_ZN7kernite6my_app6ampere6matmulE_param_3];
+	ld.param.u32 %k, [_ZN7kernite6my_app6ampere6matmulE_param_4];
 	mov.u32 %lane, %tid.x;
 	// the tile's first row and column
 	mov.u32 %i, %ctaid.x;

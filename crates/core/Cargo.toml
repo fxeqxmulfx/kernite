@@ -1,5 +1,5 @@
 [package]
-name = "kgen-core"
+name = "kernite-core"
 description = "A kernel as instructions over registers"
 version.workspace = true
 edition.workspace = true

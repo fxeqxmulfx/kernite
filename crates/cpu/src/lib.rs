@@ -1,4 +1,4 @@
-//! What x86 kernels need of the process beyond their code, for what `#[kgen_macros::kernels]`
+//! What x86 kernels need of the process beyond their code, for what `#[kernite_macros::kernels]`
 //! writes: the threads a cooperative kernel runs on, and the memory of a module's.
 //!
 //! - [`launch`] runs a kernel on each thread of a [`Grid`], given its [`Place`] there, which
@@ -7,7 +7,7 @@
 //!   writes: `kernels::COUNTS.read()`.
 //!
 //! ```ignore
-//! #[kgen_macros::kernels]
+//! #[kernite_macros::kernels]
 //! mod cpu {
 //!     /// `x[t] = t` for each thread `t` of the grid.
 //!     #[cooperative]
@@ -18,8 +18,8 @@
 //!     }
 //! }
 //!
-//! let mut x = vec![0; kgen_cpu::most()?];
-//! unsafe { cpu::fill(kgen_cpu::Grid::new(x.len()), x.as_mut_ptr())? };
+//! let mut x = vec![0; kernite_cpu::most()?];
+//! unsafe { cpu::fill(kernite_cpu::Grid::new(x.len()), x.as_mut_ptr())? };
 //! ```
 //!
 //! A thread that waits at `grid.sync()` spins until the last comes, so each needs a core of
@@ -30,7 +30,7 @@
 //! at a displacement from `rip`, and which keeps what they write from one call to the next:
 //!
 //! ```ignore
-//! #[kgen_macros::kernels]
+//! #[kernite_macros::kernels]
 //! mod cpu {
 //!     /// How many times `bump` has run.
 //!     pub static RUNS: global<u64>;
@@ -47,10 +47,10 @@
 //! assert_eq!(cpu::RUNS.read(), [1]);
 //! ```
 //!
-//! The crate depends on no other. kgen-x86 writes the kernels, which read a place as [`Place`]
+//! The crate depends on no other. kernite-x86 writes the kernels, which read a place as [`Place`]
 //! lays it out, and the macro writes the launchers, which call [`launch`] and, in each thread,
-//! the kernel, and the statics. Nothing here is `unsafe`: calling the kernel is, and the
-//! launcher does that.
+//! the kernel, and the statics. Nothing here is `unsafe`: calling the kernel is, and the launcher
+//! does that.
 
 mod global;
 
@@ -80,7 +80,7 @@ impl Grid {
 
 /// What a thread of a grid is given, in the register after the kernel's parameters: its index,
 /// how many threads there are, and the address of the grid's barrier, a word each, in that
-/// order, as kgen-x86 reads them. The barrier is two words: how many threads have come to it
+/// order, as kernite-x86 reads them. The barrier is two words: how many threads have come to it
 /// since all last did, and how many times all have.
 #[repr(C)]
 #[derive(Debug)]
@@ -259,7 +259,7 @@ mod tests {
         );
     }
 
-    /// The words of a place and of the barrier where kgen-x86 reads them.
+    /// The words of a place and of the barrier where kernite-x86 reads them.
     #[test]
     fn a_place_is_laid_out_as_a_kernel_reads_it() {
         assert_eq!((offset_of!(Place, thread), offset_of!(Place, threads), offset_of!(Place, barrier)), (0, 8, 16));

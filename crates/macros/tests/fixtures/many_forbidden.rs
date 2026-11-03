@@ -3,7 +3,7 @@
 
 #![forbid(clippy::too_many_arguments)]
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod cpu {
     #[cooperative]
     pub unsafe extern "sysv64" fn together(x: *mut u32) {
@@ -12,7 +12,7 @@ pub mod cpu {
     }
 }
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod gpu {
     pub unsafe extern "ptx-kernel" fn one(x: *mut u32) {
         st.global.u32([x], 1);

@@ -1,16 +1,16 @@
-//! x86-64-v3, as `kgen` sees it: the adapter between the entities of `kgen-core` and this
+//! x86-64-v3, as `kernite` sees it: the adapter between the entities of `kernite-core` and this
 //! instruction set, x86-64 with AVX2, FMA, F16C, BMI1, BMI2, LZCNT, POPCNT and MOVBE.
 //!
-//! - [`forms`] is every form of every instruction kgen writes, as the assembler takes them,
+//! - [`forms`] is every form of every instruction kernite writes, as the assembler takes them,
 //!   and the CPU feature each needs.
-//! - [`lang::Kernel`] is x86 for `kgen-lang`, the language kernels are written in where
+//! - [`lang::Kernel`] is x86 for `kernite-lang`, the language kernels are written in where
 //!   they are called: its types and views, and every instruction it calls by name, checked
 //!   against the forms x86 has for it.
-//! - [`X86`] is x86 for `kgen-build`, the machine its use cases compile a module's kernels
+//! - [`X86`] is x86 for `kernite-build`, the machine its use cases compile a module's kernels
 //!   and statics with: kernels Rust calls in the process, and memory Rust lays out there.
 //! - [`Asm`] builds the same programs from Rust: one method per instruction, operands typed
 //!   by what the instruction accepts, variables instead of registers.
-//! - [`SysV`] is the [`kgen_compile::Machine`] the allocator runs against: the registers of the
+//! - [`SysV`] is the [`kernite_compile::Machine`] the allocator runs against: the registers of the
 //!   System V calling convention and the ones it wants back.
 //! - [`intel::print`] turns an allocated kernel into Intel-syntax lines, as `naked_asm!`
 //!   takes them, and a listing for people.

@@ -1,22 +1,22 @@
-# kgen
+# kernite
 
-kgen compiles kernels written in Rust's syntax, instructions over variables in a module that
-`#[kgen_macros::kernels]` is on, to x86-64 assembly, as `#[unsafe(naked)]` functions in Intel syntax,
+kernite compiles kernels written in Rust's syntax, instructions over variables in a module that
+`#[kernite_macros::kernels]` is on, to x86-64 assembly, as `#[unsafe(naked)]` functions in Intel syntax,
 and to PTX for NVIDIA GPUs. [README.md](README.md) describes the language, the targets and the
-guarantees: read it before changing what kgen does.
+guarantees: read it before changing what kernite does.
 
 ## Goals
 
 Every change serves these five.
 
-1. **Zero cost.** A kernel runs as fast as the best code written by hand for it. kgen adds no
+1. **Zero cost.** A kernel runs as fast as the best code written by hand for it. kernite adds no
    check, copy or call at run time that the kernel does not ask for.
 2. **Minimum code.** The least code that does the job: no rule written twice, no dead code, no
    type or function that only hands a value on. A change that deletes code beats one that adds
    it.
-3. **The whole spec.** kgen takes all of each target's spec, x86-64-v3 and PTX's ISA, in every
+3. **The whole spec.** kernite takes all of each target's spec, x86-64-v3 and PTX's ISA, in every
    form, and refuses what the spec leaves undefined. Every rule README states has a test.
-4. **Safe where it can be.** A kernel kgen can prove safe is called without `unsafe`, as in
+4. **Safe where it can be.** A kernel kernite can prove safe is called without `unsafe`, as in
    NVIDIA's cuda-oxide for SIMT, where each thread writes only its own part of the output. Where
    safety would cost speed, zero cost wins: the call stays `unsafe`, and says why.
 5. **Clean architecture.** Each layer depends only on the layers inside it, and a port belongs
@@ -27,35 +27,35 @@ Every change serves these five.
 - `./make.py check`: formatting, clippy on every target with `-D warnings`, every test, and the docs
   without a warning. It passes before every commit. It takes about a minute here.
 - `./make.py fmt` formats every crate.
-- While working: `cargo test -p <crate>`, or `cargo test -p kgen --test x86` (or `ptx`, `lang`) for
+- While working: `cargo test -p <crate>`, or `cargo test -p kernite --test x86` (or `ptx`, `lang`) for
   the language through a target.
-- `KGEN_BLESS=1 cargo test -p my-app` (or `-p microgpt`) rewrites the snapshots of the listings, after
-  a change to the generated code made on purpose, for the diff to be reviewed.
+- `KERNITE_BLESS=1 cargo test -p my-app` (or `-p microgpt`) rewrites the snapshots of the listings,
+  after a change to the generated code made on purpose, for the diff to be reviewed.
 - Rust 1.99.1, edition 2024. `make.py` runs under [uv](https://docs.astral.sh/uv/), as every Python
   script does. A script kept as a file is Python, not shell.
 
 ## Layout
 
 The crates are layers, each depending only on those inside it. README.md's "Layers" table says what
-each knows. `crates/kgen/tests/architecture.rs` holds the rule of which may depend on which, of every
-kind of dependency, and a new crate needs its line there. Change both when the crates change.
+each knows. `crates/kernite/tests/architecture.rs` holds the rule of which may depend on which, of
+every kind of dependency, and a new crate needs its line there. Change both when the crates change.
 
-- `kgen-core`: programs over variables and over registers.
-- `kgen-lang`: the language: tokens, the parser, values, the evaluator, and the `Target` port a machine
+- `kernite-core`: programs over variables and over registers.
+- `kernite-lang`: the language: tokens, the parser, values, the evaluator, and the `Target` port a machine
   implements.
-- `kgen-compile`: the allocator: liveness, register allocation, spilling, and the frame's slots; the
+- `kernite-compile`: the allocator: liveness, register allocation, spilling, and the frame's slots; the
   ports `Machine` and `Spill` a machine implements for it. It also says which items every path of a
   program runs.
-- `kgen-build`: what kgen does with a module of kernels, whatever machine compiles them: what its
-  items are, the ports `Backend`, `Native` and `Device` a machine implements, and the use cases that
-  call them. It depends on kgen-lang alone.
-- `kgen-x86`, `kgen-ptx`: each machine, `X86` and `Ptx`: its forms, the language's binding to it, its
+- `kernite-build`: what kernite does with a module of kernels, whatever machine compiles them: what
+  its items are, the ports `Backend`, `Native` and `Device` a machine implements, and the use cases
+  that call them. It depends on kernite-lang alone.
+- `kernite-x86`, `kernite-ptx`: each machine, `X86` and `Ptx`: its forms, the language's binding to it, its
   printer.
-- `kgen`: which machine each kernel compiles with, `X86` or `Ptx`; kgen-build's use cases do the
-  compiling. `kgen-macros`: the proc macros.
-- `kgen-cuda`, `kgen-cpu`: what the generated code runs on: the CUDA driver, and an x86 grid's threads
-  and module memory. Neither depends on another crate.
-- `examples/my-app`, `examples/microgpt`: kgen used as a crate outside it would be. Their tests hold each
+- `kernite`: which machine each kernel compiles with, `X86` or `Ptx`; kernite-build's use cases do the
+  compiling. `kernite-macros`: the proc macros.
+- `kernite-cuda`, `kernite-cpu`: what the generated code runs on: the CUDA driver, and an x86 grid's
+  threads and module memory. Neither depends on another crate.
+- `examples/my-app`, `examples/microgpt`: kernite used as a crate outside it would be. Their tests hold each
   kernel to a scalar reference, bit for bit, and each listing to `snapshots/`.
 
 ## Rules the code keeps
@@ -63,10 +63,10 @@ kind of dependency, and a new crate needs its line there. Change both when the c
 - The output is a function of the source alone. Clippy denies `HashMap` and `HashSet`, and nothing
   comes from outside the workspace: `Cargo.lock` has no `source =` line.
 - The generated code changes only on purpose. Every listing in `examples/*/snapshots/` and
-  `crates/kgen/tests/builder/` is compared byte for byte, and a refactor changes none of them.
+  `crates/kernite/tests/builder/` is compared byte for byte, and a refactor changes none of them.
 - Errors are behaviour. Tests assert the text of many, and the `line:column` they point at; keep both.
   A new error says what is wrong where it can be mended, in the README's words.
-- `unsafe_code` is forbidden everywhere but kgen-cuda, where each `unsafe` block says why it holds, and the
+- `unsafe_code` is forbidden everywhere but kernite-cuda, where each `unsafe` block says why it holds, and the
   examples, which call kernels.
 - Every public item has a doc comment: `missing_docs` warns, and `./make.py check` denies warnings.
 - PTX: take what `ptxas` takes beyond PTX's ISA where it reads it as the ISA reads the rest. Refuse every
@@ -76,9 +76,9 @@ kind of dependency, and a new crate needs its line there. Change both when the c
 
 ## Tests
 
-- Fakes or the real thing, never mocks. kgen-compile's `Toy` machine is a fake. The language's tests run
-  on the real targets, through `kgen::x86_str` and `kgen::ptx_str`, in `crates/kgen/tests/`; kgen-lang
-  may not depend on a target, even for its tests.
+- Fakes or the real thing, never mocks. kernite-compile's `Toy` machine is a fake. The language's tests
+  run on the real targets, through `kernite::x86_str` and `kernite::ptx_str`, in `crates/kernite/tests/`;
+  kernite-lang may not depend on a target, even for its tests.
 - A test kernel really compiles: each variable written before it is read, each operand one the machine takes.
 - Tests that need `ptxas` (`$PTXAS`, the path, or `/usr/local/*/bin`), `llvm-mc` (`$LLVM_MC`), GNU `as`
   (`$GNU_AS`) or a GPU skip where it is missing, and say so. This machine has them all: CUDA 13.4 and an
@@ -89,8 +89,8 @@ kind of dependency, and a new crate needs its line there. Change both when the c
 - Change code in a git worktree of your own, under `.claude/worktrees/`, never in the main checkout,
   where the user and other sessions work. Reading the main checkout is fine.
 - Commit after any progress: each piece that passes `./make.py check` gets its own commit. A message is
-  a sentence of what kgen now does, in the README's plain words, then a body that says what changed and
-  why, wrapped at 72 columns, as `git log` shows, ending with the `Co-Authored-By` line.
+  a sentence of what kernite now does, in the README's plain words, then a body that says what changed
+  and why, wrapped at 72 columns, as `git log` shows, ending with the `Co-Authored-By` line.
 - Don't push, and don't merge into master: both are the user's call.
 - Don't stop to ask. Choose the sensible default, say what you chose, and keep going. Ask only before
   something that cannot be undone or that leaves this machine.

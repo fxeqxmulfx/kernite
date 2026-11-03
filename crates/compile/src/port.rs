@@ -1,4 +1,4 @@
-use kgen_core::{Class, Inst, PReg, SlotId, VReg, Width};
+use kernite_core::{Class, Inst, PReg, SlotId, VReg, Width};
 
 /// What the allocator needs to know about a machine and its calling convention: which
 /// registers it may hand out, and which of those a kernel must give back as it found them.

@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
-use kgen_core::Access::{Ignored, Read, ReadWrite, Write};
-use kgen_core::Width::{self, W8, W16, W32, W64, W128, W256};
-use kgen_core::{
+use kernite_core::Access::{Ignored, Read, ReadWrite, Write};
+use kernite_core::Width::{self, W8, W16, W32, W64, W128, W256};
+use kernite_core::{
     Arg, Base, Class, Const, ConstId, Flow, Inst, Item, Label, Operand, Program, RegInfo, Signature, Slot as SlotSpec,
     SlotId, VReg,
 };

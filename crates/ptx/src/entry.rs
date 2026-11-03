@@ -1,6 +1,6 @@
 //! A kernel or a function written out, and the module of them the driver loads.
 
-use kgen_core::{Item, Program};
+use kernite_core::{Item, Program};
 
 use crate::call::{Returns, formal, passed};
 use crate::needs::{Needs, clash};
@@ -8,7 +8,7 @@ use crate::statics::{Memory, Static, fits};
 use crate::ty::Ty;
 
 /// A PTX instruction as it is written, guard, operands and all; the operands of the
-/// [`kgen_core::Inst`] it is the opcode of say what it reads and writes, for the checks.
+/// [`kernite_core::Inst`] it is the opcode of say what it reads and writes, for the checks.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Op(pub String);
 
@@ -17,7 +17,7 @@ pub struct Op(pub String);
 pub struct Param {
     /// The type of its register; the `.param` is of [`Param::passed`].
     pub ty: Ty,
-    /// The variable it is loaded into, by [`kgen_core::VReg::id`].
+    /// The variable it is loaded into, by [`kernite_core::VReg::id`].
     pub reg: usize,
     /// Whether it is a pointer, to be made a global address.
     pub pointer: bool,
@@ -42,7 +42,7 @@ pub struct Entry {
     /// Its parameters, in order.
     pub params: Vec<Param>,
     /// Each variable's register, its name unique in the entry, and its type, by
-    /// [`kgen_core::VReg::id`].
+    /// [`kernite_core::VReg::id`].
     pub regs: Vec<(String, Ty)>,
     /// The memory it declares, in order.
     pub memory: Vec<Memory>,
@@ -152,8 +152,11 @@ pub fn module(entries: &[Entry], statics: &[Static]) -> Result<String, String> {
             .collect();
         return Err(clash(&named));
     }
-    let mut out =
-        format!("// Written by kgen.\n\n.version {}\n.target {}\n.address_size 64\n", needs.version(), needs.target());
+    let mut out = format!(
+        "// Written by kernite.\n\n.version {}\n.target {}\n.address_size 64\n",
+        needs.version(),
+        needs.target()
+    );
     // The names at the module's scope, and those of a kernel's or a function's parameters,
     // which a static's would hide there: PTX's own `WARP_SZ`, and what each name is.
     let mut names = vec![("WARP_SZ".to_string(), "PTX's own `WARP_SZ`".to_string())];

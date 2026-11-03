@@ -1,6 +1,6 @@
 [package]
-name = "kgen-x86"
-description = "x86-64 for kgen: the typed instruction builder kernels are written in, SysV, Intel syntax"
+name = "kernite-x86"
+description = "x86-64 for kernite: the typed instruction builder kernels are written in, SysV, Intel syntax"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,10 +8,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-kgen-core = { workspace = true }
-kgen-lang = { workspace = true }
-kgen-compile = { workspace = true }
-kgen-build = { workspace = true }
+kernite-core = { workspace = true }
+kernite-lang = { workspace = true }
+kernite-compile = { workspace = true }
+kernite-build = { workspace = true }
 
 [lints]
 workspace = true

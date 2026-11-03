@@ -12,9 +12,9 @@ pub use consts::*;
 
 /// What the kernels read of the model, once for every backend: its sizes, where its
 /// embeddings are, and `exp`'s constants. Each module of kernels takes them as its own,
-/// `#[kgen_macros::kernels(consts = crate::model::consts)]`, and the rest of the crate as the
-/// model's, `model::E`.
-#[kgen_macros::consts]
+/// `#[kernite_macros::kernels(consts = crate::model::consts)]`, and the rest of the crate as
+/// the model's, `model::E`.
+#[kernite_macros::consts]
 pub mod consts {
     /// Tokens: the 26 letters, and `BOS`.
     pub const V: usize = 27;

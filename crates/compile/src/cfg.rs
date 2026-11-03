@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use kgen_core::{Flow, Item, Label, Program};
+use kernite_core::{Flow, Item, Label, Program};
 
 use crate::Error;
 use crate::bits::Bits;

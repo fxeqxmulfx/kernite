@@ -5,7 +5,7 @@ use std::cell::Cell;
 
 use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 
-use kgen::lang::{self, Delim, Fn, Tree, Value};
+use kernite::lang::{self, Delim, Fn, Tree, Value};
 
 thread_local! {
     /// The span of each token the macro writes, which says where Rust resolves its names, and
@@ -249,17 +249,17 @@ pub(crate) fn error(span: Span, message: &str) -> TokenStream {
         .collect()
 }
 
-/// The type `ty` as the host names it: `f16` and `bf16`, which Rust has not, are kgen-cuda's.
+/// The type `ty` as the host names it: `f16` and `bf16`, which Rust has not, are kernite-cuda's.
 pub(crate) fn host(ty: &[TokenTree]) -> TokenStream {
     match ty {
-        [t] if is_ident(t, "f16") || is_ident(t, "bf16") => parse(&format!("::kgen_cuda::{t}")),
+        [t] if is_ident(t, "f16") || is_ident(t, "bf16") => parse(&format!("::kernite_cuda::{t}")),
         _ => ty.iter().cloned().collect(),
     }
 }
 
 /// The tokens `s` writes, each of the span [`SITE`] says.
 pub(crate) fn parse(s: &str) -> TokenStream {
-    let tokens: TokenStream = s.parse().expect("kgen-macros writes tokens that parse");
+    let tokens: TokenStream = s.parse().expect("kernite-macros writes tokens that parse");
     match SITE.get() {
         Some(span) => respan(tokens, span),
         None => tokens,

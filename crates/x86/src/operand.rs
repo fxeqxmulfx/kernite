@@ -1,4 +1,4 @@
-use kgen_core::{Access, Arg, Base, Imm, Mem, Operand, SlotId, VReg, Width};
+use kernite_core::{Access, Arg, Base, Imm, Mem, Operand, SlotId, VReg, Width};
 
 /// A general-purpose variable, seen as 64 bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,15 +1,15 @@
-//! PTX for NVIDIA GPUs, as `kgen` writes it: the adapter between `kgen-lang` and the virtual
+//! PTX for NVIDIA GPUs, as `kernite` writes it: the adapter between `kernite-lang` and the virtual
 //! instruction set that the CUDA driver compiles for whichever GPU it finds.
 //!
-//! - [`lang::Kernel`] is PTX for `kgen-lang`: variables of PTX's register types, and
+//! - [`lang::Kernel`] is PTX for `kernite-lang`: variables of PTX's register types, and
 //!   instructions by their PTX names, `ld.global.f32(x, [p + 4])`, each checked against the
 //!   forms of [`forms`], the instructions PTX has for the GPUs from Fermi, `sm_20`, to
 //!   Ampere, `sm_86`; and `call`, against the [`Prototype`] of the function it calls.
-//! - [`Entry`] is a kernel or a function written out: the program `kgen-compile` checks, and
-//!   the `.entry` or the `.func` it prints as. [`module`] puts them in a module for the
+//! - [`Entry`] is a kernel or a function written out: the program `kernite-compile` checks,
+//!   and the `.entry` or the `.func` it prints as. [`module`] puts them in a module for the
 //!   driver to load, of the PTX version and for the GPU their instructions need, with the
 //!   memory of the module's its kernels name, [`Static`].
-//! - [`Ptx`] is PTX for `kgen-build`, the machine its use cases compile a module's kernels
+//! - [`Ptx`] is PTX for `kernite-build`, the machine its use cases compile a module's kernels
 //!   and statics with: kernels and memory a driver loads as one module.
 //!
 //! PTX's registers have no number, and `ptxas` allocates them, so nothing here allocates: a

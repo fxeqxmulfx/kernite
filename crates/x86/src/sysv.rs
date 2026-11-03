@@ -1,5 +1,5 @@
-use kgen_compile::{Machine, Spill};
-use kgen_core::{Access, Arg, Base, Class, Flow, Inst, Mem, Operand, PReg, SlotId, VReg, Width};
+use kernite_compile::{Machine, Spill};
+use kernite_core::{Access, Arg, Base, Class, Flow, Inst, Mem, Operand, PReg, SlotId, VReg, Width};
 
 use crate::op::Op;
 

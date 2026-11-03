@@ -4,7 +4,7 @@
 //! workspace `after`, in the workspace's manifest and not the crate's, and builds the crate again:
 //! Cargo builds it again, and the check fails.
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 mod gpu {
     /// Writes 1 to `x`.
     pub unsafe extern "ptx-kernel" fn k(x: *mut u32) {

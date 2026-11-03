@@ -1,6 +1,6 @@
-//! kgen-build's refusals in words: what is wrong, where it can be mended.
+//! kernite-build's refusals in words: what is wrong, where it can be mended.
 
-use kgen_lang::{Error, Span, Value};
+use kernite_lang::{Error, Span, Value};
 
 /// What a function is that may not be cooperative.
 pub(crate) enum Of {
@@ -10,13 +10,13 @@ pub(crate) enum Of {
     Helper,
 }
 
-/// What kgen-build refuses.
+/// What kernite-build refuses.
 pub(crate) enum Refusal<'a> {
     /// A module of both kinds of kernel and a static: two modules.
     TwoKinds,
     /// `#[cooperative]` on function `name`, which is no kernel but `of`.
     Cooperative { name: &'a str, of: Of },
-    /// A function of ABI `abi`, which kgen compiles nothing for.
+    /// A function of ABI `abi`, which kernite compiles nothing for.
     UnknownAbi { abi: &'a str },
     /// A kernel that is not an `unsafe fn`.
     NotUnsafe,
@@ -44,7 +44,7 @@ pub(crate) fn said(r: Refusal<'_>, span: Span) -> Error {
             )
         }
         Refusal::UnknownAbi { abi } => format!(
-            "kgen compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for NVIDIA \
+            "kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for NVIDIA \
              GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"{abi}\"` is none of these"
         ),
         Refusal::NotUnsafe => "a kernel trusts the pointers it is given, so it is an `unsafe fn`".to_string(),
@@ -56,9 +56,9 @@ pub(crate) fn said(r: Refusal<'_>, span: Span) -> Error {
 }
 
 /// `e`, which happened in instance `name` of a function, for `args`, saying so if it has any.
-pub(crate) fn within(name: &str, args: &[Value], e: kgen_lang::Error) -> kgen_lang::Error {
+pub(crate) fn within(name: &str, args: &[Value], e: kernite_lang::Error) -> kernite_lang::Error {
     match args {
         [] => e,
-        _ => kgen_lang::Error { message: format!("in `{name}`: {}", e.message), ..e },
+        _ => kernite_lang::Error { message: format!("in `{name}`: {}", e.message), ..e },
     }
 }

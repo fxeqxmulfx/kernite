@@ -1,6 +1,6 @@
 use std::fmt;
 
-use kgen_core::{Class, PReg, VReg};
+use kernite_core::{Class, PReg, VReg};
 
 /// Why a program does not compile. Every case names the variables involved by the names the
 /// program gave them, and where it could, the last note before the trouble.

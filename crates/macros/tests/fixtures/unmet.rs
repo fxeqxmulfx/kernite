@@ -4,7 +4,7 @@
 
 #![deny(unfulfilled_lint_expectations)]
 
-#[kgen_macros::kernels]
+#[kernite_macros::kernels]
 pub mod gpu {
     #[cooperative]
     #[expect(non_snake_case)]
