@@ -303,9 +303,10 @@ Each crate depends only on the layers inside it. `crates/kgen/tests/architecture
 
 | layer | crate | what it knows |
 |---|---|---|
-| entities | `kgen-core` | programs over variables and over registers; the `Machine` and `Spill` ports |
+| entities | `kgen-core` | programs over variables and over registers |
 | language | `kgen-lang` | kernels in Rust's syntax: parsing, evaluation, the `Target` port |
-| use cases | `kgen-compile` | liveness, register allocation, spilling, the frame's layout; tested on a toy machine |
+| entity service | `kgen-compile` | the allocator: liveness, register allocation, spilling, the frame's layout; the `Machine` and `Spill` ports; tested on a toy machine |
+| use cases | `kgen-build` | what kgen does with a module: ABIs, its rules, compiling each function; the ports a machine implements |
 | adapters | `kgen-x86`, `kgen-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kgen` | which machine and syntax each kernel compiles with |
 | delivery | `kgen-macros` | kernels as functions: `#[unsafe(naked)]`, launchers of a grid's threads, or launchers of PTX |

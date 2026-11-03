@@ -1,4 +1,4 @@
-//! The use cases on a toy machine: a few general registers, some callee-saved, and opcodes
+//! The allocator on a toy machine: a few general registers, some callee-saved, and opcodes
 //! that are only names, which [`run`] runs.
 
 use std::collections::BTreeMap;
