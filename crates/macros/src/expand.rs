@@ -5,11 +5,11 @@ use std::path::Path;
 
 use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
 
-use kgen::lang::{self, ItemKind, Tree};
+use kgen::lang::{self, ItemKind};
 use kgen::{ItemOut, Launcher, ModuleOut};
 
 use crate::gpu::{HOLE, gpu};
-use crate::rust::{const_names, error, flatten, inner_attribute, is_ident, is_punct, parse, site, stub, tree};
+use crate::rust::{const_names, error, flatten, inner_attribute, is_ident, is_punct, lex, parse, site, stub};
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
 
@@ -20,11 +20,10 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
     let outside = given.as_ref().map_or_else(Vec::new, |(consts, _)| flatten(consts.clone()));
     let n = outside.len();
     let top: Vec<TokenTree> = outside.into_iter().chain(flatten(body)).collect();
-    let mut spans = vec![];
-    let trees: Vec<Tree> = top.iter().map(|t| tree(t, &mut spans)).collect();
+    let (trees, spans) = lex(&top);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(site);
     let said = |e: &lang::Error| error(at(e.span), &e.message);
-    let module = match lang::module(&trees) {
+    let module = match trees.and_then(|trees| lang::module(&trees)) {
         Ok(module) => module,
         Err(e) => return said(&e),
     };

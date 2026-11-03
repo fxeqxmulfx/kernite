@@ -150,6 +150,18 @@ fn the_macro_says_what_it_refuses_where_it_is() {
 }
 
 #[test]
+fn brackets_nested_past_64_deep_are_refused_where_they_open() {
+    // The 64th parenthesis is the first past the most, as `kgen::x86_str` counts the same tokens.
+    refuses(
+        "nested",
+        &[
+            "src/lib.rs:7:80: error: this nests 64 deep at most",
+            "error: could not compile `nested` (lib) due to 1 previous error",
+        ],
+    );
+}
+
+#[test]
 fn an_instance_not_listed_stops_the_build() {
     // `cargo check` evaluates no generic function's constants, so it says nothing of these.
     refuses(

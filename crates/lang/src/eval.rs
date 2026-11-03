@@ -1,11 +1,11 @@
 //! The evaluator: a kernel's body run at compile time, its loops unrolled and its helpers
 //! inlined, as calls into the [`Target`] that builds the machine's instructions.
 
-use crate::Error;
 use crate::ast::{BinOp, Block, Const, Expr, Fn, Generic, ItemKind, Module, Static, Stmt, Type, UnOp};
 use crate::target::{Fault, Guard, Mem, Operand, Target};
 use crate::token::Span;
 use crate::value::{self, Value, Want};
+use crate::{DEPTH, Error, nested};
 
 /// What running a kernel found, besides what it asked of its target.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -193,9 +193,6 @@ impl Target for Consts {
     }
 }
 
-/// How deep helpers may call helpers.
-const DEPTH: usize = 64;
-
 /// The most variables a kernel declares by `let`, however its loops and helpers repeat them: x86's
 /// allocator keeps a set of them for each of them, a bit each, so this many take 512 MiB.
 const VARIABLES: usize = 1 << 16;
@@ -262,7 +259,10 @@ struct Eval<'a, T: Target> {
     guard: Option<Guard<T::Var>>,
     /// How many instructions have run.
     insts: usize,
+    /// How many helpers are running, each in the one before.
     depth: usize,
+    /// How many levels of expressions and statements are running, each in the one before.
+    nest: usize,
     /// How many variables `let` has declared, in the kernel and in the helpers it called.
     declared: usize,
 }
@@ -290,6 +290,7 @@ impl<'a, T: Target> Eval<'a, T> {
             guard: None,
             insts: 0,
             depth: 0,
+            nest: 0,
             declared: 0,
         }
     }
@@ -497,8 +498,22 @@ impl<'a, T: Target> Eval<'a, T> {
         }
     }
 
+    /// Runs `f` one level down in what is running, or says that it nests too deep, where its
+    /// level starts at `span`.
+    fn within<R>(&mut self, span: Span, f: impl FnOnce(&mut Self) -> Result<R, Error>) -> Result<R, Error> {
+        nested(self.nest, span)?;
+        self.nest += 1;
+        let r = f(self);
+        self.nest -= 1;
+        r
+    }
+
     /// The value of `e`, which must be known now.
     fn value(&mut self, e: &Expr, want: Want) -> Result<Value, Error> {
+        self.within(e.span(), |this| this.value_of(e, want))
+    }
+
+    fn value_of(&mut self, e: &Expr, want: Want) -> Result<Value, Error> {
         let at = |m: String| err(e.span(), m);
         match e {
             Expr::Lit(text, _) => value::literal(text, want).map_err(at),
@@ -603,6 +618,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 let (mut xs, mut held) = (vec![], 0);
                 for x in items {
                     let x = self.value(x, want)?;
+                    nested(value::nests(&x), e.span())?;
                     held += value::held(&x);
                     if value::fits(held).is_ok() {
                         xs.push(x);
@@ -613,6 +629,7 @@ impl<'a, T: Target> Eval<'a, T> {
             }
             Expr::Repeat(item, len, _) => {
                 let v = self.value(item, want)?;
+                nested(value::nests(&v), e.span())?;
                 let n = self.count(len)?;
                 value::fits(value::array(n as u128 * value::held(&v), n)).map_err(at)?;
                 Ok(Value::Array(vec![v; n]))
@@ -910,7 +927,17 @@ impl<'a, T: Target> Eval<'a, T> {
         b.stmts.iter().try_for_each(|s| self.stmt(s))
     }
 
+    /// A statement. One that holds others, `for`, `if` or a block, is a level of nesting for
+    /// them, and so is each `else if`; a helper's body and a kernel's are not.
     fn stmt(&mut self, s: &Stmt) -> Result<(), Error> {
+        match s {
+            Stmt::For { span, .. } | Stmt::If { span, .. } => self.within(*span, |this| this.stmt_of(s)),
+            Stmt::Block(b) => self.within(b.span, |this| this.stmt_of(s)),
+            _ => self.stmt_of(s),
+        }
+    }
+
+    fn stmt_of(&mut self, s: &Stmt) -> Result<(), Error> {
         match s {
             Stmt::Let { name, span, ty, value } => self.let_(name, *span, ty.as_ref(), value.as_ref()),
             Stmt::Const(c) => {

@@ -13,9 +13,14 @@ fn ptx(src: &str) -> String {
     module.split(".visible .entry ").nth(1).expect("an entry").to_string()
 }
 
+/// Kernel `k`, whose body is `body` from its second line on.
+fn kernel(body: &str) -> String {
+    format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\n")
+}
+
 /// Why kernel `k`, whose body is `body` from its second line on, does not compile.
 fn refused(body: &str) -> String {
-    kgen::x86_str(&format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\n"), "k").unwrap_err()
+    kgen::x86_str(&kernel(body), "k").unwrap_err()
 }
 
 #[test]
@@ -889,4 +894,109 @@ fn a_helpers_variables_count_for_the_kernel_that_calls_it() {
 #[test]
 fn a_kernel_that_declares_exactly_the_most_variables_compiles() {
     kgen::ptx_str("unsafe extern \"ptx-kernel\" fn k(x: *mut u32) {\nlet v: [u32; 65536];\n}\n").unwrap();
+}
+
+/// A row of operators, of brackets, of `else if`s or of arrays nests 64 deep at most. A row of the
+/// most compiles, and the level past it is refused where it starts. So is a row of 5000, which
+/// the parser or the evaluator would follow, each level a call, until a thread of 2 MiB ran out
+/// of stack.
+#[test]
+fn what_nests_past_64_deep_is_refused_where_the_level_starts() {
+    // A name, the body of a row of `n`, the most `n` that compiles, and where one more is refused.
+    type Shape = (&'static str, fn(usize) -> String, usize, &'static str);
+    let shapes: [Shape; 11] = [
+        ("a sum", |n| format!("let y = 1{};", " + 1".repeat(n)), 63, "2:263"),
+        ("a difference", |n| format!("let y = 1{};", " - 1".repeat(n)), 63, "2:263"),
+        ("casts", |n| format!("let y = 1{};", " as u32".repeat(n)), 63, "2:452"),
+        ("methods", |n| format!("let y = 1{};", ".min(1)".repeat(n)), 63, "2:452"),
+        ("minus signs", |n| format!("let y = {}1;", "-".repeat(n)), 63, "2:72"),
+        ("nots", |n| format!("let y = {}true;", "!".repeat(n)), 63, "2:72"),
+        ("parentheses", |n| format!("let y = {}1{};", "(".repeat(n), ")".repeat(n)), 63, "2:72"),
+        ("blocks", |n| format!("{}{}", "{".repeat(n), "}".repeat(n)), 63, "2:64"),
+        ("`else if`s", |n| format!("if false {{}}{}", " else if false {}".repeat(n)), 62, "2:1072"),
+        ("arrays of an array", |n| format!("let w = 0;{}", "\nlet w = [w];".repeat(n)), 64, "67:9"),
+        ("arrays of a repeat", |n| format!("let w = 0;{}", "\nlet w = [w; 1];".repeat(n)), 64, "67:9"),
+    ];
+    for (name, body, most, at) in shapes {
+        x86(&kernel(&body(most)), "k");
+        let why = format!("{at}: this nests 64 deep at most");
+        assert_eq!(refused(&body(most + 1)), why, "{name}");
+        assert_eq!(refused(&body(5000)), why, "{name}, 5000 of them");
+    }
+}
+
+/// Consts that name consts nest like the expressions that name them: a chain of 64 works out, and
+/// one of 65, or of 5000, is refused where the 65th const is written.
+#[test]
+fn consts_that_name_consts_nest_64_deep_at_most() {
+    let module = |n: usize| {
+        let consts: String = (0..n).map(|i| format!("const A{i}: u32 = A{};\n", i + 1)).collect();
+        format!("{consts}const A{n}: u32 = 1;\n{}", kernel("let y = A0;"))
+    };
+    x86(&module(63), "k");
+    for n in [64, 5000] {
+        assert_eq!(kgen::x86_str(&module(n), "k").unwrap_err(), "65:18: this nests 64 deep at most", "{n}");
+    }
+}
+
+/// A type nests 64 deep at most, and `Name<T>` and `[T; N]` are a level each: the parser refuses
+/// the level past it where it starts, however long the row, before it reads the rest. A type of 64
+/// is read, and then it is the machine that has no such variable.
+#[test]
+fn a_type_nests_64_deep_at_most() {
+    let body = |n: usize| format!("let x: {}u32{};", "a<".repeat(n), ">".repeat(n));
+    assert!(refused(&body(63)).starts_with("2:8: x86 variables are "));
+    for n in [64, 5000] {
+        assert_eq!(refused(&body(n)), "2:134: this nests 64 deep at most", "{n}");
+    }
+}
+
+/// A row inside brackets inside a row is counted whole: 62 fields in parentheses in 62 fields, and
+/// so on, is 3906 deep, which the evaluator would follow, with no count of its own for a field,
+/// until a stack of 6 MiB ran out. It is refused at the first level past 64.
+#[test]
+fn a_row_inside_brackets_inside_a_row_is_counted_whole() {
+    let deep = (0..62).fold("x".to_string(), |e, _| format!("({e}){}", ".f".repeat(62)));
+    assert_eq!(refused(&format!("let y = {deep};")), "2:194: this nests 64 deep at most");
+}
+
+/// A block, a `for` and an `if` are a level for what they hold, and count with the expression in
+/// them: 62 of them around `1 + 1` compile, and 63 are refused where the 65th level starts.
+#[test]
+fn blocks_loops_and_ifs_nest_with_their_expressions_64_deep_at_most() {
+    for (open, at) in [("{", "2:72"), ("if true {", "2:576"), ("for i in 0..1 {", "2:940")] {
+        let body = |n: usize| format!("{}let y = 1 + 1;{}", open.repeat(n), "}".repeat(n));
+        x86(&kernel(&body(62)), "k");
+        assert_eq!(refused(&body(63)), format!("{at}: this nests 64 deep at most"), "{open}");
+    }
+}
+
+/// A helper's blocks count with its caller's, for the stack is one: 62 helpers, each calling the
+/// next from a `for`, compile, and the 63rd `for` is refused at its range.
+#[test]
+fn the_loops_of_helpers_that_call_helpers_nest_64_deep_at_most() {
+    let module = |n: usize| {
+        let helpers: String = (0..n)
+            .map(|i| {
+                let inside = if i + 1 < n { format!("h{}();", i + 1) } else { "let y = 1;".to_string() };
+                format!("fn h{i}() {{ for i in 0..1 {{ {inside} }} }}\n")
+            })
+            .collect();
+        format!("{helpers}{}", kernel("h0();"))
+    };
+    x86(&module(62), "k");
+    assert_eq!(kgen::x86_str(&module(63), "k").unwrap_err(), "63:21: this nests 64 deep at most");
+}
+
+/// The deepest kernel the rules allow, helpers 64 deep and a sum of 64 terms in the last, compiles
+/// on the stack of a test, 2 MiB: 64 is what fits it, with room to spare.
+#[test]
+fn the_deepest_kernel_fits_the_stack_of_a_test() {
+    let helpers: String = (0..64)
+        .map(|i| {
+            let inside = if i < 63 { format!("h{}();", i + 1) } else { format!("let y = 1{};", " + 1".repeat(63)) };
+            format!("fn h{i}() {{ {inside} }}\n")
+        })
+        .collect();
+    x86(&format!("{helpers}{}", kernel("h0();")), "k");
 }

@@ -156,6 +156,14 @@ pub fn array(items: u128, len: usize) -> u128 {
     items + u128::from(len < 2)
 }
 
+/// How many arrays `v` nests, the deepest way down: none if it is no array.
+pub fn nests(v: &Value) -> usize {
+    match v {
+        Value::Array(xs) => 1 + xs.iter().map(nests).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
 /// Nothing, if a value that holds `n` elements holds no more than `MOST`; else why not.
 pub fn fits(n: u128) -> Result<(), String> {
     if n > MOST {

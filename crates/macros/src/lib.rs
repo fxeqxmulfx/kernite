@@ -188,11 +188,11 @@ mod x86;
 use proc_macro::{Delimiter, Group, Span, TokenStream, TokenTree};
 
 use kgen::ConstItem;
-use kgen::lang::{self, Tree};
+use kgen::lang;
 
 use crate::expand::expand;
 use crate::rust::{
-    Site, attrs_len, braced, error, flatten, inner_attribute, is_ident, is_path, is_punct, module, parse, tree,
+    Site, attrs_len, braced, error, flatten, inner_attribute, is_ident, is_path, is_punct, lex, module, parse,
 };
 
 /// See the crate documentation.
@@ -244,13 +244,12 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
         );
     };
     let top = flatten(braces.stream());
-    let mut spans = vec![];
-    let trees: Vec<Tree> = top.iter().map(|t| tree(t, &mut spans)).collect();
+    let (trees, spans) = lex(&top);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(Span::call_site);
     // The module as it is, for Rust; and the consts kgen reads, for the kernels.
     let mut inner: TokenStream = top.iter().cloned().collect();
     let mut given = TokenStream::new();
-    match lang::module(&trees) {
+    match trees.and_then(|trees| lang::module(&trees)) {
         Err(e) => inner.extend(error(at(e.span), &e.message)),
         Ok(module) => {
             for (item, verdict) in module.items.iter().zip(kgen::consts(&module)) {

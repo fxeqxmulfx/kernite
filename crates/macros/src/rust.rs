@@ -178,10 +178,19 @@ pub(crate) fn flatten(stream: TokenStream) -> Vec<TokenTree> {
     out
 }
 
-/// `t` as the language reads it, each span numbered by its place in `spans`.
-pub(crate) fn tree(t: &TokenTree, spans: &mut Vec<Span>) -> Tree {
+/// `tokens` as the language reads them, each span numbered by its place in the spans beside
+/// them. The spans come back with an error too, to place it: a bracket that nests too deep.
+pub(crate) fn lex(tokens: &[TokenTree]) -> (Result<Vec<Tree>, lang::Error>, Vec<Span>) {
+    let mut spans = vec![];
+    let trees = tokens.iter().map(|t| tree(t, 0, &mut spans)).collect();
+    (trees, spans)
+}
+
+/// `t` as the language reads it, `depth` brackets down, each span numbered by its place in
+/// `spans`.
+fn tree(t: &TokenTree, depth: usize, spans: &mut Vec<Span>) -> Result<Tree, lang::Error> {
     let span = lang::Span(spans.len() as u32);
-    match t {
+    Ok(match t {
         TokenTree::Ident(i) => {
             spans.push(i.span());
             Tree::Ident { name: i.to_string(), span }
@@ -196,14 +205,16 @@ pub(crate) fn tree(t: &TokenTree, spans: &mut Vec<Span>) -> Tree {
         }
         TokenTree::Group(g) => {
             spans.push(g.span_open());
+            lang::nested(depth, span)?;
             let delim = match g.delimiter() {
                 Delimiter::Parenthesis => Delim::Paren,
                 Delimiter::Bracket => Delim::Bracket,
                 Delimiter::Brace | Delimiter::None => Delim::Brace,
             };
-            Tree::Group { delim, trees: flatten(g.stream()).iter().map(|t| tree(t, spans)).collect(), span }
+            let trees = flatten(g.stream()).iter().map(|t| tree(t, depth + 1, spans)).collect::<Result<_, _>>()?;
+            Tree::Group { delim, trees, span }
         }
-    }
+    })
 }
 
 /// `::core::compile_error! { message }`, reported where `span` is.

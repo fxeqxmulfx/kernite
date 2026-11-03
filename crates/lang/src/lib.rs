@@ -122,6 +122,19 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// How deep helpers call helpers, and how deep brackets, types, expressions, blocks and the arrays
+/// of a value nest, at most.
+const DEPTH: usize = 64;
+
+/// Nothing, if a level inside `open` others is within the most; else why not, at `span`, where
+/// the level starts.
+pub fn nested(open: usize, span: Span) -> Result<(), Error> {
+    if open >= DEPTH {
+        return Err(Error { span, message: format!("this nests {DEPTH} deep at most") });
+    }
+    Ok(())
+}
+
 /// The module in `src`, as a string holds it.
 pub fn parse(src: &str) -> Result<Module, Error> {
     module(&lex(src)?)

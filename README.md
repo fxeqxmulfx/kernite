@@ -40,7 +40,11 @@ kernel of its own, which Rust calls as it calls a generic function, `kernels::do
 does not list fails to build. A value known now holds at most 1048576 elements in all, however its arrays nest,
 and a range as many. Each number, float and `bool` is an element, and so is each array of none or one item,
 which costs memory of its own. A kernel declares at most 65536 variables, however its loops and helpers repeat
-them. [`kgen-lang`](crates/lang/src/lib.rs) describes the language.
+them. Nesting is held to 64 levels, so that no kernel can run the compiler out of stack. Brackets, types,
+expressions, rows of `else if`s, consts that name consts and a value's arrays each nest 64 deep at most, and
+each operator in `a + b + c` is a level of its expression. A block, a `for` and an `if` are a level for what
+they hold, and count together with the expression inside them, along the helpers that call one another.
+[`kgen-lang`](crates/lang/src/lib.rs) describes the language.
 
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kgen_macros::consts]` is on, and a
