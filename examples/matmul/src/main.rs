@@ -125,19 +125,25 @@ fn gpu_operands(lens: (usize, usize, usize), shape: Shape) -> (u32, u32, u32) {
     (m as u32, n as u32, k as u32)
 }
 
+/// How long a run takes at the least: the 3 that warm up take half a minute, by which time the
+/// machine is hot and its clocks are near those it keeps.
+const RUN: Duration = Duration::from_secs(10);
+
 /// The average time of one call, where `calls(count)` makes `count` calls back to back and waits
-/// for them: of 10 runs after 3 to warm up. A run is as many calls as take 100 ms or more, for the
-/// clocks to come up and the wait to cost little; the count doubles until a run does.
+/// for them: of 10 runs after 3 to warm up. A run is as many calls as take [`RUN`] or more: the
+/// count doubles until a run takes a second or more, then grows in proportion.
 fn average(mut calls: impl FnMut(u32)) -> Duration {
     let mut run = |count| {
         let start = Instant::now();
         calls(count);
         start.elapsed()
     };
-    let mut count = 1;
-    while run(count) < Duration::from_millis(100) {
+    let (mut count, mut time) = (1, run(1));
+    while time < Duration::from_secs(1) {
         count *= 2;
+        time = run(count);
     }
+    let count = count * RUN.div_duration_f64(time).ceil() as u32;
     for _ in 0..3 {
         run(count);
     }
