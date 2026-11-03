@@ -163,8 +163,9 @@
 //! `Cargo.toml` from the package's directory up that has a `[workspace]` table, or a table
 //! inside it. The workspace is named as the directory of its manifest is, or as the
 //! manifest names it, which a clone keeps wherever it is. `name = ""` leaves the workspace
-//! out of the names. A package with no workspace's manifest is one of its own, named as the
-//! package is.
+//! out of the names. A `name` that is not a string is an error at the module. The error
+//! names the manifest. A package with no workspace's manifest is one of its own, named as
+//! the package is.
 //!
 //! ```toml
 //! [workspace.metadata.kgen]

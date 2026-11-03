@@ -27,8 +27,13 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
         Ok(module) => module,
         Err(e) => return said(&e),
     };
-    // The GPU kernels' namespaces: the workspace's, then the module's path.
-    let (workspace, manifest) = workspace();
+    // The GPU kernels' namespaces: the workspace's, then the module's path. A name that is not a
+    // string is an error at the module; the macro goes on without it, so that the error is the
+    // only one.
+    let (workspace, manifest, refused) = match workspace() {
+        Ok((workspace, manifest)) => (workspace, manifest, None),
+        Err(message) => (String::new(), None, Some(message)),
+    };
     let names: Vec<&str> = [workspace.as_str()].into_iter().filter(|n| !n.is_empty()).collect();
     let scope = kgen::ptx_scope(&names) + HOLE;
     let consts = given
@@ -44,6 +49,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
         .filter(|item| inner_attribute(&top[item.tokens.clone()]))
         .flat_map(|item| top[item.tokens.clone()].iter().cloned())
         .collect();
+    out.extend(refused.map(|message| error(site(), &message)));
     if let Some((_, path)) = given {
         out.extend(made.given.iter().map(said));
         out.extend(take(&made, &top, path));

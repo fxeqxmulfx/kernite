@@ -257,8 +257,9 @@ unless the manifest names it, as kgen's does, so that a clone keeps the names wh
 name = "kgen"
 ```
 
-`name = ""` leaves the workspace out of the names: `my_app::gpu::saxpy`. A package with no workspace's manifest is one
-of its own, named as the package is.
+`name = ""` leaves the workspace out of the names: `my_app::gpu::saxpy`. A `name` that is not a string is an error at
+the module. The error names the manifest. A package with no workspace's manifest is one of its own, named as the package
+is.
 
 ## Examples
 

@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 /// The workspace the crate is built in, by name, the first namespace its GPU kernels are in:
 /// as its manifest has it, `name` in `[workspace.metadata.kgen]`, or the name of the directory
 /// the manifest is in, with that manifest. A package of no workspace is one of its own, named
-/// as the package is.
-pub(crate) fn workspace() -> (String, Option<PathBuf>) {
+/// as the package is. The error says that `name` is not a string, where it can be mended.
+pub(crate) fn workspace() -> Result<(String, Option<PathBuf>), String> {
     let package = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
     let dir = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
     workspace_from(package, dir.as_deref(), &|manifest| std::fs::read_to_string(manifest).ok())
@@ -22,18 +22,27 @@ fn workspace_from(
     package: String,
     dir: Option<&Path>,
     read: &dyn Fn(&Path) -> Option<String>,
-) -> (String, Option<PathBuf>) {
+) -> Result<(String, Option<PathBuf>), String> {
     for dir in dir.into_iter().flat_map(Path::ancestors) {
         let manifest = dir.join("Cargo.toml");
         let Some(entries) = read(&manifest).and_then(|text| parse(&text)) else { continue };
         if !entries.iter().any(|(path, _)| path[0] == "workspace") {
             continue;
         }
-        let named = entries.iter().find(|(path, _)| *path == NAME).and_then(|(_, name)| name.clone());
-        let named = named.or_else(|| dir.file_name()?.to_str().map(String::from));
-        return (named.unwrap_or(package), Some(manifest));
+        let name = match entries.iter().find(|(path, _)| path.iter().take(NAME.len()).eq(NAME)) {
+            Some((path, Some(name))) if *path == NAME => name.clone(),
+            Some(_) => {
+                return Err(format!(
+                    "`name` in `[workspace.metadata.kgen]` of {} is not a string: a workspace is named by one, as \
+                     `name = \"kgen\"`",
+                    manifest.display()
+                ));
+            }
+            None => dir.file_name().and_then(|name| name.to_str()).map_or(package, String::from),
+        };
+        return Ok((name, Some(manifest)));
     }
-    (package, None)
+    Ok((package, None))
 }
 
 /// A table or a key of a manifest, by its path from the top, and its string, if its value is one.
@@ -229,6 +238,9 @@ mod tests {
     use super::workspace_from;
     use std::path::{Path, PathBuf};
 
+    /// What `workspace_from` gives.
+    type Walked = Result<(String, Option<PathBuf>), String>;
+
     /// A reader that gives each of `files`, a path and its text, and no other.
     fn files(files: &[(&str, &str)]) -> impl Fn(&Path) -> Option<String> {
         |path| files.iter().find(|(p, _)| Path::new(p) == path).map(|(_, text)| text.to_string())
@@ -240,13 +252,13 @@ mod tests {
         // and the name may be in single quotes.
         let read = files(&[("/home/w/Cargo.toml", "[workspace.metadata.kgen]\nname = 'acme'\n")]);
         let got = workspace_from("app".into(), Some(Path::new("/home/w")), &read);
-        assert_eq!(got, ("acme".into(), Some(PathBuf::from("/home/w/Cargo.toml"))));
+        assert_eq!(got, Ok(("acme".into(), Some(PathBuf::from("/home/w/Cargo.toml")))));
         // `""` names the workspace nothing, rather than as its directory is: its kernels' names
         // leave it out. The manifest is still given: the macro includes it, so that the PTX is
         // built again when the name changes.
         let read = files(&[("/home/w/Cargo.toml", "[workspace.metadata.kgen]\nname = \"\"\n")]);
         let got = workspace_from("app".into(), Some(Path::new("/home/w")), &read);
-        assert_eq!(got, (String::new(), Some(PathBuf::from("/home/w/Cargo.toml"))));
+        assert_eq!(got, Ok((String::new(), Some(PathBuf::from("/home/w/Cargo.toml")))));
     }
 
     #[test]
@@ -276,11 +288,11 @@ mod tests {
             ("/home/Cargo.toml", "[workspace]\n"),
         ]);
         let got = workspace_from("app".into(), Some(Path::new("/home/acme/crates/app")), &read);
-        assert_eq!(got, ("acme".into(), Some(PathBuf::from("/home/acme/Cargo.toml"))));
+        assert_eq!(got, Ok(("acme".into(), Some(PathBuf::from("/home/acme/Cargo.toml")))));
         // A workspace in a directory with no name, `/`, is named as the package is.
         let read = files(&[("/Cargo.toml", "[workspace]\n")]);
         let got = workspace_from("app".into(), Some(Path::new("/app")), &read);
-        assert_eq!(got, ("app".into(), Some(PathBuf::from("/Cargo.toml"))));
+        assert_eq!(got, Ok(("app".into(), Some(PathBuf::from("/Cargo.toml")))));
     }
 
     #[test]
@@ -288,20 +300,20 @@ mod tests {
         // A package of no workspace is one of its own, named as the package is, not as its
         // directory is, with no manifest.
         let read = files(&[("/home/proj/Cargo.toml", "[package]\nname = \"app\"\n")]);
-        assert_eq!(workspace_from("app".into(), Some(Path::new("/home/proj")), &read), ("app".into(), None));
+        assert_eq!(workspace_from("app".into(), Some(Path::new("/home/proj")), &read), Ok(("app".into(), None)));
         // So is a package of no directory, though every path has a workspace's manifest.
-        assert_eq!(workspace_from("app".into(), None, &|_| Some("[workspace]\n".into())), ("app".into(), None));
+        assert_eq!(workspace_from("app".into(), None, &|_| Some("[workspace]\n".into())), Ok(("app".into(), None)));
     }
 
     /// What `workspace_from` makes of one manifest, the only one there is, `/home/w/Cargo.toml`,
     /// for the package `app` in `/home/w`.
-    fn only(manifest: &str) -> (String, Option<PathBuf>) {
+    fn only(manifest: &str) -> Walked {
         workspace_from("app".into(), Some(Path::new("/home/w")), &files(&[("/home/w/Cargo.toml", manifest)]))
     }
 
     /// What `only` makes of a manifest of a workspace named `name`.
-    fn named(name: &str) -> (String, Option<PathBuf>) {
-        (name.into(), Some(PathBuf::from("/home/w/Cargo.toml")))
+    fn named(name: &str) -> Walked {
+        Ok((name.into(), Some(PathBuf::from("/home/w/Cargo.toml"))))
     }
 
     #[test]
@@ -360,6 +372,36 @@ mod tests {
     }
 
     #[test]
+    fn a_name_that_is_not_a_string_is_refused_naming_the_manifest() {
+        // Cargo reads each of these as a `workspace.metadata.kgen.name` that is not a string: a
+        // number, a boolean, an array, an inline table, a date, or a table: of its own, by a dotted
+        // key, or by a table inside it.
+        let refused = Err("`name` in `[workspace.metadata.kgen]` of /home/w/Cargo.toml is not a string: a workspace \
+                            is named by one, as `name = \"kgen\"`"
+            .into());
+        for manifest in [
+            "[workspace.metadata.kgen]\nname = 5\n",
+            "[workspace.metadata.kgen]\nname = true\n",
+            "[workspace.metadata.kgen]\nname = [\"acme\"]\n",
+            "[workspace.metadata.kgen]\nname = { a = \"acme\" }\n",
+            "[workspace.metadata.kgen]\nname = 1979-05-27 07:32:00\n",
+            "[workspace.metadata.kgen.name]\na = \"acme\"\n",
+            "workspace.metadata.kgen.name = 5\n",
+            "[workspace.metadata]\nkgen = { name = 5 }\n",
+            "[workspace.metadata.kgen]\nname.first = \"acme\"\n",
+            "[workspace.metadata.kgen.name.first]\n",
+        ] {
+            assert_eq!(only(manifest), refused, "{manifest:?}");
+        }
+        // The nearest manifest of a workspace is the one named: a farther one is not read.
+        let read = files(&[
+            ("/home/w/Cargo.toml", "[workspace.metadata.kgen]\nname = 5\n"),
+            ("/home/Cargo.toml", "[workspace]\n"),
+        ]);
+        assert_eq!(workspace_from("app".into(), Some(Path::new("/home/w")), &read), refused);
+    }
+
+    #[test]
     fn a_name_that_is_not_where_cargo_reads_it_is_passed_by() {
         // The workspace is named as its directory is. `name` is another table's, or `kgen` or
         // `metadata` is not a table: an array of tables, or an array with a table in it. A table
@@ -415,7 +457,7 @@ mod tests {
             "[package.metadata]\nx = { workspace = { members = [] } }\n",
             "[lib]\nworkspace = \".\"\n",
         ] {
-            assert_eq!(only(manifest), ("app".into(), None), "{manifest:?}");
+            assert_eq!(only(manifest), Ok(("app".into(), None)), "{manifest:?}");
         }
     }
 
@@ -426,7 +468,7 @@ mod tests {
         for broken in ["name = \"never ends\n[workspace]\n", "[workspace\n", "workspace = \n", "[workspace] = 1 }"] {
             let manifests = [("/home/w/Cargo.toml", broken), up];
             let got = workspace_from("app".into(), Some(Path::new("/home/w")), &files(&manifests));
-            assert_eq!(got, ("home".into(), Some(PathBuf::from("/home/Cargo.toml"))), "{broken:?}");
+            assert_eq!(got, Ok(("home".into(), Some(PathBuf::from("/home/Cargo.toml")))), "{broken:?}");
         }
     }
 }

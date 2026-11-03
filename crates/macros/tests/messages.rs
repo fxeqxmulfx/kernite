@@ -226,6 +226,19 @@ fn a_crate_is_built_again_when_its_workspace_is_renamed() {
 }
 
 #[test]
+fn a_workspace_named_by_what_is_not_a_string_is_refused_where_the_module_is() {
+    // The error is at the attribute, and names the manifest, which is the crate's own: the crate is
+    // a workspace of its own. The kernel compiles, so the error is the only one.
+    let manifest = Path::new(ROOT).join("nonstring/project/Cargo.toml");
+    let error = format!(
+        "src/lib.rs:5:1: error: `name` in `[workspace.metadata.kgen]` of {} is not a string: a workspace is named by \
+         one, as `name = \"kgen\"`",
+        manifest.display()
+    );
+    refuses("nonstring", &[&error, "error: could not compile `nonstring` (lib) due to 1 previous error"]);
+}
+
+#[test]
 fn errors_inside_a_module_point_into_it() {
     // Rust's parser speaks first; then the macro, of the module as a whole, then of each item.
     refuses(
