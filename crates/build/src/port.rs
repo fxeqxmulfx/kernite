@@ -81,23 +81,21 @@ pub enum StaticError {
     Value(String),
 }
 
-/// Why a kernel's code is not finished: what is wrong, and the variable to blame, if any.
+/// Why a kernel's code is not finished: what is wrong, and where.
 #[derive(Debug, PartialEq)]
 pub struct Unfinished {
-    /// The variable to blame, by name.
-    pub var: Option<String>,
-    /// Where it is declared, if the machine knows: the error is placed there, or else where
-    /// the first variable of its name is declared.
+    /// Where the variable to blame is declared, if it blames one: the error is placed there, or
+    /// else at the function.
     pub at: Option<Span>,
     /// What is wrong.
     pub message: String,
 }
 
 impl Unfinished {
-    /// `message`, blaming the variable `var` names, if any, by its name and the machine's own
-    /// key for it: placed where `decls`, each key with where it is declared, says.
-    pub fn blaming<V: PartialEq>(var: Option<(&str, V)>, decls: &[(V, Span)], message: String) -> Unfinished {
-        let at = var.as_ref().and_then(|(_, v)| decls.iter().find(|(d, _)| d == v)).map(|&(_, at)| at);
-        Unfinished { var: var.map(|(name, _)| name.into()), at, message }
+    /// `message`, blaming the variable the machine's own key `var` names, if any: placed where
+    /// `decls`, each key with where it is declared, says.
+    pub fn blaming<V: PartialEq>(var: Option<V>, decls: &[(V, Span)], message: String) -> Unfinished {
+        let at = var.and_then(|v| decls.iter().find(|(d, _)| *d == v)).map(|&(_, at)| at);
+        Unfinished { at, message }
     }
 }

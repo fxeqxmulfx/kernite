@@ -191,6 +191,6 @@ fn each_refusal_says_what_to_blame() {
     assert_eq!(lay_out(&ptx, &module, "BIG", &[]), Err(big));
     // Where `x` is declared: a byte of the source, as a string's spans are.
     let at = Some(Span(src.find("x: u32").unwrap() as u32));
-    let unfinished = Unfinished { var: Some("x".into()), at, message: "`x` is read before anything writes it".into() };
+    let unfinished = Unfinished { at, message: "`x` is read before anything writes it".into() };
     assert_eq!(ptx.finish(written(&ptx, &module, "unwritten", &[], &[])), Err(unfinished));
 }

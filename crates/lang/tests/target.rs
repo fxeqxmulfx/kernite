@@ -205,17 +205,9 @@ fn a_static_is_made_once_the_first_time_the_kernel_names_it() {
 
 #[test]
 fn each_declaration_is_one_param_or_var() {
-    // Each declaration where an error about it would point: `2:33: xs`.
-    let decls = |src: &str| -> Vec<String> {
-        let decls = run(src, &mut Trace::default()).unwrap().decls;
-        decls.into_iter().map(|(name, span)| Error { span, message: name }.at(src)).collect()
-    };
-    // A helper's parameter is a view of what it is given, so not a declaration.
-    assert_eq!(decls(KERNEL), ["2:33: xs", "2:49: n", "3:9: v", "15:9: t"]);
-    // An array is a declaration for each of its variables.
-    assert_eq!(decls(ARRAY), ["3:9: a0", "3:9: a1", "3:9: a2"]);
-
-    // The target is told where each declaration is, by the variable it made for it.
+    // The target is told where each declaration is, by the variable it made for it: `2:33: v0`.
+    // A helper's parameter is a view of what it is given, so not a declaration. An array is a
+    // declaration for each of its variables.
     let told = |src: &str| -> Vec<String> {
         let mut trace = Trace::default();
         run(src, &mut trace).unwrap();

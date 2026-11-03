@@ -771,12 +771,12 @@ fn an_error_names_the_variable_to_blame() {
         have: 2,
     };
     let cases = [
-        (Error::ReadBeforeWrite { var: "x".into(), vreg: x }, Some(("x", x))),
-        (Error::FixedTwice { var: "x".into(), vreg: x }, Some(("x", x))),
-        (Error::FixedChanged { var: "x".into(), vreg: x, reg: r(0) }, Some(("x", x))),
-        (out, Some(("x", x))),
+        (Error::ReadBeforeWrite { var: "x".into(), vreg: x }, Some(x)),
+        (Error::FixedTwice { var: "x".into(), vreg: x }, Some(x)),
+        (Error::FixedChanged { var: "x".into(), vreg: x, reg: r(0) }, Some(x)),
+        (out, Some(x)),
         // Of two that clash, the first.
-        (Error::FixedClash { a: "x".into(), vreg: x, b: "y".into(), reg: r(0) }, Some(("x", x))),
+        (Error::FixedClash { a: "x".into(), vreg: x, b: "y".into(), reg: r(0) }, Some(x)),
         (Error::LabelTwice { label: 7 }, None),
         (Error::NoSuchLabel { label: 7 }, None),
         (Error::FallsOffEnd, None),

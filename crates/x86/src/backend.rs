@@ -69,7 +69,7 @@ impl Backend for X86 {
         let decls = std::mem::take(&mut kernel.decls);
         let allocated = kgen_compile::compile(&kernel.finish(), &SysV)
             .map_err(|e| Unfinished::blaming(e.var(), &decls, e.to_string()))?;
-        intel::print(&allocated).map_err(|message| Unfinished { var: None, at: None, message })
+        intel::print(&allocated).map_err(|message| Unfinished { at: None, message })
     }
 }
 

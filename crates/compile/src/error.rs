@@ -80,14 +80,14 @@ pub enum Error {
 }
 
 impl Error {
-    /// The variable to blame, if it names one: its name, and which it is of those of its name.
-    pub fn var(&self) -> Option<(&str, VReg)> {
+    /// The variable to blame, if it names one: which it is of those of its name.
+    pub fn var(&self) -> Option<VReg> {
         match self {
-            Error::ReadBeforeWrite { var, vreg }
-            | Error::FixedTwice { var, vreg }
-            | Error::FixedChanged { var, vreg, .. }
-            | Error::OutOfRegisters { var, vreg, .. } => Some((var, *vreg)),
-            Error::FixedClash { a, vreg, .. } => Some((a, *vreg)),
+            Error::ReadBeforeWrite { vreg, .. }
+            | Error::FixedTwice { vreg, .. }
+            | Error::FixedChanged { vreg, .. }
+            | Error::OutOfRegisters { vreg, .. }
+            | Error::FixedClash { vreg, .. } => Some(*vreg),
             Error::LabelTwice { .. } | Error::NoSuchLabel { .. } | Error::FallsOffEnd => None,
         }
     }

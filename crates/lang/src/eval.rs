@@ -10,9 +10,6 @@ use crate::value::{self, Value, Want};
 /// What running a kernel found, besides what it asked of its target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Run {
-    /// Every variable declared, with where: the place to blame for what goes wrong with one
-    /// later, when its registers are allocated.
-    pub decls: Vec<(String, Span)>,
     /// The module's constants it read, itself or through others, in its body or its
     /// `#[instances(..)]`, in the module's order. Rust never sees a kernel's body run, nor its
     /// list worked out, so it sees none of these reads.
@@ -91,7 +88,6 @@ pub fn kernel<T: Target>(module: &Module, f: &Fn, args: &[Value], target: &mut T
             return Err(err(p.ty.span(), "a function that names an ABI takes values the machine passes, not arrays"));
         };
         let v = e.target.param(&p.name, ty).map_err(|m| err(*span, m))?;
-        e.decls.push((p.name.clone(), p.span));
         e.target.declared_at(v, p.span);
         scope.push((p.name.clone(), Binding::Var(v)));
     }
@@ -103,7 +99,7 @@ pub fn kernel<T: Target>(module: &Module, f: &Fn, args: &[Value], target: &mut T
     e.target.end().map_err(|m| err(f.span, m))?;
     // A constant is evaluated the first time it is named, so the ones evaluated are the ones read.
     let consts = e.consts.iter().filter(|(_, s)| matches!(s, State::Done(_))).map(|(c, _)| c.name.clone()).collect();
-    Ok(Run { decls: e.decls, consts })
+    Ok(Run { consts })
 }
 
 /// The compile-time arguments of each instance of `f`, a function of `module`, in the order
@@ -267,7 +263,6 @@ struct Eval<'a, T: Target> {
     /// How many instructions have run.
     insts: usize,
     depth: usize,
-    decls: Vec<(String, Span)>,
     /// How many variables `let` has declared, in the kernel and in the helpers it called.
     declared: usize,
 }
@@ -295,7 +290,6 @@ impl<'a, T: Target> Eval<'a, T> {
             guard: None,
             insts: 0,
             depth: 0,
-            decls: vec![],
             declared: 0,
         }
     }
@@ -966,7 +960,6 @@ impl<'a, T: Target> Eval<'a, T> {
                 let ty = self.type_name(t)?;
                 self.declare(1, span)?;
                 let v = self.target.var(name, &ty).map_err(|m| err(t.span(), m))?;
-                self.decls.push((name.to_string(), span));
                 self.target.declared_at(v, span);
                 Binding::Var(v)
             }
@@ -983,7 +976,6 @@ impl<'a, T: Target> Eval<'a, T> {
                 for i in 0..n {
                     let each = format!("{name}{i}");
                     let v = self.target.var(&each, t).map_err(|m| err(*tspan, m))?;
-                    self.decls.push((each, span));
                     self.target.declared_at(v, span);
                     vs.push(v);
                 }

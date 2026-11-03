@@ -2,7 +2,7 @@
 //! language parses: the use cases on [`Echo`], a fake machine. Each kernel in them compiles, for
 //! its machine, but those written to fail.
 
-use kgen_lang::{Error, Fault, Fn, Guard, IntTy, Memory, Operand, Target, Value, parse};
+use kgen_lang::{Error, Fault, Fn, Guard, IntTy, Memory, Operand, Span, Target, Value, parse};
 
 use crate::{
     Abi, Backend, Call, Called, Compiled, ConstItem, Device, DeviceStatic, Given, HostStatic, ItemOut, Launcher,
@@ -115,13 +115,14 @@ fn laid(name: &str, held: &str, before: &[&str]) -> Laid {
 }
 
 /// A kernel as Echo writes it, and its code: its name, a line for each thing it was told, and
-/// its variables, by name. A variable is its place among them. Beside them, the statics it was
-/// told of, and the functions and the statics its body names, each once, in the order first
-/// named.
+/// its variables, by name, with where each is declared, as `declared_at` tells it. A variable
+/// is its place among them. Beside them, the statics it was told of, and the functions and the
+/// statics its body names, each once, in the order first named.
 struct Told {
     name: String,
     lines: Vec<String>,
     vars: Vec<String>,
+    declared: Vec<(usize, Span)>,
     memory: Vec<String>,
     funcs: Vec<String>,
     statics: Vec<String>,
@@ -173,18 +174,18 @@ impl Backend for Echo {
             lines.push(format!("callee {}: {} [{}] {:?}", c.name, c.function, listed(&c.args), c.callee));
         }
         let memory = statics.iter().map(|s| s.name.clone()).collect();
-        Told { name: name.into(), lines, vars: vec![], memory, funcs: vec![], statics: vec![] }
+        Told { name: name.into(), lines, vars: vec![], declared: vec![], memory, funcs: vec![], statics: vec![] }
     }
 
     /// Fails for a variable named `fail_v`, which it blames, or one named `fail`, blaming none.
     fn finish(&self, kernel: Told) -> Result<Told, Unfinished> {
-        for var in &kernel.vars {
+        for (i, var) in kernel.vars.iter().enumerate() {
             let blamed = match var.as_str() {
-                "fail_v" => Some(var.clone()),
+                "fail_v" => Some(i),
                 "fail" => None,
                 _ => continue,
             };
-            return Err(Unfinished { var: blamed, at: None, message: format!("`{var}` fails") });
+            return Err(Unfinished::blaming(blamed, &kernel.declared, format!("`{var}` fails")));
         }
         Ok(kernel)
     }
@@ -301,6 +302,10 @@ impl Target for Told {
         self.lines.push("end".into());
         Ok(())
     }
+
+    fn declared_at(&mut self, var: usize, at: Span) {
+        self.declared.push((var, at));
+    }
 }
 
 /// Each static is laid out after those before it that were laid out: Echo refuses the second,
@@ -382,8 +387,8 @@ fn a_kernel_hears_of_its_statics_and_callees_in_order() {
     assert_eq!(told, Ok(Compiled { code: heard.map(String::from).to_vec(), consts: vec!["ONE".into()] }));
 }
 
-/// What Echo blames on a variable is placed where the variable is first declared, and what it
-/// blames on none, at the function.
+/// What Echo blames on a variable is placed where that variable is declared, and what it blames
+/// on none, at the function.
 #[test]
 fn an_unfinished_kernel_is_blamed_where_its_variable_is_declared() {
     let src = "unsafe extern \"ptx-kernel\" fn k(x: u32) {\n\
