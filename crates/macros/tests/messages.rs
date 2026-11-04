@@ -910,6 +910,112 @@ fn a_module_of_kernels_given_consts_without_kernite_macros_is_still_there_for_th
     );
 }
 
+/// A module of kernels, x86 or GPU, whose consts' path Rust cannot find, `crate::nope`, is told once, at the path, for
+/// each attribute that has it: Rust says the crate has no `nope`, and nothing of the code that names the module's
+/// items, wherever it is: from the crate's root, from another module by path, or through a glob of the module. The glob
+/// brings in nothing, and Rust warns of that alone. kernite cannot tell that the path fails, for Rust finds it after
+/// the macro runs, so the module is there, with nothing in it, for that code to find.
+#[test]
+fn a_module_of_kernels_whose_consts_path_rust_cannot_find_is_told_once() {
+    refuses(
+        "consts_path_missing",
+        &[
+            "src/lib.rs:5:43: error[E0432]: unresolved import `crate::nope`: could not find `nope` in the crate root",
+            "src/lib.rs:15:43: error[E0432]: unresolved import `crate::nope`: could not find `nope` in the crate root",
+            "src/lib.rs:45:9: warning: unused import: `crate::cpu::*`",
+            "src/lib.rs:53:9: warning: unused import: `crate::gpu::*`",
+            "error: could not compile `consts_path_missing` (lib) due to 2 previous errors; 2 warnings emitted",
+        ],
+    );
+}
+
+/// A module of kernels whose consts' path is a module with no `#[kernite_macros::consts]` on it is told once, at the
+/// path, as one that is not there is: the module has no `__kernite_consts`, which that attribute writes. Rust says
+/// nothing of the code that names the module's items. The glob brings in nothing, and Rust warns of that alone.
+#[test]
+fn a_module_of_kernels_whose_consts_path_is_a_module_with_no_consts_attribute_is_told_once() {
+    refuses(
+        "consts_path_plain",
+        &[
+            "src/lib.rs:9:43: error[E0432]: unresolved import `__plain_3`: no `__kernite_consts` in `plain`",
+            "src/lib.rs:31:9: warning: unused import: `crate::cpu::*`",
+            "error: could not compile `consts_path_plain` (lib) due to 1 previous error; 1 warning emitted",
+        ],
+    );
+}
+
+/// A consts path Rust cannot find is told once, at the name it cannot find, whatever form the path has: from the root
+/// of the crate, `crate::nope`; of a crate, `::forms::nope`, and one that is not there; of a name, `self` or `super`,
+/// which Rust says from the module the macro writes in the module of kernels, `nope` as `super::super::nope`; one that
+/// ends at a const, which is no module; and one of which the first name is not there, or the last, or one between. A
+/// name after the first is said in the module before it, by the name the macro gives that module, `__hidden_3::nope`.
+/// The code that calls the kernels of each, from the crate's root and from the module they are in, is told nothing.
+/// Rust says first the paths that fail at their first name, and then those that fail at a later one.
+#[test]
+fn a_consts_path_is_told_once_at_the_name_rust_cannot_find_in_each_form() {
+    refuses(
+        "consts_path_forms",
+        &[
+            "src/lib.rs:16:43: error[E0432]: unresolved import `crate::nope`: could not find `nope` in the crate root",
+            "src/lib.rs:30:38: error[E0432]: unresolved import `nope`: could not find `nope` in the list of imported \
+             crates",
+            "src/lib.rs:37:36: error[E0432]: unresolved import `super::super::nope`: could not find `nope` in the \
+             crate root",
+            "src/lib.rs:44:42: error[E0432]: unresolved import `super::super::nope`: could not find `nope` in the \
+             crate root",
+            "src/lib.rs:51:43: error[E0432]: unresolved import `crate::SIZE`: could not find `SIZE` in the crate root",
+            "src/lib.rs:58:43: error[E0432]: unresolved import `crate::nope`: could not find `nope` in the crate root",
+            "src/lib.rs:81:47: error[E0432]: unresolved import `super::super::super::nope`: could not find `nope` in \
+             the crate root",
+            "src/lib.rs:88:46: error[E0432]: unresolved import `super::super::sizes`: could not find `sizes` in \
+             `super`",
+            "src/lib.rs:23:45: error[E0432]: unresolved import `__forms_2::nope`: could not find `nope` in the crate \
+             root",
+            "src/lib.rs:65:51: error[E0432]: unresolved import `__hidden_3::nope`: could not find `nope` in \
+             `__hidden_3`",
+            "src/lib.rs:72:51: error[E0432]: unresolved import `__hidden_3::nope`: could not find `nope` in \
+             `__hidden_3`",
+            "error: could not compile `consts_path_forms` (lib) due to 11 previous errors",
+        ],
+    );
+}
+
+/// A `use` of an item of such a module by name is Rust's error as well, beside the path's: the module has no such item
+/// until the path is mended, and kernite cannot give it one, for what the module has is what the consts make of it. The
+/// module itself, imported or renamed, is there, and Rust says nothing of the code that calls its kernels by it.
+#[test]
+fn a_use_of_an_item_by_name_of_a_module_whose_consts_path_rust_cannot_find_is_told_as_well() {
+    refuses(
+        "consts_path_named",
+        &[
+            "src/lib.rs:5:43: error[E0432]: unresolved import `crate::nope`: could not find `nope` in the crate root",
+            "src/lib.rs:18:9: error[E0432]: unresolved import `crate::cpu::step`",
+            "src/lib.rs:26:28: error[E0432]: unresolved imports `crate::cpu::step`, `crate::cpu::twice`: no `step` in \
+             `cpu`, no `twice` in `cpu`",
+            "src/lib.rs:34:13: error[E0432]: unresolved import `crate::cpu::step`",
+            "error: could not compile `consts_path_named` (lib) due to 4 previous errors",
+        ],
+    );
+}
+
+/// A module of kernels given consts keeps its own attributes first in it, the docs `//!` and the attributes `#![..]`,
+/// as a module that is given none does: its docs are on its page, and a lint that it forbids is not broken by what the
+/// macro writes in it to find the module of consts. No page shows that, not even a page of private items.
+#[test]
+fn a_module_of_kernels_given_consts_keeps_its_own_attributes_first() {
+    builds_quietly("consts_inner");
+    let docs = documents_quietly("consts_inner");
+    for (module, said) in [("cpu", "Kernels that step."), ("gpu", "Kernels that step on the GPU.")] {
+        let page = fs::read_to_string(docs.join(module).join("index.html")).unwrap();
+        assert!(page.contains(said), "the page of `{module}` lacks its docs, `{said}`");
+    }
+    builds_quietly_in(&["doc", "--no-deps", "--document-private-items"], "consts_inner", &written("consts_inner"));
+    for module in ["cpu", "gpu"] {
+        let page = fs::read_to_string(docs.join(module).join("index.html")).unwrap();
+        assert!(!page.contains("__consts"), "the page of `{module}` shows the module the macro wrote in it");
+    }
+}
+
 /// A kernel's safety contract says that nothing else touches the memory of the module's it
 /// names while it runs, with what the functions it calls name, whether it calls them by name
 /// or at an address: in a `# Safety` of its own, or after the one its docs have; and for a
@@ -1436,7 +1542,8 @@ fn a_module_needs_kernite_cuda_where_cfg_keeps_one_of_its_gpu_items() {
 }
 
 /// A module of kernels takes its consts by any path Rust has, and Rust sees them in it, those of
-/// the module the path names: the fixture asserts, as it builds, which `STEP` each sees.
+/// the module the path names: the fixture asserts, as it builds, which `STEP` each sees. A name may
+/// be on the path twice, or be a raw name, and a module the path goes through may have a `sizes` of its own.
 #[test]
 fn consts_are_taken_by_any_path() {
     builds_quietly("paths");

@@ -70,6 +70,51 @@ pub(crate) fn is_path(tokens: &[TokenTree]) -> bool {
     }
 }
 
+/// `path`, the path of a module of consts as `#[kernels(consts = path)]` is written where the module of kernels is,
+/// written from `depth` modules inside it: from the module itself, 1.
+pub(crate) fn from_inside(path: &[TokenTree], depth: usize) -> TokenStream {
+    let up = parse(&vec!["super"; depth].join("::"));
+    match path {
+        [first, ..] if is_ident(first, "crate") || is_punct(first, ':') => path.iter().cloned().collect(),
+        [first, rest @ ..] if is_ident(first, "self") => up.into_iter().chain(rest.iter().cloned()).collect(),
+        _ => up.into_iter().chain(parse("::")).chain(path.iter().cloned()).collect(),
+    }
+}
+
+/// What the module `__consts`, which `#[kernels(consts = path)]` writes in its module, holds to find the macro of the
+/// module of consts at `path`. A `use` for each name on the path takes the module and a glob of it. A last `use` takes
+/// the macro and a glob of `__kernite`, the module `#[consts]` writes. If Rust cannot find a name, the `use` that ends
+/// at it says so, once, at the name. That `use` is a glob that fails at its last name, so Rust says nothing of a name
+/// it then cannot find: the macro, or a kernel that code calls. A path that fails at a name before its last would leave
+/// those errors. Each `use` starts from the module the one before it found, by the name it gave it, so a `use` after
+/// one that failed says nothing. That name is `__`, the module's own name, `_` and the place of its token on the path.
+/// No two on a path are the same, nor is one the name of an item that a glob brings in, for Rust would not know which
+/// the name is. Rust's error says the name, and so it tells which module. A module with no `#[consts]` on it fails the
+/// last `use`, at its glob of `__kernite`.
+pub(crate) fn path_uses(path: &[TokenTree]) -> TokenStream {
+    let (mut out, mut run) = (TokenStream::new(), TokenStream::new());
+    for (i, token) in from_inside(path, 2).into_iter().enumerate() {
+        let name = match &token {
+            // `crate` and `super` are modules that are there, and not names: a `use` ends at the next name.
+            TokenTree::Ident(id) if !matches!(id.to_string().as_str(), "crate" | "super") => Some(id.to_string()),
+            _ => None,
+        };
+        run.extend([token]);
+        if let Some(name) = name {
+            // The `r#` of a raw name is not a part of the name made of it.
+            let module = format!("__{}_{i}", name.trim_start_matches("r#"));
+            out.extend(parse("use"));
+            out.extend(run);
+            out.extend(parse(&format!("::{{self as {module}, *}};")));
+            run = parse(&module);
+        }
+    }
+    out.extend(parse("pub(super) use"));
+    out.extend(run);
+    out.extend(parse("::{__kernite_consts, __kernite::*};"));
+    out
+}
+
 /// Whether `tokens`, an item's, are an attribute of the module's own, `#![..]`.
 pub(crate) fn inner_attribute(tokens: &[TokenTree]) -> bool {
     matches!(tokens, [hash, bang, ..] if is_punct(hash, '#') && is_punct(bang, '!'))

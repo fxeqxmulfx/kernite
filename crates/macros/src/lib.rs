@@ -322,6 +322,17 @@
 //! `_blocks` method. A module kernite cannot read holds its refusal alone, and the code that names its items is not an
 //! error as well, for the error is in the module.
 //!
+//! A path to a module of consts that Rust cannot find, as in `consts = crate::model::sizs`, is told once, by Rust, at
+//! the name it cannot find. So is a path to a module with no `#[kernite_macros::consts]` on it, at the module's name:
+//! Rust says the module has no `__kernite_consts`, which that attribute writes. Rust's error is an unresolved import,
+//! of the path as the macro writes it, from a module of its own in the module of kernels. A path from `self`, `super`
+//! or a name is said from there: `nope` is `super::super::nope`. A name after the first is said in the module before
+//! it, which the macro names `__`, that module's name, `_` and a number: `crate::hidden::nope` is `__hidden_3::nope`.
+//! The macro cannot tell that the path fails, for Rust finds the path after the macro runs. The module of kernels
+//! stays, with nothing in it. Rust says nothing of the code that names its items by a path, wherever it is. A glob of
+//! the module brings in nothing, and Rust warns of that alone. A `use` of an item by its name, `use crate::cpu::step;`,
+//! is Rust's error as well, for the module has no `step` until the path is mended.
+//!
 //! An argument of `#[consts]`, as in `#[consts(x)]`, is told where it is, and changes nothing else. The
 //! module is the one it is without the argument: its other errors are said, and the code that names its
 //! consts, or a module of kernels that takes them, is not an error as well.
@@ -344,7 +355,7 @@ use kernite::lang;
 use crate::expand::expand;
 use crate::rust::{
     MACROS, Site, attrs_len, braced, depends_on, error, flatten, inner_attribute, is_ident, is_path, is_punct, lex,
-    module, needs_dependency, parse, site,
+    module, needs_dependency, parse, path_uses, site,
 };
 
 /// See the crate documentation.
@@ -382,15 +393,25 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !depends_on(MACROS) {
         return refused(error(site(), &needs_dependency("a module of kernels given consts", MACROS)));
     }
+    // The module is written here, with the call in it, and not the call in its place: Rust finds the path only
+    // after this runs, and where it cannot, the module is still there, with nothing in it, for the code that
+    // names it. Its own attributes, `#![..]`, three tokens each, stay first, where Rust has them. The path is
+    // found in a module of its own, `__consts`, which the docs hide, written at the path's last name, for an
+    // error of Rust's in it to point there.
+    let body = flatten(braces.stream());
+    let attrs = body.as_chunks::<3>().0.iter().take_while(|attr| inner_attribute(*attr)).count() * 3;
+    let mut inner: TokenStream = body[..attrs].iter().cloned().collect();
+    let site = Site::at(path.last().map_or_else(Span::call_site, |t| t.span().resolved_at(Span::call_site())));
+    inner.extend(parse("#[doc(hidden)] mod __consts"));
+    inner.extend([TokenTree::Group(Group::new(Delimiter::Brace, path_uses(path)))]);
     // The macro the consts' module has calls `__kernels!` back with the consts, their module's
-    // path, and this module.
-    let mut out: TokenStream = path.iter().cloned().collect();
-    out.extend(parse("::__kernite_consts!"));
-    let mut given: TokenStream =
-        [TokenTree::Group(Group::new(Delimiter::Parenthesis, path.iter().cloned().collect()))].into_iter().collect();
-    given.extend(tokens);
-    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, given))]);
-    out
+    // path, and what is in this module.
+    inner.extend(parse("__consts::__kernite_consts!"));
+    let given = [Group::new(Delimiter::Parenthesis, path.iter().cloned().collect()), braces.clone()];
+    let call = Group::new(Delimiter::Brace, given.into_iter().map(TokenTree::Group).collect());
+    inner.extend([TokenTree::Group(call)]);
+    drop(site);
+    module(head, braces, inner)
 }
 
 /// See the crate documentation.
@@ -451,19 +472,19 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
     inner.extend(parse("#[doc(hidden)] macro_rules! __kernite_consts"));
     inner.extend([TokenTree::Group(Group::new(Delimiter::Brace, rule))]);
     inner.extend(parse("#[doc(hidden)] pub(crate) use __kernite_consts;"));
+    // A module with nothing in it, which `#[kernels(consts = ..)]` imports a glob of: a module with no `#[consts]` on
+    // it has none, and the glob is the failure Rust says nothing more after.
+    inner.extend(parse("#[doc(hidden)] pub mod __kernite {}"));
     module(head, braces, inner)
 }
 
-/// What `#[kernels(consts = path)]` on a module becomes once the macro of the module of consts
-/// at `path` has handed it their tokens: `[consts] (path) module`.
+/// What `#[kernels(consts = path)]` on a module writes in it once the macro of the module of consts
+/// at `path` has handed it their tokens: `[consts] (path) { what is in the module }`.
 #[doc(hidden)]
 #[proc_macro]
 pub fn __kernels(input: TokenStream) -> TokenStream {
     let tokens: Vec<TokenTree> = input.into_iter().collect();
-    let [TokenTree::Group(consts), TokenTree::Group(path), rest @ ..] = &tokens[..] else {
-        return error(Span::call_site(), "`__kernels!` is how `#[kernels(consts = ..)]` is given its consts");
-    };
-    let Some((braces, head)) = braced(rest) else {
+    let [TokenTree::Group(consts), TokenTree::Group(path), TokenTree::Group(braces)] = &tokens[..] else {
         return error(Span::call_site(), "`__kernels!` is how `#[kernels(consts = ..)]` is given its consts");
     };
     // What the macro writes is of the hygiene of the group `#[kernels]` made of the path, which is
@@ -475,7 +496,7 @@ pub fn __kernels(input: TokenStream) -> TokenStream {
     let site = Site::at(path.first().map_or(at, |t| t.span().resolved_at(at)));
     let inner = expand(Some((consts.stream(), &path)), None, braces.stream());
     drop(site);
-    module(head, braces, inner)
+    inner
 }
 
 /// What Rust counts of a module's GPU statics once `cfg` has left out those it leaves out: their

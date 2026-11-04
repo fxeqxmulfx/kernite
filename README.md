@@ -156,6 +156,17 @@ kernel; a compile-time argument named as a parameter of a launcher or of a `_blo
 `shared`; and a GPU kernel or a static named as a cooperative kernel's `_blocks` method. A module kernite cannot read
 holds its refusal alone, and Rust says nothing of the code that names its items, for the error is in the module.
 
+A path to a module of consts that Rust cannot find, as in `consts = crate::model::sizs`, is told once, by Rust, at the
+name it cannot find. So is a path to a module with no `#[kernite_macros::consts]` on it, at the module's name: Rust says
+the module has no `__kernite_consts`, which that attribute writes. Rust's error is an unresolved import, of the path as
+the macro writes it, from a module of its own in the module of kernels. A path from `self`, `super` or a name is said
+from there: `nope` is `super::super::nope`. A name after the first is said in the module before it, which the macro
+names `__`, that module's name, `_` and a number: `crate::hidden::nope` is `__hidden_3::nope`. The macro cannot tell
+that the path fails, for Rust finds the path after the macro runs. The module of kernels stays, with nothing in it. Rust
+says nothing of the code that names its items by a path, wherever it is. A glob of the module brings in nothing, and
+Rust warns of that alone. A `use` of an item by its name, `use crate::cpu::step;`, is Rust's error as well, for the
+module has no `step` until the path is mended.
+
 An argument of `#[consts]`, as in `#[consts(x)]`, is told where it is, and changes nothing else. The module is the one
 it is without the argument: its other errors are said, and Rust says nothing of the code that names its consts, nor of
 the modules of kernels that take them.

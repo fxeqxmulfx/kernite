@@ -20,8 +20,7 @@ use crate::cond::Cond;
 use crate::gpu::{HOLE, gpu};
 use crate::room;
 use crate::rust::{
-    cfg_of, error, error_under, flatten, inner_attribute, is_ident, is_punct, lex, name_at, parse, position, seen,
-    site, stub,
+    cfg_of, error, error_under, flatten, from_inside, inner_attribute, lex, name_at, parse, position, seen, site, stub,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
@@ -76,11 +75,11 @@ pub(crate) fn expand(
     let made = kernite::module(module, consts, refused, &scope);
     let module = &made.module;
     // The module's own attributes, `#![..]`, before anything the macro writes, where Rust has
-    // them.
+    // them. A module given consts has them from `#[kernels]`, which writes this inside the module.
     let mut out: TokenStream = module
         .items
         .iter()
-        .filter(|item| inner_attribute(&top[item.tokens.clone()]))
+        .filter(|item| given.is_none() && inner_attribute(&top[item.tokens.clone()]))
         .flat_map(|item| top[item.tokens.clone()].iter().cloned())
         .collect();
     // The errors of the module as a whole, said under no `cfg`: at its attribute or at a workspace's name that is not a
@@ -252,17 +251,7 @@ fn take(made: &ModuleOut, top: &[TokenTree], path: &[TokenTree]) -> TokenStream 
         }
     }
     let mut out = parse("use");
-    match path {
-        [first, ..] if is_ident(first, "crate") || is_punct(first, ':') => out.extend(path.iter().cloned()),
-        [first, rest @ ..] if is_ident(first, "self") => {
-            out.extend(parse("super"));
-            out.extend(rest.iter().cloned());
-        }
-        _ => {
-            out.extend(parse("super::"));
-            out.extend(path.iter().cloned());
-        }
-    }
+    out.extend(from_inside(path, 1));
     out.extend(parse("::"));
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, names))]);
     out.extend(parse(";"));
