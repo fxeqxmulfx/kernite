@@ -741,10 +741,20 @@ pub(crate) fn number_type(ty: &[TokenTree]) -> Option<TokenStream> {
 }
 
 /// `ty`, a parameter's or a result's, as the Rust the macros write has it: [`number_type`] if it is
-/// a number's name, else as written. It is for the signatures [`signature`] writes and an x86
-/// kernel's instances and launcher. A GPU launcher's numbers are [`number_type`]'s, or [`host`]'s.
+/// a number's name, `self::f16` if it is `f16`, else as written. It is for the signatures
+/// [`signature`] writes and an x86 kernel's instances and launcher. A GPU launcher's numbers are
+/// [`number_type`]'s, or [`host`]'s.
+///
+/// An x86 kernel takes no `f16`: kernite says so at the type, and leaves a stub. Rust would say too
+/// that its `f16` is unstable, as it does wherever the type is named, so the stub names `self::f16`,
+/// which Rust cannot find. Where a macro has failed in a module, Rust says nothing of a name it cannot
+/// find, as it says nothing of a `bf16`; and it says nothing of a call of the stub, whose type it
+/// takes for an error.
 pub(crate) fn value(ty: &[TokenTree]) -> TokenStream {
-    number_type(ty).unwrap_or_else(|| ty.iter().cloned().collect())
+    match ty {
+        [t] if is_ident(t, "f16") => placed("self::f16", t.span()),
+        _ => number_type(ty).unwrap_or_else(|| ty.iter().cloned().collect()),
+    }
 }
 
 /// The number `name`, by the language's name, as the Rust the macros write names it. A module may

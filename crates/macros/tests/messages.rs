@@ -1527,6 +1527,72 @@ fn a_number_named_as_a_type_with_no_size_is_refused_at_the_type_and_not_at_the_a
     refuses("number_names_unsized", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
+/// An x86 kernel takes and gives back no `f16`, which only a GPU has: kernite refuses it at the type, once
+/// for each instance. Rust says no more. It does not say that its `f16` is unstable, as it says wherever
+/// the type is named, though the macros leave a stub for the kernel. Nor does it say, at a call of the
+/// kernel, that the `f16` the kernel gives back is not the number the caller reads. So it is in a parameter
+/// and in a result, of a kernel plain, of compile-time arguments, cooperative, and cooperative of
+/// compile-time arguments, and at a call of each. So it is of a `bf16`, which Rust has not.
+#[test]
+fn an_x86_kernel_that_takes_or_gives_back_a_half_is_kernites_error_alone() {
+    let takes = |place: &str, kernel: &str, ty: &str| {
+        format!("src/lib.rs:{place}: error: {kernel}a kernel takes pointers, 64-bit integers and floats, not `{ty}`")
+    };
+    let gives = |place: &str, kernel: &str, ty: &str| {
+        format!(
+            "src/lib.rs:{place}: error: {kernel}a kernel returns a float, an integer or a pointer, or never, `!`; \
+             not `{ty}`"
+        )
+    };
+    let instance = |name: &str, n: u64| format!("in `{name}::<{n}>`: ");
+    let mut said = vec![];
+    for (ty, [plain, tiles, together, together_tiles, result, tiles_result]) in [
+        ("f16", ["8:44", "13:58", "18:47", "24:67", "28:53", "33:73"]),
+        ("bf16", ["40:44", "45:58", "50:47", "56:67", "60:53", "65:73"]),
+    ] {
+        said.push(takes(plain, "", ty));
+        said.extend([1, 2].map(|n| takes(tiles, &instance("tiles", n), ty)));
+        said.push(takes(together, "", ty));
+        said.extend([1, 2].map(|n| takes(together_tiles, &instance("together_tiles", n), ty)));
+        said.push(gives(result, "", ty));
+        said.extend([1, 2].map(|n| gives(tiles_result, &instance("tiles_result", n), ty)));
+    }
+    said.push(format!("error: could not compile `halves_refused` (lib) due to {} previous errors", said.len()));
+    refuses("halves_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A pointer to an `f16` is a pointer, which an x86 kernel takes whatever it points to: kernite says
+/// nothing of it, and Rust's word that its `f16` is unstable is the only one, said once, at the type, in
+/// a kernel of every kind, in a parameter and in a result.
+#[test]
+fn a_pointer_to_an_f16_in_an_x86_kernel_is_rusts_error_alone() {
+    let unstable = |place: &str| format!("src/lib.rs:{place}: error[E0658]: the type `f16` is unstable");
+    refuses(
+        "halves_pointers",
+        &[
+            &unstable("7:49"),
+            &unstable("12:63"),
+            &unstable("17:52"),
+            &unstable("23:72"),
+            &unstable("27:58"),
+            &unstable("32:78"),
+            "error: could not compile `halves_pointers` (lib) due to 6 previous errors",
+        ],
+    );
+}
+
+/// A GPU kernel takes an `f16` and a `bf16`, by value and by pointer: Rust builds the crate without a word,
+/// the launcher takes kernite-cuda's two, and the test the fixture holds runs the kernel and reads back
+/// what it wrote. It skips where there is no GPU.
+#[test]
+fn a_gpu_kernel_takes_the_halves_as_kernite_cuda_has_them() {
+    let printed = runs_quietly(&["test"], "halves_gpu");
+    assert!(
+        printed.contains("test result: ok. 1 passed"),
+        "fixtures/halves_gpu.rs ran its tests, and printed:\n{printed}"
+    );
+}
+
 /// Asking Rust whether each number is that number costs a crate no word, under `#![deny(warnings)]`:
 /// a parameter of each number, a result of each, of a kernel that never returns, and of parameters
 /// named as the locals the macros write; of a kernel deprecated, by `#[deprecated]` or by `cfg_attr`,
