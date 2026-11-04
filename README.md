@@ -225,6 +225,33 @@ and then sleeps, using no CPU. A launch that finds the threads asleep costs 5 mi
 16 on twelve, and some 100 when the machine has been idle for milliseconds, as the system wakes its cores. The threads
 end when the thread that launched does.
 
+Where a grid's threads run is the system's to say, unless the caller places them. A `Grid::new(4)` runs each thread on
+any CPU the caller's thread may run on, and the system moves it from one to another as it likes. A
+`kernite_cpu::Grid::on(&[0, 2, 4, 6])` runs thread 0 on CPU 0, thread 1 on CPU 2, thread 2 on CPU 4 and thread 3 on CPU
+6, each on its CPU alone, in every launch. On a Ryzen 5 5600H, whose CPUs 0 and 1 are the two threads of one core, that
+is a thread a core. `kernite_cpu::cpus()` lists the CPUs to choose from: those the caller's thread may run on, which
+`numactl --physcpubind` or `taskset` set for a process when they start it. `kernite_cpu::most()` counts them, or fewer
+where a cgroup limits the process to fewer. Under `numactl --physcpubind=0-5` it is 6, a grid of 7 threads is an error,
+and so is a thread placed on CPU 6:
+`thread 0 of the grid is placed on CPU 6, and the caller's thread may run on CPUs 0-5`. So is a CPU given to two
+threads, since a thread that waits needs a CPU of its own. When a placement is an error, no kernel runs and no thread
+moves.
+
+The caller's thread is the grid's first. The first launch that places it puts it on the first CPU of the grid, and it
+stays there, as the grid's other threads stay where they are placed, until a launch places them elsewhere, or places
+none, which puts the caller's thread and every thread kept for it back on the CPUs the caller's thread could run on. A
+thread the caller starts meanwhile starts on that one CPU, as a thread starts on the CPUs of its creator.
+`kernite_cpu::cpus()` from that thread still lists the CPUs it could run on before, for `Grid::on(&cpus()?[..4])` to
+give the same grid in launch after launch. If the program moves the caller's thread itself in between, kernite does not
+know: a launch that places it on the CPU kernite left it on does not move it.
+
+A launch makes one call to the system for each thread it moves, and none when none moves, so a thousand launches of one
+placement ask it nothing about CPUs. The first launch that places the caller's thread, and the first after one that
+placed none, also asks once which CPUs the thread may run on. A thread that may run on one CPU alone cannot run while
+another spins there, and a spin that no launch ends lasts 200 microseconds, so a launch that moves threads first ends
+the spin of each kept thread on a CPU a thread moves to, and of each the system places: it sleeps until a launch uses
+it. A launch that moves none ends no spin.
+
 The kernel's parameters keep the names they are written with, `grid` among them, but `_`, which the macros name
 for Rust. A compile-time argument may not be named `grid`, for Rust cannot keep a const apart from a parameter of
 its name: that is an error at its name. A crate with a cooperative kernel needs a dependency named `kernite-cpu`
@@ -503,7 +530,7 @@ Each crate depends only on the layers inside it. `crates/kernite/tests/architect
 | composition | `kernite` | which machine and syntax each kernel compiles with |
 | delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, launchers of a grid's threads, or launchers of PTX |
 | runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each, modules, launches, copies between GPUs; `f16` and `bf16`; depends on no other crate |
-| runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid, and the memory of a module of x86 kernels; depends on no other crate |
+| runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid and the CPUs they run on, and the memory of a module of x86 kernels; depends on no other crate |
 
 ## Guarantees
 

@@ -14,7 +14,7 @@
 //! | composition | `kernite`, this crate | which machine and syntax each kernel compiles with |
 //! | delivery | `kernite-macros` | kernels as functions, `#[unsafe(naked)]`, or launched on a grid |
 //! | runtime | `kernite-cuda` | the CUDA driver a GPU kernel's launcher calls; it depends on no other crate |
-//! | runtime | `kernite-cpu` | the threads a cooperative x86 kernel runs on, and the memory of a module of x86 kernels; it depends on no other crate |
+//! | runtime | `kernite-cpu` | the threads a cooperative x86 kernel runs on and the CPUs they run on, and the memory of a module of x86 kernels; it depends on no other crate |
 //!
 //! None of them has a dependency outside the workspace, and none iterates a hash map, so a
 //! kernel's text is a function of its source alone.
