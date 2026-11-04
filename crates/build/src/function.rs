@@ -62,7 +62,7 @@ pub fn prepare<B: Backend>(module: &Module, backend: &B) -> Prepared<B> {
 impl<B: Backend> Prepared<B> {
     /// Refuses each static `backend` has no room for beside those before it that it has, as
     /// [`Backend::room`] says: it is none, at its type. A static that was not laid out takes no
-    /// room.
+    /// room. A module that has one is not compiled, so `made` is left as it was.
     pub(crate) fn refuse_room(&mut self, module: &Module, backend: &B) {
         let mut refused = backend.room(&self.made).into_iter();
         let types = module.items.iter().filter_map(|item| match &item.kind {
@@ -76,7 +76,6 @@ impl<B: Backend> Prepared<B> {
                 *laid = Err(Error { span, message });
             }
         }
-        self.made = self.statics.iter().flatten().map(|s| s.code.clone()).collect();
     }
 }
 

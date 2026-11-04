@@ -14,14 +14,15 @@ use crate::{
 
 /// `module`, given the consts `given` says, its kernels compiled: each function the process runs
 /// by `native`, and each the GPU runs by `device` into one module the GPU loads. Its statics are
-/// laid out by the machine whose memory they are, and by `native` for its kernels to name. What
-/// is wrong is said where it can be mended. A kernel the process runs is written for Rust to call
-/// when it is an `unsafe fn`, its attributes hold, each of its instances compiled, and it names no
-/// static of the GPU's. The GPU's module has the code of each instance that compiled, of each
-/// function the GPU runs whose attributes hold; Rust launches a kernel of it when it is an
-/// `unsafe fn`, its attributes hold, and each of its instances compiled. The GPU's module is put
-/// together from what Rust keeps of them, and why it is none is said at the module's first item
-/// that is the GPU's.
+/// laid out by the machine whose memory they are, and by `native` for its kernels to name. No room
+/// is counted for the GPU's: which of them the module keeps is for Rust to say, once it knows which
+/// `cfg` holds, and [`Backend::room`](crate::Backend::room) counts the room of those. What is wrong
+/// is said where it can be mended. A kernel the process runs is written for Rust to call when it is
+/// an `unsafe fn`, its attributes hold, each of its instances compiled, and it names no static of
+/// the GPU's. The GPU's module has the code of each instance that compiled, of each function the GPU
+/// runs whose attributes hold; Rust launches a kernel of it when it is an `unsafe fn`, its
+/// attributes hold, and each of its instances compiled. The GPU's module is put together from what
+/// Rust keeps of them, and why it is none is said at the module's first item that is the GPU's.
 pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, native: &N, device: &D) -> ModuleOut {
     let twice = given.as_ref().map_or_else(Vec::new, |given| take(&mut module, given));
     let before = given.map_or(0, |given| given.before);
@@ -30,11 +31,7 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
     let m = &module;
     // Each machine's statics and callees, worked out when something first needs them.
     let n = LazyCell::new(|| prepare(m, native));
-    let d = LazyCell::new(|| {
-        let mut d = prepare(m, device);
-        d.refuse_room(m, device);
-        d
-    });
+    let d = LazyCell::new(|| prepare(m, device));
     // The statics are the process's or the GPU's.
     let (mut host, mut gpu) = match process {
         true => (n.statics.iter(), [].iter()),

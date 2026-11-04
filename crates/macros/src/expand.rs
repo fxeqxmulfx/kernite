@@ -10,6 +10,7 @@ use kernite::{DeviceOut, ItemOut, Kept, ModuleOut};
 
 use crate::cond::Cond;
 use crate::gpu::{HOLE, gpu};
+use crate::room;
 use crate::rust::{
     cfg_of, error, error_under, flatten, inner_attribute, is_ident, is_punct, lex, name_at, parse, position, site, stub,
 };
@@ -69,6 +70,9 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
     // How each kernel the GPU launches is, and each static of the GPU's, as the host reads it; when
     // each GPU item is there; and what names, for Rust, what each item names.
     let (mut launchers, mut memory, mut on_gpu, mut reads) = (vec![], vec![], vec![], TokenStream::new());
+    // A field for each static of the GPU's that is laid out, under its `cfg`, for Rust to count the room
+    // of those it keeps.
+    let mut fields = TokenStream::new();
     // Each listing the process's kernels have, by name, under the `cfg` of the kernel it is of, as
     // what `naked` writes for it is.
     let mut listed = vec![];
@@ -91,6 +95,9 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
                 out.extend(laid.as_ref().err().map(said));
                 memory.push((s, laid.as_ref().ok().map(|c| &c.code), conds[i].clone()));
                 on_gpu.push(conds[i].clone());
+                if let Ok(laid) = laid {
+                    fields.extend(room::field(cfg, i, &laid.code.ty, at(s.ty.span())));
+                }
             }
             (ItemKind::Fn(_), ItemOut::Helper(errors)) => out.extend(errors.iter().map(said)),
             (ItemKind::Fn(f), ItemOut::Unknown(e)) => {
@@ -117,6 +124,10 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
             _ => unreachable!("kernite::module says what each item is"),
         }
     }
+    out.extend(room::carrier(
+        fields,
+        &Cond::any(memory.iter().filter(|(_, m, _)| m.is_some()).map(|(.., c)| c.clone())),
+    ));
     if !reads.is_empty() {
         out.extend(parse("const _: () ="));
         out.extend([TokenTree::Group(Group::new(Delimiter::Brace, reads))]);

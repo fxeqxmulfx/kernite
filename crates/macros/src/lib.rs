@@ -48,7 +48,14 @@
 //!   - In a module of GPU kernels it is on the GPU, declared once in `PTX`. `Kernels` has a
 //!     method of its name that gives it there, a `kernite_cuda::Global` of the type of Rust's its
 //!     elements are read as, `u32` for a `b32`, for the host to read and write:
-//!     `kernels.COUNTS().read()?`. A module of statics alone is the GPU's.
+//!     `kernels.COUNTS().read()?`. A module of statics alone is the GPU's. The statics together
+//!     fit the module: it has 64 KB of constant memory and less than 4 GB of global memory, and
+//!     the error is at the type of a static that does not fit beside the statics before it that fit.
+//!     The room is that of the statics `cfg` keeps, counted as Rust leaves them: the macro writes
+//!     a struct with a field for each static, under the static's `cfg`, and a derive of
+//!     `kernite-macros` counts the fields that are there. A crate with a static in such a module
+//!     needs a dependency named `kernite-macros` as well, not renamed in `Cargo.toml`, and the
+//!     error is at the module when it has none and `cfg` keeps a static.
 //!   - In a module of x86 kernels it is in the process's memory, which the kernels reach at a
 //!     displacement from `rip`, `[COUNTS + 8]`: a `static` of Rust's, a `kernite_cpu::Global` of
 //!     its elements, for the host to read and write: `cpu::COUNTS.read()`. A crate with a static
@@ -242,6 +249,7 @@ extern crate proc_macro;
 mod cond;
 mod expand;
 mod gpu;
+mod room;
 mod rust;
 mod workspace;
 mod x86;
@@ -372,4 +380,13 @@ pub fn __kernels(input: TokenStream) -> TokenStream {
     let inner = expand(Some((consts.stream(), &path)), braces.stream());
     drop(site);
     module(head, braces, inner)
+}
+
+/// What Rust counts of a module's GPU statics once `cfg` has left out those it leaves out: their
+/// room. `#[kernels]` writes a struct with a field for each, under its `cfg`, for this to be derived
+/// on.
+#[doc(hidden)]
+#[proc_macro_derive(__Room, attributes(kernite_room))]
+pub fn __room(input: TokenStream) -> TokenStream {
+    room::derive(input)
 }

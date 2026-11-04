@@ -245,7 +245,7 @@ impl Device for Echo {
     }
 
     fn device_static(&self, s: &Laid) -> DeviceStatic {
-        DeviceStatic { symbol: s.name.clone(), host: s.held.clone() }
+        DeviceStatic { symbol: s.name.clone(), ty: format!("global<{}>", s.held), host: s.held.clone() }
     }
 }
 
@@ -704,11 +704,31 @@ fn a_module_s_items_come_out_in_order() {
         panic!("{:?}", out.items);
     };
     assert_eq!(t.at(src), "1:25: Echo holds no 13");
-    assert_eq!(b.code, DeviceStatic { symbol: "B".into(), host: "u32".into() });
+    assert_eq!(b.code, DeviceStatic { symbol: "B".into(), ty: "global<u32>".into(), host: "u32".into() });
     let device = out.device.unwrap();
     let text = device.assembly.whole().unwrap();
     let made: Vec<_> = text.lines().filter(|line| !line.starts_with("callee ")).collect();
     assert_eq!(made, ["static B", "new g: g []", "memory B", "end", "new f::<1>: f [1]", "memory B", "end"]);
+}
+
+/// A module counts no room for the GPU's statics, which of them it keeps is for Rust to say: each
+/// that is laid out comes out with its type, for the macro to ask [`Backend::room`] of the types of
+/// those `cfg` keeps. `statics` refuses `C`, which Echo has no room for beside `A` and `B`.
+#[test]
+fn a_module_counts_no_room_for_the_gpu_s_statics() {
+    let src = "static A: global<[u32; 4]>;\nstatic B: global<[u32; 4]>;\nstatic C: global<[u32; 4]>;";
+    let out = echoed(src);
+    let types: Vec<_> = out
+        .items
+        .iter()
+        .map(|item| match item {
+            ItemOut::DeviceStatic(laid) => laid.as_ref().map(|s| s.code.ty.as_str()).map_err(|e| e.at(src)),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(types, ["global<[u32; 4]>"; 3].map(Ok));
+    let refused = statics(&parse(src).unwrap(), &Echo)[2].as_ref().map(|_| ()).map_err(|e| e.at(src));
+    assert_eq!(refused, Err(format!("3:11: this makes 24 characters, and Echo has room for {ROOM}")));
 }
 
 /// Each item says where it names an item of its module, and the name, in the order of the source,
@@ -1061,7 +1081,7 @@ fn the_module_s_error_goes_at_its_first_gpu_item() {
     let src = "static A: global<u32>;";
     let out = echoed(src);
     let [ItemOut::DeviceStatic(Ok(a))] = &out.items[..] else { panic!("{:?}", out.items) };
-    assert_eq!(a.code, DeviceStatic { symbol: "A".into(), host: "u32".into() });
+    assert_eq!(a.code, DeviceStatic { symbol: "A".into(), ty: "global<u32>".into(), host: "u32".into() });
     assert_eq!(said(out.device.unwrap(), src), "1:8: nothing to load");
 }
 

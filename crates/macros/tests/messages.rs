@@ -459,27 +459,46 @@ fn a_crate_without_kernite_cuda_is_told_at_each_module_of_gpu_kernels() {
     );
 }
 
-/// A crate whose dependencies on `kernite-cuda` and `kernite-cpu` are renamed in its manifest,
-/// `cuda = { package = "kernite-cuda", .. }`, is told as one that has none is, for the Rust kernite
-/// writes names `kernite_cuda` and `kernite_cpu`, which it has not; and Rust says nothing.
+/// A crate whose dependencies on `kernite-macros`, `kernite-cuda` and `kernite-cpu` are renamed in its
+/// manifest, `cuda = { package = "kernite-cuda", .. }`, is told as one that has none is, for the Rust
+/// kernite writes names `kernite_macros`, for the room of a GPU module's statics, `kernite_cuda` and
+/// `kernite_cpu`, which it has not; and Rust says nothing. A module whose statics `cfg` leaves out is
+/// told nothing, and one with a static there only with a feature, `more`, is told with it.
 #[test]
-fn a_crate_that_renames_kernite_cuda_and_kernite_cpu_is_told_it_has_none() {
+fn a_crate_that_renames_kernite_macros_kernite_cuda_and_kernite_cpu_is_told_it_has_none() {
     let edits = [
+        ("kernite-macros = {", "km = { package = \"kernite-macros\","),
         ("kernite-cuda = {", "cuda = { package = \"kernite-cuda\","),
         ("kernite-cpu = {", "cpu = { package = \"kernite-cpu\","),
     ];
-    let (built, said) = cargo_in(&["build"], &edited("renamed_deps", &edits));
+    let dir = edited("renamed_deps", &edits);
+    let (built, without) = cargo_in(&["build"], &dir);
     assert!(!built, "fixtures/renamed_deps.rs built");
     assert_eq!(
-        said,
+        without,
         [
-            "src/lib.rs:6:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
+            "src/lib.rs:8:1: error: a static of GPU kernels needs a dependency named `kernite-macros`, \
              which this crate does not have",
-            "src/lib.rs:15:16: error: a static of x86 kernels needs a dependency named `kernite-cpu`, \
+            "src/lib.rs:8:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
              which this crate does not have",
-            "src/lib.rs:18:35: error: a cooperative x86 kernel needs a dependency named `kernite-cpu`, \
+            "src/lib.rs:19:16: error: a static of x86 kernels needs a dependency named `kernite-cpu`, \
              which this crate does not have",
-            "error: could not compile `renamed_deps` (lib) due to 3 previous errors",
+            "src/lib.rs:22:35: error: a cooperative x86 kernel needs a dependency named `kernite-cpu`, \
+             which this crate does not have",
+            "error: could not compile `renamed_deps` (lib) due to 4 previous errors",
+        ]
+    );
+    let (built, with) = cargo_in(&["build", "--features", "more"], &dir);
+    assert!(!built, "fixtures/renamed_deps.rs built with the feature");
+    assert_eq!(with[..4], without[..4]);
+    assert_eq!(
+        with[4..],
+        [
+            "src/lib.rs:47:1: error: a static of GPU kernels needs a dependency named `kernite-macros`, \
+             which this crate does not have",
+            "src/lib.rs:47:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
+             which this crate does not have",
+            "error: could not compile `renamed_deps` (lib) due to 6 previous errors",
         ]
     );
 }
@@ -619,6 +638,49 @@ fn a_gpu_module_holds_what_cfg_keeps() {
             "fixtures/configured_ptx.rs: {command:?} printed:\n{printed}"
         );
     }
+}
+
+/// The room of a module's statics is that of the statics `cfg` keeps. The fixture has two tables of
+/// constant memory that do not fit together, and two statics of global memory, one of which `cfg`
+/// leaves out in one module; it builds under `deny(warnings)` without a word, with the feature `new` and
+/// without, and its tests assert which table the module has and, on a machine with a GPU, load it and
+/// read the table that is there.
+#[test]
+fn the_room_of_a_gpu_module_counts_the_statics_cfg_keeps() {
+    for features in ["", "new"] {
+        let command = ["test", "--features", features];
+        let printed = runs_quietly(&command, "room");
+        assert!(printed.contains("test result: ok. 2 passed"), "fixtures/room.rs: {command:?} printed:\n{printed}");
+    }
+}
+
+/// A static that does not fit beside those before it that `cfg` keeps is refused at its type, in the words
+/// it has with no `cfg`; one that `cfg` leaves out takes no room, nor does one that is refused, so a
+/// small table after it fits. Without the feature `new` the fixture's `plain` is refused alone, at its
+/// second table; with it, so are `kept`, at its second table, and `kept_global`, of global memory. `either`
+/// is not, whichever `cfg` leaves out, `cfg_attr(..)` too.
+#[test]
+fn a_static_with_no_room_beside_those_cfg_keeps_is_refused_at_its_type() {
+    let constant = "this makes the module's constant memory 96000 bytes, and a module has 64 KB";
+    let global = "this makes the module's global memory as much as 4294967302 bytes, each static aligned, and \
+                  `ptxas` writes its size in 32 bits: a module has less than 4 GB";
+    refuses(
+        "room_refused",
+        &[
+            &format!("src/lib.rs:11:19: error: {constant}"),
+            "error: could not compile `room_refused` (lib) due to 1 previous error",
+        ],
+    );
+    refuses_by(
+        &["build", "--features", "new"],
+        "room_refused",
+        &[
+            &format!("src/lib.rs:11:19: error: {constant}"),
+            &format!("src/lib.rs:21:19: error: {constant}"),
+            &format!("src/lib.rs:30:19: error: {global}"),
+            "error: could not compile `room_refused` (lib) due to 3 previous errors",
+        ],
+    );
 }
 
 /// A kernel, a helper or a static that `cfg` leaves out says nothing of what is wrong with it, as

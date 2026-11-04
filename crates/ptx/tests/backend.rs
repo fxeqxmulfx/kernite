@@ -45,7 +45,8 @@ fn ptx_compiles_a_kernel_through_the_port() {
     let counts = lay_out(&ptx, &module, "COUNTS").unwrap();
     let count = ptx.finish(written(&ptx, &module, "count", std::slice::from_ref(&counts), &[])).unwrap();
     assert_eq!(ptx.symbol(&count), "_ZN7kernite3gpu5countE");
-    let host = DeviceStatic { symbol: "_ZN7kernite3gpu6COUNTSE".into(), host: "u32".into() };
+    let host =
+        DeviceStatic { symbol: "_ZN7kernite3gpu6COUNTSE".into(), ty: "global<[b32; 4]>".into(), host: "u32".into() };
     assert_eq!(ptx.device_static(&counts), host);
     let want = "// Written by kernite.
 

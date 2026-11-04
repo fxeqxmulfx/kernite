@@ -3389,6 +3389,36 @@ fn a_static_is_memory_of_a_type_the_host_reads_holding_what_it_says() {
     let want = "1:35: `constant<[u8; 65536]>` holds an array of `u8`; this is an integer";
     assert_eq!(made[0].as_ref().unwrap_err().at(src), want);
     assert_eq!(made[1].as_ref().err(), None);
+    // Nor does one that has no room: `B` is refused beside `A`, and `C` fits beside `A` alone.
+    let src = "static A: constant<[u8; 65535]>; static B: constant<[u32; 1]>; static C: constant<u8>;";
+    let made = kernite::ptx_statics(&kernite::lang::parse(src).unwrap(), "");
+    let want = "1:44: this makes the module's constant memory 65540 bytes, and a module has 64 KB";
+    assert_eq!(made[1].as_ref().unwrap_err().at(src), want);
+    assert_eq!(made[2].as_ref().err(), None);
+}
+
+/// The room of the types of the statics a module keeps, `ptx_room`, which the macro asks once Rust has
+/// left out those `cfg` does, is that of `ptx_statics` for a module that keeps them all: each type that
+/// does not fit beside those before it that do is refused in the same words, and takes none; the
+/// constant memory and the global are counted apart.
+#[test]
+fn the_room_of_the_types_a_module_keeps_is_counted_in_order() {
+    let constant = |all| format!("this makes the module's constant memory {all} bytes, and a module has 64 KB");
+    let global = "this makes the module's global memory as much as 4294967296 bytes, each static aligned, and \
+                  `ptxas` writes its size in 32 bits: a module has less than 4 GB";
+    let cases = [
+        ("constant<[u8; 65535]>", None),
+        ("constant<[u32; 1]>", Some(constant(65540))),
+        // Beside the first alone, it fills the 64 KB; the next has none left.
+        ("constant<u8>", None),
+        ("constant<u8>", Some(constant(65537))),
+        ("global<[u8; 4294967295]>", None),
+        ("global<u8>", Some(global.to_string())),
+    ];
+    let types: Vec<&str> = cases.iter().map(|(ty, _)| *ty).collect();
+    let want: Vec<Option<String>> = cases.into_iter().map(|(_, why)| why).collect();
+    assert_eq!(kernite::ptx_room(&types), want);
+    assert_eq!(kernite::ptx_room(&[]), []);
 }
 
 #[test]

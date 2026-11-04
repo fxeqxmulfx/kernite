@@ -607,8 +607,9 @@ pub(crate) fn error_under(cfg: &TokenStream, span: Span, message: &str) -> Token
     out
 }
 
-/// Whether the crate being compiled has a dependency named `name`, `kernite-cpu` or `kernite-cuda`,
-/// which is how the Rust the macro writes names it. One renamed in `Cargo.toml` has another name.
+/// Whether the crate being compiled has a dependency named `name`, `kernite-cpu`, `kernite-cuda` or
+/// `kernite-macros`, which is how the Rust the macro writes names it. One renamed in `Cargo.toml` has
+/// another name.
 pub(crate) fn depends_on(name: &str) -> bool {
     given(&std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>(), name)
 }

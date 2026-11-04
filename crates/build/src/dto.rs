@@ -62,11 +62,13 @@ pub struct HostStatic {
     pub init: Vec<u8>,
 }
 
-/// A static of the GPU's memory: its symbol, and the number the host reads its elements as.
+/// A static of the GPU's memory: its symbol, its type, and the number the host reads its elements as.
 #[derive(Debug, PartialEq)]
 pub struct DeviceStatic {
     /// The name the driver finds it by.
     pub symbol: String,
+    /// Its type as the module declares it, with the values it names known now: `constant<[u32; 16]>`.
+    pub ty: String,
     /// The number the host reads each element as, by the language's name: `u32` for one PTX
     /// calls `b32` or `u32`, or `f16`.
     pub host: String,
