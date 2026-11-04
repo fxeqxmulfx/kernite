@@ -107,11 +107,16 @@ api! {
 }
 
 impl Api {
-    /// What the function `call` returned, as a `Result`.
+    /// What the function `call` returned, as a `Result`: a call that succeeds costs a test.
+    #[inline]
     fn check(&self, call: &'static str, result: CuResult) -> Result<(), Error> {
-        if result == 0 {
-            return Ok(());
-        }
+        if result == 0 { Ok(()) } else { Err(self.failed(call, result)) }
+    }
+
+    /// What the function `call` said by returning `result`, which is not 0, by name, number and
+    /// meaning.
+    #[cold]
+    fn failed(&self, call: &'static str, result: CuResult) -> Error {
         let (mut name, mut meaning) = (ptr::null(), ptr::null());
         // SAFETY: each sets its pointer to a string that lasts as long as the driver, or
         // leaves it null for a result it does not know.
@@ -120,7 +125,7 @@ impl Api {
             (self.error_string)(result, &mut meaning);
             (string(name), string(meaning))
         };
-        Err(Error::new(call, format!("{name} ({result}): {meaning}")))
+        Error::new(call, format!("{name} ({result}): {meaning}"))
     }
 }
 
@@ -214,6 +219,53 @@ impl Driver {
         // SAFETY: it writes on the GPU alone.
         self.api.check("cuMemsetD8", unsafe { (self.api.memset)(ptr, 0, bytes) })
     }
+
+    /// What the GPU says of itself as the `CUdevice_attribute` `attribute`.
+    fn attribute(&self, attribute: c_int) -> Result<u32, Error> {
+        let mut v = 0;
+        // SAFETY: it writes the attribute's value to `v`.
+        let asked = unsafe { (self.api.attribute)(&mut v, attribute, self.device) };
+        self.api.check("cuDeviceGetAttribute", asked).map(|()| v as u32)
+    }
+
+    /// `e`, which the driver gave by returning `launched` for a launch over `grid`, with the first
+    /// size of `grid` that is past what the GPU takes, and what it takes. The driver says
+    /// `CUDA_ERROR_INVALID_VALUE` of each and no more; any other error says what it is, and is
+    /// left as it is. It asks the GPU only now, after the launch has failed.
+    fn refused(&self, mut e: Error, launched: CuResult, grid: Grid) -> Error {
+        // CUDA_ERROR_INVALID_VALUE.
+        if launched != 1 {
+            return e;
+        }
+        // Wide enough for the product of three sizes of 32 bits.
+        let [bx, by, bz] = grid.blocks.map(u128::from);
+        let [tx, ty, tz] = grid.threads.map(u128::from);
+        // Each size, and the `CUdevice_attribute` of the most the GPU takes of it:
+        // CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X, _Y and _Z; MAX_BLOCK_DIM_X, _Y and _Z; and
+        // MAX_THREADS_PER_BLOCK.
+        let sizes = [
+            (5, bx, "the grid has", "blocks along x"),
+            (6, by, "the grid has", "blocks along y"),
+            (7, bz, "the grid has", "blocks along z"),
+            (2, tx, "each block has", "threads along x"),
+            (3, ty, "each block has", "threads along y"),
+            (4, tz, "each block has", "threads along z"),
+            (1, tx * ty * tz, "each block has", "threads"),
+        ];
+        for (attribute, size, has, what) in sizes {
+            let Ok(most) = self.attribute(attribute).map(u128::from) else { continue };
+            // Each limit of the size, how the sentence says it, and whether the size is past it:
+            // the GPU takes one at the least, and the most it says.
+            let least = 1;
+            for (limit, tail, past) in [(least, "at least", size < least), (most, "at most", size > most)] {
+                if past {
+                    e.message += &format!(": {has} {size} {what}, and the GPU takes {limit} {tail}");
+                    return e;
+                }
+            }
+        }
+        e
+    }
 }
 
 impl Drop for Driver {
@@ -262,11 +314,7 @@ impl Cuda {
         // CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR and _MINOR,
         // CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, _MULTIPROCESSOR_COUNT and
         // _COOPERATIVE_LAUNCH.
-        let [major, minor, shared, multiprocessors, cooperative] = [75, 76, 97, 16, 95].map(|a| {
-            let mut v = 0;
-            // SAFETY: it writes the attribute's value to `v`.
-            api.check("cuDeviceGetAttribute", unsafe { (api.attribute)(&mut v, a, device) }).map(|()| v as u32)
-        });
+        let [major, minor, shared, multiprocessors, cooperative] = [75, 76, 97, 16, 95].map(|a| driver.attribute(a));
         Ok(Cuda {
             sm: major? * 10 + minor?,
             max_shared: shared?,
@@ -471,6 +519,17 @@ pub fn arg<T: Param>(x: &T) -> *const c_void {
 
 /// How many blocks a kernel is launched in, how many threads each block has, what it reads
 /// as `nctaid` and `ntid`; and the shared memory the launch gives each block.
+///
+/// From Kepler's `sm_30` on, a GPU takes 1 to 2^31 - 1 blocks along x, 1 to 65535 along y and 1
+/// to 65535 along z, and 1 to 1024 threads in a block, of them 1 to 1024 along x, 1 to 1024
+/// along y and 1 to 64 along z. A launch over a grid the GPU does not take, one with more of a
+/// size than it takes or with none of it, is an error that says which size is past which limit:
+/// `the grid has 65536 blocks along y, and the GPU takes 65535 at most`, or `the grid has 0
+/// blocks along x, and the GPU takes 1 at least`. It says so after `CUDA_ERROR_INVALID_VALUE`
+/// alone, which is what the driver says of such a grid; any other error is said as it is. The
+/// driver starts at most 65535 blocks along x of a module written for an older GPU, `sm_20` or
+/// `sm_21`, whatever the GPU it runs on, and says only `CUDA_ERROR_INVALID_VALUE` of a launch
+/// past that.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Grid {
     /// Blocks along x, y and z.
@@ -579,7 +638,8 @@ impl Module {
 
     /// Launches kernel `index`, as [`load`](Module::load) was given its name, over `grid`,
     /// with `args`, each a parameter by [`arg`]. More than 48 KB of shared memory for a block,
-    /// which a GPU from Volta on can give, the kernel is let have first.
+    /// which a GPU from Volta on can give, the kernel is let have first. A `grid` the GPU does
+    /// not take is an error that says which size of it is past which limit.
     ///
     /// # Safety
     ///
@@ -593,7 +653,7 @@ impl Module {
         // SAFETY: the caller's. The driver reads `args`, and through them, as it launches.
         let launched =
             unsafe { (api.launch)(f, bx, by, bz, tx, ty, tz, grid.shared, ptr::null_mut(), params, ptr::null_mut()) };
-        api.check("cuLaunchKernel", launched)
+        api.check("cuLaunchKernel", launched).map_err(|e| self.driver.refused(e, launched, grid))
     }
 
     /// Launches kernel `index` as [`launch`](Module::launch) does, but cooperatively: every
@@ -616,9 +676,10 @@ impl Module {
         // SAFETY: the caller's. The driver reads `args`, and through them, as it launches.
         let launched =
             unsafe { (api.launch_cooperative)(f, bx, by, bz, tx, ty, tz, grid.shared, ptr::null_mut(), params) };
-        api.check("cuLaunchCooperativeKernel", launched).map_err(|mut e| {
+        api.check("cuLaunchCooperativeKernel", launched).map_err(|e| {
+            let mut e = self.driver.refused(e, launched, grid);
             // CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE, which says no more.
-            let threads = u32::try_from(u64::from(tx) * u64::from(ty) * u64::from(tz)).unwrap_or(u32::MAX);
+            let threads = tx.saturating_mul(ty).saturating_mul(tz);
             if launched == 720
                 && let Ok(most) = self.resident(index, threads, grid.shared)
             {

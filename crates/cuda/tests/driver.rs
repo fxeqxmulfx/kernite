@@ -578,3 +578,91 @@ fn the_driver_starts_65535_blocks_of_a_module_for_fermi_and_more_of_one_for_kepl
     }
     cuda.sync().unwrap();
 }
+
+/// Each grid, and what a launch over it says: nothing, for one the GPU takes, at the least and at
+/// the most it takes of each size; or which size is past what the GPU takes, the first that is.
+fn grids() -> Vec<(Grid, Option<&'static str>)> {
+    let grid = |blocks, threads| Grid { blocks, threads, shared: 0 };
+    let blocks_y = "the grid has 65536 blocks along y, and the GPU takes 65535 at most";
+    let blocks_z = "the grid has 65536 blocks along z, and the GPU takes 65535 at most";
+    let blocks_x = "the grid has 2147483648 blocks along x, and the GPU takes 2147483647 at most";
+    let no_blocks_z = "the grid has 0 blocks along z, and the GPU takes 1 at least";
+    vec![
+        (grid([1, 1, 1], [1, 1, 1]), None),
+        (grid([1, 65535, 1], [1, 1, 1]), None),
+        (grid([1, 1, 65535], [1, 1, 1]), None),
+        (grid([1, 1, 1], [1024, 1, 1]), None),
+        (grid([1, 1, 1], [1, 1024, 1]), None),
+        (grid([1, 1, 1], [1, 1, 64]), None),
+        (grid([1, 1, 1], [32, 32, 1]), None),
+        (grid([1, 1, 1], [16, 16, 4]), None),
+        (grid([1, 65536, 1], [1, 1, 1]), Some(blocks_y)),
+        (grid([1, 1, 65536], [1, 1, 1]), Some(blocks_z)),
+        (grid([1 << 31, 1, 1], [1, 1, 1]), Some(blocks_x)),
+        (grid([1, 1, 1], [1025, 1, 1]), Some("each block has 1025 threads along x, and the GPU takes 1024 at most")),
+        (grid([1, 1, 1], [1, 1025, 1]), Some("each block has 1025 threads along y, and the GPU takes 1024 at most")),
+        (grid([1, 1, 1], [1, 1, 65]), Some("each block has 65 threads along z, and the GPU takes 64 at most")),
+        (grid([1, 1, 1], [1 << 22; 3]), Some("each block has 4194304 threads along x, and the GPU takes 1024 at most")),
+        (grid([1, 1, 1], [33, 32, 1]), Some("each block has 1056 threads, and the GPU takes 1024 at most")),
+        (grid([1, 1, 1], [16, 16, 5]), Some("each block has 1280 threads, and the GPU takes 1024 at most")),
+        (grid([1, 1, 1], [1024, 1024, 64]), Some("each block has 67108864 threads, and the GPU takes 1024 at most")),
+        (grid([0, 1, 1], [1, 1, 1]), Some("the grid has 0 blocks along x, and the GPU takes 1 at least")),
+        (grid([1, 0, 1], [1, 1, 1]), Some("the grid has 0 blocks along y, and the GPU takes 1 at least")),
+        (grid([1, 1, 0], [1, 1, 1]), Some(no_blocks_z)),
+        (grid([1, 1, 1], [0, 1, 1]), Some("each block has 0 threads along x, and the GPU takes 1 at least")),
+        (grid([1, 1, 1], [1, 0, 1]), Some("each block has 0 threads along y, and the GPU takes 1 at least")),
+        (grid([1, 1, 1], [1, 1, 0]), Some("each block has 0 threads along z, and the GPU takes 1 at least")),
+        // The first size past is the one said, whichever limit it is past: the blocks' before the
+        // threads', x before y before z.
+        (grid([1, 65536, 65536], [1025, 1, 1]), Some(blocks_y)),
+        (grid([1, 65536, 0], [1, 1, 1]), Some(blocks_y)),
+        (grid([1, 1, 0], [1025, 1, 1]), Some(no_blocks_z)),
+    ]
+}
+
+/// What a launch over a grid the GPU does not take says: the driver's `CUDA_ERROR_INVALID_VALUE`,
+/// and which size is past which limit.
+fn refusal(call: &str, e: &kernite_cuda::Error, said: &str) {
+    assert_eq!(e.call, call);
+    assert!(e.message.starts_with("CUDA_ERROR_INVALID_VALUE (1): "), "{e}");
+    assert!(e.message.ends_with(&format!(": {said}")), "{e}");
+}
+
+#[test]
+fn a_launch_over_a_grid_the_gpu_does_not_take_says_which_size_is_past_which_limit() {
+    let Some(cuda) = cuda() else { return };
+    let module = Module::load(&cuda, LAST, &["last"], &[]).unwrap();
+    let out = cuda.alloc::<u32>(1).unwrap();
+    let at = out.ptr();
+    for (grid, said) in grids() {
+        // SAFETY: `last` takes a pointer, and writes a word there.
+        let launched = unsafe { module.launch(0, grid, &[arg(&at)]) };
+        match (launched, said) {
+            (Ok(()), None) => {}
+            (Err(e), Some(said)) => refusal("cuLaunchKernel", &e, said),
+            (launched, said) => panic!("{grid:?}: {launched:?}, and it should say {said:?}"),
+        }
+    }
+    // The launches refused did not harm the GPU, nor the ones that started.
+    cuda.sync().unwrap();
+}
+
+#[test]
+fn a_cooperative_launch_over_a_grid_the_gpu_does_not_take_says_it_too() {
+    let Some(cuda) = cuda() else { return };
+    if !cuda.cooperative() {
+        eprintln!("{} launches no kernel cooperatively: skipped", cuda.name());
+        return;
+    }
+    let module = Module::load(&cuda, LAST, &["last"], &[]).unwrap();
+    let out = cuda.alloc::<u32>(1).unwrap();
+    let at = out.ptr();
+    // Only the grids the GPU does not take: one it takes may have more blocks than it runs at
+    // once, which is refused in other words.
+    for (grid, said) in grids().into_iter().filter_map(|(grid, said)| said.map(|said| (grid, said))) {
+        // SAFETY: `last` takes a pointer, and writes a word there.
+        let e = unsafe { module.launch_cooperative(0, grid, &[arg(&at)]) }.unwrap_err();
+        refusal("cuLaunchCooperativeKernel", &e, said);
+    }
+    cuda.sync().unwrap();
+}

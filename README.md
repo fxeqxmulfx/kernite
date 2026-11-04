@@ -227,6 +227,14 @@ they are written with, `grid` among them. A compile-time argument may not be nam
 `threads` or `shared`, which are parameters of the method that says how many blocks its grid has at most, below. Rust
 cannot keep a const apart from a parameter of its name: that is an error at its name.
 
+A grid has as many blocks and threads as the GPU takes: at least 1 along each of x, y and z, and, from Kepler's `sm_30`
+on, at most 2^31 - 1 blocks along x, 65535 along y and 65535 along z, and 1024 threads in a block, at most 1024 of them
+along x, 1024 along y and 64 along z. A grid past one of these is an error that says which size is past which limit:
+`cuLaunchKernel: CUDA_ERROR_INVALID_VALUE (1): invalid argument: the grid has 65536 blocks along y, and the GPU takes
+65535 at most`, or, for a grid of none, `... the grid has 0 blocks along x, and the GPU takes 1 at least`. The driver
+says no more than `CUDA_ERROR_INVALID_VALUE` of any of them, and kernite adds its sentence to that error alone: another,
+such as `CUDA_ERROR_ILLEGAL_ADDRESS` from a kernel before it, is said as the driver says it.
+
 The PTX target knows every instruction of PTX's for the GPUs from Fermi, `sm_20`, to Ampere, `sm_86`, in each form
 `ptxas` takes, [`forms`](crates/ptx/src/forms.rs), but one. `txq.force_unnormalized_coords` asks of a sampler apart
 from its texture, in the independent mode, which kernite does not write: kernite writes no `.samplerref`, so the ISA
