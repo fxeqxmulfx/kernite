@@ -2,8 +2,8 @@
 //! does a GPU kernel, and kernite says so, at the result's type. Rust sees that type as it sees a plain x86
 //! kernel's, which is beside them for the words to be the same: it says what it says of any function's result,
 //! once, at the same place, and counts an import that only the result names as used. The crate's functions
-//! call every kernel as Rust calls it, and Rust says nothing there. A GPU kernel's launcher is a method, so a
-//! `&` in its result takes the lifetime of `self`, and Rust has none to ask for.
+//! call every kernel as Rust calls it, and Rust says nothing there. A `&` in a launcher's result takes a lifetime
+//! from what the launcher takes, a cooperative kernel's grid or a GPU kernel's `self`, so Rust asks for none.
 
 pub struct Ret(pub u64);
 

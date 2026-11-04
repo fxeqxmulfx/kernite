@@ -940,6 +940,30 @@ fn a_kernels_safety_contract_says_nothing_else_touches_the_memory_it_names() {
     );
 }
 
+/// A GPU kernel's launcher says what a launch keeps to, as `Module::launch` does: the kernel's own
+/// `# Safety`, or, where it has none, the macros': each pointer is to a buffer or to unified
+/// memory of the GPU; from the launch until the kernel is done, the host holds no slice of memory
+/// the kernel writes, and no slice it may write of memory the kernel reads; and where
+/// `Cuda::concurrent_managed_access` is false, no slice of managed memory at all.
+#[test]
+fn a_gpu_kernels_launcher_says_what_a_launch_keeps_to() {
+    let page = fs::read_to_string(documents_quietly("contract").join("gpu/struct.Kernels.html")).unwrap();
+    // The paragraphs after the heading of `name`'s `# Safety`, as rustdoc writes them.
+    let safety = |name: &str| -> Vec<String> {
+        let (_, method) = page.split_once(&format!("id=\"method.{name}\"")).expect("the method is there");
+        let (_, docs) = method.split_once(">Safety</h5>\n").unwrap_or_else(|| panic!("`{name}` has no `# Safety`"));
+        docs.split_once("</div>").expect("the docs end").0.lines().map(String::from).collect()
+    };
+    let contract = "<p>The kernel trusts the pointers it is given: each must be to a buffer or to unified memory of \
+                    the GPU the kernels are loaded on, as long as the kernel reads and writes through it. From the \
+                    launch until the kernel is done, the host must hold no slice of memory the kernel writes, and no \
+                    slice it may write of memory the kernel reads; and where \
+                    <code>Cuda::concurrent_managed_access</code> is false, the GPU not reaching managed memory while \
+                    the host does, the host must hold no slice of managed memory at all.</p>";
+    assert_eq!(safety("one"), [contract]);
+    assert_eq!(safety("two"), ["<p><code>x</code> points at an integer.</p>"]);
+}
+
 /// The function's docs name the CPU features its kernel needs past x86-64's own, which nothing
 /// checks for when it runs, as the listing's header does: three, two, one, or, for a kernel
 /// that needs none, no paragraph. A generic kernel's docs name those of every instance, each
@@ -2732,12 +2756,13 @@ fn rust_says_of_a_type_kernite_refuses_what_it_says_of_any_signature() {
 /// its lifetime is not declared, `&'a u64`; that a `_` is not allowed; that `core::f16` is a module, and that an
 /// `f128` is unstable, and that the `!` behind a pointer, `*const !`, is experimental. It says nothing of `!`
 /// itself, nor of a pointer to an array of a compile-time argument, `*const [u8; N]`, nor of a type that only an
-/// import names, `Ret`, which counts the import as used, so that Rust does not warn that it is not. A `&` in a GPU
-/// kernel's result takes the lifetime of `self`, as the launcher is a method, so Rust has none to ask for. A
-/// pointer of two words to a trait that is not dyn compatible, `*mut dyn Copy`, is the one type Rust says of a
-/// plain kernel's result and not of a launcher's: it is kernite's error alone there. A result of `()` is none, so
-/// those kernels are kernels, and their launchers give back the `Result` of the launch. The functions that call
-/// each kernel as Rust calls it, with `?`, `unwrap`, a `match` and a type for the result, get no word from Rust.
+/// import names, `Ret`, which counts the import as used, so that Rust does not warn that it is not. A `&` in the
+/// result of a cooperative x86 kernel or a GPU kernel takes a lifetime from what its launcher takes, the grid or
+/// `self`, so Rust has none to ask for. A pointer of two words to a trait that is not dyn compatible,
+/// `*mut dyn Copy`, is the one type Rust says of a plain kernel's result and not of a launcher's: it is kernite's
+/// error alone there. A result of `()` is none, so those kernels are kernels, and their launchers give back the
+/// `Result` of the launch. The functions that call each kernel as Rust calls it, with `?`, `unwrap`, a `match` and
+/// a type for the result, get no word from Rust.
 #[test]
 fn rust_sees_the_result_a_kernel_cannot_have_as_it_sees_the_result_of_a_plain_kernel() {
     // What kernite says, in the order of the kernels: plain x86, cooperative x86, cooperative x86 of compile-time
@@ -2784,12 +2809,11 @@ fn rust_sees_the_result_a_kernel_cannot_have_as_it_sees_the_result_of_a_plain_ke
         gpu_returns("260:71", "", "*mut !"),
     ]);
     // What Rust says, in the order it says it. Each word it says of `plain` it says of `cpu` and of `gpu`, at the
-    // same place in the result, but that a `&` has no lifetime to take, in `gpu`.
+    // same place in the result, but that a `&` has no lifetime to take, in `cpu` and `gpu`.
     said.extend([
         no_lifetime("24:62"),
         undeclared("28:62", "'a"),
         unstable("40:64", "f128"),
-        no_lifetime("64:62"),
         undeclared("69:62", "'a"),
         unstable("84:64", "f128"),
         undeclared("135:73", "'a"),

@@ -1,6 +1,6 @@
 [package]
 name = "kernite-cpu"
-description = "What x86 kernels need of the process: the threads a cooperative one runs on, each given its place in a grid, and the memory of a module's"
+description = "What x86 kernels need of the process: the threads a cooperative one runs on, on CPUs of the caller's choosing, each given its place in a grid, and the memory of a module's"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,5 +11,13 @@ categories.workspace = true
 
 [dependencies]
 
-[lints]
-workspace = true
+# Not the workspace's lints: placing a thread is a call to the C library, which only `unsafe`
+# reaches. `unsafe` is denied here but in the module `affinity`, which makes the calls, and in the
+# tests that read back where a page is. Each `unsafe` block says why it holds.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+disallowed_types = "deny"
+undocumented_unsafe_blocks = "warn"

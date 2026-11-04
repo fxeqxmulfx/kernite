@@ -15,10 +15,39 @@
 //! # Ok::<(), kernite_cuda::Error>(())
 //! ```
 //!
-//! Everything is for the thread that made the [`Cuda`]: the GPU's primary context is current
-//! there, and the buffers and modules hold on to it, so none of them is `Send`. Kernels run
-//! in the order they are launched, and a copy to or from a buffer waits for those launched
-//! before it; [`Cuda::sync`] waits for all of them, and says whether one failed.
+//! A machine may have several GPUs. The GPUs are those the driver shows the program: all of the
+//! machine's, unless `CUDA_VISIBLE_DEVICES` chooses which, and the driver numbers them from 0 in
+//! its order. [`Cuda::count`] says how many there are, 0 where the driver shows none, and
+//! [`Cuda::on`] takes one by its index; [`Cuda::new`] takes GPU 0. An index past the last is an
+//! error that says how many there are: `cuDeviceGet: CUDA_ERROR_INVALID_DEVICE (101): invalid
+//! device ordinal: the driver shows 1 GPU, and none is numbered 1`. Where the driver shows none,
+//! [`Cuda::new`] and [`Cuda::on`] are the error of `cuInit`: `cuInit: CUDA_ERROR_NO_DEVICE
+//! (100): no CUDA-capable device is detected`.
+//!
+//! A [`Cuda`] is for the thread that made it, and so are the buffers and modules it makes: they
+//! hold on to it, so none is `Send`. A thread takes the GPU it uses with [`Cuda::on`], and threads
+//! may take the same GPU. One thread may take several, and use them in turn: each call goes to
+//! the GPU of the `Cuda` it is made on, or of the buffer or the module it is made on, whichever
+//! GPU the call before it went to. The driver does the work of a call in the context that is
+//! current on the thread. This crate makes a GPU's primary context current when a call goes to
+//! another GPU than the call before it, with one `cuCtxSetCurrent`; a call to the same GPU asks
+//! the driver for nothing more. A context that the program makes current itself, with the
+//! driver's own calls, is not seen: the next call to the GPU of the last call goes to it.
+//!
+//! Kernels run on a GPU in the order they are launched, and a copy to or from a buffer waits
+//! for those launched before it on the buffer's GPU; [`Cuda::sync`] waits for all of its GPU's,
+//! and says whether one failed. A buffer is on one GPU, and a kernel is given the buffers of
+//! the GPU it runs on: [`Buffer::copy_from`] copies a buffer to a buffer on another.
+//!
+//! A buffer is the GPU's own memory, and the host reaches it by copies. [`Unified`] memory is
+//! reached by the host and by the GPU's kernels at one address, with no copy: [`Cuda::managed`]
+//! makes memory the driver moves to whichever touches it, [`Cuda::pinned`] makes page-locked memory
+//! in the host, and [`Cuda::lend`] lends a slice of the host's own to the GPU. The first two are
+//! zeros, and [`Cuda::managed_uninit`] and [`Cuda::pinned_uninit`], which are `unsafe`, make them
+//! without, for memory that is written whole before it is read. The slices it lends the host wait
+//! for the GPU's kernels first, and [`Module::launch`] says what a launch keeps to of the slices
+//! the host holds. Managed memory is sent to the GPU before a kernel needs it by
+//! [`Unified::prefetch`], and advised how it is used by [`Unified::advise`].
 //!
 //! A kernel whose blocks wait for each other is launched cooperatively,
 //! [`Module::launch_cooperative`]: every block of the grid runs at once, so there are at most
@@ -34,14 +63,24 @@ use std::rc::Rc;
 mod half;
 #[doc(hidden)]
 pub mod named;
+mod unified;
 
 pub use half::{bf16, f16};
+pub use unified::{Advice, Location, Placement, Unified};
 
 /// What every function of the driver returns: 0, or what went wrong.
 type CuResult = c_int;
 
 /// A context, a module, a function or a stream: what the driver hands out, opaque.
 type Handle = *mut c_void;
+
+/// A place that the driver is told of, as `CUmemLocation` is: a kind of place, and which one.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MemLocation {
+    kind: c_int,
+    id: c_int,
+}
 
 // The dynamic loader, in the C library that every Rust program on Linux links.
 unsafe extern "C" {
@@ -54,24 +93,61 @@ unsafe extern "C" {
 const RTLD_NOW: c_int = 2;
 
 /// The driver's functions that kernite calls, each by the name `cuda.h` gives it under its own:
-/// `cuMemAlloc` is `cuMemAlloc_v2`.
+/// `cuMemAlloc` is `cuMemAlloc_v2`. A driver lacks the functions after the `?` if it is older than
+/// the release that brought them. It is opened all the same, and the table keeps the error of
+/// the lookup for the call that needs the function to return.
 macro_rules! api {
-    ($($field:ident = $symbol:literal($($arg:ty),*);)*) => {
+    (
+        $($field:ident = $symbol:literal($($arg:ty),*);)*
+        ?
+        $($maybe:ident = $maybe_symbol:literal($($maybe_arg:ty),*);)*
+    ) => {
         struct Api {
             $($field: unsafe extern "C" fn($($arg),*) -> CuResult,)*
+            $($maybe: Result<unsafe extern "C" fn($($maybe_arg),*) -> CuResult, Error>,)*
         }
 
         impl Api {
-            /// The functions of the driver that `lib` is a handle to.
-            fn load(lib: *mut c_void) -> Result<Api, Error> {
+            /// The functions of the driver that `lookup` finds, by their names.
+            fn load(lookup: impl Fn(&CStr) -> Result<*mut c_void, Error>) -> Result<Api, Error> {
                 Ok(Api {
                     $($field: {
-                        let f = symbol(lib, $symbol)?;
+                        let f = lookup($symbol)?;
                         // SAFETY: `f` is not null, and `cuda.h` declares the function of this
                         // name with these parameters.
                         unsafe { std::mem::transmute::<*mut c_void, unsafe extern "C" fn($($arg),*) -> CuResult>(f) }
                     },)*
+                    $($maybe: lookup($maybe_symbol).map(|f| {
+                        // SAFETY: as above.
+                        unsafe {
+                            std::mem::transmute::<*mut c_void, unsafe extern "C" fn($($maybe_arg),*) -> CuResult>(f)
+                        }
+                    }),)*
                 })
+            }
+        }
+
+        /// The functions of a driver that refuses every call, for a test to replace the few it
+        /// needs.
+        #[cfg(test)]
+        impl Api {
+            fn refusing() -> Api {
+                Api {
+                    $($field: {
+                        unsafe extern "C" fn refuse($(_: $arg),*) -> CuResult {
+                            // CUDA_ERROR_UNKNOWN.
+                            999
+                        }
+                        refuse
+                    },)*
+                    $($maybe: {
+                        unsafe extern "C" fn refuse($(_: $maybe_arg),*) -> CuResult {
+                            // CUDA_ERROR_UNKNOWN.
+                            999
+                        }
+                        Ok(refuse as unsafe extern "C" fn($($maybe_arg),*) -> CuResult)
+                    },)*
+                }
             }
         }
     };
@@ -79,18 +155,26 @@ macro_rules! api {
 
 api! {
     init = c"cuInit"(c_uint);
+    device_count = c"cuDeviceGetCount"(*mut c_int);
     device_get = c"cuDeviceGet"(*mut c_int, c_int);
     device_name = c"cuDeviceGetName"(*mut c_char, c_int, c_int);
     attribute = c"cuDeviceGetAttribute"(*mut c_int, c_int, c_int);
     retain = c"cuDevicePrimaryCtxRetain"(*mut Handle, c_int);
     release = c"cuDevicePrimaryCtxRelease_v2"(c_int);
     set_current = c"cuCtxSetCurrent"(Handle);
+    can_access_peer = c"cuDeviceCanAccessPeer"(*mut c_int, c_int, c_int);
+    enable_peer_access = c"cuCtxEnablePeerAccess"(Handle, c_uint);
     synchronize = c"cuCtxSynchronize"();
     alloc = c"cuMemAlloc_v2"(*mut u64, usize);
+    alloc_managed = c"cuMemAllocManaged"(*mut u64, usize, c_uint);
     free = c"cuMemFree_v2"(u64);
+    alloc_host = c"cuMemHostAlloc"(*mut *mut c_void, usize, c_uint);
+    free_host = c"cuMemFreeHost"(*mut c_void);
     to_device = c"cuMemcpyHtoD_v2"(u64, *const c_void, usize);
     to_host = c"cuMemcpyDtoH_v2"(*mut c_void, u64, usize);
+    copy_peer = c"cuMemcpyPeer"(u64, Handle, u64, Handle, usize);
     memset = c"cuMemsetD8_v2"(u64, u8, usize);
+    range_attribute = c"cuMemRangeGetAttribute"(*mut c_void, usize, c_int, u64, usize);
     load_module = c"cuModuleLoadDataEx"(*mut Handle, *const c_void, c_uint, *mut c_int, *mut *mut c_void);
     unload_module = c"cuModuleUnload"(Handle);
     function = c"cuModuleGetFunction"(*mut Handle, Handle, *const c_char);
@@ -106,6 +190,10 @@ api! {
     occupancy = c"cuOccupancyMaxActiveBlocksPerMultiprocessor"(*mut c_int, Handle, c_int, usize);
     error_name = c"cuGetErrorName"(CuResult, *mut *const c_char);
     error_string = c"cuGetErrorString"(CuResult, *mut *const c_char);
+    // These came with CUDA 12.2, which brought the NUMA node as a place.
+    ?
+    prefetch = c"cuMemPrefetchAsync_v2"(u64, usize, MemLocation, c_uint, Handle);
+    advise = c"cuMemAdvise_v2"(u64, usize, c_int, MemLocation);
 }
 
 impl Api {
@@ -129,6 +217,39 @@ impl Api {
         };
         Error::new(call, format!("{name} ({result}): {meaning}"))
     }
+
+    /// Starts the driver, as `cuInit` does: what it returned, which is 0 once the driver is
+    /// started.
+    fn start(&self) -> CuResult {
+        // SAFETY: it takes flags, of which there are none yet: 0.
+        unsafe { (self.init)(0) }
+    }
+
+    /// How many GPUs the driver shows the program, once it is started.
+    fn gpus(&self) -> Result<usize, Error> {
+        let mut count = 0;
+        // SAFETY: it writes the count to `count`.
+        self.check("cuDeviceGetCount", unsafe { (self.device_count)(&mut count) })?;
+        Ok(count as usize)
+    }
+}
+
+/// The driver's functions, found but not started; or why there is no driver to have.
+fn find() -> Result<Api, Error> {
+    // SAFETY: opening the driver runs its initialisers, which ask nothing of this
+    // program. It is never closed: like a library linked, it lasts as long as the program.
+    let lib = unsafe { dlopen(c"libcuda.so.1".as_ptr(), RTLD_NOW) };
+    if lib.is_null() {
+        return Err(Error::new("dlopen", format!("no CUDA driver: {}", dl_error())));
+    }
+    Api::load(|name| symbol(lib, name))
+}
+
+/// The driver, opened and started: its functions, or why there is no driver to have.
+fn open() -> Result<Api, Error> {
+    let api = find()?;
+    api.check("cuInit", api.start())?;
+    Ok(api)
 }
 
 /// The function `name` of the library `lib`.
@@ -136,9 +257,14 @@ fn symbol(lib: *mut c_void, name: &CStr) -> Result<*mut c_void, Error> {
     // SAFETY: `lib` is a handle `dlopen` gave, and `name` is a C string.
     let f = unsafe { dlsym(lib, name.as_ptr()) };
     if f.is_null() {
-        return Err(Error::new("dlsym", format!("the driver has no `{}`: {}", name.to_string_lossy(), dl_error())));
+        return Err(missing(name, &dl_error()));
     }
     Ok(f)
+}
+
+/// The error that says the driver has no function `name`, and why, as the loader says.
+fn missing(name: &CStr, why: &str) -> Error {
+    Error::new("dlsym", format!("the driver has no `{}`: {why}", name.to_string_lossy()))
 }
 
 /// What the loader said went wrong, last.
@@ -164,7 +290,13 @@ unsafe fn string(p: *const c_char) -> String {
 /// What went wrong in a call to the driver.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
-    /// The function that failed, by its name in C: `cuInit`, or `dlopen` if there is no driver.
+    /// The function that failed, by its name in C: `cuInit`; `dlopen` if there is no driver, and
+    /// `dlsym` for a function the driver does not have.
+    /// A call refused before it is made names that call, whatever the reason: `cuMemAllocManaged`
+    /// where the GPU cannot allocate managed memory, `cuMemPrefetchAsync` where the memory is
+    /// page-locked, which the driver does not prefetch, and `cuMemAdvise` where a NUMA node is
+    /// given as an accessor. [`Cuda::lend`] refuses no call of the driver's, and names
+    /// `cuDeviceGetAttribute`, which told that the GPU cannot.
     pub call: &'static str,
     /// What it said: the `CUresult` it returned, by name, number and meaning, or why there is
     /// no driver.
@@ -191,35 +323,119 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+thread_local! {
+    /// The context this crate made current on this thread last, or null before it made any:
+    /// what a call tests, to know whether its own GPU's is current. The last release of a GPU's
+    /// primary context destroys it, and the driver leaves it current on the thread; the next
+    /// retain makes it again with the handle it had, so what is remembered is right still, as
+    /// `tests/again.rs` shows.
+    static CURRENT: Cell<Handle> = const { Cell::new(ptr::null_mut()) };
+}
+
+/// Makes `context` current on the thread by `set`, unless `current`, which holds the context
+/// made current last, says it is. `current` holds `context` only if `set` worked.
+#[inline]
+fn enter(current: &Cell<Handle>, context: Handle, set: impl FnOnce() -> Result<(), Error>) -> Result<(), Error> {
+    if current.get() != context {
+        set()?;
+        current.set(context);
+    }
+    Ok(())
+}
+
 /// The driver's functions, and the GPU whose primary context they work in, which is let go
 /// when the last thing holding it is dropped.
 struct Driver {
     api: Api,
     device: c_int,
+    /// The GPU's primary context, which the driver keeps while this holds it.
+    context: Handle,
 }
 
 impl Driver {
+    /// The driver's functions, once this GPU's context is current on the thread: the ones that
+    /// allocate, copy, wait, load or launch work in the current context, and every call of
+    /// them gets its functions here. The thread-local test is all it costs a call to the GPU
+    /// the thread's last call went to; one to another GPU asks the driver once to switch.
+    #[inline]
+    fn current(&self) -> Result<&Api, Error> {
+        CURRENT.with(|current| enter(current, self.context, || self.set_current()))?;
+        Ok(&self.api)
+    }
+
+    /// Makes this GPU's context current on the thread, whichever is now.
+    fn set_current(&self) -> Result<(), Error> {
+        // SAFETY: the context was retained, and is held until `self` is dropped.
+        self.api.check("cuCtxSetCurrent", unsafe { (self.api.set_current)(self.context) })
+    }
+
+    /// Waits for every kernel launched on this GPU to finish, and says whether one failed.
+    fn sync(&self) -> Result<(), Error> {
+        let api = self.current()?;
+        // SAFETY: it takes nothing.
+        api.check("cuCtxSynchronize", unsafe { (api.synchronize)() })
+    }
+
     /// Copies `data` to the GPU at `ptr`, after the kernels launched before have run.
     fn write<T: Plain>(&self, ptr: u64, data: &[T]) -> Result<(), Error> {
+        let api = self.current()?;
         // SAFETY: it reads as many bytes from `data` as it has.
-        let copied = unsafe { (self.api.to_device)(ptr, data.as_ptr().cast(), size_of_val(data)) };
-        self.api.check("cuMemcpyHtoD", copied)
+        let copied = unsafe { (api.to_device)(ptr, data.as_ptr().cast(), size_of_val(data)) };
+        api.check("cuMemcpyHtoD", copied)
     }
 
     /// Copies what the GPU holds at `ptr` to `out`, after the kernels launched before have
     /// run.
     fn read_into<T: Plain>(&self, ptr: u64, out: &mut [T]) -> Result<(), Error> {
+        let api = self.current()?;
         // SAFETY: it writes as many bytes to `out` as it has, and any bits are a `T`, as
         // `Plain` promises.
-        let copied = unsafe { (self.api.to_host)(out.as_mut_ptr().cast(), ptr, size_of_val(out)) };
-        self.api.check("cuMemcpyDtoH", copied)
+        let copied = unsafe { (api.to_host)(out.as_mut_ptr().cast(), ptr, size_of_val(out)) };
+        api.check("cuMemcpyDtoH", copied)
     }
 
     /// Sets the `bytes` bytes at `ptr` on the GPU to zero, after the kernels launched before
     /// have run.
     fn zero(&self, ptr: u64, bytes: usize) -> Result<(), Error> {
+        let api = self.current()?;
         // SAFETY: it writes on the GPU alone.
-        self.api.check("cuMemsetD8", unsafe { (self.api.memset)(ptr, 0, bytes) })
+        api.check("cuMemsetD8", unsafe { (api.memset)(ptr, 0, bytes) })
+    }
+
+    /// Copies the `bytes` bytes at `from_ptr` on the GPU of `from` to `ptr` on this one, after
+    /// the kernels launched before have run on either, and before those launched after run on
+    /// either. The copy is made in this GPU's context, which reaches the other's memory by a
+    /// link between the two GPUs where they have one, and through the host where they have not.
+    fn copy_from(&self, ptr: u64, from: &Driver, from_ptr: u64, bytes: usize) -> Result<(), Error> {
+        let api = self.current()?;
+        if self.device != from.device {
+            self.reach(api, from)?;
+        }
+        // SAFETY: the caller's addresses are on the GPUs of the two contexts, with `bytes`
+        // bytes from each.
+        let copied = unsafe { (api.copy_peer)(ptr, self.context, from_ptr, from.context, bytes) };
+        api.check("cuMemcpyPeer", copied)
+    }
+
+    /// Lets this GPU's context, which is current, reach the memory of `from`'s GPU directly,
+    /// if the two have a link for that. The driver keeps it until a context is destroyed.
+    fn reach(&self, api: &Api, from: &Driver) -> Result<(), Error> {
+        let mut linked = 0;
+        // SAFETY: it writes whether this GPU may reach the other's memory to `linked`.
+        let asked = unsafe { (api.can_access_peer)(&mut linked, self.device, from.device) };
+        api.check("cuDeviceCanAccessPeer", asked)?;
+        if linked == 0 {
+            return Ok(());
+        }
+        // SAFETY: `from.context` is held by `from`, which the caller has.
+        let enabled = unsafe { (api.enable_peer_access)(from.context, 0) };
+        match enabled {
+            // CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED, by an earlier copy; and
+            // CUDA_ERROR_TOO_MANY_PEERS, where the driver has no link left to give and stages
+            // the copy through the host, as it does for GPUs that have none.
+            704 | 711 => Ok(()),
+            _ => api.check("cuCtxEnablePeerAccess", enabled),
+        }
     }
 
     /// What the GPU says of itself as the `CUdevice_attribute` `attribute`.
@@ -232,11 +448,12 @@ impl Driver {
 
     /// What the driver says of kernel `f` as the `CUfunction_attribute` `attribute`.
     fn function_attribute(&self, f: Handle, attribute: c_int) -> Result<u32, Error> {
+        let api = self.current()?;
         let mut v = 0;
         // SAFETY: `f` is a kernel of a module that is loaded; it writes the attribute's value
         // to `v`.
-        let asked = unsafe { (self.api.function_attribute)(&mut v, attribute, f) };
-        self.api.check("cuFuncGetAttribute", asked).map(|()| v as u32)
+        let asked = unsafe { (api.function_attribute)(&mut v, attribute, f) };
+        api.check("cuFuncGetAttribute", asked).map(|()| v as u32)
     }
 
     /// `e`, which the driver gave by returning `result` for a launch over `grid` of kernel `k`,
@@ -307,12 +524,13 @@ impl Driver {
 
 impl Drop for Driver {
     fn drop(&mut self) {
-        // SAFETY: `Cuda::new` retained the primary context, once for each `Driver`.
+        // SAFETY: `Cuda::on` retained the primary context, once for each `Driver`.
         unsafe { (self.api.release)(self.device) };
     }
 }
 
-/// A GPU, its primary context current on this thread.
+/// One GPU, through its primary context, which a call makes current on its thread if the call
+/// before it went to another GPU.
 pub struct Cuda {
     driver: Rc<Driver>,
     name: String,
@@ -320,43 +538,79 @@ pub struct Cuda {
     max_shared: u32,
     multiprocessors: u32,
     cooperative: bool,
+    concurrent_managed_access: bool,
 }
 
 impl Cuda {
-    /// The first GPU, through the driver opened now; or why there is none to have.
+    /// How many GPUs the driver shows the program, through the driver opened now: all of the
+    /// machine's, or those `CUDA_VISIBLE_DEVICES` chooses. It is 0 where `cuInit` says
+    /// `CUDA_ERROR_NO_DEVICE`, as it does where the machine has no GPU, or the variable chooses
+    /// none. It is an error where there is no driver, or `cuInit` fails any other way, as
+    /// [`Cuda::new`] says why it has none to take.
+    pub fn count() -> Result<usize, Error> {
+        let api = find()?;
+        match api.start() {
+            // CUDA_ERROR_NO_DEVICE.
+            100 => Ok(0),
+            started => api.check("cuInit", started).and_then(|()| api.gpus()),
+        }
+    }
+
+    /// GPU 0, through the driver opened now; or why there is none to have. It is `Cuda::on(0)`.
     pub fn new() -> Result<Cuda, Error> {
-        // SAFETY: opening the driver runs its initialisers, which ask nothing of this
-        // program. It is never closed: like a library linked, it lasts as long as the program.
-        let lib = unsafe { dlopen(c"libcuda.so.1".as_ptr(), RTLD_NOW) };
-        if lib.is_null() {
-            return Err(Error::new("dlopen", format!("no CUDA driver: {}", dl_error())));
-        }
-        let api = Api::load(lib)?;
+        Cuda::on(0)
+    }
+
+    /// GPU `index` of those the driver shows the program, counted from 0 in its order, through
+    /// the driver opened now; or why there is none to have. An `index` past the last GPU is an
+    /// error that says how many there are: `cuDeviceGet: CUDA_ERROR_INVALID_DEVICE (101):
+    /// invalid device ordinal: the driver shows 1 GPU, and none is numbered 1`. Where the driver
+    /// shows none, it is the error of `cuInit`: `cuInit: CUDA_ERROR_NO_DEVICE (100): no
+    /// CUDA-capable device is detected`. The GPU's context is made current on this thread.
+    pub fn on(index: usize) -> Result<Cuda, Error> {
+        let api = open()?;
         let (mut device, mut context) = (0, ptr::null_mut());
-        // SAFETY: each is called as `cuda.h` declares it, and writes only what it is given
-        // the address of.
-        unsafe {
-            api.check("cuInit", (api.init)(0))?;
-            api.check("cuDeviceGet", (api.device_get)(&mut device, 0))?;
-            api.check("cuDevicePrimaryCtxRetain", (api.retain)(&mut context, device))?;
-        }
-        let driver = Rc::new(Driver { api, device });
+        // An index past what an `int` holds is past the GPUs, and the driver says so of the
+        // greatest.
+        let ordinal = c_int::try_from(index).unwrap_or(c_int::MAX);
+        // SAFETY: it writes the device to `device`.
+        let got = unsafe { (api.device_get)(&mut device, ordinal) };
+        api.check("cuDeviceGet", got).map_err(|mut e| {
+            // CUDA_ERROR_INVALID_DEVICE, which says no more.
+            if got == 101
+                && let Ok(gpus) = api.gpus()
+            {
+                let gpus = if gpus == 1 { "1 GPU".to_string() } else { format!("{gpus} GPUs") };
+                e.message += &format!(": the driver shows {gpus}, and none is numbered {index}");
+            }
+            e
+        })?;
+        // SAFETY: it writes the context to `context`.
+        api.check("cuDevicePrimaryCtxRetain", unsafe { (api.retain)(&mut context, device) })?;
+        let driver = Rc::new(Driver { api, device, context });
+        driver.current()?;
         let (api, mut name) = (&driver.api, [0u8; 256]);
-        // SAFETY: the context was retained; the name is written as a C string, cut to fit.
-        unsafe {
-            api.check("cuCtxSetCurrent", (api.set_current)(context))?;
-            api.check("cuDeviceGetName", (api.device_name)(name.as_mut_ptr().cast(), name.len() as c_int, device))?;
-        }
+        // SAFETY: the name is written as a C string, cut to fit.
+        api.check("cuDeviceGetName", unsafe {
+            (api.device_name)(name.as_mut_ptr().cast(), name.len() as c_int, device)
+        })?;
         let name = CStr::from_bytes_until_nul(&name).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        Cuda::of(driver, name)
+    }
+
+    /// The GPU of `driver`, called `name`, with what the GPU says of itself.
+    fn of(driver: Rc<Driver>, name: String) -> Result<Cuda, Error> {
         // CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR and _MINOR,
-        // CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, _MULTIPROCESSOR_COUNT and
-        // _COOPERATIVE_LAUNCH.
-        let [major, minor, shared, multiprocessors, cooperative] = [75, 76, 97, 16, 95].map(|a| driver.attribute(a));
+        // CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, _MULTIPROCESSOR_COUNT,
+        // _COOPERATIVE_LAUNCH and _CONCURRENT_MANAGED_ACCESS.
+        let [major, minor, shared, multiprocessors, cooperative, concurrent] =
+            [75, 76, 97, 16, 95, unified::CONCURRENT_MANAGED_ACCESS.0].map(|a| driver.attribute(a));
         Ok(Cuda {
             sm: major? * 10 + minor?,
             max_shared: shared?,
             multiprocessors: multiprocessors?,
             cooperative: cooperative? != 0,
+            concurrent_managed_access: concurrent? != 0,
             driver,
             name,
         })
@@ -391,11 +645,19 @@ impl Cuda {
         self.cooperative
     }
 
-    /// Waits for every kernel launched to finish, and says whether one failed.
+    /// Whether the GPU reaches managed memory while the host does, as its
+    /// `CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS` says. A GPU that does not faults the host on
+    /// managed memory while any kernel runs, so the host may hold a slice of managed memory while
+    /// a kernel runs only where this is true: [`Module::launch`] has the rule. Such a GPU is also
+    /// refused [`Unified::prefetch`], and [`Unified::advise`] of a preferred location or an
+    /// accessor that is the GPU.
+    pub fn concurrent_managed_access(&self) -> bool {
+        self.concurrent_managed_access
+    }
+
+    /// Waits for every kernel launched on the GPU to finish, and says whether one failed.
     pub fn sync(&self) -> Result<(), Error> {
-        let api = &self.driver.api;
-        // SAFETY: it takes nothing.
-        api.check("cuCtxSynchronize", unsafe { (api.synchronize)() })
+        self.driver.sync()
     }
 
     /// `len` elements on the GPU, all zero.
@@ -414,15 +676,20 @@ impl Cuda {
 
     /// `len` elements on the GPU, as they were left.
     fn reserve<T: Plain>(&self, len: usize) -> Result<Buffer<T>, Error> {
-        let bytes = len.checked_mul(size_of::<T>()).expect("a buffer of more bytes than there are addresses");
-        let (api, mut ptr) = (&self.driver.api, 0);
+        let bytes = bytes::<T>(len);
+        let (api, mut ptr) = (self.driver.current()?, 0);
         // SAFETY: it writes the address to `ptr`. It refuses no bytes, so it is asked for one.
         api.check("cuMemAlloc", unsafe { (api.alloc)(&mut ptr, bytes.max(1)) })?;
         Ok(Buffer { driver: self.driver.clone(), ptr, len, of: PhantomData })
     }
 }
 
-/// `len` elements of `T` on the GPU, freed when it is dropped.
+/// How many bytes `len` elements of `T` take. Panics if they are more than there are addresses.
+fn bytes<T>(len: usize) -> usize {
+    len.checked_mul(size_of::<T>()).expect("memory of more bytes than there are addresses")
+}
+
+/// `len` elements of `T` on one GPU, the one that made it, freed when it is dropped.
 pub struct Buffer<T: Plain> {
     driver: Rc<Driver>,
     ptr: u64,
@@ -478,12 +745,25 @@ impl<T: Plain> Buffer<T> {
     pub fn zero(&mut self) -> Result<(), Error> {
         self.driver.zero(self.ptr, self.len * size_of::<T>())
     }
+
+    /// Copies what `from` holds to it, after the kernels launched before have run on the GPU
+    /// of either, and before those launched after run on either. `from` may be on another
+    /// GPU than it: where the two have a link between them, the driver's peer access, the copy
+    /// goes over the link, and where they have none it goes through the host. Panics if `from`
+    /// has not as many elements.
+    pub fn copy_from(&mut self, from: &Buffer<T>) -> Result<(), Error> {
+        assert_eq!(from.len, self.len, "a buffer of {} elements copied from one of {}", self.len, from.len);
+        self.driver.copy_from(self.ptr, &from.driver, from.ptr, self.len * size_of::<T>())
+    }
 }
 
 impl<T: Plain> Drop for Buffer<T> {
     fn drop(&mut self) {
-        // SAFETY: `cuMemAlloc` gave the address, and it is freed once, here.
-        unsafe { (self.driver.api.free)(self.ptr) };
+        // A buffer whose GPU's context cannot be made current is left, and not freed in another's.
+        if let Ok(api) = self.driver.current() {
+            // SAFETY: `cuMemAlloc` gave the address, and it is freed once, here.
+            unsafe { (api.free)(self.ptr) };
+        }
     }
 }
 
@@ -658,7 +938,7 @@ impl Module {
     /// variables in global or constant memory, each by its name, in that order. If the driver
     /// will not compile it, the error's `log` is what its compiler said.
     pub fn load(cuda: &Cuda, ptx: &str, names: &[&str], globals: &[&str]) -> Result<Module, Error> {
-        let api = &cuda.driver.api;
+        let api = cuda.driver.current()?;
         let image =
             CString::new(ptx).map_err(|_| Error::new("cuModuleLoadDataEx", "the PTX has a NUL in it".into()))?;
         let mut log = vec![0u8; 1 << 14];
@@ -731,12 +1011,17 @@ impl Module {
     ///
     /// # Safety
     ///
-    /// `args` must be as many as the kernel's parameters, each of the type its `.param` is;
-    /// and the kernel is trusted with them: each pointer among them must be to a buffer as
-    /// long as the kernel reads and writes through it, while it runs.
+    /// `args` must be as many as the kernel's parameters, each of the type its `.param` is; and the
+    /// kernel is trusted with them. Each pointer among them must be to a buffer or to [`Unified`]
+    /// memory of the GPU the module is loaded on, as long as the kernel reads and writes through
+    /// it. From the launch until the kernel is done, the host must hold no slice of memory the
+    /// kernel writes, and no slice it may write of memory the kernel reads; and where
+    /// [`Cuda::concurrent_managed_access`] is false, the GPU not reaching managed memory while the
+    /// host does, the host must hold no slice of managed memory at all. A slice taken after the
+    /// launch waits for the kernel, so only a slice taken before it can break this.
     pub unsafe fn launch(&self, index: usize, grid: Grid, args: &[*const c_void]) -> Result<(), Error> {
         let ([bx, by, bz], [tx, ty, tz]) = (grid.blocks, grid.threads);
-        let (api, k, params) = (&self.driver.api, &self.kernels[index], args.as_ptr().cast_mut().cast());
+        let (api, k, params) = (self.driver.current()?, &self.kernels[index], args.as_ptr().cast_mut().cast());
         self.let_have(k, &grid)?;
         // SAFETY: the caller's. The driver reads `args`, and through them, as it launches.
         let launched = unsafe {
@@ -760,7 +1045,7 @@ impl Module {
             return Err(Error::new("cuLaunchCooperativeKernel", message.into()));
         }
         let ([bx, by, bz], [tx, ty, tz]) = (grid.blocks, grid.threads);
-        let (api, k, params) = (&self.driver.api, &self.kernels[index], args.as_ptr().cast_mut().cast());
+        let (api, k, params) = (self.driver.current()?, &self.kernels[index], args.as_ptr().cast_mut().cast());
         self.let_have(k, &grid)?;
         // SAFETY: the caller's. The driver reads `args`, and through them, as it launches.
         let launched = unsafe {
@@ -786,7 +1071,7 @@ impl Module {
     /// cooperative launch of the kernel has at most this many. The kernel is let have `shared`
     /// bytes first, as for a launch, and `shared` past what a block has is an error that says so.
     pub fn resident(&self, index: usize, threads: u32, shared: u32) -> Result<u32, Error> {
-        let (api, k) = (&self.driver.api, &self.kernels[index]);
+        let (api, k) = (self.driver.current()?, &self.kernels[index]);
         self.let_have(k, &Grid::new(1, threads).with_shared(shared))?;
         let (threads, mut blocks) = (c_int::try_from(threads).unwrap_or(c_int::MAX), 0);
         // SAFETY: `k.function` is a kernel of the module, which is loaded; it writes the count to
@@ -807,7 +1092,7 @@ impl Module {
         if grid.shared <= k.room.get() {
             return Ok(());
         }
-        let api = &self.driver.api;
+        let api = self.driver.current()?;
         // The driver refuses a count of bytes that is no `c_int`, and past what the GPU has.
         let bytes = c_int::try_from(grid.shared).unwrap_or(c_int::MAX);
         // SAFETY: `k.function` is a kernel of the module, which is loaded.
@@ -820,8 +1105,12 @@ impl Module {
 
 impl Drop for Module {
     fn drop(&mut self) {
-        // SAFETY: the module was loaded, and is unloaded once, here.
-        unsafe { (self.driver.api.unload_module)(self.module) };
+        // A module whose GPU's context cannot be made current is left, and not unloaded in
+        // another's.
+        if let Ok(api) = self.driver.current() {
+            // SAFETY: the module was loaded, and is unloaded once, here.
+            unsafe { (api.unload_module)(self.module) };
+        }
     }
 }
 
@@ -890,5 +1179,67 @@ impl<T: Plain> Global<'_, T> {
 impl<T: Plain> fmt::Debug for Global<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Global({} elements at {:#x})", self.len, self.ptr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A function of the fake driver that every lookup finds: it refuses.
+    unsafe extern "C" fn refuse() -> CuResult {
+        // CUDA_ERROR_UNKNOWN.
+        999
+    }
+
+    /// The lookup of a fake driver that has every function but those of `lacks`.
+    fn finds<'a>(lacks: &'a [&'a CStr]) -> impl Fn(&CStr) -> Result<*mut c_void, Error> + 'a {
+        move |name| {
+            if lacks.contains(&name) {
+                Err(missing(name, "libcuda.so.1: undefined symbol"))
+            } else {
+                Ok(refuse as unsafe extern "C" fn() -> CuResult as *mut c_void)
+            }
+        }
+    }
+
+    /// A driver of a release before CUDA 12.2 is opened all the same: the table has the functions
+    /// it has, and has for the two it lacks the error of the lookup, which a call that needs one
+    /// returns. A driver that lacks any other function is not opened.
+    #[test]
+    fn a_driver_before_cuda_12_2_is_opened_and_one_that_lacks_any_other_function_is_not() {
+        let lacks = |name: &str| format!("dlsym: the driver has no `{name}`: libcuda.so.1: undefined symbol");
+        let api = Api::load(finds(&[c"cuMemPrefetchAsync_v2", c"cuMemAdvise_v2"])).ok().unwrap();
+        assert_eq!(api.prefetch.err().unwrap().to_string(), lacks("cuMemPrefetchAsync_v2"));
+        assert_eq!(api.advise.err().unwrap().to_string(), lacks("cuMemAdvise_v2"));
+        let api = Api::load(finds(&[])).ok().unwrap();
+        assert!(api.prefetch.is_ok() && api.advise.is_ok(), "a driver that has them has them");
+        for name in [c"cuInit", c"cuMemRangeGetAttribute", c"cuGetErrorString"] {
+            let e = Api::load(finds(&[name])).err().unwrap();
+            assert_eq!(e.to_string(), lacks(&name.to_string_lossy()), "{name:?}");
+        }
+    }
+
+    /// A call asks the driver to switch only when it goes to another GPU than the last call
+    /// did, and a context the driver would not make current is not taken for the current one.
+    /// The driver here is a cell that holds the context it was last given, and counts the gives.
+    #[test]
+    fn a_context_is_made_current_only_when_another_is() {
+        let (remembered, driver, gives) = (Cell::new(ptr::null_mut()), Cell::new(ptr::null_mut()), Cell::new(0));
+        let (a, b) = (ptr::without_provenance_mut(1), ptr::without_provenance_mut(2));
+        let give = |context| {
+            driver.set(context);
+            gives.set(gives.get() + 1);
+            Ok(())
+        };
+        for (context, gives_so_far) in [(a, 1), (a, 1), (b, 2), (b, 2), (a, 3), (a, 3)] {
+            enter(&remembered, context, || give(context)).unwrap();
+            assert_eq!((driver.get(), gives.get()), (context, gives_so_far));
+        }
+        let refused = enter(&remembered, b, || Err(Error::new("cuCtxSetCurrent", "refused".into())));
+        assert_eq!(refused.unwrap_err().message, "refused");
+        // It tries again, for the context the driver last had is still `a`.
+        enter(&remembered, b, || give(b)).unwrap();
+        assert_eq!((driver.get(), gives.get()), (b, 4));
     }
 }

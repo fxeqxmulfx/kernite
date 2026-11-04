@@ -276,7 +276,7 @@ unsafe { kernels::normalize(kernite_cpu::Grid::new(4), x.as_mut_ptr(), sums.as_m
 
 `normalize` becomes the function that launches it, which takes a [`kernite_cpu::Grid`](crates/cpu/src/lib.rs) and the
 kernel's parameters, runs the kernel on a thread for each of the grid's, the caller's the first, and returns when all
-have ended. A thread that waits spins, so it needs a core: a grid of more threads than the machine runs at once,
+have ended. A thread that waits spins, so it needs a core: a grid of more threads than the process runs at once,
 `kernite_cpu::most()`, is an error, as a GPU's grid of more blocks than it runs at once is.
 
 The grid's other threads are kept. The first launch from a thread starts them, each with the stack Rust gives a thread,
@@ -286,6 +286,47 @@ on twelve. A kept thread with no kernel to run spins for 200 microseconds, `kern
 and then sleeps, using no CPU. A launch that finds the threads asleep costs 5 microseconds on two threads, 9 on six and
 16 on twelve, and some 100 when the machine has been idle for milliseconds, as the system wakes its cores. The threads
 end when the thread that launched does.
+
+Where a grid's threads run is the system's to say, unless the caller places them. A `Grid::new(4)` runs each thread on
+any CPU the caller's thread may run on, and the system moves it from one to another as it likes. A
+`kernite_cpu::Grid::on(&[0, 2, 4, 6])` runs thread 0 on CPU 0, thread 1 on CPU 2, thread 2 on CPU 4 and thread 3 on CPU
+6, each on its CPU alone, in every launch. On a Ryzen 5 5600H, whose CPUs 0 and 1 are the two threads of one core, that
+is a thread a core. `kernite_cpu::cpus()` lists the CPUs to choose from: those the caller's thread may run on, which
+`numactl --physcpubind` or `taskset` set for a process when they start it. `kernite_cpu::most()` counts them, or fewer
+where a cgroup limits the process to fewer: under `systemd-run --user --scope -p CPUQuota=200%` it is 2, though `cpus()`
+lists every CPU the thread may run on. Under `numactl --physcpubind=0-5` it is 6, a grid of 7 threads is an error, and
+so is a thread placed on CPU 6:
+`thread 0 of the grid is placed on CPU 6, and the caller's thread may run on CPUs 0-5`. So is a CPU given to two
+threads, since a thread that waits needs a CPU of its own. When a placement is an error, no kernel runs and no thread
+moves.
+
+The caller's thread is the grid's first. The first launch that places it puts it on the first CPU of the grid, and it
+stays there, as the grid's other threads stay where they are placed, until a launch places them elsewhere, or places
+none, which puts the caller's thread and every thread kept for it back on the CPUs the caller's thread could run on. A
+thread the caller starts meanwhile starts on that one CPU, as a thread starts on the CPUs of its creator.
+`kernite_cpu::cpus()` from that thread still lists the CPUs it could run on before, for `Grid::on(&cpus()?[..4])` to
+give the same grid in launch after launch. If the program moves the caller's thread itself in between, kernite does not
+know: a launch that places it on the CPU kernite left it on does not move it.
+
+A launch makes one call to the system for each thread it moves, and none when none moves, so a thousand launches of one
+placement ask it nothing about CPUs. The first launch that places the caller's thread, and the first after one that
+placed none, also asks once which CPUs the thread may run on. A thread that may run on one CPU alone cannot run while
+another spins there, and a spin that no launch ends lasts 200 microseconds, so a launch that moves threads first ends
+the spin of each kept thread on a CPU a thread moves to, and of each the system places: it sleeps until a launch uses
+it. A launch that moves none ends no spin.
+
+A page of memory is on the NUMA node of the CPU that first writes it, if that node has room, whichever thread asked for
+the buffer. `vec![0.0; n]`, for a large `n`, writes no page, so the first thread to write one gives it its node, and
+`vec![1.0; n]` writes them all, so the caller's thread gives them its own. A grid's threads are near their memory, then,
+if each writes its part of a buffer first, and a `Grid::on` of the same CPUs keeps each by its part in the launches
+after. A page is the least that has a node, so a part is near its thread but for the pages it shares with the parts next
+to it.
+
+kernite places no memory and sets no policy: to spread a buffer over the nodes, or keep it on one, run the process under
+`numactl --interleave=all` or `--membind=1`. The system says which CPUs are on a node, and which are the threads of one
+core, in `/sys/devices/system/node/node0/cpulist` and `/sys/devices/system/cpu/cpu0/topology/thread_siblings_list`, for
+a program to read and give to `Grid::on`. The grid's barrier is one cache line for the whole grid, whichever nodes its
+threads are on, so a `grid.sync()` over threads on two nodes passes that line between them.
 
 The kernel's parameters keep the names they are written with, `grid` among them, but `_`, which the macros name
 for Rust. A compile-time argument may not be named `grid`, for Rust cannot keep a const apart from a parameter of
@@ -352,6 +393,120 @@ let (xs, ys) = (cuda.upload(&x)?, cuda.upload(&y)?);
 unsafe { kernels.saxpy(kernite_cuda::Grid::new(n.div_ceil(256), 256), 2.0, xs.ptr(), ys.ptr(), n)? };
 ys.read_into(&mut y)?;
 ```
+
+A machine may have several GPUs. The GPUs are those the driver shows the program: all of the machine's, unless
+`CUDA_VISIBLE_DEVICES` chooses which, and the driver numbers them from 0 in its order. `Cuda::count()` says how many
+there are, and `Cuda::on(i)` takes GPU `i`; `Cuda::new()` is `Cuda::on(0)`. `Kernels::load(&cuda)` loads the kernels on
+the GPU of `cuda`, and a buffer is on the GPU of the `Cuda` that made it.
+
+An index past the last GPU is an error that says how many there are:
+`cuDeviceGet: CUDA_ERROR_INVALID_DEVICE (101): invalid device ordinal: the driver shows 1 GPU, and none is numbered 1`.
+Where the driver shows none, because the machine has no GPU or `CUDA_VISIBLE_DEVICES` chooses none, `Cuda::count()` is 0
+and `Cuda::new()` is the error `cuInit` gives: `cuInit: CUDA_ERROR_NO_DEVICE (100): no CUDA-capable device is detected`.
+Where there is no driver, or `cuInit` fails any other way, `Cuda::count()` is an error, as `Cuda::new()` is.
+
+A `Cuda`, and the buffers and `Kernels` made on it, are for the thread that made it. A thread takes the GPU it uses with
+`Cuda::on`, and threads may take the same GPU. One thread may use the `Cuda` of each GPU in turn: each call, a launch, a
+copy or `sync`, goes to the GPU of the `Cuda`, the buffer or the `Kernels` it is made on, whichever GPU the call before
+it went to. A kernel is given the buffers of the GPU it runs on. The driver does a call's work in the context current on
+the thread, so kernite-cuda keeps which GPU's it made current last. A call to that GPU asks the driver for nothing it
+did not ask before, and a call to another GPU asks it once more, to make that GPU's current, `cuCtxSetCurrent`.
+
+`to.copy_from(&from)` copies a buffer to one on another GPU, after the kernels launched before it on either GPU have
+run, and before those launched after it on either run. Where the two GPUs have a link between them, it asks the driver
+for peer access and the copy goes over the link; where they have none, the driver sends it through the host.
+
+A buffer is the GPU's own memory, which the host reaches by copies. Unified memory is reached by the host and by the
+GPU's kernels at one address, with no copy, and it is of one of three kinds. `cuda.managed::<f32>(len)` is `len` zeros
+of managed memory, which the driver moves to whichever of the host and the GPU touches it. `cuda.pinned::<f32>(len)` is
+`len` zeros of page-locked memory, which stays in the host's memory, and a kernel reads and writes it across the bus.
+`cuda.lend(&mut xs)` lends a slice of the host's own memory to the GPU, a `Vec`'s or a `Box`'s: a kernel reads and
+writes its elements where they are, and the host has the slice back when it drops what `lend` returned. A kernel is
+given `memory.ptr()`, and the host reads and writes `memory.host()` and `memory.host_mut()`, which are slices of it. The
+slices are at the address `ptr` gives, so a kernel for the CPU that is given a slice's pointer works on the memory that
+a kernel for the GPU is given: [`examples/my-app`](examples/my-app/src/main.rs) makes managed memory with
+`managed_uninit`, fills it with an x86 kernel, squares it with a PTX kernel and adds it up with an x86 kernel, bit for
+bit, with no copy.
+
+The zeros cost. The GPU writes the zeros of managed memory, so the driver has each page at the GPU when the host first
+writes it, and moves it back; the host writes the zeros of page-locked memory in a pass of its own, before its fill.
+Memory that the host or a kernel writes whole before anything reads it needs none: `cuda.managed_uninit::<f32>(len)` and
+`cuda.pinned_uninit::<f32>(len)` leave the bytes as the driver does, and cost what `cuMemAllocManaged` and
+`cuMemHostAlloc` do. They are `unsafe`, because the bytes may be those of memory freed before, which the driver hands
+out again where a buffer beside it holds the page: the host or a kernel writes each element before anything reads it.
+Memory that is read before it is all written is made with `managed` and `pinned`, which are safe.
+
+A GPU does not do all three, so each asks the GPU first. Where the GPU cannot, the error says so in these words, and no
+kernel is left to fault: `cuMemAllocManaged: the GPU cannot allocate managed memory: its
+CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY is 0` for `managed` and `managed_uninit`; `cuMemHostAlloc: the GPU cannot reach
+page-locked memory at the host's addresses: its CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0` for `pinned` and
+`pinned_uninit`; and `cuDeviceGetAttribute: the GPU cannot reach pageable memory, a slice of the host's: its
+CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0` for `lend`, which a GPU with HMM can do. Each error names the call it
+refuses, as `Error::call` does; `lend` makes no call of the driver's to refuse, so its error names
+`cuDeviceGetAttribute`, which told that the GPU cannot.
+
+The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, faults a kernel on a lent element that has a guard
+page in its aligned 64 KiB, a page set with `madvise(MADV_GUARD_INSTALL)`: the kernel fails with
+`CUDA_ERROR_ILLEGAL_ADDRESS (700)`, as does every call after it. glibc 2.43 sets such a page below each thread's
+stack. So `lend` the memory of a `Vec`, a `Box` or a mapping, and not an array on a thread's stack.
+
+`host()` and `host_mut()` wait for every kernel launched on the GPU to finish, and say whether one failed, before they
+lend the slice, so a slice taken after a launch is never under its kernel, and the host reads what a kernel wrote with
+no `sync` of its own. The compiler refuses to take a pointer for a kernel while the host holds a slice it may write, as
+`ptr` borrows the memory and `host_mut` borrows it mutably, and it refuses the host a touch of a slice that is lent, as
+`lend` borrows the slice. Dropping the memory waits for the kernels that use it, as dropping a buffer does, and then
+frees it, or gives a slice lent back to the host.
+
+A pointer taken before the slice is `Copy`, and the compiler cannot refuse a launch on it, so a launch is `unsafe`, and
+its contract is this: each pointer is to a buffer or to unified memory of the GPU, as long as the kernel reads and
+writes through it; from the launch until the kernel is done, the host holds no slice of memory the kernel writes, and no
+slice it may write of memory the kernel reads; and where `cuda.concurrent_managed_access()` is false, the GPU not
+reaching managed memory while the host does, the host holds no slice of managed memory at all. The method is the GPU's
+`CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS`, and a GPU where it is false faults the host on managed memory while any
+kernel runs. `Module::launch` says the contract in its `# Safety`, and the macros write it as the `# Safety` of the
+launcher of a GPU kernel that has none.
+
+Managed memory is moved ahead of its use, and advised how it is used, over a range of its elements; a slice lent is
+advised too, but not moved. `memory.prefetch(0..len, Location::Gpu)` moves them to the GPU, ahead of the kernels that
+use them, on the stream the kernels are launched on; the places are `Gpu`, `Host`, `Numa(node)` and `NumaOfThread`.
+`memory.advise(range, advice)` tells the driver that the range is `ReadMostly` or `NotReadMostly`, that it has a
+`PreferredLocation(place)` or `NoPreferredLocation`, or that the GPU or the host is `AccessedBy` it or `NotAccessedBy`
+it, which the driver may follow or not. `memory.placement(range)` says what the driver has of both: `read_mostly`,
+`preferred`, `accessed_by` and `last_prefetch`, each only where every page of the range agrees, and `None` or empty
+where they do not. A prefetch, and the advice that names the GPU, need the GPU to reach managed memory while the host
+does, and where it cannot the error says so in these words: `cuMemPrefetchAsync: the GPU cannot reach managed memory
+while the host does: its CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0`, or `cuMemAdvise:` and the same for the
+advice.
+
+`prefetch`, `advise` and `placement` need a driver of CUDA 12.2 (535) or later, which brought `cuMemPrefetchAsync_v2`,
+`cuMemAdvise_v2` and the attributes of the preferred place and of the last prefetch. `Cuda::new()` opens an older driver
+all the same, and each of the three says so when it is called, in the words of the loader: ``dlsym: the driver has no
+`cuMemPrefetchAsync_v2`: libcuda.so.1: undefined symbol: cuMemPrefetchAsync_v2`` for `prefetch`, and the same of
+`cuMemAdvise_v2` for `advise` and `placement`.
+
+The driver prefetches managed memory alone, and tells the place of it alone, so `prefetch` and `placement` refuse
+page-locked memory and a slice lent, and say why: `cuMemPrefetchAsync: the driver prefetches managed memory alone: this
+is page-locked memory`, or `this is a slice lent`, and `cuMemRangeGetAttribute: the driver tells the place of managed
+memory alone: this is a slice lent`. It advises managed memory, and pageable memory where the GPU reaches it, which
+`lend` asked, so `advise` takes a slice lent as it takes managed memory, and refuses page-locked memory: `cuMemAdvise:
+the driver advises managed and pageable memory alone: this is page-locked memory`.
+
+A NUMA node does not touch memory, so it is refused as an accessor: `cuMemAdvise: only the GPU and the host access
+memory, not a NUMA node`; and the driver refuses a node the host does not have: `cuMemPrefetchAsync:
+CUDA_ERROR_INVALID_VALUE (1): invalid argument`. A range with no elements, or one past the end, panics.
+
+The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, takes a NUMA node as the preferred location,
+`PreferredLocation(Numa(node))` or `PreferredLocation(NumaOfThread)`, and changes nothing: the memory prefers what it
+did before, the GPU, the host or no place, and `preferred` says so. CUDA's header says the driver sets the node and says
+it back as a NUMA node, which this one does not.
+
+The driver works on whole pages, 4 KiB. A range reaches all of each page it touches, the rest of the page too, whether
+it is the memory of the same buffer or of another. A managed buffer starts at a multiple of 512 bytes, not at a page, so
+it shares the pages at its ends with the buffers beside it, and a range from a page to a page reaches just its own.
+
+The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, does not always clear the advice and the last
+prefetch of a buffer it frees, when threads use it at once: a buffer made at that address may start with them, and
+`placement` says so. When one thread uses it, it clears them. They are hints, so no value changes.
 
 `saxpy` becomes the method that launches it, which takes the grid and then the kernel's parameters. They keep the names
 they are written with, `grid` among them, but `_`, which the macros name for Rust. A compile-time argument may not
@@ -555,8 +710,8 @@ Each crate depends only on the layers inside it. `crates/kernite/tests/architect
 | adapters | `kernite-x86`, `kernite-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kernite` | which machine and syntax each kernel compiles with |
 | delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, launchers of a grid's threads, or launchers of PTX |
-| runtime | `kernite-cuda` | the CUDA driver: memory on the GPU, modules, launches; `f16` and `bf16`; depends on no other crate |
-| runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid, and the memory of a module of x86 kernels; depends on no other crate |
+| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and memory the host reaches too, modules, launches, copies between GPUs; `f16` and `bf16`; depends on no other crate |
+| runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid and the CPUs they run on, and the memory of a module of x86 kernels; depends on no other crate |
 
 ## Guarantees
 

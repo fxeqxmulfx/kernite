@@ -1087,7 +1087,8 @@ fn weigh_on_cpu(x: &mut [f32]) {
 /// `x / s` on `threads` threads of the cpu, `s` the sum of `x`, in one launch: each thread
 /// sums its chunks of 1024 floats while the others sum theirs, then waits for them to add the
 /// chunks' sums, bit for bit as `normalize` does on the GPU. `threads` is one at least, and at
-/// most as many as the machine runs at once, `kernite_cpu::most()`; else it is an error.
+/// most as many as the process runs at once, `kernite_cpu::most()`: the CPUs the caller's thread
+/// may run on, or fewer where a cgroup limits the process to fewer. More is an error.
 fn normalize_on_threads(x: &mut [f32], threads: usize) -> Result<(), kernite_cpu::Error> {
     assert!(supported(), "the kernels need AVX2 and FMA");
     let mut sums = vec![0.0; x.len().div_ceil(1024)];
@@ -1098,8 +1099,9 @@ fn normalize_on_threads(x: &mut [f32], threads: usize) -> Result<(), kernite_cpu
 
 /// `steps` steps of heat spreading along `x` on `threads` threads of the cpu, in one launch,
 /// the threads waiting for each other between steps, bit for bit as `diffuse` does on the
-/// GPU. `threads` is one at least, and at most as many as the machine runs at once,
-/// `kernite_cpu::most()`; else it is an error.
+/// GPU. `threads` is one at least, and at most as many as the process runs at once,
+/// `kernite_cpu::most()`: the CPUs the caller's thread may run on, or fewer where a cgroup limits
+/// the process to fewer. More is an error.
 fn diffuse_on_threads(x: &mut [f32], steps: usize, threads: usize) -> Result<(), kernite_cpu::Error> {
     assert!(supported(), "the kernels need AVX2 and FMA");
     let mut y = vec![0.0; x.len()];
@@ -1967,24 +1969,31 @@ mod tests {
         too_large(super::diffuse(&cuda, &kernels, &mut vec![0.0; all + 1], 1).unwrap_err(), most + 1, most);
     }
 
-    /// How many threads the cpu tests run on at most: four, or as many as the machine runs at
+    /// How many threads the cpu tests run on at most: four, or as many as the process runs at
     /// once if fewer, since `cargo test` runs tests beside each other and each thread spins at
     /// a barrier.
     fn threads() -> usize {
         kernite_cpu::most().unwrap().min(4)
     }
 
-    /// The error of a grid of more threads than the machine runs at once.
+    /// The error of a grid of more threads than the process runs at once.
     fn too_many(e: kernite_cpu::Error) {
         let most = kernite_cpu::most().unwrap();
-        assert_eq!(e.message, format!("the grid has {} threads, and the machine runs {most} at once", most + 1));
+        assert_eq!(
+            e.message,
+            format!(
+                "the grid has {} threads, and the process runs {most} at once: the CPUs the caller's thread may run \
+                 on, or fewer where a cgroup limits the process to fewer",
+                most + 1
+            )
+        );
     }
 
     /// The cpu's `normalize` against [`normalized`], the GPU's reference, bit for bit, on one
     /// thread to four, each time of ten: of no float and of one, of a chunk and a float less and
     /// more, and of chunks enough that each thread has several, the last partial, so that a
     /// thread that went on before the others had written their sums would show; and a grid of
-    /// more threads than the machine runs is an error.
+    /// more threads than the process runs at once is an error.
     #[test]
     fn normalize_on_threads_is_the_gpus_reference_bit_for_bit() {
         assert!(super::supported(), "the kernels need AVX2 and FMA");
@@ -2007,11 +2016,36 @@ mod tests {
         too_many(super::normalize_on_threads(&mut [1.0], kernite_cpu::most().unwrap() + 1).unwrap_err());
     }
 
+    /// The cpu's `normalize` on a grid placed on the first CPUs the caller's thread may run on, a thread on
+    /// each, against [`normalized`], bit for bit, on one thread to four: the threads wait for each
+    /// other at the barrier on CPUs of their own, as they do where the system puts them.
+    #[test]
+    fn normalize_on_a_placed_grid_is_the_gpus_reference_bit_for_bit() {
+        assert!(super::supported(), "the kernels need AVX2 and FMA");
+        let cpus = kernite_cpu::cpus().unwrap();
+        for threads in 1..=threads() {
+            for n in [1, 1025, 41_000] {
+                let x: Vec<f32> = floats(n, n as u32 + 11).iter().map(|x| x / 2.0 + 1.0).collect();
+                let want: Vec<u32> = normalized(&x).iter().map(|v| v.to_bits()).collect();
+                let (mut got, mut sums) = (x.clone(), vec![0.0; n.div_ceil(1024)]);
+                let grid = kernite_cpu::Grid::on(&cpus[..threads]);
+                // SAFETY: `n` floats behind `got` and a float a chunk behind `sums`, which nothing
+                // else touches while the threads run, and the cpu has what the kernel needs.
+                unsafe { super::kernels::normalize(grid, got.as_mut_ptr(), sums.as_mut_ptr(), n) }.unwrap();
+                assert_eq!(
+                    got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    want,
+                    "{n} floats, {threads} threads placed"
+                );
+            }
+        }
+    }
+
     /// The cpu's `diffuse` against [`diffused`], the GPU's reference, bit for bit, on one thread
     /// to four: of floats fewer than a vector and its neighbours, of a chunk and one more, and
     /// of chunks enough that each thread has several, over a thousand steps, each a wait of the
     /// grid, so that a thread that read a neighbour of another step would show; and a grid of
-    /// more threads than the machine runs is an error.
+    /// more threads than the process runs at once is an error.
     #[test]
     fn diffuse_on_threads_is_the_gpus_reference_bit_for_bit() {
         assert!(super::supported(), "the kernels need AVX2 and FMA");
@@ -2091,6 +2125,28 @@ mod tests {
             let want: Vec<u32> = x.iter().zip(&y).map(|(x, y)| 1.5f32.mul_add(*x, *y).to_bits()).collect();
             super::saxpy(&cuda, &kernels, 1.5, &x, &mut y).unwrap();
             assert_eq!(y.iter().map(|y| y.to_bits()).collect::<Vec<_>>(), want, "{n} floats");
+        }
+    }
+
+    /// `Kernels::load` on the `Cuda` of each GPU, all held at once on this thread, and `saxpy`
+    /// launched on each in turn against `f32::mul_add`, twice around, so that each launch follows
+    /// one on another GPU. On a machine with one GPU it runs on that one; with none, skipped.
+    #[test]
+    fn saxpy_is_mul_add_bit_for_bit_on_each_gpu() {
+        let Some(first) = cuda() else { return };
+        let others = (1..Cuda::count().unwrap()).map(|index| {
+            let cuda = Cuda::on(index).unwrap();
+            gpu::Kernels::load(&cuda).map(|kernels| (cuda, kernels)).unwrap()
+        });
+        let gpus: Vec<(Cuda, gpu::Kernels)> = std::iter::once(first).chain(others).collect();
+        for round in 0..2 {
+            for (index, (cuda, kernels)) in gpus.iter().enumerate() {
+                let seed = 10 * round + index as u32;
+                let (x, mut y) = (floats(10_000, 3 * seed + 1), floats(10_000, 3 * seed + 2));
+                let want: Vec<u32> = x.iter().zip(&y).map(|(x, y)| 1.5f32.mul_add(*x, *y).to_bits()).collect();
+                super::saxpy(cuda, kernels, 1.5, &x, &mut y).unwrap();
+                assert_eq!(y.iter().map(|y| y.to_bits()).collect::<Vec<_>>(), want, "GPU {index}, round {round}");
+            }
         }
     }
 
@@ -2254,5 +2310,135 @@ mod tests {
             }
         }
         cuda.sync().unwrap();
+    }
+
+    /// The cpu's kernels for the test of one memory for a cpu kernel and a GPU kernel.
+    #[kernite_macros::kernels]
+    mod host {
+        /// The indices of the eight floats a step of `fill` writes, as floats.
+        pub static LANES: constant<[f32; 8]> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+
+        /// `x[i] = 1 + i * 0.000001` for each `i < n`, `n` a multiple of 8, each operation rounded
+        /// once: eight floats at a time, from the indices as floats, which grow by eight. All the
+        /// floats are between 1 and 2, so that each of them shows in a sum of the squares.
+        pub unsafe extern "sysv64" fn fill(x: *mut f32, n: usize) {
+            test(n, n);
+            jz(done);
+            let (at, eight, step, one, v): (ymm, ymm, ymm, ymm, ymm);
+            vmovups(at, [LANES]);
+            vbroadcastss(eight, [8.0]);
+            vbroadcastss(step, [0.000001]);
+            vbroadcastss(one, [1.0]);
+            label(top);
+            vmulps(v, at, step);
+            vaddps(v, v, one);
+            vmovups([x], v);
+            vaddps(at, at, eight);
+            add(x, 32);
+            sub(n, 8);
+            jnz(top);
+            label(done);
+        }
+
+        /// The eight lanes of the sum of the `n` floats at `x`, `n` a multiple of 8, to `out`:
+        /// lane `j` is the floats at `j` of each eight, added in order.
+        pub unsafe extern "sysv64" fn lanes(x: *const f32, n: usize, out: *mut f32) {
+            let acc: ymm;
+            zero(acc);
+            test(n, n);
+            jz(done);
+            label(top);
+            vaddps(acc, acc, [x]);
+            add(x, 32);
+            sub(n, 8);
+            jnz(top);
+            label(done);
+            vmovups([out], acc);
+        }
+    }
+
+    /// The GPU's kernel for the same test.
+    #[kernite_macros::kernels]
+    mod device {
+        /// `x[i] *= x[i]` for each `i < n`, rounded once.
+        pub unsafe extern "ptx-kernel" fn square(x: *mut f32, n: u32) {
+            let (block, size, thread, i): (u32, u32, u32, u32);
+            mov.u32(block, ctaid.x);
+            mov.u32(size, ntid.x);
+            mov.u32(thread, tid.x);
+            mad.lo.u32(i, block, size, thread);
+            let past: pred;
+            setp.ge.u32(past, i, n);
+            if past {
+                ret();
+            }
+            let at: u64;
+            mad.wide.u32(at, i, 4, x);
+            let v: f32;
+            ld.global.f32(v, [at]);
+            mul.rn.f32(v, v, v);
+            st.global.f32([at], v);
+        }
+    }
+
+    /// One managed memory is the cpu's and the GPU's, at one address, with no copy: a cpu kernel
+    /// fills it, a GPU kernel squares it, and a cpu kernel adds it up, each bit for bit as the
+    /// scalar reference does, in the kernel's order; on a machine with no GPU, skipped.
+    #[test]
+    fn a_cpu_kernel_fills_managed_memory_a_gpu_kernel_squares_it_and_a_cpu_kernel_adds_it_up() {
+        let cuda = match Cuda::new() {
+            Ok(cuda) => cuda,
+            Err(e) => return eprintln!("no GPU: skipped. {e}"),
+        };
+        // This test holds slices of managed memory while the other tests of the binary launch kernels,
+        // which a launch's contract allows only where the GPU reaches managed memory while the host does.
+        if !cuda.concurrent_managed_access() {
+            return eprintln!("the GPU cannot reach managed memory while the host does: skipped.");
+        }
+        let kernels = device::Kernels::load(&cuda).unwrap();
+        // A multiple of 8, and not of 256, so that the last block has threads past the end.
+        let n = 1_000_008;
+        // SAFETY: the cpu kernel `fill` writes each of the `n` floats before anything reads one.
+        let mut memory = match unsafe { cuda.managed_uninit::<f32>(n) } {
+            Ok(memory) => memory,
+            Err(e) => return eprintln!("the GPU cannot: skipped. {e}"),
+        };
+        let address = memory.ptr().addr();
+        let filled = memory.host_mut().unwrap();
+        assert_eq!(filled.as_ptr() as u64, address, "the cpu's address is the GPU's");
+        // SAFETY: `n` floats at `filled`, which has them, and a cpu that runs the kernel.
+        unsafe { host::fill(filled.as_mut_ptr(), n) };
+        let want: Vec<f32> = (0..n).map(|i| 1.0 + i as f32 * 0.000001).collect();
+        assert_eq!(bits(filled), bits(&want), "the cpu kernel's floats");
+
+        // SAFETY: `square` reads and writes `n` floats at the pointer, which the memory, managed
+        // memory of this GPU, has, and this test holds no slice of it. The GPU reaches managed memory
+        // while the host does, or the test would have been skipped.
+        unsafe { kernels.square(Grid::new(n.div_ceil(256) as u32, 256), memory.ptr(), n as u32) }.unwrap();
+        let squared = memory.host().unwrap();
+        assert_eq!(squared.as_ptr() as u64, address, "no copy");
+        let want: Vec<f32> = want.iter().map(|x| x * x).collect();
+        assert_eq!(bits(squared), bits(&want), "the GPU kernel's floats");
+
+        let mut lanes = [0f32; 8];
+        // SAFETY: `n` floats at `squared`, which has them, eight at `lanes`, and a cpu that runs
+        // the kernels.
+        let sum = unsafe {
+            host::lanes(squared.as_ptr(), n, lanes.as_mut_ptr());
+            kernels::sum8(lanes.as_ptr())
+        };
+        let mut want_lanes = [0f32; 8];
+        for eight in want.chunks(8) {
+            for (lane, x) in want_lanes.iter_mut().zip(eight) {
+                *lane += x;
+            }
+        }
+        assert_eq!(lanes.map(f32::to_bits), want_lanes.map(f32::to_bits), "the cpu kernel's lanes");
+        assert_eq!(sum.to_bits(), sum_lanes(want_lanes).to_bits(), "the sum of the squares");
+    }
+
+    /// The bits of `floats`.
+    fn bits(floats: &[f32]) -> Vec<u32> {
+        floats.iter().map(|x| x.to_bits()).collect()
     }
 }

@@ -1,11 +1,13 @@
 //! The driver as kernite calls it, on the GPU here, if there is one.
 
-use kernite_cuda::{Cuda, Grid, Module, arg, bf16, f16};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
+use kernite_cuda::{Buffer, Cuda, Grid, Module, arg, bf16, f16};
 
 /// `x[i] += 1` for each `i < n`, a thread each, written by hand.
 const PTX: &str = "
 .version 7.5
-.target sm_75
+.target sm_61
 .address_size 64
 
 .visible .entry add_one(.param .u64 x_param, .param .u32 n_param)
@@ -1017,4 +1019,170 @@ fn the_kernels_block_is_said_after_the_gpus_limits_and_the_shared_memory() {
         refusal("cuFuncSetAttribute", &e, &all);
     }
     cuda.sync().unwrap();
+}
+
+/// The indexes of the GPUs for a test of two: 0 and 1; or, on a machine with one GPU, 0 twice,
+/// and a line that says what the test could not show. `None`, and why, where the driver shows none.
+fn two_gpus() -> Option<[usize; 2]> {
+    // Where the driver shows none, `cuda` says so, and the test is skipped.
+    cuda()?;
+    let count = Cuda::count().unwrap();
+    if count < 2 {
+        eprintln!("two GPUs: skipped, the driver shows {count}; the test runs on GPU 0 twice");
+        return Some([0, 0]);
+    }
+    Some([0, 1])
+}
+
+/// Launches `add_one`, kernel 0 of `module`, over the first 1000 floats of `x`.
+fn add_one(module: &Module, x: &Buffer<f32>) {
+    let (x, n) = (x.ptr(), 1000u32);
+    // SAFETY: `add_one` takes a pointer and a `u32`, and writes only the first `n` floats there,
+    // which the buffers of these tests have.
+    unsafe { module.launch(0, Grid::new(4, 256), &[arg(&x), arg(&n)]) }.unwrap();
+}
+
+#[test]
+fn a_gpu_is_taken_by_its_index_and_a_missing_one_is_an_error_that_says_how_many_there_are() {
+    let Some(first) = cuda() else { return };
+    let count = Cuda::count().unwrap();
+    // The system lists a GPU in a directory of its own, unless `CUDA_VISIBLE_DEVICES` hides some.
+    if let (Ok(gpus), None) = (std::fs::read_dir("/proc/driver/nvidia/gpus"), std::env::var_os("CUDA_VISIBLE_DEVICES"))
+    {
+        assert_eq!(gpus.count(), count);
+    }
+    // GPU 0 by its index is the one `Cuda::new` gives, and every index below the count is a GPU.
+    let describe = |c: &Cuda| (c.name().to_string(), c.sm(), c.max_shared(), c.multiprocessors());
+    assert_eq!(describe(&Cuda::on(0).unwrap()), describe(&first));
+    for index in 0..count {
+        Cuda::on(index).unwrap();
+    }
+    // The first index past the last GPU, and the greatest there is, are errors that say how many
+    // GPUs there are.
+    let gpus = if count == 1 { "1 GPU".to_string() } else { format!("{count} GPUs") };
+    for past in [count, usize::MAX] {
+        let e = Cuda::on(past).err().unwrap();
+        let said = "CUDA_ERROR_INVALID_DEVICE (101): invalid device ordinal";
+        assert_eq!(
+            (e.call, e.message),
+            ("cuDeviceGet", format!("{said}: the driver shows {gpus}, and none is numbered {past}"))
+        );
+    }
+    if count == 1 {
+        let e = Cuda::on(1).err().unwrap();
+        assert_eq!(
+            e.to_string(),
+            "cuDeviceGet: CUDA_ERROR_INVALID_DEVICE (101): invalid device ordinal: the driver shows 1 GPU, and none is numbered 1"
+        );
+    }
+}
+
+#[test]
+fn a_cuda_of_each_gpu_on_one_thread_sends_each_call_to_its_own_gpu() {
+    let Some(gpus) = two_gpus() else { return };
+    // Each `Cuda` is made, and its module loaded, with its own GPU's context current; the second
+    // makes its context current in the first's place.
+    let a = Cuda::on(gpus[0]).unwrap();
+    let module_a = Module::load(&a, PTX, &["add_one"], &[]).unwrap();
+    let globals_a = Module::load(&a, GLOBALS, &["count"], &["counts"]).unwrap();
+    let b = Cuda::on(gpus[1]).unwrap();
+    let module_b = Module::load(&b, PTX, &["add_one"], &[]).unwrap();
+    let globals_b = Module::load(&b, GLOBALS, &["count"], &["counts"]).unwrap();
+    let (mut xs_a, mut xs_b) = (a.alloc::<f32>(1000).unwrap(), b.alloc::<f32>(1000).unwrap());
+    for round in 1..=4 {
+        // Copies in turn, then launches on both GPUs before either is waited for, in an order
+        // that changes, and each call goes to its own GPU.
+        xs_a.write(&[round as f32; 1000]).unwrap();
+        xs_b.write(&[10.0 * round as f32; 1000]).unwrap();
+        let order: [&dyn Fn(); 4] = if round % 2 == 0 {
+            [&|| add_one(&module_a, &xs_a), &|| add_one(&module_b, &xs_b), &|| add_one(&module_b, &xs_b), &|| {
+                add_one(&module_a, &xs_a)
+            }]
+        } else {
+            [&|| add_one(&module_b, &xs_b), &|| add_one(&module_a, &xs_a), &|| add_one(&module_a, &xs_a), &|| {
+                add_one(&module_b, &xs_b)
+            }]
+        };
+        order.iter().for_each(|launch| launch());
+        if round % 2 == 0 {
+            a.sync().unwrap();
+            b.sync().unwrap();
+        } else {
+            b.sync().unwrap();
+            a.sync().unwrap();
+        }
+        assert_eq!(xs_a.read().unwrap(), vec![round as f32 + 2.0; 1000], "round {round}, GPU {}", gpus[0]);
+        assert_eq!(xs_b.read().unwrap(), vec![10.0 * round as f32 + 2.0; 1000], "round {round}, GPU {}", gpus[1]);
+    }
+    // The memory of each module is on its own GPU: the same variable on each holds its own count.
+    let count = |module: &Module, threads: u32| {
+        let i = 1u32;
+        // SAFETY: `count` takes a `u32`, and adds to word `i` of the four of `counts`.
+        unsafe { module.launch(0, Grid::new(1, threads), &[arg(&i)]) }.unwrap()
+    };
+    count(&globals_a, 3);
+    count(&globals_b, 5);
+    count(&globals_a, 3);
+    assert_eq!(globals_b.global::<u32>(0).read().unwrap(), [0, 5, 0, 0]);
+    assert_eq!(globals_a.global::<u32>(0).read().unwrap(), [0, 6, 0, 0]);
+    // What is dropped goes to its own GPU's context too, whichever was used last.
+    drop(xs_a);
+    b.sync().unwrap();
+    drop(globals_a);
+    drop(module_a);
+    assert_eq!(xs_b.read().unwrap(), vec![42.0; 1000]);
+    drop(a);
+    b.sync().unwrap();
+}
+
+#[test]
+fn a_buffer_is_copied_from_one_gpu_to_another() {
+    let Some(gpus) = two_gpus() else { return };
+    let a = Cuda::on(gpus[0]).unwrap();
+    let module_a = Module::load(&a, PTX, &["add_one"], &[]).unwrap();
+    let b = Cuda::on(gpus[1]).unwrap();
+    let module_b = Module::load(&b, PTX, &["add_one"], &[]).unwrap();
+    // Whole numbers, so that each addition is exact, whichever order the sums are made in.
+    let xs: Vec<f32> = (0..1000).map(|i| i as f32).collect();
+    let plus = |n: u32| xs.iter().map(|x| x + n as f32).collect::<Vec<f32>>();
+    let (mut from_a, mut on_b) = (a.upload(&xs).unwrap(), b.alloc::<f32>(1000).unwrap());
+    // The kernels launched before the copy, on either GPU, which are not waited for, have run when
+    // it is made, and those launched after it, on either, run after it.
+    (0..100).for_each(|_| add_one(&module_b, &on_b));
+    (0..300).for_each(|_| add_one(&module_a, &from_a));
+    on_b.copy_from(&from_a).unwrap();
+    (0..200).for_each(|_| add_one(&module_a, &from_a));
+    (0..200).for_each(|_| add_one(&module_b, &on_b));
+    assert_eq!(on_b.read().unwrap(), plus(500), "300 on the first GPU before the copy, 200 on the second after it");
+    assert_eq!(from_a.read().unwrap(), plus(500), "300 before the copy and 200 after it");
+    // And back.
+    on_b.write(&plus(7)).unwrap();
+    from_a.copy_from(&on_b).unwrap();
+    assert_eq!(from_a.read().unwrap(), plus(7));
+    // A buffer of none is copied to one of none, and one of another length is refused.
+    b.alloc::<f32>(0).unwrap().copy_from(&a.alloc::<f32>(0).unwrap()).unwrap();
+    let short = a.alloc::<f32>(999).unwrap();
+    let refused = catch_unwind(AssertUnwindSafe(|| on_b.copy_from(&short))).unwrap_err();
+    let said = refused.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(said.contains("a buffer of 1000 elements copied from one of 999"), "{said}");
+}
+
+#[test]
+fn threads_each_take_a_cuda_of_a_gpu_and_may_share_one() {
+    let Some(_) = cuda() else { return };
+    let count = Cuda::count().unwrap();
+    // Two threads for each GPU, each with the `Cuda` of its own thread.
+    std::thread::scope(|scope| {
+        for thread in 0..2 * count {
+            scope.spawn(move || {
+                let cuda = Cuda::on(thread % count).unwrap();
+                let module = Module::load(&cuda, PTX, &["add_one"], &[]).unwrap();
+                let xs = cuda.upload(&[thread as f32; 1000]).unwrap();
+                for _ in 0..50 {
+                    add_one(&module, &xs);
+                }
+                assert_eq!(xs.read().unwrap(), vec![thread as f32 + 50.0; 1000], "thread {thread}");
+            });
+        }
+    });
 }

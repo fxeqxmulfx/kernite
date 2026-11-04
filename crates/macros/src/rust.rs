@@ -828,8 +828,9 @@ fn unit(ty: &[TokenTree]) -> bool {
 /// name, with the type as its argument and `launched` beside it. Rust reads the type in the launcher's
 /// signature as it reads a plain kernel's, and says what it says of any function's result, once, at the type;
 /// an import that only the type names is used. Rust says nothing of a call of the launcher, which a crate
-/// writes as it writes any: it takes the name for a type it has reported. A GPU launcher is a method, so a `&`
-/// in its result takes the lifetime of `self`, where a plain kernel's has none to take.
+/// writes as it writes any: it takes the name for a type it has reported. A `&` in a launcher's result takes a
+/// lifetime from what the launcher takes, a cooperative kernel's grid or a GPU kernel's `self`, where a plain
+/// kernel's has none to take.
 pub(crate) fn launcher_result(f: &Fn, top: &[TokenTree], launched: TokenStream) -> TokenStream {
     match f.ret.as_ref().map(|r| &top[r.tokens.clone()]) {
         Some(ty) if !unit(ty) => refused_beside(ty, launched),
