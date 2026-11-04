@@ -233,6 +233,9 @@ impl<T: Plain> Unified<'_, T> {
     /// something only where every page of it does. The driver tells the place of managed memory
     /// alone, so page-locked memory and a slice lent are refused: `cuMemRangeGetAttribute: the
     /// driver tells the place of managed memory alone: this is a slice lent`.
+    /// The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, does not always clear
+    /// the advice and the last prefetch of a buffer it frees, when threads use it at once, so a
+    /// buffer made at that address may start with them.
     /// It needs a driver of CUDA 12.2 or later, which brought the attributes of the preferred
     /// place and of the last prefetch with `cuMemAdvise_v2`; an older one is the error of the
     /// lookup of that function, as for [`advise`](Unified::advise).

@@ -440,6 +440,10 @@ The driver works on whole pages, 4 KiB. A range reaches all of each page it touc
 it is the memory of the same buffer or of another. A managed buffer starts at a multiple of 512 bytes, not at a page, so
 it shares the pages at its ends with the buffers beside it, and a range from a page to a page reaches just its own.
 
+The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, does not always clear the advice and the last
+prefetch of a buffer it frees, when threads use it at once: a buffer made at that address may start with them, and
+`placement` says so. When one thread uses it, it clears them. They are hints, so no value changes.
+
 `saxpy` becomes the method that launches it, which takes the grid and then the kernel's parameters. They keep the names
 they are written with, `grid` among them, but `_`, which the macros name for Rust. A compile-time argument may not
 be named `grid`, nor, on a cooperative kernel, `threads` or `shared`, which are parameters of the method that says

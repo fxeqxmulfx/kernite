@@ -1,8 +1,8 @@
 //! What the driver says of the pages of managed memory that were moved and advised: where each was
 //! last prefetched, and how each is advised. The tests run one at a time, in a program of their
 //! own: the driver here may keep the advice and the last prefetch of a buffer it frees, and make
-//! the buffer at that address start with them, when threads use it at once. Beside one another, or
-//! beside the tests of `unified.rs`, they would read what another left.
+//! the buffer at that address start with them, when threads use it at once, as `stale.rs` shows.
+//! Beside one another, or beside the tests of `unified.rs`, they would read what another left.
 
 use std::ffi::c_int;
 use std::ops::Range;
