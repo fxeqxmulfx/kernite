@@ -1,7 +1,7 @@
 // Written by kernite.
 
-.version 2.3
-.target sm_20
+.version 3.0
+.target sm_30
 .address_size 64
 
 .visible .entry _ZN7kernite8microgpt3gpu7kernels5embedE(

@@ -524,3 +524,57 @@ fn a_cooperative_launch_has_at_most_the_blocks_the_gpu_runs_at_once() {
     let ws = at.read().unwrap();
     assert!(ws[0] != 0 && ws[..most as usize].iter().all(|&w| w == ws[0]) && ws[most as usize] == 0, "{ws:#x?}");
 }
+
+/// Stores `ctaid.x` of the last block, the one whose number is one less than the blocks along
+/// x, in `out[0]`, in a module written for `sm_30`: with `sm_20` for it, the same kernel.
+const LAST: &str = "
+.version 3.0
+.target sm_30
+.address_size 64
+
+.visible .entry last(.param .u64 out_param)
+{
+	.reg .pred %other;
+	.reg .u32 %block, %blocks;
+	.reg .u64 %out;
+
+	ld.param.u64 %out, [out_param];
+	cvta.to.global.u64 %out, %out;
+	mov.u32 %block, %ctaid.x;
+	mov.u32 %blocks, %nctaid.x;
+	sub.u32 %blocks, %blocks, 1;
+	setp.ne.u32 %other, %block, %blocks;
+	@%other bra done;
+	st.global.u32 [%out], %block;
+done:
+	ret;
+}
+";
+
+/// The driver starts at most 65535 blocks along x of a module written for `sm_20` or `sm_21`,
+/// whatever the GPU, and as many as the GPU takes of one written for `sm_30`, which is why a
+/// module of kernite's is written for `sm_30` at the least. The `.target` says it, not the
+/// `.version`.
+#[test]
+fn the_driver_starts_65535_blocks_of_a_module_for_fermi_and_more_of_one_for_kepler() {
+    let Some(cuda) = cuda() else { return };
+    let mut out = cuda.alloc::<u32>(1).unwrap();
+    let at = out.ptr();
+    for (target, most) in [("sm_20", 65535), ("sm_21", 65535), ("sm_30", 65536)] {
+        let module = Module::load(&cuda, &LAST.replace("sm_30", target), &["last"], &[]).unwrap();
+        for blocks in [1, 65535, 65536] {
+            out.zero().unwrap();
+            // SAFETY: `last` takes a pointer, and writes a word there.
+            let launched = unsafe { module.launch(0, Grid::new(blocks, 1), &[arg(&at)]) };
+            if blocks <= most {
+                launched.unwrap();
+                assert_eq!(out.read().unwrap(), [blocks - 1], "{blocks} blocks for {target}");
+            } else {
+                let e = launched.unwrap_err();
+                assert_eq!(e.call, "cuLaunchKernel");
+                assert!(e.message.starts_with("CUDA_ERROR_INVALID_VALUE"), "{blocks} blocks for {target}: {e}");
+            }
+        }
+    }
+    cuda.sync().unwrap();
+}

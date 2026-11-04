@@ -135,8 +135,8 @@ fn a_function_the_kernels_call_is_a_func() {
     assert_eq!([&times.name, &k.name], ["times::<2>", "k::<1>"]);
     let want = "// Written by kernite.
 
-.version 2.3
-.target sm_20
+.version 3.0
+.target sm_30
 .address_size 64
 
 .func (.param .u32 _ZN7kernite3gpu5timesILj2EEE_retval) _ZN7kernite3gpu5timesILj2EEE(

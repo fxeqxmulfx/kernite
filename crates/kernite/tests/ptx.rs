@@ -286,9 +286,9 @@ fn what_is_for_newer_gpus_says_which() {
         for item in items.split_whitespace() {
             let want = match item.split_once('.') {
                 Some((op, w)) => {
-                    format!("PTX's `{op}` takes `.{w}` on {gpu} and newer, and kernite writes PTX for sm_20 to sm_86")
+                    format!("PTX's `{op}` takes `.{w}` on {gpu} and newer, and kernite writes PTX for sm_30 to sm_86")
                 }
-                None => format!("PTX's `{item}` is for {gpu} and newer, and kernite writes PTX for sm_20 to sm_86"),
+                None => format!("PTX's `{item}` is for {gpu} and newer, and kernite writes PTX for sm_30 to sm_86"),
             };
             assert_eq!(forms::find(item).err(), Some(want), "{item}");
         }
@@ -315,7 +315,7 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
         (
             "let (a, b, c, e): (f64, f64, f64, f64); ld.global.v4.f64((a, b, c, e), [x]);",
             "2:54: `ld.global.v4.f64` moves 256 bits at once, which PTX's `ld` does on sm_100 and newer, and kernite \
-             writes PTX for sm_20 to sm_86: a vector of 128 bits at most, as `.v4.b32` or `.v2.b64`",
+             writes PTX for sm_30 to sm_86: a vector of 128 bits at most, as `.v4.b32` or `.v2.b64`",
         ),
         (
             "let v: f32; cvt.f32.f64(v, d);",
@@ -330,14 +330,14 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
             "2:21: `cvt.u32.f32` converts a float to an integer, so it says how it rounds to one: `cvt.rni.u32.f32` \
              to the nearest, `cvt.rzi` toward zero",
         ),
-        ("elect.sync(n);", "2:7: PTX's `elect` is for sm_90 and newer, and kernite writes PTX for sm_20 to sm_86"),
+        ("elect.sync(n);", "2:7: PTX's `elect` is for sm_90 and newer, and kernite writes PTX for sm_30 to sm_86"),
         (
             "let (a, b): (f32, f32); ld.global.v8.f32((a, b, a, b, a, b, a, b), [x]);",
-            "2:38: PTX's `ld` takes `.v8` on sm_100 and newer, and kernite writes PTX for sm_20 to sm_86",
+            "2:38: PTX's `ld` takes `.v8` on sm_100 and newer, and kernite writes PTX for sm_30 to sm_86",
         ),
         (
             "fence.proxy.r#async();",
-            "2:13: PTX's `fence` takes `.async` on sm_90 and newer, and kernite writes PTX for sm_20 to sm_86",
+            "2:13: PTX's `fence` takes `.async` on sm_90 and newer, and kernite writes PTX for sm_30 to sm_86",
         ),
         (
             "call.sync(n);",
@@ -445,7 +445,7 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         (
             "let i: u32; mov.u32(i, clusterid.x);",
             "2:34: `clusterid.x` is a special register of PTX's that kernite does not read: it needs sm_90, and kernite \
-             writes PTX for sm_20 to sm_86",
+             writes PTX for sm_30 to sm_86",
         ),
         (
             "let d: s32; vmad.s32.s32.s32(d, -n, n, -n);",
@@ -787,10 +787,10 @@ fn a_mask_of_lanes_is_marked_in_each_form_that_has_one() {
 #[test]
 fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
     let cases = [
-        ("", ".version 2.3 .target sm_20"),
-        ("let i: u32; popc.b32(i, n);", ".version 2.3 .target sm_20"),
+        ("", ".version 3.0 .target sm_30"),
+        ("let i: u32; popc.b32(i, n);", ".version 3.0 .target sm_30"),
         ("let i: u32; shfl.idx.b32(i, n, 0, 31);", ".version 3.0 .target sm_30"),
-        ("let i: u32; vadd.u32.u32.u32(i, n.b0, n.h1);", ".version 2.3 .target sm_20"),
+        ("let i: u32; vadd.u32.u32.u32(i, n.b0, n.h1);", ".version 3.0 .target sm_30"),
         ("let i: u32; vset4.u32.u32.lt(i, n, n, n);", ".version 3.0 .target sm_30"),
         ("let h: f16x2;", ".version 4.2 .target sm_53"),
         ("let i: u32; dp4a.u32.u32(i, n, n, n);", ".version 5.0 .target sm_61"),
@@ -826,12 +826,12 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         // The ISA has it from sm_75, and ptxas takes it for sm_70.
         ("let i: u32; ld.mmio.acquire.sys.global.u32(i, [y]);", ".version 9.3 .target sm_70"),
         ("let a: u64; clmad.lo.u64(a, y, y, y);", ".version 9.3 .target sm_80"),
-        ("let i: u32; suld.b._2d.b32.trap(i, [y, (n, n)]);", ".version 3.1 .target sm_20"),
-        ("let i: u32; suq.memory_layout.b32(i, [y]);", ".version 4.2 .target sm_20"),
+        ("let i: u32; suld.b._2d.b32.trap(i, [y, (n, n)]);", ".version 3.1 .target sm_30"),
+        ("let i: u32; suq.memory_layout.b32(i, [y]);", ".version 4.2 .target sm_30"),
         ("sured.b.max._1d.u64.trap([y, 0], y);", ".version 8.1 .target sm_50"),
         (
             "let (a, b, c, d): (f32, f32, f32, f32); tex._2d.v4.f32.f32((a, b, c, d), [y, (f, f)]);",
-            ".version 3.1 .target sm_20",
+            ".version 3.1 .target sm_30",
         ),
         (
             "let (a, b, c, d): (s32, s32, s32, s32); tex.a2dms.v4.s32.s32((a, b, c, d), [y, (n, n, n, n)]);",
@@ -844,7 +844,7 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         (
             "let (a, b, c, d): (f32, f32, f32, f32); tex.grad.cube.v4.f32.f32((a, b, c, d), [y, (f, f, f, f)], (f, f, \
              f, f), (f, f, f, f));",
-            ".version 4.3 .target sm_20",
+            ".version 4.3 .target sm_30",
         ),
         (
             "let (a, b, c, d): (f32, f32, f32, f32); let p: pred; tex._2d.v4.f32.f32((a, b, c, d) | p, [y, (f, f)]);",
@@ -1040,7 +1040,7 @@ const TEXTURES: &str = r#"
 fn a_texture_is_its_handle_in_brackets_with_the_coordinates_in_it() {
     let ptx = kernite::ptx_str(TEXTURES).unwrap();
     let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
-    assert!(head.contains(".version 3.1\n.target sm_20\n"), "{head}");
+    assert!(head.contains(".version 3.1\n.target sm_30\n"), "{head}");
     for line in [
         "\ttex.level.2d.v4.f32.f32 {%r, _, _, _}, [%t, {%x, 0f3F000000}], 0f00000000;\n",
         "\ttxq.width.b32 %width, [%t];\n",
@@ -1054,7 +1054,7 @@ fn a_texture_is_its_handle_in_brackets_with_the_coordinates_in_it() {
 fn a_surface_is_its_handle_in_brackets_with_the_coordinates_in_it() {
     let ptx = kernite::ptx_str(SURFACES).unwrap();
     let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
-    assert!(head.contains(".version 3.1\n.target sm_20\n"), "{head}");
+    assert!(head.contains(".version 3.1\n.target sm_30\n"), "{head}");
     for line in [
         "\tsuld.b.2d.v4.b32.clamp {%r, %g, %b, %a}, [%from, {%x, %y}];\n",
         "\tsust.b.2d.v4.b32.clamp [%to, {%x, %y}], {%r, %g, %b, %a};\n",
@@ -1360,8 +1360,8 @@ fn a_function_comes_out_as_ptx_writes_it() {
     "#;
     let want = "// Written by kernite.
 
-.version 2.3
-.target sm_20
+.version 3.0
+.target sm_30
 .address_size 64
 
 .func (.param .u32 gcd_retval) gcd(
@@ -1630,8 +1630,8 @@ fn a_variable_named_as_a_special_register_takes_a_trailing_underscore() {
     "#;
     let want = "// Written by kernite.
 
-.version 2.3
-.target sm_20
+.version 3.0
+.target sm_30
 .address_size 64
 
 .visible .entry k(
@@ -2416,18 +2416,24 @@ const VERSIONS: [u32; 47] = [
     75, 76, 77, 78, 80, 81, 82, 83, 84, 85, 86, 87, 88, 90, 91, 92, 93, 94,
 ];
 
+/// The newest of Fermi's GPUs, which came with PTX 2.0. kernite writes for none of them, as the
+/// driver starts at most 65535 blocks along x of a module for one; ptxas takes a module for one.
+const FERMI: u32 = 21;
+
 /// The newest GPU a module of PTX `v` with what `n` needs may be for: before 2.0, one of
-/// Tesla's, `sm_11` or `sm_13`, which kernite writes for neither of.
+/// Tesla's, `sm_11` or `sm_13`, and before 3.0, Fermi's, [`FERMI`], which kernite writes for none
+/// of.
 fn newest(v: u32, n: Needs) -> u32 {
     match v {
         ..12 => 11,
         12..20 => 13,
+        20..30 => FERMI,
         _ => kernite_ptx::GPUS
             .iter()
             .filter(|&&(g, came)| came <= v && (n.below == 0 || g < n.below || v < n.since))
             .map(|&(g, _)| g)
             .max()
-            .expect("every version from 2.0 has Fermi"),
+            .expect("every version from 3.0 has Kepler"),
     }
 }
 
@@ -2437,9 +2443,12 @@ fn before(v: u32) -> Option<u32> {
     i.checked_sub(1).map(|i| VERSIONS[i])
 }
 
-/// The version of PTX that came with the GPU `sm`.
+/// The version of PTX that came with the GPU `sm`: one kernite writes for, or [`FERMI`].
 fn came(sm: u32) -> u32 {
-    kernite_ptx::GPUS.iter().find(|&&(g, _)| g == sm).map(|&(_, v)| v).expect("a GPU kernite writes for")
+    match sm {
+        FERMI => 20,
+        _ => kernite_ptx::GPUS.iter().find(|&&(g, _)| g == sm).map(|&(_, v)| v).expect("a GPU kernite writes for"),
+    }
 }
 
 /// The module `text` as one of PTX `v` for the GPU `sm`.
@@ -2547,9 +2556,8 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
         if let Some(v) = before(ptx) {
             modules.push(at(retarget(&text, v, newest(v, n)), Expect::Refuses));
         }
-        if sm > Needs::FLOOR.sm {
-            let i = kernite_ptx::GPUS.iter().position(|&(g, _)| g == sm).expect("a GPU kernite writes for");
-            let g = kernite_ptx::GPUS[i - 1].0;
+        if sm > 0 {
+            let g = kernite_ptx::GPUS.iter().map(|&(g, _)| g).rfind(|&g| g < sm).unwrap_or(FERMI);
             modules.push(at(retarget(&text, ptx.max(came(g)), g), Expect::Refuses));
         }
         if below != 0 {
@@ -2683,8 +2691,8 @@ fn memory_is_declared_where_ptx_has_it() {
     let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
     let want = "// Written by kernite.
 
-.version 2.3
-.target sm_20
+.version 3.0
+.target sm_30
 .address_size 64
 
 .extern .shared .align 4 .b8 _ZZ7reverseE3buf[];
@@ -2910,7 +2918,7 @@ fn a_static_is_declared_once_for_each_kernel_to_name() {
     let want = "// Written by kernite.
 
 .version 3.1
-.target sm_20
+.target sm_30
 .address_size 64
 
 .global .align 4 .b8 COUNTS[64];

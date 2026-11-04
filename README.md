@@ -245,10 +245,11 @@ register only as one of a vector's. And kernite checks what `ptxas` leaves to th
 memory it names, at a multiple of the bytes it moves. Each form, and each of its words, says the oldest version of PTX
 and the oldest GPU `ptxas` takes it at, back to PTX 1.0, which is at times older than the ISA says: `ptxas` takes
 `ld.mmio.acquire` for `sm_70`, which the ISA has from `sm_75`. A module's `.version` and `.target` are the oldest that
-have every instruction its kernels use: PTX 2.3 and `sm_20` at the least. Where `ptxas` is installed, a test hands it
-every form at what kernite says it needs, at the newest version, and for each newer GPU to `sm_86`, which the driver
-compiles a module for when it runs there, and `ptxas` must take it each time; and at the version before and on the GPU
-before, which it must refuse.
+have every instruction its kernels use, and never older than PTX 3.0 and `sm_30`: the driver starts at most 65535 blocks
+along x of a module written for `sm_20` or `sm_21`, Fermi's, whatever the GPU it runs on, and 2^31 - 1 of one written
+for `sm_30`. Where `ptxas` is installed, a test hands it every form at what kernite says it needs, at the newest
+version, and for each newer GPU to `sm_86`, which the driver compiles a module for when it runs there, and `ptxas` must
+take it each time; and at the version before and on the GPU before, which it must refuse.
 
 An `extern "ptx-func"` function is a `.func` that the module's kernels and functions call, itself among them. It
 takes and returns PTX's types, and `call(g, gcd, (a, b))` calls it by its name, or `call(g, fp, (a, b))` at the

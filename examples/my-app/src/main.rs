@@ -1419,7 +1419,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use kernite_cuda::{Cuda, f16};
+    use kernite_cuda::{Cuda, Grid, f16};
 
     use super::{ampere, gpu, kernels, pascal};
 
@@ -2092,5 +2092,74 @@ mod tests {
             super::saxpy(&cuda, &kernels, 1.5, &x, &mut y).unwrap();
             assert_eq!(y.iter().map(|y| y.to_bits()).collect::<Vec<_>>(), want, "{n} floats");
         }
+    }
+
+    /// GPU kernels for the tests alone, of nothing past `sm_20`.
+    #[kernite_macros::kernels]
+    mod oldest {
+        /// `y[i] = a * x[i] + y[i]` for each `i < n`, rounded once.
+        pub unsafe extern "ptx-kernel" fn saxpy(a: f32, x: *const f32, y: *mut f32, n: u32) {
+            let (block, size, thread, i): (u32, u32, u32, u32);
+            mov.u32(block, ctaid.x);
+            mov.u32(size, ntid.x);
+            mov.u32(thread, tid.x);
+            mad.lo.u32(i, block, size, thread);
+            let past: pred;
+            setp.ge.u32(past, i, n);
+            if past {
+                ret();
+            }
+            let (at_x, at_y): (u64, u64);
+            mad.wide.u32(at_x, i, 4, x);
+            mad.wide.u32(at_y, i, 4, y);
+            let (xi, yi): (f32, f32);
+            ld.global.f32(xi, [at_x]);
+            ld.global.f32(yi, [at_y]);
+            fma.rn.f32(yi, a, xi, yi);
+            st.global.f32([at_y], yi);
+        }
+
+        /// Stores `ctaid.x` of the last block, the one whose number is one less than the blocks
+        /// along x, in `out[0]`.
+        pub unsafe extern "ptx-kernel" fn last(out: *mut u32) {
+            let (block, blocks): (u32, u32);
+            mov.u32(block, ctaid.x);
+            mov.u32(blocks, nctaid.x);
+            sub.u32(blocks, blocks, 1);
+            let other: pred;
+            setp.ne.u32(other, block, blocks);
+            if other {
+                ret();
+            }
+            st.global.u32([out], block);
+        }
+    }
+
+    /// A module of nothing past `sm_20` is written for `sm_30`, as every module is: the driver
+    /// starts 65535 blocks along x of one written for `sm_20`, whatever the GPU, and 2^31 - 1 of
+    /// one written for `sm_30`. `saxpy` over 65536 blocks against `f32::mul_add`, and the last of
+    /// 2^31 - 1 blocks of one thread; on a machine with no GPU, skipped.
+    #[test]
+    fn a_kernel_of_nothing_past_sm_20_starts_every_grid_the_gpu_takes() {
+        let cuda = match Cuda::new() {
+            Ok(cuda) => cuda,
+            Err(e) => return eprintln!("no GPU: skipped. {e}"),
+        };
+        assert!(oldest::PTX.contains(".version 3.0\n.target sm_30\n"), "{}", oldest::PTX);
+        let kernels = oldest::Kernels::load(&cuda).unwrap();
+        // 65536 blocks of 256 threads, the last with one float to its name.
+        let n = 65535 * 256 + 1;
+        let (x, y) = (floats(n, 7), floats(n, 8));
+        let want: Vec<u32> = x.iter().zip(&y).map(|(x, y)| 1.5f32.mul_add(*x, *y).to_bits()).collect();
+        let (xs, ys) = (cuda.upload(&x).unwrap(), cuda.upload(&y).unwrap());
+        // SAFETY: `n` floats behind each pointer, in buffers that last until `read` has waited
+        // for the kernel.
+        unsafe { kernels.saxpy(Grid::new(65536, 256), 1.5, xs.ptr(), ys.ptr(), n as u32) }.unwrap();
+        assert_eq!(ys.read().unwrap().iter().map(|y| y.to_bits()).collect::<Vec<_>>(), want);
+        let most = (1 << 31) - 1;
+        let out = cuda.alloc::<u32>(1).unwrap();
+        // SAFETY: a word at `out`, which the last block writes.
+        unsafe { kernels.last(Grid::new(most, 1), out.ptr()) }.unwrap();
+        assert_eq!(out.read().unwrap(), [most - 1]);
     }
 }
