@@ -195,6 +195,59 @@ fn a_generic_is_a_value_and_a_type_is_refused_at_its_token() {
     assert!(x86(src, "k").starts_with("# k(gpr, gpr) -> ()\n"), "{src}");
 }
 
+/// A result is a type, and is read whole as a parameter's is, up to the body or the `where` or `;` before it: not
+/// up to a block among the arguments of a name in it, `Pair<u8, { 3 }>`, which is a const argument. A kernel
+/// gives back a pointer to such a type, plain and of compile-time arguments, whatever else the type holds. A
+/// result that is no number or pointer, and one that a cooperative kernel or a GPU kernel may not have, is
+/// refused: every error is at the result, and the x86 kernel's and the GPU kernel's quote the type whole.
+#[test]
+fn a_result_that_holds_a_block_is_read_whole_up_to_its_body() {
+    let code = |src: &str, name: &str| {
+        kernite::x86_str(src, name).unwrap_or_else(|e| panic!("{e}")).code().map(String::from).collect::<Vec<_>>()
+    };
+    for to in [
+        "Arr<{ 3 }>",
+        "crate::Arr<{ 3 }>",
+        "Pair<u8, { 3 }>",
+        "Pair<{ 3 }, u8>",
+        "Pair<{ 3 }, { 4 }>",
+        "Wrap<Arr<{ let _ = 1; 3 }>>",
+        "[Arr<{ 3 }>; 1]",
+        "fn() -> Arr<{ 3 }>",
+        "<A as B>::C<{ 3 }>",
+    ] {
+        let src = format!("unsafe extern \"sysv64\" fn k(p: *const u8) -> *const {to} {{ ret(p); }}");
+        assert_eq!(code(&src, "k"), ["mov rax, rdi", "ret"], "{to}");
+    }
+    let src = "#[instances(1, 2)]\nunsafe extern \"sysv64\" fn k<const N: u64>(p: *const u8) -> *const Arr<{ 3 }> \
+               { add(p, N); ret(p); }";
+    assert_eq!(code(src, "k::<1>"), ["add rdi, 1", "mov rax, rdi", "ret"]);
+    assert_eq!(code(src, "k::<2>"), ["add rdi, 2", "mov rax, rdi", "ret"]);
+    // Every error is at the result, and the x86 kernel's and the GPU kernel's quote the type whole: a kernel
+    // returns a pointer or a number, a cooperative kernel's threads return nothing, and so does a GPU kernel.
+    let src = "unsafe extern \"sysv64\" fn k() -> Arr<{ 3 }> {}";
+    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `Arr<{3}>`";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    let src = "#[cooperative]\nunsafe extern \"sysv64\" fn k() -> *const Arr<{ 3 }> {}";
+    let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("2:34: {nothing}"));
+    let src = "unsafe extern \"ptx-kernel\" fn k() -> *const Arr<{ 3 }> {}";
+    let nothing = "a GPU kernel returns nothing, not `*const Arr<{3}>`: it writes what it works out to memory";
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:38: {nothing}"));
+    // The result still ends at its `where`, which a kernel has none of, and at the `;` of a function with no
+    // body, with a block in it or without.
+    let no_body = "a kernel is written in its body, and `k` has none";
+    for (result, at, message) in [
+        ("u8 where u8: Sized {}", "1:37", "a kernel has no `where`"),
+        ("*const Arr<{ 3 }> where u8: Sized {}", "1:52", "a kernel has no `where`"),
+        ("u8;", "1:36", no_body),
+        ("*const Arr<{ 3 }>;", "1:51", no_body),
+    ] {
+        let src = format!("unsafe extern \"sysv64\" fn k() -> {result}");
+        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("{at}: {message}"), "{result}");
+    }
+}
+
 #[test]
 fn loops_unroll_and_number_their_labels_afresh() {
     let src = r#"
@@ -1051,7 +1104,8 @@ fn consts_that_name_consts_nest_64_deep_at_most() {
 
 /// A type nests 64 deep at most, and `Name<T>` and `[T; N]` are a level each, in a pointer to them
 /// as well: the parser refuses the level past it where it starts, however long the row, before it
-/// reads the rest. A type of 64 is read, and then it is the machine that has no such variable.
+/// reads the rest. A type of 64 is read, and then it is the machine that has no such variable. A
+/// result is a type, and nests as far.
 #[test]
 fn a_type_nests_64_deep_at_most() {
     for (pointer, at) in [("", "2:134"), ("*const ", "2:141")] {
@@ -1060,6 +1114,14 @@ fn a_type_nests_64_deep_at_most() {
         for n in [64, 5000] {
             assert_eq!(refused(&body(n)), format!("{at}: this nests 64 deep at most"), "{pointer}{n}");
         }
+    }
+    let result = |n: usize| {
+        let ty = format!("{}u32{}", "a<".repeat(n), ">".repeat(n));
+        format!("unsafe extern \"sysv64\" fn k(p: *const u8) -> *const {ty} {{ ret(p); }}")
+    };
+    kernite::x86_str(&result(63), "k").unwrap();
+    for n in [64, 5000] {
+        assert_eq!(kernite::x86_str(&result(n), "k").unwrap_err(), "1:179: this nests 64 deep at most", "-> {n}");
     }
 }
 

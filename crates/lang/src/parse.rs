@@ -431,12 +431,11 @@ impl<'a> Parser<'a> {
         }
         let ret = if self.eat_op("->") {
             let (from, span) = (self.pos, self.span());
-            while !self.done() && !matches!(self.peek(), Some(Tree::Group { delim: Delim::Brace, .. })) {
-                if self.is_ident("where") || self.is_op(";") {
-                    break;
-                }
-                self.pos += 1;
-            }
+            // The result ends at its `where`, at its body, or at the `;` of a function with none: a block among
+            // the arguments of a name in it, `Foo<{ 3 }>`, is none of them.
+            self.skip_ty(1, |p| {
+                p.is_ident("where") || p.is_op(";") || matches!(p.peek(), Some(Tree::Group { delim: Delim::Brace, .. }))
+            })?;
             no_impl(&self.trees[from..self.pos])?;
             Some(Ret { ty: text(&self.trees[from..self.pos]), span, tokens: from..self.pos })
         } else {
@@ -500,10 +499,20 @@ impl<'a> Parser<'a> {
             return Ok(Type::Generic(name.strip_prefix("r#").unwrap_or(name).to_string(), args, *span));
         }
         let (from, span) = (self.pos, self.span());
-        // The arguments of a name in it, `*const Foo<u8>`, end at their own `>`. A level starts at
-        // the name, as `Name<T>` above does.
+        self.skip_ty(open, |p| ["=", ";", ","].iter().any(|op| p.is_op(op)))?;
+        if from == self.pos {
+            return self.error(format!("expected a type, found {}", self.found()));
+        }
+        Ok(Type::Name(text(&self.trees[from..self.pos]), span))
+    }
+
+    /// Goes past the tokens of a type, at level `open` of the type it is in, to the first that `ends` it, or to the
+    /// `>` that closes the arguments the type is in. The arguments of a name in it, `*const Foo<u8>`, end at their
+    /// own `>`, and `ends` is not asked inside them. A level starts at the name, as `Name<T>` above does.
+    fn skip_ty(&mut self, open: usize, ends: fn(&Self) -> bool) -> Result<(), Error> {
+        let from = self.pos;
         let mut angles = 0;
-        while !self.done() && (angles > 0 || !["=", ";", ",", ">"].iter().any(|op| self.is_op(op))) {
+        while !self.done() && (angles > 0 || !(self.is_op(">") || ends(self))) {
             if self.is_op("<") {
                 nested(open + angles, self.trees[from..self.pos].last().map_or(self.span(), Tree::span))?;
                 angles += 1;
@@ -516,10 +525,7 @@ impl<'a> Parser<'a> {
             }
             self.pos += 1;
         }
-        if from == self.pos {
-            return self.error(format!("expected a type, found {}", self.found()));
-        }
-        Ok(Type::Name(text(&self.trees[from..self.pos]), span))
+        Ok(())
     }
 
     fn finish(&self) -> Result<(), Error> {
