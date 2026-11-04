@@ -42,9 +42,11 @@
 //! A buffer is the GPU's own memory, and the host reaches it by copies. [`Unified`] memory is
 //! reached by the host and by the GPU's kernels at one address, with no copy: [`Cuda::managed`]
 //! makes memory the driver moves to whichever touches it, [`Cuda::pinned`] makes page-locked memory
-//! in the host, and [`Cuda::lend`] lends a slice of the host's own to the GPU. The slices it lends
-//! the host wait for the GPU's kernels first, and [`Module::launch`] says what a launch keeps to of
-//! the slices the host holds. Managed memory is sent to the GPU before a kernel needs it by
+//! in the host, and [`Cuda::lend`] lends a slice of the host's own to the GPU. The first two are
+//! zeros, and [`Cuda::managed_uninit`] and [`Cuda::pinned_uninit`], which are `unsafe`, make them
+//! without, for memory that is written whole before it is read. The slices it lends the host wait
+//! for the GPU's kernels first, and [`Module::launch`] says what a launch keeps to of the slices
+//! the host holds. Managed memory is sent to the GPU before a kernel needs it by
 //! [`Unified::prefetch`], and advised how it is used by [`Unified::advise`].
 //!
 //! A kernel whose blocks wait for each other is launched cooperatively,

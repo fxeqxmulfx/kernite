@@ -2398,7 +2398,8 @@ mod tests {
         let kernels = device::Kernels::load(&cuda).unwrap();
         // A multiple of 8, and not of 256, so that the last block has threads past the end.
         let n = 1_000_008;
-        let mut memory = match cuda.managed::<f32>(n) {
+        // SAFETY: the cpu kernel `fill` writes each of the `n` floats before anything reads one.
+        let mut memory = match unsafe { cuda.managed_uninit::<f32>(n) } {
             Ok(memory) => memory,
             Err(e) => return eprintln!("the GPU cannot: skipped. {e}"),
         };

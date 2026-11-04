@@ -48,7 +48,34 @@ impl Cuda {
     /// reach at one address, and the driver moves to whichever touches it. The GPU must allocate
     /// managed memory; the error says so of one that does not: `cuMemAllocManaged: the GPU cannot
     /// allocate managed memory: its CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY is 0`.
+    ///
+    /// The GPU writes the zeros, so the driver has each page at the GPU when the host first writes
+    /// it, and moves it back. Memory that the host or a kernel writes whole before anything reads
+    /// it needs no zeros, and [`managed_uninit`](Cuda::managed_uninit) makes it for what the
+    /// driver's own call costs.
     pub fn managed<T: Plain>(&self, len: usize) -> Result<Unified<'static, T>, Error> {
+        // SAFETY: the zeros are written below, before the memory is lent.
+        let memory = unsafe { self.managed_uninit(len) }?;
+        // The driver does not clear it, and the host must not be lent bytes that were never
+        // written. The GPU writes the zeros: where the GPU does not allow concurrent access, the
+        // host must not touch managed memory while a kernel runs, and one may be running.
+        memory.driver.zero(memory.addr(), bytes::<T>(len))?;
+        Ok(memory)
+    }
+
+    /// `len` elements of managed memory as the driver leaves it, with no zeros written: it costs
+    /// what `cuMemAllocManaged` does, and no more. [`managed`](Cuda::managed) writes the zeros with
+    /// the GPU, which has the driver move each page to the GPU, and back when the host first
+    /// writes it. The GPU must allocate managed memory, as for `managed`, and the error is the
+    /// same.
+    ///
+    /// # Safety
+    ///
+    /// The bytes may be those of memory freed before, which the driver hands out again where a
+    /// buffer beside it holds the page. The host or a kernel must write each element before
+    /// anything reads it: [`host`](Unified::host) and [`host_mut`](Unified::host_mut) lend the
+    /// bytes as they are.
+    pub unsafe fn managed_uninit<T: Plain>(&self, len: usize) -> Result<Unified<'static, T>, Error> {
         self.driver.require("cuMemAllocManaged", MANAGED_MEMORY, "the GPU cannot allocate managed memory")?;
         let bytes = bytes::<T>(len);
         let (api, mut addr) = (self.driver.current()?, 0);
@@ -56,12 +83,7 @@ impl Cuda {
         // is CU_MEM_ATTACH_GLOBAL: any stream of any GPU may use it, as the default stream does.
         api.check("cuMemAllocManaged", unsafe { (api.alloc_managed)(&mut addr, bytes.max(1), 1) })?;
         let ptr = ptr::with_exposed_provenance_mut(addr as usize);
-        let memory = Unified { driver: self.driver.clone(), ptr, len, kind: Kind::Managed, of: PhantomData };
-        // The driver does not clear it, and the host must not be lent bytes that were never
-        // written. The GPU writes the zeros: where the GPU does not allow concurrent access, the
-        // host must not touch managed memory while a kernel runs, and one may be running.
-        memory.driver.zero(addr, bytes)?;
-        Ok(memory)
+        Ok(Unified { driver: self.driver.clone(), ptr, len, kind: Kind::Managed, of: PhantomData })
     }
 
     /// `len` elements of page-locked memory, all zero: memory in the host that stays where it is,
@@ -69,7 +91,31 @@ impl Cuda {
     /// GPU must use the host's addresses for the host's memory; the error says so of one that
     /// does not: `cuMemHostAlloc: the GPU cannot reach page-locked memory at the host's addresses:
     /// its CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0`.
+    ///
+    /// The host writes the zeros, a pass of its own before the host's fill. Memory that the host or
+    /// a kernel writes whole before anything reads it needs no zeros, and
+    /// [`pinned_uninit`](Cuda::pinned_uninit) makes it for what the driver's own call costs.
     pub fn pinned<T: Plain>(&self, len: usize) -> Result<Unified<'static, T>, Error> {
+        // SAFETY: the zeros are written below, before the memory is lent.
+        let memory = unsafe { self.pinned_uninit::<T>(len) }?;
+        // SAFETY: the allocation has room for `len` elements, and any bits are a `T`. No kernel
+        // uses memory the host has only now been given.
+        unsafe { memory.ptr.write_bytes(0, len) };
+        Ok(memory)
+    }
+
+    /// `len` elements of page-locked memory as the driver leaves it, with no zeros written: it
+    /// costs what `cuMemHostAlloc` does, and no more. [`pinned`](Cuda::pinned) writes the zeros in
+    /// a pass of its own. The GPU must use the host's addresses for the host's memory, as for
+    /// `pinned`, and the error is the same.
+    ///
+    /// # Safety
+    ///
+    /// The bytes may be those of memory freed before, which the driver hands out again where a
+    /// buffer beside it holds the page. The host or a kernel must write each element before
+    /// anything reads it: [`host`](Unified::host) and [`host_mut`](Unified::host_mut) lend the
+    /// bytes as they are.
+    pub unsafe fn pinned_uninit<T: Plain>(&self, len: usize) -> Result<Unified<'static, T>, Error> {
         let cannot = "the GPU cannot reach page-locked memory at the host's addresses";
         self.driver.require("cuMemHostAlloc", UNIFIED_ADDRESSING, cannot)?;
         let bytes = bytes::<T>(len);
@@ -77,12 +123,7 @@ impl Cuda {
         // SAFETY: it writes the address to `host`. It refuses no bytes, so it is asked for one. 2
         // is CU_MEMHOSTALLOC_DEVICEMAP: the GPU reaches it.
         api.check("cuMemHostAlloc", unsafe { (api.alloc_host)(&mut host, bytes.max(1), 2) })?;
-        let memory =
-            Unified { driver: self.driver.clone(), ptr: host.cast::<T>(), len, kind: Kind::Pinned, of: PhantomData };
-        // SAFETY: the allocation has room for `len` elements, and any bits are a `T`. No kernel
-        // uses memory the host has only now been given.
-        unsafe { memory.ptr.write_bytes(0, len) };
-        Ok(memory)
+        Ok(Unified { driver: self.driver.clone(), ptr: host.cast::<T>(), len, kind: Kind::Pinned, of: PhantomData })
     }
 
     /// `memory`, a slice of the host's own, pageable memory, lent to the GPU for as long as the
@@ -150,6 +191,12 @@ enum Kind {
 ///   reads and writes it across the bus.
 /// - [`Cuda::lend`] lends a slice of the host's own memory to the GPU, for as long as `'a`, where
 ///   the GPU reaches pageable memory. The others are their own: `Unified<'static, T>`.
+///
+/// The first two are zeros, which cost: the GPU writes the zeros of managed memory, so the driver
+/// has each page at the GPU when the host first writes it, and moves it back, and the host writes
+/// those of page-locked memory in a pass of its own. Memory that the host or a kernel writes whole
+/// before anything reads it needs none, and the `unsafe` [`Cuda::managed_uninit`] and
+/// [`Cuda::pinned_uninit`] make it for what the driver's own calls cost.
 ///
 /// Managed memory also moves ahead of its use: [`prefetch`](Unified::prefetch) sends a range of it
 /// to the GPU or the host, [`advise`](Unified::advise) tells the driver how a range is used, and
@@ -456,5 +503,25 @@ mod tests {
         });
         assert_eq!(cuda.managed::<u32>(4).unwrap().host().unwrap(), [0; 4]);
         assert_eq!(cuda.pinned::<u32>(4).unwrap().host().unwrap(), [0; 4]);
+    }
+
+    /// Managed and page-locked memory made with no zeros are as the driver hands them out, the
+    /// fake's bytes of 0xAA, and nothing is asked to clear them: the fake has no `cuMemsetD8`.
+    #[test]
+    fn memory_made_with_no_zeros_is_as_the_driver_hands_it_out() {
+        let cuda = gpu_with(&[MANAGED_MEMORY, UNIFIED_ADDRESSING], |api| {
+            api.alloc_managed = alloc_managed;
+            api.alloc_host = alloc_host;
+            api.free = free;
+            api.free_host = free_host;
+            api.synchronize = synchronize;
+        });
+        // SAFETY: only the test reads the bytes, and it knows them to be the fake's.
+        let managed = unsafe { cuda.managed_uninit::<u32>(4) }.unwrap();
+        assert_eq!(managed.host().unwrap(), [0xAAAA_AAAA; 4]);
+        drop(managed);
+        // SAFETY: as above.
+        let pinned = unsafe { cuda.pinned_uninit::<u32>(4) }.unwrap();
+        assert_eq!(pinned.host().unwrap(), [0xAAAA_AAAA; 4]);
     }
 }

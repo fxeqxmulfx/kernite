@@ -360,16 +360,26 @@ of managed memory, which the driver moves to whichever of the host and the GPU t
 writes its elements where they are, and the host has the slice back when it drops what `lend` returned. A kernel is
 given `memory.ptr()`, and the host reads and writes `memory.host()` and `memory.host_mut()`, which are slices of it. The
 slices are at the address `ptr` gives, so a kernel for the CPU that is given a slice's pointer works on the memory that
-a kernel for the GPU is given: [`examples/my-app`](examples/my-app/src/main.rs) fills managed memory with an x86 kernel,
-squares it with a PTX kernel and adds it up with an x86 kernel, bit for bit, with no copy.
+a kernel for the GPU is given: [`examples/my-app`](examples/my-app/src/main.rs) makes managed memory with
+`managed_uninit`, fills it with an x86 kernel, squares it with a PTX kernel and adds it up with an x86 kernel, bit for
+bit, with no copy.
+
+The zeros cost. The GPU writes the zeros of managed memory, so the driver has each page at the GPU when the host first
+writes it, and moves it back; the host writes the zeros of page-locked memory in a pass of its own, before its fill.
+Memory that the host or a kernel writes whole before anything reads it needs none: `cuda.managed_uninit::<f32>(len)` and
+`cuda.pinned_uninit::<f32>(len)` leave the bytes as the driver does, and cost what `cuMemAllocManaged` and
+`cuMemHostAlloc` do. They are `unsafe`, because the bytes may be those of memory freed before, which the driver hands
+out again where a buffer beside it holds the page: the host or a kernel writes each element before anything reads it.
+Memory that is read before it is all written is made with `managed` and `pinned`, which are safe.
 
 A GPU does not do all three, so each asks the GPU first. Where the GPU cannot, the error says so in these words, and no
 kernel is left to fault: `cuMemAllocManaged: the GPU cannot allocate managed memory: its
-CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY is 0` for `managed`; `cuMemHostAlloc: the GPU cannot reach page-locked memory at the
-host's addresses: its CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0` for `pinned`; and `cuDeviceGetAttribute: the GPU
-cannot reach pageable memory, a slice of the host's: its CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0` for `lend`,
-which a GPU with HMM can do. Each error names the call it refuses, as `Error::call` does; `lend` makes no call of the
-driver's to refuse, so its error names `cuDeviceGetAttribute`, which told that the GPU cannot.
+CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY is 0` for `managed` and `managed_uninit`; `cuMemHostAlloc: the GPU cannot reach
+page-locked memory at the host's addresses: its CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0` for `pinned` and
+`pinned_uninit`; and `cuDeviceGetAttribute: the GPU cannot reach pageable memory, a slice of the host's: its
+CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0` for `lend`, which a GPU with HMM can do. Each error names the call it
+refuses, as `Error::call` does; `lend` makes no call of the driver's to refuse, so its error names
+`cuDeviceGetAttribute`, which told that the GPU cannot.
 
 The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, faults a kernel on a lent element that has a guard
 page in its aligned 64 KiB, a page set with `madvise(MADV_GUARD_INSTALL)`: the kernel fails with

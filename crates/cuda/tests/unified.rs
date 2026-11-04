@@ -176,6 +176,18 @@ fn a_managed_buffer_is_filled_by_the_host_added_to_by_a_kernel_and_read_by_the_h
 }
 
 #[test]
+fn managed_memory_made_with_no_zeros_is_filled_by_the_host_added_to_by_a_kernel_and_read_by_the_host() {
+    let Some((_one, cuda, module)) = setup() else { return };
+    let n = 1_000_003;
+    let mut input = words(n, 5);
+    input[0] = u32::MAX;
+    // SAFETY: `fill_add_read` writes every word, with the host, before anything reads one.
+    let mut m = unsafe { cuda.managed_uninit::<u32>(n) }.unwrap();
+    assert_eq!(m.len(), n);
+    fill_add_read(&module, &mut m, &input);
+}
+
+#[test]
 fn the_host_waits_for_a_kernel_before_it_reads_or_writes_managed_memory() {
     let Some((_one, cuda, module)) = setup() else { return };
     host_waits(&module, &mut cuda.managed::<u32>(4).unwrap());
@@ -212,6 +224,18 @@ fn page_locked_memory_is_filled_by_the_host_added_to_by_a_kernel_and_read_by_the
     let Some(mut m) = or_skip(cuda.pinned::<u32>(n), NO_PAGE_LOCKED) else { return };
     assert_eq!(m.len(), n);
     assert!(m.host().unwrap().iter().all(|&w| w == 0), "page-locked memory is zero until written");
+    fill_add_read(&module, &mut m, &input);
+}
+
+#[test]
+fn page_locked_memory_made_with_no_zeros_is_filled_by_the_host_added_to_by_a_kernel_and_read_by_the_host() {
+    let Some((_one, cuda, module)) = setup() else { return };
+    let n = 1_000_003;
+    let mut input = words(n, 6);
+    input[0] = u32::MAX;
+    // SAFETY: `fill_add_read` writes every word, with the host, before anything reads one.
+    let Some(mut m) = or_skip(unsafe { cuda.pinned_uninit::<u32>(n) }, NO_PAGE_LOCKED) else { return };
+    assert_eq!(m.len(), n);
     fill_add_read(&module, &mut m, &input);
 }
 
