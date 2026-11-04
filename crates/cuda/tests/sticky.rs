@@ -1,7 +1,7 @@
 //! An error of a launch that is not about its grid is said as the driver says it, whatever the
-//! grid. A test of its own, as a program of its own: a kernel that faults leaves the GPU's
-//! context failed for every call after it, which would fail the driver's other tests if they
-//! shared its process.
+//! grid, and the host's slice of unified memory, which waits for the kernel, says it too. A test of
+//! its own, as a program of its own: a kernel that faults leaves the GPU's context failed for every
+//! call after it, which would fail the driver's other tests if they shared its process.
 
 use kernite_cuda::{Grid, Module, arg};
 
@@ -28,12 +28,14 @@ fn an_error_of_a_launch_that_is_not_about_its_grid_is_said_as_the_driver_says_it
     let Ok(cuda) = kernite_cuda::Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return };
     let module = Module::load(&cuda, FAULT, &["fault"], &[]).unwrap();
     let out = cuda.alloc::<u32>(1).unwrap();
+    let unified = cuda.managed::<u32>(1).unwrap();
     let at = out.ptr();
     // SAFETY: `fault` takes a pointer and does not read it. The launch starts, and the kernel
     // fails on the GPU, which this test is for.
     unsafe { module.launch(0, Grid::new(1, 1), &[arg(&at)]) }.unwrap();
     let failed = cuda.sync().unwrap_err();
     assert!(failed.message.starts_with("CUDA_ERROR_ILLEGAL_ADDRESS"), "{failed}");
+    assert_eq!(unified.host().unwrap_err(), failed);
     // Every launch after it returns that error, and says no more of a grid the GPU does not take.
     let grid = |blocks, threads| Grid { blocks, threads, shared: 0 };
     let grids = [grid([1, 65536, 1], [1, 1, 1]), grid([1, 1, 1], [1025, 1, 1]), grid([0, 1, 1], [1, 1, 1])];

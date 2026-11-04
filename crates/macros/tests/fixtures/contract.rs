@@ -1,5 +1,6 @@
 //! x86 kernels whose safety contracts say what memory of the module's nothing else touches
-//! while they run: what each names, and what the functions it calls name.
+//! while they run: what each names, and what the functions it calls name. And GPU kernels whose
+//! launchers say what a launch keeps to: their own contract, or the macros' where they have none.
 
 #[kernite_macros::kernels]
 pub mod cpu {
@@ -44,5 +45,22 @@ pub mod cpu {
         mov(t, grid.thread);
         mov(n, [RUNS]);
         mov([x + t * 8], n);
+    }
+}
+
+#[kernite_macros::kernels]
+pub mod gpu {
+    /// Writes 1 at `x`.
+    pub unsafe extern "ptx-kernel" fn one(x: *mut u32) {
+        st.global.u32([x], 1);
+    }
+
+    /// Writes 2 at `x`.
+    ///
+    /// # Safety
+    ///
+    /// `x` points at an integer.
+    pub unsafe extern "ptx-kernel" fn two(x: *mut u32) {
+        st.global.u32([x], 2);
     }
 }

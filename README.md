@@ -352,6 +352,26 @@ did not ask before, and a call to another GPU asks it once more, to make that GP
 run, and before those launched after it on either run. Where the two GPUs have a link between them, it asks the driver
 for peer access and the copy goes over the link; where they have none, the driver sends it through the host.
 
+A buffer is the GPU's own memory, which the host reaches by copies. Managed memory is reached by the host and by the
+GPU's kernels at one address, with no copy: `cuda.managed::<f32>(len)` is `len` zeros, and the driver moves each page to
+whichever of them touches it. A kernel is given `memory.ptr()`, and the host reads and writes `memory.host()` and
+`memory.host_mut()`, which are slices of it.
+
+`host()` and `host_mut()` wait for every kernel launched on the GPU to finish, and say whether one failed, before they
+lend the slice, so a slice taken after a launch is never under its kernel, and the host reads what a kernel wrote with
+no `sync` of its own. The compiler refuses to take a pointer for a kernel while the host holds a slice it may write, as
+`ptr` borrows the memory and `host_mut` borrows it mutably. Dropping the memory waits for the kernels that use it, as
+dropping a buffer does.
+
+A pointer taken before the slice is `Copy`, and the compiler cannot refuse a launch on it, so a launch is `unsafe`, and
+its contract is this: each pointer is to a buffer or to unified memory of the GPU, as long as the kernel reads and
+writes through it; from the launch until the kernel is done, the host holds no slice of memory the kernel writes, and no
+slice it may write of memory the kernel reads; and where `cuda.concurrent_managed_access()` is false, the GPU not
+reaching managed memory while the host does, the host holds no slice of managed memory at all. The method is the GPU's
+`CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS`, and a GPU where it is false faults the host on managed memory while any
+kernel runs. `Module::launch` says the contract in its `# Safety`, and the macros write it as the `# Safety` of the
+launcher of a GPU kernel that has none.
+
 `saxpy` becomes the method that launches it, which takes the grid and then the kernel's parameters. They keep the names
 they are written with, `grid` among them, but `_`, which the macros name for Rust. A compile-time argument may not
 be named `grid`, nor, on a cooperative kernel, `threads` or `shared`, which are parameters of the method that says
@@ -543,7 +563,7 @@ Each crate depends only on the layers inside it. `crates/kernite/tests/architect
 | adapters | `kernite-x86`, `kernite-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kernite` | which machine and syntax each kernel compiles with |
 | delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, launchers of a grid's threads, or launchers of PTX |
-| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each, modules, launches, copies between GPUs; `f16` and `bf16`; depends on no other crate |
+| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and memory the host reaches too, modules, launches, copies between GPUs; `f16` and `bf16`; depends on no other crate |
 | runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid and the CPUs they run on, and the memory of a module of x86 kernels; depends on no other crate |
 
 ## Guarantees

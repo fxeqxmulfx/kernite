@@ -551,6 +551,30 @@ fn a_kernels_safety_contract_says_nothing_else_touches_the_memory_it_names() {
     );
 }
 
+/// A GPU kernel's launcher says what a launch keeps to, as `Module::launch` does: the kernel's own
+/// `# Safety`, or, where it has none, the macros': each pointer is to a buffer or to unified
+/// memory of the GPU; from the launch until the kernel is done, the host holds no slice of memory
+/// the kernel writes, and no slice it may write of memory the kernel reads; and where
+/// `Cuda::concurrent_managed_access` is false, no slice of managed memory at all.
+#[test]
+fn a_gpu_kernels_launcher_says_what_a_launch_keeps_to() {
+    let page = fs::read_to_string(documents_quietly("contract").join("gpu/struct.Kernels.html")).unwrap();
+    // The paragraphs after the heading of `name`'s `# Safety`, as rustdoc writes them.
+    let safety = |name: &str| -> Vec<String> {
+        let (_, method) = page.split_once(&format!("id=\"method.{name}\"")).expect("the method is there");
+        let (_, docs) = method.split_once(">Safety</h5>\n").unwrap_or_else(|| panic!("`{name}` has no `# Safety`"));
+        docs.split_once("</div>").expect("the docs end").0.lines().map(String::from).collect()
+    };
+    let contract = "<p>The kernel trusts the pointers it is given: each must be to a buffer or to unified memory of \
+                    the GPU the kernels are loaded on, as long as the kernel reads and writes through it. From the \
+                    launch until the kernel is done, the host must hold no slice of memory the kernel writes, and no \
+                    slice it may write of memory the kernel reads; and where \
+                    <code>Cuda::concurrent_managed_access</code> is false, the GPU not reaching managed memory while \
+                    the host does, the host must hold no slice of managed memory at all.</p>";
+    assert_eq!(safety("one"), [contract]);
+    assert_eq!(safety("two"), ["<p><code>x</code> points at an integer.</p>"]);
+}
+
 /// The function's docs name the CPU features its kernel needs past x86-64's own, which nothing
 /// checks for when it runs, as the listing's header does: three, two, one, or, for a kernel
 /// that needs none, no paragraph. A generic kernel's docs name those of every instance, each

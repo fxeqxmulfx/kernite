@@ -39,6 +39,11 @@
 //! and says whether one failed. A buffer is on one GPU, and a kernel is given the buffers of
 //! the GPU it runs on: [`Buffer::copy_from`] copies a buffer to a buffer on another.
 //!
+//! A buffer is the GPU's own memory, and the host reaches it by copies. [`Unified`] memory is
+//! reached by the host and by the GPU's kernels at one address, with no copy, and
+//! [`Cuda::managed`] makes it. The slices it lends the host wait for the GPU's kernels first, and
+//! [`Module::launch`] says what a launch keeps to of the slices the host holds.
+//!
 //! A kernel whose blocks wait for each other is launched cooperatively,
 //! [`Module::launch_cooperative`]: every block of the grid runs at once, so there are at most
 //! [`Module::resident`] of them, and the driver gives the launch a barrier for the grid.
@@ -56,6 +61,7 @@ pub mod named;
 mod unified;
 
 pub use half::{bf16, f16};
+pub use unified::Unified;
 
 /// What every function of the driver returns: 0, or what went wrong.
 type CuResult = c_int;
@@ -127,6 +133,7 @@ api! {
     enable_peer_access = c"cuCtxEnablePeerAccess"(Handle, c_uint);
     synchronize = c"cuCtxSynchronize"();
     alloc = c"cuMemAlloc_v2"(*mut u64, usize);
+    alloc_managed = c"cuMemAllocManaged"(*mut u64, usize, c_uint);
     free = c"cuMemFree_v2"(u64);
     to_device = c"cuMemcpyHtoD_v2"(u64, *const c_void, usize);
     to_host = c"cuMemcpyDtoH_v2"(*mut c_void, u64, usize);
@@ -309,6 +316,13 @@ impl Driver {
     fn set_current(&self) -> Result<(), Error> {
         // SAFETY: the context was retained, and is held until `self` is dropped.
         self.api.check("cuCtxSetCurrent", unsafe { (self.api.set_current)(self.context) })
+    }
+
+    /// Waits for every kernel launched on this GPU to finish, and says whether one failed.
+    fn sync(&self) -> Result<(), Error> {
+        let api = self.current()?;
+        // SAFETY: it takes nothing.
+        api.check("cuCtxSynchronize", unsafe { (api.synchronize)() })
     }
 
     /// Copies `data` to the GPU at `ptr`, after the kernels launched before have run.
@@ -582,16 +596,15 @@ impl Cuda {
 
     /// Whether the GPU reaches managed memory while the host does, as its
     /// `CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS` says. A GPU that does not faults the host on
-    /// managed memory while any kernel runs.
+    /// managed memory while any kernel runs, so the host may hold a slice of managed memory while
+    /// a kernel runs only where this is true: [`Module::launch`] has the rule.
     pub fn concurrent_managed_access(&self) -> bool {
         self.concurrent_managed_access
     }
 
     /// Waits for every kernel launched on the GPU to finish, and says whether one failed.
     pub fn sync(&self) -> Result<(), Error> {
-        let api = self.driver.current()?;
-        // SAFETY: it takes nothing.
-        api.check("cuCtxSynchronize", unsafe { (api.synchronize)() })
+        self.driver.sync()
     }
 
     /// `len` elements on the GPU, all zero.
@@ -610,12 +623,17 @@ impl Cuda {
 
     /// `len` elements on the GPU, as they were left.
     fn reserve<T: Plain>(&self, len: usize) -> Result<Buffer<T>, Error> {
-        let bytes = len.checked_mul(size_of::<T>()).expect("a buffer of more bytes than there are addresses");
+        let bytes = bytes::<T>(len);
         let (api, mut ptr) = (self.driver.current()?, 0);
         // SAFETY: it writes the address to `ptr`. It refuses no bytes, so it is asked for one.
         api.check("cuMemAlloc", unsafe { (api.alloc)(&mut ptr, bytes.max(1)) })?;
         Ok(Buffer { driver: self.driver.clone(), ptr, len, of: PhantomData })
     }
+}
+
+/// How many bytes `len` elements of `T` take. Panics if they are more than there are addresses.
+fn bytes<T>(len: usize) -> usize {
+    len.checked_mul(size_of::<T>()).expect("memory of more bytes than there are addresses")
 }
 
 /// `len` elements of `T` on one GPU, the one that made it, freed when it is dropped.
@@ -940,10 +958,14 @@ impl Module {
     ///
     /// # Safety
     ///
-    /// `args` must be as many as the kernel's parameters, each of the type its `.param` is;
-    /// and the kernel is trusted with them: each pointer among them must be to a buffer of the
-    /// GPU the module is loaded on, as long as the kernel reads and writes through it, while
-    /// it runs.
+    /// `args` must be as many as the kernel's parameters, each of the type its `.param` is; and the
+    /// kernel is trusted with them. Each pointer among them must be to a buffer or to [`Unified`]
+    /// memory of the GPU the module is loaded on, as long as the kernel reads and writes through
+    /// it. From the launch until the kernel is done, the host must hold no slice of memory the
+    /// kernel writes, and no slice it may write of memory the kernel reads; and where
+    /// [`Cuda::concurrent_managed_access`] is false, the GPU not reaching managed memory while the
+    /// host does, the host must hold no slice of managed memory at all. A slice taken after the
+    /// launch waits for the kernel, so only a slice taken before it can break this.
     pub unsafe fn launch(&self, index: usize, grid: Grid, args: &[*const c_void]) -> Result<(), Error> {
         let ([bx, by, bz], [tx, ty, tz]) = (grid.blocks, grid.threads);
         let (api, k, params) = (self.driver.current()?, &self.kernels[index], args.as_ptr().cast_mut().cast());

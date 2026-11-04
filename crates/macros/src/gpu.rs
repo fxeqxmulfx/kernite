@@ -199,8 +199,12 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     if !out.to_string().contains("# Safety") {
         out.extend(parse(
             "#[doc = \"\"]\n#[doc = \" # Safety\"]\n#[doc = \"\"]\n\
-             #[doc = \" The kernel trusts the pointers it is given: each must be to a buffer of the GPU the \
-             kernels are loaded on, as long as the kernel reads and writes through it.\"]",
+             #[doc = \" The kernel trusts the pointers it is given: each must be to a buffer or to unified memory \
+             of the GPU the kernels are loaded on, as long as the kernel reads and writes through it. From the \
+             launch until the kernel is done, the host must hold no slice of memory the kernel writes, and no \
+             slice it may write of memory the kernel reads; and where `Cuda::concurrent_managed_access` is false, \
+             the GPU not reaching managed memory while the host does, the host must hold no slice of managed \
+             memory at all.\"]",
         ));
     }
     // Clippy says "too many arguments" of a function of more than seven parameters wherever its
