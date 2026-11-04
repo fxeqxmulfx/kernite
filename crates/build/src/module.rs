@@ -3,7 +3,7 @@
 
 use std::cell::LazyCell;
 
-use kernite_lang::{Error, Item, ItemKind, Module};
+use kernite_lang::{Error, Item, ItemKind, Mention, Module};
 
 use crate::classify::{attributes, helper, trusted};
 use crate::present::{Refusal, said};
@@ -50,7 +50,7 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
                 let laid = host.next().expect("each static is laid out or refused");
                 items.push(ItemOut::HostStatic(
                     laid.as_ref()
-                        .map(|s| Compiled { code: native.host_static(&s.code), consts: s.consts.clone() })
+                        .map(|s| Compiled { code: native.host_static(&s.code), mentions: s.mentions.clone() })
                         .map_err(Clone::clone),
                 ));
                 continue;
@@ -60,7 +60,7 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
                 let laid = gpu.next().expect("each static is laid out or refused");
                 items.push(ItemOut::DeviceStatic(
                     laid.as_ref()
-                        .map(|s| Compiled { code: device.device_static(&s.code), consts: s.consts.clone() })
+                        .map(|s| Compiled { code: device.device_static(&s.code), mentions: s.mentions.clone() })
                         .map_err(Clone::clone),
                 ));
                 continue;
@@ -80,13 +80,13 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
             Ok(listed) => (None, listed),
             Err(e) => (Some(e), vec![]),
         };
-        let (count, mut errors, mut consts) = (listed.len(), vec![], vec![]);
+        let (count, mut errors, mut mentions) = (listed.len(), vec![], vec![]);
         if abi.native() {
             let mut instances = vec![];
             for args in listed {
                 match compile(m, &n, native, f, &args) {
                     Ok(k) => {
-                        consts.extend(k.consts);
+                        k.mentions.iter().for_each(|at| Mention::record(&mut mentions, &at.name, at.span));
                         instances.push(NativeInstance { args, naked: native.naked(&k.code), calls: vec![] });
                     }
                     Err(e) => errors.push(e),
@@ -102,8 +102,7 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
                     listings.push((kernite_lang::instance(f, &k.args).unwrap_or_default(), k.naked.text.clone()));
                 }
             }
-            let consts = in_order(m, &consts);
-            let out = NativeOut { not_unsafe, said, instances, consts, written, count, touched: vec![], errors };
+            let out = NativeOut { not_unsafe, said, instances, mentions, written, count, touched: vec![], errors };
             items.push(ItemOut::Native(out));
             continue;
         }
@@ -113,7 +112,7 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
         for args in listed {
             match compile(m, &d, device, f, &args) {
                 Ok(k) => {
-                    consts.extend(k.consts);
+                    k.mentions.iter().for_each(|at| Mention::record(&mut mentions, &at.name, at.span));
                     compiled.push((args, k.code));
                 }
                 Err(e) => errors.push(e),
@@ -132,8 +131,7 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
             true => Launcher::Of(launched),
             false => Launcher::Never,
         });
-        let consts = in_order(m, &consts);
-        items.push(ItemOut::Device(DeviceFnOut { not_unsafe, said, errors, consts, launcher }));
+        items.push(ItemOut::Device(DeviceFnOut { not_unsafe, said, errors, mentions, launcher }));
     }
     // Once every function the process runs is compiled, for a kernel to name the statics of the
     // functions it calls, which may come after it.
@@ -153,16 +151,6 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
         DeviceOut { text, error, symbols }
     });
     ModuleOut { module, given: twice, owner: whose.err(), items, listings, device: loaded }
-}
-
-/// The consts of `module` that `read` names, each once, in the module's order: the instances of a
-/// function each read some of them, and it reads the consts that any of them did.
-fn in_order(module: &Module, read: &[String]) -> Vec<String> {
-    let consts = module.items.iter().filter_map(|item| match &item.kind {
-        ItemKind::Const(c) => Some(&c.name),
-        _ => None,
-    });
-    consts.filter(|name| read.contains(name)).cloned().collect()
 }
 
 /// What an item of a module of consts is to the modules of kernels that take its consts.

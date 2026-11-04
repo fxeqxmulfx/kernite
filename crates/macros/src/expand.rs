@@ -3,15 +3,15 @@
 
 use std::path::Path;
 
-use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
+use proc_macro::{Delimiter, Group, Span, TokenStream, TokenTree};
 
 use kernite::lang::{self, ItemKind};
 use kernite::{ItemOut, Launcher, ModuleOut};
 
 use crate::gpu::{HOLE, gpu};
 use crate::rust::{
-    attrs_len, carried, condition, const_names, error, error_under, flatten, inner_attribute, is_ident, is_punct, lex,
-    parse, site, stub,
+    all, any, cfg_of, condition, error, error_under, flatten, inner_attribute, is_ident, is_punct, lex, name_at, not,
+    parse, position, site, stub, when,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
@@ -58,16 +58,22 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
         out.extend(take(&made, &top, path));
     }
     out.extend(made.owner.as_ref().map(said));
+    // The `cfg` of each item, what is kept of its attributes, and the condition it says. An item says
+    // what is wrong with it under its `cfg`, as what is written for it is: Rust says nothing of a
+    // function it leaves out.
+    let cfgs: Vec<TokenStream> = module.items.iter().map(|item| cfg_of(item, &top)).collect();
+    let conds: Vec<Option<TokenStream>> = cfgs.iter().map(condition).collect();
+    // Where Rust finds a name of the kernel's, as it would find it in the kernel's own body: at the
+    // name, with the macro's hygiene, for Rust to resolve it as it resolves what the macro writes.
+    let place = |m: &lang::Mention| at(m.span).resolved_at(site());
     // How each kernel the GPU launches is, and each static of the GPU's, as the host reads it; when
-    // each GPU item is there; and what names the consts the items read, which Rust never sees.
+    // each GPU item is there; and what names, for Rust, what each item names.
     let (mut launchers, mut memory, mut on_gpu, mut reads) = (vec![], vec![], vec![], TokenStream::new());
-    for (item, made_item) in module.items.iter().zip(&made.items) {
+    for (i, (item, made_item)) in module.items.iter().zip(&made.items).enumerate() {
         let tokens = &top[item.tokens.clone()];
-        // An item says what is wrong with it under its `cfg`, as what is written for it is: Rust
-        // says nothing of a function it leaves out.
-        let cfg = carried(tokens[..attrs_len(tokens)].iter().cloned(), false);
-        let said = |e: &lang::Error| error_under(&cfg, at(e.span), &e.message);
-        reads.extend(used(module, made_item.consts(), &cfg, &top));
+        let cfg = &cfgs[i];
+        let said = |e: &lang::Error| error_under(cfg, at(e.span), &e.message);
+        reads.extend(named(&made, &conds, i, &top, &place));
         match (&item.kind, made_item) {
             // The module's own attributes are first, and a const given is Rust's where its
             // module is.
@@ -81,7 +87,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
             (ItemKind::Static(s), ItemOut::DeviceStatic(laid)) => {
                 out.extend(laid.as_ref().err().map(said));
                 memory.push((s, laid.as_ref().ok().map(|c| &c.code)));
-                on_gpu.push(condition(&cfg));
+                on_gpu.push(conds[i].clone());
             }
             (ItemKind::Fn(_), ItemOut::Helper(errors)) => out.extend(errors.iter().map(said)),
             (ItemKind::Fn(f), ItemOut::Unknown(e)) => {
@@ -101,7 +107,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
                 out.extend(d.not_unsafe.as_ref().map(said));
                 out.extend(d.said.as_ref().map(said));
                 out.extend(d.errors.iter().map(said));
-                on_gpu.push(condition(&cfg));
+                on_gpu.push(conds[i].clone());
                 launchers.extend(d.launcher.as_ref().map(|l| match l {
                     Launcher::Never => (f, None),
                     Launcher::Of(launched) => (f, Some(launched.as_slice())),
@@ -144,7 +150,7 @@ fn take(made: &ModuleOut, top: &[TokenTree], path: &[TokenTree]) -> TokenStream 
     let mut names = TokenStream::new();
     for (item, made_item) in made.module.items.iter().zip(&made.items) {
         if matches!(made_item, ItemOut::Given) {
-            names.extend([const_name(item, top)]);
+            names.extend([name_at(item, top, site())]);
             names.extend(parse(","));
         }
     }
@@ -166,27 +172,56 @@ fn take(made: &ModuleOut, top: &[TokenTree], path: &[TokenTree]) -> TokenStream 
     out
 }
 
-/// What names each constant of `module` among `read`, the consts one item reads, for Rust, which never
-/// sees a kernel's body run and would find them unused: a `let _ = N;` for each, by its name as `top`
-/// writes it, `r#type` as well, under `cfg`, what is kept of the item's attributes, which Rust takes on a
-/// statement. Where the item is not, neither is the statement.
-fn used(module: &lang::Module, read: &[String], cfg: &TokenStream, top: &[TokenTree]) -> TokenStream {
-    let mut lets = TokenStream::new();
-    for item in &module.items {
-        if matches!(&item.kind, ItemKind::Const(c) if read.contains(&c.name)) {
-            lets.extend(cfg.clone());
-            lets.extend(parse("let _ ="));
-            lets.extend([const_name(item, top)]);
-            lets.extend(parse(";"));
+/// What says, at each place item `i` of `made` names an item of its module, that `cfg` may leave the
+/// item out; `place` is the span of the place. Rust has a name for a const, a static of the process's
+/// and an x86 kernel that takes no compile-time arguments, and finds it where it is written: a
+/// `let _ = NAME;` there, for Rust to say it cannot find the name if `cfg` leaves out the item where
+/// it keeps item `i`. For any other item kernite says so itself, as an error where `cfg` keeps item `i`
+/// and leaves that one out. Both are under the `cfg` of item `i` and of the code that has the place,
+/// where item `i` runs it: [`runs`].
+fn named(
+    made: &ModuleOut,
+    conds: &[Option<TokenStream>],
+    i: usize,
+    top: &[TokenTree],
+    place: &dyn Fn(&lang::Mention) -> Span,
+) -> TokenStream {
+    let module = &made.module;
+    let mut out = TokenStream::new();
+    for m in made.items[i].mentions() {
+        let j = position(module, &m.name);
+        let kept = all([conds[i].clone(), runs(made, conds, i, module.item_at(m.span), &[])]);
+        let rust = match (&module.items[j].kind, &made.items[j]) {
+            (_, ItemOut::Rust | ItemOut::Given | ItemOut::HostStatic(_)) => true,
+            (ItemKind::Fn(f), ItemOut::Native(_)) => f.generics.is_empty(),
+            _ => false,
+        };
+        if rust {
+            out.extend(when(kept));
+            out.extend(parse("let _ ="));
+            out.extend([name_at(&module.items[j], top, place(m))]);
+            out.extend(parse(";"));
+        } else if let Some(gone) = &conds[j] {
+            let reader = module.items[i].name().expect("an item that names others has a name");
+            let message = format!("`{}` is left out by `cfg` where `{reader}`, which names it, is kept", m.name);
+            out.extend(error_under(&when(all([kept, Some(not(gone.clone()))])), place(m), &message));
         }
     }
-    lets
+    out
 }
 
-/// The name of `item`, a const, as `top` writes it, `r#type` as well, of the span the macro
-/// writes.
-fn const_name(item: &lang::Item, top: &[TokenTree]) -> TokenTree {
-    let mut name = const_names(&top[item.tokens.clone()]).next().expect("a const").clone();
-    name.set_span(site());
-    name
+/// The condition under which item `i` of `made` runs the code of item `c`, but for the `cfg` of `i`:
+/// always for its own code, and for a helper's, where `cfg` keeps the helper and `i` runs the code that
+/// calls it, at any place `i` names the helper. `way` holds the items followed back from the place to
+/// `c`: a place in one of them adds nothing, for `i` reaches that item by the places already counted.
+/// So a helper that calls itself, or two that call each other, do not go on without end.
+fn runs(made: &ModuleOut, conds: &[Option<TokenStream>], i: usize, c: usize, way: &[usize]) -> Option<TokenStream> {
+    if c == i {
+        return None;
+    }
+    let module = &made.module;
+    let way = [way, &[c]].concat();
+    let calls = made.items[i].mentions().iter().filter(|m| module.items[c].name() == Some(&m.name));
+    let callers = calls.map(|m| module.item_at(m.span)).filter(|caller| !way.contains(caller));
+    all([conds[c].clone(), any(callers.map(|caller| runs(made, conds, i, caller, &way)))])
 }

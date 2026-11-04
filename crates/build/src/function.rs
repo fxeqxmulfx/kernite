@@ -39,7 +39,7 @@ pub fn prepare<B: Backend>(module: &Module, backend: &B) -> Prepared<B> {
                 StaticError::Type(message) => Error { span: s.ty.span(), message },
                 StaticError::Value(message) => Error { span: s.value.as_ref().map_or(s.span, Expr::span), message },
             })?;
-            Ok(Compiled { code, consts: memory.consts })
+            Ok(Compiled { code, mentions: memory.mentions })
         });
         if let Ok(laid) = &laid {
             made.push(laid.code.clone());
@@ -77,5 +77,5 @@ pub fn compile<B: Backend>(
     let code = backend
         .finish(kernel)
         .map_err(|u| within(&name, args, Error { span: u.at.unwrap_or(f.span), message: u.message }))?;
-    Ok(Compiled { code, consts: run.consts })
+    Ok(Compiled { code, mentions: run.mentions })
 }

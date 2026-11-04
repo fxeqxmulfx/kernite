@@ -310,8 +310,10 @@ fn the_target_is_told_the_directives_once_before_the_parameters() {
     let mut trace = Trace::default();
     let run = run(DIRECTIVES, &mut trace).unwrap();
     assert_eq!(trace.lines, ["directives maxntid[8, 16] maxnreg[32]", "param n: u32 = v0", "end"]);
-    // The const the directive read is one the kernel read.
-    assert_eq!(run.consts, ["SIZE"]);
+    // The const the directives read is named by the kernel, at each place it is written.
+    let named: Vec<String> =
+        run.mentions.iter().map(|m| Error { span: m.span, message: m.name.clone() }.at(DIRECTIVES)).collect();
+    assert_eq!(named, ["4:11: SIZE", "4:17: SIZE"]);
 }
 
 #[test]

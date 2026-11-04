@@ -188,6 +188,11 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The item of the tokens from `start` to here.
+    fn made(&self, start: usize, kind: ItemKind) -> Item {
+        Item { tokens: start..self.pos, span: self.trees[start].span(), kind }
+    }
+
     fn item(&mut self) -> Result<Item, Error> {
         let start = self.pos;
         // The module's own attribute, `#![..]`, passes through where it is.
@@ -196,7 +201,7 @@ impl<'a> Parser<'a> {
             && matches!(self.peek_at(2), Some(Tree::Group { delim: Delim::Bracket, .. }))
         {
             self.pos += 3;
-            return Ok(Item { tokens: start..self.pos, kind: ItemKind::Other });
+            return Ok(self.made(start, ItemKind::Other));
         }
         let (mut instances, mut cooperative, mut directives) = (None, None, vec![]);
         while self.is_op("#") && matches!(self.peek_at(1), Some(Tree::Group { delim: Delim::Bracket, .. })) {
@@ -286,7 +291,7 @@ impl<'a> Parser<'a> {
                 return Err(e);
             }
             let s = self.static_rest(attrs, head..self.pos - 1)?;
-            return Ok(Item { tokens: start..self.pos, kind: ItemKind::Static(s) });
+            return Ok(self.made(start, ItemKind::Static(s)));
         }
         let qualifier = |t: Option<&Tree>| matches!(t, Some(Tree::Ident { name, .. }) if ["fn", "unsafe", "extern", "async"].contains(&name.as_str()));
         if self.is_ident("const") && !qualifier(self.peek_at(1)) {
@@ -295,7 +300,7 @@ impl<'a> Parser<'a> {
             }
             self.pos += 1;
             let c = self.const_rest()?;
-            return Ok(Item { tokens: start..self.pos, kind: ItemKind::Const(c) });
+            return Ok(self.made(start, ItemKind::Const(c)));
         }
         let qualifiers = self.pos;
         let mut abi = None;
@@ -340,7 +345,7 @@ impl<'a> Parser<'a> {
                 return Err(Error { span, message: message.into() });
             }
             let f = self.function(attrs, (instances, cooperative, directives), head..self.pos - 1, abi, unsafe_fn)?;
-            return Ok(Item { tokens: start..self.pos, kind: ItemKind::Fn(f) });
+            return Ok(self.made(start, ItemKind::Fn(f)));
         }
         if let Some(e) = misplaced {
             return Err(e);
@@ -353,7 +358,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        Ok(Item { tokens: start..self.pos, kind: ItemKind::Other })
+        Ok(self.made(start, ItemKind::Other))
     }
 
     /// What follows `const`: `NAME: TYPE = VALUE;`.

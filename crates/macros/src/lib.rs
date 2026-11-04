@@ -60,10 +60,19 @@
 //!   nothing behind. Constants and every other item but a `static` stay as written, for Rust
 //!   to use as well.
 //!   A constant a kernel reads counts as used, as it would if Rust had seen the read, under the
-//!   `cfg` of each item that reads it, a helper's under that of the kernel that calls it: only
-//!   one that nothing reads, or that only what `cfg` leaves out reads, is `dead_code`. Rust has
-//!   no `bf16`, and its `f16` is unstable, so a constant of either goes in the kernel that
-//!   reads it, where `const` is the language's alone.
+//!   `cfg` of each item that reads it, a helper's under that of the kernel that calls it and that
+//!   of the helper: only one that nothing reads, or that only what `cfg` leaves out reads, is
+//!   `dead_code`. Rust has no `bf16`, and its `f16` is unstable, so a constant of either goes in
+//!   the kernel that reads it, where `const` is the language's alone.
+//! - A kernel `cfg` keeps names only what `cfg` keeps. What it names is written for Rust at the
+//!   name, for Rust to say what it says of any name it cannot find, at the name: a constant, a
+//!   static of the process's, an x86 kernel that takes no compile-time arguments. Of the rest, a
+//!   helper, an instance of an x86 kernel, an `extern "ptx-func"` function and a static of the
+//!   GPU's, which Rust has no item for, it is an error of kernite's at the name, under
+//!   `cfg(all(<the kernel's>, not(<the item's>)))`. Both are under the kernel's `cfg`, and, for a
+//!   name in a helper's body, the helper's and that of a place that calls the helper. The naked
+//!   function of an x86 kernel names the same items, and where `cfg` leaves one out it names
+//!   `const 0`, for Rust to say a name once, at the name.
 //!
 //! ```ignore
 //! #[kernite_macros::kernels]

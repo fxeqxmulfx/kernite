@@ -2,12 +2,12 @@
 //! language parses: the use cases on [`Echo`], a fake machine. Each kernel in them compiles, for
 //! its machine, but those written to fail.
 
-use kernite_lang::{Error, Fault, Fn, Guard, IntTy, Memory, Operand, Span, Target, Value, parse};
+use kernite_lang::{Error, Fault, Fn, Guard, IntTy, Memory, Mention, Operand, Span, Target, Value, parse};
 
 use crate::{
-    Abi, Backend, Call, Called, Compiled, ConstItem, Device, DeviceStatic, Given, HostStatic, ItemOut, Launcher,
-    ModuleOut, Naked, Native, NativeOut, Owner, StaticError, Unfinished, abi, all, compile, consts, cooperative,
-    function, instance, module, one, owner, prepare, statics,
+    Abi, Backend, Call, Called, ConstItem, Device, DeviceStatic, Given, HostStatic, ItemOut, Launcher, ModuleOut,
+    Naked, Native, NativeOut, Owner, StaticError, Unfinished, abi, all, compile, consts, cooperative, function,
+    instance, module, one, owner, prepare, statics,
 };
 
 /// An ABI is one kernite compiles for, by the name Rust writes it as, or none. Of them, the process
@@ -113,6 +113,11 @@ struct Laid {
 /// What Echo lays out as `name`, holding `held`, after `before`.
 fn laid(name: &str, held: &str, before: &[&str]) -> Laid {
     Laid { name: name.into(), held: held.into(), before: before.iter().map(|&b| b.into()).collect() }
+}
+
+/// Where each of `mentions` is in `src`, as `line:column: name`.
+fn placed(src: &str, mentions: &[Mention]) -> Vec<String> {
+    mentions.iter().map(|m| Error { span: m.span, message: m.name.clone() }.at(src)).collect()
 }
 
 /// A kernel as Echo writes it, and its code: its name, a line for each thing it was told, and
@@ -334,7 +339,7 @@ impl Target for Told {
 
 /// Each static is laid out after those before it that were laid out: Echo refuses the second,
 /// so the third is laid out beside the first alone, and the fourth beside the first and the
-/// third. Each has the constants it read.
+/// third. Each has where it named the module's items.
 #[test]
 fn a_static_is_laid_out_beside_those_before_it() {
     let src = "const N: usize = 4;\n\
@@ -342,14 +347,17 @@ fn a_static_is_laid_out_beside_those_before_it() {
                static B: global<u32> = 13;\n\
                static C: global<u32>;\n\
                static D: global<u32>;";
-    let laid_out: Vec<_> = statics(&parse(src).unwrap(), &Echo).into_iter().map(|s| s.map_err(|e| e.at(src))).collect();
+    let laid_out: Vec<_> = statics(&parse(src).unwrap(), &Echo)
+        .into_iter()
+        .map(|s| s.map(|s| (s.code, placed(src, &s.mentions))).map_err(|e| e.at(src)))
+        .collect();
     assert_eq!(
         laid_out,
         [
-            Ok(Compiled { code: laid("A", "[u32; 4]", &[]), consts: vec!["N".into()] }),
+            Ok((laid("A", "[u32; 4]", &[]), vec!["2:24: N".to_string()])),
             Err("3:25: Echo holds no 13".into()),
-            Ok(Compiled { code: laid("C", "u32", &["A"]), consts: vec![] }),
-            Ok(Compiled { code: laid("D", "u32", &["A", "C"]), consts: vec![] }),
+            Ok((laid("C", "u32", &["A"]), vec![])),
+            Ok((laid("D", "u32", &["A", "C"]), vec![])),
         ]
     );
 }
@@ -377,7 +385,7 @@ fn a_static_that_does_not_lay_out_is_placed_where_it_can_be_mended() {
 
 /// A kernel is told whether it is cooperative, each static laid out, and each instance of each
 /// function the machine lets it call, each in the module's order, before its body is written. A
-/// function whose instances are wrong has none. It has the constants it read.
+/// function whose instances are wrong has none. It has where it named the module's items.
 #[test]
 fn a_kernel_hears_of_its_statics_and_callees_in_order() {
     let src = "const ONE: u64 = 1;\n\
@@ -394,7 +402,7 @@ fn a_kernel_hears_of_its_statics_and_callees_in_order() {
     let prepared = prepare(&module, &Echo);
     assert_eq!(prepared.made, [laid("A", "u32", &[]), laid("C", "[u32; 4]", &["A"])]);
     let k = compile(&module, &prepared, &Echo, function(&module, "k").unwrap(), &[]);
-    let told = k.map(|k| Compiled { code: k.code.lines, consts: k.consts });
+    let told = k.map(|k| (k.code.lines, placed(src, &k.mentions)));
     let heard = [
         "new k: k []",
         "cooperative",
@@ -408,7 +416,7 @@ fn a_kernel_hears_of_its_statics_and_callees_in_order() {
         "inst add x 1",
         "end",
     ];
-    assert_eq!(told, Ok(Compiled { code: heard.map(String::from).to_vec(), consts: vec!["ONE".into()] }));
+    assert_eq!(told, Ok((heard.map(String::from).to_vec(), vec!["10:61: ONE".to_string()])));
 }
 
 /// What Echo blames on a variable is placed where that variable is declared, and what it blames
@@ -644,15 +652,14 @@ fn a_module_s_items_come_out_in_order() {
     assert_eq!(made, ["static B", "new g: g []", "memory B", "end", "new f::<1>: f [1]", "memory B", "end"]);
 }
 
-/// Each item has the consts it read, by name, each once, in the module's order, and no other's. A
-/// kernel's are those of its body, of a helper it calls, and of the `#[instances(..)]` it lists, in
-/// whichever of its instances read them, itself or through other consts: instances that read one
-/// const give it once, and the consts of them all come in the module's order, not in the order the
-/// instances read them. A function it calls by name has its own, and so has an `extern "ptx-func"`
-/// function, which reads those of a helper it calls. A static's are those of its type and of what
-/// it holds. A helper has none, for the kernel or function that calls it reads what it reads.
+/// Each item says where it names an item of its module, and the name, in the order of the source,
+/// each place once. A kernel names items in its body, in the `#[instances(..)]` it lists and in a
+/// helper it calls, in any of its instances: a place that more than one names is one place. The
+/// name of a function it calls is a place, a helper's among them, whose body it runs as its own. An
+/// `extern "ptx-func"` function names items the same way, and a static in its type and in what it
+/// holds. A helper names nothing of its own, nor does a const: what its definition names is Rust's.
 #[test]
-fn an_item_has_the_consts_it_read() {
+fn an_item_has_the_places_it_names() {
     let src = "const A: u64 = 1;\n\
                const B: u64 = A + 1;\n\
                const C: u64 = 3;\n\
@@ -675,8 +682,27 @@ fn an_item_has_the_consts_it_read() {
                }\n\
                #[instances(L)] unsafe extern \"sysv64\" fn listed<const N: u64>(x: u64) { add(x, N); }\n\
                unsafe extern \"sysv64\" fn none(x: u64) { add(x, 1); }";
-    let read = |src: &str| echoed(src).items.iter().map(|item| item.consts().join(" ")).collect::<Vec<_>>();
-    assert_eq!(read(src), ["", "", "", "", "", "", "", "", "E", "F", "", "A B", "C", "D", "C D", "L", ""]);
+    // Each item that names an item of its module, by its name, with where it does.
+    let named = |src: &str| {
+        let out = echoed(src);
+        let items = out.module.items.iter().zip(&out.items);
+        let named = items.filter(|(_, made)| !made.mentions().is_empty());
+        named
+            .map(|(item, made)| format!("{}: {}", item.name().unwrap(), placed(src, made.mentions()).join(", ")))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        named(src),
+        [
+            "S: 9:24: E",
+            "T: 10:25: F",
+            "direct: 12:51: B",
+            "through: 11:26: C, 13:45: help",
+            "each: 15:20: D",
+            "both: 18:8: D, 19:20: C",
+            "listed: 21:13: L",
+        ]
+    );
     let src = "const A: u32 = 1;\n\
                const B: u32 = 2;\n\
                const C: usize = 4;\n\
@@ -689,7 +715,10 @@ fn an_item_has_the_consts_it_read() {
                add(x, B);\n\
                if N == 2 { add(x, A); }\n\
                }";
-    assert_eq!(read(src), ["", "", "", "", "C", "", "B D", "A", "A B"]);
+    assert_eq!(
+        named(src),
+        ["S: 5:24: C", "f: 6:25: D, 7:41: B, 7:45: aid", "g: 8:50: A, 8:59: f", "h: 10:8: B, 11:20: A"]
+    );
 }
 
 /// A const the module is given that an item of its own is named as too is left out, and the item

@@ -1,15 +1,15 @@
 //! The data kernite-build and the machines hand on: plain values, whatever the machine.
 
-use kernite_lang::{Error, Module, Value};
+use kernite_lang::{Error, Mention, Module, Value};
 
-/// A kernel compiled, or a static, and the constants of its module it read. Rust never sees
-/// those reads, so whatever writes the module out for Rust has to say they happened.
+/// A kernel compiled, or a static, and where it named the items of its module. Rust never sees
+/// a kernel's body run, so whatever writes the module out for Rust has to say what it named.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Compiled<T> {
     /// What it compiled to: its listing, its `.entry`, or the memory a static is.
     pub code: T,
-    /// The constants, by name, in the module's order.
-    pub consts: Vec<String>,
+    /// Where it named an item of its module.
+    pub mentions: Vec<Mention>,
 }
 
 /// A kernel's code as `naked_asm!` takes it, for Rust to call in the process. Constant `i`'s
@@ -104,11 +104,11 @@ pub enum ItemOut {
     Rust,
     /// A const given, Rust's where its module is.
     Given,
-    /// A static of the process's memory, as Rust lays it out, and the consts it read; or why it
-    /// is none.
+    /// A static of the process's memory, as Rust lays it out, and where it named the module's items;
+    /// or why it is none.
     HostStatic(Result<Compiled<HostStatic>, Error>),
-    /// A static of the GPU's memory, as the host reads it, and the consts it read; or why it is
-    /// none. The module the GPU loads has it.
+    /// A static of the GPU's memory, as the host reads it, and where it named the module's items; or
+    /// why it is none. The module the GPU loads has it.
     DeviceStatic(Result<Compiled<DeviceStatic>, Error>),
     /// A helper, and what is wrong with it whether it is called or not: its body, its
     /// `#[instances(..)]`, then its attributes, `#[cooperative]` and the directives.
@@ -122,18 +122,19 @@ pub enum ItemOut {
 }
 
 impl ItemOut {
-    /// The consts of its module that the item read, by name, each once, in the module's order: a
-    /// kernel's, in its body, in its `#[instances(..)]` or in a helper it calls, and an
-    /// `extern "ptx-func"` function's, in its body, whichever of the instances of either read
-    /// them; a static's, in its type or what it holds. A helper has none of its own: the kernel
-    /// or function that calls it read what it reads. Rust never sees these reads, so whatever
-    /// writes the item out for Rust says they happened, where the item is.
-    pub fn consts(&self) -> &[String] {
+    /// Where the item named an item of its module: a kernel's, in its body, in its
+    /// `#[instances(..)]`, in its directives or in a helper it calls, and an `extern "ptx-func"`
+    /// function's, in its body, whichever of the instances of either named them; a static's, in
+    /// its type or what it holds. A helper has none of its own: the kernel or function that
+    /// calls it named what it names. A const's definition is Rust's own, and the names in it
+    /// are not the item's. Rust never sees these names, so whatever writes the item out for
+    /// Rust says each at its place, where the item runs the code that has it.
+    pub fn mentions(&self) -> &[Mention] {
         match self {
-            ItemOut::HostStatic(Ok(s)) => &s.consts,
-            ItemOut::DeviceStatic(Ok(s)) => &s.consts,
-            ItemOut::Native(k) => &k.consts,
-            ItemOut::Device(k) => &k.consts,
+            ItemOut::HostStatic(Ok(s)) => &s.mentions,
+            ItemOut::DeviceStatic(Ok(s)) => &s.mentions,
+            ItemOut::Native(k) => &k.mentions,
+            ItemOut::Device(k) => &k.mentions,
             _ => &[],
         }
     }
@@ -148,8 +149,8 @@ pub struct NativeOut {
     pub said: Option<Error>,
     /// Each instance that compiled, in order.
     pub instances: Vec<NativeInstance>,
-    /// The consts the instances that compiled read, by name, each once, in the module's order.
-    pub consts: Vec<String>,
+    /// Where the instances that compiled named an item of the module.
+    pub mentions: Vec<Mention>,
     /// Whether Rust gets its code: it is an `unsafe fn`, its attributes hold, each of its
     /// instances compiled, and it reaches the statics it names.
     pub written: bool,
@@ -194,8 +195,8 @@ pub struct DeviceFnOut {
     pub said: Option<Error>,
     /// Why each instance that did not compile did not, in order.
     pub errors: Vec<Error>,
-    /// The consts the instances that compiled read, by name, each once, in the module's order.
-    pub consts: Vec<String>,
+    /// Where the instances that compiled named an item of the module.
+    pub mentions: Vec<Mention>,
     /// How Rust launches it, if it is a kernel; none for a function the kernels call.
     pub launcher: Option<Launcher>,
 }

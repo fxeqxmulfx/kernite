@@ -864,10 +864,12 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
     assert_eq!(compile("", "let v: fn(u32)->u32;").unwrap_err(), format!("2:8: {vars} `fn(u32) -> u32`"));
 }
 
-/// Rust never sees a kernel's body run, so kernite says which of the module's constants it read:
-/// what the macro marks as used, so that only the constants nothing reads are dead code.
+/// Rust never sees a kernel's body run, so kernite says which of the module's items it named, and
+/// where, in the order of the source: what the macro writes for Rust at each name, so that Rust finds
+/// only the constants nothing reads dead, and says what it cannot find where it is written. A name
+/// in a helper the kernel calls is the kernel's, and one in the definition of a constant is not.
 #[test]
-fn a_kernel_names_the_constants_it_reads() {
+fn a_kernel_names_the_items_it_names() {
     let src = r#"
         const ADD: usize = 1;
         const STORE: usize = 0;
@@ -900,12 +902,16 @@ fn a_kernel_names_the_constants_it_reads() {
         }
     "#;
     let module = kernite::lang::parse(src).unwrap();
-    let reads = |name| kernite::x86(&module, kernite::function(&module, name).unwrap(), &[]).unwrap().consts;
-    // `STORE` as a helper's value and `ADD` in the `if` that chooses, in the module's order;
+    let named = |name| {
+        let k = kernite::x86(&module, kernite::function(&module, name).unwrap(), &[]).unwrap();
+        k.mentions.into_iter().map(|m| (m.name, src[..m.span.0 as usize].lines().count())).collect::<Vec<_>>()
+    };
+    let at = |name: &str, line: usize| (name.to_string(), line);
+    // The helper `then`, `STORE` as its value, and `ADD` in the `if` that chooses, in its body;
     // not `OFFSET`, in the branch not taken, nor `SPARE`, in a helper not called.
-    assert_eq!(reads("stores"), ["ADD", "STORE"]);
-    // `OFFSET` in the branch taken, and `LANE` through it.
-    assert_eq!(reads("adds"), ["ADD", "OFFSET", "LANE"]);
+    assert_eq!(named("stores"), [at("then", 12), at("STORE", 12), at("ADD", 22)]);
+    // `OFFSET` in the branch taken, and not `LANE`, which `OFFSET`'s definition names.
+    assert_eq!(named("adds"), [at("then", 18), at("ADD", 18), at("ADD", 22), at("OFFSET", 23)]);
 }
 
 /// Memory of the module's, which its x86 kernels name: a histogram they keep from call to
@@ -1028,8 +1034,8 @@ fn a_static_is_rusts_numbers_holding_what_it_says() {
     assert_eq!(statics[1].code.init, floats);
     assert_eq!(statics[2].code.init, [7, 0, 0, 0, 0, 0, 0, 0]);
     assert_eq!(statics[3].code.init, [255, 2, 128]);
-    assert_eq!(statics[0].consts, ["N"]);
-    assert!(statics[1..].iter().all(|s| s.consts.is_empty()));
+    assert_eq!(statics[0].mentions.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["N"]);
+    assert!(statics[1..].iter().all(|s| s.mentions.is_empty()));
 }
 
 /// A helper takes memory of the module's as it takes stack memory: of the type it is declared.

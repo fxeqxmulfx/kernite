@@ -7,8 +7,8 @@ use kernite::DeviceStatic;
 use kernite::lang::{self, Fn, Value};
 
 use crate::rust::{
-    attrs, carried, cfg_any, checks, clashes, depends_on, error_under, host, hygienic, missing, never, number_type,
-    parse, pick, pointer, primitive, quiet, site, visibility, written_params,
+    any, attrs, carried, checks, clashes, depends_on, error_under, host, hygienic, missing, never, number_type, parse,
+    pick, pointer, primitive, quiet, site, visibility, when, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -44,7 +44,7 @@ pub(crate) fn gpu(
     on_gpu: &[Option<TokenStream>],
 ) -> TokenStream {
     if !depends_on(CUDA) {
-        let gate = cfg_any(on_gpu);
+        let gate = when(any(on_gpu.iter().cloned()));
         let mut out = gate.clone();
         out.extend(parse("pub const PTX: &::core::primitive::str = \"\";"));
         out.extend(gate);

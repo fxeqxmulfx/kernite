@@ -1241,12 +1241,15 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
     assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:27: {funcs} `[usize; 3]`"));
 }
 
+/// A kernel says which items of its module it names, and where: in its directives, then in its body.
 #[test]
-fn a_kernel_names_the_constants_it_reads() {
+fn a_kernel_names_the_items_it_names() {
     let src = r#"
         const ONE: f32 = 1.0;
+        const THREADS: u32 = 64;
         const UNREAD: u32 = 2;
 
+        #[maxntid(THREADS)]
         pub unsafe extern "ptx-kernel" fn k(x: *mut f32) {
             let v: f32;
             mov.f32(v, ONE);
@@ -1255,7 +1258,8 @@ fn a_kernel_names_the_constants_it_reads() {
     "#;
     let module = kernite::lang::parse(src).unwrap();
     let k = kernite::ptx(&module, kernite::function(&module, "k").unwrap(), &[], "").unwrap();
-    assert_eq!(k.consts, ["ONE"]);
+    let named: Vec<_> = k.mentions.iter().map(|m| (m.name.as_str(), m.span.0 as usize)).collect();
+    assert_eq!(named, [("THREADS", src.find("THREADS)]").unwrap()), ("ONE", src.find("ONE);").unwrap())]);
 }
 
 /// Functions the kernels call, and a kernel that calls them each way PTX does.
@@ -2954,8 +2958,8 @@ fn a_static_is_declared_once_for_each_kernel_to_name() {
     let scope = kernite::ptx_scope(&["kernite", "my_app", "gpu"]);
     let statics: Vec<_> = kernite::ptx_statics(&module, &scope).into_iter().map(Result::unwrap).collect();
     assert_eq!(statics[0].code.memory.name, "_ZN7kernite6my_app3gpu6COUNTSE");
-    assert_eq!(statics[0].consts, ["N"]);
-    assert!(statics[1..].iter().all(|s| s.consts.is_empty()));
+    assert_eq!(statics[0].mentions.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["N"]);
+    assert!(statics[1..].iter().all(|s| s.mentions.is_empty()));
     let count = kernite::ptx(&module, kernite::function(&module, "count").unwrap(), &[], &scope).unwrap();
     assert!(count.code.text().contains("\tmov.u64 %at, _ZN7kernite6my_app3gpu6COUNTSE;\n"));
 }

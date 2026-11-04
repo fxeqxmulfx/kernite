@@ -5,7 +5,7 @@ use std::cell::Cell;
 
 use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 
-use kernite::lang::{self, Delim, Fn, Tree, Value};
+use kernite::lang::{self, Delim, Fn, ItemKind, Tree, Value};
 
 thread_local! {
     /// The span of each token the macro writes, which says where Rust resolves its names, and
@@ -125,6 +125,31 @@ pub(crate) fn written_generics<'a>(f: &Fn, top: &'a [TokenTree]) -> &'a [TokenTr
 /// a function's compile-time arguments.
 pub(crate) fn const_names(tokens: &[TokenTree]) -> impl Iterator<Item = &TokenTree> {
     tokens.windows(2).filter(|w| is_ident(&w[0], "const")).map(|w| &w[1])
+}
+
+/// The place of the item of `module` named `name`, among its items.
+pub(crate) fn position(module: &lang::Module, name: &str) -> usize {
+    module.items.iter().position(|item| item.name() == Some(name)).expect("an item of the module")
+}
+
+/// What [`carried`] keeps of `item`'s attributes when it offers nothing: its `cfg`.
+pub(crate) fn cfg_of(item: &lang::Item, top: &[TokenTree]) -> TokenStream {
+    let tokens = &top[item.tokens.clone()];
+    carried(tokens[..attrs_len(tokens)].iter().cloned(), false)
+}
+
+/// The name of `item`, a const, a static or a function, as `top` writes it, `r#type` as well, of the
+/// span `span`.
+pub(crate) fn name_at(item: &lang::Item, top: &[TokenTree], span: Span) -> TokenTree {
+    let mut name = match &item.kind {
+        ItemKind::Const(_) => const_names(&top[item.tokens.clone()]).next().expect("a const has a name"),
+        ItemKind::Static(s) => &top[s.vis.end + 1],
+        ItemKind::Fn(f) => &top[f.head.end + 1],
+        ItemKind::Other => unreachable!("only an item with a name is named"),
+    }
+    .clone();
+    name.set_span(span);
+    name
 }
 
 /// An error at each of `f`'s compile-time arguments named as one of `own`, the locals the Rust of
@@ -474,27 +499,39 @@ fn named(t: &TokenTree, name: &str) -> bool {
 }
 
 /// The condition under which an item is there, from `cfg`, what [`carried`] keeps of its attributes
-/// when it offers nothing: its `cfg`s as one predicate, `all(..)` of them, where a `cfg_attr(p, cfg(q))`
-/// is `any(not(p), q)`, and one in another likewise. `None` for an item with none: it is always there.
+/// when it offers nothing: [`all`] its `cfg`s say, where a `cfg_attr(p, cfg(q))` is `any(not(p), q)`,
+/// and one in another likewise. `None` for an item with none: it is always there.
 pub(crate) fn condition(cfg: &TokenStream) -> Option<TokenStream> {
     let attrs: Vec<TokenTree> = cfg.clone().into_iter().collect();
-    let parts: Vec<TokenStream> = attrs
-        .chunks(2)
-        .filter_map(|attr| {
-            let [_, TokenTree::Group(meta)] = attr else { unreachable!("an attribute is `#` and brackets") };
-            predicate(&flatten(meta.stream()))
-        })
-        .collect();
+    all(attrs.chunks(2).map(|attr| {
+        let [_, TokenTree::Group(meta)] = attr else { unreachable!("an attribute is `#` and brackets") };
+        predicate(&flatten(meta.stream()))
+    }))
+}
+
+/// The condition that all of `parts` hold, each as [`condition`] has it: `None` if all are always
+/// there.
+pub(crate) fn all(parts: impl IntoIterator<Item = Option<TokenStream>>) -> Option<TokenStream> {
+    let parts: Vec<TokenStream> = parts.into_iter().flatten().collect();
     (!parts.is_empty()).then(|| join("all", parts))
 }
 
-/// `#[cfg(any(..))]` of the conditions of some items, each as [`condition`] has it: what is written
-/// under it is there when any of the items is. Nothing if one of the items is always there, for then
-/// what is written is.
-pub(crate) fn cfg_any(conditions: &[Option<TokenStream>]) -> TokenStream {
-    let Some(parts) = conditions.iter().cloned().collect::<Option<Vec<_>>>() else { return TokenStream::new() };
+/// The condition that any of `parts` holds, each as [`condition`] has it: `None` if one is always.
+pub(crate) fn any(parts: impl IntoIterator<Item = Option<TokenStream>>) -> Option<TokenStream> {
+    Some(join("any", parts.into_iter().collect::<Option<Vec<_>>>()?))
+}
+
+/// The condition that `part` does not hold.
+pub(crate) fn not(part: TokenStream) -> TokenStream {
+    call("not", vec![part])
+}
+
+/// `#[cfg(condition)]`: what is written under it is there where the condition holds. Nothing for `None`,
+/// which always does.
+pub(crate) fn when(condition: Option<TokenStream>) -> TokenStream {
+    let Some(condition) = condition else { return TokenStream::new() };
     let mut out = parse("#");
-    out.extend([TokenTree::Group(Group::new(Delimiter::Bracket, call("cfg", vec![join("any", parts)])))]);
+    out.extend([TokenTree::Group(Group::new(Delimiter::Bracket, call("cfg", vec![condition])))]);
     out
 }
 
@@ -511,7 +548,7 @@ fn predicate(meta: &[TokenTree]) -> Option<TokenStream> {
     let mut parts = tokens.split(|t| is_punct(t, ','));
     let when: TokenStream = parts.next().expect("a split has a first part").iter().cloned().collect();
     let then: Vec<TokenStream> = parts.filter_map(predicate).collect();
-    (!then.is_empty()).then(|| call("any", vec![call("not", vec![when]), join("all", then)]))
+    (!then.is_empty()).then(|| call("any", vec![not(when), join("all", then)]))
 }
 
 /// `name(parts)` for a predicate's `all` or `any`, or the part alone where there is one.

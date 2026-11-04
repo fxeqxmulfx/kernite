@@ -92,13 +92,27 @@ function and static of a module has a name of its own.
 A function or a static that `cfg` leaves out says nothing, as Rust says nothing of a function it leaves out. A macro
 runs before Rust knows which `cfg` holds, so kernite compiles each one, and puts each error it finds in one under the
 same `#[cfg(..)]` or `#[cfg_attr(.., cfg(..))]`: a kernel that does not compile, or is not `unsafe`, a helper, a static.
-Where `cfg` leaves them out, the crate builds without a word; where it keeps them, each error is said where it is. A
-const is named the same way: Rust never sees a kernel read it, so kernite names it for Rust under the `cfg` of each item
-that reads it. A kernel reads a const in its body, in its `#[instances(..)]` or in a helper it calls; an
-`extern "ptx-func"` function reads one in its body; a static, in its type or in what it holds. A helper has no consts of
-its own: what it reads is named under the `cfg` of the kernel or function that calls it. A const that `cfg` leaves out
-with every item that reads it is not said of, and one that `cfg` keeps and only items `cfg` leaves out read is unused
-to Rust, which says so as it does of any const that nothing reads.
+Where `cfg` leaves them out, the crate builds without a word; where it keeps them, each error is said where it is.
+
+A kernel names the items of its module that it uses: a const it reads, a static, a helper, a kernel or an
+`extern "ptx-func"` function it calls. A kernel names an item in its body, in its `#[instances(..)]`, in its directives
+or in a helper it calls; an `extern "ptx-func"` function names one in its body; a static, in its type or in what it
+holds. A helper names nothing of its own: the kernel or function that calls it names what it names, where the helper
+writes it, and only where `cfg` keeps the helper as well as the kernel. What a const names in its definition is Rust's
+own, and not the kernel's.
+
+A kernel that `cfg` keeps names only what `cfg` keeps. Where it names an item `cfg` leaves out, the name is an error,
+said at the name, once for each place it is written, in a kernel of instances too. Rust never sees a kernel run, so
+kernite says it. Of the items that are Rust's, a const, a static in the process's memory and an x86 kernel that takes
+no compile-time arguments, kernite writes the name for Rust where the kernel writes it, under the kernel's `cfg`, and
+Rust says what it says of any name it cannot find: `cannot find value`. Of the rest, which Rust has no item for, a
+helper, an instance of an x86 kernel, an `extern "ptx-func"` function and a static in the GPU's memory, kernite says
+that `seven` is left out by `cfg` where `calls_seven`, which names it, is kept. Where `cfg` leaves out the kernel too,
+or keeps the item wherever it keeps the kernel, nothing is said. A kept kernel that calls a helper `cfg` leaves out,
+itself or through a helper `cfg` keeps, is told of the helper alone, whatever the helper names. One that calls a helper
+at two places, one of them in a helper `cfg` leaves out, is told of what the helper names, once. A const that `cfg`
+leaves out with every item that names it is not said of, and one that `cfg` keeps and only items `cfg` leaves out name
+is unused to Rust, which says so as it does of any const that nothing names.
 
 kernite reads every item before Rust knows which `cfg` holds, as Rust parses every item before it does, so an item it
 cannot read is said whatever `cfg` holds, as Rust says a syntax error in a function it leaves out: the head of a

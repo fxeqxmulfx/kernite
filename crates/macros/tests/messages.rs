@@ -116,13 +116,13 @@ fn builds_quietly_in(command: &[&str], name: &str, dir: &Path) {
     );
 }
 
-/// That Cargo builds fixture `name` without a word, and the tests in it pass, its own and its doc
-/// tests, which are crates that call it: the kernels run, as a crate that uses them runs them.
-/// Returns what the tests printed. A test that finds the GPU missing says so in a line with "skipped"
-/// and passes: that line is no word of Cargo's, and it is said again here, as a test of this file says
-/// of a tool it lacks.
-fn runs_quietly(name: &str) -> String {
-    let out = cargo_out(&["test"], &written(name));
+/// That Cargo does `command`, `["test", "--features", "big"]` say, for fixture `name`, without a word, and
+/// the tests in it pass, its own and its doc tests, which are crates that call it: the kernels run, as a
+/// crate that uses them runs them. Returns what the tests printed. A test that finds the GPU missing says
+/// so in a line with "skipped" and passes: that line is no word of Cargo's, and it is said again here, as a
+/// test of this file says of a tool it lacks.
+fn runs_quietly(command: &[&str], name: &str) -> String {
+    let out = cargo_out(command, &written(name));
     let (said, printed) = (String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
     let (skipped, said): (Vec<&str>, Vec<&str>) = said.lines().partition(|line| line.contains("skipped"));
     for line in skipped {
@@ -167,6 +167,17 @@ fn refuses_by(command: &[&str], name: &str, lines: &[&str]) {
 /// What Rust says of `name`, a type that is not there, at `place` of `src/lib.rs`.
 fn not_found(place: &str, name: &str) -> String {
     format!("src/lib.rs:{place}: error[E0425]: cannot find type `{name}` in this scope: not found in this scope")
+}
+
+/// What Rust says of `name`, a value that is not there, at `place` of `src/lib.rs`.
+fn no_value(place: &str, name: &str) -> String {
+    format!("src/lib.rs:{place}: error[E0425]: cannot find value `{name}` in this scope: not found in this scope")
+}
+
+/// What kernite says of `name`, which `cfg` leaves out, named by `reader`, which `cfg` keeps, at `place` of
+/// `src/lib.rs`.
+fn left_out(place: &str, name: &str, reader: &str) -> String {
+    format!("src/lib.rs:{place}: error: `{name}` is left out by `cfg` where `{reader}`, which names it, is kept")
 }
 
 /// What Rust says of a pointer to a type with no size, or of a value of one, `ty` the part of it that
@@ -653,6 +664,97 @@ fn rust_finds_a_const_unused_that_only_what_cfg_leaves_out_reads() {
     builds_quietly_in(&["build", "--features", "cpu"], "configured_unused", &written("configured_unused"));
 }
 
+/// A kernel that `cfg` keeps names only what `cfg` keeps: where it names an item `cfg` leaves out, the name
+/// is an error, said at the name, as Rust says it of a function it keeps that names one it leaves out. Rust
+/// says it, "cannot find value", of what is Rust's own: a const, a static of the process's and an x86
+/// kernel that takes no compile-time arguments, named in a kernel's body, in its `#[instances(..)]`, in its
+/// directives and in the type or the value of a static; a const whose definition names one is Rust's alone,
+/// and Rust says it once, there. kernite says it of what is not Rust's: a helper, an instance of an x86
+/// kernel, an `extern "ptx-func"` function and a static of the GPU's. Each place a name is written is said
+/// once, in a kernel of instances too. What a helper names is its caller's, as it is for a helper a helper
+/// calls, and is said where `cfg` keeps the helper as well: a kept kernel that calls a helper `cfg` leaves
+/// out is told of the helper alone, whatever the helper names, and one that calls a helper at two places,
+/// one in a helper `cfg` leaves out, is told of what the helper names, once. A helper that calls itself, or
+/// two that call each other, as long as a value known now says, are followed once: what they name is said
+/// once for each place, however often the kernel runs them. A kept kernel that calls a pair `cfg` leaves
+/// out is told of the helper it calls alone, and so is one that reaches a pair only through a helper `cfg`
+/// leaves out, though the pair names a const `cfg` leaves out with that helper. The fixture's modules are,
+/// in order, the x86 kernels Rust has names for, those it has none for, those that call helpers, the GPU's
+/// kernels, two of which nothing is said: one whose kernels `cfg` leaves out with what they name, or keeps
+/// only where it keeps that, and one that the features keep as they keep what it names; and last the
+/// helpers that loop: one that calls itself, a pair, a pair `cfg` leaves out, and a pair that only a helper
+/// `cfg` leaves out calls.
+#[test]
+fn a_kernel_that_cfg_keeps_is_told_at_each_name_that_cfg_leaves_out() {
+    refuses(
+        "configured_names",
+        &[
+            // kernite's, an item at a time, in the order of the source, and the places of an item likewise.
+            &left_out("106:9", "seven", "calls_helper"),
+            &left_out("95:9", "inner", "calls_through"),
+            &left_out("116:17", "tile", "calls_instance"),
+            &left_out("122:9", "seven", "calls_helper_of_instances"),
+            &left_out("123:9", "seven", "calls_helper_of_instances"),
+            &left_out("171:9", "left_out", "calls_left_out"),
+            &left_out("175:9", "calls_twice", "calls_both_ways"),
+            &left_out("205:17", "nine", "via"),
+            &left_out("224:9", "left_out", "calls_left_out"),
+            &left_out("229:21", "COUNT", "reads_static"),
+            &left_out("235:17", "nine", "calls_function"),
+            &left_out("242:17", "nine", "calls_function_of_instances"),
+            &left_out("383:9", "tick", "calls_left_out_pair"),
+            &left_out("411:9", "entry", "calls_entry"),
+            // Rust's, a module at a time, in the order it reads what the macro writes: the items first, a
+            // const's definition and the type and value of a static, then the names its kernels say, in
+            // the order of the source.
+            &no_value("30:24", "SIZE"),
+            &no_value("32:37", "LEN"),
+            &no_value("34:37", "SIZE"),
+            &no_value("44:23", "SIZE"),
+            &no_value("53:22", "COUNT"),
+            &no_value("59:17", "eight"),
+            &no_value("63:17", "LIST"),
+            &no_value("71:22", "COUNT"),
+            &no_value("72:16", "SIZE"),
+            &no_value("73:16", "SIZE"),
+            &no_value("162:23", "FOUR"),
+            &no_value("194:37", "LEN"),
+            &no_value("206:23", "SIZE"),
+            &no_value("220:28", "SIZE"),
+            &no_value("246:15", "SIZE"),
+            &no_value("338:23", "STEP"),
+            "error: could not compile `configured_names` (lib) due to 30 previous errors",
+        ],
+    );
+}
+
+/// What is told is judged by the conditions of both, the kernel's and the item's. With `big`, an item that
+/// `big` and `wide` keep, and a helper under `cfg_attr(big, cfg(wide))`, are gone where `big` holds alone,
+/// and the kernels that name them are told there, a kernel that `big` keeps and one that is always kept;
+/// not where neither holds, nor where both do.
+#[test]
+fn a_name_is_told_where_the_kernel_is_kept_and_the_item_is_not() {
+    refuses_by(
+        &["build", "--features", "big"],
+        "configured_names",
+        &[
+            &left_out("320:9", "six", "calls_six"),
+            &left_out("324:9", "five", "calls_five"),
+            &no_value("315:23", "WIDE"),
+            "error: could not compile `configured_names` (lib) due to 3 previous errors",
+        ],
+    );
+}
+
+/// What `cfg` keeps of what the kernels name builds without a word, under `deny(warnings)`, and the x86
+/// kernels run as they did: each writes through its pointer what it names, as the test the fixture holds
+/// finds.
+#[test]
+fn what_cfg_keeps_of_what_a_kernel_names_builds_and_runs() {
+    let printed = runs_quietly(&["test", "--features", "big,wide"], "configured_names");
+    assert!(printed.contains("1 passed"), "fixtures/configured_names.rs ran its test, and printed:\n{printed}");
+}
+
 /// A module of GPU kernels needs `kernite-cuda` where `cfg` keeps one of its GPU items, and not
 /// where it leaves out all: a feature that brings the crate, `cuda = ["dep:kernite-cuda"]`, can keep
 /// them, and the crate builds without the feature, without a word, under `deny(warnings)`, and with
@@ -762,7 +864,7 @@ fn kernels_that_compile_say_nothing() {
 /// it. They skip where there is no GPU.
 #[test]
 fn a_gpu_kernel_runs_over_the_blocks_its_directives_allow() {
-    let printed = runs_quietly("tuned");
+    let printed = runs_quietly(&["test"], "tuned");
     assert!(printed.contains("test result: ok. 3 passed"), "fixtures/tuned.rs ran its tests, and printed:\n{printed}");
 }
 
@@ -819,7 +921,7 @@ fn a_kernels_parameters_keep_their_names_beside_those_the_macros_rust_binds() {
 /// themselves, `__kernite_0`, and a parameter or a compile-time argument of that name is the kernel's own.
 #[test]
 fn a_parameter_named_underscore_is_passed_and_not_read_in_a_kernel_of_whatever_kind_it_is() {
-    let printed = runs_quietly("underscore");
+    let printed = runs_quietly(&["test"], "underscore");
     assert!(
         printed.contains("test result: ok. 2 passed"),
         "fixtures/underscore.rs ran its tests, and printed:\n{printed}"
@@ -902,7 +1004,7 @@ fn a_kernel_kernite_refuses_with_a_parameter_named_underscore_is_kernites_error_
 /// through its pointer. So does its doc test, from another crate.
 #[test]
 fn a_parameters_type_means_what_it_means_where_the_kernel_is_written() {
-    let printed = runs_quietly("beside");
+    let printed = runs_quietly(&["test"], "beside");
     let passed = printed.matches("1 passed").count();
     assert_eq!(passed, 2, "fixtures/beside.rs ran its test and its doc test, and printed:\n{printed}");
 }
@@ -916,7 +1018,7 @@ fn a_parameters_type_means_what_it_means_where_the_kernel_is_written() {
 /// does its doc test, from another crate.
 #[test]
 fn a_type_in_a_kernel_may_name_its_compile_time_arguments() {
-    let printed = runs_quietly("argument_pointers");
+    let printed = runs_quietly(&["test"], "argument_pointers");
     for passed in ["test result: ok. 9 passed", "test result: ok. 1 passed"] {
         assert!(
             printed.contains(passed),

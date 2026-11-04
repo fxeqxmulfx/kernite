@@ -1,8 +1,10 @@
 //! The lexer, how a type is written and which types are pointers, the rounding of 16-bit floats,
-//! and whether a function is `unsafe`. The rest of the language is tested where it meets the
-//! targets it is compiled for, in `kernite`'s `tests/lang.rs`.
+//! whether a function is `unsafe`, and where a place is. The rest of the language is tested where it
+//! meets the targets it is compiled for, in `kernite`'s `tests/lang.rs`.
 
+use crate::token::Span;
 use crate::value::{Value, cast};
+use crate::{Mention, parse};
 
 #[test]
 fn the_lexer_reads_what_rust_writes() {
@@ -179,4 +181,26 @@ fn a_function_says_whether_it_is_unsafe() {
         })
         .collect();
     assert_eq!(said, [("k", true), ("f", false), ("h", true), ("c", true)]);
+}
+
+/// A place is in the item that starts last before it, whatever it is nested in: the brackets of a
+/// static's type, the body of a helper.
+#[test]
+fn a_place_is_in_the_item_that_writes_it() {
+    let src = "const A: u64 = 1;\nstatic S: global<[u32; A]>;\nfn help(x: gpr) { add(x, A); }\n\
+               unsafe extern \"sysv64\" fn k(x: u64) { help(x); }";
+    let module = parse(src).unwrap();
+    let item_of = |at: &str| module.item_at(Span(src.rfind(at).unwrap() as u32));
+    assert_eq!([item_of("A: u64"), item_of("A]"), item_of("A); }"), item_of("help(x); }")], [0, 1, 2, 3]);
+}
+
+/// Mentions come in the order of the source, however they were recorded, and a place has one.
+#[test]
+fn a_function_has_its_mentions_in_the_order_of_the_source_each_place_once() {
+    let mut mentions = vec![];
+    for (name, at) in [("B", 20), ("A", 5), ("B", 20), ("C", 12), ("A", 5)] {
+        Mention::record(&mut mentions, name, Span(at));
+    }
+    let told: Vec<_> = mentions.iter().map(|m| (m.name.as_str(), m.span.0)).collect();
+    assert_eq!(told, [("A", 5), ("C", 12), ("B", 20)]);
 }

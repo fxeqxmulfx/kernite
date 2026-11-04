@@ -12,13 +12,34 @@ pub struct Module {
     pub items: Vec<Item>,
 }
 
+impl Module {
+    /// The place among its items of the one that writes `span`: the last that starts at or before it.
+    pub fn item_at(&self, span: Span) -> usize {
+        self.items.iter().rposition(|item| item.span <= span).expect("an item writes each place")
+    }
+}
+
 /// An item, and the tokens it spans by index into the module's tokens.
 #[derive(Clone, Debug)]
 pub struct Item {
     /// Its tokens, attributes included.
     pub tokens: Range<usize>,
+    /// Where its first token is.
+    pub span: Span,
     /// What it is.
     pub kind: ItemKind,
+}
+
+impl Item {
+    /// Its name, if it is a const, a function or a static.
+    pub fn name(&self) -> Option<&str> {
+        match &self.kind {
+            ItemKind::Const(c) => Some(&c.name),
+            ItemKind::Fn(f) => Some(&f.name),
+            ItemKind::Static(s) => Some(&s.name),
+            ItemKind::Other => None,
+        }
+    }
 }
 
 /// What an item is.
