@@ -183,76 +183,143 @@ pub(crate) fn pointer(ty: &[TokenTree]) -> Option<(&'static str, &[TokenTree])> 
 /// The name of the function the macros write into a body to ask Rust whether a pointer has a size.
 const THIN: &str = "__kernite_thin";
 
-/// For each of `f`'s parameters, and last for its result: `"const"` or `"mut"`, and where the type
-/// it points to begins, if it is a pointer of one word, `*const T` or `*mut T`. The language says
-/// which: a pointer to a slice, a `str` or a `dyn` has two words, and is its error alone, which
-/// Rust is not asked of, for it would say the same twice.
-pub(crate) fn words(f: &Fn, top: &[TokenTree]) -> Vec<Option<(&'static str, Span)>> {
-    let word = |ty: &[TokenTree]| {
-        let (kind, to) = pointer(ty)?;
-        let one = lex(ty).0.is_ok_and(|trees| lang::pointer(&lang::text(&trees)) == Ok(true));
-        one.then(|| (kind, to[0].span()))
-    };
-    let params = written_params(f, top).into_iter().map(|(param, colon)| word(&param[colon + 1..]));
-    params.chain([f.ret.as_ref().and_then(|r| word(&top[r.tokens.clone()]))]).collect()
+/// What Rust is asked of a type of a kernel's, and where the type is.
+#[derive(Clone, Copy)]
+enum Ask {
+    /// `"const"` or `"mut"`, and where the type it points to begins, for a pointer of one word,
+    /// `*const T` or `*mut T`: whether `T` has a size.
+    Pointer(&'static str, Span),
+    /// A number by its name, and where the name is: whether it is that number, the primitive
+    /// `::core::primitive::u64`, and not another type the module gives the name. Rust is asked of
+    /// the type alone, never of a value of it.
+    Number(&'static str, Span),
 }
 
-/// What asks Rust whether each pointer of one word `f` takes has a size, in a body that has the
-/// parameters by their names as written: a function that takes a pointer as `ptr` writes it, and
-/// a call of it on each, [`asks`] says how. Nothing if `f` takes none.
+/// For each of `f`'s parameters, and last for its result: what Rust is asked of its type, if it is
+/// asked. It is asked of a number the language reads by its name, `u8` to `u64`, `i8` to `i64`,
+/// `usize`, `isize`, `f32`, `f64` and `bool`, and not of `f16` and `bf16`, which Rust has not; and
+/// of a pointer of one word, `*const T` or `*mut T`. The language says which: a pointer to a slice, a
+/// `str` or a `dyn` has two words, and is its error alone, which Rust is not asked of, for it would
+/// say the same twice.
+fn asked(f: &Fn, top: &[TokenTree]) -> Vec<Option<Ask>> {
+    let ask = |ty: &[TokenTree]| {
+        if let [name] = ty {
+            let text = name.to_string();
+            let known = lang::IntTy::parse(&text).map(lang::IntTy::name);
+            return known
+                .or_else(|| ["bool", "f32", "f64"].into_iter().find(|n| *n == text))
+                .map(|n| Ask::Number(n, name.span()));
+        }
+        let (kind, to) = pointer(ty)?;
+        let one = lex(ty).0.is_ok_and(|trees| lang::pointer(&lang::text(&trees)) == Ok(true));
+        one.then(|| Ask::Pointer(kind, to[0].span()))
+    };
+    let params = written_params(f, top).into_iter().map(|(param, colon)| ask(&param[colon + 1..]));
+    params.chain([f.ret.as_ref().and_then(|r| ask(&top[r.tokens.clone()]))]).collect()
+}
+
+/// What asks Rust of each type `f` takes or gives back, in a body that has the parameters by their
+/// names as written: [`numbers`] asks of the numbers and [`pointers`] of the pointers, for which a
+/// function that takes a pointer as `ptr` is written. A result that is a pointer is asked of
+/// where it is given back. Nothing if `f` has none to ask of.
 pub(crate) fn checks(f: &Fn, top: &[TokenTree], ptr: &str) -> TokenStream {
     let names: Vec<TokenStream> =
         written_params(f, top).iter().map(|(param, colon)| param[colon - 1].clone().into()).collect();
-    asks(&words(f, top), ptr, &names)
+    let asked = asked(f, top);
+    let mut out = numbers(&asked);
+    out.extend(pointers(&asked, ptr, &names));
+    out
 }
 
-/// The block of a `const` operand of a naked kernel's own `naked_asm!`, which asks Rust whether
-/// each pointer of one word it takes or gives back has a size: a closure that Rust checks and
-/// never runs, which calls the kernel on its parameters, and asks of them and of what it gives
-/// back. Nothing if the kernel has no such pointer. A naked function has no body to write the
+/// The block of a `const` operand of a naked kernel's own `naked_asm!`, which asks Rust of each
+/// type the kernel takes or gives back: a closure for each number, which Rust checks and never
+/// runs, and, if the kernel has a pointer to ask of, one that calls the kernel on its parameters,
+/// and asks of them and of what it gives back. A call is made for the pointers alone, for the value
+/// of a number's name that is no number may have no size, which Rust would say of the call, at the
+/// attribute. Nothing if the kernel has none to ask of. A naked function has no body to write the
 /// questions in, and no name of the kernel's finds the closure's locals.
 pub(crate) fn probe(f: &Fn, top: &[TokenTree]) -> Option<TokenStream> {
     let n = f.params.len();
-    let words = words(f, top);
+    let asked = asked(f, top);
     // The parameters are `__0`, `__1` and on. Rust says of a type that is not well formed wherever a
-    // value of it is, so a pointer's is located at the type it points to, as Rust says it there.
+    // value of it is, so each is located at the type it is asked of, as Rust says it there.
     let local = |i: usize| -> TokenTree {
-        let at = words[i].map_or_else(Span::mixed_site, |(_, to)| to.resolved_at(Span::mixed_site()));
+        let at = asked[i].map_or_else(Span::mixed_site, |(Ask::Pointer(_, at) | Ask::Number(_, at))| {
+            at.resolved_at(Span::mixed_site())
+        });
         Ident::new(&format!("__{i}"), at).into()
     };
     let mut values: Vec<TokenStream> = (0..n).map(|i| local(i).into()).collect();
     values.push(hygienic(&format!("$__{n}()"), true));
-    let calls = asks(&words, "*const T", &values);
-    if calls.is_empty() {
-        return None;
+    let mut block = numbers(&asked);
+    let calls = pointers(&asked, "*const T", &values);
+    if !calls.is_empty() {
+        let args: TokenStream = (0..n).flat_map(|i| [local(i), Punct::new(',', Spacing::Alone).into()]).collect();
+        // `__n` calls the kernel on them, in a closure of its own, and first, for Rust to know the
+        // types of the parameters when it is asked, and for a kernel that never returns to leave no
+        // question unreachable.
+        let mut call = parse(&top[f.head.end + 1].to_string());
+        call.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, args.clone()))]);
+        let mut body = hygienic(&format!("let $__{n} = || unsafe"), true);
+        body.extend([TokenTree::Group(Group::new(Delimiter::Brace, call))]);
+        body.extend(parse(";"));
+        body.extend(calls);
+        block.extend(parse("let _ = |"));
+        block.extend(args);
+        block.extend(parse("|"));
+        block.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
+        block.extend(parse(";"));
     }
-    let args: TokenStream = (0..n).flat_map(|i| [local(i), Punct::new(',', Spacing::Alone).into()]).collect();
-    // `__n` calls the kernel on them, in a closure of its own, and first, for Rust to know the types
-    // of the parameters when it is asked, and for a kernel that never returns to leave no question
-    // unreachable.
-    let mut call = parse(&top[f.head.end + 1].to_string());
-    call.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, args.clone()))]);
-    let mut body = hygienic(&format!("let $__{n} = || unsafe"), true);
-    body.extend([TokenTree::Group(Group::new(Delimiter::Brace, call))]);
-    body.extend(parse(";"));
-    body.extend(calls);
-    let mut block = parse("let _ = |");
-    block.extend(args);
-    block.extend(parse("|"));
-    block.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
-    block.extend(parse("; 0"));
-    Some(block)
+    (!block.is_empty()).then(|| {
+        block.extend(parse("0"));
+        block
+    })
 }
 
-/// A function that takes a pointer as `ptr` writes it, and a call of it on each of `values` that is
-/// a pointer of one word, as `words` says: the values of a function's parameters and, last, of its
-/// result. Rust cannot call it on a pointer to a type with no size, and says so, that its size cannot
-/// be known. Nothing if there is no call.
-fn asks(words: &[Option<(&str, Span)>], ptr: &str, values: &[TokenStream]) -> TokenStream {
+/// What asks Rust of each number `asked` has, a parameter's or the result's, by [`number`]: in an item
+/// of its own, `const _: () = { .. };`, and not among the statements of the body, for Rust numbers the
+/// closures of a body in the order they come, and the names of the symbols of the code hold the
+/// numbers: the closure a launcher runs, say, would be another's, and the code of a release build
+/// would differ in its names. Nothing if there is no number to ask of.
+fn numbers(asked: &[Option<Ask>]) -> TokenStream {
+    let mut inner = TokenStream::new();
+    for ask in asked {
+        if let Some(Ask::Number(name, at)) = *ask {
+            inner.extend(number(name, at));
+        }
+    }
+    if inner.is_empty() {
+        return inner;
+    }
+    let mut out = respan(parse("const _: () ="), Span::mixed_site());
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, inner))]);
+    out.extend(respan(parse(";"), Span::mixed_site()));
+    out
+}
+
+/// `let _ = |__kernite_asked: u64| { let _: ::core::primitive::u64 = __kernite_asked; };`, which
+/// asks Rust whether the type the kernel writes, `u64` at `at`, is the number `name`, as a module's
+/// `u64` is not when it gives the name another type. A closure that Rust checks and never calls takes
+/// a value of the type as written; so Rust says of a type that is not the number that it is not, once,
+/// at the type, and in the order a kernel that compiles says it: it expected the number and found the
+/// type. It asks of the type and not of any value of it, which a type that has no size has none of.
+/// Each token but the type is the macro's, located at `at`.
+fn number(name: &str, at: Span) -> TokenStream {
+    let mut out = placed("let _ = | __kernite_asked :", at);
+    out.extend([TokenTree::Ident(Ident::new(name, at))]);
+    out.extend(placed(&format!("| {{ let _: {} = __kernite_asked; }};", primitive(name)), at));
+    out
+}
+
+/// What asks Rust of each pointer of one word `asked` has, among the parameters, by the values that
+/// `values` gives of them: a call of a function that takes a pointer as `ptr`, which Rust cannot make
+/// on a pointer to a type with no size: it says that the size cannot be known. Nothing if there is
+/// nothing to ask.
+fn pointers(asked: &[Option<Ask>], ptr: &str, values: &[TokenStream]) -> TokenStream {
     let mut calls = TokenStream::new();
-    for (value, word) in values.iter().zip(words) {
-        if let Some((_, to)) = word {
-            calls.extend(thin(value.clone(), *to));
+    for (value, ask) in values.iter().zip(asked) {
+        if let Some(Ask::Pointer(_, to)) = *ask {
+            calls.extend(thin(value.clone(), to));
         }
     }
     if calls.is_empty() {
@@ -262,6 +329,11 @@ fn asks(words: &[Option<(&str, Span)>], ptr: &str, values: &[TokenStream]) -> To
     let mut out = respan(parse(&format!("#[inline(always)] fn {THIN}<T>(_: {ptr}) {{}}")), Span::mixed_site());
     out.extend(calls);
     out
+}
+
+/// The tokens `s` writes, each located at `at` and of the macro's hygiene.
+fn placed(s: &str, at: Span) -> TokenStream {
+    respan(parse(s), at.resolved_at(Span::mixed_site()))
 }
 
 /// `__kernite_thin(value);` with each token located at `to`, where the type `value` points to
@@ -280,20 +352,35 @@ fn thin(value: TokenStream, to: Span) -> TokenStream {
     [TokenTree::Ident(Ident::new(THIN, at)), args.into(), end.into()].into_iter().collect()
 }
 
-/// `f` with a body that never runs, for a kernel that does not compile. It asks Rust whether each
-/// pointer `f` takes has a size, and gives back one by `dangling`, which asks at its type, if `f`
-/// returns a pointer.
+/// `call`, which gives back the result of an instance of `f`, as `f` gives it back. A pointer is
+/// cast back at its type, for Rust to say there that the type has no size. Rust is asked of a
+/// number by [`checks`].
+pub(crate) fn result(f: &Fn, top: &[TokenTree], call: TokenStream) -> TokenStream {
+    let mut out = call;
+    if let Some(Ask::Pointer(_, to)) = asked(f, top).pop().flatten() {
+        out.extend(parse("."));
+        out.extend([TokenTree::Ident(Ident::new("cast", to.resolved_at(site())))]);
+        out.extend(parse("()"));
+    }
+    out
+}
+
+/// `f` with a body that never runs, for a kernel that does not compile. It asks Rust of each type `f`
+/// takes or gives back, as [`checks`] says: of a number by a closure of the type as written, which it
+/// never calls, so that a result reads as it does in a kernel that compiles, "expected `f64`, found
+/// `f32`", and not the other way round, as a literal of the number would read. It ends with `dangling`,
+/// the value of a result that is a pointer, and with `unreachable!()` for any other.
 pub(crate) fn stub(f: &Fn, top: &[TokenTree]) -> TokenStream {
     let mut out = attrs(f, top);
     out.extend(signature(f, top));
     let mut body = checks(f, top, "*const T");
     body.extend(parse(&never(f, top)));
-    body.extend(match words(f, top).pop().flatten() {
-        Some((kind, to)) => {
+    body.extend(match asked(f, top).pop().flatten() {
+        Some(Ask::Pointer(kind, to)) => {
             let mutable = if kind == "mut" { "_mut" } else { "" };
             respan(parse(&format!("::core::ptr::dangling{mutable}()")), to.resolved_at(site()))
         }
-        None => parse("::core::unreachable!()"),
+        _ => parse("::core::unreachable!()"),
     });
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
     out

@@ -102,12 +102,17 @@
 //! `expect` gives it. So is a pointer to a type with no size, `*const CStr` say, which has two words
 //! where a kernel's has one: the macros ask Rust of each pointer a kernel takes or gives back, and
 //! it says that the size cannot be known, at the type, whatever the type is called and holds.
+//! So is a number's name that the module gives another type, `pub type u64 = u32;` and a `use` of
+//! it: kernite reads `u64` as 64 bits where Rust would pass a `u32`, so the macros ask Rust of each
+//! number a kernel takes or gives back whether it is that number, and it says that it is not, at
+//! the type, once.
 //! A generic is a value: `<T>` is an error at the `T`, and so is `impl` in a parameter's type or
 //! the result's, wherever in it, `x: impl Copy`, `Option<impl Copy>` or `-> *mut impl Copy`, at the
 //! `impl`: in a parameter it makes the function generic over a type, and in the result it hides
 //! one. kernite says both in the same words.
 //! The Rust the macros write names the numbers and `str` by their paths, `::core::primitive::u64`,
-//! so a module may give any of those names another type and build.
+//! so a module may give any of those names another type and build, so long as none of its kernels
+//! takes or gives that name as a number.
 //!
 //! The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one,
 //! `dead_code` say, and build its kernels: Rust lints the names and the code a kernel is

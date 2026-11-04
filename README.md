@@ -69,8 +69,14 @@ where `type Floats = [f32];`, a struct of yours whose last field is a slice, `(&
 be known, at the type, for a pointer a kernel returns as well as for one it takes, in a kernel of every kind. A type in
 a message is written as Rust writes it, `[usize; 3]`.
 
-A module may give the name of a primitive, `u8` or `str`, another type, and its kernels build as they do without: the
-Rust kernite writes names each primitive by its path, `::core::primitive::u8`.
+A number's name in a kernel's parameters or return, `u8` to `u64`, `i8` to `i64`, `usize`, `isize`, `f32`, `f64` or
+`bool`, means that number: `u64` is 64 bits. A module that gives the name another type, `pub type u64 = u32;` and a
+`use` of it, would have Rust pass a `u32` where the listing reads 64 bits, so it is an error at the type. Rust says it,
+once, in a kernel of every kind: it expected `u64` and found `u32`.
+
+A module may give the name of a primitive, `u8` or `str`, another type, and its kernels build as they do without, so
+long as none takes or gives that name as a number: the Rust kernite writes names each primitive by its path,
+`::core::primitive::u8`.
 
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kernite_macros::consts]` is on, and a

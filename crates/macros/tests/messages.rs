@@ -163,13 +163,19 @@ fn not_found(place: &str, name: &str) -> String {
     format!("src/lib.rs:{place}: error[E0425]: cannot find type `{name}` in this scope: not found in this scope")
 }
 
-/// What Rust says of a pointer to a type with no size, `ty` the part of it that has none, at `place` of
-/// `src/lib.rs`: that its size cannot be known.
+/// What Rust says of a pointer to a type with no size, or of a value of one, `ty` the part of it that
+/// has none, at `place` of `src/lib.rs`: that its size cannot be known.
 fn size_unknown(place: &str, ty: &str) -> String {
     format!(
         "src/lib.rs:{place}: error[E0277]: the size for values of type `{ty}` cannot be known at compilation \
          time: doesn't have a size known at compile-time"
     )
+}
+
+/// What Rust says of a number's name that the module gives another type, `found`, at `place` of
+/// `src/lib.rs`: that the type is not the number, `expected`.
+fn not_the_number(place: &str, expected: &str, found: &str) -> String {
+    format!("src/lib.rs:{place}: error[E0308]: mismatched types: expected `{expected}`, found `{found}`")
 }
 
 /// Whether this machine has Clippy, which the tests that run it skip without, and say so.
@@ -1094,6 +1100,229 @@ fn impl_in_the_type_of_a_variable_a_const_or_a_static_is_said_as_it_was() {
     );
 }
 
+/// A number's name that the module gives another type is Rust's error at the type, once: kernite reads
+/// the number the name says, and the macros ask Rust whether the type is that number. The names are
+/// given by a `use` of a `pub type` of the crate's root, and of a module of aliases, to the type of
+/// another number; in each parameter and result of an x86 kernel, plain, of compile-time arguments
+/// or cooperative, and in each parameter of a GPU kernel of those kinds.
+#[test]
+fn a_number_named_as_another_type_is_refused_at_the_type_whatever_the_kernel_is() {
+    let numbers = [
+        // `u64` and `f64`, which the crate's root gives and a module takes by a `use`: `id` takes
+        // a `u64`, and `twice` takes and gives back an `f64`.
+        ("35:41", "u64", "u32"),
+        ("39:44", "f64", "f32"),
+        ("39:52", "f64", "f32"),
+        // An x86 kernel, plain: a parameter of each number it takes.
+        ("50:12", "f32", "f64"),
+        ("51:12", "f64", "f32"),
+        ("52:12", "usize", "isize"),
+        ("53:12", "isize", "usize"),
+        ("54:12", "u64", "i64"),
+        ("55:12", "i64", "u64"),
+        // The same, a result of each number it gives back, and `bool`.
+        ("60:58", "f32", "f64"),
+        ("61:58", "f64", "f32"),
+        ("62:60", "usize", "isize"),
+        ("63:60", "isize", "usize"),
+        ("64:58", "u64", "i64"),
+        ("65:58", "i64", "u64"),
+        ("66:58", "u32", "i32"),
+        ("67:58", "i32", "u32"),
+        ("68:58", "u16", "i16"),
+        ("69:58", "i16", "u16"),
+        ("70:57", "u8", "i8"),
+        ("71:57", "i8", "u8"),
+        ("72:59", "bool", "u8"),
+        // An x86 kernel of compile-time arguments: a parameter of each number.
+        ("81:12", "f32", "f64"),
+        ("82:12", "f64", "f32"),
+        ("83:12", "usize", "isize"),
+        ("84:12", "isize", "usize"),
+        ("85:12", "u64", "i64"),
+        ("86:12", "i64", "u64"),
+        // A result of three of them.
+        ("92:74", "f32", "f64"),
+        ("94:73", "u8", "i8"),
+        ("96:75", "bool", "u8"),
+        // A cooperative x86 kernel, plain and of compile-time arguments.
+        ("105:12", "f32", "f64"),
+        ("106:12", "f64", "f32"),
+        ("107:12", "usize", "isize"),
+        ("108:12", "isize", "usize"),
+        ("109:12", "u64", "i64"),
+        ("110:12", "i64", "u64"),
+        ("117:67", "f32", "f64"),
+        ("117:75", "u64", "i64"),
+        // A GPU kernel, plain: a parameter of each number it takes.
+        ("127:12", "u8", "i8"),
+        ("128:12", "u16", "i16"),
+        ("129:12", "u32", "i32"),
+        ("130:12", "u64", "i64"),
+        ("131:12", "i8", "u8"),
+        ("132:12", "i16", "u16"),
+        ("133:12", "i32", "u32"),
+        ("134:12", "i64", "u64"),
+        ("135:12", "usize", "isize"),
+        ("136:12", "isize", "usize"),
+        ("137:12", "f32", "f64"),
+        ("138:12", "f64", "f32"),
+        // A GPU kernel of compile-time arguments, a cooperative one, and a cooperative one of arguments.
+        ("143:69", "u8", "i8"),
+        ("143:76", "f64", "f32"),
+        ("147:58", "u32", "i32"),
+        ("147:66", "f32", "f64"),
+        ("152:78", "i64", "u64"),
+        // A name for a type wider than the number: Rust would pass eight bytes where the kernel reads four.
+        ("166:78", "u32", "u64"),
+    ];
+    let mut said: Vec<String> = numbers.map(|(at, number, found)| not_the_number(at, number, found)).into();
+    said.push(format!("error: could not compile `number_names` (lib) due to {} previous errors", numbers.len()));
+    refuses("number_names", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// The same in kernels kernite refuses: kernite says what is wrong where it is, in the kernel, and
+/// Rust says what it finds at the type, in the stub the macros leave for each, once.
+#[test]
+fn a_number_named_as_another_type_is_refused_at_the_type_in_a_kernel_kernite_refuses() {
+    let kernite = [
+        // An x86 kernel kernite refuses for a body that names a variable it has not: a plain one, one
+        // of compile-time arguments, which it says once for each instance, a cooperative one, and a
+        // cooperative one of arguments.
+        "src/lib.rs:23:13: error: `y` is not defined",
+        "src/lib.rs:27:13: error: `y` is not defined",
+        "src/lib.rs:32:13: error: in `tiles::<1>`: `y` is not defined",
+        "src/lib.rs:32:13: error: in `tiles::<2>`: `y` is not defined",
+        "src/lib.rs:37:13: error: `y` is not defined",
+        "src/lib.rs:43:13: error: in `together_tiles::<1>`: `y` is not defined",
+        "src/lib.rs:43:13: error: in `together_tiles::<2>`: `y` is not defined",
+        // One whose `extern` it does not know, and one that is not `unsafe`.
+        "src/lib.rs:46:23: error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \
+         \"ptx-kernel\"` ones, for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` \
+         is none of these",
+        "src/lib.rs:50:28: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
+        // A GPU kernel: a plain one, one of compile-time arguments, and a cooperative one.
+        "src/lib.rs:60:24: error: `y` is not defined",
+        "src/lib.rs:65:24: error: in `tiles::<1>`: `y` is not defined",
+        "src/lib.rs:65:24: error: in `tiles::<2>`: `y` is not defined",
+        "src/lib.rs:70:24: error: `y` is not defined",
+    ];
+    let numbers = [
+        // An x86 kernel kernite refuses, plain: the parameters and the result, and a `bool`.
+        ("22:44", "f32", "f64"),
+        ("22:52", "usize", "isize"),
+        ("22:62", "u64", "i64"),
+        ("22:70", "f64", "f32"),
+        ("26:49", "u64", "i64"),
+        ("26:57", "bool", "u8"),
+        // One of compile-time arguments, said once and not for each instance.
+        ("31:60", "f32", "f64"),
+        ("31:68", "u64", "i64"),
+        ("31:76", "usize", "isize"),
+        // A cooperative one, and a cooperative one of arguments.
+        ("36:47", "f32", "f64"),
+        ("36:55", "u64", "i64"),
+        ("42:69", "f64", "f32"),
+        // One whose `extern` kernite does not know, and one that is not `unsafe`.
+        ("46:43", "u64", "i64"),
+        ("46:51", "f64", "f32"),
+        ("50:36", "f32", "f64"),
+        ("50:44", "f32", "f64"),
+        // A GPU kernel kernite refuses: a plain one, one of compile-time arguments and a cooperative one.
+        ("59:48", "u32", "i32"),
+        ("59:56", "f64", "f32"),
+        ("59:64", "u8", "i8"),
+        ("64:62", "u64", "i64"),
+        ("69:51", "f32", "f64"),
+    ];
+    let mut said: Vec<String> = kernite.map(String::from).into();
+    said.extend(numbers.map(|(at, number, found)| not_the_number(at, number, found)));
+    said.push(format!("error: could not compile `number_names_refused` (lib) due to {} previous errors", said.len()));
+    refuses("number_names_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A number's name that the module gives a type with no size, `u8` a slice, is Rust's error at the
+/// type: that its size cannot be known, and that it is not the number. Asking Rust whether it is the
+/// number brings no error at the module's attribute, for the macros ask of the type alone, and never
+/// of a call that gives back a value of it, nor of a local that holds one. So it is in an x86 kernel,
+/// plain, of compile-time arguments and one kernite refuses, with the number as its result, and in a
+/// GPU kernel of each kind, with it as a parameter. The errors at the attribute, `19:1` and `41:1`, are
+/// the code the macros write for the kernel itself, which the module has without the questions: the
+/// instances of a kernel of compile-time arguments that gives back such a value, and the launchers of
+/// a GPU kernel that takes one.
+#[test]
+fn a_number_named_as_a_type_with_no_size_is_refused_at_the_type_and_not_at_the_attribute() {
+    let mut said: Vec<String> =
+        ["src/lib.rs:33:13: error: `y` is not defined", "src/lib.rs:60:24: error: `y` is not defined"]
+            .map(String::from)
+            .into();
+    said.extend([
+        // An x86 kernel with the number as its result: plain, of compile-time arguments and refused.
+        size_unknown("23:52", "[u8]"),
+        size_unknown("28:66", "[u8]"),
+        size_unknown("19:1", "[u8]"),
+        size_unknown("32:54", "[u8]"),
+        not_the_number("23:52", "u8", "[u8]"),
+        not_the_number("28:66", "u8", "[u8]"),
+        not_the_number("32:54", "u8", "[u8]"),
+        // An x86 kernel with the number as its parameter.
+        size_unknown("36:48", "[usize]"),
+        not_the_number("36:48", "usize", "[usize]"),
+        // A GPU kernel with the number as its parameter: plain, with the launchers' error at the
+        // attribute, then of compile-time arguments, cooperative and refused.
+        size_unknown("45:48", "[u8]"),
+        "src/lib.rs:41:1: error[E0277]: the trait bound `[u8]: Param` is not satisfied: the trait `Param` is not \
+         implemented for `[u8]`"
+            .to_string(),
+        not_the_number("45:48", "u8", "[u8]"),
+        size_unknown("50:62", "[u8]"),
+        not_the_number("50:62", "u8", "[u8]"),
+        size_unknown("55:51", "[u8]"),
+        not_the_number("55:51", "u8", "[u8]"),
+        size_unknown("59:50", "[u8]"),
+        not_the_number("59:50", "u8", "[u8]"),
+    ]);
+    // Cargo shows a line once, however many times Rust says it. Rust says of each type twice that its
+    // size cannot be known, in the kernel and in the question, and once that it is not the number; and
+    // three times of each attribute what it says there, for three kernels or instances. So there are
+    // two errors of kernite's, three of each of the eight types, and six at the attributes.
+    said.push("error: could not compile `number_names_unsized` (lib) due to 32 previous errors".into());
+    refuses("number_names_unsized", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// Asking Rust whether each number is that number costs a crate no word, under `#![deny(warnings)]`:
+/// a parameter of each number, a result of each, of a kernel that never returns, and of parameters
+/// named as the locals the macros write; of a kernel deprecated, by `#[deprecated]` or by `cfg_attr`,
+/// or configured out, by `#[cfg]` or by `cfg_attr`. So it does in an x86 kernel, plain, of
+/// compile-time arguments, cooperative, and cooperative of compile-time arguments; and in a GPU
+/// kernel, plain, of compile-time arguments and cooperative.
+#[test]
+fn a_kernel_with_numbers_builds_without_a_word_of_whatever_kind_it_is() {
+    builds_quietly("number_checks");
+}
+
+/// The closure that the launcher of a cooperative x86 kernel runs is the launcher's first, however many
+/// numbers the kernel takes: Rust numbers the closures of a body in the order they come, and the names
+/// of the symbols hold the numbers, so a question among the launcher's statements would change the
+/// names in the code of a release build. The questions are in an item of their own. Needs `nm`, which
+/// says the symbols of the library, and skips without it.
+#[test]
+fn the_launcher_of_a_cooperative_kernel_that_takes_numbers_runs_its_first_closure() {
+    builds_quietly("closure_names");
+    let library = Path::new(ROOT).join("target/debug/libclosure_names.rlib");
+    let Ok(out) = Command::new("nm").arg("--demangle").arg(library).output() else {
+        eprintln!("no nm here: skipped");
+        return;
+    };
+    let symbols = String::from_utf8_lossy(&out.stdout);
+    let ours: Vec<&str> = symbols.lines().filter(|s| s.contains("closure_names::")).collect();
+    assert!(
+        ours.iter().any(|s| s.ends_with(" T closure_names::cpu::together::{closure#0}")),
+        "fixtures/closure_names.rs: `together` runs no first closure, and its library has:\n{}",
+        ours.join("\n")
+    );
+}
+
 /// A module that takes the name of `u8`, `u32`, `str` or any number from elsewhere builds as one that
 /// does not: the Rust the macros write names the primitives by their paths, `::core::primitive::u8`.
 #[test]
@@ -1191,7 +1420,7 @@ fn a_crate_that_forbids_a_lint_a_kernel_expects_is_refused_once_at_the_expect() 
 #[test]
 fn clippy_says_nothing_of_the_rust_the_macro_writes() {
     if clippy_here() {
-        for name in ["many", "forbidden", "pointers", "pointer_checks", "primitive_names"] {
+        for name in ["many", "forbidden", "pointers", "pointer_checks", "number_checks", "primitive_names"] {
             let (done, said) = cargo(&["clippy"], name);
             assert!(done && said.is_empty(), "fixtures/{name}.rs: Clippy {done}, and said:\n{}", said.join("\n"));
         }

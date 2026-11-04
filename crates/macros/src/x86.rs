@@ -1,14 +1,14 @@
 //! What x86 kernels become in Rust: naked functions and their safety contracts, the launchers
 //! of cooperative ones, stubs for those that do not compile, and the module's statics.
 
-use proc_macro::{Delimiter, Group, Ident, TokenStream, TokenTree};
+use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
 
 use kernite::lang::{self, Fn, ItemKind, Value};
 use kernite::{Call, HostStatic, Naked, NativeInstance};
 
 use crate::rust::{
-    attrs, checks, clashes, depends_on, hygienic, missing, never, parse, pick, pointer, primitive, probe, signature,
-    site, stub, visibility, words, written_params,
+    attrs, checks, clashes, depends_on, hygienic, missing, never, parse, pick, pointer, primitive, probe, result,
+    signature, stub, visibility, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -103,13 +103,8 @@ pub(crate) fn naked(
             out.extend(parse("#[inline(always)]"));
             out.extend(signature(f, top));
             let mut body = checks(f, top, "*const T");
-            body.extend(parse(&format!("unsafe {{ ({})({}) }}", pick(f, &arms, top), names.join(", "))));
-            // The result is cast back at its type, for Rust to say there that the type has no size.
-            if let Some((_, to)) = words(f, top).pop().flatten() {
-                body.extend(parse("."));
-                body.extend([TokenTree::Ident(Ident::new("cast", to.resolved_at(site())))]);
-                body.extend(parse("()"));
-            }
+            let call = parse(&format!("unsafe {{ ({})({}) }}", pick(f, &arms, top), names.join(", ")));
+            body.extend(result(f, top, call));
             out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
         }
         out.extend(fns);
@@ -140,9 +135,9 @@ pub(crate) fn naked(
 
 /// The body of a naked function whose code is `listing`'s, its constants the statics
 /// `{statics}0`, `{statics}1` and on, the functions it calls by the names `funcs`, and the
-/// module's memory it names, which `memory` gives by the name of each static. The pointers a
-/// plain kernel takes are asked of in `probe`, a `const` operand, which a comment of the code
-/// names, as the code is all a naked function has.
+/// module's memory it names, which `memory` gives by the name of each static. The types a
+/// plain kernel takes or gives back are asked of in `probe`, a `const` operand, which a comment of
+/// the code names, as the code is all a naked function has.
 fn asm(listing: &Naked, statics: &str, funcs: &[String], memory: &[String], probe: Option<TokenStream>) -> TokenStream {
     let mut asm = String::new();
     for line in &listing.code {
