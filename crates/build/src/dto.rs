@@ -17,9 +17,11 @@ pub struct Compiled<T> {
 /// A static that does not compile: why not, and what stands for it in the code that names it.
 #[derive(Debug)]
 pub struct Failed<T> {
-    /// Why it does not compile, where it can be mended.
-    pub error: Error,
-    /// The static as its type has it, holding zeros, if only what it holds is wrong; else none.
+    /// Why it does not compile, where it can be mended; none in a refused module, which says nothing of
+    /// its items.
+    pub error: Option<Error>,
+    /// The static as its type has it, holding zeros, if the language works its type out and the machine
+    /// takes its name and its type, whatever it holds; else none.
     pub stub: Option<T>,
 }
 
@@ -93,7 +95,8 @@ pub struct Given {
 }
 
 /// A module of kernels, its kernels compiled, for whatever writes it out for Rust: what each of
-/// its items is, and what the module as a whole needs.
+/// its items is, and what the module as a whole needs. A module that is refused whole is not
+/// compiled: each of its items is what it is otherwise, and nothing is said of an item.
 pub struct ModuleOut {
     /// The module, without each const given that an item of its own is named as too.
     pub module: Module,
@@ -103,7 +106,8 @@ pub struct ModuleOut {
     pub owner: Option<Error>,
     /// What each item of `module` is, in order.
     pub items: Vec<ItemOut>,
-    /// The module the GPU loads, if a static of the module's or a function of it is the GPU's.
+    /// The module the GPU loads, if a static of the module's or a function of it is the GPU's;
+    /// empty, in a refused module.
     pub device: Option<DeviceOut>,
 }
 
@@ -115,19 +119,23 @@ pub enum ItemOut {
     /// A const given, Rust's where its module is.
     Given,
     /// A static of the process's memory, as Rust lays it out, and where it named the module's items;
-    /// or why it is none, and what stands for it.
+    /// or why it is none, and what stands for it. A refused module lays out none: each stands as its
+    /// type has it, with no error.
     HostStatic(Result<Compiled<HostStatic>, Failed<HostStatic>>),
     /// A static of the GPU's memory, as the host reads it, and where it named the module's items; or
-    /// why it is none, and what stands for it. The module the GPU loads has it.
+    /// why it is none, and what stands for it. The module the GPU loads has it. A refused module lays
+    /// out none, as for the process's.
     DeviceStatic(Result<Compiled<DeviceStatic>, Failed<DeviceStatic>>),
     /// A helper, and what is wrong with it whether it is called or not: its body, its
     /// `#[instances(..)]`, then its attributes, `#[cooperative]` and the directives.
     Helper(Vec<Error>),
-    /// A function of an ABI kernite compiles nothing for, which says so.
-    Unknown(Error),
-    /// A function the process runs.
+    /// A function of an ABI kernite compiles nothing for, which says so, unless its module is refused.
+    Unknown(Option<Error>),
+    /// A function the process runs; in a refused module, one that is not compiled: it has nothing
+    /// to say, no instance, and is not written.
     Native(NativeOut),
-    /// A function the GPU runs.
+    /// A function the GPU runs; in a refused module, one that is not compiled: it has nothing to
+    /// say, and is never launched.
     Device(DeviceFnOut),
 }
 

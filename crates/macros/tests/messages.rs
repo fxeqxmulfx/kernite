@@ -444,17 +444,25 @@ fn a_crate_is_built_again_when_its_workspace_is_renamed() {
     assert_eq!(said, [error, "error: could not compile `rebuilt` (lib) due to 1 previous error"]);
 }
 
+/// The error is at the attribute, and names the manifest, which is the crate's own: the crate is a workspace of its
+/// own. The kernel compiles, so the error is the only one of its module. A module that `#[kernels]` refuses at its
+/// attribute, beside it, is told its refusal alone: nothing of it is compiled, so it reads no workspace.
 #[test]
 fn a_workspace_named_by_what_is_not_a_string_is_refused_where_the_module_is() {
-    // The error is at the attribute, and names the manifest, which is the crate's own: the crate is
-    // a workspace of its own. The kernel compiles, so the error is the only one.
     let manifest = Path::new(ROOT).join("nonstring/project/Cargo.toml");
     let error = format!(
         "src/lib.rs:5:1: error: `name` in `[workspace.metadata.kernite]` of {} is not a string: a workspace is named by \
          one, as `name = \"kernite\"`",
         manifest.display()
     );
-    refuses("nonstring", &[&error, "error: could not compile `nonstring` (lib) due to 1 previous error"]);
+    refuses(
+        "nonstring",
+        &[
+            &error,
+            &format!("src/lib.rs:14:27: error: {REFUSED}"),
+            "error: could not compile `nonstring` (lib) due to 2 previous errors",
+        ],
+    );
 }
 
 #[test]
@@ -624,7 +632,9 @@ fn a_crate_without_kernite_cuda_is_told_at_each_module_of_gpu_kernels() {
 /// else, nor at the module of consts. A module whose statics `cfg` leaves out is told nothing, and one
 /// with a static there only with a feature, `more`, is told with it. So is a module given consts, at its
 /// attribute: Rust takes out one that `cfg` leaves out, written before the attribute, after it or in the
-/// module's braces, before the macro runs, and the macro runs on each one that `cfg` keeps.
+/// module's braces, before the macro runs, and the macro runs on each one that `cfg` keeps. A module of GPU kernels
+/// with a static that `#[kernels]` refuses at its attribute, last, is told its refusal and the `kernite-cuda` it
+/// needs, as the first is, and not the `kernite-macros` it needs for its static: no room of it is counted.
 #[test]
 fn a_crate_that_renames_kernite_macros_kernite_cuda_and_kernite_cpu_is_told_it_has_none() {
     let edits = [
@@ -650,7 +660,10 @@ fn a_crate_that_renames_kernite_macros_kernite_cuda_and_kernite_cpu_is_told_it_h
              which this crate does not have",
             "src/lib.rs:93:1: error: a module of kernels given consts needs a dependency named `kernite-macros`, \
              which this crate does not have",
-            "error: could not compile `renamed_deps` (lib) due to 6 previous errors",
+            &format!("src/lib.rs:111:15: error: {REFUSED}")[..],
+            "src/lib.rs:111:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, which this \
+             crate does not have",
+            "error: could not compile `renamed_deps` (lib) due to 8 previous errors",
         ]
     );
     let (built, with) = cargo_in(&["build", "--features", "more"], &dir);
@@ -671,7 +684,10 @@ fn a_crate_that_renames_kernite_macros_kernite_cuda_and_kernite_cpu_is_told_it_h
              which this crate does not have",
             "src/lib.rs:104:1: error: a module of kernels given consts needs a dependency named `kernite-macros`, \
              which this crate does not have",
-            "error: could not compile `renamed_deps` (lib) due to 10 previous errors",
+            &format!("src/lib.rs:111:15: error: {REFUSED}")[..],
+            "src/lib.rs:111:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, which this \
+             crate does not have",
+            "error: could not compile `renamed_deps` (lib) due to 12 previous errors",
         ]
     );
 }
@@ -682,6 +698,183 @@ fn a_crate_that_renames_kernite_macros_kernite_cuda_and_kernite_cpu_is_told_it_h
 fn a_crate_that_renames_kernite_macros_builds_consts_no_module_takes() {
     let dir = edited("renamed_consts", &[("kernite-macros = {", "km = { package = \"kernite-macros\",")]);
     builds_quietly_in(&["build"], "renamed_consts", &dir);
+}
+
+/// What `#[kernels]` says of an argument that is not `consts = path`.
+const REFUSED: &str = "`#[kernels]` takes the module of consts its kernels read, as `consts = crate::model::sizes`, a \
+                       module `#[kernite_macros::consts]` is on; or nothing";
+
+/// A module of kernels that `#[kernels]` refuses at its attribute, `consts = 5`, is told its refusal once, there. It is
+/// still there, each kernel as of one that does not compile and each static as its type has it, so Rust says nothing of
+/// the code that names its items: from the crate's root, from another module by path and by `use`, or by a glob. A
+/// module kernite cannot read has the refusal alone. What else such a module is told is the tests' below.
+#[test]
+fn a_module_of_kernels_refused_at_its_attribute_is_still_there_for_the_code_that_names_it() {
+    refuses(
+        "refused_attribute",
+        &[
+            &format!("src/lib.rs:6:27: error: {REFUSED}"),
+            &format!("src/lib.rs:49:27: error: {REFUSED}"),
+            &format!("src/lib.rs:78:27: error: {REFUSED}"),
+            "error: could not compile `refused_attribute` (lib) due to 3 previous errors",
+        ],
+    );
+}
+
+/// A static of a module that `#[kernels]` refuses at its attribute stands as its type has it, as a static whose value
+/// alone is wrong does, though nothing of the module is compiled and nothing is said of what the static holds:
+/// the code that uses it is read as for one that compiles, though it says no type for the elements, and a use the type
+/// does not fit is Rust's error, beside the refusal. A static whose type reads a const the module would be given,
+/// `SIZED`, stands as one whose elements are of any type: a use that says the type is no error of Rust's, and a use that
+/// says none is, beside the refusal. The process's statics and the GPU's alike.
+#[test]
+fn a_static_of_a_module_refused_at_its_attribute_stands_as_its_type_has_it() {
+    refuses(
+        "refused_statics",
+        &[
+            &format!("src/lib.rs:8:27: error: {REFUSED}"),
+            &format!("src/lib.rs:18:27: error: {REFUSED}"),
+            // Rust's, in the order of the uses: the process's `COUNTS` where `u64`s are wanted; its `SIZED`, read
+            // and cast to an address with no type said; the GPU's `COUNTS` where `u64`s are wanted; its `SIZED`,
+            // with no type said.
+            "src/lib.rs:46:5: error[E0308]: mismatched types: expected `Vec<u64>`, found `Vec<u32>`",
+            "src/lib.rs:57:16: error[E0282]: type annotations needed: cannot infer type of the type parameter `T` \
+             declared on the method `read`",
+            "src/lib.rs:61:25: error[E0641]: cannot cast from a pointer of an unknown kind",
+            "src/lib.rs:78:5: error[E0308]: mismatched types: expected `Result<Vec<u64>, Error>`, found \
+             `Result<Vec<u32>, Error>`",
+            "src/lib.rs:88:13: error[E0283]: type annotations needed: cannot infer type of the type parameter `T` \
+             declared on the method `SIZED`",
+            "error: could not compile `refused_statics` (lib) due to 7 previous errors",
+        ],
+    );
+}
+
+/// A module of kernels that `#[kernels]` refuses at its attribute is told its refusal, and what the macro finds in
+/// writing it for Rust, as a module that is not refused is: the dependency its crate needs, which the tests below
+/// hold, a compile-time argument named as a parameter of a launcher, `grid`, or of a `_blocks` method, `threads` and
+/// `shared`, and a GPU kernel or a static named as a cooperative kernel's `_blocks` method. It is told nothing that
+/// kernite would find in its items, for kernite checks none: a kernel that is not `unsafe`, a `#[instances(..)]` that
+/// does not hold, a name that is not defined, an ABI kernite does not compile for, a static that holds nothing, and
+/// kernels of both kinds with a static. With the feature `taken` the same modules are not refused, and each mistake
+/// is said.
+#[test]
+fn a_module_refused_at_its_attribute_is_told_what_the_macro_finds_in_writing_it_and_nothing_in_its_items() {
+    refuses(
+        "refused_mistakes",
+        &[
+            &format!("src/lib.rs:7:60: error: {REFUSED}"),
+            "src/lib.rs:43:50: error: `grid` names a parameter of the launcher as well",
+            &format!("src/lib.rs:48:60: error: {REFUSED}"),
+            "src/lib.rs:68:54: error: `grid` names a parameter of the launcher as well",
+            "src/lib.rs:76:54: error: `threads` names a parameter of `together_blocks` as well",
+            "src/lib.rs:76:74: error: `shared` names a parameter of `together_blocks` as well",
+            "src/lib.rs:81:7: error: `#[cooperative]` gives `Kernels` a method `cut_blocks`, which says how many \
+             blocks a grid of `cut` has at most, and a kernel or a static of the module is named `cut_blocks` as well",
+            &format!("src/lib.rs:92:60: error: {REFUSED}"),
+            "error: could not compile `refused_mistakes` (lib) due to 8 previous errors",
+        ],
+    );
+    refuses_by(
+        &["build", "--features", "taken"],
+        "refused_mistakes",
+        &[
+            "src/lib.rs:11:28: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
+            "src/lib.rs:16:7: error: `once` takes no compile-time arguments, so it is compiled once, with no \
+             `#[instances(..)]`",
+            "src/lib.rs:23:16: error: `nope` is not defined",
+            "src/lib.rs:28:7: error: a helper is compiled where it is called, for what `::<..>` gives it there: \
+             `#[instances(..)]` lists what a function that names an ABI is compiled for",
+            "src/lib.rs:34:23: error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \
+             \"ptx-kernel\"` ones, for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \
+             \"C\"` is none of these",
+            "src/lib.rs:37:23: error: `global<[u32; 0]>` holds nothing",
+            "src/lib.rs:43:50: error: `grid` names a parameter of the launcher as well",
+            "src/lib.rs:51:32: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
+            "src/lib.rs:55:7: error: `once` takes no compile-time arguments, so it is compiled once, with no \
+             `#[instances(..)]`",
+            "src/lib.rs:61:28: error: `nope` is not defined",
+            "src/lib.rs:64:23: error: `global<[u32; 0]>` holds nothing",
+            "src/lib.rs:68:54: error: `grid` names a parameter of the launcher as well",
+            "src/lib.rs:76:54: error: `threads` names a parameter of `together_blocks` as well",
+            "src/lib.rs:76:74: error: `shared` names a parameter of `together_blocks` as well",
+            "src/lib.rs:81:7: error: `#[cooperative]` gives `Kernels` a method `cut_blocks`, which says how many \
+             blocks a grid of `cut` has at most, and a kernel or a static of the module is named `cut_blocks` as well",
+            "src/lib.rs:95:16: error: a static is memory of the module's kernels: the GPU's, for PTX kernels, or the \
+             process's, for x86 ones; and this module has both, so it is two modules, one of each kind of kernel and \
+             the statics they name",
+            "error: could not compile `refused_mistakes` (lib) due to 16 previous errors",
+        ],
+    );
+}
+
+/// A module of GPU kernels that `#[kernels]` refuses at its attribute needs `kernite-cuda` where `cfg` keeps one of
+/// its GPU items, as a module kernite does not refuse does: the crate is told once, at the module, beside the
+/// attribute, and not where the feature leaves the kernel out.
+#[test]
+fn a_module_refused_at_its_attribute_needs_kernite_cuda_where_cfg_keeps_a_gpu_item() {
+    let dir = edited("refused_features", &[("kernite-cuda =", "# kernite-cuda =")]);
+    let (built, kept) = cargo_in(&["build", "--features", "a"], &dir);
+    assert!(!built, "fixtures/refused_features.rs built with the feature");
+    assert_eq!(
+        kept,
+        [
+            &format!("src/lib.rs:6:27: error: {REFUSED}")[..],
+            "src/lib.rs:6:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, which this crate \
+             does not have",
+            "error: could not compile `refused_features` (lib) due to 2 previous errors",
+        ]
+    );
+    let (built, left_out) = cargo_in(&["build"], &dir);
+    assert!(!built, "fixtures/refused_features.rs built without the feature");
+    assert_eq!(
+        left_out,
+        [
+            &format!("src/lib.rs:6:27: error: {REFUSED}")[..],
+            "error: could not compile `refused_features` (lib) due to 1 previous error",
+        ]
+    );
+}
+
+/// A module of x86 kernels that `#[kernels]` refuses at its attribute needs `kernite-cpu` for its static and its
+/// cooperative kernel, as a module kernite does not refuse does: each is told, at the static and at the kernel,
+/// beside the attribute. Rust says nothing of the code that names them.
+#[test]
+fn a_module_refused_at_its_attribute_needs_kernite_cpu_for_a_static_and_a_cooperative_kernel() {
+    let dir = edited("refused_cpu", &[("kernite-cpu =", "# kernite-cpu =")]);
+    let (built, said) = cargo_in(&["build"], &dir);
+    assert!(!built, "fixtures/refused_cpu.rs built");
+    assert_eq!(
+        said,
+        [
+            &format!("src/lib.rs:5:27: error: {REFUSED}")[..],
+            "src/lib.rs:7:16: error: a static of x86 kernels needs a dependency named `kernite-cpu`, which this crate \
+             does not have",
+            "src/lib.rs:10:35: error: a cooperative x86 kernel needs a dependency named `kernite-cpu`, which this \
+             crate does not have",
+            "error: could not compile `refused_cpu` (lib) due to 3 previous errors",
+        ]
+    );
+}
+
+/// A module of kernels given consts, in a crate that renames `kernite-macros`, is told once, at its attribute. It
+/// is still there, as a module that `#[kernels]` refuses is, so Rust says nothing of the code that names its items.
+/// The static of the GPU one does not tell it again that it needs `kernite-macros`: no room of it is counted.
+#[test]
+fn a_module_of_kernels_given_consts_without_kernite_macros_is_still_there_for_the_code_that_names_it() {
+    let dir = edited("renamed_given", &[("kernite-macros = {", "km = { package = \"kernite-macros\",")]);
+    let (built, said) = cargo_in(&["build"], &dir);
+    assert!(!built, "fixtures/renamed_given.rs built");
+    assert_eq!(
+        said,
+        [
+            "src/lib.rs:11:1: error: a module of kernels given consts needs a dependency named `kernite-macros`, \
+             which this crate does not have",
+            "src/lib.rs:19:1: error: a module of kernels given consts needs a dependency named `kernite-macros`, \
+             which this crate does not have",
+            "error: could not compile `renamed_given` (lib) due to 2 previous errors",
+        ]
+    );
 }
 
 /// A kernel's safety contract says that nothing else touches the memory of the module's it

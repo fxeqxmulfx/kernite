@@ -43,8 +43,8 @@ impl When {
 }
 
 /// A device's module, said in parts: its text, part by part, in order, each there where its condition
-/// holds, and why it is none where a refusal's does.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// holds, and why it is none where a refusal's does. The default has no part and no refusal.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Assembly {
     /// The text of the module, part by part.
     pub parts: Vec<(When, String)>,

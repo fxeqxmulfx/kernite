@@ -119,6 +119,23 @@ and holds `pub` consts of what kernels read, numbers, floats, `bool`s, arrays of
 module that takes them may not have a const, a function or a static of its own of one of their names. Each const,
 function and static of a module has a name of its own.
 
+kernite refuses a module of kernels whole, at its attribute, for an argument of `#[kernels]` that is not
+`consts = path`, such as `consts = 5`, and for consts given in a crate with no dependency named `kernite-macros`. It
+says so once, there, and the module stays. Each of its kernels is a stub, as one that does not compile is. Each of its
+statics is a static of its type, holding zeros, if kernite works its type out and takes its name and its type, and one
+whose elements are of any type if not. So Rust says nothing of the code that names the module's items, wherever it is,
+but for two kinds of use, beside the refusal. A use that the type of the first kind of static does not fit is Rust's
+error, as it is for a static that compiles. A use of the second kind that says no type for its elements has Rust ask for
+it. The module is given no consts, so a type that reads one is of the second kind. kernite checks none of the items, so
+it says nothing it would find in them, such as a kernel that is not `unsafe`, an ABI it does not know, what a static
+holds, or what compiling a kernel finds. It compiles nothing of the module, so a workspace `name` that is not a string
+is no error at it. No room is counted for the statics, so a crate with no dependency named `kernite-macros` is not told
+it needs one for them. What the macro finds in writing the module for Rust is said, as for any module: the dependency
+the crate needs, `kernite-cuda` for a GPU item that `cfg` keeps and `kernite-cpu` for an x86 static or cooperative
+kernel; a compile-time argument named as a parameter of a launcher or of a `_blocks` method, `grid`, `threads` or
+`shared`; and a GPU kernel or a static named as a cooperative kernel's `_blocks` method. A module kernite cannot read
+holds its refusal alone, and Rust says nothing of the code that names its items, for the error is in the module.
+
 A function or a static that `cfg` leaves out says nothing, as Rust says nothing of a function it leaves out. A macro
 runs before Rust knows which `cfg` holds, so kernite compiles each one, and puts each error it finds in one under the
 same `#[cfg(..)]` or `#[cfg_attr(.., cfg(..))]`: a kernel that does not compile, or is not `unsafe`, a helper, a static.

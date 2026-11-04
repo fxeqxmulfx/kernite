@@ -105,3 +105,14 @@ pub mod inner_out {
 pub mod inner_more {
     #![cfg(feature = "more")]
 }
+
+/// Given an argument that is not consts: told that, and the `kernite-cuda` it needs, as the module at line 8 is, and
+/// not that it needs `kernite-macros` for its static, for no room of it is counted.
+#[km::kernels(consts = 5)]
+pub mod refused {
+    pub static TABLE: constant<[u32; 4]>;
+
+    pub unsafe extern "ptx-kernel" fn nothing() {
+        ret();
+    }
+}

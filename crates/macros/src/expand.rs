@@ -1,5 +1,13 @@
 //! What a module of kernels becomes once kernite has compiled its kernels: each item as what
-//! `kernite::module` says it is, written out for Rust.
+//! `kernite::module` says it is, written out for Rust. A module kernite refuses whole, at its
+//! attribute, is written the same way, with the error in it. kernite checks none of its items, so
+//! each kernel is as it is when it does not compile, each static stands as its type has it where
+//! kernite works that out, and nothing kernite would find in them is said. Nothing of it is
+//! compiled, so a workspace `name` that is not a string is no error at it. No room is counted for
+//! the statics, so the crate is not told it needs `kernite-macros` for them. What this finds in
+//! writing the module for Rust is said, as for any module, such as the dependency on `kernite-cuda`
+//! or `kernite-cpu` it needs or a compile-time argument named as a parameter of a launcher. A module
+//! kernite cannot read is its error alone.
 
 use std::path::Path;
 
@@ -18,8 +26,22 @@ use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
 
 /// What the module's braces hold once its kernels are compiled; `given`, the consts it takes
-/// from outside, and the path of their module, as `#[kernels(consts = path)]` writes it.
-pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStream) -> TokenStream {
+/// from outside, and the path of their module, as `#[kernels(consts = path)]` writes it. A module
+/// kernite refuses whole, at its attribute, has `why`, the error, which is in the module, said
+/// once. It is given no consts, and kernite checks none of its items, for the consts its kernels
+/// read may not be given: each kernel is as it is when it does not compile, each static stands as
+/// its type has it where kernite works that out, and nothing kernite would find in them is said.
+/// Nothing of it is compiled, so it reads no workspace, and a `name` that is not a string is no
+/// error at it. No room is counted for the statics, so the crate is not told it needs
+/// `kernite-macros` for them. What this finds in writing the module for Rust is said, as for any
+/// module: the dependency on `kernite-cuda` or `kernite-cpu` it needs, a compile-time argument named
+/// as a parameter of a launcher or of a `_blocks` method, and a GPU kernel or a static named as a
+/// cooperative kernel's `_blocks` method. A module kernite cannot read has `why` alone.
+pub(crate) fn expand(
+    given: Option<(TokenStream, &[TokenTree])>,
+    why: Option<TokenStream>,
+    body: TokenStream,
+) -> TokenStream {
     // The consts given come first, for the kernels to read as the module's own.
     let outside = given.as_ref().map_or_else(Vec::new, |(consts, _)| flatten(consts.clone()));
     let n = outside.len();
@@ -29,21 +51,28 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
     let said = |e: &lang::Error| error(at(e.span), &e.message);
     let module = match trees.and_then(|trees| lang::module(&trees, n)) {
         Ok(module) => module,
-        Err(e) => return said(&e),
+        // A module kernite refuses has its error alone: it is what can be mended first.
+        Err(e) => return why.unwrap_or_else(|| said(&e)),
     };
-    // The GPU kernels' namespaces: the workspace's, then the module's path. A name that is not a
-    // string is an error at the module; the macro goes on without it, so that the error is the
-    // only one.
-    let (workspace, manifest, refused) = match workspace() {
-        Ok((workspace, manifest)) => (workspace, manifest, None),
-        Err(message) => (String::new(), None, Some(message)),
+    // The error at the module itself, and the GPU kernels' namespaces: the workspace's, then the
+    // module's path. A name that is not a string is an error at the module; the macro goes on without
+    // it, so that the error is the only one. A refused module has the error it is refused for, and no
+    // namespace, for nothing of it is compiled: it reads no workspace, so a name that is not a string
+    // is none of its errors.
+    let refused = why.is_some();
+    let (workspace, manifest, at_module) = match why {
+        Some(why) => (String::new(), None, Some(why)),
+        None => match workspace() {
+            Ok((workspace, manifest)) => (workspace, manifest, None),
+            Err(message) => (String::new(), None, Some(error(site(), &message))),
+        },
     };
     let names: Vec<&str> = [workspace.as_str()].into_iter().filter(|n| !n.is_empty()).collect();
     let scope = kernite::ptx_scope(&names) + HOLE;
     let consts = given
         .as_ref()
         .map(|(_, path)| kernite::Given { before: n, from: path.iter().map(TokenTree::to_string).collect() });
-    let made = kernite::module(module, consts, &scope);
+    let made = kernite::module(module, consts, refused, &scope);
     let module = &made.module;
     // The module's own attributes, `#![..]`, before anything the macro writes, where Rust has
     // them.
@@ -53,7 +82,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
         .filter(|item| inner_attribute(&top[item.tokens.clone()]))
         .flat_map(|item| top[item.tokens.clone()].iter().cloned())
         .collect();
-    out.extend(refused.map(|message| error(site(), &message)));
+    out.extend(at_module);
     if let Some((_, path)) = given {
         out.extend(made.given.iter().map(said));
         out.extend(take(&made, &top, path));
@@ -88,12 +117,12 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
             (_, ItemOut::Rust) => out.extend(tokens.iter().cloned()),
             (_, ItemOut::Given) => {}
             (ItemKind::Static(s), ItemOut::HostStatic(laid)) => {
-                out.extend(laid.as_ref().err().map(|failed| said(&failed.error)));
+                out.extend(laid.as_ref().err().and_then(|failed| failed.error.as_ref()).map(said));
                 let held = laid.as_ref().map_or_else(|failed| failed.stub.as_ref(), |c| Some(&c.code));
                 out.extend(cpu_static(s, held, &top));
             }
             (ItemKind::Static(s), ItemOut::DeviceStatic(laid)) => {
-                out.extend(laid.as_ref().err().map(|failed| said(&failed.error)));
+                out.extend(laid.as_ref().err().and_then(|failed| failed.error.as_ref()).map(said));
                 memory.push((s, laid, conds[i].clone()));
                 on_gpu.push(conds[i].clone());
                 if let Ok(laid) = laid {
@@ -102,7 +131,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
             }
             (ItemKind::Fn(_), ItemOut::Helper(errors)) => out.extend(errors.iter().map(said)),
             (ItemKind::Fn(f), ItemOut::Unknown(e)) => {
-                out.extend(said(e));
+                out.extend(e.as_ref().map(said));
                 out.extend(stub(f, &top));
             }
             (ItemKind::Fn(f), ItemOut::Native(k)) => {

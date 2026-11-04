@@ -60,8 +60,9 @@ pub fn prepare<B: Backend>(module: &Module, backend: &B) -> Prepared<B> {
 }
 
 /// What stands for `s`, a static of `module` that `backend` does not lay out, in the code that names
-/// it, beside the error that says why: `s` as its type has it, holding zeros, if the language works
-/// its type out and `backend` takes it and its name, so that only what it holds is wrong; else none.
+/// it, beside the error that says why, if there is one: `s` as its type has it, holding zeros, if the
+/// language works its type out and `backend` takes it and its name, whatever it holds, which is not
+/// read; else none.
 pub(crate) fn stub<B: Backend>(module: &Module, s: &Static, backend: &B) -> Option<B::Static> {
     let memory = kernite_lang::memory(module, &Static { value: None, ..s.clone() }).ok()?;
     backend.lay_out(&s.name, &memory).ok()
