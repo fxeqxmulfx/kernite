@@ -142,6 +142,11 @@ fn refuses(name: &str, lines: &[&str]) {
     assert_eq!(said, lines, "fixtures/{name}.rs: Cargo said:\n{}", said.join("\n"));
 }
 
+/// What Rust says of `name`, a type that is not there, at `place` of `src/lib.rs`.
+fn not_found(place: &str, name: &str) -> String {
+    format!("src/lib.rs:{place}: error[E0425]: cannot find type `{name}` in this scope: not found in this scope")
+}
+
 /// Whether this machine has Clippy, which the tests that run it skip without, and say so.
 fn clippy_here() -> bool {
     let has = Command::new(env!("CARGO")).args(["clippy", "--version"]).output().is_ok_and(|out| out.status.success());
@@ -610,19 +615,81 @@ fn a_type_in_a_kernel_may_name_its_compile_time_arguments() {
 
 /// Rust takes a compile-time argument in a type alone, `[u8; N]` or `[u8; { N }]`, and no expression
 /// of it, `[u8; N + 1]`, in any generic function. The macro adds no refusal to Rust's: the error is
-/// at the type as the kernel writes it. It is at the attribute once more, as is every error in a
-/// type of a kernel of instances or of a cooperative kernel: `naked` writes each instance's types,
-/// and the casts of `pick`, from their text, which has the attribute's place.
+/// at the type as the kernel writes it, and said once, as is every error in a type of a kernel of
+/// instances.
 #[test]
 fn an_expression_of_a_compile_time_argument_in_a_type_is_rusts_error() {
-    let error = "error: generic parameters may not be used in const operations: cannot perform const operation \
-                 using `N`";
     refuses(
         "argument_expression",
         &[
-            &format!("src/lib.rs:8:68: {error}"),
-            &format!("src/lib.rs:5:1: {error}"),
-            "error: could not compile `argument_expression` (lib) due to 2 previous errors",
+            "src/lib.rs:8:68: error: generic parameters may not be used in const operations: cannot perform const \
+             operation using `N`",
+            "error: could not compile `argument_expression` (lib) due to 1 previous error",
+        ],
+    );
+}
+
+/// A type that is not there, in the parameters or the result of an x86 kernel of instances, is Rust's
+/// error, said once, at the type, as it is of any function: not again at the attribute, where the
+/// instances' own copies of the type were, nor once for each instance.
+#[test]
+fn an_error_in_a_type_of_a_kernel_of_instances_is_said_once() {
+    refuses(
+        "type_errors_instances",
+        &[
+            &not_found("7:69", "Missing"),
+            &not_found("12:78", "Lost"),
+            "error: could not compile `type_errors_instances` (lib) due to 2 previous errors",
+        ],
+    );
+}
+
+/// So is an error in a type of a cooperative x86 kernel, of instances and not: not again at the
+/// attribute, where its launcher's instances had it.
+#[test]
+fn an_error_in_a_type_of_a_cooperative_kernel_is_said_once() {
+    refuses(
+        "type_errors_cooperative",
+        &[
+            &not_found("8:68", "Missing"),
+            &not_found("13:49", "Absent"),
+            "error: could not compile `type_errors_cooperative` (lib) due to 2 previous errors",
+        ],
+    );
+}
+
+/// The kernels that said it once already still do: a plain x86 kernel, in a parameter and in a
+/// result, and a GPU kernel of instances.
+#[test]
+fn an_error_in_a_type_of_any_other_kernel_is_said_once() {
+    refuses(
+        "type_errors_others",
+        &[
+            &not_found("6:53", "Gone"),
+            &not_found("10:62", "Away"),
+            &not_found("19:71", "Elsewhere"),
+            "error: could not compile `type_errors_others` (lib) due to 3 previous errors",
+        ],
+    );
+}
+
+/// A lint in a type of a kernel of instances, or of a cooperative kernel, is said once, at the type,
+/// at the level the kernel sets: an error where it says `deny` or `forbid`, a warning where it says
+/// `warn`. Where it says `allow`, Rust says nothing, as the kernels of
+/// `a_type_in_a_kernel_may_name_its_compile_time_arguments` show, and it says nothing where the `allow`
+/// is in a `cfg_attr`. Where it says `expect`, Rust says nothing if the lint is in the type, and, if
+/// not, that the expectation is unfulfilled, once, at the `expect`.
+#[test]
+fn a_lint_in_a_type_of_a_kernel_of_instances_is_said_once_at_the_level_the_kernel_sets() {
+    let braces = "unnecessary braces around const expression";
+    refuses(
+        "type_lints",
+        &[
+            &format!("src/lib.rs:10:71: error: {braces}"),
+            &format!("src/lib.rs:17:74: error: {braces}"),
+            &format!("src/lib.rs:23:71: warning: {braces}"),
+            "src/lib.rs:33:14: warning: this lint expectation is unfulfilled",
+            "error: could not compile `type_lints` (lib) due to 2 previous errors; 2 warnings emitted",
         ],
     );
 }
@@ -714,16 +781,20 @@ fn the_launcher_keeps_a_kernels_expect_as_written() {
     );
 }
 
-/// A crate that forbids a lint a cooperative kernel expects is refused once, at the `expect`: the
-/// launcher keeps it as written, and `k_blocks` keeps no lint.
+/// A crate that forbids a lint a kernel expects is refused once, at the `expect`, of a cooperative GPU
+/// kernel, an x86 kernel of instances and a cooperative one: the launcher, or the function that picks
+/// an instance, keeps the `expect` as written, and `k_blocks` and the instances keep no lint.
 #[test]
 fn a_crate_that_forbids_a_lint_a_kernel_expects_is_refused_once_at_the_expect() {
+    let refused =
+        "error[E0453]: expect(non_snake_case) incompatible with previous forbid: overruled by previous forbid";
     refuses(
         "forbidden_expect",
         &[
-            "src/lib.rs:10:14: error[E0453]: expect(non_snake_case) incompatible with previous forbid: overruled by \
-             previous forbid",
-            "error: could not compile `forbidden_expect` (lib) due to 1 previous error",
+            &format!("src/lib.rs:10:14: {refused}"),
+            &format!("src/lib.rs:18:14: {refused}"),
+            &format!("src/lib.rs:24:14: {refused}"),
+            "error: could not compile `forbidden_expect` (lib) due to 3 previous errors",
         ],
     );
 }

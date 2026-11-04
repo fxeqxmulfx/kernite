@@ -7,8 +7,8 @@ use kernite::DeviceStatic;
 use kernite::lang::{self, Fn, Value};
 
 use crate::rust::{
-    attrs, clashes, depends_on, error, flatten, host, hygienic, is_ident, is_punct, missing, never, parse, pick, site,
-    visibility, written_params,
+    attrs, clashes, depends_on, error, flatten, host, hygienic, is_ident, is_punct, missing, never, parse, pick, quiet,
+    site, visibility, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -218,11 +218,7 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
     out.extend(parse("fn"));
     let name = top[f.head.end + 1].span().resolved_at(site());
     out.extend([TokenTree::Ident(Ident::new(&blocks_name(f), name))]);
-    out.extend(top[f.head.end + 2..f.params_at].iter().map(|t| {
-        let mut t = t.clone();
-        t.set_span(t.span().resolved_at(site()));
-        t
-    }));
+    out.extend(quiet(&top[f.head.end + 2..f.params_at]));
     out.extend(hygienic(
         "(&self, $threads: u32, $shared: u32) -> ::core::result::Result<u32, ::kernite_cuda::Error>",
         launched.is_some(),

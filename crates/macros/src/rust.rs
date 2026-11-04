@@ -315,6 +315,16 @@ pub(crate) fn host(ty: &[TokenTree]) -> TokenStream {
     }
 }
 
+/// `tokens` where they were written, but of the macro's span: Rust lints what a user wrote, and
+/// these only repeat it. An error or a reader finds them where they were written.
+pub(crate) fn quiet(tokens: &[TokenTree]) -> impl Iterator<Item = TokenTree> + '_ {
+    tokens.iter().map(|t| {
+        let mut t = t.clone();
+        t.set_span(t.span().resolved_at(site()));
+        t
+    })
+}
+
 /// The tokens `s` writes, each of the span [`SITE`] says.
 pub(crate) fn parse(s: &str) -> TokenStream {
     let tokens: TokenStream = s.parse().expect("kernite-macros writes tokens that parse");

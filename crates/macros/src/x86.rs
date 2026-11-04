@@ -7,8 +7,8 @@ use kernite::lang::{self, Fn, ItemKind, Value};
 use kernite::{Call, HostStatic, Naked, NativeInstance};
 
 use crate::rust::{
-    attrs, clashes, const_names, depends_on, hygienic, is_ident, is_punct, missing, never, parse, pick, signature,
-    stub, visibility, written_generics, written_params,
+    attrs, clashes, depends_on, hygienic, is_ident, is_punct, missing, never, parse, pick, signature, stub, visibility,
+    written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -20,13 +20,15 @@ const CPU: &str = "kernite-cpu";
 /// is one that calls the instance its arguments pick. So is each instance of a cooperative
 /// kernel, which takes the thread's place in the grid after `f`'s parameters, and `f` is its
 /// [`grid_launcher`]. An instance is a function of the module of kernels, as `f` is, and not of
-/// a module of its own, and it has `f`'s generics: it takes `f`'s parameters as they are written,
-/// so a type in them means what it means in `f`: `super::W`, a `W` that a `use` of the module
-/// brings in, and `[u8; N]`, whose `N` is a compile-time argument. Each names the functions of
-/// `module` it calls by the names [`callees`] gives, and its statics by those [`reached`] gives.
-/// Its safety contract says that nothing else touches `named`, the module's memory, while it
-/// runs. A cooperative kernel of a crate without `kernite-cpu` is [`x86_stub`]'s instead, with the
-/// error that says so.
+/// a module of its own. It takes what `f` takes, but a pointer is `*const ()` or `*mut ()` to it,
+/// whatever it points to, and `f` casts the pointers it passes on and the one it gets back. So no
+/// type of `f`'s is written twice: Rust reads each once, in `f`, where it means what it means in
+/// any function of the module, `super::W` or `[u8; N]`, whose `N` is a compile-time argument; it
+/// says an error in one once, at the type, and lints it at the level `f` sets. Each instance names
+/// the functions of `module` it calls by the names [`callees`] gives, and its statics by those
+/// [`reached`] gives. Its safety contract says that nothing else touches `named`, the module's
+/// memory, while it runs. A cooperative kernel of a crate without `kernite-cpu` is [`x86_stub`]'s
+/// instead, with the error that says so.
 pub(crate) fn naked(
     module: &lang::Module,
     f: &Fn,
@@ -56,26 +58,22 @@ pub(crate) fn naked(
         out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&code)))]);
         statics.push(("C".to_string(), listing));
     } else {
-        // Each instance's parameters and their types: `f`'s, then a cooperative kernel's place.
-        // `f` passes its own on by their names as written, before the colon.
-        let (mut params, mut tys, mut names) = (vec![], vec![], vec![]);
+        // Each instance's parameters and their types: `f`'s, then a cooperative kernel's place. `f`
+        // passes its own on by their names as written, before the colon, and a pointer's `.cast()`.
+        let (mut params, mut names) = (vec![], vec![]);
         for (param, colon) in written_params(f, top) {
-            params.push(param.iter().cloned().collect::<TokenStream>().to_string());
-            tys.push(param[colon + 1..].iter().cloned().collect::<TokenStream>().to_string());
-            names.push(param[colon - 1].to_string());
+            let (ty, cast) = erased(&param[colon + 1..]);
+            params.push(format!("{}: {ty}", param[colon - 1]));
+            names.push(format!("{}{cast}", param[colon - 1]));
         }
         if cooperative {
             params.push("_: &::kernite_cpu::Place".to_string());
-            tys.push("&::kernite_cpu::Place".to_string());
         }
-        let ret: TokenStream = f.ret.as_ref().map_or_else(TokenStream::new, |r| {
-            parse("->").into_iter().chain(top[r.tokens.clone()].iter().cloned()).collect()
+        // Its result, which `f` casts back if it is a pointer.
+        let (ret, cast) = f.ret.as_ref().map_or((String::new(), ""), |r| {
+            let (ty, cast) = erased(&top[r.tokens.clone()]);
+            (format!("-> {ty}"), cast)
         });
-        let ty = format!("unsafe extern \"sysv64\" fn({}) {ret}", tys.join(", "));
-        // Each instance has `f`'s generics as written, as a type in its parameters or its result may
-        // name one, and `f` passes its own on by name.
-        let generics: TokenStream = written_generics(f, top).iter().cloned().collect();
-        let given = turbofish(const_names(written_generics(f, top)));
         let (mut arms, mut fns) = (vec![], String::new());
         for (k, instance) in instances.iter().enumerate() {
             let (listing, name) = (&instance.naked, instance_name(&f.name, k));
@@ -86,11 +84,11 @@ pub(crate) fn naked(
                 &reached(module, listing, top),
             );
             fns += &format!(
-                "#[doc(hidden)]\n#[unsafe(naked)]\nunsafe extern \"sysv64\" fn {name}{generics}({}) {ret} {{ {code} }}\n",
+                "#[doc(hidden)]\n#[unsafe(naked)]\nunsafe extern \"sysv64\" fn {name}({}) {ret} {{ {code} }}\n",
                 params.join(", ")
             );
             statics.push((format!("I{k}C"), listing));
-            arms.push((instance.args.clone(), format!("{name}{given} as {ty}")));
+            arms.push((instance.args.clone(), name));
         }
         if cooperative {
             out.extend(grid_launcher(f, Some(&arms), needs(instances), named, top));
@@ -100,7 +98,7 @@ pub(crate) fn naked(
             out.extend(contract(docs, named));
             out.extend(parse("#[inline(always)]"));
             out.extend(signature(f, top));
-            let body = format!("unsafe {{ ({})({}) }}", pick(f, &arms, top), names.join(", "));
+            let body = format!("unsafe {{ ({})({}) }}{cast}", pick(f, &arms, top), names.join(", "));
             out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&body)))]);
         }
         out.extend(parse(&fns));
@@ -249,11 +247,10 @@ fn elements(m: &HostStatic) -> Vec<String> {
 
 /// The names by which the code of an instance of a kernel of `module` names each function it
 /// `calls`: a function of no compile-time arguments by its name as written, `r#fn` as well, and an
-/// instance, `tile::<4>`, by the name [`instance_name`] gives the function [`naked`] makes of it,
-/// and the instance's arguments: `__kernite_tile_I0::<4>`.
+/// instance, `tile::<4>`, by the name [`instance_name`] gives the function [`naked`] makes of it.
 fn callees(module: &lang::Module, calls: &[Call], top: &[TokenTree]) -> Vec<String> {
-    let name = |call: &Call| match &call.instance {
-        Some((k, args)) => instance_name(&call.function, *k) + &turbofish(args),
+    let name = |call: &Call| match call.instance {
+        Some(k) => instance_name(&call.function, k),
         None => {
             let g = kernite::function(module, &call.function).expect("a kernel calls a function of its module");
             // Its name as written, after `fn`.
@@ -269,11 +266,22 @@ fn instance_name(function: &str, k: usize) -> String {
     format!("__kernite_{function}_I{k}")
 }
 
-/// `::<4, true>`, the arguments that name an instance of a generic function in a path; none for
-/// none.
-fn turbofish<T: ToString>(args: impl IntoIterator<Item = T>) -> String {
-    let args: Vec<String> = args.into_iter().map(|a| a.to_string()).collect();
-    if args.is_empty() { String::new() } else { format!("::<{}>", args.join(", ")) }
+/// `ty`, a type of `f`'s, as an instance writes it, and what `f` writes after a value of it to pass
+/// it on or take it back: a pointer is `*const ()` or `*mut ()` to the instance, whatever it points
+/// to, and `.cast()` in `f`; a number is its name as written, `u64`, and nothing.
+fn erased(ty: &[TokenTree]) -> (String, &'static str) {
+    match pointer(ty) {
+        Some(kind) => (format!("*{kind} ()"), ".cast()"),
+        None => (ty.iter().cloned().collect::<TokenStream>().to_string(), ""),
+    }
+}
+
+/// `"const"` or `"mut"` if `ty` is a pointer, `*const T` or `*mut T`.
+fn pointer(ty: &[TokenTree]) -> Option<&'static str> {
+    match ty {
+        [star, kind, ..] if is_punct(star, '*') => ["const", "mut"].into_iter().find(|k| is_ident(kind, k)),
+        _ => None,
+    }
 }
 
 /// The function that runs `f`, a cooperative x86 kernel, on the threads of a grid, of `f`'s
@@ -354,13 +362,13 @@ fn grid_launcher(
             for (param, colon) in written_params(f, top) {
                 // Its name as written, before the colon.
                 let name = &param[colon - 1];
-                match &param[colon + 1..] {
-                    [star, kind, ..] if is_punct(star, '*') && (is_ident(kind, "const") || is_ident(kind, "mut")) => {
-                        let again = if is_ident(kind, "mut") { "_mut" } else { "" };
+                match pointer(&param[colon + 1..]) {
+                    Some(kind) => {
+                        let again = if kind == "mut" { "_mut" } else { "" };
                         addresses += &format!("let {name} = {name}.expose_provenance();\n");
                         args.push(format!("::core::ptr::with_exposed_provenance{again}({name})"));
                     }
-                    _ => args.push(name.to_string()),
+                    None => args.push(name.to_string()),
                 }
             }
             args.push("$grid".to_string());
@@ -397,19 +405,18 @@ fn needs(instances: &[NativeInstance]) -> TokenStream {
 /// `f`, an x86 kernel that does not compile, or a cooperative one in a crate without
 /// `kernite-cpu`, as a function that never runs: of `f`'s signature, or of its launcher's, for a
 /// cooperative kernel. One of compile-time arguments has its `instances` as functions too, named
-/// as [`naked`] would name them and of `f`'s generics, for kernels that call one to name. Its
-/// safety contract says what the kernel's would of `named`, the module's memory.
+/// as [`naked`] would name them, for kernels that call one to name. Its safety contract says what
+/// the kernel's would of `named`, the module's memory.
 pub(crate) fn x86_stub(f: &Fn, instances: usize, named: &[String], top: &[TokenTree]) -> TokenStream {
     if f.cooperative.is_some() {
         return grid_launcher(f, None, TokenStream::new(), named, top);
     }
     let mut out = stub(f, top);
     if !f.generics.is_empty() {
-        let generics: TokenStream = written_generics(f, top).iter().cloned().collect();
         for k in 0..instances {
             let name = instance_name(&f.name, k);
             out.extend(parse(&format!(
-                "#[doc(hidden)]\nunsafe extern \"sysv64\" fn {name}{generics}() {{ ::core::unreachable!() }}\n"
+                "#[doc(hidden)]\nunsafe extern \"sysv64\" fn {name}() {{ ::core::unreachable!() }}\n"
             )));
         }
     }

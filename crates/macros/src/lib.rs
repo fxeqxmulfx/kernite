@@ -93,7 +93,9 @@
 //!
 //! A type in a kernel's parameters or return means what it means in any function of the module,
 //! `super::W` and `self::W` among them, and it may name the kernel's compile-time arguments, as in
-//! any generic function: `*mut [u8; N]` in `fn arr<const N: usize>`.
+//! any generic function: `*mut [u8; N]` in `fn arr<const N: usize>`. An error in one is Rust's, said
+//! once, at the type, and so is a lint, at the level the kernel's `allow`, `warn`, `deny`, `forbid` or
+//! `expect` gives it.
 //!
 //! The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one,
 //! `dead_code` say, and build its kernels: Rust lints the names and the code a kernel is
