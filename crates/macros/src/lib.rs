@@ -118,17 +118,24 @@
 //!
 //! A type in a kernel's parameters or return means what it means in any function of the module,
 //! `super::W` and `self::W` among them, and it may name the kernel's compile-time arguments, as in
-//! any generic function: `*mut [u8; N]` in `fn arr<const N: usize>`. An error in one is Rust's, said
-//! once, at the type, and so is a lint, at the level the kernel's `allow`, `warn`, `deny`, `forbid` or
-//! `expect` gives it. So is a pointer to a type with no size, `*const CStr` say, which has two words
-//! where a kernel's has one: the macros ask Rust of each pointer a kernel takes or gives back, and
-//! it says that the size cannot be known, at the type, whatever the type is called and holds.
-//! So is a number's name that the module gives another type, `pub type u64 = u32;` and a `use` of
-//! it: kernite reads `u64` as 64 bits where Rust would pass a `u32`, so the macros ask Rust of each
+//! any generic function: `*mut [u8; N]` in `fn arr<const N: usize>`. An error in one is Rust's, a
+//! pointer's among them, said once, at the type, in a kernel of every kind but the case below that
+//! has two, and so is a lint, at the level the kernel's `allow`, `warn`, `deny`, `forbid` or
+//! `expect` gives it. So is a pointer to a type with no size, `*const CStr` say, which has two
+//! words where a kernel's has one: the macros ask Rust of each pointer a kernel takes or gives
+//! back, and it says that the size cannot be known, at the type, whatever the type is called and
+//! holds. So is a pointer to a type Rust refuses by itself, `*const NeedsCopy<String>` where
+//! `struct NeedsCopy<T: Copy>`, or `*const [CStr; 3]`: the macros ask Rust whether a pointer has a
+//! size by a coercion and never by a call, which would say the error of the type again. And so is a
+//! number's name that the module gives another type, `pub type u64 = u32;` and a `use` of it:
+//! kernite reads `u64` as 64 bits where Rust would pass a `u32`, so the macros ask Rust of each
 //! number a kernel takes or gives back whether it is that number, and it says that it is not, at
 //! the type, once. A type with no size, `pub type u8 = [u8];`, has Rust say as well that its size
 //! cannot be known, at the type, and nothing at the module's attribute, where nothing could be
-//! mended: the Rust the macros write for the kernel itself takes the number and not the name.
+//! mended: the Rust the macros write for the kernel itself takes the number and not the name. One
+//! case has two errors: a kernel of compile-time arguments casts back a pointer it gives, so for a
+//! type that holds the part Rust refuses, `-> *const (u8, [CStr; 3])`, Rust says the part in the
+//! signature, and the whole type at the cast.
 //! A generic is a value: `<T>` is an error at the `T`, and so is `impl` in a parameter's type or
 //! the result's, wherever in it, `x: impl Copy`, `Option<impl Copy>` or `-> *mut impl Copy`, at the
 //! `impl`: in a parameter it makes the function generic over a type, and in the result it hides

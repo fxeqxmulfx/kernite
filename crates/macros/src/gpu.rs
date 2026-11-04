@@ -8,7 +8,7 @@ use kernite::{DeviceStatic, Launcher};
 
 use crate::cond::Cond;
 use crate::rust::{
-    attrs, carried, checks, clashes, depends_on, error_under, host, hygienic, missing, never, number_type, parse, pick,
+    asks, attrs, carried, clashes, depends_on, error_under, host, hygienic, missing, never, number_type, parse, pick,
     pointer, primitive, quiet, site, visibility, written_params,
 };
 
@@ -215,15 +215,21 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     let mut args = vec![];
     for (param, colon) in written_params(f, top) {
         // Its name, before the colon.
-        args.push(format!("::kernite_cuda::arg(&{})", param[colon - 1]));
+        let name = &param[colon - 1];
         params.extend(param[..=colon].iter().cloned());
         match pointer(&param[colon + 1..]) {
             Some((_, to)) => {
+                // Its address, by a cast. A call of `arg` is generic over the type of the pointer, so Rust
+                // would say an error in the type it points to again, at the call.
+                args.push(format!("(&raw const {name}) as *const ::core::ffi::c_void"));
                 params.extend(parse("::kernite_cuda::Ptr<"));
                 params.extend(host(to));
-                params.extend(parse(">"));
+                // A type that ends in `>` is joint with the next token, and Rust, which reads the two as
+                // one, `>>`, and breaks it again, would say an error in the type at the attribute.
+                params.extend(parse(",>"));
             }
             None => {
+                args.push(format!("::kernite_cuda::arg(&{name})"));
                 let ty = &param[colon + 1..];
                 params.extend(number_type(ty).unwrap_or_else(|| host(ty)));
             }
@@ -234,7 +240,7 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     out.extend(parse("-> ::core::result::Result<(), ::kernite_cuda::Error>"));
     let how = if f.cooperative.is_some() { "launch_cooperative" } else { "launch" };
     let never = format!("{}::core::unreachable!()", never(f, top));
-    out.extend(body(f, launched, top, checks(f, top, "::kernite_cuda::Ptr<T>"), &never, |index| {
+    out.extend(body(f, launched, top, asks(f, top, host), &never, |index| {
         format!("unsafe {{ self.module.{how}({index}, $grid, &[{}]) }}", args.join(", "))
     }));
     out.extend(clashes);

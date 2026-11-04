@@ -8,8 +8,9 @@ use kernite::{Call, HostStatic, Naked, NativeInstance};
 
 use crate::cond::Cond;
 use crate::rust::{
-    attrs, cfg_of, checks, clashes, depends_on, hygienic, missing, name_at, never, parse, pick, pointer, position,
-    primitive, probe, result, signature, site, stub, value, value_params, visibility, written_params,
+    attrs, cfg_of, checks, clashes, depends_on, gives_placeholder, hygienic, missing, name_at, never, parse, pick,
+    pointer, position, primitive, probe, result, signature, site, stub, value, value_params, visibility,
+    written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -30,7 +31,8 @@ const CPU: &str = "kernite-cpu";
 /// and lints it at the level `f` sets. Each instance names the functions of `module` it calls by
 /// the operands [`callees`] gives, and its statics by those [`reached`] gives. Its safety contract
 /// says that nothing else touches `named`, the module's memory, while it runs. A cooperative
-/// kernel of a crate without `kernite-cpu` is [`x86_stub`]'s instead, with the error that says so.
+/// kernel of a crate without `kernite-cpu` is [`x86_stub`]'s instead, with the error that says so,
+/// and so is a kernel that gives back a type with a `_` in it, which is Rust's error alone.
 /// All this writes is under `cfg`, `f`'s own, the module of its statics included: an instance is `extern
 /// "sysv64"`, which only x86-64 has, so a crate that keeps `f` there alone builds for another machine.
 pub(crate) fn naked(
@@ -43,7 +45,7 @@ pub(crate) fn naked(
 ) -> TokenStream {
     let hidden = format!("__kernite_{}", f.name);
     let cooperative = f.cooperative.is_some();
-    if cooperative && !depends_on(CPU) {
+    if (cooperative && !depends_on(CPU)) || gives_placeholder(f, top) {
         return x86_stub(f, instances.len(), named, cfg, top);
     }
     let mut out = TokenStream::new();
@@ -69,7 +71,7 @@ pub(crate) fn naked(
         statics.push(("C".to_string(), listing));
     } else {
         // Each instance's parameters and their types: `f`'s, then a cooperative kernel's place. `f`
-        // passes its own on by their names, before the colon, and a pointer's `.cast()`.
+        // passes its own on by their names, before the colon, and a pointer cast.
         let (mut params, mut names) = (vec![], vec![]);
         for (param, colon) in written_params(f, top) {
             let (ty, cast) = erased(&param[colon + 1..]);
@@ -108,8 +110,8 @@ pub(crate) fn naked(
             out.extend(contract(docs, named));
             out.extend(parse("#[inline(always)]"));
             out.extend(signature(f, top));
-            let mut body = checks(f, top, "*const T");
-            let call = parse(&format!("unsafe {{ ({})({}) }}", pick(f, &arms, top), names.join(", ")));
+            let mut body = checks(f, top);
+            let call = parse(&format!("({})({})", pick(f, &arms, top), names.join(", ")));
             body.extend(result(f, top, call));
             out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
         }
@@ -310,12 +312,13 @@ fn instance_name(function: &str, k: usize) -> String {
 }
 
 /// `ty`, a type of `f`'s, as an instance writes it, and what `f` writes after a value of it to pass
-/// it on: a pointer is `*const ()` or `*mut ()` to the instance, whatever it points to, and
-/// `.cast()` in `f`; a number is the primitive, as it is in `f`, and nothing.
-fn erased(ty: &[TokenTree]) -> (String, &'static str) {
+/// it on: a pointer is `*const ()` or `*mut ()` to the instance, whatever it points to, and `as
+/// *const ()` or `as *mut ()` in `f`, which is a cast and not a call, so that Rust says nothing of
+/// the type it points to; a number is the primitive, as it is in `f`, and nothing.
+fn erased(ty: &[TokenTree]) -> (String, String) {
     match pointer(ty) {
-        Some((kind, _)) => (format!("*{kind} ()"), ".cast()"),
-        None => (value(ty).to_string(), ""),
+        Some((kind, _)) => (format!("*{kind} ()"), format!(" as *{kind} ()")),
+        None => (value(ty).to_string(), String::new()),
     }
 }
 
@@ -397,7 +400,7 @@ fn grid_launcher(
                 match pointer(&param[colon + 1..]) {
                     Some((kind, _)) => {
                         let again = if kind == "mut" { "_mut" } else { "" };
-                        addresses += &format!("let {name} = {name}.expose_provenance();\n");
+                        addresses += &format!("let {name} = ({name} as *{kind} ()).expose_provenance();\n");
                         args.push(format!("::core::ptr::with_exposed_provenance{again}({name})"));
                     }
                     None => args.push(name.to_string()),
@@ -411,7 +414,7 @@ fn grid_launcher(
         }
         None => format!("{}::core::unreachable!()", never(f, top)),
     };
-    let mut body = checks(f, top, "*const T");
+    let mut body = checks(f, top);
     body.extend(hygienic(&text, kernels.is_some()));
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
     out.extend(clashes);
@@ -436,11 +439,12 @@ fn needs(instances: &[NativeInstance]) -> TokenStream {
     ))
 }
 
-/// `f`, an x86 kernel that does not compile, or a cooperative one in a crate without
-/// `kernite-cpu`, as a function that never runs: of `f`'s signature, or of its launcher's, for a
-/// cooperative kernel. One of compile-time arguments has its `instances` as functions too, named
-/// as [`naked`] would name them, for kernels that call one to name. Its safety contract says what
-/// the kernel's would of `named`, the module's memory. Each instance is under `cfg`, `f`'s own, as `f` is.
+/// `f`, an x86 kernel that does not compile, or that gives back a type with a `_` in it, or a
+/// cooperative one in a crate without `kernite-cpu`, as a function that never runs: of `f`'s
+/// signature, or of its launcher's, for a cooperative kernel. One of compile-time arguments has its
+/// `instances` as functions too, named as [`naked`] would name them, for kernels that call one to
+/// name. Its safety contract says what the kernel's would of `named`, the module's memory. Each
+/// instance is under `cfg`, `f`'s own, as `f` is.
 pub(crate) fn x86_stub(
     f: &Fn,
     instances: usize,

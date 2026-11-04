@@ -2,8 +2,10 @@
 //! address and a length or a table, where a kernel's is one. kernite tells `[f32]` by its text and
 //! says so; only Rust knows that `CStr`, `str` by its path, `Floats`, `Tail` and a tuple that ends in
 //! `CStr` have no size, and says it at the type, in a kernel of any kind, x86 or GPU. A kernel kernite
-//! refuses for another reason has it in its stub. Rust refuses `[CStr; 3]` and `(CStr, u8)` by itself,
-//! at the type, and says no more of them.
+//! refuses for another reason has it in its stub. Rust refuses `[CStr; 3]`, `(CStr, u8)` and
+//! `(u8, [CStr; 3])` by itself, at the type, and says no more of them, in a kernel of any kind but
+//! one: a kernel of compile-time arguments casts back a pointer it returns, and for `(u8, [CStr; 3])`
+//! Rust says the array in the signature, and the tuple at the cast.
 
 /// A name for a slice.
 pub type Floats = [f32];
@@ -140,8 +142,72 @@ pub mod cpu {
         mov(qword[p], n);
     }
 
+    #[instances(1, 2)]
+    pub unsafe extern "sysv64" fn array_of_c_str_tiles<const N: u64>(p: *const [core::ffi::CStr; 3], n: usize) {
+        add(n, N);
+        mov(qword[p], n);
+    }
+
+    #[cooperative]
+    pub unsafe extern "sysv64" fn array_of_c_str_together(p: *const [core::ffi::CStr; 3], n: usize) {
+        mov(qword[p], n);
+    }
+
+    pub unsafe extern "sysv64" fn array_of_c_str_returns(p: *const u8) -> *const [core::ffi::CStr; 3] {
+        ret(p);
+    }
+
+    #[instances(1, 2)]
+    pub unsafe extern "sysv64" fn array_of_c_str_returns_tiles<const N: u64>(
+        p: *const u8,
+    ) -> *mut [core::ffi::CStr; 3] {
+        add(p, N);
+        ret(p);
+    }
+
     pub unsafe extern "sysv64" fn tuple_c_str_first(p: *const (core::ffi::CStr, u8), n: usize) {
         mov(qword[p], n);
+    }
+
+    #[instances(1, 2)]
+    pub unsafe extern "sysv64" fn tuple_c_str_first_tiles<const N: u64>(p: *const (core::ffi::CStr, u8), n: usize) {
+        add(n, N);
+        mov(qword[p], n);
+    }
+
+    #[cooperative]
+    pub unsafe extern "sysv64" fn tuple_c_str_first_together(p: *const (core::ffi::CStr, u8), n: usize) {
+        mov(qword[p], n);
+    }
+
+    pub unsafe extern "sysv64" fn tuple_ends_in_array(p: *const (u8, [core::ffi::CStr; 3]), n: usize) {
+        mov(qword[p], n);
+    }
+
+    #[instances(1, 2)]
+    pub unsafe extern "sysv64" fn tuple_ends_in_array_tiles<const N: u64>(
+        p: *const (u8, [core::ffi::CStr; 3]),
+        n: usize,
+    ) {
+        add(n, N);
+        mov(qword[p], n);
+    }
+
+    #[cooperative]
+    pub unsafe extern "sysv64" fn tuple_ends_in_array_together(p: *const (u8, [core::ffi::CStr; 3]), n: usize) {
+        mov(qword[p], n);
+    }
+
+    pub unsafe extern "sysv64" fn tuple_ends_in_array_returns(p: *const u8) -> *const (u8, [core::ffi::CStr; 3]) {
+        ret(p);
+    }
+
+    #[instances(1, 2)]
+    pub unsafe extern "sysv64" fn tuple_ends_in_array_returns_tiles<const N: u64>(
+        p: *const u8,
+    ) -> *const (u8, [core::ffi::CStr; 3]) {
+        add(p, N);
+        ret(p);
     }
 }
 
@@ -178,5 +244,49 @@ pub mod gpu {
     #[cooperative]
     pub unsafe extern "ptx-kernel" fn refused_together(p: *mut core::ffi::CStr, n: u32) {
         st.global.u32([p], y);
+    }
+
+    pub unsafe extern "ptx-kernel" fn array_of_c_str(p: *mut [core::ffi::CStr; 3], n: u32) {
+        st.global.u32([p], n);
+    }
+
+    #[instances(1, 2)]
+    pub unsafe extern "ptx-kernel" fn array_of_c_str_tiles<const N: u32>(p: *const [core::ffi::CStr; 3]) {
+        st.global.u32([p], N);
+    }
+
+    #[cooperative]
+    pub unsafe extern "ptx-kernel" fn array_of_c_str_together(p: *mut [core::ffi::CStr; 3], n: u32) {
+        st.global.u32([p], n);
+    }
+
+    pub unsafe extern "ptx-kernel" fn tuple_c_str_first(p: *mut (core::ffi::CStr, u8), n: u32) {
+        st.global.u32([p], n);
+    }
+
+    #[instances(1, 2)]
+    pub unsafe extern "ptx-kernel" fn tuple_c_str_first_tiles<const N: u32>(p: *mut (core::ffi::CStr, u8)) {
+        st.global.u32([p], N);
+    }
+
+    pub unsafe extern "ptx-kernel" fn tuple_ends_in_array(p: *mut (u8, [core::ffi::CStr; 3]), n: u32) {
+        st.global.u32([p], n);
+    }
+
+    #[cooperative]
+    #[instances(1, 2)]
+    pub unsafe extern "ptx-kernel" fn tuple_ends_in_array_together_tiles<const N: u32>(
+        p: *mut (u8, [core::ffi::CStr; 3]),
+    ) {
+        st.global.u32([p], N);
+    }
+
+    pub unsafe extern "ptx-kernel" fn returns_c_str(p: *mut u32) -> *mut core::ffi::CStr {
+        st.global.u32([p], 1);
+    }
+
+    #[instances(1, 2)]
+    pub unsafe extern "ptx-kernel" fn returns_c_str_tiles<const N: u32>(p: *mut u32) -> *mut core::ffi::CStr {
+        st.global.u32([p], N);
     }
 }

@@ -53,23 +53,28 @@ together with the expression inside them, along the helpers that call one anothe
 [`kernite-lang`](crates/lang/src/lib.rs) describes the language.
 
 A type in a kernel's parameters or return means what it means in any function of the module: `super::W` is the `W`
-beside the module of kernels, and `self::W` the one in it. It may name the kernel's compile-time arguments, as in
-any generic function: in `fn arr<const N: usize>(p: *mut [u8; N])`, `arr::<2>` takes a pointer to two bytes. Rust
-takes the argument in a type alone, `N` or `{ N }`, and no expression of it, `N + 1`. An error in a type is Rust's,
-said once, at the type, and so is a lint, at the level the kernel's `allow`, `warn`, `deny`, `forbid` or `expect` gives
-it: a kernel of instances, or a cooperative one, is no different from any function. A generic is a value: `<T>` is an
-error at the `T`, and so is `impl` in a parameter's type or the result's, wherever in it, `x: impl Copy`,
-`Option<impl Copy>` or `-> *mut impl Copy`, at the `impl`: in a parameter it makes the function generic over a type, and
-in the result it hides one. kernite says both in the same words.
+beside the module of kernels, and `self::W` the one in it. It may name the kernel's compile-time arguments, as in any
+generic function: in `fn arr<const N: usize>(p: *mut [u8; N])`, `arr::<2>` takes a pointer to two bytes. Rust takes the
+argument in a type alone, `N` or `{ N }`, and no expression of it, `N + 1`. An error in a type is Rust's, a pointer's
+among them, said once, at the type, in a kernel of every kind, and so is a lint, at the level the kernel's `allow`,
+`warn`, `deny`, `forbid` or `expect` gives it: a kernel of instances, or a cooperative one, on x86 or on a GPU, is no
+different from any function. The one exception is a pointer that a kernel of instances gives back, which the next
+paragraph tells. A generic is a value: `<T>` is an error at the `T`, and so is `impl` in a parameter's type or the
+result's, wherever in it, `x: impl Copy`, `Option<impl Copy>` or `-> *mut impl Copy`, at the `impl`: in a parameter it
+makes the function generic over a type, and in the result it hides one. kernite says both in the same words.
 
 A kernel's pointer to a type with a size, `*const T` or `*mut T`, is one register: `*const [usize; 3]` and
-`*mut *const f32` are taken as `*const f32` is, on x86 and on a GPU. A pointer to a type with no size has two words,
-an address and a length or a table, so it is an error at its type: take the address and the length as two
-parameters. kernite tells a slice, a `str` or a `dyn`, or a tuple that ends in one, in parentheses or not, by what is
-written, and says so in its words. Rust tells any other, whatever it holds and whatever it is called: `CStr`, `Floats`
-where `type Floats = [f32];`, a struct of yours whose last field is a slice, `(&u8, CStr)`. It says that the size cannot
-be known, at the type, for a pointer a kernel returns as well as for one it takes, in a kernel of every kind. A type in
-a message is written as Rust writes it, `[usize; 3]`.
+`*mut *const f32` are taken as `*const f32` is, on x86 and on a GPU. A pointer to a type with no size has two words, an
+address and a length or a table, so it is an error at its type: take the address and the length as two parameters.
+kernite tells a slice, a `str` or a `dyn`, or a tuple that ends in one, in parentheses or not, by what is written, and
+says so in its words. Rust tells any other, whatever it holds and whatever it is called: `CStr`, `Floats` where
+`type Floats = [f32];`, a struct of yours whose last field is a slice, `(&u8, CStr)`. It says that the size cannot be
+known, at the type, for a pointer a kernel returns as well as for one it takes, in a kernel of every kind. A type that
+Rust refuses by itself is its error alone, said once, at the type, in a kernel of every kind: an argument that does not
+meet its struct's bound, `*const NeedsCopy<String>` where `struct NeedsCopy<T: Copy>`, or an array or a tuple that holds
+a type with no size, `*const [CStr; 3]` or `*const (CStr, u8)`. One case has two errors: in a kernel of instances,
+`-> *const (u8, [CStr; 3])` has Rust's error twice, at `[CStr; 3]` and at the whole type. A type in a message is written
+as Rust writes it, `[usize; 3]`.
 
 A number's name in a kernel's parameters or return, `u8` to `u64`, `i8` to `i64`, `usize`, `isize`, `f32`, `f64` or
 `bool`, means that number: `u64` is 64 bits. A module that gives the name another type, `pub type u64 = u32;` and a
