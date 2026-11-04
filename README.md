@@ -231,8 +231,9 @@ any CPU the caller's thread may run on, and the system moves it from one to anot
 6, each on its CPU alone, in every launch. On a Ryzen 5 5600H, whose CPUs 0 and 1 are the two threads of one core, that
 is a thread a core. `kernite_cpu::cpus()` lists the CPUs to choose from: those the caller's thread may run on, which
 `numactl --physcpubind` or `taskset` set for a process when they start it. `kernite_cpu::most()` counts them, or fewer
-where a cgroup limits the process to fewer. Under `numactl --physcpubind=0-5` it is 6, a grid of 7 threads is an error,
-and so is a thread placed on CPU 6:
+where a cgroup limits the process to fewer: under `systemd-run --user --scope -p CPUQuota=200%` it is 2, though `cpus()`
+lists every CPU the thread may run on. Under `numactl --physcpubind=0-5` it is 6, a grid of 7 threads is an error, and
+so is a thread placed on CPU 6:
 `thread 0 of the grid is placed on CPU 6, and the caller's thread may run on CPUs 0-5`. So is a CPU given to two
 threads, since a thread that waits needs a CPU of its own. When a placement is an error, no kernel runs and no thread
 moves.

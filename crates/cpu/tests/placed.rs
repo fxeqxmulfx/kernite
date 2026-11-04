@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
@@ -14,8 +15,9 @@ use std::{env, fs, io, panic};
 use common::listed;
 use kernite_cpu::{Grid, cpus, launch, most};
 
-/// The variable that makes the test the one `numactl` runs, in a process of its own: it holds the
-/// CPU the process is kept off, and how many threads a grid has at most there, as `6,6`.
+/// The variable that makes a test the one another program runs, in a process of its own: it holds
+/// the CPU the process may not run on, how many CPUs it may run on, and how many threads a grid has
+/// at most there, as `6,6,6`.
 const CHILD: &str = "KERNITE_CPU_CHILD";
 
 /// Whether Linux says what each thread runs on, as the tests here need.
@@ -347,6 +349,26 @@ fn the_cpus_are_those_the_system_says_the_thread_may_run_on_and_most_counts_them
     assert_eq!(from_a_thread, all);
 }
 
+/// Runs the test `name` again, in a process of its own that the program `tool` starts, given `args`
+/// before the test binary, and `child` for `CHILD` to hold. It says whether that process ended well,
+/// and what it printed; none if there is no `tool`.
+fn again(tool: &OsStr, args: &[String], name: &str, child: String) -> Option<(bool, String)> {
+    let ran = Command::new(tool)
+        .args(args)
+        .arg(env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture", "--test-threads=1"])
+        .env(CHILD, child)
+        .output();
+    match ran {
+        Ok(out) => {
+            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            Some((out.status.success(), text))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => panic!("{} did not run: {e}", tool.to_string_lossy()),
+    }
+}
+
 /// A process `numactl` keeps to some of the machine's CPUs runs a grid on those: `cpus` and `most`
 /// count them, a grid of more threads than `most` is an error that says what `most` counts, so is
 /// one placed on a CPU outside them, and a grid that is not placed runs on them all. A grid placed
@@ -355,8 +377,7 @@ fn the_cpus_are_those_the_system_says_the_thread_may_run_on_and_most_counts_them
 fn a_process_kept_to_some_cpus_by_numactl_runs_its_grids_on_those() {
     let name = "a_process_kept_to_some_cpus_by_numactl_runs_its_grids_on_those";
     if let Ok(said) = env::var(CHILD) {
-        let (outside, expected) = said.split_once(',').unwrap();
-        return kept_to_some(outside.parse().unwrap(), expected.parse().unwrap());
+        return limited_to_some(&said);
     }
     if !proc_says() {
         return;
@@ -369,29 +390,74 @@ fn a_process_kept_to_some_cpus_by_numactl_runs_its_grids_on_those() {
     let kept = &all[..all.len().min(7) - 1];
     let list: Vec<String> = kept.iter().map(ToString::to_string).collect();
     let numactl = env::var_os("NUMACTL").unwrap_or_else(|| "numactl".into());
-    let ran = Command::new(numactl)
-        .arg(format!("--physcpubind={}", list.join(",")))
-        .arg(env::current_exe().unwrap())
-        .args(["--exact", name, "--nocapture", "--test-threads=1"])
-        .env(CHILD, format!("{},{}", all[kept.len()], most().unwrap().min(kept.len())))
-        .output();
-    let out = match ran {
-        Ok(out) => out,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return eprintln!("no numactl here: skipped; set NUMACTL to run it");
-        }
-        Err(e) => panic!("numactl did not run: {e}"),
+    let child = format!("{},{},{}", all[kept.len()], kept.len(), most().unwrap().min(kept.len()));
+    let Some((ended_well, text)) = again(&numactl, &[format!("--physcpubind={}", list.join(","))], name, child) else {
+        return eprintln!("no numactl here: skipped; set NUMACTL to run it");
     };
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success() && text.contains("1 passed"), "{text}");
+    assert!(ended_well && text.contains("1 passed"), "{text}");
 }
 
-/// The body of the test above, in the process `numactl` kept to some CPUs, which are not `outside`,
-/// and where a grid has `expected` threads at most.
-fn kept_to_some(outside: usize, expected: usize) {
+/// How many CPUs the quota of the test below lets the process use.
+const QUOTA: usize = 2;
+
+/// A process a cgroup's CPU quota limits to two CPUs may still run on every CPU its thread may:
+/// `cpus` lists all of them, `most` counts the two, and a grid of more threads than that is an
+/// error that says what `most` counts, as README does: the CPUs the caller's thread may run on, or
+/// fewer where a cgroup limits the process to fewer. `systemd-run` runs the test again in a scope
+/// of the user's systemd manager with a quota of 200%; where there is no `systemd-run`, or it does
+/// not start the test, or its manager sets no quota, the test says so and is skipped.
+#[test]
+fn a_process_a_cgroup_limits_to_some_cpus_runs_grids_of_that_many_threads_at_most() {
+    let name = "a_process_a_cgroup_limits_to_some_cpus_runs_grids_of_that_many_threads_at_most";
+    if let Ok(said) = env::var(CHILD) {
+        // A manager with no `cpu` controller to give a scope sets no quota.
+        let system = thread::available_parallelism().unwrap().get();
+        if system != QUOTA {
+            return eprintln!(
+                "the quota of {QUOTA} CPUs is not the limit here, for the system says the process runs {system} at \
+                 once: skipped"
+            );
+        }
+        return limited_to_some(&said);
+    }
+    if !proc_says() {
+        return;
+    }
+    let all = cpus().unwrap();
+    if all.len() <= QUOTA {
+        return eprintln!(
+            "the caller's thread may run on {QUOTA} CPUs or fewer, so a quota of {QUOTA} limits nothing: skipped"
+        );
+    }
+    let percent = format!("CPUQuota={}%", 100 * QUOTA);
+    let quota = ["--user", "--scope", "--quiet", "-p", &percent].map(String::from);
+    let child = format!("{},{},{QUOTA}", all.last().unwrap() + 1, all.len());
+    let Some((ended_well, text)) = again("systemd-run".as_ref(), &quota, name, child) else {
+        return eprintln!("no systemd-run here: skipped");
+    };
+    // libtest says it runs the test, if `systemd-run` started it.
+    if !text.contains("running 1 test") {
+        return eprintln!(
+            "systemd-run did not start the test, which needs the user's systemd: skipped: {}",
+            text.trim()
+        );
+    }
+    // The process says so, if it found no quota.
+    if let Some(skipped) = text.lines().find(|line| line.ends_with(": skipped")) {
+        return eprintln!("{skipped}");
+    }
+    assert!(ended_well && text.contains("1 passed"), "{text}");
+}
+
+/// The body of the two tests above, in the process each runs again, as `said` tells it: the thread
+/// may run on `all` CPUs, none of them `outside`, and a grid has `expected` threads at most there.
+fn limited_to_some(said: &str) {
+    let numbers: Vec<usize> = said.split(',').map(|n| n.parse().unwrap()).collect();
+    let [outside, all, expected] = numbers[..] else { panic!("{CHILD} is `{said}`") };
     let (list, _) = here();
     let kept = cpus().unwrap();
     assert_eq!(kept, listed(&list));
+    assert_eq!(kept.len(), all, "the CPUs {list} are not the {all} the thread may run on");
     assert!(!kept.contains(&outside), "CPU {outside} is outside {list}");
     let most = most().unwrap();
     assert_eq!(most, expected, "the CPUs {list} are {} in all", kept.len());
