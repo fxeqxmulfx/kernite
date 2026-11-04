@@ -24,6 +24,7 @@ pub mod lang;
 mod naming;
 mod needs;
 mod statics;
+mod tuning;
 mod ty;
 
 pub use backend::Ptx;

@@ -1429,6 +1429,38 @@ fn the_grid_is_a_cooperative_kernels_to_read_and_wait_for() {
     );
 }
 
+/// A GPU's tuning directives are the GPU kernel's: an x86 kernel says none, however many
+/// instances it has, and the error is one, at the directive.
+#[test]
+fn an_x86_kernel_says_no_gpu_directive() {
+    let not = |name: &str| {
+        format!(
+            "`#[{name}(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`; `k` is a kernel for x86-64, which the \
+             process runs"
+        )
+    };
+    for (attr, name) in [
+        ("#[maxntid(256)]", "maxntid"),
+        ("#[reqntid(8, 8)]", "reqntid"),
+        ("#[minnctapersm(2)]", "minnctapersm"),
+        ("#[maxnreg(32)]", "maxnreg"),
+    ] {
+        let src = format!("{attr}\nunsafe extern \"sysv64\" fn k() {{}}\n");
+        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("1:3: {}", not(name)), "{attr}");
+    }
+    // What PTX has not is said by its name, whatever the kernel.
+    let src = "#[maxnctapersm(2)]\nunsafe extern \"sysv64\" fn k() {}\n";
+    assert_eq!(
+        kernite::x86_str(src, "k").unwrap_err(),
+        "1:3: PTX has no `.maxnctapersm` from 2.1 on; `#[minnctapersm(..)]` gives the blocks an SM should hold at \
+         once, at least"
+    );
+    let src = "#[maxnreg(32)] #[instances(1, 2)]\nunsafe extern \"sysv64\" fn k<const N: u32>() {}\n";
+    for name in ["k::<1>", "k::<2>"] {
+        assert_eq!(kernite::x86_str(src, name).unwrap_err(), format!("1:3: {}", not("maxnreg")), "{name}");
+    }
+}
+
 /// Stack memory is the kernel's frame: the header says where each slot lies, and brackets reach
 /// it from `rsp`, an index beside it.
 #[test]

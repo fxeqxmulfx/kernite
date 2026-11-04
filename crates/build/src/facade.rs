@@ -3,9 +3,9 @@
 
 use kernite_lang::{Error, ItemKind, Module};
 
-use crate::classify::{helper, trusted};
+use crate::classify::{attributes, helper, trusted};
 use crate::present::{Refusal, said};
-use crate::{Abi, Compiled, Device, Native, abi, compile, cooperative, instance, owner, prepare};
+use crate::{Abi, Compiled, Device, Native, abi, compile, instance, owner, prepare};
 
 /// Function `name` of `module`, or its instance `tile::<4>`, compiled by `native`, or why not;
 /// `None` if `name` names no instance of a function the process runs: a helper has none, and
@@ -13,7 +13,8 @@ use crate::{Abi, Compiled, Device, Native, abi, compile, cooperative, instance, 
 /// static that is not laid out is the error, whatever the name. Once the instance has compiled,
 /// what is wrong with the rest of the module is the error as well, as the macro says it: the module
 /// is two modules, a helper does not parse, a function names an ABI kernite knows nothing of, a
-/// kernel is not an `unsafe fn`, or a function's `#[cooperative]` or `#[instances(..)]` is wrong.
+/// kernel is not an `unsafe fn`, or a function's `#[cooperative]`, directive or `#[instances(..)]` is
+/// wrong.
 pub fn one<N: Native>(module: &Module, native: &N, name: &str) -> Result<Option<Compiled<N::Code>>, Error> {
     let prepared = prepare(module, native);
     for s in &prepared.statics {
@@ -31,8 +32,9 @@ pub fn one<N: Native>(module: &Module, native: &N, name: &str) -> Result<Option<
 /// Each function of `module` that the GPU runs, each instance of each, compiled by `device`, in
 /// one module with the statics; or the first error, in the module's order, a static's before any
 /// function's, or why the device makes none. A helper has no instance, but its
-/// `#[instances(..)]` and its `#[cooperative]` are errors. Once the device has made its module,
-/// what is wrong with the rest of the module is the error as well, as `one` says.
+/// `#[instances(..)]`, its `#[cooperative]` and its directives are errors. Once the device has
+/// made its module, what is wrong with the rest of the module is the error as well, as `one`
+/// says.
 pub fn all<D: Device>(module: &Module, device: &D) -> Result<Result<String, String>, Error> {
     let prepared = prepare(module, device);
     for s in &prepared.statics {
@@ -46,7 +48,7 @@ pub fn all<D: Device>(module: &Module, device: &D) -> Result<Result<String, Stri
         if f.abi.is_some() && abi(f).is_none_or(Abi::native) {
             continue;
         }
-        cooperative(f)?;
+        attributes(f)?;
         for args in kernite_lang::instances(module, f)? {
             codes.push(compile(module, &prepared, device, f, &args)?.code);
         }
@@ -61,7 +63,7 @@ pub fn all<D: Device>(module: &Module, device: &D) -> Result<Result<String, Stri
 /// What is wrong with `module` that no compile finds, as the macro says it, the first error, in
 /// this order: that it is two modules; then, for each function in the module's order, a
 /// helper's first error, an ABI kernite knows nothing of, a kernel that is not an `unsafe fn`,
-/// its `#[cooperative]` and its `#[instances(..)]`.
+/// its `#[cooperative]`, its directives and its `#[instances(..)]`.
 fn rules(module: &Module) -> Result<(), Error> {
     owner(module)?;
     for item in &module.items {
@@ -76,7 +78,7 @@ fn rules(module: &Module) -> Result<(), Error> {
         if !trusted(f, abi) {
             return Err(said(Refusal::NotUnsafe, f.span));
         }
-        cooperative(f)?;
+        attributes(f)?;
         kernite_lang::instances(module, f)?;
     }
     Ok(())

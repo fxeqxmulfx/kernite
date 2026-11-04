@@ -54,6 +54,9 @@ pub struct Entry {
     /// The functions it names, each once, by their symbols: those it calls, and those whose
     /// addresses it takes, which a module declares before it if they come after.
     pub calls: Vec<String>,
+    /// For a kernel, its tuning directives as PTX writes them, `.maxntid 16, 16`, between its
+    /// parameters and its body.
+    pub directives: Vec<String>,
 }
 
 impl Entry {
@@ -95,11 +98,15 @@ impl Entry {
         self.head() + ";\n"
     }
 
-    /// The `.entry` or the `.func`: its parameters, its registers, the loads of its
-    /// parameters into them, and its body.
+    /// The `.entry` or the `.func`: its parameters, its directives, its registers, the loads of
+    /// its parameters into them, and its body.
     pub fn text(&self) -> String {
         let name = &self.program.name;
-        let mut out = self.head() + "\n{\n";
+        let mut out = self.head() + "\n";
+        for directive in &self.directives {
+            out += &format!("{directive}\n");
+        }
+        out += "{\n";
         for ty in Ty::ALL.into_iter().filter(|t| t.decl() == *t) {
             let regs: Vec<String> =
                 self.regs.iter().filter(|(_, t)| t.decl() == ty).map(|(reg, _)| format!("%{reg}")).collect();

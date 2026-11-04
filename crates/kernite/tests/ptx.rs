@@ -3328,3 +3328,586 @@ fn cooperative_is_said_of_a_kernel_alone() {
         assert_eq!(kernite::ptx_str(&src).unwrap().matches("\tatom.add.u32 %old, [%barrier], %add;\n").count(), 2);
     }
 }
+
+/// A kernel for each form of each directive: `.maxntid` and `.reqntid` of one, two and three
+/// sizes, `.minnctapersm` beside either, `.maxnreg`, and the three beside one another in an order
+/// that is not the ISA's. A size is a number known now, as `ROW` is.
+const TUNED: &str = r#"
+    const ROW: u32 = 16;
+
+    /// Every thread writes its place in its block.
+    fn mark(x: u64) {
+        let t: u32;
+        mov.u32(t, tid.x);
+        st.global.u32([x], t);
+    }
+
+    pub unsafe extern "ptx-kernel" fn none(x: *mut u32) {
+        mark(x);
+    }
+
+    #[maxntid(256)]
+    pub unsafe extern "ptx-kernel" fn max_x(x: *mut u32) {
+        mark(x);
+    }
+
+    #[maxntid(ROW, ROW)]
+    pub unsafe extern "ptx-kernel" fn max_xy(x: *mut u32) {
+        mark(x);
+    }
+
+    #[maxntid(8, 8, 4)]
+    pub unsafe extern "ptx-kernel" fn max_xyz(x: *mut u32) {
+        mark(x);
+    }
+
+    #[reqntid(256)]
+    pub unsafe extern "ptx-kernel" fn req_x(x: *mut u32) {
+        mark(x);
+    }
+
+    #[reqntid(ROW, ROW)]
+    pub unsafe extern "ptx-kernel" fn req_xy(x: *mut u32) {
+        mark(x);
+    }
+
+    #[reqntid(8, 8, 4)]
+    pub unsafe extern "ptx-kernel" fn req_xyz(x: *mut u32) {
+        mark(x);
+    }
+
+    #[maxntid(256)]
+    #[minnctapersm(2)]
+    pub unsafe extern "ptx-kernel" fn max_blocks(x: *mut u32) {
+        mark(x);
+    }
+
+    #[reqntid(ROW * 8, 2)]
+    #[minnctapersm(4)]
+    pub unsafe extern "ptx-kernel" fn req_blocks(x: *mut u32) {
+        mark(x);
+    }
+
+    #[maxnreg(32)]
+    pub unsafe extern "ptx-kernel" fn regs(x: *mut u32) {
+        mark(x);
+    }
+
+    #[maxnreg(48)]
+    #[minnctapersm(4)]
+    #[reqntid(8, 8, 4)]
+    pub unsafe extern "ptx-kernel" fn all(x: *mut u32) {
+        mark(x);
+    }
+"#;
+
+/// The directives of the `.entry` `name` of `ptx`: its lines between its parameters and its body.
+fn directives_of(ptx: &str, name: &str) -> Vec<String> {
+    let entry = ptx.split_once(&format!(".visible .entry {name}(")).expect("the module has the kernel").1;
+    let head = entry.split_once("\n{\n").expect("a kernel has a body").0;
+    head.lines().skip_while(|l| *l != ")").skip(1).map(String::from).collect()
+}
+
+#[test]
+fn a_kernel_says_its_directives_between_its_parameters_and_its_body() {
+    let ptx = kernite::ptx_str(TUNED).unwrap();
+    // `.maxntid` and `.maxnreg` came with PTX 1.3, `.minnctapersm` with 2.0 and `.reqntid` with 2.1, and
+    // every module kernite writes is of `.version 3.0` at least, `Needs::FLOOR`, so a directive asks nothing
+    // of the module.
+    assert!(ptx.starts_with("// Written by kernite.\n\n.version 3.0\n.target sm_30\n.address_size 64\n\n"), "{ptx}");
+    let all: [(&str, &[&str]); 11] = [
+        ("none", &[]),
+        ("max_x", &[".maxntid 256"]),
+        ("max_xy", &[".maxntid 16, 16"]),
+        ("max_xyz", &[".maxntid 8, 8, 4"]),
+        ("req_x", &[".reqntid 256"]),
+        ("req_xy", &[".reqntid 16, 16"]),
+        ("req_xyz", &[".reqntid 8, 8, 4"]),
+        ("max_blocks", &[".maxntid 256", ".minnctapersm 2"]),
+        ("req_blocks", &[".reqntid 128, 2", ".minnctapersm 4"]),
+        ("regs", &[".maxnreg 32"]),
+        // In the order they are written.
+        ("all", &[".maxnreg 48", ".minnctapersm 4", ".reqntid 8, 8, 4"]),
+    ];
+    for (name, lines) in all {
+        assert_eq!(directives_of(&ptx, name), lines, "{name}");
+    }
+    // As `nvcc` prints them: after the `)` of the parameters, one to a line, before the `{`.
+    let want =
+        ".visible .entry max_blocks(\n\t.param .u64 max_blocks_param_0\n)\n.maxntid 256\n.minnctapersm 2\n{\n\t.reg ";
+    assert!(ptx.contains(want), "{ptx}");
+}
+
+/// A module of a kernel for each of `attrs`, `k0`, `k1` and so on, that does nothing.
+fn tuned(attrs: &[&str]) -> String {
+    let kernel = |(i, attr): (usize, &&str)| format!("{attr}\npub unsafe extern \"ptx-kernel\" fn k{i}() {{}}\n");
+    attrs.iter().enumerate().map(kernel).collect()
+}
+
+/// Each directive at the edge of what kernite takes, as a kernel of its own.
+const EDGES: &[&str] = &[
+    "#[maxntid(1)]",
+    "#[maxntid(1024)]",
+    "#[maxntid(1024, 1, 1)]",
+    "#[maxntid(1, 1024)]",
+    "#[maxntid(1, 1, 64)]",
+    "#[maxntid(32, 32)]",
+    "#[maxntid(4, 4, 64)]",
+    "#[reqntid(1)]",
+    "#[reqntid(1024)]",
+    "#[reqntid(1024, 1, 1)]",
+    "#[reqntid(1, 1024)]",
+    "#[reqntid(1, 1, 64)]",
+    "#[reqntid(32, 32)]",
+    "#[reqntid(4, 4, 64)]",
+    "#[maxntid(1024)] #[minnctapersm(1)]",
+    "#[maxntid(64)] #[minnctapersm(16)]",
+    "#[reqntid(1024)] #[minnctapersm(1)]",
+    "#[reqntid(8, 8)] #[minnctapersm(16)]",
+    // `ptxas` counts the warps of the blocks, a warp being 32 threads and the last of a block maybe fewer:
+    // 10 blocks of 96 threads make 30 warps, 16 of 33 make 32, and 8 of 99 make 32, which Turing's SM holds.
+    "#[maxntid(96)] #[minnctapersm(10)]",
+    "#[maxntid(33)] #[minnctapersm(16)]",
+    "#[reqntid(33, 3)] #[minnctapersm(8)]",
+    "#[maxnreg(24)]",
+    "#[maxnreg(255)]",
+    "#[maxntid(1024)] #[maxnreg(64)]",
+    "#[reqntid(512)] #[maxnreg(128)]",
+    "#[maxntid(16, 16)] #[maxnreg(255)]",
+    "#[reqntid(32, 32)] #[minnctapersm(1)] #[maxnreg(64)]",
+    // A launch counts the registers of a thread by eights, and the warps of a block by fours: 255 registers
+    // for 8 warps are 256 * 32 * 8 = 65536, 168 for 9 warps, counted as 12, 168 * 32 * 12 = 64512, 64 for 32
+    // warps, 64 * 32 * 32 = 65536, and 255 for 2 warps, counted as 4, 256 * 32 * 4 = 32768.
+    "#[maxntid(256)] #[maxnreg(255)]",
+    "#[reqntid(256)] #[maxnreg(255)]",
+    "#[maxntid(288)] #[maxnreg(168)]",
+    "#[maxntid(384)] #[maxnreg(168)]",
+    "#[maxntid(1000)] #[maxnreg(64)]",
+    "#[reqntid(33)] #[maxnreg(255)]",
+];
+
+/// What `ptxas` makes of the module `text` for the GPU `gpu`, with `flags`, named `name` in the
+/// directory of this test.
+fn assembled(ptxas: &Path, text: &str, gpu: &str, name: &str, flags: &[&str]) -> std::process::Output {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let (src, out) = (dir.join(format!("{name}.ptx")), dir.join(format!("{name}.cubin")));
+    std::fs::write(&src, text).unwrap();
+    Command::new(ptxas).args(["--gpu-name", gpu]).args(flags).arg(&src).arg("-o").arg(&out).output().unwrap()
+}
+
+#[test]
+fn ptxas_takes_each_directive_kernite_writes_without_a_word() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    // Turing's SM holds the fewest blocks and warps of the GPUs kernite writes for, and a
+    // GeForce RTX 3050 is Ampere.
+    for (name, text) in
+        [("tuned", kernite::ptx_str(TUNED).unwrap()), ("edges", kernite::ptx_str(&tuned(EDGES)).unwrap())]
+    {
+        for gpu in ["sm_75", "sm_86"] {
+            let run = assembled(&ptxas, &text, gpu, &format!("{name}_{gpu}"), &["--warning-as-error"]);
+            assert!(run.status.success(), "{name} for {gpu}: {}", String::from_utf8_lossy(&run.stderr));
+        }
+    }
+}
+
+/// A kernel that loads the 64 floats `v[k]` at `x[tid.x]`, 1024 apart, and writes to `y[tid.x]` the sum of
+/// their products in pairs, `v[k] * v[63 - k]`. It loads them all before it uses the first: without a
+/// limit, `ptxas` gives it more than 32 registers.
+fn heavy(attrs: &str) -> String {
+    let body = r#"
+    pub unsafe extern "ptx-kernel" fn heavy(x: *const f32, y: *mut f32) {
+        let (i, at): (u32, u64);
+        mov.u32(i, tid.x);
+        mad.wide.u32(at, i, 4, x);
+        let v: [f32; 64];
+        for k in 0..64 {
+            ld.global.f32(v[k], [at + 4096 * k]);
+        }
+        let s: f32;
+        mov.f32(s, 0);
+        for k in 0..64 {
+            fma.rn.f32(s, v[k], v[63 - k], s);
+        }
+        mad.wide.u32(at, i, 4, y);
+        st.global.f32([at], s);
+    }
+    "#;
+    kernite::ptx_str(&format!("{attrs}{body}")).unwrap()
+}
+
+/// The registers `ptxas -v` says the kernel of the module `text` uses, for the RTX 3050's `sm_86`.
+fn used_registers(ptxas: &Path, text: &str, name: &str) -> u32 {
+    let run = assembled(ptxas, text, "sm_86", name, &["-v", "--warning-as-error"]);
+    let said = String::from_utf8_lossy(&run.stderr).into_owned();
+    assert!(run.status.success(), "{name}: {said}");
+    let after = said.split_once("Used ").unwrap_or_else(|| panic!("{name}: {said}")).1;
+    after.split_once(" registers").unwrap().0.parse().unwrap()
+}
+
+#[test]
+fn a_kernel_with_maxnreg_uses_no_more_registers_than_it_says() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    let used = |attrs: &str, name: &str| used_registers(&ptxas, &heavy(attrs), name);
+    let free = used("", "free");
+    assert!(free > 32, "the kernel needs {free} registers, and the test means nothing if that is 32 or fewer");
+    for most in [24, 32, 48] {
+        let held = used(&format!("#[maxnreg({most})]"), &format!("held_{most}"));
+        assert!(held <= most, "`#[maxnreg({most})]` and {held} registers, not {free}");
+    }
+}
+
+#[test]
+fn ptxas_lowers_maxnreg_for_the_blocks_an_sm_holds_but_not_for_the_threads_of_a_block() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    let used = |attrs: &str, name: &str| used_registers(&ptxas, &heavy(attrs), name);
+    let free = used("", "free_again");
+    assert!(free > 64, "the kernel needs {free} registers, and the test means nothing if that is 64 or fewer");
+    // 1024 threads have 64 registers each, and `.maxntid 1024` alone gives the kernel no more.
+    assert_eq!(used("#[maxntid(1024)]", "threads"), 64);
+    // Four blocks of 256 threads are 1024 threads an SM, and `.minnctapersm 4` gives it 64 as well,
+    // though `.maxnreg` says 128.
+    assert_eq!(used("#[maxntid(256)] #[minnctapersm(4)] #[maxnreg(128)]", "blocks"), 64);
+    // `.maxnreg 128` beside `.maxntid 1024` is kept, and kernite refuses it: no block of 1024
+    // threads has 128 registers each. The module is by hand, for kernite does not write it.
+    let text = heavy("#[maxntid(1024)]").replace(".maxntid 1024\n", ".maxntid 1024\n.maxnreg 128\n");
+    assert!(text.contains(".maxnreg 128"), "{text}");
+    assert_eq!(used_registers(&ptxas, &text, "kept"), free);
+}
+
+#[test]
+fn ptxas_keeps_the_last_of_a_directive_said_twice_and_says_nothing_of_the_first() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    let once = |most: u32| used_registers(&ptxas, &heavy(&format!("#[maxnreg({most})]")), &format!("once_{most}"));
+    // The modules are by hand, for kernite refuses a directive twice, at the second.
+    let twice = |first: u32, last: u32| {
+        let text = heavy(&format!("#[maxnreg({last})]"));
+        let text = text.replace(&format!(".maxnreg {last}\n"), &format!(".maxnreg {first}\n.maxnreg {last}\n"));
+        assert!(text.contains(&format!(".maxnreg {first}\n.maxnreg {last}\n")), "{text}");
+        used_registers(&ptxas, &text, &format!("twice_{first}_{last}"))
+    };
+    let (low, high) = (once(32), once(48));
+    assert!(low <= 32 && high > 32, "`#[maxnreg(32)]` and {low} registers, `#[maxnreg(48)]` and {high}");
+    assert_eq!(twice(48, 32), low);
+    assert_eq!(twice(32, 48), high);
+}
+
+#[test]
+fn what_ptx_forbids_and_ptxas_would_cut_or_ignore_is_refused_at_the_directive() {
+    let size = |name: &str| format!("`#[{name}(..)]` gives one size, two or three: the threads along x, then y and z");
+    let few = "threads are too few: a block has 1 at least along each axis";
+    let one = |name: &str, what: &str| format!("`#[{name}(..)]` gives one number: {what}");
+    let blocks = "the blocks an SM should hold at once, at least";
+    let registers = "the most registers a thread may use";
+    let both = "a kernel has `#[maxntid(..)]` or `#[reqntid(..)]`, not both: its blocks have at most these threads, or \
+                exactly these";
+    // `n` blocks of `threads` threads make `all` warps, `w` to a block.
+    let warps = |n: u32, threads: u32, all: u32, w: u32| {
+        format!(
+            "{n} blocks of {threads} threads make {all} warps, {w} to a block: an SM holds 32 on some GPUs, and \
+             `ptxas` counts the warps of the blocks, not their threads, and ignores the number on a GPU whose SM \
+             holds fewer"
+        )
+    };
+    // `n` registers for each of `threads` threads make `all` in a launch: `r` registers by eights, 32 threads to a
+    // warp, and `w` warps by fours.
+    let launch = |n: u32, threads: u32, all: u32, r: u32, w: u32| {
+        format!(
+            "{n} registers for each of {threads} threads make {all} in a launch, which counts a thread's registers by \
+             eights and a block's warps by fours, {r} * 32 * {w}: a block has 65536 at most, and `ptxas` does not \
+             lower `#[maxnreg(..)]` to fit the threads of a block, so a kernel that used them all could not launch"
+        )
+    };
+    let cases = [
+        // A size of 0, which `ptxas` refuses, at the size.
+        ("#[maxntid(0)]", "1:11", format!("0 {few}")),
+        ("#[reqntid(8, 0)]", "1:14", format!("0 {few}")),
+        ("#[maxntid(-1)]", "1:11", format!("-1 {few}")),
+        // A size past what a block has along an axis, and the threads of a block in all: `ptxas`
+        // ignores `.maxntid 2048`, takes `.reqntid 32, 33`, and dies of `SIGFPE` on 4294967295.
+        ("#[maxntid(2048)]", "1:11", "2048 threads are too many: a block has 1024 at most along x".into()),
+        ("#[maxntid(1, 2048)]", "1:14", "2048 threads are too many: a block has 1024 at most along y".into()),
+        ("#[reqntid(1, 1, 65)]", "1:17", "65 threads are too many: a block has 64 at most along z".into()),
+        ("#[maxntid(4294967295)]", "1:11", "4294967295 threads are too many: a block has 1024 at most along x".into()),
+        ("#[reqntid(32, 33)]", "1:3", "these sizes make 1056 threads: a block has 1024 at most in all".into()),
+        ("#[maxntid(1, 2, 3, 4)]", "1:20", size("maxntid")),
+        ("#[reqntid()]", "1:3", size("reqntid")),
+        // `.maxntid` with `.reqntid`: `ptxas` refuses a module that has both. The second is at fault.
+        ("#[maxntid(256)] #[reqntid(256)]", "1:19", both.into()),
+        ("#[reqntid(8, 8)] #[maxntid(8, 8)]", "1:20", both.into()),
+        // `.minnctapersm` alone, which `ptxas` ignores, and more blocks than the GPU's SM holds.
+        (
+            "#[minnctapersm(2)]",
+            "1:3",
+            "`#[minnctapersm(..)]` needs `#[maxntid(..)]` or `#[reqntid(..)]`: `ptxas` ignores it where it does not \
+             know the threads of a block"
+                .into(),
+        ),
+        ("#[maxntid(256)] #[minnctapersm(0)]", "1:32", "0 blocks are too few: an SM holds 1 at least".into()),
+        (
+            "#[maxntid(256)] #[minnctapersm(17)]",
+            "1:32",
+            "17 blocks are too many: an SM holds 16 on some GPUs, and `ptxas` ignores the number on a GPU whose SM \
+             holds fewer"
+                .into(),
+        ),
+        ("#[maxntid(1024)] #[minnctapersm(2)]", "1:33", warps(2, 1024, 64, 32)),
+        ("#[reqntid(512)] #[minnctapersm(3)]", "1:32", warps(3, 512, 48, 16)),
+        // The warps of the blocks, not their threads: 970 threads are fewer than Turing's SM holds, but 40
+        // warps are more than the 32 it holds, and `ptxas` ignores the number there. At the number.
+        ("#[maxntid(97)] #[minnctapersm(10)]", "1:31", warps(10, 97, 40, 4)),
+        ("#[maxntid(330)] #[minnctapersm(3)]", "1:32", warps(3, 330, 33, 11)),
+        ("#[reqntid(33, 3)] #[minnctapersm(9)]", "1:34", warps(9, 99, 36, 4)),
+        ("#[maxntid(256)] #[minnctapersm()]", "1:19", one("minnctapersm", blocks)),
+        ("#[maxntid(256)] #[minnctapersm(1, 2)]", "1:35", one("minnctapersm", blocks)),
+        // `.maxnreg` below 24, which `ptxas` raises to 24, and past 255, which it ignores.
+        (
+            "#[maxnreg(0)]",
+            "1:11",
+            "0 registers are too few: `ptxas` gives a thread 24 at least, and raises a smaller number to it".into(),
+        ),
+        (
+            "#[maxnreg(16)]",
+            "1:11",
+            "16 registers are too few: `ptxas` gives a thread 24 at least, and raises a smaller number to it".into(),
+        ),
+        (
+            "#[maxnreg(300)]",
+            "1:11",
+            "300 registers are too many: a thread has 255 at most, and `ptxas` ignores a bigger number".into(),
+        ),
+        ("#[maxnreg()]", "1:3", one("maxnreg", registers)),
+        ("#[maxnreg(32, 64)]", "1:15", one("maxnreg", registers)),
+        // The registers of a block's threads, which `ptxas` does not lower `.maxnreg` for.
+        ("#[maxntid(1024)] #[maxnreg(128)]", "1:28", launch(128, 1024, 131072, 128, 32)),
+        ("#[maxnreg(255)] #[reqntid(1024)]", "1:11", launch(255, 1024, 262144, 256, 32)),
+        ("#[reqntid(32, 32)] #[maxnreg(65)]", "1:30", launch(65, 1024, 73728, 72, 32)),
+        ("#[maxntid(8, 8, 8)] #[maxnreg(255)]", "1:31", launch(255, 512, 131072, 256, 16)),
+        // A launch counts by eights and by fours, so these cannot launch: one thread past 8 warps is 9, counted as
+        // 12, and the registers of a thread, 170 and 65, as 176 and 72. The edges are in `EDGES`.
+        ("#[maxntid(257)] #[maxnreg(255)]", "1:27", launch(255, 257, 98304, 256, 12)),
+        ("#[reqntid(257)] #[maxnreg(255)]", "1:27", launch(255, 257, 98304, 256, 12)),
+        ("#[maxntid(288)] #[maxnreg(176)]", "1:27", launch(176, 288, 67584, 176, 12)),
+        ("#[maxntid(384)] #[maxnreg(170)]", "1:27", launch(170, 384, 67584, 176, 12)),
+        ("#[maxntid(1000)] #[maxnreg(65)]", "1:28", launch(65, 1000, 73728, 72, 32)),
+        // The attribute is not one: it names no number, or twice, or a number that is not whole.
+        (
+            "#[maxntid]",
+            "1:3",
+            "`#[maxntid(..)]` gives the most threads a block has, along x, then y and z, as in `#[maxntid(16, 16)]`"
+                .into(),
+        ),
+        (
+            "#[reqntid = 256]",
+            "1:3",
+            "`#[reqntid(..)]` gives the threads a block has, along x, then y and z, as in `#[reqntid(8, 8, 4)]`".into(),
+        ),
+        (
+            "#[minnctapersm]",
+            "1:3",
+            "`#[minnctapersm(..)]` gives the blocks an SM should hold at once, at least, as in `#[minnctapersm(2)]`"
+                .into(),
+        ),
+        (
+            "#[maxnreg]",
+            "1:3",
+            "`#[maxnreg(..)]` gives the most registers a thread may use, as in `#[maxnreg(32)]`".into(),
+        ),
+        ("#[maxntid(1)] #[maxntid(1)]", "1:17", "a kernel has one `#[maxntid(..)]`".into()),
+        ("#[maxnreg(32)] #[maxnreg(32)]", "1:18", "a kernel has one `#[maxnreg(..)]`".into()),
+        ("#[maxntid(1.5)]", "1:11", "`#[maxntid(..)]` gives whole numbers; this is an f32".into()),
+    ];
+    for (attrs, at, want) in cases {
+        let src = format!("{attrs}\npub unsafe extern \"ptx-kernel\" fn k() {{}}\n");
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), format!("{at}: {want}"), "{attrs}");
+    }
+    // The other side of each edge is taken.
+    kernite::ptx_str(&tuned(EDGES)).unwrap();
+}
+
+#[test]
+fn a_directive_is_said_of_a_gpu_kernel_alone() {
+    let not = |name: &str| format!("`#[{name}(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`");
+    let cooperative = "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, \
+                       `extern \"ptx-kernel\"` or `extern \"sysv64\"`";
+    let cases = [
+        (
+            "#[maxntid(256)] extern \"ptx-func\" fn f() {}",
+            format!(
+                "1:3: {}; `f` is a function the kernels call, which runs as the kernel that calls it is launched",
+                not("maxntid")
+            ),
+        ),
+        // Nothing calls `h`, and a helper that is not called is wrong all the same.
+        ("#[maxnreg(32)] fn h() {}", format!("1:3: {}; `h` is a helper, inlined where it is called", not("maxnreg"))),
+        ("#[reqntid(8, 8)] static A: global<u32>;", format!("1:3: {}", not("reqntid"))),
+        ("#[minnctapersm(2)] const A: u32 = 1;", format!("1:3: {}", not("minnctapersm"))),
+        (
+            "#[maxntid(256)] unsafe extern \"sysv64\" fn s() {}",
+            format!("1:3: {}; `s` is a kernel for x86-64, which the process runs", not("maxntid")),
+        ),
+        // The first of its directives is the one said, and `#[cooperative]` is said before them.
+        (
+            "#[maxnreg(32)] #[maxntid(8)] fn h() {}",
+            format!("1:3: {}; `h` is a helper, inlined where it is called", not("maxnreg")),
+        ),
+        (
+            "#[maxnreg(32)] #[cooperative] fn h() {}",
+            format!("1:18: {cooperative}; `h` is a helper, inlined where it is called"),
+        ),
+    ];
+    for (items, want) in cases {
+        let src = format!("{items}\npub unsafe extern \"ptx-kernel\" fn k() {{}}\n");
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{items}");
+    }
+    // Where the function is called, it is said once, and for the function, not for the kernel.
+    let src = "#[maxnreg(32)]\nfn h() {\n    bar.sync(0);\n}\npub unsafe extern \"ptx-kernel\" fn j() {\n    h();\n}\n\
+               pub unsafe extern \"ptx-kernel\" fn k() {\n    h();\n}\n";
+    let want = format!("1:3: {}; `h` is a helper, inlined where it is called", not("maxnreg"));
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), want);
+}
+
+/// `.maxnctapersm` is gone from PTX 2.1 on, and `ptxas` refuses it: the name is what is wrong with
+/// `#[maxnctapersm(..)]`, in whatever form it is written and on whatever it is. The error says so, at the
+/// name, and not that the directive goes on a GPU kernel, where it would be refused too.
+#[test]
+fn maxnctapersm_is_refused_by_its_name_in_every_form_and_every_place() {
+    let want = "1:3: PTX has no `.maxnctapersm` from 2.1 on; `#[minnctapersm(..)]` gives the blocks an SM should hold \
+                at once, at least";
+    for items in [
+        // On a GPU kernel, with the blocks it asks for, with none, and as `= 2`.
+        "#[maxnctapersm(2)]",
+        "#[maxnctapersm]",
+        "#[maxnctapersm = 2]",
+        // On what is no GPU kernel: a helper, a function the kernels call, a static and a const.
+        "#[maxnctapersm(2)] fn h() {}",
+        "#[maxnctapersm(2)] extern \"ptx-func\" fn f() {}",
+        "#[maxnctapersm(2)] static A: global<u32>;",
+        "#[maxnctapersm(2)] const A: u32 = 1;",
+    ] {
+        let src = format!("{items}\npub unsafe extern \"ptx-kernel\" fn k() {{}}\n");
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{items}");
+    }
+}
+
+/// A kernel of a tile `N` along y and 8 along x, compiled for 16 and for 32.
+const GENERIC: &str = r#"
+    const ROW: u32 = 8;
+
+    #[instances(16, 32)]
+    #[maxntid(ROW, N)]
+    #[minnctapersm(N / ROW)]
+    pub unsafe extern "ptx-kernel" fn tile<const N: u32>() {}
+"#;
+
+#[test]
+fn a_directive_works_out_the_consts_and_the_instance_of_its_kernel() {
+    let ptx = kernite::ptx_str(GENERIC).unwrap();
+    assert_eq!(directives_of(&ptx, "_Z4tileILj16EE"), [".maxntid 8, 16", ".minnctapersm 2"]);
+    assert_eq!(directives_of(&ptx, "_Z4tileILj32EE"), [".maxntid 8, 32", ".minnctapersm 4"]);
+    // What is wrong with an instance is said of that instance, at the value.
+    for (instances, want) in [
+        ("16, 2048", "2:11: in `tile::<2048>`: 2048 threads are too many: a block has 1024 at most along x"),
+        ("0, 16", "2:11: in `tile::<0>`: 0 threads are too few: a block has 1 at least along each axis"),
+    ] {
+        let src = format!(
+            "#[instances({instances})]\n#[maxntid(N)]\npub unsafe extern \"ptx-kernel\" fn tile<const N: u32>() {{}}\n"
+        );
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{instances}");
+    }
+}
+
+/// A kernel `k` written by hand, with `lines` for its directives.
+fn written_with(lines: &str) -> String {
+    format!(".version 3.0\n.target sm_30\n.address_size 64\n\n.visible .entry k()\n{lines}\n{{\n\tret;\n}}\n")
+}
+
+#[test]
+fn ptxas_refuses_cuts_or_ignores_what_kernite_refuses_of_the_directives() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    // What `ptxas` says of a kernel with `lines`, for the GPU `gpu`.
+    let said = |gpu: &str, lines: &str, name: usize| -> (bool, String) {
+        let run = assembled(&ptxas, &written_with(lines), gpu, &format!("written_with_{name}"), &[]);
+        (run.status.success(), String::from_utf8_lossy(&run.stderr).into_owned())
+    };
+    let cases = [
+        // Refused, which kernite refuses at the directive in its words.
+        (".maxntid 0", false, "Positive non-zero value expected for maxntid"),
+        (".reqntid 256, 0", false, "Positive non-zero value expected for reqntid"),
+        (".maxntid 32\n.minnctapersm 0", false, "Positive non-zero value expected for minnctapersm"),
+        (".maxnreg 0", false, "Positive non-zero value expected for maxnreg"),
+        (".maxntid 256\n.reqntid 256", false, "Conflicting directives: .maxntid and .reqntid cannot both be specified"),
+        (".maxnctapersm 2", false, "'.maxnctapersm directive' not supported as of PTX version 2.1"),
+        // Taken with a warning that it changes or ignores the number.
+        (
+            ".maxntid 2048",
+            true,
+            "Value of threads per SM for entry k is out of range. .minnctapersm and .maxntid will be ignored",
+        ),
+        (".maxnreg 300", true, "Too many maxnreg specified for entry k, will be ignored"),
+        (".maxnreg 16", true, "adjusting per thread register count of 16 to lower bound of 24"),
+        (".minnctapersm 2", true, ".minnctapersm is ignored when neither .maxntid nor .reqntid is specified"),
+        (
+            ".maxntid 32\n.minnctapersm 17",
+            true,
+            "Value of minnctapersm for entry k is out of range. minnctapersm will be ignored",
+        ),
+        (
+            ".maxntid 1024\n.minnctapersm 2",
+            true,
+            "Value of threads per SM for entry k is out of range. .minnctapersm will be ignored",
+        ),
+        // Taken without a word, though no launch has these threads: a block has 1024 at most, and
+        // 64 along z.
+        (".reqntid 32, 33", true, ""),
+        (".reqntid 1, 1, 65", true, ""),
+    ];
+    // For the RTX 3050's `sm_86`.
+    let before = cases.len();
+    for (i, (lines, takes, word)) in cases.into_iter().enumerate() {
+        let (took, stderr) = said("sm_86", lines, i);
+        assert_eq!(took, takes, "{lines}: {stderr}");
+        assert!(stderr.contains(word) && (!word.is_empty() || stderr.is_empty()), "{lines}: {stderr}");
+    }
+    // An SM holds the blocks and the warps its GPU has, and Turing's, `sm_75`, holds fewer than Ampere's
+    // `sm_86`: 32 warps against 48. `ptxas` counts the warps of the blocks, 32 threads each, and not their
+    // threads: 10 blocks of 96 threads are 30 warps and are taken, and 10 of 97 are 40 warps, though they are 970
+    // threads and the SM holds 1024, so 3 blocks of 330, 33 warps, are ignored as well.
+    let ignored = "Value of threads per SM for entry k is out of range. .minnctapersm will be ignored";
+    let turing = [
+        (".maxntid 96\n.minnctapersm 10", true),
+        (".maxntid 97\n.minnctapersm 10", false),
+        (".reqntid 100\n.minnctapersm 10", false),
+        (".maxntid 33\n.minnctapersm 16", true),
+        (".maxntid 330\n.minnctapersm 3", false),
+        (".maxntid 320\n.minnctapersm 3", true),
+        (".maxntid 400\n.minnctapersm 3", false),
+        (".maxntid 400\n.minnctapersm 2", true),
+        (".maxntid 33, 3\n.minnctapersm 8", true),
+        (".maxntid 33, 3\n.minnctapersm 9", false),
+        (".reqntid 7, 7, 2\n.minnctapersm 9", false),
+        (".maxntid 1024\n.minnctapersm 1", true),
+        (".maxntid 513\n.minnctapersm 2", false),
+    ];
+    for (i, (lines, takes)) in turing.into_iter().enumerate() {
+        let (took, stderr) = said("sm_75", lines, before + 2 * i);
+        let word = if takes { "" } else { ignored };
+        assert!(took && stderr.contains(word) && (!takes || stderr.is_empty()), "{lines}: {stderr}");
+        // Ampere's holds 48 warps, more than any of these makes.
+        assert_eq!(said("sm_86", lines, before + 2 * i + 1), (true, String::new()), "{lines}");
+    }
+}

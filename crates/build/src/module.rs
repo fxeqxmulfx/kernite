@@ -5,11 +5,11 @@ use std::cell::LazyCell;
 
 use kernite_lang::{Error, Item, ItemKind, Module};
 
-use crate::classify::{helper, trusted};
+use crate::classify::{attributes, helper, trusted};
 use crate::present::{Refusal, said};
 use crate::{
     Abi, Call, Compiled, Device, DeviceFnOut, DeviceOut, Given, ItemOut, Launcher, ModuleOut, Naked, Native,
-    NativeInstance, NativeOut, Owner, compile, cooperative, instance, owner, prepare,
+    NativeInstance, NativeOut, Owner, compile, instance, owner, prepare,
 };
 
 /// `module`, given the consts `given` says, its kernels compiled: each function the process runs
@@ -76,7 +76,7 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
             continue;
         };
         let not_unsafe = (!trusted(f, abi)).then(|| said(Refusal::NotUnsafe, f.span));
-        let (said, listed) = match cooperative(f).and(kernite_lang::instances(m, f)) {
+        let (said, listed) = match attributes(f).and(kernite_lang::instances(m, f)) {
             Ok(listed) => (None, listed),
             Err(e) => (Some(e), vec![]),
         };

@@ -3,11 +3,20 @@
 use std::collections::BTreeSet;
 
 use crate::ast::{
-    BinOp, Block, Const, Cooperative, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret, Static, Stmt,
-    Type, UnOp,
+    BinOp, Block, Const, Cooperative, Directive, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret,
+    Static, Stmt, Type, UnOp,
 };
 use crate::token::{Delim, Span, Tree, text};
 use crate::{Error, nested};
+
+/// A GPU kernel's tuning directives, as PTX has them: each by its name, what it gives, and an
+/// example of it.
+const DIRECTIVES: [(&str, &str, &str); 4] = [
+    ("maxntid", "the most threads a block has, along x, then y and z", "16, 16"),
+    ("reqntid", "the threads a block has, along x, then y and z", "8, 8, 4"),
+    ("minnctapersm", "the blocks an SM should hold at once, at least", "2"),
+    ("maxnreg", "the most registers a thread may use", "32"),
+];
 
 /// The items of a module, from the tokens inside its braces. Each const, function and static
 /// has a name of its own. The first `given` tokens are consts the module takes from another;
@@ -189,7 +198,7 @@ impl<'a> Parser<'a> {
             self.pos += 3;
             return Ok(Item { tokens: start..self.pos, kind: ItemKind::Other });
         }
-        let (mut instances, mut cooperative) = (None, None);
+        let (mut instances, mut cooperative, mut directives) = (None, None, vec![]);
         while self.is_op("#") && matches!(self.peek_at(1), Some(Tree::Group { delim: Delim::Bracket, .. })) {
             if let Some(Tree::Group { trees, .. }) = self.peek_at(1)
                 && let [Tree::Ident { name, span }, rest @ ..] = trees.as_slice()
@@ -222,7 +231,30 @@ impl<'a> Parser<'a> {
                         }
                         cooperative = Some(Cooperative { span: *span, tokens });
                     }
-                    _ => {}
+                    // `.maxnctapersm` is gone from PTX 2.1 on, and `ptxas` refuses it: the name is what is
+                    // wrong, in whatever form it is written and on whatever it is.
+                    "maxnctapersm" => {
+                        return at(
+                            "PTX has no `.maxnctapersm` from 2.1 on; `#[minnctapersm(..)]` gives the blocks an SM \
+                             should hold at once, at least",
+                        );
+                    }
+                    _ => {
+                        if let Some(&(_, what, example)) = DIRECTIVES.iter().find(|(d, ..)| d == name) {
+                            let [Tree::Group { delim: Delim::Paren, trees: values, .. }] = rest else {
+                                return at(&format!("`#[{name}(..)]` gives {what}, as in `#[{name}({example})]`"));
+                            };
+                            if directives.iter().any(|d: &Directive| d.name == *name) {
+                                return at(&format!("a kernel has one `#[{name}(..)]`"));
+                            }
+                            directives.push(Directive {
+                                name: name.clone(),
+                                values: args(values)?,
+                                span: *span,
+                                tokens,
+                            });
+                        }
+                    }
                 }
             }
             self.pos += 2;
@@ -240,6 +272,10 @@ impl<'a> Parser<'a> {
                 message: "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, `extern \
                           \"ptx-kernel\"` or `extern \"sysv64\"`"
                     .into(),
+            }))
+            .or(directives.first().map(|d| Error {
+                span: d.span,
+                message: format!("`#[{}(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`", d.name),
             }));
         let head = self.pos;
         if self.eat_ident("pub") {
@@ -303,7 +339,7 @@ impl<'a> Parser<'a> {
             if let Some((span, message)) = refused {
                 return Err(Error { span, message: message.into() });
             }
-            let f = self.function(attrs, (instances, cooperative), head..self.pos - 1, abi, unsafe_fn)?;
+            let f = self.function(attrs, (instances, cooperative, directives), head..self.pos - 1, abi, unsafe_fn)?;
             return Ok(Item { tokens: start..self.pos, kind: ItemKind::Fn(f) });
         }
         if let Some(e) = misplaced {
@@ -350,7 +386,7 @@ impl<'a> Parser<'a> {
     fn function(
         &mut self,
         attrs: std::ops::Range<usize>,
-        (instances, cooperative): (Option<Instances>, Option<Cooperative>),
+        (instances, cooperative, directives): (Option<Instances>, Option<Cooperative>, Vec<Directive>),
         head: std::ops::Range<usize>,
         abi: Option<(String, Span)>,
         unsafe_fn: bool,
@@ -412,6 +448,7 @@ impl<'a> Parser<'a> {
             attrs,
             instances,
             cooperative,
+            directives,
             head,
             abi,
             unsafe_fn,

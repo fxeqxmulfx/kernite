@@ -392,12 +392,15 @@ pub(crate) fn never(f: &Fn, top: &[TokenTree]) -> String {
     written_params(f, top).iter().map(|(param, colon)| format!("let _ = {};", param[colon - 1])).collect()
 }
 
-/// `f`'s attributes as written, but `#[instances(..)]` and `#[cooperative]`, which Rust does not
-/// know.
+/// `f`'s attributes as written, but `#[instances(..)]`, `#[cooperative]` and its directives,
+/// `#[maxntid(..)]` and the like, which Rust does not know.
 pub(crate) fn attrs(f: &Fn, top: &[TokenTree]) -> TokenStream {
     let instances = f.instances.as_ref().map_or(0..0, |i| i.tokens.clone());
     let cooperative = f.cooperative.as_ref().map_or(0..0, |c| c.tokens.clone());
-    f.attrs.clone().filter(|i| !instances.contains(i) && !cooperative.contains(i)).map(|i| top[i].clone()).collect()
+    let kernite = |i: &usize| {
+        [&instances, &cooperative].into_iter().chain(f.directives.iter().map(|d| &d.tokens)).any(|r| r.contains(i))
+    };
+    f.attrs.clone().filter(|i| !kernite(i)).map(|i| top[i].clone()).collect()
 }
 
 /// What the code that stands for an item, an error said of it or a method it gives, keeps of the

@@ -3,8 +3,9 @@
 
 use kernite_lang::{Error, Expr, Fn, ItemKind, Module, Value};
 
+use crate::classify::attributes;
 use crate::present::within;
-use crate::{Backend, Called, Compiled, StaticError, cooperative};
+use crate::{Backend, Called, Compiled, StaticError};
 
 /// Each static of `module`, in order, laid out by `backend` after those before it that were;
 /// or why not, where it can be mended: at its name, its type or what it holds, as the machine
@@ -70,7 +71,7 @@ pub fn compile<B: Backend>(
     args: &[Value],
 ) -> Result<Compiled<B::Code>, Error> {
     let name = kernite_lang::instance(f, args)?;
-    let cooperative = cooperative(f)?;
+    let cooperative = attributes(f)?;
     let mut kernel = backend.kernel(f, &name, args, cooperative, &prepared.made, &prepared.callees);
     let run = kernite_lang::kernel(module, f, args, &mut kernel).map_err(|e| within(&name, args, e))?;
     let code = backend

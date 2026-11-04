@@ -143,6 +143,8 @@ pub struct Kernel {
     /// Whether every launch runs each block of its grid at once, so that it may wait for its
     /// grid.
     cooperative: bool,
+    /// Its tuning directives as PTX writes them, `.maxntid 16, 16`.
+    directives: Vec<String>,
     /// Each variable the source declares in a register, and where: what goes wrong with it
     /// when the program is checked is placed there.
     pub(crate) decls: Vec<(VReg, Span)>,
@@ -257,6 +259,7 @@ impl Kernel {
             calls: vec![],
             statics: vec![],
             cooperative: false,
+            directives: vec![],
             decls: vec![],
             at: Span::default(),
             masks: vec![],
@@ -309,6 +312,7 @@ impl Kernel {
             needs: self.needs,
             func: self.func,
             calls: self.calls,
+            directives: self.directives,
         }
     }
 
@@ -1695,6 +1699,11 @@ impl Target for Kernel {
             _ => {}
         }
         self.func = Some(returns);
+        Ok(())
+    }
+
+    fn directives(&mut self, given: &[(&str, Vec<i128>)]) -> Result<(), (usize, Fault)> {
+        self.directives = crate::tuning::lines(given)?;
         Ok(())
     }
 

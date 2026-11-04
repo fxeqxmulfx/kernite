@@ -2,12 +2,25 @@
 
 use kernite_lang::{Error, Span, Value};
 
-/// What a function is that may not be cooperative.
+/// What a function is that may not be cooperative, or say a directive.
 pub(crate) enum Of {
     /// A function the kernels call, `extern "ptx-func"`.
     Func,
     /// A helper, a function of no ABI, inlined where it is called.
     Helper,
+    /// A kernel for x86-64, `extern "sysv64"`, which the process runs.
+    Native,
+}
+
+impl Of {
+    /// What it is, for a message.
+    fn is(&self) -> &'static str {
+        match self {
+            Of::Func => "a function the kernels call, which runs as the kernel that calls it is launched",
+            Of::Helper => "a helper, inlined where it is called",
+            Of::Native => "a kernel for x86-64, which the process runs",
+        }
+    }
 }
 
 /// What kernite-build refuses.
@@ -16,6 +29,9 @@ pub(crate) enum Refusal<'a> {
     TwoKinds,
     /// `#[cooperative]` on function `name`, which is no kernel but `of`.
     Cooperative { name: &'a str, of: Of },
+    /// A directive, `#[maxntid(..)]` and the like, named `directive`, on function `name`, which
+    /// is no GPU kernel but `of`.
+    Directive { directive: &'a str, name: &'a str, of: Of },
     /// A function of ABI `abi`, which kernite compiles nothing for.
     UnknownAbi { abi: &'a str },
     /// A kernel that is not an `unsafe fn`.
@@ -33,15 +49,13 @@ pub(crate) fn said(r: Refusal<'_>, span: Span) -> Error {
              the statics they name"
                 .to_string()
         }
-        Refusal::Cooperative { name, of } => {
-            let what = match of {
-                Of::Func => "a function the kernels call, which runs as the kernel that calls it is launched",
-                Of::Helper => "a helper, inlined where it is called",
-            };
-            format!(
-                "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, `extern \"ptx-kernel\"` \
-                 or `extern \"sysv64\"`; `{name}` is {what}"
-            )
+        Refusal::Cooperative { name, of } => format!(
+            "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, `extern \"ptx-kernel\"` \
+             or `extern \"sysv64\"`; `{name}` is {}",
+            of.is()
+        ),
+        Refusal::Directive { directive, name, of } => {
+            format!("`#[{directive}(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`; `{name}` is {}", of.is())
         }
         Refusal::UnknownAbi { abi } => format!(
             "kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for NVIDIA \

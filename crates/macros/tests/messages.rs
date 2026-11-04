@@ -748,6 +748,53 @@ fn kernels_that_compile_say_nothing() {
     builds_quietly("quiet");
 }
 
+/// A GPU kernel's tuning directives, `#[maxntid(..)]`, `#[reqntid(..)]`, `#[minnctapersm(..)]` and
+/// `#[maxnreg(..)]`, are the kernel's alone: Rust builds the crate without a word, though a const
+/// is read by a directive alone, and the tests the fixture holds run each kernel on the GPU over the
+/// blocks its directives allow; and a kernel at the edge of the registers a launch gives a block
+/// launches over its most threads, and not a step past it. They skip where there is no GPU.
+#[test]
+fn a_gpu_kernel_runs_over_the_blocks_its_directives_allow() {
+    let printed = runs_quietly("tuned");
+    assert!(printed.contains("test result: ok. 2 passed"), "fixtures/tuned.rs ran its tests, and printed:\n{printed}");
+}
+
+#[test]
+fn the_macro_says_what_is_wrong_with_a_directive_where_it_is() {
+    // A value is said at the value, and a kernel of instances once, for the first that is wrong. A
+    // directive on a function that is no GPU kernel is said at the directive once, though two
+    // kernels call the helper, and for the helper nothing calls.
+    refuses(
+        "directives",
+        &[
+            "src/lib.rs:8:15: error: 2048 threads are too many: a block has 1024 at most along x",
+            "src/lib.rs:11:7: error: these sizes make 1056 threads: a block has 1024 at most in all",
+            "src/lib.rs:15:7: error: a kernel has `#[maxntid(..)]` or `#[reqntid(..)]`, not both: its blocks have at \
+             most these threads, or exactly these",
+            "src/lib.rs:18:7: error: `#[minnctapersm(..)]` needs `#[maxntid(..)]` or `#[reqntid(..)]`: `ptxas` \
+             ignores it where it does not know the threads of a block",
+            "src/lib.rs:21:15: error: 16 registers are too few: `ptxas` gives a thread 24 at least, and raises a \
+             smaller number to it",
+            "src/lib.rs:25:15: error: in `tile::<2048>`: 2048 threads are too many: a block has 1024 at most along x",
+            "src/lib.rs:31:7: error: `#[maxnreg(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`; `called` is a \
+             function the kernels call, which runs as the kernel that calls it is launched",
+            "src/lib.rs:34:7: error: `#[maxnreg(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`; `helper` is a \
+             helper, inlined where it is called",
+            "src/lib.rs:39:7: error: `#[maxnreg(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`; `never_called` \
+             is a helper, inlined where it is called",
+            "src/lib.rs:53:7: error: `#[maxntid(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`; `tile` is a \
+             kernel for x86-64, which the process runs",
+            "src/lib.rs:60:7: error: PTX has no `.maxnctapersm` from 2.1 on; `#[minnctapersm(..)]` gives the blocks \
+             an SM should hold at once, at least",
+            "src/lib.rs:66:7: error: `#[maxnreg(..)]` gives the most registers a thread may use, as in \
+             `#[maxnreg(32)]`",
+            "src/lib.rs:73:7: error: a kernel has one `#[maxnreg(..)]`",
+            "src/lib.rs:79:15: error: `#[maxntid(..)]` gives whole numbers; this is an f32",
+            "error: could not compile `directives` (lib) due to 14 previous errors",
+        ],
+    );
+}
+
 /// A parameter named as a local the macro's Rust binds for itself, `index`, `grid`, `threads` or
 /// `shared`, is the kernel's own, and reaches it: Rust builds the module without a word, where the
 /// launcher's own `index` hid it, and Rust said "unused variable: `index`". So is a compile-time

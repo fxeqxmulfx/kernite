@@ -19,6 +19,14 @@ pub trait Target {
     /// the machine's.
     fn result(&mut self, ty: &str) -> Result<(), String>;
 
+    /// The function's directives, `#[maxntid(16, 16)]` and the like, at least one, each by its
+    /// name, `maxntid`, and the whole numbers it gives, worked out, in the order written; or
+    /// which of them is wrong, by its place among them, and what is wrong with it. A machine
+    /// takes none unless it says so.
+    fn directives(&mut self, given: &[(&str, Vec<i128>)]) -> Result<(), (usize, Fault)> {
+        Err((0, Fault::new(format!("this machine takes no `#[{}(..)]`", given[0].0))))
+    }
+
     /// A new variable of the machine's type `ty`.
     fn var(&mut self, name: &str, ty: &str) -> Result<Self::Var, String>;
 

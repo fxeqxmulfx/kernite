@@ -59,7 +59,8 @@
 //!   `Option<impl Copy>` or `-> *mut impl Copy`: in a parameter it makes the function generic over
 //!   a type, and in the result it hides one. `#[cooperative]` on a kernel says that its parts wait
 //!   for each other at `grid.sync()`, a GPU kernel's blocks or an x86 kernel's threads, so that it
-//!   is launched with them all running at once.
+//!   is launched with them all running at once. A GPU kernel's directives, `#[maxntid(16, 16)]`
+//!   and the like, give whole numbers known now, which the machine takes before the parameters.
 //! - **`for k in 0..n { .. }`** is unrolled, over a range, an array or variables.
 //!   **`if c { .. } else { .. }`** chooses now when `c` is a bool; when `c` is a predicate
 //!   variable it guards each instruction inside, `if !p` the other way.
@@ -88,8 +89,8 @@ mod value;
 use std::fmt;
 
 pub use ast::{
-    BinOp, Block, Const, Cooperative, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret, Static, Stmt,
-    Type, UnOp,
+    BinOp, Block, Const, Cooperative, Directive, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret,
+    Static, Stmt, Type, UnOp,
 };
 pub use eval::{Memory, Run, constant, instance, instances, kernel, memory};
 pub use parse::module;

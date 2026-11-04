@@ -176,6 +176,13 @@
 //! `kernels.normalize_blocks(256, 0)?`. A grid of more is an error, and so is a GPU before
 //! Pascal's, `sm_60`, which launches none cooperatively.
 //!
+//! A GPU kernel says how it is launched with `#[maxntid(16, 16)]`, the most threads a block has,
+//! `#[reqntid(8, 8, 4)]`, the threads it has, `#[minnctapersm(2)]`, the blocks an SM should hold at
+//! once, and `#[maxnreg(32)]`, the most registers a thread may use: whole numbers known now, the
+//! module's consts among them, and the compile-time arguments of an instance. They are PTX's
+//! directives of the same names, which `ptxas` holds the kernel's code to, and they are not Rust's:
+//! the kernel's launcher is the same.
+//!
 //! An x86 kernel whose threads wait for each other is `#[cooperative]` too, and runs on the
 //! threads of a grid, each given its place there, `grid.thread` of `grid.threads`: it becomes
 //! the function of its name that takes a `kernite_cpu::Grid` and the kernel's parameters, runs

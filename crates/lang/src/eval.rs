@@ -12,9 +12,9 @@ use crate::{DEPTH, Error, nested};
 /// What running a kernel found, besides what it asked of its target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Run {
-    /// The module's constants it read, itself or through others, in its body or its
-    /// `#[instances(..)]`, in the module's order. Rust never sees a kernel's body run, nor its
-    /// list worked out, so it sees none of these reads.
+    /// The module's constants it read, itself or through others, in its body, its
+    /// `#[instances(..)]` or its directives, in the module's order. Rust never sees a kernel's
+    /// body run, nor its list worked out, so it sees none of these reads.
     pub consts: Vec<String>,
 }
 
@@ -57,14 +57,15 @@ pub fn constant(module: &Module, c: &Const) -> Result<Value, Error> {
 }
 
 /// Runs `f` of `module` on `target`, a kernel or another function that names an ABI, for the
-/// compile-time arguments `args`, those of one of its [`instances`]: its parameters declared,
-/// its body evaluated.
+/// compile-time arguments `args`, those of one of its [`instances`]: its directives told, its
+/// parameters declared, its body evaluated.
 pub fn kernel<T: Target>(module: &Module, f: &Fn, args: &[Value], target: &mut T) -> Result<Run, Error> {
     instance(f, args)?;
     let mut e = Eval::new(module, target);
     e.listed(f)?;
     e.scopes
         .push(f.generics.iter().zip(args).map(|(g, a)| (g.name.clone(), Binding::Value(Rc::new(a.clone())))).collect());
+    e.directives(f)?;
     for p in &f.params {
         let ty = e.type_name(&p.ty)?;
         let v = e.target.param(&p.name, &ty).map_err(|m| err(p.ty.span(), m))?;
@@ -348,6 +349,33 @@ impl<'a, T: Target> Eval<'a, T> {
         let v = Rc::new(v?);
         self.consts[i].1 = State::Done(v.clone());
         Ok(Some(v))
+    }
+
+    /// Tells the target `f`'s directives, `#[maxntid(..)]` and the like, if it has any, with the
+    /// whole numbers each gives, values known now among the instance's compile-time arguments
+    /// and the module's constants.
+    fn directives(&mut self, f: &Fn) -> Result<(), Error> {
+        if f.directives.is_empty() {
+            return Ok(());
+        }
+        let mut given = vec![];
+        for d in &f.directives {
+            let mut sizes = vec![];
+            for e in &d.values {
+                match self.value(e, Want::Any)? {
+                    Value::Int(n, _) => sizes.push(n),
+                    other => {
+                        let what = format!("`#[{}(..)]` gives whole numbers; this is {}", d.name, other.kind());
+                        return Err(err(e.span(), what));
+                    }
+                }
+            }
+            given.push((d.name.as_str(), sizes));
+        }
+        self.target.directives(&given).map_err(|(i, fault)| {
+            let d = &f.directives[i];
+            Error { span: fault.arg.and_then(|a| d.values.get(a)).map_or(d.span, Expr::span), message: fault.message }
+        })
     }
 
     /// The compile-time arguments of each of `f`'s instances, as [`instances`] has them: those

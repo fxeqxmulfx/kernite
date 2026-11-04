@@ -337,6 +337,31 @@ the launch. A grid of more is an error, which says how many. Such a kernel needs
 kernite refuses `grid.sync()` under an `if`, in an `extern "ptx-func"` function, or in a kernel that is not
 cooperative. A jump around one is the kernel's to see to: every thread of the grid takes it, or none does.
 
+A GPU kernel tells `ptxas` what its launches look like with PTX's tuning directives, spelled as `#[instances(..)]` and
+`#[cooperative]` are. `#[maxntid(16, 16)]` is the most threads a block has, along x, then y and z: one size, two or
+three. `#[reqntid(8, 8, 4)]` is the threads it has exactly. `#[minnctapersm(2)]`, beside either, is the blocks an SM
+should hold at once, at least. `#[maxnreg(32)]` is the most registers a thread may use. Each gives whole numbers known
+now, consts or the `N` of an instance, and the kernel's `.entry` says them as the ISA does, one to a line between its
+parameters and its body: `.maxntid 16, 16`. kernite refuses what the ISA forbids and what `ptxas` would cut or ignore
+without a word, as an error at the number or the name that is wrong:
+
+- a size of 0, or past what a block has: 1024 threads along x and along y, 64 along z, and 1024 in all. `ptxas` ignores
+  a `.maxntid` past 1024 threads, and takes `.reqntid 32, 33`, which no launch matches;
+- `#[maxntid(..)]` with `#[reqntid(..)]`, which `ptxas` refuses;
+- a directive twice: `ptxas` keeps the last, and says nothing of the first;
+- `#[minnctapersm(..)]` without either, which `ptxas` ignores; more than 16 blocks; and blocks that make more than 32
+  warps. An SM of some GPUs holds no more, and `ptxas` ignores the number on one. It counts the warps of the blocks, not
+  their threads, a warp being 32 threads and the last of a block maybe fewer: 10 blocks of 96 threads make 30 warps, and
+  10 of 97 make 40, which Turing's SM does not hold, though they are 970 threads and it holds 1024;
+- `#[maxnreg(..)]` of fewer than 24 registers, which `ptxas` raises to 24, or more than 255, which it ignores; and more
+  registers for the threads of a block than a launch gives it. A launch counts the registers of a thread by eights, 32
+  threads to a warp, and the warps of a block by fours, and a block has 65536 at most: 255 registers for 256 threads
+  are 256 * 32 * 8 = 65536, and for 257 threads 256 * 32 * 12 = 98304. `ptxas` does not lower `#[maxnreg(..)]` to fit
+  the threads of a block: `#[maxntid(1024)]` alone gives the kernel the 64 registers that 1024 threads have, but it
+  keeps `#[maxnreg(128)]` beside it, and a kernel that used them all could not launch;
+- `#[maxnctapersm(..)]`, which PTX has not from 2.1 on, in any form and wherever it is written; and any other
+  directive on what is no GPU kernel: a helper, an `extern "ptx-func"` function or an x86 kernel.
+
 A kernel is named in PTX as C++ names a function in the namespaces of its workspace, its crate and its modules, so
 that a profiler tells two crates' `saxpy` apart: `_ZN7kernite6my_app3gpu5saxpyE`, which `cu++filt`, Nsight and
 `cuda-gdb` show as `kernite::my_app::gpu::saxpy`. An instance of a generic kernel is named as a template's,

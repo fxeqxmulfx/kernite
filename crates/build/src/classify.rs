@@ -106,11 +106,26 @@ pub fn cooperative(f: &Fn) -> Result<bool, kernite_lang::Error> {
     Err(said(Refusal::Cooperative { name: &f.name, of }, c.span))
 }
 
+/// Whether `f` is cooperative, as [`cooperative`] has it, if its attributes hold: a directive,
+/// `#[maxntid(..)]` and the like, goes on a GPU kernel alone, so a function that is none and says
+/// one is refused, at the first it says, after its `#[cooperative]`.
+pub(crate) fn attributes(f: &Fn) -> Result<bool, kernite_lang::Error> {
+    let cooperative = cooperative(f)?;
+    let Some(d) = f.directives.first() else { return Ok(cooperative) };
+    let of = match (abi(f), &f.abi) {
+        (Some(Abi::PtxKernel), _) | (None, Some(_)) => return Ok(cooperative),
+        (Some(Abi::Sysv64), _) => Of::Native,
+        (Some(Abi::PtxFunc), _) => Of::Func,
+        (None, None) => Of::Helper,
+    };
+    Err(said(Refusal::Directive { directive: &d.name, name: &f.name, of }, d.span))
+}
+
 /// What is wrong with `f`, a helper of `module`, whether it is called or not: its body, if it
-/// does not parse, its `#[instances(..)]`, then its `#[cooperative]`, in that order. The rest is
+/// does not parse, its `#[instances(..)]`, then its attributes, in that order. The rest is
 /// checked where it is called.
 pub(crate) fn helper(module: &Module, f: &Fn) -> Vec<kernite_lang::Error> {
-    let errors = [f.body.as_ref().err().cloned(), kernite_lang::instances(module, f).err(), cooperative(f).err()];
+    let errors = [f.body.as_ref().err().cloned(), kernite_lang::instances(module, f).err(), attributes(f).err()];
     errors.into_iter().flatten().collect()
 }
 

@@ -76,6 +76,8 @@ pub struct Fn {
     pub instances: Option<Instances>,
     /// Its `#[cooperative]`, among them, if it has one.
     pub cooperative: Option<Cooperative>,
+    /// Its tuning directives, `#[maxntid(..)]` and the like, among them, in the order written.
+    pub directives: Vec<Directive>,
     /// What comes before `fn`: visibility, `unsafe`, `extern "abi"`.
     pub head: Range<usize>,
     /// The ABI it names, which makes it a kernel for the machine that ABI belongs to.
@@ -106,6 +108,22 @@ pub struct Instances {
     /// Each instance's arguments, as written.
     pub values: Vec<Expr>,
     /// Where `instances` is.
+    pub span: Span,
+    /// The attribute's tokens, by index into the module's tokens: Rust has no such attribute,
+    /// so it is not passed on.
+    pub tokens: Range<usize>,
+}
+
+/// `#[maxntid(16, 16)]`, `#[reqntid(..)]`, `#[minnctapersm(2)]` or `#[maxnreg(32)]`: how a GPU
+/// kernel's blocks are sized and its registers used, as the PTX directives of the same names
+/// say.
+#[derive(Clone, Debug)]
+pub struct Directive {
+    /// Its name: `maxntid`.
+    pub name: String,
+    /// What it gives, as written: values known now.
+    pub values: Vec<Expr>,
+    /// Where `name` is.
     pub span: Span,
     /// The attribute's tokens, by index into the module's tokens: Rust has no such attribute,
     /// so it is not passed on.

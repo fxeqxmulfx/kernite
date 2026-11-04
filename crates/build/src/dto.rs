@@ -111,7 +111,7 @@ pub enum ItemOut {
     /// none. The module the GPU loads has it.
     DeviceStatic(Result<Compiled<DeviceStatic>, Error>),
     /// A helper, and what is wrong with it whether it is called or not: its body, its
-    /// `#[instances(..)]`, then its `#[cooperative]`.
+    /// `#[instances(..)]`, then its attributes, `#[cooperative]` and the directives.
     Helper(Vec<Error>),
     /// A function of an ABI kernite compiles nothing for, which says so.
     Unknown(Error),
@@ -189,8 +189,8 @@ pub struct Call {
 pub struct DeviceFnOut {
     /// Why it is not a kernel Rust may launch: it is not an `unsafe fn`.
     pub not_unsafe: Option<Error>,
-    /// What is wrong with its `#[cooperative]`, else with its `#[instances(..)]`; then nothing
-    /// of it is compiled.
+    /// What is wrong with its `#[cooperative]` or its directives, else with its
+    /// `#[instances(..)]`; then nothing of it is compiled.
     pub said: Option<Error>,
     /// Why each instance that did not compile did not, in order.
     pub errors: Vec<Error>,
