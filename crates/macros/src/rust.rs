@@ -494,83 +494,8 @@ fn keep(meta: Vec<TokenTree>, offered: bool) -> Option<Vec<TokenTree>> {
 }
 
 /// Whether `t` is `name`, or `r#name`: Rust reads an attribute's name written raw as the name.
-fn named(t: &TokenTree, name: &str) -> bool {
+pub(crate) fn named(t: &TokenTree, name: &str) -> bool {
     is_ident(t, name) || is_ident(t, &format!("r#{name}"))
-}
-
-/// The condition under which an item is there, from `cfg`, what [`carried`] keeps of its attributes
-/// when it offers nothing: [`all`] its `cfg`s say, where a `cfg_attr(p, cfg(q))` is `any(not(p), q)`,
-/// and one in another likewise. `None` for an item with none: it is always there.
-pub(crate) fn condition(cfg: &TokenStream) -> Option<TokenStream> {
-    let attrs: Vec<TokenTree> = cfg.clone().into_iter().collect();
-    all(attrs.chunks(2).map(|attr| {
-        let [_, TokenTree::Group(meta)] = attr else { unreachable!("an attribute is `#` and brackets") };
-        predicate(&flatten(meta.stream()))
-    }))
-}
-
-/// The condition that all of `parts` hold, each as [`condition`] has it: `None` if all are always
-/// there.
-pub(crate) fn all(parts: impl IntoIterator<Item = Option<TokenStream>>) -> Option<TokenStream> {
-    let parts: Vec<TokenStream> = parts.into_iter().flatten().collect();
-    (!parts.is_empty()).then(|| join("all", parts))
-}
-
-/// The condition that any of `parts` holds, each as [`condition`] has it: `None` if one is always.
-pub(crate) fn any(parts: impl IntoIterator<Item = Option<TokenStream>>) -> Option<TokenStream> {
-    Some(join("any", parts.into_iter().collect::<Option<Vec<_>>>()?))
-}
-
-/// The condition that `part` does not hold.
-pub(crate) fn not(part: TokenStream) -> TokenStream {
-    call("not", vec![part])
-}
-
-/// `#[cfg(condition)]`: what is written under it is there where the condition holds. Nothing for `None`,
-/// which always does.
-pub(crate) fn when(condition: Option<TokenStream>) -> TokenStream {
-    let Some(condition) = condition else { return TokenStream::new() };
-    let mut out = parse("#");
-    out.extend([TokenTree::Group(Group::new(Delimiter::Bracket, call("cfg", vec![condition])))]);
-    out
-}
-
-/// The predicate that one attribute [`carried`] keeps says, `meta` the tokens in its brackets:
-/// `cfg(p)` says `p`, and `cfg_attr(p, ..)` that what it keeps of the list holds, or `p` does not.
-/// `None` for an attribute that says nothing, as a `cfg` Rust cannot read: it says what is wrong with
-/// it where it is written, and takes the item to be there.
-fn predicate(meta: &[TokenTree]) -> Option<TokenStream> {
-    let [name, TokenTree::Group(list)] = meta else { return None };
-    let tokens = flatten(list.stream());
-    if named(name, "cfg") {
-        return Some(tokens.into_iter().collect());
-    }
-    let mut parts = tokens.split(|t| is_punct(t, ','));
-    let when: TokenStream = parts.next().expect("a split has a first part").iter().cloned().collect();
-    let then: Vec<TokenStream> = parts.filter_map(predicate).collect();
-    (!then.is_empty()).then(|| call("any", vec![not(when), join("all", then)]))
-}
-
-/// `name(parts)` for a predicate's `all` or `any`, or the part alone where there is one.
-fn join(name: &str, mut parts: Vec<TokenStream>) -> TokenStream {
-    match parts.len() {
-        1 => parts.remove(0),
-        _ => call(name, parts),
-    }
-}
-
-/// `name(a, b, ..)`, the `parts` apart by commas.
-fn call(name: &str, parts: Vec<TokenStream>) -> TokenStream {
-    let mut args = TokenStream::new();
-    for (i, part) in parts.into_iter().enumerate() {
-        if i > 0 {
-            args.extend(parse(","));
-        }
-        args.extend(part);
-    }
-    let mut out = parse(name);
-    out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, args))]);
-    out
 }
 
 /// `f`'s signature as written, from its visibility to its result, but for its parameters, as

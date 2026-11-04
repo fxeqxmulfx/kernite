@@ -8,10 +8,10 @@ use proc_macro::{Delimiter, Group, Span, TokenStream, TokenTree};
 use kernite::lang::{self, ItemKind};
 use kernite::{ItemOut, Launcher, ModuleOut};
 
+use crate::cond::Cond;
 use crate::gpu::{HOLE, gpu};
 use crate::rust::{
-    all, any, cfg_of, condition, error, error_under, flatten, inner_attribute, is_ident, is_punct, lex, name_at, not,
-    parse, position, site, stub, when,
+    cfg_of, error, error_under, flatten, inner_attribute, is_ident, is_punct, lex, name_at, parse, position, site, stub,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
@@ -62,13 +62,16 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
     // what is wrong with it under its `cfg`, as what is written for it is: Rust says nothing of a
     // function it leaves out.
     let cfgs: Vec<TokenStream> = module.items.iter().map(|item| cfg_of(item, &top)).collect();
-    let conds: Vec<Option<TokenStream>> = cfgs.iter().map(condition).collect();
+    let conds: Vec<Cond> = cfgs.iter().map(Cond::of).collect();
     // Where Rust finds a name of the kernel's, as it would find it in the kernel's own body: at the
     // name, with the macro's hygiene, for Rust to resolve it as it resolves what the macro writes.
     let place = |m: &lang::Mention| at(m.span).resolved_at(site());
     // How each kernel the GPU launches is, and each static of the GPU's, as the host reads it; when
     // each GPU item is there; and what names, for Rust, what each item names.
     let (mut launchers, mut memory, mut on_gpu, mut reads) = (vec![], vec![], vec![], TokenStream::new());
+    // Each listing the process's kernels have, by name, under the `cfg` of the kernel it is of, as
+    // what `naked` writes for it is.
+    let mut listed = vec![];
     for (i, (item, made_item)) in module.items.iter().zip(&made.items).enumerate() {
         let tokens = &top[item.tokens.clone()];
         let cfg = &cfgs[i];
@@ -102,6 +105,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
                     false => x86_stub(f, k.count, &k.touched, cfg, &top),
                 });
                 out.extend(k.errors.iter().map(said));
+                listed.extend(k.listings.iter().map(|listing| (cfg, listing)));
             }
             (ItemKind::Fn(f), ItemOut::Device(d)) => {
                 out.extend(d.not_unsafe.as_ref().map(said));
@@ -121,16 +125,19 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
         out.extend([TokenTree::Group(Group::new(Delimiter::Brace, reads))]);
         out.extend(parse(";"));
     }
-    if !made.listings.is_empty() {
-        let mut s = String::from(
-            "/// Each x86 kernel's listing, by name, an instance's as `tile::<4>`: where its variables\n\
-             /// live, and its code with its notes, for snapshots.\n\
-             pub const LISTINGS: &[(&::core::primitive::str, &::core::primitive::str)] = &[",
-        );
-        for (name, text) in &made.listings {
-            s += &format!("({name:?}, {text:?}), ");
+    if !listed.is_empty() {
+        let mut listings = TokenStream::new();
+        for (cfg, (name, text)) in listed {
+            listings.extend(cfg.clone());
+            listings.extend(parse(&format!("({name:?}, {text:?}),")));
         }
-        out.extend(parse(&(s + "];")));
+        out.extend(parse(
+            "/// Each x86 kernel's listing that `cfg` keeps, by name, an instance's as `tile::<4>`: where its\n\
+             /// variables live, and its code with its notes, for snapshots.\n\
+             pub const LISTINGS: &[(&::core::primitive::str, &::core::primitive::str)] = &",
+        ));
+        out.extend([TokenTree::Group(Group::new(Delimiter::Bracket, listings))]);
+        out.extend(parse(";"));
     }
     if let Some(device) = &made.device {
         out.extend(device.error.as_ref().map(said));
@@ -181,7 +188,7 @@ fn take(made: &ModuleOut, top: &[TokenTree], path: &[TokenTree]) -> TokenStream 
 /// where item `i` runs it: [`runs`].
 fn named(
     made: &ModuleOut,
-    conds: &[Option<TokenStream>],
+    conds: &[Cond],
     i: usize,
     top: &[TokenTree],
     place: &dyn Fn(&lang::Mention) -> Span,
@@ -190,21 +197,22 @@ fn named(
     let mut out = TokenStream::new();
     for m in made.items[i].mentions() {
         let j = position(module, &m.name);
-        let kept = all([conds[i].clone(), runs(made, conds, i, module.item_at(m.span), &[])]);
+        let kept = Cond::all([conds[i].clone(), runs(made, conds, i, module.item_at(m.span), &[])]);
         let rust = match (&module.items[j].kind, &made.items[j]) {
             (_, ItemOut::Rust | ItemOut::Given | ItemOut::HostStatic(_)) => true,
             (ItemKind::Fn(f), ItemOut::Native(_)) => f.generics.is_empty(),
             _ => false,
         };
         if rust {
-            out.extend(when(kept));
+            let Some(guard) = kept.guard() else { continue };
+            out.extend(guard);
             out.extend(parse("let _ ="));
             out.extend([name_at(&module.items[j], top, place(m))]);
             out.extend(parse(";"));
-        } else if let Some(gone) = &conds[j] {
+        } else if let Some(guard) = Cond::all([kept, conds[j].clone().not()]).guard() {
             let reader = module.items[i].name().expect("an item that names others has a name");
             let message = format!("`{}` is left out by `cfg` where `{reader}`, which names it, is kept", m.name);
-            out.extend(error_under(&when(all([kept, Some(not(gone.clone()))])), place(m), &message));
+            out.extend(error_under(&guard, place(m), &message));
         }
     }
     out
@@ -215,13 +223,13 @@ fn named(
 /// calls it, at any place `i` names the helper. `way` holds the items followed back from the place to
 /// `c`: a place in one of them adds nothing, for `i` reaches that item by the places already counted.
 /// So a helper that calls itself, or two that call each other, do not go on without end.
-fn runs(made: &ModuleOut, conds: &[Option<TokenStream>], i: usize, c: usize, way: &[usize]) -> Option<TokenStream> {
+fn runs(made: &ModuleOut, conds: &[Cond], i: usize, c: usize, way: &[usize]) -> Cond {
     if c == i {
-        return None;
+        return Cond::Always;
     }
     let module = &made.module;
     let way = [way, &[c]].concat();
     let calls = made.items[i].mentions().iter().filter(|m| module.items[c].name() == Some(&m.name));
     let callers = calls.map(|m| module.item_at(m.span)).filter(|caller| !way.contains(caller));
-    all([conds[c].clone(), any(callers.map(|caller| runs(made, conds, i, caller, &way)))])
+    Cond::all([conds[c].clone(), Cond::any(callers.map(|caller| runs(made, conds, i, caller, &way)))])
 }

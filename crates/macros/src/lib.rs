@@ -239,6 +239,7 @@
 
 extern crate proc_macro;
 
+mod cond;
 mod expand;
 mod gpu;
 mod rust;

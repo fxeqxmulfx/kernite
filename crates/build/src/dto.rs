@@ -90,9 +90,6 @@ pub struct ModuleOut {
     pub owner: Option<Error>,
     /// What each item of `module` is, in order.
     pub items: Vec<ItemOut>,
-    /// Each instance written of each function the process runs, by name, `tile::<4>`, and its
-    /// listing.
-    pub listings: Vec<(String, String)>,
     /// The module the GPU loads, if a static of the module's or a function of it is the GPU's.
     pub device: Option<DeviceOut>,
 }
@@ -156,6 +153,9 @@ pub struct NativeOut {
     pub written: bool,
     /// How many instances it lists, compiled or not; none if its attributes are wrong.
     pub count: usize,
+    /// Each instance Rust gets the code of, by name, `tile::<4>`, and its listing, in order; none
+    /// unless `written`.
+    pub listings: Vec<(String, String)>,
     /// The statics its code names, those the functions it names or may reach at an address
     /// name, and on, in the module's order; none unless the process owns the statics.
     pub touched: Vec<String>,

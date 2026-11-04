@@ -35,7 +35,7 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
         true => (n.statics.iter(), [].iter()),
         false => ([].iter(), d.statics.iter()),
     };
-    let (mut items, mut listings, mut codes, mut symbols, mut first) = (vec![], vec![], vec![], vec![], None);
+    let (mut items, mut codes, mut symbols, mut first) = (vec![], vec![], vec![], None);
     for item in &m.items {
         let f = match &item.kind {
             ItemKind::Const(_) if item.tokens.start < before => {
@@ -96,13 +96,15 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
             // the process's does not reach, as the first of them says.
             let reaches = whose.is_ok() || instances.iter().all(|k| k.naked.statics.is_empty());
             let written = said.is_none() && not_unsafe.is_none() && errors.is_empty() && reaches;
+            let mut listings = vec![];
             if written {
                 for k in &mut instances {
                     k.calls = calls(m, &k.naked.funcs);
                     listings.push((kernite_lang::instance(f, &k.args).unwrap_or_default(), k.naked.text.clone()));
                 }
             }
-            let out = NativeOut { not_unsafe, said, instances, mentions, written, count, touched: vec![], errors };
+            let out =
+                NativeOut { not_unsafe, said, instances, mentions, written, count, listings, touched: vec![], errors };
             items.push(ItemOut::Native(out));
             continue;
         }
@@ -150,7 +152,7 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
         };
         DeviceOut { text, error, symbols }
     });
-    ModuleOut { module, given: twice, owner: whose.err(), items, listings, device: loaded }
+    ModuleOut { module, given: twice, owner: whose.err(), items, device: loaded }
 }
 
 /// What an item of a module of consts is to the modules of kernels that take its consts.

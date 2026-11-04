@@ -576,6 +576,16 @@ fn listings_holds_each_kernels_listing_by_its_name() {
     builds_quietly("listings");
 }
 
+/// `LISTINGS` holds the listings of the kernels `cfg` keeps, one for each instance of a kernel that
+/// has them, and none of a kernel that `cfg` leaves out, by a `cfg` or by a `cfg_attr(..)`. The
+/// fixture asserts, as it builds, which listings the module has with its feature and without it.
+#[test]
+fn listings_holds_what_cfg_keeps() {
+    let dir = written("configured_listings");
+    builds_quietly_in(&["build"], "configured_listings", &dir);
+    builds_quietly_in(&["build", "--features", "more"], "configured_listings", &dir);
+}
+
 #[test]
 fn a_kernel_that_does_not_compile_leaves_a_stub() {
     // Rust calls each stub, and a kernel calls two, and none of these calls is an error.

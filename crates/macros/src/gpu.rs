@@ -6,9 +6,10 @@ use proc_macro::{Delimiter, Group, Ident, Span, TokenStream, TokenTree};
 use kernite::DeviceStatic;
 use kernite::lang::{self, Fn, Value};
 
+use crate::cond::Cond;
 use crate::rust::{
-    any, attrs, carried, checks, clashes, depends_on, error_under, host, hygienic, missing, never, number_type, parse,
-    pick, pointer, primitive, quiet, site, visibility, when, written_params,
+    attrs, carried, checks, clashes, depends_on, error_under, host, hygienic, missing, never, number_type, parse, pick,
+    pointer, primitive, quiet, site, visibility, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -32,8 +33,8 @@ type Launched = (Vec<Value>, usize);
 /// a kernel or a static has that name, which is an error where `at` says. A crate without
 /// `kernite-cuda` has `PTX` empty and a `Kernels` that is the error, said once, at the module:
 /// nothing else is said of the code that loads it or launches a kernel. Both are there when any of
-/// the module's GPU items is, `on_gpu` their conditions, each as `condition` has it: a feature that
-/// brings `kernite-cuda` and keeps them lets the crate build without the feature.
+/// the module's GPU items is, `on_gpu` their conditions: a feature that brings `kernite-cuda` and
+/// keeps them lets the crate build without the feature.
 pub(crate) fn gpu(
     launchers: &[(&Fn, Option<&[Launched]>)],
     symbols: &[String],
@@ -41,10 +42,10 @@ pub(crate) fn gpu(
     ptx: &str,
     top: &[TokenTree],
     at: &dyn std::ops::Fn(lang::Span) -> Span,
-    on_gpu: &[Option<TokenStream>],
+    on_gpu: &[Cond],
 ) -> TokenStream {
     if !depends_on(CUDA) {
-        let gate = when(any(on_gpu.iter().cloned()));
+        let Some(gate) = Cond::any(on_gpu.iter().cloned()).guard() else { return TokenStream::new() };
         let mut out = gate.clone();
         out.extend(parse("pub const PTX: &::core::primitive::str = \"\";"));
         out.extend(gate);

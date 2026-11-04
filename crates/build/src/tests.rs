@@ -580,8 +580,8 @@ fn echoed(src: &str) -> ModuleOut {
 /// static is laid out or says why not, and a function is a helper, of an ABI kernite does not
 /// know, the process's or the GPU's. A kernel the process runs whose `#[instances(..)]` is wrong
 /// compiles nothing, and one whose instances do not all compile says why of each that does not,
-/// in order; neither is written. The listings of the kernels the process runs, and the code of
-/// the functions the GPU runs, are in the module's order as well.
+/// in order; neither is written. A kernel the process runs holds the listings of its instances, in
+/// order, and the code of the functions the GPU runs is in the module's order.
 #[test]
 fn a_module_s_items_come_out_in_order() {
     let src = "const ONE: u64 = 1;\n\
@@ -621,7 +621,8 @@ fn a_module_s_items_come_out_in_order() {
     assert_eq!(args, [[Value::Int(2, Some(IntTy::U64))], [Value::Int(4, Some(IntTy::U64))]]);
     assert!(k.written && tile.written);
     let listing = |name: &str, kernel: &NativeOut, i: usize| (name.to_string(), kernel.instances[i].naked.text.clone());
-    assert_eq!(out.listings, [listing("k", k, 0), listing("tile::<2>", tile, 0), listing("tile::<4>", tile, 1)]);
+    assert_eq!(k.listings, [listing("k", k, 0)]);
+    assert_eq!(tile.listings, [listing("tile::<2>", tile, 0), listing("tile::<4>", tile, 1)]);
     let once_said = "`once` takes no compile-time arguments, so it is compiled once, with no `#[instances(..)]`";
     assert_eq!(once.said.as_ref().map(|e| e.at(src)), Some(format!("9:3: {once_said}")));
     assert_eq!((once.count, once.instances.len(), once.errors.len(), once.written), (0, 0, 0, false));
@@ -768,7 +769,7 @@ fn a_kernel_that_is_not_unsafe_is_refused() {
     let [ItemOut::Native(k)] = &out.items[..] else { panic!("{:?}", out.items) };
     assert_eq!(k.not_unsafe.as_ref().map(|e| e.at(src)), Some(format!("1:20: {not}")));
     assert_eq!((k.instances.len(), k.count, k.written), (1, 1, false));
-    assert!(out.listings.is_empty());
+    assert!(k.listings.is_empty());
     let src = "extern \"ptx-kernel\" fn g() {}\nextern \"ptx-func\" fn f() {}";
     let out = echoed(src);
     let [ItemOut::Device(g), ItemOut::Device(f)] = &out.items[..] else { panic!("{:?}", out.items) };

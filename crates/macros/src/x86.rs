@@ -6,10 +6,10 @@ use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
 use kernite::lang::{self, Fn, Value};
 use kernite::{Call, HostStatic, Naked, NativeInstance};
 
+use crate::cond::Cond;
 use crate::rust::{
-    attrs, cfg_of, checks, clashes, condition, depends_on, hygienic, missing, name_at, never, not, parse, pick,
-    pointer, position, primitive, probe, result, signature, site, stub, value, value_params, visibility, when,
-    written_params,
+    attrs, cfg_of, checks, clashes, depends_on, hygienic, missing, name_at, never, parse, pick, pointer, position,
+    primitive, probe, result, signature, site, stub, value, value_params, visibility, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -180,10 +180,12 @@ fn asm(
 /// kernel writes the name, and is not said here as well.
 fn operand(label: &str, path: &str, item: &lang::Item, top: &[TokenTree]) -> TokenStream {
     let sym = parse(&format!("{label} = sym {path},"));
-    let Some(kept) = condition(&cfg_of(item, top)) else { return sym };
-    let mut out = when(Some(kept.clone()));
+    let kept = Cond::of(&cfg_of(item, top));
+    // An item `cfg` never leaves out is named as it is.
+    let (Some(then), Some(otherwise)) = (kept.guard(), kept.not().guard()) else { return sym };
+    let mut out = then;
     out.extend(sym);
-    out.extend(when(Some(not(kept))));
+    out.extend(otherwise);
     out.extend(parse(&format!("{label} = const 0,")));
     out
 }

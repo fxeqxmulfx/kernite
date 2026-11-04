@@ -117,6 +117,9 @@ at two places, one of them in a helper `cfg` leaves out, is told of what the hel
 leaves out with every item that names it is not said of, and one that `cfg` keeps and only items `cfg` leaves out name
 is unused to Rust, which says so as it does of any const that nothing names.
 
+A module holds what `cfg` keeps: Rust puts it together, where it knows which `cfg` holds, so `LISTINGS` has the
+listing of each x86 kernel that `cfg` keeps, and of no other.
+
 kernite reads every item before Rust knows which `cfg` holds, as Rust parses every item before it does, so an item it
 cannot read is said whatever `cfg` holds, as Rust says a syntax error in a function it leaves out: the head of a
 function, as `fn k<T>()`, rests on no other item. What rests on all the items together is said whatever `cfg` leaves
