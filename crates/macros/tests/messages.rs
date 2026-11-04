@@ -751,12 +751,13 @@ fn kernels_that_compile_say_nothing() {
 /// A GPU kernel's tuning directives, `#[maxntid(..)]`, `#[reqntid(..)]`, `#[minnctapersm(..)]` and
 /// `#[maxnreg(..)]`, are the kernel's alone: Rust builds the crate without a word, though a const
 /// is read by a directive alone, and the tests the fixture holds run each kernel on the GPU over the
-/// blocks its directives allow; and a kernel at the edge of the registers a launch gives a block
-/// launches over its most threads, and not a step past it. They skip where there is no GPU.
+/// blocks its directives allow, and over ones they refuse, which the launch says; and a kernel at the
+/// edge of the registers a launch gives a block launches over its most threads, and not a step past
+/// it. They skip where there is no GPU.
 #[test]
 fn a_gpu_kernel_runs_over_the_blocks_its_directives_allow() {
     let printed = runs_quietly("tuned");
-    assert!(printed.contains("test result: ok. 2 passed"), "fixtures/tuned.rs ran its tests, and printed:\n{printed}");
+    assert!(printed.contains("test result: ok. 3 passed"), "fixtures/tuned.rs ran its tests, and printed:\n{printed}");
 }
 
 #[test]

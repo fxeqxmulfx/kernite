@@ -276,7 +276,7 @@ is an error that says how much it has: `cuFuncSetAttribute: CUDA_ERROR_INVALID_V
 has 102400 bytes of shared memory, 20480 of the kernel's and 81920 of the launch's, and the GPU takes 101376 at most`.
 A cooperative launch says the same, and so does the method that says how many blocks its grid has at most, below. A
 grid past more than one limit is told of the first of these: the blocks along x, y and z, the threads along x, y and z,
-the threads in all, and the shared memory.
+the threads in all, the shared memory, and last the kernel's `.maxntid` or `.reqntid`, below.
 
 The PTX target knows every instruction of PTX's for the GPUs from Fermi, `sm_20`, to Ampere, `sm_86`, in each form
 `ptxas` takes, [`forms`](crates/ptx/src/forms.rs), but one. `txq.force_unnormalized_coords` asks of a sampler apart
@@ -361,6 +361,13 @@ without a word, as an error at the number or the name that is wrong:
   keeps `#[maxnreg(128)]` beside it, and a kernel that used them all could not launch;
 - `#[maxnctapersm(..)]`, which PTX has not from 2.1 on, in any form and wherever it is written; and any other
   directive on what is no GPU kernel: a helper, an `extern "ptx-func"` function or an x86 kernel.
+
+A launch over a block that the kernel's `#[maxntid(..)]` or `#[reqntid(..)]` refuses is an error that says the directive
+and the threads, as a grid's does:
+``... each block has 128 threads along x, and the kernel's `.reqntid 256` takes 256 exactly``, or
+``... each block has 512 threads, and the kernel's `.maxntid 256` takes 256 at most``. The driver holds `.maxntid` to
+the threads of a block in all, of any shape, and `.reqntid` to the size along each of x, y and z. It lets a block of one
+thread through to a kernel of `.reqntid`, and starts the kernel's own threads in it.
 
 A kernel is named in PTX as C++ names a function in the namespaces of its workspace, its crate and its modules, so
 that a profiler tells two crates' `saxpy` apart: `_ZN7kernite6my_app3gpu5saxpyE`, which `cu++filt`, Nsight and

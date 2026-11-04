@@ -181,7 +181,8 @@
 //! once, and `#[maxnreg(32)]`, the most registers a thread may use: whole numbers known now, the
 //! module's consts among them, and the compile-time arguments of an instance. They are PTX's
 //! directives of the same names, which `ptxas` holds the kernel's code to, and they are not Rust's:
-//! the kernel's launcher is the same.
+//! the kernel's launcher is the same, and a launch over a block the directives refuse is an error
+//! that names the directive and the threads of the block.
 //!
 //! An x86 kernel whose threads wait for each other is `#[cooperative]` too, and runs on the
 //! threads of a grid, each given its place there, `grid.thread` of `grid.threads`: it becomes

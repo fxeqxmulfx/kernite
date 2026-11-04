@@ -871,3 +871,150 @@ fn the_first_size_past_is_said_whether_it_is_the_grids_or_the_shared_memorys() {
     }
     cuda.sync().unwrap();
 }
+
+/// A module of kernels written by hand, each adding 1 to the word at its pointer for each thread
+/// that runs, and each saying the directives after its name in `kernels`, one to a line.
+fn counting(kernels: &[(&str, &str)]) -> String {
+    let mut ptx = ".version 3.0\n.target sm_30\n.address_size 64\n".to_string();
+    for (name, directives) in kernels {
+        ptx += &format!(
+            "\n.visible .entry {name}(.param .u64 out_param)\n{directives}\n{{\n\t.reg .u64 %out;\n\n\
+             \tld.param.u64 %out, [out_param];\n\tcvta.to.global.u64 %out, %out;\n\
+             \tred.global.add.u32 [%out], 1;\n\tret;\n}}\n"
+        );
+    }
+    ptx
+}
+
+/// The kernels `counting` writes, in order: `.reqntid` of one size and of two, `.maxntid` of one
+/// size and of three, one with `.minnctapersm` after its `.maxntid`, and one with `.maxnreg` before it.
+const TUNED: [(&str, &str); 6] = [
+    ("req", ".reqntid 256"),
+    ("req_xy", ".reqntid 16, 16"),
+    ("max", ".maxntid 256"),
+    ("max_xyz", ".maxntid 8, 8, 4"),
+    ("max_blocks", ".maxntid 256\n.minnctapersm 2"),
+    ("regs", ".maxnreg 32\n.maxntid 128"),
+];
+
+/// The launches of the kernels of `TUNED`, each by its place in it, over blocks of so many threads
+/// along x, y and z, and what the driver does with it: starts blocks of so many threads, or says
+/// which size is past which limit.
+fn launches() -> Vec<(usize, [u32; 3], Result<u32, String>)> {
+    let req = |threads: u32, along: &str, exactly: u32| {
+        format!(
+            "each block has {threads} threads along {along}, and the kernel's `.reqntid 256` takes {exactly} exactly"
+        )
+    };
+    let max = |threads: u32, directive: &str, most: u32| {
+        format!("each block has {threads} threads, and the kernel's `.maxntid {directive}` takes {most} at most")
+    };
+    let xy = |threads: u32, along: &str| {
+        format!("each block has {threads} threads along {along}, and the kernel's `.reqntid 16, 16` takes 16 exactly")
+    };
+    vec![
+        // `.reqntid` takes a block of exactly its shape. A block of one thread is let through, and the
+        // driver starts the kernel's own threads in it: 256, not 1.
+        (0, [256, 1, 1], Ok(256)),
+        (0, [1, 1, 1], Ok(256)),
+        (0, [128, 1, 1], Err(req(128, "x", 256))),
+        (0, [512, 1, 1], Err(req(512, "x", 256))),
+        (0, [256, 2, 1], Err(req(2, "y", 1))),
+        (0, [16, 16, 1], Err(req(16, "x", 256))),
+        (1, [16, 16, 1], Ok(256)),
+        (1, [1, 1, 1], Ok(256)),
+        (1, [256, 1, 1], Err(xy(256, "x"))),
+        (1, [16, 8, 2], Err(xy(8, "y"))),
+        // `.maxntid` takes a block of at most that many threads in all, of any shape.
+        (2, [256, 1, 1], Ok(256)),
+        (2, [16, 16, 1], Ok(256)),
+        (2, [1, 1, 1], Ok(1)),
+        (2, [512, 1, 1], Err(max(512, "256", 256))),
+        (2, [16, 16, 2], Err(max(512, "256", 256))),
+        (3, [8, 8, 4], Ok(256)),
+        (3, [256, 1, 1], Ok(256)),
+        (3, [1024, 1, 1], Err(max(1024, "8, 8, 4", 256))),
+        (4, [256, 1, 1], Ok(256)),
+        (4, [257, 1, 1], Err(max(257, "256", 256))),
+        (5, [128, 1, 1], Ok(128)),
+        (5, [129, 1, 1], Err(max(129, "128", 128))),
+        // The GPU's limits are said before the kernel's.
+        (2, [2048, 1, 1], Err("each block has 2048 threads along x, and the GPU takes 1024 at most".into())),
+    ]
+}
+
+#[test]
+fn a_launch_over_a_block_the_kernel_refuses_says_the_directive_and_the_threads() {
+    let Some(cuda) = cuda() else { return };
+    let names: Vec<&str> = TUNED.iter().map(|(name, _)| *name).collect();
+    let module = Module::load(&cuda, &counting(&TUNED), &names, &[]).unwrap();
+    let mut count = cuda.alloc::<u32>(1).unwrap();
+    for (index, threads, done) in launches() {
+        let grid = Grid { blocks: [3, 1, 1], threads, shared: 0 };
+        count.zero().unwrap();
+        // SAFETY: each kernel takes a pointer, and adds to the word there.
+        let launched = unsafe { module.launch(index, grid, &[arg(&count.ptr())]) };
+        match (launched, done) {
+            (Ok(()), Ok(block)) => {
+                cuda.sync().unwrap();
+                assert_eq!(count.read().unwrap(), [3 * block], "{} over {grid:?}", names[index]);
+            }
+            (Err(e), Err(said)) => refusal("cuLaunchKernel", &e, &said),
+            (launched, done) => {
+                panic!("{} over {grid:?}: {launched:?}, and the driver should do {done:?}", names[index])
+            }
+        }
+    }
+    // The launches refused did not harm the GPU, nor the ones that started.
+    cuda.sync().unwrap();
+}
+
+#[test]
+fn a_cooperative_launch_over_a_block_the_kernel_refuses_says_it_too() {
+    let Some(cuda) = cuda() else { return };
+    if !cuda.cooperative() {
+        eprintln!("{} launches no kernel cooperatively: skipped", cuda.name());
+        return;
+    }
+    let names: Vec<&str> = TUNED.iter().map(|(name, _)| *name).collect();
+    let module = Module::load(&cuda, &counting(&TUNED), &names, &[]).unwrap();
+    let count = cuda.alloc::<u32>(1).unwrap();
+    // Only the blocks the kernel refuses: one it takes may have more blocks than it runs at once,
+    // which is refused in other words.
+    for (index, threads, said) in launches().into_iter().filter_map(|(i, t, done)| done.err().map(|said| (i, t, said)))
+    {
+        let grid = Grid { blocks: [3, 1, 1], threads, shared: 0 };
+        // SAFETY: each kernel takes a pointer, and adds to the word there.
+        let e = unsafe { module.launch_cooperative(index, grid, &[arg(&count.ptr())]) }.unwrap_err();
+        refusal("cuLaunchCooperativeKernel", &e, &said);
+    }
+    cuda.sync().unwrap();
+}
+
+#[test]
+fn the_kernels_block_is_said_after_the_gpus_limits_and_the_shared_memory() {
+    let Some(cuda) = cuda() else { return };
+    let names: Vec<&str> = TUNED.iter().map(|(name, _)| *name).collect();
+    let module = Module::load(&cuda, &counting(&TUNED), &names, &[]).unwrap();
+    let count = cuda.alloc::<u32>(1).unwrap();
+    let (index, most) = (2, cuda.max_shared());
+    let shared = most + 4;
+    // 512 threads are past the `.maxntid 256` of kernel `max`, which is at `index`, and `shared`
+    // is past what the GPU gives a block: the shared memory is said, for the kernel's block comes
+    // after it. The GPU's limits on the threads come before it too, which `launches` has.
+    let past_both = Grid { blocks: [3, 1, 1], threads: [512, 1, 1], shared };
+    let all = format!(
+        "each block has {shared} bytes of shared memory, 0 of the kernel's and {shared} of the launch's, and the GPU \
+         takes {most} at most"
+    );
+    let args = [arg(&count.ptr())];
+    // SAFETY: the kernels take a pointer, and add to the word there, if they start at all.
+    let e = unsafe { module.launch(index, past_both, &args) }.unwrap_err();
+    refusal("cuFuncSetAttribute", &e, &all);
+    if cuda.cooperative() {
+        // SAFETY: as above.
+        let e = unsafe { module.launch_cooperative(index, past_both, &args) }.unwrap_err();
+        refusal("cuFuncSetAttribute", &e, &all);
+    }
+    cuda.sync().unwrap();
+}

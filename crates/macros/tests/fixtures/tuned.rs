@@ -2,7 +2,8 @@
 //! `#[minnctapersm(..)]` and `#[maxnreg(..)]`, of one size, two and three, and a kernel of
 //! instances that sizes its block by its compile-time argument. Rust builds the crate without a
 //! word, though a const is read by a directive alone, and the tests run each kernel on the GPU over
-//! the blocks its directives allow. A kernel that uses the registers `#[maxnreg(..)]` allows
+//! the blocks its directives allow. A launch over one they refuse is an error that names the
+//! directive and the threads of the block. A kernel that uses the registers `#[maxnreg(..)]` allows
 //! launches over its most threads at the edge of what a launch gives a block, and not a thread or a
 //! step of registers past it. The tests skip where there is no GPU.
 
@@ -162,6 +163,33 @@ mod tests {
             assert_eq!(ran(&cuda, |n| k.tile::<64>(grid(3, [64, 1, 1]), n)).unwrap(), 192);
             assert_eq!(ran(&cuda, |n| k.tile::<128>(grid(3, [128, 1, 1]), n)).unwrap(), 384);
         }
+    }
+
+    #[test]
+    fn a_launch_the_directives_refuse_says_the_directive_and_the_threads() {
+        let Some((cuda, k)) = gpu() else { return };
+        // What the driver refuses of a launch, past `CUDA_ERROR_INVALID_VALUE (1): invalid argument`.
+        let refused = |launched: Result<u32, Error>| {
+            let e = launched.unwrap_err();
+            assert_eq!(e.call, "cuLaunchKernel");
+            let said = e.message.strip_prefix("CUDA_ERROR_INVALID_VALUE (1): invalid argument: ");
+            said.unwrap_or_else(|| panic!("{e}")).to_string()
+        };
+        // SAFETY: as above.
+        unsafe {
+            let said = refused(ran(&cuda, |n| k.req_x(grid(1, [128, 1, 1]), n)));
+            assert_eq!(said, "each block has 128 threads along x, and the kernel's `.reqntid 256` takes 256 exactly");
+            let said = refused(ran(&cuda, |n| k.max_x(grid(1, [512, 1, 1]), n)));
+            assert_eq!(said, "each block has 512 threads, and the kernel's `.maxntid 256` takes 256 at most");
+            let said = refused(ran(&cuda, |n| k.req_xy(grid(1, [256, 1, 1]), n)));
+            assert_eq!(said, "each block has 256 threads along x, and the kernel's `.reqntid 16, 16` takes 16 exactly");
+            let said = refused(ran(&cuda, |n| k.max_xyz(grid(1, [16, 16, 2]), n)));
+            assert_eq!(said, "each block has 512 threads, and the kernel's `.maxntid 8, 8, 4` takes 256 at most");
+            let said = refused(ran(&cuda, |n| k.tile::<64>(grid(1, [128, 1, 1]), n)));
+            assert_eq!(said, "each block has 128 threads along x, and the kernel's `.reqntid 64` takes 64 exactly");
+        }
+        // The launches refused did not harm the GPU.
+        cuda.sync().unwrap();
     }
 
     /// The name of the kernel in `gpu::PTX` that has `part`, as its `.entry` says it.
