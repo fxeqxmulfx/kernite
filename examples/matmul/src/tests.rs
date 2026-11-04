@@ -1,7 +1,8 @@
 //! The kernels against the reference, and their listings against `snapshots/`.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use kernite_cuda::{Buffer, Cuda, Error, Plain, f16};
 
@@ -167,36 +168,117 @@ fn integers(n: usize, seed: u32) -> Vec<f16> {
     floats(n, seed).iter().map(|x| f16::from_f32((x * 8.0).round())).collect()
 }
 
+/// The products the tensor cores' kernel is held to, `n` and `k` multiples of 8: none in each
+/// of `m`, `n` and `k`; then each size the kernel works in, one less, equal and one more where
+/// its doc allows: `BM` of `m`, `BN` of `n`, and every `k` up to a few tiles more than the
+/// stages hold, so that each short last tile and each number of tiles in the pipeline is met;
+/// then tiles in grids of each shape, with a group of tile rows whole and one short, the last
+/// tile short in each size; and a few larger.
+fn tensor_shapes() -> Vec<Shape> {
+    use tensor::kernels::{BK, BM, BN, GROUP, STAGES};
+    let mut shapes = vec![(0, 8, 8), (5, 0, 8), (5, 8, 0), (1, 8, 8)];
+    shapes.extend((BM - 1..=BM + 1).map(|m| (m, 16, 24)));
+    shapes.extend((BN - 8..=BN + 8).step_by(8).map(|n| (5, n, 24)));
+    shapes.extend((0..=(STAGES + 2) * BK).step_by(8).map(|k| (5, 24, k)));
+    shapes.extend([(BM + 1, BN + 8, BK + 8), (BM - 1, 2 * BN - 8, 3 * BK - 8)]);
+    shapes.extend([(GROUP * BM + 1, 3 * BN - 8, BK + 8), ((2 * GROUP + 1) * BM - 1, BN + 8, 8)]);
+    shapes.extend([(64, 64, 64), (100, 200, 304), (512, 512, 512)]);
+    shapes
+}
+
+/// The GPU if it runs `tensor`'s kernels; on one older than Ampere, `None`, and the test is
+/// skipped.
+fn ampere() -> Option<Cuda> {
+    let cuda = cuda()?;
+    if cuda.sm() < tensor::SM {
+        eprintln!("the {} is older than Ampere, sm_80: skipped", cuda.name());
+        return None;
+    }
+    Some(cuda)
+}
+
+/// For halves of integers of `shape`, the `c` that `hgemm` computes, and the reference's.
+fn hgemm_and_reference(
+    cuda: &Cuda,
+    kernels: &tensor::kernels::Kernels,
+    shape @ (m, n, k): Shape,
+) -> (Vec<f32>, Vec<f32>) {
+    let (a, b) = (integers(m * k, 1), integers(k * n, 2));
+    let widen = |x: &[f16]| x.iter().map(|h| h.to_f32()).collect::<Vec<_>>();
+    // SAFETY: `on_gpu` keeps the buffers until it reads `c`, which waits for the kernel.
+    let c = on_gpu(cuda, &a, &b, shape, |c, a, b| unsafe { tensor::launch(kernels, c, a, b, shape) });
+    (c, reference::sgemm(&widen(&a), &widen(&b), shape))
+}
+
 #[test]
 fn hgemm_is_exact_on_integers() {
-    let Some(cuda) = cuda() else { return };
-    if cuda.sm() < 80 {
-        return eprintln!("the {} is older than Ampere, sm_80: skipped", cuda.name());
-    }
+    let Some(cuda) = ampere() else { return };
     let kernels = tensor::kernels::Kernels::load(&cuda).unwrap();
-    let widen = |x: &[f16]| x.iter().map(|h| h.to_f32()).collect::<Vec<_>>();
-    for shape @ (m, n, k) in SHAPES {
-        let (a, b) = (integers(m * k, 1), integers(k * n, 2));
-        // SAFETY: `on_gpu` keeps the buffers until it reads `c`, which waits for the kernel.
-        let c = on_gpu(&cuda, &a, &b, shape, |c, a, b| unsafe { tensor::launch(&kernels, c, a, b, shape) });
-        same_bits(&c, &reference::sgemm(&widen(&a), &widen(&b), shape), shape);
+    for shape in tensor_shapes() {
+        let (c, want) = hgemm_and_reference(&cuda, &kernels, shape);
+        same_bits(&c, &want, shape);
     }
 }
 
 #[test]
-fn hgemm_takes_more_blocks_than_a_grid_has_along_x() {
-    let Some(cuda) = cuda() else { return };
-    if cuda.sm() < 80 {
-        return eprintln!("the {} is older than Ampere, sm_80: skipped", cuda.name());
-    }
+fn hgemm_is_exact_over_65536_tiles_down_and_across() {
+    let Some(cuda) = ampere() else { return };
     let kernels = tensor::kernels::Kernels::load(&cuda).unwrap();
-    // 65536 blocks of 256 threads, one thread for each element of c: 65535 blocks are a grid's along x.
-    let shape = (4096, 4096, 1);
-    let (a, b) = (integers(4096, 1), integers(4096, 2));
-    let widen = |x: &[f16]| x.iter().map(|h| h.to_f32()).collect::<Vec<_>>();
-    // SAFETY: `on_gpu` keeps the buffers until it reads `c`, which waits for the kernel.
-    let c = on_gpu(&cuda, &a, &b, shape, |c, a, b| unsafe { tensor::launch(&kernels, c, a, b, shape) });
-    same_bits(&c, &reference::sgemm(&widen(&a), &widen(&b), shape), shape);
+    // 65536 tiles, one more than the 65535 that 16 bits hold, the last of them short: a count of
+    // blocks, or of tiles down or across, held in 16 bits would be 0.
+    use tensor::kernels::{BM, BN};
+    for shape in [(65535 * BM + 1, 8, 8), (1, 65535 * BN + 8, 8)] {
+        let (c, want) = hgemm_and_reference(&cuda, &kernels, shape);
+        same_bits(&c, &want, shape);
+    }
+}
+
+#[test]
+fn hgemm_refuses_n_and_k_that_are_not_multiples_of_8() {
+    let Some(cuda) = ampere() else { return };
+    let kernels = tensor::kernels::Kernels::load(&cuda).unwrap();
+    for shape @ (m, n, k) in [(1, 7, 8), (1, 8, 7), (1, 9, 16)] {
+        let (c, a, b) =
+            (cuda.alloc::<f32>(m * n).unwrap(), cuda.alloc::<f16>(m * k).unwrap(), cuda.alloc::<f16>(k * n).unwrap());
+        // SAFETY: nothing is launched: `launch` panics before it.
+        let refused = std::panic::catch_unwind(|| unsafe { tensor::launch(&kernels, &c, &a, &b, shape) });
+        let message = *refused.unwrap_err().downcast::<String>().unwrap();
+        assert_eq!(message, format!("n is {n} and k is {k}: both must be multiples of 8"));
+    }
+}
+
+/// `ptxas`, if CUDA is here: `$PTXAS`, or on the path, or in a toolkit under `/usr/local`.
+fn ptxas() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("PTXAS") {
+        return Some(p.into());
+    }
+    if Command::new("ptxas").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        return Some("ptxas".into());
+    }
+    let mut found: Vec<PathBuf> = fs::read_dir("/usr/local")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path().join("bin/ptxas"))
+        .filter(|p| p.exists())
+        .collect();
+    found.sort();
+    found.pop()
+}
+
+#[test]
+fn hgemm_spills_nothing() {
+    let Some(ptxas) = ptxas() else { return eprintln!("no ptxas here: skipped; set PTXAS to run it") };
+    let src = std::env::temp_dir().join(format!("matmul-hgemm-{}.ptx", std::process::id()));
+    fs::write(&src, tensor::kernels::PTX).unwrap();
+    let run = Command::new(ptxas).args(["-v", "-arch=sm_80", "-o", "/dev/null"]).arg(&src).output();
+    // Before the unwrap and the asserts, so that a ptxas that cannot be run, one that fails, or a
+    // spill leaves nothing in the temp dir.
+    fs::remove_file(src).unwrap();
+    let run = run.unwrap();
+    let report = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{report}");
+    assert!(report.contains("0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"), "{report}");
 }
 
 /// Each x86 kernel's listing against the one in `snapshots/`, and the GPU kernels' PTX, so that

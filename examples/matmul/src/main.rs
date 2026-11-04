@@ -1,8 +1,8 @@
 //! Matrix products, `c = a b` into `f32`, by kernels written in kernite's language: for the CPU
-//! in x86, and for the GPU in PTX, on its cores in `f32` and on its tensor cores from `f16`. The
-//! tests hold each kernel to a scalar reference that does the same float operations in the same
-//! order, bit for bit, or the tensor cores, which add in an order of their own, to products of
-//! integers, exact in any order. `main` times them:
+//! in x86, and for the GPU in PTX, on its cores in `f32` and, on an Ampere GPU or a newer, on its
+//! tensor cores from `f16`. The tests hold each kernel to a scalar reference that does the same
+//! float operations in the same order, bit for bit, or the tensor cores, which add in an order of
+//! their own, to products of integers, exact in any order. `main` times them:
 //!
 //! ```text
 //! cargo run --release -p matmul -- cpu             # the x86 kernels
@@ -86,10 +86,12 @@ fn on_cpu(sizes: &[usize]) -> Result<ExitCode, kernite_cpu::Error> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Times the PTX kernels at each size, on the first GPU.
+/// Times the PTX kernels at each size, on the first GPU. `hgemm` is timed where the GPU is
+/// Ampere's or newer and `n` is a multiple of 8; the table has a dash for the others.
 fn on_gpu(sizes: &[usize]) -> Result<ExitCode, Error> {
     let cuda = Cuda::new()?;
-    let (cores, tensor_cores) = (gpu::kernels::Kernels::load(&cuda)?, tensor::kernels::Kernels::load(&cuda)?);
+    let cores = gpu::kernels::Kernels::load(&cuda)?;
+    let tensor_cores = if cuda.sm() >= tensor::SM { Some(tensor::kernels::Kernels::load(&cuda)?) } else { None };
     println!("{}", cuda.name());
     println!("{:>6} {:>14} {:>14}", "n", "sgemm GFLOPS", "hgemm GFLOPS");
     for &n in sizes {
@@ -98,10 +100,15 @@ fn on_gpu(sizes: &[usize]) -> Result<ExitCode, Error> {
         let halves = |x: &[f32]| x.iter().map(|&x| f16::from_f32(x)).collect::<Vec<_>>();
         // SAFETY: `gpu_gflops` keeps the buffers until it has waited for the kernels.
         let sgemm = gpu_gflops(&cuda, &a, &b, shape, |c, a, b| unsafe { gpu::launch(&cores, c, a, b, shape) })?;
-        // SAFETY: as above.
-        let launch = |c: &_, a: &_, b: &_| unsafe { tensor::launch(&tensor_cores, c, a, b, shape) };
-        let hgemm = gpu_gflops(&cuda, &halves(&a), &halves(&b), shape, launch)?;
-        println!("{n:>6} {sgemm:>14.1} {hgemm:>14.1}");
+        let hgemm = match &tensor_cores {
+            Some(kernels) if n % 8 == 0 => {
+                // SAFETY: as above.
+                let launch = |c: &_, a: &_, b: &_| unsafe { tensor::launch(kernels, c, a, b, shape) };
+                format!("{:.1}", gpu_gflops(&cuda, &halves(&a), &halves(&b), shape, launch)?)
+            }
+            _ => "-".to_string(),
+        };
+        println!("{n:>6} {sgemm:>14.1} {hgemm:>14}");
     }
     Ok(ExitCode::SUCCESS)
 }
