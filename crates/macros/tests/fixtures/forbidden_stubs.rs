@@ -1,6 +1,6 @@
 //! Kernels that do not compile, in a crate that forbids each lint the macro used to `allow`: each
 //! is said where it does not compile, beside a stub of its signature or its launcher, a module
-//! given consts as well, and nothing else is said of them.
+//! given consts as well, and nothing else is said of them or of the pointers they take or give back.
 
 #![forbid(
     dead_code,
@@ -67,5 +67,17 @@ pub mod gpu_taking {
     #[cooperative]
     pub unsafe extern "ptx-kernel" fn together(x: *mut u32) {
         st.global.u32([x], y);
+    }
+}
+
+#[kernite_macros::kernels]
+pub mod cpu_pointers {
+    pub unsafe extern "sysv64" fn broken(x: *mut u64) -> *const u64 {
+        mov([x], y);
+    }
+
+    #[instances(1, 2)]
+    pub unsafe extern "sysv64" fn tile<const N: u64>(x: *mut u64) -> *mut u64 {
+        mov([x], y);
     }
 }

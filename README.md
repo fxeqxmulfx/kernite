@@ -58,10 +58,13 @@ said once, at the type, and so is a lint, at the level the kernel's `allow`, `wa
 it: a kernel of instances, or a cooperative one, is no different from any function.
 
 A kernel's pointer to a type with a size, `*const T` or `*mut T`, is one register: `*const [usize; 3]` and
-`*mut *const f32` are taken as `*const f32` is, on x86 and on a GPU. A pointer to a slice, a `str` or a `dyn`, or to a
-tuple that ends in one, in parentheses or not, has two words, an address and a length or a table, so it is an error at
-its type: take the address and the length as two parameters. A type in a message is written as Rust writes it,
-`[usize; 3]`.
+`*mut *const f32` are taken as `*const f32` is, on x86 and on a GPU. A pointer to a type with no size has two words,
+an address and a length or a table, so it is an error at its type: take the address and the length as two
+parameters. kernite tells a slice, a `str` or a `dyn`, or a tuple that ends in one, in parentheses or not, by what is
+written, and says so in its words. Rust tells any other, whatever it holds and whatever it is called: `CStr`, `Floats`
+where `type Floats = [f32];`, a struct of yours whose last field is a slice, `(&u8, CStr)`. It says that the size cannot
+be known, at the type, for a pointer a kernel returns as well as for one it takes, in a kernel of every kind. A type in
+a message is written as Rust writes it, `[usize; 3]`.
 
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kernite_macros::consts]` is on, and a

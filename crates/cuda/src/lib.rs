@@ -457,29 +457,31 @@ impl<T: Plain> fmt::Debug for Buffer<T> {
 }
 
 /// An address on the GPU, of elements of `T`: what a kernel's `*const T` or `*mut T` is
-/// given. A [`Buffer`] gives it, and it points at something only while the buffer lasts.
+/// given. A [`Buffer`] gives it, and it points at something only while the buffer lasts. A kernel's
+/// pointer is to a type with a size, but `T` may have none: a kernel that is wrong in this is one
+/// error, at its type, and not a second, here.
 #[repr(transparent)]
-pub struct Ptr<T> {
+pub struct Ptr<T: ?Sized> {
     addr: u64,
     of: PhantomData<*const T>,
 }
 
-impl<T> Ptr<T> {
+impl<T: ?Sized> Ptr<T> {
     /// The address, as the GPU reckons it.
     pub fn addr(self) -> u64 {
         self.addr
     }
 }
 
-impl<T> Clone for Ptr<T> {
+impl<T: ?Sized> Clone for Ptr<T> {
     fn clone(&self) -> Ptr<T> {
         *self
     }
 }
 
-impl<T> Copy for Ptr<T> {}
+impl<T: ?Sized> Copy for Ptr<T> {}
 
-impl<T> fmt::Debug for Ptr<T> {
+impl<T: ?Sized> fmt::Debug for Ptr<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Ptr({:#x})", self.addr)
     }
@@ -505,11 +507,11 @@ plain!(u8, u16, u32, u64, i8, i16, i32, i64, f16, bf16, f32, f64);
 
 impl sealed::Sealed for usize {}
 impl sealed::Sealed for isize {}
-impl<T> sealed::Sealed for Ptr<T> {}
+impl<T: ?Sized> sealed::Sealed for Ptr<T> {}
 
 impl Param for usize {}
 impl Param for isize {}
-impl<T> Param for Ptr<T> {}
+impl<T: ?Sized> Param for Ptr<T> {}
 
 /// `x` as [`Module::launch`] takes a parameter: the address of its value, which the driver
 /// reads as it launches.

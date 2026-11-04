@@ -7,8 +7,8 @@ use kernite::DeviceStatic;
 use kernite::lang::{self, Fn, Value};
 
 use crate::rust::{
-    attrs, clashes, depends_on, error, flatten, host, hygienic, is_ident, is_punct, missing, never, parse, pick, quiet,
-    site, visibility, written_params,
+    attrs, checks, clashes, depends_on, error, flatten, host, hygienic, is_ident, is_punct, missing, never, parse,
+    pick, pointer, quiet, site, visibility, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -166,20 +166,21 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
         // Its name as written, before the colon.
         args.push(format!("::kernite_cuda::arg(&{})", param[colon - 1]));
         params.extend(param[..=colon].iter().cloned());
-        match &param[colon + 1..] {
-            [star, kind, pointee @ ..] if is_punct(star, '*') && (is_ident(kind, "const") || is_ident(kind, "mut")) => {
+        match pointer(&param[colon + 1..]) {
+            Some((_, to)) => {
                 params.extend(parse("::kernite_cuda::Ptr<"));
-                params.extend(host(pointee));
+                params.extend(host(to));
                 params.extend(parse(">"));
             }
-            ty => params.extend(host(ty)),
+            None => params.extend(host(&param[colon + 1..])),
         }
         params.extend(parse(","));
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, params))]);
     out.extend(parse("-> ::core::result::Result<(), ::kernite_cuda::Error>"));
     let how = if f.cooperative.is_some() { "launch_cooperative" } else { "launch" };
-    out.extend(body(f, launched, top, &never(f, top), |index| {
+    let never = format!("{}::core::unreachable!()", never(f, top));
+    out.extend(body(f, launched, top, checks(f, top, "::kernite_cuda::Ptr<T>"), &never, |index| {
         format!("unsafe {{ self.module.{how}({index}, $grid, &[{}]) }}", args.join(", "))
     }));
     out.extend(clashes);
@@ -223,7 +224,7 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
         "(&self, $threads: u32, $shared: u32) -> ::core::result::Result<u32, ::kernite_cuda::Error>",
         launched.is_some(),
     ));
-    out.extend(body(f, launched, top, "::core::unreachable!()", |index| {
+    out.extend(body(f, launched, top, TokenStream::new(), "::core::unreachable!()", |index| {
         format!("self.module.resident({index}, $threads, $shared)")
     }));
     out.extend(clashes);
@@ -269,11 +270,12 @@ fn blocks_name(f: &Fn) -> String {
 
 /// The body of a method of `f`, which does `then` with the index of the instance among
 /// `launched` its compile-time arguments pick, as an expression; or `never`, for a kernel that
-/// did not compile.
+/// did not compile. The `checks` come first.
 fn body(
     f: &Fn,
     launched: Option<&[Launched]>,
     top: &[TokenTree],
+    mut checks: TokenStream,
     never: &str,
     then: impl std::ops::Fn(&str) -> String,
 ) -> TokenStream {
@@ -285,5 +287,6 @@ fn body(
         }
         None => never.to_string(),
     };
-    [TokenTree::Group(Group::new(Delimiter::Brace, hygienic(&body, launched.is_some())))].into_iter().collect()
+    checks.extend(hygienic(&body, launched.is_some()));
+    [TokenTree::Group(Group::new(Delimiter::Brace, checks))].into_iter().collect()
 }

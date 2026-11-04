@@ -1,14 +1,14 @@
 //! What x86 kernels become in Rust: naked functions and their safety contracts, the launchers
 //! of cooperative ones, stubs for those that do not compile, and the module's statics.
 
-use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
+use proc_macro::{Delimiter, Group, Ident, TokenStream, TokenTree};
 
 use kernite::lang::{self, Fn, ItemKind, Value};
 use kernite::{Call, HostStatic, Naked, NativeInstance};
 
 use crate::rust::{
-    attrs, clashes, depends_on, hygienic, is_ident, is_punct, missing, never, parse, pick, signature, stub, visibility,
-    written_params,
+    attrs, checks, clashes, depends_on, hygienic, missing, never, parse, pick, pointer, probe, signature, site, stub,
+    visibility, words, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -53,9 +53,14 @@ pub(crate) fn naked(
         out.extend(contract(docs, named));
         out.extend(parse("#[unsafe(naked)]"));
         out.extend(signature(f, top));
-        let code =
-            asm(listing, &format!("{hidden}::C"), &callees(module, &one.calls, top), &reached(module, listing, top));
-        out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&code)))]);
+        let code = asm(
+            listing,
+            &format!("{hidden}::C"),
+            &callees(module, &one.calls, top),
+            &reached(module, listing, top),
+            probe(f, top),
+        );
+        out.extend([TokenTree::Group(Group::new(Delimiter::Brace, code))]);
         statics.push(("C".to_string(), listing));
     } else {
         // Each instance's parameters and their types: `f`'s, then a cooperative kernel's place. `f`
@@ -70,11 +75,8 @@ pub(crate) fn naked(
             params.push("_: &::kernite_cpu::Place".to_string());
         }
         // Its result, which `f` casts back if it is a pointer.
-        let (ret, cast) = f.ret.as_ref().map_or((String::new(), ""), |r| {
-            let (ty, cast) = erased(&top[r.tokens.clone()]);
-            (format!("-> {ty}"), cast)
-        });
-        let (mut arms, mut fns) = (vec![], String::new());
+        let ret = f.ret.as_ref().map_or(String::new(), |r| format!("-> {}", erased(&top[r.tokens.clone()]).0));
+        let (mut arms, mut fns) = (vec![], TokenStream::new());
         for (k, instance) in instances.iter().enumerate() {
             let (listing, name) = (&instance.naked, instance_name(&f.name, k));
             let code = asm(
@@ -82,11 +84,13 @@ pub(crate) fn naked(
                 &format!("{hidden}::I{k}C"),
                 &callees(module, &instance.calls, top),
                 &reached(module, listing, top),
+                None,
             );
-            fns += &format!(
-                "#[doc(hidden)]\n#[unsafe(naked)]\nunsafe extern \"sysv64\" fn {name}({}) {ret} {{ {code} }}\n",
+            fns.extend(parse(&format!(
+                "#[doc(hidden)]\n#[unsafe(naked)]\nunsafe extern \"sysv64\" fn {name}({}) {ret}",
                 params.join(", ")
-            );
+            )));
+            fns.extend([TokenTree::Group(Group::new(Delimiter::Brace, code))]);
             statics.push((format!("I{k}C"), listing));
             arms.push((instance.args.clone(), name));
         }
@@ -98,10 +102,17 @@ pub(crate) fn naked(
             out.extend(contract(docs, named));
             out.extend(parse("#[inline(always)]"));
             out.extend(signature(f, top));
-            let body = format!("unsafe {{ ({})({}) }}{cast}", pick(f, &arms, top), names.join(", "));
-            out.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&body)))]);
+            let mut body = checks(f, top, "*const T");
+            body.extend(parse(&format!("unsafe {{ ({})({}) }}", pick(f, &arms, top), names.join(", "))));
+            // The result is cast back at its type, for Rust to say there that the type has no size.
+            if let Some((_, to)) = words(f, top).pop().flatten() {
+                body.extend(parse("."));
+                body.extend([TokenTree::Ident(Ident::new("cast", to.resolved_at(site())))]);
+                body.extend(parse("()"));
+            }
+            out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
         }
-        out.extend(parse(&fns));
+        out.extend(fns);
     }
     let mut items = String::new();
     let mut aligns: Vec<u32> = statics.iter().flat_map(|(_, l)| l.consts.iter().map(|c| c.align)).collect();
@@ -129,11 +140,16 @@ pub(crate) fn naked(
 
 /// The body of a naked function whose code is `listing`'s, its constants the statics
 /// `{statics}0`, `{statics}1` and on, the functions it calls by the names `funcs`, and the
-/// module's memory it names, which `memory` gives by the name of each static.
-fn asm(listing: &Naked, statics: &str, funcs: &[String], memory: &[String]) -> String {
-    let mut asm = String::from("::core::arch::naked_asm!(");
+/// module's memory it names, which `memory` gives by the name of each static. The pointers a
+/// plain kernel takes are asked of in `probe`, a `const` operand, which a comment of the code
+/// names, as the code is all a naked function has.
+fn asm(listing: &Naked, statics: &str, funcs: &[String], memory: &[String], probe: Option<TokenStream>) -> TokenStream {
+    let mut asm = String::new();
     for line in &listing.code {
         asm += &format!("{line:?}, ");
+    }
+    if probe.is_some() {
+        asm += "\"# {__kernite_sized}\", ";
     }
     for i in 0..listing.consts.len() {
         asm += &format!("c{i} = sym {statics}{i}, ");
@@ -144,7 +160,14 @@ fn asm(listing: &Naked, statics: &str, funcs: &[String], memory: &[String]) -> S
     for name in memory {
         asm += &format!("{name} = sym {name}, ");
     }
-    asm + ")"
+    let mut args = parse(&asm);
+    if let Some(block) = probe {
+        args.extend(parse("__kernite_sized = const"));
+        args.extend([TokenTree::Group(Group::new(Delimiter::Brace, block))]);
+    }
+    let mut out = parse("::core::arch::naked_asm!");
+    out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, args))]);
+    out
 }
 
 /// The name by which the code of `listing`, of a kernel of `module`, names each static it
@@ -267,20 +290,12 @@ fn instance_name(function: &str, k: usize) -> String {
 }
 
 /// `ty`, a type of `f`'s, as an instance writes it, and what `f` writes after a value of it to pass
-/// it on or take it back: a pointer is `*const ()` or `*mut ()` to the instance, whatever it points
-/// to, and `.cast()` in `f`; a number is its name as written, `u64`, and nothing.
+/// it on: a pointer is `*const ()` or `*mut ()` to the instance, whatever it points to, and
+/// `.cast()` in `f`; a number is its name as written, `u64`, and nothing.
 fn erased(ty: &[TokenTree]) -> (String, &'static str) {
     match pointer(ty) {
-        Some(kind) => (format!("*{kind} ()"), ".cast()"),
+        Some((kind, _)) => (format!("*{kind} ()"), ".cast()"),
         None => (ty.iter().cloned().collect::<TokenStream>().to_string(), ""),
-    }
-}
-
-/// `"const"` or `"mut"` if `ty` is a pointer, `*const T` or `*mut T`.
-fn pointer(ty: &[TokenTree]) -> Option<&'static str> {
-    match ty {
-        [star, kind, ..] if is_punct(star, '*') => ["const", "mut"].into_iter().find(|k| is_ident(kind, k)),
-        _ => None,
     }
 }
 
@@ -352,7 +367,7 @@ fn grid_launcher(
     out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, params))]);
     out.extend(parse("->"));
     out.extend(result);
-    let body = match kernels {
+    let text = match kernels {
         Some(kernels) => {
             let kernel = match kernels {
                 [(args, kernel)] if args.is_empty() => kernel.clone(),
@@ -363,7 +378,7 @@ fn grid_launcher(
                 // Its name as written, before the colon.
                 let name = &param[colon - 1];
                 match pointer(&param[colon + 1..]) {
-                    Some(kind) => {
+                    Some((kind, _)) => {
                         let again = if kind == "mut" { "_mut" } else { "" };
                         addresses += &format!("let {name} = {name}.expose_provenance();\n");
                         args.push(format!("::core::ptr::with_exposed_provenance{again}({name})"));
@@ -377,9 +392,11 @@ fn grid_launcher(
                 args.join(", ")
             )
         }
-        None => never(f, top),
+        None => format!("{}::core::unreachable!()", never(f, top)),
     };
-    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, hygienic(&body, kernels.is_some())))]);
+    let mut body = checks(f, top, "*const T");
+    body.extend(hygienic(&text, kernels.is_some()));
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
     out.extend(clashes);
     out
 }

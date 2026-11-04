@@ -164,20 +164,140 @@ pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, 
     params.map(|p| (p.to_vec(), p.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type"))).collect()
 }
 
-/// `f` with a body that never runs, for a kernel that does not compile.
-pub(crate) fn stub(f: &Fn, top: &[TokenTree]) -> TokenStream {
-    let mut out = attrs(f, top);
-    out.extend(signature(f, top));
-    out.extend(parse(&format!("{{ {} }}", never(f, top))));
+/// `"const"` or `"mut"`, and the tokens of the type it points to, if `ty` is a pointer, `*const T`
+/// or `*mut T`. The macros read a pointer here and nowhere else.
+pub(crate) fn pointer(ty: &[TokenTree]) -> Option<(&'static str, &[TokenTree])> {
+    match ty {
+        [star, kind, to @ ..] if is_punct(star, '*') => {
+            ["const", "mut"].into_iter().find(|k| is_ident(kind, k)).map(|kind| (kind, to))
+        }
+        _ => None,
+    }
+}
+
+/// The name of the function the macros write into a body to ask Rust whether a pointer has a size.
+const THIN: &str = "__kernite_thin";
+
+/// For each of `f`'s parameters, and last for its result: `"const"` or `"mut"`, and where the type
+/// it points to begins, if it is a pointer of one word, `*const T` or `*mut T`. The language says
+/// which: a pointer to a slice, a `str` or a `dyn` has two words, and is its error alone, which
+/// Rust is not asked of, for it would say the same twice.
+pub(crate) fn words(f: &Fn, top: &[TokenTree]) -> Vec<Option<(&'static str, Span)>> {
+    let word = |ty: &[TokenTree]| {
+        let (kind, to) = pointer(ty)?;
+        let one = lex(ty).0.is_ok_and(|trees| lang::pointer(&lang::text(&trees)) == Ok(true));
+        one.then(|| (kind, to[0].span()))
+    };
+    let params = written_params(f, top).into_iter().map(|(param, colon)| word(&param[colon + 1..]));
+    params.chain([f.ret.as_ref().and_then(|r| word(&top[r.tokens.clone()]))]).collect()
+}
+
+/// What asks Rust whether each pointer of one word `f` takes has a size, in a body that has the
+/// parameters by their names as written: a function that takes a pointer as `ptr` writes it, and
+/// a call of it on each, [`asks`] says how. Nothing if `f` takes none.
+pub(crate) fn checks(f: &Fn, top: &[TokenTree], ptr: &str) -> TokenStream {
+    let names: Vec<TokenStream> =
+        written_params(f, top).iter().map(|(param, colon)| param[colon - 1].clone().into()).collect();
+    asks(&words(f, top), ptr, &names)
+}
+
+/// The block of a `const` operand of a naked kernel's own `naked_asm!`, which asks Rust whether
+/// each pointer of one word it takes or gives back has a size: a closure that Rust checks and
+/// never runs, which calls the kernel on its parameters, and asks of them and of what it gives
+/// back. Nothing if the kernel has no such pointer. A naked function has no body to write the
+/// questions in, and no name of the kernel's finds the closure's locals.
+pub(crate) fn probe(f: &Fn, top: &[TokenTree]) -> Option<TokenStream> {
+    let n = f.params.len();
+    let words = words(f, top);
+    // The parameters are `__0`, `__1` and on. Rust says of a type that is not well formed wherever a
+    // value of it is, so a pointer's is located at the type it points to, as Rust says it there.
+    let local = |i: usize| -> TokenTree {
+        let at = words[i].map_or_else(Span::mixed_site, |(_, to)| to.resolved_at(Span::mixed_site()));
+        Ident::new(&format!("__{i}"), at).into()
+    };
+    let mut values: Vec<TokenStream> = (0..n).map(|i| local(i).into()).collect();
+    values.push(hygienic(&format!("$__{n}()"), true));
+    let calls = asks(&words, "*const T", &values);
+    if calls.is_empty() {
+        return None;
+    }
+    let args: TokenStream = (0..n).flat_map(|i| [local(i), Punct::new(',', Spacing::Alone).into()]).collect();
+    // `__n` calls the kernel on them, in a closure of its own, and first, for Rust to know the types
+    // of the parameters when it is asked, and for a kernel that never returns to leave no question
+    // unreachable.
+    let mut call = parse(&top[f.head.end + 1].to_string());
+    call.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, args.clone()))]);
+    let mut body = hygienic(&format!("let $__{n} = || unsafe"), true);
+    body.extend([TokenTree::Group(Group::new(Delimiter::Brace, call))]);
+    body.extend(parse(";"));
+    body.extend(calls);
+    let mut block = parse("let _ = |");
+    block.extend(args);
+    block.extend(parse("|"));
+    block.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
+    block.extend(parse("; 0"));
+    Some(block)
+}
+
+/// A function that takes a pointer as `ptr` writes it, and a call of it on each of `values` that is
+/// a pointer of one word, as `words` says: the values of a function's parameters and, last, of its
+/// result. Rust cannot call it on a pointer to a type with no size, and says so, that its size cannot
+/// be known. Nothing if there is no call.
+fn asks(words: &[Option<(&str, Span)>], ptr: &str, values: &[TokenStream]) -> TokenStream {
+    let mut calls = TokenStream::new();
+    for (value, word) in values.iter().zip(words) {
+        if let Some((_, to)) = word {
+            calls.extend(thin(value.clone(), *to));
+        }
+    }
+    if calls.is_empty() {
+        return calls;
+    }
+    // The function and its calls are of one span, for Rust to find the one by the other.
+    let mut out = respan(parse(&format!("#[inline(always)] fn {THIN}<T>(_: {ptr}) {{}}")), Span::mixed_site());
+    out.extend(calls);
     out
 }
 
-/// What a function of `f`'s parameters does when it never runs, for a kernel that does not
-/// compile: it uses each parameter, by its name as written, which Rust would find unused.
+/// `__kernite_thin(value);` with each token located at `to`, where the type `value` points to
+/// begins, for Rust to say there that the type has no size. `value` is resolved as it is written;
+/// the function is the macro's, which no name of the kernel's finds.
+fn thin(value: TokenStream, to: Span) -> TokenStream {
+    let value = value.into_iter().map(|mut t| {
+        t.set_span(to.resolved_at(t.span()));
+        t
+    });
+    let at = to.resolved_at(Span::mixed_site());
+    let mut args = Group::new(Delimiter::Parenthesis, value.collect());
+    args.set_span(at);
+    let mut end = Punct::new(';', Spacing::Alone);
+    end.set_span(at);
+    [TokenTree::Ident(Ident::new(THIN, at)), args.into(), end.into()].into_iter().collect()
+}
+
+/// `f` with a body that never runs, for a kernel that does not compile. It asks Rust whether each
+/// pointer `f` takes has a size, and gives back one by `dangling`, which asks at its type, if `f`
+/// returns a pointer.
+pub(crate) fn stub(f: &Fn, top: &[TokenTree]) -> TokenStream {
+    let mut out = attrs(f, top);
+    out.extend(signature(f, top));
+    let mut body = checks(f, top, "*const T");
+    body.extend(parse(&never(f, top)));
+    body.extend(match words(f, top).pop().flatten() {
+        Some((kind, to)) => {
+            let mutable = if kind == "mut" { "_mut" } else { "" };
+            respan(parse(&format!("::core::ptr::dangling{mutable}()")), to.resolved_at(site()))
+        }
+        None => parse("::core::unreachable!()"),
+    });
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
+    out
+}
+
+/// What a body of `f`'s parameters does when it never runs, for a kernel that does not compile: it
+/// uses each parameter, by its name as written, which Rust would find unused.
 pub(crate) fn never(f: &Fn, top: &[TokenTree]) -> String {
-    let uses: String =
-        written_params(f, top).iter().map(|(param, colon)| format!("let _ = {};", param[colon - 1])).collect();
-    uses + "::core::unreachable!()"
+    written_params(f, top).iter().map(|(param, colon)| format!("let _ = {};", param[colon - 1])).collect()
 }
 
 /// `f`'s attributes as written, but `#[instances(..)]` and `#[cooperative]`, which Rust does not
