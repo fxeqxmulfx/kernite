@@ -606,7 +606,7 @@ fn a_module_s_items_come_out_in_order() {
     else {
         panic!("{:?}", out.items);
     };
-    assert_eq!(a, &HostStatic { elem: "[u32; 4]".into(), size: 0, len: 1, align: 1, init: vec![] });
+    assert_eq!(a.code, HostStatic { elem: "[u32; 4]".into(), size: 0, len: 1, align: 1, init: vec![] });
     assert_eq!(u.at(src), "4:25: Echo holds no 13");
     assert!(h.is_empty() && c.at(src).starts_with("6:8: "));
     let args: Vec<_> = tile.instances.iter().map(|i| i.args.clone()).collect();
@@ -638,10 +638,58 @@ fn a_module_s_items_come_out_in_order() {
         panic!("{:?}", out.items);
     };
     assert_eq!(t.at(src), "1:25: Echo holds no 13");
-    assert_eq!(b, &DeviceStatic { symbol: "B".into(), host: "u32".into() });
+    assert_eq!(b.code, DeviceStatic { symbol: "B".into(), host: "u32".into() });
     let device = out.device.unwrap();
     let made: Vec<_> = device.text.lines().filter(|line| !line.starts_with("callee ")).collect();
     assert_eq!(made, ["static B", "new g: g []", "memory B", "end", "new f::<1>: f [1]", "memory B", "end"]);
+}
+
+/// Each item has the consts it read, by name, each once, in the module's order, and no other's. A
+/// kernel's are those of its body, of a helper it calls, and of the `#[instances(..)]` it lists, in
+/// whichever of its instances read them, itself or through other consts: instances that read one
+/// const give it once, and the consts of them all come in the module's order, not in the order the
+/// instances read them. A function it calls by name has its own, and so has an `extern "ptx-func"`
+/// function, which reads those of a helper it calls. A static's are those of its type and of what
+/// it holds. A helper has none, for the kernel or function that calls it reads what it reads.
+#[test]
+fn an_item_has_the_consts_it_read() {
+    let src = "const A: u64 = 1;\n\
+               const B: u64 = A + 1;\n\
+               const C: u64 = 3;\n\
+               const D: u64 = 4;\n\
+               const E: usize = 2;\n\
+               const F: u32 = 6;\n\
+               const G: u64 = 7;\n\
+               const L: u64 = 2;\n\
+               static S: global<[u32; E]>;\n\
+               static T: global<u32> = F;\n\
+               fn help(x: gpr) { add(x, C); }\n\
+               unsafe extern \"sysv64\" fn direct(x: u64) { add(x, B); }\n\
+               unsafe extern \"sysv64\" fn through(x: u64) { help(x); }\n\
+               #[instances(1, 2)] unsafe extern \"sysv64\" fn each<const N: u64>(x: u64) {\n\
+               if N == 2 { add(x, D); }\n\
+               }\n\
+               #[instances(1, 2)] unsafe extern \"sysv64\" fn both<const N: u64>(x: u64) {\n\
+               add(x, D);\n\
+               if N == 2 { add(x, C); }\n\
+               }\n\
+               #[instances(L)] unsafe extern \"sysv64\" fn listed<const N: u64>(x: u64) { add(x, N); }\n\
+               unsafe extern \"sysv64\" fn none(x: u64) { add(x, 1); }";
+    let read = |src: &str| echoed(src).items.iter().map(|item| item.consts().join(" ")).collect::<Vec<_>>();
+    assert_eq!(read(src), ["", "", "", "", "", "", "", "", "E", "F", "", "A B", "C", "D", "C D", "L", ""]);
+    let src = "const A: u32 = 1;\n\
+               const B: u32 = 2;\n\
+               const C: usize = 4;\n\
+               const D: u32 = 8;\n\
+               static S: global<[u32; C]>;\n\
+               fn aid(x: u32) { add(x, D); }\n\
+               extern \"ptx-func\" fn f(x: u32) { add(x, B); aid(x); }\n\
+               unsafe extern \"ptx-kernel\" fn g(x: u32) { add(x, A); call(f, x); }\n\
+               #[instances(1, 2)] unsafe extern \"ptx-kernel\" fn h<const N: u32>(x: u32) {\n\
+               add(x, B);\n\
+               if N == 2 { add(x, A); }\n\
+               }";
+    assert_eq!(read(src), ["", "", "", "", "C", "", "B D", "A", "A B"]);
 }
 
 /// A const the module is given that an item of its own is named as too is left out, and the item
@@ -918,7 +966,7 @@ fn the_module_s_error_goes_at_its_first_gpu_item() {
     let src = "static A: global<u32>;";
     let out = echoed(src);
     let [ItemOut::DeviceStatic(Ok(a))] = &out.items[..] else { panic!("{:?}", out.items) };
-    assert_eq!(a, &DeviceStatic { symbol: "A".into(), host: "u32".into() });
+    assert_eq!(a.code, DeviceStatic { symbol: "A".into(), host: "u32".into() });
     assert_eq!(out.device.unwrap().error.map(|e| e.at(src)), Some("1:8: nothing to load".into()));
 }
 

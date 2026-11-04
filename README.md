@@ -77,6 +77,23 @@ and holds `pub` consts of what kernels read, numbers, floats, `bool`s, arrays of
 module that takes them may not have a const, a function or a static of its own of one of their names. Each const,
 function and static of a module has a name of its own.
 
+A function or a static that `cfg` leaves out says nothing, as Rust says nothing of a function it leaves out. A macro
+runs before Rust knows which `cfg` holds, so kernite compiles each one, and puts each error it finds in one under the
+same `#[cfg(..)]` or `#[cfg_attr(.., cfg(..))]`: a kernel that does not compile, or is not `unsafe`, a helper, a static.
+Where `cfg` leaves them out, the crate builds without a word; where it keeps them, each error is said where it is. A
+const is named the same way: Rust never sees a kernel read it, so kernite names it for Rust under the `cfg` of each item
+that reads it. A kernel reads a const in its body, in its `#[instances(..)]` or in a helper it calls; an
+`extern "ptx-func"` function reads one in its body; a static, in its type or in what it holds. A helper has no consts of
+its own: what it reads is named under the `cfg` of the kernel or function that calls it. A const that `cfg` leaves out
+with every item that reads it is not said of, and one that `cfg` keeps and only items `cfg` leaves out read is unused
+to Rust, which says so as it does of any const that nothing reads.
+
+kernite reads every item before Rust knows which `cfg` holds, as Rust parses every item before it does, so an item it
+cannot read is said whatever `cfg` holds, as Rust says a syntax error in a function it leaves out: the head of a
+function, as `fn k<T>()`, rests on no other item. What rests on all the items together is said whatever `cfg` leaves
+out: a name that two items share, though each is under a `cfg` the other is not; and GPU kernels that no one PTX module
+can hold, for each sets the module's `.version` and `.target`.
+
 The x86 target knows every instruction of x86-64-v3, in each form `llvm-mc` takes, [`forms`](crates/x86/src/forms.rs):
 x86-64's own on integers of 8 to 64 bits, SSE's to SSE4.2's as AVX writes them, `vaddps` and not `addps`, and AVX's,
 AVX2's, FMA's, F16C's, BMI1's, BMI2's, LZCNT's, POPCNT's and MOVBE's. It leaves out the stack's, which is the frame's,
@@ -200,7 +217,9 @@ An `extern "ptx-kernel"` function is compiled to PTX. The module's kernels are o
 `Kernels::load` hands to the CUDA driver; each kernel is then a method that launches it on a grid.
 [`kernite-cuda`](crates/cuda/src/lib.rs) is the driver, opened when a GPU is asked for, so that a program built with
 GPU kernels still runs where there is none. A crate with a module of GPU kernels needs a dependency named
-`kernite-cuda`, not renamed in `Cargo.toml`. kernite says at the module when it has none.
+`kernite-cuda`, not renamed in `Cargo.toml`, for the GPU items that `cfg` keeps: kernite says at the module when it has
+none and one of them is kept. A feature can bring the crate and keep them, `cuda = ["dep:kernite-cuda"]`, and the crate
+builds without the feature.
 
 ```rust
 #[kernite_macros::kernels]

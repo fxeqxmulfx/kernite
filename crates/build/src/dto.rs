@@ -90,9 +90,6 @@ pub struct ModuleOut {
     pub owner: Option<Error>,
     /// What each item of `module` is, in order.
     pub items: Vec<ItemOut>,
-    /// The consts something read, by their index among `module`'s items, in order, each once.
-    /// Rust sees none of these reads, so it would find them unused.
-    pub read: Vec<usize>,
     /// Each instance written of each function the process runs, by name, `tile::<4>`, and its
     /// listing.
     pub listings: Vec<(String, String)>,
@@ -107,11 +104,12 @@ pub enum ItemOut {
     Rust,
     /// A const given, Rust's where its module is.
     Given,
-    /// A static of the process's memory, as Rust lays it out, or why it is none.
-    HostStatic(Result<HostStatic, Error>),
-    /// A static of the GPU's memory, as the host reads it, or why it is none. The module the GPU
-    /// loads has it.
-    DeviceStatic(Result<DeviceStatic, Error>),
+    /// A static of the process's memory, as Rust lays it out, and the consts it read; or why it
+    /// is none.
+    HostStatic(Result<Compiled<HostStatic>, Error>),
+    /// A static of the GPU's memory, as the host reads it, and the consts it read; or why it is
+    /// none. The module the GPU loads has it.
+    DeviceStatic(Result<Compiled<DeviceStatic>, Error>),
     /// A helper, and what is wrong with it whether it is called or not: its body, its
     /// `#[instances(..)]`, then its `#[cooperative]`.
     Helper(Vec<Error>),
@@ -123,6 +121,24 @@ pub enum ItemOut {
     Device(DeviceFnOut),
 }
 
+impl ItemOut {
+    /// The consts of its module that the item read, by name, each once, in the module's order: a
+    /// kernel's, in its body, in its `#[instances(..)]` or in a helper it calls, and an
+    /// `extern "ptx-func"` function's, in its body, whichever of the instances of either read
+    /// them; a static's, in its type or what it holds. A helper has none of its own: the kernel
+    /// or function that calls it read what it reads. Rust never sees these reads, so whatever
+    /// writes the item out for Rust says they happened, where the item is.
+    pub fn consts(&self) -> &[String] {
+        match self {
+            ItemOut::HostStatic(Ok(s)) => &s.consts,
+            ItemOut::DeviceStatic(Ok(s)) => &s.consts,
+            ItemOut::Native(k) => &k.consts,
+            ItemOut::Device(k) => &k.consts,
+            _ => &[],
+        }
+    }
+}
+
 /// A function the process runs, compiled.
 #[derive(Debug)]
 pub struct NativeOut {
@@ -132,6 +148,8 @@ pub struct NativeOut {
     pub said: Option<Error>,
     /// Each instance that compiled, in order.
     pub instances: Vec<NativeInstance>,
+    /// The consts the instances that compiled read, by name, each once, in the module's order.
+    pub consts: Vec<String>,
     /// Whether Rust gets its code: it is an `unsafe fn`, its attributes hold, each of its
     /// instances compiled, and it reaches the statics it names.
     pub written: bool,
@@ -176,6 +194,8 @@ pub struct DeviceFnOut {
     pub said: Option<Error>,
     /// Why each instance that did not compile did not, in order.
     pub errors: Vec<Error>,
+    /// The consts the instances that compiled read, by name, each once, in the module's order.
+    pub consts: Vec<String>,
     /// How Rust launches it, if it is a kernel; none for a function the kernels call.
     pub launcher: Option<Launcher>,
 }

@@ -33,7 +33,9 @@
 //!   `kernite_cuda::Grid` and the kernel's parameters, a pointer as the `kernite_cuda::Ptr` a
 //!   buffer on the GPU gives, and an `f16` or a `bf16` as kernite-cuda's, Rust having neither.
 //!   A crate with a module of GPU kernels needs a dependency named `kernite-cuda` for these, not
-//!   renamed in `Cargo.toml`, and the error is at the module when it has none.
+//!   renamed in `Cargo.toml`, and the error is at the module when it has none and `cfg` keeps one
+//!   of its GPU items: a feature can bring `kernite-cuda` and keep them, and the crate builds
+//!   without it.
 //! - An `extern "ptx-func" fn` is a `.func` in `PTX`, which the module's GPU kernels and
 //!   functions call, itself among them, as `call(r, gcd, (a, b))` does. It takes and
 //!   returns PTX's types, `u32` or `f16x2`, or never returns, `-> !`, and leaves nothing
@@ -57,9 +59,11 @@
 //! - A function without an ABI is a helper, inlined where a kernel calls it, and leaves
 //!   nothing behind. Constants and every other item but a `static` stay as written, for Rust
 //!   to use as well.
-//!   A constant a kernel reads counts as used, as it would if Rust had seen the read: only one
-//!   that nothing reads is `dead_code`. Rust has no `bf16`, and its `f16` is unstable, so a
-//!   constant of either goes in the kernel that reads it, where `const` is the language's alone.
+//!   A constant a kernel reads counts as used, as it would if Rust had seen the read, under the
+//!   `cfg` of each item that reads it, a helper's under that of the kernel that calls it: only
+//!   one that nothing reads, or that only what `cfg` leaves out reads, is `dead_code`. Rust has
+//!   no `bf16`, and its `f16` is unstable, so a constant of either goes in the kernel that
+//!   reads it, where `const` is the language's alone.
 //!
 //! ```ignore
 //! #[kernite_macros::kernels]
@@ -197,7 +201,9 @@
 //! memory of the module's it names while it runs, as an x86 kernel's safety contract says, by
 //! name, of the statics it and the functions it calls name, whether it calls them by name or
 //! at an address. One that does not compile is a `compile_error!` where the trouble is, beside
-//! a stub of its signature or its launcher, so that its callers are not errors as well.
+//! a stub of its signature or its launcher, so that its callers are not errors as well. Both
+//! are under the kernel's `cfg`, as a helper's errors and a static's are under theirs: what
+//! `cfg` leaves out says nothing.
 
 extern crate proc_macro;
 

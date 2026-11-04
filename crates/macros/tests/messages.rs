@@ -102,8 +102,18 @@ fn cargo_out(command: &[&str], dir: &Path) -> Output {
 
 /// That Cargo builds fixture `name` without a word.
 fn builds_quietly(name: &str) {
-    let (built, said) = cargo(&["build"], name);
-    assert!(built && said.is_empty(), "fixtures/{name}.rs: built {built}, and Cargo said:\n{}", said.join("\n"));
+    builds_quietly_in(&["build"], name, &written(name));
+}
+
+/// That Cargo does `command`, `["build", "--features", "cuda"]` say, in `dir`, where fixture `name` is
+/// written, without a word.
+fn builds_quietly_in(command: &[&str], name: &str, dir: &Path) {
+    let (built, said) = cargo_in(command, dir);
+    assert!(
+        built && said.is_empty(),
+        "fixtures/{name}.rs: {command:?} built {built}, and Cargo said:\n{}",
+        said.join("\n")
+    );
 }
 
 /// That Cargo builds fixture `name` without a word, and the tests in it pass, its own and its doc
@@ -137,8 +147,14 @@ fn documented(name: &str, module: &str, start: &str) -> impl Fn(&str) -> Vec<Str
 
 /// That Cargo does not build fixture `name`, and says `lines`, in that order, and nothing else.
 fn refuses(name: &str, lines: &[&str]) {
-    let (built, said) = cargo(&["build"], name);
-    assert!(!built, "fixtures/{name}.rs built");
+    refuses_by(&["build"], name, lines);
+}
+
+/// That Cargo does not do `command`, `["build", "--features", "cpu"]` say, for fixture `name`, and says
+/// `lines`, in that order, and nothing else.
+fn refuses_by(command: &[&str], name: &str, lines: &[&str]) {
+    let (done, said) = cargo(command, name);
+    assert!(!done, "fixtures/{name}.rs: {command:?} did it");
     assert_eq!(said, lines, "fixtures/{name}.rs: Cargo said:\n{}", said.join("\n"));
 }
 
@@ -527,6 +543,147 @@ fn a_kernel_that_does_not_compile_leaves_a_stub() {
             "error: could not compile `stubs` (lib) due to 6 previous errors",
         ],
     );
+}
+
+/// A kernel, a helper or a static that `cfg` leaves out says nothing of what is wrong with it, as
+/// Rust says nothing of a function it leaves out: the crate builds without a word, under
+/// `deny(warnings)`, and with the feature that keeps them each error is said where it is, in its
+/// words, as for any kernel. The fixture leaves them out by `cfg`, by a `cfg` written raw, by a
+/// `cfg_attr(..)` and by one in another, and by two `cfg`s, the second of which never holds. It
+/// ends with consts under the feature that a kernel, a function and the length of a static read,
+/// each under it too; with one that a helper reads, which has no `cfg`, for the kernel that calls
+/// it, which has; and with a const a module of consts gives that only a kernel under it reads. Rust
+/// never sees a kernel read them, so kernite names each under the `cfg` of the item that reads it,
+/// a helper's under its caller's, and says nothing of it where that item is not, nor, with the
+/// feature, any error of its own.
+#[test]
+fn what_cfg_leaves_out_says_nothing() {
+    builds_quietly("configured");
+    refuses_by(
+        &["build", "--features", "cpu"],
+        "configured",
+        &[
+            // The x86 kernels: `narrow`, `undefined`, `unknown`, `abi`, `safe`, each instance of `tile`,
+            // `plain`, `together`, `taken`, the helper `help`, the static `EMPTY`, `conditional` and `nested`; and
+            // nothing of `never`, which two `cfg`s leave out whatever the feature says.
+            "src/lib.rs:17:45: error: SysV leaves the high bits of a `u32` as they were; take a usize or a u64",
+            "src/lib.rs:28:23: error: `y` is not defined",
+            "src/lib.rs:34:9: error: x86 has no instruction `frobnicate` that kernite knows",
+            "src/lib.rs:39:23: error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \
+             \"ptx-kernel\"` ones, for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \
+             \"C\"` is none of these",
+            "src/lib.rs:45:28: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
+            "src/lib.rs:53:13: error: in `tile::<1>`: `y` is not defined",
+            "src/lib.rs:53:13: error: in `tile::<2>`: `y` is not defined",
+            "src/lib.rs:58:7: error: `plain` takes no compile-time arguments, so it is compiled once, with no \
+             `#[instances(..)]`",
+            "src/lib.rs:67:23: error: `y` is not defined",
+            "src/lib.rs:75:47: error: `grid` names a parameter of the launcher as well",
+            "src/lib.rs:82:9: error: a kernel has no `while`: loops are labels and jumps, and `for` is unrolled",
+            "src/lib.rs:87:23: error: `global<[u32; 0]>` holds nothing",
+            "src/lib.rs:92:23: error: `y` is not defined",
+            "src/lib.rs:98:23: error: `y` is not defined",
+            // The GPU kernels in the same order, the function `func` among them; then the compile-time arguments
+            // of `taken` and `counted` named as a parameter of a launcher, which the module says after the rest.
+            "src/lib.rs:119:28: error: `y` is not defined",
+            "src/lib.rs:125:20: error: PTX has no instruction `frobnicate` that kernite knows",
+            "src/lib.rs:130:32: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
+            "src/lib.rs:138:28: error: in `tile::<1>`: `y` is not defined",
+            "src/lib.rs:138:28: error: in `tile::<2>`: `y` is not defined",
+            "src/lib.rs:143:7: error: `plain` takes no compile-time arguments, so it is compiled once, with no \
+             `#[instances(..)]`",
+            "src/lib.rs:152:28: error: `y` is not defined",
+            "src/lib.rs:176:28: error: `y` is not defined",
+            "src/lib.rs:181:23: error: `global<[u32; 0]>` holds nothing",
+            "src/lib.rs:186:28: error: `y` is not defined",
+            "src/lib.rs:159:51: error: `grid` names a parameter of the launcher as well",
+            "src/lib.rs:169:53: error: `threads` names a parameter of `counted_blocks` as well",
+            // A cooperative kernel whose method `k_blocks` has the name of a kernel of the module.
+            "src/lib.rs:195:7: error: `#[cooperative]` gives `Kernels` a method `k_blocks`, which says how many \
+             blocks a grid of `k` has at most, and a kernel or a static of the module is named `k_blocks` as well",
+            "error: could not compile `configured` (lib) due to 27 previous errors",
+        ],
+    );
+}
+
+/// What rests on all of a module's items together is said as it is for a module that has no `cfg`,
+/// and so is an item kernite cannot read, the head of a function, which rests on no other: kernite
+/// reads every item before it knows which `cfg` holds, as Rust parses every item before it does.
+/// Each case in the fixture has a function that `cfg` leaves out.
+#[test]
+fn what_rests_on_all_the_items_is_said_whatever_cfg_leaves_out() {
+    // The modules in order: `head`, `twice`, `blocks`, and `ptx`, whose error is at its first
+    // kernel, which is left out.
+    refuses(
+        "configured_module",
+        &[
+            "src/lib.rs:9:43: error: a function's generics are values, as in `<const N: usize>`",
+            "src/lib.rs:23:35: error: `k` names another function of the module as well",
+            "src/lib.rs:31:7: error: `#[cooperative]` gives `Kernels` a method `k_blocks`, which says how many \
+             blocks a grid of `k` has at most, and a kernel or a static of the module is named `k_blocks` as well",
+            "src/lib.rs:42:39: error: `shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and \
+             `tanh.approx.f32` in `new` needs sm_75 and PTX 7.0: no module has both",
+            "error: could not compile `configured_module` (lib) due to 4 previous errors",
+        ],
+    );
+}
+
+/// A const `cfg` keeps that only what `cfg` leaves out reads is unused to Rust, which says so, as it
+/// does of a const that nothing reads; with the kernel there it is used, and Rust says nothing.
+#[test]
+fn rust_finds_a_const_unused_that_only_what_cfg_leaves_out_reads() {
+    let (built, said) = cargo(&["build"], "configured_unused");
+    assert!(built, "fixtures/configured_unused.rs did not build");
+    assert_eq!(said, ["src/lib.rs:6:11: warning: constant `N` is never used"]);
+    builds_quietly_in(&["build", "--features", "cpu"], "configured_unused", &written("configured_unused"));
+}
+
+/// A module of GPU kernels needs `kernite-cuda` where `cfg` keeps one of its GPU items, and not
+/// where it leaves out all: a feature that brings the crate, `cuda = ["dep:kernite-cuda"]`, can keep
+/// them, and the crate builds without the feature, without a word, under `deny(warnings)`, and with
+/// it. A kernel, a function that kernels call and a static each make a module of their own, under
+/// `cfg` and under `cfg_attr(.., cfg(..))`.
+#[test]
+fn a_feature_that_brings_kernite_cuda_can_keep_the_gpu_items() {
+    let optional = [("kernite-cuda = {", "kernite-cuda = { optional = true,")];
+    let dir = edited("configured_cuda", &optional);
+    builds_quietly_in(&["build"], "configured_cuda", &dir);
+    builds_quietly_in(&["build", "--features", "cuda"], "configured_cuda", &dir);
+}
+
+/// A crate without `kernite-cuda` is told so once, where a module of GPU kernels is, and only where
+/// `cfg` keeps one of its GPU items, which the features say. Each module of the fixture has its
+/// GPU items under `a` and `b` in a form `cfg` takes them by, and the table has the modules that
+/// are told so, for each set of features: a kernel under `a`; a kernel under `a`, written raw, and a
+/// function under `b`; a kernel under two `cfg`s; a kernel under `cfg_attr(a, cfg(b))`, left out
+/// only where `a` holds and `b` does not; one under a `cfg_attr(..)` in another, left out only where
+/// both hold; a static under `b`; a kernel `cfg` does not touch and one under `a`; a GPU kernel
+/// under `a` and an x86 kernel under `b`, which needs no crate.
+#[test]
+fn a_module_needs_kernite_cuda_where_cfg_keeps_one_of_its_gpu_items() {
+    let dir = edited("configured_gpu", &[("kernite-cuda =", "# kernite-cuda =")]);
+    let [just_a, a_or_b, a_and_b, a_then_b, nested, static_b, always, mixed] = [6, 15, 31, 41, 51, 60, 68, 81];
+    let cases: [(&[&str], &[u32]); 4] = [
+        (&["build"], &[a_then_b, nested, always]),
+        (&["build", "--features", "a"], &[just_a, a_or_b, nested, always, mixed]),
+        (&["build", "--features", "b"], &[a_or_b, a_then_b, nested, static_b, always]),
+        (&["build", "--features", "a,b"], &[just_a, a_or_b, a_and_b, a_then_b, static_b, always, mixed]),
+    ];
+    for (command, modules) in cases {
+        let (built, said) = cargo_in(command, &dir);
+        assert!(!built, "fixtures/configured_gpu.rs: {command:?} built");
+        let mut lines: Vec<String> = modules
+            .iter()
+            .map(|line| {
+                format!(
+                    "src/lib.rs:{line}:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
+                     which this crate does not have"
+                )
+            })
+            .collect();
+        lines.push(format!("error: could not compile `configured_gpu` (lib) due to {} previous errors", modules.len()));
+        assert_eq!(said, lines, "fixtures/configured_gpu.rs: {command:?}: Cargo said:\n{}", said.join("\n"));
+    }
 }
 
 /// A module of kernels takes its consts by any path Rust has, and Rust sees them in it, those of

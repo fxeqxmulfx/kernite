@@ -7,8 +7,8 @@ use kernite::DeviceStatic;
 use kernite::lang::{self, Fn, Value};
 
 use crate::rust::{
-    attrs, checks, clashes, depends_on, error, flatten, host, hygienic, is_ident, is_punct, missing, never, parse,
-    pick, pointer, quiet, site, visibility, written_params,
+    attrs, carried, cfg_any, checks, clashes, depends_on, error_under, host, hygienic, missing, never, parse, pick,
+    pointer, quiet, site, visibility, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -31,7 +31,9 @@ type Launched = (Vec<Value>, usize);
 /// and each cooperative kernel has one that says how many blocks its grid has at most, unless
 /// a kernel or a static has that name, which is an error where `at` says. A crate without
 /// `kernite-cuda` has `PTX` empty and a `Kernels` that is the error, said once, at the module:
-/// nothing else is said of the code that loads it or launches a kernel.
+/// nothing else is said of the code that loads it or launches a kernel. Both are there when any of
+/// the module's GPU items is, `on_gpu` their conditions, each as `condition` has it: a feature that
+/// brings `kernite-cuda` and keeps them lets the crate build without the feature.
 pub(crate) fn gpu(
     launchers: &[(&Fn, Option<&[Launched]>)],
     symbols: &[String],
@@ -39,9 +41,14 @@ pub(crate) fn gpu(
     ptx: &str,
     top: &[TokenTree],
     at: &dyn std::ops::Fn(lang::Span) -> Span,
+    on_gpu: &[Option<TokenStream>],
 ) -> TokenStream {
     if !depends_on(CUDA) {
-        let mut out = parse("pub const PTX: &str = \"\"; pub type Kernels =");
+        let gate = cfg_any(on_gpu);
+        let mut out = gate.clone();
+        out.extend(parse("pub const PTX: &str = \"\";"));
+        out.extend(gate);
+        out.extend(parse("pub type Kernels ="));
         out.extend(missing(site(), "a module of GPU kernels", CUDA));
         out.extend(parse(";"));
         return out;
@@ -83,7 +90,8 @@ pub(crate) fn gpu(
                  at most, and a kernel or a static of the module is named `{name}` as well",
                 f.name
             );
-            errors.extend(error(at(c.span), &message));
+            // The method would be under the kernel's `cfg`, and so is the error of its name.
+            errors.extend(error_under(&carried(attrs(f, top), false), at(c.span), &message));
             continue;
         }
         methods.extend(blocks(f, *launched, top));
@@ -206,13 +214,7 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
          /// runs them all together.",
         f.name
     ));
-    for attr in attrs(f, top).into_iter().collect::<Vec<_>>().chunks(2) {
-        let [hash, TokenTree::Group(group)] = attr else { unreachable!("an attribute is `#` and brackets") };
-        let Some(meta) = carried(flatten(group.stream())) else { continue };
-        let mut kept = Group::new(Delimiter::Bracket, meta.into_iter().collect());
-        kept.set_span(group.span());
-        out.extend([hash.clone(), kept.into()]);
-    }
+    out.extend(carried(attrs(f, top), true));
     // Its visibility, then `fn`, its name and the generics of `f`: the name and the generics
     // where `f` has its own, for an error or a reader to find, but of the macro's span.
     out.extend(visibility(f, top).iter().cloned());
@@ -229,38 +231,6 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
     }));
     out.extend(clashes);
     out
-}
-
-/// What the method of `blocks` keeps of an attribute of a kernel's, `meta` the tokens in its
-/// brackets; `None` if nothing. Of a `cfg_attr(..)`, it keeps the condition and what it keeps of
-/// the list, or nothing if that is nothing: a `cfg_attr(..)` of a condition alone is an error.
-fn carried(meta: Vec<TokenTree>) -> Option<Vec<TokenTree>> {
-    // Rust reads an attribute's name written raw, `r#cfg`, as the name.
-    let named = |t: &TokenTree, name: &str| is_ident(t, name) || is_ident(t, &format!("r#{name}"));
-    match &meta[..] {
-        [doc, TokenTree::Group(list)] if named(doc, "doc") => flatten(list.stream())
-            .iter()
-            .any(|t| named(t, "hidden"))
-            .then(|| parse("doc(hidden)").into_iter().collect()),
-        [cfg_attr, TokenTree::Group(list)] if named(cfg_attr, "cfg_attr") => {
-            let tokens = flatten(list.stream());
-            let mut parts = tokens.split(|t| is_punct(t, ','));
-            let mut kept = parts.next().expect("a split has a first part").to_vec();
-            let condition = kept.len();
-            for part in parts.filter_map(|part| carried(part.to_vec())) {
-                kept.extend(parse(","));
-                kept.extend(part);
-            }
-            if kept.len() == condition {
-                return None;
-            }
-            let mut group = Group::new(Delimiter::Parenthesis, kept.into_iter().collect());
-            group.set_span(list.span());
-            Some(vec![cfg_attr.clone(), group.into()])
-        }
-        [name, ..] if ["cfg", "deprecated"].iter().any(|n| named(name, n)) => Some(meta),
-        _ => None,
-    }
 }
 
 /// The name of the method that says how many blocks a grid of `f` has at most.

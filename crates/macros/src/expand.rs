@@ -9,7 +9,10 @@ use kernite::lang::{self, ItemKind};
 use kernite::{ItemOut, Launcher, ModuleOut};
 
 use crate::gpu::{HOLE, gpu};
-use crate::rust::{const_names, error, flatten, inner_attribute, is_ident, is_punct, lex, parse, site, stub};
+use crate::rust::{
+    attrs_len, carried, condition, const_names, error, error_under, flatten, inner_attribute, is_ident, is_punct, lex,
+    parse, site, stub,
+};
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
 
@@ -55,10 +58,16 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
         out.extend(take(&made, &top, path));
     }
     out.extend(made.owner.as_ref().map(said));
-    // How each kernel the GPU launches is, and each static of the GPU's, as the host reads it.
-    let (mut launchers, mut memory) = (vec![], vec![]);
+    // How each kernel the GPU launches is, and each static of the GPU's, as the host reads it; when
+    // each GPU item is there; and what names the consts the items read, which Rust never sees.
+    let (mut launchers, mut memory, mut on_gpu, mut reads) = (vec![], vec![], vec![], TokenStream::new());
     for (item, made_item) in module.items.iter().zip(&made.items) {
         let tokens = &top[item.tokens.clone()];
+        // An item says what is wrong with it under its `cfg`, as what is written for it is: Rust
+        // says nothing of a function it leaves out.
+        let cfg = carried(tokens[..attrs_len(tokens)].iter().cloned(), false);
+        let said = |e: &lang::Error| error_under(&cfg, at(e.span), &e.message);
+        reads.extend(used(module, made_item.consts(), &cfg, &top));
         match (&item.kind, made_item) {
             // The module's own attributes are first, and a const given is Rust's where its
             // module is.
@@ -67,11 +76,12 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
             (_, ItemOut::Given) => {}
             (ItemKind::Static(s), ItemOut::HostStatic(laid)) => {
                 out.extend(laid.as_ref().err().map(said));
-                out.extend(cpu_static(s, laid.as_ref().ok(), &top));
+                out.extend(cpu_static(s, laid.as_ref().ok().map(|c| &c.code), &top));
             }
             (ItemKind::Static(s), ItemOut::DeviceStatic(laid)) => {
                 out.extend(laid.as_ref().err().map(said));
-                memory.push((s, laid.as_ref().ok()));
+                memory.push((s, laid.as_ref().ok().map(|c| &c.code)));
+                on_gpu.push(condition(&cfg));
             }
             (ItemKind::Fn(_), ItemOut::Helper(errors)) => out.extend(errors.iter().map(said)),
             (ItemKind::Fn(f), ItemOut::Unknown(e)) => {
@@ -91,6 +101,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
                 out.extend(d.not_unsafe.as_ref().map(said));
                 out.extend(d.said.as_ref().map(said));
                 out.extend(d.errors.iter().map(said));
+                on_gpu.push(condition(&cfg));
                 launchers.extend(d.launcher.as_ref().map(|l| match l {
                     Launcher::Never => (f, None),
                     Launcher::Of(launched) => (f, Some(launched.as_slice())),
@@ -99,7 +110,11 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
             _ => unreachable!("kernite::module says what each item is"),
         }
     }
-    out.extend(used(module, &made.read, &top));
+    if !reads.is_empty() {
+        out.extend(parse("const _: () ="));
+        out.extend([TokenTree::Group(Group::new(Delimiter::Brace, reads))]);
+        out.extend(parse(";"));
+    }
     if !made.listings.is_empty() {
         let mut s = String::from(
             "/// Each x86 kernel's listing, by name, an instance's as `tile::<4>`: where its variables\n\
@@ -113,7 +128,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
     }
     if let Some(device) = &made.device {
         out.extend(device.error.as_ref().map(said));
-        out.extend(gpu(&launchers, &device.symbols, &memory, &device.text, &top, &at));
+        out.extend(gpu(&launchers, &device.symbols, &memory, &device.text, &top, &at, &on_gpu));
         // The workspace's name is in the PTX, so it is built again when it changes.
         if let Some(manifest) = manifest.as_deref().and_then(Path::to_str) {
             out.extend(parse(&format!("const _: &[u8] = ::core::include_bytes!({manifest:?});")));
@@ -151,23 +166,21 @@ fn take(made: &ModuleOut, top: &[TokenTree], path: &[TokenTree]) -> TokenStream 
     out
 }
 
-/// A `const _` that names each constant of `module` that `read` gives by its index among the
-/// items, by its name as `top` writes it, `r#type` as well. The kernels read them, but Rust never
-/// sees a kernel's body run, so it would find them unused.
-fn used(module: &lang::Module, read: &[usize], top: &[TokenTree]) -> TokenStream {
+/// What names each constant of `module` among `read`, the consts one item reads, for Rust, which never
+/// sees a kernel's body run and would find them unused: a `let _ = N;` for each, by its name as `top`
+/// writes it, `r#type` as well, under `cfg`, what is kept of the item's attributes, which Rust takes on a
+/// statement. Where the item is not, neither is the statement.
+fn used(module: &lang::Module, read: &[String], cfg: &TokenStream, top: &[TokenTree]) -> TokenStream {
     let mut lets = TokenStream::new();
-    for &i in read {
-        lets.extend(parse("let _ ="));
-        lets.extend([const_name(&module.items[i], top)]);
-        lets.extend(parse(";"));
+    for item in &module.items {
+        if matches!(&item.kind, ItemKind::Const(c) if read.contains(&c.name)) {
+            lets.extend(cfg.clone());
+            lets.extend(parse("let _ ="));
+            lets.extend([const_name(item, top)]);
+            lets.extend(parse(";"));
+        }
     }
-    if lets.is_empty() {
-        return TokenStream::new();
-    }
-    let mut out = parse("const _: () =");
-    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, lets))]);
-    out.extend(parse(";"));
-    out
+    lets
 }
 
 /// The name of `item`, a const, as `top` writes it, `r#type` as well, of the span the macro

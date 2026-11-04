@@ -8,8 +8,8 @@ use kernite_lang::{Error, Item, ItemKind, Module};
 use crate::classify::{helper, trusted};
 use crate::present::{Refusal, said};
 use crate::{
-    Abi, Call, Device, DeviceFnOut, DeviceOut, Given, ItemOut, Launcher, ModuleOut, Naked, Native, NativeInstance,
-    NativeOut, Owner, compile, cooperative, instance, owner, prepare,
+    Abi, Call, Compiled, Device, DeviceFnOut, DeviceOut, Given, ItemOut, Launcher, ModuleOut, Naked, Native,
+    NativeInstance, NativeOut, Owner, compile, cooperative, instance, owner, prepare,
 };
 
 /// `module`, given the consts `given` says, its kernels compiled: each function the process runs
@@ -30,11 +30,10 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
     // Each machine's statics and callees, worked out when something first needs them.
     let n = LazyCell::new(|| prepare(m, native));
     let d = LazyCell::new(|| prepare(m, device));
-    // The statics are the process's or the GPU's. Their consts are read, whether a kernel names
-    // them or not.
-    let (mut host, mut gpu, mut consts): (_, _, Vec<String>) = match process {
-        true => (n.statics.iter(), [].iter(), n.statics.iter().flatten().flat_map(|s| s.consts.clone()).collect()),
-        false => ([].iter(), d.statics.iter(), d.statics.iter().flatten().flat_map(|s| s.consts.clone()).collect()),
+    // The statics are the process's or the GPU's.
+    let (mut host, mut gpu) = match process {
+        true => (n.statics.iter(), [].iter()),
+        false => ([].iter(), d.statics.iter()),
     };
     let (mut items, mut listings, mut codes, mut symbols, mut first) = (vec![], vec![], vec![], vec![], None);
     for item in &m.items {
@@ -50,7 +49,9 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
             ItemKind::Static(_) if process => {
                 let laid = host.next().expect("each static is laid out or refused");
                 items.push(ItemOut::HostStatic(
-                    laid.as_ref().map(|s| native.host_static(&s.code)).map_err(Clone::clone),
+                    laid.as_ref()
+                        .map(|s| Compiled { code: native.host_static(&s.code), consts: s.consts.clone() })
+                        .map_err(Clone::clone),
                 ));
                 continue;
             }
@@ -58,7 +59,9 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
                 first.get_or_insert(s.span);
                 let laid = gpu.next().expect("each static is laid out or refused");
                 items.push(ItemOut::DeviceStatic(
-                    laid.as_ref().map(|s| device.device_static(&s.code)).map_err(Clone::clone),
+                    laid.as_ref()
+                        .map(|s| Compiled { code: device.device_static(&s.code), consts: s.consts.clone() })
+                        .map_err(Clone::clone),
                 ));
                 continue;
             }
@@ -77,7 +80,7 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
             Ok(listed) => (None, listed),
             Err(e) => (Some(e), vec![]),
         };
-        let (count, mut errors) = (listed.len(), vec![]);
+        let (count, mut errors, mut consts) = (listed.len(), vec![], vec![]);
         if abi.native() {
             let mut instances = vec![];
             for args in listed {
@@ -99,7 +102,8 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
                     listings.push((kernite_lang::instance(f, &k.args).unwrap_or_default(), k.naked.text.clone()));
                 }
             }
-            let out = NativeOut { not_unsafe, said, instances, written, count, touched: vec![], errors };
+            let consts = in_order(m, &consts);
+            let out = NativeOut { not_unsafe, said, instances, consts, written, count, touched: vec![], errors };
             items.push(ItemOut::Native(out));
             continue;
         }
@@ -128,7 +132,8 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
             true => Launcher::Of(launched),
             false => Launcher::Never,
         });
-        items.push(ItemOut::Device(DeviceFnOut { not_unsafe, said, errors, launcher }));
+        let consts = in_order(m, &consts);
+        items.push(ItemOut::Device(DeviceFnOut { not_unsafe, said, errors, consts, launcher }));
     }
     // Once every function the process runs is compiled, for a kernel to name the statics of the
     // functions it calls, which may come after it.
@@ -147,16 +152,17 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
         };
         DeviceOut { text, error, symbols }
     });
-    let read = m
-        .items
-        .iter()
-        .enumerate()
-        .filter_map(|(i, item)| match &item.kind {
-            ItemKind::Const(c) if consts.contains(&c.name) => Some(i),
-            _ => None,
-        })
-        .collect();
-    ModuleOut { module, given: twice, owner: whose.err(), items, read, listings, device: loaded }
+    ModuleOut { module, given: twice, owner: whose.err(), items, listings, device: loaded }
+}
+
+/// The consts of `module` that `read` names, each once, in the module's order: the instances of a
+/// function each read some of them, and it reads the consts that any of them did.
+fn in_order(module: &Module, read: &[String]) -> Vec<String> {
+    let consts = module.items.iter().filter_map(|item| match &item.kind {
+        ItemKind::Const(c) => Some(&c.name),
+        _ => None,
+    });
+    consts.filter(|name| read.contains(name)).cloned().collect()
 }
 
 /// What an item of a module of consts is to the modules of kernels that take its consts.
