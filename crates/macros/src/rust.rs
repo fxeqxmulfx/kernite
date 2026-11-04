@@ -655,6 +655,10 @@ pub(crate) fn error_under(cfg: &TokenStream, span: Span, message: &str) -> Token
     out
 }
 
+/// The crate that has `__kernels!` and `__Room`, which the Rust the macro writes calls by the crate's
+/// name, `::kernite_macros`: a dependency of that name, not renamed in `Cargo.toml`.
+pub(crate) const MACROS: &str = "kernite-macros";
+
 /// Whether the crate being compiled has a dependency named `name`, `kernite-cpu`, `kernite-cuda` or
 /// `kernite-macros`, which is how the Rust the macro writes names it. One renamed in `Cargo.toml` has
 /// another name.
@@ -685,13 +689,18 @@ fn extern_name(value: &str) -> &str {
     spec.rsplit_once(':').map_or(spec, |(_options, name)| name)
 }
 
+/// What a crate that has no dependency named `name` is told of `what`, which needs one.
+pub(crate) fn needs_dependency(what: &str, name: &str) -> String {
+    format!("{what} needs a dependency named `{name}`, which this crate does not have")
+}
+
 /// A type that stands for one of the crate `name`'s in a crate that has no dependency named so, and
 /// says at `span` that `what` needs one. It is an array whose length is the error, which Rust
 /// reports once and takes for a type it has reported, so that it says nothing of the code that
 /// uses it.
 pub(crate) fn missing(span: Span, what: &str, name: &str) -> TokenStream {
     let mut length = parse("();");
-    length.extend(error(span, &format!("{what} needs a dependency named `{name}`, which this crate does not have")));
+    length.extend(error(span, &needs_dependency(what, name)));
     TokenTree::Group(Group::new(Delimiter::Bracket, length)).into()
 }
 

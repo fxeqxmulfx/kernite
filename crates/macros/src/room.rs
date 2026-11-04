@@ -6,10 +6,7 @@
 use proc_macro::{Delimiter, Group, Literal, Span, TokenStream, TokenTree};
 
 use crate::cond::Cond;
-use crate::rust::{depends_on, error, error_under, flatten, is_ident, parse, site};
-
-/// The crate whose derive counts the room, named by its path in the Rust the macro writes.
-const MACROS: &str = "kernite-macros";
+use crate::rust::{MACROS, depends_on, error, error_under, flatten, is_ident, needs_dependency, parse, site};
 
 /// The field of static `i`, whose type is `ty`, which is at `at`: under the static's `cfg`, with the
 /// type for `__Room` to count, written where the static's type is, for an error to point at.
@@ -31,9 +28,7 @@ pub(crate) fn field(cfg: &TokenStream, i: usize, ty: &str, at: Span) -> TokenStr
 pub(crate) fn carrier(fields: TokenStream, kept: &Cond) -> TokenStream {
     let Some(guard) = kept.guard() else { return TokenStream::new() };
     if !depends_on(MACROS) {
-        let message =
-            format!("a static of GPU kernels needs a dependency named `{MACROS}`, which this crate does not have");
-        return error_under(&guard, site(), &message);
+        return error_under(&guard, site(), &needs_dependency("a static of GPU kernels", MACROS));
     }
     let mut out = parse("const _: () =");
     let mut block = parse("#[derive(::kernite_macros::__Room)] struct _Room");
