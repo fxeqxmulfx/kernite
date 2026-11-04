@@ -3,7 +3,7 @@
 
 use kernite_lang::{Fn, Memory, Span, Target, Value};
 
-use crate::{DeviceStatic, HostStatic, Naked};
+use crate::{Assembly, DeviceStatic, HostStatic, Naked};
 
 /// A machine kernite compiles a module's functions for: its kernels while their bodies are
 /// written, its statics, how its kernels see the functions they call, and its code.
@@ -17,9 +17,14 @@ pub trait Backend {
     /// A kernel's code, once its body is written.
     type Code;
 
-    /// Static `name`, as `memory` has it worked out, laid out after `before`, the statics
-    /// before it that were laid out; or why not.
-    fn lay_out(&self, name: &str, memory: &Memory, before: &[Self::Static]) -> Result<Self::Static, StaticError>;
+    /// Static `name`, as `memory` has it worked out, laid out; or why not.
+    fn lay_out(&self, name: &str, memory: &Memory) -> Result<Self::Static, StaticError>;
+    /// Why each of `statics`, which were laid out, has no room in the module's memory beside those
+    /// before it that have, in order; `None` for each that has. A machine with room for them all, as
+    /// the process has, says none.
+    fn room(&self, statics: &[Self::Static]) -> Vec<Option<String>> {
+        vec![None; statics.len()]
+    }
     /// How this machine's kernels see `g` when they call it; `None` if they cannot name it.
     fn callee(&self, g: &Fn) -> Option<Self::Callee>;
     /// The kernel `name`, instance `args` of `f`, told whether it is `cooperative`, each of
@@ -48,8 +53,10 @@ pub trait Native: Backend {
 
 /// A machine whose kernels a driver loads as one module.
 pub trait Device: Backend {
-    /// The module of `code`, each kernel and function, with `statics`; or why it is none.
-    fn module(&self, code: &[Self::Code], statics: &[Self::Static]) -> Result<String, String>;
+    /// The module of `code`, each kernel and function, with `statics`, put together from what the
+    /// program keeps of them: for every set of them kept, the text the module of that set alone
+    /// has, or why it is none.
+    fn module(&self, code: &[Self::Code], statics: &[Self::Static]) -> Assembly;
     /// The name the driver finds `code` by.
     fn symbol(&self, code: &Self::Code) -> String;
     /// `s` as the host reads it.

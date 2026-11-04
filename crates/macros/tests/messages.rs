@@ -189,6 +189,24 @@ fn size_unknown(place: &str, ty: &str) -> String {
     )
 }
 
+/// What Rust says of a struct's argument that is not `Copy`, `ty`, where the struct asks for one, at
+/// `place` of `src/lib.rs`: that the trait bound is not satisfied.
+fn not_copy(place: &str, ty: &str) -> String {
+    format!(
+        "src/lib.rs:{place}: error[E0277]: the trait bound `{ty}: Copy` is not satisfied: the trait `Copy` is \
+         not implemented for `{ty}`"
+    )
+}
+
+/// What Rust says of a `_` in a signature, at `place` of `src/lib.rs`: that it is not allowed in the types of
+/// `what`, `functions`, `methods` or `return types`.
+fn not_allowed(place: &str, what: &str) -> String {
+    format!(
+        "src/lib.rs:{place}: error[E0121]: the placeholder `_` is not allowed within types on item signatures for \
+         {what}: not allowed in type signatures"
+    )
+}
+
 /// What Rust says of a number's name that the module gives another type, `found`, at `place` of
 /// `src/lib.rs`: that the type is not the number, `expected`.
 fn not_the_number(place: &str, expected: &str, found: &str) -> String {
@@ -459,27 +477,46 @@ fn a_crate_without_kernite_cuda_is_told_at_each_module_of_gpu_kernels() {
     );
 }
 
-/// A crate whose dependencies on `kernite-cuda` and `kernite-cpu` are renamed in its manifest,
-/// `cuda = { package = "kernite-cuda", .. }`, is told as one that has none is, for the Rust kernite
-/// writes names `kernite_cuda` and `kernite_cpu`, which it has not; and Rust says nothing.
+/// A crate whose dependencies on `kernite-macros`, `kernite-cuda` and `kernite-cpu` are renamed in its
+/// manifest, `cuda = { package = "kernite-cuda", .. }`, is told as one that has none is, for the Rust
+/// kernite writes names `kernite_macros`, for the room of a GPU module's statics, `kernite_cuda` and
+/// `kernite_cpu`, which it has not; and Rust says nothing. A module whose statics `cfg` leaves out is
+/// told nothing, and one with a static there only with a feature, `more`, is told with it.
 #[test]
-fn a_crate_that_renames_kernite_cuda_and_kernite_cpu_is_told_it_has_none() {
+fn a_crate_that_renames_kernite_macros_kernite_cuda_and_kernite_cpu_is_told_it_has_none() {
     let edits = [
+        ("kernite-macros = {", "km = { package = \"kernite-macros\","),
         ("kernite-cuda = {", "cuda = { package = \"kernite-cuda\","),
         ("kernite-cpu = {", "cpu = { package = \"kernite-cpu\","),
     ];
-    let (built, said) = cargo_in(&["build"], &edited("renamed_deps", &edits));
+    let dir = edited("renamed_deps", &edits);
+    let (built, without) = cargo_in(&["build"], &dir);
     assert!(!built, "fixtures/renamed_deps.rs built");
     assert_eq!(
-        said,
+        without,
         [
-            "src/lib.rs:6:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
+            "src/lib.rs:8:1: error: a static of GPU kernels needs a dependency named `kernite-macros`, \
              which this crate does not have",
-            "src/lib.rs:15:16: error: a static of x86 kernels needs a dependency named `kernite-cpu`, \
+            "src/lib.rs:8:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
              which this crate does not have",
-            "src/lib.rs:18:35: error: a cooperative x86 kernel needs a dependency named `kernite-cpu`, \
+            "src/lib.rs:19:16: error: a static of x86 kernels needs a dependency named `kernite-cpu`, \
              which this crate does not have",
-            "error: could not compile `renamed_deps` (lib) due to 3 previous errors",
+            "src/lib.rs:22:35: error: a cooperative x86 kernel needs a dependency named `kernite-cpu`, \
+             which this crate does not have",
+            "error: could not compile `renamed_deps` (lib) due to 4 previous errors",
+        ]
+    );
+    let (built, with) = cargo_in(&["build", "--features", "more"], &dir);
+    assert!(!built, "fixtures/renamed_deps.rs built with the feature");
+    assert_eq!(with[..4], without[..4]);
+    assert_eq!(
+        with[4..],
+        [
+            "src/lib.rs:47:1: error: a static of GPU kernels needs a dependency named `kernite-macros`, \
+             which this crate does not have",
+            "src/lib.rs:47:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
+             which this crate does not have",
+            "error: could not compile `renamed_deps` (lib) due to 6 previous errors",
         ]
     );
 }
@@ -576,6 +613,16 @@ fn listings_holds_each_kernels_listing_by_its_name() {
     builds_quietly("listings");
 }
 
+/// `LISTINGS` holds the listings of the kernels `cfg` keeps, one for each instance of a kernel that
+/// has them, and none of a kernel that `cfg` leaves out, by a `cfg` or by a `cfg_attr(..)`. The
+/// fixture asserts, as it builds, which listings the module has with its feature and without it.
+#[test]
+fn listings_holds_what_cfg_keeps() {
+    let dir = written("configured_listings");
+    builds_quietly_in(&["build"], "configured_listings", &dir);
+    builds_quietly_in(&["build", "--features", "more"], "configured_listings", &dir);
+}
+
 #[test]
 fn a_kernel_that_does_not_compile_leaves_a_stub() {
     // Rust calls each stub, and a kernel calls two, and none of these calls is an error.
@@ -589,6 +636,67 @@ fn a_kernel_that_does_not_compile_leaves_a_stub() {
             "src/lib.rs:32:28: error: `y` is not defined",
             "src/lib.rs:37:28: error: `y` is not defined",
             "error: could not compile `stubs` (lib) due to 6 previous errors",
+        ],
+    );
+}
+
+/// A module of GPU kernels holds what `cfg` keeps: a static, a function that kernels call or a kernel
+/// that `cfg` leaves out is neither in its `PTX` nor among the names `Kernels::load` asks the driver
+/// for, and what comes after it is where it was. Its `.version` and `.target` are the oldest that have
+/// every instruction of the kernels and functions `cfg` keeps, though the kernel that calls a function
+/// is left out. The fixture's tests run with each of its features and without; they assert which of the
+/// module is in `PTX` and, on a machine with a GPU, load it and launch each kernel that is there.
+#[test]
+fn a_gpu_module_holds_what_cfg_keeps() {
+    for features in ["", "more", "new", "more,new"] {
+        let command = ["test", "--features", features];
+        let printed = runs_quietly(&command, "configured_ptx");
+        assert!(
+            printed.contains("test result: ok. 5 passed"),
+            "fixtures/configured_ptx.rs: {command:?} printed:\n{printed}"
+        );
+    }
+}
+
+/// The room of a module's statics is that of the statics `cfg` keeps. The fixture has two tables of
+/// constant memory that do not fit together, and two statics of global memory, one of which `cfg`
+/// leaves out in one module; it builds under `deny(warnings)` without a word, with the feature `new` and
+/// without, and its tests assert which table the module has and, on a machine with a GPU, load it and
+/// read the table that is there.
+#[test]
+fn the_room_of_a_gpu_module_counts_the_statics_cfg_keeps() {
+    for features in ["", "new"] {
+        let command = ["test", "--features", features];
+        let printed = runs_quietly(&command, "room");
+        assert!(printed.contains("test result: ok. 2 passed"), "fixtures/room.rs: {command:?} printed:\n{printed}");
+    }
+}
+
+/// A static that does not fit beside those before it that `cfg` keeps is refused at its type, in the words
+/// it has with no `cfg`; one that `cfg` leaves out takes no room, nor does one that is refused, so a
+/// small table after it fits. Without the feature `new` the fixture's `plain` is refused alone, at its
+/// second table; with it, so are `kept`, at its second table, and `kept_global`, of global memory. `either`
+/// is not, whichever `cfg` leaves out, `cfg_attr(..)` too.
+#[test]
+fn a_static_with_no_room_beside_those_cfg_keeps_is_refused_at_its_type() {
+    let constant = "this makes the module's constant memory 96000 bytes, and a module has 64 KB";
+    let global = "this makes the module's global memory as much as 4294967302 bytes, each static aligned, and \
+                  `ptxas` writes its size in 32 bits: a module has less than 4 GB";
+    refuses(
+        "room_refused",
+        &[
+            &format!("src/lib.rs:11:19: error: {constant}"),
+            "error: could not compile `room_refused` (lib) due to 1 previous error",
+        ],
+    );
+    refuses_by(
+        &["build", "--features", "new"],
+        "room_refused",
+        &[
+            &format!("src/lib.rs:11:19: error: {constant}"),
+            &format!("src/lib.rs:21:19: error: {constant}"),
+            &format!("src/lib.rs:30:19: error: {global}"),
+            "error: could not compile `room_refused` (lib) due to 3 previous errors",
         ],
     );
 }
@@ -660,8 +768,7 @@ fn what_cfg_leaves_out_says_nothing() {
 /// Each case in the fixture has a function that `cfg` leaves out.
 #[test]
 fn what_rests_on_all_the_items_is_said_whatever_cfg_leaves_out() {
-    // The modules in order: `head`, `twice`, `blocks`, and `ptx`, whose error is at its first
-    // kernel, which is left out.
+    // The modules in order: `head`, `twice` and `blocks`.
     refuses(
         "configured_module",
         &[
@@ -669,11 +776,59 @@ fn what_rests_on_all_the_items_is_said_whatever_cfg_leaves_out() {
             "src/lib.rs:23:35: error: `k` names another function of the module as well",
             "src/lib.rs:31:7: error: `#[cooperative]` gives `Kernels` a method `k_blocks`, which says how many \
              blocks a grid of `k` has at most, and a kernel or a static of the module is named `k_blocks` as well",
-            "src/lib.rs:42:39: error: `shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and \
-             `tanh.approx.f32` in `new` needs sm_75 and PTX 7.0: no module has both",
-            "error: could not compile `configured_module` (lib) due to 4 previous errors",
+            "error: could not compile `configured_module` (lib) due to 3 previous errors",
         ],
     );
+}
+
+/// Kernels and functions that no one PTX module can hold are refused where `cfg` keeps them, and
+/// where it keeps all of a set of them, at the module's first GPU item, kept or not: one error, in
+/// the words of the module of those alone, whichever else `cfg` keeps. The fixture's items are
+/// `first`, the first, which needs nothing, `old`, which is for GPUs older than `sm_70` from PTX 6.4
+/// on, `mid` and `top`, which need `sm_75` and `sm_80`, and the function `fast`, which needs
+/// `sm_75`, each under a feature; the one kernel that calls `fast` is left out by every `cfg`, and
+/// the error of `old` and `fast` kept names those two and not that kernel. The error is at `first`
+/// whether its feature keeps it or not.
+#[test]
+fn kernels_that_no_one_module_holds_are_refused_where_cfg_keeps_them() {
+    let dir = written("configured_clash");
+    let old = "`shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and";
+    let with_mid = format!("{old} `tanh.approx.f32` in `mid` needs sm_75 and PTX 7.0: no module has both");
+    let with_top =
+        format!("{old} `redux.sync.add.u32` in `top` needs sm_80, which PTX has from 7.0 on: no module has both");
+    let with_fast = format!("{old} `tanh.approx.f32` in `fast` needs sm_75 and PTX 7.0: no module has both");
+    let cases = [
+        ("", None),
+        ("old", None),
+        ("mid", None),
+        ("top", None),
+        ("mid,top", None),
+        ("fast", None),
+        ("mid,fast", None),
+        ("old,mid", Some(&with_mid)),
+        ("old,top", Some(&with_top)),
+        ("old,fast", Some(&with_fast)),
+        ("old,mid,top", Some(&with_mid)),
+        ("first,old,mid", Some(&with_mid)),
+        ("first,old,fast", Some(&with_fast)),
+    ];
+    for (features, said) in cases {
+        let command = ["build", "--features", features];
+        let Some(why) = said else {
+            builds_quietly_in(&command, "configured_clash", &dir);
+            continue;
+        };
+        let (built, lines) = cargo_in(&command, &dir);
+        let want = [
+            format!("src/lib.rs:13:39: error: {why}"),
+            "error: could not compile `configured_clash` (lib) due to 1 previous error".to_string(),
+        ];
+        assert!(
+            !built && lines == want,
+            "fixtures/configured_clash.rs: {command:?}: Cargo said:\n{}",
+            lines.join("\n")
+        );
+    }
 }
 
 /// A const `cfg` keeps that only what `cfg` leaves out reads is unused to Rust, which says so, as it
@@ -1210,6 +1365,35 @@ fn a_pointer_to_a_type_with_a_lifetime_is_refused_at_its_type() {
     );
 }
 
+/// A type that begins with a binder, `for<'a> fn(&'a u8)`, is read whole, as any other type is: it was once
+/// taken for a type named `for` with an argument, and the reading stopped at the `fn`. A kernel that takes one
+/// by value, or as the argument of a type, or returns one, is refused at the type, in its machine's words, on
+/// x86 and on a GPU; the type is quoted as Rust writes it, with a space after the binder. A pointer to one is
+/// refused in the lexer's words, as a pointer to any type with a lifetime is, and a pointer to a function's
+/// type that has no binder, `*const fn(&u8)`, is taken.
+#[test]
+fn a_type_that_begins_with_a_binder_is_read_whole() {
+    refuses(
+        "binders",
+        &[
+            "src/lib.rs:10:47: error: a kernel takes pointers, 64-bit integers and floats, not `for<'a> fn(&'a u8)`",
+            "src/lib.rs:14:48: error: a kernel takes pointers, 64-bit integers and floats, not `Option<for<'a> \
+             fn(&'a u8)>`",
+            "src/lib.rs:18:56: error: a kernel takes pointers, 64-bit integers and floats, not `Option<&dyn \
+             for<'a> Fn(&'a u8)>`",
+            "src/lib.rs:22:55: error: a kernel returns a float, an integer or a pointer, or never, `!`; not \
+             `for<'a> fn(&'a u8)`",
+            "src/lib.rs:26:49: error: lifetimes and labels have no place in a kernel",
+            "src/lib.rs:30:64: error: lifetimes and labels have no place in a kernel",
+            // The pointer to a function's type with no binder, at line 34, has no error: it is taken.
+            "src/lib.rs:41:51: error: a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, `f32` and \
+             `f64`, not `for<'a> fn(&'a u8)`",
+            "src/lib.rs:45:53: error: lifetimes and labels have no place in a kernel",
+            "error: could not compile `binders` (lib) due to 8 previous errors",
+        ],
+    );
+}
+
 /// A pointer to a type with no size, which Rust passes in two registers where a kernel's is one, is
 /// one error, at the type, whatever the type is called. kernite tells `[f32]` by its text, and says so
 /// in its words, on x86 and on a GPU. Rust tells the others, and says that the size cannot be known:
@@ -1220,9 +1404,14 @@ fn a_pointer_to_a_type_with_a_lifetime_is_refused_at_its_type() {
 /// plain or of compile-time arguments. A kernel kernite refuses for another reason leaves a stub that
 /// asks Rust as well, so that it is two errors, kernite's and Rust's, each where it is: an x86 kernel,
 /// plain, of compile-time arguments or cooperative, and one that returns a pointer; one that is not
-/// `unsafe`; one whose `extern` kernite does not know; and a GPU kernel, plain or cooperative. An
-/// array or a tuple that holds a type with no size Rust refuses by itself, at the type, and says it
-/// again of what kernite asks of it: Cargo prints the two as one.
+/// `unsafe`; one whose `extern` kernite does not know; and a GPU kernel, plain or cooperative, and
+/// one that returns a pointer, plain or of compile-time arguments. An array or a tuple that holds a
+/// type with no size, `[CStr; 3]`, `(CStr, u8)` or `(u8, [CStr; 3])`, Rust refuses by itself, at the
+/// type, before it asks of the pointer: it says so once, and nothing asks again, in a kernel of
+/// every kind, a pointer that a kernel returns too, so that the errors Cargo counts are the lines it
+/// prints. One case has two, at two places: a kernel of compile-time arguments casts back a pointer
+/// it returns, so for `(u8, [CStr; 3])` Rust says the array in the signature, and the tuple at the
+/// cast.
 #[test]
 fn a_pointer_to_a_type_with_no_size_is_refused_at_its_type() {
     // What kernite says, in the order of the kernels: the x86 module's, then the GPU's.
@@ -1232,74 +1421,112 @@ fn a_pointer_to_a_type_with_no_size_is_refused_at_its_type() {
     let safe = "error: a kernel trusts the pointers it is given, so it is an `unsafe fn`";
     let abi = "error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, \
                for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` is none of these";
+    let gives = "error: a GPU kernel returns nothing, not `*mut core::ffi::CStr`: it writes what it works out \
+                 to memory";
+    let gives_first = "error: in `returns_c_str_tiles::<1>`: a GPU kernel returns nothing, not \
+                       `*mut core::ffi::CStr`: it writes what it works out to memory";
+    let gives_second = "error: in `returns_c_str_tiles::<2>`: a GPU kernel returns nothing, not \
+                        `*mut core::ffi::CStr`: it writes what it works out to memory";
     let kernite = [
-        ("83:44", told),
-        ("109:23", y),
-        ("114:23", "error: in `refused_tiles::<1>`: `y` is not defined"),
-        ("114:23", "error: in `refused_tiles::<2>`: `y` is not defined"),
-        ("119:23", y),
-        ("123:23", y),
-        ("128:23", "error: in `refused_returns_tiles::<1>`: `y` is not defined"),
-        ("128:23", "error: in `refused_returns_tiles::<2>`: `y` is not defined"),
-        ("131:28", safe),
-        ("135:23", abi),
-        ("150:48", told),
-        ("175:28", y),
-        ("180:28", y),
+        ("85:44", told),
+        ("111:23", y),
+        ("116:23", "error: in `refused_tiles::<1>`: `y` is not defined"),
+        ("116:23", "error: in `refused_tiles::<2>`: `y` is not defined"),
+        ("121:23", y),
+        ("125:23", y),
+        ("130:23", "error: in `refused_returns_tiles::<1>`: `y` is not defined"),
+        ("130:23", "error: in `refused_returns_tiles::<2>`: `y` is not defined"),
+        ("133:28", safe),
+        ("137:23", abi),
+        ("216:48", told),
+        ("241:28", y),
+        ("246:28", y),
+        ("284:69", gives),
+        ("289:89", gives_first),
+        ("289:89", gives_second),
     ];
     // Where Rust says it, and of which type: at the pointer's type, in the order Rust says it.
     let sizes = [
-        // An array of `CStr`, and a tuple with `CStr` before its last field: Rust refuses the types.
-        ("139:60", "[i8]"),
-        ("143:63", "[i8]"),
+        // An array of `CStr`, a tuple with `CStr` before its last field, and a tuple that ends in an
+        // array of `CStr`: Rust refuses the types, before the pointers. In an x86 kernel: plain, of
+        // compile-time arguments, cooperative, and one that returns a pointer, plain and of arguments.
+        ("141:60", "[i8]"),
+        ("146:80", "[i8]"),
+        ("152:69", "[i8]"),
+        ("156:82", "[i8]"),
+        ("163:15", "[i8]"),
+        ("168:63", "[i8]"),
+        ("173:83", "[i8]"),
+        ("179:72", "[i8]"),
+        ("183:70", "[i8]"),
+        ("189:24", "[i8]"),
+        ("197:79", "[i8]"),
+        ("201:92", "[i8]"),
+        // The array of a tuple that a kernel of compile-time arguments returns a pointer to, in its
+        // signature; the tuple is said below, where the pointer is cast back.
+        ("208:22", "[i8]"),
+        // And in a GPU kernel: plain, of compile-time arguments, cooperative, and cooperative of
+        // compile-time arguments.
+        ("249:62", "[i8]"),
+        ("254:84", "[i8]"),
+        ("259:71", "[i8]"),
+        ("263:65", "[i8]"),
+        ("268:85", "[i8]"),
+        ("272:72", "[i8]"),
+        ("279:22", "[i8]"),
         // `CStr`: a plain kernel, one of compile-time arguments, a cooperative one.
-        ("19:51", "[i8]"),
-        ("24:71", "[i8]"),
-        ("30:60", "[i8]"),
+        ("21:51", "[i8]"),
+        ("26:71", "[i8]"),
+        ("32:60", "[i8]"),
         // `str` by its path.
-        ("34:54", "str"),
-        ("39:74", "str"),
-        ("45:63", "str"),
+        ("36:54", "str"),
+        ("41:74", "str"),
+        ("47:63", "str"),
         // `Floats`, a name for `[f32]`.
-        ("49:52", "[f32]"),
-        ("54:72", "[f32]"),
-        ("60:61", "[f32]"),
+        ("51:52", "[f32]"),
+        ("56:72", "[f32]"),
+        ("62:61", "[f32]"),
         // `Tail`, a struct whose last field is `[f32]`.
-        ("64:50", "[f32]"),
-        ("69:70", "[f32]"),
-        ("75:59", "[f32]"),
-        // Two pointers of one kernel, and a pointer a kernel returns, plain and of arguments.
-        ("79:49", "[i8]"),
-        ("79:74", "[f32]"),
-        ("87:67", "[i8]"),
-        ("92:87", "[i8]"),
+        ("66:50", "[f32]"),
+        ("71:70", "[f32]"),
+        ("77:59", "[f32]"),
+        // Two pointers of one kernel, the second before the first, as Rust says them, and a pointer a
+        // kernel returns, plain and of arguments.
+        ("81:74", "[f32]"),
+        ("81:49", "[i8]"),
+        ("89:67", "[i8]"),
+        ("94:87", "[i8]"),
         // A tuple that ends in `CStr`: a plain kernel, and a cooperative one of arguments.
-        ("97:51", "[i8]"),
-        ("103:80", "[i8]"),
+        ("99:51", "[i8]"),
+        ("105:80", "[i8]"),
         // An x86 kernel kernite refuses: a plain one, one of arguments, a cooperative one, a plain one
         // and one of arguments that return a pointer, one that is not `unsafe`, and one whose
         // `extern` kernite does not know.
-        ("108:53", "[i8]"),
-        ("113:73", "[i8]"),
-        ("118:62", "[i8]"),
-        ("122:75", "[i8]"),
-        ("127:93", "[f32]"),
-        ("131:43", "[i8]"),
-        ("135:48", "[i8]"),
+        ("110:53", "[i8]"),
+        ("115:73", "[i8]"),
+        ("120:62", "[i8]"),
+        ("124:75", "[i8]"),
+        ("129:93", "[f32]"),
+        ("133:43", "[i8]"),
+        ("137:48", "[i8]"),
+        // The tuple of that kernel, where the pointer is cast back.
+        ("208:17", "[i8]"),
         // A GPU kernel: a plain one, one of compile-time arguments, a cooperative one, and a
         // cooperative one of arguments.
-        ("154:53", "[i8]"),
-        ("159:72", "[f32]"),
-        ("164:62", "[i8]"),
-        ("170:81", "[f32]"),
+        ("220:53", "[i8]"),
+        ("225:72", "[f32]"),
+        ("230:62", "[i8]"),
+        ("236:81", "[f32]"),
         // A GPU kernel kernite refuses: a plain one, and a cooperative one.
-        ("174:55", "[i8]"),
-        ("179:64", "[i8]"),
+        ("240:55", "[i8]"),
+        ("245:64", "[i8]"),
+        // And one that returns a pointer, plain and of compile-time arguments.
+        ("284:74", "[i8]"),
+        ("289:94", "[i8]"),
     ];
     let mut said: Vec<String> = kernite.map(|(at, what)| format!("src/lib.rs:{at}: {what}")).into();
     said.extend(sizes.map(|(at, ty)| size_unknown(at, ty)));
-    // The array and the tuple Rust refuses are two errors more than the lines say.
-    let errors = kernite.len() + sizes.len() + 2;
+    let errors = kernite.len() + sizes.len();
     said.push(format!("error: could not compile `no_size` (lib) due to {errors} previous errors"));
     refuses("no_size", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
@@ -1341,6 +1568,167 @@ fn a_pointer_to_a_type_with_no_size_is_refused_whatever_it_holds_or_is_called() 
     let mut said: Vec<String> = sizes.map(|(at, ty)| size_unknown(at, ty)).into();
     said.push(format!("error: could not compile `no_size_names` (lib) due to {} previous errors", sizes.len()));
     refuses("no_size_names", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A pointer to a type Rust refuses by itself, `NeedsCopy<String>` where the struct asks for an argument
+/// that is `Copy`, is Rust's error, said once, at the type, as any type's is: in a kernel of every kind,
+/// and not again at the module's attribute, nor once for each instance. So it is in an x86 kernel, plain,
+/// of compile-time arguments, cooperative, and cooperative of compile-time arguments; in one that
+/// returns the pointer, plain or of compile-time arguments; in one with two such pointers, each said at
+/// its own; in an x86 kernel kernite refuses, plain or of compile-time arguments, where kernite's error
+/// comes first; and in a GPU kernel, plain, of compile-time arguments, cooperative, and cooperative of
+/// compile-time arguments, and one kernite refuses.
+#[test]
+fn a_pointer_to_a_type_rust_refuses_by_itself_is_said_once_at_its_type() {
+    let y = "error: `y` is not defined";
+    // What kernite says, in the order of the kernels: the x86 module's, then the GPU's.
+    let kernite = [
+        ("51:23", y),
+        ("56:23", "error: in `refused_tiles::<1>`: `y` is not defined"),
+        ("56:23", "error: in `refused_tiles::<2>`: `y` is not defined"),
+        ("83:28", y),
+    ];
+    // Where Rust says it, and of which type: at the pointer's type, in the order Rust says it.
+    let bounds = [
+        // An x86 kernel: plain, of compile-time arguments, cooperative, and cooperative of
+        // compile-time arguments.
+        ("14:51", "String"),
+        ("19:63", "String"),
+        ("25:54", "String"),
+        ("31:72", "String"),
+        // One that returns the pointer, plain and of compile-time arguments.
+        ("36:67", "String"),
+        ("41:85", "String"),
+        // One with two such pointers.
+        ("46:49", "String"),
+        ("46:83", "Vec<u8>"),
+        // One kernite refuses: plain and of compile-time arguments.
+        ("50:53", "String"),
+        ("55:73", "String"),
+        // A GPU kernel: plain, of compile-time arguments, cooperative, and cooperative of
+        // compile-time arguments.
+        ("62:53", "String"),
+        ("67:69", "String"),
+        ("72:56", "String"),
+        ("78:76", "String"),
+        // One kernite refuses.
+        ("82:55", "String"),
+    ];
+    let mut said: Vec<String> = kernite.map(|(at, what)| format!("src/lib.rs:{at}: {what}")).into();
+    said.extend(bounds.map(|(at, ty)| not_copy(at, ty)));
+    let errors = kernite.len() + bounds.len();
+    said.push(format!("error: could not compile `pointer_bound` (lib) due to {errors} previous errors"));
+    refuses("pointer_bound", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A pointer to a type with a `_` in it, `*const [_; 3]` or `*mut (u8, _)`, is Rust's error alone: Rust does not
+/// allow a `_` in a signature, and says so once, at the `_`. It does not say as well that it cannot tell the type
+/// the `_` stands for, at the module's attribute or at the result, nor is the pointer asked whether it has a size.
+/// So it is in an x86 kernel, plain, of compile-time arguments, cooperative, and one kernite refuses, where
+/// kernite's error comes first; for a parameter, and for a result, `-> *const _` and `-> *mut (u8, _)`, but a
+/// cooperative kernel's result, where kernite's error is alone; and in a GPU kernel, plain, of compile-time
+/// arguments, cooperative, and one kernite refuses, but a GPU kernel's result, where kernite's error is alone.
+/// So is a `_` in a result that is no pointer, `-> [_; 3]`, beside kernite's error, and a `_` that is an array's
+/// whole length, `*const [u8; _]`, in an x86 kernel's parameter and result.
+#[test]
+fn a_placeholder_in_a_pointers_type_is_rusts_error_alone_at_the_placeholder() {
+    let y = "error: `y` is not defined";
+    // What kernite says, in the order of the kernels: the x86 module's, then the GPU's.
+    let kernite = [
+        ("48:69", "error: a cooperative kernel's threads return nothing: they write what they compute to memory"),
+        ("53:23", y),
+        ("57:23", y),
+        ("61:23", y),
+        ("64:66", "error: a kernel returns a float, an integer or a pointer, or never, `!`; not `[_; 3]`"),
+        ("85:63", "error: a GPU kernel returns nothing, not `*mut [_; 3]`: it writes what it works out to memory"),
+        ("90:28", y),
+    ];
+    // Where Rust says it, and of what: at the `_`, in the order Rust says it.
+    let holes = [
+        // An x86 kernel: plain, with a parameter and with each result.
+        ("12:52", "functions"),
+        ("16:73", "return types"),
+        ("20:81", "return types"),
+        // Of compile-time arguments.
+        ("25:66", "functions"),
+        ("31:87", "return types"),
+        ("37:95", "return types"),
+        // Cooperative.
+        ("43:55", "functions"),
+        // One kernite refuses.
+        ("52:54", "functions"),
+        ("56:75", "return types"),
+        ("60:83", "return types"),
+        // A result that is no pointer.
+        ("64:67", "return types"),
+        // An array's whole length, `[u8; _]`: a parameter and a result.
+        ("97:56", "functions"),
+        ("101:78", "return types"),
+        // A GPU kernel: plain, of compile-time arguments, cooperative, and one kernite refuses.
+        ("71:58", "methods"),
+        ("76:74", "methods"),
+        ("81:61", "methods"),
+        ("89:60", "methods"),
+    ];
+    let mut said: Vec<String> = kernite.map(|(at, what)| format!("src/lib.rs:{at}: {what}")).into();
+    said.extend(holes.map(|(at, what)| not_allowed(at, what)));
+    let errors = kernite.len() + holes.len();
+    said.push(format!("error: could not compile `placeholder` (lib) due to {errors} previous errors"));
+    refuses("placeholder", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A `_` is Rust's placeholder in a type, and is no placeholder where it is a pattern or a name, or the macro's
+/// own: in a block, `[u8; { let _ = 1; 3 }]` or `Arr<{ let _ = 1; 3 }>`; in an array's length that is no block,
+/// `[u8; if let Some(_) = Some(1) { 3 } else { 4 }]`, which is an expression; among a macro's arguments,
+/// `[u8; len!(_)]` or `byte!(_)`, which the macro drops; and as the name of a function pointer's parameter,
+/// `fn(_: u8)`. Rust takes each of these types in a signature, so a kernel that gives back a pointer to one is a
+/// kernel: the crate builds without a word, under `#![deny(warnings)]`, and the test the fixture holds calls each
+/// x86 kernel, plain and of compile-time arguments, which gives its pointer back, and the second adds its argument
+/// to it first. A kernel taken for one with a placeholder is a stub, which aborts.
+#[test]
+fn a_result_with_an_underscore_that_is_no_placeholder_is_a_kernel_that_runs() {
+    let printed = runs_quietly(&["test"], "not_placeholder");
+    assert!(
+        printed.contains("test result: ok. 1 passed"),
+        "fixtures/not_placeholder.rs ran its test, and printed:\n{printed}"
+    );
+}
+
+/// A pointer to a type with no size, a tuple that ends in `CStr` or a struct whose last field is a slice, is Rust's
+/// error at the type, said once, if the type holds a `_` that is no placeholder, as it is if the type holds none: a
+/// pattern in a block, in an array's length, the name of a function pointer's parameter, and an argument of a macro,
+/// as the test of the results says. The macros ask Rust of the pointer, and do not take the `_` for a placeholder,
+/// which Rust refuses alone. So it is in an x86 kernel, plain, of compile-time arguments and cooperative, and in a GPU
+/// kernel.
+#[test]
+fn a_pointer_with_no_size_and_an_underscore_that_is_no_placeholder_is_rusts_error_at_its_type() {
+    let sizes = [
+        // A pattern in a block, and an argument of a macro, in an array's length: an x86 kernel, plain, of
+        // compile-time arguments and cooperative.
+        ("32:51", "[i8]"),
+        ("38:19", "[i8]"),
+        ("46:60", "[i8]"),
+        ("50:56", "[i8]"),
+        ("55:76", "[i8]"),
+        ("61:65", "[i8]"),
+        // A pattern in an array's length, and a function pointer's parameter: a plain x86 kernel.
+        ("66:19", "[i8]"),
+        ("72:54", "[i8]"),
+        // A pattern in a block that is a const argument, and a macro that gives the type: a plain x86 kernel.
+        ("76:60", "[u8]"),
+        ("80:56", "[i8]"),
+        // And a GPU kernel, with each of the six.
+        ("87:53", "[i8]"),
+        ("91:58", "[i8]"),
+        ("96:17", "[i8]"),
+        ("102:56", "[i8]"),
+        ("106:62", "[u8]"),
+        ("110:58", "[i8]"),
+    ];
+    let mut said: Vec<String> = sizes.map(|(at, ty)| size_unknown(at, ty)).into();
+    let errors = sizes.len();
+    said.push(format!("error: could not compile `not_placeholder_no_size` (lib) due to {errors} previous errors"));
+    refuses("not_placeholder_no_size", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
 /// Asking Rust whether each pointer has a size costs a crate no word, under `#![deny(warnings)]`: of

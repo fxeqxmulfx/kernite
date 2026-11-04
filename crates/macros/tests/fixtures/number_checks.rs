@@ -44,17 +44,16 @@ pub mod cpu {
         ret(a);
     }
 
-    /// Parameters named as the locals the macros write: the probe's of a plain kernel, `__0`, `__1`
-    /// and `__n`, and the parameter of the closure that asks of a type, `__kernite_asked`.
-    pub unsafe extern "sysv64" fn locals(__0: u64, __1: u64, __n: u64, __kernite_asked: u64) -> u64 {
+    /// Parameters named as the locals the macros write: the probe's of a plain kernel, `__0` and
+    /// `__1`, and the parameter of the closure that asks of a type, `__kernite_asked`.
+    pub unsafe extern "sysv64" fn locals(__0: u64, __1: u64, __kernite_asked: u64) -> u64 {
         add(__0, __1);
-        add(__0, __n);
         add(__0, __kernite_asked);
         ret(__0);
     }
 
     #[instances(1, 2)]
-    pub unsafe extern "sysv64" fn locals_tiles<const N: u64>(__0: u64, __n: f64, __kernite_asked: u64) -> u64 {
+    pub unsafe extern "sysv64" fn locals_tiles<const N: u64>(__0: u64, __1: f64, __kernite_asked: u64) -> u64 {
         add(__0, N);
         add(__0, __kernite_asked);
         ret(__0);
@@ -170,7 +169,7 @@ pub mod gpu {
     }
 
     /// Parameters named as the locals the macros write.
-    pub unsafe extern "ptx-kernel" fn locals(__0: u32, __1: f32, __n: u64, __kernite_asked: u8) {
+    pub unsafe extern "ptx-kernel" fn locals(__0: u32, __1: f32, __kernite_asked: u8) {
         let x: u32;
         mov.u32(x, __0);
     }

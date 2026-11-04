@@ -34,18 +34,3 @@ pub mod blocks {
     #[cfg(any())]
     pub unsafe extern "ptx-kernel" fn k_blocks() {}
 }
-
-/// Kernels that no one PTX module can hold, the first left out.
-#[kernite_macros::kernels]
-pub mod ptx {
-    #[cfg(any())]
-    pub unsafe extern "ptx-kernel" fn old(n: u32) {
-        let i: u32;
-        shfl.idx.b32(i, n, 0, 31);
-    }
-
-    pub unsafe extern "ptx-kernel" fn new(f: f32) {
-        let v: f32;
-        tanh.approx.f32(v, f);
-    }
-}

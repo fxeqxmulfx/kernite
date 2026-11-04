@@ -1,6 +1,8 @@
 //! The data kernite-build and the machines hand on: plain values, whatever the machine.
 
-use kernite_lang::{Error, Mention, Module, Value};
+use kernite_lang::{Error, Mention, Module, Span, Value};
+
+use crate::Assembly;
 
 /// A kernel compiled, or a static, and where it named the items of its module. Rust never sees
 /// a kernel's body run, so whatever writes the module out for Rust has to say what it named.
@@ -60,11 +62,13 @@ pub struct HostStatic {
     pub init: Vec<u8>,
 }
 
-/// A static of the GPU's memory: its symbol, and the number the host reads its elements as.
+/// A static of the GPU's memory: its symbol, its type, and the number the host reads its elements as.
 #[derive(Debug, PartialEq)]
 pub struct DeviceStatic {
     /// The name the driver finds it by.
     pub symbol: String,
+    /// Its type as the module declares it, with the values it names known now: `constant<[u32; 16]>`.
+    pub ty: String,
     /// The number the host reads each element as, by the language's name: `u32` for one PTX
     /// calls `b32` or `u32`, or `f16`.
     pub host: String,
@@ -90,9 +94,6 @@ pub struct ModuleOut {
     pub owner: Option<Error>,
     /// What each item of `module` is, in order.
     pub items: Vec<ItemOut>,
-    /// Each instance written of each function the process runs, by name, `tile::<4>`, and its
-    /// listing.
-    pub listings: Vec<(String, String)>,
     /// The module the GPU loads, if a static of the module's or a function of it is the GPU's.
     pub device: Option<DeviceOut>,
 }
@@ -156,6 +157,9 @@ pub struct NativeOut {
     pub written: bool,
     /// How many instances it lists, compiled or not; none if its attributes are wrong.
     pub count: usize,
+    /// Each instance Rust gets the code of, by name, `tile::<4>`, and its listing, in order; none
+    /// unless `written`.
+    pub listings: Vec<(String, String)>,
     /// The statics its code names, those the functions it names or may reach at an address
     /// name, and on, in the module's order; none unless the process owns the statics.
     pub touched: Vec<String>,
@@ -212,13 +216,22 @@ pub enum Launcher {
     Of(Vec<(Vec<Value>, usize)>),
 }
 
-/// The module the GPU loads.
+/// The module the GPU loads, put together from what the program keeps of the module's items.
 pub struct DeviceOut {
-    /// Its text; empty if it is none.
-    pub text: String,
-    /// Why it is none, at the module's first item that is the GPU's: a static of its memory, or
-    /// a function it runs.
-    pub error: Option<Error>,
-    /// The symbol of each instance of each kernel Rust launches, by index.
-    pub symbols: Vec<String>,
+    /// The module as the machine says it, for the program to put together.
+    pub assembly: Assembly,
+    /// Where the module's errors go: at the module's first item that is the GPU's, a static of
+    /// its memory or a function it runs.
+    pub at: Span,
+    /// Each instance of each kernel Rust launches, by index: the code it is, by
+    /// [`Kept::Code`](crate::Kept::Code), and its symbol.
+    pub symbols: Vec<(usize, String)>,
+    /// The item of the module that each of the assembly's code is of, by
+    /// [`Kept::Code`](crate::Kept::Code): an instance of a function the GPU runs, in the order of
+    /// the items.
+    pub code_items: Vec<usize>,
+    /// The item of the module that each of the assembly's statics is of, by
+    /// [`Kept::Static`](crate::Kept::Static): a static of the GPU's memory that was laid out, in
+    /// the order of the items.
+    pub static_items: Vec<usize>,
 }

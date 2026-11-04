@@ -36,7 +36,8 @@ pub fn one<N: Native>(module: &Module, native: &N, name: &str) -> Result<Option<
 /// made its module, what is wrong with the rest of the module is the error as well, as `one`
 /// says.
 pub fn all<D: Device>(module: &Module, device: &D) -> Result<Result<String, String>, Error> {
-    let prepared = prepare(module, device);
+    let mut prepared = prepare(module, device);
+    prepared.refuse_room(module, device);
     for s in &prepared.statics {
         s.as_ref().map_err(Clone::clone)?;
     }
@@ -53,7 +54,7 @@ pub fn all<D: Device>(module: &Module, device: &D) -> Result<Result<String, Stri
             codes.push(compile(module, &prepared, device, f, &args)?.code);
         }
     }
-    let made = device.module(&codes, &prepared.made);
+    let made = device.module(&codes, &prepared.made).whole();
     if made.is_ok() {
         rules(module)?;
     }

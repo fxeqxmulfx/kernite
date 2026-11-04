@@ -7,13 +7,13 @@ use kernite_lang::{ItemKind, Module, Span};
 use kernite_ptx::lang::{Callee, Kernel};
 use kernite_ptx::{Prototype, Ptx, Returns, Static, Ty};
 
-/// Static `name` of `module`, laid out by `ptx` after `before`.
-fn lay_out(ptx: &Ptx, module: &Module, name: &str, before: &[Static]) -> Result<Static, StaticError> {
+/// Static `name` of `module`, laid out by `ptx`.
+fn lay_out(ptx: &Ptx, module: &Module, name: &str) -> Result<Static, StaticError> {
     let s = module.items.iter().find_map(|item| match &item.kind {
         ItemKind::Static(s) if s.name == name => Some(s),
         _ => None,
     });
-    ptx.lay_out(name, &kernite_lang::memory(module, s.unwrap()).unwrap(), before)
+    ptx.lay_out(name, &kernite_lang::memory(module, s.unwrap()).unwrap())
 }
 
 /// The kernel `ptx` makes of `name`, a function of `module` or an instance of one, told of
@@ -42,10 +42,11 @@ fn ptx_compiles_a_kernel_through_the_port() {
     "#;
     let module = kernite_lang::parse(src).unwrap();
     let ptx = Ptx::new("7kernite3gpu");
-    let counts = lay_out(&ptx, &module, "COUNTS", &[]).unwrap();
+    let counts = lay_out(&ptx, &module, "COUNTS").unwrap();
     let count = ptx.finish(written(&ptx, &module, "count", std::slice::from_ref(&counts), &[])).unwrap();
     assert_eq!(ptx.symbol(&count), "_ZN7kernite3gpu5countE");
-    let host = DeviceStatic { symbol: "_ZN7kernite3gpu6COUNTSE".into(), host: "u32".into() };
+    let host =
+        DeviceStatic { symbol: "_ZN7kernite3gpu6COUNTSE".into(), ty: "global<[b32; 4]>".into(), host: "u32".into() };
     assert_eq!(ptx.device_static(&counts), host);
     let want = "// Written by kernite.
 
@@ -66,27 +67,28 @@ fn ptx_compiles_a_kernel_through_the_port() {
 \tret;
 }
 ";
-    assert_eq!(ptx.module(&[count], &[counts]).unwrap(), want);
+    assert_eq!(ptx.module(&[count], &[counts]).whole().unwrap(), want);
 }
 
-/// A module has 64 KB of constant memory, so a static that fits alone is refused at its type
-/// after statics that leave it too little: the port is told of those laid out before it. What a
-/// static holds is checked before the room left: one wrong in both is refused at its value.
+/// A module has 64 KB of constant memory, so a static that fits alone has no room after statics
+/// that leave it too little: the port says so of the statics it laid out, in order, and a static
+/// that has none takes none, so `D` fits where `B` did not. What a static holds is checked when it
+/// is laid out, before the room left: one wrong in both is refused at its value.
 #[test]
-fn a_static_that_does_not_fit_beside_those_before_it_is_refused() {
+fn a_static_that_does_not_fit_beside_those_before_it_has_no_room() {
     let src = "
         static A: constant<[u8; 65535]>;
         static B: constant<[u32; 1]>;
         static C: constant<[u32; 2]> = [1, 2, 3];
+        static D: constant<[u8; 1]>;
     ";
     let module = kernite_lang::parse(src).unwrap();
     let ptx = Ptx::new("");
-    let a = lay_out(&ptx, &module, "A", &[]).unwrap();
-    lay_out(&ptx, &module, "B", &[]).unwrap();
-    let full = "this makes the module's constant memory 65540 bytes, and a module has 64 KB";
-    assert_eq!(lay_out(&ptx, &module, "B", std::slice::from_ref(&a)), Err(StaticError::Type(full.into())));
     let three = StaticError::Value("`constant<[u32; 2]>` holds 2 elements; this has 3".into());
-    assert_eq!(lay_out(&ptx, &module, "C", &[a]), Err(three));
+    assert_eq!(lay_out(&ptx, &module, "C"), Err(three));
+    let laid: Vec<Static> = ["A", "B", "D"].map(|name| lay_out(&ptx, &module, name).unwrap()).into();
+    let full = "this makes the module's constant memory 65540 bytes, and a module has 64 KB";
+    assert_eq!(ptx.room(&laid), [None, Some(full.into()), None]);
 }
 
 /// A function `extern "ptx-func"` is a `.func` of the module, which a kernel calls by its
@@ -167,7 +169,7 @@ fn a_function_the_kernels_call_is_a_func() {
 \tret;
 }
 ";
-    assert_eq!(ptx.module(&[times, k], &[]).unwrap(), want);
+    assert_eq!(ptx.module(&[times, k], &[]).whole().unwrap(), want);
 }
 
 /// Each refusal says what to blame, for kernite-build to place it: the part of a static that is
@@ -186,9 +188,9 @@ fn each_refusal_says_what_to_blame() {
     let module = kernite_lang::parse(src).unwrap();
     let ptx = Ptx::new("");
     let empty = StaticError::Type("`global<[u32; 0]>` holds nothing".into());
-    assert_eq!(lay_out(&ptx, &module, "EMPTY", &[]), Err(empty));
+    assert_eq!(lay_out(&ptx, &module, "EMPTY"), Err(empty));
     let big = StaticError::Value("this is 128, out of range for `s8`".into());
-    assert_eq!(lay_out(&ptx, &module, "BIG", &[]), Err(big));
+    assert_eq!(lay_out(&ptx, &module, "BIG"), Err(big));
     // Where `x` is declared: a byte of the source, as a string's spans are.
     let at = Some(Span(src.find("x: u32").unwrap() as u32));
     let unfinished = Unfinished { at, message: "`x` is read before anything writes it".into() };

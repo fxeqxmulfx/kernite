@@ -1,8 +1,8 @@
-//! The lexer, how a type is written and which types are pointers, the rounding of 16-bit floats,
-//! whether a function is `unsafe`, and where a place is. The rest of the language is tested where it
-//! meets the targets it is compiled for, in `kernite`'s `tests/lang.rs`.
+//! The lexer, how a type is read and written and which types are pointers, the rounding of 16-bit
+//! floats, whether a function is `unsafe`, and where a place is. The rest of the language is tested
+//! where it meets the targets it is compiled for, in `kernite`'s `tests/lang.rs`.
 
-use crate::token::Span;
+use crate::token::{Span, Tree};
 use crate::value::{Value, cast};
 use crate::{Mention, parse};
 
@@ -13,10 +13,31 @@ fn the_lexer_reads_what_rust_writes() {
     assert_eq!(crate::text(&trees), r#"a.b(0..n, 1.5e-3, 0x1F_u8, r#type, "s\"q", 1..=2)"#);
 }
 
+/// The tokens of `src`, a source with lifetimes in it, as `for<'a> fn(&'a u8)` has. The lexer of a
+/// string refuses a lifetime, but the macro is given one as `proc_macro` hands it over: a `'` joint
+/// to the name that follows it. So each `'` of `src` is lexed as the start of a word, `lt_a`, which
+/// is then made into the two tokens.
+fn lexed_with_lifetimes(src: &str) -> Vec<Tree> {
+    fn made(trees: Vec<Tree>) -> Vec<Tree> {
+        trees
+            .into_iter()
+            .flat_map(|tree| match tree {
+                Tree::Ident { name, span } if name.starts_with("lt_") => vec![
+                    Tree::Punct { ch: '\'', joint: true, span },
+                    Tree::Ident { name: name["lt_".len()..].to_string(), span },
+                ],
+                Tree::Group { delim, trees, span } => vec![Tree::Group { delim, trees: made(trees), span }],
+                tree => vec![tree],
+            })
+            .collect()
+    }
+    made(crate::lex(&src.replace('\'', "lt_")).unwrap())
+}
+
 /// A type is written as Rust writes it, however its source spaced it: a space between words, after
-/// `,` and `;`, after `const` and `mut`, on each side of a `+` or a `=` that no operator holds and of
-/// an arrow, `->`, and none beside the rest, nor inside an operator, `+=`, `==`, `=>`, `<=`, `..=` or
-/// `->`.
+/// `,` and `;`, after `const` and `mut`, after the `>` of a binder, `for<'a> fn(&'a u8)`, on each
+/// side of a `+` or a `=` that no operator holds and of an arrow, `->`, and none beside the rest, nor
+/// inside an operator, `+=`, `==`, `=>`, `<=`, `..=` or `->`.
 #[test]
 fn a_type_is_written_as_rust_writes_it() {
     let written = |src: &str| crate::text(&crate::lex(src).unwrap());
@@ -66,6 +87,55 @@ fn a_type_is_written_as_rust_writes_it() {
     assert_eq!(written("Pair<fn()->&u8,2>"), "Pair<fn() -> &u8, 2>");
     assert_eq!(written("Box<dyn Fn(u8)->u8+Send>"), "Box<dyn Fn(u8) -> u8 + Send>");
     assert_eq!(written("fn(fn()->!)  ->  !"), "fn(fn() -> !) -> !");
+    // A binder is followed by a space; the `>` that closes the arguments of a type is no binder's.
+    let bound = |src: &str| crate::text(&lexed_with_lifetimes(src));
+    for ty in [
+        "for<'a> fn(&'a u8)",
+        "for<'a> fn(&'a u8) -> &'a u8",
+        "for<'a, 'b> fn(&'a u8, &'b u8)",
+        "for<> fn(u8)",
+        "dyn for<'a> Fn(&'a u8)",
+        "Option<&dyn for<'a> Fn(&'a u8)>",
+        "*const for<'a> fn(&'a u8)",
+        "Pair<for<'a> fn(&'a u8), 2>",
+        "fn(for<'a> fn(&'a u8)) -> for<'a> fn(&'a u8)",
+        "Box<dyn Send + for<'a> Fn(&'a u8)>",
+        "Box<dyn for<'a> Tr<'a>>",
+        "dyn for<'a> Tr<'a> + Send",
+    ] {
+        assert_eq!(bound(ty), ty);
+    }
+    assert_eq!(bound("for<'a>fn(&'a u8)"), "for<'a> fn(&'a u8)");
+    assert_eq!(bound("for < 'a >  fn(&'a u8)->&'a u8"), "for<'a> fn(&'a u8) -> &'a u8");
+    assert_eq!(bound("Option<&dyn for<'a>Fn(&'a u8)>"), "Option<&dyn for<'a> Fn(&'a u8)>");
+    assert_eq!(bound("Box<dyn Send+for<'a>Fn(&'a u8)>"), "Box<dyn Send + for<'a> Fn(&'a u8)>");
+}
+
+/// A type that begins with a binder, `for<'a> fn(&'a u8)`, is read whole, as any other type is: the
+/// `<` after `for` opens the binder, not the arguments of a type named `for`. So it is one type as a
+/// parameter, which starts at its `for`, as the argument of another type, `Option<for<'a> fn(&'a u8)>`,
+/// and as a result.
+#[test]
+fn a_type_that_begins_with_a_binder_is_read_whole() {
+    // A type as the parser holds it, a name or a name with arguments, written out.
+    fn shown(ty: &crate::Type) -> String {
+        match ty {
+            crate::Type::Name(name, _) => name.clone(),
+            crate::Type::Generic(name, args, _) => {
+                format!("{name}<{}>", args.iter().map(shown).collect::<Vec<_>>().join(", "))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    let src = "pub unsafe extern \"sysv64\" fn k(x: for<'a> fn(&'a u8), y: Option<for<'a> fn(&'a u8)>, \
+               z: Option<&dyn for<'a> Fn(&'a u8)>) -> for<'a> fn(&'a u8) {}";
+    let module = crate::module(&lexed_with_lifetimes(src), 0).unwrap();
+    let crate::ItemKind::Fn(f) = &module.items[0].kind else { panic!("a function") };
+    let types: Vec<String> = f.params.iter().map(|p| shown(&p.ty)).collect();
+    assert_eq!(types, ["for<'a> fn(&'a u8)", "Option<for<'a> fn(&'a u8)>", "Option<&dyn for<'a> Fn(&'a u8)>"]);
+    // No `'` comes before the first `for`, so the lexer's offset is the source's.
+    assert_eq!(f.params[0].ty.span(), Span(src.find("for<").unwrap() as u32));
+    assert_eq!(f.ret.as_ref().map(|r| r.ty.as_str()), Some("for<'a> fn(&'a u8)"));
 }
 
 /// A pointer is one word, unless it is to a slice, a `str` or a `dyn`: those are an address and a

@@ -53,23 +53,28 @@ together with the expression inside them, along the helpers that call one anothe
 [`kernite-lang`](crates/lang/src/lib.rs) describes the language.
 
 A type in a kernel's parameters or return means what it means in any function of the module: `super::W` is the `W`
-beside the module of kernels, and `self::W` the one in it. It may name the kernel's compile-time arguments, as in
-any generic function: in `fn arr<const N: usize>(p: *mut [u8; N])`, `arr::<2>` takes a pointer to two bytes. Rust
-takes the argument in a type alone, `N` or `{ N }`, and no expression of it, `N + 1`. An error in a type is Rust's,
-said once, at the type, and so is a lint, at the level the kernel's `allow`, `warn`, `deny`, `forbid` or `expect` gives
-it: a kernel of instances, or a cooperative one, is no different from any function. A generic is a value: `<T>` is an
-error at the `T`, and so is `impl` in a parameter's type or the result's, wherever in it, `x: impl Copy`,
-`Option<impl Copy>` or `-> *mut impl Copy`, at the `impl`: in a parameter it makes the function generic over a type, and
-in the result it hides one. kernite says both in the same words.
+beside the module of kernels, and `self::W` the one in it. It may name the kernel's compile-time arguments, as in any
+generic function: in `fn arr<const N: usize>(p: *mut [u8; N])`, `arr::<2>` takes a pointer to two bytes. Rust takes the
+argument in a type alone, `N` or `{ N }`, and no expression of it, `N + 1`. An error in a type is Rust's, a pointer's
+among them, said once, at the type, in a kernel of every kind, and so is a lint, at the level the kernel's `allow`,
+`warn`, `deny`, `forbid` or `expect` gives it: a kernel of instances, or a cooperative one, on x86 or on a GPU, is no
+different from any function. The one exception is a pointer that a kernel of instances gives back, which the next
+paragraph tells. A generic is a value: `<T>` is an error at the `T`, and so is `impl` in a parameter's type or the
+result's, wherever in it, `x: impl Copy`, `Option<impl Copy>` or `-> *mut impl Copy`, at the `impl`: in a parameter it
+makes the function generic over a type, and in the result it hides one. kernite says both in the same words.
 
 A kernel's pointer to a type with a size, `*const T` or `*mut T`, is one register: `*const [usize; 3]` and
-`*mut *const f32` are taken as `*const f32` is, on x86 and on a GPU. A pointer to a type with no size has two words,
-an address and a length or a table, so it is an error at its type: take the address and the length as two
-parameters. kernite tells a slice, a `str` or a `dyn`, or a tuple that ends in one, in parentheses or not, by what is
-written, and says so in its words. Rust tells any other, whatever it holds and whatever it is called: `CStr`, `Floats`
-where `type Floats = [f32];`, a struct of yours whose last field is a slice, `(&u8, CStr)`. It says that the size cannot
-be known, at the type, for a pointer a kernel returns as well as for one it takes, in a kernel of every kind. A type in
-a message is written as Rust writes it, `[usize; 3]`.
+`*mut *const f32` are taken as `*const f32` is, on x86 and on a GPU. A pointer to a type with no size has two words, an
+address and a length or a table, so it is an error at its type: take the address and the length as two parameters.
+kernite tells a slice, a `str` or a `dyn`, or a tuple that ends in one, in parentheses or not, by what is written, and
+says so in its words. Rust tells any other, whatever it holds and whatever it is called: `CStr`, `Floats` where
+`type Floats = [f32];`, a struct of yours whose last field is a slice, `(&u8, CStr)`. It says that the size cannot be
+known, at the type, for a pointer a kernel returns as well as for one it takes, in a kernel of every kind. A type that
+Rust refuses by itself is its error alone, said once, at the type, in a kernel of every kind: an argument that does not
+meet its struct's bound, `*const NeedsCopy<String>` where `struct NeedsCopy<T: Copy>`, or an array or a tuple that holds
+a type with no size, `*const [CStr; 3]` or `*const (CStr, u8)`. One case has two errors: in a kernel of instances,
+`-> *const (u8, [CStr; 3])` has Rust's error twice, at `[CStr; 3]` and at the whole type. A type in a message is written
+as Rust writes it, `[usize; 3]`.
 
 A number's name in a kernel's parameters or return, `u8` to `u64`, `i8` to `i64`, `usize`, `isize`, `f32`, `f64` or
 `bool`, means that number: `u64` is 64 bits. A module that gives the name another type, `pub type u64 = u32;` and a
@@ -117,11 +122,17 @@ at two places, one of them in a helper `cfg` leaves out, is told of what the hel
 leaves out with every item that names it is not said of, and one that `cfg` keeps and only items `cfg` leaves out name
 is unused to Rust, which says so as it does of any const that nothing names.
 
+A module holds what `cfg` keeps: Rust puts it together, where it knows which `cfg` holds. `LISTINGS` has the listing
+of each x86 kernel that `cfg` keeps, and of no other. `PTX` has each GPU kernel, function and static that `cfg`
+keeps, for the PTX and the GPU that the kernels and functions kept need, and `Kernels::load` asks the driver for the
+names of those alone.
+
 kernite reads every item before Rust knows which `cfg` holds, as Rust parses every item before it does, so an item it
 cannot read is said whatever `cfg` holds, as Rust says a syntax error in a function it leaves out: the head of a
 function, as `fn k<T>()`, rests on no other item. What rests on all the items together is said whatever `cfg` leaves
-out: a name that two items share, though each is under a `cfg` the other is not; and GPU kernels that no one PTX module
-can hold, for each sets the module's `.version` and `.target`.
+out: a name that two items share, though each is under a `cfg` the other is not. GPU kernels and functions that no one
+PTX module can hold, for each sets the module's `.version` and `.target`, are said where `cfg` keeps them: once, at the
+module's first GPU item, of those that clash and no others.
 
 The x86 target knows every instruction of x86-64-v3, in each form `llvm-mc` takes, [`forms`](crates/x86/src/forms.rs):
 x86-64's own on integers of 8 to 64 bits, SSE's to SSE4.2's as AVX writes them, `vaddps` and not `addps`, and AVX's,
@@ -248,7 +259,9 @@ An `extern "ptx-kernel"` function is compiled to PTX. The module's kernels are o
 GPU kernels still runs where there is none. A crate with a module of GPU kernels needs a dependency named
 `kernite-cuda`, not renamed in `Cargo.toml`, for the GPU items that `cfg` keeps: kernite says at the module when it has
 none and one of them is kept. A feature can bring the crate and keep them, `cuda = ["dep:kernite-cuda"]`, and the crate
-builds without the feature.
+builds without the feature. A crate with a static in such a module needs a dependency named `kernite-macros` as well,
+not renamed, for Rust to count the room of the statics `cfg` keeps: kernite says at the module when it has none and a
+static is kept.
 
 ```rust
 #[kernite_macros::kernels]
@@ -339,11 +352,11 @@ register only as one of a vector's. And kernite checks what `ptxas` leaves to th
 memory it names, at a multiple of the bytes it moves. Each form, and each of its words, says the oldest version of PTX
 and the oldest GPU `ptxas` takes it at, back to PTX 1.0, which is at times older than the ISA says: `ptxas` takes
 `ld.mmio.acquire` for `sm_70`, which the ISA has from `sm_75`. A module's `.version` and `.target` are the oldest that
-have every instruction its kernels use, and never older than PTX 3.0 and `sm_30`: the driver starts at most 65535 blocks
-along x of a module written for `sm_20` or `sm_21`, Fermi's, whatever the GPU it runs on, and 2^31 - 1 of one written
-for `sm_30`. Where `ptxas` is installed, a test hands it every form at what kernite says it needs, at the newest
-version, and for each newer GPU to `sm_86`, which the driver compiles a module for when it runs there, and `ptxas` must
-take it each time; and at the version before and on the GPU before, which it must refuse.
+have every instruction of its kernels and functions, those that `cfg` keeps, and never older than PTX 3.0 and `sm_30`:
+the driver starts at most 65535 blocks along x of a module written for `sm_20` or `sm_21`, Fermi's, whatever the GPU it
+runs on, and 2^31 - 1 of one written for `sm_30`. Where `ptxas` is installed, a test hands it every form at what kernite
+says it needs, at the newest version, and for each newer GPU to `sm_86`, which the driver compiles a module for when it
+runs there, and `ptxas` must take it each time; and at the version before and on the GPU before, which it must refuse.
 
 An `extern "ptx-func"` function is a `.func` that the module's kernels and functions call, itself among them. It
 takes and returns PTX's types, and `call(g, gcd, (a, b))` calls it by its name, or `call(g, fp, (a, b))` at the
@@ -369,7 +382,10 @@ four floats of constant memory, which the kernels only read, `ld.r#const.f32(w, 
 until something writes it. The host reads and writes each as `Kernels` gives it, a [`Global`](crates/cuda/src/lib.rs) of
 Rust's type for its elements: `kernels.COUNTS().read()?`, `kernels.WEIGHTS().write(&[2.0; 4])?`. kernite refuses what a
 module cannot hold: more than the 64 KB of constant memory it has, or 4 GB of global memory, whose size `ptxas` writes
-in 32 bits.
+in 32 bits. The error is at the type of a static that does not fit beside the statics before it that fit. It takes no
+room, so a static after it may fit. The room is that of the statics `cfg` keeps: two tables of 48000 bytes, one under
+`cfg(feature = "new")` and one under `cfg(not(feature = "new"))`, fit in a module, and both under
+`cfg(feature = "new")` do not.
 
 A kernel whose blocks wait for each other is `#[cooperative]`, and its `grid.sync()` waits until every thread of the
 grid has come to it, as CUDA's does. The driver launches it cooperatively, every block of the grid at once, so what a

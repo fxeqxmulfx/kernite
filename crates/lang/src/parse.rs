@@ -482,7 +482,9 @@ impl<'a> Parser<'a> {
             p.finish()?;
             return Ok(Type::Array(Box::new(elem), len, span));
         }
+        // `for<'a> fn(&'a u8)` begins with a binder, not with the name of a type: it is read whole below.
         if let Some(Tree::Ident { name, span }) = self.peek()
+            && name != "for"
             && matches!(self.peek_at(1), Some(Tree::Punct { ch: '<', .. }))
         {
             nested(open, *span)?;

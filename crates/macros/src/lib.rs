@@ -48,7 +48,14 @@
 //!   - In a module of GPU kernels it is on the GPU, declared once in `PTX`. `Kernels` has a
 //!     method of its name that gives it there, a `kernite_cuda::Global` of the type of Rust's its
 //!     elements are read as, `u32` for a `b32`, for the host to read and write:
-//!     `kernels.COUNTS().read()?`. A module of statics alone is the GPU's.
+//!     `kernels.COUNTS().read()?`. A module of statics alone is the GPU's. The statics together
+//!     fit the module: it has 64 KB of constant memory and less than 4 GB of global memory, and
+//!     the error is at the type of a static that does not fit beside the statics before it that fit.
+//!     The room is that of the statics `cfg` keeps, counted as Rust leaves them: the macro writes
+//!     a struct with a field for each static, under the static's `cfg`, and a derive of
+//!     `kernite-macros` counts the fields that are there. A crate with a static in such a module
+//!     needs a dependency named `kernite-macros` as well, not renamed in `Cargo.toml`, and the
+//!     error is at the module when it has none and `cfg` keeps a static.
 //!   - In a module of x86 kernels it is in the process's memory, which the kernels reach at a
 //!     displacement from `rip`, `[COUNTS + 8]`: a `static` of Rust's, a `kernite_cpu::Global` of
 //!     its elements, for the host to read and write: `cpu::COUNTS.read()`. A crate with a static
@@ -111,17 +118,24 @@
 //!
 //! A type in a kernel's parameters or return means what it means in any function of the module,
 //! `super::W` and `self::W` among them, and it may name the kernel's compile-time arguments, as in
-//! any generic function: `*mut [u8; N]` in `fn arr<const N: usize>`. An error in one is Rust's, said
-//! once, at the type, and so is a lint, at the level the kernel's `allow`, `warn`, `deny`, `forbid` or
-//! `expect` gives it. So is a pointer to a type with no size, `*const CStr` say, which has two words
-//! where a kernel's has one: the macros ask Rust of each pointer a kernel takes or gives back, and
-//! it says that the size cannot be known, at the type, whatever the type is called and holds.
-//! So is a number's name that the module gives another type, `pub type u64 = u32;` and a `use` of
-//! it: kernite reads `u64` as 64 bits where Rust would pass a `u32`, so the macros ask Rust of each
+//! any generic function: `*mut [u8; N]` in `fn arr<const N: usize>`. An error in one is Rust's, a
+//! pointer's among them, said once, at the type, in a kernel of every kind but the case below that
+//! has two, and so is a lint, at the level the kernel's `allow`, `warn`, `deny`, `forbid` or
+//! `expect` gives it. So is a pointer to a type with no size, `*const CStr` say, which has two
+//! words where a kernel's has one: the macros ask Rust of each pointer a kernel takes or gives
+//! back, and it says that the size cannot be known, at the type, whatever the type is called and
+//! holds. So is a pointer to a type Rust refuses by itself, `*const NeedsCopy<String>` where
+//! `struct NeedsCopy<T: Copy>`, or `*const [CStr; 3]`: the macros ask Rust whether a pointer has a
+//! size by a coercion and never by a call, which would say the error of the type again. And so is a
+//! number's name that the module gives another type, `pub type u64 = u32;` and a `use` of it:
+//! kernite reads `u64` as 64 bits where Rust would pass a `u32`, so the macros ask Rust of each
 //! number a kernel takes or gives back whether it is that number, and it says that it is not, at
 //! the type, once. A type with no size, `pub type u8 = [u8];`, has Rust say as well that its size
 //! cannot be known, at the type, and nothing at the module's attribute, where nothing could be
-//! mended: the Rust the macros write for the kernel itself takes the number and not the name.
+//! mended: the Rust the macros write for the kernel itself takes the number and not the name. One
+//! case has two errors: a kernel of compile-time arguments casts back a pointer it gives, so for a
+//! type that holds the part Rust refuses, `-> *const (u8, [CStr; 3])`, Rust says the part in the
+//! signature, and the whole type at the cast.
 //! A generic is a value: `<T>` is an error at the `T`, and so is `impl` in a parameter's type or
 //! the result's, wherever in it, `x: impl Copy`, `Option<impl Copy>` or `-> *mut impl Copy`, at the
 //! `impl`: in a parameter it makes the function generic over a type, and in the result it hides
@@ -239,8 +253,10 @@
 
 extern crate proc_macro;
 
+mod cond;
 mod expand;
 mod gpu;
+mod room;
 mod rust;
 mod workspace;
 mod x86;
@@ -371,4 +387,13 @@ pub fn __kernels(input: TokenStream) -> TokenStream {
     let inner = expand(Some((consts.stream(), &path)), braces.stream());
     drop(site);
     module(head, braces, inner)
+}
+
+/// What Rust counts of a module's GPU statics once `cfg` has left out those it leaves out: their
+/// room. `#[kernels]` writes a struct with a field for each, under its `cfg`, for this to be derived
+/// on.
+#[doc(hidden)]
+#[proc_macro_derive(__Room, attributes(kernite_room))]
+pub fn __room(input: TokenStream) -> TokenStream {
+    room::derive(input)
 }
