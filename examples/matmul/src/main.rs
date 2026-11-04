@@ -30,6 +30,10 @@ type Shape = (usize, usize, usize);
 /// The sizes timed when none are given: products of `n` rows of `n` by `n` rows of `n`.
 const SIZES: [usize; 4] = [256, 512, 1024, 2048];
 
+/// The numbers of threads the x86 kernel is timed on, those of them the machine runs at once: one,
+/// then six and twelve, the cores and the threads of a six-core CPU with two threads a core.
+const THREADS: [usize; 3] = [1, 6, 12];
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let target = args.next().unwrap_or_default();
@@ -40,7 +44,10 @@ fn main() -> ExitCode {
         sizes = SIZES.to_vec();
     }
     match target.as_str() {
-        "cpu" => on_cpu(&sizes),
+        "cpu" => on_cpu(&sizes).unwrap_or_else(|e| {
+            eprintln!("the CPU failed: {e}");
+            ExitCode::FAILURE
+        }),
         "gpu" => on_gpu(&sizes).unwrap_or_else(|e| {
             eprintln!("the GPU failed: {e}");
             ExitCode::FAILURE
@@ -55,24 +62,28 @@ fn usage() -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Times the x86 kernels at each size.
-fn on_cpu(sizes: &[usize]) -> ExitCode {
+/// Times the x86 kernel at each size, on each count of [`THREADS`] the machine runs at once; a
+/// line on standard error says which it skips.
+fn on_cpu(sizes: &[usize]) -> Result<ExitCode, kernite_cpu::Error> {
     if !cpu::supported() {
         eprintln!("the kernels need AVX2 and FMA");
-        return ExitCode::FAILURE;
+        return Ok(ExitCode::FAILURE);
     }
-    println!("{:>6} {:>14}", "n", "sgemm GFLOPS");
+    let counts = cpu::runnable(&THREADS)?;
+    println!("{:>6} {:>7} {:>14}", "n", "threads", "sgemm GFLOPS");
     for &n in sizes {
         let shape = (n, n, n);
         let (a, b, mut c) = (floats(n * n, 1), floats(n * n, 2), vec![0.0; n * n]);
-        let time = average(|count| {
-            for _ in 0..count {
-                cpu::sgemm(&mut c, &a, &b, shape);
-            }
-        });
-        println!("{n:>6} {:>14.1}", gflops(shape, time));
+        for &threads in &counts {
+            let time = average(|count| {
+                for _ in 0..count {
+                    cpu::sgemm(&mut c, &a, &b, shape, threads).unwrap_or_else(|e| panic!("the grid failed: {e}"));
+                }
+            });
+            println!("{n:>6} {threads:>7} {:>14.1}", gflops(shape, time));
+        }
     }
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Times the PTX kernels at each size, on the first GPU.

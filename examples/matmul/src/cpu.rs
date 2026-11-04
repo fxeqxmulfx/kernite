@@ -9,30 +9,44 @@ pub mod kernels {
     /// Columns of `c` it keeps in registers: two vectors of eight a row, twelve of the sixteen
     /// `ymm`s, with two for a row of `b` and one for a float of `a`.
     pub const NR: usize = 16;
-    /// Steps of `k` a block takes: a sliver of `a`, `MR` rows of `KC` floats, 9 KB, is read from
+    /// Steps of `k` a block takes: a sliver of `a`, `MR` rows of `KC` floats, 18 KB, is read from
     /// L1 while the slivers of `b`'s block pass it.
-    pub const KC: usize = 384;
-    /// Columns of `b` a block takes: `KC` rows of `NC` floats, 384 KB, stay in L2 while the
-    /// slivers of `a` pass them.
-    pub const NC: usize = 256;
+    pub const KC: usize = 768;
+    /// Columns of `b` a strip takes at most: `KC` rows of `NC` floats, 192 KB, stay in L2 while
+    /// the slivers of `a` pass them.
+    pub const NC: usize = 64;
+    /// Rows of `a` a thread packs at a time: whole slivers.
+    pub const PACK: usize = 4 * MR;
     /// Steps of `k` a turn of the micro-kernel's loop takes.
     pub const UNROLL: usize = 4;
 
     /// `c = a b`, of `a`, `m` rows of `k` floats, and `b`, `k` rows of `n`, into `c`, `m` rows
-    /// of `n`, where `shape` points at `m`, `n` and `k`, in a row: each element of `c` a chain
-    /// of fused multiply-adds over `k` in order, from +0.
+    /// of `n`, on the threads of a grid: each element of `c` a chain of fused multiply-adds over
+    /// `k` in order, from +0. `m` and `n` are 1 or more.
     ///
-    /// For each block of `KC` steps of `k`, `a` is packed into slivers of `MR` rows at `packed`,
-    /// which has room for `m` rows, rounded up to `MR`, of `min(k, KC)` floats, and for 15 more,
-    /// to start at a multiple of 64 bytes: they grow with `m`, so the caller hands them in. Then
-    /// `b`, a block of `NC` columns at a time, is packed into slivers of `NR` columns in the
-    /// kernel's stack memory, which stays a thread's own, in its core's L2. It takes 384 KB: a
-    /// thread Rust starts has 2 MB of stack unless told otherwise, and where less is left,
-    /// kernite's probes stop the kernel at the stack's guard page. The micro-kernel multiplies a
-    /// sliver of each into a tile of `c` in registers: from +0 for the first block of `k`, and
-    /// from what the tile holds for each after, so that each chain goes on in order. Past the
-    /// edges of `c` the slivers hold zeros, and of a tile there only what lies in `c` is read
-    /// and written.
+    /// `shape` points at six words: `m`, `n` and `k`; how many parts of `PACK` rows `a` has; how
+    /// many pieces `c` has; and where the counters are. The pieces follow, four words each: the
+    /// first column, and how many, which is `NC` or fewer; the first row, a multiple of `MR`, and
+    /// how many, which lie in `c`. The pieces lie side by side in `c`, and none shares an element
+    /// with another. The counters are all zero, four for each block of `KC` steps of `k`: the parts
+    /// taken and packed, the pieces taken and done. Each is a line of the cache to itself, 64 bytes
+    /// from a multiple of 64, so that threads taking from one do not slow those taking from
+    /// another.
+    ///
+    /// For each block of `KC` steps of `k`, the threads pack `a` into slivers of `MR` rows at
+    /// `packed`, which has room for `m` rows, rounded up to `MR`, of `min(k, KC)` floats: they grow
+    /// with `m`, so the caller hands them in, from a multiple of 64 bytes, so that threads packing
+    /// parts side by side share a line of it only where a block takes an odd number of steps. Each
+    /// part of `a` goes to the first thread to come for it. When every part is packed, the threads
+    /// take the pieces of `c` the same way: `b`, the columns of a piece, is packed into slivers of
+    /// `NR` columns in the kernel's stack memory, which stays a thread's own, in its core's L2. The
+    /// micro-kernel multiplies a sliver of each into a tile of `c` in registers: from +0 for the
+    /// first block of `k`, and from what the tile holds for each after, so that each chain goes on
+    /// in order, whichever thread has the piece. When every piece is done, the next block of `k`
+    /// packs over `a`'s. A thread waits for work to be done, not for threads to come: one that
+    /// comes late, or is kept back, holds up only the part or the piece it took. Past the edges of
+    /// `c` the slivers hold zeros, and of a tile there only what lies in `c` is read and written.
+    #[cooperative]
     pub unsafe extern "sysv64" fn sgemm(
         c: *mut f32,
         a: *const f32,
@@ -45,48 +59,76 @@ pub mod kernels {
         mov(m, [shape]);
         mov(n, [shape + 8]);
         mov(k, [shape + 16]);
-        test(m, m);
-        jz(done);
-        test(n, n);
-        jz(done);
-        add(packed, 63);
-        and(packed, -64);
         note("the bytes from a row of b or c to the next");
         let ld: gpr;
         mov(ld, n);
         shl(ld, 2);
 
         note("blocks of KC steps of k from step pc, each chain going on from the block before");
-        let (pc, ak, bk): (gpr, gpr, gpr);
+        let (pc, ak, bk, counters): (gpr, gpr, gpr, gpr);
         zero(pc);
         mov(ak, a);
         mov(bk, b);
+        note("a block's counters, a line each: parts taken, +64 packed; +128 pieces taken, +192 done");
+        mov(counters, [shape + 40]);
         label(depth);
         let kc: gpr;
         mov(kc, k);
         sub(kc, pc);
         at_most::<KC>(kc);
-        pack_a(packed, ak, k, m, kc);
 
-        note("blocks of NC columns of b, and of c");
-        let (bj, cj, nleft): (gpr, gpr, gpr);
-        mov(bj, bk);
-        mov(cj, c);
-        mov(nleft, n);
-        label(columns);
-        let (nc, to): (gpr, gpr);
-        mov(nc, nleft);
-        at_most::<NC>(nc);
+        note("parts of PACK rows of a, packed by the first thread to come for each");
+        label(parts);
+        let part: gpr;
+        mov(part, 1);
+        lock.xadd([counters], part);
+        cmp(part, [shape + 24]);
+        jae(packed_all);
+        let (sliver, row, mine): (gpr, gpr, gpr);
+        imul(row, part, PACK);
+        mov(mine, m);
+        sub(mine, row);
+        at_most::<PACK>(mine);
+        mov(sliver, row);
+        imul(sliver, kc);
+        lea(sliver, [packed + sliver * 4]);
+        imul(row, k);
+        lea(row, [ak + row * 4]);
+        pack_a(sliver, row, k, mine, kc);
+        lock.inc(qword[counters + 64]);
+        jmp(parts);
+        label(packed_all);
+        let total: gpr;
+        mov(total, [shape + 24]);
+        wait_for::<64>(counters, total);
+
+        note("pieces of c, columns and rows, each taken by the first thread to come for it");
+        label(pieces);
+        let (piece, cj, nc, ri, hleft): (gpr, gpr, gpr, gpr, gpr);
+        mov(piece, 1);
+        lock.xadd([counters + 128], piece);
+        cmp(piece, [shape + 32]);
+        jae(joined);
+        shl(piece, 5);
+        mov(cj, [shape + piece + 48]);
+        mov(nc, [shape + piece + 56]);
+        mov(ri, [shape + piece + 64]);
+        mov(hleft, [shape + piece + 72]);
+        let (bj, to): (gpr, gpr);
+        lea(bj, [bk + cj * 4]);
+        lea(cj, [c + cj * 4]);
         lea(to, [block]);
         pack_b(to, bj, ld, nc, kc);
 
         note("slivers of MR rows of a, and of c");
-        let (pa, ci, hleft): (gpr, gpr, gpr);
-        mov(pa, packed);
-        mov(ci, cj);
-        mov(hleft, m);
+        let (pa, ci): (gpr, gpr);
+        mov(pa, ri);
+        imul(pa, kc);
+        lea(pa, [packed + pa * 4]);
+        imul(ri, ld);
+        lea(ci, [cj + ri]);
         label(rows);
-        note("slivers of NR columns of the block, a tile of c each");
+        note("slivers of NR columns of the piece, a tile of c each");
         let (pb, ct, wleft, x): (gpr, gpr, gpr, gpr);
         lea(pb, [block]);
         mov(ct, ci);
@@ -102,19 +144,29 @@ pub mod kernels {
         lea(ci, [ci + ld * 2]);
         sub(hleft, MR);
         ja(rows);
+        lock.inc(qword[counters + 192]);
+        jmp(pieces);
 
-        add(bj, 4 * NC);
-        add(cj, 4 * NC);
-        sub(nleft, NC);
-        ja(columns);
-
+        label(joined);
+        mov(total, [shape + 32]);
+        wait_for::<192>(counters, total);
         add(ak, 4 * KC);
         let t: gpr;
         imul(t, ld, KC);
         add(bk, t);
+        add(counters, 256);
         add(pc, KC);
         cmp(pc, k);
         jb(depth);
+    }
+
+    /// Waits for the counter at `counters + AT` to reach `total`.
+    fn wait_for<const AT: usize>(counters: gpr, total: gpr) {
+        label(again);
+        cmp([counters + AT], total);
+        jae(done);
+        pause();
+        jmp(again);
         label(done);
     }
 
@@ -162,6 +214,8 @@ pub mod kernels {
     /// `mc`.
     fn pack_a(to: gpr, from: gpr, k: gpr, mc: gpr, kc: gpr) {
         test(kc, kc);
+        jz(end);
+        test(mc, mc);
         jz(end);
         let (lda, q, p, left): (gpr, gpr, gpr, gpr);
         mov(lda, k);
@@ -342,20 +396,79 @@ pub mod kernels {
     }
 }
 
+/// Floats in a line of the CPU's cache, which is 64 bytes.
+const LINE: usize = 16;
+
+/// A line of the CPU's cache: 64 bytes, from a multiple of 64. The kernel's counters have one
+/// each, and `packed` is a run of them.
+#[derive(Clone)]
+#[repr(C, align(64))]
+struct Line {
+    _floats: [f32; LINE],
+}
+
 /// Whether this CPU runs the kernels.
 pub fn supported() -> bool {
     is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
 }
 
-/// `c = a b` by the kernel, of the operands of `shape`.
-pub fn sgemm(c: &mut [f32], a: &[f32], b: &[f32], shape: crate::Shape) {
+/// Of the numbers of threads in `counts`, those the machine runs at once, in order, which a grid
+/// may have. For each of the others, a line on standard error says that it is skipped.
+pub fn runnable(counts: &[usize]) -> Result<Vec<usize>, kernite_cpu::Error> {
+    let most = kernite_cpu::most()?;
+    let (run, skipped): (Vec<usize>, Vec<usize>) = counts.iter().partition(|&&threads| threads <= most);
+    for threads in skipped {
+        eprintln!("{threads} threads: skipped, the machine runs {most} at once");
+    }
+    Ok(run)
+}
+
+/// `c = a b` by the kernel, on `threads` threads, of the operands of `shape`. It fails where the
+/// grid cannot start: with no threads, or with more than the machine runs at once.
+pub fn sgemm(
+    c: &mut [f32],
+    a: &[f32],
+    b: &[f32],
+    shape: crate::Shape,
+    threads: usize,
+) -> Result<(), kernite_cpu::Error> {
     let (m, n, k) = shape;
     assert!(supported(), "the kernels need AVX2 and FMA");
     crate::operands((a.len(), b.len(), c.len()), shape);
-    use kernels::{KC, MR};
-    let mut packed = Vec::with_capacity(MR * k.min(KC) * m.div_ceil(MR) + 15);
+    if m * n == 0 {
+        return Ok(());
+    }
+    use kernels::{KC, MR, NC, NR, PACK};
+    // The pieces of `c` the threads take in turn, from big to small, so that they finish
+    // together: strips of columns, wide at first and one sliver at the end; the narrower a
+    // strip, the more pieces its rows are split in.
+    let mut pieces = Vec::new();
+    let mut at = 0;
+    while at < n {
+        let slivers = (n - at).div_ceil(NR).div_ceil(2 * threads.max(1)).clamp(1, NC / NR);
+        let end = n.min(at + slivers * NR);
+        let rows = m.div_ceil(MR).div_ceil((NC / NR).div_ceil(slivers)) * MR;
+        for row in (0..m).step_by(rows) {
+            pieces.extend([at, end - at, row, rows.min(m - row)]);
+        }
+        at = end;
+    }
+    let mut counters = vec![Line { _floats: [0.0; LINE] }; 4 * k.div_ceil(KC).max(1)];
+    let mut work = vec![m, n, k, m.div_ceil(PACK), pieces.len() / 4, counters.as_mut_ptr() as usize];
+    work.extend(pieces);
+    let mut packed = Vec::<Line>::with_capacity((MR * k.min(KC) * m.div_ceil(MR)).div_ceil(LINE));
     // SAFETY: `m` rows of `k` floats behind `a`, `k` rows of `n` behind `b` and `m` rows of `n`
-    // behind `c`, as `shape` says; room for `a`'s slivers in `packed`; and the CPU has what the
-    // kernel needs.
-    unsafe { kernels::sgemm(c.as_mut_ptr(), a.as_ptr(), b.as_ptr(), [m, n, k].as_ptr(), packed.as_mut_ptr()) }
+    // behind `c`, as `shape` says; room for `a`'s slivers in `packed`, from a multiple of 64
+    // bytes; the pieces lie inside `c` and share no element; four counters, zero, a line each,
+    // for each block of `k`; and the CPU has what the kernel needs.
+    unsafe {
+        kernels::sgemm(
+            kernite_cpu::Grid::new(threads),
+            c.as_mut_ptr(),
+            a.as_ptr(),
+            b.as_ptr(),
+            work.as_ptr(),
+            packed.as_mut_ptr().cast(),
+        )
+    }
 }

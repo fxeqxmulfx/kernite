@@ -37,41 +37,66 @@ fn on_gpu<T: Plain>(
 }
 
 /// The products `cpu::sgemm` is held to: none in each of `m`, `n` and `k`, and the least; then
-/// each size the kernel works in, one less, equal and one more, the others small: `MR` of `m`,
-/// `NR` and `NC` of `n`, `UNROLL` and `KC` of `k`; and one past a block in each at once.
+/// each size the kernel works in, one less, equal and one more, the others small: `MR` and
+/// `PACK` of `m`, `NR` and `NC` of `n`, `UNROLL` and `KC` of `k`; then `n` of each number of
+/// slivers up to two for each of 12 threads and two more, three columns short, so that the
+/// strips come in each width, the last one short; and one past a block in each at once.
 fn cpu_shapes() -> Vec<Shape> {
-    use cpu::kernels::{KC, MR, NC, NR, UNROLL};
+    use cpu::kernels::{KC, MR, NC, NR, PACK, UNROLL};
     let around = |x: usize| [x - 1, x, x + 1];
     let mut shapes = vec![(0, NR, 3), (MR, 0, 3), (MR, NR, 0), (1, 1, 1)];
-    shapes.extend(around(MR).map(|m| (m, NR + 1, 9)));
+    shapes.extend([MR, PACK].into_iter().flat_map(around).map(|m| (m, NR + 1, 9)));
     shapes.extend([NR, NC].into_iter().flat_map(around).map(|n| (MR + 1, n, 9)));
     shapes.extend([UNROLL, KC].into_iter().flat_map(around).map(|k| (MR + 1, NR + 1, k)));
+    shapes.extend((1..=2 * 12 + 2).map(|slivers| (MR + 1, slivers * NR - 3, 9)));
     shapes.push((3 * MR + 1, NC + NR + 5, 2 * KC + 1));
     shapes
 }
 
+/// The numbers of threads `cpu::sgemm` is held to the reference on, those of them the machine
+/// runs at once: one, two, and six and twelve, the cores and the threads of a six-core CPU with
+/// two threads a core.
+const THREADS: [usize; 4] = [1, 2, 6, 12];
+
 #[test]
 fn cpu_sgemm_is_the_reference_bit_for_bit() {
+    let counts = cpu::runnable(&THREADS).unwrap();
     for shape @ (m, n, k) in cpu_shapes() {
         let (a, b) = (floats(m * k, 1), floats(k * n, 2));
-        // `c`, then a row and a tile more, which the kernel leaves as they are.
-        let mut c = vec![f32::NAN; m * n + n + cpu::kernels::NR];
-        let (c, past) = c.split_at_mut(m * n);
-        cpu::sgemm(c, &a, &b, shape);
-        same_bits(c, &reference::sgemm(&a, &b, shape), shape);
-        assert!(past.iter().all(|x| x.is_nan()), "{shape:?}: c written past its end");
+        for &threads in &counts {
+            // `c`, then a row and a tile more, which the kernel leaves as they are.
+            let mut c = vec![f32::NAN; m * n + n + cpu::kernels::NR];
+            let (c, past) = c.split_at_mut(m * n);
+            cpu::sgemm(c, &a, &b, shape, threads).unwrap();
+            same_bits(c, &reference::sgemm(&a, &b, shape), shape);
+            assert!(past.iter().all(|x| x.is_nan()), "{shape:?} on {threads} threads: c written past its end");
+        }
     }
 }
 
 #[test]
 #[should_panic(expected = "c is not 4294967296 rows of 4294967296")]
 fn cpu_sgemm_refuses_a_shape_too_large_to_count() {
-    cpu::sgemm(&mut [], &[], &[], (1 << 32, 1 << 32, 0));
+    cpu::sgemm(&mut [], &[], &[], (1 << 32, 1 << 32, 0), 1).unwrap();
 }
 
 #[test]
 fn cpu_sgemm_takes_usize_max_rows_of_nothing() {
-    cpu::sgemm(&mut [], &[], &[], (usize::MAX, 0, 0));
+    cpu::sgemm(&mut [], &[], &[], (usize::MAX, 0, 0), 1).unwrap();
+}
+
+#[test]
+fn cpu_runnable_keeps_as_many_threads_as_the_machine_runs_at_once() {
+    let most = kernite_cpu::most().unwrap();
+    assert_eq!(cpu::runnable(&[1, most]).unwrap(), [1, most]);
+}
+
+#[test]
+fn cpu_sgemm_fails_where_its_grid_cannot_start() {
+    let most = kernite_cpu::most().unwrap();
+    for threads in [0, most + 1] {
+        assert!(cpu::sgemm(&mut [0.0], &[1.0], &[1.0], (1, 1, 1), threads).is_err(), "{threads} threads");
+    }
 }
 
 #[test]

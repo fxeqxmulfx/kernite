@@ -8,6 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+kernite-cpu = { workspace = true }
 kernite-cuda = { workspace = true }
 kernite-macros = { workspace = true }
 

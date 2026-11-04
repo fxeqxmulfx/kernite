@@ -74,6 +74,7 @@ dependencies = [
 name = "matmul"
 version = "0.1.0"
 dependencies = [
+ "kernite-cpu",
  "kernite-cuda",
  "kernite-macros",
 ]
