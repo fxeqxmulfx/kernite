@@ -157,7 +157,10 @@
 //! writes; a const, function or static of the module's own of one of their names is an error.
 //! A module of consts holds `pub` consts alone, of what kernels read: numbers, floats,
 //! `bool`s, arrays of them, and expressions of these. It is of the same crate, for the macro
-//! that hands its consts on is the crate's alone.
+//! that hands its consts on is the crate's alone. That macro calls `kernite-macros` back by
+//! its name, so a crate with a module of kernels given consts needs a dependency named
+//! `kernite-macros`, not renamed in `Cargo.toml`, and the error is at the module of kernels
+//! when it has none and `cfg` keeps it.
 //!
 //! ```
 //! #[kernite_macros::consts]
@@ -268,7 +271,8 @@ use kernite::lang;
 
 use crate::expand::expand;
 use crate::rust::{
-    Site, attrs_len, braced, error, flatten, inner_attribute, is_ident, is_path, is_punct, lex, module, parse,
+    MACROS, Site, attrs_len, braced, depends_on, error, flatten, inner_attribute, is_ident, is_path, is_punct, lex,
+    module, needs_dependency, parse, site,
 };
 
 /// See the crate documentation.
@@ -294,6 +298,12 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
             return error(attr[0].span(), message);
         }
     };
+    // The macro the consts' module has calls `__kernels!` back by the name `kernite-macros`, which a
+    // crate that has the dependency by another name has not: that is said here, at the module, in place
+    // of the call. Rust takes out a module that `cfg` leaves out before this runs, so none is told.
+    if !depends_on(MACROS) {
+        return error(site(), &needs_dependency("a module of kernels given consts", MACROS));
+    }
     // The macro the consts' module has calls `__kernels!` back with the consts, their module's
     // path, and this module.
     let mut out: TokenStream = path.iter().cloned().collect();
@@ -351,7 +361,8 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
     // The macro `#[kernels(consts = ..)]` calls, by the module's path, which calls `__kernels!`
-    // back with the consts that compile first.
+    // back with the consts that compile first. `#[kernels(consts = ..)]` has seen that the crate
+    // has `kernite-macros`, by that name, for the call to name it.
     let mut call = parse("::kernite_macros::__kernels!");
     let mut args: TokenStream = [TokenTree::Group(Group::new(Delimiter::Bracket, given))].into_iter().collect();
     args.extend(parse("$($module)*"));

@@ -479,9 +479,12 @@ fn a_crate_without_kernite_cuda_is_told_at_each_module_of_gpu_kernels() {
 
 /// A crate whose dependencies on `kernite-macros`, `kernite-cuda` and `kernite-cpu` are renamed in its
 /// manifest, `cuda = { package = "kernite-cuda", .. }`, is told as one that has none is, for the Rust
-/// kernite writes names `kernite_macros`, for the room of a GPU module's statics, `kernite_cuda` and
-/// `kernite_cpu`, which it has not; and Rust says nothing. A module whose statics `cfg` leaves out is
-/// told nothing, and one with a static there only with a feature, `more`, is told with it.
+/// kernite writes names `kernite_macros`, for the room of a GPU module's statics and for the consts a
+/// module of kernels is given, `kernite_cuda` and `kernite_cpu`, which it has not; and Rust says nothing
+/// else, nor at the module of consts. A module whose statics `cfg` leaves out is told nothing, and one
+/// with a static there only with a feature, `more`, is told with it. So is a module given consts, at its
+/// attribute: Rust takes out one that `cfg` leaves out, written before the attribute, after it or in the
+/// module's braces, before the macro runs, and the macro runs on each one that `cfg` keeps.
 #[test]
 fn a_crate_that_renames_kernite_macros_kernite_cuda_and_kernite_cpu_is_told_it_has_none() {
     let edits = [
@@ -503,7 +506,11 @@ fn a_crate_that_renames_kernite_macros_kernite_cuda_and_kernite_cpu_is_told_it_h
              which this crate does not have",
             "src/lib.rs:22:35: error: a cooperative x86 kernel needs a dependency named `kernite-cpu`, \
              which this crate does not have",
-            "error: could not compile `renamed_deps` (lib) due to 4 previous errors",
+            "src/lib.rs:63:1: error: a module of kernels given consts needs a dependency named `kernite-macros`, \
+             which this crate does not have",
+            "src/lib.rs:93:1: error: a module of kernels given consts needs a dependency named `kernite-macros`, \
+             which this crate does not have",
+            "error: could not compile `renamed_deps` (lib) due to 6 previous errors",
         ]
     );
     let (built, with) = cargo_in(&["build", "--features", "more"], &dir);
@@ -516,9 +523,25 @@ fn a_crate_that_renames_kernite_macros_kernite_cuda_and_kernite_cpu_is_told_it_h
              which this crate does not have",
             "src/lib.rs:47:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
              which this crate does not have",
-            "error: could not compile `renamed_deps` (lib) due to 6 previous errors",
+            "src/lib.rs:63:1: error: a module of kernels given consts needs a dependency named `kernite-macros`, \
+             which this crate does not have",
+            "src/lib.rs:83:1: error: a module of kernels given consts needs a dependency named `kernite-macros`, \
+             which this crate does not have",
+            "src/lib.rs:89:1: error: a module of kernels given consts needs a dependency named `kernite-macros`, \
+             which this crate does not have",
+            "src/lib.rs:104:1: error: a module of kernels given consts needs a dependency named `kernite-macros`, \
+             which this crate does not have",
+            "error: could not compile `renamed_deps` (lib) due to 10 previous errors",
         ]
     );
+}
+
+/// A crate that renames `kernite-macros` builds a module of consts that no module of kernels takes without
+/// a word: it is a module of kernels given consts that needs a dependency of that name.
+#[test]
+fn a_crate_that_renames_kernite_macros_builds_consts_no_module_takes() {
+    let dir = edited("renamed_consts", &[("kernite-macros = {", "km = { package = \"kernite-macros\",")]);
+    builds_quietly_in(&["build"], "renamed_consts", &dir);
 }
 
 /// A kernel's safety contract says that nothing else touches the memory of the module's it

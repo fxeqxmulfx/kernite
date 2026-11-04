@@ -3,7 +3,7 @@
 //! a cooperative kernel in a module of x86 kernels: each is said once, where it is, as for a crate that
 //! has none of them, and nothing else is said of them, nor of the code that uses them as Rust does. A
 //! module whose statics `cfg` leaves out says nothing, and one with a static there only with the feature
-//! `more` says what it says with it.
+//! `more` says what it says with it. So does a module of kernels given consts, at its attribute.
 
 #[km::kernels]
 pub mod gpu {
@@ -51,4 +51,57 @@ pub mod some {
 
     #[cfg(any())]
     pub static OLD: constant<[u32; 4]>;
+}
+
+/// Consts for the modules below to take.
+#[km::consts]
+pub mod sizes {
+    pub const N: u32 = 4;
+}
+
+/// Given the consts: told once, at its attribute, that it needs `kernite-macros`.
+#[km::kernels(consts = crate::sizes)]
+pub mod given {
+    pub unsafe extern "sysv64" fn read(x: *mut u32) {
+        mov(dword[x], N);
+        ret();
+    }
+}
+
+/// Given the consts, under a `cfg` that leaves it out, written after the attribute: told nothing, for Rust has
+/// taken the module out before the macro runs.
+#[km::kernels(consts = crate::sizes)]
+#[cfg(any())]
+pub mod out_after {}
+
+/// The same, written before the attribute.
+#[cfg(any())]
+#[km::kernels(consts = crate::sizes)]
+pub mod out_before {}
+
+/// Given the consts, under a `cfg` that keeps it only with the feature `more`, after the attribute: told with it.
+#[km::kernels(consts = crate::sizes)]
+#[cfg(feature = "more")]
+pub mod more_after {}
+
+/// The same, written before the attribute.
+#[cfg(feature = "more")]
+#[km::kernels(consts = crate::sizes)]
+pub mod more_before {}
+
+/// Given the consts, under a `cfg_attr(..)` that leaves it out only with the feature `more`: told without it.
+#[km::kernels(consts = crate::sizes)]
+#[cfg_attr(feature = "more", cfg(any()))]
+pub mod less {}
+
+/// Given the consts, under a `cfg` written in its braces, `#![cfg(..)]`, that leaves it out: told nothing.
+#[km::kernels(consts = crate::sizes)]
+pub mod inner_out {
+    #![cfg(any())]
+}
+
+/// The same, that keeps it only with the feature `more`: told with it.
+#[km::kernels(consts = crate::sizes)]
+pub mod inner_more {
+    #![cfg(feature = "more")]
 }

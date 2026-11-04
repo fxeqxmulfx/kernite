@@ -261,7 +261,9 @@ GPU kernels still runs where there is none. A crate with a module of GPU kernels
 none and one of them is kept. A feature can bring the crate and keep them, `cuda = ["dep:kernite-cuda"]`, and the crate
 builds without the feature. A crate with a static in such a module needs a dependency named `kernite-macros` as well,
 not renamed, for Rust to count the room of the statics `cfg` keeps: kernite says at the module when it has none and a
-static is kept.
+static is kept. A crate with a module of kernels given consts, of either kind, needs a dependency named
+`kernite-macros` too, not renamed, for the module of consts to hand them on: kernite says at the module of kernels when
+it has none and `cfg` keeps it.
 
 ```rust
 #[kernite_macros::kernels]
