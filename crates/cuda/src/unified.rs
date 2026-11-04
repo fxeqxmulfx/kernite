@@ -283,6 +283,7 @@ impl<T: Plain> fmt::Debug for Unified<'_, T> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::ffi::{c_uint, c_void};
 
     use super::super::{Api, CuResult, Handle};
     use super::*;
@@ -323,6 +324,60 @@ mod tests {
         replace(&mut api);
         let driver = Rc::new(Driver { api, device: 0, context: ptr::without_provenance_mut(1) });
         Cuda::of(driver, String::new()).unwrap()
+    }
+
+    thread_local! {
+        /// The block that the fake driver handed out last: its address and its bytes.
+        static BLOCK: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+    }
+
+    /// `bytes` of 0xAA, which the fake driver hands out as the driver may, with no clearing.
+    fn dirty(bytes: usize) -> *mut u8 {
+        let block = Box::leak(vec![0xAAu8; bytes].into_boxed_slice());
+        BLOCK.set((block.as_mut_ptr() as usize, bytes));
+        block.as_mut_ptr()
+    }
+
+    /// The fake driver's `cuMemAllocManaged`.
+    unsafe extern "C" fn alloc_managed(addr: *mut u64, bytes: usize, _: c_uint) -> CuResult {
+        // SAFETY: the caller gives a place for the address.
+        unsafe { *addr = dirty(bytes) as u64 };
+        0
+    }
+
+    /// The fake driver's `cuMemHostAlloc`.
+    unsafe extern "C" fn alloc_host(host: *mut *mut c_void, bytes: usize, _: c_uint) -> CuResult {
+        // SAFETY: the caller gives a place for the address.
+        unsafe { *host = dirty(bytes).cast() };
+        0
+    }
+
+    /// The fake driver's `cuMemsetD8`.
+    unsafe extern "C" fn memset(addr: u64, value: u8, bytes: usize) -> CuResult {
+        // SAFETY: the caller gives the address of a block of the fake driver's, of `bytes` bytes.
+        unsafe { ptr::with_exposed_provenance_mut::<u8>(addr as usize).write_bytes(value, bytes) };
+        0
+    }
+
+    /// The fake driver's `cuMemFree`, and `cuMemFreeHost`: it frees the block it handed out last.
+    unsafe extern "C" fn free(_: u64) -> CuResult {
+        let (at, bytes) = BLOCK.get();
+        // SAFETY: the block was leaked from a boxed slice of `bytes` bytes, and is freed once.
+        drop(unsafe {
+            Box::from_raw(ptr::slice_from_raw_parts_mut(ptr::with_exposed_provenance_mut::<u8>(at), bytes))
+        });
+        0
+    }
+
+    /// The fake driver's `cuMemFreeHost`.
+    unsafe extern "C" fn free_host(_: *mut c_void) -> CuResult {
+        // SAFETY: as for `free`.
+        unsafe { free(0) }
+    }
+
+    /// The fake driver's `cuCtxSynchronize`: no kernel runs.
+    unsafe extern "C" fn synchronize() -> CuResult {
+        0
     }
 
     /// A GPU says it reaches managed memory while the host does as its attribute says, whatever
@@ -372,5 +427,21 @@ mod tests {
         assert_eq!(e.to_string(), format!("cuDeviceGetAttribute: {said}"));
         let lent = gpu(&[PAGEABLE_MEMORY_ACCESS]).lend(&mut host).unwrap();
         assert_eq!((lent.len(), lent.ptr().addr()), (3, at));
+    }
+
+    /// Managed and page-locked memory are zeros, though the driver clears neither: the fake hands
+    /// out bytes of 0xAA.
+    #[test]
+    fn managed_and_page_locked_memory_are_zeros_though_the_driver_clears_neither() {
+        let cuda = gpu_with(&[MANAGED_MEMORY, UNIFIED_ADDRESSING], |api| {
+            api.alloc_managed = alloc_managed;
+            api.alloc_host = alloc_host;
+            api.memset = memset;
+            api.free = free;
+            api.free_host = free_host;
+            api.synchronize = synchronize;
+        });
+        assert_eq!(cuda.managed::<u32>(4).unwrap().host().unwrap(), [0; 4]);
+        assert_eq!(cuda.pinned::<u32>(4).unwrap().host().unwrap(), [0; 4]);
     }
 }
