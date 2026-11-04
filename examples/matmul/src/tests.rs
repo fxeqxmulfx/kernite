@@ -99,15 +99,65 @@ fn cpu_sgemm_fails_where_its_grid_cannot_start() {
     }
 }
 
+/// The products the GPU's cores are held to: none in each of `m`, `n` and `k`; then each size the
+/// kernel works in, one less, equal and one more, in both ways it loads, four floats at a time
+/// where `n` and `k` are multiples of 4 and one at a time where they are not: `BM` of `m`, `BN`
+/// of `n`, and every `k` up to four tiles, so that each short first tile and each number of
+/// whole tiles after it is met; then tiles in a grid of each shape, the last short in each
+/// size; and `SHAPES`.
+fn gpu_shapes() -> Vec<Shape> {
+    use gpu::kernels::{BK, BM, BN};
+    let mut shapes = vec![(0, 8, 4), (5, 0, 4), (1, 1, 1)];
+    shapes.extend((BM - 1..=BM + 1).flat_map(|m| [(m, 12, 12), (m, 13, 13)]));
+    shapes.extend((BN - 4..=BN + 4).flat_map(|n| [(5, n, 12), (5, n, 13)]));
+    shapes.extend((0..=4 * BK + 1).flat_map(|k| [(5, 12, k), (5, 13, k)]));
+    shapes.extend([(BM + 1, BN + 4, BK + 4), (BM + 1, BN + 1, BK + 1), (2 * BM + 1, 3 * BN - 4, 3 * BK + 4)]);
+    shapes.extend(SHAPES);
+    shapes
+}
+
 #[test]
 fn gpu_sgemm_is_the_reference_bit_for_bit() {
     let Some(cuda) = cuda() else { return };
     let kernels = gpu::kernels::Kernels::load(&cuda).unwrap();
-    for shape @ (m, n, k) in SHAPES {
+    for shape @ (m, n, k) in gpu_shapes() {
         let (a, b) = (floats(m * k, 1), floats(k * n, 2));
         // SAFETY: `on_gpu` keeps the buffers until it reads `c`, which waits for the kernel.
         let c = on_gpu(&cuda, &a, &b, shape, |c, a, b| unsafe { gpu::launch(&kernels, c, a, b, shape) });
         same_bits(&c, &reference::sgemm(&a, &b, shape), shape);
+    }
+}
+
+#[test]
+fn gpu_sgemm_takes_more_tiles_than_a_grid_has_blocks_along_x() {
+    let Some(cuda) = cuda() else { return };
+    let kernels = gpu::kernels::Kernels::load(&cuda).unwrap();
+    // A module for the oldest GPU has 65535 blocks along x at most: one tile more, down and across,
+    // in the kernel that loads 16 bytes, `n` and `k` multiples of 4, and in the one that loads 4.
+    use gpu::kernels::{BM, BN};
+    let shapes = [(65535 * BM + 1, 1, 1), (1, 65535 * BN + 1, 1), (65535 * BM + 1, 4, 4), (4, 65535 * BN + 4, 4)];
+    for shape @ (m, n, k) in shapes {
+        let (a, b) = (floats(m * k, 1), floats(k * n, 2));
+        // SAFETY: `on_gpu` keeps the buffers until it reads `c`, which waits for the kernel.
+        let c = on_gpu(&cuda, &a, &b, shape, |c, a, b| unsafe { gpu::launch(&kernels, c, a, b, shape) });
+        same_bits(&c, &reference::sgemm(&a, &b, shape), shape);
+    }
+}
+
+#[test]
+fn gpu_sgemm_never_steps_past_k_with_zeros() {
+    let Some(cuda) = cuda() else { return };
+    let kernels = gpu::kernels::Kernels::load(&cuda).unwrap();
+    // Each product, -1e-30 by 1e-30, is less than the least float, so each chain is -0 at every
+    // step: a step of a zero past `k` would make it +0.
+    for k in 1..=2 * gpu::kernels::BK + 1 {
+        for shape @ (m, n, _) in [(3, 5, k), (3, 8, k)] {
+            let (a, b) = (vec![-1e-30; m * k], vec![1e-30; k * n]);
+            // SAFETY: `on_gpu` keeps the buffers until it reads `c`, which waits for the kernel.
+            let c = on_gpu(&cuda, &a, &b, shape, |c, a, b| unsafe { gpu::launch(&kernels, c, a, b, shape) });
+            same_bits(&c, &reference::sgemm(&a, &b, shape), shape);
+            assert!(c.iter().all(|x| x.to_bits() == (-0.0f32).to_bits()), "{shape:?}: {c:?}");
+        }
     }
 }
 
