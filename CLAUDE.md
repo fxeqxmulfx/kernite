@@ -67,9 +67,9 @@ every kind of dependency, and a new crate needs its line there. Change both when
 - Errors are behaviour. Tests assert the text of many, and the `line:column` they point at; keep both.
   A new error says what is wrong where it can be mended, in the README's words.
 - `unsafe_code` is forbidden everywhere but in kernite-cuda; in kernite-cpu's `affinity` module, which calls the C
-  library to read and set the CPUs a thread may run on; and in the examples, which call kernels. Each `unsafe` block
-  says why it holds. kernite-cuda and kernite-cpu keep lints of their own for this, as a workspace's lints cannot be
-  eased for a part of a crate.
+  library to read and set the CPUs a thread may run on, and in its test of where pages are, `tests/nodes.rs`; and in
+  the examples, which call kernels. Each `unsafe` block says why it holds. kernite-cuda and kernite-cpu keep lints of
+  their own for this, as a workspace's lints cannot be eased for a part of a crate.
 - Every public item has a doc comment: `missing_docs` warns, and `./make.py check` denies warnings.
 - PTX: take what `ptxas` takes beyond PTX's ISA where it reads it as the ISA reads the rest. Refuse every
   value `ptxas` or the instruction would cut, every value the ISA leaves undefined, and anything that looks

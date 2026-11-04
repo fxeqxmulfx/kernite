@@ -78,7 +78,7 @@ Change files only in your worktree. Never touch another worktree, the main check
     crates in `.kanban/notes/expand-fixtures/`, stays token for token, but for changes a review
     approved;
   - no `#[ignore]`, no package from outside, no `HashMap` or `HashSet`, and no `unsafe` outside
-    kernite-cuda and kernite-cpu's `affinity` module, as CLAUDE.md says;
+    kernite-cuda, kernite-cpu's `affinity` module and its test `tests/nodes.rs`, as CLAUDE.md says;
   - docs on every public item, and every crate on `[lints] workspace = true`, but kernite-cuda and
     kernite-cpu, which keep lints of their own for that `unsafe`;
   - tests use fakes or the real thing, never mocks.

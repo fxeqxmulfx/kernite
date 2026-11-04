@@ -50,6 +50,9 @@
 //! each kept thread on a CPU a thread moves to, and of each the system places: it sleeps until a
 //! launch uses it. A launch that moves none ends no spin.
 //!
+//! A page of memory is on the NUMA node of the CPU that first writes it, so a grid's threads are
+//! near their memory when each writes its part of a buffer first. The crate places no memory.
+//!
 //! A static of a module of x86 kernels is a [`Global`] of its elements, which the kernels reach
 //! at a displacement from `rip`, and which keeps what they write from one call to the next:
 //!

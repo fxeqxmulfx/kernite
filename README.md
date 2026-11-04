@@ -252,6 +252,19 @@ another spins there, and a spin that no launch ends lasts 200 microseconds, so a
 the spin of each kept thread on a CPU a thread moves to, and of each the system places: it sleeps until a launch uses
 it. A launch that moves none ends no spin.
 
+A page of memory is on the NUMA node of the CPU that first writes it, if that node has room, whichever thread asked for
+the buffer. `vec![0.0; n]`, for a large `n`, writes no page, so the first thread to write one gives it its node, and
+`vec![1.0; n]` writes them all, so the caller's thread gives them its own. A grid's threads are near their memory, then,
+if each writes its part of a buffer first, and a `Grid::on` of the same CPUs keeps each by its part in the launches
+after. A page is the least that has a node, so a part is near its thread but for the pages it shares with the parts next
+to it.
+
+kernite places no memory and sets no policy: to spread a buffer over the nodes, or keep it on one, run the process under
+`numactl --interleave=all` or `--membind=1`. The system says which CPUs are on a node, and which are the threads of one
+core, in `/sys/devices/system/node/node0/cpulist` and `/sys/devices/system/cpu/cpu0/topology/thread_siblings_list`, for
+a program to read and give to `Grid::on`. The grid's barrier is one cache line for the whole grid, whichever nodes its
+threads are on, so a `grid.sync()` over threads on two nodes passes that line between them.
+
 The kernel's parameters keep the names they are written with, `grid` among them, but `_`, which the macros name
 for Rust. A compile-time argument may not be named `grid`, for Rust cannot keep a const apart from a parameter of
 its name: that is an error at its name. A crate with a cooperative kernel needs a dependency named `kernite-cpu`

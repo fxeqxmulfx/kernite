@@ -3,8 +3,8 @@
 //! asks about no CPU once the threads are where it places them: a thousand launches of one
 //! placement make no call about CPUs, and a launch that changes the placement makes one call for
 //! each thread that moves, the caller's among them, and no other. A launch that starts threads puts
-//! each on its CPU before it starts the next. Each test runs itself again under `strace`, and skips
-//! where there is none.
+//! each on its CPU before it starts the next, and none of these places memory or sets a policy for
+//! it. Each test runs itself again under `strace`, and skips where there is none.
 
 use std::io;
 use std::path::PathBuf;
@@ -46,10 +46,15 @@ fn launches(threads: usize) {
     mark(1);
 }
 
+/// Where `strace` writes the calls of the process the test `name` runs again under it.
+fn log_of(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.strace"))
+}
+
 /// The calls `strace` shows in each step of the process the test `name` runs again under it, a
 /// grid of `threads` placed or not, between one mark and the next; none if there is no `strace`.
 fn steps_of(name: &str, threads: usize, placed: bool) -> Option<Vec<Vec<String>>> {
-    let log = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.strace"));
+    let log = log_of(name);
     let strace = env::var_os("STRACE").unwrap_or_else(|| "strace".into());
     let run = match Command::new(strace)
         .args(["-f", "-o"])
@@ -95,6 +100,18 @@ fn starts_a_thread_or_maps_a_stack(call: &str) -> bool {
 /// Whether a call `strace` shows is about the CPUs a thread may run on.
 fn is_about_cpus(call: &str) -> bool {
     call.contains("affinity")
+}
+
+/// The calls that place memory or set a policy for it, as `strace` names them.
+const MEMORY: [&str; 5] = ["mbind(", "set_mempolicy(", "set_mempolicy_home_node(", "migrate_pages(", "move_pages("];
+
+/// Says if a call of the whole run of the process the test `name` ran again under `strace`, from its
+/// start, is one that places memory or sets a policy for it.
+fn assert_places_no_memory(name: &str) {
+    let calls = fs::read_to_string(log_of(name)).unwrap();
+    let memory: Vec<&str> = calls.lines().filter(|call| MEMORY.iter().any(|m| call.contains(m))).collect();
+    let message = "calls place memory or set a policy for it, as";
+    assert!(memory.is_empty(), "{name}: {} {message}:\n{}", memory.len(), memory[..memory.len().min(5)].join("\n"));
 }
 
 /// A thousand launches on one thread, after the first, which asks how many threads the machine
@@ -216,7 +233,10 @@ fn changes(threads: usize) {
 /// A launch that changes the placement makes one call for each thread that moves, the caller's
 /// among them, and no other, and reads the CPUs the caller's thread may run on only when it places
 /// that thread and a launch before did not. A launch of the placement the threads are on makes
-/// none, and a launch that places none sends back the threads it moves with a call for each.
+/// none, and a launch that places none sends back the threads it moves with a call for each. No
+/// call of the whole run, the first launch's among them, is `mbind`, `set_mempolicy`,
+/// `set_mempolicy_home_node`, `migrate_pages` or `move_pages`: kernite places no memory and sets no
+/// policy, as the README says.
 #[test]
 fn a_launch_that_changes_the_placement_makes_a_call_for_each_thread_that_moves_and_no_other() {
     if let Some(threads) = child() {
@@ -246,6 +266,7 @@ fn a_launch_that_changes_the_placement_makes_a_call_for_each_thread_that_moves_a
         let new: Vec<String> = calls.iter().filter(|call| starts_a_thread_or_maps_a_stack(call)).cloned().collect();
         assert!(new.is_empty(), "step {i}: {} calls start a thread or map a stack, as:\n{}", new.len(), first(&new));
     }
+    assert_places_no_memory(name);
 }
 
 /// What the process `strace` runs for the test of starts does: one launch that places a grid, which
@@ -261,7 +282,7 @@ fn starts(threads: usize) {
 /// puts each thread on its CPU right after it starts it, before it starts the next: a thread that
 /// starts on the caller's CPU, where the caller has to run to start the next, never spins there.
 /// `strace` shows the calls that start a thread, and the call that puts a thread on a CPU, in that
-/// order, each with the number of the thread.
+/// order, each with the number of the thread. The launch places no memory either.
 #[test]
 fn a_launch_that_starts_threads_puts_each_on_its_cpu_before_it_starts_the_next() {
     if let Some(threads) = child() {
@@ -291,4 +312,5 @@ fn a_launch_that_starts_threads_puts_each_on_its_cpu_before_it_starts_the_next()
     for pair in events[1..].chunks(2) {
         assert_eq!(pair[0].1, pair[1].1, "a thread is put on its CPU right after it starts: {events:?}");
     }
+    assert_places_no_memory(name);
 }
