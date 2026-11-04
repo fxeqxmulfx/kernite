@@ -1,7 +1,7 @@
 //! A module of x86 kernels, one of GPU kernels and one kernite cannot read, which `#[kernels]` refuses at its
 //! attribute, `consts = 5`: the error is said once, there, and Rust says nothing of the code that names their
 //! items, wherever it is. The two kernite can read are still there, with a stub for each kernel, as when it does not
-//! compile, each static as its type has it and the x86 module an empty `LISTINGS`; the other holds its refusal alone.
+//! compile, each static as its type has it and the x86 module an empty `LISTINGS`; the other has the first of its two.
 
 #[kernite_macros::kernels(consts = 5)]
 pub mod cpu {
@@ -74,7 +74,7 @@ pub mod gpu {
     }
 }
 
-/// Two functions share a name, so kernite cannot read it: only its attribute's error is said.
+/// Two functions share a name, so kernite cannot read it: only its attribute's error is said, and the first stands.
 #[kernite_macros::kernels(consts = 5)]
 pub mod unreadable {
     pub unsafe extern "sysv64" fn same(x: u64) -> u64 {
@@ -151,5 +151,14 @@ pub mod gpu_globbed {
 impl gpu::Kernels {
     pub fn callee(&self) -> u32 {
         7
+    }
+}
+
+/// By the names a glob brings in.
+pub mod unreadable_globbed {
+    use crate::unreadable::*;
+
+    pub fn all() -> u64 {
+        unsafe { same(1) }
     }
 }

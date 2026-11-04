@@ -184,13 +184,14 @@
 //! compile, `let _: ..;` in a block of the module, under the `cfg` of the function and where the
 //! error is said. kernite refuses the module as a whole when it is two modules, when no module of
 //! PTX holds its GPU kernels and statics, when an item of its own has the name of a const it
-//! takes, when the workspace's name is not a string, and when its attribute is refused, as below.
-//! Rust finds the names in the types, so an import that only they name is used, and it says of
-//! them only that a lifetime is not declared, that a module is where a type is written, and what a
-//! macro writes; it says the same of a helper that no kernel calls. Only where a macro has written
-//! an error as an item of the module is Rust silent about a name it cannot find, as `gpr` and
-//! `local<[u32; 4], 16>` are, so the types are shown nowhere else. A module that builds is shown
-//! none of them, so an import that only a helper names is unused to Rust.
+//! takes, when the workspace's name is not a string, when its attribute is refused, and when it has
+//! an item kernite cannot read, as below. Rust finds the names in the types, so an import that only
+//! they name is used, and it says of them only that a lifetime is not declared, that a module is
+//! where a type is written, and what a macro writes; it says the same of a helper that no kernel
+//! calls. Only where a macro has written an error as an item of the module is Rust silent about a
+//! name it cannot find, as `gpr` and `local<[u32; 4], 16>` are, so the types are shown nowhere
+//! else. A module that builds is shown none of them, so an import that only a helper names is
+//! unused to Rust.
 //!
 //! The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one,
 //! `dead_code` say, and build its kernels: Rust lints the names and the code a kernel is
@@ -319,8 +320,21 @@
 //! Rust is said, as for any module: the dependency the crate needs, `kernite-cuda` for a GPU item that `cfg` keeps and
 //! `kernite-cpu` for an x86 static or cooperative kernel; a compile-time argument named as a parameter of a launcher or
 //! of a `_blocks` method, `grid`, `threads` or `shared`; and a GPU kernel or a static named as a cooperative kernel's
-//! `_blocks` method. A module kernite cannot read holds its refusal alone, and the code that names its items is not an
-//! error as well, for the error is in the module.
+//! `_blocks` method.
+//!
+//! A module kernite cannot read is refused whole as well, and stays with every item kernite can read. A `const` or a
+//! `static` it cannot read ends at its `;`, for its value may hold a `{..}`, as in `= { 1 };`. Any other item ends at
+//! its first `;`, or at its first `{..}` outside `<..>`: a function at its body. The items after it are read as they
+//! are. If items share a name, it knows one of them: a const before a function, a function before a static, else the
+//! first. If it cannot read an item and reads no function that names an ABI, it knows no static, for the kernels say
+//! whose a static is, the process's or the GPU's. If brackets nest too deep, it knows no item. Its items are as in a
+//! module refused at its attribute, with two differences: the module is given the consts it takes, and kernite says
+//! nothing of an item of its own that has the name of one. The error is said once, where it can be mended. If the
+//! module's attribute is refused too, that refusal is said instead. So Rust says nothing of the code that names an item
+//! kernite knows, by a path, by a `use` or by a glob, beside the error. Of a name kernite does not know, as that of an
+//! item it cannot read, Rust says nothing of a path or a `use`, for the error is in the module. It cannot find the name
+//! by a glob or as a method of `Kernels`, as it cannot find a name that no module has. A glob that finds none of what
+//! it names is unused, and Rust warns of it.
 //!
 //! A path to a module of consts that Rust cannot find, as in `consts = crate::model::sizs`, is told once, by Rust, at
 //! the name it cannot find. So is a path to a module with no `#[kernite_macros::consts]` on it, at the module's name:

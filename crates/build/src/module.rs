@@ -25,13 +25,15 @@ use crate::{
 /// attributes hold, and each of its instances compiled. The GPU's module is put together from what
 /// Rust keeps of them, and why it is none is said at the module's first item that is the GPU's.
 ///
-/// A `refused` module is one refused whole, at its attribute, with no consts given. Nothing of it
-/// is compiled, for the consts its kernels read may not be given, and nothing is said of its
-/// items. Each item is what it is otherwise, for Rust to find it where it is named: a function
-/// the process runs is not written, with no instance; a kernel the GPU runs is never launched; a
-/// static is laid out by none, and stands as its type has it where that is worked out, as one
-/// whose value alone is wrong does. The GPU's module is empty, at the module's first item that is
-/// the GPU's.
+/// A `refused` module is one refused whole: at its attribute, with no consts given, or for an item
+/// kernite cannot read, which leaves it the items kernite reads and the consts it is given. Nothing
+/// of it is compiled, for the consts its kernels read may not be given, and nothing is said of its
+/// items, nor of one of its own that has the name of a const given: that const is left out, as it
+/// is in any module, and the item keeps the name. Each item is what it is otherwise, for Rust to
+/// find it where it is named: a function the process runs is not written, with no instance; a
+/// kernel the GPU runs is never launched; a static is laid out by none, and stands as its type has
+/// it where that is worked out, as one whose value alone is wrong does. The GPU's module is empty,
+/// at the module's first item that is the GPU's.
 pub fn module<N: Native, D: Device>(
     mut module: Module,
     given: Option<Given>,
@@ -169,7 +171,8 @@ pub fn module<N: Native, D: Device>(
         let assembly = if refused { Assembly::default() } else { device.module(&codes, &d.made) };
         DeviceOut { assembly, at, symbols, code_items, static_items }
     });
-    ModuleOut { module, given: twice, owner: whose.err().filter(|_| !refused), items, device: loaded }
+    let (given, owner) = if refused { (vec![], None) } else { (twice, whose.err()) };
+    ModuleOut { module, given, owner, items, device: loaded }
 }
 
 /// Static `s` of `module` as an item of it comes out: `laid`, as `backend` laid it out, its memory

@@ -121,15 +121,16 @@ Rust sees neither. Where kernite finds an error in compiling a function or a sta
 Rust is shown the types of every helper and function of the module, one that no kernel calls too: each compile-time
 argument's, each parameter's and the result's, as it sees a kernel's. kernite refuses the module as a whole when it is
 two modules, when no module of PTX holds its GPU kernels and statics, when an item of its own has the name of a const it
-takes, when the workspace's name is not a string, and when its attribute is refused, as below. An import that only these
-types name is used, so Rust does not call `use super::Ret;` unused beside kernite's error at `Ret`, which is said once:
-at the argument of a call of the helper, at the result of a helper that is called, or at the type of a function. Rust
-says of the types only that a lifetime is not declared, `x: &'a Ret`; that a module is where a type is written,
-`x: core::f16` or `x: core`; and what a macro writes, `x: half!()` with an `f16`, which is unstable. It says the same of
-the types of a helper that no kernel calls, of which kernite says nothing. It says nothing of a name it cannot find,
-such as `gpr` or `local<[u32; 4], 16>`, nor of a type it refuses by itself, `[u64]`, `f128` or `_`. A function's types
-are shown where `cfg` keeps the function and the error is said. A module that builds is shown none of them, so an import
-that only a helper names is unused to Rust, which says so as it does of any import that nothing names.
+takes, when the workspace's name is not a string, when its attribute is refused, and when it has an item kernite cannot
+read, as below. An import that only these types name is used, so Rust does not call `use super::Ret;` unused beside
+kernite's error at `Ret`, which is said once: at the argument of a call of the helper, at the result of a helper that is
+called, or at the type of a function. Rust says of the types only that a lifetime is not declared, `x: &'a Ret`; that a
+module is where a type is written, `x: core::f16` or `x: core`; and what a macro writes, `x: half!()` with an `f16`,
+which is unstable. It says the same of the types of a helper that no kernel calls, of which kernite says nothing. It
+says nothing of a name it cannot find, such as `gpr` or `local<[u32; 4], 16>`, nor of a type it refuses by itself,
+`[u64]`, `f128` or `_`. A function's types are shown where `cfg` keeps the function and the error is said. A module that
+builds is shown none of them, so an import that only a helper names is unused to Rust, which says so as it does of any
+import that nothing names.
 
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kernite_macros::consts]` is on, and a
@@ -153,8 +154,20 @@ is no error at it. No room is counted for the statics, so a crate with no depend
 it needs one for them. What the macro finds in writing the module for Rust is said, as for any module: the dependency
 the crate needs, `kernite-cuda` for a GPU item that `cfg` keeps and `kernite-cpu` for an x86 static or cooperative
 kernel; a compile-time argument named as a parameter of a launcher or of a `_blocks` method, `grid`, `threads` or
-`shared`; and a GPU kernel or a static named as a cooperative kernel's `_blocks` method. A module kernite cannot read
-holds its refusal alone, and Rust says nothing of the code that names its items, for the error is in the module.
+`shared`; and a GPU kernel or a static named as a cooperative kernel's `_blocks` method.
+
+A module kernite cannot read is refused whole as well, and stays with every item kernite can read. A `const` or a
+`static` it cannot read ends at its `;`, for its value may hold a `{..}`, as in `= { 1 };`. Any other item ends at its
+first `;`, or at its first `{..}` outside `<..>`: a function at its body. The items after it are read as they are. If
+items share a name, it knows one of them: a const before a function, a function before a static, else the first. If it
+cannot read an item and reads no function that names an ABI, it knows no static, for the kernels say whose a static is,
+the process's or the GPU's. If brackets nest too deep, it knows no item. Its items are as in a module refused at its
+attribute, with two differences: the module is given the consts it takes, and kernite says nothing of an item of its own
+that has the name of one. The error is said once, where it can be mended. If the module's attribute is refused too, that
+refusal is said instead. So Rust says nothing of the code that names an item kernite knows, by a path, by a `use` or by
+a glob, beside the error. Of a name kernite does not know, as that of an item it cannot read, Rust says nothing of a
+path or a `use`, for the error is in the module. It cannot find the name by a glob or as a method of `Kernels`, as it
+cannot find a name that no module has. A glob that finds none of what it names is unused, and Rust warns of it.
 
 A path to a module of consts that Rust cannot find, as in `consts = crate::model::sizs`, is told once, by Rust, at the
 name it cannot find. So is a path to a module with no `#[kernite_macros::consts]` on it, at the module's name: Rust says

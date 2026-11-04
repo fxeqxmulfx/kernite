@@ -93,7 +93,7 @@ pub use ast::{
     Static, Stmt, Type, UnOp,
 };
 pub use eval::{Memory, Mention, Run, constant, instance, instances, kernel, memory};
-pub use parse::module;
+pub use parse::{module, read};
 pub use target::{Fault, Guard, Mem, Operand, Target};
 pub use token::{Delim, Span, Tree, lex, pointer, text};
 pub use value::{IntTy, Value};

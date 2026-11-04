@@ -367,6 +367,8 @@ fn the_macro_says_what_it_refuses_where_it_is() {
     );
 }
 
+/// kernite reads no item of a module whose brackets nest too deep. Rust says nothing of the code that names a kernel of
+/// it by path or by `use`, but cannot find it by a glob, and says the import is unused.
 #[test]
 fn brackets_nested_past_64_deep_are_refused_where_they_open() {
     // The 64th parenthesis is the first past the most, as `kernite::x86_str` counts the same
@@ -374,8 +376,10 @@ fn brackets_nested_past_64_deep_are_refused_where_they_open() {
     refuses(
         "nested",
         &[
-            "src/lib.rs:7:80: error: this nests 64 deep at most",
-            "error: could not compile `nested` (lib) due to 1 previous error",
+            "src/lib.rs:8:80: error: this nests 64 deep at most",
+            "src/lib.rs:25:9: warning: unused import: `crate::brackets::*`",
+            "src/lib.rs:28:18: error[E0425]: cannot find function `f` in this scope: not found in this scope",
+            "error: could not compile `nested` (lib) due to 2 previous errors; 1 warning emitted",
         ],
     );
 }
@@ -707,8 +711,8 @@ const REFUSED: &str = "`#[kernels]` takes the module of consts its kernels read,
 /// A module of kernels that `#[kernels]` refuses at its attribute, `consts = 5`, is told its refusal once, there. It is
 /// still there, each kernel as of one that does not compile and each static as its type has it, and a module of x86
 /// kernels has an empty `LISTINGS`, so Rust says nothing of the code that names its items: from the crate's root, from
-/// another module by path and by `use`, or by a glob. A module kernite cannot read has the refusal alone. What else
-/// such a module is told is the tests' below.
+/// another module by path and by `use`, or by a glob. A module kernite cannot read has the refusal alone, and the
+/// items kernite reads of it. What else such a module is told is the tests' below.
 #[test]
 fn a_module_of_kernels_refused_at_its_attribute_is_still_there_for_the_code_that_names_it() {
     refuses(
@@ -805,6 +809,125 @@ fn a_module_refused_at_its_attribute_is_told_what_the_macro_finds_in_writing_it_
              process's, for x86 ones; and this module has both, so it is two modules, one of each kind of kernel and \
              the statics they name",
             "error: could not compile `refused_mistakes` (lib) due to 16 previous errors",
+        ],
+    );
+}
+
+/// A module of kernels that kernite cannot read is still there, as far as kernite reads it, for the code that names its
+/// items: a module of x86 kernels and one of GPU kernels, each with two items of a name, `same` and `scale`, say so
+/// once, at the second, and are left the first of the two and every item beside them: a kernel as of one that does not
+/// compile, a const, a struct, and a static as its type has it. So Rust says nothing of the code that names them, from
+/// the crate's root, from another module by `use` or by a glob.
+#[test]
+fn a_module_with_two_items_of_a_name_is_still_there_for_the_code_that_names_it() {
+    refuses(
+        "unreadable_glob",
+        &[
+            "src/lib.rs:10:35: error: `same` names another function of the module as well",
+            "src/lib.rs:37:39: error: `scale` names another function of the module as well",
+            "error: could not compile `unreadable_glob` (lib) due to 2 previous errors",
+        ],
+    );
+}
+
+/// A module of kernels with the head of a function kernite does not take, `bad<T>`, says so once, and is still there as
+/// far as kernite reads it: `good` comes before `bad`, so Rust says nothing of the code that names `good` by the
+/// module's path, by `use` or by a glob, as it says nothing of one that names a module that compiles.
+#[test]
+fn a_module_with_the_head_of_a_kernel_it_cannot_read_is_still_there_for_the_kernel_it_reads() {
+    refuses(
+        "unreadable_head",
+        &[
+            "src/lib.rs:10:39: error: a function's generics are values, as in `<const N: usize>`",
+            "error: could not compile `unreadable_head` (lib) due to 1 previous error",
+        ],
+    );
+}
+
+/// A function kernite cannot read ends at its body, though its head holds a brace group in `<..>`, as a const argument
+/// does: of its result's type, of a bound or of a `where` clause. So nothing of the three is left over for Rust to read
+/// as an item, which it would refuse. kernite's error is said alone, at the first. `good`, after them, is still there
+/// for the glob that names it.
+#[test]
+fn a_function_kernite_cannot_read_ends_at_its_body_whatever_a_const_argument_of_its_head_holds() {
+    refuses(
+        "unreadable_angle",
+        &[
+            "src/lib.rs:11:22: error: a function's generics are values, as in `<const N: usize>`",
+            "error: could not compile `unreadable_angle` (lib) due to 1 previous error",
+        ],
+    );
+}
+
+/// kernite reads every item of a module but the one it cannot read, `bad`: `good` and `scale` before it, `late` after
+/// it. Rust says nothing of a path or a `use` that names `bad`, for the error is in the module, but cannot find it by a
+/// glob, as it cannot find a name no module has; and the import is unused, as for any glob, where `bad` is all it
+/// names. A GPU kernel is named as a method of `Kernels`: Rust finds `scale` and `late`, and not `bad`.
+#[test]
+fn rust_cannot_find_by_a_glob_what_kernite_does_not_know_of_a_module_it_cannot_read() {
+    refuses(
+        "unreadable_unknown",
+        &[
+            "src/lib.rs:11:39: error: a function's generics are values, as in `<const N: usize>`",
+            "src/lib.rs:29:43: error: a function's generics are values, as in `<const N: usize>`",
+            "src/lib.rs:76:9: warning: unused import: `crate::cpu::*`",
+            "src/lib.rs:48:17: error[E0599]: no method named `bad` found for reference `&Kernels` in the current \
+             scope: method not found in `&Kernels`",
+            "src/lib.rs:70:28: error[E0425]: cannot find function `bad` in this scope: not found in this scope",
+            "src/lib.rs:79:18: error[E0425]: cannot find function `bad` in this scope: not found in this scope",
+            "error: could not compile `unreadable_unknown` (lib) due to 5 previous errors; 1 warning emitted",
+        ],
+    );
+}
+
+/// A module of x86 kernels that kernite cannot read has a static that kernite knows where it has read a function that
+/// names an ABI, before the item it cannot read, `first`, or after it, `last`, and else knows none, for such a function
+/// says whose a static is, the process's or the GPU's. Rust says nothing of the code that names the first two by a
+/// path, by `use` or by a glob, nor of the third by a path or by `use`, and cannot find it by a glob. Nor does it ask
+/// for `kernite-cuda`, as it would if kernite took the third for the GPU's.
+#[test]
+fn a_static_of_a_module_kernite_cannot_read_is_known_if_a_function_that_names_an_abi_is_read() {
+    let lines = [
+        "src/lib.rs:15:39: error: a function's generics are values, as in `<const N: usize>`",
+        "src/lib.rs:24:39: error: a function's generics are values, as in `<const N: usize>`",
+        "src/lib.rs:37:39: error: a function's generics are values, as in `<const N: usize>`",
+        "src/lib.rs:73:9: error[E0425]: cannot find value `COUNTS` in this scope: not found in this scope",
+        "src/lib.rs:70:9: warning: unused import: `crate::no_other::*`",
+        "error: could not compile `unreadable_statics` (lib) due to 4 previous errors; 1 warning emitted",
+    ];
+    refuses("unreadable_statics", &lines);
+    let (built, said) = cargo_in(&["build"], &edited("unreadable_statics", &[("kernite-cuda =", "# kernite-cuda =")]));
+    assert!(!built, "fixtures/unreadable_statics.rs built without kernite-cuda");
+    assert_eq!(said, lines, "without kernite-cuda, Cargo said:\n{}", said.join("\n"));
+}
+
+/// A `const` or a `static` that kernite cannot read ends at its `;`, though its value holds a brace group with more
+/// after it: a block added to, a struct literal read for a field and a branch are each told once, and Rust says nothing
+/// of what would be left of them as an item of its own, nor of the code that names the kernel beside them.
+#[test]
+fn a_const_or_a_static_kernite_cannot_read_ends_at_its_semicolon() {
+    refuses(
+        "unreadable_cut",
+        &[
+            "src/lib.rs:8:24: error: a block is a statement, not a value",
+            "src/lib.rs:17:43: error: expected `;`, found `{ a: 1 }`",
+            "src/lib.rs:26:27: error: expected `;`, found `true`",
+            "error: could not compile `unreadable_cut` (lib) due to 3 previous errors",
+        ],
+    );
+}
+
+/// A module that takes consts and that kernite cannot read says so alone, and is still there as far as kernite reads
+/// it, the consts it takes among its items, and a static whose type reads one of them. A kernel of its own named as a
+/// const it takes, `STEP`, is not said, as it is in a module that compiles, for the error that can be mended first is
+/// the head.
+#[test]
+fn a_module_given_consts_that_kernite_cannot_read_is_still_there_and_says_its_error_alone() {
+    refuses(
+        "unreadable_given",
+        &[
+            "src/lib.rs:25:39: error: a function's generics are values, as in `<const N: usize>`",
+            "error: could not compile `unreadable_given` (lib) due to 1 previous error",
         ],
     );
 }
@@ -3116,11 +3239,12 @@ fn a_crate_that_forbids_lints_is_told_of_the_helpers_that_do_not_compile_and_of_
 
 /// Rust is shown the types a helper's signature names where kernite says an error of the module as a whole, as it is
 /// where kernite says one of an item: where the module is two modules; where no module of PTX has its GPU kernels;
-/// where an item of its own has the name of a const it takes; and where the module is refused at its attribute,
-/// which `consts = 5` is. No kernel calls the helpers, so kernite says nothing of their types. The import that only
-/// they name is used, so Rust does not call it unused beside the module's error, and Rust says nothing of the
-/// language's types, `gpr`, `ymm`, `local<[u32; 4], 16>` and `r32`, which it cannot find. A module that takes its
-/// consts from another is expanded after the rest, so its error is the last.
+/// where an item of its own has the name of a const it takes; where the module is refused at its attribute, which
+/// `consts = 5` is; and where it has an item kernite cannot read, `bad<T>`. No kernel calls the helpers, so kernite
+/// says nothing of their types. The import that only they name is used, so Rust does not call it unused beside the
+/// module's error, and Rust says nothing of the language's types, `gpr`, `ymm`, `local<[u32; 4], 16>` and `r32`,
+/// which it cannot find. A module that takes its consts from another is expanded after the rest, so its error is the
+/// last.
 #[test]
 fn rust_sees_the_types_a_helper_names_where_kernite_says_an_error_of_the_module_as_a_whole() {
     let attribute = format!("src/lib.rs:77:27: error: {REFUSED}");
@@ -3133,8 +3257,9 @@ fn rust_sees_the_types_a_helper_names_where_kernite_says_an_error_of_the_module_
             "src/lib.rs:51:39: error: `shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and \
              `tanh.approx.f32` in `new` needs sm_75 and PTX 7.0: no module has both",
             &attribute,
+            "src/lib.rs:102:12: error: a function's generics are values, as in `<const N: usize>`",
             "src/lib.rs:66:15: error: `STEP` names one of the consts the module takes from `crate::sizes` as well",
-            "error: could not compile `helper_imports_whole` (lib) due to 4 previous errors",
+            "error: could not compile `helper_imports_whole` (lib) due to 5 previous errors",
         ],
     );
 }

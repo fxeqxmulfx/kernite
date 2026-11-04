@@ -100,9 +100,11 @@ pub struct Given {
 pub struct ModuleOut {
     /// The module, without each const given that an item of its own is named as too.
     pub module: Module,
-    /// An error at each item of the module's own named as a const given is.
+    /// An error at each item of the module's own named as a const given is; none, in a refused
+    /// module.
     pub given: Vec<Error>,
-    /// Why the module is two, if it has both kinds of kernel and a static.
+    /// Why the module is two, if it has both kinds of kernel and a static; none, in a refused
+    /// module.
     pub owner: Option<Error>,
     /// What each item of `module` is, in order.
     pub items: Vec<ItemOut>,

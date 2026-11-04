@@ -1,13 +1,14 @@
 //! What a module of kernels becomes once kernite has compiled its kernels: each item as what
 //! `kernite::module` says it is, written out for Rust. A module kernite refuses whole, at its
-//! attribute, is written the same way, with the error in it. kernite checks none of its items, so
-//! each kernel is as it is when it does not compile, each static stands as its type has it where
-//! kernite works that out, and nothing kernite would find in them is said. Nothing of it is
-//! compiled, so a workspace `name` that is not a string is no error at it. No room is counted for
-//! the statics, so the crate is not told it needs `kernite-macros` for them. What this finds in
-//! writing the module for Rust is said, as for any module, such as the dependency on `kernite-cuda`
-//! or `kernite-cpu` it needs or a compile-time argument named as a parameter of a launcher. A module
-//! kernite cannot read is its error alone.
+//! attribute or for an item it cannot read, is written the same way, with the error in it: of the
+//! second, the items `lang::read` reads. kernite checks none of its items, so each kernel is as it
+//! is when it does not compile, each static stands as its type has it where kernite works that out,
+//! and nothing kernite would find in them is said. Nothing of it is compiled, so a workspace `name`
+//! that is not a string is no error at it. No room is counted for the statics, so the crate is not
+//! told it needs `kernite-macros` for them. What this finds in writing the module for Rust is said,
+//! as for any module, such as the dependency on `kernite-cuda` or `kernite-cpu` it needs or a
+//! compile-time argument named as a parameter of a launcher. Brackets nested too deep leave a module
+//! no item: it is its error alone.
 
 use std::path::Path;
 
@@ -25,18 +26,21 @@ use crate::rust::{
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
 
-/// What the module's braces hold once its kernels are compiled; `given`, the consts it takes
-/// from outside, and the path of their module, as `#[kernels(consts = path)]` writes it. A module
-/// kernite refuses whole, at its attribute, has `why`, the error, which is in the module, said
-/// once. It is given no consts, and kernite checks none of its items, for the consts its kernels
-/// read may not be given: each kernel is as it is when it does not compile, each static stands as
-/// its type has it where kernite works that out, and nothing kernite would find in them is said.
-/// Nothing of it is compiled, so it reads no workspace, and a `name` that is not a string is no
-/// error at it. No room is counted for the statics, so the crate is not told it needs
-/// `kernite-macros` for them. What this finds in writing the module for Rust is said, as for any
-/// module: the dependency on `kernite-cuda` or `kernite-cpu` it needs, a compile-time argument named
-/// as a parameter of a launcher or of a `_blocks` method, and a GPU kernel or a static named as a
-/// cooperative kernel's `_blocks` method. A module kernite cannot read has `why` alone.
+/// What the module's braces hold once its kernels are compiled; `given`, the consts it takes from
+/// outside, and the path of their module, as `#[kernels(consts = path)]` writes it. A module
+/// kernite refuses whole has its error, which is in the module, said once: `why`, for a module
+/// refused at its attribute, which is given no consts, for the consts its kernels read may not be
+/// given; or the error `lang::read` gives, for a module kernite cannot read, which has the items it
+/// reads and the consts it is given. kernite checks none of the items of a module refused whole:
+/// each kernel is as it is when it does not compile, each static stands as its type has it where
+/// kernite works that out, and nothing kernite would find in them is said. Nothing of it is
+/// compiled, so it reads no workspace, and a `name` that is not a string is no error at it. No room
+/// is counted for the statics, so the crate is not told it needs `kernite-macros` for them. What
+/// this finds in writing the module for Rust is said, as for any module: the dependency on
+/// `kernite-cuda` or `kernite-cpu` it needs, a compile-time argument named as a parameter of a
+/// launcher or of a `_blocks` method, and a GPU kernel or a static named as a cooperative kernel's
+/// `_blocks` method. Brackets nested too deep leave a module no item: it has its error alone, or
+/// `why`.
 pub(crate) fn expand(
     given: Option<(TokenStream, &[TokenTree])>,
     why: Option<TokenStream>,
@@ -49,11 +53,13 @@ pub(crate) fn expand(
     let (trees, spans) = lex(&top);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(site);
     let said = |e: &lang::Error| error(at(e.span), &e.message);
-    let module = match trees.and_then(|trees| lang::module(&trees, n)) {
-        Ok(module) => module,
-        // A module kernite refuses has its error alone: it is what can be mended first.
+    // A module kernite cannot read is refused whole, as at its attribute, with the items it reads: its error is what
+    // can be mended first. Brackets nested too deep leave it no item, and its error alone.
+    let (module, unread) = match trees {
+        Ok(trees) => lang::read(&trees, n),
         Err(e) => return why.unwrap_or_else(|| said(&e)),
     };
+    let why = why.or_else(|| unread.as_ref().map(said));
     // The error at the module itself, and the GPU kernels' namespaces: the workspace's, then the
     // module's path. A name that is not a string is an error at the module; the macro goes on without
     // it, so that the error is the only one. A refused module has the error it is refused for, and no

@@ -1,6 +1,7 @@
 //! The lexer, how a type is read and written and which types are pointers, the rounding of 16-bit
-//! floats, whether a function is `unsafe`, and where a place is. The rest of the language is tested
-//! where it meets the targets it is compiled for, in `kernite`'s `tests/lang.rs`.
+//! floats, whether a function is `unsafe`, where a place is, and which items of a module kernite
+//! reads when it cannot read all. The rest of the language is tested where it meets the targets it
+//! is compiled for, in `kernite`'s `tests/lang.rs`.
 
 use crate::token::{Span, Tree};
 use crate::value::{Value, cast};
@@ -798,4 +799,146 @@ fn a_function_has_its_mentions_in_the_order_of_the_source_each_place_once() {
     }
     let told: Vec<_> = mentions.iter().map(|m| (m.name.as_str(), m.span.0)).collect();
     assert_eq!(told, [("A", 5), ("C", 12), ("B", 20)]);
+}
+
+/// A module kernite cannot read has the items it reads, named in order, and `_` for each that is none of a const, a
+/// function or a static: every item but those it cannot read, the head of a function with a generic type say, each of
+/// which ends at its `;` if it is a `const` or a `static`, whose value may hold a brace group, and else at its first
+/// `;` or at its first brace group outside `<..>`, a function's body; and, of items that share a name, those that are
+/// not in the way: the static is in the way of the function, the function of the const, else the second. Of the
+/// statics, it has none if it cannot read an item and reads no function that names an ABI. The error is the first
+/// head's if there is one, else the first item in the way, as for a module it cannot read at all; the consts a module
+/// is given are none of its own.
+#[test]
+fn a_module_kernite_cannot_read_has_the_items_it_reads() {
+    let read = |src: &str, given: &str| {
+        let (module, error) = crate::read(&crate::lex(src).unwrap(), crate::lex(given).unwrap().len());
+        let names: Vec<_> = module.items.iter().map(|item| item.name().unwrap_or("_").to_string()).collect();
+        (names, error.map(|e| e.at(src)))
+    };
+    let cases = [
+        ("fn a() {} const b: u32 = 1; static c: global<u32>;", "", vec!["a", "b", "c"], None),
+        (
+            "fn a() {} fn b<T>() {} fn c() {} fn d<U>() {} fn e() {}",
+            "",
+            vec!["a", "c", "e"],
+            Some("1:16: a function's generics are values, as in `<const N: usize>`"),
+        ),
+        (
+            "fn a() {} fn b() {} fn a() {} fn c() {}",
+            "",
+            vec!["a", "b", "c"],
+            Some("1:24: `a` names another function of the module as well"),
+        ),
+        (
+            "fn k() {} static k: global<u32>; fn m() {}",
+            "",
+            vec!["k", "m"],
+            Some("1:18: `k` names a function of the module as well"),
+        ),
+        (
+            "fn h() {} const h: u32 = 1; fn j() {}",
+            "",
+            vec!["h", "j"],
+            Some("1:4: `h` names a constant of the module as well"),
+        ),
+        (
+            "fn a() {} fn a() {} fn b<T>() {}",
+            "",
+            vec!["a"],
+            Some("1:26: a function's generics are values, as in `<const N: usize>`"),
+        ),
+        (
+            "const A: u64 = 1; fn A() {} fn A() {}",
+            "const A: u64 = 1;",
+            vec!["A", "A"],
+            Some("1:32: `A` names another function of the module as well"),
+        ),
+        (
+            "static s: global<u32>; fn h() {} fn b<T>() {}",
+            "",
+            vec!["h"],
+            Some("1:39: a function's generics are values, as in `<const N: usize>`"),
+        ),
+        (
+            "static s: global<u32>; extern \"sysv64\" fn k() {} fn b<T>() {}",
+            "",
+            vec!["s", "k"],
+            Some("1:55: a function's generics are values, as in `<const N: usize>`"),
+        ),
+        (
+            "static s: global<u32>; fn b<T>() {} extern \"sysv64\" fn k() {}",
+            "",
+            vec!["s", "k"],
+            Some("1:29: a function's generics are values, as in `<const N: usize>`"),
+        ),
+        (
+            "const a: u64 = 1 fn b() {} const c: u64 = 3; fn d() {}",
+            "",
+            vec!["d"],
+            Some("1:18: expected `;`, found `fn`"),
+        ),
+        ("const a: u64 = { 1 }; fn b() {}", "", vec!["b"], Some("1:16: a block is a statement, not a value")),
+        ("const a: u64 = { 1 } + 2; fn b() {}", "", vec!["b"], Some("1:16: a block is a statement, not a value")),
+        ("const a: u64 = if c { 1 } else { 2 }; fn b() {}", "", vec!["b"], Some("1:19: expected `;`, found `c`")),
+        (
+            "#[doc = \"x\"] pub(crate) static s: global<u32> = Pair { a: 1 }.a; fn b() {}",
+            "",
+            vec!["b"],
+            Some("1:54: expected `;`, found `{ a: 1 }`"),
+        ),
+        (
+            "const fn a<T>() -> u32 { 1 } fn b() {}",
+            "",
+            vec!["b"],
+            Some("1:12: a function's generics are values, as in `<const N: usize>`"),
+        ),
+        (
+            "fn a<T>() -> Foo<{ 3 }> {} fn b() {}",
+            "",
+            vec!["b"],
+            Some("1:6: a function's generics are values, as in `<const N: usize>`"),
+        ),
+        (
+            "fn a<T: Fn() -> u32>() -> Foo<{ 3 }> {} fn b() {}",
+            "",
+            vec!["b"],
+            Some("1:6: a function's generics are values, as in `<const N: usize>`"),
+        ),
+        (
+            "fn a<T>() -> Foo<fn() -> u32, { 3 }> {} fn b() {}",
+            "",
+            vec!["b"],
+            Some("1:6: a function's generics are values, as in `<const N: usize>`"),
+        ),
+        (
+            "fn a<T: Tr<{ 3 }>>() {} fn b() {}",
+            "",
+            vec!["b"],
+            Some("1:6: a function's generics are values, as in `<const N: usize>`"),
+        ),
+        (
+            "fn a<T>() where Foo<{ 3 }>: Sized {} fn b() {}",
+            "",
+            vec!["b"],
+            Some("1:6: a function's generics are values, as in `<const N: usize>`"),
+        ),
+        ("impl Foo<{ 3 }> { fn x() {} } fn b() {}", "", vec!["_", "b"], None),
+        (
+            "fn a<T>() {} struct S; fn b() {}",
+            "",
+            vec!["_", "b"],
+            Some("1:6: a function's generics are values, as in `<const N: usize>`"),
+        ),
+        (
+            "static s: global<u32>; fn a() {} fn a() {}",
+            "",
+            vec!["s", "a"],
+            Some("1:37: `a` names another function of the module as well"),
+        ),
+    ];
+    for (src, given, names, error) in cases {
+        let want = (names.into_iter().map(String::from).collect::<Vec<_>>(), error.map(String::from));
+        assert_eq!(read(src, given), want, "{src}");
+    }
 }

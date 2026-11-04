@@ -1085,6 +1085,26 @@ fn a_const_given_twice_is_refused_at_the_module_s_own() {
     assert!(out.items.iter().all(|item| !item.failed()));
 }
 
+/// A module refused whole that is given consts leaves out a const given that an item of its own is named as, as any
+/// module does, but the item of its own says nothing: the error that can be mended first is the one it is refused for.
+#[test]
+fn a_module_refused_whole_says_nothing_of_an_item_named_as_a_const_given() {
+    let src = "const STEP: u64 = 3;\n\
+               unsafe extern \"sysv64\" fn STEP(x: u64) { ret(x); }\n\
+               unsafe extern \"sysv64\" fn k(x: u64) { add(x, STEP); }";
+    let before = kernite_lang::lex(&src[..src.find('\n').unwrap()]).unwrap().len();
+    let given = || Some(Given { before, from: "crate::sizes".into() });
+    let parse = || kernite_lang::module(&kernite_lang::lex(src).unwrap(), before).unwrap();
+    for (refused, said) in [
+        (false, vec!["2:27: `STEP` names one of the consts the module takes from `crate::sizes` as well"]),
+        (true, vec![]),
+    ] {
+        let out = module(parse(), given(), refused, &Echo, &Echo);
+        assert_eq!(out.given.iter().map(|e| e.at(src)).collect::<Vec<_>>(), said, "refused: {refused}");
+        let [ItemOut::Native(_), ItemOut::Native(_)] = &out.items[..] else { panic!("{:?}", out.items) };
+    }
+}
+
 /// A kernel that is not an `unsafe fn` is refused where it is named, though it is compiled: one
 /// the process runs is not written, and one the GPU runs is never launched, though its code is in
 /// the GPU's module. A function the kernels call promises Rust nothing, so it need not be one.
