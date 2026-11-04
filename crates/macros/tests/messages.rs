@@ -808,6 +808,38 @@ fn a_module_refused_at_its_attribute_is_told_what_the_macro_finds_in_writing_it_
     );
 }
 
+/// An argument of `#[consts]` is told where it is, once, and changes nothing else. The module is the one it is without
+/// the argument, so Rust says nothing of the code that reads its consts, nor of a module of kernels that takes them.
+#[test]
+fn a_module_of_consts_given_an_argument_is_still_there_for_the_code_that_reads_it() {
+    refuses(
+        "consts_argument",
+        &[
+            "src/lib.rs:6:26: error: `#[consts]` takes no arguments",
+            "error: could not compile `consts_argument` (lib) due to 1 previous error",
+        ],
+    );
+}
+
+/// The module of consts is the one it is without the argument, so its other errors are said, beside the argument's:
+/// they are other mistakes. The module of kernels that takes its consts reads the one that is right, and says its own
+/// error.
+#[test]
+fn a_module_of_consts_given_an_argument_says_its_other_errors_as_well() {
+    refuses(
+        "consts_argument_beside",
+        &[
+            "src/lib.rs:6:26: error: `#[consts]` takes no arguments",
+            "src/lib.rs:8:5: error: a const of a module of consts is `pub`, for the modules of kernels that take it to \
+             see",
+            "src/lib.rs:10:5: error: a module of consts holds the consts kernels read, as `pub const E: usize = 16;`, \
+             and nothing else",
+            "src/lib.rs:17:16: error: `nope` is not defined",
+            "error: could not compile `consts_argument_beside` (lib) due to 4 previous errors",
+        ],
+    );
+}
+
 /// A module of GPU kernels that `#[kernels]` refuses at its attribute needs `kernite-cuda` where `cfg` keeps one of
 /// its GPU items, as a module kernite does not refuse does: the crate is told once, at the module, beside the
 /// attribute, and not where the feature leaves the kernel out.

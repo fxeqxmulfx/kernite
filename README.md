@@ -136,6 +136,10 @@ kernel; a compile-time argument named as a parameter of a launcher or of a `_blo
 `shared`; and a GPU kernel or a static named as a cooperative kernel's `_blocks` method. A module kernite cannot read
 holds its refusal alone, and Rust says nothing of the code that names its items, for the error is in the module.
 
+An argument of `#[consts]`, as in `#[consts(x)]`, is told where it is, and changes nothing else. The module is the one
+it is without the argument: its other errors are said, and Rust says nothing of the code that names its consts, nor of
+the modules of kernels that take them.
+
 A function or a static that `cfg` leaves out says nothing, as Rust says nothing of a function it leaves out. A macro
 runs before Rust knows which `cfg` holds, so kernite compiles each one, and puts each error it finds in one under the
 same `#[cfg(..)]` or `#[cfg_attr(.., cfg(..))]`: a kernel that does not compile, or is not `unsafe`, a helper, a static.

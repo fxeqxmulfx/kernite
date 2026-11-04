@@ -303,6 +303,10 @@
 //! of a `_blocks` method, `grid`, `threads` or `shared`; and a GPU kernel or a static named as a cooperative kernel's
 //! `_blocks` method. A module kernite cannot read holds its refusal alone, and the code that names its items is not an
 //! error as well, for the error is in the module.
+//!
+//! An argument of `#[consts]`, as in `#[consts(x)]`, is told where it is, and changes nothing else. The
+//! module is the one it is without the argument: its other errors are said, and the code that names its
+//! consts, or a module of kernels that takes them, is not an error as well.
 
 extern crate proc_macro;
 
@@ -374,9 +378,6 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// See the crate documentation.
 #[proc_macro_attribute]
 pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
-    if let Some(t) = attr.into_iter().next() {
-        return error(t.span(), "`#[consts]` takes no arguments");
-    }
     let tokens: Vec<TokenTree> = item.into_iter().collect();
     let Some((braces, head)) = braced(&tokens) else {
         let span = tokens.first().map_or_else(Span::call_site, TokenTree::span);
@@ -388,8 +389,11 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
     let top = flatten(braces.stream());
     let (trees, spans) = lex(&top);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(Span::call_site);
-    // The module as it is, for Rust; and the consts kernite reads, for the kernels.
+    // The module as it is, for Rust; and the consts kernite reads, for the kernels. The argument is told where
+    // it is, and changes nothing else: the module is the one it would be without it, for the modules of kernels
+    // that take its consts to read them.
     let mut inner: TokenStream = top.iter().cloned().collect();
+    inner.extend(attr.into_iter().next().map(|t| error(t.span(), "`#[consts]` takes no arguments")));
     let mut given = TokenStream::new();
     match trees.and_then(|trees| lang::module(&trees, 0)) {
         Err(e) => inner.extend(error(at(e.span), &e.message)),
