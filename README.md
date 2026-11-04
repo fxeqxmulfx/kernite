@@ -119,7 +119,8 @@ is unused to Rust, which says so as it does of any const that nothing names.
 
 A module holds what `cfg` keeps: Rust puts it together, where it knows which `cfg` holds. `LISTINGS` has the listing
 of each x86 kernel that `cfg` keeps, and of no other. `PTX` has each GPU kernel, function and static that `cfg`
-keeps, and `Kernels::load` asks the driver for the names of those alone.
+keeps, for the PTX and the GPU that the kernels and functions kept need, and `Kernels::load` asks the driver for the
+names of those alone.
 
 kernite reads every item before Rust knows which `cfg` holds, as Rust parses every item before it does, so an item it
 cannot read is said whatever `cfg` holds, as Rust says a syntax error in a function it leaves out: the head of a
@@ -321,11 +322,11 @@ register only as one of a vector's. And kernite checks what `ptxas` leaves to th
 memory it names, at a multiple of the bytes it moves. Each form, and each of its words, says the oldest version of PTX
 and the oldest GPU `ptxas` takes it at, back to PTX 1.0, which is at times older than the ISA says: `ptxas` takes
 `ld.mmio.acquire` for `sm_70`, which the ISA has from `sm_75`. A module's `.version` and `.target` are the oldest that
-have every instruction its kernels use, and never older than PTX 3.0 and `sm_30`: the driver starts at most 65535 blocks
-along x of a module written for `sm_20` or `sm_21`, Fermi's, whatever the GPU it runs on, and 2^31 - 1 of one written
-for `sm_30`. Where `ptxas` is installed, a test hands it every form at what kernite says it needs, at the newest
-version, and for each newer GPU to `sm_86`, which the driver compiles a module for when it runs there, and `ptxas` must
-take it each time; and at the version before and on the GPU before, which it must refuse.
+have every instruction of its kernels and functions, those that `cfg` keeps, and never older than PTX 3.0 and `sm_30`:
+the driver starts at most 65535 blocks along x of a module written for `sm_20` or `sm_21`, Fermi's, whatever the GPU it
+runs on, and 2^31 - 1 of one written for `sm_30`. Where `ptxas` is installed, a test hands it every form at what kernite
+says it needs, at the newest version, and for each newer GPU to `sm_86`, which the driver compiles a module for when it
+runs there, and `ptxas` must take it each time; and at the version before and on the GPU before, which it must refuse.
 
 An `extern "ptx-func"` function is a `.func` that the module's kernels and functions call, itself among them. It
 takes and returns PTX's types, and `call(g, gcd, (a, b))` calls it by its name, or `call(g, fp, (a, b))` at the

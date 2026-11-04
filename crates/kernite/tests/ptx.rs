@@ -9,8 +9,8 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use kernite::Kept;
 use kernite::lang::{IntTy, Mem as Address, Operand as Given, Target, Value};
+use kernite::{Assembly, Kept};
 use kernite_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Sel, Space, Spec};
 use kernite_ptx::lang::{Callee, Kernel, Var};
 use kernite_ptx::{Entry, Kind, Needs, Prototype, Returns, Static, Ty};
@@ -1502,6 +1502,39 @@ const PARTS: &str = r#"
     }
 "#;
 
+/// The module put together from `entries` and `statics` for each set of them kept, by the bits of
+/// its number, `entries` first: that it is the module of what is kept alone, with why it is none.
+fn every_set_put_together(entries: &[Entry], statics: &[Static]) -> Vec<Result<String, String>> {
+    let assembly = kernite_ptx::module(entries, statics);
+    (0u32..1 << (entries.len() + statics.len()))
+        .map(|set| {
+            let has = |i: usize| set >> i & 1 == 1;
+            let kept = |it| match it {
+                Kept::Code(i) => has(i),
+                Kept::Static(j) => has(entries.len() + j),
+            };
+            let code: Vec<Entry> = (0..entries.len()).filter(|&i| has(i)).map(|i| entries[i].clone()).collect();
+            let memory: Vec<Static> =
+                (0..statics.len()).filter(|&j| has(entries.len() + j)).map(|j| statics[j].clone()).collect();
+            let alone = kernite_ptx::module(&code, &memory).whole();
+            assert_eq!(assembly.text(&kept), alone, "{set:b}");
+            alone
+        })
+        .collect()
+}
+
+/// The module of `assembly` put together where the entries at `kept` are kept, or why it is none.
+fn put_together(assembly: &Assembly, kept: &[usize]) -> Result<String, String> {
+    assembly.text(&|it| matches!(it, Kept::Code(i) if kept.contains(&i)))
+}
+
+/// `names` compiled, each a kernel or a function of `source`.
+fn compiled(source: &str, names: &[&str]) -> Vec<Entry> {
+    let module = kernite::lang::parse(source).unwrap();
+    let compile = |name| kernite::ptx(&module, kernite::function(&module, name).unwrap(), &[], "").unwrap().code;
+    names.iter().copied().map(compile).collect()
+}
+
 /// A module put together from what is kept is the module of what is kept alone, whichever of its
 /// kernels, functions and statics that is: for every set of them, each function declared before
 /// the first kernel or function kept that names it, if it comes after, and the rest as it is. A
@@ -1512,32 +1545,110 @@ fn a_module_put_together_from_what_is_kept_is_the_module_of_what_is_kept_alone()
     let module = kernite::lang::parse(PARTS).unwrap();
     let mut statics: Vec<Static> = kernite::ptx_statics(&module, "").into_iter().map(|s| s.unwrap().code).collect();
     statics.push(Static::new("S", "odd", "global<u32>").unwrap());
-    let names = ["first", "second", "gcd", "even", "odd", "reverse"];
-    let compile = |name| kernite::ptx(&module, kernite::function(&module, name).unwrap(), &[], "").unwrap().code;
-    let entries: Vec<Entry> = names.into_iter().map(compile).collect();
-    let assembly = kernite_ptx::module(&entries, &statics);
-    let (mut refused, mut made) = (0, 0);
-    for set in 0u32..1 << (entries.len() + statics.len()) {
-        let has = |i: usize| set >> i & 1 == 1;
-        let kept = |it| match it {
-            Kept::Code(i) => has(i),
-            Kept::Static(j) => has(entries.len() + j),
-        };
-        let code: Vec<Entry> = (0..entries.len()).filter(|&i| has(i)).map(|i| entries[i].clone()).collect();
-        let memory: Vec<Static> =
-            (0..statics.len()).filter(|&j| has(entries.len() + j)).map(|j| statics[j].clone()).collect();
-        let alone = kernite_ptx::module(&code, &memory).whole();
-        assert_eq!(assembly.text(&kept), alone, "{set:b}");
-        match alone {
-            Ok(_) => made += 1,
-            Err(_) => refused += 1,
-        }
-    }
+    let entries = compiled(PARTS, &["first", "second", "gcd", "even", "odd", "reverse"]);
+    let modules = every_set_put_together(&entries, &statics);
     // Only the static S with `odd` kept beside it makes a module none: of the 2^9 sets, the 2^7
     // that have both.
-    assert_eq!((made, refused), (384, 128));
+    let made = modules.iter().filter(|m| m.is_ok()).count();
+    assert_eq!((made, modules.len() - made), (384, 128));
     let both = |it| matches!(it, Kept::Code(4) | Kept::Static(2));
-    assert_eq!(assembly.text(&both), Err("`S` is `odd` in PTX, as `odd` is".into()));
+    assert_eq!(kernite_ptx::module(&entries, &statics).text(&both), Err("`S` is `odd` in PTX, as `odd` is".into()));
+}
+
+/// Kernels that need more of PTX and of the GPU, one after another, and the last two the same GPU.
+const NEEDS: &str = r#"
+    pub unsafe extern "ptx-kernel" fn plain(x: *mut u32) {
+        st.global.u32([x], 1);
+    }
+
+    pub unsafe extern "ptx-kernel" fn half(x: *mut u32) {
+        let h: f16x2;
+        st.global.u32([x], 2);
+    }
+
+    pub unsafe extern "ptx-kernel" fn sleep(n: u32) {
+        nanosleep.u32(n);
+    }
+
+    pub unsafe extern "ptx-kernel" fn tanh(f: f32) {
+        let v: f32;
+        tanh.approx.f32(v, f);
+    }
+
+    pub unsafe extern "ptx-kernel" fn wait() {
+        cp.async.wait_all();
+    }
+
+    pub unsafe extern "ptx-kernel" fn arrive(y: u64) {
+        mbarrier.arrive.b64(_, [y]);
+    }
+"#;
+
+/// A module put together from what is kept is of the PTX and the GPU that what is kept needs, as
+/// the module of it alone is: its `.version` and `.target` are the oldest that have every
+/// instruction of the kernels kept, and the floor if none is.
+#[test]
+fn a_module_put_together_from_what_is_kept_is_of_the_ptx_and_gpu_it_needs() {
+    let entries = compiled(NEEDS, &["plain", "half", "sleep", "tanh", "wait", "arrive"]);
+    let modules = every_set_put_together(&entries, &[]);
+    assert!(modules.iter().all(Result::is_ok));
+    let assembly = kernite_ptx::module(&entries, &[]);
+    let cases: [(&[usize], &str); 14] = [
+        (&[], ".version 3.0 .target sm_30"),
+        (&[0], ".version 3.0 .target sm_30"),
+        (&[1], ".version 4.2 .target sm_53"),
+        (&[0, 1], ".version 4.2 .target sm_53"),
+        (&[2], ".version 6.2 .target sm_70"),
+        (&[1, 2], ".version 6.2 .target sm_70"),
+        (&[3], ".version 7.0 .target sm_75"),
+        (&[2, 3], ".version 7.0 .target sm_75"),
+        (&[4], ".version 7.0 .target sm_80"),
+        (&[3, 4], ".version 7.0 .target sm_80"),
+        (&[5], ".version 7.1 .target sm_80"),
+        (&[3, 5], ".version 7.1 .target sm_80"),
+        (&[0, 1, 2, 3, 4], ".version 7.0 .target sm_80"),
+        (&[0, 1, 2, 3, 4, 5], ".version 7.1 .target sm_80"),
+    ];
+    for (kept, want) in cases {
+        assert_eq!(header(&put_together(&assembly, kept).unwrap()), want, "kept {kept:?}");
+    }
+}
+
+/// A function with an instruction for a newer GPU, and the one kernel that calls it, beside a
+/// kernel that needs nothing: the function may be kept and its caller not.
+const HELPED: &str = r#"
+    pub unsafe extern "ptx-kernel" fn plain(x: *mut u32) {
+        st.global.u32([x], 1);
+    }
+
+    pub unsafe extern "ptx-kernel" fn shine(x: *mut f32, f: f32) {
+        let v: f32;
+        call(v, fast, f);
+        st.global.f32([x], v);
+    }
+
+    extern "ptx-func" fn fast(f: f32) -> f32 {
+        let v: f32;
+        tanh.approx.f32(v, f);
+        ret(v);
+    }
+"#;
+
+/// A function kept sets the module's `.version` and `.target` as a kernel kept does, though the one
+/// kernel that calls it is left out: `fast` with `plain`, which needs nothing, is a module of PTX 7.0
+/// and `sm_75`, which `fast` needs, and `plain` alone is of the floor. In each set of the three the
+/// module put together is the module of that set alone.
+#[test]
+fn a_function_kept_sets_the_header_though_the_kernel_that_calls_it_is_left_out() {
+    let entries = compiled(HELPED, &["plain", "shine", "fast"]);
+    let modules = every_set_put_together(&entries, &[]);
+    assert!(modules.iter().all(Result::is_ok));
+    let assembly = kernite_ptx::module(&entries, &[]);
+    let with_function = put_together(&assembly, &[0, 2]).unwrap();
+    assert_eq!(header(&with_function), ".version 7.0 .target sm_75");
+    assert!(with_function.contains(".func (.param .f32 fast_retval) fast("), "{with_function}");
+    assert!(!with_function.contains(".entry shine("), "{with_function}");
+    assert_eq!(header(&put_together(&assembly, &[0]).unwrap()), ".version 3.0 .target sm_30");
 }
 
 /// A kernel and a function each compiled for every instance their `#[instances(..)]` lists,

@@ -139,6 +139,47 @@ impl Entry {
     }
 }
 
+/// That the code at `i` is kept.
+fn code(i: usize) -> When {
+    When::Kept(Kept::Code(i))
+}
+
+/// The module's header: a part for each pair of what some of `entries` need most of PTX and of the
+/// GPU, each the largest of theirs. The part of the pair that what is kept needs is there, and no
+/// other: each thing kept is within the pair, and something kept needs each of its values, but a 0,
+/// which nothing needs. A pair that no entries reach has no part.
+fn headers(entries: &[Entry]) -> Vec<(When, String)> {
+    let needs: Vec<Needs> = entries.iter().map(Entry::needs).collect();
+    let values = |of: fn(&Needs) -> u32| {
+        let mut all: Vec<u32> = needs.iter().map(of).chain([0]).collect();
+        all.sort_unstable();
+        all.dedup();
+        all
+    };
+    let mut parts = vec![];
+    for ptx in values(|n| n.ptx) {
+        for sm in values(|n| n.sm) {
+            let (within, beyond): (Vec<usize>, Vec<usize>) =
+                (0..needs.len()).partition(|&i| needs[i].ptx <= ptx && needs[i].sm <= sm);
+            let reach = |value: u32, of: fn(&Needs) -> u32| -> Vec<When> {
+                within.iter().filter(|&&i| of(&needs[i]) == value).map(|&i| code(i)).collect()
+            };
+            let (by_ptx, by_sm) = (reach(ptx, |n| n.ptx), reach(sm, |n| n.sm));
+            if (ptx > 0 && by_ptx.is_empty()) || (sm > 0 && by_sm.is_empty()) {
+                continue;
+            }
+            let mut when = vec![When::Not(Box::new(When::Any(beyond.into_iter().map(code).collect())))];
+            when.extend((ptx > 0).then_some(When::Any(by_ptx)));
+            when.extend((sm > 0).then_some(When::Any(by_sm)));
+            let at = Needs { ptx, sm, ..Needs::default() };
+            let (version, target) = (at.version(), at.target());
+            let text = format!("// Written by kernite.\n\n.version {version}\n.target {target}\n.address_size 64\n");
+            parts.push((When::All(when), text));
+        }
+    }
+    parts
+}
+
 /// The PTX module of `entries`, kernels and functions, with `statics`, the module's memory, put
 /// together from what the program keeps of them: whichever are kept, it is the module of those
 /// alone. That is of the version and for the GPU the instructions of what is kept need, and no
@@ -153,7 +194,6 @@ impl Entry {
 ///
 /// [`fit`]: fits
 pub fn module(entries: &[Entry], statics: &[Static]) -> Assembly {
-    let code = |i: usize| When::Kept(Kept::Code(i));
     let kept = |j: usize| When::Kept(Kept::Static(j));
     let (mut parts, mut refusals) = (vec![], vec![]);
     let needs = entries.iter().fold(Needs::default(), |n, e| n.and(e.needs()));
@@ -164,11 +204,7 @@ pub fn module(entries: &[Entry], statics: &[Static]) -> Assembly {
             .collect();
         refusals.push((When::always(), clash(&named)));
     }
-    let (version, target) = (needs.version(), needs.target());
-    parts.push((
-        When::always(),
-        format!("// Written by kernite.\n\n.version {version}\n.target {target}\n.address_size 64\n"),
-    ));
+    parts.extend(headers(entries));
     // The names at the module's scope, and those of a kernel's or a function's parameters,
     // which a static's would hide there: PTX's own `WARP_SZ`, and what each name is, and whose.
     let mut names = vec![("WARP_SZ".to_string(), "PTX's own `WARP_SZ`".to_string(), When::always())];
