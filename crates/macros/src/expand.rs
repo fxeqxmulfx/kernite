@@ -6,7 +6,7 @@ use std::path::Path;
 use proc_macro::{Delimiter, Group, Span, TokenStream, TokenTree};
 
 use kernite::lang::{self, ItemKind};
-use kernite::{ItemOut, Launcher, ModuleOut};
+use kernite::{DeviceOut, ItemOut, Kept, ModuleOut};
 
 use crate::cond::Cond;
 use crate::gpu::{HOLE, gpu};
@@ -89,7 +89,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
             }
             (ItemKind::Static(s), ItemOut::DeviceStatic(laid)) => {
                 out.extend(laid.as_ref().err().map(said));
-                memory.push((s, laid.as_ref().ok().map(|c| &c.code)));
+                memory.push((s, laid.as_ref().ok().map(|c| &c.code), conds[i].clone()));
                 on_gpu.push(conds[i].clone());
             }
             (ItemKind::Fn(_), ItemOut::Helper(errors)) => out.extend(errors.iter().map(said)),
@@ -112,10 +112,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
                 out.extend(d.said.as_ref().map(said));
                 out.extend(d.errors.iter().map(said));
                 on_gpu.push(conds[i].clone());
-                launchers.extend(d.launcher.as_ref().map(|l| match l {
-                    Launcher::Never => (f, None),
-                    Launcher::Of(launched) => (f, Some(launched.as_slice())),
-                }));
+                launchers.extend(d.launcher.as_ref().map(|l| (f, l)));
             }
             _ => unreachable!("kernite::module says what each item is"),
         }
@@ -140,12 +137,39 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
         out.extend(parse(";"));
     }
     if let Some(device) = &made.device {
-        out.extend(device.error.as_ref().map(said));
-        out.extend(gpu(&launchers, &device.symbols, &memory, &device.text, &top, &at, &on_gpu));
+        // Each part of the module is there where `cfg` keeps the code and the statics it is of.
+        let kept = |it: Kept| match it {
+            Kept::Code(i) => conds[device.code_items[i]].clone(),
+            Kept::Static(j) => conds[device.static_items[j]].clone(),
+        };
+        let parts: Vec<(Cond, &str)> =
+            device.assembly.parts.iter().map(|(when, text)| (Cond::when(when, &kept), text.as_str())).collect();
+        out.extend(unloadable(device, &kept, &at));
+        let symbols: Vec<(Cond, &str)> =
+            device.symbols.iter().map(|(code, symbol)| (kept(Kept::Code(*code)), symbol.as_str())).collect();
+        out.extend(gpu(&launchers, &symbols, &memory, &parts, &top, &at, &on_gpu));
         // The workspace's name is in the PTX, so it is built again when it changes.
         if let Some(manifest) = manifest.as_deref().and_then(Path::to_str) {
             out.extend(parse(&format!("const _: &[::core::primitive::u8] = ::core::include_bytes!({manifest:?});")));
         }
+    }
+    out
+}
+
+/// Why the GPU's module is none, at the module's first item that is the GPU's, where `cfg` keeps what
+/// each reason is of, `kept` saying where. It is said once: where an earlier reason holds, a later
+/// is not.
+fn unloadable(
+    device: &DeviceOut,
+    kept: &dyn Fn(Kept) -> Cond,
+    at: &dyn Fn(lang::Span) -> proc_macro::Span,
+) -> TokenStream {
+    let (mut out, mut before) = (TokenStream::new(), vec![]);
+    for (when, message) in &device.assembly.refusals {
+        let cond = Cond::when(when, kept);
+        let now = Cond::all([cond.clone(), Cond::any(before.iter().cloned()).not()]);
+        out.extend(now.guard().map(|guard| error_under(&guard, at(device.at), message)));
+        before.push(cond);
     }
     out
 }

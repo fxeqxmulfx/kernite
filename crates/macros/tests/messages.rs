@@ -603,6 +603,22 @@ fn a_kernel_that_does_not_compile_leaves_a_stub() {
     );
 }
 
+/// A module of GPU kernels holds what `cfg` keeps: a static, a function that kernels call or a kernel
+/// that `cfg` leaves out is neither in its `PTX` nor among the names `Kernels::load` asks the driver
+/// for, and what comes after it is where it was. The fixture's tests run with its feature and without
+/// it; they assert which of the module is in `PTX` and, on a machine with a GPU, load it and launch each
+/// kernel that is there, which writes to a buffer and to a static of its own.
+#[test]
+fn a_gpu_module_holds_what_cfg_keeps() {
+    for command in [&["test"][..], &["test", "--features", "more"]] {
+        let printed = runs_quietly(command, "configured_ptx");
+        assert!(
+            printed.contains("test result: ok. 2 passed"),
+            "fixtures/configured_ptx.rs: {command:?} printed:\n{printed}"
+        );
+    }
+}
+
 /// A kernel, a helper or a static that `cfg` leaves out says nothing of what is wrong with it, as
 /// Rust says nothing of a function it leaves out: the crate builds without a word, under
 /// `deny(warnings)`, and with the feature that keeps them each error is said where it is, in its

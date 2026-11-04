@@ -3,8 +3,8 @@
 
 use proc_macro::{Delimiter, Group, Ident, Span, TokenStream, TokenTree};
 
-use kernite::DeviceStatic;
 use kernite::lang::{self, Fn, Value};
+use kernite::{DeviceStatic, Launcher};
 
 use crate::cond::Cond;
 use crate::rust::{
@@ -21,25 +21,28 @@ const CUDA: &str = "kernite-cuda";
 pub(crate) const HOLE: &str = "\0";
 
 /// What a kernel's instance is: its compile-time arguments, none for a kernel that takes
-/// none, and its index among the module's kernels.
-type Launched = (Vec<Value>, usize);
+/// none, and its index among the names the driver is asked for, as an expression of Rust.
+type Launched = (Vec<Value>, String);
 
 /// `PTX`, the module the GPU kernels are, and `Kernels`, which loads it on a GPU and has a
 /// method to launch each kernel by its name: of each instance, for a kernel of compile-time
-/// arguments; one that never runs for a kernel that did not compile, launched `None`. Each of
-/// `symbols` is a kernel's name in `ptx`, by its index. Each static of `memory` has a method
+/// arguments; one that never runs for a kernel that did not compile, a [`Launcher::Never`], each
+/// instance by the index of its name in `symbols`. Each static of `memory` has a method
 /// of its name too, which gives its memory on the GPU, or never runs, if it did not compile;
 /// and each cooperative kernel has one that says how many blocks its grid has at most, unless
-/// a kernel or a static has that name, which is an error where `at` says. A crate without
-/// `kernite-cuda` has `PTX` empty and a `Kernels` that is the error, said once, at the module:
-/// nothing else is said of the code that loads it or launches a kernel. Both are there when any of
-/// the module's GPU items is, `on_gpu` their conditions: a feature that brings `kernite-cuda` and
-/// keeps them lets the crate build without the feature.
+/// a kernel or a static has that name, which is an error where `at` says. `ptx` is the module's
+/// text in parts. Each part, each name in `symbols` and each static of `memory` is there where its
+/// condition holds, for Rust puts the module together where it knows which `cfg` holds; the index
+/// of a name is its place among those that are there. A crate without `kernite-cuda` has `PTX`
+/// empty and a `Kernels` that is the error, said once, at the module: nothing else is said of the
+/// code that loads it or launches a kernel. Both are there when any of the module's GPU items is,
+/// `on_gpu` their conditions: a feature that brings `kernite-cuda` and keeps them lets the crate
+/// build without the feature.
 pub(crate) fn gpu(
-    launchers: &[(&Fn, Option<&[Launched]>)],
-    symbols: &[String],
-    memory: &[(&lang::Static, Option<&DeviceStatic>)],
-    ptx: &str,
+    launchers: &[(&Fn, &Launcher)],
+    symbols: &[(Cond, &str)],
+    memory: &[(&lang::Static, Option<&DeviceStatic>, Cond)],
+    ptx: &[(Cond, &str)],
     top: &[TokenTree],
     at: &dyn std::ops::Fn(lang::Span) -> Span,
     on_gpu: &[Cond],
@@ -54,35 +57,49 @@ pub(crate) fn gpu(
         out.extend(parse(";"));
         return out;
     }
-    let names: Vec<String> = symbols.iter().map(|s| named(s)).collect();
-    let globals: Vec<String> = memory.iter().filter_map(|(_, m)| m.map(|m| named(&m.symbol))).collect();
-    let mut out = parse(&format!(
-        "/// The module's GPU kernels, in PTX, for the CUDA driver to compile for the GPU it finds.\n\
-         /// Each is named as C++ names it in the namespaces of the workspace, the crate and the\n\
-         /// module, with its compile-time arguments, for the tools that read PTX to show:\n\
+    // The module's variables: the statics that compiled, in order.
+    let variables: Vec<(&Cond, &DeviceStatic)> = memory.iter().filter_map(|(_, m, c)| m.map(|m| (c, m))).collect();
+    let mut out = parse(
+        "/// The module's GPU kernels, functions and statics that `cfg` keeps, in PTX, for the CUDA\n\
+         /// driver to compile for the GPU it finds. Each is named as C++ names it in the\n\
+         /// namespaces of the workspace, the crate and the module, with its compile-time\n\
+         /// arguments, for the tools that read PTX to show:\n\
          /// `kernite::my_app::gpu::tile<(unsigned long)4>`.\n\
-         pub const PTX: &::core::primitive::str = {};\n\
-         /// The module's GPU kernels, loaded on a GPU: each is launched by the method of its name,\n\
-         /// and the memory of each static is the `kernite_cuda::Global` the method of its name gives.\n\
-         pub struct Kernels {{\n    module: ::kernite_cuda::Module,\n}}\n\
+         pub const PTX: &::core::primitive::str =",
+    );
+    out.extend(named(ptx));
+    out.extend(parse(
+        ";\n\
+         /// The module's GPU kernels that `cfg` keeps, loaded on a GPU: each is launched by the\n\
+         /// method of its name, and the memory of each static is the `kernite_cuda::Global` the\n\
+         /// method of its name gives.\n\
+         pub struct Kernels {\n    module: ::kernite_cuda::Module,\n}\n\
          impl Kernels",
-        named(ptx)
     ));
-    let mut methods = parse(&format!(
+    // The names the driver finds the kernels and the statics by, those `cfg` keeps.
+    let mut load = parse("const NAMES: &[&::core::primitive::str] = &");
+    load.extend([names(symbols.iter().map(|(c, s)| (c, *s)))]);
+    load.extend(parse("; const GLOBALS: &[&::core::primitive::str] = &"));
+    load.extend([names(variables.iter().map(|(c, m)| (*c, m.symbol.as_str())))]);
+    load.extend(parse(
+        ";\n::core::result::Result::Ok(Kernels { module: ::kernite_cuda::Module::load(cuda, PTX, NAMES, GLOBALS)? })",
+    ));
+    let mut methods = parse(
         "/// The kernels, compiled for `cuda`'s GPU by its driver.\n\
-         pub fn load(cuda: &::kernite_cuda::Cuda) -> ::core::result::Result<Kernels, ::kernite_cuda::Error> {{\n\
-             const NAMES: &[&::core::primitive::str] = &[{}];\n\
-             const GLOBALS: &[&::core::primitive::str] = &[{}];\n\
-             ::core::result::Result::Ok(Kernels {{ module: ::kernite_cuda::Module::load(cuda, PTX, NAMES, GLOBALS)? }})\n\
-         }}",
-        names.join(", "),
-        globals.join(", ")
-    ));
+         pub fn load(cuda: &::kernite_cuda::Cuda) -> ::core::result::Result<Kernels, ::kernite_cuda::Error>",
+    );
+    methods.extend([TokenTree::Group(Group::new(Delimiter::Brace, load))]);
+    // The index of the name of symbol `i` among the names that are there.
+    let index = |i: usize| Cond::count(symbols[..i].iter().map(|(c, _)| c));
     let mut errors = TokenStream::new();
     let taken: Vec<&str> =
-        launchers.iter().map(|(f, _)| f.name.as_str()).chain(memory.iter().map(|(s, _)| s.name.as_str())).collect();
-    for (f, launched) in launchers {
-        methods.extend(launcher(f, *launched, top));
+        launchers.iter().map(|(f, _)| f.name.as_str()).chain(memory.iter().map(|(s, ..)| s.name.as_str())).collect();
+    for (f, how) in launchers {
+        let launched: Option<Vec<Launched>> = match how {
+            Launcher::Never => None,
+            Launcher::Of(l) => Some(l.iter().map(|(args, i)| (args.clone(), index(*i))).collect()),
+        };
+        methods.extend(launcher(f, launched.as_deref(), top));
         let Some(c) = &f.cooperative else { continue };
         let name = blocks_name(f);
         if taken.contains(&name.as_str()) {
@@ -95,11 +112,11 @@ pub(crate) fn gpu(
             errors.extend(error_under(&carried(attrs(f, top), false), at(c.span), &message));
             continue;
         }
-        methods.extend(blocks(f, *launched, top));
+        methods.extend(blocks(f, launched.as_deref(), top));
     }
-    for (k, (s, made)) in memory.iter().enumerate() {
-        // Its index among the variables the module has, those of the statics that compiled.
-        let i = memory[..k].iter().filter(|(_, m)| m.is_some()).count();
+    for (k, (s, made, _)) in memory.iter().enumerate() {
+        // Its index among the variables there are, those of the statics that compiled.
+        let i = Cond::count(memory[..k].iter().filter(|(_, m, _)| m.is_some()).map(|(.., c)| c));
         methods.extend(accessor(s, made.map(|m| (m, i)), top));
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, methods))]);
@@ -108,9 +125,9 @@ pub(crate) fn gpu(
 }
 
 /// The method that gives static `s`'s memory on the GPU, `made`, by its index among the
-/// module's variables, as the `kernite_cuda::Global` of the type of Rust's its elements are
-/// read as; or one that never runs, for a static that did not compile.
-fn accessor(s: &lang::Static, made: Option<(&DeviceStatic, usize)>, top: &[TokenTree]) -> TokenStream {
+/// module's variables, an expression, as the `kernite_cuda::Global` of the type of Rust's its
+/// elements are read as; or one that never runs, for a static that did not compile.
+fn accessor(s: &lang::Static, made: Option<(&DeviceStatic, String)>, top: &[TokenTree]) -> TokenStream {
     let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
     out.extend(top[s.vis.clone()].iter().cloned());
     out.extend(parse("fn"));
@@ -131,10 +148,34 @@ fn accessor(s: &lang::Static, made: Option<(&DeviceStatic, usize)>, top: &[Token
     out
 }
 
-/// `text`, with the module's path written where each [`HOLE`] is, as the constant it is.
-fn named(text: &str) -> String {
-    let pieces: Vec<String> = text.split(HOLE).map(|p| format!("{p:?}")).collect();
-    format!("::kernite_cuda::__named!(::core::module_path!(), [{}])", pieces.join(", "))
+/// The constant that is the `parts` of a text joined, each under its condition, with the module's
+/// path written where each [`HOLE`] is.
+fn named(parts: &[(Cond, &str)]) -> TokenStream {
+    let mut list = TokenStream::new();
+    for (cond, text) in parts {
+        let Some(guard) = cond.guard() else { continue };
+        let pieces: Vec<String> = text.split(HOLE).map(|piece| format!("{piece:?}")).collect();
+        list.extend(guard);
+        list.extend(parse(&format!("[{}],", pieces.join(", "))));
+    }
+    let mut args = parse("::core::module_path!(),");
+    args.extend([TokenTree::Group(Group::new(Delimiter::Bracket, list))]);
+    let mut out = parse("::kernite_cuda::__named!");
+    out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, args))]);
+    out
+}
+
+/// The names of `symbols` as the constants `named` makes them, in brackets, each there where its
+/// condition holds.
+fn names<'a>(symbols: impl Iterator<Item = (&'a Cond, &'a str)>) -> TokenTree {
+    let mut list = TokenStream::new();
+    for (cond, symbol) in symbols {
+        let Some(guard) = cond.guard() else { continue };
+        list.extend(guard);
+        list.extend(named(&[(Cond::Always, symbol)]));
+        list.extend(parse(","));
+    }
+    TokenTree::Group(Group::new(Delimiter::Bracket, list))
 }
 
 /// The method that launches `f` over a grid, each of its instances `launched`: its parameters
@@ -256,11 +297,8 @@ fn body(
     then: impl std::ops::Fn(&str) -> String,
 ) -> TokenStream {
     let body = match launched {
-        Some([(args, i)]) if args.is_empty() => then(&i.to_string()),
-        Some(instances) => {
-            let arms: Vec<(Vec<Value>, String)> = instances.iter().map(|(a, i)| (a.clone(), i.to_string())).collect();
-            then(&pick(f, &arms, top))
-        }
+        Some([(args, i)]) if args.is_empty() => then(i),
+        Some(instances) => then(&pick(f, instances, top)),
         None => never.to_string(),
     };
     checks.extend(hygienic(&body, launched.is_some()));

@@ -9,6 +9,7 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use kernite::Kept;
 use kernite::lang::{IntTy, Mem as Address, Operand as Given, Target, Value};
 use kernite_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Sel, Space, Spec};
 use kernite_ptx::lang::{Callee, Kernel, Var};
@@ -1431,6 +1432,114 @@ fn a_function_comes_out_as_ptx_writes_it() {
     }
 }
 
+/// Kernels and functions that name each other, forward and back, kernels that share what a
+/// launch gives, and statics: what a module is made of.
+const PARTS: &str = r#"
+    static A: global<[u32; 4]>;
+    static C: constant<[u32; 2]> = [1, 2];
+
+    pub unsafe extern "ptx-kernel" fn first(x: *mut u32, n: u32) {
+        let (a, g, e): (u32, u32, u32);
+        ld.global.u32(a, [x]);
+        call(g, gcd, (a, n));
+        call(e, even, 10);
+        st.global.u32([x], g);
+    }
+
+    pub unsafe extern "ptx-kernel" fn second(x: *mut u32, n: u32) {
+        let (a, g, e): (u32, u32, u32);
+        ld.global.u32(a, [x]);
+        call(e, even, 10);
+        call(g, gcd, (a, n));
+        st.global.u32([x], g);
+    }
+
+    extern "ptx-func" fn gcd(a: u32, b: u32) -> u32 {
+        let p: pred;
+        setp.eq.u32(p, b, 0);
+        if p {
+            ret(a);
+        }
+        let (r, g): (u32, u32);
+        rem.u32(r, a, b);
+        call(g, gcd, (b, r));
+        ret(g);
+    }
+
+    extern "ptx-func" fn even(n: u32) -> u32 {
+        let p: pred;
+        setp.eq.u32(p, n, 0);
+        if p {
+            ret(1);
+        }
+        let (m, r): (u32, u32);
+        sub.u32(m, n, 1);
+        call(r, odd, m);
+        ret(r);
+    }
+
+    extern "ptx-func" fn odd(n: u32) -> u32 {
+        let p: pred;
+        setp.eq.u32(p, n, 0);
+        if p {
+            ret(0);
+        }
+        let (m, r): (u32, u32);
+        sub.u32(m, n, 1);
+        call(r, even, m);
+        ret(r);
+    }
+
+    pub unsafe extern "ptx-kernel" fn reverse(x: *mut f32) {
+        let buf: shared<[f32]>;
+        let (t, s): (u32, u32);
+        mov.u32(t, tid.x);
+        mov.u32(s, buf);
+        let v: f32;
+        ld.global.f32(v, [x]);
+        st.shared.f32([s], v);
+        st.global.f32([x], v);
+    }
+"#;
+
+/// A module put together from what is kept is the module of what is kept alone, whichever of its
+/// kernels, functions and statics that is: for every set of them, each function declared before
+/// the first kernel or function kept that names it, if it comes after, and the rest as it is. A
+/// static whose name in PTX is a function's is refused where both are kept, and where one is, the
+/// other's module has it.
+#[test]
+fn a_module_put_together_from_what_is_kept_is_the_module_of_what_is_kept_alone() {
+    let module = kernite::lang::parse(PARTS).unwrap();
+    let mut statics: Vec<Static> = kernite::ptx_statics(&module, "").into_iter().map(|s| s.unwrap().code).collect();
+    statics.push(Static::new("S", "odd", "global<u32>").unwrap());
+    let names = ["first", "second", "gcd", "even", "odd", "reverse"];
+    let compile = |name| kernite::ptx(&module, kernite::function(&module, name).unwrap(), &[], "").unwrap().code;
+    let entries: Vec<Entry> = names.into_iter().map(compile).collect();
+    let assembly = kernite_ptx::module(&entries, &statics);
+    let (mut refused, mut made) = (0, 0);
+    for set in 0u32..1 << (entries.len() + statics.len()) {
+        let has = |i: usize| set >> i & 1 == 1;
+        let kept = |it| match it {
+            Kept::Code(i) => has(i),
+            Kept::Static(j) => has(entries.len() + j),
+        };
+        let code: Vec<Entry> = (0..entries.len()).filter(|&i| has(i)).map(|i| entries[i].clone()).collect();
+        let memory: Vec<Static> =
+            (0..statics.len()).filter(|&j| has(entries.len() + j)).map(|j| statics[j].clone()).collect();
+        let alone = kernite_ptx::module(&code, &memory).whole();
+        assert_eq!(assembly.text(&kept), alone, "{set:b}");
+        match alone {
+            Ok(_) => made += 1,
+            Err(_) => refused += 1,
+        }
+    }
+    // Only the static S with `odd` kept beside it makes a module none: of the 2^9 sets, the 2^7
+    // that have both.
+    assert_eq!((made, refused), (384, 128));
+    let both = |it| matches!(it, Kept::Code(4) | Kept::Static(2));
+    assert_eq!(assembly.text(&both), Err("`S` is `odd` in PTX, as `odd` is".into()));
+}
+
 /// A kernel and a function each compiled for every instance their `#[instances(..)]` lists,
 /// and a kernel, before the function, that names some.
 const INSTANCES: &str = r#"
@@ -2294,7 +2403,7 @@ fn module(entries: &[Entry]) -> String {
     if entries.iter().any(|e| e.calls.iter().any(|c| c == "f")) {
         all.insert(0, callee());
     }
-    kernite_ptx::module(&all, &statics()).unwrap()
+    kernite_ptx::module(&all, &statics()).whole().unwrap()
 }
 
 /// The kernels `ptxas` refuses of each module, assembling it for the GPU given with it, by

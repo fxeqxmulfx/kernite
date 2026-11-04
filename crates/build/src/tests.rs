@@ -5,9 +5,9 @@
 use kernite_lang::{Error, Fault, Fn, Guard, IntTy, Memory, Mention, Operand, Span, Target, Value, parse};
 
 use crate::{
-    Abi, Backend, Call, Called, ConstItem, Device, DeviceStatic, Given, HostStatic, ItemOut, Launcher, ModuleOut,
-    Naked, Native, NativeOut, Owner, StaticError, Unfinished, abi, all, compile, consts, cooperative, function,
-    instance, module, one, owner, prepare, statics,
+    Abi, Assembly, Backend, Call, Called, ConstItem, Device, DeviceOut, DeviceStatic, Given, HostStatic, ItemOut, Kept,
+    Launcher, ModuleOut, Naked, Native, NativeOut, Owner, StaticError, Unfinished, When, abi, all, compile, consts,
+    cooperative, function, instance, module, one, owner, prepare, statics,
 };
 
 /// An ABI is one kernite compiles for, by the name Rust writes it as, or none. Of them, the process
@@ -209,14 +209,17 @@ impl Backend for Echo {
 }
 
 impl Device for Echo {
-    /// The statics, a line each, then the lines of each code. No code is no module.
-    fn module(&self, code: &[Told], statics: &[Laid]) -> Result<String, String> {
-        if code.is_empty() {
-            return Err("nothing to load".into());
+    /// The statics, a line each, then the lines of each code, each line where its static or code
+    /// is kept. No code kept is no module.
+    fn module(&self, code: &[Told], statics: &[Laid]) -> Assembly {
+        let line = |kept: Kept, line: &str| (When::Kept(kept), format!("{line}\n"));
+        let mut parts: Vec<_> =
+            statics.iter().enumerate().map(|(j, s)| line(Kept::Static(j), &format!("static {}", s.name))).collect();
+        for (i, c) in code.iter().enumerate() {
+            parts.extend(c.lines.iter().map(|l| line(Kept::Code(i), l)));
         }
-        let statics = statics.iter().map(|s| format!("static {}", s.name));
-        let code = code.iter().flat_map(|c| c.lines.iter().cloned());
-        Ok(statics.chain(code).collect::<Vec<_>>().join("\n"))
+        let kept = (0..code.len()).map(|i| When::Kept(Kept::Code(i))).collect();
+        Assembly { parts, refusals: vec![(When::Not(Box::new(When::Any(kept))), "nothing to load".into())] }
     }
 
     fn symbol(&self, code: &Told) -> String {
@@ -535,7 +538,7 @@ fn all_compiles_each_instance_in_order() {
     let heard = "memory A\ncallee tile::<4>: tile [4] PtxFunc\ncallee tile::<2>: tile [2] PtxFunc\n\
                  callee k: k [] PtxKernel\nend";
     let codes = ["tile::<4>: tile [4]", "tile::<2>: tile [2]", "k: k []"].map(|line| format!("new {line}\n{heard}"));
-    assert_eq!(all(&parse(src).unwrap(), &Echo), Ok(Ok(format!("static A\n{}", codes.join("\n")))));
+    assert_eq!(all(&parse(src).unwrap(), &Echo), Ok(Ok(format!("static A\n{}\n", codes.join("\n")))));
     let x86 = "unsafe extern \"sysv64\" fn x() {}";
     assert_eq!(all(&parse(x86).unwrap(), &Echo), Ok(Err("nothing to load".into())));
     let not = "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, `extern \"ptx-kernel\"` \
@@ -649,7 +652,8 @@ fn a_module_s_items_come_out_in_order() {
     assert_eq!(t.at(src), "1:25: Echo holds no 13");
     assert_eq!(b.code, DeviceStatic { symbol: "B".into(), host: "u32".into() });
     let device = out.device.unwrap();
-    let made: Vec<_> = device.text.lines().filter(|line| !line.starts_with("callee ")).collect();
+    let text = device.assembly.whole().unwrap();
+    let made: Vec<_> = text.lines().filter(|line| !line.starts_with("callee ")).collect();
     assert_eq!(made, ["static B", "new g: g []", "memory B", "end", "new f::<1>: f [1]", "memory B", "end"]);
 }
 
@@ -777,7 +781,8 @@ fn a_kernel_that_is_not_unsafe_is_refused() {
     assert_eq!(g.launcher, Some(Launcher::Never));
     assert!(f.not_unsafe.is_none());
     let device = out.device.unwrap();
-    let made: Vec<_> = device.text.lines().filter(|line| line.starts_with("new ")).collect();
+    let text = device.assembly.whole().unwrap();
+    let made: Vec<_> = text.lines().filter(|line| line.starts_with("new ")).collect();
     assert_eq!(made, ["new g: g []", "new f: f []"]);
     assert!(device.symbols.is_empty());
 }
@@ -924,10 +929,12 @@ fn an_x86_kernel_of_a_module_of_both_kinds_is_written_unless_it_names_a_static()
 }
 
 /// Rust launches each instance of each kernel the GPU runs by the index of its symbol, in the
-/// module's order. A kernel one of whose instances does not compile is never launched, and takes
-/// no index, though the code of those that compile is in the GPU's module; it says why of each
-/// that does not, in order. Nor is a kernel whose attributes are wrong, of which nothing is
-/// compiled; each says what is wrong with it. A function the kernels call is not launched.
+/// module's order, and the symbol says which code of the module the instance is, where the code of
+/// what is not launched counts as well. A kernel one of whose instances does not compile is never
+/// launched, and takes no index, though the code of those that compile is in the GPU's module; it
+/// says why of each that does not, in order. Nor is a kernel whose attributes are wrong, of which
+/// nothing is compiled; each says what is wrong with it. A function the kernels call is not
+/// launched.
 #[test]
 fn the_gpu_s_kernels_are_launched_by_index() {
     let src = "unsafe extern \"ptx-kernel\" fn k() {}\n\
@@ -965,8 +972,11 @@ fn the_gpu_s_kernels_are_launched_by_index() {
     let errors: Vec<_> = half.errors.iter().map(|e| e.at(src)).collect();
     assert_eq!(errors, ["5:17: in `half::<2>`: `fail_v` fails", "5:17: in `half::<3>`: `fail_v` fails"]);
     let device = out.device.unwrap();
-    assert_eq!(device.symbols, ["k", "tile::<2>", "tile::<4>", "last"]);
-    let made: Vec<_> = device.text.lines().filter(|line| line.starts_with("new ")).collect();
+    // `last` is the sixth code, after `f::<1>` and `half::<1>`, which are not launched.
+    let symbols = [(0, "k"), (1, "tile::<2>"), (2, "tile::<4>"), (5, "last")];
+    assert_eq!(device.symbols, symbols.map(|(code, symbol)| (code, symbol.to_string())));
+    let text = device.assembly.whole().unwrap();
+    let made: Vec<_> = text.lines().filter(|line| line.starts_with("new ")).collect();
     let all = [
         "k: k []",
         "tile::<2>: tile [2]",
@@ -983,21 +993,22 @@ fn the_gpu_s_kernels_are_launched_by_index() {
 /// ABI kernite does not know, are not the GPU's.
 #[test]
 fn the_module_s_error_goes_at_its_first_gpu_item() {
+    let said = |device: DeviceOut, src: &str| {
+        let message = device.assembly.whole().unwrap_err();
+        Error { span: device.at, message }.at(src)
+    };
     let src = "fn h() {}\n\
                extern \"C\" fn c() {}\n\
                #[instances(1)] extern \"ptx-kernel\" fn k() {}\n\
                unsafe extern \"ptx-kernel\" fn j() { let fail_v: u32; }";
-    let device = echoed(src).device.unwrap();
-    assert_eq!(device.error.map(|e| e.at(src)), Some("3:40: nothing to load".into()));
-    assert!(device.text.is_empty());
+    assert_eq!(said(echoed(src).device.unwrap(), src), "3:40: nothing to load");
     let src = "extern \"ptx-func\" fn f() { let fail_v: u32; }\nstatic A: global<u32>;\nstatic B: global<u32>;";
-    let device = echoed(src).device.unwrap();
-    assert_eq!(device.error.map(|e| e.at(src)), Some("1:22: nothing to load".into()));
+    assert_eq!(said(echoed(src).device.unwrap(), src), "1:22: nothing to load");
     let src = "static A: global<u32>;";
     let out = echoed(src);
     let [ItemOut::DeviceStatic(Ok(a))] = &out.items[..] else { panic!("{:?}", out.items) };
     assert_eq!(a.code, DeviceStatic { symbol: "A".into(), host: "u32".into() });
-    assert_eq!(out.device.unwrap().error.map(|e| e.at(src)), Some("1:8: nothing to load".into()));
+    assert_eq!(said(out.device.unwrap(), src), "1:8: nothing to load");
 }
 
 /// A function a kernel's code calls, or whose code it takes, as `[tile::<4>]`, is named once

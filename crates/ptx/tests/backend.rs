@@ -66,7 +66,7 @@ fn ptx_compiles_a_kernel_through_the_port() {
 \tret;
 }
 ";
-    assert_eq!(ptx.module(&[count], &[counts]).unwrap(), want);
+    assert_eq!(ptx.module(&[count], &[counts]).whole().unwrap(), want);
 }
 
 /// A module has 64 KB of constant memory, so a static that fits alone is refused at its type
@@ -167,7 +167,7 @@ fn a_function_the_kernels_call_is_a_func() {
 \tret;
 }
 ";
-    assert_eq!(ptx.module(&[times, k], &[]).unwrap(), want);
+    assert_eq!(ptx.module(&[times, k], &[]).whole().unwrap(), want);
 }
 
 /// Each refusal says what to blame, for kernite-build to place it: the part of a static that is

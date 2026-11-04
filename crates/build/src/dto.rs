@@ -1,6 +1,8 @@
 //! The data kernite-build and the machines hand on: plain values, whatever the machine.
 
-use kernite_lang::{Error, Mention, Module, Value};
+use kernite_lang::{Error, Mention, Module, Span, Value};
+
+use crate::Assembly;
 
 /// A kernel compiled, or a static, and where it named the items of its module. Rust never sees
 /// a kernel's body run, so whatever writes the module out for Rust has to say what it named.
@@ -212,13 +214,22 @@ pub enum Launcher {
     Of(Vec<(Vec<Value>, usize)>),
 }
 
-/// The module the GPU loads.
+/// The module the GPU loads, put together from what the program keeps of the module's items.
 pub struct DeviceOut {
-    /// Its text; empty if it is none.
-    pub text: String,
-    /// Why it is none, at the module's first item that is the GPU's: a static of its memory, or
-    /// a function it runs.
-    pub error: Option<Error>,
-    /// The symbol of each instance of each kernel Rust launches, by index.
-    pub symbols: Vec<String>,
+    /// The module as the machine says it, for the program to put together.
+    pub assembly: Assembly,
+    /// Where the module's errors go: at the module's first item that is the GPU's, a static of
+    /// its memory or a function it runs.
+    pub at: Span,
+    /// Each instance of each kernel Rust launches, by index: the code it is, by
+    /// [`Kept::Code`](crate::Kept::Code), and its symbol.
+    pub symbols: Vec<(usize, String)>,
+    /// The item of the module that each of the assembly's code is of, by
+    /// [`Kept::Code`](crate::Kept::Code): an instance of a function the GPU runs, in the order of
+    /// the items.
+    pub code_items: Vec<usize>,
+    /// The item of the module that each of the assembly's statics is of, by
+    /// [`Kept::Static`](crate::Kept::Static): a static of the GPU's memory that was laid out, in
+    /// the order of the items.
+    pub static_items: Vec<usize>,
 }

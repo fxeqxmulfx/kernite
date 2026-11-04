@@ -3,7 +3,7 @@
 
 use kernite_lang::{Fn, Memory, Span, Target, Value};
 
-use crate::{DeviceStatic, HostStatic, Naked};
+use crate::{Assembly, DeviceStatic, HostStatic, Naked};
 
 /// A machine kernite compiles a module's functions for: its kernels while their bodies are
 /// written, its statics, how its kernels see the functions they call, and its code.
@@ -48,8 +48,10 @@ pub trait Native: Backend {
 
 /// A machine whose kernels a driver loads as one module.
 pub trait Device: Backend {
-    /// The module of `code`, each kernel and function, with `statics`; or why it is none.
-    fn module(&self, code: &[Self::Code], statics: &[Self::Static]) -> Result<String, String>;
+    /// The module of `code`, each kernel and function, with `statics`, put together from what the
+    /// program keeps of them: for every set of them kept, the text the module of that set alone
+    /// has, or why it is none.
+    fn module(&self, code: &[Self::Code], statics: &[Self::Static]) -> Assembly;
     /// The name the driver finds `code` by.
     fn symbol(&self, code: &Self::Code) -> String;
     /// `s` as the host reads it.

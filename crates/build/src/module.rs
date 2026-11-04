@@ -19,8 +19,9 @@ use crate::{
 /// when it is an `unsafe fn`, its attributes hold, each of its instances compiled, and it names no
 /// static of the GPU's. The GPU's module has the code of each instance that compiled, of each
 /// function the GPU runs whose attributes hold; Rust launches a kernel of it when it is an
-/// `unsafe fn`, its attributes hold, and each of its instances compiled. Why the GPU's module is
-/// none is said at the module's first item that is the GPU's.
+/// `unsafe fn`, its attributes hold, and each of its instances compiled. The GPU's module is put
+/// together from what Rust keeps of them, and why it is none is said at the module's first item
+/// that is the GPU's.
 pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, native: &N, device: &D) -> ModuleOut {
     let twice = given.as_ref().map_or_else(Vec::new, |given| take(&mut module, given));
     let before = given.map_or(0, |given| given.before);
@@ -36,6 +37,8 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
         false => ([].iter(), d.statics.iter()),
     };
     let (mut items, mut codes, mut symbols, mut first) = (vec![], vec![], vec![], None);
+    // The item each code of the GPU's module is of, and each static.
+    let (mut code_items, mut static_items) = (vec![], vec![]);
     for item in &m.items {
         let f = match &item.kind {
             ItemKind::Const(_) if item.tokens.start < before => {
@@ -58,6 +61,9 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
             ItemKind::Static(s) => {
                 first.get_or_insert(s.span);
                 let laid = gpu.next().expect("each static is laid out or refused");
+                if laid.is_ok() {
+                    static_items.push(items.len());
+                }
                 items.push(ItemOut::DeviceStatic(
                     laid.as_ref()
                         .map(|s| Compiled { code: device.device_static(&s.code), mentions: s.mentions.clone() })
@@ -125,9 +131,10 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
         for (args, code) in compiled {
             if launches {
                 launched.push((args, symbols.len()));
-                symbols.push(device.symbol(&code));
+                symbols.push((codes.len(), device.symbol(&code)));
             }
             codes.push(code);
+            code_items.push(items.len());
         }
         let launcher = (abi == Abi::PtxKernel).then_some(match launches {
             true => Launcher::Of(launched),
@@ -145,13 +152,8 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
             }
         }
     }
-    let loaded = first.map(|span| {
-        let (text, error) = match device.module(&codes, &d.made) {
-            Ok(text) => (text, None),
-            Err(message) => (String::new(), Some(Error { span, message })),
-        };
-        DeviceOut { text, error, symbols }
-    });
+    let loaded =
+        first.map(|at| DeviceOut { assembly: device.module(&codes, &d.made), at, symbols, code_items, static_items });
     ModuleOut { module, given: twice, owner: whose.err(), items, device: loaded }
 }
 

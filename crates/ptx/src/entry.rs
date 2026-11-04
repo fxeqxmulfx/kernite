@@ -1,5 +1,6 @@
 //! A kernel or a function written out, and the module of them the driver loads.
 
+use kernite_build::{Assembly, Kept, When};
 use kernite_core::{Item, Program};
 
 use crate::call::{Returns, formal, passed};
@@ -138,79 +139,81 @@ impl Entry {
     }
 }
 
-/// The PTX module of `entries`, kernels and functions, of the version and for the GPU the
-/// instructions they use need, and no newer: [`Needs::FLOOR`] if they need nothing more. The
-/// driver compiles it for the GPU it runs on, which may be any as new as its `.target` or
-/// newer, unless an instruction is gone from newer ones. Each is where it is among
-/// `entries`, after a declaration of each it names that comes later; `statics`, the module's
-/// memory, before them all, in order.
+/// The PTX module of `entries`, kernels and functions, with `statics`, the module's memory, put
+/// together from what the program keeps of them: whichever are kept, it is the module of those
+/// alone. That is of the version and for the GPU the instructions of what is kept need, and no
+/// newer: [`Needs::FLOOR`] if they need nothing more. The driver compiles it for the GPU it runs
+/// on, which may be any as new as its `.target` or newer, unless an instruction is gone from newer
+/// ones. Each is where it is among `entries`, after a declaration of each it names that comes
+/// later; `statics` before them all, in order.
 ///
-/// It fails if one kernel is for GPUs older than another needs, in the version of PTX the
-/// module would be of: PTX has no module for both. It fails if a static does not [`fit`]
+/// It is none if one kernel is for GPUs older than another needs, in the version of PTX the
+/// module would be of: PTX has no module for both. It is none if a static does not [`fit`]
 /// beside those before it, or has a name in PTX that something else of the module has.
 ///
 /// [`fit`]: fits
-pub fn module(entries: &[Entry], statics: &[Static]) -> Result<String, String> {
+pub fn module(entries: &[Entry], statics: &[Static]) -> Assembly {
+    let code = |i: usize| When::Kept(Kept::Code(i));
+    let kept = |j: usize| When::Kept(Kept::Static(j));
+    let (mut parts, mut refusals) = (vec![], vec![]);
     let needs = entries.iter().fold(Needs::default(), |n, e| n.and(e.needs()));
     if !needs.possible() {
         let named: Vec<(Needs, String)> = entries
             .iter()
             .flat_map(|e| e.needs.iter().map(move |(n, why)| (*n, format!("`{why}` in `{}`", e.name))))
             .collect();
-        return Err(clash(&named));
+        refusals.push((When::always(), clash(&named)));
     }
-    let mut out = format!(
-        "// Written by kernite.\n\n.version {}\n.target {}\n.address_size 64\n",
-        needs.version(),
-        needs.target()
-    );
+    let (version, target) = (needs.version(), needs.target());
+    parts.push((
+        When::always(),
+        format!("// Written by kernite.\n\n.version {version}\n.target {target}\n.address_size 64\n"),
+    ));
     // The names at the module's scope, and those of a kernel's or a function's parameters,
-    // which a static's would hide there: PTX's own `WARP_SZ`, and what each name is.
-    let mut names = vec![("WARP_SZ".to_string(), "PTX's own `WARP_SZ`".to_string())];
-    for e in entries {
+    // which a static's would hide there: PTX's own `WARP_SZ`, and what each name is, and whose.
+    let mut names = vec![("WARP_SZ".to_string(), "PTX's own `WARP_SZ`".to_string(), When::always())];
+    for (i, e) in entries.iter().enumerate() {
         let (symbol, name) = (&e.program.name, &e.name);
-        names.push((symbol.clone(), format!("`{name}`")));
-        names.extend((0..e.params.len()).map(|i| (format!("{symbol}_param_{i}"), format!("a parameter of `{name}`"))));
-        if e.func.is_some() {
-            names.push((format!("{symbol}_retval"), format!("what `{name}` returns")));
-        }
+        names.push((symbol.clone(), format!("`{name}`"), code(i)));
+        let params = (0..e.params.len()).map(|p| (format!("{symbol}_param_{p}"), format!("a parameter of `{name}`")));
+        let returned = e.func.is_some().then(|| (format!("{symbol}_retval"), format!("what `{name}` returns")));
         let launched = e.memory.iter().filter(|m| m.bytes.is_none());
-        names.extend(launched.map(|m| (m.name.clone(), format!("the shared memory of `{name}`"))));
+        let shared = launched.map(|m| (m.name.clone(), format!("the shared memory of `{name}`")));
+        names.extend(params.chain(returned).chain(shared).map(|(n, what)| (n, what, code(i))));
     }
-    for (i, s) in statics.iter().enumerate() {
-        fits(&statics[..i], s).map_err(|m| format!("`{}`: {m}", s.name))?;
-        if let Some((_, what)) = names.iter().find(|(n, _)| *n == s.memory.name) {
-            return Err(format!("`{}` is `{}` in PTX, as {what} is", s.name, s.memory.name));
+    for (j, s) in statics.iter().enumerate() {
+        if let Err(m) = fits(&statics[..j], s) {
+            refusals.push((When::always(), format!("`{}`: {m}", s.name)));
         }
-        names.push((s.memory.name.clone(), format!("`{}`", s.name)));
+        for (_, what, whose) in names.iter().filter(|(n, ..)| *n == s.memory.name) {
+            let message = format!("`{}` is `{}` in PTX, as {what} is", s.name, s.memory.name);
+            refusals.push((When::All(vec![kept(j), whose.clone()]), message));
+        }
+        names.push((s.memory.name.clone(), format!("`{}`", s.name), kept(j)));
     }
     if !statics.is_empty() {
-        out += "\n";
+        parts.push((When::Any((0..statics.len()).map(kept).collect()), "\n".into()));
     }
-    for s in statics {
-        out += &s.declaration();
-    }
-    let launched: Vec<&Memory> = entries.iter().flat_map(|e| &e.memory).filter(|m| m.bytes.is_none()).collect();
+    parts.extend(statics.iter().enumerate().map(|(j, s)| (kept(j), s.declaration())));
+    let launched: Vec<(usize, &Memory)> = (entries.iter().enumerate())
+        .flat_map(|(i, e)| e.memory.iter().filter(|m| m.bytes.is_none()).map(move |m| (i, m)))
+        .collect();
     if !launched.is_empty() {
-        out += "\n";
+        parts.push((When::Any(launched.iter().map(|&(i, _)| code(i)).collect()), "\n".into()));
     }
-    for m in launched {
-        out += &format!(".extern .shared .align {} .b8 {}[];\n", m.align, m.name);
+    for (i, m) in launched {
+        parts.push((code(i), format!(".extern .shared .align {} .b8 {}[];\n", m.align, m.name)));
     }
-    let mut declared: Vec<&str> = vec![];
-    for e in entries {
+    // A function that a kernel or a function names, if it comes after, is declared before the first
+    // of those kept that name it.
+    for (i, e) in entries.iter().enumerate() {
         for name in &e.calls {
-            if *name != e.program.name && !declared.contains(&name.as_str()) {
-                if let Some(later) = entries.iter().find(|l| l.program.name == *name) {
-                    out += "\n";
-                    out += &later.declaration();
-                }
-                declared.push(name);
-            }
+            let Some(at) = entries.iter().position(|l| l.program.name == *name).filter(|&at| at > i) else { continue };
+            let before = (0..i).filter(|&j| entries[j].calls.contains(name)).map(code).collect();
+            let when = When::All(vec![code(i), code(at), When::Not(Box::new(When::Any(before)))]);
+            parts.push((when, "\n".to_string() + &entries[at].declaration()));
         }
-        out += "\n";
-        out += &e.text();
-        declared.push(&e.program.name);
+        parts.push((code(i), "\n".to_string() + &e.text()));
     }
-    Ok(out)
+    Assembly { parts, refusals }
 }

@@ -3,6 +3,8 @@
 
 use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
 
+use kernite::{Kept, When};
+
 use crate::rust::{flatten, is_punct, named, parse};
 
 /// When something the macro writes is there: always, never, or when a predicate of `cfg` holds,
@@ -62,6 +64,16 @@ impl Cond {
         }
     }
 
+    /// When `when` holds, `kept` saying when each code and static it names is kept.
+    pub(crate) fn when(when: &When, kept: &dyn Fn(Kept) -> Cond) -> Cond {
+        match when {
+            When::Kept(it) => kept(*it),
+            When::Any(parts) => Cond::any(parts.iter().map(|part| Cond::when(part, kept))),
+            When::All(parts) => Cond::all(parts.iter().map(|part| Cond::when(part, kept))),
+            When::Not(part) => Cond::when(part, kept).not(),
+        }
+    }
+
     /// When this does not hold.
     pub(crate) fn not(self) -> Cond {
         match self {
@@ -69,6 +81,31 @@ impl Cond {
             Cond::Never => Cond::Always,
             Cond::If(p) => Cond::If(call("not", vec![p])),
         }
+    }
+
+    /// How many of `conds` hold, as an expression of Rust: a number, if none is asked of `cfg`, else
+    /// a `const` block that sums `cfg!(..)` for each, which Rust works out as it compiles.
+    pub(crate) fn count<'a>(conds: impl Iterator<Item = &'a Cond>) -> String {
+        let (mut always, mut asked) = (0, Vec::<(String, usize)>::new());
+        for cond in conds {
+            match cond {
+                Cond::Always => always += 1,
+                Cond::Never => {}
+                Cond::If(p) => {
+                    let text = p.to_string();
+                    match asked.iter_mut().find(|(q, _)| *q == text) {
+                        Some((_, n)) => *n += 1,
+                        None => asked.push((text, 1)),
+                    }
+                }
+            }
+        }
+        if asked.is_empty() {
+            return always.to_string();
+        }
+        let terms: Vec<String> =
+            asked.iter().map(|(p, n)| format!("::core::cfg!({p}) as ::core::primitive::usize * {n}")).collect();
+        format!("const {{ {always} + {} }}", terms.join(" + "))
     }
 
     /// The attribute that puts what is written under it where this holds: `#[cfg(..)]`, or nothing

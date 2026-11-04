@@ -53,7 +53,7 @@ pub fn all<D: Device>(module: &Module, device: &D) -> Result<Result<String, Stri
             codes.push(compile(module, &prepared, device, f, &args)?.code);
         }
     }
-    let made = device.module(&codes, &prepared.made);
+    let made = device.module(&codes, &prepared.made).whole();
     if made.is_ok() {
         rules(module)?;
     }
