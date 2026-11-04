@@ -14,32 +14,138 @@ use super::{Cuda, Driver, Error, Plain, Ptr, bytes};
 /// attribute that is not 0.
 type Flag = (c_int, &'static str);
 
+/// The GPU allocates managed memory.
+const MANAGED_MEMORY: Flag = (83, "MANAGED_MEMORY");
+
+/// The GPU uses the host's addresses for the host's memory, so that page-locked memory has one
+/// address for both.
+const UNIFIED_ADDRESSING: Flag = (41, "UNIFIED_ADDRESSING");
+
+/// The GPU reaches any pageable memory of the host, as one with HMM does.
+const PAGEABLE_MEMORY_ACCESS: Flag = (88, "PAGEABLE_MEMORY_ACCESS");
+
 /// The GPU reaches managed memory while the host does, as the driver needs of a GPU that it moves
 /// memory for. [`Cuda::concurrent_managed_access`] says it.
 pub(crate) const CONCURRENT_MANAGED_ACCESS: Flag = (89, "CONCURRENT_MANAGED_ACCESS");
 
+impl Driver {
+    /// `Ok` if this GPU has the `flag`; or the error that says the `call` is refused, as the GPU
+    /// `cannot` do it, and why.
+    fn require(&self, call: &'static str, (attribute, name): Flag, cannot: &str) -> Result<(), Error> {
+        if self.attribute(attribute)? == 0 {
+            return Err(Error::new(call, format!("{cannot}: its CU_DEVICE_ATTRIBUTE_{name} is 0")));
+        }
+        Ok(())
+    }
+}
+
 impl Cuda {
-    /// `len` elements of managed memory, all zero: memory that the host and the GPU's kernels reach
-    /// at one address, and the driver moves to whichever touches it. The GPU must allocate managed
-    /// memory, as one from Kepler's `sm_30` on does on Linux; the driver says
-    /// `CUDA_ERROR_NOT_SUPPORTED` of one that does not.
-    pub fn managed<T: Plain>(&self, len: usize) -> Result<Unified<T>, Error> {
+    /// `len` elements of managed memory, all zero: memory that the host and the GPU's kernels
+    /// reach at one address, and the driver moves to whichever touches it. The GPU must allocate
+    /// managed memory; the error says so of one that does not: `cuMemAllocManaged: the GPU cannot
+    /// allocate managed memory: its CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY is 0`.
+    pub fn managed<T: Plain>(&self, len: usize) -> Result<Unified<'static, T>, Error> {
+        self.driver.require("cuMemAllocManaged", MANAGED_MEMORY, "the GPU cannot allocate managed memory")?;
         let bytes = bytes::<T>(len);
         let (api, mut addr) = (self.driver.current()?, 0);
         // SAFETY: it writes the address to `addr`. It refuses no bytes, so it is asked for one. 1
         // is CU_MEM_ATTACH_GLOBAL: any stream of any GPU may use it, as the default stream does.
         api.check("cuMemAllocManaged", unsafe { (api.alloc_managed)(&mut addr, bytes.max(1), 1) })?;
-        let memory = Unified { driver: self.driver.clone(), ptr: ptr::with_exposed_provenance_mut(addr as usize), len };
-        // The driver does not clear it, and the host must not be lent bytes that were never written.
+        let ptr = ptr::with_exposed_provenance_mut(addr as usize);
+        let memory = Unified { driver: self.driver.clone(), ptr, len, kind: Kind::Managed, of: PhantomData };
+        // The driver does not clear it, and the host must not be lent bytes that were never
+        // written. The GPU writes the zeros: where the GPU does not allow concurrent access, the
+        // host must not touch managed memory while a kernel runs, and one may be running.
         memory.driver.zero(addr, bytes)?;
         Ok(memory)
     }
+
+    /// `len` elements of page-locked memory, all zero: memory in the host that stays where it is,
+    /// and that a kernel reads and writes across the bus, at the address the host has for it. The
+    /// GPU must use the host's addresses for the host's memory; the error says so of one that
+    /// does not: `cuMemHostAlloc: the GPU cannot reach page-locked memory at the host's addresses:
+    /// its CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0`.
+    pub fn pinned<T: Plain>(&self, len: usize) -> Result<Unified<'static, T>, Error> {
+        let cannot = "the GPU cannot reach page-locked memory at the host's addresses";
+        self.driver.require("cuMemHostAlloc", UNIFIED_ADDRESSING, cannot)?;
+        let bytes = bytes::<T>(len);
+        let (api, mut host) = (self.driver.current()?, ptr::null_mut());
+        // SAFETY: it writes the address to `host`. It refuses no bytes, so it is asked for one. 2
+        // is CU_MEMHOSTALLOC_DEVICEMAP: the GPU reaches it.
+        api.check("cuMemHostAlloc", unsafe { (api.alloc_host)(&mut host, bytes.max(1), 2) })?;
+        let memory =
+            Unified { driver: self.driver.clone(), ptr: host.cast::<T>(), len, kind: Kind::Pinned, of: PhantomData };
+        // SAFETY: the allocation has room for `len` elements, and any bits are a `T`. No kernel
+        // uses memory the host has only now been given.
+        unsafe { memory.ptr.write_bytes(0, len) };
+        Ok(memory)
+    }
+
+    /// `memory`, a slice of the host's own, pageable memory, lent to the GPU for as long as the
+    /// `Unified` lasts: a kernel reads and writes the elements where they are, a `Vec`'s or a
+    /// `Box`'s, and the host has them again when it drops the `Unified`, which waits for the
+    /// kernels first. The GPU must reach pageable memory, as one with HMM does; the error says so
+    /// of one that does not, and a kernel is not left to fault: `cuDeviceGetAttribute: the GPU
+    /// cannot reach pageable memory, a slice of the host's: its
+    /// CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0`. No call of the driver's is refused, so the
+    /// error names the one that told.
+    ///
+    /// The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, faults a kernel on an
+    /// element that has a guard page in its aligned 64 KiB, a page set with
+    /// `madvise(MADV_GUARD_INSTALL)`: the kernel fails with `CUDA_ERROR_ILLEGAL_ADDRESS (700)`, as
+    /// does every call after it. glibc 2.43 sets such a page below each thread's stack, so lend
+    /// the memory of a `Vec`, a `Box` or a mapping, and not an array on a thread's stack.
+    ///
+    /// ```no_run
+    /// # use kernite_cuda::Cuda;
+    /// let cuda = Cuda::new()?;
+    /// let mut xs = vec![1.0f32; 1000];
+    /// let lent = cuda.lend(&mut xs)?;
+    /// // A kernel adds 1 to each element here, launched on `lent.ptr()`.
+    /// drop(lent);
+    /// assert_eq!(xs[999], 2.0);
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    ///
+    /// The slice is borrowed for as long as it is lent, so the compiler refuses the host a
+    /// touch of it:
+    ///
+    /// ```compile_fail,E0502
+    /// # let cuda = kernite_cuda::Cuda::new().unwrap();
+    /// let mut xs = vec![1.0f32; 4];
+    /// let lent = cuda.lend(&mut xs).unwrap();
+    /// let first = xs[0];
+    /// let for_a_kernel = lent.ptr();
+    /// ```
+    pub fn lend<'a, T: Plain>(&self, memory: &'a mut [T]) -> Result<Unified<'a, T>, Error> {
+        let cannot = "the GPU cannot reach pageable memory, a slice of the host's";
+        self.driver.require("cuDeviceGetAttribute", PAGEABLE_MEMORY_ACCESS, cannot)?;
+        let (ptr, len) = (memory.as_mut_ptr(), memory.len());
+        Ok(Unified { driver: self.driver.clone(), ptr, len, kind: Kind::Lent, of: PhantomData })
+    }
+}
+
+/// What made the memory, which is how it is let go.
+enum Kind {
+    /// `cuMemAllocManaged` did: `cuMemFree` frees it.
+    Managed,
+    /// `cuMemHostAlloc` did: `cuMemFreeHost` frees it.
+    Pinned,
+    /// The host's own slice, which the host frees when it has it back.
+    Lent,
 }
 
 /// `len` elements of `T` that the host and the kernels of one GPU, the one that made it, both
-/// reach at one address, freed when it is dropped: [`Cuda::managed`] makes it. A kernel is given
-/// [`ptr`](Unified::ptr), and the host the slices [`host`](Unified::host) and
-/// [`host_mut`](Unified::host_mut) lend, with no copy between them.
+/// reach at one address, with no copy between them. A kernel is given [`ptr`](Unified::ptr), and
+/// the host the slices [`host`](Unified::host) and [`host_mut`](Unified::host_mut). It is one of
+/// three kinds, by what makes it:
+///
+/// - [`Cuda::managed`] makes managed memory, which the driver moves to whichever of the host and
+///   the GPU touches it.
+/// - [`Cuda::pinned`] makes page-locked memory, which stays in the host's memory, and a kernel
+///   reads and writes it across the bus.
+/// - [`Cuda::lend`] lends a slice of the host's own memory to the GPU, for as long as `'a`, where
+///   the GPU reaches pageable memory. The others are their own: `Unified<'static, T>`.
 ///
 /// The slices wait for every kernel launched on the GPU to finish, and say whether one failed,
 /// before they lend the memory. A slice taken after a launch is never under its kernel, so the host
@@ -86,15 +192,21 @@ impl Cuda {
 /// of memory the kernel reads; and where [`Cuda::concurrent_managed_access`] is false, the GPU not
 /// reaching managed memory while the host does, the host holds no slice of managed memory at all.
 ///
+/// Dropping the memory waits for the kernels that use it, and then frees it; or, for a slice
+/// lent, gives it back to the host.
+///
 /// [`Module::launch`]: super::Module::launch
-pub struct Unified<T: Plain> {
+pub struct Unified<'a, T: Plain> {
     driver: Rc<Driver>,
     /// The address, which is the host's and the GPU's.
     ptr: *mut T,
     len: usize,
+    kind: Kind,
+    /// The slice a lent memory borrows.
+    of: PhantomData<&'a mut [T]>,
 }
 
-impl<T: Plain> Unified<T> {
+impl<T: Plain> Unified<'_, T> {
     /// Its address, for a kernel to be given.
     pub fn ptr(&self) -> Ptr<T> {
         self.at(0)
@@ -144,18 +256,25 @@ impl<T: Plain> Unified<T> {
     }
 }
 
-impl<T: Plain> Drop for Unified<T> {
+impl<T: Plain> Drop for Unified<'_, T> {
     fn drop(&mut self) {
-        // As for a `Buffer`: left, if its GPU's context cannot be made current. The driver waits for
-        // the kernels that use the memory before it frees it.
+        // As for a `Buffer`: left, if its GPU's context cannot be made current. The driver waits
+        // for the kernels that use memory before it frees it; a slice lent is waited for here.
         if let Ok(api) = self.driver.current() {
-            // SAFETY: `cuMemAllocManaged` gave the address, and it is freed once, here.
-            unsafe { (api.free)(self.addr()) };
+            // SAFETY: the driver gave the address of managed and of page-locked memory, and each is
+            // freed once, here. A slice lent is the host's, which frees it.
+            unsafe {
+                match self.kind {
+                    Kind::Managed => (api.free)(self.addr()),
+                    Kind::Pinned => (api.free_host)(self.ptr.cast()),
+                    Kind::Lent => (api.synchronize)(),
+                }
+            };
         }
     }
 }
 
-impl<T: Plain> fmt::Debug for Unified<T> {
+impl<T: Plain> fmt::Debug for Unified<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Unified({} elements at {:#x})", self.len, self.addr())
     }
@@ -206,10 +325,52 @@ mod tests {
         Cuda::of(driver, String::new()).unwrap()
     }
 
-    /// A GPU says it reaches managed memory while the host does as its attribute says.
+    /// A GPU says it reaches managed memory while the host does as its attribute says, whatever
+    /// else it says of itself.
     #[test]
     fn a_gpu_says_whether_it_reaches_managed_memory_while_the_host_does() {
         assert!(gpu(&[CONCURRENT_MANAGED_ACCESS]).concurrent_managed_access());
         assert!(!gpu(&[]).concurrent_managed_access());
+        let others = [MANAGED_MEMORY, UNIFIED_ADDRESSING, PAGEABLE_MEMORY_ACCESS];
+        assert!(!gpu(&others).concurrent_managed_access());
+        assert!(gpu(&[&others[..], &[CONCURRENT_MANAGED_ACCESS]].concat()).concurrent_managed_access());
+    }
+
+    /// A GPU that does not allocate managed memory is refused it, in the README's words, before
+    /// the driver is asked for any.
+    #[test]
+    fn managed_memory_is_made_only_for_a_gpu_that_allocates_it() {
+        let e = gpu(&[]).managed::<u32>(4).unwrap_err();
+        let said = "the GPU cannot allocate managed memory: its CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY is 0";
+        assert_eq!(e.to_string(), format!("cuMemAllocManaged: {said}"));
+        // One that does is asked, and the driver here refuses everything.
+        let e = gpu(&[MANAGED_MEMORY]).managed::<u32>(4).unwrap_err();
+        assert_eq!(e.call, "cuMemAllocManaged");
+    }
+
+    /// A GPU that does not use the host's addresses for the host's memory is refused page-locked
+    /// memory, in the README's words, before the driver is asked for any.
+    #[test]
+    fn page_locked_memory_is_made_only_for_a_gpu_that_uses_the_hosts_addresses() {
+        let e = gpu(&[]).pinned::<u32>(4).unwrap_err();
+        let said = "the GPU cannot reach page-locked memory at the host's addresses: \
+                    its CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0";
+        assert_eq!(e.to_string(), format!("cuMemHostAlloc: {said}"));
+        let e = gpu(&[UNIFIED_ADDRESSING]).pinned::<u32>(4).unwrap_err();
+        assert_eq!(e.call, "cuMemHostAlloc");
+    }
+
+    /// A GPU that does not reach pageable memory is refused a slice, in the README's words, and
+    /// one that does is lent it: the address of its elements is the slice's.
+    #[test]
+    fn a_slice_is_lent_only_to_a_gpu_that_reaches_pageable_memory() {
+        let mut host = [1u32, 2, 3];
+        let at = host.as_ptr() as u64;
+        let e = gpu(&[]).lend(&mut host).unwrap_err();
+        let said = "the GPU cannot reach pageable memory, a slice of the host's: \
+                    its CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0";
+        assert_eq!(e.to_string(), format!("cuDeviceGetAttribute: {said}"));
+        let lent = gpu(&[PAGEABLE_MEMORY_ACCESS]).lend(&mut host).unwrap();
+        assert_eq!((lent.len(), lent.ptr().addr()), (3, at));
     }
 }

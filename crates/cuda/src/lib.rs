@@ -40,9 +40,11 @@
 //! the GPU it runs on: [`Buffer::copy_from`] copies a buffer to a buffer on another.
 //!
 //! A buffer is the GPU's own memory, and the host reaches it by copies. [`Unified`] memory is
-//! reached by the host and by the GPU's kernels at one address, with no copy, and
-//! [`Cuda::managed`] makes it. The slices it lends the host wait for the GPU's kernels first, and
-//! [`Module::launch`] says what a launch keeps to of the slices the host holds.
+//! reached by the host and by the GPU's kernels at one address, with no copy: [`Cuda::managed`]
+//! makes memory the driver moves to whichever touches it, [`Cuda::pinned`] makes page-locked memory
+//! in the host, and [`Cuda::lend`] lends a slice of the host's own to the GPU. The slices it lends
+//! the host wait for the GPU's kernels first, and [`Module::launch`] says what a launch keeps to of
+//! the slices the host holds.
 //!
 //! A kernel whose blocks wait for each other is launched cooperatively,
 //! [`Module::launch_cooperative`]: every block of the grid runs at once, so there are at most
@@ -135,6 +137,8 @@ api! {
     alloc = c"cuMemAlloc_v2"(*mut u64, usize);
     alloc_managed = c"cuMemAllocManaged"(*mut u64, usize, c_uint);
     free = c"cuMemFree_v2"(u64);
+    alloc_host = c"cuMemHostAlloc"(*mut *mut c_void, usize, c_uint);
+    free_host = c"cuMemFreeHost"(*mut c_void);
     to_device = c"cuMemcpyHtoD_v2"(u64, *const c_void, usize);
     to_host = c"cuMemcpyDtoH_v2"(*mut c_void, u64, usize);
     copy_peer = c"cuMemcpyPeer"(u64, Handle, u64, Handle, usize);
@@ -246,6 +250,9 @@ unsafe fn string(p: *const c_char) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     /// The function that failed, by its name in C: `cuInit`, or `dlopen` if there is no driver.
+    /// A call refused before it is made names that call, whatever the reason: `cuMemAllocManaged`
+    /// where the GPU cannot allocate managed memory. [`Cuda::lend`] refuses no call of the driver's,
+    /// and names `cuDeviceGetAttribute`, which told that the GPU cannot.
     pub call: &'static str,
     /// What it said: the `CUresult` it returned, by name, number and meaning, or why there is
     /// no driver.

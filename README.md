@@ -352,16 +352,33 @@ did not ask before, and a call to another GPU asks it once more, to make that GP
 run, and before those launched after it on either run. Where the two GPUs have a link between them, it asks the driver
 for peer access and the copy goes over the link; where they have none, the driver sends it through the host.
 
-A buffer is the GPU's own memory, which the host reaches by copies. Managed memory is reached by the host and by the
-GPU's kernels at one address, with no copy: `cuda.managed::<f32>(len)` is `len` zeros, and the driver moves each page to
-whichever of them touches it. A kernel is given `memory.ptr()`, and the host reads and writes `memory.host()` and
-`memory.host_mut()`, which are slices of it.
+A buffer is the GPU's own memory, which the host reaches by copies. Unified memory is reached by the host and by the
+GPU's kernels at one address, with no copy, and it is of one of three kinds. `cuda.managed::<f32>(len)` is `len` zeros
+of managed memory, which the driver moves to whichever of the host and the GPU touches it. `cuda.pinned::<f32>(len)` is
+`len` zeros of page-locked memory, which stays in the host's memory, and a kernel reads and writes it across the bus.
+`cuda.lend(&mut xs)` lends a slice of the host's own memory to the GPU, a `Vec`'s or a `Box`'s: a kernel reads and
+writes its elements where they are, and the host has the slice back when it drops what `lend` returned. A kernel is
+given `memory.ptr()`, and the host reads and writes `memory.host()` and `memory.host_mut()`, which are slices of it.
+
+A GPU does not do all three, so each asks the GPU first. Where the GPU cannot, the error says so in these words, and no
+kernel is left to fault: `cuMemAllocManaged: the GPU cannot allocate managed memory: its
+CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY is 0` for `managed`; `cuMemHostAlloc: the GPU cannot reach page-locked memory at the
+host's addresses: its CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0` for `pinned`; and `cuDeviceGetAttribute: the GPU
+cannot reach pageable memory, a slice of the host's: its CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0` for `lend`,
+which a GPU with HMM can do. Each error names the call it refuses, as `Error::call` does; `lend` makes no call of the
+driver's to refuse, so its error names `cuDeviceGetAttribute`, which told that the GPU cannot.
+
+The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, faults a kernel on a lent element that has a guard
+page in its aligned 64 KiB, a page set with `madvise(MADV_GUARD_INSTALL)`: the kernel fails with
+`CUDA_ERROR_ILLEGAL_ADDRESS (700)`, as does every call after it. glibc 2.43 sets such a page below each thread's
+stack. So `lend` the memory of a `Vec`, a `Box` or a mapping, and not an array on a thread's stack.
 
 `host()` and `host_mut()` wait for every kernel launched on the GPU to finish, and say whether one failed, before they
 lend the slice, so a slice taken after a launch is never under its kernel, and the host reads what a kernel wrote with
 no `sync` of its own. The compiler refuses to take a pointer for a kernel while the host holds a slice it may write, as
-`ptr` borrows the memory and `host_mut` borrows it mutably. Dropping the memory waits for the kernels that use it, as
-dropping a buffer does.
+`ptr` borrows the memory and `host_mut` borrows it mutably, and it refuses the host a touch of a slice that is lent, as
+`lend` borrows the slice. Dropping the memory waits for the kernels that use it, as dropping a buffer does, and then
+frees it, or gives a slice lent back to the host.
 
 A pointer taken before the slice is `Copy`, and the compiler cannot refuse a launch on it, so a launch is `unsafe`, and
 its contract is this: each pointer is to a buffer or to unified memory of the GPU, as long as the kernel reads and

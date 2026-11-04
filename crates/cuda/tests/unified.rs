@@ -1,5 +1,6 @@
 //! Memory the host and a kernel both reach, on the GPU here, if there is one: what each sees of
-//! it, and when the host may touch it.
+//! it, and when the host may touch it. Each of its three kinds, managed, page-locked and lent, is
+//! held to the same three rules, below.
 //!
 //! The tests run beside each other, so one holds a slice of managed memory while a kernel of
 //! another runs. A launch's contract allows that where the GPU reaches managed memory while the
@@ -10,7 +11,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use kernite_cuda::{Cuda, Grid, Module, Ptr, arg};
+use kernite_cuda::{Cuda, Error, Grid, Module, Ptr, Unified, arg};
 
 /// Two kernels, written by hand. `add_one`: `x[i] += 1` for each `i < n`, a thread each, wrapping.
 /// `delay`: one thread waits `ns` nanoseconds on the GPU's global timer, then `x[0] += 100`.
@@ -113,6 +114,61 @@ fn delay(module: &Module, x: Ptr<u32>) {
     unsafe { module.launch(1, Grid::new(1, 1), &[arg(&x), arg(&ns)]) }.unwrap();
 }
 
+/// The README's words for a GPU that cannot be lent a slice.
+const NO_PAGEABLE: &str = "cuDeviceGetAttribute: the GPU cannot reach pageable memory, a slice of the host's: \
+                           its CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0";
+
+/// The README's words for a GPU that cannot make page-locked memory.
+const NO_PAGE_LOCKED: &str = "cuMemHostAlloc: the GPU cannot reach page-locked memory at the host's addresses: \
+                              its CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0";
+
+/// `made`, or `None` if the GPU cannot make that kind of memory: the error is then `refusal`, in
+/// the README's words, and the test is skipped, as for a machine with no GPU.
+fn or_skip<T>(made: Result<T, Error>, refusal: &str) -> Option<T> {
+    made.map_err(|e| {
+        assert_eq!(e.to_string(), refusal);
+        eprintln!("the GPU cannot: skipped. {e}");
+    })
+    .ok()
+}
+
+/// The host fills `m` with `input`, a kernel adds 1 to each word, and the host reads the sums, bit
+/// for bit, from the one address the kernel was given, with no copy and no `sync` of its own.
+fn fill_add_read(module: &Module, m: &mut Unified<u32>, input: &[u32]) {
+    assert_eq!(m.len(), input.len());
+    m.host_mut().unwrap().copy_from_slice(input);
+    add_one(module, m.ptr(), input.len() as u32);
+    let want: Vec<u32> = input.iter().map(|w| w.wrapping_add(1)).collect();
+    assert_eq!(m.host().unwrap(), want);
+    assert_eq!(m.host().unwrap().as_ptr() as u64, m.ptr().addr());
+}
+
+/// The host asks for `m`, of four words, as soon as a kernel that writes the first is launched, and
+/// has what the kernel wrote, `DELAY` later: a read, and then a write.
+fn host_waits(module: &Module, m: &mut Unified<u32>) {
+    m.host_mut().unwrap().copy_from_slice(&[5, 1, 2, 3]);
+    let started = Instant::now();
+    delay(module, m.ptr());
+    assert_eq!(m.host().unwrap(), [105, 1, 2, 3], "a read without a sync of its own is of the finished kernel");
+    assert!(started.elapsed() >= DELAY * 5 / 6, "the read came after {:?}", started.elapsed());
+    // The kernel has finished, so its add is not written over, nor does it write over the host's.
+    m.host_mut().unwrap().copy_from_slice(&[5, 6, 7, 8]);
+    delay(module, m.ptr());
+    let started = Instant::now();
+    let slice = m.host_mut().unwrap();
+    assert_eq!(slice[0], 105, "{:?}", started.elapsed());
+    slice[1] = 9;
+    assert_eq!(m.host().unwrap(), [105, 9, 7, 8]);
+}
+
+/// Dropping `m` waits for a kernel launched on it.
+fn drop_waits(module: &Module, m: Unified<u32>) {
+    let started = Instant::now();
+    delay(module, m.ptr());
+    drop(m);
+    assert!(started.elapsed() >= DELAY * 5 / 6, "dropped after {:?}", started.elapsed());
+}
+
 #[test]
 fn a_managed_buffer_is_filled_by_the_host_added_to_by_a_kernel_and_read_by_the_host() {
     let Some((_one, cuda, module)) = setup() else { return };
@@ -123,33 +179,21 @@ fn a_managed_buffer_is_filled_by_the_host_added_to_by_a_kernel_and_read_by_the_h
     let mut m = cuda.managed::<u32>(n).unwrap();
     assert_eq!(m.len(), n);
     assert!(m.host().unwrap().iter().all(|&w| w == 0), "managed memory is zero until written");
-    m.host_mut().unwrap().copy_from_slice(&input);
-    add_one(&module, m.ptr(), n as u32);
-    cuda.sync().unwrap();
-    let want: Vec<u32> = input.iter().map(|w| w.wrapping_add(1)).collect();
-    assert_eq!(m.host().unwrap(), want);
-    // The kernel and the host went to one memory: one address, and no copy.
-    assert_eq!(m.host().unwrap().as_ptr() as u64, m.ptr().addr());
+    fill_add_read(&module, &mut m, &input);
 }
 
 #[test]
 fn the_host_waits_for_a_kernel_before_it_reads_or_writes_managed_memory() {
     let Some((_one, cuda, module)) = setup() else { return };
-    let mut m = cuda.managed::<u32>(4).unwrap();
-    m.host_mut().unwrap().copy_from_slice(&[5, 1, 2, 3]);
-    // The kernel adds 100 to the first word after `DELAY`; the host asks as soon as it is launched.
-    let started = Instant::now();
-    delay(&module, m.ptr());
-    assert_eq!(m.host().unwrap(), [105, 1, 2, 3], "a read without a sync of its own is of the finished kernel");
-    assert!(started.elapsed() >= DELAY * 5 / 6, "the read came after {:?}", started.elapsed());
-    // And a write: the kernel has finished, so its add is not written over, nor does it write over the host's.
-    m.host_mut().unwrap().copy_from_slice(&[5, 6, 7, 8]);
-    delay(&module, m.ptr());
-    let started = Instant::now();
-    let slice = m.host_mut().unwrap();
-    assert_eq!(slice[0], 105, "{:?}", started.elapsed());
-    slice[1] = 9;
-    assert_eq!(m.host().unwrap(), [105, 9, 7, 8]);
+    host_waits(&module, &mut cuda.managed::<u32>(4).unwrap());
+}
+
+#[test]
+fn dropping_managed_memory_waits_for_the_kernel_that_uses_it() {
+    let Some((_one, cuda, module)) = setup() else { return };
+    drop_waits(&module, cuda.managed::<u32>(1).unwrap());
+    // A kernel that wrote freed memory would have failed.
+    cuda.sync().unwrap();
 }
 
 #[test]
@@ -167,13 +211,96 @@ fn managed_memory_has_one_address_for_both_and_may_have_no_elements() {
 }
 
 #[test]
-fn dropping_managed_memory_waits_for_the_kernel_that_uses_it() {
+fn page_locked_memory_is_filled_by_the_host_added_to_by_a_kernel_and_read_by_the_host() {
     let Some((_one, cuda, module)) = setup() else { return };
-    let m = cuda.managed::<u32>(1).unwrap();
-    let started = Instant::now();
-    delay(&module, m.ptr());
-    drop(m);
-    assert!(started.elapsed() >= DELAY * 5 / 6, "freed after {:?}", started.elapsed());
-    // A kernel that wrote freed memory would have failed.
+    let n = 1_000_003;
+    let mut input = words(n, 2);
+    input[0] = u32::MAX;
+    let Some(mut m) = or_skip(cuda.pinned::<u32>(n), NO_PAGE_LOCKED) else { return };
+    assert_eq!(m.len(), n);
+    assert!(m.host().unwrap().iter().all(|&w| w == 0), "page-locked memory is zero until written");
+    fill_add_read(&module, &mut m, &input);
+}
+
+#[test]
+fn the_host_waits_for_a_kernel_before_it_reads_or_writes_page_locked_memory() {
+    let Some((_one, cuda, module)) = setup() else { return };
+    let Some(mut m) = or_skip(cuda.pinned::<u32>(4), NO_PAGE_LOCKED) else { return };
+    host_waits(&module, &mut m);
+}
+
+#[test]
+fn dropping_page_locked_memory_waits_for_the_kernel_that_uses_it() {
+    let Some((_one, cuda, module)) = setup() else { return };
+    let Some(m) = or_skip(cuda.pinned::<u32>(1), NO_PAGE_LOCKED) else { return };
+    drop_waits(&module, m);
     cuda.sync().unwrap();
+}
+
+#[test]
+fn page_locked_memory_has_one_address_for_both_and_may_have_no_elements() {
+    let Some((_one, cuda, _)) = setup() else { return };
+    let Some(m) = or_skip(cuda.pinned::<u32>(4), NO_PAGE_LOCKED) else { return };
+    assert_eq!(m.at(3).addr(), m.ptr().addr() + 12);
+    assert_eq!(m.host().unwrap().as_ptr() as u64, m.ptr().addr());
+    let none = cuda.pinned::<u64>(0).unwrap();
+    assert!(none.is_empty());
+    assert_eq!(none.host().unwrap(), [] as [u64; 0]);
+}
+
+#[test]
+fn a_kernel_adds_to_the_memory_of_a_vec_and_the_vec_has_it_back() {
+    let Some((_one, cuda, module)) = setup() else { return };
+    let n = 1_000_003;
+    let mut input = words(n, 3);
+    input[0] = u32::MAX;
+    let want: Vec<u32> = input.iter().map(|w| w.wrapping_add(1)).collect();
+    let mut v = vec![0u32; n];
+    let at = v.as_ptr() as u64;
+    let Some(mut lent) = or_skip(cuda.lend(&mut v), NO_PAGEABLE) else { return };
+    assert_eq!((lent.len(), lent.ptr().addr()), (n, at), "the kernel is given the Vec's own address");
+    fill_add_read(&module, &mut lent, &input);
+    drop(lent);
+    assert_eq!(v, want, "the Vec holds what the kernel wrote");
+}
+
+#[test]
+fn a_part_of_a_vec_or_a_box_is_lent_and_the_rest_of_it_is_not_touched() {
+    let Some((_one, cuda, module)) = setup() else { return };
+    let mut v = words(300, 4);
+    let before = v.clone();
+    let Some(lent) = or_skip(cuda.lend(&mut v[1..299]), NO_PAGEABLE) else { return };
+    add_one(&module, lent.ptr(), 298);
+    cuda.sync().unwrap();
+    drop(lent);
+    assert_eq!(v[0], before[0]);
+    assert_eq!(v[299], before[299]);
+    assert!((1..299).all(|i| v[i] == before[i].wrapping_add(1)));
+    // A Box's array is lent as a Vec's is, and so is none at all. An array on a thread's stack
+    // is not: the driver faults a kernel on one near the guard page below a stack.
+    let mut a = Box::new([7u32; 16]);
+    let lent = cuda.lend(&mut *a).unwrap();
+    add_one(&module, lent.ptr(), 16);
+    drop(lent);
+    assert_eq!(*a, [8; 16]);
+    let none = cuda.lend::<u32>(&mut []).unwrap();
+    assert!(none.is_empty());
+    assert_eq!(none.host().unwrap(), [] as [u32; 0]);
+}
+
+#[test]
+fn the_host_waits_for_a_kernel_before_it_reads_or_writes_a_slice_lent() {
+    let Some((_one, cuda, module)) = setup() else { return };
+    let mut v = vec![0u32; 4];
+    let Some(mut lent) = or_skip(cuda.lend(&mut v), NO_PAGEABLE) else { return };
+    host_waits(&module, &mut lent);
+}
+
+#[test]
+fn dropping_a_slice_lent_waits_for_the_kernel_and_the_host_has_the_slice_back() {
+    let Some((_one, cuda, module)) = setup() else { return };
+    let mut v = vec![5u32, 1, 2, 3];
+    let Some(lent) = or_skip(cuda.lend(&mut v), NO_PAGEABLE) else { return };
+    drop_waits(&module, lent);
+    assert_eq!(v, [105, 1, 2, 3], "the kernel's write is in the Vec when the host has it back");
 }
