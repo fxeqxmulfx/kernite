@@ -150,10 +150,20 @@ unsafe { kernels::normalize(kernite_cpu::Grid::new(4), x.as_mut_ptr(), sums.as_m
 `normalize` becomes the function that launches it, which takes a [`kernite_cpu::Grid`](crates/cpu/src/lib.rs) and the
 kernel's parameters, runs the kernel on a thread for each of the grid's, the caller's the first, and returns when all
 have ended. A thread that waits spins, so it needs a core: a grid of more threads than the machine runs at once,
-`kernite_cpu::most()`, is an error, as a GPU's grid of more blocks than it runs at once is. The kernel's parameters keep
-the names they are written with, `grid` among them. A compile-time argument may not be named `grid`, for Rust cannot
-keep a const apart from a parameter of its name: that is an error at its name. A crate with a cooperative kernel needs a
-dependency named `kernite-cpu` for the grid, not renamed in `Cargo.toml`. kernite says at the kernel when it has none.
+`kernite_cpu::most()`, is an error, as a GPU's grid of more blocks than it runs at once is.
+
+The grid's other threads are kept. The first launch from a thread starts them, each with the stack Rust gives a thread,
+and the launches after it from that thread hand them the kernel and start none. On a Ryzen 5 5600H a launch of a kernel
+that returns at once costs 22 ns on one thread, which makes no system call, 0.2 microseconds on two, 0.8 on six and 2.3
+on twelve. A kept thread with no kernel to run spins for 200 microseconds, `kernite_cpu::SPIN`, for the next to come,
+and then sleeps, using no CPU. A launch that finds the threads asleep costs 5 microseconds on two threads, 9 on six and
+16 on twelve, and some 100 when the machine has been idle for milliseconds, as the system wakes its cores. The threads
+end when the thread that launched does.
+
+The kernel's parameters keep the names they are written with, `grid` among them. A compile-time argument may not be
+named `grid`, for Rust cannot keep a const apart from a parameter of its name: that is an error at its name. A crate
+with a cooperative kernel needs a dependency named `kernite-cpu` for the grid, not renamed in `Cargo.toml`. kernite says
+at the kernel when it has none.
 
 A kernel calls the module's others, itself among them, as SysV calls a function: `call(g, gcd, (a, b))` moves `a` to
 `rdi` and `b` to `rsi`, and `g` from `rax`, and is checked against what `gcd` takes and returns. `lea(fp, [gcd])` takes
