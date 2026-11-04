@@ -2758,14 +2758,14 @@ fn a_pointer_to_an_f16_in_an_x86_kernel_is_rusts_error_alone() {
     );
 }
 
-/// A GPU kernel takes an `f16` and a `bf16`, by value and by pointer: Rust builds the crate without a word,
-/// the launcher takes kernite-cuda's two, and the test the fixture holds runs the kernel and reads back
-/// what it wrote. It skips where there is no GPU.
+/// A GPU kernel takes an `f16` and a `bf16`, by value and by pointer, written plain or raw, `r#f16`: Rust builds
+/// the crate without a word, the launcher takes kernite-cuda's two, and the tests the fixture holds run each
+/// kernel and read back what it wrote. They skip where there is no GPU.
 #[test]
 fn a_gpu_kernel_takes_the_halves_as_kernite_cuda_has_them() {
     let printed = runs_quietly(&["test"], "halves_gpu");
     assert!(
-        printed.contains("test result: ok. 1 passed"),
+        printed.contains("test result: ok. 2 passed"),
         "fixtures/halves_gpu.rs ran its tests, and printed:\n{printed}"
     );
 }
@@ -2903,6 +2903,76 @@ fn a_gpu_kernel_that_takes_a_type_kernite_refuses_is_kernites_error_alone() {
     ]);
     said.push(format!("error: could not compile `types_refused_gpu` (lib) due to {} previous errors", said.len()));
     refuses("types_refused_gpu", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A type kernite refuses, written raw, is kernite's error alone, at the type, once for each instance, as it is
+/// written plain: Rust reads `r#f16` as `f16`, so it says no more of the one than of the other, and kernite quotes
+/// the type as Rust reads it, `f16`. So are `[r#f16; 4]`, `r#f128`, a result `r#f16`, and a pointer to a type with
+/// no size, `*const r#str` and `*mut [r#u64]`, in an x86 kernel and in a GPU kernel, plain, of compile-time
+/// arguments, cooperative, or both. So is a result that a cooperative kernel or a GPU kernel may not have, `r#f16`,
+/// `r#f128` or `r#u64`: the launcher hands the type to Rust, which reads it as it reads the one written plain.
+#[test]
+fn a_type_kernite_refuses_written_raw_is_kernites_error_alone() {
+    let two = |place: &str, kernel: &str, ty: &str| {
+        format!(
+            "src/lib.rs:{place}: error: {kernel}a pointer to `{ty}` has two words, an address and a length or a \
+             table, and a kernel's pointer has one"
+        )
+    };
+    let mut said = vec![];
+    for (ty, [plain, tiles, together, together_tiles]) in [
+        ("f16", ["9:44", "14:58", "19:47", "25:67"]),
+        ("[f16; 4]", ["41:44", "46:58", "51:47", "57:67"]),
+        ("f128", ["64:44", "69:58", "74:47", "80:67"]),
+    ] {
+        said.push(x86_takes(plain, "", ty));
+        said.extend([1, 2].map(|n| x86_takes(tiles, &instance("tiles", n), ty)));
+        said.push(x86_takes(together, "", ty));
+        said.extend([1, 2].map(|n| x86_takes(together_tiles, &instance("together_tiles", n), ty)));
+        if ty == "f16" {
+            said.push(x86_gives("29:53", "", ty));
+            said.extend([1, 2].map(|n| x86_gives("34:73", &instance("tiles_result", n), ty)));
+        }
+    }
+    said.push(two("87:43", "", "str"));
+    said.extend([1, 2].map(|n| two("92:58", &instance("words", n), "[u64]")));
+    said.push(gpu_takes("99:48", "", "f128"));
+    said.extend([1, 2].map(|n| gpu_takes("104:62", &instance("tiles", n), "f128")));
+    said.push(gpu_takes("109:51", "", "f128"));
+    said.extend([1, 2].map(|n| gpu_takes("115:71", &instance("together_tiles", n), "f128")));
+    said.extend([gpu_takes("122:48", "", "[f16; 4]"), two("126:47", "", "str")]);
+    said.push(x86_gives("134:55", "", "f16"));
+    said.extend([1, 2].map(|n| x86_gives("140:75", &instance("together_tiles", n), "f128")));
+    said.push(gpu_returns("144:67", "", "f16"));
+    said.extend([1, 2].map(|n| gpu_returns("149:79", &instance("gpu_tiles", n), "f128")));
+    said.extend([gpu_returns("154:76", "", "u64"), coop_returns("159:62", "")]);
+    said.push(format!("error: could not compile `types_refused_raw` (lib) due to {} previous errors", said.len()));
+    refuses("types_refused_raw", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A type kernite refuses whose name is a keyword written raw, `r#dyn::Foo`, `r#mut` or `r#for<u8>`, is kernite's
+/// error alone, at the type, once for each instance, with the keyword as written, for `r#mut` is a name and `mut` is
+/// not. So is a pointer to `[r#mut]`, which has two words; and a pointer to `r#str` has two as well, quoted `str`,
+/// for `str` is no keyword. Rust says nothing of the type, nor at a call of the kernel, which the crate's own
+/// function makes.
+#[test]
+fn a_type_named_by_a_keyword_written_raw_that_kernite_refuses_is_kernites_error_alone() {
+    let two = |place: &str, ty: &str| {
+        format!(
+            "src/lib.rs:{place}: error: a pointer to `{ty}` has two words, an address and a length or a table, \
+             and a kernel's pointer has one"
+        )
+    };
+    let variable = "src/lib.rs:51:17: error: x86 variables are `gpr`, `ymm`, `xmm` and stack memory, `local<..>`; \
+                    not `r#mut`";
+    let mut said = vec![x86_takes("28:43", "", "r#dyn::Foo"), x86_takes("32:43", "", "r#mut")];
+    said.extend([1, 2].map(|n| x86_takes("37:58", &instance("tiles", n), "r#for<u8>")));
+    said.extend([x86_takes("42:47", "", "r#mut"), x86_gives("46:53", "", "r#mut"), variable.to_string()]);
+    said.extend([two("59:43", "[r#mut]"), two("63:43", "str"), gpu_takes("72:47", "", "r#dyn::Foo")]);
+    said.extend([1, 2].map(|n| gpu_takes("77:62", &instance("tiles", n), "r#mut")));
+    said.push(two("81:47", "[r#mut]"));
+    said.push(format!("error: could not compile `keywords_refused` (lib) due to {} previous errors", said.len()));
+    refuses("keywords_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
 /// Rust says of a type kernite refuses what it says of any function's signature, once, at the fault, beside
@@ -3513,7 +3583,8 @@ fn a_module_that_gives_a_primitive_another_type_builds_as_one_that_does_not() {
 /// A compile-time argument is no local, and no span of stable Rust keeps it apart from one of its
 /// name: `grid`, the launcher's, and `threads` and `shared`, of a cooperative kernel's `_blocks`.
 /// Each is refused at its name, and nothing at the module's attribute, where Rust would say
-/// "expected `Grid`, found `u32`", as the launcher or method never runs.
+/// "expected `Grid`, found `u32`", as the launcher or method never runs. So is a name written raw,
+/// `r#grid`, which Rust reads as `grid`.
 #[test]
 fn a_compile_time_argument_named_as_the_launchers_parameters_is_refused_at_its_name() {
     refuses(
@@ -3523,7 +3594,8 @@ fn a_compile_time_argument_named_as_the_launchers_parameters_is_refused_at_its_n
             "src/lib.rs:38:47: error: `threads` names a parameter of `k_blocks` as well",
             "src/lib.rs:49:47: error: `shared` names a parameter of `k_blocks` as well",
             "src/lib.rs:60:43: error: `grid` names a parameter of the launcher as well",
-            "error: could not compile `arguments` (lib) due to 4 previous errors",
+            "src/lib.rs:71:43: error: `grid` names a parameter of the launcher as well",
+            "error: could not compile `arguments` (lib) due to 5 previous errors",
         ],
     );
 }
@@ -3633,6 +3705,34 @@ fn a_crate_of_kernels_may_not_forbid_clippys_too_many_arguments() {
 #[test]
 fn names_written_raw_reach_rust_as_written() {
     builds_quietly("raw");
+}
+
+/// A type's name written raw, `r#u64`, is the type Rust reads: Rust builds the crate without a word, an x86 kernel
+/// has the listing of the same kernel written plain, and runs as it does, whether its types are numbers,
+/// floats, pointers, a compile-time argument's, a variable's, or a static's, and the kernel is plain, of
+/// compile-time arguments or cooperative; and a GPU kernel runs with the launcher Rust reads, and its static is
+/// read back as the type Rust reads.
+#[test]
+fn a_type_written_raw_is_the_type_rust_reads() {
+    let printed = runs_quietly(&["test"], "raw_types");
+    assert!(
+        printed.contains("test result: ok. 4 passed"),
+        "fixtures/raw_types.rs ran its tests, and printed:\n{printed}"
+    );
+}
+
+/// A type named by a keyword written raw is the type Rust reads: a pointer to `r#dyn::Foo`, a struct of a module
+/// named `dyn`, or to `r#mut<u64>`, a generic struct, has one word, as Rust has it, where a pointer to `dyn Foo` has
+/// two. Rust builds the crate without a word, an x86 kernel has the listing of the kernel that names types of the same
+/// layout by words that are no keywords, `dyn_::Foo` say, and runs as it does, whether the kernel is plain, of
+/// compile-time arguments or cooperative, and a GPU kernel runs with the launcher Rust reads.
+#[test]
+fn a_type_named_by_a_keyword_written_raw_is_the_type_rust_reads() {
+    let printed = runs_quietly(&["test"], "raw_keywords");
+    assert!(
+        printed.contains("test result: ok. 4 passed"),
+        "fixtures/raw_keywords.rs ran its tests, and printed:\n{printed}"
+    );
 }
 
 /// The method that says how many blocks a cooperative GPU kernel's grid has at most, `k_blocks`,

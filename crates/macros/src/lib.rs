@@ -175,6 +175,11 @@
 //! Rust has none to ask for. A pointer of two words to a type Rust refuses by itself,
 //! `-> *mut dyn Copy`, is kernite's error alone, though Rust says its own of a plain kernel's
 //! result. A result of `()` is no result, and no error.
+//! A name written raw is the name Rust reads, in a type as in a value's name: `r#u64` is the number
+//! `u64`, `r#f16` the half a GPU kernel's launcher takes as kernite-cuda has it, and `r#f128` a type
+//! kernite refuses, as the plain names are. A keyword written raw is a name too: a pointer to
+//! `r#dyn::Foo` has one word, as Rust has it, where a pointer to `dyn Foo` has two. An error says the
+//! keyword as it is written, `r#dyn`.
 //!
 //! A helper is compiled where a kernel calls it, and an `extern "ptx-func"` function is a `.func`
 //! of the GPU's module, so the macros write no function for either. Where kernite finds any error

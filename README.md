@@ -130,6 +130,21 @@ are mended. A function's types are shown where `cfg` keeps the function and the 
 shown none of them, so an import that only a helper names is unused to Rust, which says so as it does of any import that
 nothing names.
 
+A name written raw is the name Rust reads, in a type as in a value's name: `r#u64` is `u64`, `*const r#u8` is
+`*const u8` and `[r#f32; 4]` is `[f32; 4]`, in a parameter, a result, a variable, a compile-time argument's type,
+`<const N: r#u64>`, a const and a static. A kernel written so compiles to the listing, or the PTX, of the one written
+plain, and the launcher of a GPU kernel that takes `r#f16` or `r#bf16` takes kernite-cuda's half, as it does for `f16`
+and `bf16`. A type kernite refuses is refused as it is written plain: `r#f16`, `[r#f16; 4]` and `r#f128` are its error
+alone, at the type, once for each instance, as `f16`, `[f16; 4]` and `f128` are, and it says the type as Rust reads it,
+`f16` and not `r#f16`.
+
+A keyword written raw is a name, and no keyword: `r#dyn::Foo` is a struct in a module named `dyn`, `r#mut<u64>` is a
+generic struct named `mut`, and a pointer to `r#dyn::Foo` has one word, as Rust has it, where a pointer to `dyn Foo` has
+two. So it is for every keyword Rust lets be written raw, `r#for`, `r#true` and `r#type` as `r#dyn`. A kernel that names
+a type so compiles to the listing, or the PTX, of one that names types of the same layout by words that are no keywords,
+`dyn_::Foo` say. An error says the keyword as it is written, `r#dyn::Foo` and `r#mut`: without its `r#` the word is the
+keyword, and not the name.
+
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kernite_macros::consts]` is on, and a
 module of kernels takes them by its path, `#[kernite_macros::kernels(consts = crate::model::sizes)]`: its kernels read

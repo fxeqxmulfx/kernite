@@ -204,7 +204,7 @@ pub(crate) fn clashes(f: &Fn, cfg: &TokenStream, own: &[&str], method: &str, top
     let mut errors = TokenStream::new();
     for name in const_names(written_generics(f, top)) {
         let written = name.to_string();
-        let name_of = written.trim_start_matches("r#");
+        let name_of = lang::unraw(&written);
         if own.contains(&name_of) {
             errors.extend(error_under(cfg, name.span(), &format!("`{name_of}` names a parameter of {method} as well")));
         }
@@ -370,11 +370,12 @@ enum Ask {
 }
 
 /// The number `ty` is, and where its name is, if `ty` is one by its name: `u8` to `u64`, `i8` to
-/// `i64`, `usize`, `isize`, `f32`, `f64` or `bool`, which the language reads by their names.
+/// `i64`, `usize`, `isize`, `f32`, `f64` or `bool`, which the language reads by their names, written raw or not.
 fn number_name(ty: &[TokenTree]) -> Option<(&'static str, Span)> {
     let [name] = ty else { return None };
-    let text = name.to_string();
-    let known = lang::IntTy::parse(&text).map(lang::IntTy::name);
+    let written = name.to_string();
+    let text = lang::unraw(&written);
+    let known = lang::IntTy::parse(text).map(lang::IntTy::name);
     known.or_else(|| ["bool", "f32", "f64"].into_iter().find(|n| *n == text)).map(|n| (n, name.span()))
 }
 
@@ -391,7 +392,7 @@ fn asked(f: &Fn, top: &[TokenTree]) -> Vec<Option<Ask>> {
             return Some(Ask::Number(name, at));
         }
         let (_, to) = pointer(ty)?;
-        let one = lex(ty).0.is_ok_and(|trees| lang::pointer(&lang::text(&trees)) == Ok(true));
+        let one = lex(ty).0.is_ok_and(|trees| lang::pointer(&lang::read_type(&trees)) == Ok(true));
         (one && !placeholder(to)).then(|| Ask::Pointer(to[0].span(), to[to.len() - 1].span()))
     };
     let params = written_params(f, top).into_iter().map(|(param, colon)| ask(&param[colon + 1..]));
@@ -646,9 +647,10 @@ fn keep(meta: Vec<TokenTree>, offered: bool) -> Option<Vec<TokenTree>> {
     }
 }
 
-/// Whether `t` is `name`, or `r#name`: Rust reads an attribute's name written raw as the name.
+/// Whether `t` is the name `name`, written raw or not: Rust reads `r#name` as `name`, an attribute's, `r#cfg`, or a
+/// type's, `r#u64`. A keyword is asked as written, by [`is_ident`]: `r#let` is a name, and not `let`.
 pub(crate) fn named(t: &TokenTree, name: &str) -> bool {
-    is_ident(t, name) || is_ident(t, &format!("r#{name}"))
+    matches!(t, TokenTree::Ident(i) if lang::unraw(&i.to_string()) == name)
 }
 
 /// `f`'s signature as written, from its visibility to its result, but for its parameters, as
@@ -845,10 +847,10 @@ pub(crate) fn host(ty: &[TokenTree]) -> TokenStream {
     half(ty).unwrap_or_else(|| ty.iter().cloned().collect())
 }
 
-/// `ty` as kernite-cuda names it, if it is `f16` or `bf16`, which Rust has not.
+/// `ty` as kernite-cuda names it, if it is `f16` or `bf16`, written raw or not, which Rust has not.
 pub(crate) fn half(ty: &[TokenTree]) -> Option<TokenStream> {
     match ty {
-        [t] if is_ident(t, "f16") || is_ident(t, "bf16") => Some(parse(&primitive(&t.to_string()))),
+        [t] if named(t, "f16") || named(t, "bf16") => Some(parse(&primitive(lang::unraw(&t.to_string())))),
         _ => None,
     }
 }
@@ -958,15 +960,15 @@ fn refused_beside(ty: &[TokenTree], beside: TokenStream) -> TokenStream {
 
 /// `tokens`, a type kernite refuses, as written, but for each `f16`, `f128` and `!` where [`walk`] says a type is
 /// written: wherever Rust finds one it says that the type is unstable, even in the argument of a name it cannot
-/// find. A `!` is the name [`refused`] writes. An `f16` or an `f128` is written `self::f16` or `self::f128`,
-/// for a module may give either name a type: Rust finds it there, and its import is used, and where there is
-/// none Rust finds nothing and says nothing. Where the module has a module so named, Rust says that it is no
-/// type, as it does of any function's signature. A later segment of a path, `core::primitive::f16`, is a name
-/// in the path before it, and stays as written. An `f16` or an `f128` that kernite does not see as a type, for a
-/// macro writes it, `half!()`, or it is in an expression of the type, as in an array's length,
-/// `[u8; size_of::<f16>()]`, Rust still says is unstable.
+/// find. A `!` is the name [`refused`] writes. An `f16` or an `f128` is written `self::f16` or `self::f128`, with the
+/// `r#` if it has one, which Rust reads as the name without it, for a module may give either name a type: Rust finds
+/// it there, and its import is used, and where there is none Rust finds nothing and says nothing. Where the module
+/// has a module so named, Rust says that it is no type, as it does of any function's signature. A later segment of
+/// a path, `core::primitive::f16`, is a name in the path before it, and stays as written. An `f16` or an `f128` that
+/// kernite does not see as a type, for a macro writes it, `half!()`, or it is in an expression of the type, as in an
+/// array's length, `[u8; size_of::<f16>()]`, Rust still says is unstable.
 fn unstable(tokens: &[TokenTree]) -> TokenStream {
-    let float = |t: &TokenTree| is_ident(t, "f16") || is_ident(t, "f128") || is_punct(t, '!');
+    let float = |t: &TokenTree| named(t, "f16") || named(t, "f128") || is_punct(t, '!');
     walk(tokens, float, &mut |t, place| match place {
         Place::Type if is_punct(t, '!') => Some(placed(REFUSED, t.span())),
         Place::Type => Some(placed(&format!("self::{t}"), t.span())),

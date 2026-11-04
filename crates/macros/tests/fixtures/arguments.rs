@@ -61,3 +61,14 @@ pub mod cpu_grid {
         mov(qword[x], 1);
     }
 }
+
+/// The same, with the name written raw, `r#grid`, which Rust reads as `grid`.
+#[kernite_macros::kernels]
+pub mod cpu_raw_grid {
+    #[instances(1, 2)]
+    #[cooperative]
+    #[allow(non_upper_case_globals)]
+    pub unsafe extern "sysv64" fn k<const r#grid: u64>(x: *mut u64) {
+        mov(qword[x], 1);
+    }
+}
