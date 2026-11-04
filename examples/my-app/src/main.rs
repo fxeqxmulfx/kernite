@@ -2007,6 +2007,31 @@ mod tests {
         too_many(super::normalize_on_threads(&mut [1.0], kernite_cpu::most().unwrap() + 1).unwrap_err());
     }
 
+    /// The cpu's `normalize` on a grid placed on the first CPUs the caller's thread may run on, a thread on
+    /// each, against [`normalized`], bit for bit, on one thread to four: the threads wait for each
+    /// other at the barrier on CPUs of their own, as they do where the system puts them.
+    #[test]
+    fn normalize_on_a_placed_grid_is_the_gpus_reference_bit_for_bit() {
+        assert!(super::supported(), "the kernels need AVX2 and FMA");
+        let cpus = kernite_cpu::cpus().unwrap();
+        for threads in 1..=threads() {
+            for n in [1, 1025, 41_000] {
+                let x: Vec<f32> = floats(n, n as u32 + 11).iter().map(|x| x / 2.0 + 1.0).collect();
+                let want: Vec<u32> = normalized(&x).iter().map(|v| v.to_bits()).collect();
+                let (mut got, mut sums) = (x.clone(), vec![0.0; n.div_ceil(1024)]);
+                let grid = kernite_cpu::Grid::on(&cpus[..threads]);
+                // SAFETY: `n` floats behind `got` and a float a chunk behind `sums`, which nothing
+                // else touches while the threads run, and the cpu has what the kernel needs.
+                unsafe { super::kernels::normalize(grid, got.as_mut_ptr(), sums.as_mut_ptr(), n) }.unwrap();
+                assert_eq!(
+                    got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    want,
+                    "{n} floats, {threads} threads placed"
+                );
+            }
+        }
+    }
+
     /// The cpu's `diffuse` against [`diffused`], the GPU's reference, bit for bit, on one thread
     /// to four: of floats fewer than a vector and its neighbours, of a chunk and one more, and
     /// of chunks enough that each thread has several, over a thousand steps, each a wait of the
