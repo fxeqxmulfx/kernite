@@ -2094,6 +2094,28 @@ mod tests {
         }
     }
 
+    /// `Kernels::load` on the `Cuda` of each GPU, all held at once on this thread, and `saxpy`
+    /// launched on each in turn against `f32::mul_add`, twice around, so that each launch follows
+    /// one on another GPU. On a machine with one GPU it runs on that one; with none, skipped.
+    #[test]
+    fn saxpy_is_mul_add_bit_for_bit_on_each_gpu() {
+        let Some(first) = cuda() else { return };
+        let others = (1..Cuda::count().unwrap()).map(|index| {
+            let cuda = Cuda::on(index).unwrap();
+            gpu::Kernels::load(&cuda).map(|kernels| (cuda, kernels)).unwrap()
+        });
+        let gpus: Vec<(Cuda, gpu::Kernels)> = std::iter::once(first).chain(others).collect();
+        for round in 0..2 {
+            for (index, (cuda, kernels)) in gpus.iter().enumerate() {
+                let seed = 10 * round + index as u32;
+                let (x, mut y) = (floats(10_000, 3 * seed + 1), floats(10_000, 3 * seed + 2));
+                let want: Vec<u32> = x.iter().zip(&y).map(|(x, y)| 1.5f32.mul_add(*x, *y).to_bits()).collect();
+                super::saxpy(cuda, kernels, 1.5, &x, &mut y).unwrap();
+                assert_eq!(y.iter().map(|y| y.to_bits()).collect::<Vec<_>>(), want, "GPU {index}, round {round}");
+            }
+        }
+    }
+
     /// GPU kernels for the tests alone, of nothing past `sm_20`.
     #[kernite_macros::kernels]
     mod oldest {

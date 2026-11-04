@@ -908,8 +908,9 @@ impl Module {
     /// # Safety
     ///
     /// `args` must be as many as the kernel's parameters, each of the type its `.param` is;
-    /// and the kernel is trusted with them: each pointer among them must be to a buffer as
-    /// long as the kernel reads and writes through it, while it runs.
+    /// and the kernel is trusted with them: each pointer among them must be to a buffer of the
+    /// GPU the module is loaded on, as long as the kernel reads and writes through it, while
+    /// it runs.
     pub unsafe fn launch(&self, index: usize, grid: Grid, args: &[*const c_void]) -> Result<(), Error> {
         let ([bx, by, bz], [tx, ty, tz]) = (grid.blocks, grid.threads);
         let (api, k, params) = (self.driver.current()?, &self.kernels[index], args.as_ptr().cast_mut().cast());

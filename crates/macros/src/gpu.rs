@@ -157,8 +157,8 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     if !out.to_string().contains("# Safety") {
         out.extend(parse(
             "#[doc = \"\"]\n#[doc = \" # Safety\"]\n#[doc = \"\"]\n\
-             #[doc = \" The kernel trusts the pointers it is given: each must be to a buffer as long as the \
-             kernel reads and writes through it.\"]",
+             #[doc = \" The kernel trusts the pointers it is given: each must be to a buffer of the GPU the \
+             kernels are loaded on, as long as the kernel reads and writes through it.\"]",
         ));
     }
     // Clippy says "too many arguments" of a function of more than seven parameters wherever its
