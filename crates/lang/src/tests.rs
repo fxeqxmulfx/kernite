@@ -138,6 +138,21 @@ fn a_type_that_begins_with_a_binder_is_read_whole() {
     assert_eq!(f.ret.as_ref().map(|r| r.ty.as_str()), Some("for<'a> fn(&'a u8)"));
 }
 
+/// The `!` of never follows the arrow, a keyword or a lifetime, and is no macro's: the braces after it are the
+/// body. A lifetime is a `'` and a name, and that name is no macro's, so the result of `&'static !` is the four tokens
+/// before the braces. A macro after a lifetime, `&'static byte!{ _ }`, takes its braces, as it does anywhere in a
+/// result. The tokens are made as the macro is given them, for the lexer of a string refuses a lifetime.
+#[test]
+fn the_braces_after_a_never_that_follows_a_lifetime_are_the_body() {
+    for (result, tokens) in [("&'static !", 4), ("&'a !", 4), ("&'a mut !", 5), ("&'static byte!{ _ }", 6)] {
+        let src = format!("pub unsafe extern \"sysv64\" fn k() -> {result} {{ ud2(); }}");
+        let module = crate::module(&lexed_with_lifetimes(&src), 0).expect(result);
+        let crate::ItemKind::Fn(f) = &module.items[0].kind else { panic!("a function") };
+        assert_eq!(f.ret.as_ref().map(|r| r.tokens.len()), Some(tokens), "{result}");
+        assert_eq!(f.body.as_ref().expect(result).stmts.len(), 1, "{result}");
+    }
+}
+
 /// A pointer is one word, unless it is to a slice, a `str` or a `dyn`: those are an address and a
 /// length or a table. Parentheses around a type do not hide it, and a tuple that ends in one has no
 /// size either. A pointer to what the lexer refuses, a lifetime, which the macro hands on, is

@@ -7,6 +7,11 @@ fn x86(src: &str, name: &str) -> String {
     kernite::x86_str(src, name).unwrap_or_else(|e| panic!("{e}")).text()
 }
 
+/// Kernel `name` of `src`, for x86: its instructions alone, without the listing's comments.
+fn code(src: &str, name: &str) -> Vec<String> {
+    kernite::x86_str(src, name).unwrap_or_else(|e| panic!("{e}")).code().map(String::from).collect()
+}
+
 /// The `.entry` of the one kernel in `src`, in PTX, from its name on.
 fn ptx(src: &str) -> String {
     let module = kernite::ptx_str(src).unwrap_or_else(|e| panic!("{e}"));
@@ -202,9 +207,6 @@ fn a_generic_is_a_value_and_a_type_is_refused_at_its_token() {
 /// refused: every error is at the result, and the x86 kernel's and the GPU kernel's quote the type whole.
 #[test]
 fn a_result_that_holds_a_block_is_read_whole_up_to_its_body() {
-    let code = |src: &str, name: &str| {
-        kernite::x86_str(src, name).unwrap_or_else(|e| panic!("{e}")).code().map(String::from).collect::<Vec<_>>()
-    };
     for to in [
         "Arr<{ 3 }>",
         "crate::Arr<{ 3 }>",
@@ -242,6 +244,61 @@ fn a_result_that_holds_a_block_is_read_whole_up_to_its_body() {
         ("*const Arr<{ 3 }> where u8: Sized {}", "1:52", "a kernel has no `where`"),
         ("u8;", "1:36", no_body),
         ("*const Arr<{ 3 }>;", "1:51", no_body),
+    ] {
+        let src = format!("unsafe extern \"sysv64\" fn k() -> {result}");
+        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("{at}: {message}"), "{result}");
+    }
+}
+
+/// A result that is a type macro in braces, `byte!{ _ }`, is read whole, as one in parentheses is: the braces right
+/// after the `!` of a macro's name are its argument, and the body is the braces after them. The `!` of never follows
+/// the arrow, a keyword or a lifetime, `-> !`, `*const !` or `&'static !`, and is no macro's: the braces after it are
+/// the body. The lexer of a string refuses a lifetime, so that one is tried where its tokens can be made, in
+/// kernite-lang's tests and kernite-macros's. A kernel gives back a pointer to such a type, plain and of compile-time
+/// arguments. A result that is no number or pointer, and one that a cooperative kernel or a GPU kernel may not have,
+/// is refused at the result, as it is with any type.
+#[test]
+fn a_result_that_holds_a_macro_in_braces_is_read_whole_up_to_its_body() {
+    for to in [
+        "byte!{ _ }",
+        "crate::byte!{ _ }",
+        "fn(u8) -> byte!{ _ }",
+        // A macro's argument in parentheses or brackets, and its braces in angles or brackets, are not the body.
+        "byte!(_)",
+        "byte![_]",
+        "Wrap<byte!{ _ }>",
+        "[byte!{ _ }; 1]",
+    ] {
+        let src = format!("unsafe extern \"sysv64\" fn k(p: *const u8) -> *const {to} {{ ret(p); }}");
+        assert_eq!(code(&src, "k"), ["mov rax, rdi", "ret"], "{to}");
+    }
+    // The `!` of never follows the arrow, `-> !`, a keyword, `*const !`, or a lifetime, `&'static !`, and is no macro's:
+    // the braces after it are the body. A string holds no lifetime, so the first two are tried here.
+    assert_eq!(code("unsafe extern \"sysv64\" fn k() -> ! { ud2(); }", "k"), ["ud2"]);
+    for to in ["*const fn() -> !", "*const !", "*mut !"] {
+        let src = format!("unsafe extern \"sysv64\" fn k(p: *const u8) -> {to} {{ ret(p); }}");
+        assert_eq!(code(&src, "k"), ["mov rax, rdi", "ret"], "{to}");
+    }
+    let src = "#[instances(1, 2)]\nunsafe extern \"sysv64\" fn k<const N: u64>(p: *const u8) -> *const byte!{ _ } \
+               { add(p, N); ret(p); }";
+    assert_eq!(code(src, "k::<1>"), ["add rdi, 1", "mov rax, rdi", "ret"]);
+    assert_eq!(code(src, "k::<2>"), ["add rdi, 2", "mov rax, rdi", "ret"]);
+    // Every error is at the result, and the x86 kernel's and the GPU kernel's quote the type whole.
+    let src = "unsafe extern \"sysv64\" fn k() -> byte!{ _ } {}";
+    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `byte!{_}`";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    let src = "#[cooperative]\nunsafe extern \"sysv64\" fn k() -> *const byte!{ _ } {}";
+    let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("2:34: {nothing}"));
+    let src = "unsafe extern \"ptx-kernel\" fn k() -> *const byte!{ _ } {}";
+    let nothing = "a GPU kernel returns nothing, not `*const byte!{_}`: it writes what it works out to memory";
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:38: {nothing}"));
+    // The result still ends at its `where`, which a kernel has none of, and at the `;` of a function with no
+    // body, after a macro in braces too.
+    let no_body = "a kernel is written in its body, and `k` has none";
+    for (result, at, message) in [
+        ("*const byte!{ _ } where u8: Sized {}", "1:52", "a kernel has no `where`"),
+        ("*const byte!{ _ };", "1:51", no_body),
     ] {
         let src = format!("unsafe extern \"sysv64\" fn k() -> {result}");
         assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("{at}: {message}"), "{result}");

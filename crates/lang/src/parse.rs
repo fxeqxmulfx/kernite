@@ -431,10 +431,19 @@ impl<'a> Parser<'a> {
         }
         let ret = if self.eat_op("->") {
             let (from, span) = (self.pos, self.span());
-            // The result ends at its `where`, at its body, or at the `;` of a function with none: a block among
-            // the arguments of a name in it, `Foo<{ 3 }>`, is none of them.
+            // The result ends at its `where`, at its body, or at the `;` of a function with none. A block among
+            // the arguments of a name in it, `Foo<{ 3 }>`, is none of them. Nor are the braces of a macro,
+            // `byte!{ _ }`, which come right after the `!` of its name. The `!` of never follows the arrow,
+            // `-> !`, a keyword, `*const !`, or a lifetime, `&'a !`: it is no macro's, and the braces after it are
+            // the body. A lifetime is a `'` and the name that follows it.
             self.skip_ty(1, |p| {
-                p.is_ident("where") || p.is_op(";") || matches!(p.peek(), Some(Tree::Group { delim: Delim::Brace, .. }))
+                let macro_args = matches!(
+                    &p.trees[..p.pos],
+                    [.., before, Tree::Ident { name, .. }, Tree::Punct { ch: '!', .. }]
+                        if name != "const" && name != "mut" && !matches!(before, Tree::Punct { ch: '\'', .. })
+                );
+                let body = matches!(p.peek(), Some(Tree::Group { delim: Delim::Brace, .. })) && !macro_args;
+                p.is_ident("where") || p.is_op(";") || body
             })?;
             no_impl(&self.trees[from..self.pos])?;
             Some(Ret { ty: text(&self.trees[from..self.pos]), span, tokens: from..self.pos })
