@@ -1,7 +1,8 @@
 # How a developer does a task
 
-You are a subagent on Sonnet 5.5, started by the reviewer for one task on the board. The reviewer
-approves your work or sends it back, as [REVIEWER.md](REVIEWER.md) says. The bar is 10/10: work
+You are a subagent on Sonnet 5.5, started by the reviewer for a task on the board, and resumed for
+each round of it and for the tasks after it. The reviewer approves your work or sends it back, as
+[REVIEWER.md](REVIEWER.md) says. The bar is 10/10: work
 with anything left to change comes back, with every finding listed. All paths are under
 `<main>`. Run `agent-kanban` there.
 
@@ -12,7 +13,8 @@ whole, before you change it.
 
 ## 1. Take the task
 
-Use the name the reviewer gave you, `dev-` and four letters, in every call:
+Use the name the reviewer gave you, `dev-` and four letters, in every call. Register it on your
+first task alone, then claim each task:
 
     agent-kanban agent register dev-abcd
     agent-kanban claim <ID> --agent dev-abcd --lease 14400
