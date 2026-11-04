@@ -6,17 +6,22 @@
 
     ./make.py check                 formatting, clippy, every test, and the docs
     ./make.py fmt                   formats every crate
+    ./make.py publish               publishes each crate crates.io lacks at its version, one at a time
 
 An argument NAME=VALUE sets a variable in the environment of everything the targets run.
 With no target, the targets are listed.
 """
 
+import graphlib
+import json
 import os
 import re
 import shlex
 import signal
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -56,8 +61,9 @@ def sh(cmd: list, env: dict | None = None, capture: bool = False, echo: bool = T
 @target("help")
 def usage():
     """this list"""
+    width = max(map(len, TARGETS))
     for name, fn in TARGETS.items():
-        print(f"  ./make.py {name:<6} {fn.__doc__.splitlines()[0]}")
+        print(f"  ./make.py {name:<{width}} {fn.__doc__.splitlines()[0]}")
 
 
 @target("check")
@@ -73,6 +79,39 @@ def check():
 def fmt():
     """formats every crate"""
     sh(["cargo", "fmt"])
+
+
+@target("publish")
+def publish():
+    """publishes each crate crates.io lacks at its version, one at a time, those it needs first
+
+    A dry run of them all comes first, so that none goes up unless each builds as crates.io will have it.
+    A run that crates.io stops, at its limit of uploads say, goes on where it stopped when run again."""
+    packages = json.loads(sh(["cargo", "metadata", "-q", "--no-deps", "--format-version", "1"], capture=True,
+                             echo=False))["packages"]
+    versions = {p["name"]: p["version"] for p in packages if p["publish"] != []}
+    needs = {p["name"]: [d["name"] for d in p["dependencies"] if d["name"] in versions]
+             for p in packages if p["name"] in versions}
+    left = [c for c in graphlib.TopologicalSorter(needs).static_order() if not published(c, versions[c])]
+    if not left:
+        print("crates.io has every crate at its version")
+        return
+    sh(["cargo", "publish", "--dry-run", *(arg for c in left for arg in ("-p", c))])
+    for c in left:
+        sh(["cargo", "publish", "-p", c])
+
+
+def published(crate: str, version: str) -> bool:
+    """Whether crates.io has this version of the crate, as its index says."""
+    name = crate.lower()
+    folder = {1: "1", 2: "2", 3: f"3/{name[0]}"}.get(len(name), f"{name[:2]}/{name[2:4]}")
+    try:
+        with urllib.request.urlopen(f"https://index.crates.io/{folder}/{name}") as index:
+            return any(json.loads(line)["vers"] == version for line in index)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return False
+        raise
 
 
 def main(args: list[str]) -> None:

@@ -733,6 +733,7 @@ the examples.
 ```
 ./make.py check    # formatting, clippy, every test, and the docs
 ./make.py fmt      # formats every crate
+./make.py publish  # publishes each crate crates.io lacks at its version, one at a time
 ```
 
 kernite builds with Rust 1.99.1 and later, as the workspace's `rust-version` says. `make.py` runs under
