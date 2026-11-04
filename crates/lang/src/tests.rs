@@ -37,6 +37,19 @@ fn lexed_with_lifetimes(src: &str) -> Vec<Tree> {
     made(crate::lex(&src.replace('\'', "lt_")).unwrap())
 }
 
+/// A type as the parser holds it, written out: a name, a name with arguments, an array or a slice, whose length is
+/// left out.
+fn shown(ty: &crate::Type) -> String {
+    match ty {
+        crate::Type::Name(name, _) => name.clone(),
+        crate::Type::Generic(name, args, _) => {
+            format!("{name}<{}>", args.iter().map(shown).collect::<Vec<_>>().join(", "))
+        }
+        crate::Type::Array(elem, ..) => format!("[{}; ..]", shown(elem)),
+        crate::Type::Slice(elem, _) => format!("[{}]", shown(elem)),
+    }
+}
+
 /// A type is written as Rust writes it, however its source spaced it: a space between words, after
 /// `,` and `;`, after `const` and `mut`, after the `>` of a binder, `for<'a> fn(&'a u8)`, on each
 /// side of a `+` or a `=` that no operator holds and of an arrow, `->`, and none beside the rest, nor
@@ -628,16 +641,6 @@ fn a_macros_arguments_are_written_as_their_source_has_them() {
 /// and as a result.
 #[test]
 fn a_type_that_begins_with_a_binder_is_read_whole() {
-    // A type as the parser holds it, a name or a name with arguments, written out.
-    fn shown(ty: &crate::Type) -> String {
-        match ty {
-            crate::Type::Name(name, _) => name.clone(),
-            crate::Type::Generic(name, args, _) => {
-                format!("{name}<{}>", args.iter().map(shown).collect::<Vec<_>>().join(", "))
-            }
-            other => panic!("{other:?}"),
-        }
-    }
     let src = "pub unsafe extern \"sysv64\" fn k(x: for<'a> fn(&'a u8), y: Option<for<'a> fn(&'a u8)>, \
                z: Option<&dyn for<'a> Fn(&'a u8)>) -> for<'a> fn(&'a u8) {}";
     let module = crate::module(&lexed_with_lifetimes(src), 0).unwrap();
@@ -647,6 +650,105 @@ fn a_type_that_begins_with_a_binder_is_read_whole() {
     // No `'` comes before the first `for`, so the lexer's offset is the source's.
     assert_eq!(f.params[0].ty.span(), Span(src.find("for<").unwrap() as u32));
     assert_eq!(f.ret.as_ref().map(|r| r.ty.as_str()), Some("for<'a> fn(&'a u8)"));
+}
+
+/// A name written raw is the name Rust reads: `r#u64` is `u64`. A type is read so wherever it is written: a
+/// parameter's, a result's, a const's, a static's, a variable's, an array's element, an argument of a type, and
+/// the names of a type read as text, `*const [r#f16; 4]`, at any depth. `text` writes a type as it was written.
+#[test]
+fn a_name_written_raw_is_the_name_rust_reads() {
+    assert_eq!((crate::unraw("r#u64"), crate::unraw("u64"), crate::unraw("r#type")), ("u64", "u64", "type"));
+    let read = |src: &str| crate::read_type(&crate::lex(src).unwrap());
+    for (written, name) in [
+        ("r#u64", "u64"),
+        ("*const r#u8", "*const u8"),
+        ("*const [r#f16; 4]", "*const [f16; 4]"),
+        ("(r#u8, Pair<r#u16, 2>, fn(r#i8) -> r#i16)", "(u8, Pair<u16, 2>, fn(i8) -> i16)"),
+        ("&mut r#str", "&mut str"),
+        ("*const u8", "*const u8"),
+    ] {
+        assert_eq!(read(written), name, "{written}");
+        assert_eq!(crate::text(&crate::lex(written).unwrap()), written, "{written}");
+    }
+    // A block among the arguments of a type holds names too, which `text` writes as the source has them.
+    assert_eq!((read("Arr<{ r#N }>"), read("Arr<{r#N}>")), ("Arr<{ N }>".into(), "Arr<{N}>".into()));
+    let src = r#"
+        const N: r#usize = 4;
+        static S: r#global<[r#u32; 4]>;
+        pub unsafe extern "sysv64" fn k(x: r#u64, ys: [r#f32; 2], p: *const r#str) -> r#u64 {
+            let v: r#ymm;
+            let w: [r#ymm; 2];
+            let n: r#u32 = 3;
+        }
+    "#;
+    let module = parse(src).unwrap();
+    let kinds: Vec<_> = module.items.iter().map(|item| &item.kind).collect();
+    let [crate::ItemKind::Const(c), crate::ItemKind::Static(s), crate::ItemKind::Fn(f)] = kinds[..] else {
+        panic!("a const, a static and a function")
+    };
+    assert_eq!((shown(&c.ty), shown(&s.ty)), ("usize".into(), "global<[u32; ..]>".into()));
+    let params: Vec<String> = f.params.iter().map(|p| shown(&p.ty)).collect();
+    assert_eq!(params, ["u64", "[f32; ..]", "*const str"]);
+    assert_eq!(f.ret.as_ref().map(|r| r.ty.as_str()), Some("u64"));
+    let lets = f.body.as_ref().unwrap().stmts.iter();
+    let lets: Vec<String> = lets
+        .filter_map(|s| match s {
+            crate::Stmt::Let { ty: Some(ty), .. } => Some(shown(ty)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lets, ["ymm", "[ymm; ..]", "u32"]);
+    // A pointer to a `str` written raw is a pointer to a `str`, which has two words.
+    let words = "a pointer to `str` has two words, an address and a length or a table, and a kernel's pointer has one";
+    assert_eq!(crate::pointer(&params[2]), Err(words.into()));
+}
+
+/// A keyword written raw is a name, and no keyword: `read_type` leaves its `r#`, at any depth of a type and for every
+/// keyword Rust lets be written raw, so that no reader of the type takes the name for the keyword. A pointer to
+/// `r#dyn::Foo`, a struct, has one word, where a pointer to `dyn Foo` has two; `r#mut<u8>` is a name with an argument,
+/// written close, where `mut <u8>` is not; `Arr<{r#true}>` holds a name, and not the literal. A word that is no
+/// keyword loses its `r#`, a weak keyword too, and a generic's name is read so as the rest is.
+#[test]
+fn a_keyword_written_raw_stays_a_name_in_a_type() {
+    // The keywords Rust lets be written raw, as the Rust Reference lists them: the strict ones, then the reserved ones.
+    let keywords = [
+        "as", "async", "await", "break", "const", "continue", "dyn", "else", "enum", "extern", "false", "fn", "for",
+        "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "static", "struct",
+        "trait", "true", "type", "unsafe", "use", "where", "while", "abstract", "become", "box", "do", "final", "gen",
+        "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
+    ];
+    let read = |src: &str| crate::read_type(&crate::lex(src).unwrap());
+    for word in keywords {
+        for ty in [
+            format!("r#{word}"),
+            format!("*const r#{word}::Foo"),
+            format!("*mut r#{word}<u8>"),
+            format!("[r#{word}; 2]"),
+            format!("(r#{word}, r#{word}::Foo)"),
+            format!("fn(r#{word}) -> r#{word}"),
+            format!("Arr<{{r#{word}}}>"),
+        ] {
+            assert_eq!(read(&ty), ty, "{ty}");
+        }
+        // A pointer to a type that the word names has one word.
+        for pointer in [format!("*const r#{word}::Foo"), format!("*mut r#{word}<u64>")] {
+            assert_eq!(crate::pointer(&read(&pointer)), Ok(true), "{pointer}");
+        }
+    }
+    let words = |ty: &str| crate::pointer(ty).unwrap_err();
+    assert!(words(&read("*const dyn Foo")).starts_with("a pointer to `dyn Foo` has two words"));
+    assert!(words(&read("*const r#str")).starts_with("a pointer to `str` has two words"));
+    assert!(words(&read("*const [r#mut]")).starts_with("a pointer to `[r#mut]` has two words"));
+    assert!(words(&read("*const (u8, r#str)")).starts_with("a pointer to `(u8, str)` has two words"));
+    for word in ["union", "macro_rules", "raw", "safe", "auto", "default", "u64", "str", "f16", "gpr", "Foo", "dyn_"] {
+        assert_eq!(read(&format!("*const r#{word}::Foo")), format!("*const {word}::Foo"), "{word}");
+    }
+    // The parser holds a name that is a keyword written raw as `read_type` gives it,
+    // in a generic's name as in the rest.
+    let module = parse("static S: r#mut<[r#dyn; 4], r#u32>; static T: r#global<r#true>;").unwrap();
+    let kinds: Vec<_> = module.items.iter().map(|item| &item.kind).collect();
+    let [crate::ItemKind::Static(s), crate::ItemKind::Static(t)] = kinds[..] else { panic!("two statics") };
+    assert_eq!((shown(&s.ty), shown(&t.ty)), ("r#mut<[r#dyn; ..], u32>".into(), "global<r#true>".into()));
 }
 
 /// The `!` of never follows the arrow, a keyword or a lifetime, and is no macro's: the braces after it are the

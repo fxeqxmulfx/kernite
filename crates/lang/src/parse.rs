@@ -6,7 +6,7 @@ use crate::ast::{
     BinOp, Block, Const, Cooperative, Directive, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret,
     Static, Stmt, Type, UnOp,
 };
-use crate::token::{Delim, Span, Tree, text};
+use crate::token::{Delim, Span, Tree, read_type, text, unraw};
 use crate::{Error, nested};
 
 /// A GPU kernel's tuning directives, as PTX has them: each by its name, what it gives, and an
@@ -184,7 +184,7 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Some(Tree::Ident { name, span, .. }) => {
                 self.pos += 1;
-                Ok((name.strip_prefix("r#").unwrap_or(name).to_string(), *span))
+                Ok((unraw(name).to_string(), *span))
             }
             _ => self.error(format!("expected a name, found {}", self.found())),
         }
@@ -504,7 +504,7 @@ impl<'a> Parser<'a> {
                 p.is_ident("where") || p.is_op(";") || body
             })?;
             no_impl(&self.trees[from..self.pos])?;
-            Some(Ret { ty: text(&self.trees[from..self.pos]), span, tokens: from..self.pos })
+            Some(Ret { ty: read_type(&self.trees[from..self.pos]), span, tokens: from..self.pos })
         } else {
             None
         };
@@ -554,6 +554,7 @@ impl<'a> Parser<'a> {
             && matches!(self.peek_at(1), Some(Tree::Punct { ch: '<', .. }))
         {
             nested(open, *span)?;
+            let head = read_type(&self.trees[self.pos..=self.pos]);
             self.pos += 2;
             let mut args = vec![];
             while !self.eat_op(">") {
@@ -563,14 +564,14 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
-            return Ok(Type::Generic(name.strip_prefix("r#").unwrap_or(name).to_string(), args, *span));
+            return Ok(Type::Generic(head, args, *span));
         }
         let (from, span) = (self.pos, self.span());
         self.skip_ty(open, |p| ["=", ";", ","].iter().any(|op| p.is_op(op)))?;
         if from == self.pos {
             return self.error(format!("expected a type, found {}", self.found()));
         }
-        Ok(Type::Name(text(&self.trees[from..self.pos]), span))
+        Ok(Type::Name(read_type(&self.trees[from..self.pos]), span))
     }
 
     /// Goes past the tokens of a type, at level `open` of the type it is in, to the first that `ends` it, or to the
@@ -816,7 +817,7 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Bool(name == "true", *span))
             }
             Tree::Ident { name, span, .. } => {
-                let mut path = vec![name.strip_prefix("r#").unwrap_or(name).to_string()];
+                let mut path = vec![unraw(name).to_string()];
                 while self.is_op("::") && matches!(self.peek_at(2), Some(Tree::Ident { .. })) {
                     self.pos += 2;
                     path.push(self.ident()?.0);

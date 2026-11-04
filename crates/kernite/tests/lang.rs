@@ -126,6 +126,296 @@ fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
     assert!(x86(src, "k").starts_with("# k(gpr, gpr) -> ()\n"), "{src}");
 }
 
+/// `src` with each of `names` written raw, `u64` as `r#u64`, but not where it is a part of an instruction's name,
+/// `ld.global.u32`.
+fn raw(src: &str, names: &[&str]) -> String {
+    let chars: Vec<char> = src.chars().collect();
+    let in_word = |c: char| c.is_alphanumeric() || c == '_';
+    let (mut out, mut at) = (String::new(), 0);
+    while at < chars.len() {
+        let end = (at..chars.len()).find(|&i| !in_word(chars[i])).unwrap_or(chars.len());
+        if end == at {
+            out.push(chars[at]);
+            at += 1;
+            continue;
+        }
+        let word: String = chars[at..end].iter().collect();
+        let dotted = (at > 0 && chars[at - 1] == '.') || chars.get(end) == Some(&'.');
+        out += if names.contains(&word.as_str()) && !dotted { "r#" } else { "" };
+        out += &word;
+        at = end;
+    }
+    out
+}
+
+/// A name written raw is the name Rust reads, so a type written so is the type written plain: a kernel compiles to
+/// the listing, or the PTX, of the same kernel with its types written plain. So it is for a parameter's type and a
+/// result's, a number's, a float's or a pointer's, in a kernel of instances too; for a variable's, alone or in an
+/// array; for a helper's parameter's; and for a const's and a static's.
+#[test]
+fn a_type_written_raw_is_the_type_written_plain() {
+    let x86_names = ["u64", "usize", "u32", "f32", "f64", "u8", "gpr", "ymm", "global"];
+    for (src, kernel) in [
+        (r#"pub unsafe extern "sysv64" fn k(x: u64, n: usize) -> u64 { add(x, n); ret(x); }"#, "k"),
+        (r#"pub unsafe extern "sysv64" fn k(x: u64) -> u32 { add(x, 1); ret(x); }"#, "k"),
+        (r#"pub unsafe extern "sysv64" fn k(a: f32, b: f32) -> f32 { vaddss(a, a, b); ret(a); }"#, "k"),
+        (r#"pub unsafe extern "sysv64" fn k(a: f64, b: f64) -> f64 { vaddsd(a, a, b); ret(a); }"#, "k"),
+        (r#"pub unsafe extern "sysv64" fn k(p: *const u8, q: *mut u64) { mov(qword[q], p); }"#, "k"),
+        (r#"pub unsafe extern "sysv64" fn k(p: *const f32) -> *const f32 { ret(p); }"#, "k"),
+        (
+            "#[instances(1, 2)]\npub unsafe extern \"sysv64\" fn k<const N: u64>(x: u64) -> u64 { add(x, N); ret(x); }",
+            "k::<2>",
+        ),
+        (
+            r#"
+            const N: usize = 4;
+            pub unsafe extern "sysv64" fn k(x: u64) -> u64 {
+                let t: gpr;
+                let v: ymm;
+                let w: [gpr; 2];
+                mov(t, x);
+                mov(w[0], t);
+                mov(w[1], N);
+                vmovups(v, [x]);
+                twice(t);
+                add(x, t);
+                ret(x);
+            }
+            fn twice(x: gpr) { add(x, x); }
+            "#,
+            "k",
+        ),
+        (
+            r#"
+            static S: global<[u32; 4]>;
+            pub unsafe extern "sysv64" fn k() { let at: gpr; lea(at, [S]); }
+            "#,
+            "k",
+        ),
+    ] {
+        let written = raw(src, &x86_names);
+        assert_ne!(written, src);
+        assert_eq!(x86(&written, kernel), x86(src, kernel), "{written}");
+    }
+    let gpu_names = ["u32", "u64", "f32", "f16", "bf16", "pred", "global"];
+    for src in [
+        r#"pub unsafe extern "ptx-kernel" fn g(n: u32, w: u64, x: f32, out: *mut u32) { st.global.u32([out], n); }"#,
+        r#"pub unsafe extern "ptx-kernel" fn g(h: f16, b: bf16, out: *mut f16) { st.global.b16([out], h); }"#,
+        r#"pub unsafe extern "ptx-kernel" fn g(out: *mut bf16, b: bf16) { st.global.b16([out], b); }"#,
+        r#"
+        extern "ptx-func" fn f(a: u64, h: f16) -> u32 { let y: u32; ld.global.u32(y, [a]); ret(y); }
+        pub unsafe extern "ptx-kernel" fn g(p: u64, h: f16) { let r: u32; call(r, f, (p, h)); st.global.u32([p], r); }
+        "#,
+        r#"
+        pub unsafe extern "ptx-kernel" fn g(n: u32, out: *mut u32) {
+            let i: u32;
+            mov.u32(i, tid.x);
+            let p: pred;
+            setp.ge.u32(p, i, n);
+            if p {
+                ret();
+            }
+            let r: [u32; 2];
+            add.u32(r[0], n, i);
+            add.u32(r[1], n, i);
+            st.global.u32([out], r[1]);
+        }
+        "#,
+        r#"
+        static S: global<[u32; 4]>;
+        pub unsafe extern "ptx-kernel" fn g(out: *mut u32) {
+            let at: u64;
+            mov.u64(at, S);
+            red.global.add.u32([at], 1);
+            st.global.u32([out], 1);
+        }
+        "#,
+    ] {
+        let written = raw(src, &gpu_names);
+        assert_ne!(written, src);
+        let module = |src: &str| kernite::ptx_str(src).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(module(&written), module(src), "{written}");
+    }
+}
+
+/// An error that quotes a type written raw quotes it as Rust reads it, `f16` and not `r#f16`, at the place it has
+/// for the type written plain: a parameter's type, a result's, a variable's, and a pointer's, whole, in an x86
+/// kernel, a cooperative one and a GPU kernel.
+#[test]
+fn an_error_quotes_a_type_written_raw_as_rust_reads_it() {
+    let takes = "a kernel takes pointers, 64-bit integers and floats, not `f16`";
+    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `f16`";
+    let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
+    let variable = "x86 variables are `gpr`, `ymm`, `xmm` and stack memory, `local<..>`; not `f16`";
+    let words = "a pointer to `str` has two words, an address and a length or a table, and a kernel's pointer has one";
+    let gpu_takes =
+        "a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, `f32` and `f64`, not `[u32; 2]`";
+    let gpu_nothing = "a GPU kernel returns nothing, not `*const [f32; 2]`: it writes what it works out to memory";
+    let gpu_variable = "PTX variables are `pred`, `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, \
+                        `bf16`, `bf16x2`, `tf32`, `f32` and `f64`, not `f128`";
+    for (plain, name, at, said) in [
+        (r#"unsafe extern "sysv64" fn k(x: f16) {}"#, "f16", "1:32", takes),
+        (r#"unsafe extern "sysv64" fn k() -> f16 {}"#, "f16", "1:34", returns),
+        ("#[cooperative]\nunsafe extern \"sysv64\" fn k() -> u64 {}", "u64", "2:34", nothing),
+        (r#"unsafe extern "sysv64" fn k() { let v: [f16; 2]; }"#, "f16", "1:41", variable),
+        (r#"unsafe extern "sysv64" fn k(p: *const str) {}"#, "str", "1:32", words),
+        (r#"unsafe extern "ptx-kernel" fn k(x: [u32; 2]) {}"#, "u32", "1:36", gpu_takes),
+        (r#"unsafe extern "ptx-kernel" fn k() -> *const [f32; 2] {}"#, "f32", "1:38", gpu_nothing),
+        (r#"unsafe extern "ptx-kernel" fn k() { let v: f128; }"#, "f128", "1:44", gpu_variable),
+    ] {
+        let err = |src: &str| match src.contains("ptx-kernel") {
+            true => kernite::ptx_str(src).unwrap_err(),
+            false => kernite::x86_str(src, "k").unwrap_err(),
+        };
+        let written = raw(plain, &[name]);
+        assert_ne!(written, plain);
+        assert_eq!(err(plain), format!("{at}: {said}"), "{plain}");
+        assert_eq!(err(&written), format!("{at}: {said}"), "{written}");
+    }
+}
+
+/// A keyword written raw is a name in a type: Rust reads `*const r#dyn::Foo`, a pointer to a struct of a module named
+/// `dyn`, and `*const r#dyn<u64>`, a pointer to a generic struct named `dyn`, as pointers of one word, where a pointer
+/// to `dyn Foo` has two. So a kernel that names a type by a keyword written raw compiles to the listing, or the PTX,
+/// of the kernel that names types of the same layout by words that are no keywords, `dyn_::Foo` say, whichever keyword
+/// it is: `dyn`, which makes a pointer two words; `mut` and `const`, which are spaced; `for`, which opens a binder;
+/// `impl`, which a parameter may not have; `true`, which is a literal; and `type`, which no reader asks of.
+#[test]
+fn a_keyword_written_raw_is_a_name_in_a_type() {
+    let x86_kernel = |name: &str| {
+        format!(
+            r#"pub unsafe extern "sysv64" fn k(
+                p: *const {name}::Foo,
+                q: *mut {name}<u64>,
+                r: *const Arr<{{ {name} }}>,
+            ) -> *const {name}::Foo {{
+                ret(p);
+            }}"#
+        )
+    };
+    let gpu_kernel = |name: &str| {
+        format!(
+            r#"pub unsafe extern "ptx-kernel" fn k(p: *mut {name}::Foo, q: *const {name}<u64>, n: u64) {{
+                st.global.u64([p], n);
+            }}"#
+        )
+    };
+    for word in ["dyn", "mut", "const", "for", "impl", "true", "type"] {
+        // The kernel it is compared with names the keyword and a `_`, `dyn_`, which is no keyword.
+        let (raw, no_keyword) = (format!("r#{word}"), format!("{word}_"));
+        assert_eq!(x86(&x86_kernel(&raw), "k"), x86(&x86_kernel(&no_keyword), "k"), "{}", x86_kernel(&raw));
+        assert_eq!(ptx(&gpu_kernel(&raw)), ptx(&gpu_kernel(&no_keyword)), "{}", gpu_kernel(&raw));
+    }
+}
+
+/// A const named by a keyword written raw is found where a type takes it as an argument, as `ALIGN` is:
+/// `shared<[u32; 4], r#type>` is `shared<[u32; 4], 16>`, and so is `shared<[u32; 4], ALIGN>`, whether `ALIGN` is
+/// written raw where it is declared, where it is used, or both.
+#[test]
+fn a_const_named_by_a_keyword_is_an_argument_of_a_type() {
+    let kernel = |declared: &str, align: &str| {
+        format!(
+            "const {declared}: usize = 16;\n\
+             pub unsafe extern \"ptx-kernel\" fn g(out: *mut u32) {{\n\
+                 let tile: shared<[u32; 4], {align}>;\n\
+                 let at: u32;\n\
+                 mov.u32(at, tile);\n\
+                 st.global.u32([out], at);\n\
+             }}"
+        )
+    };
+    let literal = "pub unsafe extern \"ptx-kernel\" fn g(out: *mut u32) { let tile: shared<[u32; 4], 16>; let at: u32; \
+                   mov.u32(at, tile); st.global.u32([out], at); }";
+    for (declared, align) in
+        [("r#type", "r#type"), ("r#ALIGN", "ALIGN"), ("ALIGN", "r#ALIGN"), ("r#ALIGN", "r#ALIGN"), ("ALIGN", "ALIGN")]
+    {
+        assert_eq!(ptx(&kernel(declared, align)), ptx(literal), "{declared}, {align}");
+    }
+}
+
+/// An error that quotes a keyword written raw quotes it as written, `r#dyn::Foo` and `r#mut`: without its `r#` it is
+/// the keyword, a type of another kind, and the error would name it. A name that is no keyword is quoted as Rust
+/// reads it, `str` for `r#str`, and a pointer to it has two words as one to `str` has.
+#[test]
+fn an_error_quotes_a_keyword_written_raw_as_written() {
+    let takes = |ty: &str| format!("a kernel takes pointers, 64-bit integers and floats, not `{ty}`");
+    let returns = |ty: &str| format!("a kernel returns a float, an integer or a pointer, or never, `!`; not `{ty}`");
+    let variable =
+        |ty: &str| format!("x86 variables are `gpr`, `ymm`, `xmm` and stack memory, `local<..>`; not `{ty}`");
+    let words = |ty: &str| {
+        format!("a pointer to `{ty}` has two words, an address and a length or a table, and a kernel's pointer has one")
+    };
+    let gpu_takes = |ty: &str| {
+        format!("a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, `f32` and `f64`, not `{ty}`")
+    };
+    let gpu_variable = |ty: &str| {
+        format!(
+            "PTX variables are `pred`, `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, \
+             `bf16x2`, `tf32`, `f32` and `f64`, not `{ty}`"
+        )
+    };
+    let gpu_nothing =
+        |ty: &str| format!("a GPU kernel returns nothing, not `{ty}`: it writes what it works out to memory");
+    for (src, at, said) in [
+        (r#"unsafe extern "sysv64" fn k(x: r#dyn::Foo) {}"#, "1:32", takes("r#dyn::Foo")),
+        (r#"unsafe extern "sysv64" fn k(x: r#mut) {}"#, "1:32", takes("r#mut")),
+        (r#"unsafe extern "sysv64" fn k(x: r#mut<u8>) {}"#, "1:32", takes("r#mut<u8>")),
+        (r#"unsafe extern "sysv64" fn k(x: Arr<{ r#true }>) {}"#, "1:32", takes("Arr<{ r#true }>")),
+        (r#"unsafe extern "sysv64" fn k(x: fn(r#mut) -> r#dyn) {}"#, "1:32", takes("fn(r#mut) -> r#dyn")),
+        (r#"unsafe extern "sysv64" fn k(x: *r#const u64) {}"#, "1:32", takes("*r#const u64")),
+        (r#"unsafe extern "sysv64" fn k() -> r#mut {}"#, "1:34", returns("r#mut")),
+        (r#"unsafe extern "sysv64" fn k() { let v: [r#mut; 2]; }"#, "1:41", variable("r#mut")),
+        (r#"unsafe extern "sysv64" fn k(p: *const [r#mut]) {}"#, "1:32", words("[r#mut]")),
+        (r#"unsafe extern "sysv64" fn k(p: *const dyn r#mut) {}"#, "1:32", words("dyn r#mut")),
+        (r#"unsafe extern "sysv64" fn k(p: *const r#str) {}"#, "1:32", words("str")),
+        (r#"unsafe extern "sysv64" fn k(p: *const (u8, r#str)) {}"#, "1:32", words("(u8, str)")),
+        (r#"unsafe extern "ptx-kernel" fn k(x: r#dyn::Foo) {}"#, "1:36", gpu_takes("r#dyn::Foo")),
+        (r#"unsafe extern "ptx-kernel" fn k(x: r#mut) {}"#, "1:36", gpu_takes("r#mut")),
+        (r#"unsafe extern "ptx-kernel" fn k() -> *const r#mut {}"#, "1:38", gpu_nothing("*const r#mut")),
+        (r#"unsafe extern "ptx-kernel" fn k() { let v: r#mut<u8>; }"#, "1:44", gpu_variable("r#mut<u8>")),
+        (r#"unsafe extern "ptx-kernel" fn k(p: *const [r#mut]) {}"#, "1:36", words("[r#mut]")),
+        (r#"unsafe extern "ptx-kernel" fn k(p: *const r#str) {}"#, "1:36", words("str")),
+    ] {
+        let err = match src.contains("ptx-kernel") {
+            true => kernite::ptx_str(src).unwrap_err(),
+            false => kernite::x86_str(src, "k").unwrap_err(),
+        };
+        assert_eq!(err, format!("{at}: {said}"), "{src}");
+    }
+}
+
+/// A name written raw is the name in a value's place as in a type's: `r#x` and `x` are one value, whether a
+/// kernel's name, a parameter, a variable, a const, a compile-time argument or a helper, and whether the name is
+/// written raw where it is declared, where it is used, or both.
+#[test]
+fn a_value_named_raw_is_the_value_named_plain() {
+    let src = r#"
+        const STEP: u64 = 3;
+        #[instances(2)]
+        pub unsafe extern "sysv64" fn k<const N: u64>(x: u64) -> u64 {
+            let t: gpr;
+            mov(t, x);
+            bump(t);
+            add(x, t);
+            add(x, STEP);
+            add(x, N);
+            ret(x);
+        }
+        fn bump(g: gpr) { add(g, 1); }
+    "#;
+    let written = raw(src, &["STEP", "N", "x", "t", "g", "k", "bump"]);
+    assert_ne!(written, src);
+    assert_eq!(x86(&written, "k::<2>"), x86(src, "k::<2>"), "{written}");
+    // A name raw where it is declared and plain where it is used, and the other way about, in one kernel.
+    let plain = r#"pub unsafe extern "sysv64" fn k(x: u64) -> u64 { add(x, 1); ret(x); }"#;
+    for mixed in [
+        r#"pub unsafe extern "sysv64" fn k(r#x: u64) -> u64 { add(x, 1); ret(r#x); }"#,
+        r#"pub unsafe extern "sysv64" fn k(x: u64) -> u64 { add(r#x, 1); ret(x); }"#,
+    ] {
+        assert_eq!(x86(mixed, "k"), x86(plain, "k"), "{mixed}");
+    }
+}
+
 #[test]
 fn a_generic_is_a_value_and_a_type_is_refused_at_its_token() {
     // `<T>` is a generic that is a type, and so is an `impl` in a parameter's type or the result's: in a

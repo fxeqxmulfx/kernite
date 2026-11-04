@@ -87,6 +87,42 @@ impl Tree {
     }
 }
 
+/// The name Rust reads in `ident`, an identifier as written: `u64` in `r#u64`. A keyword is asked of `ident` as
+/// written, for `r#let` is a name and not `let`; any other name, of what this gives.
+pub fn unraw(ident: &str) -> &str {
+    ident.strip_prefix("r#").unwrap_or(ident)
+}
+
+/// The keywords Rust lets be written raw, the strict and the reserved ones of every edition: each is a name only if it
+/// is written raw. The weak ones, `union` and `macro_rules` say, are names as they are.
+const KEYWORDS: &[&str] = &[
+    "as", "async", "await", "break", "const", "continue", "dyn", "else", "enum", "extern", "false", "fn", "for", "if",
+    "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "static", "struct", "trait",
+    "true", "type", "unsafe", "use", "where", "while", // strict
+    "abstract", "become", "box", "do", "final", "gen", "macro", "override", "priv", "try", "typeof", "unsized",
+    "virtual", "yield", // reserved
+];
+
+/// `trees` as the language reads a type: [`text`], but with each name written raw at any depth as the name Rust
+/// reads, `[r#f16; 4]` as `[f16; 4]`. A keyword written raw is a name too, and stays as written, `r#dyn::Foo`: the
+/// readers of the text ask it of the keyword, [`pointer()`] of `dyn` and [`text`] of `const`, `mut` and `for`, and a
+/// name that lost its `r#` would be taken for the keyword. So it is for the 48 keywords Rust lets be written raw, the
+/// strict and the reserved ones. A weak keyword, `union` say, is a name as it is, and loses its `r#` as any name does.
+pub fn read_type(trees: &[Tree]) -> String {
+    fn plain(trees: &mut [Tree]) {
+        for tree in trees {
+            match tree {
+                Tree::Ident { name, .. } if !KEYWORDS.contains(&unraw(name)) => *name = unraw(name).to_string(),
+                Tree::Group { trees, .. } => plain(trees),
+                _ => {}
+            }
+        }
+    }
+    let mut trees = trees.to_vec();
+    plain(&mut trees);
+    text(&trees)
+}
+
 /// `trees` as Rust writes a type in a message.
 ///
 /// The type's own tokens are spaced as the printer of rustc spaces them, whatever the source has:
@@ -226,7 +262,7 @@ fn spaced(trees: &[Tree], i: usize) -> bool {
         }
 }
 
-/// Whether `ty`, a type as [`text`] writes it, is a pointer, `*const T` or `*mut T`; or why it is
+/// Whether `ty`, a type as [`read_type`] gives it, is a pointer, `*const T` or `*mut T`; or why it is
 /// not one a machine passes in a register: a pointer to a type with no size is two words, and one
 /// to a type kernite cannot read, as `&'static str` is, is refused in the lexer's words. A type that
 /// has no size but is named, as `CStr` is, is not told from one that has.
