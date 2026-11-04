@@ -1,5 +1,5 @@
 //! Kernels that give back a pointer to a type with a `_` in it that is no placeholder: a pattern in a block,
-//! `[u8; { let _ = 1; 3 }]` or `[Arr<{ let _ = 1; 3 }>; 1]`; an argument of a macro, `[u8; len!(_)]` or `byte!(_)`,
+//! `[u8; { let _ = 1; 3 }]` or `Arr<{ let _ = 1; 3 }>`; an argument of a macro, `[u8; len!(_)]` or `byte!(_)`,
 //! which drops it; a pattern in an array's length that is no block, `[u8; if let Some(_) = Some(1) { 3 } else
 //! { 4 }]`; and the name of a function pointer's parameter, `fn(_: u8)`. Rust takes each in a signature, and
 //! builds the crate without a word, under `#![deny(warnings)]`. The test calls each x86 kernel, plain and of
@@ -61,15 +61,14 @@ pub mod cpu {
         ret(p);
     }
 
-    // The type is inside an array in these two kernels, as kernite-lang ends a result at its first `{`: see #111.
-    pub unsafe extern "sysv64" fn const_argument(p: *const u8) -> *const [crate::Arr<{ let _ = 1; 3 }>; 1] {
+    pub unsafe extern "sysv64" fn const_argument(p: *const u8) -> *const crate::Arr<{ let _ = 1; 3 }> {
         ret(p);
     }
 
     #[instances(1, 2)]
     pub unsafe extern "sysv64" fn const_argument_tiles<const N: u64>(
         p: *const u8,
-    ) -> *const [crate::Arr<{ let _ = 1; 3 }>; 1] {
+    ) -> *const crate::Arr<{ let _ = 1; 3 }> {
         add(p, N);
         ret(p);
     }

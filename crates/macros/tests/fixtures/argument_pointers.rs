@@ -1,5 +1,5 @@
 //! Kernels of compile-time arguments whose types name one: a pointer to an array of the length an
-//! argument gives, in braces as well, a type of the crate's that takes it as its own argument, in a
+//! argument gives, a type of the crate's that takes it as its own argument, each in braces as well, in a
 //! parameter and in a result, with one argument, two and a `bool`, in a kernel that is cooperative.
 //! There are kernels that call an instance of one argument, of two, of a `bool`, of a negative
 //! number and of the caller's own, and one whose code holds a constant. A type in a kernel means in
@@ -57,6 +57,15 @@ pub mod cpu {
     #[instances(2, 3)]
     pub unsafe extern "sysv64" fn braced<const N: usize>(p: *mut [u8; { N }]) {
         mov(byte[p], N);
+    }
+
+    /// Writes its length through `p` and gives `p` back: the pointer's type names the argument in braces, in the
+    /// parameter and in the result.
+    #[allow(unused_braces)]
+    #[instances(2, 3)]
+    pub unsafe extern "sysv64" fn back_braced<const N: usize>(p: *mut Pair<{ N }>) -> *mut Pair<{ N }> {
+        mov(byte[p], N);
+        ret(p);
     }
 
     /// Writes both its arguments: the width of a row, and how many rows there are.
@@ -181,6 +190,16 @@ fn an_argument_in_braces() {
         cpu::braced::<3>(&mut three);
     }
     assert_eq!((two[0], three[0]), (2, 3));
+}
+
+#[test]
+fn a_result_that_names_the_argument_in_braces() {
+    let (mut two, mut three) = (Pair([0u8; 2]), Pair([0u8; 3]));
+    unsafe {
+        assert_eq!(cpu::back_braced::<2>(&mut two), &raw mut two);
+        assert_eq!(cpu::back_braced::<3>(&mut three), &raw mut three);
+    }
+    assert_eq!((two.0[0], three.0[0]), (2, 3));
 }
 
 #[test]

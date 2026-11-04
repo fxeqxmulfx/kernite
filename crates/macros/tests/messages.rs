@@ -1260,15 +1260,15 @@ fn a_parameters_type_means_what_it_means_where_the_kernel_is_written() {
 
 /// A type in a kernel's parameters or return may name the kernel's compile-time arguments, as in any
 /// generic function, in each instance of an x86 kernel: a pointer to an array of the length an
-/// argument gives, alone or in braces, a result, a type of the crate's that takes it, with one
-/// argument, two and a `bool`, in a kernel that is cooperative, and in one that calls an instance,
-/// of any arguments. A GPU kernel's launcher takes it as before. Rust builds the crate without a
-/// word, and the tests the fixture holds run each x86 kernel, which writes through its pointer. So
-/// does its doc test, from another crate.
+/// argument gives, alone or in braces, a result, in braces as well, a type of the crate's that takes
+/// it, with one argument, two and a `bool`, in a kernel that is cooperative, and in one that calls an
+/// instance, of any arguments. A GPU kernel's launcher takes it as before. Rust builds the crate
+/// without a word, and the tests the fixture holds run each x86 kernel, which writes through its
+/// pointer. So does its doc test, from another crate.
 #[test]
 fn a_type_in_a_kernel_may_name_its_compile_time_arguments() {
     let printed = runs_quietly(&["test"], "argument_pointers");
-    for passed in ["test result: ok. 9 passed", "test result: ok. 1 passed"] {
+    for passed in ["test result: ok. 10 passed", "test result: ok. 1 passed"] {
         assert!(
             printed.contains(passed),
             "fixtures/argument_pointers.rs ran its tests and its doc test, and printed:\n{printed}"
@@ -1714,6 +1714,50 @@ fn a_result_with_an_underscore_that_is_no_placeholder_is_a_kernel_that_runs() {
     assert!(
         printed.contains("test result: ok. 1 passed"),
         "fixtures/not_placeholder.rs ran its test, and printed:\n{printed}"
+    );
+}
+
+/// A result whose type holds a block among its arguments, `Arr<{ 3 }>`, is read whole as a parameter's type is: the
+/// braces are a const argument, no body. Rust builds the crate and lints each pair of braces as it lints any, at the
+/// braces, once, in a kernel that is plain, of compile-time arguments, whose block stands beside another argument or
+/// in a type nested in another, and in a parameter and inside an array, which kernite read whole before. kernite says
+/// nothing, and the tests the fixture holds call each x86 kernel: each that gives back a pointer gives back the one
+/// it is given, moved by its argument if it has one, and the one that takes a pointer writes a byte through it.
+#[test]
+fn a_result_whose_type_holds_a_block_is_a_kernel_and_rust_lints_the_braces_alone() {
+    let out = cargo_out(&["test", "--lib"], &written("block_result"));
+    let (said, printed) = (String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
+    assert!(out.status.success(), "fixtures/block_result.rs: its tests failed:\n{said}\n{printed}");
+    assert!(printed.contains("test result: ok. 2 passed"), "fixtures/block_result.rs ran no tests:\n{printed}");
+    let braces = "unnecessary braces around const expression";
+    let at = ["20:76", "25:90", "30:82", "34:89", "38:64", "42:77"];
+    assert_eq!(
+        said.lines().collect::<Vec<_>>(),
+        at.map(|at| format!("src/lib.rs:{at}: warning: {braces}")),
+        "fixtures/block_result.rs"
+    );
+}
+
+/// A kernel with a result that none of its kind may have, a cooperative kernel or a GPU kernel, which give back
+/// nothing, plain or of compile-time arguments, or an x86 kernel whose result is no number or pointer, is refused at
+/// the result when its type holds a block, as it is when it holds none, in the words of its kind.
+#[test]
+fn a_result_its_kind_may_not_have_is_refused_at_the_result_when_its_type_holds_a_block() {
+    let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
+    let gpu = "a GPU kernel returns nothing, not `*const crate::Arr<{3}>`: it writes what it works out to memory";
+    refuses(
+        "block_result_refused",
+        &[
+            &format!("src/lib.rs:17:64: error: {nothing}"),
+            &format!("src/lib.rs:23:84: error: in `cooperative_tiles::<1>`: {nothing}"),
+            &format!("src/lib.rs:23:84: error: in `cooperative_tiles::<2>`: {nothing}"),
+            "src/lib.rs:28:59: error: a kernel returns a float, an integer or a pointer, or never, `!`; not \
+             `crate::Arr<{3}>`",
+            &format!("src/lib.rs:36:62: error: {gpu}"),
+            &format!("src/lib.rs:41:76: error: in `tiles::<1>`: {gpu}"),
+            &format!("src/lib.rs:41:76: error: in `tiles::<2>`: {gpu}"),
+            "error: could not compile `block_result_refused` (lib) due to 7 previous errors",
+        ],
     );
 }
 
