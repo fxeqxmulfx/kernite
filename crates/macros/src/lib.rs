@@ -44,7 +44,18 @@
 //!   it declares: `static COUNTS: global<[u32; 16]>;` in global memory, or
 //!   `static WEIGHTS: constant<[f32; 4]> = [1.0, 0.5, 0.25, 2.0];` in constant memory, which
 //!   the kernels only read. It holds what it says until something writes it, or zeros, and
-//!   keeps what is written from one call or launch to the next. It is its kernels' memory:
+//!   keeps what is written from one call or launch to the next. One that does not compile is an
+//!   error where the trouble is, and a static stands for it in the code that uses it. If only
+//!   what it holds is wrong, it stands as a static of its type, holding zeros, and the code that
+//!   uses it is read as it is for one that compiles: it need not say the type of the elements, and
+//!   a use that the type does not fit is Rust's error, beside kernite's. If its type or its name
+//!   is wrong, it stands as one whose elements are of any type, and the code that uses it says
+//!   the type of the elements, or Rust asks for it, beside kernite's error. kernite says the first
+//!   error it finds, and reads what a static holds before the machine reads its name and its type.
+//!   So its error can be at what the static holds while the machine refuses the type or the name
+//!   too, as for `static EMPTY: global<[u32; 0]> = [nope];`: that static stands as one whose
+//!   elements are of any type as well, and Rust asks for the type of a use that says none, beside
+//!   kernite's error. It is its kernels' memory:
 //!   - In a module of GPU kernels it is on the GPU, declared once in `PTX`. `Kernels` has a
 //!     method of its name that gives it there, a `kernite_cuda::Global` of the type of Rust's its
 //!     elements are read as, `u32` for a `b32`, for the host to read and write:

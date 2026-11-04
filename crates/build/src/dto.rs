@@ -14,6 +14,15 @@ pub struct Compiled<T> {
     pub mentions: Vec<Mention>,
 }
 
+/// A static that does not compile: why not, and what stands for it in the code that names it.
+#[derive(Debug)]
+pub struct Failed<T> {
+    /// Why it does not compile, where it can be mended.
+    pub error: Error,
+    /// The static as its type has it, holding zeros, if only what it holds is wrong; else none.
+    pub stub: Option<T>,
+}
+
 /// A kernel's code as `naked_asm!` takes it, for Rust to call in the process. Constant `i`'s
 /// address reads `{ci}` in `code`, function `i`'s `{fi}`, and static `NAME`'s `{NAME}`: the
 /// operands of `naked_asm!` that name them.
@@ -106,11 +115,11 @@ pub enum ItemOut {
     /// A const given, Rust's where its module is.
     Given,
     /// A static of the process's memory, as Rust lays it out, and where it named the module's items;
-    /// or why it is none.
-    HostStatic(Result<Compiled<HostStatic>, Error>),
+    /// or why it is none, and what stands for it.
+    HostStatic(Result<Compiled<HostStatic>, Failed<HostStatic>>),
     /// A static of the GPU's memory, as the host reads it, and where it named the module's items; or
-    /// why it is none. The module the GPU loads has it.
-    DeviceStatic(Result<Compiled<DeviceStatic>, Error>),
+    /// why it is none, and what stands for it. The module the GPU loads has it.
+    DeviceStatic(Result<Compiled<DeviceStatic>, Failed<DeviceStatic>>),
     /// A helper, and what is wrong with it whether it is called or not: its body, its
     /// `#[instances(..)]`, then its attributes, `#[cooperative]` and the directives.
     Helper(Vec<Error>),

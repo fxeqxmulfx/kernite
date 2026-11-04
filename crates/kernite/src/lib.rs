@@ -42,9 +42,9 @@
 //! ```
 
 pub use kernite_build::{
-    Abi, Assembly, Call, Compiled, ConstItem, DeviceFnOut, DeviceOut, DeviceStatic, Given, HostStatic, ItemOut, Kept,
-    Launcher, ModuleOut, Naked, NativeInstance, NativeOut, Owner, When, abi, consts, cooperative, function, instance,
-    owner,
+    Abi, Assembly, Call, Compiled, ConstItem, DeviceFnOut, DeviceOut, DeviceStatic, Failed, Given, HostStatic, ItemOut,
+    Kept, Launcher, ModuleOut, Naked, NativeInstance, NativeOut, Owner, When, abi, consts, cooperative, function,
+    instance, owner,
 };
 pub use kernite_lang as lang;
 

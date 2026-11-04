@@ -4,7 +4,7 @@
 use proc_macro::{Delimiter, Group, Ident, Span, TokenStream, TokenTree};
 
 use kernite::lang::{self, Fn, Value};
-use kernite::{DeviceStatic, Launcher};
+use kernite::{Compiled, DeviceStatic, Failed, Launcher};
 
 use crate::cond::Cond;
 use crate::rust::{
@@ -24,6 +24,9 @@ pub(crate) const HOLE: &str = "\0";
 /// none, and its index among the names the driver is asked for, as an expression of Rust.
 type Launched = (Vec<Value>, String);
 
+/// A static of the GPU's as kernite compiled it; or why it is none, and what stands for it.
+pub(crate) type Laid = Result<Compiled<DeviceStatic>, Failed<DeviceStatic>>;
+
 /// `PTX`, the module the GPU kernels are, and `Kernels`, which loads it on a GPU and has a
 /// method to launch each kernel by its name: of each instance, for a kernel of compile-time
 /// arguments; one that never runs for a kernel that did not compile, a [`Launcher::Never`], each
@@ -41,7 +44,7 @@ type Launched = (Vec<Value>, String);
 pub(crate) fn gpu(
     launchers: &[(&Fn, &Launcher)],
     symbols: &[(Cond, &str)],
-    memory: &[(&lang::Static, Option<&DeviceStatic>, Cond)],
+    memory: &[(&lang::Static, &Laid, Cond)],
     ptx: &[(Cond, &str)],
     top: &[TokenTree],
     at: &dyn std::ops::Fn(lang::Span) -> Span,
@@ -58,7 +61,8 @@ pub(crate) fn gpu(
         return out;
     }
     // The module's variables: the statics that compiled, in order.
-    let variables: Vec<(&Cond, &DeviceStatic)> = memory.iter().filter_map(|(_, m, c)| m.map(|m| (c, m))).collect();
+    let variables: Vec<(&Cond, &DeviceStatic)> =
+        memory.iter().filter_map(|(_, m, c)| m.as_ref().ok().map(|m| (c, &m.code))).collect();
     let mut out = parse(
         "/// The module's GPU kernels, functions and statics that `cfg` keeps, in PTX, for the CUDA\n\
          /// driver to compile for the GPU it finds. Each is named as C++ names it in the\n\
@@ -114,20 +118,21 @@ pub(crate) fn gpu(
         }
         methods.extend(blocks(f, launched.as_deref(), top));
     }
-    for (k, (s, made, _)) in memory.iter().enumerate() {
+    for (k, (s, laid, _)) in memory.iter().enumerate() {
         // Its index among the variables there are, those of the statics that compiled.
-        let i = Cond::count(memory[..k].iter().filter(|(_, m, _)| m.is_some()).map(|(.., c)| c));
-        methods.extend(accessor(s, made.map(|m| (m, i)), top));
+        let i = Cond::count(memory[..k].iter().filter(|(_, m, _)| m.is_ok()).map(|(.., c)| c));
+        methods.extend(accessor(s, laid, i, top));
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, methods))]);
     out.extend(errors);
     out
 }
 
-/// The method that gives static `s`'s memory on the GPU, `made`, by its index among the
+/// The method that gives static `s`'s memory on the GPU, `laid`, by its index `i` among the
 /// module's variables, an expression, as the `kernite_cuda::Global` of the type of Rust's its
-/// elements are read as; or one that never runs, for a static that did not compile.
-fn accessor(s: &lang::Static, made: Option<(&DeviceStatic, String)>, top: &[TokenTree]) -> TokenStream {
+/// elements are read as; or one that never runs, for a static that did not compile: of the type
+/// its elements are read as, if only what the static holds is wrong, and of any type if not.
+fn accessor(s: &lang::Static, laid: &Laid, i: String, top: &[TokenTree]) -> TokenStream {
     let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
     out.extend(top[s.vis.clone()].iter().cloned());
     out.extend(parse("fn"));
@@ -136,14 +141,13 @@ fn accessor(s: &lang::Static, made: Option<(&DeviceStatic, String)>, top: &[Toke
     let mut name = top[s.vis.end + 1].clone();
     name.set_span(name.span().resolved_at(site()));
     out.extend([name]);
-    out.extend(parse(&match made {
-        Some((m, i)) => {
-            let ty = primitive(&m.host);
-            format!("(&self) -> ::kernite_cuda::Global<'_, {ty}> {{ self.module.global({i}) }}")
-        }
-        None => {
-            "<T: ::kernite_cuda::Plain>(&self) -> ::kernite_cuda::Global<'_, T> { ::core::unreachable!() }".to_string()
-        }
+    let (read, body) = match laid {
+        Ok(m) => (Some(&m.code), format!("self.module.global({i})")),
+        Err(failed) => (failed.stub.as_ref(), "::core::unreachable!()".to_string()),
+    };
+    out.extend(parse(&match read {
+        Some(m) => format!("(&self) -> ::kernite_cuda::Global<'_, {}> {{ {body} }}", primitive(&m.host)),
+        None => format!("<T: ::kernite_cuda::Plain>(&self) -> ::kernite_cuda::Global<'_, T> {{ {body} }}"),
     }));
     out
 }

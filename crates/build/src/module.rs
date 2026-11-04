@@ -3,13 +3,14 @@
 
 use std::cell::LazyCell;
 
-use kernite_lang::{Error, Item, ItemKind, Mention, Module};
+use kernite_lang::{Error, Item, ItemKind, Mention, Module, Static};
 
 use crate::classify::{attributes, helper, trusted};
+use crate::function::stub;
 use crate::present::{Refusal, said};
 use crate::{
-    Abi, Call, Compiled, Device, DeviceFnOut, DeviceOut, Given, ItemOut, Launcher, ModuleOut, Naked, Native,
-    NativeInstance, NativeOut, Owner, compile, instance, owner, prepare,
+    Abi, Backend, Call, Compiled, Device, DeviceFnOut, DeviceOut, Failed, Given, ItemOut, Launcher, ModuleOut, Naked,
+    Native, NativeInstance, NativeOut, Owner, compile, instance, owner, prepare,
 };
 
 /// `module`, given the consts `given` says, its kernels compiled: each function the process runs
@@ -50,13 +51,9 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
                 items.push(ItemOut::Rust);
                 continue;
             }
-            ItemKind::Static(_) if process => {
+            ItemKind::Static(s) if process => {
                 let laid = host.next().expect("each static is laid out or refused");
-                items.push(ItemOut::HostStatic(
-                    laid.as_ref()
-                        .map(|s| Compiled { code: native.host_static(&s.code), mentions: s.mentions.clone() })
-                        .map_err(Clone::clone),
-                ));
+                items.push(ItemOut::HostStatic(static_out(m, s, native, laid, |s| native.host_static(s))));
                 continue;
             }
             ItemKind::Static(s) => {
@@ -65,11 +62,7 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
                 if laid.is_ok() {
                     static_items.push(items.len());
                 }
-                items.push(ItemOut::DeviceStatic(
-                    laid.as_ref()
-                        .map(|s| Compiled { code: device.device_static(&s.code), mentions: s.mentions.clone() })
-                        .map_err(Clone::clone),
-                ));
+                items.push(ItemOut::DeviceStatic(static_out(m, s, device, laid, |s| device.device_static(s))));
                 continue;
             }
             ItemKind::Fn(f) => f,
@@ -156,6 +149,21 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
     let loaded =
         first.map(|at| DeviceOut { assembly: device.module(&codes, &d.made), at, symbols, code_items, static_items });
     ModuleOut { module, given: twice, owner: whose.err(), items, device: loaded }
+}
+
+/// Static `s` of `module` as an item of it comes out: `laid`, as `backend` laid it out, its memory
+/// as `data` has it; or why it is none, and what stands for it.
+fn static_out<B: Backend, T>(
+    module: &Module,
+    s: &Static,
+    backend: &B,
+    laid: &Result<Compiled<B::Static>, Error>,
+    data: impl Fn(&B::Static) -> T,
+) -> Result<Compiled<T>, Failed<T>> {
+    match laid {
+        Ok(c) => Ok(Compiled { code: data(&c.code), mentions: c.mentions.clone() }),
+        Err(error) => Err(Failed { error: error.clone(), stub: stub(module, s, backend).map(|s| data(&s)) }),
+    }
 }
 
 /// What an item of a module of consts is to the modules of kernels that take its consts.

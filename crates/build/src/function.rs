@@ -1,7 +1,7 @@
 //! The use cases for a function of a module, whatever machine compiles it: the module's
 //! statics laid out, what every kernel is told, and an instance compiled.
 
-use kernite_lang::{Error, Expr, Fn, ItemKind, Module, Value};
+use kernite_lang::{Error, Expr, Fn, ItemKind, Module, Static, Value};
 
 use crate::classify::attributes;
 use crate::present::within;
@@ -57,6 +57,14 @@ pub fn prepare<B: Backend>(module: &Module, backend: &B) -> Prepared<B> {
         }
     }
     Prepared { statics, made, callees }
+}
+
+/// What stands for `s`, a static of `module` that `backend` does not lay out, in the code that names
+/// it, beside the error that says why: `s` as its type has it, holding zeros, if the language works
+/// its type out and `backend` takes it and its name, so that only what it holds is wrong; else none.
+pub(crate) fn stub<B: Backend>(module: &Module, s: &Static, backend: &B) -> Option<B::Static> {
+    let memory = kernite_lang::memory(module, &Static { value: None, ..s.clone() }).ok()?;
+    backend.lay_out(&s.name, &memory).ok()
 }
 
 impl<B: Backend> Prepared<B> {

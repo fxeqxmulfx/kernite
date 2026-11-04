@@ -202,8 +202,10 @@ alignments! {
     4096 Z4096,
 }
 
-/// What stands for a static that did not compile, beside the error, so that the code that uses
-/// it is no error as well: each of [`Global`]'s methods, which never runs.
+/// What stands for a static that did not compile, beside the error, when its type or its name is
+/// wrong: each of [`Global`]'s methods, which never runs, and the type of its elements left to the
+/// code that uses it, which says it, or Rust asks for it, beside kernite's error. A static whose
+/// value alone is wrong stands as a [`Global`] of its type, holding zeros.
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct Stub;

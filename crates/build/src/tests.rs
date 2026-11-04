@@ -436,6 +436,70 @@ fn a_static_that_does_not_lay_out_is_placed_where_it_can_be_mended() {
     );
 }
 
+/// A static that does not compile has beside its error what stands for it in the code that names it:
+/// itself as its type has it, holding zeros, if the language works its type out and the machine takes
+/// its name and its type, whatever is wrong with what it holds. A name the machine refuses has none,
+/// for it refuses the name before it reads the type, nor has a type the machine does not take or the
+/// language cannot work out. The language reads what a static holds before the machine reads its name
+/// and its type, so the error can be at what it holds while the machine refuses the name or the type
+/// too: `taken_v` and `U` have none. The process's statics and the GPU's alike.
+#[test]
+fn a_static_whose_value_alone_is_wrong_stands_as_its_type_has_it() {
+    let statics = "static taken_x: global<u32>;\n\
+                   static Y: constant<u32>;\n\
+                   static Z: global<u32> = 13;\n\
+                   static V: global<[u32; 2]> = nope;\n\
+                   static W: global<[u32; M]>;\n\
+                   static taken_v: global<u32> = nope;\n\
+                   static U: constant<u32> = nope;\n";
+    // A module of statics alone is the GPU's.
+    let device = |symbol: &str, held: &str| DeviceStatic {
+        symbol: symbol.into(),
+        ty: format!("global<{held}>"),
+        host: held.into(),
+    };
+    let stubs: Vec<_> = echoed(statics)
+        .items
+        .into_iter()
+        .map(|item| match item {
+            ItemOut::DeviceStatic(Err(failed)) => (failed.error.at(statics), failed.stub),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let [taken, unread, refused, unknown, unworked, taken_unknown, unread_unknown] = &stubs[..] else {
+        panic!("{stubs:?}")
+    };
+    assert_eq!(taken, &("1:8: `taken_x` is taken".to_string(), None));
+    assert_eq!(unread, &("2:11: Echo lays out `global<..>` alone, not `constant<u32>`".to_string(), None));
+    assert_eq!(refused, &("3:25: Echo holds no 13".to_string(), Some(device("Z", "u32"))));
+    assert_eq!(unknown, &("4:30: `nope` is not defined".to_string(), Some(device("V", "[u32; 2]"))));
+    assert_eq!(unworked, &("5:24: `M` is not defined".to_string(), None));
+    assert_eq!(taken_unknown, &("6:31: `nope` is not defined".to_string(), None));
+    assert_eq!(unread_unknown, &("7:27: `nope` is not defined".to_string(), None));
+    // With a kernel of the process's, they are the process's.
+    let host = |held: &str| HostStatic { elem: held.into(), size: 0, len: 1, align: 1, init: vec![] };
+    let src = format!("{statics}unsafe extern \"sysv64\" fn k(x: u64) {{ ret(x); }}");
+    let stubs: Vec<_> = echoed(&src)
+        .items
+        .into_iter()
+        .filter_map(|item| match item {
+            ItemOut::HostStatic(Err(failed)) => Some((failed.error.at(&src), failed.stub)),
+            ItemOut::Native(_) => None,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let [taken, unread, refused, unknown, unworked, taken_unknown, unread_unknown] = &stubs[..] else {
+        panic!("{stubs:?}")
+    };
+    assert_eq!(taken, &("1:8: `taken_x` is taken".to_string(), None));
+    assert_eq!(unread, &("2:11: Echo lays out `global<..>` alone, not `constant<u32>`".to_string(), None));
+    assert_eq!(refused, &("3:25: Echo holds no 13".to_string(), Some(host("u32"))));
+    assert_eq!(unknown, &("4:30: `nope` is not defined".to_string(), Some(host("[u32; 2]"))));
+    assert_eq!(unworked, &("5:24: `M` is not defined".to_string(), None));
+    assert_eq!(taken_unknown, &("6:31: `nope` is not defined".to_string(), None));
+    assert_eq!(unread_unknown, &("7:27: `nope` is not defined".to_string(), None));
+}
+
 /// A kernel is told whether it is cooperative, each static laid out, and each instance of each
 /// function the machine lets it call, each in the module's order, before its body is written. A
 /// function whose instances are wrong has none. It has where it named the module's items.
@@ -672,7 +736,7 @@ fn a_module_s_items_come_out_in_order() {
         panic!("{:?}", out.items);
     };
     assert_eq!(a.code, HostStatic { elem: "[u32; 4]".into(), size: 0, len: 1, align: 1, init: vec![] });
-    assert_eq!(u.at(src), "4:25: Echo holds no 13");
+    assert_eq!(u.error.at(src), "4:25: Echo holds no 13");
     assert!(h.is_empty() && c.at(src).starts_with("6:8: "));
     let args: Vec<_> = tile.instances.iter().map(|i| i.args.clone()).collect();
     assert_eq!(args, [[Value::Int(2, Some(IntTy::U64))], [Value::Int(4, Some(IntTy::U64))]]);
@@ -703,7 +767,7 @@ fn a_module_s_items_come_out_in_order() {
     else {
         panic!("{:?}", out.items);
     };
-    assert_eq!(t.at(src), "1:25: Echo holds no 13");
+    assert_eq!(t.error.at(src), "1:25: Echo holds no 13");
     assert_eq!(b.code, DeviceStatic { symbol: "B".into(), ty: "global<u32>".into(), host: "u32".into() });
     let device = out.device.unwrap();
     let text = device.assembly.whole().unwrap();
@@ -722,7 +786,7 @@ fn a_module_counts_no_room_for_the_gpu_s_statics() {
         .items
         .iter()
         .map(|item| match item {
-            ItemOut::DeviceStatic(laid) => laid.as_ref().map(|s| s.code.ty.as_str()).map_err(|e| e.at(src)),
+            ItemOut::DeviceStatic(laid) => laid.as_ref().map(|s| s.code.ty.as_str()).map_err(|f| f.error.at(src)),
             other => panic!("{other:?}"),
         })
         .collect();

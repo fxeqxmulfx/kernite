@@ -239,8 +239,10 @@ fn list(names: &[String]) -> String {
 
 /// Static `s` of a module of x86 kernels as Rust has it, as written but for its type and what it
 /// holds: `made`, a `kernite_cpu::Global` of its elements at the multiple its type says, holding
-/// what it says or zeros; or what stands for a static that did not compile, beside its error.
-/// In a crate without `kernite-cpu`, its type is [`missing`]'s, with the error that says so.
+/// what it says or zeros; for a static that did not compile, beside its error, `made` is the
+/// static as its type has it, holding zeros, if only what it holds is wrong; if not, `None`, and a
+/// `kernite_cpu::Stub` stands for it, which leaves the type of its elements to the code that uses
+/// it. In a crate without `kernite-cpu`, its type is [`missing`]'s, with the error that says so.
 pub(crate) fn cpu_static(s: &lang::Static, made: Option<&HostStatic>, top: &[TokenTree]) -> TokenStream {
     let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
     out.extend(top[s.vis.clone()].iter().cloned());

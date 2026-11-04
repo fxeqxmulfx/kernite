@@ -520,6 +520,52 @@ fn a_static_that_does_not_compile_is_said_once() {
     );
 }
 
+/// A static whose value alone is wrong stands as its type has it, so that the code that uses it is
+/// read as it is for one that compiles: a use that leaves the type of the elements to the static,
+/// `COUNTS.read()[0] as u64`, needs no type, and a use that the type does not fit, `COUNTS.read()`
+/// where a `Vec<u64>` is wanted, is Rust's error, beside kernite's, as it is for one that compiles.
+/// A static whose type kernite does not take, here one that holds nothing, stands as one whose
+/// elements are of any type: a use that says the type is no error of Rust's, and a use that says none
+/// is, beside kernite's. So does one whose type is refused and whose value is wrong too, `HOLLOW`:
+/// kernite says the value only, since it reads that first, and Rust asks for the type of a use that says
+/// none, of the process's static and of the GPU's.
+#[test]
+fn a_static_whose_value_alone_is_wrong_stands_as_its_type_has_it() {
+    refuses(
+        "static_stubs",
+        &[
+            "src/lib.rs:8:43: error: `global<[u32; 4]>` holds 4 elements; this has 5",
+            "src/lib.rs:9:48: error: element 0 is an integer, and an `f32` a float: `1.0`",
+            "src/lib.rs:10:35: error: 300 is out of range for u8",
+            "src/lib.rs:11:45: error: `nope` is not defined",
+            "src/lib.rs:12:23: error: `global<[u32; 0]>` holds nothing",
+            "src/lib.rs:21:43: error: `global<[u32; 4]>` holds 4 elements; this has 5",
+            "src/lib.rs:22:45: error: element 0 is an integer, and an `f16` a float: `1.0`",
+            "src/lib.rs:23:45: error: `nope` is not defined",
+            "src/lib.rs:24:23: error: `global<[u32; 0]>` holds nothing",
+            // `HOLLOW`, whose type is refused too: kernite says the value, which it reads first.
+            "src/lib.rs:151:44: error: `nope` is not defined",
+            "src/lib.rs:160:44: error: `nope` is not defined",
+            // Rust's, in the order of the uses: the process's `COUNTS` where `u64`s are wanted; its `EMPTY`, read
+            // and cast to an address with no type said; the GPU's `COUNTS` where `u64`s are wanted; its `EMPTY`,
+            // with no type said; and the `HOLLOW` of the process's, read with no type said, and the GPU's.
+            "src/lib.rs:65:5: error[E0308]: mismatched types: expected `Vec<u64>`, found `Vec<u32>`",
+            "src/lib.rs:76:16: error[E0282]: type annotations needed: cannot infer type of the type parameter `T` \
+             declared on the method `read`",
+            "src/lib.rs:80:25: error[E0641]: cannot cast from a pointer of an unknown kind",
+            "src/lib.rs:133:5: error[E0308]: mismatched types: expected `Result<Vec<u64>, Error>`, found \
+             `Result<Vec<u32>, Error>`",
+            "src/lib.rs:143:13: error[E0283]: type annotations needed: cannot infer type of the type parameter `T` \
+             declared on the method `EMPTY`",
+            "src/lib.rs:169:24: error[E0282]: type annotations needed: cannot infer type of the type parameter `T` \
+             declared on the method `read`",
+            "src/lib.rs:174:13: error[E0283]: type annotations needed: cannot infer type of the type parameter `T` \
+             declared on the method `HOLLOW`",
+            "error: could not compile `static_stubs` (lib) due to 18 previous errors",
+        ],
+    );
+}
+
 /// A crate that does not depend on `kernite-cpu` is told where it needs the crate, at each static of
 /// a module of x86 kernels and at each cooperative kernel, by kernite and not by Rust, which would
 /// say that `kernite_cpu` is not found, at the attribute. A cooperative kernel's result is said as

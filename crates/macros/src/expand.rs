@@ -88,12 +88,13 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
             (_, ItemOut::Rust) => out.extend(tokens.iter().cloned()),
             (_, ItemOut::Given) => {}
             (ItemKind::Static(s), ItemOut::HostStatic(laid)) => {
-                out.extend(laid.as_ref().err().map(said));
-                out.extend(cpu_static(s, laid.as_ref().ok().map(|c| &c.code), &top));
+                out.extend(laid.as_ref().err().map(|failed| said(&failed.error)));
+                let held = laid.as_ref().map_or_else(|failed| failed.stub.as_ref(), |c| Some(&c.code));
+                out.extend(cpu_static(s, held, &top));
             }
             (ItemKind::Static(s), ItemOut::DeviceStatic(laid)) => {
-                out.extend(laid.as_ref().err().map(said));
-                memory.push((s, laid.as_ref().ok().map(|c| &c.code), conds[i].clone()));
+                out.extend(laid.as_ref().err().map(|failed| said(&failed.error)));
+                memory.push((s, laid, conds[i].clone()));
                 on_gpu.push(conds[i].clone());
                 if let Ok(laid) = laid {
                     fields.extend(room::field(cfg, i, &laid.code.ty, at(s.ty.span())));
@@ -124,10 +125,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
             _ => unreachable!("kernite::module says what each item is"),
         }
     }
-    out.extend(room::carrier(
-        fields,
-        &Cond::any(memory.iter().filter(|(_, m, _)| m.is_some()).map(|(.., c)| c.clone())),
-    ));
+    out.extend(room::carrier(fields, &Cond::any(memory.iter().filter(|(_, m, _)| m.is_ok()).map(|(.., c)| c.clone()))));
     if !reads.is_empty() {
         out.extend(parse("const _: () ="));
         out.extend([TokenTree::Group(Group::new(Delimiter::Brace, reads))]);
