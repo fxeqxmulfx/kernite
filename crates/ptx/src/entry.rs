@@ -5,7 +5,7 @@ use kernite_core::{Item, Program};
 
 use crate::call::{Returns, formal, passed};
 use crate::needs::{Needs, clash};
-use crate::statics::{Memory, Static, fits};
+use crate::statics::{Memory, Static};
 use crate::ty::Ty;
 
 /// A PTX instruction as it is written, guard, operands and all; the operands of the
@@ -232,10 +232,9 @@ fn choose(from: &[usize], size: usize, set: &mut Vec<usize>, each: &mut dyn FnMu
 /// later; `statics` before them all, in order.
 ///
 /// It is none if something kept is for GPUs older than something else kept needs, in the version of
-/// PTX the module would be of: PTX has no module for both. It is none if a static does not [`fit`]
-/// beside those before it, kept or not, or has a name in PTX that something else kept has.
-///
-/// [`fit`]: fits
+/// PTX the module would be of: PTX has no module for both. It is none if a static has a name in PTX
+/// that something else kept has. It counts no room: `statics` are laid out, each if it [`fits`](crate::fits)
+/// beside those before it.
 pub fn module(entries: &[Entry], statics: &[Static]) -> Assembly {
     let kept = |j: usize| When::Kept(Kept::Static(j));
     let (mut parts, mut refusals) = (headers(entries), clashes(entries));
@@ -252,9 +251,6 @@ pub fn module(entries: &[Entry], statics: &[Static]) -> Assembly {
         names.extend(params.chain(returned).chain(shared).map(|(n, what)| (n, what, code(i))));
     }
     for (j, s) in statics.iter().enumerate() {
-        if let Err(m) = fits(&statics[..j], s) {
-            refusals.push((When::always(), format!("`{}`: {m}", s.name)));
-        }
         for (_, what, whose) in names.iter().filter(|(n, ..)| *n == s.memory.name) {
             let message = format!("`{}` is `{}` in PTX, as {what} is", s.name, s.memory.name);
             refusals.push((When::All(vec![kept(j), whose.clone()]), message));
