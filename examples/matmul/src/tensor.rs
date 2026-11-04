@@ -1,7 +1,7 @@
 //! The product on the GPU from `f16`, for its tensor cores: a kernel in PTX, `f16` in and
 //! `f32` out.
 
-use kernite_cuda::{Buffer, Error, Grid, f16};
+use kernite_cuda::{Buffer, Error, f16};
 
 /// The kernels.
 #[kernite_macros::kernels]
@@ -10,8 +10,13 @@ pub mod kernels {
     /// of `n` floats: a thread for each element of `c`, its chain of fused multiply-adds over
     /// `k` in order, each half made a float.
     pub unsafe extern "ptx-kernel" fn hgemm(c: *mut f32, a: *const f16, b: *const f16, m: u32, n: u32, k: u32) {
-        let (block, size, thread, i, row, col): (u32, u32, u32, u32, u32, u32);
-        mov.u32(block, ctaid.x);
+        let (block, size, thread, i, row, col, w): (u32, u32, u32, u32, u32, u32, u32);
+        note("the block's number counts along the grid's x, then y, as `gpu_grid` makes it");
+        mov.u32(block, ctaid.y);
+        mov.u32(w, nctaid.x);
+        mul.lo.u32(block, block, w);
+        mov.u32(w, ctaid.x);
+        add.u32(block, block, w);
         mov.u32(size, ntid.x);
         mov.u32(thread, tid.x);
         mad.lo.u32(i, block, size, thread);
@@ -78,5 +83,5 @@ pub unsafe fn launch(
     let blocks = (m * n).div_ceil(256);
     // SAFETY: `m` rows of `k` halves behind `a`, `k` rows of `n` behind `b` and `m` rows of `n`
     // floats behind `c`, which last as the caller says.
-    unsafe { kernels.hgemm(Grid::new(blocks, 256), c.ptr(), a.ptr(), b.ptr(), m, n, k) }
+    unsafe { kernels.hgemm(crate::gpu_grid(blocks, 256), c.ptr(), a.ptr(), b.ptr(), m, n, k) }
 }

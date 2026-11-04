@@ -183,6 +183,22 @@ fn hgemm_is_exact_on_integers() {
     }
 }
 
+#[test]
+fn hgemm_takes_more_blocks_than_a_grid_has_along_x() {
+    let Some(cuda) = cuda() else { return };
+    if cuda.sm() < 80 {
+        return eprintln!("the {} is older than Ampere, sm_80: skipped", cuda.name());
+    }
+    let kernels = tensor::kernels::Kernels::load(&cuda).unwrap();
+    // 65536 blocks of 256 threads, one thread for each element of c: 65535 blocks are a grid's along x.
+    let shape = (4096, 4096, 1);
+    let (a, b) = (integers(4096, 1), integers(4096, 2));
+    let widen = |x: &[f16]| x.iter().map(|h| h.to_f32()).collect::<Vec<_>>();
+    // SAFETY: `on_gpu` keeps the buffers until it reads `c`, which waits for the kernel.
+    let c = on_gpu(&cuda, &a, &b, shape, |c, a, b| unsafe { tensor::launch(&kernels, c, a, b, shape) });
+    same_bits(&c, &reference::sgemm(&widen(&a), &widen(&b), shape), shape);
+}
+
 /// Each x86 kernel's listing against the one in `snapshots/`, and the GPU kernels' PTX, so that
 /// a change to kernite or to a kernel that moves an instruction shows in review. With
 /// `KERNITE_BLESS=1` the files are written instead, for the diff to be reviewed and committed.

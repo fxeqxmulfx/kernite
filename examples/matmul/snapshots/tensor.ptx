@@ -16,7 +16,7 @@
 	.reg .pred %past, %more;
 	.reg .f16 %p, %q;
 	.reg .u32 %m, %n, %k, %block, %size, %thread, %i, %row;
-	.reg .u32 %col;
+	.reg .u32 %col, %w;
 	.reg .f32 %acc, %u, %v;
 	.reg .u64 %c, %a, %b, %x, %y, %down, %z;
 
@@ -29,7 +29,12 @@
 	ld.param.u32 %m, [_ZN7kernite6matmul6tensor7kernels5hgemmE_param_3];
 	ld.param.u32 %n, [_ZN7kernite6matmul6tensor7kernels5hgemmE_param_4];
 	ld.param.u32 %k, [_ZN7kernite6matmul6tensor7kernels5hgemmE_param_5];
-	mov.u32 %block, %ctaid.x;
+	// the block's number counts along the grid's x, then y, as `gpu_grid` makes it
+	mov.u32 %block, %ctaid.y;
+	mov.u32 %w, %nctaid.x;
+	mul.lo.u32 %block, %block, %w;
+	mov.u32 %w, %ctaid.x;
+	add.u32 %block, %block, %w;
 	mov.u32 %size, %ntid.x;
 	mov.u32 %thread, %tid.x;
 	mad.lo.u32 %i, %block, %size, %thread;
