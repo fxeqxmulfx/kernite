@@ -8,8 +8,8 @@ use kernite::{DeviceStatic, Launcher};
 
 use crate::cond::Cond;
 use crate::rust::{
-    asks, attrs, carried, clashes, depends_on, error_under, host, hygienic, missing, never, number_type, parse, pick,
-    pointer, primitive, quiet, site, visibility, written_params,
+    asks, attrs, carried, clashes, depends_on, error_under, half, host, hygienic, missing, never, number_type, parse,
+    pick, pointer, primitive, quiet, refused, site, visibility, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -231,7 +231,7 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
             None => {
                 args.push(format!("::kernite_cuda::arg(&{name})"));
                 let ty = &param[colon + 1..];
-                params.extend(number_type(ty).unwrap_or_else(|| host(ty)));
+                params.extend(number_type(ty).or_else(|| half(ty)).unwrap_or_else(|| refused(ty)));
             }
         }
         params.extend(parse(","));

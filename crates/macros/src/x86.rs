@@ -8,8 +8,8 @@ use kernite::{Call, HostStatic, Naked, NativeInstance};
 
 use crate::cond::Cond;
 use crate::rust::{
-    attrs, cfg_of, checks, clashes, depends_on, gives_placeholder, hygienic, missing, name_at, never, parse, pick,
-    pointer, position, primitive, probe, result, signature, site, stub, value, value_params, visibility,
+    attrs, cfg_of, checks, clashes, depends_on, given_back, gives_placeholder, hygienic, missing, name_at, never,
+    parse, pick, pointer, position, primitive, probe, result, signature, site, stub, value_params, visibility,
     written_params,
 };
 
@@ -318,7 +318,7 @@ fn instance_name(function: &str, k: usize) -> String {
 fn erased(ty: &[TokenTree]) -> (String, String) {
     match pointer(ty) {
         Some((kind, _)) => (format!("*{kind} ()"), format!(" as *{kind} ()")),
-        None => (value(ty).to_string(), String::new()),
+        None => (given_back(ty).to_string(), String::new()),
     }
 }
 

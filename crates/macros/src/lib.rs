@@ -143,6 +143,18 @@
 //! The Rust the macros write names the numbers and `str` by their paths, `::core::primitive::u64`,
 //! so a module may give any of those names another type and build, so long as none of its kernels
 //! takes or gives that name as a number.
+//! Any other type a kernel takes or gives back is kernite's error alone, at the type: `f128`,
+//! `[f16; 4]`, `!` as a parameter, `[u64]`, or a type of the crate's named `f16` or `f128`. The
+//! macros write a name Rust cannot find for it, with the type as its argument, so that Rust says
+//! neither that the type is unstable or has no size, nor anything at a call of the kernel. An
+//! `f16` or an `f128` in the argument is written `self::f16` or `self::f128`: a type of the module
+//! so named is found there, and Rust does not call its `use` unused. What Rust says of any
+//! function's signature it still says: a lifetime it cannot find, a `_` in a result, and a module
+//! where a type is written, as `core::f16` is in `x: core::f16`, or an `f16` where the module
+//! imports a module so named, `use crate::f16;` with `x: f16`: Rust expected a type and found a
+//! module. An `f16` or an `f128` that the macros do not see as a type keeps Rust's word that it
+//! is unstable: one that a macro writes, `half!()`, or one in an expression of the type, as in an
+//! array's length, `[u8; size_of::<f16>()]`.
 //!
 //! The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one,
 //! `dead_code` say, and build its kernels: Rust lints the names and the code a kernel is

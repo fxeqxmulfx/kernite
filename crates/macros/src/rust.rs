@@ -219,27 +219,92 @@ pub(crate) fn pointer(ty: &[TokenTree]) -> Option<(&'static str, &[TokenTree])> 
     }
 }
 
-/// Whether `tokens` hold the placeholder `_`, at any depth, as `*const [_; 3]` does: Rust refuses it in a
-/// signature, once, at the `_`. It is looked for where a type is written. A `_` is no placeholder in a
-/// block, which is an expression where `_` is a pattern, `Pair<{ let _ = 1; 3 }>`; in an array's length,
-/// unless it is the whole length, `[u8; _]`, for `[u8; if let _ = 1 { 3 } else { 4 }]` has a pattern; as
-/// the name of a function pointer's parameter, `fn(_: u8)`; or among a macro's arguments, `len!(_)`,
-/// which are the macro's. Where kernite cannot tell, as for a macro that writes a `_` into a type, it
-/// takes the `_` for no placeholder. Rust then says what it says of the `_`, which a kernel's author can
-/// mend, where a kernel that builds and does not run cannot be.
-fn placeholder(mut tokens: &[TokenTree]) -> bool {
+/// Where in a type a token is, that a caller looks for.
+enum Place {
+    /// Where a type is written: a type of its own, `f16`, or the first segment of a path, `f16::X`, which may
+    /// be a module's name.
+    Type,
+    /// The whole length of an array, `[u8; _]`.
+    Length,
+}
+
+/// `tokens` as written, at any depth, but for the tokens `leaf` picks where a type is written: `found` is told
+/// which token it is and where in the type, and answers the tokens to write in its place, or `None` to leave it
+/// as it is. It is the one rule, for the macros, of where a type is written. No type is written in a block,
+/// which is an expression, `Pair<{ !0usize & 3 }>`; in a macro's call, `f16!()` or `named!(f16)`, which the
+/// macro reads; nor in an array's length, all that follows the `;` and an expression too,
+/// `[u8; (1 != 2) as usize]`, but `found` is told of a length of one token `leaf` picks, `[u8; _]`. A token
+/// `leaf` picks is a name, not a type, after a `'`, a lifetime's, `&'f16 u8`; after a `::`, a later segment of a
+/// path, `core::primitive::f16`; and before a `:`, a function pointer's parameter's, `fn(f16: u8)`. Where
+/// kernite cannot tell, as for a macro that writes the token into a type, it takes it for no type's.
+fn walk(
+    mut tokens: &[TokenTree],
+    leaf: fn(&TokenTree) -> bool,
+    found: &mut dyn FnMut(&TokenTree, Place) -> Option<TokenStream>,
+) -> TokenStream {
+    let all = tokens;
+    let mut out = TokenStream::new();
     while let [t, rest @ ..] = tokens {
-        tokens = match (t, rest) {
-            (name, [colon, after @ ..]) if is_ident(name, "_") && is_punct(colon, ':') => after,
-            (name, _) if is_ident(name, "_") => return true,
-            (semi, _) if is_punct(semi, ';') => return matches!(rest, [length] if is_ident(length, "_")),
-            (TokenTree::Ident(_), [bang, TokenTree::Group(_), after @ ..]) if is_punct(bang, '!') => after,
-            (TokenTree::Group(g), _) if g.delimiter() == Delimiter::Brace => rest,
-            (TokenTree::Group(g), _) if placeholder(&flatten(g.stream())) => return true,
-            _ => rest,
-        };
+        let before = &all[..all.len() - tokens.len()];
+        tokens = rest;
+        match (t, rest) {
+            (TokenTree::Ident(_), [bang, args @ TokenTree::Group(_), after @ ..]) if is_punct(bang, '!') => {
+                out.extend([t.clone(), bang.clone(), args.clone()]);
+                tokens = after;
+            }
+            (quote, [name, after @ ..]) if is_punct(quote, '\'') => {
+                out.extend([quote.clone(), name.clone()]);
+                tokens = after;
+            }
+            (semi, length) if is_punct(semi, ';') => {
+                let blank = match length {
+                    [one] if leaf(one) => found(one, Place::Length),
+                    _ => None,
+                };
+                out.extend([semi.clone()]);
+                out.extend(blank.unwrap_or_else(|| length.iter().cloned().collect()));
+                tokens = &[];
+            }
+            (name, _) if leaf(name) && !is_name(before, rest) => {
+                out.extend(found(name, Place::Type).unwrap_or_else(|| [name.clone()].into_iter().collect()));
+            }
+            (TokenTree::Group(g), _) if g.delimiter() != Delimiter::Brace => {
+                let mut inner = Group::new(g.delimiter(), walk(&flatten(g.stream()), leaf, found));
+                inner.set_span(g.span());
+                out.extend([TokenTree::Group(inner)]);
+            }
+            _ => out.extend([t.clone()]),
+        }
     }
-    false
+    out
+}
+
+/// Whether the token between `before` and `after` is a name, not a type: a later segment of a path, after a
+/// `::`; or a function pointer's parameter's, before a `:`. A `::` is a `:` joined to the next, so the `:`
+/// of a parameter's name before a path, `fn(f16: ::core::u8)`, is not the first of one.
+fn is_name(before: &[TokenTree], after: &[TokenTree]) -> bool {
+    let sep = |a: &TokenTree, b: &TokenTree| {
+        matches!(a, TokenTree::Punct(p) if p.as_char() == ':' && p.spacing() == Spacing::Joint) && is_punct(b, ':')
+    };
+    matches!(before, [.., a, b] if sep(a, b))
+        || matches!(after, [colon, next @ ..] if is_punct(colon, ':') && !matches!(next, [b, ..] if sep(colon, b)))
+}
+
+/// Whether `tokens` hold the placeholder `_`, at any depth, as `*const [_; 3]` does: Rust refuses it in a
+/// signature, once, at the `_`. It is looked for where [`walk`] says a type is written. A `_` is no
+/// placeholder in a block, which is an expression where `_` is a pattern, `Pair<{ let _ = 1; 3 }>`; in an
+/// array's length, unless it is the whole length, `[u8; _]`, for `[u8; if let _ = 1 { 3 } else { 4 }]` has a
+/// pattern; as the name of a function pointer's parameter, `fn(_: u8)`, or of a lifetime, `&'_ u8`; or among a
+/// macro's arguments, `len!(_)`, which are the macro's. Where kernite cannot tell, as for a macro that writes
+/// a `_` into a type, it takes the `_` for no placeholder. Rust then says what it says of the `_`, which a
+/// kernel's author can mend, where a kernel that builds and does not run cannot be.
+fn placeholder(tokens: &[TokenTree]) -> bool {
+    let mut blank = false;
+    walk(tokens, |t| is_ident(t, "_"), &mut |_, _| {
+        blank = true;
+        None
+    });
+    blank
 }
 
 /// Whether `f` gives back a type with a `_` in it, which Rust refuses in a signature.
@@ -547,7 +612,7 @@ pub(crate) fn named(t: &TokenTree, name: &str) -> bool {
 }
 
 /// `f`'s signature as written, from its visibility to its result, but for its parameters, as
-/// [`value_params`] has them, and a number it gives back, which is [`value`]'s.
+/// [`value_params`] has them, and its result, which is [`given_back`]'s.
 pub(crate) fn signature(f: &Fn, top: &[TokenTree]) -> TokenStream {
     let mut out: TokenStream = top[f.head.start..f.params_at].iter().cloned().collect();
     let mut params = Group::new(Delimiter::Parenthesis, value_params(f, top));
@@ -556,13 +621,13 @@ pub(crate) fn signature(f: &Fn, top: &[TokenTree]) -> TokenStream {
     if let Some(r) = &f.ret {
         // The arrow, then the result.
         out.extend(top[f.params_at + 1..r.tokens.start].iter().cloned());
-        out.extend(value(&top[r.tokens.clone()]));
+        out.extend(given_back(&top[r.tokens.clone()]));
     }
     out
 }
 
-/// `f`'s parameters as [`written_params`] has them, a comma after each, but for each number, which
-/// is [`value`]'s.
+/// `f`'s parameters as [`written_params`] has them, a comma after each, but for each type, which is
+/// [`value`]'s.
 pub(crate) fn value_params(f: &Fn, top: &[TokenTree]) -> TokenStream {
     let mut out = TokenStream::new();
     for (param, colon) in written_params(f, top) {
@@ -712,9 +777,14 @@ fn written(ty: &[TokenTree]) -> TokenStream {
 /// The type `ty`, a kernel's, as the host names it: `f16` and `bf16`, which Rust has not, are
 /// kernite-cuda's. Any other is as the kernel writes it, and means what it means in its module.
 pub(crate) fn host(ty: &[TokenTree]) -> TokenStream {
+    half(ty).unwrap_or_else(|| ty.iter().cloned().collect())
+}
+
+/// `ty` as kernite-cuda names it, if it is `f16` or `bf16`, which Rust has not.
+pub(crate) fn half(ty: &[TokenTree]) -> Option<TokenStream> {
     match ty {
-        [t] if is_ident(t, "f16") || is_ident(t, "bf16") => parse(&primitive(&t.to_string())),
-        _ => ty.iter().cloned().collect(),
+        [t] if is_ident(t, "f16") || is_ident(t, "bf16") => Some(parse(&primitive(&t.to_string()))),
+        _ => None,
     }
 }
 
@@ -728,21 +798,61 @@ pub(crate) fn number_type(ty: &[TokenTree]) -> Option<TokenStream> {
     number_name(ty).map(|(name, at)| placed(&primitive(name), at))
 }
 
-/// `ty`, a parameter's or a result's, as the Rust the macros write has it: [`number_type`] if it is
-/// a number's name, `self::f16` if it is `f16`, else as written. It is for the signatures
-/// [`signature`] writes and an x86 kernel's instances and launcher. A GPU launcher's numbers are
-/// [`number_type`]'s, or [`host`]'s.
-///
-/// An x86 kernel takes no `f16`: kernite says so at the type, and leaves a stub. Rust would say too
-/// that its `f16` is unstable, as it does wherever the type is named, so the stub names `self::f16`,
-/// which Rust cannot find. Where a macro has failed in a module, Rust says nothing of a name it cannot
-/// find, as it says nothing of a `bf16`; and it says nothing of a call of the stub, whose type it
-/// takes for an error.
+/// `ty`, a type a kernel takes, as the Rust the macros write has it: [`number_type`] if it is a
+/// number's name, as written if it is a pointer, else [`refused`], for a kernel takes no other type.
+/// It is for the signatures [`signature`] writes and an x86 kernel's instances and launcher. A GPU
+/// launcher's parameters are [`number_type`]'s, [`half`]'s or [`refused`].
 pub(crate) fn value(ty: &[TokenTree]) -> TokenStream {
-    match ty {
-        [t] if is_ident(t, "f16") => placed("self::f16", t.span()),
-        _ => number_type(ty).unwrap_or_else(|| ty.iter().cloned().collect()),
+    if pointer(ty).is_some() {
+        return ty.iter().cloned().collect();
     }
+    number_type(ty).unwrap_or_else(|| refused(ty))
+}
+
+/// `ty`, a type a kernel gives back, as the Rust the macros write has it: as written if it is `()` or
+/// `!`, which a kernel gives back and does not take, else [`value`].
+pub(crate) fn given_back(ty: &[TokenTree]) -> TokenStream {
+    let nothing =
+        matches!(ty, [TokenTree::Group(g)] if g.delimiter() == Delimiter::Parenthesis && g.stream().is_empty());
+    if nothing || matches!(ty, [t] if is_punct(t, '!')) {
+        return ty.iter().cloned().collect();
+    }
+    value(ty)
+}
+
+/// The name the macros write for a type kernite refuses: one Rust cannot find.
+const REFUSED: &str = "self::__kernite_refused";
+
+/// The type `ty`, which kernite refuses, as the Rust the macros write has it: a name Rust cannot find,
+/// located where `ty` begins, that takes `ty` as its argument, but for what [`unstable`] says. Written as it
+/// is, Rust would say of `ty`, beside kernite's error, what it says wherever the type is named: that an
+/// `f128` is unstable, say, or that a `[u64]` has no size. Where a macro has failed in a module, as
+/// kernite's error is, Rust says nothing of a name it cannot find, nor of what the name takes, and takes a
+/// type so named for one it has reported: so it says nothing of a call against it. It still finds the names
+/// in the argument, so an import that only `ty` uses is used. And it says of the argument what it says of
+/// any function's signature: that a result's `&` has no lifetime to take, that a lifetime is not declared,
+/// and that a result is `_`.
+pub(crate) fn refused(ty: &[TokenTree]) -> TokenStream {
+    let at = ty[0].span();
+    [placed(&format!("{REFUSED}<"), at), unstable(ty), placed(">", at)].into_iter().collect()
+}
+
+/// `tokens`, a type kernite refuses, as written, but for each `f16`, `f128` and `!` where [`walk`] says a type is
+/// written: wherever Rust finds one it says that the type is unstable, even in the argument of a name it cannot
+/// find. A `!` is the name [`refused`] writes. An `f16` or an `f128` is written `self::f16` or `self::f128`,
+/// for a module may give either name a type: Rust finds it there, and its import is used, and where there is
+/// none Rust finds nothing and says nothing. Where the module has a module so named, Rust says that it is no
+/// type, as it does of any function's signature. A later segment of a path, `core::primitive::f16`, is a name
+/// in the path before it, and stays as written. An `f16` or an `f128` that kernite does not see as a type, for a
+/// macro writes it, `half!()`, or it is in an expression of the type, as in an array's length,
+/// `[u8; size_of::<f16>()]`, Rust still says is unstable.
+fn unstable(tokens: &[TokenTree]) -> TokenStream {
+    let float = |t: &TokenTree| is_ident(t, "f16") || is_ident(t, "f128") || is_punct(t, '!');
+    walk(tokens, float, &mut |t, place| match place {
+        Place::Type if is_punct(t, '!') => Some(placed(REFUSED, t.span())),
+        Place::Type => Some(placed(&format!("self::{t}"), t.span())),
+        Place::Length => None,
+    })
 }
 
 /// The number `name`, by the language's name, as the Rust the macros write names it. A module may

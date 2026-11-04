@@ -213,6 +213,35 @@ fn not_the_number(place: &str, expected: &str, found: &str) -> String {
     format!("src/lib.rs:{place}: error[E0308]: mismatched types: expected `{expected}`, found `{found}`")
 }
 
+/// What kernite says of `ty`, a type an x86 kernel does not take, at `place` of `src/lib.rs`; `kernel`
+/// begins the message: [`instance`], or nothing.
+fn x86_takes(place: &str, kernel: &str, ty: &str) -> String {
+    format!("src/lib.rs:{place}: error: {kernel}a kernel takes pointers, 64-bit integers and floats, not `{ty}`")
+}
+
+/// What kernite says of `ty`, a type an x86 kernel does not give back, at `place` of `src/lib.rs`; `kernel`
+/// begins the message, as it does for [`x86_takes`].
+fn x86_gives(place: &str, kernel: &str, ty: &str) -> String {
+    format!(
+        "src/lib.rs:{place}: error: {kernel}a kernel returns a float, an integer or a pointer, or never, `!`; \
+         not `{ty}`"
+    )
+}
+
+/// What kernite says of `ty`, a type a GPU kernel does not take, at `place` of `src/lib.rs`; `kernel` begins
+/// the message, as it does for [`x86_takes`].
+fn gpu_takes(place: &str, kernel: &str, ty: &str) -> String {
+    format!(
+        "src/lib.rs:{place}: error: {kernel}a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, \
+         `f32` and `f64`, not `{ty}`"
+    )
+}
+
+/// What a message of kernite's begins with where it is of the instance `n` of the kernel `name`.
+fn instance(name: &str, n: u64) -> String {
+    format!("in `{name}::<{n}>`: ")
+}
+
 /// Whether this machine has Clippy, which the tests that run it skip without, and say so.
 fn clippy_here() -> bool {
     let has = Command::new(env!("CARGO")).args(["clippy", "--version"]).output().is_ok_and(|out| out.status.success());
@@ -1704,7 +1733,8 @@ fn a_placeholder_in_a_pointers_type_is_rusts_error_alone_at_the_placeholder() {
 /// own: in a block, `[u8; { let _ = 1; 3 }]` or `Arr<{ let _ = 1; 3 }>`; in an array's length that is no block,
 /// `[u8; if let Some(_) = Some(1) { 3 } else { 4 }]`, which is an expression; among a macro's arguments,
 /// `[u8; len!(_)]` or `byte!(_)`, which the macro drops; and as the name of a function pointer's parameter,
-/// `fn(_: u8)`. Rust takes each of these types in a signature, so a kernel that gives back a pointer to one is a
+/// `fn(_: u8)`, or `fn(_: ::core::primitive::u8)` where the parameter's type is a path from the root. Rust takes
+/// each of these types in a signature, so a kernel that gives back a pointer to one is a
 /// kernel: the crate builds without a word, under `#![deny(warnings)]`, and the test the fixture holds calls each
 /// x86 kernel, plain and of compile-time arguments, which gives its pointer back, and the second adds its argument
 /// to it first. A kernel taken for one with a placeholder is a stub, which aborts.
@@ -2061,27 +2091,17 @@ fn a_number_named_as_a_type_with_no_size_is_refused_at_the_type_and_not_at_the_a
 /// compile-time arguments, and at a call of each. So it is of a `bf16`, which Rust has not.
 #[test]
 fn an_x86_kernel_that_takes_or_gives_back_a_half_is_kernites_error_alone() {
-    let takes = |place: &str, kernel: &str, ty: &str| {
-        format!("src/lib.rs:{place}: error: {kernel}a kernel takes pointers, 64-bit integers and floats, not `{ty}`")
-    };
-    let gives = |place: &str, kernel: &str, ty: &str| {
-        format!(
-            "src/lib.rs:{place}: error: {kernel}a kernel returns a float, an integer or a pointer, or never, `!`; \
-             not `{ty}`"
-        )
-    };
-    let instance = |name: &str, n: u64| format!("in `{name}::<{n}>`: ");
     let mut said = vec![];
     for (ty, [plain, tiles, together, together_tiles, result, tiles_result]) in [
         ("f16", ["8:44", "13:58", "18:47", "24:67", "28:53", "33:73"]),
         ("bf16", ["40:44", "45:58", "50:47", "56:67", "60:53", "65:73"]),
     ] {
-        said.push(takes(plain, "", ty));
-        said.extend([1, 2].map(|n| takes(tiles, &instance("tiles", n), ty)));
-        said.push(takes(together, "", ty));
-        said.extend([1, 2].map(|n| takes(together_tiles, &instance("together_tiles", n), ty)));
-        said.push(gives(result, "", ty));
-        said.extend([1, 2].map(|n| gives(tiles_result, &instance("tiles_result", n), ty)));
+        said.push(x86_takes(plain, "", ty));
+        said.extend([1, 2].map(|n| x86_takes(tiles, &instance("tiles", n), ty)));
+        said.push(x86_takes(together, "", ty));
+        said.extend([1, 2].map(|n| x86_takes(together_tiles, &instance("together_tiles", n), ty)));
+        said.push(x86_gives(result, "", ty));
+        said.extend([1, 2].map(|n| x86_gives(tiles_result, &instance("tiles_result", n), ty)));
     }
     said.push(format!("error: could not compile `halves_refused` (lib) due to {} previous errors", said.len()));
     refuses("halves_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
@@ -2117,6 +2137,241 @@ fn a_gpu_kernel_takes_the_halves_as_kernite_cuda_has_them() {
         printed.contains("test result: ok. 1 passed"),
         "fixtures/halves_gpu.rs ran its tests, and printed:\n{printed}"
     );
+}
+
+/// A type an x86 kernel takes or gives back that kernite refuses is kernite's error alone, at the type, once
+/// for each instance: `f128`, an `f16` in an array, a tuple or behind a reference, `!` as a parameter, and a
+/// type with no size, `[u64]`, `str` or `dyn Fn()`. Rust does not say that the type is unstable or has no
+/// size, as it says wherever the type is named, though the macros leave a stub for the kernel. Nor does it
+/// say, at a call of the kernel, that a value is not the type, or that the result is not the type the caller
+/// reads. So it is for a parameter, of a kernel plain, of compile-time arguments, cooperative, and
+/// cooperative of compile-time arguments; for a result, of a kernel plain and of compile-time arguments; and
+/// for several parameters, of which kernite says the first it refuses. A type of the crate's is refused so
+/// too, alone or beside an `f16`, though the module imports it. So is a type with an `f16` and a `!` deep in
+/// it, `Option<fn(Vec<f16>) -> !>`, and one a macro writes, `gone!()`, whose `!` is not the type. So is a type
+/// that holds tokens that are no types, which the macros leave as written: a `!` that is an operator, in an
+/// array's length, `[u8; !0usize & 3]` and `[u8; (1 != 2) as usize]`, or in a block, `Marker<{ !0usize & 3 }>`;
+/// and an `f16` or an `f128` that is a name, among a macro's arguments, `named!(f16)`, as a function pointer's
+/// parameter, `fn(f16: u8)`, or `fn(f16: ::core::primitive::u8)` where its type is a path from the root, as the
+/// first segment of a path, `f128::X` for a module named so, and `f16::X` and `f128::X` where no module so named
+/// is in scope, as a later segment of a path, `core::primitive::f16`, as the name of a macro, `f16!()`, or as
+/// the whole length of an array, a const's name, `[u8; f16]`, which kernite says is not defined; of a kernel
+/// plain and of compile-time arguments. So is a type of the crate's named `f16` or `f128`, which the module
+/// imports, taken as `f16`, `f128`, `[f16; 4]` or `self::f16`: Rust finds the type, so it does not call the
+/// import unused.
+#[test]
+fn an_x86_kernel_that_takes_or_gives_back_a_type_kernite_refuses_is_kernites_error_alone() {
+    let mut said = vec![];
+    for (ty, [plain, tiles, together, together_tiles]) in [
+        ("f128", ["9:44", "14:58", "19:47", "25:67"]),
+        ("[f16; 4]", ["32:44", "37:58", "42:47", "48:67"]),
+        ("(f16, u64)", ["55:44", "60:58", "65:47", "71:67"]),
+        ("&f16", ["78:44", "83:58", "88:47", "94:67"]),
+        ("!", ["101:44", "106:58", "111:47", "117:67"]),
+        ("[u64]", ["124:44", "129:58", "134:47", "140:67"]),
+        ("str", ["147:44", "152:58", "157:47", "163:67"]),
+        ("dyn Fn()", ["170:44", "175:58", "180:47", "186:67"]),
+    ] {
+        said.push(x86_takes(plain, "", ty));
+        said.extend([1, 2].map(|n| x86_takes(tiles, &instance("tiles", n), ty)));
+        said.push(x86_takes(together, "", ty));
+        said.extend([1, 2].map(|n| x86_takes(together_tiles, &instance("together_tiles", n), ty)));
+    }
+    said.extend([
+        x86_takes("195:52", "", "f128"),
+        x86_takes("208:44", "", "Params"),
+        x86_takes("219:44", "", "(Params, f16)"),
+    ]);
+    for (ty, [plain, tiles]) in [("f128", ["226:52", "231:66"]), ("[u64]", ["238:52", "243:66"])] {
+        said.push(x86_gives(plain, "", ty));
+        said.extend([1, 2].map(|n| x86_gives(tiles, &instance("tiles", n), ty)));
+    }
+    said.extend([x86_takes("251:44", "", "Option<fn(Vec<f16>) -> !>"), x86_takes("265:44", "", "gone!()")]);
+    // kernite says an array's length as it works it out, and a block and a parameter's colon without spaces.
+    for (ty, [plain, tiles]) in [
+        ("[u8; 3]", ["282:44", "287:58"]),
+        ("[u8; 1]", ["295:44", "300:58"]),
+        ("Marker<{!0usize&3}>", ["310:44", "315:58"]),
+        ("named!(f16)", ["323:44", "328:58"]),
+        ("fn(f16:u8)", ["342:44", "347:58"]),
+        ("f128::X", ["357:44", "362:58"]),
+        ("f16::X", ["370:44", "375:58"]),
+        ("f128::X", ["384:44", "389:58"]),
+        ("f16!()", ["403:44", "408:58"]),
+    ] {
+        said.push(x86_takes(plain, "", ty));
+        said.extend([1, 2].map(|n| x86_takes(tiles, &instance("tiles", n), ty)));
+    }
+    // A const the module does not hold is no value to kernite, which says so at the name.
+    said.push("src/lib.rs:423:49: error: `f16` is not defined".to_string());
+    // A type of the crate's named as an unstable type is, which the module imports, and what is written
+    // beside it as a path or a parameter's name.
+    for (ty, place) in [
+        ("f16", "443:44"),
+        ("f128", "453:44"),
+        ("[f16; 4]", "463:44"),
+        ("self::f16", "474:44"),
+        ("core::primitive::f16", "482:44"),
+        ("fn(f16:::core::primitive::u8)", "491:44"),
+    ] {
+        said.push(x86_takes(place, "", ty));
+    }
+    said.push(format!("error: could not compile `types_refused` (lib) due to {} previous errors", said.len()));
+    refuses("types_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A type a GPU kernel takes that kernite refuses is kernite's error alone, at the type, once for each
+/// instance: `f128`, an `f16` in an array, `!`, and a type with no size, `[u64]` or `str`. Rust does not say
+/// that the type is unstable or has no size, as it says wherever the type is named, though the macros leave a
+/// launcher for the kernel that never runs. Nor does it say, at a call of the launcher, that a value is not
+/// the type. So it is for a kernel plain, of compile-time arguments, cooperative, and cooperative of
+/// compile-time arguments; and for several parameters, of which kernite says the first it refuses. A type of
+/// the crate's is refused so too, alone or beside an `f16`, though the module imports it. So is a type that
+/// holds tokens that are no types, which the macros leave as written: `[u8; !0usize & 3]`,
+/// `[u8; (1 != 2) as usize]`, `Marker<{ !0usize & 3 }>`, `named!(f16)`, `fn(f128: u8)`,
+/// `fn(f128: ::core::primitive::u8)`, `f16::X` for a module named so, `f16::X` and `f128::X` where no module so
+/// named is in scope, `core::primitive::f128`, `f16!()` for a macro named so, and `[u8; f128]`, whose `f128` is
+/// a const's name, which kernite says is not defined. So is a type of the crate's named `f16` or `f128`, which
+/// the module imports, taken as `f128`, `[f16; 4]` or `self::f16`: Rust finds the type, so it does not call the
+/// import unused.
+#[test]
+fn a_gpu_kernel_that_takes_a_type_kernite_refuses_is_kernites_error_alone() {
+    let mut said = vec![];
+    for (ty, [plain, tiles, together, together_tiles]) in [
+        ("f128", ["9:48", "14:62", "19:51", "25:71"]),
+        ("[f16; 4]", ["32:48", "37:62", "42:51", "48:71"]),
+        ("!", ["55:48", "60:62", "65:51", "71:71"]),
+        ("[u64]", ["78:48", "83:62", "88:51", "94:71"]),
+        ("str", ["101:48", "106:62", "111:51", "117:71"]),
+    ] {
+        said.push(gpu_takes(plain, "", ty));
+        said.extend([1, 2].map(|n| gpu_takes(tiles, &instance("tiles", n), ty)));
+        said.push(gpu_takes(together, "", ty));
+        said.extend([1, 2].map(|n| gpu_takes(together_tiles, &instance("together_tiles", n), ty)));
+    }
+    said.extend([
+        gpu_takes("126:56", "", "f128"),
+        gpu_takes("139:48", "", "Params"),
+        gpu_takes("150:48", "", "(Params, f16)"),
+        gpu_takes("167:48", "", "[u8; 3]"),
+        gpu_takes("175:48", "", "[u8; 1]"),
+        gpu_takes("185:48", "", "Marker<{!0usize&3}>"),
+        gpu_takes("193:48", "", "named!(f16)"),
+        gpu_takes("207:48", "", "fn(f128:u8)"),
+        gpu_takes("217:48", "", "f16::X"),
+        gpu_takes("226:48", "", "f16::X"),
+        gpu_takes("234:48", "", "f128::X"),
+        gpu_takes("248:48", "", "f16!()"),
+        "src/lib.rs:263:53: error: `f128` is not defined".to_string(),
+        gpu_takes("283:48", "", "f128"),
+        gpu_takes("293:48", "", "[f16; 4]"),
+        gpu_takes("304:48", "", "self::f16"),
+        gpu_takes("312:48", "", "core::primitive::f128"),
+        gpu_takes("321:48", "", "fn(f128:::core::primitive::u8)"),
+    ]);
+    said.push(format!("error: could not compile `types_refused_gpu` (lib) due to {} previous errors", said.len()));
+    refuses("types_refused_gpu", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// Rust says of a type kernite refuses what it says of any function's signature, once, at the fault, beside
+/// kernite's error at the type: a lifetime it cannot find, as for a result `&u64` with none to take, in a kernel
+/// plain and of compile-time arguments, or for an `'a` that is not declared, on x86 and on a GPU, and so for
+/// `'f16` and `'f128`, a lifetime's name that is no type; and a `_` in a result. A result `&u64` that a
+/// parameter's lifetime serves is not one of these. So Rust says that an `f16` or an `f128` is unstable, where
+/// kernite does not see it as a type, on x86 and on a GPU: one a macro writes, `half!()`, and one in an array's
+/// length, `[u8; size_of::<f16>()]`. And Rust says that it expected a type and found a module, where a type is
+/// written: `core::f16`, `[core::f128; 2]`, and an `f16` or an `f128` where the kernel's module imports a
+/// module so named, alone or in an array. Rust says nothing at a call of any kernel.
+#[test]
+fn rust_says_of_a_type_kernite_refuses_what_it_says_of_any_signature() {
+    let rust = |place: &str, code: &str, message: &str| format!("src/lib.rs:{place}: error[{code}]: {message}");
+    let unstable = |place: &str, ty: &str| rust(place, "E0658", &format!("the type `{ty}` is unstable"));
+    let call = |place: &str| {
+        format!("src/lib.rs:{place}: error: a call is a statement: an instruction or a helper, not a value")
+    };
+    let module =
+        |place: &str, path: &str| rust(place, "E0573", &format!("expected type, found module `{path}`: not a type"));
+    let no_lifetime =
+        |place: &str| rust(place, "E0106", "missing lifetime specifier: expected named lifetime parameter");
+    let undeclared = |place: &str, name: &str| {
+        rust(place, "E0261", &format!("use of undeclared lifetime name `{name}`: undeclared lifetime"))
+    };
+    let blank = rust(
+        "27:52",
+        "E0121",
+        "the placeholder `_` is not allowed within types on item signatures for return types: not allowed in type \
+         signatures",
+    );
+    // kernite says its errors first, in the order of the kernels, and Rust says its own after them.
+    let mut said = vec![x86_gives("9:52", "", "&u64")];
+    said.extend([1, 2].map(|n| x86_gives("14:66", &instance("tiles", n), "&u64")));
+    said.extend([
+        x86_takes("19:46", "", "&u64"),
+        x86_gives("27:52", "", "_"),
+        x86_takes("35:44", "", "&'a u64"),
+        gpu_takes("43:48", "", "&'a u64"),
+        x86_takes("51:44", "", "&'f16 u64"),
+        gpu_takes("59:48", "", "&'f128 u64"),
+        x86_takes("79:44", "", "half!()"),
+        call("87:49"),
+        gpu_takes("95:48", "", "wide!()"),
+        call("103:53"),
+        x86_takes("117:44", "", "core::f16"),
+        x86_takes("128:44", "", "f16"),
+        x86_takes("139:44", "", "[f16; 4]"),
+        gpu_takes("147:48", "", "[core::f128; 2]"),
+        gpu_takes("158:48", "", "f128"),
+        gpu_takes("169:48", "", "[f16; 4]"),
+    ]);
+    said.extend([
+        no_lifetime("9:52"),
+        no_lifetime("14:66"),
+        undeclared("35:45", "'a"),
+        undeclared("43:49", "'a"),
+        undeclared("51:45", "'f16"),
+        undeclared("59:49", "'f128"),
+        unstable("66:9", "f16"),
+        unstable("87:59", "f16"),
+        unstable("72:9", "f128"),
+        unstable("103:63", "f128"),
+        module("117:44", "core::f16"),
+        module("128:44", "self::f16"),
+        module("139:45", "self::f16"),
+        module("147:49", "core::f128"),
+        module("158:48", "self::f128"),
+        module("169:49", "self::f16"),
+        blank,
+    ]);
+    said.push(format!("error: could not compile `types_signature` (lib) due to {} previous errors", said.len()));
+    refuses("types_signature", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A pointer to a type kernite refuses by value is said as it was. A pointer of one word is taken, whatever
+/// it points to: Rust's word that an `f128` is unstable is the only one, said once, at the type, in a
+/// parameter and in a result, on x86 and on a GPU. A pointer of two words, to a `[u64]`, is kernite's error
+/// alone, at the pointer's type. Both are so in a kernel of every kind.
+#[test]
+fn a_pointer_to_a_type_kernite_refuses_by_value_is_said_as_it_was() {
+    let two = |place: &str, kernel: &str| {
+        format!(
+            "src/lib.rs:{place}: error: {kernel}a pointer to `[u64]` has two words, an address and a length or a \
+             table, and a kernel's pointer has one"
+        )
+    };
+    let unstable = |place: &str| format!("src/lib.rs:{place}: error[E0658]: the type `f128` is unstable");
+    // kernite says its errors first, in the order of the kernels, and Rust says its own after them.
+    let mut said = vec![two("33:44", "")];
+    said.extend([1, 2].map(|n| two("38:58", &instance("tiles", n))));
+    said.extend([two("43:47", ""), two("47:45", "")]);
+    said.extend([1, 2].map(|n| two("52:65", &instance("tiles_result", n))));
+    said.push(two("76:48", ""));
+    said.extend([1, 2].map(|n| two("81:62", &instance("tiles", n))));
+    said.push(two("86:51", ""));
+    said.extend(
+        ["7:49", "12:63", "17:52", "21:50", "21:64", "26:70", "26:84", "59:53", "64:67", "69:56"].map(unstable),
+    );
+    said.push(format!("error: could not compile `types_pointers` (lib) due to {} previous errors", said.len()));
+    refuses("types_pointers", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
 /// Asking Rust whether each number is that number costs a crate no word, under `#![deny(warnings)]`:
