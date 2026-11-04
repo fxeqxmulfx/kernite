@@ -19,7 +19,7 @@ impl Backend for X86 {
     type Callee = Callee;
     type Code = Listing;
 
-    fn lay_out(&self, name: &str, memory: &Memory, _: &[Static]) -> Result<Static, StaticError> {
+    fn lay_out(&self, name: &str, memory: &Memory) -> Result<Static, StaticError> {
         if intel::taken(name) {
             return Err(StaticError::Name(format!(
                 "a kernel's listing names a constant `{{c0}}` and a function `{{f0}}`, and a static by its name, so \

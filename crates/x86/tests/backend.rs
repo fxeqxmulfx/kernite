@@ -23,7 +23,7 @@ fn x86_compiles_a_kernel_through_the_port() {
     let module = parse(src).unwrap();
     let ItemKind::Static(counts) = &module.items[0].kind else { panic!("a static first") };
     let (half, k) = (function(&module, "half").unwrap(), function(&module, "k").unwrap());
-    let statics = [X86.lay_out("COUNTS", &kernite_lang::memory(&module, counts).unwrap(), &[]).unwrap()];
+    let statics = [X86.lay_out("COUNTS", &kernite_lang::memory(&module, counts).unwrap()).unwrap()];
     let callee = X86.callee(half).unwrap();
     let callees = [Called { name: "half".into(), function: "half".into(), args: vec![], callee }];
     let mut kernel = X86.kernel(k, "k", &[], false, &statics, &callees);
@@ -112,7 +112,7 @@ fn a_static_named_as_a_listing_names_a_constant_is_refused() {
     for (item, want) in module.items.iter().zip(cases) {
         let ItemKind::Static(s) = &item.kind else { panic!("statics alone") };
         let memory = kernite_lang::memory(&module, s).unwrap();
-        assert_eq!(X86.lay_out(&s.name, &memory, &[]), Err(StaticError::Name(want.into())));
+        assert_eq!(X86.lay_out(&s.name, &memory), Err(StaticError::Name(want.into())));
     }
 }
 

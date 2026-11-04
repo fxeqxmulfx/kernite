@@ -233,8 +233,7 @@ fn choose(from: &[usize], size: usize, set: &mut Vec<usize>, each: &mut dyn FnMu
 ///
 /// It is none if something kept is for GPUs older than something else kept needs, in the version of
 /// PTX the module would be of: PTX has no module for both. It is none if a static has a name in PTX
-/// that something else kept has. It counts no room: `statics` are laid out, each if it [`fits`](crate::fits)
-/// beside those before it.
+/// that something else kept has. It counts no room: [`room`](crate::room) does, of `statics` laid out.
 pub fn module(entries: &[Entry], statics: &[Static]) -> Assembly {
     let kept = |j: usize| When::Kept(Kept::Static(j));
     let (mut parts, mut refusals) = (headers(entries), clashes(entries));

@@ -30,7 +30,11 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
     let m = &module;
     // Each machine's statics and callees, worked out when something first needs them.
     let n = LazyCell::new(|| prepare(m, native));
-    let d = LazyCell::new(|| prepare(m, device));
+    let d = LazyCell::new(|| {
+        let mut d = prepare(m, device);
+        d.refuse_room(m, device);
+        d
+    });
     // The statics are the process's or the GPU's.
     let (mut host, mut gpu) = match process {
         true => (n.statics.iter(), [].iter()),

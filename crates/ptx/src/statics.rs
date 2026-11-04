@@ -152,12 +152,28 @@ fn datum(t: Ty, x: &Value, what: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Why `s` does not fit beside the statics `before` it, if it does not: in the 64 KB of
+/// Why each of `statics` has no room in a module beside those before it that have, in order;
+/// `None` for each that has. A static that has none takes none.
+pub fn room(statics: &[Static]) -> Vec<Option<String>> {
+    let mut taken: Vec<&Memory> = vec![];
+    statics
+        .iter()
+        .map(|s| {
+            let why = fits(&taken, &s.memory).err();
+            if why.is_none() {
+                taken.push(&s.memory);
+            }
+            why
+        })
+        .collect()
+}
+
+/// Why `m` does not fit beside the memory `before` it, if it does not: in the 64 KB of
 /// constant memory a module has, which `ptxas` lays out in the order the module declares it,
 /// each at the multiple its address is; or in the global memory `ptxas` lays out with it.
-pub fn fits(before: &[Static], s: &Static) -> Result<(), String> {
-    let space = s.memory.space;
-    let mine = before.iter().chain([s]).filter(|b| b.memory.space == space).map(|b| &b.memory);
+fn fits(before: &[&Memory], m: &Memory) -> Result<(), String> {
+    let space = m.space;
+    let mine = before.iter().copied().chain([m]).filter(|b| b.space == space);
     if space == Space::Const {
         let all = mine.fold(0u64, |end, m| end.next_multiple_of(m.align).saturating_add(m.bytes.unwrap_or(0)));
         if all > CONSTANT {

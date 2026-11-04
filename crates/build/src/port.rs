@@ -17,9 +17,14 @@ pub trait Backend {
     /// A kernel's code, once its body is written.
     type Code;
 
-    /// Static `name`, as `memory` has it worked out, laid out after `before`, the statics
-    /// before it that were laid out; or why not.
-    fn lay_out(&self, name: &str, memory: &Memory, before: &[Self::Static]) -> Result<Self::Static, StaticError>;
+    /// Static `name`, as `memory` has it worked out, laid out; or why not.
+    fn lay_out(&self, name: &str, memory: &Memory) -> Result<Self::Static, StaticError>;
+    /// Why each of `statics`, which were laid out, has no room in the module's memory beside those
+    /// before it that have, in order; `None` for each that has. A machine with room for them all, as
+    /// the process has, says none.
+    fn room(&self, statics: &[Self::Static]) -> Vec<Option<String>> {
+        vec![None; statics.len()]
+    }
     /// How this machine's kernels see `g` when they call it; `None` if they cannot name it.
     fn callee(&self, g: &Fn) -> Option<Self::Callee>;
     /// The kernel `name`, instance `args` of `f`, told whether it is `cooperative`, each of

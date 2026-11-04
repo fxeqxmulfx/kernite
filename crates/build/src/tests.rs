@@ -101,19 +101,20 @@ fn an_instance_is_found_by_its_name() {
 /// fake, which does the work with simpler rules than a machine's, and asserts nothing.
 struct Echo;
 
-/// A static as Echo lays it out: its name, what its `global<..>` holds, and the names of the
-/// statics laid out before it.
+/// A static as Echo lays it out: its name, and what its `global<..>` holds.
 #[derive(Clone, Debug, PartialEq)]
 struct Laid {
     name: String,
     held: String,
-    before: Vec<String>,
 }
 
-/// What Echo lays out as `name`, holding `held`, after `before`.
-fn laid(name: &str, held: &str, before: &[&str]) -> Laid {
-    Laid { name: name.into(), held: held.into(), before: before.iter().map(|&b| b.into()).collect() }
+/// What Echo lays out as `name`, holding `held`.
+fn laid(name: &str, held: &str) -> Laid {
+    Laid { name: name.into(), held: held.into() }
 }
+
+/// The characters of what its statics hold that Echo has room for.
+const ROOM: usize = 20;
 
 /// Where each of `mentions` is in `src`, as `line:column: name`.
 fn placed(src: &str, mentions: &[Mention]) -> Vec<String> {
@@ -144,7 +145,7 @@ impl Backend for Echo {
 
     /// Refuses a name that starts with `taken`, a type that is not `global<..>`, and a value
     /// of 13.
-    fn lay_out(&self, name: &str, memory: &Memory, before: &[Laid]) -> Result<Laid, StaticError> {
+    fn lay_out(&self, name: &str, memory: &Memory) -> Result<Laid, StaticError> {
         if name.starts_with("taken") {
             return Err(StaticError::Name(format!("`{name}` is taken")));
         }
@@ -155,7 +156,24 @@ impl Backend for Echo {
         if let Some(Value::Int(13, _)) = memory.value {
             return Err(StaticError::Value("Echo holds no 13".into()));
         }
-        Ok(Laid { name: name.into(), held: held.into(), before: before.iter().map(|s| s.name.clone()).collect() })
+        Ok(laid(name, held))
+    }
+
+    /// Has room for [`ROOM`] characters of what its statics hold: one that would make more has
+    /// none, and takes none.
+    fn room(&self, statics: &[Laid]) -> Vec<Option<String>> {
+        let mut taken = 0;
+        statics
+            .iter()
+            .map(|s| {
+                let all = taken + s.held.len();
+                if all > ROOM {
+                    return Some(format!("this makes {all} characters, and Echo has room for {ROOM}"));
+                }
+                taken = all;
+                None
+            })
+            .collect()
     }
 
     /// Its kernels call each function of an ABI kernite compiles for, as that ABI.
@@ -340,11 +358,10 @@ impl Target for Told {
     }
 }
 
-/// Each static is laid out after those before it that were laid out: Echo refuses the second,
-/// so the third is laid out beside the first alone, and the fourth beside the first and the
-/// third. Each has where it named the module's items.
+/// Each static is laid out by the machine, one by one: Echo refuses the second, and the others
+/// are laid out all the same. Each has where it named the module's items.
 #[test]
-fn a_static_is_laid_out_beside_those_before_it() {
+fn each_static_is_laid_out_alone() {
     let src = "const N: usize = 4;\n\
                static A: global<[u32; N]>;\n\
                static B: global<u32> = 13;\n\
@@ -357,12 +374,45 @@ fn a_static_is_laid_out_beside_those_before_it() {
     assert_eq!(
         laid_out,
         [
-            Ok((laid("A", "[u32; 4]", &[]), vec!["2:24: N".to_string()])),
+            Ok((laid("A", "[u32; 4]"), vec!["2:24: N".to_string()])),
             Err("3:25: Echo holds no 13".into()),
-            Ok((laid("C", "u32", &["A"]), vec![])),
-            Ok((laid("D", "u32", &["A", "C"]), vec![])),
+            Ok((laid("C", "u32"), vec![])),
+            Ok((laid("D", "u32"), vec![])),
         ]
     );
+}
+
+/// A static the machine has no room for beside those before it that it has is none, placed at
+/// its type, where it can be mended, and takes none: `C` makes more than Echo has room for, so
+/// `D` is the one that fits, and `E` is not. A static that is not laid out, `F`, takes none
+/// either, and its own error is said. `prepare` counts no room, for the statics a module keeps
+/// are not for it to say: it has `C` and `E` laid out.
+#[test]
+fn a_static_with_no_room_beside_those_before_it_is_refused_at_its_type() {
+    let src = "static A: global<[u32; 4]>;\n\
+               static F: global<u32> = 13;\n\
+               static B: global<[u32; 4]>;\n\
+               static C: global<[u32; 4]>;\n\
+               static D: global<u32>;\n\
+               static E: global<u32>;";
+    let module = parse(src).unwrap();
+    let refused: Vec<_> =
+        statics(&module, &Echo).into_iter().map(|s| s.map(|s| s.code.name).map_err(|e| e.at(src))).collect();
+    let full = |all: usize| format!("this makes {all} characters, and Echo has room for {ROOM}");
+    assert_eq!(
+        refused,
+        [
+            Ok("A".to_string()),
+            Err("2:25: Echo holds no 13".into()),
+            Ok("B".to_string()),
+            Err(format!("4:11: {}", full(24))),
+            Ok("D".to_string()),
+            Err(format!("6:11: {}", full(22))),
+        ]
+    );
+    let prepared = prepare(&module, &Echo);
+    let all = [laid("A", "[u32; 4]"), laid("B", "[u32; 4]"), laid("C", "[u32; 4]"), laid("D", "u32"), laid("E", "u32")];
+    assert_eq!(prepared.made, all);
 }
 
 /// What Echo refuses of a static is placed where it can be mended: at its name, its type or
@@ -403,7 +453,7 @@ fn a_kernel_hears_of_its_statics_and_callees_in_order() {
                #[cooperative] unsafe extern \"sysv64\" fn k(x: u64) { add(x, ONE); }";
     let module = parse(src).unwrap();
     let prepared = prepare(&module, &Echo);
-    assert_eq!(prepared.made, [laid("A", "u32", &[]), laid("C", "[u32; 4]", &["A"])]);
+    assert_eq!(prepared.made, [laid("A", "u32"), laid("C", "[u32; 4]")]);
     let k = compile(&module, &prepared, &Echo, function(&module, "k").unwrap(), &[]);
     let told = k.map(|k| (k.code.lines, placed(src, &k.mentions)));
     let heard = [
@@ -525,10 +575,10 @@ fn one_names_no_kernel_it_does_not_find() {
 /// an ABI kernite knows nothing of. Each is told its function and its compile-time arguments. A
 /// helper has no instance, but its `#[cooperative]` is the error, before its `#[instances(..)]`
 /// and a later kernel's, and its `#[instances(..)]` is one. So is a kernel that does not
-/// compile. The first static that is not laid out is the error before them all, and a module the
-/// device refuses is refused as a whole. Once the device has made its module, a module of both
-/// kinds of kernel and a static is the error, and so is a function of an ABI kernite knows
-/// nothing of.
+/// compile. The first static that is not laid out, or has no room, is the error before them all,
+/// and a module the device refuses is refused as a whole. Once the device has made its module, a
+/// module of both kinds of kernel and a static is the error, and so is a function of an ABI
+/// kernite knows nothing of.
 #[test]
 fn all_compiles_each_instance_in_order() {
     let src = "static A: global<u32>;\n\
@@ -556,6 +606,10 @@ fn all_compiles_each_instance_in_order() {
             "2:25: Echo holds no 13".into(),
         ),
         ("static A: global<u32>;\nstatic B: global<u32> = 13;", "2:25: Echo holds no 13".into()),
+        (
+            "static A: global<[u32; 4]>;\nstatic B: global<[u32; 4]>;\nstatic C: global<[u32; 4]>;",
+            format!("3:11: this makes 24 characters, and Echo has room for {ROOM}"),
+        ),
         (
             "#[cooperative] #[instances(1)] fn h() {}\nunsafe extern \"ptx-kernel\" fn k() { nop(true); }",
             format!("1:3: {not}"),

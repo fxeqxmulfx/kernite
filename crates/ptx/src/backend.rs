@@ -4,7 +4,7 @@ use kernite_build::{Abi, Assembly, Backend, Called, Device, DeviceStatic, Static
 use kernite_lang::{Fn, Memory, Value};
 
 use crate::lang::{Callee, Kernel};
-use crate::{Entry, Prototype, Static, fits};
+use crate::{Entry, Prototype, Static};
 
 /// PTX for NVIDIA GPUs: kernels and the functions they call, `.entry` and `.func`, and the
 /// module's memory, in one module the driver loads, each named by its [`symbol`](crate::symbol)
@@ -28,14 +28,17 @@ impl Backend for Ptx {
     type Callee = Callee;
     type Code = Entry;
 
-    fn lay_out(&self, name: &str, memory: &Memory, before: &[Static]) -> Result<Static, StaticError> {
+    fn lay_out(&self, name: &str, memory: &Memory) -> Result<Static, StaticError> {
         let symbol = crate::symbol(&self.scope, name, &[]);
         let mut made = Static::new(name, &symbol, &memory.ty).map_err(StaticError::Type)?;
         if let Some(value) = &memory.value {
             made.init(value).map_err(StaticError::Value)?;
         }
-        fits(before, &made).map_err(StaticError::Type)?;
         Ok(made)
+    }
+
+    fn room(&self, statics: &[Static]) -> Vec<Option<String>> {
+        crate::room(statics)
     }
 
     fn callee(&self, g: &Fn) -> Option<Callee> {
