@@ -1,6 +1,6 @@
 //! The product on the GPU's cores: a kernel in PTX, in `f32`.
 
-use kernite_cuda::{Buffer, Error};
+use kernite_cuda::{Buffer, Error, Grid};
 
 /// The kernels.
 #[kernite_macros::kernels]
@@ -8,7 +8,9 @@ pub mod kernels {
     /// Rows of `c` a block computes.
     pub const BM: usize = 128;
     /// Columns of `c` a block computes.
-    pub const BN: usize = 128;
+    pub const BN: usize = 1 << BN_SHIFT;
+    /// The power of 2 that `BN` is, so that `sgemm` divides by `BN` with a shift.
+    const BN_SHIFT: usize = 7;
     /// Steps of `k` a tile takes.
     pub const BK: usize = 8;
     /// Threads in a block: each computes 8 rows by 8 columns of `c`.
@@ -22,9 +24,9 @@ pub mod kernels {
 
     /// `c = a b`, of `a`, `m` rows of `k` floats, and `b`, `k` rows of `n`, into `c`, `m` rows
     /// of `n`: each element of `c` a chain of fused multiply-adds over `k` in order, from +0.
-    /// `m` and `n` are 1 or more. The grid has a block of `THREADS` threads for each tile of `c`,
-    /// `BM` rows by `BN` columns, as `gpu_grid` makes it: the tiles of a row of tiles, then those
-    /// of the next, and blocks past the last do nothing.
+    /// `m` and `n` are 1 or more. The grid is a row of blocks of `THREADS` threads, one for each
+    /// tile of `c`, `BM` rows by `BN` columns: the tiles of a row of tiles, then those of the
+    /// next.
     ///
     /// A thread keeps 8 rows by 8 columns of its block's tile in 64 registers: the 4 rows from
     /// `ty * 4` and the 4 from `64 + ty * 4`, the same for the columns by `tx * 4`, where the
@@ -82,11 +84,8 @@ pub mod kernels {
         mov.u32(base, b_tiles);
         mad.lo.u32(b_wr, b_wr, 4, base);
 
-        let (i0, j0, rows, cols, past): (u32, u32, u32, u32, pred);
-        tile(i0, j0, rows, cols, past, m, n);
-        if past {
-            ret();
-        }
+        let (i0, j0, rows, cols): (u32, u32, u32, u32);
+        tile(i0, j0, rows, cols, m, n);
         let (row, col): (u32, u32);
         add.u32(row, i0, ar);
         add.u32(col, j0, bc);
@@ -226,7 +225,7 @@ pub mod kernels {
         label(done);
         note("the tile of c: rows ty * 4 + r and 64 + ty * 4 + r, columns tx * 4 + q and 64 + tx * 4 + q");
         lanes(tx, ty);
-        tile(i0, j0, rows, cols, past, m, n);
+        tile(i0, j0, rows, cols, m, n);
         let (ci, cj, idx): (u32, u32, u32);
         shl.b32(ci, ty, 2);
         shl.b32(cj, tx, 2);
@@ -288,26 +287,20 @@ pub mod kernels {
     }
 
     /// This block's tile of `c`: its first row `i0` and column `j0`, and how many rows and columns
-    /// of it lie in `c`. The tiles are counted along a row, then down, and a block's number
-    /// counts along the grid's x, then y: the blocks past the last tile have none, and `past` is
-    /// true for them. It is worked out again where it is wanted again, as it takes fewer
-    /// registers than it would to keep.
-    fn tile(i0: u32, j0: u32, rows: u32, cols: u32, past: pred, m: u32, n: u32) {
-        let (across, down, id, w, bi, bj): (u32, u32, u32, u32, u32, u32);
+    /// of it lie in `c`. The tiles are counted along a row, `across` of them, then down. A block's
+    /// number is its place along the grid's x. The tile is worked out again where it is wanted
+    /// again, as it takes fewer registers than it would to keep.
+    fn tile(i0: u32, j0: u32, rows: u32, cols: u32, m: u32, n: u32) {
+        let (across, id, bi, bj): (u32, u32, u32, u32);
+        // `n` is 1 or more, so `n - 1` does not overflow, as `n + BN - 1` could. The division by
+        // `BN` is a shift. `ptxas` 13.4 divides by 128 as by any number, and keeps the result
+        // through the main loop, in a register of its own: the loop then runs 0.6% slower at 2048.
         sub.u32(across, n, 1);
-        div.u32(across, across, BN);
+        shr.u32(across, across, BN_SHIFT);
         add.u32(across, across, 1);
-        sub.u32(down, m, 1);
-        div.u32(down, down, BM);
-        add.u32(down, down, 1);
-        mov.u32(id, ctaid.y);
-        mov.u32(w, nctaid.x);
-        mul.lo.u32(id, id, w);
-        mov.u32(w, ctaid.x);
-        add.u32(id, id, w);
+        mov.u32(id, ctaid.x);
         div.u32(bi, id, across);
         rem.u32(bj, id, across);
-        setp.ge.u32(past, bi, down);
         mul.lo.u32(i0, bi, BM);
         mul.lo.u32(j0, bj, BN);
         sub.u32(rows, m, i0);
@@ -385,7 +378,7 @@ pub unsafe fn launch(
         return Ok(());
     }
     let tiles = n.div_ceil(kernels::BN as u32) * m.div_ceil(kernels::BM as u32);
-    let grid = crate::gpu_grid(tiles, kernels::THREADS as u32);
+    let grid = Grid::new(tiles, kernels::THREADS as u32);
     // SAFETY: `m` rows of `k` floats behind `a`, `k` rows of `n` behind `b` and `m` rows of `n`
     // behind `c`, which last as the caller says.
     unsafe {
