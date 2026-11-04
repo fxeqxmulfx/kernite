@@ -276,6 +276,24 @@ unsafe { kernels.saxpy(kernite_cuda::Grid::new(n.div_ceil(256), 256), 2.0, xs.pt
 ys.read_into(&mut y)?;
 ```
 
+A machine may have several GPUs. The GPUs are those the driver shows the program: all of the machine's, unless
+`CUDA_VISIBLE_DEVICES` chooses which, and the driver numbers them from 0 in its order. `Cuda::count()` says how many
+there are, and `Cuda::on(i)` takes GPU `i`; `Cuda::new()` is `Cuda::on(0)`. `Kernels::load(&cuda)` loads the kernels on
+the GPU of `cuda`, and a buffer is on the GPU of the `Cuda` that made it.
+
+An index past the last GPU is an error that says how many there are:
+`cuDeviceGet: CUDA_ERROR_INVALID_DEVICE (101): invalid device ordinal: the driver shows 1 GPU, and none is numbered 1`.
+Where the driver shows none, because the machine has no GPU or `CUDA_VISIBLE_DEVICES` chooses none, `Cuda::count()` is 0
+and `Cuda::new()` is the error `cuInit` gives: `cuInit: CUDA_ERROR_NO_DEVICE (100): no CUDA-capable device is detected`.
+Where there is no driver, or `cuInit` fails any other way, `Cuda::count()` is an error, as `Cuda::new()` is.
+
+A `Cuda`, and the buffers and `Kernels` made on it, are for the thread that made it. A thread takes the GPU it uses with
+`Cuda::on`, and threads may take the same GPU. One thread may use the `Cuda` of each GPU in turn: each call, a launch, a
+copy or `sync`, goes to the GPU of the `Cuda`, the buffer or the `Kernels` it is made on, whichever GPU the call before
+it went to. A kernel is given the buffers of the GPU it runs on. The driver does a call's work in the context current on
+the thread, so kernite-cuda keeps which GPU's it made current last. A call to that GPU asks the driver for nothing it
+did not ask before, and a call to another GPU asks it once more, to make that GPU's current, `cuCtxSetCurrent`.
+
 `saxpy` becomes the method that launches it, which takes the grid and then the kernel's parameters. They keep the names
 they are written with, `grid` among them, but `_`, which the macros name for Rust. A compile-time argument may not
 be named `grid`, nor, on a cooperative kernel, `threads` or `shared`, which are parameters of the method that says
@@ -464,7 +482,7 @@ Each crate depends only on the layers inside it. `crates/kernite/tests/architect
 | adapters | `kernite-x86`, `kernite-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kernite` | which machine and syntax each kernel compiles with |
 | delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, launchers of a grid's threads, or launchers of PTX |
-| runtime | `kernite-cuda` | the CUDA driver: memory on the GPU, modules, launches; `f16` and `bf16`; depends on no other crate |
+| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each, modules, launches; `f16` and `bf16`; depends on no other crate |
 | runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid, and the memory of a module of x86 kernels; depends on no other crate |
 
 ## Guarantees
