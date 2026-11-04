@@ -195,20 +195,24 @@ enum Ask {
     Number(&'static str, Span),
 }
 
+/// The number `ty` is, and where its name is, if `ty` is one by its name: `u8` to `u64`, `i8` to
+/// `i64`, `usize`, `isize`, `f32`, `f64` or `bool`, which the language reads by their names.
+fn number_name(ty: &[TokenTree]) -> Option<(&'static str, Span)> {
+    let [name] = ty else { return None };
+    let text = name.to_string();
+    let known = lang::IntTy::parse(&text).map(lang::IntTy::name);
+    known.or_else(|| ["bool", "f32", "f64"].into_iter().find(|n| *n == text)).map(|n| (n, name.span()))
+}
+
 /// For each of `f`'s parameters, and last for its result: what Rust is asked of its type, if it is
-/// asked. It is asked of a number the language reads by its name, `u8` to `u64`, `i8` to `i64`,
-/// `usize`, `isize`, `f32`, `f64` and `bool`, and not of `f16` and `bf16`, which Rust has not; and
-/// of a pointer of one word, `*const T` or `*mut T`. The language says which: a pointer to a slice, a
-/// `str` or a `dyn` has two words, and is its error alone, which Rust is not asked of, for it would
-/// say the same twice.
+/// asked. It is asked of a number by its name, as [`number_name`] reads it, and not of `f16` and
+/// `bf16`, which Rust has not; and of a pointer of one word, `*const T` or `*mut T`. The language
+/// says which: a pointer to a slice, a `str` or a `dyn` has two words, and is its error alone,
+/// which Rust is not asked of, for it would say the same twice.
 fn asked(f: &Fn, top: &[TokenTree]) -> Vec<Option<Ask>> {
     let ask = |ty: &[TokenTree]| {
-        if let [name] = ty {
-            let text = name.to_string();
-            let known = lang::IntTy::parse(&text).map(lang::IntTy::name);
-            return known
-                .or_else(|| ["bool", "f32", "f64"].into_iter().find(|n| *n == text))
-                .map(|n| Ask::Number(n, name.span()));
+        if let Some((name, at)) = number_name(ty) {
+            return Some(Ask::Number(name, at));
         }
         let (kind, to) = pointer(ty)?;
         let one = lex(ty).0.is_ok_and(|trees| lang::pointer(&lang::text(&trees)) == Ok(true));
@@ -234,10 +238,10 @@ pub(crate) fn checks(f: &Fn, top: &[TokenTree], ptr: &str) -> TokenStream {
 /// The block of a `const` operand of a naked kernel's own `naked_asm!`, which asks Rust of each
 /// type the kernel takes or gives back: a closure for each number, which Rust checks and never
 /// runs, and, if the kernel has a pointer to ask of, one that calls the kernel on its parameters,
-/// and asks of them and of what it gives back. A call is made for the pointers alone, for the value
-/// of a number's name that is no number may have no size, which Rust would say of the call, at the
-/// attribute. Nothing if the kernel has none to ask of. A naked function has no body to write the
-/// questions in, and no name of the kernel's finds the closure's locals.
+/// and asks of them and of what it gives back. A call is made for the pointers alone: a number is
+/// asked of by its name, and a pointer by a value of it. Nothing if the kernel has none to ask of.
+/// A naked function has no body to write the questions in, and no name of the kernel's finds the
+/// closure's locals.
 pub(crate) fn probe(f: &Fn, top: &[TokenTree]) -> Option<TokenStream> {
     let n = f.params.len();
     let asked = asked(f, top);
@@ -518,10 +522,30 @@ fn call(name: &str, parts: Vec<TokenStream>) -> TokenStream {
     out
 }
 
-/// `f`'s signature as written, from its visibility to its result.
+/// `f`'s signature as written, from its visibility to its result, but for each number, which is
+/// [`value`]'s.
 pub(crate) fn signature(f: &Fn, top: &[TokenTree]) -> TokenStream {
-    let end = f.ret.as_ref().map_or(f.params_at + 1, |r| r.tokens.end);
-    top[f.head.start..end].iter().cloned().collect()
+    let mut out: TokenStream = top[f.head.start..f.params_at].iter().cloned().collect();
+    let mut params = Group::new(Delimiter::Parenthesis, value_params(f, top));
+    params.set_span(top[f.params_at].span());
+    out.extend([TokenTree::Group(params)]);
+    if let Some(r) = &f.ret {
+        // The arrow, then the result.
+        out.extend(top[f.params_at + 1..r.tokens.start].iter().cloned());
+        out.extend(value(&top[r.tokens.clone()]));
+    }
+    out
+}
+
+/// `f`'s parameters as written, a comma after each, but for each number, which is [`value`]'s.
+pub(crate) fn value_params(f: &Fn, top: &[TokenTree]) -> TokenStream {
+    let mut out = TokenStream::new();
+    for (param, colon) in written_params(f, top) {
+        out.extend(param[..=colon].iter().cloned());
+        out.extend(value(&param[colon + 1..]));
+        out.extend(parse(","));
+    }
+    out
 }
 
 /// The tokens of `stream`, with the invisible groups a macro's fragments arrive in opened.
@@ -652,6 +676,23 @@ pub(crate) fn host(ty: &[TokenTree]) -> TokenStream {
         [t] if is_ident(t, "f16") || is_ident(t, "bf16") => parse(&primitive(&t.to_string())),
         _ => ty.iter().cloned().collect(),
     }
+}
+
+/// The number `ty` is, if it is one by its name, as the Rust the macros write for a kernel names
+/// it: the primitive by its path, `::core::primitive::u64`, located at the name. A module may give
+/// the name another type, and Rust says so, once, at the type, where [`checks`] asks it. What the
+/// macros write besides, an instance, a dispatcher or a launcher, takes the number and not the
+/// name, so it says nothing of the type: a value of one with no size, or that a launcher cannot
+/// pass on, would be an error at the module's attribute, where nothing can be mended.
+pub(crate) fn number_type(ty: &[TokenTree]) -> Option<TokenStream> {
+    number_name(ty).map(|(name, at)| placed(&primitive(name), at))
+}
+
+/// `ty`, a parameter's or a result's, as the Rust the macros write has it: [`number_type`] if it is
+/// a number's name, else as written. It is for the signatures [`signature`] writes and an x86
+/// kernel's instances and launcher. A GPU launcher's numbers are [`number_type`]'s, or [`host`]'s.
+pub(crate) fn value(ty: &[TokenTree]) -> TokenStream {
+    number_type(ty).unwrap_or_else(|| ty.iter().cloned().collect())
 }
 
 /// The number `name`, by the language's name, as the Rust the macros write names it. A module may

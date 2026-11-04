@@ -1290,51 +1290,49 @@ fn a_number_named_as_another_type_is_refused_at_the_type_in_a_kernel_kernite_ref
 }
 
 /// A number's name that the module gives a type with no size, `u8` a slice, is Rust's error at the
-/// type: that its size cannot be known, and that it is not the number. Asking Rust whether it is the
-/// number brings no error at the module's attribute, for the macros ask of the type alone, and never
-/// of a call that gives back a value of it, nor of a local that holds one. So it is in an x86 kernel,
-/// plain, of compile-time arguments and one kernite refuses, with the number as its result, and in a
-/// GPU kernel of each kind, with it as a parameter. The errors at the attribute, `19:1` and `41:1`, are
-/// the code the macros write for the kernel itself, which the module has without the questions: the
-/// instances of a kernel of compile-time arguments that gives back such a value, and the launchers of
-/// a GPU kernel that takes one.
+/// type: that it is not the number, and that its size cannot be known. It is Rust's at the type alone.
+/// The code the macros write for the kernel itself, an instance, a dispatcher or a launcher, takes the
+/// number and not the name, so it makes no value of the type, which Rust would say has no size at the
+/// module's attribute, where nothing can be mended. So it is in an x86 kernel with the number as its
+/// result or its parameter, and in a GPU kernel with it as a parameter: plain, of compile-time
+/// arguments, cooperative, cooperative of compile-time arguments, and one kernite refuses. A type with
+/// a size that is not `Copy`, `String`, is only that it is not the number, in a cooperative x86 kernel
+/// and in a GPU one.
 #[test]
 fn a_number_named_as_a_type_with_no_size_is_refused_at_the_type_and_not_at_the_attribute() {
     let mut said: Vec<String> =
         ["src/lib.rs:33:13: error: `y` is not defined", "src/lib.rs:60:24: error: `y` is not defined"]
             .map(String::from)
             .into();
-    said.extend([
-        // An x86 kernel with the number as its result: plain, of compile-time arguments and refused.
-        size_unknown("23:52", "[u8]"),
-        size_unknown("28:66", "[u8]"),
-        size_unknown("19:1", "[u8]"),
-        size_unknown("32:54", "[u8]"),
-        not_the_number("23:52", "u8", "[u8]"),
-        not_the_number("28:66", "u8", "[u8]"),
-        not_the_number("32:54", "u8", "[u8]"),
-        // An x86 kernel with the number as its parameter.
-        size_unknown("36:48", "[usize]"),
-        not_the_number("36:48", "usize", "[usize]"),
-        // A GPU kernel with the number as its parameter: plain, with the launchers' error at the
-        // attribute, then of compile-time arguments, cooperative and refused.
-        size_unknown("45:48", "[u8]"),
-        "src/lib.rs:41:1: error[E0277]: the trait bound `[u8]: Param` is not satisfied: the trait `Param` is not \
-         implemented for `[u8]`"
-            .to_string(),
-        not_the_number("45:48", "u8", "[u8]"),
-        size_unknown("50:62", "[u8]"),
-        not_the_number("50:62", "u8", "[u8]"),
-        size_unknown("55:51", "[u8]"),
-        not_the_number("55:51", "u8", "[u8]"),
-        size_unknown("59:50", "[u8]"),
-        not_the_number("59:50", "u8", "[u8]"),
-    ]);
-    // Cargo shows a line once, however many times Rust says it. Rust says of each type twice that its
-    // size cannot be known, in the kernel and in the question, and once that it is not the number; and
-    // three times of each attribute what it says there, for three kernels or instances. So there are
-    // two errors of kernite's, three of each of the eight types, and six at the attributes.
-    said.push("error: could not compile `number_names_unsized` (lib) due to 32 previous errors".into());
+    // Rust says of a type with no size that it is not the number, then that its size cannot be known.
+    let slice = |at: &str, number: &str| {
+        let found = format!("[{number}]");
+        [not_the_number(at, number, &found), size_unknown(at, &found)]
+    };
+    // An x86 kernel with the number as its result: plain, of compile-time arguments and refused.
+    said.extend(slice("23:52", "u8"));
+    said.extend(slice("28:66", "u8"));
+    said.extend(slice("32:54", "u8"));
+    // An x86 kernel with the number as its parameter.
+    said.extend(slice("36:48", "usize"));
+    // A GPU kernel with the number as its parameter: plain, of compile-time arguments, cooperative and
+    // refused.
+    said.extend(slice("45:48", "u8"));
+    said.extend(slice("50:62", "u8"));
+    said.extend(slice("55:51", "u8"));
+    said.extend(slice("59:50", "u8"));
+    // An x86 kernel with the number as its parameter: of compile-time arguments, cooperative, cooperative
+    // of compile-time arguments, and a cooperative one whose number is a `String`.
+    said.extend(slice("76:58", "usize"));
+    said.extend(slice("81:47", "usize"));
+    said.extend(slice("87:67", "usize"));
+    said.push(not_the_number("92:44", "f64", "String"));
+    // A GPU kernel with the number as its parameter: cooperative of compile-time arguments, and one whose
+    // number is a `String`.
+    said.extend(slice("104:71", "u8"));
+    said.push(not_the_number("108:48", "u16", "String"));
+    // Each line is said once, so the count is the lines' own.
+    said.push(format!("error: could not compile `number_names_unsized` (lib) due to {} previous errors", said.len()));
     refuses("number_names_unsized", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 

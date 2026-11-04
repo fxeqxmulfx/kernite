@@ -105,7 +105,9 @@
 //! So is a number's name that the module gives another type, `pub type u64 = u32;` and a `use` of
 //! it: kernite reads `u64` as 64 bits where Rust would pass a `u32`, so the macros ask Rust of each
 //! number a kernel takes or gives back whether it is that number, and it says that it is not, at
-//! the type, once.
+//! the type, once. A type with no size, `pub type u8 = [u8];`, has Rust say as well that its size
+//! cannot be known, at the type, and nothing at the module's attribute, where nothing could be
+//! mended: the Rust the macros write for the kernel itself takes the number and not the name.
 //! A generic is a value: `<T>` is an error at the `T`, and so is `impl` in a parameter's type or
 //! the result's, wherever in it, `x: impl Copy`, `Option<impl Copy>` or `-> *mut impl Copy`, at the
 //! `impl`: in a parameter it makes the function generic over a type, and in the result it hides

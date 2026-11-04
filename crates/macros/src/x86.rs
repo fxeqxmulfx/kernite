@@ -8,7 +8,7 @@ use kernite::{Call, HostStatic, Naked, NativeInstance};
 
 use crate::rust::{
     attrs, checks, clashes, depends_on, hygienic, missing, never, parse, pick, pointer, primitive, probe, result,
-    signature, stub, visibility, written_params,
+    signature, stub, value, value_params, visibility, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -21,14 +21,15 @@ const CPU: &str = "kernite-cpu";
 /// kernel, which takes the thread's place in the grid after `f`'s parameters, and `f` is its
 /// [`grid_launcher`]. An instance is a function of the module of kernels, as `f` is, and not of
 /// a module of its own. It takes what `f` takes, but a pointer is `*const ()` or `*mut ()` to it,
-/// whatever it points to, and `f` casts the pointers it passes on and the one it gets back. So no
-/// type of `f`'s is written twice: Rust reads each once, in `f`, where it means what it means in
-/// any function of the module, `super::W` or `[u8; N]`, whose `N` is a compile-time argument; it
-/// says an error in one once, at the type, and lints it at the level `f` sets. Each instance names
-/// the functions of `module` it calls by the names [`callees`] gives, and its statics by those
-/// [`reached`] gives. Its safety contract says that nothing else touches `named`, the module's
-/// memory, while it runs. A cooperative kernel of a crate without `kernite-cpu` is [`x86_stub`]'s
-/// instead, with the error that says so.
+/// whatever it points to, and `f` casts the pointers it passes on and the one it gets back; and a
+/// number is the number in both, `::core::primitive::u64`, and not the name the kernel writes. So
+/// no type of `f`'s is written twice: Rust reads each once, in `f`, where it means what it means
+/// in any function of the module, `super::W` or `[u8; N]`, whose `N` is a compile-time argument,
+/// and a number's name in the questions `f` asks of it; it says an error in one once, at the type,
+/// and lints it at the level `f` sets. Each instance names the functions of `module` it calls by
+/// the names [`callees`] gives, and its statics by those [`reached`] gives. Its safety contract
+/// says that nothing else touches `named`, the module's memory, while it runs. A cooperative
+/// kernel of a crate without `kernite-cpu` is [`x86_stub`]'s instead, with the error that says so.
 pub(crate) fn naked(
     module: &lang::Module,
     f: &Fn,
@@ -286,11 +287,11 @@ fn instance_name(function: &str, k: usize) -> String {
 
 /// `ty`, a type of `f`'s, as an instance writes it, and what `f` writes after a value of it to pass
 /// it on: a pointer is `*const ()` or `*mut ()` to the instance, whatever it points to, and
-/// `.cast()` in `f`; a number is its name as written, `u64`, and nothing.
+/// `.cast()` in `f`; a number is the primitive, as it is in `f`, and nothing.
 fn erased(ty: &[TokenTree]) -> (String, &'static str) {
     match pointer(ty) {
         Some((kind, _)) => (format!("*{kind} ()"), ".cast()"),
-        None => (ty.iter().cloned().collect::<TokenStream>().to_string(), ""),
+        None => (value(ty).to_string(), ""),
     }
 }
 
@@ -355,10 +356,7 @@ fn grid_launcher(
     let mut params = hygienic("$grid:", kernels.is_some());
     params.extend(grid);
     params.extend(parse(","));
-    for (param, _) in written_params(f, top) {
-        params.extend(param);
-        params.extend(parse(","));
-    }
+    params.extend(value_params(f, top));
     out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, params))]);
     out.extend(parse("->"));
     out.extend(result);

@@ -7,8 +7,8 @@ use kernite::DeviceStatic;
 use kernite::lang::{self, Fn, Value};
 
 use crate::rust::{
-    attrs, carried, cfg_any, checks, clashes, depends_on, error_under, host, hygienic, missing, never, parse, pick,
-    pointer, primitive, quiet, site, visibility, written_params,
+    attrs, carried, cfg_any, checks, clashes, depends_on, error_under, host, hygienic, missing, never, number_type,
+    parse, pick, pointer, primitive, quiet, site, visibility, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -137,11 +137,12 @@ fn named(text: &str) -> String {
 }
 
 /// The method that launches `f` over a grid, each of its instances `launched`: its parameters
-/// those of `f`, a pointer as the address on the GPU it is, `::kernite_cuda::Ptr`; and its
-/// compile-time arguments those of `f`, which pick the instance. A cooperative kernel is
-/// launched cooperatively, every block of its grid at once. The launcher binds `grid` for
-/// itself, which a parameter of `f` may be named as well; a compile-time argument may not, which
-/// is an error at its name, and the launcher never runs, as one of a kernel that did not compile.
+/// those of `f`, a pointer as the address on the GPU it is, `::kernite_cuda::Ptr`, and a number as
+/// the number and not the name the kernel writes; and its compile-time arguments those of `f`,
+/// which pick the instance. A cooperative kernel is launched cooperatively, every block of its
+/// grid at once. The launcher binds `grid` for itself, which a parameter of `f` may be named as
+/// well; a compile-time argument may not, which is an error at its name, and the launcher never
+/// runs, as one of a kernel that did not compile.
 fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStream {
     let clashes = clashes(f, &["grid"], "the launcher", top);
     let launched = if clashes.is_empty() { launched } else { None };
@@ -180,7 +181,10 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
                 params.extend(host(to));
                 params.extend(parse(">"));
             }
-            None => params.extend(host(&param[colon + 1..])),
+            None => {
+                let ty = &param[colon + 1..];
+                params.extend(number_type(ty).unwrap_or_else(|| host(ty)));
+            }
         }
         params.extend(parse(","));
     }

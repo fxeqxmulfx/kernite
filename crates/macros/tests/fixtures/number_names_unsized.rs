@@ -1,11 +1,11 @@
-//! A number's name that the module gives a type with no size, `u8` a slice. Rust says what it finds of
-//! each number a kernel takes or gives back at the type, and the questions bring no error at the
-//! module's attribute, where it would say that a call of a kernel that gives back such a value, or a
-//! local that holds it, has no size. So it is for an x86 kernel with the number as its result, plain,
-//! of compile-time arguments and one kernite refuses, and for a GPU kernel with it as a parameter,
-//! plain, of compile-time arguments, cooperative and one kernite refuses. The errors at the attribute
-//! are those of the code the macros write for the kernel itself, an instance's or a launcher's, which
-//! the questions do not change.
+//! A number's name that the module gives a type with no size, `u8` a slice. Rust says of each
+//! number a kernel takes or gives back, at the type, that it is not the number and that its size
+//! cannot be known, and nothing at the module's attribute, where nothing can be mended. So it does
+//! of an x86 kernel with the number as its result or its parameter, and of a GPU kernel with it as
+//! a parameter: plain, of compile-time arguments, cooperative, cooperative of compile-time
+//! arguments, and one kernite refuses. A name given a type with a size that is no number, a
+//! `String`, is Rust's one error that it is not the number, in a cooperative x86 kernel, which
+//! copies its arguments to each thread, and in a GPU kernel, which packs them for the driver.
 
 #![allow(non_camel_case_types)]
 
@@ -58,5 +58,54 @@ pub mod gpu {
 
     pub unsafe extern "ptx-kernel" fn refused(x: u8, p: *mut core::primitive::u32) {
         st.global.u32([y], 1);
+    }
+}
+
+/// A number's name given a type with a size, `String`: not `Copy`, and no GPU argument.
+pub mod owned {
+    pub type f64 = String;
+    pub type u16 = String;
+}
+
+#[kernite_macros::kernels]
+pub mod cpu_kinds {
+    use crate::owned::f64;
+    use crate::wide::usize;
+
+    #[instances(1, 2)]
+    pub unsafe extern "sysv64" fn tiles<const N: u64>(x: usize) {
+        ret();
+    }
+
+    #[cooperative]
+    pub unsafe extern "sysv64" fn together(x: usize) {
+        ret();
+    }
+
+    #[cooperative]
+    #[instances(1, 2)]
+    pub unsafe extern "sysv64" fn together_tiles<const N: u64>(x: usize) {
+        ret();
+    }
+
+    #[cooperative]
+    pub unsafe extern "sysv64" fn owned(x: f64) {
+        ret();
+    }
+}
+
+#[kernite_macros::kernels]
+pub mod gpu_kinds {
+    use crate::owned::u16;
+    use crate::wide::u8;
+
+    #[cooperative]
+    #[instances(1, 2)]
+    pub unsafe extern "ptx-kernel" fn together_tiles<const N: u32>(x: u8, p: *mut core::primitive::u32) {
+        st.global.u32([p], N);
+    }
+
+    pub unsafe extern "ptx-kernel" fn owned(x: u16, p: *mut core::primitive::u32) {
+        st.global.u32([p], 1);
     }
 }

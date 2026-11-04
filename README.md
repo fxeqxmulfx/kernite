@@ -72,7 +72,8 @@ a message is written as Rust writes it, `[usize; 3]`.
 A number's name in a kernel's parameters or return, `u8` to `u64`, `i8` to `i64`, `usize`, `isize`, `f32`, `f64` or
 `bool`, means that number: `u64` is 64 bits. A module that gives the name another type, `pub type u64 = u32;` and a
 `use` of it, would have Rust pass a `u32` where the listing reads 64 bits, so it is an error at the type. Rust says it,
-once, in a kernel of every kind: it expected `u64` and found `u32`.
+once, in a kernel of every kind: it expected `u64` and found `u32`. A type with no size, `pub type u8 = [u8];`, adds
+Rust's error that its size cannot be known, at the type too. Rust says nothing at the module's attribute.
 
 A module may give the name of a primitive, `u8` or `str`, another type, and its kernels build as they do without, so
 long as none takes or gives that name as a number: the Rust kernite writes names each primitive by its path,
