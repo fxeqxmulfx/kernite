@@ -106,19 +106,76 @@ const KEYWORDS: &[&str] = &[
     "virtual", "yield", // reserved
 ];
 
-/// `trees` as the language reads a type: [`text`], but with each name written raw at any depth as the name Rust
-/// reads, `[r#f16; 4]` as `[f16; 4]`. A keyword written raw is a name too, and stays as written, `r#dyn::Foo`: the
-/// readers of the text ask it of the keyword, [`pointer()`] of `dyn` and [`text`] of `const`, `mut` and `for`, and a
-/// name that lost its `r#` would be taken for the keyword. So it is for the 48 keywords Rust lets be written raw, the
-/// strict and the reserved ones. A weak keyword, `union` say, is a name as it is, and loses its `r#` as any name does.
+/// The types of `core::primitive`, which Rust names by a path as well as by a name: `core::primitive::u64`.
+const PRIMITIVES: [&str; 17] = [
+    "bool", "char", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64", "u128",
+    "usize",
+];
+
+/// How many of `trees`, from the first, are a path, `a::b` or `::a::b`; none if they do not begin with a name or a
+/// `::` and a name. The keywords that a type or a bound follows, `mut` of `*mut a::B`, are no names of a path.
+pub(crate) fn path(trees: &[Tree]) -> usize {
+    let name = |i: usize| matches!(trees.get(i), Some(Tree::Ident { name, .. }) if !keyword(name));
+    let (mut end, mut last) = (if colons(trees, 0) { 2 } else { 0 }, 0);
+    while name(end) {
+        end += 1;
+        last = end;
+        if !colons(trees, end) {
+            break;
+        }
+        end += 2;
+    }
+    last
+}
+
+/// The primitive that `trees` begin with the path of, and how many of them are that path, 7, or 9 with a `::` before
+/// them: `u64` for `core::primitive::u64`, `::core::primitive::u64`, `std::primitive::u64` or `::std::primitive::u64`,
+/// each name written raw or not, as Rust reads them; and for a path that goes on from there,
+/// `core::primitive::u64::MAX`. `trees` that begin with another path, `my::core::primitive::u64`, or with one that
+/// names no type of `core::primitive`, `core::primitive::f16`, begin with the path of none.
+pub(crate) fn primitive(trees: &[Tree]) -> Option<(&'static str, usize)> {
+    // Three names and the two `::` between them are seven trees, and nine with the `::` before them.
+    let len = if colons(trees, 0) { 9 } else { 7 };
+    let written = text(trees.get(..len)?);
+    let names: Vec<&str> = written.strip_prefix("::").unwrap_or(&written).split("::").map(unraw).collect();
+    match names[..] {
+        ["core" | "std", "primitive", name] => PRIMITIVES.into_iter().find(|p| *p == name).map(|p| (p, len)),
+        _ => None,
+    }
+}
+
+/// `trees` as the language reads a type: [`text`], but with each name written raw, at any depth, as the name Rust
+/// reads, `[r#f16; 4]` as `[f16; 4]`, and each path that is a primitive's, `core::primitive::u64`, at any depth, as
+/// the primitive's name, `u64`, whichever names of it are written raw, `::core::primitive::r#u64` too. A path that
+/// goes on from a primitive's, `core::primitive::u64::MAX`, and any other path stay paths, but for the names
+/// written raw in them. A lifetime's name begins no path: `&'static ::core::primitive::u8` is `&'static u8`. A
+/// keyword written raw is a name too, and stays as written, `r#dyn::Foo`: the readers of the text ask it of the
+/// keyword, [`pointer()`] of `dyn` and [`text`] of `const`, `mut` and `for`, and a name that lost its `r#` would be
+/// taken for the keyword. So it is for the 48 keywords Rust lets be written raw, the strict and the reserved ones.
+/// A weak keyword, `union` say, is a name as it is, and loses its `r#` as any name does.
 pub fn read_type(trees: &[Tree]) -> String {
-    fn plain(trees: &mut [Tree]) {
-        for tree in trees {
-            match tree {
-                Tree::Ident { name, .. } if !KEYWORDS.contains(&unraw(name)) => *name = unraw(name).to_string(),
-                Tree::Group { trees, .. } => plain(trees),
-                _ => {}
+    fn plain(trees: &mut Vec<Tree>) {
+        let mut at = 0;
+        while at < trees.len() {
+            // A path is read where it begins, and a lifetime's name begins none.
+            let len = if lifetime(trees, at) { 0 } else { path(&trees[at..]) };
+            let read = match primitive(&trees[at..at + len]) {
+                Some((name, n)) if n == len => {
+                    trees[at] =
+                        Tree::Ident { name: name.to_string(), space: trees[at].space(), span: trees[at].span() };
+                    trees.drain(at + 1..at + n);
+                    1
+                }
+                _ => len.max(1),
+            };
+            for tree in &mut trees[at..at + read] {
+                match tree {
+                    Tree::Ident { name, .. } if !KEYWORDS.contains(&unraw(name)) => *name = unraw(name).to_string(),
+                    Tree::Group { trees, .. } => plain(trees),
+                    _ => {}
+                }
             }
+            at += read;
         }
     }
     let mut trees = trees.to_vec();
@@ -202,12 +259,14 @@ fn binder_end(trees: &[Tree], i: usize) -> bool {
         })
 }
 
+/// Whether `trees[i]` and the tree after it are a `::`: two colons with no space between them.
+fn colons(trees: &[Tree], i: usize) -> bool {
+    matches!(trees.get(i..i + 2), Some([Tree::Punct { ch: ':', .. }, Tree::Punct { ch: ':', space: false, .. }]))
+}
+
 /// Whether `trees[j]` is a `:` that is not half of a `::`, as in `fn(x: u8)` and `Item: Copy`.
 fn colon(trees: &[Tree], j: usize) -> bool {
-    let path = |a: usize| {
-        matches!(trees.get(a..=a + 1), Some([Tree::Punct { ch: ':', .. }, Tree::Punct { ch: ':', space: false, .. }]))
-    };
-    matches!(trees[j], Tree::Punct { ch: ':', .. }) && !path(j) && !(j > 0 && path(j - 1))
+    matches!(trees[j], Tree::Punct { ch: ':', .. }) && !colons(trees, j) && !(j > 0 && colons(trees, j - 1))
 }
 
 /// Whether `trees[j]` is the name of a lifetime, as in `&'a [u8]`: a word after a `'`.

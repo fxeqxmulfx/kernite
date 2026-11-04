@@ -2065,28 +2065,34 @@ fn a_type_that_begins_with_a_binder_is_read_whole() {
 }
 
 /// A pointer to a type with no size, which Rust passes in two registers where a kernel's is one, is
-/// one error, at the type, whatever the type is called. kernite tells `[f32]` by its text, and says so
-/// in its words, on x86 and on a GPU. Rust tells the others, and says that the size cannot be known:
-/// `CStr`, `str` by its path, a name for `[f32]`, a struct of the crate's whose last field is one, and
-/// a tuple that ends in `CStr`. It does so in a kernel of every kind: an x86 kernel, plain, of
-/// compile-time arguments, cooperative, and cooperative of compile-time arguments, and a GPU kernel of
-/// each of these kinds; for two such pointers in a kernel, each, and for a pointer a kernel returns,
-/// plain or of compile-time arguments. A kernel kernite refuses for another reason leaves a stub that
-/// asks Rust as well, so that it is two errors, kernite's and Rust's, each where it is: an x86 kernel,
-/// plain, of compile-time arguments or cooperative, and one that returns a pointer; one that is not
-/// `unsafe`; one whose `extern` kernite does not know; and a GPU kernel, plain or cooperative, and
-/// one that returns a pointer, plain or of compile-time arguments. An array or a tuple that holds a
-/// type with no size, `[CStr; 3]`, `(CStr, u8)` or `(u8, [CStr; 3])`, Rust refuses by itself, at the
-/// type, before it asks of the pointer: it says so once, and nothing asks again, in a kernel of
-/// every kind, a pointer that a kernel returns too, so that the errors Cargo counts are the lines it
-/// prints. One case has two, at two places: a kernel of compile-time arguments casts back a pointer
-/// it returns, so for `(u8, [CStr; 3])` Rust says the array in the signature, and the tuple at the
-/// cast.
+/// one error, at the type, whatever the type is called. kernite tells `[f32]` and `str` by their text,
+/// `str` by its path too, `core::primitive::str`, and says so in its words, on x86 and on a GPU. Rust
+/// tells the others, and says that the size cannot be known: `CStr`, a name for `[f32]`, a struct of
+/// the crate's whose last field is one, and a tuple that ends in `CStr`. It does so in a kernel of
+/// every kind: an x86 kernel, plain, of compile-time arguments, cooperative, and cooperative of
+/// compile-time arguments, and a GPU kernel of each of these kinds; for two such pointers in a kernel,
+/// each, and for a pointer a kernel returns, plain or of compile-time arguments. A kernel kernite
+/// refuses for another reason leaves a stub that asks Rust as well, so that it is two errors,
+/// kernite's and Rust's, each where it is: an x86 kernel, plain, of compile-time arguments or
+/// cooperative, and one that returns a pointer; one that is not `unsafe`; one whose `extern` kernite
+/// does not know; and a GPU kernel, plain or cooperative, and one that returns a pointer, plain or of
+/// compile-time arguments. An array or a tuple that holds a type with no size, `[CStr; 3]`,
+/// `(CStr, u8)` or `(u8, [CStr; 3])`, Rust refuses by itself, at the type, before it asks of the
+/// pointer: it says so once, and nothing asks again, in a kernel of every kind, a pointer that a
+/// kernel returns too, so that the errors Cargo counts are the lines it prints. One case has two, at
+/// two places: a kernel of compile-time arguments casts back a pointer it returns, so for
+/// `(u8, [CStr; 3])` Rust says the array in the signature, and the tuple at the cast.
 #[test]
 fn a_pointer_to_a_type_with_no_size_is_refused_at_its_type() {
     // What kernite says, in the order of the kernels: the x86 module's, then the GPU's.
     let told = "error: a pointer to `[f32]` has two words, an address and a length or a table, \
                 and a kernel's pointer has one";
+    let told_str = "error: a pointer to `str` has two words, an address and a length or a table, \
+                    and a kernel's pointer has one";
+    let told_str_first = "error: in `str_path_tiles::<1>`: a pointer to `str` has two words, an address and a length \
+                          or a table, and a kernel's pointer has one";
+    let told_str_second = "error: in `str_path_tiles::<2>`: a pointer to `str` has two words, an address and a length \
+                           or a table, and a kernel's pointer has one";
     let y = "error: `y` is not defined";
     let safe = "error: a kernel trusts the pointers it is given, so it is an `unsafe fn`";
     let abi = "error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, \
@@ -2098,6 +2104,11 @@ fn a_pointer_to_a_type_with_no_size_is_refused_at_its_type() {
     let gives_second = "error: in `returns_c_str_tiles::<2>`: a GPU kernel returns nothing, not \
                         `*mut core::ffi::CStr`: it writes what it works out to memory";
     let kernite = [
+        // `str` by its path: a plain kernel, one of compile-time arguments, a cooperative one.
+        ("36:47", told_str),
+        ("41:67", told_str_first),
+        ("41:67", told_str_second),
+        ("47:56", told_str),
         ("85:44", told),
         ("111:23", y),
         ("116:23", "error: in `refused_tiles::<1>`: `y` is not defined"),
@@ -2148,10 +2159,6 @@ fn a_pointer_to_a_type_with_no_size_is_refused_at_its_type() {
         ("21:51", "[i8]"),
         ("26:71", "[i8]"),
         ("32:60", "[i8]"),
-        // `str` by its path.
-        ("36:54", "str"),
-        ("41:74", "str"),
-        ("47:63", "str"),
         // `Floats`, a name for `[f32]`.
         ("51:52", "[f32]"),
         ("56:72", "[f32]"),
@@ -2742,6 +2749,197 @@ fn a_number_named_as_a_type_with_no_size_is_refused_at_the_type_and_not_at_the_a
     refuses("number_names_unsized", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
+/// A number written as a primitive's path, `core::primitive::u64`, is the number wherever a type is written, as Rust
+/// has it: a module of kernels by the paths, in the four spellings Rust has, builds without a word, each kernel is
+/// called as the same kernel by its names is, with the same result, and its listing, or its PTX, is the one of the
+/// kernel by its names. The tests the fixture holds run the kernels, the GPU ones on the GPU, which they skip where
+/// there is none.
+#[test]
+fn a_kernel_typed_by_primitive_paths_builds_and_runs_as_the_kernel_typed_by_names() {
+    let printed = runs_quietly(&["test"], "primitive_paths");
+    assert!(
+        printed.contains("test result: ok. 4 passed"),
+        "fixtures/primitive_paths.rs ran its tests, and printed:\n{printed}"
+    );
+}
+
+/// A constant named by a primitive's path, `core::primitive::u32::MAX`, is the constant its name gives, `u32::MAX`, as
+/// Rust has it: in a const, a static's data, a compile-time argument, the values an instance lists, and a kernel's
+/// operand, in the four spellings Rust has. A module of kernels by the paths builds without a word, each kernel is
+/// called as the same kernel by the names is, with the same result, and its listing, or its PTX, is the one of the
+/// kernel by the names. The tests the fixture holds run the kernels, the GPU ones on the GPU, which they skip where
+/// there is none.
+#[test]
+fn a_constant_named_by_primitive_paths_builds_and_gives_the_value_the_names_give() {
+    let printed = runs_quietly(&["test"], "primitive_paths_values");
+    assert!(
+        printed.contains("test result: ok. 4 passed"),
+        "fixtures/primitive_paths_values.rs ran its tests, and printed:\n{printed}"
+    );
+}
+
+/// A path that the place does not take is kernite's error alone, at the type, in the words it has for the same type by
+/// its name; a primitive is named by its name, and any other path is quoted as written. Rust says of a compile-time
+/// argument's type what it says of the name, once, at the type: it is no type for a const generic. It says nothing of
+/// a kernel kernite refuses, as it says nothing of the name. So it is of a compile-time argument, a parameter, a
+/// result and a variable of an x86 kernel and a GPU kernel, in the four kinds of type: a primitive the place does not
+/// take, a type of the crate's, a `type` of the crate's for `u64`, and a path that names no primitive.
+#[test]
+fn a_path_that_names_no_type_the_place_takes_is_kernites_error_alone_at_the_type() {
+    let compile_time = |at: &str, ty: &str| {
+        format!(
+            "src/lib.rs:{at}: error: a function that names an ABI takes integers and `bool`s at compile time, as \
+             Rust's const generics are; `{ty}` is neither"
+        )
+    };
+    let x86_variable = |at: &str, ty: &str| {
+        format!(
+            "src/lib.rs:{at}: error: x86 variables are `gpr`, `ymm`, `xmm` and stack memory, `local<..>`; not `{ty}`"
+        )
+    };
+    let gpu_variable = |at: &str, ty: &str| {
+        format!(
+            "src/lib.rs:{at}: error: PTX variables are `pred`, `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, \
+             `f16x2`, `bf16`, `bf16x2`, `tf32`, `f32` and `f64`, not `{ty}`"
+        )
+    };
+    let forbidden = |at: &str, ty: &str| {
+        format!("src/lib.rs:{at}: error: `{ty}` is forbidden as the type of a const generic parameter")
+    };
+    let mut said = vec![
+        // x86, by the paths.
+        compile_time("31:49", "f32"),
+        compile_time("35:50", "crate::Word"),
+        x86_takes("38:48", "", "str"),
+        x86_takes("39:49", "", "char"),
+        x86_takes("40:49", "", "u128"),
+        x86_takes("41:49", "", "crate::Word"),
+        x86_takes("42:49", "", "crate::Wide"),
+        x86_takes("43:48", "", "core::primitive::u64::MAX"),
+        x86_takes("44:47", "", "my::core::primitive::u64"),
+        x86_takes("45:48", "", "core::primitive::f16"),
+        x86_gives("46:75", "", "i128"),
+        x86_variable("48:17", "str"),
+        // x86, by the names.
+        compile_time("58:49", "f32"),
+        compile_time("62:50", "Word"),
+        x86_takes("65:48", "", "str"),
+        x86_takes("66:49", "", "char"),
+        x86_takes("67:49", "", "u128"),
+        x86_takes("68:49", "", "Word"),
+        x86_takes("69:49", "", "Wide"),
+        x86_gives("70:58", "", "i128"),
+        x86_variable("72:17", "str"),
+        // A GPU, by the paths.
+        compile_time("80:53", "f32"),
+        gpu_takes("83:52", "", "str"),
+        gpu_takes("84:53", "", "char"),
+        gpu_takes("85:53", "", "u128"),
+        gpu_takes("86:53", "", "crate::Word"),
+        gpu_takes("87:53", "", "crate::Wide"),
+        gpu_takes("88:52", "", "core::primitive::f16"),
+        gpu_returns("89:79", "", "i128"),
+        gpu_variable("91:16", "char"),
+        // A GPU, by the names.
+        compile_time("101:53", "f32"),
+        gpu_takes("104:52", "", "str"),
+        gpu_takes("105:53", "", "char"),
+        gpu_takes("106:53", "", "u128"),
+        gpu_takes("107:53", "", "Word"),
+        gpu_takes("108:53", "", "Wide"),
+        gpu_returns("109:62", "", "i128"),
+        gpu_variable("111:16", "char"),
+        // Rust's, of a compile-time argument's type, by the paths and by the names.
+        forbidden("31:52", "f32"),
+        forbidden("35:53", "Word"),
+        forbidden("58:52", "f32"),
+        forbidden("62:53", "Word"),
+        forbidden("80:56", "f32"),
+        forbidden("101:56", "f32"),
+    ];
+    said.push(format!(
+        "error: could not compile `primitive_paths_refused` (lib) due to {} previous errors",
+        said.len()
+    ));
+    refuses("primitive_paths_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A reference with a lifetime to a primitive by its path, `&'static ::core::primitive::u8`, is `&'static u8` to
+/// kernite: a lifetime's name begins no path, so the path after it is a primitive's, from the root or not. A kernel
+/// takes no reference, so kernite refuses it in its own words, by the primitive's name, as it does the same type
+/// written by the name, and Rust says no more. So it is of a lifetime that a binder declares,
+/// `for<'a> fn(&'a ::std::primitive::u8) -> &'a ::std::primitive::u16`, on x86 and on a GPU.
+#[test]
+fn a_primitive_written_as_a_path_after_a_lifetime_is_the_primitive_in_kernites_error() {
+    let mut said = vec![
+        // x86, by the paths and by the names.
+        x86_takes("9:45", "", "&'static u8"),
+        x86_takes("10:44", "", "&'static u8"),
+        x86_takes("11:44", "", "&'static u8"),
+        x86_takes("12:44", "", "for<'a> fn(&'a u8) -> &'a u16"),
+        x86_takes("13:50", "", "for<'a> fn(&'a u8) -> &'a u16"),
+        // A GPU, by the paths and by the names.
+        gpu_takes("19:49", "", "&'static str"),
+        gpu_takes("20:48", "", "&'static str"),
+        gpu_takes("21:48", "", "&'static str"),
+    ];
+    said.push(format!(
+        "error: could not compile `primitive_paths_lifetimes` (lib) due to {} previous errors",
+        said.len()
+    ));
+    refuses("primitive_paths_lifetimes", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A module that gives `core` or `std` another meaning, `use crate::fake as core;`, has Rust say that a number written
+/// as its path is not the number, as it says it of the number's name that a module gives another type: at the type,
+/// once, for each parameter and result of an x86 kernel and each parameter of a GPU kernel. A pointer's type is not
+/// asked of, as it is not for the name, and a path from the root, `::core::primitive::u64`, is the crate `core`
+/// whatever the module gives, so Rust says nothing of it.
+#[test]
+fn a_number_written_as_a_path_through_a_core_the_module_gives_another_meaning_is_rusts_error_at_the_type() {
+    let mut said: Vec<String> = [
+        // x86, by the paths: a parameter and a result, a float, and a float whose result is from the root.
+        ("31:43", "u64", "u32"),
+        ("31:68", "u64", "u32"),
+        ("34:45", "f32", "f64"),
+        // x86, by the names: the same.
+        ("50:43", "u64", "u32"),
+        ("50:51", "u64", "u32"),
+        ("53:45", "f32", "f64"),
+        ("53:53", "f32", "f64"),
+        // A GPU by the paths and by the names: a parameter.
+        ("66:47", "u32", "u64"),
+        ("77:47", "u32", "u64"),
+    ]
+    .map(|(at, number, found)| not_the_number(at, number, found))
+    .into();
+    said.push(format!(
+        "error: could not compile `primitive_paths_shadowed` (lib) due to {} previous errors",
+        said.len()
+    ));
+    refuses("primitive_paths_shadowed", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// The types that a helper's or an `extern "ptx-func"` function's signature names are shown to Rust whole where a
+/// kernel does not compile, when they are written as primitives' paths: `::core::primitive::u64` in a compile-time
+/// argument, a parameter and a result, behind a pointer, in an array and in a tuple; and a path to a type of the
+/// crate's, `crate::Word`. Rust says nothing of them, as it says nothing of the same types by their names. kernite
+/// says its own error once for each module, at the kernel that does not compile. Some lists of compile-time
+/// arguments end with a comma, which is no type to show Rust.
+#[test]
+fn rust_says_nothing_of_a_helper_or_a_function_typed_by_primitive_paths() {
+    refuses(
+        "primitive_paths_helpers",
+        &[
+            "src/lib.rs:16:13: error: `y` is not defined",
+            "src/lib.rs:39:13: error: `y` is not defined",
+            "src/lib.rs:59:28: error: `y` is not defined",
+            "src/lib.rs:88:28: error: `y` is not defined",
+            "error: could not compile `primitive_paths_helpers` (lib) due to 4 previous errors",
+        ],
+    );
+}
+
 /// An x86 kernel takes and gives back no `f16`, which only a GPU has: kernite refuses it at the type, once
 /// for each instance. Rust says no more. It does not say that its `f16` is unstable, as it says wherever
 /// the type is named, though the macros leave a stub for the kernel. Nor does it say, at a call of the
@@ -2815,9 +3013,10 @@ fn a_gpu_kernel_takes_the_halves_as_kernite_cuda_has_them() {
 /// first segment of a path, `f128::X` for a module named so, and `f16::X` and `f128::X` where no module so named
 /// is in scope, as a later segment of a path, `core::primitive::f16`, as the name of a macro, `f16!()`, or as
 /// the whole length of an array, a const's name, `[u8; f16]`, which kernite says is not defined; of a kernel
-/// plain and of compile-time arguments. So is a type of the crate's named `f16` or `f128`, which the module
-/// imports, taken as `f16`, `f128`, `[f16; 4]` or `self::f16`: Rust finds the type, so it does not call the
-/// import unused.
+/// plain and of compile-time arguments. kernite says the parameter's type `::core::primitive::u8` as it says
+/// `u8`, so both `fn` types are `fn(f16: u8)` in its words. So is a type of the crate's named `f16` or `f128`,
+/// which the module imports, taken as `f16`, `f128`, `[f16; 4]` or `self::f16`: Rust finds the type, so it does
+/// not call the import unused.
 #[test]
 fn an_x86_kernel_that_takes_or_gives_back_a_type_kernite_refuses_is_kernites_error_alone() {
     let mut said = vec![];
@@ -2872,7 +3071,7 @@ fn an_x86_kernel_that_takes_or_gives_back_a_type_kernite_refuses_is_kernites_err
         ("[f16; 4]", "463:44"),
         ("self::f16", "474:44"),
         ("core::primitive::f16", "482:44"),
-        ("fn(f16: ::core::primitive::u8)", "491:44"),
+        ("fn(f16: u8)", "491:44"),
     ] {
         said.push(x86_takes(place, "", ty));
     }
@@ -2891,9 +3090,10 @@ fn an_x86_kernel_that_takes_or_gives_back_a_type_kernite_refuses_is_kernites_err
 /// `[u8; (1 != 2) as usize]`, `Marker<{ !0usize & 3 }>`, `named!(f16)`, `fn(f128: u8)`,
 /// `fn(f128: ::core::primitive::u8)`, `f16::X` for a module named so, `f16::X` and `f128::X` where no module so
 /// named is in scope, `core::primitive::f128`, `f16!()` for a macro named so, and `[u8; f128]`, whose `f128` is
-/// a const's name, which kernite says is not defined. So is a type of the crate's named `f16` or `f128`, which
-/// the module imports, taken as `f128`, `[f16; 4]` or `self::f16`: Rust finds the type, so it does not call the
-/// import unused.
+/// a const's name, which kernite says is not defined. kernite says the parameter's type `::core::primitive::u8`
+/// as it says `u8`, so both `fn` types are `fn(f128: u8)` in its words. So is a type of the crate's named `f16`
+/// or `f128`, which the module imports, taken as `f128`, `[f16; 4]` or `self::f16`: Rust finds the type, so it
+/// does not call the import unused.
 #[test]
 fn a_gpu_kernel_that_takes_a_type_kernite_refuses_is_kernites_error_alone() {
     let mut said = vec![];
@@ -2927,7 +3127,7 @@ fn a_gpu_kernel_that_takes_a_type_kernite_refuses_is_kernites_error_alone() {
         gpu_takes("293:48", "", "[f16; 4]"),
         gpu_takes("304:48", "", "self::f16"),
         gpu_takes("312:48", "", "core::primitive::f128"),
-        gpu_takes("321:48", "", "fn(f128: ::core::primitive::u8)"),
+        gpu_takes("321:48", "", "fn(f128: u8)"),
     ]);
     said.push(format!("error: could not compile `types_refused_gpu` (lib) due to {} previous errors", said.len()));
     refuses("types_refused_gpu", &said.iter().map(String::as_str).collect::<Vec<_>>());

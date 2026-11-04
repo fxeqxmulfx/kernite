@@ -154,6 +154,10 @@
 //! The Rust the macros write names the numbers and `str` by their paths, `::core::primitive::u64`,
 //! so a module may give any of those names another type and build, so long as none of its kernels
 //! takes or gives that name as a number.
+//! A number written by its path, `core::primitive::u64` or `::std::primitive::u64`, is that number,
+//! and Rust is asked of the path as of the name: it goes through `core` or `std`, so a module that
+//! gives either another meaning, `use crate::fake as core;`, has Rust say that the type is not the
+//! number, at the type, once.
 //! Any other type a kernel takes or gives back is kernite's error alone, at the type: `f128`,
 //! `[f16; 4]`, `!` as a parameter, `[u64]`, or a type of the crate's named `f16` or `f128`. The
 //! macros write a name Rust cannot find for it, with the type as its argument, so that Rust says

@@ -618,6 +618,537 @@ fn a_generic_is_a_value_and_a_type_is_refused_at_its_token() {
     assert!(x86(src, "k").starts_with("# k(gpr, gpr) -> ()\n"), "{src}");
 }
 
+/// The 17 types of `core::primitive`, which Rust names by a path as well as by a name.
+const PRIMITIVES: [&str; 17] = [
+    "bool", "char", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64", "u128",
+    "usize",
+];
+
+/// The paths by which Rust names a type of `core::primitive`, with `{}` where the type's name goes: four
+/// spellings, and two that write a name raw, `r#core::primitive::u64` and `::core::primitive::r#u64`.
+const PATHS: [&str; 6] = [
+    "core::primitive::{}",
+    "::core::primitive::{}",
+    "std::primitive::{}",
+    "::std::primitive::{}",
+    "r#core::primitive::{}",
+    "::core::primitive::r#{}",
+];
+
+/// `src` with each primitive written as `path`, `u64` as `core::primitive::u64`, and `u32::MAX` as
+/// `core::primitive::u32::MAX`, but where it is a part of an instruction's name, `ld.global.u32`.
+fn pathed(src: &str, path: &str) -> String {
+    let chars: Vec<char> = src.chars().collect();
+    let in_word = |c: char| c.is_alphanumeric() || c == '_';
+    let (mut out, mut at) = (String::new(), 0);
+    while at < chars.len() {
+        let end = (at..chars.len()).find(|&i| !in_word(chars[i])).unwrap_or(chars.len());
+        if end == at {
+            out.push(chars[at]);
+            at += 1;
+            continue;
+        }
+        let word: String = chars[at..end].iter().collect();
+        let part = (at > 0 && chars[at - 1] == '.') || chars.get(end) == Some(&'.');
+        out += &if PRIMITIVES.contains(&word.as_str()) && !part { path.replace("{}", &word) } else { word };
+        at = end;
+    }
+    out
+}
+
+/// Rust names a primitive by a path as well as by its name, and a path is read as the name: a kernel typed by
+/// `core::primitive::u64`, `::core::primitive::u64`, `std::primitive::u64`, `::std::primitive::u64`,
+/// `r#core::primitive::u64` or `::core::primitive::r#u64` compiles to the listing, or the PTX, of the same kernel typed
+/// by `u64`. So it is wherever a type is written: the parameters and the result of a kernel, of a pointer to a type, of
+/// a kernel of instances, and of an `extern "ptx-func"` function; a compile-time argument's type, a kernel's, a
+/// helper's and a function's; a variable's, alone, in an array and in memory; a const's and a static's; a helper's
+/// parameter; and the type of a cast.
+#[test]
+fn a_primitive_written_by_its_path_is_the_primitive_written_by_its_name() {
+    for (src, kernels) in [
+        // A kernel's parameters and result: integers, floats, and pointers to a type, in an array and nested.
+        (
+            r#"pub unsafe extern "sysv64" fn k(x: u64, n: usize, m: i64, i: isize) -> u64 { add(x, n); ret(x); }"#,
+            &["k"][..],
+        ),
+        (r#"pub unsafe extern "sysv64" fn k(a: f32, b: f64) -> f64 { ret(b); }"#, &["k"]),
+        (
+            r#"pub unsafe extern "sysv64" fn k(p: *const u8, q: *mut u64, r: *const *mut f32) { mov(qword[q], p); }"#,
+            &["k"],
+        ),
+        (r#"pub unsafe extern "sysv64" fn k(p: *const [usize; 3]) -> *mut [u8; 4] { ret(p); }"#, &["k"]),
+        (r#"pub unsafe extern "sysv64" fn k(p: *const (u8, u32)) -> *const (f32, *const u64) { ret(p); }"#, &["k"]),
+        (r#"#[cooperative] pub unsafe extern "sysv64" fn k(p: *mut u32, n: u64) { mov(dword[p], 1); }"#, &["k"]),
+        // The compile-time arguments of a kernel, of two, and of a helper.
+        (
+            "#[instances(1, 2)] pub unsafe extern \"sysv64\" fn k<const N: u64>(x: u64) -> u64 { add(x, N); ret(x); }",
+            &["k::<1>", "k::<2>"],
+        ),
+        (
+            "#[instances(true, false)] pub unsafe extern \"sysv64\" fn k<const B: bool>(x: u64) -> u64 {\n\
+             if B { add(x, 1); }\nret(x);\n}",
+            &["k::<true>", "k::<false>"],
+        ),
+        (
+            "#[instances((1, 2))] pub unsafe extern \"sysv64\" fn k<const A: usize, const B: u8>(x: u64) -> u64 {\n\
+             add(x, A);\nadd(x, B);\nret(x);\n}",
+            &["k::<1, 2>"],
+        ),
+        (
+            "fn h<const N: i32, const B: bool>(x: gpr) { add(x, N); }\n\
+             #[instances(1)] pub unsafe extern \"sysv64\" fn k<const M: i32>(x: u64) -> u64 {\n\
+             h::<3, true>(x);\nret(x);\n}",
+            &["k::<1>"],
+        ),
+        // Variables: in an array, in stack memory; a helper that takes the memory.
+        (
+            r#"pub unsafe extern "sysv64" fn k(p: *mut u32) {
+                let t: [gpr; 2];
+                let m: local<[u32; 4], 16>;
+                let q: local<f32>;
+                let a: gpr;
+                lea(a, [m]);
+                mov(dword[p], 1);
+            }"#,
+            &["k"],
+        ),
+        (
+            "fn h(m: local<[u32; 4]>, g: gpr) { mov(qword[m], g); }\n\
+             pub unsafe extern \"sysv64\" fn k(x: u64) { let m: local<[u32; 4]>; let g: gpr; mov(g, x); h(m, g); }",
+            &["k"],
+        ),
+        // Consts, with a cast; statics; a loop over a cast.
+        (
+            "const N: usize = 4; const F: f32 = 1.5; const B: bool = true; const A: [u32; 2] = [1, 2];\n\
+             const M: u8 = 5 as u8; const G: f64 = 2 as f64; const T: (u32, f32) = (1, 2.0);\n\
+             pub unsafe extern \"sysv64\" fn k(x: u64) -> u64 { add(x, N); add(x, A[1]); add(x, M); ret(x); }",
+            &["k"],
+        ),
+        (
+            "static S: global<[u32; 4]>; static C: constant<[f32; 2]> = [0.5, 1.5]; static G: global<u8>;\n\
+             pub unsafe extern \"sysv64\" fn k() { let at: gpr; lea(at, [S]); lea(at, [C]); lea(at, [G]); }",
+            &["k"],
+        ),
+        (r#"pub unsafe extern "sysv64" fn k(x: u64) { for i in 0..(3 as usize) { add(x, i); } }"#, &["k"]),
+    ] {
+        for path in PATHS {
+            let written = pathed(src, path);
+            assert_ne!(written, src);
+            for kernel in kernels {
+                assert_eq!(x86(&written, kernel), x86(src, kernel), "{written}");
+            }
+        }
+    }
+    let module = |src: &str| kernite::ptx_str(src).unwrap_or_else(|e| panic!("{e}\n{src}"));
+    for src in [
+        // A kernel's parameters: integers, floats and a pointer.
+        "pub unsafe extern \"ptx-kernel\" fn g(\n\
+         n: u32, w: u64, x: f32, d: f64, i: i32, j: i64, b: u8, c: u16, s: usize, t: isize, out: *mut u32,\n\
+         ) { st.global.u32([out], n); }",
+        r#"pub unsafe extern "ptx-kernel" fn g(p: *const *mut [f32; 2], q: *mut (u8, u16), out: *mut u32) {
+            st.global.u32([out], 1);
+        }"#,
+        // An `extern "ptx-func"` function's parameters and result.
+        r#"
+        extern "ptx-func" fn f(a: u64, b: u32, c: f32, d: f64) -> u32 { ret(b); }
+        pub unsafe extern "ptx-kernel" fn g(p: *mut u32) {
+            let r: u32;
+            call(r, f, (1u64, 2u32, 3.0f32, 4.0f64));
+            st.global.u32([p], r);
+        }
+        "#,
+        // The compile-time arguments of a kernel, of two, and of a function; and a helper's.
+        "#[instances(4, 8)] pub unsafe extern \"ptx-kernel\" fn g<const N: u32>(p: *mut u32) {\n\
+         st.global.u32([p], N);\n}",
+        "#[instances((4, true))] pub unsafe extern \"ptx-kernel\" fn g<const N: u32, const B: bool>(p: *mut u32) {\n\
+         st.global.u32([p], N);\n}",
+        "#[instances(2)] extern \"ptx-func\" fn f<const K: usize>(a: u32) -> u32 { add.u32(a, a, K); ret(a); }\n\
+         pub unsafe extern \"ptx-kernel\" fn g(p: *mut u32) {\n\
+         let r: u32; call(r, f::<2>, (1u32,)); st.global.u32([p], r);\n}",
+        "fn h<const K: u64>(x: u32) { add.u32(x, x, K); }\n\
+         #[instances(3)] pub unsafe extern \"ptx-kernel\" fn g<const N: u8>(p: *mut u32) {\n\
+         let v: u32; mov.u32(v, N); h::<7>(v); st.global.u32([p], v);\n}",
+        // Variables: alone, in an array, in shared and local memory; a helper that takes them; a cast.
+        r#"
+        pub unsafe extern "ptx-kernel" fn g(p: *mut u32) {
+            let r: [u32; 2];
+            let x: f32;
+            let d: f64;
+            let t: shared<[f32; 8], 16>;
+            let l: local<[u8; 4]>;
+            let h: u8;
+            let q: pred;
+            mov.u32(r[0], 1);
+            st.global.u32([p], r[0]);
+        }
+        "#,
+        r#"
+        fn h(x: u32, y: f32, t: shared<[u32; 4], 16>, q: pred) { add.u32(x, x, 1); }
+        pub unsafe extern "ptx-kernel" fn g(p: *mut u32) {
+            let v: u32;
+            mov.u32(v, 1);
+            let y: f32;
+            mov.f32(y, 1.0);
+            let t: shared<[u32; 4], 16>;
+            let q: pred;
+            setp.eq.u32(q, v, 1);
+            h(v, y, t, q);
+            st.global.u32([p], v);
+        }
+        "#,
+        r#"pub unsafe extern "ptx-kernel" fn g(p: *mut u32) {
+            let v: u32; mov.u32(v, 3 as u32);
+            let w: u64; mov.u64(w, 4 as u64);
+            st.global.u32([p], v);
+        }"#,
+        // Consts, with a cast; statics.
+        "const N: usize = 4; const F: f32 = 1.5; const B: bool = true; const A: [u32; 2] = [1, 2];\n\
+         const M: u8 = 5 as u8; const G: f64 = 2 as f64;\n\
+         pub unsafe extern \"ptx-kernel\" fn g(p: *mut u32) { st.global.u32([p], A[1]); }",
+        "static S: global<[u32; 4]>; static C: constant<[f32; 2]> = [0.5, 1.5]; static G: global<u8>;\n\
+         pub unsafe extern \"ptx-kernel\" fn g(p: *mut u32) {\n\
+         let at: u64; mov.u64(at, S); mov.u64(at, C); mov.u64(at, G); st.global.u32([p], 1);\n}",
+    ] {
+        for path in PATHS {
+            let written = pathed(src, path);
+            assert_ne!(written, src);
+            assert_eq!(module(&written), module(src), "{written}");
+        }
+    }
+}
+
+/// A primitive's constants and `from_bits` are named by the path of the primitive as well as by its name, and a path is
+/// read as the name: a kernel that names `core::primitive::u32::MAX`, `::core::primitive::u32::MAX`,
+/// `std::primitive::u32::MAX`, `::std::primitive::u32::MAX`, `r#core::primitive::u32::MAX` or
+/// `::core::primitive::r#u32::MAX` compiles to the listing, or the PTX, of the same kernel that names `u32::MAX`. So it
+/// is wherever a value is known now: a const, a static's data, a kernel's operand, a compile-time argument and the
+/// value an instance lists, a cast's, and the length of an array.
+#[test]
+fn a_constant_named_by_the_path_of_its_primitive_is_the_constant_named_by_its_name() {
+    for (src, kernels) in [
+        // A const, a static, and a kernel's operands: an integer, a float, a float made of bits.
+        (
+            "const TOP: u64 = u32::MAX as u64; const LOW: i32 = i16::MIN as i32; const BITS: u32 = u64::BITS;\n\
+             const INF: f32 = f32::INFINITY; const ONE: f32 = f32::from_bits(0x3f800000);\n\
+             static S: constant<[f32; 3]> = [INF, f32::NEG_INFINITY, f32::from_bits(0x40000000)];\n\
+             pub unsafe extern \"sysv64\" fn k(x: u64) -> u64 {\n\
+             let at: gpr;\nlea(at, [S]);\nmov(at, TOP);\nadd(x, u16::MAX);\n\
+             add(x, BITS);\nadd(x, i8::MIN);\nret(x);\n}",
+            &["k"][..],
+        ),
+        // A compile-time argument, a helper's, and the values an instance lists.
+        (
+            "fn h<const N: u8>(x: gpr) { add(x, N); }\n\
+             #[instances(u8::MAX, u8::MIN)] pub unsafe extern \"sysv64\" fn k<const N: u8>(x: u64) -> u64 {\n\
+             h::<u8::MAX>(x);\nadd(x, N);\nret(x);\n}",
+            &["k::<255>", "k::<0>"],
+        ),
+        // A cast of a constant, a loop over a range that ends with one, and the length of an array.
+        (
+            "pub unsafe extern \"sysv64\" fn k(x: u64) {\n\
+             add(x, u8::MAX as u64);\nfor i in 0..(u8::BITS as usize) { add(x, i); }\n\
+             let m: local<[u32; u8::BITS as usize]>;\nlet a: gpr;\nlea(a, [m]);\nadd(x, a);\n}",
+            &["k"],
+        ),
+    ] {
+        for path in PATHS {
+            let written = pathed(src, path);
+            assert_ne!(written, src);
+            for kernel in kernels {
+                assert_eq!(x86(&written, kernel), x86(src, kernel), "{written}");
+            }
+        }
+    }
+    let module = |src: &str| kernite::ptx_str(src).unwrap_or_else(|e| panic!("{e}\n{src}"));
+    for src in [
+        "const TOP: u32 = u16::MAX as u32; const INF: f32 = f32::INFINITY;\n\
+         const HALF: f64 = f64::from_bits(0x3fe0000000000000);\n\
+         static C: constant<[f32; 2]> = [f32::NEG_INFINITY, f32::MAX];\n\
+         #[instances(u32::MAX)] pub unsafe extern \"ptx-kernel\" fn g<const N: u32>(p: *mut u32) {\n\
+         let v: u32;\nmov.u32(v, TOP);\nadd.u32(v, v, u32::MAX);\nadd.u32(v, v, N);\nadd.u32(v, v, u8::BITS);\n\
+         let x: f32;\nmov.f32(x, INF);\nmov.f32(x, f32::MIN_POSITIVE);\nmov.f32(x, f32::from_bits(0x3f800000));\n\
+         let d: f64;\nmov.f64(d, HALF);\nmov.f64(d, f64::MIN);\nmov.f64(d, f64::from_bits(0x3ff0000000000000));\n\
+         st.global.u32([p], v);\n}",
+        "fn h<const K: u64>(x: u64) { add.u64(x, x, K); }\n\
+         extern \"ptx-func\" fn f(a: u32) -> u32 { add.u32(a, a, i32::MIN as u32); ret(a); }\n\
+         pub unsafe extern \"ptx-kernel\" fn g(p: *mut u32) {\n\
+         let w: u64;\nmov.u64(w, u64::MAX);\nh::<u64::MAX>(w);\n\
+         let r: u32;\ncall(r, f, (usize::BITS,));\nst.global.u32([p], r);\n\
+         let t: [u32; u8::BITS as usize / 4];\n}",
+    ] {
+        for path in PATHS {
+            let written = pathed(src, path);
+            assert_ne!(written, src);
+            assert_eq!(module(&written), module(src), "{written}");
+        }
+    }
+}
+
+/// Each place a type is written, with `{ty}` where it is, and for x86 the kernel to compile: a kernel's parameter,
+/// pointee and result, a variable in an array and in stack memory, a compile-time argument's type, a helper's
+/// parameter and result, a static, and a cast.
+const X86_PLACES: [(&str, &str); 14] = [
+    (r#"unsafe extern "sysv64" fn k(x: {ty}) {}"#, "k"),
+    (r#"unsafe extern "sysv64" fn k(p: *const {ty}) {}"#, "k"),
+    (r#"unsafe extern "sysv64" fn k() -> {ty} {}"#, "k"),
+    ("#[cooperative]\nunsafe extern \"sysv64\" fn k() -> {ty} {}", "k"),
+    (r#"unsafe extern "sysv64" fn k() { let v: [{ty}; 2]; }"#, "k"),
+    (r#"unsafe extern "sysv64" fn k() { let v: local<{ty}>; }"#, "k"),
+    ("#[instances(1)]\nunsafe extern \"sysv64\" fn k<const M: {ty}>() {}", "k::<1>"),
+    ("fn h<const M: {ty}>() {}\nunsafe extern \"sysv64\" fn k() { h::<1>(); }", "k"),
+    ("fn h() -> {ty} {}\nunsafe extern \"sysv64\" fn k() { h(); }", "k"),
+    ("fn h(x: {ty}) {}\nunsafe extern \"sysv64\" fn k() { let v: gpr; h(v); }", "k"),
+    ("static S: global<{ty}>;\nunsafe extern \"sysv64\" fn k() {}", "k"),
+    ("static S: constant<[{ty}; 2]> =\n1;\nunsafe extern \"sysv64\" fn k() {}", "k"),
+    ("const C: {ty} = 1;\nunsafe extern \"sysv64\" fn k() {}", "k"),
+    (r#"unsafe extern "sysv64" fn k() { let v = 1 as {ty}; }"#, "k"),
+];
+
+/// Each place a type is written, with `{ty}` where it is, for a GPU: the same, and an `extern "ptx-func"` function's
+/// parameter, result and compile-time argument, and memory that is shared.
+const GPU_PLACES: [&str; 17] = [
+    r#"unsafe extern "ptx-kernel" fn g(x: {ty}) {}"#,
+    r#"unsafe extern "ptx-kernel" fn g(p: *mut {ty}) {}"#,
+    r#"unsafe extern "ptx-kernel" fn g() -> {ty} {}"#,
+    r#"unsafe extern "ptx-kernel" fn g() { let v: [{ty}; 2]; }"#,
+    r#"unsafe extern "ptx-kernel" fn g() { let v: shared<{ty}>; }"#,
+    r#"unsafe extern "ptx-kernel" fn g() { let v: local<{ty}>; }"#,
+    "#[instances(1)]\nunsafe extern \"ptx-kernel\" fn g<const M: {ty}>() {}",
+    r#"extern "ptx-func" fn f(a: {ty}) {}"#,
+    r#"extern "ptx-func" fn f() -> {ty} {}"#,
+    "#[instances(1)]\nextern \"ptx-func\" fn f<const M: {ty}>() {}",
+    "fn h<const M: {ty}>() {}\nunsafe extern \"ptx-kernel\" fn g() { h::<1>(); }",
+    "fn h() -> {ty} {}\nunsafe extern \"ptx-kernel\" fn g() { h(); }",
+    "fn h(x: {ty}) {}\nunsafe extern \"ptx-kernel\" fn g() { let v: u32; h(v); }",
+    "static S: global<{ty}>;\nunsafe extern \"ptx-kernel\" fn g() {}",
+    "static S: constant<[{ty}; 2]> =\n[1, 2];\nunsafe extern \"ptx-kernel\" fn g() {}",
+    "const C: {ty} = 1;\nunsafe extern \"ptx-kernel\" fn g() {}",
+    r#"unsafe extern "ptx-kernel" fn g() { let v = 1 as {ty}; }"#,
+];
+
+/// What every place says of `ty`: the listing, or the PTX, or why not.
+fn said(ty: &str) -> Vec<Result<String, String>> {
+    let x86s =
+        X86_PLACES.iter().map(|(src, kernel)| kernite::x86_str(&src.replace("{ty}", ty), kernel).map(|l| l.text()));
+    let ptxs = GPU_PLACES.iter().map(|src| kernite::ptx_str(&src.replace("{ty}", ty)));
+    x86s.chain(ptxs).collect()
+}
+
+/// A type that a place does not take is refused where the type is written, in kernite's words, and is the same type
+/// whether Rust's path names it or not: `core::primitive::str` is refused as `str` is, and so is every primitive in
+/// every place, in all six spellings. kernite reads no other path as a primitive. A place takes it or refuses it as
+/// it does `Word`, and quotes it as written: a path into the crate, a path that is only a part of the primitive's,
+/// `core::primitive::u64` after another name, or before another, `core::primitive::u64::MAX`; and one to a type that
+/// `core::primitive` has not, `core::primitive::f16`.
+#[test]
+fn a_path_is_refused_as_the_type_it_names_is_where_the_place_does_not_take_it() {
+    for name in PRIMITIVES {
+        let by_name = said(name);
+        assert!(by_name.iter().any(Result::is_err), "{name}");
+        for path in PATHS {
+            let written = path.replace("{}", name);
+            assert_eq!(said(&written), by_name, "{written}");
+        }
+    }
+    // `Word` is a type of the program's own: every place that is not a pointer or a const says so, naming it.
+    let word = said("Word");
+    assert!(word.iter().filter(|r| r.is_err()).count() > 20);
+    for path in [
+        "crate::Word",
+        "self::Word",
+        "my::core::primitive::u64",
+        "crate::core::primitive::u64",
+        "core::primitive::u64::MAX",
+        "core::primitive::f16",
+        "core::primitive::f128",
+        "core::primitive::bf16",
+        "core::primitive::s32",
+        "core::primitive",
+        "core::u64",
+    ] {
+        let by_name: Vec<_> = word
+            .iter()
+            .map(|r| r.as_ref().map(|ok| ok.replace("Word", path)).map_err(|e| e.replace("Word", path)))
+            .collect();
+        assert_eq!(said(path), by_name, "{path}");
+    }
+}
+
+/// The error for a primitive written by a path names it by its name, at the type, and the error for any other path
+/// names the path as written. So does the error for a constant of a primitive: `core::primitive::u32::NOPE` is
+/// `u32::NOPE` in it, at the path's first token, and `my::core::primitive::u32::MAX` is as written. A name written
+/// raw is the name Rust reads in it, as in any path, but for a keyword, `r#mut`, which stays as written, in a
+/// compile-time argument's type and a cast's too.
+#[test]
+fn an_error_names_a_primitive_by_its_name_and_any_other_path_as_written() {
+    let takes = "a kernel takes pointers, 64-bit integers and floats, not";
+    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not";
+    let compile_time = "a function that names an ABI takes integers and `bool`s at compile time, as Rust's const \
+                        generics are; ";
+    let variables = "x86 variables are `gpr`, `ymm`, `xmm` and stack memory, `local<..>`; not";
+    let statics = "a static holds Rust's numbers, `u8` to `u64`, `i8` to `i64`, `usize`, `isize`, `f32` and `f64`; not";
+    for (src, kernel, error) in [
+        // A parameter, a pointer to a type, a result, a compile-time argument, and a variable.
+        (r#"unsafe extern "sysv64" fn k(x: core::primitive::str) {}"#, "k", format!("1:32: {takes} `str`")),
+        (r#"unsafe extern "sysv64" fn k(x: ::std::primitive::char) {}"#, "k", format!("1:32: {takes} `char`")),
+        (r#"unsafe extern "sysv64" fn k(x: r#core::primitive::str) {}"#, "k", format!("1:32: {takes} `str`")),
+        (r#"unsafe extern "sysv64" fn k(x: ::core::primitive::r#char) {}"#, "k", format!("1:32: {takes} `char`")),
+        (
+            r#"unsafe extern "sysv64" fn k(x: my::r#core::primitive::u64) {}"#,
+            "k",
+            format!("1:32: {takes} `my::core::primitive::u64`"),
+        ),
+        (r#"unsafe extern "sysv64" fn k(x: crate::Word) {}"#, "k", format!("1:32: {takes} `crate::Word`")),
+        (
+            r#"unsafe extern "sysv64" fn k(x: core::primitive::f16) {}"#,
+            "k",
+            format!("1:32: {takes} `core::primitive::f16`"),
+        ),
+        (
+            r#"unsafe extern "sysv64" fn k(x: my::core::primitive::u64) {}"#,
+            "k",
+            format!("1:32: {takes} `my::core::primitive::u64`"),
+        ),
+        (
+            r#"unsafe extern "sysv64" fn k(x: core::primitive::u64::MAX) {}"#,
+            "k",
+            format!("1:32: {takes} `core::primitive::u64::MAX`"),
+        ),
+        (
+            r#"unsafe extern "sysv64" fn k(p: *const core::primitive::str) {}"#,
+            "k",
+            "1:32: a pointer to `str` has two words, an address and a length or a table, and a kernel's pointer has \
+             one"
+            .into(),
+        ),
+        (r#"unsafe extern "sysv64" fn k() -> ::core::primitive::i128 {}"#, "k", format!("1:34: {returns} `i128`")),
+        (
+            "#[instances(1)]\nunsafe extern \"sysv64\" fn k<const M: core::primitive::f32>() {}",
+            "k::<1>",
+            format!("2:35: {compile_time}`f32` is neither"),
+        ),
+        (
+            "#[instances(1)]\nunsafe extern \"sysv64\" fn k<const M: crate::Word>() {}",
+            "k::<1>",
+            format!("2:35: {compile_time}`crate::Word` is neither"),
+        ),
+        (
+            "#[instances(1)]\nunsafe extern \"sysv64\" fn k<const M: r#mut>() {}",
+            "k::<1>",
+            format!("2:35: {compile_time}`r#mut` is neither"),
+        ),
+        (
+            "fn h<const M: ::std::primitive::str>() {}\nunsafe extern \"sysv64\" fn k() { h::<1>(); }",
+            "k",
+            "2:37: this is an integer, not str".into(),
+        ),
+        (
+            r#"unsafe extern "sysv64" fn k() { let v: [std::primitive::u8; 2]; }"#,
+            "k",
+            format!("1:41: {variables} `u8`"),
+        ),
+        // A static, and a cast.
+        (
+            "static S: global<::core::primitive::str>;\nunsafe extern \"sysv64\" fn k() {}",
+            "k",
+            format!("1:11: {statics} `str`"),
+        ),
+        (
+            r#"unsafe extern "sysv64" fn k() { let v = 1 as core::primitive::str; }"#,
+            "k",
+            "1:43: an integer cannot be cast to str".into(),
+        ),
+        (
+            r#"unsafe extern "sysv64" fn k() { let v = 1 as r#mut; }"#,
+            "k",
+            "1:43: an integer cannot be cast to r#mut".into(),
+        ),
+        // A constant named by the path of its primitive is the primitive's name in the error, where the constant is
+        // none, at the path's first token, `core` or the `::` before it; any other path is as written.
+        (
+            r#"unsafe extern "sysv64" fn k() { let g: gpr; mov(g, core::primitive::u32::NOPE); }"#,
+            "k",
+            "1:52: `u32::NOPE` is not a constant kernite knows".into(),
+        ),
+        (
+            r#"unsafe extern "sysv64" fn k() { let g: gpr; mov(g, ::std::primitive::f64::NOPE); }"#,
+            "k",
+            "1:52: `f64::NOPE` is not a constant kernite knows".into(),
+        ),
+        (
+            "const C: u64 = ::std::primitive::u64::NOPE;\nunsafe extern \"sysv64\" fn k() { let g: gpr; mov(g, C); }",
+            "k",
+            "1:16: `u64::NOPE` is not a constant kernite knows".into(),
+        ),
+        (
+            r#"unsafe extern "sysv64" fn k() { let g: gpr; mov(g, core::primitive::f16::MAX); }"#,
+            "k",
+            "1:52: `core::primitive::f16::MAX` is not a constant kernite knows".into(),
+        ),
+        (
+            r#"unsafe extern "sysv64" fn k() { let g: gpr; mov(g, my::core::primitive::u32::MAX); }"#,
+            "k",
+            "1:52: `my::core::primitive::u32::MAX` is not a constant kernite knows".into(),
+        ),
+        (
+            r#"unsafe extern "sysv64" fn k() { let g: gpr; mov(g, ::my::u32::MAX); }"#,
+            "k",
+            "1:52: expected an expression, found `:`".into(),
+        ),
+        (
+            r#"unsafe extern "sysv64" fn k() { let g: gpr; core::primitive::u32::MAX(g); }"#,
+            "k",
+            "1:45: `u32::MAX` names nothing kernite calls".into(),
+        ),
+        (
+            r#"unsafe extern "sysv64" fn k() { let g: gpr; mov(g, core::primitive::u32::from_bits(1)); }"#,
+            "k",
+            "1:52: `from_bits` makes an f32, f64, f16 or bf16 of an integer".into(),
+        ),
+    ] {
+        assert_eq!(kernite::x86_str(src, kernel).unwrap_err(), error, "{src}");
+    }
+    let takes = "a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, `f32` and `f64`, not";
+    let memory = "memory holds `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, `bf16x2`, `tf32`, \
+                  `f32` and `f64`; not";
+    let function = "a function takes and returns PTX's types, as its variables are: `u32`, `f32`, `b64`; not";
+    for (src, error) in [
+        (r#"unsafe extern "ptx-kernel" fn g(x: core::primitive::str) {}"#, format!("1:36: {takes} `str`")),
+        (r#"unsafe extern "ptx-kernel" fn g(x: crate::Word) {}"#, format!("1:36: {takes} `crate::Word`")),
+        (
+            "#[instances(1)]\nunsafe extern \"ptx-kernel\" fn g<const M: core::primitive::f32>() {}",
+            format!("2:39: {compile_time}`f32` is neither"),
+        ),
+        (
+            r#"unsafe extern "ptx-kernel" fn g() { let v: shared<std::primitive::str>; }"#,
+            format!("1:44: {memory} `str`"),
+        ),
+        (
+            r#"extern "ptx-func" fn f(a: ::core::primitive::i64) {}"#,
+            "1:27: a function takes and returns PTX's types, PTX writes it `s64`; not `i64`".into(),
+        ),
+        (r#"extern "ptx-func" fn f() -> std::primitive::str {}"#, format!("1:29: {function} `str`")),
+        (
+            "static S: constant<[core::primitive::str; 2]> = [1, 2];\nunsafe extern \"ptx-kernel\" fn g() {}",
+            format!("1:11: {memory} `str`"),
+        ),
+        (
+            r#"unsafe extern "ptx-kernel" fn g() { let v: u32; mov.u32(v, core::primitive::u32::NOPE); }"#,
+            "1:60: `u32::NOPE` is not a constant kernite knows".into(),
+        ),
+        (
+            r#"unsafe extern "ptx-kernel" fn g() { let v: f32; mov.f32(v, ::std::primitive::f32::NOPE); }"#,
+            "1:60: `f32::NOPE` is not a constant kernite knows".into(),
+        ),
+        (
+            r#"unsafe extern "ptx-kernel" fn g() { let v: u32; mov.u32(v, ::core::primitive::f16::MAX); }"#,
+            "1:60: expected an expression, found `:`".into(),
+        ),
+    ] {
+        assert_eq!(kernite::ptx_str(src).unwrap_err(), error, "{src}");
+    }
+}
+
 /// A result is a type, and is read whole as a parameter's is, up to the body or the `where` or `;` before it: not
 /// up to a block among the arguments of a name in it, `Pair<u8, { 3 }>`, which is a const argument. A kernel
 /// gives back a pointer to such a type, plain and of compile-time arguments, whatever else the type holds. A

@@ -51,6 +51,11 @@
 //!   [`pointer()`] to count one word in a pointer to `r#dyn::Foo`, a struct, where a pointer to `dyn Foo` has two. So
 //!   it is for the 48 keywords Rust lets be written raw, the strict and the reserved ones. A weak keyword, `union` say,
 //!   is a name as it is, and loses its `r#`.
+//! - **Primitives** are read by their names. Rust names each by a path too, `core::primitive::u64`,
+//!   `::core::primitive::u64`, `std::primitive::u64` or `::std::primitive::u64`, each name written raw or not, in a
+//!   type as in a cast, and in a value as in `core::primitive::u32::MAX`; [`read_type`] gives a type so, and the
+//!   parser reads a value so, with each path as the name, and the machines, the evaluator and the macros read the
+//!   name and no path.
 //! - **Helpers** are functions with no ABI, inlined where they are called. A parameter takes
 //!   the caller's variable, seen as its type; `<const N: usize>` takes a value, as in
 //!   `dot::<4>(x, y, n)`. A helper sees its own names and the module's constants.

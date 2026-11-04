@@ -6,7 +6,7 @@ use crate::ast::{
     BinOp, Block, Const, Cooperative, Directive, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret,
     Static, Stmt, Type, UnOp,
 };
-use crate::token::{Delim, Span, Tree, read_type, text, unraw};
+use crate::token::{Delim, Span, Tree, path, primitive, read_type, text, unraw};
 use crate::{Error, nested};
 
 /// A GPU kernel's tuning directives, as PTX has them: each by its name, what it gives, and an
@@ -187,6 +187,19 @@ impl<'a> Parser<'a> {
                 Ok((unraw(name).to_string(), *span))
             }
             _ => self.error(format!("expected a name, found {}", self.found())),
+        }
+    }
+
+    /// A type that is a name, `u64`, or a path, `core::primitive::u64`, as [`read_type`] gives it: a generic's, or the
+    /// one a cast is to.
+    fn path_type(&mut self) -> Result<String, Error> {
+        match path(&self.trees[self.pos..]) {
+            0 => Ok(self.ident()?.0),
+            len => {
+                let ty = read_type(&self.trees[self.pos..self.pos + len]);
+                self.pos += len;
+                Ok(ty)
+            }
         }
     }
 
@@ -465,7 +478,7 @@ impl<'a> Parser<'a> {
                 }
                 let (name, span) = self.ident()?;
                 self.expect_op(":")?;
-                let (ty, _) = self.ident()?;
+                let ty = self.path_type()?;
                 generics.push(Generic { name, span, ty });
                 if !self.eat_op(",") {
                     self.expect_op(">")?;
@@ -781,7 +794,7 @@ impl<'a> Parser<'a> {
             chained += 1;
             nested(chained, span)?;
             self.pos += 1;
-            let (ty, _) = self.ident()?;
+            let ty = self.path_type()?;
             e = Expr::Cast(Box::new(e), ty, span);
         }
         Ok(e)
@@ -809,8 +822,23 @@ impl<'a> Parser<'a> {
         Ok(ops.into_iter().rev().fold(e, |e, (op, span)| Expr::Unary(op, Box::new(e), span)))
     }
 
+    /// The path that begins with `first`, whose name `span` is at, and goes on by `::`: `u32::MAX`.
+    fn path_from(&mut self, first: &str, span: Span) -> Result<Expr, Error> {
+        let mut path = vec![first.to_string()];
+        while self.is_op("::") && matches!(self.peek_at(2), Some(Tree::Ident { .. })) {
+            self.pos += 2;
+            path.push(self.ident()?.0);
+        }
+        Ok(Expr::Path(path, span))
+    }
+
     fn primary(&mut self) -> Result<Expr, Error> {
         let span = self.span();
+        // A path that begins with a primitive's, `core::primitive::u32::MAX`, is read from the primitive's name.
+        if let Some((name, len)) = primitive(&self.trees[self.pos..]) {
+            self.pos += len;
+            return self.path_from(name, span);
+        }
         let Some(t) = self.bump() else {
             return Err(Error { span, message: "expected an expression, found the end".into() });
         };
@@ -825,14 +853,7 @@ impl<'a> Parser<'a> {
             Tree::Ident { name, span, .. } if name == "true" || name == "false" => {
                 Ok(Expr::Bool(name == "true", *span))
             }
-            Tree::Ident { name, span, .. } => {
-                let mut path = vec![unraw(name).to_string()];
-                while self.is_op("::") && matches!(self.peek_at(2), Some(Tree::Ident { .. })) {
-                    self.pos += 2;
-                    path.push(self.ident()?.0);
-                }
-                Ok(Expr::Path(path, *span))
-            }
+            Tree::Ident { name, span, .. } => self.path_from(unraw(name), *span),
             // The tokens of a macro's fragment are one operand, as parentheses make them.
             Tree::Group { delim: Delim::Paren | Delim::None, trees, span, .. } => {
                 let mut p = Parser::new(trees, *span);

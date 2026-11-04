@@ -91,6 +91,35 @@ A module may give the name of a primitive, `u8` or `str`, another type, and its 
 long as none takes or gives that name as a number: the Rust kernite writes names each primitive by its path,
 `::core::primitive::u8`.
 
+Rust names each primitive by a path as well as by its name, and kernite reads the path as the name:
+`core::primitive::u64`, `::core::primitive::u64`, `std::primitive::u64` and `::std::primitive::u64` are all `u64`. A
+name of the path written raw is the name Rust reads, so `r#core::primitive::u64` and `::core::primitive::r#u64` are
+`u64` too. So it is for each of the 17 types of `core::primitive`: `bool`, `char`, `f32`, `f64`, `i8` to `i128`,
+`isize`, `str`, `u8` to `u128` and `usize`. It holds wherever a type is written: the parameters and the result of a
+kernel, a helper or an `extern "ptx-func"` function; the type of a compile-time argument,
+`fn k<const N: core::primitive::u32>`; the type of a variable, a const or a static; and the type a cast is to. A kernel
+written with the paths compiles to the listing, or the PTX, of the same kernel written with the names, and a message
+says the name: `core::primitive::str` is `str` in it.
+
+A path in a value that begins with a primitive's is read from the primitive's name too: `core::primitive::u32::MAX` is
+`u32::MAX`, `::std::primitive::f32::INFINITY` is `f32::INFINITY`, and `core::primitive::f32::from_bits(..)` is
+`f32::from_bits(..)`. It holds wherever a value is written: a const, a static's data, the length of an array, a
+compile-time argument, the values an instance lists, and the operand of an instruction, on x86 and on a GPU. Here too a
+kernel compiles to the listing, or the PTX, it has with the names, and a message says the name:
+`core::primitive::u32::NOPE` is `u32::NOPE` in "`u32::NOPE` is not a constant kernite knows".
+
+kernite reads no other path as a primitive, and quotes it as written: `my::core::primitive::u64` and `crate::Word`,
+which are paths to types of yours; `core::primitive::f16` and `core::primitive::f128`, which name no type, for
+`core::primitive` has neither in the Rust kernite builds with; and, where a type is written,
+`core::primitive::u64::MAX`, which names a constant. Nor does it read a name of yours as the type it stands for: `Word`
+after `type Word = u64;` is quoted as `Word`. A place that takes no type of yours, a kernel's parameter say, refuses
+each at the type, in the words it has for `Word`: "a kernel takes pointers, 64-bit integers and floats, not
+`crate::Word`".
+
+Rust is asked of the path as it is of the name, in a kernel's parameters and result. A module that gives `core` or `std`
+another meaning, `use crate::fake as core;`, has Rust say, once, at the type, that it is not the number, as it does when
+the module gives `u64` another type.
+
 Any other type a kernel takes or gives back is kernite's error alone, at the type, once for each instance: `f128`,
 `[f16; 4]`, `(f16, u64)`, `&f16`, `!` as a parameter, `[u64]`, `str`, `dyn Fn()`, an `f16` or a `bf16` on x86, or a type
 of yours, whatever it is called: a type of the crate's named `f16` or `f128` is one, and Rust does not call its `use`

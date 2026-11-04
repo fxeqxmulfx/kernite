@@ -780,6 +780,349 @@ fn an_attribute_written_raw_is_the_attribute() {
     assert_eq!(spans, ["r#maxntid", "r#reqntid", "r#minnctapersm", "r#maxnreg"].map(at));
 }
 
+/// A path is names joined by `::`, with a `::` before the first or not, and `a::b` is four trees: a name, two colons
+/// and a name. The words that a type or a bound follows, `as`, `const`, `dyn`, `impl` and `mut`, are no names of one,
+/// but the same written raw is a name. Two colons make a `::` only when no space is between them; a name is a path
+/// whether a `::` comes after it or not, and a `::` with no name after it is no part of one.
+#[test]
+fn a_path_is_names_joined_by_double_colons() {
+    let count = |src: &str| crate::token::path(&crate::lex(src).unwrap());
+    for (src, trees) in [
+        ("a", 1),
+        ("a::b", 4),
+        ("a::b::c", 7),
+        ("::a", 3),
+        ("::a::b", 6),
+        (" :: a :: b ", 6),
+        ("a::b + c", 4),
+        ("a::b<c>", 4),
+        ("r#a::r#b", 4),
+        ("a::", 1),
+        ("a::b::", 4),
+        ("::", 0),
+        ("::::a", 0),
+        (":a", 0),
+        ("a:b", 1),
+        ("a: :b", 1),
+        ("a : : b", 1),
+        ("1::a", 0),
+        ("(a)::b", 0),
+        ("<a>::b", 0),
+        ("", 0),
+    ] {
+        assert_eq!(count(src), trees, "{src}");
+    }
+    for word in ["as", "const", "dyn", "impl", "mut"] {
+        for src in [format!("{word}::a"), format!("::{word}::a"), word.to_string(), format!("a::{word}::b")] {
+            let want = if src.starts_with("a::") { 1 } else { 0 };
+            assert_eq!(count(&src), want, "{src}");
+        }
+        assert_eq!(count(&format!("r#{word}::a")), 4, "r#{word}");
+        assert_eq!(count(&format!("::r#{word}::a")), 6, "::r#{word}");
+    }
+}
+
+/// `primitive` reads the third name of `core::primitive::NAME`, or of `std::primitive::NAME`, with a `::` before the
+/// first or not, when `core::primitive` has a type of that name. It takes seven trees, or nine with the `::`. `r#` on a
+/// name is Rust's way to write it, so it is dropped from each name of the path, `::core::primitive::r#u64` and
+/// `r#core::primitive::u64` as the others. The path may go on past the primitive's, and other trees may follow it;
+/// any other path begins with no primitive's.
+#[test]
+fn a_path_begins_with_a_primitive_when_core_or_std_primitive_names_one() {
+    let begins = |src: &str| crate::token::primitive(&crate::lex(src).unwrap());
+    for (src, want) in [
+        ("core::primitive::u64", Some(("u64", 7))),
+        ("std::primitive::str", Some(("str", 7))),
+        ("::core::primitive::bool", Some(("bool", 9))),
+        ("::std::primitive::f32", Some(("f32", 9))),
+        (" :: std :: primitive :: u128 ", Some(("u128", 9))),
+        ("r#core::r#primitive::r#i8", Some(("i8", 7))),
+        ("::r#std::r#primitive::r#usize", Some(("usize", 9))),
+        ("::core::primitive::r#u64", Some(("u64", 9))),
+        ("r#core::primitive::u64", Some(("u64", 7))),
+        ("core::primitive::u64::MAX", Some(("u64", 7))),
+        ("::std::primitive::u8::MAX::X", Some(("u8", 9))),
+        ("core::primitive::u64 + 1", Some(("u64", 7))),
+        ("::std::primitive::f32::from_bits(1)", Some(("f32", 9))),
+        ("core::primitive::u64, std::primitive::u8", Some(("u64", 7))),
+        ("core::primitive::f16", None),
+        ("core::primitive::f128", None),
+        ("core::primitive::U64", None),
+        ("core::primitive::u65", None),
+        ("core::primitive", None),
+        ("::core::primitive", None),
+        ("core::primitive::", None),
+        ("my::core::primitive::u64", None),
+        ("::my::std::primitive::u64", None),
+        ("alloc::primitive::u64", None),
+        ("core::prim::u64", None),
+        ("core::u64::MAX", None),
+        ("::core::u64::MAX", None),
+        ("::primitive::u64", None),
+        (": :core::primitive::u64", None),
+        ("-core::primitive::u64", None),
+        ("(core::primitive::u64)", None),
+        ("core: :primitive::u64", None),
+        ("core::primitive: :u64", None),
+        ("u64", None),
+        ("u64::MAX", None),
+        ("core", None),
+        ("", None),
+    ] {
+        assert_eq!(begins(src), want, "{src}");
+    }
+    // Fewer trees than a primitive's path has are the path of none.
+    assert_eq!(crate::token::primitive(&[]), None);
+    assert_eq!(crate::token::primitive(&crate::lex("core::primitive").unwrap()), None);
+}
+
+/// Rust names each primitive by a path as well as by its name, and the language reads the name: a type written with
+/// `core::primitive::u64`, `::core::primitive::u64`, `std::primitive::u64` or `::std::primitive::u64` is the type
+/// written with `u64`, wherever in it the path is, and so is a compile-time argument's type and a cast's. So it is
+/// when a name of the path is written raw, `::core::primitive::r#u64` and `r#core::primitive::u64`: one rule reads
+/// the names written raw and the paths of the primitives. A lifetime's name begins no path, so
+/// `&'static ::core::primitive::u64` is `&'static u64`. A path that is no primitive's of `core::primitive` stays as
+/// written but for the names written raw in it, which are the names Rust reads: one that goes on, one that begins
+/// elsewhere, one to a type `core::primitive` has not, and a module's.
+#[test]
+fn a_primitive_is_read_by_its_name_whether_it_is_written_by_a_path_or_not() {
+    let read = |src: &str| crate::read_type(&crate::lex(src).unwrap());
+    let names = [
+        "bool", "char", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64",
+        "u128", "usize",
+    ];
+    for name in names {
+        for root in ["core", "::core", "std", "::std", "r#core", " core ", ":: std"] {
+            let path = format!("{root}::primitive::{name}");
+            assert_eq!(read(&path), name, "{path}");
+            assert_eq!(read(&format!("{root}::r#primitive::r#{name}")), name, "{path} written raw");
+        }
+    }
+    for (src, want) in [
+        ("*const core::primitive::u64", "*const u64"),
+        ("*mut ::std::primitive::f32", "*mut f32"),
+        ("*const *mut core::primitive::u8", "*const *mut u8"),
+        ("[core::primitive::u8; 4]", "[u8; 4]"),
+        ("*const [::core::primitive::u8; 4]", "*const [u8; 4]"),
+        ("(core::primitive::u32, ::core::primitive::f64)", "(u32, f64)"),
+        ("&mut [std::primitive::u16]", "&mut [u16]"),
+        ("global<[core::primitive::u32; 4]>", "global<[u32; 4]>"),
+        ("fn(core::primitive::u8) -> ::core::primitive::u8", "fn(u8) -> u8"),
+        ("Pair<core::primitive::u8, 2>", "Pair<u8, 2>"),
+        ("core :: primitive :: u64", "u64"),
+        // The words a type is spaced by, `as`, `const`, `dyn`, `impl` and `mut`, are no names of a path, so a `::`
+        // after one begins a path of its own.
+        ("dyn core::primitive::u8", "dyn u8"),
+        ("&mut core::primitive::u8", "&mut u8"),
+        ("<core::primitive::u8 as Tr>::T", "<u8 as Tr>::T"),
+        ("dyn ::core::primitive::u8", "dyn u8"),
+        ("impl ::std::primitive::u8", "impl u8"),
+        ("*const ::core::primitive::u8", "*const u8"),
+        ("*mut ::std::primitive::u8", "*mut u8"),
+        ("&mut ::core::primitive::u8", "&mut u8"),
+        ("<::core::primitive::u8 as ::std::primitive::u16>::T", "<u8 as u16>::T"),
+        // A block is written as its source has it, so the name that stands for a path has the space the path had.
+        ("Marker<{ N as core::primitive::u8 }>", "Marker<{ N as u8 }>"),
+        ("Marker<{N as ::std::primitive::u8}>", "Marker<{N as u8}>"),
+        ("Marker<{ N as(core::primitive::u8) }>", "Marker<{ N as(u8) }>"),
+        // A keyword written raw is a name, so it can begin a path, and be one beside it.
+        ("Foo<r#mut, ::core::primitive::u8>", "Foo<r#mut, u8>"),
+        ("r#dyn<::std::primitive::u8>", "r#dyn<u8>"),
+        // A name written raw is the name Rust reads, whichever name of the path it is. One rule reads the names
+        // written raw and the primitive's path, so a path that both touch is the primitive's name.
+        ("::core::primitive::r#u64", "u64"),
+        ("r#core::primitive::u64", "u64"),
+        ("*const ::std::primitive::r#f32", "*const f32"),
+        ("[r#std::r#primitive::u8; 4]", "[u8; 4]"),
+        ("(r#core::primitive::u32, ::core::r#primitive::f64)", "(u32, f64)"),
+    ] {
+        assert_eq!(read(src), want, "{src}");
+    }
+    // A lifetime is a `'` and a name, and its name begins no path: `'static ::core::primitive::u8` is a lifetime and a
+    // path. The tokens are made as the macro is given them, for the lexer of a string refuses a lifetime.
+    let bound = |src: &str| crate::read_type(&lexed_with_lifetimes(src));
+    for (src, want) in [
+        ("&'static ::core::primitive::u8", "&'static u8"),
+        ("&'static core::primitive::u8", "&'static u8"),
+        ("&'a ::std::primitive::str", "&'a str"),
+        ("&'a mut ::core::primitive::u8", "&'a mut u8"),
+        ("&'_ ::std::primitive::u16", "&'_ u16"),
+        ("Foo<'a, ::core::primitive::u8>", "Foo<'a, u8>"),
+        ("(&'a ::core::primitive::u8, &'b std::primitive::i8)", "(&'a u8, &'b i8)"),
+        ("for<'a> fn(&'a ::core::primitive::u8) -> &'a ::std::primitive::u8", "for<'a> fn(&'a u8) -> &'a u8"),
+        ("&'a u8", "&'a u8"),
+    ] {
+        assert_eq!(bound(src), want, "{src}");
+    }
+    // A `'` with no name after it is no lifetime, and nothing to take the tokens that follow it for.
+    let quote = Tree::Punct { ch: '\'', space: false, span: Span(0) };
+    assert_eq!(crate::read_type(std::slice::from_ref(&quote)), "'");
+    // Any other path stays: the types that `core::primitive` has not on this Rust, `f16` and `f128` say, a path that
+    // goes on, one that begins elsewhere, one that is only a part, and the types of the module.
+    for path in [
+        "core::primitive::f16",
+        "core::primitive::f128",
+        "core::primitive::bf16",
+        "core::primitive::s32",
+        "core::primitive::U64",
+        "core::primitive::u64::MAX",
+        "my::core::primitive::u64",
+        "crate::core::primitive::u64",
+        "super::std::primitive::u64",
+        "r#mut::core::primitive::u64",
+        "r#dyn::std::primitive::u64",
+        "core::primitive",
+        "core::primitive::",
+        // Two colons are a `::` only when no space is between them.
+        "core: :primitive: :u64",
+        "primitive::u64",
+        "core::u64",
+        "std::u64",
+        "core::f32::consts::PI",
+        "crate::Word",
+        "u64::MAX",
+        "*const my::core::primitive::u64",
+        "[my::std::primitive::u8; 4]",
+    ] {
+        assert_eq!(read(path), crate::text(&crate::lex(path).unwrap()), "{path}");
+    }
+    // A path that is no primitive's is a path still, but for the names written raw in it, which are the names Rust
+    // reads. A keyword written raw stays so.
+    for (src, want) in [
+        ("my::r#core::primitive::u64", "my::core::primitive::u64"),
+        ("core::primitive::r#f16", "core::primitive::f16"),
+        ("::r#core::primitive::r#u64::r#MAX", "::core::primitive::u64::MAX"),
+        ("my::r#mut::r#Word", "my::r#mut::Word"),
+    ] {
+        assert_eq!(read(src), want, "{src}");
+    }
+    // A type is read as a path where the parser reads one: a function's parameters, its result, its compile-time
+    // arguments and a cast.
+    let src = "pub unsafe extern \"sysv64\" fn k<const N: core::primitive::usize, const R: r#u16, \
+               const M: ::core::primitive::r#u64, const L: r#core::primitive::u8>(\
+               x: ::core::primitive::u64, p: *mut std::primitive::u8, \
+               q: [::std::primitive::f32; core::primitive::u8::BITS as usize]) \
+               -> ::std::primitive::u32 { let y = x as core::primitive::u8; let z = y as r#u32; }";
+    let module = crate::module(&crate::lex(src).unwrap(), 0).unwrap();
+    let crate::ItemKind::Fn(f) = &module.items[0].kind else { panic!("a function") };
+    // A name written raw is the name, as it is anywhere else.
+    assert_eq!(f.generics.iter().map(|g| g.ty.as_str()).collect::<Vec<_>>(), ["usize", "u16", "u64", "u8"]);
+    let types: Vec<String> = f.params[..2].iter().map(|p| shown(&p.ty)).collect();
+    assert_eq!(types, ["u64", "*mut u8"]);
+    let crate::Type::Array(elem, len, _) = &f.params[2].ty else { panic!("an array") };
+    assert_eq!(shown(elem), "f32");
+    // The length is a value, and its path is read from the primitive's name too.
+    let crate::Expr::Cast(bits, ty, _) = len else { panic!("a cast") };
+    assert!(matches!(&**bits, crate::Expr::Path(names, _) if names == &["u8", "BITS"]) && ty == "usize");
+    let at = |path: &str| Span(src.find(path).unwrap() as u32);
+    assert_eq!(f.generics[0].span, at("N:"));
+    assert_eq!(f.params[0].ty.span(), at("::core::primitive::u64"));
+    assert_eq!(f.params[1].ty.span(), at("*mut std::primitive::u8"));
+    assert_eq!(f.ret.as_ref().map(|r| (r.ty.as_str(), r.span)), Some(("u32", at("::std::primitive::u32"))));
+    let body = f.body.as_ref().unwrap();
+    let crate::Stmt::Let { value: Some(crate::Expr::Cast(_, ty, _)), .. } = &body.stmts[0] else { panic!("a cast") };
+    assert_eq!(ty, "u8");
+    let crate::Stmt::Let { value: Some(crate::Expr::Cast(_, ty, _)), .. } = &body.stmts[1] else { panic!("a cast") };
+    assert_eq!(ty, "u32");
+    // The same with a lifetime before the path, in a parameter, in a type's arguments and in the result.
+    let src = "pub unsafe extern \"sysv64\" fn k(x: &'static ::core::primitive::u8, y: Foo<'a, ::std::primitive::str>) \
+               -> &'a ::std::primitive::str {}";
+    let module = crate::module(&lexed_with_lifetimes(src), 0).unwrap();
+    let crate::ItemKind::Fn(f) = &module.items[0].kind else { panic!("a function") };
+    let types: Vec<String> = f.params.iter().map(|p| shown(&p.ty)).collect();
+    assert_eq!(types, ["&'static u8", "Foo<'a, str>"]);
+    assert_eq!(f.ret.as_ref().map(|r| r.ty.as_str()), Some("&'a str"));
+    // No `'` comes before the first parameter's type, so the lexer's offset is the source's.
+    assert_eq!(f.params[0].ty.span(), Span(src.find("&'static").unwrap() as u32));
+    // A path that is no name is the parser's error: it wants a name, not a `::` with none after it.
+    for (bad, said) in
+        [("k<const N: ::>()", "expected a name, found `:`"), ("k<const N: 5>()", "expected a name, found `5`")]
+    {
+        let src = format!("pub unsafe extern \"sysv64\" fn {bad} {{}}");
+        let err = crate::module(&crate::lex(&src).unwrap(), 0).unwrap_err();
+        assert_eq!(err.message, said, "{src}");
+    }
+}
+
+/// A path in a value that begins with a primitive's path, `core::primitive::u32::MAX`, is read as the one that begins
+/// with the primitive's name, `u32::MAX`, by the rule that reads a type: in the four ways, with `r#` on a name or not,
+/// alone and in a call, `core::primitive::f32::from_bits(..)`. It is at the place where the path begins. Any other
+/// path stays as written: one to a type that `core::primitive` has not, one that begins elsewhere, and a module's,
+/// `core::u32::MAX`. A path from the root that is no primitive's is no value: the parser wants an expression, not a
+/// `::`.
+#[test]
+fn a_value_path_that_begins_with_a_primitives_path_is_read_from_its_name() {
+    let parsed = |src: &str| {
+        let module = crate::module(&crate::lex(&format!("const C: u64 = {src};")).unwrap(), 0);
+        module.map(|m| match &m.items[0].kind {
+            crate::ItemKind::Const(c) => c.value.clone(),
+            _ => panic!("a const"),
+        })
+    };
+    let at = Span("const C: u64 = ".len() as u32);
+    let primitives = [
+        "bool", "char", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64",
+        "u128", "usize",
+    ];
+    for name in primitives {
+        for root in ["core", "::core", "std", "::std", "r#core", ":: std"] {
+            for (path, rest) in [
+                (format!("{root}::primitive::{name}::MAX"), vec!["MAX"]),
+                (format!("{root}::r#primitive::r#{name}::r#MAX"), vec!["MAX"]),
+                (format!("{root}::primitive::{name}::NOT::HERE"), vec!["NOT", "HERE"]),
+                (format!("{root}::primitive::{name}"), vec![]),
+            ] {
+                let Ok(crate::Expr::Path(names, span)) = parsed(&path) else { panic!("a path: {path}") };
+                assert_eq!(names, [vec![name], rest].concat(), "{path}");
+                assert_eq!(span, at, "{path}");
+            }
+        }
+    }
+    // A call, and what is called: `f32::from_bits`.
+    for root in ["core", "::core", "std", "::std"] {
+        let src = format!("{root}::primitive::f32::from_bits(1)");
+        let Ok(crate::Expr::Call { func, args, span, .. }) = parsed(&src) else { panic!("a call: {src}") };
+        let crate::Expr::Path(names, _) = *func else { panic!("a path: {src}") };
+        assert_eq!((names, args.len(), span), (vec!["f32".to_string(), "from_bits".to_string()], 1, at), "{src}");
+    }
+    // A name written raw is the name Rust reads, whichever name of the path it is.
+    for src in ["::core::primitive::r#u64::MAX", "r#core::primitive::u64::MAX", "::r#std::r#primitive::r#u64::r#MAX"] {
+        let Ok(crate::Expr::Path(names, span)) = parsed(src) else { panic!("a path: {src}") };
+        assert_eq!((names, span), (vec!["u64".to_string(), "MAX".to_string()], at), "{src}");
+    }
+    // A path goes on as a path does after a name: a cast, a method.
+    let Ok(crate::Expr::Cast(inner, ty, _)) = parsed("::core::primitive::u8::MAX as ::std::primitive::u64") else {
+        panic!("a cast")
+    };
+    let crate::Expr::Path(names, _) = *inner else { panic!("a path") };
+    assert_eq!((names, ty.as_str()), (vec!["u8".to_string(), "MAX".to_string()], "u64"));
+    assert!(matches!(parsed("core::primitive::u32::MAX.count_ones()"), Ok(crate::Expr::Method { .. })));
+    // Any other path is as it was written: one to a type `core::primitive` has not, one that begins elsewhere, a
+    // module's.
+    for path in [
+        "core::primitive::f16::MAX",
+        "std::primitive::bf16::MAX",
+        "core::primitive::s32::MAX",
+        "core::primitive",
+        "core::primitive::MAX",
+        "core::u32::MAX",
+        "std::f32::consts::PI",
+        "my::core::primitive::u32::MAX",
+        "crate::core::primitive::u32::MAX",
+        "primitive::u32::MAX",
+        "u32::MAX",
+    ] {
+        let Ok(crate::Expr::Path(names, span)) = parsed(path) else { panic!("a path: {path}") };
+        assert_eq!(names.join("::"), path, "{path}");
+        assert_eq!(span, at, "{path}");
+    }
+    // A path from the root that is no primitive's is no value: the parser wants an expression, not a `::`.
+    for path in ["::my::u32::MAX", "::core::u32::MAX", "::core::primitive::f16::MAX", "::"] {
+        let err = parsed(path).unwrap_err();
+        assert_eq!((err.message.as_str(), err.span), ("expected an expression, found `:`", at), "{path}");
+    }
+}
+
 /// The `!` of never follows the arrow, a keyword or a lifetime, and is no macro's: the braces after it are the
 /// body. A lifetime is a `'` and a name, and that name is no macro's, so the result of `&'static !` is the four tokens
 /// before the braces. A macro after a lifetime, `&'static byte!{ _ }`, takes its braces, as it does anywhere in a

@@ -212,27 +212,31 @@ pub(crate) fn clashes(f: &Fn, cfg: &TokenStream, own: &[&str], method: &str, top
     errors
 }
 
+/// `tokens` split at the commas that are not among the arguments of a type's, `x: *mut Pair<u8, 2>`.
+/// The `>` of an arrow, `fn() -> u8`, closes no `<` of them.
+fn split_commas(tokens: &[TokenTree]) -> impl Iterator<Item = &[TokenTree]> {
+    let (mut open, mut dash) = (0usize, false);
+    tokens.split(move |t| {
+        if is_punct(t, '<') {
+            open += 1;
+        } else if is_punct(t, '>') && !dash {
+            open = open.saturating_sub(1);
+        }
+        // A `>` after a `-` joint to it is an arrow's, `->`.
+        dash = matches!(t, TokenTree::Punct(p) if p.as_char() == '-' && p.spacing() == Spacing::Joint);
+        open == 0 && is_punct(t, ',')
+    })
+}
+
 /// `f`'s parameters as written, each its tokens, `x: *mut f32`, and the place of its colon. A comma
-/// ends a parameter unless it is among the arguments of a type's, `x: *mut Pair<u8, 2>`. The `>` of
-/// an arrow, `fn() -> u8`, closes no `<` of them. Rust cannot pass a parameter named `_` on, so
-/// each is named here, for every signature and body the macros write for `f`: it takes the next of
-/// `__kernite_0`, `__kernite_1` and on that no parameter or compile-time argument of `f` is named.
+/// ends a parameter unless [`split_commas`] says it is among the arguments of a type's. Rust cannot
+/// pass a parameter named `_` on, so each is named here, for every signature and body the macros
+/// write for `f`: it takes the next of `__kernite_0`, `__kernite_1` and on that no parameter or
+/// compile-time argument of `f` is named.
 pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, usize)> {
     let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
     let tokens = flatten(group.stream());
-    let (mut open, mut dash) = (0usize, false);
-    let params = tokens
-        .split(|t| {
-            if is_punct(t, '<') {
-                open += 1;
-            } else if is_punct(t, '>') && !dash {
-                open = open.saturating_sub(1);
-            }
-            // A `>` after a `-` joint to it is an arrow's, `->`.
-            dash = matches!(t, TokenTree::Punct(p) if p.as_char() == '-' && p.spacing() == Spacing::Joint);
-            open == 0 && is_punct(t, ',')
-        })
-        .filter(|p| !p.is_empty());
+    let params = split_commas(&tokens).filter(|p| !p.is_empty());
     let taken: Vec<&str> =
         f.generics.iter().map(|g| &g.name).chain(f.params.iter().map(|p| &p.name)).map(String::as_str).collect();
     let mut free = (0..).map(|n| format!("__kernite_{n}")).filter(|name| !taken.contains(&name.as_str()));
@@ -358,29 +362,27 @@ pub(crate) fn gives_placeholder(f: &Fn, top: &[TokenTree]) -> bool {
 const THIN: &str = "__KerniteThin";
 
 /// What Rust is asked of a type of a kernel's, and where the type is.
-#[derive(Clone, Copy)]
 enum Ask {
     /// Where the type a pointer of one word, `*const T` or `*mut T`, points to begins and where it
     /// ends: whether `T` has a size.
     Pointer(Span, Span),
-    /// A number by its name, and where the name is: whether it is that number, the primitive
-    /// `::core::primitive::u64`, and not another type the module gives the name. Rust is asked of
-    /// the type alone, never of a value of it.
-    Number(&'static str, Span),
+    /// A number by its name or its path, and the tokens that write it: whether they are that number,
+    /// the primitive `::core::primitive::u64`, and not another type: one the module gives the name,
+    /// or one the path finds through a `core` or `std` the module gives another meaning. Rust is
+    /// asked of the type alone, never of a value of it.
+    Number(&'static str, Vec<TokenTree>),
 }
 
-/// The number `ty` is, and where its name is, if `ty` is one by its name: `u8` to `u64`, `i8` to
-/// `i64`, `usize`, `isize`, `f32`, `f64` or `bool`, which the language reads by their names, written raw or not.
-fn number_name(ty: &[TokenTree]) -> Option<(&'static str, Span)> {
-    let [name] = ty else { return None };
-    let written = name.to_string();
-    let text = lang::unraw(&written);
-    let known = lang::IntTy::parse(text).map(lang::IntTy::name);
-    known.or_else(|| ["bool", "f32", "f64"].into_iter().find(|n| *n == text)).map(|n| (n, name.span()))
+/// The number `ty` is, if `ty` is one by its name or its path, `u64` or `core::primitive::u64`: `u8` to
+/// `u64`, `i8` to `i64`, `usize`, `isize`, `f32`, `f64` or `bool`, which the language reads by their names.
+fn number_name(ty: &[TokenTree]) -> Option<&'static str> {
+    let read = lang::read_type(&lex(ty).0.ok()?);
+    let known = lang::IntTy::parse(&read).map(lang::IntTy::name);
+    known.or_else(|| ["bool", "f32", "f64"].into_iter().find(|n| *n == read))
 }
 
 /// For each of `f`'s parameters, and last for its result: what Rust is asked of its type, if it is
-/// asked. It is asked of a number by its name, as [`number_name`] reads it, and not of `f16` and
+/// asked. It is asked of a number by its name or its path, as [`number_name`] reads it, and not of `f16` and
 /// `bf16`, which Rust has not; and of a pointer of one word, `*const T` or `*mut T`. The language
 /// says which: a pointer to a slice, a `str` or a `dyn` has two words, and is its error alone,
 /// which Rust is not asked of, for it would say the same twice. Nor is it asked of a pointer to a
@@ -388,8 +390,8 @@ fn number_name(ty: &[TokenTree]) -> Option<(&'static str, Span)> {
 /// the type to ask of is one Rust cannot infer, and it would say that too.
 fn asked(f: &Fn, top: &[TokenTree]) -> Vec<Option<Ask>> {
     let ask = |ty: &[TokenTree]| {
-        if let Some((name, at)) = number_name(ty) {
-            return Some(Ask::Number(name, at));
+        if let Some(name) = number_name(ty) {
+            return Some(Ask::Number(name, ty.to_vec()));
         }
         let (_, to) = pointer(ty)?;
         let one = lex(ty).0.is_ok_and(|trees| lang::pointer(&lang::read_type(&trees)) == Ok(true));
@@ -467,8 +469,8 @@ pub(crate) fn probe(f: &Fn, top: &[TokenTree]) -> Option<TokenStream> {
 fn numbers(asked: &[Option<Ask>]) -> TokenStream {
     let mut inner = TokenStream::new();
     for ask in asked {
-        if let Some(Ask::Number(name, at)) = *ask {
-            inner.extend(number(name, at));
+        if let Some(Ask::Number(name, ty)) = ask {
+            inner.extend(number(name, ty));
         }
     }
     if inner.is_empty() {
@@ -481,15 +483,17 @@ fn numbers(asked: &[Option<Ask>]) -> TokenStream {
 }
 
 /// `let _ = |__kernite_asked: u64| { let _: ::core::primitive::u64 = __kernite_asked; };`, which
-/// asks Rust whether the type the kernel writes, `u64` at `at`, is the number `name`, as a module's
-/// `u64` is not when it gives the name another type. A closure that Rust checks and never calls takes
-/// a value of the type as written; so Rust says of a type that is not the number that it is not, once,
-/// at the type, and in the order a kernel that compiles says it: it expected the number and found the
-/// type. It asks of the type and not of any value of it, which a type that has no size has none of.
-/// Each token but the type is the macro's, located at `at`.
-fn number(name: &str, at: Span) -> TokenStream {
+/// asks Rust whether the type the kernel writes, `u64` or `core::primitive::u64`, `ty`, is the number
+/// `name`, as a module's `u64` is not when it gives the name another type, nor its `core` when it gives
+/// that another meaning. A closure that Rust checks and never calls takes a value of the type as
+/// written; so Rust says of a type that is not the number that it is not, once, at the type, and in the
+/// order a kernel that compiles says it: it expected the number and found the type. It asks of the type
+/// and not of any value of it, which a type that has no size has none of. Each token but the type is
+/// the macro's, located where the type begins.
+fn number(name: &str, ty: &[TokenTree]) -> TokenStream {
+    let at = ty[0].span();
     let mut out = placed("let _ = | __kernite_asked :", at);
-    out.extend([TokenTree::Ident(Ident::new(name, at))]);
+    out.extend(ty.iter().cloned());
     out.extend(placed(&format!("| {{ let _: {} = __kernite_asked; }};", primitive(name)), at));
     out
 }
@@ -503,8 +507,8 @@ fn number(name: &str, at: Span) -> TokenStream {
 fn pointers(asked: &[Option<Ask>], values: &[TokenStream]) -> TokenStream {
     let mut questions = TokenStream::new();
     for (value, ask) in values.iter().zip(asked) {
-        if let Some(Ask::Pointer(to, _)) = *ask {
-            questions.extend(thin(value.clone(), to));
+        if let Some(Ask::Pointer(to, _)) = ask {
+            questions.extend(thin(value.clone(), *to));
         }
     }
     if questions.is_empty() {
@@ -930,14 +934,14 @@ pub(crate) fn half(ty: &[TokenTree]) -> Option<TokenStream> {
     }
 }
 
-/// The number `ty` is, if it is one by its name, as the Rust the macros write for a kernel names
-/// it: the primitive by its path, `::core::primitive::u64`, located at the name. A module may give
-/// the name another type, and Rust says so, once, at the type, where [`checks`] asks it. What the
+/// The number `ty` is, if it is one by its name or its path, as the Rust the macros write for a kernel
+/// names it: the primitive by its path, `::core::primitive::u64`, located where `ty` begins. A module may
+/// give the name another type, and Rust says so, once, at the type, where [`checks`] asks it. What the
 /// macros write besides, an instance, a dispatcher or a launcher, takes the number and not the
 /// name, so it says nothing of the type: a value of one with no size, or that a launcher cannot
 /// pass on, would be an error at the module's attribute, where nothing can be mended.
 pub(crate) fn number_type(ty: &[TokenTree]) -> Option<TokenStream> {
-    number_name(ty).map(|(name, at)| placed(&primitive(name), at))
+    number_name(ty).map(|name| placed(&primitive(name), ty[0].span()))
 }
 
 /// `ty`, a type a kernel takes, as the Rust the macros write has it: [`number_type`] if it is a
@@ -988,10 +992,9 @@ pub(crate) fn launcher_result(f: &Fn, top: &[TokenTree], launched: TokenStream) 
 /// silent about a name it cannot find only where a macro has written an error as an item of the module, and `guard`
 /// holds only there; or the lines are `__Room`'s to write, beside an error it writes, and `guard` is none.
 pub(crate) fn seen(f: &Fn, top: &[TokenTree], guard: &TokenStream) -> TokenStream {
-    let generics = written_generics(f, top)
-        .windows(4)
-        .filter(|w| is_ident(&w[0], "const") && is_punct(&w[2], ':'))
-        .map(|w| vec![w[3].clone()]);
+    let written = written_generics(f, top);
+    let inside = written.get(1..written.len().saturating_sub(1)).unwrap_or_default();
+    let generics = split_commas(inside).filter(|g| !g.is_empty()).map(|g| g[3..].to_vec());
     let params = written_params(f, top).into_iter().map(|(param, colon)| param[colon + 1..].to_vec());
     let result = f.ret.iter().map(|r| top[r.tokens.clone()].to_vec());
     let mut out = TokenStream::new();
