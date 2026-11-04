@@ -69,6 +69,9 @@ where `type Floats = [f32];`, a struct of yours whose last field is a slice, `(&
 be known, at the type, for a pointer a kernel returns as well as for one it takes, in a kernel of every kind. A type in
 a message is written as Rust writes it, `[usize; 3]`.
 
+A module may give the name of a primitive, `u8` or `str`, another type, and its kernels build as they do without: the
+Rust kernite writes names each primitive by its path, `::core::primitive::u8`.
+
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kernite_macros::consts]` is on, and a
 module of kernels takes them by its path, `#[kernite_macros::kernels(consts = crate::model::sizes)]`: its kernels read

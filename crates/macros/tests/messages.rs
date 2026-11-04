@@ -392,8 +392,9 @@ fn a_crate_without_kernite_cpu_is_told_at_what_needs_it() {
 
 /// A crate that does not depend on `kernite-cuda` is told where it needs the crate, once at each
 /// module of GPU kernels, by kernite and not by Rust, which would say that `kernite_cuda` is not
-/// found, at the attribute; and nothing is said of the code that uses the module. The crate's own
-/// name holds `kernite-cuda`, which does not make it a dependency.
+/// found, at the attribute; and nothing is said of the code that uses the module, nor of a module
+/// that gives `str` another type, whose empty `PTX` is a `&str` all the same. The crate's own name
+/// holds `kernite-cuda`, which does not make it a dependency.
 #[test]
 fn a_crate_without_kernite_cuda_is_told_at_each_module_of_gpu_kernels() {
     let edits = [("kernite-cuda =", "# kernite-cuda ="), ("\"no_cuda\"", "\"my-kernite-cuda-app\"")];
@@ -402,11 +403,13 @@ fn a_crate_without_kernite_cuda_is_told_at_each_module_of_gpu_kernels() {
     assert_eq!(
         said,
         [
-            "src/lib.rs:6:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
+            "src/lib.rs:7:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
              which this crate does not have",
-            "src/lib.rs:30:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
+            "src/lib.rs:31:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
              which this crate does not have",
-            "error: could not compile `my-kernite-cuda-app` (lib) due to 2 previous errors",
+            "src/lib.rs:68:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
+             which this crate does not have",
+            "error: could not compile `my-kernite-cuda-app` (lib) due to 3 previous errors",
         ]
     );
 }
@@ -989,8 +992,8 @@ fn a_pointer_to_a_type_with_no_size_is_refused_at_its_type() {
 /// it is called, for the macros ask Rust of each pointer, and not of a clause on its type. Two cases
 /// show it: a type with a `&` in it, `(&u8, CStr)` or `GTail<[&u8]>`, which a `where` clause cannot
 /// hold; and `u8` in a module that takes it from the crate, where it is a name for `[u8]` and kernite
-/// reads a number. Each is one error, at the type, in an x86 kernel, plain, of compile-time
-/// arguments or cooperative; the types with a `&`, on a GPU too.
+/// reads a number. Each is one error, at the type, in a kernel, plain, of compile-time arguments or
+/// cooperative, on x86 and on a GPU.
 #[test]
 fn a_pointer_to_a_type_with_no_size_is_refused_whatever_it_holds_or_is_called() {
     let sizes = [
@@ -1013,6 +1016,11 @@ fn a_pointer_to_a_type_with_no_size_is_refused_whatever_it_holds_or_is_called() 
         ("87:52", "[&u8]"),
         ("92:72", "[&u8]"),
         ("97:61", "[&u8]"),
+        // `u8`, in a GPU kernel too: the module's own `u8` is a name for a slice, and the Rust the
+        // macros write names the primitives by their paths.
+        ("106:53", "[u8]"),
+        ("111:67", "[u8]"),
+        ("116:56", "[u8]"),
     ];
     let mut said: Vec<String> = sizes.map(|(at, ty)| size_unknown(at, ty)).into();
     said.push(format!("error: could not compile `no_size_names` (lib) due to {} previous errors", sizes.len()));
@@ -1084,6 +1092,13 @@ fn impl_in_the_type_of_a_variable_a_const_or_a_static_is_said_as_it_was() {
             "error: could not compile `type_impls` (lib) due to 5 previous errors",
         ],
     );
+}
+
+/// A module that takes the name of `u8`, `u32`, `str` or any number from elsewhere builds as one that
+/// does not: the Rust the macros write names the primitives by their paths, `::core::primitive::u8`.
+#[test]
+fn a_module_that_gives_a_primitive_another_type_builds_as_one_that_does_not() {
+    builds_quietly("primitive_names");
 }
 
 /// A compile-time argument is no local, and no span of stable Rust keeps it apart from one of its
@@ -1176,7 +1191,7 @@ fn a_crate_that_forbids_a_lint_a_kernel_expects_is_refused_once_at_the_expect() 
 #[test]
 fn clippy_says_nothing_of_the_rust_the_macro_writes() {
     if clippy_here() {
-        for name in ["many", "forbidden", "pointers", "pointer_checks"] {
+        for name in ["many", "forbidden", "pointers", "pointer_checks", "primitive_names"] {
             let (done, said) = cargo(&["clippy"], name);
             assert!(done && said.is_empty(), "fixtures/{name}.rs: Clippy {done}, and said:\n{}", said.join("\n"));
         }

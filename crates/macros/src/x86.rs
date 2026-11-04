@@ -7,8 +7,8 @@ use kernite::lang::{self, Fn, ItemKind, Value};
 use kernite::{Call, HostStatic, Naked, NativeInstance};
 
 use crate::rust::{
-    attrs, checks, clashes, depends_on, hygienic, missing, never, parse, pick, pointer, probe, signature, site, stub,
-    visibility, words, written_params,
+    attrs, checks, clashes, depends_on, hygienic, missing, never, parse, pick, pointer, primitive, probe, signature,
+    site, stub, visibility, words, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -235,7 +235,7 @@ pub(crate) fn cpu_static(s: &lang::Static, made: Option<&HostStatic>, top: &[Tok
     }
     out.extend(parse(&match made {
         Some(m) => {
-            let ty = format!("::kernite_cpu::Global<{}, {}, {}>", m.elem, m.len, m.align);
+            let ty = format!("::kernite_cpu::Global<{}, {}, {}>", primitive(&m.elem), m.len, m.align);
             match m.init.iter().all(|&b| b == 0) {
                 true => format!(": {ty} = <{ty}>::zeroed();"),
                 false => format!(": {ty} = <{ty}>::new([{}]);", elements(m).join(", ")),
@@ -260,7 +260,7 @@ fn elements(m: &HostStatic) -> Vec<String> {
             // The bits as a signed number of the element's width.
             let signed = ((bits << (64 - 8 * size)) as i64) >> (64 - 8 * size);
             match m.elem.as_str() {
-                t @ ("f32" | "f64") => format!("{t}::from_bits({bits:#x})"),
+                t @ ("f32" | "f64") => format!("{}::from_bits({bits:#x})", primitive(t)),
                 t if t.starts_with('i') => format!("{signed}{t}"),
                 t => format!("{bits}{t}"),
             }

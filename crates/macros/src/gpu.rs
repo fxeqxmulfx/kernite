@@ -8,7 +8,7 @@ use kernite::lang::{self, Fn, Value};
 
 use crate::rust::{
     attrs, carried, cfg_any, checks, clashes, depends_on, error_under, host, hygienic, missing, never, parse, pick,
-    pointer, quiet, site, visibility, written_params,
+    pointer, primitive, quiet, site, visibility, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -46,7 +46,7 @@ pub(crate) fn gpu(
     if !depends_on(CUDA) {
         let gate = cfg_any(on_gpu);
         let mut out = gate.clone();
-        out.extend(parse("pub const PTX: &str = \"\";"));
+        out.extend(parse("pub const PTX: &::core::primitive::str = \"\";"));
         out.extend(gate);
         out.extend(parse("pub type Kernels ="));
         out.extend(missing(site(), "a module of GPU kernels", CUDA));
@@ -60,7 +60,7 @@ pub(crate) fn gpu(
          /// Each is named as C++ names it in the namespaces of the workspace, the crate and the\n\
          /// module, with its compile-time arguments, for the tools that read PTX to show:\n\
          /// `kernite::my_app::gpu::tile<(unsigned long)4>`.\n\
-         pub const PTX: &str = {};\n\
+         pub const PTX: &::core::primitive::str = {};\n\
          /// The module's GPU kernels, loaded on a GPU: each is launched by the method of its name,\n\
          /// and the memory of each static is the `kernite_cuda::Global` the method of its name gives.\n\
          pub struct Kernels {{\n    module: ::kernite_cuda::Module,\n}}\n\
@@ -70,8 +70,8 @@ pub(crate) fn gpu(
     let mut methods = parse(&format!(
         "/// The kernels, compiled for `cuda`'s GPU by its driver.\n\
          pub fn load(cuda: &::kernite_cuda::Cuda) -> ::core::result::Result<Kernels, ::kernite_cuda::Error> {{\n\
-             const NAMES: &[&str] = &[{}];\n\
-             const GLOBALS: &[&str] = &[{}];\n\
+             const NAMES: &[&::core::primitive::str] = &[{}];\n\
+             const GLOBALS: &[&::core::primitive::str] = &[{}];\n\
              ::core::result::Result::Ok(Kernels {{ module: ::kernite_cuda::Module::load(cuda, PTX, NAMES, GLOBALS)? }})\n\
          }}",
         names.join(", "),
@@ -120,7 +120,7 @@ fn accessor(s: &lang::Static, made: Option<(&DeviceStatic, usize)>, top: &[Token
     out.extend([name]);
     out.extend(parse(&match made {
         Some((m, i)) => {
-            let ty = host(&[TokenTree::Ident(Ident::new(&m.host, site()))]);
+            let ty = primitive(&m.host);
             format!("(&self) -> ::kernite_cuda::Global<'_, {ty}> {{ self.module.global({i}) }}")
         }
         None => {
@@ -223,7 +223,8 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
     out.extend([TokenTree::Ident(Ident::new(&blocks_name(f), name))]);
     out.extend(quiet(&top[f.head.end + 2..f.params_at]));
     out.extend(hygienic(
-        "(&self, $threads: u32, $shared: u32) -> ::core::result::Result<u32, ::kernite_cuda::Error>",
+        "(&self, $threads: ::core::primitive::u32, $shared: ::core::primitive::u32) \
+         -> ::core::result::Result<::core::primitive::u32, ::kernite_cuda::Error>",
         launched.is_some(),
     ));
     out.extend(body(f, launched, top, TokenStream::new(), "::core::unreachable!()", |index| {

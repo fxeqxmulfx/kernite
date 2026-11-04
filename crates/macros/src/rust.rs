@@ -555,11 +555,22 @@ pub(crate) fn missing(span: Span, what: &str, name: &str) -> TokenStream {
     TokenTree::Group(Group::new(Delimiter::Bracket, length)).into()
 }
 
-/// The type `ty` as the host names it: `f16` and `bf16`, which Rust has not, are kernite-cuda's.
+/// The type `ty`, a kernel's, as the host names it: `f16` and `bf16`, which Rust has not, are
+/// kernite-cuda's. Any other is as the kernel writes it, and means what it means in its module.
 pub(crate) fn host(ty: &[TokenTree]) -> TokenStream {
     match ty {
-        [t] if is_ident(t, "f16") || is_ident(t, "bf16") => parse(&format!("::kernite_cuda::{t}")),
+        [t] if is_ident(t, "f16") || is_ident(t, "bf16") => parse(&primitive(&t.to_string())),
         _ => ty.iter().cloned().collect(),
+    }
+}
+
+/// The number `name`, by the language's name, as the Rust the macros write names it. A module may
+/// give a name such as `u32` another type, so it is the primitive by its path,
+/// `::core::primitive::u32`. `f16` and `bf16`, which Rust has not, are kernite-cuda's.
+pub(crate) fn primitive(name: &str) -> String {
+    match name {
+        "f16" | "bf16" => format!("::kernite_cuda::{name}"),
+        _ => format!("::core::primitive::{name}"),
     }
 }
 

@@ -1,7 +1,8 @@
-//! A crate that does not depend on `kernite-cuda`, with two modules of GPU kernels, the first of a
-//! kernel of a pointer and an `f16`, one of a compile-time argument, a cooperative one and a static:
-//! each module is said once, where it is, and nothing else is said of them, nor of the x86 kernels
-//! that need no crate, nor of the code that loads a module and launches its kernels as Rust does.
+//! A crate that does not depend on `kernite-cuda`, with three modules of GPU kernels, the first of a
+//! kernel of a pointer and an `f16`, one of a compile-time argument, a cooperative one and a static,
+//! and the last in a module that gives `str` another type: each module is said once, where it is, and
+//! nothing else is said of them, nor of the x86 kernels that need no crate, nor of the code that loads
+//! a module and launches its kernels as Rust does.
 
 #[kernite_macros::kernels]
 pub mod gpu {
@@ -54,4 +55,22 @@ pub fn on_the_gpu<C, G: Copy, P: Copy, H>(cuda: &C, grid: G, x: P, a: H) -> Resu
     kernels.COUNTS().write(&[0; 4])?;
     let _ = (gpu::PTX, more::PTX);
     Ok(kernels.together_blocks(32, 0)? + unsafe { cpu::step(1) } as u32)
+}
+
+/// The type `str` is in the module below.
+pub mod alias {
+    #[allow(non_camel_case_types)]
+    pub type str = core::primitive::u8;
+}
+
+/// A module of GPU kernels that takes `str` from elsewhere, where its `PTX`, empty here, is still a
+/// `&str`: it is told as the others are, and Rust says nothing more.
+#[kernite_macros::kernels]
+pub mod shadowed {
+    #[allow(unused_imports)]
+    use crate::alias::str;
+
+    pub unsafe extern "ptx-kernel" fn nothing() {
+        ret();
+    }
 }

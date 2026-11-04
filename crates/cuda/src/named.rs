@@ -154,15 +154,17 @@ pub const fn text(bytes: &'static [u8]) -> &'static str {
 
 /// `pieces` joined, a constant `&'static str`, with the names of `path`, a Rust module's path,
 /// between each two, as C++ mangles a namespace's names: what kernite-macros writes for a
-/// module's PTX and its kernels' names, `path` its `module_path!()`.
+/// module's PTX and its kernels' names, `path` its `module_path!()`. It is expanded in the module
+/// of kernels, which may give `u8` and `str` another type, so it names the primitives by path.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __named {
     ($path:expr, [$($piece:expr),* $(,)?]) => {{
-        const PATH: &str = $path;
-        const SCOPE: [u8; $crate::named::scope_len(PATH)] = $crate::named::scope(PATH);
-        const PIECES: &[&str] = &[$($piece),*];
-        const TEXT: [u8; $crate::named::joined_len(PIECES, &SCOPE)] = $crate::named::join(PIECES, &SCOPE);
+        const PATH: &::core::primitive::str = $path;
+        const SCOPE: [::core::primitive::u8; $crate::named::scope_len(PATH)] = $crate::named::scope(PATH);
+        const PIECES: &[&::core::primitive::str] = &[$($piece),*];
+        const TEXT: [::core::primitive::u8; $crate::named::joined_len(PIECES, &SCOPE)] =
+            $crate::named::join(PIECES, &SCOPE);
         $crate::named::text(&TEXT)
     }};
 }

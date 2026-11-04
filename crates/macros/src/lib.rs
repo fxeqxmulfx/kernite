@@ -106,6 +106,8 @@
 //! the result's, wherever in it, `x: impl Copy`, `Option<impl Copy>` or `-> *mut impl Copy`, at the
 //! `impl`: in a parameter it makes the function generic over a type, and in the result it hides
 //! one. kernite says both in the same words.
+//! The Rust the macros write names the numbers and `str` by their paths, `::core::primitive::u64`,
+//! so a module may give any of those names another type and build.
 //!
 //! The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one,
 //! `dead_code` say, and build its kernels: Rust lints the names and the code a kernel is

@@ -119,7 +119,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
         let mut s = String::from(
             "/// Each x86 kernel's listing, by name, an instance's as `tile::<4>`: where its variables\n\
              /// live, and its code with its notes, for snapshots.\n\
-             pub const LISTINGS: &[(&str, &str)] = &[",
+             pub const LISTINGS: &[(&::core::primitive::str, &::core::primitive::str)] = &[",
         );
         for (name, text) in &made.listings {
             s += &format!("({name:?}, {text:?}), ");
@@ -131,7 +131,7 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
         out.extend(gpu(&launchers, &device.symbols, &memory, &device.text, &top, &at, &on_gpu));
         // The workspace's name is in the PTX, so it is built again when it changes.
         if let Some(manifest) = manifest.as_deref().and_then(Path::to_str) {
-            out.extend(parse(&format!("const _: &[u8] = ::core::include_bytes!({manifest:?});")));
+            out.extend(parse(&format!("const _: &[::core::primitive::u8] = ::core::include_bytes!({manifest:?});")));
         }
     }
     out
