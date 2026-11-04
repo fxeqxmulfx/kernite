@@ -122,6 +122,80 @@ fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
 }
 
 #[test]
+fn a_generic_is_a_value_and_a_type_is_refused_at_its_token() {
+    // `<T>` is a generic that is a type, and so is an `impl` in a parameter's type or the result's: in a
+    // parameter it makes the function generic over a type, and in the result it hides one. A kernel's generics
+    // are values, so each is refused, at the `T` or the first `impl`, in one set of words, wherever the type
+    // holds it. A pointer to `impl ?Sized` is among them: Rust passes one to a type with no size in two words,
+    // so the next parameter was read from the wrong register.
+    let generics = "a function's generics are values, as in `<const N: usize>`";
+    for (src, at) in [
+        (r#"pub unsafe extern "sysv64" fn k<T>(p: *const T, n: usize) {}"#, "1:33"),
+        // The first generic that is no value.
+        (r#"pub unsafe extern "sysv64" fn k<const N: usize, T: Copy>() {}"#, "1:49"),
+        // In a parameter by value, and in a type that holds one.
+        (r#"pub unsafe extern "sysv64" fn k(x: impl Copy) {}"#, "1:36"),
+        (r#"pub unsafe extern "sysv64" fn k(x: Option<impl Copy>) {}"#, "1:43"),
+        (r#"pub unsafe extern "sysv64" fn k(x: Option<*const impl Copy>) {}"#, "1:50"),
+        (r#"pub unsafe extern "sysv64" fn k(x: [*const impl Copy; 2]) {}"#, "1:44"),
+        (r#"pub unsafe extern "sysv64" fn k(x: (*const impl Copy, u8)) {}"#, "1:44"),
+        // In a pointer's type.
+        (r#"pub unsafe extern "sysv64" fn k(p: *const impl Copy, n: usize) { mov(qword[p], n); }"#, "1:43"),
+        (r#"pub unsafe extern "sysv64" fn k(p: *mut impl Copy, n: usize) { mov(qword[p], n); }"#, "1:41"),
+        // A kernel of instances, a cooperative kernel, and a helper, whose types are read as a kernel's are.
+        (
+            "#[instances(1, 2)]\npub unsafe extern \"sysv64\" fn k<const N: usize>(p: *const impl Copy, n: usize) {}",
+            "2:59",
+        ),
+        ("#[instances(1, 2)]\npub unsafe extern \"sysv64\" fn k<const N: usize>(x: impl Copy) {}", "2:52"),
+        ("#[instances(1, 2)]\npub unsafe extern \"sysv64\" fn k<const N: usize>(x: Option<impl Copy>) {}", "2:59"),
+        ("#[cooperative]\npub unsafe extern \"sysv64\" fn k(p: *const impl Copy, n: usize) {}", "2:43"),
+        ("#[cooperative]\npub unsafe extern \"sysv64\" fn k(x: impl Copy) {}", "2:36"),
+        ("pub unsafe extern \"sysv64\" fn k() { h(); }\nfn h(p: *const impl Copy) {}", "2:16"),
+        ("pub unsafe extern \"sysv64\" fn k() { h(); }\nfn h(x: impl Copy) {}", "2:9"),
+        ("pub unsafe extern \"sysv64\" fn k() { h(); }\nfn h() -> impl Copy {}", "2:11"),
+        // In the result.
+        (r#"pub unsafe extern "sysv64" fn k(p: *mut u8) -> *mut impl Copy { ret(p); }"#, "1:53"),
+        (r#"pub unsafe extern "sysv64" fn k(x: u64) -> impl Copy { ret(x); }"#, "1:44"),
+        (r#"pub unsafe extern "sysv64" fn k(x: u64) -> Option<impl Copy> { ret(x); }"#, "1:51"),
+        (r#"pub unsafe extern "sysv64" fn k(x: u64) -> Option<*const impl Copy> { ret(x); }"#, "1:58"),
+        // In a type the pointer is to, however deep, and in a group of it.
+        (r#"pub unsafe extern "sysv64" fn k(p: *const Option<impl Copy>, n: usize) {}"#, "1:50"),
+        (r#"pub unsafe extern "sysv64" fn k(p: *const [impl Copy; 2], n: usize) {}"#, "1:44"),
+        (r#"pub unsafe extern "sysv64" fn k(p: *const (u8, impl Copy), n: usize) {}"#, "1:48"),
+        (r#"pub unsafe extern "sysv64" fn k(p: *const (impl ?Sized + core::fmt::Debug), n: usize) {}"#, "1:44"),
+        (r#"pub unsafe extern "sysv64" fn k(p: *mut *const impl Copy, n: usize) {}"#, "1:48"),
+        // Of two, the first.
+        (r#"pub unsafe extern "sysv64" fn k(p: *const (impl A, impl B)) {}"#, "1:44"),
+    ] {
+        assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("{at}: {generics}"), "{src}");
+    }
+    // A GPU kernel and a GPU function are read as an x86 kernel is.
+    for (src, at) in [
+        (r#"pub unsafe extern "ptx-kernel" fn g<T>(p: *mut T, n: u32) {}"#, "1:37"),
+        (r#"pub unsafe extern "ptx-kernel" fn g(x: impl Copy) {}"#, "1:40"),
+        (r#"pub unsafe extern "ptx-kernel" fn g(x: Option<impl Copy>) {}"#, "1:47"),
+        (r#"pub unsafe extern "ptx-kernel" fn g(x: Option<*mut impl Copy>) {}"#, "1:52"),
+        (r#"pub unsafe extern "ptx-kernel" fn g(x: [*mut impl Copy; 2]) {}"#, "1:46"),
+        (r#"pub unsafe extern "ptx-kernel" fn g(x: (*mut impl Copy, u8)) {}"#, "1:46"),
+        (r#"pub unsafe extern "ptx-kernel" fn g(p: *mut impl Copy, n: u32) {}"#, "1:45"),
+        ("#[instances(1, 2)]\npub unsafe extern \"ptx-kernel\" fn g<const N: u32>(p: *mut impl Copy) {}", "2:59"),
+        ("#[instances(1, 2)]\npub unsafe extern \"ptx-kernel\" fn g<const N: u32>(x: impl Copy) {}", "2:54"),
+        (r#"pub unsafe extern "ptx-func" fn f(x: impl Copy) {}"#, "1:38"),
+        (r#"pub unsafe extern "ptx-func" fn f(p: *mut impl Copy) {}"#, "1:43"),
+        (r#"pub unsafe extern "ptx-func" fn f(p: *mut u64) -> *mut impl Copy {}"#, "1:56"),
+        (r#"pub unsafe extern "ptx-func" fn f(x: u64) -> impl Copy {}"#, "1:46"),
+        (r#"pub unsafe extern "ptx-func" fn f(x: u64) -> Option<impl Copy> {}"#, "1:53"),
+        (r#"pub unsafe extern "ptx-func" fn f(x: u64) -> Option<*mut impl Copy> {}"#, "1:58"),
+    ] {
+        assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("{at}: {generics}"), "{src}");
+    }
+    // A type named `r#impl` is a name, not the keyword.
+    let src = r#"pub unsafe extern "sysv64" fn k(p: *const r#impl, n: usize) { mov(qword[p], n); }"#;
+    assert!(x86(src, "k").starts_with("# k(gpr, gpr) -> ()\n"), "{src}");
+}
+
+#[test]
 fn loops_unroll_and_number_their_labels_afresh() {
     let src = r#"
         const STEP: usize = 32;

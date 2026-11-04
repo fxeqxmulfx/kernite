@@ -55,7 +55,10 @@ beside the module of kernels, and `self::W` the one in it. It may name the kerne
 any generic function: in `fn arr<const N: usize>(p: *mut [u8; N])`, `arr::<2>` takes a pointer to two bytes. Rust
 takes the argument in a type alone, `N` or `{ N }`, and no expression of it, `N + 1`. An error in a type is Rust's,
 said once, at the type, and so is a lint, at the level the kernel's `allow`, `warn`, `deny`, `forbid` or `expect` gives
-it: a kernel of instances, or a cooperative one, is no different from any function.
+it: a kernel of instances, or a cooperative one, is no different from any function. A generic is a value: `<T>` is an
+error at the `T`, and so is `impl` in a parameter's type or the result's, wherever in it, `x: impl Copy`,
+`Option<impl Copy>` or `-> *mut impl Copy`, at the `impl`: in a parameter it makes the function generic over a type, and
+in the result it hides one. kernite says both in the same words.
 
 A kernel's pointer to a type with a size, `*const T` or `*mut T`, is one register: `*const [usize; 3]` and
 `*mut *const f32` are taken as `*const f32` is, on x86 and on a GPU. A pointer to a type with no size has two words,

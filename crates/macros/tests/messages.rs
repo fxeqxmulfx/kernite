@@ -874,6 +874,61 @@ fn a_kernel_with_a_pointer_builds_without_a_word_of_whatever_kind_it_is() {
     builds_quietly("pointer_checks");
 }
 
+/// A generic is a value, so one that is a type is refused where it is: `<T>`, at the `T`, and `impl` in a
+/// parameter's type or the result's, wherever in it, at the first `impl`: in a parameter it makes the function
+/// generic over a type, and in the result it hides one. So it is by value, in a pointer's type and in a type
+/// that holds one, in a parameter and in the result, for each kind of kernel, and for `impl ?Sized`, a pointer
+/// to which Rust passes in two words. The macro writes nothing else for the module, so Rust says nothing of its
+/// own, nor of a call to a kernel, and a kernel of instances is said once.
+#[test]
+fn a_generic_that_is_a_type_is_refused_at_its_token() {
+    let generics =
+        |place: &str| format!("src/lib.rs:{place}: error: a function's generics are values, as in `<const N: usize>`");
+    refuses(
+        "type_generics",
+        &[
+            &generics("8:37"),
+            &generics("15:47"),
+            &generics("23:63"),
+            &generics("31:47"),
+            &generics("40:63"),
+            &generics("47:49"),
+            &generics("57:63"),
+            &generics("66:48"),
+            &generics("73:57"),
+            &generics("80:54"),
+            &generics("87:48"),
+            &generics("94:52"),
+            &generics("101:53"),
+            &generics("109:69"),
+            &generics("116:50"),
+            &generics("123:57"),
+            &generics("130:54"),
+            "error: could not compile `type_generics` (lib) due to 17 previous errors",
+        ],
+    );
+}
+
+/// An `impl` makes a function generic in its parameters and its result alone. In the type of a variable, a
+/// const or a static it is said as it was: the x86 target takes no such variable, Rust takes no `impl` in a
+/// const's type, at the const and again at a kernel that reads it, and the PTX target takes no such memory.
+#[test]
+fn impl_in_the_type_of_a_variable_a_const_or_a_static_is_said_as_it_was() {
+    refuses(
+        "type_impls",
+        &[
+            "src/lib.rs:6:16: error: x86 variables are `gpr`, `ymm`, `xmm` and stack memory, \
+             `local<..>`; not `impl Copy`",
+            "src/lib.rs:22:30: error: this is an integer, not impl Copy",
+            "src/lib.rs:31:15: error: memory holds `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, \
+             `bf16`, `bf16x2`, `tf32`, `f32` and `f64`; not `impl Copy`",
+            "src/lib.rs:13:18: error[E0562]: `impl Trait` is not allowed in const types",
+            "src/lib.rs:22:18: error[E0562]: `impl Trait` is not allowed in const types",
+            "error: could not compile `type_impls` (lib) due to 5 previous errors",
+        ],
+    );
+}
+
 /// A compile-time argument is no local, and no span of stable Rust keeps it apart from one of its
 /// name: `grid`, the launcher's, and `threads` and `shared`, of a cooperative kernel's `_blocks`.
 /// Each is refused at its name, and nothing at the module's attribute, where Rust would say

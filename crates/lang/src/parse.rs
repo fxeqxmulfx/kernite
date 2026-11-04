@@ -55,6 +55,10 @@ fn named_once(items: &[Item], given: usize) -> Result<(), Error> {
     Ok(())
 }
 
+/// What a generic that is a type is refused with: `<T>`, and `impl` in a parameter's type or the result's, which
+/// in a parameter makes the function generic over a type, and in the result hides one.
+const GENERICS: &str = "a function's generics are values, as in `<const N: usize>`";
+
 /// The binary operators, longest first where one starts another, with their precedence.
 const BINARY: &[(&str, BinOp, u8)] = &[
     ("||", BinOp::OrOr, 1),
@@ -356,7 +360,7 @@ impl<'a> Parser<'a> {
         if self.eat_op("<") {
             while !self.eat_op(">") {
                 if !self.eat_ident("const") {
-                    return self.error("a function's generics are values, as in `<const N: usize>`");
+                    return self.error(GENERICS);
                 }
                 let (name, span) = self.ident()?;
                 self.expect_op(":")?;
@@ -392,6 +396,7 @@ impl<'a> Parser<'a> {
                 }
                 self.pos += 1;
             }
+            no_impl(&self.trees[from..self.pos])?;
             Some(Ret { ty: text(&self.trees[from..self.pos]), span, tokens: from..self.pos })
         } else {
             None
@@ -871,13 +876,30 @@ fn params(trees: &[Tree]) -> Result<Vec<Param>, Error> {
         p.eat_ident("mut");
         let (name, span) = p.ident()?;
         p.expect_op(":")?;
+        let from = p.pos;
         let ty = p.ty(1)?;
+        no_impl(&p.trees[from..p.pos])?;
         out.push(Param { name, span, ty });
         if !p.done() {
             p.expect_op(",")?;
         }
     }
     Ok(out)
+}
+
+/// Refuses an `impl` in the type of a parameter or the result, wherever in it, as `<T>` is, at the `impl`: in a
+/// parameter it makes the function generic over a type, and in the result it hides one.
+fn no_impl(trees: &[Tree]) -> Result<(), Error> {
+    for tree in trees {
+        match tree {
+            Tree::Ident { name, span } if name == "impl" => {
+                return Err(Error { span: *span, message: GENERICS.to_string() });
+            }
+            Tree::Group { trees, .. } => no_impl(trees)?,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// A string literal's text.
