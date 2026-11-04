@@ -358,7 +358,10 @@ of managed memory, which the driver moves to whichever of the host and the GPU t
 `len` zeros of page-locked memory, which stays in the host's memory, and a kernel reads and writes it across the bus.
 `cuda.lend(&mut xs)` lends a slice of the host's own memory to the GPU, a `Vec`'s or a `Box`'s: a kernel reads and
 writes its elements where they are, and the host has the slice back when it drops what `lend` returned. A kernel is
-given `memory.ptr()`, and the host reads and writes `memory.host()` and `memory.host_mut()`, which are slices of it.
+given `memory.ptr()`, and the host reads and writes `memory.host()` and `memory.host_mut()`, which are slices of it. The
+slices are at the address `ptr` gives, so a kernel for the CPU that is given a slice's pointer works on the memory that
+a kernel for the GPU is given: [`examples/my-app`](examples/my-app/src/main.rs) fills managed memory with an x86 kernel,
+squares it with a PTX kernel and adds it up with an x86 kernel, bit for bit, with no copy.
 
 A GPU does not do all three, so each asks the GPU first. Where the GPU cannot, the error says so in these words, and no
 kernel is left to fault: `cuMemAllocManaged: the GPU cannot allocate managed memory: its

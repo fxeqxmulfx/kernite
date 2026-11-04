@@ -2311,4 +2311,133 @@ mod tests {
         }
         cuda.sync().unwrap();
     }
+
+    /// The cpu's kernels for the test of one memory for a cpu kernel and a GPU kernel.
+    #[kernite_macros::kernels]
+    mod host {
+        /// The indices of the eight floats a step of `fill` writes, as floats.
+        pub static LANES: constant<[f32; 8]> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+
+        /// `x[i] = 1 + i * 0.000001` for each `i < n`, `n` a multiple of 8, each operation rounded
+        /// once: eight floats at a time, from the indices as floats, which grow by eight. All the
+        /// floats are between 1 and 2, so that each of them shows in a sum of the squares.
+        pub unsafe extern "sysv64" fn fill(x: *mut f32, n: usize) {
+            test(n, n);
+            jz(done);
+            let (at, eight, step, one, v): (ymm, ymm, ymm, ymm, ymm);
+            vmovups(at, [LANES]);
+            vbroadcastss(eight, [8.0]);
+            vbroadcastss(step, [0.000001]);
+            vbroadcastss(one, [1.0]);
+            label(top);
+            vmulps(v, at, step);
+            vaddps(v, v, one);
+            vmovups([x], v);
+            vaddps(at, at, eight);
+            add(x, 32);
+            sub(n, 8);
+            jnz(top);
+            label(done);
+        }
+
+        /// The eight lanes of the sum of the `n` floats at `x`, `n` a multiple of 8, to `out`:
+        /// lane `j` is the floats at `j` of each eight, added in order.
+        pub unsafe extern "sysv64" fn lanes(x: *const f32, n: usize, out: *mut f32) {
+            let acc: ymm;
+            zero(acc);
+            test(n, n);
+            jz(done);
+            label(top);
+            vaddps(acc, acc, [x]);
+            add(x, 32);
+            sub(n, 8);
+            jnz(top);
+            label(done);
+            vmovups([out], acc);
+        }
+    }
+
+    /// The GPU's kernel for the same test.
+    #[kernite_macros::kernels]
+    mod device {
+        /// `x[i] *= x[i]` for each `i < n`, rounded once.
+        pub unsafe extern "ptx-kernel" fn square(x: *mut f32, n: u32) {
+            let (block, size, thread, i): (u32, u32, u32, u32);
+            mov.u32(block, ctaid.x);
+            mov.u32(size, ntid.x);
+            mov.u32(thread, tid.x);
+            mad.lo.u32(i, block, size, thread);
+            let past: pred;
+            setp.ge.u32(past, i, n);
+            if past {
+                ret();
+            }
+            let at: u64;
+            mad.wide.u32(at, i, 4, x);
+            let v: f32;
+            ld.global.f32(v, [at]);
+            mul.rn.f32(v, v, v);
+            st.global.f32([at], v);
+        }
+    }
+
+    /// One managed memory is the cpu's and the GPU's, at one address, with no copy: a cpu kernel
+    /// fills it, a GPU kernel squares it, and a cpu kernel adds it up, each bit for bit as the
+    /// scalar reference does, in the kernel's order; on a machine with no GPU, skipped.
+    #[test]
+    fn a_cpu_kernel_fills_managed_memory_a_gpu_kernel_squares_it_and_a_cpu_kernel_adds_it_up() {
+        let cuda = match Cuda::new() {
+            Ok(cuda) => cuda,
+            Err(e) => return eprintln!("no GPU: skipped. {e}"),
+        };
+        // This test holds slices of managed memory while the other tests of the binary launch kernels,
+        // which a launch's contract allows only where the GPU reaches managed memory while the host does.
+        if !cuda.concurrent_managed_access() {
+            return eprintln!("the GPU cannot reach managed memory while the host does: skipped.");
+        }
+        let kernels = device::Kernels::load(&cuda).unwrap();
+        // A multiple of 8, and not of 256, so that the last block has threads past the end.
+        let n = 1_000_008;
+        let mut memory = match cuda.managed::<f32>(n) {
+            Ok(memory) => memory,
+            Err(e) => return eprintln!("the GPU cannot: skipped. {e}"),
+        };
+        let address = memory.ptr().addr();
+        let filled = memory.host_mut().unwrap();
+        assert_eq!(filled.as_ptr() as u64, address, "the cpu's address is the GPU's");
+        // SAFETY: `n` floats at `filled`, which has them, and a cpu that runs the kernel.
+        unsafe { host::fill(filled.as_mut_ptr(), n) };
+        let want: Vec<f32> = (0..n).map(|i| 1.0 + i as f32 * 0.000001).collect();
+        assert_eq!(bits(filled), bits(&want), "the cpu kernel's floats");
+
+        // SAFETY: `square` reads and writes `n` floats at the pointer, which the memory, managed
+        // memory of this GPU, has, and this test holds no slice of it. The GPU reaches managed memory
+        // while the host does, or the test would have been skipped.
+        unsafe { kernels.square(Grid::new(n.div_ceil(256) as u32, 256), memory.ptr(), n as u32) }.unwrap();
+        let squared = memory.host().unwrap();
+        assert_eq!(squared.as_ptr() as u64, address, "no copy");
+        let want: Vec<f32> = want.iter().map(|x| x * x).collect();
+        assert_eq!(bits(squared), bits(&want), "the GPU kernel's floats");
+
+        let mut lanes = [0f32; 8];
+        // SAFETY: `n` floats at `squared`, which has them, eight at `lanes`, and a cpu that runs
+        // the kernels.
+        let sum = unsafe {
+            host::lanes(squared.as_ptr(), n, lanes.as_mut_ptr());
+            kernels::sum8(lanes.as_ptr())
+        };
+        let mut want_lanes = [0f32; 8];
+        for eight in want.chunks(8) {
+            for (lane, x) in want_lanes.iter_mut().zip(eight) {
+                *lane += x;
+            }
+        }
+        assert_eq!(lanes.map(f32::to_bits), want_lanes.map(f32::to_bits), "the cpu kernel's lanes");
+        assert_eq!(sum.to_bits(), sum_lanes(want_lanes).to_bits(), "the sum of the squares");
+    }
+
+    /// The bits of `floats`.
+    fn bits(floats: &[f32]) -> Vec<u32> {
+        floats.iter().map(|x| x.to_bits()).collect()
+    }
 }
