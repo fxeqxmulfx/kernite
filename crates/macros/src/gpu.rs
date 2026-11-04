@@ -8,8 +8,8 @@ use kernite::{DeviceStatic, Launcher};
 
 use crate::cond::Cond;
 use crate::rust::{
-    asks, attrs, carried, clashes, depends_on, error_under, half, host, hygienic, missing, never, number_type, parse,
-    pick, pointer, primitive, quiet, refused, site, visibility, written_params,
+    asks, attrs, carried, clashes, depends_on, error_under, half, host, hygienic, launcher_result, missing, never,
+    number_type, parse, pick, pointer, primitive, quiet, refused, site, visibility, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -184,7 +184,7 @@ fn names<'a>(symbols: impl Iterator<Item = (&'a Cond, &'a str)>) -> TokenTree {
 /// which pick the instance. A cooperative kernel is launched cooperatively, every block of its
 /// grid at once. The launcher binds `grid` for itself, which a parameter of `f` may be named as
 /// well; a compile-time argument may not, which is an error at its name, and the launcher never
-/// runs, as one of a kernel that did not compile.
+/// runs, as one of a kernel that did not compile. Its result is [`launcher_result`]'s.
 fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStream {
     let clashes = clashes(f, &["grid"], "the launcher", top);
     let launched = if clashes.is_empty() { launched } else { None };
@@ -237,7 +237,8 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
         params.extend(parse(","));
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, params))]);
-    out.extend(parse("-> ::core::result::Result<(), ::kernite_cuda::Error>"));
+    out.extend(parse("->"));
+    out.extend(launcher_result(f, top, parse("::core::result::Result<(), ::kernite_cuda::Error>")));
     let how = if f.cooperative.is_some() { "launch_cooperative" } else { "launch" };
     let never = format!("{}::core::unreachable!()", never(f, top));
     out.extend(body(f, launched, top, asks(f, top, host), &never, |index| {

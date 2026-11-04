@@ -770,7 +770,7 @@ pub(crate) fn missing(span: Span, what: &str, name: &str) -> TokenStream {
 }
 
 /// The type `ty`, a kernel's, as it is written.
-fn written(ty: &[TokenTree]) -> TokenStream {
+pub(crate) fn written(ty: &[TokenTree]) -> TokenStream {
     ty.iter().cloned().collect()
 }
 
@@ -812,12 +812,29 @@ pub(crate) fn value(ty: &[TokenTree]) -> TokenStream {
 /// `ty`, a type a kernel gives back, as the Rust the macros write has it: as written if it is `()` or
 /// `!`, which a kernel gives back and does not take, else [`value`].
 pub(crate) fn given_back(ty: &[TokenTree]) -> TokenStream {
-    let nothing =
-        matches!(ty, [TokenTree::Group(g)] if g.delimiter() == Delimiter::Parenthesis && g.stream().is_empty());
-    if nothing || matches!(ty, [t] if is_punct(t, '!')) {
+    if unit(ty) || matches!(ty, [t] if is_punct(t, '!')) {
         return ty.iter().cloned().collect();
     }
     value(ty)
+}
+
+/// Whether `ty` is `()`.
+fn unit(ty: &[TokenTree]) -> bool {
+    matches!(ty, [TokenTree::Group(g)] if g.delimiter() == Delimiter::Parenthesis && g.stream().is_empty())
+}
+
+/// What a launcher of `f` gives back: `launched`, the `Result` of the launch, but for a kernel that gives back
+/// a type. kernite refuses that, at the type, and the launcher never launches; it gives back [`refused`]'s
+/// name, with the type as its argument and `launched` beside it. Rust reads the type in the launcher's
+/// signature as it reads a plain kernel's, and says what it says of any function's result, once, at the type;
+/// an import that only the type names is used. Rust says nothing of a call of the launcher, which a crate
+/// writes as it writes any: it takes the name for a type it has reported. A GPU launcher is a method, so a `&`
+/// in its result takes the lifetime of `self`, where a plain kernel's has none to take.
+pub(crate) fn launcher_result(f: &Fn, top: &[TokenTree], launched: TokenStream) -> TokenStream {
+    match f.ret.as_ref().map(|r| &top[r.tokens.clone()]) {
+        Some(ty) if !unit(ty) => refused_beside(ty, launched),
+        _ => launched,
+    }
 }
 
 /// The name the macros write for a type kernite refuses: one Rust cannot find.
@@ -833,8 +850,20 @@ const REFUSED: &str = "self::__kernite_refused";
 /// any function's signature: that a result's `&` has no lifetime to take, that a lifetime is not declared,
 /// and that a result is `_`.
 pub(crate) fn refused(ty: &[TokenTree]) -> TokenStream {
+    refused_beside(ty, TokenStream::new())
+}
+
+/// [`refused`], with `beside` among the arguments if it is not empty: Rust finds the names in it too.
+fn refused_beside(ty: &[TokenTree], beside: TokenStream) -> TokenStream {
     let at = ty[0].span();
-    [placed(&format!("{REFUSED}<"), at), unstable(ty), placed(">", at)].into_iter().collect()
+    let mut out = placed(&format!("{REFUSED}<"), at);
+    out.extend(unstable(ty));
+    if !beside.is_empty() {
+        out.extend(placed(",", at));
+        out.extend(beside);
+    }
+    out.extend(placed(">", at));
+    out
 }
 
 /// `tokens`, a type kernite refuses, as written, but for each `f16`, `f128` and `!` where [`walk`] says a type is

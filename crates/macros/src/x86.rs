@@ -8,9 +8,9 @@ use kernite::{Call, HostStatic, Naked, NativeInstance};
 
 use crate::cond::Cond;
 use crate::rust::{
-    attrs, cfg_of, checks, clashes, depends_on, given_back, gives_placeholder, hygienic, missing, name_at, never,
-    parse, pick, pointer, position, primitive, probe, result, signature, site, stub, value_params, visibility,
-    written_params,
+    asks, attrs, cfg_of, checks, clashes, depends_on, given_back, gives_placeholder, hygienic, launcher_result,
+    missing, name_at, never, parse, pick, pointer, position, primitive, probe, result, signature, site, stub,
+    value_params, visibility, written, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -332,7 +332,8 @@ fn erased(ty: &[TokenTree]) -> (String, String) {
 /// It binds `grid` for itself, which a parameter of `f` may be named as well; a compile-time
 /// argument may not, which is an error at its name, and the function never runs, as one of a
 /// kernel that did not compile. In a crate without `kernite-cpu`, it takes any grid, gives
-/// [`missing`]'s type, with the error that says so, and never runs.
+/// [`missing`]'s type, with the error that says so, and never runs. Its result is
+/// [`launcher_result`]'s.
 fn grid_launcher(
     f: &Fn,
     kernels: Option<&[(Vec<Value>, String)]>,
@@ -386,7 +387,7 @@ fn grid_launcher(
     params.extend(value_params(f, top));
     out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, params))]);
     out.extend(parse("->"));
-    out.extend(result);
+    out.extend(launcher_result(f, top, result));
     let text = match kernels {
         Some(kernels) => {
             let kernel = match kernels {
@@ -414,7 +415,7 @@ fn grid_launcher(
         }
         None => format!("{}::core::unreachable!()", never(f, top)),
     };
-    let mut body = checks(f, top);
+    let mut body = asks(f, top, written);
     body.extend(hygienic(&text, kernels.is_some()));
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
     out.extend(clashes);

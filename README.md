@@ -91,14 +91,25 @@ Any other type a kernel takes or gives back is kernite's error alone, at the typ
 of yours, whatever it is called: a type of the crate's named `f16` or `f128` is one, and Rust does not call its `use`
 unused. Rust says nothing of the type beside it: not that it is unstable or has no size, as it says wherever the type is
 named, and nothing at a call of the kernel, which the crate's own code makes as it makes any call. What Rust says of any
-function's signature it still says: a lifetime it cannot find, as for a result `&u64` with none to take or for an `'a`
-not declared; a `_` in a result; and a module where a type is written. Rust expected a type and found a module in
-`x: core::f16`, or in `[core::f128; 2]` on a GPU. It does so too for an `f16` or an `f128` where the kernel's module
+function's signature it still says: a lifetime it cannot find, as for a result `&u64` with none to take, on x86, or for
+an `'a` not declared; a `_` in a result; and a module where a type is written. Rust expected a type and found a module
+in `x: core::f16`, or in `[core::f128; 2]` on a GPU. It does so too for an `f16` or an `f128` where the kernel's module
 imports a module so named, `use crate::f16;` with `x: f16` or `x: [f16; 4]`: Rust reads the name as the module. A
 pointer to such a type is a pointer, and is said as above: `*mut f128` is Rust's error that `f128` is unstable, and
 `*mut [u64]` is kernite's, for it has two words. An `f16` or an `f128` that kernite does not see as a type keeps Rust's
 word that it is unstable, beside kernite's error: one that a macro writes, `half!()`, or one in an expression of the
 type, as in an array's length, `[u8; size_of::<f16>()]`.
+
+A cooperative x86 kernel's threads return nothing, and so does a GPU kernel: a result is kernite's error, at the type.
+Rust sees the type as it sees a plain x86 kernel's, and says what it says of any function's result, once, at the type,
+in the same words. A pointer to a type with no size, `-> *const CStr`, has Rust say that the size cannot be known, and
+`-> *const NeedsCopy<String>` that the bound is not met. A lifetime it cannot find, `-> &'a u64`, a `_`, `-> *const _`,
+a module where a type is written, `-> core::f16`, and an `f128` behind a pointer, `-> *const f128`, are Rust's errors
+beside kernite's. An import that only the result names is used, so Rust does not call it unused, and Rust says nothing
+at a call of the kernel. A GPU kernel's launcher is a method, so the `&` of a result, `-> &u64`, takes the lifetime of
+`self`, and Rust has none to ask for. A pointer of two words to a type Rust refuses by itself, `-> *mut dyn Copy`, is
+kernite's error alone, though Rust says its own of a plain kernel's result. A result of `()` is no result, and no
+error.
 
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kernite_macros::consts]` is on, and a

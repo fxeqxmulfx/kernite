@@ -5,7 +5,7 @@
 //! attribute, nor that it cannot tell the type of the `_`. An x86 kernel, plain, of compile-time
 //! arguments, cooperative, and one kernite refuses for another reason, and a GPU kernel, plain, of
 //! compile-time arguments, cooperative, and one kernite refuses. A result of a cooperative x86 kernel
-//! or of a GPU kernel is kernite's error, and Rust says nothing more of its `_`.
+//! or of a GPU kernel is kernite's error, and Rust says its own beside it, at the `_`, once.
 
 #[kernite_macros::kernels]
 pub mod cpu {

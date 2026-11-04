@@ -155,6 +155,15 @@
 //! module. An `f16` or an `f128` that the macros do not see as a type keeps Rust's word that it
 //! is unstable: one that a macro writes, `half!()`, or one in an expression of the type, as in an
 //! array's length, `[u8; size_of::<f16>()]`.
+//! A result that a cooperative x86 kernel or a GPU kernel cannot have is kernite's error at the
+//! type, and Rust sees the type as it sees a plain kernel's: it says what it says of any function's
+//! result, once, at the type, in the same words. So a pointer whose type has no size,
+//! `-> *const CStr`, a `&` with no lifetime to take, a lifetime not declared and a `_` are Rust's
+//! errors there as they are in a plain kernel's, and an import that only the result names is used.
+//! A GPU kernel's launcher is a method, so a `&` in its result takes the lifetime of `self`, and
+//! Rust has none to ask for. A pointer of two words to a type Rust refuses by itself,
+//! `-> *mut dyn Copy`, is kernite's error alone, though Rust says its own of a plain kernel's
+//! result. A result of `()` is no result, and no error.
 //!
 //! The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one,
 //! `dead_code` say, and build its kernels: Rust lints the names and the code a kernel is

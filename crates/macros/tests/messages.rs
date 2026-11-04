@@ -213,6 +213,47 @@ fn not_the_number(place: &str, expected: &str, found: &str) -> String {
     format!("src/lib.rs:{place}: error[E0308]: mismatched types: expected `{expected}`, found `{found}`")
 }
 
+/// What Rust says of `ty`, `f16` or `f128`, at `place` of `src/lib.rs`: that the type is unstable.
+fn unstable(place: &str, ty: &str) -> String {
+    format!("src/lib.rs:{place}: error[E0658]: the type `{ty}` is unstable")
+}
+
+/// What Rust says of the type `!` behind a pointer, at `place` of `src/lib.rs`: that it is experimental.
+fn experimental(place: &str) -> String {
+    format!("src/lib.rs:{place}: error[E0658]: the `!` type is experimental")
+}
+
+/// What Rust says of `path`, a module, where a type is written, at `place` of `src/lib.rs`: that it is no type.
+fn not_a_type(place: &str, path: &str) -> String {
+    format!("src/lib.rs:{place}: error[E0573]: expected type, found module `{path}`: not a type")
+}
+
+/// What Rust says of a `&` in a result that has no lifetime to take, at `place` of `src/lib.rs`.
+fn no_lifetime(place: &str) -> String {
+    format!("src/lib.rs:{place}: error[E0106]: missing lifetime specifier: expected named lifetime parameter")
+}
+
+/// What Rust says of a lifetime, `name`, that is not declared, at `place` of `src/lib.rs`.
+fn undeclared(place: &str, name: &str) -> String {
+    format!("src/lib.rs:{place}: error[E0261]: use of undeclared lifetime name `{name}`: undeclared lifetime")
+}
+
+/// What Rust says of a trait object of `name`, a trait that is not dyn compatible, at `place` of `src/lib.rs`.
+fn not_dyn_compatible(place: &str, name: &str) -> String {
+    format!(
+        "src/lib.rs:{place}: error[E0038]: the trait `{name}` is not dyn compatible: `{name}` is not dyn compatible"
+    )
+}
+
+/// What kernite says of a pointer to `ty`, a type with no size, at `place` of `src/lib.rs`: that it has two
+/// words, where a kernel's pointer has one; `kernel` begins the message, as it does for [`x86_takes`].
+fn two_words(place: &str, kernel: &str, ty: &str) -> String {
+    format!(
+        "src/lib.rs:{place}: error: {kernel}a pointer to `{ty}` has two words, an address and a length or a table, \
+         and a kernel's pointer has one"
+    )
+}
+
 /// What kernite says of `ty`, a type an x86 kernel does not take, at `place` of `src/lib.rs`; `kernel`
 /// begins the message: [`instance`], or nothing.
 fn x86_takes(place: &str, kernel: &str, ty: &str) -> String {
@@ -225,6 +266,24 @@ fn x86_gives(place: &str, kernel: &str, ty: &str) -> String {
     format!(
         "src/lib.rs:{place}: error: {kernel}a kernel returns a float, an integer or a pointer, or never, `!`; \
          not `{ty}`"
+    )
+}
+
+/// What kernite says of a pointer a cooperative x86 kernel gives back, at `place` of `src/lib.rs`: that its
+/// threads return nothing; `kernel` begins the message, as it does for [`x86_takes`].
+fn coop_returns(place: &str, kernel: &str) -> String {
+    format!(
+        "src/lib.rs:{place}: error: {kernel}a cooperative kernel's threads return nothing: they write what they \
+         compute to memory"
+    )
+}
+
+/// What kernite says of `ty`, a type a GPU kernel gives back, at `place` of `src/lib.rs`; `kernel` begins the
+/// message, as it does for [`x86_takes`].
+fn gpu_returns(place: &str, kernel: &str, ty: &str) -> String {
+    format!(
+        "src/lib.rs:{place}: error: {kernel}a GPU kernel returns nothing, not `{ty}`: it writes what it works out \
+         to memory"
     )
 }
 
@@ -463,7 +522,9 @@ fn a_static_that_does_not_compile_is_said_once() {
 
 /// A crate that does not depend on `kernite-cpu` is told where it needs the crate, at each static of
 /// a module of x86 kernels and at each cooperative kernel, by kernite and not by Rust, which would
-/// say that `kernite_cpu` is not found, at the attribute.
+/// say that `kernite_cpu` is not found, at the attribute. A cooperative kernel's result is said as
+/// it is in a crate that has `kernite-cpu`: kernite's error at the type, and Rust's, after kernite's,
+/// that a pointer's type has no size.
 #[test]
 fn a_crate_without_kernite_cpu_is_told_at_what_needs_it() {
     let (built, said) = cargo_in(&["build"], &edited("no_cpu", &[("kernite-cpu =", "# kernite-cpu =")]));
@@ -477,7 +538,11 @@ fn a_crate_without_kernite_cpu_is_told_at_what_needs_it() {
              which this crate does not have",
             "src/lib.rs:28:35: error: a cooperative x86 kernel needs a dependency named `kernite-cpu`, \
              which this crate does not have",
-            "error: could not compile `no_cpu` (lib) due to 3 previous errors",
+            "src/lib.rs:34:35: error: a cooperative x86 kernel needs a dependency named `kernite-cpu`, \
+             which this crate does not have",
+            coop_returns("34:58", "").as_str(),
+            size_unknown("34:65", "[i8]").as_str(),
+            "error: could not compile `no_cpu` (lib) due to 6 previous errors",
         ]
     );
 }
@@ -1677,11 +1742,11 @@ fn a_pointer_to_a_type_rust_refuses_by_itself_is_said_once_at_its_type() {
 /// allow a `_` in a signature, and says so once, at the `_`. It does not say as well that it cannot tell the type
 /// the `_` stands for, at the module's attribute or at the result, nor is the pointer asked whether it has a size.
 /// So it is in an x86 kernel, plain, of compile-time arguments, cooperative, and one kernite refuses, where
-/// kernite's error comes first; for a parameter, and for a result, `-> *const _` and `-> *mut (u8, _)`, but a
-/// cooperative kernel's result, where kernite's error is alone; and in a GPU kernel, plain, of compile-time
-/// arguments, cooperative, and one kernite refuses, but a GPU kernel's result, where kernite's error is alone.
-/// So is a `_` in a result that is no pointer, `-> [_; 3]`, beside kernite's error, and a `_` that is an array's
-/// whole length, `*const [u8; _]`, in an x86 kernel's parameter and result.
+/// kernite's error comes first; for a parameter, and for a result, `-> *const _` and `-> *mut (u8, _)`; and in a
+/// GPU kernel, plain, of compile-time arguments, cooperative, and one kernite refuses. A cooperative x86 kernel's
+/// result and a GPU kernel's are kernite's error, and Rust says its own beside it, at the `_`, as it does of a
+/// plain kernel's. So is a `_` in a result that is no pointer, `-> [_; 3]`, beside kernite's error, and a `_` that
+/// is an array's whole length, `*const [u8; _]`, in an x86 kernel's parameter and result.
 #[test]
 fn a_placeholder_in_a_pointers_type_is_rusts_error_alone_at_the_placeholder() {
     let y = "error: `y` is not defined";
@@ -1705,8 +1770,9 @@ fn a_placeholder_in_a_pointers_type_is_rusts_error_alone_at_the_placeholder() {
         ("25:66", "functions"),
         ("31:87", "return types"),
         ("37:95", "return types"),
-        // Cooperative.
+        // Cooperative: a parameter, and a result, where kernite's error is beside Rust's.
         ("43:55", "functions"),
+        ("48:76", "return types"),
         // One kernite refuses.
         ("52:54", "functions"),
         ("56:75", "return types"),
@@ -1716,10 +1782,12 @@ fn a_placeholder_in_a_pointers_type_is_rusts_error_alone_at_the_placeholder() {
         // An array's whole length, `[u8; _]`: a parameter and a result.
         ("97:56", "functions"),
         ("101:78", "return types"),
-        // A GPU kernel: plain, of compile-time arguments, cooperative, and one kernite refuses.
+        // A GPU kernel: plain, of compile-time arguments, cooperative, with a result, and one kernite
+        // refuses.
         ("71:58", "methods"),
         ("76:74", "methods"),
         ("81:61", "methods"),
+        ("85:69", "return types"),
         ("89:60", "methods"),
     ];
     let mut said: Vec<String> = kernite.map(|(at, what)| format!("src/lib.rs:{at}: {what}")).into();
@@ -2321,24 +2389,9 @@ fn a_gpu_kernel_that_takes_a_type_kernite_refuses_is_kernites_error_alone() {
 /// module so named, alone or in an array. Rust says nothing at a call of any kernel.
 #[test]
 fn rust_says_of_a_type_kernite_refuses_what_it_says_of_any_signature() {
-    let rust = |place: &str, code: &str, message: &str| format!("src/lib.rs:{place}: error[{code}]: {message}");
-    let unstable = |place: &str, ty: &str| rust(place, "E0658", &format!("the type `{ty}` is unstable"));
     let call = |place: &str| {
         format!("src/lib.rs:{place}: error: a call is a statement: an instruction or a helper, not a value")
     };
-    let module =
-        |place: &str, path: &str| rust(place, "E0573", &format!("expected type, found module `{path}`: not a type"));
-    let no_lifetime =
-        |place: &str| rust(place, "E0106", "missing lifetime specifier: expected named lifetime parameter");
-    let undeclared = |place: &str, name: &str| {
-        rust(place, "E0261", &format!("use of undeclared lifetime name `{name}`: undeclared lifetime"))
-    };
-    let blank = rust(
-        "27:52",
-        "E0121",
-        "the placeholder `_` is not allowed within types on item signatures for return types: not allowed in type \
-         signatures",
-    );
     // kernite says its errors first, in the order of the kernels, and Rust says its own after them.
     let mut said = vec![x86_gives("9:52", "", "&u64")];
     said.extend([1, 2].map(|n| x86_gives("14:66", &instance("tiles", n), "&u64")));
@@ -2371,16 +2424,109 @@ fn rust_says_of_a_type_kernite_refuses_what_it_says_of_any_signature() {
         unstable("87:59", "f16"),
         unstable("72:9", "f128"),
         unstable("103:63", "f128"),
-        module("117:44", "core::f16"),
-        module("128:44", "self::f16"),
-        module("139:45", "self::f16"),
-        module("147:49", "core::f128"),
-        module("158:48", "self::f128"),
-        module("169:49", "self::f16"),
-        blank,
+        not_a_type("117:44", "core::f16"),
+        not_a_type("128:44", "self::f16"),
+        not_a_type("139:45", "self::f16"),
+        not_a_type("147:49", "core::f128"),
+        not_a_type("158:48", "self::f128"),
+        not_a_type("169:49", "self::f16"),
+        not_allowed("27:52", "return types"),
     ]);
     said.push(format!("error: could not compile `types_signature` (lib) due to {} previous errors", said.len()));
     refuses("types_signature", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// The result of a kernel that can have none, a cooperative x86 kernel's or a GPU kernel's, is kernite's error at
+/// its type, and Rust sees that type as it sees the result of a plain x86 kernel, beside kernite's error: it says
+/// the same words, once, at the same place. So Rust says that a pointer's type has no size, `*const CStr`, or
+/// lacks what the type it holds needs, `*const NeedsCopy<String>`; that a `&` has no lifetime to take, or that
+/// its lifetime is not declared, `&'a u64`; that a `_` is not allowed; that `core::f16` is a module, and that an
+/// `f128` is unstable, and that the `!` behind a pointer, `*const !`, is experimental. It says nothing of `!`
+/// itself, nor of a pointer to an array of a compile-time argument, `*const [u8; N]`, nor of a type that only an
+/// import names, `Ret`, which counts the import as used, so that Rust does not warn that it is not. A `&` in a GPU
+/// kernel's result takes the lifetime of `self`, as the launcher is a method, so Rust has none to ask for. A
+/// pointer of two words to a trait that is not dyn compatible, `*mut dyn Copy`, is the one type Rust says of a
+/// plain kernel's result and not of a launcher's: it is kernite's error alone there. A result of `()` is none, so
+/// those kernels are kernels, and their launchers give back the `Result` of the launch. The functions that call
+/// each kernel as Rust calls it, with `?`, `unwrap`, a `match` and a type for the result, get no word from Rust.
+#[test]
+fn rust_sees_the_result_a_kernel_cannot_have_as_it_sees_the_result_of_a_plain_kernel() {
+    // What kernite says, in the order of the kernels: plain x86, cooperative x86, cooperative x86 of compile-time
+    // arguments, then the GPU kernels, plain, of compile-time arguments, and cooperative, and last the kernels with
+    // a pointer to a trait object and with never.
+    let mut said = vec![
+        x86_gives("24:62", "", "&u64"),
+        x86_gives("28:61", "", "&'a u64"),
+        x86_gives("36:59", "", "core::f16"),
+        x86_gives("44:59", "", "Ret"),
+        coop_returns("54:57", ""),
+        coop_returns("59:58", ""),
+        x86_gives("64:62", "", "&u64"),
+        x86_gives("69:61", "", "&'a u64"),
+        coop_returns("74:58", ""),
+        x86_gives("79:59", "", "core::f16"),
+        coop_returns("84:57", ""),
+        x86_gives("89:59", "", "Ret"),
+    ];
+    said.extend([1, 2].map(|n| coop_returns("100:71", &instance("size", n))));
+    said.extend([1, 2].map(|n| coop_returns("107:74", &instance("array", n))));
+    said.extend([1, 2].map(|n| x86_gives("113:73", &instance("import", n), "Ret")));
+    said.extend([
+        gpu_returns("123:68", "", "*mut core::ffi::CStr"),
+        gpu_returns("127:69", "", "*mut NeedsCopy<String>"),
+        gpu_returns("131:73", "", "&u64"),
+        gpu_returns("135:72", "", "&'a u64"),
+        gpu_returns("139:69", "", "*mut _"),
+        gpu_returns("143:70", "", "core::f16"),
+        gpu_returns("147:68", "", "*mut f128"),
+        gpu_returns("151:70", "", "Ret"),
+    ]);
+    said.extend([1, 2].map(|n| gpu_returns("161:74", &instance("size", n), "*mut core::ffi::CStr")));
+    said.extend([1, 2].map(|n| gpu_returns("166:77", &instance("array", n), "*mut [u8; N]")));
+    said.extend([1, 2].map(|n| gpu_returns("171:76", &instance("import", n), "Ret")));
+    said.extend([gpu_returns("181:68", "", "*mut core::ffi::CStr"), gpu_returns("186:70", "", "Ret")]);
+    said.extend([
+        two_words("212:59", "", "dyn Copy"),
+        two_words("220:59", "", "dyn Copy"),
+        gpu_returns("227:70", "", "*mut dyn Copy"),
+        coop_returns("244:59", ""),
+        coop_returns("249:60", ""),
+        gpu_returns("256:71", "", "!"),
+        gpu_returns("260:71", "", "*mut !"),
+    ]);
+    // What Rust says, in the order it says it. Each word it says of `plain` it says of `cpu` and of `gpu`, at the
+    // same place in the result, but that a `&` has no lifetime to take, in `gpu`.
+    said.extend([
+        no_lifetime("24:62"),
+        undeclared("28:62", "'a"),
+        unstable("40:64", "f128"),
+        no_lifetime("64:62"),
+        undeclared("69:62", "'a"),
+        unstable("84:64", "f128"),
+        undeclared("135:73", "'a"),
+        unstable("147:73", "f128"),
+        not_a_type("36:59", "core::f16"),
+        not_a_type("79:59", "core::f16"),
+        not_a_type("143:70", "core::f16"),
+        experimental("236:67"),
+        experimental("249:67"),
+        experimental("260:76"),
+        not_copy("20:65", "String"),
+        not_allowed("32:65", "return types"),
+        not_allowed("74:65", "return types"),
+        not_dyn_compatible("212:64", "Copy"),
+        not_allowed("139:74", "return types"),
+        size_unknown("16:64", "[i8]"),
+        size_unknown("54:64", "[i8]"),
+        not_copy("59:65", "String"),
+        size_unknown("100:78", "[i8]"),
+        size_unknown("123:73", "[i8]"),
+        not_copy("127:74", "String"),
+        size_unknown("161:79", "[i8]"),
+        size_unknown("181:73", "[i8]"),
+    ]);
+    said.push(format!("error: could not compile `result_kinds` (lib) due to {} previous errors", said.len()));
+    refuses("result_kinds", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
 /// A pointer to a type kernite refuses by value is said as it was. A pointer of one word is taken, whatever
@@ -2389,13 +2535,7 @@ fn rust_says_of_a_type_kernite_refuses_what_it_says_of_any_signature() {
 /// alone, at the pointer's type. Both are so in a kernel of every kind.
 #[test]
 fn a_pointer_to_a_type_kernite_refuses_by_value_is_said_as_it_was() {
-    let two = |place: &str, kernel: &str| {
-        format!(
-            "src/lib.rs:{place}: error: {kernel}a pointer to `[u64]` has two words, an address and a length or a \
-             table, and a kernel's pointer has one"
-        )
-    };
-    let unstable = |place: &str| format!("src/lib.rs:{place}: error[E0658]: the type `f128` is unstable");
+    let two = |place: &str, kernel: &str| two_words(place, kernel, "[u64]");
     // kernite says its errors first, in the order of the kernels, and Rust says its own after them.
     let mut said = vec![two("33:44", "")];
     said.extend([1, 2].map(|n| two("38:58", &instance("tiles", n))));
@@ -2405,7 +2545,8 @@ fn a_pointer_to_a_type_kernite_refuses_by_value_is_said_as_it_was() {
     said.extend([1, 2].map(|n| two("81:62", &instance("tiles", n))));
     said.push(two("86:51", ""));
     said.extend(
-        ["7:49", "12:63", "17:52", "21:50", "21:64", "26:70", "26:84", "59:53", "64:67", "69:56"].map(unstable),
+        ["7:49", "12:63", "17:52", "21:50", "21:64", "26:70", "26:84", "59:53", "64:67", "69:56"]
+            .map(|place| unstable(place, "f128")),
     );
     said.push(format!("error: could not compile `types_pointers` (lib) due to {} previous errors", said.len()));
     refuses("types_pointers", &said.iter().map(String::as_str).collect::<Vec<_>>());

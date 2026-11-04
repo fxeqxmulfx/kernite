@@ -1,7 +1,7 @@
-//! A crate that does not depend on `kernite-cpu`, with a static in a module of x86 kernels and two
-//! cooperative kernels, one of a compile-time argument: each is said where it is, and nothing else
-//! is said of them, nor of the kernels that need no crate, nor of the code that calls them as Rust
-//! calls them.
+//! A crate that does not depend on `kernite-cpu`, with a static in a module of x86 kernels and three
+//! cooperative kernels, one of a compile-time argument and one with a result: each is said where it
+//! is, and nothing else is said of them, but Rust's word that the result's type has no size, nor of
+//! the kernels that need no crate, nor of the code that calls them as Rust calls them.
 
 #[kernite_macros::kernels]
 pub mod cpu {
@@ -29,6 +29,11 @@ pub mod cpu {
         grid.sync();
         mov(dword[x], N);
     }
+
+    #[cooperative]
+    pub unsafe extern "sysv64" fn counts(x: *mut u32) -> *const core::ffi::CStr {
+        ret(x);
+    }
 }
 
 #[kernite_macros::kernels]
@@ -45,6 +50,7 @@ pub fn on_the_cpu(x: *mut u32) -> Result<u64, Box<dyn std::error::Error>> {
     unsafe {
         cpu::together((), x)?;
         cpu::tile::<2>((), x).unwrap();
+        let _ = cpu::counts((), x)?;
         cpu::count();
         Ok(cpu::step(1) + plain::step(1))
     }
