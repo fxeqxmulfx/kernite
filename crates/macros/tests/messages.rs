@@ -2131,7 +2131,7 @@ fn a_result_whose_type_holds_a_block_is_a_kernel_and_rust_lints_the_braces_alone
 #[test]
 fn a_result_its_kind_may_not_have_is_refused_at_the_result_when_its_type_holds_a_block() {
     let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
-    let gpu = "a GPU kernel returns nothing, not `*const crate::Arr<{3}>`: it writes what it works out to memory";
+    let gpu = "a GPU kernel returns nothing, not `*const crate::Arr<{ 3 }>`: it writes what it works out to memory";
     refuses(
         "block_result_refused",
         &[
@@ -2139,7 +2139,7 @@ fn a_result_its_kind_may_not_have_is_refused_at_the_result_when_its_type_holds_a
             &format!("src/lib.rs:23:84: error: in `cooperative_tiles::<1>`: {nothing}"),
             &format!("src/lib.rs:23:84: error: in `cooperative_tiles::<2>`: {nothing}"),
             "src/lib.rs:28:59: error: a kernel returns a float, an integer or a pointer, or never, `!`; not \
-             `crate::Arr<{3}>`",
+             `crate::Arr<{ 3 }>`",
             &format!("src/lib.rs:36:62: error: {gpu}"),
             &format!("src/lib.rs:41:76: error: in `tiles::<1>`: {gpu}"),
             &format!("src/lib.rs:41:76: error: in `tiles::<2>`: {gpu}"),
@@ -2155,14 +2155,15 @@ fn a_result_its_kind_may_not_have_is_refused_at_the_result_when_its_type_holds_a
 #[test]
 fn a_result_its_kind_may_not_have_is_refused_at_the_result_when_its_type_is_a_macro_in_braces() {
     let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
-    let gpu = "a GPU kernel returns nothing, not `*const byte!{_}`: it writes what it works out to memory";
+    let gpu = "a GPU kernel returns nothing, not `*const byte! { _ }`: it writes what it works out to memory";
     refuses(
         "type_macro_refused",
         &[
             &format!("src/lib.rs:17:64: error: {nothing}"),
             &format!("src/lib.rs:23:84: error: in `cooperative_tiles::<1>`: {nothing}"),
             &format!("src/lib.rs:23:84: error: in `cooperative_tiles::<2>`: {nothing}"),
-            "src/lib.rs:28:59: error: a kernel returns a float, an integer or a pointer, or never, `!`; not `byte!{_}`",
+            "src/lib.rs:28:59: error: a kernel returns a float, an integer or a pointer, or never, `!`; not \
+             `byte! { _ }`",
             &format!("src/lib.rs:36:62: error: {gpu}"),
             &format!("src/lib.rs:41:76: error: in `tiles::<1>`: {gpu}"),
             &format!("src/lib.rs:41:76: error: in `tiles::<2>`: {gpu}"),
@@ -2179,7 +2180,7 @@ fn a_result_that_is_a_reference_to_never_is_refused_at_the_result_and_its_braces
     refuses(
         "never_after_lifetime",
         &[
-            "src/lib.rs:7:50: error: a kernel returns a float, an integer or a pointer, or never, `!`; not `&'static!`",
+            "src/lib.rs:7:50: error: a kernel returns a float, an integer or a pointer, or never, `!`; not `&'static !`",
             "error: could not compile `never_after_lifetime` (lib) due to 1 previous error",
         ],
     );
@@ -2581,13 +2582,14 @@ fn an_x86_kernel_that_takes_or_gives_back_a_type_kernite_refuses_is_kernites_err
         said.extend([1, 2].map(|n| x86_gives(tiles, &instance("tiles", n), ty)));
     }
     said.extend([x86_takes("251:44", "", "Option<fn(Vec<f16>) -> !>"), x86_takes("265:44", "", "gone!()")]);
-    // kernite says an array's length as it works it out, and a block and a parameter's colon without spaces.
+    // kernite says an array's length as it works it out, a block as its source has it, and a parameter's colon
+    // as Rust writes it.
     for (ty, [plain, tiles]) in [
         ("[u8; 3]", ["282:44", "287:58"]),
         ("[u8; 1]", ["295:44", "300:58"]),
-        ("Marker<{!0usize&3}>", ["310:44", "315:58"]),
+        ("Marker<{ !0usize & 3 }>", ["310:44", "315:58"]),
         ("named!(f16)", ["323:44", "328:58"]),
-        ("fn(f16:u8)", ["342:44", "347:58"]),
+        ("fn(f16: u8)", ["342:44", "347:58"]),
         ("f128::X", ["357:44", "362:58"]),
         ("f16::X", ["370:44", "375:58"]),
         ("f128::X", ["384:44", "389:58"]),
@@ -2606,7 +2608,7 @@ fn an_x86_kernel_that_takes_or_gives_back_a_type_kernite_refuses_is_kernites_err
         ("[f16; 4]", "463:44"),
         ("self::f16", "474:44"),
         ("core::primitive::f16", "482:44"),
-        ("fn(f16:::core::primitive::u8)", "491:44"),
+        ("fn(f16: ::core::primitive::u8)", "491:44"),
     ] {
         said.push(x86_takes(place, "", ty));
     }
@@ -2649,9 +2651,9 @@ fn a_gpu_kernel_that_takes_a_type_kernite_refuses_is_kernites_error_alone() {
         gpu_takes("150:48", "", "(Params, f16)"),
         gpu_takes("167:48", "", "[u8; 3]"),
         gpu_takes("175:48", "", "[u8; 1]"),
-        gpu_takes("185:48", "", "Marker<{!0usize&3}>"),
+        gpu_takes("185:48", "", "Marker<{ !0usize & 3 }>"),
         gpu_takes("193:48", "", "named!(f16)"),
-        gpu_takes("207:48", "", "fn(f128:u8)"),
+        gpu_takes("207:48", "", "fn(f128: u8)"),
         gpu_takes("217:48", "", "f16::X"),
         gpu_takes("226:48", "", "f16::X"),
         gpu_takes("234:48", "", "f128::X"),
@@ -2661,7 +2663,7 @@ fn a_gpu_kernel_that_takes_a_type_kernite_refuses_is_kernites_error_alone() {
         gpu_takes("293:48", "", "[f16; 4]"),
         gpu_takes("304:48", "", "self::f16"),
         gpu_takes("312:48", "", "core::primitive::f128"),
-        gpu_takes("321:48", "", "fn(f128:::core::primitive::u8)"),
+        gpu_takes("321:48", "", "fn(f128: ::core::primitive::u8)"),
     ]);
     said.push(format!("error: could not compile `types_refused_gpu` (lib) due to {} previous errors", said.len()));
     refuses("types_refused_gpu", &said.iter().map(String::as_str).collect::<Vec<_>>());
@@ -3304,4 +3306,61 @@ fn an_error_in_an_attribute_k_blocks_keeps_is_said_once() {
             "error: could not compile `twice` (lib) due to 2 previous errors",
         ],
     );
+}
+
+/// kernite says a block, the length of an array in a tuple and a macro's arguments with the spaces their source has,
+/// as the messages of rustc write a block they do not work out: `Marker<{N*2}>` from `{N*2}`, `Marker<{ N * 2 }>` from
+/// `{ N * 2 }` and `sum!(a+b)` from `sum!(a+b)`. A space, a line break or a comment is one space, so a block over
+/// several lines, with a comment, is one line, even where each line starts on the column where the one before it ends.
+/// It is so for a parameter and a result of an x86 kernel, and for a parameter of a GPU kernel. A block that a macro
+/// builds from a fragment has a space where the macro's body and the fragment meet, `{ N * 2 }` from `{ N * $n }` and
+/// `{N* 2 }` from `{N*$n}`, and the fragment `N + 1` has no brackets round it. A block that a macro is given whole, as
+/// a fragment, is as the call has it, `{N*2}` from `{N*2}`. A punct that the stream says is joint to the next has
+/// nothing after it, whatever the spans say: two fragments that are each a `<`, joint to the `,` after each at the
+/// call, are `<<`.
+#[test]
+fn a_block_an_arrays_length_and_a_macros_arguments_are_said_as_their_source_has_them() {
+    let mut said = vec![
+        x86_takes("25:51", "", "Marker<{N*2}>"),
+        x86_takes("29:51", "", "Marker<{ N * 2 }>"),
+        x86_takes("33:51", "", "Marker<{N * 2}>"),
+        x86_takes("38:12", "", "Marker<{ N * 2 }>"),
+        x86_takes("47:59", "", "Marker<{N *2}>"),
+        x86_takes("51:58", "", "Marker<{size_of::<Vec<u8>>()*2}>"),
+        x86_takes("55:51", "", "(u8, [u8; N*2])"),
+        x86_takes("59:51", "", "(u8, [u8; N * 2])"),
+        x86_takes("63:51", "", "sum!(a+b)"),
+        x86_takes("67:51", "", "sum!(a + b)"),
+        x86_takes("71:51", "", "sum! {a+b}"),
+        x86_gives("75:60", "", "Marker<{N*2}>"),
+        x86_gives("79:60", "", "Marker<{ N * 2 }>"),
+        gpu_takes("89:55", "", "Marker<{N*2}>"),
+        gpu_takes("93:55", "", "Marker<{ N * 2 }>"),
+        gpu_takes("97:55", "", "sum!(a+b)"),
+        gpu_takes("101:55", "", "sum!(a + b)"),
+    ];
+    // The modules that `built!` writes, one for each call of it, at the same places in its body.
+    for blocks in [
+        ["{ N * 2 }", "{N* 2 }", "{ 2 }", "{ size_of::< u8 >() }", "{ N << 2 }"],
+        ["{ N * N + 1 }", "{N* N + 1 }", "{ N + 1 }", "{ size_of::< [u8; N + 1] >() }", "{ N + 2 }"],
+    ] {
+        for (place, block) in ["113:53", "117:53", "121:52", "125:51", "129:55"].into_iter().zip(blocks) {
+            said.push(x86_takes(place, "", &format!("Marker<{block}>")));
+        }
+    }
+    said.extend([x86_takes("145:51", "", "sum!(a << b)"), x86_takes("149:53", "", "sum!(a < b)")]);
+    // A block whose lines start where the one before ends, so that no column tells a line break from a space.
+    said.push(x86_takes("165:12", "", "Marker<{ N * 2 }>"));
+    // A block that a macro is given whole is as the call has it. One that it builds from the tokens it is given
+    // has a space where its body and the tokens meet, though the body has none.
+    said.extend([
+        x86_takes("183:52", "", "Marker<{N*2}>"),
+        x86_takes("183:52", "", "Marker<{ N * 2 }>"),
+        x86_takes("201:53", "", "Marker<{ N*2 }>"),
+        x86_takes("205:53", "", "Marker<{ N*2 }>"),
+        x86_takes("201:53", "", "Marker<{ N * 2 }>"),
+        x86_takes("205:53", "", "Marker<{ N * 2 }>"),
+    ]);
+    said.push(format!("error: could not compile `type_quotes` (lib) due to {} previous errors", said.len()));
+    refuses("type_quotes", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }

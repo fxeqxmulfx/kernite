@@ -654,26 +654,58 @@ pub(crate) fn flatten(stream: TokenStream) -> Vec<TokenTree> {
 /// them. The spans come back with an error too, to place it: a bracket that nests too deep.
 pub(crate) fn lex(tokens: &[TokenTree]) -> (Result<Vec<Tree>, lang::Error>, Vec<Span>) {
     let mut spans = vec![];
-    let trees = tokens.iter().map(|t| tree(t, 0, &mut spans)).collect();
+    let trees = run(tokens, None, 0, &mut spans);
     (trees, spans)
 }
 
-/// `t` as the language reads it, `depth` brackets down, each span numbered by its place in
-/// `spans`.
-fn tree(t: &TokenTree, depth: usize, spans: &mut Vec<Span>) -> Result<Tree, lang::Error> {
+/// Whether the source has a space between what ends at `end` and what starts at `start`: it has, unless the
+/// one ends on the line and column where the other starts. A macro's body and its call are two places, so a
+/// fragment is taken to stand apart from the body round it, unless a line and a column of the one are those
+/// of the other, which two files can have by chance.
+fn apart(end: Span, start: Span) -> bool {
+    end.line() != start.line() || end.column() != start.column()
+}
+
+/// `tokens` as the language reads them, `depth` brackets down, each span numbered by its place in `spans`.
+/// `before` is where what comes before the first ends, a bracket that opens, if anything does.
+fn run(
+    tokens: &[TokenTree],
+    mut before: Option<Span>,
+    depth: usize,
+    spans: &mut Vec<Span>,
+) -> Result<Vec<Tree>, lang::Error> {
+    let mut out = Vec::with_capacity(tokens.len());
+    let mut joint = false;
+    for t in tokens {
+        // `proc_macro` says that a punct is joint to the punct after it, which it touches, so the two have no
+        // space between them, even where their spans lie in two places, as every span of a stream that `quote!`
+        // writes does. A punct joint to a token that is no punct says nothing of it: it is the last of a
+        // fragment, joint to what follows it at the call.
+        let glued = joint && matches!(t, TokenTree::Punct(_));
+        let space = !glued && before.is_some_and(|end| apart(end, t.span()));
+        out.push(tree(t, space, depth, spans)?);
+        before = Some(t.span().end());
+        joint = matches!(t, TokenTree::Punct(p) if p.spacing() == Spacing::Joint);
+    }
+    Ok(out)
+}
+
+/// `t` as the language reads it, with `space` before it, `depth` brackets down, each span numbered by its
+/// place in `spans`.
+fn tree(t: &TokenTree, space: bool, depth: usize, spans: &mut Vec<Span>) -> Result<Tree, lang::Error> {
     let span = lang::Span(spans.len() as u32);
     Ok(match t {
         TokenTree::Ident(i) => {
             spans.push(i.span());
-            Tree::Ident { name: i.to_string(), span }
+            Tree::Ident { name: i.to_string(), space, span }
         }
         TokenTree::Punct(p) => {
             spans.push(p.span());
-            Tree::Punct { ch: p.as_char(), joint: p.spacing() == Spacing::Joint, span }
+            Tree::Punct { ch: p.as_char(), space, span }
         }
         TokenTree::Literal(l) => {
             spans.push(l.span());
-            Tree::Lit { text: l.to_string(), span }
+            Tree::Lit { text: l.to_string(), space, span }
         }
         TokenTree::Group(g) => {
             spans.push(g.span_open());
@@ -683,8 +715,11 @@ fn tree(t: &TokenTree, depth: usize, spans: &mut Vec<Span>) -> Result<Tree, lang
                 Delimiter::Bracket => Delim::Bracket,
                 Delimiter::Brace | Delimiter::None => Delim::Brace,
             };
-            let trees = flatten(g.stream()).iter().map(|t| tree(t, depth + 1, spans)).collect::<Result<_, _>>()?;
-            Tree::Group { delim, trees, span }
+            let inside = flatten(g.stream());
+            let open = g.span_open().end();
+            let trees = run(&inside, Some(open), depth + 1, spans)?;
+            let space_close = apart(inside.last().map_or(open, |t| t.span().end()), g.span_close());
+            Tree::Group { delim, trees, space, space_close, span }
         }
     })
 }

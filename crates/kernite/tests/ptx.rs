@@ -15,6 +15,9 @@ use kernite_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Sel, Space,
 use kernite_ptx::lang::{Callee, Kernel, Var};
 use kernite_ptx::{Entry, Kind, Needs, Prototype, Returns, Static, Ty};
 
+#[path = "common/quotes.rs"]
+mod quotes;
+
 const KERNELS: &str = r#"
     /// `x[i] *= a` for each `i < n`, a thread each.
     pub unsafe extern "ptx-kernel" fn scale(x: *mut f32, a: f32, n: u32) {
@@ -1208,7 +1211,9 @@ fn a_kernel_takes_a_pointer_to_a_type_that_holds_an_arrow() {
 }
 
 /// A type in a message is written as Rust writes it, whatever the source spaced: a parameter by
-/// value, a result, a variable.
+/// value, a result, a variable. A block and a macro's arguments are written as their source has them, packed
+/// or spaced, as the messages of rustc write them. So is the length of an array, but where kernite takes the type
+/// of a parameter or a variable apart, and works the length out.
 #[test]
 fn a_type_in_a_message_is_written_as_rust_writes_it() {
     let takes = "a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, `f32` and `f64`, not";
@@ -1225,18 +1230,90 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
         ("a: fn()->!", "fn() -> !"),
         ("a: Pair<fn()->u8,2>", "Pair<fn() -> u8, 2>"),
         ("a: Box<dyn Fn(u8)->u8+Send>", "Box<dyn Fn(u8) -> u8 + Send>"),
+        ("a: fn(f16:u8)", "fn(f16: u8)"),
+        ("a: fn(f16: ::core::primitive::u8)", "fn(f16: ::core::primitive::u8)"),
+        ("a: Box<dyn Iterator<Item:Copy>>", "Box<dyn Iterator<Item: Copy>>"),
+        ("a: Box<dyn Tr<Item<X>=u8>>", "Box<dyn Tr<Item<X> = u8>>"),
+        ("a: Box<dyn Tr<Item<X> =u8>>", "Box<dyn Tr<Item<X> = u8>>"),
+        ("a: Box<dyn Tr<Item<X>= u8>>", "Box<dyn Tr<Item<X> = u8>>"),
+        ("a: Box<dyn Tr<Item<X> = u8>>", "Box<dyn Tr<Item<X> = u8>>"),
+        ("a: Box<dyn Tr<Item<Vec<X>>=u8,Other<Y,Z>=&u8>>", "Box<dyn Tr<Item<Vec<X>> = u8, Other<Y, Z> = &u8>>"),
+        ("a: Marker<{!0usize&3}>", "Marker<{!0usize&3}>"),
+        ("a: Marker<{ !0usize & 3 }>", "Marker<{ !0usize & 3 }>"),
+        ("a: Marker<{\n    N * // twice\n    2\n}>", "Marker<{ N * 2 }>"),
+        ("a: m!(a+b)", "m!(a+b)"),
+        ("a: m!(a + b)", "m!(a + b)"),
+        ("a: m!{a&b}", "m! {a&b}"),
+        ("a: Pair<u8,{3}>", "Pair<u8, {3}>"),
+        ("a: Pair<u8,{ 3 }>", "Pair<u8, { 3 }>"),
+        ("a: Marker<{}>", "Marker<{}>"),
+        ("a: Marker<{ }>", "Marker<{ }>"),
     ] {
         assert_eq!(compile(params, "").unwrap_err(), format!("1:36: {takes} `{ty}`"), "{params}");
     }
+    // The rows of the review, each packed and spaced, in a block and as a macro's arguments.
+    for (ty, quoted) in quotes::quoted() {
+        assert_eq!(compile(&format!("a: {ty}"), "").unwrap_err(), format!("1:36: {takes} `{quoted}`"), "{ty}");
+    }
+    // The length of an array is worked out in the type of a parameter that is an array or a name with arguments,
+    // and in those of its elements and arguments that are, `[usize; 6]`; its names are the module's. In any other
+    // type, a tuple, a reference or a path, it is written as its source has it.
+    for (ty, quoted) in [
+        ("(u8,[usize;N*2])", "(u8, [usize; N*2])"),
+        ("(u8,[usize; N * 2])", "(u8, [usize; N * 2])"),
+        ("(u8,[usize ;(N+1)/2 ])", "(u8, [usize; (N+1)/2])"),
+        ("(u8,[usize;!0usize&N])", "(u8, [usize; !0usize&N])"),
+        ("(u8,[usize;\n    N * // twice\n    2\n])", "(u8, [usize; N * 2])"),
+        ("&[usize;N*2]", "&[usize; N*2]"),
+        ("&mut [usize;N * 2]", "&mut [usize; N * 2]"),
+        ("a::Wrap<[usize;N*2]>", "a::Wrap<[usize; N*2]>"),
+        ("Wrap<(u8,[usize;N*2])>", "Wrap<(u8, [usize; N*2])>"),
+        ("[(u8,[usize;N*2]);2]", "[(u8, [usize; N*2]); 2]"),
+        ("[usize;N*2]", "[usize; 6]"),
+        ("Wrap<[usize;N*2]>", "Wrap<[usize; 6]>"),
+        ("[[usize;N*2];2]", "[[usize; 6]; 2]"),
+        ("Wrap<Wrap<[usize;N*2]>>", "Wrap<Wrap<[usize; 6]>>"),
+    ] {
+        let src = format!("const N: usize = 3;\nunsafe extern \"ptx-kernel\" fn k(a: {ty}) {{}}\n");
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), format!("2:36: {takes} `{quoted}`"), "{ty}");
+    }
     let two = "has two words, an address and a length or a table, and a kernel's pointer has one";
     assert_eq!(compile("p: *const dyn A+Send", "").unwrap_err(), format!("1:36: a pointer to `dyn A + Send` {two}"));
+    for (to, quoted) in [
+        ("dyn Tr<N={3}>", "dyn Tr<N = {3}>"),
+        ("dyn Tr<N={ 3 }>", "dyn Tr<N = { 3 }>"),
+        ("dyn m!(a+b)", "dyn m!(a+b)"),
+        ("dyn Tr<Item<X>=u8>", "dyn Tr<Item<X> = u8>"),
+        ("dyn Tr<Item<X> =u8>", "dyn Tr<Item<X> = u8>"),
+    ] {
+        let why = format!("1:36: a pointer to `{quoted}` {two}");
+        assert_eq!(compile(&format!("p: *const {to}"), "").unwrap_err(), why, "{to}");
+    }
     let src = "unsafe extern \"ptx-kernel\" fn k() -> (u32,u32) {}";
     let returns = "a GPU kernel returns nothing, not `(u32, u32)`: it writes what it works out to memory";
     assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:38: {returns}"));
+    for (ty, quoted) in
+        [("(u8,Marker<{N*2}>)", "(u8, Marker<{N*2}>)"), ("(u8,Marker<{ N * 2 }>)", "(u8, Marker<{ N * 2 }>)")]
+    {
+        let src = format!("unsafe extern \"ptx-kernel\" fn k() -> {ty} {{}}");
+        let returns = format!("a GPU kernel returns nothing, not `{quoted}`: it writes what it works out to memory");
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), format!("1:38: {returns}"), "{ty}");
+    }
+    // In a result the length of an array is as the source has it; in the type of a variable, worked out.
+    let src = "const N: usize = 3;\nunsafe extern \"ptx-kernel\" fn k() -> [usize;N*2] {}";
+    let returns = "a GPU kernel returns nothing, not `[usize; N*2]`: it writes what it works out to memory";
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("2:38: {returns}"));
     let vars = "PTX variables are `pred`, `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, \
                 `bf16x2`, `tf32`, `f32` and `f64`, not";
+    let src = "const N: usize = 3;\nunsafe extern \"ptx-kernel\" fn k() { let v: Wrap<[usize;N*2]>; }";
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("2:44: {vars} `Wrap<[usize; 6]>`"));
+    let src = "const N: usize = 3;\nunsafe extern \"ptx-kernel\" fn k() { let v: a::Wrap<[usize;N*2]>; }";
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("2:44: {vars} `a::Wrap<[usize; N*2]>`"));
     assert_eq!(compile("", "let v: *const[u8;4];").unwrap_err(), format!("2:8: {vars} `*const [u8; 4]`"));
     assert_eq!(compile("", "let v: fn(u32)->u32;").unwrap_err(), format!("2:8: {vars} `fn(u32) -> u32`"));
+    assert_eq!(compile("", "let v: m!(a+b);").unwrap_err(), format!("2:8: {vars} `m!(a+b)`"));
+    assert_eq!(compile("", "let v: m!(a + b);").unwrap_err(), format!("2:8: {vars} `m!(a + b)`"));
+    assert_eq!(compile("", "let v: (u8,Marker<{N*2}>);").unwrap_err(), format!("2:8: {vars} `(u8, Marker<{{N*2}}>)`"));
     let funcs = "a function takes and returns PTX's types, as its variables are: `u32`, `f32`, `b64`; not";
     let src = "extern \"ptx-func\" fn f(a: [usize;3]) {}";
     assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:27: {funcs} `[usize; 3]`"));

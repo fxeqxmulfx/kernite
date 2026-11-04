@@ -228,13 +228,13 @@ fn a_result_that_holds_a_block_is_read_whole_up_to_its_body() {
     // Every error is at the result, and the x86 kernel's and the GPU kernel's quote the type whole: a kernel
     // returns a pointer or a number, a cooperative kernel's threads return nothing, and so does a GPU kernel.
     let src = "unsafe extern \"sysv64\" fn k() -> Arr<{ 3 }> {}";
-    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `Arr<{3}>`";
+    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `Arr<{ 3 }>`";
     assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
     let src = "#[cooperative]\nunsafe extern \"sysv64\" fn k() -> *const Arr<{ 3 }> {}";
     let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
     assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("2:34: {nothing}"));
     let src = "unsafe extern \"ptx-kernel\" fn k() -> *const Arr<{ 3 }> {}";
-    let nothing = "a GPU kernel returns nothing, not `*const Arr<{3}>`: it writes what it works out to memory";
+    let nothing = "a GPU kernel returns nothing, not `*const Arr<{ 3 }>`: it writes what it works out to memory";
     assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:38: {nothing}"));
     // The result still ends at its `where`, which a kernel has none of, and at the `;` of a function with no
     // body, with a block in it or without.
@@ -285,13 +285,13 @@ fn a_result_that_holds_a_macro_in_braces_is_read_whole_up_to_its_body() {
     assert_eq!(code(src, "k::<2>"), ["add rdi, 2", "mov rax, rdi", "ret"]);
     // Every error is at the result, and the x86 kernel's and the GPU kernel's quote the type whole.
     let src = "unsafe extern \"sysv64\" fn k() -> byte!{ _ } {}";
-    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `byte!{_}`";
+    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `byte! { _ }`";
     assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
     let src = "#[cooperative]\nunsafe extern \"sysv64\" fn k() -> *const byte!{ _ } {}";
     let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
     assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("2:34: {nothing}"));
     let src = "unsafe extern \"ptx-kernel\" fn k() -> *const byte!{ _ } {}";
-    let nothing = "a GPU kernel returns nothing, not `*const byte!{_}`: it writes what it works out to memory";
+    let nothing = "a GPU kernel returns nothing, not `*const byte! { _ }`: it writes what it works out to memory";
     assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:38: {nothing}"));
     // The result still ends at its `where`, which a kernel has none of, and at the `;` of a function with no
     // body, after a macro in braces too.
@@ -1304,4 +1304,42 @@ fn work_within_the_most_steps_compiles() {
         let want = format!("2:{}: this takes more than 4194304 steps to work out", body.len() + 2);
         assert_eq!(past.err(), Some(want), "{name}");
     }
+}
+
+/// An operator of two characters, `<<`, `&&`, `==`, `!=`, `<=` and `..`, is one token only if no space, line
+/// break or comment is between its characters: with one, they are two, and no expression begins with the
+/// second.
+#[test]
+fn an_operator_of_two_characters_has_nothing_between_them() {
+    let constant = |op: &str| {
+        let src = format!(
+            "const A: u32 = 8;\nconst B: u32 = A {op} 1;\n\
+             unsafe extern \"sysv64\" fn k() -> u64 {{ let r: gpr; mov(r, B); ret(r); }}\n"
+        );
+        kernite::x86_str(&src, "k").map(|l| l.code().collect::<Vec<_>>().join("; "))
+    };
+    assert_eq!(constant("<<").unwrap(), "mov rax, 16; ret");
+    assert_eq!(constant(">>").unwrap(), "mov rax, 4; ret");
+    for op in ["&&", "||"] {
+        assert_eq!(constant(op).unwrap_err(), format!("2:18: `{op}` has no meaning between an integer and an integer"));
+    }
+    for op in ["==", "!=", "<=", ">="] {
+        assert_eq!(constant(op).unwrap_err(), "2:18: this is a bool, not u32");
+    }
+    assert_eq!(constant("..").unwrap_err(), "2:18: this is an array, not u32");
+    for (op, at, found) in [
+        ("< <", "2:20", "`<`"),
+        ("<\n<", "3:1", "`<`"),
+        ("< /* a comment */ <", "2:36", "`<`"),
+        ("> >", "2:20", "`>`"),
+        ("& &", "2:20", "`&`"),
+        ("| |", "2:20", "`|`"),
+        ("< =", "2:20", "`=`"),
+        ("> =", "2:20", "`=`"),
+    ] {
+        assert_eq!(constant(op).unwrap_err(), format!("{at}: expected an expression, found {found}"), "{op}");
+    }
+    assert_eq!(constant(". .").unwrap_err(), "2:20: expected a name, found `.`");
+    assert_eq!(constant("= =").unwrap_err(), "2:18: expected `;`, found `=`");
+    assert_eq!(constant("! =").unwrap_err(), "2:18: expected `;`, found `!`");
 }

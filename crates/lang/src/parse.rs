@@ -150,7 +150,7 @@ impl<'a> Parser<'a> {
 
     fn ident(&mut self) -> Result<(String, Span), Error> {
         match self.peek() {
-            Some(Tree::Ident { name, span }) => {
+            Some(Tree::Ident { name, span, .. }) => {
                 self.pos += 1;
                 Ok((name.strip_prefix("r#").unwrap_or(name).to_string(), *span))
             }
@@ -158,12 +158,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Whether the next tokens are the punctuation `op`, joined as one operator.
+    /// Whether the next tokens are the punctuation `op`, joined as one operator: with no space between.
     fn is_op(&self, op: &str) -> bool {
-        let n = op.chars().count();
-        op.chars().enumerate().all(|(i, c)| {
-            matches!(self.peek_at(i), Some(Tree::Punct { ch, joint, .. }) if *ch == c && (i + 1 == n || *joint))
-        })
+        op.chars().enumerate().all(
+            |(i, c)| matches!(self.peek_at(i), Some(Tree::Punct { ch, space, .. }) if *ch == c && (i == 0 || !*space)),
+        )
     }
 
     fn eat_op(&mut self, op: &str) -> bool {
@@ -180,7 +179,7 @@ impl<'a> Parser<'a> {
 
     fn group(&mut self, delim: Delim) -> Option<(&'a [Tree], Span)> {
         match self.peek() {
-            Some(Tree::Group { delim: d, trees, span }) if *d == delim => {
+            Some(Tree::Group { delim: d, trees, span, .. }) if *d == delim => {
                 self.pos += 1;
                 Some((trees, *span))
             }
@@ -206,7 +205,7 @@ impl<'a> Parser<'a> {
         let (mut instances, mut cooperative, mut directives) = (None, None, vec![]);
         while self.is_op("#") && matches!(self.peek_at(1), Some(Tree::Group { delim: Delim::Bracket, .. })) {
             if let Some(Tree::Group { trees, .. }) = self.peek_at(1)
-                && let [Tree::Ident { name, span }, rest @ ..] = trees.as_slice()
+                && let [Tree::Ident { name, span, .. }, rest @ ..] = trees.as_slice()
             {
                 let at = |message: &str| Err(Error { span: *span, message: message.into() });
                 let tokens = self.pos..self.pos + 2;
@@ -317,7 +316,7 @@ impl<'a> Parser<'a> {
                 let span = self.span();
                 self.pos += 1;
                 abi = Some(match self.peek() {
-                    Some(Tree::Lit { text, span }) if text.starts_with('"') => {
+                    Some(Tree::Lit { text, span, .. }) if text.starts_with('"') => {
                         self.pos += 1;
                         (text.trim_matches('"').to_string(), *span)
                     }
@@ -331,10 +330,10 @@ impl<'a> Parser<'a> {
             // A helper may be `const`: kernite runs it while the kernel compiles. The error is at
             // the first word refused.
             let refused = self.trees[qualifiers..self.pos - 1].iter().find_map(|t| match t {
-                Tree::Ident { name, span } if name == "async" => {
+                Tree::Ident { name, span, .. } if name == "async" => {
                     Some((*span, "a function runs when it is called, so it is not `async`"))
                 }
-                Tree::Ident { name, span } if name == "const" && abi.is_some() => Some((
+                Tree::Ident { name, span, .. } if name == "const" && abi.is_some() => Some((
                     *span,
                     "a function that names an ABI runs on its machine, never while Rust compiles, so it is not \
                      `const`",
@@ -491,7 +490,7 @@ impl<'a> Parser<'a> {
             return Ok(Type::Array(Box::new(elem), len, span));
         }
         // `for<'a> fn(&'a u8)` begins with a binder, not with the name of a type: it is read whole below.
-        if let Some(Tree::Ident { name, span }) = self.peek()
+        if let Some(Tree::Ident { name, span, .. }) = self.peek()
             && name != "for"
             && matches!(self.peek_at(1), Some(Tree::Punct { ch: '<', .. }))
         {
@@ -619,7 +618,7 @@ impl<'a> Parser<'a> {
         if matches!(self.peek(), Some(Tree::Group { delim: Delim::Brace, .. })) {
             return Ok(Stmt::Block(self.braced()?));
         }
-        if let Some(Tree::Ident { name, span }) = self.peek()
+        if let Some(Tree::Ident { name, span, .. }) = self.peek()
             && ["while", "loop", "match", "return", "break", "continue"].contains(&name.as_str())
         {
             return Err(Error {
@@ -747,15 +746,17 @@ impl<'a> Parser<'a> {
             return Err(Error { span, message: "expected an expression, found the end".into() });
         };
         match t {
-            Tree::Lit { text, span } if text.starts_with('"') || text.starts_with("r\"") => {
+            Tree::Lit { text, span, .. } if text.starts_with('"') || text.starts_with("r\"") => {
                 Ok(Expr::Str(unquote(text, *span)?, *span))
             }
-            Tree::Lit { text, span } if text.starts_with('\'') => {
+            Tree::Lit { text, span, .. } if text.starts_with('\'') => {
                 Err(Error { span: *span, message: format!("a kernel has no use for the character {text}") })
             }
-            Tree::Lit { text, span } => Ok(Expr::Lit(text.clone(), *span)),
-            Tree::Ident { name, span } if name == "true" || name == "false" => Ok(Expr::Bool(name == "true", *span)),
-            Tree::Ident { name, span } => {
+            Tree::Lit { text, span, .. } => Ok(Expr::Lit(text.clone(), *span)),
+            Tree::Ident { name, span, .. } if name == "true" || name == "false" => {
+                Ok(Expr::Bool(name == "true", *span))
+            }
+            Tree::Ident { name, span, .. } => {
                 let mut path = vec![name.strip_prefix("r#").unwrap_or(name).to_string()];
                 while self.is_op("::") && matches!(self.peek_at(2), Some(Tree::Ident { .. })) {
                     self.pos += 2;
@@ -763,7 +764,7 @@ impl<'a> Parser<'a> {
                 }
                 Ok(Expr::Path(path, *span))
             }
-            Tree::Group { delim: Delim::Paren, trees, span } => {
+            Tree::Group { delim: Delim::Paren, trees, span, .. } => {
                 let mut p = Parser::new(trees, *span);
                 if p.done() {
                     return Ok(Expr::Tuple(vec![], *span));
@@ -779,7 +780,7 @@ impl<'a> Parser<'a> {
                 p.finish()?;
                 Ok(Expr::Tuple(items, *span))
             }
-            Tree::Group { delim: Delim::Bracket, trees, span } => {
+            Tree::Group { delim: Delim::Bracket, trees, span, .. } => {
                 let mut p = Parser::new(trees, *span);
                 if p.done() {
                     return Ok(Expr::Array(vec![], *span));
@@ -811,7 +812,7 @@ impl<'a> Parser<'a> {
         loop {
             if self.is_op(".") && !self.is_op("..") {
                 self.pos += 1;
-                if let Some(Tree::Lit { text, span }) = self.peek() {
+                if let Some(Tree::Lit { text, span, .. }) = self.peek() {
                     return Err(Error {
                         span: *span,
                         message: format!(
@@ -951,7 +952,7 @@ fn params(trees: &[Tree]) -> Result<Vec<Param>, Error> {
 fn no_impl(trees: &[Tree]) -> Result<(), Error> {
     for tree in trees {
         match tree {
-            Tree::Ident { name, span } if name == "impl" => {
+            Tree::Ident { name, span, .. } if name == "impl" => {
                 return Err(Error { span: *span, message: GENERICS.to_string() });
             }
             Tree::Group { trees, .. } => no_impl(trees)?,
