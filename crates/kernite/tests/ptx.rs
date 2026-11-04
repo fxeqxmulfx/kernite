@@ -2737,6 +2737,11 @@ fn memory_is_reached_in_its_state_space_and_within_it() {
              `shared<[f32]>`, which the launch gives",
         ),
         (
+            "let a: shared<[u8; 49153]>;".into(),
+            "2:8: this makes the kernel's shared memory 49153 bytes; it declares 48 KB at most, and has more as \
+             `shared<[u8]>`, which the launch gives",
+        ),
+        (
             "let a: shared<[f32]>; let b: shared<[u32]>;".into(),
             "2:30: `b` would start where `a` does, after the memory with a size: a kernel has one `shared<[T]>`, \
              which the launch gives",
@@ -2847,6 +2852,9 @@ fn memory_is_reached_in_its_state_space_and_within_it() {
     for (body, want) in cases {
         assert_eq!(compile("x: *mut f32, n: u32", &body).unwrap_err(), want, "{body}");
     }
+    // A kernel declares 48 KB of shared memory, to the byte, and no more.
+    let ptx = compile("x: *mut f32, n: u32", "let a: shared<[u8; 49152]>; mov.u32(n, a);").unwrap();
+    assert!(ptx.contains("\t.shared .align 1 .b8 a[49152];\n"));
     // Memory takes the name it is given, but for one PTX has or the kernel's other names.
     let ptx = compile(
         "x: *mut f32, n: u32",

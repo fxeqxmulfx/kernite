@@ -572,7 +572,9 @@ fn the_driver_starts_65535_blocks_of_a_module_for_fermi_and_more_of_one_for_kepl
             } else {
                 let e = launched.unwrap_err();
                 assert_eq!(e.call, "cuLaunchKernel");
-                assert!(e.message.starts_with("CUDA_ERROR_INVALID_VALUE"), "{blocks} blocks for {target}: {e}");
+                // The driver's words alone: no size of the launch, its shared memory of none among
+                // them, is past what the GPU takes.
+                assert_eq!(e.message, "CUDA_ERROR_INVALID_VALUE (1): invalid argument", "{blocks} blocks for {target}");
             }
         }
     }
@@ -663,6 +665,209 @@ fn a_cooperative_launch_over_a_grid_the_gpu_does_not_take_says_it_too() {
         // SAFETY: `last` takes a pointer, and writes a word there.
         let e = unsafe { module.launch_cooperative(0, grid, &[arg(&at)]) }.unwrap_err();
         refusal("cuLaunchCooperativeKernel", &e, said);
+    }
+    cuda.sync().unwrap();
+}
+
+/// A kernel of 20 KB of shared memory of its own, `both`, and one of none, `plain`, each given
+/// the launch's beside it, `bytes` of it. Each writes the last word of its own, if it has any,
+/// and the last of the launch's, if it is given any, reads each back, and stores them in
+/// `out[0]` and `out[1]`: 7 and 9, or 0 for the memory it has not.
+const OWN: &str = "
+.version 7.5
+.target sm_61
+.address_size 64
+
+.extern .shared .align 4 .b8 launched[];
+
+.visible .entry both(.param .u64 out_param, .param .u32 bytes_param)
+{
+	.shared .align 4 .b8 fixed[20480];
+	.reg .pred %none;
+	.reg .u32 %bytes, %seven, %nine, %mine, %theirs, %at;
+	.reg .u64 %out;
+
+	ld.param.u64 %out, [out_param];
+	cvta.to.global.u64 %out, %out;
+	ld.param.u32 %bytes, [bytes_param];
+	mov.u32 %seven, 7;
+	st.shared.u32 [fixed+20476], %seven;
+	ld.shared.u32 %mine, [fixed+20476];
+	st.global.u32 [%out], %mine;
+	setp.eq.u32 %none, %bytes, 0;
+	@%none bra done;
+	mov.u32 %at, launched;
+	add.u32 %at, %at, %bytes;
+	mov.u32 %nine, 9;
+	st.shared.u32 [%at+-4], %nine;
+	ld.shared.u32 %theirs, [%at+-4];
+	st.global.u32 [%out+4], %theirs;
+done:
+	ret;
+}
+
+.visible .entry plain(.param .u64 out_param, .param .u32 bytes_param)
+{
+	.reg .pred %none;
+	.reg .u32 %bytes, %nine, %theirs, %at;
+	.reg .u64 %out;
+
+	ld.param.u64 %out, [out_param];
+	cvta.to.global.u64 %out, %out;
+	ld.param.u32 %bytes, [bytes_param];
+	setp.eq.u32 %none, %bytes, 0;
+	@%none bra done;
+	mov.u32 %at, launched;
+	add.u32 %at, %at, %bytes;
+	mov.u32 %nine, 9;
+	st.shared.u32 [%at+-4], %nine;
+	ld.shared.u32 %theirs, [%at+-4];
+	st.global.u32 [%out+4], %theirs;
+done:
+	ret;
+}
+";
+
+/// Each kernel of `OWN`, by its index, and the bytes of shared memory it has of its own.
+const OWNS: [(usize, u32); 2] = [(0, 20 << 10), (1, 0)];
+
+/// Kernel `index` of `OWN` over `grid`, whose `shared` it is told, writing at `out`; launched
+/// cooperatively or not.
+fn launch_own(
+    module: &Module,
+    cooperative: bool,
+    index: usize,
+    grid: Grid,
+    out: kernite_cuda::Ptr<u32>,
+) -> Result<(), kernite_cuda::Error> {
+    let bytes = grid.shared;
+    let args = [arg(&out), arg(&bytes)];
+    // SAFETY: both kernels of `OWN` take a pointer and a `u32`, and write two words at the
+    // pointer, which has them; the last word of the `bytes` of shared memory the grid gives is
+    // inside them.
+    unsafe {
+        match cooperative {
+            false => module.launch(index, grid, &args),
+            true => module.launch_cooperative(index, grid, &args),
+        }
+    }
+}
+
+#[test]
+fn a_launch_gives_a_block_all_the_shared_memory_the_gpu_has_with_the_kernels_own_counted() {
+    let Some(cuda) = cuda() else { return };
+    let most = cuda.max_shared();
+    if most < 99 << 10 {
+        eprintln!("{}, sm_{}, gives a block {most} bytes of shared memory, not 99 KB: skipped", cuda.name(), cuda.sm());
+        return;
+    }
+    let load = || Module::load(&cuda, OWN, &["both", "plain"], &[]).unwrap();
+    let mut out = cuda.alloc::<u32>(2).unwrap();
+    for (index, own) in OWNS {
+        // The count of blocks a kernel runs at once lets it have the shared memory it counts by,
+        // as a launch does: of a kernel nothing has let have more, it is not none.
+        assert!(load().resident(index, 256, most - own).unwrap() >= 1, "{own} bytes of the kernel's");
+    }
+    for cooperative in [false, true] {
+        if cooperative && !cuda.cooperative() {
+            eprintln!("{} launches no kernel cooperatively: skipped", cuda.name());
+            continue;
+        }
+        for (index, own) in OWNS {
+            // A module of its own, which nothing has let have more than the driver gives unasked.
+            let module = load();
+            // What a launch gets unasked, 48 KB with the kernel's own, and what the GPU gives it.
+            let (unasked, all) = ((48 << 10) - own, most - own);
+            let mut sizes: Vec<u32> = [0, 16, 28, 29, 40, 48, 49, 79].map(|kb| kb << 10).into();
+            sizes.extend([unasked - 4, unasked, unasked + 4, all - 4, all]);
+            sizes.retain(|&bytes| bytes <= all);
+            sizes.sort();
+            sizes.dedup();
+            // Up from none to all, and down again: a kernel let have more keeps what it was let,
+            // and runs a launch of less.
+            for &bytes in sizes.iter().chain(sizes.iter().rev()) {
+                out.zero().unwrap();
+                let grid = Grid::new(1, 1).with_shared(bytes);
+                let what =
+                    format!("{bytes} bytes from the launch and {own} of the kernel's, cooperative: {cooperative}");
+                launch_own(&module, cooperative, index, grid, out.ptr()).unwrap_or_else(|e| panic!("{what}: {e}"));
+                let want = [if own > 0 { 7 } else { 0 }, if bytes > 0 { 9 } else { 0 }];
+                assert_eq!(out.read().unwrap(), want, "{what}");
+            }
+        }
+    }
+    cuda.sync().unwrap();
+}
+
+#[test]
+fn a_launch_past_the_shared_memory_the_gpu_gives_a_block_says_how_much_the_block_has() {
+    let Some(cuda) = cuda() else { return };
+    let most = cuda.max_shared();
+    let module = Module::load(&cuda, OWN, &["both", "plain"], &[]).unwrap();
+    let mut out = cuda.alloc::<u32>(2).unwrap();
+    let said = |own: u32, bytes: u32| {
+        let all = u64::from(own) + u64::from(bytes);
+        format!(
+            "each block has {all} bytes of shared memory, {own} of the kernel's and {bytes} of the launch's, and the \
+             GPU takes {most} at most"
+        )
+    };
+    for (index, own) in OWNS {
+        let all = most - own;
+        // A byte past, a word, a kilobyte (80 KB with 20 KB of the kernel's, on a GPU of 99 KB), a
+        // kilobyte past what a block has in all (100 KB with none of the kernel's), the most a count
+        // of bytes holds in a `c_int` and one more, and the most a `u32` holds.
+        for bytes in [all + 1, all + 4, all + 1024, most + 1024, (1 << 31) - 1, 1 << 31, u32::MAX] {
+            let launch = Grid::new(1, 1).with_shared(bytes);
+            for cooperative in [false, true] {
+                if cooperative && !cuda.cooperative() {
+                    continue;
+                }
+                let what =
+                    format!("{bytes} bytes from the launch and {own} of the kernel's, cooperative: {cooperative}");
+                let e = launch_own(&module, cooperative, index, launch, out.ptr()).expect_err(&what);
+                refusal("cuFuncSetAttribute", &e, &said(own, bytes));
+            }
+            let e = module.resident(index, 256, bytes).expect_err("resident");
+            refusal("cuFuncSetAttribute", &e, &said(own, bytes));
+        }
+        // A launch refused leaves the kernel as it was, and the GPU: the most it gives still runs,
+        // and so does a launch of the 48 KB it gets unasked.
+        for bytes in [all, (48 << 10) - own] {
+            out.zero().unwrap();
+            launch_own(&module, false, index, Grid::new(1, 1).with_shared(bytes), out.ptr()).unwrap();
+            assert_eq!(out.read().unwrap(), [if own > 0 { 7 } else { 0 }, 9], "{bytes} bytes and {own}");
+        }
+        assert!(module.resident(index, 256, all).unwrap() >= 1);
+    }
+    cuda.sync().unwrap();
+}
+
+#[test]
+fn the_first_size_past_is_said_whether_it_is_the_grids_or_the_shared_memorys() {
+    let Some(cuda) = cuda() else { return };
+    let most = cuda.max_shared();
+    let module = Module::load(&cuda, OWN, &["plain"], &[]).unwrap();
+    let out = cuda.alloc::<u32>(2).unwrap();
+    let shared = most + 4;
+    let grid = |blocks, threads| Grid { blocks, threads, shared };
+    let all = format!(
+        "each block has {shared} bytes of shared memory, 0 of the kernel's and {shared} of the launch's, and the GPU \
+         takes {most} at most"
+    );
+    // The shared memory is past the most in each, and the sizes of the grid come before it.
+    let cases = [
+        (grid([1, 65536, 1], [1, 1, 1]), "the grid has 65536 blocks along y, and the GPU takes 65535 at most"),
+        (grid([1, 1, 1], [1025, 1, 1]), "each block has 1025 threads along x, and the GPU takes 1024 at most"),
+        (grid([0, 1, 1], [1, 1, 1]), "the grid has 0 blocks along x, and the GPU takes 1 at least"),
+        (grid([1, 1, 1], [32, 32, 65]), "each block has 65 threads along z, and the GPU takes 64 at most"),
+        (grid([1, 1, 1], [1024, 2, 1]), "each block has 2048 threads, and the GPU takes 1024 at most"),
+        (grid([1, 1, 1], [1024, 1, 1]), all.as_str()),
+        (grid([1, 1, 1], [1, 1, 1]), all.as_str()),
+    ];
+    for (grid, said) in cases {
+        let e = launch_own(&module, false, 0, grid, out.ptr()).unwrap_err();
+        refusal("cuFuncSetAttribute", &e, said);
     }
     cuda.sync().unwrap();
 }

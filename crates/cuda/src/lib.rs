@@ -24,6 +24,7 @@
 //! [`Module::launch_cooperative`]: every block of the grid runs at once, so there are at most
 //! [`Module::resident`] of them, and the driver gives the launch a barrier for the grid.
 
+use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::fmt;
 use std::marker::PhantomData;
@@ -94,6 +95,7 @@ api! {
     unload_module = c"cuModuleUnload"(Handle);
     function = c"cuModuleGetFunction"(*mut Handle, Handle, *const c_char);
     global = c"cuModuleGetGlobal_v2"(*mut u64, *mut usize, Handle, *const c_char);
+    function_attribute = c"cuFuncGetAttribute"(*mut c_int, c_int, Handle);
     set_attribute = c"cuFuncSetAttribute"(Handle, c_int, c_int);
     launch = c"cuLaunchKernel"(
         Handle, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, Handle, *mut *mut c_void, *mut *mut c_void
@@ -228,35 +230,45 @@ impl Driver {
         self.api.check("cuDeviceGetAttribute", asked).map(|()| v as u32)
     }
 
-    /// `e`, which the driver gave by returning `launched` for a launch over `grid`, with the first
-    /// size of `grid` that is past what the GPU takes, and what it takes. The driver says
-    /// `CUDA_ERROR_INVALID_VALUE` of each and no more; any other error says what it is, and is
-    /// left as it is. It asks the GPU only now, after the launch has failed.
-    fn refused(&self, mut e: Error, launched: CuResult, grid: Grid) -> Error {
+    /// What the driver says of kernel `f` as the `CUfunction_attribute` `attribute`.
+    fn function_attribute(&self, f: Handle, attribute: c_int) -> Result<u32, Error> {
+        let mut v = 0;
+        // SAFETY: `f` is a kernel of a module that is loaded; it writes the attribute's value
+        // to `v`.
+        let asked = unsafe { (self.api.function_attribute)(&mut v, attribute, f) };
+        self.api.check("cuFuncGetAttribute", asked).map(|()| v as u32)
+    }
+
+    /// `e`, which the driver gave by returning `result` for a launch over `grid` of a kernel with
+    /// `own` bytes of shared memory, with the first size of the launch that is past what the GPU
+    /// takes, and what it takes. The driver says `CUDA_ERROR_INVALID_VALUE` of each and no more;
+    /// any other error says what it is, and is left as it is. It asks the GPU only now, after the
+    /// launch has failed.
+    fn refused(&self, mut e: Error, result: CuResult, grid: &Grid, own: u32) -> Error {
         // CUDA_ERROR_INVALID_VALUE.
-        if launched != 1 {
+        if result != 1 {
             return e;
         }
         // Wide enough for the product of three sizes of 32 bits.
         let [bx, by, bz] = grid.blocks.map(u128::from);
         let [tx, ty, tz] = grid.threads.map(u128::from);
-        // Each size, and the `CUdevice_attribute` of the most the GPU takes of it:
-        // CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X, _Y and _Z; MAX_BLOCK_DIM_X, _Y and _Z; and
-        // MAX_THREADS_PER_BLOCK.
+        let shared = format!("bytes of shared memory, {own} of the kernel's and {} of the launch's", grid.shared);
+        // Each size, the least the GPU takes of it, and the `CUdevice_attribute` of the most:
+        // CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X, _Y and _Z; MAX_BLOCK_DIM_X, _Y and _Z;
+        // MAX_THREADS_PER_BLOCK; and MAX_SHARED_MEMORY_PER_BLOCK_OPTIN.
         let sizes = [
-            (5, bx, "the grid has", "blocks along x"),
-            (6, by, "the grid has", "blocks along y"),
-            (7, bz, "the grid has", "blocks along z"),
-            (2, tx, "each block has", "threads along x"),
-            (3, ty, "each block has", "threads along y"),
-            (4, tz, "each block has", "threads along z"),
-            (1, tx * ty * tz, "each block has", "threads"),
+            (5, 1, bx, "the grid has", "blocks along x"),
+            (6, 1, by, "the grid has", "blocks along y"),
+            (7, 1, bz, "the grid has", "blocks along z"),
+            (2, 1, tx, "each block has", "threads along x"),
+            (3, 1, ty, "each block has", "threads along y"),
+            (4, 1, tz, "each block has", "threads along z"),
+            (1, 1, tx * ty * tz, "each block has", "threads"),
+            (97, 0, u128::from(own) + u128::from(grid.shared), "each block has", shared.as_str()),
         ];
-        for (attribute, size, has, what) in sizes {
+        for (attribute, least, size, has, what) in sizes {
             let Ok(most) = self.attribute(attribute).map(u128::from) else { continue };
-            // Each limit of the size, how the sentence says it, and whether the size is past it:
-            // the GPU takes one at the least, and the most it says.
-            let least = 1;
+            // Each limit of the size, how the sentence says it, and whether the size is past it.
             for (limit, tail, past) in [(least, "at least", size < least), (most, "at most", size > most)] {
                 if past {
                     e.message += &format!(": {has} {size} {what}, and the GPU takes {limit} {tail}");
@@ -532,6 +544,11 @@ pub fn arg<T: Param>(x: &T) -> *const c_void {
 /// driver starts at most 65535 blocks along x of a module written for an older GPU, `sm_20` or
 /// `sm_21`, whatever the GPU it runs on, and says only `CUDA_ERROR_INVALID_VALUE` of a launch
 /// past that.
+///
+/// A block has shared memory of the kernel's own, what it declares, and of the launch's, beside
+/// it: together at most [`Cuda::max_shared`] bytes, 99 KB on an RTX 30. A launch of more is an
+/// error that says how much the block has: `each block has 102400 bytes of shared memory, 20480
+/// of the kernel's and 81920 of the launch's, and the GPU takes 101376 at most`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Grid {
     /// Blocks along x, y and z.
@@ -539,7 +556,7 @@ pub struct Grid {
     /// Threads in each block along x, y and z.
     pub threads: [u32; 3],
     /// Bytes of shared memory for each block beyond what the kernel declares: what its
-    /// `shared<[T]>` holds.
+    /// `shared<[T]>` holds. With the kernel's own, at most [`Cuda::max_shared`].
     pub shared: u32,
 }
 
@@ -556,15 +573,25 @@ impl Grid {
     }
 }
 
-/// The shared memory a launch gives a block, at most, unless the kernel is let have more.
-const SHARED: u32 = 48 << 10;
+/// A kernel of a module, and its shared memory: what it declares, and what a launch may give it
+/// beside that.
+struct Kernel {
+    function: Handle,
+    /// Bytes of shared memory it declares itself, which its PTX fixes:
+    /// CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES.
+    own: u32,
+    /// The most bytes of shared memory a launch may give it beside its own, as the driver has it:
+    /// CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES. It starts at what the driver gives unasked,
+    /// 48 KB less its own, and a launch that needs more raises it.
+    room: Cell<u32>,
+}
 
 /// A PTX module, compiled by the driver for its GPU, and the kernels and the memory of it that
 /// were asked for.
 pub struct Module {
     driver: Rc<Driver>,
     module: Handle,
-    kernels: Vec<Handle>,
+    kernels: Vec<Kernel>,
     /// Where each of its variables asked for is on the GPU, and how many bytes it has.
     globals: Vec<(u64, usize)>,
     /// The GPU's, as [`Cuda`] has them.
@@ -612,7 +639,9 @@ impl Module {
                 e.message += &format!(", for `{name}`");
                 e
             })?;
-            m.kernels.push(f);
+            // CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, and _MAX_DYNAMIC_SHARED_SIZE_BYTES.
+            let [own, room] = [1, 8].map(|attribute| m.driver.function_attribute(f, attribute));
+            m.kernels.push(Kernel { function: f, own: own?, room: Cell::new(room?) });
         }
         for name in globals {
             let c = CString::new(*name).map_err(|_| Error::new("cuModuleGetGlobal", format!("{name:?} has a NUL")))?;
@@ -639,9 +668,11 @@ impl Module {
     }
 
     /// Launches kernel `index`, as [`load`](Module::load) was given its name, over `grid`,
-    /// with `args`, each a parameter by [`arg`]. More than 48 KB of shared memory for a block,
-    /// which a GPU from Volta on can give, the kernel is let have first. A `grid` the GPU does
-    /// not take is an error that says which size of it is past which limit.
+    /// with `args`, each a parameter by [`arg`]. A block's shared memory, the kernel's own and
+    /// the grid's together, may be all [`Cuda::max_shared`] gives. The driver gives 48 KB unasked,
+    /// and a GPU from Volta on can give more once the kernel is let have it: the launch that
+    /// needs more asks the driver, once, and a launch of no more than that asks it nothing. A
+    /// `grid` the GPU does not take is an error that says which size of it is past which limit.
     ///
     /// # Safety
     ///
@@ -650,12 +681,13 @@ impl Module {
     /// long as the kernel reads and writes through it, while it runs.
     pub unsafe fn launch(&self, index: usize, grid: Grid, args: &[*const c_void]) -> Result<(), Error> {
         let ([bx, by, bz], [tx, ty, tz]) = (grid.blocks, grid.threads);
-        let (api, f, params) = (&self.driver.api, self.kernels[index], args.as_ptr().cast_mut().cast());
-        self.let_have(f, grid.shared)?;
+        let (api, k, params) = (&self.driver.api, &self.kernels[index], args.as_ptr().cast_mut().cast());
+        self.let_have(k, &grid)?;
         // SAFETY: the caller's. The driver reads `args`, and through them, as it launches.
-        let launched =
-            unsafe { (api.launch)(f, bx, by, bz, tx, ty, tz, grid.shared, ptr::null_mut(), params, ptr::null_mut()) };
-        api.check("cuLaunchKernel", launched).map_err(|e| self.driver.refused(e, launched, grid))
+        let launched = unsafe {
+            (api.launch)(k.function, bx, by, bz, tx, ty, tz, grid.shared, ptr::null_mut(), params, ptr::null_mut())
+        };
+        api.check("cuLaunchKernel", launched).map_err(|e| self.driver.refused(e, launched, &grid, k.own))
     }
 
     /// Launches kernel `index` as [`launch`](Module::launch) does, but cooperatively: every
@@ -673,13 +705,14 @@ impl Module {
             return Err(Error::new("cuLaunchCooperativeKernel", message.into()));
         }
         let ([bx, by, bz], [tx, ty, tz]) = (grid.blocks, grid.threads);
-        let (api, f, params) = (&self.driver.api, self.kernels[index], args.as_ptr().cast_mut().cast());
-        self.let_have(f, grid.shared)?;
+        let (api, k, params) = (&self.driver.api, &self.kernels[index], args.as_ptr().cast_mut().cast());
+        self.let_have(k, &grid)?;
         // SAFETY: the caller's. The driver reads `args`, and through them, as it launches.
-        let launched =
-            unsafe { (api.launch_cooperative)(f, bx, by, bz, tx, ty, tz, grid.shared, ptr::null_mut(), params) };
+        let launched = unsafe {
+            (api.launch_cooperative)(k.function, bx, by, bz, tx, ty, tz, grid.shared, ptr::null_mut(), params)
+        };
         api.check("cuLaunchCooperativeKernel", launched).map_err(|e| {
-            let mut e = self.driver.refused(e, launched, grid);
+            let mut e = self.driver.refused(e, launched, &grid, k.own);
             // CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE, which says no more.
             let threads = tx.saturating_mul(ty).saturating_mul(tz);
             if launched == 720
@@ -695,30 +728,38 @@ impl Module {
     /// How many blocks of kernel `index` the GPU runs at once, of `threads` threads each and
     /// `shared` bytes of the launch's shared memory: as many as one of its SMs holds, by the
     /// registers, the shared memory and the threads each takes, times how many SMs it has. A
-    /// cooperative launch of the kernel has at most this many.
+    /// cooperative launch of the kernel has at most this many. The kernel is let have `shared`
+    /// bytes first, as for a launch, and `shared` past what a block has is an error that says so.
     pub fn resident(&self, index: usize, threads: u32, shared: u32) -> Result<u32, Error> {
-        let (api, f) = (&self.driver.api, self.kernels[index]);
-        self.let_have(f, shared)?;
+        let (api, k) = (&self.driver.api, &self.kernels[index]);
+        self.let_have(k, &Grid::new(1, threads).with_shared(shared))?;
         let (threads, mut blocks) = (c_int::try_from(threads).unwrap_or(c_int::MAX), 0);
-        // SAFETY: `f` is a kernel of the module, which is loaded; it writes the count to
+        // SAFETY: `k.function` is a kernel of the module, which is loaded; it writes the count to
         // `blocks`.
-        let found = unsafe { (api.occupancy)(&mut blocks, f, threads, shared as usize) };
+        let found = unsafe { (api.occupancy)(&mut blocks, k.function, threads, shared as usize) };
         api.check("cuOccupancyMaxActiveBlocksPerMultiprocessor", found)?;
         Ok(blocks as u32 * self.multiprocessors)
     }
 
-    /// Lets kernel `f` have `shared` bytes of shared memory from a launch, if that is more than
-    /// 48 KB, which a GPU from Volta on can give.
-    fn let_have(&self, f: Handle, shared: u32) -> Result<(), Error> {
-        if shared <= SHARED {
+    /// Lets kernel `k` have the `grid.shared` bytes of shared memory the launch over `grid` gives
+    /// it beside its own. The driver gives a kernel 48 KB in all unasked, and a GPU from Volta on
+    /// can give more once the kernel is let have it, up to what a block has in all. A launch that
+    /// needs no more than the kernel has been let have asks the driver nothing; one that needs
+    /// more asks once, and the kernel keeps what it was let. One past what the GPU gives is the
+    /// driver's `CUDA_ERROR_INVALID_VALUE` and the size that is past which limit. `grid` is
+    /// borrowed and not copied, so that a launch that asks nothing does no more than compare.
+    fn let_have(&self, k: &Kernel, grid: &Grid) -> Result<(), Error> {
+        if grid.shared <= k.room.get() {
             return Ok(());
         }
         let api = &self.driver.api;
-        // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, which the driver refuses past what
-        // the GPU has.
-        let bytes = c_int::try_from(shared).unwrap_or(c_int::MAX);
-        // SAFETY: `f` is a kernel of the module, which is loaded.
-        api.check("cuFuncSetAttribute", unsafe { (api.set_attribute)(f, 8, bytes) })
+        // The driver refuses a count of bytes that is no `c_int`, and past what the GPU has.
+        let bytes = c_int::try_from(grid.shared).unwrap_or(c_int::MAX);
+        // SAFETY: `k.function` is a kernel of the module, which is loaded.
+        let set = unsafe { (api.set_attribute)(k.function, 8, bytes) };
+        api.check("cuFuncSetAttribute", set).map_err(|e| self.driver.refused(e, set, grid, k.own))?;
+        k.room.set(grid.shared);
+        Ok(())
     }
 }
 

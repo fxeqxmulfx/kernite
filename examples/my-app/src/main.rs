@@ -2162,4 +2162,97 @@ mod tests {
         unsafe { kernels.last(Grid::new(most, 1), out.ptr()) }.unwrap();
         assert_eq!(out.read().unwrap(), [most - 1]);
     }
+
+    /// GPU kernels for the tests alone, of 20 KB of shared memory of their own and the launch's
+    /// beside it, by a launch and by a cooperative one.
+    #[kernite_macros::kernels]
+    mod beside {
+        /// The last word of its 20 KB of shared memory, `fixed`, and the last of the `bytes` the
+        /// launch gives, `launched`, each written and read back, to `out[0]` and `out[1]`.
+        pub unsafe extern "ptx-kernel" fn both(out: *mut u32, bytes: u32) {
+            write_both(out, bytes);
+        }
+
+        /// As `both`, and then the grid waits.
+        #[cooperative]
+        pub unsafe extern "ptx-kernel" fn together(out: *mut u32, bytes: u32) {
+            write_both(out, bytes);
+            grid.sync();
+        }
+
+        /// Writes the last word of each memory, reads it back, and stores it at `out`.
+        fn write_both(out: u64, bytes: u32) {
+            let fixed: shared<[u32; 5120], 4>;
+            let launched: shared<[u32]>;
+            let (seven, nine, mine, theirs, at): (u32, u32, u32, u32, u32);
+            mov.u32(seven, 7);
+            st.shared.u32([fixed + 20476], seven);
+            ld.shared.u32(mine, [fixed + 20476]);
+            st.global.u32([out], mine);
+            mov.u32(at, launched);
+            add.u32(at, at, bytes);
+            mov.u32(nine, 9);
+            st.shared.u32([at - 4], nine);
+            ld.shared.u32(theirs, [at - 4]);
+            st.global.u32([out + 4], theirs);
+        }
+    }
+
+    /// What a launch past the shared memory a block has says: the sizes, and what the GPU takes.
+    fn said(bytes: u32, most: u32) -> String {
+        format!(
+            ": each block has {} bytes of shared memory, 20480 of the kernel's and {bytes} of the launch's, and the \
+             GPU takes {most} at most",
+            20480 + u64::from(bytes)
+        )
+    }
+
+    /// A kernel of 20 KB of shared memory of its own is given the launch's beside it, up to all a
+    /// block has: from 16 KB to 79 KB, 36 KB to 99 KB in all on an RTX 30, each launch runs and the
+    /// kernel reads what it wrote, by a launch and by a cooperative one; and a launch past what a
+    /// block has is an error that says how much it has and how much the GPU takes. On a machine
+    /// with no GPU, with one older than Pascal, `sm_60`, or whose blocks have less than 99 KB,
+    /// skipped.
+    #[test]
+    fn a_kernel_with_shared_memory_of_its_own_is_given_the_launchs_beside_it() {
+        let cuda = match Cuda::new() {
+            Ok(cuda) => cuda,
+            Err(e) => return eprintln!("no GPU: skipped. {e}"),
+        };
+        let most = cuda.max_shared();
+        if cuda.sm() < 60 || most < 99 << 10 {
+            eprintln!("the {}, sm_{}, gives a block {most} bytes: skipped", cuda.name(), cuda.sm());
+            return;
+        }
+        let kernels = beside::Kernels::load(&cuda).unwrap();
+        let out = cuda.alloc::<u32>(2).unwrap();
+        let all = most - 20480;
+        // 28 KB is what a launch is given unasked beside the kernel's own 20 KB; the rest the
+        // kernel must be let have.
+        for bytes in [16 << 10, 28 << 10, 29 << 10, 40 << 10, 48 << 10, 49 << 10, 79 << 10, all] {
+            let grid = Grid::new(1, 1).with_shared(bytes);
+            // SAFETY: `both` and `together` write two words at `out`, which has them, and the last
+            // word of the `bytes` of shared memory they are given.
+            unsafe { kernels.both(grid, out.ptr(), bytes) }.unwrap();
+            assert_eq!(out.read().unwrap(), [7, 9], "{bytes} bytes");
+            // SAFETY: as above.
+            unsafe { kernels.together(grid, out.ptr(), bytes) }.unwrap();
+            assert_eq!(out.read().unwrap(), [7, 9], "{bytes} bytes, cooperatively");
+            assert!(kernels.together_blocks(1, bytes).unwrap() >= 1, "{bytes} bytes");
+        }
+        // 80 KB, 100 KB in all.
+        for bytes in [all + 1, all + 1024, u32::MAX] {
+            let grid = Grid::new(1, 1).with_shared(bytes);
+            // SAFETY: as above; the launches are refused.
+            let launched =
+                [unsafe { kernels.both(grid, out.ptr(), bytes) }, unsafe { kernels.together(grid, out.ptr(), bytes) }];
+            let blocks = kernels.together_blocks(1, bytes).map(|_| ());
+            for e in launched.into_iter().chain([blocks]).map(Result::unwrap_err) {
+                assert_eq!(e.call, "cuFuncSetAttribute", "{e}");
+                assert!(e.message.starts_with("CUDA_ERROR_INVALID_VALUE (1): "), "{e}");
+                assert!(e.message.ends_with(&said(bytes, most)), "{e}");
+            }
+        }
+        cuda.sync().unwrap();
+    }
 }

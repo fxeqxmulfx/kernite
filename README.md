@@ -260,6 +260,15 @@ along x, 1024 along y and 64 along z. A grid past one of these is an error that 
 says no more than `CUDA_ERROR_INVALID_VALUE` of any of them, and kernite adds its sentence to that error alone: another,
 such as `CUDA_ERROR_ILLEGAL_ADDRESS` from a kernel before it, is said as the driver says it.
 
+A block has shared memory of the kernel's own, which it declares, `let tile: shared<[f32; 256], 16>;`, at most 48 KB,
+and of the launch's beside it, `with_shared(bytes)`. Together they may be all the GPU gives a block, which
+`Cuda::max_shared` says: 99 KB on an RTX 30, so that a launch gives a kernel of 20 KB of its own 79 KB. A block of more
+is an error that says how much it has: `cuFuncSetAttribute: CUDA_ERROR_INVALID_VALUE (1): invalid argument: each block
+has 102400 bytes of shared memory, 20480 of the kernel's and 81920 of the launch's, and the GPU takes 101376 at most`.
+A cooperative launch says the same, and so does the method that says how many blocks its grid has at most, below. A
+grid past more than one limit is told of the first of these: the blocks along x, y and z, the threads along x, y and z,
+the threads in all, and the shared memory.
+
 The PTX target knows every instruction of PTX's for the GPUs from Fermi, `sm_20`, to Ampere, `sm_86`, in each form
 `ptxas` takes, [`forms`](crates/ptx/src/forms.rs), but one. `txq.force_unnormalized_coords` asks of a sampler apart
 from its texture, in the independent mode, which kernite does not write: kernite writes no `.samplerref`, so the ISA
