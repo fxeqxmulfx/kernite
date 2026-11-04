@@ -1732,12 +1732,12 @@ fn a_placeholder_in_a_pointers_type_is_rusts_error_alone_at_the_placeholder() {
 /// A `_` is Rust's placeholder in a type, and is no placeholder where it is a pattern or a name, or the macro's
 /// own: in a block, `[u8; { let _ = 1; 3 }]` or `Arr<{ let _ = 1; 3 }>`; in an array's length that is no block,
 /// `[u8; if let Some(_) = Some(1) { 3 } else { 4 }]`, which is an expression; among a macro's arguments,
-/// `[u8; len!(_)]` or `byte!(_)`, which the macro drops; and as the name of a function pointer's parameter,
-/// `fn(_: u8)`, or `fn(_: ::core::primitive::u8)` where the parameter's type is a path from the root. Rust takes
-/// each of these types in a signature, so a kernel that gives back a pointer to one is a
-/// kernel: the crate builds without a word, under `#![deny(warnings)]`, and the test the fixture holds calls each
-/// x86 kernel, plain and of compile-time arguments, which gives its pointer back, and the second adds its argument
-/// to it first. A kernel taken for one with a placeholder is a stub, which aborts.
+/// `[u8; len!(_)]`, `byte!(_)` or `byte!{ _ }`, which the macro drops; and as the name of a function pointer's
+/// parameter, `fn(_: u8)`, or `fn(_: ::core::primitive::u8)` where the parameter's type is a path from the root.
+/// Rust takes each of these types in a signature, so a kernel that gives back a pointer to one is a kernel: the
+/// crate builds without a word, under `#![deny(warnings)]`, and the test the fixture holds calls each x86 kernel,
+/// plain and of compile-time arguments, which gives its pointer back, and the second adds its argument to it
+/// first. A kernel taken for one with a placeholder is a stub, which aborts.
 #[test]
 fn a_result_with_an_underscore_that_is_no_placeholder_is_a_kernel_that_runs() {
     let printed = runs_quietly(&["test"], "not_placeholder");
@@ -1787,6 +1787,43 @@ fn a_result_its_kind_may_not_have_is_refused_at_the_result_when_its_type_holds_a
             &format!("src/lib.rs:41:76: error: in `tiles::<1>`: {gpu}"),
             &format!("src/lib.rs:41:76: error: in `tiles::<2>`: {gpu}"),
             "error: could not compile `block_result_refused` (lib) due to 7 previous errors",
+        ],
+    );
+}
+
+/// A kernel with a result that none of its kind may have, a cooperative kernel or a GPU kernel, which give back
+/// nothing, plain or of compile-time arguments, or an x86 kernel whose result is no number or pointer, is refused at
+/// the result when its type is a macro in braces, `byte!{ _ }`, as it is when it holds a block or no macro, in the
+/// words of its kind.
+#[test]
+fn a_result_its_kind_may_not_have_is_refused_at_the_result_when_its_type_is_a_macro_in_braces() {
+    let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
+    let gpu = "a GPU kernel returns nothing, not `*const byte!{_}`: it writes what it works out to memory";
+    refuses(
+        "type_macro_refused",
+        &[
+            &format!("src/lib.rs:17:64: error: {nothing}"),
+            &format!("src/lib.rs:23:84: error: in `cooperative_tiles::<1>`: {nothing}"),
+            &format!("src/lib.rs:23:84: error: in `cooperative_tiles::<2>`: {nothing}"),
+            "src/lib.rs:28:59: error: a kernel returns a float, an integer or a pointer, or never, `!`; not `byte!{_}`",
+            &format!("src/lib.rs:36:62: error: {gpu}"),
+            &format!("src/lib.rs:41:76: error: in `tiles::<1>`: {gpu}"),
+            &format!("src/lib.rs:41:76: error: in `tiles::<2>`: {gpu}"),
+            "error: could not compile `type_macro_refused` (lib) due to 7 previous errors",
+        ],
+    );
+}
+
+/// The `!` of never follows the arrow, a keyword or a lifetime, and is no macro's: the braces after it are the body.
+/// So a kernel whose result is a reference to never, `&'static !`, is refused at the result, a reference, and not for
+/// the want of a body.
+#[test]
+fn a_result_that_is_a_reference_to_never_is_refused_at_the_result_and_its_braces_are_the_body() {
+    refuses(
+        "never_after_lifetime",
+        &[
+            "src/lib.rs:7:50: error: a kernel returns a float, an integer or a pointer, or never, `!`; not `&'static!`",
+            "error: could not compile `never_after_lifetime` (lib) due to 1 previous error",
         ],
     );
 }
