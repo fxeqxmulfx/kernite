@@ -172,7 +172,7 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     let mut params = hygienic("&self, $grid: ::kernite_cuda::Grid, ", launched.is_some());
     let mut args = vec![];
     for (param, colon) in written_params(f, top) {
-        // Its name as written, before the colon.
+        // Its name, before the colon.
         args.push(format!("::kernite_cuda::arg(&{})", param[colon - 1]));
         params.extend(param[..=colon].iter().cloned());
         match pointer(&param[colon + 1..]) {

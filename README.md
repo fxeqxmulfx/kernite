@@ -35,10 +35,12 @@ let sum = unsafe { kernels::sum8(xs.as_ptr()) };
 and `kernels::LISTINGS` holds each kernel's listing for snapshots. Everything that is not an instruction happens
 while the kernel compiles: `for` unrolls, `if` on a bool chooses, a function without an ABI is a helper inlined
 where it is called, and `<const N: usize>` makes one generic. Each parameter and generic of a function has a
-name of its own, but `_`. A generic kernel is compiled for each value its `#[instances(1, 4)]` lists, each a
-kernel of its own, which Rust calls as it calls a generic function, `kernels::dot::<4>(x, y, n)`; a value it
-does not list fails to build. A value known now holds at most 1048576 elements in all, however its arrays nest,
-and a range as many. Each number, float and `bool` is an element, and so is each array of none or one item,
+name of its own, but `_`. A parameter named `_` is given and not read, as in Rust, in a kernel of every kind: the next
+parameter is read where the ABI puts it. Rust cannot pass `_` on, so the macros name it for Rust, and the function Rust
+calls the kernel by takes it under that name. A generic kernel is compiled for each value its `#[instances(1, 4)]`
+lists, each a kernel of its own, which Rust calls as it calls a generic function, `kernels::dot::<4>(x, y, n)`; a value
+it does not list fails to build. A value known now holds at most 1048576 elements in all, however its arrays nest, and a
+range as many. Each number, float and `bool` is an element, and so is each array of none or one item,
 which costs memory of its own. A kernel declares at most 65536 variables, however its loops and helpers repeat
 them. Working out a function takes at most 4194304 steps: each turn of a `for`, each instruction, call, label or
 note, each number of a range, each item an array lists, as `[a, b]`, and each element of each `[x; n]`, of each
@@ -195,10 +197,10 @@ and then sleeps, using no CPU. A launch that finds the threads asleep costs 5 mi
 16 on twelve, and some 100 when the machine has been idle for milliseconds, as the system wakes its cores. The threads
 end when the thread that launched does.
 
-The kernel's parameters keep the names they are written with, `grid` among them. A compile-time argument may not be
-named `grid`, for Rust cannot keep a const apart from a parameter of its name: that is an error at its name. A crate
-with a cooperative kernel needs a dependency named `kernite-cpu` for the grid, not renamed in `Cargo.toml`. kernite says
-at the kernel when it has none.
+The kernel's parameters keep the names they are written with, `grid` among them, but `_`, which the macros name
+for Rust. A compile-time argument may not be named `grid`, for Rust cannot keep a const apart from a parameter of
+its name: that is an error at its name. A crate with a cooperative kernel needs a dependency named `kernite-cpu`
+for the grid, not renamed in `Cargo.toml`. kernite says at the kernel when it has none.
 
 A kernel calls the module's others, itself among them, as SysV calls a function: `call(g, gcd, (a, b))` moves `a` to
 `rdi` and `b` to `rsi`, and `g` from `rax`, and is checked against what `gcd` takes and returns. `lea(fp, [gcd])` takes
@@ -258,9 +260,10 @@ ys.read_into(&mut y)?;
 ```
 
 `saxpy` becomes the method that launches it, which takes the grid and then the kernel's parameters. They keep the names
-they are written with, `grid` among them. A compile-time argument may not be named `grid`, nor, on a cooperative kernel,
-`threads` or `shared`, which are parameters of the method that says how many blocks its grid has at most, below. Rust
-cannot keep a const apart from a parameter of its name: that is an error at its name.
+they are written with, `grid` among them, but `_`, which the macros name for Rust. A compile-time argument may not
+be named `grid`, nor, on a cooperative kernel, `threads` or `shared`, which are parameters of the method that says
+how many blocks its grid has at most, below. Rust cannot keep a const apart from a parameter of its name: that is
+an error at its name.
 
 A grid has as many blocks and threads as the GPU takes: at least 1 along each of x, y and z, and, from Kepler's `sm_30`
 on, at most 2^31 - 1 blocks along x, 65535 along y and 65535 along z, and 1024 threads in a block, at most 1024 of them

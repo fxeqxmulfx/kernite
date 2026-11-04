@@ -118,11 +118,17 @@ fn builds_quietly_in(command: &[&str], name: &str, dir: &Path) {
 
 /// That Cargo builds fixture `name` without a word, and the tests in it pass, its own and its doc
 /// tests, which are crates that call it: the kernels run, as a crate that uses them runs them.
-/// Returns what the tests printed.
+/// Returns what the tests printed. A test that finds the GPU missing says so in a line with "skipped"
+/// and passes: that line is no word of Cargo's, and it is said again here, as a test of this file says
+/// of a tool it lacks.
 fn runs_quietly(name: &str) -> String {
     let out = cargo_out(&["test"], &written(name));
     let (said, printed) = (String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
-    let passed = out.status.success() && said.is_empty();
+    let (skipped, said): (Vec<&str>, Vec<&str>) = said.lines().partition(|line| line.contains("skipped"));
+    for line in skipped {
+        eprintln!("{line}");
+    }
+    let (passed, said) = (out.status.success() && said.is_empty(), said.join("\n"));
     assert!(passed, "fixtures/{name}.rs: ran {}, and Cargo said:\n{said}\n{printed}", out.status.success());
     printed.into_owned()
 }
@@ -805,6 +811,89 @@ fn a_kernels_parameters_keep_their_names_beside_those_the_macros_rust_binds() {
     builds_quietly("parameters");
 }
 
+/// A parameter named `_` is a number or a pointer the kernel is given and does not read, as it is in any
+/// Rust function: in an x86 kernel, plain, of compile-time arguments, cooperative, and cooperative of
+/// arguments, and in a GPU kernel of those kinds. Rust builds the crate without a word, and the tests the
+/// fixture holds run each kernel, the x86 kernels and the GPU kernels on the GPU: each reads the parameters
+/// after the ones named `_` where the ABI puts them. The macros name each such parameter for Rust
+/// themselves, `__kernite_0`, and a parameter or a compile-time argument of that name is the kernel's own.
+#[test]
+fn a_parameter_named_underscore_is_passed_and_not_read_in_a_kernel_of_whatever_kind_it_is() {
+    let printed = runs_quietly("underscore");
+    assert!(
+        printed.contains("test result: ok. 2 passed"),
+        "fixtures/underscore.rs ran its tests, and printed:\n{printed}"
+    );
+}
+
+/// A kernel kernite refuses, with a number and a pointer named `_`, is kernite's error alone, where it
+/// is: Rust says nothing at the module's attribute, for the stub the macros leave for the kernel takes
+/// them as the kernel does. So it is for an x86 kernel, plain, of compile-time arguments, cooperative and
+/// cooperative of arguments, one whose `extern` kernite does not know and one that is not `unsafe`;
+/// and for a GPU kernel, plain, of compile-time arguments, cooperative and cooperative of arguments. In a
+/// module that gives a number's name another type, Rust says as well, once, at the type of the number
+/// named `_`: it is not that number.
+#[test]
+fn a_kernel_kernite_refuses_with_a_parameter_named_underscore_is_kernites_error_alone() {
+    let y = "error: `y` is not defined";
+    let abi = "error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, \
+               for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` is none of these";
+    let safe = "error: a kernel trusts the pointers it is given, so it is an `unsafe fn`";
+    let kernite = [
+        // The module of x86 kernels: a plain one, one of compile-time arguments, which kernite says
+        // once for each instance, a cooperative one and a cooperative one of arguments; one whose
+        // `extern` it does not know, and one that is not `unsafe`.
+        ("17:13", y),
+        ("22:13", "error: in `tiles::<1>`: `y` is not defined"),
+        ("22:13", "error: in `tiles::<2>`: `y` is not defined"),
+        ("27:13", y),
+        ("33:13", "error: in `together_tiles::<1>`: `y` is not defined"),
+        ("33:13", "error: in `together_tiles::<2>`: `y` is not defined"),
+        ("36:23", abi),
+        ("40:28", safe),
+        // The module of GPU kernels: the same four kinds.
+        ("48:24", y),
+        ("53:24", "error: in `tiles::<1>`: `y` is not defined"),
+        ("53:24", "error: in `tiles::<2>`: `y` is not defined"),
+        ("58:24", y),
+        ("64:24", "error: in `together_tiles::<1>`: `y` is not defined"),
+        ("64:24", "error: in `together_tiles::<2>`: `y` is not defined"),
+        // The same kernels in the modules that take the names of `u64` and `u32` from the crate's `alias`.
+        ("73:13", y),
+        ("78:13", "error: in `tiles::<1>`: `y` is not defined"),
+        ("78:13", "error: in `tiles::<2>`: `y` is not defined"),
+        ("83:13", y),
+        ("89:13", "error: in `together_tiles::<1>`: `y` is not defined"),
+        ("89:13", "error: in `together_tiles::<2>`: `y` is not defined"),
+        ("92:23", abi),
+        ("96:28", safe),
+        ("106:24", y),
+        ("111:24", "error: in `tiles::<1>`: `y` is not defined"),
+        ("111:24", "error: in `tiles::<2>`: `y` is not defined"),
+        ("116:24", y),
+        ("122:24", "error: in `together_tiles::<1>`: `y` is not defined"),
+        ("122:24", "error: in `together_tiles::<2>`: `y` is not defined"),
+    ];
+    // Where Rust says it, and of which number, at the type of the parameter named `_`: in each
+    // kernel of the modules that rename a number, once, whatever the kernel is.
+    let numbers = [
+        ("72:44", "u64", "i64"),
+        ("77:58", "u64", "i64"),
+        ("82:47", "u64", "i64"),
+        ("88:67", "u64", "i64"),
+        ("92:43", "u64", "i64"),
+        ("96:36", "u64", "i64"),
+        ("105:48", "u32", "i32"),
+        ("110:62", "u32", "i32"),
+        ("115:51", "u32", "i32"),
+        ("121:71", "u32", "i32"),
+    ];
+    let mut said: Vec<String> = kernite.map(|(at, what)| format!("src/lib.rs:{at}: {what}")).into();
+    said.extend(numbers.map(|(at, number, found)| not_the_number(at, number, found)));
+    said.push(format!("error: could not compile `underscore_refused` (lib) due to {} previous errors", said.len()));
+    refuses("underscore_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
 /// A parameter's type means in every x86 kernel what it means in any function of the module, whether
 /// the kernel is called as it is written, of compile-time arguments, or cooperative: `super::W`,
 /// `crate::W`, `self::W`, a `W` the module takes from beside it or holds, and `super::super::W`
@@ -1462,11 +1551,14 @@ fn a_crate_that_forbids_a_lint_a_kernel_expects_is_refused_once_at_the_expect() 
 /// come from, and a launcher takes `self` and the grid as well as the kernel's parameters: so each
 /// launcher allows it, and Clippy says nothing of one of eight or nine, of each kind of kernel. It
 /// says nothing of the kernels that forbid lints either, whose instances include `bool`s, nor of those
-/// that take or give back pointers, of every kind, which the macros ask Rust the size of.
+/// that take or give back pointers, of every kind, which the macros ask Rust the size of, nor of those
+/// that take parameters named `_`, which the macros name for Rust themselves.
 #[test]
 fn clippy_says_nothing_of_the_rust_the_macro_writes() {
     if clippy_here() {
-        for name in ["many", "forbidden", "pointers", "pointer_checks", "number_checks", "primitive_names"] {
+        for name in
+            ["many", "forbidden", "pointers", "pointer_checks", "number_checks", "primitive_names", "underscore"]
+        {
             let (done, said) = cargo(&["clippy"], name);
             assert!(done && said.is_empty(), "fixtures/{name}.rs: Clippy {done}, and said:\n{}", said.join("\n"));
         }

@@ -149,7 +149,9 @@ pub(crate) fn clashes(f: &Fn, own: &[&str], method: &str, top: &[TokenTree]) -> 
 
 /// `f`'s parameters as written, each its tokens, `x: *mut f32`, and the place of its colon. A comma
 /// ends a parameter unless it is among the arguments of a type's, `x: *mut Pair<u8, 2>`. The `>` of
-/// an arrow, `fn() -> u8`, closes no `<` of them.
+/// an arrow, `fn() -> u8`, closes no `<` of them. Rust cannot pass a parameter named `_` on, so
+/// each is named here, for every signature and body the macros write for `f`: it takes the next of
+/// `__kernite_0`, `__kernite_1` and on that no parameter or compile-time argument of `f` is named.
 pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, usize)> {
     let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
     let tokens = flatten(group.stream());
@@ -166,7 +168,19 @@ pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, 
             open == 0 && is_punct(t, ',')
         })
         .filter(|p| !p.is_empty());
-    params.map(|p| (p.to_vec(), p.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type"))).collect()
+    let taken: Vec<&str> =
+        f.generics.iter().map(|g| &g.name).chain(f.params.iter().map(|p| &p.name)).map(String::as_str).collect();
+    let mut free = (0..).map(|n| format!("__kernite_{n}")).filter(|name| !taken.contains(&name.as_str()));
+    params
+        .map(|p| {
+            let mut p = p.to_vec();
+            let colon = p.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type");
+            if is_ident(&p[colon - 1], "_") {
+                p[colon - 1] = TokenTree::Ident(Ident::new(&free.next().expect("names do not run out"), site()));
+            }
+            (p, colon)
+        })
+        .collect()
 }
 
 /// `"const"` or `"mut"`, and the tokens of the type it points to, if `ty` is a pointer, `*const T`
@@ -223,9 +237,9 @@ fn asked(f: &Fn, top: &[TokenTree]) -> Vec<Option<Ask>> {
 }
 
 /// What asks Rust of each type `f` takes or gives back, in a body that has the parameters by their
-/// names as written: [`numbers`] asks of the numbers and [`pointers`] of the pointers, for which a
-/// function that takes a pointer as `ptr` is written. A result that is a pointer is asked of
-/// where it is given back. Nothing if `f` has none to ask of.
+/// names: [`numbers`] asks of the numbers and [`pointers`] of the pointers, for which a function
+/// that takes a pointer as `ptr` is written. A result that is a pointer is asked of where it is
+/// given back. Nothing if `f` has none to ask of.
 pub(crate) fn checks(f: &Fn, top: &[TokenTree], ptr: &str) -> TokenStream {
     let names: Vec<TokenStream> =
         written_params(f, top).iter().map(|(param, colon)| param[colon - 1].clone().into()).collect();
@@ -391,7 +405,7 @@ pub(crate) fn stub(f: &Fn, top: &[TokenTree]) -> TokenStream {
 }
 
 /// What a body of `f`'s parameters does when it never runs, for a kernel that does not compile: it
-/// uses each parameter, by its name as written, which Rust would find unused.
+/// uses each parameter, by its name, which Rust would find unused.
 pub(crate) fn never(f: &Fn, top: &[TokenTree]) -> String {
     written_params(f, top).iter().map(|(param, colon)| format!("let _ = {};", param[colon - 1])).collect()
 }
@@ -522,8 +536,8 @@ fn call(name: &str, parts: Vec<TokenStream>) -> TokenStream {
     out
 }
 
-/// `f`'s signature as written, from its visibility to its result, but for each number, which is
-/// [`value`]'s.
+/// `f`'s signature as written, from its visibility to its result, but for its parameters, as
+/// [`value_params`] has them, and a number it gives back, which is [`value`]'s.
 pub(crate) fn signature(f: &Fn, top: &[TokenTree]) -> TokenStream {
     let mut out: TokenStream = top[f.head.start..f.params_at].iter().cloned().collect();
     let mut params = Group::new(Delimiter::Parenthesis, value_params(f, top));
@@ -537,7 +551,8 @@ pub(crate) fn signature(f: &Fn, top: &[TokenTree]) -> TokenStream {
     out
 }
 
-/// `f`'s parameters as written, a comma after each, but for each number, which is [`value`]'s.
+/// `f`'s parameters as [`written_params`] has them, a comma after each, but for each number, which
+/// is [`value`]'s.
 pub(crate) fn value_params(f: &Fn, top: &[TokenTree]) -> TokenStream {
     let mut out = TokenStream::new();
     for (param, colon) in written_params(f, top) {

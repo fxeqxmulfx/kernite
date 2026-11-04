@@ -65,7 +65,7 @@ pub(crate) fn naked(
         statics.push(("C".to_string(), listing));
     } else {
         // Each instance's parameters and their types: `f`'s, then a cooperative kernel's place. `f`
-        // passes its own on by their names as written, before the colon, and a pointer's `.cast()`.
+        // passes its own on by their names, before the colon, and a pointer's `.cast()`.
         let (mut params, mut names) = (vec![], vec![]);
         for (param, colon) in written_params(f, top) {
             let (ty, cast) = erased(&param[colon + 1..]);
@@ -368,7 +368,7 @@ fn grid_launcher(
             };
             let (mut addresses, mut args) = (String::new(), vec![]);
             for (param, colon) in written_params(f, top) {
-                // Its name as written, before the colon.
+                // Its name, before the colon.
                 let name = &param[colon - 1];
                 match pointer(&param[colon + 1..]) {
                     Some((kind, _)) => {

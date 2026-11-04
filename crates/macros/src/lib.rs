@@ -95,6 +95,11 @@
 //! as one of them, for Rust cannot keep a const apart from a parameter of its name: that is
 //! an error at its name.
 //!
+//! A parameter named `_` is given and not read, in a kernel of every kind. Rust cannot pass `_` on,
+//! so the macros name it, with a name of their own that no parameter or compile-time argument of
+//! the kernel has. The function Rust calls the kernel by takes it under that name, and its docs
+//! show it.
+//!
 //! A type in a kernel's parameters or return means what it means in any function of the module,
 //! `super::W` and `self::W` among them, and it may name the kernel's compile-time arguments, as in
 //! any generic function: `*mut [u8; N]` in `fn arr<const N: usize>`. An error in one is Rust's, said
