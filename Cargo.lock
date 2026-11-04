@@ -7,6 +7,7 @@ name = "kernite"
 version = "0.1.0"
 dependencies = [
  "kernite-build",
+ "kernite-compile",
  "kernite-core",
  "kernite-lang",
  "kernite-ptx",

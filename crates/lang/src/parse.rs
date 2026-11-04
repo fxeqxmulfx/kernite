@@ -3,11 +3,20 @@
 use std::collections::BTreeSet;
 
 use crate::ast::{
-    BinOp, Block, Const, Cooperative, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret, Static, Stmt,
-    Type, UnOp,
+    BinOp, Block, Const, Cooperative, Directive, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret,
+    Static, Stmt, Type, UnOp,
 };
 use crate::token::{Delim, Span, Tree, text};
 use crate::{Error, nested};
+
+/// A GPU kernel's tuning directives, as PTX has them: each by its name, what it gives, and an
+/// example of it.
+const DIRECTIVES: [(&str, &str, &str); 4] = [
+    ("maxntid", "the most threads a block has, along x, then y and z", "16, 16"),
+    ("reqntid", "the threads a block has, along x, then y and z", "8, 8, 4"),
+    ("minnctapersm", "the blocks an SM should hold at once, at least", "2"),
+    ("maxnreg", "the most registers a thread may use", "32"),
+];
 
 /// The items of a module, from the tokens inside its braces. Each const, function and static
 /// has a name of its own. The first `given` tokens are consts the module takes from another;
@@ -54,6 +63,10 @@ fn named_once(items: &[Item], given: usize) -> Result<(), Error> {
     }
     Ok(())
 }
+
+/// What a generic that is a type is refused with: `<T>`, and `impl` in a parameter's type or the result's, which
+/// in a parameter makes the function generic over a type, and in the result hides one.
+const GENERICS: &str = "a function's generics are values, as in `<const N: usize>`";
 
 /// The binary operators, longest first where one starts another, with their precedence.
 const BINARY: &[(&str, BinOp, u8)] = &[
@@ -175,6 +188,11 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The item of the tokens from `start` to here.
+    fn made(&self, start: usize, kind: ItemKind) -> Item {
+        Item { tokens: start..self.pos, span: self.trees[start].span(), kind }
+    }
+
     fn item(&mut self) -> Result<Item, Error> {
         let start = self.pos;
         // The module's own attribute, `#![..]`, passes through where it is.
@@ -183,9 +201,9 @@ impl<'a> Parser<'a> {
             && matches!(self.peek_at(2), Some(Tree::Group { delim: Delim::Bracket, .. }))
         {
             self.pos += 3;
-            return Ok(Item { tokens: start..self.pos, kind: ItemKind::Other });
+            return Ok(self.made(start, ItemKind::Other));
         }
-        let (mut instances, mut cooperative) = (None, None);
+        let (mut instances, mut cooperative, mut directives) = (None, None, vec![]);
         while self.is_op("#") && matches!(self.peek_at(1), Some(Tree::Group { delim: Delim::Bracket, .. })) {
             if let Some(Tree::Group { trees, .. }) = self.peek_at(1)
                 && let [Tree::Ident { name, span }, rest @ ..] = trees.as_slice()
@@ -218,7 +236,30 @@ impl<'a> Parser<'a> {
                         }
                         cooperative = Some(Cooperative { span: *span, tokens });
                     }
-                    _ => {}
+                    // `.maxnctapersm` is gone from PTX 2.1 on, and `ptxas` refuses it: the name is what is
+                    // wrong, in whatever form it is written and on whatever it is.
+                    "maxnctapersm" => {
+                        return at(
+                            "PTX has no `.maxnctapersm` from 2.1 on; `#[minnctapersm(..)]` gives the blocks an SM \
+                             should hold at once, at least",
+                        );
+                    }
+                    _ => {
+                        if let Some(&(_, what, example)) = DIRECTIVES.iter().find(|(d, ..)| d == name) {
+                            let [Tree::Group { delim: Delim::Paren, trees: values, .. }] = rest else {
+                                return at(&format!("`#[{name}(..)]` gives {what}, as in `#[{name}({example})]`"));
+                            };
+                            if directives.iter().any(|d: &Directive| d.name == *name) {
+                                return at(&format!("a kernel has one `#[{name}(..)]`"));
+                            }
+                            directives.push(Directive {
+                                name: name.clone(),
+                                values: args(values)?,
+                                span: *span,
+                                tokens,
+                            });
+                        }
+                    }
                 }
             }
             self.pos += 2;
@@ -236,6 +277,10 @@ impl<'a> Parser<'a> {
                 message: "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, `extern \
                           \"ptx-kernel\"` or `extern \"sysv64\"`"
                     .into(),
+            }))
+            .or(directives.first().map(|d| Error {
+                span: d.span,
+                message: format!("`#[{}(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`", d.name),
             }));
         let head = self.pos;
         if self.eat_ident("pub") {
@@ -246,7 +291,7 @@ impl<'a> Parser<'a> {
                 return Err(e);
             }
             let s = self.static_rest(attrs, head..self.pos - 1)?;
-            return Ok(Item { tokens: start..self.pos, kind: ItemKind::Static(s) });
+            return Ok(self.made(start, ItemKind::Static(s)));
         }
         let qualifier = |t: Option<&Tree>| matches!(t, Some(Tree::Ident { name, .. }) if ["fn", "unsafe", "extern", "async"].contains(&name.as_str()));
         if self.is_ident("const") && !qualifier(self.peek_at(1)) {
@@ -255,7 +300,7 @@ impl<'a> Parser<'a> {
             }
             self.pos += 1;
             let c = self.const_rest()?;
-            return Ok(Item { tokens: start..self.pos, kind: ItemKind::Const(c) });
+            return Ok(self.made(start, ItemKind::Const(c)));
         }
         let qualifiers = self.pos;
         let mut abi = None;
@@ -299,8 +344,8 @@ impl<'a> Parser<'a> {
             if let Some((span, message)) = refused {
                 return Err(Error { span, message: message.into() });
             }
-            let f = self.function(attrs, (instances, cooperative), head..self.pos - 1, abi, unsafe_fn)?;
-            return Ok(Item { tokens: start..self.pos, kind: ItemKind::Fn(f) });
+            let f = self.function(attrs, (instances, cooperative, directives), head..self.pos - 1, abi, unsafe_fn)?;
+            return Ok(self.made(start, ItemKind::Fn(f)));
         }
         if let Some(e) = misplaced {
             return Err(e);
@@ -313,7 +358,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        Ok(Item { tokens: start..self.pos, kind: ItemKind::Other })
+        Ok(self.made(start, ItemKind::Other))
     }
 
     /// What follows `const`: `NAME: TYPE = VALUE;`.
@@ -346,7 +391,7 @@ impl<'a> Parser<'a> {
     fn function(
         &mut self,
         attrs: std::ops::Range<usize>,
-        (instances, cooperative): (Option<Instances>, Option<Cooperative>),
+        (instances, cooperative, directives): (Option<Instances>, Option<Cooperative>, Vec<Directive>),
         head: std::ops::Range<usize>,
         abi: Option<(String, Span)>,
         unsafe_fn: bool,
@@ -356,7 +401,7 @@ impl<'a> Parser<'a> {
         if self.eat_op("<") {
             while !self.eat_op(">") {
                 if !self.eat_ident("const") {
-                    return self.error("a function's generics are values, as in `<const N: usize>`");
+                    return self.error(GENERICS);
                 }
                 let (name, span) = self.ident()?;
                 self.expect_op(":")?;
@@ -386,12 +431,21 @@ impl<'a> Parser<'a> {
         }
         let ret = if self.eat_op("->") {
             let (from, span) = (self.pos, self.span());
-            while !self.done() && !matches!(self.peek(), Some(Tree::Group { delim: Delim::Brace, .. })) {
-                if self.is_ident("where") || self.is_op(";") {
-                    break;
-                }
-                self.pos += 1;
-            }
+            // The result ends at its `where`, at its body, or at the `;` of a function with none. A block among
+            // the arguments of a name in it, `Foo<{ 3 }>`, is none of them. Nor are the braces of a macro,
+            // `byte!{ _ }`, which come right after the `!` of its name. The `!` of never follows the arrow,
+            // `-> !`, a keyword, `*const !`, or a lifetime, `&'a !`: it is no macro's, and the braces after it are
+            // the body. A lifetime is a `'` and the name that follows it.
+            self.skip_ty(1, |p| {
+                let macro_args = matches!(
+                    &p.trees[..p.pos],
+                    [.., before, Tree::Ident { name, .. }, Tree::Punct { ch: '!', .. }]
+                        if name != "const" && name != "mut" && !matches!(before, Tree::Punct { ch: '\'', .. })
+                );
+                let body = matches!(p.peek(), Some(Tree::Group { delim: Delim::Brace, .. })) && !macro_args;
+                p.is_ident("where") || p.is_op(";") || body
+            })?;
+            no_impl(&self.trees[from..self.pos])?;
             Some(Ret { ty: text(&self.trees[from..self.pos]), span, tokens: from..self.pos })
         } else {
             None
@@ -407,6 +461,7 @@ impl<'a> Parser<'a> {
             attrs,
             instances,
             cooperative,
+            directives,
             head,
             abi,
             unsafe_fn,
@@ -435,7 +490,9 @@ impl<'a> Parser<'a> {
             p.finish()?;
             return Ok(Type::Array(Box::new(elem), len, span));
         }
+        // `for<'a> fn(&'a u8)` begins with a binder, not with the name of a type: it is read whole below.
         if let Some(Tree::Ident { name, span }) = self.peek()
+            && name != "for"
             && matches!(self.peek_at(1), Some(Tree::Punct { ch: '<', .. }))
         {
             nested(open, *span)?;
@@ -451,13 +508,33 @@ impl<'a> Parser<'a> {
             return Ok(Type::Generic(name.strip_prefix("r#").unwrap_or(name).to_string(), args, *span));
         }
         let (from, span) = (self.pos, self.span());
-        while !self.done() && !["=", ";", ",", ">"].iter().any(|op| self.is_op(op)) {
-            self.pos += 1;
-        }
+        self.skip_ty(open, |p| ["=", ";", ","].iter().any(|op| p.is_op(op)))?;
         if from == self.pos {
             return self.error(format!("expected a type, found {}", self.found()));
         }
         Ok(Type::Name(text(&self.trees[from..self.pos]), span))
+    }
+
+    /// Goes past the tokens of a type, at level `open` of the type it is in, to the first that `ends` it, or to the
+    /// `>` that closes the arguments the type is in. The arguments of a name in it, `*const Foo<u8>`, end at their
+    /// own `>`, and `ends` is not asked inside them. A level starts at the name, as `Name<T>` above does.
+    fn skip_ty(&mut self, open: usize, ends: fn(&Self) -> bool) -> Result<(), Error> {
+        let from = self.pos;
+        let mut angles = 0;
+        while !self.done() && (angles > 0 || !(self.is_op(">") || ends(self))) {
+            if self.is_op("<") {
+                nested(open + angles, self.trees[from..self.pos].last().map_or(self.span(), Tree::span))?;
+                angles += 1;
+            } else if self.is_op(">") {
+                angles -= 1;
+            } else if self.is_op("->") {
+                // The arrow of a function's type, `fn(u8) -> u8`, is one operator: its `>` neither ends the
+                // type nor closes a `<`.
+                self.pos += 1;
+            }
+            self.pos += 1;
+        }
+        Ok(())
     }
 
     fn finish(&self) -> Result<(), Error> {
@@ -858,13 +935,30 @@ fn params(trees: &[Tree]) -> Result<Vec<Param>, Error> {
         p.eat_ident("mut");
         let (name, span) = p.ident()?;
         p.expect_op(":")?;
+        let from = p.pos;
         let ty = p.ty(1)?;
+        no_impl(&p.trees[from..p.pos])?;
         out.push(Param { name, span, ty });
         if !p.done() {
             p.expect_op(",")?;
         }
     }
     Ok(out)
+}
+
+/// Refuses an `impl` in the type of a parameter or the result, wherever in it, as `<T>` is, at the `impl`: in a
+/// parameter it makes the function generic over a type, and in the result it hides one.
+fn no_impl(trees: &[Tree]) -> Result<(), Error> {
+    for tree in trees {
+        match tree {
+            Tree::Ident { name, span } if name == "impl" => {
+                return Err(Error { span: *span, message: GENERICS.to_string() });
+            }
+            Tree::Group { trees, .. } => no_impl(trees)?,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// A string literal's text.

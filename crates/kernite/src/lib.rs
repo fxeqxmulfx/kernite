@@ -42,8 +42,9 @@
 //! ```
 
 pub use kernite_build::{
-    Abi, Call, Compiled, ConstItem, DeviceFnOut, DeviceOut, DeviceStatic, Given, HostStatic, ItemOut, Launcher,
-    ModuleOut, Naked, NativeInstance, NativeOut, Owner, abi, consts, cooperative, function, instance, owner,
+    Abi, Assembly, Call, Compiled, ConstItem, DeviceFnOut, DeviceOut, DeviceStatic, Failed, Given, HostStatic, ItemOut,
+    Kept, Launcher, ModuleOut, Naked, NativeInstance, NativeOut, Owner, When, abi, consts, cooperative, function,
+    instance, owner,
 };
 pub use kernite_lang as lang;
 
@@ -81,9 +82,10 @@ pub fn x86_statics(module: &Module) -> Vec<Result<Compiled<X86Static>, kernite_l
 /// them. `scope` is the namespaces its GPU kernels are in, as [`ptx_scope`] writes them, and
 /// `given` the consts it takes from a module of consts. What is wrong is said where it can be
 /// mended, and each item of the module is what [`ModuleOut`] says, for whatever writes the
-/// module out for Rust.
-pub fn module(module: Module, given: Option<Given>, scope: &str) -> ModuleOut {
-    kernite_build::module(module, given, &X86, &Ptx::new(scope))
+/// module out for Rust. A module that is `refused` whole, at its attribute, is not compiled, and
+/// nothing is said of its items: each is what it is otherwise.
+pub fn module(module: Module, given: Option<Given>, refused: bool, scope: &str) -> ModuleOut {
+    kernite_build::module(module, given, refused, &X86, &Ptx::new(scope))
 }
 
 /// Kernel `name` of the module in `src`, for x86-64, or its instance `tile::<4>`; an error
@@ -121,9 +123,19 @@ pub fn ptx_scope(path: &[&str]) -> String {
 /// [`symbol`](kernite_ptx::symbol) in `scope`, as [`ptx`] names a kernel, for its kernels to name
 /// and [`kernite_ptx::module`] to declare; or why it is none, where it can be mended: at its
 /// type, or at what it holds. One that does not fit beside those before it, in the constant
-/// memory a module has or the global, is none.
+/// memory a module has or the global, is none: the module keeps them all.
 pub fn ptx_statics(module: &Module, scope: &str) -> Vec<Result<Compiled<Static>, kernite_lang::Error>> {
     statics(module, &Ptx::new(scope))
+}
+
+/// Why each of `types`, those of the statics a module's PTX keeps, in order, as
+/// [`DeviceStatic::ty`] has them, has no room in the module beside those before it that have, as
+/// [`ptx_statics`] says of a module that keeps them all; `None` for each that has. Each is the type
+/// of a static that was laid out.
+pub fn ptx_room(types: &[&str]) -> Vec<Option<String>> {
+    let statics: Vec<Static> =
+        types.iter().map(|ty| Static::new("", "", ty).expect("the type of a static that was laid out")).collect();
+    kernite_ptx::room(&statics)
 }
 
 /// Every kernel `extern "ptx-kernel"` and function `extern "ptx-func"` of the module in

@@ -9,6 +9,7 @@
 //! needs it, and what each item of a module of [`consts`] is. It depends on the language alone, so
 //! it cannot reach a machine's code: it names the machines only in words.
 
+mod assembly;
 mod classify;
 mod dto;
 mod facade;
@@ -17,10 +18,11 @@ mod module;
 mod port;
 mod present;
 
+pub use assembly::{Assembly, Kept, When};
 pub use classify::{Abi, Owner, abi, cooperative, function, instance, owner};
 pub use dto::{
-    Bytes, Call, Compiled, DeviceFnOut, DeviceOut, DeviceStatic, Given, HostStatic, ItemOut, Launcher, ModuleOut,
-    Naked, NativeInstance, NativeOut,
+    Bytes, Call, Compiled, DeviceFnOut, DeviceOut, DeviceStatic, Failed, Given, HostStatic, ItemOut, Launcher,
+    ModuleOut, Naked, NativeInstance, NativeOut,
 };
 pub use facade::{all, one};
 pub use function::{Prepared, compile, prepare, statics};

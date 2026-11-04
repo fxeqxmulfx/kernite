@@ -15,6 +15,7 @@ pub fn on_the_gpu(kernels: &gpu::Kernels, x: kernite_cuda::Ptr<f32>) -> Result<u
         kernels.scale(kernite_cuda::Grid::new(1, 1), x, 2.0)?;
         kernels.tile::<2>(kernite_cuda::Grid::new(1, 1), x)?;
         kernels.together(kernite_cuda::Grid::new(1, 1), x)?;
+        kernels.tuned(kernite_cuda::Grid::new(1, 64), x)?;
     }
     kernels.COUNTS().write(&[0; 4])?;
     let _: kernite_cuda::Global<'_, kernite_cuda::f16> = kernels.F16S();
@@ -66,6 +67,9 @@ mod gpu {
     /// Read by `#[instances(..)]` alone.
     const TWO: u32 = 2;
 
+    /// Read by a directive alone.
+    const THREADS: u32 = 64;
+
     pub static COUNTS: global<[u32; LEN]>;
     pub static F16S: global<[f16; 2]>;
     pub static BF16S: global<[bf16; 2]>;
@@ -88,5 +92,14 @@ mod gpu {
     #[cooperative]
     pub unsafe extern "ptx-kernel" fn together(x: *mut f32) {
         grid.sync();
+    }
+
+    #[maxntid(THREADS)]
+    #[minnctapersm(2)]
+    #[maxnreg(32)]
+    pub unsafe extern "ptx-kernel" fn tuned(x: *mut f32) {
+        let at: u64;
+        mov.u64(at, COUNTS);
+        red.global.add.u32([at], 1);
     }
 }

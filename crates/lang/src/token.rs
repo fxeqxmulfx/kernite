@@ -67,23 +67,16 @@ impl Tree {
     }
 }
 
-/// `trees` as they read: words apart, punctuation against what follows.
+/// `trees` as Rust writes a type: `*const [usize; 3]`, `(u32, u32)`, `&mut [f32]`, `fn(u8) -> u8`.
 pub fn text(trees: &[Tree]) -> String {
     let mut out = String::new();
-    let mut word = false;
-    for t in trees {
+    for (i, t) in trees.iter().enumerate() {
+        if i > 0 && spaced(trees, i) {
+            out.push(' ');
+        }
         match t {
-            Tree::Ident { name: s, .. } | Tree::Lit { text: s, .. } => {
-                if word {
-                    out.push(' ');
-                }
-                out += s;
-                word = true;
-            }
-            Tree::Punct { ch, .. } => {
-                out.push(*ch);
-                word = false;
-            }
+            Tree::Ident { name: s, .. } | Tree::Lit { text: s, .. } => out += s,
+            Tree::Punct { ch, .. } => out.push(*ch),
             Tree::Group { delim, trees, .. } => {
                 let (open, close) = match delim {
                     Delim::Paren => ('(', ')'),
@@ -93,11 +86,115 @@ pub fn text(trees: &[Tree]) -> String {
                 out.push(open);
                 out += &text(trees);
                 out.push(close);
-                word = true;
             }
         }
     }
     out
+}
+
+/// Whether `trees[i]` is the `>` of an arrow, `->`, as in `fn(u8) -> u8`: one operator, whose `>`
+/// closes no `<`.
+fn arrow_head(trees: &[Tree], i: usize) -> bool {
+    matches!(
+        i.checked_sub(1).and_then(|j| trees.get(j..=i)),
+        Some([Tree::Punct { ch: '-', joint: true, .. }, Tree::Punct { ch: '>', .. }])
+    )
+}
+
+/// Whether `trees[i]` is the `>` that ends a binder, as in `for<'a> fn(&'a u8)`: the nearest angle
+/// bracket before it is a `<`, and a `for` stands before that.
+fn binder_end(trees: &[Tree], i: usize) -> bool {
+    matches!(trees[i], Tree::Punct { ch: '>', .. })
+        && trees[..i].iter().rposition(|t| matches!(t, Tree::Punct { ch: '<' | '>', .. })).is_some_and(|open| {
+            matches!(trees[open], Tree::Punct { ch: '<', .. })
+                && matches!(trees[..open].last(), Some(Tree::Ident { name, .. }) if name == "for")
+        })
+}
+
+/// Whether Rust writes a space between `trees[i - 1]` and `trees[i]`: after `const` and `mut`,
+/// which a type follows, after `,` and `;`, after the `>` of a binder, `for<'a> fn(&'a u8)`, between
+/// words, on each side of a `+` or a `=` that no operator holds, as in `dyn A + B` and `Item = &u8`,
+/// and on each side of an arrow, `fn(u8) -> u8`. The operators that hold a `+` or a `=`, `+=`, `==`,
+/// `=>`, `<=` and `..=`, are written close, and so are the two characters of an arrow. Other
+/// punctuation and brackets are against the word before them.
+fn spaced(trees: &[Tree], i: usize) -> bool {
+    // The `joint` mark says that punctuation follows, not that an operator is made, as the `&` after
+    // the `=` of `Item=&u8` shows, so the next character is read too. No operator ends in `+`, and
+    // `+=` begins with it; `==` and `=>` begin with `=`, and `+=`, `<=` and `..=` end in it.
+    let apart = |j: usize| {
+        let next = |chars: &str| matches!(trees.get(j + 1), Some(Tree::Punct { ch, .. }) if chars.contains(*ch));
+        match trees[j] {
+            Tree::Punct { ch: '+', joint, .. } => !(joint && next("=")),
+            Tree::Punct { ch: '=', joint, .. } => {
+                !(joint && next("=>")) && !matches!(trees[..j].last(), Some(Tree::Punct { joint: true, .. }))
+            }
+            _ => false,
+        }
+    };
+    arrow_head(trees, i - 1)
+        || arrow_head(trees, i + 1)
+        || binder_end(trees, i - 1)
+        || apart(i - 1)
+        || apart(i)
+        || match (&trees[i - 1], &trees[i]) {
+            (Tree::Ident { name, .. }, _) if name == "const" || name == "mut" => true,
+            (Tree::Punct { ch, .. }, _) => matches!(ch, ',' | ';'),
+            (_, Tree::Punct { .. } | Tree::Group { .. }) => false,
+            _ => true,
+        }
+}
+
+/// Whether `ty`, a type as [`text`] writes it, is a pointer, `*const T` or `*mut T`; or why it is
+/// not one a machine passes in a register: a pointer to a type with no size is two words, and one
+/// to a type kernite cannot read, as `&'static str` is, is refused in the lexer's words. A type that
+/// has no size but is named, as `CStr` is, is not told from one that has.
+pub fn pointer(ty: &str) -> Result<bool, String> {
+    let Some(to) = ty.strip_prefix("*const ").or_else(|| ty.strip_prefix("*mut ")) else {
+        return Ok(false);
+    };
+    // The macro passes a lifetime on as punctuation, where the lexer refuses one in a string, so `to`
+    // may not lex: what kernite cannot read is not taken for a word.
+    let trees = lex(to).map_err(|e| e.message)?;
+    if no_size(&trees) {
+        return Err(format!(
+            "a pointer to `{to}` has two words, an address and a length or a table, and a kernel's pointer has one"
+        ));
+    }
+    Ok(true)
+}
+
+/// Whether the type `ty` has no size: a slice, a `str` or a `dyn`, or a tuple that ends in one.
+fn no_size(ty: &[Tree]) -> bool {
+    match ty {
+        // A slice is brackets with no `;` of their own, `[[u8; 4]]`; an array has one, `[u8; 4]`.
+        [Tree::Group { delim: Delim::Bracket, trees, .. }] => {
+            !trees.iter().any(|t| matches!(t, Tree::Punct { ch: ';', .. }))
+        }
+        // Parentheses around one type, `(dyn A + Send)`, are as the type is; a tuple, as its last field.
+        [Tree::Group { delim: Delim::Paren, trees, .. }] => no_size(last_field(trees)),
+        [Tree::Ident { name, .. }] => name == "str",
+        [Tree::Ident { name, .. }, ..] => name == "dyn",
+        _ => false,
+    }
+}
+
+/// The last field of a tuple whose fields are `fields`: what follows the last `,` that neither ends
+/// the tuple, `(u8,)`, nor is among the arguments of a type, `Pair<u8, 2>`.
+fn last_field(mut fields: &[Tree]) -> &[Tree] {
+    if let [rest @ .., Tree::Punct { ch: ',', .. }] = fields {
+        fields = rest;
+    }
+    let (mut open, mut from) = (0usize, 0);
+    for (i, t) in fields.iter().enumerate() {
+        match t {
+            Tree::Punct { ch: '<', .. } => open += 1,
+            // The `>` of an arrow closes no `<`; nor does one with none open, which Rust refuses.
+            Tree::Punct { ch: '>', .. } if !arrow_head(fields, i) => open = open.saturating_sub(1),
+            Tree::Punct { ch: ',', .. } if open == 0 => from = i + 1,
+            _ => {}
+        }
+    }
+    &fields[from..]
 }
 
 /// The characters that are punctuation.

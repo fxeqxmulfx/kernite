@@ -3,25 +3,42 @@
 
 use std::cell::LazyCell;
 
-use kernite_lang::{Error, Item, ItemKind, Module};
+use kernite_lang::{Error, Item, ItemKind, Mention, Module, Static};
 
-use crate::classify::{helper, trusted};
+use crate::classify::{attributes, helper, trusted};
+use crate::function::stub;
 use crate::present::{Refusal, said};
 use crate::{
-    Abi, Call, Device, DeviceFnOut, DeviceOut, Given, ItemOut, Launcher, ModuleOut, Naked, Native, NativeInstance,
-    NativeOut, Owner, compile, cooperative, instance, owner, prepare,
+    Abi, Assembly, Backend, Call, Compiled, Device, DeviceFnOut, DeviceOut, Failed, Given, ItemOut, Launcher,
+    ModuleOut, Naked, Native, NativeInstance, NativeOut, Owner, compile, instance, owner, prepare,
 };
 
 /// `module`, given the consts `given` says, its kernels compiled: each function the process runs
 /// by `native`, and each the GPU runs by `device` into one module the GPU loads. Its statics are
-/// laid out by the machine whose memory they are, and by `native` for its kernels to name. What
-/// is wrong is said where it can be mended. A kernel the process runs is written for Rust to call
-/// when it is an `unsafe fn`, its attributes hold, each of its instances compiled, and it names no
-/// static of the GPU's. The GPU's module has the code of each instance that compiled, of each
-/// function the GPU runs whose attributes hold; Rust launches a kernel of it when it is an
-/// `unsafe fn`, its attributes hold, and each of its instances compiled. Why the GPU's module is
-/// none is said at the module's first item that is the GPU's.
-pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, native: &N, device: &D) -> ModuleOut {
+/// laid out by the machine whose memory they are, and by `native` for its kernels to name. No room
+/// is counted for the GPU's: which of them the module keeps is for Rust to say, once it knows which
+/// `cfg` holds, and [`Backend::room`](crate::Backend::room) counts the room of those. What is wrong
+/// is said where it can be mended. A kernel the process runs is written for Rust to call when it is
+/// an `unsafe fn`, its attributes hold, each of its instances compiled, and it names no static of
+/// the GPU's. The GPU's module has the code of each instance that compiled, of each function the GPU
+/// runs whose attributes hold; Rust launches a kernel of it when it is an `unsafe fn`, its
+/// attributes hold, and each of its instances compiled. The GPU's module is put together from what
+/// Rust keeps of them, and why it is none is said at the module's first item that is the GPU's.
+///
+/// A `refused` module is one refused whole, at its attribute, with no consts given. Nothing of it
+/// is compiled, for the consts its kernels read may not be given, and nothing is said of its
+/// items. Each item is what it is otherwise, for Rust to find it where it is named: a function
+/// the process runs is not written, with no instance; a kernel the GPU runs is never launched; a
+/// static is laid out by none, and stands as its type has it where that is worked out, as one
+/// whose value alone is wrong does. The GPU's module is empty, at the module's first item that is
+/// the GPU's.
+pub fn module<N: Native, D: Device>(
+    mut module: Module,
+    given: Option<Given>,
+    refused: bool,
+    native: &N,
+    device: &D,
+) -> ModuleOut {
     let twice = given.as_ref().map_or_else(Vec::new, |given| take(&mut module, given));
     let before = given.map_or(0, |given| given.before);
     let whose = owner(&module);
@@ -30,13 +47,15 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
     // Each machine's statics and callees, worked out when something first needs them.
     let n = LazyCell::new(|| prepare(m, native));
     let d = LazyCell::new(|| prepare(m, device));
-    // The statics are the process's or the GPU's. Their consts are read, whether a kernel names
-    // them or not.
-    let (mut host, mut gpu, mut consts): (_, _, Vec<String>) = match process {
-        true => (n.statics.iter(), [].iter(), n.statics.iter().flatten().flat_map(|s| s.consts.clone()).collect()),
-        false => ([].iter(), d.statics.iter(), d.statics.iter().flatten().flat_map(|s| s.consts.clone()).collect()),
+    // The statics are the process's or the GPU's. A refused module lays out none.
+    let (mut host, mut gpu) = match (refused, process) {
+        (true, _) => ([].iter(), [].iter()),
+        (false, true) => (n.statics.iter(), [].iter()),
+        (false, false) => ([].iter(), d.statics.iter()),
     };
-    let (mut items, mut listings, mut codes, mut symbols, mut first) = (vec![], vec![], vec![], vec![], None);
+    let (mut items, mut codes, mut symbols, mut first) = (vec![], vec![], vec![], None);
+    // The item each code of the GPU's module is of, and each static.
+    let (mut code_items, mut static_items) = (vec![], vec![]);
     for item in &m.items {
         let f = match &item.kind {
             ItemKind::Const(_) if item.tokens.start < before => {
@@ -47,43 +66,46 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
                 items.push(ItemOut::Rust);
                 continue;
             }
-            ItemKind::Static(_) if process => {
-                let laid = host.next().expect("each static is laid out or refused");
-                items.push(ItemOut::HostStatic(
-                    laid.as_ref().map(|s| native.host_static(&s.code)).map_err(Clone::clone),
-                ));
+            ItemKind::Static(s) if process => {
+                let laid = (!refused).then(|| host.next().expect("each static is laid out or refused"));
+                items.push(ItemOut::HostStatic(static_out(m, s, native, laid, |s| native.host_static(s))));
                 continue;
             }
             ItemKind::Static(s) => {
                 first.get_or_insert(s.span);
-                let laid = gpu.next().expect("each static is laid out or refused");
-                items.push(ItemOut::DeviceStatic(
-                    laid.as_ref().map(|s| device.device_static(&s.code)).map_err(Clone::clone),
-                ));
+                let laid = (!refused).then(|| gpu.next().expect("each static is laid out or refused"));
+                let out = static_out(m, s, device, laid, |s| device.device_static(s));
+                if out.is_ok() {
+                    static_items.push(items.len());
+                }
+                items.push(ItemOut::DeviceStatic(out));
                 continue;
             }
             ItemKind::Fn(f) => f,
         };
         let Some((name, at)) = &f.abi else {
-            items.push(ItemOut::Helper(helper(m, f)));
+            items.push(ItemOut::Helper(if refused { vec![] } else { helper(m, f) }));
             continue;
         };
         let Some(abi) = Abi::of(name) else {
-            items.push(ItemOut::Unknown(said(Refusal::UnknownAbi { abi: name }, *at)));
+            items.push(ItemOut::Unknown((!refused).then(|| said(Refusal::UnknownAbi { abi: name }, *at))));
             continue;
         };
-        let not_unsafe = (!trusted(f, abi)).then(|| said(Refusal::NotUnsafe, f.span));
-        let (said, listed) = match cooperative(f).and(kernite_lang::instances(m, f)) {
+        // A refused module's kernels are not looked at: nothing of them is said or compiled.
+        let not_unsafe = (!refused && !trusted(f, abi)).then(|| said(Refusal::NotUnsafe, f.span));
+        let checked = if refused { Ok(vec![]) } else { attributes(f).and(kernite_lang::instances(m, f)) };
+        let (said, listed) = match checked {
             Ok(listed) => (None, listed),
             Err(e) => (Some(e), vec![]),
         };
-        let (count, mut errors) = (listed.len(), vec![]);
+        let holds = !refused && said.is_none() && not_unsafe.is_none();
+        let (count, mut errors, mut mentions) = (listed.len(), vec![], vec![]);
         if abi.native() {
             let mut instances = vec![];
             for args in listed {
                 match compile(m, &n, native, f, &args) {
                     Ok(k) => {
-                        consts.extend(k.consts);
+                        k.mentions.iter().for_each(|at| Mention::record(&mut mentions, &at.name, at.span));
                         instances.push(NativeInstance { args, naked: native.naked(&k.code), calls: vec![] });
                     }
                     Err(e) => errors.push(e),
@@ -92,14 +114,16 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
             // In a module of both kinds of kernel, the statics are the GPU's, which a kernel of
             // the process's does not reach, as the first of them says.
             let reaches = whose.is_ok() || instances.iter().all(|k| k.naked.statics.is_empty());
-            let written = said.is_none() && not_unsafe.is_none() && errors.is_empty() && reaches;
+            let written = holds && errors.is_empty() && reaches;
+            let mut listings = vec![];
             if written {
                 for k in &mut instances {
                     k.calls = calls(m, &k.naked.funcs);
                     listings.push((kernite_lang::instance(f, &k.args).unwrap_or_default(), k.naked.text.clone()));
                 }
             }
-            let out = NativeOut { not_unsafe, said, instances, written, count, touched: vec![], errors };
+            let out =
+                NativeOut { not_unsafe, said, instances, mentions, written, count, listings, touched: vec![], errors };
             items.push(ItemOut::Native(out));
             continue;
         }
@@ -109,26 +133,27 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
         for args in listed {
             match compile(m, &d, device, f, &args) {
                 Ok(k) => {
-                    consts.extend(k.consts);
+                    k.mentions.iter().for_each(|at| Mention::record(&mut mentions, &at.name, at.span));
                     compiled.push((args, k.code));
                 }
                 Err(e) => errors.push(e),
             }
         }
-        let launches = abi == Abi::PtxKernel && said.is_none() && not_unsafe.is_none() && errors.is_empty();
+        let launches = abi == Abi::PtxKernel && holds && errors.is_empty();
         let mut launched = vec![];
         for (args, code) in compiled {
             if launches {
                 launched.push((args, symbols.len()));
-                symbols.push(device.symbol(&code));
+                symbols.push((codes.len(), device.symbol(&code)));
             }
             codes.push(code);
+            code_items.push(items.len());
         }
         let launcher = (abi == Abi::PtxKernel).then_some(match launches {
             true => Launcher::Of(launched),
             false => Launcher::Never,
         });
-        items.push(ItemOut::Device(DeviceFnOut { not_unsafe, said, errors, launcher }));
+        items.push(ItemOut::Device(DeviceFnOut { not_unsafe, said, errors, mentions, launcher }));
     }
     // Once every function the process runs is compiled, for a kernel to name the statics of the
     // functions it calls, which may come after it.
@@ -140,23 +165,29 @@ pub fn module<N: Native, D: Device>(mut module: Module, given: Option<Given>, na
             }
         }
     }
-    let loaded = first.map(|span| {
-        let (text, error) = match device.module(&codes, &d.made) {
-            Ok(text) => (text, None),
-            Err(message) => (String::new(), Some(Error { span, message })),
-        };
-        DeviceOut { text, error, symbols }
+    let loaded = first.map(|at| {
+        let assembly = if refused { Assembly::default() } else { device.module(&codes, &d.made) };
+        DeviceOut { assembly, at, symbols, code_items, static_items }
     });
-    let read = m
-        .items
-        .iter()
-        .enumerate()
-        .filter_map(|(i, item)| match &item.kind {
-            ItemKind::Const(c) if consts.contains(&c.name) => Some(i),
-            _ => None,
-        })
-        .collect();
-    ModuleOut { module, given: twice, owner: whose.err(), items, read, listings, device: loaded }
+    ModuleOut { module, given: twice, owner: whose.err().filter(|_| !refused), items, device: loaded }
+}
+
+/// Static `s` of `module` as an item of it comes out: `laid`, as `backend` laid it out, its memory
+/// as `data` has it; or why it is none, and what stands for it. `laid` is none in a module refused
+/// whole, which lays out none: the static has no error, and what stands for it.
+fn static_out<B: Backend, T>(
+    module: &Module,
+    s: &Static,
+    backend: &B,
+    laid: Option<&Result<Compiled<B::Static>, Error>>,
+    data: impl Fn(&B::Static) -> T,
+) -> Result<Compiled<T>, Failed<T>> {
+    let error = match laid {
+        Some(Ok(c)) => return Ok(Compiled { code: data(&c.code), mentions: c.mentions.clone() }),
+        Some(Err(error)) => Some(error.clone()),
+        None => None,
+    };
+    Err(Failed { error, stub: stub(module, s, backend).map(|s| data(&s)) })
 }
 
 /// What an item of a module of consts is to the modules of kernels that take its consts.

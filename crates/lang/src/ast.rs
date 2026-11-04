@@ -12,13 +12,34 @@ pub struct Module {
     pub items: Vec<Item>,
 }
 
+impl Module {
+    /// The place among its items of the one that writes `span`: the last that starts at or before it.
+    pub fn item_at(&self, span: Span) -> usize {
+        self.items.iter().rposition(|item| item.span <= span).expect("an item writes each place")
+    }
+}
+
 /// An item, and the tokens it spans by index into the module's tokens.
 #[derive(Clone, Debug)]
 pub struct Item {
     /// Its tokens, attributes included.
     pub tokens: Range<usize>,
+    /// Where its first token is.
+    pub span: Span,
     /// What it is.
     pub kind: ItemKind,
+}
+
+impl Item {
+    /// Its name, if it is a const, a function or a static.
+    pub fn name(&self) -> Option<&str> {
+        match &self.kind {
+            ItemKind::Const(c) => Some(&c.name),
+            ItemKind::Fn(f) => Some(&f.name),
+            ItemKind::Static(s) => Some(&s.name),
+            ItemKind::Other => None,
+        }
+    }
 }
 
 /// What an item is.
@@ -76,6 +97,8 @@ pub struct Fn {
     pub instances: Option<Instances>,
     /// Its `#[cooperative]`, among them, if it has one.
     pub cooperative: Option<Cooperative>,
+    /// Its tuning directives, `#[maxntid(..)]` and the like, among them, in the order written.
+    pub directives: Vec<Directive>,
     /// What comes before `fn`: visibility, `unsafe`, `extern "abi"`.
     pub head: Range<usize>,
     /// The ABI it names, which makes it a kernel for the machine that ABI belongs to.
@@ -106,6 +129,22 @@ pub struct Instances {
     /// Each instance's arguments, as written.
     pub values: Vec<Expr>,
     /// Where `instances` is.
+    pub span: Span,
+    /// The attribute's tokens, by index into the module's tokens: Rust has no such attribute,
+    /// so it is not passed on.
+    pub tokens: Range<usize>,
+}
+
+/// `#[maxntid(16, 16)]`, `#[reqntid(..)]`, `#[minnctapersm(2)]` or `#[maxnreg(32)]`: how a GPU
+/// kernel's blocks are sized and its registers used, as the PTX directives of the same names
+/// say.
+#[derive(Clone, Debug)]
+pub struct Directive {
+    /// Its name: `maxntid`.
+    pub name: String,
+    /// What it gives, as written: values known now.
+    pub values: Vec<Expr>,
+    /// Where `name` is.
     pub span: Span,
     /// The attribute's tokens, by index into the module's tokens: Rust has no such attribute,
     /// so it is not passed on.
@@ -148,7 +187,7 @@ pub struct Param {
 /// What a function returns.
 #[derive(Clone, Debug)]
 pub struct Ret {
-    /// The type, as written.
+    /// The type, as Rust writes it.
     pub ty: String,
     /// Where it is.
     pub span: Span,
@@ -160,7 +199,7 @@ pub struct Ret {
 /// `shared<[f32; 256], 16>`.
 #[derive(Clone, Debug)]
 pub enum Type {
-    /// A type by its name, as written: `ymm`, `*const f32`.
+    /// A type by its name, as Rust writes it: `ymm`, `*const f32`, `*const [usize; 3]`.
     Name(String, Span),
     /// `[elem; len]`.
     Array(Box<Type>, Expr, Span),

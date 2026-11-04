@@ -2,7 +2,7 @@
 //! on a crate outside the workspace. Every crate must have a line here, so a new one cannot
 //! join without its place being decided. Inside a crate, no modules use each other in a cycle.
 //! The composition hands on only the language and the use cases, and the macro names only
-//! those, `module` and `ptx_scope`.
+//! those, `module`, `ptx_scope` and `ptx_room`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -16,8 +16,9 @@ const RULE: &[(&str, &[&str])] = &[
     ("kernite-build", &["kernite-lang"]),
     ("kernite-x86", &["kernite-core", "kernite-lang", "kernite-compile", "kernite-build"]),
     ("kernite-ptx", &["kernite-core", "kernite-lang", "kernite-compile", "kernite-build"]),
-    // kernite-core is a dev-dependency: the tests of PTX read the items of an entry.
-    ("kernite", &["kernite-core", "kernite-lang", "kernite-build", "kernite-x86", "kernite-ptx"]),
+    // kernite-core and kernite-compile are dev-dependencies: the tests of PTX read the items of an
+    // entry, and those of x86 compile what the builder wrote.
+    ("kernite", &["kernite-core", "kernite-compile", "kernite-lang", "kernite-build", "kernite-x86", "kernite-ptx"]),
     ("kernite-macros", &["kernite"]),
     ("kernite-cuda", &[]),
     ("kernite-cpu", &[]),
@@ -410,20 +411,21 @@ fn kernite_re_exports_only_the_language_and_the_use_cases() {
 }
 
 /// The macro writes Rust for what kernite has decided, and decides nothing. It names the language,
-/// the use cases kernite hands on, `module`, which calls them, and `ptx_scope`. It calls none of
+/// the use cases kernite hands on, `module`, which calls them, `ptx_scope`, and `ptx_room`, which
+/// counts the room of the statics Rust keeps, once `cfg` has left out the rest. It calls none of
 /// the language's functions that evaluate: `kernite::module` does that. `lang::instance` names an
 /// instance and evaluates nothing, so it stays.
 #[test]
-fn the_macro_names_only_the_language_the_use_cases_and_ptx_scope() {
+fn the_macro_names_only_the_language_the_use_cases_ptx_scope_and_ptx_room() {
     let kernite = Path::new(env!("CARGO_MANIFEST_DIR"));
     let lib = sources(&kernite.join("src"));
     let built: Vec<_> = lib.iter().flat_map(|(_, code)| starts(code, "pub use kernite_build::")).collect();
-    let allowed = [&["lang", "module", "ptx_scope"][..], &built].concat();
+    let allowed = [&["lang", "module", "ptx_scope", "ptx_room"][..], &built].concat();
     for (file, code) in sources(&kernite.join("../macros/src")) {
         for name in starts(&code, "kernite::") {
             assert!(
                 allowed.contains(&name),
-                "{} names `kernite::{name}`; it may name the language, the use cases, `module` and `ptx_scope`",
+                "{} names `kernite::{name}`; it may name the language, the use cases, `module`, `ptx_scope` and `ptx_room`",
                 file.display()
             );
         }

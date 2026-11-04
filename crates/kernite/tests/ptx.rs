@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kernite::lang::{IntTy, Mem as Address, Operand as Given, Target, Value};
+use kernite::{Assembly, Kept};
 use kernite_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Sel, Space, Spec};
 use kernite_ptx::lang::{Callee, Kernel, Var};
 use kernite_ptx::{Entry, Kind, Needs, Prototype, Returns, Static, Ty};
@@ -286,9 +287,9 @@ fn what_is_for_newer_gpus_says_which() {
         for item in items.split_whitespace() {
             let want = match item.split_once('.') {
                 Some((op, w)) => {
-                    format!("PTX's `{op}` takes `.{w}` on {gpu} and newer, and kernite writes PTX for sm_20 to sm_86")
+                    format!("PTX's `{op}` takes `.{w}` on {gpu} and newer, and kernite writes PTX for sm_30 to sm_86")
                 }
-                None => format!("PTX's `{item}` is for {gpu} and newer, and kernite writes PTX for sm_20 to sm_86"),
+                None => format!("PTX's `{item}` is for {gpu} and newer, and kernite writes PTX for sm_30 to sm_86"),
             };
             assert_eq!(forms::find(item).err(), Some(want), "{item}");
         }
@@ -315,7 +316,7 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
         (
             "let (a, b, c, e): (f64, f64, f64, f64); ld.global.v4.f64((a, b, c, e), [x]);",
             "2:54: `ld.global.v4.f64` moves 256 bits at once, which PTX's `ld` does on sm_100 and newer, and kernite \
-             writes PTX for sm_20 to sm_86: a vector of 128 bits at most, as `.v4.b32` or `.v2.b64`",
+             writes PTX for sm_30 to sm_86: a vector of 128 bits at most, as `.v4.b32` or `.v2.b64`",
         ),
         (
             "let v: f32; cvt.f32.f64(v, d);",
@@ -330,14 +331,14 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
             "2:21: `cvt.u32.f32` converts a float to an integer, so it says how it rounds to one: `cvt.rni.u32.f32` \
              to the nearest, `cvt.rzi` toward zero",
         ),
-        ("elect.sync(n);", "2:7: PTX's `elect` is for sm_90 and newer, and kernite writes PTX for sm_20 to sm_86"),
+        ("elect.sync(n);", "2:7: PTX's `elect` is for sm_90 and newer, and kernite writes PTX for sm_30 to sm_86"),
         (
             "let (a, b): (f32, f32); ld.global.v8.f32((a, b, a, b, a, b, a, b), [x]);",
-            "2:38: PTX's `ld` takes `.v8` on sm_100 and newer, and kernite writes PTX for sm_20 to sm_86",
+            "2:38: PTX's `ld` takes `.v8` on sm_100 and newer, and kernite writes PTX for sm_30 to sm_86",
         ),
         (
             "fence.proxy.r#async();",
-            "2:13: PTX's `fence` takes `.async` on sm_90 and newer, and kernite writes PTX for sm_20 to sm_86",
+            "2:13: PTX's `fence` takes `.async` on sm_90 and newer, and kernite writes PTX for sm_30 to sm_86",
         ),
         (
             "call.sync(n);",
@@ -445,7 +446,7 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         (
             "let i: u32; mov.u32(i, clusterid.x);",
             "2:34: `clusterid.x` is a special register of PTX's that kernite does not read: it needs sm_90, and kernite \
-             writes PTX for sm_20 to sm_86",
+             writes PTX for sm_30 to sm_86",
         ),
         (
             "let d: s32; vmad.s32.s32.s32(d, -n, n, -n);",
@@ -787,10 +788,10 @@ fn a_mask_of_lanes_is_marked_in_each_form_that_has_one() {
 #[test]
 fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
     let cases = [
-        ("", ".version 2.3 .target sm_20"),
-        ("let i: u32; popc.b32(i, n);", ".version 2.3 .target sm_20"),
+        ("", ".version 3.0 .target sm_30"),
+        ("let i: u32; popc.b32(i, n);", ".version 3.0 .target sm_30"),
         ("let i: u32; shfl.idx.b32(i, n, 0, 31);", ".version 3.0 .target sm_30"),
-        ("let i: u32; vadd.u32.u32.u32(i, n.b0, n.h1);", ".version 2.3 .target sm_20"),
+        ("let i: u32; vadd.u32.u32.u32(i, n.b0, n.h1);", ".version 3.0 .target sm_30"),
         ("let i: u32; vset4.u32.u32.lt(i, n, n, n);", ".version 3.0 .target sm_30"),
         ("let h: f16x2;", ".version 4.2 .target sm_53"),
         ("let i: u32; dp4a.u32.u32(i, n, n, n);", ".version 5.0 .target sm_61"),
@@ -826,12 +827,12 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         // The ISA has it from sm_75, and ptxas takes it for sm_70.
         ("let i: u32; ld.mmio.acquire.sys.global.u32(i, [y]);", ".version 9.3 .target sm_70"),
         ("let a: u64; clmad.lo.u64(a, y, y, y);", ".version 9.3 .target sm_80"),
-        ("let i: u32; suld.b._2d.b32.trap(i, [y, (n, n)]);", ".version 3.1 .target sm_20"),
-        ("let i: u32; suq.memory_layout.b32(i, [y]);", ".version 4.2 .target sm_20"),
+        ("let i: u32; suld.b._2d.b32.trap(i, [y, (n, n)]);", ".version 3.1 .target sm_30"),
+        ("let i: u32; suq.memory_layout.b32(i, [y]);", ".version 4.2 .target sm_30"),
         ("sured.b.max._1d.u64.trap([y, 0], y);", ".version 8.1 .target sm_50"),
         (
             "let (a, b, c, d): (f32, f32, f32, f32); tex._2d.v4.f32.f32((a, b, c, d), [y, (f, f)]);",
-            ".version 3.1 .target sm_20",
+            ".version 3.1 .target sm_30",
         ),
         (
             "let (a, b, c, d): (s32, s32, s32, s32); tex.a2dms.v4.s32.s32((a, b, c, d), [y, (n, n, n, n)]);",
@@ -844,7 +845,7 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         (
             "let (a, b, c, d): (f32, f32, f32, f32); tex.grad.cube.v4.f32.f32((a, b, c, d), [y, (f, f, f, f)], (f, f, \
              f, f), (f, f, f, f));",
-            ".version 4.3 .target sm_20",
+            ".version 4.3 .target sm_30",
         ),
         (
             "let (a, b, c, d): (f32, f32, f32, f32); let p: pred; tex._2d.v4.f32.f32((a, b, c, d) | p, [y, (f, f)]);",
@@ -1040,7 +1041,7 @@ const TEXTURES: &str = r#"
 fn a_texture_is_its_handle_in_brackets_with_the_coordinates_in_it() {
     let ptx = kernite::ptx_str(TEXTURES).unwrap();
     let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
-    assert!(head.contains(".version 3.1\n.target sm_20\n"), "{head}");
+    assert!(head.contains(".version 3.1\n.target sm_30\n"), "{head}");
     for line in [
         "\ttex.level.2d.v4.f32.f32 {%r, _, _, _}, [%t, {%x, 0f3F000000}], 0f00000000;\n",
         "\ttxq.width.b32 %width, [%t];\n",
@@ -1054,7 +1055,7 @@ fn a_texture_is_its_handle_in_brackets_with_the_coordinates_in_it() {
 fn a_surface_is_its_handle_in_brackets_with_the_coordinates_in_it() {
     let ptx = kernite::ptx_str(SURFACES).unwrap();
     let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
-    assert!(head.contains(".version 3.1\n.target sm_20\n"), "{head}");
+    assert!(head.contains(".version 3.1\n.target sm_30\n"), "{head}");
     for line in [
         "\tsuld.b.2d.v4.b32.clamp {%r, %g, %b, %a}, [%from, {%x, %y}];\n",
         "\tsust.b.2d.v4.b32.clamp [%to, {%x, %y}], {%r, %g, %b, %a};\n",
@@ -1134,12 +1135,122 @@ fn a_kernel_takes_pointers_and_numbers_and_returns_nothing() {
     assert_eq!(e, "1:38: a GPU kernel returns nothing, not `f32`: it writes what it works out to memory");
 }
 
+/// A kernel's pointer is an address on the GPU whatever it points to: an array, a pointer, a tuple,
+/// a generic type. One to what has no size, a slice, a `str` or a `dyn`, in parentheses or not, or
+/// a tuple that ends in one, is two words in Rust, and an error; and a function takes no pointer
+/// at all, whatever it points to.
 #[test]
-fn a_kernel_names_the_constants_it_reads() {
+fn a_kernel_takes_a_pointer_to_any_type() {
+    let ptx = compile(
+        "shape: *const [usize; 3], out: *mut *const f32, pair: *const (u32, u32), cell: *const Cell<u8, 2>",
+        "let v: u64; ld.global.u64(v, [shape + 8]); st.global.u64([out], v); st.global.u64([pair], v);\n\
+         st.global.u64([cell], v);",
+    )
+    .unwrap();
+    for (i, name) in ["shape", "out", "pair", "cell"].iter().enumerate() {
+        let part = format!("\tld.param.u64 %{name}, [k_param_{i}];\n\tcvta.to.global.u64 %{name}, %{name};\n");
+        assert!(ptx.contains(&part), "{part}\nin\n{ptx}");
+    }
+    for to in ["()", "(u32,)", "(u32, u32)"] {
+        compile(&format!("p: *const {to}"), "").unwrap();
+    }
+    for to in [
+        "[f32]",
+        "[[u8; 4]]",
+        "str",
+        "dyn Foo",
+        "(dyn A + Send)",
+        "([f32])",
+        "(str)",
+        "((dyn Foo))",
+        "(dyn Foo<A, B>)",
+        "(u32, [f32])",
+    ] {
+        let why = format!(
+            "a pointer to `{to}` has two words, an address and a length or a table, and a kernel's pointer has one"
+        );
+        assert_eq!(compile(&format!("p: *const {to}"), "").unwrap_err(), format!("1:36: {why}"), "{to}");
+    }
+    let func = "a function takes and returns PTX's types, an address is a `u64`";
+    for to in ["[usize; 3]", "[f32]", "str", "dyn Foo", "(dyn A + Send)", "f32"] {
+        let src = format!("extern \"ptx-func\" fn f(a: *const {to}) {{}}");
+        let want = format!("1:27: {func}; not `*const {to}`");
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "function {to}");
+    }
+}
+
+/// A type may hold an arrow, `->`, one operator whose `>` ends no type and closes no `<`: a pointer to
+/// a function's pointer, or to a type with one among its arguments, is an address as any pointer is,
+/// and the parameter after it is the next.
+#[test]
+fn a_kernel_takes_a_pointer_to_a_type_that_holds_an_arrow() {
+    for params in [
+        "call: *const fn(u32) -> u32, table: *mut Pair<fn() -> u8, 2>, \
+         boxed: *const Box<dyn Fn(u8) -> u8 + Send>, n: u64",
+        "call: *const fn(u32)->u32, table: *mut Pair<fn()->&u8,2>, boxed: *const Box<dyn Fn(u8)->u8+Send>,n: u64",
+    ] {
+        let ptx =
+            compile(params, "st.global.u64([call], n); st.global.u64([table], n); st.global.u64([boxed], n);").unwrap();
+        for (i, name) in ["call", "table", "boxed"].iter().enumerate() {
+            let part = format!("\tld.param.u64 %{name}, [k_param_{i}];\n\tcvta.to.global.u64 %{name}, %{name};\n");
+            assert!(ptx.contains(&part), "{part}\nin\n{ptx}");
+        }
+        assert!(ptx.contains("\tld.param.u64 %n, [k_param_3];\n"), "{ptx}");
+    }
+    let to = "dyn Fn(u8) -> u8";
+    let why = format!(
+        "a pointer to `{to}` has two words, an address and a length or a table, and a kernel's pointer has one"
+    );
+    assert_eq!(compile("p: *const dyn Fn(u8)->u8, n: u64", "").unwrap_err(), format!("1:36: {why}"));
+    let func = "a function takes and returns PTX's types, an address is a `u64`";
+    let src = "extern \"ptx-func\" fn f(a: *const fn(u32)->u32) {}";
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:27: {func}; not `*const fn(u32) -> u32`"));
+}
+
+/// A type in a message is written as Rust writes it, whatever the source spaced: a parameter by
+/// value, a result, a variable.
+#[test]
+fn a_type_in_a_message_is_written_as_rust_writes_it() {
+    let takes = "a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, `f32` and `f64`, not";
+    for (params, ty) in [
+        ("a: [usize;3]", "[usize; 3]"),
+        ("a: (u32 ,u32)", "(u32, u32)"),
+        ("a: &mut[f32]", "&mut [f32]"),
+        ("a: Box<dyn A+B>", "Box<dyn A + B>"),
+        ("a: Box<dyn Iterator<Item=u8>>", "Box<dyn Iterator<Item = u8>>"),
+        ("a: Box<dyn Iterator<Item = u8> + Send>", "Box<dyn Iterator<Item = u8> + Send>"),
+        ("f: fn(u32) -> u32", "fn(u32) -> u32"),
+        ("f: fn(u32)->u32, n: u32", "fn(u32) -> u32"),
+        ("a: fn(fn()->u8)->&u8", "fn(fn() -> u8) -> &u8"),
+        ("a: fn()->!", "fn() -> !"),
+        ("a: Pair<fn()->u8,2>", "Pair<fn() -> u8, 2>"),
+        ("a: Box<dyn Fn(u8)->u8+Send>", "Box<dyn Fn(u8) -> u8 + Send>"),
+    ] {
+        assert_eq!(compile(params, "").unwrap_err(), format!("1:36: {takes} `{ty}`"), "{params}");
+    }
+    let two = "has two words, an address and a length or a table, and a kernel's pointer has one";
+    assert_eq!(compile("p: *const dyn A+Send", "").unwrap_err(), format!("1:36: a pointer to `dyn A + Send` {two}"));
+    let src = "unsafe extern \"ptx-kernel\" fn k() -> (u32,u32) {}";
+    let returns = "a GPU kernel returns nothing, not `(u32, u32)`: it writes what it works out to memory";
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:38: {returns}"));
+    let vars = "PTX variables are `pred`, `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, \
+                `bf16x2`, `tf32`, `f32` and `f64`, not";
+    assert_eq!(compile("", "let v: *const[u8;4];").unwrap_err(), format!("2:8: {vars} `*const [u8; 4]`"));
+    assert_eq!(compile("", "let v: fn(u32)->u32;").unwrap_err(), format!("2:8: {vars} `fn(u32) -> u32`"));
+    let funcs = "a function takes and returns PTX's types, as its variables are: `u32`, `f32`, `b64`; not";
+    let src = "extern \"ptx-func\" fn f(a: [usize;3]) {}";
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:27: {funcs} `[usize; 3]`"));
+}
+
+/// A kernel says which items of its module it names, and where: in its directives, then in its body.
+#[test]
+fn a_kernel_names_the_items_it_names() {
     let src = r#"
         const ONE: f32 = 1.0;
+        const THREADS: u32 = 64;
         const UNREAD: u32 = 2;
 
+        #[maxntid(THREADS)]
         pub unsafe extern "ptx-kernel" fn k(x: *mut f32) {
             let v: f32;
             mov.f32(v, ONE);
@@ -1148,7 +1259,8 @@ fn a_kernel_names_the_constants_it_reads() {
     "#;
     let module = kernite::lang::parse(src).unwrap();
     let k = kernite::ptx(&module, kernite::function(&module, "k").unwrap(), &[], "").unwrap();
-    assert_eq!(k.consts, ["ONE"]);
+    let named: Vec<_> = k.mentions.iter().map(|m| (m.name.as_str(), m.span.0 as usize)).collect();
+    assert_eq!(named, [("THREADS", src.find("THREADS)]").unwrap()), ("ONE", src.find("ONE);").unwrap())]);
 }
 
 /// Functions the kernels call, and a kernel that calls them each way PTX does.
@@ -1253,8 +1365,8 @@ fn a_function_comes_out_as_ptx_writes_it() {
     "#;
     let want = "// Written by kernite.
 
-.version 2.3
-.target sm_20
+.version 3.0
+.target sm_30
 .address_size 64
 
 .func (.param .u32 gcd_retval) gcd(
@@ -1318,6 +1430,334 @@ fn a_function_comes_out_as_ptx_writes_it() {
     ] {
         assert!(ptx.contains(text), "{text}\nin\n{ptx}");
     }
+}
+
+/// Kernels and functions that name each other, forward and back, kernels that share what a
+/// launch gives, and statics: what a module is made of.
+const PARTS: &str = r#"
+    static A: global<[u32; 4]>;
+    static C: constant<[u32; 2]> = [1, 2];
+
+    pub unsafe extern "ptx-kernel" fn first(x: *mut u32, n: u32) {
+        let (a, g, e): (u32, u32, u32);
+        ld.global.u32(a, [x]);
+        call(g, gcd, (a, n));
+        call(e, even, 10);
+        st.global.u32([x], g);
+    }
+
+    pub unsafe extern "ptx-kernel" fn second(x: *mut u32, n: u32) {
+        let (a, g, e): (u32, u32, u32);
+        ld.global.u32(a, [x]);
+        call(e, even, 10);
+        call(g, gcd, (a, n));
+        st.global.u32([x], g);
+    }
+
+    extern "ptx-func" fn gcd(a: u32, b: u32) -> u32 {
+        let p: pred;
+        setp.eq.u32(p, b, 0);
+        if p {
+            ret(a);
+        }
+        let (r, g): (u32, u32);
+        rem.u32(r, a, b);
+        call(g, gcd, (b, r));
+        ret(g);
+    }
+
+    extern "ptx-func" fn even(n: u32) -> u32 {
+        let p: pred;
+        setp.eq.u32(p, n, 0);
+        if p {
+            ret(1);
+        }
+        let (m, r): (u32, u32);
+        sub.u32(m, n, 1);
+        call(r, odd, m);
+        ret(r);
+    }
+
+    extern "ptx-func" fn odd(n: u32) -> u32 {
+        let p: pred;
+        setp.eq.u32(p, n, 0);
+        if p {
+            ret(0);
+        }
+        let (m, r): (u32, u32);
+        sub.u32(m, n, 1);
+        call(r, even, m);
+        ret(r);
+    }
+
+    pub unsafe extern "ptx-kernel" fn reverse(x: *mut f32) {
+        let buf: shared<[f32]>;
+        let (t, s): (u32, u32);
+        mov.u32(t, tid.x);
+        mov.u32(s, buf);
+        let v: f32;
+        ld.global.f32(v, [x]);
+        st.shared.f32([s], v);
+        st.global.f32([x], v);
+    }
+"#;
+
+/// A module's text, or why it is none.
+type Made = Result<String, String>;
+
+/// For each set of `entries` and `statics` kept, by the bits of its number, `entries` first: the
+/// module put together from what is kept, and the module of what is kept alone.
+fn every_set(entries: &[Entry], statics: &[Static]) -> Vec<(u32, Made, Made)> {
+    let assembly = kernite_ptx::module(entries, statics);
+    (0u32..1 << (entries.len() + statics.len()))
+        .map(|set| {
+            let has = |i: usize| set >> i & 1 == 1;
+            let kept = |it| match it {
+                Kept::Code(i) => has(i),
+                Kept::Static(j) => has(entries.len() + j),
+            };
+            let code: Vec<Entry> = (0..entries.len()).filter(|&i| has(i)).map(|i| entries[i].clone()).collect();
+            let memory: Vec<Static> =
+                (0..statics.len()).filter(|&j| has(entries.len() + j)).map(|j| statics[j].clone()).collect();
+            (set, assembly.text(&kept), kernite_ptx::module(&code, &memory).whole())
+        })
+        .collect()
+}
+
+/// The module of `assembly` put together where the entries at `kept` are kept, or why it is none.
+fn put_together(assembly: &Assembly, kept: &[usize]) -> Result<String, String> {
+    assembly.text(&|it| matches!(it, Kept::Code(i) if kept.contains(&i)))
+}
+
+/// `names` compiled, each a kernel or a function of `source`.
+fn compiled(source: &str, names: &[&str]) -> Vec<Entry> {
+    let module = kernite::lang::parse(source).unwrap();
+    let compile = |name| kernite::ptx(&module, kernite::function(&module, name).unwrap(), &[], "").unwrap().code;
+    names.iter().copied().map(compile).collect()
+}
+
+/// A module put together from what is kept is the module of what is kept alone, whichever of its
+/// kernels, functions and statics that is: for every set of them, each function declared before
+/// the first kernel or function kept that names it, if it comes after, and the rest as it is. A
+/// static whose name in PTX is a function's is refused where both are kept, and where one is, the
+/// other's module has it.
+#[test]
+fn a_module_put_together_from_what_is_kept_is_the_module_of_what_is_kept_alone() {
+    let module = kernite::lang::parse(PARTS).unwrap();
+    let mut statics: Vec<Static> = kernite::ptx_statics(&module, "").into_iter().map(|s| s.unwrap().code).collect();
+    statics.push(Static::new("S", "odd", "global<u32>").unwrap());
+    let entries = compiled(PARTS, &["first", "second", "gcd", "even", "odd", "reverse"]);
+    let modules = every_set(&entries, &statics);
+    for (set, together, alone) in &modules {
+        assert_eq!(together, alone, "{set:b}");
+    }
+    // Only the static S with `odd` kept beside it makes a module none: of the 2^9 sets, the 2^7
+    // that have both.
+    let made = modules.iter().filter(|(_, m, _)| m.is_ok()).count();
+    assert_eq!((made, modules.len() - made), (384, 128));
+    let both = |it| matches!(it, Kept::Code(4) | Kept::Static(2));
+    assert_eq!(kernite_ptx::module(&entries, &statics).text(&both), Err("`S` is `odd` in PTX, as `odd` is".into()));
+}
+
+/// Kernels that need more of PTX and of the GPU, one after another, and the last two the same GPU.
+const NEEDS: &str = r#"
+    pub unsafe extern "ptx-kernel" fn plain(x: *mut u32) {
+        st.global.u32([x], 1);
+    }
+
+    pub unsafe extern "ptx-kernel" fn half(x: *mut u32) {
+        let h: f16x2;
+        st.global.u32([x], 2);
+    }
+
+    pub unsafe extern "ptx-kernel" fn sleep(n: u32) {
+        nanosleep.u32(n);
+    }
+
+    pub unsafe extern "ptx-kernel" fn tanh(f: f32) {
+        let v: f32;
+        tanh.approx.f32(v, f);
+    }
+
+    pub unsafe extern "ptx-kernel" fn wait() {
+        cp.async.wait_all();
+    }
+
+    pub unsafe extern "ptx-kernel" fn arrive(y: u64) {
+        mbarrier.arrive.b64(_, [y]);
+    }
+"#;
+
+/// A module put together from what is kept is of the PTX and the GPU that what is kept needs, as
+/// the module of it alone is: its `.version` and `.target` are the oldest that have every
+/// instruction of the kernels kept, and the floor if none is.
+#[test]
+fn a_module_put_together_from_what_is_kept_is_of_the_ptx_and_gpu_it_needs() {
+    let entries = compiled(NEEDS, &["plain", "half", "sleep", "tanh", "wait", "arrive"]);
+    for (set, together, alone) in every_set(&entries, &[]) {
+        assert!(together.is_ok(), "{set:b}");
+        assert_eq!(together, alone, "{set:b}");
+    }
+    let assembly = kernite_ptx::module(&entries, &[]);
+    let cases: [(&[usize], &str); 14] = [
+        (&[], ".version 3.0 .target sm_30"),
+        (&[0], ".version 3.0 .target sm_30"),
+        (&[1], ".version 4.2 .target sm_53"),
+        (&[0, 1], ".version 4.2 .target sm_53"),
+        (&[2], ".version 6.2 .target sm_70"),
+        (&[1, 2], ".version 6.2 .target sm_70"),
+        (&[3], ".version 7.0 .target sm_75"),
+        (&[2, 3], ".version 7.0 .target sm_75"),
+        (&[4], ".version 7.0 .target sm_80"),
+        (&[3, 4], ".version 7.0 .target sm_80"),
+        (&[5], ".version 7.1 .target sm_80"),
+        (&[3, 5], ".version 7.1 .target sm_80"),
+        (&[0, 1, 2, 3, 4], ".version 7.0 .target sm_80"),
+        (&[0, 1, 2, 3, 4, 5], ".version 7.1 .target sm_80"),
+    ];
+    for (kept, want) in cases {
+        assert_eq!(header(&put_together(&assembly, kept).unwrap()), want, "kept {kept:?}");
+    }
+}
+
+/// A function with an instruction for a newer GPU, and the one kernel that calls it, beside a
+/// kernel that needs nothing: the function may be kept and its caller not.
+const HELPED: &str = r#"
+    pub unsafe extern "ptx-kernel" fn plain(x: *mut u32) {
+        st.global.u32([x], 1);
+    }
+
+    pub unsafe extern "ptx-kernel" fn shine(x: *mut f32, f: f32) {
+        let v: f32;
+        call(v, fast, f);
+        st.global.f32([x], v);
+    }
+
+    extern "ptx-func" fn fast(f: f32) -> f32 {
+        let v: f32;
+        tanh.approx.f32(v, f);
+        ret(v);
+    }
+"#;
+
+/// A function kept sets the module's `.version` and `.target` as a kernel kept does, though the one
+/// kernel that calls it is left out: `fast` with `plain`, which needs nothing, is a module of PTX 7.0
+/// and `sm_75`, which `fast` needs, and `plain` alone is of the floor. In each set of the three the
+/// module put together is the module of that set alone.
+#[test]
+fn a_function_kept_sets_the_header_though_the_kernel_that_calls_it_is_left_out() {
+    let entries = compiled(HELPED, &["plain", "shine", "fast"]);
+    for (set, together, alone) in every_set(&entries, &[]) {
+        assert!(together.is_ok(), "{set:b}");
+        assert_eq!(together, alone, "{set:b}");
+    }
+    let assembly = kernite_ptx::module(&entries, &[]);
+    let with_function = put_together(&assembly, &[0, 2]).unwrap();
+    assert_eq!(header(&with_function), ".version 7.0 .target sm_75");
+    assert!(with_function.contains(".func (.param .f32 fast_retval) fast("), "{with_function}");
+    assert!(!with_function.contains(".entry shine("), "{with_function}");
+    assert_eq!(header(&put_together(&assembly, &[0]).unwrap()), ".version 3.0 .target sm_30");
+}
+
+/// Kernels of which some, kept together, no module holds: `old` is for GPUs older than `sm_70` from
+/// PTX 6.4 on, `mid` needs `sm_75` and PTX 7.0, `top` `sm_80` and PTX 7.0, `sleep` `sm_70` and PTX
+/// 6.2, and `half` PTX 6.5, the last two with `old` only together.
+const CLASHES: &str = r#"
+    pub unsafe extern "ptx-kernel" fn plain(x: *mut u32) {
+        st.global.u32([x], 1);
+    }
+
+    pub unsafe extern "ptx-kernel" fn old(n: u32) {
+        let i: u32;
+        shfl.idx.b32(i, n, 0, 31);
+    }
+
+    pub unsafe extern "ptx-kernel" fn sleep(n: u32) {
+        nanosleep.u32(n);
+    }
+
+    pub unsafe extern "ptx-kernel" fn half(h: f16) {
+        let g: f16;
+        abs.f16(g, h);
+    }
+
+    pub unsafe extern "ptx-kernel" fn mid(f: f32) {
+        let v: f32;
+        tanh.approx.f32(v, f);
+    }
+
+    pub unsafe extern "ptx-kernel" fn top(n: u32) {
+        let i: u32;
+        redux.sync.add.u32(i, n, n);
+    }
+"#;
+
+/// A module put together from what is kept is none where the kernels kept have no module, as the
+/// module of them alone is, and says why of the kernels kept alone, whichever else are kept: `old`
+/// with `mid`, with `top`, or with `sleep` and `half` together. Of those it names the first in
+/// order, and a set of only those, exactly as the module of it alone does.
+#[test]
+fn a_module_put_together_from_what_is_kept_is_none_where_the_kernels_kept_have_no_module() {
+    let names = ["plain", "old", "sleep", "half", "mid", "top"];
+    let entries = compiled(CLASHES, &names);
+    let modules = every_set(&entries, &[]);
+    let none = modules.iter().filter(|(_, together, _)| together.is_err()).count();
+    // With `old`, of the 32 sets of the rest, those with neither `mid` nor `top` nor `sleep` and
+    // `half` together: 2 for `plain` and 3 for the other two.
+    assert_eq!(none, 32 - 6);
+    for (set, together, alone) in &modules {
+        let kept: Vec<&str> = (0..names.len()).filter(|i| set >> i & 1 == 1).map(|i| names[i]).collect();
+        let Err(why) = together else {
+            assert_eq!(together, alone, "{kept:?}");
+            continue;
+        };
+        assert!(alone.is_err(), "{kept:?} put together: {why}");
+        // What it says of the kernels names those kept alone.
+        let said: Vec<&str> = why.split("` in `").skip(1).filter_map(|rest| rest.split('`').next()).collect();
+        assert!(said.len() >= 2 && said.iter().all(|name| kept.contains(name)), "{kept:?}: {why}");
+    }
+    // The kernels named, by their places, put together, and alone.
+    let assembly = kernite_ptx::module(&entries, &[]);
+    let places =
+        |kept: &[&str]| -> Vec<usize> { kept.iter().map(|k| names.iter().position(|n| n == k).unwrap()).collect() };
+    let said = |kept: &[&str]| {
+        let kept = places(kept);
+        assembly.text(&|it| matches!(it, Kept::Code(i) if kept.contains(&i)))
+    };
+    let alone = |kept: &[&str]| {
+        let kept = places(kept);
+        let some: Vec<Entry> = kept.iter().map(|&i| entries[i].clone()).collect();
+        kernite_ptx::module(&some, &[]).whole()
+    };
+    for kept in [&["old", "mid"][..], &["old", "top"], &["old", "sleep", "half"], &["old", "mid", "plain"]] {
+        assert_eq!(said(kept), alone(kept), "{kept:?}");
+    }
+    let first = said(&["old", "mid", "top"]).unwrap_err();
+    assert!(first.contains("`tanh.approx.f32` in `mid`") && !first.contains("top"), "{first}");
+}
+
+/// A function kept is named in the error of a set that no module holds, as a kernel kept is, though
+/// the one kernel that calls it is left out: `old`, which is for GPUs older than `sm_70` from PTX 6.4
+/// on, with `fast`, which needs `sm_75` and PTX 7.0, is none, and says so of `old` and `fast`, never
+/// of `shine`, which needs nothing itself and has a module with `old`. In each set of the three the
+/// module put together is the module of that set alone.
+#[test]
+fn a_function_kept_is_named_where_the_kernels_and_functions_kept_have_no_module() {
+    let mut entries = compiled(CLASHES, &["old"]);
+    entries.extend(compiled(HELPED, &["shine", "fast"]));
+    for (set, together, alone) in every_set(&entries, &[]) {
+        assert_eq!(together, alone, "{set:b}");
+        // `old` and `fast`, bits 0 and 2, kept together are the sets with no module.
+        assert_eq!(together.is_err(), set & 0b101 == 0b101, "{set:b}");
+    }
+    let assembly = kernite_ptx::module(&entries, &[]);
+    let said = put_together(&assembly, &[0, 2]).unwrap_err();
+    assert_eq!(
+        said,
+        "`shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and `tanh.approx.f32` in `fast` \
+         needs sm_75 and PTX 7.0: no module has both"
+    );
+    assert!(put_together(&assembly, &[0, 1]).is_ok());
 }
 
 /// A kernel and a function each compiled for every instance their `#[instances(..)]` lists,
@@ -1523,8 +1963,8 @@ fn a_variable_named_as_a_special_register_takes_a_trailing_underscore() {
     "#;
     let want = "// Written by kernite.
 
-.version 2.3
-.target sm_20
+.version 3.0
+.target sm_30
 .address_size 64
 
 .visible .entry k(
@@ -2183,7 +2623,7 @@ fn module(entries: &[Entry]) -> String {
     if entries.iter().any(|e| e.calls.iter().any(|c| c == "f")) {
         all.insert(0, callee());
     }
-    kernite_ptx::module(&all, &statics()).unwrap()
+    kernite_ptx::module(&all, &statics()).whole().unwrap()
 }
 
 /// The kernels `ptxas` refuses of each module, assembling it for the GPU given with it, by
@@ -2309,18 +2749,24 @@ const VERSIONS: [u32; 47] = [
     75, 76, 77, 78, 80, 81, 82, 83, 84, 85, 86, 87, 88, 90, 91, 92, 93, 94,
 ];
 
+/// The newest of Fermi's GPUs, which came with PTX 2.0. kernite writes for none of them, as the
+/// driver starts at most 65535 blocks along x of a module for one; ptxas takes a module for one.
+const FERMI: u32 = 21;
+
 /// The newest GPU a module of PTX `v` with what `n` needs may be for: before 2.0, one of
-/// Tesla's, `sm_11` or `sm_13`, which kernite writes for neither of.
+/// Tesla's, `sm_11` or `sm_13`, and before 3.0, Fermi's, [`FERMI`], which kernite writes for none
+/// of.
 fn newest(v: u32, n: Needs) -> u32 {
     match v {
         ..12 => 11,
         12..20 => 13,
+        20..30 => FERMI,
         _ => kernite_ptx::GPUS
             .iter()
             .filter(|&&(g, came)| came <= v && (n.below == 0 || g < n.below || v < n.since))
             .map(|&(g, _)| g)
             .max()
-            .expect("every version from 2.0 has Fermi"),
+            .expect("every version from 3.0 has Kepler"),
     }
 }
 
@@ -2330,9 +2776,12 @@ fn before(v: u32) -> Option<u32> {
     i.checked_sub(1).map(|i| VERSIONS[i])
 }
 
-/// The version of PTX that came with the GPU `sm`.
+/// The version of PTX that came with the GPU `sm`: one kernite writes for, or [`FERMI`].
 fn came(sm: u32) -> u32 {
-    kernite_ptx::GPUS.iter().find(|&&(g, _)| g == sm).map(|&(_, v)| v).expect("a GPU kernite writes for")
+    match sm {
+        FERMI => 20,
+        _ => kernite_ptx::GPUS.iter().find(|&&(g, _)| g == sm).map(|&(_, v)| v).expect("a GPU kernite writes for"),
+    }
 }
 
 /// The module `text` as one of PTX `v` for the GPU `sm`.
@@ -2440,9 +2889,8 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
         if let Some(v) = before(ptx) {
             modules.push(at(retarget(&text, v, newest(v, n)), Expect::Refuses));
         }
-        if sm > Needs::FLOOR.sm {
-            let i = kernite_ptx::GPUS.iter().position(|&(g, _)| g == sm).expect("a GPU kernite writes for");
-            let g = kernite_ptx::GPUS[i - 1].0;
+        if sm > 0 {
+            let g = kernite_ptx::GPUS.iter().map(|&(g, _)| g).rfind(|&g| g < sm).unwrap_or(FERMI);
             modules.push(at(retarget(&text, ptx.max(came(g)), g), Expect::Refuses));
         }
         if below != 0 {
@@ -2576,8 +3024,8 @@ fn memory_is_declared_where_ptx_has_it() {
     let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
     let want = "// Written by kernite.
 
-.version 2.3
-.target sm_20
+.version 3.0
+.target sm_30
 .address_size 64
 
 .extern .shared .align 4 .b8 _ZZ7reverseE3buf[];
@@ -2620,6 +3068,11 @@ fn memory_is_reached_in_its_state_space_and_within_it() {
             "let a: shared<[f32; 8192]>; let b: shared<[f32; 4097]>;".into(),
             "2:36: this makes the kernel's shared memory 49156 bytes; it declares 48 KB at most, and has more as \
              `shared<[f32]>`, which the launch gives",
+        ),
+        (
+            "let a: shared<[u8; 49153]>;".into(),
+            "2:8: this makes the kernel's shared memory 49153 bytes; it declares 48 KB at most, and has more as \
+             `shared<[u8]>`, which the launch gives",
         ),
         (
             "let a: shared<[f32]>; let b: shared<[u32]>;".into(),
@@ -2732,6 +3185,9 @@ fn memory_is_reached_in_its_state_space_and_within_it() {
     for (body, want) in cases {
         assert_eq!(compile("x: *mut f32, n: u32", &body).unwrap_err(), want, "{body}");
     }
+    // A kernel declares 48 KB of shared memory, to the byte, and no more.
+    let ptx = compile("x: *mut f32, n: u32", "let a: shared<[u8; 49152]>; mov.u32(n, a);").unwrap();
+    assert!(ptx.contains("\t.shared .align 1 .b8 a[49152];\n"));
     // Memory takes the name it is given, but for one PTX has or the kernel's other names.
     let ptx = compile(
         "x: *mut f32, n: u32",
@@ -2803,7 +3259,7 @@ fn a_static_is_declared_once_for_each_kernel_to_name() {
     let want = "// Written by kernite.
 
 .version 3.1
-.target sm_20
+.target sm_30
 .address_size 64
 
 .global .align 4 .b8 COUNTS[64];
@@ -2831,8 +3287,8 @@ fn a_static_is_declared_once_for_each_kernel_to_name() {
     let scope = kernite::ptx_scope(&["kernite", "my_app", "gpu"]);
     let statics: Vec<_> = kernite::ptx_statics(&module, &scope).into_iter().map(Result::unwrap).collect();
     assert_eq!(statics[0].code.memory.name, "_ZN7kernite6my_app3gpu6COUNTSE");
-    assert_eq!(statics[0].consts, ["N"]);
-    assert!(statics[1..].iter().all(|s| s.consts.is_empty()));
+    assert_eq!(statics[0].mentions.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["N"]);
+    assert!(statics[1..].iter().all(|s| s.mentions.is_empty()));
     let count = kernite::ptx(&module, kernite::function(&module, "count").unwrap(), &[], &scope).unwrap();
     assert!(count.code.text().contains("\tmov.u64 %at, _ZN7kernite6my_app3gpu6COUNTSE;\n"));
 }
@@ -2933,6 +3389,36 @@ fn a_static_is_memory_of_a_type_the_host_reads_holding_what_it_says() {
     let want = "1:35: `constant<[u8; 65536]>` holds an array of `u8`; this is an integer";
     assert_eq!(made[0].as_ref().unwrap_err().at(src), want);
     assert_eq!(made[1].as_ref().err(), None);
+    // Nor does one that has no room: `B` is refused beside `A`, and `C` fits beside `A` alone.
+    let src = "static A: constant<[u8; 65535]>; static B: constant<[u32; 1]>; static C: constant<u8>;";
+    let made = kernite::ptx_statics(&kernite::lang::parse(src).unwrap(), "");
+    let want = "1:44: this makes the module's constant memory 65540 bytes, and a module has 64 KB";
+    assert_eq!(made[1].as_ref().unwrap_err().at(src), want);
+    assert_eq!(made[2].as_ref().err(), None);
+}
+
+/// The room of the types of the statics a module keeps, `ptx_room`, which the macro asks once Rust has
+/// left out those `cfg` does, is that of `ptx_statics` for a module that keeps them all: each type that
+/// does not fit beside those before it that do is refused in the same words, and takes none; the
+/// constant memory and the global are counted apart.
+#[test]
+fn the_room_of_the_types_a_module_keeps_is_counted_in_order() {
+    let constant = |all| format!("this makes the module's constant memory {all} bytes, and a module has 64 KB");
+    let global = "this makes the module's global memory as much as 4294967296 bytes, each static aligned, and \
+                  `ptxas` writes its size in 32 bits: a module has less than 4 GB";
+    let cases = [
+        ("constant<[u8; 65535]>", None),
+        ("constant<[u32; 1]>", Some(constant(65540))),
+        // Beside the first alone, it fills the 64 KB; the next has none left.
+        ("constant<u8>", None),
+        ("constant<u8>", Some(constant(65537))),
+        ("global<[u8; 4294967295]>", None),
+        ("global<u8>", Some(global.to_string())),
+    ];
+    let types: Vec<&str> = cases.iter().map(|(ty, _)| *ty).collect();
+    let want: Vec<Option<String>> = cases.into_iter().map(|(_, why)| why).collect();
+    assert_eq!(kernite::ptx_room(&types), want);
+    assert_eq!(kernite::ptx_room(&[]), []);
 }
 
 #[test]
@@ -3203,5 +3689,588 @@ fn cooperative_is_said_of_a_kernel_alone() {
     for attrs in ["#[cooperative] #[instances(1, 2)]", "#[instances(1, 2)] #[cooperative]"] {
         let src = format!("{attrs}\nunsafe extern \"ptx-kernel\" fn k<const N: u32>() {{ grid.sync(); }}");
         assert_eq!(kernite::ptx_str(&src).unwrap().matches("\tatom.add.u32 %old, [%barrier], %add;\n").count(), 2);
+    }
+}
+
+/// A kernel for each form of each directive: `.maxntid` and `.reqntid` of one, two and three
+/// sizes, `.minnctapersm` beside either, `.maxnreg`, and the three beside one another in an order
+/// that is not the ISA's. A size is a number known now, as `ROW` is.
+const TUNED: &str = r#"
+    const ROW: u32 = 16;
+
+    /// Every thread writes its place in its block.
+    fn mark(x: u64) {
+        let t: u32;
+        mov.u32(t, tid.x);
+        st.global.u32([x], t);
+    }
+
+    pub unsafe extern "ptx-kernel" fn none(x: *mut u32) {
+        mark(x);
+    }
+
+    #[maxntid(256)]
+    pub unsafe extern "ptx-kernel" fn max_x(x: *mut u32) {
+        mark(x);
+    }
+
+    #[maxntid(ROW, ROW)]
+    pub unsafe extern "ptx-kernel" fn max_xy(x: *mut u32) {
+        mark(x);
+    }
+
+    #[maxntid(8, 8, 4)]
+    pub unsafe extern "ptx-kernel" fn max_xyz(x: *mut u32) {
+        mark(x);
+    }
+
+    #[reqntid(256)]
+    pub unsafe extern "ptx-kernel" fn req_x(x: *mut u32) {
+        mark(x);
+    }
+
+    #[reqntid(ROW, ROW)]
+    pub unsafe extern "ptx-kernel" fn req_xy(x: *mut u32) {
+        mark(x);
+    }
+
+    #[reqntid(8, 8, 4)]
+    pub unsafe extern "ptx-kernel" fn req_xyz(x: *mut u32) {
+        mark(x);
+    }
+
+    #[maxntid(256)]
+    #[minnctapersm(2)]
+    pub unsafe extern "ptx-kernel" fn max_blocks(x: *mut u32) {
+        mark(x);
+    }
+
+    #[reqntid(ROW * 8, 2)]
+    #[minnctapersm(4)]
+    pub unsafe extern "ptx-kernel" fn req_blocks(x: *mut u32) {
+        mark(x);
+    }
+
+    #[maxnreg(32)]
+    pub unsafe extern "ptx-kernel" fn regs(x: *mut u32) {
+        mark(x);
+    }
+
+    #[maxnreg(48)]
+    #[minnctapersm(4)]
+    #[reqntid(8, 8, 4)]
+    pub unsafe extern "ptx-kernel" fn all(x: *mut u32) {
+        mark(x);
+    }
+"#;
+
+/// The directives of the `.entry` `name` of `ptx`: its lines between its parameters and its body.
+fn directives_of(ptx: &str, name: &str) -> Vec<String> {
+    let entry = ptx.split_once(&format!(".visible .entry {name}(")).expect("the module has the kernel").1;
+    let head = entry.split_once("\n{\n").expect("a kernel has a body").0;
+    head.lines().skip_while(|l| *l != ")").skip(1).map(String::from).collect()
+}
+
+#[test]
+fn a_kernel_says_its_directives_between_its_parameters_and_its_body() {
+    let ptx = kernite::ptx_str(TUNED).unwrap();
+    // `.maxntid` and `.maxnreg` came with PTX 1.3, `.minnctapersm` with 2.0 and `.reqntid` with 2.1, and
+    // every module kernite writes is of `.version 3.0` at least, `Needs::FLOOR`, so a directive asks nothing
+    // of the module.
+    assert!(ptx.starts_with("// Written by kernite.\n\n.version 3.0\n.target sm_30\n.address_size 64\n\n"), "{ptx}");
+    let all: [(&str, &[&str]); 11] = [
+        ("none", &[]),
+        ("max_x", &[".maxntid 256"]),
+        ("max_xy", &[".maxntid 16, 16"]),
+        ("max_xyz", &[".maxntid 8, 8, 4"]),
+        ("req_x", &[".reqntid 256"]),
+        ("req_xy", &[".reqntid 16, 16"]),
+        ("req_xyz", &[".reqntid 8, 8, 4"]),
+        ("max_blocks", &[".maxntid 256", ".minnctapersm 2"]),
+        ("req_blocks", &[".reqntid 128, 2", ".minnctapersm 4"]),
+        ("regs", &[".maxnreg 32"]),
+        // In the order they are written.
+        ("all", &[".maxnreg 48", ".minnctapersm 4", ".reqntid 8, 8, 4"]),
+    ];
+    for (name, lines) in all {
+        assert_eq!(directives_of(&ptx, name), lines, "{name}");
+    }
+    // As `nvcc` prints them: after the `)` of the parameters, one to a line, before the `{`.
+    let want =
+        ".visible .entry max_blocks(\n\t.param .u64 max_blocks_param_0\n)\n.maxntid 256\n.minnctapersm 2\n{\n\t.reg ";
+    assert!(ptx.contains(want), "{ptx}");
+}
+
+/// A module of a kernel for each of `attrs`, `k0`, `k1` and so on, that does nothing.
+fn tuned(attrs: &[&str]) -> String {
+    let kernel = |(i, attr): (usize, &&str)| format!("{attr}\npub unsafe extern \"ptx-kernel\" fn k{i}() {{}}\n");
+    attrs.iter().enumerate().map(kernel).collect()
+}
+
+/// Each directive at the edge of what kernite takes, as a kernel of its own.
+const EDGES: &[&str] = &[
+    "#[maxntid(1)]",
+    "#[maxntid(1024)]",
+    "#[maxntid(1024, 1, 1)]",
+    "#[maxntid(1, 1024)]",
+    "#[maxntid(1, 1, 64)]",
+    "#[maxntid(32, 32)]",
+    "#[maxntid(4, 4, 64)]",
+    "#[reqntid(1)]",
+    "#[reqntid(1024)]",
+    "#[reqntid(1024, 1, 1)]",
+    "#[reqntid(1, 1024)]",
+    "#[reqntid(1, 1, 64)]",
+    "#[reqntid(32, 32)]",
+    "#[reqntid(4, 4, 64)]",
+    "#[maxntid(1024)] #[minnctapersm(1)]",
+    "#[maxntid(64)] #[minnctapersm(16)]",
+    "#[reqntid(1024)] #[minnctapersm(1)]",
+    "#[reqntid(8, 8)] #[minnctapersm(16)]",
+    // `ptxas` counts the warps of the blocks, a warp being 32 threads and the last of a block maybe fewer:
+    // 10 blocks of 96 threads make 30 warps, 16 of 33 make 32, and 8 of 99 make 32, which Turing's SM holds.
+    "#[maxntid(96)] #[minnctapersm(10)]",
+    "#[maxntid(33)] #[minnctapersm(16)]",
+    "#[reqntid(33, 3)] #[minnctapersm(8)]",
+    "#[maxnreg(24)]",
+    "#[maxnreg(255)]",
+    "#[maxntid(1024)] #[maxnreg(64)]",
+    "#[reqntid(512)] #[maxnreg(128)]",
+    "#[maxntid(16, 16)] #[maxnreg(255)]",
+    "#[reqntid(32, 32)] #[minnctapersm(1)] #[maxnreg(64)]",
+    // A launch counts the registers of a thread by eights, and the warps of a block by fours: 255 registers
+    // for 8 warps are 256 * 32 * 8 = 65536, 168 for 9 warps, counted as 12, 168 * 32 * 12 = 64512, 64 for 32
+    // warps, 64 * 32 * 32 = 65536, and 255 for 2 warps, counted as 4, 256 * 32 * 4 = 32768.
+    "#[maxntid(256)] #[maxnreg(255)]",
+    "#[reqntid(256)] #[maxnreg(255)]",
+    "#[maxntid(288)] #[maxnreg(168)]",
+    "#[maxntid(384)] #[maxnreg(168)]",
+    "#[maxntid(1000)] #[maxnreg(64)]",
+    "#[reqntid(33)] #[maxnreg(255)]",
+];
+
+/// What `ptxas` makes of the module `text` for the GPU `gpu`, with `flags`, named `name` in the
+/// directory of this test.
+fn assembled(ptxas: &Path, text: &str, gpu: &str, name: &str, flags: &[&str]) -> std::process::Output {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let (src, out) = (dir.join(format!("{name}.ptx")), dir.join(format!("{name}.cubin")));
+    std::fs::write(&src, text).unwrap();
+    Command::new(ptxas).args(["--gpu-name", gpu]).args(flags).arg(&src).arg("-o").arg(&out).output().unwrap()
+}
+
+#[test]
+fn ptxas_takes_each_directive_kernite_writes_without_a_word() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    // Turing's SM holds the fewest blocks and warps of the GPUs kernite writes for, and a
+    // GeForce RTX 3050 is Ampere.
+    for (name, text) in
+        [("tuned", kernite::ptx_str(TUNED).unwrap()), ("edges", kernite::ptx_str(&tuned(EDGES)).unwrap())]
+    {
+        for gpu in ["sm_75", "sm_86"] {
+            let run = assembled(&ptxas, &text, gpu, &format!("{name}_{gpu}"), &["--warning-as-error"]);
+            assert!(run.status.success(), "{name} for {gpu}: {}", String::from_utf8_lossy(&run.stderr));
+        }
+    }
+}
+
+/// A kernel that loads the 64 floats `v[k]` at `x[tid.x]`, 1024 apart, and writes to `y[tid.x]` the sum of
+/// their products in pairs, `v[k] * v[63 - k]`. It loads them all before it uses the first: without a
+/// limit, `ptxas` gives it more than 32 registers.
+fn heavy(attrs: &str) -> String {
+    let body = r#"
+    pub unsafe extern "ptx-kernel" fn heavy(x: *const f32, y: *mut f32) {
+        let (i, at): (u32, u64);
+        mov.u32(i, tid.x);
+        mad.wide.u32(at, i, 4, x);
+        let v: [f32; 64];
+        for k in 0..64 {
+            ld.global.f32(v[k], [at + 4096 * k]);
+        }
+        let s: f32;
+        mov.f32(s, 0);
+        for k in 0..64 {
+            fma.rn.f32(s, v[k], v[63 - k], s);
+        }
+        mad.wide.u32(at, i, 4, y);
+        st.global.f32([at], s);
+    }
+    "#;
+    kernite::ptx_str(&format!("{attrs}{body}")).unwrap()
+}
+
+/// The registers `ptxas -v` says the kernel of the module `text` uses, for the RTX 3050's `sm_86`.
+fn used_registers(ptxas: &Path, text: &str, name: &str) -> u32 {
+    let run = assembled(ptxas, text, "sm_86", name, &["-v", "--warning-as-error"]);
+    let said = String::from_utf8_lossy(&run.stderr).into_owned();
+    assert!(run.status.success(), "{name}: {said}");
+    let after = said.split_once("Used ").unwrap_or_else(|| panic!("{name}: {said}")).1;
+    after.split_once(" registers").unwrap().0.parse().unwrap()
+}
+
+#[test]
+fn a_kernel_with_maxnreg_uses_no_more_registers_than_it_says() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    let used = |attrs: &str, name: &str| used_registers(&ptxas, &heavy(attrs), name);
+    let free = used("", "free");
+    assert!(free > 32, "the kernel needs {free} registers, and the test means nothing if that is 32 or fewer");
+    for most in [24, 32, 48] {
+        let held = used(&format!("#[maxnreg({most})]"), &format!("held_{most}"));
+        assert!(held <= most, "`#[maxnreg({most})]` and {held} registers, not {free}");
+    }
+}
+
+#[test]
+fn ptxas_lowers_maxnreg_for_the_blocks_an_sm_holds_but_not_for_the_threads_of_a_block() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    let used = |attrs: &str, name: &str| used_registers(&ptxas, &heavy(attrs), name);
+    let free = used("", "free_again");
+    assert!(free > 64, "the kernel needs {free} registers, and the test means nothing if that is 64 or fewer");
+    // 1024 threads have 64 registers each, and `.maxntid 1024` alone gives the kernel no more.
+    assert_eq!(used("#[maxntid(1024)]", "threads"), 64);
+    // Four blocks of 256 threads are 1024 threads an SM, and `.minnctapersm 4` gives it 64 as well,
+    // though `.maxnreg` says 128.
+    assert_eq!(used("#[maxntid(256)] #[minnctapersm(4)] #[maxnreg(128)]", "blocks"), 64);
+    // `.maxnreg 128` beside `.maxntid 1024` is kept, and kernite refuses it: no block of 1024
+    // threads has 128 registers each. The module is by hand, for kernite does not write it.
+    let text = heavy("#[maxntid(1024)]").replace(".maxntid 1024\n", ".maxntid 1024\n.maxnreg 128\n");
+    assert!(text.contains(".maxnreg 128"), "{text}");
+    assert_eq!(used_registers(&ptxas, &text, "kept"), free);
+}
+
+#[test]
+fn ptxas_keeps_the_last_of_a_directive_said_twice_and_says_nothing_of_the_first() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    let once = |most: u32| used_registers(&ptxas, &heavy(&format!("#[maxnreg({most})]")), &format!("once_{most}"));
+    // The modules are by hand, for kernite refuses a directive twice, at the second.
+    let twice = |first: u32, last: u32| {
+        let text = heavy(&format!("#[maxnreg({last})]"));
+        let text = text.replace(&format!(".maxnreg {last}\n"), &format!(".maxnreg {first}\n.maxnreg {last}\n"));
+        assert!(text.contains(&format!(".maxnreg {first}\n.maxnreg {last}\n")), "{text}");
+        used_registers(&ptxas, &text, &format!("twice_{first}_{last}"))
+    };
+    let (low, high) = (once(32), once(48));
+    assert!(low <= 32 && high > 32, "`#[maxnreg(32)]` and {low} registers, `#[maxnreg(48)]` and {high}");
+    assert_eq!(twice(48, 32), low);
+    assert_eq!(twice(32, 48), high);
+}
+
+#[test]
+fn what_ptx_forbids_and_ptxas_would_cut_or_ignore_is_refused_at_the_directive() {
+    let size = |name: &str| format!("`#[{name}(..)]` gives one size, two or three: the threads along x, then y and z");
+    let few = "threads are too few: a block has 1 at least along each axis";
+    let one = |name: &str, what: &str| format!("`#[{name}(..)]` gives one number: {what}");
+    let blocks = "the blocks an SM should hold at once, at least";
+    let registers = "the most registers a thread may use";
+    let both = "a kernel has `#[maxntid(..)]` or `#[reqntid(..)]`, not both: its blocks have at most these threads, or \
+                exactly these";
+    // `n` blocks of `threads` threads make `all` warps, `w` to a block.
+    let warps = |n: u32, threads: u32, all: u32, w: u32| {
+        format!(
+            "{n} blocks of {threads} threads make {all} warps, {w} to a block: an SM holds 32 on some GPUs, and \
+             `ptxas` counts the warps of the blocks, not their threads, and ignores the number on a GPU whose SM \
+             holds fewer"
+        )
+    };
+    // `n` registers for each of `threads` threads make `all` in a launch: `r` registers by eights, 32 threads to a
+    // warp, and `w` warps by fours.
+    let launch = |n: u32, threads: u32, all: u32, r: u32, w: u32| {
+        format!(
+            "{n} registers for each of {threads} threads make {all} in a launch, which counts a thread's registers by \
+             eights and a block's warps by fours, {r} * 32 * {w}: a block has 65536 at most, and `ptxas` does not \
+             lower `#[maxnreg(..)]` to fit the threads of a block, so a kernel that used them all could not launch"
+        )
+    };
+    let cases = [
+        // A size of 0, which `ptxas` refuses, at the size.
+        ("#[maxntid(0)]", "1:11", format!("0 {few}")),
+        ("#[reqntid(8, 0)]", "1:14", format!("0 {few}")),
+        ("#[maxntid(-1)]", "1:11", format!("-1 {few}")),
+        // A size past what a block has along an axis, and the threads of a block in all: `ptxas`
+        // ignores `.maxntid 2048`, takes `.reqntid 32, 33`, and dies of `SIGFPE` on 4294967295.
+        ("#[maxntid(2048)]", "1:11", "2048 threads are too many: a block has 1024 at most along x".into()),
+        ("#[maxntid(1, 2048)]", "1:14", "2048 threads are too many: a block has 1024 at most along y".into()),
+        ("#[reqntid(1, 1, 65)]", "1:17", "65 threads are too many: a block has 64 at most along z".into()),
+        ("#[maxntid(4294967295)]", "1:11", "4294967295 threads are too many: a block has 1024 at most along x".into()),
+        ("#[reqntid(32, 33)]", "1:3", "these sizes make 1056 threads: a block has 1024 at most in all".into()),
+        ("#[maxntid(1, 2, 3, 4)]", "1:20", size("maxntid")),
+        ("#[reqntid()]", "1:3", size("reqntid")),
+        // `.maxntid` with `.reqntid`: `ptxas` refuses a module that has both. The second is at fault.
+        ("#[maxntid(256)] #[reqntid(256)]", "1:19", both.into()),
+        ("#[reqntid(8, 8)] #[maxntid(8, 8)]", "1:20", both.into()),
+        // `.minnctapersm` alone, which `ptxas` ignores, and more blocks than the GPU's SM holds.
+        (
+            "#[minnctapersm(2)]",
+            "1:3",
+            "`#[minnctapersm(..)]` needs `#[maxntid(..)]` or `#[reqntid(..)]`: `ptxas` ignores it where it does not \
+             know the threads of a block"
+                .into(),
+        ),
+        ("#[maxntid(256)] #[minnctapersm(0)]", "1:32", "0 blocks are too few: an SM holds 1 at least".into()),
+        (
+            "#[maxntid(256)] #[minnctapersm(17)]",
+            "1:32",
+            "17 blocks are too many: an SM holds 16 on some GPUs, and `ptxas` ignores the number on a GPU whose SM \
+             holds fewer"
+                .into(),
+        ),
+        ("#[maxntid(1024)] #[minnctapersm(2)]", "1:33", warps(2, 1024, 64, 32)),
+        ("#[reqntid(512)] #[minnctapersm(3)]", "1:32", warps(3, 512, 48, 16)),
+        // The warps of the blocks, not their threads: 970 threads are fewer than Turing's SM holds, but 40
+        // warps are more than the 32 it holds, and `ptxas` ignores the number there. At the number.
+        ("#[maxntid(97)] #[minnctapersm(10)]", "1:31", warps(10, 97, 40, 4)),
+        ("#[maxntid(330)] #[minnctapersm(3)]", "1:32", warps(3, 330, 33, 11)),
+        ("#[reqntid(33, 3)] #[minnctapersm(9)]", "1:34", warps(9, 99, 36, 4)),
+        ("#[maxntid(256)] #[minnctapersm()]", "1:19", one("minnctapersm", blocks)),
+        ("#[maxntid(256)] #[minnctapersm(1, 2)]", "1:35", one("minnctapersm", blocks)),
+        // `.maxnreg` below 24, which `ptxas` raises to 24, and past 255, which it ignores.
+        (
+            "#[maxnreg(0)]",
+            "1:11",
+            "0 registers are too few: `ptxas` gives a thread 24 at least, and raises a smaller number to it".into(),
+        ),
+        (
+            "#[maxnreg(16)]",
+            "1:11",
+            "16 registers are too few: `ptxas` gives a thread 24 at least, and raises a smaller number to it".into(),
+        ),
+        (
+            "#[maxnreg(300)]",
+            "1:11",
+            "300 registers are too many: a thread has 255 at most, and `ptxas` ignores a bigger number".into(),
+        ),
+        ("#[maxnreg()]", "1:3", one("maxnreg", registers)),
+        ("#[maxnreg(32, 64)]", "1:15", one("maxnreg", registers)),
+        // The registers of a block's threads, which `ptxas` does not lower `.maxnreg` for.
+        ("#[maxntid(1024)] #[maxnreg(128)]", "1:28", launch(128, 1024, 131072, 128, 32)),
+        ("#[maxnreg(255)] #[reqntid(1024)]", "1:11", launch(255, 1024, 262144, 256, 32)),
+        ("#[reqntid(32, 32)] #[maxnreg(65)]", "1:30", launch(65, 1024, 73728, 72, 32)),
+        ("#[maxntid(8, 8, 8)] #[maxnreg(255)]", "1:31", launch(255, 512, 131072, 256, 16)),
+        // A launch counts by eights and by fours, so these cannot launch: one thread past 8 warps is 9, counted as
+        // 12, and the registers of a thread, 170 and 65, as 176 and 72. The edges are in `EDGES`.
+        ("#[maxntid(257)] #[maxnreg(255)]", "1:27", launch(255, 257, 98304, 256, 12)),
+        ("#[reqntid(257)] #[maxnreg(255)]", "1:27", launch(255, 257, 98304, 256, 12)),
+        ("#[maxntid(288)] #[maxnreg(176)]", "1:27", launch(176, 288, 67584, 176, 12)),
+        ("#[maxntid(384)] #[maxnreg(170)]", "1:27", launch(170, 384, 67584, 176, 12)),
+        ("#[maxntid(1000)] #[maxnreg(65)]", "1:28", launch(65, 1000, 73728, 72, 32)),
+        // The attribute is not one: it names no number, or twice, or a number that is not whole.
+        (
+            "#[maxntid]",
+            "1:3",
+            "`#[maxntid(..)]` gives the most threads a block has, along x, then y and z, as in `#[maxntid(16, 16)]`"
+                .into(),
+        ),
+        (
+            "#[reqntid = 256]",
+            "1:3",
+            "`#[reqntid(..)]` gives the threads a block has, along x, then y and z, as in `#[reqntid(8, 8, 4)]`".into(),
+        ),
+        (
+            "#[minnctapersm]",
+            "1:3",
+            "`#[minnctapersm(..)]` gives the blocks an SM should hold at once, at least, as in `#[minnctapersm(2)]`"
+                .into(),
+        ),
+        (
+            "#[maxnreg]",
+            "1:3",
+            "`#[maxnreg(..)]` gives the most registers a thread may use, as in `#[maxnreg(32)]`".into(),
+        ),
+        ("#[maxntid(1)] #[maxntid(1)]", "1:17", "a kernel has one `#[maxntid(..)]`".into()),
+        ("#[maxnreg(32)] #[maxnreg(32)]", "1:18", "a kernel has one `#[maxnreg(..)]`".into()),
+        ("#[maxntid(1.5)]", "1:11", "`#[maxntid(..)]` gives whole numbers; this is an f32".into()),
+    ];
+    for (attrs, at, want) in cases {
+        let src = format!("{attrs}\npub unsafe extern \"ptx-kernel\" fn k() {{}}\n");
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), format!("{at}: {want}"), "{attrs}");
+    }
+    // The other side of each edge is taken.
+    kernite::ptx_str(&tuned(EDGES)).unwrap();
+}
+
+#[test]
+fn a_directive_is_said_of_a_gpu_kernel_alone() {
+    let not = |name: &str| format!("`#[{name}(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`");
+    let cooperative = "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, \
+                       `extern \"ptx-kernel\"` or `extern \"sysv64\"`";
+    let cases = [
+        (
+            "#[maxntid(256)] extern \"ptx-func\" fn f() {}",
+            format!(
+                "1:3: {}; `f` is a function the kernels call, which runs as the kernel that calls it is launched",
+                not("maxntid")
+            ),
+        ),
+        // Nothing calls `h`, and a helper that is not called is wrong all the same.
+        ("#[maxnreg(32)] fn h() {}", format!("1:3: {}; `h` is a helper, inlined where it is called", not("maxnreg"))),
+        ("#[reqntid(8, 8)] static A: global<u32>;", format!("1:3: {}", not("reqntid"))),
+        ("#[minnctapersm(2)] const A: u32 = 1;", format!("1:3: {}", not("minnctapersm"))),
+        (
+            "#[maxntid(256)] unsafe extern \"sysv64\" fn s() {}",
+            format!("1:3: {}; `s` is a kernel for x86-64, which the process runs", not("maxntid")),
+        ),
+        // The first of its directives is the one said, and `#[cooperative]` is said before them.
+        (
+            "#[maxnreg(32)] #[maxntid(8)] fn h() {}",
+            format!("1:3: {}; `h` is a helper, inlined where it is called", not("maxnreg")),
+        ),
+        (
+            "#[maxnreg(32)] #[cooperative] fn h() {}",
+            format!("1:18: {cooperative}; `h` is a helper, inlined where it is called"),
+        ),
+    ];
+    for (items, want) in cases {
+        let src = format!("{items}\npub unsafe extern \"ptx-kernel\" fn k() {{}}\n");
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{items}");
+    }
+    // Where the function is called, it is said once, and for the function, not for the kernel.
+    let src = "#[maxnreg(32)]\nfn h() {\n    bar.sync(0);\n}\npub unsafe extern \"ptx-kernel\" fn j() {\n    h();\n}\n\
+               pub unsafe extern \"ptx-kernel\" fn k() {\n    h();\n}\n";
+    let want = format!("1:3: {}; `h` is a helper, inlined where it is called", not("maxnreg"));
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), want);
+}
+
+/// `.maxnctapersm` is gone from PTX 2.1 on, and `ptxas` refuses it: the name is what is wrong with
+/// `#[maxnctapersm(..)]`, in whatever form it is written and on whatever it is. The error says so, at the
+/// name, and not that the directive goes on a GPU kernel, where it would be refused too.
+#[test]
+fn maxnctapersm_is_refused_by_its_name_in_every_form_and_every_place() {
+    let want = "1:3: PTX has no `.maxnctapersm` from 2.1 on; `#[minnctapersm(..)]` gives the blocks an SM should hold \
+                at once, at least";
+    for items in [
+        // On a GPU kernel, with the blocks it asks for, with none, and as `= 2`.
+        "#[maxnctapersm(2)]",
+        "#[maxnctapersm]",
+        "#[maxnctapersm = 2]",
+        // On what is no GPU kernel: a helper, a function the kernels call, a static and a const.
+        "#[maxnctapersm(2)] fn h() {}",
+        "#[maxnctapersm(2)] extern \"ptx-func\" fn f() {}",
+        "#[maxnctapersm(2)] static A: global<u32>;",
+        "#[maxnctapersm(2)] const A: u32 = 1;",
+    ] {
+        let src = format!("{items}\npub unsafe extern \"ptx-kernel\" fn k() {{}}\n");
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{items}");
+    }
+}
+
+/// A kernel of a tile `N` along y and 8 along x, compiled for 16 and for 32.
+const GENERIC: &str = r#"
+    const ROW: u32 = 8;
+
+    #[instances(16, 32)]
+    #[maxntid(ROW, N)]
+    #[minnctapersm(N / ROW)]
+    pub unsafe extern "ptx-kernel" fn tile<const N: u32>() {}
+"#;
+
+#[test]
+fn a_directive_works_out_the_consts_and_the_instance_of_its_kernel() {
+    let ptx = kernite::ptx_str(GENERIC).unwrap();
+    assert_eq!(directives_of(&ptx, "_Z4tileILj16EE"), [".maxntid 8, 16", ".minnctapersm 2"]);
+    assert_eq!(directives_of(&ptx, "_Z4tileILj32EE"), [".maxntid 8, 32", ".minnctapersm 4"]);
+    // What is wrong with an instance is said of that instance, at the value.
+    for (instances, want) in [
+        ("16, 2048", "2:11: in `tile::<2048>`: 2048 threads are too many: a block has 1024 at most along x"),
+        ("0, 16", "2:11: in `tile::<0>`: 0 threads are too few: a block has 1 at least along each axis"),
+    ] {
+        let src = format!(
+            "#[instances({instances})]\n#[maxntid(N)]\npub unsafe extern \"ptx-kernel\" fn tile<const N: u32>() {{}}\n"
+        );
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{instances}");
+    }
+}
+
+/// A kernel `k` written by hand, with `lines` for its directives.
+fn written_with(lines: &str) -> String {
+    format!(".version 3.0\n.target sm_30\n.address_size 64\n\n.visible .entry k()\n{lines}\n{{\n\tret;\n}}\n")
+}
+
+#[test]
+fn ptxas_refuses_cuts_or_ignores_what_kernite_refuses_of_the_directives() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    // What `ptxas` says of a kernel with `lines`, for the GPU `gpu`.
+    let said = |gpu: &str, lines: &str, name: usize| -> (bool, String) {
+        let run = assembled(&ptxas, &written_with(lines), gpu, &format!("written_with_{name}"), &[]);
+        (run.status.success(), String::from_utf8_lossy(&run.stderr).into_owned())
+    };
+    let cases = [
+        // Refused, which kernite refuses at the directive in its words.
+        (".maxntid 0", false, "Positive non-zero value expected for maxntid"),
+        (".reqntid 256, 0", false, "Positive non-zero value expected for reqntid"),
+        (".maxntid 32\n.minnctapersm 0", false, "Positive non-zero value expected for minnctapersm"),
+        (".maxnreg 0", false, "Positive non-zero value expected for maxnreg"),
+        (".maxntid 256\n.reqntid 256", false, "Conflicting directives: .maxntid and .reqntid cannot both be specified"),
+        (".maxnctapersm 2", false, "'.maxnctapersm directive' not supported as of PTX version 2.1"),
+        // Taken with a warning that it changes or ignores the number.
+        (
+            ".maxntid 2048",
+            true,
+            "Value of threads per SM for entry k is out of range. .minnctapersm and .maxntid will be ignored",
+        ),
+        (".maxnreg 300", true, "Too many maxnreg specified for entry k, will be ignored"),
+        (".maxnreg 16", true, "adjusting per thread register count of 16 to lower bound of 24"),
+        (".minnctapersm 2", true, ".minnctapersm is ignored when neither .maxntid nor .reqntid is specified"),
+        (
+            ".maxntid 32\n.minnctapersm 17",
+            true,
+            "Value of minnctapersm for entry k is out of range. minnctapersm will be ignored",
+        ),
+        (
+            ".maxntid 1024\n.minnctapersm 2",
+            true,
+            "Value of threads per SM for entry k is out of range. .minnctapersm will be ignored",
+        ),
+        // Taken without a word, though no launch has these threads: a block has 1024 at most, and
+        // 64 along z.
+        (".reqntid 32, 33", true, ""),
+        (".reqntid 1, 1, 65", true, ""),
+    ];
+    // For the RTX 3050's `sm_86`.
+    let before = cases.len();
+    for (i, (lines, takes, word)) in cases.into_iter().enumerate() {
+        let (took, stderr) = said("sm_86", lines, i);
+        assert_eq!(took, takes, "{lines}: {stderr}");
+        assert!(stderr.contains(word) && (!word.is_empty() || stderr.is_empty()), "{lines}: {stderr}");
+    }
+    // An SM holds the blocks and the warps its GPU has, and Turing's, `sm_75`, holds fewer than Ampere's
+    // `sm_86`: 32 warps against 48. `ptxas` counts the warps of the blocks, 32 threads each, and not their
+    // threads: 10 blocks of 96 threads are 30 warps and are taken, and 10 of 97 are 40 warps, though they are 970
+    // threads and the SM holds 1024, so 3 blocks of 330, 33 warps, are ignored as well.
+    let ignored = "Value of threads per SM for entry k is out of range. .minnctapersm will be ignored";
+    let turing = [
+        (".maxntid 96\n.minnctapersm 10", true),
+        (".maxntid 97\n.minnctapersm 10", false),
+        (".reqntid 100\n.minnctapersm 10", false),
+        (".maxntid 33\n.minnctapersm 16", true),
+        (".maxntid 330\n.minnctapersm 3", false),
+        (".maxntid 320\n.minnctapersm 3", true),
+        (".maxntid 400\n.minnctapersm 3", false),
+        (".maxntid 400\n.minnctapersm 2", true),
+        (".maxntid 33, 3\n.minnctapersm 8", true),
+        (".maxntid 33, 3\n.minnctapersm 9", false),
+        (".reqntid 7, 7, 2\n.minnctapersm 9", false),
+        (".maxntid 1024\n.minnctapersm 1", true),
+        (".maxntid 513\n.minnctapersm 2", false),
+    ];
+    for (i, (lines, takes)) in turing.into_iter().enumerate() {
+        let (took, stderr) = said("sm_75", lines, before + 2 * i);
+        let word = if takes { "" } else { ignored };
+        assert!(took && stderr.contains(word) && (!takes || stderr.is_empty()), "{lines}: {stderr}");
+        // Ampere's holds 48 warps, more than any of these makes.
+        assert_eq!(said("sm_86", lines, before + 2 * i + 1), (true, String::new()), "{lines}");
     }
 }

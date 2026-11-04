@@ -20,8 +20,8 @@
 //! the brackets says how much: `movzx(g.r32, byte[p])`, `add(dword[p], 1)`, with `byte`, `word`,
 //! `dword`, `qword`, `xmmword` or `ymmword`. Memory holding data known now, `[[1u16; 4]]`, is as
 //! big as its data there. A gather reads memory at a vector of indices, as in
-//! `vpgatherdd(v, [p + i * 4], mask)`, and faults unless its result, its indices and its mask are
-//! three registers.
+//! `vpgatherdd(v, [p + i * 4], mask)` or, with no base, `[i * 4]`, and faults unless its result,
+//! its indices and its mask are three registers.
 //!
 //! A form needs the CPU features it is of past x86-64's own: AVX for every vector instruction,
 //! AVX2 for integers in a ymm, and FMA, F16C, BMI1, BMI2, LZCNT, POPCNT, MOVBE and SSE4.2's
@@ -85,7 +85,7 @@ use kernite_core::{
     Arg, Base, Class, Const, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo, Signature,
     Slot, SlotId, StaticId, VReg,
 };
-use kernite_lang::{Fault, Guard, Operand as Given, Span, Target, Value};
+use kernite_lang::{Fault, Guard, Operand as Given, Span, Target, Value, pointer};
 
 use crate::bytes;
 use crate::forms::{self, Form, Kind, Miss, Shape};
@@ -229,7 +229,7 @@ impl Ty {
         match ty {
             "f32" => Ok(Ty::F32),
             "f64" => Ok(Ty::F64),
-            _ if ty.starts_with("*const ") || ty.starts_with("*mut ") => Ok(Ty::Int),
+            _ if pointer(ty)? => Ok(Ty::Int),
             "usize" | "isize" | "u64" | "i64" => Ok(Ty::Int),
             "u32" | "i32" | "u16" | "i16" | "u8" | "i8" | "bool" => {
                 Err(format!("SysV leaves the high bits of a `{ty}` as they were; take a usize or a u64"))
@@ -271,7 +271,7 @@ impl Returns {
             "!" => Ok(Returns::Never),
             "f32" => Ok(Returns::Value(Ty::F32)),
             "f64" => Ok(Returns::Value(Ty::F64)),
-            _ if ty.starts_with("*const ") || ty.starts_with("*mut ") => Ok(Returns::Value(Ty::Int)),
+            _ if pointer(ty)? => Ok(Returns::Value(Ty::Int)),
             "usize" | "isize" | "u64" | "i64" | "u32" | "i32" | "u16" | "i16" | "u8" | "i8" | "bool" => {
                 Ok(Returns::Value(Ty::Int))
             }
@@ -1207,6 +1207,13 @@ impl Kernel {
                 _ => "an address multiplies its vector of indices, as in `[p + v * 4]`; this multiplies a gpr".into(),
             });
         }
+        // x86 scales by 1, 2, 4 or 8, so an index with no base beside it, times 3, 5 or 9, is its
+        // own base: `[n * 5]` is `[n + n * 4]`.
+        if let (None, Some((i, k @ (3 | 5 | 9)))) = (base, index)
+            && !i.vector()
+        {
+            (base, index) = (Some(i), Some((i, k - 1)));
+        }
         let held = base.filter(|b| b.reg().is_none());
         if let (Some(Var(Place::Static(s))), Some((i, k))) = (held, index) {
             let (held, i) = (&self.statics[s.0 as usize].name, i.reg().expect("an index is a register").0);
@@ -1263,15 +1270,7 @@ impl Kernel {
             _ => {}
         }
         let disp = i32::try_from(m.disp).map_err(|_| format!("{} bytes are too far for an address", m.disp))?;
-        let (base, index) = match (base, index) {
-            (Some(b), index) => (b, index),
-            (None, Some(_)) if matches!(kind, Kind::Vsib(..)) => {
-                return Err("x86 adds a gpr to a vector of indices, as in `[p + v * 4]`".into());
-            }
-            (None, Some((r, 1))) => (r, None),
-            (None, _) => return Err("x86 wants a base beside a scaled index".into()),
-        };
-        Ok(Mem { base: Base::Reg(base), index, disp, width })
+        Ok(Mem { base: base.map_or(Base::None, Base::Reg), index, disp, width })
     }
 
     /// Whether the instruction `name` stays inside `memory`, of the stack or of the module's,

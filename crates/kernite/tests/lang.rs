@@ -7,6 +7,11 @@ fn x86(src: &str, name: &str) -> String {
     kernite::x86_str(src, name).unwrap_or_else(|e| panic!("{e}")).text()
 }
 
+/// Kernel `name` of `src`, for x86: its instructions alone, without the listing's comments.
+fn code(src: &str, name: &str) -> Vec<String> {
+    kernite::x86_str(src, name).unwrap_or_else(|e| panic!("{e}")).code().map(String::from).collect()
+}
+
 /// The `.entry` of the one kernel in `src`, in PTX, from its name on.
 fn ptx(src: &str) -> String {
     let module = kernite::ptx_str(src).unwrap_or_else(|e| panic!("{e}"));
@@ -119,6 +124,185 @@ fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
     // `_` names none, so two stay, as Rust takes them.
     let src = r#"pub unsafe extern "sysv64" fn k(_: u64, _: u64) {}"#;
     assert!(x86(src, "k").starts_with("# k(gpr, gpr) -> ()\n"), "{src}");
+}
+
+#[test]
+fn a_generic_is_a_value_and_a_type_is_refused_at_its_token() {
+    // `<T>` is a generic that is a type, and so is an `impl` in a parameter's type or the result's: in a
+    // parameter it makes the function generic over a type, and in the result it hides one. A kernel's generics
+    // are values, so each is refused, at the `T` or the first `impl`, in one set of words, wherever the type
+    // holds it. A pointer to `impl ?Sized` is among them: Rust passes one to a type with no size in two words,
+    // so the next parameter was read from the wrong register.
+    let generics = "a function's generics are values, as in `<const N: usize>`";
+    for (src, at) in [
+        (r#"pub unsafe extern "sysv64" fn k<T>(p: *const T, n: usize) {}"#, "1:33"),
+        // The first generic that is no value.
+        (r#"pub unsafe extern "sysv64" fn k<const N: usize, T: Copy>() {}"#, "1:49"),
+        // In a parameter by value, and in a type that holds one.
+        (r#"pub unsafe extern "sysv64" fn k(x: impl Copy) {}"#, "1:36"),
+        (r#"pub unsafe extern "sysv64" fn k(x: Option<impl Copy>) {}"#, "1:43"),
+        (r#"pub unsafe extern "sysv64" fn k(x: Option<*const impl Copy>) {}"#, "1:50"),
+        (r#"pub unsafe extern "sysv64" fn k(x: [*const impl Copy; 2]) {}"#, "1:44"),
+        (r#"pub unsafe extern "sysv64" fn k(x: (*const impl Copy, u8)) {}"#, "1:44"),
+        // In a pointer's type.
+        (r#"pub unsafe extern "sysv64" fn k(p: *const impl Copy, n: usize) { mov(qword[p], n); }"#, "1:43"),
+        (r#"pub unsafe extern "sysv64" fn k(p: *mut impl Copy, n: usize) { mov(qword[p], n); }"#, "1:41"),
+        // A kernel of instances, a cooperative kernel, and a helper, whose types are read as a kernel's are.
+        (
+            "#[instances(1, 2)]\npub unsafe extern \"sysv64\" fn k<const N: usize>(p: *const impl Copy, n: usize) {}",
+            "2:59",
+        ),
+        ("#[instances(1, 2)]\npub unsafe extern \"sysv64\" fn k<const N: usize>(x: impl Copy) {}", "2:52"),
+        ("#[instances(1, 2)]\npub unsafe extern \"sysv64\" fn k<const N: usize>(x: Option<impl Copy>) {}", "2:59"),
+        ("#[cooperative]\npub unsafe extern \"sysv64\" fn k(p: *const impl Copy, n: usize) {}", "2:43"),
+        ("#[cooperative]\npub unsafe extern \"sysv64\" fn k(x: impl Copy) {}", "2:36"),
+        ("pub unsafe extern \"sysv64\" fn k() { h(); }\nfn h(p: *const impl Copy) {}", "2:16"),
+        ("pub unsafe extern \"sysv64\" fn k() { h(); }\nfn h(x: impl Copy) {}", "2:9"),
+        ("pub unsafe extern \"sysv64\" fn k() { h(); }\nfn h() -> impl Copy {}", "2:11"),
+        // In the result.
+        (r#"pub unsafe extern "sysv64" fn k(p: *mut u8) -> *mut impl Copy { ret(p); }"#, "1:53"),
+        (r#"pub unsafe extern "sysv64" fn k(x: u64) -> impl Copy { ret(x); }"#, "1:44"),
+        (r#"pub unsafe extern "sysv64" fn k(x: u64) -> Option<impl Copy> { ret(x); }"#, "1:51"),
+        (r#"pub unsafe extern "sysv64" fn k(x: u64) -> Option<*const impl Copy> { ret(x); }"#, "1:58"),
+        // In a type the pointer is to, however deep, and in a group of it.
+        (r#"pub unsafe extern "sysv64" fn k(p: *const Option<impl Copy>, n: usize) {}"#, "1:50"),
+        (r#"pub unsafe extern "sysv64" fn k(p: *const [impl Copy; 2], n: usize) {}"#, "1:44"),
+        (r#"pub unsafe extern "sysv64" fn k(p: *const (u8, impl Copy), n: usize) {}"#, "1:48"),
+        (r#"pub unsafe extern "sysv64" fn k(p: *const (impl ?Sized + core::fmt::Debug), n: usize) {}"#, "1:44"),
+        (r#"pub unsafe extern "sysv64" fn k(p: *mut *const impl Copy, n: usize) {}"#, "1:48"),
+        // Of two, the first.
+        (r#"pub unsafe extern "sysv64" fn k(p: *const (impl A, impl B)) {}"#, "1:44"),
+    ] {
+        assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("{at}: {generics}"), "{src}");
+    }
+    // A GPU kernel and a GPU function are read as an x86 kernel is.
+    for (src, at) in [
+        (r#"pub unsafe extern "ptx-kernel" fn g<T>(p: *mut T, n: u32) {}"#, "1:37"),
+        (r#"pub unsafe extern "ptx-kernel" fn g(x: impl Copy) {}"#, "1:40"),
+        (r#"pub unsafe extern "ptx-kernel" fn g(x: Option<impl Copy>) {}"#, "1:47"),
+        (r#"pub unsafe extern "ptx-kernel" fn g(x: Option<*mut impl Copy>) {}"#, "1:52"),
+        (r#"pub unsafe extern "ptx-kernel" fn g(x: [*mut impl Copy; 2]) {}"#, "1:46"),
+        (r#"pub unsafe extern "ptx-kernel" fn g(x: (*mut impl Copy, u8)) {}"#, "1:46"),
+        (r#"pub unsafe extern "ptx-kernel" fn g(p: *mut impl Copy, n: u32) {}"#, "1:45"),
+        ("#[instances(1, 2)]\npub unsafe extern \"ptx-kernel\" fn g<const N: u32>(p: *mut impl Copy) {}", "2:59"),
+        ("#[instances(1, 2)]\npub unsafe extern \"ptx-kernel\" fn g<const N: u32>(x: impl Copy) {}", "2:54"),
+        (r#"pub unsafe extern "ptx-func" fn f(x: impl Copy) {}"#, "1:38"),
+        (r#"pub unsafe extern "ptx-func" fn f(p: *mut impl Copy) {}"#, "1:43"),
+        (r#"pub unsafe extern "ptx-func" fn f(p: *mut u64) -> *mut impl Copy {}"#, "1:56"),
+        (r#"pub unsafe extern "ptx-func" fn f(x: u64) -> impl Copy {}"#, "1:46"),
+        (r#"pub unsafe extern "ptx-func" fn f(x: u64) -> Option<impl Copy> {}"#, "1:53"),
+        (r#"pub unsafe extern "ptx-func" fn f(x: u64) -> Option<*mut impl Copy> {}"#, "1:58"),
+    ] {
+        assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("{at}: {generics}"), "{src}");
+    }
+    // A type named `r#impl` is a name, not the keyword.
+    let src = r#"pub unsafe extern "sysv64" fn k(p: *const r#impl, n: usize) { mov(qword[p], n); }"#;
+    assert!(x86(src, "k").starts_with("# k(gpr, gpr) -> ()\n"), "{src}");
+}
+
+/// A result is a type, and is read whole as a parameter's is, up to the body or the `where` or `;` before it: not
+/// up to a block among the arguments of a name in it, `Pair<u8, { 3 }>`, which is a const argument. A kernel
+/// gives back a pointer to such a type, plain and of compile-time arguments, whatever else the type holds. A
+/// result that is no number or pointer, and one that a cooperative kernel or a GPU kernel may not have, is
+/// refused: every error is at the result, and the x86 kernel's and the GPU kernel's quote the type whole.
+#[test]
+fn a_result_that_holds_a_block_is_read_whole_up_to_its_body() {
+    for to in [
+        "Arr<{ 3 }>",
+        "crate::Arr<{ 3 }>",
+        "Pair<u8, { 3 }>",
+        "Pair<{ 3 }, u8>",
+        "Pair<{ 3 }, { 4 }>",
+        "Wrap<Arr<{ let _ = 1; 3 }>>",
+        "[Arr<{ 3 }>; 1]",
+        "fn() -> Arr<{ 3 }>",
+        "<A as B>::C<{ 3 }>",
+    ] {
+        let src = format!("unsafe extern \"sysv64\" fn k(p: *const u8) -> *const {to} {{ ret(p); }}");
+        assert_eq!(code(&src, "k"), ["mov rax, rdi", "ret"], "{to}");
+    }
+    let src = "#[instances(1, 2)]\nunsafe extern \"sysv64\" fn k<const N: u64>(p: *const u8) -> *const Arr<{ 3 }> \
+               { add(p, N); ret(p); }";
+    assert_eq!(code(src, "k::<1>"), ["add rdi, 1", "mov rax, rdi", "ret"]);
+    assert_eq!(code(src, "k::<2>"), ["add rdi, 2", "mov rax, rdi", "ret"]);
+    // Every error is at the result, and the x86 kernel's and the GPU kernel's quote the type whole: a kernel
+    // returns a pointer or a number, a cooperative kernel's threads return nothing, and so does a GPU kernel.
+    let src = "unsafe extern \"sysv64\" fn k() -> Arr<{ 3 }> {}";
+    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `Arr<{3}>`";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    let src = "#[cooperative]\nunsafe extern \"sysv64\" fn k() -> *const Arr<{ 3 }> {}";
+    let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("2:34: {nothing}"));
+    let src = "unsafe extern \"ptx-kernel\" fn k() -> *const Arr<{ 3 }> {}";
+    let nothing = "a GPU kernel returns nothing, not `*const Arr<{3}>`: it writes what it works out to memory";
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:38: {nothing}"));
+    // The result still ends at its `where`, which a kernel has none of, and at the `;` of a function with no
+    // body, with a block in it or without.
+    let no_body = "a kernel is written in its body, and `k` has none";
+    for (result, at, message) in [
+        ("u8 where u8: Sized {}", "1:37", "a kernel has no `where`"),
+        ("*const Arr<{ 3 }> where u8: Sized {}", "1:52", "a kernel has no `where`"),
+        ("u8;", "1:36", no_body),
+        ("*const Arr<{ 3 }>;", "1:51", no_body),
+    ] {
+        let src = format!("unsafe extern \"sysv64\" fn k() -> {result}");
+        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("{at}: {message}"), "{result}");
+    }
+}
+
+/// A result that is a type macro in braces, `byte!{ _ }`, is read whole, as one in parentheses is: the braces right
+/// after the `!` of a macro's name are its argument, and the body is the braces after them. The `!` of never follows
+/// the arrow, a keyword or a lifetime, `-> !`, `*const !` or `&'static !`, and is no macro's: the braces after it are
+/// the body. The lexer of a string refuses a lifetime, so that one is tried where its tokens can be made, in
+/// kernite-lang's tests and kernite-macros's. A kernel gives back a pointer to such a type, plain and of compile-time
+/// arguments. A result that is no number or pointer, and one that a cooperative kernel or a GPU kernel may not have,
+/// is refused at the result, as it is with any type.
+#[test]
+fn a_result_that_holds_a_macro_in_braces_is_read_whole_up_to_its_body() {
+    for to in [
+        "byte!{ _ }",
+        "crate::byte!{ _ }",
+        "fn(u8) -> byte!{ _ }",
+        // A macro's argument in parentheses or brackets, and its braces in angles or brackets, are not the body.
+        "byte!(_)",
+        "byte![_]",
+        "Wrap<byte!{ _ }>",
+        "[byte!{ _ }; 1]",
+    ] {
+        let src = format!("unsafe extern \"sysv64\" fn k(p: *const u8) -> *const {to} {{ ret(p); }}");
+        assert_eq!(code(&src, "k"), ["mov rax, rdi", "ret"], "{to}");
+    }
+    // The `!` of never follows the arrow, `-> !`, a keyword, `*const !`, or a lifetime, `&'static !`, and is no macro's:
+    // the braces after it are the body. A string holds no lifetime, so the first two are tried here.
+    assert_eq!(code("unsafe extern \"sysv64\" fn k() -> ! { ud2(); }", "k"), ["ud2"]);
+    for to in ["*const fn() -> !", "*const !", "*mut !"] {
+        let src = format!("unsafe extern \"sysv64\" fn k(p: *const u8) -> {to} {{ ret(p); }}");
+        assert_eq!(code(&src, "k"), ["mov rax, rdi", "ret"], "{to}");
+    }
+    let src = "#[instances(1, 2)]\nunsafe extern \"sysv64\" fn k<const N: u64>(p: *const u8) -> *const byte!{ _ } \
+               { add(p, N); ret(p); }";
+    assert_eq!(code(src, "k::<1>"), ["add rdi, 1", "mov rax, rdi", "ret"]);
+    assert_eq!(code(src, "k::<2>"), ["add rdi, 2", "mov rax, rdi", "ret"]);
+    // Every error is at the result, and the x86 kernel's and the GPU kernel's quote the type whole.
+    let src = "unsafe extern \"sysv64\" fn k() -> byte!{ _ } {}";
+    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `byte!{_}`";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    let src = "#[cooperative]\nunsafe extern \"sysv64\" fn k() -> *const byte!{ _ } {}";
+    let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("2:34: {nothing}"));
+    let src = "unsafe extern \"ptx-kernel\" fn k() -> *const byte!{ _ } {}";
+    let nothing = "a GPU kernel returns nothing, not `*const byte!{_}`: it writes what it works out to memory";
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:38: {nothing}"));
+    // The result still ends at its `where`, which a kernel has none of, and at the `;` of a function with no
+    // body, after a macro in braces too.
+    let no_body = "a kernel is written in its body, and `k` has none";
+    for (result, at, message) in [
+        ("*const byte!{ _ } where u8: Sized {}", "1:52", "a kernel has no `where`"),
+        ("*const byte!{ _ };", "1:51", no_body),
+    ] {
+        let src = format!("unsafe extern \"sysv64\" fn k() -> {result}");
+        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("{at}: {message}"), "{result}");
+    }
 }
 
 #[test]
@@ -975,15 +1159,26 @@ fn consts_that_name_consts_nest_64_deep_at_most() {
     }
 }
 
-/// A type nests 64 deep at most, and `Name<T>` and `[T; N]` are a level each: the parser refuses
-/// the level past it where it starts, however long the row, before it reads the rest. A type of 64
-/// is read, and then it is the machine that has no such variable.
+/// A type nests 64 deep at most, and `Name<T>` and `[T; N]` are a level each, in a pointer to them
+/// as well: the parser refuses the level past it where it starts, however long the row, before it
+/// reads the rest. A type of 64 is read, and then it is the machine that has no such variable. A
+/// result is a type, and nests as far.
 #[test]
 fn a_type_nests_64_deep_at_most() {
-    let body = |n: usize| format!("let x: {}u32{};", "a<".repeat(n), ">".repeat(n));
-    assert!(refused(&body(63)).starts_with("2:8: x86 variables are "));
+    for (pointer, at) in [("", "2:134"), ("*const ", "2:141")] {
+        let body = |n: usize| format!("let x: {pointer}{}u32{};", "a<".repeat(n), ">".repeat(n));
+        assert!(refused(&body(63)).starts_with("2:8: x86 variables are "), "{pointer}");
+        for n in [64, 5000] {
+            assert_eq!(refused(&body(n)), format!("{at}: this nests 64 deep at most"), "{pointer}{n}");
+        }
+    }
+    let result = |n: usize| {
+        let ty = format!("{}u32{}", "a<".repeat(n), ">".repeat(n));
+        format!("unsafe extern \"sysv64\" fn k(p: *const u8) -> *const {ty} {{ ret(p); }}")
+    };
+    kernite::x86_str(&result(63), "k").unwrap();
     for n in [64, 5000] {
-        assert_eq!(refused(&body(n)), "2:134: this nests 64 deep at most", "{n}");
+        assert_eq!(kernite::x86_str(&result(n), "k").unwrap_err(), "1:179: this nests 64 deep at most", "-> {n}");
     }
 }
 

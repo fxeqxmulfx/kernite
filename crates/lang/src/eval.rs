@@ -9,13 +9,34 @@ use crate::token::Span;
 use crate::value::{self, Value, Want};
 use crate::{DEPTH, Error, nested};
 
+/// Where a function or a static names an item of its module: its name, and where it is written. A
+/// function or a static has them in the order of the source, each place once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mention {
+    /// The item's name.
+    pub name: String,
+    /// Where the name is written.
+    pub span: Span,
+}
+
+impl Mention {
+    /// Records that `name` is written at `span` among `mentions`. Two names are never at one place.
+    pub fn record(mentions: &mut Vec<Mention>, name: &str, span: Span) {
+        if let Err(at) = mentions.binary_search_by_key(&span, |m| m.span) {
+            mentions.insert(at, Mention { name: name.to_string(), span });
+        }
+    }
+}
+
 /// What running a kernel found, besides what it asked of its target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Run {
-    /// The module's constants it read, itself or through others, in its body or its
-    /// `#[instances(..)]`, in the module's order. Rust never sees a kernel's body run, nor its
-    /// list worked out, so it sees none of these reads.
-    pub consts: Vec<String>,
+    /// Where it named an item of the module, in its body, its `#[instances(..)]` or its
+    /// directives: a const it read, a static, a helper it called, a function that names an ABI. A
+    /// helper it called is run here, so the names in the helper are its; a const's definition is
+    /// Rust's own, and the names in it are not. Rust never sees a kernel's body run, nor its list
+    /// or its directives worked out, so it sees none of these names.
+    pub mentions: Vec<Mention>,
 }
 
 /// A static of a module, as [`memory`] evaluates it.
@@ -27,9 +48,9 @@ pub struct Memory {
     /// What it holds until something writes it, if it says: a value known now, its literals
     /// of the type its type's first argument holds, `[0.5; 256]`.
     pub value: Option<Value>,
-    /// The module's constants it read, itself or through others, in the module's order. Rust
-    /// never sees its type or its value worked out, so it sees none of these reads.
-    pub consts: Vec<String>,
+    /// Where it named an item of the module, in its type or what it holds, as [`Run`] has them.
+    /// Rust never sees its type or its value worked out, so it sees none of these names.
+    pub mentions: Vec<Mention>,
 }
 
 /// `s`, a static of `module`, worked out among the module's constants; or why not.
@@ -42,8 +63,7 @@ pub fn memory(module: &Module, s: &Static) -> Result<Memory, Error> {
         t => want(t),
     };
     let value = s.value.as_ref().map(|v| e.value(v, held)).transpose()?;
-    let consts = e.consts.iter().filter(|(_, state)| matches!(state, State::Done(_))).map(|(c, _)| c.name.clone());
-    Ok(Memory { ty, value, consts: consts.collect() })
+    Ok(Memory { ty, value, mentions: e.mentions })
 }
 
 /// `c`, a constant of `module`, worked out among the module's constants; or why it is no value
@@ -57,31 +77,27 @@ pub fn constant(module: &Module, c: &Const) -> Result<Value, Error> {
 }
 
 /// Runs `f` of `module` on `target`, a kernel or another function that names an ABI, for the
-/// compile-time arguments `args`, those of one of its [`instances`]: its parameters declared,
-/// its body evaluated.
+/// compile-time arguments `args`, those of one of its [`instances`]: its directives told, its
+/// parameters declared, its body evaluated.
 pub fn kernel<T: Target>(module: &Module, f: &Fn, args: &[Value], target: &mut T) -> Result<Run, Error> {
     instance(f, args)?;
     let mut e = Eval::new(module, target);
     e.listed(f)?;
-    let mut scope: Scope<T::Var> =
-        f.generics.iter().zip(args).map(|(g, a)| (g.name.clone(), Binding::Value(Rc::new(a.clone())))).collect();
+    e.scopes
+        .push(f.generics.iter().zip(args).map(|(g, a)| (g.name.clone(), Binding::Value(Rc::new(a.clone())))).collect());
+    e.directives(f)?;
     for p in &f.params {
-        let Type::Name(ty, span) = &p.ty else {
-            return Err(err(p.ty.span(), "a function that names an ABI takes values the machine passes, not arrays"));
-        };
-        let v = e.target.param(&p.name, ty).map_err(|m| err(*span, m))?;
+        let ty = e.type_name(&p.ty)?;
+        let v = e.target.param(&p.name, &ty).map_err(|m| err(p.ty.span(), m))?;
         e.target.declared_at(v, p.span);
-        scope.push((p.name.clone(), Binding::Var(v)));
+        e.bind(&p.name, Binding::Var(v));
     }
     if let Some(r) = &f.ret {
         e.target.result(&r.ty).map_err(|m| err(r.span, m))?;
     }
-    e.scopes.push(scope);
     e.block(f.body.as_ref().map_err(Clone::clone)?)?;
     e.target.end().map_err(|m| err(f.span, m))?;
-    // A constant is evaluated the first time it is named, so the ones evaluated are the ones read.
-    let consts = e.consts.iter().filter(|(_, s)| matches!(s, State::Done(_))).map(|(c, _)| c.name.clone()).collect();
-    Ok(Run { consts })
+    Ok(Run { mentions: e.mentions })
 }
 
 /// The compile-time arguments of each instance of `f`, a function of `module`, in the order
@@ -243,6 +259,8 @@ struct Eval<'a, T: Target> {
     /// The functions that name an ABI, each compiled on its own: kernels, and functions the
     /// machine calls.
     compiled: Vec<&'a Fn>,
+    /// Where the function has named an item of the module, as [`Run`] has them.
+    mentions: Vec<Mention>,
     /// The names in scope, innermost last. A helper runs in scopes of its own.
     scopes: Vec<Scope<T::Var>>,
     labels: u32,
@@ -277,6 +295,7 @@ impl<'a, T: Target> Eval<'a, T> {
             statics,
             helpers,
             compiled,
+            mentions: vec![],
             scopes: vec![],
             labels: 0,
             guard: None,
@@ -298,10 +317,14 @@ impl<'a, T: Target> Eval<'a, T> {
                 return Ok(Some(b.clone()));
             }
         }
-        if let Some(v) = self.global(name, span)? {
-            return Ok(Some(Binding::Value(v)));
+        let found = match self.global(name, span)? {
+            Some(v) => Some(Binding::Value(v)),
+            None => self.statics.iter().position(|(s, _)| s.name == name).map(Binding::Static),
+        };
+        if found.is_some() {
+            Mention::record(&mut self.mentions, name, span);
         }
-        Ok(self.statics.iter().position(|(s, _)| s.name == name).map(Binding::Static))
+        Ok(found)
     }
 
     /// The value of `e`, which must be known now: lent where it is held, if `e` names it.
@@ -346,11 +369,41 @@ impl<'a, T: Target> Eval<'a, T> {
         self.consts[i].1 = State::Busy;
         let c = self.consts[i].0;
         let outer = std::mem::take(&mut self.scopes);
+        // What its definition names is Rust's to see, as the definition is Rust's.
+        let saved = std::mem::take(&mut self.mentions);
         let v = self.constant(c);
+        self.mentions = saved;
         self.scopes = outer;
         let v = Rc::new(v?);
         self.consts[i].1 = State::Done(v.clone());
         Ok(Some(v))
+    }
+
+    /// Tells the target `f`'s directives, `#[maxntid(..)]` and the like, if it has any, with the
+    /// whole numbers each gives, values known now among the instance's compile-time arguments
+    /// and the module's constants.
+    fn directives(&mut self, f: &Fn) -> Result<(), Error> {
+        if f.directives.is_empty() {
+            return Ok(());
+        }
+        let mut given = vec![];
+        for d in &f.directives {
+            let mut sizes = vec![];
+            for e in &d.values {
+                match self.value(e, Want::Any)? {
+                    Value::Int(n, _) => sizes.push(n),
+                    other => {
+                        let what = format!("`#[{}(..)]` gives whole numbers; this is {}", d.name, other.kind());
+                        return Err(err(e.span(), what));
+                    }
+                }
+            }
+            given.push((d.name.as_str(), sizes));
+        }
+        self.target.directives(&given).map_err(|(i, fault)| {
+            let d = &f.directives[i];
+            Error { span: fault.arg.and_then(|a| d.values.get(a)).map_or(d.span, Expr::span), message: fault.message }
+        })
     }
 
     /// The compile-time arguments of each of `f`'s instances, as [`instances`] has them: those
@@ -789,14 +842,15 @@ impl<'a, T: Target> Eval<'a, T> {
 
     /// What a name that is nothing in scope gives an instruction: a function of the module
     /// that names an ABI, or a name the machine has.
-    fn unscoped(&self, name: &str, span: Span) -> Result<Operand<T::Var>, Error> {
-        if let Some(f) = self.compiled.iter().find(|f| f.name == name) {
+    fn unscoped(&mut self, name: &str, span: Span) -> Result<Operand<T::Var>, Error> {
+        if let Some(f) = self.compiled.iter().find(|f| f.name == name).copied() {
             if !f.generics.is_empty() {
                 return Err(err(
                     span,
                     format!("`{name}` is compiled for each of its instances: an instruction names one, `{name}::<..>`"),
                 ));
             }
+            Mention::record(&mut self.mentions, name, span);
             return Ok(Operand::Func(name.to_string()));
         }
         if self.helpers.iter().any(|f| f.name == name) {
@@ -811,8 +865,8 @@ impl<'a, T: Target> Eval<'a, T> {
     /// `func::<generics>`, an instance of a function of the module that names an ABI, as an
     /// instruction names it: one its `#[instances(..)]` lists.
     fn instance_named(&mut self, func: &Expr, generics: &[Expr], span: Span) -> Result<Operand<T::Var>, Error> {
-        let name = match func {
-            Expr::Path(path, _) if path.len() == 1 => &path[0],
+        let (name, at) = match func {
+            Expr::Path(path, at) if path.len() == 1 => (&path[0], *at),
             _ => return Err(err(span, "an instance is of a function of the module, by its name, as `tile::<4>`")),
         };
         let Some(&f) = self.compiled.iter().find(|f| f.name == *name) else {
@@ -835,7 +889,11 @@ impl<'a, T: Target> Eval<'a, T> {
             ));
         }
         let args = self.generics(f, generics)?;
-        let listed = self.listed(f)?;
+        // Its list is in its attributes, which Rust does not see, and which it names when it runs.
+        let saved = std::mem::take(&mut self.mentions);
+        let listed = self.listed(f);
+        self.mentions = saved;
+        let listed = listed?;
         if !listed.contains(&args) {
             let listed: Vec<String> = listed.iter().map(|a| format!("`{}`", named(name, a))).collect();
             return Err(err(
@@ -847,6 +905,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 ),
             ));
         }
+        Mention::record(&mut self.mentions, name, at);
         Ok(Operand::Func(named(name, &args)))
     }
 
@@ -1123,7 +1182,7 @@ impl<'a, T: Target> Eval<'a, T> {
     fn call(&mut self, e: &Expr) -> Result<(), Error> {
         match e {
             Expr::Call { func, generics, args, span } => {
-                let Expr::Path(path, _) = &**func else {
+                let Expr::Path(path, at) = &**func else {
                     return Err(err(*span, "what is called is an instruction or a helper, by name"));
                 };
                 let [name] = path.as_slice() else {
@@ -1136,6 +1195,7 @@ impl<'a, T: Target> Eval<'a, T> {
                     return self.note(args, *span);
                 }
                 if let Some(&f) = self.helpers.iter().find(|f| f.name == *name) {
+                    Mention::record(&mut self.mentions, name, *at);
                     return self.inline(f, generics, args, *span);
                 }
                 if self.compiled.iter().any(|f| f.name == *name) {

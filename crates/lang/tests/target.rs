@@ -34,6 +34,17 @@ pub unsafe extern "sysv64" fn k() {
 }
 "#;
 
+/// A kernel whose parameters and result are of each shape of type, spaced as no one writes them,
+/// with an array's length a const's. [`Trace`] takes every type.
+const TYPES: &str = r#"
+const N: usize = 3;
+
+pub unsafe extern "sysv64" fn k(
+    a: *const[usize;3], b: *  mut*const f32, c: [u64;N], d: (u8 ,u8), e: Box<dyn A+B>,
+    f: *const fn(u32)->u32, g: Pair<fn()->u8,2>, h: Box<dyn Fn(u8)->u8+Send>,
+) -> &mut[f32] {}
+"#;
+
 /// A module of two statics, and a kernel that names them after an `add`: `B`, then `A`, then `B`
 /// again, in an address.
 const STATICS: &str = r#"
@@ -48,9 +59,18 @@ pub unsafe extern "sysv64" fn k(n: u64) {
 }
 "#;
 
+/// A kernel with two directives, the first of values worked out from a const, and a parameter.
+const DIRECTIVES: &str = r#"
+const SIZE: u32 = 8;
+
+#[maxntid(SIZE, SIZE * 2)]
+#[maxnreg(32)]
+pub unsafe extern "ptx-kernel" fn k(n: u32) {}
+"#;
+
 /// A target that writes a line for each call but `declared_at` and `inst_at`, whose places it
 /// keeps, makes a variable for each `param`, `var`, `global`, `view` and `field`, and refuses one
-/// instruction, by its name, with a given fault.
+/// instruction, by its name, with a given fault, and one directive, by its place among them.
 #[derive(Default)]
 struct Trace {
     /// A line for each call, in the order of the calls.
@@ -59,6 +79,8 @@ struct Trace {
     vars: usize,
     /// The instruction it refuses, and why.
     refuse: Option<(&'static str, Fault)>,
+    /// The directive it refuses, by its place among the function's, and why.
+    refuse_directive: Option<(usize, Fault)>,
     /// Each variable it is told is declared, with where, in the order it is told.
     declared: Vec<(usize, Span)>,
     /// The place it was last told of an instruction, until `inst` takes it.
@@ -87,6 +109,12 @@ impl Target for Trace {
     fn result(&mut self, ty: &str) -> Result<(), String> {
         self.lines.push(format!("result {ty}"));
         Ok(())
+    }
+
+    fn directives(&mut self, given: &[(&str, Vec<i128>)]) -> Result<(), (usize, Fault)> {
+        let told: Vec<String> = given.iter().map(|(name, values)| format!("{name}{values:?}")).collect();
+        self.lines.push(format!("directives {}", told.join(" ")));
+        self.refuse_directive.clone().map_or(Ok(()), Err)
     }
 
     fn var(&mut self, name: &str, ty: &str) -> Result<usize, String> {
@@ -197,6 +225,25 @@ fn the_evaluator_asks_its_target_in_source_order() {
 }
 
 #[test]
+fn a_type_is_given_to_the_target_as_rust_writes_it() {
+    let mut trace = Trace::default();
+    run(TYPES, &mut trace).unwrap();
+    let want = [
+        "param a: *const [usize; 3] = v0",
+        "param b: *mut *const f32 = v1",
+        "param c: [u64; 3] = v2",
+        "param d: (u8, u8) = v3",
+        "param e: Box<dyn A + B> = v4",
+        "param f: *const fn(u32) -> u32 = v5",
+        "param g: Pair<fn() -> u8, 2> = v6",
+        "param h: Box<dyn Fn(u8) -> u8 + Send> = v7",
+        "result &mut [f32]",
+        "end",
+    ];
+    assert_eq!(trace.lines, want);
+}
+
+#[test]
 fn a_static_is_made_once_the_first_time_the_kernel_names_it() {
     let mut trace = Trace::default();
     run(STATICS, &mut trace).unwrap();
@@ -251,4 +298,95 @@ fn a_fault_points_at_the_operand_it_names() {
     };
     assert_eq!(refused("add", Fault::at(1, "no")), "16:12: no");
     assert_eq!(refused("vmovups", Fault::at(0, "no")), "5:19: no");
+}
+
+#[test]
+fn the_target_is_told_the_directives_once_before_the_parameters() {
+    // A kernel with none tells it nothing. One with some tells it the whole numbers each gives,
+    // worked out, in the order written.
+    let mut trace = Trace::default();
+    run(KERNEL, &mut trace).unwrap();
+    assert!(!trace.lines.iter().any(|line| line.starts_with("directives")));
+    let mut trace = Trace::default();
+    let run = run(DIRECTIVES, &mut trace).unwrap();
+    assert_eq!(trace.lines, ["directives maxntid[8, 16] maxnreg[32]", "param n: u32 = v0", "end"]);
+    // The const the directives read is named by the kernel, at each place it is written.
+    let named: Vec<String> =
+        run.mentions.iter().map(|m| Error { span: m.span, message: m.name.clone() }.at(DIRECTIVES)).collect();
+    assert_eq!(named, ["4:11: SIZE", "4:17: SIZE"]);
+}
+
+#[test]
+fn a_directive_is_wrong_at_its_value_or_at_its_name() {
+    let refused = |directive: usize, fault: Fault| {
+        let mut trace = Trace { refuse_directive: Some((directive, fault)), ..Trace::default() };
+        run(DIRECTIVES, &mut trace).unwrap_err()
+    };
+    assert_eq!(refused(0, Fault::at(0, "no")), "4:11: no");
+    // A value that is worked out is at its operator, as an expression is anywhere.
+    assert_eq!(refused(0, Fault::at(1, "no")), "4:22: no");
+    assert_eq!(refused(0, Fault::new("no")), "4:3: no");
+    assert_eq!(refused(1, Fault::new("no")), "5:3: no");
+    // A value the directive does not have is the directive's as a whole.
+    assert_eq!(refused(1, Fault::at(1, "no")), "5:3: no");
+}
+
+#[test]
+fn a_directive_gives_whole_numbers() {
+    for (value, kind) in [("1.5", "an f32"), ("true", "a bool"), ("[1, 2]", "an array"), ("2.0f64", "an f64")] {
+        let src = format!("#[maxnreg({value})]\npub unsafe extern \"ptx-kernel\" fn k() {{}}");
+        let want = format!("1:11: `#[maxnreg(..)]` gives whole numbers; this is {kind}");
+        assert_eq!(run(&src, &mut Trace::default()).unwrap_err(), want, "{value}");
+    }
+}
+
+/// A target that takes only what it must, to see what the evaluator does with one that is told a
+/// directive and says nothing of directives.
+struct Bare;
+
+impl Target for Bare {
+    type Var = ();
+
+    fn param(&mut self, _: &str, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn result(&mut self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn var(&mut self, _: &str, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn view(&mut self, (): (), _: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn label(&mut self, _: u32) {}
+
+    fn note(&mut self, _: &str) {}
+
+    fn inst(&mut self, _: &str, _: &[Operand<()>], _: Option<Guard<()>>) -> Result<(), Fault> {
+        Ok(())
+    }
+
+    fn end(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_target_that_says_nothing_of_directives_takes_none() {
+    let module = kernite_lang::parse(DIRECTIVES).unwrap();
+    let k = module.items.iter().find_map(|item| match &item.kind {
+        ItemKind::Fn(f) => Some(f),
+        _ => None,
+    });
+    let e = kernite_lang::kernel(&module, k.unwrap(), &[], &mut Bare).unwrap_err();
+    assert_eq!(e.at(DIRECTIVES), "4:3: this machine takes no `#[maxntid(..)]`");
+    // A kernel with none runs on it.
+    let module = kernite_lang::parse("pub unsafe extern \"ptx-kernel\" fn k() {}").unwrap();
+    let ItemKind::Fn(f) = &module.items[0].kind else { panic!("a kernel") };
+    kernite_lang::kernel(&module, f, &[], &mut Bare).unwrap();
 }

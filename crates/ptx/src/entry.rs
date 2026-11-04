@@ -1,10 +1,11 @@
 //! A kernel or a function written out, and the module of them the driver loads.
 
+use kernite_build::{Assembly, Kept, When};
 use kernite_core::{Item, Program};
 
 use crate::call::{Returns, formal, passed};
 use crate::needs::{Needs, clash};
-use crate::statics::{Memory, Static, fits};
+use crate::statics::{Memory, Static};
 use crate::ty::Ty;
 
 /// A PTX instruction as it is written, guard, operands and all; the operands of the
@@ -54,6 +55,9 @@ pub struct Entry {
     /// The functions it names, each once, by their symbols: those it calls, and those whose
     /// addresses it takes, which a module declares before it if they come after.
     pub calls: Vec<String>,
+    /// For a kernel, its tuning directives as PTX writes them, `.maxntid 16, 16`, between its
+    /// parameters and its body.
+    pub directives: Vec<String>,
 }
 
 impl Entry {
@@ -95,11 +99,15 @@ impl Entry {
         self.head() + ";\n"
     }
 
-    /// The `.entry` or the `.func`: its parameters, its registers, the loads of its
-    /// parameters into them, and its body.
+    /// The `.entry` or the `.func`: its parameters, its directives, its registers, the loads of
+    /// its parameters into them, and its body.
     pub fn text(&self) -> String {
         let name = &self.program.name;
-        let mut out = self.head() + "\n{\n";
+        let mut out = self.head() + "\n";
+        for directive in &self.directives {
+            out += &format!("{directive}\n");
+        }
+        out += "{\n";
         for ty in Ty::ALL.into_iter().filter(|t| t.decl() == *t) {
             let regs: Vec<String> =
                 self.regs.iter().filter(|(_, t)| t.decl() == ty).map(|(reg, _)| format!("%{reg}")).collect();
@@ -131,79 +139,146 @@ impl Entry {
     }
 }
 
-/// The PTX module of `entries`, kernels and functions, of the version and for the GPU the
-/// instructions they use need, and no newer: [`Needs::FLOOR`] if they need nothing more. The
-/// driver compiles it for the GPU it runs on, which may be any as new as its `.target` or
-/// newer, unless an instruction is gone from newer ones. Each is where it is among
-/// `entries`, after a declaration of each it names that comes later; `statics`, the module's
-/// memory, before them all, in order.
-///
-/// It fails if one kernel is for GPUs older than another needs, in the version of PTX the
-/// module would be of: PTX has no module for both. It fails if a static does not [`fit`]
-/// beside those before it, or has a name in PTX that something else of the module has.
-///
-/// [`fit`]: fits
-pub fn module(entries: &[Entry], statics: &[Static]) -> Result<String, String> {
-    let needs = entries.iter().fold(Needs::default(), |n, e| n.and(e.needs()));
-    if !needs.possible() {
-        let named: Vec<(Needs, String)> = entries
-            .iter()
-            .flat_map(|e| e.needs.iter().map(move |(n, why)| (*n, format!("`{why}` in `{}`", e.name))))
-            .collect();
-        return Err(clash(&named));
+/// That the code at `i` is kept.
+fn code(i: usize) -> When {
+    When::Kept(Kept::Code(i))
+}
+
+/// The module's header: a part for each pair of what some of `entries` need most of PTX and of the
+/// GPU, each the largest of theirs. The part of the pair that what is kept needs is there, and no
+/// other: each thing kept is within the pair, and something kept needs each of its values, but a 0,
+/// which nothing needs. A pair that no entries reach has no part.
+fn headers(entries: &[Entry]) -> Vec<(When, String)> {
+    let needs: Vec<Needs> = entries.iter().map(Entry::needs).collect();
+    let values = |of: fn(&Needs) -> u32| {
+        let mut all: Vec<u32> = needs.iter().map(of).chain([0]).collect();
+        all.sort_unstable();
+        all.dedup();
+        all
+    };
+    let mut parts = vec![];
+    for ptx in values(|n| n.ptx) {
+        for sm in values(|n| n.sm) {
+            let (within, beyond): (Vec<usize>, Vec<usize>) =
+                (0..needs.len()).partition(|&i| needs[i].ptx <= ptx && needs[i].sm <= sm);
+            let reach = |value: u32, of: fn(&Needs) -> u32| -> Vec<When> {
+                within.iter().filter(|&&i| of(&needs[i]) == value).map(|&i| code(i)).collect()
+            };
+            let (by_ptx, by_sm) = (reach(ptx, |n| n.ptx), reach(sm, |n| n.sm));
+            if (ptx > 0 && by_ptx.is_empty()) || (sm > 0 && by_sm.is_empty()) {
+                continue;
+            }
+            let mut when = vec![When::Not(Box::new(When::Any(beyond.into_iter().map(code).collect())))];
+            when.extend((ptx > 0).then_some(When::Any(by_ptx)));
+            when.extend((sm > 0).then_some(When::Any(by_sm)));
+            let at = Needs { ptx, sm, ..Needs::default() };
+            let (version, target) = (at.version(), at.target());
+            let text = format!("// Written by kernite.\n\n.version {version}\n.target {target}\n.address_size 64\n");
+            parts.push((When::All(when), text));
+        }
     }
-    let mut out = format!(
-        "// Written by kernite.\n\n.version {}\n.target {}\n.address_size 64\n",
-        needs.version(),
-        needs.target()
-    );
+    parts
+}
+
+/// Why the module is none where what is kept has no module: a reason for each set of at most four
+/// of `entries` that no module has, though one has any smaller set of them. It is said where all of
+/// the set are kept, and names the set alone. Four are enough: [`Needs::and`] takes the largest
+/// PTX, the newest GPU, the oldest `below` and the first `since` each on its own, so each is one
+/// entry's, and those, at most four, have no module either. Entries added to a set never make a
+/// module of it.
+fn clashes(entries: &[Entry]) -> Vec<(When, String)> {
+    let needs: Vec<Needs> = entries.iter().map(Entry::needs).collect();
+    let join = |set: &[usize]| set.iter().fold(Needs::default(), |n, &i| n.and(needs[i]));
+    let all: Vec<usize> = (0..entries.len()).collect();
+    if join(&all).possible() {
+        return vec![];
+    }
+    // A kernel that needs nothing is of no set that no module has.
+    let asking: Vec<usize> = all.into_iter().filter(|&i| needs[i] != Needs::default()).collect();
+    let mut sets: Vec<Vec<usize>> = vec![];
+    for size in 1..=4 {
+        choose(&asking, size, &mut vec![], &mut |set| {
+            if !sets.iter().any(|found| found.iter().all(|i| set.contains(i))) && !join(set).possible() {
+                sets.push(set.to_vec());
+            }
+        });
+    }
+    let named = |i: usize| {
+        let (name, records) = (&entries[i].name, &entries[i].needs);
+        records.iter().map(move |(n, why)| (*n, format!("`{why}` in `{name}`")))
+    };
+    let reason = |set: &[usize]| clash(&set.iter().flat_map(|&i| named(i)).collect::<Vec<_>>());
+    sets.into_iter().map(|set| (When::All(set.iter().copied().map(code).collect()), reason(&set))).collect()
+}
+
+/// Each choice of `size` of `from` in order, after the `set` chosen so far, given to `each`.
+fn choose(from: &[usize], size: usize, set: &mut Vec<usize>, each: &mut dyn FnMut(&[usize])) {
+    if set.len() == size {
+        return each(set);
+    }
+    for (at, &i) in from.iter().enumerate() {
+        set.push(i);
+        choose(&from[at + 1..], size, set, each);
+        set.pop();
+    }
+}
+
+/// The PTX module of `entries`, kernels and functions, with `statics`, the module's memory, put
+/// together from what the program keeps of them: whichever are kept, it is the module of those
+/// alone. That is of the version and for the GPU the instructions of what is kept need, and no
+/// newer: [`Needs::FLOOR`] if they need nothing more. The driver compiles it for the GPU it runs
+/// on, which may be any as new as its `.target` or newer, unless an instruction is gone from newer
+/// ones. Each is where it is among `entries`, after a declaration of each it names that comes
+/// later; `statics` before them all, in order.
+///
+/// It is none if something kept is for GPUs older than something else kept needs, in the version of
+/// PTX the module would be of: PTX has no module for both. It is none if a static has a name in PTX
+/// that something else kept has. It counts no room: [`room`](crate::room) does, of `statics` laid out.
+pub fn module(entries: &[Entry], statics: &[Static]) -> Assembly {
+    let kept = |j: usize| When::Kept(Kept::Static(j));
+    let (mut parts, mut refusals) = (headers(entries), clashes(entries));
     // The names at the module's scope, and those of a kernel's or a function's parameters,
-    // which a static's would hide there: PTX's own `WARP_SZ`, and what each name is.
-    let mut names = vec![("WARP_SZ".to_string(), "PTX's own `WARP_SZ`".to_string())];
-    for e in entries {
+    // which a static's would hide there: PTX's own `WARP_SZ`, and what each name is, and whose.
+    let mut names = vec![("WARP_SZ".to_string(), "PTX's own `WARP_SZ`".to_string(), When::always())];
+    for (i, e) in entries.iter().enumerate() {
         let (symbol, name) = (&e.program.name, &e.name);
-        names.push((symbol.clone(), format!("`{name}`")));
-        names.extend((0..e.params.len()).map(|i| (format!("{symbol}_param_{i}"), format!("a parameter of `{name}`"))));
-        if e.func.is_some() {
-            names.push((format!("{symbol}_retval"), format!("what `{name}` returns")));
-        }
+        names.push((symbol.clone(), format!("`{name}`"), code(i)));
+        let params = (0..e.params.len()).map(|p| (format!("{symbol}_param_{p}"), format!("a parameter of `{name}`")));
+        let returned = e.func.is_some().then(|| (format!("{symbol}_retval"), format!("what `{name}` returns")));
         let launched = e.memory.iter().filter(|m| m.bytes.is_none());
-        names.extend(launched.map(|m| (m.name.clone(), format!("the shared memory of `{name}`"))));
+        let shared = launched.map(|m| (m.name.clone(), format!("the shared memory of `{name}`")));
+        names.extend(params.chain(returned).chain(shared).map(|(n, what)| (n, what, code(i))));
     }
-    for (i, s) in statics.iter().enumerate() {
-        fits(&statics[..i], s).map_err(|m| format!("`{}`: {m}", s.name))?;
-        if let Some((_, what)) = names.iter().find(|(n, _)| *n == s.memory.name) {
-            return Err(format!("`{}` is `{}` in PTX, as {what} is", s.name, s.memory.name));
+    for (j, s) in statics.iter().enumerate() {
+        for (_, what, whose) in names.iter().filter(|(n, ..)| *n == s.memory.name) {
+            let message = format!("`{}` is `{}` in PTX, as {what} is", s.name, s.memory.name);
+            refusals.push((When::All(vec![kept(j), whose.clone()]), message));
         }
-        names.push((s.memory.name.clone(), format!("`{}`", s.name)));
+        names.push((s.memory.name.clone(), format!("`{}`", s.name), kept(j)));
     }
     if !statics.is_empty() {
-        out += "\n";
+        parts.push((When::Any((0..statics.len()).map(kept).collect()), "\n".into()));
     }
-    for s in statics {
-        out += &s.declaration();
-    }
-    let launched: Vec<&Memory> = entries.iter().flat_map(|e| &e.memory).filter(|m| m.bytes.is_none()).collect();
+    parts.extend(statics.iter().enumerate().map(|(j, s)| (kept(j), s.declaration())));
+    let launched: Vec<(usize, &Memory)> = (entries.iter().enumerate())
+        .flat_map(|(i, e)| e.memory.iter().filter(|m| m.bytes.is_none()).map(move |m| (i, m)))
+        .collect();
     if !launched.is_empty() {
-        out += "\n";
+        parts.push((When::Any(launched.iter().map(|&(i, _)| code(i)).collect()), "\n".into()));
     }
-    for m in launched {
-        out += &format!(".extern .shared .align {} .b8 {}[];\n", m.align, m.name);
+    for (i, m) in launched {
+        parts.push((code(i), format!(".extern .shared .align {} .b8 {}[];\n", m.align, m.name)));
     }
-    let mut declared: Vec<&str> = vec![];
-    for e in entries {
+    // A function that a kernel or a function names, if it comes after, is declared before the first
+    // of those kept that name it.
+    for (i, e) in entries.iter().enumerate() {
         for name in &e.calls {
-            if *name != e.program.name && !declared.contains(&name.as_str()) {
-                if let Some(later) = entries.iter().find(|l| l.program.name == *name) {
-                    out += "\n";
-                    out += &later.declaration();
-                }
-                declared.push(name);
-            }
+            let Some(at) = entries.iter().position(|l| l.program.name == *name).filter(|&at| at > i) else { continue };
+            let before = (0..i).filter(|&j| entries[j].calls.contains(name)).map(code).collect();
+            let when = When::All(vec![code(i), code(at), When::Not(Box::new(When::Any(before)))]);
+            parts.push((when, "\n".to_string() + &entries[at].declaration()));
         }
-        out += "\n";
-        out += &e.text();
-        declared.push(&e.program.name);
+        parts.push((code(i), "\n".to_string() + &e.text()));
     }
-    Ok(out)
+    Assembly { parts, refusals }
 }

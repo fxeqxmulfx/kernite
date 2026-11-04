@@ -16,6 +16,7 @@ kernite-x86 = { workspace = true }
 kernite-ptx = { workspace = true }
 
 [dev-dependencies]
+kernite-compile = { workspace = true }
 kernite-core = { workspace = true }
 
 [lints]

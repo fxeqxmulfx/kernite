@@ -1419,7 +1419,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use kernite_cuda::{Cuda, f16};
+    use kernite_cuda::{Cuda, Grid, f16};
 
     use super::{ampere, gpu, kernels, pascal};
 
@@ -1677,6 +1677,28 @@ mod tests {
             zero(zero);
             mov([words], zero);
             mov([words + 8 * 131071], zero);
+        }
+    }
+
+    /// A cooperative kernel for the tests alone.
+    #[kernite_macros::kernels]
+    mod framed {
+        /// Each thread writes `t + 1` to the first word of a frame of 192 KB, and `t + 2` to the
+        /// last; waits for the others; and stores the sum of the two words it reads back in
+        /// `out[t]`, `t` its index in the grid.
+        #[cooperative]
+        pub unsafe extern "sysv64" fn framed(out: *mut u64) {
+            let words: local<[u64; 24576]>;
+            let (t, v): (gpr, gpr);
+            mov(t, grid.thread);
+            lea(v, [t + 1]);
+            mov([words], v);
+            lea(v, [t + 2]);
+            mov([words + 8 * 24575], v);
+            grid.sync();
+            mov(v, [words]);
+            add(v, [words + 8 * 24575]);
+            mov([out + t * 8], v);
         }
     }
 
@@ -2009,6 +2031,52 @@ mod tests {
         too_many(super::diffuse_on_threads(&mut [1.0], 1, kernite_cpu::most().unwrap() + 1).unwrap_err());
     }
 
+    /// A frame of 192 KB is on the stack of the thread the kernel runs on, each of the grid's,
+    /// whose own it is, launch after launch on the threads the launches before kept: each reads
+    /// back what it wrote, though all wrote before any read.
+    #[test]
+    fn a_frame_of_192_kb_is_each_threads_own_launch_after_launch() {
+        for threads in 1..=threads() {
+            let want: Vec<u64> = (0..threads as u64).map(|t| 2 * t + 3).collect();
+            for launch in 0..50 {
+                let mut out = vec![0u64; threads];
+                // SAFETY: a word a thread behind `out`, which nothing else touches while the
+                // threads run, and the kernel reaches nothing else.
+                unsafe { framed::framed(kernite_cpu::Grid::new(threads), out.as_mut_ptr()) }.unwrap();
+                assert_eq!(out, want, "{threads} threads, launch {launch}");
+            }
+        }
+    }
+
+    /// Launches from two threads at once, one of `normalize` and one of `diffuse`, each wait at
+    /// a barrier of their grid's own: each result is the reference's, bit for bit, as when
+    /// they launch alone, a hundred times over.
+    #[test]
+    fn launches_from_two_threads_at_once_wait_at_barriers_of_their_own() {
+        assert!(super::supported(), "the kernels need AVX2 and FMA");
+        let threads = threads().min(2);
+        let x = floats(41_000, 17).iter().map(|x| x / 2.0 + 1.0).collect::<Vec<f32>>();
+        let heat = floats(9000, 19);
+        let bits = |v: &[f32]| v.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        let (normal, spread) = (bits(&normalized(&x)), bits(&diffused(&heat, 50)));
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                for _ in 0..100 {
+                    let mut got = x.clone();
+                    super::normalize_on_threads(&mut got, threads).unwrap();
+                    assert_eq!(bits(&got), normal);
+                }
+            });
+            s.spawn(|| {
+                for _ in 0..100 {
+                    let mut got = heat.clone();
+                    super::diffuse_on_threads(&mut got, 50, threads).unwrap();
+                    assert_eq!(bits(&got), spread);
+                }
+            });
+        });
+    }
+
     /// `saxpy` on the GPU against `f32::mul_add`, which rounds once as `fma.rn.f32` does; on a
     /// machine with no GPU, skipped.
     #[test]
@@ -2024,5 +2092,167 @@ mod tests {
             super::saxpy(&cuda, &kernels, 1.5, &x, &mut y).unwrap();
             assert_eq!(y.iter().map(|y| y.to_bits()).collect::<Vec<_>>(), want, "{n} floats");
         }
+    }
+
+    /// GPU kernels for the tests alone, of nothing past `sm_20`.
+    #[kernite_macros::kernels]
+    mod oldest {
+        /// `y[i] = a * x[i] + y[i]` for each `i < n`, rounded once.
+        pub unsafe extern "ptx-kernel" fn saxpy(a: f32, x: *const f32, y: *mut f32, n: u32) {
+            let (block, size, thread, i): (u32, u32, u32, u32);
+            mov.u32(block, ctaid.x);
+            mov.u32(size, ntid.x);
+            mov.u32(thread, tid.x);
+            mad.lo.u32(i, block, size, thread);
+            let past: pred;
+            setp.ge.u32(past, i, n);
+            if past {
+                ret();
+            }
+            let (at_x, at_y): (u64, u64);
+            mad.wide.u32(at_x, i, 4, x);
+            mad.wide.u32(at_y, i, 4, y);
+            let (xi, yi): (f32, f32);
+            ld.global.f32(xi, [at_x]);
+            ld.global.f32(yi, [at_y]);
+            fma.rn.f32(yi, a, xi, yi);
+            st.global.f32([at_y], yi);
+        }
+
+        /// Stores `ctaid.x` of the last block, the one whose number is one less than the blocks
+        /// along x, in `out[0]`.
+        pub unsafe extern "ptx-kernel" fn last(out: *mut u32) {
+            let (block, blocks): (u32, u32);
+            mov.u32(block, ctaid.x);
+            mov.u32(blocks, nctaid.x);
+            sub.u32(blocks, blocks, 1);
+            let other: pred;
+            setp.ne.u32(other, block, blocks);
+            if other {
+                ret();
+            }
+            st.global.u32([out], block);
+        }
+    }
+
+    /// A module of nothing past `sm_20` is written for `sm_30`, as every module is: the driver
+    /// starts 65535 blocks along x of one written for `sm_20`, whatever the GPU, and 2^31 - 1 of
+    /// one written for `sm_30`. `saxpy` over 65536 blocks against `f32::mul_add`, and the last of
+    /// 2^31 - 1 blocks of one thread; on a machine with no GPU, skipped.
+    #[test]
+    fn a_kernel_of_nothing_past_sm_20_starts_every_grid_the_gpu_takes() {
+        let cuda = match Cuda::new() {
+            Ok(cuda) => cuda,
+            Err(e) => return eprintln!("no GPU: skipped. {e}"),
+        };
+        assert!(oldest::PTX.contains(".version 3.0\n.target sm_30\n"), "{}", oldest::PTX);
+        let kernels = oldest::Kernels::load(&cuda).unwrap();
+        // 65536 blocks of 256 threads, the last with one float to its name.
+        let n = 65535 * 256 + 1;
+        let (x, y) = (floats(n, 7), floats(n, 8));
+        let want: Vec<u32> = x.iter().zip(&y).map(|(x, y)| 1.5f32.mul_add(*x, *y).to_bits()).collect();
+        let (xs, ys) = (cuda.upload(&x).unwrap(), cuda.upload(&y).unwrap());
+        // SAFETY: `n` floats behind each pointer, in buffers that last until `read` has waited
+        // for the kernel.
+        unsafe { kernels.saxpy(Grid::new(65536, 256), 1.5, xs.ptr(), ys.ptr(), n as u32) }.unwrap();
+        assert_eq!(ys.read().unwrap().iter().map(|y| y.to_bits()).collect::<Vec<_>>(), want);
+        let most = (1 << 31) - 1;
+        let out = cuda.alloc::<u32>(1).unwrap();
+        // SAFETY: a word at `out`, which the last block writes.
+        unsafe { kernels.last(Grid::new(most, 1), out.ptr()) }.unwrap();
+        assert_eq!(out.read().unwrap(), [most - 1]);
+    }
+
+    /// GPU kernels for the tests alone, of 20 KB of shared memory of their own and the launch's
+    /// beside it, by a launch and by a cooperative one.
+    #[kernite_macros::kernels]
+    mod beside {
+        /// The last word of its 20 KB of shared memory, `fixed`, and the last of the `bytes` the
+        /// launch gives, `launched`, each written and read back, to `out[0]` and `out[1]`.
+        pub unsafe extern "ptx-kernel" fn both(out: *mut u32, bytes: u32) {
+            write_both(out, bytes);
+        }
+
+        /// As `both`, and then the grid waits.
+        #[cooperative]
+        pub unsafe extern "ptx-kernel" fn together(out: *mut u32, bytes: u32) {
+            write_both(out, bytes);
+            grid.sync();
+        }
+
+        /// Writes the last word of each memory, reads it back, and stores it at `out`.
+        fn write_both(out: u64, bytes: u32) {
+            let fixed: shared<[u32; 5120], 4>;
+            let launched: shared<[u32]>;
+            let (seven, nine, mine, theirs, at): (u32, u32, u32, u32, u32);
+            mov.u32(seven, 7);
+            st.shared.u32([fixed + 20476], seven);
+            ld.shared.u32(mine, [fixed + 20476]);
+            st.global.u32([out], mine);
+            mov.u32(at, launched);
+            add.u32(at, at, bytes);
+            mov.u32(nine, 9);
+            st.shared.u32([at - 4], nine);
+            ld.shared.u32(theirs, [at - 4]);
+            st.global.u32([out + 4], theirs);
+        }
+    }
+
+    /// What a launch past the shared memory a block has says: the sizes, and what the GPU takes.
+    fn said(bytes: u32, most: u32) -> String {
+        format!(
+            ": each block has {} bytes of shared memory, 20480 of the kernel's and {bytes} of the launch's, and the \
+             GPU takes {most} at most",
+            20480 + u64::from(bytes)
+        )
+    }
+
+    /// A kernel of 20 KB of shared memory of its own is given the launch's beside it, up to all a
+    /// block has: from 16 KB to 79 KB, 36 KB to 99 KB in all on an RTX 30, each launch runs and the
+    /// kernel reads what it wrote, by a launch and by a cooperative one; and a launch past what a
+    /// block has is an error that says how much it has and how much the GPU takes. On a machine
+    /// with no GPU, with one older than Pascal, `sm_60`, or whose blocks have less than 99 KB,
+    /// skipped.
+    #[test]
+    fn a_kernel_with_shared_memory_of_its_own_is_given_the_launchs_beside_it() {
+        let cuda = match Cuda::new() {
+            Ok(cuda) => cuda,
+            Err(e) => return eprintln!("no GPU: skipped. {e}"),
+        };
+        let most = cuda.max_shared();
+        if cuda.sm() < 60 || most < 99 << 10 {
+            eprintln!("the {}, sm_{}, gives a block {most} bytes: skipped", cuda.name(), cuda.sm());
+            return;
+        }
+        let kernels = beside::Kernels::load(&cuda).unwrap();
+        let out = cuda.alloc::<u32>(2).unwrap();
+        let all = most - 20480;
+        // 28 KB is what a launch is given unasked beside the kernel's own 20 KB; the rest the
+        // kernel must be let have.
+        for bytes in [16 << 10, 28 << 10, 29 << 10, 40 << 10, 48 << 10, 49 << 10, 79 << 10, all] {
+            let grid = Grid::new(1, 1).with_shared(bytes);
+            // SAFETY: `both` and `together` write two words at `out`, which has them, and the last
+            // word of the `bytes` of shared memory they are given.
+            unsafe { kernels.both(grid, out.ptr(), bytes) }.unwrap();
+            assert_eq!(out.read().unwrap(), [7, 9], "{bytes} bytes");
+            // SAFETY: as above.
+            unsafe { kernels.together(grid, out.ptr(), bytes) }.unwrap();
+            assert_eq!(out.read().unwrap(), [7, 9], "{bytes} bytes, cooperatively");
+            assert!(kernels.together_blocks(1, bytes).unwrap() >= 1, "{bytes} bytes");
+        }
+        // 80 KB, 100 KB in all.
+        for bytes in [all + 1, all + 1024, u32::MAX] {
+            let grid = Grid::new(1, 1).with_shared(bytes);
+            // SAFETY: as above; the launches are refused.
+            let launched =
+                [unsafe { kernels.both(grid, out.ptr(), bytes) }, unsafe { kernels.together(grid, out.ptr(), bytes) }];
+            let blocks = kernels.together_blocks(1, bytes).map(|_| ());
+            for e in launched.into_iter().chain([blocks]).map(Result::unwrap_err) {
+                assert_eq!(e.call, "cuFuncSetAttribute", "{e}");
+                assert!(e.message.starts_with("CUDA_ERROR_INVALID_VALUE (1): "), "{e}");
+                assert!(e.message.ends_with(&said(bytes, most)), "{e}");
+            }
+        }
+        cuda.sync().unwrap();
     }
 }

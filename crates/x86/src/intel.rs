@@ -278,6 +278,7 @@ fn name(r: PReg, width: Width) -> String {
 /// If its index is a vector of no width given, which whoever built the instruction left out.
 fn memory(m: &Mem<PReg>, c: &Allocated<Op>, sized: bool, vector_index: Option<Width>) -> String {
     let (mut text, disp) = match m.base {
+        Base::None => (String::new(), i64::from(m.disp)),
         Base::Reg(r) => (name(r, Width::W64), i64::from(m.disp)),
         Base::Slot(s) => (name(RSP, Width::W64), i64::from(m.disp) + i64::from(c.frame.offsets[s.0 as usize])),
         Base::Const(k) => (format!("rip + {{c{}}}", k.0), i64::from(m.disp)),
@@ -289,7 +290,8 @@ fn memory(m: &Mem<PReg>, c: &Allocated<Op>, sized: bool, vector_index: Option<Wi
             Class::Vec => vector_index.expect("a vector of indices among the operands an instruction reads unwritten"),
             _ => Width::W64,
         };
-        write!(text, " + {}*{scale}", name(r, width)).unwrap();
+        let plus = if text.is_empty() { "" } else { " + " };
+        write!(text, "{plus}{}*{scale}", name(r, width)).unwrap();
     }
     match disp {
         0 => {}

@@ -7,7 +7,7 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use kernite_x86::forms::{self, Form, Kind};
-use kernite_x86::{Asm, Feature};
+use kernite_x86::{Asm, Feature, SysV, intel};
 
 /// The kernels of `examples/my-app`, and the same dot product with sixteen accumulators.
 const KERNELS: &str = r#"
@@ -207,6 +207,140 @@ ret";
     assert_eq!(code, want);
 }
 
+/// x86 scales an index by 1, 2, 4 or 8, so an index with no base beside it, times 3, 5 or 9, is
+/// its own base: `[n + n * 2]`, which `[n * 3]` is too, since a variable that comes twice in an
+/// address has its scales added. `llvm-mc` and GNU as assemble each as x86 encodes it.
+#[test]
+fn an_index_with_no_base_times_3_5_or_9_is_its_own_base() {
+    let cases = [
+        ("lea(x, [n + n * 2]);", "lea rdi, [rsi + rsi*2]", "48 8d 3c 76"),
+        ("lea(x, [n * 3]);", "lea rdi, [rsi + rsi*2]", "48 8d 3c 76"),
+        ("lea(x, [n * 5]);", "lea rdi, [rsi + rsi*4]", "48 8d 3c b6"),
+        (
+            "let v: ymm; vmovups(v, [n + n * 4 + 8]);",
+            "vmovups ymm0, ymmword ptr [rsi + rsi*4 + 8]",
+            "c5 fc 10 44 b6 08",
+        ),
+        ("lea(x, [n + n * 8]);", "lea rdi, [rsi + rsi*8]", "48 8d 3c f6"),
+        ("lea(x, [n * 9]);", "lea rdi, [rsi + rsi*8]", "48 8d 3c f6"),
+    ];
+    addresses_encode("own-base", &cases);
+}
+
+/// A gpr whose scales come to 0 is left out: `[x + n * 0]`, `[x + n - n]` and `[x + n * N]` where
+/// the const `N` is 0 are all `[x]`. `llvm-mc` and GNU as assemble each as x86 encodes it.
+#[test]
+fn a_gpr_whose_scales_come_to_0_is_left_out() {
+    let cases = [
+        ("lea(x, [x + n * 0]);", "lea rdi, [rdi]", "48 8d 3f"),
+        ("lea(x, [x + n - n]);", "lea rdi, [rdi]", "48 8d 3f"),
+        ("const N: usize = 0; lea(x, [x + n * N]);", "lea rdi, [rdi]", "48 8d 3f"),
+    ];
+    addresses_encode("left-out", &cases);
+}
+
+/// A base takes an index times 1, 2, 4 or 8, and a number. `llvm-mc` and GNU as assemble each as
+/// x86 encodes it.
+#[test]
+fn a_base_takes_an_index_times_1_2_4_or_8_and_a_number() {
+    let cases = [
+        ("lea(x, [x + n]);", "lea rdi, [rdi + rsi*1]", "48 8d 3c 37"),
+        ("lea(x, [x + n * 2]);", "lea rdi, [rdi + rsi*2]", "48 8d 3c 77"),
+        ("lea(x, [x + n * 4 + 8]);", "lea rdi, [rdi + rsi*4 + 8]", "48 8d 7c b7 08"),
+        ("lea(x, [x + n * 8 - 8]);", "lea rdi, [rdi + rsi*8 - 8]", "48 8d 7c f7 f8"),
+    ];
+    addresses_encode("scales", &cases);
+}
+
+/// x86 has an index with no base, `[rcx*4]`, and writes it with a 32-bit displacement, 0 where
+/// there is none. `[x + x * 3]` is `[x * 4]`, since a variable that comes twice in an address has
+/// its scales added. A gather's vector of indices is an index too, `[ymm2*4]`, of a ymm or an xmm.
+/// `llvm-mc` and GNU as assemble each as x86 encodes it.
+#[test]
+fn an_index_with_no_base_has_a_32_bit_displacement() {
+    let cases = [
+        ("lea(x, [n * 4]);", "lea rdi, [rsi*4]", "48 8d 3c b5 00 00 00 00"),
+        ("lea(x, [n * 2]);", "lea rdi, [rsi*2]", "48 8d 3c 75 00 00 00 00"),
+        ("lea(x, [n * 4 + 8]);", "lea rdi, [rsi*4 + 8]", "48 8d 3c b5 08 00 00 00"),
+        ("lea(x, [n * 4 - 8]);", "lea rdi, [rsi*4 - 8]", "48 8d 3c b5 f8 ff ff ff"),
+        (
+            "let v: ymm; vmovups(v, [n * 8 + 32]);",
+            "vmovups ymm0, ymmword ptr [rsi*8 + 32]",
+            "c5 fc 10 04 f5 20 00 00 00",
+        ),
+        ("let v: ymm; vmovups(v, [x + x * 3]);", "vmovups ymm0, ymmword ptr [rdi*4]", "c5 fc 10 04 bd 00 00 00 00"),
+        (
+            "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, [i * 4], m);",
+            "vpgatherdd ymm0, dword ptr [ymm2*4], ymm1",
+            "c4 e2 75 90 04 95 00 00 00 00",
+        ),
+        (
+            "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, [i * 8 - 8], m);",
+            "vpgatherdd ymm0, dword ptr [ymm2*8 - 8], ymm1",
+            "c4 e2 75 90 04 d5 f8 ff ff ff",
+        ),
+        (
+            "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, [i], m);",
+            "vpgatherdd ymm0, dword ptr [ymm2*1], ymm1",
+            "c4 e2 75 90 04 15 00 00 00 00",
+        ),
+        (
+            "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdq(v, [i.xmm * 8], m);",
+            "vpgatherdq ymm0, qword ptr [xmm2*8], ymm1",
+            "c4 e2 f5 90 04 d5 00 00 00 00",
+        ),
+    ];
+    addresses_encode("no-base", &cases);
+}
+
+/// Each of `cases`, a kernel's body, a line of its listing and the bytes x86 encodes that line
+/// as, holds: the kernel compiles to a listing with that line, and `llvm-mc` and GNU as, where
+/// they are here, make those bytes of it. `name` is for the files they read.
+fn addresses_encode(name: &str, cases: &[(&str, &str, &str)]) {
+    for &(body, line, _) in cases {
+        let code = compile("x: *const f32, n: usize", body).unwrap_or_else(|e| panic!("{e}, of {body}"));
+        assert!(code.lines().any(|l| l == line), "{line} is not a line of\n{code}\nof {body}");
+    }
+    let encoded: Vec<_> = cases.iter().map(|&(_, line, bytes)| (line, bytes)).collect();
+    encode(name, &encoded);
+}
+
+/// Each of `cases`, a line of a listing and the bytes x86 encodes it as, holds: `llvm-mc` and GNU
+/// as, where they are here, make those bytes of it. `name` is for the files they read.
+fn encode(name: &str, cases: &[(&str, &str)]) {
+    let (Some(mc), Some(gnu)) = (tool("LLVM_MC", "llvm-mc"), tool("GNU_AS", "as")) else {
+        eprintln!("no llvm-mc or GNU as here: skipped; set LLVM_MC and GNU_AS to run it");
+        return;
+    };
+    let lines: Vec<&str> = cases.iter().map(|&(line, _)| line).collect();
+    let (text, at) = source(&lines);
+    let (ok, out, said) =
+        assemble(&mc, &["-triple=x86_64", "-x86-asm-syntax=intel", "-show-encoding"], &format!("{name}-mc.s"), &text);
+    assert!(ok && said.is_empty(), "llvm-mc says {said:?}, of\n{text}");
+    // `leaq (,%rsi,4), %rdi  # encoding: [0x48,0x8d,0x3c,0xb5,0x00,0x00,0x00,0x00]`
+    let made = out.lines().filter_map(|l| l.split_once("encoding: [")).map(|(_, e)| {
+        e.trim_end_matches(']').split(',').map(|b| b.trim_start_matches("0x")).collect::<Vec<_>>().join(" ")
+    });
+    for ((line, want), made) in cases.iter().zip(made) {
+        assert_eq!(made, *want, "llvm-mc, of {line}");
+    }
+    // GNU as's listing has a line's number, its offset and up to four of its bytes in hex in a
+    // row, and more rows below it for the rest of them.
+    let (ok, out, said) = assemble(&gnu, &["--64", "-al", "-o", "/dev/null"], &format!("{name}-gnu.s"), &text);
+    assert!(ok && said.is_empty(), "GNU as says {said:?}, of\n{text}");
+    let mut made: Vec<Vec<&str>> = vec![vec![]; cases.len()];
+    for row in out.lines() {
+        let n = row.get(..4).and_then(|n| n.trim().parse().ok());
+        let hex = row.get(10..).and_then(|r| r.split('\t').next()).map_or("", str::trim);
+        if let Some(i) = at.iter().position(|&a| Some(a) == n) {
+            made[i].extend((0..hex.len()).step_by(2).map(|k| &hex[k..k + 2]));
+        }
+    }
+    for ((line, want), made) in cases.iter().zip(made) {
+        assert_eq!(made.join(" ").to_lowercase(), *want, "GNU as, of {line}");
+    }
+}
+
 /// Memory is as much as the other operands say, or, where an instruction's forms differ by that
 /// alone, as Intel's word before the brackets says. A write to `r16` or `r8` keeps the rest of
 /// the register, so it needs a value there first.
@@ -394,8 +528,15 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ("let v: ymm; vaddps(v, v.xmm, v);", "2:25: `vaddps` wants a ymm; this is an xmm"),
         ("let v: ymm; vaddps(v, v);", "2:13: `vaddps` takes 3 operands, not 2"),
         ("let v: ymm; vmovups(v, [1.0]);", "2:24: this reads 32 bytes of a constant of 4"),
-        ("let v: ymm; vmovups(v, [x + x * 3]);", "2:24: x86 wants a base beside a scaled index"),
         ("let i: gpr; let v: ymm; vmovups(v, [x + i * 3]);", "2:36: x86 scales an index by 1, 2, 4 or 8, not 3"),
+        ("let i: gpr; let v: ymm; vmovups(v, [i * 3 + x]);", "2:36: x86 scales an index by 1, 2, 4 or 8, not 3"),
+        (
+            "let b: local<[f32; 16]>; let i: gpr; let p: gpr; lea(p, [b + i * 3]);",
+            "2:57: x86 scales an index by 1, 2, 4 or 8, not 3",
+        ),
+        ("let i: gpr; let v: ymm; vmovups(v, [x + i * 16]);", "2:36: x86 scales an index by 1, 2, 4 or 8, not 16"),
+        ("let i: gpr; let v: ymm; vmovups(v, [i * 6]);", "2:36: x86 scales an index by 1, 2, 4 or 8, not 6"),
+        ("let i: gpr; let v: ymm; vmovups(v, [i + i * 5]);", "2:36: x86 scales an index by 1, 2, 4 or 8, not 6"),
         ("let v: ymm; vaddps(v, v, 1.5);", "2:26: x86 takes floats from memory: `[1.5]`"),
         ("vfrobps(x);", "2:1: x86 has no instruction `vfrobps` that kernite knows"),
         ("let v: ymm; vaddps(v, v, w);", "2:26: `w` is not defined"),
@@ -473,8 +614,16 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
             "2:57: `vpgatherdd` wants 4 bytes of memory at a ymm of indices; this is memory at an index in a gpr",
         ),
         (
-            "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, [i * 4], m);",
-            "2:78: x86 adds a gpr to a vector of indices, as in `[p + v * 4]`",
+            "let v: ymm; let m: ymm; zero(v); ones(m); vpgatherdd(v, [x * 4], m);",
+            "2:57: `vpgatherdd` wants 4 bytes of memory at a ymm of indices; this is memory at an index in a gpr",
+        ),
+        (
+            "let v: ymm; let m: ymm; zero(v); ones(m); vpgatherdd(v, [x], m);",
+            "2:57: `vpgatherdd` wants 4 bytes of memory at a ymm of indices; this is memory",
+        ),
+        (
+            "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, [i * 3], m);",
+            "2:78: x86 scales an index by 1, 2, 4 or 8, not 3",
         ),
         ("jmp(x);", "2:5: `jmp` wants a label; this is a gpr"),
         ("let g: gpr; add(g, top); label(top);", "2:20: a label is for a jump"),
@@ -518,12 +667,56 @@ ret";
     assert_eq!(code, want);
 }
 
-/// The builder takes no more of an immediate than x86 reads, as the language does not.
+/// A program built in Rust writes an index with no base as the language does: `n.times(4)` is
+/// `[rsi*4]`, and `plus` puts a displacement after it, in the bytes of the language's `[n * 4]` and
+/// `[n * 4 + 8]`. A gather's vector of indices is written so too: `i.times(4)` is `[ymm2*4]`, and
+/// `i.xmm().times(8)` is `[xmm2*8]`, in the bytes of the language's `vpgatherdd(v, [i * 4], m)` and
+/// `vpgatherdq(v, [i.xmm * 8], m)`. Only the builder writes a scale of 1 of a gpr, `[rsi*1]`, where
+/// the language writes a base, `[n]`.
+#[test]
+fn the_builder_writes_an_index_with_no_base() {
+    let mut a = Asm::new("k");
+    let (x, n) = (a.param("x"), a.param("n"));
+    let (v, m, i) = (a.ymm("v"), a.ymm("m"), a.ymm("i"));
+    a.zero(v);
+    a.ones(m);
+    a.zero(i);
+    a.lea(x, n.times(1));
+    a.lea(x, n.times(2));
+    a.lea(x, n.times(4));
+    a.lea(x, n.times(4).plus(8));
+    a.lea(x, n.times(8).plus(-8));
+    a.vpgatherdd(v, i.times(4), m);
+    a.ones(m);
+    a.vpgatherdd(v, i.times(8).plus(-8), m);
+    a.ones(m);
+    a.vpgatherdq(v, i.xmm().times(8), m);
+    a.ret();
+    let listing = intel::print(&kernite_compile::compile(&a.finish(), &SysV).unwrap(), vec![]).unwrap();
+    let cases = [
+        ("lea rdi, [rsi*1]", "48 8d 3c 35 00 00 00 00"),
+        ("lea rdi, [rsi*2]", "48 8d 3c 75 00 00 00 00"),
+        ("lea rdi, [rsi*4]", "48 8d 3c b5 00 00 00 00"),
+        ("lea rdi, [rsi*4 + 8]", "48 8d 3c b5 08 00 00 00"),
+        ("lea rdi, [rsi*8 - 8]", "48 8d 3c f5 f8 ff ff ff"),
+        ("vpgatherdd ymm0, dword ptr [ymm2*4], ymm1", "c4 e2 75 90 04 95 00 00 00 00"),
+        ("vpgatherdd ymm0, dword ptr [ymm2*8 - 8], ymm1", "c4 e2 75 90 04 d5 f8 ff ff ff"),
+        ("vpgatherdq ymm0, qword ptr [xmm2*8], ymm1", "c4 e2 f5 90 04 d5 00 00 00 00"),
+    ];
+    for (line, _) in cases {
+        assert!(listing.code().any(|l| l == line), "{line} is not a line of\n{}", listing.text());
+    }
+    encode("builder", &cases);
+}
+
+/// The builder takes no more of an immediate than x86 reads, nor a scale x86 has not, as the
+/// language does not.
 #[test]
 fn the_builder_refuses_what_x86_would_not_read() {
     let refused = |want: &str, build: fn(&mut Asm)| {
         let e = std::panic::catch_unwind(|| build(&mut Asm::new("k"))).expect_err(want);
-        assert_eq!(e.downcast_ref::<String>().map(String::as_str), Some(want));
+        let said = e.downcast_ref::<String>().map(String::as_str).or(e.downcast_ref::<&str>().copied());
+        assert_eq!(said, Some(want));
     };
     refused("shl by 64: x86 shifts a gpr by 0 to 63", |a| {
         let g = a.gpr("g");
@@ -545,6 +738,23 @@ fn the_builder_refuses_what_x86_would_not_read() {
         let v = a.ymm("v").xmm();
         a.vpblendd(v, v, v, 0x10);
     });
+    refused("scale 3", |a| {
+        a.gpr("g").times(3);
+    });
+    refused("scale 16", |a| {
+        a.ymm("v").times(16);
+    });
+    refused("scale 0", |a| {
+        a.ymm("v").xmm().times(0);
+    });
+    refused("one index to an address", |a| {
+        let (g, v) = (a.gpr("g"), a.ymm("v"));
+        g.at(0).index(g, 4).index_ymm(v, 4);
+    });
+    refused("a constant's address takes no index", |a| {
+        let g = a.gpr("g");
+        a.u32s(&[1]).index(g, 4);
+    });
     let mut a = Asm::new("k");
     let (g, v) = (a.gpr("g"), a.ymm("v"));
     a.shl(g, 63);
@@ -561,10 +771,105 @@ fn a_kernel_takes_what_sysv_passes_in_registers() {
     assert_eq!(code, "vmovss dword ptr [rdi], xmm1\nvaddss xmm1, xmm0, xmm1\nvzeroupper\nret");
 }
 
-/// Rust never sees a kernel's body run, so kernite says which of the module's constants it read:
-/// what the macro marks as used, so that only the constants nothing reads are dead code.
+/// A pointer is one register, whatever it points to: an array, a pointer, a tuple, a generic type.
+/// A pointer to what has no size, a slice, a `str` or a `dyn`, in parentheses or not, or a tuple that
+/// ends in one, is two words in Rust, and an error.
 #[test]
-fn a_kernel_names_the_constants_it_reads() {
+fn a_kernel_takes_a_pointer_to_any_type_in_a_register() {
+    let params = "shape: *const [usize; 3], out: *mut *const f32, pair: *const (u32, u32), \
+                  cell: *const Cell<u8, 2>, n: usize";
+    let code = compile(params, "mov(n, [shape + 8]); mov([out], pair); mov([cell], n);").unwrap();
+    assert_eq!(code, "mov r8, qword ptr [rdi + 8]\nmov qword ptr [rsi], rdx\nmov qword ptr [rcx], r8\nret");
+    let src = "unsafe extern \"sysv64\" fn k(p: *const [usize; 3]) -> *mut [usize; 3] { ret(p); }";
+    assert_eq!(kernite::x86_str(src, "k").unwrap().code().collect::<Vec<_>>(), ["mov rax, rdi", "ret"]);
+    for to in ["()", "(u32,)", "(u32, u32)"] {
+        assert_eq!(compile(&format!("p: *const {to}"), "").unwrap(), "ret", "{to}");
+    }
+    for to in [
+        "[f32]",
+        "[[u8; 4]]",
+        "str",
+        "dyn Foo",
+        "(dyn A + Send)",
+        "([f32])",
+        "(str)",
+        "((dyn Foo))",
+        "(dyn Foo<A, B>)",
+        "(u32, [f32])",
+    ] {
+        let why = format!(
+            "a pointer to `{to}` has two words, an address and a length or a table, and a kernel's pointer has one"
+        );
+        assert_eq!(compile(&format!("p: *const {to}"), "").unwrap_err(), format!("1:32: {why}"), "{to}");
+        let src = format!("unsafe extern \"sysv64\" fn k() -> *mut {to} {{}}");
+        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("1:34: {why}"), "-> {to}");
+    }
+}
+
+/// A type may hold an arrow, `->`, one operator whose `>` ends no type and closes no `<`: a pointer to
+/// a function's pointer, or to a type with one among its arguments, is one register as any pointer is,
+/// and the parameter after it is read from the next.
+#[test]
+fn a_kernel_takes_a_pointer_to_a_type_that_holds_an_arrow() {
+    for params in [
+        "call: *const fn(u32) -> u32, table: *mut Pair<fn() -> u8, 2>, \
+         boxed: *const Box<dyn Fn(u8) -> u8 + Send>, n: usize",
+        "call: *const fn(u32)->u32, table: *mut Pair<fn()->&u8,2>, boxed: *const Box<dyn Fn(u8)->u8+Send>,n: usize",
+    ] {
+        let code = compile(params, "mov([call], n); mov([table], n); mov([boxed], n);").unwrap();
+        assert_eq!(code, "mov qword ptr [rdi], rcx\nmov qword ptr [rsi], rcx\nmov qword ptr [rdx], rcx\nret");
+    }
+    let src = "unsafe extern \"sysv64\" fn k(p: *const fn(u32) -> u32) -> *mut fn(u32) -> u32 { ret(p); }";
+    assert_eq!(kernite::x86_str(src, "k").unwrap().code().collect::<Vec<_>>(), ["mov rax, rdi", "ret"]);
+    let to = "dyn Fn(u8) -> u8";
+    let why = format!(
+        "a pointer to `{to}` has two words, an address and a length or a table, and a kernel's pointer has one"
+    );
+    assert_eq!(compile("p: *const dyn Fn(u8)->u8, n: usize", "").unwrap_err(), format!("1:32: {why}"));
+}
+
+/// A type in a message is written as Rust writes it, whatever the source spaced: a parameter by
+/// value, a result, a variable.
+#[test]
+fn a_type_in_a_message_is_written_as_rust_writes_it() {
+    let takes = "a kernel takes pointers, 64-bit integers and floats, not";
+    for (params, ty) in [
+        ("a: [usize;3]", "[usize; 3]"),
+        ("a: (u32 ,u32)", "(u32, u32)"),
+        ("a: &mut[f32]", "&mut [f32]"),
+        ("a: Box<dyn A+B>", "Box<dyn A + B>"),
+        ("a: Box<dyn Iterator<Item=u8>>", "Box<dyn Iterator<Item = u8>>"),
+        ("a: Box<dyn Iterator<Item = u8> + Send>", "Box<dyn Iterator<Item = u8> + Send>"),
+        ("f: fn(u32) -> u32", "fn(u32) -> u32"),
+        ("f: fn(u32)->u32, n: usize", "fn(u32) -> u32"),
+        ("a: fn(fn()->u8)->&u8", "fn(fn() -> u8) -> &u8"),
+        ("a: fn()->!", "fn() -> !"),
+        ("a: Pair<fn()->u8,2>", "Pair<fn() -> u8, 2>"),
+        ("a: Box<dyn Fn(u8)->u8+Send>", "Box<dyn Fn(u8) -> u8 + Send>"),
+    ] {
+        assert_eq!(compile(params, "").unwrap_err(), format!("1:32: {takes} `{ty}`"), "{params}");
+    }
+    let two = "has two words, an address and a length or a table, and a kernel's pointer has one";
+    assert_eq!(compile("p: *const dyn A+Send", "").unwrap_err(), format!("1:32: a pointer to `dyn A + Send` {two}"));
+    let src = "#[instances(2)]\nunsafe extern \"sysv64\" fn k<const N: usize>(a: [usize; N]) {}";
+    assert_eq!(kernite::x86_str(src, "k::<2>").unwrap_err(), format!("2:48: in `k::<2>`: {takes} `[usize; 2]`"));
+    let src = "unsafe extern \"sysv64\" fn k() -> (u32,u32) {}";
+    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `(u32, u32)`";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    let src = "unsafe extern \"sysv64\" fn k() -> fn(u32)->u32 {}";
+    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `fn(u32) -> u32`";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    let vars = "x86 variables are `gpr`, `ymm`, `xmm` and stack memory, `local<..>`; not";
+    assert_eq!(compile("", "let v: *const[u8;4];").unwrap_err(), format!("2:8: {vars} `*const [u8; 4]`"));
+    assert_eq!(compile("", "let v: fn(u32)->u32;").unwrap_err(), format!("2:8: {vars} `fn(u32) -> u32`"));
+}
+
+/// Rust never sees a kernel's body run, so kernite says which of the module's items it named, and
+/// where, in the order of the source: what the macro writes for Rust at each name, so that Rust finds
+/// only the constants nothing reads dead, and says what it cannot find where it is written. A name
+/// in a helper the kernel calls is the kernel's, and one in the definition of a constant is not.
+#[test]
+fn a_kernel_names_the_items_it_names() {
     let src = r#"
         const ADD: usize = 1;
         const STORE: usize = 0;
@@ -597,12 +902,16 @@ fn a_kernel_names_the_constants_it_reads() {
         }
     "#;
     let module = kernite::lang::parse(src).unwrap();
-    let reads = |name| kernite::x86(&module, kernite::function(&module, name).unwrap(), &[]).unwrap().consts;
-    // `STORE` as a helper's value and `ADD` in the `if` that chooses, in the module's order;
+    let named = |name| {
+        let k = kernite::x86(&module, kernite::function(&module, name).unwrap(), &[]).unwrap();
+        k.mentions.into_iter().map(|m| (m.name, src[..m.span.0 as usize].lines().count())).collect::<Vec<_>>()
+    };
+    let at = |name: &str, line: usize| (name.to_string(), line);
+    // The helper `then`, `STORE` as its value, and `ADD` in the `if` that chooses, in its body;
     // not `OFFSET`, in the branch not taken, nor `SPARE`, in a helper not called.
-    assert_eq!(reads("stores"), ["ADD", "STORE"]);
-    // `OFFSET` in the branch taken, and `LANE` through it.
-    assert_eq!(reads("adds"), ["ADD", "OFFSET", "LANE"]);
+    assert_eq!(named("stores"), [at("then", 12), at("STORE", 12), at("ADD", 22)]);
+    // `OFFSET` in the branch taken, and not `LANE`, which `OFFSET`'s definition names.
+    assert_eq!(named("adds"), [at("then", 18), at("ADD", 18), at("ADD", 22), at("OFFSET", 23)]);
 }
 
 /// Memory of the module's, which its x86 kernels name: a histogram they keep from call to
@@ -725,8 +1034,8 @@ fn a_static_is_rusts_numbers_holding_what_it_says() {
     assert_eq!(statics[1].code.init, floats);
     assert_eq!(statics[2].code.init, [7, 0, 0, 0, 0, 0, 0, 0]);
     assert_eq!(statics[3].code.init, [255, 2, 128]);
-    assert_eq!(statics[0].consts, ["N"]);
-    assert!(statics[1..].iter().all(|s| s.consts.is_empty()));
+    assert_eq!(statics[0].mentions.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["N"]);
+    assert!(statics[1..].iter().all(|s| s.mentions.is_empty()));
 }
 
 /// A helper takes memory of the module's as it takes stack memory: of the type it is declared.
@@ -1124,6 +1433,38 @@ fn the_grid_is_a_cooperative_kernels_to_read_and_wait_for() {
         kernite::x86_str(src, "k").unwrap_err(),
         "2:34: a cooperative kernel's threads return nothing: they write what they compute to memory"
     );
+}
+
+/// A GPU's tuning directives are the GPU kernel's: an x86 kernel says none, however many
+/// instances it has, and the error is one, at the directive.
+#[test]
+fn an_x86_kernel_says_no_gpu_directive() {
+    let not = |name: &str| {
+        format!(
+            "`#[{name}(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`; `k` is a kernel for x86-64, which the \
+             process runs"
+        )
+    };
+    for (attr, name) in [
+        ("#[maxntid(256)]", "maxntid"),
+        ("#[reqntid(8, 8)]", "reqntid"),
+        ("#[minnctapersm(2)]", "minnctapersm"),
+        ("#[maxnreg(32)]", "maxnreg"),
+    ] {
+        let src = format!("{attr}\nunsafe extern \"sysv64\" fn k() {{}}\n");
+        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("1:3: {}", not(name)), "{attr}");
+    }
+    // What PTX has not is said by its name, whatever the kernel.
+    let src = "#[maxnctapersm(2)]\nunsafe extern \"sysv64\" fn k() {}\n";
+    assert_eq!(
+        kernite::x86_str(src, "k").unwrap_err(),
+        "1:3: PTX has no `.maxnctapersm` from 2.1 on; `#[minnctapersm(..)]` gives the blocks an SM should hold at \
+         once, at least"
+    );
+    let src = "#[maxnreg(32)] #[instances(1, 2)]\nunsafe extern \"sysv64\" fn k<const N: u32>() {}\n";
+    for name in ["k::<1>", "k::<2>"] {
+        assert_eq!(kernite::x86_str(src, name).unwrap_err(), format!("1:3: {}", not("maxnreg")), "{name}");
+    }
 }
 
 /// Stack memory is the kernel's frame: the header says where each slot lies, and brackets reach

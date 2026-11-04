@@ -11,13 +11,21 @@ pub trait Target {
     /// A variable, seen as one of the machine's types: `ymm`, `v.xmm`, `u32`.
     type Var: Copy + PartialEq + fmt::Debug;
 
-    /// The function's next parameter, of the type `ty` as written: Rust's, `*const f32` or
-    /// `usize`, or the machine's.
+    /// The function's next parameter, of the type `ty` as Rust writes it: Rust's, `*const f32` or
+    /// `usize`, or the machine's. [`pointer`](crate::pointer) says whether it is a pointer.
     fn param(&mut self, name: &str, ty: &str) -> Result<Self::Var, String>;
 
     /// What the function returns, of the type `ty` as written: `()`, `!` for never, Rust's or
     /// the machine's.
     fn result(&mut self, ty: &str) -> Result<(), String>;
+
+    /// The function's directives, `#[maxntid(16, 16)]` and the like, at least one, each by its
+    /// name, `maxntid`, and the whole numbers it gives, worked out, in the order written; or
+    /// which of them is wrong, by its place among them, and what is wrong with it. A machine
+    /// takes none unless it says so.
+    fn directives(&mut self, given: &[(&str, Vec<i128>)]) -> Result<(), (usize, Fault)> {
+        Err((0, Fault::new(format!("this machine takes no `#[{}(..)]`", given[0].0))))
+    }
 
     /// A new variable of the machine's type `ty`.
     fn var(&mut self, name: &str, ty: &str) -> Result<Self::Var, String>;

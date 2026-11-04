@@ -67,6 +67,8 @@ pub enum Base<R> {
     /// Memory of the module's that the program names, a static, whose place the machine
     /// decides.
     Static(StaticId),
+    /// Nothing: the address is its index times its scale, plus its displacement.
+    None,
 }
 
 /// A memory operand: `width` bits at `base + index * scale + disp`.
@@ -140,7 +142,7 @@ impl<R: Register> Arg<R> {
             Operand::Mem(m) => (
                 match m.base {
                     Base::Reg(r) => Some(r),
-                    Base::Slot(_) | Base::Const(_) | Base::Func(_) | Base::Static(_) => None,
+                    Base::Slot(_) | Base::Const(_) | Base::Func(_) | Base::Static(_) | Base::None => None,
                 },
                 m.index.map(|(r, _)| r),
             ),
@@ -156,7 +158,7 @@ impl<R: Register> Arg<R> {
             Operand::Mem(m) => (
                 match m.base {
                     Base::Reg(r) => Some(r),
-                    Base::Slot(_) | Base::Const(_) | Base::Func(_) | Base::Static(_) => None,
+                    Base::Slot(_) | Base::Const(_) | Base::Func(_) | Base::Static(_) | Base::None => None,
                 },
                 m.index.map(|(r, _)| r),
             ),
@@ -184,6 +186,7 @@ impl<R: Register> Arg<R> {
                     Base::Const(c) => Base::Const(c),
                     Base::Func(f) => Base::Func(f),
                     Base::Static(s) => Base::Static(s),
+                    Base::None => Base::None,
                 },
                 index: m.index.map(|(r, scale)| (f(r), scale)),
                 disp: m.disp,

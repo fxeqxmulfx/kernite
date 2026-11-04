@@ -524,3 +524,497 @@ fn a_cooperative_launch_has_at_most_the_blocks_the_gpu_runs_at_once() {
     let ws = at.read().unwrap();
     assert!(ws[0] != 0 && ws[..most as usize].iter().all(|&w| w == ws[0]) && ws[most as usize] == 0, "{ws:#x?}");
 }
+
+/// Stores `ctaid.x` of the last block, the one whose number is one less than the blocks along
+/// x, in `out[0]`, in a module written for `sm_30`: with `sm_20` for it, the same kernel.
+const LAST: &str = "
+.version 3.0
+.target sm_30
+.address_size 64
+
+.visible .entry last(.param .u64 out_param)
+{
+	.reg .pred %other;
+	.reg .u32 %block, %blocks;
+	.reg .u64 %out;
+
+	ld.param.u64 %out, [out_param];
+	cvta.to.global.u64 %out, %out;
+	mov.u32 %block, %ctaid.x;
+	mov.u32 %blocks, %nctaid.x;
+	sub.u32 %blocks, %blocks, 1;
+	setp.ne.u32 %other, %block, %blocks;
+	@%other bra done;
+	st.global.u32 [%out], %block;
+done:
+	ret;
+}
+";
+
+/// The driver starts at most 65535 blocks along x of a module written for `sm_20` or `sm_21`,
+/// whatever the GPU, and as many as the GPU takes of one written for `sm_30`, which is why a
+/// module of kernite's is written for `sm_30` at the least. The `.target` says it, not the
+/// `.version`.
+#[test]
+fn the_driver_starts_65535_blocks_of_a_module_for_fermi_and_more_of_one_for_kepler() {
+    let Some(cuda) = cuda() else { return };
+    let mut out = cuda.alloc::<u32>(1).unwrap();
+    let at = out.ptr();
+    for (target, most) in [("sm_20", 65535), ("sm_21", 65535), ("sm_30", 65536)] {
+        let module = Module::load(&cuda, &LAST.replace("sm_30", target), &["last"], &[]).unwrap();
+        for blocks in [1, 65535, 65536] {
+            out.zero().unwrap();
+            // SAFETY: `last` takes a pointer, and writes a word there.
+            let launched = unsafe { module.launch(0, Grid::new(blocks, 1), &[arg(&at)]) };
+            if blocks <= most {
+                launched.unwrap();
+                assert_eq!(out.read().unwrap(), [blocks - 1], "{blocks} blocks for {target}");
+            } else {
+                let e = launched.unwrap_err();
+                assert_eq!(e.call, "cuLaunchKernel");
+                // The driver's words alone: no size of the launch, its shared memory of none among
+                // them, is past what the GPU takes.
+                assert_eq!(e.message, "CUDA_ERROR_INVALID_VALUE (1): invalid argument", "{blocks} blocks for {target}");
+            }
+        }
+    }
+    cuda.sync().unwrap();
+}
+
+/// Each grid, and what a launch over it says: nothing, for one the GPU takes, at the least and at
+/// the most it takes of each size; or which size is past what the GPU takes, the first that is.
+fn grids() -> Vec<(Grid, Option<&'static str>)> {
+    let grid = |blocks, threads| Grid { blocks, threads, shared: 0 };
+    let blocks_y = "the grid has 65536 blocks along y, and the GPU takes 65535 at most";
+    let blocks_z = "the grid has 65536 blocks along z, and the GPU takes 65535 at most";
+    let blocks_x = "the grid has 2147483648 blocks along x, and the GPU takes 2147483647 at most";
+    let no_blocks_z = "the grid has 0 blocks along z, and the GPU takes 1 at least";
+    vec![
+        (grid([1, 1, 1], [1, 1, 1]), None),
+        (grid([1, 65535, 1], [1, 1, 1]), None),
+        (grid([1, 1, 65535], [1, 1, 1]), None),
+        (grid([1, 1, 1], [1024, 1, 1]), None),
+        (grid([1, 1, 1], [1, 1024, 1]), None),
+        (grid([1, 1, 1], [1, 1, 64]), None),
+        (grid([1, 1, 1], [32, 32, 1]), None),
+        (grid([1, 1, 1], [16, 16, 4]), None),
+        (grid([1, 65536, 1], [1, 1, 1]), Some(blocks_y)),
+        (grid([1, 1, 65536], [1, 1, 1]), Some(blocks_z)),
+        (grid([1 << 31, 1, 1], [1, 1, 1]), Some(blocks_x)),
+        (grid([1, 1, 1], [1025, 1, 1]), Some("each block has 1025 threads along x, and the GPU takes 1024 at most")),
+        (grid([1, 1, 1], [1, 1025, 1]), Some("each block has 1025 threads along y, and the GPU takes 1024 at most")),
+        (grid([1, 1, 1], [1, 1, 65]), Some("each block has 65 threads along z, and the GPU takes 64 at most")),
+        (grid([1, 1, 1], [1 << 22; 3]), Some("each block has 4194304 threads along x, and the GPU takes 1024 at most")),
+        (grid([1, 1, 1], [33, 32, 1]), Some("each block has 1056 threads, and the GPU takes 1024 at most")),
+        (grid([1, 1, 1], [16, 16, 5]), Some("each block has 1280 threads, and the GPU takes 1024 at most")),
+        (grid([1, 1, 1], [1024, 1024, 64]), Some("each block has 67108864 threads, and the GPU takes 1024 at most")),
+        (grid([0, 1, 1], [1, 1, 1]), Some("the grid has 0 blocks along x, and the GPU takes 1 at least")),
+        (grid([1, 0, 1], [1, 1, 1]), Some("the grid has 0 blocks along y, and the GPU takes 1 at least")),
+        (grid([1, 1, 0], [1, 1, 1]), Some(no_blocks_z)),
+        (grid([1, 1, 1], [0, 1, 1]), Some("each block has 0 threads along x, and the GPU takes 1 at least")),
+        (grid([1, 1, 1], [1, 0, 1]), Some("each block has 0 threads along y, and the GPU takes 1 at least")),
+        (grid([1, 1, 1], [1, 1, 0]), Some("each block has 0 threads along z, and the GPU takes 1 at least")),
+        // The first size past is the one said, whichever limit it is past: the blocks' before the
+        // threads', x before y before z.
+        (grid([1, 65536, 65536], [1025, 1, 1]), Some(blocks_y)),
+        (grid([1, 65536, 0], [1, 1, 1]), Some(blocks_y)),
+        (grid([1, 1, 0], [1025, 1, 1]), Some(no_blocks_z)),
+    ]
+}
+
+/// What a launch over a grid the GPU does not take says: the driver's `CUDA_ERROR_INVALID_VALUE`,
+/// and which size is past which limit.
+fn refusal(call: &str, e: &kernite_cuda::Error, said: &str) {
+    assert_eq!(e.call, call);
+    assert!(e.message.starts_with("CUDA_ERROR_INVALID_VALUE (1): "), "{e}");
+    assert!(e.message.ends_with(&format!(": {said}")), "{e}");
+}
+
+#[test]
+fn a_launch_over_a_grid_the_gpu_does_not_take_says_which_size_is_past_which_limit() {
+    let Some(cuda) = cuda() else { return };
+    let module = Module::load(&cuda, LAST, &["last"], &[]).unwrap();
+    let out = cuda.alloc::<u32>(1).unwrap();
+    let at = out.ptr();
+    for (grid, said) in grids() {
+        // SAFETY: `last` takes a pointer, and writes a word there.
+        let launched = unsafe { module.launch(0, grid, &[arg(&at)]) };
+        match (launched, said) {
+            (Ok(()), None) => {}
+            (Err(e), Some(said)) => refusal("cuLaunchKernel", &e, said),
+            (launched, said) => panic!("{grid:?}: {launched:?}, and it should say {said:?}"),
+        }
+    }
+    // The launches refused did not harm the GPU, nor the ones that started.
+    cuda.sync().unwrap();
+}
+
+#[test]
+fn a_cooperative_launch_over_a_grid_the_gpu_does_not_take_says_it_too() {
+    let Some(cuda) = cuda() else { return };
+    if !cuda.cooperative() {
+        eprintln!("{} launches no kernel cooperatively: skipped", cuda.name());
+        return;
+    }
+    let module = Module::load(&cuda, LAST, &["last"], &[]).unwrap();
+    let out = cuda.alloc::<u32>(1).unwrap();
+    let at = out.ptr();
+    // Only the grids the GPU does not take: one it takes may have more blocks than it runs at
+    // once, which is refused in other words.
+    for (grid, said) in grids().into_iter().filter_map(|(grid, said)| said.map(|said| (grid, said))) {
+        // SAFETY: `last` takes a pointer, and writes a word there.
+        let e = unsafe { module.launch_cooperative(0, grid, &[arg(&at)]) }.unwrap_err();
+        refusal("cuLaunchCooperativeKernel", &e, said);
+    }
+    cuda.sync().unwrap();
+}
+
+/// A kernel of 20 KB of shared memory of its own, `both`, and one of none, `plain`, each given
+/// the launch's beside it, `bytes` of it. Each writes the last word of its own, if it has any,
+/// and the last of the launch's, if it is given any, reads each back, and stores them in
+/// `out[0]` and `out[1]`: 7 and 9, or 0 for the memory it has not.
+const OWN: &str = "
+.version 7.5
+.target sm_61
+.address_size 64
+
+.extern .shared .align 4 .b8 launched[];
+
+.visible .entry both(.param .u64 out_param, .param .u32 bytes_param)
+{
+	.shared .align 4 .b8 fixed[20480];
+	.reg .pred %none;
+	.reg .u32 %bytes, %seven, %nine, %mine, %theirs, %at;
+	.reg .u64 %out;
+
+	ld.param.u64 %out, [out_param];
+	cvta.to.global.u64 %out, %out;
+	ld.param.u32 %bytes, [bytes_param];
+	mov.u32 %seven, 7;
+	st.shared.u32 [fixed+20476], %seven;
+	ld.shared.u32 %mine, [fixed+20476];
+	st.global.u32 [%out], %mine;
+	setp.eq.u32 %none, %bytes, 0;
+	@%none bra done;
+	mov.u32 %at, launched;
+	add.u32 %at, %at, %bytes;
+	mov.u32 %nine, 9;
+	st.shared.u32 [%at+-4], %nine;
+	ld.shared.u32 %theirs, [%at+-4];
+	st.global.u32 [%out+4], %theirs;
+done:
+	ret;
+}
+
+.visible .entry plain(.param .u64 out_param, .param .u32 bytes_param)
+{
+	.reg .pred %none;
+	.reg .u32 %bytes, %nine, %theirs, %at;
+	.reg .u64 %out;
+
+	ld.param.u64 %out, [out_param];
+	cvta.to.global.u64 %out, %out;
+	ld.param.u32 %bytes, [bytes_param];
+	setp.eq.u32 %none, %bytes, 0;
+	@%none bra done;
+	mov.u32 %at, launched;
+	add.u32 %at, %at, %bytes;
+	mov.u32 %nine, 9;
+	st.shared.u32 [%at+-4], %nine;
+	ld.shared.u32 %theirs, [%at+-4];
+	st.global.u32 [%out+4], %theirs;
+done:
+	ret;
+}
+";
+
+/// Each kernel of `OWN`, by its index, and the bytes of shared memory it has of its own.
+const OWNS: [(usize, u32); 2] = [(0, 20 << 10), (1, 0)];
+
+/// Kernel `index` of `OWN` over `grid`, whose `shared` it is told, writing at `out`; launched
+/// cooperatively or not.
+fn launch_own(
+    module: &Module,
+    cooperative: bool,
+    index: usize,
+    grid: Grid,
+    out: kernite_cuda::Ptr<u32>,
+) -> Result<(), kernite_cuda::Error> {
+    let bytes = grid.shared;
+    let args = [arg(&out), arg(&bytes)];
+    // SAFETY: both kernels of `OWN` take a pointer and a `u32`, and write two words at the
+    // pointer, which has them; the last word of the `bytes` of shared memory the grid gives is
+    // inside them.
+    unsafe {
+        match cooperative {
+            false => module.launch(index, grid, &args),
+            true => module.launch_cooperative(index, grid, &args),
+        }
+    }
+}
+
+#[test]
+fn a_launch_gives_a_block_all_the_shared_memory_the_gpu_has_with_the_kernels_own_counted() {
+    let Some(cuda) = cuda() else { return };
+    let most = cuda.max_shared();
+    if most < 99 << 10 {
+        eprintln!("{}, sm_{}, gives a block {most} bytes of shared memory, not 99 KB: skipped", cuda.name(), cuda.sm());
+        return;
+    }
+    let load = || Module::load(&cuda, OWN, &["both", "plain"], &[]).unwrap();
+    let mut out = cuda.alloc::<u32>(2).unwrap();
+    for (index, own) in OWNS {
+        // The count of blocks a kernel runs at once lets it have the shared memory it counts by,
+        // as a launch does: of a kernel nothing has let have more, it is not none.
+        assert!(load().resident(index, 256, most - own).unwrap() >= 1, "{own} bytes of the kernel's");
+    }
+    for cooperative in [false, true] {
+        if cooperative && !cuda.cooperative() {
+            eprintln!("{} launches no kernel cooperatively: skipped", cuda.name());
+            continue;
+        }
+        for (index, own) in OWNS {
+            // A module of its own, which nothing has let have more than the driver gives unasked.
+            let module = load();
+            // What a launch gets unasked, 48 KB with the kernel's own, and what the GPU gives it.
+            let (unasked, all) = ((48 << 10) - own, most - own);
+            let mut sizes: Vec<u32> = [0, 16, 28, 29, 40, 48, 49, 79].map(|kb| kb << 10).into();
+            sizes.extend([unasked - 4, unasked, unasked + 4, all - 4, all]);
+            sizes.retain(|&bytes| bytes <= all);
+            sizes.sort();
+            sizes.dedup();
+            // Up from none to all, and down again: a kernel let have more keeps what it was let,
+            // and runs a launch of less.
+            for &bytes in sizes.iter().chain(sizes.iter().rev()) {
+                out.zero().unwrap();
+                let grid = Grid::new(1, 1).with_shared(bytes);
+                let what =
+                    format!("{bytes} bytes from the launch and {own} of the kernel's, cooperative: {cooperative}");
+                launch_own(&module, cooperative, index, grid, out.ptr()).unwrap_or_else(|e| panic!("{what}: {e}"));
+                let want = [if own > 0 { 7 } else { 0 }, if bytes > 0 { 9 } else { 0 }];
+                assert_eq!(out.read().unwrap(), want, "{what}");
+            }
+        }
+    }
+    cuda.sync().unwrap();
+}
+
+#[test]
+fn a_launch_past_the_shared_memory_the_gpu_gives_a_block_says_how_much_the_block_has() {
+    let Some(cuda) = cuda() else { return };
+    let most = cuda.max_shared();
+    let module = Module::load(&cuda, OWN, &["both", "plain"], &[]).unwrap();
+    let mut out = cuda.alloc::<u32>(2).unwrap();
+    let said = |own: u32, bytes: u32| {
+        let all = u64::from(own) + u64::from(bytes);
+        format!(
+            "each block has {all} bytes of shared memory, {own} of the kernel's and {bytes} of the launch's, and the \
+             GPU takes {most} at most"
+        )
+    };
+    for (index, own) in OWNS {
+        let all = most - own;
+        // A byte past, a word, a kilobyte (80 KB with 20 KB of the kernel's, on a GPU of 99 KB), a
+        // kilobyte past what a block has in all (100 KB with none of the kernel's), the most a count
+        // of bytes holds in a `c_int` and one more, and the most a `u32` holds.
+        for bytes in [all + 1, all + 4, all + 1024, most + 1024, (1 << 31) - 1, 1 << 31, u32::MAX] {
+            let launch = Grid::new(1, 1).with_shared(bytes);
+            for cooperative in [false, true] {
+                if cooperative && !cuda.cooperative() {
+                    continue;
+                }
+                let what =
+                    format!("{bytes} bytes from the launch and {own} of the kernel's, cooperative: {cooperative}");
+                let e = launch_own(&module, cooperative, index, launch, out.ptr()).expect_err(&what);
+                refusal("cuFuncSetAttribute", &e, &said(own, bytes));
+            }
+            let e = module.resident(index, 256, bytes).expect_err("resident");
+            refusal("cuFuncSetAttribute", &e, &said(own, bytes));
+        }
+        // A launch refused leaves the kernel as it was, and the GPU: the most it gives still runs,
+        // and so does a launch of the 48 KB it gets unasked.
+        for bytes in [all, (48 << 10) - own] {
+            out.zero().unwrap();
+            launch_own(&module, false, index, Grid::new(1, 1).with_shared(bytes), out.ptr()).unwrap();
+            assert_eq!(out.read().unwrap(), [if own > 0 { 7 } else { 0 }, 9], "{bytes} bytes and {own}");
+        }
+        assert!(module.resident(index, 256, all).unwrap() >= 1);
+    }
+    cuda.sync().unwrap();
+}
+
+#[test]
+fn the_first_size_past_is_said_whether_it_is_the_grids_or_the_shared_memorys() {
+    let Some(cuda) = cuda() else { return };
+    let most = cuda.max_shared();
+    let module = Module::load(&cuda, OWN, &["plain"], &[]).unwrap();
+    let out = cuda.alloc::<u32>(2).unwrap();
+    let shared = most + 4;
+    let grid = |blocks, threads| Grid { blocks, threads, shared };
+    let all = format!(
+        "each block has {shared} bytes of shared memory, 0 of the kernel's and {shared} of the launch's, and the GPU \
+         takes {most} at most"
+    );
+    // The shared memory is past the most in each, and the sizes of the grid come before it.
+    let cases = [
+        (grid([1, 65536, 1], [1, 1, 1]), "the grid has 65536 blocks along y, and the GPU takes 65535 at most"),
+        (grid([1, 1, 1], [1025, 1, 1]), "each block has 1025 threads along x, and the GPU takes 1024 at most"),
+        (grid([0, 1, 1], [1, 1, 1]), "the grid has 0 blocks along x, and the GPU takes 1 at least"),
+        (grid([1, 1, 1], [32, 32, 65]), "each block has 65 threads along z, and the GPU takes 64 at most"),
+        (grid([1, 1, 1], [1024, 2, 1]), "each block has 2048 threads, and the GPU takes 1024 at most"),
+        (grid([1, 1, 1], [1024, 1, 1]), all.as_str()),
+        (grid([1, 1, 1], [1, 1, 1]), all.as_str()),
+    ];
+    for (grid, said) in cases {
+        let e = launch_own(&module, false, 0, grid, out.ptr()).unwrap_err();
+        refusal("cuFuncSetAttribute", &e, said);
+    }
+    cuda.sync().unwrap();
+}
+
+/// A module of kernels written by hand, each adding 1 to the word at its pointer for each thread
+/// that runs, and each saying the directives after its name in `kernels`, one to a line.
+fn counting(kernels: &[(&str, &str)]) -> String {
+    let mut ptx = ".version 3.0\n.target sm_30\n.address_size 64\n".to_string();
+    for (name, directives) in kernels {
+        ptx += &format!(
+            "\n.visible .entry {name}(.param .u64 out_param)\n{directives}\n{{\n\t.reg .u64 %out;\n\n\
+             \tld.param.u64 %out, [out_param];\n\tcvta.to.global.u64 %out, %out;\n\
+             \tred.global.add.u32 [%out], 1;\n\tret;\n}}\n"
+        );
+    }
+    ptx
+}
+
+/// The kernels `counting` writes, in order: `.reqntid` of one size and of two, `.maxntid` of one
+/// size and of three, one with `.minnctapersm` after its `.maxntid`, and one with `.maxnreg` before it.
+const TUNED: [(&str, &str); 6] = [
+    ("req", ".reqntid 256"),
+    ("req_xy", ".reqntid 16, 16"),
+    ("max", ".maxntid 256"),
+    ("max_xyz", ".maxntid 8, 8, 4"),
+    ("max_blocks", ".maxntid 256\n.minnctapersm 2"),
+    ("regs", ".maxnreg 32\n.maxntid 128"),
+];
+
+/// The launches of the kernels of `TUNED`, each by its place in it, over blocks of so many threads
+/// along x, y and z, and what the driver does with it: starts blocks of so many threads, or says
+/// which size is past which limit.
+fn launches() -> Vec<(usize, [u32; 3], Result<u32, String>)> {
+    let req = |threads: u32, along: &str, exactly: u32| {
+        format!(
+            "each block has {threads} threads along {along}, and the kernel's `.reqntid 256` takes {exactly} exactly"
+        )
+    };
+    let max = |threads: u32, directive: &str, most: u32| {
+        format!("each block has {threads} threads, and the kernel's `.maxntid {directive}` takes {most} at most")
+    };
+    let xy = |threads: u32, along: &str| {
+        format!("each block has {threads} threads along {along}, and the kernel's `.reqntid 16, 16` takes 16 exactly")
+    };
+    vec![
+        // `.reqntid` takes a block of exactly its shape. A block of one thread is let through, and the
+        // driver starts the kernel's own threads in it: 256, not 1.
+        (0, [256, 1, 1], Ok(256)),
+        (0, [1, 1, 1], Ok(256)),
+        (0, [128, 1, 1], Err(req(128, "x", 256))),
+        (0, [512, 1, 1], Err(req(512, "x", 256))),
+        (0, [256, 2, 1], Err(req(2, "y", 1))),
+        (0, [16, 16, 1], Err(req(16, "x", 256))),
+        (1, [16, 16, 1], Ok(256)),
+        (1, [1, 1, 1], Ok(256)),
+        (1, [256, 1, 1], Err(xy(256, "x"))),
+        (1, [16, 8, 2], Err(xy(8, "y"))),
+        // `.maxntid` takes a block of at most that many threads in all, of any shape.
+        (2, [256, 1, 1], Ok(256)),
+        (2, [16, 16, 1], Ok(256)),
+        (2, [1, 1, 1], Ok(1)),
+        (2, [512, 1, 1], Err(max(512, "256", 256))),
+        (2, [16, 16, 2], Err(max(512, "256", 256))),
+        (3, [8, 8, 4], Ok(256)),
+        (3, [256, 1, 1], Ok(256)),
+        (3, [1024, 1, 1], Err(max(1024, "8, 8, 4", 256))),
+        (4, [256, 1, 1], Ok(256)),
+        (4, [257, 1, 1], Err(max(257, "256", 256))),
+        (5, [128, 1, 1], Ok(128)),
+        (5, [129, 1, 1], Err(max(129, "128", 128))),
+        // The GPU's limits are said before the kernel's.
+        (2, [2048, 1, 1], Err("each block has 2048 threads along x, and the GPU takes 1024 at most".into())),
+    ]
+}
+
+#[test]
+fn a_launch_over_a_block_the_kernel_refuses_says_the_directive_and_the_threads() {
+    let Some(cuda) = cuda() else { return };
+    let names: Vec<&str> = TUNED.iter().map(|(name, _)| *name).collect();
+    let module = Module::load(&cuda, &counting(&TUNED), &names, &[]).unwrap();
+    let mut count = cuda.alloc::<u32>(1).unwrap();
+    for (index, threads, done) in launches() {
+        let grid = Grid { blocks: [3, 1, 1], threads, shared: 0 };
+        count.zero().unwrap();
+        // SAFETY: each kernel takes a pointer, and adds to the word there.
+        let launched = unsafe { module.launch(index, grid, &[arg(&count.ptr())]) };
+        match (launched, done) {
+            (Ok(()), Ok(block)) => {
+                cuda.sync().unwrap();
+                assert_eq!(count.read().unwrap(), [3 * block], "{} over {grid:?}", names[index]);
+            }
+            (Err(e), Err(said)) => refusal("cuLaunchKernel", &e, &said),
+            (launched, done) => {
+                panic!("{} over {grid:?}: {launched:?}, and the driver should do {done:?}", names[index])
+            }
+        }
+    }
+    // The launches refused did not harm the GPU, nor the ones that started.
+    cuda.sync().unwrap();
+}
+
+#[test]
+fn a_cooperative_launch_over_a_block_the_kernel_refuses_says_it_too() {
+    let Some(cuda) = cuda() else { return };
+    if !cuda.cooperative() {
+        eprintln!("{} launches no kernel cooperatively: skipped", cuda.name());
+        return;
+    }
+    let names: Vec<&str> = TUNED.iter().map(|(name, _)| *name).collect();
+    let module = Module::load(&cuda, &counting(&TUNED), &names, &[]).unwrap();
+    let count = cuda.alloc::<u32>(1).unwrap();
+    // Only the blocks the kernel refuses: one it takes may have more blocks than it runs at once,
+    // which is refused in other words.
+    for (index, threads, said) in launches().into_iter().filter_map(|(i, t, done)| done.err().map(|said| (i, t, said)))
+    {
+        let grid = Grid { blocks: [3, 1, 1], threads, shared: 0 };
+        // SAFETY: each kernel takes a pointer, and adds to the word there.
+        let e = unsafe { module.launch_cooperative(index, grid, &[arg(&count.ptr())]) }.unwrap_err();
+        refusal("cuLaunchCooperativeKernel", &e, &said);
+    }
+    cuda.sync().unwrap();
+}
+
+#[test]
+fn the_kernels_block_is_said_after_the_gpus_limits_and_the_shared_memory() {
+    let Some(cuda) = cuda() else { return };
+    let names: Vec<&str> = TUNED.iter().map(|(name, _)| *name).collect();
+    let module = Module::load(&cuda, &counting(&TUNED), &names, &[]).unwrap();
+    let count = cuda.alloc::<u32>(1).unwrap();
+    let (index, most) = (2, cuda.max_shared());
+    let shared = most + 4;
+    // 512 threads are past the `.maxntid 256` of kernel `max`, which is at `index`, and `shared`
+    // is past what the GPU gives a block: the shared memory is said, for the kernel's block comes
+    // after it. The GPU's limits on the threads come before it too, which `launches` has.
+    let past_both = Grid { blocks: [3, 1, 1], threads: [512, 1, 1], shared };
+    let all = format!(
+        "each block has {shared} bytes of shared memory, 0 of the kernel's and {shared} of the launch's, and the GPU \
+         takes {most} at most"
+    );
+    let args = [arg(&count.ptr())];
+    // SAFETY: the kernels take a pointer, and add to the word there, if they start at all.
+    let e = unsafe { module.launch(index, past_both, &args) }.unwrap_err();
+    refusal("cuFuncSetAttribute", &e, &all);
+    if cuda.cooperative() {
+        // SAFETY: as above.
+        let e = unsafe { module.launch_cooperative(index, past_both, &args) }.unwrap_err();
+        refusal("cuFuncSetAttribute", &e, &all);
+    }
+    cuda.sync().unwrap();
+}

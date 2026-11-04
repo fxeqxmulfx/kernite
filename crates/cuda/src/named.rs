@@ -1,9 +1,11 @@
 //! The text of a module's GPU kernels, and their names, with the Rust module they are in
-//! written into them as Rust compiles it. kernite-macros writes the text before Rust knows the
-//! module, which a macro is not told, so it leaves a hole wherever the module's path goes, and
-//! [`__named!`](crate::__named) fills each with `module_path!()` as C++ mangles a namespace's
-//! names, `<length><name>` each: `my_app::gpu` is `6my_app3gpu`. The tools that read PTX
-//! show `_ZN7kernite6my_app3gpu5saxpyE` as `kernite::my_app::gpu::saxpy`.
+//! written into them as Rust compiles it, and with what its `cfg` keeps. kernite-macros writes
+//! the text in parts, before Rust knows the module, which a macro is not told, nor which `cfg`
+//! holds: it leaves a hole wherever the module's path goes, and puts each part under the `cfg` of
+//! the items it is of. [`__named!`](crate::__named) joins the parts that are kept and fills each
+//! hole with `module_path!()` as C++ mangles a namespace's names, `<length><name>` each:
+//! `my_app::gpu` is `6my_app3gpu`. The tools that read PTX show `_ZN7kernite6my_app3gpu5saxpyE` as
+//! `kernite::my_app::gpu::saxpy`.
 //!
 //! It is all `const`, so the text is a constant all the same: nothing is written as the
 //! program runs.
@@ -112,34 +114,43 @@ const fn number<const N: usize>(out: &mut [u8; N], i: usize, mut n: usize, base:
     i + d
 }
 
-/// How many bytes `pieces` take joined, with `hole` between each two.
-pub const fn joined_len(pieces: &[&str], hole: &[u8]) -> usize {
-    let mut n = 0;
-    let mut i = 0;
-    while i < pieces.len() {
-        n += pieces[i].len();
-        if i + 1 < pieces.len() {
-            n += hole.len();
+/// How many bytes `parts` take joined, each part's pieces with `hole` between each two.
+pub const fn joined_len(parts: &[&[&str]], hole: &[u8]) -> usize {
+    let (mut n, mut p) = (0, 0);
+    while p < parts.len() {
+        let pieces = parts[p];
+        let mut i = 0;
+        while i < pieces.len() {
+            n += pieces[i].len();
+            if i + 1 < pieces.len() {
+                n += hole.len();
+            }
+            i += 1;
         }
-        i += 1;
+        p += 1;
     }
     n
 }
 
-/// `pieces` joined, with `hole` between each two, for `N` the bytes [`joined_len`] says they
-/// take.
-pub const fn join<const N: usize>(pieces: &[&str], hole: &[u8]) -> [u8; N] {
+/// `parts` joined, each part's pieces with `hole` between each two, for `N` the bytes
+/// [`joined_len`] says they take.
+pub const fn join<const N: usize>(parts: &[&[&str]], hole: &[u8]) -> [u8; N] {
     let mut out = [0; N];
-    let (mut at, mut i) = (0, 0);
-    while i < pieces.len() {
-        let piece = pieces[i].as_bytes();
-        out.split_at_mut(at).1.split_at_mut(piece.len()).0.copy_from_slice(piece);
-        at += piece.len();
-        if i + 1 < pieces.len() {
-            out.split_at_mut(at).1.split_at_mut(hole.len()).0.copy_from_slice(hole);
-            at += hole.len();
+    let (mut at, mut p) = (0, 0);
+    while p < parts.len() {
+        let pieces = parts[p];
+        let mut i = 0;
+        while i < pieces.len() {
+            let piece = pieces[i].as_bytes();
+            out.split_at_mut(at).1.split_at_mut(piece.len()).0.copy_from_slice(piece);
+            at += piece.len();
+            if i + 1 < pieces.len() {
+                out.split_at_mut(at).1.split_at_mut(hole.len()).0.copy_from_slice(hole);
+                at += hole.len();
+            }
+            i += 1;
         }
-        i += 1;
+        p += 1;
     }
     out
 }
@@ -152,17 +163,20 @@ pub const fn text(bytes: &'static [u8]) -> &'static str {
     }
 }
 
-/// `pieces` joined, a constant `&'static str`, with the names of `path`, a Rust module's path,
-/// between each two, as C++ mangles a namespace's names: what kernite-macros writes for a
-/// module's PTX and its kernels' names, `path` its `module_path!()`.
+/// The parts joined, a constant `&'static str`: the pieces of each with the names of `path`, a Rust
+/// module's path, between each two, as C++ mangles a namespace's names. A part with an attribute,
+/// `#[cfg(..)]`, is there where Rust keeps it, and only there. It is what kernite-macros writes for
+/// a module's PTX and its kernels' names, `path` its `module_path!()`. It is expanded in the module
+/// of kernels, which may give `u8` and `str` another type, so it names the primitives by path.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __named {
-    ($path:expr, [$($piece:expr),* $(,)?]) => {{
-        const PATH: &str = $path;
-        const SCOPE: [u8; $crate::named::scope_len(PATH)] = $crate::named::scope(PATH);
-        const PIECES: &[&str] = &[$($piece),*];
-        const TEXT: [u8; $crate::named::joined_len(PIECES, &SCOPE)] = $crate::named::join(PIECES, &SCOPE);
+    ($path:expr, [$($(#[$cfg:meta])* [$($piece:expr),* $(,)?]),* $(,)?]) => {{
+        const PATH: &::core::primitive::str = $path;
+        const SCOPE: [::core::primitive::u8; $crate::named::scope_len(PATH)] = $crate::named::scope(PATH);
+        const PARTS: &[&[&::core::primitive::str]] = &[$($(#[$cfg])* &[$($piece),*]),*];
+        const TEXT: [::core::primitive::u8; $crate::named::joined_len(PARTS, &SCOPE)] =
+            $crate::named::join(PARTS, &SCOPE);
         $crate::named::text(&TEXT)
     }};
 }
@@ -173,19 +187,48 @@ mod tests {
 
     #[test]
     fn each_name_of_the_path_is_its_length_and_itself() {
-        const NAME: &str = crate::__named!("my_app::gpu", ["_ZN7kernite", "5saxpyE"]);
+        const NAME: &str = crate::__named!("my_app::gpu", [["_ZN7kernite", "5saxpyE"]]);
         assert_eq!(NAME, "_ZN7kernite6my_app3gpu5saxpyE");
-        const LONG: &str = crate::__named!("a::abcdefghijklmnopqrstuvwxyz_0123456789::b", ["_ZN", "1fE"]);
+        const LONG: &str = crate::__named!("a::abcdefghijklmnopqrstuvwxyz_0123456789::b", [["_ZN", "1fE"]]);
         assert_eq!(LONG, "_ZN1a37abcdefghijklmnopqrstuvwxyz_01234567891b1fE");
-        assert_eq!(crate::__named!(module_path!(), ["_ZN", "1kE"]), "_ZN12kernite_cuda5named5tests1kE");
+        assert_eq!(crate::__named!(module_path!(), [["_ZN", "1kE"]]), "_ZN12kernite_cuda5named5tests1kE");
     }
 
     #[test]
     fn the_path_goes_in_each_hole_and_only_there() {
-        const TEXT: &str = crate::__named!("x::y", ["a ", " b ", ""]);
+        const TEXT: &str = crate::__named!("x::y", [["a ", " b ", ""]]);
         assert_eq!(TEXT, "a 1x1y b 1x1y");
-        assert_eq!(crate::__named!("x", ["just text"]), "just text");
+        assert_eq!(crate::__named!("x", [["just text"]]), "just text");
         assert_eq!(crate::__named!("x", []), "");
+        assert_eq!(crate::__named!("x", [[]]), "");
+    }
+
+    #[test]
+    fn the_parts_are_joined_where_cfg_keeps_them() {
+        const TEXT: &str = crate::__named!(
+            "x",
+            [
+                ["a "],
+                #[cfg(any())]
+                ["gone "],
+                #[cfg(all())]
+                [" b ", "!"],
+                #[cfg(not(all()))]
+                [" never ", "?"],
+                ["c"],
+            ]
+        );
+        assert_eq!(TEXT, "a  b 1x!c");
+        const NONE: &str = crate::__named!(
+            "x",
+            [
+                #[cfg(any())]
+                ["gone"],
+                #[cfg(any())]
+                ["too"]
+            ]
+        );
+        assert_eq!(NONE, "");
     }
 
     #[test]

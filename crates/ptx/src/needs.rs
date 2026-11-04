@@ -18,9 +18,7 @@ pub struct Needs {
 
 /// The GPUs kernite writes for, by their `sm_` numbers, and the version of PTX that came with
 /// each, which a module for it is of at least.
-pub const GPUS: [(u32, u32); 17] = [
-    (20, 20),
-    (21, 20),
+pub const GPUS: [(u32, u32); 15] = [
     (30, 30),
     (32, 40),
     (35, 31),
@@ -39,9 +37,10 @@ pub const GPUS: [(u32, u32); 17] = [
 ];
 
 impl Needs {
-    /// What every module is written for: PTX 2.3, the first with `.address_size 64`, which
-    /// every module has, and Fermi, `sm_20`, the oldest GPU the driver compiles PTX for.
-    pub const FLOOR: Needs = Needs { ptx: 23, sm: 20, below: 0, since: 0 };
+    /// What every module is written for: Kepler, `sm_30`, and PTX 3.0, which came with it. The
+    /// driver starts at most 65535 blocks along x of a module written for an older GPU, Fermi's
+    /// `sm_20` or `sm_21`, whatever the GPU it runs on, and 2^31 - 1 of one written for Kepler.
+    pub const FLOOR: Needs = Needs { ptx: 30, sm: 30, below: 0, since: 0 };
 
     /// What both need, and the narrower of the GPUs they are for.
     pub fn and(self, other: Needs) -> Needs {

@@ -99,3 +99,27 @@ fn the_facades_read_the_attributes_of_every_function_of_the_module() {
     let not = "a kernel trusts the pointers it is given, so it is an `unsafe fn`";
     assert_eq!(kernite::ptx_str(&src).unwrap_err(), format!("2:40: {not}"));
 }
+
+#[test]
+fn the_facades_read_the_directives_of_every_function_of_the_module() {
+    // A directive is a GPU kernel's: `x86_str` reads those of the GPU's other functions and of the
+    // helpers, and `ptx_str` those of the process's kernels.
+    let goes = "goes on a GPU kernel, `extern \"ptx-kernel\"`";
+    let x86 = "pub unsafe extern \"sysv64\" fn k() {}\n";
+    let func = "`f` is a function the kernels call, which runs as the kernel that calls it is launched";
+    let helper = "`h` is a helper, inlined where it is called";
+    for (item, what) in [("#[maxntid(256)] extern \"ptx-func\" fn f() {}", func), ("#[maxntid(256)] fn h() {}", helper)]
+    {
+        let src = format!("{x86}{item}\n");
+        let want = format!("2:3: `#[maxntid(..)]` {goes}; {what}");
+        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), want, "{item}");
+    }
+    let ptx = "pub unsafe extern \"ptx-kernel\" fn k() {}\n";
+    let src = format!("{ptx}#[reqntid(8)] pub unsafe extern \"sysv64\" fn j() {{}}\n");
+    let want = format!("2:3: `#[reqntid(..)]` {goes}; `j` is a kernel for x86-64, which the process runs");
+    assert_eq!(kernite::ptx_str(&src).unwrap_err(), want);
+    // A kernel that is not `unsafe` is said first, before its directives.
+    let src = format!("{ptx}#[maxntid(1)] pub extern \"sysv64\" fn j() {{}}\n");
+    let not = "a kernel trusts the pointers it is given, so it is an `unsafe fn`";
+    assert_eq!(kernite::ptx_str(&src).unwrap_err(), format!("2:38: {not}"));
+}
