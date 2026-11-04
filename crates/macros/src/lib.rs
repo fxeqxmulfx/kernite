@@ -284,7 +284,9 @@
 //! a stub of its signature or its launcher, so that its callers are not errors as well. Both
 //! are under the kernel's `cfg`, as a helper's errors and a static's are under theirs, and so
 //! are the function of each of its instances and the module of its constants: what `cfg` leaves
-//! out says nothing.
+//! out says nothing. A module of x86 kernels has `LISTINGS` whether its kernels compile or not,
+//! with the listing of each that compiles and `cfg` keeps, and of no other; a module of GPU
+//! kernels alone has none.
 //!
 //! kernite refuses a module of kernels whole, at its attribute, for an argument of `#[kernels]` that is not
 //! `consts = path`, such as `consts = 5`, and for consts given in a crate with no dependency named `kernite-macros`. It

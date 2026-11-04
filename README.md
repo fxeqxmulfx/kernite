@@ -169,9 +169,10 @@ leaves out with every item that names it is not said of, and one that `cfg` keep
 is unused to Rust, which says so as it does of any const that nothing names.
 
 A module holds what `cfg` keeps: Rust puts it together, where it knows which `cfg` holds. `LISTINGS` has the listing
-of each x86 kernel that `cfg` keeps, and of no other. `PTX` has each GPU kernel, function and static that `cfg`
-keeps, for the PTX and the GPU that the kernels and functions kept need, and `Kernels::load` asks the driver for the
-names of those alone.
+of each x86 kernel that compiles and `cfg` keeps, and of no other. A module of x86 kernels has it whether its kernels
+compile or not, so Rust says nothing of the code that names it, and it is empty where none compiles. A module of GPU
+kernels alone has none. `PTX` has each GPU kernel, function and static that `cfg` keeps, for the PTX and the GPU that
+the kernels and functions kept need, and `Kernels::load` asks the driver for the names of those alone.
 
 kernite reads every item before Rust knows which `cfg` holds, as Rust parses every item before it does, so an item it
 cannot read is said whatever `cfg` holds, as Rust says a syntax error in a function it leaves out: the head of a

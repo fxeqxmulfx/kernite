@@ -705,9 +705,10 @@ const REFUSED: &str = "`#[kernels]` takes the module of consts its kernels read,
                        module `#[kernite_macros::consts]` is on; or nothing";
 
 /// A module of kernels that `#[kernels]` refuses at its attribute, `consts = 5`, is told its refusal once, there. It is
-/// still there, each kernel as of one that does not compile and each static as its type has it, so Rust says nothing of
-/// the code that names its items: from the crate's root, from another module by path and by `use`, or by a glob. A
-/// module kernite cannot read has the refusal alone. What else such a module is told is the tests' below.
+/// still there, each kernel as of one that does not compile and each static as its type has it, and a module of x86
+/// kernels has an empty `LISTINGS`, so Rust says nothing of the code that names its items: from the crate's root, from
+/// another module by path and by `use`, or by a glob. A module kernite cannot read has the refusal alone. What else
+/// such a module is told is the tests' below.
 #[test]
 fn a_module_of_kernels_refused_at_its_attribute_is_still_there_for_the_code_that_names_it() {
     refuses(
@@ -1009,6 +1010,23 @@ fn listings_holds_what_cfg_keeps() {
     let dir = written("configured_listings");
     builds_quietly_in(&["build"], "configured_listings", &dir);
     builds_quietly_in(&["build", "--features", "more"], "configured_listings", &dir);
+}
+
+/// A module of x86 kernels has `LISTINGS` whether its kernels compile or not, so Rust says nothing of the code that
+/// names it, a glob's included: kernite's errors are the only ones. It holds the listing of each kernel that compiles
+/// and `cfg` keeps, and of no other, and nothing where no kernel compiles. A module of GPU kernels alone has none,
+/// so a glob of it beside one of a module with a `LISTINGS` of its own is not ambiguous. The fixture's consts assert
+/// what each holds, which Rust evaluates beside kernite's errors.
+#[test]
+fn a_module_of_x86_kernels_has_listings_whether_its_kernels_compile_or_not() {
+    refuses(
+        "listings_uncompiled",
+        &[
+            "src/lib.rs:15:16: error: `nope` is not defined",
+            "src/lib.rs:29:16: error: `nope` is not defined",
+            "error: could not compile `listings_uncompiled` (lib) due to 2 previous errors",
+        ],
+    );
 }
 
 #[test]

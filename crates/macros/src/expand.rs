@@ -160,7 +160,9 @@ pub(crate) fn expand(
         out.extend([TokenTree::Group(Group::new(Delimiter::Brace, reads))]);
         out.extend(parse(";"));
     }
-    if !listed.is_empty() {
+    // A module with an x86 kernel has `LISTINGS` whether its kernels compile or not, and a module of GPU
+    // kernels alone has none.
+    if made.items.iter().any(|item| matches!(item, ItemOut::Native(_))) {
         let mut listings = TokenStream::new();
         for (cfg, (name, text)) in listed {
             listings.extend(cfg.clone());
@@ -168,7 +170,8 @@ pub(crate) fn expand(
         }
         out.extend(parse(
             "/// Each x86 kernel's listing that `cfg` keeps, by name, an instance's as `tile::<4>`: where its\n\
-             /// variables live, and its code with its notes, for snapshots.\n\
+             /// variables live, and its code with its notes, for snapshots. A kernel that does not compile has\n\
+             /// none.\n\
              pub const LISTINGS: &[(&::core::primitive::str, &::core::primitive::str)] = &",
         ));
         out.extend([TokenTree::Group(Group::new(Delimiter::Bracket, listings))]);
