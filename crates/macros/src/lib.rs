@@ -233,8 +233,9 @@
 //! name, of the statics it and the functions it calls name, whether it calls them by name or
 //! at an address. One that does not compile is a `compile_error!` where the trouble is, beside
 //! a stub of its signature or its launcher, so that its callers are not errors as well. Both
-//! are under the kernel's `cfg`, as a helper's errors and a static's are under theirs: what
-//! `cfg` leaves out says nothing.
+//! are under the kernel's `cfg`, as a helper's errors and a static's are under theirs, and so
+//! are the function of each of its instances and the module of its constants: what `cfg` leaves
+//! out says nothing.
 
 extern crate proc_macro;
 

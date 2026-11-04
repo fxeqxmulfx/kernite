@@ -98,8 +98,8 @@ pub(crate) fn expand(given: Option<(TokenStream, &[TokenTree])>, body: TokenStre
                 out.extend(k.not_unsafe.as_ref().map(said));
                 out.extend(k.said.as_ref().map(said));
                 out.extend(match k.written {
-                    true => naked(module, f, &k.instances, &k.touched, &top),
-                    false => x86_stub(f, k.count, &k.touched, &top),
+                    true => naked(module, f, &k.instances, &k.touched, cfg, &top),
+                    false => x86_stub(f, k.count, &k.touched, cfg, &top),
                 });
                 out.extend(k.errors.iter().map(said));
             }

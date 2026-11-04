@@ -204,6 +204,28 @@ fn clippy_here() -> bool {
     has
 }
 
+/// A machine other than x86-64 to check a crate for: a 32-bit ARM, which has no `extern "sysv64"`. Cargo checks a
+/// crate for it without a linker, so long as the target's standard library is here.
+const ARM: &str = "arm-unknown-linux-gnueabihf";
+
+/// Whether this machine has the standard library of [`ARM`], which the tests that check a crate for it skip
+/// without, and say so.
+fn arm_here() -> bool {
+    let libs = Command::new("rustc").args(["--print", "target-libdir", "--target", ARM]).output();
+    let has = libs.is_ok_and(|out| Path::new(String::from_utf8_lossy(&out.stdout).trim()).is_dir());
+    if !has {
+        eprintln!("no standard library for {ARM} here: skipped");
+    }
+    has
+}
+
+/// That Cargo checks fixture `name` for [`ARM`] without a word, if this machine can check a crate for it.
+fn checks_quietly_for_arm(name: &str) {
+    if arm_here() {
+        builds_quietly_in(&["check", "--target", ARM], name, &written(name));
+    }
+}
+
 #[test]
 fn the_macro_says_what_it_refuses_where_it_is() {
     // The modules given `STEP` come last: Rust expands each a step later, when the macro of the
@@ -753,6 +775,55 @@ fn a_name_is_told_where_the_kernel_is_kept_and_the_item_is_not() {
 fn what_cfg_keeps_of_what_a_kernel_names_builds_and_runs() {
     let printed = runs_quietly(&["test", "--features", "big,wide"], "configured_names");
     assert!(printed.contains("1 passed"), "fixtures/configured_names.rs ran its test, and printed:\n{printed}");
+}
+
+/// A kernel of compile-time arguments and a cooperative one that a feature leaves out with what they name, a
+/// static and an x86 kernel, say nothing without it. With it, they build without a word, and run.
+#[test]
+fn kernels_of_instances_and_cooperative_ones_that_a_feature_leaves_out_say_nothing() {
+    builds_quietly("configured_hidden");
+    let printed = runs_quietly(&["test", "--features", "big"], "configured_hidden");
+    assert!(printed.contains("1 passed"), "fixtures/configured_hidden.rs ran its test, and printed:\n{printed}");
+}
+
+/// A crate that keeps its x86 kernels only on x86-64, by `cfg(target_arch = "x86_64")`, builds for another
+/// machine without a word, under `deny(warnings)`. Only x86-64 has `extern "sysv64"`, so each function the
+/// macros write for a kernel goes with it, one for each instance as well. The fixture has a kernel whose code
+/// holds a constant, one of compile-time arguments, and one of those whose instances hold a constant. For
+/// x86-64 it keeps them, and they run.
+#[test]
+fn x86_kernels_that_cfg_leaves_out_say_nothing_for_another_machine() {
+    checks_quietly_for_arm("other_machine");
+    let printed = runs_quietly(&["test"], "other_machine");
+    assert!(printed.contains("1 passed"), "fixtures/other_machine.rs ran its test, and printed:\n{printed}");
+}
+
+/// So do cooperative x86 kernels, a plain one, one whose code holds a constant and one of compile-time
+/// arguments, in a crate that takes `kernite-cpu` on every machine. For x86-64 they run on a grid.
+#[test]
+fn cooperative_x86_kernels_that_cfg_leaves_out_say_nothing_for_another_machine() {
+    checks_quietly_for_arm("other_machine_cooperative");
+    let printed = runs_quietly(&["test"], "other_machine_cooperative");
+    assert!(
+        printed.contains("1 passed"),
+        "fixtures/other_machine_cooperative.rs ran its test, and printed:\n{printed}"
+    );
+}
+
+/// So does an x86 kernel of compile-time arguments that kernite refuses: its stub has a function for each
+/// instance, for the kernels that call one, and it goes with the kernel too. For x86-64 the kernel is kernite's
+/// error for each instance, and nothing else.
+#[test]
+fn a_refused_x86_kernel_of_instances_that_cfg_leaves_out_says_nothing_for_another_machine() {
+    checks_quietly_for_arm("other_machine_refused");
+    refuses(
+        "other_machine_refused",
+        &[
+            "src/lib.rs:10:13: error: in `tiles::<1>`: `v` is read before anything writes it",
+            "src/lib.rs:10:13: error: in `tiles::<2>`: `v` is read before anything writes it",
+            "error: could not compile `other_machine_refused` (lib) due to 2 previous errors",
+        ],
+    );
 }
 
 /// A module of GPU kernels needs `kernite-cuda` where `cfg` keeps one of its GPU items, and not

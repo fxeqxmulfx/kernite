@@ -31,17 +31,20 @@ const CPU: &str = "kernite-cpu";
 /// the operands [`callees`] gives, and its statics by those [`reached`] gives. Its safety contract
 /// says that nothing else touches `named`, the module's memory, while it runs. A cooperative
 /// kernel of a crate without `kernite-cpu` is [`x86_stub`]'s instead, with the error that says so.
+/// All this writes is under `cfg`, `f`'s own, the module of its statics included: an instance is `extern
+/// "sysv64"`, which only x86-64 has, so a crate that keeps `f` there alone builds for another machine.
 pub(crate) fn naked(
     module: &lang::Module,
     f: &Fn,
     instances: &[NativeInstance],
     named: &[String],
+    cfg: &TokenStream,
     top: &[TokenTree],
 ) -> TokenStream {
     let hidden = format!("__kernite_{}", f.name);
     let cooperative = f.cooperative.is_some();
     if cooperative && !depends_on(CPU) {
-        return x86_stub(f, instances.len(), named, top);
+        return x86_stub(f, instances.len(), named, cfg, top);
     }
     let mut out = TokenStream::new();
     let mut statics = vec![];
@@ -88,6 +91,7 @@ pub(crate) fn naked(
                 reached(module, listing, top),
                 None,
             );
+            fns.extend(cfg.clone());
             fns.extend(parse(&format!(
                 "#[doc(hidden)]\n#[unsafe(naked)]\nunsafe extern \"sysv64\" fn {name}({}) {ret}",
                 params.join(", ")
@@ -130,6 +134,7 @@ pub(crate) fn naked(
         }
     }
     if !items.is_empty() {
+        out.extend(cfg.clone());
         out.extend(parse(&format!("#[doc(hidden)]\nmod {hidden} {{\n{items}}}\n")));
     }
     out
@@ -433,8 +438,14 @@ fn needs(instances: &[NativeInstance]) -> TokenStream {
 /// `kernite-cpu`, as a function that never runs: of `f`'s signature, or of its launcher's, for a
 /// cooperative kernel. One of compile-time arguments has its `instances` as functions too, named
 /// as [`naked`] would name them, for kernels that call one to name. Its safety contract says what
-/// the kernel's would of `named`, the module's memory.
-pub(crate) fn x86_stub(f: &Fn, instances: usize, named: &[String], top: &[TokenTree]) -> TokenStream {
+/// the kernel's would of `named`, the module's memory. Each instance is under `cfg`, `f`'s own, as `f` is.
+pub(crate) fn x86_stub(
+    f: &Fn,
+    instances: usize,
+    named: &[String],
+    cfg: &TokenStream,
+    top: &[TokenTree],
+) -> TokenStream {
     if f.cooperative.is_some() {
         return grid_launcher(f, None, TokenStream::new(), named, top);
     }
@@ -442,6 +453,7 @@ pub(crate) fn x86_stub(f: &Fn, instances: usize, named: &[String], top: &[TokenT
     if !f.generics.is_empty() {
         for k in 0..instances {
             let name = instance_name(&f.name, k);
+            out.extend(cfg.clone());
             out.extend(parse(&format!(
                 "#[doc(hidden)]\nunsafe extern \"sysv64\" fn {name}() {{ ::core::unreachable!() }}\n"
             )));

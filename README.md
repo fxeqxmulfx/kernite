@@ -93,6 +93,9 @@ A function or a static that `cfg` leaves out says nothing, as Rust says nothing 
 runs before Rust knows which `cfg` holds, so kernite compiles each one, and puts each error it finds in one under the
 same `#[cfg(..)]` or `#[cfg_attr(.., cfg(..))]`: a kernel that does not compile, or is not `unsafe`, a helper, a static.
 Where `cfg` leaves them out, the crate builds without a word; where it keeps them, each error is said where it is.
+A crate that keeps its x86 kernels on x86-64 alone, by `cfg(target_arch = "x86_64")`, builds for another machine
+without a word, though only x86-64 has `extern "sysv64"`: each function kernite writes for a kernel is under the
+kernel's `cfg` too, as one for each instance of a kernel of compile-time arguments or of a cooperative one.
 
 A kernel names the items of its module that it uses: a const it reads, a static, a helper, a kernel or an
 `extern "ptx-func"` function it calls. A kernel names an item in its body, in its `#[instances(..)]`, in its directives
