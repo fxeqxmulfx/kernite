@@ -44,11 +44,14 @@ fn alone() -> MutexGuard<'static, ()> {
 }
 
 /// The first four CPUs the caller's thread may run on, one more than a grid has threads, if the
-/// machine runs that many threads at once; none if not.
+/// process runs that many threads at once; none if not.
 fn four() -> Option<Vec<usize>> {
     let all = cpus().unwrap();
     if all.len() < THREADS + 1 || most().unwrap() < THREADS {
-        eprintln!("the machine has fewer than four CPUs, or runs fewer than three threads at once: skipped");
+        eprintln!(
+            "the caller's thread may run on fewer than four CPUs, or the process runs fewer than three threads at \
+             once: skipped"
+        );
         return None;
     }
     Some(all[..4].to_vec())

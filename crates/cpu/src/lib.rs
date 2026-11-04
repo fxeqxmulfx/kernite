@@ -25,7 +25,8 @@
 //!
 //! A thread that waits at `grid.sync()` spins until the last comes, so each needs a core of
 //! its own while it waits, as each block of a cooperative GPU kernel needs room on the GPU: a
-//! grid has at most as many threads as the machine runs at once, [`most`].
+//! grid has at most as many threads as the process runs at once, [`most`]. That is the CPUs
+//! [`cpus`] lists, or fewer where a cgroup limits the process to fewer.
 //!
 //! The threads a launch needs besides the caller's are kept for the caller's launches after it:
 //! the first starts them, and each next hands the kernel to threads that run already. A kept
@@ -195,9 +196,9 @@ impl std::error::Error for Error {}
 /// lists, or fewer where a cgroup limits the process to fewer.
 pub fn most() -> Result<usize, Error> {
     static MOST: LazyLock<Result<usize, Error>> = LazyLock::new(|| {
-        thread::available_parallelism()
-            .map(NonZero::get)
-            .map_err(|e| Error { message: format!("the machine does not say how many threads it runs at once: {e}") })
+        thread::available_parallelism().map(NonZero::get).map_err(|e| Error {
+            message: format!("the system does not say how many threads the process runs at once: {e}"),
+        })
     });
     MOST.clone()
 }
@@ -292,7 +293,11 @@ pub fn launch(grid: Grid<'_>, kernel: impl Fn(&Place) + Send + Sync + 'static) -
         return Err(Error { message: "a grid has one thread at least, and this has none".into() });
     }
     if threads > most {
-        return Err(Error { message: format!("the grid has {threads} threads, and the machine runs {most} at once") });
+        let message = format!(
+            "the grid has {threads} threads, and the process runs {most} at once: the CPUs the caller's thread may run \
+             on, or fewer where a cgroup limits the process to fewer"
+        );
+        return Err(Error { message });
     }
     let mut team = KEPT.take();
     let ready = CALLER.with_borrow_mut(|caller| match grid.cpus {
@@ -620,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn a_grid_has_one_thread_to_as_many_as_the_machine_runs_at_once() {
+    fn a_grid_has_one_thread_to_as_many_as_the_process_runs_at_once() {
         let most = most().unwrap();
         let never = |_: &Place| panic!("no thread runs");
         assert_eq!(
@@ -629,7 +634,11 @@ mod tests {
         );
         assert_eq!(
             launch(Grid::new(most + 1), never).unwrap_err().message,
-            format!("the grid has {} threads, and the machine runs {most} at once", most + 1)
+            format!(
+                "the grid has {} threads, and the process runs {most} at once: the CPUs the caller's thread may run \
+                 on, or fewer where a cgroup limits the process to fewer",
+                most + 1
+            )
         );
     }
 

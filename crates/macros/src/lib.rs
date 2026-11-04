@@ -220,9 +220,10 @@
 //! the kernel on every thread at once, and returns when all have ended:
 //! `cpu::normalize(kernite_cpu::Grid::new(4), x.as_mut_ptr(), sums.as_mut_ptr(), n)?`. A thread
 //! spins at `grid.sync()` until the last comes, so a grid has at most as many threads as the
-//! machine runs at once, `kernite_cpu::most()`, and more is an error. A crate with such a kernel
-//! needs a dependency named `kernite-cpu` for it, not renamed in `Cargo.toml`, and the error is at
-//! the kernel when it has none.
+//! process runs at once, `kernite_cpu::most()`: the CPUs the caller's thread may run on, or fewer
+//! where a cgroup limits the process to fewer. More is an error. A crate with such a kernel needs
+//! a dependency named `kernite-cpu` for it, not renamed in `Cargo.toml`, and the error is at the
+//! kernel when it has none.
 //!
 //! A GPU kernel is named in PTX as C++ names a function in namespaces, those of the
 //! workspace, the crate and its modules, mangled under Itanium's ABI:

@@ -346,7 +346,8 @@ fn grid_launcher(
     out.extend(needs);
     out.extend(parse(
         "#[doc = \"\"]\n#[doc = \" Every thread of the grid runs at once, as `grid.sync()` needs, each on a core, so a \
-         grid of more threads than [`kernite_cpu::most`] says the machine runs is an error.\"]",
+         grid has at most as many threads as the process runs at once, [`kernite_cpu::most`]: the CPUs the caller's \
+         thread may run on, or fewer where a cgroup limits the process to fewer. More is an error.\"]",
     ));
     let memory = match named {
         [] => String::new(),

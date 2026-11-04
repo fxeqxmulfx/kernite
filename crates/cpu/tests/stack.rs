@@ -36,7 +36,7 @@ fn again(name: &str, stack: usize) {
 #[test]
 fn a_thread_that_cannot_start_is_an_error_and_no_thread_runs_the_kernel() {
     if most().unwrap() < 2 {
-        return eprintln!("the machine runs one thread at once, so no grid starts a thread: skipped");
+        return eprintln!("the process runs one thread at once, so no grid starts a thread: skipped");
     }
     if !is_child() {
         // More than the address space has: no stack of it can be mapped.

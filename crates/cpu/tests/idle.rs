@@ -101,7 +101,7 @@ fn kept_threads_spin_for_a_launch_that_comes_soon_then_sleep_and_end_with_their_
     assert_eq!(SPIN, Duration::from_micros(200), "README says a kept thread spins for 200 microseconds");
     let threads = most().unwrap().min(4);
     if threads < 2 {
-        return eprintln!("the machine runs one thread at once, so no grid keeps a thread: skipped");
+        return eprintln!("the process runs one thread at once, so no grid keeps a thread: skipped");
     }
     let Some(before) = tasks() else { return eprintln!("no /proc/self/task: skipped") };
     let caller = thread::spawn(move || {

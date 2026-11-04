@@ -1087,7 +1087,8 @@ fn weigh_on_cpu(x: &mut [f32]) {
 /// `x / s` on `threads` threads of the cpu, `s` the sum of `x`, in one launch: each thread
 /// sums its chunks of 1024 floats while the others sum theirs, then waits for them to add the
 /// chunks' sums, bit for bit as `normalize` does on the GPU. `threads` is one at least, and at
-/// most as many as the machine runs at once, `kernite_cpu::most()`; else it is an error.
+/// most as many as the process runs at once, `kernite_cpu::most()`: the CPUs the caller's thread
+/// may run on, or fewer where a cgroup limits the process to fewer. More is an error.
 fn normalize_on_threads(x: &mut [f32], threads: usize) -> Result<(), kernite_cpu::Error> {
     assert!(supported(), "the kernels need AVX2 and FMA");
     let mut sums = vec![0.0; x.len().div_ceil(1024)];
@@ -1098,8 +1099,9 @@ fn normalize_on_threads(x: &mut [f32], threads: usize) -> Result<(), kernite_cpu
 
 /// `steps` steps of heat spreading along `x` on `threads` threads of the cpu, in one launch,
 /// the threads waiting for each other between steps, bit for bit as `diffuse` does on the
-/// GPU. `threads` is one at least, and at most as many as the machine runs at once,
-/// `kernite_cpu::most()`; else it is an error.
+/// GPU. `threads` is one at least, and at most as many as the process runs at once,
+/// `kernite_cpu::most()`: the CPUs the caller's thread may run on, or fewer where a cgroup limits
+/// the process to fewer. More is an error.
 fn diffuse_on_threads(x: &mut [f32], steps: usize, threads: usize) -> Result<(), kernite_cpu::Error> {
     assert!(supported(), "the kernels need AVX2 and FMA");
     let mut y = vec![0.0; x.len()];
@@ -1967,24 +1969,31 @@ mod tests {
         too_large(super::diffuse(&cuda, &kernels, &mut vec![0.0; all + 1], 1).unwrap_err(), most + 1, most);
     }
 
-    /// How many threads the cpu tests run on at most: four, or as many as the machine runs at
+    /// How many threads the cpu tests run on at most: four, or as many as the process runs at
     /// once if fewer, since `cargo test` runs tests beside each other and each thread spins at
     /// a barrier.
     fn threads() -> usize {
         kernite_cpu::most().unwrap().min(4)
     }
 
-    /// The error of a grid of more threads than the machine runs at once.
+    /// The error of a grid of more threads than the process runs at once.
     fn too_many(e: kernite_cpu::Error) {
         let most = kernite_cpu::most().unwrap();
-        assert_eq!(e.message, format!("the grid has {} threads, and the machine runs {most} at once", most + 1));
+        assert_eq!(
+            e.message,
+            format!(
+                "the grid has {} threads, and the process runs {most} at once: the CPUs the caller's thread may run \
+                 on, or fewer where a cgroup limits the process to fewer",
+                most + 1
+            )
+        );
     }
 
     /// The cpu's `normalize` against [`normalized`], the GPU's reference, bit for bit, on one
     /// thread to four, each time of ten: of no float and of one, of a chunk and a float less and
     /// more, and of chunks enough that each thread has several, the last partial, so that a
     /// thread that went on before the others had written their sums would show; and a grid of
-    /// more threads than the machine runs is an error.
+    /// more threads than the process runs at once is an error.
     #[test]
     fn normalize_on_threads_is_the_gpus_reference_bit_for_bit() {
         assert!(super::supported(), "the kernels need AVX2 and FMA");
@@ -2036,7 +2045,7 @@ mod tests {
     /// to four: of floats fewer than a vector and its neighbours, of a chunk and one more, and
     /// of chunks enough that each thread has several, over a thousand steps, each a wait of the
     /// grid, so that a thread that read a neighbour of another step would show; and a grid of
-    /// more threads than the machine runs is an error.
+    /// more threads than the process runs at once is an error.
     #[test]
     fn diffuse_on_threads_is_the_gpus_reference_bit_for_bit() {
         assert!(super::supported(), "the kernels need AVX2 and FMA");

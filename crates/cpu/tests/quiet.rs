@@ -114,7 +114,7 @@ fn assert_places_no_memory(name: &str) {
     assert!(memory.is_empty(), "{name}: {} {message}:\n{}", memory.len(), memory[..memory.len().min(5)].join("\n"));
 }
 
-/// A thousand launches on one thread, after the first, which asks how many threads the machine
+/// A thousand launches on one thread, after the first, which asks how many threads the process
 /// runs and, if the grid is placed, puts the caller on its CPU: `strace` shows no call between the
 /// two files the process asks for.
 #[test]
@@ -145,7 +145,7 @@ fn a_launch_on_many_threads_starts_no_thread_maps_no_stack_and_asks_about_no_cpu
     }
     let threads = most().unwrap().min(6);
     if threads < 2 {
-        return eprintln!("the machine runs one thread at once, so no grid has many: skipped");
+        return eprintln!("the process runs one thread at once, so no grid has many: skipped");
     }
     let name = "a_launch_on_many_threads_starts_no_thread_maps_no_stack_and_asks_about_no_cpu";
     for placed in [false, true] {
@@ -172,9 +172,9 @@ struct Step {
     sets: usize,
 }
 
-/// The steps for a grid of `threads` threads, two at least, on the machine's `cpus`, which are as
-/// many. They begin with the grid not placed, which has started the threads, so that the first
-/// step is the first to place it.
+/// The steps for a grid of `threads` threads, two at least, on `cpus`, those the caller's thread
+/// may run on, which are as many. They begin with the grid not placed, which has started the
+/// threads, so that the first step is the first to place it.
 fn script(cpus: &[usize], threads: usize) -> Vec<Step> {
     let on = |placed: &[usize], reads, sets| Step { placed: Some(placed.to_vec()), threads: placed.len(), reads, sets };
     let anywhere = |threads, reads, sets| Step { placed: None, threads, reads, sets };
@@ -215,7 +215,7 @@ fn script(cpus: &[usize], threads: usize) -> Vec<Step> {
 }
 
 /// What the process `strace` runs for the test of changes does: a launch not placed, which starts
-/// the threads and asks how many the machine runs, then the steps, a mark before each.
+/// the threads and asks how many the process runs, then the steps, a mark before each.
 fn changes(threads: usize) {
     launch(Grid::new(threads), |_| {}).unwrap();
     let script = script(&cpus().unwrap(), threads);
@@ -245,7 +245,7 @@ fn a_launch_that_changes_the_placement_makes_a_call_for_each_thread_that_moves_a
     let all = cpus().unwrap();
     let threads = most().unwrap().min(all.len()).min(6);
     if threads < 2 {
-        return eprintln!("the machine runs one thread at once, so no grid has many: skipped");
+        return eprintln!("the process runs one thread at once, so no grid has many: skipped");
     }
     let name = "a_launch_that_changes_the_placement_makes_a_call_for_each_thread_that_moves_and_no_other";
     let Some(steps) = steps_of(name, threads, false) else { return };
@@ -291,7 +291,7 @@ fn a_launch_that_starts_threads_puts_each_on_its_cpu_before_it_starts_the_next()
     let all = cpus().unwrap();
     let threads = most().unwrap().min(all.len()).min(6);
     if threads < 2 {
-        return eprintln!("the machine runs one thread at once, so no grid has many: skipped");
+        return eprintln!("the process runs one thread at once, so no grid has many: skipped");
     }
     let name = "a_launch_that_starts_threads_puts_each_on_its_cpu_before_it_starts_the_next";
     let Some(steps) = steps_of(name, threads, false) else { return };

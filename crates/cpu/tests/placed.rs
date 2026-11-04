@@ -163,8 +163,8 @@ fn the_callers_thread_stays_on_the_cpu_of_its_grid_until_a_launch_places_it_else
         assert_eq!(here().0, at, "{threads} threads: the caller's thread after a panic");
         assert_eq!(seen(grid)[0].1.0, at, "{threads} threads: the caller's thread in the next launch of it");
 
-        // From the first CPU up, which is the last's if the machine has as many CPUs as the grid
-        // has threads.
+        // From the first CPU up, which is the last's if the caller's thread may run on as many CPUs
+        // as the grid has threads.
         let elsewhere: Vec<usize> = all.iter().take(threads).copied().collect();
         let launched = seen(Grid::on(&elsewhere));
         assert_eq!(launched[0].1.0, elsewhere[0].to_string(), "{threads} threads: the caller's thread moved");
@@ -208,7 +208,9 @@ fn a_thread_the_program_moves_itself_is_moved_by_a_launch_only_to_another_cpu_or
     let (before, _) = here();
     let all = cpus().unwrap();
     if all.len() < 3 {
-        return eprintln!("the machine runs fewer than three threads at once, so there is no CPU to move to: skipped");
+        return eprintln!(
+            "the caller's thread may run on fewer than three CPUs, so there is no CPU to move to: skipped"
+        );
     }
     let (left, program, another) = (all[0], all[1], all[2]);
     assert_eq!(seen(Grid::on(&[left]))[0].1.0, left.to_string());
@@ -346,9 +348,9 @@ fn the_cpus_are_those_the_system_says_the_thread_may_run_on_and_most_counts_them
 }
 
 /// A process `numactl` keeps to some of the machine's CPUs runs a grid on those: `cpus` and `most`
-/// count them, a grid of more threads than `most` is an error, so is one placed on a CPU outside
-/// them, and a grid that is not placed runs on them all. A grid placed on them runs each thread
-/// on its own.
+/// count them, a grid of more threads than `most` is an error that says what `most` counts, so is
+/// one placed on a CPU outside them, and a grid that is not placed runs on them all. A grid placed
+/// on them runs each thread on its own.
 #[test]
 fn a_process_kept_to_some_cpus_by_numactl_runs_its_grids_on_those() {
     let name = "a_process_kept_to_some_cpus_by_numactl_runs_its_grids_on_those";
@@ -361,7 +363,7 @@ fn a_process_kept_to_some_cpus_by_numactl_runs_its_grids_on_those() {
     }
     let all = cpus().unwrap();
     if all.len() < 2 {
-        return eprintln!("the machine runs one thread at once, so numactl can keep nothing off a CPU: skipped");
+        return eprintln!("the caller's thread may run on one CPU, so numactl can keep nothing off a CPU: skipped");
     }
     // Six CPUs, the first of the mask, if the mask has a seventh to keep the process off.
     let kept = &all[..all.len().min(7) - 1];
@@ -394,7 +396,14 @@ fn kept_to_some(outside: usize, expected: usize) {
     let most = most().unwrap();
     assert_eq!(most, expected, "the CPUs {list} are {} in all", kept.len());
     let too_many = launch(Grid::new(most + 1), |_| {}).unwrap_err();
-    assert_eq!(too_many.message, format!("the grid has {} threads, and the machine runs {most} at once", most + 1));
+    assert_eq!(
+        too_many.message,
+        format!(
+            "the grid has {} threads, and the process runs {most} at once: the CPUs the caller's thread may run \
+             on, or fewer where a cgroup limits the process to fewer",
+            most + 1
+        )
+    );
     let off = launch(Grid::on(&[outside]), |_| {}).unwrap_err();
     assert_eq!(
         off.message,

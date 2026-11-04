@@ -214,7 +214,7 @@ unsafe { kernels::normalize(kernite_cpu::Grid::new(4), x.as_mut_ptr(), sums.as_m
 
 `normalize` becomes the function that launches it, which takes a [`kernite_cpu::Grid`](crates/cpu/src/lib.rs) and the
 kernel's parameters, runs the kernel on a thread for each of the grid's, the caller's the first, and returns when all
-have ended. A thread that waits spins, so it needs a core: a grid of more threads than the machine runs at once,
+have ended. A thread that waits spins, so it needs a core: a grid of more threads than the process runs at once,
 `kernite_cpu::most()`, is an error, as a GPU's grid of more blocks than it runs at once is.
 
 The grid's other threads are kept. The first launch from a thread starts them, each with the stack Rust gives a thread,
