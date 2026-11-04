@@ -1365,6 +1365,35 @@ fn a_pointer_to_a_type_with_a_lifetime_is_refused_at_its_type() {
     );
 }
 
+/// A type that begins with a binder, `for<'a> fn(&'a u8)`, is read whole, as any other type is: it was once
+/// taken for a type named `for` with an argument, and the reading stopped at the `fn`. A kernel that takes one
+/// by value, or as the argument of a type, or returns one, is refused at the type, in its machine's words, on
+/// x86 and on a GPU; the type is quoted as Rust writes it, with a space after the binder. A pointer to one is
+/// refused in the lexer's words, as a pointer to any type with a lifetime is, and a pointer to a function's
+/// type that has no binder, `*const fn(&u8)`, is taken.
+#[test]
+fn a_type_that_begins_with_a_binder_is_read_whole() {
+    refuses(
+        "binders",
+        &[
+            "src/lib.rs:10:47: error: a kernel takes pointers, 64-bit integers and floats, not `for<'a> fn(&'a u8)`",
+            "src/lib.rs:14:48: error: a kernel takes pointers, 64-bit integers and floats, not `Option<for<'a> \
+             fn(&'a u8)>`",
+            "src/lib.rs:18:56: error: a kernel takes pointers, 64-bit integers and floats, not `Option<&dyn \
+             for<'a> Fn(&'a u8)>`",
+            "src/lib.rs:22:55: error: a kernel returns a float, an integer or a pointer, or never, `!`; not \
+             `for<'a> fn(&'a u8)`",
+            "src/lib.rs:26:49: error: lifetimes and labels have no place in a kernel",
+            "src/lib.rs:30:64: error: lifetimes and labels have no place in a kernel",
+            // The pointer to a function's type with no binder, at line 34, has no error: it is taken.
+            "src/lib.rs:41:51: error: a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, `f32` and \
+             `f64`, not `for<'a> fn(&'a u8)`",
+            "src/lib.rs:45:53: error: lifetimes and labels have no place in a kernel",
+            "error: could not compile `binders` (lib) due to 8 previous errors",
+        ],
+    );
+}
+
 /// A pointer to a type with no size, which Rust passes in two registers where a kernel's is one, is
 /// one error, at the type, whatever the type is called. kernite tells `[f32]` by its text, and says so
 /// in its words, on x86 and on a GPU. Rust tells the others, and says that the size cannot be known:

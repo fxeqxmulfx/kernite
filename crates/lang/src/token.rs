@@ -101,12 +101,22 @@ fn arrow_head(trees: &[Tree], i: usize) -> bool {
     )
 }
 
+/// Whether `trees[i]` is the `>` that ends a binder, as in `for<'a> fn(&'a u8)`: the nearest angle
+/// bracket before it is a `<`, and a `for` stands before that.
+fn binder_end(trees: &[Tree], i: usize) -> bool {
+    matches!(trees[i], Tree::Punct { ch: '>', .. })
+        && trees[..i].iter().rposition(|t| matches!(t, Tree::Punct { ch: '<' | '>', .. })).is_some_and(|open| {
+            matches!(trees[open], Tree::Punct { ch: '<', .. })
+                && matches!(trees[..open].last(), Some(Tree::Ident { name, .. }) if name == "for")
+        })
+}
+
 /// Whether Rust writes a space between `trees[i - 1]` and `trees[i]`: after `const` and `mut`,
-/// which a type follows, after `,` and `;`, between words, on each side of a `+` or a `=` that no
-/// operator holds, as in `dyn A + B` and `Item = &u8`, and on each side of an arrow, `fn(u8) -> u8`.
-/// The operators that hold a `+` or a `=`, `+=`, `==`, `=>`, `<=` and `..=`, are written close, and
-/// so are the two characters of an arrow. Other punctuation and brackets are against the word
-/// before them.
+/// which a type follows, after `,` and `;`, after the `>` of a binder, `for<'a> fn(&'a u8)`, between
+/// words, on each side of a `+` or a `=` that no operator holds, as in `dyn A + B` and `Item = &u8`,
+/// and on each side of an arrow, `fn(u8) -> u8`. The operators that hold a `+` or a `=`, `+=`, `==`,
+/// `=>`, `<=` and `..=`, are written close, and so are the two characters of an arrow. Other
+/// punctuation and brackets are against the word before them.
 fn spaced(trees: &[Tree], i: usize) -> bool {
     // The `joint` mark says that punctuation follows, not that an operator is made, as the `&` after
     // the `=` of `Item=&u8` shows, so the next character is read too. No operator ends in `+`, and
@@ -123,6 +133,7 @@ fn spaced(trees: &[Tree], i: usize) -> bool {
     };
     arrow_head(trees, i - 1)
         || arrow_head(trees, i + 1)
+        || binder_end(trees, i - 1)
         || apart(i - 1)
         || apart(i)
         || match (&trees[i - 1], &trees[i]) {
