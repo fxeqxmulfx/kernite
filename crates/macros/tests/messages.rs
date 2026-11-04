@@ -688,8 +688,7 @@ fn what_cfg_leaves_out_says_nothing() {
 /// Each case in the fixture has a function that `cfg` leaves out.
 #[test]
 fn what_rests_on_all_the_items_is_said_whatever_cfg_leaves_out() {
-    // The modules in order: `head`, `twice`, `blocks`, and `ptx`, whose error is at its first
-    // kernel, which is left out.
+    // The modules in order: `head`, `twice` and `blocks`.
     refuses(
         "configured_module",
         &[
@@ -697,11 +696,59 @@ fn what_rests_on_all_the_items_is_said_whatever_cfg_leaves_out() {
             "src/lib.rs:23:35: error: `k` names another function of the module as well",
             "src/lib.rs:31:7: error: `#[cooperative]` gives `Kernels` a method `k_blocks`, which says how many \
              blocks a grid of `k` has at most, and a kernel or a static of the module is named `k_blocks` as well",
-            "src/lib.rs:42:39: error: `shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and \
-             `tanh.approx.f32` in `new` needs sm_75 and PTX 7.0: no module has both",
-            "error: could not compile `configured_module` (lib) due to 4 previous errors",
+            "error: could not compile `configured_module` (lib) due to 3 previous errors",
         ],
     );
+}
+
+/// Kernels and functions that no one PTX module can hold are refused where `cfg` keeps them, and
+/// where it keeps all of a set of them, at the module's first GPU item, kept or not: one error, in
+/// the words of the module of those alone, whichever else `cfg` keeps. The fixture's items are
+/// `first`, the first, which needs nothing, `old`, which is for GPUs older than `sm_70` from PTX 6.4
+/// on, `mid` and `top`, which need `sm_75` and `sm_80`, and the function `fast`, which needs
+/// `sm_75`, each under a feature; the one kernel that calls `fast` is left out by every `cfg`, and
+/// the error of `old` and `fast` kept names those two and not that kernel. The error is at `first`
+/// whether its feature keeps it or not.
+#[test]
+fn kernels_that_no_one_module_holds_are_refused_where_cfg_keeps_them() {
+    let dir = written("configured_clash");
+    let old = "`shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and";
+    let with_mid = format!("{old} `tanh.approx.f32` in `mid` needs sm_75 and PTX 7.0: no module has both");
+    let with_top =
+        format!("{old} `redux.sync.add.u32` in `top` needs sm_80, which PTX has from 7.0 on: no module has both");
+    let with_fast = format!("{old} `tanh.approx.f32` in `fast` needs sm_75 and PTX 7.0: no module has both");
+    let cases = [
+        ("", None),
+        ("old", None),
+        ("mid", None),
+        ("top", None),
+        ("mid,top", None),
+        ("fast", None),
+        ("mid,fast", None),
+        ("old,mid", Some(&with_mid)),
+        ("old,top", Some(&with_top)),
+        ("old,fast", Some(&with_fast)),
+        ("old,mid,top", Some(&with_mid)),
+        ("first,old,mid", Some(&with_mid)),
+        ("first,old,fast", Some(&with_fast)),
+    ];
+    for (features, said) in cases {
+        let command = ["build", "--features", features];
+        let Some(why) = said else {
+            builds_quietly_in(&command, "configured_clash", &dir);
+            continue;
+        };
+        let (built, lines) = cargo_in(&command, &dir);
+        let want = [
+            format!("src/lib.rs:13:39: error: {why}"),
+            "error: could not compile `configured_clash` (lib) due to 1 previous error".to_string(),
+        ];
+        assert!(
+            !built && lines == want,
+            "fixtures/configured_clash.rs: {command:?}: Cargo said:\n{}",
+            lines.join("\n")
+        );
+    }
 }
 
 /// A const `cfg` keeps that only what `cfg` leaves out reads is unused to Rust, which says so, as it

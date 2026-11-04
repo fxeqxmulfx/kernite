@@ -180,6 +180,49 @@ fn headers(entries: &[Entry]) -> Vec<(When, String)> {
     parts
 }
 
+/// Why the module is none where what is kept has no module: a reason for each set of at most four
+/// of `entries` that no module has, though one has any smaller set of them. It is said where all of
+/// the set are kept, and names the set alone. Four are enough: [`Needs::and`] takes the largest
+/// PTX, the newest GPU, the oldest `below` and the first `since` each on its own, so each is one
+/// entry's, and those, at most four, have no module either. Entries added to a set never make a
+/// module of it.
+fn clashes(entries: &[Entry]) -> Vec<(When, String)> {
+    let needs: Vec<Needs> = entries.iter().map(Entry::needs).collect();
+    let join = |set: &[usize]| set.iter().fold(Needs::default(), |n, &i| n.and(needs[i]));
+    let all: Vec<usize> = (0..entries.len()).collect();
+    if join(&all).possible() {
+        return vec![];
+    }
+    // A kernel that needs nothing is of no set that no module has.
+    let asking: Vec<usize> = all.into_iter().filter(|&i| needs[i] != Needs::default()).collect();
+    let mut sets: Vec<Vec<usize>> = vec![];
+    for size in 1..=4 {
+        choose(&asking, size, &mut vec![], &mut |set| {
+            if !sets.iter().any(|found| found.iter().all(|i| set.contains(i))) && !join(set).possible() {
+                sets.push(set.to_vec());
+            }
+        });
+    }
+    let named = |i: usize| {
+        let (name, records) = (&entries[i].name, &entries[i].needs);
+        records.iter().map(move |(n, why)| (*n, format!("`{why}` in `{name}`")))
+    };
+    let reason = |set: &[usize]| clash(&set.iter().flat_map(|&i| named(i)).collect::<Vec<_>>());
+    sets.into_iter().map(|set| (When::All(set.iter().copied().map(code).collect()), reason(&set))).collect()
+}
+
+/// Each choice of `size` of `from` in order, after the `set` chosen so far, given to `each`.
+fn choose(from: &[usize], size: usize, set: &mut Vec<usize>, each: &mut dyn FnMut(&[usize])) {
+    if set.len() == size {
+        return each(set);
+    }
+    for (at, &i) in from.iter().enumerate() {
+        set.push(i);
+        choose(&from[at + 1..], size, set, each);
+        set.pop();
+    }
+}
+
 /// The PTX module of `entries`, kernels and functions, with `statics`, the module's memory, put
 /// together from what the program keeps of them: whichever are kept, it is the module of those
 /// alone. That is of the version and for the GPU the instructions of what is kept need, and no
@@ -188,23 +231,14 @@ fn headers(entries: &[Entry]) -> Vec<(When, String)> {
 /// ones. Each is where it is among `entries`, after a declaration of each it names that comes
 /// later; `statics` before them all, in order.
 ///
-/// It is none if one kernel is for GPUs older than another needs, in the version of PTX the
-/// module would be of: PTX has no module for both. It is none if a static does not [`fit`]
-/// beside those before it, or has a name in PTX that something else of the module has.
+/// It is none if something kept is for GPUs older than something else kept needs, in the version of
+/// PTX the module would be of: PTX has no module for both. It is none if a static does not [`fit`]
+/// beside those before it, kept or not, or has a name in PTX that something else kept has.
 ///
 /// [`fit`]: fits
 pub fn module(entries: &[Entry], statics: &[Static]) -> Assembly {
     let kept = |j: usize| When::Kept(Kept::Static(j));
-    let (mut parts, mut refusals) = (vec![], vec![]);
-    let needs = entries.iter().fold(Needs::default(), |n, e| n.and(e.needs()));
-    if !needs.possible() {
-        let named: Vec<(Needs, String)> = entries
-            .iter()
-            .flat_map(|e| e.needs.iter().map(move |(n, why)| (*n, format!("`{why}` in `{}`", e.name))))
-            .collect();
-        refusals.push((When::always(), clash(&named)));
-    }
-    parts.extend(headers(entries));
+    let (mut parts, mut refusals) = (headers(entries), clashes(entries));
     // The names at the module's scope, and those of a kernel's or a function's parameters,
     // which a static's would hide there: PTX's own `WARP_SZ`, and what each name is, and whose.
     let mut names = vec![("WARP_SZ".to_string(), "PTX's own `WARP_SZ`".to_string(), When::always())];

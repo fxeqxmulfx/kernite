@@ -125,8 +125,9 @@ names of those alone.
 kernite reads every item before Rust knows which `cfg` holds, as Rust parses every item before it does, so an item it
 cannot read is said whatever `cfg` holds, as Rust says a syntax error in a function it leaves out: the head of a
 function, as `fn k<T>()`, rests on no other item. What rests on all the items together is said whatever `cfg` leaves
-out: a name that two items share, though each is under a `cfg` the other is not; and GPU kernels that no one PTX module
-can hold, for each sets the module's `.version` and `.target`.
+out: a name that two items share, though each is under a `cfg` the other is not. GPU kernels and functions that no one
+PTX module can hold, for each sets the module's `.version` and `.target`, are said where `cfg` keeps them: once, at the
+module's first GPU item, of those that clash and no others.
 
 The x86 target knows every instruction of x86-64-v3, in each form `llvm-mc` takes, [`forms`](crates/x86/src/forms.rs):
 x86-64's own on integers of 8 to 64 bits, SSE's to SSE4.2's as AVX writes them, `vaddps` and not `addps`, and AVX's,
