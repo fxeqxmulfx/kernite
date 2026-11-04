@@ -14,19 +14,21 @@ fn the_lexer_reads_what_rust_writes() {
 }
 
 /// The tokens of `src`, a source with lifetimes in it, as `for<'a> fn(&'a u8)` has. The lexer of a
-/// string refuses a lifetime, but the macro is given one as `proc_macro` hands it over: a `'` joint
-/// to the name that follows it. So each `'` of `src` is lexed as the start of a word, `lt_a`, which
-/// is then made into the two tokens.
+/// string refuses a lifetime, but the macro is given one as `proc_macro` hands it over: a `'` right before
+/// the name that follows it. So each `'` of `src` is lexed as the start of a word, `lt_a`, which is then
+/// made into the two tokens.
 fn lexed_with_lifetimes(src: &str) -> Vec<Tree> {
     fn made(trees: Vec<Tree>) -> Vec<Tree> {
         trees
             .into_iter()
             .flat_map(|tree| match tree {
-                Tree::Ident { name, span } if name.starts_with("lt_") => vec![
-                    Tree::Punct { ch: '\'', joint: true, span },
-                    Tree::Ident { name: name["lt_".len()..].to_string(), span },
+                Tree::Ident { name, space, span } if name.starts_with("lt_") => vec![
+                    Tree::Punct { ch: '\'', space, span },
+                    Tree::Ident { name: name["lt_".len()..].to_string(), space: false, span },
                 ],
-                Tree::Group { delim, trees, span } => vec![Tree::Group { delim, trees: made(trees), span }],
+                Tree::Group { delim, trees, space, space_close, span } => {
+                    vec![Tree::Group { delim, trees: made(trees), space, space_close, span }]
+                }
                 tree => vec![tree],
             })
             .collect()
@@ -109,6 +111,514 @@ fn a_type_is_written_as_rust_writes_it() {
     assert_eq!(bound("for < 'a >  fn(&'a u8)->&'a u8"), "for<'a> fn(&'a u8) -> &'a u8");
     assert_eq!(bound("Option<&dyn for<'a>Fn(&'a u8)>"), "Option<&dyn for<'a> Fn(&'a u8)>");
     assert_eq!(bound("Box<dyn Send+for<'a>Fn(&'a u8)>"), "Box<dyn Send + for<'a> Fn(&'a u8)>");
+}
+
+/// A type has a space after a `:` that is not half of a `::`, `fn(x: u8)`, `Item: Copy` and `'b: 'a`; after
+/// the name of a lifetime, `&'a [u8]` and `&'static !`; after `dyn` and `impl`, `dyn (A) + B` and
+/// `impl 'a + A`; and before `as`, `<Vec<u8> as Tr>::Out`. The braces of a macro have a space before them,
+/// `byte! {..}`; the parentheses of a macro have none, `byte!(_)`.
+#[test]
+fn a_colon_a_lifetime_and_a_macros_braces_are_written_as_rust_writes_them() {
+    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+    for (src, ty) in [
+        ("fn(f16:u8)", "fn(f16: u8)"),
+        ("fn(f16 : u8)", "fn(f16: u8)"),
+        ("fn(a:u8,b:u16)", "fn(a: u8, b: u16)"),
+        ("fn(_:u8)", "fn(_: u8)"),
+        ("fn(x:fn(y:u8)->u8)->u8", "fn(x: fn(y: u8) -> u8) -> u8"),
+        ("fn(f128: ::core::primitive::u8)", "fn(f128: ::core::primitive::u8)"),
+        ("Box<dyn Iterator<Item:Copy>>", "Box<dyn Iterator<Item: Copy>>"),
+        ("impl Iterator<Item : Copy>", "impl Iterator<Item: Copy>"),
+        ("a::b::C<u8>", "a::b::C<u8>"),
+        ("<A as B>::C", "<A as B>::C"),
+        ("<Vec<u8>as Tr>::Out", "<Vec<u8> as Tr>::Out"),
+        ("::core::primitive::u8", "::core::primitive::u8"),
+        ("dyn(A)+B", "dyn (A) + B"),
+        ("impl(A)", "impl (A)"),
+        ("Box<dyn ::a::B>", "Box<dyn ::a::B>"),
+        ("byte!{_}", "byte! {_}"),
+        ("byte!{ _ }", "byte! { _ }"),
+        ("byte!{}", "byte! {}"),
+        ("m!{a,b}", "m! {a,b}"),
+        ("byte!(_)", "byte!(_)"),
+        ("byte![_]", "byte![_]"),
+        ("f16!()", "f16!()"),
+        ("crate::byte!{_}", "crate::byte! {_}"),
+        ("*const byte!{_}", "*const byte! {_}"),
+        ("Wrap<byte!{_}>", "Wrap<byte! {_}>"),
+        ("[byte!{_};1]", "[byte! {_}; 1]"),
+        ("fn(u8)->byte!{_}", "fn(u8) -> byte! {_}"),
+    ] {
+        assert_eq!(written(src), ty, "{src}");
+    }
+    let bound = |src: &str| crate::text(&lexed_with_lifetimes(src));
+    for (src, ty) in [
+        ("&'a [u8]", "&'a [u8]"),
+        ("&'static [u8]", "&'static [u8]"),
+        ("&'a(u8,u8)", "&'a (u8, u8)"),
+        ("&'a&'b u8", "&'a &'b u8"),
+        ("&'a*const u8", "&'a *const u8"),
+        ("&'a<T as Tr>::Out", "&'a <T as Tr>::Out"),
+        ("&'a mut u8", "&'a mut u8"),
+        ("&'a !", "&'a !"),
+        ("&'static!", "&'static !"),
+        ("&'a mut !", "&'a mut !"),
+        ("Option<&'a [u8]>", "Option<&'a [u8]>"),
+        ("fn(&'a [u8],&'b str)->&'a str", "fn(&'a [u8], &'b str) -> &'a str"),
+        ("Foo<'a,'b>", "Foo<'a, 'b>"),
+        ("Foo<'a>", "Foo<'a>"),
+        ("dyn A+'a", "dyn A + 'a"),
+        ("Box<dyn 'a+A>", "Box<dyn 'a + A>"),
+        ("impl 'a+A", "impl 'a + A"),
+        ("<A<'a>as B>::C", "<A<'a> as B>::C"),
+        ("Box<dyn Fn()+Send+'static>", "Box<dyn Fn() + Send + 'static>"),
+        ("for<'a,'b:'a> fn(&'a u8,&'b u8)", "for<'a, 'b: 'a> fn(&'a u8, &'b u8)"),
+        ("dyn for<'a> Tr<'a,Item:Copy>", "dyn for<'a> Tr<'a, Item: Copy>"),
+    ] {
+        assert_eq!(bound(src), ty, "{src}");
+    }
+}
+
+/// A keyword written raw is a name: `r#mut` has none of the spaces `mut` has.
+#[test]
+fn a_keyword_written_raw_is_a_name_and_has_none_of_the_spaces_a_keyword_has() {
+    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+    for (src, ty) in [
+        ("mut::Foo", "mut ::Foo"),
+        ("r#mut::Foo", "r#mut::Foo"),
+        ("*const r#mut::Foo", "*const r#mut::Foo"),
+        ("r#const<A>", "r#const<A>"),
+        ("dyn(A)", "dyn (A)"),
+        ("r#dyn(A)", "r#dyn(A)"),
+        ("&mut r#dyn::Foo", "&mut r#dyn::Foo"),
+        ("r#impl[A]", "r#impl[A]"),
+        ("Foo<r#as>", "Foo<r#as>"),
+        ("Foo<r#as,r#mut>", "Foo<r#as, r#mut>"),
+    ] {
+        assert_eq!(written(src), ty, "{src}");
+    }
+}
+
+/// The `>` before a `=` closes the arguments of a name, so the two are no `>=`: an associated type with
+/// arguments is written `Item<X> = u8`, as rustfmt writes it, whether the source packs it, spaces it as rustfmt
+/// does, or spaces one side of the `=`. And `as` has a space after it before a path from the root,
+/// `<A as ::b::C>::D`.
+#[test]
+fn an_associated_type_with_arguments_and_a_path_from_the_root_after_as_are_written_as_rust_writes_them() {
+    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+    for ty in [
+        "dyn Tr<Item<X> = u8>",
+        "dyn Tr<Item<X> = u8, Other<Y, Z> = &u8>",
+        "<A as ::b::C>::D",
+        "<A as ::b::C<u8>>::D<u16>",
+    ] {
+        assert_eq!(written(ty), ty);
+    }
+    assert_eq!(written("<A as::b::C>::D"), "<A as ::b::C>::D");
+    for (src, ty) in [
+        ("dyn Tr<Item<X>=u8>", "dyn Tr<Item<X> = u8>"),
+        ("dyn Tr<Item<X> =u8>", "dyn Tr<Item<X> = u8>"),
+        ("dyn Tr<Item<X>= u8>", "dyn Tr<Item<X> = u8>"),
+        ("dyn Tr<Item<X>=u8,Other<Y,Z>=&u8>", "dyn Tr<Item<X> = u8, Other<Y, Z> = &u8>"),
+        ("dyn Tr<Item<Vec<X>>=u8>", "dyn Tr<Item<Vec<X>> = u8>"),
+        ("dyn Tr<Item<X>=Vec<u8>>", "dyn Tr<Item<X> = Vec<u8>>"),
+        ("dyn Tr<Item<fn()->u8>=u8>", "dyn Tr<Item<fn() -> u8> = u8>"),
+        ("dyn Tr<Item<X>=fn()->u8>", "dyn Tr<Item<X> = fn() -> u8>"),
+        ("dyn Tr<Item<X>={3}>", "dyn Tr<Item<X> = {3}>"),
+        ("Box<dyn Tr<Item<X>=u8>+Send>", "Box<dyn Tr<Item<X> = u8> + Send>"),
+        ("*const Foo<Item<X>=u8>", "*const Foo<Item<X> = u8>"),
+    ] {
+        assert_eq!(written(src), ty, "{src}");
+    }
+    let bound = |src: &str| crate::text(&lexed_with_lifetimes(src));
+    for src in ["dyn Tr<Item<'a>=&'a u8>", "dyn Tr<Item<'a> =&'a u8>", "dyn Tr<Item<'a>= &'a u8>"] {
+        assert_eq!(bound(src), "dyn Tr<Item<'a> = &'a u8>", "{src}");
+    }
+    assert_eq!(bound("dyn for<'a> Tr<Item<'a>=&'a u8>"), "dyn for<'a> Tr<Item<'a> = &'a u8>");
+}
+
+/// The lexer says, of each token, whether the source has a space before it: a space, a line break or a
+/// comment; and of each group, whether it has one before its first token and before the bracket that
+/// closes it.
+#[test]
+fn the_lexer_says_where_the_source_has_a_space() {
+    let spaces = |src: &str| crate::lex(src).unwrap().iter().map(Tree::space).collect::<Vec<_>>();
+    assert_eq!(spaces("a+b"), [false, false, false]);
+    assert_eq!(spaces("a + b"), [false, true, true]);
+    assert_eq!(spaces("a+ b"), [false, false, true]);
+    assert_eq!(spaces("a +b"), [false, true, false]);
+    assert_eq!(spaces("a  +\n\t b"), [false, true, true]);
+    assert_eq!(spaces("a/**/+// c\nb"), [false, true, true]);
+    assert_eq!(spaces("a/**/+b"), [false, true, false]);
+    assert_eq!(spaces("a<<b a< <b"), [false, false, false, false, true, false, true, false]);
+    let group = |src: &str| match crate::lex(src).unwrap().last() {
+        Some(Tree::Group { trees, space, space_close, .. }) => {
+            (*space, trees.first().is_some_and(Tree::space), *space_close)
+        }
+        _ => panic!("{src} does not end in a group"),
+    };
+    assert_eq!(group("f(a)"), (false, false, false));
+    assert_eq!(group("f (a)"), (true, false, false));
+    assert_eq!(group("f( a)"), (false, true, false));
+    assert_eq!(group("f(a )"), (false, false, true));
+    assert_eq!(group("f( a )"), (false, true, true));
+    assert_eq!(group("f{}"), (false, false, false));
+    assert_eq!(group("f{ }"), (false, false, true));
+    assert_eq!(group("f{/**/}"), (false, false, true));
+    assert_eq!(group("f{\n}"), (false, false, true));
+}
+
+/// Expressions, each as rustfmt writes it. The spaces that do not stand between two word characters are the
+/// optional ones, as the ones around a `+` are, and the one in `as usize` is not.
+const EXPRESSIONS: &[&str] = &[
+    "3",
+    "!0usize & 3",
+    "A + B",
+    "A - B",
+    "A * B",
+    "A / B",
+    "A % B",
+    "A ^ B",
+    "A & B",
+    "A | B",
+    "A << 2",
+    "A >> 2",
+    "A == B",
+    "A != B",
+    "A < B",
+    "A <= B",
+    "A > B",
+    "A >= B",
+    "A && B",
+    "A || B",
+    "A += 1",
+    "A -= 1",
+    "A *= 1",
+    "A /= 1",
+    "A %= 1",
+    "A ^= 1",
+    "A &= 1",
+    "A |= 1",
+    "A <<= 1",
+    "A >>= 1",
+    "A = 1",
+    "!A",
+    "-A",
+    "-1",
+    "A - -1",
+    "A & !B",
+    "A & &B",
+    "A < -1",
+    "A * *B",
+    "A && &B",
+    "A + *B",
+    "A == *B",
+    "A * -1",
+    "A == -1",
+    "*A",
+    "&A",
+    "&mut A",
+    "&mut *A",
+    "*A + 1",
+    "(A + B) * C",
+    "f(-1)",
+    "f(1, 2)",
+    "f(A + 1)",
+    "[1, 2][0]",
+    "A[0] + A[1]",
+    "A.b.c",
+    "A.f().g()",
+    "A::B + 1",
+    "A as usize",
+    "A as u8 as usize",
+    "A as *const u8 as usize",
+    "f as fn() -> u8",
+    "f as fn(u8) -> u8 as usize",
+    "A.0 - 1",
+    "0..1",
+    "0..N - 1",
+    "A?",
+    "1.5e-3",
+    "\"a\".len()",
+    "'a' as u32",
+    "S { a: 1, b: -2 }",
+    "m! { 1 }",
+    "m!(1)",
+    "if A > 1 { 1 } else { 2 }",
+    "if !A { 1 } else { 2 }",
+    "if !(A > 1) { 1 } else { 2 }",
+    "let x = A + 1; x * 2",
+    "let x: u8 = 1; x",
+    "let mut i = 0; while i < N { i += 1; } i",
+    "loop { break -1 }",
+    "while !A {}",
+    "let (a, b) = (1, 2); a",
+    "match (A) {}",
+    "return !A",
+    "unsafe { A }",
+    "{ A + 1 }",
+    "size_of::<u8>()",
+    "size_of::<[u8; 4]>() * 2",
+    "size_of::<Vec<u8>>()",
+    "size_of::<fn() -> u8>()",
+    "size_of::<fn(u8) -> u8>() + 1",
+    "f::<fn() -> u8>() > 2",
+    "f::<Vec<u8>, Vec<u8>>()",
+    "f::<A<B<C>>, D<E>>() > 2",
+    "N as usize & 3",
+    "f::<u8>(1) > 2",
+    "f::<u8>(1) >> 2",
+    "f::<{ 3 }>(1)",
+    "<u8 as T>::C",
+    "<u8>::C > 1",
+    "<Cfg<4> as Tile>::N",
+    "<Vec<u8> as Tr>::N",
+    "<u8 as Tr<3>>::N",
+    "<Foo<u8>>::N",
+    "<Foo<u8>>::N < 3",
+    "<<u8 as Tr>::A as Tr>::B",
+    "A && <u8>::MAX > 3",
+    "<u8>::MAX << 1",
+    "let v: Option<usize> = Some(3); match v { Some(n) => n, None => 0 }",
+    "match A { 1 => 2, _ => 3 }",
+    "match A { n @ 1..=3 => n, _ => 0 }",
+    "match A { 1 | 2 => 3, _ => 4 }",
+    "if A { 1 } else { 2 }",
+    "f::<u8>() < 3",
+    "A < B && C > D",
+    "(A < B) as usize",
+    "A as i32 - 1",
+    "x as *const u8 as usize",
+    "[0u8; 4].len()",
+    "A - (-1)",
+    "S { a: 1 }.a",
+    "Foo::<u8>::N + 1",
+    "size_of::<u8>() * 2",
+    "{ 3 }",
+    "A::B",
+    "*&A",
+    "A.0",
+    "A + B * C",
+    "A < B || f::<u8>() > 2",
+    "N % 2 == 0",
+    "(N + 1) / 2",
+    "N.min(3)",
+    "u8::MAX as usize",
+    "core::mem::size_of::<u64>()",
+    "<u64>::BITS as usize",
+    "A as usize * 2",
+    "!A as usize",
+    "-1i32 as u8",
+    "[0; 3]",
+    "const { 3 }",
+    "loop { break 3 }",
+    "(3, 4).0",
+    "true as usize",
+    "A | B | C",
+    "0 as *const Vec<u8> as usize",
+    "|x: Vec<u8>| x",
+    "|x| x",
+    "let f = |x: Vec<u8>| x; 3",
+    "let v: Option<usize> = Some(3); 3",
+    "(0 as *const Vec<u8>).is_null() as usize",
+    "N * 2",
+    "<Cfg as Tile>::N",
+    "A < -B",
+    "1..=3",
+    "f::<{ 3 }>()",
+    "size_of::<[u8; 4]>()",
+    "a + b",
+    "a: b",
+    "a & b",
+    "A >> 1",
+    "unsafe { 3 }",
+    "(3)",
+];
+
+/// `row` with its optional spaces kept or taken out in each way that tells one from another: as written, all
+/// taken out, and each one alone kept, and alone taken out.
+fn spaced_both_ways(row: &str) -> Vec<String> {
+    let chars: Vec<char> = row.chars().collect();
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let optional: Vec<usize> =
+        (1..chars.len() - 1).filter(|&i| chars[i] == ' ' && !(word(chars[i - 1]) && word(chars[i + 1]))).collect();
+    let without = |gone: &[usize]| {
+        chars.iter().enumerate().filter(|(i, _)| !gone.contains(i)).map(|(_, c)| *c).collect::<String>()
+    };
+    let mut out = vec![row.to_string(), without(&optional)];
+    for &gap in &optional {
+        out.push(without(&[gap]));
+        out.push(without(&optional.iter().copied().filter(|&o| o != gap).collect::<Vec<_>>()));
+    }
+    out
+}
+
+/// A block is written with the spaces its source has, as the messages of rustc write one they do not work out:
+/// `Marker<{N*2}>` from `{N*2}`, `Marker<{ N * 2 }>` from `{ N * 2 }`. So it is in the packed form, in the form
+/// rustfmt writes, and with one space of the form, or one space less, at a time. The type around it is spaced as
+/// before.
+#[test]
+fn a_block_is_written_as_its_source_has_it() {
+    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+    for expr in EXPRESSIONS {
+        for src in spaced_both_ways(&format!("Marker<{{ {expr} }}>")) {
+            assert_eq!(written(&src), src);
+        }
+    }
+    // Rows of the review: the operators of a comparison are not the brackets of a type, and the other way round.
+    assert_eq!(written("Marker<{!0usize&3}>"), "Marker<{!0usize&3}>");
+    assert_eq!(written("Marker<{ !0usize & 3 }>"), "Marker<{ !0usize & 3 }>");
+    assert_eq!(written("Marker<{<Vec<u8>as Tr>::N}>"), "Marker<{<Vec<u8>as Tr>::N}>");
+    assert_eq!(written("Marker<{let v:Option<usize>=Some(3);v}>"), "Marker<{let v:Option<usize>=Some(3);v}>");
+    assert_eq!(written("Marker<{N*2}>"), "Marker<{N*2}>");
+    assert_eq!(written("Marker<{ N * 2 }>"), "Marker<{ N * 2 }>");
+    assert_eq!(written("Marker<{N * 2}>"), "Marker<{N * 2}>");
+    assert_eq!(written("Marker<{ N*2 }>"), "Marker<{ N*2 }>");
+    // An empty block has none, or the one the source has.
+    assert_eq!(written("Marker<{}>"), "Marker<{}>");
+    assert_eq!(written("Marker<{ }>"), "Marker<{ }>");
+    // A run of spaces, line breaks and comments is one space, and a comment is a space where it stands.
+    assert_eq!(written("Marker<{  N   *\t2  }>"), "Marker<{ N * 2 }>");
+    assert_eq!(written("Marker<{\n    N *\n    2\n}>"), "Marker<{ N * 2 }>");
+    assert_eq!(written("Marker<{ // twice\n    N *\n    2 // the last\n}>"), "Marker<{ N * 2 }>");
+    assert_eq!(written("Marker<{ /* a */ N /* b */ * /* c */ 2 /* d */ }>"), "Marker<{ N * 2 }>");
+    assert_eq!(written("Marker<{N/* b */*2}>"), "Marker<{N *2}>");
+    assert_eq!(written("Marker<{N*/* c */2}>"), "Marker<{N* 2}>");
+    assert_eq!(written("Marker<{/* a */N*2/* d */}>"), "Marker<{ N*2 }>");
+    // The block inside a block, and the array inside it, are as the source has them too.
+    assert_eq!(written("Marker<{{N*2}}>"), "Marker<{{N*2}}>");
+    assert_eq!(written("Marker<{ { N * 2 } }>"), "Marker<{ { N * 2 } }>");
+    assert_eq!(written("Marker<{size_of::<[u8;4]>()}>"), "Marker<{size_of::<[u8;4]>()}>");
+    assert_eq!(written("Marker<{size_of::<[u8; 4]>()}>"), "Marker<{size_of::<[u8; 4]>()}>");
+}
+
+/// The type's own tokens around a block are spaced as ever, whatever the source has; the block is not.
+#[test]
+fn the_type_around_a_block_is_spaced_as_before() {
+    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+    for (src, ty) in [
+        ("Pair<u8,{3}>", "Pair<u8, {3}>"),
+        ("Pair<u8 , { 3 }>", "Pair<u8, { 3 }>"),
+        ("Pair<{3},{4}>", "Pair<{3}, {4}>"),
+        ("Pair<{ 3 } , { 4 }>", "Pair<{ 3 }, { 4 }>"),
+        ("[Arr<{3}>;1]", "[Arr<{3}>; 1]"),
+        ("[ Arr < { 3 } > ; 1 ]", "[Arr<{ 3 }>; 1]"),
+        ("fn()->Arr<{3}>", "fn() -> Arr<{3}>"),
+        ("<A as B>::C<{3}>", "<A as B>::C<{3}>"),
+        ("<A  as  B> :: C <  { 3 } >", "<A as B>::C<{ 3 }>"),
+        ("dyn Tr<N={3}>", "dyn Tr<N = {3}>"),
+        ("dyn Tr<N={ 3 }>", "dyn Tr<N = { 3 }>"),
+        ("*  const Marker < { N*2 } >", "*const Marker<{ N*2 }>"),
+        ("*mut*const Marker<{N*2}>", "*mut *const Marker<{N*2}>"),
+        ("*const Marker<{!0usize&3}>", "*const Marker<{!0usize&3}>"),
+        ("*const Marker<{ !0usize & 3 }>", "*const Marker<{ !0usize & 3 }>"),
+        ("(Marker<{N*2}>,u8)", "(Marker<{N*2}>, u8)"),
+        ("&mut Marker<{N*2}>", "&mut Marker<{N*2}>"),
+        ("Marker<{N*2},{ N * 2 }>", "Marker<{N*2}, { N * 2 }>"),
+    ] {
+        assert_eq!(written(src), ty, "{src}");
+    }
+}
+
+/// The length of an array, all that follows its `;`, is written as its source has it, one space after the
+/// `;` and none before the `]`: `[u8; N*2]` from `[u8;N*2]` and `[u8; N * 2]` from `[u8 ; N * 2 ]`.
+#[test]
+fn an_arrays_length_is_written_as_its_source_has_it() {
+    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+    // A length is an expression; statements, `let x = 1; x`, are only a block's.
+    for expr in EXPRESSIONS.iter().filter(|e| !e.starts_with("let ")) {
+        for src in spaced_both_ways(&format!("[u8; {expr}]")) {
+            let length = src["[u8;".len()..src.len() - 1].trim_start();
+            assert_eq!(written(&src), format!("[u8; {length}]"), "{src}");
+        }
+    }
+    for (src, ty) in [
+        ("[u8;N*2]", "[u8; N*2]"),
+        ("[u8; N * 2]", "[u8; N * 2]"),
+        ("[u8 ;N * 2 ]", "[u8; N * 2]"),
+        ("[ u8 ; N*2 ]", "[u8; N*2]"),
+        ("[u8;N * 2]", "[u8; N * 2]"),
+        ("[u8;N* 2]", "[u8; N* 2]"),
+        ("[u8;{3}]", "[u8; {3}]"),
+        ("[u8;{ 3 }]", "[u8; { 3 }]"),
+        ("[u8;<Cfg<4> as Tile>::N]", "[u8; <Cfg<4> as Tile>::N]"),
+        ("[u8;<Cfg<4>as Tile>::N]", "[u8; <Cfg<4>as Tile>::N]"),
+        ("[u8;size_of::<u8>()*2]", "[u8; size_of::<u8>()*2]"),
+        ("[u8;\n    N *\n    2\n]", "[u8; N * 2]"),
+        ("[u8;N/* c */*2]", "[u8; N *2]"),
+        // The element is the type's own tokens, the length is not.
+        ("[Arr<{3}>;N*2]", "[Arr<{3}>; N*2]"),
+        ("[*const u8;N*2]", "[*const u8; N*2]"),
+        ("*const [u8;N*2]", "*const [u8; N*2]"),
+        ("*const [u8;N * 2]", "*const [u8; N * 2]"),
+        ("[[u8;N*2];M+1]", "[[u8; N*2]; M+1]"),
+        ("[[u8; N * 2]; M + 1]", "[[u8; N * 2]; M + 1]"),
+        ("Pair<[u8;N*2],[u8;N * 2]>", "Pair<[u8; N*2], [u8; N * 2]>"),
+        ("fn([u8;N*2])->[u8;N * 2]", "fn([u8; N*2]) -> [u8; N * 2]"),
+        // A `;` with nothing after it, as the token a message says it found, is the `;` alone.
+        (";", ";"),
+        ("[u8;]", "[u8;]"),
+        // A `;` is the end of the element only in an array: a slice, a tuple and a group hold none.
+        ("&[u8]", "&[u8]"),
+        ("&mut [Arr<{3}>]", "&mut [Arr<{3}>]"),
+    ] {
+        assert_eq!(written(src), ty, "{src}");
+    }
+}
+
+/// The arguments of a macro, in any of its brackets, are written as their source has them; the type around
+/// them is spaced as ever, and so is the space before the braces of a macro, `byte! {..}`.
+#[test]
+fn a_macros_arguments_are_written_as_their_source_has_them() {
+    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+    for expr in EXPRESSIONS {
+        for (open, close) in [("(", ")"), ("[", "]")] {
+            for src in spaced_both_ways(&format!("m!{open} {expr} {close}")) {
+                assert_eq!(written(&src), src);
+            }
+        }
+        for src in spaced_both_ways(&format!("m!{{ {expr} }}")) {
+            assert_eq!(written(&src), src.replacen("!{", "! {", 1));
+        }
+    }
+    for (src, ty) in [
+        ("m!(a+b)", "m!(a+b)"),
+        ("m!(a + b)", "m!(a + b)"),
+        ("m!(a +b)", "m!(a +b)"),
+        ("m!(a+ b)", "m!(a+ b)"),
+        ("m!( a + b )", "m!( a + b )"),
+        ("m!(a:b)", "m!(a:b)"),
+        ("m!(a: b)", "m!(a: b)"),
+        ("m!(a,b)", "m!(a,b)"),
+        ("m!(a, b)", "m!(a, b)"),
+        ("m!{a&b}", "m! {a&b}"),
+        ("m! { a & b }", "m! { a & b }"),
+        ("m ! ( a+b )", "m!( a+b )"),
+        ("m!(\n    a +\n    b\n)", "m!( a + b )"),
+        ("m!(a/* c */+b)", "m!(a +b)"),
+        ("m!()", "m!()"),
+        ("m!( )", "m!( )"),
+        ("m!{}", "m! {}"),
+        ("m!{ }", "m! { }"),
+        // The type around a macro, and a macro in the arguments of one.
+        ("*const m!(a+b)", "*const m!(a+b)"),
+        ("Wrap<m!(a+b),u8>", "Wrap<m!(a+b), u8>"),
+        ("[m!(a+b);N*2]", "[m!(a+b); N*2]"),
+        ("fn(u8)->m!(a+b)", "fn(u8) -> m!(a+b)"),
+        ("crate::m!(a+b)", "crate::m!(a+b)"),
+        ("m!(n!(a+b),c)", "m!(n!(a+b),c)"),
+        ("m!(n!{a+b},c)", "m!(n!{a+b},c)"),
+        ("m!(n! { a + b }, c)", "m!(n! { a + b }, c)"),
+        ("m!([a;3],{b})", "m!([a;3],{b})"),
+        // A group that follows a name but no `!` is the type's own, as `Fn(u8)` is.
+        ("Box<dyn Fn( u8 )>", "Box<dyn Fn(u8)>"),
+        ("Box<dyn Fn(a:u8)>", "Box<dyn Fn(a: u8)>"),
+        // The `!` of a never type is no macro's, and the tuple beside it is the type's own.
+        ("fn()->!", "fn() -> !"),
+        ("Foo<!,(a:u8)>", "Foo<!, (a: u8)>"),
+    ] {
+        assert_eq!(written(src), ty, "{src}");
+    }
 }
 
 /// A type that begins with a binder, `for<'a> fn(&'a u8)`, is read whole, as any other type is: the

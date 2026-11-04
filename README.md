@@ -74,7 +74,12 @@ Rust refuses by itself is its error alone, said once, at the type, in a kernel o
 meet its struct's bound, `*const NeedsCopy<String>` where `struct NeedsCopy<T: Copy>`, or an array or a tuple that holds
 a type with no size, `*const [CStr; 3]` or `*const (CStr, u8)`. One case has two errors: in a kernel of instances,
 `-> *const (u8, [CStr; 3])` has Rust's error twice, at `[CStr; 3]` and at the whole type. A type in a message is written
-as Rust writes it, `[usize; 3]`.
+as Rust writes it, `[usize; 3]` and `fn(f16: u8)`. A block and the arguments of a macro are written as their source has
+them, as Rust writes a block it does not work out: `Marker<{N*2}>` from `{N*2}`, `Marker<{ N * 2 }>` from `{ N * 2 }`
+and `m!(a+b)`. A run of spaces, line breaks and comments is one space. The length of an array is worked out in the type
+of a parameter or a variable that is an array or a name with arguments, and in those of its elements and arguments that
+are: with `N` as 3, `[usize; 6]` from `[usize;N*2]` and `Wrap<[usize; 6]>` from `Wrap<[usize;N*2]>`. In any other type,
+and in a result, it is written as its source has it: `(u8, [usize; N*2])` from `(u8,[usize;N*2])`.
 
 A number's name in a kernel's parameters or return, `u8` to `u64`, `i8` to `i64`, `usize`, `isize`, `f32`, `f64` or
 `bool`, means that number: `u64` is 64 bits. A module that gives the name another type, `pub type u64 = u32;` and a

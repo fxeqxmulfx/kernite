@@ -9,6 +9,9 @@ use std::sync::Mutex;
 use kernite_x86::forms::{self, Form, Kind};
 use kernite_x86::{Asm, Feature, SysV, intel};
 
+#[path = "common/quotes.rs"]
+mod quotes;
+
 /// The kernels of `examples/my-app`, and the same dot product with sixteen accumulators.
 const KERNELS: &str = r#"
     /// The sum of the eight floats at `xs`.
@@ -829,7 +832,9 @@ fn a_kernel_takes_a_pointer_to_a_type_that_holds_an_arrow() {
 }
 
 /// A type in a message is written as Rust writes it, whatever the source spaced: a parameter by
-/// value, a result, a variable.
+/// value, a result, a variable. A block and a macro's arguments are written as their source has them, packed
+/// or spaced, as the messages of rustc write them. So is the length of an array, but where kernite takes the type
+/// of a parameter or a variable apart, and works the length out.
 #[test]
 fn a_type_in_a_message_is_written_as_rust_writes_it() {
     let takes = "a kernel takes pointers, 64-bit integers and floats, not";
@@ -846,11 +851,65 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
         ("a: fn()->!", "fn() -> !"),
         ("a: Pair<fn()->u8,2>", "Pair<fn() -> u8, 2>"),
         ("a: Box<dyn Fn(u8)->u8+Send>", "Box<dyn Fn(u8) -> u8 + Send>"),
+        ("a: fn(f16:u8)", "fn(f16: u8)"),
+        ("a: fn(f16: ::core::primitive::u8)", "fn(f16: ::core::primitive::u8)"),
+        ("a: Box<dyn Iterator<Item:Copy>>", "Box<dyn Iterator<Item: Copy>>"),
+        ("a: Box<dyn Tr<Item<X>=u8>>", "Box<dyn Tr<Item<X> = u8>>"),
+        ("a: Box<dyn Tr<Item<X> =u8>>", "Box<dyn Tr<Item<X> = u8>>"),
+        ("a: Box<dyn Tr<Item<X>= u8>>", "Box<dyn Tr<Item<X> = u8>>"),
+        ("a: Box<dyn Tr<Item<X> = u8>>", "Box<dyn Tr<Item<X> = u8>>"),
+        ("a: Box<dyn Tr<Item<Vec<X>>=u8,Other<Y,Z>=&u8>>", "Box<dyn Tr<Item<Vec<X>> = u8, Other<Y, Z> = &u8>>"),
+        ("a: Marker<{!0usize&3}>", "Marker<{!0usize&3}>"),
+        ("a: Marker<{ !0usize & 3 }>", "Marker<{ !0usize & 3 }>"),
+        ("a: Marker<{\n    N * // twice\n    2\n}>", "Marker<{ N * 2 }>"),
+        ("a: m!(a+b)", "m!(a+b)"),
+        ("a: m!(a + b)", "m!(a + b)"),
+        ("a: m!{a&b}", "m! {a&b}"),
+        ("a: Pair<u8,{3}>", "Pair<u8, {3}>"),
+        ("a: Pair<u8,{ 3 }>", "Pair<u8, { 3 }>"),
+        ("a: Marker<{}>", "Marker<{}>"),
+        ("a: Marker<{ }>", "Marker<{ }>"),
     ] {
         assert_eq!(compile(params, "").unwrap_err(), format!("1:32: {takes} `{ty}`"), "{params}");
     }
+    // The rows of the review, each packed and spaced, in a block and as a macro's arguments.
+    for (ty, quoted) in quotes::quoted() {
+        assert_eq!(compile(&format!("a: {ty}"), "").unwrap_err(), format!("1:32: {takes} `{quoted}`"), "{ty}");
+    }
+    // The length of an array is worked out in the type of a parameter that is an array or a name with arguments,
+    // and in those of its elements and arguments that are, `[usize; 6]`; its names are the module's. In any other
+    // type, a tuple, a reference or a path, it is written as its source has it.
+    for (ty, quoted) in [
+        ("(u8,[usize;N*2])", "(u8, [usize; N*2])"),
+        ("(u8,[usize; N * 2])", "(u8, [usize; N * 2])"),
+        ("(u8,[usize ;(N+1)/2 ])", "(u8, [usize; (N+1)/2])"),
+        ("(u8,[usize;!0usize&N])", "(u8, [usize; !0usize&N])"),
+        ("(u8,[usize;\n    N * // twice\n    2\n])", "(u8, [usize; N * 2])"),
+        ("&[usize;N*2]", "&[usize; N*2]"),
+        ("&mut [usize;N * 2]", "&mut [usize; N * 2]"),
+        ("a::Wrap<[usize;N*2]>", "a::Wrap<[usize; N*2]>"),
+        ("Wrap<(u8,[usize;N*2])>", "Wrap<(u8, [usize; N*2])>"),
+        ("[(u8,[usize;N*2]);2]", "[(u8, [usize; N*2]); 2]"),
+        ("[usize;N*2]", "[usize; 6]"),
+        ("Wrap<[usize;N*2]>", "Wrap<[usize; 6]>"),
+        ("[[usize;N*2];2]", "[[usize; 6]; 2]"),
+        ("Wrap<Wrap<[usize;N*2]>>", "Wrap<Wrap<[usize; 6]>>"),
+    ] {
+        let src = format!("const N: usize = 3;\nunsafe extern \"sysv64\" fn k(a: {ty}) {{}}\n");
+        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("2:32: {takes} `{quoted}`"), "{ty}");
+    }
     let two = "has two words, an address and a length or a table, and a kernel's pointer has one";
     assert_eq!(compile("p: *const dyn A+Send", "").unwrap_err(), format!("1:32: a pointer to `dyn A + Send` {two}"));
+    for (to, quoted) in [
+        ("dyn Tr<N={3}>", "dyn Tr<N = {3}>"),
+        ("dyn Tr<N={ 3 }>", "dyn Tr<N = { 3 }>"),
+        ("dyn m!(a+b)", "dyn m!(a+b)"),
+        ("dyn Tr<Item<X>=u8>", "dyn Tr<Item<X> = u8>"),
+        ("dyn Tr<Item<X> =u8>", "dyn Tr<Item<X> = u8>"),
+    ] {
+        let why = format!("1:32: a pointer to `{quoted}` {two}");
+        assert_eq!(compile(&format!("p: *const {to}"), "").unwrap_err(), why, "{to}");
+    }
     let src = "#[instances(2)]\nunsafe extern \"sysv64\" fn k<const N: usize>(a: [usize; N]) {}";
     assert_eq!(kernite::x86_str(src, "k::<2>").unwrap_err(), format!("2:48: in `k::<2>`: {takes} `[usize; 2]`"));
     let src = "unsafe extern \"sysv64\" fn k() -> (u32,u32) {}";
@@ -859,9 +918,26 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
     let src = "unsafe extern \"sysv64\" fn k() -> fn(u32)->u32 {}";
     let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `fn(u32) -> u32`";
     assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    let src = "unsafe extern \"sysv64\" fn k() -> (u8,Marker<{N*2}>) {}";
+    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `(u8, Marker<{N*2}>)`";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    let src = "unsafe extern \"sysv64\" fn k() -> (u8,Marker<{ N * 2 }>) {}";
+    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `(u8, Marker<{ N * 2 }>)`";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    // In a result the length of an array is as the source has it; in the type of a variable, worked out.
+    let src = "const N: usize = 3;\nunsafe extern \"sysv64\" fn k() -> [usize;N*2] {}";
+    let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `[usize; N*2]`";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("2:34: {returns}"));
     let vars = "x86 variables are `gpr`, `ymm`, `xmm` and stack memory, `local<..>`; not";
+    let src = "const N: usize = 3;\nunsafe extern \"sysv64\" fn k() { let v: Wrap<[usize;N*2]>; }";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("2:40: {vars} `Wrap<[usize; 6]>`"));
+    let src = "const N: usize = 3;\nunsafe extern \"sysv64\" fn k() { let v: a::Wrap<[usize;N*2]>; }";
+    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("2:40: {vars} `a::Wrap<[usize; N*2]>`"));
     assert_eq!(compile("", "let v: *const[u8;4];").unwrap_err(), format!("2:8: {vars} `*const [u8; 4]`"));
     assert_eq!(compile("", "let v: fn(u32)->u32;").unwrap_err(), format!("2:8: {vars} `fn(u32) -> u32`"));
+    assert_eq!(compile("", "let v: m!(a+b);").unwrap_err(), format!("2:8: {vars} `m!(a+b)`"));
+    assert_eq!(compile("", "let v: m!(a + b);").unwrap_err(), format!("2:8: {vars} `m!(a + b)`"));
+    assert_eq!(compile("", "let v: (u8,Marker<{N*2}>);").unwrap_err(), format!("2:8: {vars} `(u8, Marker<{{N*2}}>)`"));
 }
 
 /// Rust never sees a kernel's body run, so kernite says which of the module's items it named, and
