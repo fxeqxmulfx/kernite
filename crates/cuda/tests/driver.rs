@@ -1,5 +1,7 @@
 //! The driver as kernite calls it, on the GPU here, if there is one.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
 use kernite_cuda::{Buffer, Cuda, Grid, Module, arg, bf16, f16};
 
 /// `x[i] += 1` for each `i < n`, a thread each, written by hand.
@@ -1131,6 +1133,38 @@ fn a_cuda_of_each_gpu_on_one_thread_sends_each_call_to_its_own_gpu() {
     assert_eq!(xs_b.read().unwrap(), vec![42.0; 1000]);
     drop(a);
     b.sync().unwrap();
+}
+
+#[test]
+fn a_buffer_is_copied_from_one_gpu_to_another() {
+    let Some(gpus) = two_gpus() else { return };
+    let a = Cuda::on(gpus[0]).unwrap();
+    let module_a = Module::load(&a, PTX, &["add_one"], &[]).unwrap();
+    let b = Cuda::on(gpus[1]).unwrap();
+    let module_b = Module::load(&b, PTX, &["add_one"], &[]).unwrap();
+    // Whole numbers, so that each addition is exact, whichever order the sums are made in.
+    let xs: Vec<f32> = (0..1000).map(|i| i as f32).collect();
+    let plus = |n: u32| xs.iter().map(|x| x + n as f32).collect::<Vec<f32>>();
+    let (mut from_a, mut on_b) = (a.upload(&xs).unwrap(), b.alloc::<f32>(1000).unwrap());
+    // The kernels launched before the copy, on either GPU, which are not waited for, have run when
+    // it is made, and those launched after it, on either, run after it.
+    (0..100).for_each(|_| add_one(&module_b, &on_b));
+    (0..300).for_each(|_| add_one(&module_a, &from_a));
+    on_b.copy_from(&from_a).unwrap();
+    (0..200).for_each(|_| add_one(&module_a, &from_a));
+    (0..200).for_each(|_| add_one(&module_b, &on_b));
+    assert_eq!(on_b.read().unwrap(), plus(500), "300 on the first GPU before the copy, 200 on the second after it");
+    assert_eq!(from_a.read().unwrap(), plus(500), "300 before the copy and 200 after it");
+    // And back.
+    on_b.write(&plus(7)).unwrap();
+    from_a.copy_from(&on_b).unwrap();
+    assert_eq!(from_a.read().unwrap(), plus(7));
+    // A buffer of none is copied to one of none, and one of another length is refused.
+    b.alloc::<f32>(0).unwrap().copy_from(&a.alloc::<f32>(0).unwrap()).unwrap();
+    let short = a.alloc::<f32>(999).unwrap();
+    let refused = catch_unwind(AssertUnwindSafe(|| on_b.copy_from(&short))).unwrap_err();
+    let said = refused.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(said.contains("a buffer of 1000 elements copied from one of 999"), "{said}");
 }
 
 #[test]

@@ -294,6 +294,10 @@ it went to. A kernel is given the buffers of the GPU it runs on. The driver does
 the thread, so kernite-cuda keeps which GPU's it made current last. A call to that GPU asks the driver for nothing it
 did not ask before, and a call to another GPU asks it once more, to make that GPU's current, `cuCtxSetCurrent`.
 
+`to.copy_from(&from)` copies a buffer to one on another GPU, after the kernels launched before it on either GPU have
+run, and before those launched after it on either run. Where the two GPUs have a link between them, it asks the driver
+for peer access and the copy goes over the link; where they have none, the driver sends it through the host.
+
 `saxpy` becomes the method that launches it, which takes the grid and then the kernel's parameters. They keep the names
 they are written with, `grid` among them, but `_`, which the macros name for Rust. A compile-time argument may not
 be named `grid`, nor, on a cooperative kernel, `threads` or `shared`, which are parameters of the method that says
@@ -482,7 +486,7 @@ Each crate depends only on the layers inside it. `crates/kernite/tests/architect
 | adapters | `kernite-x86`, `kernite-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kernite` | which machine and syntax each kernel compiles with |
 | delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, launchers of a grid's threads, or launchers of PTX |
-| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each, modules, launches; `f16` and `bf16`; depends on no other crate |
+| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each, modules, launches, copies between GPUs; `f16` and `bf16`; depends on no other crate |
 | runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid, and the memory of a module of x86 kernels; depends on no other crate |
 
 ## Guarantees

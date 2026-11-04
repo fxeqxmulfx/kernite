@@ -37,7 +37,7 @@
 //! Kernels run on a GPU in the order they are launched, and a copy to or from a buffer waits
 //! for those launched before it on the buffer's GPU; [`Cuda::sync`] waits for all of its GPU's,
 //! and says whether one failed. A buffer is on one GPU, and a kernel is given the buffers of
-//! the GPU it runs on.
+//! the GPU it runs on: [`Buffer::copy_from`] copies a buffer to a buffer on another.
 //!
 //! A kernel whose blocks wait for each other is launched cooperatively,
 //! [`Module::launch_cooperative`]: every block of the grid runs at once, so there are at most
@@ -105,11 +105,14 @@ api! {
     retain = c"cuDevicePrimaryCtxRetain"(*mut Handle, c_int);
     release = c"cuDevicePrimaryCtxRelease_v2"(c_int);
     set_current = c"cuCtxSetCurrent"(Handle);
+    can_access_peer = c"cuDeviceCanAccessPeer"(*mut c_int, c_int, c_int);
+    enable_peer_access = c"cuCtxEnablePeerAccess"(Handle, c_uint);
     synchronize = c"cuCtxSynchronize"();
     alloc = c"cuMemAlloc_v2"(*mut u64, usize);
     free = c"cuMemFree_v2"(u64);
     to_device = c"cuMemcpyHtoD_v2"(u64, *const c_void, usize);
     to_host = c"cuMemcpyDtoH_v2"(*mut c_void, u64, usize);
+    copy_peer = c"cuMemcpyPeer"(u64, Handle, u64, Handle, usize);
     memset = c"cuMemsetD8_v2"(u64, u8, usize);
     load_module = c"cuModuleLoadDataEx"(*mut Handle, *const c_void, c_uint, *mut c_int, *mut *mut c_void);
     unload_module = c"cuModuleUnload"(Handle);
@@ -314,6 +317,42 @@ impl Driver {
         let api = self.current()?;
         // SAFETY: it writes on the GPU alone.
         api.check("cuMemsetD8", unsafe { (api.memset)(ptr, 0, bytes) })
+    }
+
+    /// Copies the `bytes` bytes at `from_ptr` on the GPU of `from` to `ptr` on this one, after
+    /// the kernels launched before have run on either, and before those launched after run on
+    /// either. The copy is made in this GPU's context, which reaches the other's memory by a
+    /// link between the two GPUs where they have one, and through the host where they have not.
+    fn copy_from(&self, ptr: u64, from: &Driver, from_ptr: u64, bytes: usize) -> Result<(), Error> {
+        let api = self.current()?;
+        if self.device != from.device {
+            self.reach(api, from)?;
+        }
+        // SAFETY: the caller's addresses are on the GPUs of the two contexts, with `bytes`
+        // bytes from each.
+        let copied = unsafe { (api.copy_peer)(ptr, self.context, from_ptr, from.context, bytes) };
+        api.check("cuMemcpyPeer", copied)
+    }
+
+    /// Lets this GPU's context, which is current, reach the memory of `from`'s GPU directly,
+    /// if the two have a link for that. The driver keeps it until a context is destroyed.
+    fn reach(&self, api: &Api, from: &Driver) -> Result<(), Error> {
+        let mut linked = 0;
+        // SAFETY: it writes whether this GPU may reach the other's memory to `linked`.
+        let asked = unsafe { (api.can_access_peer)(&mut linked, self.device, from.device) };
+        api.check("cuDeviceCanAccessPeer", asked)?;
+        if linked == 0 {
+            return Ok(());
+        }
+        // SAFETY: `from.context` is held by `from`, which the caller has.
+        let enabled = unsafe { (api.enable_peer_access)(from.context, 0) };
+        match enabled {
+            // CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED, by an earlier copy; and
+            // CUDA_ERROR_TOO_MANY_PEERS, where the driver has no link left to give and stages
+            // the copy through the host, as it does for GPUs that have none.
+            704 | 711 => Ok(()),
+            _ => api.check("cuCtxEnablePeerAccess", enabled),
+        }
     }
 
     /// What the GPU says of itself as the `CUdevice_attribute` `attribute`.
@@ -601,6 +640,16 @@ impl<T: Plain> Buffer<T> {
     /// Sets every element to zero, after the kernels launched before have run.
     pub fn zero(&mut self) -> Result<(), Error> {
         self.driver.zero(self.ptr, self.len * size_of::<T>())
+    }
+
+    /// Copies what `from` holds to it, after the kernels launched before have run on the GPU
+    /// of either, and before those launched after run on either. `from` may be on another
+    /// GPU than it: where the two have a link between them, the driver's peer access, the copy
+    /// goes over the link, and where they have none it goes through the host. Panics if `from`
+    /// has not as many elements.
+    pub fn copy_from(&mut self, from: &Buffer<T>) -> Result<(), Error> {
+        assert_eq!(from.len, self.len, "a buffer of {} elements copied from one of {}", self.len, from.len);
+        self.driver.copy_from(self.ptr, &from.driver, from.ptr, self.len * size_of::<T>())
     }
 }
 
