@@ -5,13 +5,16 @@
 //! The tests run beside each other, so one holds a slice of managed memory while a kernel of
 //! another runs. A launch's contract allows that where the GPU reaches managed memory while the
 //! host does, `Cuda::concurrent_managed_access`, as the GPU here does, and nowhere else: where the
-//! GPU does not, `setup` makes the tests run one at a time.
+//! GPU does not, `setup` makes the tests run one at a time, as those of `placement.rs` do.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use kernite_cuda::{Cuda, Error, Grid, Module, Ptr, Unified, arg};
+use kernite_cuda::{Advice, Cuda, Grid, Location, Module, Ptr, Unified, arg};
+
+mod common;
+use common::{NO_ADVICE, NO_PREFETCH, PAGE, first_page, or_skip};
 
 /// Two kernels, written by hand. `add_one`: `x[i] += 1` for each `i < n`, a thread each, wrapping.
 /// `delay`: one thread waits `ns` nanoseconds on the GPU's global timer, then `x[0] += 100`.
@@ -121,16 +124,6 @@ const NO_PAGEABLE: &str = "cuDeviceGetAttribute: the GPU cannot reach pageable m
 /// The README's words for a GPU that cannot make page-locked memory.
 const NO_PAGE_LOCKED: &str = "cuMemHostAlloc: the GPU cannot reach page-locked memory at the host's addresses: \
                               its CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0";
-
-/// `made`, or `None` if the GPU cannot make that kind of memory: the error is then `refusal`, in
-/// the README's words, and the test is skipped, as for a machine with no GPU.
-fn or_skip<T>(made: Result<T, Error>, refusal: &str) -> Option<T> {
-    made.map_err(|e| {
-        assert_eq!(e.to_string(), refusal);
-        eprintln!("the GPU cannot: skipped. {e}");
-    })
-    .ok()
-}
 
 /// The host fills `m` with `input`, a kernel adds 1 to each word, and the host reads the sums, bit
 /// for bit, from the one address the kernel was given, with no copy and no `sync` of its own.
@@ -303,4 +296,71 @@ fn dropping_a_slice_lent_waits_for_the_kernel_and_the_host_has_the_slice_back() 
     let Some(lent) = or_skip(cuda.lend(&mut v), NO_PAGEABLE) else { return };
     drop_waits(&module, lent);
     assert_eq!(v, [105, 1, 2, 3], "the kernel's write is in the Vec when the host has it back");
+}
+
+#[test]
+fn page_locked_memory_is_not_moved_advised_or_placed_and_a_slice_lent_is_not_moved_or_placed() {
+    let Some((_one, cuda, _)) = setup() else { return };
+    let pinned = or_skip(cuda.pinned::<u32>(PAGE), NO_PAGE_LOCKED);
+    let mut v = vec![0u32; PAGE];
+    let lent = or_skip(cuda.lend(&mut v), NO_PAGEABLE);
+    let said = |this, call, rule| format!("{call}: the driver {rule}: this is {this}");
+    for (m, this) in [(pinned.as_ref(), "page-locked memory"), (lent.as_ref(), "a slice lent")] {
+        let Some(m) = m else { continue };
+        let prefetch = said(this, "cuMemPrefetchAsync", "prefetches managed memory alone");
+        assert_eq!(m.prefetch(0..PAGE, Location::Gpu).unwrap_err().to_string(), prefetch);
+        let placement = said(this, "cuMemRangeGetAttribute", "tells the place of managed memory alone");
+        assert_eq!(m.placement(0..PAGE).unwrap_err().to_string(), placement);
+    }
+    if let Some(m) = pinned {
+        let advise = said("page-locked memory", "cuMemAdvise", "advises managed and pageable memory alone");
+        assert_eq!(m.advise(0..PAGE, Advice::ReadMostly).unwrap_err().to_string(), advise);
+    }
+}
+
+#[test]
+fn a_slice_lent_takes_each_advice_and_a_kernel_adds_to_it_after_each() {
+    let Some((_one, cuda, module)) = setup() else { return };
+    let n = 3 * PAGE;
+    let input = words(n, 11);
+    let mut v = input.clone();
+    let Some(lent) = or_skip(cuda.lend(&mut v), NO_PAGEABLE) else { return };
+    // The one page of the slice that is its own.
+    let page = first_page(&lent)..first_page(&lent) + PAGE;
+    let advice = [
+        Advice::ReadMostly,
+        Advice::NotReadMostly,
+        Advice::PreferredLocation(Location::Gpu),
+        Advice::PreferredLocation(Location::Host),
+        Advice::NoPreferredLocation,
+        Advice::AccessedBy(Location::Gpu),
+        Advice::AccessedBy(Location::Host),
+        Advice::NotAccessedBy(Location::Gpu),
+        Advice::NotAccessedBy(Location::Host),
+    ];
+    let mut taken = 0u32;
+    for advice in advice {
+        let Some(()) = or_skip(lent.advise(page.clone(), advice), NO_ADVICE) else { continue };
+        add_one(&module, lent.ptr(), n as u32);
+        taken += 1;
+    }
+    drop(lent);
+    let want: Vec<u32> = input.iter().map(|w| w.wrapping_add(taken)).collect();
+    assert_eq!(v, want, "{taken} advice taken");
+}
+
+#[test]
+fn a_kernel_adds_to_memory_prefetched_to_the_gpu_and_the_host_reads_it_prefetched_back() {
+    let Some((_one, cuda, module)) = setup() else { return };
+    let n = 1_000_003;
+    let mut input = words(n, 5);
+    input[0] = u32::MAX;
+    let want: Vec<u32> = input.iter().map(|w| w.wrapping_add(1)).collect();
+    let mut m = cuda.managed::<u32>(n).unwrap();
+    m.host_mut().unwrap().copy_from_slice(&input);
+    let Some(()) = or_skip(m.prefetch(0..n, Location::Gpu), NO_PREFETCH) else { return };
+    add_one(&module, m.ptr(), n as u32);
+    m.prefetch(0..n, Location::Host).unwrap();
+    assert_eq!(m.host().unwrap(), want, "the sums, bit for bit, from the one address");
+    assert_eq!(m.placement(0..n).unwrap().last_prefetch, Some(Location::Host));
 }

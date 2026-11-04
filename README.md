@@ -389,6 +389,44 @@ reaching managed memory while the host does, the host holds no slice of managed 
 kernel runs. `Module::launch` says the contract in its `# Safety`, and the macros write it as the `# Safety` of the
 launcher of a GPU kernel that has none.
 
+Managed memory is moved ahead of its use, and advised how it is used, over a range of its elements; a slice lent is
+advised too, but not moved. `memory.prefetch(0..len, Location::Gpu)` moves them to the GPU, ahead of the kernels that
+use them, on the stream the kernels are launched on; the places are `Gpu`, `Host`, `Numa(node)` and `NumaOfThread`.
+`memory.advise(range, advice)` tells the driver that the range is `ReadMostly` or `NotReadMostly`, that it has a
+`PreferredLocation(place)` or `NoPreferredLocation`, or that the GPU or the host is `AccessedBy` it or `NotAccessedBy`
+it, which the driver may follow or not. `memory.placement(range)` says what the driver has of both: `read_mostly`,
+`preferred`, `accessed_by` and `last_prefetch`, each only where every page of the range agrees, and `None` or empty
+where they do not. A prefetch, and the advice that names the GPU, need the GPU to reach managed memory while the host
+does, and where it cannot the error says so in these words: `cuMemPrefetchAsync: the GPU cannot reach managed memory
+while the host does: its CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0`, or `cuMemAdvise:` and the same for the
+advice.
+
+`prefetch`, `advise` and `placement` need a driver of CUDA 12.2 (535) or later, which brought `cuMemPrefetchAsync_v2`,
+`cuMemAdvise_v2` and the attributes of the preferred place and of the last prefetch. `Cuda::new()` opens an older driver
+all the same, and each of the three says so when it is called, in the words of the loader: ``dlsym: the driver has no
+`cuMemPrefetchAsync_v2`: libcuda.so.1: undefined symbol: cuMemPrefetchAsync_v2`` for `prefetch`, and the same of
+`cuMemAdvise_v2` for `advise` and `placement`.
+
+The driver prefetches managed memory alone, and tells the place of it alone, so `prefetch` and `placement` refuse
+page-locked memory and a slice lent, and say why: `cuMemPrefetchAsync: the driver prefetches managed memory alone: this
+is page-locked memory`, or `this is a slice lent`, and `cuMemRangeGetAttribute: the driver tells the place of managed
+memory alone: this is a slice lent`. It advises managed memory, and pageable memory where the GPU reaches it, which
+`lend` asked, so `advise` takes a slice lent as it takes managed memory, and refuses page-locked memory: `cuMemAdvise:
+the driver advises managed and pageable memory alone: this is page-locked memory`.
+
+A NUMA node does not touch memory, so it is refused as an accessor: `cuMemAdvise: only the GPU and the host access
+memory, not a NUMA node`; and the driver refuses a node the host does not have: `cuMemPrefetchAsync:
+CUDA_ERROR_INVALID_VALUE (1): invalid argument`. A range with no elements, or one past the end, panics.
+
+The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, takes a NUMA node as the preferred location,
+`PreferredLocation(Numa(node))` or `PreferredLocation(NumaOfThread)`, and changes nothing: the memory prefers what it
+did before, the GPU, the host or no place, and `preferred` says so. CUDA's header says the driver sets the node and says
+it back as a NUMA node, which this one does not.
+
+The driver works on whole pages, 4 KiB. A range reaches all of each page it touches, the rest of the page too, whether
+it is the memory of the same buffer or of another. A managed buffer starts at a multiple of 512 bytes, not at a page, so
+it shares the pages at its ends with the buffers beside it, and a range from a page to a page reaches just its own.
+
 `saxpy` becomes the method that launches it, which takes the grid and then the kernel's parameters. They keep the names
 they are written with, `grid` among them, but `_`, which the macros name for Rust. A compile-time argument may not
 be named `grid`, nor, on a cooperative kernel, `threads` or `shared`, which are parameters of the method that says

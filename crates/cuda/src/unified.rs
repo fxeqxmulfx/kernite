@@ -9,6 +9,10 @@ use std::slice;
 
 use super::{Cuda, Driver, Error, Plain, Ptr, bytes};
 
+mod placement;
+
+pub use placement::{Advice, Location, Placement};
+
 /// Something a GPU can do if it says so, as `cuDeviceGetAttribute` has it: the attribute's
 /// number, and its name without the `CU_DEVICE_ATTRIBUTE_` before it. The GPU says so by an
 /// attribute that is not 0.
@@ -146,6 +150,15 @@ enum Kind {
 ///   reads and writes it across the bus.
 /// - [`Cuda::lend`] lends a slice of the host's own memory to the GPU, for as long as `'a`, where
 ///   the GPU reaches pageable memory. The others are their own: `Unified<'static, T>`.
+///
+/// Managed memory also moves ahead of its use: [`prefetch`](Unified::prefetch) sends a range of it
+/// to the GPU or the host, [`advise`](Unified::advise) tells the driver how a range is used, and
+/// [`placement`](Unified::placement) says what the driver has of both. The driver prefetches and
+/// places managed memory alone, so those two refuse page-locked memory and a slice lent; it advises
+/// a slice lent too, and page-locked memory not. The driver works on whole pages, 4 KiB: a range
+/// reaches all of each page it touches, the rest of the page too, whether it is the memory of the
+/// same buffer or of another. A managed buffer starts at a multiple of 512 bytes, not at a page, so
+/// it shares the pages at its ends with the buffers beside it.
 ///
 /// The slices wait for every kernel launched on the GPU to finish, and say whether one failed,
 /// before they lend the memory. A slice taken after a launch is never under its kernel, so the host

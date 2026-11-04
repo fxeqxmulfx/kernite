@@ -44,7 +44,8 @@
 //! makes memory the driver moves to whichever touches it, [`Cuda::pinned`] makes page-locked memory
 //! in the host, and [`Cuda::lend`] lends a slice of the host's own to the GPU. The slices it lends
 //! the host wait for the GPU's kernels first, and [`Module::launch`] says what a launch keeps to of
-//! the slices the host holds.
+//! the slices the host holds. Managed memory is sent to the GPU before a kernel needs it by
+//! [`Unified::prefetch`], and advised how it is used by [`Unified::advise`].
 //!
 //! A kernel whose blocks wait for each other is launched cooperatively,
 //! [`Module::launch_cooperative`]: every block of the grid runs at once, so there are at most
@@ -63,13 +64,21 @@ pub mod named;
 mod unified;
 
 pub use half::{bf16, f16};
-pub use unified::Unified;
+pub use unified::{Advice, Location, Placement, Unified};
 
 /// What every function of the driver returns: 0, or what went wrong.
 type CuResult = c_int;
 
 /// A context, a module, a function or a stream: what the driver hands out, opaque.
 type Handle = *mut c_void;
+
+/// A place that the driver is told of, as `CUmemLocation` is: a kind of place, and which one.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MemLocation {
+    kind: c_int,
+    id: c_int,
+}
 
 // The dynamic loader, in the C library that every Rust program on Linux links.
 unsafe extern "C" {
@@ -82,23 +91,36 @@ unsafe extern "C" {
 const RTLD_NOW: c_int = 2;
 
 /// The driver's functions that kernite calls, each by the name `cuda.h` gives it under its own:
-/// `cuMemAlloc` is `cuMemAlloc_v2`.
+/// `cuMemAlloc` is `cuMemAlloc_v2`. A driver lacks the functions after the `?` if it is older than
+/// the release that brought them. It is opened all the same, and the table keeps the error of
+/// the lookup for the call that needs the function to return.
 macro_rules! api {
-    ($($field:ident = $symbol:literal($($arg:ty),*);)*) => {
+    (
+        $($field:ident = $symbol:literal($($arg:ty),*);)*
+        ?
+        $($maybe:ident = $maybe_symbol:literal($($maybe_arg:ty),*);)*
+    ) => {
         struct Api {
             $($field: unsafe extern "C" fn($($arg),*) -> CuResult,)*
+            $($maybe: Result<unsafe extern "C" fn($($maybe_arg),*) -> CuResult, Error>,)*
         }
 
         impl Api {
-            /// The functions of the driver that `lib` is a handle to.
-            fn load(lib: *mut c_void) -> Result<Api, Error> {
+            /// The functions of the driver that `lookup` finds, by their names.
+            fn load(lookup: impl Fn(&CStr) -> Result<*mut c_void, Error>) -> Result<Api, Error> {
                 Ok(Api {
                     $($field: {
-                        let f = symbol(lib, $symbol)?;
+                        let f = lookup($symbol)?;
                         // SAFETY: `f` is not null, and `cuda.h` declares the function of this
                         // name with these parameters.
                         unsafe { std::mem::transmute::<*mut c_void, unsafe extern "C" fn($($arg),*) -> CuResult>(f) }
                     },)*
+                    $($maybe: lookup($maybe_symbol).map(|f| {
+                        // SAFETY: as above.
+                        unsafe {
+                            std::mem::transmute::<*mut c_void, unsafe extern "C" fn($($maybe_arg),*) -> CuResult>(f)
+                        }
+                    }),)*
                 })
             }
         }
@@ -115,6 +137,13 @@ macro_rules! api {
                             999
                         }
                         refuse
+                    },)*
+                    $($maybe: {
+                        unsafe extern "C" fn refuse($(_: $maybe_arg),*) -> CuResult {
+                            // CUDA_ERROR_UNKNOWN.
+                            999
+                        }
+                        Ok(refuse as unsafe extern "C" fn($($maybe_arg),*) -> CuResult)
                     },)*
                 }
             }
@@ -143,6 +172,7 @@ api! {
     to_host = c"cuMemcpyDtoH_v2"(*mut c_void, u64, usize);
     copy_peer = c"cuMemcpyPeer"(u64, Handle, u64, Handle, usize);
     memset = c"cuMemsetD8_v2"(u64, u8, usize);
+    range_attribute = c"cuMemRangeGetAttribute"(*mut c_void, usize, c_int, u64, usize);
     load_module = c"cuModuleLoadDataEx"(*mut Handle, *const c_void, c_uint, *mut c_int, *mut *mut c_void);
     unload_module = c"cuModuleUnload"(Handle);
     function = c"cuModuleGetFunction"(*mut Handle, Handle, *const c_char);
@@ -158,6 +188,10 @@ api! {
     occupancy = c"cuOccupancyMaxActiveBlocksPerMultiprocessor"(*mut c_int, Handle, c_int, usize);
     error_name = c"cuGetErrorName"(CuResult, *mut *const c_char);
     error_string = c"cuGetErrorString"(CuResult, *mut *const c_char);
+    // These came with CUDA 12.2, which brought the NUMA node as a place.
+    ?
+    prefetch = c"cuMemPrefetchAsync_v2"(u64, usize, MemLocation, c_uint, Handle);
+    advise = c"cuMemAdvise_v2"(u64, usize, c_int, MemLocation);
 }
 
 impl Api {
@@ -206,7 +240,7 @@ fn find() -> Result<Api, Error> {
     if lib.is_null() {
         return Err(Error::new("dlopen", format!("no CUDA driver: {}", dl_error())));
     }
-    Api::load(lib)
+    Api::load(|name| symbol(lib, name))
 }
 
 /// The driver, opened and started: its functions, or why there is no driver to have.
@@ -221,9 +255,14 @@ fn symbol(lib: *mut c_void, name: &CStr) -> Result<*mut c_void, Error> {
     // SAFETY: `lib` is a handle `dlopen` gave, and `name` is a C string.
     let f = unsafe { dlsym(lib, name.as_ptr()) };
     if f.is_null() {
-        return Err(Error::new("dlsym", format!("the driver has no `{}`: {}", name.to_string_lossy(), dl_error())));
+        return Err(missing(name, &dl_error()));
     }
     Ok(f)
+}
+
+/// The error that says the driver has no function `name`, and why, as the loader says.
+fn missing(name: &CStr, why: &str) -> Error {
+    Error::new("dlsym", format!("the driver has no `{}`: {why}", name.to_string_lossy()))
 }
 
 /// What the loader said went wrong, last.
@@ -249,10 +288,13 @@ unsafe fn string(p: *const c_char) -> String {
 /// What went wrong in a call to the driver.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
-    /// The function that failed, by its name in C: `cuInit`, or `dlopen` if there is no driver.
+    /// The function that failed, by its name in C: `cuInit`; `dlopen` if there is no driver, and
+    /// `dlsym` for a function the driver does not have.
     /// A call refused before it is made names that call, whatever the reason: `cuMemAllocManaged`
-    /// where the GPU cannot allocate managed memory. [`Cuda::lend`] refuses no call of the driver's,
-    /// and names `cuDeviceGetAttribute`, which told that the GPU cannot.
+    /// where the GPU cannot allocate managed memory, `cuMemPrefetchAsync` where the memory is
+    /// page-locked, which the driver does not prefetch, and `cuMemAdvise` where a NUMA node is
+    /// given as an accessor. [`Cuda::lend`] refuses no call of the driver's, and names
+    /// `cuDeviceGetAttribute`, which told that the GPU cannot.
     pub call: &'static str,
     /// What it said: the `CUresult` it returned, by name, number and meaning, or why there is
     /// no driver.
@@ -604,7 +646,9 @@ impl Cuda {
     /// Whether the GPU reaches managed memory while the host does, as its
     /// `CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS` says. A GPU that does not faults the host on
     /// managed memory while any kernel runs, so the host may hold a slice of managed memory while
-    /// a kernel runs only where this is true: [`Module::launch`] has the rule.
+    /// a kernel runs only where this is true: [`Module::launch`] has the rule. Such a GPU is also
+    /// refused [`Unified::prefetch`], and [`Unified::advise`] of a preferred location or an
+    /// accessor that is the GPU.
     pub fn concurrent_managed_access(&self) -> bool {
         self.concurrent_managed_access
     }
@@ -1139,6 +1183,40 @@ impl<T: Plain> fmt::Debug for Global<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A function of the fake driver that every lookup finds: it refuses.
+    unsafe extern "C" fn refuse() -> CuResult {
+        // CUDA_ERROR_UNKNOWN.
+        999
+    }
+
+    /// The lookup of a fake driver that has every function but those of `lacks`.
+    fn finds<'a>(lacks: &'a [&'a CStr]) -> impl Fn(&CStr) -> Result<*mut c_void, Error> + 'a {
+        move |name| {
+            if lacks.contains(&name) {
+                Err(missing(name, "libcuda.so.1: undefined symbol"))
+            } else {
+                Ok(refuse as unsafe extern "C" fn() -> CuResult as *mut c_void)
+            }
+        }
+    }
+
+    /// A driver of a release before CUDA 12.2 is opened all the same: the table has the functions
+    /// it has, and has for the two it lacks the error of the lookup, which a call that needs one
+    /// returns. A driver that lacks any other function is not opened.
+    #[test]
+    fn a_driver_before_cuda_12_2_is_opened_and_one_that_lacks_any_other_function_is_not() {
+        let lacks = |name: &str| format!("dlsym: the driver has no `{name}`: libcuda.so.1: undefined symbol");
+        let api = Api::load(finds(&[c"cuMemPrefetchAsync_v2", c"cuMemAdvise_v2"])).ok().unwrap();
+        assert_eq!(api.prefetch.err().unwrap().to_string(), lacks("cuMemPrefetchAsync_v2"));
+        assert_eq!(api.advise.err().unwrap().to_string(), lacks("cuMemAdvise_v2"));
+        let api = Api::load(finds(&[])).ok().unwrap();
+        assert!(api.prefetch.is_ok() && api.advise.is_ok(), "a driver that has them has them");
+        for name in [c"cuInit", c"cuMemRangeGetAttribute", c"cuGetErrorString"] {
+            let e = Api::load(finds(&[name])).err().unwrap();
+            assert_eq!(e.to_string(), lacks(&name.to_string_lossy()), "{name:?}");
+        }
+    }
 
     /// A call asks the driver to switch only when it goes to another GPU than the last call
     /// did, and a context the driver would not make current is not taken for the current one.
