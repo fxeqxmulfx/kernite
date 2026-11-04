@@ -38,7 +38,7 @@
 //!   without it.
 //! - An `extern "ptx-func" fn` is a `.func` in `PTX`, which the module's GPU kernels and
 //!   functions call, itself among them, as `call(r, gcd, (a, b))` does. It takes and
-//!   returns PTX's types, `u32` or `f16x2`, or never returns, `-> !`, and leaves nothing
+//!   returns PTX's types, `u32` or `f16x2`, or never returns, `-> !`, and leaves no function
 //!   behind for Rust, which does not call it.
 //! - A `static` is memory of the module's, which each of its kernels names as it names memory
 //!   it declares: `static COUNTS: global<[u32; 16]>;` in global memory, or
@@ -74,8 +74,8 @@
 //!     `Cargo.toml`, and the error is at the static when it has none.
 //!   - A module of both kinds of kernel and a static is an error: it is two modules, one of
 //!     each kind of kernel, with the statics each names.
-//! - A function without an ABI is a helper, inlined where a kernel calls it, and leaves
-//!   nothing behind. Constants and every other item but a `static` stay as written, for Rust
+//! - A function without an ABI is a helper, inlined where a kernel calls it, and leaves no
+//!   function behind. Constants and every other item but a `static` stay as written, for Rust
 //!   to use as well.
 //!   A constant a kernel reads counts as used, as it would if Rust had seen the read, under the
 //!   `cfg` of each item that reads it, a helper's under that of the kernel that calls it and that
@@ -175,6 +175,22 @@
 //! Rust has none to ask for. A pointer of two words to a type Rust refuses by itself,
 //! `-> *mut dyn Copy`, is kernite's error alone, though Rust says its own of a plain kernel's
 //! result. A result of `()` is no result, and no error.
+//!
+//! A helper is compiled where a kernel calls it, and an `extern "ptx-func"` function is a `.func`
+//! of the GPU's module, so the macros write no function for either. Where kernite finds an error
+//! in compiling a function or a static, or refuses the module as a whole, they write the types of
+//! every helper and function of the module, one that no kernel calls too: each compile-time
+//! argument's, each parameter's and the result's, as they write the type of a kernel that does not
+//! compile, `let _: ..;` in a block of the module, under the `cfg` of the function and where the
+//! error is said. kernite refuses the module as a whole when it is two modules, when no module of
+//! PTX holds its GPU kernels and statics, when an item of its own has the name of a const it
+//! takes, when the workspace's name is not a string, and when its attribute is refused, as below.
+//! Rust finds the names in the types, so an import that only they name is used, and it says of
+//! them only that a lifetime is not declared, that a module is where a type is written, and what a
+//! macro writes; it says the same of a helper that no kernel calls. Only where a macro has written
+//! an error as an item of the module is Rust silent about a name it cannot find, as `gpr` and
+//! `local<[u32; 4], 16>` are, so the types are shown nowhere else. A module that builds is shown
+//! none of them, so an import that only a helper names is unused to Rust.
 //!
 //! The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one,
 //! `dead_code` say, and build its kernels: Rust lints the names and the code a kernel is

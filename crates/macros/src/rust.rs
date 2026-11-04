@@ -837,6 +837,31 @@ pub(crate) fn launcher_result(f: &Fn, top: &[TokenTree], launched: TokenStream) 
     }
 }
 
+/// What shows Rust the types in the signature of `f`, a helper or an `extern "ptx-func"` function, of which the macros
+/// write nothing else: a helper is compiled where a kernel calls it, and the function is a `.func` of the GPU's
+/// module. Each compile-time argument's type, each parameter's and the result's is written as [`refused`] writes the
+/// type of a kernel that does not compile, `let _: ..;`, under `guard`. So an import that only they name is used, and
+/// Rust says of them only that a lifetime is not declared, that a module is where a type is written, and what a macro
+/// writes. Most of the types are the language's, `gpr` or `local<[u32; 4], 16>`, and Rust cannot find them: it is
+/// silent about a name it cannot find only where a macro has written an error as an item of the module, and `guard`
+/// holds only there.
+pub(crate) fn seen(f: &Fn, top: &[TokenTree], guard: &TokenStream) -> TokenStream {
+    let generics = written_generics(f, top)
+        .windows(4)
+        .filter(|w| is_ident(&w[0], "const") && is_punct(&w[2], ':'))
+        .map(|w| vec![w[3].clone()]);
+    let params = written_params(f, top).into_iter().map(|(param, colon)| param[colon + 1..].to_vec());
+    let result = f.ret.iter().map(|r| top[r.tokens.clone()].to_vec());
+    let mut out = TokenStream::new();
+    for ty in generics.chain(params).chain(result) {
+        out.extend(guard.clone());
+        out.extend(parse("let _:"));
+        out.extend(refused(&ty));
+        out.extend(parse(";"));
+    }
+    out
+}
+
 /// The name the macros write for a type kernite refuses: one Rust cannot find.
 const REFUSED: &str = "self::__kernite_refused";
 

@@ -156,6 +156,23 @@ impl ItemOut {
             _ => &[],
         }
     }
+
+    /// Whether kernite says an error of the item itself: a static it cannot lay out; a helper
+    /// whose body, `#[instances(..)]` or attributes are wrong; a function of an ABI it compiles
+    /// nothing for; a kernel that is not an `unsafe fn`; or a kernel or an `extern "ptx-func"`
+    /// function whose attributes are wrong, or of which an instance does not compile. An error of
+    /// the module as a whole is none of an item's, and a module refused whole says none of its items'.
+    pub fn failed(&self) -> bool {
+        match self {
+            ItemOut::Rust | ItemOut::Given => false,
+            ItemOut::HostStatic(laid) => laid.as_ref().err().is_some_and(|failed| failed.error.is_some()),
+            ItemOut::DeviceStatic(laid) => laid.as_ref().err().is_some_and(|failed| failed.error.is_some()),
+            ItemOut::Helper(errors) => !errors.is_empty(),
+            ItemOut::Unknown(error) => error.is_some(),
+            ItemOut::Native(k) => k.not_unsafe.is_some() || k.said.is_some() || !k.errors.is_empty(),
+            ItemOut::Device(k) => k.not_unsafe.is_some() || k.said.is_some() || !k.errors.is_empty(),
+        }
+    }
 }
 
 /// A function the process runs, compiled.

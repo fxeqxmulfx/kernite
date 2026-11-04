@@ -20,7 +20,8 @@ use crate::cond::Cond;
 use crate::gpu::{HOLE, gpu};
 use crate::room;
 use crate::rust::{
-    cfg_of, error, error_under, flatten, inner_attribute, is_ident, is_punct, lex, name_at, parse, position, site, stub,
+    cfg_of, error, error_under, flatten, inner_attribute, is_ident, is_punct, lex, name_at, parse, position, seen,
+    site, stub,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
@@ -82,6 +83,9 @@ pub(crate) fn expand(
         .filter(|item| inner_attribute(&top[item.tokens.clone()]))
         .flat_map(|item| top[item.tokens.clone()].iter().cloned())
         .collect();
+    // The errors of the module as a whole, said under no `cfg`: at its attribute or at a workspace's name that is not a
+    // string; an item that has the name of a const the module takes; and a module that is two.
+    let whole = at_module.is_some() || !made.given.is_empty() || made.owner.is_some();
     out.extend(at_module);
     if let Some((_, path)) = given {
         out.extend(made.given.iter().map(said));
@@ -93,11 +97,29 @@ pub(crate) fn expand(
     // function it leaves out.
     let cfgs: Vec<TokenStream> = module.items.iter().map(|item| cfg_of(item, &top)).collect();
     let conds: Vec<Cond> = cfgs.iter().map(Cond::of).collect();
+    // Where `cfg` keeps what a part of the GPU's module is of: the code of an item, or a static of the GPU's.
+    let kept = |device: &DeviceOut, it: Kept| match it {
+        Kept::Code(i) => conds[device.code_items[i]].clone(),
+        Kept::Static(j) => conds[device.static_items[j]].clone(),
+    };
+    // Why the GPU's module is none, each reason where `cfg` keeps what it is of.
+    let mut unloaded = vec![];
+    for device in made.device.iter() {
+        for (when, message) in &device.assembly.refusals {
+            unloaded.push((Cond::when(when, &|it| kept(device, it)), message.as_str()));
+        }
+    }
+    // Where Rust is silent about a name it cannot find, `gpr` say, in the signature of a helper: where a macro writes
+    // an error as an item of the module. That is where kernite says an error of an item, under the item's `cfg`; why
+    // the GPU's module is none, under the `cfg` of what it is of; and the errors of the module as a whole.
+    let items = made.items.iter().zip(&conds).filter(|(item, _)| item.failed()).map(|(_, c)| c.clone());
+    let failing = Cond::any(items.chain(unloaded.iter().map(|(c, _)| c.clone())).chain(whole.then_some(Cond::Always)));
     // Where Rust finds a name of the kernel's, as it would find it in the kernel's own body: at the
     // name, with the macro's hygiene, for Rust to resolve it as it resolves what the macro writes.
     let place = |m: &lang::Mention| at(m.span).resolved_at(site());
     // How each kernel the GPU launches is, and each static of the GPU's, as the host reads it; when
-    // each GPU item is there; and what names, for Rust, what each item names.
+    // each GPU item is there; and what shows Rust what each item names, and the types of each signature
+    // that nothing else writes.
     let (mut launchers, mut memory, mut on_gpu, mut reads) = (vec![], vec![], vec![], TokenStream::new());
     // A field for each static of the GPU's that is laid out, under its `cfg`, for Rust to count the room
     // of those it keeps.
@@ -109,6 +131,9 @@ pub(crate) fn expand(
         let tokens = &top[item.tokens.clone()];
         let cfg = &cfgs[i];
         let said = |e: &lang::Error| error_under(cfg, at(e.span), &e.message);
+        // What shows Rust the types of a signature that nothing else writes, where `cfg` keeps the item and kernite
+        // says an error.
+        let shown = |f: &lang::Fn| Cond::all([conds[i].clone(), failing.clone()]).guard().map(|g| seen(f, &top, &g));
         reads.extend(named(&made, &conds, i, &top, &place));
         match (&item.kind, made_item) {
             // The module's own attributes are first, and a const given is Rust's where its
@@ -129,7 +154,10 @@ pub(crate) fn expand(
                     fields.extend(room::field(cfg, i, &laid.code.ty, at(s.ty.span())));
                 }
             }
-            (ItemKind::Fn(_), ItemOut::Helper(errors)) => out.extend(errors.iter().map(said)),
+            (ItemKind::Fn(f), ItemOut::Helper(errors)) => {
+                out.extend(errors.iter().map(said));
+                reads.extend(shown(f));
+            }
             (ItemKind::Fn(f), ItemOut::Unknown(e)) => {
                 out.extend(e.as_ref().map(said));
                 out.extend(stub(f, &top));
@@ -150,6 +178,9 @@ pub(crate) fn expand(
                 out.extend(d.errors.iter().map(said));
                 on_gpu.push(conds[i].clone());
                 launchers.extend(d.launcher.as_ref().map(|l| (f, l)));
+                if d.launcher.is_none() {
+                    reads.extend(shown(f));
+                }
             }
             _ => unreachable!("kernite::module says what each item is"),
         }
@@ -179,15 +210,15 @@ pub(crate) fn expand(
     }
     if let Some(device) = &made.device {
         // Each part of the module is there where `cfg` keeps the code and the statics it is of.
-        let kept = |it: Kept| match it {
-            Kept::Code(i) => conds[device.code_items[i]].clone(),
-            Kept::Static(j) => conds[device.static_items[j]].clone(),
-        };
-        let parts: Vec<(Cond, &str)> =
-            device.assembly.parts.iter().map(|(when, text)| (Cond::when(when, &kept), text.as_str())).collect();
-        out.extend(unloadable(device, &kept, &at));
+        let parts: Vec<(Cond, &str)> = device
+            .assembly
+            .parts
+            .iter()
+            .map(|(when, text)| (Cond::when(when, &|it| kept(device, it)), text.as_str()))
+            .collect();
+        out.extend(unloadable(&unloaded, at(device.at)));
         let symbols: Vec<(Cond, &str)> =
-            device.symbols.iter().map(|(code, symbol)| (kept(Kept::Code(*code)), symbol.as_str())).collect();
+            device.symbols.iter().map(|(code, symbol)| (kept(device, Kept::Code(*code)), symbol.as_str())).collect();
         out.extend(gpu(&launchers, &symbols, &memory, &parts, &top, &at, &on_gpu));
         // The workspace's name is in the PTX, so it is built again when it changes.
         if let Some(manifest) = manifest.as_deref().and_then(Path::to_str) {
@@ -197,20 +228,14 @@ pub(crate) fn expand(
     out
 }
 
-/// Why the GPU's module is none, at the module's first item that is the GPU's, where `cfg` keeps what
-/// each reason is of, `kept` saying where. It is said once: where an earlier reason holds, a later
-/// is not.
-fn unloadable(
-    device: &DeviceOut,
-    kept: &dyn Fn(Kept) -> Cond,
-    at: &dyn Fn(lang::Span) -> proc_macro::Span,
-) -> TokenStream {
+/// Why the GPU's module is none, at the module's first item that is the GPU's, `at`: each of `unloaded`
+/// where its condition holds. It is said once: where an earlier reason holds, a later is not.
+fn unloadable(unloaded: &[(Cond, &str)], at: Span) -> TokenStream {
     let (mut out, mut before) = (TokenStream::new(), vec![]);
-    for (when, message) in &device.assembly.refusals {
-        let cond = Cond::when(when, kept);
+    for (cond, message) in unloaded {
         let now = Cond::all([cond.clone(), Cond::any(before.iter().cloned()).not()]);
-        out.extend(now.guard().map(|guard| error_under(&guard, at(device.at), message)));
-        before.push(cond);
+        out.extend(now.guard().map(|guard| error_under(&guard, at, message)));
+        before.push(cond.clone());
     }
     out
 }

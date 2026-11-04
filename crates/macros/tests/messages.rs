@@ -2818,6 +2818,232 @@ fn rust_sees_the_result_a_kernel_cannot_have_as_it_sees_the_result_of_a_plain_ke
     refuses("result_kinds", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
+/// A helper is compiled where a kernel calls it, and an `extern "ptx-func"` function is a `.func` of the GPU's
+/// module, so Rust sees neither. Where kernite says an error of an item, Rust is shown the types their
+/// signatures name, as it sees a kernel's: a type of the crate's that only they name, `Ret`, is used, so Rust does
+/// not call its `use` unused beside kernite's error, which is said once. So it is of a parameter, a result and a
+/// compile-time argument, the second of two for a helper; of a type nested in a parameter, `[Ret; 2]`, `*const Ret`
+/// or `Option<Ret>`; of a helper on x86 and on a GPU, called by a kernel of instances, which says its error for
+/// each, or by a helper; and of a function of instances, which says its error for each. kernite says it at the
+/// argument of the call of a helper, at the result of a helper that is called, and at the type of a function.
+#[test]
+fn rust_sees_the_types_a_helper_or_a_function_names_as_it_sees_a_kernels() {
+    let gpr = "`x`: a gpr is seen as `gpr`, `r32`, `r16` or `r8`, not `Ret`";
+    let func = "a function takes and returns PTX's types, as its variables are: `u32`, `f32`, `b64`; not `Ret`";
+    let nothing = "a helper returns nothing; it writes the variables it is given";
+    let generic = "a function that names an ABI takes integers and `bool`s at compile time, as Rust's const generics \
+                   are; `Ret` is neither";
+    let gpu = "`x`: PTX variables are `pred`, `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, \
+               `bf16x2`, `tf32`, `f32` and `f64`, not `Ret`";
+    let said = |place: &str, kernel: &str, what: &str| format!("src/lib.rs:{place}: error: {kernel}{what}");
+    // In the order of the modules: a helper's parameter, its result, its compile-time argument and the types nested
+    // in its parameters, of which a call refuses the first; a helper of a kernel of instances, and a helper called
+    // by a helper; then an `extern "ptx-func"` function's parameter, result, compile-time argument and
+    // instances; last the GPU helper's parameter and result.
+    let mut lines = vec![
+        said("18:11", "", gpr),
+        said("27:21", "", nothing),
+        said("46:16", "", "this is an integer, not Ret"),
+        said("68:15", "", "`x`: wants variables declared together; this is a variable"),
+    ];
+    lines.extend([1, 2].map(|n| said("85:11", &instance("k", n), gpr)));
+    lines.extend([
+        said("99:15", "", gpr),
+        said("112:42", "", func),
+        said("125:50", "", func),
+        said("139:45", "", generic),
+    ]);
+    lines.extend([1, 2].map(|n| said("153:56", &instance("g", n), func)));
+    lines.extend([said("171:11", "", gpu), said("180:21", "", nothing)]);
+    lines.push(format!("error: could not compile `helper_imports` (lib) due to {} previous errors", lines.len()));
+    refuses("helper_imports", &lines.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// Rust says of the types a helper's or an `extern "ptx-func"` function's signature names only three things, in a
+/// module where kernite says an error: that a lifetime is not declared, `&'a Ret`, in a parameter and in a result;
+/// that a module is where a type is written, `core::f16` in a parameter and in a result, and `core`, a crate; and
+/// what a macro writes, `half!()`, an `f16`, which is unstable. It says nothing of the types the language has, `gpr`,
+/// `ymm`, `[gpr; N]` and `local<[u32; 4], 16>`; nor of a type it refuses by itself, or kernite does: `Ret` behind a
+/// `&`, a `*const`, in an array, an `Option`, a `Box<dyn Tr>` and a `fn`, a `[u64]`, a `str`, a `dyn Tr`, an `f16`, an
+/// `f128`, a `!`, a `Self` and a `_`; nor of a compile-time argument of a type kernite refuses. Rust says the three of
+/// a helper no kernel calls too, of whose types kernite says nothing. kernite says its own once, at the type of each
+/// function it refuses.
+#[test]
+fn rust_says_of_the_types_a_helper_or_a_function_names_what_it_says_of_any_signature() {
+    let func = |place: &str, ty: &str| {
+        format!(
+            "src/lib.rs:{place}: error: a function takes and returns PTX's types, as its variables are: `u32`, \
+             `f32`, `b64`; not `{ty}`"
+        )
+    };
+    let generic = "src/lib.rs:115:56: error: a function that names an ABI takes integers and `bool`s at compile time, \
+                   as Rust's const generics are; `Ret` is neither";
+    // kernite's errors first, in the order of the items, and Rust says its own after them.
+    let mut said = vec![
+        "src/lib.rs:22:13: error: `y` is not defined".to_string(),
+        "src/lib.rs:75:28: error: `y` is not defined".to_string(),
+        func("98:51", "Ret"),
+        func("102:54", "&'a Ret"),
+        func("106:60", "core::f16"),
+        func("110:53", "half!()"),
+        generic.to_string(),
+    ];
+    said.extend([
+        undeclared("41:21", "'a"),
+        unstable("11:9", "f16"),
+        undeclared("57:36", "'a"),
+        undeclared("86:21", "'a"),
+        undeclared("102:55", "'a"),
+        not_a_type("45:18", "core::f16"),
+        "src/lib.rs:49:17: error[E0573]: expected type, found crate `core`: not a type".to_string(),
+        not_a_type("61:33", "core::f16"),
+        not_a_type("90:18", "core::f16"),
+        not_a_type("106:60", "core::f16"),
+    ]);
+    // Rust counts the `f16` of `half!()` for each signature that writes it, three, and prints it once.
+    said.push(format!("error: could not compile `helper_types` (lib) due to {} previous errors", said.len() + 2));
+    refuses("helper_types", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A module that builds shows Rust none of the types of its helpers and functions, so an import of the crate's that
+/// nothing names is unused to Rust, which says so as it does of any import; and so is one that only a helper names
+/// that no kernel calls, for a helper is compiled where it is called. One that a kernel names, as the type a pointer
+/// it takes points to, is used, on x86 and on a GPU.
+#[test]
+fn a_module_that_builds_shows_rust_no_types_of_a_helper_or_a_function() {
+    let (built, said) = cargo(&["build"], "helper_imports_unused");
+    assert!(built, "fixtures/helper_imports_unused.rs did not build");
+    let unused = |place: &str| format!("src/lib.rs:{place}: warning: unused import: `super::Ret`");
+    assert_eq!(said, [unused("9:9"), unused("37:9"), unused("50:9")]);
+}
+
+/// A function under `cfg` shows Rust its types where `cfg` keeps it and kernite says an error, there. The modules
+/// are, in order: a helper that a kernel calls, both under `a`; a helper under `a` beside a kernel that does not
+/// compile, kept; a helper kept beside a kernel under `a` that does not compile; an `extern "ptx-func"` function
+/// under `a` beside a kernel that does not compile, kept; a helper under `a` beside a kernel under `b` that does not
+/// compile; a helper under `a` beside a kernel that does not compile under `a` and another under `b`; a helper under
+/// `a` beside a kernel under `a` and another under `b`, of which no module of PTX has both; and a helper under `a` in
+/// a module that is two modules, which kernite says under no `cfg`. With no feature each import is unused to Rust,
+/// for a function `cfg` leaves out names nothing, though the eighth module has its error. With `b` the kernels that
+/// do not compile are kept, but no function that names `Ret` is kept in a module with an error, so every import is
+/// unused. With `a` the fifth module has no error, and its import is unused, while the sixth has the error of its
+/// kernel under `a`, which shows its helper though the kernel under `b` is left out; the seventh has none, for one
+/// of its kernels is left out, and its import is unused; and the eighth shows its helper, for `cfg` keeps it. With
+/// both every import is used, and kernite's errors are the only words, the seventh's among them: it is said where
+/// both its kernels are kept.
+#[test]
+fn rust_sees_the_types_of_a_function_where_cfg_keeps_it_and_the_module_has_an_error() {
+    let unused = |place: &str| format!("src/lib.rs:{place}: warning: unused import: `super::Ret`");
+    let undefined = |place: &str| format!("src/lib.rs:{place}: error: `y` is not defined");
+    let argument = "src/lib.rs:20:11: error: `x`: a gpr is seen as `gpr`, `r32`, `r16` or `r8`, not `Ret`".to_string();
+    let result = "src/lib.rs:61:39: error: a function takes and returns PTX's types, as its variables are: `u32`, \
+                  `f32`, `b64`; not `Ret`"
+        .to_string();
+    // What Cargo says with `features`, none if empty: kernite's errors, then Rust's warnings, then the count.
+    let builds = |features: &str, mut said: Vec<String>, unused_at: &[&str], count: &str| {
+        said.extend(unused_at.iter().map(|at| unused(at)));
+        said.push(format!("error: could not compile `helper_imports_configured` (lib) due to {count}"));
+        let command: &[&str] = if features.is_empty() { &["build"] } else { &["build", "--features", features] };
+        refuses_by(command, "helper_imports_configured", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    };
+    let two = "src/lib.rs:142:12: error: a static is memory of the module's kernels: the GPU's, for PTX kernels, or \
+               the process's, for x86 ones; and this module has both, so it is two modules, one of each kind of \
+               kernel and the statics they name"
+        .to_string();
+    let none = "src/lib.rs:124:39: error: `shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and \
+                `tanh.approx.f32` in `new` needs sm_75 and PTX 7.0: no module has both"
+        .to_string();
+    let all = ["11:9", "28:9", "43:9", "58:9", "73:9", "94:9", "116:9", "140:9"];
+    builds(
+        "",
+        vec![undefined("36:13"), undefined("66:28"), two.clone()],
+        &all,
+        "3 previous errors; 8 warnings emitted",
+    );
+    let said = vec![
+        argument.clone(),
+        undefined("36:13"),
+        undefined("51:13"),
+        result.clone(),
+        undefined("66:28"),
+        undefined("103:13"),
+        two.clone(),
+    ];
+    builds("a", said, &["73:9", "116:9"], "7 previous errors; 2 warnings emitted");
+    let said = vec![undefined("36:13"), undefined("66:28"), undefined("86:28"), undefined("108:13"), two.clone()];
+    builds("b", said, &all, "5 previous errors; 8 warnings emitted");
+    let said = vec![
+        argument,
+        undefined("36:13"),
+        undefined("51:13"),
+        result,
+        undefined("66:28"),
+        undefined("86:28"),
+        undefined("103:13"),
+        undefined("108:13"),
+        none,
+        two,
+    ];
+    builds("a,b", said, &[], "10 previous errors");
+}
+
+/// A crate that forbids lints is told of helpers and of `extern "ptx-func"` functions in a module where kernite says
+/// an error, and of nothing else, as Rust and Clippy are: what the macros write for Rust to see their types needs
+/// no `allow`, and a `forbid(unused_imports)` is not tripped by the import that only they name.
+#[test]
+fn a_crate_that_forbids_lints_is_told_of_the_helpers_that_do_not_compile_and_of_nothing_else() {
+    let lines = [
+        "src/lib.rs:35:13: error: `y` is not defined",
+        "src/lib.rs:43:48: error: a function takes and returns PTX's types, as its variables are: `u32`, `f32`, \
+         `b64`; not `Ret`",
+        "src/lib.rs:56:28: error: `y` is not defined",
+        "error: could not compile `helper_imports_forbidden` (lib) due to 3 previous errors",
+    ];
+    refuses("helper_imports_forbidden", &lines);
+    if clippy_here() {
+        refuses_by(&["clippy"], "helper_imports_forbidden", &lines);
+    }
+}
+
+/// Rust is shown the types a helper's signature names where kernite says an error of the module as a whole, as it is
+/// where kernite says one of an item: where the module is two modules; where no module of PTX has its GPU kernels;
+/// where an item of its own has the name of a const it takes; and where the module is refused at its attribute,
+/// which `consts = 5` is. No kernel calls the helpers, so kernite says nothing of their types. The import that only
+/// they name is used, so Rust does not call it unused beside the module's error, and Rust says nothing of the
+/// language's types, `gpr`, `ymm`, `local<[u32; 4], 16>` and `r32`, which it cannot find. A module that takes its
+/// consts from another is expanded after the rest, so its error is the last.
+#[test]
+fn rust_sees_the_types_a_helper_names_where_kernite_says_an_error_of_the_module_as_a_whole() {
+    let attribute = format!("src/lib.rs:77:27: error: {REFUSED}");
+    refuses(
+        "helper_imports_whole",
+        &[
+            "src/lib.rs:18:12: error: a static is memory of the module's kernels: the GPU's, for PTX kernels, or the \
+             process's, for x86 ones; and this module has both, so it is two modules, one of each kind of kernel and \
+             the statics they name",
+            "src/lib.rs:51:39: error: `shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and \
+             `tanh.approx.f32` in `new` needs sm_75 and PTX 7.0: no module has both",
+            &attribute,
+            "src/lib.rs:66:15: error: `STEP` names one of the consts the module takes from `crate::sizes` as well",
+            "error: could not compile `helper_imports_whole` (lib) due to 4 previous errors",
+        ],
+    );
+}
+
+/// Rust is shown the types a helper's signature names where the module is refused for a workspace named by what is
+/// not a string: the error is the module's, at its attribute, and the import that only the helper names is used.
+#[test]
+fn rust_sees_the_types_a_helper_names_where_the_workspace_is_named_by_what_is_not_a_string() {
+    let manifest = Path::new(ROOT).join("helper_imports_workspace/project/Cargo.toml");
+    let error = format!(
+        "src/lib.rs:9:1: error: `name` in `[workspace.metadata.kernite]` of {} is not a string: a workspace is named \
+         by one, as `name = \"kernite\"`",
+        manifest.display()
+    );
+    let count = "error: could not compile `helper_imports_workspace` (lib) due to 1 previous error";
+    refuses("helper_imports_workspace", &[&error, count]);
+}
+
 /// A pointer to a type kernite refuses by value is said as it was. A pointer of one word is taken, whatever
 /// it points to: Rust's word that an `f128` is unstable is the only one, said once, at the type, in a
 /// parameter and in a result, on x86 and on a GPU. A pointer of two words, to a `[u64]`, is kernite's error

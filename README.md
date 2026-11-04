@@ -111,6 +111,21 @@ at a call of the kernel. A GPU kernel's launcher is a method, so the `&` of a re
 kernite's error alone, though Rust says its own of a plain kernel's result. A result of `()` is no result, and no
 error.
 
+A helper is compiled where a kernel calls it, and an `extern "ptx-func"` function is a `.func` of the GPU's module, so
+Rust sees neither. Where kernite finds an error in compiling a function or a static, or refuses the module as a whole,
+Rust is shown the types of every helper and function of the module, one that no kernel calls too: each compile-time
+argument's, each parameter's and the result's, as it sees a kernel's. kernite refuses the module as a whole when it is
+two modules, when no module of PTX holds its GPU kernels and statics, when an item of its own has the name of a const it
+takes, when the workspace's name is not a string, and when its attribute is refused, as below. An import that only these
+types name is used, so Rust does not call `use super::Ret;` unused beside kernite's error at `Ret`, which is said once:
+at the argument of a call of the helper, at the result of a helper that is called, or at the type of a function. Rust
+says of the types only that a lifetime is not declared, `x: &'a Ret`; that a module is where a type is written,
+`x: core::f16` or `x: core`; and what a macro writes, `x: half!()` with an `f16`, which is unstable. It says the same of
+the types of a helper that no kernel calls, of which kernite says nothing. It says nothing of a name it cannot find,
+such as `gpr` or `local<[u32; 4], 16>`, nor of a type it refuses by itself, `[u64]`, `f128` or `_`. A function's types
+are shown where `cfg` keeps the function and the error is said. A module that builds is shown none of them, so an import
+that only a helper names is unused to Rust, which says so as it does of any import that nothing names.
+
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kernite_macros::consts]` is on, and a
 module of kernels takes them by its path, `#[kernite_macros::kernels(consts = crate::model::sizes)]`: its kernels read
