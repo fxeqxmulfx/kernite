@@ -112,6 +112,9 @@ Work is planned on [agent-kanban](.claude/skills/agent-kanban/SKILL.md), a task 
 
 Developers are subagents the reviewer starts, each on Sonnet 5.5: the Agent tool's
 `model: "sonnet"`. Their commits end `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
+The reviewer reuses a developer where it can. A developer whose run has ended takes the next round
+of its task, or a new task, by SendMessage, and keeps what it knows of the code. The reviewer
+starts a new developer only when none is free, and gives a task to the one that knows its code.
 
 A bug found in kernite, in a review, a test or a task, becomes a task of its own on the board,
 tagged `kernite`, with tests that show it, and a developer resolves it. The reviewer files it and

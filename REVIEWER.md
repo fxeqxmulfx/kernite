@@ -8,10 +8,10 @@ more round finishes it. A finding of taste is still a finding; say that it is on
 outside the task's lines that the task did not make worse is not a reason to hold it: put it
 on the task that touches those lines next, or on a task of its own.
 
-Developers are subagents on Sonnet 5.5, and each bug in kernite is a task of its own, as
-CLAUDE.md says. The reviewer starts each developer with a brief that names the task, the effort's
-brief, the files, the commands and the evidence to bring, as [DEVELOPER.md](DEVELOPER.md) has a
-developer work. Only one developer whose task measures runs at a time, as another's build or
+Developers are subagents on Sonnet 5.5, reused where they can be, and each bug in kernite is a
+task of its own, as CLAUDE.md says. With each task, the reviewer gives its developer, new or
+resumed, a brief that names the task, the effort's brief, the files, the commands and the evidence
+to bring, as [DEVELOPER.md](DEVELOPER.md) has a developer work. Only one developer whose task measures runs at a time, as another's build or
 benchmark spoils its numbers. The reviewer checks a bug against the code before it files it, and
 a limit README states is not a bug; it does not fix a bug itself.
 
