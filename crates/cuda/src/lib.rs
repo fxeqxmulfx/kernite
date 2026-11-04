@@ -53,6 +53,7 @@ use std::rc::Rc;
 mod half;
 #[doc(hidden)]
 pub mod named;
+mod unified;
 
 pub use half::{bf16, f16};
 
@@ -91,6 +92,23 @@ macro_rules! api {
                         unsafe { std::mem::transmute::<*mut c_void, unsafe extern "C" fn($($arg),*) -> CuResult>(f) }
                     },)*
                 })
+            }
+        }
+
+        /// The functions of a driver that refuses every call, for a test to replace the few it
+        /// needs.
+        #[cfg(test)]
+        impl Api {
+            fn refusing() -> Api {
+                Api {
+                    $($field: {
+                        unsafe extern "C" fn refuse($(_: $arg),*) -> CuResult {
+                            // CUDA_ERROR_UNKNOWN.
+                            999
+                        }
+                        refuse
+                    },)*
+                }
             }
         }
     };
@@ -455,6 +473,7 @@ pub struct Cuda {
     max_shared: u32,
     multiprocessors: u32,
     cooperative: bool,
+    concurrent_managed_access: bool,
 }
 
 impl Cuda {
@@ -511,15 +530,22 @@ impl Cuda {
             (api.device_name)(name.as_mut_ptr().cast(), name.len() as c_int, device)
         })?;
         let name = CStr::from_bytes_until_nul(&name).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        Cuda::of(driver, name)
+    }
+
+    /// The GPU of `driver`, called `name`, with what the GPU says of itself.
+    fn of(driver: Rc<Driver>, name: String) -> Result<Cuda, Error> {
         // CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR and _MINOR,
-        // CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, _MULTIPROCESSOR_COUNT and
-        // _COOPERATIVE_LAUNCH.
-        let [major, minor, shared, multiprocessors, cooperative] = [75, 76, 97, 16, 95].map(|a| driver.attribute(a));
+        // CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, _MULTIPROCESSOR_COUNT,
+        // _COOPERATIVE_LAUNCH and _CONCURRENT_MANAGED_ACCESS.
+        let [major, minor, shared, multiprocessors, cooperative, concurrent] =
+            [75, 76, 97, 16, 95, unified::CONCURRENT_MANAGED_ACCESS.0].map(|a| driver.attribute(a));
         Ok(Cuda {
             sm: major? * 10 + minor?,
             max_shared: shared?,
             multiprocessors: multiprocessors?,
             cooperative: cooperative? != 0,
+            concurrent_managed_access: concurrent? != 0,
             driver,
             name,
         })
@@ -552,6 +578,13 @@ impl Cuda {
     /// one whose blocks wait for each other needs: a GPU from Pascal's, `sm_60`, on does.
     pub fn cooperative(&self) -> bool {
         self.cooperative
+    }
+
+    /// Whether the GPU reaches managed memory while the host does, as its
+    /// `CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS` says. A GPU that does not faults the host on
+    /// managed memory while any kernel runs.
+    pub fn concurrent_managed_access(&self) -> bool {
+        self.concurrent_managed_access
     }
 
     /// Waits for every kernel launched on the GPU to finish, and says whether one failed.
