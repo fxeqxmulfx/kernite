@@ -345,15 +345,15 @@ mod tests {
     fn the_workspace_is_named_by_its_metadata() {
         // A manifest with no `[workspace]`, only `[workspace.metadata.kernite]`, is a workspace's,
         // and the name may be in single quotes.
-        let read = files(&[("/home/w/Cargo.toml", "[workspace.metadata.kernite]\nname = 'acme'\n")]);
-        let got = workspace_from("app".into(), Some(Path::new("/home/w")), None, &read);
-        assert_eq!(got, Ok(("acme".into(), Some(PathBuf::from("/home/w/Cargo.toml")))));
+        let read = files(&[("/work/w/Cargo.toml", "[workspace.metadata.kernite]\nname = 'acme'\n")]);
+        let got = workspace_from("app".into(), Some(Path::new("/work/w")), None, &read);
+        assert_eq!(got, Ok(("acme".into(), Some(PathBuf::from("/work/w/Cargo.toml")))));
         // `""` names the workspace nothing, rather than as its directory is: its kernels' names
         // leave it out. The manifest is still given: the macro includes it, so that the PTX is
         // built again when the name changes.
-        let read = files(&[("/home/w/Cargo.toml", "[workspace.metadata.kernite]\nname = \"\"\n")]);
-        let got = workspace_from("app".into(), Some(Path::new("/home/w")), None, &read);
-        assert_eq!(got, Ok((String::new(), Some(PathBuf::from("/home/w/Cargo.toml")))));
+        let read = files(&[("/work/w/Cargo.toml", "[workspace.metadata.kernite]\nname = \"\"\n")]);
+        let got = workspace_from("app".into(), Some(Path::new("/work/w")), None, &read);
+        assert_eq!(got, Ok((String::new(), Some(PathBuf::from("/work/w/Cargo.toml")))));
     }
 
     #[test]
@@ -378,12 +378,12 @@ mod tests {
             name = "root"
         "#;
         let read = files(&[
-            ("/home/acme/crates/app/Cargo.toml", "[package]\nname = \"app\"\n"),
-            ("/home/acme/Cargo.toml", ACME),
-            ("/home/Cargo.toml", "[workspace]\n"),
+            ("/work/acme/crates/app/Cargo.toml", "[package]\nname = \"app\"\n"),
+            ("/work/acme/Cargo.toml", ACME),
+            ("/work/Cargo.toml", "[workspace]\n"),
         ]);
-        let got = workspace_from("app".into(), Some(Path::new("/home/acme/crates/app")), None, &read);
-        assert_eq!(got, Ok(("acme".into(), Some(PathBuf::from("/home/acme/Cargo.toml")))));
+        let got = workspace_from("app".into(), Some(Path::new("/work/acme/crates/app")), None, &read);
+        assert_eq!(got, Ok(("acme".into(), Some(PathBuf::from("/work/acme/Cargo.toml")))));
         // A workspace in a directory with no name, `/`, is named as the package is.
         let read = files(&[("/Cargo.toml", "[workspace]\n")]);
         let got = workspace_from("app".into(), Some(Path::new("/app")), None, &read);
@@ -394,8 +394,8 @@ mod tests {
     fn a_package_of_no_workspace_is_its_own() {
         // A package of no workspace is one of its own, named as the package is, not as its
         // directory is, with no manifest.
-        let read = files(&[("/home/proj/Cargo.toml", "[package]\nname = \"app\"\n")]);
-        assert_eq!(workspace_from("app".into(), Some(Path::new("/home/proj")), None, &read), Ok(("app".into(), None)));
+        let read = files(&[("/work/proj/Cargo.toml", "[package]\nname = \"app\"\n")]);
+        assert_eq!(workspace_from("app".into(), Some(Path::new("/work/proj")), None, &read), Ok(("app".into(), None)));
         // So is a package of no directory, though every path has a workspace's manifest.
         assert_eq!(
             workspace_from("app".into(), None, None, &|_| Some("[workspace]\n".into())),
@@ -403,15 +403,15 @@ mod tests {
         );
     }
 
-    /// What `workspace_from` makes of one manifest, the only one there is, `/home/w/Cargo.toml`,
-    /// for the package `app` in `/home/w`.
+    /// What `workspace_from` makes of one manifest, the only one there is, `/work/w/Cargo.toml`,
+    /// for the package `app` in `/work/w`.
     fn only(manifest: &str) -> Walked {
-        workspace_from("app".into(), Some(Path::new("/home/w")), None, &files(&[("/home/w/Cargo.toml", manifest)]))
+        workspace_from("app".into(), Some(Path::new("/work/w")), None, &files(&[("/work/w/Cargo.toml", manifest)]))
     }
 
     /// What `only` makes of a manifest of a workspace named `name`.
     fn named(name: &str) -> Walked {
-        Ok((name.into(), Some(PathBuf::from("/home/w/Cargo.toml"))))
+        Ok((name.into(), Some(PathBuf::from("/work/w/Cargo.toml"))))
     }
 
     #[test]
@@ -475,7 +475,7 @@ mod tests {
         // number, a boolean, an array, an inline table, a date, or a table: of its own, by a dotted
         // key, or by a table inside it.
         let refused =
-            Err("`name` in `[workspace.metadata.kernite]` of /home/w/Cargo.toml is not a string: a workspace \
+            Err("`name` in `[workspace.metadata.kernite]` of /work/w/Cargo.toml is not a string: a workspace \
                             is named by one, as `name = \"kernite\"`"
                 .into());
         for manifest in [
@@ -494,10 +494,10 @@ mod tests {
         }
         // The nearest manifest of a workspace is the one named: a farther one is not read.
         let read = files(&[
-            ("/home/w/Cargo.toml", "[workspace.metadata.kernite]\nname = 5\n"),
-            ("/home/Cargo.toml", "[workspace]\n"),
+            ("/work/w/Cargo.toml", "[workspace.metadata.kernite]\nname = 5\n"),
+            ("/work/Cargo.toml", "[workspace]\n"),
         ]);
-        assert_eq!(workspace_from("app".into(), Some(Path::new("/home/w")), None, &read), refused);
+        assert_eq!(workspace_from("app".into(), Some(Path::new("/work/w")), None, &read), refused);
     }
 
     #[test]
@@ -563,11 +563,11 @@ mod tests {
     #[test]
     fn a_manifest_that_is_not_toml_is_passed_by() {
         // As one that is not there is: the walk goes on, here to a workspace one directory up.
-        let up = ("/home/Cargo.toml", "[workspace]\n");
+        let up = ("/work/Cargo.toml", "[workspace]\n");
         for broken in ["name = \"never ends\n[workspace]\n", "[workspace\n", "workspace = \n", "[workspace] = 1 }"] {
-            let manifests = [("/home/w/Cargo.toml", broken), up];
-            let got = workspace_from("app".into(), Some(Path::new("/home/w")), None, &files(&manifests));
-            assert_eq!(got, Ok(("home".into(), Some(PathBuf::from("/home/Cargo.toml")))), "{broken:?}");
+            let manifests = [("/work/w/Cargo.toml", broken), up];
+            let got = workspace_from("app".into(), Some(Path::new("/work/w")), None, &files(&manifests));
+            assert_eq!(got, Ok(("work".into(), Some(PathBuf::from("/work/Cargo.toml")))), "{broken:?}");
         }
     }
 
@@ -596,39 +596,39 @@ mod tests {
     fn the_walk_stops_at_cargos_home_after_its_manifest() {
         // A crate unpacked from a registry, under the home, is a workspace of its own, though a
         // workspace's manifest is above the home.
-        let dep = "/home/u/.cargo/registry/src/index/dep-1.0.0";
+        let dep = "/work/u/.cargo/registry/src/index/dep-1.0.0";
         let manifests =
-            [("/home/u/.cargo/registry/src/index/dep-1.0.0/Cargo.toml", PACKAGE), ("/home/u/Cargo.toml", WORKSPACE)];
-        assert_eq!(walk(dep, Some("/home/u/.cargo"), &manifests), alone());
+            [("/work/u/.cargo/registry/src/index/dep-1.0.0/Cargo.toml", PACKAGE), ("/work/u/Cargo.toml", WORKSPACE)];
+        assert_eq!(walk(dep, Some("/work/u/.cargo"), &manifests), alone());
         // With no home, or one that is not above the package, the walk goes on to that workspace.
-        for home in [None, Some("/home/v/.cargo")] {
-            assert_eq!(walk(dep, home, &manifests), is("u", "/home/u/Cargo.toml"));
+        for home in [None, Some("/work/v/.cargo")] {
+            assert_eq!(walk(dep, home, &manifests), is("u", "/work/u/Cargo.toml"));
         }
         // The home's own manifest is the last one read: a workspace's there is the package's.
-        let manifests = [("/home/u/.cargo/Cargo.toml", WORKSPACE), ("/home/u/Cargo.toml", WORKSPACE)];
-        assert_eq!(walk(dep, Some("/home/u/.cargo"), &manifests), is(".cargo", "/home/u/.cargo/Cargo.toml"));
+        let manifests = [("/work/u/.cargo/Cargo.toml", WORKSPACE), ("/work/u/Cargo.toml", WORKSPACE)];
+        assert_eq!(walk(dep, Some("/work/u/.cargo"), &manifests), is(".cargo", "/work/u/.cargo/Cargo.toml"));
         // The package's own directory is not one the walk stops at: it looks above, as Cargo does.
-        let manifests = [("/home/u/Cargo.toml", WORKSPACE)];
-        assert_eq!(walk("/home/u/app", Some("/home/u/app"), &manifests), is("u", "/home/u/Cargo.toml"));
+        let manifests = [("/work/u/Cargo.toml", WORKSPACE)];
+        assert_eq!(walk("/work/u/app", Some("/work/u/app"), &manifests), is("u", "/work/u/Cargo.toml"));
     }
 
     #[test]
     fn the_walk_never_goes_into_target_package() {
         // `cargo package` builds the crate it checks at `target/package/<name>`, a workspace of its
         // own, though the workspace's manifest is above, and one is in `target/package` itself.
-        let manifests = [("/home/w/Cargo.toml", WORKSPACE), ("/home/w/target/package/Cargo.toml", WORKSPACE)];
-        for dir in ["/home/w/target/package/app-0.1.0", "/home/w/target/package/x/y/app"] {
+        let manifests = [("/work/w/Cargo.toml", WORKSPACE), ("/work/w/target/package/Cargo.toml", WORKSPACE)];
+        for dir in ["/work/w/target/package/app-0.1.0", "/work/w/target/package/x/y/app"] {
             assert_eq!(walk(dir, None, &manifests), alone(), "{dir}");
         }
         // A workspace's manifest nearer than `target/package` is the package's.
-        let manifests = [("/home/w/Cargo.toml", WORKSPACE), ("/home/w/target/package/x/Cargo.toml", WORKSPACE)];
+        let manifests = [("/work/w/Cargo.toml", WORKSPACE), ("/work/w/target/package/x/Cargo.toml", WORKSPACE)];
         assert_eq!(
-            walk("/home/w/target/package/x/app", None, &manifests),
-            is("x", "/home/w/target/package/x/Cargo.toml")
+            walk("/work/w/target/package/x/app", None, &manifests),
+            is("x", "/work/w/target/package/x/Cargo.toml")
         );
         // Only a directory that ends in those two parts: others are walked through.
-        for dir in ["/home/w/target/other/app", "/home/w/package/app", "/home/w/my-target/package/app"] {
-            assert_eq!(walk(dir, None, &manifests), is("w", "/home/w/Cargo.toml"), "{dir}");
+        for dir in ["/work/w/target/other/app", "/work/w/package/app", "/work/w/my-target/package/app"] {
+            assert_eq!(walk(dir, None, &manifests), is("w", "/work/w/Cargo.toml"), "{dir}");
         }
     }
 
@@ -637,12 +637,12 @@ mod tests {
         // A member of the workspace may be the directory `target/package`: the walk does not
         // stop at the package's own directory, but looks above it. A workspace's manifest
         // there is its own.
-        let manifests = [("/home/w/Cargo.toml", "[workspace]\nmembers = [\"target/package\"]\n")];
-        assert_eq!(walk("/home/w/target/package", None, &manifests), is("w", "/home/w/Cargo.toml"));
-        let manifests = [("/home/w/Cargo.toml", WORKSPACE), ("/home/w/target/package/Cargo.toml", WORKSPACE)];
+        let manifests = [("/work/w/Cargo.toml", "[workspace]\nmembers = [\"target/package\"]\n")];
+        assert_eq!(walk("/work/w/target/package", None, &manifests), is("w", "/work/w/Cargo.toml"));
+        let manifests = [("/work/w/Cargo.toml", WORKSPACE), ("/work/w/target/package/Cargo.toml", WORKSPACE)];
         assert_eq!(
-            walk("/home/w/target/package", None, &manifests),
-            is("package", "/home/w/target/package/Cargo.toml")
+            walk("/work/w/target/package", None, &manifests),
+            is("package", "/work/w/target/package/Cargo.toml")
         );
     }
 
@@ -656,42 +656,42 @@ mod tests {
             "package.workspace = '../ws'\n",
             "package = { workspace = \"../ws\" }\n",
             "[package]\nworkspace = \"./../x/../ws/.\"\n",
-            "[package]\nworkspace = \"/home/ws\"\n",
+            "[package]\nworkspace = \"/work/ws\"\n",
         ] {
             let manifests = [
-                ("/home/app/Cargo.toml", manifest),
-                ("/home/ws/Cargo.toml", WORKSPACE),
-                ("/home/Cargo.toml", WORKSPACE),
+                ("/work/app/Cargo.toml", manifest),
+                ("/work/ws/Cargo.toml", WORKSPACE),
+                ("/work/Cargo.toml", WORKSPACE),
             ];
-            assert_eq!(walk("/home/app", None, &manifests), is("ws", "/home/ws/Cargo.toml"), "{manifest:?}");
+            assert_eq!(walk("/work/app", None, &manifests), is("ws", "/work/ws/Cargo.toml"), "{manifest:?}");
         }
         // A key that is not a string names nothing, nor does one in another table.
         for manifest in
             ["[package]\nworkspace = 5\n", "[package]\nworkspace = [\"../ws\"]\n", "[lib]\nworkspace = \"../ws\"\n"]
         {
-            let manifests = [("/home/app/Cargo.toml", manifest), ("/home/ws/Cargo.toml", WORKSPACE)];
-            assert_eq!(walk("/home/app", None, &manifests), alone(), "{manifest:?}");
+            let manifests = [("/work/app/Cargo.toml", manifest), ("/work/ws/Cargo.toml", WORKSPACE)];
+            assert_eq!(walk("/work/app", None, &manifests), alone(), "{manifest:?}");
         }
     }
 
     #[test]
     fn an_ancestor_names_the_workspace_where_none_is_above_it() {
         // The key is read from the ancestor's directory, not the package's.
-        let named = ("/home/t/Cargo.toml", "[package]\nname = \"t\"\nworkspace = \"../ws\"\n");
-        let ws = ("/home/ws/Cargo.toml", WORKSPACE);
-        assert_eq!(walk("/home/t/app", None, &[named, ws]), is("ws", "/home/ws/Cargo.toml"));
+        let named = ("/work/t/Cargo.toml", "[package]\nname = \"t\"\nworkspace = \"../ws\"\n");
+        let ws = ("/work/ws/Cargo.toml", WORKSPACE);
+        assert_eq!(walk("/work/t/app", None, &[named, ws]), is("ws", "/work/ws/Cargo.toml"));
         // A workspace's manifest above is the package's instead, for Cargo looks for one before it
         // follows a key; unless it excludes the package, or is past Cargo's home.
-        let above = ("/home/Cargo.toml", WORKSPACE);
-        assert_eq!(walk("/home/t/app", None, &[named, ws, above]), is("home", "/home/Cargo.toml"));
-        let excluding = ("/home/Cargo.toml", "[workspace]\nexclude = [\"t\"]\n");
-        assert_eq!(walk("/home/t/app", None, &[named, ws, excluding]), is("ws", "/home/ws/Cargo.toml"));
-        assert_eq!(walk("/home/t/app", Some("/home/t"), &[named, ws, above]), is("ws", "/home/ws/Cargo.toml"));
+        let above = ("/work/Cargo.toml", WORKSPACE);
+        assert_eq!(walk("/work/t/app", None, &[named, ws, above]), is("work", "/work/Cargo.toml"));
+        let excluding = ("/work/Cargo.toml", "[workspace]\nexclude = [\"t\"]\n");
+        assert_eq!(walk("/work/t/app", None, &[named, ws, excluding]), is("ws", "/work/ws/Cargo.toml"));
+        assert_eq!(walk("/work/t/app", Some("/work/t"), &[named, ws, above]), is("ws", "/work/ws/Cargo.toml"));
         // Of two keys, the nearer is followed.
-        let nearer = ("/home/u/t/Cargo.toml", "[package]\nname = \"n\"\nworkspace = \"../../v\"\n");
-        let farther = ("/home/u/Cargo.toml", "[package]\nname = \"f\"\nworkspace = \"../ws\"\n");
-        let v = ("/home/v/Cargo.toml", WORKSPACE);
-        assert_eq!(walk("/home/u/t/app", None, &[nearer, farther, ws, v]), is("v", "/home/v/Cargo.toml"));
+        let nearer = ("/work/u/t/Cargo.toml", "[package]\nname = \"n\"\nworkspace = \"../../v\"\n");
+        let farther = ("/work/u/Cargo.toml", "[package]\nname = \"f\"\nworkspace = \"../ws\"\n");
+        let v = ("/work/v/Cargo.toml", WORKSPACE);
+        assert_eq!(walk("/work/u/t/app", None, &[nearer, farther, ws, v]), is("v", "/work/v/Cargo.toml"));
     }
 
     #[test]
@@ -701,31 +701,31 @@ mod tests {
         // on to the workspace above.
         const EXCLUDING: &str = "[workspace]\nexclude = [\"skip\"]\n";
         for (workspace, dir, excluded) in [
-            (EXCLUDING, "/home/w/skip", true),
-            (EXCLUDING, "/home/w/skip/inner", true),
-            ("[workspace]\nmembers = [\"other\"]\nexclude = [\"skip\"]\n", "/home/w/other", false),
-            ("[workspace]\nmembers = [\"skip\"]\nexclude = [\"skip\"]\n", "/home/w/skip", false),
-            ("[workspace]\nmembers = [\"skip/inner\"]\nexclude = [\"skip\"]\n", "/home/w/skip/inner", false),
-            ("[workspace]\nmembers = [\"c/*\"]\nexclude = [\"c/skip\"]\n", "/home/w/c/skip", true),
-            ("[workspace]\nexclude = [\n  \"other\", # not this one\n  \"skip\",\n]\n", "/home/w/skip", true),
-            ("workspace = { members = [\"a\"], exclude = [\"skip\"] }\n", "/home/w/skip", true),
-            ("workspace.exclude = [\"skip\"]\n", "/home/w/skip", true),
-            ("[workspace]\nexclude = [\"./skip\"]\n", "/home/w/skip", true),
-            ("[workspace]\nexclude = ['/home/w/skip']\n", "/home/w/skip", true),
+            (EXCLUDING, "/work/w/skip", true),
+            (EXCLUDING, "/work/w/skip/inner", true),
+            ("[workspace]\nmembers = [\"other\"]\nexclude = [\"skip\"]\n", "/work/w/other", false),
+            ("[workspace]\nmembers = [\"skip\"]\nexclude = [\"skip\"]\n", "/work/w/skip", false),
+            ("[workspace]\nmembers = [\"skip/inner\"]\nexclude = [\"skip\"]\n", "/work/w/skip/inner", false),
+            ("[workspace]\nmembers = [\"c/*\"]\nexclude = [\"c/skip\"]\n", "/work/w/c/skip", true),
+            ("[workspace]\nexclude = [\n  \"other\", # not this one\n  \"skip\",\n]\n", "/work/w/skip", true),
+            ("workspace = { members = [\"a\"], exclude = [\"skip\"] }\n", "/work/w/skip", true),
+            ("workspace.exclude = [\"skip\"]\n", "/work/w/skip", true),
+            ("[workspace]\nexclude = [\"./skip\"]\n", "/work/w/skip", true),
+            ("[workspace]\nexclude = ['/work/w/skip']\n", "/work/w/skip", true),
         ] {
-            let manifests = [("/home/w/Cargo.toml", workspace), ("/home/Cargo.toml", WORKSPACE)];
-            let want = if excluded { is("home", "/home/Cargo.toml") } else { is("w", "/home/w/Cargo.toml") };
+            let manifests = [("/work/w/Cargo.toml", workspace), ("/work/Cargo.toml", WORKSPACE)];
+            let want = if excluded { is("work", "/work/Cargo.toml") } else { is("w", "/work/w/Cargo.toml") };
             assert_eq!(walk(dir, None, &manifests), want, "{workspace:?} for {dir}");
         }
         // The package's own manifest is the workspace's, though its `exclude` names the package.
-        let manifests = [("/home/w/Cargo.toml", "[workspace]\nexclude = [\".\"]\n"), ("/home/Cargo.toml", WORKSPACE)];
-        assert_eq!(walk("/home/w", None, &manifests), is("w", "/home/w/Cargo.toml"));
+        let manifests = [("/work/w/Cargo.toml", "[workspace]\nexclude = [\".\"]\n"), ("/work/Cargo.toml", WORKSPACE)];
+        assert_eq!(walk("/work/w", None, &manifests), is("w", "/work/w/Cargo.toml"));
     }
 
     #[test]
     fn cargos_home_is_cargo_home_else_dot_cargo_of_the_user() {
-        let user = || Some(PathBuf::from("/home/u"));
-        let dot_cargo = Some(PathBuf::from("/home/u/.cargo"));
+        let user = || Some(PathBuf::from("/work/u"));
+        let dot_cargo = Some(PathBuf::from("/work/u/.cargo"));
         // `CARGO_HOME`, if it is set and not empty, whoever the user is.
         assert_eq!(cargo_home(Some("/opt/cargo".into()), user()), Some(PathBuf::from("/opt/cargo")));
         assert_eq!(cargo_home(Some("/opt/cargo".into()), None), Some(PathBuf::from("/opt/cargo")));

@@ -3,8 +3,8 @@
 You are a subagent on Sonnet 5.5, started by the reviewer for a task on the board, and resumed for
 each round of it and for the tasks after it. The reviewer approves your work or sends it back, as
 [REVIEWER.md](REVIEWER.md) says. The bar is 10/10: work
-with anything left to change comes back, with every finding listed. All paths are under
-`<main>`. Run `agent-kanban` there.
+with anything left to change comes back, with every finding listed. All paths are under the main
+checkout, `<main>` below, the first folder that `git worktree list` shows. Run `agent-kanban` there.
 
 Each task belongs to an effort, `matmul`, `fixes` or `support` say. The effort's brief,
 `.kanban/notes/<effort>/README.md`, names its branch and its gate, adds its own rules, and says
