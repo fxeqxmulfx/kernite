@@ -131,18 +131,31 @@ pub(crate) fn path(trees: &[Tree]) -> usize {
     last
 }
 
+/// How many of `trees`, from the first, are the root of a path into Rust's libraries, `core::` or `std::`, 3 of them,
+/// or 5 with a `::` before, each name written raw or not, as Rust reads them. `trees` that begin with another path,
+/// `my::core::`, or with a `::` and another name, `::my::`, begin with no root.
+pub(crate) fn root(trees: &[Tree]) -> Option<usize> {
+    let start = if colons(trees, 0) { 2 } else { 0 };
+    match trees.get(start) {
+        Some(Tree::Ident { name, .. }) if matches!(unraw(name), "core" | "std") && colons(trees, start + 1) => {
+            Some(start + 3)
+        }
+        _ => None,
+    }
+}
+
 /// The primitive that `trees` begin with the path of, and how many of them are that path, 7, or 9 with a `::` before
 /// them: `u64` for `core::primitive::u64`, `::core::primitive::u64`, `std::primitive::u64` or `::std::primitive::u64`,
 /// each name written raw or not, as Rust reads them; and for a path that goes on from there,
 /// `core::primitive::u64::MAX`. `trees` that begin with another path, `my::core::primitive::u64`, or with one that
 /// names no type of `core::primitive`, `core::primitive::f16`, begin with the path of none.
 pub(crate) fn primitive(trees: &[Tree]) -> Option<(&'static str, usize)> {
-    // Three names and the two `::` between them are seven trees, and nine with the `::` before them.
-    let len = if colons(trees, 0) { 9 } else { 7 };
-    let written = text(trees.get(..len)?);
-    let names: Vec<&str> = written.strip_prefix("::").unwrap_or(&written).split("::").map(unraw).collect();
-    match names[..] {
-        ["core" | "std", "primitive", name] => PRIMITIVES.into_iter().find(|p| *p == name).map(|p| (p, len)),
+    // `primitive::name` is four trees after the root.
+    let root = root(trees)?;
+    let len = root + 4;
+    let written = text(trees.get(root..len)?);
+    match written.split("::").map(unraw).collect::<Vec<_>>()[..] {
+        ["primitive", name] => PRIMITIVES.into_iter().find(|p| *p == name).map(|p| (p, len)),
         _ => None,
     }
 }

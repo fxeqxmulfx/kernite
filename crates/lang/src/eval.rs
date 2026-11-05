@@ -9,33 +9,44 @@ use crate::token::{Span, unraw};
 use crate::value::{self, Value, Want};
 use crate::{DEPTH, Error, nested};
 
-/// Where a function or a static names an item of its module: its name, and where it is written. A
-/// function or a static has them in the order of the source, each place once.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Where a function or a static names an item of its module, or a constant of a module of Rust's by its path: the name
+/// or the path as it is written, and where it is written. A function or a static has them in the order of the source,
+/// each place once.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Mention {
-    /// The item's name.
+    /// The item's name, or the path to the constant, `std::f32::consts::PI`.
     pub name: String,
     /// Where the name is written.
     pub span: Span,
+    /// The value kernite took for the path to a constant of a module of Rust's, for Rust to say where the path is
+    /// written that it gives that value; none for an item's name.
+    pub value: Option<Value>,
 }
 
 impl Mention {
-    /// Records that `name` is written at `span` among `mentions`. Two names are never at one place.
-    pub fn record(mentions: &mut Vec<Mention>, name: &str, span: Span) {
-        if let Err(at) = mentions.binary_search_by_key(&span, |m| m.span) {
-            mentions.insert(at, Mention { name: name.to_string(), span });
+    /// The name of an item of the module, written at `span`.
+    pub fn item(name: &str, span: Span) -> Mention {
+        Mention { name: name.to_string(), span, value: None }
+    }
+
+    /// Records `mention` among `mentions`. Two names are never at one place.
+    pub fn record(mentions: &mut Vec<Mention>, mention: Mention) {
+        if let Err(at) = mentions.binary_search_by_key(&mention.span, |m| m.span) {
+            mentions.insert(at, mention);
         }
     }
 }
 
 /// What running a kernel found, besides what it asked of its target.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Run {
     /// Where it named an item of the module, in its body, its `#[instances(..)]` or its
-    /// directives: a const it read, a static, a helper it called, a function that names an ABI. A
-    /// helper it called is run here, so the names in the helper are its; a const's definition is
-    /// Rust's own, and the names in it are not. Rust never sees a kernel's body run, nor its list
-    /// or its directives worked out, so it sees none of these names.
+    /// directives: a const it read, a static, a helper it called, a function that names an ABI;
+    /// or a constant of a module of Rust's by its path, `std::f32::consts::PI`. A helper it called
+    /// is run here, so the names in the helper are its; a const's definition is Rust's own, and the
+    /// names in it are not, but for the constants of a module of Rust's, which kernite takes the
+    /// value of. Rust never sees a kernel's body run, nor its list or its directives worked out, so
+    /// it sees none of these names.
     pub mentions: Vec<Mention>,
 }
 
@@ -261,6 +272,8 @@ struct Eval<'a, T: Target> {
     compiled: Vec<&'a Fn>,
     /// Where the function has named an item of the module, as [`Run`] has them.
     mentions: Vec<Mention>,
+    /// Whether Rust reads the module too: [`Module::rust`].
+    rust: bool,
     /// The names in scope, innermost last. A helper runs in scopes of its own.
     scopes: Vec<Scope<T::Var>>,
     labels: u32,
@@ -296,6 +309,7 @@ impl<'a, T: Target> Eval<'a, T> {
             helpers,
             compiled,
             mentions: vec![],
+            rust: module.rust,
             scopes: vec![],
             labels: 0,
             guard: None,
@@ -322,7 +336,7 @@ impl<'a, T: Target> Eval<'a, T> {
             None => self.statics.iter().position(|(s, _)| s.name == name).map(Binding::Static),
         };
         if found.is_some() {
-            Mention::record(&mut self.mentions, name, span);
+            Mention::record(&mut self.mentions, Mention::item(name, span));
         }
         Ok(found)
     }
@@ -369,10 +383,14 @@ impl<'a, T: Target> Eval<'a, T> {
         self.consts[i].1 = State::Busy;
         let c = self.consts[i].0;
         let outer = std::mem::take(&mut self.scopes);
-        // What its definition names is Rust's to see, as the definition is Rust's.
+        // What its definition names is Rust's to see, as the definition is Rust's, but for the constants of a module of
+        // Rust's: Rust is to say its paths give what kernite took.
         let saved = std::mem::take(&mut self.mentions);
         let v = self.constant(c);
-        self.mentions = saved;
+        let inside = std::mem::replace(&mut self.mentions, saved);
+        for taken in inside.into_iter().filter(|m| m.value.is_some()) {
+            Mention::record(&mut self.mentions, taken);
+        }
         self.scopes = outer;
         let v = Rc::new(v?);
         self.consts[i].1 = State::Done(v.clone());
@@ -587,9 +605,15 @@ impl<'a, T: Target> Eval<'a, T> {
                 self.elements(&v, e.span())?;
                 Ok(Rc::unwrap_or_clone(v))
             }
-            Expr::Path(path, _) => {
+            Expr::Path(path, span) => {
                 let p = path.join("::");
-                value::path(&p).ok_or_else(|| at(format!("`{p}` is not a constant kernite knows")))
+                let v = value::path(&p, self.rust).map_err(at)?;
+                // A type's constant, `u32::MAX`, is Rust's however it is written. A module's, `std::f32::consts::PI`,
+                // is Rust's by the path alone, which Rust is to say gives the value taken, where it is written.
+                if path.len() > 2 {
+                    Mention::record(&mut self.mentions, Mention { name: p, span: *span, value: Some(v.clone()) });
+                }
+                Ok(v)
             }
             Expr::Field(..) => Err(at("a field is a view of a variable, not a value".into())),
             Expr::Instance { .. } => {
@@ -850,7 +874,7 @@ impl<'a, T: Target> Eval<'a, T> {
                     format!("`{name}` is compiled for each of its instances: an instruction names one, `{name}::<..>`"),
                 ));
             }
-            Mention::record(&mut self.mentions, name, span);
+            Mention::record(&mut self.mentions, Mention::item(name, span));
             return Ok(Operand::Func(name.to_string()));
         }
         if self.helpers.iter().any(|f| f.name == name) {
@@ -905,7 +929,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 ),
             ));
         }
-        Mention::record(&mut self.mentions, name, at);
+        Mention::record(&mut self.mentions, Mention::item(name, at));
         Ok(Operand::Func(named(name, &args)))
     }
 
@@ -1195,7 +1219,7 @@ impl<'a, T: Target> Eval<'a, T> {
                     return self.note(args, *span);
                 }
                 if let Some(&f) = self.helpers.iter().find(|f| f.name == *name) {
-                    Mention::record(&mut self.mentions, name, *at);
+                    Mention::record(&mut self.mentions, Mention::item(name, *at));
                     return self.inline(f, generics, args, *span);
                 }
                 if self.compiled.iter().any(|f| f.name == *name) {

@@ -1079,10 +1079,11 @@ fn a_primitive_is_read_by_its_name_whether_it_is_written_by_a_path_or_not() {
 
 /// A path in a value that begins with a primitive's path, `core::primitive::u32::MAX`, is read as the one that begins
 /// with the primitive's name, `u32::MAX`, by the rule that reads a type: in the four ways, with `r#` on a name or not,
-/// alone and in a call, `core::primitive::f32::from_bits(..)`. It is at the place where the path begins. Any other
-/// path stays as written: one to a type that `core::primitive` has not, one that begins elsewhere, and a module's,
-/// `core::u32::MAX`. A path from the root that is no primitive's is no value: the parser wants an expression, not a
-/// `::`.
+/// alone and in a call, `core::primitive::f32::from_bits(..)`, if it ends there or with one name more. It is at the
+/// place where the path begins. Any other path stays as written: one that goes on by two names,
+/// `core::primitive::f32::consts::PI`, which is no path of Rust's, one to a type that `core::primitive` has not, one
+/// that begins elsewhere, and a module's, `core::u32::MAX`, with a `::` before it or not. A path from the root of no
+/// library of Rust's is no value: the parser wants an expression, not a `::`.
 #[test]
 fn a_value_path_that_begins_with_a_primitives_path_is_read_from_its_name() {
     let parsed = |src: &str| {
@@ -1097,16 +1098,27 @@ fn a_value_path_that_begins_with_a_primitives_path_is_read_from_its_name() {
         "bool", "char", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64",
         "u128", "usize",
     ];
+    let roots = [
+        ("core", vec!["core"]),
+        ("::core", vec!["", "core"]),
+        ("std", vec!["std"]),
+        ("::std", vec!["", "std"]),
+        ("r#core", vec!["core"]),
+        (":: std", vec!["", "std"]),
+    ];
     for name in primitives {
-        for root in ["core", "::core", "std", "::std", "r#core", ":: std"] {
-            for (path, rest) in [
-                (format!("{root}::primitive::{name}::MAX"), vec!["MAX"]),
-                (format!("{root}::r#primitive::r#{name}::r#MAX"), vec!["MAX"]),
-                (format!("{root}::primitive::{name}::NOT::HERE"), vec!["NOT", "HERE"]),
-                (format!("{root}::primitive::{name}"), vec![]),
+        for (root, from) in &roots {
+            let written = |rest: &[&'static str]| [from.as_slice(), &["primitive", name], rest].concat();
+            for (path, want) in [
+                (format!("{root}::primitive::{name}::MAX"), vec![name, "MAX"]),
+                (format!("{root}::r#primitive::r#{name}::r#MAX"), vec![name, "MAX"]),
+                (format!("{root}::primitive::{name}"), vec![name]),
+                // A path that goes on by two names is read as it is written, from its root.
+                (format!("{root}::primitive::{name}::NOT::HERE"), written(&["NOT", "HERE"])),
+                (format!("{root}::primitive::{name}::consts::PI"), written(&["consts", "PI"])),
             ] {
                 let Ok(crate::Expr::Path(names, span)) = parsed(&path) else { panic!("a path: {path}") };
-                assert_eq!(names, [vec![name], rest].concat(), "{path}");
+                assert_eq!(names, want, "{path}");
                 assert_eq!(span, at, "{path}");
             }
         }
@@ -1136,6 +1148,8 @@ fn a_value_path_that_begins_with_a_primitives_path_is_read_from_its_name() {
         "core::primitive::f16::MAX",
         "std::primitive::bf16::MAX",
         "core::primitive::s32::MAX",
+        "core::primitive::f32::consts::PI",
+        "::std::primitive::f64::consts::E",
         "core::primitive",
         "core::primitive::MAX",
         "core::u32::MAX",
@@ -1144,16 +1158,66 @@ fn a_value_path_that_begins_with_a_primitives_path_is_read_from_its_name() {
         "crate::core::primitive::u32::MAX",
         "primitive::u32::MAX",
         "u32::MAX",
+        "::core::u32::MAX",
+        "::core::primitive::f16::MAX",
     ] {
         let Ok(crate::Expr::Path(names, span)) = parsed(path) else { panic!("a path: {path}") };
         assert_eq!(names.join("::"), path, "{path}");
         assert_eq!(span, at, "{path}");
     }
-    // A path from the root that is no primitive's is no value: the parser wants an expression, not a `::`.
-    for path in ["::my::u32::MAX", "::core::u32::MAX", "::core::primitive::f16::MAX", "::"] {
+    // A path from the root of `core` or `std` is read whole, as one without a `::` before it is, and the value says
+    // what it names. One from another root is no value: the parser wants an expression, not a `::`.
+    for path in ["::my::u32::MAX", "::"] {
         let err = parsed(path).unwrap_err();
         assert_eq!((err.message.as_str(), err.span), ("expected an expression, found `:`", at), "{path}");
     }
+}
+
+/// A path in a value that begins at the root of `core` or `std` with a `::` before it, `::std::f32::consts::PI`, is
+/// read whole, as the same path without the `::` is, and its first name is empty. A name of it written raw is the
+/// name Rust reads, and a space may be after the `::`. It is at the `::`. A path from another root, `::my::f32::PI`,
+/// or from none, `::f32::consts::PI`, is no value: the parser wants an expression, not a `::`. It goes on as a path
+/// does after a name: a cast, a method.
+#[test]
+fn a_path_from_the_root_of_core_or_std_with_a_colon_before_it_is_read_whole() {
+    let parsed = |src: &str| {
+        let module = crate::module(&crate::lex(&format!("const C: u64 = {src};")).unwrap(), 0);
+        module.map(|m| match &m.items[0].kind {
+            crate::ItemKind::Const(c) => c.value.clone(),
+            _ => panic!("a const"),
+        })
+    };
+    let at = Span("const C: u64 = ".len() as u32);
+    for (src, want) in [
+        ("::std::f32::consts::PI", vec!["", "std", "f32", "consts", "PI"]),
+        ("::core::f64::consts::E", vec!["", "core", "f64", "consts", "E"]),
+        ("std::f32::consts::PI", vec!["std", "f32", "consts", "PI"]),
+        ("core::f64::consts::E", vec!["core", "f64", "consts", "E"]),
+        (":: std::f32::consts::PI", vec!["", "std", "f32", "consts", "PI"]),
+        ("::r#core::r#f32::consts::r#PI", vec!["", "core", "f32", "consts", "PI"]),
+        ("::core::u32::MAX", vec!["", "core", "u32", "MAX"]),
+        ("::std::f32::consts::NOPE::MORE", vec!["", "std", "f32", "consts", "NOPE", "MORE"]),
+        ("::std::f32", vec!["", "std", "f32"]),
+    ] {
+        let Ok(crate::Expr::Path(names, span)) = parsed(src) else { panic!("a path: {src}") };
+        assert_eq!((names.iter().map(String::as_str).collect::<Vec<_>>(), span), (want, at), "{src}");
+    }
+    // The root is `core` or `std` and a `::` after it, else nothing is read of the path.
+    for src in [
+        "::my::f32::PI",
+        "::f32::consts::PI",
+        "::crate::f32::consts::PI",
+        "::r#my::std::f32::consts::PI",
+        "::std",
+        "::",
+    ] {
+        let err = parsed(src).unwrap_err();
+        assert_eq!((err.message.as_str(), err.span), ("expected an expression, found `:`", at), "{src}");
+    }
+    let Ok(crate::Expr::Cast(inner, ty, _)) = parsed("::std::f32::consts::PI as f64") else { panic!("a cast") };
+    let crate::Expr::Path(names, _) = *inner else { panic!("a path") };
+    assert_eq!((names.join("::"), ty.as_str()), ("::std::f32::consts::PI".to_string(), "f64"));
+    assert!(matches!(parsed("::core::f32::consts::PI.to_bits()"), Ok(crate::Expr::Method { .. })));
 }
 
 /// The `!` of never follows the arrow, a keyword or a lifetime, and is no macro's: the braces after it are the
@@ -1351,7 +1415,7 @@ fn a_place_is_in_the_item_that_writes_it() {
 fn a_function_has_its_mentions_in_the_order_of_the_source_each_place_once() {
     let mut mentions = vec![];
     for (name, at) in [("B", 20), ("A", 5), ("B", 20), ("C", 12), ("A", 5)] {
-        Mention::record(&mut mentions, name, Span(at));
+        Mention::record(&mut mentions, Mention::item(name, Span(at)));
     }
     let told: Vec<_> = mentions.iter().map(|m| (m.name.as_str(), m.span.0)).collect();
     assert_eq!(told, [("A", 5), ("C", 12), ("B", 20)]);

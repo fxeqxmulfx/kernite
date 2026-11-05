@@ -6,11 +6,11 @@ use crate::Assembly;
 
 /// A kernel compiled, or a static, and where it named the items of its module. Rust never sees
 /// a kernel's body run, so whatever writes the module out for Rust has to say what it named.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Compiled<T> {
     /// What it compiled to: its listing, its `.entry`, or the memory a static is.
     pub code: T,
-    /// Where it named an item of its module.
+    /// Where it named an item of its module, or a constant of a module of Rust's by its path.
     pub mentions: Vec<Mention>,
 }
 
@@ -142,13 +142,15 @@ pub enum ItemOut {
 }
 
 impl ItemOut {
-    /// Where the item named an item of its module: a kernel's, in its body, in its
-    /// `#[instances(..)]`, in its directives or in a helper it calls, and an `extern "ptx-func"`
-    /// function's, in its body, whichever of the instances of either named them; a static's, in
-    /// its type or what it holds. A helper has none of its own: the kernel or function that
-    /// calls it named what it names. A const's definition is Rust's own, and the names in it
-    /// are not the item's. Rust never sees these names, so whatever writes the item out for
-    /// Rust says each at its place, where the item runs the code that has it.
+    /// Where the item named an item of its module, or a constant of a module of Rust's by its path:
+    /// a kernel's, in its body, in its `#[instances(..)]`, in its directives or in a helper it
+    /// calls, and an `extern "ptx-func"` function's, in its body, whichever of the instances of
+    /// either named them; a static's, in its type or what it holds. A helper has none of its own:
+    /// the kernel or function that calls it named what it names. A const's definition is Rust's
+    /// own, and the names in it are not the item's, but for the constants of a module of Rust's it
+    /// names by a path: kernite takes their values for the item that names the const. Rust never
+    /// sees these names, so whatever writes the item out for Rust says each at its place, where
+    /// the item runs the code that has it.
     pub fn mentions(&self) -> &[Mention] {
         match self {
             ItemOut::HostStatic(Ok(s)) => &s.mentions,
@@ -169,7 +171,8 @@ pub struct NativeOut {
     pub said: Option<Error>,
     /// Each instance that compiled, in order.
     pub instances: Vec<NativeInstance>,
-    /// Where the instances that compiled named an item of the module.
+    /// Where the instances that compiled named an item of the module, or a constant of a module of Rust's by its
+    /// path.
     pub mentions: Vec<Mention>,
     /// Whether Rust gets its code: it is an `unsafe fn`, its attributes hold, each of its
     /// instances compiled, and it reaches the statics it names.
@@ -218,7 +221,8 @@ pub struct DeviceFnOut {
     pub said: Option<Error>,
     /// Why each instance that did not compile did not, in order.
     pub errors: Vec<Error>,
-    /// Where the instances that compiled named an item of the module.
+    /// Where the instances that compiled named an item of the module, or a constant of a module of Rust's by its
+    /// path.
     pub mentions: Vec<Mention>,
     /// How Rust launches it, if it is a kernel; none for a function the kernels call.
     pub launcher: Option<Launcher>,

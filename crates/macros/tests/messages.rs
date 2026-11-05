@@ -2800,6 +2800,174 @@ fn a_constant_named_by_primitive_paths_builds_and_gives_the_value_the_names_give
     );
 }
 
+/// A constant of `core::f32::consts` or `core::f64::consts` named by Rust's own path, `std::f32::consts::LOG2_E`, in
+/// the four spellings Rust has and with names written raw, and a float's own constant, `f64::EPSILON`, is Rust's
+/// value, bit for bit: in a const, a static's data, a kernel's operand and a helper's, on x86 and on a GPU. Rust
+/// builds the module without a word. So does a const of a module of consts that a module of kernels takes, in a module
+/// that gives `std` another meaning: Rust reads the path where the consts are. The halves' constants, `f16::MAX` and
+/// `bf16::EPSILON`, are kernite's own, which Rust is not asked of. The path without its root, `f32::consts::LOG2_E`, is
+/// Rust's where the module has `use std::f32;`, and then kernite takes it too. The tests the fixture holds run the
+/// kernels, the GPU ones on the GPU, which they skip where there is none.
+#[test]
+fn a_constant_named_by_rusts_path_builds_and_gives_the_value_rust_gives() {
+    let printed = runs_quietly(&["test"], "consts_paths");
+    assert!(
+        printed.contains("test result: ok. 6 passed"),
+        "fixtures/consts_paths.rs ran its tests, and printed:\n{printed}"
+    );
+}
+
+/// A path to a constant that Rust has not is Rust's error alone, at the path: `f32::consts::LOG2_E`, which Rust has
+/// only after `use std::f32;`, is "ambiguous associated type" in a const, a static's data and a kernel's operand, on
+/// x86 and on a GPU, and in a helper two kernels call, which Rust says once. kernite takes the path for Rust to refuse
+/// it, and says nothing.
+#[test]
+fn a_constant_path_without_its_root_is_rusts_error_alone_at_the_path() {
+    let ambiguous = |at: &str| format!("src/lib.rs:{at}: error[E0223]: ambiguous associated type");
+    let mut said: Vec<String> = ["9:29", "10:43", "14:24", "25:22", "41:46", "45:26", "50:20"].map(ambiguous).into();
+    // Cargo counts each time Rust says it, and prints it once: the const's path is read again by the check that kernite
+    // writes at it, and a helper's path is checked once for each of the two kernels that call it, in both modules.
+    said.push(format!(
+        "error: could not compile `consts_paths_refused` (lib) due to {} previous errors",
+        said.len() + 3
+    ));
+    refuses("consts_paths_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A module that gives `std` another meaning, `use crate::fake as std;`, has Rust say that it cannot find `f32` in it,
+/// at the name Rust cannot find, in each path to a constant that begins with `std`: in a const, a static's data and a
+/// kernel's operand on x86 and on a GPU. It says nothing of `::std`, the crate whatever the module gives. kernite says
+/// nothing.
+#[test]
+fn a_constant_path_through_a_std_the_module_gives_another_meaning_is_rusts_error_alone() {
+    let missing =
+        |at: &str| format!("src/lib.rs:{at}: error[E0433]: cannot find `f32` in `std`: could not find `f32` in `std`");
+    let mut said: Vec<String> = ["14:34", "15:71", "22:27", "35:25"].map(missing).into();
+    // Cargo counts each time Rust says it, and prints it once: the const's path is read again by the check that kernite
+    // writes at it.
+    said.push(format!("error: could not compile `consts_paths_std` (lib) due to {} previous errors", said.len() + 1));
+    refuses("consts_paths_std", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A module that gives `std` or `core`, or `f32` or `f64`, a meaning of its own, `use crate::fake_std as std;`, where
+/// the meaning has a constant of its own at the path, has Rust say, at the path, that it is not the constant kernite
+/// takes, with the bits kernite took and the path that is: in a const, a static's data and a kernel's operand on x86,
+/// and in a GPU's static's data and operand. So Rust says it of a const that kernite works out itself, as of an
+/// operand, and of no path in a kernel that `cfg` leaves out. kernite says nothing else: it takes the constant that the
+/// path names where nothing gives its names another meaning.
+#[test]
+fn a_constant_path_that_the_module_gives_a_constant_of_its_own_is_refused_at_the_path() {
+    let refused = |(at, path, bits, write, module): (&str, &str, &str, &str, &str)| {
+        format!(
+            "src/lib.rs:{at}: error[E0080]: evaluation panicked: `{path}` is not Rust's constant, which kernite takes, \
+             with the bits {bits}: a name in the path means another thing in this module; write `{write}`: evaluation \
+             of `{module}::_::_` failed here"
+        )
+    };
+    let (pi, e) = ("0x40490fdb", "0x4005bf0a8b145769");
+    let (core_pi, core_e) = ("::core::f32::consts::PI", "::core::f64::consts::E");
+    let said: Vec<String> = [
+        // `std` on x86: a static's data, a const and an operand.
+        ("37:43", "std::f64::consts::E", e, core_e, "std_x86"),
+        ("36:27", "std::f32::consts::PI", pi, core_pi, "std_x86"),
+        ("44:22", "std::f32::consts::PI", pi, core_pi, "std_x86"),
+        // `std` on a GPU: a static's data and an operand.
+        ("53:46", "std::f64::consts::E", e, core_e, "std_gpu"),
+        ("57:20", "std::f32::consts::PI", pi, core_pi, "std_gpu"),
+        // `f32`, which the module names a module of its own, on x86: a const and an operand; and on a GPU: an operand.
+        ("68:27", "f32::consts::PI", pi, core_pi, "f32_x86"),
+        ("75:22", "f32::consts::PI", pi, core_pi, "f32_x86"),
+        ("86:20", "f32::consts::PI", pi, core_pi, "f32_gpu"),
+        // `core` on x86: a const and an operand; and `f64`, which the module names a module of its own, on a GPU: an
+        // operand.
+        ("104:27", "core::f64::consts::E", e, core_e, "core_x86"),
+        ("111:22", "core::f64::consts::E", e, core_e, "core_x86"),
+        ("123:20", "f64::consts::E", e, core_e, "f64_gpu"),
+    ]
+    .map(refused)
+    .into_iter()
+    .chain(["error: could not compile `consts_paths_shadowed` (lib) due to 11 previous errors".to_string()])
+    .collect();
+    refuses("consts_paths_shadowed", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A path through the primitive, `core::primitive::f32::consts::PI`, is no path of Rust's: `core::primitive::f32` is
+/// the type, which has no `consts`. Rust says "ambiguous associated type" of it, at the path, as it says of the path in
+/// a const of its own: in a const, a static's data and a kernel's operand, on x86 and on a GPU, in a module that has
+/// `use std::f32;`, which Rust's own path `f32::consts::PI` uses, and in one that has not. kernite takes the path as it
+/// is written, for Rust to refuse it, and says nothing.
+#[test]
+fn a_path_through_the_primitive_is_rusts_error_alone_at_the_path() {
+    let ambiguous = |at: &str| format!("src/lib.rs:{at}: error[E0223]: ambiguous associated type");
+    let mut said: Vec<String> = ["8:24", "16:27", "17:43", "24:22", "32:46", "36:20"].map(ambiguous).into();
+    // Cargo counts each time Rust says it, and prints it once: the const's path is read again by the check that kernite
+    // writes at it.
+    said.push(format!(
+        "error: could not compile `consts_paths_primitive` (lib) due to {} previous errors",
+        said.len() + 1
+    ));
+    refuses("consts_paths_primitive", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A path that names no constant kernite knows is kernite's error alone, at the path, and Rust is not asked of it: a
+/// name the modules have not, a type that has none, one that Rust has, deprecated, in a module of the type,
+/// `std::u32::MAX`, and a number's own constant that kernite has no value for, `f32::NAN`; in a kernel's operand on x86
+/// and on a GPU, in a GPU static's data, and in a helper's.
+#[test]
+fn a_path_that_names_no_constant_kernite_knows_is_kernites_error_alone_at_the_path() {
+    let unknown =
+        |(at, path): (&str, &str)| format!("src/lib.rs:{at}: error: `{path}` is not a constant kernite knows");
+    let mut said: Vec<String> = [
+        // x86: a name, a type, a legacy path and a type's constant.
+        ("12:16", "::core::f64::consts::NOPE"),
+        ("18:16", "f16::consts::PI"),
+        ("24:16", "std::u32::MAX"),
+        ("30:16", "f32::NAN"),
+        // A GPU: a static's data, a kernel's operand, and the helper that the second kernel calls.
+        ("38:46", "::std::f64::consts::PHI"),
+        ("47:20", "std::u32::MAX"),
+        ("42:26", "core::f32::consts::INFINITY"),
+    ]
+    .map(unknown)
+    .into();
+    said.push(format!("error: could not compile `consts_paths_unknown` (lib) due to {} previous errors", said.len()));
+    refuses("consts_paths_unknown", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A constant of the two modules that Rust has unstable, `std::f32::consts::SQRT_3`, is Rust's error alone, at the
+/// path, that the library feature is unstable: in a const, a static's data and a kernel's operand, on x86 and on a GPU,
+/// and in a helper two kernels call, which Rust says once. kernite takes the path, with the value Rust's nightly gives,
+/// and says nothing.
+#[test]
+fn an_unstable_constant_is_rusts_error_alone_at_the_path() {
+    let gated =
+        |at: &str| format!("src/lib.rs:{at}: error[E0658]: use of unstable library feature `more_float_constants`");
+    let mut said: Vec<String> = ["9:29", "10:43", "14:24", "25:22", "41:46", "45:26", "50:20"].map(gated).into();
+    // Cargo counts each time Rust says it, and prints it once, as for `consts_paths_refused`.
+    said.push(format!(
+        "error: could not compile `consts_paths_unstable` (lib) due to {} previous errors",
+        said.len() + 3
+    ));
+    refuses("consts_paths_unstable", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A module of consts is one Rust reads, as a module of kernels is, so kernite takes in it the paths that Rust refuses:
+/// a path without its root, one through the primitive, and an unstable constant. Rust says what is wrong with each,
+/// once, at the path, in the consts, and kernite says nothing, there or in the kernels, on x86 and on a GPU, that take
+/// them.
+#[test]
+fn a_module_of_consts_takes_the_paths_rust_refuses_as_a_module_of_kernels_does() {
+    refuses(
+        "consts_paths_given",
+        &[
+            "src/lib.rs:10:31: error[E0658]: use of unstable library feature `more_float_constants`",
+            "src/lib.rs:8:31: error[E0223]: ambiguous associated type",
+            "src/lib.rs:9:30: error[E0223]: ambiguous associated type",
+            "error: could not compile `consts_paths_given` (lib) due to 3 previous errors",
+        ],
+    );
+}
+
 /// A path that the place does not take is kernite's error alone, at the type, in the words it has for the same type by
 /// its name; a primitive is named by its name, and any other path is quoted as written. Rust says of a compile-time
 /// argument's type what it says of the name, once, at the type: it is no type for a const generic. It says nothing of
@@ -3838,7 +4006,9 @@ fn the_launcher_of_a_cooperative_kernel_that_takes_numbers_runs_its_first_closur
 }
 
 /// A module that takes the name of `u8`, `u32`, `str` or any number from elsewhere builds as one that
-/// does not: the Rust the macros write names the primitives by their paths, `::core::primitive::u8`.
+/// does not: the Rust the macros write names the primitives by their paths, `::core::primitive::u8`. So it is of the
+/// constants a kernel names: a number's own, `u32::MAX`, which Rust is not asked of, as the number may be another type
+/// there, and a module's, `std::f32::consts::PI`, which it is.
 #[test]
 fn a_module_that_gives_a_primitive_another_type_builds_as_one_that_does_not() {
     builds_quietly("primitive_names");

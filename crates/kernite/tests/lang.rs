@@ -963,6 +963,256 @@ fn a_constant_named_by_the_path_of_its_primitive_is_the_constant_named_by_its_na
     }
 }
 
+/// The constants of `core::f32::consts` and `core::f64::consts` that Rust has stable, by name, each with Rust's own
+/// value as the bits of an `f32` and of an `f64`.
+macro_rules! rust_consts {
+    ($($name:ident),*) => {
+        [$((stringify!($name), std::f32::consts::$name.to_bits(), std::f64::consts::$name.to_bits())),*]
+    };
+}
+
+const RUST_CONSTS: [(&str, u32, u64); 21] = rust_consts! {
+    PI, TAU, E, EULER_GAMMA, GOLDEN_RATIO, FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, FRAC_PI_6, FRAC_PI_8, FRAC_1_PI, FRAC_2_PI,
+    FRAC_2_SQRT_PI, SQRT_2, FRAC_1_SQRT_2, LN_2, LN_10, LOG2_E, LOG10_E, LOG2_10, LOG10_2
+};
+
+/// The six constants of the two modules that Rust has unstable, `more_float_constants`, which stable Rust cannot name
+/// to take: the bits of an `f32` and of an `f64` that Rust's nightly gives each.
+const UNSTABLE_CONSTS: [(&str, u32, u64); 6] = [
+    ("SQRT_3", 0x3fddb3d7, 0x3ffbb67ae8584caa),
+    ("SQRT_5", 0x400f1bbd, 0x4001e3779b97f4a8),
+    ("FRAC_1_SQRT_2PI", 0x3ecc422a, 0x3fd9884533d43651),
+    ("FRAC_1_SQRT_3", 0x3f13cd3a, 0x3fe279a74590331c),
+    ("FRAC_1_SQRT_5", 0x3ee4f92e, 0x3fdc9f25c5bfedd9),
+    ("FRAC_1_SQRT_PI", 0x3f106ebb, 0x3fe20dd750429b6d),
+];
+
+/// The paths by which Rust names a module of `core` or `std`, `core::f32::consts`: four spellings, one that writes a
+/// name raw, and one with a space after the `::`. A path is a root and the rest, `f32::consts::PI`.
+const ROOTS: [&str; 6] = ["core::", "::core::", "std::", "::std::", "::r#std::", ":: core::"];
+
+/// What the kernels over the operands `single` and `double`, an `f32` and an `f64`, compile to: for x86 each loads its
+/// operand from memory, as a table of constants in the listing; for a GPU one moves both into registers.
+fn compiled(single: &str, double: &str) -> (String, String, String) {
+    let x86s = format!(r#"unsafe extern "sysv64" fn s() {{ let v: ymm; vmovups(v, [[{single}; 8]]); }}"#);
+    let x86d = format!(r#"unsafe extern "sysv64" fn d() {{ let v: ymm; vmovupd(v, [[{double}; 4]]); }}"#);
+    let ptx_src = format!(
+        r#"unsafe extern "ptx-kernel" fn g(a: *mut f32, b: *mut f64) {{
+            let (x, y): (f32, f64);
+            mov.f32(x, {single});
+            mov.f64(y, {double});
+            st.global.f32([a], x);
+            st.global.f64([b], y);
+        }}"#
+    );
+    (x86(&x86s, "s"), x86(&x86d, "d"), ptx(&ptx_src))
+}
+
+/// A constant of `core::f32::consts` or `core::f64::consts` is named by its path from the root of `core` or `std`,
+/// `std::f32::consts::LOG2_E`, with a `::` before it or not, with a name raw or a space after the `::`, and has Rust's
+/// own value, bit for bit: a kernel that names it compiles to the listing, or the PTX, of the kernel that makes the
+/// same bits, `f32::from_bits(0x3fb8aa3b)`, for x86 and for a GPU. So is each of the 21 that Rust has stable, whose
+/// values are Rust's own constants, and each of the six that it has unstable, whose values are the bits its nightly
+/// gives; of `f32` and of `f64`.
+#[test]
+fn a_constant_of_core_consts_is_rusts_own_by_a_path_from_its_root() {
+    for (name, single, double) in RUST_CONSTS.into_iter().chain(UNSTABLE_CONSTS) {
+        let bits = (format!("f32::from_bits({single:#x})"), format!("f64::from_bits({double:#x})"));
+        let want = compiled(&bits.0, &bits.1);
+        for root in ROOTS {
+            let named = compiled(&format!("{root}f32::consts::{name}"), &format!("{root}f64::consts::{name}"));
+            assert_eq!(named, want, "{root}{name}");
+        }
+        // A name written raw is the name Rust reads, at each place it is written.
+        let raw = compiled(&format!("::r#core::r#f32::r#consts::r#{name}"), &format!("std::r#f64::consts::r#{name}"));
+        assert_eq!(raw, want, "r#{name}");
+    }
+}
+
+/// An integer's constants, `MIN`, `MAX` and `BITS`, are Rust's own for each of the ten integers kernite has, `u8` to
+/// `u64`, `i8` to `i64`, `usize` and `isize`: a const that holds each, or a note that says it, has Rust's value, and
+/// `BITS` is a `u32` whatever the integer is.
+#[test]
+fn an_integer_s_constants_are_rusts_own() {
+    macro_rules! own {
+        ($($ty:ident),*) => {
+            [$((stringify!($ty), $ty::MIN.to_string(), $ty::MAX.to_string(), $ty::BITS.to_string())),*]
+        };
+    }
+    for (ty, min, max, bits) in own!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize) {
+        let src = format!(
+            "const LOW: {ty} = {ty}::MIN; const HIGH: {ty} = {ty}::MAX; const WIDTH: u32 = {ty}::BITS;\n\
+             pub unsafe extern \"sysv64\" fn k() {{ note(\"{{LOW}} {{HIGH}} {{WIDTH}}\"); }}"
+        );
+        let listing = x86(&src, "k");
+        assert!(listing.contains(&format!("# {min} {max} {bits}\n")), "{ty}: {listing}");
+        // The value is the integer's own type, so that a use of another is refused, `u64::MAX` as a `u32`.
+        let wrong =
+            format!("const WIDTH: u8 = {ty}::BITS;\npub unsafe extern \"sysv64\" fn k() {{ note(\"{{WIDTH}}\"); }}");
+        assert_eq!(kernite::x86_str(&wrong, "k").unwrap_err(), "1:19: this is a u32, not u8", "{ty}");
+    }
+}
+
+/// A float's own constants are named by the float's path: `INFINITY`, `NEG_INFINITY`, `MAX`, `MIN`, `MIN_POSITIVE` and
+/// `EPSILON` of `f32` and of `f64` have Rust's own value, bit for bit. `f16` and `bf16` have the same six, with the
+/// bits that IEEE 754's rules give a float of their widths, 5 bits of exponent and 10 of fraction, and 8 and 7, for
+/// Rust has no such floats to take them from. The primitive's path names them too, `core::primitive::f64::EPSILON`.
+#[test]
+fn a_float_s_own_constants_are_rusts_own_by_the_floats_path() {
+    macro_rules! own {
+        ($($name:ident),*) => {
+            [$((stringify!($name), f32::$name.to_bits(), f64::$name.to_bits())),*]
+        };
+    }
+    let floats: [(&str, u32, u64); 6] = own!(INFINITY, NEG_INFINITY, MAX, MIN, MIN_POSITIVE, EPSILON);
+    for (name, single, double) in floats {
+        let bits = (format!("f32::from_bits({single:#x})"), format!("f64::from_bits({double:#x})"));
+        let want = compiled(&bits.0, &bits.1);
+        for path in PATHS {
+            let (single, double) = (path.replace("{}", "f32"), path.replace("{}", "f64"));
+            assert_eq!(compiled(&format!("{single}::{name}"), &format!("{double}::{name}")), want, "{path}::{name}");
+        }
+        assert_eq!(compiled(&format!("f32::{name}"), &format!("f64::{name}")), want, "{name}");
+    }
+    // The bits of the halves: a lane of a vector for x86, a register for a GPU.
+    let halves = [
+        ("INFINITY", 0x7c00, 0x7f80),
+        ("NEG_INFINITY", 0xfc00, 0xff80),
+        ("MAX", 0x7bff, 0x7f7f),
+        ("MIN", 0xfbff, 0xff7f),
+        ("MIN_POSITIVE", 0x0400, 0x0080),
+        ("EPSILON", 0x1400, 0x3c00),
+    ];
+    let halved = |half: &str, brain: &str| {
+        let x86_src = format!(
+            r#"unsafe extern "sysv64" fn k() {{ let v: ymm; vpbroadcastw(v, [{half}]); vpbroadcastw(v, [{brain}]); }}"#
+        );
+        let ptx_src = format!(
+            r#"unsafe extern "ptx-kernel" fn g(a: *mut f16, b: *mut bf16) {{
+                let (x, y): (f16, bf16);
+                mov.b16(x, {half});
+                mov.b16(y, {brain});
+                st.global.b16([a], x);
+                st.global.b16([b], y);
+            }}"#
+        );
+        (x86(&x86_src, "k"), ptx(&ptx_src))
+    };
+    for (name, half, brain) in halves {
+        let want = halved(&format!("f16::from_bits({half:#x})"), &format!("bf16::from_bits({brain:#x})"));
+        assert_eq!(halved(&format!("f16::{name}"), &format!("bf16::{name}")), want, "{name}");
+    }
+}
+
+/// Why a constant's path is refused in text, which no Rust reads: the path as it is written, and what kernite says of
+/// it at its first token.
+fn refused_constants() -> Vec<(String, String)> {
+    let unknown = |p: &str| (p.to_string(), format!("`{p}` is not a constant kernite knows"));
+    let mut rows = vec![];
+    // A path without its root is Rust's after a `use std::f32;`, which kernite does not read.
+    for read in ["f32::consts::LOG2_E", "f64::consts::PI", "f64::consts::FRAC_2_SQRT_PI"] {
+        let ty = read.split("::").next().unwrap();
+        let error = format!(
+            "`{read}` is Rust's only after `use std::{ty};`, which kernite does not read: write `core::{read}`"
+        );
+        rows.push((read.to_string(), error));
+    }
+    // Types that have no `consts`, names that the modules have not, and paths of another shape: through a primitive to
+    // a module, which is no path of Rust's, `core::primitive::f32::consts::PI`, as it is written.
+    for p in [
+        "core::primitive::f32::consts::PI",
+        "std::f16::consts::PI",
+        "core::f128::consts::PI",
+        "std::bf16::consts::E",
+        "f16::consts::PI",
+        "bf16::consts::E",
+        "std::u32::consts::MAX",
+        "std::f32::consts::NOPE",
+        "std::f64::consts::pi",
+        "std::f32::consts::Pi",
+        "core::f32::consts::PI_2",
+        "std::f32::consts",
+        "std::f32::consts::PI::X",
+        "std::consts::PI",
+        "std::f32::PI",
+        "consts::PI",
+        "my::f32::consts::PI",
+        "crate::std::f32::consts::PI",
+        "self::f32::consts::PI",
+        "::std::f32::consts::PI::X",
+        "::core::f32::consts",
+    ] {
+        rows.push(unknown(p));
+    }
+    // A name written raw is the name, in a path as anywhere: it is quoted so.
+    rows.push((
+        "::std::primitive::r#f64::consts::E".to_string(),
+        "`::std::primitive::f64::consts::E` is not a constant kernite knows".to_string(),
+    ));
+    // A type's constant that Rust has by another path or name, or has not: the modules' constants, which Rust has
+    // deprecated, `std::u32::MAX`; the floats' other constants; a name that no type has.
+    for p in [
+        "std::u32::MAX",
+        "core::f32::MAX",
+        "std::f64::EPSILON",
+        "core::i8::MIN",
+        "::std::f32::INFINITY",
+        "f32::NAN",
+        "f64::NAN",
+        "f32::RADIX",
+        "f64::DIGITS",
+        "f32::MANTISSA_DIGITS",
+        "f64::MAX_EXP",
+        "u8::NOPE",
+        "u128::MAX",
+        "i128::MIN",
+        "u128::BITS",
+        "char::MAX",
+        "f32::consts",
+        "core::MAX",
+    ] {
+        rows.push(unknown(p));
+    }
+    rows
+}
+
+/// A path that names no constant kernite has a value for is refused where it is written, at its first token, in
+/// kernite's words, for x86 and for a GPU, wherever a value is known now: an operand, a const, a static's data and a
+/// helper. In text no Rust reads the path, so kernite says why: a constant of `core::f32::consts` or
+/// `core::f64::consts` without `std::` or `core::` before it needs one, as kernite reads no `use`; and every other
+/// path is no constant kernite knows: a name or a type the modules have not, a path of another shape, which includes
+/// one through a primitive to a module, `core::primitive::f32::consts::PI`, quoted as it is written, a constant that
+/// Rust has deprecated in a module of its type, `std::u32::MAX`, or has not, `f32::NAN`, `f32::RADIX` or `f64::DIGITS`.
+/// A path with a `::` before another name than `core` or `std` is no expression.
+#[test]
+fn a_path_that_names_no_constant_kernite_knows_is_refused_at_its_first_token_in_text() {
+    let at = |src: &str, path: &str| 1 + src.find(path).unwrap_or_else(|| panic!("`{path}` in {src}"));
+    for (path, error) in refused_constants() {
+        for src in [
+            format!(r#"unsafe extern "sysv64" fn k() {{ let g: gpr; mov(g, {path}); }}"#),
+            format!("const C: f32 = {path};\nunsafe extern \"sysv64\" fn k() {{ let g: gpr; mov(g, C); }}"),
+            format!(
+                "static S: constant<[f32; 1]> = [{path}];\n\
+                 unsafe extern \"sysv64\" fn k() {{ let g: gpr; lea(g, [S]); }}"
+            ),
+            format!("fn h() {{ let g: gpr; mov(g, {path}); }}\nunsafe extern \"sysv64\" fn k() {{ h(); }}"),
+        ] {
+            let want = format!("{}:{}: {error}", 1, at(&src, &path));
+            assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), want, "{src}");
+        }
+        let src = format!(r#"unsafe extern "ptx-kernel" fn g() {{ let v: f32; mov.f32(v, {path}); }}"#);
+        let want = format!("1:{}: {error}", at(&src, &path));
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{src}");
+    }
+    // The `::` before a name other than `core` or `std` begins no path.
+    for path in ["::f32::consts::PI", "::my::f32::consts::PI", "::u32::MAX"] {
+        let src = format!(r#"unsafe extern "sysv64" fn k() {{ let g: gpr; mov(g, {path}); }}"#);
+        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), "1:52: expected an expression, found `:`", "{path}");
+        let src = format!(r#"unsafe extern "ptx-kernel" fn g() {{ let v: f32; mov.f32(v, {path}); }}"#);
+        assert_eq!(kernite::ptx_str(&src).unwrap_err(), "1:60: expected an expression, found `:`", "{path}");
+    }
+}
+
 /// Each place a type is written, with `{ty}` where it is, and for x86 the kernel to compile: a kernel's parameter,
 /// pointee and result, a variable in an array and in stack memory, a compile-time argument's type, a helper's
 /// parameter and result, a static, and a cast.
@@ -1221,7 +1471,7 @@ fn an_error_names_a_primitive_by_its_name_and_any_other_path_as_written() {
         ),
         (
             r#"unsafe extern "ptx-kernel" fn g() { let v: u32; mov.u32(v, ::core::primitive::f16::MAX); }"#,
-            "1:60: expected an expression, found `:`".into(),
+            "1:60: `::core::primitive::f16::MAX` is not a constant kernite knows".into(),
         ),
     ] {
         assert_eq!(kernite::ptx_str(src).unwrap_err(), error, "{src}");

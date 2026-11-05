@@ -101,12 +101,12 @@ kernel, a helper or an `extern "ptx-func"` function; the type of a compile-time 
 written with the paths compiles to the listing, or the PTX, of the same kernel written with the names, and a message
 says the name: `core::primitive::str` is `str` in it.
 
-A path in a value that begins with a primitive's is read from the primitive's name too: `core::primitive::u32::MAX` is
-`u32::MAX`, `::std::primitive::f32::INFINITY` is `f32::INFINITY`, and `core::primitive::f32::from_bits(..)` is
-`f32::from_bits(..)`. It holds wherever a value is written: a const, a static's data, the length of an array, a
-compile-time argument, the values an instance lists, and the operand of an instruction, on x86 and on a GPU. Here too a
-kernel compiles to the listing, or the PTX, it has with the names, and a message says the name:
-`core::primitive::u32::NOPE` is `u32::NOPE` in "`u32::NOPE` is not a constant kernite knows".
+A path in a value that begins with a primitive's, and goes on by a name or none, is read from the primitive's name too:
+`core::primitive::u32::MAX` is `u32::MAX`, `::std::primitive::f32::INFINITY` is `f32::INFINITY`, and
+`core::primitive::f32::from_bits(..)` is `f32::from_bits(..)`. It holds wherever a value is written: a const, a static's
+data, the length of an array, a compile-time argument, the values an instance lists, and the operand of an instruction,
+on x86 and on a GPU. Here too a kernel compiles to the listing, or the PTX, it has with the names, and a message says
+the name: `core::primitive::u32::NOPE` is `u32::NOPE` in "`u32::NOPE` is not a constant kernite knows".
 
 kernite reads no other path as a primitive, and quotes it as written: `my::core::primitive::u64` and `crate::Word`,
 which are paths to types of yours; `core::primitive::f16` and `core::primitive::f128`, which name no type, for
@@ -119,6 +119,51 @@ each at the type, in the words it has for `Word`: "a kernel takes pointers, 64-b
 Rust is asked of the path as it is of the name, in a kernel's parameters and result. A module that gives `core` or `std`
 another meaning, `use crate::fake as core;`, has Rust say, once, at the type, that it is not the number, as it does when
 the module gives `u64` another type.
+
+A value names a number's constants by a path, in a const, a static's data and the operand of an instruction, on x86 and
+on a GPU. An integer has `MIN`, `MAX` and `BITS`: `u8::MAX`, `i64::MIN` and `usize::BITS`, of the ten integers kernite
+has, `u8` to `u64`, `i8` to `i64`, `usize` and `isize`. `f32` and `f64` have `INFINITY`, `NEG_INFINITY`, `MAX`, `MIN`,
+`MIN_POSITIVE` and `EPSILON`, with Rust's own values, and `f16` and `bf16` have the same six, with the bits that IEEE
+754's rules give a float of their widths, 5 bits of exponent and 10 of fraction, and 8 and 7, for Rust has no such
+floats to take them from. `core::f32::consts` and `core::f64::consts` have 27 constants, 21 that Rust has stable: `PI`,
+`TAU`, `E`, `EULER_GAMMA`, `GOLDEN_RATIO`, `FRAC_PI_2`, `FRAC_PI_3`, `FRAC_PI_4`, `FRAC_PI_6`, `FRAC_PI_8`, `FRAC_1_PI`,
+`FRAC_2_PI`, `FRAC_2_SQRT_PI`, `SQRT_2`, `FRAC_1_SQRT_2`, `LN_2`, `LN_10`, `LOG2_E`, `LOG10_E`, `LOG2_10` and `LOG10_2`;
+and six that it has unstable, `SQRT_3`, `SQRT_5`, `FRAC_1_SQRT_2PI`, `FRAC_1_SQRT_3`, `FRAC_1_SQRT_5` and
+`FRAC_1_SQRT_PI`. kernite names them as Rust does, by the path from `core` or `std`, `core::f32::consts::PI` or
+`::std::f64::consts::LOG2_E`, with a name of the path written raw too, `std::r#f64::consts::r#E`. Each is Rust's own
+value, bit for bit, and a kernel that names it compiles to the listing, or the PTX, of one that makes the same bits,
+`f32::from_bits(0x40490fdb)`. Rust says of each of the six, at the path, "use of unstable library feature
+`more_float_constants`", where the crate does not enable the feature, and kernite says nothing: its values are the bits
+that Rust's nightly gives them.
+
+In a module of kernels Rust holds each path to a constant to the bits kernite takes for it: kernite writes a check at
+the path, in a const, a static's data and an operand, on x86 and on a GPU, and Rust runs it as it builds the module. A
+module that gives a name in the path another meaning, `use crate::fake as std;`, where the meaning has a
+`f32::consts::PI` of its own, has Rust's constant in kernite and its own in Rust, and Rust says, at the path,
+"`std::f32::consts::PI` is not Rust's constant, which kernite takes, with the bits 0x40490fdb: a name in the path means
+another thing in this module; write `::core::f32::consts::PI`". It says so of `std`, of `core`, and of an `f32` or an
+`f64` that the module names a module of its own. Where the meaning has no constant at the path, Rust says what it says
+of any path, that it cannot find `f32` in `std`, at the name, and kernite says nothing. Of a path that begins with
+`::std` or `::core`, which name the crates whatever the module gives, Rust says nothing. A const of a module of consts
+is Rust's where its module is, and holds nothing that gives `std` another meaning: a module of kernels that takes it is
+asked nothing of its paths, whatever the module means by `std`.
+
+The path without its root, `f32::consts::PI`, is Rust's only after `use std::f32;`: where the module has no such `use`,
+Rust says "ambiguous associated type" at it, once for each place it is written. A path through the primitive,
+`core::primitive::f32::consts::PI`, is no path of Rust's, `use std::f32;` or not, for `core::primitive::f32` is the
+type, which has no `consts`: Rust says the same of it, as it is written. kernite takes both for Rust to refuse, and says
+nothing, in a module of kernels and in a module of consts, and in the kernels that take its consts. No Rust reads the
+text that `x86_str` and `ptx_str` are given, and kernite reads no `use`, so there it refuses the path without its root,
+at its first token, and says the path to write: "`f32::consts::PI` is Rust's only after `use std::f32;`, which kernite
+does not read: write `core::f32::consts::PI`". It refuses the path through the primitive as it is written:
+"`core::primitive::f32::consts::PI` is not a constant kernite knows".
+
+A path that names no constant kernite knows is kernite's error alone, at the path, and Rust is not asked of it:
+"`std::f32::consts::NOPE` is not a constant kernite knows". So it is for a name that the two modules have not; a type
+that has no `consts`, `f16::consts::PI`; a constant that Rust has in a module of its type too, `std::u32::MAX` or
+`core::f32::MAX`; and a number's own constant that kernite has no value for, `f32::NAN`, `f64::DIGITS` or `u128::MAX`.
+A number's own constant, `u32::MAX`, is not asked of Rust either: a module may give `u32` another type, and its kernels
+build as they do without.
 
 Any other type a kernel takes or gives back is kernite's error alone, at the type, once for each instance: `f128`,
 `[f16; 4]`, `(f16, u64)`, `&f16`, `!` as a parameter, `[u64]`, `str`, `dyn Fn()`, an `f16` or a `bf16` on x86, or a type

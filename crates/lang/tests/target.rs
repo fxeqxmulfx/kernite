@@ -2,7 +2,7 @@
 //! for each call, or keeps what it is told, so these tests pin the calls, and what each is given,
 //! with no machine.
 
-use kernite_lang::{Error, Fault, Guard, ItemKind, Mem, Operand, Run, Span, Target};
+use kernite_lang::{Error, Fault, Guard, ItemKind, Mem, Operand, Run, Span, Target, Value};
 
 /// A kernel with a pointer, a `ymm`, a loop of `v.xmm` fields, which the evaluator unrolls, a
 /// label and a helper, whose parameter is a view of what it is given, and which declares a
@@ -80,6 +80,31 @@ const SIZE: u32 = 8;
 #[maxntid(SIZE, SIZE * 2)]
 #[maxnreg(32)]
 pub unsafe extern "ptx-kernel" fn k(n: u32) {}
+"#;
+
+/// A kernel that names constants: a type's, `u32::MAX`, by its name and by `core::primitive`'s path, and a module's of
+/// Rust's, `std::f32::consts::PI`, by its path from `core` or `std`, with a `::` before it or not, and by none.
+const CONSTS: &str = r#"
+pub unsafe extern "sysv64" fn k(n: u64) {
+    add(n, u32::MAX);
+    add(n, core::primitive::f64::EPSILON);
+    add(n, std::f32::consts::PI);
+    add(n, ::core::f64::consts::E);
+    add(n, f32::consts::TAU);
+    add(n, core::primitive::f32::consts::LN_2);
+}
+"#;
+
+/// A kernel that names a const, which names two more, and a constant of a module of Rust's by its path in each of them,
+/// and one that no kernel names.
+const IN_CONSTS: &str = r#"
+const MORE: u32 = BITS + OTHER;
+const BITS: u32 = std::f32::consts::PI.to_bits();
+const OTHER: u32 = ::core::f32::consts::E.to_bits();
+const UNUSED: u32 = core::f64::consts::TAU.to_bits() as u32;
+pub unsafe extern "sysv64" fn k(n: u32) {
+    add(n, MORE);
+}
 "#;
 
 /// A target that writes a line for each call but `declared_at` and `inst_at`, whose places it
@@ -203,9 +228,17 @@ fn operand(o: &Operand<usize>) -> String {
     }
 }
 
-/// Runs the kernel `k` of `src` on `trace`; or the error, at its line and column.
+/// Runs the kernel `k` of `src` on `trace`, as text is run, which Rust does not read; or the error, at its line and
+/// column.
 fn run(src: &str, trace: &mut Trace) -> Result<Run, String> {
-    let module = kernite_lang::parse(src).map_err(|e| e.at(src))?;
+    run_as(src, false, trace)
+}
+
+/// Runs the kernel `k` of `src` on `trace`, as a module of kernels is run if `rust`, which Rust reads as well; or the
+/// error, at its line and column.
+fn run_as(src: &str, rust: bool, trace: &mut Trace) -> Result<Run, String> {
+    let mut module = kernite_lang::parse(src).map_err(|e| e.at(src))?;
+    module.rust = rust;
     let k = module.items.iter().find_map(|item| match &item.kind {
         ItemKind::Fn(f) if f.name == "k" => Some(f),
         _ => None,
@@ -349,6 +382,72 @@ fn the_target_is_told_the_directives_once_before_the_parameters() {
     let named: Vec<String> =
         run.mentions.iter().map(|m| Error { span: m.span, message: m.name.clone() }.at(DIRECTIVES)).collect();
     assert_eq!(named, ["4:11: SIZE", "4:17: SIZE"]);
+}
+
+/// A constant of a module of Rust's, `std::f32::consts::PI`, is Rust's own value, and the kernel names it at its path,
+/// with the value it took, for Rust to say the path gives it: where the path begins, `::` and all. A type's constant,
+/// `u32::MAX`, is none, for Rust has it however it is written, and nor is the same by `core::primitive`'s path. Where
+/// Rust reads the module too, a path without its root is taken: Rust refuses it if it has not, and so is one that goes
+/// on from a primitive's path, `core::primitive::f32::consts::LN_2`, which Rust has never. Where it does not, as in
+/// text, kernite reads no `use`, and refuses the first, and the second is none it knows.
+#[test]
+fn a_constant_of_a_module_of_rusts_is_named_at_its_path_and_a_type_s_is_not() {
+    let mut trace = Trace::default();
+    let ran = run_as(CONSTS, true, &mut trace).unwrap();
+    let want = [
+        "param n: u64 = v0".to_string(),
+        format!("add v0, Int({})", u32::MAX),
+        format!("add v0, F64({:?})", f64::EPSILON),
+        format!("add v0, F32({:?})", std::f32::consts::PI),
+        format!("add v0, F64({:?})", std::f64::consts::E),
+        format!("add v0, F32({:?})", std::f32::consts::TAU),
+        format!("add v0, F32({:?})", std::f32::consts::LN_2),
+        "end".to_string(),
+    ];
+    assert_eq!(trace.lines, want);
+    let named: Vec<String> =
+        ran.mentions.iter().map(|m| Error { span: m.span, message: m.name.clone() }.at(CONSTS)).collect();
+    let paths = [
+        "5:12: std::f32::consts::PI",
+        "6:12: ::core::f64::consts::E",
+        "7:12: f32::consts::TAU",
+        "8:12: core::primitive::f32::consts::LN_2",
+    ];
+    assert_eq!(named, paths);
+    // Each says the value it took.
+    let took: Vec<_> = ran.mentions.iter().map(|m| m.value.clone()).collect();
+    let values = [
+        Value::F32(std::f32::consts::PI),
+        Value::F64(std::f64::consts::E),
+        Value::F32(std::f32::consts::TAU),
+        Value::F32(std::f32::consts::LN_2),
+    ];
+    assert_eq!(took, values.map(Some));
+    // Text is not read by Rust, and its `f32::consts::TAU` is refused, at the path.
+    let refused = run(CONSTS, &mut Trace::default()).unwrap_err();
+    let want = "7:12: `f32::consts::TAU` is Rust's only after `use std::f32;`, which kernite does not read: write \
+                `core::f32::consts::TAU`";
+    assert_eq!(refused, want);
+    // Nor is the path through `core::primitive` a constant it knows, once the first is out of the way.
+    let rooted = CONSTS.replace("f32::consts::TAU", "std::f32::consts::TAU");
+    let refused = run(&rooted, &mut Trace::default()).unwrap_err();
+    assert_eq!(refused, "8:12: `core::primitive::f32::consts::LN_2` is not a constant kernite knows");
+    // Nothing else is wrong with the kernel without those two lines.
+    let both = rooted.replace("    add(n, core::primitive::f32::consts::LN_2);\n", "");
+    assert_eq!(run(&both, &mut Trace::default()).unwrap().mentions.len(), 3);
+}
+
+/// A constant of a module of Rust's that a const names by its path is named too, for Rust to say its path gives the
+/// value taken, where the const is named by the kernel, by another const or not: but for the constants of consts that
+/// no kernel names. A const's own name is no mention of the constants it names, `BITS` of `MORE`: Rust has those.
+#[test]
+fn a_const_names_the_constants_of_a_module_of_rusts_that_its_definition_names() {
+    let ran = run_as(IN_CONSTS, true, &mut Trace::default()).unwrap();
+    let named: Vec<String> =
+        ran.mentions.iter().map(|m| Error { span: m.span, message: m.name.clone() }.at(IN_CONSTS)).collect();
+    assert_eq!(named, ["3:19: std::f32::consts::PI", "4:20: ::core::f32::consts::E", "7:12: MORE"]);
+    let took: Vec<_> = ran.mentions.iter().map(|m| m.value.clone()).collect();
+    assert_eq!(took, [Some(Value::F32(std::f32::consts::PI)), Some(Value::F32(std::f32::consts::E)), None]);
 }
 
 #[test]

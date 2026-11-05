@@ -41,6 +41,8 @@ pub fn module<N: Native, D: Device>(
     native: &N,
     device: &D,
 ) -> ModuleOut {
+    // Rust reads the module too, and says which paths it has.
+    module.rust = true;
     let twice = given.as_ref().map_or_else(Vec::new, |given| take(&mut module, given));
     let before = given.map_or(0, |given| given.before);
     let whose = owner(&module);
@@ -107,7 +109,7 @@ pub fn module<N: Native, D: Device>(
             for args in listed {
                 match compile(m, &n, native, f, &args) {
                     Ok(k) => {
-                        k.mentions.iter().for_each(|at| Mention::record(&mut mentions, &at.name, at.span));
+                        k.mentions.into_iter().for_each(|at| Mention::record(&mut mentions, at));
                         instances.push(NativeInstance { args, naked: native.naked(&k.code), calls: vec![] });
                     }
                     Err(e) => errors.push(e),
@@ -135,7 +137,7 @@ pub fn module<N: Native, D: Device>(
         for args in listed {
             match compile(m, &d, device, f, &args) {
                 Ok(k) => {
-                    k.mentions.iter().for_each(|at| Mention::record(&mut mentions, &at.name, at.span));
+                    k.mentions.into_iter().for_each(|at| Mention::record(&mut mentions, at));
                     compiled.push((args, k.code));
                 }
                 Err(e) => errors.push(e),
@@ -205,10 +207,12 @@ pub enum ConstItem {
 }
 
 /// What each item of `module`, a module of consts, is, in order: each const worked out on its
-/// own, `pub` or not: only its tokens say which, and the macro reads them.
+/// own, `pub` or not: only its tokens say which, and the macro reads them. Rust reads the module
+/// too, as it reads a module of kernels.
 pub fn consts(module: &Module) -> Vec<ConstItem> {
+    let module = Module { rust: true, ..module.clone() };
     let item = |item: &Item| match &item.kind {
-        ItemKind::Const(c) => kernite_lang::constant(module, c).map_or_else(ConstItem::Wrong, |_| ConstItem::Given),
+        ItemKind::Const(c) => kernite_lang::constant(&module, c).map_or_else(ConstItem::Wrong, |_| ConstItem::Given),
         _ => ConstItem::NotAConst,
     };
     module.items.iter().map(item).collect()

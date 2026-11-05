@@ -10,6 +10,10 @@ use crate::token::Span;
 pub struct Module {
     /// Each item.
     pub items: Vec<Item>,
+    /// Whether Rust reads the module as well, as it reads a module of kernels or of consts: it says which paths it
+    /// has, so kernite takes the path of a constant that it has a value for, and Rust refuses one it has not. Else
+    /// kernite reads the module alone, as it reads text, and refuses that path itself.
+    pub rust: bool,
 }
 
 impl Module {

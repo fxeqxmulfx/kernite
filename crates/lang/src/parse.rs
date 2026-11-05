@@ -6,7 +6,7 @@ use crate::ast::{
     BinOp, Block, Const, Cooperative, Directive, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret,
     Static, Stmt, Type, UnOp,
 };
-use crate::token::{Delim, Span, Tree, path, primitive, read_type, text, unraw};
+use crate::token::{Delim, Span, Tree, path, primitive, read_type, root, text, unraw};
 use crate::{Error, nested};
 
 /// A GPU kernel's tuning directives, as PTX has them: each by its name, what it gives, and an
@@ -58,7 +58,7 @@ pub fn read(trees: &[Tree], given: usize) -> (Module, Option<Error>) {
         items.retain(|item| !matches!(item.kind, ItemKind::Static(_)));
     }
     let shared = named_once(&mut items, given);
-    (Module { items }, error.or(shared))
+    (Module { items, rust: false }, error.or(shared))
 }
 
 /// Leaves out of `items` each const, function and static that another has the name of, but for the
@@ -822,7 +822,8 @@ impl<'a> Parser<'a> {
         Ok(ops.into_iter().rev().fold(e, |e, (op, span)| Expr::Unary(op, Box::new(e), span)))
     }
 
-    /// The path that begins with `first`, whose name `span` is at, and goes on by `::`: `u32::MAX`.
+    /// The path that begins with `first`, whose name `span` is at, and goes on by `::`: `u32::MAX`. `first` is empty
+    /// for a path that begins with a `::`, `::core::f32::consts::PI`.
     fn path_from(&mut self, first: &str, span: Span) -> Result<Expr, Error> {
         let mut path = vec![first.to_string()];
         while self.is_op("::") && matches!(self.peek_at(2), Some(Tree::Ident { .. })) {
@@ -834,10 +835,17 @@ impl<'a> Parser<'a> {
 
     fn primary(&mut self) -> Result<Expr, Error> {
         let span = self.span();
-        // A path that begins with a primitive's, `core::primitive::u32::MAX`, is read from the primitive's name.
-        if let Some((name, len)) = primitive(&self.trees[self.pos..]) {
+        // A path that begins with a primitive's, `core::primitive::u32::MAX`, is read from the primitive's name, if it
+        // ends there or with a name more. One that goes on by two, `core::primitive::f32::consts::PI`, is no path of
+        // Rust's, and is read as it is written.
+        let here = &self.trees[self.pos..];
+        if let Some((name, len)) = primitive(here).filter(|&(_, len)| path(here) <= len + 3) {
             self.pos += len;
             return self.path_from(name, span);
+        }
+        // A path from the root of a library with a `::` before it, `::core::f32::consts::PI`, is read whole.
+        if self.is_op("::") && root(&self.trees[self.pos..]).is_some() {
+            return self.path_from("", span);
         }
         let Some(t) = self.bump() else {
             return Err(Error { span, message: "expected an expression, found the end".into() });

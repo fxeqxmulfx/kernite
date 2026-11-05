@@ -22,7 +22,7 @@ use crate::gpu::{HOLE, gpu};
 use crate::room;
 use crate::rust::{
     cfg_of, error, error_under, flatten, for_rust, from_inside, inner_attribute, lex, name_at, parse, position, seen,
-    site, stub,
+    site, stub, takes,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
@@ -120,7 +120,7 @@ pub(crate) fn expand(
     }
     // Where Rust finds a name of the kernel's, as it would find it in the kernel's own body: at the
     // name, with the macro's hygiene, for Rust to resolve it as it resolves what the macro writes.
-    let place = |m: &lang::Mention| at(m.span).resolved_at(site());
+    let place = |s: lang::Span| at(s).resolved_at(site());
     // How each kernel the GPU launches is, and each static of the GPU's, as the host reads it; when
     // each GPU item is there; what shows Rust what each item names; and the errors of a name that `cfg` leaves out.
     let (mut launchers, mut memory, mut on_gpu) = (vec![], vec![], vec![]);
@@ -281,6 +281,15 @@ fn take(made: &ModuleOut, top: &[TokenTree], path: &[TokenTree]) -> TokenStream 
     out
 }
 
+/// `let _ = what;` under `guard`: Rust finds `what` there, and says it cannot if it cannot.
+fn find(guard: TokenStream, what: impl IntoIterator<Item = TokenTree>) -> TokenStream {
+    let mut find = guard;
+    find.extend(parse("let _ ="));
+    find.extend(what);
+    find.extend(parse(";"));
+    find
+}
+
 /// What says, at each place item `i` of `made` names an item of its module, that `cfg` may leave the
 /// item out; `place` is the span of the place. Rust has a name for a const, a static of the process's
 /// and an x86 kernel that takes no compile-time arguments, and finds it where it is written: a
@@ -288,18 +297,28 @@ fn take(made: &ModuleOut, top: &[TokenTree], path: &[TokenTree]) -> TokenStream 
 /// it keeps item `i`; these are the first of the pair this gives back. For any other item kernite says so itself, as
 /// an error where `cfg` keeps item `i` and leaves that one out; these are the second, for they are items of the
 /// module. Both are under the `cfg` of item `i` and of the code that has the place, where item `i` runs it: [`runs`].
+/// A constant of a module of Rust's that item `i` names by its path, `std::f32::consts::PI`, is Rust's to say as well,
+/// in the first of the pair, by [`takes`]: that the path gives the constant kernite took. So is one that a const that
+/// item `i` names has in its definition, where `cfg` keeps the const; but not one in a const that the module is given,
+/// whose path is Rust's where the consts are, in a module that holds nothing to give `std` another meaning.
 fn named(
     made: &ModuleOut,
     conds: &[Cond],
     i: usize,
     top: &[TokenTree],
-    place: &dyn Fn(&lang::Mention) -> Span,
+    place: &dyn Fn(lang::Span) -> Span,
 ) -> (TokenStream, TokenStream) {
     let module = &made.module;
     let (mut names, mut errors) = (TokenStream::new(), TokenStream::new());
     for m in made.items[i].mentions() {
+        let at = module.item_at(m.span);
+        let kept = Cond::all([conds[i].clone(), runs(made, conds, i, at, &[])]);
+        if m.value.is_some() {
+            let given = matches!(made.items[at], ItemOut::Given);
+            names.extend(kept.guard().filter(|_| !given).map(|guard| takes(guard, m, place)));
+            continue;
+        }
         let j = position(module, &m.name);
-        let kept = Cond::all([conds[i].clone(), runs(made, conds, i, module.item_at(m.span), &[])]);
         let rust = match (&module.items[j].kind, &made.items[j]) {
             (_, ItemOut::Rust | ItemOut::Given | ItemOut::HostStatic(_)) => true,
             (ItemKind::Fn(f), ItemOut::Native(_)) => f.generics.is_empty(),
@@ -307,14 +326,11 @@ fn named(
         };
         if rust {
             let Some(guard) = kept.guard() else { continue };
-            names.extend(guard);
-            names.extend(parse("let _ ="));
-            names.extend([name_at(&module.items[j], top, place(m))]);
-            names.extend(parse(";"));
+            names.extend(find(guard, [name_at(&module.items[j], top, place(m.span))]));
         } else if let Some(guard) = Cond::all([kept, conds[j].clone().not()]).guard() {
             let reader = module.items[i].name().expect("an item that names others has a name");
             let message = format!("`{}` is left out by `cfg` where `{reader}`, which names it, is kept", m.name);
-            errors.extend(error_under(&guard, place(m), &message));
+            errors.extend(error_under(&guard, place(m.span), &message));
         }
     }
     (names, errors)
@@ -322,14 +338,19 @@ fn named(
 
 /// The condition under which item `i` of `made` runs the code of item `c`, but for the `cfg` of `i`:
 /// always for its own code, and for a helper's, where `cfg` keeps the helper and `i` runs the code that
-/// calls it, at any place `i` names the helper. `way` holds the items followed back from the place to
-/// `c`: a place in one of them adds nothing, for `i` reaches that item by the places already counted.
-/// So a helper that calls itself, or two that call each other, do not go on without end.
+/// calls it, at any place `i` names the helper. A const's definition is worked out wherever `i` names
+/// the const, by that const or by another: where `cfg` keeps the const. `way` holds the items followed
+/// back from the place to `c`: a place in one of them adds nothing, for `i` reaches that item by the
+/// places already counted. So a helper that calls itself, or two that call each other, do not go on
+/// without end.
 fn runs(made: &ModuleOut, conds: &[Cond], i: usize, c: usize, way: &[usize]) -> Cond {
+    let module = &made.module;
     if c == i {
         return Cond::Always;
     }
-    let module = &made.module;
+    if matches!(module.items[c].kind, ItemKind::Const(_)) {
+        return conds[c].clone();
+    }
     let way = [way, &[c]].concat();
     let calls = made.items[i].mentions().iter().filter(|m| module.items[c].name() == Some(&m.name));
     let callers = calls.map(|m| module.item_at(m.span)).filter(|caller| !way.contains(caller));

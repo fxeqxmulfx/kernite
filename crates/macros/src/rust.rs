@@ -869,6 +869,44 @@ pub(crate) fn error_under(cfg: &TokenStream, span: Span, message: &str) -> Token
     out
 }
 
+/// What has Rust hold the path of `m`, a constant of a module of Rust's, to the value kernite took for it: an item
+/// under `guard` that Rust works out, and that fails if the path gives a float of other bits, as it does where a name
+/// in the path, `std` or `f32`, means another thing in the module. It fails at the place of the path, `at` its first
+/// token. The path's own tokens keep the places the source has them, so that Rust says what it says of any path, at
+/// the name that is wrong, if it finds no constant there, one of another type, or one that is unstable. Each path is an
+/// item of its own: a statement is not worked out beside one that is an error.
+pub(crate) fn takes(guard: TokenStream, m: &lang::Mention, at: &dyn std::ops::Fn(lang::Span) -> Span) -> TokenStream {
+    let (float, bits) = match m.value {
+        Some(Value::F32(x)) => ("f32", u64::from(x.to_bits())),
+        Some(Value::F64(x)) => ("f64", x.to_bits()),
+        _ => unreachable!("kernite takes a float for the path of a constant of a module of Rust's"),
+    };
+    let place = at(m.span);
+    let path = (m.span.0..).zip(parse(&m.name)).map(|(i, mut t)| {
+        t.set_span(at(lang::Span(i)));
+        t
+    });
+    let (_, name) = m.name.rsplit_once("::").expect("a constant of a module is named by a path");
+    let message = format!(
+        "`{}` is not Rust's constant, which kernite takes, with the bits {bits:#x}: a name in the path means another \
+         thing in this module; write `::core::{float}::consts::{name}`",
+        m.name
+    );
+    let paren = |inside: TokenStream| {
+        let mut group = Group::new(Delimiter::Parenthesis, inside);
+        group.set_span(place);
+        TokenTree::Group(group)
+    };
+    let mut args = respan(parse(&format!("::core::primitive::{float}::to_bits")), place);
+    args.extend([paren(path.collect())]);
+    args.extend(respan(parse(&format!("== {bits:#x}, {message:?}")), place));
+    let mut out = guard;
+    out.extend(respan(parse("const _: () = ::core::assert!"), place));
+    out.extend([paren(args)]);
+    out.extend(respan(parse(";"), place));
+    out
+}
+
 /// Whether `tokens` begin with the tokens of [`ERROR`], whatever follows them.
 pub(crate) fn is_error(tokens: &[TokenTree]) -> bool {
     let path: Vec<String> = parse(ERROR).into_iter().map(|t| t.to_string()).collect();
@@ -1125,7 +1163,7 @@ pub(crate) fn site() -> Span {
 }
 
 /// `tokens`, each of the span `span`.
-fn respan(tokens: TokenStream, span: Span) -> TokenStream {
+pub(crate) fn respan(tokens: TokenStream, span: Span) -> TokenStream {
     tokens
         .into_iter()
         .map(|t| match t {

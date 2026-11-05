@@ -293,7 +293,7 @@ pub mod kernels {
     fn exp(x: ymm) {
         vmaxps(x, x, [[-87.0; 8]]);
         let (k, p): (ymm, ymm);
-        vmulps(k, x, [[f32::consts::LOG2_E; 8]]);
+        vmulps(k, x, [[std::f32::consts::LOG2_E; 8]]);
         vroundps(k, k, 0x08);
         vfnmadd231ps(x, k, [[LN2_HI; 8]]);
         vfnmadd231ps(x, k, [[LN2_LO; 8]]);

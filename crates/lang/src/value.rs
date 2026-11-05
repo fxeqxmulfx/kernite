@@ -612,8 +612,42 @@ pub fn method(recv: &Value, name: &str, args: &[Value]) -> Result<Value, String>
     }
 }
 
-/// The constants named by paths: `f32::INFINITY`, `u32::MAX`, `bf16::MAX`.
-pub fn path(p: &str) -> Option<Value> {
+macro_rules! rust_consts {
+    ($($name:ident),*) => {
+        &[$((stringify!($name), std::f32::consts::$name, std::f64::consts::$name)),*]
+    };
+}
+
+/// The constants of `core::f32::consts` and `core::f64::consts` that Rust has stable, by name, each with the value of
+/// Rust's own constant of `f32` and of `f64`, bit for bit.
+const CONSTS: &[(&str, f32, f64)] = rust_consts! {
+    PI, TAU, E, EULER_GAMMA, GOLDEN_RATIO, FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, FRAC_PI_6, FRAC_PI_8, FRAC_1_PI, FRAC_2_PI,
+    FRAC_2_SQRT_PI, SQRT_2, FRAC_1_SQRT_2, LN_2, LN_10, LOG2_E, LOG10_E, LOG2_10, LOG10_2
+};
+
+/// The six that the two modules have unstable, `more_float_constants`, which stable Rust refuses and cannot give a
+/// value to take: the values that Rust's nightly gives them, bit for bit.
+const UNSTABLE_CONSTS: &[(&str, f32, f64)] = &[
+    ("SQRT_3", 1.7320508, 1.7320508075688772),
+    ("SQRT_5", 2.236068, 2.23606797749979),
+    ("FRAC_1_SQRT_2PI", 0.3989423, 0.3989422804014327),
+    ("FRAC_1_SQRT_3", 0.57735026, 0.5773502691896257),
+    ("FRAC_1_SQRT_5", 0.4472136, 0.4472135954999579),
+    ("FRAC_1_SQRT_PI", 0.5641896, 0.5641895835477563),
+];
+
+/// The constant `name` of `core::f32::consts` or of `core::f64::consts`, as `ty` says.
+fn consts(ty: &str, name: &str) -> Option<Value> {
+    let &(_, single, double) = CONSTS.iter().chain(UNSTABLE_CONSTS).find(|(n, ..)| *n == name)?;
+    match ty {
+        "f32" => Some(Value::F32(single)),
+        "f64" => Some(Value::F64(double)),
+        _ => None,
+    }
+}
+
+/// The constants of a type, named by a path: `f32::INFINITY`, `u32::MAX`, `bf16::MAX`.
+fn associated(p: &str) -> Option<Value> {
     Some(match p {
         "f32::INFINITY" => Value::F32(f32::INFINITY),
         "f32::NEG_INFINITY" => Value::F32(f32::NEG_INFINITY),
@@ -625,6 +659,8 @@ pub fn path(p: &str) -> Option<Value> {
         "f64::NEG_INFINITY" => Value::F64(f64::NEG_INFINITY),
         "f64::MAX" => Value::F64(f64::MAX),
         "f64::MIN" => Value::F64(f64::MIN),
+        "f64::MIN_POSITIVE" => Value::F64(f64::MIN_POSITIVE),
+        "f64::EPSILON" => Value::F64(f64::EPSILON),
         "f16::INFINITY" => Value::F16(0x7c00),
         "f16::NEG_INFINITY" => Value::F16(0xfc00),
         "f16::MAX" => Value::F16(0x7bff),
@@ -637,14 +673,6 @@ pub fn path(p: &str) -> Option<Value> {
         "bf16::MIN" => Value::Bf16(0xff7f),
         "bf16::MIN_POSITIVE" => Value::Bf16(0x0080),
         "bf16::EPSILON" => Value::Bf16(0x3c00),
-        "f32::consts::LN_2" => Value::F32(std::f32::consts::LN_2),
-        "f32::consts::LOG2_E" => Value::F32(std::f32::consts::LOG2_E),
-        "f32::consts::PI" => Value::F32(std::f32::consts::PI),
-        "f32::consts::E" => Value::F32(std::f32::consts::E),
-        "f64::consts::LN_2" => Value::F64(std::f64::consts::LN_2),
-        "f64::consts::LOG2_E" => Value::F64(std::f64::consts::LOG2_E),
-        "f64::consts::PI" => Value::F64(std::f64::consts::PI),
-        "f64::consts::E" => Value::F64(std::f64::consts::E),
         _ => {
             let (ty, which) = p.split_once("::")?;
             let t = IntTy::parse(ty)?;
@@ -657,6 +685,34 @@ pub fn path(p: &str) -> Option<Value> {
             }
         }
     })
+}
+
+/// The constant that the path `p` names, as it is written: a type's, `u32::MAX`, `f64::EPSILON` or `bf16::MAX`; or one
+/// of `core::f32::consts` or `core::f64::consts`, from `core` or `std` with a `::` before or not,
+/// `std::f32::consts::LOG2_E`. A path without the root, `f32::consts::LOG2_E`, is Rust's after a `use std::f32;`, and
+/// one that goes on from a primitive's path, `core::primitive::f32::consts::LOG2_E`, is Rust's never: where `rust` says
+/// that Rust reads the path too, kernite takes either, for Rust to refuse it if it has not; else kernite reads no
+/// `use`, and refuses the first, and the second is none it knows. Or why `p` names none.
+pub fn path(p: &str, rust: bool) -> Result<Value, String> {
+    let names: Vec<&str> = p.split("::").collect();
+    let found = match names[..] {
+        [_, _] => associated(p),
+        ["core" | "std", ty, "consts", name] | ["", "core" | "std", ty, "consts", name] => consts(ty, name),
+        ["core" | "std", "primitive", ty, "consts", name] | ["", "core" | "std", "primitive", ty, "consts", name] => {
+            consts(ty, name).filter(|_| rust)
+        }
+        [ty, "consts", name] => {
+            let found = consts(ty, name);
+            if found.is_some() && !rust {
+                return Err(format!(
+                    "`{p}` is Rust's only after `use std::{ty};`, which kernite does not read: write `core::{p}`"
+                ));
+            }
+            found
+        }
+        _ => None,
+    };
+    found.ok_or_else(|| format!("`{p}` is not a constant kernite knows"))
 }
 
 /// A value as little-endian bytes, the way data in memory holds it. Integers without a type

@@ -2,7 +2,9 @@
 //! that does not: the Rust the macros write names the primitives by their paths, `::core::primitive::u8`,
 //! and each kernel's own types here are written so. A GPU module that takes `u8`, a cooperative GPU
 //! kernel in one that takes `u32`, an x86 module that takes `str`, and modules of statics that take
-//! every number's name and `str`, on x86 and on a GPU. Rust builds each without a word.
+//! every number's name and `str`, on x86 and on a GPU; and modules whose kernels name the constants of the
+//! numbers they give other types: a number's own, `u32::MAX`, which Rust is not asked of, and a module's,
+//! `std::f32::consts::PI`, which it is. Rust builds each without a word.
 
 #![deny(warnings)]
 #![allow(non_camel_case_types)]
@@ -104,5 +106,48 @@ pub mod gpu_statics {
         mov.u64(at, COUNTS);
         mov.u64(at, HALVES);
         mov.u64(at, BYTES);
+    }
+}
+
+/// An x86 module that takes every name and names constants: a number's own, by its name and by its path, and a
+/// module's.
+#[kernite_macros::kernels]
+pub mod cpu_constants {
+    #[allow(unused_imports)]
+    use crate::alias::*;
+
+    pub unsafe extern "sysv64" fn k(x: core::primitive::u64) -> core::primitive::u64 {
+        add(x, u8::MAX);
+        add(x, ::std::primitive::u16::MAX);
+        add(x, i8::MIN);
+        add(x, u64::BITS);
+        let g: gpr;
+        mov(g, core::primitive::u32::MAX);
+        add(x, g);
+        let v: ymm;
+        vmovups(v, [[f32::INFINITY; 8]]);
+        vmovups(v, [[core::primitive::f32::EPSILON; 8]]);
+        vmovups(v, [[std::f32::consts::PI; 8]]);
+        vmovups(v, [[::core::f32::consts::E; 8]]);
+        ret(x);
+    }
+}
+
+/// A GPU module that takes every name and names constants, as `cpu_constants` does.
+#[kernite_macros::kernels]
+pub mod gpu_constants {
+    #[allow(unused_imports)]
+    use crate::alias::*;
+
+    pub unsafe extern "ptx-kernel" fn k(p: *mut core::primitive::u32) {
+        let v: core::primitive::u32;
+        let x: core::primitive::f32;
+        mov.u32(v, u32::MAX);
+        add.u32(v, v, core::primitive::u8::MAX);
+        mov.f32(x, f32::MAX);
+        mov.f32(x, ::std::primitive::f32::MIN_POSITIVE);
+        mov.f32(x, std::f32::consts::LOG2_E);
+        mov.f32(x, ::core::f32::consts::LN_2);
+        st.global.u32([p], v);
     }
 }

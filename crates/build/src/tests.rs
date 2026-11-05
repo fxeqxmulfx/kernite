@@ -1350,6 +1350,18 @@ fn a_call_to_a_function_with_instances_it_cannot_have_names_it_whole() {
     assert_eq!(k.instances[0].calls, [Call { function: "g".into(), instance: None }]);
 }
 
+/// What `consts` says each item of `src`, a module of consts, is, in order: `given`, `not a const`, or why it is wrong.
+fn consts_said(src: &str) -> Vec<String> {
+    consts(&parse(src).unwrap())
+        .iter()
+        .map(|item| match item {
+            ConstItem::Given => "given".to_string(),
+            ConstItem::Wrong(e) => e.at(src),
+            ConstItem::NotAConst => "not a const".to_string(),
+        })
+        .collect()
+}
+
 /// Each item of a module of consts is a const known now, a const that is not, with why, or no
 /// const; a const is worked out on its own, `pub` or not, whichever of the consts it reads comes
 /// first.
@@ -1362,14 +1374,17 @@ fn a_module_of_consts_says_what_each_of_its_items_is() {
                pub const D: u64 = E + 1;\n\
                const E: u64 = 4;\n\
                pub const fn double(x: u64) -> u64 { 2 * x }";
-    let said: Vec<String> = consts(&parse(src).unwrap())
-        .iter()
-        .map(|item| match item {
-            ConstItem::Given => "given".to_string(),
-            ConstItem::Wrong(e) => e.at(src),
-            ConstItem::NotAConst => "not a const".to_string(),
-        })
-        .collect();
     let call = "4:20: a call is a statement: an instruction or a helper, not a value";
-    assert_eq!(said, ["not a const", "given", "given", call, "given", "given", "not a const"]);
+    assert_eq!(consts_said(src), ["not a const", "given", "given", call, "given", "given", "not a const"]);
+}
+
+/// Rust reads a module of consts as it reads a module of kernels, so a const that names a constant by a path Rust
+/// refuses, one without its root or through the primitive, is a const known now, for Rust to say what is wrong with
+/// the path; kernite refuses the path itself where it names no constant it knows.
+#[test]
+fn a_module_of_consts_takes_the_paths_rust_refuses_as_a_module_of_kernels_does() {
+    let src = "pub const A: u64 = f32::consts::LOG2_E.to_bits() as u64;\n\
+               pub const B: u64 = core::primitive::f32::consts::PI.to_bits() as u64;\n\
+               pub const C: u64 = std::f32::consts::NOPE.to_bits() as u64;";
+    assert_eq!(consts_said(src), ["given", "given", "3:20: `std::f32::consts::NOPE` is not a constant kernite knows"]);
 }

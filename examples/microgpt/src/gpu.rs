@@ -285,7 +285,7 @@ pub mod kernels {
             mov.f32(x, -87.0);
         }
         let (k, nk, p, two): (f32, f32, f32, f32);
-        mul.rn.f32(k, x, f32::consts::LOG2_E);
+        mul.rn.f32(k, x, std::f32::consts::LOG2_E);
         cvt.rni.f32.f32(k, k);
         neg.f32(nk, k);
         fma.rn.f32(x, nk, LN2_HI, x);
