@@ -12,3 +12,15 @@ struct KerniteBuild;
 #[cfg(doctest)]
 #[doc = include_str!("../../../crates/kernite/README.md")]
 struct Kernite;
+
+#[cfg(doctest)]
+#[doc = include_str!("../../../crates/macros/README.md")]
+struct KerniteMacros;
+
+#[cfg(doctest)]
+#[doc = include_str!("../../../crates/cuda/README.md")]
+struct KerniteCuda;
+
+#[cfg(doctest)]
+#[doc = include_str!("../../../crates/cpu/README.md")]
+struct KerniteCpu;
