@@ -10,6 +10,10 @@ struct KerniteCore;
 struct KerniteLang;
 
 #[cfg(doctest)]
+#[doc = include_str!("../../../crates/compile/README.md")]
+struct KerniteCompile;
+
+#[cfg(doctest)]
 #[doc = include_str!("../../../crates/build/README.md")]
 struct KerniteBuild;
 
