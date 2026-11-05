@@ -2,6 +2,10 @@
 //! user's is: `cargo test -p readmes --doc`.
 
 #[cfg(doctest)]
+#[doc = include_str!("../../../crates/core/README.md")]
+struct KerniteCore;
+
+#[cfg(doctest)]
 #[doc = include_str!("../../../crates/lang/README.md")]
 struct KerniteLang;
 
