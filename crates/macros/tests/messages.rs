@@ -4016,6 +4016,37 @@ fn an_attribute_written_raw_is_wrong_as_the_plain_one_is() {
     refuses("raw_attributes_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
+/// A name Rust refuses written raw, `r#self`, `r#Self`, `r#super`, `r#crate` or `r#_`, is Rust's error in a module of
+/// kernels, at each place it is written, in Rust's words, "`self` cannot be a raw identifier". Rust reads the name
+/// before the macros run, and kernite says nothing. So it is for a variable, which the macros hand to kernite alone,
+/// and for `*const r#super::Foo` and `*const r#Self`, where Rust adds what it says of them in plain Rust: that it
+/// cannot find the type. An `r#` that no name follows, a parameter's, is the error of Rust's lexer, "found invalid
+/// character; only `#` is allowed in raw string delimitation", which stops the crate.
+#[test]
+fn a_name_rust_refuses_raw_is_rusts_error_in_a_module_of_kernels() {
+    let raw = |place: &str, name: &str| format!("src/lib.rs:{place}: error: `{name}` cannot be a raw identifier");
+    let mut said = vec![];
+    // A variable's kernel writes its name on three lines at one column: the `let`, the `mov` and the `ret`.
+    for (name, line) in [("self", 8), ("Self", 14), ("super", 20), ("crate", 26), ("_", 32)] {
+        said.extend((line..line + 3).map(|line| raw(&format!("{line}:13"), name)));
+    }
+    said.extend([raw("40:52", "super"), raw("40:76", "super"), raw("44:56", "Self"), raw("44:74", "Self")]);
+    let no_foo = "error[E0425]: cannot find type `Foo` in module `super`: not found in `super`";
+    let no_self = "error[E0411]: cannot find type `Self` in this scope: `Self` is only available in impls, traits, and \
+                   type definitions";
+    said.extend(["40:61", "40:85"].map(|place| format!("src/lib.rs:{place}: {no_foo}")));
+    said.extend(["44:56", "44:74"].map(|place| format!("src/lib.rs:{place}: {no_self}")));
+    said.push(format!("error: could not compile `raw_names_refused` (lib) due to {} previous errors", said.len()));
+    refuses("raw_names_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses(
+        "raw_alone_refused",
+        &[
+            "src/lib.rs:5:45: error: found invalid character; only `#` is allowed in raw string delimitation: :",
+            "error: could not compile `raw_alone_refused` (lib) due to 1 previous error",
+        ],
+    );
+}
+
 /// The method that says how many blocks a cooperative GPU kernel's grid has at most, `k_blocks`,
 /// keeps what the kernel says of lints by giving Rust nothing of the kernel's to lint: its name and
 /// the compile-time arguments it takes are of the macro's span. Of the kernel's attributes it keeps

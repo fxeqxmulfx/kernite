@@ -181,6 +181,13 @@ PTX, of the one written plain. An attribute written raw is wrong as the plain on
 words, at its name, which starts at the same `line:column`, and Rust adds none of its own. So `#[r#maxnctapersm(..)]`
 is refused as `#[maxnctapersm(..)]` is.
 
+Five names cannot be written raw, as in Rust: `self`, `Self`, `super`, `crate` and `_`. In a module of kernels Rust
+refuses one written so at each place, in its own words, "`self` cannot be a raw identifier", and an `r#` that no name
+follows as well. kernite refuses each where it reads a module from text, as `kernite::x86_str` and `kernite::ptx_str`
+do: at its `r#`, "`self` cannot be written raw" and "`r#` comes before a name, as in `r#u64`", wherever a name is
+written, an attribute's too. Any other name can be written raw, a weak keyword or a reserved word as well, `r#union` and
+`r#gen`.
+
 A macro's fragment is one operand, or one type, wherever kernite reads it, as Rust reads it. With `$n:expr` as `1 + 2`,
 `$n * 2` is 6, and not the 5 that `1 + 2 * 2` is. It is so in a kernel's expression, on x86 and on a GPU, under a `-`,
 in the length of an array, in `#[instances(..)]`, and in a const, which is 6 to Rust too. A `$t:ty` is one type in a

@@ -15,6 +15,32 @@ fn the_lexer_reads_what_rust_writes() {
     assert_eq!(crate::text(&trees), r#"a.b(0..n, 1.5e-3, 0x1F_u8, r#type, "s\"q", 1..=2)"#);
 }
 
+/// The lexer refuses a name written raw that Rust refuses, at its `r#`: `self`, `Self`, `super`, `crate` and `_`, which
+/// Rust lets be written raw in no place, and an `r#` that no name follows. Every other name written raw is one name,
+/// whatever it starts as or is: a keyword, a weak one, a reserved one, or one that has `self` or `crate` in it.
+#[test]
+fn the_lexer_refuses_a_name_written_raw_that_rust_refuses() {
+    let error = |src: &str| crate::lex(src).unwrap_err().at(src);
+    for name in ["self", "Self", "super", "crate", "_"] {
+        let src = format!("a r#{name} b");
+        assert_eq!(error(&src), format!("1:3: `{name}` cannot be written raw"), "{src}");
+    }
+    // No name after the `r#`: a space, the end, a bracket, a dot, a digit or a quote.
+    for src in ["a r# b", "a r#", "a r#(b)", "a r#.b", "a r#9", "a r#1x", "a r#\"x\""] {
+        assert_eq!(error(src), "1:3: `r#` comes before a name, as in `r#u64`", "{src}");
+    }
+    let names = "r#u64 r#dyn r#union r#gen r#try r#_x r#__ r#selfie r#crate_ r#é self Self super crate _";
+    let idents: Vec<String> = crate::lex(names)
+        .unwrap()
+        .into_iter()
+        .map(|tree| match tree {
+            Tree::Ident { name, .. } => name,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(idents, names.split(' ').collect::<Vec<_>>());
+}
+
 /// The tokens of `src`, a source with lifetimes in it, as `for<'a> fn(&'a u8)` has. The lexer of a
 /// string refuses a lifetime, but the macro is given one as `proc_macro` hands it over: a `'` right before
 /// the name that follows it. So each `'` of `src` is lexed as the start of a word, `lt_a`, which is then

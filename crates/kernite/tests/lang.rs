@@ -28,6 +28,15 @@ fn refused(body: &str) -> String {
     kernite::x86_str(&kernel(body), "k").unwrap_err()
 }
 
+/// What `src` compiles to, or why it does not: for x86, the listing of kernel `name`; for a GPU, which `src` says by
+/// `ptx-kernel`, the PTX of all of it.
+fn compile(src: &str, name: &str) -> Result<String, String> {
+    match src.contains("ptx-kernel") {
+        true => kernite::ptx_str(src),
+        false => kernite::x86_str(src, name).map(|listing| listing.text()),
+    }
+}
+
 #[test]
 fn a_kernel_runs_its_helpers_in_place() {
     let src = r#"
@@ -263,10 +272,7 @@ fn an_error_quotes_a_type_written_raw_as_rust_reads_it() {
         (r#"unsafe extern "ptx-kernel" fn k() -> *const [f32; 2] {}"#, "f32", "1:38", gpu_nothing),
         (r#"unsafe extern "ptx-kernel" fn k() { let v: f128; }"#, "f128", "1:44", gpu_variable),
     ] {
-        let err = |src: &str| match src.contains("ptx-kernel") {
-            true => kernite::ptx_str(src).unwrap_err(),
-            false => kernite::x86_str(src, "k").unwrap_err(),
-        };
+        let err = |src: &str| compile(src, "k").unwrap_err();
         let written = raw(plain, &[name]);
         assert_ne!(written, plain);
         assert_eq!(err(plain), format!("{at}: {said}"), "{plain}");
@@ -376,11 +382,7 @@ fn an_error_quotes_a_keyword_written_raw_as_written() {
         (r#"unsafe extern "ptx-kernel" fn k(p: *const [r#mut]) {}"#, "1:36", words("[r#mut]")),
         (r#"unsafe extern "ptx-kernel" fn k(p: *const r#str) {}"#, "1:36", words("str")),
     ] {
-        let err = match src.contains("ptx-kernel") {
-            true => kernite::ptx_str(src).unwrap_err(),
-            false => kernite::x86_str(src, "k").unwrap_err(),
-        };
-        assert_eq!(err, format!("{at}: {said}"), "{src}");
+        assert_eq!(compile(src, "k").unwrap_err(), format!("{at}: {said}"), "{src}");
     }
 }
 
@@ -540,6 +542,83 @@ fn an_attribute_written_raw_is_wrong_as_the_plain_one_is() {
         assert_ne!(written, src);
         for src in [&src, &written] {
             assert_eq!(kernite::ptx_str(src).unwrap_err(), want, "{src}");
+        }
+    }
+}
+
+/// The places a name is written, a kernel for each, `NAME` where the name goes, and the kernel to ask of it: a kernel's
+/// name, a parameter's, a variable's, a type, and the start of a type's path, for x86 and then for a GPU. Each is one
+/// line, so the column of an error at its first `r#` is where that `r#` stands, and each compiles with a plain name
+/// for `NAME`.
+const PLACES: [(&str, &str); 10] = [
+    (r#"unsafe extern "sysv64" fn NAME(x: u64) -> u64 { ret(x); }"#, "NAME"),
+    (r#"unsafe extern "sysv64" fn k(NAME: u64) -> u64 { ret(NAME); }"#, "k"),
+    (r#"unsafe extern "sysv64" fn k(x: u64) -> u64 { let NAME: gpr; mov(NAME, x); ret(NAME); }"#, "k"),
+    (r#"unsafe extern "sysv64" fn k(p: *const NAME) -> *const NAME { ret(p); }"#, "k"),
+    (r#"unsafe extern "sysv64" fn k(p: *const NAME::Foo) -> *const NAME::Foo { ret(p); }"#, "k"),
+    (r#"unsafe extern "ptx-kernel" fn NAME(p: *mut u64) { st.global.u64([p], 1); }"#, "NAME"),
+    (r#"unsafe extern "ptx-kernel" fn k(NAME: *mut u64) { st.global.u64([NAME], 1); }"#, "k"),
+    (
+        r#"unsafe extern "ptx-kernel" fn k(p: *mut u8) { let NAME: u64; mov.u64(NAME, 1); st.global.u64([p], NAME); }"#,
+        "k",
+    ),
+    (r#"unsafe extern "ptx-kernel" fn k(p: *mut NAME) { st.global.u64([p], 1); }"#, "k"),
+    (r#"unsafe extern "ptx-kernel" fn k(p: *mut NAME::Foo) { st.global.u64([p], 1); }"#, "k"),
+];
+
+/// An attribute's name, one more place a name is written, on x86 and then on a GPU, as `PLACES` has them. No name that
+/// `PLACES` takes is an attribute of kernite's, so these are for the refusals alone.
+const ATTRIBUTE_PLACES: [&str; 2] =
+    [r#"#[NAME] unsafe extern "sysv64" fn k() {}"#, r#"#[NAME(256)] unsafe extern "ptx-kernel" fn k() {}"#];
+
+/// The sources that have `NAME` in a place where a name is written: those of `PLACES`, and an attribute's.
+fn places() -> impl Iterator<Item = &'static str> {
+    PLACES.iter().map(|&(place, _)| place).chain(ATTRIBUTE_PLACES)
+}
+
+/// Five names Rust lets be written raw in no place, `self`, `Self`, `super`, `crate` and `_`, are refused at their `r#`
+/// wherever a name is written: a kernel's, a parameter's, a variable's, an attribute's, a type, and the start of a
+/// type's path, on x86 and on a GPU. The error says the name as Rust reads it.
+#[test]
+fn a_name_rust_lets_be_written_raw_in_no_place_is_refused_at_its_r() {
+    for name in ["self", "Self", "super", "crate", "_"] {
+        for place in places() {
+            let src = place.replace("NAME", &format!("r#{name}"));
+            let at = src.find("r#").expect("a raw name") + 1;
+            assert_eq!(compile(&src, "k"), Err(format!("1:{at}: `{name}` cannot be written raw")), "{src}");
+        }
+    }
+}
+
+/// An `r#` that no name follows is refused at the `r#`, wherever a name is written, whether a bracket, a colon, a
+/// dot or a `#` comes after it, or a space, a digit or a quote: none of these starts a name.
+#[test]
+fn an_r_that_no_name_follows_is_refused_at_its_r() {
+    let said = "`r#` comes before a name, as in `r#u64`";
+    let mut sources: Vec<String> = places().map(|place| place.replace("NAME", "r#")).collect();
+    for after in [" x", "9", "9x", "\"x\"", ".x", "#x"] {
+        sources.push(format!(r#"unsafe extern "sysv64" fn k(r#{after}: u64) -> u64 {{ ret(x); }}"#));
+    }
+    for src in sources {
+        let at = src.find("r#").expect("a raw name") + 1;
+        assert_eq!(compile(&src, "k"), Err(format!("1:{at}: {said}")), "{src}");
+    }
+}
+
+/// Every other name written raw is a name wherever one is written: `r#u64`, a type's; `r#dyn`, a keyword; `r#union`, a
+/// weak one; and `r#gen` and `r#try`, reserved words. A kernel with one compiles to what the kernel with `xxx` in its
+/// place compiles to, with the name where `xxx` was, on x86 and on a GPU.
+#[test]
+fn every_other_name_written_raw_is_a_name_wherever_a_name_is_written() {
+    for name in ["u64", "dyn", "union", "gen", "try"] {
+        let plain = "x".repeat(name.len());
+        for (place, kernel) in PLACES {
+            let compiles = |written: &str| {
+                let src = place.replace("NAME", written);
+                let kernel = kernel.replace("NAME", written.trim_start_matches("r#"));
+                compile(&src, &kernel).unwrap_or_else(|e| panic!("{e}\n{src}"))
+            };
+            assert_eq!(compiles(&format!("r#{name}")), compiles(&plain).replace(&plain, name), "{place}");
         }
     }
 }

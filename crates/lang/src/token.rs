@@ -106,6 +106,9 @@ const KEYWORDS: &[&str] = &[
     "virtual", "yield", // reserved
 ];
 
+/// The names Rust lets be written raw in no place: `r#self` and `r#_` are errors.
+const NEVER_RAW: &[&str] = &["self", "Self", "super", "crate", "_"];
+
 /// The types of `core::primitive`, which Rust names by a path as well as by a name: `core::primitive::u64`.
 const PRIMITIVES: [&str; 17] = [
     "bool", "char", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64", "u128",
@@ -381,8 +384,14 @@ fn last_field(mut fields: &[Tree]) -> &[Tree] {
 /// The characters that are punctuation.
 const PUNCT: &str = "+-*/%^!&|=<>@.,;:#$?~";
 
+/// Whether a name can start with `c`.
+fn starts_name(c: char) -> bool {
+    c == '_' || c.is_alphabetic()
+}
+
 /// The tokens of `src`, each spanned by its byte offset, and each with whether a space, a line break or a
-/// comment comes before it. Comments are skipped, doc comments too.
+/// comment comes before it. Comments are skipped, doc comments too. A name written raw that Rust refuses,
+/// `r#self` say, is an error at its `r#`, and so is an `r#` that no name follows.
 pub fn lex(src: &str) -> Result<Vec<Tree>, Error> {
     Lexer { src, pos: 0 }.trees(None, 0).map(|(trees, _)| trees)
 }
@@ -446,13 +455,24 @@ impl Lexer<'_> {
                 '"' => out.push(Tree::Lit { text: self.string()?, space, span }),
                 '\'' => out.push(Tree::Lit { text: self.char()?, space, span }),
                 c if c.is_ascii_digit() => out.push(Tree::Lit { text: self.number(), space, span }),
-                c if c == '_' || c.is_alphabetic() => {
+                c if starts_name(c) => {
                     let start = self.pos;
-                    if self.src[start..].starts_with("r#") {
+                    let raw = self.src[start..].starts_with("r#");
+                    if raw {
                         self.pos += 2;
                     }
+                    let from = self.pos;
                     while let Some(c) = self.peek().filter(|&c| c == '_' || c.is_alphanumeric()) {
                         self.pos += c.len_utf8();
+                    }
+                    if raw {
+                        let word = &self.src[from..self.pos];
+                        if !word.starts_with(starts_name) {
+                            return Err(Error { span, message: "`r#` comes before a name, as in `r#u64`".into() });
+                        }
+                        if NEVER_RAW.contains(&word) {
+                            return Err(Error { span, message: format!("`{word}` cannot be written raw") });
+                        }
                     }
                     out.push(Tree::Ident { name: self.src[start..self.pos].to_string(), space, span });
                 }
