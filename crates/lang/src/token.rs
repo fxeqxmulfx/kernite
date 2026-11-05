@@ -17,6 +17,9 @@ pub enum Delim {
     Bracket,
     /// `{ }`.
     Brace,
+    /// No brackets: the tokens of a macro's fragment, `1 + 2` in `$n * 2`, which are one operand or
+    /// one type, as brackets make them. They are written with nothing round them.
+    None,
 }
 
 /// A token, or a group of them in brackets. Each says whether the source has a space before it, for
@@ -53,7 +56,7 @@ pub enum Tree {
     },
     /// Tokens in brackets.
     Group {
-        /// The brackets.
+        /// The brackets, or none.
         delim: Delim,
         /// What is inside.
         trees: Vec<Tree>,
@@ -61,7 +64,7 @@ pub enum Tree {
         space: bool,
         /// Whether the source has a space before the closing bracket.
         space_close: bool,
-        /// Where it opens.
+        /// Where it opens, or, with no brackets, where its first token is.
         span: Span,
     },
 }
@@ -85,6 +88,99 @@ impl Tree {
             | Tree::Group { space, .. } => *space,
         }
     }
+}
+
+/// The name Rust reads in `ident`, an identifier as written: `u64` in `r#u64`. A keyword is asked of `ident` as
+/// written, for `r#let` is a name and not `let`; any other name, of what this gives.
+pub fn unraw(ident: &str) -> &str {
+    ident.strip_prefix("r#").unwrap_or(ident)
+}
+
+/// The keywords Rust lets be written raw, the strict and the reserved ones of every edition: each is a name only if it
+/// is written raw. The weak ones, `union` and `macro_rules` say, are names as they are.
+const KEYWORDS: &[&str] = &[
+    "as", "async", "await", "break", "const", "continue", "dyn", "else", "enum", "extern", "false", "fn", "for", "if",
+    "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "static", "struct", "trait",
+    "true", "type", "unsafe", "use", "where", "while", // strict
+    "abstract", "become", "box", "do", "final", "gen", "macro", "override", "priv", "try", "typeof", "unsized",
+    "virtual", "yield", // reserved
+];
+
+/// The types of `core::primitive`, which Rust names by a path as well as by a name: `core::primitive::u64`.
+const PRIMITIVES: [&str; 17] = [
+    "bool", "char", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64", "u128",
+    "usize",
+];
+
+/// How many of `trees`, from the first, are a path, `a::b` or `::a::b`; none if they do not begin with a name or a
+/// `::` and a name. The keywords that a type or a bound follows, `mut` of `*mut a::B`, are no names of a path.
+pub(crate) fn path(trees: &[Tree]) -> usize {
+    let name = |i: usize| matches!(trees.get(i), Some(Tree::Ident { name, .. }) if !keyword(name));
+    let (mut end, mut last) = (if colons(trees, 0) { 2 } else { 0 }, 0);
+    while name(end) {
+        end += 1;
+        last = end;
+        if !colons(trees, end) {
+            break;
+        }
+        end += 2;
+    }
+    last
+}
+
+/// The primitive that `trees` begin with the path of, and how many of them are that path, 7, or 9 with a `::` before
+/// them: `u64` for `core::primitive::u64`, `::core::primitive::u64`, `std::primitive::u64` or `::std::primitive::u64`,
+/// each name written raw or not, as Rust reads them; and for a path that goes on from there,
+/// `core::primitive::u64::MAX`. `trees` that begin with another path, `my::core::primitive::u64`, or with one that
+/// names no type of `core::primitive`, `core::primitive::f16`, begin with the path of none.
+pub(crate) fn primitive(trees: &[Tree]) -> Option<(&'static str, usize)> {
+    // Three names and the two `::` between them are seven trees, and nine with the `::` before them.
+    let len = if colons(trees, 0) { 9 } else { 7 };
+    let written = text(trees.get(..len)?);
+    let names: Vec<&str> = written.strip_prefix("::").unwrap_or(&written).split("::").map(unraw).collect();
+    match names[..] {
+        ["core" | "std", "primitive", name] => PRIMITIVES.into_iter().find(|p| *p == name).map(|p| (p, len)),
+        _ => None,
+    }
+}
+
+/// `trees` as the language reads a type: [`text`], but with each name written raw, at any depth, as the name Rust
+/// reads, `[r#f16; 4]` as `[f16; 4]`, and each path that is a primitive's, `core::primitive::u64`, at any depth, as
+/// the primitive's name, `u64`, whichever names of it are written raw, `::core::primitive::r#u64` too. A path that
+/// goes on from a primitive's, `core::primitive::u64::MAX`, and any other path stay paths, but for the names
+/// written raw in them. A lifetime's name begins no path: `&'static ::core::primitive::u8` is `&'static u8`. A
+/// keyword written raw is a name too, and stays as written, `r#dyn::Foo`: the readers of the text ask it of the
+/// keyword, [`pointer()`] of `dyn` and [`text`] of `const`, `mut` and `for`, and a name that lost its `r#` would be
+/// taken for the keyword. So it is for the 48 keywords Rust lets be written raw, the strict and the reserved ones.
+/// A weak keyword, `union` say, is a name as it is, and loses its `r#` as any name does.
+pub fn read_type(trees: &[Tree]) -> String {
+    fn plain(trees: &mut Vec<Tree>) {
+        let mut at = 0;
+        while at < trees.len() {
+            // A path is read where it begins, and a lifetime's name begins none.
+            let len = if lifetime(trees, at) { 0 } else { path(&trees[at..]) };
+            let read = match primitive(&trees[at..at + len]) {
+                Some((name, n)) if n == len => {
+                    trees[at] =
+                        Tree::Ident { name: name.to_string(), space: trees[at].space(), span: trees[at].span() };
+                    trees.drain(at + 1..at + n);
+                    1
+                }
+                _ => len.max(1),
+            };
+            for tree in &mut trees[at..at + read] {
+                match tree {
+                    Tree::Ident { name, .. } if !KEYWORDS.contains(&unraw(name)) => *name = unraw(name).to_string(),
+                    Tree::Group { trees, .. } => plain(trees),
+                    _ => {}
+                }
+            }
+            at += read;
+        }
+    }
+    let mut trees = trees.to_vec();
+    plain(&mut trees);
+    text(&trees)
 }
 
 /// `trees` as Rust writes a type in a message.
@@ -122,9 +218,10 @@ fn written(trees: &[Tree], source: bool) -> String {
             Tree::Punct { ch, .. } => out.push(*ch),
             Tree::Group { delim, trees: inside, space_close, .. } => {
                 let (open, close) = match delim {
-                    Delim::Paren => ('(', ')'),
-                    Delim::Bracket => ('[', ']'),
-                    Delim::Brace => ('{', '}'),
+                    Delim::Paren => ("(", ")"),
+                    Delim::Bracket => ("[", "]"),
+                    Delim::Brace => ("{", "}"),
+                    Delim::None => ("", ""),
                 };
                 // The brackets of a block and of a macro's arguments are as the source has them too.
                 let source = source || *delim == Delim::Brace || macro_args(trees, i);
@@ -162,12 +259,14 @@ fn binder_end(trees: &[Tree], i: usize) -> bool {
         })
 }
 
+/// Whether `trees[i]` and the tree after it are a `::`: two colons with no space between them.
+fn colons(trees: &[Tree], i: usize) -> bool {
+    matches!(trees.get(i..i + 2), Some([Tree::Punct { ch: ':', .. }, Tree::Punct { ch: ':', space: false, .. }]))
+}
+
 /// Whether `trees[j]` is a `:` that is not half of a `::`, as in `fn(x: u8)` and `Item: Copy`.
 fn colon(trees: &[Tree], j: usize) -> bool {
-    let path = |a: usize| {
-        matches!(trees.get(a..=a + 1), Some([Tree::Punct { ch: ':', .. }, Tree::Punct { ch: ':', space: false, .. }]))
-    };
-    matches!(trees[j], Tree::Punct { ch: ':', .. }) && !path(j) && !(j > 0 && path(j - 1))
+    matches!(trees[j], Tree::Punct { ch: ':', .. }) && !colons(trees, j) && !(j > 0 && colons(trees, j - 1))
 }
 
 /// Whether `trees[j]` is the name of a lifetime, as in `&'a [u8]`: a word after a `'`.
@@ -226,7 +325,7 @@ fn spaced(trees: &[Tree], i: usize) -> bool {
         }
 }
 
-/// Whether `ty`, a type as [`text`] writes it, is a pointer, `*const T` or `*mut T`; or why it is
+/// Whether `ty`, a type as [`read_type`] gives it, is a pointer, `*const T` or `*mut T`; or why it is
 /// not one a machine passes in a register: a pointer to a type with no size is two words, and one
 /// to a type kernite cannot read, as `&'static str` is, is refused in the lexer's words. A type that
 /// has no size but is named, as `CStr` is, is not told from one that has.

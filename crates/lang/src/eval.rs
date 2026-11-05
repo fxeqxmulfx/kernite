@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use crate::ast::{BinOp, Block, Const, Expr, Fn, Generic, ItemKind, Module, Static, Stmt, Type, UnOp};
 use crate::target::{Fault, Guard, Mem, Operand, Target};
-use crate::token::Span;
+use crate::token::{Span, unraw};
 use crate::value::{self, Value, Want};
 use crate::{DEPTH, Error, nested};
 
@@ -541,7 +541,7 @@ impl<'a, T: Target> Eval<'a, T> {
                         Type::Name(n, span) if n.starts_with(|c: char| c.is_ascii_digit()) => {
                             value::literal(n, Want::Any).map_err(|m| err(*span, m))?.to_string()
                         }
-                        Type::Name(n, span) => match self.lookup(n, *span)? {
+                        Type::Name(n, span) => match self.lookup(unraw(n), *span)? {
                             Some(Binding::Value(v)) => v.to_string(),
                             _ => n.clone(),
                         },

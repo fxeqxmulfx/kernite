@@ -103,7 +103,7 @@ pub(crate) fn naked(
             arms.push((instance.args.clone(), name));
         }
         if cooperative {
-            out.extend(grid_launcher(f, Some(&arms), needs(instances), named, top));
+            out.extend(grid_launcher(f, Some(&arms), needs(instances), named, cfg, top));
         } else {
             let mut docs = attrs(f, top);
             docs.extend(needs(instances));
@@ -242,8 +242,14 @@ fn list(names: &[String]) -> String {
 /// what it says or zeros; for a static that did not compile, beside its error, `made` is the
 /// static as its type has it, holding zeros, if only what it holds is wrong; if not, `None`, and a
 /// `kernite_cpu::Stub` stands for it, which leaves the type of its elements to the code that uses
-/// it. In a crate without `kernite-cpu`, its type is [`missing`]'s, with the error that says so.
-pub(crate) fn cpu_static(s: &lang::Static, made: Option<&HostStatic>, top: &[TokenTree]) -> TokenStream {
+/// it. In a crate without `kernite-cpu`, its type is [`missing`]'s, with the error that says so after it, under `cfg`,
+/// the static's own.
+pub(crate) fn cpu_static(
+    s: &lang::Static,
+    made: Option<&HostStatic>,
+    cfg: &TokenStream,
+    top: &[TokenTree],
+) -> TokenStream {
     let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
     out.extend(top[s.vis.clone()].iter().cloned());
     out.extend(parse("static"));
@@ -251,9 +257,11 @@ pub(crate) fn cpu_static(s: &lang::Static, made: Option<&HostStatic>, top: &[Tok
     let name = &top[s.vis.end + 1];
     out.extend([name.clone()]);
     if !depends_on(CPU) {
+        let (ty, error) = missing(cfg, name.span(), "a static of x86 kernels", CPU);
         out.extend(parse(":"));
-        out.extend(missing(name.span(), "a static of x86 kernels", CPU));
+        out.extend(ty);
         out.extend(parse("= [];"));
+        out.extend(error);
         return out;
     }
     out.extend(parse(&match made {
@@ -332,18 +340,19 @@ fn erased(ty: &[TokenTree]) -> (String, String) {
 /// did not compile. `needs` is the doc of the CPU features the kernels need. Its safety
 /// contract says that nothing else touches `named`, the module's memory, while the threads run.
 /// It binds `grid` for itself, which a parameter of `f` may be named as well; a compile-time
-/// argument may not, which is an error at its name, and the function never runs, as one of a
-/// kernel that did not compile. In a crate without `kernite-cpu`, it takes any grid, gives
-/// [`missing`]'s type, with the error that says so, and never runs. Its result is
-/// [`launcher_result`]'s.
+/// argument may not, which is an error at its name, after the function, under `cfg`, `f`'s own;
+/// and the function never runs, as one of a kernel that did not compile. In a crate without
+/// `kernite-cpu`, it takes any grid, gives [`missing`]'s type, with the error that says so after
+/// it, and never runs. Its result is [`launcher_result`]'s.
 fn grid_launcher(
     f: &Fn,
     kernels: Option<&[(Vec<Value>, String)]>,
     needs: TokenStream,
     named: &[String],
+    cfg: &TokenStream,
     top: &[TokenTree],
 ) -> TokenStream {
-    let clashes = clashes(f, &["grid"], "the launcher", top);
+    let clashes = clashes(f, cfg, &["grid"], "the launcher", top);
     let kernels = if clashes.is_empty() { kernels } else { None };
     let mut out = attrs(f, top);
     out.extend(needs);
@@ -377,11 +386,16 @@ fn grid_launcher(
     out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
     // Its types are `kernite_cpu`'s, but where the crate has none: any grid goes in, and the error,
     // said once, comes out.
-    let (grid, result) = match depends_on(CPU) {
-        true => (parse("::kernite_cpu::Grid"), parse("::core::result::Result<(), ::kernite_cpu::Error>")),
+    let (grid, result, missed) = match depends_on(CPU) {
+        true => (
+            parse("::kernite_cpu::Grid"),
+            parse("::core::result::Result<(), ::kernite_cpu::Error>"),
+            TokenStream::new(),
+        ),
         false => {
             let name = top[f.head.end + 1].span();
-            (parse("impl ::core::marker::Sized"), missing(name, "a cooperative x86 kernel", CPU))
+            let (result, missed) = missing(cfg, name, "a cooperative x86 kernel", CPU);
+            (parse("impl ::core::marker::Sized"), result, missed)
         }
     };
     let mut params = hygienic("$grid:", kernels.is_some());
@@ -421,6 +435,7 @@ fn grid_launcher(
     let mut body = asks(f, top, written);
     body.extend(hygienic(&text, kernels.is_some()));
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
+    out.extend(missed);
     out.extend(clashes);
     out
 }
@@ -457,7 +472,7 @@ pub(crate) fn x86_stub(
     top: &[TokenTree],
 ) -> TokenStream {
     if f.cooperative.is_some() {
-        return grid_launcher(f, None, TokenStream::new(), named, top);
+        return grid_launcher(f, None, TokenStream::new(), named, cfg, top);
     }
     let mut out = stub(f, top);
     if !f.generics.is_empty() {

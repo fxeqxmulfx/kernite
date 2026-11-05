@@ -6,7 +6,7 @@ use crate::ast::{
     BinOp, Block, Const, Cooperative, Directive, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret,
     Static, Stmt, Type, UnOp,
 };
-use crate::token::{Delim, Span, Tree, text};
+use crate::token::{Delim, Span, Tree, path, primitive, read_type, text, unraw};
 use crate::{Error, nested};
 
 /// A GPU kernel's tuning directives, as PTX has them: each by its name, what it gives, and an
@@ -18,28 +18,56 @@ const DIRECTIVES: [(&str, &str, &str); 4] = [
     ("maxnreg", "the most registers a thread may use", "32"),
 ];
 
+/// The words that follow `const` where it begins a function: `const fn`, `const unsafe fn`.
+const FN_WORDS: [&str; 4] = ["fn", "unsafe", "extern", "async"];
+
 /// The items of a module, from the tokens inside its braces. Each const, function and static
 /// has a name of its own. The first `given` tokens are consts the module takes from another;
 /// an item of the module's own that has the name of one is for the caller to refuse, as it can
 /// say where they come from.
 pub fn module(trees: &[Tree], given: usize) -> Result<Module, Error> {
-    let mut p = Parser::new(trees, trees.last().map_or(Span::default(), Tree::span));
-    let mut items = vec![];
-    while !p.done() {
-        items.push(p.item()?);
+    match read(trees, given) {
+        (module, None) => Ok(module),
+        (_, Some(error)) => Err(error),
     }
-    named_once(&items, given)?;
-    Ok(Module { items })
 }
 
-/// An error at the name of the first item that another const, function or static has the name
-/// of, but for the consts of the first `given` tokens. Of the two, the static is the one in the
-/// way, else the function, else the second.
-fn named_once(items: &[Item], given: usize) -> Result<(), Error> {
+/// The items of a module that kernite reads, from the tokens inside its braces, and the error [`module`]
+/// gives, if there is one. A `const` or a `static` it cannot read ends at its `;`, for its value may hold a
+/// brace group, as `= { 1 };` does. Any other item ends at its first `;`, or at its first brace group outside
+/// `<..>`: a function at its body. The items after it are read as they are. Of items that share a name, it
+/// leaves out all but one, as [`module`] refuses them, so that each const, function and static has a name of
+/// its own. And it leaves out the statics, if it cannot read an item and reads no function that names an ABI,
+/// for the kernels say whose a static is, the process's or the GPU's, and the item may be the one that tells.
+pub fn read(trees: &[Tree], given: usize) -> (Module, Option<Error>) {
+    let mut p = Parser::new(trees, trees.last().map_or(Span::default(), Tree::span));
+    let (mut items, mut error) = (vec![], None);
+    while !p.done() {
+        let start = p.pos;
+        match p.item() {
+            Ok(item) => items.push(item),
+            Err(e) => {
+                error.get_or_insert(e);
+                p.pos = start;
+                p.skip();
+            }
+        }
+    }
+    let abi_seen = items.iter().any(|item| matches!(&item.kind, ItemKind::Fn(f) if f.abi.is_some()));
+    if error.is_some() && !abi_seen {
+        items.retain(|item| !matches!(item.kind, ItemKind::Static(_)));
+    }
+    let shared = named_once(&mut items, given);
+    (Module { items }, error.or(shared))
+}
+
+/// Leaves out of `items` each const, function and static that another has the name of, but for the
+/// consts of the first `given` tokens, and says why, at the name of the first. Of two, the static
+/// is the one in the way, else the function, else the second.
+fn named_once(items: &mut Vec<Item>, given: usize) -> Option<Error> {
     const KINDS: [&str; 3] = ["constant", "function", "static"];
-    // Each item's name, where it is, its kind as an index of `KINDS`, and whether it is the
-    // module's own. Of two items of a name, the one of the later kind in `KINDS` is in the
-    // way, else the later one.
+    // Each item's first token, name, where the name is, and kind as an index of `KINDS`. Of two items of
+    // a name, the one of the later kind in `KINDS` is in the way, else the later one.
     let named: Vec<_> = items
         .iter()
         .filter_map(|item| {
@@ -49,19 +77,23 @@ fn named_once(items: &[Item], given: usize) -> Result<(), Error> {
                 ItemKind::Static(s) => (s.name.as_str(), s.span, 2),
                 ItemKind::Other => return None,
             };
-            Some((name, span, kind, item.tokens.start >= given))
+            Some((item.tokens.start, name, span, kind))
         })
         .collect();
-    for (i, &(name, span, kind, _)) in named.iter().enumerate() {
-        for (j, &(same, _, other, own)) in named.iter().enumerate() {
-            if own && same == name && (other, j) < (kind, i) {
+    let (mut way, mut error) = (vec![], None);
+    for &(at, name, span, kind) in &named {
+        for &(from, same, _, other) in &named {
+            if from >= given && same == name && (other, from) < (kind, at) {
                 let what = if other == kind { "another" } else { "a" };
                 let message = format!("`{name}` names {what} {} of the module as well", KINDS[other]);
-                return Err(Error { span, message });
+                error.get_or_insert(Error { span, message });
+                way.push(at);
+                break;
             }
         }
     }
-    Ok(())
+    items.retain(|item| !way.contains(&item.tokens.start));
+    error
 }
 
 /// What a generic that is a type is refused with: `<T>`, and `impl` in a parameter's type or the result's, which
@@ -152,9 +184,22 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Some(Tree::Ident { name, span, .. }) => {
                 self.pos += 1;
-                Ok((name.strip_prefix("r#").unwrap_or(name).to_string(), *span))
+                Ok((unraw(name).to_string(), *span))
             }
             _ => self.error(format!("expected a name, found {}", self.found())),
+        }
+    }
+
+    /// A type that is a name, `u64`, or a path, `core::primitive::u64`, as [`read_type`] gives it: a generic's, or the
+    /// one a cast is to.
+    fn path_type(&mut self) -> Result<String, Error> {
+        match path(&self.trees[self.pos..]) {
+            0 => Ok(self.ident()?.0),
+            len => {
+                let ty = read_type(&self.trees[self.pos..self.pos + len]);
+                self.pos += len;
+                Ok(ty)
+            }
         }
     }
 
@@ -207,9 +252,11 @@ impl<'a> Parser<'a> {
             if let Some(Tree::Group { trees, .. }) = self.peek_at(1)
                 && let [Tree::Ident { name, span, .. }, rest @ ..] = trees.as_slice()
             {
+                // Rust reads an attribute's name written raw, `r#instances`, as the name.
+                let name = unraw(name);
                 let at = |message: &str| Err(Error { span: *span, message: message.into() });
                 let tokens = self.pos..self.pos + 2;
-                match name.as_str() {
+                match name {
                     "instances" => {
                         let [Tree::Group { delim: Delim::Paren, trees: values, .. }] = rest else {
                             return at(
@@ -244,15 +291,15 @@ impl<'a> Parser<'a> {
                         );
                     }
                     _ => {
-                        if let Some(&(_, what, example)) = DIRECTIVES.iter().find(|(d, ..)| d == name) {
+                        if let Some(&(_, what, example)) = DIRECTIVES.iter().find(|(d, ..)| *d == name) {
                             let [Tree::Group { delim: Delim::Paren, trees: values, .. }] = rest else {
                                 return at(&format!("`#[{name}(..)]` gives {what}, as in `#[{name}({example})]`"));
                             };
-                            if directives.iter().any(|d: &Directive| d.name == *name) {
+                            if directives.iter().any(|d: &Directive| d.name == name) {
                                 return at(&format!("a kernel has one `#[{name}(..)]`"));
                             }
                             directives.push(Directive {
-                                name: name.clone(),
+                                name: name.to_string(),
                                 values: args(values)?,
                                 span: *span,
                                 tokens,
@@ -292,7 +339,8 @@ impl<'a> Parser<'a> {
             let s = self.static_rest(attrs, head..self.pos - 1)?;
             return Ok(self.made(start, ItemKind::Static(s)));
         }
-        let qualifier = |t: Option<&Tree>| matches!(t, Some(Tree::Ident { name, .. }) if ["fn", "unsafe", "extern", "async"].contains(&name.as_str()));
+        let qualifier =
+            |t: Option<&Tree>| matches!(t, Some(Tree::Ident { name, .. }) if FN_WORDS.contains(&name.as_str()));
         if self.is_ident("const") && !qualifier(self.peek_at(1)) {
             if let Some(e) = misplaced {
                 return Err(e);
@@ -349,15 +397,41 @@ impl<'a> Parser<'a> {
         if let Some(e) = misplaced {
             return Err(e);
         }
-        // Anything else ends at its first `;` or brace group. An item cut short there, as `use
-        // a::{b, c};` is, goes on as another; they pass through in order all the same.
+        // Anything else ends at its first `;`, or at its first brace group outside `<..>`, as `impl Foo<{ 3 }> {..}`
+        // does at its body. An item cut short there, as `use a::{b, c};` is, goes on as another; they pass through
+        // in order all the same.
         self.pos = qualifiers;
-        while let Some(t) = self.bump() {
-            if matches!(t, Tree::Punct { ch: ';', .. } | Tree::Group { delim: Delim::Brace, .. }) {
-                break;
+        self.skip();
+        Ok(self.made(start, ItemKind::Other))
+    }
+
+    /// Skips to the end of an item. A `const` or a `static` ends at its first `;`, for its value may hold a brace
+    /// group. Any other item ends at its first `;`, or at its first brace group outside `<..>`, where a const
+    /// argument may hold one: a function ends at its body.
+    fn skip(&mut self) {
+        let mut words = self.trees[self.pos..].iter().filter_map(|t| match t {
+            Tree::Ident { name, .. } if name != "pub" => Some(name.as_str()),
+            _ => None,
+        });
+        let valued = match words.next() {
+            Some("static") => true,
+            Some("const") => !matches!(words.next(), Some(word) if FN_WORDS.contains(&word)),
+            _ => false,
+        };
+        // How many `<` are open. The `>` of `->` closes none.
+        let mut open = 0usize;
+        while !self.done() {
+            if self.eat_op("->") {
+                continue;
+            }
+            match self.bump() {
+                Some(Tree::Punct { ch: ';', .. }) => break,
+                Some(Tree::Punct { ch: '<', .. }) => open += 1,
+                Some(Tree::Punct { ch: '>', .. }) => open = open.saturating_sub(1),
+                Some(Tree::Group { delim: Delim::Brace, .. }) if !valued && open == 0 => break,
+                _ => {}
             }
         }
-        Ok(self.made(start, ItemKind::Other))
     }
 
     /// What follows `const`: `NAME: TYPE = VALUE;`.
@@ -404,7 +478,7 @@ impl<'a> Parser<'a> {
                 }
                 let (name, span) = self.ident()?;
                 self.expect_op(":")?;
-                let (ty, _) = self.ident()?;
+                let ty = self.path_type()?;
                 generics.push(Generic { name, span, ty });
                 if !self.eat_op(",") {
                     self.expect_op(">")?;
@@ -445,7 +519,7 @@ impl<'a> Parser<'a> {
                 p.is_ident("where") || p.is_op(";") || body
             })?;
             no_impl(&self.trees[from..self.pos])?;
-            Some(Ret { ty: text(&self.trees[from..self.pos]), span, tokens: from..self.pos })
+            Some(Ret { ty: read_type(&self.trees[from..self.pos]), span, tokens: from..self.pos })
         } else {
             None
         };
@@ -477,6 +551,13 @@ impl<'a> Parser<'a> {
     /// A type, at level `open` of the type it is in, 1 if it is the outer one. `[T; N]` and
     /// `Name<T>` hold a level more.
     fn ty(&mut self, open: usize) -> Result<Type, Error> {
+        // The tokens of a macro's fragment are one type, as brackets make them.
+        if let Some((inner, span)) = self.group(Delim::None) {
+            let mut p = Parser::new(inner, span);
+            let ty = p.ty(open)?;
+            p.finish()?;
+            return Ok(ty);
+        }
         if let Some((inner, span)) = self.group(Delim::Bracket) {
             nested(open, span)?;
             let mut p = Parser::new(inner, span);
@@ -495,6 +576,7 @@ impl<'a> Parser<'a> {
             && matches!(self.peek_at(1), Some(Tree::Punct { ch: '<', .. }))
         {
             nested(open, *span)?;
+            let head = read_type(&self.trees[self.pos..=self.pos]);
             self.pos += 2;
             let mut args = vec![];
             while !self.eat_op(">") {
@@ -504,14 +586,14 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
-            return Ok(Type::Generic(name.strip_prefix("r#").unwrap_or(name).to_string(), args, *span));
+            return Ok(Type::Generic(head, args, *span));
         }
         let (from, span) = (self.pos, self.span());
         self.skip_ty(open, |p| ["=", ";", ","].iter().any(|op| p.is_op(op)))?;
         if from == self.pos {
             return self.error(format!("expected a type, found {}", self.found()));
         }
-        Ok(Type::Name(text(&self.trees[from..self.pos]), span))
+        Ok(Type::Name(read_type(&self.trees[from..self.pos]), span))
     }
 
     /// Goes past the tokens of a type, at level `open` of the type it is in, to the first that `ends` it, or to the
@@ -712,7 +794,7 @@ impl<'a> Parser<'a> {
             chained += 1;
             nested(chained, span)?;
             self.pos += 1;
-            let (ty, _) = self.ident()?;
+            let ty = self.path_type()?;
             e = Expr::Cast(Box::new(e), ty, span);
         }
         Ok(e)
@@ -740,8 +822,23 @@ impl<'a> Parser<'a> {
         Ok(ops.into_iter().rev().fold(e, |e, (op, span)| Expr::Unary(op, Box::new(e), span)))
     }
 
+    /// The path that begins with `first`, whose name `span` is at, and goes on by `::`: `u32::MAX`.
+    fn path_from(&mut self, first: &str, span: Span) -> Result<Expr, Error> {
+        let mut path = vec![first.to_string()];
+        while self.is_op("::") && matches!(self.peek_at(2), Some(Tree::Ident { .. })) {
+            self.pos += 2;
+            path.push(self.ident()?.0);
+        }
+        Ok(Expr::Path(path, span))
+    }
+
     fn primary(&mut self) -> Result<Expr, Error> {
         let span = self.span();
+        // A path that begins with a primitive's, `core::primitive::u32::MAX`, is read from the primitive's name.
+        if let Some((name, len)) = primitive(&self.trees[self.pos..]) {
+            self.pos += len;
+            return self.path_from(name, span);
+        }
         let Some(t) = self.bump() else {
             return Err(Error { span, message: "expected an expression, found the end".into() });
         };
@@ -756,15 +853,9 @@ impl<'a> Parser<'a> {
             Tree::Ident { name, span, .. } if name == "true" || name == "false" => {
                 Ok(Expr::Bool(name == "true", *span))
             }
-            Tree::Ident { name, span, .. } => {
-                let mut path = vec![name.strip_prefix("r#").unwrap_or(name).to_string()];
-                while self.is_op("::") && matches!(self.peek_at(2), Some(Tree::Ident { .. })) {
-                    self.pos += 2;
-                    path.push(self.ident()?.0);
-                }
-                Ok(Expr::Path(path, *span))
-            }
-            Tree::Group { delim: Delim::Paren, trees, span, .. } => {
+            Tree::Ident { name, span, .. } => self.path_from(unraw(name), *span),
+            // The tokens of a macro's fragment are one operand, as parentheses make them.
+            Tree::Group { delim: Delim::Paren | Delim::None, trees, span, .. } => {
                 let mut p = Parser::new(trees, *span);
                 if p.done() {
                     return Ok(Expr::Tuple(vec![], *span));

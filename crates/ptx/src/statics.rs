@@ -1,7 +1,7 @@
 //! Memory a kernel declares, and the module's, a `static`: its shape, what it holds, and
 //! whether the module has room for it.
 
-use kernite_lang::{IntTy, Value};
+use kernite_lang::{IntTy, Value, article};
 
 use crate::forms::Space;
 use crate::ty::{Kind, Ty};
@@ -117,8 +117,6 @@ impl Static {
 /// type, or bits of its size.
 fn datum(t: Ty, x: &Value, what: &str) -> Result<Vec<u8>, String> {
     let (name, bits) = (t.name(), t.bits());
-    // A type's name as it is read: an `s8`, an `f32`, an `i64`, a `u8`.
-    let a = |name: &str| if name.starts_with(['f', 'i', 's']) { "an" } else { "a" };
     match *x {
         Value::Int(v, ty) if t.int() || t.kind() == Kind::Bit => {
             let fits = |ty: IntTy| match t.kind() {
@@ -129,7 +127,12 @@ fn datum(t: Ty, x: &Value, what: &str) -> Result<Vec<u8>, String> {
             if let Some(ty) = ty
                 && (ty.bits() != bits || !fits(ty))
             {
-                return Err(format!("{what} is {} `{}`, not {} `{name}`", a(ty.name()), ty.name(), a(name)));
+                return Err(format!(
+                    "{what} is {} `{}`, not {} `{name}`",
+                    article(ty.name()),
+                    ty.name(),
+                    article(name)
+                ));
             }
             let (lo, hi) = match t.kind() {
                 Kind::Unsigned => (0, (1i128 << bits) - 1),
@@ -142,13 +145,13 @@ fn datum(t: Ty, x: &Value, what: &str) -> Result<Vec<u8>, String> {
             Ok(v.to_le_bytes()[..bits as usize / 8].to_vec())
         }
         Value::Int(v, _) if t.kind() == Kind::Float => {
-            Err(format!("{what} is an integer, and {} `{name}` a float: `{v}.0`", a(name)))
+            Err(format!("{what} is an integer, and {} `{name}` a float: `{v}.0`", article(name)))
         }
         Value::F32(v) if matches!(t, Ty::F32 | Ty::B32) => Ok(v.to_le_bytes().to_vec()),
         Value::F64(v) if matches!(t, Ty::F64 | Ty::B64) => Ok(v.to_le_bytes().to_vec()),
         Value::F16(v) if matches!(t, Ty::F16 | Ty::B16) => Ok(v.to_le_bytes().to_vec()),
         Value::Bf16(v) if matches!(t, Ty::Bf16 | Ty::B16) => Ok(v.to_le_bytes().to_vec()),
-        ref x => Err(format!("{what} is {}, not {} `{name}`", x.kind(), a(name))),
+        ref x => Err(format!("{what} is {}, not {} `{name}`", x.kind(), article(name))),
     }
 }
 

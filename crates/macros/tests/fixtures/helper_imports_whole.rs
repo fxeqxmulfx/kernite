@@ -1,8 +1,8 @@
-//! Helpers whose signatures name `Ret`, a type of the crate's that their module imports, in a module where kernite
-//! says an error of the module as a whole, and of none of its items: that it is two modules, that no module of PTX
-//! has its GPU's kernels, that an item of its own has the name of a const it takes, or that its attribute is
-//! refused. No kernel calls the helpers, so kernite says nothing of their types; it shows them to Rust, so Rust does
-//! not call the import unused beside the error, and says nothing of `gpr` or `local<[u32; 4], 16>`.
+//! Helpers whose signatures name `Ret`, a type of the crate's that their module imports, in a module where kernite says
+//! an error of the module as a whole, and of none of its items: that it is two modules, that no module of PTX has its
+//! GPU's kernels, that an item of its own has the name of a const it takes, that its attribute is refused, or that it
+//! cannot read an item. No kernel calls the helpers, so kernite says nothing of their types; it shows them to Rust, so
+//! Rust does not call the import unused beside the error, and says nothing of `gpr` or `local<[u32; 4], 16>`.
 
 pub struct Ret(pub u64);
 
@@ -83,6 +83,23 @@ pub mod refused_at_its_attribute {
     }
 
     fn language(a: gpr, b: ymm, c: local<[u32; 4], 16>) -> r32 {
+        nop();
+    }
+}
+
+#[kernite_macros::kernels]
+pub mod an_item_kernite_cannot_read {
+    use super::Ret;
+
+    fn h(x: Ret) {
+        nop();
+    }
+
+    fn language(a: gpr, b: ymm, c: local<[u32; 4], 16>) -> r32 {
+        nop();
+    }
+
+    fn bad<T>() {
         nop();
     }
 }

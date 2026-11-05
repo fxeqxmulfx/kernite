@@ -1,11 +1,11 @@
-//! Kernels that `cfg` keeps and that name an item `cfg` leaves out. Built without the feature `big`, which
-//! keeps each item they name, each name is an error where it is written, as Rust says of a function it
-//! leaves out: Rust's own, "cannot find value", of a const, a static of the process's and an x86 kernel that
-//! takes no compile-time arguments, which are Rust's items, and kernite's of the rest, a helper, an
-//! `extern "ptx-func"` function, an instance of an x86 kernel and a static of the GPU's, which are not.
-//! Where `cfg` leaves out the kernel with what it names, nothing is said, nor of what a helper names, where
-//! `cfg` leaves out the helper. Built with `big` and `wide`, the crate builds without a word, and the x86
-//! kernels run.
+//! Kernels that `cfg` keeps and that name an item `cfg` leaves out. Built without the feature `big`,
+//! which keeps each item they name, each name is an error where it is written, as Rust says of a
+//! function it leaves out. Rust says its own, "cannot find value", of a const, a static of the process's
+//! and an x86 kernel that takes no compile-time arguments, which are Rust's items, in a module where
+//! kernite says no error. kernite says its own of the rest, a helper, an `extern "ptx-func"` function,
+//! an instance of an x86 kernel and a static of the GPU's, which are not. Where `cfg` leaves out the
+//! kernel with what it names, nothing is said, nor of what a helper names, where `cfg` leaves out the
+//! helper. Built with `big` and `wide`, the crate builds without a word, and the x86 kernels run.
 
 #![deny(warnings)]
 
@@ -409,6 +409,94 @@ pub mod recursive {
 
     pub unsafe extern "sysv64" fn calls_entry(p: *mut u64) {
         entry(p);
+    }
+}
+
+/// What Rust says of a name `cfg` leaves out, in a module where kernite says no error: the names a helper's
+/// body has, and a helper that loops.
+#[kernite_macros::kernels]
+pub mod rust_in_helpers {
+    #[cfg(feature = "big")]
+    const FOUR: u64 = 4;
+
+    #[cfg(feature = "big")]
+    const STEP: u64 = 3;
+
+    fn twice(p: gpr) {
+        add(qword[p], FOUR);
+    }
+
+    fn count<const N: u64>(p: gpr) {
+        add(qword[p], STEP);
+        if N > 0 {
+            count::<{ N - 1 }>(p);
+        }
+    }
+
+    pub unsafe extern "sysv64" fn calls_twice(p: *mut u64) {
+        twice(p);
+    }
+
+    pub unsafe extern "sysv64" fn counts(p: *mut u64) {
+        count::<3>(p);
+    }
+}
+
+/// The same for GPU kernels: the type of a static, the body of a function, of a helper and of a kernel, and a
+/// directive.
+#[kernite_macros::kernels]
+pub mod rust_in_gpu {
+    #[cfg(feature = "big")]
+    const SIZE: u32 = 4;
+
+    #[cfg(feature = "big")]
+    const LEN: usize = 2;
+
+    pub static WIDTHS: global<[u32; LEN]>;
+
+    extern "ptx-func" fn via() -> u32 {
+        let v: u32;
+        mov.u32(v, 9);
+        add.u32(v, v, SIZE);
+        ret(v);
+    }
+
+    fn twice(p: u64) {
+        let g: u32;
+        mov.u32(g, SIZE);
+        st.global.u32([p], g);
+    }
+
+    pub unsafe extern "ptx-kernel" fn reads_const(p: *mut u32) {
+        st.global.u32([p], SIZE);
+    }
+
+    pub unsafe extern "ptx-kernel" fn calls_function(p: *mut u32) {
+        let g: u32;
+        call(g, via, ());
+        st.global.u32([p], g);
+    }
+
+    pub unsafe extern "ptx-kernel" fn calls_helper(p: *mut u32) {
+        twice(p);
+    }
+
+    #[maxntid(SIZE)]
+    pub unsafe extern "ptx-kernel" fn limited(p: *mut u32) {
+        st.global.u32([p], 1);
+    }
+}
+
+/// A const kept only where `wide` holds as well, which a kernel `big` keeps reads: it is gone where `big` holds
+/// alone, and Rust says so there.
+#[kernite_macros::kernels]
+pub mod rust_in_narrower {
+    #[cfg(all(feature = "big", feature = "wide"))]
+    const WIDE: u64 = 6;
+
+    #[cfg(feature = "big")]
+    pub unsafe extern "sysv64" fn reads_wide(p: *mut u64) {
+        mov(qword[p], WIDE);
     }
 }
 

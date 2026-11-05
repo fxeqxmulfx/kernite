@@ -1,13 +1,14 @@
 //! What a module of kernels becomes once kernite has compiled its kernels: each item as what
 //! `kernite::module` says it is, written out for Rust. A module kernite refuses whole, at its
-//! attribute, is written the same way, with the error in it. kernite checks none of its items, so
-//! each kernel is as it is when it does not compile, each static stands as its type has it where
-//! kernite works that out, and nothing kernite would find in them is said. Nothing of it is
-//! compiled, so a workspace `name` that is not a string is no error at it. No room is counted for
-//! the statics, so the crate is not told it needs `kernite-macros` for them. What this finds in
-//! writing the module for Rust is said, as for any module, such as the dependency on `kernite-cuda`
-//! or `kernite-cpu` it needs or a compile-time argument named as a parameter of a launcher. A module
-//! kernite cannot read is its error alone.
+//! attribute or for an item it cannot read, is written the same way, with the error in it: of the
+//! second, the items `lang::read` reads. kernite checks none of its items, so each kernel is as it
+//! is when it does not compile, each static stands as its type has it where kernite works that out,
+//! and nothing kernite would find in them is said. Nothing of it is compiled, so a workspace `name`
+//! that is not a string is no error at it. No room is counted for the statics, so the crate is not
+//! told it needs `kernite-macros` for them. What this finds in writing the module for Rust is said,
+//! as for any module, such as the dependency on `kernite-cuda` or `kernite-cpu` it needs or a
+//! compile-time argument named as a parameter of a launcher. Brackets nested too deep leave a module
+//! no item: it is its error alone.
 
 use std::path::Path;
 
@@ -20,24 +21,30 @@ use crate::cond::Cond;
 use crate::gpu::{HOLE, gpu};
 use crate::room;
 use crate::rust::{
-    cfg_of, error, error_under, flatten, inner_attribute, is_ident, is_punct, lex, name_at, parse, position, seen,
+    cfg_of, error, error_under, flatten, for_rust, from_inside, inner_attribute, lex, name_at, parse, position, seen,
     site, stub,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
 
-/// What the module's braces hold once its kernels are compiled; `given`, the consts it takes
-/// from outside, and the path of their module, as `#[kernels(consts = path)]` writes it. A module
-/// kernite refuses whole, at its attribute, has `why`, the error, which is in the module, said
-/// once. It is given no consts, and kernite checks none of its items, for the consts its kernels
-/// read may not be given: each kernel is as it is when it does not compile, each static stands as
-/// its type has it where kernite works that out, and nothing kernite would find in them is said.
-/// Nothing of it is compiled, so it reads no workspace, and a `name` that is not a string is no
-/// error at it. No room is counted for the statics, so the crate is not told it needs
-/// `kernite-macros` for them. What this finds in writing the module for Rust is said, as for any
-/// module: the dependency on `kernite-cuda` or `kernite-cpu` it needs, a compile-time argument named
-/// as a parameter of a launcher or of a `_blocks` method, and a GPU kernel or a static named as a
-/// cooperative kernel's `_blocks` method. A module kernite cannot read has `why` alone.
+/// What the module's braces hold once its kernels are compiled; `given`, the consts it takes from
+/// outside, and the path of their module, as `#[kernels(consts = path)]` writes it. A module
+/// kernite refuses whole has its error, which is in the module, said once: `why`, for a module
+/// refused at its attribute, which is given no consts, for the consts its kernels read may not be
+/// given; or the error `lang::read` gives, for a module kernite cannot read, which has the items it
+/// reads and the consts it is given. kernite checks none of the items of a module refused whole:
+/// each kernel is as it is when it does not compile, each static stands as its type has it where
+/// kernite works that out, and nothing kernite would find in them is said. Nothing of it is
+/// compiled, so it reads no workspace, and a `name` that is not a string is no error at it. No room
+/// is counted for the statics, so the crate is not told it needs `kernite-macros` for them. What
+/// this finds in writing the module for Rust is said, as for any module: the dependency on
+/// `kernite-cuda` or `kernite-cpu` it needs, a compile-time argument named as a parameter of a
+/// launcher or of a `_blocks` method, and a GPU kernel or a static named as a cooperative kernel's
+/// `_blocks` method. Brackets nested too deep leave a module no item: it has its error alone, or
+/// `why`.
+///
+/// Every error the macros write is an item of the module, so Rust is silent about a name it cannot find where there is
+/// one. The types a helper's signature names, which no kernel needs to compile, are shown to Rust there alone.
 pub(crate) fn expand(
     given: Option<(TokenStream, &[TokenTree])>,
     why: Option<TokenStream>,
@@ -48,13 +55,16 @@ pub(crate) fn expand(
     let n = outside.len();
     let top: Vec<TokenTree> = outside.into_iter().chain(flatten(body)).collect();
     let (trees, spans) = lex(&top);
+    let top = for_rust(top);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(site);
     let said = |e: &lang::Error| error(at(e.span), &e.message);
-    let module = match trees.and_then(|trees| lang::module(&trees, n)) {
-        Ok(module) => module,
-        // A module kernite refuses has its error alone: it is what can be mended first.
+    // A module kernite cannot read is refused whole, as at its attribute, with the items it reads: its error is what
+    // can be mended first. Brackets nested too deep leave it no item, and its error alone.
+    let (module, unread) = match trees {
+        Ok(trees) => lang::read(&trees, n),
         Err(e) => return why.unwrap_or_else(|| said(&e)),
     };
+    let why = why.or_else(|| unread.as_ref().map(said));
     // The error at the module itself, and the GPU kernels' namespaces: the workspace's, then the
     // module's path. A name that is not a string is an error at the module; the macro goes on without
     // it, so that the error is the only one. A refused module has the error it is refused for, and no
@@ -76,16 +86,15 @@ pub(crate) fn expand(
     let made = kernite::module(module, consts, refused, &scope);
     let module = &made.module;
     // The module's own attributes, `#![..]`, before anything the macro writes, where Rust has
-    // them.
+    // them. A module given consts has them from `#[kernels]`, which writes this inside the module.
     let mut out: TokenStream = module
         .items
         .iter()
-        .filter(|item| inner_attribute(&top[item.tokens.clone()]))
+        .filter(|item| given.is_none() && inner_attribute(&top[item.tokens.clone()]))
         .flat_map(|item| top[item.tokens.clone()].iter().cloned())
         .collect();
     // The errors of the module as a whole, said under no `cfg`: at its attribute or at a workspace's name that is not a
     // string; an item that has the name of a const the module takes; and a module that is two.
-    let whole = at_module.is_some() || !made.given.is_empty() || made.owner.is_some();
     out.extend(at_module);
     if let Some((_, path)) = given {
         out.extend(made.given.iter().map(said));
@@ -109,21 +118,19 @@ pub(crate) fn expand(
             unloaded.push((Cond::when(when, &|it| kept(device, it)), message.as_str()));
         }
     }
-    // Where Rust is silent about a name it cannot find, `gpr` say, in the signature of a helper: where a macro writes
-    // an error as an item of the module. That is where kernite says an error of an item, under the item's `cfg`; why
-    // the GPU's module is none, under the `cfg` of what it is of; and the errors of the module as a whole.
-    let items = made.items.iter().zip(&conds).filter(|(item, _)| item.failed()).map(|(_, c)| c.clone());
-    let failing = Cond::any(items.chain(unloaded.iter().map(|(c, _)| c.clone())).chain(whole.then_some(Cond::Always)));
     // Where Rust finds a name of the kernel's, as it would find it in the kernel's own body: at the
     // name, with the macro's hygiene, for Rust to resolve it as it resolves what the macro writes.
     let place = |m: &lang::Mention| at(m.span).resolved_at(site());
     // How each kernel the GPU launches is, and each static of the GPU's, as the host reads it; when
-    // each GPU item is there; and what shows Rust what each item names, and the types of each signature
-    // that nothing else writes.
-    let (mut launchers, mut memory, mut on_gpu, mut reads) = (vec![], vec![], vec![], TokenStream::new());
+    // each GPU item is there; what shows Rust what each item names; and the errors of a name that `cfg` leaves out.
+    let (mut launchers, mut memory, mut on_gpu) = (vec![], vec![], vec![]);
+    let (mut reads, mut left_out) = (TokenStream::new(), TokenStream::new());
     // A field for each static of the GPU's that is laid out, under its `cfg`, for Rust to count the room
     // of those it keeps.
     let mut fields = TokenStream::new();
+    // The functions whose types nothing else shows Rust: each helper, and each GPU function, which is not launched,
+    // whether a kernel calls it or not.
+    let mut helpers = vec![];
     // Each listing the process's kernels have, by name, under the `cfg` of the kernel it is of, as
     // what `naked` writes for it is.
     let mut listed = vec![];
@@ -131,10 +138,9 @@ pub(crate) fn expand(
         let tokens = &top[item.tokens.clone()];
         let cfg = &cfgs[i];
         let said = |e: &lang::Error| error_under(cfg, at(e.span), &e.message);
-        // What shows Rust the types of a signature that nothing else writes, where `cfg` keeps the item and kernite
-        // says an error.
-        let shown = |f: &lang::Fn| Cond::all([conds[i].clone(), failing.clone()]).guard().map(|g| seen(f, &top, &g));
-        reads.extend(named(&made, &conds, i, &top, &place));
+        let (names, errors) = named(&made, &conds, i, &top, &place);
+        reads.extend(names);
+        left_out.extend(errors);
         match (&item.kind, made_item) {
             // The module's own attributes are first, and a const given is Rust's where its
             // module is.
@@ -144,19 +150,19 @@ pub(crate) fn expand(
             (ItemKind::Static(s), ItemOut::HostStatic(laid)) => {
                 out.extend(laid.as_ref().err().and_then(|failed| failed.error.as_ref()).map(said));
                 let held = laid.as_ref().map_or_else(|failed| failed.stub.as_ref(), |c| Some(&c.code));
-                out.extend(cpu_static(s, held, &top));
+                out.extend(cpu_static(s, held, cfg, &top));
             }
             (ItemKind::Static(s), ItemOut::DeviceStatic(laid)) => {
                 out.extend(laid.as_ref().err().and_then(|failed| failed.error.as_ref()).map(said));
                 memory.push((s, laid, conds[i].clone()));
                 on_gpu.push(conds[i].clone());
                 if let Ok(laid) = laid {
-                    fields.extend(room::field(cfg, i, &laid.code.ty, at(s.ty.span())));
+                    fields.extend(room::room(cfg, i, &laid.code.ty, at(s.ty.span())));
                 }
             }
             (ItemKind::Fn(f), ItemOut::Helper(errors)) => {
                 out.extend(errors.iter().map(said));
-                reads.extend(shown(f));
+                helpers.push((i, f));
             }
             (ItemKind::Fn(f), ItemOut::Unknown(e)) => {
                 out.extend(e.as_ref().map(said));
@@ -179,18 +185,16 @@ pub(crate) fn expand(
                 on_gpu.push(conds[i].clone());
                 launchers.extend(d.launcher.as_ref().map(|l| (f, l)));
                 if d.launcher.is_none() {
-                    reads.extend(shown(f));
+                    helpers.push((i, f));
                 }
             }
             _ => unreachable!("kernite::module says what each item is"),
         }
     }
-    out.extend(room::carrier(fields, &Cond::any(memory.iter().filter(|(_, m, _)| m.is_ok()).map(|(.., c)| c.clone()))));
-    if !reads.is_empty() {
-        out.extend(parse("const _: () ="));
-        out.extend([TokenTree::Group(Group::new(Delimiter::Brace, reads))]);
-        out.extend(parse(";"));
-    }
+    let laid = Cond::any(memory.iter().filter(|(_, m, _)| m.is_ok()).map(|(.., c)| c.clone()));
+    out.extend(room::lacking(&laid));
+    // The rest of the module, after the room and the names `cfg` leaves out.
+    let mut tail = TokenStream::new();
     // A module with an x86 kernel has `LISTINGS` whether its kernels compile or not, and a module of GPU
     // kernels alone has none.
     if made.items.iter().any(|item| matches!(item, ItemOut::Native(_))) {
@@ -199,14 +203,14 @@ pub(crate) fn expand(
             listings.extend(cfg.clone());
             listings.extend(parse(&format!("({name:?}, {text:?}),")));
         }
-        out.extend(parse(
+        tail.extend(parse(
             "/// Each x86 kernel's listing that `cfg` keeps, by name, an instance's as `tile::<4>`: where its\n\
              /// variables live, and its code with its notes, for snapshots. A kernel that does not compile has\n\
              /// none.\n\
              pub const LISTINGS: &[(&::core::primitive::str, &::core::primitive::str)] = &",
         ));
-        out.extend([TokenTree::Group(Group::new(Delimiter::Bracket, listings))]);
-        out.extend(parse(";"));
+        tail.extend([TokenTree::Group(Group::new(Delimiter::Bracket, listings))]);
+        tail.extend(parse(";"));
     }
     if let Some(device) = &made.device {
         // Each part of the module is there where `cfg` keeps the code and the statics it is of.
@@ -216,15 +220,33 @@ pub(crate) fn expand(
             .iter()
             .map(|(when, text)| (Cond::when(when, &|it| kept(device, it)), text.as_str()))
             .collect();
-        out.extend(unloadable(&unloaded, at(device.at)));
+        tail.extend(unloadable(&unloaded, at(device.at)));
         let symbols: Vec<(Cond, &str)> =
             device.symbols.iter().map(|(code, symbol)| (kept(device, Kept::Code(*code)), symbol.as_str())).collect();
-        out.extend(gpu(&launchers, &symbols, &memory, &parts, &top, &at, &on_gpu));
+        tail.extend(gpu(&launchers, &symbols, &memory, &parts, &top, &at, &on_gpu));
         // The workspace's name is in the PTX, so it is built again when it changes.
         if let Some(manifest) = manifest.as_deref().and_then(Path::to_str) {
-            out.extend(parse(&format!("const _: &[::core::primitive::u8] = ::core::include_bytes!({manifest:?});")));
+            tail.extend(parse(&format!("const _: &[::core::primitive::u8] = ::core::include_bytes!({manifest:?});")));
         }
     }
+    // Where Rust is silent about a name it cannot find, `gpr` say, in the signature of a helper: where the module
+    // has an error as an item, as every error kernite and the macros find is. There the types of the helpers are
+    // shown, in a block of the module, under the `cfg` of the helper. The room of the statics is wrong where Rust
+    // decides, so `__Room` shows them there, as a field of each helper in the struct says.
+    let failing = Cond::any([Cond::errors_in(&out), Cond::errors_in(&left_out), Cond::errors_in(&tail)]);
+    let mut shown = TokenStream::new();
+    for (i, f) in helpers {
+        reads.extend(Cond::all([conds[i].clone(), failing.clone()]).guard().map(|g| seen(f, &top, &g)));
+        shown.extend(conds[i].guard().map(|g| room::shown(&g, i, seen(f, &top, &TokenStream::new()))));
+    }
+    out.extend(room::carrier(fields, shown));
+    out.extend(left_out);
+    if !reads.is_empty() {
+        out.extend(parse("const _: () ="));
+        out.extend([TokenTree::Group(Group::new(Delimiter::Brace, reads))]);
+        out.extend(parse(";"));
+    }
+    out.extend(tail);
     out
 }
 
@@ -252,17 +274,7 @@ fn take(made: &ModuleOut, top: &[TokenTree], path: &[TokenTree]) -> TokenStream 
         }
     }
     let mut out = parse("use");
-    match path {
-        [first, ..] if is_ident(first, "crate") || is_punct(first, ':') => out.extend(path.iter().cloned()),
-        [first, rest @ ..] if is_ident(first, "self") => {
-            out.extend(parse("super"));
-            out.extend(rest.iter().cloned());
-        }
-        _ => {
-            out.extend(parse("super::"));
-            out.extend(path.iter().cloned());
-        }
-    }
+    out.extend(from_inside(path, 1));
     out.extend(parse("::"));
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, names))]);
     out.extend(parse(";"));
@@ -273,18 +285,18 @@ fn take(made: &ModuleOut, top: &[TokenTree], path: &[TokenTree]) -> TokenStream 
 /// item out; `place` is the span of the place. Rust has a name for a const, a static of the process's
 /// and an x86 kernel that takes no compile-time arguments, and finds it where it is written: a
 /// `let _ = NAME;` there, for Rust to say it cannot find the name if `cfg` leaves out the item where
-/// it keeps item `i`. For any other item kernite says so itself, as an error where `cfg` keeps item `i`
-/// and leaves that one out. Both are under the `cfg` of item `i` and of the code that has the place,
-/// where item `i` runs it: [`runs`].
+/// it keeps item `i`; these are the first of the pair this gives back. For any other item kernite says so itself, as
+/// an error where `cfg` keeps item `i` and leaves that one out; these are the second, for they are items of the
+/// module. Both are under the `cfg` of item `i` and of the code that has the place, where item `i` runs it: [`runs`].
 fn named(
     made: &ModuleOut,
     conds: &[Cond],
     i: usize,
     top: &[TokenTree],
     place: &dyn Fn(&lang::Mention) -> Span,
-) -> TokenStream {
+) -> (TokenStream, TokenStream) {
     let module = &made.module;
-    let mut out = TokenStream::new();
+    let (mut names, mut errors) = (TokenStream::new(), TokenStream::new());
     for m in made.items[i].mentions() {
         let j = position(module, &m.name);
         let kept = Cond::all([conds[i].clone(), runs(made, conds, i, module.item_at(m.span), &[])]);
@@ -295,17 +307,17 @@ fn named(
         };
         if rust {
             let Some(guard) = kept.guard() else { continue };
-            out.extend(guard);
-            out.extend(parse("let _ ="));
-            out.extend([name_at(&module.items[j], top, place(m))]);
-            out.extend(parse(";"));
+            names.extend(guard);
+            names.extend(parse("let _ ="));
+            names.extend([name_at(&module.items[j], top, place(m))]);
+            names.extend(parse(";"));
         } else if let Some(guard) = Cond::all([kept, conds[j].clone().not()]).guard() {
             let reader = module.items[i].name().expect("an item that names others has a name");
             let message = format!("`{}` is left out by `cfg` where `{reader}`, which names it, is kept", m.name);
-            out.extend(error_under(&guard, place(m), &message));
+            errors.extend(error_under(&guard, place(m), &message));
         }
     }
-    out
+    (names, errors)
 }
 
 /// The condition under which item `i` of `made` runs the code of item `c`, but for the `cfg` of `i`:

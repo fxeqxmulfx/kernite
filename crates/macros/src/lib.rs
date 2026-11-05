@@ -154,6 +154,10 @@
 //! The Rust the macros write names the numbers and `str` by their paths, `::core::primitive::u64`,
 //! so a module may give any of those names another type and build, so long as none of its kernels
 //! takes or gives that name as a number.
+//! A number written by its path, `core::primitive::u64` or `::std::primitive::u64`, is that number,
+//! and Rust is asked of the path as of the name: it goes through `core` or `std`, so a module that
+//! gives either another meaning, `use crate::fake as core;`, has Rust say that the type is not the
+//! number, at the type, once.
 //! Any other type a kernel takes or gives back is kernite's error alone, at the type: `f128`,
 //! `[f16; 4]`, `!` as a parameter, `[u64]`, or a type of the crate's named `f16` or `f128`. The
 //! macros write a name Rust cannot find for it, with the type as its argument, so that Rust says
@@ -175,22 +179,30 @@
 //! Rust has none to ask for. A pointer of two words to a type Rust refuses by itself,
 //! `-> *mut dyn Copy`, is kernite's error alone, though Rust says its own of a plain kernel's
 //! result. A result of `()` is no result, and no error.
+//! A name written raw is the name Rust reads, in a type as in a value's name: `r#u64` is the number
+//! `u64`, `r#f16` the half a GPU kernel's launcher takes as kernite-cuda has it, and `r#f128` a type
+//! kernite refuses, as the plain names are. A keyword written raw is a name too: a pointer to
+//! `r#dyn::Foo` has one word, as Rust has it, where a pointer to `dyn Foo` has two. An error says the
+//! keyword as it is written, `r#dyn`. An attribute kernite reads, written raw, is the attribute:
+//! `#[r#instances(1, 2)]`, `#[r#cooperative]`, a GPU kernel's `#[r#maxnreg(32)]`, and the module's
+//! `#[kernels(r#consts = ..)]`. Rust is given none of them, and an error of one is kernite's alone.
 //!
 //! A helper is compiled where a kernel calls it, and an `extern "ptx-func"` function is a `.func`
-//! of the GPU's module, so the macros write no function for either. Where kernite finds an error
-//! in compiling a function or a static, or refuses the module as a whole, they write the types of
-//! every helper and function of the module, one that no kernel calls too: each compile-time
-//! argument's, each parameter's and the result's, as they write the type of a kernel that does not
-//! compile, `let _: ..;` in a block of the module, under the `cfg` of the function and where the
-//! error is said. kernite refuses the module as a whole when it is two modules, when no module of
-//! PTX holds its GPU kernels and statics, when an item of its own has the name of a const it
-//! takes, when the workspace's name is not a string, and when its attribute is refused, as below.
-//! Rust finds the names in the types, so an import that only they name is used, and it says of
-//! them only that a lifetime is not declared, that a module is where a type is written, and what a
-//! macro writes; it says the same of a helper that no kernel calls. Only where a macro has written
-//! an error as an item of the module is Rust silent about a name it cannot find, as `gpr` and
-//! `local<[u32; 4], 16>` are, so the types are shown nowhere else. A module that builds is shown
-//! none of them, so an import that only a helper names is unused to Rust.
+//! of the GPU's module, so the macros write no function for either. Where kernite finds any error
+//! in the module, they write the types of every helper and function of the module, one that no
+//! kernel calls too: each compile-time argument's, each parameter's and the result's, as they write
+//! the type of a kernel that does not compile, `let _: ..;` in a block of the module, under the
+//! `cfg` of the function and where the error is said. Every error is an item of the module, as Rust
+//! is silent about a name it cannot find, as `gpr` and `local<[u32; 4], 16>` are, only in a module
+//! that has one. So the types are shown nowhere else. In such a module Rust says nothing of any
+//! other name it cannot find either, a const that `cfg` leaves out say, until the errors are
+//! mended. Rust finds the names in the types, so an import that only they name is used, and it says
+//! of them only that a lifetime is not declared, that a module is where a type is written, and what
+//! a macro writes; it says the same of a helper that no kernel calls. The room of the statics is
+//! the one error that Rust decides, by `cfg`. `__Room` is derived on a struct with a field for each
+//! static and each helper, under the `cfg` of its item. It counts the room of the statics Rust
+//! keeps, and writes the error, with the types of the helpers Rust keeps beside it. A module that
+//! builds is shown none of them, so an import that only a helper names is unused to Rust.
 //!
 //! The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one,
 //! `dead_code` say, and build its kernels: Rust lints the names and the code a kernel is
@@ -320,8 +332,32 @@
 //! Rust is said, as for any module: the dependency the crate needs, `kernite-cuda` for a GPU item that `cfg` keeps and
 //! `kernite-cpu` for an x86 static or cooperative kernel; a compile-time argument named as a parameter of a launcher or
 //! of a `_blocks` method, `grid`, `threads` or `shared`; and a GPU kernel or a static named as a cooperative kernel's
-//! `_blocks` method. A module kernite cannot read holds its refusal alone, and the code that names its items is not an
-//! error as well, for the error is in the module.
+//! `_blocks` method.
+//!
+//! A module kernite cannot read is refused whole as well, and stays with every item kernite can read. A `const` or a
+//! `static` it cannot read ends at its `;`, for its value may hold a `{..}`, as in `= { 1 };`. Any other item ends at
+//! its first `;`, or at its first `{..}` outside `<..>`: a function at its body. The items after it are read as they
+//! are. If items share a name, it knows one of them: a const before a function, a function before a static, else the
+//! first. If it cannot read an item and reads no function that names an ABI, it knows no static, for the kernels say
+//! whose a static is, the process's or the GPU's. If brackets nest too deep, it knows no item. Its items are as in a
+//! module refused at its attribute, with two differences: the module is given the consts it takes, and kernite says
+//! nothing of an item of its own that has the name of one. The error is said once, where it can be mended. If the
+//! module's attribute is refused too, that refusal is said instead. So Rust says nothing of the code that names an item
+//! kernite knows, by a path, by a `use` or by a glob, beside the error. Of a name kernite does not know, as that of an
+//! item it cannot read, Rust says nothing of a path or a `use`, for the error is in the module. It cannot find the name
+//! by a glob or as a method of `Kernels`, as it cannot find a name that no module has. A glob that finds none of what
+//! it names is unused, and Rust warns of it.
+//!
+//! A path to a module of consts that Rust cannot find, as in `consts = crate::model::sizs`, is told once, by Rust, at
+//! the name it cannot find. So is a path to a module with no `#[kernite_macros::consts]` on it, at the module's name:
+//! Rust says the module has no `__kernite_consts`, which that attribute writes. Rust's error is an unresolved import,
+//! of the path as the macro writes it, from a module of its own in the module of kernels. A path from `self`, `super`
+//! or a name is said from there: `nope` is `super::super::nope`. A name after the first is said in the module before
+//! it, which the macro names `__`, that module's name, `_` and a number: `crate::hidden::nope` is `__hidden_3::nope`.
+//! The macro cannot tell that the path fails, for Rust finds the path after the macro runs. The module of kernels
+//! stays, with nothing in it. Rust says nothing of the code that names its items by a path, wherever it is. A glob of
+//! the module brings in nothing, and Rust warns of that alone. A `use` of an item by its name, `use crate::cpu::step;`,
+//! is Rust's error as well, for the module has no `step` until the path is mended.
 //!
 //! An argument of `#[consts]`, as in `#[consts(x)]`, is told where it is, and changes nothing else. The
 //! module is the one it is without the argument: its other errors are said, and the code that names its
@@ -344,8 +380,8 @@ use kernite::lang;
 
 use crate::expand::expand;
 use crate::rust::{
-    MACROS, Site, attrs_len, braced, depends_on, error, flatten, inner_attribute, is_ident, is_path, is_punct, lex,
-    module, needs_dependency, parse, site,
+    MACROS, Site, attrs_len, braced, depends_on, error, flatten, for_rust, inner_attribute, is_ident, is_path,
+    is_punct, lex, module, named, needs_dependency, parse, path_uses, site,
 };
 
 /// See the crate documentation.
@@ -370,7 +406,7 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
     // dependency on `kernite-cuda` or `kernite-cpu` it needs, is said, as for any module.
     let refused = |why: TokenStream| module(head, braces, expand(None, Some(why), braces.stream()));
     let path = match &attr[..] {
-        [c, eq, path @ ..] if is_ident(c, "consts") && is_punct(eq, '=') && is_path(path) => path,
+        [c, eq, path @ ..] if named(c, "consts") && is_punct(eq, '=') && is_path(path) => path,
         _ => {
             let message = "`#[kernels]` takes the module of consts its kernels read, as `consts = crate::model::sizes`, \
                            a module `#[kernite_macros::consts]` is on; or nothing";
@@ -383,15 +419,25 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !depends_on(MACROS) {
         return refused(error(site(), &needs_dependency("a module of kernels given consts", MACROS)));
     }
+    // The module is written here, with the call in it, and not the call in its place: Rust finds the path only
+    // after this runs, and where it cannot, the module is still there, with nothing in it, for the code that
+    // names it. Its own attributes, `#![..]`, three tokens each, stay first, where Rust has them. The path is
+    // found in a module of its own, `__consts`, which the docs hide, written at the path's last name, for an
+    // error of Rust's in it to point there.
+    let body = flatten(braces.stream());
+    let attrs = body.as_chunks::<3>().0.iter().take_while(|attr| inner_attribute(*attr)).count() * 3;
+    let mut inner: TokenStream = body[..attrs].iter().cloned().collect();
+    let site = Site::at(path.last().map_or_else(Span::call_site, |t| t.span().resolved_at(Span::call_site())));
+    inner.extend(parse("#[doc(hidden)] mod __consts"));
+    inner.extend([TokenTree::Group(Group::new(Delimiter::Brace, path_uses(path)))]);
     // The macro the consts' module has calls `__kernels!` back with the consts, their module's
-    // path, and this module.
-    let mut out: TokenStream = path.iter().cloned().collect();
-    out.extend(parse("::__kernite_consts!"));
-    let mut given: TokenStream =
-        [TokenTree::Group(Group::new(Delimiter::Parenthesis, path.iter().cloned().collect()))].into_iter().collect();
-    given.extend(tokens);
-    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, given))]);
-    out
+    // path, and what is in this module.
+    inner.extend(parse("__consts::__kernite_consts!"));
+    let given = [Group::new(Delimiter::Parenthesis, path.iter().cloned().collect()), braces.clone()];
+    let call = Group::new(Delimiter::Brace, given.into_iter().map(TokenTree::Group).collect());
+    inner.extend([TokenTree::Group(call)]);
+    drop(site);
+    module(head, braces, inner)
 }
 
 /// See the crate documentation.
@@ -407,6 +453,7 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     let top = flatten(braces.stream());
     let (trees, spans) = lex(&top);
+    let top = for_rust(top);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(Span::call_site);
     // The module as it is, for Rust; and the consts kernite reads, for the kernels. The argument is told where
     // it is, and changes nothing else: the module is the one it would be without it, for the modules of kernels
@@ -452,19 +499,19 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
     inner.extend(parse("#[doc(hidden)] macro_rules! __kernite_consts"));
     inner.extend([TokenTree::Group(Group::new(Delimiter::Brace, rule))]);
     inner.extend(parse("#[doc(hidden)] pub(crate) use __kernite_consts;"));
+    // A module with nothing in it, which `#[kernels(consts = ..)]` imports a glob of: a module with no `#[consts]` on
+    // it has none, and the glob is the failure Rust says nothing more after.
+    inner.extend(parse("#[doc(hidden)] pub mod __kernite {}"));
     module(head, braces, inner)
 }
 
-/// What `#[kernels(consts = path)]` on a module becomes once the macro of the module of consts
-/// at `path` has handed it their tokens: `[consts] (path) module`.
+/// What `#[kernels(consts = path)]` on a module writes in it once the macro of the module of consts
+/// at `path` has handed it their tokens: `[consts] (path) { what is in the module }`.
 #[doc(hidden)]
 #[proc_macro]
 pub fn __kernels(input: TokenStream) -> TokenStream {
     let tokens: Vec<TokenTree> = input.into_iter().collect();
-    let [TokenTree::Group(consts), TokenTree::Group(path), rest @ ..] = &tokens[..] else {
-        return error(Span::call_site(), "`__kernels!` is how `#[kernels(consts = ..)]` is given its consts");
-    };
-    let Some((braces, head)) = braced(rest) else {
+    let [TokenTree::Group(consts), TokenTree::Group(path), TokenTree::Group(braces)] = &tokens[..] else {
         return error(Span::call_site(), "`__kernels!` is how `#[kernels(consts = ..)]` is given its consts");
     };
     // What the macro writes is of the hygiene of the group `#[kernels]` made of the path, which is
@@ -476,14 +523,14 @@ pub fn __kernels(input: TokenStream) -> TokenStream {
     let site = Site::at(path.first().map_or(at, |t| t.span().resolved_at(at)));
     let inner = expand(Some((consts.stream(), &path)), None, braces.stream());
     drop(site);
-    module(head, braces, inner)
+    inner
 }
 
 /// What Rust counts of a module's GPU statics once `cfg` has left out those it leaves out: their
 /// room. `#[kernels]` writes a struct with a field for each, under its `cfg`, for this to be derived
-/// on.
+/// on, and one for each helper, to show Rust the types of its signature where there is an error.
 #[doc(hidden)]
-#[proc_macro_derive(__Room, attributes(kernite_room))]
+#[proc_macro_derive(__Room, attributes(kernite_room, kernite_shown))]
 pub fn __room(input: TokenStream) -> TokenStream {
     room::derive(input)
 }

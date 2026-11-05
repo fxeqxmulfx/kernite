@@ -45,6 +45,20 @@ pub unsafe extern "sysv64" fn k(
 ) -> &mut[f32] {}
 "#;
 
+/// A kernel whose types are named raw, `r#u64`: a parameter's, an array's, a pointer's, a tuple's, the result's, a
+/// variable's, an array of variables', a helper's parameter's and a const's. The array's length is a const's.
+const RAW: &str = r#"
+const N: r#usize = 2;
+
+pub unsafe extern "sysv64" fn k(a: r#u64, b: [r#f32; N], c: *const [r#u8; 4], d: (r#u8, r#u16)) -> r#u64 {
+    let v: r#ymm;
+    let w: [r#u32; N];
+    twice(a);
+}
+
+fn twice(x: r#gpr) {}
+"#;
+
 /// A module of two statics, and a kernel that names them after an `add`: `B`, then `A`, then `B`
 /// again, in an address.
 const STATICS: &str = r#"
@@ -238,6 +252,27 @@ fn a_type_is_given_to_the_target_as_rust_writes_it() {
         "param g: Pair<fn() -> u8, 2> = v6",
         "param h: Box<dyn Fn(u8) -> u8 + Send> = v7",
         "result &mut [f32]",
+        "end",
+    ];
+    assert_eq!(trace.lines, want);
+}
+
+/// A name written raw is the name Rust reads, so the target is told `u64` of `r#u64`, and `[f32; 2]` of `[r#f32; N]`:
+/// each name of a type is read so.
+#[test]
+fn a_type_written_raw_is_given_to_the_target_as_the_type_rust_reads() {
+    let mut trace = Trace::default();
+    run(RAW, &mut trace).unwrap();
+    let want = [
+        "param a: u64 = v0",
+        "param b: [f32; 2] = v1",
+        "param c: *const [u8; 4] = v2",
+        "param d: (u8, u16) = v3",
+        "result u64",
+        "var v: ymm = v4",
+        "var w0: u32 = v5",
+        "var w1: u32 = v6",
+        "view v0 as gpr = v7",
         "end",
     ];
     assert_eq!(trace.lines, want);

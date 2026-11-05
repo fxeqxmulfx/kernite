@@ -100,9 +100,11 @@ pub struct Given {
 pub struct ModuleOut {
     /// The module, without each const given that an item of its own is named as too.
     pub module: Module,
-    /// An error at each item of the module's own named as a const given is.
+    /// An error at each item of the module's own named as a const given is; none, in a refused
+    /// module.
     pub given: Vec<Error>,
-    /// Why the module is two, if it has both kinds of kernel and a static.
+    /// Why the module is two, if it has both kinds of kernel and a static; none, in a refused
+    /// module.
     pub owner: Option<Error>,
     /// What each item of `module` is, in order.
     pub items: Vec<ItemOut>,
@@ -154,23 +156,6 @@ impl ItemOut {
             ItemOut::Native(k) => &k.mentions,
             ItemOut::Device(k) => &k.mentions,
             _ => &[],
-        }
-    }
-
-    /// Whether kernite says an error of the item itself: a static it cannot lay out; a helper
-    /// whose body, `#[instances(..)]` or attributes are wrong; a function of an ABI it compiles
-    /// nothing for; a kernel that is not an `unsafe fn`; or a kernel or an `extern "ptx-func"`
-    /// function whose attributes are wrong, or of which an instance does not compile. An error of
-    /// the module as a whole is none of an item's, and a module refused whole says none of its items'.
-    pub fn failed(&self) -> bool {
-        match self {
-            ItemOut::Rust | ItemOut::Given => false,
-            ItemOut::HostStatic(laid) => laid.as_ref().err().is_some_and(|failed| failed.error.is_some()),
-            ItemOut::DeviceStatic(laid) => laid.as_ref().err().is_some_and(|failed| failed.error.is_some()),
-            ItemOut::Helper(errors) => !errors.is_empty(),
-            ItemOut::Unknown(error) => error.is_some(),
-            ItemOut::Native(k) => k.not_unsafe.is_some() || k.said.is_some() || !k.errors.is_empty(),
-            ItemOut::Device(k) => k.not_unsafe.is_some() || k.said.is_some() || !k.errors.is_empty(),
         }
     }
 }

@@ -5,7 +5,7 @@ use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
 
 use kernite::{Kept, When};
 
-use crate::rust::{flatten, is_punct, named, parse};
+use crate::rust::{attrs_len, flatten, inner_attribute, is_error, is_punct, named, parse};
 
 /// When something the macro writes is there: always, never, or when a predicate of `cfg` holds,
 /// `feature = "cuda"`. The macro does not evaluate a predicate; it writes it for Rust to.
@@ -30,6 +30,33 @@ impl Cond {
             let [_, TokenTree::Group(meta)] = attr else { unreachable!("an attribute is `#` and brackets") };
             predicate(&flatten(meta.stream())).map(Cond::If)
         }))
+    }
+
+    /// When `module`, the tokens of a module the macros write, has an error as an item of it: the `cfg` before each
+    /// [`error`](crate::rust::error) at its top, as one condition. Only there is Rust silent about a name it cannot
+    /// find in the module, so only there can it be shown the types of a signature that nothing else writes. An item
+    /// begins at the start, or after the `;` or the braces that end the one before.
+    pub(crate) fn errors_in(module: &TokenStream) -> Cond {
+        let tokens: Vec<TokenTree> = module.clone().into_iter().collect();
+        let ends =
+            |t: &TokenTree| is_punct(t, ';') || matches!(t, TokenTree::Group(g) if g.delimiter() == Delimiter::Brace);
+        let (mut found, mut attrs, mut start, mut i) = (vec![], TokenStream::new(), true, 0);
+        while i < tokens.len() {
+            let (rest, n) = (&tokens[i..], attrs_len(&tokens[i..]));
+            if start && inner_attribute(rest) {
+                i += 3;
+            } else if start && n > 0 {
+                attrs.extend(rest[..n].iter().cloned());
+                i += n;
+            } else {
+                if start && is_error(rest) {
+                    found.push(Cond::of(&attrs));
+                }
+                (attrs, start) = (TokenStream::new(), ends(&tokens[i]));
+                i += 1;
+            }
+        }
+        Cond::any(found)
     }
 
     /// When any of `parts` holds, each once: `Always` if one always does, `Never` for none.

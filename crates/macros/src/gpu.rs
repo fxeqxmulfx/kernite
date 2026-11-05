@@ -33,14 +33,16 @@ pub(crate) type Laid = Result<Compiled<DeviceStatic>, Failed<DeviceStatic>>;
 /// instance by the index of its name in `symbols`. Each static of `memory` has a method
 /// of its name too, which gives its memory on the GPU, or never runs, if it did not compile;
 /// and each cooperative kernel has one that says how many blocks its grid has at most, unless
-/// a kernel or a static has that name, which is an error where `at` says. `ptx` is the module's
+/// a kernel or a static has that name, which is an error where `at` says. A compile-time argument
+/// named as a parameter of a launcher or of a `_blocks` method is an error too, at its name. Each
+/// is written after the `impl`, as an item of the module. `ptx` is the module's
 /// text in parts. Each part, each name in `symbols` and each static of `memory` is there where its
 /// condition holds, for Rust puts the module together where it knows which `cfg` holds; the index
 /// of a name is its place among those that are there. A crate without `kernite-cuda` has `PTX`
-/// empty and a `Kernels` that is the error, said once, at the module: nothing else is said of the
-/// code that loads it or launches a kernel. Both are there when any of the module's GPU items is,
-/// `on_gpu` their conditions: a feature that brings `kernite-cuda` and keeps them lets the crate
-/// build without the feature.
+/// empty and a `Kernels` that is [`missing`]'s type, with the error said once, at the module: nothing
+/// else is said of the code that loads it or launches a kernel. Both are there when any of the
+/// module's GPU items is, `on_gpu` their conditions: a feature that brings `kernite-cuda` and keeps
+/// them lets the crate build without the feature.
 pub(crate) fn gpu(
     launchers: &[(&Fn, &Launcher)],
     symbols: &[(Cond, &str)],
@@ -52,12 +54,14 @@ pub(crate) fn gpu(
 ) -> TokenStream {
     if !depends_on(CUDA) {
         let Some(gate) = Cond::any(on_gpu.iter().cloned()).guard() else { return TokenStream::new() };
+        let (kernels, error) = missing(&gate, site(), "a module of GPU kernels", CUDA);
         let mut out = gate.clone();
         out.extend(parse("pub const PTX: &::core::primitive::str = \"\";"));
         out.extend(gate);
         out.extend(parse("pub type Kernels ="));
-        out.extend(missing(site(), "a module of GPU kernels", CUDA));
+        out.extend(kernels);
         out.extend(parse(";"));
+        out.extend(error);
         return out;
     }
     // The module's variables: the statics that compiled, in order.
@@ -95,7 +99,9 @@ pub(crate) fn gpu(
     methods.extend([TokenTree::Group(Group::new(Delimiter::Brace, load))]);
     // The index of the name of symbol `i` among the names that are there.
     let index = |i: usize| Cond::count(symbols[..i].iter().map(|(c, _)| c));
-    let mut errors = TokenStream::new();
+    // The errors that follow the `impl`, as items of the module: those of a name that two methods have, and those of
+    // a compile-time argument named as a parameter that a method binds for itself.
+    let (mut errors, mut clashed) = (TokenStream::new(), TokenStream::new());
     let taken: Vec<&str> =
         launchers.iter().map(|(f, _)| f.name.as_str()).chain(memory.iter().map(|(s, ..)| s.name.as_str())).collect();
     for (f, how) in launchers {
@@ -103,7 +109,11 @@ pub(crate) fn gpu(
             Launcher::Never => None,
             Launcher::Of(l) => Some(l.iter().map(|(args, i)| (args.clone(), index(*i))).collect()),
         };
-        methods.extend(launcher(f, launched.as_deref(), top));
+        // The methods would be under the kernel's `cfg`, and so are their errors.
+        let cfg = carried(attrs(f, top), false);
+        let grid = clashes(f, &cfg, &["grid"], "the launcher", top);
+        methods.extend(launcher(f, launched.as_deref().filter(|_| grid.is_empty()), top));
+        clashed.extend(grid);
         let Some(c) = &f.cooperative else { continue };
         let name = blocks_name(f);
         if taken.contains(&name.as_str()) {
@@ -112,11 +122,12 @@ pub(crate) fn gpu(
                  at most, and a kernel or a static of the module is named `{name}` as well",
                 f.name
             );
-            // The method would be under the kernel's `cfg`, and so is the error of its name.
-            errors.extend(error_under(&carried(attrs(f, top), false), at(c.span), &message));
+            errors.extend(error_under(&cfg, at(c.span), &message));
             continue;
         }
-        methods.extend(blocks(f, launched.as_deref(), top));
+        let threads = clashes(f, &cfg, &["threads", "shared"], &format!("`{name}`"), top);
+        methods.extend(blocks(f, launched.as_deref().filter(|_| threads.is_empty()), top));
+        clashed.extend(threads);
     }
     for (k, (s, laid, _)) in memory.iter().enumerate() {
         // Its index among the variables there are, those of the statics that compiled.
@@ -124,6 +135,7 @@ pub(crate) fn gpu(
         methods.extend(accessor(s, laid, i, top));
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, methods))]);
+    out.extend(clashed);
     out.extend(errors);
     out
 }
@@ -187,11 +199,9 @@ fn names<'a>(symbols: impl Iterator<Item = (&'a Cond, &'a str)>) -> TokenTree {
 /// the number and not the name the kernel writes; and its compile-time arguments those of `f`,
 /// which pick the instance. A cooperative kernel is launched cooperatively, every block of its
 /// grid at once. The launcher binds `grid` for itself, which a parameter of `f` may be named as
-/// well; a compile-time argument may not, which is an error at its name, and the launcher never
+/// well; a compile-time argument may not, and `launched` is `None` for the launcher that never
 /// runs, as one of a kernel that did not compile. Its result is [`launcher_result`]'s.
 fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStream {
-    let clashes = clashes(f, &["grid"], "the launcher", top);
-    let launched = if clashes.is_empty() { launched } else { None };
     let mut out = attrs(f, top);
     if f.cooperative.is_some() {
         out.extend(parse(&format!(
@@ -252,7 +262,6 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     out.extend(body(f, launched, top, asks(f, top, host), &never, |index| {
         format!("unsafe {{ self.module.{how}({index}, $grid, &[{}]) }}", args.join(", "))
     }));
-    out.extend(clashes);
     out
 }
 
@@ -264,11 +273,9 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
 /// symbol, as `allow`, `target_feature` and `export_name` do. The method's name and generics are
 /// where `f` has its own, but of the macro's span: Rust lints neither, and says a lint of a
 /// compile-time argument once, at the launcher. The method binds `threads` and `shared` for itself,
-/// which a compile-time argument of `f` may not be named: an error at its name, and the method
-/// never runs, as one of a kernel that did not compile.
+/// which a compile-time argument of `f` may not be named, and `launched` is `None` for the method
+/// that never runs, as one of a kernel that did not compile.
 fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStream {
-    let clashes = clashes(f, &["threads", "shared"], &format!("`{}`", blocks_name(f)), top);
-    let launched = if clashes.is_empty() { launched } else { None };
     let mut out = parse(&format!(
         "/// How many blocks a grid of [`{0}`](Self::{0}) has at most, of `threads` threads each and\n\
          /// `shared` bytes of the launch's shared memory: as many as the GPU runs at once, for it\n\
@@ -291,7 +298,6 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
     out.extend(body(f, launched, top, TokenStream::new(), "::core::unreachable!()", |index| {
         format!("self.module.resident({index}, $threads, $shared)")
     }));
-    out.extend(clashes);
     out
 }
 
