@@ -106,6 +106,9 @@ const KEYWORDS: &[&str] = &[
     "virtual", "yield", // reserved
 ];
 
+/// The names Rust lets be written raw in no place: `r#self` and `r#_` are errors.
+const NEVER_RAW: &[&str] = &["self", "Self", "super", "crate", "_"];
+
 /// The types of `core::primitive`, which Rust names by a path as well as by a name: `core::primitive::u64`.
 const PRIMITIVES: [&str; 17] = [
     "bool", "char", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64", "u128",
@@ -283,13 +286,13 @@ fn keyword(name: &str) -> bool {
 /// Whether the printer of rustc writes a space between `trees[i - 1]` and `trees[i]`, of a type's own tokens:
 /// after a keyword that a type or a bound follows, `dyn`, `impl`, `const`, `mut`, `as`, and before `as`,
 /// `<A<'a> as B>::C`; after `,`; after a `:` that is not half of a `::`; after the `>` of a binder,
-/// `for<'a> fn(&'a u8)`; between words; after the name of a lifetime, `&'a [u8]` and `&'a !`; on each side of
-/// a `+` or a `=` that no operator holds, as in `dyn A + B` and `Item = &u8`; and on each side of an arrow,
-/// `fn(u8) -> u8`. The operators that hold a `+` or a `=`, `+=`, `==`, `=>`, `<=` and `..=`, are written
-/// close, and so are the two characters of an arrow. A `>` before a `=` is no operator's: it closes the
-/// arguments of a name, so `Item<X>=u8` and `Item<X> = u8` are both written `Item<X> = u8`. The braces of a
-/// macro have a space before them, `byte! {..}`. Other punctuation and brackets are against the word before
-/// them.
+/// `for<'a> fn(&'a u8)`; between words; after the name of a lifetime, `&'a [u8]`, `&'a !` and `&'a ::b::C`, but
+/// not before a `,`, a `>` or the `:` of a bound, `'b: 'a`; on each side of a `+` or a `=` that no operator
+/// holds, as in `dyn A + B` and `Item = &u8`; and on each side of an arrow, `fn(u8) -> u8`. The operators that
+/// hold a `+` or a `=`, `+=`, `==`, `=>`, `<=` and `..=`, are written close, and so are the two characters of
+/// an arrow. A `>` before a `=` is no operator's: it closes the arguments of a name, so `Item<X>=u8` and
+/// `Item<X> = u8` are both written `Item<X> = u8`. The braces of a macro have a space before them,
+/// `byte! {..}`. Other punctuation and brackets are against the word before them.
 fn spaced(trees: &[Tree], i: usize) -> bool {
     // Only a `=` or a `>` after a `=`, and a `=` after a `+`, make an operator: `=&` and `+?` are none, as
     // the `&` after the `=` of `Item=&u8` shows. No operator ends in `+`, and `+=` begins with it; `==` and
@@ -315,7 +318,7 @@ fn spaced(trees: &[Tree], i: usize) -> bool {
             (Tree::Ident { name, .. }, _) if keyword(name) => true,
             (_, Tree::Ident { name, .. }) if name == "as" => true,
             (Tree::Ident { .. }, after) if lifetime(trees, i - 1) => {
-                !matches!(after, Tree::Punct { ch: ',' | '>' | ':', .. })
+                !matches!(after, Tree::Punct { ch: ',' | '>', .. }) && !colon(trees, i)
             }
             (Tree::Punct { ch, .. }, after) => {
                 *ch == ',' || *ch == '!' && matches!(after, Tree::Group { delim: Delim::Brace, .. })
@@ -381,8 +384,14 @@ fn last_field(mut fields: &[Tree]) -> &[Tree] {
 /// The characters that are punctuation.
 const PUNCT: &str = "+-*/%^!&|=<>@.,;:#$?~";
 
+/// Whether a name can start with `c`.
+fn starts_name(c: char) -> bool {
+    c == '_' || c.is_alphabetic()
+}
+
 /// The tokens of `src`, each spanned by its byte offset, and each with whether a space, a line break or a
-/// comment comes before it. Comments are skipped, doc comments too.
+/// comment comes before it. Comments are skipped, doc comments too. A name written raw that Rust refuses,
+/// `r#self` say, is an error at its `r#`, and so is an `r#` that no name follows.
 pub fn lex(src: &str) -> Result<Vec<Tree>, Error> {
     Lexer { src, pos: 0 }.trees(None, 0).map(|(trees, _)| trees)
 }
@@ -446,13 +455,24 @@ impl Lexer<'_> {
                 '"' => out.push(Tree::Lit { text: self.string()?, space, span }),
                 '\'' => out.push(Tree::Lit { text: self.char()?, space, span }),
                 c if c.is_ascii_digit() => out.push(Tree::Lit { text: self.number(), space, span }),
-                c if c == '_' || c.is_alphabetic() => {
+                c if starts_name(c) => {
                     let start = self.pos;
-                    if self.src[start..].starts_with("r#") {
+                    let raw = self.src[start..].starts_with("r#");
+                    if raw {
                         self.pos += 2;
                     }
+                    let from = self.pos;
                     while let Some(c) = self.peek().filter(|&c| c == '_' || c.is_alphanumeric()) {
                         self.pos += c.len_utf8();
+                    }
+                    if raw {
+                        let word = &self.src[from..self.pos];
+                        if !word.starts_with(starts_name) {
+                            return Err(Error { span, message: "`r#` comes before a name, as in `r#u64`".into() });
+                        }
+                        if NEVER_RAW.contains(&word) {
+                            return Err(Error { span, message: format!("`{word}` cannot be written raw") });
+                        }
                     }
                     out.push(Tree::Ident { name: self.src[start..self.pos].to_string(), space, span });
                 }

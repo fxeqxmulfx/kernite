@@ -2914,6 +2914,23 @@ fn a_primitive_written_as_a_path_after_a_lifetime_is_the_primitive_in_kernites_e
     refuses("primitive_paths_lifetimes", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
+/// A lifetime before a path from the root that is no primitive's, `&'static ::core::ffi::CStr`, keeps its space in
+/// kernite's error, as it does before any other path, `&'static core::ffi::CStr`: for the parameter of an x86 kernel
+/// and of a GPU kernel, and for a function type's parameter, `for<'a> fn(&'a ::core::ffi::CStr)`.
+#[test]
+fn a_lifetime_keeps_its_space_before_a_path_from_the_root_in_kernites_error() {
+    let mut said = vec![
+        // x86, by a path from the root and by one that is not, and in a function type's parameter.
+        x86_takes("6:45", "", "&'static ::core::ffi::CStr"),
+        x86_takes("10:44", "", "&'static core::ffi::CStr"),
+        x86_takes("14:44", "", "for<'a> fn(&'a ::core::ffi::CStr)"),
+        // A GPU.
+        gpu_takes("21:49", "", "&'static ::core::ffi::CStr"),
+    ];
+    said.push(format!("error: could not compile `lifetime_root` (lib) due to {} previous errors", said.len()));
+    refuses("lifetime_root", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
 /// A module that gives `core` or `std` another meaning, `use crate::fake as core;`, has Rust say that a number written
 /// as its path is not the number, as it says it of the number's name that a module gives another type: at the type,
 /// once, for each parameter and result of an x86 kernel and each parameter of a GPU kernel. A pointer's type is not
@@ -4040,6 +4057,37 @@ fn an_attribute_written_raw_is_wrong_as_the_plain_one_is() {
     refuses("raw_attributes_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
+/// A name Rust refuses written raw, `r#self`, `r#Self`, `r#super`, `r#crate` or `r#_`, is Rust's error in a module of
+/// kernels, at each place it is written, in Rust's words, "`self` cannot be a raw identifier". Rust reads the name
+/// before the macros run, and kernite says nothing. So it is for a variable, which the macros hand to kernite alone,
+/// and for `*const r#super::Foo` and `*const r#Self`, where Rust adds what it says of them in plain Rust: that it
+/// cannot find the type. An `r#` that no name follows, a parameter's, is the error of Rust's lexer, "found invalid
+/// character; only `#` is allowed in raw string delimitation", which stops the crate.
+#[test]
+fn a_name_rust_refuses_raw_is_rusts_error_in_a_module_of_kernels() {
+    let raw = |place: &str, name: &str| format!("src/lib.rs:{place}: error: `{name}` cannot be a raw identifier");
+    let mut said = vec![];
+    // A variable's kernel writes its name on three lines at one column: the `let`, the `mov` and the `ret`.
+    for (name, line) in [("self", 8), ("Self", 14), ("super", 20), ("crate", 26), ("_", 32)] {
+        said.extend((line..line + 3).map(|line| raw(&format!("{line}:13"), name)));
+    }
+    said.extend([raw("40:52", "super"), raw("40:76", "super"), raw("44:56", "Self"), raw("44:74", "Self")]);
+    let no_foo = "error[E0425]: cannot find type `Foo` in module `super`: not found in `super`";
+    let no_self = "error[E0411]: cannot find type `Self` in this scope: `Self` is only available in impls, traits, and \
+                   type definitions";
+    said.extend(["40:61", "40:85"].map(|place| format!("src/lib.rs:{place}: {no_foo}")));
+    said.extend(["44:56", "44:74"].map(|place| format!("src/lib.rs:{place}: {no_self}")));
+    said.push(format!("error: could not compile `raw_names_refused` (lib) due to {} previous errors", said.len()));
+    refuses("raw_names_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses(
+        "raw_alone_refused",
+        &[
+            "src/lib.rs:5:45: error: found invalid character; only `#` is allowed in raw string delimitation: :",
+            "error: could not compile `raw_alone_refused` (lib) due to 1 previous error",
+        ],
+    );
+}
+
 /// The method that says how many blocks a cooperative GPU kernel's grid has at most, `k_blocks`,
 /// keeps what the kernel says of lints by giving Rust nothing of the kernel's to lint: its name and
 /// the compile-time arguments it takes are of the macro's span. Of the kernel's attributes it keeps
@@ -4253,4 +4301,95 @@ fn an_error_at_a_fragment_is_said_where_the_fragment_is() {
     ];
     said.push(format!("error: could not compile `fragments_refused` (lib) due to {} previous errors", said.len()));
     refuses("fragments_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A macro's fragment `$t:ty` of bounds, `dyn core::fmt::Debug + Send`, is one type to Rust behind a pointer or a
+/// reference, `*const $t`, `*mut $t`, `&$t`, `&mut $t` and `&'static $t`, wherever the macros write it back: in a
+/// parameter and in a result, of an x86 kernel, of a GPU kernel and of a helper, and in a type that holds it, a tuple,
+/// an array, a function pointer or an argument of a type. kernite refuses each, for a pointer to a trait object has two
+/// words and a kernel takes no reference. Rust says nothing of the fragment, as it says nothing of it in a macro that
+/// does not call kernite: not that its `+` is ambiguous, as it says of `*const dyn Debug + Send` written out. Each is
+/// also built with the bounds in parentheses, as written by hand: the errors are the same, at the same places. Rust's
+/// one word is a warning at the parentheses of the GPU parameters' call: the launcher writes the type in `Ptr<..>`,
+/// where they are not needed.
+#[test]
+fn a_fragment_of_bounds_behind_a_pointer_is_one_type_to_rust_wherever_the_macros_write_it_back() {
+    let (mut said, mut repeated) = (Vec::new(), 0);
+    // The fixture calls each macro with the fragment, then with the type in parentheses. Cargo says a message once,
+    // however many calls make it, and counts each.
+    let mut both = |lines: &dyn Fn(&str) -> Vec<String>| {
+        for ty in ["dyn core::fmt::Debug + Send", "(dyn core::fmt::Debug + Send)"] {
+            for line in lines(ty) {
+                if said.contains(&line) {
+                    repeated += 1;
+                } else {
+                    said.push(line);
+                }
+            }
+        }
+    };
+    both(&|ty| {
+        vec![
+            two_words("17:48", "", ty),
+            two_words("20:48", "", ty),
+            x86_takes("23:48", "", &format!("&{ty}")),
+            x86_takes("26:48", "", &format!("&mut {ty}")),
+            x86_takes("29:48", "", &format!("&'static {ty}")),
+        ]
+    });
+    both(&|ty| {
+        vec![
+            two_words("46:56", "", ty),
+            two_words("49:56", "", ty),
+            x86_gives("52:56", "", &format!("&'static {ty}")),
+            x86_gives("55:56", "", &format!("&'static mut {ty}")),
+            x86_takes("58:48", "", "&u8"),
+            x86_takes("61:48", "", "&u8"),
+        ]
+    });
+    both(&|ty| {
+        vec![
+            two_words("76:52", "", ty),
+            two_words("79:52", "", ty),
+            gpu_takes("82:52", "", &format!("&{ty}")),
+            gpu_takes("85:52", "", &format!("&mut {ty}")),
+            gpu_takes("88:52", "", &format!("&'static {ty}")),
+        ]
+    });
+    both(&|ty| {
+        let places = ["103:54", "106:54", "109:54", "112:54", "115:54"];
+        let behind = ["*const ", "*mut ", "&", "&mut ", "&'static "];
+        places.into_iter().zip(behind).map(|(place, behind)| gpu_returns(place, "", &format!("{behind}{ty}"))).collect()
+    });
+    // A helper is shown to Rust where a kernel of its module does not compile, so each of these has one that does not.
+    both(&|ty| vec![two_words("131:48", "", ty)]);
+    both(&|ty| vec![two_words("163:48", "", ty)]);
+    both(&|ty| {
+        vec![
+            x86_takes("200:52", "", &format!("(u8, &'static {ty})")),
+            x86_gives("203:60", "", &format!("[*const {ty}; 2]")),
+            gpu_takes("206:59", "", &format!("fn(&mut {ty}) -> u8")),
+            x86_takes("209:55", "", &format!("Wrap<&'static {ty}>")),
+        ]
+    });
+    let errors = said.len() + repeated;
+    said.push("src/lib.rs:96:32: warning: unnecessary parentheses around type".to_string());
+    said.push(format!(
+        "error: could not compile `fragments_bounds` (lib) due to {errors} previous errors; 1 warning emitted"
+    ));
+    refuses("fragments_bounds", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A macro's fragment `$t:ty` behind a pointer that kernite takes is one type to Rust and to the kernel, with nothing
+/// said of it: `crate::Wrap<u32>` and `fn(u8) -> u8` behind `*const` and `*mut`, in a parameter and in a result, of an
+/// x86 kernel, of an instance of one and of a GPU kernel; bounds in the argument of a type, `*const Wrap<$t>` with `$t`
+/// as `dyn core::fmt::Debug + Send`, which has a size whatever its argument has; and bounds behind a pointer in a type
+/// of the module's own, `pub type Fat = *const $t;`, which has two words.
+#[test]
+fn a_fragment_behind_a_pointer_that_kernite_takes_is_one_type_to_rust_and_to_the_kernel() {
+    let printed = runs_quietly(&["test"], "fragments_pointees");
+    assert!(
+        printed.contains("test result: ok. 4 passed"),
+        "fixtures/fragments_pointees.rs ran, and printed:\n{printed}"
+    );
 }
