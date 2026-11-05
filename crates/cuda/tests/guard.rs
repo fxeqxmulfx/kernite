@@ -1,7 +1,7 @@
 //! A lent element that has a guard page in its aligned 64 KiB is one the driver here faults a
-//! kernel on, as README says. A test of its own, as a program of its own, as `sticky.rs` is: the
+//! kernel on, as GUIDE.md says. A test of its own, as a program of its own, as `sticky.rs` is: the
 //! fault fails the GPU's context for every call after it. A driver that reaches such an element
-//! fails this test, and then the sentence in README and the one in the docs of `Cuda::lend` go.
+//! fails this test, and then the sentence in GUIDE.md and the one in the docs of `Cuda::lend` go.
 
 use kernite_cuda::{Cuda, Grid, Module, arg};
 

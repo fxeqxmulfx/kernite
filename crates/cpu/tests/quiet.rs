@@ -236,7 +236,7 @@ fn changes(threads: usize) {
 /// none, and a launch that places none sends back the threads it moves with a call for each. No
 /// call of the whole run, the first launch's among them, is `mbind`, `set_mempolicy`,
 /// `set_mempolicy_home_node`, `migrate_pages` or `move_pages`: kernite places no memory and sets no
-/// policy, as the README says.
+/// policy, as GUIDE.md says.
 #[test]
 fn a_launch_that_changes_the_placement_makes_a_call_for_each_thread_that_moves_and_no_other() {
     if let Some(threads) = child() {

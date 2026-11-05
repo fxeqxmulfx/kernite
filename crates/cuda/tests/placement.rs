@@ -110,7 +110,7 @@ fn each_advice_is_in_force_for_the_range_it_is_given_for_and_the_driver_says_so(
     let preferred = || m.placement(all.clone()).unwrap().preferred;
     // The driver here takes a NUMA node as the preferred place and changes nothing, though cuda.h
     // says it sets the node: so the place is still the one it was. The day a driver sets the node,
-    // this fails, and README and the docs of `PreferredLocation` and `preferred` change with it.
+    // this fails, and GUIDE.md and the docs of `PreferredLocation` and `preferred` change with it.
     let numa_changes_nothing = |was: Option<Location>| {
         for place in [Location::Numa(0), Location::NumaOfThread] {
             m.advise(all.clone(), Advice::PreferredLocation(place)).unwrap();

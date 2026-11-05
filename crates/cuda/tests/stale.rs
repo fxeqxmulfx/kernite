@@ -1,8 +1,8 @@
 //! A buffer made at the address of one freed may start with the advice and the last prefetch the
-//! freed one had, as README says: the driver here does not always clear them when threads use it
+//! freed one had, as GUIDE.md says: the driver here does not always clear them when threads use it
 //! at once, and clears them when one thread does. A test of its own, as a program of its own, for
 //! the pages it leaves with them would be read by the tests beside it. A driver that clears them
-//! for threads fails this test, and then the sentences in README and in the docs of
+//! for threads fails this test, and then the sentences in GUIDE.md and in the docs of
 //! `Unified::placement` go. So does a driver that makes no buffer at the address of the one freed:
 //! it shows nothing of one thread, or of two, and the test counts the buffers that were.
 

@@ -402,7 +402,7 @@ const QUOTA: usize = 2;
 
 /// A process a cgroup's CPU quota limits to two CPUs may still run on every CPU its thread may:
 /// `cpus` lists all of them, `most` counts the two, and a grid of more threads than that is an
-/// error that says what `most` counts, as README does: the CPUs the caller's thread may run on, or
+/// error that says what `most` counts, as GUIDE.md does: the CPUs the caller's thread may run on, or
 /// fewer where a cgroup limits the process to fewer. `systemd-run` runs the test again in a scope
 /// of the user's systemd manager with a quota of 200%; where there is no `systemd-run`, or it does
 /// not start the test, or its manager sets no quota, the test says so and is skipped.

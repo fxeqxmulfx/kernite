@@ -13,7 +13,7 @@ task of its own, as CLAUDE.md says. With each task, the reviewer gives its devel
 resumed, a brief that names the task, the effort's brief, the files, the commands and the evidence
 to bring, as [DEVELOPER.md](DEVELOPER.md) has a developer work. Only one developer whose task measures runs at a time, as another's build or
 benchmark spoils its numbers. The reviewer checks a bug against the code before it files it, and
-a limit README states is not a bug; it does not fix a bug itself.
+a limit GUIDE.md states is not a bug; it does not fix a bug itself.
 
 Run the commands from the main checkout, where `review.py` means
 `uv run .kanban/notes/<effort>/review.py`, of the task's effort. For each task in review, as it
@@ -31,8 +31,8 @@ comes:
    - **Behaviour.** A listing changes only where the task changes the generated code, and every
      message kernite gives keeps its text and its `line:column` unless the task changes it.
    - **Tests.** New behaviour has a new test, a fake or the real thing, never a mock. No test is
-     weakened. Every rule README states has a test, and a test that skips says so.
-   - **Words.** Docs, messages and commit messages in README's plain words, as CLAUDE.md says;
+     weakened. Every rule GUIDE.md states has a test, and a test that skips says so.
+   - **Words.** Docs, messages and commit messages in GUIDE.md's plain words, as CLAUDE.md says;
      every public item documented.
    - **Size.** Commits of one step each, that build and pass, with each later fix folded into
      the commit it belongs to.

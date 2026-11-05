@@ -354,7 +354,7 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
     }
 }
 
-/// The three names README.md gives: `tex.2d` is `tex._2d`, `ld.global.L2::64B` is
+/// The three names GUIDE.md gives: `tex.2d` is `tex._2d`, `ld.global.L2::64B` is
 /// `ld.global.L2__64B`, and `cp.async` is `cp.r#async`.
 #[test]
 fn an_instructions_name_is_rusts_words() {

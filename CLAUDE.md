@@ -2,7 +2,7 @@
 
 kernite compiles kernels written in Rust's syntax, instructions over variables in a module that
 `#[kernite_macros::kernels]` is on, to x86-64 assembly, as `#[unsafe(naked)]` functions in Intel syntax,
-and to PTX for NVIDIA GPUs. [README.md](README.md) describes the language, the targets and the
+and to PTX for NVIDIA GPUs. [GUIDE.md](GUIDE.md) describes the language, the targets and the
 guarantees: read it before changing what kernite does.
 
 ## Goals
@@ -15,7 +15,7 @@ Every change serves these five.
    type or function that only hands a value on. A change that deletes code beats one that adds
    it.
 3. **The whole spec.** kernite takes all of each target's spec, x86-64-v3 and PTX's ISA, in every
-   form, and refuses what the spec leaves undefined. Every rule README states has a test.
+   form, and refuses what the spec leaves undefined. Every rule GUIDE.md states has a test.
 4. **Safe where it can be.** A kernel kernite can prove safe is called without `unsafe`, as in
    NVIDIA's cuda-oxide for SIMT, where each thread writes only its own part of the output. Where
    safety would cost speed, zero cost wins: the call stays `unsafe`, and says why.
@@ -38,7 +38,7 @@ Every change serves these five.
 
 ## Layout
 
-The crates are layers, each depending only on those inside it. README.md's "Layers" table says what
+The crates are layers, each depending only on those inside it. GUIDE.md's "Layers" table says what
 each knows. `crates/kernite/tests/architecture.rs` holds the rule of which may depend on which, of
 every kind of dependency, and a new crate needs its line there. Change both when the crates change.
 
@@ -71,7 +71,7 @@ every kind of dependency, and a new crate needs its line there. Change both when
 - The generated code changes only on purpose. Every listing in `examples/*/snapshots/` and
   `crates/kernite/tests/builder/` is compared byte for byte, and a refactor changes none of them.
 - Errors are behaviour. Tests assert the text of many, and the `line:column` they point at; keep both.
-  A new error says what is wrong where it can be mended, in the README's words.
+  A new error says what is wrong where it can be mended, in GUIDE.md's words.
 - What rustc can do, rustc does. The macros write the Rust so that rustc checks, works out and says
   all it can of it, whether a type is a number say, and kernite does none of it again. kernite does
   itself only what rustc cannot: reading a kernel and compiling it, and reading the text that
@@ -101,14 +101,14 @@ every kind of dependency, and a new crate needs its line there. Change both when
 - Change code in a git worktree of your own, under `.claude/worktrees/`, never in the main checkout,
   where the user and other sessions work. Reading the main checkout is fine.
 - Commit after any progress: each piece that passes `./make.py check` gets its own commit. A message is
-  a sentence of what kernite now does, in the README's plain words, then a body that says what changed
+  a sentence of what kernite now does, in GUIDE.md's plain words, then a body that says what changed
   and why, wrapped at 72 columns, as `git log` shows, ending with the `Co-Authored-By` line.
 - Don't push, and don't merge into master: both are the user's call.
 - Don't stop to ask. Choose the sensible default, say what you chose, and keep going. Ask only before
   something that cannot be undone or that leaves this machine.
 - A crate's API may change where a task needs it. Make the least change that does the job, and keep
   no old form beside the new one.
-- Write as the README does: plain, short words, a value "known now" rather than at compile time, one
+- Write as GUIDE.md does: plain, short words, a value "known now" rather than at compile time, one
   thing a sentence. Doc comments, error messages and commit messages alike.
 
 ## Planning and review

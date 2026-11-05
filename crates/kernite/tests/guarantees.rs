@@ -1,4 +1,4 @@
-//! The output is deterministic, as README guarantees: clippy forbids hash maps and hash sets,
+//! The output is deterministic, as GUIDE.md guarantees: clippy forbids hash maps and hash sets,
 //! here; and no crate depends on anything outside the workspace, in architecture.rs.
 
 use std::fs;

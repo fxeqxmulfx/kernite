@@ -2351,7 +2351,7 @@ fn work_past_the_most_steps_is_refused_where_the_step_past_it_is_taken() {
 
 /// Work of exactly the most steps compiles, and a note after it is the step past, refused. A loop
 /// of `n` turns is `2n` steps, its range and its turns, so two loops fill what each case leaves, a
-/// range holding 2^20 at most. A case would pass the most if it counted one step more than README
+/// range holding 2^20 at most. A case would pass the most if it counted one step more than GUIDE.md
 /// says, and fall short if it counted one less: loops add, and do not multiply; a number read by
 /// name or worked out costs none; an array listed costs its items, not its elements; an `[x; n]`,
 /// an array a method makes and one copied from a name, by a typed `let` or by `for`, cost their
