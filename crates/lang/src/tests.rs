@@ -751,6 +751,34 @@ fn a_keyword_written_raw_stays_a_name_in_a_type() {
     assert_eq!((shown(&s.ty), shown(&t.ty)), ("r#mut<[r#dyn; ..], u32>".into(), "global<r#true>".into()));
 }
 
+/// An attribute of kernite's written raw is the attribute, as Rust reads `r#cfg` as `cfg`: a function holds its
+/// `#[r#instances(..)]`, its `#[r#cooperative]` and its directives, each under the name Rust reads, and
+/// `#[r#allow(..)]`, which is Rust's, is no directive.
+#[test]
+fn an_attribute_written_raw_is_the_attribute() {
+    let src = r#"
+        #[r#instances(1, 2)]
+        #[r#cooperative]
+        #[r#maxntid(16, 16)]
+        #[r#reqntid(8)]
+        #[r#minnctapersm(2)]
+        #[r#maxnreg(32)]
+        #[r#allow(dead_code)]
+        pub unsafe extern "ptx-kernel" fn k<const N: u32>() {}
+    "#;
+    let module = parse(src).unwrap();
+    let crate::ItemKind::Fn(f) = &module.items[0].kind else { panic!("a function") };
+    assert_eq!((f.instances.is_some(), f.cooperative.is_some()), (true, true));
+    let directives: Vec<&str> = f.directives.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(directives, ["maxntid", "reqntid", "minnctapersm", "maxnreg"]);
+    // Each is where it is written, at its `r#`, for an error to point there.
+    let at = |name: &str| Span(src.find(name).unwrap() as u32);
+    assert_eq!(f.instances.as_ref().map(|i| i.span), Some(at("r#instances")));
+    assert_eq!(f.cooperative.as_ref().map(|c| c.span), Some(at("r#cooperative")));
+    let spans: Vec<Span> = f.directives.iter().map(|d| d.span).collect();
+    assert_eq!(spans, ["r#maxntid", "r#reqntid", "r#minnctapersm", "r#maxnreg"].map(at));
+}
+
 /// The `!` of never follows the arrow, a keyword or a lifetime, and is no macro's: the braces after it are the
 /// body. A lifetime is a `'` and a name, and that name is no macro's, so the result of `&'static !` is the four tokens
 /// before the braces. A macro after a lifetime, `&'static byte!{ _ }`, takes its braces, as it does anywhere in a

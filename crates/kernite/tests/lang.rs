@@ -416,6 +416,134 @@ fn a_value_named_raw_is_the_value_named_plain() {
     }
 }
 
+/// The attributes of kernite's: a function's `#[instances(..)]` and `#[cooperative]`, and a GPU kernel's directives,
+/// `#[maxnctapersm(..)]`, which PTX no longer has, among them.
+const ATTRIBUTES: [&str; 7] =
+    ["instances", "cooperative", "maxntid", "reqntid", "minnctapersm", "maxnreg", "maxnctapersm"];
+
+/// An attribute of kernite's written raw is the attribute, as Rust reads `r#cfg` as `cfg`: an x86 kernel with
+/// `#[r#instances(..)]` or `#[r#cooperative]` compiles to the listing of the one written plain, and a GPU kernel with
+/// those and with each directive to its PTX.
+#[test]
+fn an_attribute_written_raw_is_the_attribute() {
+    let tile = r#"
+        #[instances(1, 2)]
+        pub unsafe extern "sysv64" fn k<const N: u64>(x: u64) -> u64 {
+            add(x, N);
+            ret(x);
+        }
+    "#;
+    let together = r#"
+        #[cooperative]
+        pub unsafe extern "sysv64" fn k(p: *mut u64) {
+            grid.sync();
+            mov(qword[p], 1);
+        }
+    "#;
+    for (src, kernel) in [(tile, "k::<1>"), (tile, "k::<2>"), (together, "k")] {
+        let written = raw(src, &ATTRIBUTES);
+        assert_ne!(written, src);
+        assert_eq!(x86(&written, kernel), x86(src, kernel), "{written}");
+    }
+    assert_ne!(x86(tile, "k::<1>"), x86(tile, "k::<2>"));
+    assert!(x86(together, "k").contains("lock xadd"));
+    let gpu = r#"
+        #[instances(1, 2)]
+        #[maxntid(256)]
+        pub unsafe extern "ptx-kernel" fn tile<const N: u32>(x: *mut u32) {
+            st.global.u32([x], N);
+        }
+
+        #[cooperative]
+        #[reqntid(8, 8, 4)]
+        #[minnctapersm(2)]
+        #[maxnreg(32)]
+        pub unsafe extern "ptx-kernel" fn together(x: *mut u32) {
+            grid.sync();
+            st.global.u32([x], 1);
+        }
+    "#;
+    let ptx = kernite::ptx_str(gpu).unwrap();
+    let want = [".maxntid 256", ".maxnreg 32", ".minnctapersm 2", ".reqntid 8, 8, 4", "atom.add.u32 %old, [%barrier]"];
+    assert!(want.iter().all(|line| ptx.contains(line)), "{ptx}");
+    assert_eq!(kernite::ptx_str(&raw(gpu, &ATTRIBUTES)).unwrap(), ptx);
+}
+
+/// An attribute of kernite's written raw is wrong as the plain one is: the same error, in the same words, at the same
+/// `line:column`. Each attribute is on a line of its own, so that its name starts where the plain one's does.
+#[test]
+fn an_attribute_written_raw_is_wrong_as_the_plain_one_is() {
+    let kernel = "unsafe extern \"ptx-kernel\" fn k() {}";
+    let generic = "unsafe extern \"ptx-kernel\" fn k<const N: u32>() {}";
+    let gives =
+        |name: &str, what: &str, example: &str| format!("`#[{name}(..)]` gives {what}, as in `#[{name}({example})]`");
+    let cases = [
+        (
+            format!("#[instances]\n{generic}"),
+            "1:3: `#[instances(..)]` lists what a function is compiled for, as in `#[instances(4, 8)]`".to_string(),
+        ),
+        (
+            format!("#[instances(1)]\n#[instances(2)]\n{generic}"),
+            "2:3: a function has one `#[instances(..)]`, which lists each instance it is compiled for".into(),
+        ),
+        (
+            format!("#[instances(1)]\n{kernel}"),
+            "1:3: `k` takes no compile-time arguments, so it is compiled once, with no `#[instances(..)]`".into(),
+        ),
+        (
+            "#[instances(1)]\nconst C: u32 = 1;".into(),
+            "1:3: `#[instances(..)]` goes on a function that names an ABI, which it lists the instances of".into(),
+        ),
+        (
+            format!("#[cooperative(1)]\n{kernel}"),
+            "1:3: `#[cooperative]` takes nothing: it says that a kernel's blocks or threads wait for each other".into(),
+        ),
+        (format!("#[cooperative]\n#[cooperative]\n{kernel}"), "2:3: a kernel has one `#[cooperative]`".into()),
+        (
+            "#[cooperative]\nfn h() {}".into(),
+            "1:3: `#[cooperative]` goes on a kernel whose blocks or threads wait for each other, `extern \
+             \"ptx-kernel\"` or `extern \"sysv64\"`; `h` is a helper, inlined where it is called"
+                .into(),
+        ),
+        (
+            format!("#[maxntid]\n{kernel}"),
+            format!("1:3: {}", gives("maxntid", "the most threads a block has, along x, then y and z", "16, 16")),
+        ),
+        (
+            format!("#[reqntid]\n{kernel}"),
+            format!("1:3: {}", gives("reqntid", "the threads a block has, along x, then y and z", "8, 8, 4")),
+        ),
+        (
+            format!("#[minnctapersm]\n{kernel}"),
+            format!("1:3: {}", gives("minnctapersm", "the blocks an SM should hold at once, at least", "2")),
+        ),
+        (
+            format!("#[maxnreg]\n{kernel}"),
+            format!("1:3: {}", gives("maxnreg", "the most registers a thread may use", "32")),
+        ),
+        (format!("#[maxnreg(32)]\n#[maxnreg(32)]\n{kernel}"), "2:3: a kernel has one `#[maxnreg(..)]`".into()),
+        (
+            format!("#[maxnctapersm(2)]\n{kernel}"),
+            "1:3: PTX has no `.maxnctapersm` from 2.1 on; `#[minnctapersm(..)]` gives the blocks an SM should hold at \
+             once, at least"
+                .into(),
+        ),
+        (
+            "#[maxntid(256)]\nunsafe extern \"sysv64\" fn k() {}".into(),
+            "1:3: `#[maxntid(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`; `k` is a kernel for x86-64, which \
+             the process runs"
+                .into(),
+        ),
+    ];
+    for (src, want) in cases {
+        let written = raw(&src, &ATTRIBUTES);
+        assert_ne!(written, src);
+        for src in [&src, &written] {
+            assert_eq!(kernite::ptx_str(src).unwrap_err(), want, "{src}");
+        }
+    }
+}
+
 #[test]
 fn a_generic_is_a_value_and_a_type_is_refused_at_its_token() {
     // `<T>` is a generic that is a type, and so is an `impl` in a parameter's type or the result's: in a

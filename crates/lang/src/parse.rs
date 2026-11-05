@@ -239,9 +239,11 @@ impl<'a> Parser<'a> {
             if let Some(Tree::Group { trees, .. }) = self.peek_at(1)
                 && let [Tree::Ident { name, span, .. }, rest @ ..] = trees.as_slice()
             {
+                // Rust reads an attribute's name written raw, `r#instances`, as the name.
+                let name = unraw(name);
                 let at = |message: &str| Err(Error { span: *span, message: message.into() });
                 let tokens = self.pos..self.pos + 2;
-                match name.as_str() {
+                match name {
                     "instances" => {
                         let [Tree::Group { delim: Delim::Paren, trees: values, .. }] = rest else {
                             return at(
@@ -276,15 +278,15 @@ impl<'a> Parser<'a> {
                         );
                     }
                     _ => {
-                        if let Some(&(_, what, example)) = DIRECTIVES.iter().find(|(d, ..)| d == name) {
+                        if let Some(&(_, what, example)) = DIRECTIVES.iter().find(|(d, ..)| *d == name) {
                             let [Tree::Group { delim: Delim::Paren, trees: values, .. }] = rest else {
                                 return at(&format!("`#[{name}(..)]` gives {what}, as in `#[{name}({example})]`"));
                             };
-                            if directives.iter().any(|d: &Directive| d.name == *name) {
+                            if directives.iter().any(|d: &Directive| d.name == name) {
                                 return at(&format!("a kernel has one `#[{name}(..)]`"));
                             }
                             directives.push(Directive {
-                                name: name.clone(),
+                                name: name.to_string(),
                                 values: args(values)?,
                                 span: *span,
                                 tokens,

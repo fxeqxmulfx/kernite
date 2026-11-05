@@ -45,11 +45,12 @@
 //! - **Names of instructions** are Rust's words: one that starts with a digit takes a `_`,
 //!   `tex._2d`; one that holds a `::` has `__` there, `ld.global.L2__64B`; and a keyword
 //!   takes `r#`, `cp.r#async`. The machine is given them as it writes them.
-//! - **Names written raw** are the names Rust reads, in a type as in a value's name: `r#u64` is `u64`, and
-//!   `r#x` is `x`. [`unraw`] gives a name so, and [`read_type`] a type, `[r#f16; 4]` as `[f16; 4]`. A keyword written
-//!   raw is a name, and no keyword: [`read_type`] leaves its `r#`, for [`pointer()`] to count one word in a pointer to
-//!   `r#dyn::Foo`, a struct, where a pointer to `dyn Foo` has two. So it is for the 48 keywords Rust lets be written
-//!   raw, the strict and the reserved ones. A weak keyword, `union` say, is a name as it is, and loses its `r#`.
+//! - **Names written raw** are the names Rust reads, in a type, a value's name and an attribute's: `r#u64` is `u64`,
+//!   `r#x` is `x` and `#[r#cooperative]` is `#[cooperative]`. [`unraw`] gives a name so, and [`read_type`] a type,
+//!   `[r#f16; 4]` as `[f16; 4]`. A keyword written raw is a name, and no keyword: [`read_type`] leaves its `r#`, for
+//!   [`pointer()`] to count one word in a pointer to `r#dyn::Foo`, a struct, where a pointer to `dyn Foo` has two. So
+//!   it is for the 48 keywords Rust lets be written raw, the strict and the reserved ones. A weak keyword, `union` say,
+//!   is a name as it is, and loses its `r#`.
 //! - **Helpers** are functions with no ABI, inlined where they are called. A parameter takes
 //!   the caller's variable, seen as its type; `<const N: usize>` takes a value, as in
 //!   `dot::<4>(x, y, n)`. A helper sees its own names and the module's constants.
