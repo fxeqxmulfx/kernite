@@ -27,7 +27,8 @@ fn cargo(command: &[&str], name: &str) -> (bool, Vec<String>) {
 /// Fixture `name` written as the `src/lib.rs` of a crate that depends on kernite-macros, kernite-cuda and kernite-cpu,
 /// as a user's does: the crate's directory. The crate is a workspace of its own in `CARGO_TARGET_TMPDIR`. Few fixtures
 /// use all three dependencies, so its manifest allows `unused_dependencies`, Cargo's lint of a dependency that a crate
-/// does not use, and ends with what `{name}.toml` beside the fixture says of the workspace, if there is one.
+/// does not use, and ends with what `{name}.toml` beside the fixture says of the workspace, if there is one. The files
+/// of the folder `{name}/` beside it, if there is one, are the crate's other files: `src/macros.rs`, for `mod macros;`.
 fn written(name: &str) -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     let crates = here.parent().expect("kernite-macros is in crates/");
@@ -57,6 +58,9 @@ unused_dependencies = "allow"
     let workspace = fs::read_to_string(fixtures.join(format!("{name}.toml"))).unwrap_or_default();
     fs::write(dir.join("Cargo.toml"), manifest + &workspace).unwrap();
     fs::copy(fixtures.join(format!("{name}.rs")), dir.join("src/lib.rs")).unwrap();
+    for file in fs::read_dir(fixtures.join(name)).into_iter().flatten().map(Result::unwrap) {
+        fs::copy(file.path(), dir.join("src").join(file.file_name())).unwrap();
+    }
     dir
 }
 
@@ -4668,4 +4672,109 @@ fn a_fragment_behind_a_pointer_that_kernite_takes_is_one_type_to_rust_and_to_the
         printed.contains("test result: ok. 4 passed"),
         "fixtures/fragments_pointees.rs ran, and printed:\n{printed}"
     );
+}
+
+/// Kernels of one macro that take a fragment together have Rust say that a result with a `&` before the fragment has
+/// no lifetime at the `&` of each, as it says it of kernels written out, and not at the `$t` of the first. It is so
+/// for `$t:ty` as `u8`, as `[u8]`, as `dyn Send + Sync` and as `f16`, which Rust is given as `self::f16`, and for
+/// `$t:path`, with a kernel that compiles between them; behind `&mut` and another `&`; where the `&` is not the first
+/// token of the result, in `Option<..>`, a tuple and an array, and where the type ends at a `,` or a `;`; where tokens
+/// are between the `&` and the fragment, `&dyn $t` and `&fn() -> $t`, whose arrow ends nothing; and where the type
+/// ends at the `as` of a qualified path, `<&$t as Tr>::Out`. Where the last token of the type is the macro's,
+/// `&Vec<$t>` and `&$t<u8>`, it is so too. Two fragments, `&$t` and `&$u`, are told as they were, and so is a pointer
+/// to a type with no size, `*const $t` with `$t` as `CStr`, which Rust says once, in the call of the macro, where the
+/// fragment is. A GPU kernel's `&` takes the lifetime of `self`, so Rust has none to ask for there.
+#[test]
+fn a_result_without_a_lifetime_is_said_at_the_ampersand_of_each_kernel_that_takes_the_same_fragment() {
+    let gives = |places: &[&str], ty: &str| places.iter().map(|place| x86_gives(place, "", ty)).collect::<Vec<_>>();
+    let both = |place: &str| {
+        format!(
+            "src/lib.rs:{place}: error[E0106]: missing lifetime specifiers: expected named lifetime parameter, \
+             expected named lifetime parameter"
+        )
+    };
+    // kernite says its errors first, in the order of the kernels, and Rust says its own after them.
+    let mut said = vec![];
+    for ty in ["&u8", "&[u8]", "&dyn Send + Sync", "&f16"] {
+        said.extend(gives(&["9:60", "15:61", "18:60"], ty));
+    }
+    said.extend(gives(&["34:60", "37:61"], "&u8"));
+    said.extend([
+        x86_gives("52:62", "", "&mut u8"),
+        x86_gives("55:60", "", "&&u8"),
+        x86_gives("58:59", "", "Option<&u8>"),
+        x86_gives("61:61", "", "(u8, &u8)"),
+        x86_gives("64:61", "", "(&u8, u8)"),
+        x86_gives("67:62", "", "[&u8; 3]"),
+        x86_gives("70:61", "", "&fn() -> u8"),
+        x86_gives("73:62", "", "&Vec<u8>"),
+    ]);
+    said.extend(gives(&["87:60", "90:61"], "&Vec<u8>"));
+    said.extend(gives(&["103:60", "106:61"], "&dyn Send"));
+    said.extend([
+        x86_gives("119:60", "", "&u8"),
+        x86_gives("122:61", "", "&u16"),
+        gpu_returns("151:64", "", "&u8"),
+        gpu_returns("154:65", "", "&u8"),
+    ]);
+    said.extend(gives(&["172:60", "175:61"], "<&u8 as crate::Tr>::Out"));
+    // Cargo says a message once, however many calls make it, and counts each: the three kernels of `types!` are the
+    // same places for each of its four types, and the two kernels of `pointers!` have the one fragment.
+    let repeated = 3 * 3 + 1;
+    said.extend(["9:60", "15:61", "18:60", "34:60", "37:61", "52:62"].map(no_lifetime));
+    said.push(both("55:60"));
+    said.extend(["58:66", "61:66", "64:62", "67:63", "70:61", "73:62"].map(no_lifetime));
+    said.extend(["87:60", "90:61", "103:60", "106:61", "119:60", "122:61", "172:61", "175:62"].map(no_lifetime));
+    said.push(size_unknown("145:21", "[i8]"));
+    let errors = said.len() + repeated;
+    said.push(format!("error: could not compile `fragments_shared` (lib) due to {errors} previous errors"));
+    refuses("fragments_shared", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// Kernels of one macro that take the same `$t` have Rust say that a result with a `&` before it has no lifetime at
+/// the `&` of each, wherever the macro is defined: below its call, as a `#[macro_export]` macro called by its path is,
+/// and in a file of its own, with two kernels and with one. Rust says it from the `&` to the last token of the type,
+/// and where the macro is does not change where that starts.
+#[test]
+fn a_result_without_a_lifetime_is_said_at_the_ampersand_wherever_the_macro_is_defined() {
+    let in_macros = |said: String| said.replacen("src/lib.rs", "src/macros.rs", 1);
+    let said = [
+        x86_gives("15:60", "", "&u8"),
+        x86_gives("18:61", "", "Option<&u8>"),
+        in_macros(x86_gives("5:60", "", "&u8")),
+        in_macros(x86_gives("8:61", "", "Option<&u8>")),
+        in_macros(x86_gives("19:59", "", "&u8")),
+        no_lifetime("15:60"),
+        no_lifetime("18:68"),
+        in_macros(no_lifetime("5:60")),
+        in_macros(no_lifetime("8:68")),
+        in_macros(no_lifetime("19:59")),
+        "error: could not compile `fragments_placed` (lib) due to 10 previous errors".to_string(),
+    ];
+    refuses("fragments_placed", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A fragment that is a pair of parentheses of the user's, and ends the type behind a `&`, is Rust's to lint in a
+/// kernel's result as in a plain function's. `&$t` with `$t` as `(u8)`, `(dyn Send)` and `([u8])` has Rust say that the
+/// pair is unnecessary, where the user wrote it, in the call of the macro; as `(dyn Send + Sync)`, which a `&` needs,
+/// it says nothing of it. Rust says that the `&` of each of two kernels that take the fragment has no lifetime, at its
+/// own place, as it says it of two plain functions of another macro; kernite's error is of each kernel.
+#[test]
+fn the_parentheses_of_a_fragment_behind_a_reference_are_linted_in_a_kernel_as_in_a_plain_function() {
+    let pairs = ["(u8)", "(dyn Send)", "([u8])", "(dyn Send + Sync)"];
+    // kernite says its errors first, in the order of the kernels, and Rust says its own after them.
+    let mut said: Vec<String> =
+        pairs.iter().flat_map(|ty| ["10:60", "13:61"].map(|place| x86_gives(place, "", &format!("&{ty}")))).collect();
+    said.extend(["10:60", "13:61", "28:38", "31:39"].map(no_lifetime));
+    // Cargo says a message once, however many calls make it, and counts each: the two kernels of `kernels!` and the two
+    // functions of `plain!` are the same places for each of the four types.
+    let errors = said.len() + 3 * 4;
+    // At the pair of each call that has a needless one, three of the four, and at none that a `+` needs.
+    let warnings = ["20:23", "21:25", "22:24", "38:20", "39:22", "40:21"];
+    said.extend(warnings.map(|place| format!("src/lib.rs:{place}: warning: unnecessary parentheses around type")));
+    said.push(format!(
+        "error: could not compile `fragments_parens` (lib) due to {errors} previous errors; {} warnings emitted",
+        warnings.len()
+    ));
+    refuses("fragments_parens", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
