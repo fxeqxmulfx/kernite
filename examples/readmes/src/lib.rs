@@ -18,6 +18,10 @@ struct KerniteCompile;
 struct KerniteBuild;
 
 #[cfg(doctest)]
+#[doc = include_str!("../../../crates/x86/README.md")]
+struct KerniteX86;
+
+#[cfg(doctest)]
 #[doc = include_str!("../../../crates/kernite/README.md")]
 struct Kernite;
 
