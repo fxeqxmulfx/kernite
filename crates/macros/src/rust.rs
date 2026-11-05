@@ -1167,8 +1167,8 @@ mod tests {
         // crate's, and so does a flag of rustdoc's: none of them is an `--extern` of it.
         for (args, name) in [
             ("--crate-name my_kernite_cuda_app", "kernite-cuda"),
-            ("--out-dir /work/u/kernite_cpu_demo/target/debug/deps", "kernite-cpu"),
-            ("-L dependency=/work/u/kernite_cuda/target/debug/deps", "kernite-cuda"),
+            ("--out-dir /home/u/kernite_cpu_demo/target/debug/deps", "kernite-cpu"),
+            ("-L dependency=/home/u/kernite_cuda/target/debug/deps", "kernite-cuda"),
             ("--extern kernite_cuda_demo=/t/libkernite_cuda_demo.rlib", "kernite-cuda"),
             ("--extern-html-root-url kernite_cuda=https://docs.rs/kernite-cuda", "kernite-cuda"),
         ] {
