@@ -8,7 +8,7 @@ members = ["crates/*", "examples/*"]
 name = "kernite"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.99.1"
 license = "MIT"
@@ -19,16 +19,16 @@ categories = ["compilers", "hardware-support"]
 # The dependency rule, innermost first. `crates/kernite/tests/architecture.rs` checks every
 # manifest against it. crates.io takes a path dependency with its version, the workspace's.
 [workspace.dependencies]
-kernite-core = { path = "crates/core", version = "0.3.0" }
-kernite-lang = { path = "crates/lang", version = "0.3.0" }
-kernite-compile = { path = "crates/compile", version = "0.3.0" }
-kernite-build = { path = "crates/build", version = "0.3.0" }
-kernite-x86 = { path = "crates/x86", version = "0.3.0" }
-kernite-ptx = { path = "crates/ptx", version = "0.3.0" }
-kernite = { path = "crates/kernite", version = "0.3.0" }
-kernite-macros = { path = "crates/macros", version = "0.3.0" }
-kernite-cuda = { path = "crates/cuda", version = "0.3.0" }
-kernite-cpu = { path = "crates/cpu", version = "0.3.0" }
+kernite-core = { path = "crates/core", version = "0.3.1" }
+kernite-lang = { path = "crates/lang", version = "0.3.1" }
+kernite-compile = { path = "crates/compile", version = "0.3.1" }
+kernite-build = { path = "crates/build", version = "0.3.1" }
+kernite-x86 = { path = "crates/x86", version = "0.3.1" }
+kernite-ptx = { path = "crates/ptx", version = "0.3.1" }
+kernite = { path = "crates/kernite", version = "0.3.1" }
+kernite-macros = { path = "crates/macros", version = "0.3.1" }
+kernite-cuda = { path = "crates/cuda", version = "0.3.1" }
+kernite-cpu = { path = "crates/cpu", version = "0.3.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
