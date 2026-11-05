@@ -1490,12 +1490,16 @@ fn rust_finds_a_const_unused_that_only_what_cfg_leaves_out_reads() {
 /// two that call each other, as long as a value known now says, are followed once: what they name is said
 /// once for each place, however often the kernel runs them. A kept kernel that calls a pair `cfg` leaves
 /// out is told of the helper it calls alone, and so is one that reaches a pair only through a helper `cfg`
-/// leaves out, though the pair names a const `cfg` leaves out with that helper. The fixture's modules are,
-/// in order, the x86 kernels Rust has names for, those it has none for, those that call helpers, the GPU's
-/// kernels, two of which nothing is said: one whose kernels `cfg` leaves out with what they name, or keeps
-/// only where it keeps that, and one that the features keep as they keep what it names; and last the
-/// helpers that loop: one that calls itself, a pair, a pair `cfg` leaves out, and a pair that only a helper
-/// `cfg` leaves out calls.
+/// leaves out, though the pair names a const `cfg` leaves out with that helper. Rust says nothing of a name it
+/// cannot find in a module where kernite says an error, as each error is an item of the module. So Rust says
+/// none of the names in the fixture's modules that have kernite's errors. The fixture's modules are, in order,
+/// the x86 kernels Rust has names for, those it has none for, those that call helpers, the GPU's kernels, two
+/// of which nothing is said: one whose kernels `cfg` leaves out with what they name, or keeps only where it
+/// keeps that, and one that the features keep as they keep what it names; and the helpers that loop: one that
+/// calls itself, a pair, a pair `cfg` leaves out, and a pair that only a helper `cfg` leaves out calls. Last
+/// are three where kernite says no error. In the first two, Rust says the names in a helper and in one that
+/// loops, on x86, and in the type of a static, a function, a helper, a kernel and a directive, on a GPU. Of the
+/// third, nothing is said without `big`, with which the next test builds.
 #[test]
 fn a_kernel_that_cfg_keeps_is_told_at_each_name_that_cfg_leaves_out() {
     refuses(
@@ -1518,7 +1522,7 @@ fn a_kernel_that_cfg_keeps_is_told_at_each_name_that_cfg_leaves_out() {
             &left_out("411:9", "entry", "calls_entry"),
             // Rust's, a module at a time, in the order it reads what the macro writes: the items first, a
             // const's definition and the type and value of a static, then the names its kernels say, in
-            // the order of the source.
+            // the order of the source. Only the modules where kernite says no error have them.
             &no_value("30:24", "SIZE"),
             &no_value("32:37", "LEN"),
             &no_value("34:37", "SIZE"),
@@ -1529,13 +1533,14 @@ fn a_kernel_that_cfg_keeps_is_told_at_each_name_that_cfg_leaves_out() {
             &no_value("71:22", "COUNT"),
             &no_value("72:16", "SIZE"),
             &no_value("73:16", "SIZE"),
-            &no_value("162:23", "FOUR"),
-            &no_value("194:37", "LEN"),
-            &no_value("206:23", "SIZE"),
-            &no_value("220:28", "SIZE"),
-            &no_value("246:15", "SIZE"),
-            &no_value("338:23", "STEP"),
-            "error: could not compile `configured_names` (lib) due to 30 previous errors",
+            &no_value("426:23", "FOUR"),
+            &no_value("430:23", "STEP"),
+            &no_value("455:37", "LEN"),
+            &no_value("460:23", "SIZE"),
+            &no_value("471:28", "SIZE"),
+            &no_value("466:20", "SIZE"),
+            &no_value("484:15", "SIZE"),
+            "error: could not compile `configured_names` (lib) due to 31 previous errors",
         ],
     );
 }
@@ -1543,7 +1548,8 @@ fn a_kernel_that_cfg_keeps_is_told_at_each_name_that_cfg_leaves_out() {
 /// What is told is judged by the conditions of both, the kernel's and the item's. With `big`, an item that
 /// `big` and `wide` keep, and a helper under `cfg_attr(big, cfg(wide))`, are gone where `big` holds alone,
 /// and the kernels that name them are told there, a kernel that `big` keeps and one that is always kept;
-/// not where neither holds, nor where both do.
+/// not where neither holds, nor where both do. Rust says the const's name, `WIDE`, in the last module, where
+/// kernite says no error.
 #[test]
 fn a_name_is_told_where_the_kernel_is_kept_and_the_item_is_not() {
     refuses_by(
@@ -1552,7 +1558,7 @@ fn a_name_is_told_where_the_kernel_is_kept_and_the_item_is_not() {
         &[
             &left_out("320:9", "six", "calls_six"),
             &left_out("324:9", "five", "calls_five"),
-            &no_value("315:23", "WIDE"),
+            &no_value("499:23", "WIDE"),
             "error: could not compile `configured_names` (lib) due to 3 previous errors",
         ],
     );
@@ -3276,6 +3282,169 @@ fn rust_sees_the_types_a_helper_names_where_the_workspace_is_named_by_what_is_no
     );
     let count = "error: could not compile `helper_imports_workspace` (lib) due to 1 previous error";
     refuses("helper_imports_workspace", &[&error, count]);
+}
+
+/// Rust is shown the types a helper's signature names where a macro finds an error in writing the module, as it is
+/// where kernite says one of an item: a compile-time argument named `grid` beside the launcher, of a cooperative
+/// x86 kernel and of a GPU kernel; `threads` and `shared` beside the parameters of `k_blocks`, the method of a
+/// cooperative GPU kernel; a `k_blocks` that a kernel and a static of the module are named as well; statics with no
+/// room beside each other; and a name that `cfg` leaves out where the kernel that names it is kept. Each module has
+/// a helper no kernel calls, whose parameter is `Ret`, a type of the crate's that nothing else names, and another
+/// whose types are the language's, `gpr`, `ymm`, `local<[u32; 4], 16>` and `r32`. kernite's errors are all the
+/// words: Rust does not call the import unused, and says nothing of the types it cannot find.
+#[test]
+fn rust_sees_the_types_a_helper_names_where_a_macro_finds_an_error_in_writing_the_module() {
+    let grid = "names a parameter of the launcher as well";
+    let blocks = "names a parameter of `k_blocks` as well";
+    let twice = "`#[cooperative]` gives `Kernels` a method `k_blocks`, which says how many blocks a grid of `k` has at \
+                 most, and a kernel or a static of the module is named `k_blocks` as well";
+    let room = "this makes the module's constant memory 96000 bytes, and a module has 64 KB";
+    let error = |place: &str, what: &str| format!("src/lib.rs:{place}: error: {what}");
+    refuses(
+        "helper_imports_macros",
+        &[
+            &error("26:43", &format!("`grid` {grid}")),
+            &error("45:47", &format!("`grid` {grid}")),
+            &error("65:47", &format!("`threads` {blocks}")),
+            &error("65:67", &format!("`shared` {blocks}")),
+            &error("82:7", twice),
+            &error("103:7", twice),
+            &error("112:19", room),
+            &left_out("145:9", "g", "k"),
+            "error: could not compile `helper_imports_macros` (lib) due to 8 previous errors",
+        ],
+    );
+}
+
+/// Rust is shown the types a helper's signature names where the crate lacks a dependency the Rust the macros write
+/// needs, as it is where kernite says an error of the module as a whole: a static of GPU kernels needs
+/// `kernite-macros`, to count its room, and `kernite-cuda`, for its module; a static of x86 kernels and a cooperative
+/// x86 kernel need `kernite-cpu`; and any other module of GPU kernels needs `kernite-cuda`. The crate names its
+/// dependencies otherwise, `km`, `cuda` and `cpu`, so it has none of them. Each module has a helper no kernel calls,
+/// whose parameter is `Ret`, a type of the crate's that nothing else names, and another whose types are the
+/// language's, `gpr`, `ymm`, `local<[u32; 4], 16>` and `r32`. kernite's errors are all the words.
+#[test]
+fn rust_sees_the_types_a_helper_names_where_the_crate_lacks_a_dependency_the_macros_write() {
+    let edits = [
+        ("kernite-macros = {", "km = { package = \"kernite-macros\","),
+        ("kernite-cuda = {", "cuda = { package = \"kernite-cuda\","),
+        ("kernite-cpu = {", "cpu = { package = \"kernite-cpu\","),
+    ];
+    let (built, said) = cargo_in(&["build"], &edited("helper_imports_deps", &edits));
+    assert!(!built, "fixtures/helper_imports_deps.rs built");
+    assert_eq!(
+        said,
+        [
+            "src/lib.rs:10:1: error: a static of GPU kernels needs a dependency named `kernite-macros`, which this \
+             crate does not have",
+            "src/lib.rs:10:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, which this \
+             crate does not have",
+            "src/lib.rs:33:16: error: a static of x86 kernels needs a dependency named `kernite-cpu`, which this \
+             crate does not have",
+            "src/lib.rs:61:35: error: a cooperative x86 kernel needs a dependency named `kernite-cpu`, which this \
+             crate does not have",
+            "src/lib.rs:67:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, which this \
+             crate does not have",
+            "error: could not compile `helper_imports_deps` (lib) due to 5 previous errors",
+        ]
+    );
+}
+
+/// Rust is silent about a name it cannot find only where an error is an item of the module, and the macros find each
+/// error they write as an item, wherever it comes. Each module has a helper no kernel calls: `h` takes `Ret`, a type
+/// of the crate's that nothing else names, and `language` the language's types. In the first, the error is the
+/// module's as a whole, that it is two modules, right after the module's own attribute. In the second, it is a
+/// kernel's, of an ABI kernite does not know, right after a kernel under `a`, whose `cfg` is not the error's. In the
+/// third, it is Rust's own, in a type, and no item. The fourth builds: an item of its own,
+/// `::std::thread_local! {..}`, is written as the macros write an error, and is none. Rust is shown the helpers'
+/// types in the first two, so it does not call the import unused, and says nothing of the types it cannot find. In
+/// the last two it is not, and says the import is unused.
+#[test]
+fn rust_sees_the_types_a_helper_names_wherever_the_error_a_macro_writes_is_an_item_of_the_module() {
+    let two = "src/lib.rs:16:12: error: a static is memory of the module's kernels: the GPU's, for PTX kernels, or the \
+               process's, for x86 ones; and this module has both, so it is two modules, one of each kind of kernel \
+               and the statics they name";
+    let abi = "src/lib.rs:54:23: error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \
+               \"ptx-kernel\"` ones, for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \
+               \"C\"` is none of these";
+    let lines = [
+        two,
+        abi,
+        "src/lib.rs:61:17: error: an error of Rust's own",
+        "src/lib.rs:59:9: warning: unused import: `super::Ret`",
+        "src/lib.rs:78:9: warning: unused import: `super::Ret`",
+        "error: could not compile `helper_imports_scan` (lib) due to 3 previous errors; 2 warnings emitted",
+    ];
+    refuses("helper_imports_scan", &lines);
+    refuses_by(&["build", "--features", "a"], "helper_imports_scan", &lines);
+}
+
+/// A GPU module whose statics have no room beside each other where `cfg` keeps both is told so at the type of the
+/// second, by `__Room`, which counts the room of the statics Rust keeps. The helpers `cfg` keeps are shown to Rust
+/// there too: `h` takes `Ret`, a type of the crate's that nothing else names, `lifetimes` a lifetime the module has
+/// not declared, which Rust says, and `language` the language's types, of which it says nothing. Where the room is
+/// right the module builds, and shows Rust none of them. Where a kernel that does not compile is kept, `broken`, the
+/// module has an error of its own, and Rust says of the types once, beside both. The features: `a` and `b` keep a
+/// static each, `c` keeps `h` and `lifetimes`, and `d` the kernel. `language` is always kept.
+#[test]
+fn rust_sees_the_types_a_helper_names_where_the_statics_have_no_room_and_cfg_keeps_the_helper() {
+    let unused = "src/lib.rs:12:9: warning: unused import: `super::Ret`";
+    let room = "src/lib.rs:18:19: error: this makes the module's constant memory 96000 bytes, and a module has 64 KB";
+    let broken = "src/lib.rs:40:13: error: a bool is no operand";
+    let lifetime = undeclared("26:22", "'a");
+    let says = |features: &str, lines: &[&str], count: &str| {
+        let mut lines = lines.to_vec();
+        let count = format!("error: could not compile `helper_imports_room` (lib) due to {count}");
+        lines.push(&count);
+        refuses_by(&["build", "--features", features], "helper_imports_room", &lines);
+    };
+    // The room is right: the module builds, and shows Rust no helper.
+    let (built, said) = cargo(&["build", "--features", "a,c"], "helper_imports_room");
+    assert!(built, "fixtures/helper_imports_room.rs did not build with a,c");
+    assert_eq!(said, [unused]);
+    // The room is the only error, and `h` is left out: the import is unused.
+    says("a,b", &[room, unused], "1 previous error; 1 warning emitted");
+    // The room is the only error, and the helpers are kept: `__Room` shows Rust their types beside it.
+    says("a,b,c", &[room, &lifetime], "2 previous errors");
+    // The kernel is kept as well, and `h` is not: the import is unused.
+    says("a,b,d", &[broken, room, unused], "2 previous errors; 1 warning emitted");
+    // The kernel and the helpers are kept: Rust says of the types once.
+    says("a,b,c,d", &[broken, room, &lifetime], "3 previous errors");
+    // The kernel and the helpers are kept, and no static: the types are shown beside the kernel's error alone.
+    says("c,d", &[broken, &lifetime], "2 previous errors");
+}
+
+/// A compile-time argument named as the launcher's parameter, `grid`, of a cooperative kernel that `cfg` keeps under
+/// `a`, x86 or the GPU's, and one named as its `_blocks` method's, `threads`, are errors the macros find in writing the
+/// module, and are not said of a kernel that `cfg` leaves out. The helpers are under `b`: `h` takes `Ret`, a type of
+/// the crate's that nothing else names, and `language` the language's types. Rust is shown their types where the errors
+/// are said and the helpers are kept, so it does not call the import unused, and says nothing of the types it cannot
+/// find; otherwise the import is unused.
+#[test]
+fn rust_sees_the_types_a_helper_names_where_cfg_keeps_the_error_the_macros_find_and_the_helper() {
+    let unused = [
+        "src/lib.rs:11:9: warning: unused import: `super::Ret`",
+        "src/lib.rs:38:9: warning: unused import: `super::Ret`",
+    ];
+    let errors = [
+        "src/lib.rs:27:43: error: `grid` names a parameter of the launcher as well",
+        "src/lib.rs:54:47: error: `grid` names a parameter of the launcher as well",
+        "src/lib.rs:54:64: error: `threads` names a parameter of `g_blocks` as well",
+    ];
+    let says = |features: &str, lines: &[&str], count: &str| {
+        let mut lines = lines.to_vec();
+        let count = format!("error: could not compile `helper_imports_clash` (lib) due to {count}");
+        lines.push(&count);
+        refuses_by(&["build", "--features", features], "helper_imports_clash", &lines);
+    };
+    // The kernels are kept and the helpers are not: the import is unused.
+    says("a", &[errors.as_slice(), unused.as_slice()].concat(), "3 previous errors; 2 warnings emitted");
+    // The helpers are kept and the kernels are not: nothing is wrong, and the import is unused.
+    let (built, said) = cargo(&["build", "--features", "b"], "helper_imports_clash");
+    assert!(built, "fixtures/helper_imports_clash.rs did not build with b");
+    assert_eq!(said, unused);
+    // Both are kept: Rust is shown the types, and says nothing of them.
+    says("a,b", &errors, "3 previous errors");
 }
 
 /// A pointer to a type kernite refuses by value is said as it was. A pointer of one word is taken, whatever

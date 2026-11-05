@@ -177,21 +177,21 @@
 //! result. A result of `()` is no result, and no error.
 //!
 //! A helper is compiled where a kernel calls it, and an `extern "ptx-func"` function is a `.func`
-//! of the GPU's module, so the macros write no function for either. Where kernite finds an error
-//! in compiling a function or a static, or refuses the module as a whole, they write the types of
-//! every helper and function of the module, one that no kernel calls too: each compile-time
-//! argument's, each parameter's and the result's, as they write the type of a kernel that does not
-//! compile, `let _: ..;` in a block of the module, under the `cfg` of the function and where the
-//! error is said. kernite refuses the module as a whole when it is two modules, when no module of
-//! PTX holds its GPU kernels and statics, when an item of its own has the name of a const it
-//! takes, when the workspace's name is not a string, when its attribute is refused, and when it has
-//! an item kernite cannot read, as below. Rust finds the names in the types, so an import that only
-//! they name is used, and it says of them only that a lifetime is not declared, that a module is
-//! where a type is written, and what a macro writes; it says the same of a helper that no kernel
-//! calls. Only where a macro has written an error as an item of the module is Rust silent about a
-//! name it cannot find, as `gpr` and `local<[u32; 4], 16>` are, so the types are shown nowhere
-//! else. A module that builds is shown none of them, so an import that only a helper names is
-//! unused to Rust.
+//! of the GPU's module, so the macros write no function for either. Where kernite finds any error
+//! in the module, they write the types of every helper and function of the module, one that no
+//! kernel calls too: each compile-time argument's, each parameter's and the result's, as they write
+//! the type of a kernel that does not compile, `let _: ..;` in a block of the module, under the
+//! `cfg` of the function and where the error is said. Every error is an item of the module, as Rust
+//! is silent about a name it cannot find, as `gpr` and `local<[u32; 4], 16>` are, only in a module
+//! that has one. So the types are shown nowhere else. In such a module Rust says nothing of any
+//! other name it cannot find either, a const that `cfg` leaves out say, until the errors are
+//! mended. Rust finds the names in the types, so an import that only they name is used, and it says
+//! of them only that a lifetime is not declared, that a module is where a type is written, and what
+//! a macro writes; it says the same of a helper that no kernel calls. The room of the statics is
+//! the one error that Rust decides, by `cfg`. `__Room` is derived on a struct with a field for each
+//! static and each helper, under the `cfg` of its item. It counts the room of the statics Rust
+//! keeps, and writes the error, with the types of the helpers Rust keeps beside it. A module that
+//! builds is shown none of them, so an import that only a helper names is unused to Rust.
 //!
 //! The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one,
 //! `dead_code` say, and build its kernels: Rust lints the names and the code a kernel is
@@ -515,9 +515,9 @@ pub fn __kernels(input: TokenStream) -> TokenStream {
 
 /// What Rust counts of a module's GPU statics once `cfg` has left out those it leaves out: their
 /// room. `#[kernels]` writes a struct with a field for each, under its `cfg`, for this to be derived
-/// on.
+/// on, and one for each helper, to show Rust the types of its signature where there is an error.
 #[doc(hidden)]
-#[proc_macro_derive(__Room, attributes(kernite_room))]
+#[proc_macro_derive(__Room, attributes(kernite_room, kernite_shown))]
 pub fn __room(input: TokenStream) -> TokenStream {
     room::derive(input)
 }

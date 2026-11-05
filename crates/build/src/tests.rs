@@ -918,43 +918,6 @@ fn a_module_of_both_kinds_refused_whole_is_not_said_to_be_two() {
     assert_eq!(k.launcher, Some(Launcher::Never));
 }
 
-/// An item has failed where kernite says an error of it: a static that does not lay out, a helper with a wrong
-/// attribute, a function of an ABI kernite compiles nothing for, a kernel that is not an `unsafe fn`, whose
-/// `#[instances(..)]` is wrong or one of whose instances does not compile, in the process's module and the GPU's.
-/// A const, Rust's own items and what compiles have not, nor has any item of a module refused whole, which says
-/// nothing of its items.
-#[test]
-fn an_item_has_failed_where_kernite_says_an_error_of_it() {
-    let failed = |src: &str| echoed(src).items.iter().map(ItemOut::failed).collect::<Vec<_>>();
-    let process = "const ONE: u64 = 1;\n\
-                   struct S;\n\
-                   static A: global<u32>;\n\
-                   static U: global<u32> = 13;\n\
-                   fn fine() {}\n\
-                   #[cooperative] fn wrong() {}\n\
-                   extern \"C\" fn c() {}\n\
-                   unsafe extern \"sysv64\" fn k(x: u64) { add(x, ONE); }\n\
-                   unsafe extern \"sysv64\" fn broken(x: u64) { nop(true); }\n\
-                   extern \"sysv64\" fn loose(x: u64) { add(x, ONE); }\n\
-                   #[instances(1)] unsafe extern \"sysv64\" fn once(x: u64) {}\n\
-                   #[instances(1, 2)] unsafe extern \"sysv64\" fn half<const N: u64>(x: u64) {\n\
-                   if N == 2 { nop(true); }\n\
-                   }";
-    assert_eq!(failed(process), [false, false, false, true, false, true, true, false, true, true, true, true]);
-    let gpu = "static T: global<u32> = 13;\n\
-               static B: global<u32>;\n\
-               unsafe extern \"ptx-kernel\" fn g() {}\n\
-               unsafe extern \"ptx-kernel\" fn broken() { nop(true); }\n\
-               extern \"ptx-kernel\" fn loose() {}\n\
-               #[instances(1)] unsafe extern \"ptx-kernel\" fn once() {}\n\
-               #[instances(1)] extern \"ptx-func\" fn f<const K: u32>() {}\n\
-               extern \"ptx-func\" fn bad() { nop(true); }";
-    assert_eq!(failed(gpu), [true, false, false, true, true, true, false, true]);
-    for src in [process, gpu] {
-        assert!(refused(src).items.iter().all(|item| !item.failed()), "{src}");
-    }
-}
-
 /// A module counts no room for the GPU's statics, which of them it keeps is for Rust to say: each
 /// that is laid out comes out with its type, for the macro to ask [`Backend::room`] of the types of
 /// those `cfg` keeps. `statics` refuses `C`, which Echo has no room for beside `A` and `B`.
@@ -1081,8 +1044,6 @@ fn a_const_given_twice_is_refused_at_the_module_s_own() {
     else {
         panic!("{:?}", out.items);
     };
-    // The errors above are the module's, not an item's: no item has failed, and a const given is Rust's.
-    assert!(out.items.iter().all(|item| !item.failed()));
 }
 
 /// A module refused whole that is given consts leaves out a const given that an item of its own is named as, as any

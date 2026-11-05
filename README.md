@@ -117,20 +117,18 @@ kernite's error alone, though Rust says its own of a plain kernel's result. A re
 error.
 
 A helper is compiled where a kernel calls it, and an `extern "ptx-func"` function is a `.func` of the GPU's module, so
-Rust sees neither. Where kernite finds an error in compiling a function or a static, or refuses the module as a whole,
-Rust is shown the types of every helper and function of the module, one that no kernel calls too: each compile-time
-argument's, each parameter's and the result's, as it sees a kernel's. kernite refuses the module as a whole when it is
-two modules, when no module of PTX holds its GPU kernels and statics, when an item of its own has the name of a const it
-takes, when the workspace's name is not a string, when its attribute is refused, and when it has an item kernite cannot
-read, as below. An import that only these types name is used, so Rust does not call `use super::Ret;` unused beside
-kernite's error at `Ret`, which is said once: at the argument of a call of the helper, at the result of a helper that is
-called, or at the type of a function. Rust says of the types only that a lifetime is not declared, `x: &'a Ret`; that a
-module is where a type is written, `x: core::f16` or `x: core`; and what a macro writes, `x: half!()` with an `f16`,
-which is unstable. It says the same of the types of a helper that no kernel calls, of which kernite says nothing. It
-says nothing of a name it cannot find, such as `gpr` or `local<[u32; 4], 16>`, nor of a type it refuses by itself,
-`[u64]`, `f128` or `_`. A function's types are shown where `cfg` keeps the function and the error is said. A module that
-builds is shown none of them, so an import that only a helper names is unused to Rust, which says so as it does of any
-import that nothing names.
+Rust sees neither. Where kernite finds any error in the module, Rust is shown the types of every helper and function of
+the module, one that no kernel calls too: each compile-time argument's, each parameter's and the result's, as it sees a
+kernel's. An import that only these types name is used, so Rust does not call `use super::Ret;` unused beside kernite's
+error at `Ret`, which is said once: at the argument of a call of the helper, at the result of a helper that is called,
+or at the type of a function. Rust says of the types only that a lifetime is not declared, `x: &'a Ret`; that a module
+is where a type is written, `x: core::f16` or `x: core`; and what a macro writes, `x: half!()` with an `f16`, which is
+unstable. It says the same of the types of a helper that no kernel calls, of which kernite says nothing. It says nothing
+of a type it refuses by itself, `[u64]`, `f128` or `_`. In a module with an error of kernite's, it says nothing of any
+name it cannot find, `gpr` or `local<[u32; 4], 16>` in these types, or a const that `cfg` leaves out, until the errors
+are mended. A function's types are shown where `cfg` keeps the function and the error is said. A module that builds is
+shown none of them, so an import that only a helper names is unused to Rust, which says so as it does of any import that
+nothing names.
 
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kernite_macros::consts]` is on, and a
@@ -201,16 +199,16 @@ own, and not the kernel's.
 
 A kernel that `cfg` keeps names only what `cfg` keeps. Where it names an item `cfg` leaves out, the name is an error,
 said at the name, once for each place it is written, in a kernel of instances too. Rust never sees a kernel run, so
-kernite says it. Of the items that are Rust's, a const, a static in the process's memory and an x86 kernel that takes
-no compile-time arguments, kernite writes the name for Rust where the kernel writes it, under the kernel's `cfg`, and
-Rust says what it says of any name it cannot find: `cannot find value`. Of the rest, which Rust has no item for, a
-helper, an instance of an x86 kernel, an `extern "ptx-func"` function and a static in the GPU's memory, kernite says
-that `seven` is left out by `cfg` where `calls_seven`, which names it, is kept. Where `cfg` leaves out the kernel too,
-or keeps the item wherever it keeps the kernel, nothing is said. A kept kernel that calls a helper `cfg` leaves out,
-itself or through a helper `cfg` keeps, is told of the helper alone, whatever the helper names. One that calls a helper
-at two places, one of them in a helper `cfg` leaves out, is told of what the helper names, once. A const that `cfg`
-leaves out with every item that names it is not said of, and one that `cfg` keeps and only items `cfg` leaves out name
-is unused to Rust, which says so as it does of any const that nothing names.
+kernite says it. Of the items that are Rust's, a const, a static in the process's memory and an x86 kernel that takes no
+compile-time arguments, kernite writes the name for Rust where the kernel writes it, under the kernel's `cfg`, and Rust
+says what it says of any name it cannot find, `cannot find value`, in a module where kernite says no error. Of the rest,
+which Rust has no item for, a helper, an instance of an x86 kernel, an `extern "ptx-func"` function and a static in the
+GPU's memory, kernite says that `seven` is left out by `cfg` where `calls_seven`, which names it, is kept. Where `cfg`
+leaves out the kernel too, or keeps the item wherever it keeps the kernel, nothing is said. A kept kernel that calls a
+helper `cfg` leaves out, itself or through a helper `cfg` keeps, is told of the helper alone, whatever the helper names.
+One that calls a helper at two places, one of them in a helper `cfg` leaves out, is told of what the helper names, once.
+A const that `cfg` leaves out with every item that names it is not said of, and one that `cfg` keeps and only items
+`cfg` leaves out name is unused to Rust, which says so as it does of any const that nothing names.
 
 A module holds what `cfg` keeps: Rust puts it together, where it knows which `cfg` holds. `LISTINGS` has the listing
 of each x86 kernel that compiles and `cfg` keeps, and of no other. A module of x86 kernels has it whether its kernels

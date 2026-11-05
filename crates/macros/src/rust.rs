@@ -3,7 +3,7 @@
 
 use std::cell::Cell;
 
-use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
+use proc_macro::{Delimiter, Group, Ident, Literal, Spacing, Span, TokenStream, TokenTree};
 
 use kernite::lang::{self, Delim, Fn, ItemKind, Tree, Value};
 
@@ -198,20 +198,15 @@ pub(crate) fn name_at(item: &lang::Item, top: &[TokenTree], span: Span) -> Token
 }
 
 /// An error at each of `f`'s compile-time arguments named as one of `own`, the locals the Rust of
-/// `method` binds for itself, under `f`'s `cfg`. A compile-time argument is no local, and no span of
+/// `method` binds for itself, under `cfg`, `f`'s own. A compile-time argument is no local, and no span of
 /// stable Rust keeps it apart from one of its name, as it does a parameter's.
-pub(crate) fn clashes(f: &Fn, own: &[&str], method: &str, top: &[TokenTree]) -> TokenStream {
-    let cfg = carried(attrs(f, top), false);
+pub(crate) fn clashes(f: &Fn, cfg: &TokenStream, own: &[&str], method: &str, top: &[TokenTree]) -> TokenStream {
     let mut errors = TokenStream::new();
     for name in const_names(written_generics(f, top)) {
         let written = name.to_string();
         let name_of = written.trim_start_matches("r#");
         if own.contains(&name_of) {
-            errors.extend(error_under(
-                &cfg,
-                name.span(),
-                &format!("`{name_of}` names a parameter of {method} as well"),
-            ));
+            errors.extend(error_under(cfg, name.span(), &format!("`{name_of}` names a parameter of {method} as well")));
         }
     }
     errors
@@ -769,27 +764,14 @@ fn tree(t: &TokenTree, space: bool, depth: usize, spans: &mut Vec<Span>) -> Resu
     })
 }
 
+/// The macro an [`error`] calls.
+const ERROR: &str = "::core::compile_error!";
+
 /// `::core::compile_error! { message }`, reported where `span` is.
 pub(crate) fn error(span: Span, message: &str) -> TokenStream {
-    let mut message = Literal::string(message);
-    message.set_span(span);
-    let tokens = [
-        TokenTree::Punct(Punct::new(':', Spacing::Joint)),
-        TokenTree::Punct(Punct::new(':', Spacing::Alone)),
-        TokenTree::Ident(Ident::new("core", span)),
-        TokenTree::Punct(Punct::new(':', Spacing::Joint)),
-        TokenTree::Punct(Punct::new(':', Spacing::Alone)),
-        TokenTree::Ident(Ident::new("compile_error", span)),
-        TokenTree::Punct(Punct::new('!', Spacing::Alone)),
-        TokenTree::Group(Group::new(Delimiter::Brace, TokenTree::Literal(message).into())),
-    ];
-    tokens
-        .into_iter()
-        .map(|mut t| {
-            t.set_span(span);
-            t
-        })
-        .collect()
+    let mut out = parse(ERROR);
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, TokenTree::Literal(Literal::string(message)).into()))]);
+    respan(out, span)
 }
 
 /// [`error`] under `cfg`, what [`carried`] keeps of an item's attributes: Rust says nothing of an item
@@ -798,6 +780,12 @@ pub(crate) fn error_under(cfg: &TokenStream, span: Span, message: &str) -> Token
     let mut out = cfg.clone();
     out.extend(error(span, message));
     out
+}
+
+/// Whether `tokens` begin with the tokens of [`ERROR`], whatever follows them.
+pub(crate) fn is_error(tokens: &[TokenTree]) -> bool {
+    let path: Vec<String> = parse(ERROR).into_iter().map(|t| t.to_string()).collect();
+    tokens.iter().take(path.len()).map(TokenTree::to_string).eq(path)
 }
 
 /// The crate that has `__kernels!` and `__Room`, which the Rust the macro writes calls by the crate's
@@ -839,14 +827,11 @@ pub(crate) fn needs_dependency(what: &str, name: &str) -> String {
     format!("{what} needs a dependency named `{name}`, which this crate does not have")
 }
 
-/// A type that stands for one of the crate `name`'s in a crate that has no dependency named so, and
-/// says at `span` that `what` needs one. It is an array whose length is the error, which Rust
-/// reports once and takes for a type it has reported, so that it says nothing of the code that
-/// uses it.
-pub(crate) fn missing(span: Span, what: &str, name: &str) -> TokenStream {
-    let mut length = parse("();");
-    length.extend(error(span, &needs_dependency(what, name)));
-    TokenTree::Group(Group::new(Delimiter::Bracket, length)).into()
+/// What stands for a type of the crate `name`'s in a crate that has no dependency named so, and what says at `span`
+/// that `what` needs one, under `cfg`. The type is [`REFUSED`], a name Rust cannot find. The error is an item, for the
+/// caller to write after the item the type is of. Rust then says nothing of the type, nor of the code that uses it.
+pub(crate) fn missing(cfg: &TokenStream, span: Span, what: &str, name: &str) -> (TokenStream, TokenStream) {
+    (placed(REFUSED, span), error_under(cfg, span, &needs_dependency(what, name)))
 }
 
 /// The type `ty`, a kernel's, as it is written.
@@ -924,7 +909,7 @@ pub(crate) fn launcher_result(f: &Fn, top: &[TokenTree], launched: TokenStream) 
 /// Rust says of them only that a lifetime is not declared, that a module is where a type is written, and what a macro
 /// writes. Most of the types are the language's, `gpr` or `local<[u32; 4], 16>`, and Rust cannot find them: it is
 /// silent about a name it cannot find only where a macro has written an error as an item of the module, and `guard`
-/// holds only there.
+/// holds only there; or the lines are `__Room`'s to write, beside an error it writes, and `guard` is none.
 pub(crate) fn seen(f: &Fn, top: &[TokenTree], guard: &TokenStream) -> TokenStream {
     let generics = written_generics(f, top)
         .windows(4)
