@@ -155,9 +155,9 @@ fn a_type_is_written_as_rust_writes_it() {
 }
 
 /// A type has a space after a `:` that is not half of a `::`, `fn(x: u8)`, `Item: Copy` and `'b: 'a`; after
-/// the name of a lifetime, `&'a [u8]` and `&'static !`; after `dyn` and `impl`, `dyn (A) + B` and
-/// `impl 'a + A`; and before `as`, `<Vec<u8> as Tr>::Out`. The braces of a macro have a space before them,
-/// `byte! {..}`; the parentheses of a macro have none, `byte!(_)`.
+/// the name of a lifetime, `&'a [u8]`, `&'static !` and `&'a ::b::C`, a path from the root; after `dyn` and
+/// `impl`, `dyn (A) + B` and `impl 'a + A`; and before `as`, `<Vec<u8> as Tr>::Out`. The braces of a macro have
+/// a space before them, `byte! {..}`; the parentheses of a macro have none, `byte!(_)`.
 #[test]
 fn a_colon_a_lifetime_and_a_macros_braces_are_written_as_rust_writes_them() {
     let written = |src: &str| crate::text(&crate::lex(src).unwrap());
@@ -200,6 +200,13 @@ fn a_colon_a_lifetime_and_a_macros_braces_are_written_as_rust_writes_them() {
         ("&'a&'b u8", "&'a &'b u8"),
         ("&'a*const u8", "&'a *const u8"),
         ("&'a<T as Tr>::Out", "&'a <T as Tr>::Out"),
+        ("&'static ::core::ffi::CStr", "&'static ::core::ffi::CStr"),
+        ("&'a ::my::Word", "&'a ::my::Word"),
+        ("&'a::my::Word", "&'a ::my::Word"),
+        ("Option<&'a ::my::Word>", "Option<&'a ::my::Word>"),
+        ("Foo<'a, ::my::Word>", "Foo<'a, ::my::Word>"),
+        ("Foo<'a,::my::Word>", "Foo<'a, ::my::Word>"),
+        ("for<'a> fn(&'a ::core::ffi::CStr)", "for<'a> fn(&'a ::core::ffi::CStr)"),
         ("&'a mut u8", "&'a mut u8"),
         ("&'a !", "&'a !"),
         ("&'static!", "&'static !"),

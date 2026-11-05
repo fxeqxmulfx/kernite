@@ -2890,6 +2890,23 @@ fn a_primitive_written_as_a_path_after_a_lifetime_is_the_primitive_in_kernites_e
     refuses("primitive_paths_lifetimes", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
+/// A lifetime before a path from the root that is no primitive's, `&'static ::core::ffi::CStr`, keeps its space in
+/// kernite's error, as it does before any other path, `&'static core::ffi::CStr`: for the parameter of an x86 kernel
+/// and of a GPU kernel, and for a function type's parameter, `for<'a> fn(&'a ::core::ffi::CStr)`.
+#[test]
+fn a_lifetime_keeps_its_space_before_a_path_from_the_root_in_kernites_error() {
+    let mut said = vec![
+        // x86, by a path from the root and by one that is not, and in a function type's parameter.
+        x86_takes("6:45", "", "&'static ::core::ffi::CStr"),
+        x86_takes("10:44", "", "&'static core::ffi::CStr"),
+        x86_takes("14:44", "", "for<'a> fn(&'a ::core::ffi::CStr)"),
+        // A GPU.
+        gpu_takes("21:49", "", "&'static ::core::ffi::CStr"),
+    ];
+    said.push(format!("error: could not compile `lifetime_root` (lib) due to {} previous errors", said.len()));
+    refuses("lifetime_root", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
 /// A module that gives `core` or `std` another meaning, `use crate::fake as core;`, has Rust say that a number written
 /// as its path is not the number, as it says it of the number's name that a module gives another type: at the type,
 /// once, for each parameter and result of an x86 kernel and each parameter of a GPU kernel. A pointer's type is not

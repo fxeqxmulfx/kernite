@@ -286,13 +286,13 @@ fn keyword(name: &str) -> bool {
 /// Whether the printer of rustc writes a space between `trees[i - 1]` and `trees[i]`, of a type's own tokens:
 /// after a keyword that a type or a bound follows, `dyn`, `impl`, `const`, `mut`, `as`, and before `as`,
 /// `<A<'a> as B>::C`; after `,`; after a `:` that is not half of a `::`; after the `>` of a binder,
-/// `for<'a> fn(&'a u8)`; between words; after the name of a lifetime, `&'a [u8]` and `&'a !`; on each side of
-/// a `+` or a `=` that no operator holds, as in `dyn A + B` and `Item = &u8`; and on each side of an arrow,
-/// `fn(u8) -> u8`. The operators that hold a `+` or a `=`, `+=`, `==`, `=>`, `<=` and `..=`, are written
-/// close, and so are the two characters of an arrow. A `>` before a `=` is no operator's: it closes the
-/// arguments of a name, so `Item<X>=u8` and `Item<X> = u8` are both written `Item<X> = u8`. The braces of a
-/// macro have a space before them, `byte! {..}`. Other punctuation and brackets are against the word before
-/// them.
+/// `for<'a> fn(&'a u8)`; between words; after the name of a lifetime, `&'a [u8]`, `&'a !` and `&'a ::b::C`, but
+/// not before a `,`, a `>` or the `:` of a bound, `'b: 'a`; on each side of a `+` or a `=` that no operator
+/// holds, as in `dyn A + B` and `Item = &u8`; and on each side of an arrow, `fn(u8) -> u8`. The operators that
+/// hold a `+` or a `=`, `+=`, `==`, `=>`, `<=` and `..=`, are written close, and so are the two characters of
+/// an arrow. A `>` before a `=` is no operator's: it closes the arguments of a name, so `Item<X>=u8` and
+/// `Item<X> = u8` are both written `Item<X> = u8`. The braces of a macro have a space before them,
+/// `byte! {..}`. Other punctuation and brackets are against the word before them.
 fn spaced(trees: &[Tree], i: usize) -> bool {
     // Only a `=` or a `>` after a `=`, and a `=` after a `+`, make an operator: `=&` and `+?` are none, as
     // the `&` after the `=` of `Item=&u8` shows. No operator ends in `+`, and `+=` begins with it; `==` and
@@ -318,7 +318,7 @@ fn spaced(trees: &[Tree], i: usize) -> bool {
             (Tree::Ident { name, .. }, _) if keyword(name) => true,
             (_, Tree::Ident { name, .. }) if name == "as" => true,
             (Tree::Ident { .. }, after) if lifetime(trees, i - 1) => {
-                !matches!(after, Tree::Punct { ch: ',' | '>' | ':', .. })
+                !matches!(after, Tree::Punct { ch: ',' | '>', .. }) && !colon(trees, i)
             }
             (Tree::Punct { ch, .. }, after) => {
                 *ch == ',' || *ch == '!' && matches!(after, Tree::Group { delim: Delim::Brace, .. })
