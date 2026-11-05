@@ -1,5 +1,5 @@
-//! Each crate's README, its example run as a doctest, built against the crates as a crate of a
-//! user's is: `cargo test -p readmes --doc`.
+//! Each crate's README and the repository's, their examples run as doctests, built against the
+//! crates as a crate of a user's is: `cargo test -p readmes --doc`.
 
 #[cfg(doctest)]
 #[doc = include_str!("../../../crates/core/README.md")]
@@ -40,3 +40,7 @@ struct KerniteCuda;
 #[cfg(doctest)]
 #[doc = include_str!("../../../crates/cpu/README.md")]
 struct KerniteCpu;
+
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+struct Repository;

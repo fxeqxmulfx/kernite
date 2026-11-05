@@ -1,6 +1,6 @@
 [package]
 name = "readmes"
-description = "Each crate's README, its example run as a doctest, built against the crates as a user's crate is"
+description = "Each crate's README and the repository's, their examples run as doctests, built against the crates as a user's crate is"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

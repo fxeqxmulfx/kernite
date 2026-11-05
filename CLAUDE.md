@@ -60,9 +60,10 @@ every kind of dependency, and a new crate needs its line there. Change both when
 - `examples/my-app`, `examples/microgpt`, `examples/matmul`: kernite used as a crate outside it
   would be. Their tests hold each kernel to a scalar reference, bit for bit, and each listing to
   `snapshots/`.
-- `examples/readmes`: runs the example of each crate's `README.md` as a doctest, all together, built
-  against the crates as a crate of a user's is. kernite-cpu's and kernite-cuda's cannot run in their
-  own crates: they need kernite-macros, and `architecture.rs` lets neither depend on another crate.
+- `examples/readmes`: runs the example of each crate's `README.md` and of the repository's as a
+  doctest, all together, built against the crates as a crate of a user's is. kernite-cpu's and
+  kernite-cuda's cannot run in their own crates: they need kernite-macros, and `architecture.rs`
+  lets neither depend on another crate.
 
 ## Rules the code keeps
 
