@@ -96,3 +96,19 @@ dependencies = [
  "kernite-cuda",
  "kernite-macros",
 ]
+
+[[package]]
+name = "readmes"
+version = "0.3.0"
+dependencies = [
+ "kernite",
+ "kernite-build",
+ "kernite-compile",
+ "kernite-core",
+ "kernite-cpu",
+ "kernite-cuda",
+ "kernite-lang",
+ "kernite-macros",
+ "kernite-ptx",
+ "kernite-x86",
+]
