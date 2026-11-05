@@ -4,3 +4,7 @@
 #[cfg(doctest)]
 #[doc = include_str!("../../../crates/lang/README.md")]
 struct KerniteLang;
+
+#[cfg(doctest)]
+#[doc = include_str!("../../../crates/build/README.md")]
+struct KerniteBuild;
