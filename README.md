@@ -145,6 +145,13 @@ a type so compiles to the listing, or the PTX, of one that names types of the sa
 `dyn_::Foo` say. An error says the keyword as it is written, `r#dyn::Foo` and `r#mut`: without its `r#` the word is the
 keyword, and not the name.
 
+An attribute of kernite's written raw is the attribute: a kernel's `#[r#instances(1, 2)]` and `#[r#cooperative]`, a
+GPU kernel's `#[r#maxntid(..)]`, `#[r#reqntid(..)]`, `#[r#minnctapersm(..)]` and `#[r#maxnreg(..)]`, and a module's
+`#[kernite_macros::kernels(r#consts = crate::model::sizes)]`. A kernel written so compiles to the listing, or the
+PTX, of the one written plain. An attribute written raw is wrong as the plain one is: the same error, in the same
+words, at its name, which starts at the same `line:column`, and Rust adds none of its own. So `#[r#maxnctapersm(..)]`
+is refused as `#[maxnctapersm(..)]` is.
+
 A macro's fragment is one operand, or one type, wherever kernite reads it, as Rust reads it. With `$n:expr` as `1 + 2`,
 `$n * 2` is 6, and not the 5 that `1 + 2 * 2` is. It is so in a kernel's expression, on x86 and on a GPU, under a `-`,
 in the length of an array, in `#[instances(..)]`, and in a const, which is 6 to Rust too. A `$t:ty` is one type in a

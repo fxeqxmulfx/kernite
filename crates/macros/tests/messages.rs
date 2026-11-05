@@ -3735,6 +3735,59 @@ fn a_type_named_by_a_keyword_written_raw_is_the_type_rust_reads() {
     );
 }
 
+/// An attribute kernite reads, written raw, is the attribute written plain: a kernel's `#[r#instances(..)]` and
+/// `#[r#cooperative]`, a GPU kernel's `#[r#maxntid(..)]`, `#[r#reqntid(..)]`, `#[r#minnctapersm(..)]` and
+/// `#[r#maxnreg(..)]`, and the module's `#[kernels(r#consts = ..)]`. Rust builds the crate without a word. An x86
+/// module written so has the listings of the one written plain, and runs as it does. A GPU module written so is the
+/// PTX of the one written plain, has its launchers, `together_blocks` among them, and the driver holds a launch to
+/// its directives. A module given its consts by `r#consts` reads them as one given them by `consts`.
+#[test]
+fn an_attribute_written_raw_is_the_attribute_written_plain() {
+    let printed = runs_quietly(&["test"], "raw_attributes");
+    assert!(
+        printed.contains("test result: ok. 7 passed"),
+        "fixtures/raw_attributes.rs ran its tests, and printed:\n{printed}"
+    );
+}
+
+/// An attribute kernite reads, written raw, is wrong as the plain one is: kernite's error alone, in the same words, at
+/// the same column of a line of its own. So it is for an `#[r#instances]` with no list; two `#[r#instances(..)]`,
+/// whichever way each is written, for the two are one attribute; an `#[r#cooperative(1)]`, which takes nothing; two
+/// `#[r#cooperative]`; a directive with no list, `#[r#maxnreg]`; two of one directive; a directive PTX has no more,
+/// `#[r#maxnctapersm(2)]`; a directive on a kernel for x86-64; and the module's own, `#[kernels(r#consts = 5)]`.
+#[test]
+fn an_attribute_written_raw_is_wrong_as_the_plain_one_is() {
+    // The line of the attribute refused in each module of the fixture, the plain one first, then the raw one, and
+    // for two of one the mixed one; the column of its name; and what is said.
+    let cases: [(&[u32], u32, &str); 9] = [
+        (&[8, 14], 7, "`#[instances(..)]` lists what a function is compiled for, as in `#[instances(4, 8)]`"),
+        (&[21, 28, 35], 7, "a function has one `#[instances(..)]`, which lists each instance it is compiled for"),
+        (&[41, 47], 7, "`#[cooperative]` takes nothing: it says that a kernel's blocks or threads wait for each other"),
+        (&[54, 61, 68], 7, "a kernel has one `#[cooperative]`"),
+        (&[74, 80], 7, "`#[maxnreg(..)]` gives the most registers a thread may use, as in `#[maxnreg(32)]`"),
+        (&[87, 94, 101], 7, "a kernel has one `#[maxntid(..)]`"),
+        (
+            &[107, 113],
+            7,
+            "PTX has no `.maxnctapersm` from 2.1 on; `#[minnctapersm(..)]` gives the blocks an SM should hold at once, \
+             at least",
+        ),
+        (
+            &[119, 125],
+            7,
+            "`#[maxntid(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`; `k` is a kernel for x86-64, which the \
+             process runs",
+        ),
+        (&[129, 134], 27, REFUSED),
+    ];
+    let mut said = vec![];
+    for (lines, column, message) in cases {
+        said.extend(lines.iter().map(|line| format!("src/lib.rs:{line}:{column}: error: {message}")));
+    }
+    said.push(format!("error: could not compile `raw_attributes_refused` (lib) due to {} previous errors", said.len()));
+    refuses("raw_attributes_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
 /// The method that says how many blocks a cooperative GPU kernel's grid has at most, `k_blocks`,
 /// keeps what the kernel says of lints by giving Rust nothing of the kernel's to lint: its name and
 /// the compile-time arguments it takes are of the macro's span. Of the kernel's attributes it keeps

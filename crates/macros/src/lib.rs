@@ -179,7 +179,9 @@
 //! `u64`, `r#f16` the half a GPU kernel's launcher takes as kernite-cuda has it, and `r#f128` a type
 //! kernite refuses, as the plain names are. A keyword written raw is a name too: a pointer to
 //! `r#dyn::Foo` has one word, as Rust has it, where a pointer to `dyn Foo` has two. An error says the
-//! keyword as it is written, `r#dyn`.
+//! keyword as it is written, `r#dyn`. An attribute kernite reads, written raw, is the attribute:
+//! `#[r#instances(1, 2)]`, `#[r#cooperative]`, a GPU kernel's `#[r#maxnreg(32)]`, and the module's
+//! `#[kernels(r#consts = ..)]`. Rust is given none of them, and an error of one is kernite's alone.
 //!
 //! A helper is compiled where a kernel calls it, and an `extern "ptx-func"` function is a `.func`
 //! of the GPU's module, so the macros write no function for either. Where kernite finds any error
@@ -374,7 +376,7 @@ use kernite::lang;
 use crate::expand::expand;
 use crate::rust::{
     MACROS, Site, attrs_len, braced, depends_on, error, flatten, for_rust, inner_attribute, is_ident, is_path,
-    is_punct, lex, module, needs_dependency, parse, path_uses, site,
+    is_punct, lex, module, named, needs_dependency, parse, path_uses, site,
 };
 
 /// See the crate documentation.
@@ -399,7 +401,7 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
     // dependency on `kernite-cuda` or `kernite-cpu` it needs, is said, as for any module.
     let refused = |why: TokenStream| module(head, braces, expand(None, Some(why), braces.stream()));
     let path = match &attr[..] {
-        [c, eq, path @ ..] if is_ident(c, "consts") && is_punct(eq, '=') && is_path(path) => path,
+        [c, eq, path @ ..] if named(c, "consts") && is_punct(eq, '=') && is_path(path) => path,
         _ => {
             let message = "`#[kernels]` takes the module of consts its kernels read, as `consts = crate::model::sizes`, \
                            a module `#[kernite_macros::consts]` is on; or nothing";
