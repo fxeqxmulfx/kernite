@@ -131,11 +131,12 @@ fn gpu_sgemm_is_the_reference_bit_for_bit() {
 }
 
 #[test]
-fn gpu_sgemm_takes_more_tiles_than_a_grid_has_blocks_along_x() {
+fn gpu_sgemm_takes_a_row_of_more_than_65535_blocks() {
     let Some(cuda) = cuda() else { return };
     let kernels = gpu::kernels::Kernels::load(&cuda).unwrap();
-    // A module for the oldest GPU has 65535 blocks along x at most: one tile more, down and across,
-    // in the kernel that loads 16 bytes, `n` and `k` multiples of 4, and in the one that loads 4.
+    // A row of 65536 blocks is one more than the 65535 that a module written for `sm_20` has
+    // along x. There are that many tiles down, then across, in the kernel that loads 16 bytes,
+    // `n` and `k` multiples of 4, and in the one that loads 4.
     use gpu::kernels::{BM, BN};
     let shapes = [(65535 * BM + 1, 1, 1), (1, 65535 * BN + 1, 1), (65535 * BM + 1, 4, 4), (4, 65535 * BN + 4, 4)];
     for shape @ (m, n, k) in shapes {

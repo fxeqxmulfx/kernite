@@ -21,7 +21,7 @@ mod tests;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use kernite_cuda::{Buffer, Cuda, Error, Grid, Plain, f16};
+use kernite_cuda::{Buffer, Cuda, Error, Plain, f16};
 
 /// A product's size, `(m, n, k)`: of `a`, `m` rows of `k`, and `b`, `k` rows of `n`, into `c`,
 /// `m` rows of `n`.
@@ -141,14 +141,6 @@ fn gpu_operands(lens: (usize, usize, usize), shape: Shape) -> (u32, u32, u32) {
     let fits = |len: usize| u32::try_from(len).is_ok();
     assert!(fits(m * k) && fits(k * n) && fits(m * n), "{m} by {n} by {k} has 2^32 elements or more");
     (m as u32, n as u32, k as u32)
-}
-
-/// The grid for `blocks` blocks of `threads` threads, `blocks` 1 or more: a rectangle, since a
-/// module that runs on the oldest GPU, as kernite writes it, has at most 65535 blocks along x.
-/// A kernel counts its blocks `ctaid.y * nctaid.x + ctaid.x`, and those past `blocks` do nothing.
-fn gpu_grid(blocks: u32, threads: u32) -> Grid {
-    let x = blocks.min(65535);
-    Grid { blocks: [x, blocks.div_ceil(x), 1], threads: [threads, 1, 1], shared: 0 }
 }
 
 /// How long a run takes at the least: the 3 that warm up take half a minute, by which time the
