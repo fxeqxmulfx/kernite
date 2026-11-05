@@ -69,6 +69,10 @@ every kind of dependency, and a new crate needs its line there. Change both when
   `crates/kernite/tests/builder/` is compared byte for byte, and a refactor changes none of them.
 - Errors are behaviour. Tests assert the text of many, and the `line:column` they point at; keep both.
   A new error says what is wrong where it can be mended, in the README's words.
+- What rustc can do, rustc does. The macros write the Rust so that rustc checks, works out and says
+  all it can of it, whether a type is a number say, and kernite does none of it again. kernite does
+  itself only what rustc cannot: reading a kernel and compiling it, and reading the text that
+  `x86_str` and `ptx_str` are given, which no rustc reads.
 - `unsafe_code` is forbidden everywhere but in kernite-cuda; in kernite-cpu's `affinity` module, which calls the C
   library to read and set the CPUs a thread may run on, and in its test of where pages are, `tests/nodes.rs`; and in
   the examples, which call kernels. Each `unsafe` block says why it holds. kernite-cuda and kernite-cpu keep lints of
@@ -119,6 +123,7 @@ Developers are subagents the reviewer starts, each on Sonnet 5.5: the Agent tool
 The reviewer reuses a developer where it can. A developer whose run has ended takes the next round
 of its task, or a new task, by SendMessage, and keeps what it knows of the code. The reviewer
 starts a new developer only when none is free, and gives a task to the one that knows its code.
+At most three developers run at once; the next task starts when one ends its run.
 
 A bug found in kernite, in a review, a test or a task, becomes a task of its own on the board,
 tagged `kernite`, with tests that show it, and a developer resolves it. The reviewer files it and
