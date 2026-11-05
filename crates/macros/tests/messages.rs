@@ -4230,3 +4230,94 @@ fn an_error_at_a_fragment_is_said_where_the_fragment_is() {
     said.push(format!("error: could not compile `fragments_refused` (lib) due to {} previous errors", said.len()));
     refuses("fragments_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
+
+/// A macro's fragment `$t:ty` of bounds, `dyn core::fmt::Debug + Send`, is one type to Rust behind a pointer or a
+/// reference, `*const $t`, `*mut $t`, `&$t`, `&mut $t` and `&'static $t`, wherever the macros write it back: in a
+/// parameter and in a result, of an x86 kernel, of a GPU kernel and of a helper, and in a type that holds it, a tuple,
+/// an array, a function pointer or an argument of a type. kernite refuses each, for a pointer to a trait object has two
+/// words and a kernel takes no reference. Rust says nothing of the fragment, as it says nothing of it in a macro that
+/// does not call kernite: not that its `+` is ambiguous, as it says of `*const dyn Debug + Send` written out. Each is
+/// also built with the bounds in parentheses, as written by hand: the errors are the same, at the same places. Rust's
+/// one word is a warning at the parentheses of the GPU parameters' call: the launcher writes the type in `Ptr<..>`,
+/// where they are not needed.
+#[test]
+fn a_fragment_of_bounds_behind_a_pointer_is_one_type_to_rust_wherever_the_macros_write_it_back() {
+    let (mut said, mut repeated) = (Vec::new(), 0);
+    // The fixture calls each macro with the fragment, then with the type in parentheses. Cargo says a message once,
+    // however many calls make it, and counts each.
+    let mut both = |lines: &dyn Fn(&str) -> Vec<String>| {
+        for ty in ["dyn core::fmt::Debug + Send", "(dyn core::fmt::Debug + Send)"] {
+            for line in lines(ty) {
+                if said.contains(&line) {
+                    repeated += 1;
+                } else {
+                    said.push(line);
+                }
+            }
+        }
+    };
+    both(&|ty| {
+        vec![
+            two_words("17:48", "", ty),
+            two_words("20:48", "", ty),
+            x86_takes("23:48", "", &format!("&{ty}")),
+            x86_takes("26:48", "", &format!("&mut {ty}")),
+            x86_takes("29:48", "", &format!("&'static {ty}")),
+        ]
+    });
+    both(&|ty| {
+        vec![
+            two_words("46:56", "", ty),
+            two_words("49:56", "", ty),
+            x86_gives("52:56", "", &format!("&'static {ty}")),
+            x86_gives("55:56", "", &format!("&'static mut {ty}")),
+            x86_takes("58:48", "", "&u8"),
+            x86_takes("61:48", "", "&u8"),
+        ]
+    });
+    both(&|ty| {
+        vec![
+            two_words("76:52", "", ty),
+            two_words("79:52", "", ty),
+            gpu_takes("82:52", "", &format!("&{ty}")),
+            gpu_takes("85:52", "", &format!("&mut {ty}")),
+            gpu_takes("88:52", "", &format!("&'static {ty}")),
+        ]
+    });
+    both(&|ty| {
+        let places = ["103:54", "106:54", "109:54", "112:54", "115:54"];
+        let behind = ["*const ", "*mut ", "&", "&mut ", "&'static "];
+        places.into_iter().zip(behind).map(|(place, behind)| gpu_returns(place, "", &format!("{behind}{ty}"))).collect()
+    });
+    // A helper is shown to Rust where a kernel of its module does not compile, so each of these has one that does not.
+    both(&|ty| vec![two_words("131:48", "", ty)]);
+    both(&|ty| vec![two_words("163:48", "", ty)]);
+    both(&|ty| {
+        vec![
+            x86_takes("200:52", "", &format!("(u8, &'static {ty})")),
+            x86_gives("203:60", "", &format!("[*const {ty}; 2]")),
+            gpu_takes("206:59", "", &format!("fn(&mut {ty}) -> u8")),
+            x86_takes("209:55", "", &format!("Wrap<&'static {ty}>")),
+        ]
+    });
+    let errors = said.len() + repeated;
+    said.push("src/lib.rs:96:32: warning: unnecessary parentheses around type".to_string());
+    said.push(format!(
+        "error: could not compile `fragments_bounds` (lib) due to {errors} previous errors; 1 warning emitted"
+    ));
+    refuses("fragments_bounds", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A macro's fragment `$t:ty` behind a pointer that kernite takes is one type to Rust and to the kernel, with nothing
+/// said of it: `crate::Wrap<u32>` and `fn(u8) -> u8` behind `*const` and `*mut`, in a parameter and in a result, of an
+/// x86 kernel, of an instance of one and of a GPU kernel; bounds in the argument of a type, `*const Wrap<$t>` with `$t`
+/// as `dyn core::fmt::Debug + Send`, which has a size whatever its argument has; and bounds behind a pointer in a type
+/// of the module's own, `pub type Fat = *const $t;`, which has two words.
+#[test]
+fn a_fragment_behind_a_pointer_that_kernite_takes_is_one_type_to_rust_and_to_the_kernel() {
+    let printed = runs_quietly(&["test"], "fragments_pointees");
+    assert!(
+        printed.contains("test result: ok. 4 passed"),
+        "fixtures/fragments_pointees.rs ran, and printed:\n{printed}"
+    );
+}

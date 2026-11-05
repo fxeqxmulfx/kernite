@@ -228,14 +228,15 @@ fn split_commas(tokens: &[TokenTree]) -> impl Iterator<Item = &[TokenTree]> {
     })
 }
 
-/// `f`'s parameters as written, each its tokens, `x: *mut f32`, and the place of its colon. A comma
-/// ends a parameter unless [`split_commas`] says it is among the arguments of a type's. Rust cannot
-/// pass a parameter named `_` on, so each is named here, for every signature and body the macros
-/// write for `f`: it takes the next of `__kernite_0`, `__kernite_1` and on that no parameter or
-/// compile-time argument of `f` is named.
+/// `f`'s parameters as written, each its tokens, `x: *mut f32`, and the place of its colon. A fragment that stays
+/// one type is in parentheses, as [`for_rust`] has it, for the macros write each parameter as it is here, and Rust
+/// reads `*const $t`, with `$t` as `dyn Debug + Send`, as one type only so. A comma ends a parameter unless
+/// [`split_commas`] says it is among the arguments of a type's. Rust cannot pass a parameter named `_` on, so each is
+/// named here, for every signature and body the macros write for `f`: it takes the next of `__kernite_0`,
+/// `__kernite_1` and on that no parameter or compile-time argument of `f` is named.
 pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, usize)> {
     let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
-    let tokens = flatten(group.stream());
+    let tokens = for_rust(flatten(group.stream()));
     let params = split_commas(&tokens).filter(|p| !p.is_empty());
     let taken: Vec<&str> =
         f.generics.iter().map(|g| &g.name).chain(f.params.iter().map(|p| &p.name)).map(String::as_str).collect();
@@ -280,7 +281,8 @@ enum Place {
 /// `[u8; (1 != 2) as usize]`, but `found` is told of a length of one token `leaf` picks, `[u8; _]`. A token
 /// `leaf` picks is a name, not a type, after a `'`, a lifetime's, `&'f16 u8`; after a `::`, a later segment of a
 /// path, `core::primitive::f16`; and before a `:`, a function pointer's parameter's, `fn(f16: u8)`. Where
-/// kernite cannot tell, as for a macro that writes the token into a type, it takes it for no type's.
+/// kernite cannot tell, as for a macro that writes the token into a type, it takes it for no type's. What it
+/// writes is for Rust, so a fragment that stays one type in a bracket is in parentheses there, as [`for_rust`] has it.
 fn walk(
     mut tokens: &[TokenTree],
     leaf: fn(&TokenTree) -> bool,
@@ -313,7 +315,7 @@ fn walk(
                 out.extend(found(name, Place::Type).unwrap_or_else(|| [name.clone()].into_iter().collect()));
             }
             (TokenTree::Group(g), _) if g.delimiter() != Delimiter::Brace => {
-                let mut inner = Group::new(g.delimiter(), walk(&flatten(g.stream()), leaf, found));
+                let mut inner = Group::new(g.delimiter(), walk(&for_rust(flatten(g.stream())), leaf, found));
                 inner.set_span(g.span());
                 out.extend([TokenTree::Group(inner)]);
             }
@@ -707,12 +709,14 @@ pub(crate) fn flatten(stream: TokenStream) -> Vec<TokenTree> {
 }
 
 /// Whether an invisible group that holds `inside`, between `before` and `after`, stays one. An operator in it
-/// could be taken apart by one next to it, as `* 2` takes `1 + 2` apart: so it stays if it holds an operator
-/// outside any bracket, `1 + 2`, `-1`, `a as u8` or `0..4`, and one is next to it. Before it is one of
-/// `+ - * / % ^ & | < >` and `!`, or `==`, `!=`, `<=` or `>=`; after it, one of `+ - * / % ^ & | < >`, or `==`,
-/// `!=`, `.` or `as`. The `>` of an arrow, `->`, is a result's, and no operator's, and a lone `=` is a `let`'s or an
-/// assignment's. A group that holds `a.b`, `f(x)` or `a::b`, or that no operator is next to, is read as it would be
-/// without the group, and is opened.
+/// could be taken apart by a token next to it, as `* 2` takes `1 + 2` apart, and as `*const` takes the `+` of
+/// `dyn Debug + Send` for its own, which Rust refuses as ambiguous: so it stays if it holds an operator outside
+/// any bracket, `1 + 2`, `-1`, `a as u8`, `0..4` or `dyn Debug + Send`, and a token that takes it apart is next to
+/// it. Before it is one of `+ - * / % ^ & | < >` and `!`; `==`, `!=`, `<=` or `>=`; `const` or `mut`, of a pointer,
+/// `*const T`, or a reference, `&mut T`; or the name of a lifetime, `&'a T`. After it is one of `+ - * / % ^ & | < >`,
+/// or `==`, `!=`, `.` or `as`. The `>` of an arrow, `->`, is a result's, and no operator's, and a lone `=` is a
+/// `let`'s or an assignment's. A group that holds `a.b`, `f(x)` or `a::b`, or that no such token is next to, is read
+/// as it would be without the group, and is opened.
 fn stays(inside: &[TokenTree], before: &[TokenTree], after: &[TokenTree]) -> bool {
     let is_any = |t: &TokenTree, chars: &str| chars.chars().any(|c| is_punct(t, c));
     let loose = inside.iter().any(|t| is_any(t, "+-*/%^&|<>!=") || is_ident(t, "as"))
@@ -728,6 +732,8 @@ fn stays(inside: &[TokenTree], before: &[TokenTree], after: &[TokenTree]) -> boo
     };
     let arrow = matches!(before, [.., dash, head] if is_punct(dash, '-') && is_punct(head, '>'));
     let left = before.last().is_some_and(|t| is_any(t, "+-*/%^&|<>!")) && !arrow
+        || before.last().is_some_and(|t| is_ident(t, "const") || is_ident(t, "mut"))
+        || matches!(before, [.., quote, _] if is_punct(quote, '\''))
         || before.len() >= 2 && compares(&before[before.len() - 2..]);
     let right = after.first().is_some_and(|t| is_any(t, "+-*/%^&|<>.") || is_ident(t, "as"))
         || after.len() >= 2 && compares(&after[..2]);
