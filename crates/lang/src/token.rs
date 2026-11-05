@@ -17,6 +17,9 @@ pub enum Delim {
     Bracket,
     /// `{ }`.
     Brace,
+    /// No brackets: the tokens of a macro's fragment, `1 + 2` in `$n * 2`, which are one operand or
+    /// one type, as brackets make them. They are written with nothing round them.
+    None,
 }
 
 /// A token, or a group of them in brackets. Each says whether the source has a space before it, for
@@ -53,7 +56,7 @@ pub enum Tree {
     },
     /// Tokens in brackets.
     Group {
-        /// The brackets.
+        /// The brackets, or none.
         delim: Delim,
         /// What is inside.
         trees: Vec<Tree>,
@@ -61,7 +64,7 @@ pub enum Tree {
         space: bool,
         /// Whether the source has a space before the closing bracket.
         space_close: bool,
-        /// Where it opens.
+        /// Where it opens, or, with no brackets, where its first token is.
         span: Span,
     },
 }
@@ -158,9 +161,10 @@ fn written(trees: &[Tree], source: bool) -> String {
             Tree::Punct { ch, .. } => out.push(*ch),
             Tree::Group { delim, trees: inside, space_close, .. } => {
                 let (open, close) = match delim {
-                    Delim::Paren => ('(', ')'),
-                    Delim::Bracket => ('[', ']'),
-                    Delim::Brace => ('{', '}'),
+                    Delim::Paren => ("(", ")"),
+                    Delim::Bracket => ("[", "]"),
+                    Delim::Brace => ("{", "}"),
+                    Delim::None => ("", ""),
                 };
                 // The brackets of a block and of a macro's arguments are as the source has them too.
                 let source = source || *delim == Delim::Brace || macro_args(trees, i);

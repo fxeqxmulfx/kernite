@@ -3865,3 +3865,87 @@ fn a_block_an_arrays_length_and_a_macros_arguments_are_said_as_their_source_has_
     said.push(format!("error: could not compile `type_quotes` (lib) due to {} previous errors", said.len()));
     refuses("type_quotes", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
+
+/// A macro's fragment `$n:expr` is one operand where an x86 kernel reads it, as Rust reads it: `$n * 2` with `$n` as
+/// `1 + 2` is 6, and not the 5 that `1 + 2 * 2` is. The fixture's kernels put a fragment of each operator of an
+/// integer and of a bool known now before and after each operator, and before `as`, `.` and `..`, and give what Rust
+/// gives for the same fragment worked out beside them. It is so for a fragment a macro passes on to another, whole or
+/// as tokens, and under a `-`, for a number with a sign too.
+#[test]
+fn a_fragment_is_one_operand_in_an_x86_kernels_expression() {
+    let printed = runs_quietly(&["test"], "fragments_operands");
+    assert!(
+        printed.contains("test result: ok. 42 passed"),
+        "fixtures/fragments_operands.rs ran, and printed:\n{printed}"
+    );
+}
+
+/// A const of a module that a macro writes from a fragment is one value to Rust, which gets the module written back,
+/// and to the kernel that reads it: `pub const C: u64 = $n * 2;` is 6 for both, as is an array's length, `[u64; $n * 2]`,
+/// and an element of an array, of an array of arrays too. So it is for a fragment that holds a fragment, and for a
+/// const in a module of its own that the kernels take by its path.
+#[test]
+fn a_const_built_from_a_fragment_is_one_value_to_rust_and_to_the_kernel() {
+    let printed = runs_quietly(&["test"], "fragments_consts");
+    assert!(printed.contains("test result: ok. 5 passed"), "fixtures/fragments_consts.rs ran, and printed:\n{printed}");
+}
+
+/// A fragment is one operand, or one type, in the places besides an x86 kernel's expression and a const: a GPU
+/// kernel's operand, where the PTX writes 6 for `$n * 2` and -3 for `-$n`, an array's length, `#[instances(..)]`, and,
+/// for a `$t:ty`, a parameter's type, a result and an argument of a type, of an x86 kernel and of a GPU kernel.
+#[test]
+fn a_fragment_is_one_operand_or_one_type_in_each_place_kernite_reads_it() {
+    let printed = runs_quietly(&["test"], "fragments_places");
+    assert!(
+        printed.contains("test result: ok. 12 passed"),
+        "fixtures/fragments_places.rs ran, and printed:\n{printed}"
+    );
+}
+
+/// A fragment that is no group, `$i:ident` and `$t:tt`, and a literal of one token, a group of one, are read as they
+/// were, and so is a fragment that no operator is next to or that holds none of its own.
+#[test]
+fn a_fragment_that_is_no_group_is_read_as_it_was() {
+    let printed = runs_quietly(&["test"], "fragments_bare");
+    assert!(printed.contains("test result: ok. 6 passed"), "fixtures/fragments_bare.rs ran, and printed:\n{printed}");
+}
+
+/// An error at a fragment is said where the fragment is, in the call of the macro that has it. kernite's: at the name
+/// that is not defined, the `x` of `x + 1`; at the operator that has no meaning between its operands, the `+` of
+/// `1.5 + 2`; at the string; and at the `+` of `200 + 100`, which is out of range for a `u8`. Rust's, of the fragment as
+/// a whole, where it starts: that `200 + 100` overflows a `u8`, and that `1u16 + 2` is no `u8`. A fragment is one
+/// operand, so `1 - 1` under `10 / $n` is the division by zero it is for Rust, an array as long as `$n * 2`, which is
+/// 6 for `1 + 2`, has no index 6, and a fragment where a `;` should be is told as one thing, `1 + 2`. A type that is a
+/// fragment is said whole, `Wrap<Wrap<u8>>`, and, next to a result, as it was.
+#[test]
+fn an_error_at_a_fragment_is_said_where_the_fragment_is() {
+    let said_at = |place: &str, message: &str| format!("src/lib.rs:{place}: error: {message}");
+    let mut said = vec![
+        said_at("20:19", "`x` is not defined"),
+        said_at("21:21", "`+` has no meaning between an f32 and an integer"),
+        said_at("22:18", "a string is no value here; `note(\"..\")` takes one"),
+        said_at("29:27", "10 / 0"),
+        said_at("44:22", "`v` has 6 variables; there is no [6]"),
+        said_at("67:22", "300 is out of range for u8"),
+        said_at("57:34", "this is an integer, not u8"),
+        x86_takes("87:17", "", "&f16"),
+        x86_takes("95:48", "", "Wrap<Wrap<[u8; 6]>>"),
+        x86_takes("95:48", "", "Wrap<Wrap<u8>>"),
+        // Rust's own word on the stray fragment, in the macro's body; kernite's is at the call.
+        said_at(
+            "123:27",
+            "expected one of `.`, `;`, `?`, `}`, or an operator, found `expr` metavariable: expected one of `.`, \
+             `;`, `?`, `}`, or an operator",
+        ),
+        said_at("130:22", "expected `;`, found `1 + 2`"),
+        unstable("86:25", "f128"),
+        unstable("87:18", "f16"),
+        "src/lib.rs:67:18: error[E0080]: attempt to compute `200_u8 + 100_u8`, which would overflow: evaluation of \
+         `too_wide::C` failed here"
+            .to_string(),
+        not_the_number("68:20", "u8", "u16"),
+        size_unknown("116:31", "[i8]"),
+    ];
+    said.push(format!("error: could not compile `fragments_refused` (lib) due to {} previous errors", said.len()));
+    refuses("fragments_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}

@@ -373,8 +373,8 @@ use kernite::lang;
 
 use crate::expand::expand;
 use crate::rust::{
-    MACROS, Site, attrs_len, braced, depends_on, error, flatten, inner_attribute, is_ident, is_path, is_punct, lex,
-    module, needs_dependency, parse, path_uses, site,
+    MACROS, Site, attrs_len, braced, depends_on, error, flatten, for_rust, inner_attribute, is_ident, is_path,
+    is_punct, lex, module, needs_dependency, parse, path_uses, site,
 };
 
 /// See the crate documentation.
@@ -446,6 +446,7 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     let top = flatten(braces.stream());
     let (trees, spans) = lex(&top);
+    let top = for_rust(top);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(Span::call_site);
     // The module as it is, for Rust; and the consts kernite reads, for the kernels. The argument is told where
     // it is, and changes nothing else: the module is the one it would be without it, for the modules of kernels

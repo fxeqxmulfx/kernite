@@ -536,6 +536,13 @@ impl<'a> Parser<'a> {
     /// A type, at level `open` of the type it is in, 1 if it is the outer one. `[T; N]` and
     /// `Name<T>` hold a level more.
     fn ty(&mut self, open: usize) -> Result<Type, Error> {
+        // The tokens of a macro's fragment are one type, as brackets make them.
+        if let Some((inner, span)) = self.group(Delim::None) {
+            let mut p = Parser::new(inner, span);
+            let ty = p.ty(open)?;
+            p.finish()?;
+            return Ok(ty);
+        }
         if let Some((inner, span)) = self.group(Delim::Bracket) {
             nested(open, span)?;
             let mut p = Parser::new(inner, span);
@@ -824,7 +831,8 @@ impl<'a> Parser<'a> {
                 }
                 Ok(Expr::Path(path, *span))
             }
-            Tree::Group { delim: Delim::Paren, trees, span, .. } => {
+            // The tokens of a macro's fragment are one operand, as parentheses make them.
+            Tree::Group { delim: Delim::Paren | Delim::None, trees, span, .. } => {
                 let mut p = Parser::new(trees, *span);
                 if p.done() {
                     return Ok(Expr::Tuple(vec![], *span));

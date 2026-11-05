@@ -21,7 +21,8 @@ use crate::cond::Cond;
 use crate::gpu::{HOLE, gpu};
 use crate::room;
 use crate::rust::{
-    cfg_of, error, error_under, flatten, from_inside, inner_attribute, lex, name_at, parse, position, seen, site, stub,
+    cfg_of, error, error_under, flatten, for_rust, from_inside, inner_attribute, lex, name_at, parse, position, seen,
+    site, stub,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
@@ -54,6 +55,7 @@ pub(crate) fn expand(
     let n = outside.len();
     let top: Vec<TokenTree> = outside.into_iter().chain(flatten(body)).collect();
     let (trees, spans) = lex(&top);
+    let top = for_rust(top);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(site);
     let said = |e: &lang::Error| error(at(e.span), &e.message);
     // A module kernite cannot read is refused whole, as at its attribute, with the items it reads: its error is what

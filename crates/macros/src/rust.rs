@@ -680,16 +680,86 @@ pub(crate) fn value_params(f: &Fn, top: &[TokenTree]) -> TokenStream {
     out
 }
 
-/// The tokens of `stream`, with the invisible groups a macro's fragments arrive in opened.
+/// The tokens of `stream`, with the invisible groups a macro's fragments arrive in opened, but for those that
+/// [`stays`] says stay one operand or one type: Rust reads `$n * 2` with `$n` as `1 + 2` as `(1 + 2) * 2`, and
+/// opened it would be `1 + 2 * 2`. A group that stays is as it was: what is in it is opened where it is read.
 pub(crate) fn flatten(stream: TokenStream) -> Vec<TokenTree> {
+    let tokens: Vec<TokenTree> = stream.into_iter().collect();
     let mut out = vec![];
-    for t in stream {
+    for (i, t) in tokens.iter().enumerate() {
         match t {
-            TokenTree::Group(g) if g.delimiter() == Delimiter::None => out.extend(flatten(g.stream())),
-            t => out.push(t),
+            TokenTree::Group(g) if g.delimiter() == Delimiter::None => {
+                let inside = flatten(g.stream());
+                if stays(&inside, &tokens[..i], &tokens[i + 1..]) {
+                    out.push(t.clone());
+                } else {
+                    out.extend(inside);
+                }
+            }
+            t => out.push(t.clone()),
         }
     }
     out
+}
+
+/// Whether an invisible group that holds `inside`, between `before` and `after`, stays one. An operator in it
+/// could be taken apart by one next to it, as `* 2` takes `1 + 2` apart: so it stays if it holds an operator
+/// outside any bracket, `1 + 2`, `-1`, `a as u8` or `0..4`, and one is next to it. Before it is one of
+/// `+ - * / % ^ & | < >` and `!`, or `==`, `!=`, `<=` or `>=`; after it, one of `+ - * / % ^ & | < >`, or `==`,
+/// `!=`, `.` or `as`. The `>` of an arrow, `->`, is a result's, and no operator's, and a lone `=` is a `let`'s or an
+/// assignment's. A group that holds `a.b`, `f(x)` or `a::b`, or that no operator is next to, is read as it would be
+/// without the group, and is opened.
+fn stays(inside: &[TokenTree], before: &[TokenTree], after: &[TokenTree]) -> bool {
+    let is_any = |t: &TokenTree, chars: &str| chars.chars().any(|c| is_punct(t, c));
+    let loose = inside.iter().any(|t| is_any(t, "+-*/%^&|<>!=") || is_ident(t, "as"))
+        || inside.windows(2).any(|dots| is_punct(&dots[0], '.') && is_punct(&dots[1], '.'));
+    // `==`, `!=`, `<=` and `>=` are an `=` that an operator is joint to.
+    let compares = |pair: &[TokenTree]| match pair {
+        [op, eq] => {
+            is_punct(eq, '=')
+                && is_any(op, "=!<>")
+                && matches!(op, TokenTree::Punct(p) if p.spacing() == Spacing::Joint)
+        }
+        _ => false,
+    };
+    let arrow = matches!(before, [.., dash, head] if is_punct(dash, '-') && is_punct(head, '>'));
+    let left = before.last().is_some_and(|t| is_any(t, "+-*/%^&|<>!")) && !arrow
+        || before.len() >= 2 && compares(&before[before.len() - 2..]);
+    let right = after.first().is_some_and(|t| is_any(t, "+-*/%^&|<>.") || is_ident(t, "as"))
+        || after.len() >= 2 && compares(&after[..2]);
+    loose && (left || right)
+}
+
+/// The first and the last token of `t`: itself, but for a group that [`flatten`] keeps, where they are those
+/// of what is in it.
+fn ends(t: &TokenTree) -> (TokenTree, TokenTree) {
+    match t {
+        TokenTree::Group(g) if g.delimiter() == Delimiter::None => {
+            let inside = flatten(g.stream());
+            (ends(&inside[0]).0, ends(&inside[inside.len() - 1]).1)
+        }
+        t => (t.clone(), t.clone()),
+    }
+}
+
+/// `tokens`, as [`flatten`] gives them, for Rust: a group that stays one is written in parentheses. Rust keeps a
+/// fragment's group with no brackets as one operand only where a macro hands it on as it came; a macro that takes
+/// the tokens apart, as [`flatten`] does, writes the group again, and Rust reads it as no group at all. The
+/// parentheses are the macro's own, as Rust lints none of what the macro adds, and would lint a type in them,
+/// `Foo<(Vec<u8>)>`; and they stand where the fragment starts, for Rust to say an error of the whole fragment
+/// there. A bracket among the tokens is handed on as it came, with each fragment in it one operand.
+pub(crate) fn for_rust(tokens: Vec<TokenTree>) -> Vec<TokenTree> {
+    tokens
+        .into_iter()
+        .map(|t| match t {
+            TokenTree::Group(ref g) if g.delimiter() == Delimiter::None => {
+                let mut group = Group::new(Delimiter::Parenthesis, g.stream());
+                group.set_span(Span::mixed_site().located_at(ends(&t).0.span()));
+                group.into()
+            }
+            t => t,
+        })
+        .collect()
 }
 
 /// `tokens` as the language reads them, each span numbered by its place in the spans beside
@@ -723,11 +793,12 @@ fn run(
         // space between them, even where their spans lie in two places, as every span of a stream that `quote!`
         // writes does. A punct joint to a token that is no punct says nothing of it: it is the last of a
         // fragment, joint to what follows it at the call.
-        let glued = joint && matches!(t, TokenTree::Punct(_));
-        let space = !glued && before.is_some_and(|end| apart(end, t.span()));
+        let (first, last) = ends(t);
+        let glued = joint && matches!(first, TokenTree::Punct(_));
+        let space = !glued && before.is_some_and(|end| apart(end, first.span()));
         out.push(tree(t, space, depth, spans)?);
-        before = Some(t.span().end());
-        joint = matches!(t, TokenTree::Punct(p) if p.spacing() == Spacing::Joint);
+        before = Some(last.span().end());
+        joint = matches!(&last, TokenTree::Punct(p) if p.spacing() == Spacing::Joint);
     }
     Ok(out)
 }
@@ -750,17 +821,21 @@ fn tree(t: &TokenTree, space: bool, depth: usize, spans: &mut Vec<Span>) -> Resu
             Tree::Lit { text: l.to_string(), space, span }
         }
         TokenTree::Group(g) => {
-            spans.push(g.span_open());
+            // A group with no brackets is where its first token is: its own span is that of the name of the
+            // fragment in the macro that has it, which is not where the fragment was written.
+            let none = g.delimiter() == Delimiter::None;
+            spans.push(if none { ends(t).0.span() } else { g.span_open() });
             lang::nested(depth, span)?;
             let delim = match g.delimiter() {
                 Delimiter::Parenthesis => Delim::Paren,
                 Delimiter::Bracket => Delim::Bracket,
-                Delimiter::Brace | Delimiter::None => Delim::Brace,
+                Delimiter::Brace => Delim::Brace,
+                Delimiter::None => Delim::None,
             };
             let inside = flatten(g.stream());
             let open = g.span_open().end();
-            let trees = run(&inside, Some(open), depth + 1, spans)?;
-            let space_close = apart(inside.last().map_or(open, |t| t.span().end()), g.span_close());
+            let trees = run(&inside, (!none).then_some(open), depth + 1, spans)?;
+            let space_close = !none && apart(inside.last().map_or(open, |t| ends(t).1.span().end()), g.span_close());
             Tree::Group { delim, trees, space, space_close, span }
         }
     })

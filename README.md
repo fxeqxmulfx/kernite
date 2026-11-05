@@ -145,6 +145,14 @@ a type so compiles to the listing, or the PTX, of one that names types of the sa
 `dyn_::Foo` say. An error says the keyword as it is written, `r#dyn::Foo` and `r#mut`: without its `r#` the word is the
 keyword, and not the name.
 
+A macro's fragment is one operand, or one type, wherever kernite reads it, as Rust reads it. With `$n:expr` as `1 + 2`,
+`$n * 2` is 6, and not the 5 that `1 + 2 * 2` is. It is so in a kernel's expression, on x86 and on a GPU, under a `-`,
+in the length of an array, in `#[instances(..)]`, and in a const, which is 6 to Rust too. A `$t:ty` is one type in a
+parameter's type, in a result and in an argument of a type, `*const Wrap<$t>`. An error in a fragment is said where the
+fragment is written, in the call of the macro. Rust says its error of the whole fragment where the fragment starts: that
+`1u16 + 2` is no `u8`, at the `1u16`. An `$i:ident` or a `$t:tt`, a fragment that holds no operator, `u8::MAX` or
+`st.global`, and one that no operator is next to, `let k = 2 + 3` as a `$s:stmt`, are read as they are written.
+
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kernite_macros::consts]` is on, and a
 module of kernels takes them by its path, `#[kernite_macros::kernels(consts = crate::model::sizes)]`: its kernels read
