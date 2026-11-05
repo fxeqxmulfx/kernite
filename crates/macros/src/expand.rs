@@ -21,8 +21,8 @@ use crate::cond::Cond;
 use crate::gpu::{HOLE, gpu};
 use crate::room;
 use crate::rust::{
-    cfg_of, error, error_under, flatten, for_rust, from_inside, inner_attribute, lex, name_at, parse, position, seen,
-    site, stub, takes,
+    cfg_of, error, error_under, flatten, for_rust, from_inside, inner_attribute, lex, name_at, parse, passable,
+    position, seen, site, stub, takes,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
@@ -55,7 +55,7 @@ pub(crate) fn expand(
     let n = outside.len();
     let top: Vec<TokenTree> = outside.into_iter().chain(flatten(body)).collect();
     let (trees, spans) = lex(&top);
-    let top = for_rust(top);
+    let mut top = for_rust(top);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(site);
     let said = |e: &lang::Error| error(at(e.span), &e.message);
     // A module kernite cannot read is refused whole, as at its attribute, with the items it reads: its error is what
@@ -85,6 +85,12 @@ pub(crate) fn expand(
         .map(|(_, path)| kernite::Given { before: n, from: path.iter().map(TokenTree::to_string).collect() });
     let made = kernite::module(module, consts, refused, &scope);
     let module = &made.module;
+    // Every signature the macros write has the names Rust can be given.
+    for item in &module.items {
+        if let ItemKind::Fn(f) = &item.kind {
+            passable(&mut top, f);
+        }
+    }
     // The module's own attributes, `#![..]`, before anything the macro writes, where Rust has
     // them. A module given consts has them from `#[kernels]`, which writes this inside the module.
     let mut out: TokenStream = module

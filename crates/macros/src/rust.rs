@@ -228,28 +228,73 @@ fn split_commas(tokens: &[TokenTree]) -> impl Iterator<Item = &[TokenTree]> {
     })
 }
 
-/// `f`'s parameters as written, each its tokens, `x: *mut f32`, and the place of its colon. A fragment that stays
-/// one type is in parentheses, as [`for_rust`] has it, for the macros write each parameter as it is here, and Rust
-/// reads `*const $t`, with `$t` as `dyn Debug + Send`, as one type only so. A comma ends a parameter unless
-/// [`split_commas`] says it is among the arguments of a type's. Rust cannot pass a parameter named `_` on, so each is
-/// named here, for every signature and body the macros write for `f`: it takes the next of `__kernite_0`,
-/// `__kernite_1` and on that no parameter or compile-time argument of `f` is named.
-pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, usize)> {
-    let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
-    let tokens = for_rust(flatten(group.stream()));
-    let params = split_commas(&tokens).filter(|p| !p.is_empty());
+/// `f`'s signature in `top`, written so that Rust can be given every name in it: a name Rust cannot be given is named
+/// `__kernite_0`, or the next of `__kernite_0`, `__kernite_1` and on that no parameter or compile-time argument of `f`
+/// is named. Rust cannot pass on a parameter named `_`. And it refuses a name written raw that it lets be written in no
+/// place, `r#self`, `r#Self`, `r#super`, `r#crate` or `r#_`, with an error at each place it is written: written again
+/// by the macros as text, in a call or a signature, it is refused again at the module's attribute, where Rust lexes
+/// the text; and a GPU kernel's launcher binds `self` and `Self` for itself, which a parameter or a compile-time
+/// argument so named would take for its own. So the macros never write such a name, and Rust has the places the user
+/// wrote it, for its own error. A compile-time argument is named so wherever the signature names it, in a type too,
+/// `[u8; r#crate]`. All the macros write for `f`, a signature or a body, has the names as they are here.
+pub(crate) fn passable(top: &mut [TokenTree], f: &Fn) {
     let taken: Vec<&str> =
         f.generics.iter().map(|g| &g.name).chain(f.params.iter().map(|p| &p.name)).map(String::as_str).collect();
     let mut free = (0..).map(|n| format!("__kernite_{n}")).filter(|name| !taken.contains(&name.as_str()));
-    params
-        .map(|p| {
-            let mut p = p.to_vec();
-            let colon = p.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type");
-            if is_ident(&p[colon - 1], "_") {
-                p[colon - 1] = TokenTree::Ident(Ident::new(&free.next().expect("names do not run out"), site()));
+    let mut fresh = || Ident::new(&free.next().expect("names do not run out"), site());
+    let consts: Vec<(String, Ident)> = const_names(written_generics(f, top))
+        .map(TokenTree::to_string)
+        .filter(|name| lang::never_raw(name))
+        .map(|name| (name, fresh()))
+        .collect();
+    let mut params = TokenStream::new();
+    for (mut param, colon) in written_params(f, top) {
+        if is_ident(&param[colon - 1], "_") || lang::never_raw(&param[colon - 1].to_string()) {
+            param[colon - 1] = fresh().into();
+        }
+        params.extend(param);
+        params.extend(parse(","));
+    }
+    let mut group = Group::new(Delimiter::Parenthesis, params);
+    group.set_span(top[f.params_at].span());
+    top[f.params_at] = group.into();
+    if !consts.is_empty() {
+        let end = f.ret.as_ref().map_or(f.params_at + 1, |r| r.tokens.end);
+        rename(&mut top[f.head.end + 2..end], &consts);
+    }
+}
+
+/// `tokens`, with the second of a pair of `names` for each ident written as the first, in brackets too.
+fn rename(tokens: &mut [TokenTree], names: &[(String, Ident)]) {
+    for token in tokens {
+        match token {
+            TokenTree::Ident(ident) => {
+                if let Some((_, to)) = names.iter().find(|(from, _)| *from == ident.to_string()) {
+                    *token = to.clone().into();
+                }
             }
-            (p, colon)
-        })
+            TokenTree::Group(group) => {
+                let mut inside: Vec<TokenTree> = group.stream().into_iter().collect();
+                rename(&mut inside, names);
+                let mut renamed = Group::new(group.delimiter(), inside.into_iter().collect());
+                renamed.set_span(group.span());
+                *token = renamed.into();
+            }
+            TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+        }
+    }
+}
+
+/// `f`'s parameters as written, each its tokens, `x: *mut f32`, and the place of its colon. A fragment that stays
+/// one type is in parentheses, as [`for_rust`] has it, for the macros write each parameter as it is here, and Rust
+/// reads `*const $t`, with `$t` as `dyn Debug + Send`, as one type only so. A comma ends a parameter unless
+/// [`split_commas`] says it is among the arguments of a type's. Each name is as [`passable`] has it.
+pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, usize)> {
+    let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
+    let tokens = for_rust(flatten(group.stream()));
+    split_commas(&tokens)
+        .filter(|p| !p.is_empty())
+        .map(|p| (p.to_vec(), p.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type")))
         .collect()
 }
 

@@ -109,6 +109,13 @@ const KEYWORDS: &[&str] = &[
 /// The names Rust lets be written raw in no place: `r#self` and `r#_` are errors.
 const NEVER_RAW: &[&str] = &["self", "Self", "super", "crate", "_"];
 
+/// Whether `ident`, an identifier as written, is one of the names Rust lets be written raw in no place: `r#self`,
+/// `r#Self`, `r#super`, `r#crate` or `r#_`. Rust says of each, "`crate` cannot be a raw identifier", at each place it
+/// is written.
+pub fn never_raw(ident: &str) -> bool {
+    ident.strip_prefix("r#").is_some_and(|name| NEVER_RAW.contains(&name))
+}
+
 /// The types of `core::primitive`, which Rust names by a path as well as by a name: `core::primitive::u64`.
 const PRIMITIVES: [&str; 17] = [
     "bool", "char", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64", "u128",
@@ -483,7 +490,7 @@ impl Lexer<'_> {
                         if !word.starts_with(starts_name) {
                             return Err(Error { span, message: "`r#` comes before a name, as in `r#u64`".into() });
                         }
-                        if NEVER_RAW.contains(&word) {
+                        if never_raw(&self.src[start..self.pos]) {
                             return Err(Error { span, message: format!("`{word}` cannot be written raw") });
                         }
                     }

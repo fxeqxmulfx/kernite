@@ -167,6 +167,26 @@ fn refuses_by(command: &[&str], name: &str, lines: &[&str]) {
     assert_eq!(said, lines, "fixtures/{name}.rs: Cargo said:\n{}", said.join("\n"));
 }
 
+/// What Rust says of each name it lets be written raw in no place that fixture `name` writes raw, outside its comments,
+/// `r#self`, `r#Self`, `r#super`, `r#crate` or `r#_`: "`crate` cannot be a raw identifier", at each place, in the
+/// order of the fixture. It says so of the source, before any macro runs.
+fn refused_raw(name: &str) -> Vec<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/{name}.rs"));
+    let source = fs::read_to_string(path).unwrap();
+    let mut said = vec![];
+    for (line, text) in source.lines().enumerate() {
+        let code = text.split("//").next().expect("a split has a first part");
+        for (at, _) in code.match_indices("r#") {
+            let word = &code[at + 2..];
+            let ident = &word[..word.find(|c: char| c != '_' && !c.is_alphanumeric()).unwrap_or(word.len())];
+            if ["self", "Self", "super", "crate", "_"].contains(&ident) {
+                said.push(format!("src/lib.rs:{}:{}: error: `{ident}` cannot be a raw identifier", line + 1, at + 1));
+            }
+        }
+    }
+    said
+}
+
 /// What Rust says of `name`, a type that is not there, at `place` of `src/lib.rs`.
 fn not_found(place: &str, name: &str) -> String {
     format!("src/lib.rs:{place}: error[E0425]: cannot find type `{name}` in this scope: not found in this scope")
@@ -4249,6 +4269,66 @@ fn a_name_rust_refuses_raw_is_rusts_error_in_a_module_of_kernels() {
         &[
             "src/lib.rs:5:45: error: found invalid character; only `#` is allowed in raw string delimitation: :",
             "error: could not compile `raw_alone_refused` (lib) due to 1 previous error",
+        ],
+    );
+}
+
+/// A kernel's parameter named by a name Rust refuses raw is Rust's error at each place it is written, in its own words,
+/// "`crate` cannot be a raw identifier", and nothing more, in a kernel of every kind: a GPU kernel, alone, of
+/// compile-time arguments and cooperative; an x86 kernel, plain, of compile-time arguments and cooperative. The macros
+/// name the parameter otherwise in all they write for Rust, so Rust is not told it again at the module's attribute,
+/// where the macros would write it as text, and the parameter is neither bound beside the `&self` of a GPU kernel's
+/// launcher, nor its `Self`.
+#[test]
+fn a_parameter_named_by_a_name_rust_refuses_raw_is_rusts_error_alone() {
+    let mut said = refused_raw("raw_parameters_refused");
+    assert_eq!(said.len(), 45, "the fixture writes 45 names raw");
+    said.push(format!("error: could not compile `raw_parameters_refused` (lib) due to {} previous errors", said.len()));
+    refuses("raw_parameters_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A compile-time argument named by a name Rust refuses raw is Rust's error at each place it is written, and nothing
+/// more, in each kind of kernel that takes one: a GPU kernel, alone and cooperative; an x86 kernel, alone and
+/// cooperative. So is it where a type names the argument, in a parameter and in a result, beside an argument and
+/// parameters named otherwise, `__kernite_0` among them, and beside a parameter named `_`. The macros name the
+/// argument otherwise in all they write for Rust: not again at the module's attribute, where they would write it as
+/// text to pick an instance, and not bound beside the `&self` of a GPU kernel's launcher, nor its `Self`.
+#[test]
+fn a_compile_time_argument_named_by_a_name_rust_refuses_raw_is_rusts_error_alone() {
+    let mut said = refused_raw("raw_arguments_refused");
+    assert_eq!(said.len(), 64, "the fixture writes 64 names raw");
+    said.push(format!("error: could not compile `raw_arguments_refused` (lib) due to {} previous errors", said.len()));
+    refuses("raw_arguments_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A kernel that does not compile, with a parameter or a compile-time argument named by a name Rust refuses raw, is
+/// kernite's error at the kernel's name and Rust's at each place the parameter's or the argument's name is written, and
+/// nothing more: the body that never runs and the launcher that never runs, which the macros write for it, name each
+/// otherwise.
+#[test]
+fn a_kernel_kernite_refuses_with_a_name_rust_refuses_raw_is_kernites_error_and_rusts_alone() {
+    let mut said = refused_raw("raw_names_in_stubs");
+    assert_eq!(said.len(), 16, "the fixture writes 16 names raw");
+    let unsafe_fn = "a kernel trusts the pointers it is given, so it is an `unsafe fn`";
+    said.extend(
+        [(10, 28), (15, 28), (20, 28), (27, 32), (32, 32), (37, 32)]
+            .map(|(line, column)| format!("src/lib.rs:{line}:{column}: error: {unsafe_fn}")),
+    );
+    said.push(format!("error: could not compile `raw_names_in_stubs` (lib) due to {} previous errors", said.len()));
+    refuses("raw_names_in_stubs", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A parameter named `self`, written plain, is Rust's error at the name, as it is for any function that is no method:
+/// the macros hand it on. It is the name written raw, `r#self`, that they name otherwise, for Rust to say its lexer's
+/// error alone.
+#[test]
+fn a_parameter_named_self_is_rusts_error_at_the_name() {
+    refuses(
+        "self_parameter",
+        &[
+            "src/lib.rs:7:41: error: `self` parameter is only allowed in associated functions: not semantically \
+             valid as function parameter",
+            "error: could not compile `self_parameter` (lib) due to 1 previous error",
         ],
     );
 }
