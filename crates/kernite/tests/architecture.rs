@@ -2,7 +2,8 @@
 //! on a crate outside the workspace. Every crate must have a line here, so a new one cannot
 //! join without its place being decided. Inside a crate, no modules use each other in a cycle.
 //! The composition hands on only the language and the use cases, and the macro names only
-//! those, `module`, `ptx_scope` and `ptx_room`.
+//! those, `module`, `ptx_scope` and `ptx_room`. Every crate has a README.md with an example that
+//! `examples/readmes` runs, and a line in the README.md of the repository.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -41,6 +42,21 @@ fn package(path: &Path) -> String {
     name.unwrap()
 }
 
+/// The folder of the workspace, two above this crate's folder, crates/kernite.
+fn workspace() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).unwrap().to_path_buf()
+}
+
+/// The name of the package of each crate in `parent`, `crates` or `examples`, by the name of its folder.
+fn crates(parent: &str) -> BTreeMap<String, String> {
+    let dirs = fs::read_dir(workspace().join(parent)).unwrap();
+    dirs.map(|dir| {
+        let dir = dir.unwrap().path();
+        (dir.file_name().unwrap().to_str().unwrap().to_string(), package(&dir.join("Cargo.toml")))
+    })
+    .collect()
+}
+
 /// Each package of `lock`, a Cargo.lock's text, and the packages it depends on, of every kind.
 /// However a manifest writes a dependency, cargo writes it in the lock in one form:
 /// `[[package]]`, `name = "…"`, `dependencies = [`, one `"name",` a line, `]`.
@@ -62,13 +78,11 @@ fn locked(lock: &str) -> Vec<(&str, Vec<&str>)> {
 
 #[test]
 fn every_crate_depends_only_inward() {
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     // Cargo writes the lock before a test runs, each crate's dependencies as it resolved them.
-    let lock = fs::read_to_string(crates.join("../Cargo.lock")).unwrap();
+    let lock = fs::read_to_string(workspace().join("Cargo.lock")).unwrap();
     let packages = locked(&lock);
     let mut seen = vec![];
-    for entry in fs::read_dir(&crates).unwrap() {
-        let name = package(&entry.unwrap().path().join("Cargo.toml"));
+    for name in crates("crates").into_values() {
         let allowed =
             RULE.iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("{name} has no place in the rule")).1;
         let (_, deps) = packages
@@ -90,16 +104,50 @@ fn no_crate_depends_on_anything_outside_the_workspace() {
     // The lock holds every package that the workspace's crates depend on, and every package those
     // depend on, whether from a registry, git or a path. Each is one of the workspace's crates,
     // those of crates/ and examples/.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut crates = vec![];
-    for dir in ["crates", "examples"] {
-        for entry in fs::read_dir(root.join(dir)).unwrap() {
-            crates.push(package(&entry.unwrap().path().join("Cargo.toml")));
-        }
-    }
-    let lock = fs::read_to_string(root.join("Cargo.lock")).unwrap();
+    let members: Vec<_> = ["crates", "examples"].into_iter().flat_map(|parent| crates(parent).into_values()).collect();
+    let lock = fs::read_to_string(workspace().join("Cargo.lock")).unwrap();
     for (name, _) in locked(&lock) {
-        assert!(crates.iter().any(|c| c == name), "a crate depends on {name}, from outside the workspace");
+        assert!(members.iter().any(|m| m == name), "a crate depends on {name}, from outside the workspace");
+    }
+}
+
+/// Each crate has a README.md in its folder, and in it an example to copy, in a block of Rust.
+#[test]
+fn every_crate_has_a_readme_with_an_example() {
+    for (dir, name) in crates("crates") {
+        let path = workspace().join(format!("crates/{dir}/README.md"));
+        let readme = fs::read_to_string(path).unwrap_or_else(|_| panic!("{name} has no README.md in crates/{dir}"));
+        assert!(
+            readme.lines().any(|l| l.starts_with("```rust")),
+            "{name}'s crates/{dir}/README.md has no example; it needs a ```rust block"
+        );
+    }
+}
+
+/// `examples/readmes` runs the example of each crate's README.md as a doctest: an item of its lib.rs
+/// has the README.md for its docs.
+#[test]
+fn examples_readmes_runs_the_example_of_every_crates_readme() {
+    let lib = fs::read_to_string(workspace().join("examples/readmes/src/lib.rs")).unwrap();
+    for (dir, name) in crates("crates") {
+        let docs = format!("#[doc = include_str!(\"../../../crates/{dir}/README.md\")]");
+        assert!(
+            lib.lines().any(|l| l.trim() == docs),
+            "examples/readmes runs no example of {name}; its src/lib.rs needs an item with {docs}"
+        );
+    }
+}
+
+/// The README.md of the repository lists the crates, a line each, linked to the crate's folder.
+#[test]
+fn the_readme_lists_every_crate_linked_to_its_folder() {
+    let readme = fs::read_to_string(workspace().join("README.md")).unwrap();
+    for (dir, name) in crates("crates") {
+        let line = format!("- [`{name}`](crates/{dir})");
+        assert!(
+            readme.lines().any(|l| l.starts_with(&line)),
+            "README.md's list of crates has no line for {name}; it needs one that starts with {line}"
+        );
     }
 }
 
@@ -324,21 +372,18 @@ mod tests { const C: [char; 3] = ['}', '"', '\'']; use crate::c; }
 /// of its directory, and not in those named tests.rs: a test may use what it tests.
 #[test]
 fn no_crates_modules_use_each_other_in_a_cycle() {
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut cycles = vec![];
-    for entry in fs::read_dir(&crates).unwrap() {
-        let dir = entry.unwrap().path();
-        let src = dir.join("src");
+    for (dir, name) in crates("crates") {
+        let src = workspace().join(format!("crates/{dir}/src"));
         let mut modules = BTreeMap::<String, String>::new();
         for (file, text) in sources(&src) {
             if !file.ends_with("tests.rs") {
-                let name = file.strip_prefix(&src).unwrap().iter().next().unwrap().to_str().unwrap();
-                *modules.entry(name.trim_end_matches(".rs").to_string()).or_default() += &text;
+                let module = file.strip_prefix(&src).unwrap().iter().next().unwrap().to_str().unwrap();
+                *modules.entry(module.trim_end_matches(".rs").to_string()).or_default() += &text;
             }
         }
         let root = modules.remove("lib").unwrap();
         if let Some(cycle) = cycle(&uses(&root, &modules)) {
-            let name = package(&dir.join("Cargo.toml"));
             let path = cycle[1..].join(", which uses ");
             cycles.push(format!("{name}'s modules use each other in a cycle: {} uses {path}", cycle[0]));
         }
@@ -399,7 +444,7 @@ fn what_kernite_hands_on_and_what_the_macro_names_are_read_from_their_code() {
 /// the crate that has it.
 #[test]
 fn kernite_re_exports_only_the_language_and_the_use_cases() {
-    for (file, code) in sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src")) {
+    for (file, code) in sources(&workspace().join("crates/kernite/src")) {
         for from in starts(&code, "pub use ") {
             assert!(
                 ["kernite_lang", "kernite_build"].contains(&from),
@@ -417,11 +462,10 @@ fn kernite_re_exports_only_the_language_and_the_use_cases() {
 /// instance and evaluates nothing, so it stays.
 #[test]
 fn the_macro_names_only_the_language_the_use_cases_ptx_scope_and_ptx_room() {
-    let kernite = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let lib = sources(&kernite.join("src"));
+    let lib = sources(&workspace().join("crates/kernite/src"));
     let built: Vec<_> = lib.iter().flat_map(|(_, code)| starts(code, "pub use kernite_build::")).collect();
     let allowed = [&["lang", "module", "ptx_scope", "ptx_room"][..], &built].concat();
-    for (file, code) in sources(&kernite.join("../macros/src")) {
+    for (file, code) in sources(&workspace().join("crates/macros/src")) {
         for name in starts(&code, "kernite::") {
             assert!(
                 allowed.contains(&name),

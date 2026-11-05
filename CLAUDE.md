@@ -41,6 +41,8 @@ Every change serves these five.
 The crates are layers, each depending only on those inside it. GUIDE.md's "Layers" table says what
 each knows. `crates/kernite/tests/architecture.rs` holds the rule of which may depend on which, of
 every kind of dependency, and a new crate needs its line there. Change both when the crates change.
+A new crate also needs a `README.md` with an example that `examples/readmes` runs, and a line in
+the list of crates in the repository's `README.md`. `architecture.rs` fails without them.
 
 - `kernite-core`: programs over variables and over registers.
 - `kernite-lang`: the language: tokens, the parser, values, the evaluator, and the `Target` port a machine
