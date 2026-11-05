@@ -8,7 +8,7 @@ with anything left to change comes back, with every finding listed. All paths ar
 
 Each task belongs to an effort, `matmul`, `fixes` or `support` say. The effort's brief,
 `.kanban/notes/<effort>/README.md`, names its branch and its gate, adds its own rules, and says
-what each of its tasks is about. Read it first, then README.md, then the code you will change,
+what each of its tasks is about. Read it first, then GUIDE.md, then the code you will change,
 whole, before you change it.
 
 ## 1. Take the task

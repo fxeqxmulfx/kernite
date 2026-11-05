@@ -117,11 +117,11 @@ fn delay(module: &Module, x: Ptr<u32>) {
     unsafe { module.launch(1, Grid::new(1, 1), &[arg(&x), arg(&ns)]) }.unwrap();
 }
 
-/// The README's words for a GPU that cannot be lent a slice.
+/// GUIDE.md's words for a GPU that cannot be lent a slice.
 const NO_PAGEABLE: &str = "cuDeviceGetAttribute: the GPU cannot reach pageable memory, a slice of the host's: \
                            its CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0";
 
-/// The README's words for a GPU that cannot make page-locked memory.
+/// GUIDE.md's words for a GPU that cannot make page-locked memory.
 const NO_PAGE_LOCKED: &str = "cuMemHostAlloc: the GPU cannot reach page-locked memory at the host's addresses: \
                               its CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0";
 

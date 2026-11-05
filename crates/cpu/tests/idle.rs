@@ -98,7 +98,7 @@ fn asleep_early(tasks: &[PathBuf], began: Instant) -> bool {
 #[test]
 fn kept_threads_spin_for_a_launch_that_comes_soon_then_sleep_and_end_with_their_caller() {
     // The test looks for `SPIN` after a launch began, so a `SPIN` of nothing would let it find nothing.
-    assert_eq!(SPIN, Duration::from_micros(200), "README says a kept thread spins for 200 microseconds");
+    assert_eq!(SPIN, Duration::from_micros(200), "GUIDE.md says a kept thread spins for 200 microseconds");
     let threads = most().unwrap().min(4);
     if threads < 2 {
         return eprintln!("the process runs one thread at once, so no grid keeps a thread: skipped");

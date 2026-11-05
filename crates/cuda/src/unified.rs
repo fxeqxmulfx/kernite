@@ -451,7 +451,7 @@ mod tests {
         assert!(gpu(&[&others[..], &[CONCURRENT_MANAGED_ACCESS]].concat()).concurrent_managed_access());
     }
 
-    /// A GPU that does not allocate managed memory is refused it, in the README's words, before
+    /// A GPU that does not allocate managed memory is refused it, in GUIDE.md's words, before
     /// the driver is asked for any.
     #[test]
     fn managed_memory_is_made_only_for_a_gpu_that_allocates_it() {
@@ -464,7 +464,7 @@ mod tests {
     }
 
     /// A GPU that does not use the host's addresses for the host's memory is refused page-locked
-    /// memory, in the README's words, before the driver is asked for any.
+    /// memory, in GUIDE.md's words, before the driver is asked for any.
     #[test]
     fn page_locked_memory_is_made_only_for_a_gpu_that_uses_the_hosts_addresses() {
         let e = gpu(&[]).pinned::<u32>(4).unwrap_err();
@@ -475,7 +475,7 @@ mod tests {
         assert_eq!(e.call, "cuMemHostAlloc");
     }
 
-    /// A GPU that does not reach pageable memory is refused a slice, in the README's words, and
+    /// A GPU that does not reach pageable memory is refused a slice, in GUIDE.md's words, and
     /// one that does is lent it: the address of its elements is the slice's.
     #[test]
     fn a_slice_is_lent_only_to_a_gpu_that_reaches_pageable_memory() {

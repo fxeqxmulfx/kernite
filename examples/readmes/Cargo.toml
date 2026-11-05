@@ -1,0 +1,23 @@
+[package]
+name = "readmes"
+description = "Each crate's README and the repository's, their examples run as doctests, built against the crates as a user's crate is"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dev-dependencies]
+kernite-core = { workspace = true }
+kernite-lang = { workspace = true }
+kernite-compile = { workspace = true }
+kernite-build = { workspace = true }
+kernite-x86 = { workspace = true }
+kernite-ptx = { workspace = true }
+kernite = { workspace = true }
+kernite-macros = { workspace = true }
+kernite-cuda = { workspace = true }
+kernite-cpu = { workspace = true }
+
+[lints]
+workspace = true

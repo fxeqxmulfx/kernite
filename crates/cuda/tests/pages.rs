@@ -1,8 +1,8 @@
 //! A managed buffer does not start at a page, and a range reaches the memory beside it on its first
-//! page, which is another buffer's, as README says. A test of its own, as a program of its own,
+//! page, which is another buffer's, as GUIDE.md says. A test of its own, as a program of its own,
 //! for the driver hands out managed memory in the order it is asked for, and the tests that run
 //! beside one another ask for theirs at once. A driver that places buffers another way fails this
-//! test, and then the sentence in README goes.
+//! test, and then the sentence in GUIDE.md goes.
 
 use kernite_cuda::{Advice, Cuda};
 

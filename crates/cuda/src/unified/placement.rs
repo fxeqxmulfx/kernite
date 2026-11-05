@@ -302,7 +302,7 @@ mod tests {
     }
 
     /// A GPU that cannot reach managed memory while the host does is refused a prefetch, and the
-    /// advice that names it, of managed memory and of a slice lent, in the README's words, naming
+    /// advice that names it, of managed memory and of a slice lent, in GUIDE.md's words, naming
     /// the call each refuses, before the driver is asked; and one that can is asked.
     #[test]
     fn a_gpu_that_cannot_reach_managed_memory_with_the_host_is_refused_a_prefetch_and_advice_naming_it() {
@@ -339,7 +339,7 @@ mod tests {
     }
 
     /// Memory that is page-locked or a slice lent is not moved or placed: each call says so, in
-    /// the README's words, before the driver is asked.
+    /// GUIDE.md's words, before the driver is asked.
     #[test]
     fn only_managed_memory_is_moved_and_placed() {
         let cuda = gpu(&[CONCURRENT_MANAGED_ACCESS]);
@@ -354,7 +354,7 @@ mod tests {
     }
 
     /// A slice lent is advised as managed memory is: the driver is told the advice, for the
-    /// elements' addresses. Page-locked memory is refused it, in the README's words, and the driver
+    /// elements' addresses. Page-locked memory is refused it, in GUIDE.md's words, and the driver
     /// is not asked.
     #[test]
     fn a_slice_lent_is_advised_as_managed_memory_is_and_page_locked_memory_is_not() {
@@ -371,7 +371,7 @@ mod tests {
         assert_eq!(ADVISED.get(), None, "the driver was not asked");
     }
 
-    /// A NUMA node does not touch memory, so it is refused as an accessor, in the README's words,
+    /// A NUMA node does not touch memory, so it is refused as an accessor, in GUIDE.md's words,
     /// before the driver is asked.
     #[test]
     fn a_numa_node_is_no_accessor() {
