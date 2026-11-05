@@ -118,6 +118,12 @@ impl Value {
     }
 }
 
+/// The article a type's name is read with: `an` before `f`, `i` and `s`, which are read `ef`, `eye` and `es`, as in an
+/// `f32`, an `i8` and an `s16`; and `a` before the rest, as in a `u64` and a `bf16`.
+pub fn article(name: &str) -> &'static str {
+    if name.starts_with(['f', 'i', 's']) { "an" } else { "a" }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -563,24 +569,19 @@ pub fn cast(a: &Value, ty: &str) -> Result<Value, String> {
     }
 }
 
-/// The value `a` takes as a constant of type `ty`, or why it cannot.
+/// The value `a` takes as a constant of type `ty`, or why it cannot. An integer where an integer of another type
+/// is wanted is told by its type, `this is a u16, not u8`: `an integer` would not say what is wrong.
 pub fn typed(a: Value, ty: &str) -> Result<Value, String> {
-    let wrong = |a: &Value| Err(format!("this is {}, not {ty}", a.kind()));
     match (IntTy::parse(ty), ty, a) {
         (Some(t), _, Value::Int(x, None)) => int(x, Some(t)),
-        (Some(t), _, a @ Value::Int(_, Some(u))) => {
-            if t == u {
-                Ok(a)
-            } else {
-                wrong(&a)
-            }
-        }
+        (Some(t), _, a @ Value::Int(_, Some(u))) if t == u => Ok(a),
+        (Some(_), _, Value::Int(_, Some(u))) => Err(format!("this is {} {}, not {ty}", article(u.name()), u.name())),
         (None, "f32", a @ Value::F32(_))
         | (None, "f64", a @ Value::F64(_))
         | (None, "f16", a @ Value::F16(_))
         | (None, "bf16", a @ Value::Bf16(_))
         | (None, "bool", a @ Value::Bool(_)) => Ok(a),
-        (_, _, a) => wrong(&a),
+        (_, _, a) => Err(format!("this is {}, not {ty}", a.kind())),
     }
 }
 

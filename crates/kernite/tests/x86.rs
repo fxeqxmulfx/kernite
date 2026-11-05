@@ -1290,6 +1290,7 @@ fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() {
         ("static A: global<u32> = [1];", "1:25: this is an array, not a `u32`"),
         ("static A: global<u32> = true;", "1:25: this is a bool, not a `u32`"),
         ("static A: global<u32> = 1u8;", "1:25: this is a `u8`, not a `u32`"),
+        ("static A: global<i32> = 1i8;", "1:25: this is an `i8`, not an `i32`"),
         ("static A: global<f32> = 1;", "1:25: this is an integer, and an `f32` a float: `1.0`"),
         ("static A: global<f32> = 1.5f64;", "1:25: this is an f64, not an `f32`"),
         ("static A: global<u8> = 256;", "1:24: 256 is out of range for u8"),

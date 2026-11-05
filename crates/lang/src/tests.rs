@@ -1,10 +1,11 @@
 //! The lexer, how a type is read and written and which types are pointers, the rounding of 16-bit
-//! floats, whether a function is `unsafe`, where a place is, and which items of a module kernite
-//! reads when it cannot read all. The rest of the language is tested where it meets the targets it
-//! is compiled for, in `kernite`'s `tests/lang.rs`.
+//! floats, how a value known now is told when it is another type than the one wanted, whether a function
+//! is `unsafe`, where a place is, and which items of a module kernite reads when it cannot read all. The
+//! rest of the language is tested where it meets the targets it is compiled for, in `kernite`'s
+//! `tests/lang.rs`.
 
 use crate::token::{Span, Tree};
-use crate::value::{Value, cast};
+use crate::value::{IntTy, Value, article, cast, typed};
 use crate::{Mention, parse};
 
 #[test]
@@ -886,6 +887,55 @@ fn sixteen_bit_floats_round_to_nearest_even() {
         }
         assert_eq!(round(f64::INFINITY), make(inf));
         assert!(matches!(round(f64::NAN), Value::F16(h) | Value::Bf16(h) if h & inf == inf && h != inf));
+    }
+}
+
+/// A value known now that is not of the type wanted is told by what it is. An integer where an integer of another
+/// type is wanted is told by its type, `a u16` for a `u8`, as a float is by its own, `an f32`: `an integer` would
+/// say no fault, for a `u8` is one too. Its article is how its name is read, `an i8` to `an isize` and `a u8` to
+/// `a usize`. Where the type wanted is no integer's, what is wrong is that the value is an integer, and it is
+/// `an integer`, whatever its type. A number of no type of its own takes the type wanted.
+#[test]
+fn an_integer_of_another_type_is_told_by_its_type() {
+    let types = [
+        ("i8", "an i8"),
+        ("i16", "an i16"),
+        ("i32", "an i32"),
+        ("i64", "an i64"),
+        ("isize", "an isize"),
+        ("u8", "a u8"),
+        ("u16", "a u16"),
+        ("u32", "a u32"),
+        ("u64", "a u64"),
+        ("usize", "a usize"),
+    ];
+    for (name, said) in types {
+        let int = Value::Int(1, IntTy::parse(name));
+        for (wanted, _) in types {
+            let want = if wanted == name { Ok(int.clone()) } else { Err(format!("this is {said}, not {wanted}")) };
+            assert_eq!(typed(int.clone(), wanted), want, "{name} as {wanted}");
+        }
+        for wanted in ["f32", "bool", "Word", "[u8; 2]"] {
+            let want = Err(format!("this is an integer, not {wanted}"));
+            assert_eq!(typed(int.clone(), wanted), want, "{name} as {wanted}");
+        }
+        assert_eq!(typed(Value::Int(1, None), name), Ok(int), "no type as {name}");
+    }
+    assert_eq!(typed(Value::Int(1, None), "bool"), Err("this is an integer, not bool".into()));
+    assert_eq!(typed(Value::F32(1.5), "u8"), Err("this is an f32, not u8".into()));
+    assert_eq!(typed(Value::Bool(true), "u8"), Err("this is a bool, not u8".into()));
+    assert_eq!(typed(Value::Bf16(0), "f16"), Err("this is a bf16, not f16".into()));
+}
+
+/// A type's name is read with `an` before `f`, `i` and `s`, which are read `ef`, `eye` and `es`, and with `a` before
+/// any other letter: `an f32`, `an i8` and `an s16`, but `a u64`, `a b32` and `a pred`.
+#[test]
+fn a_type_name_is_read_with_its_article() {
+    for name in ["f16", "f16x2", "f32", "f64", "i8", "i64", "isize", "s8", "s64"] {
+        assert_eq!(article(name), "an", "{name}");
+    }
+    for name in ["u8", "u64", "usize", "b8", "b64", "bf16", "tf32", "pred"] {
+        assert_eq!(article(name), "a", "{name}");
     }
 }
 

@@ -578,6 +578,34 @@ fn a_static_whose_value_alone_is_wrong_stands_as_its_type_has_it() {
     );
 }
 
+/// An integer where an integer of another type is wanted is told by its type, `a u16` where a `u8` is wanted, and
+/// `an i32` for a signed one: `an integer` would say no fault, for a `u8` is one too. So it is for a const, `A`,
+/// whether the type wanted is signed, `B`, or not; for an element of an array const, `C`, told at the array; and for
+/// a compile-time argument of `#[instances(..)]`, on x86 and on a GPU. A static's value says its type already, in
+/// words of its own, on both. Where the type wanted is no integer's, `D`, what is wrong is that the value is an
+/// integer, and kernite says `an integer`. Rust's own error stands beside kernite's, at the const.
+#[test]
+fn an_integer_of_another_type_is_told_by_its_type_beside_rusts_error() {
+    refuses(
+        "int_kinds",
+        &[
+            "src/lib.rs:9:23: error: this is a u16, not u8",
+            "src/lib.rs:10:24: error: this is a u32, not i64",
+            "src/lib.rs:11:28: error: this is a u16, not u8",
+            "src/lib.rs:12:25: error: this is an integer, not bool",
+            "src/lib.rs:37:17: error: this is a u16, not u8",
+            "src/lib.rs:46:20: error: this is an i32, not u8",
+            "src/lib.rs:56:33: error: this is a `u16`, not a `u32`",
+            "src/lib.rs:65:33: error: this is a `u16`, not a `u32`",
+            &not_the_number("9:23", "u8", "u16"),
+            &not_the_number("10:24", "i64", "u32"),
+            &not_the_number("11:34", "u8", "u16"),
+            &not_the_number("12:25", "bool", "u16"),
+            "error: could not compile `int_kinds` (lib) due to 12 previous errors",
+        ],
+    );
+}
+
 /// A crate that does not depend on `kernite-cpu` is told where it needs the crate, at each static of
 /// a module of x86 kernels and at each cooperative kernel, by kernite and not by Rust, which would
 /// say that `kernite_cpu` is not found, at the attribute. A cooperative kernel's result is said as
@@ -3980,7 +4008,7 @@ fn an_error_at_a_fragment_is_said_where_the_fragment_is() {
         said_at("29:27", "10 / 0"),
         said_at("44:22", "`v` has 6 variables; there is no [6]"),
         said_at("67:22", "300 is out of range for u8"),
-        said_at("57:34", "this is an integer, not u8"),
+        said_at("57:34", "this is a u16, not u8"),
         x86_takes("87:17", "", "&f16"),
         x86_takes("95:48", "", "Wrap<Wrap<[u8; 6]>>"),
         x86_takes("95:48", "", "Wrap<Wrap<u8>>"),

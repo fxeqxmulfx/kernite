@@ -1240,6 +1240,8 @@ fn h<const N: u32>() {}
         ),
         ("#[instances(256)]\nK<const N: u8>() {}", "1:13: 256 is out of range for u8"),
         ("#[instances(1)]\nK<const N: bool>() {}", "1:13: this is an integer, not bool"),
+        ("#[instances(WIDE)]\nK<const N: u8>() {}", "1:13: this is a u32, not u8"),
+        ("#[instances((1u8, 2usize))]\nK<const N: u8, const M: isize>() {}", "1:19: this is a usize, not isize"),
         ("#[instances(MISSING)]\nK<const N: u32>() {}", "1:13: `MISSING` is not defined"),
         (
             "#[instances(1)]\nconst C: u32 = 1;",
@@ -1400,6 +1402,55 @@ fn a_constant_works_out_on_its_own() {
     ];
     for (name, want) in cases {
         assert_eq!(value(name), want.map(String::from).map_err(String::from), "{name}");
+    }
+}
+
+/// An integer where an integer of another type is wanted is told by its type, `a u16` for a `u8`: `an integer` would
+/// say no fault, for a `u8` is one too. So it is for a const, an element of an array const, a const named by another
+/// and a `let`, on x86; and for a compile-time argument of `#[instances(..)]`, on x86 and on a GPU. Where the type
+/// wanted is no integer's, what is wrong is that the value is an integer, and it is `an integer`, whatever its type.
+#[test]
+fn an_integer_of_another_type_is_told_by_its_type() {
+    let x86 = |items: &str| {
+        let src = format!("{items}\nunsafe extern \"sysv64\" fn k() -> u64 {{ let r: gpr; mov(r, A); ret(r); }}\n");
+        kernite::x86_str(&src, "k").unwrap_err()
+    };
+    let consts = [
+        ("const A: u8 = 1u16;", "1:15: this is a u16, not u8"),
+        ("const A: i32 = 2usize;", "1:16: this is a usize, not i32"),
+        ("const A: u64 = 3i64;", "1:16: this is an i64, not u64"),
+        ("const A: isize = 4usize;", "1:18: this is a usize, not isize"),
+        ("const A: usize = 5isize;", "1:18: this is an isize, not usize"),
+        // The type of a sum is that of its terms, told at the `+`, and a const named brings its own.
+        ("const A: u8 = 1u16 + 2;", "1:20: this is a u16, not u8"),
+        ("const B: u16 = 3;\nconst A: u8 = B;", "2:15: this is a u16, not u8"),
+        // An element of an array is told at the array.
+        ("const A: [u8; 2] = [1u8, 2u16];", "1:20: this is a u16, not u8"),
+        ("const A: [[u8; 2]; 2] = [[1, 2], [3, 4u32]];", "1:25: this is a u32, not u8"),
+        // A float and a bool are told by their types; a number of no type, and an integer where the type wanted is
+        // no integer's, are `an integer`; and a number too big for its type is told by its value.
+        ("const A: u8 = 1.5;", "1:15: this is an f32, not u8"),
+        ("const A: u32 = true;", "1:16: this is a bool, not u32"),
+        ("const A: bool = 1;", "1:17: this is an integer, not bool"),
+        ("const A: bool = 1u16;", "1:17: this is an integer, not bool"),
+        ("const A: f32 = 1u16;", "1:16: this is an integer, not f32"),
+        ("const A: u8 = 300;", "1:15: 300 is out of range for u8"),
+    ];
+    for (items, want) in consts {
+        assert_eq!(x86(items), want, "{items}");
+    }
+    assert_eq!(refused("let n: u8 = 1u16;"), "2:13: this is a u16, not u8");
+    assert_eq!(refused("let n: u8 = 1;\nlet m: bool = 1u16;"), "3:15: this is an integer, not bool");
+    let instances = [
+        ("#[instances(1u16)]\nK<const N: u8>() {}", "1:13: this is a u16, not u8"),
+        ("#[instances(1, 2i32)]\nK<const N: u8>() {}", "1:16: this is an i32, not u8"),
+        ("#[instances(1u16)]\nK<const N: bool>() {}", "1:13: this is an integer, not bool"),
+    ];
+    for (case, want) in instances {
+        let on_x86 = case.replacen('K', "unsafe extern \"sysv64\" fn k", 1);
+        assert_eq!(kernite::x86_str(&on_x86, "k").unwrap_err(), want, "{on_x86}");
+        let on_a_gpu = case.replacen('K', "unsafe extern \"ptx-kernel\" fn k", 1);
+        assert_eq!(kernite::ptx_str(&on_a_gpu).unwrap_err(), want, "{on_a_gpu}");
     }
 }
 

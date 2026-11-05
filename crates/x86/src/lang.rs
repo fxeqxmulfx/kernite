@@ -85,7 +85,7 @@ use kernite_core::{
     Arg, Base, Class, Const, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo, Signature,
     Slot, SlotId, StaticId, VReg,
 };
-use kernite_lang::{Fault, Guard, Operand as Given, Span, Target, Value, pointer};
+use kernite_lang::{Fault, Guard, Operand as Given, Span, Target, Value, article, pointer};
 
 use crate::bytes;
 use crate::forms::{self, Form, Kind, Miss, Shape};
@@ -403,15 +403,13 @@ impl Static {
 /// `x` as the bytes of a `t`, one of Rust's numbers, of `size` bytes, in memory, the lowest
 /// first; or why it is none, of `x` as `what` names it, `this` or `element 2`.
 fn datum(t: &str, size: u64, x: &Value, what: &str) -> Result<Vec<u8>, String> {
-    // A type's name as it is read: an `i8`, an `f32`, a `u64`.
-    let a = |name: &str| if name.starts_with(['f', 'i']) { "an" } else { "a" };
     let bits = size * 8;
     match *x {
         Value::Int(v, ty) if !t.starts_with('f') => {
             if let Some(ty) = ty
                 && ty.name() != t
             {
-                return Err(format!("{what} is {} `{}`, not {} `{t}`", a(ty.name()), ty.name(), a(t)));
+                return Err(format!("{what} is {} `{}`, not {} `{t}`", article(ty.name()), ty.name(), article(t)));
             }
             let (lo, hi) = match t.starts_with('i') {
                 true => (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1),
@@ -422,10 +420,10 @@ fn datum(t: &str, size: u64, x: &Value, what: &str) -> Result<Vec<u8>, String> {
             }
             Ok(v.to_le_bytes()[..size as usize].to_vec())
         }
-        Value::Int(v, _) => Err(format!("{what} is an integer, and {} `{t}` a float: `{v}.0`", a(t))),
+        Value::Int(v, _) => Err(format!("{what} is an integer, and {} `{t}` a float: `{v}.0`", article(t))),
         Value::F32(v) if t == "f32" => Ok(v.to_le_bytes().to_vec()),
         Value::F64(v) if t == "f64" => Ok(v.to_le_bytes().to_vec()),
-        ref x => Err(format!("{what} is {}, not {} `{t}`", x.kind(), a(t))),
+        ref x => Err(format!("{what} is {}, not {} `{t}`", x.kind(), article(t))),
     }
 }
 

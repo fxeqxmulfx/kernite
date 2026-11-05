@@ -102,7 +102,7 @@ pub use eval::{Memory, Mention, Run, constant, instance, instances, kernel, memo
 pub use parse::{module, read};
 pub use target::{Fault, Guard, Mem, Operand, Target};
 pub use token::{Delim, Span, Tree, lex, pointer, read_type, text, unraw};
-pub use value::{IntTy, Value};
+pub use value::{IntTy, Value, article};
 
 /// Why a module does not compile, and where.
 #[derive(Clone, Debug, PartialEq, Eq)]
