@@ -69,10 +69,15 @@ def usage():
 @target("check")
 def check():
     """formatting, clippy on every target, every test, and the docs, without a warning"""
+    # `build.warnings` denies every warning of a build, Cargo's own too, an unused dependency say, where `-D warnings`
+    # reaches only the compiler's, clippy's and rustdoc's. It is on these two command lines and not in the environment,
+    # which the fixture builds of `cargo test` would see. It goes after the subcommand: Cargo does not hand on a
+    # `--config` put before it to `cargo clippy`, which then warns and passes.
+    deny = ["--config", 'build.warnings="deny"']
     sh(["cargo", "fmt", "--check"])
-    sh(["cargo", "clippy", "-q", "--all-targets", "--", "-D", "warnings"])
+    sh(["cargo", "clippy", "-q", "--all-targets", *deny])
     sh(["cargo", "test", "-q"])
-    sh(["cargo", "doc", "-q", "--no-deps", "--workspace"], env={"RUSTDOCFLAGS": "-D warnings"})
+    sh(["cargo", "doc", "-q", "--no-deps", "--workspace", *deny])
 
 
 @target("fmt")
