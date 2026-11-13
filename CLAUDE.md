@@ -97,7 +97,7 @@ the list of crates in the repository's `README.md`. `architecture.rs` fails with
 - A test kernel really compiles: each variable written before it is read, each operand one the machine takes.
 - Tests that need `ptxas` (`$PTXAS`, the path, or `/usr/local/*/bin`), `llvm-mc` (`$LLVM_MC`), GNU `as`
   (`$GNU_AS`), `strace` (`$STRACE`) or a GPU skip where it is missing, and say so. This machine has them all:
-  CUDA 13.4 and an RTX 3050, `sm_86`, with 4 GB.
+  CUDA 13.5 and an RTX 3050, `sm_86`, with 4 GB.
 
 ## How to work here
 

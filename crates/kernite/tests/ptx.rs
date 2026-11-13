@@ -136,7 +136,6 @@ fn ptxas_takes_what_kernite_writes() {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
         return;
     };
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     for (name, kernels) in [
         ("kernels", KERNELS),
         ("shared", SHARED),
@@ -151,15 +150,13 @@ fn ptxas_takes_what_kernite_writes() {
         // Every byte of constant memory, and what it holds, on one line.
         ("constant", "static ALL: constant<[u8; 65536]> = [1; 65536];"),
     ] {
-        let (src, out) = (dir.join(format!("{name}.ptx")), dir.join(format!("{name}.cubin")));
-        std::fs::write(&src, kernite::ptx_str(kernels).unwrap()).unwrap();
-        let run = Command::new(&ptxas)
-            .args(["--gpu-name", "sm_75", "--warning-as-error"])
-            .arg(&src)
-            .arg("-o")
-            .arg(&out)
-            .output()
-            .unwrap();
+        // ptxas 13.5 cannot size the stack of `calls`, which recurses, and warns of it. That warning is turned off
+        // for `calls` alone: any other warning of `calls`, and every warning of the other kernels, is an error.
+        let flags: &[&str] = match name {
+            "calls" => &["--warning-as-error", "--suppress-stack-size-warning"],
+            _ => &["--warning-as-error"],
+        };
+        let run = assembled(&ptxas, &kernite::ptx_str(kernels).unwrap(), "sm_75", name, flags);
         assert!(run.status.success(), "{name}: {}", String::from_utf8_lossy(&run.stderr));
     }
 }
