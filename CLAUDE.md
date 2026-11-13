@@ -21,10 +21,10 @@ Every change serves these seven.
    safety would cost speed, zero cost wins: the call stays `unsafe`, and says why.
 5. **Clean architecture.** Each layer depends only on the layers inside it, and a port belongs
    to the code that calls it. Every step leaves the architecture cleaner than it found it.
-6. **The newest PTX.** kernite takes what the newest PTX and `ptxas` take, and refuses what they
-   refuse, whatever the version of PTX. The code it writes keeps each module's `.version` the
-   oldest that has its instructions. An older `ptxas` or driver may refuse a module, and kernite
-   does not guarantee one.
+6. **The newest PTX.** What the newest PTX and `ptxas` refuse, kernite refuses at every version
+   of PTX. What they take, kernite takes for the newest: an older `ptxas` or driver may refuse
+   it, and kernite does not guarantee one. The code it writes keeps each module's `.version` the
+   oldest that has its instructions.
 7. **Nothing deprecated.** kernite refuses what a target deprecates, though its spec still has
    it: `shfl` and `vote` without `.sync`, which PTX deprecated in 6.0, say.
 
