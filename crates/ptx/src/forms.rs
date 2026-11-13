@@ -119,7 +119,7 @@ mad.wide~half.u32 : =u64, T, T, u64 @1.0
 mad.wide~half.s16 : =s32, T, T, s32 @1.0
 mad.wide~half.s32 : =s64, T, T, s64 @1.0
 clmad(.hi|.lo).u64 : =T, T, T, T @9.3 @sm80
-# `mul24` and `mad24` multiply the low 24 bits of `a` and `b`, as the ISA has it: ptxas 13.4
+# `mul24` and `mad24` multiply the low 24 bits of `a` and `b`, as the ISA has it: ptxas 13.5
 # takes more known now, and keeps those bits, so that 2^24 + 1 is 1, and 2^23 is -2^23 in an
 # `s32`.
 mul24(.hi|.lo).u32 : =T, T[0,16777215], T[0,16777215] @1.0
@@ -138,8 +138,8 @@ popc(.b32|.b64) : =u32, T @2.0
 clz(.b32|.b64) : =u32, T @2.0
 bfind{.shiftamt}(.u32|.u64|.s32|.s64) : =u32, T @2.0
 # `fns` finds from a bit 0 to 31, as the ISA has it, which leaves it undefined past them, where
-# ptxas 13.4 finds none. `bfe` and `bfi` take a field's start and length 0 to 255, as the ISA
-# and ptxas 13.4 have it.
+# ptxas 13.5 finds none. `bfe` and `bfi` take a field's start and length 0 to 255, as the ISA
+# and ptxas 13.5 have it.
 fns.b32 : =T, T, T[0,31], s32 @6.0 @sm30
 brev(.b32|.b64) : =T, T @2.0
 bfe(.u32|.u64|.s32|.s64) : =T, T, u32[0,255], u32[0,255] @2.0
@@ -266,7 +266,7 @@ selp$num : =T, T, T, !pred @1.0
 slct$num.s32 : =T, T, T, U @1.0
 slct{.ftz@1.4}$num.f32 : =T, T, T, U @1.0
 
-# Logic and shifts. `lop3`'s table is of 8 bits, 0 to 255, as the ISA has it: ptxas 13.4
+# Logic and shifts. `lop3`'s table is of 8 bits, 0 to 255, as the ISA has it: ptxas 13.5
 # takes any, and keeps its low 8 bits.
 and(.pred|.b16|.b32|.b64) : =T, !T, !T @1.0
 or(.pred|.b16|.b32|.b64) : =T, !T, !T @1.0
@@ -282,7 +282,7 @@ shr(.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64) : =T, T, u32 @1.0
 # Video: arithmetic on bytes and halves of 32-bit variables. A source may be a part of one,
 # `a.b0`, which it extends as its type says. A scalar one works the last operand in, `.add`,
 # or writes a part of its result, `d.h1`, and the rest from the last operand; or all of it,
-# `d`, and reads the last operand for nothing, as PTX's ISA has it, where ptxas 13.4 takes
+# `d`, and reads the last operand for nothing, as PTX's ISA has it, where ptxas 13.5 takes
 # `d.b01` too, and writes all of `d`. A SIMD one selects what it works on from the halves or
 # bytes of its two sources together, `a.h32` being two of the second, and adds the last
 # operand, `.add`, or writes those of its result that `d.h1` says and the rest from the
@@ -328,10 +328,10 @@ vmin4$vty{.sat|.add} : =T{.bmask}, %U{.bxyzw}, %V{.bxyzw}, %T @3.0 @sm30
 vmax4$vty{.sat|.add} : =T{.bmask}, %U{.bxyzw}, %V{.bxyzw}, %T @3.0 @sm30
 vset4(.u32|.s32)(.u32|.s32)$cmps{.add} : =u32{.bmask}, %T{.bxyzw}, %U{.bxyzw}, %u32 @3.0 @sm30
 
-# Moving data, and converting it. `mov` packs no `_`, as the ISA has it, where ptxas 13.4
+# Moving data, and converting it. `mov` packs no `_`, as the ISA has it, where ptxas 13.5
 # takes one and packs zeros: `mov.b32 d, {_, h}`.
 mov(.pred|.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64|.f32|.f64) : =T, !$T @1.0
-# A variable's address, which the ISA puts in a `u32` or a `u64`, and ptxas 13.4 in a `b` or
+# A variable's address, which the ISA puts in a `u32` or a `u64`, and ptxas 13.5 in a `b` or
 # an `s` type of their sizes as well, as the same bits.
 mov(.u32|.u64|.b32|.b64|.s32|.s64) : =T, &T @1.0
 mov(.u32|.u64|.b32|.b64) : =T, fn @2.1
@@ -352,7 +352,7 @@ mov.b128 : =_b64*2, %T @8.3 @sm70
 mov.b128 : =_b32*4, %T @8.3 @sm70
 # `shfl` reads a lane in the low 5 bits of `b`, and a clamp and a segment mask in the bits
 # 0x1f1f of `c`; `prmt` its selector in the low 16 bits of `c`, or, with a mode, the low 2;
-# as the ISA has it: ptxas 13.4 takes more known now, and the GPU reads no more. As
+# as the ISA has it: ptxas 13.5 takes more known now, and the GPU reads no more. As
 # `vote.sync`'s below, `shfl.sync`'s mask of lanes is its last operand, `lanes`.
 shfl$shfl.b32 : =T[|=_pred], T, u32[0,31], u32&0x1f1f @3.0 @sm30 @<sm70/6.4
 shfl.sync$shfl.b32 : =T[|=_pred], T, u32[0,31], u32&0x1f1f, lanes @6.0 @sm30
@@ -383,8 +383,8 @@ prefetch.global(.L2::evict_last|.L2::evict_normal) : [R] @7.4 @sm80
 prefetchu.L1 : [R] @2.0
 applypriority{.global}.L2::evict_normal : [R], #=128 @7.4 @sm80
 discard{.global}.L2 : [W], #=128 @7.4 @sm80
-# A policy's primary size is part of its total, as the ISA has it, and ptxas 13.4 refuses more
-# known now; its fraction is of sixteenths, as ptxas 13.4 rounds any up to a sixteenth.
+# A policy's primary size is part of its total, as the ISA has it, and ptxas 13.5 refuses more
+# known now; its fraction is of sixteenths, as ptxas 13.5 rounds any up to a sixteenth.
 createpolicy.range{.global}$prio$prio2.b64 : =T, [R], u32, u32 @7.4 @sm80 +addr32
 createpolicy.fractional$prio$prio2.b64 : =T, f32(0,1]/16? @7.4 @sm80
 createpolicy.cvt.L2.b64 : =T, b64 @7.4 @sm80
@@ -393,7 +393,7 @@ isspacep$space : =pred, %u32 @2.0
 cvta$space.u64 : =T, T @2.0
 cvta(.const@3.1|.global|.local|.shared|.shared::cta@7.8).u64 : =T, &T @2.0
 cvta.to$space.u64 : =T, T @2.0
-# A special register is converted to an integer only: ptxas 13.4 converts none to a float.
+# A special register is converted to an integer only: ptxas 13.5 converts none to a float.
 cvt{.rni|.rzi|.rmi|.rpi|.rn|.rz|.rm|.rp}{.ftz@1.4}{.sat}$cvti$cvty : =T, $U @1.0 +wide +cvt
 cvt{.rni|.rzi|.rmi|.rpi|.rn|.rz|.rm|.rp}{.ftz@1.4}{.sat}$cvtf$cvty : =T, U @1.0 +wide +cvt
 cvt(.rn|.rz)~round{.relu@7.0@sm80}{.satfinite@8.1@sm70}(.f16|.bf16@7.0@sm80).f32 : =T, U @1.0 +wide
@@ -402,20 +402,20 @@ cvt.rna{.satfinite@8.1}.tf32.f32 : =T, U @7.0 @sm80
 cvt.f32.bf16 : =T, U @7.1 @sm80
 cvt.pack.sat(.u16|.s16).s32 : =u32, s32, s32 @6.5 @sm72 +wide
 # `cvt.pack` fills the bits above the two it packs with the low bits of `c`, as the ISA has
-# it: ptxas 13.4 takes more known now, and keeps no more.
+# it: ptxas 13.5 takes more known now, and keeps no more.
 cvt.pack.sat(.u8|.s8).s32.b32 : =u32, s32, s32, b32[0,65535] @6.5 @sm72 +wide
 cvt.pack.sat(.u4|.s4).s32.b32 : =u32, s32, s32, b32[0,16777215] @6.5 @sm75 +wide
 cvt.pack.sat(.u2|.s2).s32.b32 : =u32, s32, s32, b32[0,268435455] @6.5 @sm75 +wide
 
 # Textures, each by its handle, the `u64` of a CUDA texture object, which holds its sampler
 # too, in brackets with the coordinates in it, as for surfaces, though some are floats. A
-# texture returns four, but two of `f16x2`; ptxas 13.4 takes `_` for one of four, and not
+# texture returns four, but two of `f16x2`; ptxas 13.5 takes `_` for one of four, and not
 # of two, saying that `mov` may not discard its result. The level of detail of `.level`, or
 # the gradients of `.grad`, follow the brackets, then an offset of each coordinate, and a
 # depth to compare with, for `f32` coordinates, which without the offset is a line of its
 # own. There are no `.texref` and `.samplerref` variables, and so no sampler apart from its
 # texture, nor its `force_unnormalized_coords`. An offset is -8 to 7, as the ISA has it:
-# ptxas 13.4 takes any, and keeps its low 4 bits, so that 8 is -8.
+# ptxas 13.5 takes any, and keeps its low 4 bits, so that 8 is -8.
 tex{.base}.1d(.v4|.v2)$tdt.s32 : $texd, [%u64,$U*1], $s32*1[-8,7]@4.3@sm30? @3.1 +tex
 tex{.base}.1d(.v4|.v2)$tdt.f32 : $texd, [%u64,$U*1], $s32*1[-8,7]@4.3@sm30?, f32@4.3@sm30? @3.1 +tex
 tex{.base}.1d(.v4|.v2)$tdt.f32 : $texd, [%u64,$U*1], f32@4.3@sm30 @3.1 +tex
@@ -478,10 +478,11 @@ istypep(.texref|.samplerref|.surfref) : =pred, u64 @4.0 @sm30
 # Surfaces, each by its handle, the `u64` of a CUDA surface object, in brackets with the
 # coordinates in it: an array's layer first, then four where there would be three, the last
 # ignored; the lowest in bytes, but in samples for `sust.p` and `sured.p`. `sured` has no
-# `.xor`, on which ptxas 13.4 crashes, a segfault, rather than refusing it. `sust.p` takes
-# a cache operation, and arrays from 4.1 and `sm_30`, as `sust.b` does, where the ISA has
+# `.xor`, on which ptxas 13.5 and the driver's own compiler, that of CUDA 13.5, crash, a
+# segfault, rather than refusing it: `sured.b.xor.1d.b32.trap [%rd0, {%r0}], %r1`. `sust.p`
+# takes a cache operation, and arrays from 4.1 and `sm_30`, as `sust.b` does, where the ISA has
 # neither but ptxas takes both; and a store takes a special register only as one of a
-# vector's, where ptxas 13.4 takes it, and none alone.
+# vector's, where ptxas 13.5 takes it, and none alone.
 suld.b.1d$sucop$vec$bty$clamp : =_T*v, [%u64,$s32*1] @3.1 +wide +vec
 suld.b.2d$sucop$vec$bty$clamp : =_T*v, [%u64,$s32*2] @3.1 +wide +vec
 suld.b.3d$sucop$vec$bty$clamp : =_T*v, [%u64,$s32*4] @3.1 +wide +vec
@@ -521,7 +522,7 @@ ret{.uni} @1.0
 exit @1.0
 
 # Barriers, fences and atomics. A barrier's count of threads is a multiple of 32, as the ISA
-# has it, to 1024, the most threads a CTA has, past which it would wait for ever: ptxas 13.4
+# has it, to 1024, the most threads a CTA has, past which it would wait for ever: ptxas 13.5
 # takes any, and keeps its low 12 bits, so that 4096 is 0, which it reads as every thread.
 barrier$cta.sync{.aligned} : u32[0,15], u32[0,1024]/32? @6.0 @sm30
 barrier$cta.arrive{.aligned} : u32[0,15], u32[32,1024]/32 @6.0 @sm30
@@ -583,7 +584,7 @@ red$rsem$ascope$shared.add.noftz.f16x2 : [X], T @6.2 @sm60
 # After the bytes a copy moves may come how many of them it reads, the rest zeros, or, from
 # 7.5, a predicate that has it read none; that is a variable, as the ISA has it, so that a
 # value known now is how many. `cp.async.wait_group` waits till 0 to 63 groups are left:
-# ptxas 13.4 takes more, and waits till 63 are, as its SASS holds no more. An `mbarrier`'s
+# ptxas 13.5 takes more, and waits till 63 are, as its SASS holds no more. An `mbarrier`'s
 # count is 1 to 2^20 - 1, as the ISA has it: ptxas checks it for `init` alone, and adds a
 # bigger one for `arrive` past the 20 bits it is counted in.
 cp.async.ca(.shared|.shared::cta).global$hint$size : [W], [R], #=4|8|16, {L2::cache_hint}b64 @7.0 @sm80 +addr32
@@ -611,8 +612,9 @@ mbarrier.test_wait.parity{.acquire.cta@8.0}{.shared|.shared::cta@7.8}.b64 : =pre
 mbarrier.pending_count.b64 : =u32, u64 @7.0 @sm80
 
 # The threads of a warp together. A mask of lanes holds the thread that runs the instruction,
-# or the ISA leaves it undefined, so it is never 0: ptxas 13.4 takes 0, and syncs no lane. Nor
-# does a mask leave out lane 0 where every thread runs the instruction: thread 0 is in lane 0.
+# or the ISA leaves it undefined, so it is never 0: ptxas 13.5 takes 0, and writes the same
+# code for it as for any other mask known now. Nor does a mask leave out lane 0 where every
+# thread runs the instruction: thread 0 is in lane 0.
 bar.warp.sync : lanes @6.0 @sm30
 vote(.all|.any|.uni).pred : =T, !pred @1.2 @<sm70/6.4
 vote.ballot.b32 : =T, !pred @2.0 @<sm70/6.4
@@ -626,7 +628,8 @@ redux.sync(.and|.or|.xor).b32 : =T, T, lanes @7.0 @sm80
 
 # Matrices a warp loads and multiplies together, each thread holding a fragment of each: so
 # many registers, braced even when one. `mma` takes `_` for what it leaves unwritten, and
-# `movmatrix` doesn't: on `_` there ptxas 13.4 crashes, a segfault, rather than refusing it.
+# `movmatrix` doesn't: ptxas 13.5 and the driver's own compiler, that of CUDA 13.5, crash
+# on `movmatrix.sync.aligned.m8n8.trans.b16 _, %r0`, a segfault, rather than refusing it.
 # Of integers, `mma` takes values known now among a fragment's registers beside a variable,
 # of which ptxas takes the type, and of floats in `c` alone: ptxas takes none of `f16x2`,
 # `bf16x2` or `tf32`. A sparse one's selector is the threads of four that hold the
@@ -674,9 +677,9 @@ mma(.sp|.sp::ordered_metadata@8.5).sync.aligned.m16n8k128.row.col{.satfinite}.s3
 # ptxas requires `.aligned` from PTX 6.3 and refuses it before, so kernite, which writes it,
 # writes wmma from 6.3, though the ISA has 6.0 without it; and no `.satfinite` on a float
 # one, which 6.5 removes. The driver compiles a module for the GPU it runs on, and ptxas
-# 13.4 takes `_` for one of `mma`'s results for Turing, `sm_75`, of `f16.f32` and of the
-# integers alone, though for Ampere, `sm_80`, of every type; and a special register in `a`
-# or `b` of `u8` or `s8` for Ampere alone: so kernite takes these only where both do.
+# 13.5 takes `_` for one of `wmma.mma`'s results for Turing, `sm_75`, of `f16.f32` and of the
+# integers alone, though for Ampere, `sm_80`, of every type but `tf32`; and a special register
+# in `a` or `b` of `u8` or `s8` for Ampere alone: so kernite takes these only where both do.
 wmma.load(.a|.b).sync.aligned$lay$fshape$gsh.f16 : =_f16x2*8, [R], u32? @6.3 @sm70 +addr32
 wmma.load.c.sync.aligned$lay$fshape$gsh.f16 : =_f16x2*4, [R], u32? @6.3 @sm70 +addr32
 wmma.load.c.sync.aligned$lay$fshape$gsh.f32 : =_f32*8, [R], u32? @6.3 @sm70 +addr32

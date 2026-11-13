@@ -293,8 +293,8 @@ pub mod kernels {
     fn tile(i0: u32, j0: u32, rows: u32, cols: u32, m: u32, n: u32) {
         let (across, id, bi, bj): (u32, u32, u32, u32);
         // `n` is 1 or more, so `n - 1` does not overflow, as `n + BN - 1` could. The division by
-        // `BN` is a shift. `ptxas` 13.4 divides by 128 as by any number, and keeps the result
-        // through the main loop, in a register of its own: the loop then runs 0.6% slower at 2048.
+        // `BN` is a shift. `ptxas` 13.5 divides by 128 as by any number, and keeps the result
+        // through the main loop, in a register of its own: the loop then runs 1% slower at 2048.
         sub.u32(across, n, 1);
         shr.u32(across, across, BN_SHIFT);
         add.u32(across, across, 1);

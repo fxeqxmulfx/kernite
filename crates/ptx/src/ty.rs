@@ -193,8 +193,11 @@ impl Ty {
 
     /// Whether a register of this type is an operand an instruction of type `want` takes, as
     /// PTX checks most instructions: one of the same size that is the same type, or untyped
-    /// bits, or an integer where an integer is wanted. ptxas 13.4 takes an `f16x2` for a
-    /// 32-bit integer too, and for a predicate, which PTX's ISA has not.
+    /// bits, or an integer where an integer is wanted. PTX's ISA takes an `f16x2` for neither
+    /// an integer nor a predicate, and neither does `fits`. ptxas 13.5 takes one for a 32-bit
+    /// integer, as its bits. It takes one for the predicate that `and`, `or`, `xor`, `not` and
+    /// `mov` read too, but as 32 bits and not one, and not for the one that `selp`, `setp`,
+    /// `vote`, `bar.red` or a guard reads.
     pub fn fits(self, want: Ty) -> bool {
         if self == want {
             return true;

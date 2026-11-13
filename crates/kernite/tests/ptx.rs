@@ -2787,7 +2787,7 @@ fn without(text: &str, k: &str) -> String {
 }
 
 /// The GPU `ptxas` assembles `text` for, but where another is said: the one it is for, or
-/// Turing, `sm_75`, the oldest that ptxas 13.4 assembles for.
+/// Turing, `sm_75`, the oldest that ptxas 13.5 assembles for.
 fn gpu_of(text: &str) -> u32 {
     let sm: u32 = text
         .lines()

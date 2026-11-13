@@ -501,7 +501,7 @@ impl Kernel {
             w.texts.push(text);
             w.needs = w.needs.and(spec.needs);
         }
-        // PTX leaves undefined an index past the labels, where ptxas 13.4 jumps to the first.
+        // PTX leaves undefined an index past the labels, where ptxas 13.5 jumps to the first.
         if let Some(i) = specs.iter().position(|s| s.role == Role::Labels).and_then(|l| l.checked_sub(1))
             && let Given::Int(x) = args[i]
             && !(0..w.table.len() as i128).contains(&x)
@@ -512,7 +512,7 @@ impl Kernel {
             };
             return Err(Miss::At(i, true, Fault::at(i, m)));
         }
-        // A policy's primary size is part of its total, as the ISA has it, and ptxas 13.4
+        // A policy's primary size is part of its total, as the ISA has it, and ptxas 13.5
         // refuses more known now.
         if b.form.op == "createpolicy"
             && let [.., Given::Int(primary), Given::Int(total)] = args
@@ -706,7 +706,7 @@ impl Kernel {
                         m.space.noun()
                     ));
                 }
-                // ptxas 13.4 refuses a global address in 32 bits: "32-Bit compilation is no
+                // ptxas 13.5 refuses a global address in 32 bits: "32-Bit compilation is no
                 // longer supported".
                 if m.space == Space::Global && t.bits() != 64 {
                     return Err(format!(
@@ -1440,7 +1440,7 @@ fn is_value(a: &Given<Var>) -> bool {
 }
 
 /// Whether `a` is a variable that values known now may be beside, in registers taken
-/// together: ptxas 13.4 takes `{%r1, 8}` and `{%laneid, 8}`, but not `{%tid.x, 8}`, though
+/// together: ptxas 13.5 takes `{%r1, 8}` and `{%laneid, 8}`, but not `{%tid.x, 8}`, though
 /// it takes `{%tid.x, %r1}`.
 fn anchors(a: &Given<Var>) -> bool {
     match a {
@@ -1454,7 +1454,7 @@ fn anchors(a: &Given<Var>) -> bool {
 fn int(t: Ty, x: i128, name: &str) -> Result<String, String> {
     match t {
         // An integer is a predicate as PTX's ISA says, 0 false and the rest true; written as
-        // 0 or 1, as ptxas 13.4 reads `set`'s and `setp`'s `c` in its low 32 bits alone.
+        // 0 or 1, as ptxas 13.5 reads `set`'s and `setp`'s `c` in its low 32 bits alone.
         Ty::Pred => Ok(if x == 0 { "0" } else { "1" }.into()),
         Ty::F32 if (x as f32) as i128 == x => Ok(format!("0f{:08X}", (x as f32).to_bits())),
         Ty::F64 if (x as f64) as i128 == x => Ok(format!("0d{:016X}", (x as f64).to_bits())),

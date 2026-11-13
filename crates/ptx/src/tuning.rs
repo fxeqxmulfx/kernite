@@ -13,8 +13,8 @@
 //! - `.maxntid` and `.reqntid` take 1 to 3 sizes, each 1 or more, at most 1024 along x and along y
 //!   and 64 along z, as a block has them, and 1024 threads in all. `ptxas` takes `.reqntid 32, 33`
 //!   and `.reqntid 1, 1, 65`, which no launch matches, and ignores a `.maxntid` past 1024 threads.
-//!   It dies of `SIGFPE` on `.maxntid 4294967295`, in ptxas 13.4 and in the driver's own compiler;
-//!   kernite writes no size past 1024.
+//!   It dies of `SIGFPE` on `.maxntid 4294967295`, in ptxas 13.5 and in the driver's own compiler,
+//!   that of CUDA 13.5; kernite writes no size past 1024.
 //! - A kernel has `.maxntid` or `.reqntid`, not both: `ptxas` refuses a module that has both.
 //! - `.minnctapersm` is 1 to 16, with `.maxntid` or `.reqntid`, and no more than 32 warps in all.
 //!   `ptxas` ignores it alone, and ignores a number of blocks, or of warps, that the GPU's SM does
@@ -27,7 +27,7 @@
 //!   block. A launch counts the registers of a thread by eights, 32 threads to a warp, and the
 //!   warps of a block by fours, and every GPU kernite writes for gives a block 65536 at most:
 //!   255 registers for 256 threads are 256 * 32 * 8, and for 257 threads 256 * 32 * 12. The ISA
-//!   says `.maxnreg` may be further constrained by `.maxntid`, and ptxas 13.4 does so for
+//!   says `.maxnreg` may be further constrained by `.maxntid`, and ptxas 13.5 does so for
 //!   `.maxntid 1024` alone, which gives a kernel 64 registers, and for `.minnctapersm`, but keeps
 //!   `.maxnreg 128` beside `.maxntid 1024`: a kernel that uses its 128 registers has no block of
 //!   1024 threads that can launch, and the driver says `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES`.
