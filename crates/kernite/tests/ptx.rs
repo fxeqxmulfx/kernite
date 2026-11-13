@@ -187,6 +187,36 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ("let i: u32; add.u32(i, tid.x, 1);", "2:28: `add.u32` reads no special register; `mov.u32` does"),
         ("let i: u32; mov.u32(i, tod.x);", "2:28: `tod.x` is not defined"),
         ("let i: u32; if n { mov.u32(i, 1); }", "2:24: an instruction is guarded by a `pred`; this is a `u32`"),
+        // ptxas 13.5 takes an `f16x2` for the predicate that `and`, `or`, `xor`, `not` and `mov` read, but reads its 32
+        // bits, where a predicate is one bit: kernite takes it for no predicate.
+        (
+            "let (h, p): (f16x2, pred); mov.b32(h, n); and.pred(p, h, h);",
+            "2:55: `and.pred` wants a `pred` variable; this is a `f16x2`",
+        ),
+        (
+            "let (h, i): (f16x2, u32); mov.b32(h, n); if h { mov.u32(i, 1); }",
+            "2:53: an instruction is guarded by a `pred`; this is a `f16x2`",
+        ),
+        // ptxas 13.5 takes `_` for one result of `wmma.mma` of `f16.f32` and of the integers on Turing and on Ampere,
+        // of `f32.f32` on Ampere alone, and of `tf32` on none: kernite takes it only where both do.
+        (
+            "let (a, b): ([f16x2; 8], [f16x2; 8]); let c: [f32; 8]; let d: f32; \
+             wmma.load.a.sync.aligned.row.m16n16k16.f16(a, [x]); \
+             wmma.load.b.sync.aligned.col.m16n16k16.f16(b, [x], 16); \
+             wmma.load.c.sync.aligned.row.m16n16k16.f32(c, [x]); \
+             wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32((d, d, d, d, d, d, d, _), a, b, c);",
+            "2:276: `wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32` has no result here that it may leave \
+             unwritten, `_`",
+        ),
+        (
+            "let (a, b): ([tf32; 4], [tf32; 4]); let c: [f32; 8]; let d: f32; \
+             wmma.load.a.sync.aligned.row.m16n16k8.tf32(a, [x]); \
+             wmma.load.b.sync.aligned.col.m16n16k8.tf32(b, [x], 16); \
+             wmma.load.c.sync.aligned.row.m16n16k8.f32(c, [x]); \
+             wmma.mma.sync.aligned.row.col.m16n16k8.f32.tf32.tf32.f32((d, d, d, d, d, d, d, _), a, b, c);",
+            "2:282: `wmma.mma.sync.aligned.row.col.m16n16k8.f32.tf32.tf32.f32` has no result here that it may leave \
+             unwritten, `_`",
+        ),
         ("let v: f32; add.rn.f32(v, v, 1.5);", "2:5: `v` is read before anything writes it"),
         (
             "let v: f32; brx.idx(n, (a, b)); label(a); mov.f32(v, 1); label(b); st.global.f32([x], v);",
