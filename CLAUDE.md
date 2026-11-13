@@ -107,6 +107,8 @@ the list of crates in the repository's `README.md`. `architecture.rs` fails with
   a sentence of what kernite now does, in GUIDE.md's plain words, then a body that says what changed
   and why, wrapped at 72 columns, as `git log` shows, ending with the `Co-Authored-By` line.
 - Don't push, and don't merge into master: both are the user's call.
+- Don't start a subagent, in any way: by the Agent tool, a workflow or a skill that starts one. Do
+  all the work yourself, the searching and the reviewing too.
 - Don't stop to ask. Choose the sensible default, say what you chose, and keep going. Ask only before
   something that cannot be undone or that leaves this machine.
 - A crate's API may change where a task needs it. Make the least change that does the job, and keep
@@ -124,12 +126,8 @@ Work is planned on [agent-kanban](.claude/skills/agent-kanban/SKILL.md), a task 
 - [REVIEWER.md](REVIEWER.md): the reviewer merges it and approves it, or sends it back with what
   must change.
 
-Developers are subagents the reviewer starts, each on Sonnet 5.5: the Agent tool's
-`model: "sonnet"`. Their commits end `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
-The reviewer reuses a developer where it can. A developer whose run has ended takes the next round
-of its task, or a new task, by SendMessage, and keeps what it knows of the code. The reviewer
-starts a new developer only when none is free, and gives a task to the one that knows its code.
-At most three developers run at once; the next task starts when one ends its run.
+Each developer, and the reviewer, is a session of its own, which the user starts. They talk only
+through the board: its tasks, hand-ins, verdicts and mail.
 
 A bug found in kernite, in a review, a test or a task, becomes a task of its own on the board,
 tagged `kernite`, with tests that show it, and a developer resolves it. The reviewer files it and

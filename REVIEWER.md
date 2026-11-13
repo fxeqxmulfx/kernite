@@ -8,12 +8,12 @@ more round finishes it. A finding of taste is still a finding; say that it is on
 outside the task's lines that the task did not make worse is not a reason to hold it: put it
 on the task that touches those lines next, or on a task of its own.
 
-Developers are subagents on Sonnet 5.5, reused where they can be, and each bug in kernite is a
-task of its own, as CLAUDE.md says. With each task, the reviewer gives its developer, new or
-resumed, a brief that names the task, the effort's brief, the files, the commands and the evidence
-to bring, as [DEVELOPER.md](DEVELOPER.md) has a developer work. Only one developer whose task measures runs at a time, as another's build or
-benchmark spoils its numbers. The reviewer checks a bug against the code before it files it, and
-a limit GUIDE.md states is not a bug; it does not fix a bug itself.
+Developers are sessions of their own, and each bug in kernite is a task of its own, as CLAUDE.md
+says. With each task, the reviewer writes in the effort's brief what its developer needs: the
+files, the commands and the evidence to bring, as [DEVELOPER.md](DEVELOPER.md) has a developer
+work. Only one developer whose task measures runs at a time, as another's build or benchmark
+spoils its numbers. The reviewer checks a bug against the code before it files it, and a limit
+GUIDE.md states is not a bug; it does not fix a bug itself.
 
 Run the commands from the main checkout, where `review.py` means
 `uv run .kanban/notes/<effort>/review.py`, of the task's effort. For each task in review, as it
@@ -21,7 +21,7 @@ comes:
 
 1. `agent-kanban claim ID --agent reviewer`.
 2. `review.py show ID`: the history and evidence, the commits, the files, and the test code
-   touched.
+   touched. The developer's report comes by mail: `agent-kanban inbox --agent reviewer`.
 3. Read the task's tests, the effort's brief, and the whole diff, `review.py diff ID [PATH..]`.
    Refuse when any of these fails:
    - **Does what the task says, and only that.** No dead code left behind, no unrelated change,
@@ -50,8 +50,8 @@ comes:
    the output.
 5. `agent-kanban approve ID --agent reviewer --notes "merged as <sha>: <what was checked>"`,
    then `review.py clean ID`; or `agent-kanban request-changes ID --agent reviewer --notes
-   "<each finding, where, what to write instead>"`. Either way, message the developer the
-   verdict.
+   "<each finding, where, what to write instead>"`. Either way, mail the developer the verdict,
+   by `agent-kanban send`.
 
 Approve only after the merge, so that the tasks it unblocks start from code that holds it.
 Merging an effort's branch into master is the user's call.
