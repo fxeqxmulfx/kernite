@@ -24,10 +24,10 @@ fn cargo(command: &[&str], name: &str) -> (bool, Vec<String>) {
     cargo_in(command, &written(name))
 }
 
-/// Fixture `name` written as the `src/lib.rs` of a crate that depends on kernite-macros,
-/// kernite-cuda and kernite-cpu, as a user's does: the crate's directory. The crate is a workspace
-/// of its own in `CARGO_TARGET_TMPDIR`. Its manifest ends with what `{name}.toml` beside the
-/// fixture says of the workspace, if there is one.
+/// Fixture `name` written as the `src/lib.rs` of a crate that depends on kernite-macros, kernite-cuda and kernite-cpu,
+/// as a user's does: the crate's directory. The crate is a workspace of its own in `CARGO_TARGET_TMPDIR`. Few fixtures
+/// use all three dependencies, so its manifest allows `unused_dependencies`, Cargo's lint of a dependency that a crate
+/// does not use, and ends with what `{name}.toml` beside the fixture says of the workspace, if there is one.
 fn written(name: &str) -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     let crates = here.parent().expect("kernite-macros is in crates/");
@@ -47,6 +47,9 @@ publish = false
 kernite-macros = {{ path = {macros:?} }}
 kernite-cuda = {{ path = {cuda:?} }}
 kernite-cpu = {{ path = {cpu:?} }}
+
+[lints.cargo]
+unused_dependencies = "allow"
 
 [workspace]
 "#
@@ -216,11 +219,6 @@ fn not_the_number(place: &str, expected: &str, found: &str) -> String {
 /// What Rust says of `ty`, `f16` or `f128`, at `place` of `src/lib.rs`: that the type is unstable.
 fn unstable(place: &str, ty: &str) -> String {
     format!("src/lib.rs:{place}: error[E0658]: the type `{ty}` is unstable")
-}
-
-/// What Rust says of the type `!` behind a pointer, at `place` of `src/lib.rs`: that it is experimental.
-fn experimental(place: &str) -> String {
-    format!("src/lib.rs:{place}: error[E0658]: the `!` type is experimental")
 }
 
 /// What Rust says of `path`, a module, where a type is written, at `place` of `src/lib.rs`: that it is no type.
@@ -3307,9 +3305,9 @@ fn rust_says_of_a_type_kernite_refuses_what_it_says_of_any_signature() {
 /// the same words, once, at the same place. So Rust says that a pointer's type has no size, `*const CStr`, or
 /// lacks what the type it holds needs, `*const NeedsCopy<String>`; that a `&` has no lifetime to take, or that
 /// its lifetime is not declared, `&'a u64`; that a `_` is not allowed; that `core::f16` is a module, and that an
-/// `f128` is unstable, and that the `!` behind a pointer, `*const !`, is experimental. It says nothing of `!`
-/// itself, nor of a pointer to an array of a compile-time argument, `*const [u8; N]`, nor of a type that only an
-/// import names, `Ret`, which counts the import as used, so that Rust does not warn that it is not. A `&` in the
+/// `f128` is unstable. It says nothing of `!` itself, nor of a pointer to it, `*const !`, a type Rust takes, nor
+/// of a pointer to an array of a compile-time argument, `*const [u8; N]`, nor of a type that only an import
+/// names, `Ret`, which counts the import as used, so that Rust does not warn that it is not. A `&` in the
 /// result of a cooperative x86 kernel or a GPU kernel takes a lifetime from what its launcher takes, the grid or
 /// `self`, so Rust has none to ask for. A pointer of two words to a trait that is not dyn compatible,
 /// `*mut dyn Copy`, is the one type Rust says of a plain kernel's result and not of a launcher's: it is kernite's
@@ -3374,9 +3372,6 @@ fn rust_sees_the_result_a_kernel_cannot_have_as_it_sees_the_result_of_a_plain_ke
         not_a_type("36:59", "core::f16"),
         not_a_type("79:59", "core::f16"),
         not_a_type("143:70", "core::f16"),
-        experimental("236:67"),
-        experimental("249:67"),
-        experimental("260:76"),
         not_copy("20:65", "String"),
         not_allowed("32:65", "return types"),
         not_allowed("74:65", "return types"),

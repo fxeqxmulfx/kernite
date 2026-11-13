@@ -229,8 +229,8 @@ pub mod gpu_object {
     }
 }
 
-/// `!` is no result of these kernels either, and a pointer to it, `*const !`, is a type that Rust has not made
-/// stable: it says so at the `!` of a plain kernel's result, and of a cooperative kernel's and a GPU kernel's.
+/// `!` is no result of these kernels either, and a pointer to it, `*const !`, is a type that Rust has made
+/// stable: it says nothing of the `!` of a plain kernel's result, nor of a cooperative kernel's or a GPU kernel's.
 #[kernite_macros::kernels]
 pub mod plain_never {
     pub unsafe extern "sysv64" fn pointer(p: *const u8) -> *const ! {

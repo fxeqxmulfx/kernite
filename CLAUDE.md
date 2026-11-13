@@ -33,7 +33,7 @@ Every change serves these five.
   the language through a target.
 - `KERNITE_BLESS=1 cargo test -p my-app` (or `-p microgpt`) rewrites the snapshots of the listings,
   after a change to the generated code made on purpose, for the diff to be reviewed.
-- Rust 1.99.1, edition 2024. `make.py` runs under [uv](https://docs.astral.sh/uv/), as every Python
+- Rust 1.100.0, edition 2024. `make.py` runs under [uv](https://docs.astral.sh/uv/), as every Python
   script does. A script kept as a file is Python, not shell.
 
 ## Layout
