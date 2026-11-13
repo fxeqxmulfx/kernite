@@ -212,9 +212,10 @@ pub(crate) fn clashes(f: &Fn, cfg: &TokenStream, own: &[&str], method: &str, top
     errors
 }
 
-/// `tokens` split at the commas that are not among the arguments of a type's, `x: *mut Pair<u8, 2>`.
-/// The `>` of an arrow, `fn() -> u8`, closes no `<` of them.
-fn split_commas(tokens: &[TokenTree]) -> impl Iterator<Item = &[TokenTree]> {
+/// `tokens` split at each `sep` that is not among the arguments of a type's, as the comma of `Pair<u8, 2>` is: a comma
+/// between parameters, or a plus between a trait object's bounds, `dyn Debug + Send`. The `>` of an arrow,
+/// `fn() -> u8`, closes no `<` of them.
+fn split_top(tokens: &[TokenTree], sep: char) -> impl Iterator<Item = &[TokenTree]> {
     let (mut open, mut dash) = (0usize, false);
     tokens.split(move |t| {
         if is_punct(t, '<') {
@@ -224,7 +225,7 @@ fn split_commas(tokens: &[TokenTree]) -> impl Iterator<Item = &[TokenTree]> {
         }
         // A `>` after a `-` joint to it is an arrow's, `->`.
         dash = matches!(t, TokenTree::Punct(p) if p.as_char() == '-' && p.spacing() == Spacing::Joint);
-        open == 0 && is_punct(t, ',')
+        open == 0 && is_punct(t, sep)
     })
 }
 
@@ -288,11 +289,11 @@ fn rename(tokens: &mut [TokenTree], names: &[(String, Ident)]) {
 /// `f`'s parameters as written, each its tokens, `x: *mut f32`, and the place of its colon. A fragment that stays
 /// one type is in parentheses, as [`for_rust`] has it, for the macros write each parameter as it is here, and Rust
 /// reads `*const $t`, with `$t` as `dyn Debug + Send`, as one type only so. A comma ends a parameter unless
-/// [`split_commas`] says it is among the arguments of a type's. Each name is as [`passable`] has it.
+/// [`split_top`] says it is among the arguments of a type's. Each name is as [`passable`] has it.
 pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, usize)> {
     let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
     let tokens = for_rust(flatten(group.stream()));
-    split_commas(&tokens)
+    split_top(&tokens, ',')
         .filter(|p| !p.is_empty())
         .map(|p| (p.to_vec(), p.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type")))
         .collect()
@@ -1015,6 +1016,28 @@ pub(crate) fn host(ty: &[TokenTree]) -> TokenStream {
     half(ty).unwrap_or_else(|| ty.iter().cloned().collect())
 }
 
+/// The type `to` that a kernel's pointer points to, as the argument of `::kernite_cuda::Ptr<..>` in a launcher: as
+/// [`host`] has it, but for a trait object of more than one bound in parentheses, `(dyn Debug + Send)`, which it has
+/// without them. A pointer needs them, as `*const dyn Debug + Send` is ambiguous, and Rust does not lint them there;
+/// an argument does not, and Rust would say there that they are unnecessary. Rust lints the parentheses of any other
+/// type alike in the argument and behind the pointer. A fragment in them that stays one type is in the macro's own
+/// parentheses, as [`for_rust`] has it, for Rust reads a group the macro writes again as no group: `Fn() -> $t + Send`,
+/// with `$t` as `dyn Debug + Sync`, would be `Fn() -> dyn Debug + Sync + Send`.
+pub(crate) fn ptr_argument(to: &[TokenTree]) -> TokenStream {
+    if let [TokenTree::Group(g)] = to
+        && g.delimiter() == Delimiter::Parenthesis
+    {
+        // One type with a `+` of its own, a trait object's, with `dyn` or without, and not a tuple, which has commas
+        // of its own.
+        let inside = for_rust(flatten(g.stream()));
+        let parts = |sep| split_top(&inside, sep).count();
+        if parts(',') == 1 && parts('+') > 1 {
+            return inside.into_iter().collect();
+        }
+    }
+    host(to)
+}
+
 /// `ty` as kernite-cuda names it, if it is `f16` or `bf16`, written raw or not, which Rust has not.
 pub(crate) fn half(ty: &[TokenTree]) -> Option<TokenStream> {
     match ty {
@@ -1084,7 +1107,7 @@ pub(crate) fn launcher_result(f: &Fn, top: &[TokenTree], launched: TokenStream) 
 pub(crate) fn seen(f: &Fn, top: &[TokenTree], guard: &TokenStream) -> TokenStream {
     let written = written_generics(f, top);
     let inside = written.get(1..written.len().saturating_sub(1)).unwrap_or_default();
-    let generics = split_commas(inside).filter(|g| !g.is_empty()).map(|g| g[3..].to_vec());
+    let generics = split_top(inside, ',').filter(|g| !g.is_empty()).map(|g| g[3..].to_vec());
     let params = written_params(f, top).into_iter().map(|(param, colon)| param[colon + 1..].to_vec());
     let result = f.ret.iter().map(|r| top[r.tokens.clone()].to_vec());
     let mut out = TokenStream::new();

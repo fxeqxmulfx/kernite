@@ -9,7 +9,7 @@ use kernite::{Compiled, DeviceStatic, Failed, Launcher};
 use crate::cond::Cond;
 use crate::rust::{
     asks, attrs, carried, clashes, depends_on, error_under, half, host, hygienic, launcher_result, missing, never,
-    number_type, parse, pick, pointer, primitive, quiet, refused, site, visibility, written_params,
+    number_type, parse, pick, pointer, primitive, ptr_argument, quiet, refused, site, visibility, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -241,7 +241,7 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
                 // would say an error in the type it points to again, at the call.
                 args.push(format!("(&raw const {name}) as *const ::core::ffi::c_void"));
                 params.extend(parse("::kernite_cuda::Ptr<"));
-                params.extend(host(to));
+                params.extend(ptr_argument(to));
                 // A type that ends in `>` is joint with the next token, and Rust, which reads the two as
                 // one, `>>`, and breaks it again, would say an error in the type at the attribute.
                 params.extend(parse(",>"));

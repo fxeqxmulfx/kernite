@@ -4554,9 +4554,8 @@ fn an_error_at_a_fragment_is_said_where_the_fragment_is() {
 /// an array, a function pointer or an argument of a type. kernite refuses each, for a pointer to a trait object has two
 /// words and a kernel takes no reference. Rust says nothing of the fragment, as it says nothing of it in a macro that
 /// does not call kernite: not that its `+` is ambiguous, as it says of `*const dyn Debug + Send` written out. Each is
-/// also built with the bounds in parentheses, as written by hand: the errors are the same, at the same places. Rust's
-/// one word is a warning at the parentheses of the GPU parameters' call: the launcher writes the type in `Ptr<..>`,
-/// where they are not needed.
+/// also built with the bounds in parentheses, as written by hand: the errors are the same, at the same places, and
+/// Rust says nothing of the parentheses, which a pointer needs.
 #[test]
 fn a_fragment_of_bounds_behind_a_pointer_is_one_type_to_rust_wherever_the_macros_write_it_back() {
     let (mut said, mut repeated) = (Vec::new(), 0);
@@ -4618,11 +4617,43 @@ fn a_fragment_of_bounds_behind_a_pointer_is_one_type_to_rust_wherever_the_macros
         ]
     });
     let errors = said.len() + repeated;
-    said.push("src/lib.rs:96:32: warning: unnecessary parentheses around type".to_string());
-    said.push(format!(
-        "error: could not compile `fragments_bounds` (lib) due to {errors} previous errors; 1 warning emitted"
-    ));
+    said.push(format!("error: could not compile `fragments_bounds` (lib) due to {errors} previous errors"));
     refuses("fragments_bounds", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// The parentheses of the type a pointer points to are Rust's to lint in a kernel's parameter as they are in any
+/// function's, in an x86 kernel, a GPU kernel and a plain function alike. Where the pointer needs them,
+/// `*const (dyn Debug + Send)`, Rust says nothing of them: a GPU kernel's launcher writes the type as the argument of
+/// `Ptr<..>`, where they are not needed, and leaves them out. Where it does not, `*const (dyn Debug)`, `*mut ([u8])`
+/// and `*mut (u32)`, Rust says that they are unnecessary, once in each of the three. kernite's errors are of the
+/// pointers to a trait object and to a slice, which have two words, and Rust says nothing else of them. A fragment in
+/// the parentheses, `*const (dyn Fn() -> $t + Send)` with `$t` as `dyn Debug + Sync`, is one type to Rust: kernite's
+/// error is all that is said of it. Two bounds with no `dyn`, `*const (Debug + Send)`, are Rust's error in edition
+/// 2024, `E0782`, with no warning.
+#[test]
+fn the_parentheses_of_the_type_a_pointer_points_to_are_linted_in_a_gpu_kernel_as_in_a_plain_function() {
+    let mut said = vec![];
+    for (gpu, x86, ty) in [
+        ("10:44", "17:40", "(dyn core::fmt::Debug + Send)"),
+        ("28:44", "35:40", "(dyn core::fmt::Debug)"),
+        ("46:44", "53:40", "([u8])"),
+        ("84:52", "91:48", "(dyn Fn() -> dyn core::fmt::Debug + Sync + Send)"),
+    ] {
+        said.push(two_words(gpu, "", ty));
+        said.push(two_words(x86, "", ty));
+    }
+    // Not one at `10:51`, the parentheses that the GPU kernel's pointer needs.
+    for place in ["28:51", "35:47", "41:25", "46:49", "53:45", "59:23", "64:49", "71:45", "77:23"] {
+        said.push(format!("src/lib.rs:{place}: warning: unnecessary parentheses around type"));
+    }
+    // Rust's, and no warning with it, for the two bounds with no `dyn`, in each of the three.
+    for place in ["113:48", "119:26", "106:52"] {
+        said.push(format!("src/lib.rs:{place}: error[E0782]: expected a type, found a trait"));
+    }
+    said.push(
+        "error: could not compile `pointer_parens` (lib) due to 11 previous errors; 9 warnings emitted".to_string(),
+    );
+    refuses("pointer_parens", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
 /// A macro's fragment `$t:ty` behind a pointer that kernite takes is one type to Rust and to the kernel, with nothing
