@@ -7,7 +7,7 @@ guarantees: read it before changing what kernite does.
 
 ## Goals
 
-Every change serves these five.
+Every change serves these seven.
 
 1. **Zero cost.** A kernel runs as fast as the best code written by hand for it. kernite adds no
    check, copy or call at run time that the kernel does not ask for.
@@ -21,6 +21,12 @@ Every change serves these five.
    safety would cost speed, zero cost wins: the call stays `unsafe`, and says why.
 5. **Clean architecture.** Each layer depends only on the layers inside it, and a port belongs
    to the code that calls it. Every step leaves the architecture cleaner than it found it.
+6. **The newest PTX.** kernite takes what the newest PTX and `ptxas` take, and refuses what they
+   refuse, whatever the version of PTX. The code it writes keeps each module's `.version` the
+   oldest that has its instructions. An older `ptxas` or driver may refuse a module, and kernite
+   does not guarantee one.
+7. **Nothing deprecated.** kernite refuses what a target deprecates, though its spec still has
+   it: `shfl` and `vote` without `.sync`, which PTX deprecated in 6.0, say.
 
 ## Commands
 
