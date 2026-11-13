@@ -1,10 +1,10 @@
 # How a developer does a task
 
-You are a subagent on Sonnet 5.5, started by the reviewer for a task on the board, and resumed for
-each round of it and for the tasks after it. The reviewer approves your work or sends it back, as
-[REVIEWER.md](REVIEWER.md) says. The bar is 10/10: work
-with anything left to change comes back, with every finding listed. All paths are under the main
-checkout, `<main>` below, the first folder that `git worktree list` shows. Run `agent-kanban` there.
+You are a session of your own, which the user started for a task on the board, and you take each
+round of it. The reviewer approves your work or sends it back, as [REVIEWER.md](REVIEWER.md) says.
+The bar is 10/10: work with anything left to change comes back, with every finding listed. All
+paths are under the main checkout, `<main>` below, the first folder that `git worktree list` shows.
+Run `agent-kanban` there.
 
 Each task belongs to an effort, `matmul`, `fixes` or `support` say. The effort's brief,
 `.kanban/notes/<effort>/README.md`, names its branch and its gate, adds its own rules, and says
@@ -13,8 +13,8 @@ whole, before you change it.
 
 ## 1. Take the task
 
-Use the name the reviewer gave you, `dev-` and four letters, in every call. Register it on your
-first task alone, then claim each task:
+Use the name the user gave you, or else one of your own, `dev-` and four letters, in every call.
+Register it on your first task alone, then claim each task:
 
     agent-kanban agent register dev-abcd
     agent-kanban claim <ID> --agent dev-abcd --lease 14400
@@ -65,12 +65,17 @@ evidence.
   by name and what it showed, and, for a measured task, the numbers and the library's from the
   same sitting.
 
-Then end with your report, as your last message:
+Then mail the reviewer your report:
+
+    agent-kanban send reviewer "REPORT" --task <ID> --agent dev-abcd
 
 - the branch and commit, and the gate's last lines;
 - each test's evidence;
 - what you chose where the task left it open, and why;
 - each finding: a bug in kernite, with the smallest kernel that shows it.
 
-The reviewer messages you the verdict. If the task comes back, claim it again, fix every finding,
-and hand it in again.
+The reviewer mails you the verdict. Wait for it in the background:
+
+    agent-kanban wait <ID> --agent dev-abcd
+
+If the task comes back, claim it again, fix every finding, and hand it in again.
