@@ -4910,6 +4910,64 @@ fn a_result_without_a_lifetime_is_said_at_the_ampersand_of_an_ident_wherever_the
     refuses("fragments_placed_idents", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
+/// A body that the call gives, a `$b:block`, after a result with a `&` is the kernel's body, and no part of the type
+/// behind the `&`. kernite reads each kernel and refuses each result at its `&`, and Rust says that the `&` has no
+/// lifetime at the same place, as it says it of the same kernels written out: of two kernels that take a `$t:ident`, a
+/// `$t:ty`, a `$t:tt`, a `$t:path`, or `&u8` written in the macro; of `&mut $t` and `&Vec<$t>`; and of a kernel before
+/// one with no result, whose body is its own. A GPU kernel's `&` takes the lifetime of `self`, so Rust has none to ask
+/// for there.
+#[test]
+fn a_body_the_call_gives_after_a_result_with_a_reference_is_the_kernels_body() {
+    let gives = |places: &[&str], ty: &str| places.iter().map(|place| x86_gives(place, "", ty)).collect::<Vec<_>>();
+    // kernite says its errors first, in the order of the kernels, and Rust says its own after them.
+    let mut said = vec![];
+    for places in [["12:60", "13:61"], ["24:60", "25:61"], ["36:60", "37:61"]] {
+        said.extend(gives(&places, "&u8"));
+    }
+    said.extend([x86_gives("48:60", "", "&mut u8"), x86_gives("49:61", "", "&Vec<u8>")]);
+    said.extend(gives(&["60:60"], "&u8"));
+    said.extend([gpu_returns("72:69", "", "&u8"), gpu_returns("73:70", "", "&u8")]);
+    said.extend(gives(&["84:60", "85:61", "96:60", "97:61"], "&u8"));
+    let x86 = ["12:60", "13:61", "24:60", "25:61", "36:60", "37:61", "48:60", "49:61", "60:60"];
+    said.extend(x86.into_iter().chain(["84:60", "85:61", "96:60", "97:61"]).map(no_lifetime));
+    let errors = said.len();
+    said.push(format!("error: could not compile `fragments_blocks` (lib) due to {errors} previous errors"));
+    refuses("fragments_blocks", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// Rust says that a result with a `&` before a body that the call gives has no lifetime at the `&` of each kernel of a
+/// macro, wherever the macro is defined: below its call, as a `#[macro_export]` macro called by its path is, and in a
+/// file of its own. It is so for `&u8` written in the macro and for a `$t:ident`, and kernite refuses each kernel at
+/// the same `&`: the body has the place of the call, whoever wrote the type, so it tells nothing of where the ident is.
+#[test]
+fn a_result_without_a_lifetime_before_a_body_the_call_gives_is_said_at_its_ampersand_wherever_the_macro_is_defined() {
+    let in_macros = |said: String| said.replacen("src/lib.rs", "src/macros.rs", 1);
+    let lib = ["17:60", "18:61", "28:60", "29:61"];
+    let macros = ["5:60", "6:61", "15:60", "16:61"];
+    // kernite says its errors first, in the order of the kernels, and Rust says its own after them.
+    let mut said: Vec<String> = lib.iter().map(|place| x86_gives(place, "", "&u8")).collect();
+    said.extend(macros.iter().map(|place| in_macros(x86_gives(place, "", "&u8"))));
+    said.extend(lib.map(no_lifetime));
+    said.extend(macros.map(|place| in_macros(no_lifetime(place))));
+    said.push("error: could not compile `fragments_blocks_placed` (lib) due to 16 previous errors".to_string());
+    refuses("fragments_blocks_placed", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A body that the call gives after a pointer to a reference that names a lifetime, `*const &'static u8`, is the
+/// kernel's body: the kernel is refused at its type, in the lexer's words, as the same kernel written out is, and the
+/// body is not said to be missing.
+#[test]
+fn a_body_the_call_gives_after_a_pointer_to_a_reference_is_the_kernels_body() {
+    refuses(
+        "fragments_blocks_pointers",
+        &[
+            "src/lib.rs:9:51: error: lifetimes and labels have no place in a kernel",
+            "src/lib.rs:18:43: error: lifetimes and labels have no place in a kernel",
+            "error: could not compile `fragments_blocks_pointers` (lib) due to 2 previous errors",
+        ],
+    );
+}
+
 /// A fragment that is a pair of parentheses of the user's, and ends the type behind a `&`, is Rust's to lint in a
 /// kernel's result as in a plain function's. `&$t` with `$t` as `(u8)`, `(dyn Send)` and `([u8])` has Rust say that the
 /// pair is unnecessary, where the user wrote it, in the call of the macro; as `(dyn Send + Sync)`, which a `&` needs,

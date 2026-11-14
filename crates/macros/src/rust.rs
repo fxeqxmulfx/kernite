@@ -804,10 +804,11 @@ fn stays(inside: &[TokenTree], before: &[TokenTree], after: &[TokenTree]) -> boo
 /// `&` starts a type where it is the first token, or where a punct but `&` is before it, or `const` or `mut`, as in
 /// `*const &$t`. Any other token before it is taken for an operand, as the `a` of `a & b` is, and so is a `&`, as in
 /// `a && b`: where a `&` behind another is a reference, `&&$t` or `&'a &$t`, it is in the type of the first, which ends
-/// where its own would. The type ends at the first `,`, `;`, `=`, `as`, `where` or brace that is not among the
-/// arguments of a type's, or at the `>` that closes the arguments it is among, as in `Option<&$t>` and
-/// `<&$t as Trait>::Out`. So `&dyn $d`, `&mut $t`, `&*const $t` and `&fn() -> $t` end in `$t`, a group or an ident;
-/// `&Wrap<$t>` and `&[$t]` end in a token of the macro's own, and Rust finds the `&` of those alone.
+/// where its own would. The type ends at the first `,`, `;`, `=`, `as`, `where` or body that is not among the arguments
+/// of a type's, or at the `>` that closes the arguments it is among, as in `Option<&$t>` and `<&$t as Trait>::Out`. A
+/// brace is a body, and so is the group of no brackets that a `$b:block` arrives in, which holds one: [`is_body`]. So
+/// `&dyn $d`, `&mut $t`, `&*const $t` and `&fn() -> $t` end in `$t`, a group or an ident; `&Wrap<$t>` and `&[$t]` end
+/// in a token of the macro's own, and Rust finds the `&` of those alone.
 fn ends_reference(tokens: &[TokenTree], at: usize) -> Option<usize> {
     let starts_type = match at.checked_sub(1).map(|before| &tokens[before]) {
         None => true,
@@ -821,10 +822,22 @@ fn ends_reference(tokens: &[TokenTree], at: usize) -> Option<usize> {
         [',', ';', '>', '='].into_iter().any(|c| is_punct(t, c))
             || is_ident(t, "as")
             || is_ident(t, "where")
-            || matches!(t, TokenTree::Group(g) if g.delimiter() == Delimiter::Brace)
+            || is_body(t)
     };
     // The first part is the type.
     Some(at + split_top(&tokens[at + 1..], stops).next().expect("a split has a first part").len())
+}
+
+/// Whether `t` is a body: a pair of braces, or the group of no brackets that holds one, which is how a `$b:block`
+/// arrives, the macro's call giving the body.
+fn is_body(t: &TokenTree) -> bool {
+    match t {
+        TokenTree::Group(g) if g.delimiter() == Delimiter::Brace => true,
+        TokenTree::Group(g) if g.delimiter() == Delimiter::None => {
+            matches!(&g.stream().into_iter().collect::<Vec<_>>()[..], [inside] if is_body(inside))
+        }
+        _ => false,
+    }
 }
 
 /// The first and the last token of `t`: itself, but for a group that [`flatten`] keeps, where they are those
@@ -850,9 +863,9 @@ fn ends(t: &TokenTree) -> (TokenTree, TokenTree) {
 /// the kernels that take it, and the error of each of the others is there. The macro's own `)` is of a hygiene no
 /// fragment has, and the span is the `&`'s alone. A `$t:ident` is no group, but a token with the place and the hygiene
 /// of the call, which ends the type behind a `&` in the same way: [`is_given`] says when it is in the macro's
-/// parentheses too. `end` is where the tokens end, if they are in a bracket: the closing one. A bracket among the
-/// tokens is handed on as it came, with each fragment in it one operand.
-pub(crate) fn for_rust(tokens: Vec<TokenTree>, end: Option<Span>) -> Vec<TokenTree> {
+/// parentheses too. `end` is where the tokens end: the bracket they are in, closing. A bracket among the tokens is
+/// handed on as it came, with each fragment in it one operand.
+pub(crate) fn for_rust(tokens: Vec<TokenTree>, end: Span) -> Vec<TokenTree> {
     let ends_of_types: Vec<usize> = (0..tokens.len()).filter_map(|at| ends_reference(&tokens, at)).collect();
     tokens
         .iter()
@@ -871,18 +884,20 @@ pub(crate) fn for_rust(tokens: Vec<TokenTree>, end: Option<Span>) -> Vec<TokenTr
 
 /// What is in the bracket `group`, as Rust has it: [`flatten`] opens what it does, and [`for_rust`] writes the rest.
 fn contents(group: &Group) -> Vec<TokenTree> {
-    for_rust(flatten(group.stream()), Some(group.span_close()))
+    for_rust(flatten(group.stream()), group.span_close())
 }
 
 /// Whether the ident at `at` in `tokens`, which ends the type behind a `&`, is one the macro was given, a `$t:ident`,
 /// and not one written in place, as the `u8` of `&u8` is. One it was given has the place of the call: in another file,
 /// or before or after the body of the macro. One written in place is after the token before it, in their file, and
-/// before the token after it, or `end`, where that is after the token before it. Where it is not, the call wrote both,
-/// as a `$r:ty` of `&u8` does, and the token after them is the macro's. A `$t:tt` that Rust has moved to the place of
-/// its `$t`, for the second kernel that takes it, is in place too. Where the `&` is not in the body of a macro, Rust
-/// says an error at an ident in parentheses, and not at the `&`, so none are put round those. The last segment of a
-/// path, `&$a::$b`, can have none either.
-fn is_given(tokens: &[TokenTree], at: usize, end: Option<Span>) -> bool {
+/// before the token after it, where that is after the token before it. Where it is not, the call wrote both, as a
+/// `$r:ty` of `&u8` does, and the token after them is the macro's. The token after is `end`, the bracket the tokens are
+/// in, closing, where the ident is the last token, and where a body follows it, `-> &$t $b`: a body the call gives, a
+/// `$b:block`, has the place of the call, whoever wrote the ident. A `$t:tt` that Rust has moved to the place of its
+/// `$t`, for the second kernel that takes it, is in place too. Where the `&` is not in the body of a macro, Rust says
+/// an error at an ident in parentheses, and not at the `&`, so none are put round those. The last segment of a path,
+/// `&$a::$b`, can have none either.
+fn is_given(tokens: &[TokenTree], at: usize, end: Span) -> bool {
     let precedes = |first: Span, second: Span| {
         let place = |span: Span| (span.line(), span.column());
         first.file() == second.file() && place(first.end()) <= place(second)
@@ -890,9 +905,8 @@ fn is_given(tokens: &[TokenTree], at: usize, end: Option<Span>) -> bool {
     let ident = tokens[at].span();
     // A `&` is before the first token of a type, so `at` is not the first.
     let before = tokens[at - 1].span();
-    let after = tokens.get(at + 1).map(TokenTree::span).or(end);
-    let in_place =
-        precedes(before, ident) && after.is_none_or(|after| precedes(ident, after) || !precedes(before, after));
+    let after = tokens.get(at + 1).filter(|t| !is_body(t)).map_or(end, TokenTree::span);
+    let in_place = precedes(before, ident) && (precedes(ident, after) || !precedes(before, after));
     !in_place && !is_name(&tokens[..at], &tokens[at + 1..])
 }
 
