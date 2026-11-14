@@ -460,7 +460,7 @@ pub fn binary(op: BinOp, a: &Value, b: &Value) -> Result<Value, String> {
                 Shl | Shr => {
                     let bits = tx.map_or(64, IntTy::bits);
                     if !(0..bits.into()).contains(&y) {
-                        return Err(format!("a shift by {y} is wider than its {bits} bits"));
+                        return Err(format!("a shift by {y} is not from 0 to {}", bits - 1));
                     }
                     let shifted = if op == Shl { x << y } else { x >> y };
                     tx.map_or(shifted, |t| t.wrap(shifted))

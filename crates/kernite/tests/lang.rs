@@ -1962,6 +1962,41 @@ fn a_shift_and_a_not_are_checked_for_overflow() {
     }
 }
 
+/// A shift known now by a negative count, by as many bits as its type has, or by more, is an error at its operator
+/// that says which counts a shift has, from 0 to the last bit of the type, 31 for a `u32`: the words are true of each
+/// count, the same for `<<` and `>>`, for each integer type and for one with no type, held to 64 bits. A shift by the
+/// last bit works out as in Rust: `1 << 7` of an `i8` is -128, and a `>>` of a signed type keeps its sign: `-8 >> 1`
+/// is -4.
+#[test]
+fn a_shift_known_now_by_a_count_that_is_not_from_0_to_the_last_bit_of_its_type_is_refused_at_its_operator() {
+    // Each integer type, its bits, and what Rust makes of `1 << (bits - 1)` of it.
+    macro_rules! own {
+        ($($ty:ident),*) => {
+            [$((stringify!($ty), $ty::BITS as i32, ((1 as $ty) << ($ty::BITS - 1)).to_string())),*]
+        };
+    }
+    let types = own!(u8, i8, u16, i16, u32, i32, u64, i64, usize, isize);
+    let mut consts = String::from("const SIGNED: i32 = -8 >> 1;\n");
+    for (ty, bits, _) in &types {
+        consts += &format!("const {}: {ty} = 1 << {};\n", ty.to_uppercase(), bits - 1);
+        for op in ["<<", ">>"] {
+            for count in [-1, -3, *bits, bits + 8] {
+                let body = format!("const X: {ty} = 1 {op} {count};");
+                let want =
+                    format!("2:{}: a shift by {count} is not from 0 to {}", body.find(op).unwrap() + 1, bits - 1);
+                assert_eq!(refused(&body), want, "{body}");
+            }
+        }
+    }
+    assert_eq!(refused("const X: u64 = (1 << 64) as u64;"), "2:19: a shift by 64 is not from 0 to 63");
+    assert_eq!(refused("const X: u64 = (1 >> -1) as u64;"), "2:19: a shift by -1 is not from 0 to 63");
+    let names: Vec<_> = types.iter().map(|(ty, ..)| format!("{{{}}}", ty.to_uppercase())).collect();
+    let src = format!("{consts}unsafe extern \"sysv64\" fn k() {{ note(\"{{SIGNED}} {}\"); }}\n", names.join(" "));
+    let values: Vec<_> = types.iter().map(|(.., last)| last.as_str()).collect();
+    let listing = x86(&src, "k");
+    assert!(listing.contains(&format!("# {} {}\n", -8_i32 >> 1, values.join(" "))), "{listing}");
+}
+
 /// A const is what kernels read: a number, a float, a `bool`, or an array of them. The kernel
 /// reads one of each, and adds only if each is what it was declared. One of another type is no
 /// value known now, and the error says what one is.
