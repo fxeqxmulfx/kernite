@@ -626,11 +626,27 @@ impl Kernel {
             _ if n == 1 => std::slice::from_ref(a),
             _ => return Err(format!("`{name}` wants {}; this is {}", describe(b, spec), self.given(a))),
         };
+        // ptxas 13.5 takes an `f16x2` for an integer in a vector beside registers of `f16x2` or `b32`, and `_`, and
+        // refuses it beside one of another type: "Vector with elements of different types are not allowed". It checks
+        // each register against its neighbour alone, and takes `{%h1, %b1, %r1, %r1}`, an `f16x2` and a `u32` with a
+        // `b32` between: that looks like a bug of its own, and kernite takes none there. An array's index, the lead, it
+        // checks apart, and takes no `f16x2` for it: "Array index in the 'tex' instruction has unexpected type".
+        let beside = |p: &Given<Var>| {
+            matches!(p, Given::Var(Var::Reg { ty: Ty::F16x2 | Ty::B32, .. }))
+                || matches!(p, Given::Special(s) if s == "_")
+        };
+        let rest = &Spec {
+            exact: spec.exact || !parts[usize::from(spec.lead.is_some())..].iter().all(beside),
+            ..spec.clone()
+        };
         let mut texts = vec![];
         for (k, part) in parts.iter().enumerate() {
             texts.push(match spec.lead {
-                Some(t) if k == 0 => self.one(b, &Spec { ty: Some(TyRef::Fixed(t)), ..spec.clone() }, part, name, w)?,
-                _ => self.one(b, spec, part, name, w)?,
+                Some(t) if k == 0 => {
+                    let index = Spec { ty: Some(TyRef::Fixed(t)), exact: true, ..spec.clone() };
+                    self.one(b, &index, part, name, w)?
+                }
+                _ => self.one(b, rest, part, name, w)?,
             });
         }
         if texts.iter().all(|t| t == "_") {
@@ -680,8 +696,10 @@ impl Kernel {
                     }
                     _ => {}
                 }
-                let fits = if b.form.wide && !w.inside { ty.fits_wide(t) } else { ty.fits(t) };
-                if !fits {
+                let fits = |ty: Ty| if b.form.wide && !w.inside { ty.fits_wide(t) } else { ty.fits(t) };
+                // ptxas 13.5 takes an `f16x2` for an integer, and reads its 32 bits as a `u32`'s, unless the operand
+                // is `exact`.
+                if !fits(*ty) && !(*ty == Ty::F16x2 && !spec.exact && fits(Ty::U32)) {
                     return Err(format!("`{name}` wants a `{}` variable; this is a `{}`", t.name(), ty.name()));
                 }
                 let text = var(*reg, *ty, w);
@@ -746,7 +764,11 @@ impl Kernel {
             },
             Given::Not(_) => Err(format!("`{name}` takes no operand inverted")),
             Given::Neg(v) if spec.neg => match **v {
-                Given::Var(Var::Reg { .. } | Var::Part { .. }) => Ok(format!("-{}", self.one(b, spec, v, name, w)?)),
+                // ptxas 13.5 refuses an `f16x2` negated for an integer: "Illegal argument to unary minus".
+                Given::Var(Var::Reg { .. } | Var::Part { .. }) => {
+                    let negated = Spec { exact: true, ..spec.clone() };
+                    Ok(format!("-{}", self.one(b, &negated, v, name, w)?))
+                }
                 _ => Err(format!("`{name}` negates a variable, `-a`; this is {} negated", self.given(v))),
             },
             Given::Neg(_) => Err(format!("`{name}` takes no operand negated")),

@@ -4,6 +4,7 @@
 //! them kernite refuses, which `ptxas` refuses too.
 
 use std::collections::BTreeMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -194,8 +195,109 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
             "2:55: `and.pred` wants a `pred` variable; this is a `f16x2`",
         ),
         (
+            "let (h, p): (f16x2, pred); mov.b32(h, n); or.pred(p, h, h);",
+            "2:54: `or.pred` wants a `pred` variable; this is a `f16x2`",
+        ),
+        (
+            "let (h, p): (f16x2, pred); mov.b32(h, n); xor.pred(p, h, h);",
+            "2:55: `xor.pred` wants a `pred` variable; this is a `f16x2`",
+        ),
+        (
+            "let (h, p): (f16x2, pred); mov.b32(h, n); not.pred(p, h);",
+            "2:55: `not.pred` wants a `pred` variable; this is a `f16x2`",
+        ),
+        (
+            "let (h, p): (f16x2, pred); mov.b32(h, n); mov.pred(p, h);",
+            "2:55: `mov.pred` wants a `pred` variable; this is a `f16x2`",
+        ),
+        (
             "let (h, i): (f16x2, u32); mov.b32(h, n); if h { mov.u32(i, 1); }",
             "2:53: an instruction is guarded by a `pred`; this is a `f16x2`",
+        ),
+        // ptxas 13.5 takes an `f16x2` where an instruction wants a `u32` or an `s32`, and kernite does. It takes no
+        // integer where an instruction wants an `f16x2`, no `f16x2` where one wants an `f32`, no `f16` where one
+        // wants an integer of 16 bits and no integer of 16 bits where one wants an `f16`: kernite takes none.
+        (
+            "let h: f16x2; mov.b32(h, n); add.rn.f16x2(h, h, n);",
+            "2:49: `add.rn.f16x2` wants a `f16x2` variable; this is a `u32`",
+        ),
+        (
+            "let (h, s): (f16x2, s32); mov.b32(h, n); mov.s32(s, 1); add.rn.f16x2(h, h, s);",
+            "2:76: `add.rn.f16x2` wants a `f16x2` variable; this is a `s32`",
+        ),
+        (
+            "let (v, h): (f32, f16x2); mov.b32(h, n); add.rn.f32(v, h, h);",
+            "2:56: `add.rn.f32` wants a `f32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (a, h): (u16, f16); mov.b16(h, 1); mov.u16(a, 1); add.u16(a, h, h);",
+            "2:66: `add.u16` wants a `u16` variable; this is a `f16`",
+        ),
+        (
+            "let (a, h): (u16, f16); mov.b16(h, 1); mov.u16(a, 1); add.rn.f16(h, a, a);",
+            "2:69: `add.rn.f16` wants a `f16` variable; this is a `u16`",
+        ),
+        // ptxas 13.5 refuses an `f16x2` for the count of a shift, a result of `clz` or `popc`, an element of a vector
+        // beside one of another type, an operand that is negated, the time of `nanosleep.u32`, an operand of
+        // `redux.sync` of `.add`, `.min` or `.max`, and the last one of `vadd4.u32.u32.u32.add` and
+        // `vsub4.u32.u32.u32.add`: kernite refuses it for each. `ptxas` checks each register of a vector against its
+        // neighbour alone, and takes `st.global.v4.u32 [%rd1], {%h1, %b1, %r1, %r1};`, an `f16x2` and a `u32` with a
+        // `b32` between, which looks like a bug of its own: kernite refuses that too.
+        (
+            "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); shr.u32(g, g, h);",
+            "2:71: `shr.u32` wants a `u32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); clz.b32(h, g);",
+            "2:65: `clz.b32` wants a `u32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); popc.b32(h, g);",
+            "2:66: `popc.b32` wants a `u32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); ld.global.v2.u32((g, h), [x]);",
+            "2:74: `ld.global.v2.u32` wants a `u32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); st.global.v2.u32([x], (g, h));",
+            "2:79: `st.global.v2.u32` wants a `u32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (h, b): (f16x2, b32); mov.b32(h, n); mov.b32(b, n); st.global.v4.u32([x], (h, b, n, n));",
+            "2:79: `st.global.v4.u32` wants a `u32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); vmad.u32.u32.u32(g, -h, n, n);",
+            "2:77: `vmad.u32.u32.u32` wants a `u32` variable; this is a `f16x2`",
+        ),
+        (
+            "let h: f16x2; mov.b32(h, n); nanosleep.u32(h);",
+            "2:44: `nanosleep.u32` wants a `u32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); redux.sync.add.u32(g, h, 0xffffffff);",
+            "2:79: `redux.sync.add.u32` wants a `u32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); redux.sync.min.s32(g, h, 0xffffffff);",
+            "2:79: `redux.sync.min.s32` wants a `s32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); redux.sync.max.s32(h, g, 0xffffffff);",
+            "2:76: `redux.sync.max.s32` wants a `s32` variable; this is a `f16x2`",
+        ),
+        (
+            "let h: f16x2; mov.b32(h, n); bar.warp.sync(h);",
+            "2:44: `bar.warp.sync` wants a `u32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); vadd4.u32.u32.u32.add(g, g, g, h);",
+            "2:88: `vadd4.u32.u32.u32.add` wants a `u32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); vsub4.u32.u32.u32.add(g, g, g, h);",
+            "2:88: `vsub4.u32.u32.u32.add` wants a `u32` variable; this is a `f16x2`",
         ),
         // ptxas 13.5 takes `_` for one result of `wmma.mma` of `f16.f32` and of the integers on Turing and on Ampere,
         // of `f32.f32` on Ampere alone, and of `tf32` on none: kernite takes it only where both do.
@@ -237,6 +339,78 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
     for (body, want) in cases {
         assert_eq!(compile("x: *mut f32, n: u32", body).unwrap_err(), want, "{body}");
     }
+}
+
+/// ptxas 13.5 takes an `f16x2` where an instruction of a 32-bit integer type wants a variable, and reads its 32 bits
+/// as those of a `b32`, and kernite takes it: its code has the variable as the operand, with no `mov` beside it.
+#[test]
+fn an_f16x2_is_taken_where_an_instruction_wants_a_32_bit_integer() {
+    let cases = [
+        ("add.u32(g, h, n);", "add.u32 %g, %h, %n;"),
+        ("add.s32(g, h, n);", "add.s32 %g, %h, %n;"),
+        ("mul.lo.u32(g, h, n);", "mul.lo.u32 %g, %h, %n;"),
+        ("shr.u32(g, h, n);", "shr.u32 %g, %h, %n;"),
+        ("mov.u32(g, h);", "mov.u32 %g, %h;"),
+        ("setp.lt.u32(p, h, n);", "setp.lt.u32 %p, %h, %n;"),
+        // A part of one, as a video instruction selects it.
+        ("vadd.u32.u32.u32(g, h.b0, n);", "vadd.u32.u32.u32 %g, %h.b0, %n;"),
+        ("vadd2.u32.u32.u32(g.h1, n, h.h21, h);", "vadd2.u32.u32.u32 %g.h1, %n, %h.h21, %h;"),
+        // The elements of a vector, beside an `f16x2`, a `b32` or `_` only.
+        ("ld.global.v2.u32((g, h), [x]);", "ld.global.v2.u32 {%g, %h}, [%x];"),
+        ("ld.global.v2.u32((h, b), [x]);", "ld.global.v2.u32 {%h, %b}, [%x];"),
+        ("ld.global.v2.u32((h, _), [x]);", "ld.global.v2.u32 {%h, _}, [%x];"),
+        ("st.global.v2.u32([x], (b, h));", "st.global.v2.u32 [%x], {%b, %h};"),
+        // The last operand of `vadd4` and `vsub4`, which `ptxas` takes for each name but those of `dp4a`.
+        ("vadd4.s32.s32.s32(g, h, n, h);", "vadd4.s32.s32.s32 %g, %h, %n, %h;"),
+        ("vadd4.u32.u32.u32.sat(g, h, n, h);", "vadd4.u32.u32.u32.sat %g, %h, %n, %h;"),
+        ("vsub4.u32.u32.s32.add(g, h, n, h);", "vsub4.u32.u32.s32.add %g, %h, %n, %h;"),
+    ];
+    for (inst, line) in cases {
+        let body = format!("let (h, g): (f16x2, f16x2); let (b, p): (b32, pred); mov.b32(h, n); mov.b32(b, n); {inst}");
+        let ptx = compile("x: *mut u32, n: u32", &body).unwrap();
+        assert!(ptx.contains(&format!("\t{line}\n")), "{inst}: {ptx}");
+        assert_eq!(ptx.matches("\tmov.").count(), body.matches("mov.").count(), "{inst}: a `mov` beside it: {ptx}");
+    }
+}
+
+/// An `f16x2` where an instruction wants a 32-bit integer, which `ptxas` reads as the 32 bits of a `b32`.
+const BITS: &str = r#"
+    pub unsafe extern "ptx-kernel" fn bits(x: *mut u32, n: u32) {
+        let (h, g, i): (f16x2, f16x2, u32);
+        let p: pred;
+        mov.b32(h, n);
+        add.u32(g, h, n);
+        add.s32(g, g, n);
+        mul.lo.u32(g, g, n);
+        shr.u32(g, g, n);
+        mov.u32(g, g);
+        setp.lt.u32(p, g, n);
+        vadd.u32.u32.u32(g, g.b0, n);
+        vadd2.u32.u32.u32(g.h1, n, g.h21, g);
+        mov.u32(i, g);
+        st.global.u32([x], i);
+    }
+"#;
+
+/// What `ptxas` makes of [`BITS`] is what it makes of the same kernels with a `b32` in place of each `f16x2`: the
+/// same bytes of a cubin, and so the same machine code.
+#[test]
+fn ptxas_assembles_an_f16x2_for_a_32_bit_integer_as_a_b32() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    let packed = kernite::ptx_str(BITS).unwrap();
+    // A register of `b32` needs no PTX 4.2 and `sm_53`, as one of `f16x2` does: its module is put there.
+    let bits = retarget(&kernite::ptx_str(&BITS.replace("f16x2", "b32")).unwrap(), 42, 53);
+    assert_eq!(header(&packed), header(&bits));
+    let cubin = |name: &str, text: &str| {
+        let run = assembled(&ptxas, text, "sm_75", name, &["--warning-as-error"]);
+        assert!(run.status.success(), "{name}: {}", String::from_utf8_lossy(&run.stderr));
+        std::fs::read(Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.cubin"))).unwrap()
+    };
+    let (of_f16x2, of_b32) = (cubin("bits_f16x2", &packed), cubin("bits_b32", &bits));
+    assert!(of_f16x2 == of_b32, "ptxas makes other bytes of an f16x2 than of a b32");
 }
 
 /// A name of each instruction PTX's ISA has for the GPUs from `sm_20` to `sm_86`, by the
@@ -549,6 +723,33 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         (
             "let (i, f): (u32, f32); suld.b.a1d.b32.trap(i, [s, (f, n)]);",
             "2:48: `suld.b.a1d.b32.trap` wants a `u32` variable; this is a `f32`",
+        ),
+        // ptxas 13.5 refuses an `f16x2` for the layer of an array of textures or surfaces, "Array index in the 'tex'
+        // instruction has unexpected type", and for a coordinate beside an `s32`: kernite refuses both. It refuses it
+        // for the sample of `tex.a2dms`, the first of its vector, too, whose type `ptxas` does not check: that looks
+        // like a bug of its own.
+        (
+            "let (h, i): (f16x2, u32); mov.b32(h, n); suld.b.a1d.b32.trap(i, [s, (h, n)]);",
+            "2:65: `suld.b.a1d.b32.trap` wants a `u32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (h, i): (f16x2, u32); mov.b32(h, n); mov.u32(i, n); sust.b.a1d.b32.trap([s, (h, n)], i);",
+            "2:77: `sust.b.a1d.b32.trap` wants a `u32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (h, a, b, c, d): (f16x2, f32, f32, f32, f32); mov.b32(h, n); \
+             tex.a2d.v4.f32.s32((a, b, c, d), [s, (h, n, n, n)]);",
+            "2:99: `tex.a2d.v4.f32.s32` wants a `u32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (h, a, b, c, d): (f16x2, s32, s32, s32, s32); mov.b32(h, n); \
+             tex.a2dms.v4.s32.s32((a, b, c, d), [s, (h, n, n, n)]);",
+            "2:101: `tex.a2dms.v4.s32.s32` wants a `s32` variable; this is a `f16x2`",
+        ),
+        (
+            "let (h, a, b, c, d): (f16x2, f32, f32, f32, f32); mov.b32(h, n); \
+             tex.a2d.v4.f32.s32((a, b, c, d), [s, (n, h, n, n)]);",
+            "2:99: `tex.a2d.v4.f32.s32` wants a `s32` variable; this is a `f16x2`",
         ),
         (
             "let (i, w): (u64, s64); mov.s64(w, 0); suld.b._1d.b32.trap(i, [s, w]);",
@@ -2116,10 +2317,10 @@ fn ptxas_takes_a_function_that_never_returns_from_ptx_6_4_and_sm_30() {
     assert!(text.contains("\n.version 6.4\n.target sm_30\n"), "{text}");
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("never");
     std::fs::create_dir_all(&dir).unwrap();
-    assert_eq!(refused(&ptxas, &text, gpu_of(&text), &dir.join("needs")), BTreeMap::new());
+    assert_eq!(refused(&ptxas, &text, gpu_of(&text), &dir.join("needs")).0, BTreeMap::new());
     for (v, sm) in [(63, 30), (64, 20)] {
         let older = retarget(&text, v, sm);
-        assert!(!refused(&ptxas, &older, gpu_of(&older), &dir.join(format!("{v}-{sm}"))).is_empty(), "{v} {sm}");
+        assert!(!refused(&ptxas, &older, gpu_of(&older), &dir.join(format!("{v}-{sm}"))).0.is_empty(), "{v} {sm}");
     }
 }
 
@@ -2165,6 +2366,8 @@ fn calling(body: &str) -> Result<String, String> {
     kernite::ptx_str(&format!(
         "unsafe extern \"ptx-kernel\" fn k(n: u32, f: f32) {{\n{body}\n}}\n\
          extern \"ptx-func\" fn first(a: u32, b: u32) -> u32 {{ ret(a); }}\n\
+         extern \"ptx-func\" fn half(a: f32) -> f32 {{ ret(a); }}\n\
+         extern \"ptx-func\" fn short(a: u16) {{}}\n\
          extern \"ptx-func\" fn nothing() {{}}\n\
          extern \"ptx-func\" fn never() -> ! {{ trap(); }}\n\
          extern \"ptx-func\" fn narrow(a: i32) {{}}\n\
@@ -2234,6 +2437,11 @@ fn a_call_passes_what_the_function_takes_and_returns() {
             "let p: pred; call(n, n, (p,));",
             "2:25: PTX passes no `pred` to a function, nor back: `selp.u32(x, 1, 0, p)` makes it a `u32`",
         ),
+        // ptxas 13.5 takes an `f16x2` for the `.param` of a `u32`, an `s32` and an `f32`, and kernite does. It takes no
+        // integer for an `f32`, no `f16x2` for a `.param` of 16 bits, and no `f16` for one of a `u16`.
+        ("call(f, half, (n));", "2:15: `half` takes a `f32`; this is a `u32` variable"),
+        ("let h: f16x2; mov.b32(h, n); call(short, (h));", "2:42: `short` takes a `u16`; this is a `f16x2` variable"),
+        ("let a: f16; mov.b16(a, 1); call(short, (a));", "2:40: `short` takes a `u16`; this is a `f16` variable"),
     ];
     for (body, want) in cases {
         assert_eq!(calling(body).unwrap_err(), want, "{body}");
@@ -2262,6 +2470,12 @@ fn a_function_takes_and_returns_ptx_types() {
         ("extern \"ptx-func\" fn f() -> u32 { ret(); }", "1:35: `f` returns a `u32`, which `ret(v)` gives back"),
         ("extern \"ptx-func\" fn f() -> u32 { ret(1.5); }", "1:39: `f` returns a `u32`; this is the f32 1.5"),
         ("extern \"ptx-func\" fn f(a: u32) -> f32 { ret(a); }", "1:45: `f` returns a `f32`; this is a `u32` variable"),
+        // ptxas 13.5 takes an `f16x2` for the `.param` of a `u32` or an `s32` that `ret` writes, as a call does, but
+        // not for one of an `f32`, which a call takes.
+        (
+            "extern \"ptx-func\" fn f(a: f32) -> f32 { let h: f16x2; mov.b32(h, a); ret(h); }",
+            "1:74: `f` returns a `f32`; this is a `f16x2` variable",
+        ),
         (
             "extern \"ptx-func\" fn f() -> u32 {}",
             "1:22: control reaches the end of `f`, which returns a `u32`: `ret(v)` gives it back",
@@ -2314,6 +2528,38 @@ enum Style {
     Least,
     /// The most of those values.
     Most,
+    /// An `f16x2` variable for the `k`th of the registers of an integer type, which `ptxas` reads as the bits of a
+    /// `b32` where it takes it.
+    Packed(usize),
+    /// The same, but a part of it, as a video instruction selects it, where the operand may be one.
+    PackedPart(usize),
+    /// The same, but negated, where the operand may be.
+    PackedNeg(usize),
+    /// An `f16x2` variable for each register of the `j`th vector at once.
+    PackedAll(usize),
+}
+
+/// What `ptxas` should make of the kernels of a group, which need the same.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Group {
+    /// Kernels of any operands but an `f16x2` for an integer: `ptxas` takes them at each version and for each GPU.
+    Plain,
+    /// Kernels that kernite takes with an `f16x2` for an integer: `ptxas` takes them, and makes the cubin of a `b32`.
+    Packed,
+    /// Kernels that kernite refuses with an `f16x2` for an integer, written with the register of the type the form
+    /// gives and then declared `.f16x2`: `ptxas` refuses them.
+    Wrong,
+    /// Kernels of [`ptxas_bug`], which kernite refuses with an `f16x2` as it does those of [`Group::Wrong`], but that
+    /// `ptxas` takes, by a bug of its own: it must, for the test to say when it stops.
+    Bug,
+}
+
+/// Whether `ptxas` 13.5 takes the `f16x2` at `place` of `form` by a bug of its own, which kernite refuses: the first
+/// register of `tex.a2dms`, the sample, whose type `ptxas` does not check.
+fn ptxas_bug(form: &Form, place: &str) -> bool {
+    let handle = form.operands.iter().position(|s| s.role == Role::Handle);
+    form.line.starts_with("tex{.base}.a2dms")
+        && handle.is_some_and(|h| place == format!("operand {}.2 of `{}`, lane 1", h + 1, form.line))
 }
 
 /// The names of `form` the test writes, and the words of each: each word of each element with
@@ -2416,6 +2662,16 @@ struct Making {
     vars: usize,
     differs: bool,
     sunk: bool,
+    /// How many registers of an integer type there are so far, and how many vectors.
+    ints: usize,
+    vectors: usize,
+    /// Whether a register that is to be an `f16x2` is made of the type the form gives: [`instance`] declares it so.
+    retype: bool,
+    /// The registers that are to be an `f16x2`, by [`kernite_core::VReg::id`].
+    packed: Vec<usize>,
+    /// The operand being made, and the operand of an `f16x2` register: which one of which line of the table.
+    place: String,
+    packed_place: String,
 }
 
 impl Making {
@@ -2439,16 +2695,27 @@ impl Making {
     }
 
     /// A variable of type `t` for `spec`: in [`Style::Parts`], a part of one where it may be,
-    /// and negated where it may be.
-    fn reg(&mut self, spec: &Spec, t: Ty, style: Style) -> Given<Var> {
-        let mut v = self.var(t);
+    /// and negated where it may be; in [`Style::Packed`], an `f16x2` for the one it says, in
+    /// [`Style::PackedPart`] a part of it where it may be one, and in [`Style::PackedNeg`] negated where it may be;
+    /// and an `f16x2` if `all`.
+    fn reg(&mut self, spec: &Spec, t: Ty, style: Style, all: bool) -> Given<Var> {
+        let packable = matches!(t.kind(), Kind::Unsigned | Kind::Signed);
+        let alone = matches!(style, Style::Packed(k) | Style::PackedPart(k) | Style::PackedNeg(k) if k == self.ints);
+        self.ints += usize::from(packable);
+        let packed = packable && (all || alone);
+        self.differs |= packed && matches!(style, Style::Packed(_) | Style::PackedAll(_));
+        let mut v = self.var(if packed && !self.retype { Ty::F16x2 } else { t });
+        if let (true, Var::Reg { reg, .. }) = (packed, &v) {
+            self.packed.push(reg.id as usize);
+            self.packed_place.clone_from(&self.place);
+        }
         if let Some(sel) = spec.part
-            && style == Style::Parts
+            && (style == Style::Parts || packed && matches!(style, Style::PackedPart(_)))
         {
             self.differs = true;
             v = self.kernel.field(v, example(sel)).unwrap();
         }
-        if spec.neg && style == Style::Parts {
+        if spec.neg && (style == Style::Parts || packed && matches!(style, Style::PackedNeg(_))) {
             self.differs = true;
             return Given::Neg(Box::new(Given::Var(v)));
         }
@@ -2465,8 +2732,15 @@ impl Making {
         // `_` stands for a register of a vector, not for the one of a name with neither `.v2`
         // nor `.v4`.
         let sink = spec.sink && (spec.count != Count::Vec || lanes > 1);
-        let mut parts = vec![];
+        let all = lanes > 1 && {
+            self.vectors += 1;
+            style == Style::PackedAll(self.vectors - 1)
+        };
+        let (mut parts, place) = (vec![], self.place.clone());
         for k in 0..lanes {
+            if lanes > 1 {
+                self.place = format!("{place}, lane {}", k + 1);
+            }
             let t = match spec.lead {
                 Some(lead) if k == 0 => lead,
                 _ => b.ty(spec.ty.expect("a register's operand has a type")),
@@ -2501,7 +2775,7 @@ impl Making {
                 None
             };
             self.differs |= part.is_some() && !spec.memory;
-            parts.push(part.unwrap_or_else(|| self.reg(spec, t, style)));
+            parts.push(part.unwrap_or_else(|| self.reg(spec, t, style, all)));
         }
         match lanes {
             1 => parts.pop().expect("one"),
@@ -2511,15 +2785,29 @@ impl Making {
 }
 
 /// Kernel `k{n}`, of the one instruction `name`, of form `b`, its operands as `style` gives
-/// them; `None` if they would be those of [`Style::Vars`], or kernite's refusal.
-fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entry, String>> {
-    let mut m = Making { kernel: kernel(n), vars: 0, differs: false, sunk: false };
+/// them; `None` if they would be those of [`Style::Vars`]; else kernite's refusal. With `retype`, an `f16x2` that
+/// the style gives is a register of the type the form gives, declared `.f16x2` after. The kernel comes with the place
+/// of its `f16x2` register: which operand of which line of the table.
+fn instance(n: usize, name: &str, b: &Bound, style: Style, retype: bool) -> Option<Result<(Entry, String), String>> {
+    let mut m = Making {
+        kernel: kernel(n),
+        vars: 0,
+        differs: false,
+        sunk: false,
+        ints: 0,
+        vectors: 0,
+        retype,
+        packed: vec![],
+        place: String::new(),
+        packed_place: String::new(),
+    };
     m.kernel.callee("f", "f", Callee::Calls(Prototype { params: vec![], returns: Returns::Nothing }));
     let addr = m.kernel.var("a", "u64").unwrap();
     let narrow = (style == Style::Narrow).then(|| m.kernel.var("n", "u32").unwrap());
     let mut spaces = b.spaces().into_iter();
     let mut args = vec![];
-    for spec in b.form.operands.iter().filter(|s| s.when.is_none_or(|w| b.has(w))) {
+    for (i, spec) in b.form.operands.iter().enumerate().filter(|(_, s)| s.when.is_none_or(|w| b.has(w))) {
+        m.place = format!("operand {} of `{}`", i + 1, b.form.line);
         if spec.optional && style == Style::Short {
             m.differs = true;
             break;
@@ -2529,7 +2817,15 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
             Role::Labels => Given::Vector(vec![Given::Label(0), Given::Label(1)]),
             Role::Func => Given::Func("f".into()),
             Role::Handle => {
-                let items: Vec<Given<Var>> = spec.inner.iter().map(|s| m.operand(b, s, style)).collect();
+                let items: Vec<Given<Var>> = spec
+                    .inner
+                    .iter()
+                    .enumerate()
+                    .map(|(j, s)| {
+                        m.place = format!("operand {}.{} of `{}`", i + 1, j + 1, b.form.line);
+                        m.operand(b, s, style)
+                    })
+                    .collect();
                 match items.as_slice() {
                     &[Given::Var(t)] => Given::Mem(Address { base: Some(t), index: None, disp: 0 }),
                     _ => Given::List(items),
@@ -2594,7 +2890,14 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style) -> Option<Result<Entr
         m.kernel.label(1);
     }
     m.kernel.end().unwrap();
-    Some(Ok(m.kernel.finish()))
+    let mut entry = m.kernel.finish();
+    if retype {
+        for id in m.packed {
+            entry.regs[id].1 = Ty::F16x2;
+        }
+        entry.needs.push((Ty::F16x2.needs(), "f16x2".to_string()));
+    }
+    Some(Ok((entry, m.packed_place)))
 }
 
 /// Kernel `k{n}` of the one instruction `name`, of `form` with the words `choice`, written
@@ -2732,12 +3035,13 @@ fn module(entries: &[Entry]) -> String {
 }
 
 /// The kernels `ptxas` refuses of each module, assembling it for the GPU given with it, by
-/// name, each with the first error it finds in it; `?` for one outside any kernel.
-fn assemble(ptxas: &Path, modules: &[(String, u32)]) -> Vec<BTreeMap<String, String>> {
+/// name, each with the first error it finds in it; `?` for one outside any kernel. And a hash of the cubin it makes of
+/// the rest.
+fn assemble(ptxas: &Path, modules: &[(String, u32)]) -> Vec<(BTreeMap<String, String>, u64)> {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("forms");
     std::fs::create_dir_all(&dir).unwrap();
     let next = AtomicUsize::new(0);
-    let out: Vec<Mutex<BTreeMap<String, String>>> = modules.iter().map(|_| Mutex::default()).collect();
+    let out: Vec<Mutex<(BTreeMap<String, String>, u64)>> = modules.iter().map(|_| Mutex::default()).collect();
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     std::thread::scope(|s| {
         for _ in 0..threads {
@@ -2754,11 +3058,11 @@ fn assemble(ptxas: &Path, modules: &[(String, u32)]) -> Vec<BTreeMap<String, Str
 }
 
 /// The kernels `ptxas` refuses of the module `text`, which it reads at `path` and assembles
-/// for the GPU `gpu`. An error may
+/// for the GPU `gpu`, and a hash of the cubin it makes of the rest. An error may
 /// stop it before the kernels after, so it goes on without those it refused, until it takes
 /// the rest; advice, as that `mma.sp` is slower than `mma.sp::ordered_metadata`, is no
 /// refusal.
-fn refused(ptxas: &Path, text: &str, gpu: u32, path: &Path) -> BTreeMap<String, String> {
+fn refused(ptxas: &Path, text: &str, gpu: u32, path: &Path) -> (BTreeMap<String, String>, u64) {
     let (src, bin) = (path.with_extension("ptx"), path.with_extension("cubin"));
     let (mut text, mut out) = (text.to_string(), BTreeMap::new());
     loop {
@@ -2770,9 +3074,12 @@ fn refused(ptxas: &Path, text: &str, gpu: u32, path: &Path) -> BTreeMap<String, 
             .arg(&bin)
             .output()
             .unwrap();
+        let cubin = std::fs::read(&bin).unwrap_or_default();
         let _ = std::fs::remove_file(&bin);
         if run.status.success() {
-            return out;
+            let mut hasher = DefaultHasher::new();
+            cubin.hash(&mut hasher);
+            return (out, hasher.finish());
         }
         let stderr = String::from_utf8_lossy(&run.stderr);
         let mut wrong: Vec<String> = vec![];
@@ -2792,7 +3099,7 @@ fn refused(ptxas: &Path, text: &str, gpu: u32, path: &Path) -> BTreeMap<String, 
             // A crash says nothing.
             let why = if stderr.trim().is_empty() { format!("ptxas: {}", run.status) } else { stderr.trim().into() };
             out.entry("?".into()).or_insert(why);
-            return out;
+            return (out, 0);
         }
         for k in &wrong {
             text = without(&text, k);
@@ -2814,6 +3121,35 @@ fn without(text: &str, k: &str) -> String {
         .expect("the kernel is in the module");
     let end = start + lines[start..].iter().position(|l| *l == "}").expect("a kernel ends");
     lines[..start].iter().chain(&lines[end + 1..]).map(|l| format!("{l}\n")).collect()
+}
+
+/// `entries` with each `f16x2` register declared `.b32`, which is how `ptxas` reads an `f16x2` for an integer.
+fn as_bits(entries: &[Entry]) -> Vec<Entry> {
+    let mut out = entries.to_vec();
+    for (_, t) in out.iter_mut().flat_map(|e| &mut e.regs) {
+        if *t == Ty::F16x2 {
+            *t = Ty::B32;
+        }
+    }
+    out
+}
+
+/// The kernels of `entries`, found by halves, of which `ptxas` makes a cubin for the GPU `gpu` that differs from the
+/// cubin of the same with each `f16x2` register declared `.b32`.
+fn differ(ptxas: &Path, entries: &[Entry], gpu: u32) -> Vec<String> {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bits");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cubin = |entries: &[Entry]| refused(ptxas, &module(entries), gpu, &dir.join("one")).1;
+    if entries.is_empty() || cubin(entries) == cubin(&as_bits(entries)) {
+        return vec![];
+    }
+    match entries {
+        [e] => vec![e.program.name.clone()],
+        _ => {
+            let (first, rest) = entries.split_at(entries.len() / 2);
+            [differ(ptxas, first, gpu), differ(ptxas, rest, gpu)].concat()
+        }
+    }
 }
 
 /// The GPU `ptxas` assembles `text` for, but where another is said: the one it is for, or
@@ -2901,6 +3237,11 @@ fn retarget(text: &str, v: u32, sm: u32) -> String {
         .collect()
 }
 
+/// `ptxas` takes each form kernite knows, written each way kernite has, at the version and for the GPU kernite says it
+/// needs, and not at one before; and it refuses each name kernite refuses. An `f16x2` goes in each register of an
+/// integer type, alone, as a part of it, negated, and in each register of a vector at once: where kernite takes it,
+/// `ptxas` takes it and makes the cubin of a `b32`; where kernite refuses it, `ptxas` refuses the kernel with that
+/// register declared `.f16x2`, but for the places [`ptxas_bug`] says.
 #[test]
 fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
     let Some(ptxas) = ptxas() else {
@@ -2909,15 +3250,27 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
     };
     let (mut n, mut failures) = (0, vec![]);
     let mut what: BTreeMap<String, String> = BTreeMap::new();
-    let mut groups: BTreeMap<(u32, u32, u32, u32), Vec<Entry>> = BTreeMap::new();
-    let mut add = |e: Entry, what: &mut BTreeMap<String, String>| {
+    // What kernite says of each kernel it refuses, with an `f16x2` or by name, for `ptxas` to refuse too.
+    let mut why: BTreeMap<String, String> = BTreeMap::new();
+    // A group is the kernels that need the same, and that `ptxas` should make the same of.
+    let mut groups: BTreeMap<(Group, u32, u32, u32, u32), Vec<Entry>> = BTreeMap::new();
+    let mut add = |(e, place): (Entry, String), what: &mut BTreeMap<String, String>, group: Group| {
         let line = e.program.body.iter().find_map(|i| match i {
             kernite_core::Item::Inst(inst) => Some(inst.op.0.clone()),
             _ => None,
         });
-        what.insert(e.program.name.clone(), line.unwrap_or_default());
+        let mut line = line.unwrap_or_default();
+        if group != Group::Plain {
+            let halves: Vec<String> =
+                e.regs.iter().filter(|(_, t)| *t == Ty::F16x2).map(|(reg, _)| format!("%{reg}")).collect();
+            line += &format!(" with {} an `f16x2`, {place}", halves.join(", "));
+        }
+        if group == Group::Bug {
+            line += ", a bug of ptxas that `ptxas_bug` says";
+        }
+        what.insert(e.program.name.clone(), line);
         let n = e.needs();
-        groups.entry((n.ptx, n.sm, n.below, n.since)).or_default().push(e);
+        groups.entry((group, n.ptx, n.sm, n.below, n.since)).or_default().push(e);
     };
     let mut refused = vec![];
     for form in forms::forms() {
@@ -2944,18 +3297,43 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
                 Style::Most,
             ] {
                 n += 1;
-                match instance(n, &name, b, style) {
+                match instance(n, &name, b, style, false) {
                     None => {}
-                    Some(Ok(e)) => add(e, &mut what),
+                    Some(Ok(e)) => add(e, &mut what, Group::Plain),
                     Some(Err(m)) => failures.push(m),
+                }
+            }
+            // An `f16x2` for each register of an integer type, and for each vector, until there is no register
+            // left for one.
+            for k in 0.. {
+                let mut left = false;
+                for style in [Style::Packed(k), Style::PackedPart(k), Style::PackedNeg(k), Style::PackedAll(k)] {
+                    n += 1;
+                    match instance(n, &name, b, style, false) {
+                        None => continue,
+                        Some(Ok(e)) => add(e, &mut what, Group::Packed),
+                        // kernite refuses it, so `ptxas` should: the kernel with the register declared `.f16x2`.
+                        Some(Err(m)) => match instance(n, &name, b, style, true).expect("the style gives it") {
+                            Ok(e) => {
+                                why.insert(e.0.program.name.clone(), m);
+                                let group = if ptxas_bug(b.form, &e.1) { Group::Bug } else { Group::Wrong };
+                                add(e, &mut what, group);
+                            }
+                            Err(m) => failures.push(m),
+                        },
+                    }
+                    left = true;
+                }
+                if !left {
+                    break;
                 }
             }
         }
     }
     for e in others(&mut n) {
-        add(e, &mut what);
+        add((e, String::new()), &mut what, Group::Plain);
     }
-    for ((ptx, ..), entries) in groups.iter().filter(|((ptx, ..), _)| !VERSIONS.contains(ptx)) {
+    for ((_, ptx, ..), entries) in groups.iter().filter(|((_, ptx, ..), _)| !VERSIONS.contains(ptx)) {
         let (count, some): (usize, Vec<&str>) =
             (entries.len(), entries.iter().take(5).map(|e| what[&e.program.name].as_str()).collect());
         failures.push(format!("{count} kernels need PTX {ptx}, which ptxas reads none of: {}", some.join("; ")));
@@ -2965,15 +3343,32 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
     // newest GPU of that version; and at the newest version, for the newest GPU it may be
     // for, as ptxas takes some older that it refuses newer. And one step older in each way it
     // needs more than PTX 1.0 and Fermi, and for the GPU it is too new for: then each kernel
-    // is wrong.
+    // is wrong. A group of kernels with an `f16x2` goes once, as kernite writes it: what it
+    // asks of ptxas is how it reads an `f16x2`, which no version or GPU changes, and the
+    // other groups try each form at each version and GPU. Where kernite takes the `f16x2`,
+    // the group goes with its twin, with each `f16x2` a `b32`, which `ptxas` makes the same
+    // cubin of; where it refuses, `ptxas` does too, of a hundred at a time, but for the
+    // refusals of `ptxas_bug`, which it takes.
     let mut modules: Vec<(String, u32, Expect)> = vec![];
-    for (&(ptx, sm, below, since), entries) in groups.iter().filter(|((ptx, ..), _)| VERSIONS.contains(ptx)) {
+    let mut twins: Vec<(usize, &[Entry])> = vec![];
+    for (&(group, ptx, sm, below, since), entries) in groups.iter().filter(|((_, ptx, ..), _)| VERSIONS.contains(ptx)) {
         let n = Needs { ptx, sm, below, since };
-        let text = module(entries);
         let gpu = newest(ptx, n);
         if gpu < sm {
             let v = format!("{}.{}", ptx / 10, ptx % 10);
             failures.push(format!("{} kernels need PTX {v} and sm_{sm}, which no module of {v} is for", entries.len()));
+        }
+        if matches!(group, Group::Wrong | Group::Bug) {
+            let expect = if group == Group::Bug { Expect::Takes } else { Expect::Refuses };
+            modules.extend(entries.chunks(100).map(|some| at(module(some), expect)));
+            continue;
+        }
+        let text = module(entries);
+        if group == Group::Packed {
+            twins.push((modules.len(), entries));
+            modules.push(at(text, Expect::Takes));
+            modules.push(at(module(&as_bits(entries)), Expect::Takes));
+            continue;
         }
         let last = VERSIONS[VERSIONS.len() - 1];
         let (exact, latest) = (retarget(&text, ptx, gpu), retarget(&text, last, newest(last, n)));
@@ -3008,7 +3403,6 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
     }
     // And the names kernite refuses, for the newest GPU and at the newest version kernite knows,
     // where nothing but the name is wrong.
-    let mut why: BTreeMap<String, String> = BTreeMap::new();
     let refusals = refused.len();
     let mut hand = vec![];
     for (form, name, choice, m) in refused {
@@ -3028,7 +3422,7 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
     }
     let texts: Vec<(String, u32)> = modules.iter().map(|(t, g, _)| (t.clone(), *g)).collect();
     let results = assemble(&ptxas, &texts);
-    for ((text, g, expect), refused) in modules.iter().zip(&results) {
+    for ((text, g, expect), (refused, _)) in modules.iter().zip(&results) {
         let header = match *g == gpu_of(text) {
             true => header(text),
             false => format!("{} for sm_{g}", header(text)),
@@ -3056,6 +3450,16 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
                         failures.push(taken);
                     }
                 }
+            }
+        }
+    }
+    for (i, entries) in twins {
+        let ((taken, cubin), (twin_taken, twin)) = (&results[i], &results[i + 1]);
+        if taken.is_empty() && twin_taken.is_empty() && cubin != twin {
+            for k in differ(&ptxas, entries, modules[i].1) {
+                let line = what.get(&k).map_or("?", String::as_str);
+                failures
+                    .push(format!("{}: ptxas makes another cubin of `{line}` than of a `b32`", header(&modules[i].0)));
             }
         }
     }
