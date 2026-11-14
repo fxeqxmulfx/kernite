@@ -171,20 +171,25 @@ fn refuses_by(command: &[&str], name: &str, lines: &[&str]) {
     assert_eq!(said, lines, "fixtures/{name}.rs: Cargo said:\n{}", said.join("\n"));
 }
 
+/// The code of each line of fixture `name`, without its comment, and the line's number.
+fn code_lines(name: &str) -> Vec<(usize, String)> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/{name}.rs"));
+    let source = fs::read_to_string(path).unwrap();
+    let code = |text: &str| text.split_once("//").map_or(text, |(code, _)| code).to_string();
+    source.lines().enumerate().map(|(line, text)| (line + 1, code(text))).collect()
+}
+
 /// What Rust says of each name it lets be written raw in no place that fixture `name` writes raw, outside its comments,
 /// `r#self`, `r#Self`, `r#super`, `r#crate` or `r#_`: "`crate` cannot be a raw identifier", at each place, in the
 /// order of the fixture. It says so of the source, before any macro runs.
 fn refused_raw(name: &str) -> Vec<String> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/{name}.rs"));
-    let source = fs::read_to_string(path).unwrap();
     let mut said = vec![];
-    for (line, text) in source.lines().enumerate() {
-        let code = text.split("//").next().expect("a split has a first part");
+    for (line, code) in code_lines(name) {
         for (at, _) in code.match_indices("r#") {
             let word = &code[at + 2..];
             let ident = &word[..word.find(|c: char| c != '_' && !c.is_alphanumeric()).unwrap_or(word.len())];
             if ["self", "Self", "super", "crate", "_"].contains(&ident) {
-                said.push(format!("src/lib.rs:{}:{}: error: `{ident}` cannot be a raw identifier", line + 1, at + 1));
+                said.push(format!("src/lib.rs:{line}:{}: error: `{ident}` cannot be a raw identifier", at + 1));
             }
         }
     }
@@ -4244,6 +4249,54 @@ fn an_attribute_written_raw_is_wrong_as_the_plain_one_is() {
     }
     said.push(format!("error: could not compile `raw_attributes_refused` (lib) due to {} previous errors", said.len()));
     refuses("raw_attributes_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// What kernite says of each `inline` that fixture `name` writes in an attribute, outside its comments, at the
+/// `line:column` of the word, or of its `r#`, in the order of the fixture.
+fn refused_inline(name: &str) -> Vec<String> {
+    let mut said = vec![];
+    for (line, code) in code_lines(name) {
+        if code.trim_start().starts_with("#[")
+            && let Some(at) = code.find("inline")
+        {
+            let at = if code[..at].ends_with("r#") { at - 2 } else { at };
+            said.push(format!(
+                "src/lib.rs:{line}:{}: error: a helper is always inlined, and nothing else is: `#[inline]` changes \
+                 nothing kernite compiles",
+                at + 1
+            ));
+        }
+    }
+    said
+}
+
+/// A function or a static with `#[inline]`, in any form, is kernite's error alone, once, at its `inline`, as the
+/// module's other errors are: for a helper; an `extern "ptx-func"` function; an x86 kernel and a GPU kernel, plain, of
+/// compile-time arguments and cooperative, with the attribute before kernite's own and after; and a static in the
+/// process's memory and one on the GPU, global and constant. Rust says nothing: not that an x86 kernel's `#[inline]`
+/// is incompatible with `#[unsafe(naked)]`, and nothing of a launcher, of the function that picks an instance, or of
+/// a static's method, where the attribute would go if the macros handed it on. Each item has `#[inline(never)]`, which
+/// would win over the `#[inline(always)]` of the function that picks an instance, and an x86 kernel has each other
+/// way to write it: with an argument, as a value, written raw, and inside `cfg_attr(..)`, whatever its condition.
+#[test]
+fn an_inline_attribute_is_kernites_error_alone() {
+    let mut said = refused_inline("inline_refused");
+    assert_eq!(said.len(), 31, "the fixture writes 31 attributes");
+    said.push(format!("error: could not compile `inline_refused` (lib) due to {} previous errors", said.len()));
+    refuses("inline_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A const with `#[inline]` is Rust's error, in its words, at its `inline`: the macros hand it to Rust as written, and
+/// kernite says nothing of it.
+#[test]
+fn an_inline_attribute_on_a_const_is_rusts_error() {
+    refuses(
+        "inline_on_const",
+        &[
+            "src/lib.rs:6:7: error: the `inline` attribute cannot be used on constants",
+            "error: could not compile `inline_on_const` (lib) due to 1 previous error",
+        ],
+    );
 }
 
 /// A name Rust refuses written raw, `r#self`, `r#Self`, `r#super`, `r#crate` or `r#_`, is Rust's error in a module of

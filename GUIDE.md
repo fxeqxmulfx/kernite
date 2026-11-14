@@ -52,6 +52,11 @@ held to 64 levels, so that no kernel can run the compiler out of stack. Brackets
 together with the expression inside them, along the helpers that call one another.
 [`kernite-lang`](crates/lang/src/lib.rs) describes the language.
 
+A helper is always inlined, and nothing else is, so `#[inline]` changes nothing kernite compiles: kernite refuses it, in
+every form, on a function or a static, at the `inline`. `#[inline(never)]`, `#[r#inline]` and
+`#[cfg_attr(.., inline(always))]`, whatever the condition, are refused as `#[inline]` is, and Rust says none of its own.
+On a const the attribute is Rust's, and Rust says what is wrong of it.
+
 A type in a kernel's parameters or return means what it means in any function of the module: `super::W` is the `W`
 beside the module of kernels, and `self::W` the one in it. It may name the kernel's compile-time arguments, as in any
 generic function: in `fn arr<const N: usize>(p: *mut [u8; N])`, `arr::<2>` takes a pointer to two bytes. Rust takes the
@@ -704,7 +709,7 @@ An `extern "ptx-func"` function is a `.func` that the module's kernels and funct
 takes and returns PTX's types, and `call(g, gcd, (a, b))` calls it by its name, or `call(g, fp, (a, b))` at the
 address `mov.u64(fp, gcd)` put in `fp`. Each call is checked against what the function takes and returns, and a call
 of one that never returns, `-> !`, ends its caller's path there. A helper, a function without an ABI, is inlined
-instead, and leaves no call behind.
+instead, and leaves no call behind. `#[inline]` changes neither, and kernite refuses it on both.
 
 An instruction's name is Rust's words: a word that starts with a digit takes a `_`, a `::` is `__`, and a keyword
 takes `r#`, so `tex.2d` is `tex._2d`, `ld.global.L2::64B` is `ld.global.L2__64B`, and `cp.async` is `cp.r#async`. A
