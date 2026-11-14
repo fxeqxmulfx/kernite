@@ -385,11 +385,9 @@ fn the_macro_says_what_it_refuses_where_it_is() {
             "src/lib.rs:36:28: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
             "src/lib.rs:51:7: error: `#[cooperative]` gives `Kernels` a method `k_blocks`, which says how many blocks \
              a grid of `k` has at most, and a kernel or a static of the module is named `k_blocks` as well",
-            "src/lib.rs:59:39: error: `shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and \
-             `tanh.approx.f32` in `new` needs sm_75 and PTX 7.0: no module has both",
-            "src/lib.rs:73:8: error: `h` names another function of the module as well",
+            "src/lib.rs:60:8: error: `h` names another function of the module as well",
             "src/lib.rs:46:15: error: `STEP` names one of the consts the module takes from `crate::sizes` as well",
-            "error: could not compile `refused` (lib) due to 14 previous errors",
+            "error: could not compile `refused` (lib) due to 13 previous errors",
         ],
     );
 }
@@ -522,22 +520,20 @@ fn what_a_module_says_when_its_parts_fail() {
     refuses(
         "parts",
         &[
-            "src/lib.rs:8:7: error: `bad` takes no compile-time arguments, so it is compiled once, with no \
+            "src/lib.rs:6:7: error: `bad` takes no compile-time arguments, so it is compiled once, with no \
              `#[instances(..)]`",
-            "src/lib.rs:12:7: error: `#[cooperative]` goes on a kernel whose blocks or threads wait for each other, \
+            "src/lib.rs:10:7: error: `#[cooperative]` goes on a kernel whose blocks or threads wait for each other, \
              `extern \"ptx-kernel\"` or `extern \"sysv64\"`; `f` is a function the kernels call, which runs as the \
              kernel that calls it is launched",
-            "src/lib.rs:17:32: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
-            "src/lib.rs:9:39: error: `shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and \
-             `tanh.approx.f32` in `new` needs sm_75 and PTX 7.0: no module has both",
-            "src/lib.rs:47:12: error: a static is memory of the module's kernels: the GPU's, for PTX kernels, or the \
+            "src/lib.rs:15:32: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
+            "src/lib.rs:37:12: error: a static is memory of the module's kernels: the GPU's, for PTX kernels, or the \
              process's, for x86 ones; and this module has both, so it is two modules, one of each kind of kernel and \
              the statics they name",
-            "src/lib.rs:55:23: error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \
+            "src/lib.rs:45:23: error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \
              \"ptx-kernel\"` ones, for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \
              \"C\"` is none of these",
-            "src/lib.rs:36:16: error: `STEP` names one of the consts the module takes from `crate::sizes` as well",
-            "error: could not compile `parts` (lib) due to 7 previous errors",
+            "src/lib.rs:26:16: error: `STEP` names one of the consts the module takes from `crate::sizes` as well",
+            "error: could not compile `parts` (lib) due to 6 previous errors",
         ],
     );
 }
@@ -1493,56 +1489,6 @@ fn what_rests_on_all_the_items_is_said_whatever_cfg_leaves_out() {
             "error: could not compile `configured_module` (lib) due to 3 previous errors",
         ],
     );
-}
-
-/// Kernels and functions that no one PTX module can hold are refused where `cfg` keeps them, and
-/// where it keeps all of a set of them, at the module's first GPU item, kept or not: one error, in
-/// the words of the module of those alone, whichever else `cfg` keeps. The fixture's items are
-/// `first`, the first, which needs nothing, `old`, which is for GPUs older than `sm_70` from PTX 6.4
-/// on, `mid` and `top`, which need `sm_75` and `sm_80`, and the function `fast`, which needs
-/// `sm_75`, each under a feature; the one kernel that calls `fast` is left out by every `cfg`, and
-/// the error of `old` and `fast` kept names those two and not that kernel. The error is at `first`
-/// whether its feature keeps it or not.
-#[test]
-fn kernels_that_no_one_module_holds_are_refused_where_cfg_keeps_them() {
-    let dir = written("configured_clash");
-    let old = "`shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and";
-    let with_mid = format!("{old} `tanh.approx.f32` in `mid` needs sm_75 and PTX 7.0: no module has both");
-    let with_top =
-        format!("{old} `redux.sync.add.u32` in `top` needs sm_80, which PTX has from 7.0 on: no module has both");
-    let with_fast = format!("{old} `tanh.approx.f32` in `fast` needs sm_75 and PTX 7.0: no module has both");
-    let cases = [
-        ("", None),
-        ("old", None),
-        ("mid", None),
-        ("top", None),
-        ("mid,top", None),
-        ("fast", None),
-        ("mid,fast", None),
-        ("old,mid", Some(&with_mid)),
-        ("old,top", Some(&with_top)),
-        ("old,fast", Some(&with_fast)),
-        ("old,mid,top", Some(&with_mid)),
-        ("first,old,mid", Some(&with_mid)),
-        ("first,old,fast", Some(&with_fast)),
-    ];
-    for (features, said) in cases {
-        let command = ["build", "--features", features];
-        let Some(why) = said else {
-            builds_quietly_in(&command, "configured_clash", &dir);
-            continue;
-        };
-        let (built, lines) = cargo_in(&command, &dir);
-        let want = [
-            format!("src/lib.rs:13:39: error: {why}"),
-            "error: could not compile `configured_clash` (lib) due to 1 previous error".to_string(),
-        ];
-        assert!(
-            !built && lines == want,
-            "fixtures/configured_clash.rs: {command:?}: Cargo said:\n{}",
-            lines.join("\n")
-        );
-    }
 }
 
 /// A const `cfg` keeps that only what `cfg` leaves out reads is unused to Rust, which says so, as it
@@ -3690,16 +3636,13 @@ fn a_module_that_builds_shows_rust_no_types_of_a_helper_or_a_function() {
 /// are, in order: a helper that a kernel calls, both under `a`; a helper under `a` beside a kernel that does not
 /// compile, kept; a helper kept beside a kernel under `a` that does not compile; an `extern "ptx-func"` function
 /// under `a` beside a kernel that does not compile, kept; a helper under `a` beside a kernel under `b` that does not
-/// compile; a helper under `a` beside a kernel that does not compile under `a` and another under `b`; a helper under
-/// `a` beside a kernel under `a` and another under `b`, of which no module of PTX has both; and a helper under `a` in
-/// a module that is two modules, which kernite says under no `cfg`. With no feature each import is unused to Rust,
-/// for a function `cfg` leaves out names nothing, though the eighth module has its error. With `b` the kernels that
-/// do not compile are kept, but no function that names `Ret` is kept in a module with an error, so every import is
-/// unused. With `a` the fifth module has no error, and its import is unused, while the sixth has the error of its
-/// kernel under `a`, which shows its helper though the kernel under `b` is left out; the seventh has none, for one
-/// of its kernels is left out, and its import is unused; and the eighth shows its helper, for `cfg` keeps it. With
-/// both every import is used, and kernite's errors are the only words, the seventh's among them: it is said where
-/// both its kernels are kept.
+/// compile; a helper under `a` beside a kernel that does not compile under `a` and another under `b`; and a helper
+/// under `a` in a module that is two modules, which kernite says under no `cfg`. With no feature each import is unused
+/// to Rust, for a function `cfg` leaves out names nothing, though the seventh module has its error. With `b` the
+/// kernels that do not compile are kept, but no function that names `Ret` is kept in a module with an error, so every
+/// import is unused. With `a` the fifth module has no error, and its import is unused, while the sixth has the error
+/// of its kernel under `a`, which shows its helper though the kernel under `b` is left out; and the seventh shows its
+/// helper, for `cfg` keeps it. With both every import is used, and kernite's errors are the only words.
 #[test]
 fn rust_sees_the_types_of_a_function_where_cfg_keeps_it_and_the_module_has_an_error() {
     let unused = |place: &str| format!("src/lib.rs:{place}: warning: unused import: `super::Ret`");
@@ -3715,19 +3658,16 @@ fn rust_sees_the_types_of_a_function_where_cfg_keeps_it_and_the_module_has_an_er
         let command: &[&str] = if features.is_empty() { &["build"] } else { &["build", "--features", features] };
         refuses_by(command, "helper_imports_configured", &said.iter().map(String::as_str).collect::<Vec<_>>());
     };
-    let two = "src/lib.rs:142:12: error: a static is memory of the module's kernels: the GPU's, for PTX kernels, or \
+    let two = "src/lib.rs:118:12: error: a static is memory of the module's kernels: the GPU's, for PTX kernels, or \
                the process's, for x86 ones; and this module has both, so it is two modules, one of each kind of \
                kernel and the statics they name"
         .to_string();
-    let none = "src/lib.rs:124:39: error: `shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and \
-                `tanh.approx.f32` in `new` needs sm_75 and PTX 7.0: no module has both"
-        .to_string();
-    let all = ["11:9", "28:9", "43:9", "58:9", "73:9", "94:9", "116:9", "140:9"];
+    let all = ["11:9", "28:9", "43:9", "58:9", "73:9", "94:9", "116:9"];
     builds(
         "",
         vec![undefined("36:13"), undefined("66:28"), two.clone()],
         &all,
-        "3 previous errors; 8 warnings emitted",
+        "3 previous errors; 7 warnings emitted",
     );
     let said = vec![
         argument.clone(),
@@ -3738,9 +3678,9 @@ fn rust_sees_the_types_of_a_function_where_cfg_keeps_it_and_the_module_has_an_er
         undefined("103:13"),
         two.clone(),
     ];
-    builds("a", said, &["73:9", "116:9"], "7 previous errors; 2 warnings emitted");
+    builds("a", said, &["73:9"], "7 previous errors; 1 warning emitted");
     let said = vec![undefined("36:13"), undefined("66:28"), undefined("86:28"), undefined("108:13"), two.clone()];
-    builds("b", said, &all, "5 previous errors; 8 warnings emitted");
+    builds("b", said, &all, "5 previous errors; 7 warnings emitted");
     let said = vec![
         argument,
         undefined("36:13"),
@@ -3750,10 +3690,9 @@ fn rust_sees_the_types_of_a_function_where_cfg_keeps_it_and_the_module_has_an_er
         undefined("86:28"),
         undefined("103:13"),
         undefined("108:13"),
-        none,
         two,
     ];
-    builds("a,b", said, &[], "10 previous errors");
+    builds("a,b", said, &[], "9 previous errors");
 }
 
 /// A crate that forbids lints is told of helpers and of `extern "ptx-func"` functions in a module where kernite says
@@ -3775,28 +3714,25 @@ fn a_crate_that_forbids_lints_is_told_of_the_helpers_that_do_not_compile_and_of_
 }
 
 /// Rust is shown the types a helper's signature names where kernite says an error of the module as a whole, as it is
-/// where kernite says one of an item: where the module is two modules; where no module of PTX has its GPU kernels;
-/// where an item of its own has the name of a const it takes; where the module is refused at its attribute, which
-/// `consts = 5` is; and where it has an item kernite cannot read, `bad<T>`. No kernel calls the helpers, so kernite
-/// says nothing of their types. The import that only they name is used, so Rust does not call it unused beside the
-/// module's error, and Rust says nothing of the language's types, `gpr`, `ymm`, `local<[u32; 4], 16>` and `r32`,
-/// which it cannot find. A module that takes its consts from another is expanded after the rest, so its error is the
-/// last.
+/// where kernite says one of an item: where the module is two modules; where an item of its own has the name of a
+/// const it takes; where the module is refused at its attribute, which `consts = 5` is; and where it has an item
+/// kernite cannot read, `bad<T>`. No kernel calls the helpers, so kernite says nothing of their types. The import that
+/// only they name is used, so Rust does not call it unused beside the module's error, and Rust says nothing of the
+/// language's types, `gpr`, `ymm`, `local<[u32; 4], 16>` and `r32`, which it cannot find. A module that takes its
+/// consts from another is expanded after the rest, so its error is the last.
 #[test]
 fn rust_sees_the_types_a_helper_names_where_kernite_says_an_error_of_the_module_as_a_whole() {
-    let attribute = format!("src/lib.rs:77:27: error: {REFUSED}");
+    let attribute = format!("src/lib.rs:54:27: error: {REFUSED}");
     refuses(
         "helper_imports_whole",
         &[
             "src/lib.rs:18:12: error: a static is memory of the module's kernels: the GPU's, for PTX kernels, or the \
              process's, for x86 ones; and this module has both, so it is two modules, one of each kind of kernel and \
              the statics they name",
-            "src/lib.rs:51:39: error: `shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and \
-             `tanh.approx.f32` in `new` needs sm_75 and PTX 7.0: no module has both",
             &attribute,
-            "src/lib.rs:102:12: error: a function's generics are values, as in `<const N: usize>`",
-            "src/lib.rs:66:15: error: `STEP` names one of the consts the module takes from `crate::sizes` as well",
-            "error: could not compile `helper_imports_whole` (lib) due to 5 previous errors",
+            "src/lib.rs:79:12: error: a function's generics are values, as in `<const N: usize>`",
+            "src/lib.rs:43:15: error: `STEP` names one of the consts the module takes from `crate::sizes` as well",
+            "error: could not compile `helper_imports_whole` (lib) due to 4 previous errors",
         ],
     );
 }

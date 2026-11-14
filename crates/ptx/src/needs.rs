@@ -8,12 +8,6 @@ pub struct Needs {
     pub ptx: u32,
     /// The GPU, by its `sm_` number: 80 for Ampere's first. 0 for any.
     pub sm: u32,
-    /// A GPU older than this, by its `sm_` number, in a module of PTX [`Needs::since`] or
-    /// newer: `shfl` without `.sync` is for none from Volta's on, `sm_70`, from PTX 6.4. 0 for
-    /// any.
-    pub below: u32,
-    /// The version of PTX from which [`Needs::below`] holds, as [`Needs::ptx`] writes it.
-    pub since: u32,
 }
 
 /// The GPUs kernite writes for, by their `sm_` numbers, and the version of PTX that came with
@@ -40,68 +34,24 @@ impl Needs {
     /// What every module is written for: Kepler, `sm_30`, and PTX 3.0, which came with it. The
     /// driver starts at most 65535 blocks along x of a module written for an older GPU, Fermi's
     /// `sm_20` or `sm_21`, whatever the GPU it runs on, and 2^31 - 1 of one written for Kepler.
-    pub const FLOOR: Needs = Needs { ptx: 30, sm: 30, below: 0, since: 0 };
+    pub const FLOOR: Needs = Needs { ptx: 30, sm: 30 };
 
-    /// What both need, and the narrower of the GPUs they are for.
+    /// What both need: the newer version of PTX, and the newer GPU.
     pub fn and(self, other: Needs) -> Needs {
-        let least = |a: u32, b: u32| match (a, b) {
-            (0, x) | (x, 0) => x,
-            (a, b) => a.min(b),
-        };
-        Needs {
-            ptx: self.ptx.max(other.ptx),
-            sm: self.sm.max(other.sm),
-            below: least(self.below, other.below),
-            since: least(self.since, other.since),
-        }
+        Needs { ptx: self.ptx.max(other.ptx), sm: self.sm.max(other.sm) }
     }
 
-    /// Whether some module has it all: one for a GPU older than [`Needs::below`], or of a
-    /// version older than [`Needs::since`].
-    pub fn possible(self) -> bool {
-        self.below == 0 || self.sm.max(Needs::FLOOR.sm) < self.below || self.written() < self.since
-    }
-
-    /// The version of PTX a module of it is of, as [`Needs::ptx`] writes it: what it needs,
-    /// and what its GPU does.
-    pub fn written(self) -> u32 {
+    /// The version of PTX a module of it is of, as a module's `.version` writes it: `7.8`. That
+    /// is what it needs, and what its GPU came with.
+    pub fn version(self) -> String {
         let sm = self.sm.max(Needs::FLOOR.sm);
         let came = GPUS.iter().find(|&&(g, _)| g == sm).map_or(0, |&(_, v)| v);
-        self.ptx.max(came).max(Needs::FLOOR.ptx)
-    }
-
-    /// The version of PTX as a module's `.version` writes it: `7.8`.
-    pub fn version(self) -> String {
-        dotted(self.written())
+        let v = self.ptx.max(came).max(Needs::FLOOR.ptx);
+        format!("{}.{}", v / 10, v % 10)
     }
 
     /// The GPU as a module's `.target` writes it: `sm_80`.
     pub fn target(self) -> String {
         format!("sm_{}", self.sm.max(Needs::FLOOR.sm))
-    }
-}
-
-/// A version of PTX as [`Needs::ptx`] writes it, as PTX does: `7.8`.
-fn dotted(v: u32) -> String {
-    format!("{}.{}", v / 10, v % 10)
-}
-
-/// Why no module has all of `needs`, each what an instruction needs and that instruction as
-/// it is to be named: one is for GPUs older than another needs, in the version of PTX a
-/// module for that GPU, or for a third, is of.
-pub fn clash(needs: &[(Needs, String)]) -> String {
-    let all = needs.iter().fold(Needs::default(), |n, (m, _)| n.and(*m));
-    let (old, o) = needs.iter().find(|(n, _)| n.below == all.below).expect("one is for older GPUs");
-    let first = format!("{o} is for GPUs older than sm_{} from PTX {} on", old.below, dotted(old.since));
-    let gpu = needs.iter().max_by_key(|(n, _)| n.sm).expect("one needs a newer GPU");
-    let ptx = needs.iter().max_by_key(|(n, _)| n.ptx).expect("one needs the version");
-    let ((new, g), (v, w)) = (gpu, ptx);
-    let came = Needs { sm: new.sm, ..Needs::default() }.written();
-    if came >= all.since {
-        format!("{first}, and {g} needs sm_{}, which PTX has from {} on: no module has both", new.sm, dotted(came))
-    } else if std::ptr::eq(gpu, ptx) {
-        format!("{first}, and {g} needs sm_{} and PTX {}: no module has both", new.sm, dotted(v.ptx))
-    } else {
-        format!("{first}; {g} needs sm_{}, and {w} PTX {}: no module has them all", new.sm, dotted(v.ptx))
     }
 }

@@ -184,12 +184,13 @@ fn fits(before: &[&Memory], m: &Memory) -> Result<(), String> {
         }
         return Ok(());
     }
-    // ptxas 13.4 writes the size of the section it lays a module's global memory out in,
-    // `.nv.global`, or `.nv.global.init` for what holds more than zeros, in 32 bits, and cuts
-    // one of 4 GB or more to them without a word: the memory past is no memory's, and the
-    // driver's copies run past what it allocated. It cuts a symbol's own size to 61 bits, and
-    // writes 0 for 2^63; only at 2^64 does it refuse. The bytes of both sections at once,
-    // each memory's padding counted, are under 4 GB.
+    // ptxas 13.5 writes the size of `.nv.global`, the section it lays a module's global memory
+    // out in, in 32 bits, and cuts one of 4 GB or more to them without a word: the memory
+    // past is no memory's, and the driver's copies run past what it allocated. Of
+    // `.nv.global.init`, for what holds more than zeros, it takes up to 4 GB less 1 byte, and
+    // past them it writes the file and fails, "Internal error: writing file". It cuts a
+    // symbol's own size to 61 bits, and writes 0 for 2^63; only at 2^64 does it refuse. kernite
+    // keeps the bytes of both sections at once, each memory's padding counted, under 4 GB.
     let all = mine.fold(0u64, |sum, m| sum.saturating_add(m.bytes.unwrap_or(0)).saturating_add(m.align - 1));
     if all >= 1 << 32 {
         return Err(format!(

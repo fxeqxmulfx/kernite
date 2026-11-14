@@ -1,10 +1,8 @@
-//! What a module says when its parts fail: which of a part's errors is said, what goes into the
-//! module all the same, and where the module's own error goes.
+//! What a module says when its parts fail: which of a part's errors is said.
 
 #[kernite_macros::kernels]
 pub mod gpu {
-    // Its instances' error. It is the module's first GPU function, so the module's error goes here
-    // too, though this one fails.
+    // Its instances' error.
     #[instances(1)]
     pub unsafe extern "ptx-kernel" fn bad() {}
 
@@ -13,16 +11,8 @@ pub mod gpu {
     #[instances(1)]
     extern "ptx-func" fn f() {}
 
-    // It is not `unsafe`, and its code is in the module all the same, where it clashes with `new`'s.
-    pub extern "ptx-kernel" fn old(n: u32) {
-        let i: u32;
-        shfl.idx.b32(i, n, 0, 31);
-    }
-
-    pub unsafe extern "ptx-kernel" fn new(f: f32) {
-        let v: f32;
-        tanh.approx.f32(v, f);
-    }
+    // It is not `unsafe`.
+    pub extern "ptx-kernel" fn old() {}
 }
 
 #[kernite_macros::consts]

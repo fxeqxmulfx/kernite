@@ -1,8 +1,8 @@
 //! Helpers whose signatures name `Ret`, a type of the crate's that their module imports, in a module where kernite says
-//! an error of the module as a whole, and of none of its items: that it is two modules, that no module of PTX has its
-//! GPU's kernels, that an item of its own has the name of a const it takes, that its attribute is refused, or that it
-//! cannot read an item. No kernel calls the helpers, so kernite says nothing of their types; it shows them to Rust, so
-//! Rust does not call the import unused beside the error, and says nothing of `gpr` or `local<[u32; 4], 16>`.
+//! an error of the module as a whole, and of none of its items: that it is two modules, that an item of its own has the
+//! name of a const it takes, that its attribute is refused, or that it cannot read an item. No kernel calls the
+//! helpers, so kernite says nothing of their types; it shows them to Rust, so Rust does not call the import unused
+//! beside the error, and says nothing of `gpr` or `local<[u32; 4], 16>`.
 
 pub struct Ret(pub u64);
 
@@ -33,29 +33,6 @@ pub mod two_modules {
         let v: u32;
         ld.global.u32(v, [COUNTS]);
         st.global.u32([p], v);
-    }
-}
-
-#[kernite_macros::kernels]
-pub mod no_module_of_ptx_has_both {
-    use super::Ret;
-
-    fn h(x: Ret) {
-        nop();
-    }
-
-    fn language(a: gpr, b: ymm, c: local<[u32; 4], 16>) -> r32 {
-        nop();
-    }
-
-    pub unsafe extern "ptx-kernel" fn old(n: u32) {
-        let i: u32;
-        shfl.idx.b32(i, n, 0, 31);
-    }
-
-    pub unsafe extern "ptx-kernel" fn new(f: f32) {
-        let v: f32;
-        tanh.approx.f32(v, f);
     }
 }
 

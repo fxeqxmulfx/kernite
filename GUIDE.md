@@ -342,9 +342,7 @@ the kernels and functions kept need, and `Kernels::load` asks the driver for the
 kernite reads every item before Rust knows which `cfg` holds, as Rust parses every item before it does, so an item it
 cannot read is said whatever `cfg` holds, as Rust says a syntax error in a function it leaves out: the head of a
 function, as `fn k<T>()`, rests on no other item. What rests on all the items together is said whatever `cfg` leaves
-out: a name that two items share, though each is under a `cfg` the other is not. GPU kernels and functions that no one
-PTX module can hold, for each sets the module's `.version` and `.target`, are said where `cfg` keeps them: once, at the
-module's first GPU item, of those that clash and no others.
+out: a name that two items share, though each is under a `cfg` the other is not.
 
 The x86 target knows every instruction of x86-64-v3, in each form `llvm-mc` takes, [`forms`](crates/x86/src/forms.rs):
 x86-64's own on integers of 8 to 64 bits, SSE's to SSE4.2's as AVX writes them, `vaddps` and not `addps`, and AVX's,
@@ -682,28 +680,63 @@ grid past more than one limit is told of the first of these: the blocks along x,
 the threads in all, the shared memory, and last the kernel's `.maxntid` or `.reqntid`, below.
 
 The PTX target knows every instruction of PTX's for the GPUs from Fermi, `sm_20`, to Ampere, `sm_86`, in each form
-`ptxas` takes, [`forms`](crates/ptx/src/forms.rs), but one. `txq.force_unnormalized_coords` asks of a sampler apart
+`ptxas` takes, [`forms`](crates/ptx/src/forms.rs), but the forms PTX deprecated, below, and one.
+`txq.force_unnormalized_coords` asks of a sampler apart
 from its texture, in the independent mode, which kernite does not write: kernite writes no `.samplerref`, so the ISA
 leaves the answer undefined. kernite checks each operand against the forms, and a `call`'s against what the function it
-calls takes and returns. Where `ptxas` takes more than PTX's ISA has, and reads it as the ISA reads the rest, kernite
-takes it too: `sust.p` with a cache operation, as `sust.b` has, or an `mma` fragment `(a, 8)`, a value beside a
-variable. Where a value known now would be cut to fewer bits, by `ptxas` or by the instruction as the ISA has it, or is
-one the ISA leaves undefined, kernite refuses it, and the table says so: `lop3`'s table is 8 bits, and `ptxas` takes a
-bigger one and keeps its low 8; `shfl` reads its lane in the low 5 bits of `b`; and a barrier counts 1024 threads at
-most, the most a CTA has. A mask of lanes, which names the threads of a warp that take part, may not leave out lane 0
-where thread 0 runs the instruction: thread 0 is in lane 0, and the ISA leaves the instruction undefined in a thread
-outside its mask. Thread 0 runs the instruction where no `if` guards it and no `ret`, `exit`, `trap`, call or jump
-keeps thread 0 from it. kernite refuses a mask known now that leaves out lane 0 there, and takes one in a variable. It
-does not look inside a function that kernels call. Where `ptxas` takes less, kernite does too: `st` stores a special
-register only as one of a vector's. And kernite checks what `ptxas` leaves to the program: that an access stays in the
-memory it names, at a multiple of the bytes it moves. Each form, and each of its words, says the oldest version of PTX
-and the oldest GPU `ptxas` takes it at, back to PTX 1.0, which is at times older than the ISA says: `ptxas` takes
-`ld.mmio.acquire` for `sm_70`, which the ISA has from `sm_75`. A module's `.version` and `.target` are the oldest that
-have every instruction of its kernels and functions, those that `cfg` keeps, and never older than PTX 3.0 and `sm_30`:
-the driver starts at most 65535 blocks along x of a module written for `sm_20` or `sm_21`, Fermi's, whatever the GPU it
-runs on, and 2^31 - 1 of one written for `sm_30`. Where `ptxas` is installed, a test hands it every form at what kernite
-says it needs, at the newest version, and for each newer GPU to `sm_86`, which the driver compiles a module for when it
-runs there, and `ptxas` must take it each time; and at the version before and on the GPU before, which it must refuse.
+calls takes and returns. The registers of a vector, `(a, b)`, are of one size, and of types that go together, as `ptxas`
+takes them: the same type, bits beside any, or an integer beside an integer. An `f32` beside a `u32`, or a `u16` beside
+a `u32`, is an error at the register that does not go with one before it, in `st`, `ld`, `ldu`, `mov`, `suld.b`,
+`sust.b`, `sust.p`, `ldmatrix` and `mma`, as `ptxas` refuses it. The layer of an array of textures, the first of its
+vector, is apart: an integer beside floats. `ptxas` checks each register against the one before it alone, and takes
+`(f, b, i, i)`, an `f32` or an `f16x2` and a `u32` with a `b32` between, which looks like a bug of its own: kernite
+checks each against each before it, and refuses it. PTX keeps a `bf16`, `bf16x2` or `tf32` variable in a `b16` or `b32`
+register, and kernite takes it wherever it takes one, as `ptxas` does: for an integer or a float of its size, in an
+instruction, beside an `f16x2` in a vector, as an address, as an argument of a helper and of a call, as the address a
+call calls at, as the result of a call, and in `ret`. `add.u32(i, b, i)` and `add.rn.f32(v, b, v)` write `b` as the
+operand, with no `mov` beside it. `fma.rn.bf16x2(b, x, b, b)` takes a `tf32` or a `b32` for `x`, and no `u32`, `f32` or
+`f16x2`, as `ptxas` takes none. Where `ptxas` takes more than PTX's ISA has, and reads it as the ISA
+reads the rest, kernite takes it too: `sust.p` with a cache operation, as `sust.b` has, or an `mma` fragment `(a, 8)`, a
+value beside a variable. An `f16x2` variable is one more, where an instruction takes a `u32` or an `s32` variable:
+`ptxas` reads its 32 bits as a `b32`'s, and so does kernite. `add.u32(i, h, n)` writes `h` as the operand, with no `mov`
+beside it, and `vadd.u32.u32.u32(i, h.b0, n)` writes a part of it. kernite refuses it where `ptxas` does: negated, as an
+array's layer, beside a register of another type in a vector, and in each operand the table marks with `~`, as the count
+of a shift, a result of `clz`, a fragment of `mma`, the time of `nanosleep.u32`, and the last operand of
+`vadd4.u32.u32.u32.add`, which `ptxas` makes a `dp4a` of. In a vector it is one only where each other register is an
+`f16x2`, a `b32` or `_`, as it is a float of its own. kernite takes none in the vector of `tex.a2dms`: `ptxas` checks no
+type of its sample, and takes a predicate there, which looks like a bug of its own. An instruction that wants an `f16x2`
+takes no integer, one that wants an `f32` takes no `f16x2`, and none takes an `f16x2` for a predicate, where `ptxas`
+reads 32 bits, not one. A call takes an `f16x2` for a `u32`, an `s32` or an `f32`, as an argument and as a result. `ret`
+gives one back for a `u32` or an `s32`, not for an `f32`, as `ptxas` takes it. A function of an `f16x2`, a `bf16x2` or a
+`tf32`, whose `.param` is a `.b32`, takes a variable of any type of 32 bits for it, writes one with its result, and
+gives back one with `ret`. Where a value known now would be cut to fewer bits, by `ptxas` or by the instruction as the
+ISA has it, or is one the ISA leaves undefined, kernite refuses it, and the table says so: `lop3`'s table is 8 bits, and
+`ptxas` takes a bigger one and keeps its low 8; `shfl` reads its lane in the low 5 bits of `b`; and a barrier counts
+1024 threads at most, the most a CTA has. A mask of lanes, which names the threads of a warp that take part, may not
+leave out lane 0 where thread 0 runs the instruction: thread 0 is in lane 0, and the ISA leaves the instruction
+undefined in a thread outside its mask. Thread 0 runs the instruction where no `if` guards it and no `ret`, `exit`,
+`trap`, call or jump keeps thread 0 from it. kernite refuses a mask known now that leaves out lane 0 there, and takes
+one in a variable. It does not look inside a function that kernels call. Where `ptxas` takes less, kernite does too:
+`st` stores a special register only as one of a vector's. And kernite checks what `ptxas` leaves to the program: that an
+access stays in the memory it names, at a multiple of the bytes it moves. Each form, and each of its words, says the
+oldest version of PTX and the oldest GPU `ptxas` takes it at, back to PTX 1.0, which is at times older than the ISA
+says: `ptxas` takes `ld.mmio.acquire` for `sm_70`, which the ISA has from `sm_75`. A module's `.version` and `.target`
+are the oldest that have every instruction of its kernels and functions, those that `cfg` keeps, and never older than
+PTX 3.0 and `sm_30`: the driver starts at most 65535 blocks along x of a module written for `sm_20` or `sm_21`, Fermi's,
+whatever the GPU it runs on, and 2^31 - 1 of one written for `sm_30`. Where `ptxas` is installed, a test hands it every
+form at what kernite says it needs, at the newest version, and for each newer GPU to `sm_86`, which the driver compiles
+a module for when it runs there, and `ptxas` must take it each time, and say nothing of it: a warning of `ptxas` fails
+the test as an error does, but the warning that it cannot size the stack of a kernel with `alloca` or `stackrestore`,
+which size it as they run. At the version before and on the GPU before, `ptxas` must refuse it.
+
+What the newest PTX and `ptxas` refuse, kernite refuses at every version of PTX. What they take, kernite takes for the
+newest: an older `ptxas` or driver may refuse it, and kernite does not guarantee one. kernite refuses what PTX
+deprecates, though the ISA still has it. PTX deprecated `shfl` and `vote` without `.sync` in 6.0, and from 6.4 `ptxas`
+refuses them for `sm_70` and newer, where the threads of a warp need not run together; for the rest it takes them, and
+warns, but says nothing of `vote.ballot.b32` in PTX 6.0 and 6.1, which looks like a bug. kernite refuses them whatever
+the version of PTX and the GPU: `shfl.up.b32`, `shfl.down.b32`, `shfl.bfly.b32`, `shfl.idx.b32`, `vote.all.pred`,
+`vote.any.pred`, `vote.uni.pred` and `vote.ballot.b32` are errors at their names, which say why, and name the form with
+`.sync`, as `shfl.sync.idx.b32(i, n, 0, 31, 0xffff_ffff)`, whose last operand is a mask of lanes.
 
 An `extern "ptx-func"` function is a `.func` that the module's kernels and functions call, itself among them. It
 takes and returns PTX's types, and `call(g, gcd, (a, b))` calls it by its name, or `call(g, fp, (a, b))` at the

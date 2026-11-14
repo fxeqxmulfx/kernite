@@ -30,8 +30,9 @@ Every change serves these seven.
 
 ## Commands
 
-- `./make.py check`: formatting, clippy on every target with `-D warnings`, every test, and the docs
-  without a warning. It passes before every commit. It takes about a minute here.
+- `./make.py check`: formatting, clippy on every target, every test, and the docs. Clippy and the docs
+  run with Cargo's `build.warnings` set to deny: any warning fails the check, Cargo's own too, an unused
+  dependency say. It passes before every commit. It takes about a minute here.
 - `./make.py fmt` formats every crate.
 - `./make.py publish` publishes each crate that crates.io lacks at its version, one at a time, those
   it needs first. Publishing is the user's call alone.

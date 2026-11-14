@@ -4,7 +4,7 @@ use kernite_build::{Assembly, Kept, When};
 use kernite_core::{Item, Program};
 
 use crate::call::{Returns, formal, passed};
-use crate::needs::{Needs, clash};
+use crate::needs::Needs;
 use crate::statics::{Memory, Static};
 use crate::ty::Ty;
 
@@ -47,9 +47,8 @@ pub struct Entry {
     pub regs: Vec<(String, Ty)>,
     /// The memory it declares, in order.
     pub memory: Vec<Memory>,
-    /// What it needs, above [`Needs::FLOOR`], and the first instruction or type that needs
-    /// it, for when another kernel of the module needs what cannot go with it.
-    pub needs: Vec<(Needs, String)>,
+    /// What it needs, above [`Needs::FLOOR`].
+    pub needs: Needs,
     /// For a function, what it returns; `None` for a kernel.
     pub func: Option<Returns>,
     /// The functions it names, each once, by their symbols: those it calls, and those whose
@@ -61,11 +60,6 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// What it needs altogether.
-    pub fn needs(&self) -> Needs {
-        self.needs.iter().fold(Needs::default(), |n, (m, _)| n.and(*m))
-    }
-
     /// What it is called and passed: `.visible .entry` and its parameters, or `.func`, what
     /// it returns, and its parameters.
     fn head(&self) -> String {
@@ -149,7 +143,7 @@ fn code(i: usize) -> When {
 /// other: each thing kept is within the pair, and something kept needs each of its values, but a 0,
 /// which nothing needs. A pair that no entries reach has no part.
 fn headers(entries: &[Entry]) -> Vec<(When, String)> {
-    let needs: Vec<Needs> = entries.iter().map(Entry::needs).collect();
+    let needs: Vec<Needs> = entries.iter().map(|e| e.needs).collect();
     let values = |of: fn(&Needs) -> u32| {
         let mut all: Vec<u32> = needs.iter().map(of).chain([0]).collect();
         all.sort_unstable();
@@ -171,7 +165,7 @@ fn headers(entries: &[Entry]) -> Vec<(When, String)> {
             let mut when = vec![When::Not(Box::new(When::Any(beyond.into_iter().map(code).collect())))];
             when.extend((ptx > 0).then_some(When::Any(by_ptx)));
             when.extend((sm > 0).then_some(When::Any(by_sm)));
-            let at = Needs { ptx, sm, ..Needs::default() };
+            let at = Needs { ptx, sm };
             let (version, target) = (at.version(), at.target());
             let text = format!("// Written by kernite.\n\n.version {version}\n.target {target}\n.address_size 64\n");
             parts.push((When::All(when), text));
@@ -180,63 +174,18 @@ fn headers(entries: &[Entry]) -> Vec<(When, String)> {
     parts
 }
 
-/// Why the module is none where what is kept has no module: a reason for each set of at most four
-/// of `entries` that no module has, though one has any smaller set of them. It is said where all of
-/// the set are kept, and names the set alone. Four are enough: [`Needs::and`] takes the largest
-/// PTX, the newest GPU, the oldest `below` and the first `since` each on its own, so each is one
-/// entry's, and those, at most four, have no module either. Entries added to a set never make a
-/// module of it.
-fn clashes(entries: &[Entry]) -> Vec<(When, String)> {
-    let needs: Vec<Needs> = entries.iter().map(Entry::needs).collect();
-    let join = |set: &[usize]| set.iter().fold(Needs::default(), |n, &i| n.and(needs[i]));
-    let all: Vec<usize> = (0..entries.len()).collect();
-    if join(&all).possible() {
-        return vec![];
-    }
-    // A kernel that needs nothing is of no set that no module has.
-    let asking: Vec<usize> = all.into_iter().filter(|&i| needs[i] != Needs::default()).collect();
-    let mut sets: Vec<Vec<usize>> = vec![];
-    for size in 1..=4 {
-        choose(&asking, size, &mut vec![], &mut |set| {
-            if !sets.iter().any(|found| found.iter().all(|i| set.contains(i))) && !join(set).possible() {
-                sets.push(set.to_vec());
-            }
-        });
-    }
-    let named = |i: usize| {
-        let (name, records) = (&entries[i].name, &entries[i].needs);
-        records.iter().map(move |(n, why)| (*n, format!("`{why}` in `{name}`")))
-    };
-    let reason = |set: &[usize]| clash(&set.iter().flat_map(|&i| named(i)).collect::<Vec<_>>());
-    sets.into_iter().map(|set| (When::All(set.iter().copied().map(code).collect()), reason(&set))).collect()
-}
-
-/// Each choice of `size` of `from` in order, after the `set` chosen so far, given to `each`.
-fn choose(from: &[usize], size: usize, set: &mut Vec<usize>, each: &mut dyn FnMut(&[usize])) {
-    if set.len() == size {
-        return each(set);
-    }
-    for (at, &i) in from.iter().enumerate() {
-        set.push(i);
-        choose(&from[at + 1..], size, set, each);
-        set.pop();
-    }
-}
-
 /// The PTX module of `entries`, kernels and functions, with `statics`, the module's memory, put
 /// together from what the program keeps of them: whichever are kept, it is the module of those
 /// alone. That is of the version and for the GPU the instructions of what is kept need, and no
 /// newer: [`Needs::FLOOR`] if they need nothing more. The driver compiles it for the GPU it runs
-/// on, which may be any as new as its `.target` or newer, unless an instruction is gone from newer
-/// ones. Each is where it is among `entries`, after a declaration of each it names that comes
-/// later; `statics` before them all, in order.
+/// on, which may be any as new as its `.target` or newer. Each is where it is among `entries`,
+/// after a declaration of each it names that comes later; `statics` before them all, in order.
 ///
-/// It is none if something kept is for GPUs older than something else kept needs, in the version of
-/// PTX the module would be of: PTX has no module for both. It is none if a static has a name in PTX
-/// that something else kept has. It counts no room: [`room`](crate::room) does, of `statics` laid out.
+/// It is none if a static has a name in PTX that something else kept has. It counts no room:
+/// [`room`](crate::room) does, of `statics` laid out.
 pub fn module(entries: &[Entry], statics: &[Static]) -> Assembly {
     let kept = |j: usize| When::Kept(Kept::Static(j));
-    let (mut parts, mut refusals) = (headers(entries), clashes(entries));
+    let (mut parts, mut refusals) = (headers(entries), vec![]);
     // The names at the module's scope, and those of a kernel's or a function's parameters,
     // which a static's would hide there: PTX's own `WARP_SZ`, and what each name is, and whose.
     let mut names = vec![("WARP_SZ".to_string(), "PTX's own `WARP_SZ`".to_string(), When::always())];

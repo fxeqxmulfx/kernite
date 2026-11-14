@@ -88,6 +88,17 @@ pub fn formal(t: Ty) -> Ty {
     }
 }
 
+/// Whether a register of type `ty` may be an argument or a result of a call of type `t`, or, if not `call`, what `ret`
+/// gives back as one: it [`Ty::fits`] the type of the `.param` that ptxas 13.5 checks it against, which is `t` for
+/// fewer than 32 bits and [`formal`]'s for more. ptxas reads an `f16x2` as the bits of a `u32` there too, for a
+/// `.b32`, a `.u32` and an `.s32`, and in a call for an `.f32`, which `ret` does not take. A `.b32`, the `.param` of an
+/// `f16x2`, a `bf16x2` and a `tf32`, takes a register of any type of 32 bits.
+pub(crate) fn fits_param(ty: Ty, t: Ty, call: bool) -> bool {
+    let param = formal(t);
+    let wants = if param.bits() < 32 { t } else { param };
+    ty.fits(wants) || ty == Ty::F16x2 && (Ty::U32.fits(param) || call && param == Ty::F32)
+}
+
 /// Why a function takes no predicate.
 pub(crate) const NO_PRED: &str =
     "PTX passes no `pred` to a function, nor back: `selp.u32(x, 1, 0, p)` makes it a `u32`";

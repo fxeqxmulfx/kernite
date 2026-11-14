@@ -61,8 +61,7 @@
 //!   `call(r, fp, (a, b), (f, g))` as one of the functions taken together last, checked
 //!   against each.
 //!
-//! What an instruction needs of PTX and of the GPU, its [`Needs`], the kernel needs: an
-//! instruction that no GPU has with what the kernel needs already is an error where it is.
+//! What an instruction needs of PTX and of the GPU, its [`Needs`], the kernel needs.
 
 use std::collections::BTreeSet;
 
@@ -72,7 +71,7 @@ use kernite_core::{
 };
 use kernite_lang::{Fault, Guard, Operand as Given, Span, Target};
 
-use crate::call::{NO_PRED, Prototype, Returns, formal};
+use crate::call::{NO_PRED, Prototype, Returns, fits_param, formal};
 use crate::entry::{Entry, Op, Param};
 use crate::forms::{self, Bound, Check, Count, Imm, Part, Role, Space, Spec, TyRef};
 use crate::needs::Needs;
@@ -127,7 +126,7 @@ pub struct Kernel {
     shared: u64,
     local: u64,
     partial: Vec<Partial>,
-    needs: Vec<(Needs, String)>,
+    needs: Needs,
     /// The tables declared so far: of labels `brx.idx` jumps through, of call targets, and
     /// prototypes.
     tables: usize,
@@ -194,17 +193,15 @@ struct Partial {
     arg: usize,
 }
 
-/// An instruction's operands written out: their text, what they read and write, what they
-/// need and the special registers and kernels among them that need it, the labels of a table
+/// An instruction's operands written out: their text, what they read and write, what they need, the labels of a table
 /// it jumps through, and the functions it names; and as they are written, how many are addresses so far, the bytes the
-/// instruction reaches at once at each, and whether they are those in brackets, where a
-/// register is of the type the form says, though `+wide` lets the others be wider.
+/// instruction reaches at once at each, and whether they are those in brackets, where a register is of the type the
+/// form says, though `+wide` lets the others be wider.
 #[derive(Default)]
 struct Written {
     texts: Vec<String>,
     args: Vec<Arg<VReg>>,
     needs: Needs,
-    named: Vec<String>,
     table: Vec<u32>,
     funcs: Vec<String>,
     addrs: usize,
@@ -212,6 +209,8 @@ struct Written {
     inside: bool,
     /// Whether a mask of lanes known now leaves out lane 0.
     no_lane_0: bool,
+    /// The register of a vector that an error is at, where it is at one, by position.
+    part: Option<usize>,
 }
 
 /// Why operands are not those of a form.
@@ -252,7 +251,7 @@ impl Kernel {
             shared: 0,
             local: 0,
             partial: vec![],
-            needs: vec![],
+            needs: Needs::default(),
             tables: 0,
             func: None,
             callees: vec![],
@@ -296,7 +295,7 @@ impl Kernel {
     /// so from Pascal's on, `sm_60`, which the kernel needs.
     pub fn cooperative(&mut self) {
         self.cooperative = true;
-        self.needs.push((Needs { ptx: 50, sm: 60, ..Needs::default() }, "#[cooperative]".into()));
+        self.needs = self.needs.and(Needs { ptx: 50, sm: 60 });
     }
 
     /// The kernel as written.
@@ -405,28 +404,6 @@ impl Kernel {
         Ok(Var::Mem(self.memory.len() - 1))
     }
 
-    /// What the kernel needs so far.
-    fn needed(&self) -> Needs {
-        self.needs.iter().fold(Needs::default(), |n, (m, _)| n.and(*m))
-    }
-
-    /// Notes that the kernel needs `needs` for `what`, an instruction; or says why no module
-    /// has it as well as what the kernel needs already.
-    fn require(&mut self, needs: Needs, what: &str) -> Result<(), String> {
-        let had = self.needed();
-        let all = had.and(needs);
-        if !all.possible() {
-            let mut named: Vec<(Needs, String)> =
-                self.needs.iter().map(|(n, w)| (*n, format!("`{w}` before it"))).collect();
-            named.push((needs, format!("`{what}`")));
-            return Err(crate::needs::clash(&named));
-        }
-        if all != had {
-            self.needs.push((needs, what.to_string()));
-        }
-        Ok(())
-    }
-
     /// Notes that a thread may end at the instruction pushed next, or never come back from it,
     /// while others go on: a guarded `ret`, `exit` or `trap`, or a call, which may run one. Those
     /// of a kernel are kept; a function is not looked at.
@@ -496,12 +473,13 @@ impl Kernel {
         }
         let mut w = Written { reach: reach(b, args), ..Written::default() };
         for (i, (spec, a)) in specs.iter().zip(args).enumerate() {
-            let text =
-                self.operand(b, spec, a, name, &mut w).map_err(|m| Miss::At(i, shaped(b, spec, a), Fault::at(i, m)))?;
+            let text = self
+                .operand(b, spec, a, name, &mut w)
+                .map_err(|m| Miss::At(i, shaped(b, spec, a), Fault { part: w.part, ..Fault::at(i, m) }))?;
             w.texts.push(text);
             w.needs = w.needs.and(spec.needs);
         }
-        // PTX leaves undefined an index past the labels, where ptxas 13.4 jumps to the first.
+        // PTX leaves undefined an index past the labels, where ptxas 13.5 jumps to the first.
         if let Some(i) = specs.iter().position(|s| s.role == Role::Labels).and_then(|l| l.checked_sub(1))
             && let Given::Int(x) = args[i]
             && !(0..w.table.len() as i128).contains(&x)
@@ -512,7 +490,7 @@ impl Kernel {
             };
             return Err(Miss::At(i, true, Fault::at(i, m)));
         }
-        // A policy's primary size is part of its total, as the ISA has it, and ptxas 13.4
+        // A policy's primary size is part of its total, as the ISA has it, and ptxas 13.5
         // refuses more known now.
         if b.form.op == "createpolicy"
             && let [.., Given::Int(primary), Given::Int(total)] = args
@@ -626,12 +604,56 @@ impl Kernel {
             _ if n == 1 => std::slice::from_ref(a),
             _ => return Err(format!("`{name}` wants {}; this is {}", describe(b, spec), self.given(a))),
         };
+        // ptxas 13.5 takes an `f16x2` for an integer in a vector beside registers of `f16x2` or `b32`, and `_`, and
+        // refuses it beside one of another type, as it refuses any two registers whose types do not go together: the
+        // rule below. An array's index, the lead, it checks apart, and takes no `f16x2` for it: "Array index in the
+        // 'tex' instruction has unexpected type".
+        let beside = |p: &Given<Var>| {
+            matches!(p, Given::Var(Var::Reg { ty, .. }) if matches!(ty.decl(), Ty::F16x2 | Ty::B32))
+                || matches!(p, Given::Special(s) if s == "_")
+        };
+        let rest = &Spec {
+            exact: spec.exact || !parts[usize::from(spec.lead.is_some())..].iter().all(beside),
+            ..spec.clone()
+        };
         let mut texts = vec![];
         for (k, part) in parts.iter().enumerate() {
             texts.push(match spec.lead {
-                Some(t) if k == 0 => self.one(b, &Spec { ty: Some(TyRef::Fixed(t)), ..spec.clone() }, part, name, w)?,
-                _ => self.one(b, spec, part, name, w)?,
+                Some(t) if k == 0 => {
+                    let index = Spec { ty: Some(TyRef::Fixed(t)), exact: true, ..spec.clone() };
+                    self.one(b, &index, part, name, w)?
+                }
+                _ => self.one(b, rest, part, name, w)?,
             });
+        }
+        // ptxas 13.5 wants the registers of a vector of one size, "Incompatible elements of vector expression", and one
+        // type, bits beside any and an integer beside an integer: "Vector with elements of different types are not
+        // allowed in st instruction", as in `ld`, `ldu`, `mov`, `suld.b`, `sust.b`, `sust.p`, `ldmatrix` and `mma`. It
+        // checks each register against its neighbour alone, and takes `st.global.v4.b32 [%rd1], {%f1, %b1, %i1, %i1};`,
+        // an `f32` and a `u32` with a `b32` between, as it takes `{%h1, %b1, %r1, %r1}`, an `f16x2` and a `u32` with
+        // one: that looks like a bug of its own, and kernite checks each register against each before it. A special
+        // register, a value known now and `_` are no register here, and the lead, an array's index, ptxas checks apart.
+        let regs: Vec<(usize, Ty)> = parts
+            .iter()
+            .enumerate()
+            .skip(usize::from(spec.lead.is_some()))
+            .filter_map(|(k, p)| match p {
+                Given::Var(Var::Reg { ty, .. }) => Some((k, ty.decl())),
+                _ => None,
+            })
+            .collect();
+        for (i, &(k, ty)) in regs.iter().enumerate() {
+            if let Some(&(j, other)) = regs[..i].iter().find(|&&(_, other)| !ty.fits(other)) {
+                w.part = Some(k);
+                let one = match ty.bits() == other.bits() {
+                    true => "type, bits beside any and an integer beside an integer",
+                    false => "size",
+                };
+                let (this, beside) = (self.given(&parts[k]), self.given(&parts[j]));
+                return Err(format!(
+                    "`{name}` takes the registers of a vector of one {one}; this is {this} beside {beside}"
+                ));
+            }
         }
         if texts.iter().all(|t| t == "_") {
             return Err(format!("`{name}` writes one of them at least"));
@@ -680,8 +702,10 @@ impl Kernel {
                     }
                     _ => {}
                 }
-                let fits = if b.form.wide && !w.inside { ty.fits_wide(t) } else { ty.fits(t) };
-                if !fits {
+                let fits = |ty: Ty| if b.form.wide && !w.inside { ty.fits_wide(t) } else { ty.fits(t) };
+                // ptxas 13.5 takes an `f16x2` for an integer, and reads its 32 bits as a `u32`'s, unless the operand
+                // is `exact`.
+                if !fits(*ty) && !(*ty == Ty::F16x2 && !spec.exact && fits(Ty::U32)) {
                     return Err(format!("`{name}` wants a `{}` variable; this is a `{}`", t.name(), ty.name()));
                 }
                 let text = var(*reg, *ty, w);
@@ -706,7 +730,7 @@ impl Kernel {
                         m.space.noun()
                     ));
                 }
-                // ptxas 13.4 refuses a global address in 32 bits: "32-Bit compilation is no
+                // ptxas 13.5 refuses a global address in 32 bits: "32-Bit compilation is no
                 // longer supported".
                 if m.space == Space::Global && t.bits() != 64 {
                     return Err(format!(
@@ -734,9 +758,6 @@ impl Kernel {
                 }
                 Some(r) => {
                     w.needs = w.needs.and(r.needs);
-                    if r.needs != Needs::default() {
-                        w.named.push(format!("%{}", r.name));
-                    }
                     Ok(format!("%{s}"))
                 }
             },
@@ -746,7 +767,11 @@ impl Kernel {
             },
             Given::Not(_) => Err(format!("`{name}` takes no operand inverted")),
             Given::Neg(v) if spec.neg => match **v {
-                Given::Var(Var::Reg { .. } | Var::Part { .. }) => Ok(format!("-{}", self.one(b, spec, v, name, w)?)),
+                // ptxas 13.5 refuses an `f16x2` negated for an integer: "Illegal argument to unary minus".
+                Given::Var(Var::Reg { .. } | Var::Part { .. }) => {
+                    let negated = Spec { exact: true, ..spec.clone() };
+                    Ok(format!("-{}", self.one(b, &negated, v, name, w)?))
+                }
                 _ => Err(format!("`{name}` negates a variable, `-a`; this is {} negated", self.given(v))),
             },
             Given::Neg(_) => Err(format!("`{name}` takes no operand negated")),
@@ -864,7 +889,7 @@ impl Kernel {
             }
             Some(Var::Reg { reg, ty }) => (reg, ty),
         };
-        if ty.kind() == Kind::Float || ty.kind() == Kind::Pred {
+        if matches!(ty.decl().kind(), Kind::Float | Kind::Pred) {
             return Err(format!("`{name}` takes an address in an integer variable; this is a `{}`", ty.name()));
         }
         if wide && ty.bits() != 64 {
@@ -956,8 +981,7 @@ impl Kernel {
             // A kernel's address is for the GPU to launch it, as CUDA's dynamic parallelism
             // does from Kepler's sm_35 on.
             Callee::Kernel => {
-                w.needs = w.needs.and(Needs { ptx: 31, sm: 35, ..Needs::default() });
-                w.named.push(f.to_string());
+                w.needs = w.needs.and(Needs { ptx: 31, sm: 35 });
             }
             Callee::Broken => return Err(format!("`{f}` does not compile, so no kernel names it")),
         }
@@ -1048,7 +1072,7 @@ impl Kernel {
             (fp, targets) => {
                 let fp = match fp {
                     Given::Var(Var::Reg { reg, ty })
-                        if matches!(ty.kind(), Kind::Bit | Kind::Unsigned | Kind::Signed)
+                        if matches!(ty.decl().kind(), Kind::Bit | Kind::Unsigned | Kind::Signed)
                             && matches!(ty.bits(), 32 | 64) =>
                     {
                         reads.push(Arg { operand: Operand::Reg(*reg, width(*ty)), access: Access::Read });
@@ -1066,8 +1090,7 @@ impl Kernel {
                     }
                 };
                 // As `ptxas` has a call through a variable.
-                self.require(Needs { ptx: 21, sm: 20, ..Needs::default() }, &format!("{name} {fp}"))
-                    .map_err(Fault::new)?;
+                self.needs = self.needs.and(Needs { ptx: 21, sm: 20 });
                 match targets {
                     Some(targets) => {
                         let mut texts: Option<Vec<String>> = None;
@@ -1206,7 +1229,7 @@ impl Kernel {
                 )));
             }
             (Returns::Value(t), Some(r)) => match r {
-                Given::Var(Var::Reg { reg, ty }) if ty.fits(t) => {
+                Given::Var(Var::Reg { reg, ty }) if fits_param(*ty, t, true) => {
                     args.push(Arg { operand: Operand::Reg(*reg, width(*ty)), access: Access::Write });
                     format!("%{}", self.reg(*reg))
                 }
@@ -1246,7 +1269,7 @@ impl Kernel {
                 1 => format!("`{f}` takes a `{}`", t.name()),
                 _ => format!("`{f}` takes a `{}` as argument {}", t.name(), k + 1),
             };
-            texts.push(self.pass(t, &wants, a, args).map_err(|m| Fault::at(at, m))?);
+            texts.push(self.pass(t, &wants, a, true, args).map_err(|m| Fault::at(at, m))?);
         }
         Ok(vec![r, texts.join(", ")])
     }
@@ -1294,13 +1317,20 @@ impl Kernel {
         Ok(vec![r, texts.join(", "), proto])
     }
 
-    /// `a` as a value of type `t` passed to a function or given back from one, written out: a
-    /// variable of a type that fits it, as `ptxas` checks a call, or a value known now, as the
-    /// type writes it; with what it reads added to `args`. `wants` says what it is to be.
-    fn pass(&self, t: Ty, wants: &str, a: &Given<Var>, args: &mut Vec<Arg<VReg>>) -> Result<String, String> {
+    /// `a` as a value of type `t` passed to a function, if `call`, or given back from one, written out: a
+    /// variable of a type that [`fits_param`] takes for `t`, or a value known now, as the type writes it;
+    /// with what it reads added to `args`. `wants` says what it is to be.
+    fn pass(
+        &self,
+        t: Ty,
+        wants: &str,
+        a: &Given<Var>,
+        call: bool,
+        args: &mut Vec<Arg<VReg>>,
+    ) -> Result<String, String> {
         let not = |what: String| format!("{wants}; this is {what}");
         match a {
-            Given::Var(Var::Reg { reg, ty }) if ty.fits(t) => {
+            Given::Var(Var::Reg { reg, ty }) if fits_param(*ty, t, call) => {
                 args.push(Arg { operand: Operand::Reg(*reg, width(*ty)), access: Access::Read });
                 Ok(format!("%{}", self.reg(*reg)))
             }
@@ -1334,8 +1364,8 @@ impl Kernel {
             return Err(Fault::new(format!("`{f}` returns a `{}`, which `{name}(v)` gives back", t.name())));
         };
         let mut reads = vec![];
-        let text =
-            self.pass(t, &format!("`{f}` returns a `{}`", t.name()), a, &mut reads).map_err(|m| Fault::at(0, m))?;
+        let wants = format!("`{f}` returns a `{}`", t.name());
+        let text = self.pass(t, &wants, a, false, &mut reads).map_err(|m| Fault::at(0, m))?;
         let on = self.guarded(guard);
         let line = format!("{on}st.param.{} [{symbol}_retval], {text};\n\t{on}{name};", formal(t).name());
         let flow = if guard.is_none() { Flow::Return } else { Flow::Next };
@@ -1440,7 +1470,7 @@ fn is_value(a: &Given<Var>) -> bool {
 }
 
 /// Whether `a` is a variable that values known now may be beside, in registers taken
-/// together: ptxas 13.4 takes `{%r1, 8}` and `{%laneid, 8}`, but not `{%tid.x, 8}`, though
+/// together: ptxas 13.5 takes `{%r1, 8}` and `{%laneid, 8}`, but not `{%tid.x, 8}`, though
 /// it takes `{%tid.x, %r1}`.
 fn anchors(a: &Given<Var>) -> bool {
     match a {
@@ -1454,7 +1484,7 @@ fn anchors(a: &Given<Var>) -> bool {
 fn int(t: Ty, x: i128, name: &str) -> Result<String, String> {
     match t {
         // An integer is a predicate as PTX's ISA says, 0 false and the rest true; written as
-        // 0 or 1, as ptxas 13.4 reads `set`'s and `setp`'s `c` in its low 32 bits alone.
+        // 0 or 1, as ptxas 13.5 reads `set`'s and `setp`'s `c` in its low 32 bits alone.
         Ty::Pred => Ok(if x == 0 { "0" } else { "1" }.into()),
         Ty::F32 if (x as f32) as i128 == x => Ok(format!("0f{:08X}", (x as f32).to_bits())),
         Ty::F64 if (x as f64) as i128 == x => Ok(format!("0d{:016X}", (x as f64).to_bits())),
@@ -1652,9 +1682,7 @@ impl Target for Kernel {
         let t = match ty {
             _ if self.func.is_some() => {
                 let t = crate::call::passable(ty)?;
-                if t.needs() != Needs::default() {
-                    self.require(t.needs(), &format!("{name}: {}", t.name()))?;
-                }
+                self.needs = self.needs.and(t.needs());
                 t
             }
             _ if pointer => Ty::U64,
@@ -1693,9 +1721,9 @@ impl Target for Kernel {
         }
         let returns = crate::call::returns(ty)?;
         match returns {
-            Returns::Value(t) if t.needs() != Needs::default() => self.require(t.needs(), &format!("-> {ty}"))?,
+            Returns::Value(t) => self.needs = self.needs.and(t.needs()),
             // As `ptxas` has `.noreturn`.
-            Returns::Never => self.require(Needs { ptx: 64, sm: 30, ..Needs::default() }, "-> !")?,
+            Returns::Never => self.needs = self.needs.and(Needs { ptx: 64, sm: 30 }),
             _ => {}
         }
         self.func = Some(returns);
@@ -1723,9 +1751,7 @@ impl Target for Kernel {
         let Some(t) = Ty::parse(ty) else {
             return Err(format!("PTX variables are {TYPES}, not `{ty}`"));
         };
-        if t.needs() != Needs::default() {
-            self.require(t.needs(), &format!("let {name}: {}", t.name()))?;
-        }
+        self.needs = self.needs.and(t.needs());
         Ok(Var::Reg { reg: self.new_var(name, t), ty: t })
     }
 
@@ -1851,11 +1877,7 @@ impl Target for Kernel {
                 None => Fault::new(format!("`{name}` takes {}, not {}", counts(&ranges), args.len())),
             });
         };
-        let mut what = name.to_string();
-        for s in &w.named {
-            what += &format!(" {s}");
-        }
-        self.require(b.needs.and(w.needs), &what).map_err(Fault::new)?;
+        self.needs = self.needs.and(b.needs).and(w.needs);
         for f in &w.funcs {
             self.named_fn(f);
         }

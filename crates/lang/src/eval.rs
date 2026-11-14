@@ -420,7 +420,7 @@ impl<'a, T: Target> Eval<'a, T> {
         }
         self.target.directives(&given).map_err(|(i, fault)| {
             let d = &f.directives[i];
-            Error { span: fault.arg.and_then(|a| d.values.get(a)).map_or(d.span, Expr::span), message: fault.message }
+            Error { span: place(&fault, &d.values, d.span), message: fault.message }
         })
     }
 
@@ -1252,7 +1252,7 @@ impl<'a, T: Target> Eval<'a, T> {
         self.target.inst_at(span);
         self.target
             .inst(&spelled(name), &ops, self.guard)
-            .map_err(|f| Error { span: f.arg.and_then(|i| args.get(i)).map_or(span, Expr::span), message: f.message })
+            .map_err(|f| Error { span: place(&f, args, span), message: f.message })
     }
 
     fn place_label(&mut self, args: &[Expr], span: Span) -> Result<(), Error> {
@@ -1410,6 +1410,16 @@ fn dotted(e: &Expr) -> Option<String> {
         Expr::Path(path, _) if path.len() == 1 => Some(path[0].clone()),
         Expr::Field(base, name, _) => Some(format!("{}.{name}", dotted(base)?)),
         _ => None,
+    }
+}
+
+/// Where `fault` is among `args`, the operands of what is at `span`: the part of an argument that it names, as
+/// `(a, b)` has parts, or the argument, or `span`.
+fn place(fault: &Fault, args: &[Expr], span: Span) -> Span {
+    let Some(arg) = fault.arg.and_then(|i| args.get(i)) else { return span };
+    match (arg, fault.part) {
+        (Expr::Tuple(parts, _), Some(p)) => parts.get(p).map_or(arg.span(), Expr::span),
+        _ => arg.span(),
     }
 }
 
