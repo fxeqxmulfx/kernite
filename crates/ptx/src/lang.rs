@@ -929,7 +929,7 @@ impl Kernel {
             return Err(format!("`{name}` {verb} {size} bytes at `{at}`, past the end of `{v}`, {n} bytes"));
         }
         if m.align < size {
-            let stem = ty.strip_suffix('>').unwrap_or(ty);
+            let stem = ty.trim_suffix('>');
             let stem = match stem.rsplit_once(", ") {
                 Some((stem, align)) if align.parse::<u64>().is_ok() => stem,
                 _ => stem,

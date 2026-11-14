@@ -1836,7 +1836,7 @@ fn spec(s: &'static str, line: &str) -> Spec {
     };
     let mut first = if let Some((a, b)) = s.split_once("[|") {
         let mut first = one(a, line);
-        first.second = Some((Box::new(one(b.strip_suffix(']').unwrap_or(b), line)), true));
+        first.second = Some((Box::new(one(b.trim_suffix(']'), line)), true));
         first
     } else if let Some((a, b)) = s.split_once('|').filter(|_| !s.starts_with(['[', '#'])) {
         let mut first = one(a, line);

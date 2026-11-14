@@ -880,5 +880,5 @@ the examples.
 ./make.py publish  # publishes each crate crates.io lacks at its version, one at a time
 ```
 
-kernite builds with Rust 1.99.1 and later, as the workspace's `rust-version` says. `make.py` runs under
+kernite builds with Rust 1.100 and later, as the workspace's `rust-version` says. `make.py` runs under
 [uv](https://docs.astral.sh/uv/).

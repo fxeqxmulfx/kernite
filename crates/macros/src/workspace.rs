@@ -144,7 +144,7 @@ type Entry = (Vec<String>, Option<String>);
 /// not one. A value that is not a string is passed by whole, but for the keys of an inline table
 /// and the strings of an array, which are entries of their own.
 fn parse(text: &str) -> Option<Vec<Entry>> {
-    let mut toml = Toml(text.strip_prefix('\u{feff}').unwrap_or(text));
+    let mut toml = Toml(text.trim_prefix('\u{feff}'));
     let (mut entries, mut table, mut arrays) = (vec![], vec![], vec![]);
     loop {
         toml.skip();

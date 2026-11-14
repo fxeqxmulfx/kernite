@@ -93,7 +93,7 @@ impl Tree {
 /// The name Rust reads in `ident`, an identifier as written: `u64` in `r#u64`. A keyword is asked of `ident` as
 /// written, for `r#let` is a name and not `let`; any other name, of what this gives.
 pub fn unraw(ident: &str) -> &str {
-    ident.strip_prefix("r#").unwrap_or(ident)
+    ident.trim_prefix("r#")
 }
 
 /// The keywords Rust lets be written raw, the strict and the reserved ones of every edition: each is a name only if it
@@ -140,7 +140,7 @@ pub(crate) fn primitive(trees: &[Tree]) -> Option<(&'static str, usize)> {
     // Three names and the two `::` between them are seven trees, and nine with the `::` before them.
     let len = if colons(trees, 0) { 9 } else { 7 };
     let written = text(trees.get(..len)?);
-    let names: Vec<&str> = written.strip_prefix("::").unwrap_or(&written).split("::").map(unraw).collect();
+    let names: Vec<&str> = written.trim_prefix("::").split("::").map(unraw).collect();
     match names[..] {
         ["core" | "std", "primitive", name] => PRIMITIVES.into_iter().find(|p| *p == name).map(|p| (p, len)),
         _ => None,
@@ -583,7 +583,7 @@ impl Lexer<'_> {
         }
         if matches!(self.peek(), Some('e' | 'E')) {
             let rest = &self.src[self.pos + 1..];
-            let digits = rest.strip_prefix(['+', '-']).unwrap_or(rest);
+            let digits = rest.trim_prefix(['+', '-']);
             if digits.starts_with(|c: char| c.is_ascii_digit()) {
                 self.pos += 1 + (rest.len() - digits.len());
                 while self.peek().is_some_and(|c| c == '_' || c.is_ascii_digit()) {

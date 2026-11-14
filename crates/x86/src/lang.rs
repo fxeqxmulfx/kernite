@@ -1327,7 +1327,7 @@ impl Kernel {
         }
         let Kind::Aligned(_) = kind else { return Ok(()) };
         if memory.align < size {
-            let stem = ty.strip_suffix('>').unwrap_or(ty);
+            let stem = ty.trim_suffix('>');
             let stem = match stem.rsplit_once(", ") {
                 Some((stem, align)) if align.parse::<u64>().is_ok() => stem,
                 _ => stem,
