@@ -13,6 +13,10 @@ fn compiles_for_ptx(src: &str) -> bool {
     kernite::ptx_str(src).unwrap_or_else(|e| panic!("{e}")).contains(".visible .entry ")
 }
 
+/// What kernite says of a function of ABI `C`, which it compiles nothing for, at the ABI.
+const ABI_C: &str = "kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for \
+                     NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` is none of these";
+
 #[test]
 fn x86_str_compiles_no_gpu_kernel() {
     let src = "pub unsafe extern \"sysv64\" fn k() {}\n\
@@ -25,8 +29,6 @@ fn x86_str_compiles_no_gpu_kernel() {
         assert_eq!(kernite::x86_str(src, name).unwrap_err(), said, "{name}");
     }
     assert!(compiles_for_ptx(src));
-    // A function of an ABI kernite knows nothing of is none of the process's either: it is no kernel.
-    assert_eq!(kernite::x86_str("extern \"C\" fn c() {}", "c").unwrap_err(), "no kernel `c`");
 }
 
 /// A name of a function the process runs that is none of its instances says that the function has none of that
@@ -59,9 +61,27 @@ fn x86_str_says_why_a_name_finds_no_kernel() {
 fn ptx_str_compiles_no_function_of_an_abi_kernite_does_not_know() {
     // PTX would refuse `add(x, 1)`, but it is not asked: the ABI is the error.
     let src = "pub unsafe extern \"ptx-kernel\" fn k() {}\nextern \"C\" fn c(x: u64) { add(x, 1); }\n";
-    let abi = "kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for NVIDIA \
-               GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` is none of these";
-    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("2:8: {abi}"));
+    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("2:8: {ABI_C}"));
+}
+
+/// A function of an ABI kernite knows nothing of is none of the process's, and where the name given is its own, or an
+/// instance's of it, the error is the one `ptx_str` gives of the module, at the ABI: not that no kernel has the name,
+/// nor what is wrong with the function's `#[instances(..)]`, which kernite does not check. The name of a helper, and
+/// one that no function has, find no kernel, whatever else the module has.
+#[test]
+fn x86_str_refuses_the_name_of_a_function_of_an_abi_kernite_does_not_know() {
+    // `c` takes no compile-time arguments, so the second's `#[instances(..)]` is wrong.
+    for (src, at) in [("extern \"C\" fn c() {}", "1:8"), ("#[instances(2)] extern \"C\" fn c() {}", "1:24")] {
+        let at_the_abi = kernite::ptx_str(src).unwrap_err();
+        assert_eq!(at_the_abi, format!("{at}: {ABI_C}"));
+        for name in ["c", "c::<2>"] {
+            assert_eq!(kernite::x86_str(src, name).unwrap_err(), at_the_abi, "{src}: {name}");
+        }
+    }
+    let src = "fn h() {}\nunsafe extern \"sysv64\" fn k() {}\nextern \"C\" fn c() {}";
+    for name in ["h", "nope"] {
+        assert_eq!(kernite::x86_str(src, name).unwrap_err(), format!("no kernel `{name}`"), "{name}");
+    }
 }
 
 #[test]

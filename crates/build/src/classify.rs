@@ -46,6 +46,12 @@ pub fn abi(f: &Fn) -> Option<Abi> {
     f.abi.as_ref().and_then(|(abi, _)| Abi::of(abi))
 }
 
+/// The ABI `f` names: none for a helper, which names none, and the error, at the ABI, for one kernite knows nothing of.
+pub(crate) fn abi_or_error(f: &Fn) -> Result<Option<Abi>, kernite_lang::Error> {
+    let Some((name, at)) = &f.abi else { return Ok(None) };
+    Abi::of(name).map(Some).ok_or_else(|| said(Refusal::UnknownAbi { abi: name }, *at))
+}
+
 /// Whether `f`, of ABI `abi`, is an `unsafe fn` if it must be: a kernel trusts the pointers it is
 /// given, so it is one. A function the kernels call is called by nothing else, so it promises
 /// Rust nothing, and need not be.

@@ -116,6 +116,10 @@ fn laid(name: &str, held: &str) -> Laid {
 /// The characters of what its statics hold that Echo has room for.
 const ROOM: usize = 20;
 
+/// What kernite says of a function of ABI `C`, which it compiles nothing for, at the ABI.
+const ABI_C: &str = "kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for \
+                     NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` is none of these";
+
 /// Where each of `mentions` is in `src`, as `line:column: name`.
 fn placed(src: &str, mentions: &[Mention]) -> Vec<String> {
     mentions.iter().map(|m| Error { span: m.span, message: m.name.clone() }.at(src)).collect()
@@ -589,11 +593,11 @@ fn an_instance_says_which_when_it_fails() {
 /// arguments, or an instance of one that does. A name that names none says why: the GPU runs the
 /// function, whichever instance of it the name is; the function the process runs has no instance of
 /// that name; or no function the process runs has the name: no function has it, or it is a
-/// helper's, or its function names an ABI kernite knows nothing of. A name of a function that does
-/// not compile, or whose `#[instances(..)]` is wrong, is the error. So is the first static that is
-/// not laid out, whatever the name. What it compiles is told its function and its compile-time
-/// arguments, and the module's statics and callees. Once it has compiled, what is wrong with the
-/// rest of the module is the error as well.
+/// helper's. A name of a function that does not compile, whose `#[instances(..)]` is wrong, or of
+/// an ABI kernite knows nothing of, whichever instance the name is of, is the error: at the ABI,
+/// for the last. So is the first static that is not laid out, whatever the name. What it compiles
+/// is told its function and its compile-time arguments, and the module's statics and callees. Once
+/// it has compiled, what is wrong with the rest of the module is the error as well.
 #[test]
 fn one_says_why_a_name_finds_no_kernel() {
     let src = "#[instances(2, 4)] unsafe extern \"ptx-kernel\" fn tile<const N: u32>() {}\n\
@@ -609,7 +613,6 @@ fn one_says_why_a_name_finds_no_kernel() {
     let absent = [
         ("j", Absent::Kernel),
         ("h", Absent::Kernel),
-        ("c", Absent::Kernel),
         ("tile", gpu),
         ("tile::<3>", gpu),
         ("tile::<4>", gpu),
@@ -619,6 +622,11 @@ fn one_says_why_a_name_finds_no_kernel() {
         assert_eq!(found(name), Ok(Err(why)), "{name}");
     }
     assert_eq!(found("bad"), Err("4:39: a bool is no operand".into()));
+    // A function of an ABI kernite knows nothing of is the error at its ABI, as `all` has it, whichever instance the
+    // name is of.
+    for name in ["c", "c::<2>"] {
+        assert_eq!(found(name), Err(format!("6:8: {ABI_C}")), "{name}");
+    }
     let once = "`once` takes no compile-time arguments, so it is compiled once, with no `#[instances(..)]`";
     assert_eq!(found("once"), Err(format!("5:3: {once}")));
     // `k` compiles, but with `tile` and the static the module is two modules.
@@ -685,8 +693,6 @@ fn all_compiles_each_instance_in_order() {
     let two = "a static is memory of the module's kernels: the GPU's, for PTX kernels, or the process's, for x86 \
                ones; and this module has both, so it is two modules, one of each kind of kernel and the statics \
                they name";
-    let abi = "kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for NVIDIA \
-               GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` is none of these";
     let failing = [
         (
             "#[cooperative] fn h() {}\nstatic B: global<u32> = 13;\nstatic T: constant<u32>;",
@@ -707,7 +713,7 @@ fn all_compiles_each_instance_in_order() {
             "static A: global<u32>;\nunsafe extern \"sysv64\" fn x() {}\nunsafe extern \"ptx-kernel\" fn k() {}",
             format!("1:8: {two}"),
         ),
-        ("unsafe extern \"ptx-kernel\" fn k() {}\nextern \"C\" fn c() {}", format!("2:8: {abi}")),
+        ("unsafe extern \"ptx-kernel\" fn k() {}\nextern \"C\" fn c() {}", format!("2:8: {ABI_C}")),
     ];
     for (src, want) in failing {
         assert_eq!(all(&parse(src).unwrap(), &Echo).map_err(|e| e.at(src)), Err(want));
@@ -1121,9 +1127,7 @@ fn a_function_of_an_abi_kernite_does_not_know_is_refused() {
     let src = "unsafe extern \"C\" fn f() {}";
     let out = echoed(src);
     let [ItemOut::Unknown(Some(e))] = &out.items[..] else { panic!("{:?}", out.items) };
-    let none = "1:15: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for \
-                NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` is none of these";
-    assert_eq!(e.at(src), none);
+    assert_eq!(e.at(src), format!("1:15: {ABI_C}"));
     assert!(out.device.is_none());
 }
 

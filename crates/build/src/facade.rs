@@ -3,7 +3,7 @@
 
 use kernite_lang::{Error, ItemKind, Module};
 
-use crate::classify::{attributes, helper, named, trusted};
+use crate::classify::{abi_or_error, attributes, helper, named, trusted};
 use crate::present::{Refusal, said};
 use crate::{Abi, Compiled, Device, Native, abi, compile, instance, owner, prepare};
 
@@ -17,18 +17,17 @@ pub enum Absent<'a> {
     /// `sum4::<2>`, where `sum4` takes no compile-time arguments or lists no 2 in its
     /// `#[instances(..)]`, or `tile`, where `tile` takes some.
     Instance(&'a str),
-    /// No function the process runs has the name: no function has it, or it is a helper's, or its
-    /// function names an ABI kernite knows nothing of.
+    /// No function the process runs has the name: no function has it, or it is a helper's.
     Kernel,
 }
 
 /// Function `name` of `module`, or its instance `tile::<4>`, compiled by `native`, or why not:
 /// where `name` names no instance of a function the process runs, [`Absent`] says why. The first
-/// static that is not laid out is the error, whatever the name. Once the instance has compiled,
-/// what is wrong with the rest of the module is the error as well, as the macro says it: the module
-/// is two modules, a helper does not parse, a function names an ABI kernite knows nothing of, a
-/// kernel is not an `unsafe fn`, or a function's `#[cooperative]`, directive or `#[instances(..)]` is
-/// wrong.
+/// static that is not laid out is the error, whatever the name; and a name of a function of an ABI
+/// kernite knows nothing of is the error at the ABI. Once the instance has compiled, what is wrong
+/// with the rest of the module is the error as well, as the macro says it: the module is two
+/// modules, a helper does not parse, a function names an ABI kernite knows nothing of, a kernel is
+/// not an `unsafe fn`, or a function's `#[cooperative]`, directive or `#[instances(..)]` is wrong.
 pub fn one<'a, N: Native>(
     module: &'a Module,
     native: &N,
@@ -39,8 +38,9 @@ pub fn one<'a, N: Native>(
         s.as_ref().map_err(Clone::clone)?;
     }
     let Some(f) = named(module, name) else { return Ok(Err(Absent::Kernel)) };
+    let abi = abi_or_error(f)?;
     let found = instance(module, name)?;
-    match abi(f) {
+    match abi {
         None => return Ok(Err(Absent::Kernel)),
         Some(a) if !a.native() => return Ok(Err(Absent::Gpu(&f.name))),
         Some(_) => {}
@@ -91,13 +91,12 @@ fn rules(module: &Module) -> Result<(), Error> {
     owner(module)?;
     for item in &module.items {
         let ItemKind::Fn(f) = &item.kind else { continue };
-        let Some((name, at)) = &f.abi else {
+        let Some(abi) = abi_or_error(f)? else {
             if let Some(e) = helper(module, f).into_iter().next() {
                 return Err(e);
             }
             continue;
         };
-        let Some(abi) = Abi::of(name) else { return Err(said(Refusal::UnknownAbi { abi: name }, *at)) };
         if !trusted(f, abi) {
             return Err(said(Refusal::NotUnsafe, f.span));
         }
