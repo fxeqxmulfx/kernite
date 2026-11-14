@@ -85,7 +85,7 @@ use kernite_core::{
     Arg, Base, Class, Const, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo, Signature,
     Slot, SlotId, StaticId, VReg,
 };
-use kernite_lang::{Fault, Guard, Operand as Given, Span, Target, Value, article, pointer};
+use kernite_lang::{Fault, Guard, Operand as Given, Span, Target, Value, pointer, with_article};
 
 use crate::bytes;
 use crate::forms::{self, Form, Kind, Miss, Shape};
@@ -232,7 +232,7 @@ impl Ty {
             _ if pointer(ty)? => Ok(Ty::Int),
             "usize" | "isize" | "u64" | "i64" => Ok(Ty::Int),
             "u32" | "i32" | "u16" | "i16" | "u8" | "i8" | "bool" => {
-                Err(format!("SysV leaves the high bits of a `{ty}` as they were; take a usize or a u64"))
+                Err(format!("SysV leaves the high bits of {} as they were; take a usize or a u64", with_article(ty)))
             }
             _ => Err(format!("a kernel takes pointers, 64-bit integers and floats, not `{ty}`")),
         }
@@ -409,7 +409,7 @@ fn datum(t: &str, size: u64, x: &Value, what: &str) -> Result<Vec<u8>, String> {
             if let Some(ty) = ty
                 && ty.name() != t
             {
-                return Err(format!("{what} is {} `{}`, not {} `{t}`", article(ty.name()), ty.name(), article(t)));
+                return Err(format!("{what} is {}, not {}", with_article(ty.name()), with_article(t)));
             }
             let (lo, hi) = match t.starts_with('i') {
                 true => (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1),
@@ -420,10 +420,10 @@ fn datum(t: &str, size: u64, x: &Value, what: &str) -> Result<Vec<u8>, String> {
             }
             Ok(v.to_le_bytes()[..size as usize].to_vec())
         }
-        Value::Int(v, _) => Err(format!("{what} is an integer, and {} `{t}` a float: `{v}.0`", article(t))),
+        Value::Int(v, _) => Err(format!("{what} is an integer, and {} a float: `{v}.0`", with_article(t))),
         Value::F32(v) if t == "f32" => Ok(v.to_le_bytes().to_vec()),
         Value::F64(v) if t == "f64" => Ok(v.to_le_bytes().to_vec()),
-        ref x => Err(format!("{what} is {}, not {} `{t}`", x.kind(), article(t))),
+        ref x => Err(format!("{what} is {}, not {}", x.kind(), with_article(t))),
     }
 }
 

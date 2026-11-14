@@ -254,6 +254,6 @@ fn question_mark_takes_a_fault_into_a_boxed_error() {
 #[test]
 fn a_fault_shown_says_what_is_wrong() {
     let fault = store_an_f32_as_a_u32().unwrap_err();
-    assert_eq!(format!("{fault}"), "`st.global.u32` wants a `u32` variable; this is a `f32`");
+    assert_eq!(format!("{fault}"), "`st.global.u32` wants a `u32` variable; this is an `f32`");
     assert_eq!(format!("{fault}"), fault.message);
 }

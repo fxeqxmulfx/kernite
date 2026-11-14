@@ -5,8 +5,8 @@
 //! `tests/lang.rs`.
 
 use crate::token::{Span, Tree};
-use crate::value::{IntTy, Value, article, cast, typed};
-use crate::{Mention, parse};
+use crate::value::{IntTy, Value, article, cast, typed, with_article};
+use crate::{Mention, instance, parse};
 
 #[test]
 fn the_lexer_reads_what_rust_writes() {
@@ -1367,15 +1367,45 @@ fn an_integer_of_another_type_is_told_by_its_type() {
     assert_eq!(typed(Value::Bf16(0), "f16"), Err("this is a bf16, not f16".into()));
 }
 
-/// A type's name is read with `an` before `f`, `i` and `s`, which are read `ef`, `eye` and `es`, and with `a` before
-/// any other letter: `an f32`, `an i8` and `an s16`, but `a u64`, `a b32` and `a pred`.
+/// A type's name is read with `an` before `e`, `f`, `i` and `s`, which are read `ee`, `ef`, `eye` and `es`, and with
+/// `a` before any other letter: `an e4m3`, `an f32`, `an i8` and `an s16`, but `a u64`, `a b32` and `a pred`. A message
+/// gives the name in backticks after its article, "an `f32`" and "a `u64`".
 #[test]
 fn a_type_name_is_read_with_its_article() {
-    for name in ["f16", "f16x2", "f32", "f64", "i8", "i64", "isize", "s8", "s64"] {
+    for name in ["e4m3", "e5m2", "f16", "f16x2", "f32", "f64", "i8", "i64", "isize", "s8", "s16", "s32", "s64"] {
         assert_eq!(article(name), "an", "{name}");
+        assert_eq!(with_article(name), format!("an `{name}`"));
     }
-    for name in ["u8", "u64", "usize", "b8", "b64", "bf16", "tf32", "pred"] {
+    for name in ["u8", "u32", "u64", "usize", "b8", "b32", "b64", "bf16", "tf32", "pred"] {
         assert_eq!(article(name), "a", "{name}");
+        assert_eq!(with_article(name), format!("a `{name}`"));
+    }
+}
+
+/// An instance gives each generic a value of its type, and what it says of a value that is not one names the type with
+/// its article: an `i32`, a `u8`, a `bool`, an `isize`.
+#[test]
+fn an_instance_gives_each_generic_a_value_of_its_type() {
+    let src = "unsafe extern \"ptx-kernel\" fn k<const A: i32, const B: u8, const C: bool, const D: isize>() {}";
+    let module = parse(src).unwrap();
+    let crate::ItemKind::Fn(f) = &module.items[0].kind else { panic!("a function") };
+    let ok = [
+        Value::Int(-1, Some(IntTy::I32)),
+        Value::Int(1, Some(IntTy::U8)),
+        Value::Bool(true),
+        Value::Int(2, Some(IntTy::Isize)),
+    ];
+    assert_eq!(instance(f, &ok).unwrap(), "k::<-1, 1, true, 2>");
+    // Each at the generic, where it is named.
+    for (at, wrong, want) in [
+        (0, Value::Bool(true), "1:39: `k` takes an `i32` for `A`; this is a bool"),
+        (1, Value::Bool(true), "1:53: `k` takes a `u8` for `B`; this is a bool"),
+        (2, Value::Int(1, Some(IntTy::U8)), "1:66: `k` takes a `bool` for `C`; this is an integer"),
+        (3, Value::F32(1.5), "1:81: `k` takes an `isize` for `D`; this is an f32"),
+    ] {
+        let mut args = ok.clone();
+        args[at] = wrong;
+        assert_eq!(instance(f, &args).unwrap_err().at(src), want);
     }
 }
 
