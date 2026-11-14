@@ -212,44 +212,94 @@ pub(crate) fn clashes(f: &Fn, cfg: &TokenStream, own: &[&str], method: &str, top
     errors
 }
 
-/// `tokens` split at the commas that are not among the arguments of a type's, `x: *mut Pair<u8, 2>`.
-/// The `>` of an arrow, `fn() -> u8`, closes no `<` of them.
-fn split_commas(tokens: &[TokenTree]) -> impl Iterator<Item = &[TokenTree]> {
+/// `tokens` split at each token `ends` says ends a part, that is not among the arguments of a type's, as the comma of
+/// `Pair<u8, 2>` is: a comma between parameters, or a plus between a trait object's bounds, `dyn Debug + Send`. A `>`
+/// that closes no `<` of the tokens' own closes the arguments of a type that holds them, as the `>` after `u8` in
+/// `Option<u8>` does: it is asked of `ends`, as any token is. The `>` of an arrow, `fn() -> u8`, closes no `<`, and
+/// ends nothing.
+fn split_top(tokens: &[TokenTree], ends: impl std::ops::Fn(&TokenTree) -> bool) -> impl Iterator<Item = &[TokenTree]> {
     let (mut open, mut dash) = (0usize, false);
     tokens.split(move |t| {
+        // A `>` after a `-` joint to it is an arrow's, `->`.
+        let arrow = dash && is_punct(t, '>');
+        let end = open == 0 && !arrow && ends(t);
         if is_punct(t, '<') {
             open += 1;
-        } else if is_punct(t, '>') && !dash {
+        } else if is_punct(t, '>') && !arrow {
             open = open.saturating_sub(1);
         }
-        // A `>` after a `-` joint to it is an arrow's, `->`.
         dash = matches!(t, TokenTree::Punct(p) if p.as_char() == '-' && p.spacing() == Spacing::Joint);
-        open == 0 && is_punct(t, ',')
+        end
     })
+}
+
+/// `f`'s signature in `top`, written so that Rust can be given every name in it: a name Rust cannot be given is named
+/// `__kernite_0`, or the next of `__kernite_0`, `__kernite_1` and on that no parameter or compile-time argument of `f`
+/// is named. Rust cannot pass on a parameter named `_`. And it refuses a name written raw that it lets be written in no
+/// place, `r#self`, `r#Self`, `r#super`, `r#crate` or `r#_`, with an error at each place it is written: written again
+/// by the macros as text, in a call or a signature, it is refused again at the module's attribute, where Rust lexes
+/// the text; and a GPU kernel's launcher binds `self` and `Self` for itself, which a parameter or a compile-time
+/// argument so named would take for its own. So the macros never write such a name, and Rust has the places the user
+/// wrote it, for its own error. A compile-time argument is named so wherever the signature names it, in a type too,
+/// `[u8; r#crate]`. All the macros write for `f`, a signature or a body, has the names as they are here.
+pub(crate) fn passable(top: &mut [TokenTree], f: &Fn) {
+    let taken: Vec<&str> =
+        f.generics.iter().map(|g| &g.name).chain(f.params.iter().map(|p| &p.name)).map(String::as_str).collect();
+    let mut free = (0..).map(|n| format!("__kernite_{n}")).filter(|name| !taken.contains(&name.as_str()));
+    let mut fresh = || Ident::new(&free.next().expect("names do not run out"), site());
+    let consts: Vec<(String, Ident)> = const_names(written_generics(f, top))
+        .map(TokenTree::to_string)
+        .filter(|name| lang::never_raw(name))
+        .map(|name| (name, fresh()))
+        .collect();
+    let mut params = TokenStream::new();
+    for (mut param, colon) in written_params(f, top) {
+        if is_ident(&param[colon - 1], "_") || lang::never_raw(&param[colon - 1].to_string()) {
+            param[colon - 1] = fresh().into();
+        }
+        params.extend(param);
+        params.extend(parse(","));
+    }
+    let mut group = Group::new(Delimiter::Parenthesis, params);
+    group.set_span(top[f.params_at].span());
+    top[f.params_at] = group.into();
+    if !consts.is_empty() {
+        let end = f.ret.as_ref().map_or(f.params_at + 1, |r| r.tokens.end);
+        rename(&mut top[f.head.end + 2..end], &consts);
+    }
+}
+
+/// `tokens`, with the second of a pair of `names` for each ident written as the first, in brackets too.
+fn rename(tokens: &mut [TokenTree], names: &[(String, Ident)]) {
+    for token in tokens {
+        match token {
+            TokenTree::Ident(ident) => {
+                if let Some((_, to)) = names.iter().find(|(from, _)| *from == ident.to_string()) {
+                    *token = to.clone().into();
+                }
+            }
+            TokenTree::Group(group) => {
+                let mut inside: Vec<TokenTree> = group.stream().into_iter().collect();
+                rename(&mut inside, names);
+                let mut renamed = Group::new(group.delimiter(), inside.into_iter().collect());
+                renamed.set_span(group.span());
+                *token = renamed.into();
+            }
+            TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+        }
+    }
 }
 
 /// `f`'s parameters as written, each its tokens, `x: *mut f32`, and the place of its colon. A fragment that stays
 /// one type is in parentheses, as [`for_rust`] has it, for the macros write each parameter as it is here, and Rust
 /// reads `*const $t`, with `$t` as `dyn Debug + Send`, as one type only so. A comma ends a parameter unless
-/// [`split_commas`] says it is among the arguments of a type's. Rust cannot pass a parameter named `_` on, so each is
-/// named here, for every signature and body the macros write for `f`: it takes the next of `__kernite_0`,
-/// `__kernite_1` and on that no parameter or compile-time argument of `f` is named.
+/// [`split_top`] says it is among the arguments of a type's. Each name is as [`passable`] has it.
 pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, usize)> {
     let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
-    let tokens = for_rust(flatten(group.stream()));
-    let params = split_commas(&tokens).filter(|p| !p.is_empty());
-    let taken: Vec<&str> =
-        f.generics.iter().map(|g| &g.name).chain(f.params.iter().map(|p| &p.name)).map(String::as_str).collect();
-    let mut free = (0..).map(|n| format!("__kernite_{n}")).filter(|name| !taken.contains(&name.as_str()));
-    params
-        .map(|p| {
-            let mut p = p.to_vec();
-            let colon = p.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type");
-            if is_ident(&p[colon - 1], "_") {
-                p[colon - 1] = TokenTree::Ident(Ident::new(&free.next().expect("names do not run out"), site()));
-            }
-            (p, colon)
-        })
+    let tokens = contents(group);
+    split_top(&tokens, |t| is_punct(t, ','))
+        .filter(|p| !p.is_empty())
+        .map(|p| (p.to_vec(), p.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type")))
         .collect()
 }
 
@@ -315,7 +365,7 @@ fn walk(
                 out.extend(found(name, Place::Type).unwrap_or_else(|| [name.clone()].into_iter().collect()));
             }
             (TokenTree::Group(g), _) if g.delimiter() != Delimiter::Brace => {
-                let mut inner = Group::new(g.delimiter(), walk(&for_rust(flatten(g.stream())), leaf, found));
+                let mut inner = Group::new(g.delimiter(), walk(&contents(g), leaf, found));
                 inner.set_span(g.span());
                 out.extend([TokenTree::Group(inner)]);
             }
@@ -686,20 +736,30 @@ pub(crate) fn value_params(f: &Fn, top: &[TokenTree]) -> TokenStream {
     out
 }
 
-/// The tokens of `stream`, with the invisible groups a macro's fragments arrive in opened, but for those that
-/// [`stays`] says stay one operand or one type: Rust reads `$n * 2` with `$n` as `1 + 2` as `(1 + 2) * 2`, and
-/// opened it would be `1 + 2 * 2`. A group that stays is as it was: what is in it is opened where it is read.
+/// The tokens of `stream`, with the invisible groups a macro's fragments arrive in opened, but for those that stay:
+/// the group [`stays`] says is one operand or one type, as Rust reads `$n * 2` with `$n` as `1 + 2` as `(1 + 2) * 2`,
+/// and opened it would be `1 + 2 * 2`; and the group [`ends_reference`] says ends the type behind a `&`, which
+/// [`for_rust`] parts from the `&`. A group that stays is as it was: what is in it is opened where it is read. But a
+/// group of that second kind that holds the parentheses of a trait object's bounds, `(dyn Debug + Send)`, is those
+/// parentheses written again as the macro's own: [`for_rust`] would put parentheses round the user's pair, which a
+/// `&` wants there, and Rust would call the user's unnecessary. Any other pair it holds, `(u32)`, `(dyn Debug)` or
+/// `([u8])`, is left to [`for_rust`] with the rest, and Rust lints a needless pair of the user's behind a `&` as it
+/// does in a plain function.
 pub(crate) fn flatten(stream: TokenStream) -> Vec<TokenTree> {
     let tokens: Vec<TokenTree> = stream.into_iter().collect();
+    let last_of_reference: Vec<usize> = (0..tokens.len()).filter_map(|at| ends_reference(&tokens, at)).collect();
     let mut out = vec![];
     for (i, t) in tokens.iter().enumerate() {
         match t {
             TokenTree::Group(g) if g.delimiter() == Delimiter::None => {
                 let inside = flatten(g.stream());
-                if stays(&inside, &tokens[..i], &tokens[i + 1..]) {
-                    out.push(t.clone());
-                } else {
-                    out.extend(inside);
+                match &inside[..] {
+                    [TokenTree::Group(b)] if last_of_reference.contains(&i) && bounded(b).is_some() => {
+                        out.push(own(b.delimiter(), b.stream(), b.span()));
+                    }
+                    [_, ..] if last_of_reference.contains(&i) => out.push(t.clone()),
+                    _ if stays(&inside, &tokens[..i], &tokens[i + 1..]) => out.push(t.clone()),
+                    _ => out.extend(inside),
                 }
             }
             t => out.push(t.clone()),
@@ -740,6 +800,33 @@ fn stays(inside: &[TokenTree], before: &[TokenTree], after: &[TokenTree]) -> boo
     loose && (left || right)
 }
 
+/// The place in `tokens` of the last token of the type behind the `&` at `at`, `$t` of `&$t`, if the `&` starts one. A
+/// `&` starts a type where it is the first token, or where a punct but `&` is before it, or `const` or `mut`, as in
+/// `*const &$t`. Any other token before it is taken for an operand, as the `a` of `a & b` is, and so is a `&`, as in
+/// `a && b`: where a `&` behind another is a reference, `&&$t` or `&'a &$t`, it is in the type of the first, which ends
+/// where its own would. The type ends at the first `,`, `;`, `=`, `as`, `where` or brace that is not among the
+/// arguments of a type's, or at the `>` that closes the arguments it is among, as in `Option<&$t>` and
+/// `<&$t as Trait>::Out`. So `&dyn $d`, `&mut $t`, `&*const $t` and `&fn() -> $t` end in `$t`, a group or an ident;
+/// `&Wrap<$t>` and `&[$t]` end in a token of the macro's own, and Rust finds the `&` of those alone.
+fn ends_reference(tokens: &[TokenTree], at: usize) -> Option<usize> {
+    let starts_type = match at.checked_sub(1).map(|before| &tokens[before]) {
+        None => true,
+        Some(TokenTree::Punct(p)) => p.as_char() != '&',
+        Some(before) => is_ident(before, "const") || is_ident(before, "mut"),
+    };
+    if !is_punct(&tokens[at], '&') || !starts_type {
+        return None;
+    }
+    let stops = |t: &TokenTree| {
+        [',', ';', '>', '='].into_iter().any(|c| is_punct(t, c))
+            || is_ident(t, "as")
+            || is_ident(t, "where")
+            || matches!(t, TokenTree::Group(g) if g.delimiter() == Delimiter::Brace)
+    };
+    // The first part is the type.
+    Some(at + split_top(&tokens[at + 1..], stops).next().expect("a split has a first part").len())
+}
+
 /// The first and the last token of `t`: itself, but for a group that [`flatten`] keeps, where they are those
 /// of what is in it.
 fn ends(t: &TokenTree) -> (TokenTree, TokenTree) {
@@ -757,19 +844,76 @@ fn ends(t: &TokenTree) -> (TokenTree, TokenTree) {
 /// the tokens apart, as [`flatten`] does, writes the group again, and Rust reads it as no group at all. The
 /// parentheses are the macro's own, as Rust lints none of what the macro adds, and would lint a type in them,
 /// `Foo<(Vec<u8>)>`; and they stand where the fragment starts, for Rust to say an error of the whole fragment
-/// there. A bracket among the tokens is handed on as it came, with each fragment in it one operand.
-pub(crate) fn for_rust(tokens: Vec<TokenTree>) -> Vec<TokenTree> {
+/// there. They also part a `&` from the fragment that ends its type, `&$t`. Rust says that a `&` has no lifetime at
+/// the start of the span from the `&` to the last token of its type. Where the two differ in hygiene, as a macro's `&`
+/// and a fragment's token do, it puts that token where the macro first wrote the fragment, at the `$t` of the first of
+/// the kernels that take it, and the error of each of the others is there. The macro's own `)` is of a hygiene no
+/// fragment has, and the span is the `&`'s alone. A `$t:ident` is no group, but a token with the place and the hygiene
+/// of the call, which ends the type behind a `&` in the same way: [`is_given`] says when it is in the macro's
+/// parentheses too. `end` is where the tokens end, if they are in a bracket: the closing one. A bracket among the
+/// tokens is handed on as it came, with each fragment in it one operand.
+pub(crate) fn for_rust(tokens: Vec<TokenTree>, end: Option<Span>) -> Vec<TokenTree> {
+    let ends_of_types: Vec<usize> = (0..tokens.len()).filter_map(|at| ends_reference(&tokens, at)).collect();
     tokens
-        .into_iter()
-        .map(|t| match t {
-            TokenTree::Group(ref g) if g.delimiter() == Delimiter::None => {
-                let mut group = Group::new(Delimiter::Parenthesis, g.stream());
-                group.set_span(Span::mixed_site().located_at(ends(&t).0.span()));
-                group.into()
+        .iter()
+        .enumerate()
+        .map(|(at, t)| match t {
+            TokenTree::Group(g) if g.delimiter() == Delimiter::None => {
+                own(Delimiter::Parenthesis, g.stream(), ends(t).0.span())
             }
-            t => t,
+            TokenTree::Ident(name) if ends_of_types.contains(&at) && is_given(&tokens, at, end) => {
+                own(Delimiter::Parenthesis, t.clone().into(), name.span())
+            }
+            t => t.clone(),
         })
         .collect()
+}
+
+/// What is in the bracket `group`, as Rust has it: [`flatten`] opens what it does, and [`for_rust`] writes the rest.
+fn contents(group: &Group) -> Vec<TokenTree> {
+    for_rust(flatten(group.stream()), Some(group.span_close()))
+}
+
+/// Whether the ident at `at` in `tokens`, which ends the type behind a `&`, is one the macro was given, a `$t:ident`,
+/// and not one written in place, as the `u8` of `&u8` is. One it was given has the place of the call: in another file,
+/// or before or after the body of the macro. One written in place is after the token before it, in their file, and
+/// before the token after it, or `end`, where that is after the token before it. Where it is not, the call wrote both,
+/// as a `$r:ty` of `&u8` does, and the token after them is the macro's. A `$t:tt` that Rust has moved to the place of
+/// its `$t`, for the second kernel that takes it, is in place too. Where the `&` is not in the body of a macro, Rust
+/// says an error at an ident in parentheses, and not at the `&`, so none are put round those. The last segment of a
+/// path, `&$a::$b`, can have none either.
+fn is_given(tokens: &[TokenTree], at: usize, end: Option<Span>) -> bool {
+    let precedes = |first: Span, second: Span| {
+        let place = |span: Span| (span.line(), span.column());
+        first.file() == second.file() && place(first.end()) <= place(second)
+    };
+    let ident = tokens[at].span();
+    // A `&` is before the first token of a type, so `at` is not the first.
+    let before = tokens[at - 1].span();
+    let after = tokens.get(at + 1).map(TokenTree::span).or(end);
+    let in_place =
+        precedes(before, ident) && after.is_none_or(|after| precedes(ident, after) || !precedes(before, after));
+    !in_place && !is_name(&tokens[..at], &tokens[at + 1..])
+}
+
+/// `stream` in a group of `delimiter` that is the macro's own, standing where `at` is. Rust lints none of what the
+/// macro adds, and the hygiene of the group is the macro's: no fragment's, and no user's.
+fn own(delimiter: Delimiter, stream: TokenStream, at: Span) -> TokenTree {
+    let mut group = Group::new(delimiter, stream);
+    group.set_span(Span::mixed_site().located_at(at));
+    group.into()
+}
+
+/// What is in the parentheses `g`, as [`for_rust`] has it, if it is the bounds of a trait object: one type with a `+`
+/// of its own, with `dyn` or without, `(dyn Debug + Send)`, and not a tuple, which has commas of its own. A `&` or a
+/// pointer before it needs them, as `&dyn Debug + Send` is ambiguous, and Rust lints none of them as unnecessary there.
+fn bounded(g: &Group) -> Option<Vec<TokenTree>> {
+    if g.delimiter() != Delimiter::Parenthesis {
+        return None;
+    }
+    let inside = contents(g);
+    let parts = |sep| split_top(&inside, move |t| is_punct(t, sep)).count();
+    (parts(',') == 1 && parts('+') > 1).then_some(inside)
 }
 
 /// `tokens` as the language reads them, each span numbered by its place in the spans beside
@@ -970,6 +1114,22 @@ pub(crate) fn host(ty: &[TokenTree]) -> TokenStream {
     half(ty).unwrap_or_else(|| ty.iter().cloned().collect())
 }
 
+/// The type `to` that a kernel's pointer points to, as the argument of `::kernite_cuda::Ptr<..>` in a launcher: as
+/// [`host`] has it, but for a trait object of more than one bound in parentheses, `(dyn Debug + Send)`, which it has
+/// without them. A pointer needs them, as `*const dyn Debug + Send` is ambiguous, and Rust does not lint them there;
+/// an argument does not, and Rust would say there that they are unnecessary. Rust lints the parentheses of any other
+/// type alike in the argument and behind the pointer. A fragment in them that stays one type is in the macro's own
+/// parentheses, as [`for_rust`] has it, for Rust reads a group the macro writes again as no group: `Fn() -> $t + Send`,
+/// with `$t` as `dyn Debug + Sync`, would be `Fn() -> dyn Debug + Sync + Send`.
+pub(crate) fn ptr_argument(to: &[TokenTree]) -> TokenStream {
+    if let [TokenTree::Group(g)] = to
+        && let Some(inside) = bounded(g)
+    {
+        return inside.into_iter().collect();
+    }
+    host(to)
+}
+
 /// `ty` as kernite-cuda names it, if it is `f16` or `bf16`, written raw or not, which Rust has not.
 pub(crate) fn half(ty: &[TokenTree]) -> Option<TokenStream> {
     match ty {
@@ -1039,7 +1199,7 @@ pub(crate) fn launcher_result(f: &Fn, top: &[TokenTree], launched: TokenStream) 
 pub(crate) fn seen(f: &Fn, top: &[TokenTree], guard: &TokenStream) -> TokenStream {
     let written = written_generics(f, top);
     let inside = written.get(1..written.len().saturating_sub(1)).unwrap_or_default();
-    let generics = split_commas(inside).filter(|g| !g.is_empty()).map(|g| g[3..].to_vec());
+    let generics = split_top(inside, |t| is_punct(t, ',')).filter(|g| !g.is_empty()).map(|g| g[3..].to_vec());
     let params = written_params(f, top).into_iter().map(|(param, colon)| param[colon + 1..].to_vec());
     let result = f.ret.iter().map(|r| top[r.tokens.clone()].to_vec());
     let mut out = TokenStream::new();

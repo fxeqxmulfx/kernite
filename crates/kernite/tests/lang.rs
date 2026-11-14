@@ -546,6 +546,94 @@ fn an_attribute_written_raw_is_wrong_as_the_plain_one_is() {
     }
 }
 
+/// What kernite says of an `inline` on a function or a static.
+const INLINED: &str = "a helper is always inlined, and nothing else is: `#[inline]` changes nothing kernite compiles";
+
+/// Each way to write `#[inline]`, inside the brackets, and the word where the error stands. In `cfg_attr(..)` it is the
+/// `inline` it gives, whatever its condition: `any()` is false, `all()` true.
+const INLINES: [(&str, &str); 14] = [
+    ("inline", "inline"),
+    ("inline(always)", "inline"),
+    ("inline(never)", "inline"),
+    ("inline = \"never\"", "inline"),
+    ("r#inline", "r#inline"),
+    ("r#inline(never)", "r#inline"),
+    ("cfg_attr(all(), inline)", "inline"),
+    ("cfg_attr(any(), inline(never))", "inline"),
+    ("cfg_attr(target_arch = \"x86_64\", inline(always))", "inline"),
+    ("cfg_attr(all(), cfg_attr(any(), inline))", "inline"),
+    ("cfg_attr(all(), doc = \"x\", r#inline)", "r#inline"),
+    ("r#cfg_attr(all(), inline)", "inline"),
+    ("cfg_attr(all(), r#inline = \"always\")", "r#inline"),
+    ("cfg_attr(any(), cfg_attr(any(), doc = \"x\", inline(always)))", "inline"),
+];
+
+/// Each item that refuses `#[inline]`, with `ATTR` where it goes, on a line of its own, and the kernel to ask of the
+/// source: a helper; an `extern "ptx-func"` function; a kernel for x86-64, plain, of `#[instances(..)]` and
+/// `#[cooperative]`, the attribute before kernite's own and after; a GPU kernel the same; and a static of each machine.
+/// Each compiles without the attribute.
+const INLINED_ITEMS: [(&str, &str); 18] = [
+    ("unsafe extern \"sysv64\" fn k() { h(); }\nATTR\nfn h() {}", "k"),
+    ("unsafe extern \"sysv64\" fn k() { h(); }\nATTR\nconst fn h() {}", "k"),
+    ("unsafe extern \"ptx-kernel\" fn k() { h(); }\nATTR\nfn h() {}", "k"),
+    ("ATTR\nextern \"ptx-func\" fn f(a: u32) -> u32 { ret(a); }\nunsafe extern \"ptx-kernel\" fn k() {}", "k"),
+    ("ATTR\npub unsafe extern \"sysv64\" fn k() {}", "k"),
+    ("ATTR\n#[instances(1, 2)]\nunsafe extern \"sysv64\" fn k<const N: u64>() {}", "k::<1>"),
+    ("#[instances(1, 2)]\nATTR\nunsafe extern \"sysv64\" fn k<const N: u64>() {}", "k::<2>"),
+    ("ATTR\n#[cooperative]\nunsafe extern \"sysv64\" fn k(p: *mut u64) { grid.sync(); mov(qword[p], 1); }", "k"),
+    ("#[cooperative]\nATTR\nunsafe extern \"sysv64\" fn k(p: *mut u64) { grid.sync(); mov(qword[p], 1); }", "k"),
+    ("ATTR\npub unsafe extern \"ptx-kernel\" fn k() {}", "k"),
+    ("ATTR\n#[instances(1, 2)]\nunsafe extern \"ptx-kernel\" fn k<const N: u32>() {}", "k"),
+    ("#[instances(1, 2)]\nATTR\nunsafe extern \"ptx-kernel\" fn k<const N: u32>() {}", "k"),
+    (
+        "ATTR\n#[cooperative]\nunsafe extern \"ptx-kernel\" fn k(p: *mut u32) { grid.sync(); st.global.u32([p], 1); }",
+        "k",
+    ),
+    (
+        "#[cooperative]\nATTR\nunsafe extern \"ptx-kernel\" fn k(p: *mut u32) { grid.sync(); st.global.u32([p], 1); }",
+        "k",
+    ),
+    ("ATTR\nstatic S: global<[u32; 4]>;\nunsafe extern \"sysv64\" fn k() {}", "k"),
+    ("ATTR\npub static C: constant<[f32; 2]> = [0.5, 1.5];\nunsafe extern \"sysv64\" fn k() {}", "k"),
+    ("ATTR\nstatic S: global<[u32; 4]>;\nunsafe extern \"ptx-kernel\" fn k() {}", "k"),
+    ("ATTR\npub static C: constant<[f32; 2]> = [0.5, 1.5];\nunsafe extern \"ptx-kernel\" fn k() {}", "k"),
+];
+
+/// A helper is always inlined and nothing else is, so `#[inline]` changes nothing kernite compiles, and kernite refuses
+/// it, in every form, on a function or a static: one error, at the `inline`. `kernite::x86_str` and `kernite::ptx_str`
+/// say it of every source, whatever machine its kernels are for, for kernite reads the attribute before it asks one.
+#[test]
+fn an_inline_attribute_on_a_function_or_a_static_is_refused_at_its_inline() {
+    for (item, kernel) in INLINED_ITEMS {
+        let line = item.lines().position(|line| line == "ATTR").expect("a line for the attribute") + 1;
+        compile(&item.replace("ATTR\n", ""), kernel).unwrap_or_else(|e| panic!("{e}\n{item}"));
+        for (form, word) in INLINES {
+            let src = item.replace("ATTR", &format!("#[{form}]"));
+            let column = format!("#[{form}]").find(word).expect("the word of the error") + 1;
+            let want = format!("{line}:{column}: {INLINED}");
+            assert_eq!(kernite::x86_str(&src, kernel).unwrap_err(), want, "{src}");
+            assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{src}");
+        }
+    }
+}
+
+/// An item that is neither a function nor a static keeps its `#[inline]` for Rust to read: a const kernite works out
+/// compiles as it does without the attribute, on x86 and on a GPU. The macros hand the const to Rust as written, and
+/// Rust says what is wrong of it.
+#[test]
+fn an_inline_attribute_on_a_const_is_left_to_rust() {
+    for (src, kernel) in [
+        ("#[inline]\nconst N: u32 = 1;\nunsafe extern \"sysv64\" fn k() { let r: gpr; mov(r, N); }", "k"),
+        (
+            "#[inline]\nconst N: u32 = 1;\nunsafe extern \"ptx-kernel\" fn k(p: *mut u32) { st.global.u32([p], N); }",
+            "k",
+        ),
+    ] {
+        let without = compile(&src.replace("#[inline]\n", ""), kernel).unwrap_or_else(|e| panic!("{e}\n{src}"));
+        assert_eq!(compile(src, kernel), Ok(without), "{src}");
+    }
+}
+
 /// The places a name is written, a kernel for each, `NAME` where the name goes, and the kernel to ask of it: a kernel's
 /// name, a parameter's, a variable's, a type, and the start of a type's path, for x86 and then for a GPU. Each is one
 /// line, so the column of an error at its first `r#` is where that `r#` stands, and each compiles with a plain name
@@ -2240,7 +2328,7 @@ fn array_parameters_take_variables_declared_together() {
 fn a_constant_works_out_on_its_own() {
     let src = "const D: usize = E / H;\nconst E: usize = 16;\nconst H: usize = 4;\nconst W: [f32; 2] = [0.5, -1.0];\n\
                const LOOP: u32 = LOOP + 1;\nconst BAD: u32 = 1.5;\nconst GONE: u32 = NOPE;\n\
-               unsafe extern \"sysv64\" fn k() {}\n";
+               const DIV: u32 = 1 / 0;\nconst REM: u32 = 1 % 0;\nunsafe extern \"sysv64\" fn k() {}\n";
     let module = kernite::lang::parse(src).unwrap();
     let value = |name: &str| {
         let c = module
@@ -2259,9 +2347,30 @@ fn a_constant_works_out_on_its_own() {
         ("LOOP", Err("5:19: `LOOP` is defined in terms of itself")),
         ("BAD", Err("6:18: this is an f32, not u32")),
         ("GONE", Err("7:19: `NOPE` is not defined")),
+        ("DIV", Err("8:20: 1 / 0 divides by zero")),
+        ("REM", Err("9:20: 1 % 0 divides by zero")),
     ];
     for (name, want) in cases {
         assert_eq!(value(name), want.map(String::from).map_err(String::from), "{name}");
+    }
+}
+
+/// A `/` or a `%` of integers known now by zero says that it divides by zero, at its operator, in a const that a kernel
+/// reads, on x86 and on a GPU, as it does where the const is worked out on its own. By one, the same kernels compile.
+#[test]
+fn a_kernel_that_reads_a_division_by_zero_is_told_that_it_divides_by_zero() {
+    let src = |gpu: bool, op: &str, divisor: u32| {
+        let kernel = match gpu {
+            true => r#"unsafe extern "ptx-kernel" fn k(p: *mut u32) { st.global.u32([p], N); }"#,
+            false => r#"unsafe extern "sysv64" fn k() { let r: gpr; mov(r, N); }"#,
+        };
+        format!("const N: u32 = 1 {op} {divisor};\n{kernel}\n")
+    };
+    for (op, want) in [("/", "1:18: 1 / 0 divides by zero"), ("%", "1:18: 1 % 0 divides by zero")] {
+        for gpu in [false, true] {
+            assert_eq!(compile(&src(gpu, op, 0), "k").unwrap_err(), want, "{op}, gpu: {gpu}");
+            compile(&src(gpu, op, 1), "k").unwrap_or_else(|e| panic!("{op} by 1, gpu: {gpu}: {e}"));
+        }
     }
 }
 

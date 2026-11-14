@@ -107,7 +107,7 @@ pub use ast::{
 pub use eval::{Memory, Mention, Run, constant, instance, instances, kernel, memory};
 pub use parse::{module, read};
 pub use target::{Fault, Guard, Mem, Operand, Target};
-pub use token::{Delim, Span, Tree, lex, pointer, read_type, text, unraw};
+pub use token::{Delim, Span, Tree, lex, never_raw, pointer, read_type, text, unraw};
 pub use value::{IntTy, Value, article};
 
 /// Why a module does not compile, and where.

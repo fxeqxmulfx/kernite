@@ -247,13 +247,14 @@ impl<'a> Parser<'a> {
             self.pos += 3;
             return Ok(self.made(start, ItemKind::Other));
         }
-        let (mut instances, mut cooperative, mut directives) = (None, None, vec![]);
+        let (mut instances, mut cooperative, mut directives, mut inline) = (None, None, vec![], None);
         while self.is_op("#") && matches!(self.peek_at(1), Some(Tree::Group { delim: Delim::Bracket, .. })) {
             if let Some(Tree::Group { trees, .. }) = self.peek_at(1)
                 && let [Tree::Ident { name, span, .. }, rest @ ..] = trees.as_slice()
             {
                 // Rust reads an attribute's name written raw, `r#instances`, as the name.
                 let name = unraw(name);
+                inline = inline.or_else(|| inline_in(trees));
                 let at = |message: &str| Err(Error { span: *span, message: message.into() });
                 let tokens = self.pos..self.pos + 2;
                 match name {
@@ -328,12 +329,19 @@ impl<'a> Parser<'a> {
                 span: d.span,
                 message: format!("`#[{}(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`", d.name),
             }));
+        // Only a function and a static refuse it: another item is Rust's, and Rust says what is wrong.
+        let inline = inline.map(|span| Error {
+            span,
+            message: "a helper is always inlined, and nothing else is: `#[inline]` changes nothing kernite \
+                      compiles"
+                .into(),
+        });
         let head = self.pos;
         if self.eat_ident("pub") {
             self.group(Delim::Paren);
         }
         if self.eat_ident("static") {
-            if let Some(e) = misplaced {
+            if let Some(e) = misplaced.or(inline) {
                 return Err(e);
             }
             let s = self.static_rest(attrs, head..self.pos - 1)?;
@@ -390,6 +398,9 @@ impl<'a> Parser<'a> {
             });
             if let Some((span, message)) = refused {
                 return Err(Error { span, message: message.into() });
+            }
+            if let Some(e) = inline {
+                return Err(e);
             }
             let f = self.function(attrs, (instances, cooperative, directives), head..self.pos - 1, abi, unsafe_fn)?;
             return Ok(self.made(start, ItemKind::Fn(f)));
@@ -1012,6 +1023,19 @@ fn block(trees: &[Tree], span: Span) -> Result<Block, Error> {
         }
     }
     Ok(Block { stmts, span })
+}
+
+/// Where the `inline` is that the attribute `meta`, the tokens in its brackets, is or gives by `cfg_attr(..)`, nested
+/// or not: `inline`, `inline(never)`, `cfg_attr(p, inline)`. Of a `cfg_attr(..)` the first is its condition, and the
+/// rest are attributes.
+fn inline_in(meta: &[Tree]) -> Option<Span> {
+    match meta {
+        [Tree::Ident { name, span, .. }, ..] if unraw(name) == "inline" => Some(*span),
+        [Tree::Ident { name, .. }, Tree::Group { delim: Delim::Paren, trees, .. }] if unraw(name) == "cfg_attr" => {
+            trees.split(|t| matches!(t, Tree::Punct { ch: ',', .. })).skip(1).find_map(inline_in)
+        }
+        _ => None,
+    }
 }
 
 /// Arguments, separated by commas.

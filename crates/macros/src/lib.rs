@@ -75,8 +75,9 @@
 //!   - A module of both kinds of kernel and a static is an error: it is two modules, one of
 //!     each kind of kernel, with the statics each names.
 //! - A function without an ABI is a helper, inlined where a kernel calls it, and leaves no
-//!   function behind. Constants and every other item but a `static` stay as written, for Rust
-//!   to use as well.
+//!   function behind. A helper is always inlined, and nothing else is, so `#[inline]`, in any
+//!   form, on a function or a static is an error, at the `inline`. Constants and every other
+//!   item but a `static` stay as written, for Rust to use as well.
 //!   A constant a kernel reads counts as used, as it would if Rust had seen the read, under the
 //!   `cfg` of each item that reads it, a helper's under that of the kernel that calls it and that
 //!   of the helper: only one that nothing reads, or that only what `cfg` leaves out reads, is
@@ -453,7 +454,7 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     let top = flatten(braces.stream());
     let (trees, spans) = lex(&top);
-    let top = for_rust(top);
+    let top = for_rust(top, None);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(Span::call_site);
     // The module as it is, for Rust; and the consts kernite reads, for the kernels. The argument is told where
     // it is, and changes nothing else: the module is the one it would be without it, for the modules of kernels

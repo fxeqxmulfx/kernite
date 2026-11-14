@@ -155,3 +155,11 @@ impl Fault {
         Fault { arg: Some(arg), message: message.into() }
     }
 }
+
+impl fmt::Display for Fault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Fault {}

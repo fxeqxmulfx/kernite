@@ -3,7 +3,7 @@
 //! written and finished, and the module of them all.
 
 use kernite_build::{Backend, Called, Device, DeviceStatic, StaticError, Unfinished};
-use kernite_lang::{ItemKind, Module, Span};
+use kernite_lang::{Fault, ItemKind, Mem, Module, Operand, Span, Target};
 use kernite_ptx::lang::{Callee, Kernel};
 use kernite_ptx::{Prototype, Ptx, Returns, Static, Ty};
 
@@ -224,4 +224,36 @@ fn a_mask_without_lane_0_is_refused_at_its_instruction() {
     let unfinished = Unfinished { at, message: message.into() };
     assert_eq!(ptx.finish(written(&ptx, &module, "masked", &[], &[])), Err(unfinished));
     assert!(ptx.finish(written(&ptx, &module, "guarded", &[], &[])).is_ok());
+}
+
+/// The instruction `st.global.u32` over an `f32` variable, which the target refuses.
+fn store_an_f32_as_a_u32() -> Result<(), Fault> {
+    let mut kernel = Kernel::new("k", "k");
+    let out = kernel.param("out", "*mut f32").unwrap();
+    let x = Operand::Var(kernel.var("x", "f32").unwrap());
+    kernel.inst("st.global.u32", &[Operand::Mem(Mem { base: Some(out), index: None, disp: 0 }), x], None)
+}
+
+/// A refusal is an error: `?` takes a `Fault` into a `Box<dyn Error>`, and keeps it whole.
+#[test]
+fn question_mark_takes_a_fault_into_a_boxed_error() {
+    fn taken() -> Result<(), Box<dyn std::error::Error>> {
+        let mut kernel = Kernel::new("k", "k");
+        kernel.inst("ret", &[], None)?;
+        Ok(())
+    }
+    fn refused() -> Result<(), Box<dyn std::error::Error>> {
+        store_an_f32_as_a_u32()?;
+        Ok(())
+    }
+    taken().unwrap();
+    assert_eq!(refused().unwrap_err().downcast_ref::<Fault>(), Some(&store_an_f32_as_a_u32().unwrap_err()));
+}
+
+/// A refusal shown with `{}` says what is wrong, as its `message` does.
+#[test]
+fn a_fault_shown_says_what_is_wrong() {
+    let fault = store_an_f32_as_a_u32().unwrap_err();
+    assert_eq!(format!("{fault}"), "`st.global.u32` wants a `u32` variable; this is a `f32`");
+    assert_eq!(format!("{fault}"), fault.message);
 }

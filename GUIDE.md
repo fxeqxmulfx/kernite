@@ -52,16 +52,23 @@ held to 64 levels, so that no kernel can run the compiler out of stack. Brackets
 together with the expression inside them, along the helpers that call one another.
 [`kernite-lang`](crates/lang/src/lib.rs) describes the language.
 
+A helper is always inlined, and nothing else is, so `#[inline]` changes nothing kernite compiles: kernite refuses it, in
+every form, on a function or a static, at the `inline`. `#[inline(never)]`, `#[r#inline]` and
+`#[cfg_attr(.., inline(always))]`, whatever the condition, are refused as `#[inline]` is, and Rust says none of its own.
+On a const the attribute is Rust's, and Rust says what is wrong of it.
+
 A type in a kernel's parameters or return means what it means in any function of the module: `super::W` is the `W`
 beside the module of kernels, and `self::W` the one in it. It may name the kernel's compile-time arguments, as in any
 generic function: in `fn arr<const N: usize>(p: *mut [u8; N])`, `arr::<2>` takes a pointer to two bytes. Rust takes the
 argument in a type alone, `N` or `{ N }`, and no expression of it, `N + 1`. An error in a type is Rust's, a pointer's
 among them, said once, at the type, in a kernel of every kind, and so is a lint, at the level the kernel's `allow`,
 `warn`, `deny`, `forbid` or `expect` gives it: a kernel of instances, or a cooperative one, on x86 or on a GPU, is no
-different from any function. The one exception is a pointer that a kernel of instances gives back, which the next
-paragraph tells. A generic is a value: `<T>` is an error at the `T`, and so is `impl` in a parameter's type or the
-result's, wherever in it, `x: impl Copy`, `Option<impl Copy>` or `-> *mut impl Copy`, at the `impl`: in a parameter it
-makes the function generic over a type, and in the result it hides one. kernite says both in the same words.
+different from any function. Rust's lint of needless parentheses is one: `*mut ([u8])` has its warning, on x86 and on a
+GPU as in a plain function, and `*const (dyn Debug + Send)`, where the pointer needs them, has none. The one exception
+is a pointer that a kernel of instances gives back, which the next paragraph tells. A generic is a value: `<T>` is an
+error at the `T`, and so is `impl` in a parameter's type or the result's, wherever in it, `x: impl Copy`,
+`Option<impl Copy>` or `-> *mut impl Copy`, at the `impl`: in a parameter it makes the function generic over a type, and
+in the result it hides one. kernite says both in the same words.
 
 A kernel's pointer to a type with a size, `*const T` or `*mut T`, is one register: `*const [usize; 3]` and
 `*mut *const f32` are taken as `*const f32` is, on x86 and on a GPU. A pointer to a type with no size has two words, an
@@ -228,10 +235,11 @@ is refused as `#[maxnctapersm(..)]` is.
 
 Five names cannot be written raw, as in Rust: `self`, `Self`, `super`, `crate` and `_`. In a module of kernels Rust
 refuses one written so at each place, in its own words, "`self` cannot be a raw identifier", and an `r#` that no name
-follows as well. kernite refuses each where it reads a module from text, as `kernite::x86_str` and `kernite::ptx_str`
-do: at its `r#`, "`self` cannot be written raw" and "`r#` comes before a name, as in `r#u64`", wherever a name is
-written, an attribute's too. Any other name can be written raw, a weak keyword or a reserved word as well, `r#union` and
-`r#gen`.
+follows as well. Of a parameter or a compile-time argument so named it says that alone: the macros name it for Rust, as
+they name a parameter `_`, and write the name no more. kernite refuses each where it reads a module from text, as
+`kernite::x86_str` and `kernite::ptx_str` do: at its `r#`, "`self` cannot be written raw" and "`r#` comes before a
+name, as in `r#u64`", wherever a name is written, an attribute's too. Any other name can be written raw, a weak keyword
+or a reserved word as well, `r#union` and `r#gen`.
 
 A macro's fragment is one operand, or one type, wherever kernite reads it, as Rust reads it. With `$n:expr` as `1 + 2`,
 `$n * 2` is 6, and not the 5 that `1 + 2 * 2` is. It is so in a kernel's expression, on x86 and on a GPU, under a `-`,
@@ -239,9 +247,11 @@ in the length of an array, in `#[instances(..)]`, and in a const, which is 6 to 
 parameter's type, in a result and in an argument of a type, `*const Wrap<$t>`. It is one behind a pointer or a reference
 too: `*const $t` with `$t` as `dyn Debug + Send` is a pointer to one type, as `*const (dyn Debug + Send)` is, and Rust
 does not call its `+` ambiguous. An error in a fragment is said where the fragment is written, in the call of the macro.
-Rust says its error of the whole fragment where the fragment starts: that `1u16 + 2` is no `u8`, at the `1u16`. An
-`$i:ident` or a `$t:tt`, a fragment that holds no operator, `u8::MAX` or `st.global`, and one that no operator is next
-to, `let k = 2 + 3` as a `$s:stmt`, are read as they are written.
+Rust says its error of the whole fragment where the fragment starts: that `1u16 + 2` is no `u8`, at the `1u16`. Where
+kernels of one macro take the same `$t:ty`, `$t:path`, `$t:ident` or `$t:tt`, a result with a `&` before it, `&$t` or
+`Option<&$t>`, has Rust say, at the `&` of each, that it has no lifetime to take, as for kernels written out, wherever
+the macro is defined. An `$i:ident` or a `$t:tt`, a fragment that holds no operator, `u8::MAX` or `st.global`, and one
+that no operator is next to, `let k = 2 + 3` as a `$s:stmt`, are read as they are written.
 
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kernite_macros::consts]` is on, and a
@@ -699,7 +709,7 @@ An `extern "ptx-func"` function is a `.func` that the module's kernels and funct
 takes and returns PTX's types, and `call(g, gcd, (a, b))` calls it by its name, or `call(g, fp, (a, b))` at the
 address `mov.u64(fp, gcd)` put in `fp`. Each call is checked against what the function takes and returns, and a call
 of one that never returns, `-> !`, ends its caller's path there. A helper, a function without an ABI, is inlined
-instead, and leaves no call behind.
+instead, and leaves no call behind. `#[inline]` changes neither, and kernite refuses it on both.
 
 An instruction's name is Rust's words: a word that starts with a digit takes a `_`, a `::` is `__`, and a keyword
 takes `r#`, so `tex.2d` is `tex._2d`, `ld.global.L2::64B` is `ld.global.L2__64B`, and `cp.async` is `cp.r#async`. A
