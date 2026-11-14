@@ -2,6 +2,7 @@
 //! written, and tokens the macro makes, each at the span that says where Rust resolves it.
 
 use std::cell::Cell;
+use std::mem::DropGuard;
 
 use proc_macro::{Delimiter, Group, Ident, Literal, Spacing, Span, TokenStream, TokenTree};
 
@@ -17,21 +18,11 @@ thread_local! {
     static SITE: Cell<Option<Span>> = const { Cell::new(None) };
 }
 
-/// `SITE` at a span until this is dropped, the macro panicking or not: a span of one call of
-/// the macro is none in the next, and the thread that runs it may run the next.
-pub(crate) struct Site;
-
-impl Site {
-    pub(crate) fn at(span: Span) -> Site {
-        SITE.set(Some(span));
-        Site
-    }
-}
-
-impl Drop for Site {
-    fn drop(&mut self) {
-        SITE.set(None);
-    }
+/// `SITE` at `span` until the guard this gives is dropped, the macro panicking or not: a span of
+/// one call of the macro is none in the next, and the thread that runs it may run the next.
+pub(crate) fn site_at(span: Span) -> DropGuard<(), impl FnOnce(())> {
+    SITE.set(Some(span));
+    DropGuard::new((), |()| SITE.set(None))
 }
 
 /// The braces of the module `tokens` are, and what is before them, if it is written in braces.

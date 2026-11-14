@@ -380,8 +380,8 @@ use kernite::lang;
 
 use crate::expand::expand;
 use crate::rust::{
-    MACROS, Site, attrs_len, braced, depends_on, error, flatten, for_rust, inner_attribute, is_ident, is_path,
-    is_punct, lex, module, named, needs_dependency, parse, path_uses, site,
+    MACROS, attrs_len, braced, depends_on, error, flatten, for_rust, inner_attribute, is_ident, is_path, is_punct, lex,
+    module, named, needs_dependency, parse, path_uses, site, site_at,
 };
 
 /// See the crate documentation.
@@ -427,7 +427,7 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
     let body = flatten(braces.stream());
     let attrs = body.as_chunks::<3>().0.iter().take_while(|attr| inner_attribute(*attr)).count() * 3;
     let mut inner: TokenStream = body[..attrs].iter().cloned().collect();
-    let site = Site::at(path.last().map_or_else(Span::call_site, |t| t.span().resolved_at(Span::call_site())));
+    let site = site_at(path.last().map_or_else(Span::call_site, |t| t.span().resolved_at(Span::call_site())));
     inner.extend(parse("#[doc(hidden)] mod __consts"));
     inner.extend([TokenTree::Group(Group::new(Delimiter::Brace, path_uses(path)))]);
     // The macro the consts' module has calls `__kernels!` back with the consts, their module's
@@ -520,7 +520,7 @@ pub fn __kernels(input: TokenStream) -> TokenStream {
     // to point at.
     let at = path.span();
     let path: Vec<TokenTree> = path.stream().into_iter().collect();
-    let site = Site::at(path.first().map_or(at, |t| t.span().resolved_at(at)));
+    let site = site_at(path.first().map_or(at, |t| t.span().resolved_at(at)));
     let inner = expand(Some((consts.stream(), &path)), None, braces.stream());
     drop(site);
     inner
