@@ -206,7 +206,7 @@ pub fn module(entries: &[Entry], statics: &[Static]) -> Assembly {
         names.push((s.memory.name.clone(), format!("`{}`", s.name), kept(j)));
     }
     if !statics.is_empty() {
-        parts.push((When::Any((0..statics.len()).map(kept).collect()), "\n".into()));
+        parts.push((When::Any(Vec::from_fn(statics.len(), kept)), "\n".into()));
     }
     parts.extend(statics.iter().enumerate().map(|(j, s)| (kept(j), s.declaration())));
     let launched: Vec<(usize, &Memory)> = (entries.iter().enumerate())

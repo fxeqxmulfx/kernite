@@ -61,18 +61,18 @@ fn on_cpu(params: &[f32]) -> Option<Cpu> {
 #[test]
 fn draws_are_pythons() {
     let mut rng = Random::new(42);
-    assert_eq!((0..6).map(|_| rng.random()).collect::<Vec<_>>(), draws::<f64>("random"));
+    assert_eq!(Vec::from_fn(6, |_| rng.random()), draws::<f64>("random"));
     let mut rng = Random::new(42);
     assert_eq!([1, 5, 15, 31, 32].map(|k| rng.bits(k)).to_vec(), draws::<u32>("bits"));
     let mut rng = Random::new(42);
-    assert_eq!((0..7).map(|_| rng.gauss(0.0, 0.08)).collect::<Vec<_>>(), draws::<f64>("gauss"));
+    assert_eq!(Vec::from_fn(7, |_| rng.gauss(0.0, 0.08)), draws::<f64>("gauss"));
     let (mut rng, weights) = (Random::new(42), [0.1, 0.25, 0.0, 0.4, 0.25]);
-    assert_eq!((0..24).map(|_| rng.choice(&weights)).collect::<Vec<_>>(), draws::<usize>("choices"));
+    assert_eq!(Vec::from_fn(24, |_| rng.choice(&weights)), draws::<usize>("choices"));
     // What microgpt.py draws, in its order: the shuffle of its names, then its 4192 weights.
     let (mut rng, mut order) = (Random::new(42), (0..DOCS).collect::<Vec<_>>());
     rng.shuffle(&mut order);
     assert_eq!(order[..12], draws::<usize>("shuffle"));
-    let weights: Vec<f64> = (0..4192).map(|_| rng.gauss(0.0, 0.08)).collect();
+    let weights: Vec<f64> = Vec::from_fn(4192, |_| rng.gauss(0.0, 0.08));
     let want = draws::<f64>("weights");
     assert_eq!([weights[0], weights[1], weights[2], weights[3], weights[4191]], want[..5]);
     // Python 3.12 adds floats with compensation, which a sum in order differs from in the

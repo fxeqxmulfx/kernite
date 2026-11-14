@@ -3796,12 +3796,10 @@ fn registers(b: &Bound, spec: &Spec, regs: &mut Vec<Ty>) -> String {
         Count::Fixed(n) => n,
         Count::Vec => b.lanes(),
     };
-    let names: Vec<String> = (0..lanes)
-        .map(|k| {
-            regs.push(if k == 0 { spec.lead.unwrap_or(t) } else { t });
-            format!("%v{}", regs.len())
-        })
-        .collect();
+    let names: Vec<String> = Vec::from_fn(lanes, |k| {
+        regs.push(if k == 0 { spec.lead.unwrap_or(t) } else { t });
+        format!("%v{}", regs.len())
+    });
     let braced = matches!(spec.count, Count::Fixed(_));
     let first = if lanes == 1 && !braced { names[0].clone() } else { format!("{{{}}}", names.join(", ")) };
     match &spec.second {

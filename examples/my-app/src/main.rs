@@ -1290,8 +1290,8 @@ fn main() {
     let ones: [f32; 16] = std::array::from_fn(|i| (i + 1) as f32);
     println!("sum16(1, ..., 16), which calls sum8 for each half = {}", sum16(&ones));
     for n in [1024, 1000] {
-        let x: Vec<f32> = (0..n).map(|i| (i % 7) as f32 - 3.0).collect();
-        let y: Vec<f32> = (0..n).map(|i| (i % 5) as f32 / 2.0).collect();
+        let x: Vec<f32> = Vec::from_fn(n, |i| (i % 7) as f32 - 3.0);
+        let y: Vec<f32> = Vec::from_fn(n, |i| (i % 5) as f32 / 2.0);
         let naive: f32 = x.iter().zip(&y).map(|(a, b)| a * b).sum();
         println!("dot of {n} floats = {}; a loop in Rust says {naive}", dot(&x, &y));
     }
@@ -1333,13 +1333,13 @@ fn main() {
     let gpu = Cuda::new().and_then(|cuda| gpu::Kernels::load(&cuda).map(|kernels| (cuda, kernels)));
     match gpu {
         Ok((cuda, kernels)) => {
-            let x: Vec<f32> = (0..1000).map(|i| i as f32 / 8.0).collect();
+            let x: Vec<f32> = Vec::from_fn(1000, |i| i as f32 / 8.0);
             let mut y = vec![1.0; 1000];
             match saxpy(&cuda, &kernels, 2.0, &x, &mut y) {
                 Ok(()) => println!("saxpy on the {}: 2 * {} + 1 = {}", cuda.name(), x[999], y[999]),
                 Err(e) => println!("saxpy failed on the {}: {e}", cuda.name()),
             }
-            let ones: Vec<f32> = (0..1024).map(|i| i as f32).collect();
+            let ones: Vec<f32> = Vec::from_fn(1024, |i| i as f32);
             match block_sums::<256>(&cuda, &kernels, &ones)
                 .and_then(|q| Ok((q, block_sums::<1024>(&cuda, &kernels, &ones)?)))
             {
@@ -1350,7 +1350,7 @@ fn main() {
                 }
                 Err(e) => println!("block_sums failed: {e}"),
             }
-            let mut run: Vec<f32> = (0..8).map(|i| i as f32).collect();
+            let mut run: Vec<f32> = Vec::from_fn(8, |i| i as f32);
             match reverse_runs(&cuda, &kernels, &mut run, 4) {
                 Ok(()) => println!("0..8 reversed in runs of 4, in shared memory the launch gives: {run:?}"),
                 Err(e) => println!("reverse_runs failed: {e}"),
@@ -1379,8 +1379,8 @@ fn main() {
                 Err(e) => println!("weigh failed: {e}"),
             }
             if cuda.sm() >= 80 {
-                let a: Vec<f16> = (0..64 * 64).map(|i| f16::from_f32((i % 7) as f32 - 3.0)).collect();
-                let bt: Vec<f16> = (0..64 * 64).map(|i| f16::from_f32((i % 5) as f32 - 2.0)).collect();
+                let a: Vec<f16> = Vec::from_fn(64 * 64, |i| f16::from_f32((i % 7) as f32 - 3.0));
+                let bt: Vec<f16> = Vec::from_fn(64 * 64, |i| f16::from_f32((i % 5) as f32 - 2.0));
                 let naive: f32 = (0..64).map(|l| a[l].to_f32() * bt[l].to_f32()).sum();
                 let c = ampere::Kernels::load(&cuda).and_then(|kernels| matmul(&cuda, &kernels, &a, &bt, (64, 64, 64)));
                 match c {
@@ -1456,14 +1456,12 @@ mod tests {
     /// Pseudo-random integers, the same for the same seed.
     fn words(n: usize, seed: u32) -> Vec<u32> {
         let mut s = seed;
-        (0..n)
-            .map(|_| {
-                s ^= s << 13;
-                s ^= s >> 17;
-                s ^= s << 5;
-                s
-            })
-            .collect()
+        Vec::from_fn(n, |_| {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s
+        })
     }
 
     /// Pseudo-random floats in [-1, 1), the same for the same seed.
@@ -1769,7 +1767,7 @@ mod tests {
         let Some((cuda, kernels)) = cuda() else { return };
         // A run of 1024 is as many threads as a block has, and 4 KB of shared memory.
         for (n, run) in [(12, 3), (1024, 1), (4096, 1024), (1000, 40)] {
-            let mut x: Vec<f32> = (0..n).map(|i| i as f32).collect();
+            let mut x: Vec<f32> = Vec::from_fn(n, |i| i as f32);
             let want: Vec<f32> = x.chunks(run).flat_map(|r| r.iter().rev().copied()).collect();
             super::reverse_runs(&cuda, &kernels, &mut x, run).unwrap();
             assert_eq!(x, want, "{n} floats in runs of {run}");
@@ -1864,13 +1862,11 @@ mod tests {
         let kernels = ampere::Kernels::load(&cuda).unwrap();
         for (m, n, k) in [(16, 8, 16), (0, 8, 16), (16, 8, 0), (32, 24, 48), (48, 40, 160), (128, 128, 1024)] {
             let (a, bt) = (integers(m * k, (m + k) as u32 + 1), integers(n * k, (n + k) as u32 + 2));
-            let want: Vec<f32> = (0..m * n)
-                .map(|ij| {
-                    let (i, j) = (ij / n, ij % n);
-                    let sum: i32 = (0..k).map(|l| a[i * k + l].to_f32() as i32 * bt[j * k + l].to_f32() as i32).sum();
-                    sum as f32
-                })
-                .collect();
+            let want: Vec<f32> = Vec::from_fn(m * n, |ij| {
+                let (i, j) = (ij / n, ij % n);
+                let sum: i32 = (0..k).map(|l| a[i * k + l].to_f32() as i32 * bt[j * k + l].to_f32() as i32).sum();
+                sum as f32
+            });
             let got = super::matmul(&cuda, &kernels, &a, &bt, (m, n, k)).unwrap();
             assert_eq!(got, want, "{m} by {n} by {k}");
         }
@@ -1897,7 +1893,7 @@ mod tests {
             .chunks(256 * k)
             .map(|block| {
                 let at = |j: usize| block.get(j).copied().unwrap_or(0.0);
-                let threads: Vec<f32> = (0..256).map(|t| (1..k).fold(at(t), |s, k| s + at(256 * k + t))).collect();
+                let threads: Vec<f32> = Vec::from_fn(256, |t| (1..k).fold(at(t), |s, k| s + at(256 * k + t)));
                 tree(&threads)
             })
             .fold(0.0, |s, b| s + b);
@@ -1939,13 +1935,11 @@ mod tests {
     fn diffused(x: &[f32], steps: u32) -> Vec<f32> {
         let mut x = x.to_vec();
         for _ in 0..steps {
-            x = (0..x.len())
-                .map(|i| {
-                    let v = x[i];
-                    let (l, r) = (if i > 0 { x[i - 1] } else { v }, x.get(i + 1).copied().unwrap_or(v));
-                    v + (l - v) * 0.25 + (r - v) * 0.25
-                })
-                .collect();
+            x = Vec::from_fn(x.len(), |i| {
+                let v = x[i];
+                let (l, r) = (if i > 0 { x[i - 1] } else { v }, x.get(i + 1).copied().unwrap_or(v));
+                v + (l - v) * 0.25 + (r - v) * 0.25
+            });
         }
         x
     }
@@ -2408,7 +2402,7 @@ mod tests {
         assert_eq!(filled.as_ptr() as u64, address, "the cpu's address is the GPU's");
         // SAFETY: `n` floats at `filled`, which has them, and a cpu that runs the kernel.
         unsafe { host::fill(filled.as_mut_ptr(), n) };
-        let want: Vec<f32> = (0..n).map(|i| 1.0 + i as f32 * 0.000001).collect();
+        let want: Vec<f32> = Vec::from_fn(n, |i| 1.0 + i as f32 * 0.000001);
         assert_eq!(bits(filled), bits(&want), "the cpu kernel's floats");
 
         // SAFETY: `square` reads and writes `n` floats at the pointer, which the memory, managed

@@ -650,18 +650,16 @@ mod tests {
         let threads = most().unwrap().min(3);
         let meet = Arc::new(std::sync::Barrier::new(2 * threads));
         let ids = Arc::new(Mutex::new(vec![]));
-        let callers: Vec<_> = (0..2)
-            .map(|_| {
-                let (meet, ids) = (Arc::clone(&meet), Arc::clone(&ids));
-                thread::spawn(move || {
-                    launch(Grid::new(threads), move |_| {
-                        meet.wait();
-                        ids.lock().unwrap().push(thread::current().id());
-                    })
-                    .unwrap();
+        let callers: Vec<_> = Vec::from_fn(2, |_| {
+            let (meet, ids) = (Arc::clone(&meet), Arc::clone(&ids));
+            thread::spawn(move || {
+                launch(Grid::new(threads), move |_| {
+                    meet.wait();
+                    ids.lock().unwrap().push(thread::current().id());
                 })
+                .unwrap();
             })
-            .collect();
+        });
         for caller in callers {
             caller.join().unwrap();
         }

@@ -1151,7 +1151,7 @@ impl Bound {
     pub fn spaces(&self) -> Vec<Space> {
         let given: Vec<Space> = self.words().filter_map(Space::of).collect();
         let addrs = self.form.operands.iter().filter(|s| matches!(s.role, Role::Addr(_))).count();
-        (0..addrs).map(|i| given.get(i).or(given.last()).copied().unwrap_or(Space::Generic)).collect()
+        Vec::from_fn(addrs, |i| given.get(i).or(given.last()).copied().unwrap_or(Space::Generic))
     }
 }
 

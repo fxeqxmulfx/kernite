@@ -88,14 +88,12 @@ fn setup() -> Option<(Option<MutexGuard<'static, ()>>, Cuda, Module)> {
 /// Pseudo-random words, the same for the same seed.
 fn words(n: usize, seed: u32) -> Vec<u32> {
     let mut s = seed;
-    (0..n)
-        .map(|_| {
-            s ^= s << 13;
-            s ^= s >> 17;
-            s ^= s << 5;
-            s
-        })
-        .collect()
+    Vec::from_fn(n, |_| {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        s
+    })
 }
 
 /// Launches `add_one` over the `n` words at `x`.
