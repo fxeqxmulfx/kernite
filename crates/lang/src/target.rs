@@ -140,6 +140,8 @@ pub struct Guard<V> {
 pub struct Fault {
     /// The argument at fault, by position.
     pub arg: Option<usize>,
+    /// The part of it at fault, by position, where it is operands taken together, `(a, b)`.
+    pub part: Option<usize>,
     /// What is wrong.
     pub message: String,
 }
@@ -147,11 +149,11 @@ pub struct Fault {
 impl Fault {
     /// The instruction as a whole is wrong.
     pub fn new(message: impl Into<String>) -> Self {
-        Fault { arg: None, message: message.into() }
+        Fault { arg: None, part: None, message: message.into() }
     }
 
     /// Argument `arg` is wrong.
     pub fn at(arg: usize, message: impl Into<String>) -> Self {
-        Fault { arg: Some(arg), message: message.into() }
+        Fault { arg: Some(arg), part: None, message: message.into() }
     }
 }

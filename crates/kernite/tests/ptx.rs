@@ -467,6 +467,287 @@ fn ptxas_assembles_an_f16x2_for_a_32_bit_integer_as_a_b32() {
     assert!(of_f16x2 == of_b32, "ptxas makes other bytes of an f16x2 than of a b32");
 }
 
+/// `ptxas` 13.5 wants the registers of a vector of one size and one type, bits beside any and an integer beside an
+/// integer, in `st`, `ld`, `ldu`, `mov`, `suld.b`, `sust.b`, `sust.p`, `ldmatrix` and `mma`: "Vector with elements of
+/// different types are not allowed in st instruction", and for registers of two sizes, "Incompatible elements of vector
+/// expression". kernite refuses the others, at the first register that does not go with one before it, and names the
+/// one it does not go with: `(f, b, i, i)` at the first `i`, which goes with `b` and not with `f`.
+#[test]
+fn the_registers_of_a_vector_are_of_one_size_and_one_type() {
+    let cases = [
+        // An `f32` beside a `u32`, in `st`, `ld`, `ldu` and `mov`, packed and unpacked.
+        (
+            "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); st.global.v2.b32([x], (f, i));",
+            "2:83: `st.global.v2.b32` takes the registers of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `u32` variable beside a `f32` variable",
+        ),
+        (
+            "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); ld.global.v2.b32((f, i), [x]);",
+            "2:78: `ld.global.v2.b32` takes the registers of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `u32` variable beside a `f32` variable",
+        ),
+        (
+            "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); ldu.global.v2.b32((f, i), [x]);",
+            "2:79: `ldu.global.v2.b32` takes the registers of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `u32` variable beside a `f32` variable",
+        ),
+        (
+            "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let z: b64; mov.b64(z, (f, i));",
+            "2:84: `mov.b64` takes the registers of a vector of one type, bits beside any and an integer beside an \
+             integer; this is a `u32` variable beside a `f32` variable",
+        ),
+        (
+            "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let z: b64; mov.b64(z, x); mov.b64((f, i), z);",
+            "2:96: `mov.b64` takes the registers of a vector of one type, bits beside any and an integer beside an \
+             integer; this is a `u32` variable beside a `f32` variable",
+        ),
+        (
+            "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); st.global.v2.b32([x], (i, f));",
+            "2:83: `st.global.v2.b32` takes the registers of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `f32` variable beside a `u32` variable",
+        ),
+        // An `s32` beside an `f32`, an integer beside a float.
+        (
+            "let (g, s): (f32, s32); mov.f32(g, 1.5); mov.s32(s, 1); st.global.v2.b32([x], (s, g));",
+            "2:83: `st.global.v2.b32` takes the registers of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `f32` variable beside a `s32` variable",
+        ),
+        // Each register against each before it, not against its neighbour alone, which `ptxas` 13.5 does, and
+        // so takes `(f, b, i, i)`, an `f32` and a `u32` with a `b32` between.
+        (
+            "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let b: b32; mov.b32(b, n); st.global.v4.b32([x], \
+             (f, b, i, i));",
+            "2:113: `st.global.v4.b32` takes the registers of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `u32` variable beside a `f32` variable",
+        ),
+        (
+            "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let b: b32; mov.b32(b, n); st.global.v4.b32([x], \
+             (i, b, f, b));",
+            "2:113: `st.global.v4.b32` takes the registers of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `f32` variable beside a `u32` variable",
+        ),
+        (
+            "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let b: b32; mov.b32(b, n); ld.global.v4.b32((b, \
+             f, b, i), [x]);",
+            "2:111: `ld.global.v4.b32` takes the registers of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `u32` variable beside a `f32` variable",
+        ),
+        // An `f16x2` beside an `f32`: two types of floats.
+        (
+            "let (h, f): (f16x2, f32); mov.b32(h, n); mov.f32(f, 1.5); st.global.v2.b32([x], (h, f));",
+            "2:85: `st.global.v2.b32` takes the registers of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `f32` variable beside a `f16x2` variable",
+        ),
+        // Registers of 16 bits and of 64 bits.
+        (
+            "let (h, a): (f16, u16); mov.b16(h, 1.5f16); mov.u16(a, 1); st.global.v2.b16([x], (h, a));",
+            "2:86: `st.global.v2.b16` takes the registers of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `u16` variable beside a `f16` variable",
+        ),
+        (
+            "let (d, u): (f64, u64); mov.f64(d, 1.5f64); mov.u64(u, 1); st.global.v2.b64([x], (d, u));",
+            "2:86: `st.global.v2.b64` takes the registers of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `u64` variable beside a `f64` variable",
+        ),
+        // Registers of two sizes, which `ld` and `st` take for a type of fewer bits than either, wide, but not
+        // together.
+        (
+            "let (a, b): (u16, u32); mov.u16(a, 1); mov.u32(b, n); st.global.v2.u16([x], (a, b));",
+            "2:81: `st.global.v2.u16` takes the registers of a vector of one size; this is a `u32` variable beside a \
+             `u16` variable",
+        ),
+        (
+            "let (a, b): (u16, u32); ld.global.v2.u16((b, a), [x]);",
+            "2:46: `ld.global.v2.u16` takes the registers of a vector of one size; this is a `u16` variable beside a \
+             `u32` variable",
+        ),
+        (
+            "let (b, c): (b32, b64); mov.b32(b, n); mov.b64(c, x); st.global.v2.b32([x], (b, c));",
+            "2:81: `st.global.v2.b32` takes the registers of a vector of one size; this is a `b64` variable beside a \
+             `b32` variable",
+        ),
+        // The vector of a surface, of `ldmatrix` and of `mma`, which `ptxas` checks as it does `st` and `ld`.
+        (
+            "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); sust.b._2d.v2.b32.trap([s, (n, n)], (f, i));",
+            "2:97: `sust.b.2d.v2.b32.trap` takes the registers of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `u32` variable beside a `f32` variable",
+        ),
+        (
+            "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); sust.p._2d.v2.b32.trap([s, (n, n)], (f, i));",
+            "2:97: `sust.p.2d.v2.b32.trap` takes the registers of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `u32` variable beside a `f32` variable",
+        ),
+        (
+            "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); suld.b._2d.v2.b32.trap((f, i), [s, (n, n)]);",
+            "2:84: `suld.b.2d.v2.b32.trap` takes the registers of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `u32` variable beside a `f32` variable",
+        ),
+        (
+            "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); ldmatrix.sync.aligned.m8n8.x2.shared.b16((f, i), \
+             [n]);",
+            "2:102: `ldmatrix.sync.aligned.m8n8.x2.shared.b16` takes the registers of a vector of one type, bits \
+             beside any and an integer beside an integer; this is a `u32` variable beside a `f32` variable",
+        ),
+        (
+            "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let (c0, c1, c2, c3): (s32, s32, s32, s32); let \
+             b: b32; mov.b32(b, n); mov.s32(c0, 0); mov.s32(c1, 0); mov.s32(c2, 0); mov.s32(c3, 0); \
+             mma.sync.aligned.m16n8k128.row.col.s32.b1.b1.s32.xor.popc((c0, c1, c2, c3), (f, i), b, (c0, c1, c2, c3));",
+            "2:272: `mma.sync.aligned.m16n8k128.row.col.s32.b1.b1.s32.xor.popc` takes the registers of a vector of one \
+             type, bits beside any and an integer beside an integer; this is a `u32` variable beside a `f32` variable",
+        ),
+    ];
+    for (body, want) in cases {
+        assert_eq!(compile("x: *mut u32, n: u32, s: u64", body).unwrap_err(), want, "{body}");
+    }
+}
+
+/// The variables of [`TOGETHER`]: each type of 16, 32 and 64 bits that tells `ptxas` registers apart in a vector, and
+/// bits of each size, which are those of a `bf16`, a `bf16x2` and a `tf32` too, for PTX declares them as bits.
+const TOGETHER_DECLARED: &str = "let (f, g, i, j, b, h): (f32, f32, u32, s32, b32, f16x2); \
+     let (r0, r1, r2, r3): (f32, f32, f32, f32); let (a, c, e): (u16, s16, b16); let (d, u, q): (f64, u64, b64); \
+     let (z, w): (b64, b32); let (m, o, k, l): (bf16x2, tf32, bf16, f16); mov.b32(m, n); mov.b32(o, n); mov.b16(k, 1); \
+     mov.b16(l, 1); mov.f32(f, 1.5); mov.f32(g, 2.5); mov.u32(i, n); mov.s32(j, 1); mov.b32(b, n); \
+     mov.b32(h, n); mov.u16(a, 1); mov.s16(c, 1); mov.b16(e, 1); mov.f64(d, 1.5f64); mov.u64(u, 1); mov.b64(q, x); \
+     mov.b64(z, x); mov.b32(w, n);";
+
+/// Vectors that `ptxas` 13.5 takes, and the line of PTX kernite writes for each: registers of one type; bits beside any
+/// register of their size, and an integer beside an integer, `u32` and `s32`; registers of 16 bits and of 64; of 32
+/// bits wider than an instruction of 16, where it takes them; a special register, a value known now and `_`, which
+/// have no type among registers; and the layer of an array of textures, the first of its vector, a `u32` beside
+/// floats, which `ptxas` checks apart.
+const TOGETHER: [(&str, &str); 45] = [
+    ("st.global.v2.b32([x], (f, g));", "st.global.v2.b32 [%x], {%f, %g};"),
+    ("st.global.v2.b32([x], (i, j));", "st.global.v2.b32 [%x], {%i, %j};"),
+    ("st.global.v2.u32([x], (i, j));", "st.global.v2.u32 [%x], {%i, %j};"),
+    ("st.global.v2.b32([x], (h, h));", "st.global.v2.b32 [%x], {%h, %h};"),
+    ("st.global.v2.b32([x], (b, i));", "st.global.v2.b32 [%x], {%b, %i};"),
+    ("st.global.v2.b32([x], (i, b));", "st.global.v2.b32 [%x], {%i, %b};"),
+    ("st.global.v2.b32([x], (b, f));", "st.global.v2.b32 [%x], {%b, %f};"),
+    ("st.global.v2.b32([x], (f, b));", "st.global.v2.b32 [%x], {%f, %b};"),
+    ("st.global.v2.b32([x], (b, h));", "st.global.v2.b32 [%x], {%b, %h};"),
+    ("st.global.v2.b32([x], (h, b));", "st.global.v2.b32 [%x], {%h, %b};"),
+    ("st.global.v4.b32([x], (f, b, g, b));", "st.global.v4.b32 [%x], {%f, %b, %g, %b};"),
+    ("st.global.v4.u32([x], (i, b, j, b));", "st.global.v4.u32 [%x], {%i, %b, %j, %b};"),
+    ("ld.global.v2.b32((f, g), [x]);", "ld.global.v2.b32 {%f, %g}, [%x];"),
+    ("ld.global.v2.b32((i, j), [x]);", "ld.global.v2.b32 {%i, %j}, [%x];"),
+    ("ld.global.v2.u32((b, i), [x]);", "ld.global.v2.u32 {%b, %i}, [%x];"),
+    ("ld.global.v2.b32((b, f), [x]);", "ld.global.v2.b32 {%b, %f}, [%x];"),
+    ("ld.global.v4.b32((f, b, g, b), [x]);", "ld.global.v4.b32 {%f, %b, %g, %b}, [%x];"),
+    ("mov.b64(z, (f, g));", "mov.b64 %z, {%f, %g};"),
+    ("mov.b64(z, (i, j));", "mov.b64 %z, {%i, %j};"),
+    ("mov.b64(z, (b, f));", "mov.b64 %z, {%b, %f};"),
+    ("mov.b64((f, g), z);", "mov.b64 {%f, %g}, %z;"),
+    ("mov.b64((i, j), z);", "mov.b64 {%i, %j}, %z;"),
+    ("st.global.v2.b16([x], (a, c));", "st.global.v2.b16 [%x], {%a, %c};"),
+    ("st.global.v2.b16([x], (e, a));", "st.global.v2.b16 [%x], {%e, %a};"),
+    ("st.global.v2.b16([x], (k, l));", "st.global.v2.b16 [%x], {%k, %l};"),
+    ("st.global.v4.b32([x], (m, o, f, f));", "st.global.v4.b32 [%x], {%m, %o, %f, %f};"),
+    ("mov.b32(w, (a, c));", "mov.b32 %w, {%a, %c};"),
+    ("st.global.v2.b64([x], (d, d));", "st.global.v2.b64 [%x], {%d, %d};"),
+    ("st.global.v2.b64([x], (q, d));", "st.global.v2.b64 [%x], {%q, %d};"),
+    ("st.global.v2.u64([x], (u, q));", "st.global.v2.u64 [%x], {%u, %q};"),
+    ("st.global.v2.u16([x], (i, b));", "st.global.v2.u16 [%x], {%i, %b};"),
+    ("st.global.v2.b16([x], (f, b));", "st.global.v2.b16 [%x], {%f, %b};"),
+    ("st.global.v2.b32([x], (tid.x, f));", "st.global.v2.b32 [%x], {%tid.x, %f};"),
+    ("st.global.v2.u32([x], (i, 5));", "st.global.v2.u32 [%x], {%i, 5};"),
+    ("st.global.v2.f32([x], (f, 1.5));", "st.global.v2.f32 [%x], {%f, 0f3FC00000};"),
+    ("ld.global.v2.u32((i, _), [x]);", "ld.global.v2.u32 {%i, _}, [%x];"),
+    (
+        "tex.a2d.v4.f32.f32((r0, r1, r2, r3), [s, (n, f, g, f)]);",
+        "tex.a2d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {%n, %f, %g, %f}];",
+    ),
+    (
+        "tex.a2d.v4.f32.s32((r0, r1, r2, r3), [s, (n, j, j, j)]);",
+        "tex.a2d.v4.f32.s32 {%r0, %r1, %r2, %r3}, [%s, {%n, %j, %j, %j}];",
+    ),
+    ("sust.b._2d.v2.b32.trap([s, (n, n)], (f, b));", "sust.b.2d.v2.b32.trap [%s, {%n, %n}], {%f, %b};"),
+    ("sust.b._2d.v2.b32.trap([s, (n, n)], (i, j));", "sust.b.2d.v2.b32.trap [%s, {%n, %n}], {%i, %j};"),
+    ("suld.b._2d.v2.b32.trap((b, f), [s, (n, n)]);", "suld.b.2d.v2.b32.trap {%b, %f}, [%s, {%n, %n}];"),
+    (
+        "ldmatrix.sync.aligned.m8n8.x2.shared.b16((f, g), [n]);",
+        "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%f, %g}, [%n];",
+    ),
+    (
+        "ldmatrix.sync.aligned.m8n8.x2.shared.b16((b, i), [n]);",
+        "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%b, %i}, [%n];",
+    ),
+    (
+        "mma.sync.aligned.m16n8k128.row.col.s32.b1.b1.s32.xor.popc((j, j, j, j), (b, i), b, (j, j, j, j));",
+        "mma.sync.aligned.m16n8k128.row.col.s32.b1.b1.s32.xor.popc {%j, %j, %j, %j}, {%b, %i}, {%b}, {%j, %j, %j, %j};",
+    ),
+    ("ld.global.v2.u16((i, j), [x]);", "ld.global.v2.u16 {%i, %j}, [%x];"),
+];
+
+/// kernite writes each of [`TOGETHER`] as it is.
+#[test]
+fn a_vector_takes_registers_of_types_that_ptxas_takes_together() {
+    for (inst, line) in TOGETHER {
+        let ptx = compile("x: *mut u32, n: u32, s: u64", &format!("{TOGETHER_DECLARED} {inst}")).unwrap();
+        assert!(ptx.contains(&format!("\t{line}\n")), "{inst}: {ptx}");
+    }
+}
+
+/// `ptxas` takes each of [`TOGETHER`], as kernite writes it.
+#[test]
+fn ptxas_takes_each_vector_that_kernite_takes() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    for (n, (inst, _)) in TOGETHER.into_iter().enumerate() {
+        let ptx = compile("x: *mut u32, n: u32, s: u64", &format!("{TOGETHER_DECLARED} {inst}")).unwrap();
+        let run = assembled(&ptxas, &ptx, "sm_86", &format!("together_{n}"), &["--warning-as-error"]);
+        assert!(run.status.success(), "{inst}: {}", String::from_utf8_lossy(&run.stderr));
+    }
+}
+
+/// `ptxas` 13.5 refuses registers of two types in a vector, in each of `st`, `ld`, `ldu`, `mov`, `suld.b`, `sust.b`,
+/// `sust.p`, `ldmatrix` and `mma`, and of two sizes, but checks each against its neighbour alone, and takes
+/// `{%f1, %b1, %i1, %i1}`, an `f32` and a `u32` with a `b32` between, by a bug of its own, which kernite refuses. It
+/// fails the day `ptxas` takes a vector it refuses here, for kernite to take it too, or refuses one it takes, for the
+/// comment by kernite's rule and GUIDE.md to say no more of its bug.
+#[test]
+fn ptxas_checks_each_register_of_a_vector_against_its_neighbour_alone() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    let types = "Vector with elements of different types are not allowed in";
+    let cases = [
+        ("st.global.v2.b32 [%x], {%f1, %i1};", Some(format!("{types} st instruction"))),
+        ("ld.global.v2.b32 {%f1, %i1}, [%x];", Some(format!("{types} ld instruction"))),
+        ("ldu.global.v2.b32 {%f1, %i1}, [%x];", Some(format!("{types} ldu instruction"))),
+        ("mov.b64 %z1, {%f1, %i1};", Some(format!("{types} mov instruction"))),
+        ("suld.b.2d.v2.b32.trap {%f1, %i1}, [%x, {%i1, %i1}];", Some(format!("{types} suld.b instruction"))),
+        ("sust.b.2d.v2.b32.trap [%x, {%i1, %i1}], {%f1, %i1};", Some(format!("{types} sust.b instruction"))),
+        ("sust.p.2d.v2.b32.trap [%x, {%i1, %i1}], {%f1, %i1};", Some(format!("{types} sust.p instruction"))),
+        ("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%f1, %i1}, [%i1];", Some(format!("{types} ldmatrix instruction"))),
+        (
+            "mma.sync.aligned.m16n8k128.row.col.s32.b1.b1.s32.xor.popc {%c1, %c1, %c1, %c1}, {%f1, %i1}, {%b1}, \
+             {%c1, %c1, %c1, %c1};",
+            Some(format!("{types} mma instruction")),
+        ),
+        ("st.global.v2.u16 [%x], {%a1, %i1};", Some("Incompatible elements of vector expression".into())),
+        ("st.global.v4.b32 [%x], {%f1, %b1, %i1, %i1};", None),
+        ("st.global.v4.u32 [%x], {%h1, %b1, %i1, %i1};", None),
+    ];
+    for (n, (inst, refused)) in cases.into_iter().enumerate() {
+        let text = format!(
+            ".version 9.4\n.target sm_86\n.address_size 64\n\n.visible .entry k(.param .u64 x)\n{{\n\
+             \t.reg .u64 %x;\n\t.reg .b64 %z1;\n\t.reg .f32 %f1;\n\t.reg .f16x2 %h1;\n\t.reg .b32 %b1;\n\
+             \t.reg .u32 %i1;\n\t.reg .s32 %c1;\n\t.reg .u16 %a1;\n\tld.param.u64 %x, [x];\n\tmov.b32 %f1, 0;\n\
+             \tmov.b32 %h1, 0;\n\tmov.b32 %b1, 0;\n\tmov.b32 %i1, 0;\n\tmov.s32 %c1, 0;\n\tmov.b16 %a1, 0;\n\
+             \t{inst}\n\tret;\n}}\n"
+        );
+        let run = assembled(&ptxas, &text, "sm_86", &format!("neighbour_{n}"), &[]);
+        let said = String::from_utf8_lossy(&run.stderr);
+        match refused {
+            Some(words) => assert!(!run.status.success() && said.contains(&words), "{inst}: {said}"),
+            None => assert!(run.status.success(), "{inst}: {said}"),
+        }
+    }
+}
+
 /// A name of each instruction PTX's ISA has for the GPUs from `sm_20` to `sm_86`, by the
 /// sections of its chapter of them, is of a form kernite knows; and the first word of each form
 /// is that of one of them, so that the list misses no first word kernite knows. `call` is not

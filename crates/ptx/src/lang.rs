@@ -212,6 +212,8 @@ struct Written {
     inside: bool,
     /// Whether a mask of lanes known now leaves out lane 0.
     no_lane_0: bool,
+    /// The register of a vector that an error is at, where it is at one, by position.
+    part: Option<usize>,
 }
 
 /// Why operands are not those of a form.
@@ -496,8 +498,9 @@ impl Kernel {
         }
         let mut w = Written { reach: reach(b, args), ..Written::default() };
         for (i, (spec, a)) in specs.iter().zip(args).enumerate() {
-            let text =
-                self.operand(b, spec, a, name, &mut w).map_err(|m| Miss::At(i, shaped(b, spec, a), Fault::at(i, m)))?;
+            let text = self
+                .operand(b, spec, a, name, &mut w)
+                .map_err(|m| Miss::At(i, shaped(b, spec, a), Fault { part: w.part, ..Fault::at(i, m) }))?;
             w.texts.push(text);
             w.needs = w.needs.and(spec.needs);
         }
@@ -627,10 +630,9 @@ impl Kernel {
             _ => return Err(format!("`{name}` wants {}; this is {}", describe(b, spec), self.given(a))),
         };
         // ptxas 13.5 takes an `f16x2` for an integer in a vector beside registers of `f16x2` or `b32`, and `_`, and
-        // refuses it beside one of another type: "Vector with elements of different types are not allowed". It checks
-        // each register against its neighbour alone, and takes `{%h1, %b1, %r1, %r1}`, an `f16x2` and a `u32` with a
-        // `b32` between: that looks like a bug of its own, and kernite takes none there. An array's index, the lead, it
-        // checks apart, and takes no `f16x2` for it: "Array index in the 'tex' instruction has unexpected type".
+        // refuses it beside one of another type, as it refuses any two registers whose types do not go together: the
+        // rule below. An array's index, the lead, it checks apart, and takes no `f16x2` for it: "Array index in the
+        // 'tex' instruction has unexpected type".
         let beside = |p: &Given<Var>| {
             matches!(p, Given::Var(Var::Reg { ty: Ty::F16x2 | Ty::B32, .. }))
                 || matches!(p, Given::Special(s) if s == "_")
@@ -648,6 +650,35 @@ impl Kernel {
                 }
                 _ => self.one(b, rest, part, name, w)?,
             });
+        }
+        // ptxas 13.5 wants the registers of a vector of one size, "Incompatible elements of vector expression", and one
+        // type, bits beside any and an integer beside an integer: "Vector with elements of different types are not
+        // allowed in st instruction", as in `ld`, `ldu`, `mov`, `suld.b`, `sust.b`, `sust.p`, `ldmatrix` and `mma`. It
+        // checks each register against its neighbour alone, and takes `st.global.v4.b32 [%rd1], {%f1, %b1, %i1, %i1};`,
+        // an `f32` and a `u32` with a `b32` between, as it takes `{%h1, %b1, %r1, %r1}`, an `f16x2` and a `u32` with
+        // one: that looks like a bug of its own, and kernite checks each register against each before it. A special
+        // register, a value known now and `_` are no register here, and the lead, an array's index, ptxas checks apart.
+        let regs: Vec<(usize, Ty)> = parts
+            .iter()
+            .enumerate()
+            .skip(usize::from(spec.lead.is_some()))
+            .filter_map(|(k, p)| match p {
+                Given::Var(Var::Reg { ty, .. }) => Some((k, ty.decl())),
+                _ => None,
+            })
+            .collect();
+        for (i, &(k, ty)) in regs.iter().enumerate() {
+            if let Some(&(j, other)) = regs[..i].iter().find(|&&(_, other)| !ty.fits(other)) {
+                w.part = Some(k);
+                let one = match ty.bits() == other.bits() {
+                    true => "type, bits beside any and an integer beside an integer",
+                    false => "size",
+                };
+                let (this, beside) = (self.given(&parts[k]), self.given(&parts[j]));
+                return Err(format!(
+                    "`{name}` takes the registers of a vector of one {one}; this is {this} beside {beside}"
+                ));
+            }
         }
         if texts.iter().all(|t| t == "_") {
             return Err(format!("`{name}` writes one of them at least"));
