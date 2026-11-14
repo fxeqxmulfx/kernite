@@ -373,7 +373,9 @@ fn an_f16x2_is_taken_where_an_instruction_wants_a_32_bit_integer() {
     }
 }
 
-/// An `f16x2` where an instruction wants a 32-bit integer, which `ptxas` reads as the 32 bits of a `b32`.
+/// An `f16x2` where an instruction wants a 32-bit integer, and where a call wants one or an `f32`, which `ptxas` reads
+/// as the 32 bits of a `b32`: passed to a function, written by one, and given back by one. And a `u32` where a call or
+/// a `ret` wants an `f16x2`, a `bf16x2` or a `tf32`, whose `.param` is a `.b32`.
 const BITS: &str = r#"
     pub unsafe extern "ptx-kernel" fn bits(x: *mut u32, n: u32) {
         let (h, g, i): (f16x2, f16x2, u32);
@@ -387,13 +389,64 @@ const BITS: &str = r#"
         setp.lt.u32(p, g, n);
         vadd.u32.u32.u32(g, g.b0, n);
         vadd2.u32.u32.u32(g.h1, n, g.h21, g);
+        call(g, count, (g));
+        call(h, half, (g));
+        call(g, pack, (n));
+        call(g, pack_s, (g));
+        mov.u32(i, n);
+        call(i, keep_h, (i));
+        call(i, keep_b, (i));
+        call(i, keep_t, (i));
+        call(i, give_h, (i));
+        call(i, give_b, (i));
+        call(i, give_t, (i));
         mov.u32(i, g);
         st.global.u32([x], i);
     }
+
+    extern "ptx-func" fn count(a: u32) -> u32 { ret(a); }
+    extern "ptx-func" fn half(a: f32) -> f32 { ret(a); }
+    extern "ptx-func" fn pack(a: u32) -> u32 { let h: f16x2; mov.b32(h, a); ret(h); }
+    extern "ptx-func" fn pack_s(a: s32) -> s32 { let h: f16x2; mov.b32(h, a); ret(h); }
+    extern "ptx-func" fn keep_h(a: f16x2) -> f16x2 { ret(a); }
+    extern "ptx-func" fn keep_b(a: bf16x2) -> bf16x2 { ret(a); }
+    extern "ptx-func" fn keep_t(a: tf32) -> tf32 { ret(a); }
+    extern "ptx-func" fn give_h(a: u32) -> f16x2 { ret(a); }
+    extern "ptx-func" fn give_b(a: u32) -> bf16x2 { ret(a); }
+    extern "ptx-func" fn give_t(a: u32) -> tf32 { ret(a); }
 "#;
 
-/// What `ptxas` makes of [`BITS`] is what it makes of the same kernels with a `b32` in place of each `f16x2`: the
-/// same bytes of a cubin, and so the same machine code.
+/// A call takes an `f16x2` for the `.param` of a `u32`, an `s32` or an `f32`, as it takes it for the result, and `ret`
+/// gives one back for a `u32` or an `s32`: each writes the variable, with no `mov` beside it. A function of an
+/// `f16x2`, a `bf16x2` or a `tf32` takes a `u32` for its argument, writes one with its result, and gives back one
+/// with `ret`.
+#[test]
+fn an_f16x2_is_taken_where_a_call_wants_a_32_bit_integer_or_float() {
+    let ptx = kernite::ptx_str(BITS).unwrap();
+    for line in [
+        "\tcall (%g), count, (%g);\n",
+        "\tcall (%h), half, (%g);\n",
+        "\tcall (%g), pack, (%n);\n",
+        "\tcall (%g), pack_s, (%g);\n",
+        "\tst.param.u32 [pack_retval], %h;\n",
+        "\tst.param.s32 [pack_s_retval], %h;\n",
+        "\tcall (%i), keep_h, (%i);\n",
+        "\tcall (%i), keep_b, (%i);\n",
+        "\tcall (%i), keep_t, (%i);\n",
+        "\tcall (%i), give_h, (%i);\n",
+        "\tcall (%i), give_b, (%i);\n",
+        "\tcall (%i), give_t, (%i);\n",
+        "\tst.param.b32 [give_h_retval], %a;\n",
+        "\tst.param.b32 [give_b_retval], %a;\n",
+        "\tst.param.b32 [give_t_retval], %a;\n",
+    ] {
+        assert!(ptx.contains(line), "{line}: {ptx}");
+    }
+    assert_eq!(ptx.matches("\tmov.").count(), BITS.matches("mov.").count(), "a `mov` beside a call: {ptx}");
+}
+
+/// What `ptxas` makes of [`BITS`] is what it makes of the same kernels with a `b32` in place of each `f16x2`,
+/// `bf16x2` and `tf32`: the same bytes of a cubin, and so the same machine code.
 #[test]
 fn ptxas_assembles_an_f16x2_for_a_32_bit_integer_as_a_b32() {
     let Some(ptxas) = ptxas() else {
@@ -402,7 +455,8 @@ fn ptxas_assembles_an_f16x2_for_a_32_bit_integer_as_a_b32() {
     };
     let packed = kernite::ptx_str(BITS).unwrap();
     // A register of `b32` needs no PTX 4.2 and `sm_53`, as one of `f16x2` does: its module is put there.
-    let bits = retarget(&kernite::ptx_str(&BITS.replace("f16x2", "b32")).unwrap(), 42, 53);
+    let twin = BITS.replace("bf16x2", "b32").replace("tf32", "b32").replace("f16x2", "b32");
+    let bits = retarget(&kernite::ptx_str(&twin).unwrap(), 42, 53);
     assert_eq!(header(&packed), header(&bits));
     let cubin = |name: &str, text: &str| {
         let run = assembled(&ptxas, text, "sm_75", name, &["--warning-as-error"]);

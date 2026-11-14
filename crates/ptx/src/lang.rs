@@ -72,7 +72,7 @@ use kernite_core::{
 };
 use kernite_lang::{Fault, Guard, Operand as Given, Span, Target};
 
-use crate::call::{NO_PRED, Prototype, Returns, formal};
+use crate::call::{NO_PRED, Prototype, Returns, fits_param, formal};
 use crate::entry::{Entry, Op, Param};
 use crate::forms::{self, Bound, Check, Count, Imm, Part, Role, Space, Spec, TyRef};
 use crate::needs::Needs;
@@ -1228,7 +1228,7 @@ impl Kernel {
                 )));
             }
             (Returns::Value(t), Some(r)) => match r {
-                Given::Var(Var::Reg { reg, ty }) if ty.fits(t) => {
+                Given::Var(Var::Reg { reg, ty }) if fits_param(*ty, t, true) => {
                     args.push(Arg { operand: Operand::Reg(*reg, width(*ty)), access: Access::Write });
                     format!("%{}", self.reg(*reg))
                 }
@@ -1268,7 +1268,7 @@ impl Kernel {
                 1 => format!("`{f}` takes a `{}`", t.name()),
                 _ => format!("`{f}` takes a `{}` as argument {}", t.name(), k + 1),
             };
-            texts.push(self.pass(t, &wants, a, args).map_err(|m| Fault::at(at, m))?);
+            texts.push(self.pass(t, &wants, a, true, args).map_err(|m| Fault::at(at, m))?);
         }
         Ok(vec![r, texts.join(", ")])
     }
@@ -1316,13 +1316,20 @@ impl Kernel {
         Ok(vec![r, texts.join(", "), proto])
     }
 
-    /// `a` as a value of type `t` passed to a function or given back from one, written out: a
-    /// variable of a type that fits it, as `ptxas` checks a call, or a value known now, as the
-    /// type writes it; with what it reads added to `args`. `wants` says what it is to be.
-    fn pass(&self, t: Ty, wants: &str, a: &Given<Var>, args: &mut Vec<Arg<VReg>>) -> Result<String, String> {
+    /// `a` as a value of type `t` passed to a function, if `call`, or given back from one, written out: a
+    /// variable of a type that [`fits_param`] takes for `t`, or a value known now, as the type writes it;
+    /// with what it reads added to `args`. `wants` says what it is to be.
+    fn pass(
+        &self,
+        t: Ty,
+        wants: &str,
+        a: &Given<Var>,
+        call: bool,
+        args: &mut Vec<Arg<VReg>>,
+    ) -> Result<String, String> {
         let not = |what: String| format!("{wants}; this is {what}");
         match a {
-            Given::Var(Var::Reg { reg, ty }) if ty.fits(t) => {
+            Given::Var(Var::Reg { reg, ty }) if fits_param(*ty, t, call) => {
                 args.push(Arg { operand: Operand::Reg(*reg, width(*ty)), access: Access::Read });
                 Ok(format!("%{}", self.reg(*reg)))
             }
@@ -1356,8 +1363,8 @@ impl Kernel {
             return Err(Fault::new(format!("`{f}` returns a `{}`, which `{name}(v)` gives back", t.name())));
         };
         let mut reads = vec![];
-        let text =
-            self.pass(t, &format!("`{f}` returns a `{}`", t.name()), a, &mut reads).map_err(|m| Fault::at(0, m))?;
+        let wants = format!("`{f}` returns a `{}`", t.name());
+        let text = self.pass(t, &wants, a, false, &mut reads).map_err(|m| Fault::at(0, m))?;
         let on = self.guarded(guard);
         let line = format!("{on}st.param.{} [{symbol}_retval], {text};\n\t{on}{name};", formal(t).name());
         let flow = if guard.is_none() { Flow::Return } else { Flow::Next };
