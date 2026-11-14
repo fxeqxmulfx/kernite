@@ -48,7 +48,7 @@ pub use kernite_build::{
 };
 pub use kernite_lang as lang;
 
-use kernite_build::{all, compile, one, prepare, statics};
+use kernite_build::{Absent, all, compile, one, prepare, statics};
 use kernite_lang::{Fn, Module, Value};
 use kernite_ptx::{Entry, Ptx, Static};
 use kernite_x86::X86;
@@ -89,10 +89,18 @@ pub fn module(module: Module, given: Option<Given>, refused: bool, scope: &str) 
 }
 
 /// Kernel `name` of the module in `src`, for x86-64, or its instance `tile::<4>`; an error
-/// reads `line:column: what`, a static's that does not compile among them.
+/// reads `line:column: what`, a static's that does not compile among them. A `name` that names
+/// no kernel the process runs is an error with no place, which says why: the GPU runs the
+/// function, which `ptx_str` compiles; the function has no instance of that name; or no kernel
+/// has it.
 pub fn x86_str(src: &str, name: &str) -> Result<Listing, String> {
     let module = kernite_lang::parse(src).map_err(|e| e.at(src))?;
-    one(&module, &X86, name).map_err(|e| e.at(src))?.map(|k| k.code).ok_or_else(|| format!("no kernel `{name}`"))
+    let found = one(&module, &X86, name).map_err(|e| e.at(src))?;
+    found.map(|k| k.code).map_err(|absent| match absent {
+        Absent::Gpu(f) => format!("`{f}` runs on the GPU: `ptx_str` compiles it"),
+        Absent::Instance(f) => format!("`{f}` has no instance `{name}`"),
+        Absent::Kernel => format!("no kernel `{name}`"),
+    })
 }
 
 /// Kernel `f` of `module`, in PTX, for the compile-time arguments `args`, those of one of its

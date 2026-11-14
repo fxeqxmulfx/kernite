@@ -3,30 +3,52 @@
 
 use kernite_lang::{Error, ItemKind, Module};
 
-use crate::classify::{attributes, helper, trusted};
+use crate::classify::{attributes, helper, named, trusted};
 use crate::present::{Refusal, said};
 use crate::{Abi, Compiled, Device, Native, abi, compile, instance, owner, prepare};
 
-/// Function `name` of `module`, or its instance `tile::<4>`, compiled by `native`, or why not;
-/// `None` if `name` names no instance of a function the process runs: a helper has none, and
-/// `native` compiles no function of the GPU's nor one of an ABI kernite knows nothing of. The first
+/// Why a name names no instance of a function the process runs, for [`one`] to compile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Absent<'a> {
+    /// The GPU runs the function of this name, `extern "ptx-kernel"` or `extern "ptx-func"`, and the
+    /// name given is its own or an instance's of it, one it lists or not.
+    Gpu(&'a str),
+    /// The process runs the function of this name, and the name given is of no instance of it:
+    /// `sum4::<2>`, where `sum4` takes no compile-time arguments or lists no 2 in its
+    /// `#[instances(..)]`, or `tile`, where `tile` takes some.
+    Instance(&'a str),
+    /// No function the process runs has the name: no function has it, or it is a helper's, or its
+    /// function names an ABI kernite knows nothing of.
+    Kernel,
+}
+
+/// Function `name` of `module`, or its instance `tile::<4>`, compiled by `native`, or why not:
+/// where `name` names no instance of a function the process runs, [`Absent`] says why. The first
 /// static that is not laid out is the error, whatever the name. Once the instance has compiled,
 /// what is wrong with the rest of the module is the error as well, as the macro says it: the module
 /// is two modules, a helper does not parse, a function names an ABI kernite knows nothing of, a
 /// kernel is not an `unsafe fn`, or a function's `#[cooperative]`, directive or `#[instances(..)]` is
 /// wrong.
-pub fn one<N: Native>(module: &Module, native: &N, name: &str) -> Result<Option<Compiled<N::Code>>, Error> {
+pub fn one<'a, N: Native>(
+    module: &'a Module,
+    native: &N,
+    name: &str,
+) -> Result<Result<Compiled<N::Code>, Absent<'a>>, Error> {
     let prepared = prepare(module, native);
     for s in &prepared.statics {
         s.as_ref().map_err(Clone::clone)?;
     }
-    let Some((f, args, _)) = instance(module, name)? else { return Ok(None) };
-    if !abi(f).is_some_and(Abi::native) {
-        return Ok(None);
+    let Some(f) = named(module, name) else { return Ok(Err(Absent::Kernel)) };
+    let found = instance(module, name)?;
+    match abi(f) {
+        None => return Ok(Err(Absent::Kernel)),
+        Some(a) if !a.native() => return Ok(Err(Absent::Gpu(&f.name))),
+        Some(_) => {}
     }
+    let Some((_, args, _)) = found else { return Ok(Err(Absent::Instance(&f.name))) };
     let compiled = compile(module, &prepared, native, f, &args)?;
     rules(module)?;
-    Ok(Some(compiled))
+    Ok(Ok(compiled))
 }
 
 /// Each function of `module` that the GPU runs, each instance of each, compiled by `device`, in

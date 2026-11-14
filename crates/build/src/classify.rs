@@ -137,6 +137,11 @@ pub fn function<'a>(module: &'a Module, name: &str) -> Option<&'a Fn> {
     })
 }
 
+/// The function that `name` names, as its own name or as the name of an instance of it: `tile` for `tile::<4>`.
+pub(crate) fn named<'a>(module: &'a Module, name: &str) -> Option<&'a Fn> {
+    function(module, name.split("::<").next().unwrap_or(name))
+}
+
 /// What [`instance`] finds.
 type Found<'a> = (&'a Fn, Vec<Value>, usize);
 
@@ -145,7 +150,7 @@ type Found<'a> = (&'a Fn, Vec<Value>, usize);
 /// A function that names an ABI and takes no compile-time arguments has one instance, of none,
 /// and a helper has none.
 pub fn instance<'a>(module: &'a Module, name: &str) -> Result<Option<Found<'a>>, kernite_lang::Error> {
-    let Some(f) = function(module, name.split("::<").next().unwrap_or(name)) else { return Ok(None) };
+    let Some(f) = named(module, name) else { return Ok(None) };
     for (at, args) in kernite_lang::instances(module, f)?.into_iter().enumerate() {
         if kernite_lang::instance(f, &args)? == name {
             return Ok(Some((f, args, at)));
