@@ -271,15 +271,18 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ),
         (
             "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); ld.global.v2.u32((g, h), [x]);",
-            "2:74: `ld.global.v2.u32` wants a `u32` variable; this is a `f16x2`",
+            "2:78: `ld.global.v2.u32` takes the operands of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `f16x2` variable beside a `u32` variable",
         ),
         (
             "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); st.global.v2.u32([x], (g, h));",
-            "2:79: `st.global.v2.u32` wants a `u32` variable; this is a `f16x2`",
+            "2:83: `st.global.v2.u32` takes the operands of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `f16x2` variable beside a `u32` variable",
         ),
         (
             "let (h, b): (f16x2, b32); mov.b32(h, n); mov.b32(b, n); st.global.v4.u32([x], (h, b, n, n));",
-            "2:79: `st.global.v4.u32` wants a `u32` variable; this is a `f16x2`",
+            "2:86: `st.global.v4.u32` takes the operands of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `u32` variable beside a `f16x2` variable",
         ),
         (
             "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); vmad.u32.u32.u32(g, -h, n, n);",
@@ -369,11 +372,16 @@ fn an_f16x2_is_taken_where_an_instruction_wants_a_32_bit_integer() {
         // A part of one, as a video instruction selects it.
         ("vadd.u32.u32.u32(g, h.b0, n);", "vadd.u32.u32.u32 %g, %h.b0, %n;"),
         ("vadd2.u32.u32.u32(g.h1, n, h.h21, h);", "vadd2.u32.u32.u32 %g.h1, %n, %h.h21, %h;"),
-        // The elements of a vector, beside an `f16x2`, a `b32` or `_` only.
+        // The elements of a vector, beside an `f16x2`, a `b32`, `_` or a special register, as `ptxas` checks that by
+        // its size alone, and beside no `u32`, `s32` or value known now.
         ("ld.global.v2.u32((g, h), [x]);", "ld.global.v2.u32 {%g, %h}, [%x];"),
         ("ld.global.v2.u32((h, b), [x]);", "ld.global.v2.u32 {%h, %b}, [%x];"),
         ("ld.global.v2.u32((h, _), [x]);", "ld.global.v2.u32 {%h, _}, [%x];"),
         ("st.global.v2.u32([x], (b, h));", "st.global.v2.u32 [%x], {%b, %h};"),
+        ("st.global.v2.u32([x], (h, tid.x));", "st.global.v2.u32 [%x], {%h, %tid.x};"),
+        ("st.global.v2.u32([x], (tid.x, h));", "st.global.v2.u32 [%x], {%tid.x, %h};"),
+        ("st.global.v2.s32([x], (tid.x, h));", "st.global.v2.s32 [%x], {%tid.x, %h};"),
+        ("st.global.v2.u32([x], (h, laneid));", "st.global.v2.u32 [%x], {%h, %laneid};"),
         // The last operand of `vadd4` and `vsub4`, which `ptxas` takes for each name but those of `dp4a`.
         ("vadd4.s32.s32.s32(g, h, n, h);", "vadd4.s32.s32.s32 %g, %h, %n, %h;"),
         ("vadd4.u32.u32.u32.sat(g, h, n, h);", "vadd4.u32.u32.u32.sat %g, %h, %n, %h;"),
@@ -492,38 +500,38 @@ fn the_registers_of_a_vector_are_of_one_size_and_one_type() {
         // An `f32` beside a `u32`, in `st`, `ld`, `ldu` and `mov`, packed and unpacked.
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); st.global.v2.b32([x], (f, i));",
-            "2:83: `st.global.v2.b32` takes the registers of a vector of one type, bits beside any and an integer \
+            "2:83: `st.global.v2.b32` takes the operands of a vector of one type, bits beside any and an integer \
              beside an integer; this is a `u32` variable beside a `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); ld.global.v2.b32((f, i), [x]);",
-            "2:78: `ld.global.v2.b32` takes the registers of a vector of one type, bits beside any and an integer \
+            "2:78: `ld.global.v2.b32` takes the operands of a vector of one type, bits beside any and an integer \
              beside an integer; this is a `u32` variable beside a `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); ldu.global.v2.b32((f, i), [x]);",
-            "2:79: `ldu.global.v2.b32` takes the registers of a vector of one type, bits beside any and an integer \
+            "2:79: `ldu.global.v2.b32` takes the operands of a vector of one type, bits beside any and an integer \
              beside an integer; this is a `u32` variable beside a `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let z: b64; mov.b64(z, (f, i));",
-            "2:84: `mov.b64` takes the registers of a vector of one type, bits beside any and an integer beside an \
+            "2:84: `mov.b64` takes the operands of a vector of one type, bits beside any and an integer beside an \
              integer; this is a `u32` variable beside a `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let z: b64; mov.b64(z, x); mov.b64((f, i), z);",
-            "2:96: `mov.b64` takes the registers of a vector of one type, bits beside any and an integer beside an \
+            "2:96: `mov.b64` takes the operands of a vector of one type, bits beside any and an integer beside an \
              integer; this is a `u32` variable beside a `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); st.global.v2.b32([x], (i, f));",
-            "2:83: `st.global.v2.b32` takes the registers of a vector of one type, bits beside any and an integer \
+            "2:83: `st.global.v2.b32` takes the operands of a vector of one type, bits beside any and an integer \
              beside an integer; this is a `f32` variable beside a `u32` variable",
         ),
         // An `s32` beside an `f32`, an integer beside a float.
         (
             "let (g, s): (f32, s32); mov.f32(g, 1.5); mov.s32(s, 1); st.global.v2.b32([x], (s, g));",
-            "2:83: `st.global.v2.b32` takes the registers of a vector of one type, bits beside any and an integer \
+            "2:83: `st.global.v2.b32` takes the operands of a vector of one type, bits beside any and an integer \
              beside an integer; this is a `f32` variable beside a `s32` variable",
         ),
         // Each register against each before it, not against its neighbour alone, which `ptxas` 13.5 does, and
@@ -531,87 +539,494 @@ fn the_registers_of_a_vector_are_of_one_size_and_one_type() {
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let b: b32; mov.b32(b, n); st.global.v4.b32([x], \
              (f, b, i, i));",
-            "2:113: `st.global.v4.b32` takes the registers of a vector of one type, bits beside any and an integer \
+            "2:113: `st.global.v4.b32` takes the operands of a vector of one type, bits beside any and an integer \
              beside an integer; this is a `u32` variable beside a `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let b: b32; mov.b32(b, n); st.global.v4.b32([x], \
              (i, b, f, b));",
-            "2:113: `st.global.v4.b32` takes the registers of a vector of one type, bits beside any and an integer \
+            "2:113: `st.global.v4.b32` takes the operands of a vector of one type, bits beside any and an integer \
              beside an integer; this is a `f32` variable beside a `u32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let b: b32; mov.b32(b, n); ld.global.v4.b32((b, \
              f, b, i), [x]);",
-            "2:111: `ld.global.v4.b32` takes the registers of a vector of one type, bits beside any and an integer \
+            "2:111: `ld.global.v4.b32` takes the operands of a vector of one type, bits beside any and an integer \
              beside an integer; this is a `u32` variable beside a `f32` variable",
         ),
         // An `f16x2` beside an `f32`: two types of floats.
         (
             "let (h, f): (f16x2, f32); mov.b32(h, n); mov.f32(f, 1.5); st.global.v2.b32([x], (h, f));",
-            "2:85: `st.global.v2.b32` takes the registers of a vector of one type, bits beside any and an integer \
+            "2:85: `st.global.v2.b32` takes the operands of a vector of one type, bits beside any and an integer \
              beside an integer; this is a `f32` variable beside a `f16x2` variable",
         ),
         // Registers of 16 bits and of 64 bits.
         (
             "let (h, a): (f16, u16); mov.b16(h, 1.5f16); mov.u16(a, 1); st.global.v2.b16([x], (h, a));",
-            "2:86: `st.global.v2.b16` takes the registers of a vector of one type, bits beside any and an integer \
+            "2:86: `st.global.v2.b16` takes the operands of a vector of one type, bits beside any and an integer \
              beside an integer; this is a `u16` variable beside a `f16` variable",
         ),
         (
             "let (d, u): (f64, u64); mov.f64(d, 1.5f64); mov.u64(u, 1); st.global.v2.b64([x], (d, u));",
-            "2:86: `st.global.v2.b64` takes the registers of a vector of one type, bits beside any and an integer \
+            "2:86: `st.global.v2.b64` takes the operands of a vector of one type, bits beside any and an integer \
              beside an integer; this is a `u64` variable beside a `f64` variable",
         ),
         // Registers of two sizes, which `ld` and `st` take for a type of fewer bits than either, wide, but not
         // together.
         (
             "let (a, b): (u16, u32); mov.u16(a, 1); mov.u32(b, n); st.global.v2.u16([x], (a, b));",
-            "2:81: `st.global.v2.u16` takes the registers of a vector of one size; this is a `u32` variable beside a \
+            "2:81: `st.global.v2.u16` takes the operands of a vector of one size; this is a `u32` variable beside a \
              `u16` variable",
         ),
         (
             "let (a, b): (u16, u32); ld.global.v2.u16((b, a), [x]);",
-            "2:46: `ld.global.v2.u16` takes the registers of a vector of one size; this is a `u16` variable beside a \
+            "2:46: `ld.global.v2.u16` takes the operands of a vector of one size; this is a `u16` variable beside a \
              `u32` variable",
         ),
         (
             "let (b, c): (b32, b64); mov.b32(b, n); mov.b64(c, x); st.global.v2.b32([x], (b, c));",
-            "2:81: `st.global.v2.b32` takes the registers of a vector of one size; this is a `b64` variable beside a \
+            "2:81: `st.global.v2.b32` takes the operands of a vector of one size; this is a `b64` variable beside a \
              `b32` variable",
         ),
         // The vector of a surface, of `ldmatrix` and of `mma`, which `ptxas` checks as it does `st` and `ld`.
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); sust.b._2d.v2.b32.trap([s, (n, n)], (f, i));",
-            "2:97: `sust.b.2d.v2.b32.trap` takes the registers of a vector of one type, bits beside any and an integer \
+            "2:97: `sust.b.2d.v2.b32.trap` takes the operands of a vector of one type, bits beside any and an integer \
              beside an integer; this is a `u32` variable beside a `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); sust.p._2d.v2.b32.trap([s, (n, n)], (f, i));",
-            "2:97: `sust.p.2d.v2.b32.trap` takes the registers of a vector of one type, bits beside any and an integer \
+            "2:97: `sust.p.2d.v2.b32.trap` takes the operands of a vector of one type, bits beside any and an integer \
              beside an integer; this is a `u32` variable beside a `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); suld.b._2d.v2.b32.trap((f, i), [s, (n, n)]);",
-            "2:84: `suld.b.2d.v2.b32.trap` takes the registers of a vector of one type, bits beside any and an integer \
+            "2:84: `suld.b.2d.v2.b32.trap` takes the operands of a vector of one type, bits beside any and an integer \
              beside an integer; this is a `u32` variable beside a `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); ldmatrix.sync.aligned.m8n8.x2.shared.b16((f, i), \
              [n]);",
-            "2:102: `ldmatrix.sync.aligned.m8n8.x2.shared.b16` takes the registers of a vector of one type, bits \
+            "2:102: `ldmatrix.sync.aligned.m8n8.x2.shared.b16` takes the operands of a vector of one type, bits \
              beside any and an integer beside an integer; this is a `u32` variable beside a `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let (c0, c1, c2, c3): (s32, s32, s32, s32); let \
              b: b32; mov.b32(b, n); mov.s32(c0, 0); mov.s32(c1, 0); mov.s32(c2, 0); mov.s32(c3, 0); \
              mma.sync.aligned.m16n8k128.row.col.s32.b1.b1.s32.xor.popc((c0, c1, c2, c3), (f, i), b, (c0, c1, c2, c3));",
-            "2:272: `mma.sync.aligned.m16n8k128.row.col.s32.b1.b1.s32.xor.popc` takes the registers of a vector of one \
+            "2:272: `mma.sync.aligned.m16n8k128.row.col.s32.b1.b1.s32.xor.popc` takes the operands of a vector of one \
              type, bits beside any and an integer beside an integer; this is a `u32` variable beside a `f32` variable",
         ),
     ];
     for (body, want) in cases {
         assert_eq!(compile("x: *mut u32, n: u32, s: u64", body).unwrap_err(), want, "{body}");
+    }
+}
+
+/// Why the operands of a vector do not go together: what kernite says of it, as the words of its error, and what
+/// `ptxas` 13.5 says of the same line of PTX, where it refuses it.
+#[derive(Clone, Copy)]
+enum Why {
+    /// Operands of two sizes: registers, special registers and, in a vector of bits, floats known now, which are of
+    /// the bits they are written in, 32 for `1.5` and 64 for `1.5f64`.
+    Size,
+    /// A float known now first in a vector of bits, before a register of 64 bits, where `ptxas` says it in other
+    /// words.
+    Order,
+    /// Operands of types that do not go together.
+    Type,
+    /// A part of a vector's special register, as `tid.x` is of `tid`, beside a value known now.
+    Part,
+}
+
+use Why::{Order, Part, Size, Type};
+
+impl Why {
+    /// What kernite says, after the name of the instruction.
+    fn kernite(self) -> &'static str {
+        match self {
+            Size | Order => "takes the operands of a vector of one size",
+            Type => "takes the operands of a vector of one type, bits beside any and an integer beside an integer",
+            Part => "takes no part of a special register beside a value known now, as `tid.x` is of `tid`",
+        }
+    }
+
+    /// What `ptxas` says, or the part of it that tells it from the rest.
+    fn ptxas(self) -> &'static str {
+        match self {
+            Size => "Incompatible elements of vector expression",
+            Order => "Arguments mismatch for instruction",
+            Type => "Vector with elements of different types are not allowed in",
+            Part => "must be register or constant",
+        }
+    }
+}
+
+/// A vector whose operands do not go together: the line of the kernel, with `@` where its error points, at the operand,
+/// at the `x` of `tid.x`, as an error points at the field of a special register, and at the `[` of the coordinates in a
+/// texture or a surface; the line of PTX that kernite would write; why; and the end of the error, which says what is
+/// beside what.
+type Apart = (&'static str, &'static str, Why, &'static str);
+
+/// Vectors that kernite and `ptxas` 13.5 both refuse, by the registers of [`TOGETHER_DECLARED`], in each instruction
+/// that takes one: a value known now of another kind than a register beside it, or than another value, an integer or
+/// a float; a special register of another size; a float known now first in a vector of bits, before a register of 64
+/// bits; and a part of a vector's special register, as `tid.x` is of `tid`, beside a value known now, which a whole
+/// one, `laneid`, goes beside.
+const BOTH_REFUSE: &[Apart] = &[
+    (
+        "st.global.v2.b32([x], (f, @1));",
+        "st.global.v2.b32 [%x], {%f, 1};",
+        Type,
+        "the integer 1 beside a `f32` variable",
+    ),
+    (
+        "st.global.v2.b32([x], (1, @f));",
+        "st.global.v2.b32 [%x], {1, %f};",
+        Type,
+        "a `f32` variable beside the integer 1",
+    ),
+    (
+        "st.global.v2.b32([x], (i, @1.5));",
+        "st.global.v2.b32 [%x], {%i, 0f3FC00000};",
+        Type,
+        "the float 1.5 beside a `u32` variable",
+    ),
+    (
+        "st.global.v2.b32([x], (1.5, @i));",
+        "st.global.v2.b32 [%x], {0f3FC00000, %i};",
+        Type,
+        "a `u32` variable beside the float 1.5",
+    ),
+    (
+        "st.global.v2.b32([x], (j, @1.5));",
+        "st.global.v2.b32 [%x], {%j, 0f3FC00000};",
+        Type,
+        "the float 1.5 beside a `s32` variable",
+    ),
+    (
+        "st.global.v2.b32([x], (h, @1.5));",
+        "st.global.v2.b32 [%x], {%h, 0f3FC00000};",
+        Type,
+        "the float 1.5 beside a `f16x2` variable",
+    ),
+    (
+        "st.global.v2.b32([x], (h, @1));",
+        "st.global.v2.b32 [%x], {%h, 1};",
+        Type,
+        "the integer 1 beside a `f16x2` variable",
+    ),
+    (
+        "st.global.v2.b32([x], (1, @1.5));",
+        "st.global.v2.b32 [%x], {1, 0f3FC00000};",
+        Type,
+        "the float 1.5 beside the integer 1",
+    ),
+    (
+        "st.global.v2.b64([x], (d, @1));",
+        "st.global.v2.b64 [%x], {%d, 1};",
+        Type,
+        "the integer 1 beside a `f64` variable",
+    ),
+    (
+        "st.global.v2.b64([x], (u, @1.5f64));",
+        "st.global.v2.b64 [%x], {%u, 0d3FF8000000000000};",
+        Type,
+        "the f64 1.5 beside a `u64` variable",
+    ),
+    (
+        "st.global.v2.b16([x], (l, @1));",
+        "st.global.v2.b16 [%x], {%l, 1};",
+        Type,
+        "the integer 1 beside a `f16` variable",
+    ),
+    (
+        "st.global.v2.b16([x], (l, @1.5f16));",
+        "st.global.v2.b16 [%x], {%l, 0x3E00};",
+        Type,
+        "the f16 1.5, written as the integer 0x3E00, beside a `f16` variable",
+    ),
+    (
+        "st.global.v2.b16([x], (1.5f16, @l));",
+        "st.global.v2.b16 [%x], {0x3E00, %l};",
+        Type,
+        "a `f16` variable beside the f16 1.5, written as the integer 0x3E00",
+    ),
+    (
+        "st.global.v2.b16([x], (l, @1.5bf16));",
+        "st.global.v2.b16 [%x], {%l, 0x3FC0};",
+        Type,
+        "the bf16 1.5, written as the integer 0x3FC0, beside a `f16` variable",
+    ),
+    ("mov.b64(z, (f, @1));", "mov.b64 %z, {%f, 1};", Type, "the integer 1 beside a `f32` variable"),
+    ("mov.b64(z, (1, @f));", "mov.b64 %z, {1, %f};", Type, "a `f32` variable beside the integer 1"),
+    ("mov.b64(z, (i, @1.5));", "mov.b64 %z, {%i, 0f3FC00000};", Type, "the float 1.5 beside a `u32` variable"),
+    (
+        "st.global.v4.b32([x], (f, @1, 2, 3));",
+        "st.global.v4.b32 [%x], {%f, 1, 2, 3};",
+        Type,
+        "the integer 1 beside a `f32` variable",
+    ),
+    (
+        "st.global.v4.b32([x], (1, 2, 3, @f));",
+        "st.global.v4.b32 [%x], {1, 2, 3, %f};",
+        Type,
+        "a `f32` variable beside the integer 1",
+    ),
+    (
+        "sust.b._2d.v2.b32.trap([s, (n, n)], (f, @1));",
+        "sust.b.2d.v2.b32.trap [%s, {%n, %n}], {%f, 1};",
+        Type,
+        "the integer 1 beside a `f32` variable",
+    ),
+    // An `f16x2` for an integer, which `ptxas` takes beside an `f16x2`, a `b32`, `_` and a special register alone.
+    (
+        "st.global.v2.u32([x], (h, @i));",
+        "st.global.v2.u32 [%x], {%h, %i};",
+        Type,
+        "a `u32` variable beside a `f16x2` variable",
+    ),
+    (
+        "st.global.v2.b32([x], (h, @i));",
+        "st.global.v2.b32 [%x], {%h, %i};",
+        Type,
+        "a `u32` variable beside a `f16x2` variable",
+    ),
+    (
+        "st.global.v2.u32([x], (h, @j));",
+        "st.global.v2.u32 [%x], {%h, %j};",
+        Type,
+        "a `s32` variable beside a `f16x2` variable",
+    ),
+    (
+        "st.global.v2.u32([x], (h, @1));",
+        "st.global.v2.u32 [%x], {%h, 1};",
+        Type,
+        "the integer 1 beside a `f16x2` variable",
+    ),
+    // A special register of another size, which `ptxas` checks by its size alone.
+    (
+        "st.global.v2.b32([x], (u, tid.@x));",
+        "st.global.v2.b32 [%x], {%u, %tid.x};",
+        Size,
+        "`tid.x` beside a `u64` variable",
+    ),
+    (
+        "st.global.v2.b32([x], (tid.x, @u));",
+        "st.global.v2.b32 [%x], {%tid.x, %u};",
+        Size,
+        "a `u64` variable beside `tid.x`",
+    ),
+    (
+        "st.global.v2.u32([x], (u, tid.@x));",
+        "st.global.v2.u32 [%x], {%u, %tid.x};",
+        Size,
+        "`tid.x` beside a `u64` variable",
+    ),
+    (
+        "st.global.v2.b16([x], (a, tid.@x));",
+        "st.global.v2.b16 [%x], {%a, %tid.x};",
+        Size,
+        "`tid.x` beside a `u16` variable",
+    ),
+    (
+        "st.global.v2.b32([x], (d, @laneid));",
+        "st.global.v2.b32 [%x], {%d, %laneid};",
+        Size,
+        "`laneid` beside a `f64` variable",
+    ),
+    // A float known now first in a vector of bits, beside a register of 64 bits.
+    (
+        "st.global.v2.b32([x], (1.5, @d));",
+        "st.global.v2.b32 [%x], {0f3FC00000, %d};",
+        Order,
+        "a `f64` variable beside the float 1.5",
+    ),
+    (
+        "st.global.v2.b32([x], (1.5, @z));",
+        "st.global.v2.b32 [%x], {0f3FC00000, %z};",
+        Order,
+        "a `b64` variable beside the float 1.5",
+    ),
+    // A part of a vector's special register beside a value known now, whichever of them is first and whichever the
+    // part, in each instruction that takes a vector.
+    (
+        "st.global.v2.b32([x], (tid.x, @1));",
+        "st.global.v2.b32 [%x], {%tid.x, 1};",
+        Part,
+        "the integer 1 beside `tid.x`",
+    ),
+    (
+        "st.global.v2.b32([x], (1, tid.@x));",
+        "st.global.v2.b32 [%x], {1, %tid.x};",
+        Part,
+        "`tid.x` beside the integer 1",
+    ),
+    (
+        "st.global.v2.b32([x], (tid.x, @1.5));",
+        "st.global.v2.b32 [%x], {%tid.x, 0f3FC00000};",
+        Part,
+        "the float 1.5 beside `tid.x`",
+    ),
+    (
+        "st.global.v2.b32([x], (1.5, tid.@x));",
+        "st.global.v2.b32 [%x], {0f3FC00000, %tid.x};",
+        Part,
+        "`tid.x` beside the float 1.5",
+    ),
+    (
+        "st.global.v2.u32([x], (tid.x, @1));",
+        "st.global.v2.u32 [%x], {%tid.x, 1};",
+        Part,
+        "the integer 1 beside `tid.x`",
+    ),
+    (
+        "st.global.v2.b32([x], (ntid.x, @1));",
+        "st.global.v2.b32 [%x], {%ntid.x, 1};",
+        Part,
+        "the integer 1 beside `ntid.x`",
+    ),
+    (
+        "st.global.v2.b32([x], (ctaid.y, @1));",
+        "st.global.v2.b32 [%x], {%ctaid.y, 1};",
+        Part,
+        "the integer 1 beside `ctaid.y`",
+    ),
+    (
+        "st.global.v2.b32([x], (1, nctaid.@z));",
+        "st.global.v2.b32 [%x], {1, %nctaid.z};",
+        Part,
+        "`nctaid.z` beside the integer 1",
+    ),
+    (
+        "st.global.v4.b32([x], (tid.x, tid.y, tid.z, @1));",
+        "st.global.v4.b32 [%x], {%tid.x, %tid.y, %tid.z, 1};",
+        Part,
+        "the integer 1 beside `tid.x`",
+    ),
+    ("mov.b64(z, (tid.x, @1));", "mov.b64 %z, {%tid.x, 1};", Part, "the integer 1 beside `tid.x`"),
+    ("mov.b64(z, (tid.x, @1.5));", "mov.b64 %z, {%tid.x, 0f3FC00000};", Part, "the float 1.5 beside `tid.x`"),
+    (
+        "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32((j, j, j, j), (tid.x, @8), n, (0, 0, 0, 0));",
+        "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32 {%j, %j, %j, %j}, {%tid.x, 8}, {%n}, {0, 0, 0, 0};",
+        Part,
+        "the integer 8 beside `tid.x`",
+    ),
+    (
+        "sust.b._2d.v2.b32.trap([s, (n, n)], (tid.x, @1));",
+        "sust.b.2d.v2.b32.trap [%s, {%n, %n}], {%tid.x, 1};",
+        Part,
+        "the integer 1 beside `tid.x`",
+    ),
+    (
+        "sust.b._2d.v2.b32.trap(@[s, (tid.x, 5)], (f, b));",
+        "sust.b.2d.v2.b32.trap [%s, {%tid.x, 5}], {%f, %b};",
+        Part,
+        "the integer 5 beside `tid.x`",
+    ),
+    (
+        "tex._2d.v4.f32.s32((r0, r1, r2, r3), @[s, (tid.x, 5)]);",
+        "tex.2d.v4.f32.s32 {%r0, %r1, %r2, %r3}, [%s, {%tid.x, 5}];",
+        Part,
+        "the integer 5 beside `tid.x`",
+    ),
+];
+
+/// Vectors that `ptxas` 13.5 takes and kernite refuses, by one of two bugs of its own. It checks each operand against
+/// the one before it alone: `(f, b, 1, 1)` has an `f32` and an integer with a `b32` between, as `(f, b, i, i)` has an
+/// `f32` and a `u32`, and `(f, tid.x, i, i)` a special register, which `ptxas` checks by its size alone. A float known
+/// now in a vector of bits beside a register of 64 bits, `ptxas` refuses first, [`Order`], and takes elsewhere, after
+/// one and before one: kernite refuses it in every place.
+const ONLY_KERNITE_REFUSES: &[Apart] = &[
+    (
+        "st.global.v4.b32([x], (f, b, @1, 1));",
+        "st.global.v4.b32 [%x], {%f, %b, 1, 1};",
+        Type,
+        "the integer 1 beside a `f32` variable",
+    ),
+    (
+        "st.global.v4.b32([x], (f, tid.x, @i, i));",
+        "st.global.v4.b32 [%x], {%f, %tid.x, %i, %i};",
+        Type,
+        "a `u32` variable beside a `f32` variable",
+    ),
+    (
+        "st.global.v2.b32([x], (d, @1.5));",
+        "st.global.v2.b32 [%x], {%d, 0f3FC00000};",
+        Size,
+        "the float 1.5 beside a `f64` variable",
+    ),
+    (
+        "st.global.v2.b32([x], (z, @1.5));",
+        "st.global.v2.b32 [%x], {%z, 0f3FC00000};",
+        Size,
+        "the float 1.5 beside a `b64` variable",
+    ),
+    (
+        "st.global.v4.b32([x], (d, d, @1.5, d));",
+        "st.global.v4.b32 [%x], {%d, %d, 0f3FC00000, %d};",
+        Size,
+        "the float 1.5 beside a `f64` variable",
+    ),
+];
+
+/// The kernel of a vector of [`BOTH_REFUSE`] or [`ONLY_KERNITE_REFUSES`], without its `@`; the line of the body it is
+/// in, after the variables of [`TOGETHER_DECLARED`]; the column its error points at; and the name of its instruction.
+fn apart(line: &str) -> (String, usize, String) {
+    let (before, after) = line.split_once('@').unwrap();
+    let kernel = format!("{before}{after}");
+    let body = format!("{TOGETHER_DECLARED} {kernel}");
+    let name = kernel[..kernel.find('(').unwrap()].replace("._", ".");
+    let col = body.len() - after.len() + 1;
+    (body, col, name)
+}
+
+/// kernite refuses each vector of [`BOTH_REFUSE`] and [`ONLY_KERNITE_REFUSES`] at the operand that does not go with one
+/// before it, in the words of why, and names it beside the first of those it does not go with.
+#[test]
+fn an_operand_that_does_not_go_with_one_before_it_in_a_vector_is_refused_where_ptxas_refuses_it() {
+    for &(line, _, why, this) in BOTH_REFUSE.iter().chain(ONLY_KERNITE_REFUSES) {
+        let (body, col, name) = apart(line);
+        let want = format!("2:{col}: `{name}` {}; this is {this}", why.kernite());
+        assert_eq!(compile("x: *mut u32, n: u32, s: u64", &body).unwrap_err(), want, "{line}");
+    }
+}
+
+/// The module of [`TOGETHER_DECLARED`] alone, of PTX 9.5 for `sm_86`, with the line of PTX `line` in it.
+fn with_line(line: &str) -> String {
+    let ptx = compile("x: *mut u32, n: u32, s: u64", TOGETHER_DECLARED).unwrap();
+    retarget(&ptx, 95, 86).replace("\tret;\n", &format!("\t{line}\n\tret;\n"))
+}
+
+/// `ptxas` refuses each line of [`BOTH_REFUSE`], in the words that tell why, and takes the module without it.
+#[test]
+fn ptxas_refuses_each_vector_that_kernite_refuses_with_it() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    let alone = assembled(&ptxas, &with_line(""), "sm_86", "apart_alone", &[]);
+    assert!(alone.status.success(), "{}", String::from_utf8_lossy(&alone.stderr));
+    for (n, &(_, line, why, _)) in BOTH_REFUSE.iter().enumerate() {
+        let run = assembled(&ptxas, &with_line(line), "sm_86", &format!("apart_{n}"), &[]);
+        let said = String::from_utf8_lossy(&run.stderr);
+        assert!(!run.status.success() && said.contains(why.ptxas()), "{line}: {said}");
+    }
+}
+
+/// `ptxas` 13.5 takes each vector of [`ONLY_KERNITE_REFUSES`], by one of two bugs of its own: it checks each operand
+/// of a vector against its neighbour alone, and it refuses a float known now beside a register of 64 bits in a vector
+/// of bits only where the float is first. It fails the day `ptxas` refuses one, for GUIDE.md to say no more of that
+/// bug.
+#[test]
+fn ptxas_takes_each_vector_that_only_kernite_refuses() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    for (n, &(_, line, _, _)) in ONLY_KERNITE_REFUSES.iter().enumerate() {
+        let run = assembled(&ptxas, &with_line(line), "sm_86", &format!("only_kernite_{n}"), &[]);
+        assert!(run.status.success(), "{line}: {}", String::from_utf8_lossy(&run.stderr));
     }
 }
 
@@ -626,10 +1041,12 @@ const TOGETHER_DECLARED: &str = "let (f, g, i, j, b, h): (f32, f32, u32, s32, b3
 
 /// Vectors that `ptxas` 13.5 takes, and the line of PTX kernite writes for each: registers of one type; bits beside any
 /// register of their size, and an integer beside an integer, `u32` and `s32`; registers of 16 bits and of 64; of 32
-/// bits wider than an instruction of 16, where it takes them; a special register, a value known now and `_`, which
-/// have no type among registers; and the layer of an array of textures, the first of its vector, a `u32` beside
-/// floats, which `ptxas` checks apart.
-const TOGETHER: [(&str, &str); 45] = [
+/// bits wider than an instruction of 16, where it takes them; a special register beside a register of any type of its
+/// size; a value known now beside bits, and beside a register of its kind, an integer beside integers and a float
+/// beside floats; a value known now beside any register of a vector of floats, a `b64` too; a whole special register
+/// beside a value, which a part of a vector's does not go beside; `_`; and the layer of an array of textures, the
+/// first of its vector, a `u32` beside floats, which `ptxas` checks apart.
+const TOGETHER: [(&str, &str); 81] = [
     ("st.global.v2.b32([x], (f, g));", "st.global.v2.b32 [%x], {%f, %g};"),
     ("st.global.v2.b32([x], (i, j));", "st.global.v2.b32 [%x], {%i, %j};"),
     ("st.global.v2.u32([x], (i, j));", "st.global.v2.u32 [%x], {%i, %j};"),
@@ -690,6 +1107,48 @@ const TOGETHER: [(&str, &str); 45] = [
         "mma.sync.aligned.m16n8k128.row.col.s32.b1.b1.s32.xor.popc {%j, %j, %j, %j}, {%b, %i}, {%b}, {%j, %j, %j, %j};",
     ),
     ("ld.global.v2.u16((i, j), [x]);", "ld.global.v2.u16 {%i, %j}, [%x];"),
+    ("st.global.v2.b32([x], (f, 2.5));", "st.global.v2.b32 [%x], {%f, 0f40200000};"),
+    ("st.global.v2.b32([x], (f, 1.5f32));", "st.global.v2.b32 [%x], {%f, 0f3FC00000};"),
+    ("st.global.v2.b32([x], (i, 1));", "st.global.v2.b32 [%x], {%i, 1};"),
+    ("st.global.v2.b32([x], (b, 1.5));", "st.global.v2.b32 [%x], {%b, 0f3FC00000};"),
+    ("st.global.v2.b32([x], (1, 2));", "st.global.v2.b32 [%x], {1, 2};"),
+    ("st.global.v2.b32([x], (1.5, 2.5));", "st.global.v2.b32 [%x], {0f3FC00000, 0f40200000};"),
+    ("st.global.v2.b32([x], (f, tid.x));", "st.global.v2.b32 [%x], {%f, %tid.x};"),
+    ("st.global.v2.b32([x], (h, tid.x));", "st.global.v2.b32 [%x], {%h, %tid.x};"),
+    ("st.global.v2.b32([x], (tid.x, h));", "st.global.v2.b32 [%x], {%tid.x, %h};"),
+    ("st.global.v2.u32([x], (h, tid.x));", "st.global.v2.u32 [%x], {%h, %tid.x};"),
+    ("st.global.v2.u32([x], (tid.x, h));", "st.global.v2.u32 [%x], {%tid.x, %h};"),
+    ("st.global.v2.b32([x], (tid.x, b));", "st.global.v2.b32 [%x], {%tid.x, %b};"),
+    ("st.global.v2.b32([x], (tid.x, tid.y));", "st.global.v2.b32 [%x], {%tid.x, %tid.y};"),
+    ("st.global.v2.b16([x], (a, 1.5f16));", "st.global.v2.b16 [%x], {%a, 0x3E00};"),
+    ("st.global.v2.b16([x], (a, 1.5bf16));", "st.global.v2.b16 [%x], {%a, 0x3FC0};"),
+    ("st.global.v2.b16([x], (k, 1.5bf16));", "st.global.v2.b16 [%x], {%k, 0x3FC0};"),
+    ("st.global.v2.b64([x], (u, 1));", "st.global.v2.b64 [%x], {%u, 1};"),
+    ("st.global.v2.b64([x], (d, 1.5f64));", "st.global.v2.b64 [%x], {%d, 0d3FF8000000000000};"),
+    ("st.global.v2.b64([x], (1.5f64, d));", "st.global.v2.b64 [%x], {0d3FF8000000000000, %d};"),
+    ("st.global.v2.f32([x], (f, 1));", "st.global.v2.f32 [%x], {%f, 0f3F800000};"),
+    ("st.global.v2.f32([x], (q, 1.5));", "st.global.v2.f32 [%x], {%q, 0f3FC00000};"),
+    ("st.global.v2.f32([x], (1.5, q));", "st.global.v2.f32 [%x], {0f3FC00000, %q};"),
+    ("st.global.v2.f32([x], (q, 1));", "st.global.v2.f32 [%x], {%q, 0f3F800000};"),
+    ("mov.b64(z, (f, tid.x));", "mov.b64 %z, {%f, %tid.x};"),
+    ("mov.b64(z, (tid.x, f));", "mov.b64 %z, {%tid.x, %f};"),
+    ("mov.b64(z, (laneid, 1));", "mov.b64 %z, {%laneid, 1};"),
+    ("st.global.v2.b32([x], (laneid, 1));", "st.global.v2.b32 [%x], {%laneid, 1};"),
+    ("st.global.v2.b32([x], (1, laneid));", "st.global.v2.b32 [%x], {1, %laneid};"),
+    ("st.global.v2.b32([x], (laneid, 1.5));", "st.global.v2.b32 [%x], {%laneid, 0f3FC00000};"),
+    ("st.global.v2.b64([x], (clock64, 1));", "st.global.v2.b64 [%x], {%clock64, 1};"),
+    ("st.global.v2.b64([x], (clock64, d));", "st.global.v2.b64 [%x], {%clock64, %d};"),
+    ("st.global.v2.b64([x], (u, clock64));", "st.global.v2.b64 [%x], {%u, %clock64};"),
+    ("sust.b._2d.v2.b32.trap([s, (n, n)], (f, tid.x));", "sust.b.2d.v2.b32.trap [%s, {%n, %n}], {%f, %tid.x};"),
+    ("sust.b._2d.v2.b32.trap([s, (n, n)], (laneid, 1));", "sust.b.2d.v2.b32.trap [%s, {%n, %n}], {%laneid, 1};"),
+    (
+        "tex._2d.v4.f32.s32((r0, r1, r2, r3), [s, (laneid, 5)]);",
+        "tex.2d.v4.f32.s32 {%r0, %r1, %r2, %r3}, [%s, {%laneid, 5}];",
+    ),
+    (
+        "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32((j, j, j, j), (laneid, 8), n, (0, 0, 0, 0));",
+        "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32 {%j, %j, %j, %j}, {%laneid, 8}, {%n}, {0, 0, 0, 0};",
+    ),
 ];
 
 /// kernite writes each of [`TOGETHER`] as it is.
@@ -1275,7 +1734,8 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         (
             "let (h, a, b, c, d): (f16x2, f32, f32, f32, f32); mov.b32(h, n); \
              tex.a2d.v4.f32.s32((a, b, c, d), [s, (n, h, n, n)]);",
-            "2:99: `tex.a2d.v4.f32.s32` wants a `s32` variable; this is a `f16x2`",
+            "2:99: `tex.a2d.v4.f32.s32` takes the operands of a vector of one type, bits beside any and an integer \
+             beside an integer; this is a `u32` variable beside a `f16x2` variable",
         ),
         (
             "let (i, w): (u64, s64); mov.s64(w, 0); suld.b._1d.b32.trap(i, [s, w]);",
@@ -1348,8 +1808,8 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         (
             "let (a, b, c, d): (s32, s32, s32, s32); mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32((a, b, c, d), \
              (tid.x, 8), n, (0, 0, 0, 0));",
-            "2:103: `mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32` takes values known now among these only beside \
-             a variable: one of the kernel's, or a special register but a part of a vector, as `tid.x` is of `tid`",
+            "2:111: `mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32` takes no part of a special register beside a \
+             value known now, as `tid.x` is of `tid`; this is the integer 8 beside `tid.x`",
         ),
         (
             "let (a, b, c, d): (s32, s32, s32, s32); mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32((a, b, c, d), \

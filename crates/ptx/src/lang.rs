@@ -604,18 +604,9 @@ impl Kernel {
             _ if n == 1 => std::slice::from_ref(a),
             _ => return Err(format!("`{name}` wants {}; this is {}", describe(b, spec), self.given(a))),
         };
-        // ptxas 13.5 takes an `f16x2` for an integer in a vector beside registers of `f16x2` or `b32`, and `_`, and
-        // refuses it beside one of another type, as it refuses any two registers whose types do not go together: the
-        // rule below. An array's index, the lead, it checks apart, and takes no `f16x2` for it: "Array index in the
-        // 'tex' instruction has unexpected type".
-        let beside = |p: &Given<Var>| {
-            matches!(p, Given::Var(Var::Reg { ty, .. }) if matches!(ty.decl(), Ty::F16x2 | Ty::B32))
-                || matches!(p, Given::Special(s) if s == "_")
-        };
-        let rest = &Spec {
-            exact: spec.exact || !parts[usize::from(spec.lead.is_some())..].iter().all(beside),
-            ..spec.clone()
-        };
+        // An array's index, the lead, ptxas checks apart, and takes no `f16x2` for it: "Array index in the 'tex'
+        // instruction has unexpected type". It takes one for an integer in the rest, as anywhere, and refuses it beside
+        // an operand that does not go with it: the rule below.
         let mut texts = vec![];
         for (k, part) in parts.iter().enumerate() {
             texts.push(match spec.lead {
@@ -623,53 +614,40 @@ impl Kernel {
                     let index = Spec { ty: Some(TyRef::Fixed(t)), exact: true, ..spec.clone() };
                     self.one(b, &index, part, name, w)?
                 }
-                _ => self.one(b, rest, part, name, w)?,
+                _ => self.one(b, spec, part, name, w)?,
             });
         }
-        // ptxas 13.5 wants the registers of a vector of one size, "Incompatible elements of vector expression", and one
-        // type, bits beside any and an integer beside an integer: "Vector with elements of different types are not
-        // allowed in st instruction", as in `ld`, `ldu`, `mov`, `suld.b`, `sust.b`, `sust.p`, `ldmatrix` and `mma`. It
-        // checks each register against its neighbour alone, and takes `st.global.v4.b32 [%rd1], {%f1, %b1, %i1, %i1};`,
-        // an `f32` and a `u32` with a `b32` between, as it takes `{%h1, %b1, %r1, %r1}`, an `f16x2` and a `u32` with
-        // one: that looks like a bug of its own, and kernite checks each register against each before it. A special
-        // register, a value known now and `_` are no register here, and the lead, an array's index, ptxas checks apart.
-        let regs: Vec<(usize, Ty)> = parts
+        // ptxas 13.5 takes the operands of a vector that go together, as `Seen::apart` says, in `st`, `ld`, `ldu`,
+        // `mov`, `suld.b`, `sust.b`, `sust.p`, `ldmatrix` and `mma`. It checks each against its neighbour alone, and
+        // takes `st.global.v4.b32 [%rd1], {%f1, %b1, %i1, %i1};`, an `f32` and a `u32` with a `b32` between, as it
+        // takes `{%h1, %b1, %r1, %r1}`, an `f16x2` and a `u32` with one, and `{%f1, %b1, 1, 1}`: that looks like a bug
+        // of its own, and kernite checks each against each before it. The lead, an array's index, ptxas checks apart.
+        let lane = b.ty(spec.ty.expect("a register's operand has a type"));
+        let seen: Vec<(usize, Seen)> = parts
             .iter()
+            .zip(&texts)
             .enumerate()
             .skip(usize::from(spec.lead.is_some()))
-            .filter_map(|(k, p)| match p {
-                Given::Var(Var::Reg { ty, .. }) => Some((k, ty.decl())),
-                _ => None,
-            })
+            .filter_map(|(k, (p, text))| Some((k, Seen::of(p, text, lane)?)))
             .collect();
-        for (i, &(k, ty)) in regs.iter().enumerate() {
-            if let Some(&(j, other)) = regs[..i].iter().find(|&&(_, other)| !ty.fits(other)) {
+        // A half known now is written as its bits, an integer, and the error says so: it is no `f16` beside an `f16`.
+        let named = |k: usize, end: &str| match &parts[k] {
+            p @ (Given::F16(_) | Given::Bf16(_)) => {
+                format!("{}, written as the integer {}{end}", self.given(p), texts[k])
+            }
+            p => self.given(p),
+        };
+        for (i, &(k, this)) in seen.iter().enumerate() {
+            if let Some((j, why)) = seen[..i].iter().find_map(|&(j, that)| Some((j, this.apart(that)?))) {
                 w.part = Some(k);
-                let one = match ty.bits() == other.bits() {
-                    true => "type, bits beside any and an integer beside an integer",
-                    false => "size",
-                };
-                let (this, beside) = (self.given(&parts[k]), self.given(&parts[j]));
-                return Err(format!(
-                    "`{name}` takes the registers of a vector of one {one}; this is {this} beside {beside}"
-                ));
+                return Err(format!("`{name}` {why}; this is {} beside {}", named(k, ","), named(j, "")));
             }
         }
         if texts.iter().all(|t| t == "_") {
             return Err(format!("`{name}` writes one of them at least"));
         }
-        if spec.one_var && parts.iter().any(is_value) && !parts.iter().any(anchors) {
-            let part = parts.iter().find_map(|p| match p {
-                Given::Special(s) => s.split_once('.'),
-                _ => None,
-            });
-            return Err(match part {
-                Some((v, x)) => format!(
-                    "`{name}` takes values known now among these only beside a variable: one of the kernel's, or a \
-                     special register but a part of a vector, as `{v}.{x}` is of `{v}`"
-                ),
-                None => format!("`{name}` takes values known now among these only beside a variable"),
-            });
+        if spec.one_var && parts.iter().all(is_value) {
+            return Err(format!("`{name}` takes values known now among these only beside a variable"));
         }
         Ok(format!("{{{}}}", texts.join(", ")))
     }
@@ -1469,14 +1447,77 @@ fn is_value(a: &Given<Var>) -> bool {
     matches!(a, Given::Int(_) | Given::F32(_) | Given::F64(_) | Given::F16(_) | Given::Bf16(_))
 }
 
-/// Whether `a` is a variable that values known now may be beside, in registers taken
-/// together: ptxas 13.5 takes `{%r1, 8}` and `{%laneid, 8}`, but not `{%tid.x, 8}`, though
-/// it takes `{%tid.x, %r1}`.
-fn anchors(a: &Given<Var>) -> bool {
-    match a {
-        Given::Var(Var::Reg { .. } | Var::Part { .. }) => true,
-        Given::Special(s) => s != "_" && !s.contains('.'),
-        _ => false,
+/// What `ptxas` makes of an operand of a vector, by which it tells those that go together: a variable, of the type it
+/// is declared as; a special register, of its size alone, and whether it is a part of a vector of them, as `tid.x` is
+/// of `tid`; or a value known now, which is an integer, with no size, or a float, of the bits it is written in, in a
+/// vector of bits.
+#[derive(Clone, Copy)]
+enum Seen {
+    Reg(Ty),
+    Special(u32, bool),
+    Value(Option<u32>),
+}
+
+impl Seen {
+    /// What `ptxas` makes of `a`, which is written as `text`, in a vector of `lane`: nothing of `_`, or of what is no
+    /// operand of a vector, or of a value known now in a vector of floats, which goes beside every operand that vector
+    /// takes alone, a `b64` beside an `f32` too. A float is written `0f3FC00000`, of 32 bits, or `0d3FF8000000000000`,
+    /// of 64, and an integer, or a half as its bits, is not.
+    fn of(a: &Given<Var>, text: &str, lane: Ty) -> Option<Seen> {
+        match a {
+            Given::Var(Var::Reg { ty, .. }) => Some(Seen::Reg(ty.decl())),
+            Given::Special(s) => forms::sreg(s).map(|r| Seen::Special(r.ty.bits(), s.contains('.'))),
+            _ if is_value(a) && lane.kind() != Kind::Float => Some(Seen::Value(match text.get(..2) {
+                Some("0f") => Some(32),
+                Some("0d") => Some(64),
+                _ => None,
+            })),
+            _ => None,
+        }
+    }
+
+    /// Why `self` does not go with `other` in a vector, as the words of an error, if it does not, as ptxas 13.5 takes
+    /// them. Those that have a size are of one: a variable, a special register, and, in a vector of bits, a float
+    /// known now. In a vector of bits, ptxas refuses a float known now first beside a register of 64 bits,
+    /// `{0f3FC00000, %d}`, and takes it elsewhere, `{%d, 0f3FC00000}`, which looks like a bug of its own, so kernite
+    /// refuses it in every place. A variable goes with one of a type that goes with it: bits with any, an integer with
+    /// an integer, and a float with itself. A special register goes with any variable of its size, as ptxas checks its
+    /// size alone. A value known now goes with a variable as [`beside_value`] says, and with one of its own kind. A
+    /// part of a vector's special register goes with no value, but a whole one does: `(tid.x, 1)` is refused, and
+    /// `(laneid, 1)` is not.
+    fn apart(self, other: Seen) -> Option<&'static str> {
+        use Seen::{Reg, Special, Value};
+        let size = |s: Seen| match s {
+            Reg(t) => Some(t.bits()),
+            Special(bits, _) => Some(bits),
+            Value(float) => float,
+        };
+        if let (Some(x), Some(y)) = (size(self), size(other))
+            && x != y
+        {
+            return Some("takes the operands of a vector of one size");
+        }
+        let one = "takes the operands of a vector of one type, bits beside any and an integer beside an integer";
+        match (self, other) {
+            (Reg(x), Reg(y)) if !x.fits(y) => Some(one),
+            (Reg(r), Value(float)) | (Value(float), Reg(r)) if !beside_value(r, float.is_some()) => Some(one),
+            (Value(x), Value(y)) if x.is_some() != y.is_some() => Some(one),
+            (Special(_, true), Value(_)) | (Value(_), Special(_, true)) => {
+                Some("takes no part of a special register beside a value known now, as `tid.x` is of `tid`")
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Whether a variable of type `ty` goes beside a value known now in a vector of bits or of integers, a float or not,
+/// whatever the size of either: bits go beside any, an integer beside an integer, and an `f32` or an `f64` beside a
+/// float, as ptxas 13.5 takes them.
+fn beside_value(ty: Ty, float: bool) -> bool {
+    match ty.kind() {
+        Kind::Bit => true,
+        Kind::Float => float && matches!(ty, Ty::F32 | Ty::F64),
+        _ => !float,
     }
 }
 
