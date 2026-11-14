@@ -992,10 +992,10 @@ fn an_operand_that_does_not_go_with_one_before_it_in_a_vector_is_refused_where_p
     }
 }
 
-/// The module of [`TOGETHER_DECLARED`] alone, of PTX 9.5 for `sm_86`, with the line of PTX `line` in it.
+/// The module of [`TOGETHER_DECLARED`] alone, of the newest PTX for `sm_86`, with the line of PTX `line` in it.
 fn with_line(line: &str) -> String {
     let ptx = compile("x: *mut u32, n: u32, s: u64", TOGETHER_DECLARED).unwrap();
-    retarget(&ptx, 95, 86).replace("\tret;\n", &format!("\t{line}\n\tret;\n"))
+    retarget(&ptx, NEWEST, 86).replace("\tret;\n", &format!("\t{line}\n\tret;\n"))
 }
 
 /// `ptxas` refuses each line of [`BOTH_REFUSE`], in the words that tell why, and takes the module without it.
@@ -1206,11 +1206,12 @@ fn ptxas_checks_each_register_of_a_vector_against_its_neighbour_alone() {
     ];
     for (n, (inst, refused)) in cases.into_iter().enumerate() {
         let text = format!(
-            ".version 9.4\n.target sm_86\n.address_size 64\n\n.visible .entry k(.param .u64 x)\n{{\n\
+            ".version {}\n.target sm_86\n.address_size 64\n\n.visible .entry k(.param .u64 x)\n{{\n\
              \t.reg .u64 %x;\n\t.reg .b64 %z1;\n\t.reg .f32 %f1;\n\t.reg .f16x2 %h1;\n\t.reg .b32 %b1;\n\
              \t.reg .u32 %i1;\n\t.reg .s32 %c1;\n\t.reg .u16 %a1;\n\tld.param.u64 %x, [x];\n\tmov.b32 %f1, 0;\n\
              \tmov.b32 %h1, 0;\n\tmov.b32 %b1, 0;\n\tmov.b32 %i1, 0;\n\tmov.s32 %c1, 0;\n\tmov.b16 %a1, 0;\n\
-             \t{inst}\n\tret;\n}}\n"
+             \t{inst}\n\tret;\n}}\n",
+            dotted(NEWEST)
         );
         let run = assembled(&ptxas, &text, "sm_86", &format!("neighbour_{n}"), &[]);
         let said = String::from_utf8_lossy(&run.stderr);
@@ -4030,12 +4031,26 @@ enum Expect {
     Refuses,
 }
 
-/// Every version of PTX the `ptxas` here reads, from 1.0 to 9.4: those before 2.3 without
-/// `.address_size`, which they have not.
-const VERSIONS: [u32; 47] = [
+/// Every version of PTX, from 1.0 to 9.5, which the `ptxas` here reads: those before 2.3 without `.address_size`,
+/// which they have not. PTX has no 5.1, as 6.0 came after 5.0, though `ptxas` reads it: [`READ_AS_6_0`].
+const VERSIONS: [u32; 48] = [
     10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 30, 31, 32, 40, 41, 42, 43, 50, 60, 61, 62, 63, 64, 65, 70, 71, 72, 73, 74,
-    75, 76, 77, 78, 80, 81, 82, 83, 84, 85, 86, 87, 88, 90, 91, 92, 93, 94,
+    75, 76, 77, 78, 80, 81, 82, 83, 84, 85, 86, 87, 88, 90, 91, 92, 93, 94, 95,
 ];
+
+/// The newest version of PTX, the last of [`VERSIONS`]: a test that writes a module of it takes the version from here,
+/// and writes no number of its own.
+const NEWEST: u32 = VERSIONS[VERSIONS.len() - 1];
+
+/// The version 5.1, which `ptxas` 13.5 reads as 6.0, though PTX has none: in a module of it `ptxas` takes `shfl.sync`,
+/// `vote.sync`, `bar.warp.sync` and `.target sm_70`, which it refuses at 5.0. The ISA says nothing of a module of 5.1,
+/// so kernite writes none.
+const READ_AS_6_0: u32 = 51;
+
+/// The version `v` as PTX writes it: 95 is 9.5.
+fn dotted(v: u32) -> String {
+    format!("{}.{}", v / 10, v % 10)
+}
 
 /// The newest of Fermi's GPUs, which came with PTX 2.0. kernite writes for none of them, as the
 /// driver starts at most 65535 blocks along x of a module for one; ptxas takes a module for one.
@@ -4076,11 +4091,96 @@ fn retarget(text: &str, v: u32, sm: u32) -> String {
     text.lines()
         .filter(|l| v >= 23 || *l != ".address_size 64")
         .map(|l| match l {
-            _ if l.starts_with(".version ") => format!(".version {}.{}\n", v / 10, v % 10),
+            _ if l.starts_with(".version ") => format!(".version {}\n", dotted(v)),
             _ if l.starts_with(".target ") => format!(".target sm_{sm}\n"),
             _ => format!("{l}\n"),
         })
         .collect()
+}
+
+/// A module of one kernel that returns, of which [`retarget`] makes one of each version of PTX.
+const ONE_KERNEL: &str = ".version 3.0\n.target sm_30\n.address_size 64\n\n.visible .entry k()\n{\n\tret;\n}\n";
+
+/// `ptxas` reads the versions of PTX that [`VERSIONS`] has, and [`READ_AS_6_0`], of those from 1.0 to the end of the
+/// major version after the newest, 10.9 now, and no other: of a module of one kernel that returns, for the newest GPU a
+/// module of it may be for, it says "Unsupported .version" of the rest. It fails the day `ptxas` reads a version that
+/// kernite does not know, for [`VERSIONS`] to have it and the tests to hand each form to `ptxas` at it, and the day it
+/// stops reading one that kernite does.
+#[test]
+fn ptxas_reads_each_version_of_ptx_that_versions_has_and_5_1_and_no_other() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    let every: Vec<u32> = (10..(NEWEST / 10 + 2) * 10).collect();
+    let modules: Vec<(String, u32)> = every
+        .iter()
+        .map(|&v| retarget(ONE_KERNEL, v, newest(v)))
+        .map(|text| {
+            let gpu = gpu_of(&text);
+            (text, gpu)
+        })
+        .collect();
+    let mut failures = vec![];
+    for (&v, (refused, _)) in every.iter().zip(assemble(&ptxas, "versions", &modules)) {
+        let (known, said) = (VERSIONS.contains(&v) || v == READ_AS_6_0, refused.values().next());
+        let (version, unread) = (dotted(v), said.is_some_and(|m| m.contains("Unsupported .version")));
+        match (known, unread, said) {
+            (true, true, Some(m)) => {
+                failures.push(format!("ptxas does not read PTX {version}, which kernite knows: {m}"))
+            }
+            (true, false, Some(m)) => failures.push(format!("ptxas refuses a module of PTX {version}: {m}")),
+            (false, false, _) => failures.push(format!("ptxas reads PTX {version}, which VERSIONS lacks")),
+            _ => {}
+        }
+    }
+    assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// `ptxas` 13.5 reads PTX 5.1 as 6.0, though PTX has no 5.1: it takes `shfl.sync`, `vote.sync`, `bar.warp.sync` and
+/// `.target sm_70` at 5.1 and at 6.0, which it refuses at 5.0, and refuses at 5.1 what came after 6.0, `.target sm_72`,
+/// which it takes at 6.1. It fails the day `ptxas` reads 5.1 as another version, for [`READ_AS_6_0`] and GUIDE.md to
+/// say what it is.
+#[test]
+fn ptxas_reads_ptx_5_1_as_6_0() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    // Each line of a kernel, the GPU its module is for, and the first version of PTX that has both.
+    let lines = [
+        ("shfl.sync.idx.b32 %r1, %r2, 0, 31, 0xffffffff;", 30, 60),
+        ("vote.sync.any.pred %p1, %p2, 0xffffffff;", 30, 60),
+        ("bar.warp.sync 0xffffffff;", 30, 60),
+        ("", 70, 60),
+        ("", 72, 61),
+    ];
+    let tries: Vec<_> =
+        lines.into_iter().flat_map(|(line, sm, came)| [50, READ_AS_6_0, 60, 61].map(|v| (line, sm, came, v))).collect();
+    let modules: Vec<(String, u32)> = tries
+        .iter()
+        .map(|&(line, sm, _, v)| {
+            let text = format!(
+                ".version 6.0\n.target sm_{sm}\n.address_size 64\n\n.visible .entry k()\n{{\n\t.reg .b32 %r<3>;\n\
+                 \t.reg .pred %p<3>;\n\t{line}\n\tret;\n}}\n"
+            );
+            let text = retarget(&text, v, sm);
+            let gpu = gpu_of(&text);
+            (text, gpu)
+        })
+        .collect();
+    let mut failures = vec![];
+    for (&(line, sm, came, v), (refused, _)) in tries.iter().zip(assemble(&ptxas, "five_one", &modules)) {
+        // 5.1 is read as 6.0: ptxas takes a line from the version that brought it.
+        let takes = (if v == READ_AS_6_0 { 60 } else { v }) >= came;
+        let (version, with) = (dotted(v), if line.is_empty() { String::new() } else { format!(", `{line}`") });
+        match (takes, refused.values().next()) {
+            (true, Some(m)) => failures.push(format!("ptxas refuses PTX {version} for sm_{sm}{with}: {m}")),
+            (false, None) => failures.push(format!("ptxas takes PTX {version} for sm_{sm}{with}")),
+            _ => {}
+        }
+    }
+    assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
 }
 
 /// `ptxas` takes each form kernite knows, written each way kernite has, at the version and for the GPU kernite says it
@@ -4181,25 +4281,25 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
     for ((_, ptx, ..), entries) in groups.iter().filter(|((_, ptx, ..), _)| !VERSIONS.contains(ptx)) {
         let (count, some): (usize, Vec<&str>) =
             (entries.len(), entries.iter().take(5).map(|e| what[&e.program.name].as_str()).collect());
-        failures.push(format!("{count} kernels need PTX {ptx}, which ptxas reads none of: {}", some.join("; ")));
+        failures.push(format!("{count} kernels need PTX {}, which VERSIONS lacks: {}", dotted(*ptx), some.join("; ")));
     }
     // Each group as kernite writes it, for the GPU it is for and for each newer it may run
     // on, as the driver assembles it for the GPU it runs on; at the version it needs, for the
-    // newest GPU of that version; and at the newest version, for the newest GPU it may be
-    // for, as ptxas takes some older that it refuses newer. And one step older in each way it
-    // needs more than PTX 1.0 and Fermi, and for the GPU it is too new for: then each kernel
-    // is wrong. A group of kernels with an `f16x2` goes once, as kernite writes it: what it
-    // asks of ptxas is how it reads an `f16x2`, which no version or GPU changes, and the
-    // other groups try each form at each version and GPU. Where kernite takes the `f16x2`,
-    // the group goes with its twin, with each `f16x2` a `b32`, which `ptxas` makes the same
-    // cubin of; where it refuses, `ptxas` does too, of a hundred at a time, but for the
-    // refusals of `ptxas_bug`, which it takes.
+    // newest GPU of that version; and at the newest version, for each GPU from its own to the
+    // newest, as ptxas takes some older that it refuses newer. And one step older in each way
+    // it needs more than PTX 1.0 and Fermi, and for the GPU it is too new for: then each
+    // kernel is wrong. A group of kernels with an `f16x2` goes once, as kernite writes it:
+    // what it asks of ptxas is how it reads an `f16x2`, which no version or GPU changes, and
+    // the other groups try each form at each version and GPU. Where kernite takes the
+    // `f16x2`, the group goes with its twin, with each `f16x2` a `b32`, which `ptxas` makes
+    // the same cubin of; where it refuses, `ptxas` does too, of a hundred at a time, but for
+    // the refusals of `ptxas_bug`, which it takes.
     let mut modules: Vec<(String, u32, Expect)> = vec![];
     let mut twins: Vec<(usize, &[Entry])> = vec![];
     for (&(group, ptx, sm), entries) in groups.iter().filter(|((_, ptx, ..), _)| VERSIONS.contains(ptx)) {
         let gpu = newest(ptx);
         if gpu < sm {
-            let v = format!("{}.{}", ptx / 10, ptx % 10);
+            let v = dotted(ptx);
             failures.push(format!("{} kernels need PTX {v} and sm_{sm}, which no module of {v} is for", entries.len()));
         }
         if matches!(group, Group::Wrong | Group::Bug) {
@@ -4214,10 +4314,12 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
             modules.push(at(module(&as_bits(entries)), Expect::Takes));
             continue;
         }
-        let last = VERSIONS[VERSIONS.len() - 1];
-        let (exact, latest) = (retarget(&text, ptx, gpu), retarget(&text, last, newest(last)));
-        if latest != text && latest != exact {
-            modules.push(at(latest, Expect::Takes));
+        let exact = retarget(&text, ptx, gpu);
+        for &(g, _) in kernite_ptx::GPUS.iter().filter(|&&(g, _)| g >= sm) {
+            let latest = retarget(&text, NEWEST, g);
+            if latest != text && latest != exact {
+                modules.push(at(latest, Expect::Takes));
+            }
         }
         if exact != text {
             modules.push(at(exact, Expect::Takes));
@@ -4248,9 +4350,12 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
         hand.push(text);
     }
     let f = callee().text();
+    let (version, gpu) = (dotted(NEWEST), newest(NEWEST));
     for some in hand.chunks(100) {
-        let text =
-            format!("// Written by hand.\n\n.version 9.4\n.target sm_86\n.address_size 64\n\n{f}\n{}", some.join("\n"));
+        let text = format!(
+            "// Written by hand.\n\n.version {version}\n.target sm_{gpu}\n.address_size 64\n\n{f}\n{}",
+            some.join("\n")
+        );
         modules.push(at(text, Expect::Refuses));
     }
     let texts: Vec<(String, u32)> = modules.iter().map(|(t, g, _)| (t.clone(), *g)).collect();
