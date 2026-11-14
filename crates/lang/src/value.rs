@@ -453,6 +453,9 @@ pub fn binary(op: BinOp, a: &Value, b: &Value) -> Result<Value, String> {
                 Mul => x.checked_mul(y).ok_or_else(over)?,
                 Div | Rem if y == 0 => return Err(format!("{x} {} 0 divides by zero", op_text(op))),
                 Div => x / y,
+                // The least of a signed type by -1 overflows, as `/` does: its quotient is out of range, though
+                // its remainder is 0.
+                Rem if int(x / y, t).is_err() => return Err(over()),
                 Rem => x % y,
                 Shl | Shr => {
                     let bits = tx.map_or(64, IntTy::bits);

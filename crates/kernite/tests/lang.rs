@@ -2322,15 +2322,10 @@ fn array_parameters_take_variables_declared_together() {
     assert_eq!(x86(src, "k"), want);
 }
 
-/// A constant of a module works out on its own, in terms of the module's others, before or
-/// after it, as a module of consts has each checked; or says why it is no value known now.
-#[test]
-fn a_constant_works_out_on_its_own() {
-    let src = "const D: usize = E / H;\nconst E: usize = 16;\nconst H: usize = 4;\nconst W: [f32; 2] = [0.5, -1.0];\n\
-               const LOOP: u32 = LOOP + 1;\nconst BAD: u32 = 1.5;\nconst GONE: u32 = NOPE;\n\
-               const DIV: u32 = 1 / 0;\nconst REM: u32 = 1 % 0;\nunsafe extern \"sysv64\" fn k() {}\n";
+/// What each const of the module `src` works out to on its own: its value, or its error at its place.
+fn constants(src: &str) -> impl Fn(&str) -> Result<String, String> + '_ {
     let module = kernite::lang::parse(src).unwrap();
-    let value = |name: &str| {
+    move |name| {
         let c = module
             .items
             .iter()
@@ -2340,7 +2335,17 @@ fn a_constant_works_out_on_its_own() {
             })
             .unwrap();
         kernite::lang::constant(&module, c).map(|v| v.to_string()).map_err(|e| e.at(src))
-    };
+    }
+}
+
+/// A constant of a module works out on its own, in terms of the module's others, before or
+/// after it, as a module of consts has each checked; or says why it is no value known now.
+#[test]
+fn a_constant_works_out_on_its_own() {
+    let src = "const D: usize = E / H;\nconst E: usize = 16;\nconst H: usize = 4;\nconst W: [f32; 2] = [0.5, -1.0];\n\
+               const LOOP: u32 = LOOP + 1;\nconst BAD: u32 = 1.5;\nconst GONE: u32 = NOPE;\n\
+               const DIV: u32 = 1 / 0;\nconst REM: u32 = 1 % 0;\nunsafe extern \"sysv64\" fn k() {}\n";
+    let value = constants(src);
     let cases = [
         ("D", Ok("4")),
         ("W", Ok("[0.5, -1]")),
@@ -2371,6 +2376,64 @@ fn a_kernel_that_reads_a_division_by_zero_is_told_that_it_divides_by_zero() {
             assert_eq!(compile(&src(gpu, op, 0), "k").unwrap_err(), want, "{op}, gpu: {gpu}");
             compile(&src(gpu, op, 1), "k").unwrap_or_else(|e| panic!("{op} by 1, gpu: {gpu}: {e}"));
         }
+    }
+}
+
+/// The remainder of the least of a signed type by -1, known now, overflows, as in Rust, though it is 0: it is an error
+/// at its `%`, in a const that a kernel reads, on x86 and on a GPU. By 1, the same kernels compile.
+#[test]
+fn a_kernel_that_reads_the_remainder_of_the_least_of_a_signed_type_by_minus_one_is_told_that_it_overflows() {
+    let src = |gpu: bool, ty: &str, store: &str, least: &str, divisor: i32| {
+        let kernel = match gpu {
+            true => format!(r#"unsafe extern "ptx-kernel" fn k(p: *mut {ty}) {{ st.global.{store}([p], N); }}"#),
+            false => r#"unsafe extern "sysv64" fn k() { let r: gpr; mov(r, N); }"#.to_string(),
+        };
+        format!("const N: {ty} = {least} % {divisor};\n{kernel}\n")
+    };
+    for (ty, store, least, at) in
+        [("i64", "s64", "-9223372036854775808", "1:37"), ("i32", "s32", "-2147483648", "1:28")]
+    {
+        let want = format!("{at}: {least} % -1 overflows");
+        for gpu in [false, true] {
+            assert_eq!(compile(&src(gpu, ty, store, least, -1), "k").unwrap_err(), want, "{ty}, gpu: {gpu}");
+            compile(&src(gpu, ty, store, least, 1), "k").unwrap_or_else(|e| panic!("{ty} by 1, gpu: {gpu}: {e}"));
+        }
+    }
+}
+
+/// The least of each signed type by -1 overflows under `%` as under `/`, at the operator: the `%` says that it
+/// overflows, where the `/` says that its quotient is out of range. The least by 1, and the one above it by -1, are 0,
+/// as they are in Rust. A product past i128, in which kernite works an integer out, says that it overflows too:
+/// `u64::MAX * u64::MAX`.
+#[test]
+fn the_least_of_each_signed_type_overflows_by_minus_one_under_a_remainder_as_under_a_quotient() {
+    let types = [
+        ("i8", "-128"),
+        ("i16", "-32768"),
+        ("i32", "-2147483648"),
+        ("i64", "-9223372036854775808"),
+        ("isize", "-9223372036854775808"),
+    ];
+    let (mut src, mut cases) = (String::new(), vec![]);
+    // A const of the type `ty` that is `sum`, which works out to `want`, or is the error `want` at its `op`.
+    let mut add = |ty: &str, sum: &str, op: char, want: Result<&str, String>| {
+        let line = format!("const N{}: {ty} = {sum};\n", cases.len());
+        let at = format!("{}:{}", src.lines().count() + 1, line.find(op).unwrap() + 1);
+        cases.push((format!("N{}", cases.len()), want.map(String::from).map_err(|message| format!("{at}: {message}"))));
+        src += &line;
+    };
+    for (ty, least) in types {
+        let magnitude = -least.parse::<i128>().unwrap();
+        add(ty, &format!("{least} % -1"), '%', Err(format!("{least} % -1 overflows")));
+        add(ty, &format!("({least} + 1) % -1"), '%', Ok("0"));
+        add(ty, &format!("{least} % 1"), '%', Ok("0"));
+        add(ty, &format!("{least} / -1"), '/', Err(format!("{magnitude} is out of range for {ty}")));
+    }
+    let product = "18446744073709551615 * 18446744073709551615";
+    add("u64", product, '*', Err(format!("{product} overflows")));
+    let value = constants(&src);
+    for (name, want) in cases {
+        assert_eq!(value(&name), want, "{name}");
     }
 }
 
