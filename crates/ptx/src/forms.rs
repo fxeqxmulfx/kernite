@@ -1555,10 +1555,15 @@ pub struct Sreg {
 
 impl Sreg {
     /// Whether an instruction of type `t` reads it: one of the type it is, by PTX's rules,
-    /// or an integer of fewer bits, down to [`Sreg::fewest`].
+    /// or one that reads fewer of its bits, [`Sreg::narrowed`].
     pub fn read_as(&self, t: Ty) -> bool {
-        self.ty.fits(t)
-            || (t.kind() != Kind::Float && t.kind() != Kind::Pred && (self.fewest..self.ty.bits()).contains(&t.bits()))
+        self.ty.fits(t) || self.narrowed(t)
+    }
+
+    /// Whether an instruction of type `t` reads fewer bits of it than it has: an integer of
+    /// fewer bits, down to [`Sreg::fewest`], as `mov.u32(n, gridid)` reads 32 of the 64.
+    pub fn narrowed(&self, t: Ty) -> bool {
+        t.kind() != Kind::Float && t.kind() != Kind::Pred && (self.fewest..self.ty.bits()).contains(&t.bits())
     }
 }
 

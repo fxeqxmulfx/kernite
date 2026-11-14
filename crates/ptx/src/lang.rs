@@ -607,8 +607,10 @@ impl Kernel {
         // An array's index, the lead, ptxas checks apart, and takes no `f16x2` for it: "Array index in the 'tex'
         // instruction has unexpected type". It takes one for an integer in the rest, as anywhere, and refuses it beside
         // an operand that does not go with it: the rule below.
+        let lane = b.ty(spec.ty.expect("a register's operand has a type"));
         let mut texts = vec![];
         for (k, part) in parts.iter().enumerate() {
+            let slot = spec.lead.filter(|_| k == 0).unwrap_or(lane);
             texts.push(match spec.lead {
                 Some(t) if k == 0 => {
                     let index = Spec { ty: Some(TyRef::Fixed(t)), exact: true, ..spec.clone() };
@@ -616,13 +618,32 @@ impl Kernel {
                 }
                 _ => self.one(b, spec, part, name, w)?,
             });
+            // `mov.u32(n, gridid)` reads 32 of the 64 bits of `gridid`, and a vector takes a special register whole.
+            // ptxas 13.5 refuses one of more bits than the operands of a vector, in `mov`, `mma`, `wmma`, the
+            // coordinates of a surface, and the coordinates and the offsets of a texture: "Arguments mismatch for
+            // instruction", and "Incompatible elements of vector expression" after a variable of another size. It takes
+            // one as the data of `st` and `sust`, which take a register of more bits, and after a value known now,
+            // `(1, gridid)`, in `mov`, in the accumulator of `mma`, and in coordinates and offsets, as it checks each
+            // operand against its neighbour alone, which looks like a bug of its own: kernite refuses it. `one` has
+            // taken the operand: where the vector takes no special register, or the instruction writes it, `one` says
+            // so, of `gridid` as of any.
+            if let Given::Special(s) = part
+                && let Some(r) = forms::sreg(s).filter(|r| r.narrowed(slot) && !wider(b, w))
+            {
+                w.part = Some(k);
+                let bits = slot.bits();
+                return Err(format!(
+                    "`{name}` takes the operands of a vector of {bits} bits; this is `{s}`, which has {} bits, and \
+                     `mov.u{bits}` puts {bits} of them in a variable",
+                    r.ty.bits()
+                ));
+            }
         }
         // ptxas 13.5 takes the operands of a vector that go together, as `Seen::apart` says, in `st`, `ld`, `ldu`,
         // `mov`, `suld.b`, `sust.b`, `sust.p`, `ldmatrix` and `mma`. It checks each against its neighbour alone, and
         // takes `st.global.v4.b32 [%rd1], {%f1, %b1, %i1, %i1};`, an `f32` and a `u32` with a `b32` between, as it
         // takes `{%h1, %b1, %r1, %r1}`, an `f16x2` and a `u32` with one, and `{%f1, %b1, 1, 1}`: that looks like a bug
         // of its own, and kernite checks each against each before it. The lead, an array's index, ptxas checks apart.
-        let lane = b.ty(spec.ty.expect("a register's operand has a type"));
         let seen: Vec<(usize, Seen)> = parts
             .iter()
             .zip(&texts)
@@ -680,7 +701,7 @@ impl Kernel {
                     }
                     _ => {}
                 }
-                let fits = |ty: Ty| if b.form.wide && !w.inside { ty.fits_wide(t) } else { ty.fits(t) };
+                let fits = |ty: Ty| if wider(b, w) { ty.fits_wide(t) } else { ty.fits(t) };
                 // ptxas 13.5 takes an `f16x2` for an integer, and reads its 32 bits as a `u32`'s, unless the operand
                 // is `exact`.
                 if !fits(*ty) && !(*ty == Ty::F16x2 && !spec.exact && fits(Ty::U32)) {
@@ -1410,6 +1431,12 @@ fn lanes(b: &Bound, spec: &Spec) -> usize {
         Count::Fixed(n) => n,
         Count::Vec => b.lanes(),
     }
+}
+
+/// Whether a register `w` writes next may be wider than the type of the form `b`, as `ld`, `st` and `cvt` take them:
+/// the form says so, and the register is outside brackets.
+fn wider(b: &Bound, w: &Written) -> bool {
+    b.form.wide && !w.inside
 }
 
 /// Whether `a` is what `spec` is, but for what it holds: a few together where it takes a

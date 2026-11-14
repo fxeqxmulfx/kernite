@@ -186,6 +186,17 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ("let v: f32; ld.f32(v, [n]);", "2:23: `ld.f32` takes an address in a 64-bit variable; this is a `u32`"),
         ("let v: f32; ld.glob.f32(v, [x]);", "2:21: PTX's `ld` has no `.glob` that kernite knows"),
         ("let i: u32; add.u32(i, tid.x, 1);", "2:28: `add.u32` reads no special register; `mov.u32` does"),
+        // A vector that takes no special register, or that the instruction writes, says so, whatever the bits of the
+        // register.
+        ("let w: b32; mov.b32(w, (tid.x, tid.x));", "2:24: `mov.b32` reads no special register; `mov.u32` does"),
+        (
+            "wmma.store.d.sync.aligned.row.m16n16k16.global.s32([x], (gridid, n, n, n, n, n, n, n));",
+            "2:57: `wmma.store.d.sync.aligned.row.m16n16k16.global.s32` reads no special register; `mov.u64` does",
+        ),
+        (
+            "let (z, b): (b64, b32); mov.b64(z, x); mov.b64((gridid, b), z);",
+            "2:48: `mov.b64` writes a variable; `gridid` is a special register, which it reads",
+        ),
         ("let i: u32; mov.u32(i, tod.x);", "2:28: `tod.x` is not defined"),
         ("let i: u32; if n { mov.u32(i, 1); }", "2:24: an instruction is guarded by a `pred`; this is a `u32`"),
         // ptxas 13.5 takes an `f16x2` for the predicate that `and`, `or`, `xor`, `not` and `mov` read, but reads its 32
@@ -637,9 +648,18 @@ enum Why {
     Type,
     /// A part of a vector's special register, as `tid.x` is of `tid`, beside a value known now.
     Part,
+    /// A special register of more bits than the operands of a vector of 32 bits: `gridid`, which has 64, where `ptxas`
+    /// says it of the instruction, as it does of an operand it does not take.
+    Wide,
+    /// [`Wide`] after a variable of another size, where `ptxas` says it as it does of a [`Size`]: of the elements of
+    /// the vector, and not of the instruction.
+    Beside,
 }
 
-use Why::{Order, Part, Size, Type};
+use Why::{Beside, Order, Part, Size, Type, Wide};
+
+/// What kernite says of the operand that is [`Wide`], as the end of its error.
+const GRIDID: &str = "`gridid`, which has 64 bits, and `mov.u32` puts 32 of them in a variable";
 
 impl Why {
     /// What kernite says, after the name of the instruction.
@@ -648,14 +668,15 @@ impl Why {
             Size | Order => "takes the operands of a vector of one size",
             Type => "takes the operands of a vector of one type, bits beside any and an integer beside an integer",
             Part => "takes no part of a special register beside a value known now, as `tid.x` is of `tid`",
+            Wide | Beside => "takes the operands of a vector of 32 bits",
         }
     }
 
     /// What `ptxas` says, or the part of it that tells it from the rest.
     fn ptxas(self) -> &'static str {
         match self {
-            Size => "Incompatible elements of vector expression",
-            Order => "Arguments mismatch for instruction",
+            Size | Beside => "Incompatible elements of vector expression",
+            Order | Wide => "Arguments mismatch for instruction",
             Type => "Vector with elements of different types are not allowed in",
             Part => "must be register or constant",
         }
@@ -664,15 +685,17 @@ impl Why {
 
 /// A vector whose operands do not go together: the line of the kernel, with `@` where its error points, at the operand,
 /// at the `x` of `tid.x`, as an error points at the field of a special register, and at the `[` of the coordinates in a
-/// texture or a surface; the line of PTX that kernite would write; why; and the end of the error, which says what is
-/// beside what.
+/// texture or a surface; the line of PTX that kernite would write; why; and the end of the error, after `this is`.
 type Apart = (&'static str, &'static str, Why, &'static str);
 
 /// Vectors that kernite and `ptxas` 13.5 both refuse, by the registers of [`TOGETHER_DECLARED`], in each instruction
-/// that takes one: a value known now of another kind than a register beside it, or than another value, an integer or
-/// a float; a special register of another size; a float known now first in a vector of bits, before a register of 64
-/// bits; and a part of a vector's special register, as `tid.x` is of `tid`, beside a value known now, which a whole
-/// one, `laneid`, goes beside.
+/// that takes one: a value known now of another kind than a register beside it, or than another value, an integer or a
+/// float; a special register of another size; a float known now first in a vector of bits, before a register of 64
+/// bits; a part of a vector's special register, as `tid.x` is of `tid`, beside a value known now, which a whole one,
+/// `laneid`, goes beside; and `gridid`, a special register of 64 bits, in a vector of 32, in `mov`, `mma`, `wmma`, the
+/// coordinates of a surface, and the coordinates and the offsets of a texture, the layer of an array too: before a
+/// value known now, beside another `gridid` or a variable, and in `mma` after a value known now. The data of `st` and
+/// `sust` take one, [`TOGETHER`].
 const BOTH_REFUSE: &[Apart] = &[
     (
         "st.global.v2.b32([x], (f, @1));",
@@ -930,13 +953,107 @@ const BOTH_REFUSE: &[Apart] = &[
         Part,
         "the integer 5 beside `tid.x`",
     ),
+    ("mov.b64(z, (@gridid, gridid));", "mov.b64 %z, {%gridid, %gridid};", Wide, GRIDID),
+    ("mov.b64(z, (@gridid, 1));", "mov.b64 %z, {%gridid, 1};", Wide, GRIDID),
+    ("mov.b64(z, (@gridid, -1));", "mov.b64 %z, {%gridid, -1};", Wide, GRIDID),
+    (
+        "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32((j, j, j, j), (@gridid, gridid), n, (0, 0, 0, 0));",
+        "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32 {%j, %j, %j, %j}, {%gridid, %gridid}, {%n}, {0, 0, 0, 0};",
+        Wide,
+        GRIDID,
+    ),
+    (
+        "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32((j, j, j, j), (1, @gridid), n, (0, 0, 0, 0));",
+        "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32 {%j, %j, %j, %j}, {1, %gridid}, {%n}, {0, 0, 0, 0};",
+        Wide,
+        GRIDID,
+    ),
+    (
+        "wmma.mma.sync.aligned.row.col.m16n16k16.s32.s8.s8.s32((j, j, j, j, j, j, j, j), (n, n), (n, n), \
+         (@gridid, 1, 1, 1, 1, 1, 1, 1));",
+        "wmma.mma.sync.aligned.row.col.m16n16k16.s32.s8.s8.s32 {%j, %j, %j, %j, %j, %j, %j, %j}, {%n, %n}, {%n, %n}, \
+         {%gridid, 1, 1, 1, 1, 1, 1, 1};",
+        Wide,
+        GRIDID,
+    ),
+    (
+        "sust.b._2d.v2.b32.trap(@[s, (gridid, gridid)], (f, b));",
+        "sust.b.2d.v2.b32.trap [%s, {%gridid, %gridid}], {%f, %b};",
+        Wide,
+        GRIDID,
+    ),
+    (
+        "sust.b._2d.v2.b32.trap(@[s, (gridid, 1)], (f, b));",
+        "sust.b.2d.v2.b32.trap [%s, {%gridid, 1}], {%f, %b};",
+        Wide,
+        GRIDID,
+    ),
+    (
+        "suld.b._2d.v2.b32.trap((b, b), @[s, (gridid, gridid)]);",
+        "suld.b.2d.v2.b32.trap {%b, %b}, [%s, {%gridid, %gridid}];",
+        Wide,
+        GRIDID,
+    ),
+    (
+        "sured.b.add._2d.u32.trap(@[s, (gridid, 1)], n);",
+        "sured.b.add.2d.u32.trap [%s, {%gridid, 1}], %n;",
+        Wide,
+        GRIDID,
+    ),
+    (
+        "tex._2d.v4.f32.s32((r0, r1, r2, r3), @[s, (gridid, gridid)]);",
+        "tex.2d.v4.f32.s32 {%r0, %r1, %r2, %r3}, [%s, {%gridid, %gridid}];",
+        Wide,
+        GRIDID,
+    ),
+    (
+        "tex._2d.v4.f32.s32((r0, r1, r2, r3), @[s, (gridid, 1)]);",
+        "tex.2d.v4.f32.s32 {%r0, %r1, %r2, %r3}, [%s, {%gridid, 1}];",
+        Wide,
+        GRIDID,
+    ),
+    (
+        "tex._1d.v4.f32.s32((r0, r1, r2, r3), @[s, gridid]);",
+        "tex.1d.v4.f32.s32 {%r0, %r1, %r2, %r3}, [%s, {%gridid}];",
+        Wide,
+        GRIDID,
+    ),
+    (
+        "tex._2d.v4.f32.s32((r0, r1, r2, r3), [s, (j, j)], (@gridid, 1));",
+        "tex.2d.v4.f32.s32 {%r0, %r1, %r2, %r3}, [%s, {%j, %j}], {%gridid, 1};",
+        Wide,
+        GRIDID,
+    ),
+    ("mov.b64(z, (@gridid, i));", "mov.b64 %z, {%gridid, %i};", Wide, GRIDID),
+    ("mov.b64(z, (i, @gridid));", "mov.b64 %z, {%i, %gridid};", Beside, GRIDID),
+    (
+        "tex.a1d.v4.f32.s32((r0, r1, r2, r3), @[s, (gridid, j)]);",
+        "tex.a1d.v4.f32.s32 {%r0, %r1, %r2, %r3}, [%s, {%gridid, %j}];",
+        Wide,
+        GRIDID,
+    ),
+    (
+        "tex.a1d.v4.f32.f32((r0, r1, r2, r3), @[s, (gridid, f)]);",
+        "tex.a1d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {%gridid, %f}];",
+        Wide,
+        GRIDID,
+    ),
+    (
+        "tex.a1d.v4.f32.s32((r0, r1, r2, r3), @[s, (n, gridid)]);",
+        "tex.a1d.v4.f32.s32 {%r0, %r1, %r2, %r3}, [%s, {%n, %gridid}];",
+        Beside,
+        GRIDID,
+    ),
 ];
 
 /// Vectors that `ptxas` 13.5 takes and kernite refuses, by one of two bugs of its own. It checks each operand against
 /// the one before it alone: `(f, b, 1, 1)` has an `f32` and an integer with a `b32` between, as `(f, b, i, i)` has an
 /// `f32` and a `u32`, and `(f, tid.x, i, i)` a special register, which `ptxas` checks by its size alone. A float known
 /// now in a vector of bits beside a register of 64 bits, `ptxas` refuses first, [`Order`], and takes elsewhere, after
-/// one and before one: kernite refuses it in every place.
+/// one and before one: kernite refuses it in every place. `gridid`, a special register of 64 bits, `ptxas` takes after
+/// a value known now in a vector of 32 bits, `(1, gridid)`, in `mov`, in the accumulator of `mma`, and in coordinates
+/// and offsets, as it checks the operand against its neighbour, `1`, alone: kernite refuses it, as it does
+/// `(gridid, 1)`.
 const ONLY_KERNITE_REFUSES: &[Apart] = &[
     (
         "st.global.v4.b32([x], (f, b, @1, 1));",
@@ -968,6 +1085,32 @@ const ONLY_KERNITE_REFUSES: &[Apart] = &[
         Size,
         "the float 1.5 beside a `f64` variable",
     ),
+    ("mov.b64(z, (1, @gridid));", "mov.b64 %z, {1, %gridid};", Wide, GRIDID),
+    (
+        "sust.b._2d.v2.b32.trap(@[s, (1, gridid)], (f, b));",
+        "sust.b.2d.v2.b32.trap [%s, {1, %gridid}], {%f, %b};",
+        Wide,
+        GRIDID,
+    ),
+    (
+        "tex._2d.v4.f32.s32((r0, r1, r2, r3), @[s, (1, gridid)]);",
+        "tex.2d.v4.f32.s32 {%r0, %r1, %r2, %r3}, [%s, {1, %gridid}];",
+        Wide,
+        GRIDID,
+    ),
+    (
+        "tex._2d.v4.f32.s32((r0, r1, r2, r3), [s, (j, j)], (1, @gridid));",
+        "tex.2d.v4.f32.s32 {%r0, %r1, %r2, %r3}, [%s, {%j, %j}], {1, %gridid};",
+        Wide,
+        GRIDID,
+    ),
+    (
+        "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32((j, j, j, j), (i, i), n, (1, @gridid, gridid, gridid));",
+        "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32 {%j, %j, %j, %j}, {%i, %i}, {%n}, \
+         {1, %gridid, %gridid, %gridid};",
+        Wide,
+        GRIDID,
+    ),
 ];
 
 /// The kernel of a vector of [`BOTH_REFUSE`] or [`ONLY_KERNITE_REFUSES`], without its `@`; the line of the body it is
@@ -981,10 +1124,10 @@ fn apart(line: &str) -> (String, usize, String) {
     (body, col, name)
 }
 
-/// kernite refuses each vector of [`BOTH_REFUSE`] and [`ONLY_KERNITE_REFUSES`] at the operand that does not go with one
-/// before it, in the words of why, and names it beside the first of those it does not go with.
+/// kernite refuses each vector of [`BOTH_REFUSE`] and [`ONLY_KERNITE_REFUSES`] at the operand that does not go in it,
+/// in the words of why, and names it: beside the first operand before it that it does not go with, or with its bits.
 #[test]
-fn an_operand_that_does_not_go_with_one_before_it_in_a_vector_is_refused_where_ptxas_refuses_it() {
+fn an_operand_that_does_not_go_in_its_vector_is_refused_where_ptxas_refuses_it() {
     for &(line, _, why, this) in BOTH_REFUSE.iter().chain(ONLY_KERNITE_REFUSES) {
         let (body, col, name) = apart(line);
         let want = format!("2:{col}: `{name}` {}; this is {this}", why.kernite());
@@ -1044,9 +1187,11 @@ const TOGETHER_DECLARED: &str = "let (f, g, i, j, b, h): (f32, f32, u32, s32, b3
 /// bits wider than an instruction of 16, where it takes them; a special register beside a register of any type of its
 /// size; a value known now beside bits, and beside a register of its kind, an integer beside integers and a float
 /// beside floats; a value known now beside any register of a vector of floats, a `b64` too; a whole special register
-/// beside a value, which a part of a vector's does not go beside; `_`; and the layer of an array of textures, the
-/// first of its vector, a `u32` beside floats, which `ptxas` checks apart.
-const TOGETHER: [(&str, &str); 81] = [
+/// beside a value, which a part of a vector's does not go beside; `gridid`, a special register of 64 bits, as the data
+/// of `st` and `sust`, which take a register of more bits than their vector's, and in a vector of 64, and `mov.u32`
+/// reading 32 of its bits; `_`; and the layer of an array of textures, the first of its vector, a `u32` beside floats,
+/// which `ptxas` checks apart.
+const TOGETHER: [(&str, &str); 86] = [
     ("st.global.v2.b32([x], (f, g));", "st.global.v2.b32 [%x], {%f, %g};"),
     ("st.global.v2.b32([x], (i, j));", "st.global.v2.b32 [%x], {%i, %j};"),
     ("st.global.v2.u32([x], (i, j));", "st.global.v2.u32 [%x], {%i, %j};"),
@@ -1149,6 +1294,14 @@ const TOGETHER: [(&str, &str); 81] = [
         "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32((j, j, j, j), (laneid, 8), n, (0, 0, 0, 0));",
         "mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32 {%j, %j, %j, %j}, {%laneid, 8}, {%n}, {0, 0, 0, 0};",
     ),
+    ("st.global.v2.b32([x], (gridid, gridid));", "st.global.v2.b32 [%x], {%gridid, %gridid};"),
+    ("st.global.v2.b32([x], (gridid, 1));", "st.global.v2.b32 [%x], {%gridid, 1};"),
+    (
+        "sust.b._2d.v2.b32.trap([s, (n, n)], (gridid, gridid));",
+        "sust.b.2d.v2.b32.trap [%s, {%n, %n}], {%gridid, %gridid};",
+    ),
+    ("st.global.v2.b64([x], (gridid, d));", "st.global.v2.b64 [%x], {%gridid, %d};"),
+    ("mov.u32(i, gridid);", "mov.u32 %i, %gridid;"),
 ];
 
 /// kernite writes each of [`TOGETHER`] as it is.
