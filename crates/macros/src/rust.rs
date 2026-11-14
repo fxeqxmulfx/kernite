@@ -862,9 +862,11 @@ fn ends(t: &TokenTree) -> (TokenTree, TokenTree) {
 /// and a fragment's token do, it puts that token where the macro first wrote the fragment, at the `$t` of the first of
 /// the kernels that take it, and the error of each of the others is there. The macro's own `)` is of a hygiene no
 /// fragment has, and the span is the `&`'s alone. A `$t:ident` is no group, but a token with the place and the hygiene
-/// of the call, which ends the type behind a `&` in the same way: [`is_given`] says when it is in the macro's
-/// parentheses too. `end` is where the tokens end: the bracket they are in, closing. A bracket among the tokens is
-/// handed on as it came, with each fragment in it one operand.
+/// of the call, which ends the type behind a `&` in the same way, and no parentheses can go round it where it is the
+/// last segment of a path, `&$a::$b`. Where [`is_given`] says that it is the call's, it is written again with the place
+/// it has and the hygiene of the macro, which Rust does not move to where the macro first wrote it. `end` is where the
+/// tokens end: the bracket they are in, closing. A bracket among the tokens is handed on as it came, with each fragment
+/// in it one operand.
 pub(crate) fn for_rust(tokens: Vec<TokenTree>, end: Span) -> Vec<TokenTree> {
     let ends_of_types: Vec<usize> = (0..tokens.len()).filter_map(|at| ends_reference(&tokens, at)).collect();
     tokens
@@ -875,7 +877,9 @@ pub(crate) fn for_rust(tokens: Vec<TokenTree>, end: Span) -> Vec<TokenTree> {
                 own(Delimiter::Parenthesis, g.stream(), ends(t).0.span())
             }
             TokenTree::Ident(name) if ends_of_types.contains(&at) && is_given(&tokens, at, end) => {
-                own(Delimiter::Parenthesis, t.clone().into(), name.span())
+                let mut name = name.clone();
+                name.set_span(Span::mixed_site().located_at(name.span()));
+                name.into()
             }
             t => t.clone(),
         })
@@ -895,8 +899,7 @@ fn contents(group: &Group) -> Vec<TokenTree> {
 /// in, closing, where the ident is the last token, and where a body follows it, `-> &$t $b`: a body the call gives, a
 /// `$b:block`, has the place of the call, whoever wrote the ident. A `$t:tt` that Rust has moved to the place of its
 /// `$t`, for the second kernel that takes it, is in place too. Where the `&` is not in the body of a macro, Rust says
-/// an error at an ident in parentheses, and not at the `&`, so none are put round those. The last segment of a path,
-/// `&$a::$b`, can have none either.
+/// an error at an ident written again, and not at the `&`, so one written in place is left as it is.
 fn is_given(tokens: &[TokenTree], at: usize, end: Span) -> bool {
     let precedes = |first: Span, second: Span| {
         let place = |span: Span| (span.line(), span.column());
@@ -907,7 +910,7 @@ fn is_given(tokens: &[TokenTree], at: usize, end: Span) -> bool {
     let before = tokens[at - 1].span();
     let after = tokens.get(at + 1).filter(|t| !is_body(t)).map_or(end, TokenTree::span);
     let in_place = precedes(before, ident) && (precedes(ident, after) || !precedes(before, after));
-    !in_place && !is_name(&tokens[..at], &tokens[at + 1..])
+    !in_place
 }
 
 /// `stream` in a group of `delimiter` that is the macro's own, standing where `at` is. Rust lints none of what the

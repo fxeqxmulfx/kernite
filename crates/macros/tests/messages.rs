@@ -4910,6 +4910,58 @@ fn a_result_without_a_lifetime_is_said_at_the_ampersand_of_an_ident_wherever_the
     refuses("fragments_placed_idents", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
+/// Kernels of one macro that take the last segment of a path, `&$a::$b`, have Rust say that a result with a `&` before
+/// it has no lifetime at the `&` of each, as for a path written out, and not at the `$b` of the first: the last segment
+/// is a token of the call, and no parentheses can go round one segment of a path. It is so where the macro is given the
+/// first segment too and where it writes it, `&crate::$b`; behind `mut`; for a `$t:tt`; for three segments; for a raw
+/// ident; where the `&` is in an `Option`, a tuple, behind a `dyn` or before a `Vec`; and where the macro is below its
+/// call, as a `#[macro_export]` macro called by its path is, or in a file of its own. A path written out, in a module
+/// of kernels or in the body of a macro, has it at its `&`, as it had. A GPU kernel's `&` takes the lifetime of `self`,
+/// so Rust has none to ask for there. kernite's words are the same for each, with the type as the kernel writes it.
+#[test]
+fn a_result_without_a_lifetime_is_said_at_the_ampersand_of_each_kernel_that_takes_a_path() {
+    let in_macros = |said: String| said.replacen("src/lib.rs", "src/macros.rs", 1);
+    let gives =
+        |places: &[(&str, &str)]| places.iter().map(|&(place, ty)| x86_gives(place, "", ty)).collect::<Vec<_>>();
+    // kernite says its errors first, in the order of the kernels, and Rust says its own after them.
+    let mut said = gives(&[
+        ("24:60", "&crate::Local"),
+        ("27:61", "&crate::Local"),
+        ("30:60", "&crate::Local"),
+        ("33:61", "&mut crate::Local"),
+        ("36:60", "&crate::Local"),
+        ("49:60", "&crate::Local"),
+        ("52:61", "&crate::Local"),
+        ("65:60", "&crate::inner::Deep"),
+        ("68:61", "&crate::inner::Deep"),
+        ("82:59", "Option<&crate::Tr>"),
+        ("85:61", "(u8, &crate::Tr)"),
+        ("88:61", "(&crate::Tr, u8)"),
+        ("91:62", "&dyn crate::Tr"),
+        ("94:62", "&Vec<crate::Tr>"),
+    ]);
+    said.extend([gpu_returns("107:64", "", "&crate::Local"), gpu_returns("110:65", "", "&crate::Local")]);
+    said.extend(gives(&[("126:60", "&crate::Local"), ("129:61", "&crate::Local")]));
+    said.extend(gives(&[("5:60", "&crate::Local"), ("8:61", "&crate::Local")]).into_iter().map(in_macros));
+    said.extend(gives(&[
+        ("141:52", "&crate::Local"),
+        ("144:53", "&crate::Local"),
+        ("147:52", "&mut crate::inner::Deep"),
+        ("150:53", "&dyn crate::Tr"),
+        ("159:60", "&crate::Local"),
+        ("162:61", "&crate::inner::Deep"),
+        ("176:60", "&crate::Local"),
+        ("179:61", "&crate::Local"),
+    ]));
+    // Rust's are at the `&` of each, where the type does not begin with it, as in `Option<&$a::$b>`, too.
+    said.extend(["24:60", "27:61", "30:60", "33:61", "36:60", "49:60", "52:61", "65:60", "68:61"].map(no_lifetime));
+    said.extend(["82:66", "85:66", "88:62", "91:62", "94:62", "126:60", "129:61"].map(no_lifetime));
+    said.extend(["5:60", "8:61"].map(|place| in_macros(no_lifetime(place))));
+    said.extend(["141:52", "144:53", "147:52", "150:53", "159:60", "162:61", "176:60", "179:61"].map(no_lifetime));
+    said.push("error: could not compile `fragments_paths` (lib) due to 54 previous errors".to_string());
+    refuses("fragments_paths", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
 /// A body that the call gives, a `$b:block`, after a result with a `&` is the kernel's body, and no part of the type
 /// behind the `&`. kernite reads each kernel and refuses each result at its `&`, and Rust says that the `&` has no
 /// lifetime at the same place, as it says it of the same kernels written out: of two kernels that take a `$t:ident`, a
