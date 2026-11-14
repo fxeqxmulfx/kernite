@@ -4526,7 +4526,7 @@ fn an_error_at_a_fragment_is_said_where_the_fragment_is() {
         said_at("20:19", "`x` is not defined"),
         said_at("21:21", "`+` has no meaning between an f32 and an integer"),
         said_at("22:18", "a string is no value here; `note(\"..\")` takes one"),
-        said_at("29:27", "10 / 0"),
+        said_at("29:27", "10 / 0 divides by zero"),
         said_at("44:22", "`v` has 6 variables; there is no [6]"),
         said_at("67:22", "300 is out of range for u8"),
         said_at("57:34", "this is a u16, not u8"),

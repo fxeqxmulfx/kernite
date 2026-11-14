@@ -451,7 +451,7 @@ pub fn binary(op: BinOp, a: &Value, b: &Value) -> Result<Value, String> {
                 Add => x.checked_add(y).ok_or_else(over)?,
                 Sub => x.checked_sub(y).ok_or_else(over)?,
                 Mul => x.checked_mul(y).ok_or_else(over)?,
-                Div | Rem if y == 0 => return Err(format!("{x} {} 0", op_text(op))),
+                Div | Rem if y == 0 => return Err(format!("{x} {} 0 divides by zero", op_text(op))),
                 Div => x / y,
                 Rem => x % y,
                 Shl | Shr => {
