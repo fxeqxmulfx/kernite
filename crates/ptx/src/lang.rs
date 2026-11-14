@@ -634,7 +634,7 @@ impl Kernel {
         // rule below. An array's index, the lead, it checks apart, and takes no `f16x2` for it: "Array index in the
         // 'tex' instruction has unexpected type".
         let beside = |p: &Given<Var>| {
-            matches!(p, Given::Var(Var::Reg { ty: Ty::F16x2 | Ty::B32, .. }))
+            matches!(p, Given::Var(Var::Reg { ty, .. }) if matches!(ty.decl(), Ty::F16x2 | Ty::B32))
                 || matches!(p, Given::Special(s) if s == "_")
         };
         let rest = &Spec {
@@ -917,7 +917,7 @@ impl Kernel {
             }
             Some(Var::Reg { reg, ty }) => (reg, ty),
         };
-        if ty.kind() == Kind::Float || ty.kind() == Kind::Pred {
+        if matches!(ty.decl().kind(), Kind::Float | Kind::Pred) {
             return Err(format!("`{name}` takes an address in an integer variable; this is a `{}`", ty.name()));
         }
         if wide && ty.bits() != 64 {
@@ -1101,7 +1101,7 @@ impl Kernel {
             (fp, targets) => {
                 let fp = match fp {
                     Given::Var(Var::Reg { reg, ty })
-                        if matches!(ty.kind(), Kind::Bit | Kind::Unsigned | Kind::Signed)
+                        if matches!(ty.decl().kind(), Kind::Bit | Kind::Unsigned | Kind::Signed)
                             && matches!(ty.bits(), 32 | 64) =>
                     {
                         reads.push(Arg { operand: Operand::Reg(*reg, width(*ty)), access: Access::Read });

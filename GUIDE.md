@@ -636,7 +636,12 @@ a `u32`, is an error at the register that does not go with one before it, in `st
 `sust.b`, `sust.p`, `ldmatrix` and `mma`, as `ptxas` refuses it. The layer of an array of textures, the first of its
 vector, is apart: an integer beside floats. `ptxas` checks each register against the one before it alone, and takes
 `(f, b, i, i)`, an `f32` or an `f16x2` and a `u32` with a `b32` between, which looks like a bug of its own: kernite
-checks each against each before it, and refuses it. Where `ptxas` takes more than PTX's ISA has, and reads it as the ISA
+checks each against each before it, and refuses it. PTX keeps a `bf16`, `bf16x2` or `tf32` variable in a `b16` or `b32`
+register, and kernite takes it wherever it takes one, as `ptxas` does: for an integer or a float of its size, in an
+instruction, beside an `f16x2` in a vector, as an address, as an argument of a helper and of a call, as the address a
+call calls at, as the result of a call, and in `ret`. `add.u32(i, b, i)` and `add.rn.f32(v, b, v)` write `b` as the
+operand, with no `mov` beside it. `fma.rn.bf16x2(b, x, b, b)` takes a `tf32` or a `b32` for `x`, and no `u32`, `f32` or
+`f16x2`, as `ptxas` takes none. Where `ptxas` takes more than PTX's ISA has, and reads it as the ISA
 reads the rest, kernite takes it too: `sust.p` with a cache operation, as `sust.b` has, or an `mma` fragment `(a, 8)`, a
 value beside a variable. An `f16x2` variable is one more, where an instruction takes a `u32` or an `s32` variable:
 `ptxas` reads its 32 bits as a `b32`'s, and so does kernite. `add.u32(i, h, n)` writes `h` as the operand, with no `mov`

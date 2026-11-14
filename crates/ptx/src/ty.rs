@@ -197,7 +197,8 @@ impl Ty {
     /// an integer nor a predicate, and neither does `fits`. ptxas 13.5 takes one for a 32-bit
     /// integer, as its bits. It takes one for the predicate that `and`, `or`, `xor`, `not` and
     /// `mov` read too, but as 32 bits and not one, and not for the one that `selp`, `setp`,
-    /// `vote`, `bar.red` or a guard reads.
+    /// `vote`, `bar.red` or a guard reads. A register of `bf16`, `bf16x2` or `tf32` is the bits
+    /// it is declared as, [`Ty::decl`], for PTX has none of its own: it fits what they fit.
     pub fn fits(self, want: Ty) -> bool {
         if self == want {
             return true;
@@ -205,7 +206,7 @@ impl Ty {
         if self.bits() != want.bits() || self == Ty::Pred || want == Ty::Pred {
             return false;
         }
-        match (self.kind(), want.kind()) {
+        match (self.decl().kind(), want.kind()) {
             (Kind::Bit, _) | (_, Kind::Bit) => true,
             (a, b) => a != Kind::Float && b != Kind::Float,
         }
@@ -213,10 +214,10 @@ impl Ty {
 
     /// Whether it fits as PTX checks `ld`, `st` and `cvt`: a register may be wider than the
     /// instruction's type, and bits fit any type of no more bits, an integer bits and
-    /// integers, a float bits and itself. Not for `bf16`, `bf16x2` and `tf32`, which take
-    /// [`Ty::fits`].
+    /// integers, a float bits and itself. A register of `bf16`, `bf16x2` or `tf32` is the bits it
+    /// is declared as, [`Ty::decl`]. An instruction of one of those types takes [`Ty::fits`].
     pub fn fits_wide(self, want: Ty) -> bool {
-        if matches!(want, Ty::Bf16 | Ty::Bf16x2 | Ty::Tf32) || matches!(self, Ty::Bf16 | Ty::Bf16x2 | Ty::Tf32) {
+        if matches!(want, Ty::Bf16 | Ty::Bf16x2 | Ty::Tf32) {
             return self.fits(want);
         }
         if self == Ty::Pred || want == Ty::Pred {
@@ -225,7 +226,7 @@ impl Ty {
         if self.bits() < want.bits() {
             return false;
         }
-        match (self.kind(), want.kind()) {
+        match (self.decl().kind(), want.kind()) {
             (Kind::Bit, _) => true,
             (Kind::Unsigned | Kind::Signed, k) => k != Kind::Float,
             (Kind::Float, Kind::Bit) => true,

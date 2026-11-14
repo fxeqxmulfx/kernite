@@ -237,6 +237,20 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
             "let (a, h): (u16, f16); mov.b16(h, 1); mov.u16(a, 1); add.rn.f16(h, a, a);",
             "2:69: `add.rn.f16` wants a `f16` variable; this is a `u16`",
         ),
+        // ptxas 13.5 takes a `.b32` for an operand of `fma.rn.bf16x2`, which a `tf32` is, and refuses a `.u32`, an
+        // `.f32` and an `.f16x2`: kernite takes the `tf32`, as `KEPT` has it, and refuses each of the others.
+        (
+            "let (b, x): (bf16x2, u32); mov.b32(b, n); mov.u32(x, n); fma.rn.bf16x2(b, x, b, b);",
+            "2:75: `fma.rn.bf16x2` wants a `bf16x2` variable; this is a `u32`",
+        ),
+        (
+            "let (b, x): (bf16x2, f32); mov.b32(b, n); mov.f32(x, 1.5); fma.rn.bf16x2(b, x, b, b);",
+            "2:77: `fma.rn.bf16x2` wants a `bf16x2` variable; this is a `f32`",
+        ),
+        (
+            "let (b, x): (bf16x2, f16x2); mov.b32(b, n); mov.b32(x, n); fma.rn.bf16x2(b, x, b, b);",
+            "2:77: `fma.rn.bf16x2` wants a `bf16x2` variable; this is a `f16x2`",
+        ),
         // ptxas 13.5 refuses an `f16x2` for the count of a shift, a result of `clz` or `popc`, an element of a vector
         // beside one of another type, an operand that is negated, the time of `nanosleep.u32`, an operand of
         // `redux.sync` of `.add`, `.min` or `.max`, and the last one of `vadd4.u32.u32.u32.add` and
@@ -745,6 +759,153 @@ fn ptxas_checks_each_register_of_a_vector_against_its_neighbour_alone() {
             Some(words) => assert!(!run.status.success() && said.contains(&words), "{inst}: {said}"),
             None => assert!(run.status.success(), "{inst}: {said}"),
         }
+    }
+}
+
+/// A `bf16x2` and a `tf32` where an instruction wants an integer or a float of 32 bits, and a `bf16` where one wants an
+/// integer or a float of 16: in an instruction, beside an `f16x2` in a vector, as an address, in a call, as its
+/// argument, its result and the address it calls at, in a `ret`, and as the argument of a helper.
+const KEPT: &str = r#"
+    fn bump(v: u32) { add.u32(v, v, 1); }
+
+    pub unsafe extern "ptx-kernel" fn kept(x: *mut u32, n: u32) {
+        let b: bf16x2;
+        let t: tf32;
+        let c: bf16;
+        let h: f16x2;
+        let f: f16;
+        let (i, a, v): (u32, u16, f32);
+        mov.b32(b, n);
+        mov.b32(t, n);
+        mov.b16(c, 1);
+        mov.b32(h, n);
+        mov.b16(f, 1);
+        mov.u32(i, n);
+        mov.u16(a, 1);
+        mov.f32(v, 1.5);
+        add.u32(i, b, i);
+        add.u32(i, t, i);
+        add.rn.f32(v, b, v);
+        add.rn.f32(v, t, v);
+        mov.u32(i, b);
+        mov.u32(i, t);
+        st.global.u32([x], b);
+        st.global.u32([x], t);
+        ld.global.u32(b, [x]);
+        add.u16(a, c, a);
+        add.rn.f16(f, c, f);
+        mov.u16(a, c);
+        st.global.u16([x], c);
+        st.global.u8([x], c);
+        cvt.u32.u16(i, c);
+        fma.rn.bf16x2(b, t, b, b);
+        st.global.v2.u32([x], (h, b));
+        st.global.v2.u32([x], (t, h));
+        ld.shared.u32(i, [b]);
+        st.shared.u32([t + 4], i);
+        bump(b);
+        call(i, count, (b));
+        call(b, count, (i));
+        call(i, count, (t));
+        call(t, count, (i));
+        call(v, half, (b));
+        call(t, half, (v));
+        call(a, short, (c));
+        call(c, short, (a));
+        call(i, b, i, (count,));
+        call(i, t, i);
+        call(i, keep_b, (i));
+        call(v, keep_t, (v));
+        call(a, keep_c, (a));
+        st.global.u32([x], i);
+    }
+
+    extern "ptx-func" fn count(a: u32) -> u32 { ret(a); }
+    extern "ptx-func" fn half(a: f32) -> f32 { ret(a); }
+    extern "ptx-func" fn short(a: u16) -> u16 { ret(a); }
+    extern "ptx-func" fn keep_b(a: u32) -> u32 { let b: bf16x2; mov.b32(b, a); ret(b); }
+    extern "ptx-func" fn keep_t(a: f32) -> f32 { let t: tf32; mov.b32(t, a); ret(t); }
+    extern "ptx-func" fn keep_c(a: u16) -> u16 { let c: bf16; mov.b16(c, a); ret(c); }
+"#;
+
+/// PTX has no register of a `bf16`, a `bf16x2` or a `tf32`, and keeps them in a `b16` or a `b32`: kernite takes each
+/// wherever it takes the `b16` or `b32`, for an integer or a float of its size, in an instruction, beside an `f16x2` in
+/// a vector, as an address, as an argument of a helper and of a call, as the address a call calls at, as the result of
+/// a call, and in a `ret`. Its code writes the variable as it is, with no `mov` beside it, and it is the code of the
+/// same kernels with a `b16` or `b32` in place of each.
+#[test]
+fn a_bf16_a_bf16x2_or_a_tf32_is_taken_where_the_b16_or_b32_it_is_kept_in_is() {
+    let ptx = kernite::ptx_str(KEPT).unwrap();
+    for line in [
+        "\tadd.u32 %i, %b, %i;\n",
+        "\tadd.u32 %i, %t, %i;\n",
+        "\tadd.rn.f32 %v, %b, %v;\n",
+        "\tadd.rn.f32 %v, %t, %v;\n",
+        "\tmov.u32 %i, %b;\n",
+        "\tmov.u32 %i, %t;\n",
+        "\tst.global.u32 [%x], %b;\n",
+        "\tst.global.u32 [%x], %t;\n",
+        "\tld.global.u32 %b, [%x];\n",
+        "\tadd.u16 %a, %c, %a;\n",
+        "\tadd.rn.f16 %f, %c, %f;\n",
+        "\tmov.u16 %a, %c;\n",
+        "\tst.global.u16 [%x], %c;\n",
+        "\tst.global.u8 [%x], %c;\n",
+        "\tcvt.u32.u16 %i, %c;\n",
+        "\tfma.rn.bf16x2 %b, %t, %b, %b;\n",
+        "\tst.global.v2.u32 [%x], {%h, %b};\n",
+        "\tst.global.v2.u32 [%x], {%t, %h};\n",
+        "\tld.shared.u32 %i, [%b];\n",
+        "\tst.shared.u32 [%t+4], %i;\n",
+        "\tadd.u32 %b, %b, 1;\n",
+        "\tcall (%i), count, (%b);\n",
+        "\tcall (%b), count, (%i);\n",
+        "\tcall (%i), count, (%t);\n",
+        "\tcall (%t), count, (%i);\n",
+        "\tcall (%v), half, (%b);\n",
+        "\tcall (%t), half, (%v);\n",
+        "\tcall (%a), short, (%c);\n",
+        "\tcall (%c), short, (%a);\n",
+        "\tcall (%i), %b, (%i), $C0;\n",
+        "\tcall (%i), %t, (%i), $P1;\n",
+        "\tst.param.u32 [keep_b_retval], %b;\n",
+        "\tst.param.f32 [keep_t_retval], %t;\n",
+        "\tst.param.b16 [keep_c_retval], %c;\n",
+    ] {
+        assert!(ptx.contains(line), "{line}: {ptx}");
+    }
+    assert_eq!(ptx.matches("\tmov.").count(), KEPT.matches("mov.").count(), "a `mov` beside one: {ptx}");
+    let bits = KEPT.replace(": bf16x2", ": b32").replace(": tf32", ": b32").replace(": bf16", ": b16");
+    assert_eq!(ptx, kernite::ptx_str(&bits).unwrap());
+}
+
+/// `ptxas` takes what kernite writes of [`KEPT`], at the `sm_80` that `fma.rn.bf16x2` needs.
+#[test]
+fn ptxas_assembles_a_bf16_a_bf16x2_and_a_tf32_as_the_b16_or_b32_they_are_kept_in() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    let run = assembled(&ptxas, &kernite::ptx_str(KEPT).unwrap(), "sm_86", "kept", &["--warning-as-error"]);
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+}
+
+/// `ptxas` 13.5 takes a `.b32`, which a `tf32` is, for an operand of `fma.rn.bf16x2`, and refuses a `.u32`, an `.f32`
+/// and an `.f16x2`, as kernite does of a `u32`, an `f32` and an `f16x2`, in
+/// `a_wrong_operand_is_named_by_what_the_instruction_wants`.
+#[test]
+fn ptxas_takes_a_b32_for_an_operand_of_fma_rn_bf16x2_and_no_integer_or_float() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    for (ty, takes) in [("b32", true), ("u32", false), ("f32", false), ("f16x2", false)] {
+        let text = format!(
+            ".version 7.0\n.target sm_80\n.address_size 64\n\n.visible .entry k()\n{{\n\t.reg .b32 %b;\n\t.reg .{ty} \
+             %x;\n\tmov.b32 %b, 0;\n\tmov.b32 %x, 0;\n\tfma.rn.bf16x2 %b, %x, %b, %b;\n\tret;\n}}\n"
+        );
+        let run = assembled(&ptxas, &text, "sm_86", &format!("fma_of_{ty}"), &[]);
+        assert_eq!(run.status.success(), takes, "{ty}: {}", String::from_utf8_lossy(&run.stderr));
     }
 }
 
