@@ -55,7 +55,7 @@ pub(crate) fn expand(
     let n = outside.len();
     let top: Vec<TokenTree> = outside.into_iter().chain(flatten(body)).collect();
     let (trees, spans) = lex(&top);
-    let mut top = for_rust(top);
+    let mut top = for_rust(top, None);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(site);
     let said = |e: &lang::Error| error(at(e.span), &e.message);
     // A module kernite cannot read is refused whole, as at its attribute, with the items it reads: its error is what

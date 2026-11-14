@@ -453,7 +453,7 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     let top = flatten(braces.stream());
     let (trees, spans) = lex(&top);
-    let top = for_rust(top);
+    let top = for_rust(top, None);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(Span::call_site);
     // The module as it is, for Rust; and the consts kernite reads, for the kernels. The argument is told where
     // it is, and changes nothing else: the module is the one it would be without it, for the modules of kernels

@@ -296,7 +296,7 @@ fn rename(tokens: &mut [TokenTree], names: &[(String, Ident)]) {
 /// [`split_top`] says it is among the arguments of a type's. Each name is as [`passable`] has it.
 pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, usize)> {
     let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
-    let tokens = for_rust(flatten(group.stream()));
+    let tokens = contents(group);
     split_top(&tokens, |t| is_punct(t, ','))
         .filter(|p| !p.is_empty())
         .map(|p| (p.to_vec(), p.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type")))
@@ -365,7 +365,7 @@ fn walk(
                 out.extend(found(name, Place::Type).unwrap_or_else(|| [name.clone()].into_iter().collect()));
             }
             (TokenTree::Group(g), _) if g.delimiter() != Delimiter::Brace => {
-                let mut inner = Group::new(g.delimiter(), walk(&for_rust(flatten(g.stream())), leaf, found));
+                let mut inner = Group::new(g.delimiter(), walk(&contents(g), leaf, found));
                 inner.set_span(g.span());
                 out.extend([TokenTree::Group(inner)]);
             }
@@ -800,14 +800,14 @@ fn stays(inside: &[TokenTree], before: &[TokenTree], after: &[TokenTree]) -> boo
     loose && (left || right)
 }
 
-/// The place in `tokens` of the invisible group that ends the type behind the `&` at `at`, `$t` of `&$t`, if there is
-/// one. A `&` starts a type where it is the first token, or where a punct but `&` is before it, or `const` or `mut`,
-/// as in `*const &$t`. Any other token before it is taken for an operand, as the `a` of `a & b` is, and so is a `&`, as
-/// in `a && b`: where a `&` behind another is a reference, `&&$t` or `&'a &$t`, it is in the type of the first, which
-/// ends where its own would. The type ends at the first `,`, `;`, `=`, `as`, `where` or brace that is not among the
-/// arguments of a type's, or at the `>` that closes the arguments it is among, as in `Option<&$t>` and `<&$t as
-/// Trait>::Out`. So `&dyn $d`, `&mut $t`, `&*const $t` and `&fn() -> $t` end in the group; `&Wrap<$t>` and `&[$t]` end
-/// in a token of the macro's own, and Rust finds the `&` of those alone.
+/// The place in `tokens` of the last token of the type behind the `&` at `at`, `$t` of `&$t`, if the `&` starts one. A
+/// `&` starts a type where it is the first token, or where a punct but `&` is before it, or `const` or `mut`, as in
+/// `*const &$t`. Any other token before it is taken for an operand, as the `a` of `a & b` is, and so is a `&`, as in
+/// `a && b`: where a `&` behind another is a reference, `&&$t` or `&'a &$t`, it is in the type of the first, which ends
+/// where its own would. The type ends at the first `,`, `;`, `=`, `as`, `where` or brace that is not among the
+/// arguments of a type's, or at the `>` that closes the arguments it is among, as in `Option<&$t>` and
+/// `<&$t as Trait>::Out`. So `&dyn $d`, `&mut $t`, `&*const $t` and `&fn() -> $t` end in `$t`, a group or an ident;
+/// `&Wrap<$t>` and `&[$t]` end in a token of the macro's own, and Rust finds the `&` of those alone.
 fn ends_reference(tokens: &[TokenTree], at: usize) -> Option<usize> {
     let starts_type = match at.checked_sub(1).map(|before| &tokens[before]) {
         None => true,
@@ -824,8 +824,7 @@ fn ends_reference(tokens: &[TokenTree], at: usize) -> Option<usize> {
             || matches!(t, TokenTree::Group(g) if g.delimiter() == Delimiter::Brace)
     };
     // The first part is the type.
-    let last = at + split_top(&tokens[at + 1..], stops).next().expect("a split has a first part").len();
-    matches!(&tokens[last], TokenTree::Group(g) if g.delimiter() == Delimiter::None).then_some(last)
+    Some(at + split_top(&tokens[at + 1..], stops).next().expect("a split has a first part").len())
 }
 
 /// The first and the last token of `t`: itself, but for a group that [`flatten`] keeps, where they are those
@@ -849,18 +848,52 @@ fn ends(t: &TokenTree) -> (TokenTree, TokenTree) {
 /// the start of the span from the `&` to the last token of its type. Where the two differ in hygiene, as a macro's `&`
 /// and a fragment's token do, it puts that token where the macro first wrote the fragment, at the `$t` of the first of
 /// the kernels that take it, and the error of each of the others is there. The macro's own `)` is of a hygiene no
-/// fragment has, and the span is the `&`'s alone. A bracket among the tokens is handed on as it came, with each
-/// fragment in it one operand.
-pub(crate) fn for_rust(tokens: Vec<TokenTree>) -> Vec<TokenTree> {
+/// fragment has, and the span is the `&`'s alone. A `$t:ident` is no group, but a token with the place and the hygiene
+/// of the call, which ends the type behind a `&` in the same way: [`is_given`] says when it is in the macro's
+/// parentheses too. `end` is where the tokens end, if they are in a bracket: the closing one. A bracket among the
+/// tokens is handed on as it came, with each fragment in it one operand.
+pub(crate) fn for_rust(tokens: Vec<TokenTree>, end: Option<Span>) -> Vec<TokenTree> {
+    let ends_of_types: Vec<usize> = (0..tokens.len()).filter_map(|at| ends_reference(&tokens, at)).collect();
     tokens
-        .into_iter()
-        .map(|t| match t {
-            TokenTree::Group(ref g) if g.delimiter() == Delimiter::None => {
-                own(Delimiter::Parenthesis, g.stream(), ends(&t).0.span())
+        .iter()
+        .enumerate()
+        .map(|(at, t)| match t {
+            TokenTree::Group(g) if g.delimiter() == Delimiter::None => {
+                own(Delimiter::Parenthesis, g.stream(), ends(t).0.span())
             }
-            t => t,
+            TokenTree::Ident(name) if ends_of_types.contains(&at) && is_given(&tokens, at, end) => {
+                own(Delimiter::Parenthesis, t.clone().into(), name.span())
+            }
+            t => t.clone(),
         })
         .collect()
+}
+
+/// What is in the bracket `group`, as Rust has it: [`flatten`] opens what it does, and [`for_rust`] writes the rest.
+fn contents(group: &Group) -> Vec<TokenTree> {
+    for_rust(flatten(group.stream()), Some(group.span_close()))
+}
+
+/// Whether the ident at `at` in `tokens`, which ends the type behind a `&`, is one the macro was given, a `$t:ident`,
+/// and not one written in place, as the `u8` of `&u8` is. One it was given has the place of the call: in another file,
+/// or before or after the body of the macro. One written in place is after the token before it, in their file, and
+/// before the token after it, or `end`, where that is after the token before it. Where it is not, the call wrote both,
+/// as a `$r:ty` of `&u8` does, and the token after them is the macro's. A `$t:tt` that Rust has moved to the place of
+/// its `$t`, for the second kernel that takes it, is in place too. Where the `&` is not in the body of a macro, Rust
+/// says an error at an ident in parentheses, and not at the `&`, so none are put round those. The last segment of a
+/// path, `&$a::$b`, can have none either.
+fn is_given(tokens: &[TokenTree], at: usize, end: Option<Span>) -> bool {
+    let precedes = |first: Span, second: Span| {
+        let place = |span: Span| (span.line(), span.column());
+        first.file() == second.file() && place(first.end()) <= place(second)
+    };
+    let ident = tokens[at].span();
+    // A `&` is before the first token of a type, so `at` is not the first.
+    let before = tokens[at - 1].span();
+    let after = tokens.get(at + 1).map(TokenTree::span).or(end);
+    let in_place =
+        precedes(before, ident) && after.is_none_or(|after| precedes(ident, after) || !precedes(before, after));
+    !in_place && !is_name(&tokens[..at], &tokens[at + 1..])
 }
 
 /// `stream` in a group of `delimiter` that is the macro's own, standing where `at` is. Rust lints none of what the
@@ -878,7 +911,7 @@ fn bounded(g: &Group) -> Option<Vec<TokenTree>> {
     if g.delimiter() != Delimiter::Parenthesis {
         return None;
     }
-    let inside = for_rust(flatten(g.stream()));
+    let inside = contents(g);
     let parts = |sep| split_top(&inside, move |t| is_punct(t, sep)).count();
     (parts(',') == 1 && parts('+') > 1).then_some(inside)
 }

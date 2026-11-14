@@ -4754,6 +4754,109 @@ fn a_result_without_a_lifetime_is_said_at_the_ampersand_wherever_the_macro_is_de
     refuses("fragments_placed", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
+/// Kernels of one macro that take the same `$t:ident` have Rust say that a result with a `&` before it has no lifetime
+/// at the `&` of each, as for a `$t:ty`, and not at the `$t` of the first: an ident arrives as a token of the call,
+/// with no group round it. It is so for `&$t` and `&mut $t`, `&&$t` and `&dyn $t`; where the `&` is not the first token
+/// of the result, in `Option<..>`, a tuple, whose last token the fragment is or is not, and an array; behind an arrow,
+/// `&fn() -> $t`, and at the `as` of a qualified path; where the last token of the type is the macro's, `&Vec<$t>`; and
+/// for an `f16`. A `$t:tt` is so too. A result written out, in a module of kernels or in the body of a macro, `&u8`,
+/// `& u8`, `&mut u8`, `&dyn Send` and `(u8, &u8)`, has it at its `&`, as it had: the ident of each is in its place, and
+/// kernite does not put it in parentheses. So has a result the call writes whole, `&u8` as a `$r:ty`, a `$($r:tt)*` or
+/// two `tt`s, at the `&` of the call: the `&` and the ident are the call's, and the token after them is the macro's. Of
+/// two `tt`s Rust says the second kernel's at its own `$a`. A GPU kernel's `&` takes the lifetime of `self`, so Rust
+/// has none to ask for there. kernite's words are the same for each, with the type as the kernel writes it.
+#[test]
+fn a_result_without_a_lifetime_is_said_at_the_ampersand_of_each_kernel_that_takes_the_same_ident() {
+    let gives = |places: &[&str], ty: &str| places.iter().map(|place| x86_gives(place, "", ty)).collect::<Vec<_>>();
+    let both = |place: &str| {
+        format!(
+            "src/lib.rs:{place}: error[E0106]: missing lifetime specifiers: expected named lifetime parameter, \
+             expected named lifetime parameter"
+        )
+    };
+    // kernite says its errors first, in the order of the kernels, and Rust says its own after them.
+    let mut said = vec![];
+    for ty in ["&u8", "&f16"] {
+        said.extend(gives(&["11:60", "17:61", "20:60"], ty));
+    }
+    said.extend(gives(&["34:60", "37:61"], "&u16"));
+    said.extend([
+        x86_gives("52:62", "", "&mut u8"),
+        x86_gives("55:60", "", "&&u8"),
+        x86_gives("58:59", "", "Option<&u8>"),
+        x86_gives("61:61", "", "(u8, &u8)"),
+        x86_gives("64:61", "", "(&u8, u8)"),
+        x86_gives("67:62", "", "[&u8; 3]"),
+        x86_gives("70:61", "", "&fn() -> u8"),
+        x86_gives("73:62", "", "&Vec<u8>"),
+    ]);
+    said.extend(gives(&["86:60", "89:61"], "&dyn Send"));
+    said.extend(gives(&["107:60", "110:61"], "<&u8 as crate::Tr>::Out"));
+    said.extend([gpu_returns("123:64", "", "&u8"), gpu_returns("126:65", "", "&u8")]);
+    said.extend([
+        x86_gives("138:52", "", "&u8"),
+        x86_gives("141:53", "", "&u8"),
+        x86_gives("144:52", "", "&mut u8"),
+        x86_gives("147:53", "", "&dyn Send"),
+        x86_gives("150:52", "", "(u8, &u8)"),
+        x86_gives("159:60", "", "&u8"),
+        x86_gives("162:61", "", "&u8"),
+        x86_gives("165:60", "", "(u8, &u8)"),
+    ]);
+    // The call writes the whole result: its `&` is where each is said, of a `$r:ty` in two kernels and in one, of a
+    // `$($r:tt)*`, and of two `tt`s, whose second kernel is said at its own `$a`.
+    said.extend(["191:18", "204:18", "220:22", "236:15", "229:61"].map(|place| x86_gives(place, "", "&u8")));
+    // Cargo says a message once, however many calls make it, and counts each: the three kernels of `idents!` are the
+    // same places for `u8` and for `f16`, and Rust says the error of each of the two kernels of `whole!` and of
+    // `sequence!` at the same `&`, where kernite says its own once.
+    let repeated = 5;
+    said.extend(["11:60", "17:61", "20:60", "34:60", "37:61", "52:62"].map(no_lifetime));
+    said.push(both("55:60"));
+    said.extend(["58:66", "61:66", "64:62", "67:63", "70:61", "73:62", "86:60", "89:61"].map(no_lifetime));
+    said.extend(["107:61", "110:62"].map(no_lifetime));
+    said.extend(["138:52", "141:53", "144:52", "147:53", "150:57", "159:60", "162:61", "165:65"].map(no_lifetime));
+    said.extend(["191:18", "204:18", "220:22", "236:15", "229:61"].map(no_lifetime));
+    let errors = said.len() + repeated;
+    said.push(format!("error: could not compile `fragments_idents` (lib) due to {errors} previous errors"));
+    refuses("fragments_idents", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// Kernels of one macro that take the same `$t:ident` or `$t:tt` have Rust say that a result with a `&` before it has
+/// no lifetime at the `&` of each, wherever the macro is defined, as for a `$t:ty`: below its call, as a
+/// `#[macro_export]` macro called by its path is, and in a file of its own, with two kernels and with one. The ident
+/// has the place of the call wherever the macro is, and that is not between the `&` and the token after it: in the same
+/// file, before the macro or after it, or in another. A result the call writes whole, `&u8` as a `$r:ty`, has it at the
+/// `&` of the call, with the macro in a file of its own: the `&` and the ident are the call's, and the token after them
+/// is the macro's.
+#[test]
+fn a_result_without_a_lifetime_is_said_at_the_ampersand_of_an_ident_wherever_the_macro_is_defined() {
+    let in_macros = |said: String| said.replacen("src/lib.rs", "src/macros.rs", 1);
+    let said = [
+        x86_gives("17:60", "", "&u8"),
+        x86_gives("20:61", "", "Option<&u8>"),
+        in_macros(x86_gives("5:60", "", "&u8")),
+        in_macros(x86_gives("8:61", "", "Option<&u8>")),
+        in_macros(x86_gives("19:59", "", "&u8")),
+        x86_gives("37:60", "", "&u16"),
+        x86_gives("40:61", "", "Option<&u16>"),
+        in_macros(x86_gives("30:60", "", "&u16")),
+        in_macros(x86_gives("33:61", "", "Option<&u16>")),
+        x86_gives("48:18", "", "&u8"),
+        no_lifetime("17:60"),
+        no_lifetime("20:68"),
+        in_macros(no_lifetime("5:60")),
+        in_macros(no_lifetime("8:68")),
+        in_macros(no_lifetime("19:59")),
+        no_lifetime("37:60"),
+        no_lifetime("40:68"),
+        in_macros(no_lifetime("30:60")),
+        in_macros(no_lifetime("33:68")),
+        no_lifetime("48:18"),
+        "error: could not compile `fragments_placed_idents` (lib) due to 21 previous errors".to_string(),
+    ];
+    refuses("fragments_placed_idents", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
 /// A fragment that is a pair of parentheses of the user's, and ends the type behind a `&`, is Rust's to lint in a
 /// kernel's result as in a plain function's. `&$t` with `$t` as `(u8)`, `(dyn Send)` and `([u8])` has Rust say that the
 /// pair is unnecessary, where the user wrote it, in the call of the macro; as `(dyn Send + Sync)`, which a `&` needs,
