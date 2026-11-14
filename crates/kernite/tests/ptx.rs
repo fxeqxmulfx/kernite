@@ -934,7 +934,7 @@ fn kernite_knows_every_instruction_ptx_has_for_sm_20_to_sm_86() {
         // Logic and shift.
         "and.b32 or.b32 xor.b32 not.b32 cnot.b32 lop3.b32 shf.l.clamp.b32 shl.b32 shr.u32",
         // Data movement and conversion.
-        "mov.u32 shfl.idx.b32 shfl.sync.idx.b32 prmt.b32 ld.global.f32 ld.global.nc.f32 ldu.global.f32 st.global.f32 \
+        "mov.u32 shfl.sync.idx.b32 prmt.b32 ld.global.f32 ld.global.nc.f32 ldu.global.f32 st.global.f32 \
          prefetch.global.L1 prefetchu.L1 applypriority.global.L2::evict_normal discard.global.L2 \
          createpolicy.fractional.L2::evict_last.b64 isspacep.global cvta.global.u64 cvt.rn.f32.f64 \
          cvt.pack.sat.u8.s32.b32 cp.async.ca.shared.global cp.async.commit_group cp.async.wait_group cp.async.wait_all",
@@ -945,7 +945,7 @@ fn kernite_knows_every_instruction_ptx_has_for_sm_20_to_sm_86() {
         "bra brx.idx ret exit",
         // Parallel synchronization and communication.
         "bar.sync barrier.sync bar.warp.sync membar.gl fence.sc.gpu fence.proxy.alias atom.global.add.u32 \
-         red.global.add.u32 vote.all.pred vote.sync.all.pred match.any.sync.b32 activemask.b32 redux.sync.add.u32 \
+         red.global.add.u32 vote.sync.all.pred match.any.sync.b32 activemask.b32 redux.sync.add.u32 \
          mbarrier.init.b64 mbarrier.inval.b64 mbarrier.arrive.b64 mbarrier.arrive_drop.b64 \
          cp.async.mbarrier.arrive.b64 mbarrier.test_wait.b64 mbarrier.pending_count.b64",
         // Warp level matrix multiply and accumulate.
@@ -1048,6 +1048,36 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
     ];
     for (body, want) in cases {
         assert_eq!(compile("x: *mut f32, n: u32, d: f64", body).unwrap_err(), want, "{body}");
+    }
+}
+
+/// `shfl` and `vote` without `.sync`, which PTX deprecated in 6.0, are refused wherever they are written, as
+/// `ptxas` refuses them from PTX 6.4 for `sm_70` and newer and warns of them for the rest: alone, in a module of PTX
+/// 3.0 for `sm_30`; beside `nanosleep.u32`, which makes it PTX 6.2 and `sm_70`; and beside `tanh.approx.f32`, which
+/// makes it PTX 7.0 and `sm_75`. Each error says why, and names the form with `.sync`, whose last operand is a mask of
+/// lanes.
+#[test]
+fn shfl_and_vote_without_sync_are_refused_whichever_the_version_and_gpu() {
+    let why = "is deprecated since PTX 6.0, and `ptxas` refuses it from PTX 6.4 on `sm_70` and newer, where the \
+               threads of a warp need not run together";
+    let cases = [
+        ("shfl.up.b32", "shfl.sync.up.b32", "let v: u32; shfl.up.b32(v, n, 1, 0);", 21),
+        ("shfl.down.b32", "shfl.sync.down.b32", "let v: u32; shfl.down.b32(v, n, 1, 31);", 23),
+        ("shfl.bfly.b32", "shfl.sync.bfly.b32", "let v: u32; shfl.bfly.b32(v, n, 1, 31);", 23),
+        ("shfl.idx.b32", "shfl.sync.idx.b32", "let v: u32; shfl.idx.b32(v, n, 0, 31);", 22),
+        ("vote.all.pred", "vote.sync.all.pred", "let p: pred; vote.all.pred(p, p);", 23),
+        ("vote.any.pred", "vote.sync.any.pred", "let p: pred; vote.any.pred(p, p);", 23),
+        ("vote.uni.pred", "vote.sync.uni.pred", "let p: pred; vote.uni.pred(p, p);", 23),
+        ("vote.ballot.b32", "vote.sync.ballot.b32", "let v: u32; let p: pred; vote.ballot.b32(v, p);", 38),
+    ];
+    for (name, canon, body, column) in cases {
+        for (before, line) in [("", 2), ("nanosleep.u32(n);\n", 3), ("let w: f32; tanh.approx.f32(w, f);\n", 3)] {
+            let want = format!(
+                "{line}:{column}: `{name}` {why}: `{canon}` takes a mask of lanes, the threads that take part, as its \
+                 last operand"
+            );
+            assert_eq!(compile("n: u32, f: f32", &format!("{before}{body}")).unwrap_err(), want, "{before}{body}");
+        }
     }
 }
 
@@ -1517,14 +1547,18 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
     let cases = [
         ("", ".version 3.0 .target sm_30"),
         ("let i: u32; popc.b32(i, n);", ".version 3.0 .target sm_30"),
-        ("let i: u32; shfl.idx.b32(i, n, 0, 31);", ".version 3.0 .target sm_30"),
+        ("let i: u32; shfl.sync.idx.b32(i, n, 0, 31, 0xffff_ffff);", ".version 6.0 .target sm_30"),
+        (
+            "let (i, p): (u32, pred); setp.eq.u32(p, n, 0); vote.sync.ballot.b32(i, p, 0xffff_ffff);",
+            ".version 6.0 .target sm_30",
+        ),
         ("let i: u32; vadd.u32.u32.u32(i, n.b0, n.h1);", ".version 3.0 .target sm_30"),
         ("let i: u32; vset4.u32.u32.lt(i, n, n, n);", ".version 3.0 .target sm_30"),
         ("let h: f16x2;", ".version 4.2 .target sm_53"),
         ("let i: u32; dp4a.u32.u32(i, n, n, n);", ".version 5.0 .target sm_61"),
         ("brx.idx(n, (a, b)); label(a); label(b);", ".version 6.0 .target sm_30"),
         ("nanosleep.u32(n);", ".version 6.2 .target sm_70"),
-        ("let i: u32; shfl.idx.b32(i, n, 0, 31); nanosleep.u32(n);", ".version 6.2 .target sm_70"),
+        ("let i: u32; shfl.sync.idx.b32(i, n, 0, 31, 0xffff_ffff); nanosleep.u32(n);", ".version 6.2 .target sm_70"),
         ("let v: f32; tanh.approx.f32(v, f);", ".version 7.0 .target sm_75"),
         ("let d: b32; ldmatrix.sync.aligned.m8n8.x1.b16(d, [y]);", ".version 6.5 .target sm_75"),
         ("let d: b32; movmatrix.sync.aligned.m8n8.trans.b16(d, n);", ".version 7.8 .target sm_75"),
@@ -1805,50 +1839,6 @@ fn sust_p_takes_a_cache_operation_as_sust_b_has() {
     for line in ["\tsust.b.2d.cg.b32.trap [%s, {%x, %y}], %v;\n", "\tsust.p.2d.cg.b32.trap [%s, {%x, %y}], %v;\n"] {
         assert!(ptx.contains(line), "{line}{ptx}");
     }
-}
-
-#[test]
-fn a_kernel_or_module_is_for_gpus_that_have_all_it_uses() {
-    let cases = [
-        (
-            "let i: u32; let v: f32; shfl.idx.b32(i, n, 0, 31); tanh.approx.f32(v, f);",
-            "2:64: `shfl.idx.b32` before it is for GPUs older than sm_70 from PTX 6.4 on, and `tanh.approx.f32` needs \
-             sm_75 and PTX 7.0: no module has both",
-        ),
-        (
-            "let i: u32; let v: f32; tanh.approx.f32(v, f); shfl.idx.b32(i, n, 0, 31);",
-            "2:57: `shfl.idx.b32` is for GPUs older than sm_70 from PTX 6.4 on, and `tanh.approx.f32` before it needs \
-             sm_75 and PTX 7.0: no module has both",
-        ),
-        (
-            "let i: u32; shfl.idx.b32(i, n, 0, 31); redux.sync.add.u32(i, n, n);",
-            "2:55: `shfl.idx.b32` before it is for GPUs older than sm_70 from PTX 6.4 on, and `redux.sync.add.u32` \
-             needs sm_80, which PTX has from 7.0 on: no module has both",
-        ),
-        (
-            "let i: u32; let g: f16; shfl.idx.b32(i, n, 0, 31); nanosleep.u32(n); abs.f16(g, h);",
-            "2:74: `shfl.idx.b32` before it is for GPUs older than sm_70 from PTX 6.4 on; `nanosleep.u32` before it \
-             needs sm_70, and `abs.f16` PTX 6.5: no module has them all",
-        ),
-    ];
-    for (body, want) in cases {
-        assert_eq!(compile("n: u32, f: f32, h: f16", body).unwrap_err(), want, "{body}");
-    }
-    let src = r#"
-        unsafe extern "ptx-kernel" fn old(n: u32) {
-            let i: u32;
-            shfl.idx.b32(i, n, 0, 31);
-        }
-        unsafe extern "ptx-kernel" fn new(f: f32) {
-            let v: f32;
-            tanh.approx.f32(v, f);
-        }
-    "#;
-    assert_eq!(
-        kernite::ptx_str(src).unwrap_err(),
-        "`shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and `tanh.approx.f32` in `new` needs \
-         sm_75 and PTX 7.0: no module has both"
-    );
 }
 
 #[test]
@@ -2459,107 +2449,6 @@ fn a_function_kept_sets_the_header_though_the_kernel_that_calls_it_is_left_out()
     assert!(with_function.contains(".func (.param .f32 fast_retval) fast("), "{with_function}");
     assert!(!with_function.contains(".entry shine("), "{with_function}");
     assert_eq!(header(&put_together(&assembly, &[0]).unwrap()), ".version 3.0 .target sm_30");
-}
-
-/// Kernels of which some, kept together, no module holds: `old` is for GPUs older than `sm_70` from
-/// PTX 6.4 on, `mid` needs `sm_75` and PTX 7.0, `top` `sm_80` and PTX 7.0, `sleep` `sm_70` and PTX
-/// 6.2, and `half` PTX 6.5, the last two with `old` only together.
-const CLASHES: &str = r#"
-    pub unsafe extern "ptx-kernel" fn plain(x: *mut u32) {
-        st.global.u32([x], 1);
-    }
-
-    pub unsafe extern "ptx-kernel" fn old(n: u32) {
-        let i: u32;
-        shfl.idx.b32(i, n, 0, 31);
-    }
-
-    pub unsafe extern "ptx-kernel" fn sleep(n: u32) {
-        nanosleep.u32(n);
-    }
-
-    pub unsafe extern "ptx-kernel" fn half(h: f16) {
-        let g: f16;
-        abs.f16(g, h);
-    }
-
-    pub unsafe extern "ptx-kernel" fn mid(f: f32) {
-        let v: f32;
-        tanh.approx.f32(v, f);
-    }
-
-    pub unsafe extern "ptx-kernel" fn top(n: u32) {
-        let i: u32;
-        redux.sync.add.u32(i, n, n);
-    }
-"#;
-
-/// A module put together from what is kept is none where the kernels kept have no module, as the
-/// module of them alone is, and says why of the kernels kept alone, whichever else are kept: `old`
-/// with `mid`, with `top`, or with `sleep` and `half` together. Of those it names the first in
-/// order, and a set of only those, exactly as the module of it alone does.
-#[test]
-fn a_module_put_together_from_what_is_kept_is_none_where_the_kernels_kept_have_no_module() {
-    let names = ["plain", "old", "sleep", "half", "mid", "top"];
-    let entries = compiled(CLASHES, &names);
-    let modules = every_set(&entries, &[]);
-    let none = modules.iter().filter(|(_, together, _)| together.is_err()).count();
-    // With `old`, of the 32 sets of the rest, those with neither `mid` nor `top` nor `sleep` and
-    // `half` together: 2 for `plain` and 3 for the other two.
-    assert_eq!(none, 32 - 6);
-    for (set, together, alone) in &modules {
-        let kept: Vec<&str> = (0..names.len()).filter(|i| set >> i & 1 == 1).map(|i| names[i]).collect();
-        let Err(why) = together else {
-            assert_eq!(together, alone, "{kept:?}");
-            continue;
-        };
-        assert!(alone.is_err(), "{kept:?} put together: {why}");
-        // What it says of the kernels names those kept alone.
-        let said: Vec<&str> = why.split("` in `").skip(1).filter_map(|rest| rest.split('`').next()).collect();
-        assert!(said.len() >= 2 && said.iter().all(|name| kept.contains(name)), "{kept:?}: {why}");
-    }
-    // The kernels named, by their places, put together, and alone.
-    let assembly = kernite_ptx::module(&entries, &[]);
-    let places =
-        |kept: &[&str]| -> Vec<usize> { kept.iter().map(|k| names.iter().position(|n| n == k).unwrap()).collect() };
-    let said = |kept: &[&str]| {
-        let kept = places(kept);
-        assembly.text(&|it| matches!(it, Kept::Code(i) if kept.contains(&i)))
-    };
-    let alone = |kept: &[&str]| {
-        let kept = places(kept);
-        let some: Vec<Entry> = kept.iter().map(|&i| entries[i].clone()).collect();
-        kernite_ptx::module(&some, &[]).whole()
-    };
-    for kept in [&["old", "mid"][..], &["old", "top"], &["old", "sleep", "half"], &["old", "mid", "plain"]] {
-        assert_eq!(said(kept), alone(kept), "{kept:?}");
-    }
-    let first = said(&["old", "mid", "top"]).unwrap_err();
-    assert!(first.contains("`tanh.approx.f32` in `mid`") && !first.contains("top"), "{first}");
-}
-
-/// A function kept is named in the error of a set that no module holds, as a kernel kept is, though
-/// the one kernel that calls it is left out: `old`, which is for GPUs older than `sm_70` from PTX 6.4
-/// on, with `fast`, which needs `sm_75` and PTX 7.0, is none, and says so of `old` and `fast`, never
-/// of `shine`, which needs nothing itself and has a module with `old`. In each set of the three the
-/// module put together is the module of that set alone.
-#[test]
-fn a_function_kept_is_named_where_the_kernels_and_functions_kept_have_no_module() {
-    let mut entries = compiled(CLASHES, &["old"]);
-    entries.extend(compiled(HELPED, &["shine", "fast"]));
-    for (set, together, alone) in every_set(&entries, &[]) {
-        assert_eq!(together, alone, "{set:b}");
-        // `old` and `fast`, bits 0 and 2, kept together are the sets with no module.
-        assert_eq!(together.is_err(), set & 0b101 == 0b101, "{set:b}");
-    }
-    let assembly = kernite_ptx::module(&entries, &[]);
-    let said = put_together(&assembly, &[0, 2]).unwrap_err();
-    assert_eq!(
-        said,
-        "`shfl.idx.b32` in `old` is for GPUs older than sm_70 from PTX 6.4 on, and `tanh.approx.f32` in `fast` \
-         needs sm_75 and PTX 7.0: no module has both"
-    );
-    assert!(put_together(&assembly, &[0, 1]).is_ok());
 }
 
 /// A kernel and a function each compiled for every instance their `#[instances(..)]` lists,
@@ -3391,7 +3280,7 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style, retype: bool) -> Opti
         for id in m.packed {
             entry.regs[id].1 = Ty::F16x2;
         }
-        entry.needs.push((Ty::F16x2.needs(), "f16x2".to_string()));
+        entry.needs = entry.needs.and(Ty::F16x2.needs());
     }
     Some(Ok((entry, m.packed_place)))
 }
@@ -3532,9 +3421,9 @@ fn module(entries: &[Entry]) -> String {
 
 /// The kernels `ptxas` refuses of each module, assembling it for the GPU given with it, by
 /// name, each with the first error it finds in it; `?` for one outside any kernel. And a hash of the cubin it makes of
-/// the rest.
-fn assemble(ptxas: &Path, modules: &[(String, u32)]) -> Vec<(BTreeMap<String, String>, u64)> {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("forms");
+/// the rest. The modules are written in the directory `dir` of the tests' own.
+fn assemble(ptxas: &Path, dir: &str, modules: &[(String, u32)]) -> Vec<(BTreeMap<String, String>, u64)> {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(dir);
     std::fs::create_dir_all(&dir).unwrap();
     let next = AtomicUsize::new(0);
     let out: Vec<Mutex<(BTreeMap<String, String>, u64)>> = modules.iter().map(|_| Mutex::default()).collect();
@@ -3556,15 +3445,17 @@ fn assemble(ptxas: &Path, modules: &[(String, u32)]) -> Vec<(BTreeMap<String, St
 /// The kernels `ptxas` refuses of the module `text`, which it reads at `path` and assembles
 /// for the GPU `gpu`, and a hash of the cubin it makes of the rest. An error may
 /// stop it before the kernels after, so it goes on without those it refused, until it takes
-/// the rest; advice, as that `mma.sp` is slower than `mma.sp::ordered_metadata`, is no
-/// refusal.
+/// the rest. A warning is a refusal, as `--warning-as-error` makes it: `ptxas` warns of what a
+/// version of PTX deprecates, as of `shfl` without `.sync`, and kernite takes none of it. Advice,
+/// as that `mma.sp` is slower than `mma.sp::ordered_metadata`, is no refusal; nor is the warning that `ptxas` 13.5
+/// cannot size the stack of a kernel with `alloca` or `stackrestore`, which size it as they run.
 fn refused(ptxas: &Path, text: &str, gpu: u32, path: &Path) -> (BTreeMap<String, String>, u64) {
     let (src, bin) = (path.with_extension("ptx"), path.with_extension("cubin"));
     let (mut text, mut out) = (text.to_string(), BTreeMap::new());
     loop {
         std::fs::write(&src, &text).unwrap();
         let run = Command::new(ptxas)
-            .args(["--gpu-name", &format!("sm_{gpu}")])
+            .args(["--gpu-name", &format!("sm_{gpu}"), "--warning-as-error", "--suppress-stack-size-warning"])
             .arg(&src)
             .arg("-o")
             .arg(&bin)
@@ -3690,17 +3581,16 @@ const VERSIONS: [u32; 47] = [
 /// driver starts at most 65535 blocks along x of a module for one; ptxas takes a module for one.
 const FERMI: u32 = 21;
 
-/// The newest GPU a module of PTX `v` with what `n` needs may be for: before 2.0, one of
-/// Tesla's, `sm_11` or `sm_13`, and before 3.0, Fermi's, [`FERMI`], which kernite writes for none
-/// of.
-fn newest(v: u32, n: Needs) -> u32 {
+/// The newest GPU a module of PTX `v` may be for: before 2.0, one of Tesla's, `sm_11` or `sm_13`,
+/// and before 3.0, Fermi's, [`FERMI`], which kernite writes for none of.
+fn newest(v: u32) -> u32 {
     match v {
         ..12 => 11,
         12..20 => 13,
         20..30 => FERMI,
         _ => kernite_ptx::GPUS
             .iter()
-            .filter(|&&(g, came)| came <= v && (n.below == 0 || g < n.below || v < n.since))
+            .filter(|&&(_, came)| came <= v)
             .map(|&(g, _)| g)
             .max()
             .expect("every version from 3.0 has Kepler"),
@@ -3749,7 +3639,7 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
     // What kernite says of each kernel it refuses, with an `f16x2` or by name, for `ptxas` to refuse too.
     let mut why: BTreeMap<String, String> = BTreeMap::new();
     // A group is the kernels that need the same, and that `ptxas` should make the same of.
-    let mut groups: BTreeMap<(Group, u32, u32, u32, u32), Vec<Entry>> = BTreeMap::new();
+    let mut groups: BTreeMap<(Group, u32, u32), Vec<Entry>> = BTreeMap::new();
     let mut add = |(e, place): (Entry, String), what: &mut BTreeMap<String, String>, group: Group| {
         let line = e.program.body.iter().find_map(|i| match i {
             kernite_core::Item::Inst(inst) => Some(inst.op.0.clone()),
@@ -3765,8 +3655,7 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
             line += ", a bug of ptxas that `ptxas_bug` says";
         }
         what.insert(e.program.name.clone(), line);
-        let n = e.needs();
-        groups.entry((group, n.ptx, n.sm, n.below, n.since)).or_default().push(e);
+        groups.entry((group, e.needs.ptx, e.needs.sm)).or_default().push(e);
     };
     let mut refused = vec![];
     for form in forms::forms() {
@@ -3847,9 +3736,8 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
     // refusals of `ptxas_bug`, which it takes.
     let mut modules: Vec<(String, u32, Expect)> = vec![];
     let mut twins: Vec<(usize, &[Entry])> = vec![];
-    for (&(group, ptx, sm, below, since), entries) in groups.iter().filter(|((_, ptx, ..), _)| VERSIONS.contains(ptx)) {
-        let n = Needs { ptx, sm, below, since };
-        let gpu = newest(ptx, n);
+    for (&(group, ptx, sm), entries) in groups.iter().filter(|((_, ptx, ..), _)| VERSIONS.contains(ptx)) {
+        let gpu = newest(ptx);
         if gpu < sm {
             let v = format!("{}.{}", ptx / 10, ptx % 10);
             failures.push(format!("{} kernels need PTX {v} and sm_{sm}, which no module of {v} is for", entries.len()));
@@ -3867,34 +3755,23 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
             continue;
         }
         let last = VERSIONS[VERSIONS.len() - 1];
-        let (exact, latest) = (retarget(&text, ptx, gpu), retarget(&text, last, newest(last, n)));
+        let (exact, latest) = (retarget(&text, ptx, gpu), retarget(&text, last, newest(last)));
         if latest != text && latest != exact {
             modules.push(at(latest, Expect::Takes));
         }
         if exact != text {
             modules.push(at(exact, Expect::Takes));
         }
-        let written = ptx.max(Needs::FLOOR.ptx);
-        for &(g, _) in kernite_ptx::GPUS
-            .iter()
-            .filter(|&&(g, _)| g > gpu_of(&text) && (below == 0 || written < since || g < below))
-        {
+        for &(g, _) in kernite_ptx::GPUS.iter().filter(|&&(g, _)| g > gpu_of(&text)) {
             modules.push((text.clone(), g, Expect::Takes));
         }
         modules.push(at(text.clone(), Expect::Takes));
         if let Some(v) = before(ptx) {
-            modules.push(at(retarget(&text, v, newest(v, n)), Expect::Refuses));
+            modules.push(at(retarget(&text, v, newest(v)), Expect::Refuses));
         }
         if sm > 0 {
             let g = kernite_ptx::GPUS.iter().map(|&(g, _)| g).rfind(|&g| g < sm).unwrap_or(FERMI);
             modules.push(at(retarget(&text, ptx.max(came(g)), g), Expect::Refuses));
-        }
-        if below != 0 {
-            let v = ptx.max(came(below));
-            if let Some(last) = before(since).filter(|&last| last >= v) {
-                modules.push(at(retarget(&text, last, below), Expect::Takes));
-            }
-            modules.push(at(retarget(&text, v.max(since), below), Expect::Refuses));
         }
     }
     // And the names kernite refuses, for the newest GPU and at the newest version kernite knows,
@@ -3917,7 +3794,7 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
         modules.push(at(text, Expect::Refuses));
     }
     let texts: Vec<(String, u32)> = modules.iter().map(|(t, g, _)| (t.clone(), *g)).collect();
-    let results = assemble(&ptxas, &texts);
+    let results = assemble(&ptxas, "forms", &texts);
     for ((text, g, expect), (refused, _)) in modules.iter().zip(&results) {
         let header = match *g == gpu_of(text) {
             true => header(text),
@@ -3961,6 +3838,47 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
     }
     eprintln!("{n} instances in {} modules; {refusals} names kernite refuses", modules.len());
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// A warning of `ptxas` is a refusal of the kernel it warns of, for
+/// [`ptxas_takes_every_form_kernite_knows_where_kernite_says`], as an error is. `ptxas` 13.5 refuses `shfl` and `vote`
+/// without `.sync` in a module of PTX 6.4 or newer for `sm_70` or newer, and takes them in any other, with a warning:
+/// that they may give unpredictable results on `sm_70` and newer, and from PTX 6.0 that PTX deprecated them. So
+/// `refused` has the kernel of each of them wrong at every version of PTX from 3.0, where `shfl` came, and for every
+/// GPU the version has, with what `ptxas` says of the form first; but for `vote.ballot.b32` in PTX 6.0 and 6.1, which
+/// `ptxas` takes without a word, though it warns of it in every other module it takes.
+#[test]
+fn ptxas_warns_of_shfl_and_vote_without_sync_or_refuses_them_at_every_version_and_gpu() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    let wrong = [
+        ("shfl", "shfl", "shfl.idx.b32 %r1, %r2, 0, 31;"),
+        ("any", "vote", "vote.any.pred %p0, %p1;"),
+        ("ballot", "vote", "vote.ballot.b32 %r1, %p1;"),
+    ];
+    let regs = ".reg .b32 %r<4>;\n\t.reg .pred %p<2>;";
+    let mut text = ".version 3.0\n.target sm_30\n.address_size 64\n\n".to_string();
+    for (name, _, line) in wrong {
+        text += &format!(".visible .entry {name}()\n{{\n\t{regs}\n\t{line}\n\tret;\n}}\n\n");
+    }
+    let at: Vec<(u32, u32)> = (VERSIONS.into_iter().filter(|&v| v >= 30))
+        .flat_map(|v| kernite_ptx::GPUS.into_iter().filter(move |&(_, came)| came <= v).map(move |(g, _)| (v, g)))
+        .collect();
+    let modules: Vec<(String, u32)> =
+        at.iter().map(|&(v, g)| retarget(&text, v, g)).map(|m| (m.clone(), gpu_of(&m))).collect();
+    for ((v, g), (refusals, _)) in at.into_iter().zip(assemble(&ptxas, "deprecated", &modules)) {
+        for (name, op, line) in wrong {
+            let what = match (name, v, g) {
+                ("ballot", 60 | 61, _) => None,
+                (_, 64.., 70..) => Some("is not supported on .target sm_70 and higher from PTX ISA version 6.4"),
+                _ => Some("may produce unpredictable results on sm_70 and later architectures"),
+            };
+            let want = what.map(|what| format!("error   : Instruction '{op}' without '.sync' {what}"));
+            assert_eq!(refusals.get(name), want.as_ref(), "PTX {v} for sm_{g}: `{line}`");
+        }
+    }
 }
 
 /// Kernels that keep what they work on in shared memory: as much as the kernel declares, and

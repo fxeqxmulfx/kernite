@@ -61,8 +61,7 @@
 //!   `call(r, fp, (a, b), (f, g))` as one of the functions taken together last, checked
 //!   against each.
 //!
-//! What an instruction needs of PTX and of the GPU, its [`Needs`], the kernel needs: an
-//! instruction that no GPU has with what the kernel needs already is an error where it is.
+//! What an instruction needs of PTX and of the GPU, its [`Needs`], the kernel needs.
 
 use std::collections::BTreeSet;
 
@@ -127,7 +126,7 @@ pub struct Kernel {
     shared: u64,
     local: u64,
     partial: Vec<Partial>,
-    needs: Vec<(Needs, String)>,
+    needs: Needs,
     /// The tables declared so far: of labels `brx.idx` jumps through, of call targets, and
     /// prototypes.
     tables: usize,
@@ -194,17 +193,15 @@ struct Partial {
     arg: usize,
 }
 
-/// An instruction's operands written out: their text, what they read and write, what they
-/// need and the special registers and kernels among them that need it, the labels of a table
+/// An instruction's operands written out: their text, what they read and write, what they need, the labels of a table
 /// it jumps through, and the functions it names; and as they are written, how many are addresses so far, the bytes the
-/// instruction reaches at once at each, and whether they are those in brackets, where a
-/// register is of the type the form says, though `+wide` lets the others be wider.
+/// instruction reaches at once at each, and whether they are those in brackets, where a register is of the type the
+/// form says, though `+wide` lets the others be wider.
 #[derive(Default)]
 struct Written {
     texts: Vec<String>,
     args: Vec<Arg<VReg>>,
     needs: Needs,
-    named: Vec<String>,
     table: Vec<u32>,
     funcs: Vec<String>,
     addrs: usize,
@@ -254,7 +251,7 @@ impl Kernel {
             shared: 0,
             local: 0,
             partial: vec![],
-            needs: vec![],
+            needs: Needs::default(),
             tables: 0,
             func: None,
             callees: vec![],
@@ -298,7 +295,7 @@ impl Kernel {
     /// so from Pascal's on, `sm_60`, which the kernel needs.
     pub fn cooperative(&mut self) {
         self.cooperative = true;
-        self.needs.push((Needs { ptx: 50, sm: 60, ..Needs::default() }, "#[cooperative]".into()));
+        self.needs = self.needs.and(Needs { ptx: 50, sm: 60 });
     }
 
     /// The kernel as written.
@@ -405,28 +402,6 @@ impl Kernel {
         self.memory.push(Memory { name: text, space, align, bytes });
         self.declared.push((name.to_string(), ty.to_string()));
         Ok(Var::Mem(self.memory.len() - 1))
-    }
-
-    /// What the kernel needs so far.
-    fn needed(&self) -> Needs {
-        self.needs.iter().fold(Needs::default(), |n, (m, _)| n.and(*m))
-    }
-
-    /// Notes that the kernel needs `needs` for `what`, an instruction; or says why no module
-    /// has it as well as what the kernel needs already.
-    fn require(&mut self, needs: Needs, what: &str) -> Result<(), String> {
-        let had = self.needed();
-        let all = had.and(needs);
-        if !all.possible() {
-            let mut named: Vec<(Needs, String)> =
-                self.needs.iter().map(|(n, w)| (*n, format!("`{w}` before it"))).collect();
-            named.push((needs, format!("`{what}`")));
-            return Err(crate::needs::clash(&named));
-        }
-        if all != had {
-            self.needs.push((needs, what.to_string()));
-        }
-        Ok(())
     }
 
     /// Notes that a thread may end at the instruction pushed next, or never come back from it,
@@ -783,9 +758,6 @@ impl Kernel {
                 }
                 Some(r) => {
                     w.needs = w.needs.and(r.needs);
-                    if r.needs != Needs::default() {
-                        w.named.push(format!("%{}", r.name));
-                    }
                     Ok(format!("%{s}"))
                 }
             },
@@ -1009,8 +981,7 @@ impl Kernel {
             // A kernel's address is for the GPU to launch it, as CUDA's dynamic parallelism
             // does from Kepler's sm_35 on.
             Callee::Kernel => {
-                w.needs = w.needs.and(Needs { ptx: 31, sm: 35, ..Needs::default() });
-                w.named.push(f.to_string());
+                w.needs = w.needs.and(Needs { ptx: 31, sm: 35 });
             }
             Callee::Broken => return Err(format!("`{f}` does not compile, so no kernel names it")),
         }
@@ -1119,8 +1090,7 @@ impl Kernel {
                     }
                 };
                 // As `ptxas` has a call through a variable.
-                self.require(Needs { ptx: 21, sm: 20, ..Needs::default() }, &format!("{name} {fp}"))
-                    .map_err(Fault::new)?;
+                self.needs = self.needs.and(Needs { ptx: 21, sm: 20 });
                 match targets {
                     Some(targets) => {
                         let mut texts: Option<Vec<String>> = None;
@@ -1712,9 +1682,7 @@ impl Target for Kernel {
         let t = match ty {
             _ if self.func.is_some() => {
                 let t = crate::call::passable(ty)?;
-                if t.needs() != Needs::default() {
-                    self.require(t.needs(), &format!("{name}: {}", t.name()))?;
-                }
+                self.needs = self.needs.and(t.needs());
                 t
             }
             _ if pointer => Ty::U64,
@@ -1753,9 +1721,9 @@ impl Target for Kernel {
         }
         let returns = crate::call::returns(ty)?;
         match returns {
-            Returns::Value(t) if t.needs() != Needs::default() => self.require(t.needs(), &format!("-> {ty}"))?,
+            Returns::Value(t) => self.needs = self.needs.and(t.needs()),
             // As `ptxas` has `.noreturn`.
-            Returns::Never => self.require(Needs { ptx: 64, sm: 30, ..Needs::default() }, "-> !")?,
+            Returns::Never => self.needs = self.needs.and(Needs { ptx: 64, sm: 30 }),
             _ => {}
         }
         self.func = Some(returns);
@@ -1783,9 +1751,7 @@ impl Target for Kernel {
         let Some(t) = Ty::parse(ty) else {
             return Err(format!("PTX variables are {TYPES}, not `{ty}`"));
         };
-        if t.needs() != Needs::default() {
-            self.require(t.needs(), &format!("let {name}: {}", t.name()))?;
-        }
+        self.needs = self.needs.and(t.needs());
         Ok(Var::Reg { reg: self.new_var(name, t), ty: t })
     }
 
@@ -1911,11 +1877,7 @@ impl Target for Kernel {
                 None => Fault::new(format!("`{name}` takes {}, not {}", counts(&ranges), args.len())),
             });
         };
-        let mut what = name.to_string();
-        for s in &w.named {
-            what += &format!(" {s}");
-        }
-        self.require(b.needs.and(w.needs), &what).map_err(Fault::new)?;
+        self.needs = self.needs.and(b.needs).and(w.needs);
         for f in &w.funcs {
             self.named_fn(f);
         }

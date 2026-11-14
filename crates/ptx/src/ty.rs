@@ -137,8 +137,8 @@ impl Ty {
     /// and `f16x2` ones from 4.2, for `sm_53`.
     pub fn needs(self) -> Needs {
         match self {
-            Ty::B128 => Needs { ptx: 83, sm: 70, ..Needs::default() },
-            Ty::F16x2 => Needs { ptx: 42, sm: 53, ..Needs::default() },
+            Ty::B128 => Needs { ptx: 83, sm: 70 },
+            Ty::F16x2 => Needs { ptx: 42, sm: 53 },
             _ => Needs::default(),
         }
     }

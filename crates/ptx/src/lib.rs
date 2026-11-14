@@ -31,6 +31,6 @@ pub use backend::Ptx;
 pub use call::{Prototype, Returns, formal, passable, passed};
 pub use entry::{Entry, Op, Param, module};
 pub use naming::{ident, scope, symbol};
-pub use needs::{GPUS, Needs, clash};
+pub use needs::{GPUS, Needs};
 pub use statics::{Memory, Static, room};
 pub use ty::{Kind, Ty};

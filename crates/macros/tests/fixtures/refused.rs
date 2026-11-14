@@ -54,19 +54,6 @@ pub mod a_method_of_kernels_named_twice {
     pub unsafe extern "ptx-kernel" fn k_blocks() {}
 }
 
-#[kernite_macros::kernels]
-pub mod kernels_no_module_of_ptx_has_both {
-    pub unsafe extern "ptx-kernel" fn old(n: u32) {
-        let i: u32;
-        shfl.idx.b32(i, n, 0, 31);
-    }
-
-    pub unsafe extern "ptx-kernel" fn new(f: f32) {
-        let v: f32;
-        tanh.approx.f32(v, f);
-    }
-}
-
 #[kernite_macros::kernels(consts = crate::sizes)]
 pub mod two_functions_of_a_name_given_consts {
     fn h() {}

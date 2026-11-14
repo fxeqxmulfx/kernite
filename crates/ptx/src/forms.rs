@@ -21,11 +21,11 @@ use crate::{GPUS, Kind, Needs, Ty};
 /// A word, or a choice of words, that is a type is one of the instruction's types, which its
 /// operands name by place: `T` is the first, then `U`, `V` and `W`. `@7.8` after a word or a
 /// form is the version of PTX it needs, as ptxas takes it, which every form says: `@1.0` is
-/// any. `@sm80` is the GPU, for one newer than Fermi, `sm_20`, and `@<sm70/6.4` a GPU older
-/// than that in a module of PTX 6.4 or newer. Each address is in the state space the name
-/// gives in its place, the first in the first, as `cp.async.ca.shared.global` writes shared
-/// memory and reads global; one in none, a generic address, needs PTX 2.0 besides. `~round`,
-/// `~half` and `~cmp` say what leaving an element out leaves unsaid.
+/// any. `@sm80` is the GPU, for one newer than Fermi, `sm_20`. Each address is in the state
+/// space the name gives in its place, the first in the first, as `cp.async.ca.shared.global`
+/// writes shared memory and reads global; one in none, a generic address, needs PTX 2.0
+/// besides. `~round`, `~half` and `~cmp` say what leaving an element out leaves unsaid, and
+/// `~sync` that it is `.sync`, which PTX deprecated leaving out.
 ///
 /// After ` : ` are the operands. One is a type, `T` or `u32`, with `=` before it for one the
 /// instruction writes, `%` for one that must be a variable, `^` for registers taken together
@@ -367,9 +367,10 @@ mov.b128 : =_b32*4, %T @8.3 @sm70
 # `shfl` reads a lane in the low 5 bits of `b`, and a clamp and a segment mask in the bits
 # 0x1f1f of `c`; `prmt` its selector in the low 16 bits of `c`, or, with a mode, the low 2;
 # as the ISA has it: ptxas 13.5 takes more known now, and the GPU reads no more. As
-# `vote.sync`'s below, `shfl.sync`'s mask of lanes is its last operand, `lanes`.
-shfl$shfl.b32 : =T[|=_pred], T, u32[0,31], u32&0x1f1f @3.0 @sm30 @<sm70/6.4
-shfl.sync$shfl.b32 : =T[|=_pred], T, u32[0,31], u32&0x1f1f, lanes @6.0 @sm30
+# `vote.sync`'s below, `shfl.sync`'s mask of lanes is its last operand, `lanes`. PTX deprecated
+# `shfl` and `vote` without `.sync` in 6.0, and ptxas 13.5 refuses them for `sm_70` and newer from
+# 6.4: kernite has no form of them, and `~sync` says why.
+shfl.sync~sync$shfl.b32 : =T[|=_pred], T, u32[0,31], u32&0x1f1f, lanes @6.0 @sm30
 prmt.b32 : =T, T, T, T[0,65535] @2.0
 prmt.b32(.f4e|.b4e|.rc8|.ecl|.ecr|.rc16) : =T, T, T, T[0,3] @2.0
 ld{.weak@6.0@sm70}{.global}$cop$hint$size$vec$ty : =_T*v, [R], {L2::cache_hint}b64 @1.0 +wide +vec
@@ -636,10 +637,11 @@ mbarrier.pending_count.b64 : =~u32, u64 @7.0 @sm80
 # code for it as for any other mask known now. Nor does a mask leave out lane 0 where every
 # thread runs the instruction: thread 0 is in lane 0.
 bar.warp.sync : lanes @6.0 @sm30
-vote(.all|.any|.uni).pred : =T, !pred @1.2 @<sm70/6.4
-vote.ballot.b32 : =T, !pred @2.0 @<sm70/6.4
-vote.sync(.all|.any|.uni).pred : =T, !pred, lanes @6.0 @sm30
-vote.sync.ballot.b32 : =T, !pred, lanes @6.0 @sm30
+vote.sync~sync(.all|.any|.uni).pred : =T, !pred, lanes @6.0 @sm30
+# ptxas 13.5 takes `vote.ballot.b32 %r1, %p1;` in a module of PTX 6.0 or 6.1 without a word, though it warns of it
+# in every other module it takes, and of every other `shfl` and `vote` without `.sync` in those two. It looks like a
+# bug of ptxas.
+vote.sync~sync.ballot.b32 : =T, !pred, lanes @6.0 @sm30
 match.any.sync(.b32|.b64) : =b32, T, lanes @6.0 @sm70
 match.all.sync(.b32|.b64) : =_b32[|=_pred], T, lanes @6.0 @sm70
 activemask.b32 : =T @6.2 @sm30
@@ -788,7 +790,7 @@ pub struct Elem {
     pub optional: bool,
     /// Which of the instruction's types it is, if its words are types: 0 for the first.
     pub slot: Option<usize>,
-    /// What leaving it out leaves unsaid: `round`, `half` or `cmp`.
+    /// What leaving it out leaves unsaid: `round`, `half` or `cmp`; or `sync`, which PTX deprecated leaving out.
     pub why: Option<&'static str>,
 }
 
@@ -1340,6 +1342,11 @@ fn unknown(name: &str, op: &str, words: &[&str], of: &[&'static Form]) -> String
                 )
             }
             Some("cmp") => format!("`{name}` names one comparison, as in `{canon}`"),
+            Some("sync") => format!(
+                "`{name}` is deprecated since PTX 6.0, and `ptxas` refuses it from PTX 6.4 on `sm_70` and newer, \
+                 where the threads of a warp need not run together: `{canon}` takes a mask of lanes, the threads \
+                 that take part, as its last operand"
+            ),
             _ => {
                 let alts: Vec<String> = e.alts.iter().map(|a| format!("`.{}`", a.words.join("."))).collect();
                 let what = if alts.len() == 1 { alts[0].clone() } else { format!("one of {}", alts.join(", ")) };
@@ -1561,7 +1568,7 @@ pub fn sregs() -> &'static [Sreg] {
     SREGS.get_or_init(|| {
         let mut out = vec![];
         let mut add = |name: String, ty: Ty, ptx: u32, sm: u32, fewest: u32| {
-            out.push(Sreg { name, ty, needs: Needs { ptx, sm, ..Needs::default() }, fewest });
+            out.push(Sreg { name, ty, needs: Needs { ptx, sm }, fewest });
         };
         for v in ["tid", "ntid", "ctaid", "nctaid"] {
             for c in ["x", "y", "z"] {
@@ -1788,20 +1795,14 @@ fn alt_of(s: &'static str, one: bool, line: &str) -> (Alt, &'static str) {
             major if r[major..].starts_with('.') => digits(major + 1),
             major => major,
         };
-        let end = match r.strip_prefix('<').unwrap_or(r).strip_prefix("sm") {
-            Some(_) => match digits(r.find("sm").expect("it starts so") + 2) {
-                sm if r[sm..].starts_with('/') => version(sm + 1),
-                sm => sm,
-            },
-            None => version(0),
-        };
+        let end = if r.starts_with("sm") { digits(2) } else { version(0) };
         needs = needs.and(req(&r[..end], line));
         rest = &r[end..];
     }
     (Alt { words, needs }, rest)
 }
 
-/// A requirement after `@`: `7.8`, `sm80` or `<sm70/6.4`.
+/// A requirement after `@`: `7.8` or `sm80`.
 fn req(r: &str, line: &str) -> Needs {
     let num = |s: &str| s.parse::<u32>().unwrap_or_else(|_| panic!("`{line}`: `@{r}` is no requirement"));
     let gpu = |s: &str| {
@@ -1813,10 +1814,7 @@ fn req(r: &str, line: &str) -> Needs {
         let (major, minor) = s.split_once('.').unwrap_or_else(|| panic!("`{line}`: `@{r}` is no version"));
         num(major) * 10 + num(minor)
     };
-    if let Some(sm) = r.strip_prefix("<sm") {
-        let (sm, since) = sm.split_once('/').unwrap_or_else(|| panic!("`{line}`: `@{r}` says from which version"));
-        Needs { below: gpu(sm), since: version(since), ..Needs::default() }
-    } else if let Some(sm) = r.strip_prefix("sm") {
+    if let Some(sm) = r.strip_prefix("sm") {
         Needs { sm: gpu(sm), ..Needs::default() }
     } else {
         Needs { ptx: version(r), ..Needs::default() }
