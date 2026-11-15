@@ -381,7 +381,7 @@ use kernite::lang;
 
 use crate::expand::expand;
 use crate::rust::{
-    MACROS, Site, attrs_len, braced, depends_on, error, flatten, for_rust, inner_attribute, is_ident, is_path,
+    MACROS, Site, attrs_len, braced, depends_on, error, flatten, for_rust, grouped, inner_attribute, is_ident, is_path,
     is_punct, lex, module, named, needs_dependency, parse, path_uses, site,
 };
 
@@ -452,9 +452,9 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
             "`#[consts]` goes on a module written in braces, `mod name { .. }`, of the consts kernels read",
         );
     };
-    let top = flatten(braces.stream());
+    let top = grouped(flatten(braces.stream()), braces.span_close());
     let (trees, spans) = lex(&top);
-    let top = for_rust(top, braces.span_close());
+    let top = for_rust(top);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(Span::call_site);
     // The module as it is, for Rust; and the consts kernite reads, for the kernels. The argument is told where
     // it is, and changes nothing else: the module is the one it would be without it, for the modules of kernels

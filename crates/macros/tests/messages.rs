@@ -11,7 +11,8 @@ use std::process::{Command, Output};
 use std::sync::{Mutex, PoisonError};
 
 /// Held while Cargo builds a fixture: the fixtures share a target directory, and a Cargo that
-/// waits for another's lock says so.
+/// waits for another's lock says so. Held while `written` writes a fixture too: two tests may
+/// build the same fixture, and the one must not write it while Cargo builds it for the other.
 static CARGO: Mutex<()> = Mutex::new(());
 
 /// Where in `CARGO_TARGET_TMPDIR` each fixture is a crate, `kernite-macros/name/project`, so that
@@ -30,6 +31,7 @@ fn cargo(command: &[&str], name: &str) -> (bool, Vec<String>) {
 /// does not use, and ends with what `{name}.toml` beside the fixture says of the workspace, if there is one. The files
 /// of the folder `{name}/` beside it, if there is one, are the crate's other files: `src/macros.rs`, for `mod macros;`.
 fn written(name: &str) -> PathBuf {
+    let _one = CARGO.lock().unwrap_or_else(PoisonError::into_inner);
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     let crates = here.parent().expect("kernite-macros is in crates/");
     let fixtures = here.join("tests/fixtures");
@@ -76,20 +78,21 @@ fn edited(name: &str, edits: &[(&str, &str)]) -> PathBuf {
 
 /// Whether Cargo did `command` in the crate at `dir`, and what it said, a line each, in order.
 fn cargo_in(command: &[&str], dir: &Path) -> (bool, Vec<String>) {
-    let out = cargo_out(command, dir);
+    let out = cargo_out("short", command, dir);
     let said = String::from_utf8(out.stderr).expect("Cargo writes UTF-8");
     (out.status.success(), said.lines().map(String::from).collect())
 }
 
-/// What Cargo did when it ran `command` in the crate at `dir`. The crate is built offline into
-/// `kernite-macros/target`, so that it never waits for the build that runs these tests. What the
-/// environment would change of a build is taken out of it.
-fn cargo_out(command: &[&str], dir: &Path) -> Output {
+/// What Cargo did when it ran `command` in the crate at `dir`, saying its messages in `format`: `short`, a line each,
+/// as the tests compare them, or `human`, in full, as it says them to a person. The crate is built offline into
+/// `kernite-macros/target`, so that it never waits for the build that runs these tests. What the environment would
+/// change of a build is taken out of it.
+fn cargo_out(format: &str, command: &[&str], dir: &Path) -> Output {
     let _one = CARGO.lock().unwrap_or_else(PoisonError::into_inner);
     let mut run = Command::new(env!("CARGO"));
     run.args(command);
-    run.args(["--offline", "--quiet", "--message-format=short", "--color=never", "--target-dir"]);
-    run.arg(Path::new(ROOT).join("target")).current_dir(dir);
+    run.args(["--offline", "--quiet", "--color=never", "--target-dir"]);
+    run.arg(Path::new(ROOT).join("target")).arg(format!("--message-format={format}")).current_dir(dir);
     for var in [
         "RUSTFLAGS",
         "CARGO_ENCODED_RUSTFLAGS",
@@ -129,7 +132,7 @@ fn builds_quietly_in(command: &[&str], name: &str, dir: &Path) {
 /// so in a line with "skipped" and passes: that line is no word of Cargo's, and it is said again here, as a
 /// test of this file says of a tool it lacks.
 fn runs_quietly(command: &[&str], name: &str) -> String {
-    let out = cargo_out(command, &written(name));
+    let out = cargo_out("short", command, &written(name));
     let (said, printed) = (String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
     let (skipped, said): (Vec<&str>, Vec<&str>) = said.lines().partition(|line| line.contains("skipped"));
     for line in skipped {
@@ -169,6 +172,34 @@ fn refuses_by(command: &[&str], name: &str, lines: &[&str]) {
     let (done, said) = cargo(command, name);
     assert!(!done, "fixtures/{name}.rs: {command:?} did it");
     assert_eq!(said, lines, "fixtures/{name}.rs: Cargo said:\n{}", said.join("\n"));
+}
+
+/// Rust's help, to return an owned value, for each kernel of fixture `name` whose result has a `&` and no lifetime to
+/// take, in the order Cargo says them: the line that goes and the line that takes its place, as the macro, or the call
+/// that gives the result, writes them. Cargo says its messages here in full, as it does to a person, with the code of a
+/// help beside it. Only the helps for kernels are told: a plain function of a fixture, `pub fn`, is Rust's own to say.
+/// A help of more than one line fails the test.
+fn owned_values(name: &str) -> Vec<(String, String)> {
+    let said = String::from_utf8(cargo_out("human", &["build"], &written(name)).stderr).expect("Cargo writes UTF-8");
+    let lines: Vec<&str> = said.lines().collect();
+    let mut helps = vec![];
+    for (at, line) in lines.iter().enumerate() {
+        if line.trim() != "help: ...or alternatively, you might want to return an owned value" {
+            continue;
+        }
+        // The code is between two bars, the first of them the line after the help's words.
+        let code: Vec<&str> = lines[at + 2..].iter().copied().take_while(|line| line.trim() != "|").collect();
+        if code[0].contains("pub fn ") {
+            continue;
+        }
+        let [minus, plus] = code[..] else {
+            panic!("fixtures/{name}.rs: Rust's help takes out more than one line:\n{}", code.join("\n"));
+        };
+        let (_, minus) = minus.split_once(" - ").expect("a line that goes");
+        let (_, plus) = plus.split_once(" + ").expect("a line that takes its place");
+        helps.push((minus.to_string(), plus.to_string()));
+    }
+    helps
 }
 
 /// The code of each line of fixture `name`, without its comment, and the line's number.
@@ -2434,7 +2465,7 @@ fn a_result_with_an_underscore_that_is_no_placeholder_is_a_kernel_that_runs() {
 /// it is given, moved by its argument if it has one, and the one that takes a pointer writes a byte through it.
 #[test]
 fn a_result_whose_type_holds_a_block_is_a_kernel_and_rust_lints_the_braces_alone() {
-    let out = cargo_out(&["test", "--lib"], &written("block_result"));
+    let out = cargo_out("short", &["test", "--lib"], &written("block_result"));
     let (said, printed) = (String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
     assert!(out.status.success(), "fixtures/block_result.rs: its tests failed:\n{said}\n{printed}");
     assert!(printed.contains("test result: ok. 2 passed"), "fixtures/block_result.rs ran no tests:\n{printed}");
@@ -4811,13 +4842,14 @@ fn a_result_without_a_lifetime_is_said_at_the_ampersand_wherever_the_macro_is_de
 /// at the `&` of each, as for a `$t:ty`, and not at the `$t` of the first: an ident arrives as a token of the call,
 /// with no group round it. It is so for `&$t` and `&mut $t`, `&&$t` and `&dyn $t`; where the `&` is not the first token
 /// of the result, in `Option<..>`, a tuple, whose last token the fragment is or is not, and an array; behind an arrow,
-/// `&fn() -> $t`, and at the `as` of a qualified path; where the last token of the type is the macro's, `&Vec<$t>`; and
-/// for an `f16`. A `$t:tt` is so too. A result written out, in a module of kernels or in the body of a macro, `&u8`,
-/// `& u8`, `&mut u8`, `&dyn Send` and `(u8, &u8)`, has it at its `&`, as it had: the ident of each is in its place, and
-/// kernite does not put it in parentheses. So has a result the call writes whole, `&u8` as a `$r:ty`, a `$($r:tt)*` or
-/// two `tt`s, at the `&` of the call: the `&` and the ident are the call's, and the token after them is the macro's. Of
-/// two `tt`s Rust says the second kernel's at its own `$a`. A GPU kernel's `&` takes the lifetime of `self`, so Rust
-/// has none to ask for there. kernite's words are the same for each, with the type as the kernel writes it.
+/// `&fn() -> $t`, and at the `as` of a qualified path; where the last token of the type is the macro's, `&Vec<$t>`, or
+/// the first is the ident, `&$t<u8>`; and for an `f16`. A `$t:tt` is so too. A result written out, in a module of
+/// kernels or in the body of a macro, `&u8`, `& u8`, `&mut u8`, `&dyn Send` and `(u8, &u8)`, has it at its `&`, as it
+/// had: the ident of each is in its place, and kernite does not put it in parentheses. So has a result the call writes
+/// whole, `&u8` as a `$r:ty`, a `$($r:tt)*` or two `tt`s, at the `&` of the call: the `&` and the ident are the call's,
+/// and the token after them is the macro's. Of two `tt`s Rust says the second kernel's at its own `$a`. A GPU kernel's
+/// `&` takes the lifetime of `self`, so Rust has none to ask for there. kernite's words are the same for each, with the
+/// type as the kernel writes it.
 #[test]
 fn a_result_without_a_lifetime_is_said_at_the_ampersand_of_each_kernel_that_takes_the_same_ident() {
     let gives = |places: &[&str], ty: &str| places.iter().map(|place| x86_gives(place, "", ty)).collect::<Vec<_>>();
@@ -4859,6 +4891,7 @@ fn a_result_without_a_lifetime_is_said_at_the_ampersand_of_each_kernel_that_take
     // The call writes the whole result: its `&` is where each is said, of a `$r:ty` in two kernels and in one, of a
     // `$($r:tt)*`, and of two `tt`s, whose second kernel is said at its own `$a`.
     said.extend(["191:18", "204:18", "220:22", "236:15", "229:61"].map(|place| x86_gives(place, "", "&u8")));
+    said.extend(gives(&["242:60", "245:61"], "&Vec<u8>"));
     // Cargo says a message once, however many calls make it, and counts each: the three kernels of `idents!` are the
     // same places for `u8` and for `f16`, and Rust says the error of each of the two kernels of `whole!` and of
     // `sequence!` at the same `&`, where kernite says its own once.
@@ -4869,6 +4902,7 @@ fn a_result_without_a_lifetime_is_said_at_the_ampersand_of_each_kernel_that_take
     said.extend(["107:61", "110:62"].map(no_lifetime));
     said.extend(["138:52", "141:53", "144:52", "147:53", "150:57", "159:60", "162:61", "165:65"].map(no_lifetime));
     said.extend(["191:18", "204:18", "220:22", "236:15", "229:61"].map(no_lifetime));
+    said.extend(["242:60", "245:61"].map(no_lifetime));
     let errors = said.len() + repeated;
     said.push(format!("error: could not compile `fragments_idents` (lib) due to {errors} previous errors"));
     refuses("fragments_idents", &said.iter().map(String::as_str).collect::<Vec<_>>());
@@ -5043,4 +5077,38 @@ fn the_parentheses_of_a_fragment_behind_a_reference_are_linted_in_a_kernel_as_in
         warnings.len()
     ));
     refuses("fragments_parens", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// Rust's help to return an owned value, for a result with a `&` that has no lifetime to take, takes out that `&` and
+/// no more of the macro, `&mut` for a `&mut`, as it does for kernels written out. It is so for each kernel of the
+/// fixtures above that has a fragment behind a `&`, `$t:ty`, `$t:path`, `$t:ident` or `$t:tt`: in a macro below its
+/// call, in a file of its own, with a body the call gives, and for a `$t:ty` that is a pair of parentheses. Where the
+/// call gives the `&`, as a `$a:tt` of `$a $t`, it takes out the `$a`, and as a part of `&u8`, the `&` in the call. The
+/// number of helps is that of the kernels with one lifetime to find: where a result has two, `&&$t`, Rust offers no
+/// owned value.
+#[test]
+fn rusts_help_to_return_an_owned_value_takes_out_the_ampersand_of_a_result_and_no_more() {
+    let fixtures = [
+        ("fragments_shared", 29),
+        ("fragments_idents", 36),
+        ("fragments_paths", 26),
+        ("fragments_blocks", 13),
+        ("fragments_blocks_placed", 8),
+        ("fragments_placed", 5),
+        ("fragments_placed_idents", 11),
+        ("fragments_parens", 8),
+    ];
+    // A line is its words: Rust leaves the space after what it takes out, `&mut` say, or takes it out too.
+    let words = |line: &str| line.split_whitespace().collect::<Vec<_>>().join(" ");
+    for (name, count) in fixtures {
+        let helps = owned_values(name);
+        assert_eq!(helps.len(), count, "fixtures/{name}.rs: Rust's helps are {helps:#?}");
+        for (before, after) in &helps {
+            let takes = ["&mut", "&", "$a"].iter().any(|out| {
+                let without = |at: usize| format!("{}{}", &before[..at], &before[at + out.len()..]);
+                before.match_indices(out).any(|(at, _)| words(&without(at)) == words(after))
+            });
+            assert!(takes, "fixtures/{name}.rs: Rust's help takes `{before}` to `{after}`");
+        }
+    }
 }

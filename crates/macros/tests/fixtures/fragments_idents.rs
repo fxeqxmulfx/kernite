@@ -234,3 +234,19 @@ macro_rules! pair {
 }
 
 pair!(paired, &u8);
+
+macro_rules! generics {
+    ($module:ident, $t:ident) => {
+        #[kernite_macros::kernels]
+        pub mod $module {
+            pub unsafe extern "sysv64" fn first(x: u64) -> &$t<u8> {
+                ret(x);
+            }
+            pub unsafe extern "sysv64" fn second(x: u64) -> &$t<u8> {
+                ret(x);
+            }
+        }
+    };
+}
+
+generics!(generic, Vec);

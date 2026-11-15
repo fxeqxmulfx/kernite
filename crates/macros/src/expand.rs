@@ -21,8 +21,8 @@ use crate::cond::Cond;
 use crate::gpu::{HOLE, gpu};
 use crate::room;
 use crate::rust::{
-    cfg_of, error, error_under, flatten, for_rust, from_inside, inner_attribute, lex, name_at, parse, passable,
-    position, seen, site, stub, takes,
+    cfg_of, error, error_under, flatten, for_rust, from_inside, grouped, inner_attribute, lex, name_at, parse,
+    passable, position, seen, site, stub, takes,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
@@ -51,11 +51,12 @@ pub(crate) fn expand(
     body: &Group,
 ) -> TokenStream {
     // The consts given come first, for the kernels to read as the module's own.
-    let outside = given.as_ref().map_or_else(Vec::new, |(consts, _)| flatten(consts.clone()));
+    let end = body.span_close();
+    let outside = given.as_ref().map_or_else(Vec::new, |(consts, _)| grouped(flatten(consts.clone()), end));
     let n = outside.len();
-    let top: Vec<TokenTree> = outside.into_iter().chain(flatten(body.stream())).collect();
+    let top: Vec<TokenTree> = outside.into_iter().chain(grouped(flatten(body.stream()), end)).collect();
     let (trees, spans) = lex(&top);
-    let mut top = for_rust(top, body.span_close());
+    let mut top = for_rust(top);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(site);
     let said = |e: &lang::Error| error(at(e.span), &e.message);
     // A module kernite cannot read is refused whole, as at its attribute, with the items it reads: its error is what
