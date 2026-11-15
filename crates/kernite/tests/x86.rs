@@ -1919,7 +1919,8 @@ fn a_function_calls_itself_with_its_arguments_where_sysv_passes_them() {
 
 /// A call changes the registers SysV lets it, all but rbx, rbp and r12 to r15: an integer
 /// live across one is kept in rbx, which the kernel saves for its own caller; a vector, of
-/// which the call may change any, is spilled to the frame.
+/// which the call may change any, is spilled to the frame. A value moved to rbx is not moved back to the register it
+/// came from, which still has it for the call to take.
 #[test]
 fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
     let want = "# plus(gpr) -> gpr
@@ -1927,7 +1928,6 @@ fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
 # x=rbx,rdi y=rax b=rsi
     push rbx
     mov rbx, rdi
-    mov rdi, rbx
     mov rsi, 6
     call {f0}
     add rax, rbx
@@ -1989,7 +1989,6 @@ fn a_call_through_a_gpr_calls_one_of_the_functions_taken_together_last() {
     sub rsp, 8
     mov rsi, rdi
     lea rax, [rip + {f0}]
-    mov rdi, rsi
     call rax
     add rsp, 8
     ret
@@ -2087,8 +2086,8 @@ fn a_call_passes_what_its_callee_takes() {
                 xmm0\npop rbx\nvzeroupper\nret";
     assert_eq!(code, want);
     let code = calling("x: *mut f64", "", "let v: ymm; call(v.xmm, scale, (2.5f64, x)); vmovq([x], v.xmm);").unwrap();
-    let want = "push rbx\nmov rbx, rdi\nvmovq xmm0, qword ptr [rip + {c0}]\nmov rdi, rbx\ncall {f0}\nvmovq qword ptr \
-                [rbx], xmm0\npop rbx\nvzeroupper\nret";
+    let want = "push rbx\nmov rbx, rdi\nvmovq xmm0, qword ptr [rip + {c0}]\ncall {f0}\nvmovq qword ptr [rbx], \
+                xmm0\npop rbx\nvzeroupper\nret";
     assert_eq!(code, want);
 }
 

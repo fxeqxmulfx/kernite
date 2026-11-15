@@ -1,7 +1,7 @@
 //! A kernel's frame made instructions, before it is printed: what it runs on entry, and before
 //! each `ret`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use kernite_compile::{Allocated, Frame};
 use kernite_core::{Access, Arg, Base, Class, Flow, Inst, Item, Label, Mem, Operand, PReg, Width};
@@ -28,9 +28,8 @@ pub(crate) struct Lowered {
 pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     let calls = insts(&c.body).any(|inst| inst.op == Op::Call);
     let returns = insts(&c.body).any(|inst| inst.op == Op::Ret);
-    let vector = insts(&c.body)
-        .filter(|inst| !idle(inst))
-        .any(|inst| inst.operands().any(|a| a.regs().any(|r| r.class == Class::Vec)));
+    let code = without_idle(&c.body);
+    let vector = insts(&code).any(|inst| inst.operands().any(|a| a.regs().any(|r| r.class == Class::Vec)));
     // The prologue's loop takes the least value no label of the body has: going up the body's
     // labels in order, each one that has the value looked for moves it one on.
     let labels: BTreeSet<u32> = c
@@ -44,10 +43,9 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     let free = Label(labels.into_iter().fold(0, |free, l| if l == free { free + 1 } else { free }));
     let padding = padding(&c.frame, calls);
     let mut body = prologue(&c.frame, padding, free)?;
-    for item in &c.body {
+    for item in &code {
         match item {
             Item::Inst(inst) if inst.op == Op::Ret => body.extend(epilogue(&c.frame, padding, vector)),
-            Item::Inst(inst) if idle(inst) => continue,
             Item::Inst(inst) => {
                 let spill = inst.args.iter().find_map(|a| match a.operand {
                     Operand::Mem(Mem { base: Base::Slot(s), .. }) if c.frame.slots[s.0 as usize].spill => {
@@ -86,16 +84,47 @@ fn insts(body: &[Item<Op, PReg>]) -> impl Iterator<Item = &Inst<Op, PReg>> {
     })
 }
 
-/// Whether `inst` changes nothing, so the listing leaves it out: a move of all 64 bits, or all
-/// 256, to the same register. But one of 32 bits clears the upper half, and one of an xmm the
-/// upper lanes.
-fn idle(inst: &Inst<Op, PReg>) -> bool {
-    matches!(inst.op, Op::Mov | Op::Vmovaps | Op::Vmovups | Op::Vmovdqa | Op::Vmovdqu)
-        && matches!(
-            inst.args.as_slice(),
-            [Arg { operand: Operand::Reg(a, w), .. }, Arg { operand: Operand::Reg(b, v), .. }]
-                if a == b && w == v && matches!(w, Width::W64 | Width::W256)
-        )
+/// `body` without its idle moves, which the listing leaves out. A move of all 64 bits, or all 256, is idle where its
+/// two registers hold one value: they are one register, or moves after the last label copied the value of one into the
+/// other, or of a third into both, and nothing wrote either after them. One of 32 bits clears the upper half, and one
+/// of an xmm the upper lanes, so neither is idle.
+fn without_idle(body: &[Item<Op, PReg>]) -> Vec<Item<Op, PReg>> {
+    // The value each register holds, named by the instruction that wrote it and the register: a register that is not
+    // here holds the value it had on entry, or at the last label, named by itself. A move gives its register the name
+    // of the value it copies, and a label makes every register forget its own, as control may come to it from where
+    // they differ.
+    let mut holds: BTreeMap<PReg, (usize, PReg)> = BTreeMap::new();
+    let value = |holds: &BTreeMap<PReg, (usize, PReg)>, r| holds.get(&r).copied().unwrap_or((usize::MAX, r));
+    let mut code = vec![];
+    for (i, item) in body.iter().enumerate() {
+        match item {
+            Item::Inst(inst) => {
+                let copy = copy_of(inst);
+                if copy.is_some_and(|(to, from)| value(&holds, to) == value(&holds, from)) {
+                    continue;
+                }
+                let copied = copy.map(|(to, from)| (to, value(&holds, from)));
+                holds.extend(inst.writes().chain(inst.clobbers.iter().copied()).map(|r| (r, (i, r))));
+                holds.extend(copied);
+            }
+            Item::Label(_) => holds.clear(),
+            Item::Note(_) => {}
+        }
+        code.push(item.clone());
+    }
+    code
+}
+
+/// The registers `inst` copies, the one written and the one read: all 64 bits by `mov`, or all 256 by `vmovaps`,
+/// `vmovups`, `vmovdqa` or `vmovdqu`.
+fn copy_of(inst: &Inst<Op, PReg>) -> Option<(PReg, PReg)> {
+    match (inst.op, inst.args.as_slice()) {
+        (
+            Op::Mov | Op::Vmovaps | Op::Vmovups | Op::Vmovdqa | Op::Vmovdqu,
+            [Arg { operand: Operand::Reg(to, w), .. }, Arg { operand: Operand::Reg(from, v), .. }],
+        ) if w == v && matches!(w, Width::W64 | Width::W256) => Some((*to, *from)),
+        _ => None,
+    }
 }
 
 /// Pages past this many are touched in a loop.
@@ -236,7 +265,7 @@ fn sp(op: Op, bytes: u32) -> Item<Op, PReg> {
 
 #[cfg(test)]
 mod tests {
-    use kernite_core::{Signature, Slot, SlotId};
+    use kernite_core::{FuncId, Signature, Slot, SlotId};
 
     use super::*;
     use crate::intel;
@@ -246,6 +275,7 @@ mod tests {
     const RBX: PReg = PReg { class: Class::Gpr, hw: 3 };
     const RDI: PReg = PReg { class: Class::Gpr, hw: 7 };
     const YMM0: PReg = PReg { class: Class::Vec, hw: 0 };
+    const YMM1: PReg = PReg { class: Class::Vec, hw: 1 };
 
     /// A kernel of `body` in `frame`, allocated by hand.
     fn kernel(body: Vec<Item<Op, PReg>>, frame: Frame) -> Allocated<Op> {
@@ -353,5 +383,65 @@ mod tests {
             "mov eax, eax\nvmovaps xmm0, xmm0\nmov rax, rcx\nvzeroupper\nret"
         );
         assert_eq!(code(&kernel([&wide[..], &[ret]].concat(), frame)), "ret");
+    }
+
+    /// A move of all 64 bits, or all 256, between two registers that moves gave one value is left out, until either is
+    /// written, a call changes one, or a label brings control from where they differ.
+    #[test]
+    fn a_move_into_a_register_that_holds_the_value_is_left_out() {
+        let frame = Frame { saved: vec![], slots: vec![], offsets: vec![], size: 0, align: 0 };
+        let call = Item::Inst(Inst {
+            op: Op::Call,
+            args: vec![Arg { operand: Operand::Func(FuncId(0)), access: Access::Read }],
+            implicit: vec![],
+            flow: Flow::Next,
+            clobbers: vec![RCX],
+        });
+        let (rax_rcx, rcx_rax) = (mov(Op::Mov, RAX, RCX, Width::W64), mov(Op::Mov, RCX, RAX, Width::W64));
+        let cases = [
+            // The value of rcx is in rax and in rbx, so a move back, or one between the two, is left out.
+            (vec![rax_rcx.clone(), rcx_rax.clone()], "mov rax, rcx"),
+            (
+                vec![rax_rcx.clone(), mov(Op::Mov, RBX, RAX, Width::W64), mov(Op::Mov, RCX, RBX, Width::W64)],
+                "mov rax, rcx\nmov rbx, rax",
+            ),
+            (
+                vec![rax_rcx.clone(), mov(Op::Mov, RBX, RCX, Width::W64), mov(Op::Mov, RAX, RBX, Width::W64)],
+                "mov rax, rcx\nmov rbx, rcx",
+            ),
+            (
+                vec![mov(Op::Vmovaps, YMM1, YMM0, Width::W256), mov(Op::Vmovdqu, YMM0, YMM1, Width::W256)],
+                "vmovaps ymm1, ymm0\nvzeroupper",
+            ),
+            // A register that was written since, the one read or the one written, by a move, by another instruction or
+            // by a call, holds another value.
+            (
+                vec![rax_rcx.clone(), mov(Op::Mov, RAX, RBX, Width::W64), rcx_rax.clone()],
+                "mov rax, rcx\nmov rax, rbx\nmov rcx, rax",
+            ),
+            (
+                vec![rax_rcx.clone(), mov(Op::Mov, RCX, RBX, Width::W64), rcx_rax.clone()],
+                "mov rax, rcx\nmov rcx, rbx\nmov rcx, rax",
+            ),
+            (
+                vec![rax_rcx.clone(), mov(Op::Add, RAX, RBX, Width::W64), rcx_rax.clone()],
+                "mov rax, rcx\nadd rax, rbx\nmov rcx, rax",
+            ),
+            (
+                vec![rax_rcx.clone(), mov(Op::Add, RCX, RBX, Width::W64), rcx_rax.clone()],
+                "mov rax, rcx\nadd rcx, rbx\nmov rcx, rax",
+            ),
+            (
+                vec![rax_rcx.clone(), call.clone(), rcx_rax.clone()],
+                "sub rsp, 8\nmov rax, rcx\ncall {f0}\nmov rcx, rax\nadd rsp, 8",
+            ),
+            // A label may be reached from where they differ, and a move of 32 bits is no copy.
+            (vec![rax_rcx.clone(), Item::Label(Label(0)), rcx_rax.clone()], "mov rax, rcx\n2:\nmov rcx, rax"),
+            (vec![rax_rcx.clone(), mov(Op::Mov, RCX, RAX, Width::W32)], "mov rax, rcx\nmov ecx, eax"),
+        ];
+        for (body, want) in cases {
+            let c = kernel([&body[..], &[inst(Op::Ret, vec![])]].concat(), frame.clone());
+            assert_eq!(code(&c), format!("{want}\nret"), "{body:?}");
+        }
     }
 }
