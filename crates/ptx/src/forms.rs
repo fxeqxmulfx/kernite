@@ -389,6 +389,13 @@ ld.mmio.acquire.sys{.global}$ty64 : =T, [R] @9.3 @sm70 +wide
 ld.global{.ca|.cg|.cs}.nc$hint$size$vec$ty : =_T*v, [R], {L2::cache_hint}b64 @3.1 @sm32 +wide +vec
 ld.global.nc$l1$hint$size$vec$ty : =_T*v, [R], {L2::cache_hint}b64 @3.1 @sm32 +wide +vec
 ldu{.global}$vec$ty : =_T*v, [R] @2.0 +wide +vec
+# ptxas 13.5 and the driver's own compiler, that of CUDA 13.5, crash, a segfault, rather than refusing a variable of an
+# integer type, or of bits, before an integer known now in a vector of floats: `st.global.v2.f32 [%x], {%i, 1};` with
+# `%i` a `u32`, in a module of PTX 9.5 for `sm_86`. They crash on `{%j, 1}` of an `s32`, `{%b, 1}` of a `b32`,
+# `st.global.v4.f32 [%x], {%i, %i, %i, 1};`, `st.global.v2.f64 [%x], {%u, 1};` of a `u64`, and `st.shared` and `st` with
+# no state space too. Both take `{1, %i}` and `{%i, %i}`; ptxas refuses `{%f, 1}`, `{1, 1}` and `{%i, 0f3F800000}`.
+# kernite never writes it: it refuses an integer variable in a vector of floats, and writes a value known now there as a
+# float, `0f3F800000`, which both take beside a `b32`.
 st{.weak@6.0@sm70}{.global}$scop$hint$vec$ty : [W], $T*v, {L2::cache_hint}b64 @1.0 +wide +vec
 st{.weak@6.0@sm70}{.global}$l1$hint$vec$ty : [W], $T*v, {L2::cache_hint}b64 @1.0 +wide +vec
 st{.weak@6.0@sm70}(.local|.shared|.shared::cta@7.8)$scop$vec$ty : [W], $T*v @1.0 +wide +vec
@@ -437,7 +444,9 @@ cvt.pack.sat(.u2|.s2).s32.b32 : =u32, s32, s32, b32[0,268435455] @6.5 @sm75 +wid
 # depth to compare with, for `f32` coordinates, which without the offset is a line of its
 # own. There are no `.texref` and `.samplerref` variables, and so no sampler apart from its
 # texture, nor its `force_unnormalized_coords`. An offset is -8 to 7, as the ISA has it:
-# ptxas 13.5 takes any, and keeps its low 4 bits, so that 8 is -8.
+# ptxas 13.5 takes any, and keeps its low 4 bits, so that 8 is -8. With float coordinates ptxas 13.5 and the driver's
+# own compiler crash on a `u32` before an integer known now too, as they do in the data of `st`, and kernite never
+# writes it: `tex.2d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {%i, 1}];`, and the same of `tld4.r.2d.v4.f32.f32`.
 tex{.base}.1d(.v4|.v2)$tdt.s32 : $texd, [%u64,$U*1], $~s32*1[-8,7]@4.3@sm30? @3.1 +tex
 tex{.base}.1d(.v4|.v2)$tdt.f32 : $texd, [%u64,$U*1], $~s32*1[-8,7]@4.3@sm30?, f32@4.3@sm30? @3.1 +tex
 tex{.base}.1d(.v4|.v2)$tdt.f32 : $texd, [%u64,$U*1], f32@4.3@sm30 @3.1 +tex

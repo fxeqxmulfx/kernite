@@ -1505,18 +1505,18 @@ const TOGETHER_DECLARED: &str = "let (f, g, i, j, b, h): (f32, f32, u32, s32, b3
 /// register of their size, and an integer beside an integer, `u32` and `s32`; registers of 16 bits and of 64; of 32
 /// bits wider than an instruction of 16, where it takes them; a special register beside a register of any type of its
 /// size; a value known now beside bits, and beside a register of its kind, an integer beside integers and a float
-/// beside floats; a value known now beside any register of a vector of floats, a `b64` too; a whole special register
-/// beside a value, which a part of a vector's does not go beside; a special register of more bits than the type, as the
-/// source of `cvt` and the data of `st` and `sust`, which take a register of more bits: `laneid` in a vector of 16,
-/// `clock64` in one of 32; the source of a `cvt` from an integer to one of another size or sign,
-/// `cvt.u32.s32(i, envreg0)`, `cvt.u64.u32(u, tid.x)` and `cvt.u32.u64(i, gridid)`; `gridid`, of 64 bits, in a vector
-/// of 64, and `mov.u32` reading 32 of its bits; `envreg0`, of `b32`, in a `mov` of bits or of an integer, and in a
-/// vector of floats, where a `mov` of a float takes none; an integer special register in a vector of floats, by its
-/// size: beside a variable, `(f, tid.x)`, beside itself, `(laneid, laneid)`, and `(gridid, gridid)` in the data of
-/// `st`, which takes a register of more bits, and a whole one beside a value known now, `(1.5, laneid)` and
-/// `(laneid, 1)`; `_`; and the layer of an array of textures, the first of its vector, a `u32` beside floats, which
-/// `ptxas` checks apart.
-const TOGETHER: [(&str, &str); 118] = [
+/// beside floats; a value known now beside any register of a vector of floats, a `b32` and a `b64` too, as a float, for
+/// `ptxas` and the driver's own compiler crash on an integer there; a whole special register beside a value, which a
+/// part of a vector's does not go beside; a special register of more bits than the type, as the source of `cvt` and the
+/// data of `st` and `sust`, which take a register of more bits: `laneid` in a vector of 16, `clock64` in one of 32; the
+/// source of a `cvt` from an integer to one of another size or sign, `cvt.u32.s32(i, envreg0)`, `cvt.u64.u32(u, tid.x)`
+/// and `cvt.u32.u64(i, gridid)`; `gridid`, of 64 bits, in a vector of 64, and `mov.u32` reading 32 of its bits;
+/// `envreg0`, of `b32`, in a `mov` of bits or of an integer, and in a vector of floats, where a `mov` of a float takes
+/// none; an integer special register in a vector of floats, by its size: beside a variable, `(f, tid.x)`, beside
+/// itself, `(laneid, laneid)`, and `(gridid, gridid)` in the data of `st`, which takes a register of more bits, and a
+/// whole one beside a value known now, `(1.5, laneid)` and `(laneid, 1)`; `_`; and the layer of an array of textures,
+/// the first of its vector, a `u32` beside floats, which `ptxas` checks apart.
+const TOGETHER: [(&str, &str); 124] = [
     ("st.global.v2.b32([x], (f, g));", "st.global.v2.b32 [%x], {%f, %g};"),
     ("st.global.v2.b32([x], (i, j));", "st.global.v2.b32 [%x], {%i, %j};"),
     ("st.global.v2.u32([x], (i, j));", "st.global.v2.u32 [%x], {%i, %j};"),
@@ -1600,6 +1600,18 @@ const TOGETHER: [(&str, &str); 118] = [
     ("st.global.v2.f32([x], (q, 1.5));", "st.global.v2.f32 [%x], {%q, 0f3FC00000};"),
     ("st.global.v2.f32([x], (1.5, q));", "st.global.v2.f32 [%x], {0f3FC00000, %q};"),
     ("st.global.v2.f32([x], (q, 1));", "st.global.v2.f32 [%x], {%q, 0f3F800000};"),
+    ("st.global.v2.f32([x], (b, 1));", "st.global.v2.f32 [%x], {%b, 0f3F800000};"),
+    ("st.global.v2.f32([x], (1, b));", "st.global.v2.f32 [%x], {0f3F800000, %b};"),
+    ("st.global.v4.f32([x], (b, b, b, 1));", "st.global.v4.f32 [%x], {%b, %b, %b, 0f3F800000};"),
+    ("st.global.v2.f64([x], (q, 1));", "st.global.v2.f64 [%x], {%q, 0d3FF0000000000000};"),
+    (
+        "tex._2d.v4.f32.f32((r0, r1, r2, r3), [s, (b, 1)]);",
+        "tex.2d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {%b, 0f3F800000}];",
+    ),
+    (
+        "tld4.r._2d.v4.f32.f32((r0, r1, r2, r3), [s, (b, 1)]);",
+        "tld4.r.2d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {%b, 0f3F800000}];",
+    ),
     ("mov.b64(z, (f, tid.x));", "mov.b64 %z, {%f, %tid.x};"),
     ("mov.b64(z, (tid.x, f));", "mov.b64 %z, {%tid.x, %f};"),
     ("mov.b64(z, (laneid, 1));", "mov.b64 %z, {%laneid, 1};"),
