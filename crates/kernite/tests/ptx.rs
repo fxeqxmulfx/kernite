@@ -1148,8 +1148,9 @@ const ONLY_KERNITE_REFUSES: &[Apart] = &[
     ),
 ];
 
-/// The kernel of a vector of [`BOTH_REFUSE`] or [`ONLY_KERNITE_REFUSES`], without its `@`; the line of the body it is
-/// in, after the variables of [`TOGETHER_DECLARED`]; the column its error points at; and the name of its instruction.
+/// The kernel `line`, a vector of a table such as [`BOTH_REFUSE`], without the `@` that marks where its error points:
+/// the line of the body it is in, after the variables of [`TOGETHER_DECLARED`]; the column its error points at; and the
+/// name of its instruction.
 fn apart(line: &str) -> (String, usize, String) {
     let (before, after) = line.split_once('@').unwrap();
     let kernel = format!("{before}{after}");
@@ -1265,6 +1266,93 @@ fn ptxas_takes_a_special_register_of_bits_the_vector_does_not_take_after_a_float
         let said = String::from_utf8_lossy(&run.stderr);
         assert_eq!(run.status.success(), takes, "{line}: {said}");
         assert!(takes || said.contains("Arguments mismatch for instruction"), "{line}: {said}");
+    }
+}
+
+/// An integer variable of the float's size in a vector of floats, beside no float: the data of `st`, the result of `ld`
+/// and `ldu`, and the coordinates and the result of `tex` and `tld4`, with a special register before it or not. Each is
+/// a kernel, with `@` where its error points; the line of PTX kernite would write; and the end of the error. `ptxas`
+/// 13.5 takes each, as it checks the registers of a vector against each other, and not their type against the
+/// instruction's, and refuses an integer variable alone, and one beside a float. kernite refuses all three.
+const INTEGER_IN_FLOATS: [(&str, &str, &str); 12] = [
+    ("st.global.v2.f32([x], @(i, i));", "st.global.v2.f32 [%x], {%i, %i};", "wants a `f32` variable; this is a `u32`"),
+    (
+        "st.global.v2.f32([x], @(tid.x, i));",
+        "st.global.v2.f32 [%x], {%tid.x, %i};",
+        "wants a `f32` variable; this is a `u32`",
+    ),
+    (
+        "st.global.v2.f32([x], @(laneid, j));",
+        "st.global.v2.f32 [%x], {%laneid, %j};",
+        "wants a `f32` variable; this is a `s32`",
+    ),
+    ("st.global.v2.f64([x], @(u, u));", "st.global.v2.f64 [%x], {%u, %u};", "wants a `f64` variable; this is a `u64`"),
+    (
+        "st.global.v2.f64([x], @(gridid, u));",
+        "st.global.v2.f64 [%x], {%gridid, %u};",
+        "wants a `f64` variable; this is a `u64`",
+    ),
+    ("ld.global.v2.f32(@(i, i), [x]);", "ld.global.v2.f32 {%i, %i}, [%x];", "wants a `f32` variable; this is a `u32`"),
+    (
+        "ldu.global.v2.f32(@(i, i), [x]);",
+        "ldu.global.v2.f32 {%i, %i}, [%x];",
+        "wants a `f32` variable; this is a `u32`",
+    ),
+    (
+        "tex._2d.v4.f32.f32((r0, r1, r2, r3), @[s, (i, i)]);",
+        "tex.2d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {%i, %i}];",
+        "wants a `f32` variable; this is a `u32`",
+    ),
+    (
+        "tex._1d.v4.f32.f32((r0, r1, r2, r3), @[s, i]);",
+        "tex.1d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {%i}];",
+        "wants a `f32` variable; this is a `u32`",
+    ),
+    (
+        "tex._2d.v4.f32.f32(@(i, i, i, i), [s, (f, f)]);",
+        "tex.2d.v4.f32.f32 {%i, %i, %i, %i}, [%s, {%f, %f}];",
+        "wants a `f32` variable; this is a `u32`",
+    ),
+    (
+        "tld4.r._2d.v4.f32.f32((r0, r1, r2, r3), @[s, (i, i)]);",
+        "tld4.r.2d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {%i, %i}];",
+        "wants a `f32` variable; this is a `u32`",
+    ),
+    (
+        "tld4.r._2d.v4.f32.f32(@(i, i, i, i), [s, (f, f)]);",
+        "tld4.r.2d.v4.f32.f32 {%i, %i, %i, %i}, [%s, {%f, %f}];",
+        "wants a `f32` variable; this is a `u32`",
+    ),
+];
+
+/// kernite refuses each vector of [`INTEGER_IN_FLOATS`], at the vector, or the `[` of the coordinates, though `ptxas`
+/// takes it: an integer variable is not a float, whatever it is beside.
+#[test]
+fn an_integer_variable_in_a_vector_of_floats_is_refused_though_ptxas_takes_it() {
+    for (line, _, said) in INTEGER_IN_FLOATS {
+        let (body, col, name) = apart(line);
+        let want = format!("2:{col}: `{name}` {said}");
+        assert_eq!(compile("x: *mut u32, n: u32, s: u64", &body).unwrap_err(), want, "{line}");
+    }
+}
+
+/// `ptxas` 13.5 takes each vector of [`INTEGER_IN_FLOATS`], and refuses an integer variable alone, in `st.global.f32`
+/// and `ld.global.f32`: "Arguments mismatch". It fails the day `ptxas` refuses a vector or takes a variable alone, for
+/// GUIDE.md to say no more of that bug.
+#[test]
+fn ptxas_takes_an_integer_variable_in_a_vector_of_floats_and_refuses_it_alone() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    for (n, &(_, line, _)) in INTEGER_IN_FLOATS.iter().enumerate() {
+        let run = assembled(&ptxas, &with_line(line), "sm_86", &format!("integer_in_floats_{n}"), &[]);
+        assert!(run.status.success(), "{line}: {}", String::from_utf8_lossy(&run.stderr));
+    }
+    for (n, line) in ["st.global.f32 [%x], %i;", "ld.global.f32 %i, [%x];"].into_iter().enumerate() {
+        let run = assembled(&ptxas, &with_line(line), "sm_86", &format!("integer_alone_{n}"), &[]);
+        let said = String::from_utf8_lossy(&run.stderr);
+        assert!(!run.status.success() && said.contains("Arguments mismatch for instruction"), "{line}: {said}");
     }
 }
 

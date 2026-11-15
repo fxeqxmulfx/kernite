@@ -659,7 +659,11 @@ goes in a vector of floats too, by its size, as bits: `(f, tid.x)` and `(laneid,
 many bits as the float, and `st` one of more too, `(gridid, gridid)` in `st.global.v2.f32`. In a vector of floats,
 `ptxas` takes one of bits the vector does not take after a float known now, `(1.5, gridid)` in the coordinates of `tex`
 and `(1.5f64, laneid)` in `st.global.v2.f64`, as it takes `(1, gridid)` in a vector of 32 bits, and refuses it before
-one: kernite refuses it in both. An `f32` beside a `u32`, or a `u16` beside a `u32`, is an error at the operand that
+one: kernite refuses it in both. In a vector of floats, `ptxas` takes an integer variable of the float's size too,
+beside no float: `(i, i)` as the data of `st.global.v2.f32`, as the result of `ld` and `ldu`, and in the coordinates and
+the result of `tex` and `tld4`. It checks the operands of a vector against each other, and not against the instruction's
+type, and refuses one alone, in `st.global.f32`, and one beside a float, `(f, i)`. That looks like a bug of its own:
+kernite refuses it in every place. An `f32` beside a `u32`, or a `u16` beside a `u32`, is an error at the operand that
 does not go with one before it, in `st`, `ld`, `ldu`, `mov`, `suld.b`, `sust.b`, `sust.p`, `ldmatrix` and `mma`, as
 `ptxas` refuses it. So is an `f32` beside an integer known now in a vector of bits, `(f, 1)`, a `u64` beside `tid.x`, or
 `tid.x` beside a value, in a vector that takes values or special registers. The layer of an array of textures, the first
