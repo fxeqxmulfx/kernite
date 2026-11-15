@@ -241,6 +241,10 @@ they name a parameter `_`, and write the name no more. kernite refuses each wher
 name, as in `r#u64`", wherever a name is written, an attribute's too. Any other name can be written raw, a weak keyword
 or a reserved word as well, `r#union` and `r#gen`.
 
+A `mut` before a parameter's name is taken and means nothing, in a function of every kind: an instruction may write any
+variable, which Rust cannot see. So the macros write no `mut` for Rust, which would say that the variable does not need
+to be mutable, and in a naked function that patterns are not allowed there.
+
 A parameter named `self` or `Self`, written plain, is Rust's error as of any function that is no method, at the name,
 and nothing more: that `self` is only allowed in associated functions, or is unexpected where it is not the first
 parameter, or that `Self` is not found in this scope. So it is in a kernel of every kind, in a helper and in an

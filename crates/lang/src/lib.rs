@@ -73,6 +73,8 @@
 //!   for each other at `grid.sync()`, a GPU kernel's blocks or an x86 kernel's threads, so that it
 //!   is launched with them all running at once. A GPU kernel's directives, `#[maxntid(16, 16)]`
 //!   and the like, give whole numbers known now, which the machine takes before the parameters.
+//! - **A `mut`** before a parameter's name, `fn f(mut x: u64)`, is taken and means nothing, in a function of every
+//!   kind: an instruction may write any variable.
 //! - **`for k in 0..n { .. }`** is unrolled, over a range, an array or variables.
 //!   **`if c { .. } else { .. }`** chooses now when `c` is a bool; when `c` is a predicate
 //!   variable it guards each instruction inside, `if !p` the other way.

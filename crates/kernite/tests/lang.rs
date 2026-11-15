@@ -428,6 +428,87 @@ fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
     assert!(x86(src, "k").starts_with("# k(gpr, gpr) -> ()\n"), "{src}");
 }
 
+/// A `mut` before a parameter's name is taken and means nothing, in a function of every kind: a kernel compiles to the
+/// listing, or the PTX, of the same kernel without it. So it is for an x86 kernel, plain, of `#[instances(..)]` and
+/// `#[cooperative]`, and a helper; for a GPU kernel the same, and an `extern "ptx-func"` function; before one name and
+/// before each.
+#[test]
+fn a_mut_before_a_parameters_name_is_taken_and_means_nothing_in_a_function_of_every_kind() {
+    for (src, kernel) in [
+        (r#"pub unsafe extern "sysv64" fn k(MUTx: u64) -> u64 { add(x, 1); ret(x); }"#, "k"),
+        (r#"pub unsafe extern "sysv64" fn k(MUTa: u64, MUTb: u64) -> u64 { add(a, b); ret(a); }"#, "k"),
+        (r#"pub unsafe extern "sysv64" fn k(a: u64, MUTb: u64) -> u64 { add(a, b); ret(a); }"#, "k"),
+        (
+            r#"
+            #[instances(1, 2)]
+            pub unsafe extern "sysv64" fn k<const N: u64>(MUTx: u64) -> u64 { add(x, N); ret(x); }
+            "#,
+            "k::<2>",
+        ),
+        (
+            r#"
+            #[cooperative]
+            pub unsafe extern "sysv64" fn k(MUTx: u64, p: *mut u64) { grid.sync(); mov(qword[p], x); }
+            "#,
+            "k",
+        ),
+        (
+            r#"
+            pub unsafe extern "sysv64" fn k(x: u64) -> u64 { h(x); ret(x); }
+            fn h(MUTy: gpr) { add(y, 1); }
+            "#,
+            "k",
+        ),
+        (
+            r#"
+            pub unsafe extern "ptx-kernel" fn k(p: *mut u32, MUTx: u32) {
+                add.u32(x, x, 1);
+                st.global.u32([p], x);
+            }
+            "#,
+            "k",
+        ),
+        (
+            r#"
+            #[instances(1, 2)]
+            pub unsafe extern "ptx-kernel" fn k<const N: u32>(p: *mut u32, MUTx: u32) {
+                add.u32(x, x, N);
+                st.global.u32([p], x);
+            }
+            "#,
+            "k",
+        ),
+        (
+            r#"
+            #[cooperative]
+            pub unsafe extern "ptx-kernel" fn k(p: *mut u32, MUTx: u32) { grid.sync(); st.global.u32([p], x); }
+            "#,
+            "k",
+        ),
+        (
+            r#"
+            pub unsafe extern "ptx-kernel" fn k(p: *mut u32, x: u32) { h(x); st.global.u32([p], x); }
+            fn h(MUTy: u32) { add.u32(y, y, 1); }
+            "#,
+            "k",
+        ),
+        (
+            r#"
+            extern "ptx-func" fn f(MUTa: u32, MUTb: u32) -> u32 { add.u32(a, a, b); ret(a); }
+            pub unsafe extern "ptx-kernel" fn k(p: *mut u32, a: u32, b: u32) {
+                let r: u32;
+                call(r, f, (a, b));
+                st.global.u32([p], r);
+            }
+            "#,
+            "k",
+        ),
+    ] {
+        let without = compile(&src.replace("MUT", ""), kernel).unwrap_or_else(|e| panic!("{e}\n{src}"));
+        assert_eq!(compile(&src.replace("MUT", "mut "), kernel), Ok(without), "{src}");
+    }
+}
+
 /// `src` with each of `names` written raw, `u64` as `r#u64`, but not where it is a part of an instruction's name,
 /// `ld.global.u32`.
 fn raw(src: &str, names: &[&str]) -> String {

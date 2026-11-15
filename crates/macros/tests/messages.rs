@@ -4467,6 +4467,21 @@ fn a_parameter_named_self_or_upper_self_is_rusts_error_at_the_name() {
     );
 }
 
+/// A `mut` before a parameter's name is taken and means nothing, in a kernel of every kind, a helper and a GPU
+/// function: Rust builds the crate without a word, under `#![deny(warnings)]`, where it said of a plain x86 kernel that
+/// patterns are not allowed in a naked function's parameters, at the `mut`, and of a GPU kernel and of an x86 kernel of
+/// instances that the variable does not need to be mutable. The tests the fixture holds run each kernel, the x86
+/// kernels and the GPU kernels on the GPU: each does what it does without the `mut`. `mut self` and `mut Self` stay
+/// Rust's error at the name, which the test above holds.
+#[test]
+fn a_mut_before_a_parameters_name_is_taken_and_means_nothing_in_a_function_of_every_kind() {
+    let printed = runs_quietly(&["test"], "mut_parameters");
+    assert!(
+        printed.contains("test result: ok. 2 passed"),
+        "fixtures/mut_parameters.rs ran its tests, and printed:\n{printed}"
+    );
+}
+
 /// The method that says how many blocks a cooperative GPU kernel's grid has at most, `k_blocks`,
 /// keeps what the kernel says of lints by giving Rust nothing of the kernel's to lint: its name and
 /// the compile-time arguments it takes are of the macro's span. Of the kernel's attributes it keeps

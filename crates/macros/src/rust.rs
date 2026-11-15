@@ -244,15 +244,17 @@ fn split_top(tokens: &[TokenTree], ends: impl std::ops::Fn(&TokenTree) -> bool) 
 /// wrote it, for its own error. A compile-time argument is named so wherever the signature names it, in a type too,
 /// `[u8; r#crate]`. All the macros write for `f`, a signature or a body, has the names as they are here.
 ///
+/// A `mut` before a parameter's name is taken and means nothing, in a function of every kind: an instruction may write
+/// any variable, which Rust cannot see. So the macros write no `mut` for Rust, which would say that the variable does
+/// not need to be mutable, and in a naked function that patterns are not allowed there.
+///
 /// A parameter named `self` or `Self`, written plain, is named so as well: what the macros write for a kernel binds
 /// both in ways of its own, a launcher being a method, and Rust says other words of it, or more; of a helper's or a GPU
-/// function's, for which they write no function, Rust says nothing. The name they give takes the place of a `mut`
-/// before it too, or Rust would say that patterns are not allowed in a naked function's parameters, at the module's
-/// attribute. Rust's error is that of a function that is no method, at the name, once. So the macros write a function
-/// for Rust to say it in, which never runs, in an item of no name: `fn f(_: (), self: ()) {}`, with the name in its
-/// place among the parameters of `f`, `_` in the place of each other, and each of the type `()`, so that Rust says
-/// nothing of a type as written, `gpr` or `f128`, nor that a parameter is unused. It is given back, if `f` has such a
-/// parameter.
+/// function's, for which they write no function, Rust says nothing. Rust's error is that of a function that is no
+/// method, at the name, once. So the macros write a function for Rust to say it in, which never runs, in an item of no
+/// name: `fn f(_: (), self: ()) {}`, with the name in its place among the parameters of `f`, `_` in the place of each
+/// other, and each of the type `()`, so that Rust says nothing of a type as written, `gpr` or `f128`, nor that a
+/// parameter is unused. It is given back, if `f` has such a parameter.
 pub(crate) fn passable(top: &mut [TokenTree], f: &Fn) -> Option<TokenStream> {
     let taken: Vec<&str> =
         f.generics.iter().map(|g| &g.name).chain(f.params.iter().map(|p| &p.name)).map(String::as_str).collect();
@@ -279,11 +281,12 @@ pub(crate) fn passable(top: &mut [TokenTree], f: &Fn) -> Option<TokenStream> {
     let mut params = TokenStream::new();
     for (mut param, colon) in written {
         let name = &param[colon - 1];
-        if own(name) {
-            param.splice(..colon, [fresh().into()]);
-        } else if is_ident(name, "_") || lang::never_raw(&name.to_string()) {
-            param[colon - 1] = fresh().into();
-        }
+        let name: TokenTree = if own(name) || is_ident(name, "_") || lang::never_raw(&name.to_string()) {
+            fresh().into()
+        } else {
+            name.clone()
+        };
+        param.splice(..colon, [name]);
         params.extend(param);
         params.extend(parse(","));
     }
