@@ -4419,17 +4419,49 @@ fn a_kernel_kernite_refuses_with_a_name_rust_refuses_raw_is_kernites_error_and_r
     refuses("raw_names_in_stubs", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
-/// A parameter named `self`, written plain, is Rust's error at the name, as it is for any function that is no method:
-/// the macros hand it on. It is the name written raw, `r#self`, that they name otherwise, for Rust to say its lexer's
-/// error alone.
+/// A parameter named `self` or `Self`, written plain, is Rust's error as of a function that is no method, at the name,
+/// once and alone, in a kernel of every kind: a GPU kernel, whose launcher is a method; an x86 kernel of instances,
+/// whose parameter may be of a type that names its generic, and a cooperative one, whose calls the macros write as text
+/// for Rust to lex again; and a plain one, a naked function. Of `self` Rust says it is only allowed in associated
+/// functions, and of one that is not the first parameter, that it is unexpected; of `Self`, that it is not found in
+/// this scope. A kernel that `cfg` leaves out says nothing. So it is in a helper and in an `extern "ptx-func"`
+/// function, for which the macros write no function, and with `mut` before the name: Rust does not say that patterns
+/// are not allowed in a naked function's parameters, and of `mut Self` it says too, as of any function, that `mut` must
+/// be followed by a named binding. Rust says nothing of the parameter's type: not that it cannot find a type of the
+/// language, `gpr` or `shared<[u32; 4], 16>`, nor that a type kernite refuses, `f128` or `[u64]`, is unstable or has no
+/// size, beside kernite's error; nor that a parameter beside it is unused.
 #[test]
-fn a_parameter_named_self_is_rusts_error_at_the_name() {
+fn a_parameter_named_self_or_upper_self_is_rusts_error_at_the_name() {
+    let only = "`self` parameter is only allowed in associated functions: not semantically valid as function parameter";
+    let not_found = "cannot find unit struct, unit variant or constant `Self` in this scope: not found in this scope";
     refuses(
-        "self_parameter",
+        "plain_self",
         &[
-            "src/lib.rs:7:41: error: `self` parameter is only allowed in associated functions: not semantically \
-             valid as function parameter",
-            "error: could not compile `self_parameter` (lib) due to 1 previous error",
+            "src/lib.rs:48:45: error: unexpected `self` parameter in function: must be the first parameter of an \
+             associated function",
+            "src/lib.rs:137:37: error: `mut` must be followed by a named binding",
+            "src/lib.rs:72:43: error: a kernel takes pointers, 64-bit integers and floats, not `f128`",
+            "src/lib.rs:76:43: error: a kernel takes pointers, 64-bit integers and floats, not `[u64]`",
+            "src/lib.rs:83:47: error: a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, `f32` and \
+             `f64`, not `f128`",
+            &format!("src/lib.rs:6:41: error: {only}"),
+            &format!("src/lib.rs:21:51: error: {only}"),
+            &format!("src/lib.rs:30:37: error: {only}"),
+            &format!("src/lib.rs:37:37: error: {only}"),
+            &format!("src/lib.rs:65:53: error: {only}"),
+            &format!("src/lib.rs:72:37: error: {only}"),
+            &format!("src/lib.rs:76:37: error: {only}"),
+            &format!("src/lib.rs:83:41: error: {only}"),
+            &format!("src/lib.rs:96:10: error: {only}"),
+            &format!("src/lib.rs:115:10: error: {only}"),
+            &format!("src/lib.rs:119:28: error: {only}"),
+            &format!("src/lib.rs:126:37: error: {only}"),
+            &format!("src/lib.rs:133:41: error: {only}"),
+            &format!("src/lib.rs:13:41: error[E0531]: {not_found}"),
+            &format!("src/lib.rs:41:37: error[E0531]: {not_found}"),
+            &format!("src/lib.rs:100:10: error[E0531]: {not_found}"),
+            &format!("src/lib.rs:137:41: error[E0531]: {not_found}"),
+            "error: could not compile `plain_self` (lib) due to 22 previous errors",
         ],
     );
 }

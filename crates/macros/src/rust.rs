@@ -243,7 +243,17 @@ fn split_top(tokens: &[TokenTree], ends: impl std::ops::Fn(&TokenTree) -> bool) 
 /// argument so named would take for its own. So the macros never write such a name, and Rust has the places the user
 /// wrote it, for its own error. A compile-time argument is named so wherever the signature names it, in a type too,
 /// `[u8; r#crate]`. All the macros write for `f`, a signature or a body, has the names as they are here.
-pub(crate) fn passable(top: &mut [TokenTree], f: &Fn) {
+///
+/// A parameter named `self` or `Self`, written plain, is named so as well: what the macros write for a kernel binds
+/// both in ways of its own, a launcher being a method, and Rust says other words of it, or more; of a helper's or a GPU
+/// function's, for which they write no function, Rust says nothing. The name they give takes the place of a `mut`
+/// before it too, or Rust would say that patterns are not allowed in a naked function's parameters, at the module's
+/// attribute. Rust's error is that of a function that is no method, at the name, once. So the macros write a function
+/// for Rust to say it in, which never runs, in an item of no name: `fn f(_: (), self: ()) {}`, with the name in its
+/// place among the parameters of `f`, `_` in the place of each other, and each of the type `()`, so that Rust says
+/// nothing of a type as written, `gpr` or `f128`, nor that a parameter is unused. It is given back, if `f` has such a
+/// parameter.
+pub(crate) fn passable(top: &mut [TokenTree], f: &Fn) -> Option<TokenStream> {
     let taken: Vec<&str> =
         f.generics.iter().map(|g| &g.name).chain(f.params.iter().map(|p| &p.name)).map(String::as_str).collect();
     let mut free = (0..).map(|n| format!("__kernite_{n}")).filter(|name| !taken.contains(&name.as_str()));
@@ -253,9 +263,25 @@ pub(crate) fn passable(top: &mut [TokenTree], f: &Fn) {
         .filter(|name| lang::never_raw(name))
         .map(|name| (name, fresh()))
         .collect();
+    let own = |name: &TokenTree| is_ident(name, "self") || is_ident(name, "Self");
+    let written = written_params(f, top);
+    let free_function = written.iter().any(|(param, colon)| own(&param[colon - 1])).then(|| {
+        let params = written.iter().flat_map(|(param, colon)| {
+            let name = &param[colon - 1];
+            let name = if own(name) { name.clone().into() } else { parse("_") };
+            name.into_iter().chain(parse(": (),"))
+        });
+        let mut inner = parse("fn f");
+        inner.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, params.collect()))]);
+        inner.extend(parse("{}"));
+        unnamed(inner)
+    });
     let mut params = TokenStream::new();
-    for (mut param, colon) in written_params(f, top) {
-        if is_ident(&param[colon - 1], "_") || lang::never_raw(&param[colon - 1].to_string()) {
+    for (mut param, colon) in written {
+        let name = &param[colon - 1];
+        if own(name) {
+            param.splice(..colon, [fresh().into()]);
+        } else if is_ident(name, "_") || lang::never_raw(&name.to_string()) {
             param[colon - 1] = fresh().into();
         }
         params.extend(param);
@@ -268,6 +294,7 @@ pub(crate) fn passable(top: &mut [TokenTree], f: &Fn) {
         let end = f.ret.as_ref().map_or(f.params_at + 1, |r| r.tokens.end);
         rename(&mut top[f.head.end + 2..end], &consts);
     }
+    free_function
 }
 
 /// `tokens`, with the second of a pair of `names` for each ident written as the first, in brackets too.
@@ -529,6 +556,11 @@ fn numbers(asked: &[Option<Ask>]) -> TokenStream {
     if inner.is_empty() {
         return inner;
     }
+    unnamed(inner)
+}
+
+/// `inner` in an item of no name, `const _: () = { .. };`, where Rust checks it and runs nothing.
+pub(crate) fn unnamed(inner: TokenStream) -> TokenStream {
     let mut out = respan(parse("const _: () ="), Span::mixed_site());
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, inner))]);
     out.extend(respan(parse(";"), Span::mixed_site()));

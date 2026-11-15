@@ -241,6 +241,15 @@ they name a parameter `_`, and write the name no more. kernite refuses each wher
 name, as in `r#u64`", wherever a name is written, an attribute's too. Any other name can be written raw, a weak keyword
 or a reserved word as well, `r#union` and `r#gen`.
 
+A parameter named `self` or `Self`, written plain, is Rust's error as of any function that is no method, at the name,
+and nothing more: that `self` is only allowed in associated functions, or is unexpected where it is not the first
+parameter, or that `Self` is not found in this scope. So it is in a kernel of every kind, in a helper and in an
+`extern "ptx-func"` function, with `mut` before the name too, of which Rust says no more than of a function's: before
+`Self`, that `mut` must be followed by a named binding. The macros name it for Rust, as they name a parameter `_`, and
+give Rust a function of its own that never runs, to say it in. That function has `_` in the place of each other
+parameter, and each is of the type `()`, so Rust says nothing there of a type as written, that it cannot find `gpr` or
+that `f128` is unstable, nor that a parameter is unused.
+
 A string is plain or raw, as in Rust, wherever kernite takes one: a note's text, `note(r#"a "b""#)`, and the ABI of a
 function, `extern r"sysv64"`. A raw string has no escapes, and ends at the first `"` that has as many `#` after it as
 the string began with, so `r##"a "# b"##` holds a `"#`. A string that is never closed, plain or raw, is refused where it

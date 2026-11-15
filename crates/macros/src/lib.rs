@@ -128,6 +128,15 @@
 //! the kernel has. The function Rust calls the kernel by takes it under that name, and its docs
 //! show it.
 //!
+//! A parameter named `self` or `Self`, written plain, is Rust's error as of any function that is no method, at the
+//! name, in a kernel of every kind, a helper and an `extern "ptx-func"` function too. What the macros write for a
+//! kernel binds both in ways of its own, a GPU kernel's launcher being a method, and they write no function for the
+//! others, so they name the parameter for Rust, as they name a parameter `_`, and write a function of its own that
+//! never runs, for Rust to say its error in. Its parameters are `_` but for that one, in its place, and each is of the
+//! type `()`, so that Rust says nothing there of a type as written, nor that a parameter is unused. The name they give
+//! takes the place of a `mut` before it too, or Rust would say that patterns are not allowed in a naked function's
+//! parameters.
+//!
 //! A type in a kernel's parameters or return means what it means in any function of the module,
 //! `super::W` and `self::W` among them, and it may name the kernel's compile-time arguments, as in
 //! any generic function: `*mut [u8; N]` in `fn arr<const N: usize>`. An error in one is Rust's, a
