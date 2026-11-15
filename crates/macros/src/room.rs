@@ -12,7 +12,7 @@
 use proc_macro::{Delimiter, Group, Literal, Span, TokenStream, TokenTree};
 
 use crate::cond::Cond;
-use crate::rust::{MACROS, depends_on, error, error_under, flatten, is_ident, needs_dependency, parse, site};
+use crate::rust::{MACROS, depends_on, error, error_under, flatten, is_ident, needs_dependency, parse, site, unnamed};
 
 /// The field of item `i`, under `cfg`, which `attr` is on, with `args` for `__Room` to read.
 fn field(cfg: &TokenStream, i: usize, attr: &str, args: TokenStream) -> TokenStream {
@@ -73,9 +73,7 @@ pub(crate) fn derive(input: TokenStream) -> TokenStream {
     let mut out: TokenStream =
         statics.iter().zip(rooms).filter_map(|((_, at), why)| why.map(|message| error(*at, &message))).collect();
     if !out.is_empty() && !lines.is_empty() {
-        out.extend(parse("const _: () ="));
-        out.extend([TokenTree::Group(Group::new(Delimiter::Brace, lines))]);
-        out.extend(parse(";"));
+        out.extend(unnamed(lines));
     }
     out
 }
