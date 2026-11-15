@@ -1,7 +1,7 @@
 //! A kernel's frame made instructions, before it is printed: what it runs on entry, and before
-//! each `ret`.
+//! each `ret` and each jump to a callee that stands for one.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use kernite_compile::{Allocated, Frame};
 use kernite_core::{Access, Arg, Base, Class, Flow, Inst, Item, Label, Mem, Operand, PReg, Width};
@@ -20,13 +20,14 @@ pub(crate) struct Lowered {
     pub(crate) features: Vec<Feature>,
     /// Bytes the prologue moves the stack pointer down besides the frame's.
     pub(crate) padding: u32,
-    /// Whether control returns: whether the body has a `ret`.
+    /// Whether control returns: whether the kernel has a `ret`, though a jump to a callee may stand for it.
     pub(crate) returns: bool,
 }
 
 /// `c` with its frame made instructions, as [`print`](crate::intel::print) says; or why not.
 pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
-    let calls = insts(&c.body).any(|inst| inst.op == Op::Call);
+    let jumps = jumps(c);
+    let calls = insts(&c.body).filter(|inst| inst.op == Op::Call).count() > jumps.len();
     let returns = insts(&c.body).any(|inst| inst.op == Op::Ret);
     let vector = insts(&c.body)
         .filter(|inst| !idle(inst))
@@ -44,8 +45,25 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     let free = Label(labels.into_iter().fold(0, |free, l| if l == free { free + 1 } else { free }));
     let padding = padding(&c.frame, calls);
     let mut body = prologue(&c.frame, padding, free)?;
-    for item in &c.body {
+    let done: BTreeSet<usize> = jumps.values().flatten().copied().collect();
+    for (i, item) in c.body.iter().enumerate() {
         match item {
+            Item::Inst(call) if jumps.contains_key(&i) => {
+                let mut jump =
+                    Inst { op: Op::Jmp, implicit: vec![], flow: Flow::Return, clobbers: vec![], ..call.clone() };
+                // An address in a register the epilogue restores goes first to `r11`, which passes no argument and
+                // which the epilogue leaves as it is.
+                if let Operand::Reg(at, _) = call.args[0].operand
+                    && c.frame.saved.contains(&at)
+                {
+                    body.push(inst(Op::Mov, vec![reg(R11, Access::Write), reg(at, Access::Read)]));
+                    jump.args = vec![reg(R11, Access::Read)];
+                }
+                body.extend(epilogue(&c.frame, padding, vector));
+                body.push(Item::Inst(jump));
+                continue;
+            }
+            Item::Inst(_) if done.contains(&i) => continue,
             Item::Inst(inst) if inst.op == Op::Ret => body.extend(epilogue(&c.frame, padding, vector)),
             Item::Inst(inst) if idle(inst) => continue,
             Item::Inst(inst) => {
@@ -65,10 +83,12 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
         }
         body.push(item.clone());
     }
-    let mut features: Vec<Feature> =
-        insts(&body).filter_map(|inst| forms::feature(inst.op, &inst.args, &inst.implicit)).collect();
-    // The epilogue's `vzeroupper` is AVX's: a kernel that writes it needs AVX, unless it lists a
-    // feature that builds on it.
+    // The frame's instructions need none, but for the epilogue's `vzeroupper`, which is AVX's: a kernel that writes it
+    // needs AVX, unless it lists a feature that builds on it.
+    let mut features: Vec<Feature> = insts(&c.body)
+        .filter(|inst| !idle(inst))
+        .filter_map(|inst| forms::feature(inst.op, &inst.args, &inst.implicit))
+        .collect();
     let implies_avx = [Feature::Avx2, Feature::Fma, Feature::F16c];
     if insts(&body).any(|inst| inst.op == Op::Vzeroupper) && !features.iter().any(|f| implies_avx.contains(f)) {
         features.push(Feature::Avx);
@@ -76,6 +96,38 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     features.sort_by_key(|f| f.name());
     features.dedup();
     Ok(Lowered { body, features, padding, returns })
+}
+
+/// The calls of `c` that are jumps, by their places in its body, each with the place of the `ret` it does without, if
+/// no other way comes to that `ret`. A call that `ret` follows at once, with nothing between but labels, notes and
+/// moves that change nothing, returns what the callee gives back: the kernel takes its frame down and jumps to the
+/// callee, which returns to the kernel's caller. A call stays one where the jump would not do what it does: where the
+/// kernel has taken the address of its stack memory, which the callee may use, and the frame the epilogue takes down
+/// holds; and where it passes all of a ymm, to a function it does not know, whose upper half the epilogue's
+/// `vzeroupper` would clear.
+fn jumps(c: &Allocated<Op>) -> BTreeMap<usize, Option<usize>> {
+    let stack = |a: &Arg<PReg>| matches!(a.operand, Operand::Mem(Mem { base: Base::Slot(_), .. }));
+    let mut jumps = BTreeMap::new();
+    if insts(&c.body).any(|inst| inst.op == Op::Lea && inst.args.iter().any(stack)) {
+        return jumps;
+    }
+    for (i, item) in c.body.iter().enumerate() {
+        let Item::Inst(call) = item else { continue };
+        if call.op != Op::Call {
+            continue;
+        }
+        let next = c.body.iter().enumerate().skip(i + 1).find_map(|(j, item)| match item {
+            Item::Inst(inst) if !idle(inst) => Some((j, inst)),
+            _ => None,
+        });
+        let Some((j, ret)) = next else { continue };
+        let ymm = |a: &Arg<PReg>| matches!(a.operand, Operand::Reg(r, Width::W256) if r.class == Class::Vec);
+        if ret.op == Op::Ret && !call.implicit.iter().any(|a| a.access == Access::Read && ymm(a)) {
+            let alone = !c.body[i + 1..j].iter().any(|item| matches!(item, Item::Label(_)));
+            jumps.insert(i, alone.then_some(j));
+        }
+    }
+    jumps
 }
 
 /// The instructions of `body`, in order.
@@ -199,9 +251,9 @@ fn prologue(frame: &Frame, pad: u32, free: Label) -> Result<Vec<Item<Op, PReg>>,
     Ok(items)
 }
 
-/// What runs before a `ret`: undoes [`prologue`], and clears the vector registers' upper halves
-/// if the body used any, so the caller's SSE code does not pay for them. A move that the listing
-/// leaves out uses none.
+/// What runs before a `ret`, and before a jump to a callee that stands for one: undoes [`prologue`], and clears the
+/// vector registers' upper halves if the body used any, so the caller's SSE code does not pay for them. A move that the
+/// listing leaves out uses none.
 fn epilogue(frame: &Frame, pad: u32, vector: bool) -> Vec<Item<Op, PReg>> {
     let mut items = vec![];
     if frame.size > 0 {

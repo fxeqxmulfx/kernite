@@ -34,13 +34,11 @@
 5:
     # `a` even and `b` odd: `a` halved
     shr rdi, 1
-    call {f0}
     add rsp, 8
-    ret
+    jmp {f0}
 6:
     # `b` even and `a` odd: `b` halved
     shr rsi, 1
-    call {f0}
     add rsp, 8
-    ret
+    jmp {f0}
 # f0: gcd

@@ -430,8 +430,16 @@ A kernel calls the module's others, itself among them, as SysV calls a function:
 `rdi` and `b` to `rsi`, and `g` from `rax`, and is checked against what `gcd` takes and returns. `lea(fp, [gcd])` takes
 an address to call at, `call(g, fp, (a, b), (gcd, sum))`, checked against each function given. A value alive across a
 call is kept in a register the callee leaves as it was, `rbx` or `r12` to `r15`, which the kernel saves for its own
-caller; a vector spills, since the callee may change any. The stack pointer is a multiple of 16 at each call. A kernel
-that never returns, `-> !`, ends each way out in `ud2()` or in a call of one that does not.
+caller; a vector spills, since the callee may change any. The stack pointer is a multiple of 16 at each call. A call
+that `ret` follows at once is a jump: the kernel takes its frame down as `ret` does, and jumps to the callee, which
+returns to the kernel's caller. So `call(g, gcd, (a, b)); ret(g);` is a loop in `gcd`: the stack does not grow. A label
+between the call and the `ret` leaves the `ret` for the other ways that come to it, and an address to call at in a
+register the kernel saves goes first to `r11`, which taking the frame down leaves as it is. The call stays a call where
+an instruction comes between it and the `ret`, `call(r, gcd, (a, b)); add(r, 1); ret(r);`. It stays one too where the
+jump would not do what the call does: where the kernel has taken the address of its stack memory, which the callee may
+use, and the frame the jump takes down holds; and where it calls at an address with no functions given and passes a
+vector, whose upper half the `vzeroupper` of a kernel that uses vectors clears as it takes its frame down. A kernel that
+never returns, `-> !`, ends each way out in `ud2()` or in a call of one that does not.
 
 Memory of the module's is a `static` beside its kernels, in the process's memory, which each kernel names as it names its
 own, and which keeps what they write from one call to the next: `static COUNTS: global<[u32; 16]>;` is 16 words the

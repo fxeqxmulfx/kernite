@@ -1886,18 +1886,16 @@ const CALLERS: &str = r#"
 "#;
 
 /// A call passes its arguments where SysV does, the integers in rdi, rsi, rdx, rcx, r8 and r9,
-/// and its callee gives back in rax: here, where the arguments were, but for the swap. The
-/// stack pointer is a multiple of 16 at the call, 8 below where it was at the kernel's.
+/// and its callee gives back in rax: here, where the arguments were, but for the swap. A `ret` follows the call, so it
+/// is a jump, and `gcd` goes on in the stack it has, as a loop does.
 #[test]
 fn a_function_calls_itself_with_its_arguments_where_sysv_passes_them() {
     let want = "# gcd(gpr, gpr) -> gpr
-# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# frame: 0 bytes aligned to 0, saves []
 # a=rdi,rax b=rsi t=rax g=rax
-    sub rsp, 8
     test rsi, rsi
     jnz 2f
     mov rax, rdi
-    add rsp, 8
     ret
 2:
     cmp rdi, rsi
@@ -1907,9 +1905,7 @@ fn a_function_calls_itself_with_its_arguments_where_sysv_passes_them() {
     mov rsi, rax
 3:
     sub rdi, rsi
-    call {f0}
-    add rsp, 8
-    ret
+    jmp {f0}
 # f0: gcd
 ";
     assert_eq!(kernite::x86_str(CALLERS, "gcd").unwrap().text(), want);
@@ -1978,19 +1974,16 @@ fn a_value_alive_across_a_call_is_kept_in_rbx_or_r12_to_r15() {
 
 /// `lea` takes the address of a function of the module, rip-relative, and a call through the
 /// gpr that holds it calls one of the functions taken together last, which take what it
-/// passes.
+/// passes. A `ret` follows it, so it is a jump to the address.
 #[test]
 fn a_call_through_a_gpr_calls_one_of_the_functions_taken_together_last() {
     let want = "# through(gpr) -> gpr
-# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# frame: 0 bytes aligned to 0, saves []
 # a=rsi,rdi fp=rax r=rax
-    sub rsp, 8
     mov rsi, rdi
     lea rax, [rip + {f0}]
     mov rdi, rsi
-    call rax
-    add rsp, 8
-    ret
+    jmp rax
 # f0: gcd
 ";
     assert_eq!(kernite::x86_str(CALLERS, "through").unwrap().text(), want);
@@ -2048,7 +2041,7 @@ fn calling(params: &str, ret: &str, body: &str) -> Result<String, String> {
 #[test]
 fn the_stack_pointer_is_a_multiple_of_16_at_a_call() {
     let cases = [
-        ("x: u64", "call(nothing);", "sub rsp, 8\ncall {f0}\nadd rsp, 8\nret"),
+        ("x: u64", "call(nothing); pause();", "sub rsp, 8\ncall {f0}\npause\nadd rsp, 8\nret"),
         ("x: u64", "call(nothing); add(x, x);", "push rbx\nmov rbx, rdi\ncall {f0}\nadd rbx, rbx\npop rbx\nret"),
         (
             "x: u64, y: u64",
@@ -2071,6 +2064,128 @@ fn the_stack_pointer_is_a_multiple_of_16_at_a_call() {
     ];
     for (params, body, want) in cases {
         assert_eq!(calling(params, "", body).unwrap(), want, "{body}");
+    }
+}
+
+/// A call that `ret` follows at once is a jump: the kernel takes its frame down as `ret` does, the registers it saved
+/// restored and the stack pointer where it was on entry, 8 past a multiple of 16 as a callee has it after a call, and
+/// jumps to the callee, which returns to the kernel's caller. It does so by name and at an address, the arguments in
+/// their registers before the frame goes, a float's in its xmm register through `vzeroupper`, by name and at an address
+/// with the functions given; at an address in a register the kernel saves, which goes to `r11` before the frame goes;
+/// with a note between the call and the `ret`; and with a label between, whose `ret` stays for the way that comes to
+/// it. A kernel whose every call is a jump does not pad its frame for a call; one with a call that stays pads it, and
+/// takes the padding down before each jump.
+#[test]
+fn a_call_that_ret_follows_is_a_jump_after_the_frame_is_taken_down() {
+    let saving = "let (r, v, fp): (gpr, ymm, gpr); let t: local<[f32; 8], 32>; vmovups(v, [p]); vmovups([t], v); \
+                  call(nothing); vmovups(v, [t]); vmovups([p], v);";
+    let before = "push rbx\npush r12\npush rbp\nmov rbp, rsp\nsub rsp, 32\nand rsp, -32\nmov rbx, rsi\nmov r12, \
+                  rdi\nvmovups ymm0, ymmword ptr [r12]\nvmovups ymmword ptr [rsp], ymm0\ncall {f0}\nvmovups ymm0, \
+                  ymmword ptr [rsp]\nvmovups ymmword ptr [r12], ymm0\n";
+    let after = "mov rsp, rbp\npop rbp\npop r12\npop rbx\nvzeroupper\n";
+    let cases = [
+        ("x: u64", "", "call(nothing);".to_string(), "jmp {f0}".to_string()),
+        ("x: u64", "", "call(nothing); note(\"it returns to the caller\");".to_string(), "jmp {f0}".to_string()),
+        (
+            "p: *mut f32, n: u64",
+            " -> u64",
+            format!("{saving} call(r, gcd, (n, n)); ret(r);"),
+            format!("{before}mov rdi, rbx\nmov rsi, rbx\n{after}jmp {{f1}}"),
+        ),
+        (
+            "p: *mut f32, n: u64",
+            " -> u64",
+            format!("{saving} lea(fp, [gcd]); call(r, fp, (n, n), (gcd, gcd)); ret(r);"),
+            format!("{before}lea rax, [rip + {{f1}}]\nmov rdi, rbx\nmov rsi, rbx\n{after}jmp rax"),
+        ),
+        (
+            "x: u64",
+            " -> f32",
+            "let v: ymm; call(v.xmm, half, 2.5); ret(v.xmm);".to_string(),
+            "vmovss xmm0, dword ptr [rip + {c0}]\nvzeroupper\njmp {f0}".to_string(),
+        ),
+        (
+            "x: u64",
+            " -> f32",
+            "let (v, fp): (ymm, gpr); zero(v); lea(fp, [half]); call(v, fp, (v), (half, half)); ret(v.xmm);"
+                .to_string(),
+            "vxorps xmm0, xmm0, xmm0\nlea rax, [rip + {f0}]\nvzeroupper\njmp rax".to_string(),
+        ),
+        (
+            "x: u64",
+            " -> u64",
+            "let (r, fp): (gpr, gpr); lea(fp, [gcd]); call(r, fp, (x, x), (gcd, gcd)); call(r, fp, (r, r), (gcd, \
+             gcd)); ret(r);"
+                .to_string(),
+            "push rbx\nmov rsi, rdi\nlea rbx, [rip + {f0}]\nmov rdi, rsi\ncall rbx\nmov rdi, rax\nmov rsi, rax\nmov \
+             r11, rbx\npop rbx\njmp r11"
+                .to_string(),
+        ),
+        (
+            "x: u64",
+            "",
+            "test(x, x); jz(out); call(nothing); label(out); ret();".to_string(),
+            "test rdi, rdi\njz 2f\njmp {f0}\n2:\nret".to_string(),
+        ),
+        (
+            "x: u64",
+            " -> u64",
+            "let r: gpr; test(x, x); jz(out); call(r, gcd, (x, x)); ret(r); label(out); call(r, gcd, (x, 1)); \
+             add(r, 1); ret(r);"
+                .to_string(),
+            "sub rsp, 8\nmov rsi, rdi\ntest rsi, rsi\njz 2f\nmov rdi, rsi\nadd rsp, 8\njmp {f0}\n2:\nmov rdi, rsi\nmov \
+             rsi, 1\ncall {f0}\nadd rax, 1\nadd rsp, 8\nret"
+                .to_string(),
+        ),
+    ];
+    for (params, ret, body, want) in cases {
+        assert_eq!(calling(params, ret, &body).unwrap(), want, "{body}");
+    }
+}
+
+/// A call stays one where a jump would not do what it does: where an instruction comes between it and the `ret`, to
+/// change what the callee gives back, to return another value, or to restore the MXCSR the kernel keeps; where the
+/// kernel has taken the address of its stack memory, which the callee may use, and the frame the jump takes down holds;
+/// and where it calls at an address with no functions given and passes a vector, whose upper half the kernel's
+/// `vzeroupper` would clear. A gpr's `r32` result is one more: `a_call_passes_what_its_callee_takes` has its
+/// `mov eax, eax`.
+#[test]
+fn a_call_stays_one_where_a_jump_would_not_do_what_it_does() {
+    let cases = [
+        (
+            "x: u64",
+            " -> u64",
+            "let r: gpr; call(r, gcd, (x, x)); add(r, 1); ret(r);",
+            "sub rsp, 8\nmov rsi, rdi\nmov rdi, rsi\ncall {f0}\nadd rax, 1\nadd rsp, 8\nret",
+        ),
+        (
+            "x: u64",
+            " -> u64",
+            "call(_, gcd, (x, x)); ret(x);",
+            "push rbx\nmov rbx, rdi\nmov rdi, rbx\nmov rsi, rbx\ncall {f0}\nmov rax, rbx\npop rbx\nret",
+        ),
+        (
+            "x: u64, m: *mut u32",
+            " -> u64",
+            "let r: gpr; vldmxcsr([m]); call(r, gcd, (x, x)); ret(r);",
+            "push rbp\nmov rbp, rsp\nsub rsp, 16\nmov rax, rdi\nvstmxcsr dword ptr [rsp]\nvldmxcsr dword ptr \
+             [rsi]\nmov rdi, rax\nmov rsi, rax\ncall {f0}\nvldmxcsr dword ptr [rsp]\nmov rsp, rbp\npop rbp\nret",
+        ),
+        (
+            "x: u64",
+            " -> u64",
+            "let n: local<u64>; let (p, r): (gpr, gpr); lea(p, [n]); call(r, gcd, (p, x)); ret(r);",
+            "push rbp\nmov rbp, rsp\nsub rsp, 16\nmov rsi, rdi\nlea rdi, [rsp]\ncall {f0}\nmov rsp, rbp\npop rbp\nret",
+        ),
+        (
+            "x: u64",
+            " -> f32",
+            "let (v, fp): (ymm, gpr); zero(v); lea(fp, [half]); call(v, fp, (v)); ret(v.xmm);",
+            "sub rsp, 8\nvxorps xmm0, xmm0, xmm0\nlea rax, [rip + {f0}]\ncall rax\nadd rsp, 8\nvzeroupper\nret",
+        ),
+    ];
+    for (params, ret, body, want) in cases {
+        assert_eq!(calling(params, ret, body).unwrap(), want, "{body}");
     }
 }
 
