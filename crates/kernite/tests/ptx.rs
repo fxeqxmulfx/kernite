@@ -186,6 +186,11 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ("let v: f32; ld.f32(v, [n]);", "2:23: `ld.f32` takes an address in a 64-bit variable; this is a `u32`"),
         ("let v: f32; ld.glob.f32(v, [x]);", "2:21: PTX's `ld` has no `.glob` that kernite knows"),
         ("let i: u32; add.u32(i, tid.x, 1);", "2:28: `add.u32` reads no special register; `mov.u32` does"),
+        // `ptxas` 13.5 takes no special register in a `mov` of a float: not `envreg0`, a `b32`, for an `f32`, and not
+        // `tid.x` or `gridid`.
+        ("let f: f32; mov.f32(f, envreg0);", "2:24: `mov.f32` reads no special register; `mov.b32` does"),
+        ("let f: f32; mov.f32(f, tid.x);", "2:28: `mov.f32` reads no special register; `mov.u32` does"),
+        ("let d: f64; mov.f64(d, gridid);", "2:24: `mov.f64` reads no special register; `mov.u64` does"),
         // A vector that takes no special register, or that the instruction writes, says so, whatever the bits of the
         // register.
         ("let w: b32; mov.b32(w, (tid.x, tid.x));", "2:24: `mov.b32` reads no special register; `mov.u32` does"),
@@ -1189,9 +1194,10 @@ const TOGETHER_DECLARED: &str = "let (f, g, i, j, b, h): (f32, f32, u32, s32, b3
 /// beside floats; a value known now beside any register of a vector of floats, a `b64` too; a whole special register
 /// beside a value, which a part of a vector's does not go beside; `gridid`, a special register of 64 bits, as the data
 /// of `st` and `sust`, which take a register of more bits than their vector's, and in a vector of 64, and `mov.u32`
-/// reading 32 of its bits; `_`; and the layer of an array of textures, the first of its vector, a `u32` beside floats,
-/// which `ptxas` checks apart.
-const TOGETHER: [(&str, &str); 86] = [
+/// reading 32 of its bits; `envreg0`, of `b32`, in a `mov` of bits or of an integer, and in a vector of floats, where a
+/// `mov` of a float takes none; `_`; and the layer of an array of textures, the first of its vector, a `u32` beside
+/// floats, which `ptxas` checks apart.
+const TOGETHER: [(&str, &str); 90] = [
     ("st.global.v2.b32([x], (f, g));", "st.global.v2.b32 [%x], {%f, %g};"),
     ("st.global.v2.b32([x], (i, j));", "st.global.v2.b32 [%x], {%i, %j};"),
     ("st.global.v2.u32([x], (i, j));", "st.global.v2.u32 [%x], {%i, %j};"),
@@ -1302,6 +1308,10 @@ const TOGETHER: [(&str, &str); 86] = [
     ),
     ("st.global.v2.b64([x], (gridid, d));", "st.global.v2.b64 [%x], {%gridid, %d};"),
     ("mov.u32(i, gridid);", "mov.u32 %i, %gridid;"),
+    ("mov.b32(b, envreg0);", "mov.b32 %b, %envreg0;"),
+    ("mov.u32(i, envreg0);", "mov.u32 %i, %envreg0;"),
+    ("st.global.v2.f32([x], (f, envreg0));", "st.global.v2.f32 [%x], {%f, %envreg0};"),
+    ("st.global.v2.f32([x], (envreg0, envreg0));", "st.global.v2.f32 [%x], {%envreg0, %envreg0};"),
 ];
 
 /// kernite writes each of [`TOGETHER`] as it is.
@@ -1324,6 +1334,48 @@ fn ptxas_takes_each_vector_that_kernite_takes() {
         let ptx = compile("x: *mut u32, n: u32, s: u64", &format!("{TOGETHER_DECLARED} {inst}")).unwrap();
         let run = assembled(&ptxas, &ptx, "sm_86", &format!("together_{n}"), &["--warning-as-error"]);
         assert!(run.status.success(), "{inst}: {}", String::from_utf8_lossy(&run.stderr));
+    }
+}
+
+/// kernite refuses each special register in a `mov` of a float, at the register, and says which `mov` reads it. `ptxas`
+/// 13.5 takes none there: not a `b32` such as `envreg0` for an `f32`, and not a `u32` such as `tid.x`.
+#[test]
+fn a_special_register_in_a_mov_of_a_float_is_refused_at_the_register() {
+    for r in forms::sregs() {
+        for float in ["f32", "f64"] {
+            let body = format!("let v: {float}; mov.{float}(v, {});", r.name);
+            let col = body.rfind(&r.name).unwrap() + 1 + r.name.find('.').map_or(0, |dot| dot + 1);
+            let want = format!("2:{col}: `mov.{float}` reads no special register; `mov.{}` does", r.ty.name());
+            assert_eq!(compile("", &body).unwrap_err(), want, "{body}");
+        }
+    }
+}
+
+/// `ptxas` 13.5 refuses each special register in a `mov.f32` and a `mov.f64`, of the float's size or not: it says that
+/// a special register is not allowed there, or that the arguments mismatch where the sizes differ, but for `gridid` in
+/// a `mov.f32`. It fails the day `ptxas` takes one, for kernite to take it too.
+#[test]
+fn ptxas_refuses_each_special_register_in_a_mov_of_a_float() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    let lines: Vec<String> = forms::sregs()
+        .iter()
+        .flat_map(|r| [("f32", "f"), ("f64", "d")].map(|(float, v)| format!("mov.{float} %{v}, %{};", r.name)))
+        .collect();
+    let mut text = format!(".version {}\n.target sm_86\n.address_size 64\n\n", dotted(NEWEST));
+    for (n, line) in lines.iter().enumerate() {
+        text += &format!(".visible .entry k{n}()\n{{\n\t.reg .f32 %f;\n\t.reg .f64 %d;\n\t{line}\n\tret;\n}}\n");
+    }
+    let (refused, _) = assemble(&ptxas, "mov_floats", &[(text, 86)]).remove(0);
+    for (n, line) in lines.iter().enumerate() {
+        let said = refused.get(&format!("k{n}")).unwrap_or_else(|| panic!("ptxas takes `{line}`"));
+        assert!(
+            said.ends_with("Special register argument not allowed for instruction 'mov'")
+                || said.ends_with("Arguments mismatch for instruction 'mov'"),
+            "{line}: {said}"
+        );
     }
 }
 

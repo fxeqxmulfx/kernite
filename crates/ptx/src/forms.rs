@@ -344,7 +344,10 @@ vset4(.u32|.s32)(.u32|.s32)$cmps{.add} : =~u32{.bmask}, %T{.bxyzw}, %U{.bxyzw}, 
 
 # Moving data, and converting it. `mov` packs no `_`, as the ISA has it, where ptxas 13.5
 # takes one and packs zeros: `mov.b32 d, {_, h}`.
-mov(.pred|.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64|.f32|.f64) : =T, !$T @1.0
+mov(.pred|.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64) : =T, !$T @1.0
+# ptxas 13.5 refuses a special register in a `mov` of a float, of the float's size or not: "Special register argument
+# not allowed for instruction 'mov'", or "Arguments mismatch" where the sizes differ, but for `gridid` in a `mov.f32`.
+mov(.f32|.f64) : =T, !T @1.0
 # A variable's address, which the ISA puts in a `u32` or a `u64`, and ptxas 13.5 in a `b` or
 # an `s` type of their sizes as well, as the same bits.
 mov(.u32|.u64|.b32|.b64|.s32|.s64) : =T, &T @1.0
