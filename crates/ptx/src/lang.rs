@@ -752,7 +752,7 @@ impl Kernel {
                     Err(format!("`{name}` writes a variable; `{s}` is a special register, which it reads"))
                 }
                 Some(r) if !spec.sreg => Err(format!("`{name}` reads no special register; `mov.{}` does", r.ty.name())),
-                Some(r) if !r.read_as(t, wider(b, w)) => {
+                Some(r) if !r.read_as(t, wider(b, w), spec.count != Count::One) => {
                     Err(format!("`{name}` reads a `{}`; `{s}` is a `{}`", t.name(), r.ty.name()))
                 }
                 Some(r) => {
@@ -1477,24 +1477,26 @@ fn is_value(a: &Given<Var>) -> bool {
 /// What `ptxas` makes of an operand of a vector, by which it tells those that go together: a variable, of the type it
 /// is declared as; a special register, of its size alone, and whether it is a part of a vector of them, as `tid.x` is
 /// of `tid`; or a value known now, which is an integer, with no size, or a float, of the bits it is written in, in a
-/// vector of bits.
+/// vector of bits, and a float with no size in a vector of floats.
 #[derive(Clone, Copy)]
 enum Seen {
     Reg(Ty),
     Special(u32, bool),
     Value(Option<u32>),
+    Float,
 }
 
 impl Seen {
     /// What `ptxas` makes of `a`, which is written as `text`, in a vector of `lane`: nothing of `_`, or of what is no
-    /// operand of a vector, or of a value known now in a vector of floats, which goes beside every operand that vector
-    /// takes alone, a `b64` beside an `f32` too. A float is written `0f3FC00000`, of 32 bits, or `0d3FF8000000000000`,
-    /// of 64, and an integer, or a half as its bits, is not.
+    /// operand of a vector. A value known now in a vector of floats goes beside every operand that vector takes alone,
+    /// a `b64` beside an `f32` too, but a part of a vector's special register. A float is written `0f3FC00000`, of 32
+    /// bits, or `0d3FF8000000000000`, of 64, and an integer, or a half as its bits, is not.
     fn of(a: &Given<Var>, text: &str, lane: Ty) -> Option<Seen> {
         match a {
             Given::Var(Var::Reg { ty, .. }) => Some(Seen::Reg(ty.decl())),
             Given::Special(s) => forms::sreg(s).map(|r| Seen::Special(r.ty.bits(), s.contains('.'))),
-            _ if is_value(a) && lane.kind() != Kind::Float => Some(Seen::Value(match text.get(..2) {
+            _ if is_value(a) && lane.kind() == Kind::Float => Some(Seen::Float),
+            _ if is_value(a) => Some(Seen::Value(match text.get(..2) {
                 Some("0f") => Some(32),
                 Some("0d") => Some(64),
                 _ => None,
@@ -1509,15 +1511,16 @@ impl Seen {
     /// `{0f3FC00000, %d}`, and takes it elsewhere, `{%d, 0f3FC00000}`, which looks like a bug of its own, so kernite
     /// refuses it in every place. A variable goes with one of a type that goes with it: bits with any, an integer with
     /// an integer, and a float with itself. A special register goes with any variable of its size, as ptxas checks its
-    /// size alone. A value known now goes with a variable as [`beside_value`] says, and with one of its own kind. A
-    /// part of a vector's special register goes with no value, but a whole one does: `(tid.x, 1)` is refused, and
-    /// `(laneid, 1)` is not.
+    /// size alone. A value known now goes with a variable as [`beside_value`] says, and with one of its own kind; a
+    /// float in a vector of floats, which has no size, goes with every other operand. A part of a vector's special
+    /// register goes with no value, but a whole one does: `(tid.x, 1)` is refused, and `(laneid, 1)` is not.
     fn apart(self, other: Seen) -> Option<&'static str> {
-        use Seen::{Reg, Special, Value};
+        use Seen::{Float, Reg, Special, Value};
         let size = |s: Seen| match s {
             Reg(t) => Some(t.bits()),
             Special(bits, _) => Some(bits),
             Value(float) => float,
+            Float => None,
         };
         if let (Some(x), Some(y)) = (size(self), size(other))
             && x != y
@@ -1529,7 +1532,7 @@ impl Seen {
             (Reg(x), Reg(y)) if !x.fits(y) => Some(one),
             (Reg(r), Value(float)) | (Value(float), Reg(r)) if !beside_value(r, float.is_some()) => Some(one),
             (Value(x), Value(y)) if x.is_some() != y.is_some() => Some(one),
-            (Special(_, true), Value(_)) | (Value(_), Special(_, true)) => {
+            (Special(_, true), Value(_) | Float) | (Value(_) | Float, Special(_, true)) => {
                 Some("takes no part of a special register beside a value known now, as `tid.x` is of `tid`")
             }
             _ => None,

@@ -1557,9 +1557,13 @@ pub struct Sreg {
 
 impl Sreg {
     /// Whether an instruction of type `t` reads it: one of the type it is, by PTX's rules, or one that reads fewer of
-    /// its bits, [`Sreg::narrowed`].
-    pub fn read_as(&self, t: Ty, wide: bool) -> bool {
-        self.ty.fits(t) || self.narrowed(t, wide)
+    /// its bits, [`Sreg::narrowed`]. In a `vector` a float goes too, as `ptxas` reads the register by its size alone,
+    /// as bits: a float of as many bits, or, if `wide`, of no more, as `st.global.v2.f32` takes `(f, tid.x)` and
+    /// `(gridid, gridid)`.
+    pub fn read_as(&self, t: Ty, wide: bool, vector: bool) -> bool {
+        let bits = self.ty.bits();
+        let float = vector && t.kind() == Kind::Float && if wide { t.bits() <= bits } else { t.bits() == bits };
+        float || self.ty.fits(t) || self.narrowed(t, wide)
     }
 
     /// Whether an instruction of type `t` reads fewer bits of it than it has: an integer, or bits, of fewer bits, down

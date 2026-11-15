@@ -191,6 +191,12 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ("let f: f32; mov.f32(f, envreg0);", "2:24: `mov.f32` reads no special register; `mov.b32` does"),
         ("let f: f32; mov.f32(f, tid.x);", "2:28: `mov.f32` reads no special register; `mov.u32` does"),
         ("let d: f64; mov.f64(d, gridid);", "2:24: `mov.f64` reads no special register; `mov.u64` does"),
+        // `ptxas` 13.5 takes no integer variable beside a float in a vector of floats, where it takes a special
+        // register: "Vector with elements of different types".
+        (
+            "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); st.global.v2.f32([x], (f, i));",
+            "2:79: `st.global.v2.f32` wants a `f32` variable; this is a `u32`",
+        ),
         // A vector that takes no special register, or that the instruction writes, says so, whatever the bits of the
         // register.
         ("let w: b32; mov.b32(w, (tid.x, tid.x));", "2:24: `mov.b32` reads no special register; `mov.u32` does"),
@@ -695,12 +701,12 @@ type Apart = (&'static str, &'static str, Why, &'static str);
 
 /// Vectors that kernite and `ptxas` 13.5 both refuse, by the registers of [`TOGETHER_DECLARED`], in each instruction
 /// that takes one: a value known now of another kind than a register beside it, or than another value, an integer or a
-/// float; a special register of another size; a float known now first in a vector of bits, before a register of 64
-/// bits; a part of a vector's special register, as `tid.x` is of `tid`, beside a value known now, which a whole one,
-/// `laneid`, goes beside; and `gridid`, a special register of 64 bits, in a vector of 32, in `mov`, `mma`, `wmma`, the
-/// coordinates of a surface, and the coordinates and the offsets of a texture, the layer of an array too: before a
-/// value known now, beside another `gridid` or a variable, and in `mma` after a value known now. The data of `st` and
-/// `sust` take one, [`TOGETHER`].
+/// float; a special register of another size, in a vector of floats too; a float known now first in a vector of bits,
+/// before a register of 64 bits; a part of a vector's special register, as `tid.x` is of `tid`, beside a value known
+/// now, which a whole one, `laneid`, goes beside, in a vector of floats too; and `gridid`, a special register of 64
+/// bits, in a vector of 32, in `mov`, `mma`, `wmma`, the coordinates of a surface, and the coordinates and the offsets
+/// of a texture, the layer of an array too: before a value known now, beside another `gridid` or a variable, and in
+/// `mma` after a value known now. The data of `st` and `sust` take one, [`TOGETHER`].
 const BOTH_REFUSE: &[Apart] = &[
     (
         "st.global.v2.b32([x], (f, @1));",
@@ -863,6 +869,12 @@ const BOTH_REFUSE: &[Apart] = &[
         Size,
         "`laneid` beside a `f64` variable",
     ),
+    (
+        "st.global.v2.f32([x], (f, @gridid));",
+        "st.global.v2.f32 [%x], {%f, %gridid};",
+        Size,
+        "`gridid` beside a `f32` variable",
+    ),
     // A float known now first in a vector of bits, beside a register of 64 bits.
     (
         "st.global.v2.b32([x], (1.5, @d));",
@@ -957,6 +969,24 @@ const BOTH_REFUSE: &[Apart] = &[
         "tex.2d.v4.f32.s32 {%r0, %r1, %r2, %r3}, [%s, {%tid.x, 5}];",
         Part,
         "the integer 5 beside `tid.x`",
+    ),
+    (
+        "st.global.v2.f32([x], (tid.x, @1.5));",
+        "st.global.v2.f32 [%x], {%tid.x, 0f3FC00000};",
+        Part,
+        "the float 1.5 beside `tid.x`",
+    ),
+    (
+        "st.global.v2.f32([x], (1.5, tid.@x));",
+        "st.global.v2.f32 [%x], {0f3FC00000, %tid.x};",
+        Part,
+        "`tid.x` beside the float 1.5",
+    ),
+    (
+        "tex._2d.v4.f32.f32((r0, r1, r2, r3), @[s, (tid.x, 1.5)]);",
+        "tex.2d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {%tid.x, 0f3FC00000}];",
+        Part,
+        "the float 1.5 beside `tid.x`",
     ),
     ("mov.b64(z, (@gridid, gridid));", "mov.b64 %z, {%gridid, %gridid};", Wide, GRIDID),
     ("mov.b64(z, (@gridid, 1));", "mov.b64 %z, {%gridid, 1};", Wide, GRIDID),
@@ -1178,47 +1208,138 @@ fn ptxas_takes_each_vector_that_only_kernite_refuses() {
     }
 }
 
-/// Where an instruction takes a special register wider than its type, as `ptxas` takes a register of more bits there:
-/// the source of `cvt`, and the data of the vector of `st` and of `sust`. Each place is its kernel, the line of PTX
-/// kernite writes for it, and the type that reads the register, and its bits, with `R` for the register, and `@` where
-/// an error points: at the whole of a vector, and at the register of `cvt`, or at its field, the `x` of `tid.x`.
-fn wider_places() -> Vec<(String, String, String, u32)> {
+/// A special register of bits that a vector of floats does not take, beside a float known now, before it and after it:
+/// `gridid`, of 64 bits, in the coordinates of `tex`, which take a register of as many bits as the float, and `laneid`,
+/// of 32, in the data of `st.global.v2.f64`, which takes one of no fewer. Each is a kernel, with `@` where its error
+/// points; the line of PTX kernite would write; whether `ptxas` 13.5 takes it; and the end of the error. `ptxas` checks
+/// the register against its neighbour alone, a float, which goes beside any register, and takes it only where the float
+/// is first, as it takes `gridid` after a value known now in a vector of 32 bits, `(1, gridid)`: kernite refuses both.
+const FLOAT_FIRST: [(&str, &str, bool, &str); 4] = [
+    (
+        "tex._2d.v4.f32.f32((r0, r1, r2, r3), @[s, (1.5, gridid)]);",
+        "tex.2d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {0f3FC00000, %gridid}];",
+        true,
+        "reads a `f32`; `gridid` is a `u64`",
+    ),
+    (
+        "tex._2d.v4.f32.f32((r0, r1, r2, r3), @[s, (gridid, 1.5)]);",
+        "tex.2d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {%gridid, 0f3FC00000}];",
+        false,
+        "reads a `f32`; `gridid` is a `u64`",
+    ),
+    (
+        "st.global.v2.f64([x], @(1.5f64, laneid));",
+        "st.global.v2.f64 [%x], {0d3FF8000000000000, %laneid};",
+        true,
+        "reads a `f64`; `laneid` is a `u32`",
+    ),
+    (
+        "st.global.v2.f64([x], @(laneid, 1.5f64));",
+        "st.global.v2.f64 [%x], {%laneid, 0d3FF8000000000000};",
+        false,
+        "reads a `f64`; `laneid` is a `u32`",
+    ),
+];
+
+/// kernite refuses each vector of [`FLOAT_FIRST`], the float first or last, at the vector, or the `[` of the
+/// coordinates: the register has bits that the instruction does not take there.
+#[test]
+fn a_special_register_of_bits_a_vector_of_floats_does_not_take_is_refused_beside_a_float_known_now() {
+    for (line, _, _, said) in FLOAT_FIRST {
+        let (body, col, name) = apart(line);
+        let want = format!("2:{col}: `{name}` {said}");
+        assert_eq!(compile("x: *mut u32, n: u32, s: u64", &body).unwrap_err(), want, "{line}");
+    }
+}
+
+/// `ptxas` 13.5 takes each vector of [`FLOAT_FIRST`] that has the float first, and refuses the others, "Arguments
+/// mismatch". It fails the day `ptxas` takes or refuses one the other way, for GUIDE.md to say no more of that bug.
+#[test]
+fn ptxas_takes_a_special_register_of_bits_the_vector_does_not_take_after_a_float_known_now_and_refuses_it_before() {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return;
+    };
+    for (n, &(_, line, takes, _)) in FLOAT_FIRST.iter().enumerate() {
+        let run = assembled(&ptxas, &with_line(line), "sm_86", &format!("float_first_{n}"), &[]);
+        let said = String::from_utf8_lossy(&run.stderr);
+        assert_eq!(run.status.success(), takes, "{line}: {said}");
+        assert!(takes || said.contains("Arguments mismatch for instruction"), "{line}: {said}");
+    }
+}
+
+/// A place where an instruction reads a special register by its bits: its kernel, the line of PTX kernite writes for
+/// it, and the type that reads the register, and its bits. `R` stands for the register, and `@` marks where an error
+/// points: at the whole of a vector, at the `[` of the coordinates in a texture, and at the register of `cvt`, or at
+/// its field, the `x` of `tid.x`.
+struct Place {
+    kernel: String,
+    line: String,
+    ty: String,
+    bits: u32,
+    /// Whether the place takes a register of as many bits as it reads, and none of more.
+    exact: bool,
+}
+
+impl Place {
+    /// Whether the place takes a special register of `have` bits.
+    fn takes(&self, have: u32) -> bool {
+        if self.exact { have == self.bits } else { have >= self.bits }
+    }
+}
+
+/// Where an instruction reads a special register by its bits, as `ptxas` does. It takes a register of more bits than
+/// the type as the source of `cvt` and as the data of the vector of `st` and of `sust`, and one of as many bits as the
+/// float in the coordinates of `tex` and `tld4`.
+fn places() -> Vec<Place> {
+    let place =
+        |kernel: String, line: String, ty: &str, bits, exact| Place { kernel, line, ty: ty.into(), bits, exact };
     let mut out = vec![];
     for (ty, bits) in
         [("u8", 8), ("s8", 8), ("u16", 16), ("s16", 16), ("u32", 32), ("s32", 32), ("u64", 64), ("s64", 64)]
     {
-        out.push((format!("cvt.u64.{ty}(u, @R);"), format!("cvt.u64.{ty} %u, %R;"), ty.into(), bits));
+        out.push(place(format!("cvt.u64.{ty}(u, @R);"), format!("cvt.u64.{ty} %u, %R;"), ty, bits, false));
     }
-    for bits in [8, 16, 32, 64] {
-        let ty = format!("b{bits}");
-        let (st, sust) = (format!("st.global.v2.{ty}"), format!("sust.b.2d.v2.{ty}.trap"));
-        out.push((format!("{st}([x], @(R, R));"), format!("{st} [%x], {{%R, %R}};"), ty.clone(), bits));
-        let sust_kernel = format!("{}([s, (j, j)], @(R, R));", sust.replace(".2d", "._2d"));
-        out.push((sust_kernel, format!("{sust} [%s, {{%j, %j}}], {{%R, %R}};"), ty, bits));
+    for (ty, bits) in [("b8", 8), ("b16", 16), ("b32", 32), ("b64", 64), ("f32", 32), ("f64", 64)] {
+        let st = format!("st.global.v2.{ty}");
+        out.push(place(format!("{st}([x], @(R, R));"), format!("{st} [%x], {{%R, %R}};"), ty, bits, false));
+        // `sust` writes bits alone.
+        if ty.starts_with('b') {
+            let sust = format!("sust.b.2d.v2.{ty}.trap");
+            let kernel = format!("{}([s, (j, j)], @(R, R));", sust.replace(".2d", "._2d"));
+            out.push(place(kernel, format!("{sust} [%s, {{%j, %j}}], {{%R, %R}};"), ty, bits, false));
+        }
+    }
+    for name in ["tex._2d", "tld4.r._2d"] {
+        let kernel = format!("{name}.v4.f32.f32((r0, r1, r2, r3), @[s, (R, R)]);");
+        let line = format!("{}.v4.f32.f32 {{%r0, %r1, %r2, %r3}}, [%s, {{%R, %R}}];", name.replace("._", "."));
+        out.push(place(kernel, line, "f32", 32, true));
     }
     out
 }
 
-/// A special register goes where an instruction takes a register wider than its type, as an integer or bits of no more
-/// bits than it has: `cvt.u32.u8(i, laneid)`, and `(laneid, laneid)` in a vector of 16 bits. kernite writes the line of
-/// each special register of as many bits as the type or more, and refuses the rest where the place has `@`.
+/// A special register goes where its bits are those an instruction reads: as an integer, bits or a float of no more
+/// bits than it has where the instruction takes a register wider than its type, `cvt.u32.u8(i, laneid)`,
+/// `(laneid, laneid)` in a vector of 16 bits, and in one of `f32`; and of as many where it takes none wider,
+/// `[s, (f, tid.x)]`, the coordinates of `tex` and `tld4`. kernite writes the line of each special register of the bits
+/// the place takes, and refuses the rest where the place has `@`.
 #[test]
-fn a_special_register_goes_where_an_instruction_takes_a_wider_register() {
-    for (kernel, line, ty, bits) in wider_places() {
-        let (before, after) = kernel.split_once('@').unwrap();
+fn a_special_register_goes_where_its_bits_are_those_the_instruction_reads() {
+    for place in places() {
+        let (before, after) = place.kernel.split_once('@').unwrap();
         for r in forms::sregs() {
             let after = after.replace('R', &r.name);
             let kernel = format!("{before}{after}");
             let body = format!("{TOGETHER_DECLARED} {kernel}");
             let got = compile("x: *mut u32, n: u32, s: u64", &body);
-            if r.ty.bits() >= bits {
+            if place.takes(r.ty.bits()) {
                 let ptx = got.unwrap_or_else(|e| panic!("{kernel}: {e}"));
-                assert!(ptx.contains(&format!("\t{}\n", line.replace('R', &r.name))), "{kernel}: {ptx}");
+                assert!(ptx.contains(&format!("\t{}\n", place.line.replace('R', &r.name))), "{kernel}: {ptx}");
             } else {
                 let name = before[..before.find('(').unwrap()].replace("._", ".");
-                let field = if after.starts_with('(') { 0 } else { r.name.find('.').map_or(0, |dot| dot + 1) };
+                let field = if after.starts_with(['(', '[']) { 0 } else { r.name.find('.').map_or(0, |dot| dot + 1) };
                 let col = body.len() - after.len() + 1 + field;
-                let want = format!("2:{col}: `{name}` reads a `{ty}`; `{}` is a `{}`", r.name, r.ty.name());
+                let want = format!("2:{col}: `{name}` reads a `{}`; `{}` is a `{}`", place.ty, r.name, r.ty.name());
                 assert_eq!(got.unwrap_err(), want, "{kernel}");
             }
         }
@@ -1226,10 +1347,11 @@ fn a_special_register_goes_where_an_instruction_takes_a_wider_register() {
 }
 
 /// What `ptxas` says of each of `lines` of PTX, each in a kernel of its own that declares `u`, `x` and `s`, of 64 bits,
-/// `j`, an `s32`, `f`, an `f32`, and `d`, an `f64`, in one module of the newest PTX for `sm_86`: its first error, or
-/// `None` where it takes the line.
+/// `j`, an `s32`, `f` and `r0` to `r3`, of `f32`, and `d`, an `f64`, in one module of the newest PTX for `sm_86`: its
+/// first error, or `None` where it takes the line.
 fn said_of(ptxas: &Path, dir: &str, lines: &[String]) -> Vec<Option<String>> {
-    const DECLARED: &str = ".reg .u64 %u, %x, %s;\n\t.reg .s32 %j;\n\t.reg .f32 %f;\n\t.reg .f64 %d;";
+    const DECLARED: &str =
+        ".reg .u64 %u, %x, %s;\n\t.reg .s32 %j;\n\t.reg .f32 %f, %r0, %r1, %r2, %r3;\n\t.reg .f64 %d;";
     let mut text = format!(".version {}\n.target sm_86\n.address_size 64\n\n", dotted(NEWEST));
     for (n, line) in lines.iter().enumerate() {
         text += &format!(".visible .entry k{n}()\n{{\n\t{DECLARED}\n\t{line}\n\tret;\n}}\n");
@@ -1238,18 +1360,20 @@ fn said_of(ptxas: &Path, dir: &str, lines: &[String]) -> Vec<Option<String>> {
     (0..lines.len()).map(|n| refused.get(&format!("k{n}")).cloned()).collect()
 }
 
-/// `ptxas` 13.5 takes a special register as an integer or bits of no more bits than it has, where an instruction takes
-/// a register wider than its type, and refuses one of more: "Arguments mismatch". It fails the day `ptxas` takes one it
-/// refuses here, for kernite to take it too, or refuses one it takes, for kernite and GUIDE.md to say no more of it.
+/// `ptxas` 13.5 takes a special register as an integer, bits or a float of no more bits than it has, where an
+/// instruction takes a register wider than its type, and as one of as many bits alone where it takes none wider, in the
+/// coordinates of `tex` and `tld4`, and refuses one of more or of fewer bits: "Arguments mismatch". It fails the day
+/// `ptxas` takes one it refuses here, for kernite to take it too, or refuses one it takes, for kernite and GUIDE.md to
+/// say no more of it.
 #[test]
-fn ptxas_takes_a_special_register_as_each_type_of_no_more_bits_than_it_has() {
+fn ptxas_takes_a_special_register_where_its_bits_are_those_the_instruction_reads() {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
         return;
     };
     let mut cases = vec![];
-    for (_, line, _, bits) in wider_places() {
-        cases.extend(forms::sregs().iter().map(|r| (line.replace('R', &r.name), r.ty.bits() >= bits)));
+    for place in places() {
+        cases.extend(forms::sregs().iter().map(|r| (place.line.replace('R', &r.name), place.takes(r.ty.bits()))));
     }
     let lines: Vec<String> = cases.iter().map(|(line, _)| line.clone()).collect();
     for ((line, takes), said) in cases.iter().zip(said_of(&ptxas, "wider", &lines)) {
@@ -1305,9 +1429,12 @@ const TOGETHER_DECLARED: &str = "let (f, g, i, j, b, h): (f32, f32, u32, s32, b3
 /// beside a value, which a part of a vector's does not go beside; a special register of more bits than the type, as the
 /// source of `cvt` and the data of `st` and `sust`, which take a register of more bits: `laneid` in a vector of 16,
 /// `clock64` in one of 32; `gridid`, of 64 bits, in a vector of 64, and `mov.u32` reading 32 of its bits; `envreg0`, of
-/// `b32`, in a `mov` of bits or of an integer, and in a vector of floats, where a `mov` of a float takes none; `_`; and
-/// the layer of an array of textures, the first of its vector, a `u32` beside floats, which `ptxas` checks apart.
-const TOGETHER: [(&str, &str); 103] = [
+/// `b32`, in a `mov` of bits or of an integer, and in a vector of floats, where a `mov` of a float takes none; an
+/// integer special register in a vector of floats, by its size: beside a variable, `(f, tid.x)`, beside itself,
+/// `(laneid, laneid)`, and `(gridid, gridid)` in the data of `st`, which takes a register of more bits, and a whole one
+/// beside a value known now, `(1.5, laneid)` and `(laneid, 1)`; `_`; and the layer of an array of textures, the first
+/// of its vector, a `u32` beside floats, which `ptxas` checks apart.
+const TOGETHER: [(&str, &str); 114] = [
     ("st.global.v2.b32([x], (f, g));", "st.global.v2.b32 [%x], {%f, %g};"),
     ("st.global.v2.b32([x], (i, j));", "st.global.v2.b32 [%x], {%i, %j};"),
     ("st.global.v2.u32([x], (i, j));", "st.global.v2.u32 [%x], {%i, %j};"),
@@ -1444,6 +1571,26 @@ const TOGETHER: [(&str, &str); 103] = [
     ("mov.u32(i, envreg0);", "mov.u32 %i, %envreg0;"),
     ("st.global.v2.f32([x], (f, envreg0));", "st.global.v2.f32 [%x], {%f, %envreg0};"),
     ("st.global.v2.f32([x], (envreg0, envreg0));", "st.global.v2.f32 [%x], {%envreg0, %envreg0};"),
+    ("st.global.v2.f32([x], (f, tid.x));", "st.global.v2.f32 [%x], {%f, %tid.x};"),
+    ("st.global.v2.f32([x], (tid.x, f));", "st.global.v2.f32 [%x], {%tid.x, %f};"),
+    ("st.global.v2.f32([x], (laneid, laneid));", "st.global.v2.f32 [%x], {%laneid, %laneid};"),
+    ("st.global.v2.f32([x], (gridid, gridid));", "st.global.v2.f32 [%x], {%gridid, %gridid};"),
+    ("st.global.v2.f32([x], (1.5, laneid));", "st.global.v2.f32 [%x], {0f3FC00000, %laneid};"),
+    ("st.global.v2.f32([x], (laneid, 1));", "st.global.v2.f32 [%x], {%laneid, 0f3F800000};"),
+    ("st.global.v2.f64([x], (d, gridid));", "st.global.v2.f64 [%x], {%d, %gridid};"),
+    ("st.global.v2.f64([x], (clock64, d));", "st.global.v2.f64 [%x], {%clock64, %d};"),
+    (
+        "tex._2d.v4.f32.f32((r0, r1, r2, r3), [s, (f, tid.x)]);",
+        "tex.2d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {%f, %tid.x}];",
+    ),
+    (
+        "tex._2d.v4.f32.f32((r0, r1, r2, r3), [s, (tid.x, tid.x)]);",
+        "tex.2d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {%tid.x, %tid.x}];",
+    ),
+    (
+        "tld4.r._2d.v4.f32.f32((r0, r1, r2, r3), [s, (f, laneid)]);",
+        "tld4.r.2d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {%f, %laneid}];",
+    ),
 ];
 
 /// kernite writes each of [`TOGETHER`] as it is.
@@ -1506,11 +1653,11 @@ fn ptxas_refuses_each_special_register_in_a_mov_of_a_float() {
     }
 }
 
-/// `ptxas` 13.5 refuses registers of two types in a vector, in each of `st`, `ld`, `ldu`, `mov`, `suld.b`, `sust.b`,
-/// `sust.p`, `ldmatrix` and `mma`, and of two sizes, but checks each against its neighbour alone, and takes
-/// `{%f1, %b1, %i1, %i1}`, an `f32` and a `u32` with a `b32` between, by a bug of its own, which kernite refuses. It
-/// fails the day `ptxas` takes a vector it refuses here, for kernite to take it too, or refuses one it takes, for the
-/// comment by kernite's rule and GUIDE.md to say no more of its bug.
+/// `ptxas` 13.5 refuses registers of two types in a vector, in each of `st`, also of floats, `ld`, `ldu`, `mov`,
+/// `suld.b`, `sust.b`, `sust.p`, `ldmatrix` and `mma`, and of two sizes, but checks each against its neighbour alone,
+/// and takes `{%f1, %b1, %i1, %i1}`, an `f32` and a `u32` with a `b32` between, by a bug of its own, which kernite
+/// refuses. It fails the day `ptxas` takes a vector it refuses here, for kernite to take it too, or refuses one it
+/// takes, for the comment by kernite's rule and GUIDE.md to say no more of its bug.
 #[test]
 fn ptxas_checks_each_register_of_a_vector_against_its_neighbour_alone() {
     let Some(ptxas) = ptxas() else {
@@ -1520,6 +1667,7 @@ fn ptxas_checks_each_register_of_a_vector_against_its_neighbour_alone() {
     let types = "Vector with elements of different types are not allowed in";
     let cases = [
         ("st.global.v2.b32 [%x], {%f1, %i1};", Some(format!("{types} st instruction"))),
+        ("st.global.v2.f32 [%x], {%f1, %i1};", Some(format!("{types} st instruction"))),
         ("ld.global.v2.b32 {%f1, %i1}, [%x];", Some(format!("{types} ld instruction"))),
         ("ldu.global.v2.b32 {%f1, %i1}, [%x];", Some(format!("{types} ldu instruction"))),
         ("mov.b64 %z1, {%f1, %i1};", Some(format!("{types} mov instruction"))),
@@ -3945,7 +4093,7 @@ impl Making {
             {
                 ["tid.x", "clock64"]
                     .into_iter()
-                    .find(|s| forms::sreg(s).is_some_and(|r| r.read_as(t, b.form.wide)))
+                    .find(|s| forms::sreg(s).is_some_and(|r| r.read_as(t, b.form.wide, spec.count != Count::One)))
                     .map(|s| Given::Special(s.into()))
             } else if let Some((lo, hi)) =
                 spec.range.or(spec.mask.map(|m| (0, m))).filter(|_| spec.role == Role::Src && !spec.reg_only)

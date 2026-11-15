@@ -645,46 +645,51 @@ in coordinates and offsets, as it checks each operand against the one before it 
 own: kernite refuses it there too. Any special register goes where `cvt` reads its source, and `st` and `sust` the data
 of their vector, as an integer, or bits, of no more bits than it has: `cvt.u32.u8(i, laneid)`, `(laneid, laneid)` in a
 vector of 16 bits, and `(clock64, clock64)` in one of 32. An integer, or bits, of more bits is an error,
-`cvt.u64.u64(u, laneid)` and `(laneid, laneid)` in a vector of 64, as `ptxas` refuses it. An `f32` beside a `u32`, or a
-`u16` beside a `u32`, is an error at the operand that does not go with one before it, in `st`, `ld`, `ldu`, `mov`,
-`suld.b`, `sust.b`, `sust.p`, `ldmatrix` and `mma`, as `ptxas` refuses it. So is an `f32` beside an integer known now in
-a vector of bits, `(f, 1)`, a `u64` beside `tid.x`, or `tid.x` beside a value, in a vector that takes values or special
-registers. The layer of an array of textures, the first of its vector, is apart: an integer beside floats. `ptxas`
-checks each operand against the one before it alone, and takes `(f, b, i, i)`, an `f32` or an `f16x2` and a `u32` with a
-`b32` between, `(f, b, 1, 1)` and `(f, tid.x, i, i)`, which looks like a bug of its own: kernite checks each against
-each before it, and refuses it. In a vector of bits, `ptxas` refuses a float known now first beside a register of 64
-bits, `(1.5, d)`, and takes it elsewhere, `(d, 1.5)` and `(d, d, 1.5, d)`: kernite refuses it in every place. PTX keeps
-a `bf16`, `bf16x2` or `tf32` variable in a `b16` or `b32` register, and kernite takes it wherever it takes one, as
-`ptxas` does: for an integer or a float of its size, in an instruction, beside an `f16x2` in a vector, as an address, as
-an argument of a helper and of a call, as the address a call calls at, as the result of a call, and in `ret`.
-`add.u32(i, b, i)` and `add.rn.f32(v, b, v)` write `b` as the operand, with no `mov` beside it.
-`fma.rn.bf16x2(b, x, b, b)` takes a `tf32` or a `b32` for `x`, and no `u32`, `f32` or `f16x2`, as `ptxas` takes none.
-Where `ptxas` takes more than PTX's ISA has, and reads it as the ISA reads the rest, kernite takes it too: `sust.p` with
-a cache operation, as `sust.b` has, or an `mma` fragment `(a, 8)`, a value beside a variable. An `f16x2` variable is one
-more, where an instruction takes a `u32` or an `s32` variable: `ptxas` reads its 32 bits as a `b32`'s, and so does
-kernite. `add.u32(i, h, n)` writes `h` as the operand, with no `mov` beside it, and `vadd.u32.u32.u32(i, h.b0, n)`
-writes a part of it. kernite refuses it where `ptxas` does: negated, as an array's layer, beside a register of another
-type in a vector, and in each operand the table marks with `~`, as the count of a shift, a result of `clz`, a fragment
-of `mma`, the time of `nanosleep.u32`, and the last operand of `vadd4.u32.u32.u32.add`, which `ptxas` makes a `dp4a` of.
-In a vector it is one only where each other operand goes with an `f16x2`: an `f16x2`, a `b32`, `_` or a special
-register, `(h, tid.x)`, and no `u32`, `s32` or value known now, `(h, i)` or `(h, 1)`, as it is a float of its own.
-kernite takes none in the vector of `tex.a2dms`: `ptxas` checks no type of its sample, and takes a predicate there,
-which looks like a bug of its own. An instruction that wants an `f16x2` takes no integer, one that wants an `f32` takes
-no `f16x2`, and none takes an `f16x2` for a predicate, where `ptxas` reads 32 bits, not one. A call takes an `f16x2` for
-a `u32`, an `s32` or an `f32`, as an argument and as a result. `ret` gives one back for a `u32` or an `s32`, not for an
-`f32`, as `ptxas` takes it. A function of an `f16x2`, a `bf16x2` or a `tf32`, whose `.param` is a `.b32`, takes a
-variable of any type of 32 bits for it, writes one with its result, and gives back one with `ret`. Where a value known
-now would be cut to fewer bits, by `ptxas` or by the instruction as the ISA has it, or is one the ISA leaves undefined,
-kernite refuses it, and the table says so: `lop3`'s table is 8 bits, and `ptxas` takes a bigger one and keeps its low 8;
-`shfl` reads its lane in the low 5 bits of `b`; and a barrier counts 1024 threads at most, the most a CTA has. A mask of
-lanes, which names the threads of a warp that take part, may not leave out lane 0 where thread 0 runs the instruction:
-thread 0 is in lane 0, and the ISA leaves the instruction undefined in a thread outside its mask. Thread 0 runs the
-instruction where no `if` guards it and no `ret`, `exit`, `trap`, call or jump keeps thread 0 from it. kernite refuses a
-mask known now that leaves out lane 0 there, and takes one in a variable. It does not look inside a function that
-kernels call. Where `ptxas` takes less, kernite does too: `st` stores a special register only as one of a vector's,
-`cvt` to a float reads none, and `mov.f32` and `mov.f64` read none, not `envreg0`, a `b32`, for an `f32`: `mov.b32`
-reads it. And kernite checks what `ptxas` leaves to the program: that an access stays in the memory it names, at a
-multiple of the bytes it moves. Each form, and each of its words, says the oldest version of PTX and the oldest GPU
+`cvt.u64.u64(u, laneid)` and `(laneid, laneid)` in a vector of 64, as `ptxas` refuses it. A special register goes in a
+vector of floats too, by its size, as bits: `(f, tid.x)` and `(laneid, laneid)` in `st.global.v2.f32`, `(d, gridid)` in
+`st.global.v2.f64`, and `[s, (f, tid.x)]` in the coordinates of `tex` and `tld4`, which take one of as many bits as the
+float, and `st` one of more too, `(gridid, gridid)` in `st.global.v2.f32`. In a vector of floats, `ptxas` takes one of
+bits the vector does not take after a float known now, `(1.5, gridid)` in the coordinates of `tex` and
+`(1.5f64, laneid)` in `st.global.v2.f64`, as it takes `(1, gridid)` in a vector of 32 bits, and refuses it before one:
+kernite refuses it in both. An `f32` beside a `u32`, or a `u16` beside a `u32`, is an error at the operand that does not
+go with one before it, in `st`, `ld`, `ldu`, `mov`, `suld.b`, `sust.b`, `sust.p`, `ldmatrix` and `mma`, as `ptxas`
+refuses it. So is an `f32` beside an integer known now in a vector of bits, `(f, 1)`, a `u64` beside `tid.x`, or `tid.x`
+beside a value, in a vector that takes values or special registers. The layer of an array of textures, the first of its
+vector, is apart: an integer beside floats. `ptxas` checks each operand against the one before it alone, and takes
+`(f, b, i, i)`, an `f32` or an `f16x2` and a `u32` with a `b32` between, `(f, b, 1, 1)` and `(f, tid.x, i, i)`, which
+looks like a bug of its own: kernite checks each against each before it, and refuses it. In a vector of bits, `ptxas`
+refuses a float known now first beside a register of 64 bits, `(1.5, d)`, and takes it elsewhere, `(d, 1.5)` and
+`(d, d, 1.5, d)`: kernite refuses it in every place. PTX keeps a `bf16`, `bf16x2` or `tf32` variable in a `b16` or `b32`
+register, and kernite takes it wherever it takes one, as `ptxas` does: for an integer or a float of its size, in an
+instruction, beside an `f16x2` in a vector, as an address, as an argument of a helper and of a call, as the address a
+call calls at, as the result of a call, and in `ret`. `add.u32(i, b, i)` and `add.rn.f32(v, b, v)` write `b` as the
+operand, with no `mov` beside it. `fma.rn.bf16x2(b, x, b, b)` takes a `tf32` or a `b32` for `x`, and no `u32`, `f32` or
+`f16x2`, as `ptxas` takes none. Where `ptxas` takes more than PTX's ISA has, and reads it as the ISA reads the rest,
+kernite takes it too: `sust.p` with a cache operation, as `sust.b` has, or an `mma` fragment `(a, 8)`, a value beside a
+variable. An `f16x2` variable is one more, where an instruction takes a `u32` or an `s32` variable: `ptxas` reads its 32
+bits as a `b32`'s, and so does kernite. `add.u32(i, h, n)` writes `h` as the operand, with no `mov` beside it, and
+`vadd.u32.u32.u32(i, h.b0, n)` writes a part of it. kernite refuses it where `ptxas` does: negated, as an array's layer,
+beside a register of another type in a vector, and in each operand the table marks with `~`, as the count of a shift, a
+result of `clz`, a fragment of `mma`, the time of `nanosleep.u32`, and the last operand of `vadd4.u32.u32.u32.add`,
+which `ptxas` makes a `dp4a` of. In a vector it is one only where each other operand goes with an `f16x2`: an `f16x2`, a
+`b32`, `_` or a special register, `(h, tid.x)`, and no `u32`, `s32` or value known now, `(h, i)` or `(h, 1)`, as it is a
+float of its own. kernite takes none in the vector of `tex.a2dms`: `ptxas` checks no type of its sample, and takes a
+predicate there, which looks like a bug of its own. An instruction that wants an `f16x2` takes no integer, one that
+wants an `f32` takes no `f16x2`, and none takes an `f16x2` for a predicate, where `ptxas` reads 32 bits, not one. A call
+takes an `f16x2` for a `u32`, an `s32` or an `f32`, as an argument and as a result. `ret` gives one back for a `u32` or
+an `s32`, not for an `f32`, as `ptxas` takes it. A function of an `f16x2`, a `bf16x2` or a `tf32`, whose `.param` is a
+`.b32`, takes a variable of any type of 32 bits for it, writes one with its result, and gives back one with `ret`. Where
+a value known now would be cut to fewer bits, by `ptxas` or by the instruction as the ISA has it, or is one the ISA
+leaves undefined, kernite refuses it, and the table says so: `lop3`'s table is 8 bits, and `ptxas` takes a bigger one
+and keeps its low 8; `shfl` reads its lane in the low 5 bits of `b`; and a barrier counts 1024 threads at most, the most
+a CTA has. A mask of lanes, which names the threads of a warp that take part, may not leave out lane 0 where thread 0
+runs the instruction: thread 0 is in lane 0, and the ISA leaves the instruction undefined in a thread outside its mask.
+Thread 0 runs the instruction where no `if` guards it and no `ret`, `exit`, `trap`, call or jump keeps thread 0 from it.
+kernite refuses a mask known now that leaves out lane 0 there, and takes one in a variable. It does not look inside a
+function that kernels call. Where `ptxas` takes less, kernite does too: `st` stores a special register only as one of a
+vector's, `cvt` to a float reads none, and `mov.f32` and `mov.f64` read none, not `envreg0`, a `b32`, for an `f32`:
+`mov.b32` reads it. And kernite checks what `ptxas` leaves to the program: that an access stays in the memory it names,
+at a multiple of the bytes it moves. Each form, and each of its words, says the oldest version of PTX and the oldest GPU
 `ptxas` takes it at, back to PTX 1.0, which is at times older than the ISA says: `ptxas` takes `ld.mmio.acquire` for
 `sm_70`, which the ISA has from `sm_75`. A module's `.version` and `.target` are the oldest that have every instruction
 of its kernels and functions, those that `cfg` keeps, and never older than PTX 3.0 and `sm_30`: the driver starts at
