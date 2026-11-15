@@ -10,7 +10,7 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use kernite::lang::{IntTy, Mem as Address, Operand as Given, Target, Value};
+use kernite::lang::{IntTy, Mem as Address, Operand as Given, Target, Value, with_article};
 use kernite::{Assembly, Kept};
 use kernite_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Sel, Space, Spec};
 use kernite_ptx::lang::{Callee, Kernel, Var};
@@ -170,7 +170,15 @@ fn compile(params: &str, body: &str) -> Result<String, String> {
 #[test]
 fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
     let cases = [
-        ("let i: u32; add.rn.f32(i, x, x);", "2:24: `add.rn.f32` wants a `f32` variable; this is a `u32`"),
+        ("let i: u32; add.rn.f32(i, x, x);", "2:24: `add.rn.f32` wants an `f32` variable; this is a `u32`"),
+        (
+            "let (v, b): (f32, bf16); mov.f32(v, 1.5); add.rn.f32(v, v, b);",
+            "2:60: `add.rn.f32` wants an `f32` variable; this is a `bf16`",
+        ),
+        (
+            "let v: f32; mov.f32(v, 1.5); st.global.u32([x], v);",
+            "2:49: `st.global.u32` wants a `u32` variable; this is an `f32`",
+        ),
         (
             "let v: f32; add.f32(v, v, v);",
             "2:17: `add.f32` leaves ptxas to choose how it rounds, and to fuse it; say so: `add.rn.f32`",
@@ -184,6 +192,30 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
             "2:30: `ld.global.f32` takes an address of a variable and a displacement; work out `p + 4 * i` first, as `mad.wide.u32(a, i, 4, p)` does",
         ),
         ("let v: f32; ld.f32(v, [n]);", "2:23: `ld.f32` takes an address in a 64-bit variable; this is a `u32`"),
+        (
+            "let (v, i): (f32, s32); mov.s32(i, 0); ld.f32(v, [i]);",
+            "2:50: `ld.f32` takes an address in a 64-bit variable; this is an `s32`",
+        ),
+        (
+            "let (v, b): (f32, b32); mov.b32(b, 0); ld.f32(v, [b]);",
+            "2:50: `ld.f32` takes an address in a 64-bit variable; this is a `b32`",
+        ),
+        (
+            "let (v, f): (f32, f32); mov.f32(f, 1.5); ld.f32(v, [f]);",
+            "2:52: `ld.f32` takes an address in an integer variable; this is an `f32`",
+        ),
+        (
+            "let (v, p): (f32, pred); setp.eq.u32(p, n, 0); ld.f32(v, [p]);",
+            "2:58: `ld.f32` takes an address in an integer variable; this is a `pred`",
+        ),
+        (
+            "let (v, i): (f32, s16); mov.s16(i, 0); ld.shared.f32(v, [i]);",
+            "2:57: `ld.shared.f32` takes an address in 32 bits or 64; this is an `s16`",
+        ),
+        (
+            "let (v, i): (f32, u16); mov.u16(i, 0); ld.shared.f32(v, [i]);",
+            "2:57: `ld.shared.f32` takes an address in 32 bits or 64; this is a `u16`",
+        ),
         ("let v: f32; ld.glob.f32(v, [x]);", "2:21: PTX's `ld` has no `.glob` that kernite knows"),
         ("let i: u32; add.u32(i, tid.x, 1);", "2:28: `add.u32` reads no special register; `mov.u32` does"),
         // `ptxas` 13.5 takes no special register in a `mov` of a float: not `envreg0`, a `b32`, for an `f32`, and not
@@ -195,7 +227,7 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         // register: "Vector with elements of different types".
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); st.global.v2.f32([x], (f, i));",
-            "2:79: `st.global.v2.f32` wants a `f32` variable; this is a `u32`",
+            "2:79: `st.global.v2.f32` wants an `f32` variable; this is a `u32`",
         ),
         // A vector that takes no special register, or that the instruction writes, says so, whatever the bits of the
         // register.
@@ -210,54 +242,58 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ),
         ("let i: u32; mov.u32(i, tod.x);", "2:28: `tod.x` is not defined"),
         ("let i: u32; if n { mov.u32(i, 1); }", "2:24: an instruction is guarded by a `pred`; this is a `u32`"),
+        (
+            "let v: f32; mov.f32(v, 1.5); if v { mov.f32(v, 1.5); }",
+            "2:41: an instruction is guarded by a `pred`; this is an `f32`",
+        ),
         // ptxas 13.5 takes an `f16x2` for the predicate that `and`, `or`, `xor`, `not` and `mov` read, but reads its 32
         // bits, where a predicate is one bit: kernite takes it for no predicate.
         (
             "let (h, p): (f16x2, pred); mov.b32(h, n); and.pred(p, h, h);",
-            "2:55: `and.pred` wants a `pred` variable; this is a `f16x2`",
+            "2:55: `and.pred` wants a `pred` variable; this is an `f16x2`",
         ),
         (
             "let (h, p): (f16x2, pred); mov.b32(h, n); or.pred(p, h, h);",
-            "2:54: `or.pred` wants a `pred` variable; this is a `f16x2`",
+            "2:54: `or.pred` wants a `pred` variable; this is an `f16x2`",
         ),
         (
             "let (h, p): (f16x2, pred); mov.b32(h, n); xor.pred(p, h, h);",
-            "2:55: `xor.pred` wants a `pred` variable; this is a `f16x2`",
+            "2:55: `xor.pred` wants a `pred` variable; this is an `f16x2`",
         ),
         (
             "let (h, p): (f16x2, pred); mov.b32(h, n); not.pred(p, h);",
-            "2:55: `not.pred` wants a `pred` variable; this is a `f16x2`",
+            "2:55: `not.pred` wants a `pred` variable; this is an `f16x2`",
         ),
         (
             "let (h, p): (f16x2, pred); mov.b32(h, n); mov.pred(p, h);",
-            "2:55: `mov.pred` wants a `pred` variable; this is a `f16x2`",
+            "2:55: `mov.pred` wants a `pred` variable; this is an `f16x2`",
         ),
         (
             "let (h, i): (f16x2, u32); mov.b32(h, n); if h { mov.u32(i, 1); }",
-            "2:53: an instruction is guarded by a `pred`; this is a `f16x2`",
+            "2:53: an instruction is guarded by a `pred`; this is an `f16x2`",
         ),
         // ptxas 13.5 takes an `f16x2` where an instruction wants a `u32` or an `s32`, and kernite does. It takes no
         // integer where an instruction wants an `f16x2`, no `f16x2` where one wants an `f32`, no `f16` where one
         // wants an integer of 16 bits and no integer of 16 bits where one wants an `f16`: kernite takes none.
         (
             "let h: f16x2; mov.b32(h, n); add.rn.f16x2(h, h, n);",
-            "2:49: `add.rn.f16x2` wants a `f16x2` variable; this is a `u32`",
+            "2:49: `add.rn.f16x2` wants an `f16x2` variable; this is a `u32`",
         ),
         (
             "let (h, s): (f16x2, s32); mov.b32(h, n); mov.s32(s, 1); add.rn.f16x2(h, h, s);",
-            "2:76: `add.rn.f16x2` wants a `f16x2` variable; this is a `s32`",
+            "2:76: `add.rn.f16x2` wants an `f16x2` variable; this is an `s32`",
         ),
         (
             "let (v, h): (f32, f16x2); mov.b32(h, n); add.rn.f32(v, h, h);",
-            "2:56: `add.rn.f32` wants a `f32` variable; this is a `f16x2`",
+            "2:56: `add.rn.f32` wants an `f32` variable; this is an `f16x2`",
         ),
         (
             "let (a, h): (u16, f16); mov.b16(h, 1); mov.u16(a, 1); add.u16(a, h, h);",
-            "2:66: `add.u16` wants a `u16` variable; this is a `f16`",
+            "2:66: `add.u16` wants a `u16` variable; this is an `f16`",
         ),
         (
             "let (a, h): (u16, f16); mov.b16(h, 1); mov.u16(a, 1); add.rn.f16(h, a, a);",
-            "2:69: `add.rn.f16` wants a `f16` variable; this is a `u16`",
+            "2:69: `add.rn.f16` wants an `f16` variable; this is a `u16`",
         ),
         // ptxas 13.5 takes a `.b32` for an operand of `fma.rn.bf16x2`, which a `tf32` is, and refuses a `.u32`, an
         // `.f32` and an `.f16x2`: kernite takes the `tf32`, as `KEPT` has it, and refuses each of the others.
@@ -267,11 +303,11 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ),
         (
             "let (b, x): (bf16x2, f32); mov.b32(b, n); mov.f32(x, 1.5); fma.rn.bf16x2(b, x, b, b);",
-            "2:77: `fma.rn.bf16x2` wants a `bf16x2` variable; this is a `f32`",
+            "2:77: `fma.rn.bf16x2` wants a `bf16x2` variable; this is an `f32`",
         ),
         (
             "let (b, x): (bf16x2, f16x2); mov.b32(b, n); mov.b32(x, n); fma.rn.bf16x2(b, x, b, b);",
-            "2:77: `fma.rn.bf16x2` wants a `bf16x2` variable; this is a `f16x2`",
+            "2:77: `fma.rn.bf16x2` wants a `bf16x2` variable; this is an `f16x2`",
         ),
         // ptxas 13.5 refuses an `f16x2` for the count of a shift, a result of `clz` or `popc`, an element of a vector
         // beside one of another type, an operand that is negated, the time of `nanosleep.u32`, an operand of
@@ -281,62 +317,62 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         // `b32` between, which looks like a bug of its own: kernite refuses that too.
         (
             "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); shr.u32(g, g, h);",
-            "2:71: `shr.u32` wants a `u32` variable; this is a `f16x2`",
+            "2:71: `shr.u32` wants a `u32` variable; this is an `f16x2`",
         ),
         (
             "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); clz.b32(h, g);",
-            "2:65: `clz.b32` wants a `u32` variable; this is a `f16x2`",
+            "2:65: `clz.b32` wants a `u32` variable; this is an `f16x2`",
         ),
         (
             "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); popc.b32(h, g);",
-            "2:66: `popc.b32` wants a `u32` variable; this is a `f16x2`",
+            "2:66: `popc.b32` wants a `u32` variable; this is an `f16x2`",
         ),
         (
             "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); ld.global.v2.u32((g, h), [x]);",
             "2:78: `ld.global.v2.u32` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `f16x2` variable beside a `u32` variable",
+             beside an integer; this is an `f16x2` variable beside a `u32` variable",
         ),
         (
             "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); st.global.v2.u32([x], (g, h));",
             "2:83: `st.global.v2.u32` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `f16x2` variable beside a `u32` variable",
+             beside an integer; this is an `f16x2` variable beside a `u32` variable",
         ),
         (
             "let (h, b): (f16x2, b32); mov.b32(h, n); mov.b32(b, n); st.global.v4.u32([x], (h, b, n, n));",
             "2:86: `st.global.v4.u32` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `u32` variable beside a `f16x2` variable",
+             beside an integer; this is a `u32` variable beside an `f16x2` variable",
         ),
         (
             "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); vmad.u32.u32.u32(g, -h, n, n);",
-            "2:77: `vmad.u32.u32.u32` wants a `u32` variable; this is a `f16x2`",
+            "2:77: `vmad.u32.u32.u32` wants a `u32` variable; this is an `f16x2`",
         ),
         (
             "let h: f16x2; mov.b32(h, n); nanosleep.u32(h);",
-            "2:44: `nanosleep.u32` wants a `u32` variable; this is a `f16x2`",
+            "2:44: `nanosleep.u32` wants a `u32` variable; this is an `f16x2`",
         ),
         (
             "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); redux.sync.add.u32(g, h, 0xffffffff);",
-            "2:79: `redux.sync.add.u32` wants a `u32` variable; this is a `f16x2`",
+            "2:79: `redux.sync.add.u32` wants a `u32` variable; this is an `f16x2`",
         ),
         (
             "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); redux.sync.min.s32(g, h, 0xffffffff);",
-            "2:79: `redux.sync.min.s32` wants a `s32` variable; this is a `f16x2`",
+            "2:79: `redux.sync.min.s32` wants an `s32` variable; this is an `f16x2`",
         ),
         (
             "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); redux.sync.max.s32(h, g, 0xffffffff);",
-            "2:76: `redux.sync.max.s32` wants a `s32` variable; this is a `f16x2`",
+            "2:76: `redux.sync.max.s32` wants an `s32` variable; this is an `f16x2`",
         ),
         (
             "let h: f16x2; mov.b32(h, n); bar.warp.sync(h);",
-            "2:44: `bar.warp.sync` wants a `u32` variable; this is a `f16x2`",
+            "2:44: `bar.warp.sync` wants a `u32` variable; this is an `f16x2`",
         ),
         (
             "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); vadd4.u32.u32.u32.add(g, g, g, h);",
-            "2:88: `vadd4.u32.u32.u32.add` wants a `u32` variable; this is a `f16x2`",
+            "2:88: `vadd4.u32.u32.u32.add` wants a `u32` variable; this is an `f16x2`",
         ),
         (
             "let (g, h): (u32, f16x2); mov.b32(h, n); mov.u32(g, 1); vsub4.u32.u32.u32.add(g, g, g, h);",
-            "2:88: `vsub4.u32.u32.u32.add` wants a `u32` variable; this is a `f16x2`",
+            "2:88: `vsub4.u32.u32.u32.add` wants a `u32` variable; this is an `f16x2`",
         ),
         // ptxas 13.5 takes `_` for one result of `wmma.mma` of `f16.f32` and of the integers on Turing and on Ampere,
         // of `f32.f32` on Ampere alone, and of `tf32` on none: kernite takes it only where both do.
@@ -523,38 +559,38 @@ fn the_registers_of_a_vector_are_of_one_size_and_one_type() {
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); st.global.v2.b32([x], (f, i));",
             "2:83: `st.global.v2.b32` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `u32` variable beside a `f32` variable",
+             beside an integer; this is a `u32` variable beside an `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); ld.global.v2.b32((f, i), [x]);",
             "2:78: `ld.global.v2.b32` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `u32` variable beside a `f32` variable",
+             beside an integer; this is a `u32` variable beside an `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); ldu.global.v2.b32((f, i), [x]);",
             "2:79: `ldu.global.v2.b32` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `u32` variable beside a `f32` variable",
+             beside an integer; this is a `u32` variable beside an `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let z: b64; mov.b64(z, (f, i));",
             "2:84: `mov.b64` takes the operands of a vector of one type, bits beside any and an integer beside an \
-             integer; this is a `u32` variable beside a `f32` variable",
+             integer; this is a `u32` variable beside an `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let z: b64; mov.b64(z, x); mov.b64((f, i), z);",
             "2:96: `mov.b64` takes the operands of a vector of one type, bits beside any and an integer beside an \
-             integer; this is a `u32` variable beside a `f32` variable",
+             integer; this is a `u32` variable beside an `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); st.global.v2.b32([x], (i, f));",
             "2:83: `st.global.v2.b32` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `f32` variable beside a `u32` variable",
+             beside an integer; this is an `f32` variable beside a `u32` variable",
         ),
         // An `s32` beside an `f32`, an integer beside a float.
         (
             "let (g, s): (f32, s32); mov.f32(g, 1.5); mov.s32(s, 1); st.global.v2.b32([x], (s, g));",
             "2:83: `st.global.v2.b32` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `f32` variable beside a `s32` variable",
+             beside an integer; this is an `f32` variable beside an `s32` variable",
         ),
         // Each register against each before it, not against its neighbour alone, which `ptxas` 13.5 does, and
         // so takes `(f, b, i, i)`, an `f32` and a `u32` with a `b32` between.
@@ -562,36 +598,36 @@ fn the_registers_of_a_vector_are_of_one_size_and_one_type() {
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let b: b32; mov.b32(b, n); st.global.v4.b32([x], \
              (f, b, i, i));",
             "2:113: `st.global.v4.b32` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `u32` variable beside a `f32` variable",
+             beside an integer; this is a `u32` variable beside an `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let b: b32; mov.b32(b, n); st.global.v4.b32([x], \
              (i, b, f, b));",
             "2:113: `st.global.v4.b32` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `f32` variable beside a `u32` variable",
+             beside an integer; this is an `f32` variable beside a `u32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let b: b32; mov.b32(b, n); ld.global.v4.b32((b, \
              f, b, i), [x]);",
             "2:111: `ld.global.v4.b32` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `u32` variable beside a `f32` variable",
+             beside an integer; this is a `u32` variable beside an `f32` variable",
         ),
         // An `f16x2` beside an `f32`: two types of floats.
         (
             "let (h, f): (f16x2, f32); mov.b32(h, n); mov.f32(f, 1.5); st.global.v2.b32([x], (h, f));",
             "2:85: `st.global.v2.b32` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `f32` variable beside a `f16x2` variable",
+             beside an integer; this is an `f32` variable beside an `f16x2` variable",
         ),
         // Registers of 16 bits and of 64 bits.
         (
             "let (h, a): (f16, u16); mov.b16(h, 1.5f16); mov.u16(a, 1); st.global.v2.b16([x], (h, a));",
             "2:86: `st.global.v2.b16` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `u16` variable beside a `f16` variable",
+             beside an integer; this is a `u16` variable beside an `f16` variable",
         ),
         (
             "let (d, u): (f64, u64); mov.f64(d, 1.5f64); mov.u64(u, 1); st.global.v2.b64([x], (d, u));",
             "2:86: `st.global.v2.b64` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `u64` variable beside a `f64` variable",
+             beside an integer; this is a `u64` variable beside an `f64` variable",
         ),
         // Registers of two sizes, which `ld` and `st` take for a type of fewer bits than either, wide, but not
         // together.
@@ -614,30 +650,30 @@ fn the_registers_of_a_vector_are_of_one_size_and_one_type() {
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); sust.b._2d.v2.b32.trap([s, (n, n)], (f, i));",
             "2:97: `sust.b.2d.v2.b32.trap` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `u32` variable beside a `f32` variable",
+             beside an integer; this is a `u32` variable beside an `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); sust.p._2d.v2.b32.trap([s, (n, n)], (f, i));",
             "2:97: `sust.p.2d.v2.b32.trap` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `u32` variable beside a `f32` variable",
+             beside an integer; this is a `u32` variable beside an `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); suld.b._2d.v2.b32.trap((f, i), [s, (n, n)]);",
             "2:84: `suld.b.2d.v2.b32.trap` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `u32` variable beside a `f32` variable",
+             beside an integer; this is a `u32` variable beside an `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); ldmatrix.sync.aligned.m8n8.x2.shared.b16((f, i), \
              [n]);",
             "2:102: `ldmatrix.sync.aligned.m8n8.x2.shared.b16` takes the operands of a vector of one type, bits \
-             beside any and an integer beside an integer; this is a `u32` variable beside a `f32` variable",
+             beside any and an integer beside an integer; this is a `u32` variable beside an `f32` variable",
         ),
         (
             "let (f, i): (f32, u32); mov.f32(f, 1.5); mov.u32(i, n); let (c0, c1, c2, c3): (s32, s32, s32, s32); let \
              b: b32; mov.b32(b, n); mov.s32(c0, 0); mov.s32(c1, 0); mov.s32(c2, 0); mov.s32(c3, 0); \
              mma.sync.aligned.m16n8k128.row.col.s32.b1.b1.s32.xor.popc((c0, c1, c2, c3), (f, i), b, (c0, c1, c2, c3));",
             "2:272: `mma.sync.aligned.m16n8k128.row.col.s32.b1.b1.s32.xor.popc` takes the operands of a vector of one \
-             type, bits beside any and an integer beside an integer; this is a `u32` variable beside a `f32` variable",
+             type, bits beside any and an integer beside an integer; this is a `u32` variable beside an `f32` variable",
         ),
     ];
     for (body, want) in cases {
@@ -712,13 +748,13 @@ const BOTH_REFUSE: &[Apart] = &[
         "st.global.v2.b32([x], (f, @1));",
         "st.global.v2.b32 [%x], {%f, 1};",
         Type,
-        "the integer 1 beside a `f32` variable",
+        "the integer 1 beside an `f32` variable",
     ),
     (
         "st.global.v2.b32([x], (1, @f));",
         "st.global.v2.b32 [%x], {1, %f};",
         Type,
-        "a `f32` variable beside the integer 1",
+        "an `f32` variable beside the integer 1",
     ),
     (
         "st.global.v2.b32([x], (i, @1.5));",
@@ -736,19 +772,19 @@ const BOTH_REFUSE: &[Apart] = &[
         "st.global.v2.b32([x], (j, @1.5));",
         "st.global.v2.b32 [%x], {%j, 0f3FC00000};",
         Type,
-        "the float 1.5 beside a `s32` variable",
+        "the float 1.5 beside an `s32` variable",
     ),
     (
         "st.global.v2.b32([x], (h, @1.5));",
         "st.global.v2.b32 [%x], {%h, 0f3FC00000};",
         Type,
-        "the float 1.5 beside a `f16x2` variable",
+        "the float 1.5 beside an `f16x2` variable",
     ),
     (
         "st.global.v2.b32([x], (h, @1));",
         "st.global.v2.b32 [%x], {%h, 1};",
         Type,
-        "the integer 1 beside a `f16x2` variable",
+        "the integer 1 beside an `f16x2` variable",
     ),
     (
         "st.global.v2.b32([x], (1, @1.5));",
@@ -760,7 +796,7 @@ const BOTH_REFUSE: &[Apart] = &[
         "st.global.v2.b64([x], (d, @1));",
         "st.global.v2.b64 [%x], {%d, 1};",
         Type,
-        "the integer 1 beside a `f64` variable",
+        "the integer 1 beside an `f64` variable",
     ),
     (
         "st.global.v2.b64([x], (u, @1.5f64));",
@@ -772,71 +808,71 @@ const BOTH_REFUSE: &[Apart] = &[
         "st.global.v2.b16([x], (l, @1));",
         "st.global.v2.b16 [%x], {%l, 1};",
         Type,
-        "the integer 1 beside a `f16` variable",
+        "the integer 1 beside an `f16` variable",
     ),
     (
         "st.global.v2.b16([x], (l, @1.5f16));",
         "st.global.v2.b16 [%x], {%l, 0x3E00};",
         Type,
-        "the f16 1.5, written as the integer 0x3E00, beside a `f16` variable",
+        "the f16 1.5, written as the integer 0x3E00, beside an `f16` variable",
     ),
     (
         "st.global.v2.b16([x], (1.5f16, @l));",
         "st.global.v2.b16 [%x], {0x3E00, %l};",
         Type,
-        "a `f16` variable beside the f16 1.5, written as the integer 0x3E00",
+        "an `f16` variable beside the f16 1.5, written as the integer 0x3E00",
     ),
     (
         "st.global.v2.b16([x], (l, @1.5bf16));",
         "st.global.v2.b16 [%x], {%l, 0x3FC0};",
         Type,
-        "the bf16 1.5, written as the integer 0x3FC0, beside a `f16` variable",
+        "the bf16 1.5, written as the integer 0x3FC0, beside an `f16` variable",
     ),
-    ("mov.b64(z, (f, @1));", "mov.b64 %z, {%f, 1};", Type, "the integer 1 beside a `f32` variable"),
-    ("mov.b64(z, (1, @f));", "mov.b64 %z, {1, %f};", Type, "a `f32` variable beside the integer 1"),
+    ("mov.b64(z, (f, @1));", "mov.b64 %z, {%f, 1};", Type, "the integer 1 beside an `f32` variable"),
+    ("mov.b64(z, (1, @f));", "mov.b64 %z, {1, %f};", Type, "an `f32` variable beside the integer 1"),
     ("mov.b64(z, (i, @1.5));", "mov.b64 %z, {%i, 0f3FC00000};", Type, "the float 1.5 beside a `u32` variable"),
     (
         "st.global.v4.b32([x], (f, @1, 2, 3));",
         "st.global.v4.b32 [%x], {%f, 1, 2, 3};",
         Type,
-        "the integer 1 beside a `f32` variable",
+        "the integer 1 beside an `f32` variable",
     ),
     (
         "st.global.v4.b32([x], (1, 2, 3, @f));",
         "st.global.v4.b32 [%x], {1, 2, 3, %f};",
         Type,
-        "a `f32` variable beside the integer 1",
+        "an `f32` variable beside the integer 1",
     ),
     (
         "sust.b._2d.v2.b32.trap([s, (n, n)], (f, @1));",
         "sust.b.2d.v2.b32.trap [%s, {%n, %n}], {%f, 1};",
         Type,
-        "the integer 1 beside a `f32` variable",
+        "the integer 1 beside an `f32` variable",
     ),
     // An `f16x2` for an integer, which `ptxas` takes beside an `f16x2`, a `b32`, `_` and a special register alone.
     (
         "st.global.v2.u32([x], (h, @i));",
         "st.global.v2.u32 [%x], {%h, %i};",
         Type,
-        "a `u32` variable beside a `f16x2` variable",
+        "a `u32` variable beside an `f16x2` variable",
     ),
     (
         "st.global.v2.b32([x], (h, @i));",
         "st.global.v2.b32 [%x], {%h, %i};",
         Type,
-        "a `u32` variable beside a `f16x2` variable",
+        "a `u32` variable beside an `f16x2` variable",
     ),
     (
         "st.global.v2.u32([x], (h, @j));",
         "st.global.v2.u32 [%x], {%h, %j};",
         Type,
-        "a `s32` variable beside a `f16x2` variable",
+        "an `s32` variable beside an `f16x2` variable",
     ),
     (
         "st.global.v2.u32([x], (h, @1));",
         "st.global.v2.u32 [%x], {%h, 1};",
         Type,
-        "the integer 1 beside a `f16x2` variable",
+        "the integer 1 beside an `f16x2` variable",
     ),
     // A special register of another size, which `ptxas` checks by its size alone.
     (
@@ -867,20 +903,20 @@ const BOTH_REFUSE: &[Apart] = &[
         "st.global.v2.b32([x], (d, @laneid));",
         "st.global.v2.b32 [%x], {%d, %laneid};",
         Size,
-        "`laneid` beside a `f64` variable",
+        "`laneid` beside an `f64` variable",
     ),
     (
         "st.global.v2.f32([x], (f, @gridid));",
         "st.global.v2.f32 [%x], {%f, %gridid};",
         Size,
-        "`gridid` beside a `f32` variable",
+        "`gridid` beside an `f32` variable",
     ),
     // A float known now first in a vector of bits, beside a register of 64 bits.
     (
         "st.global.v2.b32([x], (1.5, @d));",
         "st.global.v2.b32 [%x], {0f3FC00000, %d};",
         Order,
-        "a `f64` variable beside the float 1.5",
+        "an `f64` variable beside the float 1.5",
     ),
     (
         "st.global.v2.b32([x], (1.5, @z));",
@@ -1094,19 +1130,19 @@ const ONLY_KERNITE_REFUSES: &[Apart] = &[
         "st.global.v4.b32([x], (f, b, @1, 1));",
         "st.global.v4.b32 [%x], {%f, %b, 1, 1};",
         Type,
-        "the integer 1 beside a `f32` variable",
+        "the integer 1 beside an `f32` variable",
     ),
     (
         "st.global.v4.b32([x], (f, tid.x, @i, i));",
         "st.global.v4.b32 [%x], {%f, %tid.x, %i, %i};",
         Type,
-        "a `u32` variable beside a `f32` variable",
+        "a `u32` variable beside an `f32` variable",
     ),
     (
         "st.global.v2.b32([x], (d, @1.5));",
         "st.global.v2.b32 [%x], {%d, 0f3FC00000};",
         Size,
-        "the float 1.5 beside a `f64` variable",
+        "the float 1.5 beside an `f64` variable",
     ),
     (
         "st.global.v2.b32([x], (z, @1.5));",
@@ -1118,7 +1154,7 @@ const ONLY_KERNITE_REFUSES: &[Apart] = &[
         "st.global.v4.b32([x], (d, d, @1.5, d));",
         "st.global.v4.b32 [%x], {%d, %d, 0f3FC00000, %d};",
         Size,
-        "the float 1.5 beside a `f64` variable",
+        "the float 1.5 beside an `f64` variable",
     ),
     ("mov.b64(z, (1, @gridid));", "mov.b64 %z, {1, %gridid};", Wide, GRIDID),
     (
@@ -1219,25 +1255,25 @@ const FLOAT_FIRST: [(&str, &str, bool, &str); 4] = [
         "tex._2d.v4.f32.f32((r0, r1, r2, r3), @[s, (1.5, gridid)]);",
         "tex.2d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {0f3FC00000, %gridid}];",
         true,
-        "reads a `f32`; `gridid` is a `u64`",
+        "reads an `f32`; `gridid` is a `u64`",
     ),
     (
         "tex._2d.v4.f32.f32((r0, r1, r2, r3), @[s, (gridid, 1.5)]);",
         "tex.2d.v4.f32.f32 {%r0, %r1, %r2, %r3}, [%s, {%gridid, 0f3FC00000}];",
         false,
-        "reads a `f32`; `gridid` is a `u64`",
+        "reads an `f32`; `gridid` is a `u64`",
     ),
     (
         "st.global.v2.f64([x], @(1.5f64, laneid));",
         "st.global.v2.f64 [%x], {0d3FF8000000000000, %laneid};",
         true,
-        "reads a `f64`; `laneid` is a `u32`",
+        "reads an `f64`; `laneid` is a `u32`",
     ),
     (
         "st.global.v2.f64([x], @(laneid, 1.5f64));",
         "st.global.v2.f64 [%x], {%laneid, 0d3FF8000000000000};",
         false,
-        "reads a `f64`; `laneid` is a `u32`",
+        "reads an `f64`; `laneid` is a `u32`",
     ),
 ];
 
@@ -1339,7 +1375,12 @@ fn a_special_register_goes_where_its_bits_are_those_the_instruction_reads() {
                 let name = before[..before.find('(').unwrap()].replace("._", ".");
                 let field = if after.starts_with(['(', '[']) { 0 } else { r.name.find('.').map_or(0, |dot| dot + 1) };
                 let col = body.len() - after.len() + 1 + field;
-                let want = format!("2:{col}: `{name}` reads a `{}`; `{}` is a `{}`", place.ty, r.name, r.ty.name());
+                let want = format!(
+                    "2:{col}: `{name}` reads {}; `{}` is {}",
+                    with_article(&place.ty),
+                    r.name,
+                    with_article(r.ty.name())
+                );
                 assert_eq!(got.unwrap_err(), want, "{kernel}");
             }
         }
@@ -1967,6 +2008,14 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
             "2:36: `cvt.rn.u32.u16` converts an integer to an integer, which does not round: `cvt.u32.u16`",
         ),
         (
+            "let (i, s): (s32, s16); cvt.sat.s32.s16(i, s);",
+            "2:37: `cvt.sat.s32.s16` has nothing to saturate: an `s32` holds every `s16`",
+        ),
+        (
+            "let (i, s): (u32, u16); cvt.sat.u32.u16(i, s);",
+            "2:37: `cvt.sat.u32.u16` has nothing to saturate: a `u32` holds every `u16`",
+        ),
+        (
             "let i: u32; cvt.u32.f32(i, 1.5);",
             "2:21: `cvt.u32.f32` converts a float to an integer, so it says how it rounds to one: `cvt.rni.u32.f32` \
              to the nearest, `cvt.rzi` toward zero",
@@ -2085,7 +2134,7 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         ),
         (
             "let (a, b): (f32, f32); mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32((a, b), n, n, (a, b));",
-            "2:74: `mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32` wants 4 operands taken together, each a `f32` \
+            "2:74: `mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32` wants 4 operands taken together, each an `f32` \
              variable to write, or `_`; this is 2 operands taken together",
         ),
         (
@@ -2109,10 +2158,28 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         ),
         (
             "let g: f16; add.rn.f16(g, h, 1.5);",
-            "2:30: `add.rn.f16` takes a `f16` only from a variable: `mov.b16(h, 1.5f16)` puts one in it",
+            "2:30: `add.rn.f16` takes an `f16` only from a variable: `mov.b16(h, 1.5f16)` puts one in it",
         ),
         ("let v: f64; mov.f64(v, 1.5);", "2:24: `mov.f64` wants an `f64`; 1.5 is an `f32`: `1.5f64`"),
         ("let i: u16; mov.u16(i, clock);", "2:24: `mov.u16` reads a `u16`; `clock` is a `u32`"),
+        ("let q: s64; mov.s64(q, tid.x);", "2:28: `mov.s64` reads an `s64`; `tid.x` is a `u32`"),
+        (
+            "setp.eq.u32(1, n, 0);",
+            "2:13: `setp.eq.u32` wants a `pred` variable to write, or `_`; this is the integer 1",
+        ),
+        (
+            "let v: f32; mov.f32(v, 1.5); add.rn.f32(v, v, [x]);",
+            "2:47: `add.rn.f32` wants an `f32` variable or a value; this is an address",
+        ),
+        (
+            "let v: f32; mov.f32(v, 1.5); add.rn.f32(v, v, 16777217);",
+            "2:47: `add.rn.f32` wants an `f32`; 16777217 is not one",
+        ),
+        (
+            "let v: f32; mov.f32(v, 1.5); add.rn.f32(1.5, v, v);",
+            "2:41: `add.rn.f32` wants an `f32` variable to write; this is the float 1.5",
+        ),
+        ("let i: u32; add.u32(1, i, i);", "2:21: `add.u32` wants a `u32` variable to write; this is the integer 1"),
         (
             "let i: u32; mov.u32(i, clusterid.x);",
             "2:34: `clusterid.x` is a special register of PTX's that kernite does not read: it needs sm_90, and kernite \
@@ -2140,10 +2207,18 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
             "let d: u32; vadd4.u32.u32.u32(d, n, n, 1);",
             "2:40: `vadd4.u32.u32.u32` wants a `u32` variable; this is the integer 1",
         ),
+        (
+            "let d: u32; vadd4.u32.s32.u32(d, 1, n, n);",
+            "2:34: `vadd4.u32.s32.u32` wants an `s32` variable; this is the integer 1",
+        ),
         ("let d: u32; vadd.u32.u32.u32(d, -n, n);", "2:33: `vadd.u32.u32.u32` takes no operand negated"),
         (
             "let (d, w): (u32, u64); mov.u64(w, 0); vadd.u32.u32.u32(d, w.b0, n);",
             "2:62: a video instruction takes a part of a 32-bit variable, as `.b0`; this is a `u64`",
+        ),
+        (
+            "let (d, f): (u32, f64); mov.f64(f, 1.5f64); vadd.u32.u32.u32(d, f.b0, n);",
+            "2:67: a video instruction takes a part of a 32-bit variable, as `.b0`; this is an `f64`",
         ),
         (
             "brx.idx(n, a); label(a);",
@@ -2184,11 +2259,11 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         (
             "let i: u32; suld.b.a1d.b32.trap(i, [s, n]);",
             "2:36: `suld.b.a1d.b32.trap` wants 2 operands taken together, a `u32` variable, a value or a special \
-             register and then a `s32` variable, a value or a special register; this is a `u32` variable",
+             register and then an `s32` variable, a value or a special register; this is a `u32` variable",
         ),
         (
             "let (i, f): (u32, f32); suld.b.a1d.b32.trap(i, [s, (f, n)]);",
-            "2:48: `suld.b.a1d.b32.trap` wants a `u32` variable; this is a `f32`",
+            "2:48: `suld.b.a1d.b32.trap` wants a `u32` variable; this is an `f32`",
         ),
         // ptxas 13.5 refuses an `f16x2` for the layer of an array of textures or surfaces, "Array index in the 'tex'
         // instruction has unexpected type", and for a coordinate beside an `s32`: kernite refuses both. It refuses it
@@ -2196,31 +2271,31 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         // like a bug of its own.
         (
             "let (h, i): (f16x2, u32); mov.b32(h, n); suld.b.a1d.b32.trap(i, [s, (h, n)]);",
-            "2:65: `suld.b.a1d.b32.trap` wants a `u32` variable; this is a `f16x2`",
+            "2:65: `suld.b.a1d.b32.trap` wants a `u32` variable; this is an `f16x2`",
         ),
         (
             "let (h, i): (f16x2, u32); mov.b32(h, n); mov.u32(i, n); sust.b.a1d.b32.trap([s, (h, n)], i);",
-            "2:77: `sust.b.a1d.b32.trap` wants a `u32` variable; this is a `f16x2`",
+            "2:77: `sust.b.a1d.b32.trap` wants a `u32` variable; this is an `f16x2`",
         ),
         (
             "let (h, a, b, c, d): (f16x2, f32, f32, f32, f32); mov.b32(h, n); \
              tex.a2d.v4.f32.s32((a, b, c, d), [s, (h, n, n, n)]);",
-            "2:99: `tex.a2d.v4.f32.s32` wants a `u32` variable; this is a `f16x2`",
+            "2:99: `tex.a2d.v4.f32.s32` wants a `u32` variable; this is an `f16x2`",
         ),
         (
             "let (h, a, b, c, d): (f16x2, s32, s32, s32, s32); mov.b32(h, n); \
              tex.a2dms.v4.s32.s32((a, b, c, d), [s, (h, n, n, n)]);",
-            "2:101: `tex.a2dms.v4.s32.s32` wants a `s32` variable; this is a `f16x2`",
+            "2:101: `tex.a2dms.v4.s32.s32` wants an `s32` variable; this is an `f16x2`",
         ),
         (
             "let (h, a, b, c, d): (f16x2, f32, f32, f32, f32); mov.b32(h, n); \
              tex.a2d.v4.f32.s32((a, b, c, d), [s, (n, h, n, n)]);",
             "2:99: `tex.a2d.v4.f32.s32` takes the operands of a vector of one type, bits beside any and an integer \
-             beside an integer; this is a `u32` variable beside a `f16x2` variable",
+             beside an integer; this is a `u32` variable beside an `f16x2` variable",
         ),
         (
             "let (i, w): (u64, s64); mov.s64(w, 0); suld.b._1d.b32.trap(i, [s, w]);",
-            "2:63: `suld.b.1d.b32.trap` wants a `s32` variable; this is a `s64`",
+            "2:63: `suld.b.1d.b32.trap` wants an `s32` variable; this is an `s64`",
         ),
         (
             "let i: u32; suld.b._1d.b32.trap(i, [n, n]);",
@@ -2233,7 +2308,7 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         ),
         (
             "let v: f32; sured.b.add._1d.u32.trap([s, 4], v);",
-            "2:46: `sured.b.add.1d.u32.trap` wants a `u32` variable; this is a `f32`",
+            "2:46: `sured.b.add.1d.u32.trap` wants a `u32` variable; this is an `f32`",
         ),
         ("sured.b.xor._1d.b32.trap([s, n], n);", "2:21: PTX's `sured` has no `.xor` that kernite knows"),
         (
@@ -2243,7 +2318,7 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         ),
         (
             "let (a, b): (f32, f32); tex._1d.v2.f32.f32((a, b), [s, z]);",
-            "2:40: `tex.1d.v2.f32.f32` returns four of a `f32`, `.v4`; two only of an `f16x2`, `.v2`",
+            "2:40: `tex.1d.v2.f32.f32` returns four of an `f32`, `.v4`; two only of an `f16x2`, `.v2`",
         ),
         (
             "let g: f16x2; tex._1d.v2.f16x2.f32((g, _), [s, z]);",
@@ -2255,7 +2330,7 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         ),
         (
             "let (a, b, c, d): (f32, f32, f32, f32); tex.a1d.v4.f32.f32((a, b, c, d), [s, (z, z)]);",
-            "2:74: `tex.a1d.v4.f32.f32` wants a `u32` variable; this is a `f32`",
+            "2:74: `tex.a1d.v4.f32.f32` wants a `u32` variable; this is an `f32`",
         ),
         (
             "let (a, b, c, d): (s32, s32, s32, s32); tex.level._2dms.v4.s32.s32((a, b, c, d), [s, (n, n, n, n)], n);",
@@ -3698,13 +3773,18 @@ fn calling(body: &str) -> Result<String, String> {
     kernite::ptx_str(&format!(
         "unsafe extern \"ptx-kernel\" fn k(n: u32, f: f32) {{\n{body}\n}}\n\
          extern \"ptx-func\" fn first(a: u32, b: u32) -> u32 {{ ret(a); }}\n\
-         extern \"ptx-func\" fn half(a: f32) -> f32 {{ ret(a); }}\n\
+         extern \"ptx-func\" fn real(a: f32) -> f32 {{ ret(a); }}\n\
+         extern \"ptx-func\" fn single(a: u32) {{}}\n\
+         extern \"ptx-func\" fn mixed(a: f32, b: s32) {{}}\n\
          extern \"ptx-func\" fn short(a: u16) {{}}\n\
          extern \"ptx-func\" fn nothing() {{}}\n\
          extern \"ptx-func\" fn never() -> ! {{ trap(); }}\n\
          extern \"ptx-func\" fn narrow(a: i32) {{}}\n\
          unsafe extern \"sysv64\" fn cpu() {{}}\n\
-         fn helper() {{}}\n"
+         fn helper() {{}}\n\
+         fn takes_u(a: u32) {{}}\n\
+         fn takes_f(a: f32) {{}}\n\
+         fn takes_m(a: shared<[u32; 4]>) {{}}\n"
     ))
 }
 
@@ -3712,7 +3792,7 @@ fn calling(body: &str) -> Result<String, String> {
 fn a_call_passes_what_the_function_takes_and_returns() {
     let cases = [
         ("call(n, first, (n,));", "2:16: `first` takes 2 arguments, not 1"),
-        ("call(n, first, (n, f));", "2:16: `first` takes a `u32` as argument 2; this is a `f32` variable"),
+        ("call(n, first, (n, f));", "2:16: `first` takes a `u32` as argument 2; this is an `f32` variable"),
         ("call(n, first, (n, 1.5));", "2:16: `first` takes a `u32` as argument 2; this is the f32 1.5"),
         (
             "call(n, first, (n, first));",
@@ -3723,7 +3803,20 @@ fn a_call_passes_what_the_function_takes_and_returns() {
             "call(first, (n, n));",
             "2:1: `first` returns a `u32`: `call(r, first, ..)` writes it to `r`, or `call(_, first, ..)` to nothing",
         ),
-        ("call(f, first, (n, n));", "2:6: `first` returns a `u32`; this is a `f32` variable"),
+        ("call(f, first, (n, n));", "2:6: `first` returns a `u32`; this is an `f32` variable"),
+        (
+            "call(real, (f,));",
+            "2:1: `real` returns an `f32`: `call(r, real, ..)` writes it to `r`, or `call(_, real, ..)` to nothing",
+        ),
+        ("call(n, real, (f,));", "2:6: `real` returns an `f32`; this is a `u32` variable"),
+        ("call(7, real, (f,));", "2:6: `real` returns an `f32`, to a variable or `_`; this is the integer 7"),
+        ("call(f, real, (f.b0,));", "2:15: `real` takes an `f32`; this is a part of an `f32` variable, `.b0`"),
+        ("call(single, (f,));", "2:14: `single` takes a `u32`; this is an `f32` variable"),
+        ("call(mixed, (f, f));", "2:13: `mixed` takes an `s32` as argument 2; this is an `f32` variable"),
+        (
+            "call(n, first, (n.b0, n));",
+            "2:16: `first` takes a `u32` as argument 1; this is a part of a `u32` variable, `.b0`",
+        ),
         ("call(n, nothing);", "2:6: `nothing` returns nothing: `call(nothing, ..)` calls it"),
         ("call(n, never, ());", "2:6: `never` never returns: `call(never, ..)` calls it"),
         ("call(k);", "2:6: `k` is a kernel, which the host launches; `call` calls a function"),
@@ -3742,7 +3835,7 @@ fn a_call_passes_what_the_function_takes_and_returns() {
         (
             "call(f);",
             "2:6: `call` calls a function by its name, or at the address in a 32- or 64-bit integer variable; this \
-             is a `f32` variable",
+             is an `f32` variable",
         ),
         (
             "call(n, n, (n, 1));",
@@ -3771,9 +3864,26 @@ fn a_call_passes_what_the_function_takes_and_returns() {
         ),
         // ptxas 13.5 takes an `f16x2` for the `.param` of a `u32`, an `s32` and an `f32`, and kernite does. It takes no
         // integer for an `f32`, no `f16x2` for a `.param` of 16 bits, and no `f16` for one of a `u16`.
-        ("call(f, half, (n));", "2:15: `half` takes a `f32`; this is a `u32` variable"),
-        ("let h: f16x2; mov.b32(h, n); call(short, (h));", "2:42: `short` takes a `u16`; this is a `f16x2` variable"),
-        ("let a: f16; mov.b16(a, 1); call(short, (a));", "2:40: `short` takes a `u16`; this is a `f16` variable"),
+        ("call(f, real, (n));", "2:15: `real` takes an `f32`; this is a `u32` variable"),
+        ("let h: f16x2; mov.b32(h, n); call(short, (h));", "2:42: `short` takes a `u16`; this is an `f16x2` variable"),
+        ("let a: f16; mov.b16(a, 1); call(short, (a));", "2:40: `short` takes a `u16`; this is an `f16` variable"),
+    ];
+    for (body, want) in cases {
+        assert_eq!(calling(body).unwrap_err(), want, "{body}");
+    }
+}
+
+/// A helper takes a variable of the type its parameter has, or a part of one of that type, or the memory its parameter
+/// names; each message says the type of the variable it is given with its article.
+#[test]
+fn a_helper_takes_what_its_parameter_names() {
+    let cases = [
+        ("takes_u(f);", "2:9: `a`: an `f32` variable is no `u32`"),
+        ("takes_f(n);", "2:9: `a`: a `u32` variable is no `f32`"),
+        ("takes_u(f.b0);", "2:11: `a`: a part of an `f32` variable, `.b0`, is no `u32`"),
+        ("takes_f(n.b0);", "2:11: `a`: a part of a `u32` variable, `.b0`, is no `f32`"),
+        ("takes_m(f);", "2:9: `a`: an `f32` variable is no memory, `shared<[u32; 4]>`"),
+        ("takes_m(n);", "2:9: `a`: a `u32` variable is no memory, `shared<[u32; 4]>`"),
     ];
     for (body, want) in cases {
         assert_eq!(calling(body).unwrap_err(), want, "{body}");
@@ -3800,17 +3910,22 @@ fn a_function_takes_and_returns_ptx_types() {
             "1:29: a function returns one value at most, as PTX's do from Fermi on, not a tuple",
         ),
         ("extern \"ptx-func\" fn f() -> u32 { ret(); }", "1:35: `f` returns a `u32`, which `ret(v)` gives back"),
+        ("extern \"ptx-func\" fn f() -> f32 { ret(); }", "1:35: `f` returns an `f32`, which `ret(v)` gives back"),
         ("extern \"ptx-func\" fn f() -> u32 { ret(1.5); }", "1:39: `f` returns a `u32`; this is the f32 1.5"),
-        ("extern \"ptx-func\" fn f(a: u32) -> f32 { ret(a); }", "1:45: `f` returns a `f32`; this is a `u32` variable"),
+        ("extern \"ptx-func\" fn f(a: u32) -> f32 { ret(a); }", "1:45: `f` returns an `f32`; this is a `u32` variable"),
         // ptxas 13.5 takes an `f16x2` for the `.param` of a `u32` or an `s32` that `ret` writes, as a call does, but
         // not for one of an `f32`, which a call takes.
         (
             "extern \"ptx-func\" fn f(a: f32) -> f32 { let h: f16x2; mov.b32(h, a); ret(h); }",
-            "1:74: `f` returns a `f32`; this is a `f16x2` variable",
+            "1:74: `f` returns an `f32`; this is an `f16x2` variable",
         ),
         (
             "extern \"ptx-func\" fn f() -> u32 {}",
             "1:22: control reaches the end of `f`, which returns a `u32`: `ret(v)` gives it back",
+        ),
+        (
+            "extern \"ptx-func\" fn f() -> f32 {}",
+            "1:22: control reaches the end of `f`, which returns an `f32`: `ret(v)` gives it back",
         ),
         (
             "extern \"ptx-func\" fn f() -> ! { ret(); }",

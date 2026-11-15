@@ -11,6 +11,7 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use kernite_core::Access;
+use kernite_lang::with_article;
 
 use crate::{GPUS, Kind, Needs, Ty};
 
@@ -1448,7 +1449,10 @@ fn check(b: &Bound, name: &str) -> Result<Needs, String> {
                 let t = b.types[0].name();
                 match (b.has("v2"), b.types[0] == Ty::F16x2) {
                     (true, false) => {
-                        return Err(format!("`{name}` returns four of a `{t}`, `.v4`; two only of an `f16x2`, `.v2`"));
+                        return Err(format!(
+                            "`{name}` returns four of {}, `.v4`; two only of an `f16x2`, `.v2`",
+                            with_article(t)
+                        ));
                     }
                     (false, true) => {
                         return Err(format!("`{name}` returns two of an `f16x2`, `.v2`; four only of another type"));
@@ -1523,7 +1527,7 @@ fn cvt(b: &Bound, name: &str) -> Result<Needs, String> {
         return Err(format!("`.ftz` flushes the subnormals of an `f32`, and `{name}` has none"));
     }
     if b.has("sat") && !float(d) && !float(a) && holds(d, a) {
-        return Err(format!("`{name}` has nothing to saturate: a `{}` holds every `{}`", d.name(), a.name()));
+        return Err(format!("`{name}` has nothing to saturate: {} holds every `{}`", with_article(d.name()), a.name()));
     }
     let later = [(Ty::F64, Ty::F32), (Ty::F32, Ty::S8), (Ty::F32, Ty::U8), (Ty::S64, Ty::F32), (Ty::U64, Ty::F32)];
     Ok(match b.has("ftz") && later.contains(&(d, a)) {

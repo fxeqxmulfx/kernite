@@ -132,7 +132,10 @@ pub fn instance(f: &Fn, args: &[Value]) -> Result<String, Error> {
     for (g, a) in f.generics.iter().zip(args) {
         machine_generic(g)?;
         if value::typed(a.clone(), &g.ty).as_ref() != Ok(a) {
-            return Err(err(g.span, format!("`{}` takes a `{}` for `{}`; this is {}", f.name, g.ty, g.name, a.kind())));
+            return Err(err(
+                g.span,
+                format!("`{}` takes {} for `{}`; this is {}", f.name, value::with_article(&g.ty), g.name, a.kind()),
+            ));
         }
     }
     Ok(named(&f.name, args))

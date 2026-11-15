@@ -69,7 +69,7 @@ use kernite_core::Width::{W8, W16, W32, W64, W128};
 use kernite_core::{
     Access, Arg, Base, Class, Flow, Inst, Item, Label, Mem, Operand, PReg, Program, RegInfo, Signature, VReg, Width,
 };
-use kernite_lang::{Fault, Guard, Operand as Given, Span, Target};
+use kernite_lang::{Fault, Guard, Operand as Given, Span, Target, with_article};
 
 use crate::call::{NO_PRED, Prototype, Returns, fits_param, formal};
 use crate::entry::{Entry, Op, Param};
@@ -683,10 +683,6 @@ impl Kernel {
             format!("%{}", self.reg(reg))
         };
         match a {
-            Given::Var(Var::Reg { ty, .. } | Var::Part { ty, .. }) if spec.memory => Err(format!(
-                "`{name}` takes the address of memory the kernel declares here, as `tile`; this is a `{}` variable",
-                ty.name()
-            )),
             Given::Var(v @ (Var::Reg { reg, ty } | Var::Part { reg, ty, .. })) => {
                 let part = match v {
                     Var::Part { part, .. } => Some(*part),
@@ -705,7 +701,11 @@ impl Kernel {
                 // ptxas 13.5 takes an `f16x2` for an integer, and reads its 32 bits as a `u32`'s, unless the operand
                 // is `exact`.
                 if !fits(*ty) && !(*ty == Ty::F16x2 && !spec.exact && fits(Ty::U32)) {
-                    return Err(format!("`{name}` wants a `{}` variable; this is a `{}`", t.name(), ty.name()));
+                    return Err(format!(
+                        "`{name}` wants {} variable; this is {}",
+                        with_article(t.name()),
+                        with_article(ty.name())
+                    ));
                 }
                 let text = var(*reg, *ty, w);
                 Ok(match part {
@@ -753,7 +753,7 @@ impl Kernel {
                 }
                 Some(r) if !spec.sreg => Err(format!("`{name}` reads no special register; `mov.{}` does", r.ty.name())),
                 Some(r) if !r.read_as(t, wider(b, w), spec.count != Count::One) => {
-                    Err(format!("`{name}` reads a `{}`; `{s}` is a `{}`", t.name(), r.ty.name()))
+                    Err(format!("`{name}` reads {}; `{s}` is {}", with_article(t.name()), with_article(r.ty.name())))
                 }
                 Some(r) => {
                     w.needs = w.needs.and(r.needs);
@@ -889,13 +889,16 @@ impl Kernel {
             Some(Var::Reg { reg, ty }) => (reg, ty),
         };
         if matches!(ty.decl().kind(), Kind::Float | Kind::Pred) {
-            return Err(format!("`{name}` takes an address in an integer variable; this is a `{}`", ty.name()));
+            return Err(format!(
+                "`{name}` takes an address in an integer variable; this is {}",
+                with_article(ty.name())
+            ));
         }
         if wide && ty.bits() != 64 {
-            return Err(format!("`{name}` takes an address in a 64-bit variable; this is a `{}`", ty.name()));
+            return Err(format!("`{name}` takes an address in a 64-bit variable; this is {}", with_article(ty.name())));
         }
         if !wide && !matches!(ty.bits(), 32 | 64) {
-            return Err(format!("`{name}` takes an address in 32 bits or 64; this is a `{}`", ty.name()));
+            return Err(format!("`{name}` takes an address in 32 bits or 64; this is {}", with_article(ty.name())));
         }
         let disp = i32::try_from(m.disp).map_err(|_| format!("{} bytes are too far for an address", m.disp))?;
         let mem = Mem { base: Base::Reg(base), index: None, disp, width: W32 };
@@ -1223,8 +1226,8 @@ impl Kernel {
         let r = match (proto.returns, result) {
             (Returns::Value(t), None) => {
                 return Err(Fault::new(format!(
-                    "`{f}` returns a `{}`: `call(r, {f}, ..)` writes it to `r`, or `call(_, {f}, ..)` to nothing",
-                    t.name()
+                    "`{f}` returns {}: `call(r, {f}, ..)` writes it to `r`, or `call(_, {f}, ..)` to nothing",
+                    with_article(t.name())
                 )));
             }
             (Returns::Value(t), Some(r)) => match r {
@@ -1236,13 +1239,21 @@ impl Kernel {
                 Given::Var(Var::Reg { ty, .. }) => {
                     return Err(Fault::at(
                         0,
-                        format!("`{f}` returns a `{}`; this is a `{}` variable", t.name(), ty.name()),
+                        format!(
+                            "`{f}` returns {}; this is {} variable",
+                            with_article(t.name()),
+                            with_article(ty.name())
+                        ),
                     ));
                 }
                 r => {
                     return Err(Fault::at(
                         0,
-                        format!("`{f}` returns a `{}`, to a variable or `_`; this is {}", t.name(), self.given(r)),
+                        format!(
+                            "`{f}` returns {}, to a variable or `_`; this is {}",
+                            with_article(t.name()),
+                            self.given(r)
+                        ),
                     ));
                 }
             },
@@ -1265,8 +1276,8 @@ impl Kernel {
         let mut texts = vec![];
         for (k, (&t, a)) in proto.params.iter().zip(passed).enumerate() {
             let wants = match proto.params.len() {
-                1 => format!("`{f}` takes a `{}`", t.name()),
-                _ => format!("`{f}` takes a `{}` as argument {}", t.name(), k + 1),
+                1 => format!("`{f}` takes {}", with_article(t.name())),
+                _ => format!("`{f}` takes {} as argument {}", with_article(t.name()), k + 1),
             };
             texts.push(self.pass(t, &wants, a, true, args).map_err(|m| Fault::at(at, m))?);
         }
@@ -1333,7 +1344,6 @@ impl Kernel {
                 args.push(Arg { operand: Operand::Reg(*reg, width(*ty)), access: Access::Read });
                 Ok(format!("%{}", self.reg(*reg)))
             }
-            Given::Var(Var::Reg { ty, .. }) => Err(not(format!("a `{}` variable", ty.name()))),
             Given::Int(x) => match t {
                 Ty::F16 => Err(not(format!("the integer {x}: `{x}.0f16` is an `f16`"))),
                 Ty::Bf16 => Err(not(format!("the integer {x}: `{x}.0bf16` is a `bf16`"))),
@@ -1360,10 +1370,10 @@ impl Kernel {
     fn give_back(&mut self, name: &str, t: Ty, args: &[Given<Var>], guard: Option<(VReg, bool)>) -> Result<(), Fault> {
         let (f, symbol) = (self.name.clone(), self.p.name.clone());
         let [a] = args else {
-            return Err(Fault::new(format!("`{f}` returns a `{}`, which `{name}(v)` gives back", t.name())));
+            return Err(Fault::new(format!("`{f}` returns {}, which `{name}(v)` gives back", with_article(t.name()))));
         };
         let mut reads = vec![];
-        let wants = format!("`{f}` returns a `{}`", t.name());
+        let wants = format!("`{f}` returns {}", with_article(t.name()));
         let text = self.pass(t, &wants, a, false, &mut reads).map_err(|m| Fault::at(0, m))?;
         let on = self.guarded(guard);
         let line = format!("{on}st.param.{} [{symbol}_retval], {text};\n\t{on}{name};", formal(t).name());
@@ -1375,8 +1385,10 @@ impl Kernel {
     /// What `a` is, for an error.
     fn given(&self, a: &Given<Var>) -> String {
         match a {
-            Given::Var(Var::Reg { ty, .. }) => format!("a `{}` variable", ty.name()),
-            Given::Var(Var::Part { ty, part, .. }) => format!("a part of a `{}` variable, `.{part}`", ty.name()),
+            Given::Var(Var::Reg { ty, .. }) => format!("{} variable", with_article(ty.name())),
+            Given::Var(Var::Part { ty, part, .. }) => {
+                format!("a part of {} variable, `.{part}`", with_article(ty.name()))
+            }
             Given::Var(Var::Mem(i)) => format!("`{}`, {} memory", self.declared[*i].0, self.memory[*i].space.noun()),
             Given::Special(name) if name == "_" => "`_`".into(),
             Given::Special(name) => format!("`{name}`"),
@@ -1559,7 +1571,7 @@ fn int(t: Ty, x: i128, name: &str) -> Result<String, String> {
         Ty::Pred => Ok(if x == 0 { "0" } else { "1" }.into()),
         Ty::F32 if (x as f32) as i128 == x => Ok(format!("0f{:08X}", (x as f32).to_bits())),
         Ty::F64 if (x as f64) as i128 == x => Ok(format!("0d{:016X}", (x as f64).to_bits())),
-        Ty::F32 | Ty::F64 => Err(format!("`{name}` wants an `{}`; {x} is not one", t.name())),
+        Ty::F32 | Ty::F64 => Err(format!("`{name}` wants {}; {x} is not one", with_article(t.name()))),
         _ if t.kind() == Kind::Float => Err(half(t, name)),
         Ty::B128 => Err(format!("`{name}` takes a `b128` only from a variable")),
         _ => {
@@ -1599,7 +1611,7 @@ fn half(t: Ty, name: &str) -> String {
         Ty::Bf16x2 => "mov.b32(h, (1.5bf16, 2.0bf16))",
         _ => "mov.b32(t, 1.5)",
     };
-    format!("`{name}` takes a `{}` only from a variable: `{fill}` puts one in it", t.name())
+    format!("`{name}` takes {} only from a variable: `{fill}` puts one in it", with_article(t.name()))
 }
 
 /// The integer `x` as an operand that must be known now, of what `imm` lets it be.
@@ -1647,12 +1659,12 @@ fn describe(b: &Bound, spec: &Spec) -> String {
             return format!("a {what}'s handle and the coordinates in it, in brackets: `[t, {at}]`");
         }
         Role::Imm(_) => return "an integer known now".into(),
-        Role::Dst if spec.sink => format!("a `{t}` variable to write, or `_`"),
-        Role::Dst => format!("a `{t}` variable to write"),
+        Role::Dst if spec.sink => format!("{} variable to write, or `_`", with_article(t)),
+        Role::Dst => format!("{} variable to write", with_article(t)),
         Role::Src if spec.memory => "memory the kernel declares, whose address it takes".into(),
-        Role::Src if spec.reg_only => format!("a `{t}` variable"),
-        Role::Src if spec.sreg => format!("a `{t}` variable, a value or a special register"),
-        Role::Src => format!("a `{t}` variable or a value"),
+        Role::Src if spec.reg_only => format!("{} variable", with_article(t)),
+        Role::Src if spec.sreg => format!("{} variable, a value or a special register", with_article(t)),
+        Role::Src => format!("{} variable or a value", with_article(t)),
     };
     match (lanes(b, spec), spec.lead) {
         (1, _) => one,
@@ -1843,7 +1855,7 @@ impl Target for Kernel {
             Var::Part { ty, part, .. } => {
                 return match Ty::parse(view) {
                     Some(t) if ty.fits(t) => Ok(v),
-                    _ => Err(format!("a part of a `{}` variable, `.{part}`, is no `{view}`", ty.name())),
+                    _ => Err(format!("a part of {} variable, `.{part}`, is no `{view}`", with_article(ty.name()))),
                 };
             }
             Var::Mem(i) => {
@@ -1856,9 +1868,9 @@ impl Target for Kernel {
         };
         match Ty::parse(view) {
             Some(t) if ty.fits(t) => Ok(v),
-            Some(t) => Err(format!("a `{}` variable is no `{}`", ty.name(), t.name())),
+            Some(t) => Err(format!("{} variable is no `{}`", with_article(ty.name()), t.name())),
             None if ["shared<", "local<", "global<", "constant<"].iter().any(|w| view.starts_with(w)) => {
-                Err(format!("a `{}` variable is no memory, `{view}`", ty.name()))
+                Err(format!("{} variable is no memory, `{view}`", with_article(ty.name())))
             }
             None => Err(format!("PTX variables are {TYPES}, not `{view}`")),
         }
@@ -1870,8 +1882,8 @@ impl Target for Kernel {
         match (v, Part::parse(field)) {
             (Var::Reg { reg, ty }, Some(part)) if ty.bits() == 32 => Ok(Var::Part { reg, ty, part }),
             (Var::Reg { ty, .. }, Some(part)) if Ty::parse(field).is_none() => Err(format!(
-                "a video instruction takes a part of a 32-bit variable, as `.{part}`; this is a `{}`",
-                ty.name()
+                "a video instruction takes a part of a 32-bit variable, as `.{part}`; this is {}",
+                with_article(ty.name())
             )),
             (Var::Part { part, .. }, Some(_)) => Err(format!("this is a part of a variable already, `.{part}`")),
             _ => self.view(v, field),
@@ -1894,7 +1906,10 @@ impl Target for Kernel {
             None => None,
             Some((Var::Reg { reg, ty: Ty::Pred }, negated)) => Some((reg, negated)),
             Some((Var::Reg { ty, .. }, _)) => {
-                return Err(Fault::new(format!("an instruction is guarded by a `pred`; this is a `{}`", ty.name())));
+                return Err(Fault::new(format!(
+                    "an instruction is guarded by a `pred`; this is {}",
+                    with_article(ty.name())
+                )));
             }
             Some((v, _)) => {
                 let what = self.given(&Given::Var(v));
@@ -2004,8 +2019,8 @@ impl Target for Kernel {
             match self.func {
                 Some(Returns::Value(t)) => {
                     return Err(format!(
-                        "control reaches the end of `{f}`, which returns a `{}`: `ret(v)` gives it back",
-                        t.name()
+                        "control reaches the end of `{f}`, which returns {}: `ret(v)` gives it back",
+                        with_article(t.name())
                     ));
                 }
                 Some(Returns::Never) => {

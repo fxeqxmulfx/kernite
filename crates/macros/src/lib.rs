@@ -381,8 +381,8 @@ use kernite::lang;
 
 use crate::expand::expand;
 use crate::rust::{
-    MACROS, attrs_len, braced, depends_on, error, flatten, for_rust, inner_attribute, is_ident, is_path, is_punct, lex,
-    module, named, needs_dependency, parse, path_uses, site, site_at,
+    MACROS, attrs_len, braced, depends_on, error, flatten, for_rust, grouped, inner_attribute, is_ident, is_path,
+    is_punct, lex, module, named, needs_dependency, parse, path_uses, site, site_at,
 };
 
 /// See the crate documentation.
@@ -398,14 +398,14 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
         );
     };
     if attr.is_empty() {
-        return module(head, braces, expand(None, None, braces.stream()));
+        return module(head, braces, expand(None, None, braces));
     }
     // The module kernite refuses at its attribute is still there, with the error in it, for the code that
     // names it to find: `expand` writes it as it writes any module, but kernite checks none of its items,
     // so it says nothing it would find in them, and it counts no room, so the crate is not told it needs
     // `kernite-macros` for a static. What `expand` finds in writing the module for Rust, such as the
     // dependency on `kernite-cuda` or `kernite-cpu` it needs, is said, as for any module.
-    let refused = |why: TokenStream| module(head, braces, expand(None, Some(why), braces.stream()));
+    let refused = |why: TokenStream| module(head, braces, expand(None, Some(why), braces));
     let path = match &attr[..] {
         [c, eq, path @ ..] if named(c, "consts") && is_punct(eq, '=') && is_path(path) => path,
         _ => {
@@ -452,9 +452,9 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
             "`#[consts]` goes on a module written in braces, `mod name { .. }`, of the consts kernels read",
         );
     };
-    let top = flatten(braces.stream());
+    let top = grouped(flatten(braces.stream()), braces.span_close());
     let (trees, spans) = lex(&top);
-    let top = for_rust(top, None);
+    let top = for_rust(top);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(Span::call_site);
     // The module as it is, for Rust; and the consts kernite reads, for the kernels. The argument is told where
     // it is, and changes nothing else: the module is the one it would be without it, for the modules of kernels
@@ -522,7 +522,7 @@ pub fn __kernels(input: TokenStream) -> TokenStream {
     let at = path.span();
     let path: Vec<TokenTree> = path.stream().into_iter().collect();
     let site = site_at(path.first().map_or(at, |t| t.span().resolved_at(at)));
-    let inner = expand(Some((consts.stream(), &path)), None, braces.stream());
+    let inner = expand(Some((consts.stream(), &path)), None, braces);
     drop(site);
     inner
 }

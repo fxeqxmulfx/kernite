@@ -21,20 +21,20 @@ use crate::cond::Cond;
 use crate::gpu::{HOLE, gpu};
 use crate::room;
 use crate::rust::{
-    cfg_of, error, error_under, flatten, for_rust, from_inside, inner_attribute, lex, name_at, parse, passable,
-    position, seen, site, stub, takes,
+    cfg_of, error, error_under, flatten, for_rust, from_inside, grouped, inner_attribute, lex, name_at, parse,
+    passable, position, seen, site, stub, takes,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
 
-/// What the module's braces hold once its kernels are compiled; `given`, the consts it takes from
-/// outside, and the path of their module, as `#[kernels(consts = path)]` writes it. A module
-/// kernite refuses whole has its error, which is in the module, said once: `why`, for a module
-/// refused at its attribute, which is given no consts, for the consts its kernels read may not be
-/// given; or the error `lang::read` gives, for a module kernite cannot read, which has the items it
-/// reads and the consts it is given. kernite checks none of the items of a module refused whole:
-/// each kernel is as it is when it does not compile, each static stands as its type has it where
-/// kernite works that out, and nothing kernite would find in them is said. Nothing of it is
+/// What the module's braces, `body`, hold once its kernels are compiled; `given`, the consts it
+/// takes from outside, and the path of their module, as `#[kernels(consts = path)]` writes it. A
+/// module kernite refuses whole has its error, which is in the module, said once: `why`, for a
+/// module refused at its attribute, which is given no consts, for the consts its kernels read may
+/// not be given; or the error `lang::read` gives, for a module kernite cannot read, which has the
+/// items it reads and the consts it is given. kernite checks none of the items of a module refused
+/// whole: each kernel is as it is when it does not compile, each static stands as its type has it
+/// where kernite works that out, and nothing kernite would find in them is said. Nothing of it is
 /// compiled, so it reads no workspace, and a `name` that is not a string is no error at it. No room
 /// is counted for the statics, so the crate is not told it needs `kernite-macros` for them. What
 /// this finds in writing the module for Rust is said, as for any module: the dependency on
@@ -48,14 +48,15 @@ use crate::x86::{cpu_static, naked, x86_stub};
 pub(crate) fn expand(
     given: Option<(TokenStream, &[TokenTree])>,
     why: Option<TokenStream>,
-    body: TokenStream,
+    body: &Group,
 ) -> TokenStream {
     // The consts given come first, for the kernels to read as the module's own.
-    let outside = given.as_ref().map_or_else(Vec::new, |(consts, _)| flatten(consts.clone()));
+    let end = body.span_close();
+    let outside = given.as_ref().map_or_else(Vec::new, |(consts, _)| grouped(flatten(consts.clone()), end));
     let n = outside.len();
-    let top: Vec<TokenTree> = outside.into_iter().chain(flatten(body)).collect();
+    let top: Vec<TokenTree> = outside.into_iter().chain(grouped(flatten(body.stream()), end)).collect();
     let (trees, spans) = lex(&top);
-    let mut top = for_rust(top, None);
+    let mut top = for_rust(top);
     let at = |s: lang::Span| spans.get(s.0 as usize).copied().unwrap_or_else(site);
     let said = |e: &lang::Error| error(at(e.span), &e.message);
     // A module kernite cannot read is refused whole, as at its attribute, with the items it reads: its error is what

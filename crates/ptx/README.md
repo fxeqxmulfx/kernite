@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Each instruction is checked: `st.global.u32` does not store an `f32`.
     let fault = kernel.inst("st.global.u32", &[at.clone(), x.clone()], None).unwrap_err();
-    assert_eq!(fault.message, "`st.global.u32` wants a `u32` variable; this is a `f32`");
+    assert_eq!(fault.message, "`st.global.u32` wants a `u32` variable; this is an `f32`");
     kernel.inst("mov.f32", &[x.clone(), Operand::F32(1.5)], None)?;
     kernel.inst("st.global.f32", &[at, x], None)?;
     kernel.end()?;

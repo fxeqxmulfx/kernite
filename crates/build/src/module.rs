@@ -5,7 +5,7 @@ use std::cell::LazyCell;
 
 use kernite_lang::{Error, Item, ItemKind, Mention, Module, Static};
 
-use crate::classify::{attributes, helper, trusted};
+use crate::classify::{abi_or_error, attributes, helper, trusted};
 use crate::function::stub;
 use crate::present::{Refusal, said};
 use crate::{
@@ -87,13 +87,16 @@ pub fn module<N: Native, D: Device>(
             }
             ItemKind::Fn(f) => f,
         };
-        let Some((name, at)) = &f.abi else {
-            items.push(ItemOut::Helper(if refused { vec![] } else { helper(m, f) }));
-            continue;
-        };
-        let Some(abi) = Abi::of(name) else {
-            items.push(ItemOut::Unknown((!refused).then(|| said(Refusal::UnknownAbi { abi: name }, *at))));
-            continue;
+        let abi = match abi_or_error(f) {
+            Ok(Some(abi)) => abi,
+            Ok(None) => {
+                items.push(ItemOut::Helper(if refused { vec![] } else { helper(m, f) }));
+                continue;
+            }
+            Err(e) => {
+                items.push(ItemOut::Unknown((!refused).then_some(e)));
+                continue;
+            }
         };
         // A refused module's kernels are not looked at: nothing of them is said or compiled.
         let not_unsafe = (!refused && !trusted(f, abi)).then(|| said(Refusal::NotUnsafe, f.span));

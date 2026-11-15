@@ -770,6 +770,8 @@ fn the_builder_refuses_what_x86_would_not_read() {
 fn a_kernel_takes_what_sysv_passes_in_registers() {
     let e = compile("a: u32", "").unwrap_err();
     assert_eq!(e, "1:32: SysV leaves the high bits of a `u32` as they were; take a usize or a u64");
+    let e = compile("a: i32", "").unwrap_err();
+    assert_eq!(e, "1:32: SysV leaves the high bits of an `i32` as they were; take a usize or a u64");
     let code = compile("a: f32, p: *mut f32, b: f32", "vmovss([p], b.xmm); vaddss(b.xmm, a.xmm, b.xmm);").unwrap();
     assert_eq!(code, "vmovss dword ptr [rdi], xmm1\nvaddss xmm1, xmm0, xmm1\nvzeroupper\nret");
 }

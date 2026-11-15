@@ -118,10 +118,15 @@ impl Value {
     }
 }
 
-/// The article a type's name is read with: `an` before `f`, `i` and `s`, which are read `ef`, `eye` and `es`, as in an
-/// `f32`, an `i8` and an `s16`; and `a` before the rest, as in a `u64` and a `bf16`.
+/// The article a type's name is read with: `an` before `e`, `f`, `i` and `s`, which are read `ee`, `ef`, `eye` and
+/// `es`, as in an `e4m3`, an `f32`, an `i8` and an `s16`; and `a` before the rest, as in a `u64` and a `bf16`.
 pub fn article(name: &str) -> &'static str {
-    if name.starts_with(['f', 'i', 's']) { "an" } else { "a" }
+    if name.starts_with(['e', 'f', 'i', 's']) { "an" } else { "a" }
+}
+
+/// A type's name in backticks after its article, for a message: "an `f32`", "a `u64`".
+pub fn with_article(name: &str) -> String {
+    format!("{} `{name}`", article(name))
 }
 
 impl fmt::Display for Value {
@@ -453,11 +458,14 @@ pub fn binary(op: BinOp, a: &Value, b: &Value) -> Result<Value, String> {
                 Mul => x.checked_mul(y).ok_or_else(over)?,
                 Div | Rem if y == 0 => return Err(format!("{x} {} 0 divides by zero", op_text(op))),
                 Div => x / y,
+                // The least of a signed type by -1 overflows, as `/` does: its quotient is out of range, though
+                // its remainder is 0.
+                Rem if int(x / y, t).is_err() => return Err(over()),
                 Rem => x % y,
                 Shl | Shr => {
                     let bits = tx.map_or(64, IntTy::bits);
                     if !(0..bits.into()).contains(&y) {
-                        return Err(format!("a shift by {y} is wider than its {bits} bits"));
+                        return Err(format!("a shift by {y} is not from 0 to {}", bits - 1));
                     }
                     let shifted = if op == Shl { x << y } else { x >> y };
                     tx.map_or(shifted, |t| t.wrap(shifted))

@@ -10,7 +10,7 @@ cargo add kernite-build kernite-lang kernite-x86
 ```
 
 ```rust
-use kernite_build::one;
+use kernite_build::{Absent, one};
 use kernite_lang::{Error, parse};
 use kernite_x86::X86;
 
@@ -34,7 +34,7 @@ fn main() -> Result<(), Error> {
     assert_eq!(listing.code().collect::<Vec<_>>(), ["imul rax, rdi, 4", "ret"]);
 
     // The GPU runs `store`, so x86 has no kernel of that name.
-    assert!(one(&module, &X86, "store")?.is_none());
+    assert_eq!(one(&module, &X86, "store")?.err(), Some(Absent::Gpu("store")));
     Ok(())
 }
 ```
