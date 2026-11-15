@@ -43,7 +43,7 @@ fn cuda() -> Option<Cuda> {
 #[test]
 fn a_kernel_runs_on_what_was_uploaded() {
     let Some(cuda) = cuda() else { return };
-    let xs: Vec<f32> = (0..1000).map(|i| i as f32 / 3.0).collect();
+    let xs: Vec<f32> = Vec::from_fn(1000, |i| i as f32 / 3.0);
     let buf = cuda.upload(&xs).unwrap();
     let module = Module::load(&cuda, PTX, &["add_one"], &[]).unwrap();
     // Threads past the first 999, to see the bounds checked.
@@ -1143,7 +1143,7 @@ fn a_buffer_is_copied_from_one_gpu_to_another() {
     let b = Cuda::on(gpus[1]).unwrap();
     let module_b = Module::load(&b, PTX, &["add_one"], &[]).unwrap();
     // Whole numbers, so that each addition is exact, whichever order the sums are made in.
-    let xs: Vec<f32> = (0..1000).map(|i| i as f32).collect();
+    let xs: Vec<f32> = Vec::from_fn(1000, |i| i as f32);
     let plus = |n: u32| xs.iter().map(|x| x + n as f32).collect::<Vec<f32>>();
     let (mut from_a, mut on_b) = (a.upload(&xs).unwrap(), b.alloc::<f32>(1000).unwrap());
     // The kernels launched before the copy, on either GPU, which are not waited for, have run when

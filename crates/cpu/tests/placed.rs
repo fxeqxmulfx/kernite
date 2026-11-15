@@ -315,18 +315,16 @@ fn grids_launched_at_once_are_not_checked_against_each_other() {
     let cpu = cpus().unwrap()[0];
     let meet = Arc::new(std::sync::Barrier::new(2));
     let ran_on = Arc::new(Mutex::new(vec![]));
-    let callers: Vec<_> = (0..2)
-        .map(|_| {
-            let (meet, ran_on) = (Arc::clone(&meet), Arc::clone(&ran_on));
-            thread::spawn(move || {
-                launch(Grid::on(&[cpu]), move |_| {
-                    meet.wait();
-                    ran_on.lock().unwrap().push(here().1);
-                })
-                .unwrap();
+    let callers: Vec<_> = Vec::from_fn(2, |_| {
+        let (meet, ran_on) = (Arc::clone(&meet), Arc::clone(&ran_on));
+        thread::spawn(move || {
+            launch(Grid::on(&[cpu]), move |_| {
+                meet.wait();
+                ran_on.lock().unwrap().push(here().1);
             })
+            .unwrap();
         })
-        .collect();
+    });
     for caller in callers {
         caller.join().unwrap();
     }

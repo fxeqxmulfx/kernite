@@ -281,22 +281,20 @@ pub(crate) fn cpu_static(
 /// bits, `f32::from_bits(0x3f800000)`, so that it is the same bits.
 fn elements(m: &HostStatic) -> Vec<String> {
     let size = m.size as usize;
-    (0..m.len as usize)
-        .map(|i| {
-            let mut word = [0; 8];
-            if let Some(bytes) = m.init.get(i * size..(i + 1) * size) {
-                word[..size].copy_from_slice(bytes);
-            }
-            let bits = u64::from_le_bytes(word);
-            // The bits as a signed number of the element's width.
-            let signed = ((bits << (64 - 8 * size)) as i64) >> (64 - 8 * size);
-            match m.elem.as_str() {
-                t @ ("f32" | "f64") => format!("{}::from_bits({bits:#x})", primitive(t)),
-                t if t.starts_with('i') => format!("{signed}{t}"),
-                t => format!("{bits}{t}"),
-            }
-        })
-        .collect()
+    Vec::from_fn(m.len as usize, |i| {
+        let mut word = [0; 8];
+        if let Some(bytes) = m.init.get(i * size..(i + 1) * size) {
+            word[..size].copy_from_slice(bytes);
+        }
+        let bits = u64::from_le_bytes(word);
+        // The bits as a signed number of the element's width.
+        let signed = ((bits << (64 - 8 * size)) as i64) >> (64 - 8 * size);
+        match m.elem.as_str() {
+            t @ ("f32" | "f64") => format!("{}::from_bits({bits:#x})", primitive(t)),
+            t if t.starts_with('i') => format!("{signed}{t}"),
+            t => format!("{bits}{t}"),
+        }
+    })
 }
 
 /// The operands by which the code of an instance of a kernel of `module` names each function it

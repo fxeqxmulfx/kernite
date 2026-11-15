@@ -116,14 +116,12 @@ fn on_gpu(sizes: &[usize]) -> Result<ExitCode, Error> {
 /// Pseudo-random floats in [-1, 1), the same for the same seed.
 fn floats(n: usize, seed: u32) -> Vec<f32> {
     let mut s = seed;
-    (0..n)
-        .map(|_| {
-            s ^= s << 13;
-            s ^= s >> 17;
-            s ^= s << 5;
-            (s >> 8) as f32 / (1 << 23) as f32 - 1.0
-        })
-        .collect()
+    Vec::from_fn(n, |_| {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        (s >> 8) as f32 / (1 << 23) as f32 - 1.0
+    })
 }
 
 /// Asserts that `lens`, the lengths of `a`, `b` and `c`, are those of a product of `shape`.

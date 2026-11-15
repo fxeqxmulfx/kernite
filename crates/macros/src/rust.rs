@@ -2,6 +2,7 @@
 //! written, and tokens the macro makes, each at the span that says where Rust resolves it.
 
 use std::cell::Cell;
+use std::mem::DropGuard;
 
 use proc_macro::{Delimiter, Group, Ident, Literal, Spacing, Span, TokenStream, TokenTree};
 
@@ -17,21 +18,11 @@ thread_local! {
     static SITE: Cell<Option<Span>> = const { Cell::new(None) };
 }
 
-/// `SITE` at a span until this is dropped, the macro panicking or not: a span of one call of
-/// the macro is none in the next, and the thread that runs it may run the next.
-pub(crate) struct Site;
-
-impl Site {
-    pub(crate) fn at(span: Span) -> Site {
-        SITE.set(Some(span));
-        Site
-    }
-}
-
-impl Drop for Site {
-    fn drop(&mut self) {
-        SITE.set(None);
-    }
+/// `SITE` at `span` until the guard this gives is dropped, the macro panicking or not: a span of
+/// one call of the macro is none in the next, and the thread that runs it may run the next.
+pub(crate) fn site_at(span: Span) -> DropGuard<(), impl FnOnce(())> {
+    SITE.set(Some(span));
+    DropGuard::new((), |()| SITE.set(None))
 }
 
 /// The braces of the module `tokens` are, and what is before them, if it is written in braces.
@@ -1241,19 +1232,18 @@ fn refused_beside(ty: &[TokenTree], beside: TokenStream) -> TokenStream {
     out
 }
 
-/// `tokens`, a type kernite refuses, as written, but for each `f16`, `f128` and `!` where [`walk`] says a type is
-/// written: wherever Rust finds one it says that the type is unstable, even in the argument of a name it cannot
-/// find. A `!` is the name [`refused`] writes. An `f16` or an `f128` is written `self::f16` or `self::f128`, with the
-/// `r#` if it has one, which Rust reads as the name without it, for a module may give either name a type: Rust finds
-/// it there, and its import is used, and where there is none Rust finds nothing and says nothing. Where the module
-/// has a module so named, Rust says that it is no type, as it does of any function's signature. A later segment of
-/// a path, `core::primitive::f16`, is a name in the path before it, and stays as written. An `f16` or an `f128` that
-/// kernite does not see as a type, for a macro writes it, `half!()`, or it is in an expression of the type, as in an
-/// array's length, `[u8; size_of::<f16>()]`, Rust still says is unstable.
+/// `tokens`, a type kernite refuses, as written, but for each `f16` and `f128` where [`walk`] says a type is written:
+/// wherever Rust finds one it says that the type is unstable, even in the argument of a name it cannot find. An `f16`
+/// or an `f128` is written `self::f16` or `self::f128`, with the `r#` if it has one, which Rust reads as the name
+/// without it, for a module may give either name a type: Rust finds it there, and its import is used, and where there
+/// is none Rust finds nothing and says nothing. Where the module has a module so named, Rust says that it is no type,
+/// as it does of any function's signature. A later segment of a path, `core::primitive::f16`, is a name in the path
+/// before it, and stays as written. An `f16` or an `f128` that kernite does not see as a type, for a macro writes it,
+/// `half!()`, or it is in an expression of the type, as in an array's length, `[u8; size_of::<f16>()]`, Rust still says
+/// is unstable.
 fn unstable(tokens: &[TokenTree]) -> TokenStream {
-    let float = |t: &TokenTree| named(t, "f16") || named(t, "f128") || is_punct(t, '!');
+    let float = |t: &TokenTree| named(t, "f16") || named(t, "f128");
     walk(tokens, float, &mut |t, place| match place {
-        Place::Type if is_punct(t, '!') => Some(placed(REFUSED, t.span())),
         Place::Type => Some(placed(&format!("self::{t}"), t.span())),
         Place::Length => None,
     })

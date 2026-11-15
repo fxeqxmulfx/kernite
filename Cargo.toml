@@ -10,7 +10,7 @@ name = "kernite"
 [workspace.package]
 version = "0.3.2"
 edition = "2024"
-rust-version = "1.99.1"
+rust-version = "1.100"
 license = "MIT"
 repository = "https://github.com/fxeqxmulfx/kernite"
 keywords = ["gpu", "cuda", "ptx", "x86", "assembly"]

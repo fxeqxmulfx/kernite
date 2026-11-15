@@ -236,7 +236,7 @@ impl Device for Echo {
         for (i, c) in code.iter().enumerate() {
             parts.extend(c.lines.iter().map(|l| line(Kept::Code(i), l)));
         }
-        let kept = (0..code.len()).map(|i| When::Kept(Kept::Code(i))).collect();
+        let kept = Vec::from_fn(code.len(), |i| When::Kept(Kept::Code(i)));
         Assembly { parts, refusals: vec![(When::Not(Box::new(When::Any(kept))), "nothing to load".into())] }
     }
 

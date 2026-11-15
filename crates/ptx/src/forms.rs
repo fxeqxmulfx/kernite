@@ -344,7 +344,10 @@ vset4(.u32|.s32)(.u32|.s32)$cmps{.add} : =~u32{.bmask}, %T{.bxyzw}, %U{.bxyzw}, 
 
 # Moving data, and converting it. `mov` packs no `_`, as the ISA has it, where ptxas 13.5
 # takes one and packs zeros: `mov.b32 d, {_, h}`.
-mov(.pred|.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64|.f32|.f64) : =T, !$T @1.0
+mov(.pred|.b16|.b32|.b64|.u16|.u32|.u64|.s16|.s32|.s64) : =T, !$T @1.0
+# ptxas 13.5 refuses a special register in a `mov` of a float, of the float's size or not: "Special register argument
+# not allowed for instruction 'mov'", or "Arguments mismatch" where the sizes differ, but for `gridid` in a `mov.f32`.
+mov(.f32|.f64) : =T, !T @1.0
 # A variable's address, which the ISA puts in a `u32` or a `u64`, and ptxas 13.5 in a `b` or
 # an `s` type of their sizes as well, as the same bits.
 mov(.u32|.u64|.b32|.b64|.s32|.s64) : =T, &T @1.0
@@ -1151,7 +1154,7 @@ impl Bound {
     pub fn spaces(&self) -> Vec<Space> {
         let given: Vec<Space> = self.words().filter_map(Space::of).collect();
         let addrs = self.form.operands.iter().filter(|s| matches!(s.role, Role::Addr(_))).count();
-        (0..addrs).map(|i| given.get(i).or(given.last()).copied().unwrap_or(Space::Generic)).collect()
+        Vec::from_fn(addrs, |i| given.get(i).or(given.last()).copied().unwrap_or(Space::Generic))
     }
 }
 
@@ -1548,17 +1551,27 @@ pub struct Sreg {
     pub ty: Ty,
     /// What reading it needs.
     pub needs: Needs,
-    /// The fewest bits `mov` and `cvt` may read of it, which PTX allows of the registers that
-    /// were once narrower: 16 for `tid.x`.
+    /// The fewest bits `mov` may read of it, which PTX allows of the registers that were once narrower: 16 for `tid.x`.
     pub fewest: u32,
 }
 
 impl Sreg {
-    /// Whether an instruction of type `t` reads it: one of the type it is, by PTX's rules,
-    /// or an integer of fewer bits, down to [`Sreg::fewest`].
-    pub fn read_as(&self, t: Ty) -> bool {
-        self.ty.fits(t)
-            || (t.kind() != Kind::Float && t.kind() != Kind::Pred && (self.fewest..self.ty.bits()).contains(&t.bits()))
+    /// Whether an instruction of type `t` reads it: one of the type it is, by PTX's rules, or one that reads fewer of
+    /// its bits, [`Sreg::narrowed`]. In a `vector` a float goes too, as `ptxas` reads the register by its size alone,
+    /// as bits: a float of as many bits, or, if `wide`, of no more, as `st.global.v2.f32` takes `(f, tid.x)` and
+    /// `(gridid, gridid)`.
+    pub fn read_as(&self, t: Ty, wide: bool, vector: bool) -> bool {
+        let bits = self.ty.bits();
+        let float = vector && t.kind() == Kind::Float && if wide { t.bits() <= bits } else { t.bits() == bits };
+        float || self.ty.fits(t) || self.narrowed(t, wide)
+    }
+
+    /// Whether an instruction of type `t` reads fewer bits of it than it has: an integer, or bits, of fewer bits, down
+    /// to [`Sreg::fewest`], as `mov.u32(n, gridid)` reads 32 of the 64, or, if `wide`, as `cvt`, `st` and `sust` take a
+    /// register wider than their type, of any fewer: `cvt.u32.u8(i, laneid)`.
+    pub fn narrowed(&self, t: Ty, wide: bool) -> bool {
+        let fewest = if wide { 0 } else { self.fewest };
+        t.kind() != Kind::Float && t.kind() != Kind::Pred && (fewest..self.ty.bits()).contains(&t.bits())
     }
 }
 
@@ -1836,7 +1849,7 @@ fn spec(s: &'static str, line: &str) -> Spec {
     };
     let mut first = if let Some((a, b)) = s.split_once("[|") {
         let mut first = one(a, line);
-        first.second = Some((Box::new(one(b.strip_suffix(']').unwrap_or(b), line)), true));
+        first.second = Some((Box::new(one(b.trim_suffix(']'), line)), true));
         first
     } else if let Some((a, b)) = s.split_once('|').filter(|_| !s.starts_with(['[', '#'])) {
         let mut first = one(a, line);

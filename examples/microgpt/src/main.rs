@@ -92,7 +92,7 @@ fn run(
         let tokens = model::tokenize(&names.docs[i % names.docs.len()], &names.chars);
         step(i, model::train(ops, &tokens, i, steps));
     }
-    (0..samples).map(|_| model::sample(ops, rng, INV_TEMP, &names.chars)).collect()
+    Vec::from_fn(samples, |_| model::sample(ops, rng, INV_TEMP, &names.chars))
 }
 
 /// Which computes the model.

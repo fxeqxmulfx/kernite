@@ -29,12 +29,10 @@ pub(crate) fn choose<Op>(p: &Program<Op>, blocks: &[Block], live: &Live, candida
             back[s] = Some(back[s].map_or(b, |e| e.max(b)));
         }
     }
-    let often: Vec<u128> = (0..blocks.len())
-        .map(|b| {
-            let loops = back.iter().enumerate().filter(|&(top, end)| top <= b && end.is_some_and(|e| b <= e)).count();
-            10u128.saturating_pow(loops as u32)
-        })
-        .collect();
+    let often: Vec<u128> = Vec::from_fn(blocks.len(), |b| {
+        let loops = back.iter().enumerate().filter(|&(top, end)| top <= b && end.is_some_and(|e| b <= e)).count();
+        10u128.saturating_pow(loops as u32)
+    });
     let (mut cost, mut size) = (vec![0u128; candidates.len()], vec![0u128; candidates.len()]);
     for (k, &c) in candidates.iter().enumerate() {
         // A parameter's store on entry.
