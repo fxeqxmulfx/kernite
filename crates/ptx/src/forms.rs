@@ -89,6 +89,7 @@ $ascope = {.cta@5.0@sm60|.gpu@5.0@sm60|.sys@5.0@sm60}
 $cvty = (.u8|.u16|.u32|.u64|.s8|.s16|.s32|.s64|.f16|.f32|.f64)
 $cvti = (.u8|.u16|.u32|.u64|.s8|.s16|.s32|.s64)
 $cvtf = (.f16|.f32|.f64)
+$cvtr = {.rni|.rzi|.rmi|.rpi|.rn|.rz|.rm|.rp}{.ftz@1.4}{.sat}
 $prio = (.L2::evict_last|.L2::evict_normal|.L2::evict_first|.L2::evict_unchanged)
 $prio2 = {.L2::evict_first|.L2::evict_unchanged}
 $cta = {.cta@7.8}
@@ -411,9 +412,12 @@ isspacep$space : =pred, %~u32 @2.0
 cvta$space.u64 : =T, T @2.0
 cvta(.const@3.1|.global|.local|.shared|.shared::cta@7.8).u64 : =T, &T @2.0
 cvta.to$space.u64 : =T, T @2.0
-# A special register is converted to an integer only: ptxas 13.5 converts none to a float.
-cvt{.rni|.rzi|.rmi|.rpi|.rn|.rz|.rm|.rp}{.ftz@1.4}{.sat}$cvti$cvty : =T, $U @1.0 +wide +cvt
-cvt{.rni|.rzi|.rmi|.rpi|.rn|.rz|.rm|.rp}{.ftz@1.4}{.sat}$cvtf$cvty : =T, U @1.0 +wide +cvt
+# ptxas 13.5 takes a special register in a `cvt` of an integer to an integer, and in none to a float or from one,
+# whatever its bits, `envreg0`, a `b32`, from an `f32` say: "Special register argument not allowed for instruction
+# 'cvt'".
+cvt$cvtr$cvti$cvti : =T, $U @1.0 +wide +cvt
+cvt$cvtr$cvty$cvtf : =T, U @1.0 +wide +cvt
+cvt$cvtr$cvtf$cvti : =T, U @1.0 +wide +cvt
 cvt(.rn|.rz)~round{.relu@7.0@sm80}{.satfinite@8.1@sm70}(.f16|.bf16@7.0@sm80).f32 : =T, U @1.0 +wide
 cvt(.rn|.rz)~round{.relu}{.satfinite@8.1}(.f16x2|.bf16x2).f32 : =T, U, U @7.0 @sm80 +wide
 cvt.rna{.satfinite@8.1}.tf32.f32 : =T, U @7.0 @sm80

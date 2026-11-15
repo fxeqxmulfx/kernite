@@ -642,23 +642,23 @@ as `tid.x` is of `tid`, takes none, `(tid.x, 1)`. A special register of more bit
 surface, and the coordinates and the offsets of a texture, as `ptxas` refuses it: `mov.u32(n, gridid)` puts 32 of its
 bits in a variable. `ptxas` takes it after a value known now, `(1, gridid)`, in `mov`, in the accumulator of `mma`, and
 in coordinates and offsets, as it checks each operand against the one before it alone, which looks like a bug of its
-own: kernite refuses it there too. Any special register goes where `cvt` reads its source, and `st` and `sust` the data
-of their vector, as an integer, or bits, of no more bits than it has: `cvt.u32.u8(i, laneid)`, `(laneid, laneid)` in a
-vector of 16 bits, and `(clock64, clock64)` in one of 32. An integer, or bits, of more bits is an error,
-`cvt.u64.u64(u, laneid)` and `(laneid, laneid)` in a vector of 64, as `ptxas` refuses it. A special register goes in a
-vector of floats too, by its size, as bits: `(f, tid.x)` and `(laneid, laneid)` in `st.global.v2.f32`, `(d, gridid)` in
-`st.global.v2.f64`, and `[s, (f, tid.x)]` in the coordinates of `tex` and `tld4`, which take one of as many bits as the
-float, and `st` one of more too, `(gridid, gridid)` in `st.global.v2.f32`. In a vector of floats, `ptxas` takes one of
-bits the vector does not take after a float known now, `(1.5, gridid)` in the coordinates of `tex` and
-`(1.5f64, laneid)` in `st.global.v2.f64`, as it takes `(1, gridid)` in a vector of 32 bits, and refuses it before one:
-kernite refuses it in both. An `f32` beside a `u32`, or a `u16` beside a `u32`, is an error at the operand that does not
-go with one before it, in `st`, `ld`, `ldu`, `mov`, `suld.b`, `sust.b`, `sust.p`, `ldmatrix` and `mma`, as `ptxas`
-refuses it. So is an `f32` beside an integer known now in a vector of bits, `(f, 1)`, a `u64` beside `tid.x`, or `tid.x`
-beside a value, in a vector that takes values or special registers. The layer of an array of textures, the first of its
-vector, is apart: an integer beside floats. `ptxas` checks each operand against the one before it alone, and takes
-`(f, b, i, i)`, an `f32` or an `f16x2` and a `u32` with a `b32` between, `(f, b, 1, 1)` and `(f, tid.x, i, i)`, which
-looks like a bug of its own: kernite checks each against each before it, and refuses it. In a vector of bits, `ptxas`
-refuses a float known now first beside a register of 64 bits, `(1.5, d)`, and takes it elsewhere, `(d, 1.5)` and
+own: kernite refuses it there too. Any special register goes where a `cvt` to an integer reads an integer source, and
+`st` and `sust` the data of their vector, as an integer, or bits, of no more bits than it has: `cvt.u32.u8(i, laneid)`,
+`(laneid, laneid)` in a vector of 16 bits, and `(clock64, clock64)` in one of 32. An integer, or bits, of more bits is
+an error, `cvt.u64.u64(u, laneid)` and `(laneid, laneid)` in a vector of 64, as `ptxas` refuses it. A special register
+goes in a vector of floats too, by its size, as bits: `(f, tid.x)` and `(laneid, laneid)` in `st.global.v2.f32`,
+`(d, gridid)` in `st.global.v2.f64`, and `[s, (f, tid.x)]` in the coordinates of `tex` and `tld4`, which take one of as
+many bits as the float, and `st` one of more too, `(gridid, gridid)` in `st.global.v2.f32`. In a vector of floats,
+`ptxas` takes one of bits the vector does not take after a float known now, `(1.5, gridid)` in the coordinates of `tex`
+and `(1.5f64, laneid)` in `st.global.v2.f64`, as it takes `(1, gridid)` in a vector of 32 bits, and refuses it before
+one: kernite refuses it in both. An `f32` beside a `u32`, or a `u16` beside a `u32`, is an error at the operand that
+does not go with one before it, in `st`, `ld`, `ldu`, `mov`, `suld.b`, `sust.b`, `sust.p`, `ldmatrix` and `mma`, as
+`ptxas` refuses it. So is an `f32` beside an integer known now in a vector of bits, `(f, 1)`, a `u64` beside `tid.x`, or
+`tid.x` beside a value, in a vector that takes values or special registers. The layer of an array of textures, the first
+of its vector, is apart: an integer beside floats. `ptxas` checks each operand against the one before it alone, and
+takes `(f, b, i, i)`, an `f32` or an `f16x2` and a `u32` with a `b32` between, `(f, b, 1, 1)` and `(f, tid.x, i, i)`,
+which looks like a bug of its own: kernite checks each against each before it, and refuses it. In a vector of bits,
+`ptxas` refuses a float known now first beside a register of 64 bits, `(1.5, d)`, and takes it elsewhere, `(d, 1.5)` and
 `(d, d, 1.5, d)`: kernite refuses it in every place. PTX keeps a `bf16`, `bf16x2` or `tf32` variable in a `b16` or `b32`
 register, and kernite takes it wherever it takes one, as `ptxas` does: for an integer or a float of its size, in an
 instruction, beside an `f16x2` in a vector, as an address, as an argument of a helper and of a call, as the address a
@@ -687,22 +687,23 @@ runs the instruction: thread 0 is in lane 0, and the ISA leaves the instruction 
 Thread 0 runs the instruction where no `if` guards it and no `ret`, `exit`, `trap`, call or jump keeps thread 0 from it.
 kernite refuses a mask known now that leaves out lane 0 there, and takes one in a variable. It does not look inside a
 function that kernels call. Where `ptxas` takes less, kernite does too: `st` stores a special register only as one of a
-vector's, `cvt` to a float reads none, and `mov.f32` and `mov.f64` read none, not `envreg0`, a `b32`, for an `f32`:
-`mov.b32` reads it. And kernite checks what `ptxas` leaves to the program: that an access stays in the memory it names,
-at a multiple of the bytes it moves. Each form, and each of its words, says the oldest version of PTX and the oldest GPU
-`ptxas` takes it at, back to PTX 1.0, which is at times older than the ISA says: `ptxas` takes `ld.mmio.acquire` for
-`sm_70`, which the ISA has from `sm_75`. A module's `.version` and `.target` are the oldest that have every instruction
-of its kernels and functions, those that `cfg` keeps, and never older than PTX 3.0 and `sm_30`: the driver starts at
-most 65535 blocks along x of a module written for `sm_20` or `sm_21`, Fermi's, whatever the GPU it runs on, and 2^31 - 1
-of one written for `sm_30`. Where `ptxas` is installed, a test hands it every form at what kernite says it needs, at the
-newest version for each GPU from its own to `sm_86`, and for each newer GPU to `sm_86`, which the driver compiles a
-module for when it runs there, and `ptxas` must take it each time, and say nothing of it: a warning of `ptxas` fails the
-test as an error does, but the warning that it cannot size the stack of a kernel with `alloca` or `stackrestore`, which
-size it as they run. At the version before and on the GPU before, `ptxas` must refuse it. PTX has no 5.1: 6.0 came after
-5.0. `ptxas` 13.5 reads a module of 5.1 as one of 6.0, but the ISA says nothing of what a module of 5.1 is, so kernite
-writes none: a module that needs 6.0 says 6.0. A test hands `ptxas` a module of each version from 1.0 to the end of the
-major version after the newest, 10.9 now, and fails where it reads a version that the tests of each form do not try, or
-does not read one that they do; 5.1 is the one it reads and they do not try.
+vector's, `cvt` reads none to a float or from one, `cvt.rzi.u32.f32(i, envreg0)`, and `mov.f32` and `mov.f64` read none,
+not `envreg0`, a `b32`, for an `f32`: `mov.b32` and `cvt.u32.s32` read it. And kernite checks what `ptxas` leaves to the
+program: that an access stays in the memory it names, at a multiple of the bytes it moves. Each form, and each of its
+words, says the oldest version of PTX and the oldest GPU `ptxas` takes it at, back to PTX 1.0, which is at times older
+than the ISA says: `ptxas` takes `ld.mmio.acquire` for `sm_70`, which the ISA has from `sm_75`. A module's `.version`
+and `.target` are the oldest that have every instruction of its kernels and functions, those that `cfg` keeps, and never
+older than PTX 3.0 and `sm_30`: the driver starts at most 65535 blocks along x of a module written for `sm_20` or
+`sm_21`, Fermi's, whatever the GPU it runs on, and 2^31 - 1 of one written for `sm_30`. Where `ptxas` is installed, a
+test hands it every form at what kernite says it needs, at the newest version for each GPU from its own to `sm_86`, and
+for each newer GPU to `sm_86`, which the driver compiles a module for when it runs there, and `ptxas` must take it each
+time, and say nothing of it: a warning of `ptxas` fails the test as an error does, but the warning that it cannot size
+the stack of a kernel with `alloca` or `stackrestore`, which size it as they run. At the version before and on the GPU
+before, `ptxas` must refuse it. PTX has no 5.1: 6.0 came after 5.0. `ptxas` 13.5 reads a module of 5.1 as one of 6.0,
+but the ISA says nothing of what a module of 5.1 is, so kernite writes none: a module that needs 6.0 says 6.0. A test
+hands `ptxas` a module of each version from 1.0 to the end of the major version after the newest, 10.9 now, and fails
+where it reads a version that the tests of each form do not try, or does not read one that they do; 5.1 is the one it
+reads and they do not try.
 
 What the newest PTX and `ptxas` refuse, kernite refuses at every version of PTX. What they take, kernite takes for the
 newest: an older `ptxas` or driver may refuse it, and kernite does not guarantee one. kernite refuses what PTX
