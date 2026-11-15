@@ -52,7 +52,8 @@ fn log_of(name: &str) -> PathBuf {
 }
 
 /// The calls `strace` shows in each step of the process the test `name` runs again under it, a
-/// grid of `threads` placed or not, between one mark and the next; none if there is no `strace`.
+/// grid of `threads` placed or not, between one mark and the next; none if there is no `strace`. What the process
+/// prints is kept, for a failure to show it, not left among the output of `cargo test`.
 fn steps_of(name: &str, threads: usize, placed: bool) -> Option<Vec<Vec<String>>> {
     let log = log_of(name);
     let strace = env::var_os("STRACE").unwrap_or_else(|| "strace".into());
@@ -63,7 +64,7 @@ fn steps_of(name: &str, threads: usize, placed: bool) -> Option<Vec<Vec<String>>
         .args(["--exact", name, "--test-threads=1"])
         .env(CHILD, threads.to_string())
         .envs(placed.then_some((PLACED, "1")))
-        .status()
+        .output()
     {
         Ok(run) => run,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -72,7 +73,8 @@ fn steps_of(name: &str, threads: usize, placed: bool) -> Option<Vec<Vec<String>>
         }
         Err(e) => panic!("strace did not run: {e}"),
     };
-    assert!(run.success(), "{name}, run again under strace, failed");
+    let text = format!("{}{}", String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
+    assert!(run.status.success(), "{name}, run again under strace, failed:\n{text}");
     let calls = fs::read_to_string(log).unwrap();
     let calls: Vec<&str> = calls.lines().collect();
     // The quote ends the name of the file, for `-1` not to be found in `-10`.
