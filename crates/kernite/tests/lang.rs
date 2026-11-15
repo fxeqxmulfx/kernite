@@ -67,6 +67,33 @@ fn a_kernel_runs_its_helpers_in_place() {
     assert_eq!(x86(src, "fifth"), want);
 }
 
+/// A note is one line, on x86 and on a GPU: each line break in it, `\r\n`, `\n` or `\r`, is a space, so that no text of
+/// it is code to an assembler, as `int3` would be on a line of its own. Each is written by an escape, and `\n` and
+/// `\r\n` in the string itself too, plain or raw: Rust refuses a lone `\r` there.
+#[test]
+fn a_line_break_in_a_note_is_a_space_on_every_machine() {
+    for (string, shown) in [
+        (r#""a\nint3""#, "a int3"),
+        (r#""a\r\nint3""#, "a int3"),
+        (r#""a\rint3""#, "a int3"),
+        ("\"a\nint3\"", "a int3"),
+        ("\"a\r\nint3\"", "a int3"),
+        ("r\"a\nint3\"", "a int3"),
+        ("r#\"a\r\nint3\"#", "a int3"),
+        // Each line break is a space of its own, one at either end too, and `\r\n` is one line break and not two.
+        (r#""\na\n\nint3\r\n""#, " a  int3 "),
+        (r#""\r\n\r\n\r\r\n\n""#, "     "),
+        (r#""\ra\r\r\n\nint3\n""#, " a   int3 "),
+    ] {
+        let note = format!("note({string});");
+        let listing = format!("# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # {shown}\n    ret\n");
+        assert_eq!(x86(&kernel(&note), "k"), listing, "{string:?}");
+        assert_eq!(code(&kernel(&note), "k"), ["ret"], "{string:?}");
+        let gpu = format!("unsafe extern \"ptx-kernel\" fn k() {{\n{note}\n}}\n");
+        assert_eq!(ptx(&gpu), format!("k(\n)\n{{\n\n\t// {shown}\n\tret;\n}}\n"), "{string:?}");
+    }
+}
+
 #[test]
 fn a_function_that_names_an_abi_is_not_const_and_no_function_is_async() {
     let constant = "a function that names an ABI runs on its machine, never while Rust compiles, so it is not `const`";

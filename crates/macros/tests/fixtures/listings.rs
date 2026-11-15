@@ -1,6 +1,6 @@
 //! A module of kernels whose `LISTINGS` holds each x86 kernel's listing by its name: a generic
-//! kernel's, an instance each, as `plus::<2>`, and a grid's kernel's. Rust checks each as it
-//! builds.
+//! kernel's, an instance each, as `plus::<2>`, a grid's kernel's, and one whose note breaks lines, which the listing
+//! shows as one. Rust checks each as it builds.
 
 #[kernite_macros::kernels]
 pub mod kernels {
@@ -16,11 +16,16 @@ pub mod kernels {
     pub unsafe extern "sysv64" fn together(x: *mut u32) {
         mov(dword[x], 1);
     }
+
+    /// A note of three line breaks, `\n`, `\r\n` and `\r`, which the listing shows as three spaces.
+    pub unsafe extern "sysv64" fn noted() {
+        note("a\nint3\r\nint3\rint3");
+    }
 }
 
 // Each name and listing, as bytes: Rust compares those as it builds, and not yet `str`s.
 const _: () = {
-    let [two, three, together] = kernels::LISTINGS else { panic!("a listing for each instance and kernel") };
+    let [two, three, together, noted] = kernels::LISTINGS else { panic!("a listing for each instance and kernel") };
     assert!(matches!(two.0.as_bytes(), b"plus::<2>"));
     assert!(matches!(
         two.1.as_bytes(),
@@ -50,6 +55,15 @@ const _: () = {
 # frame: 0 bytes aligned to 0, saves []
 # x=rdi grid=rsi
     mov dword ptr [rdi], 1
+    ret
+"
+    ));
+    assert!(matches!(noted.0.as_bytes(), b"noted"));
+    assert!(matches!(
+        noted.1.as_bytes(),
+        b"# noted() -> ()
+# frame: 0 bytes aligned to 0, saves []
+    # a int3 int3 int3
     ret
 "
     ));

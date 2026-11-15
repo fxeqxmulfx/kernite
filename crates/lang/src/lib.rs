@@ -78,7 +78,8 @@
 //!   variable it guards each instruction inside, `if !p` the other way.
 //! - **Labels** are placed by `label(top);` and named by jumps, before or after. Each block
 //!   numbers its labels afresh every time it runs, so a loop's body or a helper's gets new
-//!   ones each time. `note("acc {k}")` is a remark for the listing, `{name}` a value's.
+//!   ones each time. `note("acc {k}")` is a remark for the listing, `{name}` a value's. A remark is one line: each line
+//!   break in it, `\r\n`, `\n` or `\r`, is a space.
 //! - **Strings** are plain or raw, as in Rust, for a note's text, `note(r#"a "b""#)`, and for a function's ABI,
 //!   `extern r"sysv64"`. A raw string has no escapes, and ends at the first `"` that has as many `#` after it as the
 //!   string began with, 255 at most; [`lex`] refuses one that has more, or is never closed, at its start.

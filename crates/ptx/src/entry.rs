@@ -131,7 +131,7 @@ impl Entry {
         for item in &self.program.body {
             match item {
                 Item::Label(l) => out += &format!("$L{}:\n", l.0),
-                Item::Note(note) => out += &format!("\t// {}\n", note.replace('\n', " ")),
+                Item::Note(note) => out += &format!("\t// {note}\n"),
                 Item::Inst(inst) => out += &format!("\t{}\n", inst.op.0),
             }
         }

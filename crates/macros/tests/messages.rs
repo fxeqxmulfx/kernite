@@ -1334,8 +1334,8 @@ fn the_functions_docs_name_the_cpu_features_a_kernel_needs() {
 }
 
 /// The module's `LISTINGS` holds each x86 kernel's listing by its name, and an instance's by
-/// its name and arguments, as `plus::<2>`. The fixture asserts each, name and listing, as it
-/// builds.
+/// its name and arguments, as `plus::<2>`, and a note that breaks lines shows them as spaces. The fixture asserts each,
+/// name and listing, as it builds.
 #[test]
 fn listings_holds_each_kernels_listing_by_its_name() {
     builds_quietly("listings");
