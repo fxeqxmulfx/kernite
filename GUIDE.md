@@ -241,6 +241,11 @@ they name a parameter `_`, and write the name no more. kernite refuses each wher
 name, as in `r#u64`", wherever a name is written, an attribute's too. Any other name can be written raw, a weak keyword
 or a reserved word as well, `r#union` and `r#gen`.
 
+A string is plain or raw, as in Rust, wherever kernite takes one: a note's text, `note(r#"a "b""#)`, and the ABI of a
+function, `extern r"sysv64"`. A raw string has no escapes, and ends at the first `"` that has as many `#` after it as
+the string began with, so `r##"a "# b"##` holds a `"#`. A string that is never closed, plain or raw, is refused where it
+starts: "this string is never closed". So is a raw string of more than 255 `#`, as Rust refuses it.
+
 A macro's fragment is one operand, or one type, wherever kernite reads it, as Rust reads it. With `$n:expr` as `1 + 2`,
 `$n * 2` is 6, and not the 5 that `1 + 2 * 2` is. It is so in a kernel's expression, on x86 and on a GPU, under a `-`,
 in the length of an array, in `#[instances(..)]`, and in a const, which is 6 to Rust too. A `$t:ty` is one type in a

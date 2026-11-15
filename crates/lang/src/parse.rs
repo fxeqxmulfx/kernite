@@ -372,9 +372,9 @@ impl<'a> Parser<'a> {
                 let span = self.span();
                 self.pos += 1;
                 abi = Some(match self.peek() {
-                    Some(Tree::Lit { text, span, .. }) if text.starts_with('"') => {
+                    Some(Tree::Lit { text, span, .. }) if is_string(text) => {
                         self.pos += 1;
-                        (text.trim_matches('"').to_string(), *span)
+                        (unquote(text, *span)?, *span)
                     }
                     _ => ("C".to_string(), span),
                 });
@@ -862,9 +862,7 @@ impl<'a> Parser<'a> {
             return Err(Error { span, message: "expected an expression, found the end".into() });
         };
         match t {
-            Tree::Lit { text, span, .. } if text.starts_with('"') || text.starts_with("r\"") => {
-                Ok(Expr::Str(unquote(text, *span)?, *span))
-            }
+            Tree::Lit { text, span, .. } if is_string(text) => Ok(Expr::Str(unquote(text, *span)?, *span)),
             Tree::Lit { text, span, .. } if text.starts_with('\'') => {
                 Err(Error { span: *span, message: format!("a kernel has no use for the character {text}") })
             }
@@ -1083,6 +1081,11 @@ fn no_impl(trees: &[Tree]) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// Whether the literal `lit` is a string, plain, `"a"`, or raw, `r"a"`: no other literal begins with a `"` or an `r`.
+fn is_string(lit: &str) -> bool {
+    lit.starts_with(['"', 'r'])
 }
 
 /// A string literal's text.

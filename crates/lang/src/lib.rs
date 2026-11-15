@@ -79,6 +79,9 @@
 //! - **Labels** are placed by `label(top);` and named by jumps, before or after. Each block
 //!   numbers its labels afresh every time it runs, so a loop's body or a helper's gets new
 //!   ones each time. `note("acc {k}")` is a remark for the listing, `{name}` a value's.
+//! - **Strings** are plain or raw, as in Rust, for a note's text, `note(r#"a "b""#)`, and for a function's ABI,
+//!   `extern r"sysv64"`. A raw string has no escapes, and ends at the first `"` that has as many `#` after it as the
+//!   string began with, 255 at most; [`lex`] refuses one that has more, or is never closed, at its start.
 //! - **Statics** are memory of the module's, of a type of the machine's that takes arguments,
 //!   `static COUNTS: global<[u32; 16]>;`, which each of its functions names, helpers among
 //!   them, as memory a function declares is named, and which keeps what they write from one

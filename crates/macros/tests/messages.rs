@@ -4244,6 +4244,19 @@ fn an_attribute_written_raw_is_the_attribute_written_plain() {
     );
 }
 
+/// A raw string is a string for kernite, as it is for Rust, where kernite takes one: a note's text, `note(r#"a "b""#)`,
+/// and a function's ABI, `extern r"sysv64"` and `extern r#"ptx-kernel"#`. Rust builds the crate without a word. An x86
+/// module written so has the listings of the one written with plain strings, each note as its text says, and runs as it
+/// does; a GPU module written so is the PTX of the one written with plain strings, and its kernel runs on a GPU.
+#[test]
+fn a_raw_string_is_a_string_for_a_note_and_for_an_abi() {
+    let printed = runs_quietly(&["test"], "raw_strings");
+    assert!(
+        printed.contains("test result: ok. 5 passed"),
+        "fixtures/raw_strings.rs ran its tests, and printed:\n{printed}"
+    );
+}
+
 /// An attribute kernite reads, written raw, is wrong as the plain one is: kernite's error alone, in the same words, at
 /// the same column of a line of its own. So it is for an `#[r#instances]` with no list; two `#[r#instances(..)]`,
 /// whichever way each is written, for the two are one attribute; an `#[r#cooperative(1)]`, which takes nothing; two

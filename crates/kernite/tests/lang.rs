@@ -97,6 +97,58 @@ fn a_function_that_names_an_abi_is_not_const_and_no_function_is_async() {
     assert_eq!(x86(src, "k"), "# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # it runs now\n    ret\n");
 }
 
+/// A raw string is a string, as in Rust, wherever kernite takes one: a note's text by `r"hi"`, `r#"hi"#` or
+/// `r##"a "# b"##` is the text of the plain string, with no escape read in it, and an ABI by `r"sysv64"` or
+/// `r#"ptx-kernel"#` is the ABI. A raw string that is never closed is refused where it starts, as a plain one is. So is
+/// one of more than 255 `#`, as Rust refuses it.
+#[test]
+fn a_raw_string_is_a_string_for_a_note_and_for_an_abi() {
+    let raw = |hashes: usize, text: &str| format!("r{0}\"{text}\"{0}", "#".repeat(hashes));
+    // (the `#`s of the raw string, its text, what a note shows of it), with `k` as 7.
+    let notes = [
+        (0, "hi", "hi"),
+        (1, "hi", "hi"),
+        (2, "a \"# b", "a \"# b"),
+        (0, "a\\nb\\\\", "a\\nb\\\\"),
+        (0, "a\\", "a\\"),
+        (1, "{k} \"{k}\" {{k}}", "7 \"7\" {k}"),
+        (255, "hi", "hi"),
+    ];
+    for (hashes, text, shown) in notes {
+        let (raw, plain) = (raw(hashes, text), format!("{text:?}"));
+        let on_x86 =
+            |lit: &str| x86(&format!("unsafe extern \"sysv64\" fn k() {{\nlet k = 7;\nnote({lit});\n}}\n"), "k");
+        let want = format!("# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # {shown}\n    ret\n");
+        assert_eq!(on_x86(&plain), want, "{plain}");
+        assert_eq!(on_x86(&raw), want, "{raw}");
+        let on_gpu =
+            |lit: &str| ptx(&format!("unsafe extern \"ptx-kernel\" fn k() {{\nlet k = 7;\nnote({lit});\n}}\n"));
+        assert!(on_gpu(&plain).contains(&format!("\t// {shown}\n")), "{plain}");
+        assert_eq!(on_gpu(&raw), on_gpu(&plain), "{raw}");
+    }
+    // Each ABI by a raw string is the ABI by the plain one, and an ABI that kernite does not know is told as the plain
+    // one is, at the string, with no escape read in it: `sysv\64` is no ABI.
+    let abis = ["sysv64", "ptx-kernel", "ptx-func", "sysv\\64"];
+    for (abi, hashes) in abis.into_iter().flat_map(|abi| (0..3).map(move |hashes| (abi, hashes))) {
+        let with = |lit: &str| match abi.starts_with("ptx-") {
+            true => kernite::ptx_str(&format!("pub unsafe extern {lit} fn f() {{}}\n")),
+            false => compile(&format!("pub unsafe extern {lit} fn f() {{}}\n"), "f"),
+        };
+        let plain = with(&format!("{abi:?}"));
+        assert_eq!(plain.is_ok(), abi != "sysv\\64", "{abi}: {plain:?}");
+        assert_eq!(with(&raw(hashes, abi)), plain, "{abi}, {hashes} `#`s");
+    }
+    // A raw string that is never closed is refused where it starts, as a plain one is.
+    let never = "2:6: this string is never closed";
+    for lit in ["\"hi);", "r\"hi);", "r#\"hi\");", "r##\"hi\"#);"] {
+        assert_eq!(refused(&format!("note({lit}")), never, "{lit}");
+    }
+    let gpu = "pub unsafe extern \"ptx-kernel\" fn k() {\nnote(r#\"hi\");\n}\n";
+    assert_eq!(kernite::ptx_str(gpu).unwrap_err(), never);
+    // So is a raw string of more than 255 `#`, as Rust refuses it.
+    assert_eq!(refused(&format!("note({});", raw(256, "hi"))), "2:6: a raw string has 255 `#` at most, as in Rust");
+}
+
 #[test]
 fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
     // Rust refuses a name bound twice among a function's generics and parameters, E0403 and E0415;
@@ -679,12 +731,12 @@ fn a_name_rust_lets_be_written_raw_in_no_place_is_refused_at_its_r() {
 }
 
 /// An `r#` that no name follows is refused at the `r#`, wherever a name is written, whether a bracket, a colon, a
-/// dot or a `#` comes after it, or a space, a digit or a quote: none of these starts a name.
+/// dot or a `#` comes after it, or a space or a digit: none of these starts a name. A quote starts a raw string.
 #[test]
 fn an_r_that_no_name_follows_is_refused_at_its_r() {
     let said = "`r#` comes before a name, as in `r#u64`";
     let mut sources: Vec<String> = places().map(|place| place.replace("NAME", "r#")).collect();
-    for after in [" x", "9", "9x", "\"x\"", ".x", "#x"] {
+    for after in [" x", "9", "9x", ".x", "#x"] {
         sources.push(format!(r#"unsafe extern "sysv64" fn k(r#{after}: u64) -> u64 {{ ret(x); }}"#));
     }
     for src in sources {

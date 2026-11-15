@@ -25,8 +25,8 @@ fn the_lexer_refuses_a_name_written_raw_that_rust_refuses() {
         let src = format!("a r#{name} b");
         assert_eq!(error(&src), format!("1:3: `{name}` cannot be written raw"), "{src}");
     }
-    // No name after the `r#`: a space, the end, a bracket, a dot, a digit or a quote.
-    for src in ["a r# b", "a r#", "a r#(b)", "a r#.b", "a r#9", "a r#1x", "a r#\"x\""] {
+    // No name after the `r#`: a space, the end, a bracket, a dot or a digit. A quote begins a raw string.
+    for src in ["a r# b", "a r#", "a r#(b)", "a r#.b", "a r#9", "a r#1x"] {
         assert_eq!(error(src), "1:3: `r#` comes before a name, as in `r#u64`", "{src}");
     }
     let names = "r#u64 r#dyn r#union r#gen r#try r#_x r#__ r#selfie r#crate_ r#é self Self super crate _";
@@ -39,6 +39,59 @@ fn the_lexer_refuses_a_name_written_raw_that_rust_refuses() {
         })
         .collect();
     assert_eq!(idents, names.split(' ').collect::<Vec<_>>());
+}
+
+/// A raw string is one token, as the macros are given it: it has no escape, and it ends at the first `"` that has as
+/// many `#` after it as the `r` has, so `r##"a "# b"##` holds a `"#`. One that is never closed is an error at its
+/// start, in the words of a plain string that is never closed. One of more than 255 `#` is an error at its start too,
+/// as in Rust.
+#[test]
+fn the_lexer_reads_a_raw_string_as_one_token() {
+    let lits = |src: &str| -> Vec<String> {
+        crate::lex(src)
+            .unwrap()
+            .into_iter()
+            .map(|tree| match tree {
+                Tree::Lit { text, .. } => text,
+                other => panic!("{src}: {other:?}"),
+            })
+            .collect()
+    };
+    for lit in [
+        r#"r"hi""#,
+        r##"r#"hi"#"##,
+        r###"r##"a "# b"##"###,
+        r#"r"a\nb\""#,
+        r##"r#"a "quoted" {b}"#"##,
+        r#"r"""#,
+        r##"r#""#"##,
+        "r\"two\nlines\"",
+    ] {
+        assert_eq!(lits(lit), [lit], "{lit}");
+    }
+    // Each ends where Rust ends it, and the `#` after that is a token of its own.
+    assert_eq!(lits(r##"r#"a"# r"b" "c""##), [r##"r#"a"#"##, r#"r"b""#, r#""c""#]);
+    let trees = crate::lex("r#\"a\"##").unwrap();
+    assert!(matches!(&trees[..], [Tree::Lit { text, .. }, Tree::Punct { ch: '#', .. }] if text == "r#\"a\"#"));
+    let error = |src: &str| crate::lex(src).unwrap_err().at(src);
+    for src in [r#"r"hi"#, r##"r#"hi""##, r###"r##"hi"#"###, r#"r""#, r##"r#""##, r##"r#"hi"x"##] {
+        assert_eq!(error(&format!("a {src}")), "1:3: this string is never closed", "{src}");
+    }
+    assert_eq!(error(r#"a "hi"#), "1:3: this string is never closed");
+    // As in Rust, a raw string begins with 255 `#` at most.
+    let raw = |hashes: usize| format!("r{0}\"a\"{0}", "#".repeat(hashes));
+    assert_eq!(lits(&raw(255)), [raw(255)]);
+    assert_eq!(error(&format!("a {}", raw(256))), "1:3: a raw string has 255 `#` at most, as in Rust");
+    // A name that begins as a raw string is a name, and an `r` that ends a name, or stands alone, is no raw string.
+    let kinds = |src: &str| -> String {
+        let kind = |tree: &Tree| match tree {
+            Tree::Lit { .. } => 'l',
+            Tree::Ident { .. } => 'i',
+            _ => 'p',
+        };
+        crate::lex(src).unwrap().iter().map(kind).collect()
+    };
+    assert_eq!(kinds(r##"r#type bar#"x"# r "y""##), "iiplpil");
 }
 
 /// The tokens of `src`, a source with lifetimes in it, as `for<'a> fn(&'a u8)` has. The lexer of a

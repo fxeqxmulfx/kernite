@@ -411,7 +411,8 @@ fn starts_name(c: char) -> bool {
 
 /// The tokens of `src`, each spanned by its byte offset, and each with whether a space, a line break or a
 /// comment comes before it. Comments are skipped, doc comments too. A name written raw that Rust refuses,
-/// `r#self` say, is an error at its `r#`, and so is an `r#` that no name follows.
+/// `r#self` say, is an error at its `r#`, and so is an `r#` that no name follows. A raw string, `r#"a"#`, is one token,
+/// and a string that is never closed, raw or plain, is an error at its start, as is a raw string of more than 255 `#`.
 pub fn lex(src: &str) -> Result<Vec<Tree>, Error> {
     Lexer { src, pos: 0 }.trees(None, 0).map(|(trees, _)| trees)
 }
@@ -473,6 +474,9 @@ impl Lexer<'_> {
                     return Ok((out, space));
                 }
                 '"' => out.push(Tree::Lit { text: self.string()?, space, span }),
+                'r' if self.src[self.pos + 1..].trim_start_matches('#').starts_with('"') => {
+                    out.push(Tree::Lit { text: self.raw_string()?, space, span });
+                }
                 '\'' => out.push(Tree::Lit { text: self.char()?, space, span }),
                 c if c.is_ascii_digit() => out.push(Tree::Lit { text: self.number(), space, span }),
                 c if starts_name(c) => {
@@ -559,6 +563,23 @@ impl Lexer<'_> {
                 Some(c) => self.pos += c.len_utf8(),
             }
         }
+    }
+
+    /// A raw string, `r"a\b"` or `r#"a "b""#`: it has no escape, and it ends at the first `"` that has as many `#`
+    /// after it as the `r` has, 255 at most, as in Rust.
+    fn raw_string(&mut self) -> Result<String, Error> {
+        let (start, span) = (self.pos, self.span());
+        let rest = &self.src[start + 1..];
+        let hashes = rest.len() - rest.trim_start_matches('#').len();
+        if hashes > 255 {
+            return Err(Error { span, message: "a raw string has 255 `#` at most, as in Rust".into() });
+        }
+        let (close, body) = (format!("\"{}", "#".repeat(hashes)), start + 1 + hashes + 1);
+        let Some(len) = self.src[body..].find(&close) else {
+            return Err(Error { span, message: "this string is never closed".into() });
+        };
+        self.pos = body + len + close.len();
+        Ok(self.src[start..self.pos].to_string())
     }
 
     fn char(&mut self) -> Result<String, Error> {
