@@ -1551,22 +1551,23 @@ pub struct Sreg {
     pub ty: Ty,
     /// What reading it needs.
     pub needs: Needs,
-    /// The fewest bits `mov` and `cvt` may read of it, which PTX allows of the registers that
-    /// were once narrower: 16 for `tid.x`.
+    /// The fewest bits `mov` may read of it, which PTX allows of the registers that were once narrower: 16 for `tid.x`.
     pub fewest: u32,
 }
 
 impl Sreg {
-    /// Whether an instruction of type `t` reads it: one of the type it is, by PTX's rules,
-    /// or one that reads fewer of its bits, [`Sreg::narrowed`].
-    pub fn read_as(&self, t: Ty) -> bool {
-        self.ty.fits(t) || self.narrowed(t)
+    /// Whether an instruction of type `t` reads it: one of the type it is, by PTX's rules, or one that reads fewer of
+    /// its bits, [`Sreg::narrowed`].
+    pub fn read_as(&self, t: Ty, wide: bool) -> bool {
+        self.ty.fits(t) || self.narrowed(t, wide)
     }
 
-    /// Whether an instruction of type `t` reads fewer bits of it than it has: an integer of
-    /// fewer bits, down to [`Sreg::fewest`], as `mov.u32(n, gridid)` reads 32 of the 64.
-    pub fn narrowed(&self, t: Ty) -> bool {
-        t.kind() != Kind::Float && t.kind() != Kind::Pred && (self.fewest..self.ty.bits()).contains(&t.bits())
+    /// Whether an instruction of type `t` reads fewer bits of it than it has: an integer, or bits, of fewer bits, down
+    /// to [`Sreg::fewest`], as `mov.u32(n, gridid)` reads 32 of the 64, or, if `wide`, as `cvt`, `st` and `sust` take a
+    /// register wider than their type, of any fewer: `cvt.u32.u8(i, laneid)`.
+    pub fn narrowed(&self, t: Ty, wide: bool) -> bool {
+        let fewest = if wide { 0 } else { self.fewest };
+        t.kind() != Kind::Float && t.kind() != Kind::Pred && (fewest..self.ty.bits()).contains(&t.bits())
     }
 }
 

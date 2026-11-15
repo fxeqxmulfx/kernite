@@ -628,7 +628,7 @@ impl Kernel {
             // taken the operand: where the vector takes no special register, or the instruction writes it, `one` says
             // so, of `gridid` as of any.
             if let Given::Special(s) = part
-                && let Some(r) = forms::sreg(s).filter(|r| r.narrowed(slot) && !wider(b, w))
+                && let Some(r) = forms::sreg(s).filter(|r| r.narrowed(slot, false) && !wider(b, w))
             {
                 w.part = Some(k);
                 let bits = slot.bits();
@@ -752,7 +752,7 @@ impl Kernel {
                     Err(format!("`{name}` writes a variable; `{s}` is a special register, which it reads"))
                 }
                 Some(r) if !spec.sreg => Err(format!("`{name}` reads no special register; `mov.{}` does", r.ty.name())),
-                Some(r) if !r.read_as(t) => {
+                Some(r) if !r.read_as(t, wider(b, w)) => {
                     Err(format!("`{name}` reads a `{}`; `{s}` is a `{}`", t.name(), r.ty.name()))
                 }
                 Some(r) => {
