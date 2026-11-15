@@ -4,7 +4,7 @@ use kernite_core::Access::{Ignored, Read, ReadWrite, Write};
 use kernite_core::Width::{self, W8, W16, W32, W64, W128, W256};
 use kernite_core::{
     Arg, Base, Class, Const, ConstId, Flow, Inst, Item, Label, Operand, Program, RegInfo, Signature, Slot as SlotSpec,
-    SlotId, VReg,
+    SlotId, VReg, one_line,
 };
 
 use crate::op::Op;
@@ -34,6 +34,9 @@ impl Stream {
 /// says.
 /// Every method takes the operands its instruction takes, so an instruction the machine
 /// has no encoding for does not compile.
+///
+/// A name, of the kernel, a parameter, a variable or a slot, is one line, as a note is, for the listing writes it in a
+/// comment: each line break in it, `\r\n`, `\n` or `\r`, is a space.
 pub struct Asm {
     p: Program<Op>,
     labels: u32,
@@ -44,7 +47,7 @@ impl Asm {
     pub fn new(name: impl Into<String>) -> Self {
         Asm {
             p: Program {
-                name: name.into(),
+                name: one_line(&name.into()),
                 signature: Signature { params: vec![], result: None },
                 regs: vec![],
                 params: vec![],
@@ -67,7 +70,7 @@ impl Asm {
 
     fn var(&mut self, class: Class, name: String) -> VReg {
         let id = self.p.regs.len() as u32;
-        self.p.regs.push(RegInfo { class, name });
+        self.p.regs.push(RegInfo { class, name: one_line(&name) });
         VReg { id, class }
     }
 
@@ -120,7 +123,7 @@ impl Asm {
     /// page at a time on the way down, and a larger alignment could skip one.
     pub fn slot(&mut self, name: impl Into<String>, size: u32, align: u32) -> Slot {
         assert!(align.is_power_of_two() && align <= PAGE, "alignment {align}");
-        self.p.slots.push(SlotSpec { name: name.into(), size, align, spill: false });
+        self.p.slots.push(SlotSpec { name: one_line(&name.into()), size, align, spill: false });
         Slot(SlotId(self.p.slots.len() as u32 - 1))
     }
 

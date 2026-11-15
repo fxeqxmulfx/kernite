@@ -712,19 +712,22 @@ fn the_builder_writes_an_index_with_no_base() {
     encode("builder", &cases);
 }
 
+/// Text with each line break, `\r\n`, `\n` and `\r`, and what it is on one line: each line break a space of its own,
+/// one at either end too, and `\r\n` one line break and not two.
+const LINE_BREAKS: [(&str, &str); 6] = [
+    ("a\nint3", "a int3"),
+    ("a\r\nint3", "a int3"),
+    ("a\rint3", "a int3"),
+    ("\na\n\nint3\r\n", " a  int3 "),
+    ("\r\n\r\n\r\r\n\n", "     "),
+    ("\ra\r\r\n\nint3\n", " a   int3 "),
+];
+
 /// A note of the builder is one line, as a kernel's note is: each line break in it, `\r\n`, `\n` or `\r`, is a space,
 /// so that no text of it is code to an assembler, as `int3` would be on a line of its own.
 #[test]
 fn a_line_break_in_the_builders_note_is_a_space() {
-    for (text, shown) in [
-        ("a\nint3", "a int3"),
-        ("a\r\nint3", "a int3"),
-        ("a\rint3", "a int3"),
-        // Each line break is a space of its own, one at either end too, and `\r\n` is one line break and not two.
-        ("\na\n\nint3\r\n", " a  int3 "),
-        ("\r\n\r\n\r\r\n\n", "     "),
-        ("\ra\r\r\n\nint3\n", " a   int3 "),
-    ] {
+    for (text, shown) in LINE_BREAKS {
         let mut a = Asm::new("k");
         a.note(text);
         a.ret();
@@ -732,6 +735,48 @@ fn a_line_break_in_the_builders_note_is_a_space() {
         let want = format!("# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # {shown}\n    ret\n");
         assert_eq!(listing.text(), want, "{text:?}");
         assert_eq!(listing.code().collect::<Vec<_>>(), ["ret"], "{text:?}");
+    }
+}
+
+/// The name of a kernel, a parameter, a variable and a slot of the builder is one line, as a note is, in the header, in
+/// the line of each variable and of each slot, and in the note of a spill, so that no text of it is code to an
+/// assembler.
+#[test]
+fn a_line_break_in_the_builders_names_is_a_space() {
+    // A kernel of a parameter, a slot that nothing uses and twenty variables alive at once, the first of which spills.
+    let print = |kernel: &str, param: &str, var: &str, slot: &str| {
+        let mut a = Asm::new(kernel);
+        let p = a.param(param);
+        a.slot(slot, 8, 8);
+        let vars: Vec<_> = (0..20).map(|i| a.gpr(if i == 0 { var.to_string() } else { format!("v{i}") })).collect();
+        for (i, &v) in vars.iter().enumerate() {
+            a.mov(v, p);
+            a.add(v, i as i32);
+        }
+        let all = a.gpr("all");
+        a.mov(all, p);
+        for &v in &vars {
+            a.or_reg(all, v);
+        }
+        a.ret();
+        intel::print(&kernite_compile::compile(&a.finish(), &SysV).unwrap(), vec![]).unwrap()
+    };
+    for (text, shown) in LINE_BREAKS {
+        let broken = print(&format!("k{text}"), &format!("p{text}"), &format!("x{text}"), &format!("s{text}"));
+        let spaced = print(&format!("k{shown}"), &format!("p{shown}"), &format!("x{shown}"), &format!("s{shown}"));
+        assert_eq!(broken.text(), spaced.text(), "{text:?}");
+        // What the comparison alone leaves open: that each name is in the listing where it is written.
+        let listing = broken.text();
+        for want in [
+            format!("# k{shown}(gpr) -> ()\n"),
+            format!("p{shown}=rdi"),
+            format!("# s{shown}: 8 bytes at "),
+            format!("# x{shown}, spilled: 8 bytes at "),
+            format!("    # x{shown} spilled\n"),
+            format!("    # x{shown} reloaded\n"),
+        ] {
+            assert!(listing.contains(&want), "{want:?} is not in\n{listing}");
+        }
     }
 }
 

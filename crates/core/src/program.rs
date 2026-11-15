@@ -69,11 +69,16 @@ pub enum Item<Op, R> {
     Note(String),
 }
 
+/// `text` on one line: each line break in it, `\r\n`, `\n` or `\r`, is a space, for a line break ends the comment that
+/// a machine writes a remark or a name in, and what follows it is code.
+pub fn one_line(text: &str) -> String {
+    text.replace("\r\n", " ").replace(['\r', '\n'], " ")
+}
+
 impl<Op, R> Item<Op, R> {
-    /// A remark for whoever reads the listing, `text` on one line: each line break in it, `\r\n`, `\n` or `\r`, is a
-    /// space, for a line break ends the comment that a machine writes a remark in, and what follows it is code.
+    /// A remark for whoever reads the listing, `text` on one line by [`one_line`].
     pub fn note(text: &str) -> Self {
-        Self::Note(text.replace("\r\n", " ").replace(['\r', '\n'], " "))
+        Self::Note(one_line(text))
     }
 }
 
