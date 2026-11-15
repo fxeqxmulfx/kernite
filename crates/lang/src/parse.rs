@@ -6,7 +6,7 @@ use crate::ast::{
     BinOp, Block, Const, Cooperative, Directive, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret,
     Static, Stmt, Type, UnOp,
 };
-use crate::token::{Delim, Span, Tree, path, primitive, read_type, root, text, unraw};
+use crate::token::{Delim, Span, Tree, path, primitive, read_type, root, text, unescape, unraw};
 use crate::{Error, nested};
 
 /// A GPU kernel's tuning directives, as PTX has them: each by its name, what it gives, and an
@@ -1088,33 +1088,11 @@ fn is_string(lit: &str) -> bool {
     lit.starts_with(['"', 'r'])
 }
 
-/// A string literal's text, each CRLF in it a LF, as Rust reads it.
+/// A string literal's text, as Rust reads it: a raw string's with each CRLF a LF, a plain string's by `unescape`.
 fn unquote(lit: &str, span: Span) -> Result<String, Error> {
-    let lit = lit.replace("\r\n", "\n");
     if let Some(raw) = lit.strip_prefix('r') {
         let hashes = raw.len() - raw.trim_start_matches('#').len();
-        return Ok(raw[hashes + 1..raw.len() - hashes - 1].to_string());
+        return Ok(raw[hashes + 1..raw.len() - hashes - 1].replace("\r\n", "\n"));
     }
-    let mut out = String::new();
-    let mut chars = lit[1..lit.len() - 1].chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        out.push(match chars.next() {
-            Some('n') => '\n',
-            Some('t') => '\t',
-            Some('r') => '\r',
-            Some('0') => '\0',
-            Some(c @ ('\\' | '"' | '\'')) => c,
-            other => {
-                return Err(Error {
-                    span,
-                    message: format!("the escape `\\{}` is not one kernite reads", other.unwrap_or(' ')),
-                });
-            }
-        });
-    }
-    Ok(out)
+    unescape(&lit[1..lit.len() - 1]).map_err(|(_, message)| Error { span, message })
 }

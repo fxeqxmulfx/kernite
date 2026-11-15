@@ -273,6 +273,123 @@ fn a_crlf_in_a_string_is_a_lf_and_a_source_of_crlf_lines_is_the_source_of_lf_lin
     }
 }
 
+/// A plain string takes the escapes that Rust reads, wherever kernite takes one. A note's text, `note("\x41")`,
+/// `note("caf\u{e9}")` and `note("a\` LF `    b")`, shows `A`, `café` and `ab`, on x86 and on a GPU, and an escape is
+/// read before the `{k}` of a note is, as Rust reads a format string. An ABI, `extern "sysv\x364"`, is `sysv64`, and
+/// one that kernite does not know is told as the string reads.
+#[test]
+fn a_string_takes_the_escapes_that_rust_reads_for_a_note_and_for_an_abi() {
+    // (the text of a plain string, what a note shows of it), with `k` as 7.
+    let notes = [
+        (r"\x41", "A"),
+        (r"\x41\x7e\x7E\x20\x2a", "A~~ *"),
+        (r"caf\u{e9}", "café"),
+        (r"\u{E9}\u{e_9}\u{e9_}\u{0e9}\u{000e9}\u{0_0_0_e_9}", "éééééé"),
+        (r"\u{1f600}\u{1F_600}\u{10ffff}", "😀😀\u{10ffff}"),
+        ("a\\\n    b", "ab"),
+        ("a\\\r\n\t b", "ab"),
+        ("a\\\n\n \t\r\n  b", "ab"),
+        ("a\\\n\r\tb", "ab"),
+        ("a\\\n    ", "a"),
+        ("a\\\n\u{a0}b", "a\u{a0}b"),
+        (r#"\\ \" \'"#, r#"\ " '"#),
+        (r"\x7bk\x7d {k} \u{7b}k}", "7 7 7"),
+        (r"\u{7b}\u{7b}k}}", "{k}"),
+        (r"\n\r\t", "  \t"),
+    ];
+    for (text, shown) in notes {
+        let lit = format!("\"{text}\"");
+        let on_x86 =
+            |lit: &str| x86(&format!("unsafe extern \"sysv64\" fn k() {{\nlet k = 7;\nnote({lit});\n}}\n"), "k");
+        let want = format!("# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # {shown}\n    ret\n");
+        assert_eq!(on_x86(&lit), want, "{text:?}");
+        let on_gpu = ptx(&format!("unsafe extern \"ptx-kernel\" fn k() {{\nlet k = 7;\nnote({lit});\n}}\n"));
+        assert!(on_gpu.contains(&format!("\t// {shown}\n")), "{text:?}: {on_gpu}");
+    }
+    // An ABI is read as a note's text is: each of these is the ABI it spells, and one told as the string says is one
+    // that kernite does not know. A raw string has no escapes, so `r"ptx-\x6bernel"` is the text it shows.
+    let with = |lit: &str| format!("pub unsafe extern {lit} fn f() {{}}\n");
+    for (written, abi) in [("sysv\\x364", "sysv64"), ("sysv\\u{36}4", "sysv64"), ("\\x73ysv64", "sysv64")] {
+        let escaped = compile(&with(&format!("\"{written}\"")), "f");
+        assert!(escaped.is_ok(), "{written}");
+        assert_eq!(escaped, compile(&with(&format!("{abi:?}")), "f"), "{written}");
+    }
+    for (written, abi) in
+        [("ptx-\\x6bernel", "ptx-kernel"), ("ptx-\\u{66}unc", "ptx-func"), ("\\x70tx-func", "ptx-func")]
+    {
+        let escaped = kernite::ptx_str(&with(&format!("\"{written}\"")));
+        assert!(escaped.is_ok(), "{written}");
+        assert_eq!(escaped, kernite::ptx_str(&with(&format!("{abi:?}"))), "{written}");
+    }
+    let unknown = compile(&with("\"a\\x41\\u{e9}\\\n   b\""), "f").unwrap_err();
+    assert!(unknown.ends_with("`extern \"aAéb\"` is none of these"), "{unknown}");
+    let raw = kernite::ptx_str(&with(r#"r"ptx-\x6bernel""#)).unwrap_err();
+    assert!(raw.ends_with(r#"`extern "ptx-\x6bernel"` is none of these"#), "{raw}");
+}
+
+/// An escape that Rust refuses is refused at its `\`, with `line:column`, in a note's text and in an ABI, on x86 and on
+/// a GPU, and the words say which of three it is: an escape that is none, `\x` that has not two hex digits, 7f at most,
+/// or `\u` that has not one to six in braces that make a character.
+#[test]
+fn a_string_refuses_the_escapes_that_rust_refuses_at_the_escape() {
+    let none = |c: &str| {
+        format!(
+            "`\\{c}` is no escape, as in Rust: a string has `\\n`, `\\r`, `\\t`, `\\0`, `\\\\`, `\\'`, `\\\"`, \
+             `\\x41`, `\\u{{e9}}` and a `\\` that ends a line"
+        )
+    };
+    let x = "`\\x` takes two hex digits, 7f at most, as in Rust: write a greater character as `\\u{80}`";
+    let u = "`\\u` takes one to six hex digits in braces, as `\\u{e9}`, of a character: not d800 to dfff, and \
+             10ffff at most, as in Rust";
+    // The kernel `k` of each machine, with `body` in it, from its second line on.
+    let kernels =
+        |body: &str| ["sysv64", "ptx-kernel"].map(|abi| format!("unsafe extern \"{abi}\" fn k() {{\n{body}\n}}\n"));
+    for (lit, at, message) in [
+        (r#""\x80""#, "2:7", x.to_string()),
+        (r#""\u{d800}""#, "2:7", u.to_string()),
+        (r#""\u{110000}""#, "2:7", u.to_string()),
+        (r#""\u{}""#, "2:7", u.to_string()),
+        (r#""\q""#, "2:7", none("q")),
+        (r#""\xff""#, "2:7", x.to_string()),
+        (r#""\x4""#, "2:7", x.to_string()),
+        (r#""\xg0""#, "2:7", x.to_string()),
+        (r#""\u00e9""#, "2:7", u.to_string()),
+        (r#""\u{e9""#, "2:7", u.to_string()),
+        (r#""\u{_e9}""#, "2:7", u.to_string()),
+        (r#""\u{1234567}""#, "2:7", u.to_string()),
+        (r#""\u{dfff}""#, "2:7", u.to_string()),
+        (r#""\{k}""#, "2:7", none("{")),
+        (r#""\é""#, "2:7", none("é")),
+        (r#""\ ""#, "2:7", none(" ")),
+        // The first is the one told, and a column counts characters, `é` as one. A string later in the line is read as
+        // the first is.
+        (r#""é\x41\q\x80""#, "2:12", none("q")),
+        (r#""a"); note("b\u{110000}""#, "2:19", u.to_string()),
+    ] {
+        for src in kernels(&format!("note({lit});")) {
+            assert_eq!(compile(&src, "k"), Err(format!("{at}: {message}")), "{src:?}");
+        }
+    }
+    // On a later line, after a CRLF, and in a helper.
+    for src in kernels("note(\"a\r\nb\\\n  c\r\n\\x80\");") {
+        assert_eq!(compile(&src, "k"), Err(format!("5:1: {x}")), "{src:?}");
+    }
+    let src = "unsafe extern \"sysv64\" fn k() { h(); }\nfn h() { note(\"\\q\"); }\n";
+    assert_eq!(compile(src, "k"), Err(format!("2:16: {}", none("q"))));
+    // An ABI is a string too, refused before it is looked up.
+    for (src, at, message) in [
+        ("unsafe extern \"sysv\\x364\\q\" fn k() {}\n", "1:25", none("q")),
+        ("unsafe extern \"sysv\\x80\" fn k() {}\n", "1:20", x.to_string()),
+        ("unsafe extern \"ptx-kernel\\u{d800}\" fn k() {}\n", "1:26", u.to_string()),
+    ] {
+        assert_eq!(compile(src, "k"), Err(format!("{at}: {message}")), "{src:?}");
+    }
+    // A raw string has no escapes to refuse.
+    for src in kernels(r#"note(r"\q\x80\ud800");"#) {
+        assert!(compile(&src, "k").unwrap().contains(r"\q\x80\ud800"), "{src:?}");
+    }
+}
+
 #[test]
 fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
     // Rust refuses a name bound twice among a function's generics and parameters, E0403 and E0415;

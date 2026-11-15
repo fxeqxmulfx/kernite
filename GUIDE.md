@@ -259,6 +259,15 @@ plain or raw, and in a doc comment: "a CR on its own is not allowed in a string,
 own is not allowed in a raw string, as in Rust" or "a CR on its own is not allowed in a doc comment, as in Rust". A
 comment that is no doc comment takes it, as Rust does, and so does a string that writes it by the escape `\r`.
 
+A plain string takes the escapes that Rust reads: `\n`, `\r`, `\t`, `\0`, `\\`, `\'` and `\"`; `\x41`, of two hex
+digits, 7f at most; `\u{e9}`, of one to six hex digits in braces, with `_` allowed after the first, that make a
+character; and a `\` that ends a line, which leaves out the line break and the spaces, tabs and line breaks after it, a
+CR on its own too. So `note("caf\u{e9}")` shows `café`, and `extern "sysv\x364"` is `sysv64`. Any other escape is
+refused at its `\`, as Rust refuses it, with one of three messages: "`\q` is no escape, as in Rust: a string has `\n`,
+`\r`, `\t`, `\0`, `\\`, `\'`, `\"`, `\x41`, `\u{e9}` and a `\` that ends a line", "`\x` takes two hex digits, 7f at
+most, as in Rust: write a greater character as `\u{80}`" or "`\u` takes one to six hex digits in braces, as `\u{e9}`, of
+a character: not d800 to dfff, and 10ffff at most, as in Rust".
+
 A macro's fragment is one operand, or one type, wherever kernite reads it, as Rust reads it. With `$n:expr` as `1 + 2`,
 `$n * 2` is 6, and not the 5 that `1 + 2 * 2` is. It is so in a kernel's expression, on x86 and on a GPU, under a `-`,
 in the length of an array, in `#[instances(..)]`, and in a const, which is 6 to Rust too. A `$t:ty` is one type in a

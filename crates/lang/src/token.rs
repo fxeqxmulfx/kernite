@@ -418,13 +418,92 @@ fn is_doc(rest: &str) -> bool {
         || rest.starts_with("/**") && !rest.starts_with("/***")
 }
 
+/// An error at the first CR before `end` in `text` that no LF follows, as its offset in `text` and what is wrong, where
+/// `what` allows none.
+fn lone_cr(text: &str, end: usize, what: &str) -> Result<(), (usize, String)> {
+    match text.match_indices('\r').take_while(|&(i, _)| i < end).find(|&(i, _)| !text[i + 1..].starts_with('\n')) {
+        Some((i, _)) => Err((i, format!("a CR on its own is not allowed in {what}"))),
+        None => Ok(()),
+    }
+}
+
+/// The text that `body`, a plain string between its quotes, says, as Rust reads it: each CRLF is a LF, each escape is
+/// the character it stands for, and a `\` that ends a line, with the white space after it, is nothing. An error is the
+/// offset in `body` of what Rust refuses, and what is wrong: an escape, at its `\`, and a CR that no LF follows, at the
+/// CR, outside the white space that a `\` that ends a line leaves out.
+pub(crate) fn unescape(body: &str) -> Result<String, (usize, String)> {
+    let mut out = String::new();
+    let mut rest = body;
+    loop {
+        let (from, at) = (body.len() - rest.len(), rest.find('\\').unwrap_or(rest.len()));
+        // Up to the character after the `\`: past that, a `\` that ends a line may leave out a CR on its own.
+        lone_cr(rest, at + 2, "a string, as in Rust: write `\\r`").map_err(|(cr, message)| (from + cr, message))?;
+        out.push_str(&rest[..at].replace("\r\n", "\n"));
+        let Some(escape) = rest[at..].strip_prefix('\\') else { return Ok(out) };
+        let (c, len) = escape_of(escape).ok_or_else(|| (from + at, refused(escape)))?;
+        out.extend(c);
+        rest = &escape[len..];
+    }
+}
+
+/// The escape that `rest` begins with, right after its `\`, as Rust reads it: the character it stands for, none for a
+/// `\` that ends a line, and how many bytes it takes after the `\`.
+fn escape_of(rest: &str) -> Option<(Option<char>, usize)> {
+    let first = rest.chars().next()?;
+    let one = |c| Some((Some(c), 1));
+    match first {
+        'n' => one('\n'),
+        'r' => one('\r'),
+        't' => one('\t'),
+        '0' => one('\0'),
+        '\\' | '"' | '\'' => one(first),
+        'x' => {
+            let digits = rest.get(1..3).filter(|d| d.bytes().all(|b| b.is_ascii_hexdigit()))?;
+            let byte = u8::from_str_radix(digits, 16).ok().filter(u8::is_ascii)?;
+            Some((Some(char::from(byte)), 3))
+        }
+        'u' => {
+            let (digits, _) = rest[1..].strip_prefix('{')?.split_once('}')?;
+            let hex = digits.replace('_', "");
+            if digits.starts_with('_') || hex.len() > 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            Some((Some(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?), digits.len() + 3))
+        }
+        '\n' | '\r' if rest.starts_with('\n') || rest.starts_with("\r\n") => {
+            Some((None, rest.len() - rest.trim_start_matches([' ', '\t', '\n', '\r']).len()))
+        }
+        _ => None,
+    }
+}
+
+/// What is wrong with the escape that `escape_of` refused, which `escape` begins with, right after its `\`.
+fn refused(escape: &str) -> String {
+    match escape.chars().next() {
+        Some('x') => {
+            "`\\x` takes two hex digits, 7f at most, as in Rust: write a greater character as `\\u{80}`".into()
+        }
+        Some('u') => {
+            "`\\u` takes one to six hex digits in braces, as `\\u{e9}`, of a character: not d800 to dfff, and \
+             10ffff at most, as in Rust"
+                .into()
+        }
+        other => format!(
+            "`\\{}` is no escape, as in Rust: a string has `\\n`, `\\r`, `\\t`, `\\0`, `\\\\`, `\\'`, `\\\"`, `\\x41`, \
+             `\\u{{e9}}` and a `\\` that ends a line",
+            other.into_iter().flat_map(char::escape_debug).collect::<String>()
+        ),
+    }
+}
+
 /// The tokens of `src`, each spanned by its byte offset, and each with whether a space, a line break or a
 /// comment comes before it. Comments are skipped, doc comments too. A name written raw that Rust refuses,
 /// `r#self` say, is an error at its `r#`, and so is an `r#` that no name follows. A raw string, `r#"a"#`, is one token,
 /// and a string that is never closed, raw or plain, is an error at its start, as is a raw string of more than 255 `#`.
 /// A CR that no LF follows is an error at the CR, in a string, plain or raw, and in a doc comment, as Rust says; in any
-/// other comment it is taken. A string is its text as the source has it, each CRLF in it too: the parser reads that as
-/// a LF, as Rust does.
+/// other comment, and in the white space that a `\` that ends a line leaves out, it is taken. A string is its text as
+/// the source has it, each CRLF in it too: the parser reads that as a LF, as Rust does. An escape of a plain string
+/// that Rust refuses is an error at its `\`.
 pub fn lex(src: &str) -> Result<Vec<Tree>, Error> {
     Lexer { src, pos: 0 }.trees(None, 0).map(|(trees, _)| trees)
 }
@@ -562,14 +641,8 @@ impl Lexer<'_> {
 
     /// An error at the first CR that no LF follows, from `from` to the lexer's place, where `what` allows none.
     fn no_lone_cr(&self, from: usize, what: &str) -> Result<(), Error> {
-        let text = &self.src[from..self.pos];
-        match text.match_indices('\r').find(|(i, _)| !self.src[from + i + 1..].starts_with('\n')) {
-            Some((i, _)) => Err(Error {
-                span: Span((from + i) as u32),
-                message: format!("a CR on its own is not allowed in {what}"),
-            }),
-            None => Ok(()),
-        }
+        lone_cr(&self.src[from..], self.pos - from, what)
+            .map_err(|(cr, message)| Error { span: Span((from + cr) as u32), message })
     }
 
     fn string(&mut self) -> Result<String, Error> {
@@ -586,7 +659,9 @@ impl Lexer<'_> {
                 }
                 Some('"') => {
                     self.pos += 1;
-                    self.no_lone_cr(start, "a string, as in Rust: write `\\r`")?;
+                    let body = start + 1;
+                    unescape(&self.src[body..self.pos - 1])
+                        .map_err(|(at, message)| Error { span: Span((body + at) as u32), message })?;
                     return Ok(self.src[start..self.pos].to_string());
                 }
                 Some(c) => self.pos += c.len_utf8(),

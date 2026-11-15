@@ -4,7 +4,7 @@
 //! rest of the language is tested where it meets the targets it is compiled for, in `kernite`'s
 //! `tests/lang.rs`.
 
-use crate::token::{Span, Tree};
+use crate::token::{Span, Tree, unescape};
 use crate::value::{IntTy, Value, article, cast, typed, with_article};
 use crate::{Mention, instance, parse};
 
@@ -114,6 +114,7 @@ fn a_cr_on_its_own_is_refused_in_a_string_and_a_doc_comment_and_a_crlf_in_a_stri
         ("a \"b\r\"", "1:5", &string),
         ("a \"b\r\nc\rd\"", "2:2", &string),
         ("a \"b\\\rc\"", "1:6", &string),
+        ("a \"b\\\\\n\rc\"", "2:1", &string),
         ("a r\"b\rc\"", "1:6", &raw),
         ("a r#\"b\r\"#", "1:7", &raw),
         ("a r\"b\r\ncc\rd\"", "2:3", &raw),
@@ -143,6 +144,95 @@ fn a_cr_on_its_own_is_refused_in_a_string_and_a_doc_comment_and_a_crlf_in_a_stri
     ] {
         assert!(crate::lex(src).is_ok(), "{src:?}");
     }
+}
+
+/// A plain string takes the escapes of Rust: `\n`, `\r`, `\t`, `\0`, `\\`, `\'` and `\"`; `\x41`, of two hex digits
+/// that make 7f at most; `\u{e9}`, of one to six hex digits in braces, with `_` after the first, that make a character;
+/// and a `\` that ends a line, which leaves out the line break, a CRLF too, and the white space after it, however many
+/// lines it spans, and a CR on its own in it. The lexer keeps each as written, and `unescape` gives the text.
+#[test]
+fn a_string_takes_the_escapes_that_rust_reads() {
+    for (body, text) in [
+        (r#"\n\r\t\0\\\'\""#, "\n\r\t\0\\'\""),
+        (r"\01\x7f\x7F\x41\x00", "\u{0}1\u{7f}\u{7f}A\u{0}"),
+        (r"\u{e9}\u{E9}\u{e_9}\u{e9_}\u{e__9___}\u{0e9}", "ééééé\u{e9}"),
+        (r"\u{000041}\u{0_0_0_0_4_1}\u{0}\u{e000}\u{10ffff}\u{1F600}", "AA\u{0}\u{e000}\u{10ffff}\u{1f600}"),
+        ("a\\\n    b", "ab"),
+        ("a\\\r\n    b", "ab"),
+        ("a\\\n\n\n  \t\r\n b", "ab"),
+        ("a\\\n\r b", "ab"),
+        ("a\\\r\n  \r", "a"),
+        ("a\\\n    ", "a"),
+        ("a\\\n\u{a0}b", "a\u{a0}b"),
+        ("a\r\nb\\\r\n  c\r\n", "a\nbc\n"),
+        (r"a\r\nb", "a\r\nb"),
+    ] {
+        let lit = format!("\"{body}\"");
+        assert_eq!(lits(&lit), [lit.as_str()], "{body:?}");
+        assert_eq!(unescape(body), Ok(text.to_string()), "{body:?}");
+    }
+    // A raw string has none, and each of its `\` stays.
+    assert_eq!(lits(r##"r"\q\x80\u{d800}" r#"\"#"##), [r#"r"\q\x80\u{d800}""#, r##"r#"\"#"##]);
+}
+
+/// Each escape that Rust refuses is an error at its `\`, `line:column` and all, and a string says which of three it is:
+/// one that is none, `\x` that has not two hex digits, 7f at most, and `\u` that has not one to six in braces that make
+/// a character, `_` after the first only. The first in a string is the one told, wherever the string is, though a CR on
+/// its own follows it.
+#[test]
+fn a_string_refuses_the_escapes_that_rust_refuses_at_the_escape() {
+    let error = |src: &str| crate::lex(src).unwrap_err().at(src);
+    let none = |c: &str| {
+        format!(
+            "`\\{c}` is no escape, as in Rust: a string has `\\n`, `\\r`, `\\t`, `\\0`, `\\\\`, `\\'`, `\\\"`, \
+             `\\x41`, `\\u{{e9}}` and a `\\` that ends a line"
+        )
+    };
+    let x = "`\\x` takes two hex digits, 7f at most, as in Rust: write a greater character as `\\u{80}`";
+    let u = "`\\u` takes one to six hex digits in braces, as `\\u{e9}`, of a character: not d800 to dfff, and \
+             10ffff at most, as in Rust";
+    for (src, at, message) in [
+        ("\"\\q\"", "1:2", none("q")),
+        ("a \"b\\ c\"", "1:5", none(" ")),
+        ("a \"b\\a\"", "1:5", none("a")),
+        ("a \"b\\1\"", "1:5", none("1")),
+        ("a \"b\\é\"", "1:5", none("é")),
+        ("a \"b\\\u{a0}\"", "1:5", none("\\u{a0}")),
+        ("a \"é\\q\"", "1:5", none("q")),
+        ("a \"b\nc\r\n\\q\"", "3:1", none("q")),
+        ("a \"b\\x80\"", "1:5", x.into()),
+        ("a \"b\\xff\"", "1:5", x.into()),
+        ("a \"b\\x4\"", "1:5", x.into()),
+        ("a \"b\\x\"", "1:5", x.into()),
+        ("a \"b\\xg1\"", "1:5", x.into()),
+        ("a \"b\\x4g\"", "1:5", x.into()),
+        ("a \"b\\x_1\"", "1:5", x.into()),
+        ("a \"b\\x+1\"", "1:5", x.into()),
+        ("a \"b\\x4é\"", "1:5", x.into()),
+        ("a \"b\\u{d800}\"", "1:5", u.into()),
+        ("a \"b\\u{dfff}\"", "1:5", u.into()),
+        ("a \"b\\u{110000}\"", "1:5", u.into()),
+        ("a \"b\\u{ffffff}\"", "1:5", u.into()),
+        ("a \"b\\u{}\"", "1:5", u.into()),
+        ("a \"b\\u00e9\"", "1:5", u.into()),
+        ("a \"b\\u\"", "1:5", u.into()),
+        ("a \"b\\u{e9\"", "1:5", u.into()),
+        ("a \"b\\u{_e9}\"", "1:5", u.into()),
+        ("a \"b\\u{_}\"", "1:5", u.into()),
+        ("a \"b\\u{0000041}\"", "1:5", u.into()),
+        ("a \"b\\u{0_0_0_0_0_4_1}\"", "1:5", u.into()),
+        ("a \"b\\u{g}\"", "1:5", u.into()),
+        ("a \"b\\u{ e9}\"", "1:5", u.into()),
+        ("a \"b\\u{e9 }\"", "1:5", u.into()),
+        ("a \"b\\u{+e9}\"", "1:5", u.into()),
+        ("a \"\\x41\\q\\x80\"", "1:8", none("q")),
+        ("a \"\\q\rb\"", "1:4", none("q")),
+        ("a \"b\" \"c\\x80\"", "1:9", x.into()),
+    ] {
+        assert_eq!(error(src), format!("{at}: {message}"), "{src:?}");
+    }
+    // A string that is never closed is told so, whatever is in it.
+    assert_eq!(error("a \"b\\q"), "1:3: this string is never closed");
 }
 
 /// The tokens of `src`, a source with lifetimes in it, as `for<'a> fn(&'a u8)` has. The lexer of a
