@@ -409,10 +409,22 @@ fn starts_name(c: char) -> bool {
     c == '_' || c.is_alphabetic()
 }
 
+/// Whether `rest` starts a doc comment, as Rust says: `//!`, `/*!`, `///` that no fourth `/` follows, and `/**` that no
+/// third `*` follows. Rust says `/**/` is none, but it holds no CR, so taking it as one changes nothing.
+fn is_doc(rest: &str) -> bool {
+    rest.starts_with("//!")
+        || rest.starts_with("/*!")
+        || rest.starts_with("///") && !rest.starts_with("////")
+        || rest.starts_with("/**") && !rest.starts_with("/***")
+}
+
 /// The tokens of `src`, each spanned by its byte offset, and each with whether a space, a line break or a
 /// comment comes before it. Comments are skipped, doc comments too. A name written raw that Rust refuses,
 /// `r#self` say, is an error at its `r#`, and so is an `r#` that no name follows. A raw string, `r#"a"#`, is one token,
 /// and a string that is never closed, raw or plain, is an error at its start, as is a raw string of more than 255 `#`.
+/// A CR that no LF follows is an error at the CR, in a string, plain or raw, and in a doc comment, as Rust says; in any
+/// other comment it is taken. A string is its text as the source has it, each CRLF in it too: the parser reads that as
+/// a LF, as Rust does.
 pub fn lex(src: &str) -> Result<Vec<Tree>, Error> {
     Lexer { src, pos: 0 }.trees(None, 0).map(|(trees, _)| trees)
 }
@@ -512,6 +524,7 @@ impl Lexer<'_> {
     fn skip_space(&mut self) -> Result<(), Error> {
         loop {
             let rest = &self.src[self.pos..];
+            let (from, doc) = (self.pos, is_doc(rest));
             if let Some(c) = rest.chars().next()
                 && c.is_whitespace()
             {
@@ -541,6 +554,21 @@ impl Lexer<'_> {
             } else {
                 return Ok(());
             }
+            if doc {
+                self.no_lone_cr(from, "a doc comment, as in Rust")?;
+            }
+        }
+    }
+
+    /// An error at the first CR that no LF follows, from `from` to the lexer's place, where `what` allows none.
+    fn no_lone_cr(&self, from: usize, what: &str) -> Result<(), Error> {
+        let text = &self.src[from..self.pos];
+        match text.match_indices('\r').find(|(i, _)| !self.src[from + i + 1..].starts_with('\n')) {
+            Some((i, _)) => Err(Error {
+                span: Span((from + i) as u32),
+                message: format!("a CR on its own is not allowed in {what}"),
+            }),
+            None => Ok(()),
         }
     }
 
@@ -558,6 +586,7 @@ impl Lexer<'_> {
                 }
                 Some('"') => {
                     self.pos += 1;
+                    self.no_lone_cr(start, "a string, as in Rust: write `\\r`")?;
                     return Ok(self.src[start..self.pos].to_string());
                 }
                 Some(c) => self.pos += c.len_utf8(),
@@ -579,6 +608,7 @@ impl Lexer<'_> {
             return Err(Error { span, message: "this string is never closed".into() });
         };
         self.pos = body + len + close.len();
+        self.no_lone_cr(start, "a raw string, as in Rust")?;
         Ok(self.src[start..self.pos].to_string())
     }
 

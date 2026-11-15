@@ -82,7 +82,9 @@
 //!   break in it, `\r\n`, `\n` or `\r`, is a space.
 //! - **Strings** are plain or raw, as in Rust, for a note's text, `note(r#"a "b""#)`, and for a function's ABI,
 //!   `extern r"sysv64"`. A raw string has no escapes, and ends at the first `"` that has as many `#` after it as the
-//!   string began with, 255 at most; [`lex`] refuses one that has more, or is never closed, at its start.
+//!   string began with, 255 at most; [`lex`] refuses one that has more, or is never closed, at its start. A CRLF in a
+//!   string is read as a LF, as Rust reads it, and [`lex`] refuses a CR that no LF follows, at the CR, in a string,
+//!   plain or raw, and in a doc comment, as Rust does.
 //! - **Statics** are memory of the module's, of a type of the machine's that takes arguments,
 //!   `static COUNTS: global<[u32; 16]>;`, which each of its functions names, helpers among
 //!   them, as memory a function declares is named, and which keeps what they write from one

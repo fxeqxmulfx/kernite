@@ -1088,8 +1088,9 @@ fn is_string(lit: &str) -> bool {
     lit.starts_with(['"', 'r'])
 }
 
-/// A string literal's text.
+/// A string literal's text, each CRLF in it a LF, as Rust reads it.
 fn unquote(lit: &str, span: Span) -> Result<String, Error> {
+    let lit = lit.replace("\r\n", "\n");
     if let Some(raw) = lit.strip_prefix('r') {
         let hashes = raw.len() - raw.trim_start_matches('#').len();
         return Ok(raw[hashes + 1..raw.len() - hashes - 1].to_string());

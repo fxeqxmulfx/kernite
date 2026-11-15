@@ -176,6 +176,103 @@ fn a_raw_string_is_a_string_for_a_note_and_for_an_abi() {
     assert_eq!(refused(&format!("note({});", raw(256, "hi"))), "2:6: a raw string has 255 `#` at most, as in Rust");
 }
 
+/// A CR that no LF follows is refused at the CR, as Rust refuses it, in a string, plain or raw, a note's or an ABI's,
+/// and in a doc comment, `///`, `//!`, `/**` and `/*!`, on x86 and on a GPU. A comment that is no doc comment takes it,
+/// as Rust does, and the escape `\r` is one.
+#[test]
+fn a_cr_on_its_own_is_refused_in_a_string_and_a_doc_comment_and_taken_in_any_other_comment() {
+    let string = "a CR on its own is not allowed in a string, as in Rust: write `\\r`";
+    let raw = "a CR on its own is not allowed in a raw string, as in Rust";
+    let doc = "a CR on its own is not allowed in a doc comment, as in Rust";
+    // The kernel `k` of each machine, with `top` before it and `body` in it.
+    let kernels = |top: &str, body: &str| {
+        ["sysv64", "ptx-kernel"].map(|abi| format!("{top}unsafe extern \"{abi}\" fn k() {{\n{body}\n}}\n"))
+    };
+    for (top, body, at, message) in [
+        ("", "note(\"a\rb\");", "2:8", string),
+        ("", "note(\"a\r\");", "2:8", string),
+        ("", "note(\"a\nb\rc\");", "3:2", string),
+        ("", "note(\"a\r\r\n\");", "2:8", string),
+        ("", "note(r\"a\rb\");", "2:9", raw),
+        ("", "note(r#\"a\r\"#);", "2:10", raw),
+        ("", "note(r\"a\r\nb\rc\");", "3:2", raw),
+        ("/// a\rb\n", "", "1:6", doc),
+        ("//! a\rb\n", "", "1:6", doc),
+        ("/** a\rb */\n", "", "1:6", doc),
+        ("/*! a\rb */\n", "", "1:6", doc),
+        ("/// a\r\n/// b\rc\n", "", "2:6", doc),
+        ("", "/// a\rb\nnote(\"c\");", "2:6", doc),
+    ] {
+        for src in kernels(top, body) {
+            assert_eq!(compile(&src, "k"), Err(format!("{at}: {message}")), "{src:?}");
+        }
+    }
+    // An ABI is a string too, refused as a note's is, before it is looked up.
+    for (src, at, message) in [
+        ("unsafe extern \"sysv64\r\" fn k() {}\n", "1:22", string),
+        ("unsafe extern r\"sysv64\r\" fn k() {}\n", "1:23", raw),
+        ("unsafe extern \"ptx-kernel\r\" fn k() {}\n", "1:26", string),
+        ("unsafe extern r#\"ptx-kernel\r\"# fn k() {}\n", "1:28", raw),
+    ] {
+        assert_eq!(compile(src, "k"), Err(format!("{at}: {message}")), "{src:?}");
+    }
+    // Any other comment takes a CR, and so does the escape `\r`, which a note shows as a space.
+    let compiled = |top: &str, body: &str| kernels(top, body).map(|src| compile(&src, "k"));
+    let want = compiled("", "note(\"a\");");
+    assert!(want.iter().all(Result::is_ok), "{want:?}");
+    for (top, body) in [
+        ("// a\rb\n", "note(\"a\");"),
+        ("//// a\rb\n", "note(\"a\");"),
+        ("/* a\rb */\n", "note(\"a\");"),
+        ("/*** a\rb ***/\n", "note(\"a\");"),
+        ("", "note(\"a\"); // b\rc"),
+        ("", "/* b\rc */ note(\"a\");"),
+    ] {
+        assert_eq!(compiled(top, body), want, "{top:?} {body:?}");
+    }
+    assert_eq!(compiled("", "note(\"a\\r\");"), compiled("", "note(\"a \");"));
+}
+
+/// A CRLF in a string, plain or raw, is a LF, as Rust reads it. A note shows each line break as a space, so an ABI is
+/// the string that tells it: `extern "a<CRLF>b"` is none that kernite knows, and the error has it as `a<LF>b`, on x86
+/// and on a GPU. A source whose lines end in CRLF is the source whose lines end in LF, with doc comments and strings of
+/// more than a line in it.
+#[test]
+fn a_crlf_in_a_string_is_a_lf_and_a_source_of_crlf_lines_is_the_source_of_lf_lines() {
+    for (crlf, lf, text) in [
+        ("\"a\r\nb\"", "\"a\nb\"", "a\nb"),
+        ("r\"a\r\nb\"", "r\"a\nb\"", "a\nb"),
+        ("r#\"a\r\n\r\nb\"#", "r#\"a\n\nb\"#", "a\n\nb"),
+    ] {
+        for top in ["", "unsafe extern \"ptx-kernel\" fn g() {}\n"] {
+            let with = |lit: &str| compile(&format!("{top}unsafe extern {lit} fn k() {{}}\n"), "k");
+            assert_eq!(with(crlf), with(lf), "{top:?} {crlf:?}");
+            let message = with(crlf).unwrap_err();
+            assert!(message.ends_with(&format!("`extern \"{text}\"` is none of these")), "{message:?}");
+        }
+    }
+    let (x86, gpu) = ("    # a b\n    # c d\n    ret\n", "\t// a b\n\t// c d\n\tret;\n");
+    for (abi, notes) in [("sysv64", x86), ("ptx-kernel", gpu)] {
+        let lf = [
+            "/// A kernel.",
+            "/** Its doc,",
+            " over two lines. */",
+            &format!("unsafe extern \"{abi}\" fn k() {{"),
+            "    // A comment.",
+            "    note(\"a",
+            "b\");",
+            "    note(r#\"c",
+            "d\"#);",
+            "}",
+            "",
+        ]
+        .join("\n");
+        let listing = compile(&lf, "k").unwrap();
+        assert!(listing.contains(notes), "{abi}: {listing:?}");
+        assert_eq!(compile(&lf.replace('\n', "\r\n"), "k"), Ok(listing), "{abi}");
+    }
+}
+
 #[test]
 fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
     // Rust refuses a name bound twice among a function's generics and parameters, E0403 and E0415;

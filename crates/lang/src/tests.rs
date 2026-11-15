@@ -41,22 +41,24 @@ fn the_lexer_refuses_a_name_written_raw_that_rust_refuses() {
     assert_eq!(idents, names.split(' ').collect::<Vec<_>>());
 }
 
+/// The text of each token of `src`, which are all literals.
+fn lits(src: &str) -> Vec<String> {
+    crate::lex(src)
+        .unwrap()
+        .into_iter()
+        .map(|tree| match tree {
+            Tree::Lit { text, .. } => text,
+            other => panic!("{src}: {other:?}"),
+        })
+        .collect()
+}
+
 /// A raw string is one token, as the macros are given it: it has no escape, and it ends at the first `"` that has as
 /// many `#` after it as the `r` has, so `r##"a "# b"##` holds a `"#`. One that is never closed is an error at its
 /// start, in the words of a plain string that is never closed. One of more than 255 `#` is an error at its start too,
 /// as in Rust.
 #[test]
 fn the_lexer_reads_a_raw_string_as_one_token() {
-    let lits = |src: &str| -> Vec<String> {
-        crate::lex(src)
-            .unwrap()
-            .into_iter()
-            .map(|tree| match tree {
-                Tree::Lit { text, .. } => text,
-                other => panic!("{src}: {other:?}"),
-            })
-            .collect()
-    };
     for lit in [
         r#"r"hi""#,
         r##"r#"hi"#"##,
@@ -92,6 +94,55 @@ fn the_lexer_reads_a_raw_string_as_one_token() {
         crate::lex(src).unwrap().iter().map(kind).collect()
     };
     assert_eq!(kinds(r##"r#type bar#"x"# r "y""##), "iiplpil");
+}
+
+/// A string, plain or raw, is its text as the source has it, a CRLF in it too, the one after a `\` too, which the
+/// parser reads as a LF. A CR that no LF follows is an error at the CR, in a string, plain or raw, and in a doc
+/// comment, `///`, `//!`, `/**` and `/*!`, as Rust refuses it, at the end of the input too. In a comment that is no doc
+/// comment, `//`, `////`, `/*` and `/***`, it is taken, as Rust takes it. A comment within another is of the outer
+/// one's kind, as in Rust.
+#[test]
+fn a_cr_on_its_own_is_refused_in_a_string_and_a_doc_comment_and_a_crlf_in_a_string_stays() {
+    for src in ["\"a\r\nb\"", "r\"a\r\nb\"", "r#\"a\r\n\r\nb\"#", "\"a\\\r\n  b\"", "\"a\\r\\nb\"", "r\"a\\r\\nb\""] {
+        assert_eq!(lits(src), [src], "{src:?}");
+    }
+    let error = |src: &str| crate::lex(src).unwrap_err().at(src);
+    let words = |what: &str| format!("a CR on its own is not allowed in {what}, as in Rust");
+    let (string, raw, doc) = (words("a string") + ": write `\\r`", words("a raw string"), words("a doc comment"));
+    for (src, at, message) in [
+        ("a \"b\rc\"", "1:5", &string),
+        ("a \"b\r\"", "1:5", &string),
+        ("a \"b\r\nc\rd\"", "2:2", &string),
+        ("a \"b\\\rc\"", "1:6", &string),
+        ("a r\"b\rc\"", "1:6", &raw),
+        ("a r#\"b\r\"#", "1:7", &raw),
+        ("a r\"b\r\ncc\rd\"", "2:3", &raw),
+        ("/// a\rb", "1:6", &doc),
+        ("/// a\r", "1:6", &doc),
+        ("a\r\n//! a\rb\n", "2:6", &doc),
+        ("/** a\rb */", "1:6", &doc),
+        ("/*! a\rb */", "1:6", &doc),
+        ("/**\r\n * a\r\n * b\r */", "3:5", &doc),
+        ("/** a /* b\rc */ d */", "1:11", &doc),
+    ] {
+        assert_eq!(error(src), format!("{at}: {message}"), "{src:?}");
+    }
+    // Never closed is told as it was, at the start of the string.
+    assert_eq!(error("a \"b\rc"), "1:3: this string is never closed");
+    assert_eq!(error("a r\"b\rc"), "1:3: this string is never closed");
+    // A comment that is no doc comment, and a CRLF that ends a line of a doc comment, hold nothing to refuse.
+    for src in [
+        "// a\rb",
+        "//// a\rb",
+        "/* a\rb */",
+        "/*** a\rb */",
+        "/* a /** b\rc */ d */",
+        "/// a\r\n",
+        "/** a\r\n b */",
+        "a // b\r\n\"c\"",
+    ] {
+        assert!(crate::lex(src).is_ok(), "{src:?}");
+    }
 }
 
 /// The tokens of `src`, a source with lifetimes in it, as `for<'a> fn(&'a u8)` has. The lexer of a

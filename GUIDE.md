@@ -253,7 +253,11 @@ that `f128` is unstable, nor that a parameter is unused.
 A string is plain or raw, as in Rust, wherever kernite takes one: a note's text, `note(r#"a "b""#)`, and the ABI of a
 function, `extern r"sysv64"`. A raw string has no escapes, and ends at the first `"` that has as many `#` after it as
 the string began with, so `r##"a "# b"##` holds a `"#`. A string that is never closed, plain or raw, is refused where it
-starts: "this string is never closed". So is a raw string of more than 255 `#`, as Rust refuses it.
+starts: "this string is never closed". So is a raw string of more than 255 `#`, as Rust refuses it. A CRLF in a string,
+plain or raw, is a LF, as Rust reads it. A CR that no LF follows is refused at the CR, as Rust refuses it, in a string,
+plain or raw, and in a doc comment: "a CR on its own is not allowed in a string, as in Rust: write `\r`", "a CR on its
+own is not allowed in a raw string, as in Rust" or "a CR on its own is not allowed in a doc comment, as in Rust". A
+comment that is no doc comment takes it, as Rust does, and so does a string that writes it by the escape `\r`.
 
 A macro's fragment is one operand, or one type, wherever kernite reads it, as Rust reads it. With `$n:expr` as `1 + 2`,
 `$n * 2` is 6, and not the 5 that `1 + 2 * 2` is. It is so in a kernel's expression, on x86 and on a GPU, under a `-`,
