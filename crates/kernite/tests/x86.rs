@@ -712,6 +712,29 @@ fn the_builder_writes_an_index_with_no_base() {
     encode("builder", &cases);
 }
 
+/// A note of the builder is one line, as a kernel's note is: each line break in it, `\r\n`, `\n` or `\r`, is a space,
+/// so that no text of it is code to an assembler, as `int3` would be on a line of its own.
+#[test]
+fn a_line_break_in_the_builders_note_is_a_space() {
+    for (text, shown) in [
+        ("a\nint3", "a int3"),
+        ("a\r\nint3", "a int3"),
+        ("a\rint3", "a int3"),
+        // Each line break is a space of its own, one at either end too, and `\r\n` is one line break and not two.
+        ("\na\n\nint3\r\n", " a  int3 "),
+        ("\r\n\r\n\r\r\n\n", "     "),
+        ("\ra\r\r\n\nint3\n", " a   int3 "),
+    ] {
+        let mut a = Asm::new("k");
+        a.note(text);
+        a.ret();
+        let listing = intel::print(&kernite_compile::compile(&a.finish(), &SysV).unwrap(), vec![]).unwrap();
+        let want = format!("# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # {shown}\n    ret\n");
+        assert_eq!(listing.text(), want, "{text:?}");
+        assert_eq!(listing.code().collect::<Vec<_>>(), ["ret"], "{text:?}");
+    }
+}
+
 /// The builder takes no more of an immediate than x86 reads, nor a scale x86 has not, as the
 /// language does not.
 #[test]

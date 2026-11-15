@@ -105,9 +105,10 @@ impl Asm {
         self.p.body.push(Item::Label(label));
     }
 
-    /// A remark for the listing, which also names the place in allocation errors.
+    /// A remark for the listing, which also names the place in allocation errors. It is one line, as a kernel's note
+    /// is: each line break in `text`, `\r\n`, `\n` or `\r`, is a space.
     pub fn note(&mut self, text: impl Into<String>) {
-        self.p.body.push(Item::Note(text.into()));
+        self.p.body.push(Item::note(&text.into()));
     }
 
     /// `size` bytes of stack called `name`, aligned to `align`. Until written, they hold

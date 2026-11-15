@@ -65,8 +65,16 @@ pub enum Item<Op, R> {
     Label(Label),
     /// An instruction.
     Inst(Inst<Op, R>),
-    /// A remark for whoever reads the listing. No code.
+    /// A remark for whoever reads the listing, on one line. No code.
     Note(String),
+}
+
+impl<Op, R> Item<Op, R> {
+    /// A remark for whoever reads the listing, `text` on one line: each line break in it, `\r\n`, `\n` or `\r`, is a
+    /// space, for a line break ends the comment that a machine writes a remark in, and what follows it is code.
+    pub fn note(text: &str) -> Self {
+        Self::Note(text.replace("\r\n", " ").replace(['\r', '\n'], " "))
+    }
 }
 
 /// What a variable is: the file it takes its register from, and the name diagnostics and

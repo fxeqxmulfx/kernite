@@ -1307,9 +1307,7 @@ impl<'a, T: Target> Eval<'a, T> {
             rest = &tail[close + 1..];
         }
         out += rest;
-        // A note is one line on every machine: each `\r\n`, `\n` and `\r` is a space, for a line break ends the comment
-        // that a machine writes a note in, and what follows it is code.
-        self.target.note(&out.replace("\r\n", " ").replace(['\r', '\n'], " "));
+        self.target.note(&out);
         Ok(())
     }
 

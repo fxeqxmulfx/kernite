@@ -50,8 +50,8 @@ pub trait Target {
     /// Places label `label` here. The evaluator numbers labels, each once.
     fn label(&mut self, label: u32);
 
-    /// A remark for whoever reads the listing, on one line: the evaluator has made each line break in `text`, `\r\n`,
-    /// `\n` or `\r`, a space, so that none ends the comment a machine writes it in.
+    /// A remark for whoever reads the listing, on one line: `text` may hold a line break, `\r\n`, `\n` or `\r`, and a
+    /// machine writes each as a space, so that none ends the comment it writes the remark in.
     fn note(&mut self, text: &str);
 
     /// The instruction `name` over `args`, run only where `guard` holds if there is one.
