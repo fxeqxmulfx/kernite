@@ -87,9 +87,12 @@ pub(crate) fn gpu(
     ));
     // The names the driver finds the kernels and the statics by, those `cfg` keeps.
     let mut load = parse("const NAMES: &[&::core::primitive::str] = &");
-    load.extend([names(symbols.iter().map(|(c, s)| (c, *s)))]);
-    load.extend(parse("; const GLOBALS: &[&::core::primitive::str] = &"));
-    load.extend([names(variables.iter().map(|(c, m)| (*c, m.symbol.as_str())))]);
+    load.extend([listed(symbols.iter().map(|(c, s)| (c, named(&[(Cond::Always, s)]))))]);
+    load.extend(parse(
+        "; const GLOBALS: &[(&::core::primitive::str, ::core::option::Option<(::core::primitive::usize, \
+         ::core::primitive::usize)>)] = &",
+    ));
+    load.extend([listed(variables.iter().map(|(c, m)| (*c, variable(m))))]);
     load.extend(parse(
         ";\n::core::result::Result::Ok(Kernels {\n\
          module: ::kernite_cuda::Module::load(__kernite_cuda, PTX, NAMES, GLOBALS)?,\n})",
@@ -183,14 +186,21 @@ fn named(parts: &[(Cond, &str)]) -> TokenStream {
     out
 }
 
-/// The names of `symbols` as the constants `named` makes them, in brackets, each there where its
-/// condition holds.
-fn names<'a>(symbols: impl Iterator<Item = (&'a Cond, &'a str)>) -> TokenTree {
+/// What `Module::load` is given of memory `m`: its name, as the constant `named` makes it, and the bytes of memory the
+/// module has no room for, or none.
+fn variable(m: &DeviceStatic) -> TokenStream {
+    let mut tuple = named(&[(Cond::Always, &m.symbol)]);
+    tuple.extend(parse(", ::core::option::Option::None"));
+    TokenTree::Group(Group::new(Delimiter::Parenthesis, tuple)).into()
+}
+
+/// `elements` in brackets, each there where its condition holds.
+fn listed<'a>(elements: impl Iterator<Item = (&'a Cond, TokenStream)>) -> TokenTree {
     let mut list = TokenStream::new();
-    for (cond, symbol) in symbols {
+    for (cond, element) in elements {
         let Some(guard) = cond.guard() else { continue };
         list.extend(guard);
-        list.extend(named(&[(Cond::Always, symbol)]));
+        list.extend(element);
         list.extend(parse(","));
     }
     TokenTree::Group(Group::new(Delimiter::Bracket, list))
