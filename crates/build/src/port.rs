@@ -3,7 +3,7 @@
 
 use kernite_lang::{Fn, Memory, Span, Target, Value};
 
-use crate::{Assembly, DeviceStatic, HostStatic, Naked};
+use crate::{Assembly, DeviceStatic, Done, HostStatic, Naked};
 
 /// A machine kernite compiles a module's functions for: its kernels while their bodies are
 /// written, its statics, how its kernels see the functions they call, and its code.
@@ -15,7 +15,7 @@ pub trait Backend {
     /// How a kernel sees a function it may call.
     type Callee: Clone;
     /// A kernel's code, once its body is written.
-    type Code;
+    type Code: Clone;
 
     /// Static `name`, as `memory` has it worked out, laid out; or why not.
     fn lay_out(&self, name: &str, memory: &Memory) -> Result<Self::Static, StaticError>;
@@ -38,9 +38,17 @@ pub trait Backend {
         statics: &[Self::Static],
         callees: &[Called<Self::Callee>],
     ) -> Self::Kernel;
+    /// The functions `kernel`'s body calls, each by the name of its instance, `tile::<4>`: those whose code its own may
+    /// depend on. A machine whose code does not says none.
+    fn calls(&self, _: &Self::Kernel) -> Vec<String> {
+        vec![]
+    }
     /// `kernel`'s code, its body written: its registers allocated, or its code checked; or why
-    /// not.
-    fn finish(&self, kernel: Self::Kernel) -> Result<Self::Code, Unfinished>;
+    /// not. `done` has what compiling each instance of the module gave so far, by its name: the code of each function
+    /// it calls among them, and of each they call in turn, for a function is finished after those it calls. It has no
+    /// code of a function that does not compile, and none of one that waits for this one: the function itself, if it
+    /// calls itself, and each that calls it.
+    fn finish(&self, kernel: Self::Kernel, done: &[Done<Self::Code>]) -> Result<Self::Code, Unfinished>;
 }
 
 /// A machine whose kernels Rust calls in the process, as naked functions.

@@ -1,32 +1,22 @@
 # gcds(gpr, gpr, gpr, gpr) -> ()
-# frame: 0 bytes aligned to 0, saves [rbx, r12, r13, r14, r15]
-# a=r14,rdi b=r13,rsi g=r12,rdx n=rbx,rcx i=r15 x=rdi
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# a=r9,rdi b=r8,rsi g=rdx n=rcx i=r10 x=rdi
 # y=rsi d=rax
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-    mov rbx, rcx
-    mov r12, rdx
-    mov r13, rsi
-    mov r14, rdi
-    test rbx, rbx
+    sub rsp, 8
+    mov r8, rsi
+    mov r9, rdi
+    test rcx, rcx
     jz 3f
-    xor r15d, r15d
+    xor r10d, r10d
 2:
-    mov edi, dword ptr [r14 + r15*4]
-    mov esi, dword ptr [r13 + r15*4]
+    mov edi, dword ptr [r9 + r10*4]
+    mov esi, dword ptr [r8 + r10*4]
     call {f0}
-    mov dword ptr [r12 + r15*4], eax
-    inc r15
-    cmp r15, rbx
+    mov dword ptr [rdx + r10*4], eax
+    inc r10
+    cmp r10, rcx
     jnz 2b
 3:
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
+    add rsp, 8
     ret
 # f0: gcd

@@ -1911,46 +1911,43 @@ fn a_function_calls_itself_with_its_arguments_where_sysv_passes_them() {
     assert_eq!(kernite::x86_str(CALLERS, "gcd").unwrap().text(), want);
 }
 
-/// A call changes the registers SysV lets it, all but rbx, rbp and r12 to r15: an integer
-/// live across one is kept in rbx, which the kernel saves for its own caller; a vector, of
-/// which the call may change any, is spilled to the frame.
+/// A call changes the registers its callee writes, and those that each function the callee calls writes: an integer
+/// live across one stays in a register none of them writes, here rcx, for `gcd` writes rdi, rsi and rax alone, and
+/// calls itself; a vector, of which the callee's `vzeroupper` clears the upper half of each, is spilled to the frame.
 #[test]
 fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
     let want = "# plus(gpr) -> gpr
-# frame: 0 bytes aligned to 0, saves [rbx]
-# x=rbx,rdi y=rax b=rsi
-    push rbx
-    mov rbx, rdi
-    mov rdi, rbx
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# x=rcx,rdi y=rax b=rsi
+    sub rsp, 8
+    mov rcx, rdi
+    mov rdi, rcx
     mov rsi, 6
     call {f0}
-    add rax, rbx
-    pop rbx
+    add rax, rcx
+    add rsp, 8
     ret
 # f0: gcd
 ";
     assert_eq!(kernite::x86_str(CALLERS, "plus").unwrap().text(), want);
     let want = "# keep(gpr) -> ()
 # needs: avx
-# frame: 32 bytes aligned to 32, saves [rbx]
+# frame: 32 bytes aligned to 32, saves []
 # v, spilled: 32 bytes at rsp
-# p=rbx,rdi v=ymm0
-    push rbx
+# p=rdi v=ymm0
     push rbp
     mov rbp, rsp
     sub rsp, 32
     and rsp, -32
-    mov rbx, rdi
-    vmovups ymm0, ymmword ptr [rbx]
+    vmovups ymm0, ymmword ptr [rdi]
     # v spilled
     vmovups ymmword ptr [rsp], ymm0
     call {f0}
     # v reloaded
     vmovups ymm0, ymmword ptr [rsp]
-    vmovups ymmword ptr [rbx], ymm0
+    vmovups ymmword ptr [rdi], ymm0
     mov rsp, rbp
     pop rbp
-    pop rbx
     vzeroupper
     ret
 # f0: nothing
@@ -1958,18 +1955,62 @@ fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
     assert_eq!(kernite::x86_str(CALLERS, "keep").unwrap().text(), want);
 }
 
-/// The registers a call leaves as they were are rbx and r12 to r15, and an integer alive
-/// across one is kept in them alone: five are, each saved for the kernel's caller, and a
-/// sixth is spilled to the frame.
+/// The registers every call leaves as they were are rbx and r12 to r15: an integer alive across a call of a function
+/// that changes all the others is kept in them alone, five, each saved for the kernel's caller, and a sixth is spilled
+/// to the frame. Across a call of one that changes none, all six stay where they are.
 #[test]
-fn a_value_alive_across_a_call_is_kept_in_rbx_or_r12_to_r15() {
-    let body = "call(nothing); add(a, b); add(a, c); add(a, d); add(a, e); add(a, f); ret(a);";
-    let code = calling("a: u64, b: u64, c: u64, d: u64, e: u64, f: u64", " -> u64", body).unwrap();
+fn a_value_alive_across_a_call_that_changes_every_register_is_kept_in_rbx_or_r12_to_r15() {
+    let params = "a: u64, b: u64, c: u64, d: u64, e: u64, f: u64";
+    let body = |callee| format!("call({callee}); add(a, b); add(a, c); add(a, d); add(a, e); add(a, f); ret(a);");
+    let code = calling(params, " -> u64", &body("wipe")).unwrap();
     let want = "push rbx\npush r12\npush r13\npush r14\npush r15\npush rbp\nmov rbp, rsp\nsub rsp, 8\nmov qword ptr \
                 [rsp], r9\nmov rbx, r8\nmov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\ncall {f0}\nadd r15, \
                 r14\nadd r15, r13\nadd r15, r12\nadd r15, rbx\nmov rax, qword ptr [rsp]\nadd r15, rax\nmov rax, \
                 r15\nmov rsp, rbp\npop rbp\npop r15\npop r14\npop r13\npop r12\npop rbx\nret";
     assert_eq!(code, want);
+    let code = calling(params, " -> u64", &body("nothing")).unwrap();
+    let want = "sub rsp, 8\ncall {f0}\nadd rdi, rsi\nadd rdi, rdx\nadd rdi, rcx\nadd rdi, r8\nadd rdi, r9\nmov rax, \
+                rdi\nadd rsp, 8\nret";
+    assert_eq!(code, want);
+}
+
+/// A call changes the registers its callee writes, and those of each function the callee calls, by a jump or a call, by
+/// name or at an address with the functions it may reach given, each counted once though two call each other: an
+/// integer alive across it stays in a register none of them writes, rcx or rdx here, for each writes rax. A call at an
+/// address with no functions given may reach any function, a call of the kernel itself reaches code that is not
+/// compiled yet, and a call of a function that does not compile reaches code kernite does not have: each changes every
+/// register a callee may, and the integer stays in rbx, which every call leaves as it was and the kernel saves.
+#[test]
+fn a_call_changes_the_registers_of_each_function_it_may_reach() {
+    let kernel = |reg: &str, calls: &str| match reg {
+        "rbx" => format!("push rbx\nmov rbx, 5\n{calls}\nadd rbx, 1\nmov rax, rbx\npop rbx\nret"),
+        _ => format!("sub rsp, 8\nmov {reg}, 5\n{calls}\nadd {reg}, 1\nmov rax, {reg}\nadd rsp, 8\nret"),
+    };
+    let at = "lea rax, [rip + {f0}]\ncall rax";
+    let cases = [
+        // `writes_rax`, `jumps`, which jumps to it, and `calls`, which calls it and goes on, each change rax.
+        ("call(writes_rax);", "rcx", "call {f0}"),
+        ("call(jumps);", "rcx", "call {f0}"),
+        ("call(calls);", "rcx", "call {f0}"),
+        // `reaches` writes rax alone, and calls at an address one of `jumps` and `writes_rax_rcx`.
+        ("call(reaches);", "rdx", "call {f0}"),
+        // The first call changes rax, and the second rax and rcx.
+        ("call(writes_rax); call(writes_rax_rcx);", "rdx", "call {f0}\ncall {f1}"),
+        // `ping` writes rax and jumps to `pong`, which writes rax and rcx, and jumps back.
+        ("call(ping);", "rdx", "call {f0}"),
+        // At an address, one of `jumps` and `writes_rax_rcx`, which together change rax and rcx.
+        ("let fp: gpr; lea(fp, [jumps]); call(fp, (jumps, writes_rax_rcx));", "rdx", at),
+        // At an address, one of any function.
+        ("let fp: gpr; lea(fp, [jumps]); call(fp);", "rbx", at),
+        // The kernel itself, `k`, which is not compiled yet.
+        ("call(_, k, ());", "rbx", "call {f0}"),
+        // `broken` does not compile, so kernite has no code of it.
+        ("call(broken);", "rbx", "call {f0}"),
+    ];
+    for (call, reg, calls) in cases {
+        let body = format!("let x: gpr; mov(x, 5); {call} add(x, 1); ret(x);");
+        assert_eq!(calling("", " -> u64", &body).unwrap(), kernel(reg, calls), "{call}");
+    }
 }
 
 /// `lea` takes the address of a function of the module, rip-relative, and a call through the
@@ -2014,12 +2055,27 @@ fn a_function_that_never_returns_ends_in_ud2_or_a_call_of_one() {
     assert_eq!(kernite::x86_str(CALLERS, "at").unwrap().text(), want);
 }
 
-/// Functions of the module for `k` to call, and some it may not.
+/// Functions of the module for `k` to call, and some it may not. `broken` does not compile.
 const CALLEES: &str = r#"
 unsafe extern "sysv64" fn gcd(a: u64, b: u64) -> u64 { ret(a); }
 unsafe extern "sysv64" fn half(x: f32) -> f32 { ret(x); }
 unsafe extern "sysv64" fn scale(x: f64, n: usize) -> f64 { ret(x); }
 unsafe extern "sysv64" fn nothing() {}
+unsafe extern "sysv64" fn wipe() {
+    let (a, b, c, d, e, f, g, h, i): (gpr, gpr, gpr, gpr, gpr, gpr, gpr, gpr, gpr);
+    mov(a, 1); mov(b, 1); mov(c, 1); mov(d, 1); mov(e, 1); mov(f, 1); mov(g, 1); mov(h, 1); mov(i, 1);
+    add(a, b); add(a, c); add(a, d); add(a, e); add(a, f); add(a, g); add(a, h); add(a, i);
+}
+unsafe extern "sysv64" fn writes_rax() { let t: gpr; mov(t, 1); add(t, t); }
+unsafe extern "sysv64" fn writes_rax_rcx() { let (t, u): (gpr, gpr); mov(t, 1); mov(u, 2); add(t, u); }
+unsafe extern "sysv64" fn jumps() { call(writes_rax); }
+unsafe extern "sysv64" fn calls() { call(writes_rax); pause(); }
+unsafe extern "sysv64" fn reaches() {
+    let fp: gpr; lea(fp, [jumps]); call(fp, (jumps, writes_rax_rcx)); pause();
+}
+unsafe extern "sysv64" fn ping() { let t: gpr; mov(t, 1); add(t, t); call(pong); }
+unsafe extern "sysv64" fn pong() { let (t, u): (gpr, gpr); mov(t, 1); mov(u, 2); add(t, u); call(ping); }
+unsafe extern "sysv64" fn broken() { let t: gpr; add(t, t); }
 unsafe extern "sysv64" fn stop() -> ! { ud2(); }
 #[instances(1, 2)]
 unsafe extern "sysv64" fn tile<const N: usize>(p: *mut f32) {}
@@ -2042,10 +2098,10 @@ fn calling(params: &str, ret: &str, body: &str) -> Result<String, String> {
 fn the_stack_pointer_is_a_multiple_of_16_at_a_call() {
     let cases = [
         ("x: u64", "call(nothing); pause();", "sub rsp, 8\ncall {f0}\npause\nadd rsp, 8\nret"),
-        ("x: u64", "call(nothing); add(x, x);", "push rbx\nmov rbx, rdi\ncall {f0}\nadd rbx, rbx\npop rbx\nret"),
+        ("x: u64", "call(wipe); add(x, x);", "push rbx\nmov rbx, rdi\ncall {f0}\nadd rbx, rbx\npop rbx\nret"),
         (
             "x: u64, y: u64",
-            "call(nothing); add(x, y);",
+            "call(wipe); add(x, y);",
             "push rbx\npush r12\nsub rsp, 8\nmov rbx, rsi\nmov r12, rdi\ncall {f0}\nadd r12, rbx\nadd rsp, 8\npop \
              r12\npop rbx\nret",
         ),
@@ -2079,7 +2135,7 @@ fn the_stack_pointer_is_a_multiple_of_16_at_a_call() {
 #[test]
 fn a_call_that_ret_follows_is_a_jump_after_the_frame_is_taken_down() {
     let saving = "let (r, v, fp): (gpr, ymm, gpr); let t: local<[f32; 8], 32>; vmovups(v, [p]); vmovups([t], v); \
-                  call(nothing); vmovups(v, [t]); vmovups([p], v);";
+                  call(wipe); vmovups(v, [t]); vmovups([p], v);";
     let before = "push rbx\npush r12\npush rbp\nmov rbp, rsp\nsub rsp, 32\nand rsp, -32\nmov rbx, rsi\nmov r12, \
                   rdi\nvmovups ymm0, ymmword ptr [r12]\nvmovups ymmword ptr [rsp], ymm0\ncall {f0}\nvmovups ymm0, \
                   ymmword ptr [rsp]\nvmovups ymmword ptr [r12], ymm0\n";
@@ -2123,8 +2179,7 @@ fn a_call_that_ret_follows_is_a_jump_after_the_frame_is_taken_down() {
         (
             "x: u64",
             " -> u64",
-            "let (r, fp): (gpr, gpr); lea(fp, [gcd]); call(r, fp, (x, x), (gcd, gcd)); call(r, fp, (r, r), (gcd, \
-             gcd)); ret(r);"
+            "let (r, fp): (gpr, gpr); lea(fp, [gcd]); call(r, fp, (x, x)); call(r, fp, (r, r), (gcd, gcd)); ret(r);"
                 .to_string(),
             "push rbx\nmov rsi, rdi\nlea rbx, [rip + {f0}]\nmov rdi, rsi\ncall rbx\nmov rdi, rax\nmov rsi, rax\nmov \
              r11, rbx\npop rbx\njmp r11"
@@ -2172,7 +2227,7 @@ fn a_call_stays_one_where_a_jump_would_not_do_what_it_does() {
             "x: u64",
             " -> u64",
             "call(_, gcd, (x, x)); ret(x);",
-            "push rbx\nmov rbx, rdi\nmov rdi, rbx\nmov rsi, rbx\ncall {f0}\nmov rax, rbx\npop rbx\nret",
+            "sub rsp, 8\nmov rcx, rdi\nmov rdi, rcx\nmov rsi, rcx\ncall {f0}\nmov rax, rcx\nadd rsp, 8\nret",
         ),
         (
             "x: u64, m: *mut u32",
@@ -2212,12 +2267,12 @@ fn a_call_passes_what_its_callee_takes() {
     let code = calling("x: u64", " -> u64", "let r: gpr; call(r.r32, gcd, (x.r32, x)); ret(r);").unwrap();
     assert_eq!(code, "sub rsp, 8\nmov rsi, rdi\nmov edi, esi\ncall {f0}\nmov eax, eax\nadd rsp, 8\nret");
     let code = calling("x: *mut f32", "", "let v: ymm; call(v.xmm, half, 2.5); vmovss([x], v.xmm);").unwrap();
-    let want = "push rbx\nmov rbx, rdi\nvmovss xmm0, dword ptr [rip + {c0}]\ncall {f0}\nvmovss dword ptr [rbx], \
-                xmm0\npop rbx\nret";
+    let want = "sub rsp, 8\nvmovss xmm0, dword ptr [rip + {c0}]\ncall {f0}\nvmovss dword ptr [rdi], xmm0\nadd rsp, \
+                8\nret";
     assert_eq!(code, want);
     let code = calling("x: *mut f64", "", "let v: ymm; call(v.xmm, scale, (2.5f64, x)); vmovq([x], v.xmm);").unwrap();
-    let want = "push rbx\nmov rbx, rdi\nvmovq xmm0, qword ptr [rip + {c0}]\nmov rdi, rbx\ncall {f0}\nvmovq qword ptr \
-                [rbx], xmm0\npop rbx\nret";
+    let want = "sub rsp, 8\nmov rax, rdi\nvmovq xmm0, qword ptr [rip + {c0}]\nmov rdi, rax\ncall {f0}\nvmovq qword ptr \
+                [rax], xmm0\nadd rsp, 8\nret";
     assert_eq!(code, want);
 }
 

@@ -3,9 +3,9 @@
 
 use kernite_lang::{Error, Expr, Fn, ItemKind, Module, Static, Value};
 
-use crate::classify::attributes;
+use crate::classify::{attributes, function};
 use crate::present::within;
-use crate::{Backend, Called, Compiled, StaticError};
+use crate::{Backend, Called, Compiled, Done, StaticError};
 
 /// Each static of `module`, in order, laid out by `backend`; or why not, where it can be
 /// mended: at its name, its type or what it holds, as the machine says, or where the language
@@ -91,20 +91,57 @@ impl<B: Backend> Prepared<B> {
 /// Instance `args` of `f`, a function of `module`, compiled by `backend` and told what
 /// `prepared` holds; or why not, where it can be mended: an instruction where it is called,
 /// what the machine finds wrong with the code where the variable it blames is declared, or at
-/// `f` if it blames none. For an instance, an error in its body or its code says which.
+/// `f` if it blames none. For an instance, an error in its body or its code says which. The functions `backend` says it
+/// calls are compiled first, each once, and the machine is given their code to finish it by: one that does not compile
+/// is left out, and its error is said where it is compiled. `done` holds what compiling each instance gave so far, by
+/// its name, and takes this one's and theirs: one it holds is not compiled again.
 pub fn compile<B: Backend>(
     module: &Module,
     prepared: &Prepared<B>,
     backend: &B,
     f: &Fn,
     args: &[Value],
+    done: &mut Vec<Done<B::Code>>,
+) -> Result<Compiled<B::Code>, Error> {
+    let name = kernite_lang::instance(f, args)?;
+    if let Some((_, compiled)) = done.iter().find(|(done, _)| *done == name) {
+        return compiled.clone();
+    }
+    let compiled = build(module, prepared, backend, f, args, &mut vec![], done);
+    done.push((name, compiled.clone()));
+    compiled
+}
+
+/// [`compile`] of an instance `done` does not hold, with `busy`, the instances whose compiling waits for this one's,
+/// each calling the next.
+fn build<B: Backend>(
+    module: &Module,
+    prepared: &Prepared<B>,
+    backend: &B,
+    f: &Fn,
+    args: &[Value],
+    busy: &mut Vec<String>,
+    done: &mut Vec<Done<B::Code>>,
 ) -> Result<Compiled<B::Code>, Error> {
     let name = kernite_lang::instance(f, args)?;
     let cooperative = attributes(f)?;
     let mut kernel = backend.kernel(f, &name, args, cooperative, &prepared.made, &prepared.callees);
     let run = kernite_lang::kernel(module, f, args, &mut kernel).map_err(|e| within(&name, args, e))?;
+    busy.push(name.clone());
+    for callee in backend.calls(&kernel) {
+        if busy.contains(&callee) || done.iter().any(|(called, _)| *called == callee) {
+            continue;
+        }
+        if let Some(called) = prepared.callees.iter().find(|c| c.name == callee)
+            && let Some(g) = function(module, &called.function)
+        {
+            let compiled = build(module, prepared, backend, g, &called.args, busy, done);
+            done.push((callee, compiled));
+        }
+    }
+    busy.pop();
     let code = backend
-        .finish(kernel)
+        .finish(kernel, done)
         .map_err(|u| within(&name, args, Error { span: u.at.unwrap_or(f.span), message: u.message }))?;
     Ok(Compiled { code, mentions: run.mentions })
 }

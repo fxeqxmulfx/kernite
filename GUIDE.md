@@ -429,24 +429,30 @@ for the grid, not renamed in `Cargo.toml`. kernite says at the kernel when it ha
 A kernel calls the module's others, itself among them, as SysV calls a function: `call(g, gcd, (a, b))` moves `a` to
 `rdi` and `b` to `rsi`, and `g` from `rax`, and is checked against what `gcd` takes and returns. `lea(fp, [gcd])` takes
 an address to call at, `call(g, fp, (a, b), (gcd, sum))`, checked against each function given. A value alive across a
-call is kept in a register the callee leaves as it was, `rbx` or `r12` to `r15`, which the kernel saves for its own
-caller; a vector spills, since the callee may change any. The stack pointer is a multiple of 16 at each call. A kernel
-writes `vzeroupper` before it returns where it may have set the upper half of a vector register, so that the SSE code of
-its caller does not pay for it. It may have where it runs an instruction on all of a ymm, or calls at an address with no
-functions given and passes a float or takes one back, which may be a vector. kernite moves and spills all of a vector
-register, though it holds a float or an xmm, `vmovaps ymm0, ymm1`, so a kernel of xmm registers alone writes it where
-its listing moves or spills one. One that does neither writes none, though it calls the module's functions: each clears
-what it sets before it returns. A call that `ret` follows at once is a jump: the kernel takes its frame down as `ret`
-does, and jumps to the callee, which returns to the kernel's caller. So `call(g, gcd, (a, b)); ret(g);` is a loop in
-`gcd`: the stack does not grow. A label between the call and the `ret` leaves the `ret` for the other ways that come to
-it, and an address to call at in a register the kernel saves goes first to `r11`, which taking the frame down leaves as
-it is. The call stays a call where an instruction comes between it and the `ret`,
-`call(r, gcd, (a, b)); add(r, 1); ret(r);`. It stays one too where the jump would not do what the call does: where the
-kernel has taken the address of its stack memory, which the callee may use, and the frame the jump takes down holds; and
-where it calls at an address with no functions given and passes a float or takes one back, which may be a vector: the
-kernel's `vzeroupper`, as it takes its frame down, would clear the upper half of one it passes, and runs before the
-callee sets that of one it gives back. A kernel that never returns, `-> !`, ends each way out in `ud2()` or in a call of
-one that does not.
+call is kept in a register the call does not change. A call changes the registers its callee writes and does not
+restore, and those of each function the callee calls, by name or at an address with the functions it may reach given.
+kernite cannot check that the address is that of one of them, and trusts it: a value alive across the call is kept in a
+register none of them changes, which another function may change. So `gcds`, which calls `gcd` in a loop, keeps its
+values in registers `gcd` does not write, and saves none for its own caller. A call at an address with no functions
+given may reach any function, and one that comes back to the function it is in, as `gcd`'s call of `gcd`, reaches code
+that is not compiled yet: each changes every register SysV lets a callee change, so a value alive across it is kept in
+`rbx` or `r12` to `r15`, which every callee leaves as it was, and which the kernel saves for its own caller. A vector
+spills, since a call may change any. The stack pointer is a multiple of 16 at each call. A kernel writes `vzeroupper`
+before it returns where it may have set the upper half of a vector register, so that the SSE code of its caller does not
+pay for it. It may have where it runs an instruction on all of a ymm, or calls at an address with no functions given and
+passes a float or takes one back, which may be a vector. kernite moves and spills all of a vector register, though it
+holds a float or an xmm, `vmovaps ymm0, ymm1`, so a kernel of xmm registers alone writes it where its listing moves or
+spills one. One that does neither writes none, though it calls the module's functions: each clears what it sets before
+it returns. A call that `ret` follows at once is a jump: the kernel takes its frame down as `ret` does, and jumps to the
+callee, which returns to the kernel's caller. So `call(g, gcd, (a, b)); ret(g);` is a loop in `gcd`: the stack does not
+grow. A label between the call and the `ret` leaves the `ret` for the other ways that come to it, and an address to call
+at in a register the kernel saves goes first to `r11`, which taking the frame down leaves as it is. The call stays a
+call where an instruction comes between it and the `ret`, `call(r, gcd, (a, b)); add(r, 1); ret(r);`. It stays one too
+where the jump would not do what the call does: where the kernel has taken the address of its stack memory, which the
+callee may use, and the frame the jump takes down holds; and where it calls at an address with no functions given and
+passes a float or takes one back, which may be a vector: the kernel's `vzeroupper`, as it takes its frame down, would
+clear the upper half of one it passes, and runs before the callee sets that of one it gives back. A kernel that never
+returns, `-> !`, ends each way out in `ud2()` or in a call of one that does not.
 
 Memory of the module's is a `static` beside its kernels, in the process's memory, which each kernel names as it names its
 own, and which keeps what they write from one call to the next: `static COUNTS: global<[u32; 16]>;` is 16 words the

@@ -24,7 +24,7 @@ pub fn one<N: Native>(module: &Module, native: &N, name: &str) -> Result<Option<
     if !abi(f).is_some_and(Abi::native) {
         return Ok(None);
     }
-    let compiled = compile(module, &prepared, native, f, &args)?;
+    let compiled = compile(module, &prepared, native, f, &args, &mut vec![])?;
     rules(module)?;
     Ok(Some(compiled))
 }
@@ -51,7 +51,7 @@ pub fn all<D: Device>(module: &Module, device: &D) -> Result<Result<String, Stri
         }
         attributes(f)?;
         for args in kernite_lang::instances(module, f)? {
-            codes.push(compile(module, &prepared, device, f, &args)?.code);
+            codes.push(compile(module, &prepared, device, f, &args, &mut vec![])?.code);
         }
     }
     let made = device.module(&codes, &prepared.made).whole();

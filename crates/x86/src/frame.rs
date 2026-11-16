@@ -9,7 +9,7 @@ use kernite_core::{Access, Arg, Base, Class, Flow, Inst, Item, Label, Mem, Opera
 use crate::forms::{self, Feature};
 use crate::op::Op;
 use crate::operand::number;
-use crate::sysv::{PAGE, R11, RBP, RSP};
+use crate::sysv::{CALL_CLOBBERS, PAGE, R11, RBP, RSP};
 
 /// An allocated kernel with its frame made instructions, as the printer prints it.
 #[derive(Debug)]
@@ -22,6 +22,8 @@ pub(crate) struct Lowered {
     pub(crate) padding: u32,
     /// Whether control returns: whether the kernel has a `ret`, though a jump to a callee may stand for it.
     pub(crate) returns: bool,
+    /// The registers a call of it changes that a caller does not keep, as `Listing::changes` says.
+    pub(crate) changes: Vec<PReg>,
 }
 
 /// `c` with its frame made instructions, as [`print`](crate::intel::print) says; or why not.
@@ -93,7 +95,8 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     }
     features.sort_by_key(|f| f.name());
     features.dedup();
-    Ok(Lowered { body, features, padding, returns })
+    let changes = insts(&body).flat_map(Inst::writes).filter(|r| CALL_CLOBBERS.contains(r)).collect::<BTreeSet<_>>();
+    Ok(Lowered { body, features, padding, returns, changes: changes.into_iter().collect() })
 }
 
 /// The calls of `c` that are jumps, by their places in its body, each with the place of the `ret` it does without, if

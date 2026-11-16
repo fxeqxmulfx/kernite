@@ -1,9 +1,11 @@
 //! `X86` through the ports kernite-build calls, driven by hand as a use case drives them: each
 //! static laid out and each callee seen, then the kernel told of them, written and finished.
 
-use kernite_build::{Backend, Bytes, Called, HostStatic, Naked, Native, StaticError, Unfinished, function};
-use kernite_lang::{ItemKind, parse};
+use kernite_build::{Backend, Bytes, Called, Compiled, HostStatic, Naked, Native, StaticError, Unfinished, function};
+use kernite_core::{Class, PReg};
+use kernite_lang::{ItemKind, Module, parse};
 use kernite_x86::X86;
+use kernite_x86::intel::Listing;
 use kernite_x86::lang::Callee;
 
 /// A kernel that names memory of its module and calls a function of it comes out of the port as
@@ -28,7 +30,7 @@ fn x86_compiles_a_kernel_through_the_port() {
     let callees = [Called { name: "half".into(), function: "half".into(), args: vec![], callee }];
     let mut kernel = X86.kernel(k, "k", &[], false, &statics, &callees);
     kernite_lang::kernel(&module, k, &[], &mut kernel).unwrap();
-    let code = X86.finish(kernel).unwrap();
+    let code = X86.finish(kernel, &[]).unwrap();
     let text = "# k(gpr) -> ()
 # needs: avx
 # frame: 0 bytes aligned to 0, saves [rbx]
@@ -90,9 +92,71 @@ fn a_call_at_an_address_hands_on_the_functions_it_may_reach() {
     let k = function(&module, "k").unwrap();
     let mut kernel = X86.kernel(k, "k", &[], false, &[], &callees);
     kernite_lang::kernel(&module, k, &[], &mut kernel).unwrap();
-    let naked = X86.naked(&X86.finish(kernel).unwrap());
+    let naked = X86.naked(&X86.finish(kernel, &[]).unwrap());
     assert!(naked.funcs.is_empty());
     assert_eq!(naked.reach, ["half", "twice", "third"]);
+}
+
+/// Function `name` of `module`, any function of which it may call, finished with `done`, the code of the functions it
+/// calls, as a use case that compiles them first gives it.
+fn finished(module: &Module, name: &str, done: &[(String, Listing)]) -> Listing {
+    let callees: Vec<_> = module
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::Fn(f) => {
+                Some(Called { name: f.name.clone(), function: f.name.clone(), args: vec![], callee: X86.callee(f)? })
+            }
+            _ => None,
+        })
+        .collect();
+    let f = function(module, name).unwrap();
+    let mut kernel = X86.kernel(f, name, &[], false, &[], &callees);
+    kernite_lang::kernel(module, f, &[], &mut kernel).unwrap();
+    let done: Vec<_> =
+        done.iter().map(|(name, code)| (name.clone(), Ok(Compiled { code: code.clone(), mentions: vec![] }))).collect();
+    X86.finish(kernel, &done).unwrap()
+}
+
+/// A listing says which registers a call of it changes, of those SysV leaves to a callee: those its code writes, less
+/// those it saves, and none of those the functions it calls write, which their listings say. A kernel is finished with
+/// the listings of the functions it calls, and a call changes what each of them changes, and each function they call in
+/// turn: `jumps` writes none and `writes_rax` writes rax, so `x` is kept in rcx. Where a listing is missing, as it is
+/// for a function that does not compile, a call changes every register a callee may, as one at an address with no
+/// functions given does, which may reach any function: the listing of a kernel that makes one says it changes them all.
+#[test]
+fn a_call_changes_what_the_listings_of_its_callees_say() {
+    let src = "unsafe extern \"sysv64\" fn writes_rax() { let t: gpr; mov(t, 1); add(t, t); }\n\
+               unsafe extern \"sysv64\" fn jumps() { call(writes_rax); }\n\
+               unsafe extern \"sysv64\" fn calls() { call(writes_rax); pause(); }\n\
+               unsafe extern \"sysv64\" fn anywhere(fp: u64) { call(fp); pause(); }\n\
+               unsafe extern \"sysv64\" fn ten() {\n\
+               let (a, b, c, d, e, f, g, h, i, j): (gpr, gpr, gpr, gpr, gpr, gpr, gpr, gpr, gpr, gpr);\n\
+               mov(a, 1); mov(b, 1); mov(c, 1); mov(d, 1); mov(e, 1);\n\
+               mov(f, 1); mov(g, 1); mov(h, 1); mov(i, 1); mov(j, 1);\n\
+               add(a, b); add(a, c); add(a, d); add(a, e); add(a, f); add(a, g); add(a, h); add(a, i); add(a, j);\n\
+               }\n\
+               unsafe extern \"sysv64\" fn k() { let x: gpr; mov(x, 5); call(jumps); add(x, 1); }";
+    let module = parse(src).unwrap();
+    let gpr = |hw| PReg { class: Class::Gpr, hw };
+    let caller_saved = [0, 1, 2, 6, 7, 8, 9, 10, 11].map(gpr);
+    let mut done = vec![];
+    for (name, changes) in
+        [("writes_rax", vec![gpr(0)]), ("jumps", vec![]), ("calls", vec![]), ("ten", caller_saved.to_vec())]
+    {
+        let listing = finished(&module, name, &done);
+        assert_eq!(listing.changes, changes, "{name}");
+        done.push((name.to_string(), listing));
+    }
+    assert!(done[3].1.code().any(|line| line == "push rbx"), "`ten` saves rbx, and a call of it leaves it as it was");
+    let vectors = (0..16).map(|hw| PReg { class: Class::Vec, hw });
+    let every: Vec<_> = caller_saved.into_iter().chain(vectors).collect();
+    assert_eq!(finished(&module, "anywhere", &[]).changes, every);
+    let code = |done: &[(String, Listing)]| finished(&module, "k", done).code().collect::<Vec<_>>().join("\n");
+    assert_eq!(code(&done), "sub rsp, 8\nmov rcx, 5\ncall {f0}\nadd rcx, 1\nadd rsp, 8\nret");
+    let saving = "push rbx\nmov rbx, 5\ncall {f0}\nadd rbx, 1\npop rbx\nret";
+    assert_eq!(code(&done[1..2]), saving, "without the listing of `writes_rax`");
+    assert_eq!(code(&[]), saving, "without any");
 }
 
 /// A listing names a constant `{c0}` and a function `{f0}`, and a static by its name, so no
@@ -171,5 +235,5 @@ fn a_frame_past_what_an_address_reaches_blames_no_variable() {
     kernite_lang::kernel(&module, k, &[], &mut kernel).unwrap();
     let message = "the kernel's frame, its stack memory and the variables that spilled, is 2147483680 bytes: more \
                    than an address reaches past the stack pointer";
-    assert_eq!(X86.finish(kernel), Err(Unfinished { at: None, message: message.into() }));
+    assert_eq!(X86.finish(kernel, &[]), Err(Unfinished { at: None, message: message.into() }));
 }

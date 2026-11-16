@@ -55,6 +55,10 @@ pub struct Listing {
     /// Whether control returns: whether the kernel has a `ret`, though a jump to a callee may stand for it. One with
     /// none never returns.
     pub returns: bool,
+    /// The registers a call of it changes that a caller does not keep: those of SysV's caller-saved that its code
+    /// writes, its frame's among them. The registers the functions it calls change are theirs to say, `funcs` and
+    /// `reach`, but for a call at an address with no functions given, which may change all of them: then it has all.
+    pub changes: Vec<PReg>,
 }
 
 impl Listing {
@@ -229,6 +233,7 @@ pub fn print(c: &Allocated<Op>, reach: Vec<String>) -> Result<Listing, String> {
         frame: c.frame.clone(),
         padding: lowered.padding,
         returns: lowered.returns,
+        changes: lowered.changes,
     })
 }
 

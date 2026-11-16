@@ -2,12 +2,14 @@
 //! language parses: the use cases on [`Echo`], a fake machine. Each kernel in them compiles, for
 //! its machine, but those written to fail.
 
+use std::cell::RefCell;
+
 use kernite_lang::{Error, Fault, Fn, Guard, IntTy, Memory, Mention, Operand, Span, Target, Value, parse};
 
 use crate::{
-    Abi, Assembly, Backend, Call, Called, ConstItem, Device, DeviceOut, DeviceStatic, Given, HostStatic, ItemOut, Kept,
-    Launcher, ModuleOut, Naked, Native, NativeOut, Owner, StaticError, Unfinished, When, abi, all, compile, consts,
-    cooperative, function, instance, module, one, owner, prepare, statics,
+    Abi, Assembly, Backend, Call, Called, ConstItem, Device, DeviceOut, DeviceStatic, Done, Given, HostStatic, ItemOut,
+    Kept, Launcher, ModuleOut, Naked, Native, NativeOut, Owner, StaticError, Unfinished, When, abi, all, compile,
+    consts, cooperative, function, instance, module, one, owner, prepare, statics,
 };
 
 /// An ABI is one kernite compiles for, by the name Rust writes it as, or none. Of them, the process
@@ -126,6 +128,7 @@ fn placed(src: &str, mentions: &[Mention]) -> Vec<String> {
 /// is its place among them. Beside them, the statics it was told of, and the functions its body
 /// names, those it may reach at an address, and the statics it names, each once, in the order
 /// first named.
+#[derive(Clone)]
 struct Told {
     name: String,
     lines: Vec<String>,
@@ -135,6 +138,11 @@ struct Told {
     funcs: Vec<String>,
     reach: Vec<String>,
     statics: Vec<String>,
+}
+
+thread_local! {
+    /// The name of each kernel Echo was told to write on this thread, in order.
+    static MADE: RefCell<Vec<String>> = const { RefCell::new(vec![]) };
 }
 
 impl Backend for Echo {
@@ -190,6 +198,7 @@ impl Backend for Echo {
         statics: &[Laid],
         callees: &[Called<Abi>],
     ) -> Told {
+        MADE.with_borrow_mut(|made| made.push(name.into()));
         let listed = |args: &[Value]| args.iter().map(Value::to_string).collect::<Vec<_>>().join(", ");
         let mut lines = vec![format!("new {name}: {} [{}]", f.name, listed(args))];
         if cooperative {
@@ -212,8 +221,19 @@ impl Backend for Echo {
         }
     }
 
+    /// The functions its body names, and those it may reach at an address.
+    fn calls(&self, kernel: &Told) -> Vec<String> {
+        kernel.funcs.iter().chain(&kernel.reach).cloned().collect()
+    }
+
+    /// Writes a line `done` with the names of the functions whose code it was given, in order, if it was given any.
     /// Fails for a variable named `fail_v`, which it blames, or one named `fail`, blaming none.
-    fn finish(&self, kernel: Told) -> Result<Told, Unfinished> {
+    fn finish(&self, mut kernel: Told, done: &[Done<Told>]) -> Result<Told, Unfinished> {
+        let names: Vec<_> =
+            done.iter().filter(|(_, compiled)| compiled.is_ok()).map(|(name, _)| name.as_str()).collect();
+        if !names.is_empty() {
+            kernel.lines.push(format!("done {}", names.join(", ")));
+        }
         for (i, var) in kernel.vars.iter().enumerate() {
             let blamed = match var.as_str() {
                 "fail_v" => Some(i),
@@ -518,7 +538,7 @@ fn a_kernel_hears_of_its_statics_and_callees_in_order() {
     let module = parse(src).unwrap();
     let prepared = prepare(&module, &Echo);
     assert_eq!(prepared.made, [laid("A", "u32"), laid("C", "[u32; 4]")]);
-    let k = compile(&module, &prepared, &Echo, function(&module, "k").unwrap(), &[]);
+    let k = compile(&module, &prepared, &Echo, function(&module, "k").unwrap(), &[], &mut vec![]);
     let told = k.map(|k| (k.code.lines, placed(src, &k.mentions)));
     let heard = [
         "new k: k []",
@@ -548,7 +568,7 @@ fn an_unfinished_kernel_is_blamed_where_its_variable_is_declared() {
     let prepared = prepare(&module, &Echo);
     let compiled = |name| {
         let f = function(&module, name).unwrap();
-        compile(&module, &prepared, &Echo, f, &[]).map(|_| ()).map_err(|e| e.at(src))
+        compile(&module, &prepared, &Echo, f, &[], &mut vec![]).map(|_| ()).map_err(|e| e.at(src))
     };
     assert_eq!(compiled("k"), Err("2:5: `fail_v` fails".into()));
     assert_eq!(compiled("j"), Err("4:31: `fail` fails".into()));
@@ -568,7 +588,8 @@ fn an_instance_says_which_when_it_fails() {
                #[cooperative] #[instances(1)] extern \"ptx-func\" fn f<const N: u32>() {}";
     let module = parse(src).unwrap();
     let prepared = prepare(&module, &Echo);
-    let compiled = |f, args: &[Value]| compile(&module, &prepared, &Echo, f, args).map(|_| ()).map_err(|e| e.at(src));
+    let compiled =
+        |f, args: &[Value]| compile(&module, &prepared, &Echo, f, args, &mut vec![]).map(|_| ()).map_err(|e| e.at(src));
     let named = |name| instance(&module, name).unwrap().unwrap();
     let (tile, four, _) = named("tile::<4>");
     assert_eq!(compiled(tile, &four), Err("2:17: in `tile::<4>`: a bool is no operand".into()));
@@ -1203,6 +1224,50 @@ fn a_kernel_names_the_statics_of_the_functions_it_may_call_at_an_address() {
     assert_eq!(run.touched, ["A"]);
     assert_eq!(either.touched, ["A"]);
     assert_eq!(top.touched, ["A"]);
+}
+
+/// A kernel is finished after the functions it calls, with the code of each function of the module compiled so far, in
+/// the order they were compiled: those its body names and those it may reach at an address, and each they call in turn.
+/// Each is compiled once in the module, though `top` calls `leaf` twice, once through `middle`, and `uses` calls
+/// `broken`, which does not compile. A function that does not compile is left out, as `broken` is for `uses`, and so
+/// are those that wait for the kernel: itself, if it calls itself, and each that calls it, as `ping` and `pong` do for
+/// each other.
+#[test]
+fn a_kernel_is_finished_with_the_code_of_the_functions_it_calls() {
+    // `uses` calls `broken` before `broken`'s own place, where it is not compiled again.
+    let src = "unsafe extern \"sysv64\" fn leaf(x: u64) {}\n\
+               unsafe extern \"sysv64\" fn middle(x: u64) { call(leaf, x); }\n\
+               unsafe extern \"sysv64\" fn top(x: u64) { call(middle, x); call(leaf, x); }\n\
+               unsafe extern \"sysv64\" fn ping(x: u64) { call(pong, x); }\n\
+               unsafe extern \"sysv64\" fn pong(x: u64) { call(ping, x); call(leaf, x); }\n\
+               unsafe extern \"sysv64\" fn loops(x: u64) { call(loops, x); }\n\
+               unsafe extern \"sysv64\" fn uses(x: u64) { call(broken, x); call(leaf, x); }\n\
+               unsafe extern \"sysv64\" fn broken(x: u64) { let fail: u32; }\n\
+               unsafe extern \"sysv64\" fn at(fp: u64) { call(fp, (leaf, middle)); }";
+    let out = echoed(src);
+    let given: Vec<_> = out
+        .items
+        .iter()
+        .map(|item| {
+            let ItemOut::Native(f) = item else { panic!("{item:?}") };
+            let code = f.instances.first().map(|instance| &instance.naked.code);
+            code.and_then(|code| code.iter().find_map(|line| line.strip_prefix("done ")))
+        })
+        .collect();
+    let want = [
+        None,
+        Some("leaf"),
+        Some("leaf, middle"),
+        Some("leaf, middle, top, pong"),
+        Some("leaf, middle, top"),
+        Some("leaf, middle, top, pong, ping"),
+        Some("leaf, middle, top, pong, ping, loops"),
+        None,
+        Some("leaf, middle, top, pong, ping, loops, uses"),
+    ];
+    assert_eq!(given, want);
+    let made = ["leaf", "middle", "top", "ping", "pong", "loops", "uses", "broken", "at"];
+    assert_eq!(MADE.take(), made);
 }
 
 /// In a module of both kinds of kernel and a static, the statics are the GPU's, as the first of

@@ -14,6 +14,9 @@ pub struct Compiled<T> {
     pub mentions: Vec<Mention>,
 }
 
+/// What compiling an instance of a function gave, by the instance's name: its code, or why it has none.
+pub type Done<T> = (String, Result<Compiled<T>, Error>);
+
 /// A static that does not compile: why not, and what stands for it in the code that names it.
 #[derive(Debug)]
 pub struct Failed<T> {
