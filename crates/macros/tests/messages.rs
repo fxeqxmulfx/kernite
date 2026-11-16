@@ -1730,39 +1730,62 @@ fn kernels_of_instances_and_cooperative_ones_that_a_feature_leaves_out_say_nothi
 /// `deny(warnings)` it says nothing, nor does rustdoc. A kernel takes its address, which the linker fills in a slot,
 /// and indexes it; the host reads back each byte it wrote, the first and the last of 3 GiB, and the last of one of
 /// 2147483647 bytes, which as a static of Rust's fails to link. The statics keep their visibility and their names, a
-/// raw one as well, and one that `cfg` leaves out is not defined.
+/// raw one as well, and one that `cfg` leaves out is not defined. A static of one byte is the linker's too, past reach
+/// beside one of 1 GiB that `cfg` leaves out, which counts all the same, and the host reads back what a kernel wrote to
+/// it.
 #[test]
 fn a_static_past_rips_reach_is_the_linkers_and_a_kernel_reaches_it_by_its_address() {
     let printed = runs_quietly(&["test"], "far");
-    assert!(printed.contains("1 passed"), "fixtures/far.rs ran its test, and printed:\n{printed}");
+    assert!(printed.contains("2 passed"), "fixtures/far.rs ran its tests, and printed:\n{printed}");
     documents_quietly("far");
 }
 
 /// A static of 1 GiB, the most that is in reach of `rip`, is Rust's own, and builds without a word: the linker takes
-/// it, and a kernel names its last byte at a displacement, which the host reads back.
+/// it, and a kernel names its last byte at a displacement, which the host reads back. A second of 1 GiB after it in the
+/// module is past reach beside it, so it is the linker's, and the host reads back what a kernel wrote to it by its
+/// address.
 #[test]
 fn a_static_of_a_gibibyte_is_in_reach_of_rip_and_the_linker_takes_it() {
     let printed = runs_quietly(&["test"], "near");
-    assert!(printed.contains("1 passed"), "fixtures/near.rs ran its test, and printed:\n{printed}");
+    assert!(printed.contains("2 passed"), "fixtures/near.rs ran its tests, and printed:\n{printed}");
 }
 
-/// Only Linux's linker defines a static of more than 1 GiB, as kernite writes it, so a crate checked for Windows is
-/// told so at each such static, with what to do: the assembler of that system is not left to say it, in words of its
-/// own.
+/// A kernel that names a static past `rip`'s reach at a displacement is kernite's error at the operand, which says to
+/// take its address, and not the linker's, where the static is far for one before it that `cfg` leaves out; a kernel
+/// that takes its address is no error.
+#[test]
+fn a_kernel_that_names_a_static_past_rips_reach_beside_others_at_a_displacement_is_refused() {
+    let said = |place: &str| {
+        format!(
+            "src/lib.rs:{place}: error: x86 reaches memory of the module's past `rip`'s reach by its address, not at \
+             a displacement from `rip`: `lea(p, [B])` puts the address of `B` in `p`, and `[p]` is what it holds"
+        )
+    };
+    let lines = [
+        said("16:17"),
+        "error: could not compile `statics_together_refused` (lib) due to 1 previous error".to_string(),
+    ];
+    refuses("statics_together_refused", &lines.each_ref().map(String::as_str));
+}
+
+/// Only Linux's linker defines a far static, as kernite writes it, so a crate checked for Windows is told so at each,
+/// with what to do, of one byte too: the assembler of that system is not left to say it, in words of its own.
 #[test]
 fn a_static_past_rips_reach_is_refused_off_linux() {
     if std_here(WINDOWS) {
-        let said = |place: &str, name: &str, bytes: &str| {
+        let said = |place: &str, name: &str| {
             format!(
-                "src/lib.rs:{place}: error: `{name}` is {bytes} bytes, more than a static in reach of `rip` may be, \
-                 and kernite defines such a static for Linux's linker alone: build for Linux, or make it smaller"
+                "src/lib.rs:{place}: error: `{name}` is past what is in reach of `rip` beside the statics before it, \
+                 and kernite defines such a static for Linux's linker alone: build for Linux, or make the statics \
+                 smaller"
             )
         };
         let lines = [
-            said("9:16", "BIG", "3221225472"),
-            said("12:23", "r#type", "2147483648"),
-            said("22:16", "EDGE", "2147483647"),
-            "error: could not compile `far` (lib) due to 3 previous errors".to_string(),
+            said("10:16", "BIG"),
+            said("13:23", "r#type"),
+            said("23:16", "EDGE"),
+            said("66:16", "B"),
+            "error: could not compile `far` (lib) due to 4 previous errors".to_string(),
         ];
         refuses_by(&["check", "--target", WINDOWS], "far", &lines.each_ref().map(String::as_str));
     }

@@ -17,6 +17,13 @@ pub fn statics<B: Backend>(module: &Module, backend: &B) -> Vec<Result<Compiled<
     prepared.statics
 }
 
+/// How many bytes `statics` take of their module's memory together, each a pair of its bytes and its alignment: its
+/// bytes, and the padding its alignment may need, one byte less than it. A machine that has room for so many bytes in
+/// its module counts the statics it lays out with this, each beside those before it that are in the module.
+pub fn taken(statics: impl IntoIterator<Item = (u64, u64)>) -> u64 {
+    statics.into_iter().fold(0, |all, (bytes, align)| all.saturating_add(bytes).saturating_add(align - 1))
+}
+
 /// What every kernel of a module is told: its statics, and the functions it may call.
 pub struct Prepared<B: Backend> {
     /// Each static of the module, as [`statics`] has it.

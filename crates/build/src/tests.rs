@@ -7,7 +7,7 @@ use kernite_lang::{Error, Fault, Fn, Guard, IntTy, Memory, Mention, Operand, Spa
 use crate::{
     Abi, Absent, Assembly, Backend, Call, Called, ConstItem, Device, DeviceOut, DeviceStatic, Given, HostStatic,
     ItemOut, Kept, Launcher, ModuleOut, Naked, Native, NativeOut, Owner, StaticError, Unfinished, When, abi, all,
-    compile, consts, cooperative, function, instance, module, one, owner, prepare, statics,
+    compile, consts, cooperative, function, instance, module, one, owner, prepare, statics, taken,
 };
 
 /// An ABI is one kernite compiles for, by the name Rust writes it as, or none. Of them, the process
@@ -434,6 +434,18 @@ fn a_static_is_laid_out_beside_the_statics_before_it_that_were_laid_out() {
                static after: global<u32>;";
     let prepared = prepare(&parse(src).unwrap(), &Echo);
     assert_eq!(prepared.made, [laid("A", "u32"), laid("B", "u32"), laid("after", "A,B")]);
+}
+
+/// Statics take their bytes together, each with the padding its alignment may need, one byte less than it, and a sum
+/// past what a number holds stops at the most, which the machines that count so then refuse.
+#[test]
+fn statics_take_their_bytes_and_the_padding_of_their_alignments_together() {
+    assert_eq!(taken([]), 0);
+    assert_eq!(taken([(16, 1)]), 16);
+    assert_eq!(taken([(16, 8)]), 16 + 7);
+    assert_eq!(taken([(16, 8), (3, 4096), (1, 1)]), 16 + 7 + 3 + 4095 + 1);
+    assert_eq!(taken([(u64::MAX, 1), (1, 1)]), u64::MAX);
+    assert_eq!(taken([(u64::MAX - 3, 8)]), u64::MAX);
 }
 
 /// What Echo refuses of a static is placed where it can be mended: at its name, its type or

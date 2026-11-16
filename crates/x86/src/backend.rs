@@ -19,7 +19,7 @@ impl Backend for X86 {
     type Callee = Callee;
     type Code = Listing;
 
-    fn lay_out(&self, name: &str, memory: &Memory, _before: &[Static]) -> Result<Static, StaticError> {
+    fn lay_out(&self, name: &str, memory: &Memory, before: &[Static]) -> Result<Static, StaticError> {
         if intel::taken(name) {
             return Err(StaticError::Name(format!(
                 "a kernel's listing names a constant `{{c0}}` and a function `{{f0}}`, and a static by its name, so \
@@ -27,6 +27,7 @@ impl Backend for X86 {
             )));
         }
         let mut made = Static::new(name, &memory.ty).map_err(StaticError::Type)?;
+        made.place(before);
         if let Some(value) = &memory.value {
             made.init(value).map_err(StaticError::Value)?;
         }
@@ -90,7 +91,7 @@ impl Native for X86 {
     }
 
     fn host_static(&self, s: &Static) -> HostStatic {
-        HostStatic { elem: s.elem.into(), size: s.size, len: s.len, align: s.align, far: s.far(), init: s.init.clone() }
+        HostStatic { elem: s.elem.into(), size: s.size, len: s.len, align: s.align, far: s.far, init: s.init.clone() }
     }
 }
 

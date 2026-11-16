@@ -78,6 +78,7 @@
 //! each. A function that never returns, `-> !`, ends each way out in `ud2()`, which faults, or
 //! in a call of one that never returns.
 
+use kernite_build::taken;
 use kernite_compile::Spill;
 use kernite_core::Access::{self, Ignored, Read, ReadWrite, Write};
 use kernite_core::Width::{self, W32, W64, W128, W256};
@@ -99,10 +100,10 @@ type Args = Vec<Arg<VReg>>;
 /// reaches, whose displacement is 32 bits, signed.
 const FRAME: u64 = i32::MAX as u64;
 
-/// The most bytes of a static in reach of `rip`. A kernel names a static at a displacement from `rip`, of 32 bits,
-/// signed, which reaches 2 GiB; the rest of the program's code and data take room in that, for the code reaches its
-/// data so, and the linker lays the statics out among that data: so a static may take half of it. A static of more is
-/// far, and a kernel reaches it by its address.
+/// The most bytes of a module's statics in reach of `rip`, together. A kernel names a static at a displacement from
+/// `rip`, of 32 bits, signed, which reaches 2 GiB; the rest of the program's code and data take room in that, for the
+/// code reaches its data so, and the linker lays the statics out among that data: so a module's statics may take half
+/// of it. A static that would make them more is far, and a kernel reaches it by its address.
 const NEAR: u64 = 1 << 30;
 
 /// What the size of a type of Rust's is less than, in bytes: `rustc` refuses a type of this many, or of more, as too
@@ -347,6 +348,9 @@ pub struct Static {
     /// What it holds until something writes it, as bytes, the lowest first; zeros past their
     /// end.
     pub init: Vec<u8>,
+    /// Whether it is far, past what is in reach of `rip`: it is [`place`](Static::place)d so. A kernel reaches it by
+    /// its address, which the linker fills.
+    pub far: bool,
 }
 
 impl Static {
@@ -379,14 +383,30 @@ impl Static {
                 SIZE - 1
             ));
         }
-        Ok(Static { name: name.to_string(), ty: ty.to_string(), elem, size, len, align, constant, init: vec![] })
+        Ok(Static {
+            name: name.to_string(),
+            ty: ty.to_string(),
+            elem,
+            size,
+            len,
+            align,
+            constant,
+            init: vec![],
+            far: false,
+        })
     }
 
     /// Makes it hold `value` until something writes it: an array of as many elements as it
     /// has, each of its element's type, `[1.5, 2.0]`; or one, for memory of one that is no
-    /// array, `global<f32>`. Or why it cannot.
+    /// array, `global<f32>`. Or why it cannot: a far static is the linker's, and holds zeros.
     pub fn init(&mut self, value: &Value) -> Result<(), String> {
         let (ty, elem) = (&self.ty, self.elem);
+        if self.far {
+            return Err(format!(
+                "the statics in reach of `rip` have no room for `{ty}` beside them, so the linker defines it, and it \
+                 holds zeros: the host writes what it should hold"
+            ));
+        }
         let array = ty.split_once('<').is_some_and(|(_, args)| args.starts_with('['));
         let items = match (value, array) {
             (Value::Array(xs), true) if xs.len() as u64 == self.len => xs.as_slice(),
@@ -410,10 +430,11 @@ impl Static {
         self.len * self.size
     }
 
-    /// Whether it is more than `NEAR` bytes, past what is in reach of `rip`, so that a kernel reaches it by its
-    /// address, which the linker fills in.
-    pub fn far(&self) -> bool {
-        self.bytes() > NEAR
+    /// Puts it in reach of `rip`, or past it: where it and the statics `before` it that are in reach, each with the
+    /// padding its alignment may need, are more than `NEAR` bytes, it is far.
+    pub fn place(&mut self, before: &[Static]) {
+        let room = |s: &Static| (s.bytes(), s.align);
+        self.far = taken(before.iter().filter(|s| !s.far).chain([&*self]).map(room)) > NEAR;
     }
 }
 
@@ -1279,7 +1300,7 @@ impl Kernel {
                 }
                 let memory = Region { name: &st.name, bytes: st.bytes(), align: st.align, ty: &st.ty };
                 self.within(memory, None, m.disp, kind, access, name)?;
-                if !st.far() {
+                if !st.far {
                     let disp = i32::try_from(m.disp).expect("inside a static in reach of `rip`");
                     return Ok(Mem { base: Base::Static(s), index: None, disp, width });
                 }
@@ -1293,9 +1314,9 @@ impl Kernel {
                 };
                 if kind != Kind::Addr {
                     return Err(format!(
-                        "x86 reaches memory of the module's of more than {NEAR} bytes by its address, not at a \
-                         displacement from `rip`: `lea(p, [{held}])` puts the address of `{held}` in `p`, and `[p]` is \
-                         what it holds"
+                        "x86 reaches memory of the module's past `rip`'s reach by its address, not at a displacement \
+                         from `rip`: `lea(p, [{held}])` puts the address of `{held}` in `p`, and `[p]` is what it \
+                         holds"
                     ));
                 }
                 return Ok(Mem { base: Base::Got(s), index: None, disp, width });

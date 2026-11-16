@@ -573,22 +573,27 @@ in `Cargo.toml`. kernite says at the static when it has none.
 A static may be as big as a Rust type may be: its size, rounded up to its alignment, is less than 2^61 bytes. A kernel
 names a static at a displacement from `rip`, 32 bits, signed, which reaches 2 GiB. The rest of the program's code and
 data take room in those 2 GiB too, for the code reaches its data so, and the linker lays the statics out among that
-data: so a static is in reach of `rip` up to 1073741824 bytes, half of it, and a kernel names it at a displacement. The
-statics in reach of a program must fit in the 2 GiB with its code and the rest of its data: the linker refuses a program
-where they do not, and kernite counts each static alone, so two of 1 GiB in one module are each in reach, and the linker
-refuses the program. One of more than 1073741824 bytes is far, and a kernel names it only by its address:
-`lea(p, [BIG])` puts the address in `p`, and `[p + i]` is the byte `i`. `lea(p, [BIG + 16])` is the address of the byte
-16, for a displacement up to 2147483647; a kernel indexes past that. Any other operand that names the static is an
-error, which says to take its address. The address comes as code for a position-independent executable has it, a load
-from a slot that the linker fills. It holds zeros at first, for no value has as many elements as it does.
+data: so the statics of a module are in reach of `rip` up to 1073741824 bytes together, half of it, and a kernel names
+each at a displacement. A static is in reach where it and the statics in reach before it in its module, each with the
+padding its alignment may need, one byte less than it, are 1073741824 bytes at most:
+`static A: global<[u8; 1073741824]>;` is in reach, and a second of 1 GiB after it is not. Every static counts, whatever
+`cfg` keeps, so a static is in reach or not whichever features are on. The statics of other modules and the rest of the
+program are the linker's to fit: it refuses a program where they do not fit in the 2 GiB. A static that is not in reach
+is far, as one of more than 1073741824 bytes is, and a kernel names it only by its address: `lea(p, [BIG])` puts the
+address in `p`, and `[p + i]` is the byte `i`. `lea(p, [BIG + 16])` is the address of the byte 16, for a displacement up
+to 2147483647; a kernel indexes past that. Any other operand that names the static is an error, which says to take its
+address. The address comes as code for a position-independent executable has it, a load from a slot that the linker
+fills. A far static takes none of the room in reach, so one after it may be in reach. It holds zeros at first, so a
+value is an error, which says the host writes what it should hold.
 
-Rust makes a static of its own in time and memory that grow with its size, 6 milliseconds and 2 MiB for each MiB, so a
-far one is the linker's instead, in the `.lbss` section of x86-64's ELF, which holds zeros and takes no room in the
-file: a crate with a static of 3 GiB builds as fast as a crate with one of 4 KiB. kernite defines it so on Linux alone,
-and refuses it on another system, at its name. To Rust it is a static of an `extern` block, a foreign static, as Rust's
-errors say: Rust refuses `#[used]` on it, say. Its symbol is the path of its module and its name, as `module_path!`
-gives them, so two such statics of one path and one name in a program are one symbol defined twice, which the assembler
-or the linker refuses: two modules of one name in two functions have one path, and so do two versions of one crate.
+A far static is the linker's, in the `.lbss` section of x86-64's ELF, which the linker lays out past the code and the
+rest of the data, so that they stay in reach of `rip`. The section holds zeros and takes no room in the file, where Rust
+makes a static of its own in time and memory that grow with its size, 6 milliseconds and 2 MiB for each MiB: a crate
+with a static of 3 GiB builds as fast as a crate with one of 4 KiB. kernite defines it so on Linux alone, and refuses it
+on another system, at its name. To Rust it is a static of an `extern` block, a foreign static, as Rust's errors say:
+Rust refuses `#[used]` on it, say. Its symbol is the path of its module and its name, as `module_path!` gives them, so
+two such statics of one path and one name in a program are one symbol defined twice, which the assembler or the linker
+refuses: two modules of one name in two functions have one path, and so do two versions of one crate.
 
 ## On a GPU
 

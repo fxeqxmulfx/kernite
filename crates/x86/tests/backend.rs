@@ -2,7 +2,7 @@
 //! static laid out and each callee seen, then the kernel told of them, written and finished.
 
 use kernite_build::{Backend, Bytes, Called, HostStatic, Naked, Native, StaticError, Unfinished, function};
-use kernite_lang::{ItemKind, parse};
+use kernite_lang::{ItemKind, Memory, parse};
 use kernite_x86::X86;
 use kernite_x86::lang::{Callee, Static};
 
@@ -72,18 +72,46 @@ fn x86_compiles_a_kernel_through_the_port() {
     assert_eq!(X86.host_static(&statics[0]), want);
 }
 
-/// A static of more than 1073741824 bytes, 1 GiB, is far, which the port says, for Rust to have the linker place it;
-/// one of as many is not. One just short of 2 GiB is far too, for a static of Rust's of that size fails to link.
+/// A static is far, past `rip`'s reach, where it and the statics in reach before it in its module, each with the
+/// padding its alignment may need, are more than 1073741824 bytes, 1 GiB; the port says so, for Rust to have the linker
+/// place it. A far static takes none of the room, and constant memory takes it as global memory does. One just short of
+/// 2 GiB is far too, for a static of Rust's of that size fails to link.
 #[test]
 fn a_static_past_rips_reach_comes_out_of_the_port_far() {
-    let far = |ty: &str| X86.host_static(&Static::new("BIG", ty).unwrap()).far;
-    assert!(far("global<[u8; 1073741825]>"));
-    assert!(far("global<[u8; 2147483647]>"));
-    assert!(far("global<[u8; 2147483648]>"));
-    assert!(far("global<[u64; 3221225472]>"));
-    assert!(far("constant<[u32; 268435457]>"));
-    assert!(!far("global<[u8; 1073741824]>"));
-    assert!(!far("constant<[u32; 268435456]>"));
+    // Whether each of `types`, laid out in order, each beside those before it, is far.
+    let far = |types: &[&str]| -> Vec<bool> {
+        let mut made: Vec<Static> = vec![];
+        for (i, ty) in types.iter().enumerate() {
+            let memory = Memory { ty: ty.to_string(), value: None, mentions: vec![] };
+            made.push(X86.lay_out(&format!("S{i}"), &memory, &made).unwrap());
+        }
+        made.iter().map(|s| X86.host_static(s).far).collect()
+    };
+    // One alone.
+    assert_eq!(far(&["global<[u8; 1073741824]>"]), [false]);
+    assert_eq!(far(&["global<[u8; 1073741825]>"]), [true]);
+    assert_eq!(far(&["global<[u8; 2147483647]>"]), [true]);
+    assert_eq!(far(&["global<[u8; 2147483648]>"]), [true]);
+    assert_eq!(far(&["global<[u64; 3221225472]>"]), [true]);
+    assert_eq!(far(&["constant<[u32; 268435457]>"]), [true]);
+    // Its own padding counts: 3 bytes for an alignment of 4, and 1 for one of 2.
+    assert_eq!(far(&["constant<[u32; 268435455]>"]), [false]);
+    assert_eq!(far(&["constant<[u32; 268435456]>"]), [true]);
+    assert_eq!(far(&["global<[u8; 1073741823], 2>"]), [false]);
+    assert_eq!(far(&["global<[u8; 1073741824], 2>"]), [true]);
+    // After another, at the bound, and one byte past it.
+    assert_eq!(far(&["global<[u8; 1073741823]>", "global<[u8; 1]>"]), [false, false]);
+    assert_eq!(far(&["global<[u8; 1073741823]>", "global<[u8; 2]>"]), [false, true]);
+    assert_eq!(far(&["global<[u8; 1073741824]>", "global<[u8; 1]>"]), [false, true]);
+    assert_eq!(far(&["global<[u8; 1073741824]>", "global<[u8; 1073741824]>"]), [false, true]);
+    assert_eq!(far(&["global<[u8; 1073741823]>", "constant<[u8; 2]>"]), [false, true]);
+    // The padding of the one after: 7 bytes for an alignment of 8.
+    assert_eq!(far(&["global<[u8; 1073741816]>", "global<[u8; 1], 8>"]), [false, false]);
+    assert_eq!(far(&["global<[u8; 1073741816]>", "global<[u8; 2], 8>"]), [false, true]);
+    // A far static takes none: the next is in reach beside the statics in reach before it alone.
+    assert_eq!(far(&["global<[u8; 3221225472]>", "global<[u8; 1073741824]>"]), [true, false]);
+    assert_eq!(far(&["global<[u8; 1073741823]>", "global<[u8; 1073741824]>", "global<[u8; 1]>"]), [false, true, false]);
+    assert_eq!(far(&["global<[u8; 1073741824]>", "global<[u8; 1]>", "global<[u8; 1]>"]), [false, true, true]);
 }
 
 /// A call at an address names no function in the code, so `funcs` has none: the functions taken

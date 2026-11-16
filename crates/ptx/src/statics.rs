@@ -1,6 +1,7 @@
 //! Memory a kernel declares, and the module's, a `static`: its shape, what it holds, whether the module has room for
 //! it, and where it is.
 
+use kernite_build::taken;
 use kernite_lang::{IntTy, Value, with_article};
 
 use crate::forms::Space;
@@ -95,10 +96,9 @@ impl Static {
     /// Puts it in the module, or outside it: where the module has no room for it in its global memory beside the
     /// statics `before` it that are in it, it is outside.
     pub fn place(&mut self, before: &[Static]) {
-        let padded = |m: &Memory| m.bytes.unwrap_or(0).saturating_add(m.align - 1);
+        let room = |s: &Static| (s.memory.bytes.unwrap_or(0), s.memory.align);
         let inside = before.iter().filter(|s| s.memory.space == Space::Global && !s.outside);
-        let all = inside.fold(padded(&self.memory), |all, s| all.saturating_add(padded(&s.memory)));
-        self.outside = self.memory.space == Space::Global && all >= GLOBAL;
+        self.outside = self.memory.space == Space::Global && taken(inside.chain([&*self]).map(room)) >= GLOBAL;
     }
 
     /// Its type as the module declares it: as the source has it, or if it is outside, the type of the constant memory

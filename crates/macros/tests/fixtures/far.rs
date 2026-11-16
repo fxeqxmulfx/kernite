@@ -1,6 +1,7 @@
 //! Statics of more than 1 GiB, which are far from `rip`, and one in reach beside them. The linker defines each far one,
 //! so the crate builds as fast as with a small static, and a kernel takes the address of one with `lea(p, [BIG])` and
-//! indexes it. Built under `deny(warnings)`, the crate says nothing, and the kernels run.
+//! indexes it. A static of one byte is far too, beside one of 1 GiB that `cfg` leaves out, which counts all the same.
+//! Built under `deny(warnings)`, the crate says nothing, and the kernels run.
 #![deny(warnings)]
 
 #[kernite_macros::kernels]
@@ -54,9 +55,28 @@ pub mod cpu {
     }
 }
 
+/// A static that `cfg` leaves out counts all the same: `B`, of one byte, is past reach beside `A`, the linker's.
+#[kernite_macros::kernels]
+pub mod left_out {
+    /// Left out: 1 GiB, all that is in reach.
+    #[cfg(any())]
+    pub static A: global<[u8; 1073741824]>;
+
+    /// One byte, past reach beside `A`, as it is where `A` is kept.
+    pub static B: global<[u8; 1]>;
+
+    /// Writes 3 to `B`, by its address.
+    pub unsafe extern "sysv64" fn touch() {
+        let p: gpr;
+        lea(p, [B]);
+        mov(byte[p], 3);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::cpu::{BIG, EDGE, RUNS, edge, ends, middle, r#type};
+    use super::left_out;
 
     /// The kernel writes the first byte and the last byte of 3 GiB, which the host reads back, and the middle, and what
     /// it leaves alone is zeros. A static of 2 GiB with a raw name is reached the same way, and so is one of 2147483647
@@ -86,5 +106,15 @@ mod tests {
         // SAFETY: Each address is in a static, which lives for the whole program, of atomics the kernel wrote.
         let (first, last) = unsafe { (*EDGE.at(0), *EDGE.at(2147483646)) };
         assert_eq!((EDGE.len(), first, last), (2147483647, 0, 4));
+    }
+
+    /// The kernel writes `B`, of one byte, past reach beside a static that `cfg` leaves out, by its address, which the
+    /// host reads back.
+    #[test]
+    fn a_static_beside_one_cfg_leaves_out_is_the_linkers_all_the_same() {
+        // SAFETY: `touch` writes only the memory of the module it names, which nothing else touches.
+        unsafe { left_out::touch() };
+        // SAFETY: The address is in a static, which lives for the whole program, of atomics the kernel wrote.
+        assert_eq!(unsafe { *left_out::B.at(0) }, 3);
     }
 }

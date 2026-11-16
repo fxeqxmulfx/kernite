@@ -1313,9 +1313,8 @@ fn a_static_past_rips_reach_is_reached_by_its_address() {
     ];
     assert_eq!(code.code().collect::<Vec<_>>(), want);
     assert_eq!(code.statics, ["BIG", "C"]);
-    let by_address = "x86 reaches memory of the module's of more than 1073741824 bytes by its address, not at a \
-                      displacement from `rip`: `lea(p, [BIG])` puts the address of `BIG` in `p`, and `[p]` is what it \
-                      holds";
+    let by_address = "x86 reaches memory of the module's past `rip`'s reach by its address, not at a displacement \
+                      from `rip`: `lea(p, [BIG])` puts the address of `BIG` in `p`, and `[p]` is what it holds";
     let index = |d: u64| {
         format!(
             "a displacement is 32 bits, signed, and holds no {d}: index it, as in `lea(p, [BIG])` and `[p + i]`, where \
@@ -1363,9 +1362,48 @@ fn a_static_of_a_gibibyte_is_in_reach_of_rip_and_one_byte_more_is_not() {
     };
     let code = kernite::x86_str(&src(1073741824), "k").unwrap();
     assert_eq!(code.code().collect::<Vec<_>>(), ["mov byte ptr [rip + {S} + 1073741823], 1", "ret"]);
-    let far = "3:9: x86 reaches memory of the module's of more than 1073741824 bytes by its address, not at a \
-               displacement from `rip`: `lea(p, [S])` puts the address of `S` in `p`, and `[p]` is what it holds";
+    let far = "3:9: x86 reaches memory of the module's past `rip`'s reach by its address, not at a displacement from \
+               `rip`: `lea(p, [S])` puts the address of `S` in `p`, and `[p]` is what it holds";
     assert_eq!(kernite::x86_str(&src(1073741825), "k").unwrap_err(), far);
+}
+
+/// A module's statics are in reach of `rip` together: a static is, where it and the statics in reach before it, each
+/// with the padding its alignment may need, are 1073741824 bytes at most, as the port's test holds. Past that a kernel
+/// names it by its address alone, and the first operand that names it at a displacement is the error. It is the
+/// linker's, and holds zeros, so a value is an error, of a small static too.
+#[test]
+fn a_static_after_others_is_past_rips_reach_where_they_make_more_than_a_gibibyte() {
+    let src = |statics: &str, body: &str| format!("{statics}unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\n");
+    let gib = "static A: global<[u8; 1073741824]>;\nstatic B: global<[u8; 1073741824]>;\n";
+    let by_address = "x86 reaches memory of the module's past `rip`'s reach by its address, not at a displacement \
+                      from `rip`: `lea(p, [B])` puts the address of `B` in `p`, and `[p]` is what it holds";
+    // The first is in reach, and the second, which is a gibibyte too, is not: the linker would refuse the program.
+    let code = kernite::x86_str(&src(gib, "mov(byte[A + 1073741823], 1);"), "k").unwrap();
+    assert_eq!(code.code().collect::<Vec<_>>(), ["mov byte ptr [rip + {A} + 1073741823], 1", "ret"]);
+    let at = |body: &str| kernite::x86_str(&src(gib, body), "k").unwrap_err();
+    assert_eq!(at("mov(byte[B + 1073741823], 2);"), format!("4:9: {by_address}"));
+    assert_eq!(at("mov(byte[B], 2);"), format!("4:9: {by_address}"));
+    // With its address, as a static of more than a gibibyte has it, the kernel is compiled.
+    let body = "let p: gpr; lea(p, [B + 1073741823]); mov(byte[p], 2);";
+    let code = kernite::x86_str(&src(gib, body), "k").unwrap();
+    let want =
+        ["mov rax, qword ptr [rip + {B}@GOTPCREL]", "lea rax, [rax + 1073741823]", "mov byte ptr [rax], 2", "ret"];
+    assert_eq!(code.code().collect::<Vec<_>>(), want);
+    assert_eq!(code.statics, ["B"]);
+    // A far static is the linker's, and holds zeros, so a value is an error at what it holds, of a table too.
+    let held = |ty: &str| {
+        let statics = format!("static A: global<[u8; 1073741824]>;\nstatic B: {ty} = [1, 2];\n");
+        kernite::x86_str(&src(&statics, "mov(byte[A], 2);"), "k").unwrap_err()
+    };
+    let no_room = |ty: &str| {
+        format!(
+            "2:{}: the statics in reach of `rip` have no room for `{ty}` beside them, so the linker defines it, and \
+             it holds zeros: the host writes what it should hold",
+            11 + ty.len() + 3
+        )
+    };
+    assert_eq!(held("global<[u32; 2]>"), no_room("global<[u32; 2]>"));
+    assert_eq!(held("constant<[u32; 2]>"), no_room("constant<[u32; 2]>"));
 }
 
 /// A static of an x86 kernel's module is of Rust's numbers, as the host reads them, of a size
@@ -1441,7 +1479,8 @@ fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() {
         ("static A: global<[u32; 2]> = [1, 2, 3];", "1:30: `global<[u32; 2]>` holds 2 elements; this has 3"),
         (
             "static A: global<[u8; 3221225472]> = [1];",
-            "1:38: `global<[u8; 3221225472]>` holds 3221225472 elements; this has 1",
+            "1:38: the statics in reach of `rip` have no room for `global<[u8; 3221225472]>` beside them, so the \
+             linker defines it, and it holds zeros: the host writes what it should hold",
         ),
         ("static A: global<[u32; 2]> = 1;", "1:30: `global<[u32; 2]>` holds an array of `u32`; this is an integer"),
         ("static A: global<[u32; 2]> = [1.5, 2];", "1:30: element 0 is an f32, not a `u32`"),
