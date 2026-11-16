@@ -86,6 +86,9 @@ the list of crates in the repository's `README.md`. `architecture.rs` fails with
   all it can of it, whether a type is a number say, and kernite does none of it again. kernite does
   itself only what rustc cannot: reading a kernel and compiling it, and reading the text that
   `x86_str` and `ptx_str` are given, which no rustc reads.
+- kernite supports only the newest Rust: the newest stable rustc, and a crate of the newest edition.
+  An older rustc or edition may refuse the Rust the macros write: that is no finding, and no test
+  builds with one.
 - `unsafe_code` is forbidden everywhere but in kernite-cuda; in kernite-cpu's `affinity` module, which calls the C
   library to read and set the CPUs a thread may run on, and in its test of where pages are, `tests/nodes.rs`; and in
   the examples, which call kernels. Each `unsafe` block says why it holds. kernite-cuda and kernite-cpu keep lints of
