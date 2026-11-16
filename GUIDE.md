@@ -259,6 +259,15 @@ lexer calls Pattern_White_Space. Each other character that Unicode calls a space
 U+202F, U+205F or U+3000, is no space, as in Rust, and is refused at the character: "unexpected `\u{a0}`". A character
 that is not printable ASCII is shown in that error as Rust shows it, `\u{a0}`, and one that is, as it is.
 
+A name is what Rust reads as one: `_`, or a character that Unicode says starts an identifier, XID_Start, and then each
+that goes on one, XID_Continue, in the Unicode 17.0.0 of Rust 1.100. So `a·b`, `a‿b` and an `e` with U+0301 after it are
+names, and `a½` and `a²` are not: the name ends at the `a`, and the character after it is refused at the character,
+"unexpected `\u{bd}`". `·` and U+0301 go on a name and start none, so `·a` is refused at the `·`. A name is read in NFC,
+as Rust reads it, so each spelling of a name is that name: `café` with `é` as U+00E9 and with `e` and U+0301 is one
+helper, one variable, one const or one kernel, which `x86_str` finds by its name in either spelling. Two functions so
+named are refused as two of one spelling are, "`café` names another function of the module as well", and a listing
+writes the name in NFC.
+
 A string is plain or raw, as in Rust, wherever kernite takes one: a note's text, `note(r#"a "b""#)`, and the ABI of a
 function, `extern r"sysv64"`. A raw string has no escapes, and ends at the first `"` that has as many `#` after it as
 the string began with, so `r##"a "# b"##` holds a `"#`. A string that is never closed, plain or raw, is refused where it

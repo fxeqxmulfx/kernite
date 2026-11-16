@@ -84,6 +84,9 @@
 //!   break in it, `\r\n`, `\n` or `\r`, is a space. A remark holds no NUL, written by an escape, `\0`, `\x00` or
 //!   `\u{0}`, or as the character, for `ptxas` reads a NUL as the end of the module: the evaluator refuses it at the
 //!   string, on every machine.
+//! - **Names** are what Rust reads as one: `_`, or a character of Unicode's XID_Start, then any of XID_Continue, in the
+//!   Unicode 17.0.0 of Rust 1.100, and read in NFC, so that each spelling of a name is that name. `a·b` and `a‿b` are
+//!   names; [`lex`] refuses a character that is no part of one where it stands, `a½` at the `½`, "unexpected `\u{bd}`".
 //! - **Spaces** are what Rust reads as one, U+0009 to U+000D, U+0020, U+0085, U+200E, U+200F, U+2028 and U+2029.
 //!   [`lex`] refuses each other character that Unicode calls a space, U+00A0, U+1680, U+2000 to U+200A, U+202F, U+205F
 //!   or U+3000, at the character, in words that show which it is: "unexpected `\u{a0}`".
@@ -111,6 +114,7 @@ mod eval;
 mod parse;
 mod target;
 mod token;
+mod unicode;
 mod value;
 
 use std::fmt;
@@ -123,6 +127,7 @@ pub use eval::{Memory, Mention, Run, constant, instance, instances, kernel, memo
 pub use parse::{module, read};
 pub use target::{Fault, Guard, Mem, Operand, Target};
 pub use token::{Delim, Span, Tree, lex, never_raw, pointer, read_type, text, unraw};
+pub use unicode::nfc;
 pub use value::{IntTy, Value, with_article};
 
 /// Why a module does not compile, and where.

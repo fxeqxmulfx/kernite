@@ -486,6 +486,113 @@ fn a_character_that_unicode_calls_a_space_and_rust_does_not_is_refused_at_the_ch
     }
 }
 
+/// A kernel for each machine, `sysv64` and `ptx-kernel`, whose parameter, variable, helper and const are named `ap`,
+/// `av`, `ah` and `ak`, with `$` between the two letters of each name where it is declared and `%` where it is used.
+const NAMED: [&str; 2] = [
+    r#"
+    const a$k: u64 = 7;
+    pub unsafe extern "sysv64" fn k(a$p: u64) {
+        let a$v: gpr;
+        mov(a%v, a%p);
+        a%h(a%v);
+    }
+    fn a$h(y: gpr) { add(y, a%k); }
+    "#,
+    r#"
+    const a$k: u32 = 7;
+    pub unsafe extern "ptx-kernel" fn k(a$p: *mut u32) {
+        let a$v: u32;
+        mov.u32(a%v, a%k);
+        a%h(a%v);
+        st.global.u32([a%p], a%v);
+    }
+    fn a$h(y: u32) { add.u32(y, y, a%k); }
+    "#,
+];
+
+/// What each machine makes of `NAMED` with `declared` for each `$` and `used` for each `%`: the listing on x86, and the
+/// PTX of the module on a GPU.
+fn named(declared: &str, used: &str) -> [Result<String, String>; 2] {
+    NAMED.map(|src| compile(&src.replace('$', declared).replace('%', used), "k"))
+}
+
+/// A name goes on with each character that Rust takes in one, on x86 and on a GPU, and not only with those that
+/// `char::is_alphanumeric` takes: U+00B7 and U+203F, and U+0301 after a letter. A kernel whose names have one between
+/// two letters compiles to the listing of the kernel whose names are ASCII, but for the names, which each machine
+/// writes as it does: x86 as they are, in NFC, and a GPU's PTX with `$u` and the code point in hex and `$` for each
+/// character beyond ASCII.
+#[test]
+fn a_name_goes_on_with_each_character_rust_takes_in_one_on_every_machine() {
+    let [x86, gpu] = named("", "").map(Result::unwrap);
+    // The character, and how each machine writes the name's first two letters, `a` and it, which are `á` for U+0301.
+    for (c, on_x86, on_gpu) in [("·", "a·", "a$ub7$"), ("‿", "a‿", "a$u203f$"), ("\u{301}", "á", "$ue1$")] {
+        let [on_x86_listing, on_gpu_listing] =
+            named(c, c).map(|listing| listing.unwrap_or_else(|e| panic!("{c:?}: {e}")));
+        assert_eq!(on_x86_listing.replace(on_x86, "a"), x86, "{c:?}");
+        assert_eq!(on_gpu_listing.replace(on_gpu, "a"), gpu, "{c:?}");
+    }
+}
+
+/// A name starts with each character that Rust takes to start one, and not only with those that `char::is_alphabetic`
+/// takes: U+2118 is no letter. A kernel whose parameter is named so compiles, on x86 and on a GPU, to the listing of
+/// the one named `a`, but for the name, which each machine writes as it does.
+#[test]
+fn a_name_starts_with_each_character_rust_takes_to_start_one_on_every_machine() {
+    for (abi, on_machine) in [("sysv64", "℘"), ("ptx-kernel", "$u2118$")] {
+        let listing = |name: &str| compile(&format!("unsafe extern \"{abi}\" fn k({name}: u64) {{}}\n"), "k").unwrap();
+        assert_eq!(listing("℘").replace(on_machine, "a"), listing("a"), "{abi}");
+    }
+}
+
+/// No other character is in a name. `a½` and `a²` have one that `char::is_alphanumeric` takes and Rust does not, and
+/// `·`, `‿`, U+0301 and U+0345 go on a name and start none, U+0345 though `char::is_alphabetic` takes it. Each is
+/// refused at the character, on x86 and on a GPU, in words that show which it is.
+#[test]
+fn no_other_character_is_in_a_name_on_every_machine() {
+    for abi in ["sysv64", "ptx-kernel"] {
+        let head = format!("unsafe extern \"{abi}\" fn k(");
+        // The name, the character of it that is refused, and how many characters come before that.
+        for (name, c, before) in [
+            ("a½", '½', 1),
+            ("a²", '²', 1),
+            ("·a", '·', 0),
+            ("‿a", '‿', 0),
+            ("\u{301}a", '\u{301}', 0),
+            ("\u{345}a", '\u{345}', 0),
+        ] {
+            let src = format!("{head}{name}: u64) {{}}\n");
+            let column = head.chars().count() + before + 1;
+            let want = format!("1:{column}: unexpected `\\u{{{:x}}}`", u32::from(c));
+            assert_eq!(compile(&src, "k"), Err(want), "{abi}: {name:?}");
+        }
+    }
+}
+
+/// A name is one name in each of its spellings, as Rust reads each in NFC: `é` as U+00E9, and as `e` and U+0301. A
+/// kernel that declares a name in one spelling and uses it in the other compiles to the listing of the kernel that
+/// spells it alike, which writes the name in NFC. Two helpers so named are two of one name, refused where the second
+/// is, as two of one spelling are. `x86_str` finds a kernel by its name in either spelling.
+#[test]
+fn a_name_in_each_of_its_spellings_is_one_name_on_every_machine() {
+    let alike = named("é", "é").map(Result::unwrap);
+    for (declared, used) in [("é", "e\u{301}"), ("e\u{301}", "é"), ("e\u{301}", "e\u{301}")] {
+        assert_eq!(named(declared, used), alike.clone().map(Ok), "declared {declared:?}, used {used:?}");
+    }
+    let twice = |second: &str| format!("fn caf\u{e9}() {{}} fn {second}() {{}}");
+    let want = "1:17: `caf\u{e9}` names another function of the module as well";
+    for second in ["caf\u{e9}", "cafe\u{301}"] {
+        assert_eq!(kernite::x86_str(&twice(second), "k").unwrap_err(), want, "{second:?}");
+        assert_eq!(kernite::ptx_str(&twice(second)).unwrap_err(), want, "{second:?}");
+    }
+    let kernel = |declared: &str, given: &str| {
+        compile(&format!("unsafe extern \"sysv64\" fn caf{declared}() {{}}\n"), &format!("caf{given}"))
+    };
+    let own = kernel("\u{e9}", "\u{e9}").unwrap();
+    for (declared, given) in [("\u{e9}", "e\u{301}"), ("e\u{301}", "\u{e9}"), ("e\u{301}", "e\u{301}")] {
+        assert_eq!(kernel(declared, given), Ok(own.clone()), "declared {declared:?}, given {given:?}");
+    }
+}
+
 #[test]
 fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
     // Rust refuses a name bound twice among a function's generics and parameters, E0403 and E0415;

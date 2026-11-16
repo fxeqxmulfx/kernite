@@ -1,7 +1,7 @@
 //! Tokens as `proc_macro` hands them over, with numbered spans in place of its own, and a lexer
 //! that reads the same tokens out of a string.
 
-use crate::{Error, nested};
+use crate::{Error, nested, unicode};
 
 /// Where a token came from, as whoever made the tokens numbers it: an index into the spans of a
 /// procedural macro's input, or a byte offset into a string.
@@ -404,9 +404,9 @@ fn last_field(mut fields: &[Tree]) -> &[Tree] {
 /// The characters that are punctuation.
 const PUNCT: &str = "+-*/%^!&|=<>@.,;:#$?~";
 
-/// Whether a name can start with `c`.
+/// Whether a name can start with `c`, as in Rust: `_`, or a character that Unicode says starts an identifier.
 fn starts_name(c: char) -> bool {
-    c == '_' || c.is_alphabetic()
+    c == '_' || unicode::is_xid_start(c)
 }
 
 /// Whether `c` is a space, as Rust says: one of Pattern_White_Space, which no version of Unicode changes.
@@ -509,9 +509,11 @@ fn refused(escape: &str) -> String {
 /// A CR that no LF follows is an error at the CR, in a string, plain or raw, and in a doc comment, as Rust says; in any
 /// other comment, and in the white space that a `\` that ends a line leaves out, it is taken. A string is its text as
 /// the source has it, each CRLF in it too: the parser reads that as a LF, as Rust does. An escape of a plain string
-/// that Rust refuses is an error at its `\`. A space is what Rust reads as one, U+0009 to U+000D, U+0020, U+0085,
-/// U+200E, U+200F, U+2028 and U+2029. Any other character that no token starts with, U+00A0 say, which looks like a
-/// space and is none, is an error at it, shown as Rust shows it, `\u{a0}`, unless it is printable ASCII.
+/// that Rust refuses is an error at its `\`. A name is `_` or a character that Unicode says starts an identifier, then
+/// each that goes on one, in NFC as Rust reads it, so that each spelling of a name is one `Ident`; a character that is
+/// no part of one, `½` after an `a` say, is an error at it. A space is what Rust reads as one, U+0009 to U+000D,
+/// U+0020, U+0085, U+200E, U+200F, U+2028 and U+2029. Any other character that no token starts with, U+00A0 say, which
+/// looks like a space and is none, is an error at it, shown as Rust shows it, `\u{a0}`, unless it is printable ASCII.
 pub fn lex(src: &str) -> Result<Vec<Tree>, Error> {
     Lexer { src, pos: 0 }.trees(None, 0).map(|(trees, _)| trees)
 }
@@ -592,7 +594,7 @@ impl Lexer<'_> {
                         self.pos += 2;
                     }
                     let from = self.pos;
-                    while let Some(c) = self.peek().filter(|&c| c == '_' || c.is_alphanumeric()) {
+                    while let Some(c) = self.peek().filter(|&c| unicode::is_xid_continue(c)) {
                         self.pos += c.len_utf8();
                     }
                     if raw {
@@ -604,7 +606,7 @@ impl Lexer<'_> {
                             return Err(Error { span, message: format!("`{word}` cannot be written raw") });
                         }
                     }
-                    out.push(Tree::Ident { name: self.src[start..self.pos].to_string(), space, span });
+                    out.push(Tree::Ident { name: unicode::nfc(&self.src[start..self.pos]), space, span });
                 }
                 c if PUNCT.contains(c) => {
                     self.pos += 1;
