@@ -1,6 +1,7 @@
 //! Memory of a module's, which its x86 kernels name, and the host reads and writes.
 
 use std::fmt;
+use std::mem::MaybeUninit;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{
     AtomicI8, AtomicI16, AtomicI32, AtomicI64, AtomicIsize, AtomicU8, AtomicU16, AtomicU32, AtomicU64, AtomicUsize,
@@ -25,14 +26,23 @@ where
 {
     /// Nothing, at a multiple of `A`, which puts the elements after it at one.
     align: [<Align<A> as Alignment>::Zst; 0],
-    /// The elements, each in an atomic of its width.
-    cells: [T::Cell; N],
+    /// The elements, each in an atomic of its width, kept as bytes that may be anything: Rust checks an array of
+    /// atomics one element at a time, 0.3 seconds for each MiB of a static, and these bytes at once.
+    cells: MaybeUninit<[T::Cell; N]>,
 }
 
 impl<T: Element, const N: usize, const A: usize> Global<T, N, A>
 where
     Align<A>: Alignment,
 {
+    /// Its elements, as atomics.
+    #[allow(unsafe_code)]
+    fn cells(&self) -> &[T::Cell; N] {
+        // SAFETY: Each way to make one, `new` and `zeroed`, gives every byte of it a value, and an atomic of an integer
+        // holds any.
+        unsafe { self.cells.assume_init_ref() }
+    }
+
     /// Its address, for a kernel to be given; it points at its elements while the process
     /// lasts.
     pub fn ptr(&self) -> *mut T {
@@ -59,27 +69,27 @@ where
     /// Copies `data` to it. Panics if `data` has not as many elements.
     pub fn write(&self, data: &[T]) {
         assert_eq!(data.len(), N, "a module's memory of {N} elements written with {}", data.len());
-        for (cell, &x) in self.cells.iter().zip(data) {
+        for (cell, &x) in self.cells().iter().zip(data) {
             T::store(cell, x);
         }
     }
 
     /// What it holds.
     pub fn read(&self) -> Vec<T> {
-        self.cells.iter().map(T::load).collect()
+        self.cells().iter().map(T::load).collect()
     }
 
     /// Copies what it holds to `out`. Panics if `out` has not as many elements.
     pub fn read_into(&self, out: &mut [T]) {
         assert_eq!(out.len(), N, "a module's memory of {N} elements read into {}", out.len());
-        for (x, cell) in out.iter_mut().zip(&self.cells) {
+        for (x, cell) in out.iter_mut().zip(self.cells()) {
             *x = T::load(cell);
         }
     }
 
     /// Sets every element to zero.
     pub fn zero(&self) {
-        for cell in &self.cells {
+        for cell in self.cells() {
             T::store(cell, T::default());
         }
     }
@@ -139,12 +149,12 @@ macro_rules! elements {
                     cells[i] = $cell::new($to(values[i]));
                     i += 1;
                 }
-                Global { align: [], cells }
+                Global { align: [], cells: MaybeUninit::new(cells) }
             }
 
             /// Memory holding zeros until something writes it, for a static to be.
             pub const fn zeroed() -> Self {
-                Global { align: [], cells: [const { $cell::new(0) }; N] }
+                Global { align: [], cells: MaybeUninit::zeroed() }
             }
         }
     )*};
@@ -272,6 +282,14 @@ mod tests {
         assert!(WEIGHTS.ptr().addr().is_multiple_of(32));
         assert_eq!(WEIGHTS.at(2).addr() - WEIGHTS.ptr().addr(), 8);
         assert_eq!((COUNTS.len(), COUNTS.is_empty()), (16, false));
+    }
+
+    /// Memory made zeroed holds zeros, as a number of each width reads them, a float as `0.0`.
+    #[test]
+    fn zeroed_memory_holds_zeros() {
+        assert_eq!(COUNTS.read(), [0; 16]);
+        assert_eq!(Global::<f32, 3, 8>::zeroed().read(), [0.0; 3]);
+        assert_eq!(Global::<i16, 2>::zeroed().read(), [0; 2]);
     }
 
     /// It holds what it is made with, which the host reads, writes and zeroes, the bits of a

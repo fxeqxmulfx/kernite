@@ -79,10 +79,11 @@
 //! The crate depends on no other. kernite-x86 writes the kernels, which read a place as [`Place`]
 //! lays it out, and the macro writes the launchers, which call [`launch`] and, in each thread,
 //! the kernel, and the statics. The only `unsafe` here is in `affinity`, which reads and sets the
-//! CPUs a thread may run on through the C library, as Rust has no call for that, and each of its
-//! blocks says why it holds. Calling the kernel is `unsafe` too, and the launcher does that.
+//! CPUs a thread may run on through the C library, as Rust has no call for that, and in the one function of `Global`
+//! that reads its elements, which Rust does not check one at a time, for that takes it 0.3 seconds for each MiB of a
+//! static. Each block says why it holds. Calling the kernel is `unsafe` too, and the launcher does that.
 
-// The one module with `unsafe` in it, as the crate's lints say.
+// The module the crate's lints let have `unsafe` in it; `Global` has one function that does.
 #[allow(unsafe_code)]
 mod affinity;
 mod global;
