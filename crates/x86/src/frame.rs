@@ -1,7 +1,7 @@
 //! A kernel's frame made instructions, before it is printed: what it runs on entry, and before
-//! each `ret`.
+//! each `ret` and each jump to a callee that stands for one.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use kernite_compile::{Allocated, Frame};
 use kernite_core::{Access, Arg, Base, Class, Flow, Inst, Item, Label, Mem, Operand, PReg, Width};
@@ -20,17 +20,16 @@ pub(crate) struct Lowered {
     pub(crate) features: Vec<Feature>,
     /// Bytes the prologue moves the stack pointer down besides the frame's.
     pub(crate) padding: u32,
-    /// Whether control returns: whether the body has a `ret`.
+    /// Whether control returns: whether the kernel has a `ret`, though a jump to a callee may stand for it.
     pub(crate) returns: bool,
 }
 
 /// `c` with its frame made instructions, as [`print`](crate::intel::print) says; or why not.
 pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
-    let calls = insts(&c.body).any(|inst| inst.op == Op::Call);
+    let jumps = jumps(c);
+    let calls = insts(&c.body).filter(|inst| inst.op == Op::Call).count() > jumps.len();
     let returns = insts(&c.body).any(|inst| inst.op == Op::Ret);
-    let vector = insts(&c.body)
-        .filter(|inst| !idle(inst))
-        .any(|inst| inst.operands().any(|a| a.regs().any(|r| r.class == Class::Vec)));
+    let upper = insts(&c.body).filter(|inst| !idle(inst)).any(|inst| inst.operands().any(ymm));
     // The prologue's loop takes the least value no label of the body has: going up the body's
     // labels in order, each one that has the value looked for moves it one on.
     let labels: BTreeSet<u32> = c
@@ -44,9 +43,26 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     let free = Label(labels.into_iter().fold(0, |free, l| if l == free { free + 1 } else { free }));
     let padding = padding(&c.frame, calls);
     let mut body = prologue(&c.frame, padding, free)?;
-    for item in &c.body {
+    let done: BTreeSet<usize> = jumps.values().flatten().copied().collect();
+    for (i, item) in c.body.iter().enumerate() {
         match item {
-            Item::Inst(inst) if inst.op == Op::Ret => body.extend(epilogue(&c.frame, padding, vector)),
+            Item::Inst(call) if jumps.contains_key(&i) => {
+                let mut jump =
+                    Inst { op: Op::Jmp, implicit: vec![], flow: Flow::Return, clobbers: vec![], ..call.clone() };
+                // An address in a register the epilogue restores goes first to `r11`, which passes no argument and
+                // which the epilogue leaves as it is.
+                if let Operand::Reg(at, _) = call.args[0].operand
+                    && c.frame.saved.contains(&at)
+                {
+                    body.push(inst(Op::Mov, vec![reg(R11, Access::Write), reg(at, Access::Read)]));
+                    jump.args = vec![reg(R11, Access::Read)];
+                }
+                body.extend(epilogue(&c.frame, padding, upper));
+                body.push(Item::Inst(jump));
+                continue;
+            }
+            Item::Inst(_) if done.contains(&i) => continue,
+            Item::Inst(inst) if inst.op == Op::Ret => body.extend(epilogue(&c.frame, padding, upper)),
             Item::Inst(inst) if idle(inst) => continue,
             Item::Inst(inst) => {
                 let spill = inst.args.iter().find_map(|a| match a.operand {
@@ -65,10 +81,12 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
         }
         body.push(item.clone());
     }
-    let mut features: Vec<Feature> =
-        insts(&body).filter_map(|inst| forms::feature(inst.op, &inst.args, &inst.implicit)).collect();
-    // The epilogue's `vzeroupper` is AVX's: a kernel that writes it needs AVX, unless it lists a
-    // feature that builds on it.
+    // The frame's instructions need none, but for the epilogue's `vzeroupper`, which is AVX's: a kernel that writes it
+    // needs AVX, unless it lists a feature that builds on it.
+    let mut features: Vec<Feature> = insts(&c.body)
+        .filter(|inst| !idle(inst))
+        .filter_map(|inst| forms::feature(inst.op, &inst.args, &inst.implicit))
+        .collect();
     let implies_avx = [Feature::Avx2, Feature::Fma, Feature::F16c];
     if insts(&body).any(|inst| inst.op == Op::Vzeroupper) && !features.iter().any(|f| implies_avx.contains(f)) {
         features.push(Feature::Avx);
@@ -78,12 +96,50 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     Ok(Lowered { body, features, padding, returns })
 }
 
+/// The calls of `c` that are jumps, by their places in its body, each with the place of the `ret` it does without, if
+/// no other way comes to that `ret`. A call that `ret` follows at once, with nothing between but labels, notes and
+/// moves that change nothing, returns what the callee gives back: the kernel takes its frame down, as before a `ret`,
+/// which clears the upper halves of the vector registers where the kernel may have set one, and jumps to the callee,
+/// which returns to the kernel's caller. A call stays one where the jump would not do what it does: where the kernel
+/// has taken the address of its stack memory, which the callee may use, and the frame the epilogue takes down holds;
+/// and where it passes all of a ymm to a function it does not know, or takes all of one back: the epilogue's
+/// `vzeroupper` would clear the upper half of one it passes, and runs before the callee sets that of one it gives back.
+fn jumps(c: &Allocated<Op>) -> BTreeMap<usize, Option<usize>> {
+    let stack = |a: &Arg<PReg>| matches!(a.operand, Operand::Mem(Mem { base: Base::Slot(_), .. }));
+    let mut jumps = BTreeMap::new();
+    if insts(&c.body).any(|inst| inst.op == Op::Lea && inst.args.iter().any(stack)) {
+        return jumps;
+    }
+    for (i, item) in c.body.iter().enumerate() {
+        let Item::Inst(call) = item else { continue };
+        if call.op != Op::Call {
+            continue;
+        }
+        let next = c.body.iter().enumerate().skip(i + 1).find_map(|(j, item)| match item {
+            Item::Inst(inst) if !idle(inst) => Some((j, inst)),
+            _ => None,
+        });
+        let Some((j, ret)) = next else { continue };
+        if ret.op == Op::Ret && !call.implicit.iter().any(ymm) {
+            let alone = !c.body[i + 1..j].iter().any(|item| matches!(item, Item::Label(_)));
+            jumps.insert(i, alone.then_some(j));
+        }
+    }
+    jumps
+}
+
 /// The instructions of `body`, in order.
 fn insts(body: &[Item<Op, PReg>]) -> impl Iterator<Item = &Inst<Op, PReg>> {
     body.iter().filter_map(|item| match item {
         Item::Inst(inst) => Some(inst),
         Item::Label(_) | Item::Note(_) => None,
     })
+}
+
+/// Whether `a` is all of a ymm, whose upper half an instruction that reads or writes it may have set. A call has such
+/// operands where its callee is a function it does not know, which may be passed a vector or give one back.
+fn ymm(a: &Arg<PReg>) -> bool {
+    matches!(a.operand, Operand::Reg(r, Width::W256) if r.class == Class::Vec)
 }
 
 /// Whether `inst` changes nothing, so the listing leaves it out: a move of all 64 bits, or all
@@ -199,10 +255,12 @@ fn prologue(frame: &Frame, pad: u32, free: Label) -> Result<Vec<Item<Op, PReg>>,
     Ok(items)
 }
 
-/// What runs before a `ret`: undoes [`prologue`], and clears the vector registers' upper halves
-/// if the body used any, so the caller's SSE code does not pay for them. A move that the listing
-/// leaves out uses none.
-fn epilogue(frame: &Frame, pad: u32, vector: bool) -> Vec<Item<Op, PReg>> {
+/// What runs before a `ret`, and before a jump to a callee that stands for one: undoes [`prologue`], and clears the
+/// upper halves of the vector registers if the body may have set one, so the caller's SSE code does not pay for them.
+/// It may have where an instruction of it reads or writes all of a ymm, as each move and spill of a vector register
+/// does, or calls a function it does not know, which may be passed a vector or give one back. A move that the listing
+/// leaves out does neither.
+fn epilogue(frame: &Frame, pad: u32, upper: bool) -> Vec<Item<Op, PReg>> {
     let mut items = vec![];
     if frame.size > 0 {
         items.extend([
@@ -213,7 +271,7 @@ fn epilogue(frame: &Frame, pad: u32, vector: bool) -> Vec<Item<Op, PReg>> {
         items.push(sp(Op::Add, pad));
     }
     items.extend(frame.saved.iter().rev().map(|&r| inst(Op::Pop, vec![reg(r, Access::Write)])));
-    if vector {
+    if upper {
         items.push(inst(Op::Vzeroupper, vec![]));
     }
     items
@@ -336,10 +394,9 @@ mod tests {
         assert_eq!(code(&c), want);
     }
 
-    /// A move of a register to itself, of all 64 bits by `mov` or all 256 by `vmovaps`, `vmovups`,
-    /// `vmovdqa` or `vmovdqu`, changes nothing, and is left out; one of 32 bits clears the upper
-    /// half, and one of an xmm the upper lanes, and stay. A move left out asks for no
-    /// `vzeroupper`.
+    /// A move of a register to itself, of all 64 bits by `mov` or all 256 by `vmovaps`, `vmovups`, `vmovdqa` or
+    /// `vmovdqu`, changes nothing, and is left out; one of 32 bits clears the upper half, and one of an xmm the upper
+    /// lanes, and stay. A move left out asks for no `vzeroupper`, nor does one of an xmm, which sets no upper half.
     #[test]
     fn a_move_of_a_register_to_itself_is_left_out() {
         let frame = Frame { saved: vec![], slots: vec![], offsets: vec![], size: 0, align: 0 };
@@ -348,10 +405,7 @@ mod tests {
         let mut body = vec![mov(Op::Mov, RAX, RAX, Width::W64), mov(Op::Mov, RAX, RAX, Width::W32)];
         body.extend(wide.clone());
         body.extend([mov(Op::Vmovaps, YMM0, YMM0, Width::W128), mov(Op::Mov, RAX, RCX, Width::W64), ret.clone()]);
-        assert_eq!(
-            code(&kernel(body, frame.clone())),
-            "mov eax, eax\nvmovaps xmm0, xmm0\nmov rax, rcx\nvzeroupper\nret"
-        );
+        assert_eq!(code(&kernel(body, frame.clone())), "mov eax, eax\nvmovaps xmm0, xmm0\nmov rax, rcx\nret");
         assert_eq!(code(&kernel([&wide[..], &[ret]].concat(), frame)), "ret");
     }
 }

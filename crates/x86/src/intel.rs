@@ -52,7 +52,8 @@ pub struct Listing {
     /// Bytes the prologue moves the stack pointer down besides the frame's, so that a kernel
     /// that calls calls at a multiple of 16, as SysV asks.
     pub padding: u32,
-    /// Whether control returns: whether the code has a `ret`. One with none never returns.
+    /// Whether control returns: whether the kernel has a `ret`, though a jump to a callee may stand for it. One with
+    /// none never returns.
     pub returns: bool,
 }
 

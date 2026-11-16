@@ -281,7 +281,6 @@
     pop r13
     pop r12
     pop rbx
-    vzeroupper
     ret
 # c0, aligned to 4:
 #   00 00 00 3f

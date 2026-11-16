@@ -74,9 +74,14 @@
 //! across the call stays in a register the callee keeps, `rbx` or `r12` to `r15`, or else in
 //! the stack frame, as every vector does. `lea(fp, [f])` puts the address of `f` in `fp`, which
 //! `call(r, fp, (a, b))` calls, passing each in the file its variable is of, and
-//! `call(r, fp, (a, b), (f, g))` as one of the functions taken together last, checked against
-//! each. A function that never returns, `-> !`, ends each way out in `ud2()`, which faults, or
-//! in a call of one that never returns.
+//! `call(r, fp, (a, b), (f, g))` as one of the functions taken together last, checked against each. A call that `ret`
+//! follows at once is a jump: the kernel takes its frame down as `ret` does, and jumps to the callee, which returns to
+//! the kernel's caller. A label between them leaves the `ret` for the other ways that come to it, and an address in a
+//! register the kernel saves goes first to `r11`, which the epilogue leaves. The call stays a call where an instruction
+//! comes between it and the `ret`, and where the jump would not do what the call does: where the kernel has taken the
+//! address of its stack memory, and where it calls at an address with no functions given and passes a vector, whose
+//! upper half the epilogue's `vzeroupper` would clear. A function that never returns, `-> !`, ends each way out in
+//! `ud2()`, which faults, or in a call of one that never returns.
 
 use kernite_compile::Spill;
 use kernite_core::Access::{self, Ignored, Read, ReadWrite, Write};
@@ -637,7 +642,11 @@ impl Kernel {
                 }
             }
         };
-        // Each argument to the register it goes in, in order; then the call; then the result.
+        // Each argument to the register it goes in, in order; then the call; then the result. The call reads what its
+        // callee takes and writes what it gives back: a float, in the xmm, of a function of the module; all of a ymm,
+        // which may hold a vector, of a function it does not know.
+        let known = targets.is_some() || matches!(target, Operand::Func(_));
+        let width = |class| if class == Class::Vec && known { W128 } else { SysV.width(class) };
         let mut implicit = vec![];
         let (mut ints, mut floats) = (0, 0);
         for (k, (a, ty)) in passed.iter().zip(&tys).enumerate() {
@@ -655,14 +664,14 @@ impl Kernel {
             let pinned = self.new_var(to.class, &name);
             self.p.pinned.push((pinned, to));
             self.pass(pinned, a, *ty);
-            implicit.push(Arg { operand: Operand::Reg(pinned, SysV.width(to.class)), access: Read });
+            implicit.push(Arg { operand: Operand::Reg(pinned, width(to.class)), access: Read });
         }
         let back = match (result.and_then(reg_of), kept) {
             (Some((reg, view)), Some(ty)) => {
                 let from = if ty == Ty::Int { INT_RESULT } else { FLOAT_RESULT };
                 let pinned = self.new_var(from.class, &self.p.regs[reg.id as usize].name.clone());
                 self.p.pinned.push((pinned, from));
-                implicit.push(Arg { operand: Operand::Reg(pinned, SysV.width(from.class)), access: Write });
+                implicit.push(Arg { operand: Operand::Reg(pinned, width(from.class)), access: Write });
                 Some((reg, view, pinned))
             }
             _ => None,
