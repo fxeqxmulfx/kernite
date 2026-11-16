@@ -81,7 +81,9 @@
 //! - **Labels** are placed by `label(top);` and named by jumps, before or after. Each block
 //!   numbers its labels afresh every time it runs, so a loop's body or a helper's gets new
 //!   ones each time. `note("acc {k}")` is a remark for the listing, `{name}` a value's. A remark is one line: each line
-//!   break in it, `\r\n`, `\n` or `\r`, is a space.
+//!   break in it, `\r\n`, `\n` or `\r`, is a space. A remark holds no NUL, written by an escape, `\0`, `\x00` or
+//!   `\u{0}`, or as the character, for `ptxas` reads a NUL as the end of the module: the evaluator refuses it at the
+//!   string, on every machine.
 //! - **Strings** are plain or raw, as in Rust, for a note's text, `note(r#"a "b""#)`, and for a function's ABI,
 //!   `extern r"sysv64"`. A plain string takes the escapes that Rust reads, `\x41`, `\u{e9}` and a `\` that ends a line
 //!   among them, and [`lex`] refuses any other at its `\`. A raw string has no escapes, and ends at the first `"` that

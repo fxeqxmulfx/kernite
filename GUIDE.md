@@ -272,6 +272,10 @@ refused at its `\`, as Rust refuses it, with one of three messages: "`\q` is no 
 most, as in Rust: write a greater character as `\u{80}`" or "`\u` takes one to six hex digits in braces, as `\u{e9}`, of
 a character: not d800 to dfff, and 10ffff at most, as in Rust".
 
+A note's text holds no NUL, on any machine, as `ptxas` reads a NUL as the end of the module. It is refused at the
+string, whether the NUL is an escape of a plain string, `\0`, `\x00` or `\u{0}`, or the character itself, in a plain or
+a raw string: "a NUL is not allowed in a note, on any machine: `ptxas` reads it as the end of the module".
+
 A macro's fragment is one operand, or one type, wherever kernite reads it, as Rust reads it. With `$n:expr` as `1 + 2`,
 `$n * 2` is 6, and not the 5 that `1 + 2 * 2` is. It is so in a kernel's expression, on x86 and on a GPU, under a `-`,
 in the length of an array, in `#[instances(..)]`, and in a const, which is 6 to Rust too. A `$t:ty` is one type in a

@@ -1281,6 +1281,12 @@ impl<'a, T: Target> Eval<'a, T> {
         let [Expr::Str(text, sspan)] = args else {
             return Err(err(span, "`note` takes a string, as in `note(\"the lanes\")`"));
         };
+        if text.contains('\0') {
+            return Err(err(
+                *sspan,
+                "a NUL is not allowed in a note, on any machine: `ptxas` reads it as the end of the module",
+            ));
+        }
         let mut out = String::new();
         let mut rest = text.as_str();
         while let Some(i) = rest.find(['{', '}']) {

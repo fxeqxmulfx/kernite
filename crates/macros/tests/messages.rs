@@ -1342,6 +1342,26 @@ fn listings_holds_each_kernels_listing_by_its_name() {
     builds_quietly("listings");
 }
 
+/// A NUL in a note is refused at the string, in a module of GPU kernels and in a module of x86 kernels, written by an
+/// escape or as the character, in a plain string and in a raw one, as `ptx_str` and `x86_str` refuse it: the module's
+/// path is not written in its place. Another control character is no trouble. The fixture has the NUL as `<NUL>`, which
+/// the test writes as a NUL before Cargo builds it, for git takes a file with a NUL in it for a binary.
+#[test]
+fn a_nul_in_a_note_is_refused_at_the_string_in_a_module_of_either_machine() {
+    let dir = written("nul_note");
+    let lib = dir.join("src/lib.rs");
+    fs::write(&lib, fs::read_to_string(&lib).unwrap().replace("<NUL>", "\0")).unwrap();
+    let (built, said) = cargo_in(&["build"], &dir);
+    assert!(!built, "Cargo built it");
+    let message = "a NUL is not allowed in a note, on any machine: `ptxas` reads it as the end of the module";
+    let mut want: Vec<String> = [9, 13, 17, 21, 25, 37, 41, 45, 49, 53]
+        .iter()
+        .map(|line| format!("src/lib.rs:{line}:14: error: {message}"))
+        .collect();
+    want.push("error: could not compile `nul_note` (lib) due to 10 previous errors".into());
+    assert_eq!(said, want, "Cargo said:\n{}", said.join("\n"));
+}
+
 /// `LISTINGS` holds the listings of the kernels `cfg` keeps, one for each instance of a kernel that
 /// has them, and none of a kernel that `cfg` leaves out, by a `cfg` or by a `cfg_attr(..)`. The
 /// fixture asserts, as it builds, which listings the module has with its feature and without it.

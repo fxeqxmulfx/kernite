@@ -94,6 +94,38 @@ fn a_line_break_in_a_note_is_a_space_on_every_machine() {
     }
 }
 
+/// A NUL in a note is refused at the string, on x86 and on a GPU, for `ptxas` reads a NUL as the end of the module: by
+/// an escape, `\0`, `\x00` or `\u{0}`, and as the character, in a plain string and in a raw one. The error is at the
+/// string, wherever the NUL is in it and whatever else the note holds. Another control character is no trouble.
+#[test]
+fn a_nul_in_a_note_is_refused_at_the_string_on_every_machine() {
+    let message = "a NUL is not allowed in a note, on any machine: `ptxas` reads it as the end of the module";
+    for string in [
+        r#""a\0b""#,
+        r#""a\x00b""#,
+        r#""a\u{0}b""#,
+        r#""a\u{0_0}b""#,
+        r#""\0""#,
+        "\"a\0b\"",
+        "\"\0\"",
+        "r\"a\0b\"",
+        "r#\"a \"\0\" b\"#",
+        // The note's text is read whole, so the NUL is refused after a name, and after a long text, at the string's
+        // start.
+        r#""{x} {{ \0""#,
+        r#""the high lanes, the low lanes, the lanes of the next tile, the lanes of the last one: \0""#,
+    ] {
+        let note = format!("let x = 1;\nnote({string});");
+        let want = format!("3:6: {message}");
+        assert_eq!(refused(&note), want, "{string:?}");
+        let gpu = format!("unsafe extern \"ptx-kernel\" fn k() {{\n{note}\n}}\n");
+        assert_eq!(kernite::ptx_str(&gpu).unwrap_err(), want, "{string:?}");
+    }
+    // A note keeps any other control character as it is: U+0001, the NUL's neighbour, DEL, a tab and NEL.
+    let listing = "# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # a\u{1}\u{7f}\tb\u{85}\n    ret\n";
+    assert_eq!(x86(&kernel(r#"note("a\u{1}\x7f\tb\u{85}");"#), "k"), listing);
+}
+
 #[test]
 fn a_function_that_names_an_abi_is_not_const_and_no_function_is_async() {
     let constant = "a function that names an ABI runs on its machine, never while Rust compiles, so it is not `const`";
