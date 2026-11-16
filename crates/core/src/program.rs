@@ -23,6 +23,17 @@ pub enum Flow {
     Return,
 }
 
+/// What an instruction does to a machine register besides its operands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Clobber {
+    /// Changes all of it, as a call's callee that writes it does.
+    All(PReg),
+    /// Clears its upper half and leaves the lower half as it was, as a call's callee that runs `vzeroupper` does a
+    /// vector register. An instruction that writes part of a register this may clear replaces its upper half as well,
+    /// though it reads what was there, as a VEX instruction clears it.
+    Upper(PReg),
+}
+
 /// One machine instruction: an opcode of the instruction set `Op`, its operands and where
 /// control goes after it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -36,9 +47,10 @@ pub struct Inst<Op, R> {
     pub implicit: Vec<Arg<R>>,
     /// Where control goes next.
     pub flow: Flow,
-    /// The machine registers it changes besides its operands: those a call's callee may. A
-    /// variable live across it, which it does not write, takes none of them.
-    pub clobbers: Vec<PReg>,
+    /// What it does to machine registers besides its operands: those a call's callee may change. A variable live across
+    /// it, which it does not write, takes none that it changes all of, and none that it clears the upper half of if an
+    /// instruction after it reads that half of the variable, as one that reads all of it does.
+    pub clobbers: Vec<Clobber>,
 }
 
 impl<Op, R: Register> Inst<Op, R> {

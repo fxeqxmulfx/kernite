@@ -3,15 +3,15 @@
 use std::collections::BTreeSet;
 
 use kernite_build::{
-    Abi, Backend, Bytes, Called, Compiled, Done, HostStatic, Naked, Native, StaticError, Unfinished, abi, cooperative,
+    Abi, Backend, Bytes, Called, Done, HostStatic, Naked, Native, StaticError, Unfinished, abi, cooperative,
 };
-use kernite_core::{Class, PReg};
+use kernite_core::Clobber;
 use kernite_lang::{Fn, Memory, Value};
 
 use crate::SysV;
 use crate::intel::{self, Listing};
 use crate::lang::{Callee, Kernel, Prototype, Static};
-use crate::sysv::CALL_CLOBBERS;
+use crate::sysv::{CALL_CLOBBERS, VECS};
 
 /// x86-64 under SysV: kernels in Intel syntax, as naked functions Rust calls, and the module's
 /// memory, which Rust lays out in the process.
@@ -89,25 +89,25 @@ impl Backend for X86 {
     }
 }
 
-/// The registers a call of the functions `called`, each by what the source calls it, changes, as the listings of `done`
-/// say: those that each changes, and each function it calls in turn, counted once however often it is called, itself
-/// among them; and every register a callee may, if one has no listing, for what it changes is not known.
-fn changed_by(called: &[String], done: &[Done<Listing>]) -> Vec<PReg> {
-    let (mut seen, mut changes, mut todo) = (vec![], BTreeSet::new(), called.iter().collect::<Vec<_>>());
+/// What a call of the functions `called`, each by what the source calls it, does to registers, as the listings of
+/// `done` say: it changes those that each changes, and each function it calls in turn, counted once however often it is
+/// called, itself among them; and clears the upper half of each vector register if one of them runs `vzeroupper`. None
+/// if a function has no listing, for what it does is not known.
+fn changed_by(called: &[String], done: &[Done<Listing>]) -> Option<Vec<Clobber>> {
+    let (mut seen, mut changes, mut clears) = (vec![], BTreeSet::new(), false);
+    let mut todo = called.iter().collect::<Vec<_>>();
     while let Some(name) = todo.pop() {
         if seen.contains(&name) {
             continue;
         }
         seen.push(name);
-        let Some((_, Ok(Compiled { code: listing, .. }))) = done.iter().find(|(done, _)| done == name) else {
-            return CALL_CLOBBERS.to_vec();
-        };
+        let listing = &done.iter().find(|(done, _)| done == name)?.1.as_ref().ok()?.code;
         changes.extend(&listing.changes);
+        clears |= listing.clears_upper;
         todo.extend(listing.funcs.iter().chain(&listing.reach));
     }
-    // Every vector register: a callee's `vzeroupper` clears the upper half of each.
-    changes.extend(CALL_CLOBBERS.iter().filter(|r| r.class == Class::Vec));
-    changes.into_iter().collect()
+    let upper = VECS.iter().filter(|_| clears);
+    Some(changes.into_iter().copied().map(Clobber::All).chain(upper.copied().map(Clobber::Upper)).collect())
 }
 
 impl Native for X86 {

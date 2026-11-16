@@ -2,7 +2,7 @@ use kernite_core::{Flow, Item, PReg, Program, VReg};
 
 use crate::Error;
 use crate::bits::Bits;
-use crate::live::{analyse, first_mentions, interference};
+use crate::live::{analyse, first_mentions, interference, upper_live};
 use crate::spill;
 use crate::{Machine, Spill};
 
@@ -11,12 +11,12 @@ use crate::{Machine, Spill};
 ///
 /// Liveness is solved over the blocks to a fixed point. Two variables interfere when one is
 /// written while the other is live, and a variable live across an instruction that changes
-/// registers besides its operands, as a call does, may take none of those. The variables the
-/// calling convention places take their registers first: the parameters, the results, and a
-/// call's arguments and result. Then each other variable, in the order the body first names
-/// it, takes the register of a call's argument or result it is copied to or from, if it may,
-/// or else the first register the machine offers that none of the variables it interferes with
-/// holds.
+/// registers besides its operands, as a call does, may take none of those; nor, where the instruction clears only the
+/// upper half of a register, one when the variable's own upper half is read after it. The variables the calling
+/// convention places take their registers first: the parameters, the results, and a call's arguments and result. Then
+/// each other variable, in the order the body first names it, takes the register of a call's argument or result it is
+/// copied to or from, if it may, or else the first register the machine offers that none of the variables it interferes
+/// with holds.
 ///
 /// A parameter or a result that cannot keep its register throughout, since another placed
 /// variable needs it while both are live, or an instruction it is live across changes it,
@@ -46,7 +46,8 @@ pub(crate) fn allocate<Op: Clone + PartialEq>(
     }
     loop {
         let (blocks, live) = analyse(&p)?;
-        let (adj, changed) = interference(&p, &blocks, &live);
+        let upper = upper_live(&p, &blocks, s);
+        let (adj, changed) = interference(&p, &blocks, &live, &upper, s);
         let regs = match fixed(&p, &adj, &changed) {
             Ok(regs) => regs,
             Err(clash) => {

@@ -159,6 +159,46 @@ fn a_call_changes_what_the_listings_of_its_callees_say() {
     assert_eq!(code(&[]), saving, "without any");
 }
 
+/// A listing says which vector registers its code writes, as it says the others, and whether it runs `vzeroupper`,
+/// which clears the upper half of each vector register and leaves the lower half. A call changes the vector registers
+/// that each function it may reach writes, and clears the upper half of each if one of them runs `vzeroupper`: a vector
+/// alive across it stays in the frame if the kernel reads all of it after, and in a register if it reads the lower half
+/// alone. Where a listing is missing, as it is for a function that does not compile, or for one that a function it
+/// calls calls, the call may change every register a callee may, so the vector stays in the frame whatever the kernel
+/// reads of it.
+#[test]
+fn a_call_clears_the_upper_halves_where_the_listings_of_its_callees_say() {
+    let callees = "unsafe extern \"sysv64\" fn writes_ymm0() { let v: ymm; zero(v); }\n\
+                   unsafe extern \"sysv64\" fn runs_vzeroupper() { let v: ymm; zero(v); vaddps(v, v, v); }\n\
+                   unsafe extern \"sysv64\" fn calls_vzeroupper() { call(runs_vzeroupper); pause(); }\n";
+    let ymm0 = PReg { class: Class::Vec, hw: 0 };
+    let module = parse(callees).unwrap();
+    let mut done = vec![];
+    for (name, changes, clears) in
+        [("writes_ymm0", vec![ymm0], false), ("runs_vzeroupper", vec![ymm0], true), ("calls_vzeroupper", vec![], false)]
+    {
+        let listing = finished(&module, name, &done);
+        assert_eq!((&listing.changes, listing.clears_upper), (&changes, clears), "{name}");
+        done.push((name.to_string(), listing));
+    }
+    // Whether a kernel that calls `callee` keeps `v` in the frame, when it reads `read` of it after.
+    let spills = |callee: &str, read: &str, done: &[(String, Listing)]| {
+        let k = format!(
+            "unsafe extern \"sysv64\" fn k(p: *mut f32) {{ let v: ymm; vmovups(v, [p]); call({callee}); \
+             vmovups([p], {read}); }}"
+        );
+        let module = parse(&format!("{callees}{k}")).unwrap();
+        finished(&module, "k", done).frame.slots.iter().any(|slot| slot.spill)
+    };
+    assert!(!spills("writes_ymm0", "v", &done));
+    assert!(spills("runs_vzeroupper", "v", &done));
+    assert!(!spills("runs_vzeroupper", "v.xmm", &done));
+    assert!(spills("calls_vzeroupper", "v", &done));
+    assert!(!spills("calls_vzeroupper", "v.xmm", &done));
+    assert!(spills("writes_ymm0", "v.xmm", &[]), "without the listing of `writes_ymm0`");
+    assert!(spills("calls_vzeroupper", "v.xmm", &done[2..]), "without that of `runs_vzeroupper`, which it calls");
+}
+
 /// A listing names a constant `{c0}` and a function `{f0}`, and a static by its name, so no
 /// static is named as a constant or a function is: the port refuses it at its name. It checks
 /// the name before the type: `c0`, whose type holds nothing, is refused at its name.

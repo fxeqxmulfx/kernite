@@ -16,10 +16,10 @@ mod kernels {
         ret_sum(v);
     }
 
-    /// The sum of the sixteen floats at `xs`: `sum8` of each half, added. A call may change
-    /// every vector, so the first half's sum waits out the second call in the kernel's stack
-    /// memory, as the listing says; but `xs` stays in `rax`, which `sum8` does not write, so the kernel saves none for
-    /// its own caller.
+    /// The sum of the sixteen floats at `xs`: `sum8` of each half, added. A call changes the registers `sum8` writes,
+    /// `ymm0` and `ymm1`, and its `vzeroupper` clears the upper half of every vector register; so the first half's sum,
+    /// of which the kernel reads only the lower half, waits out the second call in `ymm2`, as the listing says. And
+    /// `xs` stays in `rax`, which `sum8` does not write, so the kernel saves none for its own caller.
     pub unsafe extern "sysv64" fn sum16(xs: *const f32) -> f32 {
         let (low, high): (ymm, ymm);
         call(low.xmm, sum8, xs);

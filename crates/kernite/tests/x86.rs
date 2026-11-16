@@ -1913,7 +1913,7 @@ fn a_function_calls_itself_with_its_arguments_where_sysv_passes_them() {
 
 /// A call changes the registers its callee writes, and those that each function the callee calls writes: an integer
 /// live across one stays in a register none of them writes, here rcx, for `gcd` writes rdi, rsi and rax alone, and
-/// calls itself; a vector, of which the callee's `vzeroupper` clears the upper half of each, is spilled to the frame.
+/// calls itself; and a vector stays in the register it is in, for `nothing` writes none.
 #[test]
 fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
     let want = "# plus(gpr) -> gpr
@@ -1932,27 +1932,84 @@ fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
     assert_eq!(kernite::x86_str(CALLERS, "plus").unwrap().text(), want);
     let want = "# keep(gpr) -> ()
 # needs: avx
-# frame: 32 bytes aligned to 32, saves []
-# v, spilled: 32 bytes at rsp
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
 # p=rdi v=ymm0
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32
-    and rsp, -32
+    sub rsp, 8
     vmovups ymm0, ymmword ptr [rdi]
-    # v spilled
-    vmovups ymmword ptr [rsp], ymm0
     call {f0}
-    # v reloaded
-    vmovups ymm0, ymmword ptr [rsp]
     vmovups ymmword ptr [rdi], ymm0
-    mov rsp, rbp
-    pop rbp
+    add rsp, 8
     vzeroupper
     ret
 # f0: nothing
 ";
     assert_eq!(kernite::x86_str(CALLERS, "keep").unwrap().text(), want);
+}
+
+/// A vector `v` stays in a register across a call, though not in one the call changes. A call changes the registers its
+/// callee writes, and each function the callee calls, and the upper half of every vector register where one of them
+/// runs `vzeroupper`: `v` then spills to the frame if the kernel reads all of it after the call, and keeps its register
+/// if it reads only its lower half, `v.xmm`, which `vzeroupper` leaves as it was, or writes `v.xmm` first, which clears
+/// the upper half. A call at an address with the functions it may reach given is of each; with none given, or of the
+/// kernel itself, which is not compiled yet, it changes every vector register, and `v` spills whatever it reads.
+#[test]
+fn a_vector_live_across_a_call_spills_only_where_the_call_may_clear_a_half_the_kernel_reads() {
+    let at = "let fp: gpr; lea(fp, [nothing]);";
+    // Each case a call, what the kernel reads of `v` after it, and where `v` is: its registers, and `spilled` if the
+    // frame keeps it.
+    let cases = [
+        // `nothing` writes no register: `v` stays in `ymm0`.
+        ("", "call(nothing);", "v", "ymm0"),
+        // `writes_ymm0` writes `ymm0`: `v` moves to `ymm1`.
+        ("", "call(writes_ymm0);", "v", "ymm1"),
+        // `runs_vzeroupper` writes `ymm0` too, and clears the upper half of each vector register: `v` spills if the
+        // kernel reads all of it after the call, and moves to `ymm1` if it reads the lower half alone.
+        ("", "call(runs_vzeroupper);", "v", "ymm0 spilled"),
+        ("", "call(runs_vzeroupper);", "v.xmm", "ymm1"),
+        // An instruction that writes `v.xmm` clears the upper half of `v`, though it reads `v.xmm`, as an FMA does: `v`
+        // moves to `ymm1` though the kernel reads all of it after.
+        ("", "call(runs_vzeroupper); vfmadd231ps(v.xmm, v.xmm, v.xmm);", "v", "ymm1"),
+        // `calls_vzeroupper` writes none, and calls it.
+        ("", "call(calls_vzeroupper);", "v", "ymm0 spilled"),
+        ("", "call(calls_vzeroupper);", "v.xmm", "ymm1"),
+        // At an address, one of the functions given: each is as above.
+        (at, "call(fp, (nothing, writes_ymm0));", "v", "ymm1"),
+        (at, "call(fp, (nothing, runs_vzeroupper));", "v", "ymm0 spilled"),
+        (at, "call(fp, (nothing, runs_vzeroupper));", "v.xmm", "ymm1"),
+        // At an address, one of any function, which may write each register and clear each upper half: `v` spills
+        // whatever the kernel reads of it.
+        (at, "call(fp);", "v.xmm", "ymm0 spilled"),
+        // The kernel itself, `k`, which is not compiled yet: as one of any function.
+        ("", "call(k, p);", "v.xmm", "ymm0 spilled"),
+    ];
+    for (setup, call, read, want) in cases {
+        let body = format!("let v: ymm; {setup} vmovups(v, [p]); {call} vmovups([p], {read});");
+        let listing = listing("p: *mut f32", "", &body).unwrap();
+        let (_, regs) = listing.regs.iter().find(|(name, _)| name == "v").unwrap();
+        let spilled = if listing.frame.slots.iter().any(|s| s.spill) { " spilled" } else { "" };
+        assert_eq!(format!("{regs}{spilled}"), want, "{call} {read}\n{}", listing.text());
+    }
+}
+
+/// A vector that an address takes its indices from, as a gather's are, counts as read whole after a call of a function
+/// that runs `vzeroupper`, though a gather of an xmm of indices reads its lower half alone: kernite does not know how
+/// much of the vector an address reads. So the vector stays in the frame, and in its register where the call clears no
+/// half.
+#[test]
+fn a_vector_used_as_the_indices_of_an_address_counts_as_read_whole_after_a_call_that_clears_a_half() {
+    let cases = [
+        ("nothing", "vpgatherdd(d, [p + v * 4], m)", false),
+        ("runs_vzeroupper", "vpgatherdd(d, [p + v * 4], m)", true),
+        ("runs_vzeroupper", "vpgatherdq(d, [p + v.xmm * 8], m)", true),
+    ];
+    for (callee, gather, spills) in cases {
+        let body = format!(
+            "let (v, d, m): (ymm, ymm, ymm); vmovups(v, [p]); call({callee}); ones(m); zero(d); {gather}; \
+             vmovups([p], d);"
+        );
+        let listing = listing("p: *mut f32", "", &body).unwrap();
+        assert_eq!(listing.frame.slots.iter().any(|s| s.spill), spills, "{callee} {gather}\n{}", listing.text());
+    }
 }
 
 /// The registers every call leaves as they were are rbx and r12 to r15: an integer alive across a call of a function
@@ -2068,6 +2125,9 @@ unsafe extern "sysv64" fn wipe() {
 }
 unsafe extern "sysv64" fn writes_rax() { let t: gpr; mov(t, 1); add(t, t); }
 unsafe extern "sysv64" fn writes_rax_rcx() { let (t, u): (gpr, gpr); mov(t, 1); mov(u, 2); add(t, u); }
+unsafe extern "sysv64" fn writes_ymm0() { let v: ymm; zero(v); }
+unsafe extern "sysv64" fn runs_vzeroupper() { let v: ymm; zero(v); vaddps(v, v, v); }
+unsafe extern "sysv64" fn calls_vzeroupper() { call(runs_vzeroupper); pause(); }
 unsafe extern "sysv64" fn jumps() { call(writes_rax); }
 unsafe extern "sysv64" fn calls() { call(writes_rax); pause(); }
 unsafe extern "sysv64" fn reaches() {
@@ -2087,9 +2147,14 @@ unsafe extern "sysv64" fn narrow(a: u32) {}
 
 /// The kernel `k` around `body`, returning `ret`, in a module of [`CALLEES`], compiled, or
 /// the error.
-fn calling(params: &str, ret: &str, body: &str) -> Result<String, String> {
+fn listing(params: &str, ret: &str, body: &str) -> Result<intel::Listing, String> {
     let src = format!("unsafe extern \"sysv64\" fn k({params}){ret} {{\n{body}\n}}\n{CALLEES}");
-    kernite::x86_str(&src, "k").map(|l| l.code().collect::<Vec<_>>().join("\n"))
+    kernite::x86_str(&src, "k")
+}
+
+/// The code of [`listing`].
+fn calling(params: &str, ret: &str, body: &str) -> Result<String, String> {
+    listing(params, ret, body).map(|l| l.code().collect::<Vec<_>>().join("\n"))
 }
 
 /// The stack pointer is a multiple of 16 plus 8 on entry, and each push and the frame move
@@ -2708,9 +2773,15 @@ fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() {
             "x: u64",
             " -> f32",
             "let (a, b): (xmm, xmm); call(a, half, 1.5); call(b, half, 2.5); vaddss(b, a, b); ret(b);",
-            "push rbp\nmov rbp, rsp\nsub rsp, 32\nand rsp, -32\nvmovss xmm0, dword ptr [rip + {c0}]\ncall \
-             {f0}\nvmovups ymmword ptr [rsp], ymm0\nvmovss xmm0, dword ptr [rip + {c1}]\ncall {f0}\nvmovups ymm1, \
-             ymmword ptr [rsp]\nvaddss xmm0, xmm1, xmm0\nmov rsp, rbp\npop rbp\nvzeroupper\nret",
+            "sub rsp, 8\nvmovss xmm0, dword ptr [rip + {c0}]\ncall {f0}\nvmovaps ymm1, ymm0\nvmovss xmm0, dword ptr \
+             [rip + {c1}]\ncall {f0}\nvaddss xmm0, xmm1, xmm0\nadd rsp, 8\nvzeroupper\nret",
+        ),
+        (
+            "fp: u64, x: f32",
+            " -> f32",
+            "call(fp); ret(x);",
+            "push rbp\nmov rbp, rsp\nsub rsp, 32\nand rsp, -32\nvmovups ymmword ptr [rsp], ymm0\ncall rdi\nvmovups \
+             ymm0, ymmword ptr [rsp]\nmov rsp, rbp\npop rbp\nvzeroupper\nret",
         ),
         (
             "a: f32, b: f32",

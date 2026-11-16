@@ -10,5 +10,5 @@ mod program;
 mod reg;
 
 pub use operand::{Access, Arg, Base, ConstId, FuncId, Imm, Label, Mem, Operand, SlotId, StaticId, Width};
-pub use program::{Const, Flow, Inst, Item, Program, RegInfo, Signature, Slot};
+pub use program::{Clobber, Const, Flow, Inst, Item, Program, RegInfo, Signature, Slot};
 pub use reg::{Class, PReg, Register, VReg};

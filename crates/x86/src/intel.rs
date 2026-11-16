@@ -59,6 +59,9 @@ pub struct Listing {
     /// writes, its frame's among them. The registers the functions it calls change are theirs to say, `funcs` and
     /// `reach`, but for a call at an address with no functions given, which may change all of them: then it has all.
     pub changes: Vec<PReg>,
+    /// Whether its code runs `vzeroupper`, which clears the upper half of each vector register: a call of it leaves the
+    /// lower halves of those it does not write as they were.
+    pub clears_upper: bool,
 }
 
 impl Listing {
@@ -234,6 +237,7 @@ pub fn print(c: &Allocated<Op>, reach: Vec<String>) -> Result<Listing, String> {
         padding: lowered.padding,
         returns: lowered.returns,
         changes: lowered.changes,
+        clears_upper: lowered.clears_upper,
     })
 }
 

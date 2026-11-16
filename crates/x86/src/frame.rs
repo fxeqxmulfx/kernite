@@ -24,6 +24,8 @@ pub(crate) struct Lowered {
     pub(crate) returns: bool,
     /// The registers a call of it changes that a caller does not keep, as `Listing::changes` says.
     pub(crate) changes: Vec<PReg>,
+    /// Whether it runs `vzeroupper`, as `Listing::clears_upper` says.
+    pub(crate) clears_upper: bool,
 }
 
 /// `c` with its frame made instructions, as [`print`](crate::intel::print) says; or why not.
@@ -90,13 +92,14 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
         .filter_map(|inst| forms::feature(inst.op, &inst.args, &inst.implicit))
         .collect();
     let implies_avx = [Feature::Avx2, Feature::Fma, Feature::F16c];
-    if insts(&body).any(|inst| inst.op == Op::Vzeroupper) && !features.iter().any(|f| implies_avx.contains(f)) {
+    let clears_upper = insts(&body).any(|inst| inst.op == Op::Vzeroupper);
+    if clears_upper && !features.iter().any(|f| implies_avx.contains(f)) {
         features.push(Feature::Avx);
     }
     features.sort_by_key(|f| f.name());
     features.dedup();
     let changes = insts(&body).flat_map(Inst::writes).filter(|r| CALL_CLOBBERS.contains(r)).collect::<BTreeSet<_>>();
-    Ok(Lowered { body, features, padding, returns, changes: changes.into_iter().collect() })
+    Ok(Lowered { body, features, padding, returns, changes: changes.into_iter().collect(), clears_upper })
 }
 
 /// The calls of `c` that are jumps, by their places in its body, each with the place of the `ret` it does without, if

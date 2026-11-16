@@ -71,25 +71,29 @@
 //! variable of the parameter's file, a gpr's `r32` passing its 32 bits with the rest clear, or a
 //! value known now; the result is written to a variable of its file. kernite moves each to the
 //! register SysV passes it in, and the result from the one it comes back in; a value live
-//! across the call stays in a register the call does not change, or else in the stack frame, as every vector does. A
-//! call changes the registers that the functions it may reach write, and do not restore, as [`Kernel::finish`] is told.
-//! One at an address with no functions given, or that comes back to the function it is in, changes every register a
-//! callee may, so a value live across it stays in `rbx` or `r12` to `r15`, which each callee keeps. `lea(fp, [f])` puts
-//! the address of `f` in `fp`, which `call(r, fp, (a, b))` calls, passing each in the file its variable is of, and
-//! `call(r, fp, (a, b), (f, g))` as one of the functions taken together last, checked against each. A call that `ret`
-//! follows at once is a jump: the kernel takes its frame down as `ret` does, and jumps to the callee, which returns to
-//! the kernel's caller. A label between them leaves the `ret` for the other ways that come to it, and an address in a
-//! register the kernel saves goes first to `r11`, which the epilogue leaves. The call stays a call where an instruction
-//! comes between it and the `ret`, and where the jump would not do what the call does: where the kernel has taken the
-//! address of its stack memory, and where it calls at an address with no functions given and passes a vector, whose
-//! upper half the epilogue's `vzeroupper` would clear. A function that never returns, `-> !`, ends each way out in
-//! `ud2()`, which faults, or in a call of one that never returns.
+//! across the call stays in a register the call does not change, or else in the stack frame. A call changes the
+//! registers that the functions it may reach write, and do not restore, as [`Kernel::finish`] is told; and if one of
+//! them runs `vzeroupper`, it clears the upper half of each vector register, so a vector the kernel reads all of after
+//! the call stays in the stack frame, and one it reads the lower half of alone, or writes first, stays in its register;
+//! one an address takes its indices from, as a gather's, counts as read whole, for the address does not say how much of
+//! it is read. One at an address with no functions given, or that comes back to the function it is in, changes every
+//! register a callee may, so an integer live across it stays in `rbx` or `r12` to `r15`, which each callee keeps as it
+//! was, and a vector in the stack frame. `lea(fp, [f])` puts the address of `f` in `fp`, which `call(r, fp, (a, b))`
+//! calls, passing each in the file its variable is of, and `call(r, fp, (a, b), (f, g))` as one of the functions taken
+//! together last, checked against each. A call that `ret` follows at once is a jump: the kernel takes its frame down as
+//! `ret` does, and jumps to the callee, which returns to the kernel's caller. A label between them leaves the `ret` for
+//! the other ways that come to it, and an address in a register the kernel saves goes first to `r11`, which the
+//! epilogue leaves. The call stays a call where an instruction comes between it and the `ret`, and where the jump would
+//! not do what the call does: where the kernel has taken the address of its stack memory, and where it calls at an
+//! address with no functions given and passes a vector, whose upper half the epilogue's `vzeroupper` would clear. A
+//! function that never returns, `-> !`, ends each way out in `ud2()`, which faults, or in a call of one that never
+//! returns.
 
 use kernite_compile::Spill;
 use kernite_core::Access::{self, Ignored, Read, ReadWrite, Write};
 use kernite_core::Width::{self, W32, W64, W128, W256};
 use kernite_core::{
-    Arg, Base, Class, Const, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, PReg, Program, RegInfo,
+    Arg, Base, Class, Clobber, Const, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo,
     Signature, Slot, SlotId, StaticId, VReg,
 };
 use kernite_lang::{Fault, Guard, Operand as Given, Span, Target, Value, article, pointer};
@@ -689,7 +693,7 @@ impl Kernel {
             args: vec![Arg { operand: target, access: Read }],
             implicit,
             flow,
-            clobbers: CALL_CLOBBERS.to_vec(),
+            clobbers: CALL_CLOBBERS.iter().copied().map(Clobber::All).collect(),
         };
         self.p.body.push(Item::Inst(call));
         self.sites.push(reaches);
@@ -880,9 +884,10 @@ impl Kernel {
     }
 
     /// The kernel as written. A cooperative one takes its place in the grid, read or not, as
-    /// the launcher passes it; and one that loads MXCSR gives the caller's back. A call changes the registers `changes`
-    /// says the functions it may reach change; one that may reach any function changes every register a callee may.
-    pub fn finish(mut self, changes: impl Fn(&[String]) -> Vec<PReg>) -> Program<Op> {
+    /// the launcher passes it; and one that loads MXCSR gives the caller's back. A call does to registers what
+    /// `changes` says of the functions it may reach; where that is `None`, or the call may reach any function, it
+    /// changes every register a callee may.
+    pub fn finish(mut self, changes: impl Fn(&[String]) -> Option<Vec<Clobber>>) -> Program<Op> {
         if self.cooperative {
             self.grid();
         }
@@ -894,8 +899,8 @@ impl Kernel {
             _ => None,
         });
         for (call, reaches) in calls.zip(&self.sites) {
-            if let Some(reaches) = reaches {
-                call.clobbers = changes(reaches);
+            if let Some(clobbers) = reaches.as_deref().and_then(&changes) {
+                call.clobbers = clobbers;
             }
         }
         self.p
