@@ -90,7 +90,7 @@ impl Native for X86 {
     }
 
     fn host_static(&self, s: &Static) -> HostStatic {
-        HostStatic { elem: s.elem.into(), size: s.size, len: s.len, align: s.align, init: s.init.clone() }
+        HostStatic { elem: s.elem.into(), size: s.size, len: s.len, align: s.align, far: s.far(), init: s.init.clone() }
     }
 }
 

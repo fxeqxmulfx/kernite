@@ -8,9 +8,9 @@ use kernite::{Call, HostStatic, Naked, NativeInstance};
 
 use crate::cond::Cond;
 use crate::rust::{
-    asks, attrs, cfg_of, clashes, depends_on, given_back, gives_placeholder, hygienic, launcher_result, missing,
-    name_at, never, parse, pick, pointer, position, primitive, probe, result, signature, site, stub, value_params,
-    visibility, written, written_params,
+    asks, attrs, cfg_of, clashes, depends_on, error_under, given_back, gives_placeholder, hygienic, launcher_result,
+    missing, name_at, never, parse, pick, pointer, position, primitive, probe, result, signature, site, stub,
+    value_params, visibility, written, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -243,18 +243,24 @@ fn list(names: &[String]) -> String {
 /// static as its type has it, holding zeros, if only what it holds is wrong; if not, `None`, and a
 /// `kernite_cpu::Stub` stands for it, which leaves the type of its elements to the code that uses
 /// it. In a crate without `kernite-cpu`, its type is [`missing`]'s, with the error that says so after it, under `cfg`,
-/// the static's own.
+/// the static's own. A far static, past what `rip` reaches, is no more than a declaration in an `extern` block, which
+/// [`linked`] defines, for Rust makes a static of its own in time and memory that grow with its size. On a system that
+/// is not Linux, it is an error at its name.
 pub(crate) fn cpu_static(
     s: &lang::Static,
     made: Option<&HostStatic>,
     cfg: &TokenStream,
     top: &[TokenTree],
 ) -> TokenStream {
-    let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
-    out.extend(top[s.vis.clone()].iter().cloned());
-    out.extend(parse("static"));
     // Its name as written, after `static`.
     let name = &top[s.vis.end + 1];
+    let far = made.filter(|m| m.far && depends_on(CPU));
+    let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
+    if far.is_some() {
+        out.extend(parse(&format!("#[link_name = concat!(module_path!(), \"::{}\")]", symbol(name))));
+    }
+    out.extend(top[s.vis.clone()].iter().cloned());
+    out.extend(parse(if far.is_some() { "safe static" } else { "static" }));
     out.extend([name.clone()]);
     if !depends_on(CPU) {
         let (ty, error) = missing(cfg, name.span(), "a static of x86 kernels", CPU);
@@ -264,9 +270,26 @@ pub(crate) fn cpu_static(
         out.extend(error);
         return out;
     }
+    let global = |m: &HostStatic| format!("::kernite_cpu::Global<{}, {}, {}>", primitive(&m.elem), m.len, m.align);
+    if let Some(m) = far {
+        out.extend(parse(&format!(": {};", global(m))));
+        let under = |attr: &str| cfg.clone().into_iter().chain(parse(attr)).collect::<TokenStream>();
+        let mut declared = under(r#"#[cfg(target_os = "linux")]"#);
+        declared.extend(linked(&symbol(name), m));
+        let message = format!(
+            "`{name}` is {} bytes, past what `rip` reaches, and kernite defines such a static for Linux's linker \
+             alone: build for Linux, or make it smaller",
+            m.len * m.size
+        );
+        declared.extend(error_under(&under(r#"#[cfg(not(target_os = "linux"))]"#), name.span(), &message));
+        declared.extend(cfg.clone());
+        declared.extend(parse("unsafe extern \"C\""));
+        declared.extend([TokenTree::Group(Group::new(Delimiter::Brace, out))]);
+        return declared;
+    }
     out.extend(parse(&match made {
         Some(m) => {
-            let ty = format!("::kernite_cpu::Global<{}, {}, {}>", primitive(&m.elem), m.len, m.align);
+            let ty = global(m);
             match m.init.iter().all(|&b| b == 0) {
                 true => format!(": {ty} = <{ty}>::zeroed();"),
                 false => format!(": {ty} = <{ty}>::new([{}]);", elements(m).join(", ")),
@@ -275,6 +298,32 @@ pub(crate) fn cpu_static(
         None => ": ::kernite_cpu::Stub = ::kernite_cpu::Stub;".to_string(),
     }));
     out
+}
+
+/// The name of a static as the linker has it after the path of its module, which `module_path!` gives, for the statics
+/// of two modules to be two: as written, but without the `r#` of a raw name.
+fn symbol(name: &TokenTree) -> String {
+    name.to_string().trim_start_matches("r#").to_string()
+}
+
+/// The `global_asm!` that defines `m`, a far static, as the symbol `name` after its module's path, in a section
+/// `.lbss`, which ELF has for what an x86-64 program reaches by its address and no displacement: the linker places it
+/// last, past the code and the rest of the data, which stay in reach of `rip`. It takes no room in the file, and is
+/// zeros when the program starts. Its symbol is an object of its size, as a static of Rust's is, and hidden, which
+/// keeps it out of the dynamic symbol table, so the linker resolves each reference to it.
+fn linked(name: &str, m: &HostStatic) -> TokenStream {
+    let sym = |before: &str, after: &str| format!(r#"concat!("{before}", module_path!(), "::{name}{after}")"#);
+    let bytes = (m.len * m.size).next_multiple_of(m.align);
+    parse(&format!(
+        "::core::arch::global_asm!({}, \".balign {}\", {}, {}, {}, {}, {}, \".zero {bytes}\", \".popsection\");",
+        sym(r#".pushsection \".lbss."#, r#"\",\"awl\",@nobits"#),
+        m.align,
+        sym(r#".globl \""#, r#"\""#),
+        sym(r#".hidden \""#, r#"\""#),
+        sym(r#".type \""#, r#"\", @object"#),
+        sym(r#".size \""#, &format!(r#"\", {bytes}"#)),
+        sym(r#"\""#, r#"\":"#),
+    ))
 }
 
 /// What each element of `m` holds at first, as Rust writes it: `7u32`, `-1i8`, or a float by its

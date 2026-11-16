@@ -577,6 +577,15 @@ more than 2147483647 bytes is past what a displacement from `rip` reaches, so a 
 error, which says to take its address. The address comes as code for a position-independent executable has it, a load
 from a slot that the linker fills. It holds zeros at first, for no value has as many elements as it does.
 
+Rust makes a static of its own in time and memory that grow with its size, 6 milliseconds and 2 MiB for each MiB, so one
+past `rip`'s reach is the linker's instead, in the `.lbss` section of x86-64's ELF, which holds zeros and takes no room
+in the file: a crate with a static of 3 GiB builds as fast as a crate with one of 4 KiB. kernite defines it so on Linux
+alone, and refuses it on another system, at its name. To Rust it is a static of an `extern` block, a foreign static, as
+Rust's errors say: Rust refuses `#[used]` on it, say. Its symbol is the path of its module and its name, as
+`module_path!` gives them, so two such statics of one path and one name in a program are one symbol defined twice, which
+the assembler or the linker refuses: two modules of one name in two functions have one path, and so do two versions of
+one crate.
+
 ## On a GPU
 
 An `extern "ptx-kernel"` function is compiled to PTX. The module's kernels are one PTX module, `PTX`, which

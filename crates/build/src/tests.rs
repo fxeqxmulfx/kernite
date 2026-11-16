@@ -271,7 +271,7 @@ impl Native for Echo {
 
     /// What the static holds, as one element of no bytes: Echo makes no memory.
     fn host_static(&self, s: &Laid) -> HostStatic {
-        HostStatic { elem: s.held.clone(), size: 0, len: 1, align: 1, init: vec![] }
+        HostStatic { elem: s.held.clone(), size: 0, len: 1, align: 1, far: false, init: vec![] }
     }
 }
 
@@ -481,7 +481,7 @@ fn a_static_whose_value_alone_is_wrong_stands_as_its_type_has_it() {
     assert_eq!(taken_unknown, &("6:31: `nope` is not defined".to_string(), None));
     assert_eq!(unread_unknown, &("7:27: `nope` is not defined".to_string(), None));
     // With a kernel of the process's, they are the process's.
-    let host = |held: &str| HostStatic { elem: held.into(), size: 0, len: 1, align: 1, init: vec![] };
+    let host = |held: &str| HostStatic { elem: held.into(), size: 0, len: 1, align: 1, far: false, init: vec![] };
     let src = format!("{statics}unsafe extern \"sysv64\" fn k(x: u64) {{ ret(x); }}");
     let stubs: Vec<_> = echoed(&src)
         .items
@@ -764,7 +764,7 @@ fn a_module_s_items_come_out_in_order() {
     else {
         panic!("{:?}", out.items);
     };
-    assert_eq!(a.code, HostStatic { elem: "[u32; 4]".into(), size: 0, len: 1, align: 1, init: vec![] });
+    assert_eq!(a.code, HostStatic { elem: "[u32; 4]".into(), size: 0, len: 1, align: 1, far: false, init: vec![] });
     assert_eq!(u.error.as_ref().expect("kernite says why").at(src), "4:25: Echo holds no 13");
     assert!(h.is_empty() && c.at(src).starts_with("6:8: "));
     let args: Vec<_> = tile.instances.iter().map(|i| i.args.clone()).collect();
@@ -868,7 +868,7 @@ fn a_module_refused_whole_is_not_compiled_and_says_nothing() {
     };
     assert!(h.is_empty());
     assert!(a.error.is_none() && u.error.is_none() && w.error.is_none());
-    let host = |held: &str| HostStatic { elem: held.into(), size: 0, len: 1, align: 1, init: vec![] };
+    let host = |held: &str| HostStatic { elem: held.into(), size: 0, len: 1, align: 1, far: false, init: vec![] };
     assert_eq!((&a.stub, &u.stub, &w.stub), (&Some(host("[u32; 4]")), &Some(host("u32")), &None));
     for kernel in [k, bare, once, tile] {
         assert!(kernel.not_unsafe.is_none() && kernel.said.is_none() && kernel.errors.is_empty());

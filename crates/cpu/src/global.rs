@@ -38,8 +38,8 @@ where
     /// Its elements, as atomics.
     #[allow(unsafe_code)]
     fn cells(&self) -> &[T::Cell; N] {
-        // SAFETY: Each way to make one, `new` and `zeroed`, gives every byte of it a value, and an atomic of an integer
-        // holds any.
+        // SAFETY: Each way to make one, `new`, `zeroed` and the linker's zeros of a static the macro declares, gives
+        // every byte of it a value, and an atomic of an integer holds any.
         unsafe { self.cells.assume_init_ref() }
     }
 

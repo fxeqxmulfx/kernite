@@ -4,7 +4,7 @@
 use kernite_build::{Backend, Bytes, Called, HostStatic, Naked, Native, StaticError, Unfinished, function};
 use kernite_lang::{ItemKind, parse};
 use kernite_x86::X86;
-use kernite_x86::lang::Callee;
+use kernite_x86::lang::{Callee, Static};
 
 /// A kernel that names memory of its module and calls a function of it comes out of the port as
 /// Rust takes it: its code as `naked_asm!` reads it, its listing, the CPU features it needs, the
@@ -67,8 +67,20 @@ fn x86_compiles_a_kernel_through_the_port() {
         statics: vec!["COUNTS".into()],
     };
     assert_eq!(X86.naked(&code), want);
-    let want = HostStatic { elem: "u32".into(), size: 4, len: 2, align: 4, init: vec![1, 0, 0, 0, 2, 0, 0, 0] };
+    let want =
+        HostStatic { elem: "u32".into(), size: 4, len: 2, align: 4, far: false, init: vec![1, 0, 0, 0, 2, 0, 0, 0] };
     assert_eq!(X86.host_static(&statics[0]), want);
+}
+
+/// A static of more than 2147483647 bytes is far, which the port says, for Rust to have the linker place it; one of as
+/// many is not.
+#[test]
+fn a_static_past_rips_reach_comes_out_of_the_port_far() {
+    let far = |ty: &str| X86.host_static(&Static::new("BIG", ty).unwrap()).far;
+    assert!(far("global<[u8; 2147483648]>"));
+    assert!(far("global<[u64; 3221225472]>"));
+    assert!(!far("global<[u8; 2147483647]>"));
+    assert!(!far("constant<[u32; 536870911]>"));
 }
 
 /// A call at an address names no function in the code, so `funcs` has none: the functions taken

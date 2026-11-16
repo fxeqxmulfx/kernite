@@ -68,6 +68,9 @@ pub struct HostStatic {
     pub len: u64,
     /// What its address is a multiple of, a power of two.
     pub align: u64,
+    /// Whether it is past what a displacement from `rip` reaches, so that the linker places it in memory of its own,
+    /// and a kernel takes its address from the slot the linker fills.
+    pub far: bool,
     /// What it holds until something writes it, as bytes, the lowest first; zeros past their
     /// end.
     pub init: Vec<u8>,

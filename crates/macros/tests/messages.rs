@@ -372,20 +372,23 @@ fn clippy_here() -> bool {
 /// crate for it without a linker, so long as the target's standard library is here.
 const ARM: &str = "arm-unknown-linux-gnueabihf";
 
-/// Whether this machine has the standard library of [`ARM`], which the tests that check a crate for it skip
-/// without, and say so.
-fn arm_here() -> bool {
-    let libs = Command::new("rustc").args(["--print", "target-libdir", "--target", ARM]).output();
+/// A system other than Linux to check a crate for: Windows, whose linker is not ELF's.
+const WINDOWS: &str = "x86_64-pc-windows-gnu";
+
+/// Whether this machine has the standard library of `target`, which the tests that check a crate for it skip without,
+/// and say so.
+fn std_here(target: &str) -> bool {
+    let libs = Command::new("rustc").args(["--print", "target-libdir", "--target", target]).output();
     let has = libs.is_ok_and(|out| Path::new(String::from_utf8_lossy(&out.stdout).trim()).is_dir());
     if !has {
-        eprintln!("no standard library for {ARM} here: skipped");
+        eprintln!("no standard library for {target} here: skipped");
     }
     has
 }
 
 /// That Cargo checks fixture `name` for [`ARM`] without a word, if this machine can check a crate for it.
 fn checks_quietly_for_arm(name: &str) {
-    if arm_here() {
+    if std_here(ARM) {
         builds_quietly_in(&["check", "--target", ARM], name, &written(name));
     }
 }
@@ -1711,6 +1714,60 @@ fn kernels_of_instances_and_cooperative_ones_that_a_feature_leaves_out_say_nothi
     builds_quietly("configured_hidden");
     let printed = runs_quietly(&["test", "--features", "big"], "configured_hidden");
     assert!(printed.contains("1 passed"), "fixtures/configured_hidden.rs ran its test, and printed:\n{printed}");
+}
+
+/// A static of more than 2 GiB is the linker's, so the crate builds as quickly as one with a small static, and under
+/// `deny(warnings)` it says nothing, nor does rustdoc. A kernel takes its address, which the linker fills in a slot,
+/// and indexes it; the host reads back each byte it wrote, the first and the last of 3 GiB. The statics keep their
+/// visibility and their names, a raw one as well, and one that `cfg` leaves out is not defined.
+#[test]
+fn a_static_past_rips_reach_is_the_linkers_and_a_kernel_reaches_it_by_its_address() {
+    let printed = runs_quietly(&["test"], "far");
+    assert!(printed.contains("1 passed"), "fixtures/far.rs ran its test, and printed:\n{printed}");
+    documents_quietly("far");
+}
+
+/// Only Linux's linker defines a static of more than 2 GiB, as kernite writes it, so a crate checked for Windows is
+/// told so at each such static, with what to do: the assembler of that system is not left to say it, in words of its
+/// own.
+#[test]
+fn a_static_past_rips_reach_is_refused_off_linux() {
+    if std_here(WINDOWS) {
+        let said = |place: &str, name: &str, bytes: &str| {
+            format!(
+                "src/lib.rs:{place}: error: `{name}` is {bytes} bytes, past what `rip` reaches, and kernite defines \
+                 such a static for Linux's linker alone: build for Linux, or make it smaller"
+            )
+        };
+        let lines = [
+            said("9:16", "BIG", "3221225472"),
+            said("12:23", "r#type", "2147483648"),
+            "error: could not compile `far` (lib) due to 2 previous errors".to_string(),
+        ];
+        refuses_by(&["check", "--target", WINDOWS], "far", &lines.each_ref().map(String::as_str));
+    }
+}
+
+/// A static past `rip`'s reach is a static of an `extern` block to Rust, whose errors call it a foreign static: Rust
+/// refuses `#[used]` on it, which it takes on a static in reach.
+#[test]
+fn a_static_past_rips_reach_is_a_static_of_an_extern_block_to_rust() {
+    let lines = [
+        "src/lib.rs:6:7: error: the `used` attribute cannot be used on foreign statics",
+        "error: could not compile `far_used` (lib) due to 1 previous error",
+    ];
+    refuses_by(&["check"], "far_used", &lines);
+}
+
+/// The symbol of a static past `rip`'s reach is the path of its module and its name, so two of one path and one name
+/// are one symbol defined twice, which the assembler refuses: two modules of one name in two functions have one path.
+#[test]
+fn two_statics_past_rips_reach_of_one_path_and_one_name_are_refused() {
+    let lines = [
+        "error: symbol 'far_twice::m::BIG' is already defined",
+        "error: could not compile `far_twice` (lib) due to 1 previous error",
+    ];
+    refuses("far_twice", &lines);
 }
 
 /// A crate that keeps its x86 kernels only on x86-64, by `cfg(target_arch = "x86_64")`, builds for another
