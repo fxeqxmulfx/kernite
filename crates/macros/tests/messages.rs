@@ -2406,6 +2406,53 @@ fn a_pointer_to_a_type_with_a_part_that_has_no_size_is_rusts_error_once_at_its_t
     refuses("no_size_parts", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
+/// A pointer to a type with no size that kernite cannot tell by what is written, for an alias names it,
+/// `type Shown = dyn Debug + Send;` or `type Bytes = [u8];`, is Rust's error that the size cannot be known, in its own
+/// words, at the type, as it is for any type with no size, and once: in an x86 kernel, plain, of compile-time
+/// arguments, cooperative, and cooperative of compile-time arguments, in a plain one that returns the pointer, and in
+/// two of compile-time arguments that return one to each type; and in a GPU kernel of each of the four kinds. A plain
+/// function's pointer has two words, and Rust says nothing of it. Two pointers to one type that a plain kernel takes
+/// have it said once, at the first, and two to two types, at each. What Rust says in full, built as a person builds it,
+/// has no trait of the macros' in it, no note that an error comes from a macro, and no change of the code suggested, as
+/// a `&` before the type, which Rust's help for an argument of no size gives and a pointer does not need. The error was
+/// Rust's E0308 for a trait object, in words of the macros' trait, and its note named the same trait for a slice.
+#[test]
+fn a_pointer_to_a_type_with_no_size_that_an_alias_names_is_rusts_error_at_its_type() {
+    let shown = "(dyn Debug + Send + 'static)";
+    // An x86 kernel: `read`, `write`, `different`'s two, `same`'s first, `tiles`, `together`, `together_tiles`,
+    // `result`, `result_tiles`, `result_shown_tiles`; then a GPU kernel's, in the same order but for the last three.
+    let sizes = [
+        ("15:50", shown),
+        ("19:49", "[u8]"),
+        ("23:69", shown),
+        ("23:91", "[u8]"),
+        ("27:50", shown),
+        ("32:65", shown),
+        ("37:54", shown),
+        ("43:74", shown),
+        ("47:60", shown),
+        ("52:78", "[u8]"),
+        ("57:86", shown),
+        ("64:54", shown),
+        ("68:53", "[u8]"),
+        ("72:73", shown),
+        ("72:95", "[u8]"),
+        ("76:54", shown),
+        ("81:69", shown),
+        ("86:58", shown),
+        ("92:78", shown),
+    ];
+    let mut said: Vec<String> = sizes.map(|(at, ty)| size_unknown(at, ty)).into();
+    said.push(format!("error: could not compile `no_size_alias` (lib) due to {} previous errors", sizes.len()));
+    refuses("no_size_alias", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    let human = cargo_out("human", &["build"], &written("no_size_alias")).stderr;
+    let human = String::from_utf8(human).expect("Cargo writes UTF-8");
+    assert!(human.contains("error[E0277]"), "{human}");
+    let words = ["Kernite", "kernite", "macro"];
+    assert!(words.iter().all(|word| !human.contains(word)), "Rust says a word of the macros':\n{human}");
+    assert!(human.lines().all(|line| !line.starts_with("help:")), "Rust suggests a change:\n{human}");
+}
+
 /// A pointer to a type Rust refuses by itself, `NeedsCopy<String>` where the struct asks for an argument
 /// that is `Copy`, is Rust's error, said once, at the type, as any type's is: in a kernel of every kind,
 /// and not again at the module's attribute, nor once for each instance. So it is in an x86 kernel, plain,
@@ -2653,13 +2700,12 @@ fn a_pointer_with_no_size_and_an_underscore_that_is_no_placeholder_is_rusts_erro
     refuses("not_placeholder_no_size", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
-/// Asking Rust whether each pointer has a size costs a crate no word, under `#![deny(warnings)]`: of
-/// a pointer to a struct with a lifetime that is written without one, `*const Bar`, which a parameter
-/// takes, to `Option<&u8>`, to a tuple with a reference; of a pointer a kernel returns; of a kernel
-/// that never returns; of a parameter and a kernel named as what the macros write; of a kernel
-/// deprecated, by `#[deprecated]` or by `cfg_attr`, or configured out, by `#[cfg]` or by `cfg_attr`.
-/// So it does in an x86 kernel, plain, of compile-time arguments, cooperative, and cooperative of
-/// compile-time arguments; and in a GPU kernel, plain, of compile-time arguments and cooperative.
+/// Asking Rust whether each pointer has a size costs a crate no word, under `#![deny(warnings)]`: of a pointer to a
+/// struct with a lifetime that is written without one, `*const Bar`, which a parameter takes, to `Option<&u8>`, to a
+/// tuple with a reference; of a pointer a kernel returns; of a kernel that never returns; of a kernel deprecated, by
+/// `#[deprecated]` or by `cfg_attr`, or configured out, by `#[cfg]` or by `cfg_attr`. So it does in an x86 kernel,
+/// plain, of compile-time arguments, cooperative, and cooperative of compile-time arguments; and in a GPU kernel,
+/// plain, of compile-time arguments and cooperative.
 #[test]
 fn a_kernel_with_a_pointer_builds_without_a_word_of_whatever_kind_it_is() {
     builds_quietly("pointer_checks");

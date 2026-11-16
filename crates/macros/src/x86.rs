@@ -8,9 +8,9 @@ use kernite::{Call, HostStatic, Naked, NativeInstance};
 
 use crate::cond::Cond;
 use crate::rust::{
-    asks, attrs, cfg_of, checks, clashes, depends_on, given_back, gives_placeholder, hygienic, launcher_result,
-    missing, name_at, never, parse, pick, pointer, position, primitive, probe, result, signature, site, stub,
-    value_params, visibility, written, written_params,
+    asks, attrs, cfg_of, clashes, depends_on, given_back, gives_placeholder, hygienic, launcher_result, missing,
+    name_at, never, parse, pick, pointer, position, primitive, probe, result, signature, site, stub, value_params,
+    visibility, written, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -110,7 +110,7 @@ pub(crate) fn naked(
             out.extend(contract(docs, named));
             out.extend(parse("#[inline(always)]"));
             out.extend(signature(f, top));
-            let mut body = checks(f, top);
+            let mut body = asks(f, top, written);
             let call = parse(&format!("({})({})", pick(f, &arms, top), names.join(", ")));
             body.extend(result(f, top, call));
             out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
