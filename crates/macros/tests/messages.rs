@@ -4823,73 +4823,69 @@ fn an_error_at_a_fragment_is_said_where_the_fragment_is() {
 /// reference, `*const $t`, `*mut $t`, `&$t`, `&mut $t` and `&'static $t`, wherever the macros write it back: in a
 /// parameter and in a result, of an x86 kernel, of a GPU kernel and of a helper, and in a type that holds it, a tuple,
 /// an array, a function pointer or an argument of a type. kernite refuses each, for a pointer to a trait object has two
-/// words and a kernel takes no reference. Rust says nothing of the fragment, as it says nothing of it in a macro that
+/// words and a kernel takes no reference, and names the type with the bounds in parentheses, as if they were written
+/// so: `&(dyn core::fmt::Debug + Send)`. Rust says nothing of the fragment, as it says nothing of it in a macro that
 /// does not call kernite: not that its `+` is ambiguous, as it says of `*const dyn Debug + Send` written out. Each is
-/// also built with the bounds in parentheses, as written by hand: the errors are the same, at the same places, and
-/// Rust says nothing of the parentheses, which a pointer needs.
+/// also built with the bounds in parentheses, as written by hand: the errors are the same, in the same words, at the
+/// same places, and Rust says nothing of the parentheses, which a pointer needs.
 #[test]
 fn a_fragment_of_bounds_behind_a_pointer_is_one_type_to_rust_wherever_the_macros_write_it_back() {
-    let (mut said, mut repeated) = (Vec::new(), 0);
-    // The fixture calls each macro with the fragment, then with the type in parentheses. Cargo says a message once,
-    // however many calls make it, and counts each.
-    let mut both = |lines: &dyn Fn(&str) -> Vec<String>| {
-        for ty in ["dyn core::fmt::Debug + Send", "(dyn core::fmt::Debug + Send)"] {
-            for line in lines(ty) {
-                if said.contains(&line) {
-                    repeated += 1;
-                } else {
-                    said.push(line);
-                }
-            }
-        }
-    };
-    both(&|ty| {
-        vec![
-            two_words("17:48", "", ty),
-            two_words("20:48", "", ty),
-            x86_takes("23:48", "", &format!("&{ty}")),
-            x86_takes("26:48", "", &format!("&mut {ty}")),
-            x86_takes("29:48", "", &format!("&'static {ty}")),
-        ]
-    });
-    both(&|ty| {
-        vec![
-            two_words("46:56", "", ty),
-            two_words("49:56", "", ty),
-            x86_gives("52:56", "", &format!("&'static {ty}")),
-            x86_gives("55:56", "", &format!("&'static mut {ty}")),
-            x86_takes("58:48", "", "&u8"),
-            x86_takes("61:48", "", "&u8"),
-        ]
-    });
-    both(&|ty| {
-        vec![
-            two_words("76:52", "", ty),
-            two_words("79:52", "", ty),
-            gpu_takes("82:52", "", &format!("&{ty}")),
-            gpu_takes("85:52", "", &format!("&mut {ty}")),
-            gpu_takes("88:52", "", &format!("&'static {ty}")),
-        ]
-    });
-    both(&|ty| {
-        let places = ["103:54", "106:54", "109:54", "112:54", "115:54"];
-        let behind = ["*const ", "*mut ", "&", "&mut ", "&'static "];
-        places.into_iter().zip(behind).map(|(place, behind)| gpu_returns(place, "", &format!("{behind}{ty}"))).collect()
-    });
+    // The fixture calls each macro with the fragment, then with the type in parentheses. kernite says the same of both,
+    // in the words of the second: Cargo says a message once, however many calls make it, and counts each.
+    let ty = "(dyn core::fmt::Debug + Send)";
+    let mut said = vec![
+        two_words("17:48", "", ty),
+        two_words("20:48", "", ty),
+        x86_takes("23:48", "", &format!("&{ty}")),
+        x86_takes("26:48", "", &format!("&mut {ty}")),
+        x86_takes("29:48", "", &format!("&'static {ty}")),
+        two_words("46:56", "", ty),
+        two_words("49:56", "", ty),
+        x86_gives("52:56", "", &format!("&'static {ty}")),
+        x86_gives("55:56", "", &format!("&'static mut {ty}")),
+        x86_takes("58:48", "", "&u8"),
+        x86_takes("61:48", "", "&u8"),
+        two_words("76:52", "", ty),
+        two_words("79:52", "", ty),
+        gpu_takes("82:52", "", &format!("&{ty}")),
+        gpu_takes("85:52", "", &format!("&mut {ty}")),
+        gpu_takes("88:52", "", &format!("&'static {ty}")),
+    ];
+    let places = ["103:54", "106:54", "109:54", "112:54", "115:54"];
+    let behind = ["*const ", "*mut ", "&", "&mut ", "&'static "];
+    said.extend(places.into_iter().zip(behind).map(|(place, behind)| gpu_returns(place, "", &format!("{behind}{ty}"))));
     // A helper is shown to Rust where a kernel of its module does not compile, so each of these has one that does not.
-    both(&|ty| vec![two_words("131:48", "", ty)]);
-    both(&|ty| vec![two_words("163:48", "", ty)]);
-    both(&|ty| {
-        vec![
-            x86_takes("200:52", "", &format!("(u8, &'static {ty})")),
-            x86_gives("203:60", "", &format!("[*const {ty}; 2]")),
-            gpu_takes("206:59", "", &format!("fn(&mut {ty}) -> u8")),
-            x86_takes("209:55", "", &format!("Wrap<&'static {ty}>")),
-        ]
-    });
-    let errors = said.len() + repeated;
+    said.extend([two_words("131:48", "", ty), two_words("163:48", "", ty)]);
+    said.extend([
+        x86_takes("200:52", "", &format!("(u8, &'static {ty})")),
+        x86_gives("203:60", "", &format!("[*const {ty}; 2]")),
+        gpu_takes("206:59", "", &format!("fn(&mut {ty}) -> u8")),
+        x86_takes("209:55", "", &format!("Wrap<&'static {ty}>")),
+    ]);
+    let errors = 2 * said.len();
     said.push(format!("error: could not compile `fragments_bounds` (lib) due to {errors} previous errors"));
     refuses("fragments_bounds", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A macro's fragment `$t:ty` is named in kernite's errors as it is written, in no parentheses, where it is not the
+/// bounds of a trait object behind a `&`, a pointer or an arrow: when the macros open it, `*const [$t]` with `$t` as
+/// `u8`; when they keep it as one type, `&$t` and `*const $t` with `$t` as `Wrap<u8>`, or as
+/// `Wrap<dyn core::fmt::Debug + Send>`, whose `+` is in an argument; and as bounds in an argument of a type,
+/// `Wrap<$b>`, where Rust reads a type that may have them.
+#[test]
+fn a_fragment_that_is_not_bounds_behind_a_pointer_is_named_as_it_is_written() {
+    let mut said = vec![];
+    for (call, ty) in ["u8", "Wrap<u8>", "Wrap<dyn core::fmt::Debug + Send>"].into_iter().enumerate() {
+        said.push(two_words("18:52", "", &format!("[{ty}]")));
+        said.push(gpu_returns("21:60", "", &format!("*const {ty}")));
+        said.push(x86_takes("24:56", "", &format!("&{ty}")));
+        // Each call has the same bounds in an argument of a type: Cargo says the error of it once.
+        if call == 0 {
+            said.push(x86_takes("27:55", "", "Wrap<dyn core::fmt::Debug + Send>"));
+        }
+    }
+    said.push("error: could not compile `fragments_unparenthesized` (lib) due to 12 previous errors".to_string());
+    refuses("fragments_unparenthesized", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
 /// The parentheses of the type a pointer points to are Rust's to lint in a kernel's parameter as they are in any
@@ -4899,8 +4895,8 @@ fn a_fragment_of_bounds_behind_a_pointer_is_one_type_to_rust_wherever_the_macros
 /// and `*mut (u32)`, Rust says that they are unnecessary, once in each of the three. kernite's errors are of the
 /// pointers to a trait object and to a slice, which have two words, and Rust says nothing else of them. A fragment in
 /// the parentheses, `*const (dyn Fn() -> $t + Send)` with `$t` as `dyn Debug + Sync`, is one type to Rust: kernite's
-/// error is all that is said of it. Two bounds with no `dyn`, `*const (Debug + Send)`, are Rust's error in edition
-/// 2024, `E0782`, with no warning.
+/// error is all that is said of it, and has the bounds after the arrow in parentheses, as if they were written so. Two
+/// bounds with no `dyn`, `*const (Debug + Send)`, are Rust's error in edition 2024, `E0782`, with no warning.
 #[test]
 fn the_parentheses_of_the_type_a_pointer_points_to_are_linted_in_a_gpu_kernel_as_in_a_plain_function() {
     let mut said = vec![];
@@ -4908,7 +4904,7 @@ fn the_parentheses_of_the_type_a_pointer_points_to_are_linted_in_a_gpu_kernel_as
         ("10:44", "17:40", "(dyn core::fmt::Debug + Send)"),
         ("28:44", "35:40", "(dyn core::fmt::Debug)"),
         ("46:44", "53:40", "([u8])"),
-        ("84:52", "91:48", "(dyn Fn() -> dyn core::fmt::Debug + Sync + Send)"),
+        ("84:52", "91:48", "(dyn Fn() -> (dyn core::fmt::Debug + Sync) + Send)"),
     ] {
         said.push(two_words(gpu, "", ty));
         said.push(two_words(x86, "", ty));
@@ -4962,7 +4958,7 @@ fn a_result_without_a_lifetime_is_said_at_the_ampersand_of_each_kernel_that_take
     };
     // kernite says its errors first, in the order of the kernels, and Rust says its own after them.
     let mut said = vec![];
-    for ty in ["&u8", "&[u8]", "&dyn Send + Sync", "&f16"] {
+    for ty in ["&u8", "&[u8]", "&(dyn Send + Sync)", "&f16"] {
         said.extend(gives(&["9:60", "15:61", "18:60"], ty));
     }
     said.extend(gives(&["34:60", "37:61"], "&u8"));

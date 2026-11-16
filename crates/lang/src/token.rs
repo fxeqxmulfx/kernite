@@ -18,7 +18,8 @@ pub enum Delim {
     /// `{ }`.
     Brace,
     /// No brackets: the tokens of a macro's fragment, `1 + 2` in `$n * 2`, which are one operand or
-    /// one type, as brackets make them. They are written with nothing round them.
+    /// one type, as brackets make them. They are written with nothing round them, but for the bounds of a trait object
+    /// where Rust reads a type of no bounds: [`text`] says where.
     None,
 }
 
@@ -212,6 +213,10 @@ pub fn read_type(trees: &[Tree]) -> String {
 /// `*const [usize; 3]`, `(u32, u32)`, `&mut [f32]`, `fn(x: u8) -> u8`, `dyn A + B`, `Item<X> = u8` from
 /// `Item<X>=u8` too, and a space before the braces of a macro, `byte! {..}`.
 ///
+/// A macro's fragment of bounds, which arrives as a group of no brackets, `dyn A + B`, is written in parentheses where
+/// Rust reads a type of no bounds, behind a `&` or a pointer or after an arrow: `&(dyn A + B)`, `*const (dyn A + B)`
+/// and `Fn() -> (dyn A + B) + C`, as the type is when written with them. Rust calls the `+` of `&dyn A + B` ambiguous.
+///
 /// What is not the type's own is written as the source has it, as the messages of rustc write it: a block,
 /// `Marker<{N*2}>` or `Marker<{ N * 2 }>`; the length of an array, `[u8; N*2]`; and the arguments of a macro,
 /// `m!(a+b)` or `m!(a + b)`. There is one space where the source has a space, a line break or a comment, and
@@ -244,6 +249,7 @@ fn written(trees: &[Tree], source: bool) -> String {
                     Delim::Paren => ("(", ")"),
                     Delim::Bracket => ("[", "]"),
                     Delim::Brace => ("{", "}"),
+                    Delim::None if !source && parenthesized(trees, i, inside) => ("(", ")"),
                     Delim::None => ("", ""),
                 };
                 // The brackets of a block and of a macro's arguments are as the source has them too.
@@ -255,6 +261,19 @@ fn written(trees: &[Tree], source: bool) -> String {
         }
     }
     out
+}
+
+/// Whether `trees[i]`, a group of no brackets, is written in parentheses: `inside`, what it holds, is the bounds of a
+/// trait object with a `+` that is no argument's, `dyn A + B`, and it stands where Rust reads a type of no bounds:
+/// after a `&`, the name of its lifetime or its `mut`, a pointer's `const` or `mut`, or an arrow, `->`.
+fn parenthesized(trees: &[Tree], i: usize, inside: &[Tree]) -> bool {
+    let behind = match i.checked_sub(1).map(|j| (j, &trees[j])) {
+        Some((_, Tree::Punct { ch: '&', .. })) => true,
+        Some((j, Tree::Punct { ch: '>', .. })) => arrow_head(trees, j),
+        Some((j, Tree::Ident { name, .. })) => matches!(name.as_str(), "const" | "mut") || lifetime(trees, j),
+        _ => false,
+    };
+    behind && outside(inside, '+').next().is_some()
 }
 
 /// Whether `trees[i]` is the arguments of a macro, `(a + b)` in `m!(a + b)`: a group after a `!`, which in
@@ -388,17 +407,26 @@ fn last_field(mut fields: &[Tree]) -> &[Tree] {
     if let [rest @ .., Tree::Punct { ch: ',', .. }] = fields {
         fields = rest;
     }
-    let (mut open, mut from) = (0usize, 0);
-    for (i, t) in fields.iter().enumerate() {
-        match t {
-            Tree::Punct { ch: '<', .. } => open += 1,
-            // The `>` of an arrow closes no `<`; nor does one with none open, which Rust refuses.
-            Tree::Punct { ch: '>', .. } if !arrow_head(fields, i) => open = open.saturating_sub(1),
-            Tree::Punct { ch: ',', .. } if open == 0 => from = i + 1,
-            _ => {}
+    &fields[outside(fields, ',').last().map_or(0, |i| i + 1)..]
+}
+
+/// The places in `trees` of each `sep` that is the type's own, and not among the arguments of a type in it, as the `,`
+/// of `Pair<u8, 2>` is: a `,` between the fields of a tuple, or a `+` between the bounds of a trait object. The `>` of
+/// an arrow closes no `<`; nor does one with none open, which Rust refuses.
+fn outside(trees: &[Tree], sep: char) -> impl Iterator<Item = usize> {
+    let mut open = 0usize;
+    trees.iter().enumerate().filter_map(move |(i, t)| match t {
+        Tree::Punct { ch: '<', .. } => {
+            open += 1;
+            None
         }
-    }
-    &fields[from..]
+        Tree::Punct { ch: '>', .. } if !arrow_head(trees, i) => {
+            open = open.saturating_sub(1);
+            None
+        }
+        Tree::Punct { ch, .. } if *ch == sep && open == 0 => Some(i),
+        _ => None,
+    })
 }
 
 /// The characters that are punctuation.

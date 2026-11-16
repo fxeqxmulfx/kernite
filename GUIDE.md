@@ -306,14 +306,16 @@ A macro's fragment is one operand, or one type, wherever kernite reads it, as Ru
 in the length of an array, in `#[instances(..)]`, and in a const, which is 6 to Rust too. A `$t:ty` is one type in a
 parameter's type, in a result and in an argument of a type, `*const Wrap<$t>`. It is one behind a pointer or a reference
 too: `*const $t` with `$t` as `dyn Debug + Send` is a pointer to one type, as `*const (dyn Debug + Send)` is, and Rust
-does not call its `+` ambiguous. An error in a fragment is said where the fragment is written, in the call of the macro.
-Rust says its error of the whole fragment where the fragment starts: that `1u16 + 2` is no `u8`, at the `1u16`. Where
-kernels of one macro take the same `$t:ty`, `$t:path`, `$t:ident` or `$t:tt`, a result with a `&` before it, `&$t`,
-`Option<&$t>` or `&$a::$t`, has Rust say, at the `&` of each, that it has no lifetime to take, as for kernels written
-out, wherever the macro is defined, and whether it writes the body or its call gives it, a `$b:block`. Its help to
-return an owned value takes out that `&`, and the `mut` after it, and no more of the macro. An `$i:ident` or a `$t:tt`,
-a fragment that holds no operator, `u8::MAX` or `st.global`, and one that no operator is next to, `let k = 2 + 3` as a
-`$s:stmt`, are read as they are written.
+does not call its `+` ambiguous. kernite's errors name such a type with its bounds in parentheses behind a pointer, a
+reference or an arrow, `&(dyn Debug + Send)`, as if they were written so. Anywhere else, and for a fragment with no
+bounds of its own, they say the fragment as it is written: `Wrap<dyn Debug + Send>`, `*const [u8]`. An error in a
+fragment is said where the fragment is written, in the call of the macro. Rust says its error of the whole fragment
+where the fragment starts: that `1u16 + 2` is no `u8`, at the `1u16`. Where kernels of one macro take the same `$t:ty`,
+`$t:path`, `$t:ident` or `$t:tt`, a result with a `&` before it, `&$t`, `Option<&$t>` or `&$a::$t`, has Rust say, at the
+`&` of each, that it has no lifetime to take, as for kernels written out, wherever the macro is defined, and whether it
+writes the body or its call gives it, a `$b:block`. Its help to return an owned value takes out that `&`, and the `mut`
+after it, and no more of the macro. An `$i:ident` or a `$t:tt`, a fragment that holds no operator, `u8::MAX` or
+`st.global`, and one that no operator is next to, `let k = 2 + 3` as a `$s:stmt`, are read as they are written.
 
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kernite_macros::consts]` is on, and a
