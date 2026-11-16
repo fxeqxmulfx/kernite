@@ -67,6 +67,158 @@ fn a_kernel_runs_its_helpers_in_place() {
     assert_eq!(x86(src, "fifth"), want);
 }
 
+/// A note is one line, on x86 and on a GPU: each line break in it, `\r\n`, `\n` or `\r`, is a space, so that no text of
+/// it is code to an assembler, as `int3` would be on a line of its own. Each is written by an escape, and `\n` and
+/// `\r\n` in the string itself too, plain or raw: Rust refuses a lone `\r` there.
+#[test]
+fn a_line_break_in_a_note_is_a_space_on_every_machine() {
+    for (string, shown) in [
+        (r#""a\nint3""#, "a int3"),
+        (r#""a\r\nint3""#, "a int3"),
+        (r#""a\rint3""#, "a int3"),
+        ("\"a\nint3\"", "a int3"),
+        ("\"a\r\nint3\"", "a int3"),
+        ("r\"a\nint3\"", "a int3"),
+        ("r#\"a\r\nint3\"#", "a int3"),
+        // Each line break is a space of its own, one at either end too, and `\r\n` is one line break and not two.
+        (r#""\na\n\nint3\r\n""#, " a  int3 "),
+        (r#""\r\n\r\n\r\r\n\n""#, "     "),
+        (r#""\ra\r\r\n\nint3\n""#, " a   int3 "),
+    ] {
+        let note = format!("note({string});");
+        let listing = format!("# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # {shown}\n    ret\n");
+        assert_eq!(x86(&kernel(&note), "k"), listing, "{string:?}");
+        assert_eq!(code(&kernel(&note), "k"), ["ret"], "{string:?}");
+        let gpu = format!("unsafe extern \"ptx-kernel\" fn k() {{\n{note}\n}}\n");
+        assert_eq!(ptx(&gpu), format!("k(\n)\n{{\n\n\t// {shown}\n\tret;\n}}\n"), "{string:?}");
+    }
+}
+
+/// A NUL in a note is refused at the string, on x86 and on a GPU, for `ptxas` reads a NUL as the end of the module: by
+/// an escape, `\0`, `\x00` or `\u{0}`, and as the character, in a plain string and in a raw one. The error is at the
+/// string, wherever the NUL is in it and whatever else the note holds. Another control character is no trouble.
+#[test]
+fn a_nul_in_a_note_is_refused_at_the_string_on_every_machine() {
+    let message = "a NUL is not allowed in a note, on any machine: `ptxas` reads it as the end of the module";
+    for string in [
+        r#""a\0b""#,
+        r#""a\x00b""#,
+        r#""a\u{0}b""#,
+        r#""a\u{0_0}b""#,
+        r#""\0""#,
+        "\"a\0b\"",
+        "\"\0\"",
+        "r\"a\0b\"",
+        "r#\"a \"\0\" b\"#",
+        // The note's text is read whole, so the NUL is refused after a name, and after a long text, at the string's
+        // start.
+        r#""{x} {{ \0""#,
+        r#""the high lanes, the low lanes, the lanes of the next tile, the lanes of the last one: \0""#,
+    ] {
+        let note = format!("let x = 1;\nnote({string});");
+        let want = format!("3:6: {message}");
+        assert_eq!(refused(&note), want, "{string:?}");
+        let gpu = format!("unsafe extern \"ptx-kernel\" fn k() {{\n{note}\n}}\n");
+        assert_eq!(kernite::ptx_str(&gpu).unwrap_err(), want, "{string:?}");
+    }
+    // A note keeps any other control character as it is: U+0001, the NUL's neighbour, DEL, a tab and NEL.
+    let listing = "# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # a\u{1}\u{7f}\tb\u{85}\n    ret\n";
+    assert_eq!(x86(&kernel(r#"note("a\u{1}\x7f\tb\u{85}");"#), "k"), listing);
+}
+
+/// A kernel for `abi`, `sysv64` or `ptx-kernel`, that binds `declared` as 7 and has a note of `text`, as the kernel's
+/// source writes it, on its line 3, where the string starts at column 6.
+fn noted(abi: &str, declared: &str, text: &str) -> String {
+    format!("unsafe extern \"{abi}\" fn k() {{\nlet {declared} = 7;\nnote(\"{text}\");\n}}\n")
+}
+
+/// A note reads the name in its braces as `format!` does, and the name comes right after the `{`: a space, a tab, a
+/// line break or U+00A0 before it is refused at the string, on x86 and on a GPU, in words that say where the name
+/// comes, wherever in the note the braces are.
+#[test]
+fn a_note_takes_its_name_right_after_the_brace_on_every_machine() {
+    let want = Err("3:6: a note's name comes right after its `{`, with no space before it: `{k}`".to_string());
+    for text in [r"{ a}", r"{ a }", r"{\ta}", r"{\na}", r"{\u{a0}a}", r"x {{ {a} { a}"] {
+        for abi in ["sysv64", "ptx-kernel"] {
+            assert_eq!(compile(&noted(abi, "a", text), "k"), want, "{abi}: {text}");
+        }
+    }
+}
+
+/// A note has no arguments, so braces with no name in them are refused at the string, on x86 and on a GPU, with spaces
+/// in them or none, wherever in the note they are, as `format!` with no arguments refuses them.
+#[test]
+fn a_note_has_no_arguments_for_braces_with_no_name_on_every_machine() {
+    let want = Err("3:6: a note has no arguments for `{}`: its braces hold a value's name, `{k}`".to_string());
+    for text in [r"{}", r"{ }", r"{\t\u{a0}}", r"x {{ {a} {} y"] {
+        for abi in ["sysv64", "ptx-kernel"] {
+            assert_eq!(compile(&noted(abi, "a", text), "k"), want, "{abi}: {text}");
+        }
+    }
+}
+
+/// A note takes spaces between its name and the `}`, as `format!` does: each character that `char::is_whitespace`
+/// takes, and several together, on x86 and on a GPU. The note shows the value, as `{a}` does.
+#[test]
+fn a_space_after_a_notes_name_is_taken_on_every_machine() {
+    let spaces: Vec<char> = (0..=0x10ffff).filter_map(char::from_u32).filter(|c| c.is_whitespace()).collect();
+    for abi in ["sysv64", "ptx-kernel"] {
+        let want = compile(&noted(abi, "a", "{a}"), "k");
+        assert!(want.is_ok(), "{abi}: {want:?}");
+        for space in &spaces {
+            let text = format!("{{a{}}}", space.escape_unicode());
+            assert_eq!(compile(&noted(abi, "a", &text), "k"), want, "{abi}: {space:?}");
+        }
+        assert_eq!(compile(&noted(abi, "a", r"{a \t\u{a0}\u{2028}}"), "k"), want, "{abi}: several");
+    }
+}
+
+/// Any other character in a note's braces, before the name or after it, is refused at the string, on x86 and on a GPU:
+/// as `format!` refuses it, but for the `:` of a format, `{a:x}`, which a note has no use for. It is shown as `format!`
+/// shows it, by `char::escape_debug`: `§` and `·` as they are, `"`, `'` and `\` as `\"`, `\'` and `\\`, and U+200E,
+/// which shows as nothing, as `\u{200e}`.
+#[test]
+fn a_character_in_a_notes_braces_that_is_no_name_and_no_space_is_shown_as_rust_shows_it_on_every_machine() {
+    for (text, shown) in [
+        (r"{a\u{200e}}", r"\u{200e}"),
+        (r"{\u{200e}a}", r"\u{200e}"),
+        (r"{a\u{a7}}", "§"),
+        (r"{\u{b7}a}", "·"),
+        (r"{a\u{22}}", r#"\""#),
+        (r"{a\u{27}}", r"\'"),
+        (r"{a\u{5c}}", r"\\"),
+        ("{a b}", "b"),
+        ("{a:x}", ":"),
+        ("{a{}", "{"),
+        ("{0}", "0"),
+        ("{r#a}", "#"),
+    ] {
+        let want = Err(format!("3:6: unexpected `{shown}` in the braces of a note, which hold a name and then spaces"));
+        for abi in ["sysv64", "ptx-kernel"] {
+            assert_eq!(compile(&noted(abi, "a", text), "k"), want, "{abi}: {text}");
+        }
+    }
+}
+
+/// A note's name is a name as Rust reads one, as a kernel's is, and it is not read in NFC, as `format!`'s is not: `a·b`
+/// goes on past the `·`; `café` with `é` as U+00E9 in the note is the variable declared with `e` and U+0301, whose name
+/// the lexer reads in NFC; and `café` with `e` and U+0301 in the note is no variable's name, whichever way the variable
+/// is declared, as rustc says of `format!("{cafe\u{301}}")`: "cannot find value `café` in this scope".
+#[test]
+fn a_notes_name_is_a_name_of_rust_and_is_not_read_in_nfc_on_every_machine() {
+    for abi in ["sysv64", "ptx-kernel"] {
+        let shown = compile(&noted(abi, "a", "{a}"), "k");
+        assert!(shown.is_ok(), "{abi}: {shown:?}");
+        for (declared, text) in [("a·b", "{a·b}"), ("café", "{café}"), ("cafe\u{301}", "{café}")] {
+            assert_eq!(compile(&noted(abi, declared, text), "k"), shown, "{abi}: {declared:?}, {text:?}");
+        }
+        let want = Err("3:6: `cafe\u{301}` is not defined".to_string());
+        for declared in ["café", "cafe\u{301}"] {
+            assert_eq!(compile(&noted(abi, declared, "{cafe\u{301}}"), "k"), want, "{abi}: {declared:?}");
+        }
+    }
+}
+
 #[test]
 fn a_function_that_names_an_abi_is_not_const_and_no_function_is_async() {
     let constant = "a function that names an ABI runs on its machine, never while Rust compiles, so it is not `const`";
@@ -95,6 +247,443 @@ fn a_function_that_names_an_abi_is_not_const_and_no_function_is_async() {
     // `const fn`.
     let src = "pub unsafe extern \"sysv64\" fn k() { h(); }\nconst fn h() { note(\"it runs now\"); }";
     assert_eq!(x86(src, "k"), "# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # it runs now\n    ret\n");
+}
+
+/// A raw string is a string, as in Rust, wherever kernite takes one: a note's text by `r"hi"`, `r#"hi"#` or
+/// `r##"a "# b"##` is the text of the plain string, with no escape read in it, and an ABI by `r"sysv64"` or
+/// `r#"ptx-kernel"#` is the ABI. A raw string that is never closed is refused where it starts, as a plain one is. So is
+/// one of more than 255 `#`, as Rust refuses it.
+#[test]
+fn a_raw_string_is_a_string_for_a_note_and_for_an_abi() {
+    let raw = |hashes: usize, text: &str| format!("r{0}\"{text}\"{0}", "#".repeat(hashes));
+    // (the `#`s of the raw string, its text, what a note shows of it), with `k` as 7.
+    let notes = [
+        (0, "hi", "hi"),
+        (1, "hi", "hi"),
+        (2, "a \"# b", "a \"# b"),
+        (0, "a\\nb\\\\", "a\\nb\\\\"),
+        (0, "a\\", "a\\"),
+        (1, "{k} \"{k}\" {{k}}", "7 \"7\" {k}"),
+        (255, "hi", "hi"),
+    ];
+    for (hashes, text, shown) in notes {
+        let (raw, plain) = (raw(hashes, text), format!("{text:?}"));
+        let on_x86 =
+            |lit: &str| x86(&format!("unsafe extern \"sysv64\" fn k() {{\nlet k = 7;\nnote({lit});\n}}\n"), "k");
+        let want = format!("# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # {shown}\n    ret\n");
+        assert_eq!(on_x86(&plain), want, "{plain}");
+        assert_eq!(on_x86(&raw), want, "{raw}");
+        let on_gpu =
+            |lit: &str| ptx(&format!("unsafe extern \"ptx-kernel\" fn k() {{\nlet k = 7;\nnote({lit});\n}}\n"));
+        assert!(on_gpu(&plain).contains(&format!("\t// {shown}\n")), "{plain}");
+        assert_eq!(on_gpu(&raw), on_gpu(&plain), "{raw}");
+    }
+    // Each ABI by a raw string is the ABI by the plain one, and an ABI that kernite does not know is told as the plain
+    // one is, at the string, with no escape read in it: `sysv\64` is no ABI.
+    let abis = ["sysv64", "ptx-kernel", "ptx-func", "sysv\\64"];
+    for (abi, hashes) in abis.into_iter().flat_map(|abi| (0..3).map(move |hashes| (abi, hashes))) {
+        let with = |lit: &str| match abi.starts_with("ptx-") {
+            true => kernite::ptx_str(&format!("pub unsafe extern {lit} fn f() {{}}\n")),
+            false => compile(&format!("pub unsafe extern {lit} fn f() {{}}\n"), "f"),
+        };
+        let plain = with(&format!("{abi:?}"));
+        assert_eq!(plain.is_ok(), abi != "sysv\\64", "{abi}: {plain:?}");
+        assert_eq!(with(&raw(hashes, abi)), plain, "{abi}, {hashes} `#`s");
+    }
+    // A raw string that is never closed is refused where it starts, as a plain one is.
+    let never = "2:6: this string is never closed";
+    for lit in ["\"hi);", "r\"hi);", "r#\"hi\");", "r##\"hi\"#);"] {
+        assert_eq!(refused(&format!("note({lit}")), never, "{lit}");
+    }
+    let gpu = "pub unsafe extern \"ptx-kernel\" fn k() {\nnote(r#\"hi\");\n}\n";
+    assert_eq!(kernite::ptx_str(gpu).unwrap_err(), never);
+    // So is a raw string of more than 255 `#`, as Rust refuses it.
+    assert_eq!(refused(&format!("note({});", raw(256, "hi"))), "2:6: a raw string has 255 `#` at most, as in Rust");
+}
+
+/// A CR that no LF follows is refused at the CR, as Rust refuses it, in a string, plain or raw, a note's or an ABI's,
+/// and in a doc comment, `///`, `//!`, `/**` and `/*!`, on x86 and on a GPU. A comment that is no doc comment takes it,
+/// as Rust does, and the escape `\r` is one.
+#[test]
+fn a_cr_on_its_own_is_refused_in_a_string_and_a_doc_comment_and_taken_in_any_other_comment() {
+    let string = "a CR on its own is not allowed in a string, as in Rust: write `\\r`";
+    let raw = "a CR on its own is not allowed in a raw string, as in Rust";
+    let doc = "a CR on its own is not allowed in a doc comment, as in Rust";
+    // The kernel `k` of each machine, with `top` before it and `body` in it.
+    let kernels = |top: &str, body: &str| {
+        ["sysv64", "ptx-kernel"].map(|abi| format!("{top}unsafe extern \"{abi}\" fn k() {{\n{body}\n}}\n"))
+    };
+    for (top, body, at, message) in [
+        ("", "note(\"a\rb\");", "2:8", string),
+        ("", "note(\"a\r\");", "2:8", string),
+        ("", "note(\"a\nb\rc\");", "3:2", string),
+        ("", "note(\"a\r\r\n\");", "2:8", string),
+        ("", "note(r\"a\rb\");", "2:9", raw),
+        ("", "note(r#\"a\r\"#);", "2:10", raw),
+        ("", "note(r\"a\r\nb\rc\");", "3:2", raw),
+        ("/// a\rb\n", "", "1:6", doc),
+        ("//! a\rb\n", "", "1:6", doc),
+        ("/** a\rb */\n", "", "1:6", doc),
+        ("/*! a\rb */\n", "", "1:6", doc),
+        ("/// a\r\n/// b\rc\n", "", "2:6", doc),
+        ("", "/// a\rb\nnote(\"c\");", "2:6", doc),
+    ] {
+        for src in kernels(top, body) {
+            assert_eq!(compile(&src, "k"), Err(format!("{at}: {message}")), "{src:?}");
+        }
+    }
+    // An ABI is a string too, refused as a note's is, before it is looked up.
+    for (src, at, message) in [
+        ("unsafe extern \"sysv64\r\" fn k() {}\n", "1:22", string),
+        ("unsafe extern r\"sysv64\r\" fn k() {}\n", "1:23", raw),
+        ("unsafe extern \"ptx-kernel\r\" fn k() {}\n", "1:26", string),
+        ("unsafe extern r#\"ptx-kernel\r\"# fn k() {}\n", "1:28", raw),
+    ] {
+        assert_eq!(compile(src, "k"), Err(format!("{at}: {message}")), "{src:?}");
+    }
+    // Any other comment takes a CR, and so does the escape `\r`, which a note shows as a space.
+    let compiled = |top: &str, body: &str| kernels(top, body).map(|src| compile(&src, "k"));
+    let want = compiled("", "note(\"a\");");
+    assert!(want.iter().all(Result::is_ok), "{want:?}");
+    for (top, body) in [
+        ("// a\rb\n", "note(\"a\");"),
+        ("//// a\rb\n", "note(\"a\");"),
+        ("/* a\rb */\n", "note(\"a\");"),
+        ("/*** a\rb ***/\n", "note(\"a\");"),
+        ("", "note(\"a\"); // b\rc"),
+        ("", "/* b\rc */ note(\"a\");"),
+    ] {
+        assert_eq!(compiled(top, body), want, "{top:?} {body:?}");
+    }
+    assert_eq!(compiled("", "note(\"a\\r\");"), compiled("", "note(\"a \");"));
+}
+
+/// A CRLF in a string, plain or raw, is a LF, as Rust reads it. A note shows each line break as a space, so an ABI is
+/// the string that tells it: `extern "a<CRLF>b"` is none that kernite knows, and the error has it as `a<LF>b`, on x86
+/// and on a GPU. A source whose lines end in CRLF is the source whose lines end in LF, with doc comments and strings of
+/// more than a line in it.
+#[test]
+fn a_crlf_in_a_string_is_a_lf_and_a_source_of_crlf_lines_is_the_source_of_lf_lines() {
+    for (crlf, lf, text) in [
+        ("\"a\r\nb\"", "\"a\nb\"", "a\nb"),
+        ("r\"a\r\nb\"", "r\"a\nb\"", "a\nb"),
+        ("r#\"a\r\n\r\nb\"#", "r#\"a\n\nb\"#", "a\n\nb"),
+    ] {
+        for top in ["", "unsafe extern \"ptx-kernel\" fn g() {}\n"] {
+            let with = |lit: &str| compile(&format!("{top}unsafe extern {lit} fn k() {{}}\n"), "k");
+            assert_eq!(with(crlf), with(lf), "{top:?} {crlf:?}");
+            let message = with(crlf).unwrap_err();
+            assert!(message.ends_with(&format!("`extern \"{text}\"` is none of these")), "{message:?}");
+        }
+    }
+    let (x86, gpu) = ("    # a b\n    # c d\n    ret\n", "\t// a b\n\t// c d\n\tret;\n");
+    for (abi, notes) in [("sysv64", x86), ("ptx-kernel", gpu)] {
+        let lf = [
+            "/// A kernel.",
+            "/** Its doc,",
+            " over two lines. */",
+            &format!("unsafe extern \"{abi}\" fn k() {{"),
+            "    // A comment.",
+            "    note(\"a",
+            "b\");",
+            "    note(r#\"c",
+            "d\"#);",
+            "}",
+            "",
+        ]
+        .join("\n");
+        let listing = compile(&lf, "k").unwrap();
+        assert!(listing.contains(notes), "{abi}: {listing:?}");
+        assert_eq!(compile(&lf.replace('\n', "\r\n"), "k"), Ok(listing), "{abi}");
+    }
+}
+
+/// A plain string takes the escapes that Rust reads, wherever kernite takes one. A note's text, `note("\x41")`,
+/// `note("caf\u{e9}")` and `note("a\` LF `    b")`, shows `A`, `café` and `ab`, on x86 and on a GPU, and an escape is
+/// read before the `{k}` of a note is, as Rust reads a format string. An ABI, `extern "sysv\x364"`, is `sysv64`, and
+/// one that kernite does not know is told as the string reads.
+#[test]
+fn a_string_takes_the_escapes_that_rust_reads_for_a_note_and_for_an_abi() {
+    // (the text of a plain string, what a note shows of it), with `k` as 7.
+    let notes = [
+        (r"\x41", "A"),
+        (r"\x41\x7e\x7E\x20\x2a", "A~~ *"),
+        (r"caf\u{e9}", "café"),
+        (r"\u{E9}\u{e_9}\u{e9_}\u{0e9}\u{000e9}\u{0_0_0_e_9}", "éééééé"),
+        (r"\u{1f600}\u{1F_600}\u{10ffff}", "😀😀\u{10ffff}"),
+        ("a\\\n    b", "ab"),
+        ("a\\\r\n\t b", "ab"),
+        ("a\\\n\n \t\r\n  b", "ab"),
+        ("a\\\n\r\tb", "ab"),
+        ("a\\\n    ", "a"),
+        ("a\\\n\u{a0}b", "a\u{a0}b"),
+        (r#"\\ \" \'"#, r#"\ " '"#),
+        (r"\x7bk\x7d {k} \u{7b}k}", "7 7 7"),
+        (r"\u{7b}\u{7b}k}}", "{k}"),
+        (r"\n\r\t", "  \t"),
+    ];
+    for (text, shown) in notes {
+        let lit = format!("\"{text}\"");
+        let on_x86 =
+            |lit: &str| x86(&format!("unsafe extern \"sysv64\" fn k() {{\nlet k = 7;\nnote({lit});\n}}\n"), "k");
+        let want = format!("# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # {shown}\n    ret\n");
+        assert_eq!(on_x86(&lit), want, "{text:?}");
+        let on_gpu = ptx(&format!("unsafe extern \"ptx-kernel\" fn k() {{\nlet k = 7;\nnote({lit});\n}}\n"));
+        assert!(on_gpu.contains(&format!("\t// {shown}\n")), "{text:?}: {on_gpu}");
+    }
+    // An ABI is read as a note's text is: each of these is the ABI it spells, and one told as the string says is one
+    // that kernite does not know. A raw string has no escapes, so `r"ptx-\x6bernel"` is the text it shows.
+    let with = |lit: &str| format!("pub unsafe extern {lit} fn f() {{}}\n");
+    for (written, abi) in [("sysv\\x364", "sysv64"), ("sysv\\u{36}4", "sysv64"), ("\\x73ysv64", "sysv64")] {
+        let escaped = compile(&with(&format!("\"{written}\"")), "f");
+        assert!(escaped.is_ok(), "{written}");
+        assert_eq!(escaped, compile(&with(&format!("{abi:?}")), "f"), "{written}");
+    }
+    for (written, abi) in
+        [("ptx-\\x6bernel", "ptx-kernel"), ("ptx-\\u{66}unc", "ptx-func"), ("\\x70tx-func", "ptx-func")]
+    {
+        let escaped = kernite::ptx_str(&with(&format!("\"{written}\"")));
+        assert!(escaped.is_ok(), "{written}");
+        assert_eq!(escaped, kernite::ptx_str(&with(&format!("{abi:?}"))), "{written}");
+    }
+    let unknown = compile(&with("\"a\\x41\\u{e9}\\\n   b\""), "f").unwrap_err();
+    assert!(unknown.ends_with("`extern \"aAéb\"` is none of these"), "{unknown}");
+    let raw = kernite::ptx_str(&with(r#"r"ptx-\x6bernel""#)).unwrap_err();
+    assert!(raw.ends_with(r#"`extern "ptx-\x6bernel"` is none of these"#), "{raw}");
+}
+
+/// An escape that Rust refuses is refused at its `\`, with `line:column`, in a note's text and in an ABI, on x86 and on
+/// a GPU, and the words say which of three it is: an escape that is none, `\x` that has not two hex digits, 7f at most,
+/// or `\u` that has not one to six in braces that make a character.
+#[test]
+fn a_string_refuses_the_escapes_that_rust_refuses_at_the_escape() {
+    let none = |c: &str| {
+        format!(
+            "`\\{c}` is no escape, as in Rust: a string has `\\n`, `\\r`, `\\t`, `\\0`, `\\\\`, `\\'`, `\\\"`, \
+             `\\x41`, `\\u{{e9}}` and a `\\` that ends a line"
+        )
+    };
+    let x = "`\\x` takes two hex digits, 7f at most, as in Rust: write a greater character as `\\u{80}`";
+    let u = "`\\u` takes one to six hex digits in braces, as `\\u{e9}`, of a character: not d800 to dfff, and \
+             10ffff at most, as in Rust";
+    // The kernel `k` of each machine, with `body` in it, from its second line on.
+    let kernels =
+        |body: &str| ["sysv64", "ptx-kernel"].map(|abi| format!("unsafe extern \"{abi}\" fn k() {{\n{body}\n}}\n"));
+    for (lit, at, message) in [
+        (r#""\x80""#, "2:7", x.to_string()),
+        (r#""\u{d800}""#, "2:7", u.to_string()),
+        (r#""\u{110000}""#, "2:7", u.to_string()),
+        (r#""\u{}""#, "2:7", u.to_string()),
+        (r#""\q""#, "2:7", none("q")),
+        (r#""\xff""#, "2:7", x.to_string()),
+        (r#""\x4""#, "2:7", x.to_string()),
+        (r#""\xg0""#, "2:7", x.to_string()),
+        (r#""\u00e9""#, "2:7", u.to_string()),
+        (r#""\u{e9""#, "2:7", u.to_string()),
+        (r#""\u{_e9}""#, "2:7", u.to_string()),
+        (r#""\u{1234567}""#, "2:7", u.to_string()),
+        (r#""\u{dfff}""#, "2:7", u.to_string()),
+        (r#""\{k}""#, "2:7", none("{")),
+        (r#""\é""#, "2:7", none("é")),
+        (r#""\ ""#, "2:7", none(" ")),
+        // The first is the one told, and a column counts characters, `é` as one. A string later in the line is read as
+        // the first is.
+        (r#""é\x41\q\x80""#, "2:12", none("q")),
+        (r#""a"); note("b\u{110000}""#, "2:19", u.to_string()),
+    ] {
+        for src in kernels(&format!("note({lit});")) {
+            assert_eq!(compile(&src, "k"), Err(format!("{at}: {message}")), "{src:?}");
+        }
+    }
+    // On a later line, after a CRLF, and in a helper.
+    for src in kernels("note(\"a\r\nb\\\n  c\r\n\\x80\");") {
+        assert_eq!(compile(&src, "k"), Err(format!("5:1: {x}")), "{src:?}");
+    }
+    let src = "unsafe extern \"sysv64\" fn k() { h(); }\nfn h() { note(\"\\q\"); }\n";
+    assert_eq!(compile(src, "k"), Err(format!("2:16: {}", none("q"))));
+    // An ABI is a string too, refused before it is looked up.
+    for (src, at, message) in [
+        ("unsafe extern \"sysv\\x364\\q\" fn k() {}\n", "1:25", none("q")),
+        ("unsafe extern \"sysv\\x80\" fn k() {}\n", "1:20", x.to_string()),
+        ("unsafe extern \"ptx-kernel\\u{d800}\" fn k() {}\n", "1:26", u.to_string()),
+    ] {
+        assert_eq!(compile(src, "k"), Err(format!("{at}: {message}")), "{src:?}");
+    }
+    // A raw string has no escapes to refuse.
+    for src in kernels(r#"note(r"\q\x80\ud800");"#) {
+        assert!(compile(&src, "k").unwrap().contains(r"\q\x80\ud800"), "{src:?}");
+    }
+}
+
+/// The spaces of Rust's lexer, Pattern_White_Space: a tab, the line breaks, U+000B and U+000C, U+0085, a space, the
+/// marks that say which way text runs, U+200E and U+200F, and U+2028 and U+2029.
+const SPACES: [char; 11] =
+    ['\t', '\n', '\u{b}', '\u{c}', '\r', ' ', '\u{85}', '\u{200e}', '\u{200f}', '\u{2028}', '\u{2029}'];
+
+/// The characters that Unicode calls a space and Rust does not, each of which `char::is_whitespace` takes.
+const LOOKALIKES: [char; 16] = [
+    '\u{a0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}',
+    '\u{2007}', '\u{2008}', '\u{2009}', '\u{200a}', '\u{202f}', '\u{205f}', '\u{3000}',
+];
+
+/// A space is what Rust reads as one, Pattern_White_Space, on x86 and on a GPU: a kernel with any of the eleven between
+/// its tokens, before its first and after its last, and inside its brackets, compiles to the listing of the kernel with
+/// a plain space there. U+200E and U+200F are among them, which `char::is_whitespace` does not take.
+#[test]
+fn a_space_is_what_rust_reads_as_one_on_every_machine() {
+    // The kernel with a `$` for each space.
+    let kernel = |abi: &str, space: char| {
+        let spaced = r#"$unsafe$extern$"ABI"$fn$k$($)${$let$a$=$1$+$2$;$note$($"a {a}"$)$;$}$"#;
+        spaced.replace("ABI", abi).replace('$', &space.to_string())
+    };
+    for abi in ["sysv64", "ptx-kernel"] {
+        let plain = compile(&kernel(abi, ' '), "k");
+        assert!(plain.as_ref().is_ok_and(|listing| listing.contains("a 3")), "{abi}: {plain:?}");
+        for space in SPACES {
+            assert_eq!(compile(&kernel(abi, space), "k"), plain, "{abi}: {space:?}");
+        }
+    }
+}
+
+/// No other character is a space. Each other that Unicode calls one is refused at the character on x86 and on a GPU, in
+/// words that show which it is, as Rust's do: "unexpected `\u{a0}`". So is each other that no token starts with: shown
+/// so if it is not printable ASCII, and as it is if it is.
+#[test]
+fn a_character_that_unicode_calls_a_space_and_rust_does_not_is_refused_at_the_character_on_every_machine() {
+    // The two lists are each character that `char::is_whitespace` takes, and U+200E and U+200F besides.
+    let whitespace: Vec<char> = (0..=0x10ffff).filter_map(char::from_u32).filter(|c| c.is_whitespace()).collect();
+    let mut listed: Vec<char> =
+        SPACES.into_iter().chain(LOOKALIKES).filter(|c| !matches!(c, '\u{200e}' | '\u{200f}')).collect();
+    listed.sort();
+    assert_eq!(whitespace, listed);
+    let others = [
+        ('\\', "\\"),
+        ('`', "`"),
+        ('\u{1}', "\\u{1}"),
+        ('\u{7f}', "\\u{7f}"),
+        ('§', "\\u{a7}"),
+        ('\u{ad}', "\\u{ad}"),
+        ('\u{200b}', "\\u{200b}"),
+        ('\u{201c}', "\\u{201c}"),
+        ('\u{feff}', "\\u{feff}"),
+    ]
+    .map(|(c, shown)| (c, shown.to_string()));
+    let lookalikes = LOOKALIKES.map(|c| (c, format!("\\u{{{:x}}}", u32::from(c))));
+    for abi in ["sysv64", "ptx-kernel"] {
+        // The character is on line 2, right after the ABI.
+        let head = format!("unsafe extern \"{abi}\"");
+        for (c, shown) in lookalikes.iter().chain(&others) {
+            let src = format!("// a\n{head}{c}fn k() {{}}\n");
+            assert_eq!(compile(&src, "k"), Err(format!("2:{}: unexpected `{shown}`", head.len() + 1)), "{abi}: {c:?}");
+        }
+    }
+}
+
+/// A kernel for each machine, `sysv64` and `ptx-kernel`, whose parameter, variable, helper and const are named `ap`,
+/// `av`, `ah` and `ak`, with `$` between the two letters of each name where it is declared and `%` where it is used.
+const NAMED: [&str; 2] = [
+    r#"
+    const a$k: u64 = 7;
+    pub unsafe extern "sysv64" fn k(a$p: u64) {
+        let a$v: gpr;
+        mov(a%v, a%p);
+        a%h(a%v);
+    }
+    fn a$h(y: gpr) { add(y, a%k); }
+    "#,
+    r#"
+    const a$k: u32 = 7;
+    pub unsafe extern "ptx-kernel" fn k(a$p: *mut u32) {
+        let a$v: u32;
+        mov.u32(a%v, a%k);
+        a%h(a%v);
+        st.global.u32([a%p], a%v);
+    }
+    fn a$h(y: u32) { add.u32(y, y, a%k); }
+    "#,
+];
+
+/// What each machine makes of `NAMED` with `declared` for each `$` and `used` for each `%`: the listing on x86, and the
+/// PTX of the module on a GPU.
+fn named(declared: &str, used: &str) -> [Result<String, String>; 2] {
+    NAMED.map(|src| compile(&src.replace('$', declared).replace('%', used), "k"))
+}
+
+/// A name goes on with each character that Rust takes in one, on x86 and on a GPU, and not only with those that
+/// `char::is_alphanumeric` takes: U+00B7 and U+203F, and U+0301 after a letter. A kernel whose names have one between
+/// two letters compiles to the listing of the kernel whose names are ASCII, but for the names, which each machine
+/// writes as it does: x86 as they are, in NFC, and a GPU's PTX with `$u` and the code point in hex and `$` for each
+/// character beyond ASCII.
+#[test]
+fn a_name_goes_on_with_each_character_rust_takes_in_one_on_every_machine() {
+    let [x86, gpu] = named("", "").map(Result::unwrap);
+    // The character, and how each machine writes the name's first two letters, `a` and it, which are `á` for U+0301.
+    for (c, on_x86, on_gpu) in [("·", "a·", "a$ub7$"), ("‿", "a‿", "a$u203f$"), ("\u{301}", "á", "$ue1$")] {
+        let [on_x86_listing, on_gpu_listing] =
+            named(c, c).map(|listing| listing.unwrap_or_else(|e| panic!("{c:?}: {e}")));
+        assert_eq!(on_x86_listing.replace(on_x86, "a"), x86, "{c:?}");
+        assert_eq!(on_gpu_listing.replace(on_gpu, "a"), gpu, "{c:?}");
+    }
+}
+
+/// A name starts with each character that Rust takes to start one, and not only with those that `char::is_alphabetic`
+/// takes: U+2118 is no letter. A kernel whose parameter is named so compiles, on x86 and on a GPU, to the listing of
+/// the one named `a`, but for the name, which each machine writes as it does.
+#[test]
+fn a_name_starts_with_each_character_rust_takes_to_start_one_on_every_machine() {
+    for (abi, on_machine) in [("sysv64", "℘"), ("ptx-kernel", "$u2118$")] {
+        let listing = |name: &str| compile(&format!("unsafe extern \"{abi}\" fn k({name}: u64) {{}}\n"), "k").unwrap();
+        assert_eq!(listing("℘").replace(on_machine, "a"), listing("a"), "{abi}");
+    }
+}
+
+/// No other character is in a name. `a½` and `a²` have one that `char::is_alphanumeric` takes and Rust does not, and
+/// `·`, `‿`, U+0301 and U+0345 go on a name and start none, U+0345 though `char::is_alphabetic` takes it. Each is
+/// refused at the character, on x86 and on a GPU, in words that show which it is.
+#[test]
+fn no_other_character_is_in_a_name_on_every_machine() {
+    for abi in ["sysv64", "ptx-kernel"] {
+        let head = format!("unsafe extern \"{abi}\" fn k(");
+        // The name, the character of it that is refused, and how many characters come before that.
+        for (name, c, before) in [
+            ("a½", '½', 1),
+            ("a²", '²', 1),
+            ("·a", '·', 0),
+            ("‿a", '‿', 0),
+            ("\u{301}a", '\u{301}', 0),
+            ("\u{345}a", '\u{345}', 0),
+        ] {
+            let src = format!("{head}{name}: u64) {{}}\n");
+            let column = head.chars().count() + before + 1;
+            let want = format!("1:{column}: unexpected `\\u{{{:x}}}`", u32::from(c));
+            assert_eq!(compile(&src, "k"), Err(want), "{abi}: {name:?}");
+        }
+    }
+}
+
+/// A name is one name in each of its spellings, as Rust reads each in NFC: `é` as U+00E9, and as `e` and U+0301. A
+/// kernel that declares a name in one spelling and uses it in the other compiles to the listing of the kernel that
+/// spells it alike, which writes the name in NFC. Two helpers so named are two of one name, refused where the second
+/// is, as two of one spelling are. `x86_str` finds a kernel by its name in either spelling.
+#[test]
+fn a_name_in_each_of_its_spellings_is_one_name_on_every_machine() {
+    let alike = named("é", "é").map(Result::unwrap);
+    for (declared, used) in [("é", "e\u{301}"), ("e\u{301}", "é"), ("e\u{301}", "e\u{301}")] {
+        assert_eq!(named(declared, used), alike.clone().map(Ok), "declared {declared:?}, used {used:?}");
+    }
+    let twice = |second: &str| format!("fn caf\u{e9}() {{}} fn {second}() {{}}");
+    let want = "1:17: `caf\u{e9}` names another function of the module as well";
+    for second in ["caf\u{e9}", "cafe\u{301}"] {
+        assert_eq!(kernite::x86_str(&twice(second), "k").unwrap_err(), want, "{second:?}");
+        assert_eq!(kernite::ptx_str(&twice(second)).unwrap_err(), want, "{second:?}");
+    }
+    let kernel = |declared: &str, given: &str| {
+        compile(&format!("unsafe extern \"sysv64\" fn caf{declared}() {{}}\n"), &format!("caf{given}"))
+    };
+    let own = kernel("\u{e9}", "\u{e9}").unwrap();
+    for (declared, given) in [("\u{e9}", "e\u{301}"), ("e\u{301}", "\u{e9}"), ("e\u{301}", "e\u{301}")] {
+        assert_eq!(kernel(declared, given), Ok(own.clone()), "declared {declared:?}, given {given:?}");
+    }
 }
 
 #[test]
@@ -133,6 +722,87 @@ fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
     // `_` names none, so two stay, as Rust takes them.
     let src = r#"pub unsafe extern "sysv64" fn k(_: u64, _: u64) {}"#;
     assert!(x86(src, "k").starts_with("# k(gpr, gpr) -> ()\n"), "{src}");
+}
+
+/// A `mut` before a parameter's name is taken and means nothing, in a function of every kind: a kernel compiles to the
+/// listing, or the PTX, of the same kernel without it. So it is for an x86 kernel, plain, of `#[instances(..)]` and
+/// `#[cooperative]`, and a helper; for a GPU kernel the same, and an `extern "ptx-func"` function; before one name and
+/// before each.
+#[test]
+fn a_mut_before_a_parameters_name_is_taken_and_means_nothing_in_a_function_of_every_kind() {
+    for (src, kernel) in [
+        (r#"pub unsafe extern "sysv64" fn k(MUTx: u64) -> u64 { add(x, 1); ret(x); }"#, "k"),
+        (r#"pub unsafe extern "sysv64" fn k(MUTa: u64, MUTb: u64) -> u64 { add(a, b); ret(a); }"#, "k"),
+        (r#"pub unsafe extern "sysv64" fn k(a: u64, MUTb: u64) -> u64 { add(a, b); ret(a); }"#, "k"),
+        (
+            r#"
+            #[instances(1, 2)]
+            pub unsafe extern "sysv64" fn k<const N: u64>(MUTx: u64) -> u64 { add(x, N); ret(x); }
+            "#,
+            "k::<2>",
+        ),
+        (
+            r#"
+            #[cooperative]
+            pub unsafe extern "sysv64" fn k(MUTx: u64, p: *mut u64) { grid.sync(); mov(qword[p], x); }
+            "#,
+            "k",
+        ),
+        (
+            r#"
+            pub unsafe extern "sysv64" fn k(x: u64) -> u64 { h(x); ret(x); }
+            fn h(MUTy: gpr) { add(y, 1); }
+            "#,
+            "k",
+        ),
+        (
+            r#"
+            pub unsafe extern "ptx-kernel" fn k(p: *mut u32, MUTx: u32) {
+                add.u32(x, x, 1);
+                st.global.u32([p], x);
+            }
+            "#,
+            "k",
+        ),
+        (
+            r#"
+            #[instances(1, 2)]
+            pub unsafe extern "ptx-kernel" fn k<const N: u32>(p: *mut u32, MUTx: u32) {
+                add.u32(x, x, N);
+                st.global.u32([p], x);
+            }
+            "#,
+            "k",
+        ),
+        (
+            r#"
+            #[cooperative]
+            pub unsafe extern "ptx-kernel" fn k(p: *mut u32, MUTx: u32) { grid.sync(); st.global.u32([p], x); }
+            "#,
+            "k",
+        ),
+        (
+            r#"
+            pub unsafe extern "ptx-kernel" fn k(p: *mut u32, x: u32) { h(x); st.global.u32([p], x); }
+            fn h(MUTy: u32) { add.u32(y, y, 1); }
+            "#,
+            "k",
+        ),
+        (
+            r#"
+            extern "ptx-func" fn f(MUTa: u32, MUTb: u32) -> u32 { add.u32(a, a, b); ret(a); }
+            pub unsafe extern "ptx-kernel" fn k(p: *mut u32, a: u32, b: u32) {
+                let r: u32;
+                call(r, f, (a, b));
+                st.global.u32([p], r);
+            }
+            "#,
+            "k",
+        ),
+    ] {
+        let without = compile(&src.replace("MUT", ""), kernel).unwrap_or_else(|e| panic!("{e}\n{src}"));
+        assert_eq!(compile(&src.replace("MUT", "mut "), kernel), Ok(without), "{src}");
+    }
 }
 
 /// `src` with each of `names` written raw, `u64` as `r#u64`, but not where it is a part of an instruction's name,
@@ -679,12 +1349,12 @@ fn a_name_rust_lets_be_written_raw_in_no_place_is_refused_at_its_r() {
 }
 
 /// An `r#` that no name follows is refused at the `r#`, wherever a name is written, whether a bracket, a colon, a
-/// dot or a `#` comes after it, or a space, a digit or a quote: none of these starts a name.
+/// dot or a `#` comes after it, or a space or a digit: none of these starts a name. A quote starts a raw string.
 #[test]
 fn an_r_that_no_name_follows_is_refused_at_its_r() {
     let said = "`r#` comes before a name, as in `r#u64`";
     let mut sources: Vec<String> = places().map(|place| place.replace("NAME", "r#")).collect();
-    for after in [" x", "9", "9x", "\"x\"", ".x", "#x"] {
+    for after in [" x", "9", "9x", ".x", "#x"] {
         sources.push(format!(r#"unsafe extern "sysv64" fn k(r#{after}: u64) -> u64 {{ ret(x); }}"#));
     }
     for src in sources {

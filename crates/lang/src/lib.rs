@@ -73,12 +73,34 @@
 //!   for each other at `grid.sync()`, a GPU kernel's blocks or an x86 kernel's threads, so that it
 //!   is launched with them all running at once. A GPU kernel's directives, `#[maxntid(16, 16)]`
 //!   and the like, give whole numbers known now, which the machine takes before the parameters.
+//! - **A `mut`** before a parameter's name, `fn f(mut x: u64)`, is taken and means nothing, in a function of every
+//!   kind: an instruction may write any variable.
 //! - **`for k in 0..n { .. }`** is unrolled, over a range, an array or variables.
 //!   **`if c { .. } else { .. }`** chooses now when `c` is a bool; when `c` is a predicate
 //!   variable it guards each instruction inside, `if !p` the other way.
 //! - **Labels** are placed by `label(top);` and named by jumps, before or after. Each block
 //!   numbers its labels afresh every time it runs, so a loop's body or a helper's gets new
-//!   ones each time. `note("acc {k}")` is a remark for the listing, `{name}` a value's.
+//!   ones each time. `note("acc {k}")` is a remark for the listing, `{name}` a value's, read as `format!` reads it, and
+//!   not in NFC: the name right after the `{`, and spaces only after it, before the `}`. The evaluator refuses braces
+//!   with no name, "a note has no arguments for `{}`: its braces hold a value's name, `{k}`", a space before the name,
+//!   "a note's name comes right after its `{`, with no space before it: `{k}`", and any other character in the braces,
+//!   shown as `format!` shows one, "unexpected `\u{200e}` in the braces of a note, which hold a name and then spaces".
+//!   A remark is one line: each line break in it, `\r\n`, `\n` or `\r`, is a space. A remark holds no NUL, written by
+//!   an escape, `\0`, `\x00` or `\u{0}`, or as the character, for `ptxas` reads a NUL as the end of the module: the
+//!   evaluator refuses it at the string, on every machine.
+//! - **Names** are what Rust reads as one: `_`, or a character of Unicode's XID_Start, then any of XID_Continue, in the
+//!   Unicode 17.0.0 of Rust 1.100, and read in NFC, so that each spelling of a name is that name. `a·b` and `a‿b` are
+//!   names; [`lex`] refuses a character that is no part of one where it stands, `a½` at the `½`, "unexpected `\u{bd}`".
+//! - **Spaces** are what Rust reads as one, U+0009 to U+000D, U+0020, U+0085, U+200E, U+200F, U+2028 and U+2029.
+//!   [`lex`] refuses each other character that Unicode calls a space, U+00A0, U+1680, U+2000 to U+200A, U+202F, U+205F
+//!   or U+3000, at the character, in words that show which it is: "unexpected `\u{a0}`".
+//! - **Strings** are plain or raw, as in Rust, for a note's text, `note(r#"a "b""#)`, and for a function's ABI,
+//!   `extern r"sysv64"`. A plain string takes the escapes that Rust reads, `\x41`, `\u{e9}` and a `\` that ends a line
+//!   among them, and [`lex`] refuses any other at its `\`. A raw string has no escapes, and ends at the first `"` that
+//!   has as many `#` after it as the string began with, 255 at most; [`lex`] refuses one that has more, or is never
+//!   closed, at its start. A CRLF in a string is read as a LF, as Rust reads it, and [`lex`] refuses a CR that no LF
+//!   follows, at the CR, in a string, plain or raw, and in a doc comment, as Rust does, but not in the white space that
+//!   a `\` that ends a line leaves out.
 //! - **Statics** are memory of the module's, of a type of the machine's that takes arguments,
 //!   `static COUNTS: global<[u32; 16]>;`, which each of its functions names, helpers among
 //!   them, as memory a function declares is named, and which keeps what they write from one
@@ -96,6 +118,7 @@ mod eval;
 mod parse;
 mod target;
 mod token;
+mod unicode;
 mod value;
 
 use std::fmt;
@@ -108,6 +131,7 @@ pub use eval::{Memory, Mention, Run, constant, instance, instances, kernel, memo
 pub use parse::{module, read};
 pub use target::{Fault, Guard, Mem, Operand, Target};
 pub use token::{Delim, Span, Tree, lex, never_raw, pointer, read_type, text, unraw};
+pub use unicode::nfc;
 pub use value::{IntTy, Value, with_article};
 
 /// Why a module does not compile, and where.

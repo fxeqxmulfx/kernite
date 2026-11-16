@@ -21,13 +21,14 @@ pub enum Absent<'a> {
     Kernel,
 }
 
-/// Function `name` of `module`, or its instance `tile::<4>`, compiled by `native`, or why not:
-/// where `name` names no instance of a function the process runs, [`Absent`] says why. The first
-/// static that is not laid out is the error, whatever the name; and a name of a function of an ABI
-/// kernite knows nothing of is the error at the ABI. Once the instance has compiled, what is wrong
-/// with the rest of the module is the error as well, as the macro says it: the module is two
-/// modules, a helper does not parse, a function names an ABI kernite knows nothing of, a kernel is
-/// not an `unsafe fn`, or a function's `#[cooperative]`, directive or `#[instances(..)]` is wrong.
+/// Function `name` of `module`, or its instance `tile::<4>`, in any spelling of the name, compiled
+/// by `native`, or why not: where `name` names no instance of a function the process runs,
+/// [`Absent`] says why. The first static that is not laid out is the error, whatever the name; and
+/// a name of a function of an ABI kernite knows nothing of is the error at the ABI. Once the
+/// instance has compiled, what is wrong with the rest of the module is the error as well, as the
+/// macro says it: the module is two modules, a helper does not parse, a function names an ABI
+/// kernite knows nothing of, a kernel is not an `unsafe fn`, or a function's `#[cooperative]`,
+/// directive or `#[instances(..)]` is wrong.
 pub fn one<'a, N: Native>(
     module: &'a Module,
     native: &N,
@@ -37,6 +38,7 @@ pub fn one<'a, N: Native>(
     for s in &prepared.statics {
         s.as_ref().map_err(Clone::clone)?;
     }
+    let name = &kernite_lang::nfc(name);
     let Some(f) = named(module, name) else { return Ok(Err(Absent::Kernel)) };
     let abi = abi_or_error(f)?;
     let found = instance(module, name)?;

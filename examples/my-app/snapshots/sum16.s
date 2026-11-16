@@ -9,7 +9,6 @@
     sub rsp, 32
     and rsp, -32
     mov rbx, rdi
-    mov rdi, rbx
     call {f0}
     # low spilled
     vmovups ymmword ptr [rsp], ymm0

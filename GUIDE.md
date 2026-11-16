@@ -241,6 +241,65 @@ they name a parameter `_`, and write the name no more. kernite refuses each wher
 name, as in `r#u64`", wherever a name is written, an attribute's too. Any other name can be written raw, a weak keyword
 or a reserved word as well, `r#union` and `r#gen`.
 
+A `mut` before a parameter's name is taken and means nothing, in a function of every kind: an instruction may write any
+variable, which Rust cannot see. So the macros write no `mut` for Rust, which would say that the variable does not need
+to be mutable, and in a naked function that patterns are not allowed there.
+
+A parameter named `self` or `Self`, written plain, is Rust's error as of any function that is no method, at the name,
+and nothing more: that `self` is only allowed in associated functions, or is unexpected where it is not the first
+parameter, or that `Self` is not found in this scope. So it is in a kernel of every kind, in a helper and in an
+`extern "ptx-func"` function, with `mut` before the name too, of which Rust says no more than of a function's: before
+`Self`, that `mut` must be followed by a named binding. The macros name it for Rust, as they name a parameter `_`, and
+give Rust a function of its own that never runs, to say it in. That function has `_` in the place of each other
+parameter, and each is of the type `()`, so Rust says nothing there of a type as written, that it cannot find `gpr` or
+that `f128` is unstable, nor that a parameter is unused.
+
+A space is what Rust reads as one: U+0009 to U+000D, U+0020, U+0085, U+200E, U+200F, U+2028 and U+2029, which Rust's
+lexer calls Pattern_White_Space. Each other character that Unicode calls a space, U+00A0, U+1680, U+2000 to U+200A,
+U+202F, U+205F or U+3000, is no space, as in Rust, and is refused at the character: "unexpected `\u{a0}`". A character
+that is not printable ASCII is shown in that error as Rust shows it, `\u{a0}`, and one that is, as it is.
+
+A name is what Rust reads as one: `_`, or a character that Unicode says starts an identifier, XID_Start, and then each
+that goes on one, XID_Continue, in the Unicode 17.0.0 of Rust 1.100. So `a·b`, `a‿b` and an `e` with U+0301 after it are
+names, and `a½` and `a²` are not: the name ends at the `a`, and the character after it is refused at the character,
+"unexpected `\u{bd}`". `·` and U+0301 go on a name and start none, so `·a` is refused at the `·`. A name is read in NFC,
+as Rust reads it, so each spelling of a name is that name: `café` with `é` as U+00E9 and with `e` and U+0301 is one
+helper, one variable, one const or one kernel, which `x86_str` finds by its name in either spelling. Two functions so
+named are refused as two of one spelling are, "`café` names another function of the module as well", and a listing
+writes the name in NFC.
+
+A string is plain or raw, as in Rust, wherever kernite takes one: a note's text, `note(r#"a "b""#)`, and the ABI of a
+function, `extern r"sysv64"`. A raw string has no escapes, and ends at the first `"` that has as many `#` after it as
+the string began with, so `r##"a "# b"##` holds a `"#`. A string that is never closed, plain or raw, is refused where it
+starts: "this string is never closed". So is a raw string of more than 255 `#`, as Rust refuses it. A CRLF in a string,
+plain or raw, is a LF, as Rust reads it. A CR that no LF follows is refused at the CR, as Rust refuses it, in a string,
+plain or raw, and in a doc comment: "a CR on its own is not allowed in a string, as in Rust: write `\r`", "a CR on its
+own is not allowed in a raw string, as in Rust" or "a CR on its own is not allowed in a doc comment, as in Rust". A
+comment that is no doc comment takes it, as Rust does, and so does a string that writes it by the escape `\r`.
+
+A plain string takes the escapes that Rust reads: `\n`, `\r`, `\t`, `\0`, `\\`, `\'` and `\"`; `\x41`, of two hex
+digits, 7f at most; `\u{e9}`, of one to six hex digits in braces, with `_` allowed after the first, that make a
+character; and a `\` that ends a line, which leaves out the line break and the spaces, tabs and line breaks after it, a
+CR on its own too. So `note("caf\u{e9}")` shows `café`, and `extern "sysv\x364"` is `sysv64`. Any other escape is
+refused at its `\`, as Rust refuses it, with one of three messages: "`\q` is no escape, as in Rust: a string has `\n`,
+`\r`, `\t`, `\0`, `\\`, `\'`, `\"`, `\x41`, `\u{e9}` and a `\` that ends a line", "`\x` takes two hex digits, 7f at
+most, as in Rust: write a greater character as `\u{80}`" or "`\u` takes one to six hex digits in braces, as `\u{e9}`, of
+a character: not d800 to dfff, and 10ffff at most, as in Rust".
+
+A note's text holds no NUL, on any machine, as `ptxas` reads a NUL as the end of the module. It is refused at the
+string, whether the NUL is an escape of a plain string, `\0`, `\x00` or `\u{0}`, or the character itself, in a plain or
+a raw string: "a NUL is not allowed in a note, on any machine: `ptxas` reads it as the end of the module".
+
+A note shows a value by its name in braces, `note("acc {k}")`, and reads the name as `format!` does: it comes right
+after the `{`, and spaces, as `char::is_whitespace` says, may come after it, before the `}`. So `{k }` shows `k`, and
+`{ k}` is refused at the string: "a note's name comes right after its `{`, with no space before it: `{k}`". A note has
+no arguments, so braces with no name in them, `{}` or `{ }`, are refused at the string too: "a note has no arguments for
+`{}`: its braces hold a value's name, `{k}`". Any other character in the braces is refused at the string, the `:` of a
+format too, `{k:x}`, for a note has none. It is shown as `format!` shows it, by `char::escape_debug`, so `§` as it is
+and U+200E, which shows as nothing, as `\u{200e}`: "unexpected `\u{200e}` in the braces of a note, which hold a name and
+then spaces". The name is not read in NFC, as `format!`'s is not: `{café}` with `é` as U+00E9 finds `café` declared in
+either spelling, and `{café}` with `e` and U+0301 finds neither.
+
 A macro's fragment is one operand, or one type, wherever kernite reads it, as Rust reads it. With `$n:expr` as `1 + 2`,
 `$n * 2` is 6, and not the 5 that `1 + 2 * 2` is. It is so in a kernel's expression, on x86 and on a GPU, under a `-`,
 in the length of an array, in `#[instances(..)]`, and in a const, which is 6 to Rust too. A `$t:ty` is one type in a

@@ -1330,11 +1330,32 @@ fn the_functions_docs_name_the_cpu_features_a_kernel_needs() {
 }
 
 /// The module's `LISTINGS` holds each x86 kernel's listing by its name, and an instance's by
-/// its name and arguments, as `plus::<2>`. The fixture asserts each, name and listing, as it
-/// builds.
+/// its name and arguments, as `plus::<2>`, and a note that breaks lines shows them as spaces. A note and an ABI of
+/// escapes, `\x41`, `\u{e9}` and `"sysv\x364"`, are what the escapes stand for. The fixture asserts each, name and
+/// listing, as it builds.
 #[test]
 fn listings_holds_each_kernels_listing_by_its_name() {
     builds_quietly("listings");
+}
+
+/// A NUL in a note is refused at the string, in a module of GPU kernels and in a module of x86 kernels, written by an
+/// escape or as the character, in a plain string and in a raw one, as `ptx_str` and `x86_str` refuse it: the module's
+/// path is not written in its place. Another control character is no trouble. The fixture has the NUL as `<NUL>`, which
+/// the test writes as a NUL before Cargo builds it, for git takes a file with a NUL in it for a binary.
+#[test]
+fn a_nul_in_a_note_is_refused_at_the_string_in_a_module_of_either_machine() {
+    let dir = written("nul_note");
+    let lib = dir.join("src/lib.rs");
+    fs::write(&lib, fs::read_to_string(&lib).unwrap().replace("<NUL>", "\0")).unwrap();
+    let (built, said) = cargo_in(&["build"], &dir);
+    assert!(!built, "Cargo built it");
+    let message = "a NUL is not allowed in a note, on any machine: `ptxas` reads it as the end of the module";
+    let mut want: Vec<String> = [9, 13, 17, 21, 25, 37, 41, 45, 49, 53]
+        .iter()
+        .map(|line| format!("src/lib.rs:{line}:14: error: {message}"))
+        .collect();
+    want.push("error: could not compile `nul_note` (lib) due to 10 previous errors".into());
+    assert_eq!(said, want, "Cargo said:\n{}", said.join("\n"));
 }
 
 /// `LISTINGS` holds the listings of the kernels `cfg` keeps, one for each instance of a kernel that
@@ -4180,6 +4201,19 @@ fn an_attribute_written_raw_is_the_attribute_written_plain() {
     );
 }
 
+/// A raw string is a string for kernite, as it is for Rust, where kernite takes one: a note's text, `note(r#"a "b""#)`,
+/// and a function's ABI, `extern r"sysv64"` and `extern r#"ptx-kernel"#`. Rust builds the crate without a word. An x86
+/// module written so has the listings of the one written with plain strings, each note as its text says, and runs as it
+/// does; a GPU module written so is the PTX of the one written with plain strings, and its kernel runs on a GPU.
+#[test]
+fn a_raw_string_is_a_string_for_a_note_and_for_an_abi() {
+    let printed = runs_quietly(&["test"], "raw_strings");
+    assert!(
+        printed.contains("test result: ok. 5 passed"),
+        "fixtures/raw_strings.rs ran its tests, and printed:\n{printed}"
+    );
+}
+
 /// An attribute kernite reads, written raw, is wrong as the plain one is: kernite's error alone, in the same words, at
 /// the same column of a line of its own. So it is for an `#[r#instances]` with no list; two `#[r#instances(..)]`,
 /// whichever way each is written, for the two are one attribute; an `#[r#cooperative(1)]`, which takes nothing; two
@@ -4342,18 +4376,65 @@ fn a_kernel_kernite_refuses_with_a_name_rust_refuses_raw_is_kernites_error_and_r
     refuses("raw_names_in_stubs", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
-/// A parameter named `self`, written plain, is Rust's error at the name, as it is for any function that is no method:
-/// the macros hand it on. It is the name written raw, `r#self`, that they name otherwise, for Rust to say its lexer's
-/// error alone.
+/// A parameter named `self` or `Self`, written plain, is Rust's error as of a function that is no method, at the name,
+/// once and alone, in a kernel of every kind: a GPU kernel, whose launcher is a method; an x86 kernel of instances,
+/// whose parameter may be of a type that names its generic, and a cooperative one, whose calls the macros write as text
+/// for Rust to lex again; and a plain one, a naked function. Of `self` Rust says it is only allowed in associated
+/// functions, and of one that is not the first parameter, that it is unexpected; of `Self`, that it is not found in
+/// this scope. A kernel that `cfg` leaves out says nothing. So it is in a helper and in an `extern "ptx-func"`
+/// function, for which the macros write no function, and with `mut` before the name: Rust does not say that patterns
+/// are not allowed in a naked function's parameters, and of `mut Self` it says too, as of any function, that `mut` must
+/// be followed by a named binding. Rust says nothing of the parameter's type: not that it cannot find a type of the
+/// language, `gpr` or `shared<[u32; 4], 16>`, nor that a type kernite refuses, `f128` or `[u64]`, is unstable or has no
+/// size, beside kernite's error; nor that a parameter beside it is unused.
 #[test]
-fn a_parameter_named_self_is_rusts_error_at_the_name() {
+fn a_parameter_named_self_or_upper_self_is_rusts_error_at_the_name() {
+    let only = "`self` parameter is only allowed in associated functions: not semantically valid as function parameter";
+    let not_found = "cannot find unit struct, unit variant or constant `Self` in this scope: not found in this scope";
     refuses(
-        "self_parameter",
+        "plain_self",
         &[
-            "src/lib.rs:7:41: error: `self` parameter is only allowed in associated functions: not semantically \
-             valid as function parameter",
-            "error: could not compile `self_parameter` (lib) due to 1 previous error",
+            "src/lib.rs:48:45: error: unexpected `self` parameter in function: must be the first parameter of an \
+             associated function",
+            "src/lib.rs:137:37: error: `mut` must be followed by a named binding",
+            "src/lib.rs:72:43: error: a kernel takes pointers, 64-bit integers and floats, not `f128`",
+            "src/lib.rs:76:43: error: a kernel takes pointers, 64-bit integers and floats, not `[u64]`",
+            "src/lib.rs:83:47: error: a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, `f32` and \
+             `f64`, not `f128`",
+            &format!("src/lib.rs:6:41: error: {only}"),
+            &format!("src/lib.rs:21:51: error: {only}"),
+            &format!("src/lib.rs:30:37: error: {only}"),
+            &format!("src/lib.rs:37:37: error: {only}"),
+            &format!("src/lib.rs:65:53: error: {only}"),
+            &format!("src/lib.rs:72:37: error: {only}"),
+            &format!("src/lib.rs:76:37: error: {only}"),
+            &format!("src/lib.rs:83:41: error: {only}"),
+            &format!("src/lib.rs:96:10: error: {only}"),
+            &format!("src/lib.rs:115:10: error: {only}"),
+            &format!("src/lib.rs:119:28: error: {only}"),
+            &format!("src/lib.rs:126:37: error: {only}"),
+            &format!("src/lib.rs:133:41: error: {only}"),
+            &format!("src/lib.rs:13:41: error[E0531]: {not_found}"),
+            &format!("src/lib.rs:41:37: error[E0531]: {not_found}"),
+            &format!("src/lib.rs:100:10: error[E0531]: {not_found}"),
+            &format!("src/lib.rs:137:41: error[E0531]: {not_found}"),
+            "error: could not compile `plain_self` (lib) due to 22 previous errors",
         ],
+    );
+}
+
+/// A `mut` before a parameter's name is taken and means nothing, in a kernel of every kind, a helper and a GPU
+/// function: Rust builds the crate without a word, under `#![deny(warnings)]`, where it said of a plain x86 kernel that
+/// patterns are not allowed in a naked function's parameters, at the `mut`, and of a GPU kernel and of an x86 kernel of
+/// instances that the variable does not need to be mutable. The tests the fixture holds run each kernel, the x86
+/// kernels and the GPU kernels on the GPU: each does what it does without the `mut`. `mut self` and `mut Self` stay
+/// Rust's error at the name, which the test above holds.
+#[test]
+fn a_mut_before_a_parameters_name_is_taken_and_means_nothing_in_a_function_of_every_kind() {
+    let printed = runs_quietly(&["test"], "mut_parameters");
+    assert!(
+        printed.contains("test result: ok. 2 passed"),
+        "fixtures/mut_parameters.rs ran its tests, and printed:\n{printed}"
     );
 }
 

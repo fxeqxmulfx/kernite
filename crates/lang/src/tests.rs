@@ -4,7 +4,7 @@
 //! rest of the language is tested where it meets the targets it is compiled for, in `kernite`'s
 //! `tests/lang.rs`.
 
-use crate::token::{Span, Tree};
+use crate::token::{Span, Tree, unescape};
 use crate::value::{IntTy, Value, article, cast, typed, with_article};
 use crate::{Mention, instance, parse};
 
@@ -25,8 +25,8 @@ fn the_lexer_refuses_a_name_written_raw_that_rust_refuses() {
         let src = format!("a r#{name} b");
         assert_eq!(error(&src), format!("1:3: `{name}` cannot be written raw"), "{src}");
     }
-    // No name after the `r#`: a space, the end, a bracket, a dot, a digit or a quote.
-    for src in ["a r# b", "a r#", "a r#(b)", "a r#.b", "a r#9", "a r#1x", "a r#\"x\""] {
+    // No name after the `r#`: a space, the end, a bracket, a dot or a digit. A quote begins a raw string.
+    for src in ["a r# b", "a r#", "a r#(b)", "a r#.b", "a r#9", "a r#1x"] {
         assert_eq!(error(src), "1:3: `r#` comes before a name, as in `r#u64`", "{src}");
     }
     let names = "r#u64 r#dyn r#union r#gen r#try r#_x r#__ r#selfie r#crate_ r#é self Self super crate _";
@@ -39,6 +39,200 @@ fn the_lexer_refuses_a_name_written_raw_that_rust_refuses() {
         })
         .collect();
     assert_eq!(idents, names.split(' ').collect::<Vec<_>>());
+}
+
+/// The text of each token of `src`, which are all literals.
+fn lits(src: &str) -> Vec<String> {
+    crate::lex(src)
+        .unwrap()
+        .into_iter()
+        .map(|tree| match tree {
+            Tree::Lit { text, .. } => text,
+            other => panic!("{src}: {other:?}"),
+        })
+        .collect()
+}
+
+/// A raw string is one token, as the macros are given it: it has no escape, and it ends at the first `"` that has as
+/// many `#` after it as the `r` has, so `r##"a "# b"##` holds a `"#`. One that is never closed is an error at its
+/// start, in the words of a plain string that is never closed. One of more than 255 `#` is an error at its start too,
+/// as in Rust.
+#[test]
+fn the_lexer_reads_a_raw_string_as_one_token() {
+    for lit in [
+        r#"r"hi""#,
+        r##"r#"hi"#"##,
+        r###"r##"a "# b"##"###,
+        r#"r"a\nb\""#,
+        r##"r#"a "quoted" {b}"#"##,
+        r#"r"""#,
+        r##"r#""#"##,
+        "r\"two\nlines\"",
+    ] {
+        assert_eq!(lits(lit), [lit], "{lit}");
+    }
+    // Each ends where Rust ends it, and the `#` after that is a token of its own.
+    assert_eq!(lits(r##"r#"a"# r"b" "c""##), [r##"r#"a"#"##, r#"r"b""#, r#""c""#]);
+    let trees = crate::lex("r#\"a\"##").unwrap();
+    assert!(matches!(&trees[..], [Tree::Lit { text, .. }, Tree::Punct { ch: '#', .. }] if text == "r#\"a\"#"));
+    let error = |src: &str| crate::lex(src).unwrap_err().at(src);
+    for src in [r#"r"hi"#, r##"r#"hi""##, r###"r##"hi"#"###, r#"r""#, r##"r#""##, r##"r#"hi"x"##] {
+        assert_eq!(error(&format!("a {src}")), "1:3: this string is never closed", "{src}");
+    }
+    assert_eq!(error(r#"a "hi"#), "1:3: this string is never closed");
+    // As in Rust, a raw string begins with 255 `#` at most.
+    let raw = |hashes: usize| format!("r{0}\"a\"{0}", "#".repeat(hashes));
+    assert_eq!(lits(&raw(255)), [raw(255)]);
+    assert_eq!(error(&format!("a {}", raw(256))), "1:3: a raw string has 255 `#` at most, as in Rust");
+    // A name that begins as a raw string is a name, and an `r` that ends a name, or stands alone, is no raw string.
+    let kinds = |src: &str| -> String {
+        let kind = |tree: &Tree| match tree {
+            Tree::Lit { .. } => 'l',
+            Tree::Ident { .. } => 'i',
+            _ => 'p',
+        };
+        crate::lex(src).unwrap().iter().map(kind).collect()
+    };
+    assert_eq!(kinds(r##"r#type bar#"x"# r "y""##), "iiplpil");
+}
+
+/// A string, plain or raw, is its text as the source has it, a CRLF in it too, the one after a `\` too, which the
+/// parser reads as a LF. A CR that no LF follows is an error at the CR, in a string, plain or raw, and in a doc
+/// comment, `///`, `//!`, `/**` and `/*!`, as Rust refuses it, at the end of the input too. In a comment that is no doc
+/// comment, `//`, `////`, `/*` and `/***`, it is taken, as Rust takes it. A comment within another is of the outer
+/// one's kind, as in Rust.
+#[test]
+fn a_cr_on_its_own_is_refused_in_a_string_and_a_doc_comment_and_a_crlf_in_a_string_stays() {
+    for src in ["\"a\r\nb\"", "r\"a\r\nb\"", "r#\"a\r\n\r\nb\"#", "\"a\\\r\n  b\"", "\"a\\r\\nb\"", "r\"a\\r\\nb\""] {
+        assert_eq!(lits(src), [src], "{src:?}");
+    }
+    let error = |src: &str| crate::lex(src).unwrap_err().at(src);
+    let words = |what: &str| format!("a CR on its own is not allowed in {what}, as in Rust");
+    let (string, raw, doc) = (words("a string") + ": write `\\r`", words("a raw string"), words("a doc comment"));
+    for (src, at, message) in [
+        ("a \"b\rc\"", "1:5", &string),
+        ("a \"b\r\"", "1:5", &string),
+        ("a \"b\r\nc\rd\"", "2:2", &string),
+        ("a \"b\\\rc\"", "1:6", &string),
+        ("a \"b\\\\\n\rc\"", "2:1", &string),
+        ("a r\"b\rc\"", "1:6", &raw),
+        ("a r#\"b\r\"#", "1:7", &raw),
+        ("a r\"b\r\ncc\rd\"", "2:3", &raw),
+        ("/// a\rb", "1:6", &doc),
+        ("/// a\r", "1:6", &doc),
+        ("a\r\n//! a\rb\n", "2:6", &doc),
+        ("/** a\rb */", "1:6", &doc),
+        ("/*! a\rb */", "1:6", &doc),
+        ("/**\r\n * a\r\n * b\r */", "3:5", &doc),
+        ("/** a /* b\rc */ d */", "1:11", &doc),
+    ] {
+        assert_eq!(error(src), format!("{at}: {message}"), "{src:?}");
+    }
+    // Never closed is told as it was, at the start of the string.
+    assert_eq!(error("a \"b\rc"), "1:3: this string is never closed");
+    assert_eq!(error("a r\"b\rc"), "1:3: this string is never closed");
+    // A comment that is no doc comment, and a CRLF that ends a line of a doc comment, hold nothing to refuse.
+    for src in [
+        "// a\rb",
+        "//// a\rb",
+        "/* a\rb */",
+        "/*** a\rb */",
+        "/* a /** b\rc */ d */",
+        "/// a\r\n",
+        "/** a\r\n b */",
+        "a // b\r\n\"c\"",
+    ] {
+        assert!(crate::lex(src).is_ok(), "{src:?}");
+    }
+}
+
+/// A plain string takes the escapes of Rust: `\n`, `\r`, `\t`, `\0`, `\\`, `\'` and `\"`; `\x41`, of two hex digits
+/// that make 7f at most; `\u{e9}`, of one to six hex digits in braces, with `_` after the first, that make a character;
+/// and a `\` that ends a line, which leaves out the line break, a CRLF too, and the white space after it, however many
+/// lines it spans, and a CR on its own in it. The lexer keeps each as written, and `unescape` gives the text.
+#[test]
+fn a_string_takes_the_escapes_that_rust_reads() {
+    for (body, text) in [
+        (r#"\n\r\t\0\\\'\""#, "\n\r\t\0\\'\""),
+        (r"\01\x7f\x7F\x41\x00", "\u{0}1\u{7f}\u{7f}A\u{0}"),
+        (r"\u{e9}\u{E9}\u{e_9}\u{e9_}\u{e__9___}\u{0e9}", "ééééé\u{e9}"),
+        (r"\u{000041}\u{0_0_0_0_4_1}\u{0}\u{e000}\u{10ffff}\u{1F600}", "AA\u{0}\u{e000}\u{10ffff}\u{1f600}"),
+        ("a\\\n    b", "ab"),
+        ("a\\\r\n    b", "ab"),
+        ("a\\\n\n\n  \t\r\n b", "ab"),
+        ("a\\\n\r b", "ab"),
+        ("a\\\r\n  \r", "a"),
+        ("a\\\n    ", "a"),
+        ("a\\\n\u{a0}b", "a\u{a0}b"),
+        ("a\r\nb\\\r\n  c\r\n", "a\nbc\n"),
+        (r"a\r\nb", "a\r\nb"),
+    ] {
+        let lit = format!("\"{body}\"");
+        assert_eq!(lits(&lit), [lit.as_str()], "{body:?}");
+        assert_eq!(unescape(body), Ok(text.to_string()), "{body:?}");
+    }
+    // A raw string has none, and each of its `\` stays.
+    assert_eq!(lits(r##"r"\q\x80\u{d800}" r#"\"#"##), [r#"r"\q\x80\u{d800}""#, r##"r#"\"#"##]);
+}
+
+/// Each escape that Rust refuses is an error at its `\`, `line:column` and all, and a string says which of three it is:
+/// one that is none, `\x` that has not two hex digits, 7f at most, and `\u` that has not one to six in braces that make
+/// a character, `_` after the first only. The first in a string is the one told, wherever the string is, though a CR on
+/// its own follows it.
+#[test]
+fn a_string_refuses_the_escapes_that_rust_refuses_at_the_escape() {
+    let error = |src: &str| crate::lex(src).unwrap_err().at(src);
+    let none = |c: &str| {
+        format!(
+            "`\\{c}` is no escape, as in Rust: a string has `\\n`, `\\r`, `\\t`, `\\0`, `\\\\`, `\\'`, `\\\"`, \
+             `\\x41`, `\\u{{e9}}` and a `\\` that ends a line"
+        )
+    };
+    let x = "`\\x` takes two hex digits, 7f at most, as in Rust: write a greater character as `\\u{80}`";
+    let u = "`\\u` takes one to six hex digits in braces, as `\\u{e9}`, of a character: not d800 to dfff, and \
+             10ffff at most, as in Rust";
+    for (src, at, message) in [
+        ("\"\\q\"", "1:2", none("q")),
+        ("a \"b\\ c\"", "1:5", none(" ")),
+        ("a \"b\\a\"", "1:5", none("a")),
+        ("a \"b\\1\"", "1:5", none("1")),
+        ("a \"b\\é\"", "1:5", none("é")),
+        ("a \"b\\\u{a0}\"", "1:5", none("\\u{a0}")),
+        ("a \"é\\q\"", "1:5", none("q")),
+        ("a \"b\nc\r\n\\q\"", "3:1", none("q")),
+        ("a \"b\\x80\"", "1:5", x.into()),
+        ("a \"b\\xff\"", "1:5", x.into()),
+        ("a \"b\\x4\"", "1:5", x.into()),
+        ("a \"b\\x\"", "1:5", x.into()),
+        ("a \"b\\xg1\"", "1:5", x.into()),
+        ("a \"b\\x4g\"", "1:5", x.into()),
+        ("a \"b\\x_1\"", "1:5", x.into()),
+        ("a \"b\\x+1\"", "1:5", x.into()),
+        ("a \"b\\x4é\"", "1:5", x.into()),
+        ("a \"b\\u{d800}\"", "1:5", u.into()),
+        ("a \"b\\u{dfff}\"", "1:5", u.into()),
+        ("a \"b\\u{110000}\"", "1:5", u.into()),
+        ("a \"b\\u{ffffff}\"", "1:5", u.into()),
+        ("a \"b\\u{}\"", "1:5", u.into()),
+        ("a \"b\\u00e9\"", "1:5", u.into()),
+        ("a \"b\\u\"", "1:5", u.into()),
+        ("a \"b\\u{e9\"", "1:5", u.into()),
+        ("a \"b\\u{_e9}\"", "1:5", u.into()),
+        ("a \"b\\u{_}\"", "1:5", u.into()),
+        ("a \"b\\u{0000041}\"", "1:5", u.into()),
+        ("a \"b\\u{0_0_0_0_0_4_1}\"", "1:5", u.into()),
+        ("a \"b\\u{g}\"", "1:5", u.into()),
+        ("a \"b\\u{ e9}\"", "1:5", u.into()),
+        ("a \"b\\u{e9 }\"", "1:5", u.into()),
+        ("a \"b\\u{+e9}\"", "1:5", u.into()),
+        ("a \"\\x41\\q\\x80\"", "1:8", none("q")),
+        ("a \"\\q\rb\"", "1:4", none("q")),
+        ("a \"b\" \"c\\x80\"", "1:9", x.into()),
+    ] {
+        assert_eq!(error(src), format!("{at}: {message}"), "{src:?}");
+    }
+    // A string that is never closed is told so, whatever is in it.
+    assert_eq!(error("a \"b\\q"), "1:3: this string is never closed");
 }
 
 /// The tokens of `src`, a source with lifetimes in it, as `for<'a> fn(&'a u8)` has. The lexer of a

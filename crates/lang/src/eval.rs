@@ -5,7 +5,8 @@ use std::rc::Rc;
 
 use crate::ast::{BinOp, Block, Const, Expr, Fn, Generic, ItemKind, Module, Static, Stmt, Type, UnOp};
 use crate::target::{Fault, Guard, Mem, Operand, Target};
-use crate::token::{Span, unraw};
+use crate::token::{Span, starts_name, unraw};
+use crate::unicode::is_xid_continue;
 use crate::value::{self, Value, Want};
 use crate::{DEPTH, Error, nested};
 
@@ -1281,6 +1282,12 @@ impl<'a, T: Target> Eval<'a, T> {
         let [Expr::Str(text, sspan)] = args else {
             return Err(err(span, "`note` takes a string, as in `note(\"the lanes\")`"));
         };
+        if text.contains('\0') {
+            return Err(err(
+                *sspan,
+                "a NUL is not allowed in a note, on any machine: `ptxas` reads it as the end of the module",
+            ));
+        }
         let mut out = String::new();
         let mut rest = text.as_str();
         while let Some(i) = rest.find(['{', '}']) {
@@ -1295,7 +1302,7 @@ impl<'a, T: Target> Eval<'a, T> {
             let Some(close) = close else {
                 return Err(err(*sspan, "a `{` in a note opens a name and a `}` closes it; `{{` and `}}` are braces"));
             };
-            let name = tail[1..close].trim();
+            let name = braced(&tail[1..close]).map_err(|message| err(*sspan, message))?;
             match self.lookup(name, *sspan)? {
                 Some(Binding::Value(v)) => {
                     self.step(value::held(&v), *sspan)?;
@@ -1379,6 +1386,26 @@ impl<'a, T: Target> Eval<'a, T> {
             self.bind(&p.name, b);
         }
         Ok(())
+    }
+}
+
+/// The name between the braces of a note, `inner`, as `format!` reads one: a name of Rust's right after the `{`, then
+/// any spaces, as `char::is_whitespace` says, and nothing more.
+fn braced(inner: &str) -> Result<&str, String> {
+    let end =
+        if inner.starts_with(starts_name) { inner.find(|c| !is_xid_continue(c)).unwrap_or(inner.len()) } else { 0 };
+    let (name, rest) = inner.split_at(end);
+    match rest.trim_start().chars().next() {
+        None if name.is_empty() => {
+            Err("a note has no arguments for `{}`: its braces hold a value's name, `{k}`".into())
+        }
+        None => Ok(name),
+        Some(_) if inner.starts_with(char::is_whitespace) => {
+            Err("a note's name comes right after its `{`, with no space before it: `{k}`".into())
+        }
+        Some(c) => {
+            Err(format!("unexpected `{}` in the braces of a note, which hold a name and then spaces", c.escape_debug()))
+        }
     }
 }
 

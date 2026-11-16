@@ -17,7 +17,8 @@ const CUDA: &str = "kernite-cuda";
 
 /// Where the module's path goes in its PTX and in its kernels' names. A macro is not told
 /// the module it is in, so `kernite_cuda::__named!` writes `module_path!()` there once Rust
-/// knows it, as C++ mangles a namespace's names.
+/// knows it, as C++ mangles a namespace's names. It is a NUL, which the PTX holds nowhere else:
+/// kernite refuses one in a note, the one place where a kernel's source could put one.
 pub(crate) const HOLE: &str = "\0";
 
 /// What a kernel's instance is: its compile-time arguments, none for a kernel that takes

@@ -712,6 +712,74 @@ fn the_builder_writes_an_index_with_no_base() {
     encode("builder", &cases);
 }
 
+/// Text with each line break, `\r\n`, `\n` and `\r`, and what it is on one line: each line break a space of its own,
+/// one at either end too, and `\r\n` one line break and not two.
+const LINE_BREAKS: [(&str, &str); 6] = [
+    ("a\nint3", "a int3"),
+    ("a\r\nint3", "a int3"),
+    ("a\rint3", "a int3"),
+    ("\na\n\nint3\r\n", " a  int3 "),
+    ("\r\n\r\n\r\r\n\n", "     "),
+    ("\ra\r\r\n\nint3\n", " a   int3 "),
+];
+
+/// A note of the builder is one line, as a kernel's note is: each line break in it, `\r\n`, `\n` or `\r`, is a space,
+/// so that no text of it is code to an assembler, as `int3` would be on a line of its own.
+#[test]
+fn a_line_break_in_the_builders_note_is_a_space() {
+    for (text, shown) in LINE_BREAKS {
+        let mut a = Asm::new("k");
+        a.note(text);
+        a.ret();
+        let listing = intel::print(&kernite_compile::compile(&a.finish(), &SysV).unwrap(), vec![]).unwrap();
+        let want = format!("# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # {shown}\n    ret\n");
+        assert_eq!(listing.text(), want, "{text:?}");
+        assert_eq!(listing.code().collect::<Vec<_>>(), ["ret"], "{text:?}");
+    }
+}
+
+/// The name of a kernel, a parameter, a variable and a slot of the builder is one line, as a note is, in the header, in
+/// the line of each variable and of each slot, and in the note of a spill, so that no text of it is code to an
+/// assembler.
+#[test]
+fn a_line_break_in_the_builders_names_is_a_space() {
+    // A kernel of a parameter, a slot that nothing uses and twenty variables alive at once, the first of which spills.
+    let print = |kernel: &str, param: &str, var: &str, slot: &str| {
+        let mut a = Asm::new(kernel);
+        let p = a.param(param);
+        a.slot(slot, 8, 8);
+        let vars: Vec<_> = (0..20).map(|i| a.gpr(if i == 0 { var.to_string() } else { format!("v{i}") })).collect();
+        for (i, &v) in vars.iter().enumerate() {
+            a.mov(v, p);
+            a.add(v, i as i32);
+        }
+        let all = a.gpr("all");
+        a.mov(all, p);
+        for &v in &vars {
+            a.or_reg(all, v);
+        }
+        a.ret();
+        intel::print(&kernite_compile::compile(&a.finish(), &SysV).unwrap(), vec![]).unwrap()
+    };
+    for (text, shown) in LINE_BREAKS {
+        let broken = print(&format!("k{text}"), &format!("p{text}"), &format!("x{text}"), &format!("s{text}"));
+        let spaced = print(&format!("k{shown}"), &format!("p{shown}"), &format!("x{shown}"), &format!("s{shown}"));
+        assert_eq!(broken.text(), spaced.text(), "{text:?}");
+        // What the comparison alone leaves open: that each name is in the listing where it is written.
+        let listing = broken.text();
+        for want in [
+            format!("# k{shown}(gpr) -> ()\n"),
+            format!("p{shown}=rdi"),
+            format!("# s{shown}: 8 bytes at "),
+            format!("# x{shown}, spilled: 8 bytes at "),
+            format!("    # x{shown} spilled\n"),
+            format!("    # x{shown} reloaded\n"),
+        ] {
+            assert!(listing.contains(&want), "{want:?} is not in\n{listing}");
+        }
+    }
+}
+
 /// The builder takes no more of an immediate than x86 reads, nor a scale x86 has not, as the
 /// language does not.
 #[test]
@@ -1915,7 +1983,8 @@ fn a_function_calls_itself_with_its_arguments_where_sysv_passes_them() {
 
 /// A call changes the registers SysV lets it, all but rbx, rbp and r12 to r15: an integer
 /// live across one is kept in rbx, which the kernel saves for its own caller; a vector, of
-/// which the call may change any, is spilled to the frame.
+/// which the call may change any, is spilled to the frame. A value moved to rbx is not moved back to the register it
+/// came from, which still has it for the call to take.
 #[test]
 fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
     let want = "# plus(gpr) -> gpr
@@ -1923,7 +1992,6 @@ fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
 # x=rbx,rdi y=rax b=rsi
     push rbx
     mov rbx, rdi
-    mov rdi, rbx
     mov rsi, 6
     call {f0}
     add rax, rbx
@@ -1984,7 +2052,6 @@ fn a_call_through_a_gpr_calls_one_of_the_functions_taken_together_last() {
 # a=rsi,rdi fp=rax r=rax
     mov rsi, rdi
     lea rax, [rip + {f0}]
-    mov rdi, rsi
     jmp rax
 # f0: gcd
 ";
@@ -2128,8 +2195,8 @@ fn a_call_that_ret_follows_is_a_jump_after_the_frame_is_taken_down() {
             "let (r, fp): (gpr, gpr); lea(fp, [gcd]); call(r, fp, (x, x), (gcd, gcd)); call(r, fp, (r, r), (gcd, \
              gcd)); ret(r);"
                 .to_string(),
-            "push rbx\nmov rsi, rdi\nlea rbx, [rip + {f0}]\nmov rdi, rsi\ncall rbx\nmov rdi, rax\nmov rsi, rax\nmov \
-             r11, rbx\npop rbx\njmp r11"
+            "push rbx\nmov rsi, rdi\nlea rbx, [rip + {f0}]\ncall rbx\nmov rdi, rax\nmov rsi, rax\nmov r11, rbx\npop \
+             rbx\njmp r11"
                 .to_string(),
         ),
         (
@@ -2144,8 +2211,8 @@ fn a_call_that_ret_follows_is_a_jump_after_the_frame_is_taken_down() {
             "let r: gpr; test(x, x); jz(out); call(r, gcd, (x, x)); ret(r); label(out); call(r, gcd, (x, 1)); \
              add(r, 1); ret(r);"
                 .to_string(),
-            "sub rsp, 8\nmov rsi, rdi\ntest rsi, rsi\njz 2f\nmov rdi, rsi\nadd rsp, 8\njmp {f0}\n2:\nmov rdi, rsi\nmov \
-             rsi, 1\ncall {f0}\nadd rax, 1\nadd rsp, 8\nret"
+            "sub rsp, 8\nmov rsi, rdi\ntest rsi, rsi\njz 2f\nadd rsp, 8\njmp {f0}\n2:\nmov rdi, rsi\nmov rsi, 1\ncall \
+             {f0}\nadd rax, 1\nadd rsp, 8\nret"
                 .to_string(),
         ),
     ];
@@ -2168,20 +2235,20 @@ fn a_call_stays_one_where_a_jump_would_not_do_what_it_does() {
             "x: u64",
             " -> u64",
             "let r: gpr; call(r, gcd, (x, x)); add(r, 1); ret(r);",
-            "sub rsp, 8\nmov rsi, rdi\nmov rdi, rsi\ncall {f0}\nadd rax, 1\nadd rsp, 8\nret",
+            "sub rsp, 8\nmov rsi, rdi\ncall {f0}\nadd rax, 1\nadd rsp, 8\nret",
         ),
         (
             "x: u64",
             " -> u64",
             "call(_, gcd, (x, x)); ret(x);",
-            "push rbx\nmov rbx, rdi\nmov rdi, rbx\nmov rsi, rbx\ncall {f0}\nmov rax, rbx\npop rbx\nret",
+            "push rbx\nmov rbx, rdi\nmov rsi, rbx\ncall {f0}\nmov rax, rbx\npop rbx\nret",
         ),
         (
             "x: u64, m: *mut u32",
             " -> u64",
             "let r: gpr; vldmxcsr([m]); call(r, gcd, (x, x)); ret(r);",
             "push rbp\nmov rbp, rsp\nsub rsp, 16\nmov rax, rdi\nvstmxcsr dword ptr [rsp]\nvldmxcsr dword ptr \
-             [rsi]\nmov rdi, rax\nmov rsi, rax\ncall {f0}\nvldmxcsr dword ptr [rsp]\nmov rsp, rbp\npop rbp\nret",
+             [rsi]\nmov rsi, rax\ncall {f0}\nvldmxcsr dword ptr [rsp]\nmov rsp, rbp\npop rbp\nret",
         ),
         (
             "x: u64",
@@ -2218,8 +2285,8 @@ fn a_call_passes_what_its_callee_takes() {
                 xmm0\npop rbx\nret";
     assert_eq!(code, want);
     let code = calling("x: *mut f64", "", "let v: ymm; call(v.xmm, scale, (2.5f64, x)); vmovq([x], v.xmm);").unwrap();
-    let want = "push rbx\nmov rbx, rdi\nvmovq xmm0, qword ptr [rip + {c0}]\nmov rdi, rbx\ncall {f0}\nvmovq qword ptr \
-                [rbx], xmm0\npop rbx\nret";
+    let want = "push rbx\nmov rbx, rdi\nvmovq xmm0, qword ptr [rip + {c0}]\ncall {f0}\nvmovq qword ptr [rbx], \
+                xmm0\npop rbx\nret";
     assert_eq!(code, want);
 }
 

@@ -22,7 +22,7 @@ use crate::gpu::{HOLE, gpu};
 use crate::room;
 use crate::rust::{
     cfg_of, error, error_under, flatten, for_rust, from_inside, grouped, inner_attribute, lex, name_at, parse,
-    passable, position, seen, site, stub, takes,
+    passable, position, seen, site, stub, takes, unnamed,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
@@ -86,10 +86,20 @@ pub(crate) fn expand(
         .map(|(_, path)| kernite::Given { before: n, from: path.iter().map(TokenTree::to_string).collect() });
     let made = kernite::module(module, consts, refused, &scope);
     let module = &made.module;
-    // Every signature the macros write has the names Rust can be given.
-    for item in &module.items {
-        if let ItemKind::Fn(f) = &item.kind {
-            passable(&mut top, f);
+    // The `cfg` of each item, what is kept of its attributes, and the condition it says. An item says
+    // what is wrong with it under its `cfg`, as what is written for it is: Rust says nothing of a
+    // function it leaves out.
+    let cfgs: Vec<TokenStream> = module.items.iter().map(|item| cfg_of(item, &top)).collect();
+    // Every signature the macros write has the names Rust can be given. A parameter named `self` or `Self` is Rust's
+    // error as of a function that is no method, said by a function of its own that never runs, under the `cfg` of the
+    // function that has it.
+    let mut free = TokenStream::new();
+    for (item, cfg) in module.items.iter().zip(&cfgs) {
+        if let ItemKind::Fn(f) = &item.kind
+            && let Some(stub) = passable(&mut top, f)
+        {
+            free.extend(cfg.clone());
+            free.extend(stub);
         }
     }
     // The module's own attributes, `#![..]`, before anything the macro writes, where Rust has
@@ -108,10 +118,7 @@ pub(crate) fn expand(
         out.extend(take(&made, &top, path));
     }
     out.extend(made.owner.as_ref().map(said));
-    // The `cfg` of each item, what is kept of its attributes, and the condition it says. An item says
-    // what is wrong with it under its `cfg`, as what is written for it is: Rust says nothing of a
-    // function it leaves out.
-    let cfgs: Vec<TokenStream> = module.items.iter().map(|item| cfg_of(item, &top)).collect();
+    out.extend(free);
     let conds: Vec<Cond> = cfgs.iter().map(Cond::of).collect();
     // Where `cfg` keeps what a part of the GPU's module is of: the code of an item, or a static of the GPU's.
     let kept = |device: &DeviceOut, it: Kept| match it {
@@ -249,9 +256,7 @@ pub(crate) fn expand(
     out.extend(room::carrier(fields, shown));
     out.extend(left_out);
     if !reads.is_empty() {
-        out.extend(parse("const _: () ="));
-        out.extend([TokenTree::Group(Group::new(Delimiter::Brace, reads))]);
-        out.extend(parse(";"));
+        out.extend(unnamed(reads));
     }
     out.extend(tail);
     out

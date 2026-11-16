@@ -1651,7 +1651,7 @@ impl Target for Kernel {
     }
 
     fn note(&mut self, text: &str) {
-        self.p.body.push(Item::Note(text.to_string()));
+        self.p.body.push(Item::note(text));
     }
 
     fn inst(&mut self, name: &str, args: &[Given<Var>], guard: Option<Guard<Var>>) -> Result<(), Fault> {
