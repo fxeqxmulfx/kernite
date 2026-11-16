@@ -830,6 +830,14 @@ cost: it reads the address from the module's constant memory, where the address 
 driver's, and its instructions are the same. It holds zeros, so a value is an error. The host reads and writes it as it
 does a static in the module. Its address takes 8 bytes of the 64 KB.
 
+A static is memory on the GPU, and no symbol or code of the host's, so the method that gives it has the attributes that
+say how Rust has it, and no other: a doc, `cfg`, `deprecated`, the level of a lint, `allow`, `warn`, `deny`, `forbid` or
+`expect`, and a `rustfmt` attribute, each alone or in a `cfg_attr(..)`, whatever its condition. kernite refuses any
+other, as an error at its name, which says that the static is memory on the GPU, which the attribute is not for:
+`#[unsafe(no_mangle)]`, `#[unsafe(export_name = ..)]`, `#[unsafe(link_section = ..)]` and `#[used]` are for a symbol of
+the host's, `#[cold]` and `#[track_caller]` for its code, and the rest of Rust's for an item of its own. A static of x86
+kernels is a `static` of Rust's, and its attributes are Rust's.
+
 A kernel whose blocks wait for each other is `#[cooperative]`, and its `grid.sync()` waits until every thread of the
 grid has come to it, as CUDA's does. The driver launches it cooperatively, every block of the grid at once, so what a
 thread keeps in its registers, or a block in its shared memory, lasts across the wait, where two kernels would write it

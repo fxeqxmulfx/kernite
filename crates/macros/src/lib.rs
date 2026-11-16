@@ -59,19 +59,23 @@
 //!   - In a module of GPU kernels it is on the GPU, declared once in `PTX`. `Kernels` has a
 //!     method of its name that gives it there, a `kernite_cuda::Global` of the type of Rust's its
 //!     elements are read as, `u32` for a `b32`, for the host to read and write:
-//!     `kernels.COUNTS().read()?`. A module of statics alone is the GPU's. The statics together
-//!     fit the module: it has 64 KB of constant memory, and the error is at the type of a static that does not fit
-//!     beside the statics before it that fit. A static of global memory that the module has no room for, as `ptxas`
-//!     writes its size in 32 bits, is outside it: kernite-cuda allocates it when it loads the module. The room is that
-//!     of the statics `cfg` keeps, counted as Rust leaves them: the macro writes a struct with a field for each static,
-//!     under the static's `cfg`, and a derive of `kernite-macros` counts the fields that are there. A crate with a
-//!     static in such a module needs a dependency named `kernite-macros` as well, not renamed in `Cargo.toml`, and the
-//!     error is at the module when it has none and `cfg` keeps a static.
+//!     `kernels.COUNTS().read()?`. The static is memory on the GPU, and no symbol or code of the host's, so the method
+//!     has the attributes that say how Rust has it, each alone or in a `cfg_attr(..)`: a doc, `cfg`, `deprecated`, the
+//!     level of a lint, and a `rustfmt` attribute. Any other is an error at its name, `#[unsafe(no_mangle)]` or
+//!     `#[cold]` say, and the method does not have it. A module of statics alone is the GPU's. The statics together fit
+//!     the module: it has 64 KB of constant memory, and the error is at the type of a static that does not fit beside
+//!     the statics before it that fit. A static of global memory that the module has no room for, as `ptxas` writes its
+//!     size in 32 bits, is outside it: kernite-cuda allocates it when it loads the module. The room is that of the
+//!     statics `cfg` keeps, counted as Rust leaves them: the macro writes a struct with a field for each static, under
+//!     the static's `cfg`, and a derive of `kernite-macros` counts the fields that are there. A crate with a static in
+//!     such a module needs a dependency named `kernite-macros` as well, not renamed in `Cargo.toml`, and the error is
+//!     at the module when it has none and `cfg` keeps a static.
 //!   - In a module of x86 kernels it is in the process's memory, which the kernels reach at a
 //!     displacement from `rip`, `[COUNTS + 8]`: a `static` of Rust's, a `kernite_cpu::Global` of
 //!     its elements, for the host to read and write: `cpu::COUNTS.read()`. A crate with a static
 //!     in such a module needs a dependency named `kernite-cpu` for it, not renamed in
-//!     `Cargo.toml`, and the error is at the static when it has none.
+//!     `Cargo.toml`, and the error is at the static when it has none. It has the attributes it is written with, as any
+//!     static of Rust's does.
 //!   - A module of both kinds of kernel and a static is an error: it is two modules, one of
 //!     each kind of kernel, with the statics each names.
 //! - A function without an ABI is a helper, inlined where a kernel calls it, and leaves no

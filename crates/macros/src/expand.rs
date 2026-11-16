@@ -18,7 +18,7 @@ use kernite::lang::{self, ItemKind};
 use kernite::{DeviceOut, ItemOut, Kept, ModuleOut};
 
 use crate::cond::Cond;
-use crate::gpu::{HOLE, gpu};
+use crate::gpu::{HOLE, gpu, refused_attrs};
 use crate::room;
 use crate::rust::{
     cfg_of, error, error_under, flatten, for_rust, from_inside, grouped, inner_attribute, lex, name_at, parse,
@@ -168,6 +168,7 @@ pub(crate) fn expand(
             }
             (ItemKind::Static(s), ItemOut::DeviceStatic(laid)) => {
                 out.extend(laid.as_ref().err().and_then(|failed| failed.error.as_ref()).map(said));
+                out.extend(refused_attrs(s, cfg, &top));
                 memory.push((s, laid, conds[i].clone()));
                 on_gpu.push(conds[i].clone());
                 if let Ok(laid) = laid {

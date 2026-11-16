@@ -8,8 +8,9 @@ use kernite::{Compiled, DeviceStatic, Failed, Launcher};
 
 use crate::cond::Cond;
 use crate::rust::{
-    asks, attrs, carried, clashes, depends_on, error_under, half, host, hygienic, launcher_result, missing, never,
-    number_type, parse, pick, pointer, primitive, ptr_type, quiet, refused, site, visibility, written_params,
+    self, asks, attrs, carried, clashes, depends_on, error_under, filtered, flatten, half, host, hygienic, is_punct,
+    launcher_result, missing, never, number_type, parse, pick, pointer, primitive, ptr_type, quiet, refused, site,
+    visibility, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -148,9 +149,10 @@ pub(crate) fn gpu(
 /// The method that gives static `s`'s memory on the GPU, `laid`, by its index `i` among the
 /// module's variables, an expression, as the `kernite_cuda::Global` of the type of Rust's its
 /// elements are read as; or one that never runs, for a static that did not compile: of the type
-/// its elements are read as, if only what the static holds is wrong, and of any type if not.
+/// its elements are read as, if only what the static holds is wrong, and of any type if not. It has the attributes of
+/// the static that [`static_attrs`] says it takes.
 fn accessor(s: &lang::Static, laid: &Laid, i: String, top: &[TokenTree]) -> TokenStream {
-    let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
+    let mut out = static_attrs(s, top).0;
     out.extend(top[s.vis.clone()].iter().cloned());
     out.extend(parse("fn"));
     // Its name as written, after `static`, where it is but of the macro's span: Rust lints the case
@@ -167,6 +169,50 @@ fn accessor(s: &lang::Static, laid: &Laid, i: String, top: &[TokenTree]) -> Toke
         None => format!("<T: ::kernite_cuda::Plain>(&self) -> ::kernite_cuda::Global<'_, T> {{ {body} }}"),
     }));
     out
+}
+
+/// The attributes of GPU static `s`, which its method takes, and, of the rest, each one's name, a raw one plain, and
+/// where it is. The static is memory on the GPU, and no symbol or code of the host's, so its method takes what says how
+/// Rust has it, and no other attribute: a doc, `cfg`, `deprecated`, the level of a lint, `allow`, `warn`, `deny`,
+/// `forbid` or `expect`, and a `rustfmt` attribute, each alone or in a `cfg_attr(..)`, whatever its condition. The
+/// others are for what the static is not: `no_mangle`, `export_name`, `link_section` and `used` for a symbol, `cold`
+/// and `track_caller` for code, and the rest of Rust's for an item of its own. `unsafe(no_mangle)` is `no_mangle`.
+fn static_attrs(s: &lang::Static, top: &[TokenTree]) -> (TokenStream, Vec<(Span, String)>) {
+    let mut refused = vec![];
+    let taken = filtered(top[s.attrs.clone()].iter().cloned(), &mut |meta| {
+        let [first, ..] = &meta[..] else { return None };
+        let at = first.span();
+        let takes = ["doc", "cfg", "deprecated", "allow", "warn", "deny", "forbid", "expect", "rustfmt"];
+        if takes.iter().any(|name| rust::named(first, name)) {
+            return Some(meta);
+        }
+        let attr = match &meta[..] {
+            [wrapper, TokenTree::Group(inner)] if rust::named(wrapper, "unsafe") => flatten(inner.stream()),
+            _ => meta,
+        };
+        // The name, which may be a path, `a::b`, up to its arguments or its value.
+        let path: Vec<&TokenTree> =
+            attr.iter().take_while(|t| matches!(t, TokenTree::Ident(_)) || is_punct(t, ':')).collect();
+        let written = path.iter().map(|t| lang::unraw(&t.to_string()).to_string()).collect();
+        refused.push((path.first().map_or(at, |t| t.span()), written));
+        None
+    });
+    (taken, refused)
+}
+
+/// The error at each attribute of GPU static `s` that its method does not take, under `cfg`, the static's own: where
+/// `cfg` leaves the static out, it says nothing. It says what the static is, by its name as written, `r#type` as well,
+/// and what it takes instead.
+pub(crate) fn refused_attrs(s: &lang::Static, cfg: &TokenStream, top: &[TokenTree]) -> TokenStream {
+    let name = &top[s.vis.end + 1];
+    let said = |(at, attr): (Span, String)| {
+        let message = format!(
+            "`{name}` is memory on the GPU, which `{attr}` is not for: a static of GPU kernels takes a doc, `cfg`, \
+             `deprecated`, the level of a lint, and a `rustfmt` attribute, alone or in a `cfg_attr(..)`"
+        );
+        error_under(cfg, at, &message)
+    };
+    static_attrs(s, top).1.into_iter().map(said).collect()
 }
 
 /// The constant that is the `parts` of a text joined, each under its condition, with the module's

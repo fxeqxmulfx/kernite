@@ -4553,6 +4553,87 @@ fn an_inline_attribute_on_a_const_is_rusts_error() {
     );
 }
 
+/// An attribute on a static of GPU kernels that is not for memory on the GPU is kernite's error alone, once, at the
+/// attribute's name, in the same words for each but the static's name, as written, and the attribute's, a raw one
+/// plain. So it is for an attribute of a symbol: `#[unsafe(no_mangle)]`, `#[unsafe(export_name = ..)]`,
+/// `#[unsafe(link_section = ..)]` and `#[used]`, which the static's method, `Kernels::COUNTS`, would have exported,
+/// placed or kept as its own; for one of the host's code, `#[cold]` and `#[track_caller]`; and for any other: one of
+/// Rust's, `#[must_use]`, `#[derive(..)]` and `#[repr(..)]`, one of a tool that is not `rustfmt`,
+/// `#[clippy::cognitive_complexity = ..]`, and one that nothing reads. Rust says nothing, for the method is written
+/// without the attribute: a use of it in Rust, outside the module, is no error. It is the same for the attribute
+/// written raw; in a `cfg_attr(..)`, whatever its condition, beside one the method takes, and inside another
+/// `cfg_attr(..)`; for each attribute of a static; and for a constant, which is memory on the GPU as global memory is.
+/// A static that `cfg` leaves out says nothing.
+#[test]
+fn an_attribute_that_is_not_for_memory_on_the_gpu_is_kernites_error_alone() {
+    // The line and the column of each attribute's name, the static it is on, as written, and the attribute's name.
+    let refused: [(u32, u32, &str, &str); 22] = [
+        (8, 14, "COUNTS", "no_mangle"),
+        (14, 14, "COUNTS", "export_name"),
+        (20, 14, "COUNTS", "link_section"),
+        (26, 7, "COUNTS", "cold"),
+        (32, 7, "COUNTS", "track_caller"),
+        (38, 7, "COUNTS", "used"),
+        (46, 7, "r#type", "used"),
+        (49, 14, "RAW_UNSAFE", "no_mangle"),
+        (52, 30, "HOLDS", "no_mangle"),
+        (55, 23, "FALSE", "used"),
+        (58, 63, "BESIDE", "used"),
+        (61, 39, "NESTED", "cold"),
+        (69, 7, "MUST_USE", "must_use"),
+        (72, 7, "DERIVE", "derive"),
+        (75, 7, "REPR", "repr"),
+        (78, 7, "CLIPPY", "clippy::cognitive_complexity"),
+        (81, 7, "UNKNOWN", "nothing_reads_this"),
+        (90, 7, "MANY", "used"),
+        (92, 7, "MANY", "cold"),
+        (95, 7, "WEIGHTS", "used"),
+        (103, 7, "HERE", "used"),
+        (111, 7, "COUNTS", "used"),
+    ];
+    let mut said: Vec<String> = refused
+        .iter()
+        .map(|(line, column, name, attr)| {
+            format!(
+                "src/lib.rs:{line}:{column}: error: `{name}` is memory on the GPU, which `{attr}` is not for: a static \
+                 of GPU kernels takes a doc, `cfg`, `deprecated`, the level of a lint, and a `rustfmt` attribute, \
+                 alone or in a `cfg_attr(..)`"
+            )
+        })
+        .collect();
+    said.push(format!("error: could not compile `static_attrs_refused` (lib) due to {} previous errors", said.len()));
+    refuses("static_attrs_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A static of GPU kernels gives its method, `Kernels::COUNTS`, each attribute it takes, and Rust says of the method
+/// what the attribute makes it say. A module that denies `missing_docs` is told of no static that has a doc, written as
+/// `///`, as `#[doc = ..]` and in a `cfg_attr(..)`, nor of one with `#[doc(hidden)]`, `#[allow(missing_docs)]`, alone
+/// or in a `cfg_attr(..)`, or `#[expect(missing_docs)]`; it is told of one with none, once, at the module; of one whose
+/// doc and level are in a `cfg_attr(..)` that does not hold, which Rust leaves out as it does of any item; and of none
+/// that `cfg` leaves out, which has no method. The level that a static gives its method is Rust's for it: `#[warn(..)]`
+/// is a warning, `#[deny(..)]` and `#[forbid(..)]` an error, and an `#[expect(..)]` that no lint meets a warning, at
+/// the attribute. A deprecated static is told of at each use of its method, and a table with `#[rustfmt::skip]` is a
+/// static as any is. A static of x86 kernels is a `static` of Rust's: it keeps `#[used]`, which a static of GPU kernels
+/// refuses, and when it is deprecated it is told of at its use as a static is. Each module that Rust tells of has one
+/// static, for Rust says one message once for its place.
+#[test]
+fn a_static_of_gpu_kernels_gives_its_method_the_attributes_it_takes() {
+    refuses(
+        "static_attrs_kept",
+        &[
+            "src/lib.rs:125:84: error: use of deprecated static `cpu::OLD`: use `KEPT`",
+            "src/lib.rs:125:38: error: use of deprecated method `kept::Kernels::OLD`: use `HERE`",
+            "src/lib.rs:38:1: error: missing documentation for a method",
+            "src/lib.rs:47:1: error: missing documentation for a method",
+            "src/lib.rs:58:1: warning: missing documentation for a method",
+            "src/lib.rs:65:1: error: missing documentation for a method",
+            "src/lib.rs:72:1: error: missing documentation for a method",
+            "src/lib.rs:81:14: warning: this lint expectation is unfulfilled",
+            "error: could not compile `static_attrs_kept` (lib) due to 6 previous errors; 2 warnings emitted",
+        ],
+    );
+}
+
 /// A name Rust refuses written raw, `r#self`, `r#Self`, `r#super`, `r#crate` or `r#_`, is Rust's error in a module of
 /// kernels, at each place it is written, in Rust's words, "`self` cannot be a raw identifier". Rust reads the name
 /// before the macros run, and kernite says nothing. So it is for a variable, which the macros hand to kernite alone,

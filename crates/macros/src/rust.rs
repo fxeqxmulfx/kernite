@@ -650,11 +650,29 @@ pub(crate) fn attrs(f: &Fn, top: &[TokenTree]) -> TokenStream {
 /// alone or in a `cfg_attr(..)`; and, if `offered`, `deprecated` and `doc(hidden)`, which say how it is
 /// offered. Nothing else: a lint or a symbol is the item's own.
 pub(crate) fn carried(attrs: impl IntoIterator<Item = TokenTree>, offered: bool) -> TokenStream {
+    filtered(attrs, &mut |meta| match &meta[..] {
+        [doc, TokenTree::Group(list)] if offered && named(doc, "doc") => flatten(list.stream())
+            .iter()
+            .any(|t| named(t, "hidden"))
+            .then(|| parse("doc(hidden)").into_iter().collect()),
+        [name, ..] if named(name, "cfg") || (offered && named(name, "deprecated")) => Some(meta),
+        _ => None,
+    })
+}
+
+/// The attributes `attrs`, `#` and brackets each, as `leaf` leaves them: `leaf` is given the tokens in an attribute's
+/// brackets, and gives what it leaves of them, or `None` if nothing. An attribute that is a `cfg_attr(..)` is left as
+/// its condition and what `leaf` leaves of each attribute in its list, or nothing if that is nothing: a `cfg_attr(..)`
+/// of a condition alone is an error.
+pub(crate) fn filtered(
+    attrs: impl IntoIterator<Item = TokenTree>,
+    leaf: &mut impl FnMut(Vec<TokenTree>) -> Option<Vec<TokenTree>>,
+) -> TokenStream {
     let attrs: Vec<TokenTree> = attrs.into_iter().collect();
     let mut out = TokenStream::new();
     for attr in attrs.chunks(2) {
         let [hash, TokenTree::Group(group)] = attr else { unreachable!("an attribute is `#` and brackets") };
-        let Some(meta) = keep(flatten(group.stream()), offered) else { continue };
+        let Some(meta) = keep(flatten(group.stream()), leaf) else { continue };
         let mut kept = Group::new(Delimiter::Bracket, meta.into_iter().collect());
         kept.set_span(group.span());
         out.extend([hash.clone(), kept.into()]);
@@ -662,21 +680,18 @@ pub(crate) fn carried(attrs: impl IntoIterator<Item = TokenTree>, offered: bool)
     out
 }
 
-/// What [`carried`] keeps of an attribute, `meta` the tokens in its brackets; `None` if nothing. Of a
-/// `cfg_attr(..)`, it keeps the condition and what it keeps of the list, or nothing if that is
-/// nothing: a `cfg_attr(..)` of a condition alone is an error.
-fn keep(meta: Vec<TokenTree>, offered: bool) -> Option<Vec<TokenTree>> {
+/// What [`filtered`] leaves of an attribute, `meta` the tokens in its brackets; `None` if nothing.
+fn keep(
+    meta: Vec<TokenTree>,
+    leaf: &mut impl FnMut(Vec<TokenTree>) -> Option<Vec<TokenTree>>,
+) -> Option<Vec<TokenTree>> {
     match &meta[..] {
-        [doc, TokenTree::Group(list)] if offered && named(doc, "doc") => flatten(list.stream())
-            .iter()
-            .any(|t| named(t, "hidden"))
-            .then(|| parse("doc(hidden)").into_iter().collect()),
         [cfg_attr, TokenTree::Group(list)] if named(cfg_attr, "cfg_attr") => {
             let tokens = flatten(list.stream());
             let mut parts = tokens.split(|t| is_punct(t, ','));
             let mut kept = parts.next().expect("a split has a first part").to_vec();
             let condition = kept.len();
-            for part in parts.filter_map(|part| keep(part.to_vec(), offered)) {
+            for part in parts.filter_map(|part| keep(part.to_vec(), leaf)) {
                 kept.extend(parse(","));
                 kept.extend(part);
             }
@@ -687,8 +702,7 @@ fn keep(meta: Vec<TokenTree>, offered: bool) -> Option<Vec<TokenTree>> {
             group.set_span(list.span());
             Some(vec![cfg_attr.clone(), group.into()])
         }
-        [name, ..] if named(name, "cfg") || (offered && named(name, "deprecated")) => Some(meta),
-        _ => None,
+        _ => leaf(meta),
     }
 }
 
