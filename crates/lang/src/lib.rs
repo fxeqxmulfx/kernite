@@ -80,10 +80,14 @@
 //!   variable it guards each instruction inside, `if !p` the other way.
 //! - **Labels** are placed by `label(top);` and named by jumps, before or after. Each block
 //!   numbers its labels afresh every time it runs, so a loop's body or a helper's gets new
-//!   ones each time. `note("acc {k}")` is a remark for the listing, `{name}` a value's. A remark is one line: each line
-//!   break in it, `\r\n`, `\n` or `\r`, is a space. A remark holds no NUL, written by an escape, `\0`, `\x00` or
-//!   `\u{0}`, or as the character, for `ptxas` reads a NUL as the end of the module: the evaluator refuses it at the
-//!   string, on every machine.
+//!   ones each time. `note("acc {k}")` is a remark for the listing, `{name}` a value's, read as `format!` reads it, and
+//!   not in NFC: the name right after the `{`, and spaces only after it, before the `}`. The evaluator refuses braces
+//!   with no name, "a note has no arguments for `{}`: its braces hold a value's name, `{k}`", a space before the name,
+//!   "a note's name comes right after its `{`, with no space before it: `{k}`", and any other character in the braces,
+//!   shown as `format!` shows one, "unexpected `\u{200e}` in the braces of a note, which hold a name and then spaces".
+//!   A remark is one line: each line break in it, `\r\n`, `\n` or `\r`, is a space. A remark holds no NUL, written by
+//!   an escape, `\0`, `\x00` or `\u{0}`, or as the character, for `ptxas` reads a NUL as the end of the module: the
+//!   evaluator refuses it at the string, on every machine.
 //! - **Names** are what Rust reads as one: `_`, or a character of Unicode's XID_Start, then any of XID_Continue, in the
 //!   Unicode 17.0.0 of Rust 1.100, and read in NFC, so that each spelling of a name is that name. `a·b` and `a‿b` are
 //!   names; [`lex`] refuses a character that is no part of one where it stands, `a½` at the `½`, "unexpected `\u{bd}`".

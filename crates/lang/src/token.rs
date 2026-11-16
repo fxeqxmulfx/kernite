@@ -405,7 +405,7 @@ fn last_field(mut fields: &[Tree]) -> &[Tree] {
 const PUNCT: &str = "+-*/%^!&|=<>@.,;:#$?~";
 
 /// Whether a name can start with `c`, as in Rust: `_`, or a character that Unicode says starts an identifier.
-fn starts_name(c: char) -> bool {
+pub(crate) fn starts_name(c: char) -> bool {
     c == '_' || unicode::is_xid_start(c)
 }
 

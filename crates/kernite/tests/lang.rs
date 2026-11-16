@@ -126,6 +126,99 @@ fn a_nul_in_a_note_is_refused_at_the_string_on_every_machine() {
     assert_eq!(x86(&kernel(r#"note("a\u{1}\x7f\tb\u{85}");"#), "k"), listing);
 }
 
+/// A kernel for `abi`, `sysv64` or `ptx-kernel`, that binds `declared` as 7 and has a note of `text`, as the kernel's
+/// source writes it, on its line 3, where the string starts at column 6.
+fn noted(abi: &str, declared: &str, text: &str) -> String {
+    format!("unsafe extern \"{abi}\" fn k() {{\nlet {declared} = 7;\nnote(\"{text}\");\n}}\n")
+}
+
+/// A note reads the name in its braces as `format!` does, and the name comes right after the `{`: a space, a tab, a
+/// line break or U+00A0 before it is refused at the string, on x86 and on a GPU, in words that say where the name
+/// comes, wherever in the note the braces are.
+#[test]
+fn a_note_takes_its_name_right_after_the_brace_on_every_machine() {
+    let want = Err("3:6: a note's name comes right after its `{`, with no space before it: `{k}`".to_string());
+    for text in [r"{ a}", r"{ a }", r"{\ta}", r"{\na}", r"{\u{a0}a}", r"x {{ {a} { a}"] {
+        for abi in ["sysv64", "ptx-kernel"] {
+            assert_eq!(compile(&noted(abi, "a", text), "k"), want, "{abi}: {text}");
+        }
+    }
+}
+
+/// A note has no arguments, so braces with no name in them are refused at the string, on x86 and on a GPU, with spaces
+/// in them or none, wherever in the note they are, as `format!` with no arguments refuses them.
+#[test]
+fn a_note_has_no_arguments_for_braces_with_no_name_on_every_machine() {
+    let want = Err("3:6: a note has no arguments for `{}`: its braces hold a value's name, `{k}`".to_string());
+    for text in [r"{}", r"{ }", r"{\t\u{a0}}", r"x {{ {a} {} y"] {
+        for abi in ["sysv64", "ptx-kernel"] {
+            assert_eq!(compile(&noted(abi, "a", text), "k"), want, "{abi}: {text}");
+        }
+    }
+}
+
+/// A note takes spaces between its name and the `}`, as `format!` does: each character that `char::is_whitespace`
+/// takes, and several together, on x86 and on a GPU. The note shows the value, as `{a}` does.
+#[test]
+fn a_space_after_a_notes_name_is_taken_on_every_machine() {
+    let spaces: Vec<char> = (0..=0x10ffff).filter_map(char::from_u32).filter(|c| c.is_whitespace()).collect();
+    for abi in ["sysv64", "ptx-kernel"] {
+        let want = compile(&noted(abi, "a", "{a}"), "k");
+        assert!(want.is_ok(), "{abi}: {want:?}");
+        for space in &spaces {
+            let text = format!("{{a{}}}", space.escape_unicode());
+            assert_eq!(compile(&noted(abi, "a", &text), "k"), want, "{abi}: {space:?}");
+        }
+        assert_eq!(compile(&noted(abi, "a", r"{a \t\u{a0}\u{2028}}"), "k"), want, "{abi}: several");
+    }
+}
+
+/// Any other character in a note's braces, before the name or after it, is refused at the string, on x86 and on a GPU:
+/// as `format!` refuses it, but for the `:` of a format, `{a:x}`, which a note has no use for. It is shown as `format!`
+/// shows it, by `char::escape_debug`: `§` and `·` as they are, `"`, `'` and `\` as `\"`, `\'` and `\\`, and U+200E,
+/// which shows as nothing, as `\u{200e}`.
+#[test]
+fn a_character_in_a_notes_braces_that_is_no_name_and_no_space_is_shown_as_rust_shows_it_on_every_machine() {
+    for (text, shown) in [
+        (r"{a\u{200e}}", r"\u{200e}"),
+        (r"{\u{200e}a}", r"\u{200e}"),
+        (r"{a\u{a7}}", "§"),
+        (r"{\u{b7}a}", "·"),
+        (r"{a\u{22}}", r#"\""#),
+        (r"{a\u{27}}", r"\'"),
+        (r"{a\u{5c}}", r"\\"),
+        ("{a b}", "b"),
+        ("{a:x}", ":"),
+        ("{a{}", "{"),
+        ("{0}", "0"),
+        ("{r#a}", "#"),
+    ] {
+        let want = Err(format!("3:6: unexpected `{shown}` in the braces of a note, which hold a name and then spaces"));
+        for abi in ["sysv64", "ptx-kernel"] {
+            assert_eq!(compile(&noted(abi, "a", text), "k"), want, "{abi}: {text}");
+        }
+    }
+}
+
+/// A note's name is a name as Rust reads one, as a kernel's is, and it is not read in NFC, as `format!`'s is not: `a·b`
+/// goes on past the `·`; `café` with `é` as U+00E9 in the note is the variable declared with `e` and U+0301, whose name
+/// the lexer reads in NFC; and `café` with `e` and U+0301 in the note is no variable's name, whichever way the variable
+/// is declared, as rustc says of `format!("{cafe\u{301}}")`: "cannot find value `café` in this scope".
+#[test]
+fn a_notes_name_is_a_name_of_rust_and_is_not_read_in_nfc_on_every_machine() {
+    for abi in ["sysv64", "ptx-kernel"] {
+        let shown = compile(&noted(abi, "a", "{a}"), "k");
+        assert!(shown.is_ok(), "{abi}: {shown:?}");
+        for (declared, text) in [("a·b", "{a·b}"), ("café", "{café}"), ("cafe\u{301}", "{café}")] {
+            assert_eq!(compile(&noted(abi, declared, text), "k"), shown, "{abi}: {declared:?}, {text:?}");
+        }
+        let want = Err("3:6: `cafe\u{301}` is not defined".to_string());
+        for declared in ["café", "cafe\u{301}"] {
+            assert_eq!(compile(&noted(abi, declared, "{cafe\u{301}}"), "k"), want, "{abi}: {declared:?}");
+        }
+    }
+}
+
 #[test]
 fn a_function_that_names_an_abi_is_not_const_and_no_function_is_async() {
     let constant = "a function that names an ABI runs on its machine, never while Rust compiles, so it is not `const`";

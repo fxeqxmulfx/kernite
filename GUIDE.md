@@ -290,6 +290,16 @@ A note's text holds no NUL, on any machine, as `ptxas` reads a NUL as the end of
 string, whether the NUL is an escape of a plain string, `\0`, `\x00` or `\u{0}`, or the character itself, in a plain or
 a raw string: "a NUL is not allowed in a note, on any machine: `ptxas` reads it as the end of the module".
 
+A note shows a value by its name in braces, `note("acc {k}")`, and reads the name as `format!` does: it comes right
+after the `{`, and spaces, as `char::is_whitespace` says, may come after it, before the `}`. So `{k }` shows `k`, and
+`{ k}` is refused at the string: "a note's name comes right after its `{`, with no space before it: `{k}`". A note has
+no arguments, so braces with no name in them, `{}` or `{ }`, are refused at the string too: "a note has no arguments for
+`{}`: its braces hold a value's name, `{k}`". Any other character in the braces is refused at the string, the `:` of a
+format too, `{k:x}`, for a note has none. It is shown as `format!` shows it, by `char::escape_debug`, so `§` as it is
+and U+200E, which shows as nothing, as `\u{200e}`: "unexpected `\u{200e}` in the braces of a note, which hold a name and
+then spaces". The name is not read in NFC, as `format!`'s is not: `{café}` with `é` as U+00E9 finds `café` declared in
+either spelling, and `{café}` with `e` and U+0301 finds neither.
+
 A macro's fragment is one operand, or one type, wherever kernite reads it, as Rust reads it. With `$n:expr` as `1 + 2`,
 `$n * 2` is 6, and not the 5 that `1 + 2 * 2` is. It is so in a kernel's expression, on x86 and on a GPU, under a `-`,
 in the length of an array, in `#[instances(..)]`, and in a const, which is 6 to Rust too. A `$t:ty` is one type in a
