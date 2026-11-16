@@ -29,9 +29,7 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     let jumps = jumps(c);
     let calls = insts(&c.body).filter(|inst| inst.op == Op::Call).count() > jumps.len();
     let returns = insts(&c.body).any(|inst| inst.op == Op::Ret);
-    let vector = insts(&c.body)
-        .filter(|inst| !idle(inst))
-        .any(|inst| inst.operands().any(|a| a.regs().any(|r| r.class == Class::Vec)));
+    let upper = insts(&c.body).filter(|inst| !idle(inst)).any(|inst| inst.operands().any(ymm));
     // The prologue's loop takes the least value no label of the body has: going up the body's
     // labels in order, each one that has the value looked for moves it one on.
     let labels: BTreeSet<u32> = c
@@ -59,12 +57,12 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
                     body.push(inst(Op::Mov, vec![reg(R11, Access::Write), reg(at, Access::Read)]));
                     jump.args = vec![reg(R11, Access::Read)];
                 }
-                body.extend(epilogue(&c.frame, padding, vector));
+                body.extend(epilogue(&c.frame, padding, upper));
                 body.push(Item::Inst(jump));
                 continue;
             }
             Item::Inst(_) if done.contains(&i) => continue,
-            Item::Inst(inst) if inst.op == Op::Ret => body.extend(epilogue(&c.frame, padding, vector)),
+            Item::Inst(inst) if inst.op == Op::Ret => body.extend(epilogue(&c.frame, padding, upper)),
             Item::Inst(inst) if idle(inst) => continue,
             Item::Inst(inst) => {
                 let spill = inst.args.iter().find_map(|a| match a.operand {
@@ -100,11 +98,12 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
 
 /// The calls of `c` that are jumps, by their places in its body, each with the place of the `ret` it does without, if
 /// no other way comes to that `ret`. A call that `ret` follows at once, with nothing between but labels, notes and
-/// moves that change nothing, returns what the callee gives back: the kernel takes its frame down and jumps to the
-/// callee, which returns to the kernel's caller. A call stays one where the jump would not do what it does: where the
-/// kernel has taken the address of its stack memory, which the callee may use, and the frame the epilogue takes down
-/// holds; and where it passes all of a ymm, to a function it does not know, whose upper half the epilogue's
-/// `vzeroupper` would clear.
+/// moves that change nothing, returns what the callee gives back: the kernel takes its frame down, as before a `ret`,
+/// which clears the upper halves of the vector registers where the kernel may have set one, and jumps to the callee,
+/// which returns to the kernel's caller. A call stays one where the jump would not do what it does: where the kernel
+/// has taken the address of its stack memory, which the callee may use, and the frame the epilogue takes down holds;
+/// and where it passes all of a ymm to a function it does not know, or takes all of one back: the epilogue's
+/// `vzeroupper` would clear the upper half of one it passes, and runs before the callee sets that of one it gives back.
 fn jumps(c: &Allocated<Op>) -> BTreeMap<usize, Option<usize>> {
     let stack = |a: &Arg<PReg>| matches!(a.operand, Operand::Mem(Mem { base: Base::Slot(_), .. }));
     let mut jumps = BTreeMap::new();
@@ -121,8 +120,7 @@ fn jumps(c: &Allocated<Op>) -> BTreeMap<usize, Option<usize>> {
             _ => None,
         });
         let Some((j, ret)) = next else { continue };
-        let ymm = |a: &Arg<PReg>| matches!(a.operand, Operand::Reg(r, Width::W256) if r.class == Class::Vec);
-        if ret.op == Op::Ret && !call.implicit.iter().any(|a| a.access == Access::Read && ymm(a)) {
+        if ret.op == Op::Ret && !call.implicit.iter().any(ymm) {
             let alone = !c.body[i + 1..j].iter().any(|item| matches!(item, Item::Label(_)));
             jumps.insert(i, alone.then_some(j));
         }
@@ -136,6 +134,12 @@ fn insts(body: &[Item<Op, PReg>]) -> impl Iterator<Item = &Inst<Op, PReg>> {
         Item::Inst(inst) => Some(inst),
         Item::Label(_) | Item::Note(_) => None,
     })
+}
+
+/// Whether `a` is all of a ymm, whose upper half an instruction that reads or writes it may have set. A call has such
+/// operands where its callee is a function it does not know, which may be passed a vector or give one back.
+fn ymm(a: &Arg<PReg>) -> bool {
+    matches!(a.operand, Operand::Reg(r, Width::W256) if r.class == Class::Vec)
 }
 
 /// Whether `inst` changes nothing, so the listing leaves it out: a move of all 64 bits, or all
@@ -252,9 +256,11 @@ fn prologue(frame: &Frame, pad: u32, free: Label) -> Result<Vec<Item<Op, PReg>>,
 }
 
 /// What runs before a `ret`, and before a jump to a callee that stands for one: undoes [`prologue`], and clears the
-/// vector registers' upper halves if the body used any, so the caller's SSE code does not pay for them. A move that the
-/// listing leaves out uses none.
-fn epilogue(frame: &Frame, pad: u32, vector: bool) -> Vec<Item<Op, PReg>> {
+/// upper halves of the vector registers if the body may have set one, so the caller's SSE code does not pay for them.
+/// It may have where an instruction of it reads or writes all of a ymm, as each move and spill of a vector register
+/// does, or calls a function it does not know, which may be passed a vector or give one back. A move that the listing
+/// leaves out does neither.
+fn epilogue(frame: &Frame, pad: u32, upper: bool) -> Vec<Item<Op, PReg>> {
     let mut items = vec![];
     if frame.size > 0 {
         items.extend([
@@ -265,7 +271,7 @@ fn epilogue(frame: &Frame, pad: u32, vector: bool) -> Vec<Item<Op, PReg>> {
         items.push(sp(Op::Add, pad));
     }
     items.extend(frame.saved.iter().rev().map(|&r| inst(Op::Pop, vec![reg(r, Access::Write)])));
-    if vector {
+    if upper {
         items.push(inst(Op::Vzeroupper, vec![]));
     }
     items
@@ -388,10 +394,9 @@ mod tests {
         assert_eq!(code(&c), want);
     }
 
-    /// A move of a register to itself, of all 64 bits by `mov` or all 256 by `vmovaps`, `vmovups`,
-    /// `vmovdqa` or `vmovdqu`, changes nothing, and is left out; one of 32 bits clears the upper
-    /// half, and one of an xmm the upper lanes, and stay. A move left out asks for no
-    /// `vzeroupper`.
+    /// A move of a register to itself, of all 64 bits by `mov` or all 256 by `vmovaps`, `vmovups`, `vmovdqa` or
+    /// `vmovdqu`, changes nothing, and is left out; one of 32 bits clears the upper half, and one of an xmm the upper
+    /// lanes, and stay. A move left out asks for no `vzeroupper`, nor does one of an xmm, which sets no upper half.
     #[test]
     fn a_move_of_a_register_to_itself_is_left_out() {
         let frame = Frame { saved: vec![], slots: vec![], offsets: vec![], size: 0, align: 0 };
@@ -400,10 +405,7 @@ mod tests {
         let mut body = vec![mov(Op::Mov, RAX, RAX, Width::W64), mov(Op::Mov, RAX, RAX, Width::W32)];
         body.extend(wide.clone());
         body.extend([mov(Op::Vmovaps, YMM0, YMM0, Width::W128), mov(Op::Mov, RAX, RCX, Width::W64), ret.clone()]);
-        assert_eq!(
-            code(&kernel(body, frame.clone())),
-            "mov eax, eax\nvmovaps xmm0, xmm0\nmov rax, rcx\nvzeroupper\nret"
-        );
+        assert_eq!(code(&kernel(body, frame.clone())), "mov eax, eax\nvmovaps xmm0, xmm0\nmov rax, rcx\nret");
         assert_eq!(code(&kernel([&wide[..], &[ret]].concat(), frame)), "ret");
     }
 }

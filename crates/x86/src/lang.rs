@@ -643,9 +643,10 @@ impl Kernel {
             }
         };
         // Each argument to the register it goes in, in order; then the call; then the result. The call reads what its
-        // callee takes: a float, in the xmm, of a function of the module; all of a ymm, which may hold a vector, of a
-        // function it does not know.
+        // callee takes and writes what it gives back: a float, in the xmm, of a function of the module; all of a ymm,
+        // which may hold a vector, of a function it does not know.
         let known = targets.is_some() || matches!(target, Operand::Func(_));
+        let width = |class| if class == Class::Vec && known { W128 } else { SysV.width(class) };
         let mut implicit = vec![];
         let (mut ints, mut floats) = (0, 0);
         for (k, (a, ty)) in passed.iter().zip(&tys).enumerate() {
@@ -663,15 +664,14 @@ impl Kernel {
             let pinned = self.new_var(to.class, &name);
             self.p.pinned.push((pinned, to));
             self.pass(pinned, a, *ty);
-            let width = if to.class == Class::Vec && known { W128 } else { SysV.width(to.class) };
-            implicit.push(Arg { operand: Operand::Reg(pinned, width), access: Read });
+            implicit.push(Arg { operand: Operand::Reg(pinned, width(to.class)), access: Read });
         }
         let back = match (result.and_then(reg_of), kept) {
             (Some((reg, view)), Some(ty)) => {
                 let from = if ty == Ty::Int { INT_RESULT } else { FLOAT_RESULT };
                 let pinned = self.new_var(from.class, &self.p.regs[reg.id as usize].name.clone());
                 self.p.pinned.push((pinned, from));
-                implicit.push(Arg { operand: Operand::Reg(pinned, SysV.width(from.class)), access: Write });
+                implicit.push(Arg { operand: Operand::Reg(pinned, width(from.class)), access: Write });
                 Some((reg, view, pinned))
             }
             _ => None,

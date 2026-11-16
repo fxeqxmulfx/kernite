@@ -40,7 +40,6 @@ fn x86_compiles_a_kernel_through_the_port() {
     vmovss dword ptr [rbx], xmm0
     add dword ptr [rip + {COUNTS} + 4], 1
     pop rbx
-    vzeroupper
     ret
 # f0: half
 # c0, aligned to 4:
@@ -54,7 +53,6 @@ fn x86_compiles_a_kernel_through_the_port() {
         "vmovss dword ptr [rbx], xmm0",
         "add dword ptr [rip + {COUNTS} + 4], 1",
         "pop rbx",
-        "vzeroupper",
         "ret",
     ];
     let want = Naked {

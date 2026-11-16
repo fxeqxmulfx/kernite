@@ -771,7 +771,7 @@ fn a_kernel_takes_what_sysv_passes_in_registers() {
     let e = compile("a: u32", "").unwrap_err();
     assert_eq!(e, "1:32: SysV leaves the high bits of a `u32` as they were; take a usize or a u64");
     let code = compile("a: f32, p: *mut f32, b: f32", "vmovss([p], b.xmm); vaddss(b.xmm, a.xmm, b.xmm);").unwrap();
-    assert_eq!(code, "vmovss dword ptr [rdi], xmm1\nvaddss xmm1, xmm0, xmm1\nvzeroupper\nret");
+    assert_eq!(code, "vmovss dword ptr [rdi], xmm1\nvaddss xmm1, xmm0, xmm1\nret");
 }
 
 /// A pointer is one register, whatever it points to: an array, a pointer, a tuple, a generic type.
@@ -2070,11 +2070,12 @@ fn the_stack_pointer_is_a_multiple_of_16_at_a_call() {
 /// A call that `ret` follows at once is a jump: the kernel takes its frame down as `ret` does, the registers it saved
 /// restored and the stack pointer where it was on entry, 8 past a multiple of 16 as a callee has it after a call, and
 /// jumps to the callee, which returns to the kernel's caller. It does so by name and at an address, the arguments in
-/// their registers before the frame goes, a float's in its xmm register through `vzeroupper`, by name and at an address
-/// with the functions given; at an address in a register the kernel saves, which goes to `r11` before the frame goes;
-/// with a note between the call and the `ret`; and with a label between, whose `ret` stays for the way that comes to
-/// it. A kernel whose every call is a jump does not pad its frame for a call; one with a call that stays pads it, and
-/// takes the padding down before each jump.
+/// their registers before the frame goes, a float's in its xmm register, through the `vzeroupper` of a kernel that may
+/// have set an upper half and with none of a kernel that has not, by name and at an address with the functions given;
+/// at an address in a register the kernel saves, which goes to `r11` before the frame goes; with a note between the
+/// call and the `ret`; and with a label between, whose `ret` stays for the way that comes to it. A kernel whose every
+/// call is a jump does not pad its frame for a call; one with a call that stays pads it, and takes the padding down
+/// before each jump.
 #[test]
 fn a_call_that_ret_follows_is_a_jump_after_the_frame_is_taken_down() {
     let saving = "let (r, v, fp): (gpr, ymm, gpr); let t: local<[f32; 8], 32>; vmovups(v, [p]); vmovups([t], v); \
@@ -2102,14 +2103,22 @@ fn a_call_that_ret_follows_is_a_jump_after_the_frame_is_taken_down() {
             "x: u64",
             " -> f32",
             "let v: ymm; call(v.xmm, half, 2.5); ret(v.xmm);".to_string(),
-            "vmovss xmm0, dword ptr [rip + {c0}]\nvzeroupper\njmp {f0}".to_string(),
+            "vmovss xmm0, dword ptr [rip + {c0}]\njmp {f0}".to_string(),
+        ),
+        (
+            "x: u64",
+            " -> f32",
+            "let v: ymm; zero(v); vaddps(v, v, v); call(v.xmm, half, 2.5); ret(v.xmm);".to_string(),
+            "vxorps xmm0, xmm0, xmm0\nvaddps ymm0, ymm0, ymm0\nvmovss xmm0, dword ptr [rip + {c0}]\nvzeroupper\njmp \
+             {f0}"
+                .to_string(),
         ),
         (
             "x: u64",
             " -> f32",
             "let (v, fp): (ymm, gpr); zero(v); lea(fp, [half]); call(v, fp, (v), (half, half)); ret(v.xmm);"
                 .to_string(),
-            "vxorps xmm0, xmm0, xmm0\nlea rax, [rip + {f0}]\nvzeroupper\njmp rax".to_string(),
+            "vxorps xmm0, xmm0, xmm0\nlea rax, [rip + {f0}]\njmp rax".to_string(),
         ),
         (
             "x: u64",
@@ -2146,8 +2155,9 @@ fn a_call_that_ret_follows_is_a_jump_after_the_frame_is_taken_down() {
 /// A call stays one where a jump would not do what it does: where an instruction comes between it and the `ret`, to
 /// change what the callee gives back, to return another value, or to restore the MXCSR the kernel keeps; where the
 /// kernel has taken the address of its stack memory, which the callee may use, and the frame the jump takes down holds;
-/// and where it calls at an address with no functions given and passes a vector, whose upper half the kernel's
-/// `vzeroupper` would clear. A gpr's `r32` result is one more: `a_call_passes_what_its_callee_takes` has its
+/// and where it calls at an address with no functions given and passes a float or takes one back, which may be a
+/// vector: the kernel's `vzeroupper` would clear the upper half of one it passes, and runs before the callee sets that
+/// of one it gives back. A gpr's `r32` result is one more: `a_call_passes_what_its_callee_takes` has its
 /// `mov eax, eax`.
 #[test]
 fn a_call_stays_one_where_a_jump_would_not_do_what_it_does() {
@@ -2183,6 +2193,12 @@ fn a_call_stays_one_where_a_jump_would_not_do_what_it_does() {
             "let (v, fp): (ymm, gpr); zero(v); lea(fp, [half]); call(v, fp, (v)); ret(v.xmm);",
             "sub rsp, 8\nvxorps xmm0, xmm0, xmm0\nlea rax, [rip + {f0}]\ncall rax\nadd rsp, 8\nvzeroupper\nret",
         ),
+        (
+            "fp: u64",
+            " -> f32",
+            "let v: xmm; call(v, fp, ()); ret(v);",
+            "sub rsp, 8\ncall rdi\nadd rsp, 8\nvzeroupper\nret",
+        ),
     ];
     for (params, ret, body, want) in cases {
         assert_eq!(calling(params, ret, body).unwrap(), want, "{body}");
@@ -2197,11 +2213,11 @@ fn a_call_passes_what_its_callee_takes() {
     assert_eq!(code, "sub rsp, 8\nmov rsi, rdi\nmov edi, esi\ncall {f0}\nmov eax, eax\nadd rsp, 8\nret");
     let code = calling("x: *mut f32", "", "let v: ymm; call(v.xmm, half, 2.5); vmovss([x], v.xmm);").unwrap();
     let want = "push rbx\nmov rbx, rdi\nvmovss xmm0, dword ptr [rip + {c0}]\ncall {f0}\nvmovss dword ptr [rbx], \
-                xmm0\npop rbx\nvzeroupper\nret";
+                xmm0\npop rbx\nret";
     assert_eq!(code, want);
     let code = calling("x: *mut f64", "", "let v: ymm; call(v.xmm, scale, (2.5f64, x)); vmovq([x], v.xmm);").unwrap();
     let want = "push rbx\nmov rbx, rdi\nvmovq xmm0, qword ptr [rip + {c0}]\nmov rdi, rbx\ncall {f0}\nvmovq qword ptr \
-                [rbx], xmm0\npop rbx\nvzeroupper\nret";
+                [rbx], xmm0\npop rbx\nret";
     assert_eq!(code, want);
 }
 
@@ -2587,83 +2603,106 @@ fn kernite_knows_every_instruction_of_x86_64_v3() {
     }
 }
 
-/// The `vzeroupper` a kernel that touches vector registers runs before it returns is AVX's, so
-/// it needs AVX though nothing else it runs does, unless it needs FMA, F16C or AVX2, which build
-/// on AVX. AVX takes its place among the other needs, which are listed by name.
+/// A kernel clears the upper halves of the vector registers before it returns, with `vzeroupper`, only where it may
+/// have set one: where an instruction of its own reads or writes all of a ymm, as each move and spill of a vector
+/// register does, of a float too, or it calls a function it does not know, which may be passed a vector or give one
+/// back. A kernel of xmm registers alone that moves and spills none writes none, though it calls the module's
+/// functions, by name or at an address with the functions given: each clears what it sets before it returns. Nor does a
+/// call at an address with no functions given that passes and gives back no vector.
 #[test]
-fn vzeroupper_needs_avx_where_nothing_else_says_so() {
+fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() {
     let cases = [
+        // No `vzeroupper`: nothing on all of a ymm, and no call of a function it does not know that may pass or give a
+        // vector.
+        ("x: f32", " -> f32", "vaddss(x, x, x); ret(x);", "vaddss xmm0, xmm0, xmm0\nret"),
+        ("x: u64", " -> f32", "let v: ymm; zero(v); ret(v.xmm);", "vxorps xmm0, xmm0, xmm0\nret"),
         (
-            "pub unsafe extern \"sysv64\" fn f(x: f32) -> f32 { ret(x); }",
-            "# f(vec) -> vec
-# needs: avx
-# frame: 0 bytes aligned to 0, saves []
-# x=ymm0
-    vzeroupper
-    ret
-",
+            "p: *mut f32",
+            "",
+            "let v: xmm; vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v);",
+            "vmovups xmm0, xmmword ptr [rdi]\nvaddps xmm0, xmm0, xmm0\nvmovups xmmword ptr [rdi], xmm0\nret",
         ),
         (
-            "pub unsafe extern \"sysv64\" fn f(x: f32, n: u64) -> f32 { popcnt(n, n); ret(x); }",
-            "# f(vec, gpr) -> vec
-# needs: avx, popcnt
-# frame: 0 bytes aligned to 0, saves []
-# x=ymm0 n=rdi
-    popcnt rdi, rdi
-    vzeroupper
-    ret
-",
+            "x: f32",
+            " -> f32",
+            "let v: xmm; call(v, half, (x)); vaddss(v, v, v); ret(v);",
+            "sub rsp, 8\ncall {f0}\nvaddss xmm0, xmm0, xmm0\nadd rsp, 8\nret",
         ),
         (
-            "pub unsafe extern \"sysv64\" fn f(x: f32, y: f32, z: f32) -> f32 { vfmadd231ss(x, y, z); ret(x); }",
-            "# f(vec, vec, vec) -> vec
-# needs: fma
-# frame: 0 bytes aligned to 0, saves []
-# x=ymm0 y=ymm1 z=ymm2
-    vfmadd231ss xmm0, xmm1, xmm2
-    vzeroupper
-    ret
-",
+            "x: f32",
+            " -> f32",
+            "let (v, fp): (xmm, gpr); lea(fp, [half]); call(v, fp, (x), (half, half)); vaddss(v, v, v); ret(v);",
+            "sub rsp, 8\nlea rax, [rip + {f0}]\ncall rax\nvaddss xmm0, xmm0, xmm0\nadd rsp, 8\nret",
         ),
         (
-            "pub unsafe extern \"sysv64\" fn f(x: f32, y: f32) -> f32 { vcvtph2ps(x, y); ret(x); }",
-            "# f(vec, vec) -> vec
-# needs: f16c
-# frame: 0 bytes aligned to 0, saves []
-# x=ymm0 y=ymm1
-    vcvtph2ps xmm0, xmm1
-    vzeroupper
-    ret
-",
+            "fp: u64, n: u64",
+            " -> u64",
+            "let r: gpr; call(r, fp, (n)); add(r, 1); ret(r);",
+            "sub rsp, 8\nmov rax, rdi\nmov rdi, rsi\ncall rax\nadd rax, 1\nadd rsp, 8\nret",
+        ),
+        // `vzeroupper`: an instruction on all of a ymm, a move and a spill of a float, each of all of its ymm, and a
+        // call at an address with no functions given that is passed a float or gives one back.
+        (
+            "p: *mut f32",
+            "",
+            "let v: ymm; vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v);",
+            "vmovups ymm0, ymmword ptr [rdi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rdi], ymm0\nvzeroupper\n\
+             ret",
         ),
         (
-            "pub unsafe extern \"sysv64\" fn f(x: f32, y: f32) -> f32 { vpbroadcastd(x, y); ret(x); }",
-            "# f(vec, vec) -> vec
-# needs: avx2
-# frame: 0 bytes aligned to 0, saves []
-# x=ymm0 y=ymm1
-    vpbroadcastd xmm0, xmm1
-    vzeroupper
-    ret
-",
+            "x: u64",
+            " -> f32",
+            "let (a, b): (xmm, xmm); call(a, half, 1.5); call(b, half, 2.5); vaddss(b, a, b); ret(b);",
+            "push rbp\nmov rbp, rsp\nsub rsp, 32\nand rsp, -32\nvmovss xmm0, dword ptr [rip + {c0}]\ncall \
+             {f0}\nvmovups ymmword ptr [rsp], ymm0\nvmovss xmm0, dword ptr [rip + {c1}]\ncall {f0}\nvmovups ymm1, \
+             ymmword ptr [rsp]\nvaddss xmm0, xmm1, xmm0\nmov rsp, rbp\npop rbp\nvzeroupper\nret",
         ),
         (
-            "pub unsafe extern \"sysv64\" fn f(x: f32, n: u64) -> f32 { popcnt(n, n); vcvtph2ps(x, x); popcnt(n, n); \
-             ret(x); }",
-            "# f(vec, gpr) -> vec
-# needs: f16c, popcnt
-# frame: 0 bytes aligned to 0, saves []
-# x=ymm0 n=rdi
-    popcnt rdi, rdi
-    vcvtph2ps xmm0, xmm0
-    popcnt rdi, rdi
-    vzeroupper
-    ret
-",
+            "a: f32, b: f32",
+            " -> f32",
+            "let v: xmm; call(v, half, (b)); ret(v);",
+            "vmovaps ymm0, ymm1\nvzeroupper\njmp {f0}",
+        ),
+        ("fp: u64, x: f32", "", "call(fp, (x));", "sub rsp, 8\ncall rdi\nadd rsp, 8\nvzeroupper\nret"),
+        (
+            "fp: u64",
+            " -> f32",
+            "let v: xmm; call(v, fp, ()); vaddss(v, v, v); ret(v);",
+            "sub rsp, 8\ncall rdi\nvaddss xmm0, xmm0, xmm0\nadd rsp, 8\nvzeroupper\nret",
         ),
     ];
-    for (src, want) in cases {
-        assert_eq!(kernite::x86_str(src, "f").unwrap().text(), want, "{src}");
+    for (params, ret, body, want) in cases {
+        assert_eq!(calling(params, ret, body).unwrap(), want, "{body}");
+    }
+}
+
+/// A kernel needs what the instructions its listing prints need, and `vzeroupper` is AVX's: a kernel that writes it
+/// needs AVX though nothing else it runs does, unless it needs FMA, F16C or AVX2, which build on AVX. One that runs
+/// nothing on all of a ymm, nor calls a function it does not know, writes none, and needs only what its other
+/// instructions need. AVX takes its place among the other needs, which are listed by name.
+#[test]
+fn vzeroupper_needs_avx_where_nothing_else_says_so() {
+    // What each kernel's own instructions need, with no call, and with a call at an address with no functions given,
+    // which may be passed a vector or give one back, so the kernel may have set an upper half.
+    let cases = [
+        ("", "", "avx"),
+        ("popcnt(n, n);", "popcnt", "avx, popcnt"),
+        ("vfmadd231ss(x, y, z);", "fma", "fma"),
+        ("vcvtph2ps(x, y);", "f16c", "f16c"),
+        ("vpbroadcastd(x, y);", "avx2", "avx2"),
+        ("popcnt(n, n); vcvtph2ps(x, x); popcnt(n, n);", "f16c, popcnt", "f16c, popcnt"),
+    ];
+    for (body, plain, called) in cases {
+        for (call, needs) in [("", plain), (" call(fp, (x));", called)] {
+            let src = format!(
+                "pub unsafe extern \"sysv64\" fn f(fp: u64, n: u64, x: f32, y: f32, z: f32) {{ {body}{call} }}"
+            );
+            let listing = kernite::x86_str(&src, "f").unwrap();
+            let features: Vec<_> = listing.features.iter().map(|f| f.name()).collect();
+            assert_eq!(features.join(", "), needs, "{src}");
+            let cleared = listing.code().filter(|line| *line == "vzeroupper").count();
+            assert_eq!(cleared, usize::from(!call.is_empty()), "{src}\n{}", listing.text());
+        }
     }
 }
 

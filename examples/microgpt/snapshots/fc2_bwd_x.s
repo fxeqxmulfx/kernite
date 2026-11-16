@@ -107,5 +107,4 @@
     dec rcx
     jnz 2b
 4:
-    vzeroupper
     ret
