@@ -254,6 +254,11 @@ give Rust a function of its own that never runs, to say it in. That function has
 parameter, and each is of the type `()`, so Rust says nothing there of a type as written, that it cannot find `gpr` or
 that `f128` is unstable, nor that a parameter is unused.
 
+A space is what Rust reads as one: U+0009 to U+000D, U+0020, U+0085, U+200E, U+200F, U+2028 and U+2029, which Rust's
+lexer calls Pattern_White_Space. Each other character that Unicode calls a space, U+00A0, U+1680, U+2000 to U+200A,
+U+202F, U+205F or U+3000, is no space, as in Rust, and is refused at the character: "unexpected `\u{a0}`". A character
+that is not printable ASCII is shown in that error as Rust shows it, `\u{a0}`, and one that is, as it is.
+
 A string is plain or raw, as in Rust, wherever kernite takes one: a note's text, `note(r#"a "b""#)`, and the ABI of a
 function, `extern r"sysv64"`. A raw string has no escapes, and ends at the first `"` that has as many `#` after it as
 the string began with, so `r##"a "# b"##` holds a `"#`. A string that is never closed, plain or raw, is refused where it

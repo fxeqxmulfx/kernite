@@ -422,6 +422,70 @@ fn a_string_refuses_the_escapes_that_rust_refuses_at_the_escape() {
     }
 }
 
+/// The spaces of Rust's lexer, Pattern_White_Space: a tab, the line breaks, U+000B and U+000C, U+0085, a space, the
+/// marks that say which way text runs, U+200E and U+200F, and U+2028 and U+2029.
+const SPACES: [char; 11] =
+    ['\t', '\n', '\u{b}', '\u{c}', '\r', ' ', '\u{85}', '\u{200e}', '\u{200f}', '\u{2028}', '\u{2029}'];
+
+/// The characters that Unicode calls a space and Rust does not, each of which `char::is_whitespace` takes.
+const LOOKALIKES: [char; 16] = [
+    '\u{a0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}',
+    '\u{2007}', '\u{2008}', '\u{2009}', '\u{200a}', '\u{202f}', '\u{205f}', '\u{3000}',
+];
+
+/// A space is what Rust reads as one, Pattern_White_Space, on x86 and on a GPU: a kernel with any of the eleven between
+/// its tokens, before its first and after its last, and inside its brackets, compiles to the listing of the kernel with
+/// a plain space there. U+200E and U+200F are among them, which `char::is_whitespace` does not take.
+#[test]
+fn a_space_is_what_rust_reads_as_one_on_every_machine() {
+    // The kernel with a `$` for each space.
+    let kernel = |abi: &str, space: char| {
+        let spaced = r#"$unsafe$extern$"ABI"$fn$k$($)${$let$a$=$1$+$2$;$note$($"a {a}"$)$;$}$"#;
+        spaced.replace("ABI", abi).replace('$', &space.to_string())
+    };
+    for abi in ["sysv64", "ptx-kernel"] {
+        let plain = compile(&kernel(abi, ' '), "k");
+        assert!(plain.as_ref().is_ok_and(|listing| listing.contains("a 3")), "{abi}: {plain:?}");
+        for space in SPACES {
+            assert_eq!(compile(&kernel(abi, space), "k"), plain, "{abi}: {space:?}");
+        }
+    }
+}
+
+/// No other character is a space. Each other that Unicode calls one is refused at the character on x86 and on a GPU, in
+/// words that show which it is, as Rust's do: "unexpected `\u{a0}`". So is each other that no token starts with: shown
+/// so if it is not printable ASCII, and as it is if it is.
+#[test]
+fn a_character_that_unicode_calls_a_space_and_rust_does_not_is_refused_at_the_character_on_every_machine() {
+    // The two lists are each character that `char::is_whitespace` takes, and U+200E and U+200F besides.
+    let whitespace: Vec<char> = (0..=0x10ffff).filter_map(char::from_u32).filter(|c| c.is_whitespace()).collect();
+    let mut listed: Vec<char> =
+        SPACES.into_iter().chain(LOOKALIKES).filter(|c| !matches!(c, '\u{200e}' | '\u{200f}')).collect();
+    listed.sort();
+    assert_eq!(whitespace, listed);
+    let others = [
+        ('\\', "\\"),
+        ('`', "`"),
+        ('\u{1}', "\\u{1}"),
+        ('\u{7f}', "\\u{7f}"),
+        ('§', "\\u{a7}"),
+        ('\u{ad}', "\\u{ad}"),
+        ('\u{200b}', "\\u{200b}"),
+        ('\u{201c}', "\\u{201c}"),
+        ('\u{feff}', "\\u{feff}"),
+    ]
+    .map(|(c, shown)| (c, shown.to_string()));
+    let lookalikes = LOOKALIKES.map(|c| (c, format!("\\u{{{:x}}}", u32::from(c))));
+    for abi in ["sysv64", "ptx-kernel"] {
+        // The character is on line 2, right after the ABI.
+        let head = format!("unsafe extern \"{abi}\"");
+        for (c, shown) in lookalikes.iter().chain(&others) {
+            let src = format!("// a\n{head}{c}fn k() {{}}\n");
+            assert_eq!(compile(&src, "k"), Err(format!("2:{}: unexpected `{shown}`", head.len() + 1)), "{abi}: {c:?}");
+        }
+    }
+}
+
 #[test]
 fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
     // Rust refuses a name bound twice among a function's generics and parameters, E0403 and E0415;

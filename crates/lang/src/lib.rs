@@ -84,6 +84,9 @@
 //!   break in it, `\r\n`, `\n` or `\r`, is a space. A remark holds no NUL, written by an escape, `\0`, `\x00` or
 //!   `\u{0}`, or as the character, for `ptxas` reads a NUL as the end of the module: the evaluator refuses it at the
 //!   string, on every machine.
+//! - **Spaces** are what Rust reads as one, U+0009 to U+000D, U+0020, U+0085, U+200E, U+200F, U+2028 and U+2029.
+//!   [`lex`] refuses each other character that Unicode calls a space, U+00A0, U+1680, U+2000 to U+200A, U+202F, U+205F
+//!   or U+3000, at the character, in words that show which it is: "unexpected `\u{a0}`".
 //! - **Strings** are plain or raw, as in Rust, for a note's text, `note(r#"a "b""#)`, and for a function's ABI,
 //!   `extern r"sysv64"`. A plain string takes the escapes that Rust reads, `\x41`, `\u{e9}` and a `\` that ends a line
 //!   among them, and [`lex`] refuses any other at its `\`. A raw string has no escapes, and ends at the first `"` that

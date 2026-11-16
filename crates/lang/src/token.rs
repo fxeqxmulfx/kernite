@@ -409,6 +409,12 @@ fn starts_name(c: char) -> bool {
     c == '_' || c.is_alphabetic()
 }
 
+/// Whether `c` is a space, as Rust says: one of Pattern_White_Space, which no version of Unicode changes.
+/// `char::is_whitespace` is another set: it has U+00A0 and others that Rust refuses, and lacks U+200E and U+200F.
+fn is_space(c: char) -> bool {
+    matches!(c, '\t'..='\r' | ' ' | '\u{85}' | '\u{200e}' | '\u{200f}' | '\u{2028}' | '\u{2029}')
+}
+
 /// Whether `rest` starts a doc comment, as Rust says: `//!`, `/*!`, `///` that no fourth `/` follows, and `/**` that no
 /// third `*` follows. Rust says `/**/` is none, but it holds no CR, so taking it as one changes nothing.
 fn is_doc(rest: &str) -> bool {
@@ -503,7 +509,9 @@ fn refused(escape: &str) -> String {
 /// A CR that no LF follows is an error at the CR, in a string, plain or raw, and in a doc comment, as Rust says; in any
 /// other comment, and in the white space that a `\` that ends a line leaves out, it is taken. A string is its text as
 /// the source has it, each CRLF in it too: the parser reads that as a LF, as Rust does. An escape of a plain string
-/// that Rust refuses is an error at its `\`.
+/// that Rust refuses is an error at its `\`. A space is what Rust reads as one, U+0009 to U+000D, U+0020, U+0085,
+/// U+200E, U+200F, U+2028 and U+2029. Any other character that no token starts with, U+00A0 say, which looks like a
+/// space and is none, is an error at it, shown as Rust shows it, `\u{a0}`, unless it is printable ASCII.
 pub fn lex(src: &str) -> Result<Vec<Tree>, Error> {
     Lexer { src, pos: 0 }.trees(None, 0).map(|(trees, _)| trees)
 }
@@ -528,6 +536,13 @@ impl Lexer<'_> {
 
     fn error(&self, message: impl Into<String>) -> Error {
         Error { span: self.span(), message: message.into() }
+    }
+
+    /// The error at `c`, which no token starts with. `c` is shown as Rust shows it: as it is if it is printable ASCII,
+    /// and as `\u{a0}` if it is not, for it may look like another character, a space say.
+    fn unexpected(&self, c: char) -> Error {
+        let shown = if c.is_ascii_graphic() { c.to_string() } else { c.escape_default().to_string() };
+        self.error(format!("unexpected `{shown}`"))
     }
 
     /// Tokens up to `close`, or to the end of the input if there is none to wait for, `depth`
@@ -559,7 +574,7 @@ impl Lexer<'_> {
                 }
                 ')' | ']' | '}' => {
                     if close.map(|(ch, _)| ch) != Some(c) {
-                        return Err(self.error(format!("unexpected `{c}`")));
+                        return Err(self.unexpected(c));
                     }
                     self.pos += 1;
                     return Ok((out, space));
@@ -595,7 +610,7 @@ impl Lexer<'_> {
                     self.pos += 1;
                     out.push(Tree::Punct { ch: c, space, span });
                 }
-                c => return Err(self.error(format!("unexpected `{c}`"))),
+                c => return Err(self.unexpected(c)),
             }
         }
     }
@@ -605,7 +620,7 @@ impl Lexer<'_> {
             let rest = &self.src[self.pos..];
             let (from, doc) = (self.pos, is_doc(rest));
             if let Some(c) = rest.chars().next()
-                && c.is_whitespace()
+                && is_space(c)
             {
                 self.pos += c.len_utf8();
             } else if rest.starts_with("//") {
