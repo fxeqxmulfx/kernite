@@ -99,9 +99,13 @@ type Args = Vec<Arg<VReg>>;
 /// reaches, whose displacement is 32 bits, signed.
 const FRAME: u64 = i32::MAX as u64;
 
-/// The most bytes of a static: an address reaches one at a displacement from `rip`, of 32 bits,
-/// signed.
-const FAR: u64 = i32::MAX as u64;
+/// The most bytes of a static that a displacement from `rip` reaches, of 32 bits, signed: a static of more is far, and
+/// a kernel reaches it by its address.
+const NEAR: u64 = i32::MAX as u64;
+
+/// What the size of a type of Rust's is less than, in bytes: `rustc` refuses a type of this many, or of more, as too
+/// big.
+const SIZE: u64 = 1 << 61;
 
 /// Where a thread's place in the grid has each of its words: its index, how many threads
 /// there are, and the barrier's address. kernite-cpu lays it out so.
@@ -362,10 +366,15 @@ impl Static {
         let Some(len) = len else {
             return Err(format!("`{ty}` has no size: a static has one, as in `{word}<[{elem}; 64]>`"));
         };
-        if len.checked_mul(size).is_none_or(|bytes| bytes > FAR) {
+        if len
+            .checked_mul(size)
+            .and_then(|bytes| bytes.checked_next_multiple_of(align))
+            .is_none_or(|bytes| bytes >= SIZE)
+        {
             return Err(format!(
-                "`{ty}` is more than {FAR} bytes: a kernel reaches memory of the module's at a displacement from \
-                 `rip`, of 32 bits, signed"
+                "`{ty}` is more than {} bytes, as many as a type of Rust's may be, its size rounded up to its \
+                 alignment",
+                SIZE - 1
             ));
         }
         Ok(Static { name: name.to_string(), ty: ty.to_string(), elem, size, len, align, constant, init: vec![] })
@@ -397,6 +406,12 @@ impl Static {
     /// How many bytes it is.
     pub fn bytes(&self) -> u64 {
         self.len * self.size
+    }
+
+    /// Whether it is past what a displacement from `rip` reaches, so that a kernel reaches it by its address, which the
+    /// linker fills in.
+    pub fn far(&self) -> bool {
+        self.bytes() > NEAR
     }
 }
 
@@ -1262,8 +1277,26 @@ impl Kernel {
                 }
                 let memory = Region { name: &st.name, bytes: st.bytes(), align: st.align, ty: &st.ty };
                 self.within(memory, None, m.disp, kind, access, name)?;
-                let disp = i32::try_from(m.disp).expect("inside a static of 2^31 bytes at most");
-                return Ok(Mem { base: Base::Static(s), index: None, disp, width });
+                if !st.far() {
+                    let disp = i32::try_from(m.disp).expect("inside a static of 2^31 bytes at most");
+                    return Ok(Mem { base: Base::Static(s), index: None, disp, width });
+                }
+                let held = &st.name;
+                let Ok(disp) = i32::try_from(m.disp) else {
+                    return Err(format!(
+                        "a displacement is 32 bits, signed, and holds no {}: index it, as in `lea(p, [{held}])` and \
+                         `[p + i]`, where `i` holds {}",
+                        m.disp, m.disp
+                    ));
+                };
+                if kind != Kind::Addr {
+                    return Err(format!(
+                        "x86 reaches memory of the module's of more than {NEAR} bytes by its address, not at a \
+                         displacement from `rip`: `lea(p, [{held}])` puts the address of `{held}` in `p`, and `[p]` is \
+                         what it holds"
+                    ));
+                }
+                return Ok(Mem { base: Base::Got(s), index: None, disp, width });
             }
             _ => {}
         }
@@ -1772,6 +1805,31 @@ impl Target for Kernel {
         let shapes: Vec<Shape> = args.iter().map(operand_shape).collect();
         let form = forms::choose(forms, &shapes).map_err(|miss| missed(name, args, &shapes, &grid, miss))?;
         let (built, implicit) = self.build(form, args, name)?;
+        // The address of a static past `rip`'s reach: the register loads it from the slot that holds it, and goes on by
+        // the displacement.
+        if let [
+            Arg { operand: Operand::Reg(p, width), .. },
+            Arg { operand: Operand::Mem(Mem { base: Base::Got(s), disp, .. }), .. },
+        ] = built[..]
+        {
+            if width != W64 {
+                let held = &self.statics[s.0 as usize].name;
+                return Err(Fault::at(
+                    0,
+                    format!(
+                        "an address of `{held}` is 64 bits, as it is past `rip`'s reach: `lea` it into a gpr seen whole"
+                    ),
+                ));
+            }
+            let to = Arg { operand: Operand::Reg(p, W64), access: Write };
+            let from =
+                |base, disp| Arg { operand: Operand::Mem(Mem { base, index: None, disp, width: W64 }), access: Read };
+            self.push(Op::Mov, vec![to, from(Base::Got(s), 0)], vec![], Flow::Next);
+            if disp != 0 {
+                self.push(Op::Lea, vec![to, from(Base::Reg(p), disp)], vec![], Flow::Next);
+            }
+            return Ok(());
+        }
         for (i, s) in &grid {
             if built[*i].access != Read {
                 return Err(Fault::at(*i, format!("`{s}` is read, as in `mov(t, {s})`; the launcher writes it")));

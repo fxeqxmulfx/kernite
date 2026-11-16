@@ -570,6 +570,13 @@ kernels': on the GPU for GPU kernels, so a module with kernels of both kinds and
 make it two. A crate with a static in a module of x86 kernels needs a dependency named `kernite-cpu` for it, not renamed
 in `Cargo.toml`. kernite says at the static when it has none.
 
+A static may be as big as a Rust type may be: its size, rounded up to its alignment, is less than 2^61 bytes. One of
+more than 2147483647 bytes is past what a displacement from `rip` reaches, so a kernel names it only by its address:
+`lea(p, [BIG])` puts the address in `p`, and `[p + i]` is the byte `i`. `lea(p, [BIG + 16])` is the address of the byte
+16, for a displacement up to 2147483647; a kernel indexes past that. Any other operand that names the static is an
+error, which says to take its address. The address comes as code for a position-independent executable has it, a load
+from a slot that the linker fills. It holds zeros at first, for no value has as many elements as it does.
+
 ## On a GPU
 
 An `extern "ptx-kernel"` function is compiled to PTX. The module's kernels are one PTX module, `PTX`, which

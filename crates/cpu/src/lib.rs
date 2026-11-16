@@ -55,7 +55,8 @@
 //! near their memory when each writes its part of a buffer first. The crate places no memory.
 //!
 //! A static of a module of x86 kernels is a [`Global`] of its elements, which the kernels reach
-//! at a displacement from `rip`, and which keeps what they write from one call to the next:
+//! at a displacement from `rip`, or by its address where that is past `rip`'s reach, and which keeps what they write
+//! from one call to the next:
 //!
 //! ```ignore
 //! #[kernite_macros::kernels]

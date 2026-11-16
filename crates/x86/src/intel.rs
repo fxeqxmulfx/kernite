@@ -285,6 +285,7 @@ fn memory(m: &Mem<PReg>, c: &Allocated<Op>, sized: bool, vector_index: Option<Wi
         Base::Const(k) => (format!("rip + {{c{}}}", k.0), i64::from(m.disp)),
         Base::Func(f) => (format!("rip + {{f{}}}", f.0), i64::from(m.disp)),
         Base::Static(s) => (format!("rip + {{{}}}", c.statics[s.0 as usize]), i64::from(m.disp)),
+        Base::Got(s) => (format!("rip + {{{}}}@GOTPCREL", c.statics[s.0 as usize]), i64::from(m.disp)),
     };
     if let Some((r, scale)) = m.index {
         let width = match r.class {

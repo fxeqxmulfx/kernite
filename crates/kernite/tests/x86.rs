@@ -1289,8 +1289,73 @@ fn a_static_is_reached_within_it() {
     assert_eq!(code.code().collect::<Vec<_>>(), want);
 }
 
+/// A static of more than 2147483647 bytes is past what a displacement from `rip` reaches: a kernel takes its address,
+/// which the register loads from the slot the linker fills, and goes on by the displacement; and it names nothing of
+/// the static but that address.
+#[test]
+fn a_static_past_rips_reach_is_reached_by_its_address() {
+    let statics = "static BIG: global<[u8; 3221225472]>;\nstatic C: global<[u32; 16]>;\n";
+    let src = |body: &str| format!("{statics}unsafe extern \"sysv64\" fn k(i: u64) {{\n{body}\n}}\n");
+    let body = "let p: gpr; let q: gpr; lea(p, [BIG]); mov(byte[p + 7], 1); mov(byte[p + i], 2); lea(q, [BIG + 8]); \
+                lea(q, [BIG + 2147483647]); lea(q, [C + 8]); mov(q.r32, [C + 4]);";
+    let code = kernite::x86_str(&src(body), "k").unwrap();
+    let want = [
+        "mov rax, qword ptr [rip + {BIG}@GOTPCREL]",
+        "mov byte ptr [rax + 7], 1",
+        "mov byte ptr [rax + rdi*1], 2",
+        "mov rax, qword ptr [rip + {BIG}@GOTPCREL]",
+        "lea rax, [rax + 8]",
+        "mov rax, qword ptr [rip + {BIG}@GOTPCREL]",
+        "lea rax, [rax + 2147483647]",
+        "lea rax, [rip + {C} + 8]",
+        "mov eax, dword ptr [rip + {C} + 4]",
+        "ret",
+    ];
+    assert_eq!(code.code().collect::<Vec<_>>(), want);
+    assert_eq!(code.statics, ["BIG", "C"]);
+    let by_address = "x86 reaches memory of the module's of more than 2147483647 bytes by its address, not at a \
+                      displacement from `rip`: `lea(p, [BIG])` puts the address of `BIG` in `p`, and `[p]` is what it \
+                      holds";
+    let index = |d: u64| {
+        format!(
+            "a displacement is 32 bits, signed, and holds no {d}: index it, as in `lea(p, [BIG])` and `[p + i]`, where \
+             `i` holds {d}"
+        )
+    };
+    let cases = [
+        ("let g: gpr; mov(g, [BIG]);", format!("4:20: {by_address}")),
+        ("let g: gpr; mov(g.r32, [BIG + 8]);", format!("4:24: {by_address}")),
+        ("mov(byte[BIG + 2147483647], 1);", format!("4:9: {by_address}")),
+        ("mov(byte[BIG + 2147483648], 1);", format!("4:9: {}", index(2147483648))),
+        ("mov(byte[BIG + 3221225471], 1);", format!("4:9: {}", index(3221225471))),
+        (
+            "let g: gpr; mov(g, [BIG + g * 8]);",
+            "4:20: x86 reaches memory of the module's at a displacement from `rip`, with no register beside it: \
+             `lea(p, [BIG])` puts the address of `BIG` in `p`, for `[p + g * 8]`"
+                .to_string(),
+        ),
+        (
+            "let g: gpr; lea(g, [BIG + 3221225473]);",
+            "4:20: `lea` takes the address `[BIG + 3221225473]`, more than one past the end of `BIG`, 3221225472 bytes"
+                .to_string(),
+        ),
+        ("let g: gpr; lea(g, [BIG + 3221225471]);", format!("4:20: {}", index(3221225471))),
+        ("let g: gpr; lea(g, [BIG + 3221225472]);", format!("4:20: {}", index(3221225472))),
+        ("let g: gpr; lea(g, [BIG + 2147483648]);", format!("4:20: {}", index(2147483648))),
+        (
+            "let g: gpr; lea(g.r32, [BIG]);",
+            "4:19: an address of `BIG` is 64 bits, as it is past `rip`'s reach: `lea` it into a gpr seen whole"
+                .to_string(),
+        ),
+    ];
+    for (body, want) in cases {
+        assert_eq!(kernite::x86_str(&src(body), "k").unwrap_err(), want, "{body}");
+    }
+}
+
 /// A static of an x86 kernel's module is of Rust's numbers, as the host reads them, of a size
-/// a displacement from `rip` reaches; it holds what it says, and has a name of its own.
+/// Rust has a type of, and past what a displacement from `rip` reaches too; it holds what it says, all its elements,
+/// and has a name of its own.
 #[test]
 fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() {
     let cases = [
@@ -1345,16 +1410,25 @@ fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() {
         ),
         ("static A: global<[u32; M]>;", "1:24: `M` is not defined"),
         (
-            "static A: global<[u8; 2147483648]>;",
-            "1:11: `global<[u8; 2147483648]>` is more than 2147483647 bytes: a kernel reaches memory of the module's \
-             at a displacement from `rip`, of 32 bits, signed",
+            "static A: global<[u8; 2305843009213693952]>;",
+            "1:11: `global<[u8; 2305843009213693952]>` is more than 2305843009213693951 bytes, as many as a type of \
+             Rust's may be, its size rounded up to its alignment",
+        ),
+        (
+            "static A: global<[u8; 2305843009213689857], 4096>;",
+            "1:11: `global<[u8; 2305843009213689857], 4096>` is more than 2305843009213693951 bytes, as many as a type \
+             of Rust's may be, its size rounded up to its alignment",
         ),
         (
             "static A: global<[u64; 18446744073709551615]>;",
-            "1:11: `global<[u64; 18446744073709551615]>` is more than 2147483647 bytes: a kernel reaches memory of \
-             the module's at a displacement from `rip`, of 32 bits, signed",
+            "1:11: `global<[u64; 18446744073709551615]>` is more than 2305843009213693951 bytes, as many as a type of \
+             Rust's may be, its size rounded up to its alignment",
         ),
         ("static A: global<[u32; 2]> = [1, 2, 3];", "1:30: `global<[u32; 2]>` holds 2 elements; this has 3"),
+        (
+            "static A: global<[u8; 3221225472]> = [1];",
+            "1:38: `global<[u8; 3221225472]>` holds 3221225472 elements; this has 1",
+        ),
         ("static A: global<[u32; 2]> = 1;", "1:30: `global<[u32; 2]>` holds an array of `u32`; this is an integer"),
         ("static A: global<[u32; 2]> = [1.5, 2];", "1:30: element 0 is an f32, not a `u32`"),
         ("static A: global<[u32; 2]> = [1, -1];", "1:34: a u32 cannot be negated"),
@@ -1391,6 +1465,10 @@ fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() {
         "static A: global<[u64; 2]> = [0, 18446744073709551615];",
         "static A: global<[f64; 2]> = [1.5, -0.0];",
         "static A: global<[u8; 2147483647]>;",
+        "static A: global<[u8; 2147483648]>;",
+        "static A: global<[u8; 3221225472]>;",
+        "static A: global<[u8; 2305843009213693951]>;",
+        "static A: global<[u8; 2305843009213689856], 4096>;",
         "static c: global<u32>; static cf1: global<u32>; static c0x: global<u32>;",
     ] {
         kernite::x86_str(&format!("{items}\n{k}"), "k").unwrap();
