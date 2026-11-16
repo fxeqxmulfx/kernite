@@ -809,12 +809,22 @@ own, and which keeps what they write from one launch to the next: `static COUNTS
 global memory, `red.global.add.u32([COUNTS + 8], 1)`, and `static WEIGHTS: constant<[f32; 4]> = [1.0, 0.5, 0.25, 2.0];`
 four floats of constant memory, which the kernels only read, `ld.r#const.f32(w, [WEIGHTS + 4])`, holding what it says
 until something writes it. The host reads and writes each as `Kernels` gives it, a [`Global`](crates/cuda/src/lib.rs) of
-Rust's type for its elements: `kernels.COUNTS().read()?`, `kernels.WEIGHTS().write(&[2.0; 4])?`. kernite refuses what a
-module cannot hold: more than the 64 KB of constant memory it has, or 4 GB of global memory, whose size `ptxas` writes
-in 32 bits. The error is at the type of a static that does not fit beside the statics before it that fit. It takes no
-room, so a static after it may fit. The room is that of the statics `cfg` keeps: two tables of 48000 bytes, one under
-`cfg(feature = "new")` and one under `cfg(not(feature = "new"))`, fit in a module, and both under
+Rust's type for its elements: `kernels.COUNTS().read()?`, `kernels.WEIGHTS().write(&[2.0; 4])?`. A module has 64 KB of
+constant memory, and kernite refuses a static that does not fit in it beside the statics before it that fit, at its
+type. It takes no room, so a static after it may fit. The room is that of the statics `cfg` keeps: two tables of 48000
+bytes, one under `cfg(feature = "new")` and one under `cfg(not(feature = "new"))`, fit in a module, and both under
 `cfg(feature = "new")` do not.
+
+A module's global memory may be of any size that the GPU has the memory for. `ptxas` writes the size of a module's
+global memory in 32 bits, and cuts a bigger one without a word, so a static of global memory that makes it 4 GB, its
+bytes with those of the statics before it that are in the module, each with the padding its alignment may need, is
+outside the module, `static BIG: global<[u8; 6442450944]>;` say: kernite-cuda allocates it, zeros, at its alignment,
+when it loads the module, and frees it with the module. Every static counts, whatever `cfg` keeps, so a static is in the
+module or outside it whichever features are on. A GPU that has not the memory is an error at the load, which names the
+static. A kernel reaches it as it reaches a static in the module, `st.global.u8([BIG + 6442450943], v)`, and at the same
+cost: it reads the address from the module's constant memory, where the address of one in the module is read from the
+driver's, and its instructions are the same. It holds zeros, so a value is an error. The host reads and writes it as it
+does a static in the module. Its address takes 8 bytes of the 64 KB.
 
 A kernel whose blocks wait for each other is `#[cooperative]`, and its `grid.sync()` waits until every thread of the
 grid has come to it, as CUDA's does. The driver launches it cooperatively, every block of the grid at once, so what a

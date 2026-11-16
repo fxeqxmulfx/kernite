@@ -1428,10 +1428,9 @@ fn a_gpu_module_holds_what_cfg_keeps() {
 }
 
 /// The room of a module's statics is that of the statics `cfg` keeps. The fixture has two tables of
-/// constant memory that do not fit together, and two statics of global memory, one of which `cfg`
-/// leaves out in one module; it builds under `deny(warnings)` without a word, with the feature `new` and
-/// without, and its tests assert which table the module has and, on a machine with a GPU, load it and
-/// read the table that is there.
+/// constant memory that do not fit together, of which `cfg` keeps one; it builds under `deny(warnings)` without a word,
+/// with the feature `new` and without, and its tests assert which table the module has and, on a machine with a GPU,
+/// load it and read the table that is there.
 #[test]
 fn the_room_of_a_gpu_module_counts_the_statics_cfg_keeps() {
     for features in ["", "new"] {
@@ -1444,18 +1443,19 @@ fn the_room_of_a_gpu_module_counts_the_statics_cfg_keeps() {
 /// A static that does not fit beside those before it that `cfg` keeps is refused at its type, in the words
 /// it has with no `cfg`; one that `cfg` leaves out takes no room, nor does one that is refused, so a
 /// small table after it fits. Without the feature `new` the fixture's `plain` is refused alone, at its
-/// second table; with it, so are `kept`, at its second table, and `kept_global`, of global memory. `either`
-/// is not, whichever `cfg` leaves out, `cfg_attr(..)` too.
+/// second table; with it, so is `kept`, at its second table. `either` is not, whichever `cfg` leaves out,
+/// `cfg_attr(..)` too. `slot` is refused at its static of global memory that the module has no room for, whose address
+/// takes 8 bytes of constant memory, where its table leaves 7.
 #[test]
 fn a_static_with_no_room_beside_those_cfg_keeps_is_refused_at_its_type() {
     let constant = "this makes the module's constant memory 96000 bytes, and a module has 64 KB";
-    let global = "this makes the module's global memory as much as 4294967302 bytes, each static aligned, and \
-                  `ptxas` writes its size in 32 bits: a module has less than 4 GB";
+    let slot = "this makes the module's constant memory 65544 bytes, and a module has 64 KB";
     refuses(
         "room_refused",
         &[
             &format!("src/lib.rs:11:19: error: {constant}"),
-            "error: could not compile `room_refused` (lib) due to 1 previous error",
+            &format!("src/lib.rs:39:21: error: {slot}"),
+            "error: could not compile `room_refused` (lib) due to 2 previous errors",
         ],
     );
     refuses_by(
@@ -1464,10 +1464,20 @@ fn a_static_with_no_room_beside_those_cfg_keeps_is_refused_at_its_type() {
         &[
             &format!("src/lib.rs:11:19: error: {constant}"),
             &format!("src/lib.rs:21:19: error: {constant}"),
-            &format!("src/lib.rs:30:19: error: {global}"),
+            &format!("src/lib.rs:39:21: error: {slot}"),
             "error: could not compile `room_refused` (lib) due to 3 previous errors",
         ],
     );
+}
+
+/// A static of global memory that a module has no room for is outside it. The fixture has one of 6 GB, whose kernels
+/// write and read its first byte and its last, and one beside a static that `cfg` leaves out; its tests assert how the
+/// modules declare them and, on a machine with a GPU, load the first: where the GPU has the memory the kernels read
+/// what they wrote, and where it has not the load is an error that names the static and its bytes.
+#[test]
+fn a_static_a_gpu_module_has_no_room_for_is_outside_it() {
+    let printed = runs_quietly(&["test"], "outside");
+    assert!(printed.contains("test result: ok. 3 passed"), "fixtures/outside.rs printed:\n{printed}");
 }
 
 /// A kernel, a helper or a static that `cfg` leaves out says nothing of what is wrong with it, as

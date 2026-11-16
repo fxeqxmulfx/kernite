@@ -148,8 +148,8 @@ impl Backend for Echo {
     type Code = Told;
 
     /// Refuses a name that starts with `taken`, a type that is not `global<..>`, and a value
-    /// of 13.
-    fn lay_out(&self, name: &str, memory: &Memory) -> Result<Laid, StaticError> {
+    /// of 13. A static named `after` holds the names of the statics laid out before it, `A,B`.
+    fn lay_out(&self, name: &str, memory: &Memory, before: &[Laid]) -> Result<Laid, StaticError> {
         if name.starts_with("taken") {
             return Err(StaticError::Name(format!("`{name}` is taken")));
         }
@@ -160,7 +160,10 @@ impl Backend for Echo {
         if let Some(Value::Int(13, _)) = memory.value {
             return Err(StaticError::Value("Echo holds no 13".into()));
         }
-        Ok(laid(name, held))
+        match name {
+            "after" => Ok(laid(name, &before.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(","))),
+            _ => Ok(laid(name, held)),
+        }
     }
 
     /// Has room for [`ROOM`] characters of what its statics hold: one that would make more has
@@ -249,7 +252,7 @@ impl Device for Echo {
     }
 
     fn device_static(&self, s: &Laid) -> DeviceStatic {
-        DeviceStatic { symbol: s.name.clone(), ty: format!("global<{}>", s.held), host: s.held.clone() }
+        DeviceStatic { symbol: s.name.clone(), ty: format!("global<{}>", s.held), host: s.held.clone(), outside: None }
     }
 }
 
@@ -419,6 +422,20 @@ fn a_static_with_no_room_beside_those_before_it_is_refused_at_its_type() {
     assert_eq!(prepared.made, all);
 }
 
+/// A static is laid out beside the statics before it that were laid out, in the module's order: not beside one the
+/// machine refused, at its name or what it holds, nor one the language refused.
+#[test]
+fn a_static_is_laid_out_beside_the_statics_before_it_that_were_laid_out() {
+    let src = "static A: global<u32>;\n\
+               static taken_x: global<u32>;\n\
+               static Z: global<u32> = 13;\n\
+               static W: global<[u32; M]>;\n\
+               static B: global<u32>;\n\
+               static after: global<u32>;";
+    let prepared = prepare(&parse(src).unwrap(), &Echo);
+    assert_eq!(prepared.made, [laid("A", "u32"), laid("B", "u32"), laid("after", "A,B")]);
+}
+
 /// What Echo refuses of a static is placed where it can be mended: at its name, its type or
 /// what it holds, as Echo says. What the language refuses is placed where the language says.
 #[test]
@@ -461,6 +478,7 @@ fn a_static_whose_value_alone_is_wrong_stands_as_its_type_has_it() {
         symbol: symbol.into(),
         ty: format!("global<{held}>"),
         host: held.into(),
+        outside: None,
     };
     let stubs: Vec<_> = echoed(statics)
         .items
@@ -797,7 +815,10 @@ fn a_module_s_items_come_out_in_order() {
         panic!("{:?}", out.items);
     };
     assert_eq!(t.error.as_ref().expect("kernite says why").at(src), "1:25: Echo holds no 13");
-    assert_eq!(b.code, DeviceStatic { symbol: "B".into(), ty: "global<u32>".into(), host: "u32".into() });
+    assert_eq!(
+        b.code,
+        DeviceStatic { symbol: "B".into(), ty: "global<u32>".into(), host: "u32".into(), outside: None }
+    );
     let device = out.device.unwrap();
     let text = device.assembly.whole().unwrap();
     let made: Vec<_> = text.lines().filter(|line| !line.starts_with("callee ")).collect();
@@ -913,6 +934,7 @@ fn a_gpu_module_refused_whole_has_no_code_and_no_launcher() {
         symbol: symbol.into(),
         ty: format!("global<{held}>"),
         host: held.into(),
+        outside: None,
     };
     assert_eq!((&t.stub, &b.stub, &w.stub), (&Some(global("T", "u32")), &Some(global("B", "u32")), &None));
     for function in [g, bare, together, f] {
@@ -1338,7 +1360,10 @@ fn the_module_s_error_goes_at_its_first_gpu_item() {
     let src = "static A: global<u32>;";
     let out = echoed(src);
     let [ItemOut::DeviceStatic(Ok(a))] = &out.items[..] else { panic!("{:?}", out.items) };
-    assert_eq!(a.code, DeviceStatic { symbol: "A".into(), ty: "global<u32>".into(), host: "u32".into() });
+    assert_eq!(
+        a.code,
+        DeviceStatic { symbol: "A".into(), ty: "global<u32>".into(), host: "u32".into(), outside: None }
+    );
     assert_eq!(said(out.device.unwrap(), src), "1:8: nothing to load");
 }
 

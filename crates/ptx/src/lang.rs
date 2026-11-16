@@ -140,6 +140,9 @@ pub struct Kernel {
     calls: Vec<String>,
     /// The module's memory it may name.
     statics: Vec<Static>,
+    /// The module's memory it names that is outside the module: the variable that holds the address of each, by
+    /// [`VReg::id`], and the constant memory the module has that address in.
+    outside: Vec<(usize, String)>,
     /// Whether every launch runs each block of its grid at once, so that it may wait for its
     /// grid.
     cooperative: bool,
@@ -258,6 +261,7 @@ impl Kernel {
             callees: vec![],
             calls: vec![],
             statics: vec![],
+            outside: vec![],
             cooperative: false,
             directives: vec![],
             decls: vec![],
@@ -309,6 +313,7 @@ impl Kernel {
             params: self.params,
             regs: self.regs,
             memory,
+            outside: self.outside,
             needs: self.needs,
             func: self.func,
             calls: self.calls,
@@ -1746,7 +1751,14 @@ impl Target for Kernel {
         let Some(s) = self.statics.iter().find(|s| s.name == name) else {
             return Err(format!("`{name}` does not compile, so no kernel names it"));
         };
-        let (memory, declared) = (s.memory.clone(), (s.name.clone(), s.ty.clone()));
+        let (mut memory, declared, outside) = (s.memory.clone(), (s.name.clone(), s.ty.clone()), s.outside);
+        // The module has the address of memory outside it, which the entry loads, and the kernel names it as it names
+        // the register.
+        if outside {
+            let reg = self.new_var(name, Ty::U64);
+            let slot = std::mem::replace(&mut memory.name, format!("%{}", self.reg(reg)));
+            self.outside.push((reg.id as usize, slot));
+        }
         self.memory.push(memory);
         self.declared.push(declared);
         Ok(Var::Mem(self.memory.len() - 1))

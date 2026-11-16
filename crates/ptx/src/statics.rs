@@ -1,5 +1,5 @@
-//! Memory a kernel declares, and the module's, a `static`: its shape, what it holds, and
-//! whether the module has room for it.
+//! Memory a kernel declares, and the module's, a `static`: its shape, what it holds, whether the module has room for
+//! it, and where it is.
 
 use kernite_lang::{IntTy, Value, with_article};
 
@@ -25,7 +25,8 @@ pub struct Memory {
 /// Memory of the module's, which a `static` of the source declares: bytes in global or
 /// constant memory that each of its kernels names, declared once, at the module's scope, which
 /// the host reads and writes by its symbol, and which keeps what is written from one launch
-/// to the next. Constant memory the kernels only read.
+/// to the next. Constant memory the kernels only read. Global memory that the module has no room for is outside it: the
+/// driver allocates it, and the module has its address in constant memory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Static {
     /// What the source calls it, which a kernel names it by: `COUNTS`.
@@ -38,10 +39,25 @@ pub struct Static {
     pub elem: Ty,
     /// What it holds until something writes it, as bytes; zeros past their end.
     pub init: Vec<u8>,
+    /// Whether it is outside the module, which has no room for it in its global memory: it is [`place`](Static::place)d
+    /// so, and holds zeros.
+    pub outside: bool,
 }
 
 /// The constant memory a module has: 64 KB.
 const CONSTANT: u64 = 64 << 10;
+
+/// The global memory a module has no room for: 4 GB. `ptxas` 13.5 writes the size of the section it lays a module's
+/// global memory of zeros out in, `.nv.global`, in 32 bits, and cuts one of 4 GB or more to them without a word: the
+/// memory past is no memory's, and the driver's copies run past what it allocated. Of `.nv.global.init`, for what holds
+/// more than zeros, 4 GB is a fatal error, "Internal error: writing file". It cuts a symbol's own size to 61 bits; only
+/// at 2^64 does it refuse. So the bytes of both sections at once, each memory's padding counted, are under 4 GB.
+const GLOBAL: u64 = 1 << 32;
+
+/// Why the driver allocates a static `ty` of global memory: the module has no room for it.
+fn no_room(ty: &str) -> String {
+    format!("the module has no room for `{ty}` in its global memory, so the driver allocates it")
+}
 
 impl Static {
     /// The static `name`, of the type `ty` as the source declares it, `global<[u32; 16]>`, or
@@ -73,7 +89,34 @@ impl Static {
             ));
         };
         let memory = Memory { name: symbol.to_string(), space, align, bytes: Some(bytes) };
-        Ok(Static { name: name.to_string(), ty: ty.to_string(), memory, elem, init: vec![] })
+        Ok(Static { name: name.to_string(), ty: ty.to_string(), memory, elem, init: vec![], outside: false })
+    }
+
+    /// Puts it in the module, or outside it: where the module has no room for it in its global memory beside the
+    /// statics `before` it that are in it, it is outside.
+    pub fn place(&mut self, before: &[Static]) {
+        let padded = |m: &Memory| m.bytes.unwrap_or(0).saturating_add(m.align - 1);
+        let inside = before.iter().filter(|s| s.memory.space == Space::Global && !s.outside);
+        let all = inside.fold(padded(&self.memory), |all, s| all.saturating_add(padded(&s.memory)));
+        self.outside = self.memory.space == Space::Global && all >= GLOBAL;
+    }
+
+    /// Its type as the module declares it: as the source has it, or if it is outside, the type of the constant memory
+    /// that holds its address, `constant<u64>`.
+    pub fn declared(&self) -> &str {
+        match self.outside {
+            true => "constant<u64>",
+            false => &self.ty,
+        }
+    }
+
+    /// What it takes of the module's memory: its own, or if it is outside, the constant memory that holds its address,
+    /// as [`declared`](Static::declared) says.
+    pub fn held(&self) -> Memory {
+        match self.outside {
+            true => Memory { name: self.memory.name.clone(), space: Space::Const, align: 8, bytes: Some(8) },
+            false => self.memory.clone(),
+        }
     }
 
     /// Makes it hold `value` until something writes it: an array of as many elements as it
@@ -81,6 +124,9 @@ impl Static {
     /// array, `global<f32>`. Or why it cannot.
     pub fn init(&mut self, value: &Value) -> Result<(), String> {
         let (ty, elem) = (&self.ty, self.elem.name());
+        if self.outside {
+            return Err(format!("{}, and it holds zeros: the host writes what it should hold", no_room(ty)));
+        }
         let len = self.memory.bytes.unwrap_or(0) / (u64::from(self.elem.bits()) / 8);
         let array = ty.split_once('<').is_some_and(|(_, args)| args.starts_with('['));
         let items = match (value, array) {
@@ -98,9 +144,10 @@ impl Static {
     }
 
     /// Its declaration, at the module's scope, `.global .align 4 .b8 COUNTS[64];`: with what it
-    /// holds until something writes it, but the zeros that ends in, which PTX fills in.
+    /// holds until something writes it, but the zeros that ends in, which PTX fills in. If it is outside, that of the
+    /// memory that holds its address.
     pub fn declaration(&self) -> String {
-        let m = &self.memory;
+        let m = self.held();
         let mut out = format!(".{} .align {} .b8 {}[{}]", m.space.word(), m.align, m.name, m.bytes.unwrap_or(0));
         let end = self.init.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
         if end > 0 {
@@ -151,48 +198,26 @@ fn datum(t: Ty, x: &Value, what: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Why each of `statics` has no room in a module beside those before it that have, in order;
-/// `None` for each that has. A static that has none takes none.
+/// `None` for each that has. A static that has none takes none. Only constant memory is short of room: the 64 KB a
+/// module has, which `ptxas` lays out in the order the module declares it, each at the multiple its address is. Global
+/// memory has the room [`Static::place`] makes.
 pub fn room(statics: &[Static]) -> Vec<Option<String>> {
-    let mut taken: Vec<&Memory> = vec![];
+    let mut end = 0u64;
     statics
         .iter()
         .map(|s| {
-            let why = fits(&taken, &s.memory).err();
-            if why.is_none() {
-                taken.push(&s.memory);
+            let m = s.held();
+            if m.space != Space::Const {
+                return None;
             }
-            why
+            let all = end.next_multiple_of(m.align).saturating_add(m.bytes.unwrap_or(0));
+            if all > CONSTANT {
+                return Some(format!("this makes the module's constant memory {all} bytes, and a module has 64 KB"));
+            }
+            end = all;
+            None
         })
         .collect()
-}
-
-/// Why `m` does not fit beside the memory `before` it, if it does not: in the 64 KB of
-/// constant memory a module has, which `ptxas` lays out in the order the module declares it,
-/// each at the multiple its address is; or in the global memory `ptxas` lays out with it.
-fn fits(before: &[&Memory], m: &Memory) -> Result<(), String> {
-    let space = m.space;
-    let mine = before.iter().copied().chain([m]).filter(|b| b.space == space);
-    if space == Space::Const {
-        let all = mine.fold(0u64, |end, m| end.next_multiple_of(m.align).saturating_add(m.bytes.unwrap_or(0)));
-        if all > CONSTANT {
-            return Err(format!("this makes the module's constant memory {all} bytes, and a module has 64 KB"));
-        }
-        return Ok(());
-    }
-    // ptxas 13.4 writes the size of the section it lays a module's global memory out in,
-    // `.nv.global`, or `.nv.global.init` for what holds more than zeros, in 32 bits, and cuts
-    // one of 4 GB or more to them without a word: the memory past is no memory's, and the
-    // driver's copies run past what it allocated. It cuts a symbol's own size to 61 bits, and
-    // writes 0 for 2^63; only at 2^64 does it refuse. The bytes of both sections at once,
-    // each memory's padding counted, are under 4 GB.
-    let all = mine.fold(0u64, |sum, m| sum.saturating_add(m.bytes.unwrap_or(0)).saturating_add(m.align - 1));
-    if all >= 1 << 32 {
-        return Err(format!(
-            "this makes the module's global memory as much as {all} bytes, each static aligned, and `ptxas` \
-             writes its size in 32 bits: a module has less than 4 GB"
-        ));
-    }
-    Ok(())
 }
 
 /// The types memory holds, for an error about one that is none.

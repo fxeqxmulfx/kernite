@@ -187,10 +187,13 @@ fn named(parts: &[(Cond, &str)]) -> TokenStream {
 }
 
 /// What `Module::load` is given of memory `m`: its name, as the constant `named` makes it, and the bytes of memory the
-/// module has no room for, or none.
+/// module has no room for and their alignment, `Some((bytes, align))`, or `None`.
 fn variable(m: &DeviceStatic) -> TokenStream {
     let mut tuple = named(&[(Cond::Always, &m.symbol)]);
-    tuple.extend(parse(", ::core::option::Option::None"));
+    tuple.extend(parse(&match m.outside {
+        Some((bytes, align)) => format!(", ::core::option::Option::Some(({bytes}, {align}))"),
+        None => ", ::core::option::Option::None".to_string(),
+    }));
     TokenTree::Group(Group::new(Delimiter::Parenthesis, tuple)).into()
 }
 

@@ -1985,6 +1985,39 @@ fn cu_filt() -> Option<PathBuf> {
     Command::new(&filt).arg("_Z1fv").output().is_ok_and(|o| o.status.success()).then_some(filt)
 }
 
+/// NVIDIA's `cuobjdump`, beside `ptxas`, which prints what a cubin holds.
+fn cuobjdump() -> Option<PathBuf> {
+    let tool = ptxas()?.with_file_name("cuobjdump");
+    Command::new(&tool).arg("--version").output().is_ok_and(|o| o.status.success()).then_some(tool)
+}
+
+/// What `cuobjdump` prints, with `flag`, of the cubin `name`, which `assembled` made.
+fn dumped(tool: &Path, name: &str, flag: &str) -> String {
+    let cubin = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.cubin"));
+    let run = Command::new(tool).arg(flag).arg(cubin).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    String::from_utf8(run.stdout).unwrap()
+}
+
+/// The size in bytes of the section `section` of the cubin `name`, if it has one: from the table `cuobjdump -elf`
+/// prints, whose columns are `Index Offset Size ES Align Type Flags Link Info Name`, the sizes in hex.
+fn section_size(tool: &Path, name: &str, section: &str) -> Option<u64> {
+    dumped(tool, name, "-elf").lines().find_map(|line| {
+        let columns: Vec<&str> = line.split_whitespace().collect();
+        (columns.len() == 10 && columns[9] == section).then(|| u64::from_str_radix(columns[2], 16).unwrap())
+    })
+}
+
+/// The instructions of the cubin `name`, as `cuobjdump -sass` prints them, each without its address and its encoding.
+fn instructions(tool: &Path, name: &str) -> Vec<String> {
+    let line = |line: &str| {
+        let (address, rest) = line.trim().strip_prefix("/*")?.split_once("*/")?;
+        address.chars().all(|c| c.is_ascii_hexdigit()).then_some(())?;
+        Some(rest.split("/*").next()?.trim().trim_end_matches(';').trim().to_string())
+    };
+    dumped(tool, name, "-sass").lines().filter_map(line).collect()
+}
+
 #[test]
 fn the_tools_that_read_ptx_show_each_name_as_rust_has_it() {
     let Some(filt) = cu_filt() else {
@@ -3480,6 +3513,217 @@ fn a_static_is_declared_once_for_each_kernel_to_name() {
     assert!(count.code.text().contains("\tmov.u64 %at, _ZN7kernite6my_app3gpu6COUNTSE;\n"));
 }
 
+/// Statics where the module has no room for the last of global memory: `BIG` is 6 GB, which `ptxas` cannot lay out in a
+/// module, and `SMALL` fits.
+const OUTSIDE: &str = r#"
+    static SMALL: global<[u32; 4]>;
+    static TABLE: constant<[u32; 2]> = [1, 2];
+    static BIG: global<[u8; 6442450944], 4>;
+
+    /// Writes the second byte of `BIG`: a function names it as a kernel does.
+    extern "ptx-func" fn put(v: u16) {
+        st.global.u8([BIG + 1], v);
+    }
+
+    /// Writes the first byte and the last of `BIG`, and the second by `put`, and takes its address.
+    pub unsafe extern "ptx-kernel" fn touch(out: *mut u64) {
+        let (v, w): (u16, u32);
+        mov.u16(v, 1);
+        st.global.u8([BIG], v);
+        st.global.u8([BIG + 6442450943], v);
+        call(put, (v));
+        atom.global.add.u32(w, [BIG + 8], 1);
+        let (at, g): (u64, u64);
+        mov.u64(at, BIG);
+        cvta.global.u64(g, BIG);
+        st.global.u64([out], at);
+        st.global.u64([out + 8], g);
+        mov.u64(at, SMALL);
+    }
+
+    /// Does not name `BIG`.
+    pub unsafe extern "ptx-kernel" fn small(out: *mut u32) {
+        let v: u32;
+        ld.global.u32(v, [SMALL]);
+        st.global.u32([out], v);
+    }
+"#;
+
+/// A static of global memory that the module has no room for beside those before it, as much as 4 GB with them, is
+/// outside the module: the module declares a `.u64` of constant memory for its address, and each kernel that names it
+/// loads that address as it starts, and reaches the static through it, a function as a kernel. A kernel that does not
+/// name it loads nothing. The static in the module is as it was.
+#[test]
+fn a_static_the_module_has_no_room_for_is_outside_it() {
+    let ptx = kernite::ptx_str(OUTSIDE).unwrap();
+    let want = "// Written by kernite.
+
+.version 3.0
+.target sm_30
+.address_size 64
+
+.global .align 4 .b8 SMALL[16];
+.const .align 4 .b8 TABLE[8] = {1, 0, 0, 0, 2};
+.const .align 8 .b8 BIG[8];
+
+.func put(
+\t.param .b16 put_param_0
+)
+{
+\t.reg .u16 %v;
+\t.reg .u64 %BIG;
+
+\tld.param.b16 %v, [put_param_0];
+\tld.const.u64 %BIG, [BIG];
+\tcvta.to.global.u64 %BIG, %BIG;
+\tst.global.u8 [%BIG+1], %v;
+\tret;
+}
+
+.visible .entry touch(
+\t.param .u64 touch_param_0
+)
+{
+\t.reg .u16 %v;
+\t.reg .u32 %w;
+\t.reg .u64 %out, %BIG, %at, %g;
+
+\tld.param.u64 %out, [touch_param_0];
+\tcvta.to.global.u64 %out, %out;
+\tld.const.u64 %BIG, [BIG];
+\tcvta.to.global.u64 %BIG, %BIG;
+\tmov.u16 %v, 1;
+\tst.global.u8 [%BIG], %v;
+\tst.global.u8 [%BIG+6442450943], %v;
+\tcall put, (%v);
+\tatom.global.add.u32 %w, [%BIG+8], 1;
+\tmov.u64 %at, %BIG;
+\tcvta.global.u64 %g, %BIG;
+\tst.global.u64 [%out], %at;
+\tst.global.u64 [%out+8], %g;
+\tmov.u64 %at, SMALL;
+\tret;
+}
+
+.visible .entry small(
+\t.param .u64 small_param_0
+)
+{
+\t.reg .u32 %v;
+\t.reg .u64 %out;
+
+\tld.param.u64 %out, [small_param_0];
+\tcvta.to.global.u64 %out, %out;
+\tld.global.u32 %v, [SMALL];
+\tst.global.u32 [%out], %v;
+\tret;
+}
+";
+    assert_eq!(ptx, want);
+}
+
+/// Where a static of global memory is: it is outside the module where its bytes, and the padding of its alignment, make
+/// 4 GB beside those before it that are in the module, and in it otherwise. One outside takes none of the module's, so
+/// a static after it may be in; one that does not lay out takes none either. Constant memory is never outside.
+#[test]
+fn a_static_of_global_memory_is_outside_where_it_makes_the_module_4_gb() {
+    let places = |src: &str| -> Vec<&'static str> {
+        let made = kernite::ptx_statics(&kernite::lang::parse(src).unwrap(), "");
+        let place = |s: Result<_, _>| {
+            s.map_or("none", |s: kernite::Compiled<Static>| if s.code.outside { "out" } else { "in" })
+        };
+        made.into_iter().map(place).collect()
+    };
+    let cases = [
+        ("static A: global<[u8; 4294967295]>;", vec!["in"]),
+        ("static A: global<[u8; 4294967296]>;", vec!["out"]),
+        ("static A: global<[u8; 18446744073709551615]>;", vec!["out"]),
+        ("static A: global<[u8; 4294967295]>; static B: global<u8>;", vec!["in", "out"]),
+        // The padding of an alignment counts: 7 bytes of it, beside 4 bytes of `B`, or in `A` itself.
+        ("static A: global<[u8; 4294967290]>; static B: global<u8>;", vec!["in", "in"]),
+        ("static A: global<[u8; 4294967290]>; static B: global<[u8; 4], 8>;", vec!["in", "out"]),
+        ("static A: global<[u8; 4294967289], 8>;", vec!["out"]),
+        ("static A: global<[u8; 4294967288], 8>;", vec!["in"]),
+        // At any alignment.
+        ("static A: global<[u8; 4294967295]>; static B: global<[u8; 4], 512>;", vec!["in", "out"]),
+        ("static A: global<[u8; 4294967296], 1024>;", vec!["out"]),
+        // The one outside takes none: `C` is in beside `A` alone, and out if `A` and `C` make 4 GB.
+        (
+            "static A: global<[u8; 3221225472]>; static B: global<[u8; 3221225472]>; \
+             static C: global<[u8; 1073741823]>;",
+            vec!["in", "out", "in"],
+        ),
+        (
+            "static A: global<[u8; 3221225472]>; static B: global<[u8; 3221225472]>; \
+             static C: global<[u8; 1073741824]>;",
+            vec!["in", "out", "out"],
+        ),
+        // One that fails takes none: `B` does not lay out, so `C` is in beside `A` alone.
+        (
+            "static A: global<[u8; 3221225472]>; static B: global<[u8; 3221225472], 3>; \
+             static C: global<[u8; 1073741823]>;",
+            vec!["in", "none", "in"],
+        ),
+        // Constant memory has its 64 KB, and a static of it is refused there, not put outside.
+        ("static A: constant<[u8; 65536]>; static B: global<u8>;", vec!["in", "in"]),
+        ("static A: constant<[u8; 4294967296]>; static B: global<u8>;", vec!["none", "in"]),
+    ];
+    for (src, want) in cases {
+        assert_eq!(places(src), want, "{src}");
+    }
+}
+
+/// `ptxas` takes the module with a static outside it, and lays out the module's own memory alone: the global memory of
+/// its cubin is `SMALL`, 16 bytes, and not the 6 GB of `BIG`, whose slot is in the constant memory beside `TABLE`.
+#[test]
+fn ptxas_lays_out_a_module_with_a_static_outside_it_as_the_statics_in_it() {
+    let (Some(ptxas), Some(dump)) = (ptxas(), cuobjdump()) else {
+        eprintln!("no ptxas or cuobjdump here: skipped; set PTXAS to run it");
+        return;
+    };
+    let run = assembled(&ptxas, &kernite::ptx_str(OUTSIDE).unwrap(), "sm_86", "outside", &["--warning-as-error"]);
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(section_size(&dump, "outside", ".nv.global"), Some(16));
+    assert_eq!(section_size(&dump, "outside", ".nv.global.init"), None);
+    // `TABLE` of 8 bytes, and the 8 of `BIG`'s slot after it.
+    assert_eq!(section_size(&dump, "outside", ".nv.constant3"), Some(16));
+}
+
+/// A kernel reaches a static outside the module at the cost of one in it: it writes the first byte and the last, as the
+/// same instructions, with its address from the constant memory of the module, `c[0x3]`, where a static in the module
+/// has it from `c[0x4]`, and so no instruction is added.
+#[test]
+fn a_static_outside_the_module_is_reached_by_the_instructions_of_one_in_it() {
+    let (Some(ptxas), Some(dump)) = (ptxas(), cuobjdump()) else {
+        eprintln!("no ptxas or cuobjdump here: skipped; set PTXAS to run it");
+        return;
+    };
+    // The biggest static a module has room for, and one that makes it 6 GB, both written at the same displacement.
+    let sass = |name: &str, bytes: u64| {
+        let kernel = format!(
+            r#"
+            static BIG: global<[u8; {bytes}]>;
+
+            pub unsafe extern "ptx-kernel" fn touch() {{
+                let v: u16;
+                mov.u16(v, 1);
+                st.global.u8([BIG], v);
+                st.global.u8([BIG + 4294967294], v);
+            }}
+            "#
+        );
+        let text = kernite::ptx_str(&kernel).unwrap();
+        assert_eq!(text.contains(".const .align 8 .b8 BIG[8];"), bytes > 4294967295, "{name}");
+        let run = assembled(&ptxas, &text, "sm_86", name, &["--warning-as-error"]);
+        assert!(run.status.success(), "{name}: {}", String::from_utf8_lossy(&run.stderr));
+        instructions(&dump, name)
+    };
+    let (inside, outside) = (sass("sass_inside", 4294967295), sass("sass_outside", 6442450944));
+    assert_eq!(inside.iter().filter(|i| i.starts_with("STG.E.U8")).count(), 2);
+    assert_eq!(outside, inside.iter().map(|i| i.replace("c[0x4]", "c[0x3]")).collect::<Vec<_>>());
+    assert!(outside.iter().any(|i| i.contains("c[0x3][0x0]")));
+}
+
 #[test]
 fn a_static_is_memory_of_a_type_the_host_reads_holding_what_it_says() {
     let cases = [
@@ -3540,15 +3784,21 @@ fn a_static_is_memory_of_a_type_the_host_reads_holding_what_it_says() {
             "static A: constant<[u8; 65535]>; static B: constant<[u32; 1]>;",
             "1:44: this makes the module's constant memory 65540 bytes, and a module has 64 KB",
         ),
+        // The slot of a static outside the module is 8 bytes of its constant memory.
         (
-            "static A: global<[u8; 4294967295]>; static B: global<u8>;",
-            "1:47: this makes the module's global memory as much as 4294967296 bytes, each static aligned, and \
-             `ptxas` writes its size in 32 bits: a module has less than 4 GB",
+            "static A: constant<[u8; 65529]>; static B: global<[u8; 4294967296]>;",
+            "1:44: this makes the module's constant memory 65544 bytes, and a module has 64 KB",
+        ),
+        // The driver gives memory the module has no room for zeros.
+        (
+            "static A: global<[u8; 4294967295]>; static B: global<u8> = 1;",
+            "1:60: the module has no room for `global<u8>` in its global memory, so the driver allocates it, and it \
+             holds zeros: the host writes what it should hold",
         ),
         (
-            "static A: global<[u8; 18446744073709551615]>;",
-            "1:11: this makes the module's global memory as much as 18446744073709551615 bytes, each static aligned, \
-             and `ptxas` writes its size in 32 bits: a module has less than 4 GB",
+            "static A: global<[u8; 4294967296]> = 1;",
+            "1:38: the module has no room for `global<[u8; 4294967296]>` in its global memory, so the driver \
+             allocates it, and it holds zeros: the host writes what it should hold",
         ),
         // The value is checked before the room left.
         (
@@ -3572,6 +3822,9 @@ fn a_static_is_memory_of_a_type_the_host_reads_holding_what_it_says() {
     assert!(ptx.contains(".const .align 1 .b8 A[65535];\n.const .align 1 .b8 B[1];\n"));
     let ptx = kernite::ptx_str("static A: global<[b8; 2]> = [255, -128];").unwrap();
     assert!(ptx.contains(".global .align 1 .b8 A[2] = {255, 128};\n"));
+    // The slot of a static outside the module takes the last 8 bytes of the constant memory.
+    let ptx = kernite::ptx_str("static A: constant<[u8; 65528]>; static B: global<[u8; 4294967296]>;").unwrap();
+    assert!(ptx.contains(".const .align 1 .b8 A[65528];\n.const .align 8 .b8 B[8];\n"));
     // A static that fails takes no room: `A` fails at its value, and `B` lays out. `ptx_str` stops
     // at `A`, so only `ptx_statics` shows it.
     let src = "static A: constant<[u8; 65536]> = 1; static B: constant<u8>;";
@@ -3589,26 +3842,30 @@ fn a_static_is_memory_of_a_type_the_host_reads_holding_what_it_says() {
 
 /// The room of the types of the statics a module keeps, `ptx_room`, which the macro asks once Rust has
 /// left out those `cfg` does, is that of `ptx_statics` for a module that keeps them all: each type that
-/// does not fit beside those before it that do is refused in the same words, and takes none; the
-/// constant memory and the global are counted apart.
+/// does not fit beside those before it that do is refused in the same words, and takes none. Only constant memory is
+/// short of room: a static of global memory the module has no room for is outside it, and its type is `constant<u64>`
+/// here, as `DeviceStatic::ty` has it, the slot of its address, which takes 8 bytes of the 64 KB.
 #[test]
 fn the_room_of_the_types_a_module_keeps_is_counted_in_order() {
     let constant = |all| format!("this makes the module's constant memory {all} bytes, and a module has 64 KB");
-    let global = "this makes the module's global memory as much as 4294967296 bytes, each static aligned, and \
-                  `ptxas` writes its size in 32 bits: a module has less than 4 GB";
     let cases = [
         ("constant<[u8; 65535]>", None),
         ("constant<[u32; 1]>", Some(constant(65540))),
         // Beside the first alone, it fills the 64 KB; the next has none left.
         ("constant<u8>", None),
         ("constant<u8>", Some(constant(65537))),
+        // Global memory has no room to lack, of any size.
         ("global<[u8; 4294967295]>", None),
-        ("global<u8>", Some(global.to_string())),
+        ("global<u8>", None),
+        ("global<[u8; 18446744073709551615]>", None),
     ];
     let types: Vec<&str> = cases.iter().map(|(ty, _)| *ty).collect();
     let want: Vec<Option<String>> = cases.into_iter().map(|(_, why)| why).collect();
     assert_eq!(kernite::ptx_room(&types), want);
     assert_eq!(kernite::ptx_room(&[]), []);
+    // A slot is 8 bytes at a multiple of 8, so one fits beside 65528 bytes and not beside 65529.
+    assert_eq!(kernite::ptx_room(&["constant<[u8; 65528]>", "constant<u64>"]), [None, None]);
+    assert_eq!(kernite::ptx_room(&["constant<[u8; 65529]>", "constant<u64>"]), [None, Some(constant(65544))]);
 }
 
 #[test]

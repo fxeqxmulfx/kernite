@@ -33,19 +33,19 @@ pub struct Prepared<B: Backend> {
 /// not for this to say. A function whose instances are wrong has no instance here: it says why
 /// where it is compiled.
 pub fn prepare<B: Backend>(module: &Module, backend: &B) -> Prepared<B> {
-    let mut statics = vec![];
+    let (mut statics, mut made) = (vec![], vec![]);
     for item in &module.items {
         let ItemKind::Static(s) = &item.kind else { continue };
         statics.push(kernite_lang::memory(module, s).and_then(|memory| {
-            let code = backend.lay_out(&s.name, &memory).map_err(|e| match e {
+            let code = backend.lay_out(&s.name, &memory, &made).map_err(|e| match e {
                 StaticError::Name(message) => Error { span: s.span, message },
                 StaticError::Type(message) => Error { span: s.ty.span(), message },
                 StaticError::Value(message) => Error { span: s.value.as_ref().map_or(s.span, Expr::span), message },
             })?;
+            made.push(code.clone());
             Ok(Compiled { code, mentions: memory.mentions })
         }));
     }
-    let made = statics.iter().flatten().map(|s| s.code.clone()).collect();
     let mut callees = vec![];
     for item in &module.items {
         let ItemKind::Fn(g) = &item.kind else { continue };
@@ -65,7 +65,7 @@ pub fn prepare<B: Backend>(module: &Module, backend: &B) -> Prepared<B> {
 /// read; else none.
 pub(crate) fn stub<B: Backend>(module: &Module, s: &Static, backend: &B) -> Option<B::Static> {
     let memory = kernite_lang::memory(module, &Static { value: None, ..s.clone() }).ok()?;
-    backend.lay_out(&s.name, &memory).ok()
+    backend.lay_out(&s.name, &memory, &[]).ok()
 }
 
 impl<B: Backend> Prepared<B> {
