@@ -243,9 +243,9 @@ fn list(names: &[String]) -> String {
 /// static as its type has it, holding zeros, if only what it holds is wrong; if not, `None`, and a
 /// `kernite_cpu::Stub` stands for it, which leaves the type of its elements to the code that uses
 /// it. In a crate without `kernite-cpu`, its type is [`missing`]'s, with the error that says so after it, under `cfg`,
-/// the static's own. A far static, past what `rip` reaches, is no more than a declaration in an `extern` block, which
-/// [`linked`] defines, for Rust makes a static of its own in time and memory that grow with its size. On a system that
-/// is not Linux, it is an error at its name.
+/// the static's own. A far static, more than is in reach of `rip`, is no more than a declaration in an `extern` block,
+/// which [`linked`] defines, for Rust makes a static of its own in time and memory that grow with its size. On a system
+/// that is not Linux, it is an error at its name.
 pub(crate) fn cpu_static(
     s: &lang::Static,
     made: Option<&HostStatic>,
@@ -277,8 +277,8 @@ pub(crate) fn cpu_static(
         let mut declared = under(r#"#[cfg(target_os = "linux")]"#);
         declared.extend(linked(&symbol(name), m));
         let message = format!(
-            "`{name}` is {} bytes, past what `rip` reaches, and kernite defines such a static for Linux's linker \
-             alone: build for Linux, or make it smaller",
+            "`{name}` is {} bytes, more than a static in reach of `rip` may be, and kernite defines such a static for \
+             Linux's linker alone: build for Linux, or make it smaller",
             m.len * m.size
         );
         declared.extend(error_under(&under(r#"#[cfg(not(target_os = "linux"))]"#), name.span(), &message));

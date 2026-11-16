@@ -1,6 +1,6 @@
-//! Statics of 2 GiB and more, which no displacement from `rip` reaches, and one in reach beside them. The linker
-//! defines each far one, so the crate builds as fast as with a small static, and a kernel takes the address of one with
-//! `lea(p, [BIG])` and indexes it. Built under `deny(warnings)`, the crate says nothing, and the kernels run.
+//! Statics of more than 1 GiB, which are far from `rip`, and one in reach beside them. The linker defines each far one,
+//! so the crate builds as fast as with a small static, and a kernel takes the address of one with `lea(p, [BIG])` and
+//! indexes it. Built under `deny(warnings)`, the crate says nothing, and the kernels run.
 #![deny(warnings)]
 
 #[kernite_macros::kernels]
@@ -18,6 +18,9 @@ pub mod cpu {
     /// Counts how many times `ends` ran, in reach of `rip`.
     pub static RUNS: global<[u64; 1]>;
 
+    /// Just short of 2 GiB: a static of Rust's of that size fails to link, so it is far.
+    pub static EDGE: global<[u8; 2147483647]>;
+
     /// Writes 7 to the first byte of `BIG` and 9 to the byte `last` bytes on, -1 to the last `i16` of `type`, and
     /// counts the run.
     pub unsafe extern "sysv64" fn ends(last: u64) {
@@ -33,6 +36,13 @@ pub mod cpu {
         mov([RUNS], n);
     }
 
+    /// Writes 4 to the last byte of `EDGE`, 2147483646 bytes on from its address, which a displacement holds.
+    pub unsafe extern "sysv64" fn edge() {
+        let p: gpr;
+        lea(p, [EDGE + 2147483646]);
+        mov(byte[p], 4);
+    }
+
     /// Writes 5 to the byte of `BIG` 2147483648 bytes in, which no displacement holds, and 6 to the byte 8 on.
     pub unsafe extern "sysv64" fn middle() {
         let p: gpr;
@@ -46,10 +56,11 @@ pub mod cpu {
 
 #[cfg(test)]
 mod tests {
-    use super::cpu::{BIG, RUNS, ends, middle, r#type};
+    use super::cpu::{BIG, EDGE, RUNS, edge, ends, middle, r#type};
 
     /// The kernel writes the first byte and the last byte of 3 GiB, which the host reads back, and the middle, and what
-    /// it leaves alone is zeros. A static of 2 GiB with a raw name is reached the same way.
+    /// it leaves alone is zeros. A static of 2 GiB with a raw name is reached the same way, and so is one of 2147483647
+    /// bytes, at its last byte.
     #[test]
     fn a_kernel_reaches_a_static_of_3_gib_by_its_address() {
         assert_eq!((BIG.len(), BIG.is_empty(), r#type.len()), (3221225472, false, 1073741824));
@@ -70,5 +81,10 @@ mod tests {
         unsafe { ends(100) };
         assert_eq!((at(0), at(100), at(3221225471), RUNS.read()[0]), (7, 9, 9, 2));
         assert_eq!((BIG.ptr().addr() % 4096, r#type.ptr().addr() % 2), (0, 0));
+        // SAFETY: `edge` writes only the memory of the module it names, which nothing else touches.
+        unsafe { edge() };
+        // SAFETY: Each address is in a static, which lives for the whole program, of atomics the kernel wrote.
+        let (first, last) = unsafe { (*EDGE.at(0), *EDGE.at(2147483646)) };
+        assert_eq!((EDGE.len(), first, last), (2147483647, 0, 4));
     }
 }

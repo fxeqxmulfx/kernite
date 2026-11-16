@@ -1726,10 +1726,11 @@ fn kernels_of_instances_and_cooperative_ones_that_a_feature_leaves_out_say_nothi
     assert!(printed.contains("1 passed"), "fixtures/configured_hidden.rs ran its test, and printed:\n{printed}");
 }
 
-/// A static of more than 2 GiB is the linker's, so the crate builds as quickly as one with a small static, and under
+/// A static of more than 1 GiB is the linker's, so the crate builds as quickly as one with a small static, and under
 /// `deny(warnings)` it says nothing, nor does rustdoc. A kernel takes its address, which the linker fills in a slot,
-/// and indexes it; the host reads back each byte it wrote, the first and the last of 3 GiB. The statics keep their
-/// visibility and their names, a raw one as well, and one that `cfg` leaves out is not defined.
+/// and indexes it; the host reads back each byte it wrote, the first and the last of 3 GiB, and the last of one of
+/// 2147483647 bytes, which as a static of Rust's fails to link. The statics keep their visibility and their names, a
+/// raw one as well, and one that `cfg` leaves out is not defined.
 #[test]
 fn a_static_past_rips_reach_is_the_linkers_and_a_kernel_reaches_it_by_its_address() {
     let printed = runs_quietly(&["test"], "far");
@@ -1737,7 +1738,15 @@ fn a_static_past_rips_reach_is_the_linkers_and_a_kernel_reaches_it_by_its_addres
     documents_quietly("far");
 }
 
-/// Only Linux's linker defines a static of more than 2 GiB, as kernite writes it, so a crate checked for Windows is
+/// A static of 1 GiB, the most that is in reach of `rip`, is Rust's own, and builds without a word: the linker takes
+/// it, and a kernel names its last byte at a displacement, which the host reads back.
+#[test]
+fn a_static_of_a_gibibyte_is_in_reach_of_rip_and_the_linker_takes_it() {
+    let printed = runs_quietly(&["test"], "near");
+    assert!(printed.contains("1 passed"), "fixtures/near.rs ran its test, and printed:\n{printed}");
+}
+
+/// Only Linux's linker defines a static of more than 1 GiB, as kernite writes it, so a crate checked for Windows is
 /// told so at each such static, with what to do: the assembler of that system is not left to say it, in words of its
 /// own.
 #[test]
@@ -1745,14 +1754,15 @@ fn a_static_past_rips_reach_is_refused_off_linux() {
     if std_here(WINDOWS) {
         let said = |place: &str, name: &str, bytes: &str| {
             format!(
-                "src/lib.rs:{place}: error: `{name}` is {bytes} bytes, past what `rip` reaches, and kernite defines \
-                 such a static for Linux's linker alone: build for Linux, or make it smaller"
+                "src/lib.rs:{place}: error: `{name}` is {bytes} bytes, more than a static in reach of `rip` may be, \
+                 and kernite defines such a static for Linux's linker alone: build for Linux, or make it smaller"
             )
         };
         let lines = [
             said("9:16", "BIG", "3221225472"),
             said("12:23", "r#type", "2147483648"),
-            "error: could not compile `far` (lib) due to 2 previous errors".to_string(),
+            said("22:16", "EDGE", "2147483647"),
+            "error: could not compile `far` (lib) due to 3 previous errors".to_string(),
         ];
         refuses_by(&["check", "--target", WINDOWS], "far", &lines.each_ref().map(String::as_str));
     }

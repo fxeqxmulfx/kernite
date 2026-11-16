@@ -1289,9 +1289,9 @@ fn a_static_is_reached_within_it() {
     assert_eq!(code.code().collect::<Vec<_>>(), want);
 }
 
-/// A static of more than 2147483647 bytes is past what a displacement from `rip` reaches: a kernel takes its address,
-/// which the register loads from the slot the linker fills, and goes on by the displacement; and it names nothing of
-/// the static but that address.
+/// A static of more than 1073741824 bytes is far, past what is in reach of `rip`: a kernel takes its address, which the
+/// register loads from the slot the linker fills, and goes on by the displacement; and it names nothing of the static
+/// but that address.
 #[test]
 fn a_static_past_rips_reach_is_reached_by_its_address() {
     let statics = "static BIG: global<[u8; 3221225472]>;\nstatic C: global<[u32; 16]>;\n";
@@ -1313,7 +1313,7 @@ fn a_static_past_rips_reach_is_reached_by_its_address() {
     ];
     assert_eq!(code.code().collect::<Vec<_>>(), want);
     assert_eq!(code.statics, ["BIG", "C"]);
-    let by_address = "x86 reaches memory of the module's of more than 2147483647 bytes by its address, not at a \
+    let by_address = "x86 reaches memory of the module's of more than 1073741824 bytes by its address, not at a \
                       displacement from `rip`: `lea(p, [BIG])` puts the address of `BIG` in `p`, and `[p]` is what it \
                       holds";
     let index = |d: u64| {
@@ -1353,9 +1353,23 @@ fn a_static_past_rips_reach_is_reached_by_its_address() {
     }
 }
 
+/// A static of 1073741824 bytes, 1 GiB, is in reach of `rip`: a kernel names its last byte at a displacement. One byte
+/// more is far, and a kernel names it by its address alone, as the error says.
+#[test]
+fn a_static_of_a_gibibyte_is_in_reach_of_rip_and_one_byte_more_is_not() {
+    let src = |bytes: u64| {
+        let body = "mov(byte[S + 1073741823], 1);";
+        format!("static S: global<[u8; {bytes}]>;\nunsafe extern \"sysv64\" fn k() {{\n{body}\n}}\n")
+    };
+    let code = kernite::x86_str(&src(1073741824), "k").unwrap();
+    assert_eq!(code.code().collect::<Vec<_>>(), ["mov byte ptr [rip + {S} + 1073741823], 1", "ret"]);
+    let far = "3:9: x86 reaches memory of the module's of more than 1073741824 bytes by its address, not at a \
+               displacement from `rip`: `lea(p, [S])` puts the address of `S` in `p`, and `[p]` is what it holds";
+    assert_eq!(kernite::x86_str(&src(1073741825), "k").unwrap_err(), far);
+}
+
 /// A static of an x86 kernel's module is of Rust's numbers, as the host reads them, of a size
-/// Rust has a type of, and past what a displacement from `rip` reaches too; it holds what it says, all its elements,
-/// and has a name of its own.
+/// Rust has a type of, and far from `rip` too; it holds what it says, all its elements, and has a name of its own.
 #[test]
 fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() {
     let cases = [

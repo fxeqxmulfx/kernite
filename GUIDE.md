@@ -570,21 +570,25 @@ kernels': on the GPU for GPU kernels, so a module with kernels of both kinds and
 make it two. A crate with a static in a module of x86 kernels needs a dependency named `kernite-cpu` for it, not renamed
 in `Cargo.toml`. kernite says at the static when it has none.
 
-A static may be as big as a Rust type may be: its size, rounded up to its alignment, is less than 2^61 bytes. One of
-more than 2147483647 bytes is past what a displacement from `rip` reaches, so a kernel names it only by its address:
+A static may be as big as a Rust type may be: its size, rounded up to its alignment, is less than 2^61 bytes. A kernel
+names a static at a displacement from `rip`, 32 bits, signed, which reaches 2 GiB. The rest of the program's code and
+data take room in those 2 GiB too, for the code reaches its data so, and the linker lays the statics out among that
+data: so a static is in reach of `rip` up to 1073741824 bytes, half of it, and a kernel names it at a displacement. The
+statics in reach of a program must fit in the 2 GiB with its code and the rest of its data: the linker refuses a program
+where they do not, and kernite counts each static alone, so two of 1 GiB in one module are each in reach, and the linker
+refuses the program. One of more than 1073741824 bytes is far, and a kernel names it only by its address:
 `lea(p, [BIG])` puts the address in `p`, and `[p + i]` is the byte `i`. `lea(p, [BIG + 16])` is the address of the byte
 16, for a displacement up to 2147483647; a kernel indexes past that. Any other operand that names the static is an
 error, which says to take its address. The address comes as code for a position-independent executable has it, a load
 from a slot that the linker fills. It holds zeros at first, for no value has as many elements as it does.
 
-Rust makes a static of its own in time and memory that grow with its size, 6 milliseconds and 2 MiB for each MiB, so one
-past `rip`'s reach is the linker's instead, in the `.lbss` section of x86-64's ELF, which holds zeros and takes no room
-in the file: a crate with a static of 3 GiB builds as fast as a crate with one of 4 KiB. kernite defines it so on Linux
-alone, and refuses it on another system, at its name. To Rust it is a static of an `extern` block, a foreign static, as
-Rust's errors say: Rust refuses `#[used]` on it, say. Its symbol is the path of its module and its name, as
-`module_path!` gives them, so two such statics of one path and one name in a program are one symbol defined twice, which
-the assembler or the linker refuses: two modules of one name in two functions have one path, and so do two versions of
-one crate.
+Rust makes a static of its own in time and memory that grow with its size, 6 milliseconds and 2 MiB for each MiB, so a
+far one is the linker's instead, in the `.lbss` section of x86-64's ELF, which holds zeros and takes no room in the
+file: a crate with a static of 3 GiB builds as fast as a crate with one of 4 KiB. kernite defines it so on Linux alone,
+and refuses it on another system, at its name. To Rust it is a static of an `extern` block, a foreign static, as Rust's
+errors say: Rust refuses `#[used]` on it, say. Its symbol is the path of its module and its name, as `module_path!`
+gives them, so two such statics of one path and one name in a program are one symbol defined twice, which the assembler
+or the linker refuses: two modules of one name in two functions have one path, and so do two versions of one crate.
 
 ## On a GPU
 

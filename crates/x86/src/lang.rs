@@ -99,9 +99,11 @@ type Args = Vec<Arg<VReg>>;
 /// reaches, whose displacement is 32 bits, signed.
 const FRAME: u64 = i32::MAX as u64;
 
-/// The most bytes of a static that a displacement from `rip` reaches, of 32 bits, signed: a static of more is far, and
-/// a kernel reaches it by its address.
-const NEAR: u64 = i32::MAX as u64;
+/// The most bytes of a static in reach of `rip`. A kernel names a static at a displacement from `rip`, of 32 bits,
+/// signed, which reaches 2 GiB; the rest of the program's code and data take room in that, for the code reaches its
+/// data so, and the linker lays the statics out among that data: so a static may take half of it. A static of more is
+/// far, and a kernel reaches it by its address.
+const NEAR: u64 = 1 << 30;
 
 /// What the size of a type of Rust's is less than, in bytes: `rustc` refuses a type of this many, or of more, as too
 /// big.
@@ -408,8 +410,8 @@ impl Static {
         self.len * self.size
     }
 
-    /// Whether it is past what a displacement from `rip` reaches, so that a kernel reaches it by its address, which the
-    /// linker fills in.
+    /// Whether it is more than `NEAR` bytes, past what is in reach of `rip`, so that a kernel reaches it by its
+    /// address, which the linker fills in.
     pub fn far(&self) -> bool {
         self.bytes() > NEAR
     }
@@ -1278,7 +1280,7 @@ impl Kernel {
                 let memory = Region { name: &st.name, bytes: st.bytes(), align: st.align, ty: &st.ty };
                 self.within(memory, None, m.disp, kind, access, name)?;
                 if !st.far() {
-                    let disp = i32::try_from(m.disp).expect("inside a static of 2^31 bytes at most");
+                    let disp = i32::try_from(m.disp).expect("inside a static in reach of `rip`");
                     return Ok(Mem { base: Base::Static(s), index: None, disp, width });
                 }
                 let held = &st.name;

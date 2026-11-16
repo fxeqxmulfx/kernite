@@ -72,15 +72,18 @@ fn x86_compiles_a_kernel_through_the_port() {
     assert_eq!(X86.host_static(&statics[0]), want);
 }
 
-/// A static of more than 2147483647 bytes is far, which the port says, for Rust to have the linker place it; one of as
-/// many is not.
+/// A static of more than 1073741824 bytes, 1 GiB, is far, which the port says, for Rust to have the linker place it;
+/// one of as many is not. One just short of 2 GiB is far too, for a static of Rust's of that size fails to link.
 #[test]
 fn a_static_past_rips_reach_comes_out_of_the_port_far() {
     let far = |ty: &str| X86.host_static(&Static::new("BIG", ty).unwrap()).far;
+    assert!(far("global<[u8; 1073741825]>"));
+    assert!(far("global<[u8; 2147483647]>"));
     assert!(far("global<[u8; 2147483648]>"));
     assert!(far("global<[u64; 3221225472]>"));
-    assert!(!far("global<[u8; 2147483647]>"));
-    assert!(!far("constant<[u32; 536870911]>"));
+    assert!(far("constant<[u32; 268435457]>"));
+    assert!(!far("global<[u8; 1073741824]>"));
+    assert!(!far("constant<[u32; 268435456]>"));
 }
 
 /// A call at an address names no function in the code, so `funcs` has none: the functions taken
