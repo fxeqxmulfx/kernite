@@ -339,11 +339,10 @@ fn erased(ty: &[TokenTree]) -> (String, String) {
 /// Rust's pointers do not cross threads. Without `kernels`, it never runs, for a kernel that
 /// did not compile. `needs` is the doc of the CPU features the kernels need. Its safety
 /// contract says that nothing else touches `named`, the module's memory, while the threads run.
-/// It binds `grid` for itself, which a parameter of `f` may be named as well; a compile-time
-/// argument may not, which is an error at its name, after the function, under `cfg`, `f`'s own;
-/// and the function never runs, as one of a kernel that did not compile. In a crate without
-/// `kernite-cpu`, it takes any grid, gives [`missing`]'s type, with the error that says so after
-/// it, and never runs. Its result is [`launcher_result`]'s.
+/// It binds `__kernite_grid` for itself, which a parameter of `f` may be named as well; a compile-time argument may
+/// not, which is an error at its name, after the function, under `cfg`, `f`'s own; and the function never runs, as one
+/// of a kernel that did not compile. In a crate without `kernite-cpu`, it takes any grid, gives [`missing`]'s type,
+/// with the error that says so after it, and never runs. Its result is [`launcher_result`]'s.
 fn grid_launcher(
     f: &Fn,
     kernels: Option<&[(Vec<Value>, String)]>,
@@ -352,7 +351,7 @@ fn grid_launcher(
     cfg: &TokenStream,
     top: &[TokenTree],
 ) -> TokenStream {
-    let clashes = clashes(f, cfg, &["grid"], "the launcher", top);
+    let clashes = clashes(f, cfg, &["__kernite_grid"], "the launcher", top);
     let kernels = if clashes.is_empty() { kernels } else { None };
     let mut out = attrs(f, top);
     out.extend(needs);
@@ -398,7 +397,7 @@ fn grid_launcher(
             (parse("impl ::core::marker::Sized"), result, missed)
         }
     };
-    let mut params = hygienic("$grid:", kernels.is_some());
+    let mut params = hygienic("$__kernite_grid:", kernels.is_some());
     params.extend(grid);
     params.extend(parse(","));
     params.extend(value_params(f, top));
@@ -424,9 +423,10 @@ fn grid_launcher(
                     None => args.push(name.to_string()),
                 }
             }
-            args.push("$grid".to_string());
+            args.push("$__kernite_grid".to_string());
             format!(
-                "{addresses}::kernite_cpu::launch($grid, move |$grid: &::kernite_cpu::Place| unsafe {{ ({kernel})({}) }})",
+                "{addresses}::kernite_cpu::launch($__kernite_grid, \
+                 move |$__kernite_grid: &::kernite_cpu::Place| unsafe {{ ({kernel})({}) }})",
                 args.join(", ")
             )
         }

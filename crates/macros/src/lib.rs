@@ -118,10 +118,9 @@
 //! `cargo build`; `cargo check` evaluates no generic function's constants, and misses it.
 //!
 //! A kernel's parameters keep the names they are written with beside those the Rust the
-//! macro writes binds for itself: `grid`, the launcher's, and `threads` and `shared`, those
-//! of a cooperative GPU kernel's `_blocks` method. A compile-time argument may not be named
-//! as one of them, for Rust cannot keep a const apart from a parameter of its name: that is
-//! an error at its name.
+//! macro writes binds for itself: `__kernite_grid`, the launcher's, and `__kernite_threads` and `__kernite_shared`,
+//! those of a cooperative GPU kernel's `_blocks` method. A compile-time argument may not be named as one of them, for
+//! Rust cannot keep a const apart from a parameter of its name: that is an error at its name.
 //!
 //! A parameter named `_` is given and not read, in a kernel of every kind. Rust cannot pass `_` on,
 //! so the macros name it, with a name of their own that no parameter or compile-time argument of
@@ -220,6 +219,10 @@
 //! written with, and none that the macro adds. Clippy's `too_many_arguments` is the one lint a
 //! crate of kernels may not forbid: Clippy says it of a launcher of more than seven parameters,
 //! whoever wrote it, and each launcher allows it.
+//!
+//! Each name that the Rust the macro writes binds for itself starts with `__kernite_`, for Rust reads a binding named
+//! as a const in scope as that const, and refuses one named as a static. So a module of kernels may have a const or a
+//! static of any other name in scope, `grid` say.
 //!
 //! A module of kernels takes the consts it shares with others from a module `#[consts]` is
 //! on, which it names by its path, as Rust reads one where the module is:
@@ -342,8 +345,8 @@
 //! dependency named `kernite-macros` is not told it needs one for them. What the macro finds in writing the module for
 //! Rust is said, as for any module: the dependency the crate needs, `kernite-cuda` for a GPU item that `cfg` keeps and
 //! `kernite-cpu` for an x86 static or cooperative kernel; a compile-time argument named as a parameter of a launcher or
-//! of a `_blocks` method, `grid`, `threads` or `shared`; and a GPU kernel or a static named as a cooperative kernel's
-//! `_blocks` method.
+//! of a `_blocks` method, `__kernite_grid`, `__kernite_threads` or `__kernite_shared`; and a GPU kernel or a static
+//! named as a cooperative kernel's `_blocks` method.
 //!
 //! A module kernite cannot read is refused whole as well, and stays with every item kernite can read. A `const` or a
 //! `static` it cannot read ends at its `;`, for its value may hold a `{..}`, as in `= { 1 };`. Any other item ends at

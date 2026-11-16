@@ -91,11 +91,12 @@ pub(crate) fn gpu(
     load.extend(parse("; const GLOBALS: &[&::core::primitive::str] = &"));
     load.extend([names(variables.iter().map(|(c, m)| (*c, m.symbol.as_str())))]);
     load.extend(parse(
-        ";\n::core::result::Result::Ok(Kernels { module: ::kernite_cuda::Module::load(cuda, PTX, NAMES, GLOBALS)? })",
+        ";\n::core::result::Result::Ok(Kernels {\n\
+         module: ::kernite_cuda::Module::load(__kernite_cuda, PTX, NAMES, GLOBALS)?,\n})",
     ));
     let mut methods = parse(
-        "/// The kernels, compiled for `cuda`'s GPU by its driver.\n\
-         pub fn load(cuda: &::kernite_cuda::Cuda) -> ::core::result::Result<Kernels, ::kernite_cuda::Error>",
+        "/// The kernels, compiled for the given `Cuda`'s GPU by its driver.\n\
+         pub fn load(__kernite_cuda: &::kernite_cuda::Cuda) -> ::core::result::Result<Kernels, ::kernite_cuda::Error>",
     );
     methods.extend([TokenTree::Group(Group::new(Delimiter::Brace, load))]);
     // The index of the name of symbol `i` among the names that are there.
@@ -112,7 +113,7 @@ pub(crate) fn gpu(
         };
         // The methods would be under the kernel's `cfg`, and so are their errors.
         let cfg = carried(attrs(f, top), false);
-        let grid = clashes(f, &cfg, &["grid"], "the launcher", top);
+        let grid = clashes(f, &cfg, &["__kernite_grid"], "the launcher", top);
         methods.extend(launcher(f, launched.as_deref().filter(|_| grid.is_empty()), top));
         clashed.extend(grid);
         let Some(c) = &f.cooperative else { continue };
@@ -126,7 +127,7 @@ pub(crate) fn gpu(
             errors.extend(error_under(&cfg, at(c.span), &message));
             continue;
         }
-        let threads = clashes(f, &cfg, &["threads", "shared"], &format!("`{name}`"), top);
+        let threads = clashes(f, &cfg, &["__kernite_threads", "__kernite_shared"], &format!("`{name}`"), top);
         methods.extend(blocks(f, launched.as_deref().filter(|_| threads.is_empty()), top));
         clashed.extend(threads);
     }
@@ -199,9 +200,9 @@ fn names<'a>(symbols: impl Iterator<Item = (&'a Cond, &'a str)>) -> TokenTree {
 /// those of `f`, a pointer as the address on the GPU it is, `::kernite_cuda::Ptr`, and a number as
 /// the number and not the name the kernel writes; and its compile-time arguments those of `f`,
 /// which pick the instance. A cooperative kernel is launched cooperatively, every block of its
-/// grid at once. The launcher binds `grid` for itself, which a parameter of `f` may be named as
-/// well; a compile-time argument may not, and `launched` is `None` for the launcher that never
-/// runs, as one of a kernel that did not compile. Its result is [`launcher_result`]'s.
+/// grid at once. The launcher binds `__kernite_grid` for itself, which a parameter of `f` may be named as well; a
+/// compile-time argument may not, and `launched` is `None` for the launcher that never runs, as one of a kernel that
+/// did not compile. Its result is [`launcher_result`]'s.
 fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStream {
     let mut out = attrs(f, top);
     if f.cooperative.is_some() {
@@ -230,7 +231,7 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("unsafe fn"));
     out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
-    let mut params = hygienic("&self, $grid: ::kernite_cuda::Grid, ", launched.is_some());
+    let mut params = hygienic("&self, $__kernite_grid: ::kernite_cuda::Grid, ", launched.is_some());
     let mut args = vec![];
     for (param, colon) in written_params(f, top) {
         // Its name, before the colon.
@@ -257,7 +258,7 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     let how = if f.cooperative.is_some() { "launch_cooperative" } else { "launch" };
     let never = format!("{}::core::unreachable!()", never(f, top));
     out.extend(body(f, launched, top, asks(f, top, host), &never, |index| {
-        format!("unsafe {{ self.module.{how}({index}, $grid, &[{}]) }}", args.join(", "))
+        format!("unsafe {{ self.module.{how}({index}, $__kernite_grid, &[{}]) }}", args.join(", "))
     }));
     out
 }
@@ -269,14 +270,14 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
 /// own, not those of `f`. The launcher alone keeps what `f` says of lints, of its code or of its
 /// symbol, as `allow`, `target_feature` and `export_name` do. The method's name and generics are
 /// where `f` has its own, but of the macro's span: Rust lints neither, and says a lint of a
-/// compile-time argument once, at the launcher. The method binds `threads` and `shared` for itself,
-/// which a compile-time argument of `f` may not be named, and `launched` is `None` for the method
-/// that never runs, as one of a kernel that did not compile.
+/// compile-time argument once, at the launcher. The method binds `__kernite_threads` and `__kernite_shared` for itself,
+/// which a compile-time argument of `f` may not be named, and `launched` is `None` for the method that never runs, as
+/// one of a kernel that did not compile.
 fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStream {
     let mut out = parse(&format!(
-        "/// How many blocks a grid of [`{0}`](Self::{0}) has at most, of `threads` threads each and\n\
-         /// `shared` bytes of the launch's shared memory: as many as the GPU runs at once, for it\n\
-         /// runs them all together.",
+        "/// How many blocks a grid of [`{0}`](Self::{0}) has at most, given the threads of each block\n\
+         /// and the bytes of the launch's shared memory: as many as the GPU runs at once, for it runs\n\
+         /// them all together.",
         f.name
     ));
     out.extend(carried(attrs(f, top), true));
@@ -288,12 +289,12 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
     out.extend([TokenTree::Ident(Ident::new(&blocks_name(f), name))]);
     out.extend(quiet(&top[f.head.end + 2..f.params_at]));
     out.extend(hygienic(
-        "(&self, $threads: ::core::primitive::u32, $shared: ::core::primitive::u32) \
+        "(&self, $__kernite_threads: ::core::primitive::u32, $__kernite_shared: ::core::primitive::u32) \
          -> ::core::result::Result<::core::primitive::u32, ::kernite_cuda::Error>",
         launched.is_some(),
     ));
     out.extend(body(f, launched, top, TokenStream::new(), "::core::unreachable!()", |index| {
-        format!("self.module.resident({index}, $threads, $shared)")
+        format!("self.module.resident({index}, $__kernite_threads, $__kernite_shared)")
     }));
     out
 }

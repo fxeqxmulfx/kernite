@@ -338,8 +338,9 @@ holds, or what compiling a kernel finds. It compiles nothing of the module, so a
 is no error at it. No room is counted for the statics, so a crate with no dependency named `kernite-macros` is not told
 it needs one for them. What the macro finds in writing the module for Rust is said, as for any module: the dependency
 the crate needs, `kernite-cuda` for a GPU item that `cfg` keeps and `kernite-cpu` for an x86 static or cooperative
-kernel; a compile-time argument named as a parameter of a launcher or of a `_blocks` method, `grid`, `threads` or
-`shared`; and a GPU kernel or a static named as a cooperative kernel's `_blocks` method.
+kernel; a compile-time argument named as a parameter of a launcher or of a `_blocks` method, `__kernite_grid`,
+`__kernite_threads` or `__kernite_shared`; and a GPU kernel or a static named as a cooperative kernel's `_blocks`
+method.
 
 A module kernite cannot read is refused whole as well, and stays with every item kernite can read. A `const` or a
 `static` it cannot read ends at its `;`, for its value may hold a `{..}`, as in `= { 1 };`. Any other item ends at its
@@ -542,10 +543,10 @@ core, in `/sys/devices/system/node/node0/cpulist` and `/sys/devices/system/cpu/c
 a program to read and give to `Grid::on`. The grid's barrier is one cache line for the whole grid, whichever nodes its
 threads are on, so a `grid.sync()` over threads on two nodes passes that line between them.
 
-The kernel's parameters keep the names they are written with, `grid` among them, but `_`, which the macros name
-for Rust. A compile-time argument may not be named `grid`, for Rust cannot keep a const apart from a parameter of
-its name: that is an error at its name. A crate with a cooperative kernel needs a dependency named `kernite-cpu`
-for the grid, not renamed in `Cargo.toml`. kernite says at the kernel when it has none.
+The kernel's parameters keep the names they are written with, but `_`, which the macros name for Rust. The launcher
+names its grid `__kernite_grid`, and a compile-time argument may not be named so, for Rust cannot keep a const apart
+from a parameter of its name: that is an error at its name. A crate with a cooperative kernel needs a dependency named
+`kernite-cpu` for the grid, not renamed in `Cargo.toml`. kernite says at the kernel when it has none.
 
 A kernel calls the module's others, itself among them, as SysV calls a function: `call(g, gcd, (a, b))` moves `a` to
 `rdi` and `b` to `rsi`, and `g` from `rax`, and is checked against what `gcd` takes and returns. `lea(fp, [gcd])` takes
@@ -723,10 +724,10 @@ prefetch of a buffer it frees, when threads use it at once: a buffer made at tha
 `placement` says so. When one thread uses it, it clears them. They are hints, so no value changes.
 
 `saxpy` becomes the method that launches it, which takes the grid and then the kernel's parameters. They keep the names
-they are written with, `grid` among them, but `_`, which the macros name for Rust. A compile-time argument may not
-be named `grid`, nor, on a cooperative kernel, `threads` or `shared`, which are parameters of the method that says
-how many blocks its grid has at most, below. Rust cannot keep a const apart from a parameter of its name: that is
-an error at its name.
+they are written with, but `_`, which the macros name for Rust. The method names the grid `__kernite_grid`, and a
+compile-time argument may not be named so, nor, on a cooperative kernel, `__kernite_threads` or `__kernite_shared`,
+which are parameters of the method that says how many blocks its grid has at most, below. Rust cannot keep a const apart
+from a parameter of its name: that is an error at its name.
 
 A grid has as many blocks and threads as the GPU takes: at least 1 along each of x, y and z, and, from Kepler's `sm_30`
 on, at most 2^31 - 1 blocks along x, 65535 along y and 65535 along z, and 1024 threads in a block, at most 1024 of them
@@ -937,6 +938,10 @@ The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `
 its kernels: Rust lints the names and the code a kernel is written with, and none that the macro adds. Clippy's
 `too_many_arguments` is the one lint a crate of kernels may not forbid: Clippy says it of a launcher of more than seven
 parameters, whoever wrote it, and each launcher allows it.
+
+Each name that the Rust the macro writes binds for itself starts with `__kernite_`, for Rust reads a binding named as a
+const in scope as that const, and refuses one named as a static. So a module of kernels may have a const or a static of
+any other name in scope, `grid` say.
 
 Checking the generated kernels is for the crates that hold them: a snapshot of every listing, so that any change
 to any layer that moves an instruction shows in review, and runs against scalar references, bit for bit, as in

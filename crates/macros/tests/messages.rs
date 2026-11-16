@@ -843,23 +843,23 @@ fn a_static_of_a_module_refused_at_its_attribute_stands_as_its_type_has_it() {
 
 /// A module of kernels that `#[kernels]` refuses at its attribute is told its refusal, and what the macro finds in
 /// writing it for Rust, as a module that is not refused is: the dependency its crate needs, which the tests below
-/// hold, a compile-time argument named as a parameter of a launcher, `grid`, or of a `_blocks` method, `threads` and
-/// `shared`, and a GPU kernel or a static named as a cooperative kernel's `_blocks` method. It is told nothing that
-/// kernite would find in its items, for kernite checks none: a kernel that is not `unsafe`, a `#[instances(..)]` that
-/// does not hold, a name that is not defined, an ABI kernite does not compile for, a static that holds nothing, and
-/// kernels of both kinds with a static. With the feature `taken` the same modules are not refused, and each mistake
-/// is said.
+/// hold, a compile-time argument named as a parameter of a launcher, `__kernite_grid`, or of a `_blocks` method,
+/// `__kernite_threads` and `__kernite_shared`, and a GPU kernel or a static named as a cooperative kernel's `_blocks`
+/// method. It is told nothing that kernite would find in its items, for kernite checks none: a kernel that is not
+/// `unsafe`, a `#[instances(..)]` that does not hold, a name that is not defined, an ABI kernite does not compile for,
+/// a static that holds nothing, and kernels of both kinds with a static. With the feature `taken` the same modules are
+/// not refused, and each mistake is said.
 #[test]
 fn a_module_refused_at_its_attribute_is_told_what_the_macro_finds_in_writing_it_and_nothing_in_its_items() {
     refuses(
         "refused_mistakes",
         &[
             &format!("src/lib.rs:7:60: error: {REFUSED}"),
-            "src/lib.rs:43:50: error: `grid` names a parameter of the launcher as well",
+            "src/lib.rs:43:50: error: `__kernite_grid` names a parameter of the launcher as well",
             &format!("src/lib.rs:48:60: error: {REFUSED}"),
-            "src/lib.rs:68:54: error: `grid` names a parameter of the launcher as well",
-            "src/lib.rs:76:54: error: `threads` names a parameter of `together_blocks` as well",
-            "src/lib.rs:76:74: error: `shared` names a parameter of `together_blocks` as well",
+            "src/lib.rs:68:54: error: `__kernite_grid` names a parameter of the launcher as well",
+            "src/lib.rs:76:54: error: `__kernite_threads` names a parameter of `together_blocks` as well",
+            "src/lib.rs:76:84: error: `__kernite_shared` names a parameter of `together_blocks` as well",
             "src/lib.rs:81:7: error: `#[cooperative]` gives `Kernels` a method `cut_blocks`, which says how many \
              blocks a grid of `cut` has at most, and a kernel or a static of the module is named `cut_blocks` as well",
             &format!("src/lib.rs:92:60: error: {REFUSED}"),
@@ -880,15 +880,15 @@ fn a_module_refused_at_its_attribute_is_told_what_the_macro_finds_in_writing_it_
              \"ptx-kernel\"` ones, for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \
              \"C\"` is none of these",
             "src/lib.rs:37:23: error: `global<[u32; 0]>` holds nothing",
-            "src/lib.rs:43:50: error: `grid` names a parameter of the launcher as well",
+            "src/lib.rs:43:50: error: `__kernite_grid` names a parameter of the launcher as well",
             "src/lib.rs:51:32: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
             "src/lib.rs:55:7: error: `once` takes no compile-time arguments, so it is compiled once, with no \
              `#[instances(..)]`",
             "src/lib.rs:61:28: error: `nope` is not defined",
             "src/lib.rs:64:23: error: `global<[u32; 0]>` holds nothing",
-            "src/lib.rs:68:54: error: `grid` names a parameter of the launcher as well",
-            "src/lib.rs:76:54: error: `threads` names a parameter of `together_blocks` as well",
-            "src/lib.rs:76:74: error: `shared` names a parameter of `together_blocks` as well",
+            "src/lib.rs:68:54: error: `__kernite_grid` names a parameter of the launcher as well",
+            "src/lib.rs:76:54: error: `__kernite_threads` names a parameter of `together_blocks` as well",
+            "src/lib.rs:76:84: error: `__kernite_shared` names a parameter of `together_blocks` as well",
             "src/lib.rs:81:7: error: `#[cooperative]` gives `Kernels` a method `cut_blocks`, which says how many \
              blocks a grid of `cut` has at most, and a kernel or a static of the module is named `cut_blocks` as well",
             "src/lib.rs:95:16: error: a static is memory of the module's kernels: the GPU's, for PTX kernels, or the \
@@ -1500,7 +1500,7 @@ fn what_cfg_leaves_out_says_nothing() {
             "src/lib.rs:58:7: error: `plain` takes no compile-time arguments, so it is compiled once, with no \
              `#[instances(..)]`",
             "src/lib.rs:67:23: error: `y` is not defined",
-            "src/lib.rs:75:47: error: `grid` names a parameter of the launcher as well",
+            "src/lib.rs:75:47: error: `__kernite_grid` names a parameter of the launcher as well",
             "src/lib.rs:82:9: error: a kernel has no `while`: loops are labels and jumps, and `for` is unrolled",
             "src/lib.rs:87:23: error: `global<[u32; 0]>` holds nothing",
             "src/lib.rs:92:23: error: `y` is not defined",
@@ -1518,8 +1518,8 @@ fn what_cfg_leaves_out_says_nothing() {
             "src/lib.rs:176:28: error: `y` is not defined",
             "src/lib.rs:181:23: error: `global<[u32; 0]>` holds nothing",
             "src/lib.rs:186:28: error: `y` is not defined",
-            "src/lib.rs:159:51: error: `grid` names a parameter of the launcher as well",
-            "src/lib.rs:169:53: error: `threads` names a parameter of `counted_blocks` as well",
+            "src/lib.rs:159:51: error: `__kernite_grid` names a parameter of the launcher as well",
+            "src/lib.rs:169:53: error: `__kernite_threads` names a parameter of `counted_blocks` as well",
             // A cooperative kernel whose method `k_blocks` has the name of a kernel of the module.
             "src/lib.rs:195:7: error: `#[cooperative]` gives `Kernels` a method `k_blocks`, which says how many \
              blocks a grid of `k` has at most, and a kernel or a static of the module is named `k_blocks` as well",
@@ -1903,13 +1903,23 @@ fn the_macro_says_what_is_wrong_with_a_directive_where_it_is() {
     );
 }
 
-/// A parameter named as a local the macro's Rust binds for itself, `index`, `grid`, `threads` or
-/// `shared`, is the kernel's own, and reaches it: Rust builds the module without a word, where the
-/// launcher's own `index` hid it, and Rust said "unused variable: `index`". So is a compile-time
-/// argument, where no launcher or method binds its name.
+/// A parameter named as a local the macro's Rust binds for itself, `__kernite_grid`, or as one it bound, `index`,
+/// `grid`, `threads` or `shared`, is the kernel's own, and reaches it: Rust builds the module without a word, where the
+/// launcher's own `index` hid it, and Rust said "unused variable: `index`". So is a compile-time argument, where no
+/// launcher or method binds its name.
 #[test]
 fn a_kernels_parameters_keep_their_names_beside_those_the_macros_rust_binds() {
     builds_quietly("parameters");
+}
+
+/// A const or a static in scope of a module of kernels is no matter to the Rust the macros write, though named as a
+/// local it bound for itself before: consts named `__0`, `grid`, `threads`, `shared` and `cuda`, and a static named
+/// `grid`, beside x86 kernels of each kind and GPU kernels of each kind, whose types name the consts, as a static's
+/// does. Rust reads a binding named as a const in scope as that const, and refuses one named as a static, and said so
+/// at the module's attribute. Rust builds each module without a word.
+#[test]
+fn a_const_or_a_static_in_scope_is_no_matter_to_the_rust_the_macros_write() {
+    builds_quietly("consts_and_statics_in_scope");
 }
 
 /// A parameter named `_` is a number or a pointer the kernel is given and does not read, as it is in any
@@ -3970,13 +3980,13 @@ fn rust_sees_the_types_a_helper_names_where_the_workspace_is_named_by_what_is_no
 }
 
 /// Rust is shown the types a helper's signature names where a macro finds an error in writing the module, as it is
-/// where kernite says one of an item: a compile-time argument named `grid` beside the launcher, of a cooperative
-/// x86 kernel and of a GPU kernel; `threads` and `shared` beside the parameters of `k_blocks`, the method of a
-/// cooperative GPU kernel; a `k_blocks` that a kernel and a static of the module are named as well; statics with no
-/// room beside each other; and a name that `cfg` leaves out where the kernel that names it is kept. Each module has
-/// a helper no kernel calls, whose parameter is `Ret`, a type of the crate's that nothing else names, and another
-/// whose types are the language's, `gpr`, `ymm`, `local<[u32; 4], 16>` and `r32`. kernite's errors are all the
-/// words: Rust does not call the import unused, and says nothing of the types it cannot find.
+/// where kernite says one of an item: a compile-time argument named `__kernite_grid` beside the launcher, of a
+/// cooperative x86 kernel and of a GPU kernel; `__kernite_threads` and `__kernite_shared` beside the parameters of
+/// `k_blocks`, the method of a cooperative GPU kernel; a `k_blocks` that a kernel and a static of the module are named
+/// as well; statics with no room beside each other; and a name that `cfg` leaves out where the kernel that names it is
+/// kept. Each module has a helper no kernel calls, whose parameter is `Ret`, a type of the crate's that nothing else
+/// names, and another whose types are the language's, `gpr`, `ymm`, `local<[u32; 4], 16>` and `r32`. kernite's errors
+/// are all the words: Rust does not call the import unused, and says nothing of the types it cannot find.
 #[test]
 fn rust_sees_the_types_a_helper_names_where_a_macro_finds_an_error_in_writing_the_module() {
     let grid = "names a parameter of the launcher as well";
@@ -3988,10 +3998,10 @@ fn rust_sees_the_types_a_helper_names_where_a_macro_finds_an_error_in_writing_th
     refuses(
         "helper_imports_macros",
         &[
-            &error("26:43", &format!("`grid` {grid}")),
-            &error("45:47", &format!("`grid` {grid}")),
-            &error("65:47", &format!("`threads` {blocks}")),
-            &error("65:67", &format!("`shared` {blocks}")),
+            &error("26:43", &format!("`__kernite_grid` {grid}")),
+            &error("45:47", &format!("`__kernite_grid` {grid}")),
+            &error("65:47", &format!("`__kernite_threads` {blocks}")),
+            &error("65:77", &format!("`__kernite_shared` {blocks}")),
             &error("82:7", twice),
             &error("103:7", twice),
             &error("112:19", room),
@@ -4099,12 +4109,12 @@ fn rust_sees_the_types_a_helper_names_where_the_statics_have_no_room_and_cfg_kee
     says("c,d", &[broken, &lifetime], "2 previous errors");
 }
 
-/// A compile-time argument named as the launcher's parameter, `grid`, of a cooperative kernel that `cfg` keeps under
-/// `a`, x86 or the GPU's, and one named as its `_blocks` method's, `threads`, are errors the macros find in writing the
-/// module, and are not said of a kernel that `cfg` leaves out. The helpers are under `b`: `h` takes `Ret`, a type of
-/// the crate's that nothing else names, and `language` the language's types. Rust is shown their types where the errors
-/// are said and the helpers are kept, so it does not call the import unused, and says nothing of the types it cannot
-/// find; otherwise the import is unused.
+/// A compile-time argument named as the launcher's parameter, `__kernite_grid`, of a cooperative kernel that `cfg`
+/// keeps under `a`, x86 or the GPU's, and one named as its `_blocks` method's, `__kernite_threads`, are errors the
+/// macros find in writing the module, and are not said of a kernel that `cfg` leaves out. The helpers are under `b`:
+/// `h` takes `Ret`, a type of the crate's that nothing else names, and `language` the language's types. Rust is shown
+/// their types where the errors are said and the helpers are kept, so it does not call the import unused, and says
+/// nothing of the types it cannot find; otherwise the import is unused.
 #[test]
 fn rust_sees_the_types_a_helper_names_where_cfg_keeps_the_error_the_macros_find_and_the_helper() {
     let unused = [
@@ -4112,9 +4122,9 @@ fn rust_sees_the_types_a_helper_names_where_cfg_keeps_the_error_the_macros_find_
         "src/lib.rs:38:9: warning: unused import: `super::Ret`",
     ];
     let errors = [
-        "src/lib.rs:27:43: error: `grid` names a parameter of the launcher as well",
-        "src/lib.rs:54:47: error: `grid` names a parameter of the launcher as well",
-        "src/lib.rs:54:64: error: `threads` names a parameter of `g_blocks` as well",
+        "src/lib.rs:27:43: error: `__kernite_grid` names a parameter of the launcher as well",
+        "src/lib.rs:54:47: error: `__kernite_grid` names a parameter of the launcher as well",
+        "src/lib.rs:54:74: error: `__kernite_threads` names a parameter of `g_blocks` as well",
     ];
     let says = |features: &str, lines: &[&str], count: &str| {
         let mut lines = lines.to_vec();
@@ -4198,20 +4208,20 @@ fn a_module_that_gives_a_primitive_another_type_builds_as_one_that_does_not() {
 }
 
 /// A compile-time argument is no local, and no span of stable Rust keeps it apart from one of its
-/// name: `grid`, the launcher's, and `threads` and `shared`, of a cooperative kernel's `_blocks`.
-/// Each is refused at its name, and nothing at the module's attribute, where Rust would say
-/// "expected `Grid`, found `u32`", as the launcher or method never runs. So is a name written raw,
-/// `r#grid`, which Rust reads as `grid`.
+/// name: `__kernite_grid`, the launcher's, and `__kernite_threads` and `__kernite_shared`, of a cooperative kernel's
+/// `_blocks`. Each is refused at its name, and nothing at the module's attribute, where Rust would say "expected
+/// `Grid`, found `u32`", as the launcher or method never runs. So is a name written raw, `r#__kernite_grid`, which Rust
+/// reads as `__kernite_grid`.
 #[test]
 fn a_compile_time_argument_named_as_the_launchers_parameters_is_refused_at_its_name() {
     refuses(
         "arguments",
         &[
-            "src/lib.rs:27:47: error: `grid` names a parameter of the launcher as well",
-            "src/lib.rs:38:47: error: `threads` names a parameter of `k_blocks` as well",
-            "src/lib.rs:49:47: error: `shared` names a parameter of `k_blocks` as well",
-            "src/lib.rs:60:43: error: `grid` names a parameter of the launcher as well",
-            "src/lib.rs:71:43: error: `grid` names a parameter of the launcher as well",
+            "src/lib.rs:26:47: error: `__kernite_grid` names a parameter of the launcher as well",
+            "src/lib.rs:37:47: error: `__kernite_threads` names a parameter of `k_blocks` as well",
+            "src/lib.rs:48:47: error: `__kernite_shared` names a parameter of `k_blocks` as well",
+            "src/lib.rs:59:43: error: `__kernite_grid` names a parameter of the launcher as well",
+            "src/lib.rs:70:43: error: `__kernite_grid` names a parameter of the launcher as well",
             "error: could not compile `arguments` (lib) due to 5 previous errors",
         ],
     );
@@ -4634,10 +4644,10 @@ fn a_cooperative_kernels_blocks_method_keeps_what_it_says_of_lints() {
         let want = [
             format!(
                 "<p>How many blocks a grid of <a href=\"struct.Kernels.html#method.k\" title=\"method \
-                 blocks::{module}::Kernels::k\"><code>k</code></a> has at most, of <code>threads</code> threads each and"
+                 blocks::{module}::Kernels::k\"><code>k</code></a> has at most, given the threads of each block"
             ),
-            "<code>shared</code> bytes of the launch’s shared memory: as many as the GPU runs at once, for it".into(),
-            "runs them all together.</p>".into(),
+            "and the bytes of the launch’s shared memory: as many as the GPU runs at once, for it runs".into(),
+            "them all together.</p>".into(),
         ];
         assert_eq!(own(module), want, "{module}");
     }

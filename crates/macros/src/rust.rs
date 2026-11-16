@@ -1344,10 +1344,11 @@ pub(crate) fn parse(s: &str) -> TokenStream {
 }
 
 /// The tokens `s` writes, as [`parse`] gives them, but for each name after a `$`: a local the
-/// macro binds for itself, of the span `Span::mixed_site()`. No name the user wrote finds it, nor
-/// does it find theirs, so a parameter of a kernel may be named as the macro's launcher names its
-/// own. Where the Rust never `runs`, each is `_`, for a compile-time argument may be named so, and
-/// Rust reads a binding of a const's name as that const.
+/// macro binds for itself, of the span `Span::mixed_site()`. No local the user wrote finds it, nor does it find theirs,
+/// so a parameter of a kernel may be named as the macro's launcher names its own. A const or a static in scope is no
+/// local: Rust reads a binding of a const's name as that const, and refuses one of a static's. So each name is one of
+/// kernite's, `__kernite_grid` say, and a const or a static of the user's named `grid` is no matter to it. Where the
+/// Rust never `runs`, each is `_`, for a compile-time argument may be named so.
 pub(crate) fn hygienic(s: &str, runs: bool) -> TokenStream {
     fn own(tokens: TokenStream, runs: bool) -> TokenStream {
         let mut tokens = tokens.into_iter();
