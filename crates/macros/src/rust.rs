@@ -508,7 +508,10 @@ pub(crate) fn asks(f: &Fn, top: &[TokenTree], pointee: fn(&[TokenTree]) -> Token
     let types = written_params(f, top).into_iter().map(|(param, colon)| param[colon + 1..].to_vec()).chain(result);
     let (mut params, mut values) = (TokenStream::new(), vec![]);
     for (i, (ty, ask)) in types.zip(&asked).enumerate() {
-        let local = TokenTree::Ident(Ident::new(&format!("__{i}"), Span::mixed_site()));
+        // Rust says of the type of a closure's parameter that holds a part with no size, `(dyn Debug, u8)`, that it has
+        // none, at the whole parameter, from its name to the last token of its type, so the name is at the type's first
+        // token: a name of the macro's would put the error at the attribute.
+        let local = TokenTree::Ident(Ident::new(&format!("__{i}"), ty[0].span()));
         values.push(match ask {
             Some(Ask::Pointer(..)) => {
                 let (kind, to) = pointer(&ty).expect("a pointer is asked of");
@@ -1212,13 +1215,26 @@ pub(crate) fn host(ty: &[TokenTree]) -> TokenStream {
 /// type alike in the argument and behind the pointer. A fragment in them that stays one type is in the macro's own
 /// parentheses, as [`for_rust`] has it, for Rust reads a group the macro writes again as no group: `Fn() -> $t + Send`,
 /// with `$t` as `dyn Debug + Sync`, would be `Fn() -> dyn Debug + Sync + Send`.
-pub(crate) fn ptr_argument(to: &[TokenTree]) -> TokenStream {
+fn ptr_argument(to: &[TokenTree]) -> TokenStream {
     if let [TokenTree::Group(g)] = to
         && let Some(inside) = bounded(g)
     {
         return inside.into_iter().collect();
     }
     host(to)
+}
+
+/// The type of a launcher's parameter for a kernel's pointer `ty` to `to`: `::kernite_cuda::Ptr<..>` of
+/// [`ptr_argument`]. Rust says of a type that holds a part with no size, `(dyn Debug, u8)`, that it has none, at the
+/// whole type, from its first token to its last, where [`asks`] says it too, and the same error twice at one place is
+/// one. So the type begins and ends where the kernel's does: a first or a last token of the macro's would put the error
+/// at the attribute. Both tokens of the `::` that begins it are the kernel's first, for Rust reads the two as one.
+pub(crate) fn ptr_type(ty: &[TokenTree], to: &[TokenTree]) -> TokenStream {
+    let mut out: Vec<TokenTree> =
+        parse("::kernite_cuda::Ptr<").into_iter().chain(ptr_argument(to)).chain(parse(">")).collect();
+    out[..2].iter_mut().for_each(|t| t.set_span(ty[0].span()));
+    out.last_mut().expect("`>` is a token").set_span(ty[ty.len() - 1].span());
+    out.into_iter().collect()
 }
 
 /// `ty` as kernite-cuda names it, if it is `f16` or `bf16`, written raw or not, which Rust has not.

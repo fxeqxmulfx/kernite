@@ -2350,6 +2350,62 @@ fn a_pointer_to_a_type_with_no_size_is_refused_whatever_it_holds_or_is_called() 
     refuses("no_size_names", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
+/// A pointer to a type with a part that has no size, `*const (dyn Debug, u8)` or `*const [dyn Debug]`, is Rust's error,
+/// said once, at the type, as it says it of a plain function's: in an x86 kernel, plain, of compile-time arguments,
+/// cooperative, and cooperative of compile-time arguments, in one that returns the pointer, plain and of compile-time
+/// arguments, and in a GPU kernel of each of the four kinds. Rust says it at the whole type, and of a closure's
+/// parameter at the whole parameter, from its name to its type's last token. So a GPU kernel's launcher has a type that
+/// begins and ends with the kernel's own tokens, and the closure that asks Rust of a pointer has a name at the type's
+/// first: a GPU kernel's error was at the module's attribute in place of at the type, and an x86 kernel's beside it.
+/// kernite tells a slice's pointer by what is written, and says that it has two words, at the type, beside Rust's. A
+/// kernel of compile-time arguments that returns a pointer to the tuple casts it back, so for it Rust says the part
+/// that has no size once more, at the tuple.
+#[test]
+fn a_pointer_to_a_type_with_a_part_that_has_no_size_is_rusts_error_once_at_its_type() {
+    // What kernite says of a slice's pointer, in the order of the kernels: the x86 module's, then the GPU's. A kernel
+    // of compile-time arguments, whose name ends in `tiles`, is told once for each of its instances.
+    let words = "a pointer to `[dyn core::fmt::Debug]` has two words, an address and a length or a table, and a \
+                 kernel's pointer has one";
+    let kernite = [
+        ("43:44", "slice"),
+        ("48:64", "slice_tiles"),
+        ("53:53", "slice_together"),
+        ("59:73", "slice_together_tiles"),
+        ("63:59", "slice_result"),
+        ("68:79", "slice_result_tiles"),
+        ("95:48", "slice"),
+        ("100:68", "slice_tiles"),
+        ("105:57", "slice_together"),
+        ("111:77", "slice_together_tiles"),
+    ];
+    let mut said = vec![];
+    for (at, kernel) in kernite {
+        if kernel.ends_with("tiles") {
+            said.extend([1, 2].map(|n| format!("src/lib.rs:{at}: error: in `{kernel}::<{n}>`: {words}")));
+        } else {
+            said.push(format!("src/lib.rs:{at}: error: {words}"));
+        }
+    }
+    // Where Rust says it, at the type, in the order Rust says it.
+    let at_type =
+        |places: &[&str]| places.iter().map(|at| size_unknown(at, "(dyn Debug + 'static)")).collect::<Vec<_>>();
+    // A plain function's: a tuple's pointer and a slice's.
+    said.extend(at_type(&["8:24", "10:24"]));
+    // An x86 kernel's tuple, and its slice: plain, of compile-time arguments, cooperative, cooperative of compile-time
+    // arguments, and one that returns the pointer, plain and of compile-time arguments.
+    said.extend(at_type(&["14:44", "19:64", "24:53", "30:73", "34:59", "39:79"]));
+    said.extend(at_type(&["43:44", "48:64", "53:53", "59:73", "63:59", "68:79"]));
+    // A GPU kernel's tuple, and its slice: plain, of compile-time arguments, cooperative, and cooperative of
+    // compile-time arguments.
+    said.extend(at_type(&["75:48", "80:68", "85:57", "91:77"]));
+    said.extend(at_type(&["95:48", "100:68", "105:57", "111:77"]));
+    // The cast of the pointer that the last x86 kernel of the tuple returns, at the tuple, and of the part itself.
+    said.push(size_unknown("39:86", "dyn Debug"));
+    let errors = said.len();
+    said.push(format!("error: could not compile `no_size_parts` (lib) due to {errors} previous errors"));
+    refuses("no_size_parts", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
 /// A pointer to a type Rust refuses by itself, `NeedsCopy<String>` where the struct asks for an argument
 /// that is `Copy`, is Rust's error, said once, at the type, as any type's is: in a kernel of every kind,
 /// and not again at the module's attribute, nor once for each instance. So it is in an x86 kernel, plain,
