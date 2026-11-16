@@ -764,9 +764,11 @@ pub(crate) fn flatten(stream: TokenStream) -> Vec<TokenTree> {
 /// any bracket, `1 + 2`, `-1`, `a as u8`, `0..4` or `dyn Debug + Send`, and a token that takes it apart is next to
 /// it. Before it is one of `+ - * / % ^ & | < >` and `!`; `==`, `!=`, `<=` or `>=`; `const` or `mut`, of a pointer,
 /// `*const T`, or a reference, `&mut T`; or the name of a lifetime, `&'a T`. After it is one of `+ - * / % ^ & | < >`,
-/// or `==`, `!=`, `.` or `as`. The `>` of an arrow, `->`, is a result's, and no operator's, and a lone `=` is a
-/// `let`'s or an assignment's. A group that holds `a.b`, `f(x)` or `a::b`, or that no such token is next to, is read
-/// as it would be without the group, and is opened.
+/// or `==`, `!=`, `.` or `as`. The `>` of an arrow, `->`, is a result's, and no operator's, but for the `+` of a trait
+/// object's bounds, which Rust calls ambiguous after an arrow, `fn() -> dyn Debug + Send`, as after a `*const`: a group
+/// that holds one stays after an arrow, whatever is after it. A lone `=` is a `let`'s or an assignment's. A group that
+/// holds `a.b`, `f(x)` or `a::b`, or that no such token is next to, is read as it would be without the group, and is
+/// opened.
 fn stays(inside: &[TokenTree], before: &[TokenTree], after: &[TokenTree]) -> bool {
     let is_any = |t: &TokenTree, chars: &str| chars.chars().any(|c| is_punct(t, c));
     let loose = inside.iter().any(|t| is_any(t, "+-*/%^&|<>!=") || is_ident(t, "as"))
@@ -781,7 +783,8 @@ fn stays(inside: &[TokenTree], before: &[TokenTree], after: &[TokenTree]) -> boo
         _ => false,
     };
     let arrow = matches!(before, [.., dash, head] if is_punct(dash, '-') && is_punct(head, '>'));
-    let left = before.last().is_some_and(|t| is_any(t, "+-*/%^&|<>!")) && !arrow
+    let bounds = || split_top(inside, |t| is_punct(t, '+')).count() > 1;
+    let left = before.last().is_some_and(|t| is_any(t, "+-*/%^&|<>!")) && (!arrow || bounds())
         || before.last().is_some_and(|t| is_ident(t, "const") || is_ident(t, "mut"))
         || matches!(before, [.., quote, _] if is_punct(quote, '\''))
         || before.len() >= 2 && compares(&before[before.len() - 2..]);

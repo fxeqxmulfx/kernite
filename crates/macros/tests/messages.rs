@@ -4877,24 +4877,67 @@ fn a_fragment_of_bounds_behind_a_pointer_is_one_type_to_rust_wherever_the_macros
     refuses("fragments_bounds", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
+/// A macro's fragment `$t:ty` of bounds, `dyn core::fmt::Debug + Send`, is one type to Rust as the result of a function
+/// pointer, `fn() -> $t`, with no operator after it, wherever the macros write it back: in a parameter and in a result,
+/// of an x86 kernel, of a GPU kernel and of a helper, and in a type that holds one, a tuple, an array and the parameter
+/// of another function pointer; and as the result of a trait object's `Fn`, `*const (dyn Fn() -> $t)` and
+/// `Box<dyn Fn() -> $t>`. kernite refuses each, and names the type with the bounds in parentheses, as if they were
+/// written so: `fn() -> (dyn core::fmt::Debug + Send)`. Rust says nothing of the fragment, as it says nothing of it in
+/// a macro that does not call kernite: not that its `+` is ambiguous, as it says of `fn() -> dyn Debug + Send` written
+/// out. Each is also built with the bounds in parentheses, as written by hand: the errors are the same, in the same
+/// words, at the same places, and Rust says that the parentheses are unnecessary, as it does of the same macros with no
+/// kernel in them. A kernel that gives back a pointer to a type that has the bounds in an argument,
+/// `*mut Wrap<dyn core::fmt::Debug + Send>`, builds: that `+` is no bounds of the pointer's own, and the macros open
+/// the group after the arrow of its result, as they did.
+#[test]
+fn a_fragment_of_bounds_after_an_arrow_is_one_type_to_rust_wherever_the_macros_write_it_back() {
+    // The fixture calls each macro with the fragment, then with the type in parentheses. kernite says the same of both,
+    // in the words of the second: Cargo says a message once, however many calls make it, and counts each.
+    let call = "fn() -> (dyn core::fmt::Debug + Send)";
+    let mut said = vec![
+        x86_takes("18:48", "", call),
+        two_words("21:48", "", "(dyn Fn() -> (dyn core::fmt::Debug + Send))"),
+        x86_takes("24:48", "", "Box<dyn Fn() -> (dyn core::fmt::Debug + Send)>"),
+        x86_gives("39:56", "", call),
+        gpu_takes("54:52", "", call),
+        gpu_returns("57:54", "", call),
+        x86_takes("73:48", "", call),
+        x86_takes("96:52", "", &format!("(u8, {call})")),
+        x86_gives("99:60", "", &format!("[{call}; 2]")),
+        gpu_takes("102:59", "", &format!("fn({call}) -> u8")),
+    ];
+    let errors = 2 * said.len();
+    // Rust's lint of the parentheses of the macro's own, `*const (dyn Fn() -> $t)`, which each call counts, and of
+    // those that the second call of each macro has.
+    for place in ["21:55", "32:32", "47:34", "65:18", "88:26", "114:24"] {
+        said.push(format!("src/lib.rs:{place}: warning: unnecessary parentheses around type"));
+    }
+    said.push(format!(
+        "error: could not compile `fragments_arrows` (lib) due to {errors} previous errors; 7 warnings emitted"
+    ));
+    refuses("fragments_arrows", &said.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
 /// A macro's fragment `$t:ty` is named in kernite's errors as it is written, in no parentheses, where it is not the
 /// bounds of a trait object behind a `&`, a pointer or an arrow: when the macros open it, `*const [$t]` with `$t` as
 /// `u8`; when they keep it as one type, `&$t` and `*const $t` with `$t` as `Wrap<u8>`, or as
-/// `Wrap<dyn core::fmt::Debug + Send>`, whose `+` is in an argument; and as bounds in an argument of a type,
-/// `Wrap<$b>`, where Rust reads a type that may have them.
+/// `Wrap<dyn core::fmt::Debug + Send>`, whose `+` is in an argument; as bounds in an argument of a type, `Wrap<$b>`,
+/// where Rust reads a type that may have them; and after the arrow of a function pointer, `fn() -> $t`, with each of
+/// the three.
 #[test]
-fn a_fragment_that_is_not_bounds_behind_a_pointer_is_named_as_it_is_written() {
+fn a_fragment_that_is_not_bounds_behind_a_pointer_or_after_an_arrow_is_named_as_it_is_written() {
     let mut said = vec![];
     for (call, ty) in ["u8", "Wrap<u8>", "Wrap<dyn core::fmt::Debug + Send>"].into_iter().enumerate() {
-        said.push(two_words("18:52", "", &format!("[{ty}]")));
-        said.push(gpu_returns("21:60", "", &format!("*const {ty}")));
-        said.push(x86_takes("24:56", "", &format!("&{ty}")));
+        said.push(two_words("19:52", "", &format!("[{ty}]")));
+        said.push(gpu_returns("22:60", "", &format!("*const {ty}")));
+        said.push(x86_takes("25:56", "", &format!("&{ty}")));
         // Each call has the same bounds in an argument of a type: Cargo says the error of it once.
         if call == 0 {
-            said.push(x86_takes("27:55", "", "Wrap<dyn core::fmt::Debug + Send>"));
+            said.push(x86_takes("28:55", "", "Wrap<dyn core::fmt::Debug + Send>"));
         }
+        said.push(x86_takes("31:55", "", &format!("fn() -> {ty}")));
     }
-    said.push("error: could not compile `fragments_unparenthesized` (lib) due to 12 previous errors".to_string());
+    said.push("error: could not compile `fragments_unparenthesized` (lib) due to 15 previous errors".to_string());
     refuses("fragments_unparenthesized", &said.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
