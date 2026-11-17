@@ -6,12 +6,11 @@
     mov rax, rdi
     mov rdi, rax
     call {f0}
-    vmovaps ymm2, ymm0
+    vmovaps xmm2, xmm0
     add rax, 32
     mov rdi, rax
     call {f0}
     vaddss xmm0, xmm2, xmm0
     add rsp, 8
-    vzeroupper
     ret
 # f0: sum8

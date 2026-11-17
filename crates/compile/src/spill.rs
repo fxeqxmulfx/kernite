@@ -1,11 +1,31 @@
 //! Spilling: which variable goes to the stack when colouring runs out of registers, and the
 //! program that keeps it there.
 
-use kernite_core::{Arg, Flow, Inst, Item, Program, RegInfo, Slot, SlotId, VReg};
+use kernite_core::{Arg, Flow, Inst, Item, Operand, Program, RegInfo, Slot, SlotId, VReg, Width};
 
 use crate::Spill;
 use crate::cfg::Block;
 use crate::live::Live;
+
+/// How wide each variable of `p` is kept, as `s` says for the widest operand that names it: by the width the operand
+/// has, or all of its register where an address takes it, as a gather takes its indices, for an address does not say
+/// how much of it is read.
+pub(crate) fn kept<Op>(p: &Program<Op>, s: &dyn Spill<Op>) -> Vec<Width> {
+    let mut named = vec![Width::W8; p.regs.len()];
+    for item in &p.body {
+        let Item::Inst(inst) = item else { continue };
+        for arg in inst.operands() {
+            for v in arg.regs() {
+                let width = match arg.operand {
+                    Operand::Reg(_, width) => width,
+                    _ => s.width(v.class),
+                };
+                named[v.id as usize] = named[v.id as usize].max(width);
+            }
+        }
+    }
+    p.regs.iter().zip(named).map(|(info, named)| s.kept(info.class, named)).collect()
+}
 
 /// Whether variable `v` of `p` may spill: every instruction that writes it goes on to the next
 /// item, where its store goes.
@@ -62,22 +82,22 @@ pub(crate) fn choose<Op>(p: &Program<Op>, blocks: &[Block], live: &Live, candida
         .map(|k| candidates[k])
 }
 
-/// `p` with its variable `v` kept in a slot of its own, `s` storing it there after each
-/// instruction that writes it and loading it before each one that reads it. Each instruction
-/// that names it names instead a variable made for that instruction alone, of the same name,
-/// which the store and the load move. A parameter is stored on entry, from the register it
-/// arrives in; a result is loaded into itself before each return that reads it, in the register
-/// it leaves in.
+/// `p` with its variable `v` kept in a slot of its own, as wide as [`kept`] says, `s` storing it there after each
+/// instruction that writes it and loading it before each one that reads it. Each instruction that names it names
+/// instead a variable made for that instruction alone, of the same name, which the store and the load move. A parameter
+/// is stored on entry, from the register it arrives in; a result is loaded into itself before each return that reads
+/// it, in the register it leaves in.
 pub(crate) fn rewrite<Op>(p: &mut Program<Op>, v: usize, s: &dyn Spill<Op>) {
     let RegInfo { class, name } = p.regs[v].clone();
     let var = p.vreg(v);
-    let bytes = s.width(class).bytes();
+    let width = kept(p, s)[v];
+    let bytes = width.bytes();
     let slot = SlotId(p.slots.len() as u32);
     p.slots.push(Slot { name: name.clone(), size: bytes, align: bytes, spill: true });
     let result = p.results.iter().any(|&(r, _)| r == var);
     let mut body = Vec::with_capacity(p.body.len());
     if p.params.iter().any(|&(q, _)| q == var) {
-        body.push(Item::Inst(s.store(slot, var)));
+        body.push(Item::Inst(s.store(slot, var, width)));
     }
     for item in std::mem::take(&mut p.body) {
         let inst = match item {
@@ -88,18 +108,18 @@ pub(crate) fn rewrite<Op>(p: &mut Program<Op>, v: usize, s: &dyn Spill<Op>) {
             }
         };
         if result && inst.flow == Flow::Return {
-            body.extend([Item::Inst(s.load(var, slot)), Item::Inst(inst)]);
+            body.extend([Item::Inst(s.load(var, slot, width)), Item::Inst(inst)]);
             continue;
         }
         let t = VReg { id: p.regs.len() as u32, class };
         p.regs.push(RegInfo { class, name: name.clone() });
         let (reads, writes) = (inst.reads().any(|r| r == var), inst.writes().any(|w| w == var));
         if reads {
-            body.push(Item::Inst(s.load(t, slot)));
+            body.push(Item::Inst(s.load(t, slot, width)));
         }
         body.push(Item::Inst(renamed(inst, var, t)));
         if writes {
-            body.push(Item::Inst(s.store(slot, t)));
+            body.push(Item::Inst(s.store(slot, t, width)));
         }
     }
     p.body = body;

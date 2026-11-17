@@ -36,7 +36,7 @@ pub(crate) fn upper_live<Op>(p: &Program<Op>, blocks: &[Block], s: &dyn Spill<Op
 /// The variables whose upper halves `inst` reads, and those it writes. It reads the upper half of a variable where it
 /// reads all of its register, as `s` says how wide that is, and where it reads the registers of an address. It replaces
 /// the upper half of each it writes, though it writes part of it, as [`Clobber::Upper`] says.
-fn upper_touched<Op>(inst: &Inst<Op, VReg>, s: &dyn Spill<Op>) -> Touches {
+pub(crate) fn upper_touched<Op>(inst: &Inst<Op, VReg>, s: &dyn Spill<Op>) -> Touches {
     let part = |arg: &&Arg<VReg>| matches!(arg.operand, Operand::Reg(v, width) if width < s.width(v.class));
     (inst.operands().filter(|arg| !part(arg)).flat_map(Arg::reads).collect(), inst.writes().collect())
 }
@@ -48,7 +48,7 @@ fn touched<Op>(inst: &Inst<Op, VReg>) -> Touches {
 
 /// `now`, the variables live just after an instruction that reads `reads` and writes `writes`, as it is just before it:
 /// the ones it writes are not live, and the ones it reads are.
-fn before(now: &mut Bits, reads: &[VReg], writes: &[VReg]) {
+pub(crate) fn before(now: &mut Bits, reads: &[VReg], writes: &[VReg]) {
     for w in writes {
         now.remove(w.id as usize);
     }

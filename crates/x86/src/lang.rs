@@ -674,7 +674,7 @@ impl Kernel {
             };
             let pinned = self.new_var(to.class, &name);
             self.p.pinned.push((pinned, to));
-            self.pass(pinned, a, *ty);
+            self.pass(pinned, a, *ty, width(to.class));
             implicit.push(Arg { operand: Operand::Reg(pinned, width(to.class)), access: Read });
         }
         let back = match (result.and_then(reg_of), kept) {
@@ -700,20 +700,19 @@ impl Kernel {
         if let Some((reg, view, pinned)) = back {
             self.p.body.push(Item::Inst(match view {
                 View::R32 => move_r32(reg, pinned),
-                _ => SysV.copy(reg, pinned),
+                _ => SysV.copy(reg, pinned, width(reg.class)),
             }));
         }
         Ok(())
     }
 
-    /// Moves `a`, an argument of type `ty`, to `to`, the variable SysV passes it in: a variable
-    /// whole, or a gpr's `r32` with the rest clear; an integer known now; or a float known now,
-    /// from memory.
-    fn pass(&mut self, to: VReg, a: &Given<Var>, ty: Ty) {
+    /// Moves `a`, an argument of type `ty`, to `to`, the variable SysV passes it in: `width` of a variable, or a gpr's
+    /// `r32` with the rest clear; an integer known now; or a float known now, from memory.
+    fn pass(&mut self, to: VReg, a: &Given<Var>, ty: Ty, width: Width) {
         let inst = match (a, ty) {
             (Given::Var(v), _) => match v.reg().expect("an argument is a variable of a register") {
                 (reg, View::R32) => move_r32(to, reg),
-                (reg, _) => SysV.copy(to, reg),
+                (reg, _) => SysV.copy(to, reg, width),
             },
             (Given::Int(x), _) => {
                 let value = Arg { operand: Operand::Imm(Imm { value: *x as i64, hex: false }), access: Read };

@@ -1,8 +1,9 @@
-use kernite_core::{Flow, Item, PReg, Program, VReg};
+use kernite_core::{Flow, Inst, Item, PReg, Program, VReg, Width};
 
 use crate::Error;
 use crate::bits::Bits;
-use crate::live::{analyse, first_mentions, interference, upper_live};
+use crate::cfg::Block;
+use crate::live::{Live, analyse, before, first_mentions, interference, upper_live, upper_touched};
 use crate::spill;
 use crate::{Machine, Spill};
 
@@ -16,7 +17,9 @@ use crate::{Machine, Spill};
 /// convention places take their registers first: the parameters, the results, and a call's arguments and result. Then
 /// each other variable, in the order the body first names it, takes the register of a call's argument or result it is
 /// copied to or from, if it may, or else the first register the machine offers that none of the variables it interferes
-/// with holds.
+/// with holds. A copy of one variable to another that take one register is left out where it changes nothing: where it
+/// copies all of the register, or no instruction after it reads all of the register before one writes the variable it
+/// goes to, for a copy of part clears the rest.
 ///
 /// A parameter or a result that cannot keep its register throughout, since another placed
 /// variable needs it while both are live, or an instruction it is live across changes it,
@@ -58,7 +61,10 @@ pub(crate) fn allocate<Op: Clone + PartialEq>(
         };
         let prefer = preferences(&p, s, &short);
         let (v, held) = match colour(&p, m, &adj, &changed, &prefer, regs) {
-            Ok(regs) => return Ok((p, regs)),
+            Ok(regs) => {
+                leave_out(&mut p, &blocks, &upper, &regs, s);
+                return Ok((p, regs));
+            }
             Err(short) => short,
         };
         let class = p.regs[v].class;
@@ -158,6 +164,7 @@ fn fixed<Op>(p: &Program<Op>, adj: &[Bits], changed: &[Vec<PReg>]) -> Result<Vec
 fn split<Op>(p: &mut Program<Op>, v: usize, s: &dyn Spill<Op>) -> usize {
     let info = p.regs[v].clone();
     let var = p.vreg(v);
+    let width = spill::kept(p, s)[v];
     let made = VReg { id: p.regs.len() as u32, class: info.class };
     p.regs.push(info);
     match p.results.iter().position(|&(r, _)| r == var) {
@@ -166,7 +173,7 @@ fn split<Op>(p: &mut Program<Op>, v: usize, s: &dyn Spill<Op>) -> usize {
             for item in std::mem::take(&mut p.body) {
                 match item {
                     Item::Inst(inst) if inst.flow == Flow::Return && inst.reads().any(|r| r == var) => {
-                        p.body.push(Item::Inst(s.copy(made, var)));
+                        p.body.push(Item::Inst(s.copy(made, var, width)));
                         p.body.push(Item::Inst(spill::renamed(inst, var, made)));
                     }
                     item => p.body.push(item),
@@ -176,23 +183,35 @@ fn split<Op>(p: &mut Program<Op>, v: usize, s: &dyn Spill<Op>) -> usize {
         None => {
             let at = p.params.iter().position(|&(q, _)| q == var).expect("a parameter or a result splits");
             p.params[at].0 = made;
-            p.body.insert(0, Item::Inst(s.copy(var, made)));
+            p.body.insert(0, Item::Inst(s.copy(var, made, width)));
         }
     }
     made.id as usize
 }
 
+/// The variables `inst` copies, `to` from `from`, if it is what `s`'s copy makes of the one to the other. That is a
+/// copy of as much as `to` is kept, as `kept` says. Where `from` is a call's result, it is a copy of as much as `from`
+/// is kept, what the call gives back, though `to` may be kept in more.
+fn copied<Op: PartialEq>(
+    p: &Program<Op>,
+    inst: &Inst<Op, VReg>,
+    kept: &[Width],
+    s: &dyn Spill<Op>,
+) -> Option<(VReg, VReg)> {
+    let (writes, reads): (Vec<VReg>, Vec<VReg>) = (inst.writes().collect(), inst.reads().collect());
+    let ([to], [from]) = (writes.as_slice(), reads.as_slice()) else { return None };
+    let of = if p.pinned.iter().any(|&(v, _)| v == *from) { from } else { to };
+    let copy = to != from && to.class == from.class && *inst == s.copy(*to, *from, kept[of.id as usize]);
+    copy.then_some((*to, *from))
+}
+
 /// For each variable, the variables of `short` it is copied to or from by `s`'s copy, in body
 /// order: it would rather have the register of one, so that the copy moves nothing.
 fn preferences<Op: PartialEq>(p: &Program<Op>, s: &dyn Spill<Op>, short: &[usize]) -> Vec<Vec<usize>> {
-    let mut prefer = vec![vec![]; p.regs.len()];
+    let (mut prefer, kept) = (vec![vec![]; p.regs.len()], spill::kept(p, s));
     for item in &p.body {
         let Item::Inst(inst) = item else { continue };
-        let (writes, reads): (Vec<VReg>, Vec<VReg>) = (inst.writes().collect(), inst.reads().collect());
-        let ([to], [from]) = (writes.as_slice(), reads.as_slice()) else { continue };
-        if to == from || to.class != from.class || *inst != s.copy(*to, *from) {
-            continue;
-        }
+        let Some((to, from)) = copied(p, inst, &kept, s) else { continue };
         let (to, from) = (to.id as usize, from.id as usize);
         if short.contains(&from) {
             prefer[to].push(from);
@@ -202,6 +221,35 @@ fn preferences<Op: PartialEq>(p: &Program<Op>, s: &dyn Spill<Op>, short: &[usize
         }
     }
     prefer
+}
+
+/// `p` without the copies of one variable to another that `regs` puts in one register, where they change nothing: where
+/// a copy moves all of the register, or where no instruction after it reads all of `to` before one writes it, as
+/// `upper` says. A copy of less clears the rest of the register, which such an instruction would read.
+fn leave_out<Op: PartialEq>(
+    p: &mut Program<Op>,
+    blocks: &[Block],
+    upper: &Live,
+    regs: &[Option<PReg>],
+    s: &dyn Spill<Op>,
+) {
+    let kept = spill::kept(p, s);
+    let mut nothing = vec![false; p.body.len()];
+    for (b, block) in blocks.iter().enumerate() {
+        let mut high = upper.outs[b].clone();
+        for i in block.items.clone().rev() {
+            let Item::Inst(inst) = &p.body[i] else { continue };
+            if let Some((to, from)) = copied(p, inst, &kept, s)
+                && regs[to.id as usize] == regs[from.id as usize]
+            {
+                nothing[i] = *inst == s.copy(to, from, s.width(to.class)) || !high.contains(to.id as usize);
+            }
+            let (reads, writes) = upper_touched(inst, s);
+            before(&mut high, &reads, &writes);
+        }
+    }
+    let body = std::mem::take(&mut p.body);
+    p.body = body.into_iter().zip(nothing).filter_map(|(item, nothing)| (!nothing).then_some(item)).collect();
 }
 
 /// A variable colouring left without a register, and the variables beside it that hold one,

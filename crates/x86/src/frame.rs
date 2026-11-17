@@ -263,9 +263,9 @@ fn prologue(frame: &Frame, pad: u32, free: Label) -> Result<Vec<Item<Op, PReg>>,
 
 /// What runs before a `ret`, and before a jump to a callee that stands for one: undoes [`prologue`], and clears the
 /// upper halves of the vector registers if the body may have set one, so the caller's SSE code does not pay for them.
-/// It may have where an instruction of it reads or writes all of a ymm, as each move and spill of a vector register
-/// does, or calls a function it does not know, which may be passed a vector or give one back. A move that the listing
-/// leaves out does neither.
+/// It may have where an instruction of it reads or writes all of a ymm, a move or a spill of one too, or calls a
+/// function it does not know, which may be passed a vector or give one back. A move that the listing leaves out does
+/// neither.
 fn epilogue(frame: &Frame, pad: u32, upper: bool) -> Vec<Item<Op, PReg>> {
     let mut items = vec![];
     if frame.size > 0 {

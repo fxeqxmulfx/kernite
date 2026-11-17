@@ -28,12 +28,12 @@ impl Machine for Toy {
     }
 }
 
-fn slot_arg<R>(slot: SlotId, access: Access) -> Arg<R> {
-    Arg { operand: Operand::Mem(Mem { base: Base::Slot(slot), index: None, disp: 0, width: Width::W64 }), access }
+fn slot_arg<R>(slot: SlotId, width: Width, access: Access) -> Arg<R> {
+    Arg { operand: Operand::Mem(Mem { base: Base::Slot(slot), index: None, disp: 0, width }), access }
 }
 
-fn reg_arg<R>(r: R, access: Access) -> Arg<R> {
-    Arg { operand: Operand::Reg(r, Width::W64), access }
+fn reg_arg<R>(r: R, width: Width, access: Access) -> Arg<R> {
+    Arg { operand: Operand::Reg(r, width), access }
 }
 
 /// An instruction of the toy's that goes on to the next and changes nothing but its operands.
@@ -46,16 +46,21 @@ impl Spill<&'static str> for Toy {
         Width::W64
     }
 
-    fn store(&self, slot: SlotId, var: VReg) -> Inst<&'static str, VReg> {
-        plain("store", vec![slot_arg(slot, Access::Write), reg_arg(var, Access::Read)])
+    /// A variable that no instruction names more than the low half of is kept in 32 bits.
+    fn kept(&self, _: Class, named: Width) -> Width {
+        named.max(Width::W32)
     }
 
-    fn load(&self, var: VReg, slot: SlotId) -> Inst<&'static str, VReg> {
-        plain("load", vec![reg_arg(var, Access::Write), slot_arg(slot, Access::Read)])
+    fn store(&self, slot: SlotId, var: VReg, width: Width) -> Inst<&'static str, VReg> {
+        plain("store", vec![slot_arg(slot, width, Access::Write), reg_arg(var, width, Access::Read)])
     }
 
-    fn copy(&self, to: VReg, from: VReg) -> Inst<&'static str, VReg> {
-        plain("copy", vec![reg_arg(to, Access::Write), reg_arg(from, Access::Read)])
+    fn load(&self, var: VReg, slot: SlotId, width: Width) -> Inst<&'static str, VReg> {
+        plain("load", vec![reg_arg(var, width, Access::Write), slot_arg(slot, width, Access::Read)])
+    }
+
+    fn copy(&self, to: VReg, from: VReg, width: Width) -> Inst<&'static str, VReg> {
+        plain("copy", vec![reg_arg(to, width, Access::Write), reg_arg(from, width, Access::Read)])
     }
 }
 
@@ -72,7 +77,8 @@ fn hash(values: impl IntoIterator<Item = u64>) -> u64 {
 /// the second to the first, `add32` adds the low halves, 32 bits, of the two to the first's and clears its upper half,
 /// `dec` takes one from its register and jumps unless that leaves zero, `load` and `store` move a register's value to a
 /// slot and back, `copy` moves one to another, `call` writes a hash of the arguments it reads to its result, if it has
-/// one, and `ret` returns what it reads. A read at 32 bits sees the low half of a register. Reading a register nothing
+/// one, and `ret` returns what it reads. A read at 32 bits sees the low half of a register, and a read of memory at the
+/// address in a register sees all of the register, for the toy has no memory but its slots. Reading a register nothing
 /// wrote, or running past ten thousand instructions, panics.
 ///
 /// A call writes junk to each of the machine's registers it changes, its `clobbers`, that
@@ -101,6 +107,7 @@ fn run<R: Register + Ord>(
                 if w == Width::W32 { all & LOW } else { all }
             }
             Operand::Mem(Mem { base: Base::Slot(s), .. }) => mem[s.0 as usize],
+            Operand::Mem(Mem { base: Base::Reg(r), .. }) => regs[&r],
             Operand::Imm(imm) => imm.value as u64,
             _ => unreachable!("the toy has no {:?}", a.operand),
         };
@@ -245,7 +252,7 @@ impl Builder {
     }
 
     fn inst(&mut self, op: &'static str, args: &[(VReg, Access)], flow: Flow) {
-        let args = args.iter().map(|&(v, access)| reg_arg(v, access)).collect();
+        let args = args.iter().map(|&(v, access)| reg_arg(v, Width::W64, access)).collect();
         self.0.body.push(Item::Inst(Inst { op, args, implicit: vec![], flow, clobbers: vec![] }));
     }
 
@@ -290,19 +297,19 @@ impl Builder {
             let name = self.0.regs[a.id as usize].name.clone();
             let pinned = self.var(&name);
             self.0.pinned.push((pinned, r(hw)));
-            self.0.body.push(Item::Inst(Toy::copy(&toy(0, &[]), pinned, a)));
-            implicit.push(reg_arg(pinned, Access::Read));
+            self.0.body.push(Item::Inst(Toy::copy(&toy(0, &[]), pinned, a, Width::W64)));
+            implicit.push(reg_arg(pinned, Width::W64, Access::Read));
         }
         let back = dst.map(|(d, hw)| {
             let name = self.0.regs[d.id as usize].name.clone();
             let pinned = self.var(&name);
             self.0.pinned.push((pinned, r(hw)));
-            implicit.push(reg_arg(pinned, Access::Write));
+            implicit.push(reg_arg(pinned, Width::W64, Access::Write));
             (d, pinned)
         });
         self.0.body.push(Item::Inst(Inst { op: "call", args: vec![], implicit, flow: Flow::Next, clobbers }));
         if let Some((d, pinned)) = back {
-            self.0.body.push(Item::Inst(Toy::copy(&toy(0, &[]), d, pinned)));
+            self.0.body.push(Item::Inst(Toy::copy(&toy(0, &[]), d, pinned, Width::W64)));
         }
     }
 
@@ -311,9 +318,15 @@ impl Builder {
     }
 
     fn ret(&mut self, v: VReg, hw: u8) {
+        self.ret_at(Width::W64, v, hw);
+    }
+
+    /// [`ret`](Builder::ret) that reads `v` at `width`.
+    fn ret_at(&mut self, width: Width, v: VReg, hw: u8) {
         self.0.results.push((v, r(hw)));
         self.0.signature.result = Some(Class::Gpr);
-        self.inst("ret", &[(v, Access::Read)], Flow::Return);
+        let args = vec![reg_arg(v, width, Access::Read)];
+        self.0.body.push(Item::Inst(Inst { op: "ret", args, implicit: vec![], flow: Flow::Return, clobbers: vec![] }));
     }
 }
 
@@ -596,42 +609,98 @@ fn one_in_a_loop_counts_ten_times_one_outside() {
     assert_eq!(first(10), "inside");
 }
 
+/// A parameter that spills is stored on entry from the register it arrives in, as much as it is kept in: all of the
+/// register, or 32 bits where no instruction names more.
 #[test]
 fn a_parameter_spills_from_the_register_it_arrives_in() {
-    let mut b = Builder::new();
-    let p = b.param("p", 0);
-    let (x, y, w, z) = (b.var("x"), b.var("y"), b.var("w"), b.var("z"));
-    b.def(x, &[]);
-    b.def(y, &[]);
-    b.def(w, &[x, y]);
-    b.def(z, &[w, p]);
-    b.ret(z, 0);
-    let c = same(&b.0, &toy(2, &[]), &[7]);
-    assert_eq!(spilled(&c), ["p"]);
-    let Item::Inst(first) = &c.body[0] else { panic!("an instruction first") };
-    assert_eq!((first.op, first.args[1].operand), ("store", Operand::Reg(r(0), Width::W64)));
+    for width in [Width::W64, Width::W32] {
+        let mut b = Builder::new();
+        let p = b.param("p", 0);
+        let (x, y, w, z) = (b.var("x"), b.var("y"), b.var("w"), b.var("z"));
+        b.def(x, &[]);
+        b.def(y, &[]);
+        b.def(w, &[x, y]);
+        b.def_at(width, z, &[w, p]);
+        b.ret(z, 0);
+        let c = same(&b.0, &toy(2, &[]), &[7]);
+        assert_eq!(spilled(&c), ["p"]);
+        let Item::Inst(first) = &c.body[0] else { panic!("an instruction first") };
+        assert_eq!((first.op, first.args[1].operand), ("store", Operand::Reg(r(0), width)));
+    }
 }
 
+/// A result that spills comes back before the return to the register it leaves in, as much as it is kept in: all of the
+/// register, or 32 bits where no instruction names more.
 #[test]
 fn a_result_spills_and_comes_back_to_the_register_it_leaves_in() {
-    let mut b = Builder::new();
-    let (res, x, y, w, x2, y2, w2) =
-        (b.var("res"), b.var("x"), b.var("y"), b.var("w"), b.var("x2"), b.var("y2"), b.var("w2"));
-    b.def(res, &[]);
-    b.def(x, &[]);
-    b.def(y, &[]);
-    b.def(w, &[x, y]);
-    b.def(x2, &[w]);
-    b.def(y2, &[w]);
-    b.def(w2, &[x2, y2]);
-    b.inst("add", &[(res, Access::ReadWrite), (w2, Access::Read)], Flow::Next);
-    b.ret(res, 0);
-    let c = same(&b.0, &toy(2, &[]), &[]);
-    assert_eq!(spilled(&c), ["res"]);
-    let last: Vec<_> = c.body.iter().rev().take(2).collect();
-    let Item::Inst(load) = last[1] else { panic!("a load before the return") };
-    assert_eq!((load.op, load.args[0].operand), ("load", Operand::Reg(r(0), Width::W64)));
-    assert_eq!(reg_of(&c, "res"), r(0));
+    for width in [Width::W64, Width::W32] {
+        let mut b = Builder::new();
+        let (res, x, y, w, x2, y2, w2) =
+            (b.var("res"), b.var("x"), b.var("y"), b.var("w"), b.var("x2"), b.var("y2"), b.var("w2"));
+        b.def_at(width, res, &[]);
+        b.def(x, &[]);
+        b.def(y, &[]);
+        b.def(w, &[x, y]);
+        b.def(x2, &[w]);
+        b.def(y2, &[w]);
+        b.def(w2, &[x2, y2]);
+        let add = vec![reg_arg(res, width, Access::ReadWrite), reg_arg(w2, width, Access::Read)];
+        b.0.body.push(Item::Inst(plain("add", add)));
+        b.ret_at(width, res, 0);
+        let c = same(&b.0, &toy(2, &[]), &[]);
+        assert_eq!(spilled(&c), ["res"]);
+        let last: Vec<_> = c.body.iter().rev().take(2).collect();
+        let Item::Inst(load) = last[1] else { panic!("a load before the return") };
+        assert_eq!((load.op, load.args[0].operand), ("load", Operand::Reg(r(0), width)));
+        assert_eq!(reg_of(&c, "res"), r(0));
+    }
+}
+
+/// A variable that no instruction names more than the low half of is kept in it: its slot is 4 bytes, and its store and
+/// its load are of 32 bits. One that an instruction names whole is kept whole, whatever the others name, and so is one
+/// that an address takes, for an address does not say how much of a register it reads.
+#[test]
+fn a_variable_is_kept_as_wide_as_the_widest_instruction_that_names_it() {
+    // The slots and the moves to and from them, of a program whose `last` makes `v` of `w` and `z`.
+    let kept = |last: fn(&mut Builder, VReg, VReg, VReg)| {
+        let mut b = Builder::new();
+        let (x, y, z, w, v) = (b.var("x"), b.var("y"), b.var("z"), b.var("w"), b.var("v"));
+        b.def_low(x, &[]);
+        b.def_low(y, &[]);
+        b.def_low(z, &[]);
+        b.def_low(w, &[x, y]);
+        last(&mut b, v, w, z);
+        b.ret(v, 0);
+        let c = same(&b.0, &toy(2, &[]), &[]);
+        let slots = c.frame.slots.iter().map(|s| (s.name.as_str(), s.size, s.align)).collect::<Vec<_>>();
+        let moves: Vec<(&str, Width)> = c
+            .body
+            .iter()
+            .filter_map(|i| match i {
+                Item::Inst(Inst { op: op @ ("store" | "load"), args, .. }) => {
+                    args.iter().find_map(|a| match a.operand {
+                        Operand::Reg(_, width) => Some((*op, width)),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        (format!("{slots:?}"), moves)
+    };
+    let (s32, s64, l32, l64) =
+        (("store", Width::W32), ("store", Width::W64), ("load", Width::W32), ("load", Width::W64));
+    let low = ("[(\"x\", 4, 4), (\"z\", 4, 4)]".into(), vec![s32, s32, l32, l32]);
+    let whole = ("[(\"x\", 4, 4), (\"z\", 8, 8)]".into(), vec![s32, s64, l32, l64]);
+    assert_eq!(kept(|b, v, w, z| b.def_low(v, &[w, z])), low);
+    assert_eq!(kept(|b, v, w, z| b.def(v, &[w, z])), whole);
+    let address = |b: &mut Builder, v, w, z| {
+        let mem = Mem { base: Base::Reg(z), index: None, disp: 0, width: Width::W32 };
+        let at = Arg { operand: Operand::Mem(mem), access: Access::Read };
+        let args = vec![reg_arg(v, Width::W32, Access::Write), reg_arg(w, Width::W32, Access::Read), at];
+        b.0.body.push(Item::Inst(plain("op", args)));
+    };
+    assert_eq!(kept(address), whole);
 }
 
 #[test]
@@ -760,20 +829,10 @@ fn a_call_is_given_its_arguments_in_their_registers_and_gives_back_its_result() 
     b.call(Some((res, 0)), &[(x, 1), (y, 2)], &[0, 1, 2]);
     b.ret(res, 0);
     let c = same(&b.0, &toy(4, &[3]), &[]);
-    // Each of `x` and `y` is made where its argument goes, so that its copy moves nothing.
+    // Each of `x` and `y` is made where its argument goes, and `res` where the result comes back, so that no copy moves
+    // anything, and the body has none.
     assert_eq!([reg_of(&c, "x"), reg_of(&c, "y"), reg_of(&c, "res")], [r(1), r(2), r(0)]);
-    let moves: Vec<(PReg, PReg)> = c
-        .body
-        .iter()
-        .filter_map(|i| match i {
-            Item::Inst(Inst { op: "copy", args, .. }) => match (args[0].operand, args[1].operand) {
-                (Operand::Reg(to, _), Operand::Reg(from, _)) => Some((to, from)),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
-    assert_eq!(moves, [(r(1), r(1)), (r(2), r(2)), (r(0), r(0))]);
+    assert_eq!(ops(&c), ["op", "op", "call", "ret"]);
     assert!(c.frame.saved.is_empty());
 }
 
@@ -788,7 +847,109 @@ fn arguments_that_swap_registers_go_through_a_third() {
     // `p` arrives in r0, which `q` is copied to while `p` is still to be read: so it moves
     // to a variable of its own on entry, in r2, and is copied from there to its argument, in r1.
     assert_eq!(regs_of(&c, "p"), [r(2), r(1), r(0)]);
-    assert_eq!(ops(&c), ["copy", "copy", "copy", "call", "copy", "ret"]);
+    assert_eq!(ops(&c), ["copy", "copy", "copy", "call", "ret"]);
+}
+
+/// A parameter that moves on entry moves as much as it is kept in: 32 bits where no instruction reads more.
+#[test]
+fn a_parameter_that_moves_on_entry_moves_as_much_as_it_is_kept_in() {
+    let mut b = Builder::new();
+    let p = b.param("p", 0);
+    let y = b.var("y");
+    b.call(None, &[], &[0, 1]);
+    b.def_low(y, &[p]);
+    b.ret(y, 0);
+    let c = same(&b.0, &toy(3, &[2]), &[7]);
+    assert_eq!(regs_of(&c, "p"), [r(2), r(0)]);
+    let Item::Inst(first) = &c.body[0] else { panic!("an instruction first") };
+    let to = (first.op, first.args[0].operand, first.args[1].operand);
+    assert_eq!(to, ("copy", Operand::Reg(r(2), Width::W32), Operand::Reg(r(0), Width::W32)));
+}
+
+/// A copy of one variable to another is left out where the two take one register, as one a call's argument or result
+/// has, and a copy the program makes of its own: where `x` is dead after it, `y` takes its register. It stays where `x`
+/// is read after it, and the two take two.
+#[test]
+fn a_copy_of_one_variable_to_another_in_one_register_is_left_out() {
+    let copy = |to, from, width| Item::Inst(Toy::copy(&toy(0, &[]), to, from, width));
+    let program = |both: bool| {
+        let mut b = Builder::new();
+        let (x, y, z) = (b.var("x"), b.var("y"), b.var("z"));
+        b.def(x, &[]);
+        b.0.body.push(copy(y, x, Width::W64));
+        b.def(z, &if both { vec![x, y] } else { vec![y] });
+        b.ret(z, 0);
+        b.0
+    };
+    let c = same(&program(false), &toy(3, &[]), &[]);
+    assert_eq!((reg_of(&c, "x"), reg_of(&c, "y")), (r(0), r(0)));
+    assert_eq!(ops(&c), ["op", "op", "ret"]);
+    let c = same(&program(true), &toy(3, &[]), &[]);
+    assert_ne!(reg_of(&c, "x"), reg_of(&c, "y"));
+    assert_eq!(ops(&c), ["op", "copy", "op", "ret"]);
+}
+
+/// A copy is left out where it moves all that its variable `to` is kept in: of 32 bits, where no instruction names more
+/// of `to`. One of less stays, though the two take one register: it moves 32 bits of a variable kept in 64, and clears
+/// the upper half.
+#[test]
+fn a_copy_of_less_than_its_variable_is_kept_in_stays() {
+    let copy = |to, from| Item::Inst(Toy::copy(&toy(0, &[]), to, from, Width::W32));
+    let program = |whole: bool| {
+        let mut b = Builder::new();
+        let (x, y, z) = (b.var("x"), b.var("y"), b.var("z"));
+        b.def_low(x, &[]);
+        b.0.body.push(copy(y, x));
+        if whole {
+            b.def(z, &[y])
+        } else {
+            b.def_low(z, &[y])
+        }
+        b.ret(z, 0);
+        b.0
+    };
+    let c = same(&program(false), &toy(3, &[]), &[]);
+    assert_eq!((reg_of(&c, "x"), reg_of(&c, "y")), (r(0), r(0)));
+    assert_eq!(ops(&c), ["op", "op", "ret"]);
+    let c = same(&program(true), &toy(3, &[]), &[]);
+    assert_eq!((reg_of(&c, "x"), reg_of(&c, "y")), (r(0), r(0)));
+    assert_eq!(ops(&c), ["op", "copy", "op", "ret"]);
+}
+
+/// The copy of a call's result, from the variable pinned in the register it comes back in, is as wide as the call gives
+/// the result back: `given` is kept in the 32 bits the callee gives back, though `d` is kept in 64 where an instruction
+/// reads all of it. In one register, the copy is left out where no instruction after it reads all of `d` before one
+/// writes it, and stays where one does, in its block or in one after: it clears the upper half, which a callee may
+/// leave set, as a call does in `run`.
+#[test]
+fn a_copy_of_a_calls_result_stays_where_all_of_its_variable_is_read_after() {
+    // The ops of the program once compiled, where `after` reads `d` into `z`, the result, after the copy.
+    let compiled = |after: fn(&mut Builder, VReg, VReg)| {
+        let mut b = Builder::new();
+        let (d, z, given) = (b.var("d"), b.var("z"), b.var("given"));
+        b.0.pinned.push((given, r(0)));
+        let implicit = vec![reg_arg(given, Width::W32, Access::Write)];
+        b.0.body.push(Item::Inst(Inst { op: "call", args: vec![], implicit, flow: Flow::Next, clobbers: vec![] }));
+        b.0.body.push(Item::Inst(Toy::copy(&toy(0, &[]), d, given, Width::W32)));
+        after(&mut b, d, z);
+        b.ret(z, 0);
+        let c = same(&b.0, &toy(3, &[]), &[]);
+        assert_eq!(reg_of(&c, "d"), r(0));
+        ops(&c)
+    };
+    assert_eq!(compiled(|b, d, z| b.def_low(z, &[d])), ["call", "op", "ret"]);
+    assert_eq!(compiled(|b, d, z| b.def(z, &[d])), ["call", "copy", "op", "ret"]);
+    let next_block = |b: &mut Builder, d, z| {
+        b.label(1);
+        b.def(z, &[d]);
+    };
+    assert_eq!(compiled(next_block), ["call", "copy", "op", "ret"]);
+    let written_first = |b: &mut Builder, d, z| {
+        b.def_low(z, &[d]);
+        b.def(d, &[z]);
+        b.def(z, &[d]);
+    };
+    assert_eq!(compiled(written_first), ["call", "op", "op", "op", "ret"]);
 }
 
 #[test]

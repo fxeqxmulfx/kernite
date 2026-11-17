@@ -2325,12 +2325,17 @@ fn a_call_stays_one_where_a_jump_would_not_do_what_it_does() {
     }
 }
 
-/// A gpr's r32 passes its 32 bits, the rest clear, and takes the result's; a float known now
-/// is read from memory, as x86 takes floats.
+/// A gpr's r32 passes its 32 bits, the rest clear, and takes the result's. A float comes back as an xmm, the rest of
+/// its ymm clear, as an instruction that writes an xmm leaves it: the move of the result to the register it is in stays
+/// where the kernel reads all of the ymm after. A float known now is read from memory, as x86 takes floats.
 #[test]
 fn a_call_passes_what_its_callee_takes() {
     let code = calling("x: u64", " -> u64", "let r: gpr; call(r.r32, gcd, (x.r32, x)); ret(r);").unwrap();
     assert_eq!(code, "sub rsp, 8\nmov rsi, rdi\nmov edi, esi\ncall {f0}\nmov eax, eax\nadd rsp, 8\nret");
+    let body = "let v: ymm; vmovups(v, [x]); call(v.xmm, half, (v.xmm)); vaddps(v, v, v); vmovups([x], v);";
+    let want = "sub rsp, 8\nvmovups ymm0, ymmword ptr [rdi]\ncall {f0}\nvmovaps xmm0, xmm0\nvaddps ymm0, ymm0, \
+                ymm0\nvmovups ymmword ptr [rdi], ymm0\nadd rsp, 8\nvzeroupper\nret";
+    assert_eq!(calling("x: *mut f32", "", body).unwrap(), want);
     let code = calling("x: *mut f32", "", "let v: ymm; call(v.xmm, half, 2.5); vmovss([x], v.xmm);").unwrap();
     let want = "sub rsp, 8\nvmovss xmm0, dword ptr [rip + {c0}]\ncall {f0}\nvmovss dword ptr [rdi], xmm0\nadd rsp, \
                 8\nret";
@@ -2724,11 +2729,11 @@ fn kernite_knows_every_instruction_of_x86_64_v3() {
 }
 
 /// A kernel clears the upper halves of the vector registers before it returns, with `vzeroupper`, only where it may
-/// have set one: where an instruction of its own reads or writes all of a ymm, as each move and spill of a vector
-/// register does, of a float too, or it calls a function it does not know, which may be passed a vector or give one
-/// back. A kernel of xmm registers alone that moves and spills none writes none, though it calls the module's
-/// functions, by name or at an address with the functions given: each clears what it sets before it returns. Nor does a
-/// call at an address with no functions given that passes and gives back no vector.
+/// have set one: where an instruction of its own reads or writes all of a ymm, or it calls a function it does not know,
+/// which may be passed a vector or give one back. A vector register moves and spills as wide as an instruction names
+/// its variable, so a kernel of xmm registers alone writes none, though it moves and spills its floats and calls the
+/// module's functions, by name or at an address with the functions given: each clears what it sets before it returns.
+/// Nor does a call at an address with no functions given that passes and gives back no vector.
 #[test]
 fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() {
     let cases = [
@@ -2760,7 +2765,35 @@ fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() {
             "let r: gpr; call(r, fp, (n)); add(r, 1); ret(r);",
             "sub rsp, 8\nmov rax, rdi\nmov rdi, rsi\ncall rax\nadd rax, 1\nadd rsp, 8\nret",
         ),
-        // `vzeroupper`: an instruction on all of a ymm, a move and a spill of a float, each of all of its ymm, and a
+        // A float moves as an xmm: to the register it is passed in, or kept in across a call, and not at all where it
+        // is in the register already. The move the kernel writes stays, where it clears an upper half.
+        ("a: f32, b: f32", " -> f32", "let v: xmm; call(v, half, (b)); ret(v);", "vmovaps xmm0, xmm1\njmp {f0}"),
+        ("x: f32", " -> f32", "let v: xmm; call(v, half, (x)); ret(v);", "jmp {f0}"),
+        (
+            "x: u64",
+            " -> f32",
+            "let (a, b): (xmm, xmm); call(a, half, 1.5); call(b, half, 2.5); vaddss(b, a, b); ret(b);",
+            "sub rsp, 8\nvmovss xmm0, dword ptr [rip + {c0}]\ncall {f0}\nvmovaps xmm1, xmm0\nvmovss xmm0, dword ptr \
+             [rip + {c1}]\ncall {f0}\nvaddss xmm0, xmm1, xmm0\nadd rsp, 8\nret",
+        ),
+        ("x: f32", " -> f32", "vmovaps(x, x); ret(x);", "vmovaps xmm0, xmm0\nret"),
+        // A float spills as an xmm: 16 bytes in a frame aligned to 16.
+        (
+            "fp: u64, x: f32",
+            " -> f32",
+            "call(fp); ret(x);",
+            "push rbp\nmov rbp, rsp\nsub rsp, 16\nand rsp, -16\nvmovups xmmword ptr [rsp], xmm0\ncall rdi\nvmovups \
+             xmm0, xmmword ptr [rsp]\nmov rsp, rbp\npop rbp\nret",
+        ),
+        (
+            "fp: u64, x: f64",
+            " -> f64",
+            "call(fp); ret(x);",
+            "push rbp\nmov rbp, rsp\nsub rsp, 16\nand rsp, -16\nvmovups xmmword ptr [rsp], xmm0\ncall rdi\nvmovups \
+             xmm0, xmmword ptr [rsp]\nmov rsp, rbp\npop rbp\nret",
+        ),
+        // `vzeroupper`: an instruction on all of a ymm, which its variable is moved and spilled as; a float moved as
+        // all of a ymm where a function the kernel does not know is passed it, though another spills as an xmm; and a
         // call at an address with no functions given that is passed a float or gives one back.
         (
             "p: *mut f32",
@@ -2770,24 +2803,26 @@ fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() {
              ret",
         ),
         (
-            "x: u64",
-            " -> f32",
-            "let (a, b): (xmm, xmm); call(a, half, 1.5); call(b, half, 2.5); vaddss(b, a, b); ret(b);",
-            "sub rsp, 8\nvmovss xmm0, dword ptr [rip + {c0}]\ncall {f0}\nvmovaps ymm1, ymm0\nvmovss xmm0, dword ptr \
-             [rip + {c1}]\ncall {f0}\nvaddss xmm0, xmm1, xmm0\nadd rsp, 8\nvzeroupper\nret",
+            "fp: u64, p: *mut f32",
+            "",
+            "let v: ymm; vmovups(v, [p]); call(fp); vmovups([p], v);",
+            "push rbx\npush rbp\nmov rbp, rsp\nsub rsp, 32\nand rsp, -32\nmov rbx, rsi\nvmovups ymm0, ymmword ptr \
+             [rbx]\nvmovups ymmword ptr [rsp], ymm0\ncall rdi\nvmovups ymm0, ymmword ptr [rsp]\nvmovups ymmword ptr \
+             [rbx], ymm0\nmov rsp, rbp\npop rbp\npop rbx\nvzeroupper\nret",
         ),
         (
-            "fp: u64, x: f32",
+            "fp: u64, a: f32, b: f32",
             " -> f32",
-            "call(fp); ret(x);",
-            "push rbp\nmov rbp, rsp\nsub rsp, 32\nand rsp, -32\nvmovups ymmword ptr [rsp], ymm0\ncall rdi\nvmovups \
-             ymm0, ymmword ptr [rsp]\nmov rsp, rbp\npop rbp\nvzeroupper\nret",
+            "let v: xmm; call(v, fp, (b)); ret(v);",
+            "sub rsp, 8\nvmovaps ymm0, ymm1\ncall rdi\nadd rsp, 8\nvzeroupper\nret",
         ),
         (
-            "a: f32, b: f32",
+            "fp: u64, a: f32, b: f32",
             " -> f32",
-            "let v: xmm; call(v, half, (b)); ret(v);",
-            "vmovaps ymm0, ymm1\nvzeroupper\njmp {f0}",
+            "let v: xmm; call(v, fp, (b)); vaddss(v, v, a); ret(v);",
+            "push rbp\nmov rbp, rsp\nsub rsp, 16\nand rsp, -16\nvmovups xmmword ptr [rsp], xmm0\nvmovaps ymm0, \
+             ymm1\ncall rdi\nvmovups xmm1, xmmword ptr [rsp]\nvaddss xmm0, xmm0, xmm1\nmov rsp, rbp\npop \
+             rbp\nvzeroupper\nret",
         ),
         ("fp: u64, x: f32", "", "call(fp, (x));", "sub rsp, 8\ncall rdi\nadd rsp, 8\nvzeroupper\nret"),
         (

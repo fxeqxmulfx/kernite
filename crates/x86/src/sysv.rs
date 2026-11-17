@@ -109,8 +109,9 @@ pub(crate) const CALL_CLOBBERS: [PReg; 25] = [
 
 /// x86-64 under the System V calling convention: sixteen general registers and sixteen
 /// vector ones, every vector register the caller's to save. A general register spills with
-/// `mov`, a vector one with `vmovups`, all 256 bits, to a slot aligned to its size, and
-/// moves to another register whole too, with `mov` or `vmovaps`; none touches the flags.
+/// `mov`, all 64 bits, a vector one with `vmovups`, to a slot aligned to its size, and moves to another register with
+/// `mov` or `vmovaps`, as wide: a vector register as an xmm, 128 bits, where no instruction uses its variable as all of
+/// a ymm, and else as a ymm, 256; none touches the flags.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SysV;
 
@@ -129,9 +130,8 @@ impl Machine for SysV {
 }
 
 impl SysV {
-    /// The instruction that moves all of `var` to `slot`, or back.
-    fn spill(&self, slot: SlotId, var: VReg, store: bool) -> Inst<Op, VReg> {
-        let width = self.width(var.class);
+    /// The instruction that moves `width` of `var` to `slot`, or back.
+    fn spill(&self, slot: SlotId, var: VReg, width: Width, store: bool) -> Inst<Op, VReg> {
         let op = if var.class == Class::Gpr { Op::Mov } else { Op::Vmovups };
         let mem = Operand::Mem(Mem { base: Base::Slot(slot), index: None, disp: 0, width });
         let reg = Operand::Reg(var, width);
@@ -150,16 +150,23 @@ impl Spill<Op> for SysV {
         }
     }
 
-    fn store(&self, slot: SlotId, var: VReg) -> Inst<Op, VReg> {
-        self.spill(slot, var, true)
+    fn kept(&self, class: Class, named: Width) -> Width {
+        match class {
+            Class::Gpr => Width::W64,
+            Class::Vec => named.max(Width::W128),
+            Class::Pred | Class::Float => unreachable!("x86 has no {class:?} registers"),
+        }
     }
 
-    fn load(&self, var: VReg, slot: SlotId) -> Inst<Op, VReg> {
-        self.spill(slot, var, false)
+    fn store(&self, slot: SlotId, var: VReg, width: Width) -> Inst<Op, VReg> {
+        self.spill(slot, var, width, true)
     }
 
-    fn copy(&self, to: VReg, from: VReg) -> Inst<Op, VReg> {
-        let width = self.width(to.class);
+    fn load(&self, var: VReg, slot: SlotId, width: Width) -> Inst<Op, VReg> {
+        self.spill(slot, var, width, false)
+    }
+
+    fn copy(&self, to: VReg, from: VReg, width: Width) -> Inst<Op, VReg> {
         let op = if to.class == Class::Gpr { Op::Mov } else { Op::Vmovaps };
         let arg = |v, access| Arg { operand: Operand::Reg(v, width), access };
         Inst {

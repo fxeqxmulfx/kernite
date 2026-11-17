@@ -14,7 +14,7 @@ pub trait Machine {
 }
 
 /// How a machine of the instruction set `Op` keeps a variable on the stack when the allocator
-/// runs out of registers, and moves one to another: how wide a register is, and the
+/// runs out of registers, and moves one to another: how wide a register is, how wide a variable is kept, and the
 /// instructions that store one in a slot of the frame, load it back, and copy it.
 ///
 /// The allocator puts them between any two instructions, between a comparison and the jump
@@ -22,21 +22,30 @@ pub trait Machine {
 /// slot, or the register.
 pub trait Spill<Op> {
     /// How wide a register of `class` is, a file [`Machine::allocatable`] has registers of:
-    /// the bytes of a slot that keeps all of one, and the alignment it has.
+    /// all of one. An operand of less names part of it.
     fn width(&self, class: Class) -> Width;
 
-    /// An instruction that stores all of `var`'s register in `slot`.
-    fn store(&self, slot: SlotId, var: VReg) -> Inst<Op, VReg>;
+    /// How wide a variable of `class` is kept, in its slot and in the moves that copy it, where the widest operand that
+    /// names it is `named`: at least that, and at most [`Spill::width`]. A machine may keep a variable in part of a
+    /// register where no instruction names more of it, a vector register's lower half say, and then its slot has as
+    /// many bytes, and the alignment they say. The registers of an address count as all of a register, for an address
+    /// does not say how much of one it reads.
+    fn kept(&self, class: Class, named: Width) -> Width;
 
-    /// An instruction that loads all of `var`'s register from `slot`.
-    fn load(&self, var: VReg, slot: SlotId) -> Inst<Op, VReg>;
+    /// An instruction that stores `width` of `var`'s register in `slot`.
+    fn store(&self, slot: SlotId, var: VReg, width: Width) -> Inst<Op, VReg>;
 
-    /// An instruction that copies all of `from`'s register to `to`'s, of the same file. The
-    /// allocator moves a parameter or a result with it; a machine's own code may move a call's
-    /// arguments and its result with it too, and the allocator, seeing such a move, places the
-    /// two in one register where it can.
+    /// An instruction that loads `width` of `var`'s register from `slot`.
+    fn load(&self, var: VReg, slot: SlotId, width: Width) -> Inst<Op, VReg>;
+
+    /// An instruction that copies `width` of `from`'s register to `to`'s, of the same file. The allocator moves a
+    /// parameter or a result with it; a machine's own code may move a call's arguments and its result with it too, and
+    /// the allocator, seeing such a move, places the two in one register where it can, and leaves the move out where it
+    /// changes nothing then: where it moves all of the register, or no instruction after it reads all of the register
+    /// before one writes `to`, for a move of part clears the rest.
     ///
-    /// The allocator knows such a move only by its being equal to what this returns: one of
-    /// another width, as x86's `mov(to.r32, from.r32)` is, stays a move.
-    fn copy(&self, to: VReg, from: VReg) -> Inst<Op, VReg>;
+    /// The allocator knows such a move only by its being equal to what this returns, at the width `to` is kept. One of
+    /// another width, as x86's `mov(to.r32, from.r32)` is, stays a move. Where `from` is pinned, a call's result, the
+    /// width is that `from` is kept at, what the callee gives back, though `to` may be kept in more.
+    fn copy(&self, to: VReg, from: VReg, width: Width) -> Inst<Op, VReg>;
 }
