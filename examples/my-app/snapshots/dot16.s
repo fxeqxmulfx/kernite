@@ -113,5 +113,4 @@
     vxorps xmm0, xmm0, xmm0
     mov rsp, rbp
     pop rbp
-    vzeroupper
     ret

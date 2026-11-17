@@ -81,15 +81,19 @@
 //! was, and a vector in the stack frame. `lea(fp, [f])` puts the address of `f` in `fp`, which `call(r, fp, (a, b))`
 //! calls, passing each in the file its variable is of, and `call(r, fp, (a, b), (f, g))` as one of the functions taken
 //! together last, checked against each. One with no functions given passes and takes back each vector as the call names
-//! it: an xmm, or all of a ymm. A call that `ret` follows at once is a jump: the kernel takes its frame down as `ret`
-//! does, and jumps to the callee, which returns to the kernel's caller. A label between them leaves the `ret` for the
-//! other ways that come to it, and an address in a register the kernel saves goes first to `r11`, which the epilogue
-//! leaves. The call stays a call where an instruction comes between it and the `ret`, and where the jump would not do
-//! what the call does: where the kernel has taken the address of its stack memory, and where it calls at an address
-//! with no functions given and takes all of a ymm back: the epilogue's `vzeroupper` runs before the callee sets its
-//! upper half. A jump that passes all of a ymm has no `vzeroupper` before it: the callee, passed all of a ymm, clears
-//! the upper halves before it returns. A function that never returns, `-> !`, ends each way out in `ud2()`, which
-//! faults, or in a call of one that never returns.
+//! it: an xmm, or all of a ymm. A call at an address with no functions given has `vzeroupper` before it where the
+//! kernel may have set the upper half of a vector register, as a `ret` has: its callee may run SSE code, which pays for
+//! an upper half set. A call that passes all of a ymm or takes all of one back has none, for its callee runs AVX
+//! instructions and `vzeroupper` would clear the upper half of a ymm it passes; nor has a call of one of the module's
+//! functions, whose instructions are AVX's too. A call that `ret` follows at once is a jump: the kernel takes its frame
+//! down and writes `vzeroupper` as `ret` does, and jumps to the callee, which returns to the kernel's caller. A label
+//! between them leaves the `ret` for the other ways that come to it, and an address in a register the kernel saves goes
+//! first to `r11`, which the epilogue leaves. The call stays a call where an instruction comes between it and the
+//! `ret`, and where the jump would not do what the call does: where the kernel has taken the address of its stack
+//! memory, and where it calls at an address with no functions given and takes all of a ymm back: the epilogue's
+//! `vzeroupper` runs before the callee sets its upper half. A jump that passes all of a ymm has no `vzeroupper` before
+//! it: the callee, passed all of a ymm, clears the upper halves before it returns. A function that never returns,
+//! `-> !`, ends each way out in `ud2()`, which faults, or in a call of one that never returns.
 
 use kernite_compile::Spill;
 use kernite_core::Access::{self, Ignored, Read, ReadWrite, Write};
@@ -103,6 +107,7 @@ use kernite_lang::{Fault, Guard, Operand as Given, Span, Target, Value, article,
 use crate::bytes;
 use crate::forms::{self, Form, Kind, Miss, Shape};
 use crate::op::Op;
+use crate::operand::ymm;
 use crate::sysv::{CALL_CLOBBERS, FLOAT_PARAMS, FLOAT_RESULT, INT_PARAMS, INT_RESULT, PAGE, SysV};
 
 /// The operands of an instruction.
@@ -702,6 +707,13 @@ impl Kernel {
             flow,
             clobbers: CALL_CLOBBERS.iter().copied().map(Clobber::All).collect(),
         };
+        // A function it does not know may run SSE code, which pays for an upper half set: the frame turns this marker
+        // into a `vzeroupper` just before the call, where the kernel may have set one. There is none before a call of a
+        // function it knows, whose instructions are AVX's, nor before one that passes all of a ymm or takes all of one
+        // back: its callee runs AVX instructions, and `vzeroupper` would clear the upper half of a ymm it passes.
+        if !known && !call.implicit.iter().any(ymm) {
+            self.push(Op::Vzeroupper, vec![], vec![], Flow::Next);
+        }
         self.p.body.push(Item::Inst(call));
         self.sites.push(reaches);
         if let Some((reg, view, pinned)) = back {
@@ -1844,7 +1856,7 @@ impl Target for Kernel {
 
     fn end(&mut self) -> Result<(), String> {
         let open = match self.p.body.iter().rev().find(|item| !matches!(item, Item::Note(_))) {
-            Some(Item::Inst(inst)) => !matches!(inst.flow, Flow::Return | Flow::Jump(_)),
+            Some(Item::Inst(inst)) => inst.flow.falls_through(),
             _ => true,
         };
         match (open, self.returns) {

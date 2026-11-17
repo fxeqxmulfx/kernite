@@ -1,4 +1,4 @@
-use kernite_core::{Access, Arg, Base, Imm, Mem, Operand, SlotId, VReg, Width};
+use kernite_core::{Access, Arg, Base, Class, Imm, Mem, Operand, Register, SlotId, VReg, Width};
 
 /// A general-purpose variable, seen as 64 bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -246,4 +246,9 @@ pub(crate) fn control(value: u8) -> Arg<VReg> {
 /// A count or an addend, which a listing shows in decimal.
 pub(crate) fn number<R>(value: i64) -> Arg<R> {
     arg(Operand::Imm(Imm { value, hex: false }), Access::Read)
+}
+
+/// Whether `a` is all of a ymm, whose upper half an instruction that reads or writes it may set.
+pub(crate) fn ymm<R: Register>(a: &Arg<R>) -> bool {
+    matches!(a.operand, Operand::Reg(r, Width::W256) if r.class() == Class::Vec)
 }

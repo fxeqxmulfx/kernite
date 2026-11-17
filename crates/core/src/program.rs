@@ -23,6 +23,22 @@ pub enum Flow {
     Return,
 }
 
+impl Flow {
+    /// The labels control may go to.
+    pub fn labels(&self) -> &[Label] {
+        match self {
+            Flow::Next | Flow::Return => &[],
+            Flow::Jump(l) | Flow::Branch(l) => std::slice::from_ref(l),
+            Flow::Table { to, .. } => to,
+        }
+    }
+
+    /// Whether control may go to the next item.
+    pub fn falls_through(&self) -> bool {
+        !matches!(self, Flow::Jump(_) | Flow::Return | Flow::Table { or_next: false, .. })
+    }
+}
+
 /// What an instruction does to a machine register besides its operands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Clobber {

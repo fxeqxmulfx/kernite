@@ -2467,7 +2467,8 @@ fn a_call_is_checked_against_its_callee() {
     }
 }
 
-/// A function that never returns, `-> !`, may not, and a cooperative kernel returns.
+/// A function that never returns, `-> !`, may not, and a cooperative kernel returns. Control does not reach the end of
+/// a body that ends in a jump, as one that spins for ever does.
 #[test]
 fn a_function_that_never_returns_is_checked() {
     let cases = [
@@ -2494,6 +2495,7 @@ fn a_function_that_never_returns_is_checked() {
     for (src, want) in cases {
         assert_eq!(kernite::x86_str(src, "k").unwrap_err(), want, "{src}");
     }
+    assert_eq!(calling("", " -> !", "label(spin); pause(); jmp(spin);").unwrap(), "2:\npause\njmp 2b");
 }
 
 /// A program of the toolchain: `$var`, or `name` on the path, if it runs.
@@ -2747,13 +2749,17 @@ fn kernite_knows_every_instruction_of_x86_64_v3() {
     }
 }
 
-/// A kernel clears the upper halves of the vector registers before it returns, with `vzeroupper`, only where it may
-/// have set one: where an instruction of its own reads or writes all of a ymm, or it calls a function it does not know
-/// and passes it all of a ymm or takes all of one back. A vector register moves and spills as wide as an instruction
-/// names its variable, so a kernel of xmm registers alone writes none, though it moves and spills its floats and calls
-/// the module's functions, by name or at an address with the functions given: each clears what it sets before it
-/// returns. Nor does a call at an address with no functions given that passes and takes back a float, an xmm: its
-/// callee takes and gives back no ymm, and a call that `ret` follows is a jump.
+/// A kernel clears the upper halves of the vector registers with `vzeroupper` only where it may have set one: where an
+/// instruction of its own reads or writes all of a ymm, or it calls at an address with no functions given and passes
+/// all of a ymm or takes all of one back. It clears them before it returns, and before a call at an address with no
+/// functions given, whose callee may run SSE code, which pays for an upper half set, as rustc does: after the arguments
+/// are moved and what lives across the call is spilled, just before the call. A call of the module's functions has none
+/// before it: their instructions are AVX's. Nor has one that passes all of a ymm or takes all of one back: its callee
+/// runs AVX instructions, and `vzeroupper` would clear the upper half of a ymm it passes. A vector register moves and
+/// spills as wide as an instruction names its variable, so a kernel of xmm registers alone writes none, though it moves
+/// and spills its floats and calls the module's functions, by name or at an address with the functions given: each
+/// clears what it sets before it returns. Nor does a call at an address with no functions given that passes and takes
+/// back a float, an xmm: its callee takes and gives back no ymm, and a call that `ret` follows is a jump.
 #[test]
 fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() {
     let cases = [
@@ -2842,13 +2848,20 @@ fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() {
             "vmovups ymm0, ymmword ptr [rdi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rdi], ymm0\nvzeroupper\n\
              ret",
         ),
+        // A read of all of a ymm counts as much as a write, as for rustc: the store of a ymm whose xmm was zeroed.
+        (
+            "p: *mut f32",
+            "",
+            "let v: ymm; zero(v); vmovups([p], v);",
+            "vxorps xmm0, xmm0, xmm0\nvmovups ymmword ptr [rdi], ymm0\nvzeroupper\nret",
+        ),
         (
             "fp: u64, p: *mut f32",
             "",
             "let v: ymm; vmovups(v, [p]); call(fp); vmovups([p], v);",
             "push rbx\npush rbp\nmov rbp, rsp\nsub rsp, 32\nand rsp, -32\nmov rbx, rsi\nvmovups ymm0, ymmword ptr \
-             [rbx]\nvmovups ymmword ptr [rsp], ymm0\ncall rdi\nvmovups ymm0, ymmword ptr [rsp]\nvmovups ymmword ptr \
-             [rbx], ymm0\nmov rsp, rbp\npop rbp\npop rbx\nvzeroupper\nret",
+             [rbx]\nvmovups ymmword ptr [rsp], ymm0\nvzeroupper\ncall rdi\nvmovups ymm0, ymmword ptr [rsp]\n\
+             vmovups ymmword ptr [rbx], ymm0\nmov rsp, rbp\npop rbp\npop rbx\nvzeroupper\nret",
         ),
         (
             "fp: u64",
@@ -2875,6 +2888,179 @@ fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() {
             "let v: ymm; vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); call(fp, (v.xmm));",
             "vmovups ymm0, ymmword ptr [rsi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rsi], ymm0\nvzeroupper\n\
              jmp rdi",
+        ),
+        // A call at an address with no functions given has `vzeroupper` just before it, after the arguments are moved,
+        // where the kernel may have set an upper half. One that takes all of a ymm back has none, nor has a call of the
+        // module's functions, by name or at an address with them given, the function it is in among them: the
+        // `vzeroupper` comes before the `ret` after it.
+        (
+            "fp: u64, p: *mut f32",
+            " -> u64",
+            "let v: ymm; let r: gpr; vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); call(r, fp, (p)); add(r, 1); \
+             ret(r);",
+            "sub rsp, 8\nmov rax, rdi\nvmovups ymm0, ymmword ptr [rsi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr \
+             [rsi], ymm0\nmov rdi, rsi\nvzeroupper\ncall rax\nadd rax, 1\nadd rsp, 8\nret",
+        ),
+        (
+            "fp: u64, p: *mut f32, x: f32",
+            " -> u64",
+            "let (v, r): (ymm, gpr); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); call(r, fp, (x)); add(r, 1); \
+             ret(r);",
+            "sub rsp, 8\nvmovups ymm1, ymmword ptr [rsi]\nvaddps ymm1, ymm1, ymm1\nvmovups ymmword ptr [rsi], \
+             ymm1\nvzeroupper\ncall rdi\nadd rax, 1\nadd rsp, 8\nret",
+        ),
+        (
+            "fp: u64, p: *mut f32",
+            " -> f32",
+            "let v: ymm; vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); call(v, fp, ()); ret(v.xmm);",
+            "sub rsp, 8\nvmovups ymm0, ymmword ptr [rsi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rsi], \
+             ymm0\ncall rdi\nadd rsp, 8\nvzeroupper\nret",
+        ),
+        (
+            "p: *mut f32, n: u64",
+            " -> u64",
+            "let (v, r): (ymm, gpr); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); call(r, gcd, (n, n)); add(r, \
+             1); ret(r);",
+            "sub rsp, 8\nvmovups ymm0, ymmword ptr [rdi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rdi], \
+             ymm0\nmov rdi, rsi\ncall {f0}\nadd rax, 1\nadd rsp, 8\nvzeroupper\nret",
+        ),
+        (
+            "p: *mut f32, n: u64",
+            " -> u64",
+            "let (v, r, fp): (ymm, gpr, gpr); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); lea(fp, [gcd]); \
+             call(r, fp, (n, n), (gcd, gcd)); add(r, 1); ret(r);",
+            "sub rsp, 8\nvmovups ymm0, ymmword ptr [rdi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rdi], \
+             ymm0\nlea rax, [rip + {f0}]\nmov rdi, rsi\ncall rax\nadd rax, 1\nadd rsp, 8\nvzeroupper\nret",
+        ),
+        (
+            "p: *mut f32, n: u64",
+            " -> u64",
+            "let (v, r, fp): (ymm, gpr, gpr); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); lea(fp, [k]); \
+             call(r, fp, (p, n), (k, k)); add(r, 1); ret(r);",
+            "sub rsp, 8\nvmovups ymm0, ymmword ptr [rdi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rdi], \
+             ymm0\nlea rax, [rip + {f0}]\ncall rax\nadd rax, 1\nadd rsp, 8\nvzeroupper\nret",
+        ),
+    ];
+    for (params, ret, body, want) in cases {
+        assert_eq!(calling(params, ret, body).unwrap(), want, "{body}");
+    }
+}
+
+/// Where a kernel clears the upper halves of the vector registers depends on the ways to the place: a `vzeroupper` goes
+/// before a `ret`, and before a call at an address with no functions given, where some way to it may have set one and
+/// none has run `vzeroupper` since. So neither a second call nor a jump to one of the module's functions has one after
+/// the first, until the kernel sets one again; a loop that calls before its ymm work clears at the top, for the next
+/// round; a `ret` that comes before any ymm work has none, nor has the `ret` that a jump after ymm work leaves for the
+/// ways that skip that work; two ways that join, one of which may have set one, clear at the join; and a call that
+/// `ret` follows clears after the frame is taken down, before the jump, as `ret` does, though the kernel reloads the
+/// address of the call, which it spilled, before the frame goes. A call that is no jump clears after that reload, just
+/// before it.
+#[test]
+fn vzeroupper_goes_where_a_way_to_it_may_have_set_an_upper_half() {
+    let cases = [
+        (
+            "fp: u64, p: *mut f32",
+            " -> u64",
+            "let (v, r): (ymm, gpr); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); call(fp, ()); call(r, fp, \
+             ()); add(r, 1); ret(r);",
+            "push rbx\nmov rbx, rdi\nvmovups ymm0, ymmword ptr [rsi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr \
+             [rsi], ymm0\nvzeroupper\ncall rbx\ncall rbx\nadd rax, 1\npop rbx\nret",
+        ),
+        (
+            "fp: u64, p: *mut f32, n: u64",
+            " -> u64",
+            "let (v, r): (ymm, gpr); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); call(fp, ()); call(r, gcd, (n, \
+             n)); ret(r);",
+            "push rbx\nmov rbx, rdx\nvmovups ymm0, ymmword ptr [rsi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr \
+             [rsi], ymm0\nvzeroupper\ncall rdi\nmov rdi, rbx\nmov rsi, rbx\npop rbx\njmp {f0}",
+        ),
+        (
+            "fp: u64, p: *mut f32",
+            " -> u64",
+            "let (v, r): (ymm, gpr); call(v, fp, ()); vmovups([p], v); call(r, fp, ()); add(r, 1); ret(r);",
+            "push rbx\npush r12\nsub rsp, 8\nmov rbx, rsi\nmov r12, rdi\ncall r12\nvmovups ymmword ptr [rbx], \
+             ymm0\nvzeroupper\ncall r12\nadd rax, 1\nadd rsp, 8\npop r12\npop rbx\nret",
+        ),
+        (
+            "fp: u64, p: *mut f32, n: u64",
+            "",
+            "let v: ymm; label(top); call(fp, ()); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); dec(n); \
+             jnz(top); ret();",
+            "push rbx\npush r12\npush r13\nmov rbx, rdx\nmov r12, rsi\nmov r13, rdi\n2:\nvzeroupper\ncall \
+             r13\nvmovups ymm0, ymmword ptr [r12]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [r12], ymm0\ndec \
+             rbx\njnz 2b\npop r13\npop r12\npop rbx\nvzeroupper\nret",
+        ),
+        (
+            "fp: u64, p: *mut f32, n: u64",
+            "",
+            "let v: ymm; label(top); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); dec(n); jnz(top); call(fp, \
+             ()); ret();",
+            "2:\nvmovups ymm0, ymmword ptr [rsi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rsi], ymm0\ndec \
+             rdx\njnz 2b\nvzeroupper\njmp rdi",
+        ),
+        (
+            "p: *mut f32, n: u64",
+            "",
+            "let v: ymm; test(n, n); jnz(work); ret(); label(work); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], \
+             v); ret();",
+            "test rsi, rsi\njnz 2f\nret\n2:\nvmovups ymm0, ymmword ptr [rdi]\nvaddps ymm0, ymm0, ymm0\nvmovups \
+             ymmword ptr [rdi], ymm0\nvzeroupper\nret",
+        ),
+        (
+            "p: *mut f32, a: u64, b: u64",
+            " -> u64",
+            "let (v, r): (ymm, gpr); mov(r, 7); test(a, a); jz(out); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], \
+             v); call(r, gcd, (a, b)); label(out); ret(r);",
+            "mov rax, 7\ntest rsi, rsi\njz 2f\nvmovups ymm0, ymmword ptr [rdi]\nvaddps ymm0, ymm0, ymm0\nvmovups \
+             ymmword ptr [rdi], ymm0\nmov rdi, rsi\nmov rsi, rdx\nvzeroupper\njmp {f0}\n2:\nret",
+        ),
+        (
+            "p: *mut f32, n: u64",
+            "",
+            "let v: ymm; test(n, n); jz(out); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); label(out); ret();",
+            "test rsi, rsi\njz 2f\nvmovups ymm0, ymmword ptr [rdi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr \
+             [rdi], ymm0\n2:\nvzeroupper\nret",
+        ),
+        (
+            "fp: u64, p: *mut f32, n: u64",
+            "",
+            "let v: ymm; vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); test(n, n); jz(out); call(fp, ()); \
+             label(out); ret();",
+            "vmovups ymm0, ymmword ptr [rsi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rsi], ymm0\ntest rdx, \
+             rdx\njz 2f\nvzeroupper\njmp rdi\n2:\nvzeroupper\nret",
+        ),
+        (
+            "fp: u64, p: *mut f32",
+            "",
+            "let v: ymm; let t: local<[f32; 8], 32>; vmovups(v, [p]); vmovups([t], v); vaddps(v, v, v); vmovups([p], \
+             v); call(fp, ());",
+            "push rbp\nmov rbp, rsp\nsub rsp, 32\nand rsp, -32\nvmovups ymm0, ymmword ptr [rsi]\nvmovups ymmword ptr \
+             [rsp], ymm0\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rsi], ymm0\nmov rsp, rbp\npop \
+             rbp\nvzeroupper\njmp rdi",
+        ),
+        (
+            "p: *mut f32, a: u64, b: u64, c: u64, d: u64, fp: u64",
+            " -> u64",
+            "let (v, r): (ymm, gpr); call(fp, ()); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); add(a, b); \
+             add(a, c); add(a, d); add(b, c); add(b, d); add(c, d); add(a, b); call(r, fp, (a)); ret(r);",
+            "push rbx\npush r12\npush r13\npush r14\npush r15\npush rbp\nmov rbp, rsp\nsub rsp, 8\nmov qword ptr \
+             [rsp], r9\nmov rbx, r8\nmov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\nmov rax, qword ptr \
+             [rsp]\ncall rax\nvmovups ymm0, ymmword ptr [r15]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [r15], \
+             ymm0\nadd r14, r13\nadd r14, r12\nadd r14, rbx\nadd r13, r12\nadd r13, rbx\nadd r12, rbx\nadd r14, \
+             r13\nmov rdi, r14\nmov rax, qword ptr [rsp]\nmov rsp, rbp\npop rbp\npop r15\npop r14\npop r13\npop \
+             r12\npop rbx\nvzeroupper\njmp rax",
+        ),
+        (
+            "p: *mut f32, a: u64, b: u64, c: u64, d: u64, fp: u64",
+            " -> u64",
+            "let (v, r): (ymm, gpr); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); call(fp, ()); add(a, b); \
+             add(a, c); add(a, d); add(b, c); add(b, d); add(c, d); add(a, p); call(r, fp, (a)); ret(r);",
+            "push rbx\npush r12\npush r13\npush r14\npush r15\npush rbp\nmov rbp, rsp\nsub rsp, 8\nmov qword ptr \
+             [rsp], r9\nmov rbx, r8\nmov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\nvmovups ymm0, ymmword ptr \
+             [r15]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [r15], ymm0\nmov rax, qword ptr [rsp]\nvzeroupper\n\
+             call rax\nadd r14, r13\nadd r14, r12\nadd r14, rbx\nadd r13, r12\nadd r13, rbx\nadd r12, rbx\nadd r14, \
+             r15\nmov rdi, r14\nmov rax, qword ptr [rsp]\nmov rsp, rbp\npop rbp\npop r15\npop r14\npop r13\npop r12\n\
+             pop rbx\njmp rax",
         ),
     ];
     for (params, ret, body, want) in cases {

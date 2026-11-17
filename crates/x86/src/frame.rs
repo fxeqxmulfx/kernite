@@ -2,13 +2,14 @@
 //! each `ret` and each jump to a callee that stands for one.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem;
 
 use kernite_compile::{Allocated, Frame};
-use kernite_core::{Access, Arg, Base, Class, Flow, Inst, Item, Label, Mem, Operand, PReg, Width};
+use kernite_core::{Access, Arg, Base, Flow, Inst, Item, Label, Mem, Operand, PReg, Width};
 
 use crate::forms::{self, Feature};
 use crate::op::Op;
-use crate::operand::number;
+use crate::operand::{number, ymm};
 use crate::sysv::{CALL_CLOBBERS, PAGE, R11, RBP, RSP};
 
 /// An allocated kernel with its frame made instructions, as the printer prints it.
@@ -33,7 +34,7 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     let jumps = jumps(c);
     let calls = insts(&c.body).filter(|inst| inst.op == Op::Call).count() > jumps.len();
     let returns = insts(&c.body).any(|inst| inst.op == Op::Ret);
-    let upper = insts(&c.body).filter(|inst| !idle(inst)).any(|inst| inst.operands().any(ymm));
+    let upper = upper_set(&c.body, &jumps);
     // The prologue's loop takes the least value no label of the body has: going up the body's
     // labels in order, each one that has the value looked for moves it one on.
     let labels: BTreeSet<u32> = c
@@ -48,6 +49,8 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     let padding = padding(&c.frame, calls);
     let mut body = prologue(&c.frame, padding, free)?;
     let done: BTreeSet<usize> = jumps.values().flatten().copied().collect();
+    // Whether the call that comes next has a `vzeroupper` written before it.
+    let mut clear = false;
     for (i, item) in c.body.iter().enumerate() {
         match item {
             Item::Inst(call) if jumps.contains_key(&i) => {
@@ -61,13 +64,23 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
                     body.push(inst(Op::Mov, vec![reg(R11, Access::Write), reg(at, Access::Read)]));
                     jump.args = vec![reg(R11, Access::Read)];
                 }
-                // The callee, passed all of a ymm, clears the upper halves before it returns.
-                body.extend(epilogue(&c.frame, padding, upper && !call.implicit.iter().any(ymm)));
+                // The callee, passed all of a ymm, clears the upper halves before it returns. A `vzeroupper` written
+                // before the call goes after the frame is taken down, where it goes before a `ret`.
+                let clears = (mem::take(&mut clear) || upper[i]) && !call.implicit.iter().any(ymm);
+                body.extend(epilogue(&c.frame, padding, clears));
                 body.push(Item::Inst(jump));
                 continue;
             }
             Item::Inst(_) if done.contains(&i) => continue,
-            Item::Inst(inst) if inst.op == Op::Ret => body.extend(epilogue(&c.frame, padding, upper)),
+            Item::Inst(inst) if inst.op == Op::Ret => body.extend(epilogue(&c.frame, padding, upper[i])),
+            // The `vzeroupper` written before a call waits for it, and goes before it where an upper half may be set.
+            Item::Inst(inst) if inst.op == Op::Vzeroupper => {
+                clear = upper[i];
+                continue;
+            }
+            Item::Inst(call) if call.op == Op::Call && mem::take(&mut clear) => {
+                body.push(inst(Op::Vzeroupper, vec![]));
+            }
             Item::Inst(inst) if idle(inst) => continue,
             Item::Inst(inst) => {
                 let spill = inst.args.iter().find_map(|a| match a.operand {
@@ -144,10 +157,39 @@ fn insts(body: &[Item<Op, PReg>]) -> impl Iterator<Item = &Inst<Op, PReg>> {
     })
 }
 
-/// Whether `a` is all of a ymm, whose upper half an instruction that reads or writes it may have set. A call has such
-/// operands where it passes all of a ymm to a function it does not know, or takes all of one back.
-fn ymm(a: &Arg<PReg>) -> bool {
-    matches!(a.operand, Operand::Reg(r, Width::W256) if r.class == Class::Vec)
+/// Whether the upper half of a vector register may be set where each item of `body` runs: by an instruction that reads
+/// or writes all of a ymm, on some way to it, with no `vzeroupper` since. The `vzeroupper` that `call` writes before a
+/// call of a function the kernel does not know stands for the one the frame writes there. A call has such an operand
+/// where it passes all of a ymm to a function it does not know, or takes all of one back. A move that the listing
+/// leaves out sets none. A way ends at a call of `jumps`, as at a `ret`: the frame makes it a jump.
+fn upper_set(body: &[Item<Op, PReg>], jumps: &BTreeMap<usize, Option<usize>>) -> Vec<bool> {
+    // The labels that control comes to with one set. Each round finds those that the last did not, until a round finds
+    // none.
+    let mut at = BTreeSet::new();
+    loop {
+        let (mut set, mut now, mut grown) = (vec![false; body.len()], false, false);
+        for (i, item) in body.iter().enumerate() {
+            let Item::Inst(inst) = item else {
+                if let Item::Label(l) = item {
+                    now |= at.contains(&l.0);
+                }
+                continue;
+            };
+            set[i] = now;
+            if inst.op == Op::Vzeroupper {
+                now = false;
+            } else if !idle(inst) && inst.operands().any(ymm) {
+                now = true;
+            }
+            for l in inst.flow.labels().iter().filter(|_| now) {
+                grown |= at.insert(l.0);
+            }
+            now &= inst.flow.falls_through() && !jumps.contains_key(&i);
+        }
+        if !grown {
+            return set;
+        }
+    }
 }
 
 /// Whether `inst` changes nothing, so the listing leaves it out: a move of all 64 bits, or all
@@ -264,10 +306,8 @@ fn prologue(frame: &Frame, pad: u32, free: Label) -> Result<Vec<Item<Op, PReg>>,
 }
 
 /// What runs before a `ret`, and before a jump to a callee that stands for one: undoes [`prologue`], and clears the
-/// upper halves of the vector registers if the body may have set one, so the caller's SSE code does not pay for them.
-/// It may have where an instruction of it reads or writes all of a ymm, a move or a spill of one too, or calls a
-/// function it does not know and passes it all of a ymm or takes all of one back. A move that the listing leaves out
-/// does neither.
+/// upper halves of the vector registers if `upper`, as [`upper_set`] says, so the caller's SSE code does not pay for
+/// them.
 fn epilogue(frame: &Frame, pad: u32, upper: bool) -> Vec<Item<Op, PReg>> {
     let mut items = vec![];
     if frame.size > 0 {
@@ -302,7 +342,7 @@ fn sp(op: Op, bytes: u32) -> Item<Op, PReg> {
 
 #[cfg(test)]
 mod tests {
-    use kernite_core::{Signature, Slot, SlotId};
+    use kernite_core::{Class, Signature, Slot, SlotId};
 
     use super::*;
     use crate::intel;

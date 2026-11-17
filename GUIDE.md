@@ -444,27 +444,32 @@ the kernel reads the lower half alone, an xmm or a float, stays in its register.
 writes before it reads all of it: an instruction that writes an xmm or a float clears the upper half of its ymm, even
 one that reads it too, as an FMA does. A vector that an address takes its indices from counts as read whole, though a
 gather of an xmm of indices reads its lower half alone. The stack pointer is a multiple of 16 at each call. A kernel
-writes `vzeroupper` before it returns where it may have set the upper half of a vector register, so that the SSE code of
-its caller does not pay for it. It may have where it runs an instruction on all of a ymm, or calls at an address with no
-functions given and passes all of a ymm or takes all of one back. kernite moves and spills a vector register as wide as
-an instruction uses its variable: as an xmm, `vmovaps xmm0, xmm1`, where none uses it as all of a ymm, and else as all
-of a ymm, `vmovaps ymm0, ymm1`. A call of the module's functions, by name or at an address with them given, passes a
-float and takes one back as an xmm: `call(v.xmm, half, (x))` clears the upper half of `v`, as an instruction that writes
-an xmm does. A call at an address with no functions given passes and takes back each vector as the call names it: an
-xmm, or all of a ymm. A float, an `xmm` or the `.xmm` of a ymm says that its callee takes or gives back no ymm, and all
-of a ymm that it does, as the type of a function pointer does in Rust. So a kernel of xmm registers alone writes no
-`vzeroupper`, though it moves and spills them and calls functions, by name or at an address: each clears what it sets
-before it returns. A call that `ret` follows at once is a jump: the kernel takes its frame down as `ret` does, and jumps
-to the callee, which returns to the kernel's caller. So `call(g, gcd, (a, b)); ret(g);` is a loop in `gcd`: the stack
-does not grow. A label between the call and the `ret` leaves the `ret` for the other ways that come to it, and an
-address to call at in a register the kernel saves goes first to `r11`, which taking the frame down leaves as it is. The
-call stays a call where an instruction comes between it and the `ret`, `call(r, gcd, (a, b)); add(r, 1); ret(r);`. It
-stays one too where the jump would not do what the call does: where the kernel has taken the address of its stack
-memory, which the callee may use, and the frame the jump takes down holds; and where it calls at an address with no
-functions given and takes all of a ymm back: the kernel's `vzeroupper`, as it takes its frame down, runs before the
-callee sets the upper half of what it gives back. A jump that passes all of a ymm has no `vzeroupper` before it: the
-callee, passed all of a ymm, clears the upper halves before it returns. A kernel that never returns, `-> !`, ends each
-way out in `ud2()` or in a call of one that does not.
+writes `vzeroupper` where it may have set the upper half of a vector register: before it returns, so that the SSE code
+of its caller does not pay for it, and before it calls a function it does not know, so that the SSE code of the callee
+does not. It may have where, on some way to it, the kernel runs an instruction on all of a ymm, or calls at an address
+with no functions given and passes all of a ymm or takes all of one back, with no `vzeroupper` since. A call of the
+module's functions, by name or at an address with them given, has none before it: their instructions are AVX's, which
+pay nothing for an upper half set, and the kernel clears it before it returns. Nor has a call at an address with no
+functions given that passes all of a ymm or takes all of one back: its callee runs AVX instructions, and `vzeroupper`
+would clear the upper half of a ymm it passes. kernite moves and spills a vector register as wide as an instruction uses
+its variable: as an xmm, `vmovaps xmm0, xmm1`, where none uses it as all of a ymm, and else as all of a ymm,
+`vmovaps ymm0, ymm1`. A call of the module's functions, by name or at an address with them given, passes a float and
+takes one back as an xmm: `call(v.xmm, half, (x))` clears the upper half of `v`, as an instruction that writes an xmm
+does. A call at an address with no functions given passes and takes back each vector as the call names it: an xmm, or
+all of a ymm. A float, an `xmm` or the `.xmm` of a ymm says that its callee takes or gives back no ymm, and all of a ymm
+that it does, as the type of a function pointer does in Rust. So a kernel of xmm registers alone writes no `vzeroupper`,
+though it moves and spills them and calls functions, by name or at an address: each clears what it sets before it
+returns. A call that `ret` follows at once is a jump: the kernel takes its frame down and writes `vzeroupper` as `ret`
+does, and jumps to the callee, which returns to the kernel's caller. So `call(g, gcd, (a, b)); ret(g);` is a loop in
+`gcd`: the stack does not grow. A label between the call and the `ret` leaves the `ret` for the other ways that come to
+it, and an address to call at in a register the kernel saves goes first to `r11`, which taking the frame down leaves as
+it is. The call stays a call where an instruction comes between it and the `ret`,
+`call(r, gcd, (a, b)); add(r, 1); ret(r);`. It stays one too where the jump would not do what the call does: where the
+kernel has taken the address of its stack memory, which the callee may use, and the frame the jump takes down holds; and
+where it calls at an address with no functions given and takes all of a ymm back: the kernel's `vzeroupper`, as it takes
+its frame down, runs before the callee sets the upper half of what it gives back. A jump that passes all of a ymm has no
+`vzeroupper` before it: the callee, passed all of a ymm, clears the upper halves before it returns. A kernel that never
+returns, `-> !`, ends each way out in `ud2()` or in a call of one that does not.
 
 Memory of the module's is a `static` beside its kernels, in the process's memory, which each kernel names as it names its
 own, and which keeps what they write from one call to the next: `static COUNTS: global<[u32; 16]>;` is 16 words the

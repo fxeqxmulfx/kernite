@@ -1994,9 +1994,7 @@ impl Target for Kernel {
 
     fn end(&mut self) -> Result<(), String> {
         let open = match self.p.body.iter().rev().find(|item| !matches!(item, Item::Note(_))) {
-            Some(Item::Inst(inst)) => {
-                !matches!(inst.flow, Flow::Return | Flow::Jump(_) | Flow::Table { or_next: false, .. })
-            }
+            Some(Item::Inst(inst)) => inst.flow.falls_through(),
             _ => true,
         };
         if open {

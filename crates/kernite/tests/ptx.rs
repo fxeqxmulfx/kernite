@@ -3955,6 +3955,16 @@ fn a_function_takes_and_returns_ptx_types() {
     for (src, want) in cases {
         assert_eq!(kernite::ptx_str(src).unwrap_err(), want, "{src}");
     }
+    // Control does not reach the end of a body that ends in a jump, or in a jump through a table, as one that spins for
+    // ever does.
+    for src in [
+        "extern \"ptx-func\" fn f() -> ! { label(spin); bra(spin); }",
+        "extern \"ptx-func\" fn f(n: u32) -> ! { label(spin); brx.idx(n, (spin,)); }",
+    ] {
+        if let Err(e) = kernite::ptx_str(src) {
+            panic!("{src}: {e}");
+        }
+    }
 }
 
 /// How an instance gives its operands.
