@@ -80,14 +80,16 @@
 //! register a callee may, so an integer live across it stays in `rbx` or `r12` to `r15`, which each callee keeps as it
 //! was, and a vector in the stack frame. `lea(fp, [f])` puts the address of `f` in `fp`, which `call(r, fp, (a, b))`
 //! calls, passing each in the file its variable is of, and `call(r, fp, (a, b), (f, g))` as one of the functions taken
-//! together last, checked against each. A call that `ret` follows at once is a jump: the kernel takes its frame down as
-//! `ret` does, and jumps to the callee, which returns to the kernel's caller. A label between them leaves the `ret` for
-//! the other ways that come to it, and an address in a register the kernel saves goes first to `r11`, which the
-//! epilogue leaves. The call stays a call where an instruction comes between it and the `ret`, and where the jump would
-//! not do what the call does: where the kernel has taken the address of its stack memory, and where it calls at an
-//! address with no functions given and passes a vector, whose upper half the epilogue's `vzeroupper` would clear. A
-//! function that never returns, `-> !`, ends each way out in `ud2()`, which faults, or in a call of one that never
-//! returns.
+//! together last, checked against each. One with no functions given passes and takes back each vector as the call names
+//! it: an xmm, or all of a ymm. A call that `ret` follows at once is a jump: the kernel takes its frame down as `ret`
+//! does, and jumps to the callee, which returns to the kernel's caller. A label between them leaves the `ret` for the
+//! other ways that come to it, and an address in a register the kernel saves goes first to `r11`, which the epilogue
+//! leaves. The call stays a call where an instruction comes between it and the `ret`, and where the jump would not do
+//! what the call does: where the kernel has taken the address of its stack memory, and where it calls at an address
+//! with no functions given and takes all of a ymm back: the epilogue's `vzeroupper` runs before the callee sets its
+//! upper half. A jump that passes all of a ymm has no `vzeroupper` before it: the callee, passed all of a ymm, clears
+//! the upper halves before it returns. A function that never returns, `-> !`, ends each way out in `ud2()`, which
+//! faults, or in a call of one that never returns.
 
 use kernite_compile::Spill;
 use kernite_core::Access::{self, Ignored, Read, ReadWrite, Write};
@@ -654,10 +656,14 @@ impl Kernel {
             }
         };
         // Each argument to the register it goes in, in order; then the call; then the result. The call reads what its
-        // callee takes and writes what it gives back: a float, in the xmm, of a function of the module; all of a ymm,
-        // which may hold a vector, of a function it does not know.
+        // callee takes and writes what it gives back: a float, in the xmm, of a function of the module; of one it does
+        // not know, each vector as the call names it, an xmm or all of a ymm, as rustc reads a callee's type.
         let known = targets.is_some() || matches!(target, Operand::Func(_));
-        let width = |class| if class == Class::Vec && known { W128 } else { SysV.width(class) };
+        let width = |class, view: View| match class {
+            Class::Vec if known => W128,
+            Class::Vec => view.width(),
+            _ => SysV.width(class),
+        };
         let mut implicit = vec![];
         let (mut ints, mut floats) = (0, 0);
         for (k, (a, ty)) in passed.iter().zip(&tys).enumerate() {
@@ -668,21 +674,22 @@ impl Kernel {
                 return Err(Fault::at(at, format!("this passes too many: {why}")));
             };
             *count += 1;
-            let name = match reg_of(a) {
-                Some((reg, _)) => self.p.regs[reg.id as usize].name.clone(),
-                None => names.get(k).cloned().unwrap_or_else(|| format!("argument {}", k + 1)),
+            let (name, view) = match reg_of(a) {
+                Some((reg, view)) => (self.p.regs[reg.id as usize].name.clone(), view),
+                None => (names.get(k).cloned().unwrap_or_else(|| format!("argument {}", k + 1)), View::Xmm),
             };
             let pinned = self.new_var(to.class, &name);
             self.p.pinned.push((pinned, to));
-            self.pass(pinned, a, *ty, width(to.class));
-            implicit.push(Arg { operand: Operand::Reg(pinned, width(to.class)), access: Read });
+            let w = width(to.class, view);
+            self.pass(pinned, a, *ty, w);
+            implicit.push(Arg { operand: Operand::Reg(pinned, w), access: Read });
         }
         let back = match (result.and_then(reg_of), kept) {
             (Some((reg, view)), Some(ty)) => {
                 let from = if ty == Ty::Int { INT_RESULT } else { FLOAT_RESULT };
                 let pinned = self.new_var(from.class, &self.p.regs[reg.id as usize].name.clone());
                 self.p.pinned.push((pinned, from));
-                implicit.push(Arg { operand: Operand::Reg(pinned, width(from.class)), access: Write });
+                implicit.push(Arg { operand: Operand::Reg(pinned, width(from.class, view)), access: Write });
                 Some((reg, view, pinned))
             }
             _ => None,
@@ -700,7 +707,7 @@ impl Kernel {
         if let Some((reg, view, pinned)) = back {
             self.p.body.push(Item::Inst(match view {
                 View::R32 => move_r32(reg, pinned),
-                _ => SysV.copy(reg, pinned, width(reg.class)),
+                _ => SysV.copy(reg, pinned, width(reg.class, view)),
             }));
         }
         Ok(())

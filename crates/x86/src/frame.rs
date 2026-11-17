@@ -61,7 +61,8 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
                     body.push(inst(Op::Mov, vec![reg(R11, Access::Write), reg(at, Access::Read)]));
                     jump.args = vec![reg(R11, Access::Read)];
                 }
-                body.extend(epilogue(&c.frame, padding, upper));
+                // The callee, passed all of a ymm, clears the upper halves before it returns.
+                body.extend(epilogue(&c.frame, padding, upper && !call.implicit.iter().any(ymm)));
                 body.push(Item::Inst(jump));
                 continue;
             }
@@ -108,8 +109,9 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
 /// which clears the upper halves of the vector registers where the kernel may have set one, and jumps to the callee,
 /// which returns to the kernel's caller. A call stays one where the jump would not do what it does: where the kernel
 /// has taken the address of its stack memory, which the callee may use, and the frame the epilogue takes down holds;
-/// and where it passes all of a ymm to a function it does not know, or takes all of one back: the epilogue's
-/// `vzeroupper` would clear the upper half of one it passes, and runs before the callee sets that of one it gives back.
+/// and where it takes all of a ymm back from a function it does not know: the epilogue's `vzeroupper` runs before the
+/// callee sets the upper half of what it gives back. A jump that passes all of a ymm has no `vzeroupper` before it: the
+/// callee, passed all of a ymm, clears the upper halves before it returns.
 fn jumps(c: &Allocated<Op>) -> BTreeMap<usize, Option<usize>> {
     let stack = |a: &Arg<PReg>| matches!(a.operand, Operand::Mem(Mem { base: Base::Slot(_), .. }));
     let mut jumps = BTreeMap::new();
@@ -126,7 +128,7 @@ fn jumps(c: &Allocated<Op>) -> BTreeMap<usize, Option<usize>> {
             _ => None,
         });
         let Some((j, ret)) = next else { continue };
-        if ret.op == Op::Ret && !call.implicit.iter().any(ymm) {
+        if ret.op == Op::Ret && !call.implicit.iter().any(|a| ymm(a) && a.access == Access::Write) {
             let alone = !c.body[i + 1..j].iter().any(|item| matches!(item, Item::Label(_)));
             jumps.insert(i, alone.then_some(j));
         }
@@ -143,7 +145,7 @@ fn insts(body: &[Item<Op, PReg>]) -> impl Iterator<Item = &Inst<Op, PReg>> {
 }
 
 /// Whether `a` is all of a ymm, whose upper half an instruction that reads or writes it may have set. A call has such
-/// operands where its callee is a function it does not know, which may be passed a vector or give one back.
+/// operands where it passes all of a ymm to a function it does not know, or takes all of one back.
 fn ymm(a: &Arg<PReg>) -> bool {
     matches!(a.operand, Operand::Reg(r, Width::W256) if r.class == Class::Vec)
 }
@@ -264,8 +266,8 @@ fn prologue(frame: &Frame, pad: u32, free: Label) -> Result<Vec<Item<Op, PReg>>,
 /// What runs before a `ret`, and before a jump to a callee that stands for one: undoes [`prologue`], and clears the
 /// upper halves of the vector registers if the body may have set one, so the caller's SSE code does not pay for them.
 /// It may have where an instruction of it reads or writes all of a ymm, a move or a spill of one too, or calls a
-/// function it does not know, which may be passed a vector or give one back. A move that the listing leaves out does
-/// neither.
+/// function it does not know and passes it all of a ymm or takes all of one back. A move that the listing leaves out
+/// does neither.
 fn epilogue(frame: &Frame, pad: u32, upper: bool) -> Vec<Item<Op, PReg>> {
     let mut items = vec![];
     if frame.size > 0 {
