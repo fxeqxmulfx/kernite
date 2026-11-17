@@ -12,8 +12,9 @@ categories.workspace = true
 [dependencies]
 
 # Not the workspace's lints: placing a thread is a call to the C library, which only `unsafe`
-# reaches. `unsafe` is denied here but in the module `affinity`, which makes the calls, and in the
-# tests that read back where a page is. Each `unsafe` block says why it holds.
+# reaches. `unsafe` is denied here but in the module `affinity`, which makes the calls, in the one
+# function of `Global` that reads its elements, and in the tests that read back where a page is.
+# Each `unsafe` block says why it holds.
 [lints.rust]
 unsafe_code = "deny"
 missing_docs = "warn"

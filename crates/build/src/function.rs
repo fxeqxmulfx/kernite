@@ -17,6 +17,13 @@ pub fn statics<B: Backend>(module: &Module, backend: &B) -> Vec<Result<Compiled<
     prepared.statics
 }
 
+/// How many bytes `statics` take of their module's memory together, each a pair of its bytes and its alignment: its
+/// bytes, and the padding its alignment may need, one byte less than it. A machine that has room for so many bytes in
+/// its module counts the statics it lays out with this, each beside those before it that are in the module.
+pub fn taken(statics: impl IntoIterator<Item = (u64, u64)>) -> u64 {
+    statics.into_iter().fold(0, |all, (bytes, align)| all.saturating_add(bytes).saturating_add(align - 1))
+}
+
 /// What every kernel of a module is told: its statics, and the functions it may call.
 pub struct Prepared<B: Backend> {
     /// Each static of the module, as [`statics`] has it.
@@ -33,19 +40,19 @@ pub struct Prepared<B: Backend> {
 /// not for this to say. A function whose instances are wrong has no instance here: it says why
 /// where it is compiled.
 pub fn prepare<B: Backend>(module: &Module, backend: &B) -> Prepared<B> {
-    let mut statics = vec![];
+    let (mut statics, mut made) = (vec![], vec![]);
     for item in &module.items {
         let ItemKind::Static(s) = &item.kind else { continue };
         statics.push(kernite_lang::memory(module, s).and_then(|memory| {
-            let code = backend.lay_out(&s.name, &memory).map_err(|e| match e {
+            let code = backend.lay_out(&s.name, &memory, &made).map_err(|e| match e {
                 StaticError::Name(message) => Error { span: s.span, message },
                 StaticError::Type(message) => Error { span: s.ty.span(), message },
                 StaticError::Value(message) => Error { span: s.value.as_ref().map_or(s.span, Expr::span), message },
             })?;
+            made.push(code.clone());
             Ok(Compiled { code, mentions: memory.mentions })
         }));
     }
-    let made = statics.iter().flatten().map(|s| s.code.clone()).collect();
     let mut callees = vec![];
     for item in &module.items {
         let ItemKind::Fn(g) = &item.kind else { continue };
@@ -65,7 +72,7 @@ pub fn prepare<B: Backend>(module: &Module, backend: &B) -> Prepared<B> {
 /// read; else none.
 pub(crate) fn stub<B: Backend>(module: &Module, s: &Static, backend: &B) -> Option<B::Static> {
     let memory = kernite_lang::memory(module, &Static { value: None, ..s.clone() }).ok()?;
-    backend.lay_out(&s.name, &memory).ok()
+    backend.lay_out(&s.name, &memory, &[]).ok()
 }
 
 impl<B: Backend> Prepared<B> {

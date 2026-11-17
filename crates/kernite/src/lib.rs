@@ -131,8 +131,9 @@ pub fn ptx_scope(path: &[&str]) -> String {
 /// The statics of `module`, its memory in PTX, in order: each named by its
 /// [`symbol`](kernite_ptx::symbol) in `scope`, as [`ptx`] names a kernel, for its kernels to name
 /// and [`kernite_ptx::module`] to declare; or why it is none, where it can be mended: at its
-/// type, or at what it holds. One that does not fit beside those before it, in the constant
-/// memory a module has or the global, is none: the module keeps them all.
+/// type, or at what it holds. One that does not fit beside those before it in the constant memory a module has is none:
+/// the module keeps them all. One of global memory that the module has no room for is outside it, and is the constant
+/// memory that holds its address.
 pub fn ptx_statics(module: &Module, scope: &str) -> Vec<Result<Compiled<Static>, kernite_lang::Error>> {
     statics(module, &Ptx::new(scope))
 }

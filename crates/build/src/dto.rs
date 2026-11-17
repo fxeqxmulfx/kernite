@@ -71,21 +71,30 @@ pub struct HostStatic {
     pub len: u64,
     /// What its address is a multiple of, a power of two.
     pub align: u64,
+    /// Whether it is past `rip`'s reach, beside the statics before it that are in reach, so that the linker places it
+    /// in memory of its own, which the static refers to, and a kernel takes its address from the static.
+    pub far: bool,
     /// What it holds until something writes it, as bytes, the lowest first; zeros past their
     /// end.
     pub init: Vec<u8>,
 }
 
-/// A static of the GPU's memory: its symbol, its type, and the number the host reads its elements as.
+/// A static of the GPU's memory: its symbol, its type, the number the host reads its elements as, and whether the
+/// module has room for it.
 #[derive(Debug, PartialEq)]
 pub struct DeviceStatic {
     /// The name the driver finds it by.
     pub symbol: String,
-    /// Its type as the module declares it, with the values it names known now: `constant<[u32; 16]>`.
+    /// Its type as the module declares it, with the values it names known now: `constant<[u32; 16]>`. For memory the
+    /// module has no room for, which it declares as the constant memory that holds its address, that is
+    /// `constant<u64>`.
     pub ty: String,
     /// The number the host reads each element as, by the language's name: `u32` for one PTX
     /// calls `b32` or `u32`, or `f16`.
     pub host: String,
+    /// For memory the module has no room for, how many bytes the driver allocates for it when it loads the module, and
+    /// at a multiple of what, and puts its address in what `symbol` names; `None` for memory in the module.
+    pub outside: Option<(u64, u64)>,
 }
 
 /// The consts a module takes from a module of consts, `#[kernels(consts = crate::sizes)]`: its

@@ -47,6 +47,10 @@ pub struct Entry {
     pub regs: Vec<(String, Ty)>,
     /// The memory it declares, in order.
     pub memory: Vec<Memory>,
+    /// The module's memory it names that is outside the module, each as the variable that holds its address, by
+    /// [`kernite_core::VReg::id`], and the constant memory the module has that address in: it loads each before its
+    /// body.
+    pub outside: Vec<(usize, String)>,
     /// What it needs, above [`Needs::FLOOR`].
     pub needs: Needs,
     /// For a function, what it returns; `None` for a kernel.
@@ -94,7 +98,7 @@ impl Entry {
     }
 
     /// The `.entry` or the `.func`: its parameters, its directives, its registers, the loads of
-    /// its parameters into them, and its body.
+    /// its parameters and of the addresses of memory outside the module into them, and its body.
     pub fn text(&self) -> String {
         let name = &self.program.name;
         let mut out = self.head() + "\n";
@@ -121,6 +125,10 @@ impl Entry {
             if p.pointer {
                 out += &format!("\tcvta.to.global.u64 %{reg}, %{reg};\n");
             }
+        }
+        for (reg, slot) in &self.outside {
+            let reg = &self.regs[*reg].0;
+            out += &format!("\tld.const.u64 %{reg}, [{slot}];\n\tcvta.to.global.u64 %{reg}, %{reg};\n");
         }
         for item in &self.program.body {
             match item {

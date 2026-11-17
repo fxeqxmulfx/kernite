@@ -90,9 +90,10 @@ the list of crates in the repository's `README.md`. `architecture.rs` fails with
   An older rustc or edition may refuse the Rust the macros write: that is no finding, and no test
   builds with one.
 - `unsafe_code` is forbidden everywhere but in kernite-cuda; in kernite-cpu's `affinity` module, which calls the C
-  library to read and set the CPUs a thread may run on, and in its test of where pages are, `tests/nodes.rs`; and in
-  the examples, which call kernels. Each `unsafe` block says why it holds. kernite-cuda and kernite-cpu keep lints of
-  their own for this, as a workspace's lints cannot be eased for a part of a crate.
+  library to read and set the CPUs a thread may run on, in its `Global::cells`, which reads the elements of a static
+  kept as bytes for Rust to check at once, and in its test of where pages are, `tests/nodes.rs`; and in the examples,
+  which call kernels. Each `unsafe` block says why it holds. kernite-cuda and kernite-cpu keep lints of their own for
+  this, as a workspace's lints cannot be eased for a part of a crate.
 - Every public item has a doc comment: `missing_docs` warns, and `./make.py check` denies warnings.
 - PTX: take what `ptxas` takes beyond PTX's ISA where it reads it as the ISA reads the rest. Refuse every
   value `ptxas` or the instruction would cut, every value the ISA leaves undefined, and anything that looks

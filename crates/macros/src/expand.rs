@@ -18,14 +18,14 @@ use kernite::lang::{self, ItemKind};
 use kernite::{DeviceOut, ItemOut, Kept, ModuleOut};
 
 use crate::cond::Cond;
-use crate::gpu::{HOLE, gpu};
+use crate::gpu::{HOLE, gpu, refused_attrs, used};
 use crate::room;
 use crate::rust::{
     cfg_of, error, error_under, flatten, for_rust, from_inside, grouped, inner_attribute, lex, name_at, parse,
     passable, position, seen, site, stub, takes, unnamed,
 };
 use crate::workspace::workspace;
-use crate::x86::{cpu_static, naked, x86_stub};
+use crate::x86::{cpu_static, naked, operands, x86_stub};
 
 /// What the module's braces, `body`, hold once its kernels are compiled; `given`, the consts it
 /// takes from outside, and the path of their module, as `#[kernels(consts = path)]` writes it. A
@@ -168,6 +168,7 @@ pub(crate) fn expand(
             }
             (ItemKind::Static(s), ItemOut::DeviceStatic(laid)) => {
                 out.extend(laid.as_ref().err().and_then(|failed| failed.error.as_ref()).map(said));
+                out.extend(refused_attrs(s, cfg, &top));
                 memory.push((s, laid, conds[i].clone()));
                 on_gpu.push(conds[i].clone());
                 if let Ok(laid) = laid {
@@ -185,8 +186,12 @@ pub(crate) fn expand(
             (ItemKind::Fn(f), ItemOut::Native(k)) => {
                 out.extend(k.not_unsafe.as_ref().map(said));
                 out.extend(k.said.as_ref().map(said));
+                let firsts = operands(k);
+                let first = |name: &str| {
+                    place(firsts.iter().find(|m| m.name == name).expect("the kernel writes what its code names").span)
+                };
                 out.extend(match k.written {
-                    true => naked(module, f, &k.instances, &k.touched, cfg, &top),
+                    true => naked(module, f, &k.instances, &k.touched, cfg, &top, &first),
                     false => x86_stub(f, k.count, &k.touched, cfg, &top),
                 });
                 out.extend(k.errors.iter().map(said));
@@ -306,13 +311,18 @@ fn find(guard: TokenStream, what: impl IntoIterator<Item = TokenTree>) -> TokenS
 /// item out; `place` is the span of the place. Rust has a name for a const, a static of the process's
 /// and an x86 kernel that takes no compile-time arguments, and finds it where it is written: a
 /// `let _ = NAME;` there, for Rust to say it cannot find the name if `cfg` leaves out the item where
-/// it keeps item `i`; these are the first of the pair this gives back. For any other item kernite says so itself, as
-/// an error where `cfg` keeps item `i` and leaves that one out; these are the second, for they are items of the
-/// module. Both are under the `cfg` of item `i` and of the code that has the place, where item `i` runs it: [`runs`].
-/// A constant of a module of Rust's that item `i` names by its path, `std::f32::consts::PI`, is Rust's to say as well,
-/// in the first of the pair, by [`takes`]: that the path gives the constant kernite took. So is one that a const that
-/// item `i` names has in its definition, where `cfg` keeps the const; but not one in a const that the module is given,
-/// whose path is Rust's where the consts are, in a module that holds nothing to give `std` another meaning.
+/// it keeps item `i`; these are the first of the pair this gives back. They tell of a deprecated item at the place, as
+/// Rust does of any use, so a place that [`operands`] gives, where `naked` writes the operand that tells of it, has
+/// none; but where `cfg` leaves the item out, the operand is `const 0`, which names nothing, and the `let _` says that
+/// Rust cannot find the item. For any other item kernite says so itself, as an error where `cfg` keeps item `i` and
+/// leaves that one out; these are the second, for they are items of the module. A static of GPU kernels has a method
+/// with its attributes, so the first of the pair has `let _ = Kernels::NAME;` for it too, where `cfg` keeps the static,
+/// for Rust to tell of a deprecated one at the place. Both are under the `cfg` of item `i` and of the code that has the
+/// place, where item `i` runs it: [`runs`]. A constant of a module of Rust's that item `i` names by its path,
+/// `std::f32::consts::PI`, is Rust's to say as well, in the first of the pair, by [`takes`]: that the path gives the
+/// constant kernite took. So is one that a const that item `i` names has in its definition, where `cfg` keeps the
+/// const; but not one in a const that the module is given, whose path is Rust's where the consts are, in a module that
+/// holds nothing to give `std` another meaning.
 fn named(
     made: &ModuleOut,
     conds: &[Cond],
@@ -322,6 +332,10 @@ fn named(
 ) -> (TokenStream, TokenStream) {
     let module = &made.module;
     let (mut names, mut errors) = (TokenStream::new(), TokenStream::new());
+    let covered = match &made.items[i] {
+        ItemOut::Native(k) => operands(k),
+        _ => vec![],
+    };
     for m in made.items[i].mentions() {
         let at = module.item_at(m.span);
         let kept = Cond::all([conds[i].clone(), runs(made, conds, i, at, &[])]);
@@ -337,12 +351,24 @@ fn named(
             _ => false,
         };
         if rust {
+            let kept = match covered.iter().any(|x| x.span == m.span) {
+                true => Cond::all([kept, conds[j].clone().not()]),
+                false => kept,
+            };
             let Some(guard) = kept.guard() else { continue };
             names.extend(find(guard, [name_at(&module.items[j], top, place(m.span))]));
-        } else if let Some(guard) = Cond::all([kept, conds[j].clone().not()]).guard() {
+            continue;
+        }
+        if let Some(guard) = Cond::all([kept.clone(), conds[j].clone().not()]).guard() {
             let reader = module.items[i].name().expect("an item that names others has a name");
             let message = format!("`{}` is left out by `cfg` where `{reader}`, which names it, is kept", m.name);
             errors.extend(error_under(&guard, place(m.span), &message));
+        }
+        if let ItemOut::DeviceStatic(laid) = &made.items[j]
+            && let Some(path) = used(&module.items[j], laid, top, place(m.span))
+            && let Some(guard) = Cond::all([kept, conds[j].clone()]).guard()
+        {
+            names.extend(find(guard, path));
         }
     }
     (names, errors)

@@ -408,7 +408,8 @@ const GLOBALS: &str = "
 #[test]
 fn a_module_s_memory_keeps_what_is_written_from_launch_to_launch() {
     let Some(cuda) = cuda() else { return };
-    let module = Module::load(&cuda, GLOBALS, &["count", "copy"], &["counts", "seen", "table"]).unwrap();
+    let module =
+        Module::load(&cuda, GLOBALS, &["count", "copy"], &[("counts", None), ("seen", None), ("table", None)]).unwrap();
     let (counts, seen, table) = (module.global::<u32>(0), module.global::<u32>(1), module.global::<f32>(2));
     // What the PTX declares: zeros, or what it is initialized to, and zeros after.
     assert_eq!(counts.read().unwrap(), [0; 4]);
@@ -442,9 +443,92 @@ fn a_module_s_memory_keeps_what_is_written_from_launch_to_launch() {
 #[test]
 fn memory_the_module_has_not_is_named() {
     let Some(cuda) = cuda() else { return };
-    let e = Module::load(&cuda, GLOBALS, &[], &["counts", "nothing"]).err().unwrap();
+    let e = Module::load(&cuda, GLOBALS, &[], &[("counts", None), ("nothing", None)]).err().unwrap();
     assert_eq!(e.call, "cuModuleGetGlobal");
     assert!(e.message.starts_with("CUDA_ERROR_NOT_FOUND") && e.message.ends_with("for `nothing`"), "{e}");
+}
+
+/// Memory the module has no room for, which `ptxas` cannot lay out in it, written by hand as kernite writes it: the
+/// module declares a `.u64` of constant memory, `far`, and `put` reads the address from it, as it reads a module's own
+/// memory from the driver's constant bank, and writes 7 to the first word and the last of the 4096 bytes there, and
+/// `where` writes the address to `out`.
+const OUTSIDE: &str = "
+.version 7.5
+.target sm_61
+.address_size 64
+
+.global .align 4 .b8 small[16];
+.const .align 8 .b8 far[8];
+
+.visible .entry put()
+{
+	.reg .u32 %seven;
+	.reg .u64 %far;
+
+	ld.const.u64 %far, [far];
+	cvta.to.global.u64 %far, %far;
+	mov.u32 %seven, 7;
+	st.global.u32 [%far], %seven;
+	st.global.u32 [%far+4092], %seven;
+	st.global.u32 [small], %seven;
+	ret;
+}
+
+.visible .entry where(.param .u64 out_param)
+{
+	.reg .u64 %far, %out;
+
+	ld.param.u64 %out, [out_param];
+	cvta.to.global.u64 %out, %out;
+	ld.const.u64 %far, [far];
+	st.global.u64 [%out], %far;
+	ret;
+}
+";
+
+#[test]
+fn memory_the_module_has_no_room_for_is_where_its_kernels_find_it_and_the_host_reads_it() {
+    let Some(cuda) = cuda() else { return };
+    let module = Module::load(&cuda, OUTSIDE, &["put", "where"], &[("small", None), ("far", Some((4096, 4)))]).unwrap();
+    let (small, far) = (module.global::<u32>(0), module.global::<u32>(1));
+    // Zeros, as the memory a module declares is, and the whole of what was asked for.
+    assert_eq!((small.len(), far.len()), (4, 1024));
+    assert_eq!(far.read().unwrap(), [0; 1024]);
+    // SAFETY: `put` takes no parameter.
+    unsafe { module.launch(0, Grid::new(1, 1), &[]) }.unwrap();
+    let mut want = [0u32; 1024];
+    (want[0], want[1023]) = (7, 7);
+    assert_eq!(far.read().unwrap(), want);
+    assert_eq!(small.read().unwrap(), [7, 0, 0, 0]);
+    // The kernels read the address the host has: the memory is one place.
+    let out = cuda.alloc::<u64>(1).unwrap();
+    // SAFETY: `where` takes a pointer, and writes 8 bytes there, as many as `out` has.
+    unsafe { module.launch(1, Grid::new(1, 1), &[arg(&out.ptr())]) }.unwrap();
+    assert_eq!(out.read().unwrap(), [far.ptr().addr()]);
+    // It is the module's, to write and to zero, as a variable of the module is.
+    far.write(&[3; 1024]).unwrap();
+    assert_eq!(far.read().unwrap(), [3; 1024]);
+    far.zero().unwrap();
+    assert_eq!(far.read().unwrap(), [0; 1024]);
+    // A module that is dropped frees it, and another, loaded after, has its own.
+    drop(module);
+    let module = Module::load(&cuda, OUTSIDE, &["put"], &[("far", Some((4096, 4)))]).unwrap();
+    assert_eq!(module.global::<u32>(0).read().unwrap(), [0; 1024]);
+    // At a multiple of its alignment, past the 256 bytes the driver gives.
+    drop(module);
+    let module = Module::load(&cuda, OUTSIDE, &["put"], &[("far", Some((4096, 1 << 21)))]).unwrap();
+    assert!(module.global::<u32>(0).ptr().addr().is_multiple_of(1 << 21));
+}
+
+/// A GPU that has not the memory is an error of the driver's, `CUDA_ERROR_OUT_OF_MEMORY`, which names the variable and
+/// its bytes: asked for an exbibyte, which no GPU has.
+#[test]
+fn a_gpu_that_has_not_the_memory_the_module_has_no_room_for_is_an_error_naming_it() {
+    let Some(cuda) = cuda() else { return };
+    let e = Module::load(&cuda, OUTSIDE, &[], &[("far", Some((1 << 60, 1)))]).err().unwrap();
+    assert_eq!(e.call, "cuMemAlloc");
+    let said = ": out of memory, for `far`, 1152921504606846976 bytes";
+    assert!(e.message.starts_with("CUDA_ERROR_OUT_OF_MEMORY (2)") && e.message.ends_with(said), "{e}");
 }
 
 /// Where the driver's workspace for the grid is, as `%envreg1:%envreg2` give its address, high
@@ -1084,10 +1168,10 @@ fn a_cuda_of_each_gpu_on_one_thread_sends_each_call_to_its_own_gpu() {
     // makes its context current in the first's place.
     let a = Cuda::on(gpus[0]).unwrap();
     let module_a = Module::load(&a, PTX, &["add_one"], &[]).unwrap();
-    let globals_a = Module::load(&a, GLOBALS, &["count"], &["counts"]).unwrap();
+    let globals_a = Module::load(&a, GLOBALS, &["count"], &[("counts", None)]).unwrap();
     let b = Cuda::on(gpus[1]).unwrap();
     let module_b = Module::load(&b, PTX, &["add_one"], &[]).unwrap();
-    let globals_b = Module::load(&b, GLOBALS, &["count"], &["counts"]).unwrap();
+    let globals_b = Module::load(&b, GLOBALS, &["count"], &[("counts", None)]).unwrap();
     let (mut xs_a, mut xs_b) = (a.alloc::<f32>(1000).unwrap(), b.alloc::<f32>(1000).unwrap());
     for round in 1..=4 {
         // Copies in turn, then launches on both GPUs before either is waited for, in an order

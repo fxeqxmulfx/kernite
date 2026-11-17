@@ -430,11 +430,6 @@ pub(crate) fn gives_placeholder(f: &Fn, top: &[TokenTree]) -> bool {
     f.ret.as_ref().is_some_and(|r| placeholder(&top[r.tokens.clone()]))
 }
 
-/// The name of the trait the macros write into a body to ask Rust whether a pointer has a size.
-/// Every type implements it, so what asks is the coercion of a pointer to a pointer to the trait,
-/// which Rust makes of a pointer to a type with a size alone.
-const THIN: &str = "__KerniteThin";
-
 /// What Rust is asked of a type of a kernel's, and where the type is.
 enum Ask {
     /// Where the type a pointer of one word, `*const T` or `*mut T`, points to begins and where it
@@ -475,58 +470,52 @@ fn asked(f: &Fn, top: &[TokenTree]) -> Vec<Option<Ask>> {
     params.chain([f.ret.as_ref().and_then(|r| ask(&top[r.tokens.clone()]))]).collect()
 }
 
-/// What asks Rust of each type `f` takes, in a body that has the parameters by their names:
-/// [`numbers`] asks of the numbers and [`pointers`] of the pointers. A result that is a pointer is
-/// asked of where it is given back. Nothing if `f` has none to ask of.
-pub(crate) fn checks(f: &Fn, top: &[TokenTree]) -> TokenStream {
-    let names: Vec<TokenStream> =
-        written_params(f, top).iter().map(|(param, colon)| param[colon - 1].clone().into()).collect();
-    let asked = asked(f, top);
-    let mut out = numbers(&asked);
-    out.extend(pointers(&asked, &names));
-    out
-}
-
-/// What asks Rust of each type `f` takes or gives back, in a body that has none of them: [`numbers`]
-/// asks of the numbers, and one closure, which Rust checks and never runs, takes the pointers as the
-/// kernel writes them, the type each points to as `pointee` names it, for [`pointers`] to ask of
-/// them. A closure's parameter is Rust's to say an error in, at the type, as a function's is, and the
-/// same error twice at one place is one. Nothing if `f` has none to ask of.
+/// What asks Rust of each type `f` takes or gives back: [`numbers`] asks of the numbers, and one closure, which Rust
+/// checks and never runs, takes each pointer as the kernel writes it, the type it points to as `pointee` names it, and
+/// after it an array of none of that type, `[T; 0]`. The elements of an array must have a size, so Rust says of a type
+/// that has none that its size cannot be known, whatever the type is and however it is called: an alias for a slice or
+/// a trait object, a struct that ends in one. Rust says nothing more of a type it refuses by itself,
+/// `NeedsCopy<String>`: the pointer's, before the array, has said it, and the same error twice is one. A closure's
+/// parameter is Rust's to say an error in, at the type, as a function's is. Nothing if `f` has none to ask of.
 pub(crate) fn asks(f: &Fn, top: &[TokenTree], pointee: fn(&[TokenTree]) -> TokenStream) -> TokenStream {
     let asked = asked(f, top);
     let mut out = numbers(&asked);
     let result = f.ret.as_ref().map(|r| top[r.tokens.clone()].to_vec());
     let types = written_params(f, top).into_iter().map(|(param, colon)| param[colon + 1..].to_vec()).chain(result);
-    let (mut params, mut values) = (TokenStream::new(), vec![]);
-    for (i, (ty, ask)) in types.zip(&asked).enumerate() {
-        let local = TokenTree::Ident(Ident::new(&format!("__{i}"), Span::mixed_site()));
-        values.push(match ask {
-            Some(Ask::Pointer(..)) => {
-                let (kind, to) = pointer(&ty).expect("a pointer is asked of");
-                params.extend([local.clone()]);
-                params.extend(parse(&format!(":*{kind}")));
-                params.extend(pointee(to));
-                params.extend(parse(","));
-                local.into()
-            }
-            _ => TokenStream::new(),
-        });
+    let mut params = TokenStream::new();
+    for (ty, ask) in types.zip(&asked) {
+        let Some(Ask::Pointer(first, _)) = ask else { continue };
+        let (kind, to) = pointer(&ty).expect("a pointer is asked of");
+        // Rust says of the type of a closure's parameter that holds a part with no size, `(dyn Debug, u8)`, that it has
+        // none, at the whole parameter, from its `_` to the last token of its type, so the `_` is at the type's first
+        // token: one of the macro's would put the error at the attribute.
+        params.extend([TokenTree::Ident(Ident::new("_", ty[0].span()))]);
+        params.extend(parse(&format!(":*{kind}")));
+        params.extend(pointee(to));
+        params.extend(parse(","));
+        // Rust says that an element has no size at the array, `[[u8]; 0]`, or at the whole parameter, from its `_` to
+        // the array, if the part with no size is a trait object, `[dyn Debug; 0]`; and a span that joins a token of the
+        // macro's to the type's is the macro's: it puts a note beside the error, "in this attribute macro expansion".
+        // So the `_` and the array are at the type's first token, as one token's span is the array's.
+        let mut elements = pointee(&unparenthesized(to));
+        elements.extend(parse(";0"));
+        let mut array = Group::new(Delimiter::Bracket, elements);
+        array.set_span(*first);
+        params.extend(respan(parse("_:"), *first));
+        params.extend([TokenTree::Group(array)]);
+        params.extend(parse(","));
     }
-    let questions = pointers(&asked, &values);
-    if !questions.is_empty() {
+    if !params.is_empty() {
         out.extend(parse("let _ = |"));
         out.extend(params);
-        out.extend(parse("|"));
-        out.extend([TokenTree::Group(Group::new(Delimiter::Brace, questions))]);
-        out.extend(parse(";"));
+        out.extend(parse("| {};"));
     }
     out
 }
 
 /// The block of a `const` operand of a naked kernel's own `naked_asm!`, which asks Rust of each type
 /// the kernel takes or gives back, as [`asks`] says. A naked function has no body to write the
-/// questions in, and no name of the kernel's finds the closure's locals. Nothing if the kernel has
-/// none to ask of.
+/// questions in. Nothing if the kernel has none to ask of.
 pub(crate) fn probe(f: &Fn, top: &[TokenTree]) -> Option<TokenStream> {
     let mut block = asks(f, top, written);
     (!block.is_empty()).then(|| {
@@ -577,53 +566,17 @@ fn number(name: &str, ty: &[TokenTree]) -> TokenStream {
     out
 }
 
-/// What asks Rust of each pointer of one word `asked` has, by the values that `values` gives of them:
-/// a trait that every type implements, and a coercion of each pointer to a pointer to the trait,
-/// which Rust makes of a pointer to a type with a size alone: of one to a type with no size it says
-/// that the size cannot be known. A coercion is not a call, so Rust says nothing of a type it
-/// refuses by itself, again: a call says it at the call, once more. Nothing if there is nothing to
-/// ask.
-fn pointers(asked: &[Option<Ask>], values: &[TokenStream]) -> TokenStream {
-    let mut questions = TokenStream::new();
-    for (value, ask) in values.iter().zip(asked) {
-        if let Some(Ask::Pointer(to, _)) = ask {
-            questions.extend(thin(value.clone(), *to));
-        }
-    }
-    if questions.is_empty() {
-        return questions;
-    }
-    // The trait and the coercions are of one span, for Rust to find the one by the other.
-    let mut out = respan(parse(&format!("trait {THIN} {{}} impl<T: ?Sized> {THIN} for T {{}}")), Span::mixed_site());
-    out.extend(questions);
-    out
-}
-
 /// The tokens `s` writes, each located at `at` and of the macro's hygiene.
 fn placed(s: &str, at: Span) -> TokenStream {
     respan(parse(s), at.resolved_at(Span::mixed_site()))
 }
 
-/// `let _: *const (dyn __KerniteThin + '_) = value;` with each token located at `to`, where the type
-/// `value` points to begins, for Rust to say there that the type has no size. `value` is resolved as
-/// it is written; the trait is the macro's, which no name of the kernel's finds.
-fn thin(value: TokenStream, to: Span) -> TokenStream {
-    let mut out = placed(&format!("let _: *const (dyn {THIN} + '_) ="), to);
-    out.extend(value.into_iter().map(|mut t| {
-        t.set_span(to.resolved_at(t.span()));
-        t
-    }));
-    out.extend(placed(";", to));
-    out
-}
-
-/// `unsafe { call }`, which gives back the result of an instance of `f` as `f` gives it back: `call`
-/// is the call. A pointer is cast back, `.cast()`, for Rust to say there that the type it points to
-/// has no size. A cast says an error in the type again, as any generic does, at the span of the cast:
-/// so the call and the cast are located across the type, the span Rust says the error at in the
-/// signature when it says the whole type, and then the two are one error. For a type that holds the
-/// part Rust refuses, `(u8, [CStr; 3])`, Rust says the part in the signature, `[CStr; 3]`, and the
-/// cast says the whole type: the two are two. Rust is asked of a number by [`checks`].
+/// `unsafe { call }`, which gives back the result of an instance of `f` as `f` gives it back: `call` is the call. A
+/// pointer is cast back, `.cast()`, from the `*const ()` an instance gives. A cast says an error in the type again, as
+/// any generic does, at the span of the cast: so the call and the cast are located across the type, the span Rust says
+/// the error at in the signature when it says the whole type, and then the two are one error. For a type that holds the
+/// part Rust refuses, `(u8, [CStr; 3])`, Rust says the part in the signature, `[CStr; 3]`, and the cast says the whole
+/// type: the two are two. Rust is asked of a number and of the size of a pointer's type by [`asks`].
 pub(crate) fn result(f: &Fn, top: &[TokenTree], call: TokenStream) -> TokenStream {
     let mut out = call;
     if let Some(Ask::Pointer(first, last)) = asked(f, top).pop().flatten() {
@@ -688,11 +641,29 @@ pub(crate) fn attrs(f: &Fn, top: &[TokenTree]) -> TokenStream {
 /// alone or in a `cfg_attr(..)`; and, if `offered`, `deprecated` and `doc(hidden)`, which say how it is
 /// offered. Nothing else: a lint or a symbol is the item's own.
 pub(crate) fn carried(attrs: impl IntoIterator<Item = TokenTree>, offered: bool) -> TokenStream {
+    filtered(attrs, &mut |meta| match &meta[..] {
+        [doc, TokenTree::Group(list)] if offered && named(doc, "doc") => flatten(list.stream())
+            .iter()
+            .any(|t| named(t, "hidden"))
+            .then(|| parse("doc(hidden)").into_iter().collect()),
+        [name, ..] if named(name, "cfg") || (offered && named(name, "deprecated")) => Some(meta),
+        _ => None,
+    })
+}
+
+/// The attributes `attrs`, `#` and brackets each, as `leaf` leaves them: `leaf` is given the tokens in an attribute's
+/// brackets, and gives what it leaves of them, or `None` if nothing. An attribute that is a `cfg_attr(..)` is left as
+/// its condition and what `leaf` leaves of each attribute in its list, or nothing if that is nothing: a `cfg_attr(..)`
+/// of a condition alone is an error.
+pub(crate) fn filtered(
+    attrs: impl IntoIterator<Item = TokenTree>,
+    leaf: &mut impl FnMut(Vec<TokenTree>) -> Option<Vec<TokenTree>>,
+) -> TokenStream {
     let attrs: Vec<TokenTree> = attrs.into_iter().collect();
     let mut out = TokenStream::new();
     for attr in attrs.chunks(2) {
         let [hash, TokenTree::Group(group)] = attr else { unreachable!("an attribute is `#` and brackets") };
-        let Some(meta) = keep(flatten(group.stream()), offered) else { continue };
+        let Some(meta) = keep(flatten(group.stream()), leaf) else { continue };
         let mut kept = Group::new(Delimiter::Bracket, meta.into_iter().collect());
         kept.set_span(group.span());
         out.extend([hash.clone(), kept.into()]);
@@ -700,21 +671,18 @@ pub(crate) fn carried(attrs: impl IntoIterator<Item = TokenTree>, offered: bool)
     out
 }
 
-/// What [`carried`] keeps of an attribute, `meta` the tokens in its brackets; `None` if nothing. Of a
-/// `cfg_attr(..)`, it keeps the condition and what it keeps of the list, or nothing if that is
-/// nothing: a `cfg_attr(..)` of a condition alone is an error.
-fn keep(meta: Vec<TokenTree>, offered: bool) -> Option<Vec<TokenTree>> {
+/// What [`filtered`] leaves of an attribute, `meta` the tokens in its brackets; `None` if nothing.
+fn keep(
+    meta: Vec<TokenTree>,
+    leaf: &mut impl FnMut(Vec<TokenTree>) -> Option<Vec<TokenTree>>,
+) -> Option<Vec<TokenTree>> {
     match &meta[..] {
-        [doc, TokenTree::Group(list)] if offered && named(doc, "doc") => flatten(list.stream())
-            .iter()
-            .any(|t| named(t, "hidden"))
-            .then(|| parse("doc(hidden)").into_iter().collect()),
         [cfg_attr, TokenTree::Group(list)] if named(cfg_attr, "cfg_attr") => {
             let tokens = flatten(list.stream());
             let mut parts = tokens.split(|t| is_punct(t, ','));
             let mut kept = parts.next().expect("a split has a first part").to_vec();
             let condition = kept.len();
-            for part in parts.filter_map(|part| keep(part.to_vec(), offered)) {
+            for part in parts.filter_map(|part| keep(part.to_vec(), leaf)) {
                 kept.extend(parse(","));
                 kept.extend(part);
             }
@@ -725,8 +693,7 @@ fn keep(meta: Vec<TokenTree>, offered: bool) -> Option<Vec<TokenTree>> {
             group.set_span(list.span());
             Some(vec![cfg_attr.clone(), group.into()])
         }
-        [name, ..] if named(name, "cfg") || (offered && named(name, "deprecated")) => Some(meta),
-        _ => None,
+        _ => leaf(meta),
     }
 }
 
@@ -802,9 +769,11 @@ pub(crate) fn flatten(stream: TokenStream) -> Vec<TokenTree> {
 /// any bracket, `1 + 2`, `-1`, `a as u8`, `0..4` or `dyn Debug + Send`, and a token that takes it apart is next to
 /// it. Before it is one of `+ - * / % ^ & | < >` and `!`; `==`, `!=`, `<=` or `>=`; `const` or `mut`, of a pointer,
 /// `*const T`, or a reference, `&mut T`; or the name of a lifetime, `&'a T`. After it is one of `+ - * / % ^ & | < >`,
-/// or `==`, `!=`, `.` or `as`. The `>` of an arrow, `->`, is a result's, and no operator's, and a lone `=` is a
-/// `let`'s or an assignment's. A group that holds `a.b`, `f(x)` or `a::b`, or that no such token is next to, is read
-/// as it would be without the group, and is opened.
+/// or `==`, `!=`, `.` or `as`. The `>` of an arrow, `->`, is a result's, and no operator's, but for the `+` of a trait
+/// object's bounds, which Rust calls ambiguous after an arrow, `fn() -> dyn Debug + Send`, as after a `*const`: a group
+/// that holds one stays after an arrow, whatever is after it. A lone `=` is a `let`'s or an assignment's. A group that
+/// holds `a.b`, `f(x)` or `a::b`, or that no such token is next to, is read as it would be without the group, and is
+/// opened.
 fn stays(inside: &[TokenTree], before: &[TokenTree], after: &[TokenTree]) -> bool {
     let is_any = |t: &TokenTree, chars: &str| chars.chars().any(|c| is_punct(t, c));
     let loose = inside.iter().any(|t| is_any(t, "+-*/%^&|<>!=") || is_ident(t, "as"))
@@ -819,7 +788,8 @@ fn stays(inside: &[TokenTree], before: &[TokenTree], after: &[TokenTree]) -> boo
         _ => false,
     };
     let arrow = matches!(before, [.., dash, head] if is_punct(dash, '-') && is_punct(head, '>'));
-    let left = before.last().is_some_and(|t| is_any(t, "+-*/%^&|<>!")) && !arrow
+    let bounds = || split_top(inside, |t| is_punct(t, '+')).count() > 1;
+    let left = before.last().is_some_and(|t| is_any(t, "+-*/%^&|<>!")) && (!arrow || bounds())
         || before.last().is_some_and(|t| is_ident(t, "const") || is_ident(t, "mut"))
         || matches!(before, [.., quote, _] if is_punct(quote, '\''))
         || before.len() >= 2 && compares(&before[before.len() - 2..]);
@@ -1196,20 +1166,31 @@ pub(crate) fn host(ty: &[TokenTree]) -> TokenStream {
     half(ty).unwrap_or_else(|| ty.iter().cloned().collect())
 }
 
-/// The type `to` that a kernel's pointer points to, as the argument of `::kernite_cuda::Ptr<..>` in a launcher: as
-/// [`host`] has it, but for a trait object of more than one bound in parentheses, `(dyn Debug + Send)`, which it has
-/// without them. A pointer needs them, as `*const dyn Debug + Send` is ambiguous, and Rust does not lint them there;
-/// an argument does not, and Rust would say there that they are unnecessary. Rust lints the parentheses of any other
-/// type alike in the argument and behind the pointer. A fragment in them that stays one type is in the macro's own
-/// parentheses, as [`for_rust`] has it, for Rust reads a group the macro writes again as no group: `Fn() -> $t + Send`,
-/// with `$t` as `dyn Debug + Sync`, would be `Fn() -> dyn Debug + Sync + Send`.
-pub(crate) fn ptr_argument(to: &[TokenTree]) -> TokenStream {
-    if let [TokenTree::Group(g)] = to
-        && let Some(inside) = bounded(g)
-    {
-        return inside.into_iter().collect();
+/// The type `to` that a kernel's pointer points to, as a type that is not behind a pointer has it: as written, but for
+/// a trait object of more than one bound in parentheses, `(dyn Debug + Send)`, which it has without them. A pointer
+/// needs them, as `*const dyn Debug + Send` is ambiguous, and Rust does not lint them there; an argument or an array's
+/// element does not, and Rust would say there that they are unnecessary. Rust lints the parentheses of any other type
+/// alike there and behind the pointer. A fragment in them that stays one type is in the macro's own parentheses, as
+/// [`for_rust`] has it, for Rust reads a group the macro writes again as no group: `Fn() -> $t + Send`, with `$t` as
+/// `dyn Debug + Sync`, would be `Fn() -> dyn Debug + Sync + Send`.
+fn unparenthesized(to: &[TokenTree]) -> Vec<TokenTree> {
+    match to {
+        [TokenTree::Group(g)] => bounded(g).unwrap_or_else(|| to.to_vec()),
+        _ => to.to_vec(),
     }
-    host(to)
+}
+
+/// The type of a launcher's parameter for a kernel's pointer `ty` to `to`: `::kernite_cuda::Ptr<..>` of
+/// [`unparenthesized`]. Rust says of a type that holds a part with no size, `(dyn Debug, u8)`, that it has none, at the
+/// whole type, from its first token to its last, where [`asks`] says it too, and the same error twice at one place is
+/// one. So the type begins and ends where the kernel's does: a first or a last token of the macro's would put the error
+/// at the attribute. Both tokens of the `::` that begins it are the kernel's first, for Rust reads the two as one.
+pub(crate) fn ptr_type(ty: &[TokenTree], to: &[TokenTree]) -> TokenStream {
+    let mut out: Vec<TokenTree> =
+        parse("::kernite_cuda::Ptr<").into_iter().chain(host(&unparenthesized(to))).chain(parse(">")).collect();
+    out[..2].iter_mut().for_each(|t| t.set_span(ty[0].span()));
+    out.last_mut().expect("`>` is a token").set_span(ty[ty.len() - 1].span());
+    out.into_iter().collect()
 }
 
 /// `ty` as kernite-cuda names it, if it is `f16` or `bf16`, written raw or not, which Rust has not.
@@ -1222,10 +1203,10 @@ pub(crate) fn half(ty: &[TokenTree]) -> Option<TokenStream> {
 
 /// The number `ty` is, if it is one by its name or its path, as the Rust the macros write for a kernel
 /// names it: the primitive by its path, `::core::primitive::u64`, located where `ty` begins. A module may
-/// give the name another type, and Rust says so, once, at the type, where [`checks`] asks it. What the
-/// macros write besides, an instance, a dispatcher or a launcher, takes the number and not the
-/// name, so it says nothing of the type: a value of one with no size, or that a launcher cannot
-/// pass on, would be an error at the module's attribute, where nothing can be mended.
+/// give the name another type, and Rust says so, once, at the type, where [`asks`] asks it. What the macros write
+/// besides, an instance, a dispatcher or a launcher, takes the number and not the name, so it says nothing of the type:
+/// a value of one with no size, or that a launcher cannot pass on, would be an error at the module's attribute, where
+/// nothing can be mended.
 pub(crate) fn number_type(ty: &[TokenTree]) -> Option<TokenStream> {
     number_name(ty).map(|name| placed(&primitive(name), ty[0].span()))
 }
@@ -1370,10 +1351,11 @@ pub(crate) fn parse(s: &str) -> TokenStream {
 }
 
 /// The tokens `s` writes, as [`parse`] gives them, but for each name after a `$`: a local the
-/// macro binds for itself, of the span `Span::mixed_site()`. No name the user wrote finds it, nor
-/// does it find theirs, so a parameter of a kernel may be named as the macro's launcher names its
-/// own. Where the Rust never `runs`, each is `_`, for a compile-time argument may be named so, and
-/// Rust reads a binding of a const's name as that const.
+/// macro binds for itself, of the span `Span::mixed_site()`. No local the user wrote finds it, nor does it find theirs,
+/// so a parameter of a kernel may be named as the macro's launcher names its own. A const or a static in scope is no
+/// local: Rust reads a binding of a const's name as that const, and refuses one of a static's. So each name is one of
+/// kernite's, `__kernite_grid` say, and a const or a static of the user's named `grid` is no matter to it. Where the
+/// Rust never `runs`, each is `_`, for a compile-time argument may be named so.
 pub(crate) fn hygienic(s: &str, runs: bool) -> TokenStream {
     fn own(tokens: TokenStream, runs: bool) -> TokenStream {
         let mut tokens = tokens.into_iter();

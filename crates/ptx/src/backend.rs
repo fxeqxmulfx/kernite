@@ -28,9 +28,10 @@ impl Backend for Ptx {
     type Callee = Callee;
     type Code = Entry;
 
-    fn lay_out(&self, name: &str, memory: &Memory) -> Result<Static, StaticError> {
+    fn lay_out(&self, name: &str, memory: &Memory, before: &[Static]) -> Result<Static, StaticError> {
         let symbol = crate::symbol(&self.scope, name, &[]);
         let mut made = Static::new(name, &symbol, &memory.ty).map_err(StaticError::Type)?;
+        made.place(before);
         if let Some(value) = &memory.value {
             made.init(value).map_err(StaticError::Value)?;
         }
@@ -106,7 +107,8 @@ impl Device for Ptx {
 
     fn device_static(&self, s: &Static) -> DeviceStatic {
         let host = s.elem.host().expect("a static is of a type the host reads");
-        DeviceStatic { symbol: s.memory.name.clone(), ty: s.ty.clone(), host: host.into() }
+        let outside = s.memory.bytes.filter(|_| s.outside).map(|bytes| (bytes, s.memory.align));
+        DeviceStatic { symbol: s.memory.name.clone(), ty: s.declared().into(), host: host.into(), outside }
     }
 }
 

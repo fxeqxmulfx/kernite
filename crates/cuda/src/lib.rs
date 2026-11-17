@@ -928,16 +928,26 @@ pub struct Module {
     kernels: Vec<Kernel>,
     /// Where each of its variables asked for is on the GPU, and how many bytes it has.
     globals: Vec<(u64, usize)>,
+    /// The memory it allocated for the variables the module has no room for, freed with it.
+    outside: Vec<Buffer<u8>>,
     /// The GPU's, as [`Cuda`] has them.
     multiprocessors: u32,
     cooperative: bool,
 }
 
 impl Module {
-    /// `ptx` compiled for `cuda`'s GPU, with its kernels `names` and its memory `globals`, its
-    /// variables in global or constant memory, each by its name, in that order. If the driver
-    /// will not compile it, the error's `log` is what its compiler said.
-    pub fn load(cuda: &Cuda, ptx: &str, names: &[&str], globals: &[&str]) -> Result<Module, Error> {
+    /// `ptx` compiled for `cuda`'s GPU, with its kernels `names` and its memory `globals`, each by its name, in that
+    /// order: a variable in global or constant memory, `None`; or `Some((bytes, align))`, memory the module has no room
+    /// for, which `ptxas` cannot lay out in it: the name is that of a `.u64` in the module's constant memory, where its
+    /// kernels read the address of the memory this allocates, `bytes` of it at a multiple of `align`, zeros, freed with
+    /// the module. If the driver will not compile the PTX, the error's `log` is what its compiler said; and a GPU that
+    /// has not the memory is an error that names the variable and its bytes. Panics if an alignment is 0.
+    pub fn load(
+        cuda: &Cuda,
+        ptx: &str,
+        names: &[&str],
+        globals: &[(&str, Option<(usize, usize)>)],
+    ) -> Result<Module, Error> {
         let api = cuda.driver.current()?;
         let image =
             CString::new(ptx).map_err(|_| Error::new("cuModuleLoadDataEx", "the PTX has a NUL in it".into()))?;
@@ -960,6 +970,7 @@ impl Module {
             module,
             kernels: vec![],
             globals: vec![],
+            outside: vec![],
             multiprocessors: cuda.multiprocessors,
             cooperative: cuda.cooperative,
         };
@@ -977,8 +988,8 @@ impl Module {
             let [own, room] = [1, 8].map(|attribute| m.driver.function_attribute(f, attribute));
             m.kernels.push(Kernel { function: f, own: own?, room: Cell::new(room?), block: Block::of(ptx, name) });
         }
-        for name in globals {
-            let c = CString::new(*name).map_err(|_| Error::new("cuModuleGetGlobal", format!("{name:?} has a NUL")))?;
+        for &(name, outside) in globals {
+            let c = CString::new(name).map_err(|_| Error::new("cuModuleGetGlobal", format!("{name:?} has a NUL")))?;
             let (mut ptr, mut bytes) = (0, 0);
             // SAFETY: the module is loaded, and the name is a C string; it writes the address
             // and the size of the variable to `ptr` and `bytes`.
@@ -987,6 +998,18 @@ impl Module {
                 e.message += &format!(", for `{name}`");
                 e
             })?;
+            if let Some((size, align)) = outside {
+                // As many bytes more as rounding the address up to a multiple of `align` may take.
+                let memory = cuda.alloc::<u8>(size.saturating_add(align.saturating_sub(1))).map_err(|mut e| {
+                    e.message += &format!(", for `{name}`, {size} bytes");
+                    e
+                })?;
+                // The variable is the module's `.u64` that its kernels read the address from.
+                let at = memory.ptr().addr().next_multiple_of(align as u64);
+                m.driver.write(ptr, &[at])?;
+                m.outside.push(memory);
+                (ptr, bytes) = (at, size);
+            }
             m.globals.push((ptr, bytes));
         }
         Ok(m)
@@ -1117,8 +1140,8 @@ impl Drop for Module {
 /// A module's memory on the GPU, one of its variables in global or constant memory, as
 /// elements of `T`: memory its kernels name, which keeps what they write from launch to launch.
 /// The driver allocated it as it loaded the module, holding what the PTX declares, zeros or
-/// what it is initialized to, and frees it with the module. It is written through the module
-/// shared, as a launch writes it.
+/// what it is initialized to, and frees it with the module; memory the module has no room for, [`Module::load`]
+/// allocated, zeros, and frees with it. It is written through the module shared, as a launch writes it.
 pub struct Global<'m, T: Plain> {
     module: &'m Module,
     ptr: u64,
@@ -1184,6 +1207,8 @@ impl<T: Plain> fmt::Debug for Global<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
 
     /// A function of the fake driver that every lookup finds: it refuses.
@@ -1241,5 +1266,201 @@ mod tests {
         // It tries again, for the context the driver last had is still `a`.
         enter(&remembered, b, || give(b)).unwrap();
         assert_eq!((driver.get(), gives.get()), (b, 4));
+    }
+
+    thread_local! {
+        /// What the fake driver below was asked since the test last took it, in order, as words.
+        static ASKED: RefCell<Vec<String>> = const { RefCell::new(vec![]) };
+        /// Where the fake driver puts the next memory it allocates.
+        static NEXT: Cell<u64> = const { Cell::new(0x7000_0000_0000) };
+    }
+
+    /// What the fake driver was asked since the last call, which empties it.
+    fn asked() -> Vec<String> {
+        ASKED.take()
+    }
+
+    fn ask(what: String) {
+        ASKED.with_borrow_mut(|asked| asked.push(what));
+    }
+
+    /// The fake driver's `cuDeviceGetAttribute`: every attribute is 1.
+    unsafe extern "C" fn attribute(value: *mut c_int, _: c_int, _: c_int) -> CuResult {
+        // SAFETY: the caller gives a place for the value.
+        unsafe { *value = 1 };
+        0
+    }
+
+    /// The fake driver's `cuCtxSetCurrent`.
+    unsafe extern "C" fn set_current(_: Handle) -> CuResult {
+        0
+    }
+
+    /// The fake driver's `cuModuleLoadDataEx`: the module is 7.
+    unsafe extern "C" fn load_module(
+        module: *mut Handle,
+        _: *const c_void,
+        _: c_uint,
+        _: *mut c_int,
+        _: *mut *mut c_void,
+    ) -> CuResult {
+        // SAFETY: the caller gives a place for the module.
+        unsafe { *module = ptr::without_provenance_mut(7) };
+        0
+    }
+
+    /// The fake driver's `cuModuleUnload`.
+    unsafe extern "C" fn unload_module(module: Handle) -> CuResult {
+        ask(format!("unload {}", module.addr()));
+        0
+    }
+
+    /// The fake driver's `cuModuleGetGlobal`: the module has `small`, 16 bytes at 0x1000, and two `.u64` of constant
+    /// memory, `slot` at 0x2000 and `other` at 0x3000.
+    unsafe extern "C" fn module_global(at: *mut u64, bytes: *mut usize, _: Handle, name: *const c_char) -> CuResult {
+        // SAFETY: the caller gives a C string, and a place for the address and the bytes.
+        let (name, at, bytes) = unsafe { (CStr::from_ptr(name), &mut *at, &mut *bytes) };
+        let (addr, size) = match name.to_bytes() {
+            b"small" => (0x1000, 16),
+            b"slot" => (0x2000, 8),
+            b"other" => (0x3000, 8),
+            // CUDA_ERROR_NOT_FOUND.
+            _ => return 500,
+        };
+        (*at, *bytes) = (addr, size);
+        0
+    }
+
+    /// The fake driver's `cuMemAlloc`: a GPU of 8 GiB, which hands out addresses one after the other, and refuses more
+    /// than 8 GiB at once, as the driver refuses what it has not the bytes for.
+    unsafe extern "C" fn alloc(at: *mut u64, bytes: usize) -> CuResult {
+        if bytes > 8 << 30 {
+            // CUDA_ERROR_OUT_OF_MEMORY.
+            return 2;
+        }
+        ask(format!("alloc {bytes}"));
+        // SAFETY: the caller gives a place for the address.
+        unsafe { *at = NEXT.get() };
+        NEXT.set(NEXT.get() + bytes as u64);
+        0
+    }
+
+    /// The fake driver's `cuMemsetD8`.
+    unsafe extern "C" fn memset(at: u64, value: u8, bytes: usize) -> CuResult {
+        ask(format!("set {at:#x} to {value}, {bytes} bytes"));
+        0
+    }
+
+    /// The fake driver's `cuMemcpyHtoD`: it says the `u64` it is given.
+    unsafe extern "C" fn to_device(at: u64, from: *const c_void, bytes: usize) -> CuResult {
+        // SAFETY: the caller gives `bytes` bytes at `from`, which are a `u64`.
+        let value = unsafe { from.cast::<u64>().read_unaligned() };
+        ask(format!("write {value:#x} at {at:#x}, {bytes} bytes"));
+        0
+    }
+
+    /// The fake driver's `cuMemFree`.
+    unsafe extern "C" fn free(at: u64) -> CuResult {
+        ask(format!("free {at:#x}"));
+        0
+    }
+
+    /// The fake driver's `cuGetErrorName`, and `cuGetErrorString`, which know the one error it has.
+    unsafe extern "C" fn error_name(result: CuResult, name: *mut *const c_char) -> CuResult {
+        // SAFETY: the caller gives a place for the string.
+        unsafe { *name = if result == 2 { c"CUDA_ERROR_OUT_OF_MEMORY".as_ptr() } else { ptr::null() } };
+        0
+    }
+
+    unsafe extern "C" fn error_string(result: CuResult, meaning: *mut *const c_char) -> CuResult {
+        // SAFETY: the caller gives a place for the string.
+        unsafe { *meaning = if result == 2 { c"out of memory".as_ptr() } else { ptr::null() } };
+        0
+    }
+
+    /// A GPU of the fake driver, which has the calls a module's memory makes, and refuses the rest.
+    fn gpu() -> Cuda {
+        NEXT.set(0x7000_0000_0000);
+        asked();
+        let mut api = Api::refusing();
+        api.attribute = attribute;
+        api.set_current = set_current;
+        api.load_module = load_module;
+        api.unload_module = unload_module;
+        api.global = module_global;
+        api.alloc = alloc;
+        api.memset = memset;
+        api.to_device = to_device;
+        api.free = free;
+        api.error_name = error_name;
+        api.error_string = error_string;
+        let driver = Rc::new(Driver { api, device: 0, context: ptr::without_provenance_mut(1) });
+        Cuda::of(driver, String::new()).unwrap()
+    }
+
+    /// Memory the module has no room for is allocated as it loads, 6 GiB of it, with zeros in it; its address is
+    /// written where the kernels read it, the variable the module names; the host reaches the memory at that address,
+    /// whole; and the module frees it when it is dropped. The module's other memory is where the module has it.
+    #[test]
+    fn memory_the_module_has_no_room_for_is_allocated_as_it_loads_and_freed_with_it() {
+        let cuda = gpu();
+        let module = Module::load(&cuda, "", &[], &[("small", None), ("slot", Some((6 << 30, 1)))]).unwrap();
+        let at = 0x7000_0000_0000u64;
+        let want = [
+            format!("alloc {}", 6u64 << 30),
+            format!("set {at:#x} to 0, {} bytes", 6u64 << 30),
+            format!("write {at:#x} at 0x2000, 8 bytes"),
+        ];
+        assert_eq!(asked(), want);
+        let (small, far) = (module.global::<u8>(0), module.global::<u8>(1));
+        assert_eq!((small.ptr().addr(), small.len()), (0x1000, 16));
+        assert_eq!((far.ptr().addr(), far.len()), (at, 6 << 30));
+        assert_eq!(module.global::<u64>(1).len(), 6 << 27);
+        assert!(asked().is_empty(), "nothing is asked while the module lasts");
+        drop(module);
+        assert_eq!(asked(), ["unload 7".to_string(), format!("free {at:#x}")]);
+    }
+
+    /// A GPU that has not the memory is an error: the driver's, with the variable it was for and its bytes. What was
+    /// allocated before is freed with the module that is not made.
+    #[test]
+    fn a_gpu_that_has_not_the_memory_is_an_error_that_names_the_variable() {
+        let cuda = gpu();
+        let e = Module::load(&cuda, "", &[], &[("slot", Some((1 << 30, 1))), ("other", Some((16 << 30, 1)))])
+            .err()
+            .unwrap();
+        let said = "cuMemAlloc: CUDA_ERROR_OUT_OF_MEMORY (2): out of memory, for `other`, 17179869184 bytes";
+        assert_eq!(e.to_string(), said);
+        let first = 0x7000_0000_0000u64;
+        let want = [
+            format!("alloc {}", 1u64 << 30),
+            format!("set {first:#x} to 0, {} bytes", 1u64 << 30),
+            format!("write {first:#x} at 0x2000, 8 bytes"),
+            "unload 7".to_string(),
+            format!("free {first:#x}"),
+        ];
+        assert_eq!(asked(), want);
+    }
+
+    /// Memory the module has no room for is at a multiple of its alignment: for 4096, the driver is asked for 4095
+    /// bytes more, and the address it gives is rounded up. The module frees what it was given.
+    #[test]
+    fn memory_the_module_has_no_room_for_is_at_its_alignment() {
+        let cuda = gpu();
+        let module = Module::load(&cuda, "", &[], &[("slot", Some((256, 1))), ("other", Some((4096, 4096)))]).unwrap();
+        let (first, given, at) = (0x7000_0000_0000u64, 0x7000_0000_0100u64, 0x7000_0000_1000u64);
+        let want = [
+            "alloc 256".to_string(),
+            format!("set {first:#x} to 0, 256 bytes"),
+            format!("write {first:#x} at 0x2000, 8 bytes"),
+            "alloc 8191".to_string(),
+            format!("set {given:#x} to 0, 8191 bytes"),
+            format!("write {at:#x} at 0x3000, 8 bytes"),
+        ];
+        assert_eq!(asked(), want);
+        let other = module.global::<u8>(1);
+        assert_eq!((other.ptr().addr(), other.len()), (at, 4096));
+        drop(module);
+        assert_eq!(asked(), ["unload 7".to_string(), format!("free {first:#x}"), format!("free {given:#x}")]);
     }
 }

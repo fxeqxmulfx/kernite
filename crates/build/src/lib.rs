@@ -25,7 +25,7 @@ pub use dto::{
     ModuleOut, Naked, NativeInstance, NativeOut,
 };
 pub use facade::{Absent, all, one};
-pub use function::{Prepared, compile, prepare, statics};
+pub use function::{Prepared, compile, prepare, statics, taken};
 pub use module::{ConstItem, consts, module};
 pub use port::{Backend, Called, Device, Native, StaticError, Unfinished};
 

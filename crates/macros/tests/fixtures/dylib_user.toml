@@ -1,0 +1,2 @@
+[dependencies.dylib]
+path = "../../dylib/project"

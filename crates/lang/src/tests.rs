@@ -4,7 +4,7 @@
 //! rest of the language is tested where it meets the targets it is compiled for, in `kernite`'s
 //! `tests/lang.rs`.
 
-use crate::token::{Span, Tree, unescape};
+use crate::token::{Delim, Span, Tree, unescape};
 use crate::value::{IntTy, Value, article, cast, typed, with_article};
 use crate::{Mention, instance, parse};
 
@@ -346,6 +346,66 @@ fn a_type_is_written_as_rust_writes_it() {
     assert_eq!(bound("for < 'a >  fn(&'a u8)->&'a u8"), "for<'a> fn(&'a u8) -> &'a u8");
     assert_eq!(bound("Option<&dyn for<'a>Fn(&'a u8)>"), "Option<&dyn for<'a> Fn(&'a u8)>");
     assert_eq!(bound("Box<dyn Send+for<'a>Fn(&'a u8)>"), "Box<dyn Send + for<'a> Fn(&'a u8)>");
+}
+
+/// `src`, a type, with a macro's fragment where it has `frag`: a group of no brackets that holds `inside`, which is one
+/// type, as brackets make it.
+fn with_fragment(src: &str, inside: &str) -> Vec<Tree> {
+    fn grouped(trees: Vec<Tree>, inside: &[Tree]) -> Vec<Tree> {
+        trees
+            .into_iter()
+            .map(|tree| match tree {
+                Tree::Ident { name, space, span } if name == "frag" => {
+                    Tree::Group { delim: Delim::None, trees: inside.to_vec(), space, space_close: false, span }
+                }
+                Tree::Group { delim, trees, space, space_close, span } => {
+                    Tree::Group { delim, trees: grouped(trees, inside), space, space_close, span }
+                }
+                tree => tree,
+            })
+            .collect()
+    }
+    grouped(lexed_with_lifetimes(src), &lexed_with_lifetimes(inside))
+}
+
+/// The bounds of a trait object that a macro's fragment holds, `dyn A + B`, are written in parentheses where Rust reads
+/// a type of no bounds: behind a `&`, with the name of its lifetime and its `mut`, behind a pointer, and after an
+/// arrow. There Rust calls the `+` of `&dyn A + B` ambiguous, and the type written with the parentheses by hand is
+/// written as they are. Anywhere else the fragment is written as it is, and so is one with no `+` of its own: none, one
+/// among the arguments of a type, or one in the parentheses the user wrote.
+#[test]
+fn the_bounds_of_a_fragment_are_in_parentheses_where_rust_reads_a_type_of_no_bounds() {
+    let written = |src: &str, inside: &str| crate::text(&with_fragment(src, inside));
+    for (src, ty) in [
+        ("&frag", "&(dyn A + B)"),
+        ("&mut frag", "&mut (dyn A + B)"),
+        ("&'a frag", "&'a (dyn A + B)"),
+        ("&'a mut frag", "&'a mut (dyn A + B)"),
+        ("&&frag", "&&(dyn A + B)"),
+        ("*const frag", "*const (dyn A + B)"),
+        ("*mut frag", "*mut (dyn A + B)"),
+        ("*const &frag", "*const &(dyn A + B)"),
+        ("fn() -> frag", "fn() -> (dyn A + B)"),
+        ("dyn Fn() -> frag + C", "dyn Fn() -> (dyn A + B) + C"),
+        ("(u8, &'static frag)", "(u8, &'static (dyn A + B))"),
+        ("[*const frag; 2]", "[*const (dyn A + B); 2]"),
+        ("fn(&mut frag) -> u8", "fn(&mut (dyn A + B)) -> u8"),
+        ("Wrap<&'static frag>", "Wrap<&'static (dyn A + B)>"),
+    ] {
+        assert_eq!(written(src, "dyn A + B"), ty, "{src}");
+    }
+    for src in
+        ["frag", "Wrap<frag>", "(frag, u8)", "(u8, frag)", "[frag; 2]", "[frag]", "fn(frag) -> u8", "Pair<u8, frag>"]
+    {
+        assert_eq!(written(src, "dyn A + B"), src.replace("frag", "dyn A + B"), "{src}");
+    }
+    for inside in ["u8", "[u8]", "Wrap<u8>", "Wrap<dyn A + B>", "Wrap<dyn Fn() -> u8 + B>", "(dyn A + B)"] {
+        for src in ["&frag", "*const frag", "&'a mut frag", "fn() -> frag"] {
+            assert_eq!(written(src, inside), src.replace("frag", inside), "{src} with {inside}");
+        }
+    }
+    // What is not the type's own is as the source has it, the length of an array.
+    assert_eq!(written("[u8; &frag]", "a + b"), "[u8; &a + b]");
 }
 
 /// A type has a space after a `:` that is not half of a `::`, `fn(x: u8)`, `Item: Copy` and `'b: 'a`; after
@@ -1474,6 +1534,7 @@ fn a_pointer_has_one_word_unless_it_is_to_what_has_no_size() {
         "((dyn Foo))",
         "(dyn Foo<A, B>)",
         "(u32, [f32])",
+        "(u32, u32, [f32])",
         "(u32, dyn Foo<A, B>)",
         "(dyn Foo,)",
         "([f32],)",

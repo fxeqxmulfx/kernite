@@ -1,10 +1,8 @@
 //! The room of a module's statics counts the statics `cfg` keeps. `alt` has two tables of constant
 //! memory of 48000 bytes each, which together are more than the 64 KB a module has, and `cfg` keeps
-//! one: `FAST` with the feature `new`, and `SLOW` without it. `room` has two statics of global memory of
-//! 2 GB each, which make 4 GB together, where a module has less, and `cfg` leaves out the first. The
-//! crate builds without a word under `deny(warnings)`, with the feature and without it, and its tests
-//! assert which table the module has and, on a machine with a GPU, load the module and read the table
-//! that is there.
+//! one: `FAST` with the feature `new`, and `SLOW` without it. The crate builds without a word under `deny(warnings)`,
+//! with the feature and without it, and its tests assert which table the module has and, on a machine with a GPU, load
+//! the module and read the table that is there.
 
 #![deny(warnings)]
 
@@ -34,17 +32,6 @@ pub mod alt {
         ld.r#const.u32(word, [SLOW + 47996]);
         st.global.u32([out], word);
     }
-}
-
-/// A static of global memory that `cfg` leaves out, and one that it keeps: each is 2 GB.
-#[kernite_macros::kernels]
-pub mod room {
-    /// Left out.
-    #[cfg(any())]
-    pub static A: global<[u32; 536870912]>;
-
-    /// Kept: it fits alone.
-    pub static B: global<[u32; 536870912]>;
 }
 
 #[cfg(test)]

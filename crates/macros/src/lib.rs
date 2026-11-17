@@ -59,19 +59,23 @@
 //!   - In a module of GPU kernels it is on the GPU, declared once in `PTX`. `Kernels` has a
 //!     method of its name that gives it there, a `kernite_cuda::Global` of the type of Rust's its
 //!     elements are read as, `u32` for a `b32`, for the host to read and write:
-//!     `kernels.COUNTS().read()?`. A module of statics alone is the GPU's. The statics together
-//!     fit the module: it has 64 KB of constant memory and less than 4 GB of global memory, and
-//!     the error is at the type of a static that does not fit beside the statics before it that fit.
-//!     The room is that of the statics `cfg` keeps, counted as Rust leaves them: the macro writes
-//!     a struct with a field for each static, under the static's `cfg`, and a derive of
-//!     `kernite-macros` counts the fields that are there. A crate with a static in such a module
-//!     needs a dependency named `kernite-macros` as well, not renamed in `Cargo.toml`, and the
-//!     error is at the module when it has none and `cfg` keeps a static.
+//!     `kernels.COUNTS().read()?`. The static is memory on the GPU, and no symbol or code of the host's, so the method
+//!     has the attributes that say how Rust has it, each alone or in a `cfg_attr(..)`: a doc, `cfg`, `deprecated`, the
+//!     level of a lint, and a `rustfmt` attribute. Any other is an error at its name, `#[unsafe(no_mangle)]` or
+//!     `#[cold]` say, and the method does not have it. A module of statics alone is the GPU's. The statics together fit
+//!     the module: it has 64 KB of constant memory, and the error is at the type of a static that does not fit beside
+//!     the statics before it that fit. A static of global memory that the module has no room for, as `ptxas` writes its
+//!     size in 32 bits, is outside it: kernite-cuda allocates it when it loads the module. The room is that of the
+//!     statics `cfg` keeps, counted as Rust leaves them: the macro writes a struct with a field for each static, under
+//!     the static's `cfg`, and a derive of `kernite-macros` counts the fields that are there. A crate with a static in
+//!     such a module needs a dependency named `kernite-macros` as well, not renamed in `Cargo.toml`, and the error is
+//!     at the module when it has none and `cfg` keeps a static.
 //!   - In a module of x86 kernels it is in the process's memory, which the kernels reach at a
 //!     displacement from `rip`, `[COUNTS + 8]`: a `static` of Rust's, a `kernite_cpu::Global` of
 //!     its elements, for the host to read and write: `cpu::COUNTS.read()`. A crate with a static
 //!     in such a module needs a dependency named `kernite-cpu` for it, not renamed in
-//!     `Cargo.toml`, and the error is at the static when it has none.
+//!     `Cargo.toml`, and the error is at the static when it has none. It has the attributes it is written with, as any
+//!     static of Rust's does.
 //!   - A module of both kinds of kernel and a static is an error: it is two modules, one of
 //!     each kind of kernel, with the statics each names.
 //! - A function without an ABI is a helper, inlined where a kernel calls it, and leaves no
@@ -118,10 +122,9 @@
 //! `cargo build`; `cargo check` evaluates no generic function's constants, and misses it.
 //!
 //! A kernel's parameters keep the names they are written with beside those the Rust the
-//! macro writes binds for itself: `grid`, the launcher's, and `threads` and `shared`, those
-//! of a cooperative GPU kernel's `_blocks` method. A compile-time argument may not be named
-//! as one of them, for Rust cannot keep a const apart from a parameter of its name: that is
-//! an error at its name.
+//! macro writes binds for itself: `__kernite_grid`, the launcher's, and `__kernite_threads` and `__kernite_shared`,
+//! those of a cooperative GPU kernel's `_blocks` method. A compile-time argument may not be named as one of them, for
+//! Rust cannot keep a const apart from a parameter of its name: that is an error at its name.
 //!
 //! A parameter named `_` is given and not read, in a kernel of every kind. Rust cannot pass `_` on,
 //! so the macros name it, with a name of their own that no parameter or compile-time argument of
@@ -147,18 +150,17 @@
 //! `expect` gives it. So is a pointer to a type with no size, `*const CStr` say, which has two
 //! words where a kernel's has one: the macros ask Rust of each pointer a kernel takes or gives
 //! back, and it says that the size cannot be known, at the type, whatever the type is called and
-//! holds. So is a pointer to a type Rust refuses by itself, `*const NeedsCopy<String>` where
-//! `struct NeedsCopy<T: Copy>`, or `*const [CStr; 3]`: the macros ask Rust whether a pointer has a
-//! size by a coercion and never by a call, which would say the error of the type again. And so is a
-//! number's name that the module gives another type, `pub type u64 = u32;` and a `use` of it:
-//! kernite reads `u64` as 64 bits where Rust would pass a `u32`, so the macros ask Rust of each
-//! number a kernel takes or gives back whether it is that number, and it says that it is not, at
-//! the type, once. A type with no size, `pub type u8 = [u8];`, has Rust say as well that its size
-//! cannot be known, at the type, and nothing at the module's attribute, where nothing could be
-//! mended: the Rust the macros write for the kernel itself takes the number and not the name. One
-//! case has two errors: a kernel of compile-time arguments casts back a pointer it gives, so for a
-//! type that holds the part Rust refuses, `-> *const (u8, [CStr; 3])`, Rust says the part in the
-//! signature, and the whole type at the cast.
+//! holds: an alias for a trait object, `type D = dyn Debug + Send;`, say. So is a pointer to a type Rust refuses by
+//! itself, `*const NeedsCopy<String>` where `struct NeedsCopy<T: Copy>`, or `*const [CStr; 3]`: the macros ask Rust
+//! whether a pointer has a size by an array of none of the type, `[T; 0]`, whose elements must have one, and never by a
+//! call, which would say the error of the type again. And so is a number's name that the module gives another type,
+//! `pub type u64 = u32;` and a `use` of it: kernite reads `u64` as 64 bits where Rust would pass a `u32`, so the macros
+//! ask Rust of each number a kernel takes or gives back whether it is that number, and it says that it is not, at the
+//! type, once. A type with no size, `pub type u8 = [u8];`, has Rust say as well that its size cannot be known, at the
+//! type, and nothing at the module's attribute, where nothing could be mended: the Rust the macros write for the kernel
+//! itself takes the number and not the name. One case has two errors: a kernel of compile-time arguments casts back a
+//! pointer it gives, so for a type that holds the part Rust refuses, `-> *const (u8, [CStr; 3])`, Rust says the part in
+//! the signature, and the whole type at the cast.
 //! A generic is a value: `<T>` is an error at the `T`, and so is `impl` in a parameter's type or
 //! the result's, wherever in it, `x: impl Copy`, `Option<impl Copy>` or `-> *mut impl Copy`, at the
 //! `impl`: in a parameter it makes the function generic over a type, and in the result it hides
@@ -221,6 +223,10 @@
 //! written with, and none that the macro adds. Clippy's `too_many_arguments` is the one lint a
 //! crate of kernels may not forbid: Clippy says it of a launcher of more than seven parameters,
 //! whoever wrote it, and each launcher allows it.
+//!
+//! Each name that the Rust the macro writes binds for itself starts with `__kernite_`, for Rust reads a binding named
+//! as a const in scope as that const, and refuses one named as a static. So a module of kernels may have a const or a
+//! static of any other name in scope, `grid` say.
 //!
 //! A module of kernels takes the consts it shares with others from a module `#[consts]` is
 //! on, which it names by its path, as Rust reads one where the module is:
@@ -343,8 +349,8 @@
 //! dependency named `kernite-macros` is not told it needs one for them. What the macro finds in writing the module for
 //! Rust is said, as for any module: the dependency the crate needs, `kernite-cuda` for a GPU item that `cfg` keeps and
 //! `kernite-cpu` for an x86 static or cooperative kernel; a compile-time argument named as a parameter of a launcher or
-//! of a `_blocks` method, `grid`, `threads` or `shared`; and a GPU kernel or a static named as a cooperative kernel's
-//! `_blocks` method.
+//! of a `_blocks` method, `__kernite_grid`, `__kernite_threads` or `__kernite_shared`; and a GPU kernel or a static
+//! named as a cooperative kernel's `_blocks` method.
 //!
 //! A module kernite cannot read is refused whole as well, and stays with every item kernite can read. A `const` or a
 //! `static` it cannot read ends at its `;`, for its value may hold a `{..}`, as in `= { 1 };`. Any other item ends at

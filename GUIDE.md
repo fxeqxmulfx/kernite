@@ -75,18 +75,19 @@ A kernel's pointer to a type with a size, `*const T` or `*mut T`, is one registe
 address and a length or a table, so it is an error at its type: take the address and the length as two parameters.
 kernite tells a slice, a `str` or a `dyn`, or a tuple that ends in one, in parentheses or not, by what is written, and
 says so in its words. Rust tells any other, whatever it holds and whatever it is called: `CStr`, `Floats` where
-`type Floats = [f32];`, a struct of yours whose last field is a slice, `(&u8, CStr)`. It says that the size cannot be
-known, at the type, for a pointer a kernel returns as well as for one it takes, in a kernel of every kind. A type that
-Rust refuses by itself is its error alone, said once, at the type, in a kernel of every kind: an argument that does not
-meet its struct's bound, `*const NeedsCopy<String>` where `struct NeedsCopy<T: Copy>`, or an array or a tuple that holds
-a type with no size, `*const [CStr; 3]` or `*const (CStr, u8)`. One case has two errors: in a kernel of instances,
-`-> *const (u8, [CStr; 3])` has Rust's error twice, at `[CStr; 3]` and at the whole type. A type in a message is written
-as Rust writes it, `[usize; 3]` and `fn(f16: u8)`. A block and the arguments of a macro are written as their source has
-them, as Rust writes a block it does not work out: `Marker<{N*2}>` from `{N*2}`, `Marker<{ N * 2 }>` from `{ N * 2 }`
-and `m!(a+b)`. A run of spaces, line breaks and comments is one space. The length of an array is worked out in the type
-of a parameter or a variable that is an array or a name with arguments, and in those of its elements and arguments that
-are: with `N` as 3, `[usize; 6]` from `[usize;N*2]` and `Wrap<[usize; 6]>` from `Wrap<[usize;N*2]>`. In any other type,
-and in a result, it is written as its source has it: `(u8, [usize; N*2])` from `(u8,[usize;N*2])`.
+`type Floats = [f32];`, `Shown` where `type Shown = dyn Debug + Send;`, a struct of yours whose last field is a slice,
+`(&u8, CStr)`. It says that the size cannot be known, at the type, for a pointer a kernel returns as well as for one it
+takes, in a kernel of every kind. A type that Rust refuses by itself is its error alone, said once, at the type, in a
+kernel of every kind: an argument that does not meet its struct's bound, `*const NeedsCopy<String>` where
+`struct NeedsCopy<T: Copy>`, or an array or a tuple that holds a type with no size, `*const [CStr; 3]` or
+`*const (CStr, u8)`. One case has two errors: in a kernel of instances, `-> *const (u8, [CStr; 3])` has Rust's error
+twice, at `[CStr; 3]` and at the whole type. A type in a message is written as Rust writes it, `[usize; 3]` and
+`fn(f16: u8)`. A block and the arguments of a macro are written as their source has them, as Rust writes a block it does
+not work out: `Marker<{N*2}>` from `{N*2}`, `Marker<{ N * 2 }>` from `{ N * 2 }` and `m!(a+b)`. A run of spaces, line
+breaks and comments is one space. The length of an array is worked out in the type of a parameter or a variable that is
+an array or a name with arguments, and in those of its elements and arguments that are: with `N` as 3, `[usize; 6]` from
+`[usize;N*2]` and `Wrap<[usize; 6]>` from `Wrap<[usize;N*2]>`. In any other type, and in a result, it is written as its
+source has it: `(u8, [usize; N*2])` from `(u8,[usize;N*2])`.
 
 A number's name in a kernel's parameters or return, `u8` to `u64`, `i8` to `i64`, `usize`, `isize`, `f32`, `f64` or
 `bool`, means that number: `u64` is 64 bits. A module that gives the name another type, `pub type u64 = u32;` and a
@@ -303,16 +304,19 @@ either spelling, and `{café}` with `e` and U+0301 finds neither.
 A macro's fragment is one operand, or one type, wherever kernite reads it, as Rust reads it. With `$n:expr` as `1 + 2`,
 `$n * 2` is 6, and not the 5 that `1 + 2 * 2` is. It is so in a kernel's expression, on x86 and on a GPU, under a `-`,
 in the length of an array, in `#[instances(..)]`, and in a const, which is 6 to Rust too. A `$t:ty` is one type in a
-parameter's type, in a result and in an argument of a type, `*const Wrap<$t>`. It is one behind a pointer or a reference
-too: `*const $t` with `$t` as `dyn Debug + Send` is a pointer to one type, as `*const (dyn Debug + Send)` is, and Rust
-does not call its `+` ambiguous. An error in a fragment is said where the fragment is written, in the call of the macro.
-Rust says its error of the whole fragment where the fragment starts: that `1u16 + 2` is no `u8`, at the `1u16`. Where
-kernels of one macro take the same `$t:ty`, `$t:path`, `$t:ident` or `$t:tt`, a result with a `&` before it, `&$t`,
-`Option<&$t>` or `&$a::$t`, has Rust say, at the `&` of each, that it has no lifetime to take, as for kernels written
-out, wherever the macro is defined, and whether it writes the body or its call gives it, a `$b:block`. Its help to
-return an owned value takes out that `&`, and the `mut` after it, and no more of the macro. An `$i:ident` or a `$t:tt`,
-a fragment that holds no operator, `u8::MAX` or `st.global`, and one that no operator is next to, `let k = 2 + 3` as a
-`$s:stmt`, are read as they are written.
+parameter's type, in a result and in an argument of a type, `*const Wrap<$t>`. It is one behind a pointer, a reference
+or an arrow too: `*const $t` with `$t` as `dyn Debug + Send` is a pointer to one type, as `*const (dyn Debug + Send)`
+is, and `fn() -> $t` a function pointer that gives back one, and Rust does not call the `+` of either ambiguous.
+kernite's errors name such a type with its bounds in parentheses behind a pointer, a reference or an arrow,
+`&(dyn Debug + Send)`, as if they were written so. Anywhere else, and for a fragment with no bounds of its own, they say
+the fragment as it is written: `Wrap<dyn Debug + Send>`, `*const [u8]`. An error in a fragment is said where the
+fragment is written, in the call of the macro. Rust says its error of the whole fragment where the fragment starts: that
+`1u16 + 2` is no `u8`, at the `1u16`. Where kernels of one macro take the same `$t:ty`, `$t:path`, `$t:ident` or
+`$t:tt`, a result with a `&` before it, `&$t`, `Option<&$t>` or `&$a::$t`, has Rust say, at the `&` of each, that it has
+no lifetime to take, as for kernels written out, wherever the macro is defined, and whether it writes the body or its
+call gives it, a `$b:block`. Its help to return an owned value takes out that `&`, and the `mut` after it, and no more
+of the macro. An `$i:ident` or a `$t:tt`, a fragment that holds no operator, `u8::MAX` or `st.global`, and one that no
+operator is next to, `let k = 2 + 3` as a `$s:stmt`, are read as they are written.
 
 The kernels read the module's consts as values known now, and so does Rust. Consts that modules share, as a model's
 CPU kernels and GPU kernels share its sizes, are a module of their own, which `#[kernite_macros::consts]` is on, and a
@@ -335,8 +339,9 @@ holds, or what compiling a kernel finds. It compiles nothing of the module, so a
 is no error at it. No room is counted for the statics, so a crate with no dependency named `kernite-macros` is not told
 it needs one for them. What the macro finds in writing the module for Rust is said, as for any module: the dependency
 the crate needs, `kernite-cuda` for a GPU item that `cfg` keeps and `kernite-cpu` for an x86 static or cooperative
-kernel; a compile-time argument named as a parameter of a launcher or of a `_blocks` method, `grid`, `threads` or
-`shared`; and a GPU kernel or a static named as a cooperative kernel's `_blocks` method.
+kernel; a compile-time argument named as a parameter of a launcher or of a `_blocks` method, `__kernite_grid`,
+`__kernite_threads` or `__kernite_shared`; and a GPU kernel or a static named as a cooperative kernel's `_blocks`
+method.
 
 A module kernite cannot read is refused whole as well, and stays with every item kernite can read. A `const` or a
 `static` it cannot read ends at its `;`, for its value may hold a `{..}`, as in `= { 1 };`. Any other item ends at its
@@ -393,6 +398,14 @@ helper `cfg` leaves out, itself or through a helper `cfg` keeps, is told of the 
 One that calls a helper at two places, one of them in a helper `cfg` leaves out, is told of what the helper names, once.
 A const that `cfg` leaves out with every item that names it is not said of, and one that `cfg` keeps and only items
 `cfg` leaves out name is unused to Rust, which says so as it does of any const that nothing names.
+
+A deprecated item that a kernel names is told of by Rust at the name, once for each place the kernel writes it.
+`lea(p, [COUNTS]);` of a deprecated static is a warning at `COUNTS`, with the note of the attribute, and
+`call(v, old, ());` of a deprecated x86 kernel is one at `old`. A static in the GPU's memory is told of as a use of its
+method, `Kernels::COUNTS`. Rust says nothing at the module's attribute, nor of an item that no kernel names. An x86
+kernel of instances is a function for each instance, and the code of a helper is part of each x86 kernel that calls it.
+Where the build is incremental, as the dev profile's is, Rust tells of the first place each function writes the name:
+once for each instance, and for a place in a helper, once for each kernel that calls it.
 
 A module holds what `cfg` keeps: Rust puts it together, where it knows which `cfg` holds. `LISTINGS` has the listing
 of each x86 kernel that compiles and `cfg` keeps, and of no other. A module of x86 kernels has it whether its kernels
@@ -537,10 +550,10 @@ core, in `/sys/devices/system/node/node0/cpulist` and `/sys/devices/system/cpu/c
 a program to read and give to `Grid::on`. The grid's barrier is one cache line for the whole grid, whichever nodes its
 threads are on, so a `grid.sync()` over threads on two nodes passes that line between them.
 
-The kernel's parameters keep the names they are written with, `grid` among them, but `_`, which the macros name
-for Rust. A compile-time argument may not be named `grid`, for Rust cannot keep a const apart from a parameter of
-its name: that is an error at its name. A crate with a cooperative kernel needs a dependency named `kernite-cpu`
-for the grid, not renamed in `Cargo.toml`. kernite says at the kernel when it has none.
+The kernel's parameters keep the names they are written with, but `_`, which the macros name for Rust. The launcher
+names its grid `__kernite_grid`, and a compile-time argument may not be named so, for Rust cannot keep a const apart
+from a parameter of its name: that is an error at its name. A crate with a cooperative kernel needs a dependency named
+`kernite-cpu` for the grid, not renamed in `Cargo.toml`. kernite says at the kernel when it has none.
 
 A kernel calls the module's others, itself among them, as SysV calls a function: `call(g, gcd, (a, b))` moves `a` to
 `rdi` and `b` to `rsi`, and `g` from `rax`, and is checked against what `gcd` takes and returns. `lea(fp, [gcd])` takes
@@ -589,7 +602,36 @@ stores, and a kernel's safety contract says that nothing else touches the memory
 nor any that the functions it calls name, whether it calls them by name or at an address. A module's statics are its
 kernels': on the GPU for GPU kernels, so a module with kernels of both kinds and a static is an error, which says to
 make it two. A crate with a static in a module of x86 kernels needs a dependency named `kernite-cpu` for it, not renamed
-in `Cargo.toml`. kernite says at the static when it has none.
+in `Cargo.toml`. kernite says at the static when it has none. A crate of the `dylib` kind may have such a static, which
+it exports as it exports any: a program that links the crate names it as it names one of its own,
+`my_lib::kernels::COUNTS`.
+
+A static may be as big as a Rust type may be: its size, rounded up to its alignment, is less than 2^61 bytes. A kernel
+names a static at a displacement from `rip`, 32 bits, signed, which reaches 2 GiB. The rest of the program's code and
+data take room in those 2 GiB too, for the code reaches its data so, and the linker lays the statics out among that
+data: so the statics of a module are in reach of `rip` up to 1073741824 bytes together, half of it, and a kernel names
+each at a displacement. A static is in reach where it and the statics in reach before it in its module, each with the
+padding its alignment may need, one byte less than it, are 1073741824 bytes at most:
+`static A: global<[u8; 1073741824]>;` is in reach, and a second of 1 GiB after it is not. Every static counts, whatever
+`cfg` keeps, so a static is in reach or not whichever features are on. The statics of other modules and the rest of the
+program are the linker's to fit: it refuses a program where they do not fit in the 2 GiB. A static that is not in reach
+is far, as one of more than 1073741824 bytes is, and a kernel names it only by its address: `lea(p, [BIG])` puts the
+address in `p`, and `[p + i]` is the byte `i`. `lea(p, [BIG + 16])` is the address of the byte 16, for a displacement up
+to 2147483647; a kernel indexes past that. Any other operand that names the static is an error, which says to take its
+address. A far static takes none of the room in reach, so one after it may be in reach. It holds zeros at first, so a
+value is an error, which says the host writes what it should hold.
+
+A far static is the linker's, in the `.lbss` section of x86-64's ELF, which the linker lays out past the code and the
+rest of the data, so that they stay in reach of `rip`. The section holds zeros and takes no room in the file, where Rust
+makes a static of its own in time and memory that grow with its size, 6 milliseconds and 2 MiB for each MiB: a crate
+with a static of 3 GiB builds as fast as a crate with one of 4 KiB. kernite defines it so on Linux alone, and refuses it
+on another system, at its name. To Rust the static is a reference to that memory, a `&'static Global<..>`, which the
+host uses as it uses a `Global`: `kernels::BIG.len()`. A kernel loads the address from it, as code for a
+position-independent executable loads one from a slot. A crate of the `dylib` kind exports the reference, and keeps the
+memory to itself, so a program that links the crate reaches the memory through it. The memory's symbol is the path of
+its module and its name, as `module_path!` gives them, so two such statics of one path and one name in a program are one
+symbol defined twice, which the assembler or the linker refuses: two modules of one name in two functions have one path,
+and so do two versions of one crate.
 
 ## On a GPU
 
@@ -746,10 +788,10 @@ prefetch of a buffer it frees, when threads use it at once: a buffer made at tha
 `placement` says so. When one thread uses it, it clears them. They are hints, so no value changes.
 
 `saxpy` becomes the method that launches it, which takes the grid and then the kernel's parameters. They keep the names
-they are written with, `grid` among them, but `_`, which the macros name for Rust. A compile-time argument may not
-be named `grid`, nor, on a cooperative kernel, `threads` or `shared`, which are parameters of the method that says
-how many blocks its grid has at most, below. Rust cannot keep a const apart from a parameter of its name: that is
-an error at its name.
+they are written with, but `_`, which the macros name for Rust. The method names the grid `__kernite_grid`, and a
+compile-time argument may not be named so, nor, on a cooperative kernel, `__kernite_threads` or `__kernite_shared`,
+which are parameters of the method that says how many blocks its grid has at most, below. Rust cannot keep a const apart
+from a parameter of its name: that is an error at its name.
 
 A grid has as many blocks and threads as the GPU takes: at least 1 along each of x, y and z, and, from Kepler's `sm_30`
 on, at most 2^31 - 1 blocks along x, 65535 along y and 65535 along z, and 1024 threads in a block, at most 1024 of them
@@ -884,12 +926,30 @@ own, and which keeps what they write from one launch to the next: `static COUNTS
 global memory, `red.global.add.u32([COUNTS + 8], 1)`, and `static WEIGHTS: constant<[f32; 4]> = [1.0, 0.5, 0.25, 2.0];`
 four floats of constant memory, which the kernels only read, `ld.r#const.f32(w, [WEIGHTS + 4])`, holding what it says
 until something writes it. The host reads and writes each as `Kernels` gives it, a [`Global`](crates/cuda/src/lib.rs) of
-Rust's type for its elements: `kernels.COUNTS().read()?`, `kernels.WEIGHTS().write(&[2.0; 4])?`. kernite refuses what a
-module cannot hold: more than the 64 KB of constant memory it has, or 4 GB of global memory, whose size `ptxas` writes
-in 32 bits. The error is at the type of a static that does not fit beside the statics before it that fit. It takes no
-room, so a static after it may fit. The room is that of the statics `cfg` keeps: two tables of 48000 bytes, one under
-`cfg(feature = "new")` and one under `cfg(not(feature = "new"))`, fit in a module, and both under
+Rust's type for its elements: `kernels.COUNTS().read()?`, `kernels.WEIGHTS().write(&[2.0; 4])?`. A module has 64 KB of
+constant memory, and kernite refuses a static that does not fit in it beside the statics before it that fit, at its
+type. It takes no room, so a static after it may fit. The room is that of the statics `cfg` keeps: two tables of 48000
+bytes, one under `cfg(feature = "new")` and one under `cfg(not(feature = "new"))`, fit in a module, and both under
 `cfg(feature = "new")` do not.
+
+A module's global memory may be of any size that the GPU has the memory for. `ptxas` writes the size of a module's
+global memory in 32 bits, and cuts a bigger one without a word, so a static of global memory that makes it 4 GB, its
+bytes with those of the statics before it that are in the module, each with the padding its alignment may need, is
+outside the module, `static BIG: global<[u8; 6442450944]>;` say: kernite-cuda allocates it, zeros, at its alignment,
+when it loads the module, and frees it with the module. Every static counts, whatever `cfg` keeps, so a static is in the
+module or outside it whichever features are on. A GPU that has not the memory is an error at the load, which names the
+static. A kernel reaches it as it reaches a static in the module, `st.global.u8([BIG + 6442450943], v)`, and at the same
+cost: it reads the address from the module's constant memory, where the address of one in the module is read from the
+driver's, and its instructions are the same. It holds zeros, so a value is an error. The host reads and writes it as it
+does a static in the module. Its address takes 8 bytes of the 64 KB.
+
+A static is memory on the GPU, and no symbol or code of the host's, so the method that gives it has the attributes that
+say how Rust has it, and no other: a doc, `cfg`, `deprecated`, the level of a lint, `allow`, `warn`, `deny`, `forbid` or
+`expect`, and a `rustfmt` attribute, each alone or in a `cfg_attr(..)`, whatever its condition. kernite refuses any
+other, as an error at its name, which says that the static is memory on the GPU, which the attribute is not for:
+`#[unsafe(no_mangle)]`, `#[unsafe(export_name = ..)]`, `#[unsafe(link_section = ..)]` and `#[used]` are for a symbol of
+the host's, `#[cold]` and `#[track_caller]` for its code, and the rest of Rust's for an item of its own. A static of x86
+kernels is a `static` of Rust's, and its attributes are Rust's.
 
 A kernel whose blocks wait for each other is `#[cooperative]`, and its `grid.sync()` waits until every thread of the
 grid has come to it, as CUDA's does. The driver launches it cooperatively, every block of the grid at once, so what a
@@ -1030,6 +1090,10 @@ The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `
 its kernels: Rust lints the names and the code a kernel is written with, and none that the macro adds. Clippy's
 `too_many_arguments` is the one lint a crate of kernels may not forbid: Clippy says it of a launcher of more than seven
 parameters, whoever wrote it, and each launcher allows it.
+
+Each name that the Rust the macro writes binds for itself starts with `__kernite_`, for Rust reads a binding named as a
+const in scope as that const, and refuses one named as a static. So a module of kernels may have a const or a static of
+any other name in scope, `grid` say.
 
 Checking the generated kernels is for the crates that hold them: a snapshot of every listing, so that any change
 to any layer that moves an instruction shows in review, and runs against scalar references, bit for bit, as in

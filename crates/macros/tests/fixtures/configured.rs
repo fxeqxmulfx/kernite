@@ -72,7 +72,7 @@ pub mod cpu {
     #[cooperative]
     #[instances(1, 2)]
     #[allow(non_upper_case_globals)]
-    pub unsafe extern "sysv64" fn taken<const grid: u64>(p: *mut u64) {
+    pub unsafe extern "sysv64" fn taken<const __kernite_grid: u64>(p: *mut u64) {
         mov(qword[p], 1);
     }
 
@@ -156,7 +156,7 @@ pub mod gpu {
     #[cfg(feature = "cpu")]
     #[instances(1, 2)]
     #[allow(non_upper_case_globals)]
-    pub unsafe extern "ptx-kernel" fn taken<const grid: u32>(p: *mut u32) {
+    pub unsafe extern "ptx-kernel" fn taken<const __kernite_grid: u32>(p: *mut u32) {
         st.global.u32([p], 1);
     }
 
@@ -166,7 +166,7 @@ pub mod gpu {
     #[cooperative]
     #[instances(1, 2)]
     #[allow(non_upper_case_globals)]
-    pub unsafe extern "ptx-kernel" fn counted<const threads: u32>(p: *mut u32) {
+    pub unsafe extern "ptx-kernel" fn counted<const __kernite_threads: u32>(p: *mut u32) {
         st.global.u32([p], 1);
     }
 

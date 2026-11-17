@@ -3,10 +3,10 @@
 
 use kernite_build::{Backend, Bytes, Called, Compiled, HostStatic, Naked, Native, StaticError, Unfinished, function};
 use kernite_core::{Class, PReg};
-use kernite_lang::{ItemKind, Module, parse};
+use kernite_lang::{ItemKind, Memory, Module, parse};
 use kernite_x86::X86;
 use kernite_x86::intel::Listing;
-use kernite_x86::lang::Callee;
+use kernite_x86::lang::{Callee, Static};
 
 /// A kernel that names memory of its module and calls a function of it comes out of the port as
 /// Rust takes it: its code as `naked_asm!` reads it, its listing, the CPU features it needs, the
@@ -25,7 +25,7 @@ fn x86_compiles_a_kernel_through_the_port() {
     let module = parse(src).unwrap();
     let ItemKind::Static(counts) = &module.items[0].kind else { panic!("a static first") };
     let (half, k) = (function(&module, "half").unwrap(), function(&module, "k").unwrap());
-    let statics = [X86.lay_out("COUNTS", &kernite_lang::memory(&module, counts).unwrap()).unwrap()];
+    let statics = [X86.lay_out("COUNTS", &kernite_lang::memory(&module, counts).unwrap(), &[]).unwrap()];
     let callee = X86.callee(half).unwrap();
     let callees = [Called { name: "half".into(), function: "half".into(), args: vec![], callee }];
     let mut kernel = X86.kernel(k, "k", &[], false, &statics, &callees);
@@ -67,8 +67,51 @@ fn x86_compiles_a_kernel_through_the_port() {
         statics: vec!["COUNTS".into()],
     };
     assert_eq!(X86.naked(&code), want);
-    let want = HostStatic { elem: "u32".into(), size: 4, len: 2, align: 4, init: vec![1, 0, 0, 0, 2, 0, 0, 0] };
+    let want =
+        HostStatic { elem: "u32".into(), size: 4, len: 2, align: 4, far: false, init: vec![1, 0, 0, 0, 2, 0, 0, 0] };
     assert_eq!(X86.host_static(&statics[0]), want);
+}
+
+/// A static is far, past `rip`'s reach, where it and the statics in reach before it in its module, each with the
+/// padding its alignment may need, are more than 1073741824 bytes, 1 GiB; the port says so, for Rust to have the linker
+/// place it. A far static takes none of the room, and constant memory takes it as global memory does. One just short of
+/// 2 GiB is far too, for a static of Rust's of that size fails to link.
+#[test]
+fn a_static_past_rips_reach_comes_out_of_the_port_far() {
+    // Whether each of `types`, laid out in order, each beside those before it, is far.
+    let far = |types: &[&str]| -> Vec<bool> {
+        let mut made: Vec<Static> = vec![];
+        for (i, ty) in types.iter().enumerate() {
+            let memory = Memory { ty: ty.to_string(), value: None, mentions: vec![] };
+            made.push(X86.lay_out(&format!("S{i}"), &memory, &made).unwrap());
+        }
+        made.iter().map(|s| X86.host_static(s).far).collect()
+    };
+    // One alone.
+    assert_eq!(far(&["global<[u8; 1073741824]>"]), [false]);
+    assert_eq!(far(&["global<[u8; 1073741825]>"]), [true]);
+    assert_eq!(far(&["global<[u8; 2147483647]>"]), [true]);
+    assert_eq!(far(&["global<[u8; 2147483648]>"]), [true]);
+    assert_eq!(far(&["global<[u64; 3221225472]>"]), [true]);
+    assert_eq!(far(&["constant<[u32; 268435457]>"]), [true]);
+    // Its own padding counts: 3 bytes for an alignment of 4, and 1 for one of 2.
+    assert_eq!(far(&["constant<[u32; 268435455]>"]), [false]);
+    assert_eq!(far(&["constant<[u32; 268435456]>"]), [true]);
+    assert_eq!(far(&["global<[u8; 1073741823], 2>"]), [false]);
+    assert_eq!(far(&["global<[u8; 1073741824], 2>"]), [true]);
+    // After another, at the bound, and one byte past it.
+    assert_eq!(far(&["global<[u8; 1073741823]>", "global<[u8; 1]>"]), [false, false]);
+    assert_eq!(far(&["global<[u8; 1073741823]>", "global<[u8; 2]>"]), [false, true]);
+    assert_eq!(far(&["global<[u8; 1073741824]>", "global<[u8; 1]>"]), [false, true]);
+    assert_eq!(far(&["global<[u8; 1073741824]>", "global<[u8; 1073741824]>"]), [false, true]);
+    assert_eq!(far(&["global<[u8; 1073741823]>", "constant<[u8; 2]>"]), [false, true]);
+    // The padding of the one after: 7 bytes for an alignment of 8.
+    assert_eq!(far(&["global<[u8; 1073741816]>", "global<[u8; 1], 8>"]), [false, false]);
+    assert_eq!(far(&["global<[u8; 1073741816]>", "global<[u8; 2], 8>"]), [false, true]);
+    // A far static takes none: the next is in reach beside the statics in reach before it alone.
+    assert_eq!(far(&["global<[u8; 3221225472]>", "global<[u8; 1073741824]>"]), [true, false]);
+    assert_eq!(far(&["global<[u8; 1073741823]>", "global<[u8; 1073741824]>", "global<[u8; 1]>"]), [false, true, false]);
+    assert_eq!(far(&["global<[u8; 1073741824]>", "global<[u8; 1]>", "global<[u8; 1]>"]), [false, true, true]);
 }
 
 /// A call at an address names no function in the code, so `funcs` has none: the functions taken
@@ -214,7 +257,7 @@ fn a_static_named_as_a_listing_names_a_constant_is_refused() {
     for (item, want) in module.items.iter().zip(cases) {
         let ItemKind::Static(s) = &item.kind else { panic!("statics alone") };
         let memory = kernite_lang::memory(&module, s).unwrap();
-        assert_eq!(X86.lay_out(&s.name, &memory), Err(StaticError::Name(want.into())));
+        assert_eq!(X86.lay_out(&s.name, &memory, &[]), Err(StaticError::Name(want.into())));
     }
 }
 
