@@ -9,8 +9,8 @@ use kernite::{Compiled, DeviceStatic, Failed, Launcher};
 use crate::cond::Cond;
 use crate::rust::{
     self, asks, attrs, carried, clashes, depends_on, error_under, filtered, flatten, half, host, hygienic, is_punct,
-    launcher_result, missing, never, number_type, parse, pick, pointer, primitive, ptr_type, quiet, refused, site,
-    visibility, written_params,
+    launcher_result, missing, name_at, never, number_type, parse, pick, pointer, primitive, ptr_type, quiet, refused,
+    site, visibility, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -160,15 +160,34 @@ fn accessor(s: &lang::Static, laid: &Laid, i: String, top: &[TokenTree]) -> Toke
     let mut name = top[s.vis.end + 1].clone();
     name.set_span(name.span().resolved_at(site()));
     out.extend([name]);
-    let (read, body) = match laid {
-        Ok(m) => (Some(&m.code), format!("self.module.global({i})")),
-        Err(failed) => (failed.stub.as_ref(), "::core::unreachable!()".to_string()),
+    let body = match laid {
+        Ok(_) => format!("self.module.global({i})"),
+        Err(_) => "::core::unreachable!()".to_string(),
     };
-    out.extend(parse(&match read {
+    out.extend(parse(&match read(laid) {
         Some(m) => format!("(&self) -> ::kernite_cuda::Global<'_, {}> {{ {body} }}", primitive(&m.host)),
         None => format!("<T: ::kernite_cuda::Plain>(&self) -> ::kernite_cuda::Global<'_, T> {{ {body} }}"),
     }));
     out
+}
+
+/// The static, `laid`, whose elements the method that gives its memory reads as the type of Rust's they are: itself, or
+/// what stands for it if only what it holds is wrong. None for a static that has none: its method is of any type.
+fn read(laid: &Laid) -> Option<&DeviceStatic> {
+    laid.as_ref().map_or_else(|failed| failed.stub.as_ref(), |m| Some(&m.code))
+}
+
+/// What Rust reads for a use of static `item`, `laid`, by a kernel that names it at `span`: the path of its method,
+/// `Kernels::COUNTS`, which has the attributes of the static, so Rust tells of the use as it tells of any use of the
+/// method, a deprecated one at that place. None where there is nothing to read: a crate without `kernite-cuda` has no
+/// `Kernels`, and the method of a static that has no type is of any type, which Rust cannot work out from a path.
+pub(crate) fn used(item: &lang::Item, laid: &Laid, top: &[TokenTree], span: Span) -> Option<TokenStream> {
+    if !depends_on(CUDA) || read(laid).is_none() {
+        return None;
+    }
+    let mut path = parse("Kernels::");
+    path.extend([name_at(item, top, span)]);
+    Some(path)
 }
 
 /// The attributes of GPU static `s`, which its method takes, and, of the rest, each one's name, a raw one plain, and

@@ -1,16 +1,16 @@
 //! What x86 kernels become in Rust: naked functions and their safety contracts, the launchers
 //! of cooperative ones, stubs for those that do not compile, and the module's statics.
 
-use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
+use proc_macro::{Delimiter, Group, Span, TokenStream, TokenTree};
 
 use kernite::lang::{self, Fn, Value};
-use kernite::{Call, HostStatic, Naked, NativeInstance};
+use kernite::{Call, HostStatic, Naked, NativeInstance, NativeOut};
 
 use crate::cond::Cond;
 use crate::rust::{
     asks, attrs, cfg_of, clashes, depends_on, error_under, given_back, gives_placeholder, hygienic, launcher_result,
-    missing, name_at, never, parse, pick, pointer, position, primitive, probe, result, signature, site, stub,
-    value_params, visibility, written, written_params,
+    missing, name_at, never, parse, pick, pointer, position, primitive, probe, result, signature, stub, value_params,
+    visibility, written, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -34,7 +34,8 @@ const CPU: &str = "kernite-cpu";
 /// kernel of a crate without `kernite-cpu` is [`x86_stub`]'s instead, with the error that says so,
 /// and so is a kernel that gives back a type with a `_` in it, which is Rust's error alone.
 /// All this writes is under `cfg`, `f`'s own, the module of its statics included: an instance is `extern
-/// "sysv64"`, which only x86-64 has, so a crate that keeps `f` there alone builds for another machine.
+/// "sysv64"`, which only x86-64 has, so a crate that keeps `f` there alone builds for another machine. `at` says where
+/// `f` first writes the name of an item of the module, for the operands to be written there.
 pub(crate) fn naked(
     module: &lang::Module,
     f: &Fn,
@@ -42,6 +43,7 @@ pub(crate) fn naked(
     named: &[String],
     cfg: &TokenStream,
     top: &[TokenTree],
+    at: &dyn std::ops::Fn(&str) -> Span,
 ) -> TokenStream {
     let hidden = format!("__kernite_{}", f.name);
     let cooperative = f.cooperative.is_some();
@@ -63,8 +65,8 @@ pub(crate) fn naked(
         let code = asm(
             listing,
             &format!("{hidden}::C"),
-            callees(module, &one.calls, top),
-            reached(module, listing, top),
+            callees(module, &one.calls, top, at),
+            reached(module, listing, top, at),
             probe(f, top),
         );
         out.extend([TokenTree::Group(Group::new(Delimiter::Brace, code))]);
@@ -89,8 +91,8 @@ pub(crate) fn naked(
             let code = asm(
                 listing,
                 &format!("{hidden}::I{k}C"),
-                callees(module, &instance.calls, top),
-                reached(module, listing, top),
+                callees(module, &instance.calls, top, at),
+                reached(module, listing, top, at),
                 None,
             );
             fns.extend(cfg.clone());
@@ -180,8 +182,10 @@ fn asm(
 /// module that `top` holds. Where `cfg` leaves `item` out, `label = const 0,` is the operand instead:
 /// the code is text, and names the item whether `cfg` keeps it or not. The error is said where the
 /// kernel writes the name, and is not said here as well.
-fn operand(label: &str, path: &str, item: &lang::Item, top: &[TokenTree]) -> TokenStream {
-    let sym = parse(&format!("{label} = sym {path},"));
+fn operand(label: &str, path: TokenStream, item: &lang::Item, top: &[TokenTree]) -> TokenStream {
+    let mut sym = parse(&format!("{label} = sym"));
+    sym.extend(path);
+    sym.extend(parse(","));
     let kept = Cond::of(&cfg_of(item, top));
     // An item `cfg` never leaves out is named as it is.
     let (Some(then), Some(otherwise)) = (kept.guard(), kept.not().guard()) else { return sym };
@@ -192,15 +196,40 @@ fn operand(label: &str, path: &str, item: &lang::Item, top: &[TokenTree]) -> Tok
     out
 }
 
+/// The mentions of kernel `k` at which it first writes the name of each item that its code names by an operand: a
+/// static, or a function of no compile-time arguments. [`reached`] and [`callees`] write the operand at that place, in
+/// the function of each instance that names the item, so Rust tells of the item there: a deprecated one say. `named`
+/// has Rust find the item at each later mention. None where Rust does not get the code of `k`, which has no operand.
+pub(crate) fn operands(k: &NativeOut) -> Vec<&lang::Mention> {
+    if !k.written {
+        return vec![];
+    }
+    let by_operand = |name: &String| {
+        k.instances.iter().any(|one| {
+            one.naked.statics.contains(name) || one.calls.iter().any(|c| c.instance.is_none() && c.function == *name)
+        })
+    };
+    let places = k.mentions.iter().enumerate();
+    places
+        .filter(|(n, m)| by_operand(&m.name) && k.mentions[..*n].iter().all(|x| x.name != m.name))
+        .map(|(_, m)| m)
+        .collect()
+}
+
 /// The operands by which the code of `listing`, of a kernel of `module`, names each static it
 /// names, which is the static's name in `module` as written, `COUNTS`, or `r#type`, whose
-/// `{type}` in the code names it.
-fn reached(module: &lang::Module, listing: &Naked, top: &[TokenTree]) -> TokenStream {
+/// `{type}` in the code names it. Each is at the place `at` says the kernel first writes it.
+fn reached(
+    module: &lang::Module,
+    listing: &Naked,
+    top: &[TokenTree],
+    at: &dyn std::ops::Fn(&str) -> Span,
+) -> TokenStream {
     let mut out = TokenStream::new();
     for name in &listing.statics {
         let item = &module.items[position(module, name)];
-        let written = name_at(item, top, site()).to_string();
-        out.extend(operand(&written, &written, item, top));
+        let path = name_at(item, top, at(name));
+        out.extend(operand(&path.to_string(), path.into(), item, top));
     }
     out
 }
@@ -371,16 +400,22 @@ fn elements(m: &HostStatic) -> Vec<String> {
 
 /// The operands by which the code of an instance of a kernel of `module` names each function it
 /// `calls`: a function of no compile-time arguments by its name as written, `r#fn` as well, and an
-/// instance, `tile::<4>`, by the name [`instance_name`] gives the function [`naked`] makes of it.
-fn callees(module: &lang::Module, calls: &[Call], top: &[TokenTree]) -> TokenStream {
+/// instance, `tile::<4>`, by the name [`instance_name`] gives the function [`naked`] makes of it. A function of no
+/// compile-time arguments is at the place `at` says the kernel first writes its name.
+fn callees(
+    module: &lang::Module,
+    calls: &[Call],
+    top: &[TokenTree],
+    at: &dyn std::ops::Fn(&str) -> Span,
+) -> TokenStream {
     let mut out = TokenStream::new();
     for (i, call) in calls.iter().enumerate() {
         let item = &module.items[position(module, &call.function)];
         let path = match call.instance {
-            Some(k) => instance_name(&call.function, k),
-            None => name_at(item, top, site()).to_string(),
+            Some(k) => parse(&instance_name(&call.function, k)),
+            None => name_at(item, top, at(&call.function)).into(),
         };
-        out.extend(operand(&format!("f{i}"), &path, item, top));
+        out.extend(operand(&format!("f{i}"), path, item, top));
     }
     out
 }

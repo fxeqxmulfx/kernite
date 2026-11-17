@@ -86,7 +86,8 @@ fn cargo_in(command: &[&str], dir: &Path) -> (bool, Vec<String>) {
 /// What Cargo did when it ran `command` in the crate at `dir`, saying its messages in `format`: `short`, a line each,
 /// as the tests compare them, or `human`, in full, as it says them to a person. The crate is built offline into
 /// `kernite-macros/target`, so that it never waits for the build that runs these tests. What the environment would
-/// change of a build is taken out of it.
+/// change of a build is taken out of it, and the build is incremental, as the dev profile's is: only then does rustc
+/// tell of a use at one place once for each function that has it, which the tests of deprecated items count.
 fn cargo_out(format: &str, command: &[&str], dir: &Path) -> Output {
     let _one = CARGO.lock().unwrap_or_else(PoisonError::into_inner);
     let mut run = Command::new(env!("CARGO"));
@@ -107,7 +108,7 @@ fn cargo_out(format: &str, command: &[&str], dir: &Path) -> Output {
     ] {
         run.env_remove(var);
     }
-    run.output().expect("Cargo runs")
+    run.env("CARGO_INCREMENTAL", "1").output().expect("Cargo runs")
 }
 
 /// That Cargo builds fixture `name` without a word.
@@ -4655,6 +4656,44 @@ fn a_static_of_gpu_kernels_gives_its_method_the_attributes_it_takes() {
             "src/lib.rs:72:1: error: missing documentation for a method",
             "src/lib.rs:81:14: warning: this lint expectation is unfulfilled",
             "error: could not compile `static_attrs_kept` (lib) due to 6 previous errors; 2 warnings emitted",
+        ],
+    );
+}
+
+/// A use of a deprecated static or function by a kernel is told of once, at the use, as Rust tells of a use in a
+/// function of its own: a static that one x86 kernel names, `ONCE`, once; `TWICE`, which a kernel names twice, at each
+/// of the two places; a function that a kernel calls, `old`; and a static of GPU kernels that a kernel names, `COUNTS`,
+/// which Rust tells of as a use of its method, `Kernels::COUNTS`. Rust says nothing at the module's attribute, where no
+/// kernel writes a name, and nothing of the statics that no kernel names, `UNUSED` of each module. Cargo says once a
+/// line that two errors share, so the count of five is what shows that no place is told of twice.
+#[test]
+fn a_kernels_use_of_a_deprecated_item_is_told_of_once_at_the_use() {
+    refuses(
+        "deprecated_uses",
+        &[
+            "src/lib.rs:40:17: error: use of deprecated function `cpu::old`: use `fresh`",
+            "src/lib.rs:34:17: error: use of deprecated static `cpu::ONCE`",
+            "src/lib.rs:35:17: error: use of deprecated static `cpu::TWICE`: use `ONCE`",
+            "src/lib.rs:38:17: error: use of deprecated static `cpu::TWICE`: use `ONCE`",
+            "src/lib.rs:56:29: error: use of deprecated method `gpu::Kernels::COUNTS`",
+            "error: could not compile `deprecated_uses` (lib) due to 5 previous errors",
+        ],
+    );
+}
+
+/// A kernel is a function, and Rust tells of a deprecated static at the first place each function writes it: `EACH` of
+/// a kernel of two instances is two errors at its first place and one at the place after, and of a helper that two
+/// kernels call, two at its one place: five under `deny`. Cargo says the two at a place as one line, so the count is
+/// what shows them. It says the first places, those of the functions, before the later ones.
+#[test]
+fn a_deprecated_static_is_told_of_for_each_instance_and_each_kernel_that_calls_the_helper_that_names_it() {
+    refuses(
+        "deprecated_functions",
+        &[
+            "src/lib.rs:14:17: error: use of deprecated static `cpu::EACH`",
+            "src/lib.rs:21:17: error: use of deprecated static `cpu::EACH`",
+            "src/lib.rs:16:17: error: use of deprecated static `cpu::EACH`",
+            "error: could not compile `deprecated_functions` (lib) due to 5 previous errors",
         ],
     );
 }
