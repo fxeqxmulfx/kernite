@@ -314,7 +314,11 @@ is 4 KB of its frame at a multiple of 32, reached by its name, `mov(c.r32, [tabl
 takes its address. Until written, it holds whatever was there. kernite checks an address in it where the index is 0:
 what it reaches lies inside, and `vmovaps` and `vmovdqa` reach it at a multiple of what they move; the index is the
 kernel's to keep inside. A frame of more than a page is touched a page at a time on the way down, as Rust's functions
-are, so that one past the end of the stack faults at the guard page there rather than reach past it.
+are, so that one past the end of the stack faults at the guard page there rather than reach past it. The stack pointer
+is 8 past a multiple of 16 on entry, as SysV says, so `sub rsp` makes a frame aligned to 16 or less, with a few bytes
+more where a call or the frame needs the stack pointer at a multiple of 16, and `add rsp` takes it down. Only a frame
+aligned past 16 keeps the caller's stack pointer in `rbp`: the kernel aligns the stack pointer with `and rsp`, and takes
+the frame down by `mov rsp, rbp`.
 
 When the variables alive together do not fit in the registers, kernite spills one to a slot of the frame: it stores it
 after each instruction that writes it and loads it before each one that reads it. It spills, of the variable left

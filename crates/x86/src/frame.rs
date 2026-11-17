@@ -207,35 +207,43 @@ fn idle(inst: &Inst<Op, PReg>) -> bool {
 /// Pages past this many are touched in a loop.
 const UNROLLED: u32 = 3;
 
-/// How many bytes the stack pointer is a multiple of, always: SysV calls a function at a
-/// multiple of 16, and each push moves it by 8.
-const ALIGNED: u32 = 8;
+/// How many bytes the stack pointer is a multiple of at a call, as SysV asks. A frame aligned to no more is aligned by
+/// moving the stack pointer down a few bytes more, one aligned to more by `and`.
+const CALLED: u32 = 16;
+
+/// Whether the prologue aligns the stack pointer with `and`, and keeps the caller's in `rbp` for the epilogue to
+/// restore: where `frame` is aligned to more than the stack pointer is at a call.
+fn realigns(frame: &Frame) -> bool {
+    frame.align > CALLED
+}
 
 /// How many pages the prologue touches on the way down to `frame`'s bottom, a page apart: as
-/// many as leave no more than a page untouched above the bottom, counting `pad` and the most
-/// the alignment may add.
+/// many as leave no more than a page untouched above the bottom, counting `pad`, and the
+/// alignment of a frame that `and` aligns: the `and` moves the stack pointer by less, but to
+/// no lower page.
 fn probes(frame: &Frame, pad: u32) -> u32 {
+    let aligned = if realigns(frame) { frame.align } else { 0 };
     match frame.size {
         0 => 0,
-        size => (size + pad + frame.align.saturating_sub(ALIGNED)).saturating_sub(PAGE).div_ceil(PAGE),
+        size => (size + pad + aligned).saturating_sub(PAGE).div_ceil(PAGE),
     }
 }
 
-/// Bytes the prologue moves the stack pointer down besides `frame`, if the kernel `calls`, so
-/// that it calls at a multiple of 16: on entry it is 8 past one, the return address below it,
-/// and each push moves it 8 more, the frame's `rbp` among them. A frame aligned to 16 or more
-/// needs none.
+/// Bytes the prologue moves the stack pointer down besides `frame`, so that it ends at a multiple of 16: where the
+/// kernel `calls`, as SysV asks, and where `frame` is aligned to 16, whose slots then lie at multiples of 16. On entry
+/// the stack pointer is 8 past a multiple of 16, the return address below it, and each push moves it 8 more. A frame
+/// aligned to more needs none: the prologue aligns it.
 fn padding(frame: &Frame, calls: bool) -> u32 {
-    if !calls || frame.align >= 16 {
+    if realigns(frame) || !(calls || frame.align == CALLED) {
         return 0;
     }
-    let pushes = frame.saved.len() as u32 + u32::from(frame.size > 0);
-    (16 - (8 + 8 * pushes + frame.size) % 16) % 16
+    let pushes = frame.saved.len() as u32;
+    (CALLED - (8 + 8 * pushes + frame.size) % CALLED) % CALLED
 }
 
-/// Saves the callee-saved registers the body writes; then, if there are slots, keeps the
-/// caller's stack pointer in `rbp`, and moves the stack pointer down past them and `pad`, and
-/// to their alignment; else down past `pad` alone.
+/// Saves the callee-saved registers the body writes; then, if there are slots, moves the stack pointer down past them
+/// and `pad`; else down past `pad` alone. A frame aligned to more than 16 keeps the caller's stack pointer in `rbp`
+/// first, and aligns the stack pointer last.
 ///
 /// The stack pointer never moves more than a page below memory the kernel has touched, so that
 /// a frame that runs past the end of the stack faults at the guard page there rather than step
@@ -262,10 +270,12 @@ fn prologue(frame: &Frame, pad: u32, free: Label) -> Result<Vec<Item<Op, PReg>>,
             frame.size
         ));
     }
-    items.extend([
-        inst(Op::Push, vec![reg(RBP, Access::Read)]),
-        inst(Op::Mov, vec![reg(RBP, Access::Write), reg(RSP, Access::Read)]),
-    ]);
+    if realigns(frame) {
+        items.extend([
+            inst(Op::Push, vec![reg(RBP, Access::Read)]),
+            inst(Op::Mov, vec![reg(RBP, Access::Write), reg(RSP, Access::Read)]),
+        ]);
+    }
     let pages = probes(frame, pad);
     if pages > 0 {
         items.push(Item::Note("the frame a page at a time, each touched, so that an overflow faults".into()));
@@ -275,7 +285,7 @@ fn prologue(frame: &Frame, pad: u32, free: Label) -> Result<Vec<Item<Op, PReg>>,
         if pages <= UNROLLED {
             (0..pages).for_each(|_| items.extend(probe.clone()));
         } else {
-            // The padding and the alignment add less than a page, so the loop ends no further down
+            // The padding and the alignment add a page at most, so the loop ends no further down
             // than the frame rounded up to a page: 2^31 bytes at most, a displacement of
             // `i32::MIN`.
             let disp = 0_i32.wrapping_sub_unsigned(pages * PAGE);
@@ -299,7 +309,7 @@ fn prologue(frame: &Frame, pad: u32, free: Label) -> Result<Vec<Item<Op, PReg>>,
     if rest > 0 {
         items.push(sp(Op::Sub, rest));
     }
-    if frame.align > ALIGNED {
+    if realigns(frame) {
         items.push(inst(Op::And, vec![reg(RSP, Access::ReadWrite), number(-i64::from(frame.align))]));
     }
     Ok(items)
@@ -310,13 +320,19 @@ fn prologue(frame: &Frame, pad: u32, free: Label) -> Result<Vec<Item<Op, PReg>>,
 /// them.
 fn epilogue(frame: &Frame, pad: u32, upper: bool) -> Vec<Item<Op, PReg>> {
     let mut items = vec![];
-    if frame.size > 0 {
+    if realigns(frame) {
         items.extend([
             inst(Op::Mov, vec![reg(RSP, Access::Write), reg(RBP, Access::Read)]),
             inst(Op::Pop, vec![reg(RBP, Access::Write)]),
         ]);
-    } else if pad > 0 {
-        items.push(sp(Op::Add, pad));
+    } else {
+        // An `add` takes 2^31 - 1 at most, and a frame may be 2^31 bytes, with `pad` more.
+        let mut back = frame.size + pad;
+        while back > 0 {
+            let by = back.min(i32::MAX as u32);
+            items.push(sp(Op::Add, by));
+            back -= by;
+        }
     }
     items.extend(frame.saved.iter().rev().map(|&r| inst(Op::Pop, vec![reg(r, Access::Write)])));
     if upper {
@@ -437,8 +453,8 @@ mod tests {
             _ => None,
         });
         assert_eq!(jne, Some(&Flow::Branch(Label(2))));
-        let want = "push rbp\nmov rbp, rsp\nlea r11, [rsp - 16384]\n2:\nsub rsp, 4096\nor qword ptr [rsp], 0\n\
-                    cmp rsp, r11\njne 2b\nsub rsp, 4096\n3:\n4:\n5:\nmov rsp, rbp\npop rbp\nret";
+        let want = "lea r11, [rsp - 16384]\n2:\nsub rsp, 4096\nor qword ptr [rsp], 0\ncmp rsp, r11\njne 2b\n\
+                    sub rsp, 4096\n3:\n4:\n5:\nadd rsp, 20480\nret";
         assert_eq!(code(&c), want);
     }
 

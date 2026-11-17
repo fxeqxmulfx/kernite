@@ -49,8 +49,8 @@ pub struct Listing {
     pub regs: Vec<(String, String)>,
     /// The frame.
     pub frame: Frame,
-    /// Bytes the prologue moves the stack pointer down besides the frame's, so that a kernel
-    /// that calls calls at a multiple of 16, as SysV asks.
+    /// Bytes the prologue moves the stack pointer down besides the frame's, so that a kernel that calls calls at a
+    /// multiple of 16, as SysV asks, and a frame aligned to 16 lies at one.
     pub padding: u32,
     /// Whether control returns: whether the kernel has a `ret`, though a jump to a callee may stand for it. One with
     /// none never returns.
@@ -96,9 +96,10 @@ impl Listing {
             writeln!(out, "# needs: {}", features.join(", ")).unwrap();
         }
         let saved: Vec<_> = self.frame.saved.iter().map(|&r| name(r, Width::W64)).collect();
-        let padded = match self.padding {
-            0 => String::new(),
-            n => format!(", and {n} more so that it calls at a multiple of 16"),
+        let padded = match (self.padding, self.frame.align) {
+            (0, _) => String::new(),
+            (n, 16) => format!(", and {n} more so that it is aligned to 16"),
+            (n, _) => format!(", and {n} more so that it calls at a multiple of 16"),
         };
         writeln!(
             out,

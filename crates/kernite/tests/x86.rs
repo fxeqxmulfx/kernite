@@ -478,15 +478,12 @@ fn a_kernel_that_loads_mxcsr_gives_the_callers_back() {
 # frame: 4 bytes aligned to 4, saves []
 # mxcsr: 4 bytes at rsp
 # x=rdi
-    push rbp
-    mov rbp, rsp
     sub rsp, 4
     # the caller's mxcsr, which it gets back
     vstmxcsr dword ptr [rsp]
     vldmxcsr dword ptr [rdi]
     vldmxcsr dword ptr [rsp]
-    mov rsp, rbp
-    pop rbp
+    add rsp, 4
     ret
 ";
     assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
@@ -503,8 +500,6 @@ fn a_kernel_that_loads_mxcsr_loads_the_callers_back_before_each_return() {
 # frame: 4 bytes aligned to 4, saves []
 # mxcsr: 4 bytes at rsp
 # x=rdi n=rsi
-    push rbp
-    mov rbp, rsp
     sub rsp, 4
     # the caller's mxcsr, which it gets back
     vstmxcsr dword ptr [rsp]
@@ -513,13 +508,11 @@ fn a_kernel_that_loads_mxcsr_loads_the_callers_back_before_each_return() {
     jz 2f
     vldmxcsr dword ptr [rdi + 4]
     vldmxcsr dword ptr [rsp]
-    mov rsp, rbp
-    pop rbp
+    add rsp, 4
     ret
 2:
     vldmxcsr dword ptr [rsp]
-    mov rsp, rbp
-    pop rbp
+    add rsp, 4
     ret
 ";
     assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
@@ -1601,21 +1594,64 @@ fn stack_memory_holds_whatever_was_there_until_written() {
 # frame: 8 bytes aligned to 8, saves []
 # b: 8 bytes at rsp
 # g=rax
-    push rbp
-    mov rbp, rsp
     sub rsp, 8
     mov rax, qword ptr [rsp]
-    mov rsp, rbp
-    pop rbp
+    add rsp, 8
     ret
 ";
     assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
 }
 
+/// The stack pointer is 8 past a multiple of 16 on entry, as SysV says, so a frame aligned to 16 or less keeps no `rbp`
+/// and takes no `and`: `sub` makes it, and `add` takes it down. One aligned to 16 lies at a multiple of 16 whether the
+/// kernel calls or not, and the listing says why the stack pointer moves more than the frame does. One aligned to more
+/// keeps the caller's stack pointer in `rbp`, aligns its own with `and`, and takes the frame down from `rbp`.
+#[test]
+fn only_a_frame_aligned_past_16_keeps_the_stack_pointer_in_rbp() {
+    let cases = [
+        ("local<u64>", "sub rsp, 8\nmov rax, qword ptr [rsp]\nadd rsp, 8\nret"),
+        ("local<[u64; 2], 16>", "sub rsp, 24\nmov rax, qword ptr [rsp]\nadd rsp, 24\nret"),
+        (
+            "local<[u8; 4096], 16>",
+            "sub rsp, 4096\nor qword ptr [rsp], 0\nsub rsp, 8\nmov rax, qword ptr [rsp]\nadd rsp, 4104\nret",
+        ),
+        (
+            "local<[u8; 32], 32>",
+            "push rbp\nmov rbp, rsp\nsub rsp, 32\nand rsp, -32\nmov rax, qword ptr [rsp]\nmov rsp, rbp\npop rbp\nret",
+        ),
+    ];
+    for (ty, want) in cases {
+        assert_eq!(compile("", &format!("let b: {ty}; let g: gpr; mov(g, [b]);")).unwrap(), want, "{ty}");
+    }
+    let src = "unsafe extern \"sysv64\" fn k() {\nlet b: local<[u64; 2], 16>;\nlet g: gpr;\nmov(g, [b]);\n}\n";
+    let text = kernite::x86_str(src, "k").unwrap().text();
+    assert!(
+        text.contains("\n# frame: 16 bytes aligned to 16, saves [], and 8 more so that it is aligned to 16\n"),
+        "{text}"
+    );
+}
+
+/// An `add` takes 2^31 - 1 at most, and a frame may be 2^31 bytes, 8 more where it is aligned to 16: the kernel takes
+/// it down by two. Seventeen xmm alive at once spill two, 16 bytes each, after stack memory of 2^31 - 32 bytes.
+#[test]
+fn a_frame_of_2_to_the_31_bytes_is_taken_down_by_two_adds() {
+    let loads: String = (0..17).map(|i| format!("let v{i}: xmm;\nvmovups(v{i}, [x + {}]);\n", 16 * i)).collect();
+    let sums: String = (1..17).map(|i| format!("vaddps(v0, v0, v{i});\n")).collect();
+    let src = format!(
+        "unsafe extern \"sysv64\" fn k(x: *mut f32) {{\nlet big: local<[u8; 2147483616], 16>;\n{loads}{sums}\
+         vmovups([big], v0);\n}}\n"
+    );
+    let text = kernite::x86_str(&src, "k").unwrap().text();
+    let frame = "# frame: 2147483648 bytes aligned to 16, saves [], and 8 more so that it is aligned to 16\n";
+    assert!(text.contains(frame), "{text}");
+    assert!(text.contains("\n    lea r11, [rsp - 2147483648]\n"), "{text}");
+    assert!(text.ends_with("\n    add rsp, 2147483647\n    add rsp, 9\n    ret\n"), "{text}");
+}
+
 /// The stack pointer moves no more than a page below memory the kernel has touched, as Rust's
 /// functions do, so that a frame past the end of the stack faults at the guard page there
 /// rather than step over it: a bigger frame is touched a page at a time, in a loop past three
-/// pages. What the alignment may add counts, and the stack pointer is a multiple of 8 already.
+/// pages. What the alignment may add counts.
 #[test]
 fn a_frame_of_more_than_a_page_is_touched_a_page_at_a_time() {
     let prologue = |ty: &str| {
@@ -1625,17 +1661,14 @@ fn a_frame_of_more_than_a_page_is_touched_a_page_at_a_time() {
     };
     let page = "sub rsp, 4096\nor qword ptr [rsp], 0";
     let cases = [
-        ("local<u64>", "push rbp\nmov rbp, rsp\nsub rsp, 8".to_string()),
-        ("local<[u8; 4096]>", "push rbp\nmov rbp, rsp\nsub rsp, 4096".into()),
-        ("local<[u8; 4097]>", format!("push rbp\nmov rbp, rsp\n{page}\nsub rsp, 1")),
+        ("local<u64>", "sub rsp, 8".to_string()),
+        ("local<[u8; 4096]>", "sub rsp, 4096".into()),
+        ("local<[u8; 4097]>", format!("{page}\nsub rsp, 1")),
         ("local<[u8; 4064], 32>", "push rbp\nmov rbp, rsp\nsub rsp, 4064\nand rsp, -32".into()),
-        ("local<[u8; 4096], 16>", format!("push rbp\nmov rbp, rsp\n{page}\nand rsp, -16")),
+        ("local<[u8; 4096], 16>", format!("{page}\nsub rsp, 8")),
         ("local<[u8; 4096], 4096>", format!("push rbp\nmov rbp, rsp\n{page}\nand rsp, -4096")),
-        ("local<[u8; 16384]>", format!("push rbp\nmov rbp, rsp\n{page}\n{page}\n{page}\nsub rsp, 4096")),
-        (
-            "local<[u8; 16385]>",
-            format!("push rbp\nmov rbp, rsp\nlea r11, [rsp - 16384]\n2:\n{page}\ncmp rsp, r11\njne 2b\nsub rsp, 1"),
-        ),
+        ("local<[u8; 16384]>", format!("{page}\n{page}\n{page}\nsub rsp, 4096")),
+        ("local<[u8; 16385]>", format!("lea r11, [rsp - 16384]\n2:\n{page}\ncmp rsp, r11\njne 2b\nsub rsp, 1")),
     ];
     for (ty, want) in cases {
         assert_eq!(prologue(ty), want, "{ty}");
@@ -1673,9 +1706,7 @@ fn a_frame_past_what_an_address_reaches_is_refused() {
 fn the_prologues_loop_comes_before_the_bodys_labels() {
     let code =
         compile("n: usize", "let b: local<[u64; 4096]>;\nlabel(top);\nmov([b], n);\ndec(n);\njnz(top);").unwrap();
-    let want = "push rbp
-mov rbp, rsp
-lea r11, [rsp - 28672]
+    let want = "lea r11, [rsp - 28672]
 2:
 sub rsp, 4096
 or qword ptr [rsp], 0
@@ -1686,8 +1717,7 @@ sub rsp, 4096
 mov qword ptr [rsp], rdi
 dec rdi
 jnz 3b
-mov rsp, rbp
-pop rbp
+add rsp, 32768
 ret";
     assert_eq!(code, want);
 }
@@ -2020,10 +2050,10 @@ fn a_value_alive_across_a_call_that_changes_every_register_is_kept_in_rbx_or_r12
     let params = "a: u64, b: u64, c: u64, d: u64, e: u64, f: u64";
     let body = |callee| format!("call({callee}); add(a, b); add(a, c); add(a, d); add(a, e); add(a, f); ret(a);");
     let code = calling(params, " -> u64", &body("wipe")).unwrap();
-    let want = "push rbx\npush r12\npush r13\npush r14\npush r15\npush rbp\nmov rbp, rsp\nsub rsp, 8\nmov qword ptr \
-                [rsp], r9\nmov rbx, r8\nmov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\ncall {f0}\nadd r15, \
-                r14\nadd r15, r13\nadd r15, r12\nadd r15, rbx\nmov rax, qword ptr [rsp]\nadd r15, rax\nmov rax, \
-                r15\nmov rsp, rbp\npop rbp\npop r15\npop r14\npop r13\npop r12\npop rbx\nret";
+    let want = "push rbx\npush r12\npush r13\npush r14\npush r15\nsub rsp, 16\nmov qword ptr [rsp], r9\nmov rbx, \
+                r8\nmov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\ncall {f0}\nadd r15, r14\nadd r15, \
+                r13\nadd r15, r12\nadd r15, rbx\nmov rax, qword ptr [rsp]\nadd r15, rax\nmov rax, r15\nadd rsp, \
+                16\npop r15\npop r14\npop r13\npop r12\npop rbx\nret";
     assert_eq!(code, want);
     let code = calling(params, " -> u64", &body("nothing")).unwrap();
     let want = "sub rsp, 8\ncall {f0}\nadd rdi, rsi\nadd rdi, rdx\nadd rdi, rcx\nadd rdi, r8\nadd rdi, r9\nmov rax, \
@@ -2157,8 +2187,10 @@ fn calling(params: &str, ret: &str, body: &str) -> Result<String, String> {
     listing(params, ret, body).map(|l| l.code().collect::<Vec<_>>().join("\n"))
 }
 
-/// The stack pointer is a multiple of 16 plus 8 on entry, and each push and the frame move
-/// it: a kernel that calls moves it 8 more where that leaves it short of a multiple of 16.
+/// The stack pointer is a multiple of 16 plus 8 on entry, and each push and the frame move it: a kernel that calls
+/// moves it 8 more where that leaves it short of a multiple of 16, and so does one with a frame aligned to 16, which
+/// lies at a multiple of 16. A frame aligned to 16 or less keeps no `rbp`; one aligned to more keeps the caller's stack
+/// pointer in `rbp`, and aligns the stack pointer with `and`.
 #[test]
 fn the_stack_pointer_is_a_multiple_of_16_at_a_call() {
     let cases = [
@@ -2173,13 +2205,35 @@ fn the_stack_pointer_is_a_multiple_of_16_at_a_call() {
         (
             "x: u64",
             "let n: local<u64>; mov([n], x); call(nothing); mov(x, [n]);",
-            "push rbp\nmov rbp, rsp\nsub rsp, 16\nmov qword ptr [rsp], rdi\ncall {f0}\nmov rdi, qword ptr [rsp]\nmov \
-             rsp, rbp\npop rbp\nret",
+            "sub rsp, 8\nmov qword ptr [rsp], rdi\ncall {f0}\nmov rdi, qword ptr [rsp]\nadd rsp, 8\nret",
         ),
         (
             "x: u64",
             "let n: local<[u64; 2], 16>; mov([n], x); call(nothing); mov(x, [n]);",
-            "push rbp\nmov rbp, rsp\nsub rsp, 16\nand rsp, -16\nmov qword ptr [rsp], rdi\ncall {f0}\nmov rdi, qword \
+            "sub rsp, 24\nmov qword ptr [rsp], rdi\ncall {f0}\nmov rdi, qword ptr [rsp]\nadd rsp, 24\nret",
+        ),
+        (
+            "x: u64",
+            "let n: local<[u64; 2], 16>; mov([n], x); call(wipe); add(x, x);",
+            "push rbx\nsub rsp, 16\nmov rbx, rdi\nmov qword ptr [rsp], rbx\ncall {f0}\nadd rbx, rbx\nadd rsp, 16\n\
+             pop rbx\nret",
+        ),
+        (
+            "x: u64",
+            "let n: local<[u8; 4096], 16>; mov([n], x); call(wipe); add(x, x);",
+            "push rbx\nsub rsp, 4096\nmov rbx, rdi\nmov qword ptr [rsp], rbx\ncall {f0}\nadd rbx, rbx\nadd rsp, 4096\n\
+             pop rbx\nret",
+        ),
+        (
+            "x: u64",
+            "let n: local<u64>; mov([n], x); call(wipe); add(x, x);",
+            "push rbx\nsub rsp, 16\nmov rbx, rdi\nmov qword ptr [rsp], rbx\ncall {f0}\nadd rbx, rbx\nadd rsp, 16\n\
+             pop rbx\nret",
+        ),
+        (
+            "x: u64",
+            "let n: local<[u64; 4], 32>; mov([n], x); call(nothing); mov(x, [n]);",
+            "push rbp\nmov rbp, rsp\nsub rsp, 32\nand rsp, -32\nmov qword ptr [rsp], rdi\ncall {f0}\nmov rdi, qword \
              ptr [rsp]\nmov rsp, rbp\npop rbp\nret",
         ),
     ];
@@ -2312,14 +2366,14 @@ fn a_call_stays_one_where_a_jump_would_not_do_what_it_does() {
             "x: u64, m: *mut u32",
             " -> u64",
             "let r: gpr; vldmxcsr([m]); call(r, gcd, (x, x)); ret(r);",
-            "push rbp\nmov rbp, rsp\nsub rsp, 16\nmov rax, rdi\nvstmxcsr dword ptr [rsp]\nvldmxcsr dword ptr \
-             [rsi]\nmov rdi, rax\nmov rsi, rax\ncall {f0}\nvldmxcsr dword ptr [rsp]\nmov rsp, rbp\npop rbp\nret",
+            "sub rsp, 8\nmov rax, rdi\nvstmxcsr dword ptr [rsp]\nvldmxcsr dword ptr [rsi]\nmov rdi, rax\nmov rsi, \
+             rax\ncall {f0}\nvldmxcsr dword ptr [rsp]\nadd rsp, 8\nret",
         ),
         (
             "x: u64",
             " -> u64",
             "let n: local<u64>; let (p, r): (gpr, gpr); lea(p, [n]); call(r, gcd, (p, x)); ret(r);",
-            "push rbp\nmov rbp, rsp\nsub rsp, 16\nmov rsi, rdi\nlea rdi, [rsp]\ncall {f0}\nmov rsp, rbp\npop rbp\nret",
+            "sub rsp, 8\nmov rsi, rdi\nlea rdi, [rsp]\ncall {f0}\nadd rsp, 8\nret",
         ),
         (
             "x: u64",
@@ -2808,15 +2862,13 @@ fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() {
             "fp: u64, x: f32",
             " -> f32",
             "call(fp); ret(x);",
-            "push rbp\nmov rbp, rsp\nsub rsp, 16\nand rsp, -16\nvmovups xmmword ptr [rsp], xmm0\ncall rdi\nvmovups \
-             xmm0, xmmword ptr [rsp]\nmov rsp, rbp\npop rbp\nret",
+            "sub rsp, 24\nvmovups xmmword ptr [rsp], xmm0\ncall rdi\nvmovups xmm0, xmmword ptr [rsp]\nadd rsp, 24\nret",
         ),
         (
             "fp: u64, x: f64",
             " -> f64",
             "call(fp); ret(x);",
-            "push rbp\nmov rbp, rsp\nsub rsp, 16\nand rsp, -16\nvmovups xmmword ptr [rsp], xmm0\ncall rdi\nvmovups \
-             xmm0, xmmword ptr [rsp]\nmov rsp, rbp\npop rbp\nret",
+            "sub rsp, 24\nvmovups xmmword ptr [rsp], xmm0\ncall rdi\nvmovups xmm0, xmmword ptr [rsp]\nadd rsp, 24\nret",
         ),
         // A call at an address with no functions given passes and takes back a float as an xmm, as it moves it: its
         // callee takes and gives back no ymm. A call that `ret` follows is a jump; one that is not writes no
@@ -2835,8 +2887,8 @@ fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() {
             "fp: u64, a: f32, b: f32",
             " -> f32",
             "let v: xmm; call(v, fp, (b)); vaddss(v, v, a); ret(v);",
-            "push rbp\nmov rbp, rsp\nsub rsp, 16\nand rsp, -16\nvmovups xmmword ptr [rsp], xmm0\nvmovaps xmm0, xmm1\n\
-             call rdi\nvmovups xmm1, xmmword ptr [rsp]\nvaddss xmm0, xmm0, xmm1\nmov rsp, rbp\npop rbp\nret",
+            "sub rsp, 24\nvmovups xmmword ptr [rsp], xmm0\nvmovaps xmm0, xmm1\ncall rdi\nvmovups xmm1, xmmword ptr \
+             [rsp]\nvaddss xmm0, xmm0, xmm1\nadd rsp, 24\nret",
         ),
         // `vzeroupper`: an instruction on all of a ymm, which its variable is moved and spilled as; a call at an
         // address with no functions given that gives back all of a ymm, or is passed one and has more after it; and the
@@ -3043,24 +3095,24 @@ fn vzeroupper_goes_where_a_way_to_it_may_have_set_an_upper_half() {
             " -> u64",
             "let (v, r): (ymm, gpr); call(fp, ()); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); add(a, b); \
              add(a, c); add(a, d); add(b, c); add(b, d); add(c, d); add(a, b); call(r, fp, (a)); ret(r);",
-            "push rbx\npush r12\npush r13\npush r14\npush r15\npush rbp\nmov rbp, rsp\nsub rsp, 8\nmov qword ptr \
-             [rsp], r9\nmov rbx, r8\nmov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\nmov rax, qword ptr \
-             [rsp]\ncall rax\nvmovups ymm0, ymmword ptr [r15]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [r15], \
-             ymm0\nadd r14, r13\nadd r14, r12\nadd r14, rbx\nadd r13, r12\nadd r13, rbx\nadd r12, rbx\nadd r14, \
-             r13\nmov rdi, r14\nmov rax, qword ptr [rsp]\nmov rsp, rbp\npop rbp\npop r15\npop r14\npop r13\npop \
-             r12\npop rbx\nvzeroupper\njmp rax",
+            "push rbx\npush r12\npush r13\npush r14\npush r15\nsub rsp, 16\nmov qword ptr [rsp], r9\nmov rbx, r8\n\
+             mov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\nmov rax, qword ptr [rsp]\ncall rax\n\
+             vmovups ymm0, ymmword ptr [r15]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [r15], ymm0\n\
+             add r14, r13\nadd r14, r12\nadd r14, rbx\nadd r13, r12\nadd r13, rbx\nadd r12, rbx\nadd r14, r13\n\
+             mov rdi, r14\nmov rax, qword ptr [rsp]\nadd rsp, 16\npop r15\npop r14\npop r13\npop r12\npop rbx\n\
+             vzeroupper\njmp rax",
         ),
         (
             "p: *mut f32, a: u64, b: u64, c: u64, d: u64, fp: u64",
             " -> u64",
             "let (v, r): (ymm, gpr); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); call(fp, ()); add(a, b); \
              add(a, c); add(a, d); add(b, c); add(b, d); add(c, d); add(a, p); call(r, fp, (a)); ret(r);",
-            "push rbx\npush r12\npush r13\npush r14\npush r15\npush rbp\nmov rbp, rsp\nsub rsp, 8\nmov qword ptr \
-             [rsp], r9\nmov rbx, r8\nmov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\nvmovups ymm0, ymmword ptr \
-             [r15]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [r15], ymm0\nmov rax, qword ptr [rsp]\nvzeroupper\n\
+            "push rbx\npush r12\npush r13\npush r14\npush r15\nsub rsp, 16\nmov qword ptr [rsp], r9\nmov rbx, r8\n\
+             mov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\nvmovups ymm0, ymmword ptr [r15]\n\
+             vaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [r15], ymm0\nmov rax, qword ptr [rsp]\nvzeroupper\n\
              call rax\nadd r14, r13\nadd r14, r12\nadd r14, rbx\nadd r13, r12\nadd r13, rbx\nadd r12, rbx\nadd r14, \
-             r15\nmov rdi, r14\nmov rax, qword ptr [rsp]\nmov rsp, rbp\npop rbp\npop r15\npop r14\npop r13\npop r12\n\
-             pop rbx\njmp rax",
+             r15\nmov rdi, r14\nmov rax, qword ptr [rsp]\nadd rsp, 16\npop r15\npop r14\npop r13\npop r12\npop rbx\n\
+             jmp rax",
         ),
     ];
     for (params, ret, body, want) in cases {
