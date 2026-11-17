@@ -60,6 +60,8 @@ pub fn module<N: Native, D: Device>(
     let (mut items, mut codes, mut symbols, mut first) = (vec![], vec![], vec![], None);
     // The item each code of the GPU's module is of, and each static.
     let (mut code_items, mut static_items) = (vec![], vec![]);
+    // What compiling each instance of a function the process runs gave, so that none is compiled twice.
+    let mut done = vec![];
     for item in &m.items {
         let f = match &item.kind {
             ItemKind::Const(_) if item.tokens.start < before => {
@@ -110,7 +112,7 @@ pub fn module<N: Native, D: Device>(
         if abi.native() {
             let mut instances = vec![];
             for args in listed {
-                match compile(m, &n, native, f, &args) {
+                match compile(m, &n, native, f, &args, &mut done) {
                     Ok(k) => {
                         k.mentions.into_iter().for_each(|at| Mention::record(&mut mentions, at));
                         instances.push(NativeInstance { args, naked: native.naked(&k.code), calls: vec![] });
@@ -138,7 +140,7 @@ pub fn module<N: Native, D: Device>(
         first.get_or_insert(f.span);
         let mut compiled = vec![];
         for args in listed {
-            match compile(m, &d, device, f, &args) {
+            match compile(m, &d, device, f, &args, &mut vec![]) {
                 Ok(k) => {
                     k.mentions.into_iter().for_each(|at| Mention::record(&mut mentions, at));
                     compiled.push((args, k.code));

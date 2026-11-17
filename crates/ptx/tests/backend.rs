@@ -43,7 +43,7 @@ fn ptx_compiles_a_kernel_through_the_port() {
     let module = kernite_lang::parse(src).unwrap();
     let ptx = Ptx::new("7kernite3gpu");
     let counts = lay_out(&ptx, &module, "COUNTS").unwrap();
-    let count = ptx.finish(written(&ptx, &module, "count", std::slice::from_ref(&counts), &[])).unwrap();
+    let count = ptx.finish(written(&ptx, &module, "count", std::slice::from_ref(&counts), &[]), &[]).unwrap();
     assert_eq!(ptx.symbol(&count), "_ZN7kernite3gpu5countE");
     let host =
         DeviceStatic { symbol: "_ZN7kernite3gpu6COUNTSE".into(), ty: "global<[b32; 4]>".into(), host: "u32".into() };
@@ -132,8 +132,8 @@ fn a_function_the_kernels_call_is_a_func() {
     assert_eq!(callee("nothing"), None);
     let (_, args, _) = kernite_build::instance(&module, "times::<2>").unwrap().unwrap();
     let called = Called { name: "times::<2>".into(), function: "times".into(), args, callee: calls };
-    let times = ptx.finish(written(&ptx, &module, "times::<2>", &[], &[])).unwrap();
-    let k = ptx.finish(written(&ptx, &module, "k::<1>", &[], &[called])).unwrap();
+    let times = ptx.finish(written(&ptx, &module, "times::<2>", &[], &[]), &[]).unwrap();
+    let k = ptx.finish(written(&ptx, &module, "k::<1>", &[], &[called]), &[]).unwrap();
     assert_eq!([&times.name, &k.name], ["times::<2>", "k::<1>"]);
     let want = "// Written by kernite.
 
@@ -194,7 +194,7 @@ fn each_refusal_says_what_to_blame() {
     // Where `x` is declared: a byte of the source, as a string's spans are.
     let at = Some(Span(src.find("x: u32").unwrap() as u32));
     let unfinished = Unfinished { at, message: "`x` is read before anything writes it".into() };
-    assert_eq!(ptx.finish(written(&ptx, &module, "unwritten", &[], &[])), Err(unfinished));
+    assert_eq!(ptx.finish(written(&ptx, &module, "unwritten", &[], &[]), &[]), Err(unfinished));
 }
 
 /// A mask of lanes that leaves out lane 0, on an instruction that thread 0 runs, is refused when
@@ -222,8 +222,8 @@ fn a_mask_without_lane_0_is_refused_at_its_instruction() {
     let message = "`bar.warp.sync` is run by thread 0, which is in lane 0; this mask leaves lane 0 out, and PTX \
                    leaves the instruction undefined in a thread outside its mask";
     let unfinished = Unfinished { at, message: message.into() };
-    assert_eq!(ptx.finish(written(&ptx, &module, "masked", &[], &[])), Err(unfinished));
-    assert!(ptx.finish(written(&ptx, &module, "guarded", &[], &[])).is_ok());
+    assert_eq!(ptx.finish(written(&ptx, &module, "masked", &[], &[]), &[]), Err(unfinished));
+    assert!(ptx.finish(written(&ptx, &module, "guarded", &[], &[]), &[]).is_ok());
 }
 
 /// The instruction `st.global.u32` over an `f32` variable, which the target refuses.

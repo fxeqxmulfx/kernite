@@ -1,26 +1,16 @@
 # sum16(gpr) -> vec
 # needs: avx
-# frame: 32 bytes aligned to 32, saves [rbx]
-# low, spilled: 32 bytes at rsp
-# xs=rbx,rdi high=ymm0 low=ymm0,ymm1
-    push rbx
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32
-    and rsp, -32
-    mov rbx, rdi
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# xs=rax,rdi low=ymm2,ymm0 high=ymm0
+    sub rsp, 8
+    mov rax, rdi
     call {f0}
-    # low spilled
-    vmovups ymmword ptr [rsp], ymm0
-    add rbx, 32
-    mov rdi, rbx
+    vmovaps ymm2, ymm0
+    add rax, 32
+    mov rdi, rax
     call {f0}
-    # low reloaded
-    vmovups ymm1, ymmword ptr [rsp]
-    vaddss xmm0, xmm1, xmm0
-    mov rsp, rbp
-    pop rbp
-    pop rbx
+    vaddss xmm0, xmm2, xmm0
+    add rsp, 8
     vzeroupper
     ret
 # f0: sum8

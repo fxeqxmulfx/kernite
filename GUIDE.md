@@ -545,8 +545,21 @@ for the grid, not renamed in `Cargo.toml`. kernite says at the kernel when it ha
 A kernel calls the module's others, itself among them, as SysV calls a function: `call(g, gcd, (a, b))` moves `a` to
 `rdi` and `b` to `rsi`, and `g` from `rax`, and is checked against what `gcd` takes and returns. `lea(fp, [gcd])` takes
 an address to call at, `call(g, fp, (a, b), (gcd, sum))`, checked against each function given. A value alive across a
-call is kept in a register the callee leaves as it was, `rbx` or `r12` to `r15`, which the kernel saves for its own
-caller; a vector spills, since the callee may change any. The stack pointer is a multiple of 16 at each call. A kernel
+call is kept in a register the call does not change. A call changes the registers its callee writes and does not
+restore, and those of each function the callee calls, by name or at an address with the functions it may reach given.
+kernite cannot check that the address is that of one of them, and trusts it: a value alive across the call is kept in a
+register none of them changes, which another function may change. So `gcds`, which calls `gcd` in a loop, keeps its
+values in registers `gcd` does not write, and saves none for its own caller. A call at an address with no functions
+given may reach any function, and one that comes back to the function it is in, as `gcd`'s call of `gcd`, reaches code
+that is not compiled yet: each changes every register SysV lets a callee change, so an integer alive across it is kept
+in `rbx` or `r12` to `r15`, which every callee leaves as it was, and which the kernel saves for its own caller, and a
+vector spills. A vector alive across any other call stays in a register none of the functions it may reach writes, as an
+integer does. But a function that runs `vzeroupper` clears the upper half of every vector register, and leaves the lower
+half: a vector of which an instruction after the call reads all, as one on all of a ymm does, spills, and one of which
+the kernel reads the lower half alone, an xmm or a float, stays in its register. So does one whose lower half the kernel
+writes before it reads all of it: an instruction that writes an xmm or a float clears the upper half of its ymm, even
+one that reads it too, as an FMA does. A vector that an address takes its indices from counts as read whole, though a
+gather of an xmm of indices reads its lower half alone. The stack pointer is a multiple of 16 at each call. A kernel
 writes `vzeroupper` before it returns where it may have set the upper half of a vector register, so that the SSE code of
 its caller does not pay for it. It may have where it runs an instruction on all of a ymm, or calls at an address with no
 functions given and passes a float or takes one back, which may be a vector. kernite moves and spills all of a vector

@@ -4,12 +4,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use kernite_compile::{Allocated, Frame};
-use kernite_core::{Access, Arg, Base, Class, Flow, Inst, Item, Label, Mem, Operand, PReg, Width};
+use kernite_core::{Access, Arg, Base, Class, Clobber, Flow, Inst, Item, Label, Mem, Operand, PReg, Width};
 
 use crate::forms::{self, Feature};
 use crate::op::Op;
 use crate::operand::number;
-use crate::sysv::{PAGE, R11, RBP, RSP};
+use crate::sysv::{CALL_CLOBBERS, PAGE, R11, RBP, RSP};
 
 /// An allocated kernel with its frame made instructions, as the printer prints it.
 #[derive(Debug)]
@@ -22,6 +22,10 @@ pub(crate) struct Lowered {
     pub(crate) padding: u32,
     /// Whether control returns: whether the kernel has a `ret`, though a jump to a callee may stand for it.
     pub(crate) returns: bool,
+    /// The registers a call of it changes that a caller does not keep, as `Listing::changes` says.
+    pub(crate) changes: Vec<PReg>,
+    /// Whether it runs `vzeroupper`, as `Listing::clears_upper` says.
+    pub(crate) clears_upper: bool,
 }
 
 /// `c` with its frame made instructions, as [`print`](crate::intel::print) says; or why not.
@@ -86,12 +90,14 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     let mut features: Vec<Feature> =
         insts(&code).filter_map(|inst| forms::feature(inst.op, &inst.args, &inst.implicit)).collect();
     let implies_avx = [Feature::Avx2, Feature::Fma, Feature::F16c];
-    if insts(&body).any(|inst| inst.op == Op::Vzeroupper) && !features.iter().any(|f| implies_avx.contains(f)) {
+    let clears_upper = insts(&body).any(|inst| inst.op == Op::Vzeroupper);
+    if clears_upper && !features.iter().any(|f| implies_avx.contains(f)) {
         features.push(Feature::Avx);
     }
     features.sort_by_key(|f| f.name());
     features.dedup();
-    Ok(Lowered { body, features, padding, returns })
+    let changes = insts(&body).flat_map(Inst::writes).filter(|r| CALL_CLOBBERS.contains(r)).collect::<BTreeSet<_>>();
+    Ok(Lowered { body, features, padding, returns, changes: changes.into_iter().collect(), clears_upper })
 }
 
 /// The calls of `code`, a body without its idle moves, that are jumps, by their places in it, each with the place of
@@ -160,7 +166,10 @@ fn without_idle(body: &[Item<Op, PReg>]) -> Vec<Item<Op, PReg>> {
                     continue;
                 }
                 let copied = copy.map(|(to, from)| (to, value(&holds, from)));
-                holds.extend(inst.writes().chain(inst.clobbers.iter().copied()).map(|r| (r, (i, r))));
+                let changed = inst.clobbers.iter().map(|c| match *c {
+                    Clobber::All(r) | Clobber::Upper(r) => r,
+                });
+                holds.extend(inst.writes().chain(changed).map(|r| (r, (i, r))));
                 holds.extend(copied);
             }
             Item::Label(_) => holds.clear(),
@@ -444,13 +453,15 @@ mod tests {
     #[test]
     fn a_move_into_a_register_that_holds_the_value_is_left_out() {
         let frame = Frame { saved: vec![], slots: vec![], offsets: vec![], size: 0, align: 0 };
-        let call = Item::Inst(Inst {
+        let call = Inst {
             op: Op::Call,
             args: vec![Arg { operand: Operand::Func(FuncId(0)), access: Access::Read }],
             implicit: vec![],
             flow: Flow::Next,
-            clobbers: vec![RCX],
-        });
+            clobbers: vec![Clobber::All(RCX)],
+        };
+        let clears = Item::Inst(Inst { clobbers: vec![Clobber::Upper(YMM0)], ..call.clone() });
+        let call = Item::Inst(call);
         let (rax_rcx, rcx_rax) = (mov(Op::Mov, RAX, RCX, Width::W64), mov(Op::Mov, RCX, RAX, Width::W64));
         let cases = [
             // The value of rcx is in rax and in rbx, so a move back, or one between the two, is left out.
@@ -468,7 +479,7 @@ mod tests {
                 "vmovaps ymm1, ymm0\nvzeroupper",
             ),
             // A register that was written since, the one read or the one written, by a move, by another instruction or
-            // by a call, holds another value.
+            // by a call, all of it or its upper half, holds another value.
             (
                 vec![rax_rcx.clone(), mov(Op::Mov, RAX, RBX, Width::W64), rcx_rax.clone()],
                 "mov rax, rcx\nmov rax, rbx\nmov rcx, rax",
@@ -488,6 +499,10 @@ mod tests {
             (
                 vec![rax_rcx.clone(), call.clone(), rcx_rax.clone()],
                 "sub rsp, 8\nmov rax, rcx\ncall {f0}\nmov rcx, rax\nadd rsp, 8",
+            ),
+            (
+                vec![mov(Op::Vmovaps, YMM1, YMM0, Width::W256), clears, mov(Op::Vmovaps, YMM0, YMM1, Width::W256)],
+                "sub rsp, 8\nvmovaps ymm1, ymm0\ncall {f0}\nvmovaps ymm0, ymm1\nadd rsp, 8\nvzeroupper",
             ),
             // A label may be reached from where they differ, and a move of 32 bits is no copy.
             (vec![rax_rcx.clone(), Item::Label(Label(0)), rcx_rax.clone()], "mov rax, rcx\n2:\nmov rcx, rax"),

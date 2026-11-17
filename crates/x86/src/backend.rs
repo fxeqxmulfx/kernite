@@ -1,13 +1,17 @@
 //! x86-64 under SysV as kernite-build sees it: a machine whose kernels Rust calls in the process.
 
+use std::collections::BTreeSet;
+
 use kernite_build::{
-    Abi, Backend, Bytes, Called, HostStatic, Naked, Native, StaticError, Unfinished, abi, cooperative,
+    Abi, Backend, Bytes, Called, Done, HostStatic, Naked, Native, StaticError, Unfinished, abi, cooperative,
 };
+use kernite_core::Clobber;
 use kernite_lang::{Fn, Memory, Value};
 
 use crate::SysV;
 use crate::intel::{self, Listing};
 use crate::lang::{Callee, Kernel, Prototype, Static};
+use crate::sysv::{CALL_CLOBBERS, VECS};
 
 /// x86-64 under SysV: kernels in Intel syntax, as naked functions Rust calls, and the module's
 /// memory, which Rust lays out in the process.
@@ -67,13 +71,43 @@ impl Backend for X86 {
         kernel
     }
 
-    fn finish(&self, mut kernel: Kernel) -> Result<Listing, Unfinished> {
+    fn calls(&self, kernel: &Kernel) -> Vec<String> {
+        kernel.calls().map(Into::into).collect()
+    }
+
+    fn finish(&self, mut kernel: Kernel, done: &[Done<Listing>]) -> Result<Listing, Unfinished> {
         let decls = std::mem::take(&mut kernel.decls);
         let reach = std::mem::take(&mut kernel.reach);
-        let allocated = kernite_compile::compile(&kernel.finish(), &SysV)
+        let any = kernel.reaches_any();
+        let allocated = kernite_compile::compile(&kernel.finish(|called| changed_by(called, done)), &SysV)
             .map_err(|e| Unfinished::blaming(e.var(), &decls, e.to_string()))?;
-        intel::print(&allocated, reach).map_err(|message| Unfinished { at: None, message })
+        let mut listing = intel::print(&allocated, reach).map_err(|message| Unfinished { at: None, message })?;
+        if any {
+            listing.changes = CALL_CLOBBERS.to_vec();
+        }
+        Ok(listing)
     }
+}
+
+/// What a call of the functions `called`, each by what the source calls it, does to registers, as the listings of
+/// `done` say: it changes those that each changes, and each function it calls in turn, counted once however often it is
+/// called, itself among them; and clears the upper half of each vector register if one of them runs `vzeroupper`. None
+/// if a function has no listing, for what it does is not known.
+fn changed_by(called: &[String], done: &[Done<Listing>]) -> Option<Vec<Clobber>> {
+    let (mut seen, mut changes, mut clears) = (vec![], BTreeSet::new(), false);
+    let mut todo = called.iter().collect::<Vec<_>>();
+    while let Some(name) = todo.pop() {
+        if seen.contains(&name) {
+            continue;
+        }
+        seen.push(name);
+        let listing = &done.iter().find(|(done, _)| done == name)?.1.as_ref().ok()?.code;
+        changes.extend(&listing.changes);
+        clears |= listing.clears_upper;
+        todo.extend(listing.funcs.iter().chain(&listing.reach));
+    }
+    let upper = VECS.iter().filter(|_| clears);
+    Some(changes.into_iter().copied().map(Clobber::All).chain(upper.copied().map(Clobber::Upper)).collect())
 }
 
 impl Native for X86 {

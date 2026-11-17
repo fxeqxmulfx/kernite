@@ -56,7 +56,7 @@ const GPRS: [PReg; 14] = [
     gpr(15),
 ];
 
-const VECS: [PReg; 16] = [
+pub(crate) const VECS: [PReg; 16] = [
     vec(0),
     vec(1),
     vec(2),

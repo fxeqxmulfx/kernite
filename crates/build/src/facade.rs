@@ -48,7 +48,7 @@ pub fn one<'a, N: Native>(
         Some(_) => {}
     }
     let Some((_, args, _)) = found else { return Ok(Err(Absent::Instance(&f.name))) };
-    let compiled = compile(module, &prepared, native, f, &args)?;
+    let compiled = compile(module, &prepared, native, f, &args, &mut vec![])?;
     rules(module)?;
     Ok(Ok(compiled))
 }
@@ -75,7 +75,7 @@ pub fn all<D: Device>(module: &Module, device: &D) -> Result<Result<String, Stri
         }
         attributes(f)?;
         for args in kernite_lang::instances(module, f)? {
-            codes.push(compile(module, &prepared, device, f, &args)?.code);
+            codes.push(compile(module, &prepared, device, f, &args, &mut vec![])?.code);
         }
     }
     let made = device.module(&codes, &prepared.made).whole();

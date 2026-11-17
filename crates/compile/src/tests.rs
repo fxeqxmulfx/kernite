@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use kernite_core::{
-    Access, Arg, Base, Class, Flow, Imm, Inst, Item, Label, Mem, Operand, PReg, Program, RegInfo, Register, Signature,
-    Slot, SlotId, VReg, Width,
+    Access, Arg, Base, Class, Clobber, Flow, Imm, Inst, Item, Label, Mem, Operand, PReg, Program, RegInfo, Register,
+    Signature, Slot, SlotId, VReg, Width,
 };
 
 use crate::{Allocated, Error, Machine, Spill, compile};
@@ -59,6 +59,9 @@ impl Spill<&'static str> for Toy {
     }
 }
 
+/// What a read at 32 bits sees of a register: its low half.
+const LOW: u64 = 0xffff_ffff;
+
 /// The FNV hash of `values`, which `op` and `call` write.
 fn hash(values: impl IntoIterator<Item = u64>) -> u64 {
     values.into_iter().fold(0xcbf2_9ce4_8422_2325u64, |h, x| (h ^ x).wrapping_mul(0x100_0000_01b3))
@@ -66,15 +69,16 @@ fn hash(values: impl IntoIterator<Item = u64>) -> u64 {
 
 /// What `body` returns, run from registers that hold `params` and `slots` slots of memory
 /// that hold zero: `op` writes a hash of its immediate and the registers it reads, `add` adds
-/// the second to the first, `dec` takes one from its register and jumps unless that leaves
-/// zero, `load` and `store` move a register's value to a slot and back, `copy` moves one to
-/// another, `call` writes a hash of the arguments it reads to its result, if it has one, and
-/// `ret` returns what it reads. Reading a register nothing wrote, or running past ten thousand
-/// instructions, panics.
+/// the second to the first, `add32` adds the low halves, 32 bits, of the two to the first's and clears its upper half,
+/// `dec` takes one from its register and jumps unless that leaves zero, `load` and `store` move a register's value to a
+/// slot and back, `copy` moves one to another, `call` writes a hash of the arguments it reads to its result, if it has
+/// one, and `ret` returns what it reads. A read at 32 bits sees the low half of a register. Reading a register nothing
+/// wrote, or running past ten thousand instructions, panics.
 ///
 /// A call writes junk to each of the machine's registers it changes, its `clobbers`, that
-/// `reg` says is a register of `R`'s, as a callee may; the result goes in after. So a value
-/// kept in one across a call is lost, and the run returns something else.
+/// `reg` says is a register of `R`'s, as a callee may, or to the upper half of one it clears that of; the result goes
+/// in after. So a value kept in one across a call is lost, or its upper half is, and the run returns something else if
+/// the value is read after.
 fn run<R: Register + Ord>(
     body: &[Item<&'static str, R>],
     params: &[(R, u64)],
@@ -92,7 +96,10 @@ fn run<R: Register + Ord>(
             continue;
         };
         let value = |a: &Arg<R>, regs: &BTreeMap<R, u64>| match a.operand {
-            Operand::Reg(r, _) => *regs.get(&r).unwrap_or_else(|| panic!("{r:?} is read before anything writes it")),
+            Operand::Reg(r, w) => {
+                let all = *regs.get(&r).unwrap_or_else(|| panic!("{r:?} is read before anything writes it"));
+                if w == Width::W32 { all & LOW } else { all }
+            }
             Operand::Mem(Mem { base: Base::Slot(s), .. }) => mem[s.0 as usize],
             Operand::Imm(imm) => imm.value as u64,
             _ => unreachable!("the toy has no {:?}", a.operand),
@@ -112,6 +119,10 @@ fn run<R: Register + Ord>(
                 let sum = value(&inst.args[0], &regs).wrapping_add(value(&inst.args[1], &regs));
                 regs.insert(reg_of(&inst.args[0]), sum);
             }
+            "add32" => {
+                let sum = value(&inst.args[0], &regs) + value(&inst.args[1], &regs);
+                regs.insert(reg_of(&inst.args[0]), sum & LOW);
+            }
             "dec" => {
                 let left = value(&inst.args[0], &regs) - 1;
                 regs.insert(reg_of(&inst.args[0]), left);
@@ -128,9 +139,20 @@ fn run<R: Register + Ord>(
             "call" => {
                 let h = hash(inst.implicit.iter().filter(|a| a.access == Access::Read).map(|a| value(a, &regs)));
                 calls += 1;
-                for (k, &c) in inst.clobbers.iter().enumerate() {
-                    if let Some(c) = reg(c) {
-                        regs.insert(c, 0xdead_0000 + calls * 64 + k as u64);
+                for (k, &clobber) in inst.clobbers.iter().enumerate() {
+                    let junk = 0xdead_0000 + calls * 64 + k as u64;
+                    match clobber {
+                        Clobber::All(c) => {
+                            if let Some(c) = reg(c) {
+                                regs.insert(c, junk);
+                            }
+                        }
+                        Clobber::Upper(c) => {
+                            if let Some(c) = reg(c) {
+                                let low = regs.get(&c).map_or(0, |v| v & LOW);
+                                regs.insert(c, junk << 32 | low);
+                            }
+                        }
                     }
                 }
                 if let Some(result) = inst.implicit.iter().find(|a| a.access == Access::Write) {
@@ -183,6 +205,11 @@ fn toy(n: u8, saved: &[u8]) -> Toy {
     Toy { gpr: (0..n).map(r).collect(), saved: saved.iter().map(|&h| r(h)).collect() }
 }
 
+/// What a call does that clears the upper halves of the registers `hws` and leaves the lower.
+fn upper(hws: &[u8]) -> Vec<Clobber> {
+    hws.iter().map(|&h| Clobber::Upper(r(h))).collect()
+}
+
 struct Builder(Program<&'static str>, i64);
 
 impl Builder {
@@ -224,11 +251,28 @@ impl Builder {
 
     /// `dst = op(srcs)`, with an immediate of its own, so that no two compute the same.
     fn def(&mut self, dst: VReg, srcs: &[VReg]) {
+        self.def_at(Width::W64, dst, srcs);
+    }
+
+    /// [`def`](Builder::def) at 32 bits: it reads the low half of each of `srcs`, and writes `dst`, all of it.
+    fn def_low(&mut self, dst: VReg, srcs: &[VReg]) {
+        self.def_at(Width::W32, dst, srcs);
+    }
+
+    /// `dst = op(srcs)`, as [`def`](Builder::def), but for the width each is read or written at.
+    fn def_at(&mut self, width: Width, dst: VReg, srcs: &[VReg]) {
         self.1 += 1;
-        let mut args = vec![reg_arg(dst, Access::Write)];
+        let arg = |v, access| Arg { operand: Operand::Reg(v, width), access };
+        let mut args = vec![arg(dst, Access::Write)];
         args.push(Arg { operand: Operand::Imm(Imm { value: self.1, hex: false }), access: Access::Read });
-        args.extend(srcs.iter().map(|&s| reg_arg(s, Access::Read)));
+        args.extend(srcs.iter().map(|&s| arg(s, Access::Read)));
         self.0.body.push(Item::Inst(plain("op", args)));
+    }
+
+    /// `dst`'s low half added to, which clears its upper half: a write of part of a register that reads what was there.
+    fn add_low(&mut self, dst: VReg, src: VReg) {
+        let arg = |v, access| Arg { operand: Operand::Reg(v, Width::W32), access };
+        self.0.body.push(Item::Inst(plain("add32", vec![arg(dst, Access::ReadWrite), arg(src, Access::Read)])));
     }
 
     /// A call that changes the registers `clobbers`, as a machine's code makes one: each of
@@ -236,6 +280,11 @@ impl Builder {
     /// result, if `dst` says where it goes, given back in a variable pinned in the register
     /// given with it and copied to `dst`.
     fn call(&mut self, dst: Option<(VReg, u8)>, args: &[(VReg, u8)], clobbers: &[u8]) {
+        self.call_with(dst, args, clobbers.iter().map(|&h| Clobber::All(r(h))).collect());
+    }
+
+    /// [`call`](Builder::call) that does to registers what `clobbers` says.
+    fn call_with(&mut self, dst: Option<(VReg, u8)>, args: &[(VReg, u8)], clobbers: Vec<Clobber>) {
         let mut implicit = vec![];
         for &(a, hw) in args {
             let name = self.0.regs[a.id as usize].name.clone();
@@ -251,7 +300,6 @@ impl Builder {
             implicit.push(reg_arg(pinned, Access::Write));
             (d, pinned)
         });
-        let clobbers = clobbers.iter().map(|&h| r(h)).collect();
         self.0.body.push(Item::Inst(Inst { op: "call", args: vec![], implicit, flow: Flow::Next, clobbers }));
         if let Some((d, pinned)) = back {
             self.0.body.push(Item::Inst(Toy::copy(&toy(0, &[]), d, pinned)));
@@ -615,6 +663,92 @@ fn a_value_live_across_a_call_that_changes_every_register_spills() {
     let c = same(&b.0, &toy(3, &[]), &[]);
     assert_eq!(spilled(&c), ["x"]);
     assert_eq!(ops(&c), ["op", "store", "call", "load", "op", "ret"]);
+}
+
+#[test]
+fn a_value_live_across_a_call_that_clears_upper_halves_spills_if_all_of_it_is_read_after() {
+    let mut b = Builder::new();
+    let (x, y) = (b.var("x"), b.var("y"));
+    b.def(x, &[]);
+    b.call_with(None, &[], upper(&[0, 1, 2]));
+    b.def(y, &[x]);
+    b.ret(y, 0);
+    // The run puts junk in the upper half of each register, so one that kept `x` would return another value.
+    let c = same(&b.0, &toy(3, &[]), &[]);
+    assert_eq!(spilled(&c), ["x"]);
+    assert_eq!(ops(&c), ["op", "store", "call", "load", "op", "ret"]);
+}
+
+#[test]
+fn a_value_live_across_a_call_that_clears_upper_halves_stays_in_a_register_if_its_lower_half_is_read_after() {
+    let mut b = Builder::new();
+    let (x, y) = (b.var("x"), b.var("y"));
+    b.def(x, &[]);
+    b.call_with(None, &[], upper(&[0, 1, 2]));
+    b.def_low(y, &[x]);
+    b.ret(y, 0);
+    let c = same(&b.0, &toy(3, &[]), &[]);
+    assert!(spilled(&c).is_empty());
+    assert_eq!(ops(&c), ["op", "call", "op", "ret"]);
+}
+
+#[test]
+fn a_read_of_all_of_a_value_before_a_call_that_clears_upper_halves_does_not_spill_it() {
+    let mut b = Builder::new();
+    let (x, y, z) = (b.var("x"), b.var("y"), b.var("z"));
+    b.def(x, &[]);
+    b.def(y, &[x]);
+    b.call_with(None, &[], upper(&[0, 1, 2]));
+    b.def_low(z, &[x, y]);
+    b.ret(z, 0);
+    let c = same(&b.0, &toy(3, &[]), &[]);
+    assert!(spilled(&c).is_empty());
+}
+
+#[test]
+fn a_value_is_spilled_if_a_path_after_a_call_that_clears_upper_halves_reads_all_of_it() {
+    // The path where `dec` falls through adds `x` to `n`; the other does not read it.
+    let mut b = Builder::new();
+    let n = b.param("n", 0);
+    let x = b.var("x");
+    b.def(x, &[]);
+    b.call_with(None, &[], upper(&[1, 2]));
+    b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+    b.inst("add", &[(n, Access::ReadWrite), (x, Access::Read)], Flow::Next);
+    b.label(1);
+    b.ret(n, 0);
+    for arg in [1, 2] {
+        assert_eq!(spilled(&same(&b.0, &toy(3, &[]), &[arg])), ["x"], "for {arg}");
+    }
+}
+
+#[test]
+fn a_write_of_all_of_a_value_after_a_call_that_clears_upper_halves_ends_the_need_for_its_upper_half() {
+    // The first `x` has its lower half read after the call; the upper half read after that is of the second, which a
+    // write of 32 bits replaces all of.
+    let mut b = Builder::new();
+    let (x, t, y) = (b.var("x"), b.var("t"), b.var("y"));
+    b.def(x, &[]);
+    b.call_with(None, &[], upper(&[0, 1, 2]));
+    b.def_low(t, &[x]);
+    b.def_low(x, &[t]);
+    b.def(y, &[x]);
+    b.ret(y, 0);
+    assert!(spilled(&same(&b.0, &toy(3, &[]), &[])).is_empty());
+}
+
+#[test]
+fn a_write_of_part_of_a_value_after_a_call_that_clears_upper_halves_ends_the_need_for_its_upper_half() {
+    // `add32` reads the lower halves of `x` and `z`, and clears the upper half of `x`, which `op` reads after.
+    let mut b = Builder::new();
+    let (x, y, z) = (b.var("x"), b.var("y"), b.var("z"));
+    b.def(x, &[]);
+    b.def(z, &[]);
+    b.call_with(None, &[], upper(&[0, 1, 2]));
+    b.add_low(x, z);
+    b.def(y, &[x]);
+    b.ret(y, 0);
+    assert!(spilled(&same(&b.0, &toy(3, &[]), &[])).is_empty());
 }
 
 #[test]

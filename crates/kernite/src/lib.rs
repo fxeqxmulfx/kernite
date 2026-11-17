@@ -65,7 +65,7 @@ use kernite_x86::lang::Static as X86Static;
 /// module's memory, its statics, as [`x86_statics`] has them, which its listing names in
 /// [`Listing::statics`].
 pub fn x86(module: &Module, f: &Fn, args: &[Value]) -> Result<Compiled<Listing>, kernite_lang::Error> {
-    compile(module, &prepare(module, &X86), &X86, f, args)
+    compile(module, &prepare(module, &X86), &X86, f, args, &mut vec![])
 }
 
 /// The statics of `module`, its memory in the process's, in order, for its x86 kernels to name
@@ -119,7 +119,7 @@ pub fn x86_str(src: &str, name: &str) -> Result<Listing, String> {
 /// that is [`cooperative`] may wait for its grid, `grid.sync()`.
 pub fn ptx(module: &Module, f: &Fn, args: &[Value], scope: &str) -> Result<Compiled<Entry>, kernite_lang::Error> {
     let machine = Ptx::new(scope);
-    compile(module, &prepare(module, &machine), &machine, f, args)
+    compile(module, &prepare(module, &machine), &machine, f, args, &mut vec![])
 }
 
 /// `path`, the namespaces a module's PTX kernels are in for [`ptx`], each in the one before:

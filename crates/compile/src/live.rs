@@ -1,10 +1,10 @@
 //! Liveness: which variables are live where, and which interfere.
 
-use kernite_core::{Arg, Item, PReg, Program, VReg};
+use kernite_core::{Arg, Clobber, Inst, Item, Operand, PReg, Program, VReg};
 
-use crate::Error;
 use crate::bits::Bits;
 use crate::cfg::{self, Block};
+use crate::{Error, Spill};
 
 /// Which variables are live where, block by block: at the top of each and at the bottom.
 pub(crate) struct Live {
@@ -12,11 +12,14 @@ pub(crate) struct Live {
     pub(crate) outs: Vec<Bits>,
 }
 
+/// What an instruction touches: the variables it reads, and the variables it writes.
+type Touches = (Vec<VReg>, Vec<VReg>);
+
 /// The body's blocks and what is live at their edges, once control is known to stay inside
 /// the body and every variable but the parameters to be written before any path reads it.
 pub(crate) fn analyse<Op>(p: &Program<Op>) -> Result<(Vec<Block>, Live), Error> {
     let blocks = cfg::blocks(&p.body)?;
-    let live = liveness(p, &blocks);
+    let live = liveness(p, &blocks, &touched);
     let params: Vec<usize> = p.params.iter().map(|(v, _)| v.id as usize).collect();
     if let Some(i) = live.ins[0].iter().find(|i| !params.contains(i)) {
         return Err(Error::ReadBeforeWrite { var: p.regs[i].name.clone(), vreg: p.vreg(i) });
@@ -24,21 +27,51 @@ pub(crate) fn analyse<Op>(p: &Program<Op>) -> Result<(Vec<Block>, Live), Error> 
     Ok((blocks, live))
 }
 
-/// Solves liveness backwards to a fixed point. A block's reads of variables it has not
-/// written yet make them live at its top; its writes end the liveness that flows up from
-/// below.
-fn liveness<Op>(p: &Program<Op>, blocks: &[Block]) -> Live {
+/// Which variables are live where, as far as their upper halves go: a variable is live until an instruction writes it,
+/// if one after reads its upper half. See [`upper_touched`].
+pub(crate) fn upper_live<Op>(p: &Program<Op>, blocks: &[Block], s: &dyn Spill<Op>) -> Live {
+    liveness(p, blocks, &|inst| upper_touched(inst, s))
+}
+
+/// The variables whose upper halves `inst` reads, and those it writes. It reads the upper half of a variable where it
+/// reads all of its register, as `s` says how wide that is, and where it reads the registers of an address. It replaces
+/// the upper half of each it writes, though it writes part of it, as [`Clobber::Upper`] says.
+fn upper_touched<Op>(inst: &Inst<Op, VReg>, s: &dyn Spill<Op>) -> Touches {
+    let part = |arg: &&Arg<VReg>| matches!(arg.operand, Operand::Reg(v, width) if width < s.width(v.class));
+    (inst.operands().filter(|arg| !part(arg)).flat_map(Arg::reads).collect(), inst.writes().collect())
+}
+
+/// The variables `inst` reads and the variables it writes.
+fn touched<Op>(inst: &Inst<Op, VReg>) -> Touches {
+    (inst.reads().collect(), inst.writes().collect())
+}
+
+/// `now`, the variables live just after an instruction that reads `reads` and writes `writes`, as it is just before it:
+/// the ones it writes are not live, and the ones it reads are.
+fn before(now: &mut Bits, reads: &[VReg], writes: &[VReg]) {
+    for w in writes {
+        now.remove(w.id as usize);
+    }
+    for r in reads {
+        now.insert(r.id as usize);
+    }
+}
+
+/// Solves liveness backwards to a fixed point, as `touches` says what an instruction reads and writes. A block's reads
+/// of variables it has not written yet make them live at its top; its writes end the liveness that flows up from below.
+fn liveness<Op>(p: &Program<Op>, blocks: &[Block], touches: &dyn Fn(&Inst<Op, VReg>) -> Touches) -> Live {
     let n = p.regs.len();
     let (mut uses, mut defs) = (vec![Bits::new(n); blocks.len()], vec![Bits::new(n); blocks.len()]);
     for (b, block) in blocks.iter().enumerate() {
         for item in &p.body[block.items.clone()] {
             let Item::Inst(inst) = item else { continue };
-            for r in inst.reads() {
+            let (reads, writes) = touches(inst);
+            for r in reads {
                 if !defs[b].contains(r.id as usize) {
                     uses[b].insert(r.id as usize);
                 }
             }
-            for w in inst.writes() {
+            for w in writes {
                 defs[b].insert(w.id as usize);
             }
         }
@@ -69,8 +102,15 @@ fn liveness<Op>(p: &Program<Op>, blocks: &[Block]) -> Live {
 /// instruction writes against every other of its file live just after it, the ones written
 /// beside it included. And for each variable, the registers of its file that an instruction it
 /// is live across changes besides its operands, sorted: it is live after the instruction, which
-/// does not write it.
-pub(crate) fn interference<Op>(p: &Program<Op>, blocks: &[Block], live: &Live) -> (Vec<Bits>, Vec<Vec<PReg>>) {
+/// does not write it. One that clears only the upper half of a register changes it for a variable whose upper half is
+/// live after it, as `upper` says.
+pub(crate) fn interference<Op>(
+    p: &Program<Op>,
+    blocks: &[Block],
+    live: &Live,
+    upper: &Live,
+    s: &dyn Spill<Op>,
+) -> (Vec<Bits>, Vec<Vec<PReg>>) {
     let n = p.regs.len();
     let mut adj = vec![Bits::new(n); n];
     let mut changed: Vec<Vec<PReg>> = vec![vec![]; n];
@@ -81,14 +121,19 @@ pub(crate) fn interference<Op>(p: &Program<Op>, blocks: &[Block], live: &Live) -
         }
     };
     for (b, block) in blocks.iter().enumerate() {
-        let mut now = live.outs[b].clone();
+        let (mut now, mut high) = (live.outs[b].clone(), upper.outs[b].clone());
         for item in p.body[block.items.clone()].iter().rev() {
             let Item::Inst(inst) = item else { continue };
-            let writes: Vec<VReg> = inst.writes().collect();
-            if !inst.clobbers.is_empty() {
-                for l in now.iter().filter(|&l| writes.iter().all(|w| w.id as usize != l)) {
-                    let class = p.regs[l].class;
-                    changed[l].extend(inst.clobbers.iter().filter(|r| r.class == class));
+            let (reads, writes) = touched(inst);
+            for clobber in &inst.clobbers {
+                let (reg, alive) = match *clobber {
+                    Clobber::All(reg) => (reg, &now),
+                    Clobber::Upper(reg) => (reg, &high),
+                };
+                for l in alive.iter().filter(|&l| p.regs[l].class == reg.class) {
+                    if writes.iter().all(|w| w.id as usize != l) {
+                        changed[l].push(reg);
+                    }
                 }
             }
             for w in &writes {
@@ -99,12 +144,9 @@ pub(crate) fn interference<Op>(p: &Program<Op>, blocks: &[Block], live: &Live) -
                     edge(w.id as usize, other.id as usize);
                 }
             }
-            for w in &writes {
-                now.remove(w.id as usize);
-            }
-            for r in inst.reads() {
-                now.insert(r.id as usize);
-            }
+            before(&mut now, &reads, &writes);
+            let (reads, writes) = upper_touched(inst, s);
+            before(&mut high, &reads, &writes);
         }
     }
     for regs in &mut changed {

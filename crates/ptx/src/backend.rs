@@ -1,6 +1,6 @@
 //! PTX as kernite-build sees it: a machine whose kernels a driver loads as one module.
 
-use kernite_build::{Abi, Assembly, Backend, Called, Device, DeviceStatic, StaticError, Unfinished, abi};
+use kernite_build::{Abi, Assembly, Backend, Called, Device, DeviceStatic, Done, StaticError, Unfinished, abi};
 use kernite_lang::{Fn, Memory, Value};
 
 use crate::lang::{Callee, Kernel};
@@ -77,7 +77,7 @@ impl Backend for Ptx {
         kernel
     }
 
-    fn finish(&self, mut kernel: Kernel) -> Result<Entry, Unfinished> {
+    fn finish(&self, mut kernel: Kernel, _: &[Done<Entry>]) -> Result<Entry, Unfinished> {
         let decls = std::mem::take(&mut kernel.decls);
         let (masks, leaves) = (std::mem::take(&mut kernel.masks), std::mem::take(&mut kernel.leaves));
         let code = kernel.finish();
