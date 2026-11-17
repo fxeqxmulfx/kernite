@@ -69,7 +69,7 @@ pub struct HostStatic {
     /// What its address is a multiple of, a power of two.
     pub align: u64,
     /// Whether it is past `rip`'s reach, beside the statics before it that are in reach, so that the linker places it
-    /// in memory of its own, and a kernel takes its address from the slot the linker fills.
+    /// in memory of its own, which the static refers to, and a kernel takes its address from the static.
     pub far: bool,
     /// What it holds until something writes it, as bytes, the lowest first; zeros past their
     /// end.

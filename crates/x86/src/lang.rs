@@ -348,8 +348,8 @@ pub struct Static {
     /// What it holds until something writes it, as bytes, the lowest first; zeros past their
     /// end.
     pub init: Vec<u8>,
-    /// Whether it is far, past what is in reach of `rip`: it is [`place`](Static::place)d so. A kernel reaches it by
-    /// its address, which the linker fills.
+    /// Whether it is far, past what is in reach of `rip`: it is [`place`](Static::place)d so. To Rust a far static is a
+    /// reference to its memory, from which a kernel loads the address.
     pub far: bool,
 }
 
@@ -1300,10 +1300,6 @@ impl Kernel {
                 }
                 let memory = Region { name: &st.name, bytes: st.bytes(), align: st.align, ty: &st.ty };
                 self.within(memory, None, m.disp, kind, access, name)?;
-                if !st.far {
-                    let disp = i32::try_from(m.disp).expect("inside a static in reach of `rip`");
-                    return Ok(Mem { base: Base::Static(s), index: None, disp, width });
-                }
                 let held = &st.name;
                 let Ok(disp) = i32::try_from(m.disp) else {
                     return Err(format!(
@@ -1312,14 +1308,14 @@ impl Kernel {
                         m.disp, m.disp
                     ));
                 };
-                if kind != Kind::Addr {
+                if st.far && kind != Kind::Addr {
                     return Err(format!(
                         "x86 reaches memory of the module's past `rip`'s reach by its address, not at a displacement \
                          from `rip`: `lea(p, [{held}])` puts the address of `{held}` in `p`, and `[p]` is what it \
                          holds"
                     ));
                 }
-                return Ok(Mem { base: Base::Got(s), index: None, disp, width });
+                return Ok(Mem { base: Base::Static(s), index: None, disp, width });
             }
             _ => {}
         }
@@ -1828,12 +1824,13 @@ impl Target for Kernel {
         let shapes: Vec<Shape> = args.iter().map(operand_shape).collect();
         let form = forms::choose(forms, &shapes).map_err(|miss| missed(name, args, &shapes, &grid, miss))?;
         let (built, implicit) = self.build(form, args, name)?;
-        // The address of a static past `rip`'s reach: the register loads it from the slot that holds it, and goes on by
-        // the displacement.
+        // The address of a static past `rip`'s reach: the register loads it from the static, which holds it, and goes
+        // on by the displacement.
         if let [
             Arg { operand: Operand::Reg(p, width), .. },
-            Arg { operand: Operand::Mem(Mem { base: Base::Got(s), disp, .. }), .. },
+            Arg { operand: Operand::Mem(Mem { base: Base::Static(s), disp, .. }), .. },
         ] = built[..]
+            && self.statics[s.0 as usize].far
         {
             if width != W64 {
                 let held = &self.statics[s.0 as usize].name;
@@ -1847,7 +1844,7 @@ impl Target for Kernel {
             let to = Arg { operand: Operand::Reg(p, W64), access: Write };
             let from =
                 |base, disp| Arg { operand: Operand::Mem(Mem { base, index: None, disp, width: W64 }), access: Read };
-            self.push(Op::Mov, vec![to, from(Base::Got(s), 0)], vec![], Flow::Next);
+            self.push(Op::Mov, vec![to, from(Base::Static(s), 0)], vec![], Flow::Next);
             if disp != 0 {
                 self.push(Op::Lea, vec![to, from(Base::Reg(p), disp)], vec![], Flow::Next);
             }

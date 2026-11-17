@@ -1290,8 +1290,8 @@ fn a_static_is_reached_within_it() {
 }
 
 /// A static of more than 1073741824 bytes is far, past what is in reach of `rip`: a kernel takes its address, which the
-/// register loads from the slot the linker fills, and goes on by the displacement; and it names nothing of the static
-/// but that address.
+/// register loads from the static, a reference to its memory, and goes on by the displacement; and it names nothing of
+/// the static but that address.
 #[test]
 fn a_static_past_rips_reach_is_reached_by_its_address() {
     let statics = "static BIG: global<[u8; 3221225472]>;\nstatic C: global<[u32; 16]>;\n";
@@ -1300,12 +1300,12 @@ fn a_static_past_rips_reach_is_reached_by_its_address() {
                 lea(q, [BIG + 2147483647]); lea(q, [C + 8]); mov(q.r32, [C + 4]);";
     let code = kernite::x86_str(&src(body), "k").unwrap();
     let want = [
-        "mov rax, qword ptr [rip + {BIG}@GOTPCREL]",
+        "mov rax, qword ptr [rip + {BIG}]",
         "mov byte ptr [rax + 7], 1",
         "mov byte ptr [rax + rdi*1], 2",
-        "mov rax, qword ptr [rip + {BIG}@GOTPCREL]",
+        "mov rax, qword ptr [rip + {BIG}]",
         "lea rax, [rax + 8]",
-        "mov rax, qword ptr [rip + {BIG}@GOTPCREL]",
+        "mov rax, qword ptr [rip + {BIG}]",
         "lea rax, [rax + 2147483647]",
         "lea rax, [rip + {C} + 8]",
         "mov eax, dword ptr [rip + {C} + 4]",
@@ -1386,8 +1386,7 @@ fn a_static_after_others_is_past_rips_reach_where_they_make_more_than_a_gibibyte
     // With its address, as a static of more than a gibibyte has it, the kernel is compiled.
     let body = "let p: gpr; lea(p, [B + 1073741823]); mov(byte[p], 2);";
     let code = kernite::x86_str(&src(gib, body), "k").unwrap();
-    let want =
-        ["mov rax, qword ptr [rip + {B}@GOTPCREL]", "lea rax, [rax + 1073741823]", "mov byte ptr [rax], 2", "ret"];
+    let want = ["mov rax, qword ptr [rip + {B}]", "lea rax, [rax + 1073741823]", "mov byte ptr [rax], 2", "ret"];
     assert_eq!(code.code().collect::<Vec<_>>(), want);
     assert_eq!(code.statics, ["B"]);
     // A far static is the linker's, and holds zeros, so a value is an error at what it holds, of a table too.

@@ -243,9 +243,12 @@ fn list(names: &[String]) -> String {
 /// static as its type has it, holding zeros, if only what it holds is wrong; if not, `None`, and a
 /// `kernite_cpu::Stub` stands for it, which leaves the type of its elements to the code that uses
 /// it. In a crate without `kernite-cpu`, its type is [`missing`]'s, with the error that says so after it, under `cfg`,
-/// the static's own. A far static, past `rip`'s reach, is no more than a declaration in an `extern` block, which
-/// [`linked`] defines past the code and data in reach of `rip`: Rust would lay a static of its own out among them, and
-/// make it in time and memory that grow with its size. On a system that is not Linux, it is an error at its name.
+/// the static's own. A far static, past `rip`'s reach, is a reference to memory that [`linked`] defines past the code
+/// and data in reach of `rip`, and a static of an `extern` block declares: Rust would lay a static of its own out among
+/// them, and make it in time and memory that grow with its size. The kernels load the address from the reference. A
+/// crate of the `dylib` kind exports the reference, as it exports only the symbols that Rust defines, which the memory
+/// is not. What each static holds, a far one's reference and a stub too, is in a block with a `global_asm!` that makes
+/// its symbol protected: [`initializer`] says why. On a system that is not Linux, it is an error at its name.
 pub(crate) fn cpu_static(
     s: &lang::Static,
     made: Option<&HostStatic>,
@@ -256,11 +259,8 @@ pub(crate) fn cpu_static(
     let name = &top[s.vis.end + 1];
     let far = made.filter(|m| m.far && depends_on(CPU));
     let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
-    if far.is_some() {
-        out.extend(parse(&format!("#[link_name = concat!(module_path!(), \"::{}\")]", symbol(name))));
-    }
     out.extend(top[s.vis.clone()].iter().cloned());
-    out.extend(parse(if far.is_some() { "safe static" } else { "static" }));
+    out.extend(parse("static"));
     out.extend([name.clone()]);
     if !depends_on(CPU) {
         let (ty, error) = missing(cfg, name.span(), "a static of x86 kernels", CPU);
@@ -272,10 +272,13 @@ pub(crate) fn cpu_static(
     }
     let global = |m: &HostStatic| format!("::kernite_cpu::Global<{}, {}, {}>", primitive(&m.elem), m.len, m.align);
     if let Some(m) = far {
-        out.extend(parse(&format!(": {};", global(m))));
+        let sym = symbol(name);
+        let memory = format!("__kernite_{sym}");
+        out.extend(parse(&format!(": &'static {}", global(m))));
+        out.extend(initializer(name, &format!("&{memory}")));
         let under = |attr: &str| cfg.clone().into_iter().chain(parse(attr)).collect::<TokenStream>();
         let mut declared = under(r#"#[cfg(target_os = "linux")]"#);
-        declared.extend(linked(&symbol(name), m));
+        declared.extend(linked(&sym, m));
         let message = format!(
             "`{name}` is past what is in reach of `rip` beside the statics before it, and kernite defines such a \
              static for Linux's linker alone: build for Linux, or make the statics smaller"
@@ -283,20 +286,39 @@ pub(crate) fn cpu_static(
         declared.extend(error_under(&under(r#"#[cfg(not(target_os = "linux"))]"#), name.span(), &message));
         declared.extend(cfg.clone());
         declared.extend(parse("unsafe extern \"C\""));
-        declared.extend([TokenTree::Group(Group::new(Delimiter::Brace, out))]);
+        let item = format!("#[link_name = concat!(module_path!(), \"::{sym}\")] safe static {memory}: {};", global(m));
+        declared.extend([TokenTree::Group(Group::new(Delimiter::Brace, parse(&item)))]);
+        declared.extend(out);
         return declared;
     }
-    out.extend(parse(&match made {
+    let (ty, value) = match made {
         Some(m) => {
             let ty = global(m);
-            match m.init.iter().all(|&b| b == 0) {
-                true => format!(": {ty} = <{ty}>::zeroed();"),
-                false => format!(": {ty} = <{ty}>::new([{}]);", elements(m).join(", ")),
-            }
+            let value = match m.init.iter().all(|&b| b == 0) {
+                true => format!("<{ty}>::zeroed()"),
+                false => format!("<{ty}>::new([{}])", elements(m).join(", ")),
+            };
+            (ty, value)
         }
-        None => ": ::kernite_cpu::Stub = ::kernite_cpu::Stub;".to_string(),
-    }));
+        None => ("::kernite_cpu::Stub".to_string(), "::kernite_cpu::Stub".to_string()),
+    };
+    out.extend(parse(&format!(": {ty}")));
+    out.extend(initializer(name, &value));
     out
+}
+
+/// What the static `name` holds, `value`, in a block with a `global_asm!` that makes the symbol of the static
+/// protected, on Linux. A symbol that a crate of the `dylib` kind exports is default, which a program may replace, so
+/// the linker refuses a kernel's displacement from `rip` to it:
+/// `relocation R_X86_64_PC32 cannot be used against symbol`. A protected symbol is exported as well, and the crate's
+/// own kernels bind to the crate's own. The `global_asm!` names the static, which may be deprecated. Rust tells of no
+/// use of a deprecated item inside the item itself, so the `global_asm!` is in the static's own initializer, and no
+/// `allow` is written, which a crate that forbids `deprecated` would refuse.
+fn initializer(name: &TokenTree, value: &str) -> TokenStream {
+    parse(&format!(
+        "= {{ #[cfg(target_os = \"linux\")] mod __kernite_protected {{ \
+         ::core::arch::global_asm!(\".protected {{}}\", sym super::{name}); }} {value} }};"
+    ))
 }
 
 /// The name of a static as the linker has it after the path of its module, which `module_path!` gives, for the statics

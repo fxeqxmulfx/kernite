@@ -67,9 +67,6 @@ pub enum Base<R> {
     /// Memory of the module's that the program names, a static, whose place the machine
     /// decides.
     Static(StaticId),
-    /// The slot that holds the address of a static, which the machine fills and places: what a program loads the
-    /// address from, of a static that no displacement reaches.
-    Got(StaticId),
     /// Nothing: the address is its index times its scale, plus its displacement.
     None,
 }
@@ -145,9 +142,7 @@ impl<R: Register> Arg<R> {
             Operand::Mem(m) => (
                 match m.base {
                     Base::Reg(r) => Some(r),
-                    Base::Slot(_) | Base::Const(_) | Base::Func(_) | Base::Static(_) | Base::Got(_) | Base::None => {
-                        None
-                    }
+                    Base::Slot(_) | Base::Const(_) | Base::Func(_) | Base::Static(_) | Base::None => None,
                 },
                 m.index.map(|(r, _)| r),
             ),
@@ -163,9 +158,7 @@ impl<R: Register> Arg<R> {
             Operand::Mem(m) => (
                 match m.base {
                     Base::Reg(r) => Some(r),
-                    Base::Slot(_) | Base::Const(_) | Base::Func(_) | Base::Static(_) | Base::Got(_) | Base::None => {
-                        None
-                    }
+                    Base::Slot(_) | Base::Const(_) | Base::Func(_) | Base::Static(_) | Base::None => None,
                 },
                 m.index.map(|(r, _)| r),
             ),
@@ -193,7 +186,6 @@ impl<R: Register> Arg<R> {
                     Base::Const(c) => Base::Const(c),
                     Base::Func(f) => Base::Func(f),
                     Base::Static(s) => Base::Static(s),
-                    Base::Got(s) => Base::Got(s),
                     Base::None => Base::None,
                 },
                 index: m.index.map(|(r, scale)| (f(r), scale)),

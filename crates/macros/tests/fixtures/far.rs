@@ -10,6 +10,7 @@ pub mod cpu {
     pub static BIG: global<[u8; 3221225472], 4096>;
 
     /// 2 GiB of `i16`s with a raw name, which only this crate sees.
+    #[allow(non_upper_case_globals)]
     pub(crate) static r#type: global<[i16; 1073741824], 2>;
 
     /// Left out by `cfg`, so the linker is given no symbol for it.
@@ -19,7 +20,9 @@ pub mod cpu {
     /// Counts how many times `ends` ran, in reach of `rip`.
     pub static RUNS: global<[u64; 1]>;
 
-    /// Just short of 2 GiB: a static of Rust's of that size fails to link, so it is far.
+    /// Just short of 2 GiB: a static of Rust's of that size fails to link, so it is far. It takes `#[used]`, as a
+    /// static in reach does.
+    #[used]
     pub static EDGE: global<[u8; 2147483647]>;
 
     /// Writes 7 to the first byte of `BIG` and 9 to the byte `last` bytes on, -1 to the last `i16` of `type`, and
@@ -83,6 +86,8 @@ mod tests {
     /// bytes, at its last byte.
     #[test]
     fn a_kernel_reaches_a_static_of_3_gib_by_its_address() {
+        // To Rust it is a reference to the linker's memory.
+        let _: &'static kernite_cpu::Global<u8, 3221225472, 4096> = BIG;
         assert_eq!((BIG.len(), BIG.is_empty(), r#type.len()), (3221225472, false, 1073741824));
         // SAFETY: `ends` and `middle` write only the memory of the module they name, which nothing else touches.
         unsafe {

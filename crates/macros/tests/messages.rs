@@ -1727,12 +1727,12 @@ fn kernels_of_instances_and_cooperative_ones_that_a_feature_leaves_out_say_nothi
 }
 
 /// A static of more than 1 GiB is the linker's, so the crate builds as quickly as one with a small static, and under
-/// `deny(warnings)` it says nothing, nor does rustdoc. A kernel takes its address, which the linker fills in a slot,
-/// and indexes it; the host reads back each byte it wrote, the first and the last of 3 GiB, and the last of one of
-/// 2147483647 bytes, which as a static of Rust's fails to link. The statics keep their visibility and their names, a
-/// raw one as well, and one that `cfg` leaves out is not defined. A static of one byte is the linker's too, past reach
-/// beside one of 1 GiB that `cfg` leaves out, which counts all the same, and the host reads back what a kernel wrote to
-/// it.
+/// `deny(warnings)` it says nothing, nor does rustdoc. To Rust it is a reference to the linker's memory, which takes
+/// `#[used]` as a static in reach does. A kernel loads its address from the reference, and indexes it; the host reads
+/// back each byte it wrote, the first and the last of 3 GiB, and the last of one of 2147483647 bytes, which as a static
+/// of Rust's fails to link. The statics keep their visibility and their names, a raw one as well, and one that `cfg`
+/// leaves out is not defined. A static of one byte is the linker's too, past reach beside one of 1 GiB that `cfg`
+/// leaves out, which counts all the same, and the host reads back what a kernel wrote to it.
 #[test]
 fn a_static_past_rips_reach_is_the_linkers_and_a_kernel_reaches_it_by_its_address() {
     let printed = runs_quietly(&["test"], "far");
@@ -1768,6 +1768,19 @@ fn a_kernel_that_names_a_static_past_rips_reach_beside_others_at_a_displacement_
     refuses("statics_together_refused", &lines.each_ref().map(String::as_str));
 }
 
+/// A crate of the `dylib` kind with a static in reach of `rip` and one past it links, and a crate that links it,
+/// `dylib_user`, calls the kernel and names each static in its test. A kernel names the first at a displacement from
+/// `rip`, which the linker refuses to a symbol that a program may replace, as it may one that a shared object exports,
+/// so kernite makes the static's symbol protected, which none replaces. The crate exports the second, the reference
+/// that a kernel loads the address from, and keeps the memory to itself.
+#[test]
+fn a_dylib_with_statics_links_and_a_crate_that_uses_it_runs() {
+    // The crate that links it finds it where `written` puts it.
+    written("dylib");
+    let printed = runs_quietly(&["test"], "dylib_user");
+    assert!(printed.contains("1 passed"), "fixtures/dylib_user.rs ran its test, and printed:\n{printed}");
+}
+
 /// Only Linux's linker defines a far static, as kernite writes it, so a crate checked for Windows is told so at each,
 /// with what to do, of one byte too: the assembler of that system is not left to say it, in words of its own.
 #[test]
@@ -1782,24 +1795,13 @@ fn a_static_past_rips_reach_is_refused_off_linux() {
         };
         let lines = [
             said("10:16", "BIG"),
-            said("13:23", "r#type"),
-            said("23:16", "EDGE"),
-            said("66:16", "B"),
+            said("14:23", "r#type"),
+            said("26:16", "EDGE"),
+            said("69:16", "B"),
             "error: could not compile `far` (lib) due to 4 previous errors".to_string(),
         ];
         refuses_by(&["check", "--target", WINDOWS], "far", &lines.each_ref().map(String::as_str));
     }
-}
-
-/// A static past `rip`'s reach is a static of an `extern` block to Rust, whose errors call it a foreign static: Rust
-/// refuses `#[used]` on it, which it takes on a static in reach.
-#[test]
-fn a_static_past_rips_reach_is_a_static_of_an_extern_block_to_rust() {
-    let lines = [
-        "src/lib.rs:6:7: error: the `used` attribute cannot be used on foreign statics",
-        "error: could not compile `far_used` (lib) due to 1 previous error",
-    ];
-    refuses_by(&["check"], "far_used", &lines);
 }
 
 /// The symbol of a static past `rip`'s reach is the path of its module and its name, so two of one path and one name
@@ -4327,7 +4329,7 @@ fn a_compile_time_argument_named_as_the_launchers_parameters_is_refused_at_its_n
     );
 }
 
-/// A crate may forbid each lint the macro used to `allow`, and builds its kernels without a word.
+/// A crate may forbid each lint the macro used to `allow`, and `deprecated`, and builds its kernels without a word.
 #[test]
 fn a_crate_that_forbids_lints_builds_its_kernels_without_a_word() {
     builds_quietly("forbidden");

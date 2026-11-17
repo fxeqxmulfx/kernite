@@ -2,10 +2,12 @@
 //! module of each kind of kernel, x86 and GPU, of instances and not, cooperative, with a static,
 //! and with consts given, in private modules, where Rust says what is never used. `k_` is a
 //! cooperative kernel whose `_blocks` method has two underscores. The `forbid` is of every lint
-//! but Clippy's, which Rust does not check.
+//! but Clippy's, which Rust does not check. `deprecated` is in it for the `global_asm!` that names each static of x86
+//! kernels, which kernite writes with no `allow` of the lint.
 
 #![forbid(
     dead_code,
+    deprecated,
     non_snake_case,
     unused_variables,
     unused_imports,
@@ -19,7 +21,8 @@ pub fn on_the_cpu(x: &mut u32) -> Result<u64, kernite_cpu::Error> {
     unsafe {
         cpu::together(grid, x)?;
         cpu::rounds::<2>(grid, x)?;
-        Ok(cpu::step(1) + cpu::tile::<2>(1) + cpu::flag::<true>(1) + cpu::COUNTS.read()[0] as u64)
+        let statics = cpu::COUNTS.read()[0] as u64 + cpu::BIG.len() as u64;
+        Ok(cpu::step(1) + cpu::tile::<2>(1) + cpu::flag::<true>(1) + statics)
     }
 }
 
@@ -97,6 +100,9 @@ mod cpu {
     const LEN: usize = 4;
 
     pub static COUNTS: global<[u32; LEN]>;
+
+    /// Past the reach of `rip`, which a reference to its memory stands for.
+    pub static BIG: global<[u8; 3221225472]>;
 
     pub unsafe extern "sysv64" fn step(x: u64) -> u64 {
         add(x, STEP);

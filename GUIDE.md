@@ -568,7 +568,9 @@ stores, and a kernel's safety contract says that nothing else touches the memory
 nor any that the functions it calls name, whether it calls them by name or at an address. A module's statics are its
 kernels': on the GPU for GPU kernels, so a module with kernels of both kinds and a static is an error, which says to
 make it two. A crate with a static in a module of x86 kernels needs a dependency named `kernite-cpu` for it, not renamed
-in `Cargo.toml`. kernite says at the static when it has none.
+in `Cargo.toml`. kernite says at the static when it has none. A crate of the `dylib` kind may have such a static, which
+it exports as it exports any: a program that links the crate names it as it names one of its own,
+`my_lib::kernels::COUNTS`.
 
 A static may be as big as a Rust type may be: its size, rounded up to its alignment, is less than 2^61 bytes. A kernel
 names a static at a displacement from `rip`, 32 bits, signed, which reaches 2 GiB. The rest of the program's code and
@@ -582,18 +584,20 @@ program are the linker's to fit: it refuses a program where they do not fit in t
 is far, as one of more than 1073741824 bytes is, and a kernel names it only by its address: `lea(p, [BIG])` puts the
 address in `p`, and `[p + i]` is the byte `i`. `lea(p, [BIG + 16])` is the address of the byte 16, for a displacement up
 to 2147483647; a kernel indexes past that. Any other operand that names the static is an error, which says to take its
-address. The address comes as code for a position-independent executable has it, a load from a slot that the linker
-fills. A far static takes none of the room in reach, so one after it may be in reach. It holds zeros at first, so a
+address. A far static takes none of the room in reach, so one after it may be in reach. It holds zeros at first, so a
 value is an error, which says the host writes what it should hold.
 
 A far static is the linker's, in the `.lbss` section of x86-64's ELF, which the linker lays out past the code and the
 rest of the data, so that they stay in reach of `rip`. The section holds zeros and takes no room in the file, where Rust
 makes a static of its own in time and memory that grow with its size, 6 milliseconds and 2 MiB for each MiB: a crate
 with a static of 3 GiB builds as fast as a crate with one of 4 KiB. kernite defines it so on Linux alone, and refuses it
-on another system, at its name. To Rust it is a static of an `extern` block, a foreign static, as Rust's errors say:
-Rust refuses `#[used]` on it, say. Its symbol is the path of its module and its name, as `module_path!` gives them, so
-two such statics of one path and one name in a program are one symbol defined twice, which the assembler or the linker
-refuses: two modules of one name in two functions have one path, and so do two versions of one crate.
+on another system, at its name. To Rust the static is a reference to that memory, a `&'static Global<..>`, which the
+host uses as it uses a `Global`: `kernels::BIG.len()`. A kernel loads the address from it, as code for a
+position-independent executable loads one from a slot. A crate of the `dylib` kind exports the reference, and keeps the
+memory to itself, so a program that links the crate reaches the memory through it. The memory's symbol is the path of
+its module and its name, as `module_path!` gives them, so two such statics of one path and one name in a program are one
+symbol defined twice, which the assembler or the linker refuses: two modules of one name in two functions have one path,
+and so do two versions of one crate.
 
 ## On a GPU
 
