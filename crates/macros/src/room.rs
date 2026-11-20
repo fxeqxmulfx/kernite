@@ -72,7 +72,7 @@ pub(crate) fn derive(input: TokenStream) -> TokenStream {
     let rooms = kernite::ptx_room(&statics.iter().map(|(ty, _)| ty.as_str()).collect::<Vec<_>>());
     let mut out: TokenStream =
         statics.iter().zip(rooms).filter_map(|((_, at), why)| why.map(|message| error(*at, &message))).collect();
-    if !out.is_empty() && !lines.is_empty() {
+    if !out.is_empty() {
         out.extend(unnamed(lines));
     }
     out

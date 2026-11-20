@@ -566,14 +566,14 @@ fn numbers(asked: &[Option<Ask>]) -> TokenStream {
             inner.extend(number(name, ty));
         }
     }
-    if inner.is_empty() {
-        return inner;
-    }
     unnamed(inner)
 }
 
-/// `inner` in an item of no name, `const _: () = { .. };`, where Rust checks it and runs nothing.
+/// `inner` in an item of no name, `const _: () = { .. };`, where Rust checks it and runs nothing. No `inner`, no item.
 pub(crate) fn unnamed(inner: TokenStream) -> TokenStream {
+    if inner.is_empty() {
+        return inner;
+    }
     let mut out = respan(parse("const _: () ="), Span::mixed_site());
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, inner))]);
     out.extend(respan(parse(";"), Span::mixed_site()));
@@ -654,10 +654,13 @@ pub(crate) fn body_at(code: TokenStream, at: Span) -> TokenTree {
 /// the stub casts `f` itself, `self::f as *const ()`, which asks Rust for the signature it is in
 /// the middle of checking. Rust gives up on the body, as it does after any error, and does not say
 /// as well that a body that never returns leaves the type of the `_` to infer.
-pub(crate) fn stub(f: &Fn, top: &[TokenTree]) -> TokenStream {
+///
+/// Its body has the `places` of the kernel's code that name an item, as [`named`](crate::expand) says them.
+pub(crate) fn stub(f: &Fn, top: &[TokenTree], places: TokenStream) -> TokenStream {
     let mut out = attrs(f, top);
     out.extend(signature(f, top));
     let mut body = asks(f, top, written);
+    body.extend(unnamed(places));
     if gives_placeholder(f, top) {
         body.extend(parse(&format!("let _ = self::{} as *const ();", top[f.head.end + 1])));
     }
@@ -696,6 +699,29 @@ pub(crate) fn carried(attrs: impl IntoIterator<Item = TokenTree>, offered: bool)
             .then(|| parse("doc(hidden)").into_iter().collect()),
         [name, ..] if named(name, "cfg") || (offered && named(name, "deprecated")) => Some(meta),
         _ => None,
+    })
+}
+
+/// The attributes that set the level of a lint.
+pub(crate) const LEVELS: [&str; 5] = ["allow", "warn", "deny", "forbid", "expect"];
+
+/// What an item's attributes, `attrs`, `#` and brackets each, say of the level of a lint, of those among `kinds`, which
+/// are some of [`LEVELS`]: each of them, alone or in a `cfg_attr(..)`.
+pub(crate) fn levels(attrs: impl IntoIterator<Item = TokenTree>, kinds: &[&str]) -> TokenStream {
+    filtered(attrs, &mut |meta| {
+        let [name, ..] = &meta[..] else { return None };
+        kinds.iter().any(|kind| named(name, kind)).then_some(meta)
+    })
+}
+
+/// What an item's attributes, `attrs`, say of the level of a lint, as [`levels`] says it, for a naked function, which
+/// Rust refuses `expect` on: an `expect` is an `allow` there.
+pub(crate) fn naked_levels(attrs: impl IntoIterator<Item = TokenTree>) -> TokenStream {
+    filtered(levels(attrs, &LEVELS), &mut |mut meta| {
+        if named(&meta[0], "expect") {
+            meta[0] = Ident::new("allow", meta[0].span()).into();
+        }
+        Some(meta)
     })
 }
 

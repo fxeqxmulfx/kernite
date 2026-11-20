@@ -4376,20 +4376,27 @@ fn the_launcher_keeps_a_kernels_expect_as_written() {
     );
 }
 
-/// A crate that forbids a lint a kernel expects is refused once, at the `expect`, of a cooperative GPU
-/// kernel, an x86 kernel of instances and a cooperative one: the launcher, or the function that picks
-/// an instance, keeps the `expect` as written, and `k_blocks` and the instances keep no lint.
+/// A crate that forbids a lint a kernel expects is refused at the `expect`, of a cooperative GPU kernel, an x86 kernel
+/// of instances and a cooperative one: the launcher, or the function that picks an instance, keeps the `expect` as
+/// written, and `k_blocks` keeps no lint. The function of each x86 instance has an `allow` for the `expect`, which Rust
+/// refuses too, at the same place.
 #[test]
-fn a_crate_that_forbids_a_lint_a_kernel_expects_is_refused_once_at_the_expect() {
-    let refused =
-        "error[E0453]: expect(non_snake_case) incompatible with previous forbid: overruled by previous forbid";
+fn a_crate_that_forbids_a_lint_a_kernel_expects_is_refused_at_the_expect() {
+    let refused = |at: &str, level: &str| {
+        format!(
+            "src/lib.rs:{at}: error[E0453]: {level}(non_snake_case) incompatible with previous forbid: overruled by \
+             previous forbid"
+        )
+    };
     refuses(
         "forbidden_expect",
         &[
-            &format!("src/lib.rs:10:14: {refused}"),
-            &format!("src/lib.rs:18:14: {refused}"),
-            &format!("src/lib.rs:24:14: {refused}"),
-            "error: could not compile `forbidden_expect` (lib) due to 3 previous errors",
+            &refused("10:14", "expect"),
+            &refused("18:14", "expect"),
+            &refused("18:14", "allow"),
+            &refused("24:14", "expect"),
+            &refused("24:14", "allow"),
+            "error: could not compile `forbidden_expect` (lib) due to 5 previous errors",
         ],
     );
 }
@@ -4802,6 +4809,177 @@ fn a_deprecated_static_is_told_of_for_each_instance_and_each_kernel_that_calls_t
             "src/lib.rs:21:17: error: use of deprecated static `cpu::EACH`",
             "src/lib.rs:16:17: error: use of deprecated static `cpu::EACH`",
             "error: could not compile `deprecated_functions` (lib) due to 5 previous errors",
+        ],
+    );
+}
+
+/// A kernel that allows `deprecated` is told of nothing, by Rust, at any place its code names a deprecated item, though
+/// the crate denies the lint: a static at each of its places, a constant, a helper, an x86 kernel and an instance of
+/// one, an x86 kernel of no compile-time arguments, which it calls, and on the GPU a static, a function, a helper and
+/// the address of a kernel. So it is for a kernel of instances, whose code is a function for each, for a cooperative
+/// one, and for a kernel whose `allow` is in a `cfg_attr`.
+#[test]
+fn a_kernel_that_allows_a_lint_is_told_of_nothing_at_any_place_it_names_a_deprecated_item() {
+    builds_quietly("levels_allowed");
+}
+
+/// A kernel that raises a lint, by `warn`, `deny` or `forbid`, is told of at each place its code names a deprecated
+/// item, as a warning or an error though the crate allows the lint: a static at each place, a constant, a helper, a
+/// kernel it calls and the function of each instance of a kernel on x86, and on the GPU a function, a static and a
+/// constant, of a kernel and of a cooperative one. `crate_level` sets no level, and Rust says nothing of it. The
+/// kernel's level holds at no place in a helper: `names_after` is told of its own place of `BIG` and not of the
+/// helper's. Cargo says once a line that two errors share, so the count has a second error for each first place of
+/// `BIG` in `forbidden` and `team`, and of `leaf` in `forbidden`, which each of their two instances writes.
+#[test]
+fn a_kernel_that_raises_a_lint_is_told_of_at_each_place_it_names_a_deprecated_item_at_that_level() {
+    refuses(
+        "levels_raised",
+        &[
+            "src/lib.rs:44:17: warning: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:45:22: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:46:17: warning: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:48:9: warning: use of deprecated function `cpu::warned::_::touch`",
+            "src/lib.rs:57:17: warning: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:70:14: error: use of deprecated function `cpu::leaf`",
+            "src/lib.rs:65:17: error: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:66:22: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:67:17: error: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:69:9: error: use of deprecated function `cpu::denied::_::touch`",
+            "src/lib.rs:71:14: error: use of deprecated function `cpu::leaf`",
+            "src/lib.rs:80:17: error: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:81:22: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:82:9: error: use of deprecated function `cpu::forbidden::_::touch`",
+            "src/lib.rs:84:14: error: use of deprecated function `cpu::leaf`",
+            "src/lib.rs:83:14: error: use of deprecated function `cpu::leaf`",
+            "src/lib.rs:78:17: error: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:94:17: error: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:95:22: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:96:9: error: use of deprecated function `cpu::team::_::touch`",
+            "src/lib.rs:92:17: error: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:126:42: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:127:17: warning: use of deprecated function `gpu::Kernels::warned::_::old`",
+            "src/lib.rs:135:42: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:136:17: error: use of deprecated function `gpu::Kernels::denied::_::old`",
+            "src/lib.rs:145:42: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:146:17: error: use of deprecated function `gpu::Kernels::forbidden::_::old`",
+            "src/lib.rs:126:29: warning: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:128:29: warning: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:135:29: error: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:137:29: error: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:145:29: error: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:147:29: error: use of deprecated method `gpu::Kernels::COUNTS`",
+            "error: could not compile `levels_raised` (lib) due to 27 previous errors; 9 warnings emitted",
+        ],
+    );
+}
+
+/// A kernel that lowers a lint, by `warn`, or expects it, is told of at each place its code names a deprecated item,
+/// where the crate denies the lint: of `warned` as a warning at each place, and of `expected` nothing, as each place
+/// meets its expectation, on x86 and on the GPU. So it is of the first place of the static `BIG` in the x86 kernel of
+/// instances `expected` and in the cooperative `once`, an operand of the function of each instance, which allows the
+/// lint the kernel expects: `once` names `BIG` there alone. Of `unmet`, whose code names none, Rust says that its
+/// expectation is unfulfilled, once, at the attribute. `crate_level` sets no level, and each place of it is an error.
+#[test]
+fn a_kernel_that_lowers_a_lint_or_expects_it_is_told_of_at_each_place_it_names_a_deprecated_item_at_that_level() {
+    refuses(
+        "levels_lowered",
+        &[
+            "src/lib.rs:35:22: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:36:26: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:37:9: warning: use of deprecated function `cpu::warned::_::touch`",
+            "src/lib.rs:25:22: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:26:26: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:27:9: error: use of deprecated function `cpu::_::touch`",
+            "src/lib.rs:88:42: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:89:17: error: use of deprecated function `gpu::_::old`",
+            "src/lib.rs:97:42: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:98:17: warning: use of deprecated function `gpu::Kernels::warned::_::old`",
+            "src/lib.rs:88:29: error: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:90:29: error: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:97:29: warning: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:99:29: warning: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:62:14: warning: this lint expectation is unfulfilled",
+            "src/lib.rs:112:14: warning: this lint expectation is unfulfilled",
+            "error: could not compile `levels_lowered` (lib) due to 7 previous errors; 9 warnings emitted",
+        ],
+    );
+}
+
+/// The level a helper, or an `extern "ptx-func"` function, sets holds at each place its own code names a deprecated
+/// item, and the level of the kernel that calls it does not reach in. Rust tells of `allows` nothing, though `plain`,
+/// which calls it, sets no level and the crate denies the lint; of `warns` and `warns_bump` as a warning; and of `lets`
+/// at each place, though `quiet`, which calls it, allows the lint: a function and a constant on x86, the static
+/// `COUNTS`, which `quiet` names by an operand too, and on the GPU a function and a helper. Of `expects`, whose places
+/// all meet its expectation, it tells nothing, and of `unmet`, whose code names none, that its expectation is
+/// unfulfilled, once, at the attribute. `gone` is left out by `cfg`, on x86 and on the GPU, and Rust says nothing of
+/// its expectation; nor of the expectation of `alone`, which no kernel calls, on x86 and on the GPU, nor of `hidden`,
+/// which only a kernel that `cfg` leaves out calls: kernite reads a helper's code only where a kernel calls it. Of
+/// `spare`, an `extern "ptx-func"` function that no kernel calls, it says that its expectation is unfulfilled.
+#[test]
+fn the_level_a_helper_sets_holds_at_each_place_in_its_code_and_the_level_of_its_kernel_does_not_reach_in() {
+    refuses(
+        "levels_helpers",
+        &[
+            "src/lib.rs:33:9: warning: use of deprecated function `cpu::_::touch`",
+            "src/lib.rs:37:9: error: use of deprecated function `cpu::_::touch`",
+            "src/lib.rs:38:22: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:70:17: error: use of deprecated static `cpu::COUNTS`",
+            "src/lib.rs:108:9: warning: use of deprecated function `gpu::_::bump`",
+            "src/lib.rs:143:17: warning: use of deprecated function `gpu::_::old`",
+            "src/lib.rs:149:17: error: use of deprecated function `gpu::_::old`",
+            "src/lib.rs:112:9: error: use of deprecated function `gpu::_::bump`",
+            "src/lib.rs:47:14: warning: this lint expectation is unfulfilled",
+            "src/lib.rs:160:14: warning: this lint expectation is unfulfilled",
+            "src/lib.rs:165:14: warning: this lint expectation is unfulfilled",
+            "error: could not compile `levels_helpers` (lib) due to 5 previous errors; 6 warnings emitted",
+        ],
+    );
+}
+
+/// Rust cannot hold every level at the naked function of an x86 kernel. The first place a kernel's code names a static
+/// is an operand of the function, which Rust tells of at the kernel's level where the kernel neither allows the lint
+/// nor expects it, whichever helper's code the place is in: `warns_through` is told of the place in the helper `names`
+/// as a warning, though the helper sets no level, and `through` of the place in `allows_names` as an error, though the
+/// helper allows the lint. A plain kernel's function is the naked one, and `expects` is Rust's own error, in its words.
+#[test]
+fn rust_cannot_hold_every_level_at_the_naked_function_of_an_x86_kernel() {
+    let no_expect = "error[E0736]: attribute incompatible with `#[unsafe(naked)]`: the `expect` attribute is \
+                     incompatible with `#[unsafe(naked)]`";
+    refuses(
+        "levels_limits",
+        &[
+            &format!("src/lib.rs:37:7: {no_expect}"),
+            "src/lib.rs:14:17: warning: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:20:17: error: use of deprecated static `cpu::BIG`",
+            "error: could not compile `levels_limits` (lib) due to 2 previous errors; 1 warning emitted",
+        ],
+    );
+}
+
+/// A kernel that Rust does not get the code of is told of at the level it sets at each place its code names a
+/// deprecated item, as one it does: `plain` and `tiles` of x86 give back a type with a `_` in it, and `team` of x86 and
+/// the GPU's `tiles` have an instance that does not compile. Each place is a warning though the crate allows the lint,
+/// and Rust says its own error, kernite's or Rust's, beside them.
+#[test]
+fn a_kernel_rust_does_not_get_the_code_of_is_told_of_at_each_place_it_names_a_deprecated_item_at_its_level() {
+    refuses(
+        "levels_stubs",
+        &[
+            "src/lib.rs:39:22: error: in `team::<300>`: `mov` wants an integer of 8 bits; this is the integer 300",
+            "src/lib.rs:61:30: error: in `tiles::<70000>`: `st.global.u16` wants 16 bits; 70000 does not fit them",
+            "src/lib.rs:19:9: warning: use of deprecated function `cpu::plain::_::touch`",
+            "src/lib.rs:20:22: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:27:9: warning: use of deprecated function `cpu::tiles::_::touch`",
+            "src/lib.rs:28:22: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:37:9: warning: use of deprecated function `cpu::team::_::touch`",
+            "src/lib.rs:38:22: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:59:17: warning: use of deprecated function `gpu::Kernels::tiles::_::old`",
+            "src/lib.rs:60:30: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:18:65: error[E0121]: the placeholder `_` is not allowed within types on item \
+                 signatures for return types: not allowed in type signatures",
+            "src/lib.rs:26:79: error[E0121]: the placeholder `_` is not allowed within types on item \
+                 signatures for return types: not allowed in type signatures",
+            "error: could not compile `levels_stubs` (lib) due to 4 previous errors; 8 warnings emitted",
         ],
     );
 }

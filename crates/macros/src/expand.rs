@@ -21,8 +21,8 @@ use crate::cond::Cond;
 use crate::gpu::{HOLE, gpu, refused_attrs, used};
 use crate::room;
 use crate::rust::{
-    cfg_of, error, error_under, flatten, for_rust, from_inside, grouped, inner_attribute, lex, name_at, parse,
-    passable, position, seen, site, stand_in, stub, takes, unnamed,
+    LEVELS, attrs, cfg_of, error, error_under, flatten, for_rust, from_inside, grouped, inner_attribute, levels, lex,
+    name_at, parse, passable, position, seen, site, stand_in, stub, takes, unnamed,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, instance_used, naked, operands, x86_stub};
@@ -145,6 +145,20 @@ pub(crate) fn expand(
     // The functions whose types nothing else shows Rust: each helper, and each GPU function, which is not launched,
     // whether a kernel calls it or not.
     let mut helpers = vec![];
+    // Which items are those, and, for each, the places that name an item in its code, as `named` says them: Rust has no
+    // function of a helper or a GPU function to put them in.
+    let helper: Vec<bool> = made
+        .items
+        .iter()
+        .map(|item| matches!(item, ItemOut::Helper(_)) || matches!(item, ItemOut::Device(d) if d.launcher.is_none()))
+        .collect();
+    let mut carried = vec![TokenStream::new(); helper.len()];
+    // Which functions set the level of a lint: only the places of those are written where their level holds.
+    let leveled: Vec<bool> = module
+        .items
+        .iter()
+        .map(|item| matches!(&item.kind, ItemKind::Fn(f) if !levels(attrs(f, &top), &LEVELS).is_empty()))
+        .collect();
     // Each listing the process's kernels have, by name, under the `cfg` of the kernel it is of, as
     // what `naked` writes for it is.
     let mut listed = vec![];
@@ -152,9 +166,27 @@ pub(crate) fn expand(
         let tokens = &top[item.tokens.clone()];
         let cfg = &cfgs[i];
         let said = |e: &lang::Error| error_under(cfg, at(e.span), &e.message);
-        let (names, errors) = named(&made, &conds, i, &top, &place);
-        reads.extend(names);
+        // Where the kernel first writes the name of each item its code names by an operand.
+        let firsts = match made_item {
+            ItemOut::Native(k) => operands(k, &|m| module.item_at(m.span) == i),
+            _ => vec![],
+        };
+        let (names, errors) = named(&made, &conds, i, &top, &place, &firsts);
         left_out.extend(errors);
+        // Each place is where the code that writes it is, for the level its item sets to hold there, as in Rust: in the
+        // body of the kernel, which `own` has, or in what holds the places of the helper or the GPU function. A place
+        // of an item that sets no level, or of a const or a static, is in a block of the module, where Rust tells of it
+        // at the level of the module.
+        let mut own = TokenStream::new();
+        for (at, statement) in names {
+            if helper[at] && leveled[at] {
+                carried[at].extend(statement);
+            } else if at == i && leveled[i] {
+                own.extend(statement);
+            } else {
+                reads.extend(statement);
+            }
+        }
         match (&item.kind, made_item) {
             // The module's own attributes are first, and a const given is Rust's where its
             // module is.
@@ -181,18 +213,17 @@ pub(crate) fn expand(
             }
             (ItemKind::Fn(f), ItemOut::Unknown(e)) => {
                 out.extend(e.as_ref().map(said));
-                out.extend(stub(f, &top));
+                out.extend(stub(f, &top, TokenStream::new()));
             }
             (ItemKind::Fn(f), ItemOut::Native(k)) => {
                 out.extend(k.not_unsafe.as_ref().map(said));
                 out.extend(k.said.as_ref().map(said));
-                let firsts = operands(k);
                 let first = |name: &str| {
                     place(firsts.iter().find(|m| m.name == name).expect("the kernel writes what its code names").span)
                 };
                 out.extend(match k.written {
-                    true => naked(module, f, &k.instances, &k.touched, cfg, &top, &first),
-                    false => x86_stub(f, k.count, &k.touched, cfg, &top),
+                    true => naked(module, f, k, cfg, &top, &first, own),
+                    false => x86_stub(f, k.count, &k.touched, cfg, &top, own),
                 });
                 out.extend(k.errors.iter().map(said));
                 listed.extend(k.listings.iter().map(|listing| (cfg, listing)));
@@ -202,7 +233,7 @@ pub(crate) fn expand(
                 out.extend(d.said.as_ref().map(said));
                 out.extend(d.errors.iter().map(said));
                 on_gpu.push(conds[i].clone());
-                launchers.extend(d.launcher.as_ref().map(|l| (f, l)));
+                launchers.extend(d.launcher.as_ref().map(|l| (f, l, own)));
                 if d.launcher.is_none() {
                     helpers.push((i, f));
                 }
@@ -257,12 +288,29 @@ pub(crate) fn expand(
     for (i, f) in helpers {
         reads.extend(Cond::all([conds[i].clone(), failing.clone()]).guard().map(|g| seen(f, &top, &g)));
         shown.extend(conds[i].guard().map(|g| room::shown(&g, i, seen(f, &top, &TokenStream::new()))));
+        // The places of a helper or a GPU function that sets a level are in an item of no name that sets it, as its
+        // code would in Rust: `expect` too, which is unfulfilled where no place the code names has the lint. The code
+        // of a helper is read only where an item `cfg` keeps runs it, and only there is the item.
+        let read = match made.items[i] {
+            ItemOut::Helper(_) => Cond::any(
+                (0..made.items.len())
+                    .filter(|&k| k != i)
+                    .map(|k| Cond::all([conds[k].clone(), runs(&made, &conds, k, i, &[])])),
+            ),
+            _ => conds[i].clone(),
+        };
+        if leveled[i]
+            && let Some(guard) = read.guard()
+        {
+            let places = std::mem::take(&mut carried[i]);
+            out.extend(guard);
+            out.extend(levels(attrs(f, &top), &LEVELS));
+            out.extend(if places.is_empty() { parse("const _: () = {};") } else { unnamed(places) });
+        }
     }
     out.extend(room::carrier(fields, shown));
     out.extend(left_out);
-    if !reads.is_empty() {
-        out.extend(unnamed(reads));
-    }
+    out.extend(unnamed(reads));
     out.extend(tail);
     out
 }
@@ -327,25 +375,29 @@ fn find(guard: TokenStream, what: impl IntoIterator<Item = TokenTree>) -> TokenS
 /// the constant kernite took. So is one that a const that item `i` names has in its definition, where `cfg` keeps the
 /// const; but not one in a const that the module is given, whose path is Rust's where the consts are, in a module that
 /// holds nothing to give `std` another meaning.
+///
+/// Each statement of the first is given with the item whose code writes the place, for the level that item sets to hold
+/// there. The operand of a place of a kernel is in the function of each instance, where the kernel's levels hold, but a
+/// helper's do not, and where an `expect` is an `allow`: so where a kernel allows a lint or expects it, each place has
+/// the statement too, to be told of at the level of its code, as one that is not an operand is.
 fn named(
     made: &ModuleOut,
     conds: &[Cond],
     i: usize,
     top: &[TokenTree],
     place: &dyn Fn(lang::Span) -> Span,
-) -> (TokenStream, TokenStream) {
+    covered: &[&lang::Mention],
+) -> (Vec<(usize, TokenStream)>, TokenStream) {
     let module = &made.module;
-    let (mut names, mut errors) = (TokenStream::new(), TokenStream::new());
-    let covered = match &made.items[i] {
-        ItemOut::Native(k) => operands(k),
-        _ => vec![],
-    };
+    let (mut names, mut errors) = (vec![], TokenStream::new());
+    let lowers =
+        matches!(&module.items[i].kind, ItemKind::Fn(f) if !levels(attrs(f, top), &["allow", "expect"]).is_empty());
     for m in made.items[i].mentions() {
         let at = module.item_at(m.span);
         let kept = Cond::all([conds[i].clone(), runs(made, conds, i, at, &[])]);
         if m.value.is_some() {
             let given = matches!(made.items[at], ItemOut::Given);
-            names.extend(kept.guard().filter(|_| !given).map(|guard| takes(guard, m, place)));
+            names.extend(kept.guard().filter(|_| !given).map(|guard| (at, takes(guard, m, place))));
             continue;
         }
         let j = position(module, &m.name);
@@ -355,12 +407,12 @@ fn named(
             _ => false,
         };
         if rust {
-            let kept = match covered.iter().any(|x| x.span == m.span) {
+            let kept = match covered.iter().any(|x| x.span == m.span) && !lowers {
                 true => Cond::all([kept, conds[j].clone().not()]),
                 false => kept,
             };
             let Some(guard) = kept.guard() else { continue };
-            names.extend(find(guard, [name_at(&module.items[j], top, place(m.span))]));
+            names.push((at, find(guard, [name_at(&module.items[j], top, place(m.span))])));
             continue;
         }
         if let Some(guard) = Cond::all([kept.clone(), conds[j].clone().not()]).guard() {
@@ -377,7 +429,7 @@ fn named(
         if let Some(path) = path
             && let Some(guard) = Cond::all([kept, conds[j].clone()]).guard()
         {
-            names.extend(find(guard, path));
+            names.push((at, find(guard, path)));
         }
     }
     (names, errors)

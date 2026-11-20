@@ -68,7 +68,8 @@ GPU as in a plain function, and `*const (dyn Debug + Send)`, where the pointer n
 is a pointer that a kernel of instances gives back, which the next paragraph tells. A generic is a value: `<T>` is an
 error at the `T`, and so is `impl` in a parameter's type or the result's, wherever in it, `x: impl Copy`,
 `Option<impl Copy>` or `-> *mut impl Copy`, at the `impl`: in a parameter it makes the function generic over a type, and
-in the result it hides one. kernite says both in the same words.
+in the result it hides one. kernite says both in the same words. The level of a lint holds at each name in the kernel's
+code too, a deprecated item's, which a paragraph below tells.
 
 A kernel's pointer to a type with a size, `*const T` or `*mut T`, is one register: `*const [usize; 3]` and
 `*mut *const f32` are taken as `*const f32` is, on x86 and on a GPU. A pointer to a type with no size has two words, an
@@ -420,6 +421,29 @@ of each x86 kernel that calls it. Where the build is incremental, as the dev pro
 each function writes the name: once for each instance, and for a place in a helper, once for each kernel that calls it.
 `old::<2>`, a helper, an `extern "ptx-func"` function and a GPU kernel are told of once at each place, whatever
 instances of a kernel write it and whatever kernels call the helper it is in.
+
+The level of a lint that a kernel sets holds at each of these places, as in a function of Rust's. `#[allow(deprecated)]`
+on a kernel has Rust say nothing at any of them, on x86 and on a GPU; `warn`, `deny` and `forbid` make each a warning or
+an error, though the crate allows the lint or denies it; and `expect` is met by each: Rust says nothing of them, and of
+a kernel whose code names no deprecated item, that the expectation is unfulfilled, once, at the attribute. Where a
+kernel with a level calls a deprecated helper, GPU helper or `extern "ptx-func"` function, Rust says the kernel's name
+in the path, `cpu::warned::_::touch`, as the place is in the kernel's own function. A helper, a GPU helper and an
+`extern "ptx-func"` function have a level of their own for their code, and the level of the kernel that calls them does
+not reach in: `touch(p);` in a helper with `#[allow(deprecated)]` says nothing, whatever kernel calls it, and in one
+with no level it is told of at the module's level, though the kernel allows the lint. A helper is compiled only where a
+kernel that `cfg` keeps calls it, so Rust says nothing of the `expect` of a helper or a GPU helper that no such kernel
+calls, whatever its code names; an `extern "ptx-func"` function is compiled whether a kernel calls it or not, and its
+`expect` holds as a function's does.
+
+One place does not have the level of its code: the first an x86 kernel writes the name of a static, or of a kernel that
+takes no compile-time arguments. The name is an operand of the kernel's function, so Rust tells of it at the level of
+the kernel, whichever code writes it: a place that only a helper writes first is told of at the kernel's level, or at
+the module's where the kernel sets none, though the helper has a level of its own. Where the kernel allows the lint or
+expects it, Rust says nothing of the operand, and the place has the level of its code. The function is naked, and Rust
+takes no `expect` on a naked function: a plain x86 kernel with an `expect` is Rust's error, "the `expect` attribute is
+incompatible with `#[unsafe(naked)]`". A kernel of instances, or a cooperative one, takes `expect`, as the function of
+each instance allows the lint instead: where the crate forbids the lint, Rust says at the attribute that neither the
+`expect` nor the `allow` can overrule the `forbid`.
 
 A module holds what `cfg` keeps: Rust puts it together, where it knows which `cfg` holds. `LISTINGS` has the listing
 of each x86 kernel that compiles and `cfg` keeps, and of no other. A module of x86 kernels has it whether its kernels

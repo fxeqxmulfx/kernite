@@ -9,8 +9,8 @@ use kernite::{Call, HostStatic, Naked, NativeInstance, NativeOut};
 use crate::cond::Cond;
 use crate::rust::{
     asks, attrs, body_at, cfg_of, clashes, depends_on, ending_at, error_under, given_back, gives_placeholder, hygienic,
-    launcher_result, missing, name_at, never, parse, pick, pointer, position, primitive, probe, respan, result,
-    signature, stub, value_params, visibility, written, written_params,
+    launcher_result, missing, naked_levels, name_at, never, parse, pick, pointer, position, primitive, probe, respan,
+    result, signature, stub, unnamed, value_params, visibility, written, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -37,19 +37,25 @@ const CPU: &str = "kernite-cpu";
 /// "sysv64"`, which only x86-64 has, so a crate that keeps `f` there alone builds for another machine. `at` says where
 /// `f` first writes the name of an item of the module, for the operands to be written there. Its code ends at `f`'s
 /// name, for Rust to tell of `f` at `f`: see [`ending_at`].
+///
+/// A lint is at the level `f` sets at each place its code names an item, as in a function of Rust's. `places` are the
+/// places of `f`'s own that Rust is told of by a statement, and they are in the body of `f`, or of its launcher, in an
+/// item of no name, where the level `f` sets holds, `expect` too. An operand is a place too, in the function of each
+/// instance, which has the levels `f` sets, an `expect` as an `allow`, for Rust refuses `expect` on a naked function.
 pub(crate) fn naked(
     module: &lang::Module,
     f: &Fn,
-    instances: &[NativeInstance],
-    named: &[String],
+    k: &NativeOut,
     cfg: &TokenStream,
     top: &[TokenTree],
     at: &dyn std::ops::Fn(&str) -> Span,
+    places: TokenStream,
 ) -> TokenStream {
+    let (instances, named) = (&k.instances[..], &k.touched[..]);
     let hidden = format!("__kernite_{}", f.name);
     let cooperative = f.cooperative.is_some();
     if (cooperative && !depends_on(CPU)) || gives_placeholder(f, top) {
-        return x86_stub(f, instances.len(), named, cfg, top);
+        return x86_stub(f, instances.len(), named, cfg, top, places);
     }
     let mut out = TokenStream::new();
     let mut statics = vec![];
@@ -70,7 +76,9 @@ pub(crate) fn naked(
             reached(module, listing, top, at),
             probe(f, top),
         );
-        out.extend([body_at(code, top[f.head.end + 1].span())]);
+        let mut body = unnamed(places);
+        body.extend(code);
+        out.extend([body_at(body, top[f.head.end + 1].span())]);
         statics.push(("C".to_string(), listing));
     } else {
         // Each instance's parameters and their types: `f`'s, then a cooperative kernel's place. `f`
@@ -97,6 +105,7 @@ pub(crate) fn naked(
                 None,
             );
             fns.extend(cfg.clone());
+            fns.extend(naked_levels(attrs(f, top)));
             fns.extend(parse(&format!(
                 "#[doc(hidden)]\n#[unsafe(naked)]\nunsafe extern \"sysv64\" fn {name}({}) {ret}",
                 params.join(", ")
@@ -106,7 +115,7 @@ pub(crate) fn naked(
             arms.push((instance.args.clone(), name));
         }
         if cooperative {
-            out.extend(grid_launcher(f, Some(&arms), needs(instances), named, cfg, top));
+            out.extend(grid_launcher(f, Some(&arms), needs(instances), named, cfg, top, places));
         } else {
             let mut docs = attrs(f, top);
             docs.extend(needs(instances));
@@ -114,6 +123,7 @@ pub(crate) fn naked(
             out.extend(parse("#[inline(always)]"));
             out.extend(signature(f, top));
             let mut body = asks(f, top, written);
+            body.extend(unnamed(places));
             let call = parse(&format!("({})({})", pick(f, &arms, top), names.join(", ")));
             body.extend(result(f, top, call));
             out.extend([body_at(body, top[f.head.end + 1].span())]);
@@ -198,10 +208,12 @@ fn operand(label: &str, path: TokenStream, item: &lang::Item, top: &[TokenTree])
 }
 
 /// The mentions of kernel `k` at which it first writes the name of each item that its code names by an operand: a
-/// static, or a function of no compile-time arguments. [`reached`] and [`callees`] write the operand at that place, in
-/// the function of each instance that names the item, so Rust tells of the item there: a deprecated one say. `named`
-/// has Rust find the item at each later mention. None where Rust does not get the code of `k`, which has no operand.
-pub(crate) fn operands(k: &NativeOut) -> Vec<&lang::Mention> {
+/// static, or a function of no compile-time arguments; the first that `own` says `k` writes itself, if it writes the
+/// name at all, for the operand is in the function of each instance, where the levels of `k` hold, and not a helper's.
+/// [`reached`] and [`callees`] write the operand at that place, in the function of each instance that names the item,
+/// so Rust tells of the item there: a deprecated one say. `named` has Rust find the item at each other mention. None
+/// where Rust does not get the code of `k`, which has no operand.
+pub(crate) fn operands<'a>(k: &'a NativeOut, own: &dyn std::ops::Fn(&lang::Mention) -> bool) -> Vec<&'a lang::Mention> {
     if !k.written {
         return vec![];
     }
@@ -210,11 +222,15 @@ pub(crate) fn operands(k: &NativeOut) -> Vec<&lang::Mention> {
             one.naked.statics.contains(name) || one.calls.iter().any(|c| c.instance.is_none() && c.function == *name)
         })
     };
-    let places = k.mentions.iter().enumerate();
-    places
-        .filter(|(n, m)| by_operand(&m.name) && k.mentions[..*n].iter().all(|x| x.name != m.name))
-        .map(|(_, m)| m)
-        .collect()
+    let mut firsts: Vec<&lang::Mention> = vec![];
+    for m in k.mentions.iter().filter(|m| by_operand(&m.name)) {
+        match firsts.iter().position(|first| first.name == m.name) {
+            None => firsts.push(m),
+            Some(n) if own(m) && !own(firsts[n]) => firsts[n] = m,
+            Some(_) => {}
+        }
+    }
+    firsts
 }
 
 /// What Rust reads for a use of `item`, an x86 kernel of compile-time arguments, by a kernel that names its instance of
@@ -464,7 +480,8 @@ fn erased(ty: &[TokenTree]) -> (String, String) {
 /// It binds `__kernite_grid` for itself, which a parameter of `f` may be named as well; a compile-time argument may
 /// not, which is an error at its name, after the function, under `cfg`, `f`'s own; and the function never runs, as one
 /// of a kernel that did not compile. In a crate without `kernite-cpu`, it takes any grid, gives [`missing`]'s type,
-/// with the error that says so after it, and never runs. Its result is [`launcher_result`]'s.
+/// with the error that says so after it, and never runs. Its result is [`launcher_result`]'s. Its body has the `places`
+/// of `f`'s code that Rust is told of by a statement, as [`naked`] says.
 fn grid_launcher(
     f: &Fn,
     kernels: Option<&[(Vec<Value>, String)]>,
@@ -472,6 +489,7 @@ fn grid_launcher(
     named: &[String],
     cfg: &TokenStream,
     top: &[TokenTree],
+    places: TokenStream,
 ) -> TokenStream {
     let clashes = clashes(f, cfg, &["__kernite_grid"], "the launcher", top);
     let kernels = if clashes.is_empty() { kernels } else { None };
@@ -555,6 +573,7 @@ fn grid_launcher(
         None => format!("{}::core::unreachable!()", never(f, top)),
     };
     let mut body = asks(f, top, written);
+    body.extend(unnamed(places));
     body.extend(hygienic(&text, kernels.is_some()));
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
     out.extend(missed);
@@ -586,17 +605,20 @@ fn needs(instances: &[NativeInstance]) -> TokenStream {
 /// `instances` as functions too, named as [`naked`] would name them, for kernels that call one to
 /// name. Its safety contract says what the kernel's would of `named`, the module's memory. Each
 /// instance is under `cfg`, `f`'s own, as `f` is.
+///
+/// Its body has the `places` of `f`'s code that Rust is told of by a statement, as [`naked`] says.
 pub(crate) fn x86_stub(
     f: &Fn,
     instances: usize,
     named: &[String],
     cfg: &TokenStream,
     top: &[TokenTree],
+    places: TokenStream,
 ) -> TokenStream {
     if f.cooperative.is_some() {
-        return grid_launcher(f, None, TokenStream::new(), named, cfg, top);
+        return grid_launcher(f, None, TokenStream::new(), named, cfg, top, places);
     }
-    let mut out = stub(f, top);
+    let mut out = stub(f, top, places);
     if !f.generics.is_empty() {
         for k in 0..instances {
             let name = instance_name(&f.name, k);

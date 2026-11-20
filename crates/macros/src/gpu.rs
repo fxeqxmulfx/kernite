@@ -10,7 +10,7 @@ use crate::cond::Cond;
 use crate::rust::{
     self, asks, attrs, body_at, carried, clashes, depends_on, ending_at, error_under, filtered, flatten, half, host,
     hygienic, is_punct, launcher_result, missing, name_at, never, number_type, parse, pick, pointer, primitive,
-    ptr_type, quiet, refused, site, visibility, written_params,
+    ptr_type, quiet, refused, site, unnamed, visibility, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -45,8 +45,11 @@ pub(crate) type Laid = Result<Compiled<DeviceStatic>, Failed<DeviceStatic>>;
 /// else is said of the code that loads it or launches a kernel. Both are there when any of the
 /// module's GPU items is, `on_gpu` their conditions: a feature that brings `kernite-cuda` and keeps
 /// them lets the crate build without the feature.
+///
+/// Each kernel of `launchers` has its `places`, those of its code that name an item of the module, in the body of its
+/// launcher, where the level the kernel sets holds.
 pub(crate) fn gpu(
-    launchers: &[(&Fn, &Launcher)],
+    launchers: &[(&Fn, &Launcher, TokenStream)],
     symbols: &[(Cond, &str)],
     memory: &[(&lang::Static, &Laid, Cond)],
     ptx: &[(Cond, &str)],
@@ -109,8 +112,8 @@ pub(crate) fn gpu(
     // a compile-time argument named as a parameter that a method binds for itself.
     let (mut errors, mut clashed) = (TokenStream::new(), TokenStream::new());
     let taken: Vec<&str> =
-        launchers.iter().map(|(f, _)| f.name.as_str()).chain(memory.iter().map(|(s, ..)| s.name.as_str())).collect();
-    for (f, how) in launchers {
+        launchers.iter().map(|(f, ..)| f.name.as_str()).chain(memory.iter().map(|(s, ..)| s.name.as_str())).collect();
+    for (f, how, places) in launchers {
         let launched: Option<Vec<Launched>> = match how {
             Launcher::Never => None,
             Launcher::Of(l) => Some(l.iter().map(|(args, i)| (args.clone(), index(*i))).collect()),
@@ -118,7 +121,7 @@ pub(crate) fn gpu(
         // The methods would be under the kernel's `cfg`, and so are their errors.
         let cfg = carried(attrs(f, top), false);
         let grid = clashes(f, &cfg, &["__kernite_grid"], "the launcher", top);
-        methods.extend(launcher(f, launched.as_deref().filter(|_| grid.is_empty()), top));
+        methods.extend(launcher(f, launched.as_deref().filter(|_| grid.is_empty()), top, places.clone()));
         clashed.extend(grid);
         let Some(c) = &f.cooperative else { continue };
         let name = blocks_name(f);
@@ -205,8 +208,8 @@ fn static_attrs(s: &lang::Static, top: &[TokenTree]) -> (TokenStream, Vec<(Span,
     let taken = filtered(top[s.attrs.clone()].iter().cloned(), &mut |meta| {
         let [first, ..] = &meta[..] else { return None };
         let at = first.span();
-        let takes = ["doc", "cfg", "deprecated", "allow", "warn", "deny", "forbid", "expect", "rustfmt"];
-        if takes.iter().any(|name| rust::named(first, name)) {
+        let takes = ["doc", "cfg", "deprecated", "rustfmt"];
+        if takes.iter().chain(&rust::LEVELS).any(|name| rust::named(first, name)) {
             return Some(meta);
         }
         let attr = match &meta[..] {
@@ -284,8 +287,9 @@ fn listed<'a>(elements: impl Iterator<Item = (&'a Cond, TokenStream)>) -> TokenT
 /// which pick the instance. A cooperative kernel is launched cooperatively, every block of its
 /// grid at once. The launcher binds `__kernite_grid` for itself, which a parameter of `f` may be named as well; a
 /// compile-time argument may not, and `launched` is `None` for the launcher that never runs, as one of a kernel that
-/// did not compile. Its result is [`launcher_result`]'s.
-fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStream {
+/// did not compile. Its result is [`launcher_result`]'s. Its body has the `places` of `f`'s code that name an item,
+/// where the level `f` sets holds, as in a function of Rust's, `expect` too.
+fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree], places: TokenStream) -> TokenStream {
     let mut out = attrs(f, top);
     if f.cooperative.is_some() {
         out.extend(parse(&format!(
@@ -339,7 +343,9 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     out.extend(launcher_result(f, top, parse("::core::result::Result<(), ::kernite_cuda::Error>")));
     let how = if f.cooperative.is_some() { "launch_cooperative" } else { "launch" };
     let never = format!("{}::core::unreachable!()", never(f, top));
-    out.extend(body(f, launched, top, asks(f, top, host), &never, |index| {
+    let mut checks = asks(f, top, host);
+    checks.extend(unnamed(places));
+    out.extend(body(f, launched, top, checks, &never, |index| {
         format!("unsafe {{ self.module.{how}({index}, $__kernite_grid, &[{}]) }}", args.join(", "))
     }));
     out
