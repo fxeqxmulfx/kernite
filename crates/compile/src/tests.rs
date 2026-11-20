@@ -309,13 +309,18 @@ impl Builder {
 
     /// [`call`](Builder::call) that does to registers what `clobbers` says.
     fn call_with(&mut self, dst: Option<(VReg, u8)>, args: &[(VReg, u8)], clobbers: Vec<Clobber>) {
+        self.call_at(Width::W64, dst, args, clobbers);
+    }
+
+    /// [`call_with`](Builder::call_with) that copies each argument at `width`, and reads it so.
+    fn call_at(&mut self, width: Width, dst: Option<(VReg, u8)>, args: &[(VReg, u8)], clobbers: Vec<Clobber>) {
         let mut implicit = vec![];
         for &(a, hw) in args {
             let name = self.0.regs[a.id as usize].name.clone();
             let pinned = self.var(&name);
             self.0.pinned.push((pinned, r(hw)));
-            self.0.body.push(Item::Inst(Toy::copy(&toy(0, &[]), pinned, a, Width::W64)));
-            implicit.push(reg_arg(pinned, Width::W64, Access::Read));
+            self.0.body.push(Item::Inst(Toy::copy(&toy(0, &[]), pinned, a, width)));
+            implicit.push(reg_arg(pinned, width, Access::Read));
         }
         let back = dst.map(|(d, hw)| {
             let name = self.0.regs[d.id as usize].name.clone();
@@ -1028,16 +1033,45 @@ fn an_argument_copy_reads_the_register_the_value_arrived_in() {
     b.ret(y, 0);
     let c = same(&b.0, &toy(3, &[2]), &[7]);
     assert_eq!(copies(&c), [(r(2), r(0)), (r(1), r(0)), (r(1), r(2))]);
-    // `p` is passed twice and read no more, and `m` keeps r1 until the call's arguments are set: `p` moves to a
-    // register of its own on entry, and the copy to the second argument's register reads it there, not in r0, where it
-    // arrived.
+    // `q`, a copy of `p`, goes to r0 and `p` to r1, and neither is read after. The copy to r0 writes r0 while `p` is
+    // live, so `p` moves on entry to a register of its own, r2, as `m` holds r1 until `z` reads it; and the copy to r1
+    // reads `p` there, not in r0, where it arrived.
+    let mut b = Builder::new();
+    let (p, m, q, z) = (b.param("p", 0), b.param("m", 1), b.var("q"), b.var("z"));
+    b.copy(q, p, Width::W64);
+    b.def(z, &[m]);
+    b.call(None, &[(q, 0), (p, 1)], &[]);
+    b.ret(z, 0);
+    let c = same(&b.0, &toy(4, &[]), &[7, 9]);
+    assert_eq!(copies(&c), [(r(2), r(0)), (r(1), r(2)), (r(0), r(3))]);
+}
+
+/// A parameter that a call passes twice, and nothing reads after, stays in the register it arrived in, the first
+/// argument's, though `m` holds the second's until the arguments are set: the copy to the first moves nothing, and the
+/// copy to the second reads it there, once `m` is read. It is not moved on entry to a register of its own.
+#[test]
+fn a_parameter_passed_twice_and_read_no_more_stays_where_it_arrived() {
     let mut b = Builder::new();
     let (p, m, z) = (b.param("p", 0), b.param("m", 1), b.var("z"));
     b.def(z, &[m]);
     b.call(None, &[(p, 0), (p, 1)], &[0, 1]);
     b.ret(z, 0);
     let c = same(&b.0, &toy(4, &[3]), &[7, 9]);
-    assert_eq!(copies(&c), [(r(2), r(0)), (r(1), r(2)), (r(0), r(3))]);
+    assert_eq!(regs_of(&c, "p"), [r(0), r(0), r(1)]);
+    assert_eq!(copies(&c), [(r(1), r(0)), (r(0), r(2))]);
+}
+
+/// A parameter that a call takes the low half of stays in the register it arrived in, though the kernel reads all of it
+/// after the call: the copy that passes the low half moves nothing, so it is left out, and does not clear the rest.
+#[test]
+fn a_parameter_passed_in_part_stays_where_it_arrived() {
+    let mut b = Builder::new();
+    let (p, y) = (b.param("p", 0), b.var("y"));
+    b.call_at(Width::W32, None, &[(p, 0)], vec![]);
+    b.def(y, &[p]);
+    b.ret(y, 0);
+    let c = same(&b.0, &toy(3, &[]), &[0x1_0000_0007]);
+    assert_eq!(ops(&c), ["call", "op", "ret"]);
 }
 
 /// What a register holds is not known after a call that changes it.
@@ -1051,11 +1085,13 @@ fn a_register_holds_nothing_known_after_a_call_that_changes_it() {
     b.ret(y, 0);
     let c = same(&b.0, &toy(3, &[2]), &[7]);
     assert_eq!(copies(&c), [(r(2), r(0)), (r(0), r(2))]);
-    // Two calls that leave r0 as it was: the second passes `p` in it with no move.
+    // Two calls that leave r0 as it was, and a third that changes it, which `p` waits out in r2: the second passes `p`
+    // in r0 with no move, and so does the first, for r0 holds `p` as it arrived.
     let mut b = Builder::new();
     let (p, y) = (b.param("p", 0), b.var("y"));
     b.call(None, &[(p, 0)], &[1]);
     b.call(None, &[(p, 0)], &[1]);
+    b.call(None, &[], &[0, 1]);
     b.def(y, &[p]);
     b.ret(y, 0);
     let c = same(&b.0, &toy(3, &[2]), &[7]);
@@ -1063,7 +1099,8 @@ fn a_register_holds_nothing_known_after_a_call_that_changes_it() {
 }
 
 /// A register holds at a label what every way to it brings. One way comes to the first label, the code before it, and
-/// the call after it passes `p` in r0, which the call before it leaves, with no move.
+/// the call after it passes `p` in r0, which the call before it leaves, with no move. A third call changes r0, and `p`
+/// waits it out in r2.
 #[test]
 fn a_label_that_one_way_comes_to_leaves_what_a_register_holds() {
     let mut b = Builder::new();
@@ -1071,6 +1108,7 @@ fn a_label_that_one_way_comes_to_leaves_what_a_register_holds() {
     b.call(None, &[(p, 0)], &[1]);
     b.label(1);
     b.call(None, &[(p, 0)], &[1]);
+    b.call(None, &[], &[0, 1]);
     b.def(y, &[p]);
     b.ret(y, 0);
     let c = same(&b.0, &toy(3, &[2]), &[7]);
@@ -1082,14 +1120,17 @@ fn a_label_that_one_way_comes_to_leaves_what_a_register_holds() {
 /// follows. `n` says which way the kernel takes, the jump if 2, as the Toy's `dec` says; it is run both ways.
 #[test]
 fn a_register_holds_at_a_label_what_both_ways_to_it_bring() {
-    // `way` is the code from the jump to the label, and the call at the label gives back its result in r1.
+    // `way` is the code from the jump to the label, and the call at the label gives back its result in r1. A call that
+    // changes r0 follows it, and `p` and `d` are read after it, so that `p` waits it out in a register of its own.
     let join = |way: fn(&mut Builder, VReg, VReg)| {
         let mut b = Builder::new();
-        let (p, n, d) = (b.param("p", 0), b.param("n", 1), b.var("d"));
+        let (p, n, d, z) = (b.param("p", 0), b.param("n", 1), b.var("d"), b.var("z"));
         way(&mut b, p, n);
         b.label(1);
         b.call(Some((d, 1)), &[(p, 0)], &[1]);
-        b.ret(d, 0);
+        b.call(None, &[], &[0]);
+        b.def(z, &[p, d]);
+        b.ret(z, 0);
         let (jumps, falls) = (same(&b.0, &toy(4, &[]), &[7, 2]), same(&b.0, &toy(4, &[]), &[7, 1]));
         assert_eq!(copies(&jumps), copies(&falls));
         copies(&falls)
@@ -1099,41 +1140,44 @@ fn a_register_holds_at_a_label_what_both_ways_to_it_bring() {
         b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
         b.call(None, &[(p, 0)], &[1]);
     };
-    assert_eq!(join(agree), [(r(2), r(0)), (r(0), r(1))]);
+    assert_eq!(join(agree), [(r(2), r(0))]);
     // The code before the label calls what changes r0, and the jump skips it.
     let falls = |b: &mut Builder, _, n| {
         b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
         b.call(None, &[], &[0]);
     };
-    assert_eq!(join(falls), [(r(2), r(0)), (r(0), r(2)), (r(0), r(1))]);
+    assert_eq!(join(falls), [(r(2), r(0)), (r(0), r(2))]);
     // The jump is after a call that changes r0, and the code before the label passes `p` in r0 again.
     let jumps = |b: &mut Builder, p, n| {
         b.call(None, &[], &[0]);
         b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
         b.call(None, &[(p, 0)], &[1]);
     };
-    assert_eq!(join(jumps), [(r(2), r(0)), (r(0), r(2)), (r(0), r(2)), (r(0), r(1))]);
+    assert_eq!(join(jumps), [(r(2), r(0)), (r(0), r(2)), (r(0), r(2))]);
 }
 
 /// A register holds in a loop what the way into it and the jump back both bring: the call passes `p` in r0 with no move
-/// where it leaves r0 as it was, and has the move each time round where it changes r0.
+/// where it leaves r0 as it was, and has the move each time round where it changes r0. `p` is read after a call that
+/// changes r0, so that it waits that call out in a register of its own, where a move on entry puts it.
 #[test]
 fn a_register_holds_in_a_loop_what_the_way_in_and_the_jump_back_bring() {
     let looped = |clobbers: &[u8]| {
         let mut b = Builder::new();
         let (p, n) = (b.param("p", 0), b.param("n", 1));
-        let (acc, d) = (b.var("acc"), b.var("d"));
+        let (acc, d, z) = (b.var("acc"), b.var("d"), b.var("z"));
         b.def(acc, &[]);
         b.label(2);
         b.call(Some((d, 1)), &[(p, 0)], clobbers);
         b.inst("add", &[(acc, Access::ReadWrite), (d, Access::Read)], Flow::Next);
         b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(2)));
-        b.ret(acc, 0);
+        b.call(None, &[], &[0]);
+        b.def(z, &[acc, p]);
+        b.ret(z, 0);
         copies(&same(&b.0, &toy(5, &[]), &[7, 3]))
     };
-    // The moves of `n` and `p` on entry, and of the sum to r0 before the return.
-    assert_eq!(looped(&[1]), [(r(2), r(1)), (r(3), r(0)), (r(0), r(4))]);
-    assert_eq!(looped(&[0, 1]), [(r(2), r(1)), (r(3), r(0)), (r(0), r(3)), (r(0), r(4))]);
+    // The moves of `p` and `n` on entry, to wait out the calls, and the move of `p` to r0 where the call changes it.
+    assert_eq!(looped(&[1]), [(r(2), r(0)), (r(3), r(1))]);
+    assert_eq!(looped(&[0, 1]), [(r(2), r(0)), (r(3), r(1)), (r(0), r(2))]);
 }
 
 /// Two ways to a label that each move a value written before they parted to one register bring one value, though each

@@ -1,6 +1,6 @@
 //! Liveness: which variables are live where, and which interfere.
 
-use kernite_core::{Arg, Clobber, Inst, Item, Operand, PReg, Program, VReg};
+use kernite_core::{Arg, Clobber, Inst, Item, Operand, PReg, Program, VReg, Width};
 
 use crate::bits::Bits;
 use crate::cfg::{self, Block};
@@ -98,17 +98,35 @@ fn liveness<Op>(p: &Program<Op>, blocks: &[Block], touches: &dyn Fn(&Inst<Op, VR
     }
 }
 
-/// The interference graph, as a set of neighbours per variable: every variable an
-/// instruction writes against every other of its file live just after it, the ones written
-/// beside it included. And for each variable, the registers of its file that an instruction it
-/// is live across changes besides its operands, sorted: it is live after the instruction, which
-/// does not write it. One that clears only the upper half of a register changes it for a variable whose upper half is
-/// live after it, as `upper` says.
-pub(crate) fn interference<Op>(
+/// The variables `inst` copies, `to` from `from`, and how much, if it is what `s`'s copy makes of the one to the other.
+/// That is a copy of as much as `to` is kept, as `kept` says. Where `from` is a call's result, it is a copy of as much
+/// as `from` is kept, what the call gives back, though `to` may be kept in more.
+pub(crate) fn copied<Op: PartialEq>(
+    p: &Program<Op>,
+    inst: &Inst<Op, VReg>,
+    kept: &[Width],
+    s: &dyn Spill<Op>,
+) -> Option<(VReg, VReg, Width)> {
+    let (writes, reads): (Vec<VReg>, Vec<VReg>) = (inst.writes().collect(), inst.reads().collect());
+    let ([to], [from]) = (writes.as_slice(), reads.as_slice()) else { return None };
+    let of = if p.pinned.iter().any(|&(v, _)| v == *from) { from } else { to };
+    let width = kept[of.id as usize];
+    let copy = to != from && to.class == from.class && *inst == s.copy(*to, *from, width);
+    copy.then_some((*to, *from, width))
+}
+
+/// The interference graph, as a set of neighbours per variable: every variable an instruction writes against every
+/// other of its file live just after it, the ones written beside it included. But the copy of a variable to a call's
+/// argument makes no edge between the two, for they hold one value: they interfere where another instruction writes one
+/// while the other is live. And for each variable, the registers of its file that an instruction it is live across
+/// changes besides its operands, sorted: it is live after the instruction, which does not write it. One that clears
+/// only the upper half of a register changes it for a variable whose upper half is live after it, as `upper` says.
+pub(crate) fn interference<Op: PartialEq>(
     p: &Program<Op>,
     blocks: &[Block],
     live: &Live,
     upper: &Live,
+    kept: &[Width],
     s: &dyn Spill<Op>,
 ) -> (Vec<Bits>, Vec<Vec<PReg>>) {
     let n = p.regs.len();
@@ -125,6 +143,10 @@ pub(crate) fn interference<Op>(
         for item in p.body[block.items.clone()].iter().rev() {
             let Item::Inst(inst) = item else { continue };
             let (reads, writes) = touched(inst);
+            // The variable that the copy to a call's argument reads, if `inst` is one: it writes the argument alone.
+            let passed = copied(p, inst, kept, s)
+                .filter(|&(to, _, _)| p.pinned.iter().any(|&(v, _)| v == to))
+                .map(|(_, from, _)| from.id as usize);
             for clobber in &inst.clobbers {
                 let (reg, alive) = match *clobber {
                     Clobber::All(reg) => (reg, &now),
@@ -137,7 +159,7 @@ pub(crate) fn interference<Op>(
                 }
             }
             for w in &writes {
-                for l in now.iter() {
+                for l in now.iter().filter(|&l| passed != Some(l)) {
                     edge(w.id as usize, l);
                 }
                 for other in &writes {

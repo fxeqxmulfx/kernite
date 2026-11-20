@@ -3,25 +3,26 @@ use kernite_core::{Clobber, Flow, Inst, Item, PReg, Program, VReg, Width};
 use crate::Error;
 use crate::bits::Bits;
 use crate::cfg::{Block, forward};
-use crate::live::{Live, analyse, before, first_mentions, interference, touched, upper_live, upper_touched};
+use crate::live::{Live, analyse, before, copied, first_mentions, interference, touched, upper_live, upper_touched};
 use crate::spill;
 use crate::{Machine, Spill};
 
 /// `p` as allocated, and each of its variables' registers, by [`VReg::id`]; `None` for a
 /// variable the body never names.
 ///
-/// Liveness is solved over the blocks to a fixed point. Two variables interfere when one is
-/// written while the other is live, and a variable live across an instruction that changes
-/// registers besides its operands, as a call does, may take none of those; nor, where the instruction clears only the
-/// upper half of a register, one when the variable's own upper half is read after it. The variables the calling
-/// convention places take their registers first: the parameters, the results, and a call's arguments and result. Then
-/// each other variable, in the order the body first names it, takes the register of a call's argument or result it is
-/// copied to or from, if it may, or else the first register the machine offers that none of the variables it interferes
-/// with holds. A copy of one variable to another is left out where it changes nothing: where the two take one register,
-/// or the register it goes to holds the value already on every way to the copy, and where it copies all of the
-/// register, or no instruction after it reads all of the register before one writes the variable it goes to, for a copy
-/// of part clears the rest. A copy that stays reads the register that held the value first, where an instruction after
-/// it reads the variable it copies.
+/// Liveness is solved over the blocks to a fixed point. Two variables interfere when one is written while the other is
+/// live, but for the copy of a variable to a call's argument: the two hold one value then, and may share a register if
+/// nothing else writes one while the other is live, though the kernel reads the variable after the call, or the call
+/// takes it again. A variable live across an instruction that changes registers besides its operands, as a call does,
+/// may take none of those; nor, where the instruction clears only the upper half of a register, one when the variable's
+/// own upper half is read after it. The variables the calling convention places take their registers first: the
+/// parameters, the results, and a call's arguments and result. Then each other variable, in the order the body first
+/// names it, takes the register of a call's argument or result it is copied to or from, if it may, or else the first
+/// register the machine offers that none of the variables it interferes with holds. A copy of one variable to another
+/// is left out where it changes nothing: where the two take one register, or the register it goes to holds the value
+/// already on every way to the copy, and where it copies all of the register, or no instruction after it reads all of
+/// the register before one writes the variable it goes to, for a copy of part clears the rest. A copy that stays reads
+/// the register that held the value first, where an instruction after it reads the variable it copies.
 ///
 /// A parameter or a result that cannot keep its register throughout, since another placed
 /// variable needs it while both are live, or an instruction it is live across changes it,
@@ -52,7 +53,8 @@ pub(crate) fn allocate<Op: Clone + PartialEq>(
     loop {
         let (blocks, live) = analyse(&p)?;
         let upper = upper_live(&p, &blocks, s);
-        let (adj, changed) = interference(&p, &blocks, &live, &upper, s);
+        let kept = spill::kept(&p, s);
+        let (adj, changed) = interference(&p, &blocks, &live, &upper, &kept, s);
         let regs = match fixed(&p, &adj, &changed) {
             Ok(regs) => regs,
             Err(clash) => {
@@ -61,10 +63,10 @@ pub(crate) fn allocate<Op: Clone + PartialEq>(
                 continue;
             }
         };
-        let prefer = preferences(&p, s, &short);
+        let prefer = preferences(&p, &kept, s, &short);
         let (v, held) = match colour(&p, m, &adj, &changed, &prefer, regs) {
             Ok(regs) => {
-                leave_out(&mut p, &blocks, &live, &upper, &regs, s)?;
+                leave_out(&mut p, &blocks, &live, &upper, &regs, &kept, s)?;
                 return Ok((p, regs));
             }
             Err(short) => short,
@@ -191,30 +193,13 @@ fn split<Op>(p: &mut Program<Op>, v: usize, s: &dyn Spill<Op>) -> usize {
     made.id as usize
 }
 
-/// The variables `inst` copies, `to` from `from`, and how much, if it is what `s`'s copy makes of the one to the other.
-/// That is a copy of as much as `to` is kept, as `kept` says. Where `from` is a call's result, it is a copy of as much
-/// as `from` is kept, what the call gives back, though `to` may be kept in more.
-fn copied<Op: PartialEq>(
-    p: &Program<Op>,
-    inst: &Inst<Op, VReg>,
-    kept: &[Width],
-    s: &dyn Spill<Op>,
-) -> Option<(VReg, VReg, Width)> {
-    let (writes, reads): (Vec<VReg>, Vec<VReg>) = (inst.writes().collect(), inst.reads().collect());
-    let ([to], [from]) = (writes.as_slice(), reads.as_slice()) else { return None };
-    let of = if p.pinned.iter().any(|&(v, _)| v == *from) { from } else { to };
-    let width = kept[of.id as usize];
-    let copy = to != from && to.class == from.class && *inst == s.copy(*to, *from, width);
-    copy.then_some((*to, *from, width))
-}
-
 /// For each variable, the variables of `short` it is copied to or from by `s`'s copy, in body
 /// order: it would rather have the register of one, so that the copy moves nothing.
-fn preferences<Op: PartialEq>(p: &Program<Op>, s: &dyn Spill<Op>, short: &[usize]) -> Vec<Vec<usize>> {
-    let (mut prefer, kept) = (vec![vec![]; p.regs.len()], spill::kept(p, s));
+fn preferences<Op: PartialEq>(p: &Program<Op>, kept: &[Width], s: &dyn Spill<Op>, short: &[usize]) -> Vec<Vec<usize>> {
+    let mut prefer = vec![vec![]; p.regs.len()];
     for item in &p.body {
         let Item::Inst(inst) = item else { continue };
-        let Some((to, from, _)) = copied(p, inst, &kept, s) else { continue };
+        let Some((to, from, _)) = copied(p, inst, kept, s) else { continue };
         let (to, from) = (to.id as usize, from.id as usize);
         if short.contains(&from) {
             prefer[to].push(from);
@@ -296,9 +281,9 @@ fn leave_out<Op: PartialEq>(
     live: &Live,
     upper: &Live,
     regs: &[Option<PReg>],
+    kept: &[Width],
     s: &dyn Spill<Op>,
 ) -> Result<(), Error> {
-    let kept = spill::kept(p, s);
     let reg = |v: VReg| regs[v.id as usize].expect("a variable the body names has a register");
     // For each copy, whether an instruction after it reads `from`, and whether one reads all of `to` before one writes
     // it.
@@ -307,7 +292,7 @@ fn leave_out<Op: PartialEq>(
         let (mut now, mut high) = (live.outs[b].clone(), upper.outs[b].clone());
         for i in block.items.clone().rev() {
             let Item::Inst(inst) = &p.body[i] else { continue };
-            if let Some((to, from, _)) = copied(p, inst, &kept, s) {
+            if let Some((to, from, _)) = copied(p, inst, kept, s) {
                 after[i] = (now.contains(from.id as usize), high.contains(to.id as usize));
             }
             let (reads, writes) = touched(inst);
@@ -321,7 +306,7 @@ fn leave_out<Op: PartialEq>(
         .map(|(j, &(v, r))| (r, Held { value: Value::Param(j), bits: s.width(v.class), by: v }))
         .collect();
     let step = |i: usize, inst: &Inst<Op, VReg>, held: &mut Holds| {
-        let Some((to, from, width)) = copied(p, inst, &kept, s) else {
+        let Some((to, from, width)) = copied(p, inst, kept, s) else {
             for &(Clobber::All(r) | Clobber::Upper(r)) in &inst.clobbers {
                 held.retain(|(at, _)| *at != r);
             }

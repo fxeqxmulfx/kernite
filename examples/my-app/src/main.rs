@@ -19,8 +19,8 @@ mod kernels {
     /// The sum of the sixteen floats at `xs`: `sum8` of each half, added. A call changes the registers `sum8` writes,
     /// `ymm0` and `ymm1`, and its `vzeroupper` clears the upper half of every vector register; so the first half's sum,
     /// of which the kernel reads only the lower half, waits out the second call in `xmm2`, moved there as an xmm, as
-    /// the listing says, and the kernel writes no `vzeroupper` of its own. And `xs` stays in `rax`, which `sum8` does
-    /// not write, so the kernel saves none for its own caller.
+    /// the listing says, and the kernel writes no `vzeroupper` of its own. And `xs` stays in `rdi`, where it arrived,
+    /// which `sum8` does not write, so neither call moves it and the kernel saves none for its own caller.
     pub unsafe extern "sysv64" fn sum16(xs: *const f32) -> f32 {
         let (low, high): (ymm, ymm);
         call(low.xmm, sum8, xs);
