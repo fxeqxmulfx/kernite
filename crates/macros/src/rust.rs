@@ -605,6 +605,24 @@ fn located(mut token: TokenTree, at: Span) -> TokenTree {
     token
 }
 
+/// `tokens`, which end an item the macros write for one of the user's, with its last token located at `at`, a token of
+/// the user's. Rust says of an item, as of `missing_docs`, where the item's span is, which runs from its first token to
+/// its last: the user's if both are, so Rust tells at the item as it does of any the user wrote; and the macro's
+/// otherwise, which is the module's attribute, where nothing can be mended.
+pub(crate) fn ending_at(tokens: TokenStream, at: Span) -> TokenStream {
+    let mut tokens: Vec<TokenTree> = tokens.into_iter().collect();
+    if let Some(last) = tokens.last_mut() {
+        last.set_span(at);
+    }
+    tokens.into_iter().collect()
+}
+
+/// `code` in braces, the body of an item the macros write for one of the user's, located at `at`, a token of the
+/// user's: it ends the item, as [`ending_at`] says.
+pub(crate) fn body_at(code: TokenStream, at: Span) -> TokenTree {
+    located(TokenTree::Group(Group::new(Delimiter::Brace, code)), at)
+}
+
 /// `f` with a body that never runs, for a kernel that does not compile. It asks Rust of each type `f`
 /// takes or gives back, as [`asks`] says: of a number by a closure of the type as written, which it
 /// never calls, so that a result reads as it does in a kernel that compiles, "expected `f64`, found
@@ -720,9 +738,9 @@ pub(crate) fn signature(f: &Fn, top: &[TokenTree]) -> TokenStream {
     params.set_span(top[f.params_at].span());
     out.extend([TokenTree::Group(params)]);
     if let Some(r) = &f.ret {
-        // The arrow, then the result.
+        // The arrow, then the result, which ends where the kernel's does.
         out.extend(top[f.params_at + 1..r.tokens.start].iter().cloned());
-        out.extend(given_back(&top[r.tokens.clone()]));
+        out.extend(ending_at(given_back(&top[r.tokens.clone()]), top[r.tokens.end - 1].span()));
     }
     out
 }

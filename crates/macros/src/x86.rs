@@ -8,9 +8,9 @@ use kernite::{Call, HostStatic, Naked, NativeInstance, NativeOut};
 
 use crate::cond::Cond;
 use crate::rust::{
-    asks, attrs, cfg_of, clashes, depends_on, error_under, given_back, gives_placeholder, hygienic, launcher_result,
-    missing, name_at, never, parse, pick, pointer, position, primitive, probe, result, signature, stub, value_params,
-    visibility, written, written_params,
+    asks, attrs, body_at, cfg_of, clashes, depends_on, ending_at, error_under, given_back, gives_placeholder, hygienic,
+    launcher_result, missing, name_at, never, parse, pick, pointer, position, primitive, probe, respan, result,
+    signature, stub, value_params, visibility, written, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -35,7 +35,8 @@ const CPU: &str = "kernite-cpu";
 /// and so is a kernel that gives back a type with a `_` in it, which is Rust's error alone.
 /// All this writes is under `cfg`, `f`'s own, the module of its statics included: an instance is `extern
 /// "sysv64"`, which only x86-64 has, so a crate that keeps `f` there alone builds for another machine. `at` says where
-/// `f` first writes the name of an item of the module, for the operands to be written there.
+/// `f` first writes the name of an item of the module, for the operands to be written there. Its code ends at `f`'s
+/// name, for Rust to tell of `f` at `f`: see [`ending_at`].
 pub(crate) fn naked(
     module: &lang::Module,
     f: &Fn,
@@ -59,7 +60,7 @@ pub(crate) fn naked(
         let listing = &one.naked;
         let mut docs = attrs(f, top);
         docs.extend(needs(instances));
-        out.extend(contract(docs, named));
+        out.extend(contract(docs, named, top[f.head.end + 1].span()));
         out.extend(parse("#[unsafe(naked)]"));
         out.extend(signature(f, top));
         let code = asm(
@@ -69,7 +70,7 @@ pub(crate) fn naked(
             reached(module, listing, top, at),
             probe(f, top),
         );
-        out.extend([TokenTree::Group(Group::new(Delimiter::Brace, code))]);
+        out.extend([body_at(code, top[f.head.end + 1].span())]);
         statics.push(("C".to_string(), listing));
     } else {
         // Each instance's parameters and their types: `f`'s, then a cooperative kernel's place. `f`
@@ -109,13 +110,13 @@ pub(crate) fn naked(
         } else {
             let mut docs = attrs(f, top);
             docs.extend(needs(instances));
-            out.extend(contract(docs, named));
+            out.extend(contract(docs, named, top[f.head.end + 1].span()));
             out.extend(parse("#[inline(always)]"));
             out.extend(signature(f, top));
             let mut body = asks(f, top, written);
             let call = parse(&format!("({})({})", pick(f, &arms, top), names.join(", ")));
             body.extend(result(f, top, call));
-            out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
+            out.extend([body_at(body, top[f.head.end + 1].span())]);
         }
         out.extend(fns);
     }
@@ -236,23 +237,25 @@ fn reached(
 
 /// `docs`, a kernel's attributes, with what its safety contract says of `named`, the memory of
 /// the module's: that nothing else touches it while the kernel runs. A contract the docs do not
-/// have says that the kernel trusts the pointers it is given as well.
-fn contract(mut docs: TokenStream, named: &[String]) -> TokenStream {
+/// have says that the kernel trusts the pointers it is given as well. The contract is located at `at`, a token of the
+/// user's: Clippy leaves out the attributes of a macro, and would ask the kernel for the `# Safety` that it has.
+fn contract(mut docs: TokenStream, named: &[String], at: Span) -> TokenStream {
     if named.is_empty() {
         return docs;
     }
     let memory = format!("Nothing else touches the module's memory, {}, while it runs.", list(named));
-    if !docs.to_string().contains("# Safety") {
-        docs.extend(parse(&format!(
+    let written = if !docs.to_string().contains("# Safety") {
+        parse(&format!(
             "#[doc = \"\"]\n#[doc = \" # Safety\"]\n#[doc = \"\"]\n#[doc = {:?}]",
             format!(
                 " The kernel trusts the pointers it is given: each must be to memory as long as the kernel reads and \
                  writes through it. {memory}"
             )
-        )));
+        ))
     } else {
-        docs.extend(parse(&format!("#[doc = \"\"]\n#[doc = {:?}]", format!(" {memory}"))));
-    }
+        parse(&format!("#[doc = \"\"]\n#[doc = {:?}]", format!(" {memory}")))
+    };
+    docs.extend(respan(written, at));
     docs
 }
 
@@ -303,7 +306,7 @@ pub(crate) fn cpu_static(
     if let Some(m) = far {
         let sym = symbol(name);
         let memory = format!("__kernite_{sym}");
-        out.extend(parse(&format!(": &'static {}", global(m))));
+        out.extend(parse(&format!(": &{}", global(m))));
         out.extend(initializer(name, &format!("&{memory}")));
         let under = |attr: &str| cfg.clone().into_iter().chain(parse(attr)).collect::<TokenStream>();
         let mut declared = under(r#"#[cfg(target_os = "linux")]"#);
@@ -342,12 +345,14 @@ pub(crate) fn cpu_static(
 /// `relocation R_X86_64_PC32 cannot be used against symbol`. A protected symbol is exported as well, and the crate's
 /// own kernels bind to the crate's own. The `global_asm!` names the static, which may be deprecated. Rust tells of no
 /// use of a deprecated item inside the item itself, so the `global_asm!` is in the static's own initializer, and no
-/// `allow` is written, which a crate that forbids `deprecated` would refuse.
+/// `allow` is written, which a crate that forbids `deprecated` would refuse. It ends the static, at its name: see
+/// [`ending_at`].
 fn initializer(name: &TokenTree, value: &str) -> TokenStream {
-    parse(&format!(
+    let text = format!(
         "= {{ #[cfg(target_os = \"linux\")] mod __kernite_protected {{ \
          ::core::arch::global_asm!(\".protected {{}}\", sym super::{name}); }} {value} }};"
-    ))
+    );
+    ending_at(parse(&text), name.span())
 }
 
 /// The name of a static as the linker has it after the path of its module, which `module_path!` gives, for the statics

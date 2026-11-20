@@ -5,8 +5,10 @@
 //! every number's name and `str`, on x86 and on a GPU; and modules whose kernels name the constants of the
 //! numbers they give other types: a number's own, `u32::MAX`, which Rust is not asked of, and a module's,
 //! `std::f32::consts::PI`, which it is. Rust builds each without a word.
+//! Clippy asks of each public x86 kernel a `# Safety`, as of any `unsafe fn`, which these have not: allowed here.
 
 #![deny(warnings)]
+#![allow(clippy::missing_safety_doc)]
 #![allow(non_camel_case_types)]
 
 /// The type each name is in the modules below.

@@ -4394,12 +4394,13 @@ fn a_crate_that_forbids_a_lint_a_kernel_expects_is_refused_once_at_the_expect() 
     );
 }
 
-/// Clippy says "too many arguments" of a function of more than seven parameters wherever its tokens
-/// come from, and a launcher takes `self` and the grid as well as the kernel's parameters: so each
-/// launcher allows it, and Clippy says nothing of one of eight or nine, of each kind of kernel. It
-/// says nothing of the kernels that forbid lints either, whose instances include `bool`s, nor of those
-/// that take or give back pointers, of every kind, which the macros ask Rust the size of, nor of those
-/// that take parameters named `_`, which the macros name for Rust themselves.
+/// Clippy says "too many arguments" of a function of more than seven parameters wherever its tokens come from, and a
+/// launcher takes `self` and the grid as well as the kernel's parameters: so each launcher allows it, and Clippy says
+/// nothing of one of eight or nine, of each kind of kernel. It says nothing of the kernels that forbid lints either,
+/// whose instances include `bool`s, nor of those that take or give back pointers, of every kind, which the macros ask
+/// Rust the size of, nor of those that take parameters named `_`, which the macros name for Rust themselves. What it
+/// says of a fixture's own kernels, that a public one has no `# Safety` and that a parameter is named `__0`, the
+/// fixture allows: `clippy_tells_of_a_public_x86_kernel_with_no_safety_doc_at_the_kernel` holds the first.
 #[test]
 fn clippy_says_nothing_of_the_rust_the_macro_writes() {
     if clippy_here() {
@@ -4634,14 +4635,13 @@ fn an_attribute_that_is_not_for_memory_on_the_gpu_is_kernites_error_alone() {
 /// A static of GPU kernels gives its method, `Kernels::COUNTS`, each attribute it takes, and Rust says of the method
 /// what the attribute makes it say. A module that denies `missing_docs` is told of no static that has a doc, written as
 /// `///`, as `#[doc = ..]` and in a `cfg_attr(..)`, nor of one with `#[doc(hidden)]`, `#[allow(missing_docs)]`, alone
-/// or in a `cfg_attr(..)`, or `#[expect(missing_docs)]`; it is told of one with none, once, at the module; of one whose
+/// or in a `cfg_attr(..)`, or `#[expect(missing_docs)]`; it is told of one with none, at the static; of one whose
 /// doc and level are in a `cfg_attr(..)` that does not hold, which Rust leaves out as it does of any item; and of none
 /// that `cfg` leaves out, which has no method. The level that a static gives its method is Rust's for it: `#[warn(..)]`
 /// is a warning, `#[deny(..)]` and `#[forbid(..)]` an error, and an `#[expect(..)]` that no lint meets a warning, at
 /// the attribute. A deprecated static is told of at each use of its method, and a table with `#[rustfmt::skip]` is a
 /// static as any is. A static of x86 kernels is a `static` of Rust's: it keeps `#[used]`, which a static of GPU kernels
-/// refuses, and when it is deprecated it is told of at its use as a static is. Each module that Rust tells of has one
-/// static, for Rust says one message once for its place.
+/// refuses, and when it is deprecated it is told of at its use as a static is.
 #[test]
 fn a_static_of_gpu_kernels_gives_its_method_the_attributes_it_takes() {
     refuses(
@@ -4649,15 +4649,59 @@ fn a_static_of_gpu_kernels_gives_its_method_the_attributes_it_takes() {
         &[
             "src/lib.rs:125:84: error: use of deprecated static `cpu::OLD`: use `KEPT`",
             "src/lib.rs:125:38: error: use of deprecated method `kept::Kernels::OLD`: use `HERE`",
-            "src/lib.rs:38:1: error: missing documentation for a method",
-            "src/lib.rs:47:1: error: missing documentation for a method",
-            "src/lib.rs:58:1: warning: missing documentation for a method",
-            "src/lib.rs:65:1: error: missing documentation for a method",
-            "src/lib.rs:72:1: error: missing documentation for a method",
+            "src/lib.rs:42:5: error: missing documentation for a method",
+            "src/lib.rs:53:5: error: missing documentation for a method",
+            "src/lib.rs:61:5: warning: missing documentation for a method",
+            "src/lib.rs:68:5: error: missing documentation for a method",
+            "src/lib.rs:75:5: error: missing documentation for a method",
             "src/lib.rs:81:14: warning: this lint expectation is unfulfilled",
             "error: could not compile `static_attrs_kept` (lib) due to 6 previous errors; 2 warnings emitted",
         ],
     );
+}
+
+/// An item of a module of kernels with no doc is told of by `missing_docs` at the item, as Rust tells of an item of
+/// plain Rust, and not at the module's `#[kernite_macros::kernels]`: each of two statics of GPU kernels, which are
+/// methods of `Kernels`; each static of x86 kernels, near `rip` and far from it; and each x86 kernel that the macros
+/// write a function for, plain, giving back a number, a pointer or `()`, and of instances. A static or a kernel with a
+/// doc is not told of, nor is a GPU kernel or a cooperative x86 kernel, whose launcher the macros write with a doc, nor
+/// an x86 kernel that names a static of its module, whose safety contract they write as a doc.
+#[test]
+fn an_item_of_kernels_with_no_doc_is_told_of_at_the_item() {
+    refuses(
+        "missing_docs_at_item",
+        &[
+            "src/lib.rs:14:5: error: missing documentation for a method",
+            "src/lib.rs:19:5: error: missing documentation for a method",
+            "src/lib.rs:31:5: error: missing documentation for a static",
+            "src/lib.rs:33:5: error: missing documentation for a static",
+            "src/lib.rs:38:5: error: missing documentation for a function",
+            "src/lib.rs:40:5: error: missing documentation for a function",
+            "src/lib.rs:44:5: error: missing documentation for a function",
+            "src/lib.rs:48:5: error: missing documentation for a function",
+            "src/lib.rs:51:5: error: missing documentation for a function",
+            "src/lib.rs:58:5: error: missing documentation for a function",
+            "error: could not compile `missing_docs_at_item` (lib) due to 10 previous errors",
+        ],
+    );
+}
+
+/// Clippy tells of a public x86 kernel whose docs have no `# Safety` at the kernel, as it tells of an `unsafe fn` of
+/// Rust's own: a plain kernel, one that gives back a number, and one of instances. It says nothing of a kernel whose
+/// docs have one, of a kernel that names a static of its module, plain or of instances, whose contract the macros write
+/// as one, of a cooperative kernel, nor of a GPU kernel, whose launcher has the macros'.
+#[test]
+fn clippy_tells_of_a_public_x86_kernel_with_no_safety_doc_at_the_kernel() {
+    if clippy_here() {
+        let (done, said) = cargo(&["clippy"], "missing_safety_doc_at_item");
+        let missing = "warning: unsafe function's docs are missing a `# Safety` section";
+        let lines = [14, 17, 23].map(|line| format!("src/lib.rs:{line}:5: {missing}"));
+        assert!(
+            done && said == lines,
+            "fixtures/missing_safety_doc_at_item.rs: Clippy {done}, and said:\n{}",
+            said.join("\n")
+        );
+    }
 }
 
 /// A use of a deprecated static or function by a kernel is told of once, at the use, as Rust tells of a use in a

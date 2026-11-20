@@ -8,9 +8,9 @@ use kernite::{Compiled, DeviceStatic, Failed, Launcher};
 
 use crate::cond::Cond;
 use crate::rust::{
-    self, asks, attrs, carried, clashes, depends_on, error_under, filtered, flatten, half, host, hygienic, is_punct,
-    launcher_result, missing, name_at, never, number_type, parse, pick, pointer, primitive, ptr_type, quiet, refused,
-    site, visibility, written_params,
+    self, asks, attrs, body_at, carried, clashes, depends_on, ending_at, error_under, filtered, flatten, half, host,
+    hygienic, is_punct, launcher_result, missing, name_at, never, number_type, parse, pick, pointer, primitive,
+    ptr_type, quiet, refused, site, visibility, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -150,7 +150,8 @@ pub(crate) fn gpu(
 /// module's variables, an expression, as the `kernite_cuda::Global` of the type of Rust's its
 /// elements are read as; or one that never runs, for a static that did not compile: of the type
 /// its elements are read as, if only what the static holds is wrong, and of any type if not. It has the attributes of
-/// the static that [`static_attrs`] says it takes.
+/// the static that [`static_attrs`] says it takes. It ends at the static's name, for Rust to tell of the method at the
+/// static, as it tells of any item with no doc that a module has: see [`ending_at`].
 fn accessor(s: &lang::Static, laid: &Laid, i: String, top: &[TokenTree]) -> TokenStream {
     let mut out = static_attrs(s, top).0;
     out.extend(top[s.vis.clone()].iter().cloned());
@@ -158,16 +159,19 @@ fn accessor(s: &lang::Static, laid: &Laid, i: String, top: &[TokenTree]) -> Toke
     // Its name as written, after `static`, where it is but of the macro's span: Rust lints the case
     // of a name the user wrote, and `COUNTS` is the name of a method, not of a static.
     let mut name = top[s.vis.end + 1].clone();
-    name.set_span(name.span().resolved_at(site()));
+    let at = name.span();
+    name.set_span(at.resolved_at(site()));
     out.extend([name]);
     let body = match laid {
         Ok(_) => format!("self.module.global({i})"),
         Err(_) => "::core::unreachable!()".to_string(),
     };
-    out.extend(parse(&match read(laid) {
-        Some(m) => format!("(&self) -> ::kernite_cuda::Global<'_, {}> {{ {body} }}", primitive(&m.host)),
-        None => format!("<T: ::kernite_cuda::Plain>(&self) -> ::kernite_cuda::Global<'_, T> {{ {body} }}"),
-    }));
+    let signature = match read(laid) {
+        Some(m) => format!("(&self) -> ::kernite_cuda::Global<'_, {}>", primitive(&m.host)),
+        None => "<T: ::kernite_cuda::Plain>(&self) -> ::kernite_cuda::Global<'_, T>".to_string(),
+    };
+    out.extend(ending_at(parse(&signature), at));
+    out.extend([body_at(parse(&body), at)]);
     out
 }
 

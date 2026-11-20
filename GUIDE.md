@@ -399,6 +399,13 @@ One that calls a helper at two places, one of them in a helper `cfg` leaves out,
 A const that `cfg` leaves out with every item that names it is not said of, and one that `cfg` keeps and only items
 `cfg` leaves out name is unused to Rust, which says so as it does of any const that nothing names.
 
+Rust tells of an item of a module of kernels that has no doc, where `missing_docs` is on, as it tells of an item of
+plain Rust: at the item's `pub`, and not at the module's attribute. That holds of a static of x86 kernels, of a static
+of GPU kernels, which Rust has as a method of `Kernels`, and of an x86 kernel. Clippy tells there too of a public x86
+kernel whose docs have no `# Safety`, as it does of any public `unsafe fn`. Neither tells of a GPU kernel or a
+cooperative x86 kernel, whose launcher the macros write with a `# Safety`, nor of an x86 kernel that names a static of
+its module, whose `# Safety` they write where its docs have none.
+
 A deprecated item that a kernel names is told of by Rust at the name, once for each place the kernel writes it.
 `lea(p, [COUNTS]);` of a deprecated static is a warning at `COUNTS`, with the note of the attribute, and
 `call(v, old, ());` of a deprecated x86 kernel is one at `old`. A static in the GPU's memory is told of as a use of its

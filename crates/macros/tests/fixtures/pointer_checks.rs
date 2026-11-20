@@ -3,8 +3,10 @@
 //! `Option<&u8>`, and a tuple with a reference; a pointer a kernel returns, and a kernel that never returns; kernels
 //! deprecated, by `#[deprecated]` and by `cfg_attr`, and kernels configured out, by `#[cfg]` and by `cfg_attr`. Each is
 //! plain, of compile-time arguments and cooperative, on x86, and a GPU kernel too.
+//! Clippy asks of each public x86 kernel a `# Safety`, as of any `unsafe fn`, which these have not: allowed here.
 
 #![deny(warnings)]
+#![allow(clippy::missing_safety_doc)]
 
 /// A struct with a lifetime, which `*const Bar` names without one.
 pub struct Bar<'a>(pub &'a u8);
