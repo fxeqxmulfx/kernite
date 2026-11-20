@@ -49,9 +49,14 @@ pub struct Listing {
     pub regs: Vec<(String, String)>,
     /// The frame.
     pub frame: Frame,
-    /// Bytes the prologue moves the stack pointer down besides the frame's, so that a kernel that calls calls at a
-    /// multiple of 16, as SysV asks, and a frame aligned to 16 lies at one.
+    /// Bytes of the frame besides its slots, so that a kernel that calls calls at a multiple of 16, as SysV asks, and a
+    /// frame aligned to 16 lies at one.
     pub padding: u32,
+    /// Whether the frame lies below the stack pointer, in the red zone, which SysV lets a function use without moving
+    /// the stack pointer: a kernel that calls nothing keeps a frame aligned to 16 or less there, if the frame and its
+    /// `padding` are 128 bytes or less. A slot is at its offset in `frame` from as far below the stack pointer as the
+    /// frame's size and `padding`.
+    pub below: bool,
     /// Whether control returns: whether the kernel has a `ret`, though a jump to a callee may stand for it. One with
     /// none never returns.
     pub returns: bool,
@@ -114,9 +119,9 @@ impl Listing {
             saved.join(", ")
         )
         .unwrap();
+        let from = slots_from(&self.frame, self.padding, self.below);
         for (slot, &at) in self.frame.slots.iter().zip(&self.frame.offsets) {
-            let sp = name(RSP, Width::W64);
-            let at = if at == 0 { sp } else { format!("{sp} + {at}") };
+            let at = format!("{}{}", name(RSP, Width::W64), displacement(from + i64::from(at)));
             let spilled = if slot.spill { ", spilled" } else { "" };
             writeln!(out, "# {}{spilled}: {} at {at}", slot.name, crate::bytes(slot.size.into())).unwrap();
         }
@@ -156,6 +161,21 @@ impl Listing {
     }
 }
 
+/// Where the slots of `frame` start from the stack pointer once the prologue has run: at it, or, where the frame lies
+/// `below` it, as far under it as the prologue would have moved it, the frame's size and `padding`.
+fn slots_from(frame: &Frame, padding: u32, below: bool) -> i64 {
+    if below { -i64::from(frame.size + padding) } else { 0 }
+}
+
+/// A displacement as an address has it after the register: ` + 8`, ` - 8`, or nothing for 0.
+fn displacement(disp: i64) -> String {
+    match disp {
+        0 => String::new(),
+        d if d > 0 => format!(" + {d}"),
+        d => format!(" - {}", -d),
+    }
+}
+
 /// Whether a listing names a constant or a function by `name`, `{c0}` or `{f0}`, as it names a
 /// static by its own, `{COUNTS}`: a static of that name would be taken for one of them.
 pub fn taken(name: &str) -> bool {
@@ -166,7 +186,8 @@ pub fn taken(name: &str) -> bool {
 /// `c` in Intel syntax, with the frame set up on entry and taken down before every `ret`, and
 /// a note before each store of a variable that spilled and each load of it back. A kernel that
 /// calls has its stack pointer at a multiple of 16 for each call; a move of a register to
-/// itself that changes nothing is left out. Or why not: a frame past what an address reaches.
+/// itself that changes nothing is left out. A frame in the red zone is neither set up nor taken down. Or why not: a
+/// frame past what an address reaches.
 ///
 /// Labels become local numbers, in the order they are placed, which `naked_asm!` asks for so
 /// that the same code can be emitted twice. Numbers made of ones and zeros alone are skipped:
@@ -175,6 +196,7 @@ pub fn taken(name: &str) -> bool {
 /// `reach` is what a call at an address may reach, which `c` does not name: the listing keeps it.
 pub fn print(c: &Allocated<Op>, reach: Vec<String>) -> Result<Listing, String> {
     let lowered = frame::lower(c)?;
+    let from = slots_from(&c.frame, lowered.padding, lowered.below);
     let mut numbers = BTreeMap::new();
     let mut places = BTreeMap::new();
     let mut next = 2;
@@ -209,7 +231,7 @@ pub fn print(c: &Allocated<Op>, reach: Vec<String>) -> Result<Listing, String> {
                     .iter()
                     .map(|a| match a.operand {
                         Operand::Reg(r, w) => name(r, w),
-                        Operand::Mem(m) => memory(&m, c, inst.op != Op::Lea, vector_index(&m)),
+                        Operand::Mem(m) => memory(&m, c, from, inst.op != Op::Lea, vector_index(&m)),
                         Operand::Imm(imm) if imm.hex => format!("{:#04x}", imm.value),
                         Operand::Imm(imm) => imm.value.to_string(),
                         Operand::Label(l) => jump_target(l, i, &numbers, &places),
@@ -241,6 +263,7 @@ pub fn print(c: &Allocated<Op>, reach: Vec<String>) -> Result<Listing, String> {
             .collect(),
         frame: c.frame.clone(),
         padding: lowered.padding,
+        below: lowered.below,
         returns: lowered.returns,
         changes: lowered.changes,
         clears_upper: lowered.clears_upper,
@@ -287,17 +310,18 @@ fn name(r: PReg, width: Width) -> String {
     }
 }
 
-/// A memory operand; `sized` puts the access's size in front, which every instruction but
-/// `lea` wants. `vector_index` is the width of its vector of indices, if it is at one.
+/// A memory operand; a slot's address is its offset in the frame from `from` past the stack pointer, as `slots_from`
+/// says. `sized` puts the access's size in front, which every instruction but `lea` wants. `vector_index` is the
+/// width of its vector of indices, if it is at one.
 ///
 /// # Panics
 ///
 /// If its index is a vector of no width given, which whoever built the instruction left out.
-fn memory(m: &Mem<PReg>, c: &Allocated<Op>, sized: bool, vector_index: Option<Width>) -> String {
+fn memory(m: &Mem<PReg>, c: &Allocated<Op>, from: i64, sized: bool, vector_index: Option<Width>) -> String {
     let (mut text, disp) = match m.base {
         Base::None => (String::new(), i64::from(m.disp)),
         Base::Reg(r) => (name(r, Width::W64), i64::from(m.disp)),
-        Base::Slot(s) => (name(RSP, Width::W64), i64::from(m.disp) + i64::from(c.frame.offsets[s.0 as usize])),
+        Base::Slot(s) => (name(RSP, Width::W64), i64::from(m.disp) + from + i64::from(c.frame.offsets[s.0 as usize])),
         Base::Const(k) => (format!("rip + {{c{}}}", k.0), i64::from(m.disp)),
         Base::Func(f) => (format!("rip + {{f{}}}", f.0), i64::from(m.disp)),
         Base::Static(s) => (format!("rip + {{{}}}", c.statics[s.0 as usize]), i64::from(m.disp)),
@@ -310,11 +334,7 @@ fn memory(m: &Mem<PReg>, c: &Allocated<Op>, sized: bool, vector_index: Option<Wi
         let plus = if text.is_empty() { "" } else { " + " };
         write!(text, "{plus}{}*{scale}", name(r, width)).unwrap();
     }
-    match disp {
-        0 => {}
-        d if d > 0 => write!(text, " + {d}").unwrap(),
-        d => write!(text, " - {}", -d).unwrap(),
-    }
+    text += &displacement(disp);
     if !sized {
         return format!("[{text}]");
     }

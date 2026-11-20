@@ -19,8 +19,12 @@ pub(crate) struct Lowered {
     pub(crate) body: Vec<Item<Op, PReg>>,
     /// The CPU features past x86-64's own the code needs.
     pub(crate) features: Vec<Feature>,
-    /// Bytes the prologue moves the stack pointer down besides the frame's.
+    /// Bytes of the frame besides its slots, so that a kernel that calls calls at a multiple of 16, and a frame aligned
+    /// to 16 lies at one.
     pub(crate) padding: u32,
+    /// Whether the frame lies below the stack pointer, in the red zone, and the prologue does not move the stack
+    /// pointer for it: its slots are at `[rsp - padding - size + offset]`.
+    pub(crate) below: bool,
     /// Whether control returns: whether the kernel has a `ret`, though a jump to a callee may stand for it.
     pub(crate) returns: bool,
     /// The registers a call of it changes that a caller does not keep, as `Listing::changes` says.
@@ -49,7 +53,8 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
         .collect();
     let free = Label(labels.into_iter().fold(0, |free, l| if l == free { free + 1 } else { free }));
     let padding = padding(&c.frame, calls);
-    let mut body = prologue(&c.frame, padding, free)?;
+    let below = !calls && !realigns(&c.frame) && (1..=RED_ZONE).contains(&(c.frame.size + padding));
+    let mut body = prologue(&c.frame, padding, free, below)?;
     let done: BTreeSet<usize> = jumps.values().flatten().copied().collect();
     // Whether the call that comes next has a `vzeroupper` written before it.
     let mut clear = false;
@@ -69,12 +74,12 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
                 // The callee, passed all of a ymm, clears the upper halves before it returns. A `vzeroupper` written
                 // before the call goes after the frame is taken down, where it goes before a `ret`.
                 let clears = (mem::take(&mut clear) || upper[i]) && !call.implicit.iter().any(ymm);
-                body.extend(epilogue(&c.frame, padding, clears));
+                body.extend(epilogue(&c.frame, padding, below, clears));
                 body.push(Item::Inst(jump));
                 continue;
             }
             Item::Inst(_) if done.contains(&i) => continue,
-            Item::Inst(inst) if inst.op == Op::Ret => body.extend(epilogue(&c.frame, padding, upper[i])),
+            Item::Inst(inst) if inst.op == Op::Ret => body.extend(epilogue(&c.frame, padding, below, upper[i])),
             // The `vzeroupper` written before a call waits for it, and goes before it where an upper half may be set.
             Item::Inst(inst) if inst.op == Op::Vzeroupper => {
                 clear = upper[i];
@@ -117,7 +122,7 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     features.dedup();
     let changes = insts(&body).flat_map(Inst::writes).filter(|r| CALL_CLOBBERS.contains(r)).collect::<BTreeSet<_>>();
     let changes = changes.into_iter().collect();
-    Ok(Lowered { body, features, padding, returns, changes, clears_upper, reaches_sse })
+    Ok(Lowered { body, features, padding, below, returns, changes, clears_upper, reaches_sse })
 }
 
 /// The calls of `c` that are jumps, by their places in its body, each with the place of the `ret` it does without, if
@@ -211,6 +216,10 @@ fn idle(inst: &Inst<Op, PReg>) -> bool {
 /// Pages past this many are touched in a loop.
 const UNROLLED: u32 = 3;
 
+/// How many bytes below the stack pointer SysV lets a function use without moving it, its red zone: a signal handler
+/// leaves them as they are, and only a call, which pushes its return address there, writes them.
+const RED_ZONE: u32 = 128;
+
 /// How many bytes the stack pointer is a multiple of at a call, as SysV asks. A frame aligned to no more is aligned by
 /// moving the stack pointer down a few bytes more, one aligned to more by `and`.
 const CALLED: u32 = 16;
@@ -233,10 +242,10 @@ fn probes(frame: &Frame, pad: u32) -> u32 {
     }
 }
 
-/// Bytes the prologue moves the stack pointer down besides `frame`, so that it ends at a multiple of 16: where the
-/// kernel `calls`, as SysV asks, and where `frame` is aligned to 16, whose slots then lie at multiples of 16. On entry
-/// the stack pointer is 8 past a multiple of 16, the return address below it, and each push moves it 8 more. A frame
-/// aligned to more needs none: the prologue aligns it.
+/// Bytes of the frame besides its slots, above them, so that the frame lies at a multiple of 16: where the kernel
+/// `calls`, as SysV asks of the stack pointer, which `sub rsp` leaves at the frame, and where `frame` is aligned to 16,
+/// whose slots then lie at multiples of 16. On entry the stack pointer is 8 past a multiple of 16, the return address
+/// below it, and each push moves it 8 more. A frame aligned to more needs none: the prologue aligns it.
 fn padding(frame: &Frame, calls: bool) -> u32 {
     if realigns(frame) || !(calls || frame.align == CALLED) {
         return 0;
@@ -247,7 +256,7 @@ fn padding(frame: &Frame, calls: bool) -> u32 {
 
 /// Saves the callee-saved registers the body writes; then, if there are slots, moves the stack pointer down past them
 /// and `pad`; else down past `pad` alone. A frame aligned to more than 16 keeps the caller's stack pointer in `rbp`
-/// first, and aligns the stack pointer last.
+/// first, and aligns the stack pointer last. A frame that lies `below` the stack pointer does not move it.
 ///
 /// The stack pointer never moves more than a page below memory the kernel has touched, so that
 /// a frame that runs past the end of the stack faults at the guard page there rather than step
@@ -256,8 +265,11 @@ fn padding(frame: &Frame, calls: bool) -> u32 {
 /// keeps its end in `r11`. The alignment comes last, a page at most, unless the stack pointer
 /// has it already. A frame of more than 2^31 bytes, more than an address reaches past the stack
 /// pointer, says so.
-fn prologue(frame: &Frame, pad: u32, free: Label) -> Result<Vec<Item<Op, PReg>>, String> {
+fn prologue(frame: &Frame, pad: u32, free: Label, below: bool) -> Result<Vec<Item<Op, PReg>>, String> {
     let mut items: Vec<_> = frame.saved.iter().map(|&r| inst(Op::Push, vec![reg(r, Access::Read)])).collect();
+    if below {
+        return Ok(items);
+    }
     if frame.size == 0 {
         if pad > 0 {
             items.push(sp(Op::Sub, pad));
@@ -322,7 +334,7 @@ fn prologue(frame: &Frame, pad: u32, free: Label) -> Result<Vec<Item<Op, PReg>>,
 /// What runs before a `ret`, and before a jump to a callee that stands for one: undoes [`prologue`], and clears the
 /// upper halves of the vector registers if `upper`, as [`upper_set`] says, so the caller's SSE code does not pay for
 /// them.
-fn epilogue(frame: &Frame, pad: u32, upper: bool) -> Vec<Item<Op, PReg>> {
+fn epilogue(frame: &Frame, pad: u32, below: bool, upper: bool) -> Vec<Item<Op, PReg>> {
     let mut items = vec![];
     if realigns(frame) {
         items.extend([
@@ -331,7 +343,7 @@ fn epilogue(frame: &Frame, pad: u32, upper: bool) -> Vec<Item<Op, PReg>> {
         ]);
     } else {
         // An `add` takes 2^31 - 1 at most, and a frame may be 2^31 bytes, with `pad` more.
-        let mut back = frame.size + pad;
+        let mut back = if below { 0 } else { frame.size + pad };
         while back > 0 {
             let by = back.min(i32::MAX as u32);
             items.push(sp(Op::Add, by));

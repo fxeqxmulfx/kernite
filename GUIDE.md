@@ -321,10 +321,17 @@ takes its address. Until written, it holds whatever was there. kernite checks an
 what it reaches lies inside, and `vmovaps` and `vmovdqa` reach it at a multiple of what they move; the index is the
 kernel's to keep inside. A frame of more than a page is touched a page at a time on the way down, as Rust's functions
 are, so that one past the end of the stack faults at the guard page there rather than reach past it. The stack pointer
-is 8 past a multiple of 16 on entry, as SysV says, so `sub rsp` makes a frame aligned to 16 or less, with a few bytes
-more where a call or the frame needs the stack pointer at a multiple of 16, and `add rsp` takes it down. Only a frame
-aligned past 16 keeps the caller's stack pointer in `rbp`: the kernel aligns the stack pointer with `and rsp`, and takes
-the frame down by `mov rsp, rbp`.
+is 8 past a multiple of 16 on entry, as SysV says. A kernel that calls nothing, or whose calls are all jumps, keeps a
+frame aligned to 16 or less below the stack pointer, in the red zone that SysV lets a function use without moving the
+stack pointer, where the frame and the few bytes more that align it are 128 bytes or less: with no `sub rsp` or
+`add rsp`, the slot of a frame of 8 bytes is at `[rsp - 8]`. Linux, as SysV asks, runs a signal handler below the red
+zone, which it leaves as it is. On bare metal and under UEFI an interrupt may write it, and rustc's
+`x86_64-unknown-none` and `x86_64-unknown-uefi` keep their own functions out of it. kernite writes one listing for every
+target, so a kernel whose frame lies below the stack pointer runs on those only where no interrupt writes the stack it
+runs on. A call writes its return address in the red zone, and a frame of more than 128 bytes does not fit there, so
+`sub rsp` makes any other frame aligned to 16 or less, with a few bytes more where a call or the frame needs the stack
+pointer at a multiple of 16, and `add rsp` takes it down. Only a frame aligned past 16 keeps the caller's stack pointer
+in `rbp`: the kernel aligns the stack pointer with `and rsp`, and takes the frame down by `mov rsp, rbp`.
 
 When the variables alive together do not fit in the registers, kernite spills one to a slot of the frame: it stores it
 after each instruction that writes it and loads it before each one that reads it. It spills, of the variable left

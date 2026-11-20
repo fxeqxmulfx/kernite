@@ -160,18 +160,17 @@ fn a_general_register_spills_with_mov_a_parameter_from_where_it_arrives() {
     let text = kernite::x86_str(src, "k").unwrap().text();
     let parts = [
         "# frame: 16 bytes aligned to 8, saves [rbx, r12, r13, r14, r15]
-# n, spilled: 8 bytes at rsp
-# g12, spilled: 8 bytes at rsp + 8
+# n, spilled: 8 bytes at rsp - 16
+# g12, spilled: 8 bytes at rsp - 8
 # p=rdi n=rsi,r15 g0=rax",
-        "    sub rsp, 16
-    # n spilled
-    mov qword ptr [rsp], rsi
+        "    # n spilled
+    mov qword ptr [rsp - 16], rsi
     mov rax, qword ptr [rdi]",
         "    # n reloaded
-    mov r15, qword ptr [rsp]
+    mov r15, qword ptr [rsp - 16]
     sub r15, 1
     # n spilled
-    mov qword ptr [rsp], r15
+    mov qword ptr [rsp - 16], r15
     jnz 2b",
     ];
     for part in parts {
@@ -476,14 +475,12 @@ fn a_kernel_that_loads_mxcsr_gives_the_callers_back() {
     let want = "# k(gpr) -> ()
 # needs: avx
 # frame: 4 bytes aligned to 4, saves []
-# mxcsr: 4 bytes at rsp
+# mxcsr: 4 bytes at rsp - 4
 # x=rdi
-    sub rsp, 4
     # the caller's mxcsr, which it gets back
-    vstmxcsr dword ptr [rsp]
+    vstmxcsr dword ptr [rsp - 4]
     vldmxcsr dword ptr [rdi]
-    vldmxcsr dword ptr [rsp]
-    add rsp, 4
+    vldmxcsr dword ptr [rsp - 4]
     ret
 ";
     assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
@@ -498,21 +495,18 @@ fn a_kernel_that_loads_mxcsr_loads_the_callers_back_before_each_return() {
     let want = "# k(gpr, gpr) -> ()
 # needs: avx
 # frame: 4 bytes aligned to 4, saves []
-# mxcsr: 4 bytes at rsp
+# mxcsr: 4 bytes at rsp - 4
 # x=rdi n=rsi
-    sub rsp, 4
     # the caller's mxcsr, which it gets back
-    vstmxcsr dword ptr [rsp]
+    vstmxcsr dword ptr [rsp - 4]
     vldmxcsr dword ptr [rdi]
     test rsi, rsi
     jz 2f
     vldmxcsr dword ptr [rdi + 4]
-    vldmxcsr dword ptr [rsp]
-    add rsp, 4
+    vldmxcsr dword ptr [rsp - 4]
     ret
 2:
-    vldmxcsr dword ptr [rsp]
-    add rsp, 4
+    vldmxcsr dword ptr [rsp - 4]
     ret
 ";
     assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
@@ -1592,25 +1586,24 @@ fn stack_memory_holds_whatever_was_there_until_written() {
     let src = "unsafe extern \"sysv64\" fn k() -> u64 {\nlet b: local<u64>;\nlet g: gpr;\nmov(g, [b]);\nret(g);\n}\n";
     let want = "# k() -> gpr
 # frame: 8 bytes aligned to 8, saves []
-# b: 8 bytes at rsp
+# b: 8 bytes at rsp - 8
 # g=rax
-    sub rsp, 8
-    mov rax, qword ptr [rsp]
-    add rsp, 8
+    mov rax, qword ptr [rsp - 8]
     ret
 ";
     assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
 }
 
 /// The stack pointer is 8 past a multiple of 16 on entry, as SysV says, so a frame aligned to 16 or less keeps no `rbp`
-/// and takes no `and`: `sub` makes it, and `add` takes it down. One aligned to 16 lies at a multiple of 16 whether the
-/// kernel calls or not, and the listing says why the stack pointer moves more than the frame does. One aligned to more
-/// keeps the caller's stack pointer in `rbp`, aligns its own with `and`, and takes the frame down from `rbp`.
+/// and takes no `and`: it lies below the stack pointer, or `sub` makes it, and `add` takes it down. One aligned to 16
+/// lies at a multiple of 16 whether the kernel calls or not, and the listing says why it is as long as it is. One
+/// aligned to more keeps the caller's stack pointer in `rbp`, aligns its own with `and`, and takes the frame down from
+/// `rbp`.
 #[test]
 fn only_a_frame_aligned_past_16_keeps_the_stack_pointer_in_rbp() {
     let cases = [
-        ("local<u64>", "sub rsp, 8\nmov rax, qword ptr [rsp]\nadd rsp, 8\nret"),
-        ("local<[u64; 2], 16>", "sub rsp, 24\nmov rax, qword ptr [rsp]\nadd rsp, 24\nret"),
+        ("local<u64>", "mov rax, qword ptr [rsp - 8]\nret"),
+        ("local<[u64; 2], 16>", "mov rax, qword ptr [rsp - 24]\nret"),
         (
             "local<[u8; 4096], 16>",
             "sub rsp, 4096\nor qword ptr [rsp], 0\nsub rsp, 8\nmov rax, qword ptr [rsp]\nadd rsp, 4104\nret",
@@ -1661,7 +1654,7 @@ fn a_frame_of_more_than_a_page_is_touched_a_page_at_a_time() {
     };
     let page = "sub rsp, 4096\nor qword ptr [rsp], 0";
     let cases = [
-        ("local<u64>", "sub rsp, 8".to_string()),
+        ("local<[u8; 129]>", "sub rsp, 129".to_string()),
         ("local<[u8; 4096]>", "sub rsp, 4096".into()),
         ("local<[u8; 4097]>", format!("{page}\nsub rsp, 1")),
         ("local<[u8; 4064], 32>", "push rbp\nmov rbp, rsp\nsub rsp, 4064\nand rsp, -32".into()),
@@ -2243,6 +2236,122 @@ fn the_stack_pointer_is_a_multiple_of_16_at_a_call() {
     for (params, body, want) in cases {
         assert_eq!(calling(params, "", body).unwrap(), want, "{body}");
     }
+}
+
+/// A kernel that calls nothing keeps its frame below the stack pointer, in the red zone that SysV gives a function, and
+/// does not set it up or take it down, if the frame, aligned to 16 or less, and the bytes more that align it are 128 or
+/// less: a slot is at its offset from as far below the stack pointer as they come to, past the registers the kernel
+/// pushes. A call that is a jump is no call. A frame of more bytes and a call that stays, even one that a jump would do
+/// but for the address the kernel has of its frame, which the callee may use, make the frame as before, as an alignment
+/// past 16 does in `only_a_frame_aligned_past_16_keeps_the_stack_pointer_in_rbp`.
+#[test]
+fn a_kernel_that_calls_nothing_keeps_a_frame_of_128_bytes_or_less_below_the_stack_pointer() {
+    // A word of `ty` at `at` written and read back, with the code of a frame below the stack pointer and of one made.
+    let word = |ty: &str, at: u32| {
+        let body = format!("let b: {ty}; let g: gpr; mov([b + {at}], x); mov(g, [b + {at}]); ret(g);");
+        calling("x: u64", " -> u64", &body)
+    };
+    let below = |disp: &str| format!("mov qword ptr [rsp{disp}], rdi\nmov rax, qword ptr [rsp{disp}]\nret");
+    let made = |size: u32, disp: &str| {
+        format!("sub rsp, {size}\nmov qword ptr [rsp{disp}], rdi\nmov rax, qword ptr [rsp{disp}]\nadd rsp, {size}\nret")
+    };
+    let cases = [
+        ("local<u64>", 0, below(" - 8")),
+        ("local<[u64; 16]>", 0, below(" - 128")),
+        ("local<[u64; 16]>", 120, below(" - 8")),
+        ("local<[u8; 128]>", 120, below(" - 8")),
+        ("local<[u8; 129]>", 120, made(129, " + 120")),
+        ("local<[u64; 17]>", 128, made(136, " + 128")),
+    ];
+    for (ty, at, want) in cases {
+        assert_eq!(word(ty, at), Ok(want), "{ty} at {at}");
+    }
+
+    // A frame aligned to 16 lies at a multiple of 16, with the bytes more that make it so counted in the 128.
+    let aligned = |ty: &str, at: u32| {
+        let body = format!(
+            "let b: {ty}; let v: xmm; vmovups(v, [p]); vmovaps([b + {at}], v); vmovaps(v, [b + {at}]); vmovups([p], v);"
+        );
+        calling("p: *mut f32", "", &body)
+    };
+    let moves = |disp: &str| {
+        format!(
+            "vmovups xmm0, xmmword ptr [rdi]\nvmovaps xmmword ptr [rsp{disp}], xmm0\nvmovaps xmm0, xmmword ptr \
+             [rsp{disp}]\nvmovups xmmword ptr [rdi], xmm0"
+        )
+    };
+    let cases = [
+        ("local<[f32; 4], 16>", 0, format!("{}\nret", moves(" - 24"))),
+        ("local<[f32; 28], 16>", 96, format!("{}\nret", moves(" - 24"))),
+        ("local<[f32; 32], 16>", 112, format!("sub rsp, 136\n{}\nadd rsp, 136\nret", moves(" + 112"))),
+    ];
+    for (ty, at, want) in cases {
+        assert_eq!(aligned(ty, at), Ok(want), "{ty} at {at}");
+    }
+
+    // The registers the kernel saves are pushed first, below which the red zone lies, and each moves the frame 8 down.
+    for (n, pushes, pops, disp) in
+        [(9, "push rbx\n", "pop rbx\nret", " - 16"), (10, "push rbx\npush r12\n", "pop r12\npop rbx\nret", " - 24")]
+    {
+        let body = format!(
+            "let b: local<[u64; 2], 16>; let g: [gpr; {n}]; for i in 0..{n} {{ mov(g[i], [p + 8 * i]); }} \
+             mov([b], g[0]); for i in 1..{n} {{ add(g[0], g[i]); }} add(g[0], [b]); mov([p], g[0]);"
+        );
+        let code = calling("p: *mut u64", "", &body);
+        let rsp =
+            code.as_ref().map(|c| c.lines().filter(|l| l.contains("rsp")).map(str::to_string).collect::<Vec<_>>());
+        let want = vec![format!("mov qword ptr [rsp{disp}], rax"), format!("add rax, qword ptr [rsp{disp}]")];
+        assert_eq!(rsp, Ok(want), "{n} sums");
+        assert!(code.as_ref().is_ok_and(|c| c.starts_with(pushes) && c.ends_with(pops)), "{n} sums: {code:?}");
+    }
+
+    let cases = [
+        // A call that is a jump is no call: the callee is jumped to, and the frame it may write over is dead.
+        (
+            "x: u64, fp: u64",
+            "",
+            "let b: local<u64>; let g: gpr; mov([b], x); mov(g, [b]); call(fp, (g));",
+            "mov qword ptr [rsp - 8], rdi\nmov rdi, qword ptr [rsp - 8]\njmp rsi",
+        ),
+        // A call that stays writes its return address in the red zone.
+        (
+            "x: u64, fp: u64",
+            " -> u64",
+            "let b: local<u64>; let g: gpr; mov([b], x); call(fp); mov(g, [b]); ret(g);",
+            "sub rsp, 8\nmov qword ptr [rsp], rdi\ncall rsi\nmov rax, qword ptr [rsp]\nadd rsp, 8\nret",
+        ),
+        // So does one that would be a jump but for the address the kernel gives of its frame.
+        (
+            "x: u64, fp: u64",
+            "",
+            "let b: local<u64>; let q: gpr; mov([b], x); lea(q, [b]); call(fp, (q));",
+            "sub rsp, 8\nmov qword ptr [rsp], rdi\nlea rdi, [rsp]\ncall rsi\nadd rsp, 8\nret",
+        ),
+        // An index is added to the slot's address as it is to any.
+        (
+            "x: u64, i: u64",
+            " -> u64",
+            "let b: local<[u64; 8]>; let g: gpr; mov([b + i * 8], x); mov(g, [b + i * 8]); ret(g);",
+            "mov qword ptr [rsp + rsi*8 - 64], rdi\nmov rax, qword ptr [rsp + rsi*8 - 64]\nret",
+        ),
+    ];
+    for (params, ret, body, want) in cases {
+        assert_eq!(calling(params, ret, body), Ok(want.to_string()), "{body}");
+    }
+
+    // The listing says where each slot is: the first at the bottom of the frame, with the bytes of alignment above.
+    let body = "let a: local<u64>; let b: local<[f32; 4], 16>; let v: xmm; mov([a], x); vmovups(v, [p]); \
+                vmovaps([b], v); vmovaps(v, [b]); vmovups([p], v);";
+    let text = listing("p: *mut f32, x: u64", "", body).map(|l| l.text());
+    let frame = "# frame: 32 bytes aligned to 16, saves [], and 8 more so that it is aligned to 16\n\
+                 # a: 8 bytes at rsp - 40\n# b: 16 bytes at rsp - 24\n";
+    assert!(text.as_ref().is_ok_and(|text| text.contains(frame)), "{text:?}");
+
+    // It says whether the frame is below the stack pointer: not one that is made, nor one there is not.
+    let below = |body: &str| listing("x: u64", "", body).map(|l| l.below);
+    assert_eq!(below("let b: local<u64>; mov([b], x);"), Ok(true));
+    assert_eq!(below("let b: local<[u8; 129]>; mov([b], x);"), Ok(false));
+    assert_eq!(below("pause();"), Ok(false));
 }
 
 /// A call that `ret` follows at once is a jump: the kernel takes its frame down as `ret` does, the registers it saved
