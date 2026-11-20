@@ -4725,6 +4725,33 @@ fn a_kernels_use_of_a_deprecated_item_is_told_of_once_at_the_use() {
     );
 }
 
+/// A use of a deprecated x86 kernel of instances by a kernel is told of at the name, once for each place a kernel
+/// writes an instance of it, as Rust tells of a use of a deprecated generic function of its own: a call of `old::<2>`;
+/// of `old::<1>` and then `old::<2>`, two instances of one function; of `old::<2>` at two places; of the instance that
+/// the kernel's own argument names, `old::<M>`, which a kernel of two instances writes at one place; and of an instance
+/// of three arguments, a number, a `bool` and a negative number, `shapes::<4, false, -2>`. A place in a helper that two
+/// kernels call, `old::<1>`, is told of once. Rust says nothing at the module's attribute, nor of `unused`, which no
+/// kernel calls, nor of `rec`, which calls its own instance, as Rust does not tell of a use inside the item deprecated.
+/// Cargo says once a line that two errors share, so the count, eight for eight lines, shows that no place is told of
+/// twice.
+#[test]
+fn a_kernels_call_of_an_instance_of_a_deprecated_kernel_is_told_of_at_each_place() {
+    refuses(
+        "deprecated_instances",
+        &[
+            "src/lib.rs:26:14: error: use of deprecated function `cpu::old`: use `fresh`",
+            "src/lib.rs:31:14: error: use of deprecated function `cpu::old`: use `fresh`",
+            "src/lib.rs:32:14: error: use of deprecated function `cpu::old`: use `fresh`",
+            "src/lib.rs:37:14: error: use of deprecated function `cpu::old`: use `fresh`",
+            "src/lib.rs:38:14: error: use of deprecated function `cpu::old`: use `fresh`",
+            "src/lib.rs:44:14: error: use of deprecated function `cpu::old`: use `fresh`",
+            "src/lib.rs:49:14: error: use of deprecated function `cpu::old`: use `fresh`",
+            "src/lib.rs:75:14: error: use of deprecated function `cpu::shapes`",
+            "error: could not compile `deprecated_instances` (lib) due to 8 previous errors",
+        ],
+    );
+}
+
 /// A kernel is a function, and Rust tells of a deprecated static at the first place each function writes it: `EACH` of
 /// a kernel of two instances is two errors at its first place and one at the place after, and of a helper that two
 /// kernels call, two at its one place: five under `deny`. Cargo says the two at a place as one line, so the count is

@@ -22,12 +22,20 @@ pub struct Mention {
     /// The value kernite took for the path to a constant of a module of Rust's, for Rust to say where the path is
     /// written that it gives that value; none for an item's name.
     pub value: Option<Value>,
+    /// The compile-time arguments of the instance that the name is of, `2` where `old::<2>` is written, for Rust to
+    /// name the same instance there; none, for any other name.
+    pub args: Vec<Value>,
 }
 
 impl Mention {
     /// The name of an item of the module, written at `span`.
     pub fn item(name: &str, span: Span) -> Mention {
-        Mention { name: name.to_string(), span, value: None }
+        Mention { name: name.to_string(), span, value: None, args: vec![] }
+    }
+
+    /// The name of a function of the module, written at `span` for its instance of the compile-time arguments `args`.
+    pub fn instance(name: &str, span: Span, args: Vec<Value>) -> Mention {
+        Mention { args, ..Mention::item(name, span) }
     }
 
     /// Records `mention` among `mentions`. Two names are never at one place.
@@ -615,7 +623,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 // A type's constant, `u32::MAX`, is Rust's however it is written. A module's, `std::f32::consts::PI`,
                 // is Rust's by the path alone, which Rust is to say gives the value taken, where it is written.
                 if path.len() > 2 {
-                    Mention::record(&mut self.mentions, Mention { name: p, span: *span, value: Some(v.clone()) });
+                    Mention::record(&mut self.mentions, Mention { value: Some(v.clone()), ..Mention::item(&p, *span) });
                 }
                 Ok(v)
             }
@@ -933,8 +941,9 @@ impl<'a, T: Target> Eval<'a, T> {
                 ),
             ));
         }
-        Mention::record(&mut self.mentions, Mention::item(name, at));
-        Ok(Operand::Func(named(name, &args)))
+        let operand = Operand::Func(named(name, &args));
+        Mention::record(&mut self.mentions, Mention::instance(name, at, args));
+        Ok(operand)
     }
 
     /// `[inner]`: memory at an address, memory holding a value known now, or the code of a

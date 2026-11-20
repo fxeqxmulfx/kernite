@@ -407,12 +407,14 @@ cooperative x86 kernel, whose launcher the macros write with a `# Safety`, nor o
 its module, whose `# Safety` they write where its docs have none.
 
 A deprecated item that a kernel names is told of by Rust at the name, once for each place the kernel writes it.
-`lea(p, [COUNTS]);` of a deprecated static is a warning at `COUNTS`, with the note of the attribute, and
-`call(v, old, ());` of a deprecated x86 kernel is one at `old`. A static in the GPU's memory is told of as a use of its
-method, `Kernels::COUNTS`. Rust says nothing at the module's attribute, nor of an item that no kernel names. An x86
-kernel of instances is a function for each instance, and the code of a helper is part of each x86 kernel that calls it.
-Where the build is incremental, as the dev profile's is, Rust tells of the first place each function writes the name:
-once for each instance, and for a place in a helper, once for each kernel that calls it.
+`lea(p, [COUNTS]);` of a deprecated static is a warning at `COUNTS`, with the note of the attribute, `call(v, old, ());`
+of a deprecated x86 kernel is one at `old`, and `call(old::<2>, p);` of an instance of one that takes compile-time
+arguments is one at `old` too, as a use of a generic function of Rust's is. A static in the GPU's memory is told of as a
+use of its method, `Kernels::COUNTS`. Rust says nothing at the module's attribute, nor of an item that no kernel names.
+An x86 kernel of instances is a function for each instance, and the code of a helper is part of each x86 kernel that
+calls it. Where the build is incremental, as the dev profile's is, Rust tells of the first place each function writes
+the name: once for each instance, and for a place in a helper, once for each kernel that calls it. `old::<2>` is told of
+once at each place, whatever instances of a kernel write it and whatever kernels call the helper it is in.
 
 A module holds what `cfg` keeps: Rust puts it together, where it knows which `cfg` holds. `LISTINGS` has the listing
 of each x86 kernel that compiles and `cfg` keeps, and of no other. A module of x86 kernels has it whether its kernels

@@ -25,7 +25,7 @@ use crate::rust::{
     passable, position, seen, site, stub, takes, unnamed,
 };
 use crate::workspace::workspace;
-use crate::x86::{cpu_static, naked, operands, x86_stub};
+use crate::x86::{cpu_static, instance_used, naked, operands, x86_stub};
 
 /// What the module's braces, `body`, hold once its kernels are compiled; `given`, the consts it
 /// takes from outside, and the path of their module, as `#[kernels(consts = path)]` writes it. A
@@ -317,8 +317,11 @@ fn find(guard: TokenStream, what: impl IntoIterator<Item = TokenTree>) -> TokenS
 /// Rust cannot find the item. For any other item kernite says so itself, as an error where `cfg` keeps item `i` and
 /// leaves that one out; these are the second, for they are items of the module. A static of GPU kernels has a method
 /// with its attributes, so the first of the pair has `let _ = Kernels::NAME;` for it too, where `cfg` keeps the static,
-/// for Rust to tell of a deprecated one at the place. Both are under the `cfg` of item `i` and of the code that has the
-/// place, where item `i` runs it: [`runs`]. A constant of a module of Rust's that item `i` names by its path,
+/// for Rust to tell of a deprecated one at the place. So has an instance of an x86 kernel, `let _ = old::<2>;`: the
+/// code names the function of the instance, which has no attributes, and Rust cannot work out the arguments of `old`
+/// alone. A place in the kernel itself has none, for Rust does not tell of a use inside the item
+/// that is deprecated. Both are under the `cfg` of item `i` and of the code that has the place, where item `i` runs
+/// it: [`runs`]. A constant of a module of Rust's that item `i` names by its path,
 /// `std::f32::consts::PI`, is Rust's to say as well, in the first of the pair, by [`takes`]: that the path gives the
 /// constant kernite took. So is one that a const that item `i` names has in its definition, where `cfg` keeps the
 /// const; but not one in a const that the module is given, whose path is Rust's where the consts are, in a module that
@@ -364,8 +367,12 @@ fn named(
             let message = format!("`{}` is left out by `cfg` where `{reader}`, which names it, is kept", m.name);
             errors.extend(error_under(&guard, place(m.span), &message));
         }
-        if let ItemOut::DeviceStatic(laid) = &made.items[j]
-            && let Some(path) = used(&module.items[j], laid, top, place(m.span))
+        let path = match &made.items[j] {
+            ItemOut::DeviceStatic(laid) => used(&module.items[j], laid, top, place(m.span)),
+            ItemOut::Native(_) if at != j => Some(instance_used(&module.items[j], &m.args, top, place(m.span))),
+            _ => None,
+        };
+        if let Some(path) = path
             && let Some(guard) = Cond::all([kept, conds[j].clone()]).guard()
         {
             names.extend(find(guard, path));

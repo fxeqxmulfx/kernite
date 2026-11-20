@@ -217,6 +217,18 @@ pub(crate) fn operands(k: &NativeOut) -> Vec<&lang::Mention> {
         .collect()
 }
 
+/// What Rust reads for a use of `item`, an x86 kernel of compile-time arguments, by a kernel that names its instance of
+/// `args` at `span`: `old::<2>`, the function that has the attributes of the kernel, so Rust tells of the use as it
+/// tells of any use of a function of its own, a deprecated one at that place. The code of a kernel names the function
+/// of the instance, which has none of them, and Rust has no name for the kernel alone, which it cannot work out the
+/// arguments of.
+pub(crate) fn instance_used(item: &lang::Item, args: &[Value], top: &[TokenTree], span: Span) -> TokenStream {
+    let args: Vec<String> = args.iter().map(Value::to_string).collect();
+    let mut path = TokenStream::from(name_at(item, top, span));
+    path.extend(parse(&format!("::<{}>", args.join(", "))));
+    path
+}
+
 /// The operands by which the code of `listing`, of a kernel of `module`, names each static it
 /// names, which is the static's name in `module` as written, `COUNTS`, or `r#type`, whose
 /// `{type}` in the code names it. Each is at the place `at` says the kernel first writes it.
