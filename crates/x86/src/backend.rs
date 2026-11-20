@@ -79,6 +79,9 @@ impl Backend for X86 {
         let decls = std::mem::take(&mut kernel.decls);
         let reach = std::mem::take(&mut kernel.reach);
         let any = kernel.reaches_any();
+        if let Some((at, message)) = kernel.unowned() {
+            return Err(Unfinished { at, message });
+        }
         let program = kernel.finish(|called| changed_by(called, done), |name| may_run_sse(name, done));
         let allocated = kernite_compile::compile(&program, &SysV)
             .map_err(|e| Unfinished::blaming(e.var(), &decls, e.to_string()))?;

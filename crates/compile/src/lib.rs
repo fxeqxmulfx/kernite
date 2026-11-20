@@ -5,7 +5,8 @@
 //! runs the same for any instruction set, and its tests run it on a toy machine with a few
 //! registers.
 //!
-//! [`on_every_path`] says which items of a program every path from its start to its end runs.
+//! [`on_every_path`] says which items of a program every path from its start to its end runs, and [`forward`] follows a
+//! value over its flow.
 
 mod alloc;
 mod allocated;
@@ -18,7 +19,7 @@ mod port;
 mod spill;
 
 pub use allocated::{Allocated, Frame};
-pub use cfg::on_every_path;
+pub use cfg::{forward, on_every_path};
 pub use error::Error;
 use kernite_core::{Inst, Item, PReg, Program};
 pub use port::{Machine, Spill};

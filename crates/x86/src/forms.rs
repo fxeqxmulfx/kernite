@@ -30,16 +30,17 @@ use crate::op::Op;
 /// `[128@avx 256@avx2]` a width's own.
 ///
 /// An operand is a general register, `r8` to `r64`, which the language sees as `g.r8`, `g.r16`,
-/// `g.r32` and `g`; a vector, `xmm` or `ymm`, `vN` the one of `N` bits; memory of so many bits,
-/// `m8` to `m256`, and `aN` such memory at a multiple of its size, or `m`, an address the
-/// instruction reaches nothing at; or memory at a vector of indices: `vm32x` elements of 32
-/// bits at an xmm's, `vm64y` of 64 at a ymm's. `iN` is an integer for an operation of `N` bits,
-/// as x86 encodes one: of `N` bits, of either sign, but at 64 of 32, sign-extended; and
-/// `imm64` one of 64 bits, as `mov` puts in a register. `#0-31` is an integer from 0 to 31, and
-/// `#0x1f` a control byte of no bits but those of 0x1f, which a listing shows in hex: x86 reads
-/// no more of either. `lab` is a label. `a/b` is either; `=` before an operand marks one the
-/// instruction writes, `+` one it reads and writes, and `~` one it reads nothing of; it reads
-/// the rest. `()` is no operands.
+/// `g.r32` and `g`; a vector, `xmm` or `ymm`, `vN` the one of `N` bits, or, of less than 128, an xmm that the
+/// instruction reads the low `N` bits of as data and no more, as `vaddss` reads `v32`, or writes the low `N` bits of
+/// and passes the rest of its first source on to, as `vaddss` writes `=v32`, whose first source passes the rest from
+/// its `N`th bit on: as `xmm` it is not read at all, as `vsqrtss` has it, `=v32, xmm, v32/m32`; memory of so many bits,
+/// `m8` to `m256`, and `aN` such memory at a multiple of its size, or `m`, an address the instruction reaches nothing
+/// at; or memory at a vector of indices: `vm32x` elements of 32 bits at an xmm's, `vm64y` of 64 at a ymm's. `iN` is an
+/// integer for an operation of `N` bits, as x86 encodes one: of `N` bits, of either sign, but at 64 of 32,
+/// sign-extended; and `imm64` one of 64 bits, as `mov` puts in a register. `#0-31` is an integer from 0 to 31, and
+/// `#0x1f` a control byte of no bits but those of 0x1f, which a listing shows in hex: x86 reads no more of either.
+/// `lab` is a label. `a/b` is either; `=` before an operand marks one the instruction writes, `+` one it reads and
+/// writes, and `~` one it reads nothing of; it reads the rest. `()` is no operands.
 pub const TABLE: &str = r#"
 $cc = {a,ae,b,be,c,e,g,ge,l,le,na,nae,nb,nbe,nc,ne,ng,nge,nl,nle,no,np,ns,nz,o,p,pe,po,s,z}
 $pred = {eq,lt,le,unord,neq,nlt,nle,ord,eq_uq,nge,ngt,false,neq_oq,ge,gt,true,eq_os,lt_oq,le_oq,unord_s,neq_us,nlt_uq,nle_uq,ord_s,eq_us,nge_uq,ngt_uq,false_os,neq_os,ge_oq,gt_oq,true_us}
@@ -111,21 +112,25 @@ jmp j$cc : lab
 vaddps vaddpd vsubps vsubpd vmulps vmulpd vdivps vdivpd vmaxps vmaxpd vminps vminpd [128 256] @avx : =vN, vN, vN/mN
 vandps vandpd vandnps vandnpd vorps vorpd vxorps vxorpd [128 256] @avx : =vN, vN, vN/mN
 vaddsubps vaddsubpd vhaddps vhaddpd vhsubps vhsubpd [128 256] @avx : =vN, vN, vN/mN
-vunpcklps vunpcklpd vunpckhps vunpckhpd [128 256] @avx : =vN, vN, vN/mN
+vunpcklps vunpcklpd [128] @avx : =xmm, v64, v64/m128
+vunpcklps vunpcklpd [256] @avx : =ymm, ymm, ymm/m256
+vunpckhps vunpckhpd [128 256] @avx : =vN, vN, vN/mN
 vsqrtps vsqrtpd vrcpps vrsqrtps [128 256] @avx : =vN, vN/mN
-vaddss vsubss vmulss vdivss vmaxss vminss vsqrtss vrcpss vrsqrtss @avx : =xmm, xmm, xmm/m32
-vaddsd vsubsd vmulsd vdivsd vmaxsd vminsd vsqrtsd @avx : =xmm, xmm, xmm/m64
+vaddss vsubss vmulss vdivss vmaxss vminss @avx : =v32, v32, v32/m32
+vsqrtss vrcpss vrsqrtss @avx : =v32, xmm, v32/m32
+vaddsd vsubsd vmulsd vdivsd vmaxsd vminsd @avx : =v64, v64, v64/m64
+vsqrtsd @avx : =v64, xmm, v64/m64
 vcmpps vcmppd [128 256] @avx : =vN, vN, vN/mN, #0x1f
 vcmp$predps vcmp$predpd [128 256] @avx : =vN, vN, vN/mN
-vcmpss @avx : =xmm, xmm, xmm/m32, #0x1f
-vcmpsd @avx : =xmm, xmm, xmm/m64, #0x1f
-vcmp$predss @avx : =xmm, xmm, xmm/m32
-vcmp$predsd @avx : =xmm, xmm, xmm/m64
-vcomiss vucomiss @avx : xmm, xmm/m32
-vcomisd vucomisd @avx : xmm, xmm/m64
+vcmpss @avx : =v32, v32, v32/m32, #0x1f
+vcmpsd @avx : =v64, v64, v64/m64, #0x1f
+vcmp$predss @avx : =v32, v32, v32/m32
+vcmp$predsd @avx : =v64, v64, v64/m64
+vcomiss vucomiss @avx : v32, v32/m32
+vcomisd vucomisd @avx : v64, v64/m64
 vroundps vroundpd [128 256] @avx : =vN, vN/mN, #0x0f
-vroundss @avx : =xmm, xmm, xmm/m32, #0x0f
-vroundsd @avx : =xmm, xmm, xmm/m64, #0x0f
+vroundss @avx : =v32, xmm, v32/m32, #0x0f
+vroundsd @avx : =v64, xmm, v64/m64, #0x0f
 vdpps [128 256] @avx : =vN, vN, vN/mN, #0xff
 vdppd @avx : =xmm, xmm, xmm/m128, #0x33
 vblendps [128] @avx : =vN, vN, vN/mN, #0x0f
@@ -142,9 +147,11 @@ vpermilpd [256] @avx : =vN, vN, vN/mN ; =vN, vN/mN, #0x0f
 vperm2f128 @avx : =ymm, ymm, ymm/m256, #0xbb
 vinsertps @avx : =xmm, xmm, xmm/m32, #0xff
 vextractps @avx : =r32/r64/m32, xmm, #0-3
-vmovhlps vmovlhps @avx : =xmm, xmm, xmm
-vmovhps vmovhpd vmovlps vmovlpd @avx : =xmm, xmm, m64 ; =m64, xmm
-vmovddup @avx : =xmm, xmm/m64 ; =ymm, ymm/m256
+vmovhlps @avx : =xmm, xmm, xmm
+vmovlhps @avx : =xmm, v64, v64
+vmovhps vmovhpd @avx : =xmm, v64, m64 ; =m64, xmm
+vmovlps vmovlpd @avx : =xmm, xmm, m64 ; =m64, v64
+vmovddup @avx : =xmm, v64/m64 ; =ymm, ymm/m256
 vmovshdup vmovsldup [128 256] @avx : =vN, vN/mN
 vtestps vtestpd vptest [128 256] @avx : vN, vN/mN
 
@@ -159,7 +166,9 @@ vpand vpandn vpor vpxor [128@avx 256@avx2] : =vN, vN, vN/mN
 vpcmpeqb vpcmpeqw vpcmpeqd vpcmpeqq vpcmpgtb vpcmpgtw vpcmpgtd vpcmpgtq [128@avx 256@avx2] : =vN, vN, vN/mN
 vphaddw vphaddd vphaddsw vphsubw vphsubd vphsubsw [128@avx 256@avx2] : =vN, vN, vN/mN
 vpacksswb vpackssdw vpackuswb vpackusdw [128@avx 256@avx2] : =vN, vN, vN/mN
-vpunpcklbw vpunpcklwd vpunpckldq vpunpcklqdq vpunpckhbw vpunpckhwd vpunpckhdq vpunpckhqdq [128@avx 256@avx2] : =vN, vN, vN/mN
+vpunpcklbw vpunpcklwd vpunpckldq vpunpcklqdq [128] @avx : =xmm, v64, v64/m128
+vpunpcklbw vpunpcklwd vpunpckldq vpunpcklqdq [256] @avx2 : =ymm, ymm, ymm/m256
+vpunpckhbw vpunpckhwd vpunpckhdq vpunpckhqdq [128@avx 256@avx2] : =vN, vN, vN/mN
 vpshufb [128@avx 256@avx2] : =vN, vN, vN/mN
 vpabsb vpabsw vpabsd [128@avx 256@avx2] : =vN, vN/mN
 vphminposuw @avx : =xmm, xmm/m128
@@ -172,29 +181,30 @@ vpblendd [256] @avx2 : =vN, vN, vN/mN, #0xff
 vmpsadbw [128] @avx : =vN, vN, vN/mN, #0x07
 vmpsadbw [256] @avx2 : =vN, vN, vN/mN, #0x3f
 # A vector's lanes are shifted by a byte, which empties them past their bits.
-vpsllw vpslld vpsllq vpsrlw vpsrld vpsrlq vpsraw vpsrad [128@avx 256@avx2] : =vN, vN, xmm/m128 ; =vN, vN, #0-255
+vpsllw vpslld vpsllq vpsrlw vpsrld vpsrlq vpsraw vpsrad [128@avx 256@avx2] : =vN, vN, v64/m128 ; =vN, vN, #0-255
 vpslldq vpsrldq [128@avx 256@avx2] : =vN, vN, #0-255
 vpsllvd vpsllvq vpsrlvd vpsrlvq vpsravd [128 256] @avx2 : =vN, vN, vN/mN
 vperm2i128 @avx2 : =ymm, ymm, ymm/m256, #0xbb
 vpermd vpermps @avx2 : =ymm, ymm, ymm/m256
 vpermq vpermpd @avx2 : =ymm, ymm/m256, #0xff
-vpmovsxbw vpmovzxbw vpmovsxwd vpmovzxwd vpmovsxdq vpmovzxdq @avx : =xmm, xmm/m64
+vpmovsxbw vpmovzxbw vpmovsxwd vpmovzxwd vpmovsxdq vpmovzxdq @avx : =xmm, v64/m64
 vpmovsxbw vpmovzxbw vpmovsxwd vpmovzxwd vpmovsxdq vpmovzxdq @avx2 : =ymm, xmm/m128
-vpmovsxbd vpmovzxbd vpmovsxwq vpmovzxwq @avx : =xmm, xmm/m32
-vpmovsxbd vpmovzxbd vpmovsxwq vpmovzxwq @avx2 : =ymm, xmm/m64
-vpmovsxbq vpmovzxbq @avx : =xmm, xmm/m16
-vpmovsxbq vpmovzxbq @avx2 : =ymm, xmm/m32
+vpmovsxbd vpmovzxbd vpmovsxwq vpmovzxwq @avx : =xmm, v32/m32
+vpmovsxbd vpmovzxbd vpmovsxwq vpmovzxwq @avx2 : =ymm, v64/m64
+vpmovsxbq vpmovzxbq @avx : =xmm, v16/m16
+vpmovsxbq vpmovzxbq @avx2 : =ymm, v32/m32
 
 # Conversions.
 vcvtdq2ps vcvtps2dq vcvttps2dq [128 256] @avx : =vN, vN/mN
-vcvtdq2pd vcvtps2pd @avx : =xmm, xmm/m64 ; =ymm, xmm/m128
+vcvtdq2pd vcvtps2pd @avx : =xmm, v64/m64 ; =ymm, xmm/m128
 vcvtpd2ps vcvtpd2dq vcvttpd2dq @avx : =xmm, xmm/m128 ; =xmm, ymm/m256
-vcvtss2sd @avx : =xmm, xmm, xmm/m32
-vcvtsd2ss @avx : =xmm, xmm, xmm/m64
-vcvtsi2ss vcvtsi2sd @avx : =xmm, xmm, r32/m32/r64/m64
-vcvtss2si vcvttss2si @avx : =r32/r64, xmm/m32
-vcvtsd2si vcvttsd2si @avx : =r32/r64, xmm/m64
-vcvtph2ps @f16c : =xmm, xmm/m64 ; =ymm, xmm/m128
+vcvtss2sd @avx : =v64, xmm, v32/m32
+vcvtsd2ss @avx : =v32, xmm, v64/m64
+vcvtsi2ss @avx : =v32, xmm, r32/m32/r64/m64
+vcvtsi2sd @avx : =v64, xmm, r32/m32/r64/m64
+vcvtss2si vcvttss2si @avx : =r32/r64, v32/m32
+vcvtsd2si vcvttsd2si @avx : =r32/r64, v64/m64
+vcvtph2ps @f16c : =xmm, v64/m64 ; =ymm, xmm/m128
 vcvtps2ph @f16c : =xmm/m64, xmm, #0x07 ; =xmm/m128, ymm, #0x07
 
 # Moves of vectors.
@@ -203,24 +213,24 @@ vmovaps vmovapd vmovdqa [128 256] @avx : =vN, vN/aN ; =aN, vN
 vmovntps vmovntpd vmovntdq [128 256] @avx : =aN, vN
 vmovntdqa [128@avx 256@avx2] : =vN, aN
 vlddqu [128 256] @avx : =vN, mN
-vmovss @avx : =xmm, m32 ; =m32, xmm ; =xmm, xmm, xmm
-vmovsd @avx : =xmm, m64 ; =m64, xmm ; =xmm, xmm, xmm
-vmovd @avx : =xmm, r32/m32/r64 ; =r32/m32/r64, xmm
-vmovq @avx : =xmm, xmm/m64/r64 ; =m64/r64, xmm
+vmovss @avx : =xmm, m32 ; =m32, v32 ; =v32, xmm, v32
+vmovsd @avx : =xmm, m64 ; =m64, v64 ; =v64, xmm, v64
+vmovd @avx : =xmm, r32/m32/r64 ; =r32/m32, v32 ; =r64, v64
+vmovq @avx : =xmm, v64/m64/r64 ; =m64/r64, v64
 vmovmskps vmovmskpd [128 256] @avx : =r32/r64, vN
 vpmovmskb [128@avx 256@avx2] : =r32/r64, vN
 vmaskmovps vmaskmovpd [128 256] @avx : =vN, vN, mN ; =mN, vN, vN
 vpmaskmovd vpmaskmovq [128 256] @avx2 : =vN, vN, mN ; =mN, vN, vN
 vbroadcastss @avx : =xmm/ymm, m32
-vbroadcastss @avx2 : =xmm/ymm, xmm
+vbroadcastss @avx2 : =xmm/ymm, v32
 vbroadcastsd @avx : =ymm, m64
-vbroadcastsd @avx2 : =ymm, xmm
+vbroadcastsd @avx2 : =ymm, v64
 vbroadcastf128 @avx : =ymm, m128
 vbroadcasti128 @avx2 : =ymm, m128
-vpbroadcastb [128 256] @avx2 : =vN, xmm/m8
-vpbroadcastw [128 256] @avx2 : =vN, xmm/m16
-vpbroadcastd [128 256] @avx2 : =vN, xmm/m32
-vpbroadcastq [128 256] @avx2 : =vN, xmm/m64
+vpbroadcastb [128 256] @avx2 : =vN, v8/m8
+vpbroadcastw [128 256] @avx2 : =vN, v16/m16
+vpbroadcastd [128 256] @avx2 : =vN, v32/m32
+vpbroadcastq [128 256] @avx2 : =vN, v64/m64
 vinsertf128 @avx : =ymm, ymm, xmm/m128, #0-1
 vinserti128 @avx2 : =ymm, ymm, xmm/m128, #0-1
 vextractf128 @avx : =xmm/m128, ymm, #0-1
@@ -236,8 +246,8 @@ vpinsrq @avx : =xmm, xmm, r64/m64, #0-1
 
 # Fused multiplies and adds.
 vf{madd,msub,nmadd,nmsub,maddsub,msubadd}{132,213,231}{ps,pd} [128 256] @fma : +vN, vN, vN/mN
-vf{madd,msub,nmadd,nmsub}{132,213,231}ss @fma : +xmm, xmm, xmm/m32
-vf{madd,msub,nmadd,nmsub}{132,213,231}sd @fma : +xmm, xmm, xmm/m64
+vf{madd,msub,nmadd,nmsub}{132,213,231}ss @fma : +v32, v32, v32/m32
+vf{madd,msub,nmadd,nmsub}{132,213,231}sd @fma : +v64, v64, v64/m64
 
 # Gathers, which fault unless their result, indices and mask are three registers. Each clears
 # its mask as it reads, and leaves the lanes of its result the mask leaves out.
@@ -356,7 +366,10 @@ impl Feature {
 pub enum Kind {
     /// A general register at this width.
     Gpr(Width),
-    /// A vector register at this width.
+    /// A vector register at this width. At less than 128 bits, an xmm of which the instruction reads the low so many
+    /// bits as data, and no more, or, if it writes it, writes the low so many bits, and passes the rest of its first
+    /// source on. The first source of such an instruction is an `xmm` where it reads none of it, as `vsqrtss` reads
+    /// none of its first.
     Vec(Width),
     /// Memory of this width.
     Mem(Width),
@@ -403,7 +416,7 @@ impl Kind {
         let int = |x: i64| self.fits(Shape::Int(x.into()));
         match (self, operand) {
             (Kind::Gpr(w), Operand::Reg(r, v)) => r.class() == Class::Gpr && w == *v,
-            (Kind::Vec(w), Operand::Reg(r, v)) => r.class() == Class::Vec && w == *v,
+            (Kind::Vec(w), Operand::Reg(r, v)) => r.class() == Class::Vec && w.max(W128) == *v,
             (Kind::Mem(w) | Kind::Aligned(w), Operand::Mem(m)) => m.width == w && vector_index(m).is_none(),
             (Kind::Addr, Operand::Mem(m)) => vector_index(m).is_none(),
             (Kind::Vsib(elem, index), Operand::Mem(m)) => m.width == elem && vector_index(m) == Some(index),
@@ -416,7 +429,8 @@ impl Kind {
     /// Whether the language's operand `shape` fits it.
     pub fn fits(self, shape: Shape) -> bool {
         match (self, shape) {
-            (Kind::Gpr(w), Shape::Gpr(v)) | (Kind::Vec(w), Shape::Vec(v)) => w == v,
+            (Kind::Gpr(w), Shape::Gpr(v)) => w == v,
+            (Kind::Vec(w), Shape::Vec(v)) => w.max(W128) == v,
             (Kind::Mem(w) | Kind::Aligned(w), Shape::Mem { size, vsib: None, .. }) => size.is_none_or(|s| s == w),
             (Kind::Addr, Shape::Mem { size: None, vsib: None, .. }) => true,
             (Kind::Vsib(elem, index), Shape::Mem { size, data: None, vsib: Some(i) }) => {
@@ -635,7 +649,7 @@ pub fn wanted(wants: &[Kind], given: Shape) -> String {
         parts.push(String::new());
     }
     for w in [W256, W128] {
-        if wants.contains(&Kind::Vec(w)) {
+        if wants.iter().any(|&k| matches!(k, Kind::Vec(v) if v.max(W128) == w)) {
             parts.push(Kind::Vec(w).noun());
         }
     }
@@ -702,19 +716,24 @@ pub fn names() -> impl Iterator<Item = &'static str> {
     forms().keys().copied()
 }
 
-/// The CPU feature an instruction kernite wrote needs past x86-64's own, if any: `None` for one
-/// the table does not have, as `ret`.
+/// The form of an instruction kernite wrote that its operands fit: `None` for one the table does
+/// not have, as `ret`.
 ///
 /// # Panics
 ///
 /// If the table has the instruction, but in no form its operands fit, which is a bug of
 /// whoever built it.
-pub fn feature<R: Register>(op: Op, args: &[Arg<R>], implicit: &[Arg<R>]) -> Option<Feature> {
-    let forms = of(op.name())?;
-    let form = forms.iter().find(|f| {
+pub fn form<R: Register>(op: Op, args: &[Arg<R>], implicit: &[Arg<R>]) -> Option<&'static Form> {
+    let found = of(op.name())?.iter().find(|f| {
         f.operands.len() == args.len() && f.operands.iter().zip(args).all(|(s, a)| s.kind.takes(&a.operand, implicit))
     });
-    form.unwrap_or_else(|| panic!("`{}` in no form x86 has: {args:?}", op.name())).feature
+    Some(found.unwrap_or_else(|| panic!("`{}` in no form x86 has: {args:?}", op.name())))
+}
+
+/// The CPU feature an instruction kernite wrote needs past x86-64's own, if any: `None` for one
+/// the table does not have, as `ret`; and as [`form`] panics.
+pub fn feature<R: Register>(op: Op, args: &[Arg<R>], implicit: &[Arg<R>]) -> Option<Feature> {
+    form(op, args, implicit).and_then(|f| f.feature)
 }
 
 /// Every form, parsed from [`TABLE`] once, by name.
@@ -904,7 +923,8 @@ mod tests {
     #[test]
     fn forms_that_fit_the_same_operands_print_them_the_same() {
         let overlap = |a: Kind, b: Kind| match (a, b) {
-            (Kind::Gpr(x), Kind::Gpr(y)) | (Kind::Vec(x), Kind::Vec(y)) => x == y,
+            (Kind::Gpr(x), Kind::Gpr(y)) => x == y,
+            (Kind::Vec(x), Kind::Vec(y)) => x.max(W128) == y.max(W128),
             (Kind::Mem(_) | Kind::Aligned(_) | Kind::Addr, Kind::Mem(_) | Kind::Aligned(_) | Kind::Addr) => true,
             (Kind::Vsib(_, x), Kind::Vsib(_, y)) => x == y,
             (a, b) => a.sort() == 2 && b.sort() == 2 || a == b,
@@ -961,6 +981,13 @@ mod tests {
             panic!()
         };
         assert_eq!(wanted(&wants, Shape::Gpr(W16)), "a gpr (whole or as r32) or an xmm");
+        // An operand of which the instruction reads part of an xmm, `v32`, is an xmm.
+        let Miss::Wants { wants, .. } = choose(of("vmovd").unwrap(), &[Shape::Gpr(W32), Shape::Int(1)]).unwrap_err()
+        else {
+            panic!()
+        };
+        assert_eq!(wants, [Kind::Vec(W32)]);
+        assert_eq!(wanted(&wants, Shape::Int(1)), "an xmm");
         let Miss::Wants { wants, .. } = choose(of("movzx").unwrap(), &[Shape::Gpr(W32), Shape::Int(1)]).unwrap_err()
         else {
             panic!()

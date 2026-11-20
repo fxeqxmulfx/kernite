@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 
+use kernite_core::Access;
 use kernite_x86::forms::{self, Form, Kind};
 use kernite_x86::{Asm, Feature, SysV, intel};
 
@@ -759,6 +760,799 @@ fn a_kernel_takes_what_sysv_passes_in_registers() {
     assert_eq!(e, "1:32: SysV leaves the high bits of a `u32` as they were; take a usize or a u64");
     let code = compile("a: f32, p: *mut f32, b: f32", "vmovss([p], b.xmm); vaddss(b.xmm, a.xmm, b.xmm);").unwrap();
     assert_eq!(code, "vmovss dword ptr [rdi], xmm1\nvaddss xmm1, xmm0, xmm1\nret");
+}
+
+/// What kernite says of the instruction `name` that reads `reads` bits of `x`, of which only the low `has` are the
+/// kernel's.
+fn past_the_float(name: &str, reads: u32, has: u32, x: &str) -> String {
+    format!(
+        "`{name}` reads {reads} bits of `{x}`, of which only the low {has} are the kernel's: SysV leaves the rest of \
+         the register of a float as the caller had it, or the callee, of one it gave back. Read the float alone, as a \
+         scalar instruction does, or write all of `{x}` first"
+    )
+}
+
+/// SysV passes a float in the low bits of a vector register, 32 of an `f32` and 64 of an `f64`, and leaves the rest as
+/// the caller had it. A call gives one back so, and leaves the rest as the callee had it. A variable has as many of
+/// the low bits of its register for its own as it has been given: a float's, to begin with, and all of the register
+/// where the kernel has written it. An instruction that reads more of it is an error at the instruction, which names
+/// the variable, on any way to it. One that carries the caller's bits to the same place of its variable, as `vaddss`
+/// and `vmovaps` do, hands them on to it, whatever it is.
+#[test]
+fn a_kernel_reads_no_more_of_a_float_it_takes_than_the_float() {
+    // Each case its parameters and body, where the error is, and what it says: the instruction, the bits it reads,
+    // the bits the variable has, and its name.
+    let cases = [
+        // All of an xmm, and of a ymm, of an `f32` and of an `f64`; 64 bits of an `f32`; and what a gpr or the flags
+        // take.
+        ("x: f32, p: *mut f32", "vmovups([p], x);", "2:1", ("vmovups", 128, 32, "x")),
+        ("x: f32, p: *mut f32", "vmovups([p], x.ymm);", "2:1", ("vmovups", 256, 32, "x")),
+        ("x: f64, p: *mut f64", "vmovupd([p], x);", "2:1", ("vmovupd", 128, 64, "x")),
+        ("x: f64, p: *mut f64", "vmovupd([p], x.ymm);", "2:1", ("vmovupd", 256, 64, "x")),
+        ("x: f32, p: *mut f64", "vmovsd([p], x);", "2:1", ("vmovsd", 64, 32, "x")),
+        ("x: f32, n: usize", "vmovq(n, x);", "2:1", ("vmovq", 64, 32, "x")),
+        ("x: f32, n: usize", "vmovmskps(n.r32, x);", "2:1", ("vmovmskps", 128, 32, "x")),
+        ("x: f32", "vptest(x, x);", "2:1", ("vptest", 128, 32, "x")),
+        // An instruction that reads and writes it, and each float the kernel takes, by the bits it has.
+        ("x: f32, y: f32, z: f32", "vfmadd231ps(x, y, z);", "2:1", ("vfmadd231ps", 128, 32, "x")),
+        ("x: f32, y: f32, p: *mut f32", "zero(x);\nvmovups([p], y);", "3:1", ("vmovups", 128, 32, "y")),
+        ("x: f32, y: f64, p: *mut f64", "vmovsd([p], y);\nvmovupd([p], y);", "3:1", ("vmovupd", 128, 64, "y")),
+        // A scalar instruction writes its own bits, 32 of `vaddss`, and passes the rest of its first source on, so `x`
+        // has no more than the instruction writes and the source had: `vcvtss2sd` writes 64.
+        ("x: f32, y: f32, p: *mut f32", "vaddss(x, x, y);\nvmovups([p], x);", "3:1", ("vmovups", 128, 32, "x")),
+        ("x: f32, y: f32, p: *mut f32", "vmovss(x, y, y);\nvmovups([p], x);", "3:1", ("vmovups", 128, 32, "x")),
+        ("x: f32, n: usize, p: *mut f32", "vcvtsi2ss(x, x, n);\nvmovups([p], x);", "3:1", ("vmovups", 128, 32, "x")),
+        (
+            "x: f32, y: f32, z: f32, p: *mut f32",
+            "vfmadd231ss(x, y, z);\nvmovups([p], x);",
+            "3:1",
+            ("vmovups", 128, 32, "x"),
+        ),
+        ("x: f32, y: f32, p: *mut f64", "vcvtss2sd(x, x, y);\nvmovupd([p], x);", "3:1", ("vmovupd", 128, 64, "x")),
+        // An instruction that carries a register carries it as it was: `vmovaps(x, x)` leaves `x` as it was, and so
+        // does `vxorps(x, x, x)`, which computes zero but does not read `x`. `zero(x)` writes it.
+        ("x: f32, p: *mut f32", "vmovaps(x, x);\nvmovups([p], x);", "3:1", ("vmovups", 128, 32, "x")),
+        ("x: f32, p: *mut f32", "vxorps(x, x, x);\nvmovups([p], x);", "3:1", ("vmovups", 128, 32, "x")),
+        // The bits go to the variable the instruction writes, whatever it is: one made with `let`, and a ymm, which
+        // a move of a whole register fills with them.
+        (
+            "x: f32, y: f32, p: *mut f32",
+            "let z: xmm;\nvaddss(z, x, y);\nvmovups([p], z);",
+            "4:1",
+            ("vmovups", 128, 32, "z"),
+        ),
+        ("x: f32, p: *mut f32", "let v: ymm;\nvmovaps(v, x.ymm);\nvmovups([p], v);", "4:1", ("vmovups", 256, 32, "v")),
+    ];
+    for (params, body, at, (name, reads, has, x)) in cases {
+        let want = format!("{at}: {}", past_the_float(name, reads, has, x));
+        assert_eq!(compile(params, body), Err(want), "{body}");
+    }
+    // A function of the module is held to it as a kernel is, whoever calls it.
+    let held = "unsafe extern \"sysv64\" fn held(x: f32, p: *mut f32) {\nvmovups([p], x);\n}\n";
+    let want = format!("2:1: {}", past_the_float("vmovups", 128, 32, "x"));
+    assert_eq!(kernite::x86_str(held, "held").map(|_| ()), Err(want));
+    // `ret` reads as far as the kernel gives back, 64 bits of an `f64`.
+    let want = format!("2:1: {}", past_the_float("ret", 64, 32, "x"));
+    assert_eq!(calling("x: f32", " -> f64", "ret(x);"), Err(want));
+}
+
+/// A float is read as a float, and read whole after the kernel has written all of it, as it writes any variable:
+/// `zero` and `ones`, a load, a broadcast, an instruction that writes all of an xmm or a ymm, and a scalar one that
+/// takes the rest from a variable that is the kernel's own.
+#[test]
+fn a_kernel_reads_a_float_it_takes_as_a_float_and_whole_once_it_has_written_it() {
+    let cases = [
+        ("x: f32, p: *mut f32", "vmovss([p], x);", "vmovss dword ptr [rdi], xmm0\nret"),
+        ("x: f64, p: *mut f64", "vmovsd([p], x);", "vmovsd qword ptr [rdi], xmm0\nret"),
+        ("x: f64, n: usize", "vmovq(n, x);", "vmovq rdi, xmm0\nret"),
+        ("x: f32, y: f64, p: *mut f64", "vmovsd([p], y);", "vmovsd qword ptr [rdi], xmm1\nret"),
+        (
+            "x: f32, p: *mut f32",
+            "zero(x);\nvmovups([p], x);",
+            "vxorps xmm0, xmm0, xmm0\nvmovups xmmword ptr [rdi], xmm0\nret",
+        ),
+        (
+            "x: f32, p: *mut f32",
+            "ones(x);\nvmovups([p], x);",
+            "vpcmpeqd xmm0, xmm0, xmm0\nvmovups xmmword ptr [rdi], xmm0\nret",
+        ),
+        (
+            "x: f32, p: *mut f32, q: *const f32",
+            "vmovups(x, [q]);\nvmovups([p], x);",
+            "vmovups xmm0, xmmword ptr [rsi]\nvmovups xmmword ptr [rdi], xmm0\nret",
+        ),
+        (
+            "x: f32, p: *mut f32, q: *const f32",
+            "vmovss(x, [q]);\nvmovups([p], x);",
+            "vmovss xmm0, dword ptr [rsi]\nvmovups xmmword ptr [rdi], xmm0\nret",
+        ),
+        (
+            "x: f32, p: *mut f32",
+            "vbroadcastss(x.ymm, x);\nvmovups([p], x.ymm);",
+            "vbroadcastss ymm0, xmm0\nvmovups ymmword ptr [rdi], ymm0\nvzeroupper\nret",
+        ),
+        // An instruction of three operands that is no scalar one writes all of its first, and so does one that unpacks
+        // the low halves of its sources, which is all it reads of them: two `f64`s fill the register of an `f32`.
+        (
+            "x: f32, p: *mut f32",
+            "let y: xmm;\nzero(y);\nvaddps(x, y, y);\nvmovups([p], x);",
+            "vxorps xmm0, xmm0, xmm0\nvaddps xmm0, xmm0, xmm0\nvmovups xmmword ptr [rdi], xmm0\nret",
+        ),
+        (
+            "x: f32, y: f64, p: *mut f32",
+            "vunpcklps(x, y, y);\nvmovups([p], x);",
+            "vunpcklps xmm0, xmm1, xmm1\nvmovups xmmword ptr [rdi], xmm0\nret",
+        ),
+        (
+            "x: f32, y: f64, p: *mut f32",
+            "vmovlhps(x, y, y);\nvmovups([p], x);",
+            "vmovlhps xmm0, xmm1, xmm1\nvmovups xmmword ptr [rdi], xmm0\nret",
+        ),
+        // A scalar instruction takes the rest of its result from its first source, which is the kernel's own where
+        // the kernel wrote it: all of `x` is.
+        (
+            "x: f32, y: f32, p: *mut f32",
+            "let z: xmm;\nzero(z);\nvaddss(x, z, y);\nvmovups([p], x);",
+            "vxorps xmm0, xmm0, xmm0\nvaddss xmm0, xmm0, xmm1\nvmovups xmmword ptr [rdi], xmm0\nret",
+        ),
+    ];
+    for (params, body, want) in cases {
+        assert_eq!(compile(params, body).as_deref(), Ok(want), "{body}");
+    }
+    // Each scalar instruction reads the float alone, and `x` is passed on and given back as it is.
+    let scalar = "vaddss(y, y, x);\nvsqrtss(y, y, x);\nvcvtss2sd(y, y, x);\nvucomiss(x, y);\nvmovd(n.r32, x);\n\
+                  vbroadcastss(w.ymm, x);\nvfmadd231ss(y, x, x);";
+    assert_eq!(compile("x: f32, y: f32, w: f32, n: usize", scalar).map(|_| ()), Ok(()));
+    assert_eq!(calling("x: f32", " -> f32", "ret(x);").as_deref(), Ok("ret"));
+    // The ymm of a float is given back as the float: `ret` reads what the type of the result is.
+    assert_eq!(calling("x: f32", " -> f32", "ret(x.ymm);").as_deref(), Ok("ret"));
+}
+
+/// A float is read as far as every way to the read has written it. The ways are the program's: at a label a variable
+/// has the least that any way to it brings, a jump back among them, and what no way comes to reads nothing.
+#[test]
+fn a_float_is_read_as_far_as_every_way_to_the_read_has_written_it() {
+    let params = "x: f32, n: usize, p: *mut f32";
+    // Each body, and where the read of `x` that no way writes before is.
+    let refused = [
+        // One way writes it, and one does not.
+        ("test(n, n);\njz(skip);\nzero(x);\nlabel(skip);\nvmovups([p], x);", "6:1", 128),
+        // The first round of a loop reads it before the loop writes it.
+        ("label(top);\nvmovups([p], x);\nzero(x);\ndec(n);\njnz(top);", "3:1", 128),
+        // A jump back to the read from a way that did not write it, where the way before the label did.
+        (
+            "test(n, n);\njz(skip);\nzero(x);\nlabel(top);\nvmovups([p], x.ymm);\nlabel(skip);\ndec(n);\njnz(top);",
+            "6:1",
+            256,
+        ),
+        // Two jumps to a label, and the way before it: the least of the three.
+        ("test(n, n);\njz(skip);\nzero(x);\ntest(n, n);\njz(skip);\nlabel(skip);\nvmovups([p], x);", "8:1", 128),
+        // A label that only a jump comes to: the code before it, which `jmp` leaves, comes to it by no way.
+        ("jmp(done);\nlabel(other);\nzero(x);\nlabel(done);\nvmovups([p], x);", "6:1", 128),
+        // A jump back that brings `x` narrowed to a label, and on past a branch after it to the read, which a pass over
+        // the blocks in order reaches first.
+        (
+            "let t: xmm;\nvmovaps(t, x);\nzero(x);\nlabel(top);\ntest(n, n);\njz(done);\nvmovups([p], x);\n\
+             vmovaps(x, t);\ndec(n);\njmp(top);\nlabel(done);",
+            "8:1",
+            128,
+        ),
+    ];
+    for (body, at, reads) in refused {
+        let want = format!("{at}: {}", past_the_float("vmovups", reads, 32, "x"));
+        assert_eq!(compile(params, body), Err(want), "{body}");
+    }
+    // Each way writes it, or no way comes to the read: a loop entered at its test, the shape of a `while`, whose way
+    // in writes all of what the loop reads; a jump back from ways that did not write it, to a label that the code
+    // after it writes; and code after `ret`, which no way comes to, though the code before it did not write `x`.
+    let params_rotated = "a: f32, x: *const f32, y: *mut f32, n: u64";
+    let rotated = "let acc: ymm;\nvbroadcastss(a.ymm, a);\nzero(acc);\njmp(test);\nlabel(top);\n\
+                   vfmadd231ps(acc, a.ymm, [x]);\nadd(x, 32);\nsub(n, 8);\nlabel(test);\ntest(n, n);\njnz(top);\n\
+                   vmovups([y], acc);";
+    let want = "vbroadcastss ymm0, xmm0\nvxorps xmm1, xmm1, xmm1\njmp 3f\n2:\nvfmadd231ps ymm1, ymm0, ymmword ptr \
+                [rdi]\nadd rdi, 32\nsub rdx, 8\n3:\ntest rdx, rdx\njnz 2b\nvmovups ymmword ptr [rsi], ymm1\n\
+                vzeroupper\nret";
+    assert_eq!(compile(params_rotated, rotated).as_deref(), Ok(want));
+    let again = "test(n, n);\njz(skip);\nzero(x);\nlabel(top);\nvbroadcastss(x.ymm, [p]);\nvmovups([p], x.ymm);\n\
+                 label(skip);\ndec(n);\njnz(top);";
+    let want = "test rdi, rdi\njz 3f\nvxorps xmm0, xmm0, xmm0\n2:\nvbroadcastss ymm0, dword ptr [rsi]\nvmovups \
+                ymmword ptr [rsi], ymm0\n3:\ndec rdi\njnz 2b\nvzeroupper\nret";
+    assert_eq!(compile(params, again).as_deref(), Ok(want));
+    for body in ["ret();\nlabel(top);\nvmovups([p], x);\ndec(n);\njnz(top);", "zero(x);\nret();\nvmovups([p], x);"] {
+        assert_eq!(compile(params, body).map(|_| ()), Ok(()), "{body}");
+    }
+    let body = "zero(x);\ncall(stop);\nlabel(top);\nvmovups([p], x);\njmp(top);";
+    assert_eq!(calling(params, "", body).map(|_| ()), Ok(()), "{body}");
+    // A cooperative kernel's `grid.sync()` leaves what the kernel wrote of `x` as it was, and refuses what it did not.
+    let want = past_the_float("vmovups", 128, 32, "x");
+    assert_eq!(cooperative("x: f32, p: *mut f32", "grid.sync();\nvmovups([p], x);"), Err(format!("4:1: {want}")));
+    assert_eq!(cooperative("x: f32, p: *mut f32", "zero(x);\ngrid.sync();\nvmovups([p], x);").map(|_| ()), Ok(()));
+}
+
+/// What rustc writes for a float, written as kernels, compiles to what rustc writes: each instruction carries the bits
+/// past the float to the same place of its result, as `vandps` does in `x.abs()`, and reads none of them.
+#[test]
+fn rustcs_code_for_a_float_compiles_as_it_is() {
+    // Its parameters, what it returns, its body, and the code: `abs`, `neg`, `copysign`, `round`, `min`, `max`, a
+    // select, `_mm_set_ss`, `_mm_setr_ps` and `_mm_setr_pd`, `*p = x as f64`.
+    let cases = [
+        (
+            "x: f32, m: *const f32",
+            " -> f32",
+            "let t: xmm; vbroadcastss(t, [m]); vandps(x, x, t); ret(x);",
+            "vbroadcastss xmm1, dword ptr [rdi]\nvandps xmm0, xmm0, xmm1\nret",
+        ),
+        (
+            "x: f32, m: *const f32",
+            " -> f32",
+            "let t: xmm; vbroadcastss(t, [m]); vxorps(x, x, t); ret(x);",
+            "vbroadcastss xmm1, dword ptr [rdi]\nvxorps xmm0, xmm0, xmm1\nret",
+        ),
+        (
+            "x: f32, y: f32, s: *const f32, a: *const f32",
+            " -> f32",
+            "let t: xmm; vbroadcastss(t, [s]); vandps(y, y, t); vbroadcastss(t, [a]); vandps(x, x, t); vorps(x, x, y); \
+             ret(x);",
+            "vbroadcastss xmm2, dword ptr [rdi]\nvandps xmm1, xmm1, xmm2\nvbroadcastss xmm2, dword ptr [rsi]\nvandps \
+             xmm0, xmm0, xmm2\nvorps xmm0, xmm0, xmm1\nret",
+        ),
+        (
+            "x: f32, s: *const f32, h: *const f32",
+            " -> f32",
+            "let (t, u): (xmm, xmm); vbroadcastss(t, [s]); vandps(t, x, t); vbroadcastss(u, [h]); vorps(t, t, u); \
+             vaddss(x, x, t); vroundss(x, x, x, 11); ret(x);",
+            "vbroadcastss xmm1, dword ptr [rdi]\nvandps xmm1, xmm0, xmm1\nvbroadcastss xmm2, dword ptr [rsi]\nvorps \
+             xmm1, xmm1, xmm2\nvaddss xmm0, xmm0, xmm1\nvroundss xmm0, xmm0, xmm0, 0x0b\nret",
+        ),
+        (
+            "x: f32, y: f32",
+            " -> f32",
+            "let t: xmm; vminss(t, x, y); vcmpunordss(y, y, y); vblendvps(x, t, x, y); ret(x);",
+            "vminss xmm2, xmm0, xmm1\nvcmpunordss xmm1, xmm1, xmm1\nvblendvps xmm0, xmm2, xmm0, xmm1\nret",
+        ),
+        (
+            "x: f64, y: f64",
+            " -> f64",
+            "let t: xmm; vmaxsd(t, x, y); vcmpunordsd(y, y, y); vblendvpd(x, t, x, y); ret(x);",
+            "vmaxsd xmm2, xmm0, xmm1\nvcmpunordsd xmm1, xmm1, xmm1\nvblendvpd xmm0, xmm2, xmm0, xmm1\nret",
+        ),
+        (
+            "c: u64, x: f32, y: f32",
+            " -> f32",
+            "test(c, c); jnz(done); vmovaps(x, y); label(done); ret(x);",
+            "test rdi, rdi\njnz 2f\nvmovaps xmm0, xmm1\n2:\nret",
+        ),
+        (
+            "x: f32, p: *mut f32",
+            "",
+            "let z: xmm; zero(z); vblendps(x, z, x, 1); vmovups([p], x);",
+            "vxorps xmm1, xmm1, xmm1\nvblendps xmm0, xmm1, xmm0, 0x01\nvmovups xmmword ptr [rdi], xmm0\nret",
+        ),
+        (
+            "a: f32, b: f32, c: f32, d: f32, p: *mut f32",
+            "",
+            "vinsertps(a, a, b, 16); vinsertps(a, a, c, 32); vinsertps(a, a, d, 48); vmovups([p], a);",
+            "vinsertps xmm0, xmm0, xmm1, 0x10\nvinsertps xmm0, xmm0, xmm2, 0x20\nvinsertps xmm0, xmm0, xmm3, \
+             0x30\nvmovups xmmword ptr [rdi], xmm0\nret",
+        ),
+        (
+            "a: f64, b: f64, p: *mut f64",
+            "",
+            "vmovlhps(a, a, b); vmovupd([p], a);",
+            "vmovlhps xmm0, xmm0, xmm1\nvmovupd xmmword ptr [rdi], xmm0\nret",
+        ),
+        (
+            "x: f32, p: *mut f64",
+            "",
+            "vcvtss2sd(x, x, x); vmovsd([p], x);",
+            "vcvtss2sd xmm0, xmm0, xmm0\nvmovsd qword ptr [rdi], xmm0\nret",
+        ),
+    ];
+    for (params, ret, body, want) in cases {
+        assert_eq!(calling(params, ret, body).as_deref(), Ok(want), "{body}");
+    }
+    // What the instruction takes as it is: `vcvtss2sd` writes 64 bits, which the store reads; a scalar instruction
+    // whose first source is not read, `vsqrtsd(y, x, y)` and `vroundsd(y, x, y, 0)`, as `vmovsd(y, x, y)` is; the
+    // low lane, by a number.
+    for (body, want) in [
+        ("vsqrtsd(y, x, y);\nvmovsd([p], y);", "vsqrtsd xmm1, xmm0, xmm1\nvmovsd qword ptr [rdi], xmm1\nret"),
+        (
+            "vroundsd(y, x, y, 0);\nvmovsd([p], y);",
+            "vroundsd xmm1, xmm0, xmm1, 0x00\nvmovsd qword ptr [rdi], xmm1\nret",
+        ),
+        ("vmovsd(y, x, y);\nvmovsd([p], y);", "vmovsd xmm1, xmm0, xmm1\nvmovsd qword ptr [rdi], xmm1\nret"),
+        ("vextractps([p], x, 0);", "vextractps dword ptr [rdi], xmm0, 0\nret"),
+        (
+            "let w: xmm;\nvpshufd(w, x, 0);\nvmovss([p], w);",
+            "vpshufd xmm0, xmm0, 0x00\nvmovss dword ptr [rdi], xmm0\nret",
+        ),
+    ] {
+        assert_eq!(compile("x: f32, y: f64, p: *mut f64", body).as_deref(), Ok(want), "{body}");
+    }
+    // The bits that `vxorps(x, x, x)` carries are the caller's still, and `zero(x)` writes them.
+    assert_eq!(compile("x: f32, p: *mut f32", "zero(x);\nvxorps(x, x, x);\nvmovups([p], x);").map(|_| ()), Ok(()));
+}
+
+/// A call reads what it passes as far as its callee takes it, and gives back what its callee gives: 32 bits of an
+/// `f32` and 64 of an `f64`, of a function of the module; of one at an address with no functions given, what the call
+/// names, a float the kernel took as its type, an xmm as 128 bits and `.ymm` as all 256. The rest of the register of a
+/// result is the callee's, which the kernel may not read, unless the call names an xmm: the move of the result to its
+/// register clears the rest of its ymm.
+#[test]
+fn a_call_reads_and_gives_back_no_more_than_the_float_its_callee_takes() {
+    let cases = [
+        // An `f32` passed to a function that takes an `f64`, and all of a ymm passed at an address, which no callee
+        // takes of a float.
+        ("x: f32, n: usize", "let r: xmm;\ncall(r, scale, (x, n));", "3:1", ("call", 64, 32, "x")),
+        ("x: f32, fp: u64", "call(fp, (x.ymm));", "2:1", ("call", 256, 32, "x")),
+        // The result of a function that gives back an `f32` and of one that gives back an `f64`, and of a call at an
+        // address that names the float the kernel took: all of its xmm is read after.
+        ("x: f32, y: f32, p: *mut f32", "call(x, half, (y));\nvmovups([p], x);", "3:1", ("vmovups", 128, 32, "x")),
+        (
+            "x: f64, n: usize, p: *mut f64",
+            "call(x, scale, (x, n));\nvmovupd([p], x);",
+            "3:1",
+            ("vmovupd", 128, 64, "x"),
+        ),
+        ("x: f32, fp: u64, p: *mut f32", "call(x, fp, (x));\nvmovups([p], x);", "3:1", ("vmovups", 128, 32, "x")),
+        // A variable made with `let` is held as a float is: it has what the call gave it.
+        (
+            "x: f32, y: f32, p: *mut f32",
+            "let z: xmm;\ncall(z, half, (y));\nvmovups([p], z);",
+            "4:1",
+            ("vmovups", 128, 32, "z"),
+        ),
+    ];
+    for (params, body, at, (name, reads, has, x)) in cases {
+        let want = format!("{at}: {}", past_the_float(name, reads, has, x));
+        assert_eq!(calling(params, "", body), Err(want), "{body}");
+    }
+    // What a call may be given and may give back: the float it takes, as the kernel took it; an xmm at an address; a
+    // ymm where the call names one, and an xmm result, which the move after the call fills to all of its ymm.
+    let cases = [
+        (
+            "x: f32, y: f32, p: *mut f32",
+            "call(x, half, (y));\nvmovss([p], x);",
+            "sub rsp, 8\nvmovaps xmm0, xmm1\ncall {f0}\nvmovss dword ptr [rdi], xmm0\nadd rsp, 8\nret",
+        ),
+        ("x: f32, fp: u64", "call(fp, (x));", "jmp rdi"),
+        ("x: f64, fp: u64", "call(fp, (x.xmm));", "jmp rdi"),
+        (
+            "x: *mut f32, fp: u64",
+            "let v: ymm;\ncall(v.xmm, fp, ());\nvmovups([x], v);",
+            "push rbx\nmov rbx, rdi\ncall rsi\nvmovaps xmm0, xmm0\nvmovups ymmword ptr [rbx], ymm0\npop rbx\n\
+             vzeroupper\nret",
+        ),
+        (
+            "x: *mut f32, fp: u64",
+            "let v: ymm;\ncall(v, fp, ());\nvmovups([x], v);",
+            "push rbx\nmov rbx, rdi\ncall rsi\nvmovups ymmword ptr [rbx], ymm0\npop rbx\nvzeroupper\nret",
+        ),
+    ];
+    for (params, body, want) in cases {
+        assert_eq!(calling(params, "", body).as_deref(), Ok(want), "{body}");
+    }
+}
+
+/// How much of its register each instruction that reads a float as data reads, as Intel's manual says: an `f32` is 32
+/// bits of its register, so an instruction that reads 64 is an error at the float, and one that reads 32 or fewer is
+/// not; an `f64` is 64, and none of 64 or fewer is. Where the instruction picks what it reads by a number, it reads the
+/// lanes the number names and no more.
+#[test]
+fn an_instruction_reads_as_much_of_a_float_as_intels_manual_says() {
+    // The bits each instruction reads of `fl`; `y` and `w` are `f64`s and `z` an xmm, written first so that an
+    // instruction may read all of them, `n` an integer, and `p` memory.
+    let cases = [
+        (64, "vmovq(n, fl);"),
+        (64, "vmovd(n, fl);"),
+        (64, "vmovsd([p], fl);"),
+        (64, "vmovlps([p], fl);"),
+        (64, "vaddsd(y, fl, y);"),
+        (64, "vsqrtsd(y, y, fl);"),
+        (64, "vucomisd(fl, y);"),
+        (64, "vcomisd(y, fl);"),
+        (64, "vcmpsd(y, y, fl, 0);"),
+        (64, "vcmpsd(y, fl, y, 0);"),
+        (64, "vcmpeqsd(y, y, fl);"),
+        (64, "vcmpeqsd(y, fl, y);"),
+        (64, "vroundsd(y, y, fl, 0);"),
+        (64, "vcvtsd2ss(y, y, fl);"),
+        (64, "vcvtsd2si(n, fl);"),
+        (64, "vcvtdq2pd(y, fl);"),
+        (64, "vcvtps2pd(y, fl);"),
+        (64, "vcvtph2ps(y, fl);"),
+        (64, "vpmovsxbw(y, fl);"),
+        (64, "vpmovsxbd(w.ymm, fl);"),
+        (64, "vpmovzxdq(y, fl);"),
+        (64, "vmovddup(y, fl);"),
+        (64, "vbroadcastsd(w.ymm, fl);"),
+        (64, "vpbroadcastq(w.ymm, fl);"),
+        (64, "vfmadd231sd(y, y, fl);"),
+        (64, "vfmadd231sd(y, fl, y);"),
+        (64, "vfmadd231sd(fl, y, y);"),
+        (32, "vmovd(n.r32, fl);"),
+        (32, "vmovss([p], fl);"),
+        (32, "vaddss(y, y, fl);"),
+        (32, "vcvtss2sd(y, y, fl);"),
+        (32, "vcvtss2si(n, fl);"),
+        (32, "vucomiss(fl, y);"),
+        (32, "vbroadcastss(w.ymm, fl);"),
+        (32, "vpbroadcastd(w.ymm, fl);"),
+        (32, "vpmovsxbd(y, fl);"),
+        (32, "vpmovsxbq(w.ymm, fl);"),
+        (32, "vfmadd231ss(y, y, fl);"),
+        (32, "vroundss(y, y, fl, 0);"),
+        (32, "vcmpss(y, y, fl, 0);"),
+        (32, "vcmpeqss(y, y, fl);"),
+        (32, "vcmpeqss(y, fl, y);"),
+        (16, "vpbroadcastw(w.ymm, fl);"),
+        (16, "vpmovsxbq(y, fl);"),
+        (8, "vpbroadcastb(w.ymm, fl);"),
+        // An instruction that unpacks the low halves of two sources reads 64 bits of each, and of each half of a ymm,
+        // and a shift 64 of its count; one that unpacks the high halves reads all of its first source, and of its
+        // second all but the last element, which stays in place; and a shift reads all of what it shifts.
+        (64, "vunpcklps(w, y, fl);"),
+        (64, "vunpcklps(w, fl, y);"),
+        (192, "vunpcklps(w.ymm, fl.ymm, y.ymm);"),
+        (64, "vmovlhps(w, y, fl);"),
+        (64, "vunpcklpd(w, y, fl);"),
+        (192, "vunpcklpd(w.ymm, y.ymm, fl.ymm);"),
+        (64, "vpunpcklbw(w, fl, y);"),
+        (192, "vpunpcklbw(w.ymm, y.ymm, fl.ymm);"),
+        (64, "vpunpcklqdq(w, y, fl);"),
+        (64, "vpsllw(w, y, fl);"),
+        (64, "vpsrad(w, y, fl);"),
+        (96, "vunpckhps(w, y, fl);"),
+        (128, "vunpckhps(w, fl, y);"),
+        (224, "vunpckhps(w.ymm, y.ymm, fl.ymm);"),
+        (128, "vmovhlps(w, y, fl);"),
+        (128, "vpunpckhbw(w, fl, y);"),
+        (120, "vpunpckhbw(w, y, fl);"),
+        (112, "vpunpckhwd(w, y, fl);"),
+        (96, "vpunpckhdq(w, y, fl);"),
+        (128, "vpsllq(w, fl, y);"),
+        // What takes part of each half reads as far as that part: the low quadword of `vmovddup`, the even lanes of
+        // `vmovsldup`, `vpmuludq` and `vpmuldq`.
+        (192, "vmovddup(w.ymm, fl.ymm);"),
+        (96, "vmovsldup(w, fl);"),
+        (224, "vmovsldup(w.ymm, fl.ymm);"),
+        (96, "vpmuludq(w, y, fl);"),
+        (96, "vpmuldq(w, fl, y);"),
+        // What a gpr, the flags, and a store of the whole register take.
+        (128, "vmovmskps(n.r32, fl);"),
+        (128, "vptest(fl, z);"),
+        (128, "vmovups([p], fl);"),
+        (256, "vmovups([p], fl.ymm);"),
+        // An instruction that picks what it reads by a number reads the lanes it names, and the highest of them counts:
+        // `vextractps` and `vpextrd` the lane; `vpextrb` the byte and `vpextrw` the word; `vpshufd` and `vpermilps` the
+        // lanes of their fields, `vshufps` of its two, `vinsertps` its source lane, none where it zeroes the lane it
+        // writes, and `vpermilpd` and `vshufpd` the halves; `vpalignr` and the shifts by bytes what they shift in; a
+        // dot product the lanes it multiplies, and `vmpsadbw` the bytes it sums. Of a ymm, the high half counts, which
+        // picks by the same fields or by its own, and `vextractf128`, `vpermq` and `vperm2f128` pick from all of it.
+        (32, "vextractps(n.r32, fl, 0);"),
+        (64, "vextractps(n.r32, fl, 1);"),
+        (128, "vextractps(n.r32, fl, 3);"),
+        (32, "vpextrd(n.r32, fl, 0);"),
+        (64, "vpextrd(n.r32, fl, 1);"),
+        (64, "vpextrq(n, fl, 0);"),
+        (128, "vpextrq(n, fl, 1);"),
+        (8, "vpextrb(n.r32, fl, 0);"),
+        (32, "vpextrb(n.r32, fl, 3);"),
+        (48, "vpextrw(n.r32, fl, 2);"),
+        (32, "vpshufd(w, fl, 0);"),
+        (64, "vpshufd(w, fl, 1);"),
+        (64, "vpshufd(w, fl, 0x55);"),
+        (128, "vpshufd(w, fl, 0xe4);"),
+        (32, "vpermilps(w, fl, 0);"),
+        (128, "vpermilps(w, fl, 0xff);"),
+        (64, "vpermilpd(w, fl, 0);"),
+        (128, "vpermilpd(w, fl, 2);"),
+        (32, "vshufps(w, fl, fl, 0);"),
+        (64, "vshufps(w, fl, y, 4);"),
+        (128, "vshufps(w, y, fl, 0xc0);"),
+        (64, "vshufpd(w, fl, fl, 0);"),
+        (128, "vshufpd(w, fl, y, 1);"),
+        (128, "vshufpd(w, y, fl, 2);"),
+        (32, "vinsertps(w, z, fl, 0);"),
+        (64, "vinsertps(w, z, fl, 0x40);"),
+        (128, "vinsertps(w, z, fl, 0xc0);"),
+        (0, "vinsertps(w, z, fl, 0x41);"),
+        (16, "vpshuflw(w, fl, 0);"),
+        (64, "vpshuflw(w, fl, 0xe4);"),
+        (80, "vpshufhw(w, fl, 0);"),
+        (128, "vpshufhw(w, fl, 0xe4);"),
+        (128, "vpalignr(w, z, fl, 4);"),
+        (32, "vpalignr(w, fl, z, 4);"),
+        (0, "vpalignr(w, fl, z, 32);"),
+        (0, "vpslldq(w, fl, 16);"),
+        (32, "vpslldq(w, fl, 12);"),
+        (96, "vpslldq(w, fl, 4);"),
+        (128, "vpsrldq(w, fl, 4);"),
+        (0, "vpsrldq(w, fl, 16);"),
+        (32, "vdpps(w, fl, y, 0x11);"),
+        (64, "vdpps(w, y, fl, 0x21);"),
+        (128, "vdpps(w, fl, y, 0xf1);"),
+        (64, "vdppd(w, fl, y, 0x11);"),
+        (128, "vdppd(w, y, fl, 0x21);"),
+        (32, "vmpsadbw(w, y, fl, 0);"),
+        (64, "vmpsadbw(w, y, fl, 1);"),
+        (88, "vmpsadbw(w, fl, y, 0);"),
+        (120, "vmpsadbw(w, fl, y, 4);"),
+        (160, "vpshufd(w.ymm, fl.ymm, 0);"),
+        (192, "vpermilpd(w.ymm, fl.ymm, 0);"),
+        (0, "vdpps(w.ymm, fl.ymm, y.ymm, 0x0f);"),
+        (160, "vdpps(w.ymm, fl.ymm, y.ymm, 0x11);"),
+        (192, "vmpsadbw(w.ymm, y.ymm, fl.ymm, 8);"),
+        (248, "vmpsadbw(w.ymm, fl.ymm, y.ymm, 0x20);"),
+        (128, "vextractf128(z, fl.ymm, 0);"),
+        (256, "vextractf128(z, fl.ymm, 1);"),
+        (64, "vpermq(w.ymm, fl.ymm, 0);"),
+        (256, "vpermq(w.ymm, fl.ymm, 0xc0);"),
+        (128, "vperm2f128(w.ymm, fl.ymm, y.ymm, 9);"),
+        (256, "vperm2f128(w.ymm, fl.ymm, y.ymm, 1);"),
+    ];
+    for (reads, body) in cases {
+        let name = &body[..body.find('(').unwrap_or(body.len())];
+        for has in [32, 64] {
+            let params = format!("fl: f{has}, y: f64, w: f64, n: usize, p: *mut f32");
+            let got = compile(&params, &format!("let z: xmm; zero(y); zero(w); zero(z);\n{body}")).map(|_| ());
+            let want =
+                if reads <= has { Ok(()) } else { Err(format!("3:1: {}", past_the_float(name, reads, has, "fl"))) };
+            assert_eq!(got, want, "an f{has} in {body}");
+        }
+    }
+}
+
+/// How much of its result each instruction that carries a float gives the kernel, as Intel's manual says: the bits of
+/// the float that it moves to the same place of its result are not read, and are the kernel's in the result where they
+/// are the float's, so the result has as many low bits of its own as the least of what it carries and writes allow.
+/// `fl` is the float, 32 bits or 64; `y` is an `f64` and `z` a vector, both written first, `n` an integer, and `p`
+/// memory. Each case gives how many of the low bits of `w`, which the instruction writes, are the kernel's after it,
+/// for an `f32` and for an `f64`: all of an xmm is 128 and of a ymm 256, which is what the store of `w` after it reads.
+/// A selector that picks lanes of 64 bits counts in whole lanes, so an `f32` of 32 bits makes none of them its own.
+#[test]
+fn an_instruction_carries_a_float_as_far_as_intels_manual_says() {
+    let xmm = [
+        // Moves of a whole register and the logic of bits carry all they take, from whichever source it is.
+        ((32, 64), "vmovaps(w, fl);"),
+        ((32, 64), "vmovups(w, fl);"),
+        ((32, 64), "vmovdqa(w, fl);"),
+        ((32, 64), "vandps(w, fl, z);"),
+        ((32, 64), "vandpd(w, z, fl);"),
+        ((32, 64), "vxorps(w, fl, fl);"),
+        ((32, 64), "vpor(w, z, fl);"),
+        ((32, 64), "vpandn(w, fl, z);"),
+        // `vmovq` of an xmm carries its low 64 bits and writes the rest; `vmovss` and `vmovsd` of registers carry the
+        // low bits of the third operand, and the rest of the second.
+        ((32, 128), "vmovq(w, fl);"),
+        ((32, 128), "vmovsd(w, z, fl);"),
+        ((128, 128), "vmovss(w, z, fl);"),
+        ((64, 64), "vmovsd(w, fl, y);"),
+        ((32, 64), "vmovss(w, fl, y);"),
+        // A blend by a number takes each lane from one source, and carries it; one by a register carries both sources,
+        // and its selector, in whole lanes of its own size.
+        ((128, 128), "vblendps(w, z, fl, 1);"),
+        ((32, 128), "vblendps(w, z, fl, 3);"),
+        ((32, 64), "vblendps(w, z, fl, 7);"),
+        ((32, 64), "vblendps(w, fl, z, 0);"),
+        ((128, 128), "vblendps(w, fl, z, 14);"),
+        ((32, 128), "vblendpd(w, z, fl, 1);"),
+        ((128, 128), "vpblendd(w, z, fl, 1);"),
+        ((128, 128), "vpblendw(w, z, fl, 1);"),
+        ((32, 64), "vblendvps(w, fl, z, z);"),
+        ((32, 64), "vblendvpd(w, z, fl, z);"),
+        ((32, 64), "vpblendvb(w, z, z, fl);"),
+        ((32, 64), "vblendvps(w, z, z, fl);"),
+        ((0, 64), "vblendvpd(w, z, z, fl);"),
+        // What a merge keeps: the rest of the first source of a scalar instruction, the half of `vmovhps` and
+        // `vmovlps`, the low half of the first source of the unpacks, and the lanes that an insert leaves.
+        ((64, 64), "vsqrtsd(w, fl, y);"),
+        ((32, 64), "vsqrtss(w, fl, y);"),
+        ((64, 64), "vroundsd(w, fl, y, 0);"),
+        ((32, 64), "vcvtsd2ss(w, fl, y);"),
+        ((64, 64), "vcvtss2sd(w, fl, y);"),
+        ((32, 64), "vcvtsi2ss(w, fl, n);"),
+        ((32, 128), "vmovhps(w, fl, [p]);"),
+        ((64, 64), "vmovlps(w, fl, [p]);"),
+        ((32, 128), "vmovlhps(w, fl, y);"),
+        ((32, 128), "vunpcklpd(w, fl, y);"),
+        ((32, 128), "vpunpcklqdq(w, fl, y);"),
+        ((64, 64), "vinsertps(w, fl, z, 0x10);"),
+        ((128, 128), "vinsertps(w, z, fl, 0x10);"),
+        ((32, 128), "vpinsrq(w, fl, n, 1);"),
+        ((64, 64), "vpinsrd(w, fl, n.r32, 1);"),
+        ((32, 64), "vpinsrw(w, fl, n.r32, 0);"),
+        ((32, 64), "vpinsrb(w, fl, n.r32, 0);"),
+        ((128, 128), "vinsertps(w, fl, z, 0x0e);"),
+        ((64, 64), "vpshuflw(w, fl, 0);"),
+        ((64, 64), "vmovhlps(w, fl, z);"),
+        ((64, 64), "vunpckhpd(w, z, fl);"),
+        ((64, 64), "vpunpckhqdq(w, z, fl);"),
+        ((96, 96), "vblendps(w, z, fl, 8); vunpckhps(w, z, w);"),
+    ];
+    let ymm = [
+        ((32, 64), "vmovaps(w, fl.ymm);"),
+        ((32, 64), "vandps(w, z, fl.ymm);"),
+        ((32, 64), "vinsertf128(w, fl.ymm, z.xmm, 1);"),
+        ((128, 128), "vinsertf128(w, fl.ymm, z.xmm, 0);"),
+        ((32, 64), "vinserti128(w, fl.ymm, z.xmm, 1);"),
+        ((32, 64), "vblendps(w, z, fl.ymm, 15);"),
+        ((256, 256), "vblendps(w, z, fl.ymm, 1);"),
+        ((128, 128), "vpblendw(w, z, fl.ymm, 1);"),
+        ((32, 128), "vunpcklpd(w, fl.ymm, z);"),
+        ((192, 192), "vinsertf128(w, fl.ymm, z.xmm, 0); vunpckhpd(w, z, w);"),
+        ((224, 224), "vblendps(w, z, fl.ymm, 0x80); vunpckhps(w, z, w);"),
+    ];
+    for (vector, whole, cases) in [("xmm", 128, &xmm[..]), ("ymm", 256, &ymm[..])] {
+        for &((a32, a64), body) in cases {
+            for (has, after) in [(32, a32), (64, a64)] {
+                let params = format!("fl: f{has}, y: f64, n: usize, p: *mut f32");
+                let src = format!("let (w, z): ({vector}, {vector}); zero(z); zero(y);\n{body}\nvmovups([p], w);");
+                let want = match after {
+                    after if after >= whole => Ok(()),
+                    after => Err(format!("4:1: {}", past_the_float("vmovups", whole, after, "w"))),
+                };
+                assert_eq!(compile(&params, &src).map(|_| ()), want, "an f{has} in {body}");
+            }
+        }
+    }
+}
+
+/// What each instruction that writes a float leaves of it, as Intel's manual says: one that writes an xmm or a ymm
+/// writes all of it; a scalar one writes the float alone and carries the rest of its first source, so `x` has what that
+/// source has beyond the float, or all of it where the source is a variable that the kernel wrote. Each case gives how
+/// many bits of `x` the instruction reads, and how many of its low bits are the kernel's after it, for an `f32` and for
+/// an `f64`: all of an xmm is 128, which the store of `x` after it reads. An `f32` of a case that reads 64 bits of it
+/// is the other test's. `y` is an `f64` and `z` an xmm written first, `n` an integer, and `p` and `q` memory.
+#[test]
+fn an_instruction_writes_as_much_of_a_float_as_intels_manual_says() {
+    let cases = [
+        // What writes all of an xmm: a load, a move from a gpr, a conversion, a broadcast, and what takes all of its
+        // sources from variables the kernel wrote.
+        (0, (128, 128), "vmovss(x, [q]);"),
+        (0, (128, 128), "vmovsd(x, [q]);"),
+        (0, (128, 128), "vmovd(x, n.r32);"),
+        (0, (128, 128), "vmovq(x, n);"),
+        (0, (128, 128), "vmovq(x, y);"),
+        (0, (128, 128), "vcvtdq2pd(x, y);"),
+        (0, (128, 128), "vcvtps2pd(x, y);"),
+        (0, (128, 128), "vcvtph2ps(x, y);"),
+        (0, (128, 128), "vcvtpd2ps(x, z);"),
+        (0, (128, 128), "vpmovsxbw(x, y);"),
+        (0, (128, 128), "vmovddup(x, y);"),
+        (0, (128, 128), "vbroadcastss(x.ymm, y);"),
+        (0, (128, 128), "vpbroadcastb(x, y);"),
+        (0, (128, 128), "vmovaps(x, z);"),
+        (0, (128, 128), "vsqrtps(x, z);"),
+        (0, (128, 128), "vaddps(x, z, z);"),
+        (0, (128, 128), "vpsllw(x, z, y);"),
+        (0, (128, 128), "vpslldq(x, z, 3);"),
+        (0, (128, 128), "vpinsrd(x, z, n.r32, 0);"),
+        (0, (128, 128), "vinsertps(x, z, z, 0);"),
+        (0, (128, 128), "vblendps(x, z, z, 1);"),
+        (0, (128, 128), "vandps(x, z, z);"),
+        // The low halves that an instruction unpacks are all it reads of the floats it takes.
+        (0, (128, 128), "vunpcklps(x, y, y);"),
+        (0, (128, 128), "vunpcklpd(x, y, y);"),
+        (0, (128, 128), "vmovlhps(x, y, y);"),
+        (0, (128, 128), "vpunpcklbw(x, y, y);"),
+        (0, (128, 128), "vpunpcklqdq(x, y, y);"),
+        (0, (128, 128), "vmovhps(x, y, [q]);"),
+        (0, (128, 128), "vmovlps(x, z, [q]);"),
+        (0, (128, 128), "vmovhlps(x, z, z);"),
+        // A scalar instruction carries the rest of its first source: all of `x` where that is `z`, which the kernel
+        // wrote.
+        (0, (128, 128), "vaddss(x, z, y);"),
+        (0, (128, 128), "vsqrtsd(x, z, y);"),
+        (0, (128, 128), "vroundsd(x, z, y, 0);"),
+        (0, (128, 128), "vcvtss2sd(x, z, y);"),
+        (0, (128, 128), "vmovss(x, z, y);"),
+        // And no more than `x` has where that is `x`: the float it writes, 32 bits or 64, and the rest that it had.
+        (32, (32, 64), "vaddss(x, x, y);"),
+        (64, (0, 64), "vaddsd(x, x, y);"),
+        (0, (32, 64), "vsqrtss(x, x, y);"),
+        (0, (64, 64), "vsqrtsd(x, x, y);"),
+        (0, (32, 64), "vrcpss(x, x, y);"),
+        (0, (32, 64), "vrsqrtss(x, x, y);"),
+        (32, (32, 64), "vcmpss(x, x, y, 0);"),
+        (32, (32, 64), "vcmpeqss(x, x, y);"),
+        (64, (0, 64), "vcmpsd(x, x, y, 0);"),
+        (64, (0, 64), "vcmpeqsd(x, x, y);"),
+        (0, (32, 64), "vroundss(x, x, y, 0);"),
+        (0, (64, 64), "vroundsd(x, x, y, 0);"),
+        (0, (64, 64), "vcvtss2sd(x, x, y);"),
+        (0, (32, 64), "vcvtsd2ss(x, x, y);"),
+        (0, (32, 64), "vcvtsi2ss(x, x, n);"),
+        (0, (64, 64), "vcvtsi2sd(x, x, n);"),
+        (0, (32, 64), "vmovss(x, x, y);"),
+        (0, (64, 64), "vmovsd(x, x, y);"),
+        (32, (32, 64), "vfmadd231ss(x, y, y);"),
+        (64, (0, 64), "vfmadd231sd(x, y, y);"),
+    ];
+    for (reads, (a32, a64), body) in cases {
+        for (has, after) in [(32, a32), (64, a64)].into_iter().filter(|&(has, _)| has >= reads) {
+            let params = format!("x: f{has}, y: f64, n: usize, p: *mut f32, q: *const f32");
+            let src = format!("let z: xmm; zero(z);\n{body}\nvmovups([p], x);");
+            let want = match after {
+                after if after >= 128 => Ok(()),
+                after => Err(format!("4:1: {}", past_the_float("vmovups", 128, after, "x"))),
+            };
+            assert_eq!(compile(&params, &src).map(|_| ()), want, "an f{has} in {body}");
+        }
+    }
+}
+
+/// An operand of a form that reads the low bits of an xmm as data and no more, `v32` and `v64` among them, takes a
+/// float parameter of that many bits or more as it is, and refuses one of fewer at the instruction, saying how much it
+/// reads. The instructions that carry such an operand, or pick what they read of it by a number, do not read it as
+/// data: another test holds them. `call` writes the other operands of the form.
+#[test]
+fn each_form_that_reads_the_low_bits_of_an_xmm_takes_a_float_of_so_many() {
+    let carries = ["vmovq", "vmovss", "vmovsd", "vmovhps", "vmovhpd", "vunpcklpd", "vpunpcklqdq", "vmovlhps"];
+    let mut cases = 0;
+    for form in forms::names().filter(|n| !carries.contains(n)).flat_map(|n| forms::of(n).unwrap_or_default()) {
+        let name = form.op.name();
+        for (i, spec) in form.operands.iter().enumerate() {
+            let (Kind::Vec(w), Access::Read | Access::ReadWrite) = (spec.kind, spec.access) else { continue };
+            let reads = w.bytes() * 8;
+            if reads >= 128 {
+                continue;
+            }
+            let call = call(name, form, false, Some(i));
+            // The instruction is a line of its own, in column 1.
+            let row = call.lines().position(|l| l.starts_with(&format!("{name}("))).map_or(0, |r| r + 2);
+            for has in [32, 64] {
+                let src = format!("unsafe extern \"sysv64\" fn k(f: f{has}, x: *mut f32) {{\n{call}\n}}\n");
+                let got = kernite::x86_str(&src, "k").map(|_| ());
+                let want = if reads <= has {
+                    Ok(())
+                } else {
+                    Err(format!("{row}:1: {}", past_the_float(name, reads, has, "f")))
+                };
+                assert_eq!(got, want, "an f{has} at operand {i} of\n{call}");
+                cases += 1;
+            }
+        }
+    }
+    // Every form that reads part of an xmm, for each float: neither a form nor an operand is left out.
+    assert!(cases >= 850, "{cases} cases");
+}
+
+/// An operand of a form that writes an xmm or a ymm takes a float parameter, which the kernel reads all of after. A
+/// form that writes the low bits of an xmm, `=v32` and `=v64`, passes the rest of its first source on, which `call`
+/// writes first, so the kernel reads all of the parameter then too; one that reads and writes them, `+v32`, keeps what
+/// the parameter has, and a read of all of it after is an error at the read, where the instruction itself is not. A
+/// gather keeps the lanes of its result that its mask leaves out, and reads none of them, so its result too keeps what
+/// the parameter has.
+#[test]
+fn each_form_that_writes_a_vector_writes_a_float_whole_or_alone() {
+    let mut cases = 0;
+    for form in forms::names().flat_map(|n| forms::of(n).unwrap_or_default()) {
+        let name = form.op.name();
+        for (i, spec) in form.operands.iter().enumerate() {
+            let (Kind::Vec(w), Access::Write | Access::ReadWrite) = (spec.kind, spec.access) else { continue };
+            let bits = w.bytes() * 8;
+            let call = call(name, form, false, Some(i));
+            let at = call.lines().position(|l| l.starts_with(&format!("{name}("))).map_or(0, |r| r + 2);
+            // The kernel's last line, after the call and the stores of its other operands.
+            let last = call.lines().count() + 2;
+            let gather = i == 0 && form.operands.iter().any(|s| matches!(s.kind, Kind::Vsib(..)));
+            for has in [32, 64] {
+                let src =
+                    format!("unsafe extern \"sysv64\" fn k(f: f{has}, x: *mut f32) {{\n{call}\nvmovups([x], f);\n}}\n");
+                let got = kernite::x86_str(&src, "k").map(|_| ());
+                let want = match (spec.access, bits > has && !gather) {
+                    (Access::Write, _) => Ok(()),
+                    (_, true) => Err(format!("{at}:1: {}", past_the_float(name, bits, has, "f"))),
+                    (_, false) => Err(format!("{last}:1: {}", past_the_float("vmovups", 128, has, "f"))),
+                };
+                assert_eq!(got, want, "an f{has} at operand {i} of\n{call}");
+                cases += 1;
+            }
+        }
+    }
+    // Every form that writes a vector, for each float: neither a form nor an operand is left out.
+    assert!(cases >= 2900, "{cases} cases");
 }
 
 /// A pointer is one register, whatever it points to: an array, a pointer, a tuple, a generic type.
@@ -2506,15 +3300,18 @@ fn a_call_stays_one_where_a_jump_would_not_do_what_it_does() {
 }
 
 /// A gpr's r32 passes its 32 bits, the rest clear, and takes the result's. A float comes back as an xmm, the rest of
-/// its ymm clear, as an instruction that writes an xmm leaves it, by name and at an address with no functions given:
-/// the move of the result to the register it is in stays where the kernel reads all of the ymm after. A float known now
-/// is read from memory, as x86 takes floats.
+/// its ymm clear, as an instruction that writes an xmm leaves it, by name and at an address with no functions given. A
+/// function of the module gives back a float, 32 or 64 bits of its xmm, and the kernel reads no more of it, unless it
+/// writes the rest first: the move of the result to the register it is in stays only where the kernel reads all of the
+/// ymm after, at an address with no functions given, where the call names an xmm. A float known now is read from
+/// memory, as x86 takes floats.
 #[test]
 fn a_call_passes_what_its_callee_takes() {
     let code = calling("x: u64", " -> u64", "let r: gpr; call(r.r32, gcd, (x.r32, x)); ret(r);").unwrap();
     assert_eq!(code, "sub rsp, 8\nmov rsi, rdi\nmov edi, esi\ncall {f0}\nmov eax, eax\nadd rsp, 8\nret");
-    let body = "let v: ymm; vmovups(v, [x]); call(v.xmm, half, (v.xmm)); vaddps(v, v, v); vmovups([x], v);";
-    let want = "sub rsp, 8\nvmovups ymm0, ymmword ptr [rdi]\ncall {f0}\nvmovaps xmm0, xmm0\nvaddps ymm0, ymm0, \
+    let body = "let v: ymm; vmovups(v, [x]); call(v.xmm, half, (v.xmm)); vbroadcastss(v, v.xmm); vaddps(v, v, v); \
+                vmovups([x], v);";
+    let want = "sub rsp, 8\nvmovups ymm0, ymmword ptr [rdi]\ncall {f0}\nvbroadcastss ymm0, xmm0\nvaddps ymm0, ymm0, \
                 ymm0\nvmovups ymmword ptr [rdi], ymm0\nadd rsp, 8\nvzeroupper\nret";
     assert_eq!(calling("x: *mut f32", "", body).unwrap(), want);
     let body = "let v: ymm; call(v.xmm, fp, ()); vaddps(v, v, v); vmovups([x], v);";
@@ -2716,9 +3513,10 @@ fn tool(var: &str, name: &str) -> Option<PathBuf> {
 /// The kernel `k` around a call of `name` in `form`: each operand a variable of its own, written
 /// before and read after by an instruction of another name, so that no two share a register and
 /// kernite leaves out no move of one to another, as it leaves out a move of a register to itself;
-/// memory at `x` of the size the form reaches, a vector of indices beside it; and each integer
-/// the least the form takes there, or the most.
-fn call(name: &str, form: &Form, most: bool) -> String {
+/// memory at `x` of the size the form reaches, a vector of indices beside it; each integer the least the form takes
+/// there, or the most; and operand `float`, if there is one, the float parameter `f`, which the kernel does not write
+/// first, and with it no vector is read after, as a result may hold the caller's bits of `f`.
+fn call(name: &str, form: &Form, most: bool, float: Option<usize>) -> String {
     let mut body = String::new();
     let mut after = String::new();
     let mut args = vec![];
@@ -2727,10 +3525,13 @@ fn call(name: &str, form: &Form, most: bool) -> String {
     for (i, spec) in form.operands.iter().enumerate() {
         let mut vector = |bytes: u32| {
             body += &format!("let v{i}: ymm; zero(v{i});\n");
-            after += &format!("\n{store}([x], v{i});");
+            if float.is_none() {
+                after += &format!("\n{store}([x], v{i});");
+            }
             if bytes == 32 { format!("v{i}") } else { format!("v{i}.xmm") }
         };
         args.push(match spec.kind {
+            Kind::Vec(w) if float == Some(i) => if w.bytes() == 32 { "f.ymm" } else { "f" }.into(),
             Kind::Gpr(w) => {
                 body += &format!("let g{i}: gpr; zero(g{i});\n");
                 after += &format!("\n{test}(g{i}, g{i});");
@@ -2819,7 +3620,7 @@ fn every_form_kernite_knows_assembles_on_a_machine_of_its_feature() {
                 for form in chunk {
                     let ints = form.operands.iter().any(|s| s.kind.ints().is_some());
                     for most in [false, true].into_iter().take(if ints { 2 } else { 1 }) {
-                        let call = call(form.op.name(), form, most);
+                        let call = call(form.op.name(), form, most, None);
                         let src = format!("unsafe extern \"sysv64\" fn k(x: *mut f32) {{\n{call}\n}}\n");
                         let listing = kernite::x86_str(&src, "k").unwrap_or_else(|e| panic!("{e}, of\n{call}"));
                         if let Some(f) = form.feature {
@@ -3358,7 +4159,7 @@ fn vzeroupper_needs_avx_where_nothing_else_says_so() {
     for (body, plain, called) in cases {
         for (call, needs) in [("", plain), (" let v: ymm; call(v, fp, ());", called)] {
             let src = format!(
-                "pub unsafe extern \"sysv64\" fn f(fp: u64, n: u64, x: f32, y: f32, z: f32) {{ {body}{call} }}"
+                "pub unsafe extern \"sysv64\" fn f(fp: u64, n: u64, x: f64, y: f64, z: f64) {{ {body}{call} }}"
             );
             let listing = kernite::x86_str(&src, "f").unwrap();
             let features: Vec<_> = listing.features.iter().map(|f| f.name()).collect();

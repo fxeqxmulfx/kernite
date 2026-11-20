@@ -11,6 +11,13 @@
 //! the end of the body adds if control reaches it. Besides the instructions, `zero(v)` and
 //! `ones(v)` set a variable without reading it.
 //!
+//! SysV passes an `f32` in the low 32 bits of a vector register and an `f64` in the low 64, and leaves the rest as the
+//! caller had it; a call gives a float back so. A kernel may not read the rest: `widths.rs` holds each vector variable
+//! to how many of its low bits are the kernel's own, over every way through the body, and an instruction that reads
+//! more is an error at the instruction. One that carries bits to the same place of its result does not read them, as
+//! `vandps` and `vmovaps` carry the bits of their sources, a scalar one the rest of its first source, and a blend by a
+//! number the lanes it takes; the result is the kernel's own as far as every bit it carries is.
+//!
 //! An instruction is called by the name the assembler knows it by, `vaddps(v, v, w)`, SSE's as
 //! AVX writes them, and `lock.` before it is the lock prefix: `lock.xadd([p], g)`. [`forms`]
 //! says which instructions kernite knows. One takes the operands of each form
@@ -81,22 +88,25 @@
 //! was, and a vector in the stack frame. `lea(fp, [f])` puts the address of `f` in `fp`, which `call(r, fp, (a, b))`
 //! calls, passing each in the file its variable is of, and `call(r, fp, (a, b), (f, g))` as one of the functions taken
 //! together last, checked against each. One with no functions given passes and takes back each vector as the call names
-//! it: an xmm, or all of a ymm. A call at an address with no functions given has `vzeroupper` before it where the
-//! kernel may have set the upper half of a vector register, as a `ret` has: its callee may run SSE code, which pays for
-//! an upper half set. So has a call that comes back to the function it is in through another of the module's: it
-//! reaches code that is not compiled yet. So has a call of a function of the module that makes such a call, or calls
-//! one that does, as its listing says, and a call of the function the kernel is in, where one of its other calls has. A
-//! call that passes all of a ymm or takes all of one back has none, and gives none to a call of the function it is in:
-//! its callee runs AVX instructions, and `vzeroupper` would clear the upper half of a ymm it passes. Nor has a call of
-//! another function of the module, whose instructions are AVX's too. A call that `ret` follows at once is a jump: the
-//! kernel takes its frame down and writes `vzeroupper` as `ret` does, and jumps to the callee, which returns to the
-//! kernel's caller. A label between them leaves the `ret` for the other ways that come to it, and an address in a
-//! register the kernel saves goes first to `r11`, which the epilogue leaves. The call stays a call where an instruction
-//! comes between it and the `ret`, and where the jump would not do what the call does: where the kernel has taken the
-//! address of its stack memory, and where it calls at an address with no functions given and takes all of a ymm back:
-//! the epilogue's `vzeroupper` runs before the callee sets its upper half. A jump that passes all of a ymm has no
-//! `vzeroupper` before it: the callee, passed all of a ymm, clears the upper halves before it returns. A function that
-//! never returns, `-> !`, ends each way out in `ud2()`, which faults, or in a call of one that never returns.
+//! it: an xmm, or all of a ymm. A call reads each argument as far as its callee takes it, 32 bits of an `f32` and 64 of
+//! an `f64`, or, at an address with no functions given, a float the kernel took as far as its type and any other vector
+//! as far as the call names it, and what it gives back is the kernel's own to as many bits. A call at an address with
+//! no functions given has `vzeroupper` before it where the kernel may have set the upper half of a vector register, as
+//! a `ret` has: its callee may run SSE code, which pays for an upper half set. So has a call that comes back to the
+//! function it is in through another of the module's: it reaches code that is not compiled yet. So has a call of a
+//! function of the module that makes such a call, or calls one that does, as its listing says, and a call of the
+//! function the kernel is in, where one of its other calls has. A call that passes all of a ymm or takes all of one
+//! back has none, and gives none to a call of the function it is in: its callee runs AVX instructions, and `vzeroupper`
+//! would clear the upper half of a ymm it passes. Nor has a call of another function of the module, whose instructions
+//! are AVX's too. A call that `ret` follows at once is a jump: the kernel takes its frame down and writes `vzeroupper`
+//! as `ret` does, and jumps to the callee, which returns to the kernel's caller. A label between them leaves the `ret`
+//! for the other ways that come to it, and an address in a register the kernel saves goes first to `r11`, which the
+//! epilogue leaves. The call stays a call where an instruction comes between it and the `ret`, and where the jump would
+//! not do what the call does: where the kernel has taken the address of its stack memory, and where it calls at an
+//! address with no functions given and takes all of a ymm back: the epilogue's `vzeroupper` runs before the callee sets
+//! its upper half. A jump that passes all of a ymm has no `vzeroupper` before it: the callee, passed all of a ymm,
+//! clears the upper halves before it returns. A function that never returns, `-> !`, ends each way out in `ud2()`,
+//! which faults, or in a call of one that never returns.
 
 use kernite_compile::Spill;
 use kernite_core::Access::{self, Ignored, Read, ReadWrite, Write};
@@ -112,6 +122,7 @@ use crate::forms::{self, Form, Kind, Miss, Shape};
 use crate::op::Op;
 use crate::operand::ymm;
 use crate::sysv::{CALL_CLOBBERS, FLOAT_PARAMS, FLOAT_RESULT, INT_PARAMS, INT_RESULT, PAGE, SysV};
+use crate::widths;
 
 /// The operands of an instruction.
 type Args = Vec<Arg<VReg>>;
@@ -261,6 +272,14 @@ impl Ty {
 
     fn class(self) -> Class {
         if self == Ty::Int { Class::Gpr } else { Class::Vec }
+    }
+
+    /// How many bits of its register a value of this type is.
+    fn width(self) -> Width {
+        match self {
+            Ty::F32 => W32,
+            Ty::F64 | Ty::Int => W64,
+        }
     }
 
     fn noun(self) -> &'static str {
@@ -459,7 +478,9 @@ const NEVER: &str = "it ends each way out in `ud2()` or in a call of a function 
 pub struct Kernel {
     p: Program<Op>,
     ints: usize,
-    floats: usize,
+    /// The floats it takes, each with its type: the low 32 or 64 bits of its register are the kernel's, and the rest is
+    /// as the caller left it.
+    floats: Vec<(VReg, Ty)>,
     /// What it gives back.
     returns: Returns,
     /// The functions it may call, each by what the source calls it, with its prototype; `None`
@@ -489,6 +510,9 @@ pub struct Kernel {
     /// The functions each call may reach, by what the source calls them, in the order of the calls in the body; `None`
     /// for a call at an address with no functions given, which may reach any.
     sites: Vec<Option<Vec<String>>>,
+    /// Where each instruction of the source starts in the body, as [`Target::inst_at`] tells: its first item, and its
+    /// place in the source.
+    starts: Vec<(usize, Span)>,
 }
 
 impl Kernel {
@@ -509,7 +533,7 @@ impl Kernel {
                 statics: vec![],
             },
             ints: 0,
-            floats: 0,
+            floats: vec![],
             returns: Returns::Nothing,
             callees: vec![],
             declared: vec![],
@@ -522,6 +546,7 @@ impl Kernel {
             decls: vec![],
             reach: vec![],
             sites: vec![],
+            starts: vec![],
         }
     }
 
@@ -664,8 +689,8 @@ impl Kernel {
             }
         };
         // Each argument to the register it goes in, in order; then the call; then the result. The call reads what its
-        // callee takes and writes what it gives back: a float, in the xmm, of a function of the module; of one it does
-        // not know, each vector as the call names it, an xmm or all of a ymm, as rustc reads a callee's type.
+        // callee takes and writes what it gives back: as wide as the type of a function of the module, 32 or 64 bits of
+        // a float; of one it does not know, each vector as the call names it, as rustc reads a callee's type.
         let known = targets.is_some() || matches!(target, Operand::Func(_));
         let width = |class, view: View| match class {
             Class::Vec if known => W128,
@@ -682,22 +707,28 @@ impl Kernel {
                 return Err(Fault::at(at, format!("this passes too many: {why}")));
             };
             *count += 1;
-            let (name, view) = match reg_of(a) {
-                Some((reg, view)) => (self.p.regs[reg.id as usize].name.clone(), view),
-                None => (names.get(k).cloned().unwrap_or_else(|| format!("argument {}", k + 1)), View::Xmm),
+            let (name, view, reg) = match reg_of(a) {
+                Some((reg, view)) => (self.p.regs[reg.id as usize].name.clone(), view, Some(reg)),
+                None => (names.get(k).cloned().unwrap_or_else(|| format!("argument {}", k + 1)), View::Xmm, None),
             };
             let pinned = self.new_var(to.class, &name);
             self.p.pinned.push((pinned, to));
             let w = width(to.class, view);
             self.pass(pinned, a, *ty, w);
-            implicit.push(Arg { operand: Operand::Reg(pinned, w), access: Read });
+            let read = if to.class == Class::Vec { self.named(reg, view, known.then_some(*ty)) } else { w };
+            implicit.push(Arg { operand: Operand::Reg(pinned, read), access: Read });
         }
         let back = match (result.and_then(reg_of), kept) {
             (Some((reg, view)), Some(ty)) => {
                 let from = if ty == Ty::Int { INT_RESULT } else { FLOAT_RESULT };
                 let pinned = self.new_var(from.class, &self.p.regs[reg.id as usize].name.clone());
                 self.p.pinned.push((pinned, from));
-                implicit.push(Arg { operand: Operand::Reg(pinned, width(from.class, view)), access: Write });
+                let w = if from.class == Class::Vec {
+                    self.named(Some(reg), view, known.then_some(ty))
+                } else {
+                    width(from.class, view)
+                };
+                implicit.push(Arg { operand: Operand::Reg(pinned, w), access: Write });
                 Some((reg, view, pinned))
             }
             _ => None,
@@ -719,6 +750,17 @@ impl Kernel {
             }));
         }
         Ok(())
+    }
+
+    /// How wide a call passes the vector `reg`, which it names as `view`, or takes it back: as wide as `ty`, the type
+    /// of its callee, where that is known; else as the call names it, a float the kernel took as its type, and any
+    /// other vector as `view`, an xmm or all of a ymm.
+    fn named(&self, reg: Option<VReg>, view: View, ty: Option<Ty>) -> Width {
+        let float = reg.and_then(|r| self.floats.iter().find(|&&(f, _)| f == r)).filter(|_| view == View::Xmm);
+        match (ty, float) {
+            (Some(ty), _) | (None, Some(&(_, ty))) => ty.width(),
+            (None, None) => view.width(),
+        }
     }
 
     /// Moves `a`, an argument of type `ty`, to `to`, the variable SysV passes it in: `width` of a variable, or a gpr's
@@ -895,6 +937,17 @@ impl Kernel {
     /// Whether a call of the kernel may reach any function: one at an address with no functions given.
     pub fn reaches_any(&self) -> bool {
         self.sites.iter().any(Option::is_none)
+    }
+
+    /// The first instruction that reads a bit of a vector that is not the kernel's own, if there is one: where it is in
+    /// the source, if the source said, and what is wrong. A float the kernel takes is its own in the low 32 or 64 bits
+    /// of its register. It goes before [`finish`](Kernel::finish), which adds instructions to the body. A body that is
+    /// not whole has no such instruction: allocating registers says what is wrong with it.
+    pub(crate) fn unowned(&self) -> Option<(Option<Span>, String)> {
+        let start: Vec<_> = self.floats.iter().map(|&(v, ty)| (v, ty.width())).collect();
+        let (i, message) = widths::check(&self.p, &start)?;
+        let before = self.starts.partition_point(|&(first, _)| first <= i);
+        Some((before.checked_sub(1).map(|k| self.starts[k].1), message))
     }
 
     /// The kernel as written. A cooperative one takes its place in the grid, read or not, as
@@ -1118,7 +1171,9 @@ impl Kernel {
                 return Ok(());
             }
             (Returns::Value(Ty::Int), _, Some(r)) if r.class == Class::Gpr => (r, W64, INT_RESULT),
-            (Returns::Value(Ty::F32 | Ty::F64), _, Some(r)) if r.class == Class::Vec => (r, W128, FLOAT_RESULT),
+            (Returns::Value(t @ (Ty::F32 | Ty::F64)), _, Some(r)) if r.class == Class::Vec => {
+                (r, t.width(), FLOAT_RESULT)
+            }
             (Returns::Nothing, ..) => return Err(Fault::new("this kernel returns nothing: `ret()`")),
             (Returns::Never, ..) => {
                 return Err(Fault::new(format!("`{}` never returns, `-> !`: {NEVER}", self.p.name)));
@@ -1626,7 +1681,8 @@ impl Target for Kernel {
     type Var = Var;
 
     fn param(&mut self, name: &str, ty: &str) -> Result<Var, String> {
-        let (class, at, view) = if Ty::param(ty)? == Ty::Int {
+        let float = Ty::param(ty)?;
+        let (class, at, view) = if float == Ty::Int {
             if self.cooperative && self.ints == INT_PARAMS.len() - 1 {
                 return Err("a cooperative kernel takes five integers at most: SysV passes six in registers, and the \
                             sixth is the thread's place in the grid"
@@ -1636,11 +1692,13 @@ impl Target for Kernel {
             self.ints += 1;
             (Class::Gpr, at, View::R64)
         } else {
-            let at = *FLOAT_PARAMS.get(self.floats).ok_or(NINTH)?;
-            self.floats += 1;
+            let at = *FLOAT_PARAMS.get(self.floats.len()).ok_or(NINTH)?;
             (Class::Vec, at, View::Xmm)
         };
         let reg = self.new_var(class, name);
+        if class == Class::Vec {
+            self.floats.push((reg, float));
+        }
         self.p.params.push((reg, at));
         self.p.signature.params.push(class);
         Ok(Var(Place::Reg(reg, view)))
@@ -1905,6 +1963,10 @@ impl Target for Kernel {
         if let Some((reg, _)) = var.reg() {
             self.decls.push((reg, at));
         }
+    }
+
+    fn inst_at(&mut self, at: Span) {
+        self.starts.push((self.p.body.len(), at));
     }
 }
 

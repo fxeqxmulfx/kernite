@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use kernite_core::{Flow, Item, Label, Program};
+use kernite_core::{Flow, Inst, Item, Label, Program, VReg};
 
 use crate::Error;
 use crate::bits::Bits;
@@ -119,4 +119,53 @@ pub fn on_every_path<Op>(p: &Program<Op>, leaves: &[usize]) -> Result<Vec<bool>,
         on[blocks[b].items.start..runs[b]].fill(true);
     }
     Ok(on)
+}
+
+/// Follows a value over `p`'s body from its start to a fixed point: `start` is the value at the top of the body, `step`
+/// what an instruction does to it, and `meet` what the value at a label is of the values the ways to it bring, a jump
+/// back among them. An item that no way comes to is not stepped. `step` must give no more than it is given, and `meet`
+/// no more than either of its values, for the loop to end. It fails, as [`check`](crate::check) does, if control
+/// leaves the body or a jump has no label.
+///
+/// `step` fails where what the instruction does cannot be done, and does what it can to the value. Of the failures once
+/// the values are as small as they get, the first in the body is given: its item's index, and what `step` said.
+pub fn forward<Op, S: Clone + PartialEq, E>(
+    p: &Program<Op>,
+    start: S,
+    meet: impl Fn(&S, &S) -> S,
+    step: impl Fn(&Inst<Op, VReg>, &mut S) -> Result<(), E>,
+) -> Result<Option<(usize, E)>, Error> {
+    let blocks = blocks(&p.body)?;
+    // The value at the top of each block, once a way to it is known.
+    let mut tops: Vec<Option<S>> = vec![None; blocks.len()];
+    tops[0] = Some(start);
+    // The value at the bottom of block `b`, and its first failure.
+    let run = |b: usize, top: &S| {
+        let mut now = top.clone();
+        let mut failed = None;
+        for i in blocks[b].items.clone() {
+            if let Item::Inst(inst) = &p.body[i]
+                && let Err(e) = step(inst, &mut now)
+            {
+                failed.get_or_insert((i, e));
+            }
+        }
+        (now, failed)
+    };
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (b, block) in blocks.iter().enumerate() {
+            let Some(top) = &tops[b] else { continue };
+            let (bottom, _) = run(b, top);
+            for &to in &block.succs {
+                let met = tops[to].as_ref().map_or_else(|| bottom.clone(), |t| meet(t, &bottom));
+                if tops[to].as_ref() != Some(&met) {
+                    tops[to] = Some(met);
+                    changed = true;
+                }
+            }
+        }
+    }
+    Ok(tops.iter().enumerate().find_map(|(b, top)| run(b, top.as_ref()?).1))
 }

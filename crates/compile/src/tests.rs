@@ -1262,3 +1262,141 @@ fn control_must_stay_inside_the_body_for_the_paths_too() {
     b.inst("jmp", &[], Flow::Jump(Label(7)));
     assert_eq!(crate::on_every_path(&b.0, &[]).unwrap_err(), Error::NoSuchLabel { label: 7 });
 }
+
+/// A number for each variable of `b`, followed over its flow by [`crate::forward`]: all 5 at the start, `narrow` sets
+/// the first operand's to 1 and `wide` to 5, and `use` fails if it is under 3. The failure is the item's index and the
+/// variable.
+fn follow(b: &Builder) -> Result<Option<(usize, VReg)>, Error> {
+    let meet = |a: &Vec<u8>, b: &Vec<u8>| a.iter().zip(b).map(|(a, b)| *a.min(b)).collect();
+    crate::forward(&b.0, vec![5u8; b.0.regs.len()], meet, |inst, now: &mut Vec<u8>| {
+        let Some(Operand::Reg(v, _)) = inst.args.first().map(|a| a.operand) else { return Ok(()) };
+        match inst.op {
+            "narrow" => now[v.id as usize] = 1,
+            "wide" => now[v.id as usize] = 5,
+            "use" if now[v.id as usize] < 3 => return Err(v),
+            _ => {}
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn a_value_at_a_label_is_the_least_that_any_way_to_it_brings() {
+    // One way to the label narrows `x`, and the other does not.
+    let mut b = Builder::new();
+    let (p, x) = (b.var("p"), b.var("x"));
+    b.inst("br", &[(p, Access::Read)], Flow::Branch(Label(1)));
+    b.inst("narrow", &[(x, Access::Write)], Flow::Next);
+    b.label(1);
+    b.inst("use", &[(x, Access::Read)], Flow::Next);
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(follow(&b), Ok(Some((3, x))));
+
+    // Both ways write it wide, so that the one way that narrowed it brings nothing.
+    let mut b = Builder::new();
+    let (p, x) = (b.var("p"), b.var("x"));
+    b.inst("narrow", &[(x, Access::Write)], Flow::Next);
+    b.inst("br", &[(p, Access::Read)], Flow::Branch(Label(1)));
+    b.inst("wide", &[(x, Access::Write)], Flow::Next);
+    b.label(1);
+    b.inst("use", &[(x, Access::Read)], Flow::Next);
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(follow(&b), Ok(Some((4, x))));
+}
+
+#[test]
+fn a_jump_back_brings_a_value_to_its_label_too() {
+    let mut b = Builder::new();
+    let (p, x) = (b.var("p"), b.var("x"));
+    b.label(1);
+    b.inst("use", &[(x, Access::Read)], Flow::Next);
+    b.inst("narrow", &[(x, Access::Write)], Flow::Next);
+    b.inst("br", &[(p, Access::Read)], Flow::Branch(Label(1)));
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(follow(&b), Ok(Some((1, x))));
+
+    // Written wide again before the jump, `x` comes back as it went.
+    let mut b = Builder::new();
+    let (p, x) = (b.var("p"), b.var("x"));
+    b.label(1);
+    b.inst("use", &[(x, Access::Read)], Flow::Next);
+    b.inst("narrow", &[(x, Access::Write)], Flow::Next);
+    b.inst("wide", &[(x, Access::Write)], Flow::Next);
+    b.inst("br", &[(p, Access::Read)], Flow::Branch(Label(1)));
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(follow(&b), Ok(None));
+
+    // And on past the label, to a read after a branch, which a pass over the blocks in order reaches before the jump
+    // back.
+    let mut b = Builder::new();
+    let (p, x) = (b.var("p"), b.var("x"));
+    b.label(1);
+    b.inst("br", &[(p, Access::Read)], Flow::Branch(Label(2)));
+    b.inst("use", &[(x, Access::Read)], Flow::Next);
+    b.inst("narrow", &[(x, Access::Write)], Flow::Next);
+    b.inst("jmp", &[], Flow::Jump(Label(1)));
+    b.label(2);
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(follow(&b), Ok(Some((2, x))));
+}
+
+#[test]
+fn a_loop_entered_at_its_test_has_the_value_its_one_way_in_brings() {
+    // The only way to the top is the jump back from the test, which is entered with `x` written wide.
+    let mut b = Builder::new();
+    let (p, x) = (b.var("p"), b.var("x"));
+    b.inst("narrow", &[(x, Access::Write)], Flow::Next);
+    b.inst("wide", &[(x, Access::Write)], Flow::Next);
+    b.inst("jmp", &[], Flow::Jump(Label(2)));
+    b.label(1);
+    b.inst("use", &[(x, Access::Read)], Flow::Next);
+    b.label(2);
+    b.inst("br", &[(p, Access::Read)], Flow::Branch(Label(1)));
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(follow(&b), Ok(None));
+}
+
+#[test]
+fn an_item_that_no_way_comes_to_is_not_stepped() {
+    // Past a jump that always skips it.
+    let mut b = Builder::new();
+    let x = b.var("x");
+    b.inst("narrow", &[(x, Access::Write)], Flow::Next);
+    b.inst("jmp", &[], Flow::Jump(Label(1)));
+    b.inst("use", &[(x, Access::Read)], Flow::Next);
+    b.label(1);
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(follow(&b), Ok(None));
+
+    // A loop that no way comes to, after a return.
+    let mut b = Builder::new();
+    let x = b.var("x");
+    b.inst("narrow", &[(x, Access::Write)], Flow::Next);
+    b.inst("ret", &[], Flow::Return);
+    b.label(1);
+    b.inst("use", &[(x, Access::Read)], Flow::Next);
+    b.inst("jmp", &[], Flow::Jump(Label(1)));
+    assert_eq!(follow(&b), Ok(None));
+}
+
+#[test]
+fn the_first_failure_of_the_body_is_the_one_given() {
+    let mut b = Builder::new();
+    let (x, y) = (b.var("x"), b.var("y"));
+    b.inst("narrow", &[(y, Access::Write)], Flow::Next);
+    b.inst("narrow", &[(x, Access::Write)], Flow::Next);
+    b.inst("use", &[(x, Access::Read)], Flow::Next);
+    b.inst("use", &[(y, Access::Read)], Flow::Next);
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(follow(&b), Ok(Some((2, x))));
+}
+
+#[test]
+fn control_must_stay_inside_the_body_for_the_values_too() {
+    let mut b = Builder::new();
+    let x = b.var("x");
+    b.inst("narrow", &[(x, Access::Write)], Flow::Next);
+    assert_eq!(follow(&b), Err(Error::FallsOffEnd));
+    b.inst("jmp", &[], Flow::Jump(Label(7)));
+    assert_eq!(follow(&b), Err(Error::NoSuchLabel { label: 7 }));
+}

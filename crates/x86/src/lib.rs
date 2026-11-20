@@ -24,6 +24,7 @@ pub mod lang;
 mod op;
 mod operand;
 mod sysv;
+mod widths;
 
 pub use asm::{Asm, Stream};
 pub use backend::X86;

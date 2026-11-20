@@ -315,6 +315,36 @@ the `ret`, in a kernel and in a function of the module alike: `ret(v)` in one th
 pointer, `ret(g)` in one that gives back a float, `ret()` in one that gives back a value, and `ret(g)` or `ret(v)` in
 one that gives back nothing.
 
+SysV passes an `f32` in the low 32 bits of a vector register and an `f64` in the low 64, and leaves the rest as the
+caller had it, which may be different at each call. A call gives a float back so, and leaves the rest as its callee had
+it. kernite holds each vector variable to how many of its low bits are the kernel's own: a float's 32 or 64 to begin
+with, and all 256 of any other; and then what each instruction that writes it makes of it. An instruction that reads
+more of it, on any way to the instruction, is an error at the instruction, which names the variable: `vmovups([p], x)`
+of an `f32` `x` reads 128 bits of it and `vmovups([p], x.ymm)` 256, where `vmovss([p], x)` reads its 32. The variable is
+whole once the kernel has written all of it, with `zero(x)`, a load, or an instruction that computes all of an xmm or a
+ymm, as `vaddps` does. A scalar instruction writes the float alone, and carries the rest of its first source to the same
+place of its result: `vaddss(y, x, z)` leaves `y` the bits of `x` past the float, where `vaddss(y, w, z)` makes all of
+`y` the kernel's own if `w` is. An instruction that carries bits does not read them, and its result is the kernel's own
+as far as every bit it carries is: a move of a whole register, `vmovaps(y, x)`; the logic of bits, `vandps(x, x, mask)`,
+with which Rust takes the absolute value of a float, and `vxorps(x, x, x)`, which carries the bits of `x` though it
+computes zero, where `zero(x)` writes all of it; a blend, `vblendps(y, x, z, 1)` by a number, which takes each lane from
+one source, and `vblendvps(y, x, z, m)` by a register, whose selector counts in whole lanes; and what a merge keeps: the
+rest of the first source of a scalar instruction, the half that `vmovhps`, `vmovlps` and `vmovhlps` keep, the lanes that
+`vinsertps`, `vpinsrd` and `vinsertf128` leave, the element of each half of its first source that `vunpcklpd` leaves in
+place, and of its second that `vunpckhpd` does, the last element of the second source of `vunpckhps`, and the lanes of
+its result that a gather's mask leaves out. An instruction that picks lanes by a number known now reads the lanes it
+picks and no more: `vextractps(g, x, 0)` and `vpshufd(y, x, 0)` read 32 bits of `x`, and `vdpps(y, x, z, 0x11)`, which
+multiplies the first lanes alone, 32 of each. One that takes part of each 128 bits reads as far as the last part it
+takes: `vunpcklps` and `vmovddup` the low 64 bits of each, and `vmovsldup` and `vpmuludq` the even lanes, so 64 and 96
+bits of an xmm, and 192 and 224 of a ymm. A function of the module is held to it as a kernel is. A call reads each
+argument as far as its callee takes it, 32 bits of an `f32` and 64 of an `f64`, so `call(r, scale, (x, n))` of an `f32`
+`x`, where `scale` takes an `f64`, is an error; at an address with no functions given, it reads a float as the float,
+and any other vector as the call names it, an xmm or all of a ymm, so `x.ymm` of a float is an error there. What a call
+gives back is the kernel's own as far as the call would read it as an argument: 32 or 64 bits of a float that its callee
+gives back, and at an address with no functions given, a float as the float, and any other vector as the call names it.
+`ret(v)` reads `v` as far as the kernel gives it back, 32 bits of an `f32` and 64 of an `f64`, so `ret(x)` of an `f32`
+`x`, where the kernel gives back an `f64`, is an error.
+
 Stack memory a kernel declares is a variable, as a GPU kernel's local memory is: `let tables: local<[u32; 1024], 32>;`
 is 4 KB of its frame at a multiple of 32, reached by its name, `mov(c.r32, [tables + b * 4])`, and `lea(p, [tables])`
 takes its address. Until written, it holds whatever was there. kernite checks an address in it where the index is 0:
@@ -473,22 +503,23 @@ call of the function the kernel is in may where one of the kernel's other calls 
 other functions are AVX's, which pay nothing for an upper half set, and the kernel clears it before it returns. kernite
 moves and spills a vector register as wide as an instruction uses its variable: as an xmm, `vmovaps xmm0, xmm1`, where
 none uses it as all of a ymm, and else as all of a ymm, `vmovaps ymm0, ymm1`. A call of the module's functions, by name
-or at an address with them given, passes a float and takes one back as an xmm: `call(v.xmm, half, (x))` clears the upper
-half of `v`, as an instruction that writes an xmm does. A call at an address with no functions given passes and takes
-back each vector as the call names it: an xmm, or all of a ymm. A float, an `xmm` or the `.xmm` of a ymm says that its
-callee takes or gives back no ymm, and all of a ymm that it does, as the type of a function pointer does in Rust. So a
-kernel of xmm registers alone writes no `vzeroupper`, though it moves and spills them and calls functions, by name or at
-an address: each clears what it sets before it returns. A call that `ret` follows at once is a jump: the kernel takes
-its frame down and writes `vzeroupper` as `ret` does, and jumps to the callee, which returns to the kernel's caller. So
-`call(g, gcd, (a, b)); ret(g);` is a loop in `gcd`: the stack does not grow. A label between the call and the `ret`
-leaves the `ret` for the other ways that come to it, and an address to call at in a register the kernel saves goes first
-to `r11`, which taking the frame down leaves as it is. The call stays a call where an instruction comes between it and
-the `ret`, `call(r, gcd, (a, b)); add(r, 1); ret(r);`. It stays one too where the jump would not do what the call does:
-where the kernel has taken the address of its stack memory, which the callee may use, and the frame the jump takes down
-holds; and where it calls at an address with no functions given and takes all of a ymm back: the kernel's `vzeroupper`,
-as it takes its frame down, runs before the callee sets the upper half of what it gives back. A jump that passes all of
-a ymm has no `vzeroupper` before it: the callee, passed all of a ymm, clears the upper halves before it returns. A
-kernel that never returns, `-> !`, ends each way out in `ud2()` or in a call of one that does not.
+or at an address with them given, passes a float and takes one back as an xmm: `call(v.xmm, half, (x))` writes `v` as an
+instruction that writes an xmm does, though only the float of it is the kernel's own. A call at an address with no
+functions given passes and takes back each vector as the call names it: an xmm, or all of a ymm. A float, an `xmm` or
+the `.xmm` of a ymm says that its callee takes or gives back no ymm, and all of a ymm that it does, as the type of a
+function pointer does in Rust. So a kernel of xmm registers alone writes no `vzeroupper`, though it moves and spills
+them and calls functions, by name or at an address: each clears what it sets before it returns. A call that `ret`
+follows at once is a jump: the kernel takes its frame down and writes `vzeroupper` as `ret` does, and jumps to the
+callee, which returns to the kernel's caller. So `call(g, gcd, (a, b)); ret(g);` is a loop in `gcd`: the stack does not
+grow. A label between the call and the `ret` leaves the `ret` for the other ways that come to it, and an address to call
+at in a register the kernel saves goes first to `r11`, which taking the frame down leaves as it is. The call stays a
+call where an instruction comes between it and the `ret`, `call(r, gcd, (a, b)); add(r, 1); ret(r);`. It stays one too
+where the jump would not do what the call does: where the kernel has taken the address of its stack memory, which the
+callee may use, and the frame the jump takes down holds; and where it calls at an address with no functions given and
+takes all of a ymm back: the kernel's `vzeroupper`, as it takes its frame down, runs before the callee sets the upper
+half of what it gives back. A jump that passes all of a ymm has no `vzeroupper` before it: the callee, passed all of a
+ymm, clears the upper halves before it returns. A kernel that never returns, `-> !`, ends each way out in `ud2()` or in
+a call of one that does not.
 
 Memory of the module's is a `static` beside its kernels, in the process's memory, which each kernel names as it names its
 own, and which keeps what they write from one call to the next: `static COUNTS: global<[u32; 16]>;` is 16 words the
