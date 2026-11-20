@@ -2555,6 +2555,46 @@ fn a_function_that_never_returns_is_checked() {
     assert_eq!(calling("", " -> !", "label(spin); pause(); jmp(spin);").unwrap(), "2:\npause\njmp 2b");
 }
 
+/// A kernel gives back its result as SysV does: an integer, a `bool` or a pointer by `ret(g)` of a gpr, a float by
+/// `ret(v)` of a vector, and nothing by `ret()`. Any other `ret` is refused at the `ret`, in a kernel and in a function
+/// of the module alike: a vector of any width, or a float, for an integer, a `bool` or a pointer; a gpr for a float; a
+/// value for nothing; and none for a value.
+#[test]
+fn a_ret_of_the_wrong_kind_of_value_is_refused_at_the_ret() {
+    let integer = "this kernel returns an integer: `ret(g)`, `g` a gpr";
+    let float = "this kernel returns a float: `ret(v)`, `v` a vector";
+    let nothing = "this kernel returns nothing: `ret()`";
+    // The parameters, the result, a line before the `ret`, what it gives back, and what is said of it.
+    let cases = [
+        ("", " -> u64", "let v: xmm; zero(v);", "v", integer),
+        ("", " -> u64", "let v: ymm; zero(v);", "v", integer),
+        ("", " -> u64", "let v: ymm; zero(v);", "v.xmm", integer),
+        ("", " -> bool", "let v: ymm; zero(v);", "v", integer),
+        ("x: f32", " -> *mut f32", "", "x", integer),
+        ("x: f64", " -> u32", "", "x", integer),
+        ("", " -> u64", "", "", integer),
+        ("n: u64", " -> f32", "", "n", float),
+        ("", " -> f64", "let g: gpr; mov(g, 1);", "g", float),
+        ("", " -> f32", "", "", float),
+        ("", "", "let g: gpr; mov(g, 1);", "g", nothing),
+        ("n: u64", "", "", "n", nothing),
+        ("x: f32", "", "", "x", nothing),
+    ];
+    for (params, result, before, given, say) in cases {
+        let kernel = format!("unsafe extern \"sysv64\" fn k({params}){result} {{\n{before}\nret({given});\n}}");
+        assert_eq!(kernite::x86_str(&kernel, "k").err(), Some(format!("3:1: {say}")), "{kernel}");
+        // A function that `k` calls, which takes no parameter for the call to pass, and whose result the call drops.
+        if params.is_empty() {
+            let call = if result.is_empty() { "call(f);" } else { "call(_, f);" };
+            let function = format!(
+                "unsafe extern \"sysv64\" fn k() {{\n{call}\n}}\n\
+                 unsafe extern \"sysv64\" fn f(){result} {{\n{before}\nret({given});\n}}"
+            );
+            assert_eq!(kernite::x86_str(&function, "f").err(), Some(format!("6:1: {say}")), "{function}");
+        }
+    }
+}
+
 /// A program of the toolchain: `$var`, or `name` on the path, if it runs.
 fn tool(var: &str, name: &str) -> Option<PathBuf> {
     if let Some(p) = std::env::var_os(var) {

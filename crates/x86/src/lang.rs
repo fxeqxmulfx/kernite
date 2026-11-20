@@ -1118,7 +1118,7 @@ impl Kernel {
                 return Ok(());
             }
             (Returns::Value(Ty::Int), _, Some(r)) if r.class == Class::Gpr => (r, W64, INT_RESULT),
-            (Returns::Value(_), _, Some(r)) if r.class == Class::Vec => (r, W128, FLOAT_RESULT),
+            (Returns::Value(Ty::F32 | Ty::F64), _, Some(r)) if r.class == Class::Vec => (r, W128, FLOAT_RESULT),
             (Returns::Nothing, ..) => return Err(Fault::new("this kernel returns nothing: `ret()`")),
             (Returns::Never, ..) => {
                 return Err(Fault::new(format!("`{}` never returns, `-> !`: {NEVER}", self.p.name)));

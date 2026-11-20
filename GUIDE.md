@@ -309,6 +309,12 @@ are installed, a test hands them every form, with each integer the least the for
 take it, and GNU `as` must take it at the feature kernite says it needs, without a warning, and refuse it at the
 features before.
 
+A kernel gives back its result as SysV does: `ret(g)` of a gpr for an integer, a `bool` or a pointer, which SysV has in
+`rax`; `ret(v)` of a vector for a float, which it has in `xmm0`; and `ret()` for none. Any other `ret` is an error at
+the `ret`, in a kernel and in a function of the module alike: `ret(v)` in one that gives back an integer, a `bool` or a
+pointer, `ret(g)` in one that gives back a float, `ret()` in one that gives back a value, and `ret(g)` or `ret(v)` in
+one that gives back nothing.
+
 Stack memory a kernel declares is a variable, as a GPU kernel's local memory is: `let tables: local<[u32; 1024], 32>;`
 is 4 KB of its frame at a multiple of 32, reached by its name, `mov(c.r32, [tables + b * 4])`, and `lea(p, [tables])`
 takes its address. Until written, it holds whatever was there. kernite checks an address in it where the index is 0:
