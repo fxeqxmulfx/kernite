@@ -4667,6 +4667,107 @@ fn a_static_of_gpu_kernels_gives_its_method_the_attributes_it_takes() {
     );
 }
 
+/// An attribute on a helper or an `extern "ptx-func"` function that is not for it is kernite's error alone, once, at
+/// the attribute's name, in the same words for each but what the item is, its name, as written, and the attribute's, a
+/// raw one plain, as it is on a static of GPU kernels: neither is a symbol of the host's nor a function of Rust's. So
+/// it is for an attribute of a symbol, `#[unsafe(no_mangle)]`, `#[unsafe(export_name = ..)]`,
+/// `#[unsafe(link_section = ..)]` and `#[used]`; for one of a function, `#[cold]` and `#[track_caller]`; and for any
+/// other: one of Rust's, `#[must_use]`, `#[derive(..)]` and `#[repr(..)]`, one of a tool that is not `rustfmt`, and one
+/// that nothing defines, `#[foo]`, of which Rust says "cannot find attribute `foo` in this scope" on a function of its
+/// own. It is the same for the attribute written raw, on an item named raw; in a `cfg_attr(..)`, whatever its
+/// condition, beside one the item takes, and inside another `cfg_attr(..)`; and for each attribute of an item. An item
+/// that `cfg` leaves out says nothing. Rust says nothing of the attribute, which is not written to it, nor of a
+/// kernel's call of the item.
+#[test]
+fn an_attribute_that_is_not_for_a_helper_or_a_gpu_function_is_kernites_error_alone() {
+    // The line and the column of each attribute's name, the item it is on, as written, and the attribute's name.
+    let helpers: [(u32, u32, &str, &str); 20] = [
+        (9, 14, "no_mangle", "no_mangle"),
+        (14, 14, "export_name", "export_name"),
+        (19, 14, "link_section", "link_section"),
+        (24, 7, "cold", "cold"),
+        (29, 7, "track_caller", "track_caller"),
+        (34, 7, "used", "used"),
+        (41, 7, "r#type", "used"),
+        (46, 14, "raw_unsafe", "no_mangle"),
+        (51, 30, "holds", "no_mangle"),
+        (56, 23, "false_condition", "used"),
+        (61, 61, "beside", "used"),
+        (66, 39, "nested", "cold"),
+        (73, 7, "must_use", "must_use"),
+        (78, 7, "derive", "derive"),
+        (83, 7, "repr", "repr"),
+        (88, 7, "clippy", "clippy::cognitive_complexity"),
+        (93, 7, "unknown", "foo"),
+        (101, 7, "many", "used"),
+        (103, 7, "many", "cold"),
+        (115, 7, "here", "used"),
+    ];
+    let functions: [(u32, u32, &str, &str); 8] = [
+        (150, 7, "odd", "foo"),
+        (155, 7, "must_use", "must_use"),
+        (160, 14, "no_mangle", "no_mangle"),
+        (165, 7, "r#type", "used"),
+        (170, 23, "false_condition", "cold"),
+        (176, 7, "many", "used"),
+        (178, 7, "many", "cold"),
+        (190, 7, "here", "used"),
+    ];
+    let said = |is: &str, found: &[(u32, u32, &str, &str)]| -> Vec<String> {
+        found
+            .iter()
+            .map(|(line, column, name, attr)| {
+                format!(
+                    "src/lib.rs:{line}:{column}: error: `{name}` is {is}, which `{attr}` is not for: {is} takes a doc, \
+                     `cfg`, `deprecated`, the level of a lint, and a `rustfmt` attribute, alone or in a `cfg_attr(..)`"
+                )
+            })
+            .collect()
+    };
+    let mut lines = said("a helper", &helpers);
+    lines.extend(said("an `extern \"ptx-func\"` function", &functions));
+    lines.push(format!("error: could not compile `helper_attrs_refused` (lib) due to {} previous errors", lines.len()));
+    refuses("helper_attrs_refused", &lines.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// A helper and an `extern "ptx-func"` function take each attribute that says how Rust has them, and Rust says nothing
+/// of any: a doc, written as `///`, as `#[doc = ..]`, as `#[doc(hidden)]` and in a `cfg_attr(..)`; `cfg`; `deprecated`,
+/// alone, with a `since` and a `note`, and in a `cfg_attr(..)`; the level of a lint, `allow`, `warn`, `deny` and
+/// `forbid`, and an `expect` that a use of a deprecated item meets; and `#[rustfmt::skip]`.
+#[test]
+fn a_helper_and_a_gpu_function_take_the_attributes_that_say_how_rust_has_them() {
+    builds_quietly("helper_attrs_kept");
+}
+
+/// Rust reads the `deprecated` of each helper and each `extern "ptx-func"` function as it reads a function of its own,
+/// whether a kernel names it or not: a `deprecated` that is malformed is Rust's error at the attribute, in its words,
+/// once. So it is for one in a `cfg_attr(..)` that holds, for two on an item, "multiple `deprecated` attributes", for
+/// an item that a kernel names and one that `cfg` leaves out names too, and for an item that only a kernel under a
+/// `cfg` names, whether the `cfg` holds or not. Rust says nothing of one that is not malformed, of one in a
+/// `cfg_attr(..)` that does not hold, nor of an item that `cfg` leaves out. Cargo prints, of each module, the errors of
+/// the items that no kernel names first, and those of the items that a kernel names after, for Rust reads their
+/// `deprecated` where the kernel names them.
+#[test]
+fn rust_says_a_malformed_deprecated_of_a_helper_or_a_gpu_function_once_whether_a_kernel_names_it_or_not() {
+    refuses(
+        "helper_deprecated_malformed",
+        &[
+            "src/lib.rs:15:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:21:23: error[E0538]: malformed `deprecated` attribute input",
+            "src/lib.rs:28:5: error: multiple `deprecated` attributes: help: remove this attribute",
+            "src/lib.rs:53:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:9:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:59:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:101:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:107:23: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:126:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:95:7: error[E0538]: malformed `deprecated` attribute input",
+            "src/lib.rs:132:7: error[E0539]: malformed `deprecated` attribute input",
+            "error: could not compile `helper_deprecated_malformed` (lib) due to 11 previous errors",
+        ],
+    );
+}
+
 /// An item of a module of kernels with no doc is told of by `missing_docs` at the item, as Rust tells of an item of
 /// plain Rust, and not at the module's `#[kernite_macros::kernels]`: each of two statics of GPU kernels, which are
 /// methods of `Kernels`; each static of x86 kernels, near `rip` and far from it; and each x86 kernel that the macros

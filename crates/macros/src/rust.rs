@@ -191,13 +191,10 @@ pub(crate) fn cfg_of(item: &lang::Item, top: &[TokenTree]) -> TokenStream {
 /// not deprecated.
 pub(crate) fn stand_in(item: &lang::Item, top: &[TokenTree], span: Span) -> Option<TokenStream> {
     let tokens = &top[item.tokens.clone()];
-    let deprecated = filtered(tokens[..attrs_len(tokens)].iter().cloned(), &mut |meta| {
-        matches!(&meta[..], [name, ..] if named(name, "deprecated")).then_some(meta)
-    });
-    if deprecated.is_empty() {
+    let mut inner = deprecated(tokens[..attrs_len(tokens)].iter().cloned());
+    if inner.is_empty() {
         return None;
     }
-    let mut inner = deprecated;
     inner.extend(parse("fn"));
     inner.extend([name_at(item, top, span)]);
     inner.extend(parse("() {}"));
@@ -723,6 +720,61 @@ pub(crate) fn naked_levels(attrs: impl IntoIterator<Item = TokenTree>) -> TokenS
         }
         Some(meta)
     })
+}
+
+/// What an item's attributes, `attrs`, `#` and brackets each, say of its being deprecated: each `deprecated`, alone or
+/// in a `cfg_attr(..)`.
+pub(crate) fn deprecated(attrs: impl IntoIterator<Item = TokenTree>) -> TokenStream {
+    filtered(attrs, &mut |meta| matches!(&meta[..], [name, ..] if named(name, "deprecated")).then_some(meta))
+}
+
+/// What an item that is no item of Rust's takes of its attributes, `attrs`, `#` and brackets each, and, of the rest,
+/// each one's name, a raw one plain, and where it is. A static of GPU kernels, a helper and an `extern "ptx-func"`
+/// function are no symbol of the host's, nor an item of Rust's, so each takes what says how Rust has it, and no other
+/// attribute: a doc, `cfg`, `deprecated`, the level of a lint, `allow`, `warn`, `deny`, `forbid` or `expect`, and a
+/// `rustfmt` attribute, each alone or in a `cfg_attr(..)`, whatever its condition. The others are for what the item is
+/// not: `no_mangle`, `export_name`, `link_section` and `used` for a symbol, `cold` and `track_caller` for a function of
+/// Rust's, and the rest of Rust's for an item of its own. `unsafe(no_mangle)` is `no_mangle`.
+pub(crate) fn taken(attrs: impl IntoIterator<Item = TokenTree>) -> (TokenStream, Vec<(Span, String)>) {
+    let mut refused = vec![];
+    let taken = filtered(attrs, &mut |meta| {
+        let [first, ..] = &meta[..] else { return None };
+        let at = first.span();
+        let takes = ["doc", "cfg", "deprecated", "rustfmt"];
+        if takes.iter().chain(&LEVELS).any(|name| named(first, name)) {
+            return Some(meta);
+        }
+        let attr = match &meta[..] {
+            [wrapper, TokenTree::Group(inner)] if named(wrapper, "unsafe") => flatten(inner.stream()),
+            _ => meta,
+        };
+        // The name, which may be a path, `a::b`, up to its arguments or its value.
+        let path: Vec<&TokenTree> =
+            attr.iter().take_while(|t| matches!(t, TokenTree::Ident(_)) || is_punct(t, ':')).collect();
+        let written = path.iter().map(|t| lang::unraw(&t.to_string()).to_string()).collect();
+        refused.push((path.first().map_or(at, |t| t.span()), written));
+        None
+    });
+    (taken, refused)
+}
+
+/// The error at each of `attrs` that the item named `name` does not take, as [`taken`] says, under `cfg`, the item's
+/// own: where `cfg` leaves the item out, it says nothing. It names the item as written, `r#type` as well, and says what
+/// it is, `is`, and what takes the attributes it takes, `takers`.
+pub(crate) fn refused_attrs(
+    attrs: impl IntoIterator<Item = TokenTree>,
+    name: &TokenTree,
+    (is, takers): (&str, &str),
+    cfg: &TokenStream,
+) -> TokenStream {
+    let said = |(at, attr): (Span, String)| {
+        let message = format!(
+            "`{name}` is {is}, which `{attr}` is not for: {takers} takes a doc, `cfg`, `deprecated`, the level of a \
+             lint, and a `rustfmt` attribute, alone or in a `cfg_attr(..)`"
+        );
+        error_under(cfg, at, &message)
+    };
+    taken(attrs).1.into_iter().map(said).collect()
 }
 
 /// The attributes `attrs`, `#` and brackets each, as `leaf` leaves them: `leaf` is given the tokens in an attribute's

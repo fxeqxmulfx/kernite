@@ -213,6 +213,16 @@ are mended. A function's types are shown where `cfg` keeps the function and the 
 shown none of them, so an import that only a helper names is unused to Rust, which says so as it does of any import that
 nothing names.
 
+A helper and an `extern "ptx-func"` function are no symbol of the host's, nor a function of Rust's, so each takes the
+attributes that say how Rust has it, and no other: a doc, `cfg`, `deprecated`, the level of a lint, `allow`, `warn`,
+`deny`, `forbid` or `expect`, and a `rustfmt` attribute, each alone or in a `cfg_attr(..)`, whatever its condition.
+kernite refuses any other, as an error at its name, which says that the item is a helper or an `extern "ptx-func"`
+function, which the attribute is not for: `#[unsafe(no_mangle)]`, `#[unsafe(export_name = ..)]`,
+`#[unsafe(link_section = ..)]` and `#[used]` are for a symbol of the host's, `#[cold]` and `#[track_caller]` for a
+function of Rust's, `#[must_use]` and the rest of Rust's for an item of its own, and `#[foo]`, which nothing defines,
+for none. Rust reads the `deprecated` of each as it reads a function of its own, though no kernel names it: a
+`deprecated` that is malformed is Rust's error at the attribute.
+
 A name written raw is the name Rust reads, in a type as in a value's name: `r#u64` is `u64`, `*const r#u8` is
 `*const u8` and `[r#f32; 4]` is `[f32; 4]`, in a parameter, a result, a variable, a compile-time argument's type,
 `<const N: r#u64>`, a const and a static. A kernel written so compiles to the listing, or the PTX, of the one written
@@ -416,11 +426,12 @@ kernel, so a deprecated one is told of as a use of a function of its name that k
 says its path with an `_`, `cpu::_::touch`: `touch(p);` of a helper, `call(v, gcd, (a, b));` and `mov.u64(fp, gcd);` of
 a function, and `mov.u64(fp, run);` of a kernel are each a warning at the name, with the note of the attribute. A use
 inside the deprecated item itself is not told of, as in Rust. Rust says nothing at the module's attribute, nor of an
-item that no kernel names. An x86 kernel of instances is a function for each instance, and the code of a helper is part
-of each x86 kernel that calls it. Where the build is incremental, as the dev profile's is, Rust tells of the first place
-each function writes the name: once for each instance, and for a place in a helper, once for each kernel that calls it.
-`old::<2>`, a helper, an `extern "ptx-func"` function and a GPU kernel are told of once at each place, whatever
-instances of a kernel write it and whatever kernels call the helper it is in.
+item that no kernel names, but for an error in its `deprecated`, which Rust reads as it does of a function of its own.
+An x86 kernel of instances is a function for each instance, and the code of a helper is part of each x86 kernel that
+calls it. Where the build is incremental, as the dev profile's is, Rust tells of the first place each function writes
+the name: once for each instance, and for a place in a helper, once for each kernel that calls it. `old::<2>`, a helper,
+an `extern "ptx-func"` function and a GPU kernel are told of once at each place, whatever instances of a kernel write it
+and whatever kernels call the helper it is in.
 
 The level of a lint that a kernel sets holds at each of these places, as in a function of Rust's. `#[allow(deprecated)]`
 on a kernel has Rust say nothing at any of them, on x86 and on a GPU; `warn`, `deny` and `forbid` make each a warning or

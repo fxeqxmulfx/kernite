@@ -18,11 +18,11 @@ use kernite::lang::{self, ItemKind};
 use kernite::{DeviceOut, ItemOut, Kept, ModuleOut};
 
 use crate::cond::Cond;
-use crate::gpu::{HOLE, gpu, refused_attrs, used};
+use crate::gpu::{HOLE, gpu, used};
 use crate::room;
 use crate::rust::{
-    LEVELS, attrs, cfg_of, error, error_under, flatten, for_rust, from_inside, grouped, inner_attribute, levels, lex,
-    name_at, parse, passable, position, seen, site, stand_in, stub, takes, unnamed,
+    LEVELS, attrs, cfg_of, deprecated, error, error_under, flatten, for_rust, from_inside, grouped, inner_attribute,
+    levels, lex, name_at, parse, passable, position, refused_attrs, seen, site, stand_in, stub, takes, unnamed,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, instance_used, naked, operands, x86_stub};
@@ -153,6 +153,8 @@ pub(crate) fn expand(
         .map(|item| matches!(item, ItemOut::Helper(_)) || matches!(item, ItemOut::Device(d) if d.launcher.is_none()))
         .collect();
     let mut carried = vec![TokenStream::new(); helper.len()];
+    // Where each of them has a stand-in, as `named` says, in which Rust reads its `deprecated`.
+    let mut stood_in = vec![Cond::Never; helper.len()];
     // Which functions set the level of a lint: only the places of those are written where their level holds.
     let leveled: Vec<bool> = module
         .items
@@ -171,7 +173,7 @@ pub(crate) fn expand(
             ItemOut::Native(k) => operands(k, &|m| module.item_at(m.span) == i),
             _ => vec![],
         };
-        let (names, errors) = named(&made, &conds, i, &top, &place, &firsts);
+        let (names, errors) = named(&made, &conds, i, &top, &place, &firsts, &mut stood_in);
         left_out.extend(errors);
         // Each place is where the code that writes it is, for the level its item sets to hold there, as in Rust: in the
         // body of the kernel, which `own` has, or in what holds the places of the helper or the GPU function. A place
@@ -187,6 +189,14 @@ pub(crate) fn expand(
                 reads.extend(statement);
             }
         }
+        // A helper or an `extern "ptx-func"` function is no item of Rust's: it takes the attributes that say how Rust
+        // has it.
+        if helper[i]
+            && let ItemKind::Fn(f) = &item.kind
+        {
+            let is = if f.abi.is_some() { "an `extern \"ptx-func\"` function" } else { "a helper" };
+            out.extend(refused_attrs(attrs(f, &top), &top[f.head.end + 1], (is, is), cfg));
+        }
         match (&item.kind, made_item) {
             // The module's own attributes are first, and a const given is Rust's where its
             // module is.
@@ -200,7 +210,8 @@ pub(crate) fn expand(
             }
             (ItemKind::Static(s), ItemOut::DeviceStatic(laid)) => {
                 out.extend(laid.as_ref().err().and_then(|failed| failed.error.as_ref()).map(said));
-                out.extend(refused_attrs(s, cfg, &top));
+                let is = ("memory on the GPU", "a static of GPU kernels");
+                out.extend(refused_attrs(top[s.attrs.clone()].iter().cloned(), &top[s.vis.end + 1], is, cfg));
                 memory.push((s, laid, conds[i].clone()));
                 on_gpu.push(conds[i].clone());
                 if let Ok(laid) = laid {
@@ -288,9 +299,20 @@ pub(crate) fn expand(
     for (i, f) in helpers {
         reads.extend(Cond::all([conds[i].clone(), failing.clone()]).guard().map(|g| seen(f, &top, &g)));
         shown.extend(conds[i].guard().map(|g| room::shown(&g, i, seen(f, &top, &TokenStream::new()))));
-        // The places of a helper or a GPU function that sets a level are in an item of no name that sets it, as its
-        // code would in Rust: `expect` too, which is unfulfilled where no place the code names has the lint. The code
-        // of a helper is read only where an item `cfg` keeps runs it, and only there is the item.
+        // What Rust reads of a helper or a GPU function, whose code it never sees, is in items of no name that have it.
+        // Its `deprecated` is in one under the item's own `cfg`, but for where a stand-in has it, as `stood_in` says:
+        // so Rust says what is wrong of it once, whether a kernel names the item or not. The level it sets, `expect`
+        // too, which is unfulfilled where no place the code names has the lint, is in another, with the places of its
+        // code that name an item. The code of a helper is read only where an item `cfg` keeps runs it, and only there
+        // is that item.
+        let says = deprecated(attrs(f, &top));
+        if !says.is_empty()
+            && let Some(guard) = Cond::all([conds[i].clone(), stood_in[i].clone().not()]).guard()
+        {
+            out.extend(guard);
+            out.extend(says);
+            out.extend(parse("const _: () = {};"));
+        }
         let read = match made.items[i] {
             ItemOut::Helper(_) => Cond::any(
                 (0..made.items.len())
@@ -380,6 +402,8 @@ fn find(guard: TokenStream, what: impl IntoIterator<Item = TokenTree>) -> TokenS
 /// there. The operand of a place of a kernel is in the function of each instance, where the kernel's levels hold, but a
 /// helper's do not, and where an `expect` is an `allow`: so where a kernel allows a lint or expects it, each place has
 /// the statement too, to be told of at the level of its code, as one that is not an operand is.
+///
+/// `stood_in` of an item gains where each stand-in of it is there: Rust reads the item's `deprecated` in it.
 fn named(
     made: &ModuleOut,
     conds: &[Cond],
@@ -387,6 +411,7 @@ fn named(
     top: &[TokenTree],
     place: &dyn Fn(lang::Span) -> Span,
     covered: &[&lang::Mention],
+    stood_in: &mut [Cond],
 ) -> (Vec<(usize, TokenStream)>, TokenStream) {
     let module = &made.module;
     let (mut names, mut errors) = (vec![], TokenStream::new());
@@ -426,10 +451,12 @@ fn named(
             ItemOut::Helper(_) | ItemOut::Device(_) if at != j => stand_in(&module.items[j], top, place(m.span)),
             _ => None,
         };
-        if let Some(path) = path
-            && let Some(guard) = Cond::all([kept, conds[j].clone()]).guard()
-        {
-            names.push((at, find(guard, path)));
+        if let Some(path) = path {
+            let there = Cond::all([kept, conds[j].clone()]);
+            if let Some(guard) = there.guard() {
+                names.push((at, find(guard, path)));
+                stood_in[j] = Cond::any([stood_in[j].clone(), there]);
+            }
         }
     }
     (names, errors)
