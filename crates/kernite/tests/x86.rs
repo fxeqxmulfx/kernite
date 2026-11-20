@@ -2389,10 +2389,10 @@ fn stack_memory_holds_whatever_was_there_until_written() {
 }
 
 /// The stack pointer is 8 past a multiple of 16 on entry, as SysV says, so a frame aligned to 16 or less keeps no `rbp`
-/// and takes no `and`: it lies below the stack pointer, or `sub` makes it, and `add` takes it down. One aligned to 16
-/// lies at a multiple of 16 whether the kernel calls or not, and the listing says why it is as long as it is. One
-/// aligned to more keeps the caller's stack pointer in `rbp`, aligns its own with `and`, and takes the frame down from
-/// `rbp`.
+/// and takes no `and`: it lies below the stack pointer, up to 128 bytes of it, and `sub` makes the rest, which `add`
+/// takes down. One aligned to 16 lies at a multiple of 16 whether the kernel calls or not, and the listing says why it
+/// is as long as it is. One aligned to more keeps the caller's stack pointer in `rbp`, aligns its own with `and`, and
+/// takes the frame down from `rbp`.
 #[test]
 fn only_a_frame_aligned_past_16_keeps_the_stack_pointer_in_rbp() {
     let cases = [
@@ -2400,7 +2400,7 @@ fn only_a_frame_aligned_past_16_keeps_the_stack_pointer_in_rbp() {
         ("local<[u64; 2], 16>", "mov rax, qword ptr [rsp - 24]\nret"),
         (
             "local<[u8; 4096], 16>",
-            "sub rsp, 4096\nor qword ptr [rsp], 0\nsub rsp, 8\nmov rax, qword ptr [rsp]\nadd rsp, 4104\nret",
+            "sub rsp, 4096\nor qword ptr [rsp], 0\nmov rax, qword ptr [rsp - 8]\nadd rsp, 4096\nret",
         ),
         (
             "local<[u8; 32], 32>",
@@ -2418,8 +2418,9 @@ fn only_a_frame_aligned_past_16_keeps_the_stack_pointer_in_rbp() {
     );
 }
 
-/// An `add` takes 2^31 - 1 at most, and a frame may be 2^31 bytes, 8 more where it is aligned to 16: the kernel takes
-/// it down by two. Seventeen xmm alive at once spill two, 16 bytes each, after stack memory of 2^31 - 32 bytes.
+/// An `add` takes 2^31 - 1 at most, and the stack pointer may move by 2^31 bytes: a frame of 2^31 bytes and the 8 more
+/// that align it to 16 keeps 8 bytes below the stack pointer, and the kernel takes the rest down by two. Seventeen xmm
+/// alive at once spill two, 16 bytes each, after stack memory of 2^31 - 32 bytes.
 #[test]
 fn a_frame_of_2_to_the_31_bytes_is_taken_down_by_two_adds() {
     let loads: String = (0..17).map(|i| format!("let v{i}: xmm;\nvmovups(v{i}, [x + {}]);\n", 16 * i)).collect();
@@ -2432,13 +2433,13 @@ fn a_frame_of_2_to_the_31_bytes_is_taken_down_by_two_adds() {
     let frame = "# frame: 2147483648 bytes aligned to 16, saves [], and 8 more so that it is aligned to 16\n";
     assert!(text.contains(frame), "{text}");
     assert!(text.contains("\n    lea r11, [rsp - 2147483648]\n"), "{text}");
-    assert!(text.ends_with("\n    add rsp, 2147483647\n    add rsp, 9\n    ret\n"), "{text}");
+    assert!(text.ends_with("\n    add rsp, 2147483647\n    add rsp, 1\n    ret\n"), "{text}");
 }
 
-/// The stack pointer moves no more than a page below memory the kernel has touched, as Rust's
-/// functions do, so that a frame past the end of the stack faults at the guard page there
-/// rather than step over it: a bigger frame is touched a page at a time, in a loop past three
-/// pages. What the alignment may add counts.
+/// A frame of more than a page is touched a page at a time on the way down, as Rust's functions are, so that a frame
+/// past the end of the stack faults at the guard page there rather than step over it: no byte of the frame lies more
+/// than a page below memory the kernel has touched, those below the stack pointer counted. Past three pages it is
+/// touched in a loop. What the alignment may add counts.
 #[test]
 fn a_frame_of_more_than_a_page_is_touched_a_page_at_a_time() {
     let prologue = |ty: &str| {
@@ -2448,14 +2449,16 @@ fn a_frame_of_more_than_a_page_is_touched_a_page_at_a_time() {
     };
     let page = "sub rsp, 4096\nor qword ptr [rsp], 0";
     let cases = [
-        ("local<[u8; 129]>", "sub rsp, 129".to_string()),
-        ("local<[u8; 4096]>", "sub rsp, 4096".into()),
-        ("local<[u8; 4097]>", format!("{page}\nsub rsp, 1")),
+        ("local<[u8; 129]>", "sub rsp, 1".to_string()),
+        ("local<[u8; 4096]>", "sub rsp, 3968".into()),
+        ("local<[u8; 4097]>", page.into()),
+        ("local<[u8; 4224]>", page.into()),
+        ("local<[u8; 4225]>", format!("{page}\nsub rsp, 1")),
         ("local<[u8; 4064], 32>", "push rbp\nmov rbp, rsp\nsub rsp, 4064\nand rsp, -32".into()),
-        ("local<[u8; 4096], 16>", format!("{page}\nsub rsp, 8")),
+        ("local<[u8; 4096], 16>", page.into()),
         ("local<[u8; 4096], 4096>", format!("push rbp\nmov rbp, rsp\n{page}\nand rsp, -4096")),
-        ("local<[u8; 16384]>", format!("{page}\n{page}\n{page}\nsub rsp, 4096")),
-        ("local<[u8; 16385]>", format!("lea r11, [rsp - 16384]\n2:\n{page}\ncmp rsp, r11\njne 2b\nsub rsp, 1")),
+        ("local<[u8; 16384]>", format!("{page}\n{page}\n{page}\nsub rsp, 3968")),
+        ("local<[u8; 16385]>", format!("lea r11, [rsp - 16384]\n2:\n{page}\ncmp rsp, r11\njne 2b")),
     ];
     for (ty, want) in cases {
         assert_eq!(prologue(ty), want, "{ty}");
@@ -2483,8 +2486,8 @@ fn a_frame_past_what_an_address_reaches_is_refused() {
 ";
     assert!(text.contains(frame), "{text}");
     assert!(text.contains("\n    lea r11, [rsp - 2147483648]\n"), "{text}");
-    let want = "2:27: in `k::<2147483585>`: the kernel's frame, its stack memory and the variables that spilled, is \
-                2147483680 bytes: more than an address reaches past the stack pointer";
+    let want = "2:27: in `k::<2147483585>`: the kernel's frame, its stack memory and the variables that spilled, \
+                reaches 2147483680 bytes past the stack pointer: more than an address does";
     assert_eq!(kernite::x86_str(&src, "k::<2147483585>").unwrap_err(), want);
 }
 
@@ -2499,12 +2502,12 @@ sub rsp, 4096
 or qword ptr [rsp], 0
 cmp rsp, r11
 jne 2b
-sub rsp, 4096
+sub rsp, 3968
 3:
-mov qword ptr [rsp], rdi
+mov qword ptr [rsp - 128], rdi
 dec rdi
 jnz 3b
-add rsp, 32768
+add rsp, 32640
 ret";
     assert_eq!(code, want);
 }
@@ -3035,27 +3038,32 @@ fn the_stack_pointer_is_a_multiple_of_16_at_a_call() {
 /// A kernel that calls nothing keeps its frame below the stack pointer, in the red zone that SysV gives a function, and
 /// does not set it up or take it down, if the frame, aligned to 16 or less, and the bytes more that align it are 128 or
 /// less: a slot is at its offset from as far below the stack pointer as they come to, past the registers the kernel
-/// pushes. A call that is a jump is no call. A frame of more bytes and a call that stays, even one that a jump would do
-/// but for the address the kernel has of its frame, which the callee may use, make the frame as before, as an alignment
-/// past 16 does in `only_a_frame_aligned_past_16_keeps_the_stack_pointer_in_rbp`.
+/// pushes. A frame of more bytes, a page at most, keeps 128 of them there, and the stack pointer moves by the rest, as
+/// rustc's moves it. A call that is a jump is no call. A call that stays, even one that a jump would do but for the
+/// address the kernel has of its frame, which the callee may use, makes the frame as before, as an alignment past 16
+/// does in `only_a_frame_aligned_past_16_keeps_the_stack_pointer_in_rbp`.
 #[test]
-fn a_kernel_that_calls_nothing_keeps_a_frame_of_128_bytes_or_less_below_the_stack_pointer() {
+fn a_kernel_that_calls_nothing_keeps_up_to_128_bytes_of_its_frame_below_the_stack_pointer() {
     // A word of `ty` at `at` written and read back, with the code of a frame below the stack pointer and of one made.
     let word = |ty: &str, at: u32| {
         let body = format!("let b: {ty}; let g: gpr; mov([b + {at}], x); mov(g, [b + {at}]); ret(g);");
         calling("x: u64", " -> u64", &body)
     };
     let below = |disp: &str| format!("mov qword ptr [rsp{disp}], rdi\nmov rax, qword ptr [rsp{disp}]\nret");
-    let made = |size: u32, disp: &str| {
-        format!("sub rsp, {size}\nmov qword ptr [rsp{disp}], rdi\nmov rax, qword ptr [rsp{disp}]\nadd rsp, {size}\nret")
+    let made = |moved: u32, disp: &str| {
+        format!(
+            "sub rsp, {moved}\nmov qword ptr [rsp{disp}], rdi\nmov rax, qword ptr [rsp{disp}]\nadd rsp, {moved}\nret"
+        )
     };
     let cases = [
         ("local<u64>", 0, below(" - 8")),
         ("local<[u64; 16]>", 0, below(" - 128")),
         ("local<[u64; 16]>", 120, below(" - 8")),
         ("local<[u8; 128]>", 120, below(" - 8")),
-        ("local<[u8; 129]>", 120, made(129, " + 120")),
-        ("local<[u64; 17]>", 128, made(136, " + 128")),
+        ("local<[u8; 129]>", 120, made(1, " - 8")),
+        ("local<[u64; 17]>", 128, made(8, "")),
+        ("local<[u64; 32]>", 0, made(128, " - 128")),
+        ("local<[u64; 32]>", 248, made(128, " + 120")),
     ];
     for (ty, at, want) in cases {
         assert_eq!(word(ty, at), Ok(want), "{ty} at {at}");
@@ -3077,7 +3085,7 @@ fn a_kernel_that_calls_nothing_keeps_a_frame_of_128_bytes_or_less_below_the_stac
     let cases = [
         ("local<[f32; 4], 16>", 0, format!("{}\nret", moves(" - 24"))),
         ("local<[f32; 28], 16>", 96, format!("{}\nret", moves(" - 24"))),
-        ("local<[f32; 32], 16>", 112, format!("sub rsp, 136\n{}\nadd rsp, 136\nret", moves(" + 112"))),
+        ("local<[f32; 32], 16>", 112, format!("sub rsp, 8\n{}\nadd rsp, 8\nret", moves(" - 16"))),
     ];
     for (ty, at, want) in cases {
         assert_eq!(aligned(ty, at), Ok(want), "{ty} at {at}");
@@ -3141,11 +3149,12 @@ fn a_kernel_that_calls_nothing_keeps_a_frame_of_128_bytes_or_less_below_the_stac
                  # a: 8 bytes at rsp - 40\n# b: 16 bytes at rsp - 24\n";
     assert!(text.as_ref().is_ok_and(|text| text.contains(frame)), "{text:?}");
 
-    // It says whether the frame is below the stack pointer: not one that is made, nor one there is not.
+    // It says how many bytes of the frame are below the stack pointer: all of a small one, 128 of a bigger, none of one
+    // there is not.
     let below = |body: &str| listing("x: u64", "", body).map(|l| l.below);
-    assert_eq!(below("let b: local<u64>; mov([b], x);"), Ok(true));
-    assert_eq!(below("let b: local<[u8; 129]>; mov([b], x);"), Ok(false));
-    assert_eq!(below("pause();"), Ok(false));
+    assert_eq!(below("let b: local<u64>; mov([b], x);"), Ok(8));
+    assert_eq!(below("let b: local<[u8; 129]>; mov([b], x);"), Ok(128));
+    assert_eq!(below("pause();"), Ok(0));
 }
 
 /// A call that `ret` follows at once is a jump: the kernel takes its frame down as `ret` does, the registers it saved

@@ -52,11 +52,11 @@ pub struct Listing {
     /// Bytes of the frame besides its slots, so that a kernel that calls calls at a multiple of 16, as SysV asks, and a
     /// frame aligned to 16 lies at one.
     pub padding: u32,
-    /// Whether the frame lies below the stack pointer, in the red zone, which SysV lets a function use without moving
-    /// the stack pointer: a kernel that calls nothing keeps a frame aligned to 16 or less there, if the frame and its
-    /// `padding` are 128 bytes or less. A slot is at its offset in `frame` from as far below the stack pointer as the
-    /// frame's size and `padding`.
-    pub below: bool,
+    /// How many bytes of the frame lie below the stack pointer, in the red zone, which SysV lets a function use without
+    /// moving the stack pointer: a kernel that calls nothing keeps up to 128 bytes of a frame aligned to 16 or less
+    /// there, the frame's size and `padding` counted. A slot is at its offset in `frame` from as far below the stack
+    /// pointer as that.
+    pub below: u32,
     /// Whether control returns: whether the kernel has a `ret`, though a jump to a callee may stand for it. One with
     /// none never returns.
     pub returns: bool,
@@ -119,7 +119,7 @@ impl Listing {
             saved.join(", ")
         )
         .unwrap();
-        let from = slots_from(&self.frame, self.padding, self.below);
+        let from = -i64::from(self.below);
         for (slot, &at) in self.frame.slots.iter().zip(&self.frame.offsets) {
             let at = format!("{}{}", name(RSP, Width::W64), displacement(from + i64::from(at)));
             let spilled = if slot.spill { ", spilled" } else { "" };
@@ -161,12 +161,6 @@ impl Listing {
     }
 }
 
-/// Where the slots of `frame` start from the stack pointer once the prologue has run: at it, or, where the frame lies
-/// `below` it, as far under it as the prologue would have moved it, the frame's size and `padding`.
-fn slots_from(frame: &Frame, padding: u32, below: bool) -> i64 {
-    if below { -i64::from(frame.size + padding) } else { 0 }
-}
-
 /// A displacement as an address has it after the register: ` + 8`, ` - 8`, or nothing for 0.
 fn displacement(disp: i64) -> String {
     match disp {
@@ -186,8 +180,8 @@ pub fn taken(name: &str) -> bool {
 /// `c` in Intel syntax, with the frame set up on entry and taken down before every `ret`, and
 /// a note before each store of a variable that spilled and each load of it back. A kernel that
 /// calls has its stack pointer at a multiple of 16 for each call; a move of a register to
-/// itself that changes nothing is left out. A frame in the red zone is neither set up nor taken down. Or why not: a
-/// frame past what an address reaches.
+/// itself that changes nothing is left out. The part of a frame in the red zone is neither set up nor taken down. Or
+/// why not: a frame past what an address reaches.
 ///
 /// Labels become local numbers, in the order they are placed, which `naked_asm!` asks for so
 /// that the same code can be emitted twice. Numbers made of ones and zeros alone are skipped:
@@ -196,7 +190,7 @@ pub fn taken(name: &str) -> bool {
 /// `reach` is what a call at an address may reach, which `c` does not name: the listing keeps it.
 pub fn print(c: &Allocated<Op>, reach: Vec<String>) -> Result<Listing, String> {
     let lowered = frame::lower(c)?;
-    let from = slots_from(&c.frame, lowered.padding, lowered.below);
+    let from = -i64::from(lowered.below);
     let mut numbers = BTreeMap::new();
     let mut places = BTreeMap::new();
     let mut next = 2;
@@ -310,9 +304,9 @@ fn name(r: PReg, width: Width) -> String {
     }
 }
 
-/// A memory operand; a slot's address is its offset in the frame from `from` past the stack pointer, as `slots_from`
-/// says. `sized` puts the access's size in front, which every instruction but `lea` wants. `vector_index` is the
-/// width of its vector of indices, if it is at one.
+/// A memory operand; a slot's address is its offset in the frame from `from` past the stack pointer, which is as far
+/// below it as the frame's `below`. `sized` puts the access's size in front, which every instruction but `lea` wants.
+/// `vector_index` is the width of its vector of indices, if it is at one.
 ///
 /// # Panics
 ///

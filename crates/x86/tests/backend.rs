@@ -273,8 +273,8 @@ fn a_frame_past_what_an_address_reaches_blames_no_variable() {
     let k = function(&module, "k").unwrap();
     let mut kernel = X86.kernel(k, "k", &[], false, &[], &[]);
     kernite_lang::kernel(&module, k, &[], &mut kernel).unwrap();
-    let message = "the kernel's frame, its stack memory and the variables that spilled, is 2147483680 bytes: more \
-                   than an address reaches past the stack pointer";
+    let message = "the kernel's frame, its stack memory and the variables that spilled, reaches 2147483680 bytes past \
+                   the stack pointer: more than an address does";
     assert_eq!(X86.finish(kernel, &[]), Err(Unfinished { at: None, message: message.into() }));
 }
 
