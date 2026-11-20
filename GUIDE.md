@@ -410,11 +410,16 @@ A deprecated item that a kernel names is told of by Rust at the name, once for e
 `lea(p, [COUNTS]);` of a deprecated static is a warning at `COUNTS`, with the note of the attribute, `call(v, old, ());`
 of a deprecated x86 kernel is one at `old`, and `call(old::<2>, p);` of an instance of one that takes compile-time
 arguments is one at `old` too, as a use of a generic function of Rust's is. A static in the GPU's memory is told of as a
-use of its method, `Kernels::COUNTS`. Rust says nothing at the module's attribute, nor of an item that no kernel names.
-An x86 kernel of instances is a function for each instance, and the code of a helper is part of each x86 kernel that
-calls it. Where the build is incremental, as the dev profile's is, Rust tells of the first place each function writes
-the name: once for each instance, and for a place in a helper, once for each kernel that calls it. `old::<2>` is told of
-once at each place, whatever instances of a kernel write it and whatever kernels call the helper it is in.
+use of its method, `Kernels::COUNTS`. Rust never sees the code of a helper, an `extern "ptx-func"` function or a GPU
+kernel, so a deprecated one is told of as a use of a function of its name that kernite writes for the place, and Rust
+says its path with an `_`, `cpu::_::touch`: `touch(p);` of a helper, `call(v, gcd, (a, b));` and `mov.u64(fp, gcd);` of
+a function, and `mov.u64(fp, run);` of a kernel are each a warning at the name, with the note of the attribute. A use
+inside the deprecated item itself is not told of, as in Rust. Rust says nothing at the module's attribute, nor of an
+item that no kernel names. An x86 kernel of instances is a function for each instance, and the code of a helper is part
+of each x86 kernel that calls it. Where the build is incremental, as the dev profile's is, Rust tells of the first place
+each function writes the name: once for each instance, and for a place in a helper, once for each kernel that calls it.
+`old::<2>`, a helper, an `extern "ptx-func"` function and a GPU kernel are told of once at each place, whatever
+instances of a kernel write it and whatever kernels call the helper it is in.
 
 A module holds what `cfg` keeps: Rust puts it together, where it knows which `cfg` holds. `LISTINGS` has the listing
 of each x86 kernel that compiles and `cfg` keeps, and of no other. A module of x86 kernels has it whether its kernels

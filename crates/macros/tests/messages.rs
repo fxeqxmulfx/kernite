@@ -4725,6 +4725,43 @@ fn a_kernels_use_of_a_deprecated_item_is_told_of_once_at_the_use() {
     );
 }
 
+/// A use of a deprecated helper, `extern "ptx-func"` function or GPU kernel is told of at the name, once for each place
+/// a kernel, a function or a helper writes it, as Rust tells of a use of a deprecated function of its own: Rust never
+/// sees the code of any of them, so the macros write a function of the name and the `deprecated` for each place, and
+/// Rust says its path, `cpu::_::touch`. On x86, `touch` is told of where `names` calls it (53:9), at each of the two
+/// places in `twice` (62:9, 63:9), in `both`, a helper that two kernels call, once (48:9), in `many`, which has two
+/// instances, once (79:9), and in `old`, a deprecated helper (43:9): Rust tells of a use in a deprecated function as it
+/// does of any, but not of one in the item itself. `loud`, which `cfg_attr` deprecates (54:9), `old` (56:9) and
+/// `r#type` (57:9) are told of at the call in `names`; `quiet`, which `cfg_attr` does not, is not, nor is `unused`,
+/// which no kernel calls, nor `touch` in `gone`, which `cfg` leaves out. On the GPU, `old` is told of at a call from a
+/// function (129:17), at a call from a kernel (136:17) and at the address the kernel takes (137:21), `gcd` at the
+/// kernel's call (138:17) and not at its own, `bump`, a helper, at its call (140:9), and `spent`, a kernel, at the
+/// address `run` takes (141:21).
+#[test]
+fn a_use_of_a_deprecated_helper_or_function_is_told_of_at_each_place() {
+    refuses(
+        "deprecated_helpers",
+        &[
+            "src/lib.rs:43:9: error: use of deprecated function `cpu::_::touch`: use `fresh`",
+            "src/lib.rs:53:9: error: use of deprecated function `cpu::_::touch`: use `fresh`",
+            "src/lib.rs:54:9: error: use of deprecated function `cpu::_::loud`",
+            "src/lib.rs:56:9: error: use of deprecated function `cpu::_::old`",
+            "src/lib.rs:57:9: error: use of deprecated function `cpu::_::r#type`",
+            "src/lib.rs:62:9: error: use of deprecated function `cpu::_::touch`: use `fresh`",
+            "src/lib.rs:63:9: error: use of deprecated function `cpu::_::touch`: use `fresh`",
+            "src/lib.rs:48:9: error: use of deprecated function `cpu::_::touch`: use `fresh`",
+            "src/lib.rs:79:9: error: use of deprecated function `cpu::_::touch`: use `fresh`",
+            "src/lib.rs:129:17: error: use of deprecated function `gpu::_::old`: use `fresh`",
+            "src/lib.rs:136:17: error: use of deprecated function `gpu::_::old`: use `fresh`",
+            "src/lib.rs:137:21: error: use of deprecated function `gpu::_::old`: use `fresh`",
+            "src/lib.rs:138:17: error: use of deprecated function `gpu::_::gcd`",
+            "src/lib.rs:140:9: error: use of deprecated function `gpu::_::bump`",
+            "src/lib.rs:141:21: error: use of deprecated function `gpu::_::spent`",
+            "error: could not compile `deprecated_helpers` (lib) due to 15 previous errors",
+        ],
+    );
+}
+
 /// A use of a deprecated x86 kernel of instances by a kernel is told of at the name, once for each place a kernel
 /// writes an instance of it, as Rust tells of a use of a deprecated generic function of its own: a call of `old::<2>`;
 /// of `old::<1>` and then `old::<2>`, two instances of one function; of `old::<2>` at two places; of the instance that

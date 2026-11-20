@@ -184,6 +184,27 @@ pub(crate) fn cfg_of(item: &lang::Item, top: &[TokenTree]) -> TokenStream {
     carried(tokens[..attrs_len(tokens)].iter().cloned(), false)
 }
 
+/// What Rust reads for a use of `item`, a helper, an `extern "ptx-func"` function or a GPU kernel, whose code Rust
+/// never sees: `{ #[deprecated(note = "..")] fn old() {} old }`, a function of the same name that has the `deprecated`
+/// of `item`, so that Rust tells of the use at `span`, where a kernel writes the name, as it tells of a use of any
+/// deprecated function. The function is in the block, so that it hides no name of the module's. None where `item` is
+/// not deprecated.
+pub(crate) fn stand_in(item: &lang::Item, top: &[TokenTree], span: Span) -> Option<TokenStream> {
+    let tokens = &top[item.tokens.clone()];
+    let deprecated = filtered(tokens[..attrs_len(tokens)].iter().cloned(), &mut |meta| {
+        matches!(&meta[..], [name, ..] if named(name, "deprecated")).then_some(meta)
+    });
+    if deprecated.is_empty() {
+        return None;
+    }
+    let mut inner = deprecated;
+    inner.extend(parse("fn"));
+    inner.extend([name_at(item, top, span)]);
+    inner.extend(parse("() {}"));
+    inner.extend([name_at(item, top, span)]);
+    Some(TokenStream::from(TokenTree::Group(Group::new(Delimiter::Brace, inner))))
+}
+
 /// The name of `item`, a const, a static or a function, as `top` writes it, `r#type` as well, of the
 /// span `span`.
 pub(crate) fn name_at(item: &lang::Item, top: &[TokenTree], span: Span) -> TokenTree {
