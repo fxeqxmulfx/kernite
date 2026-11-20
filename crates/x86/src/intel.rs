@@ -62,6 +62,11 @@ pub struct Listing {
     /// Whether its code runs `vzeroupper`, which clears the upper half of each vector register: a call of it leaves the
     /// lower halves of those it does not write as they were.
     pub clears_upper: bool,
+    /// Whether a call of it may run SSE code, which pays for an upper half set: its code calls a function it does not
+    /// know, or one that may, with no ymm passed or given back, for such a callee runs AVX instructions. It does not
+    /// clear an upper half that its caller set before that call, so a kernel that calls it has `vzeroupper` before the
+    /// call where it may have set one.
+    pub reaches_sse: bool,
 }
 
 impl Listing {
@@ -239,6 +244,7 @@ pub fn print(c: &Allocated<Op>, reach: Vec<String>) -> Result<Listing, String> {
         returns: lowered.returns,
         changes: lowered.changes,
         clears_upper: lowered.clears_upper,
+        reaches_sse: lowered.reaches_sse,
     })
 }
 

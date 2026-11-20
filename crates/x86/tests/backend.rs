@@ -277,3 +277,47 @@ fn a_frame_past_what_an_address_reaches_blames_no_variable() {
                    than an address reaches past the stack pointer";
     assert_eq!(X86.finish(kernel, &[]), Err(Unfinished { at: None, message: message.into() }));
 }
+
+/// A listing says whether a call of it may run SSE code, which pays for an upper half set: its code calls a function it
+/// does not know, at an address with no functions given, or calls one that may, by name or at an address with the
+/// functions given. A call that passes all of a ymm or takes all of one back does not count: its callee runs AVX
+/// instructions. A call of the function itself runs what its other calls do. A kernel is finished with the listings of
+/// the functions it calls, and has `vzeroupper` before a call of one that may where it may have set an upper half, as
+/// it does before a call at an address with no functions given. Where a listing is missing, as it is for a function
+/// that does not compile, or for one that a function it calls calls, a call of it may.
+#[test]
+fn a_listing_says_whether_a_call_of_it_may_run_sse_code() {
+    let src = "unsafe extern \"sysv64\" fn plain() { let t: gpr; mov(t, 1); add(t, t); }\n\
+               unsafe extern \"sysv64\" fn plain_one(n: u64) { let t: gpr; mov(t, n); add(t, t); }\n\
+               unsafe extern \"sysv64\" fn unknown(fp: u64) { call(fp, ()); }\n\
+               unsafe extern \"sysv64\" fn via(fp: u64) { call(unknown, (fp)); }\n\
+               unsafe extern \"sysv64\" fn given() { let q: gpr; lea(q, [plain]); call(q, (), (plain, plain)); }\n\
+               unsafe extern \"sysv64\" fn given_via(fp: u64) {\n\
+               let q: gpr; lea(q, [plain_one]); call(q, (fp), (plain_one, via)); }\n\
+               unsafe extern \"sysv64\" fn ymm_to_unknown(fp: u64) { let v: ymm; zero(v); call(fp, (v)); }\n\
+               unsafe extern \"sysv64\" fn itself(n: u64) { call(itself, (n)); }\n\
+               unsafe extern \"sysv64\" fn itself_unknown(fp: u64) { call(itself_unknown, (fp)); call(fp, ()); }\n\
+               unsafe extern \"sysv64\" fn k(p: *mut f32) {\n\
+               let v: ymm; vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); call(plain); pause(); }";
+    let module = parse(src).unwrap();
+    let mut done = vec![];
+    for (name, may) in [
+        ("plain", false),
+        ("plain_one", false),
+        ("unknown", true),
+        ("via", true),
+        ("given", false),
+        ("given_via", true),
+        ("ymm_to_unknown", false),
+        ("itself", false),
+        ("itself_unknown", true),
+    ] {
+        let listing = finished(&module, name, &done);
+        assert_eq!(listing.reaches_sse, may, "{name}");
+        done.push((name.to_string(), listing));
+    }
+    let code = |done: &[(String, Listing)]| finished(&module, "k", done).code().collect::<Vec<_>>().join("\n");
+    let work = "sub rsp, 8\nvmovups ymm0, ymmword ptr [rdi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rdi], ymm0";
+    assert_eq!(code(&done), format!("{work}\ncall {{f0}}\npause\nadd rsp, 8\nvzeroupper\nret"));
+    assert_eq!(code(&[]), format!("{work}\nvzeroupper\ncall {{f0}}\npause\nadd rsp, 8\nret"), "without the listing");
+}

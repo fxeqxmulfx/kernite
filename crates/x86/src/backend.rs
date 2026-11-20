@@ -79,7 +79,8 @@ impl Backend for X86 {
         let decls = std::mem::take(&mut kernel.decls);
         let reach = std::mem::take(&mut kernel.reach);
         let any = kernel.reaches_any();
-        let allocated = kernite_compile::compile(&kernel.finish(|called| changed_by(called, done)), &SysV)
+        let program = kernel.finish(|called| changed_by(called, done), |name| may_run_sse(name, done));
+        let allocated = kernite_compile::compile(&program, &SysV)
             .map_err(|e| Unfinished::blaming(e.var(), &decls, e.to_string()))?;
         let mut listing = intel::print(&allocated, reach).map_err(|message| Unfinished { at: None, message })?;
         if any {
@@ -108,6 +109,13 @@ fn changed_by(called: &[String], done: &[Done<Listing>]) -> Option<Vec<Clobber>>
     }
     let upper = VECS.iter().filter(|_| clears);
     Some(changes.into_iter().copied().map(Clobber::All).chain(upper.copied().map(Clobber::Upper)).collect())
+}
+
+/// Whether a call of the function `name` may run SSE code, as its listing in `done` says; it may where it has none, for
+/// what it does is not known.
+fn may_run_sse(name: &str, done: &[Done<Listing>]) -> bool {
+    let listing = done.iter().find(|(done, _)| done == name).and_then(|(_, listing)| listing.as_ref().ok());
+    listing.is_none_or(|listing| listing.code.reaches_sse)
 }
 
 impl Native for X86 {

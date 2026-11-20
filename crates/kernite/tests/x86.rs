@@ -2158,6 +2158,9 @@ unsafe extern "sysv64" fn writes_rax_rcx() { let (t, u): (gpr, gpr); mov(t, 1); 
 unsafe extern "sysv64" fn writes_ymm0() { let v: ymm; zero(v); }
 unsafe extern "sysv64" fn runs_vzeroupper() { let v: ymm; zero(v); vaddps(v, v, v); }
 unsafe extern "sysv64" fn calls_vzeroupper() { call(runs_vzeroupper); pause(); }
+unsafe extern "sysv64" fn calls_unknown(fp: u64) { call(fp, ()); }
+unsafe extern "sysv64" fn calls_via(fp: u64) { call(calls_unknown, (fp)); }
+unsafe extern "sysv64" fn passes_ymm(fp: u64) { let v: ymm; zero(v); call(fp, (v)); }
 unsafe extern "sysv64" fn jumps() { call(writes_rax); }
 unsafe extern "sysv64" fn calls() { call(writes_rax); pause(); }
 unsafe extern "sysv64" fn reaches() {
@@ -2805,15 +2808,20 @@ fn kernite_knows_every_instruction_of_x86_64_v3() {
 
 /// A kernel clears the upper halves of the vector registers with `vzeroupper` only where it may have set one: where an
 /// instruction of its own reads or writes all of a ymm, or it calls at an address with no functions given and passes
-/// all of a ymm or takes all of one back. It clears them before it returns, and before a call at an address with no
-/// functions given, whose callee may run SSE code, which pays for an upper half set, as rustc does: after the arguments
-/// are moved and what lives across the call is spilled, just before the call. A call of the module's functions has none
-/// before it: their instructions are AVX's. Nor has one that passes all of a ymm or takes all of one back: its callee
-/// runs AVX instructions, and `vzeroupper` would clear the upper half of a ymm it passes. A vector register moves and
-/// spills as wide as an instruction names its variable, so a kernel of xmm registers alone writes none, though it moves
-/// and spills its floats and calls the module's functions, by name or at an address with the functions given: each
-/// clears what it sets before it returns. Nor does a call at an address with no functions given that passes and takes
-/// back a float, an xmm: its callee takes and gives back no ymm, and a call that `ret` follows is a jump.
+/// all of a ymm or takes all of one back. It clears them before it returns, and before a call that may run SSE code,
+/// which pays for an upper half set, as rustc does: after the arguments are moved and what lives across the call is
+/// spilled, just before the call. That is a call at an address with no functions given; a call that comes back to the
+/// function it is in through another of the module's, which has no listing yet; a call of a function of the module that
+/// makes such a call, or calls one that may, by name or at an address with the functions given, for none of the
+/// module's clears the upper halves before such a call; and a call of the kernel itself, where one of its other calls
+/// is. Any other call of the module's functions has none before it: their instructions are AVX's, and a vector alive
+/// across it stays in its register, which `vzeroupper` would clear. Nor has a call that passes all of a ymm or takes
+/// all of one back, nor does it give one to a call of the function it is in: its callee runs AVX instructions, and
+/// `vzeroupper` would clear the upper half of a ymm it passes. A vector register moves and spills as wide as an
+/// instruction names its variable, so a kernel of xmm registers alone writes none, though it moves and spills its
+/// floats and calls the module's functions, by name or at an address with the functions given: each clears what it sets
+/// before it returns. Nor does a call at an address with no functions given that passes and takes back a float, an xmm:
+/// its callee takes and gives back no ymm, and a call that `ret` follows is a jump.
 #[test]
 fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() {
     let cases = [
@@ -2991,6 +2999,67 @@ fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() {
              call(r, fp, (p, n), (k, k)); add(r, 1); ret(r);",
             "sub rsp, 8\nvmovups ymm0, ymmword ptr [rdi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rdi], \
              ymm0\nlea rax, [rip + {f0}]\ncall rax\nadd rax, 1\nadd rsp, 8\nvzeroupper\nret",
+        ),
+        // `vzeroupper` before a call that may run SSE code: of a function of the module that calls at an address with
+        // no functions given, or calls one that does, by name or at an address with them given; of one of two that call
+        // each other, which have no listing yet; and of the kernel itself, where one of its other calls may. None of
+        // the module's clears the upper halves before it does.
+        (
+            "fp: u64, p: *mut f32",
+            "",
+            "let v: ymm; vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); call(calls_unknown, (fp)); pause();",
+            "sub rsp, 8\nvmovups ymm0, ymmword ptr [rsi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rsi], \
+             ymm0\nvzeroupper\ncall {f0}\npause\nadd rsp, 8\nret",
+        ),
+        (
+            "fp: u64, p: *mut f32",
+            "",
+            "let v: ymm; vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); call(calls_via, (fp)); pause();",
+            "sub rsp, 8\nvmovups ymm0, ymmword ptr [rsi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rsi], \
+             ymm0\nvzeroupper\ncall {f0}\npause\nadd rsp, 8\nret",
+        ),
+        (
+            "fp: u64, p: *mut f32",
+            "",
+            "let (v, q): (ymm, gpr); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); lea(q, [calls_unknown]); \
+             call(q, (fp), (calls_unknown, calls_unknown)); pause();",
+            "sub rsp, 8\nvmovups ymm0, ymmword ptr [rsi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rsi], \
+             ymm0\nlea rax, [rip + {f0}]\nvzeroupper\ncall rax\npause\nadd rsp, 8\nret",
+        ),
+        (
+            "p: *mut f32",
+            "",
+            "let v: ymm; vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); call(ping); pause();",
+            "sub rsp, 8\nvmovups ymm0, ymmword ptr [rdi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rdi], \
+             ymm0\nvzeroupper\ncall {f0}\npause\nadd rsp, 8\nret",
+        ),
+        (
+            "p: *mut f32",
+            "",
+            "let (v, q, fp): (ymm, gpr, gpr); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); lea(q, [k]); \
+             call(q, (p), (k, k)); lea(fp, [gcd]); call(fp, ()); pause();",
+            "sub rsp, 8\nvmovups ymm0, ymmword ptr [rdi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rdi], \
+             ymm0\nlea rax, [rip + {f0}]\nvzeroupper\ncall rax\nlea rax, [rip + {f1}]\ncall rax\npause\nadd rsp, \
+             8\nret",
+        ),
+        // None, where the kernel has set no upper half; where the function it calls passes all of a ymm to an address
+        // with no functions given: that callee runs AVX instructions, so the function has none before its call; or
+        // where a ymm is alive across a call of a function that writes no vector register, though another call of the
+        // kernel may run SSE code: `vzeroupper` would clear the upper half of the register that keeps it.
+        ("fp: u64", "", "call(calls_unknown, (fp)); pause();", "sub rsp, 8\ncall {f0}\npause\nadd rsp, 8\nret"),
+        (
+            "fp: u64, p: *mut f32",
+            "",
+            "let v: ymm; vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); call(passes_ymm, (fp)); pause();",
+            "sub rsp, 8\nvmovups ymm0, ymmword ptr [rsi]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [rsi], \
+             ymm0\ncall {f0}\npause\nadd rsp, 8\nvzeroupper\nret",
+        ),
+        (
+            "fp: u64, p: *mut f32",
+            "",
+            "let v: ymm; vmovups(v, [p]); vaddps(v, v, v); call(writes_rax); vmovups([p], v); call(fp, ());",
+            "sub rsp, 8\nvmovups ymm0, ymmword ptr [rsi]\nvaddps ymm0, ymm0, ymm0\ncall {f0}\nvmovups ymmword ptr \
+             [rsi], ymm0\nadd rsp, 8\nvzeroupper\njmp rdi",
         ),
     ];
     for (params, ret, body, want) in cases {

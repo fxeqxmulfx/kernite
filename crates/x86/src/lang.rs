@@ -83,17 +83,20 @@
 //! together last, checked against each. One with no functions given passes and takes back each vector as the call names
 //! it: an xmm, or all of a ymm. A call at an address with no functions given has `vzeroupper` before it where the
 //! kernel may have set the upper half of a vector register, as a `ret` has: its callee may run SSE code, which pays for
-//! an upper half set. A call that passes all of a ymm or takes all of one back has none, for its callee runs AVX
-//! instructions and `vzeroupper` would clear the upper half of a ymm it passes; nor has a call of one of the module's
-//! functions, whose instructions are AVX's too. A call that `ret` follows at once is a jump: the kernel takes its frame
-//! down and writes `vzeroupper` as `ret` does, and jumps to the callee, which returns to the kernel's caller. A label
-//! between them leaves the `ret` for the other ways that come to it, and an address in a register the kernel saves goes
-//! first to `r11`, which the epilogue leaves. The call stays a call where an instruction comes between it and the
-//! `ret`, and where the jump would not do what the call does: where the kernel has taken the address of its stack
-//! memory, and where it calls at an address with no functions given and takes all of a ymm back: the epilogue's
-//! `vzeroupper` runs before the callee sets its upper half. A jump that passes all of a ymm has no `vzeroupper` before
-//! it: the callee, passed all of a ymm, clears the upper halves before it returns. A function that never returns,
-//! `-> !`, ends each way out in `ud2()`, which faults, or in a call of one that never returns.
+//! an upper half set. So has a call that comes back to the function it is in through another of the module's: it
+//! reaches code that is not compiled yet. So has a call of a function of the module that makes such a call, or calls
+//! one that does, as its listing says, and a call of the function the kernel is in, where one of its other calls has. A
+//! call that passes all of a ymm or takes all of one back has none, and gives none to a call of the function it is in:
+//! its callee runs AVX instructions, and `vzeroupper` would clear the upper half of a ymm it passes. Nor has a call of
+//! another function of the module, whose instructions are AVX's too. A call that `ret` follows at once is a jump: the
+//! kernel takes its frame down and writes `vzeroupper` as `ret` does, and jumps to the callee, which returns to the
+//! kernel's caller. A label between them leaves the `ret` for the other ways that come to it, and an address in a
+//! register the kernel saves goes first to `r11`, which the epilogue leaves. The call stays a call where an instruction
+//! comes between it and the `ret`, and where the jump would not do what the call does: where the kernel has taken the
+//! address of its stack memory, and where it calls at an address with no functions given and takes all of a ymm back:
+//! the epilogue's `vzeroupper` runs before the callee sets its upper half. A jump that passes all of a ymm has no
+//! `vzeroupper` before it: the callee, passed all of a ymm, clears the upper halves before it returns. A function that
+//! never returns, `-> !`, ends each way out in `ud2()`, which faults, or in a call of one that never returns.
 
 use kernite_compile::Spill;
 use kernite_core::Access::{self, Ignored, Read, ReadWrite, Write};
@@ -707,13 +710,6 @@ impl Kernel {
             flow,
             clobbers: CALL_CLOBBERS.iter().copied().map(Clobber::All).collect(),
         };
-        // A function it does not know may run SSE code, which pays for an upper half set: the frame turns this marker
-        // into a `vzeroupper` just before the call, where the kernel may have set one. There is none before a call of a
-        // function it knows, whose instructions are AVX's, nor before one that passes all of a ymm or takes all of one
-        // back: its callee runs AVX instructions, and `vzeroupper` would clear the upper half of a ymm it passes.
-        if !known && !call.implicit.iter().any(ymm) {
-            self.push(Op::Vzeroupper, vec![], vec![], Flow::Next);
-        }
         self.p.body.push(Item::Inst(call));
         self.sites.push(reaches);
         if let Some((reg, view, pinned)) = back {
@@ -905,7 +901,18 @@ impl Kernel {
     /// the launcher passes it; and one that loads MXCSR gives the caller's back. A call does to registers what
     /// `changes` says of the functions it may reach; where that is `None`, or the call may reach any function, it
     /// changes every register a callee may.
-    pub fn finish(mut self, changes: impl Fn(&[String]) -> Option<Vec<Clobber>>) -> Program<Op> {
+    ///
+    /// A call that may run SSE code, which pays for an upper half set, has a marker before it, which the frame turns
+    /// into a `vzeroupper` where the kernel may have set one. `sse` says whether a call of the function it is given
+    /// may, as its listing does: a call at an address with no functions given may, and a call of a function that may,
+    /// or that calls one. A call of the kernel itself runs what its other calls do. There is none before a call that
+    /// passes all of a ymm or takes all of one back: its callee runs AVX instructions, and `vzeroupper` would clear
+    /// the upper half of a ymm it passes.
+    pub fn finish(
+        mut self,
+        changes: impl Fn(&[String]) -> Option<Vec<Clobber>>,
+        sse: impl Fn(&str) -> bool,
+    ) -> Program<Op> {
         if self.cooperative {
             self.grid();
         }
@@ -916,11 +923,30 @@ impl Kernel {
             Item::Inst(inst) if inst.op == Op::Call => Some(inst),
             _ => None,
         });
+        let me = self.p.name.as_str();
+        // Whether each call, in the order of the body, may run SSE code, but for a call of the kernel itself.
+        let mut may = vec![];
         for (call, reaches) in calls.zip(&self.sites) {
             if let Some(clobbers) = reaches.as_deref().and_then(&changes) {
                 call.clobbers = clobbers;
             }
+            let others = reaches.as_deref().is_none_or(|r| r.iter().filter(|f| *f != me).any(|f| sse(f)));
+            may.push(others && !call.implicit.iter().any(ymm));
         }
+        // A call of the kernel itself may run SSE code if one of its other calls may.
+        let itself = may.iter().any(|&m| m);
+        let names_me = |reaches: &Option<Vec<String>>| reaches.as_deref().is_some_and(|r| r.iter().any(|f| f == me));
+        let mut marks = self.sites.iter().zip(may).map(|(reaches, m)| m || (itself && names_me(reaches)));
+        let marker = || {
+            Item::Inst(Inst { op: Op::Vzeroupper, args: vec![], implicit: vec![], flow: Flow::Next, clobbers: vec![] })
+        };
+        self.p.body = std::mem::take(&mut self.p.body)
+            .into_iter()
+            .flat_map(|item| {
+                let mark = matches!(&item, Item::Inst(inst) if inst.op == Op::Call) && marks.next() == Some(true);
+                mark.then(marker).into_iter().chain([item])
+            })
+            .collect();
         self.p
     }
 

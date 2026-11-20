@@ -27,6 +27,8 @@ pub(crate) struct Lowered {
     pub(crate) changes: Vec<PReg>,
     /// Whether it runs `vzeroupper`, as `Listing::clears_upper` says.
     pub(crate) clears_upper: bool,
+    /// Whether a call of it may run SSE code, as `Listing::reaches_sse` says.
+    pub(crate) reaches_sse: bool,
 }
 
 /// `c` with its frame made instructions, as [`print`](crate::intel::print) says; or why not.
@@ -107,13 +109,15 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
         .collect();
     let implies_avx = [Feature::Avx2, Feature::Fma, Feature::F16c];
     let clears_upper = insts(&body).any(|inst| inst.op == Op::Vzeroupper);
+    let reaches_sse = insts(&c.body).any(|inst| inst.op == Op::Vzeroupper);
     if clears_upper && !features.iter().any(|f| implies_avx.contains(f)) {
         features.push(Feature::Avx);
     }
     features.sort_by_key(|f| f.name());
     features.dedup();
     let changes = insts(&body).flat_map(Inst::writes).filter(|r| CALL_CLOBBERS.contains(r)).collect::<BTreeSet<_>>();
-    Ok(Lowered { body, features, padding, returns, changes: changes.into_iter().collect(), clears_upper })
+    let changes = changes.into_iter().collect();
+    Ok(Lowered { body, features, padding, returns, changes, clears_upper, reaches_sse })
 }
 
 /// The calls of `c` that are jumps, by their places in its body, each with the place of the `ret` it does without, if
@@ -158,10 +162,10 @@ fn insts(body: &[Item<Op, PReg>]) -> impl Iterator<Item = &Inst<Op, PReg>> {
 }
 
 /// Whether the upper half of a vector register may be set where each item of `body` runs: by an instruction that reads
-/// or writes all of a ymm, on some way to it, with no `vzeroupper` since. The `vzeroupper` that `call` writes before a
-/// call of a function the kernel does not know stands for the one the frame writes there. A call has such an operand
-/// where it passes all of a ymm to a function it does not know, or takes all of one back. A move that the listing
-/// leaves out sets none. A way ends at a call of `jumps`, as at a `ret`: the frame makes it a jump.
+/// or writes all of a ymm, on some way to it, with no `vzeroupper` since. The `vzeroupper` that `finish` writes before
+/// a call that may run SSE code stands for the one the frame writes there. A call has such an operand where it passes
+/// all of a ymm to a function it does not know, or takes all of one back. A move that the listing leaves out sets none.
+/// A way ends at a call of `jumps`, as at a `ret`: the frame makes it a jump.
 fn upper_set(body: &[Item<Op, PReg>], jumps: &BTreeMap<usize, Option<usize>>) -> Vec<bool> {
     // The labels that control comes to with one set. Each round finds those that the last did not, until a round finds
     // none.
