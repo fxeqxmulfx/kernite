@@ -2731,6 +2731,242 @@ fn a_function_calls_itself_with_its_arguments_where_sysv_passes_them() {
     assert_eq!(kernite::x86_str(CALLERS, "gcd").unwrap().text(), want);
 }
 
+/// A parameter that a call needs the register of moves on entry to the register it waits out the call in, and an
+/// argument in the register it arrived in is not moved back there, for the register holds it still: `x` is moved once,
+/// to `rcx`, and `1` is moved to `rsi`.
+#[test]
+fn an_integer_passed_in_its_own_register_and_alive_after_the_call_moves_once() -> Result<(), String> {
+    let src = "unsafe extern \"sysv64\" fn k(x: u64) -> u64 { let r: gpr; call(r, g, (x, 1)); add(r, x); ret(r); }
+unsafe extern \"sysv64\" fn g(a: u64, b: u64) -> u64 { sub(a, b); ret(a); }";
+    let want = "# k(gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# x=rcx,rdi r=rax b=rsi
+    sub rsp, 8
+    mov rcx, rdi
+    mov rsi, 1
+    call {f0}
+    add rax, rcx
+    add rsp, 8
+    ret
+# f0: g
+";
+    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    Ok(())
+}
+
+/// A float passed twice is moved twice: to the register it waits out the call in and to `xmm1`, both from `xmm0`, the
+/// register it arrived in, so that neither move waits for the other, and not back to `xmm0`.
+#[test]
+fn a_float_passed_twice_and_alive_after_the_call_moves_twice() -> Result<(), String> {
+    let src =
+        "unsafe extern \"sysv64\" fn k(x: f32) -> f32 { let r: xmm; call(r, h, (x, x)); vaddss(r, r, x); ret(r); }
+unsafe extern \"sysv64\" fn h(a: f32, b: f32) -> f32 { vsubss(a, a, b); ret(a); }";
+    let want = "# k(vec) -> vec
+# needs: avx
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# x=ymm2,ymm0,ymm1 r=ymm0
+    sub rsp, 8
+    vmovaps xmm2, xmm0
+    vmovaps xmm1, xmm0
+    call {f0}
+    vaddss xmm0, xmm0, xmm2
+    add rsp, 8
+    ret
+# f0: h
+";
+    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    Ok(())
+}
+
+/// An integer passed twice is moved twice too, both from `rdi`.
+#[test]
+fn an_integer_passed_twice_moves_twice_too() -> Result<(), String> {
+    let src = "unsafe extern \"sysv64\" fn k(x: u64) -> u64 { let r: gpr; call(r, g, (x, x)); add(r, x); ret(r); }
+unsafe extern \"sysv64\" fn g(a: u64, b: u64) -> u64 { sub(a, b); ret(a); }";
+    let want = "# k(gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# x=rcx,rdi,rsi r=rax
+    sub rsp, 8
+    mov rcx, rdi
+    mov rsi, rdi
+    call {f0}
+    add rax, rcx
+    add rsp, 8
+    ret
+# f0: g
+";
+    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    Ok(())
+}
+
+/// A register holds at a label what every way to it brings. A jump and the code before the label both leave `x` in
+/// `rdi`, where it arrived, so that the call after the label passes it with no move; and where the code before it calls
+/// a function that writes `rdi`, the call after the label moves `x` to `rdi` again, from the register it waits in.
+#[test]
+fn a_move_after_a_label_is_left_out_where_every_way_to_it_leaves_the_value_there() -> Result<(), String> {
+    let src = "unsafe extern \"sysv64\" fn k(x: u64, y: u64) -> u64 { let r: gpr; test(y, y); jz(out); add(y, 1); \
+               label(out); call(r, g, (x, y)); add(r, x); ret(r); }
+unsafe extern \"sysv64\" fn g(a: u64, b: u64) -> u64 { sub(a, b); ret(a); }";
+    let want = "# k(gpr, gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# x=rcx,rdi y=rsi r=rax
+    sub rsp, 8
+    mov rcx, rdi
+    test rsi, rsi
+    jz 2f
+    add rsi, 1
+2:
+    call {f0}
+    add rax, rcx
+    add rsp, 8
+    ret
+# f0: g
+";
+    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    let src = "unsafe extern \"sysv64\" fn k(x: u64, y: u64) -> u64 { let (r, q): (gpr, gpr); test(y, y); jz(out); \
+               call(q, g, (y, y)); label(out); call(r, g, (x, y)); add(r, x); ret(r); }
+unsafe extern \"sysv64\" fn g(a: u64, b: u64) -> u64 { sub(a, b); ret(a); }";
+    let want = "# k(gpr, gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# x=rdx,rdi y=rcx,rdi,rsi r=rax q=rax
+    sub rsp, 8
+    mov rcx, rsi
+    mov rdx, rdi
+    test rcx, rcx
+    jz 2f
+    mov rdi, rsi
+    call {f0}
+2:
+    mov rdi, rdx
+    call {f0}
+    add rax, rdx
+    add rsp, 8
+    ret
+# f0: g
+";
+    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    Ok(())
+}
+
+/// A register holds in a loop what the way into it and the jump back both bring, so that a call in the loop of a
+/// function that leaves `rdi` as it was passes `x` with no move, whether the loop is entered at its top or at its test;
+/// and one of a function that writes `rdi` has the move each time round.
+#[test]
+fn a_move_in_a_loop_is_left_out_where_the_way_in_and_the_jump_back_leave_the_value_there() -> Result<(), String> {
+    let h = "unsafe extern \"sysv64\" fn h(a: u64) -> u64 { let r: gpr; mov(r, a); add(r, 1); ret(r); }";
+    let src = format!(
+        "unsafe extern \"sysv64\" fn k(x: u64, n: u64) -> u64 {{ let (r, s): (gpr, gpr); mov(s, 0); label(top); \
+         call(r, h, (x)); add(s, r); dec(n); jnz(top); add(s, x); ret(s); }}\n{h}"
+    );
+    let want = "# k(gpr, gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# x=rcx,rdi n=rsi r=rax s=rdx,rax
+    sub rsp, 8
+    mov rcx, rdi
+    mov rdx, 0
+2:
+    call {f0}
+    add rdx, rax
+    dec rsi
+    jnz 2b
+    add rdx, rcx
+    mov rax, rdx
+    add rsp, 8
+    ret
+# f0: h
+";
+    assert_eq!(kernite::x86_str(&src, "k")?.text(), want);
+    let src = format!(
+        "unsafe extern \"sysv64\" fn k(x: u64, n: u64) -> u64 {{ let (r, s): (gpr, gpr); mov(s, 0); jmp(test); \
+         label(top); call(r, h, (x)); add(s, r); label(test); dec(n); jnz(top); add(s, x); ret(s); }}\n{h}"
+    );
+    let want = "# k(gpr, gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# x=rcx,rdi n=rsi r=rax s=rdx,rax
+    sub rsp, 8
+    mov rcx, rdi
+    mov rdx, 0
+    jmp 3f
+2:
+    call {f0}
+    add rdx, rax
+3:
+    dec rsi
+    jnz 2b
+    add rdx, rcx
+    mov rax, rdx
+    add rsp, 8
+    ret
+# f0: h
+";
+    assert_eq!(kernite::x86_str(&src, "k")?.text(), want);
+    let src = "unsafe extern \"sysv64\" fn k(x: u64, n: u64) -> u64 { let (r, s): (gpr, gpr); mov(s, 0); label(top); \
+               call(r, g, (x, 1)); add(s, r); dec(n); jnz(top); add(s, x); ret(s); }
+unsafe extern \"sysv64\" fn g(a: u64, b: u64) -> u64 { sub(a, b); ret(a); }";
+    let want = "# k(gpr, gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# x=rdx,rdi n=rcx,rsi r=rax s=r8,rax b=rsi
+    sub rsp, 8
+    mov rcx, rsi
+    mov rdx, rdi
+    mov r8, 0
+2:
+    mov rdi, rdx
+    mov rsi, 1
+    call {f0}
+    add r8, rax
+    dec rcx
+    jnz 2b
+    add r8, rdx
+    mov rax, r8
+    add rsp, 8
+    ret
+# f0: g
+";
+    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    Ok(())
+}
+
+/// A move into a register that holds another value stays: `y` takes `x`, then `z`, then `x` again, and the third move
+/// is made; and so does one into a register that holds only part of the value, as an xmm clears the rest of its ymm:
+/// `y` takes the low half of `x`, and `z`, in the same register, takes all of it.
+#[test]
+fn a_move_into_a_register_that_holds_another_value_or_part_of_this_one_stays() -> Result<(), String> {
+    let src = "unsafe extern \"sysv64\" fn k(x: u64, z: u64) -> u64 { let (y, w): (gpr, gpr); mov(y, x); mov(w, y); \
+               mov(y, z); add(w, y); mov(y, x); add(w, y); add(w, x); add(w, z); ret(w); }";
+    let want = "# k(gpr, gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves []
+# x=rdi z=rsi y=rcx w=rax
+    mov rcx, rdi
+    mov rax, rcx
+    mov rcx, rsi
+    add rax, rcx
+    mov rcx, rdi
+    add rax, rcx
+    add rax, rdi
+    add rax, rsi
+    ret
+";
+    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    let src = "unsafe extern \"sysv64\" fn k(p: *mut f32) { let (x, y, z): (ymm, xmm, ymm); vmovups(x, [p]); \
+               vmovaps(y, x.xmm); vmovss([p], y); vmovaps(z, x); vmovups([p + 32], z); vmovups([p + 64], x); }";
+    let want = "# k(gpr) -> ()
+# needs: avx
+# frame: 0 bytes aligned to 0, saves []
+# p=rdi x=ymm0 y=ymm1 z=ymm1
+    vmovups ymm0, ymmword ptr [rdi]
+    vmovaps xmm1, xmm0
+    vmovss dword ptr [rdi], xmm1
+    vmovaps ymm1, ymm0
+    vmovups ymmword ptr [rdi + 32], ymm1
+    vmovups ymmword ptr [rdi + 64], ymm0
+    vzeroupper
+    ret
+";
+    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    Ok(())
+}
+
 /// A call changes the registers its callee writes, and those that each function the callee calls writes: an integer
 /// live across one stays in a register none of them writes, here rcx, for `gcd` writes rdi, rsi and rax alone, and
 /// calls itself; and a vector stays in the register it is in, for `nothing` writes none.
@@ -2741,7 +2977,6 @@ fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
 # x=rcx,rdi y=rax b=rsi
     sub rsp, 8
     mov rcx, rdi
-    mov rdi, rcx
     mov rsi, 6
     call {f0}
     add rax, rcx
@@ -2900,7 +3135,6 @@ fn a_call_through_a_gpr_calls_one_of_the_functions_taken_together_last() {
 # a=rsi,rdi fp=rax r=rax
     mov rsi, rdi
     lea rax, [rip + {f0}]
-    mov rdi, rsi
     jmp rax
 # f0: gcd
 ";
@@ -3230,8 +3464,8 @@ fn a_call_that_ret_follows_is_a_jump_after_the_frame_is_taken_down() {
             " -> u64",
             "let (r, fp): (gpr, gpr); lea(fp, [gcd]); call(r, fp, (x, x)); call(r, fp, (r, r), (gcd, gcd)); ret(r);"
                 .to_string(),
-            "push rbx\nmov rsi, rdi\nlea rbx, [rip + {f0}]\nmov rdi, rsi\ncall rbx\nmov rdi, rax\nmov rsi, rax\nmov \
-             r11, rbx\npop rbx\njmp r11"
+            "push rbx\nmov rsi, rdi\nlea rbx, [rip + {f0}]\ncall rbx\nmov rdi, rax\nmov rsi, rax\nmov r11, rbx\npop \
+             rbx\njmp r11"
                 .to_string(),
         ),
         (
@@ -3246,8 +3480,8 @@ fn a_call_that_ret_follows_is_a_jump_after_the_frame_is_taken_down() {
             "let r: gpr; test(x, x); jz(out); call(r, gcd, (x, x)); ret(r); label(out); call(r, gcd, (x, 1)); \
              add(r, 1); ret(r);"
                 .to_string(),
-            "sub rsp, 8\nmov rsi, rdi\ntest rsi, rsi\njz 2f\nmov rdi, rsi\nadd rsp, 8\njmp {f0}\n2:\nmov rdi, rsi\nmov \
-             rsi, 1\ncall {f0}\nadd rax, 1\nadd rsp, 8\nret"
+            "sub rsp, 8\nmov rsi, rdi\ntest rsi, rsi\njz 2f\nadd rsp, 8\njmp {f0}\n2:\nmov rsi, 1\ncall {f0}\nadd \
+             rax, 1\nadd rsp, 8\nret"
                 .to_string(),
         ),
     ];
@@ -3269,20 +3503,20 @@ fn a_call_stays_one_where_a_jump_would_not_do_what_it_does() {
             "x: u64",
             " -> u64",
             "let r: gpr; call(r, gcd, (x, x)); add(r, 1); ret(r);",
-            "sub rsp, 8\nmov rsi, rdi\nmov rdi, rsi\ncall {f0}\nadd rax, 1\nadd rsp, 8\nret",
+            "sub rsp, 8\nmov rsi, rdi\ncall {f0}\nadd rax, 1\nadd rsp, 8\nret",
         ),
         (
             "x: u64",
             " -> u64",
             "call(_, gcd, (x, x)); ret(x);",
-            "sub rsp, 8\nmov rcx, rdi\nmov rdi, rcx\nmov rsi, rcx\ncall {f0}\nmov rax, rcx\nadd rsp, 8\nret",
+            "sub rsp, 8\nmov rcx, rdi\nmov rsi, rdi\ncall {f0}\nmov rax, rcx\nadd rsp, 8\nret",
         ),
         (
             "x: u64, m: *mut u32",
             " -> u64",
             "let r: gpr; vldmxcsr([m]); call(r, gcd, (x, x)); ret(r);",
-            "sub rsp, 8\nmov rax, rdi\nvstmxcsr dword ptr [rsp]\nvldmxcsr dword ptr [rsi]\nmov rdi, rax\nmov rsi, \
-             rax\ncall {f0}\nvldmxcsr dword ptr [rsp]\nadd rsp, 8\nret",
+            "sub rsp, 8\nmov rax, rdi\nvstmxcsr dword ptr [rsp]\nvldmxcsr dword ptr [rsi]\nmov rsi, rax\ncall \
+             {f0}\nvldmxcsr dword ptr [rsp]\nadd rsp, 8\nret",
         ),
         (
             "x: u64",
@@ -3332,8 +3566,8 @@ fn a_call_passes_what_its_callee_takes() {
                 8\nret";
     assert_eq!(code, want);
     let code = calling("x: *mut f64", "", "let v: ymm; call(v.xmm, scale, (2.5f64, x)); vmovq([x], v.xmm);").unwrap();
-    let want = "sub rsp, 8\nmov rax, rdi\nvmovq xmm0, qword ptr [rip + {c0}]\nmov rdi, rax\ncall {f0}\nvmovq qword ptr \
-                [rax], xmm0\nadd rsp, 8\nret";
+    let want = "sub rsp, 8\nmov rax, rdi\nvmovq xmm0, qword ptr [rip + {c0}]\ncall {f0}\nvmovq qword ptr [rax], \
+                xmm0\nadd rsp, 8\nret";
     assert_eq!(code, want);
 }
 

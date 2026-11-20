@@ -4,7 +4,6 @@
 # xs=rax,rdi low=ymm2,ymm0 high=ymm0
     sub rsp, 8
     mov rax, rdi
-    mov rdi, rax
     call {f0}
     vmovaps xmm2, xmm0
     add rax, 32

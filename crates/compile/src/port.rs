@@ -40,9 +40,8 @@ pub trait Spill<Op> {
 
     /// An instruction that copies `width` of `from`'s register to `to`'s, of the same file. The allocator moves a
     /// parameter or a result with it; a machine's own code may move a call's arguments and its result with it too, and
-    /// the allocator, seeing such a move, places the two in one register where it can, and leaves the move out where it
-    /// changes nothing then: where it moves all of the register, or no instruction after it reads all of the register
-    /// before one writes `to`, for a move of part clears the rest.
+    /// the allocator, seeing such a move, places the two in one register where it can, leaves it out where it changes
+    /// nothing, and has it read another register that holds the value, where that is as good.
     ///
     /// The allocator knows such a move only by its being equal to what this returns, at the width `to` is kept. One of
     /// another width, as x86's `mov(to.r32, from.r32)` is, stays a move. Where `from` is pinned, a call's result, the

@@ -120,7 +120,12 @@ fn run<R: Register + Ord>(
             "op" => {
                 let read = inst.args[1..].iter().filter(|a| a.access == Access::Read);
                 let h = hash(read.map(|a| value(a, &regs)));
-                regs.insert(reg_of(&inst.args[0]), h);
+                // Each variable it writes has a value of its own: the first the hash, and one more each after it.
+                let others = inst.args[1..].iter().filter(|a| a.access == Access::Write);
+                let writes = std::iter::once(&inst.args[0]).chain(others);
+                for (k, a) in writes.enumerate() {
+                    regs.insert(reg_of(a), h.wrapping_add(k as u64));
+                }
             }
             "add" => {
                 let sum = value(&inst.args[0], &regs).wrapping_add(value(&inst.args[1], &regs));
@@ -201,6 +206,18 @@ fn spilled(c: &Allocated<&'static str>) -> Vec<String> {
 /// The opcodes of `c`, in order.
 fn ops(c: &Allocated<&'static str>) -> Vec<&'static str> {
     c.body.iter().filter_map(|i| if let Item::Inst(i) = i { Some(i.op) } else { None }).collect()
+}
+
+/// The registers each copy of `c` writes and reads, in order.
+fn copies(c: &Allocated<&'static str>) -> Vec<(PReg, PReg)> {
+    let copy = |item: &Item<&'static str, PReg>| match item {
+        Item::Inst(i) if i.op == "copy" => match (i.args[0].operand, i.args[1].operand) {
+            (Operand::Reg(to, _), Operand::Reg(from, _)) => Some((to, from)),
+            _ => unreachable!("a copy of registers"),
+        },
+        _ => None,
+    };
+    c.body.iter().filter_map(copy).collect()
 }
 
 fn r(hw: u8) -> PReg {
@@ -311,6 +328,11 @@ impl Builder {
         if let Some((d, pinned)) = back {
             self.0.body.push(Item::Inst(Toy::copy(&toy(0, &[]), d, pinned, Width::W64)));
         }
+    }
+
+    /// A copy of `width` of `from` to `to`, as a machine's code makes one.
+    fn copy(&mut self, to: VReg, from: VReg, width: Width) {
+        self.0.body.push(Item::Inst(Toy::copy(&toy(0, &[]), to, from, width)));
     }
 
     fn label(&mut self, l: u32) {
@@ -968,6 +990,466 @@ fn a_parameter_live_across_a_call_moves_on_entry() {
     assert_eq!(c.frame.saved, [r(2)]);
 }
 
+/// A parameter that moves on entry to a register the call keeps, and is passed in the register it arrived in, which
+/// holds it still, is not copied back there.
+#[test]
+fn an_argument_is_not_copied_to_the_register_that_holds_it_already() {
+    let mut b = Builder::new();
+    let p = b.param("p", 0);
+    let y = b.var("y");
+    b.call(None, &[(p, 0)], &[0, 1]);
+    b.def(y, &[p]);
+    b.ret(y, 0);
+    let c = same(&b.0, &toy(3, &[2]), &[7]);
+    assert_eq!(ops(&c), ["copy", "call", "op", "ret"]);
+    assert_eq!(copies(&c), [(r(2), r(0))]);
+}
+
+/// A copy that stays reads the register its value arrived in, not the variable that was copied from there, so that the
+/// copies that set a call's arguments do not wait for each other, where an instruction after it reads that variable.
+/// The last read of a variable stays where it is: another register would leave the copy that wrote it moving what
+/// nothing reads.
+#[test]
+fn an_argument_copy_reads_the_register_the_value_arrived_in() {
+    let mut b = Builder::new();
+    let p = b.param("p", 0);
+    let y = b.var("y");
+    b.call(None, &[(p, 0), (p, 1)], &[0, 1]);
+    b.def(y, &[p]);
+    b.ret(y, 0);
+    let c = same(&b.0, &toy(3, &[2]), &[7]);
+    assert_eq!(ops(&c), ["copy", "copy", "call", "op", "ret"]);
+    assert_eq!(copies(&c), [(r(2), r(0)), (r(1), r(0))]);
+    let mut b = Builder::new();
+    let (p, y) = (b.param("p", 0), b.var("y"));
+    b.call(None, &[(p, 0), (p, 1)], &[0, 1]);
+    b.call(None, &[(p, 1)], &[0, 1]);
+    b.def(y, &[p]);
+    b.ret(y, 0);
+    let c = same(&b.0, &toy(3, &[2]), &[7]);
+    assert_eq!(copies(&c), [(r(2), r(0)), (r(1), r(0)), (r(1), r(2))]);
+    // `p` is passed twice and read no more, and `m` keeps r1 until the call's arguments are set: `p` moves to a
+    // register of its own on entry, and the copy to the second argument's register reads it there, not in r0, where it
+    // arrived.
+    let mut b = Builder::new();
+    let (p, m, z) = (b.param("p", 0), b.param("m", 1), b.var("z"));
+    b.def(z, &[m]);
+    b.call(None, &[(p, 0), (p, 1)], &[0, 1]);
+    b.ret(z, 0);
+    let c = same(&b.0, &toy(4, &[3]), &[7, 9]);
+    assert_eq!(copies(&c), [(r(2), r(0)), (r(1), r(2)), (r(0), r(3))]);
+}
+
+/// What a register holds is not known after a call that changes it.
+#[test]
+fn a_register_holds_nothing_known_after_a_call_that_changes_it() {
+    let mut b = Builder::new();
+    let (p, y) = (b.param("p", 0), b.var("y"));
+    b.call(None, &[(p, 0)], &[0, 1]);
+    b.call(None, &[(p, 0)], &[0, 1]);
+    b.def(y, &[p]);
+    b.ret(y, 0);
+    let c = same(&b.0, &toy(3, &[2]), &[7]);
+    assert_eq!(copies(&c), [(r(2), r(0)), (r(0), r(2))]);
+    // Two calls that leave r0 as it was: the second passes `p` in it with no move.
+    let mut b = Builder::new();
+    let (p, y) = (b.param("p", 0), b.var("y"));
+    b.call(None, &[(p, 0)], &[1]);
+    b.call(None, &[(p, 0)], &[1]);
+    b.def(y, &[p]);
+    b.ret(y, 0);
+    let c = same(&b.0, &toy(3, &[2]), &[7]);
+    assert_eq!(copies(&c), [(r(2), r(0))]);
+}
+
+/// A register holds at a label what every way to it brings. One way comes to the first label, the code before it, and
+/// the call after it passes `p` in r0, which the call before it leaves, with no move.
+#[test]
+fn a_label_that_one_way_comes_to_leaves_what_a_register_holds() {
+    let mut b = Builder::new();
+    let (p, y) = (b.param("p", 0), b.var("y"));
+    b.call(None, &[(p, 0)], &[1]);
+    b.label(1);
+    b.call(None, &[(p, 0)], &[1]);
+    b.def(y, &[p]);
+    b.ret(y, 0);
+    let c = same(&b.0, &toy(3, &[2]), &[7]);
+    assert_eq!(copies(&c), [(r(2), r(0))]);
+}
+
+/// Two ways come to a label, a jump and the code before it, and the call there passes `p` in r0, with the move left out
+/// where both ways leave r0 as `p` was, and kept where either changes it, whichever way is the first the allocator
+/// follows. `n` says which way the kernel takes, the jump if 2, as the Toy's `dec` says; it is run both ways.
+#[test]
+fn a_register_holds_at_a_label_what_both_ways_to_it_bring() {
+    // `way` is the code from the jump to the label, and the call at the label gives back its result in r1.
+    let join = |way: fn(&mut Builder, VReg, VReg)| {
+        let mut b = Builder::new();
+        let (p, n, d) = (b.param("p", 0), b.param("n", 1), b.var("d"));
+        way(&mut b, p, n);
+        b.label(1);
+        b.call(Some((d, 1)), &[(p, 0)], &[1]);
+        b.ret(d, 0);
+        let (jumps, falls) = (same(&b.0, &toy(4, &[]), &[7, 2]), same(&b.0, &toy(4, &[]), &[7, 1]));
+        assert_eq!(copies(&jumps), copies(&falls));
+        copies(&falls)
+    };
+    // The code before the label passes `p` in r0, which that call leaves as it was.
+    let agree = |b: &mut Builder, p, n| {
+        b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+        b.call(None, &[(p, 0)], &[1]);
+    };
+    assert_eq!(join(agree), [(r(2), r(0)), (r(0), r(1))]);
+    // The code before the label calls what changes r0, and the jump skips it.
+    let falls = |b: &mut Builder, _, n| {
+        b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+        b.call(None, &[], &[0]);
+    };
+    assert_eq!(join(falls), [(r(2), r(0)), (r(0), r(2)), (r(0), r(1))]);
+    // The jump is after a call that changes r0, and the code before the label passes `p` in r0 again.
+    let jumps = |b: &mut Builder, p, n| {
+        b.call(None, &[], &[0]);
+        b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+        b.call(None, &[(p, 0)], &[1]);
+    };
+    assert_eq!(join(jumps), [(r(2), r(0)), (r(0), r(2)), (r(0), r(2)), (r(0), r(1))]);
+}
+
+/// A register holds in a loop what the way into it and the jump back both bring: the call passes `p` in r0 with no move
+/// where it leaves r0 as it was, and has the move each time round where it changes r0.
+#[test]
+fn a_register_holds_in_a_loop_what_the_way_in_and_the_jump_back_bring() {
+    let looped = |clobbers: &[u8]| {
+        let mut b = Builder::new();
+        let (p, n) = (b.param("p", 0), b.param("n", 1));
+        let (acc, d) = (b.var("acc"), b.var("d"));
+        b.def(acc, &[]);
+        b.label(2);
+        b.call(Some((d, 1)), &[(p, 0)], clobbers);
+        b.inst("add", &[(acc, Access::ReadWrite), (d, Access::Read)], Flow::Next);
+        b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(2)));
+        b.ret(acc, 0);
+        copies(&same(&b.0, &toy(5, &[]), &[7, 3]))
+    };
+    // The moves of `n` and `p` on entry, and of the sum to r0 before the return.
+    assert_eq!(looped(&[1]), [(r(2), r(1)), (r(3), r(0)), (r(0), r(4))]);
+    assert_eq!(looped(&[0, 1]), [(r(2), r(1)), (r(3), r(0)), (r(0), r(3)), (r(0), r(4))]);
+}
+
+/// Two ways to a label that each move a value written before they parted to one register bring one value, though each
+/// by a copy of its own: the move after they meet is left out.
+#[test]
+fn a_value_written_before_two_ways_part_is_one_value_where_they_meet() {
+    for ways in [[1, 1], [1, 2], [2, 1]] {
+        let mut b = Builder::new();
+        let (n1, n2) = (b.param("n1", 0), b.param("n2", 1));
+        let (x, y, z) = (b.var("x"), b.var("y"), b.var("z"));
+        b.def(x, &[]);
+        b.inst("dec", &[(n1, Access::ReadWrite)], Flow::Branch(Label(1)));
+        b.copy(y, x, Width::W64);
+        b.inst("dec", &[(n2, Access::ReadWrite)], Flow::Branch(Label(2)));
+        b.label(1);
+        b.copy(y, x, Width::W64);
+        b.label(2);
+        b.copy(y, x, Width::W64);
+        b.def(z, &[y, x]);
+        b.ret(z, 0);
+        let c = same(&b.0, &toy(5, &[]), &ways);
+        assert_eq!(["x", "y"].map(|v| reg_of(&c, v)), [r(2), r(0)]);
+        assert_eq!(copies(&c), [(r(0), r(2)), (r(0), r(2))]);
+    }
+}
+
+/// A parameter is one value on each way to a label that moves it to one register, as a value written is: it is in the
+/// register it arrives in, whichever way the kernel takes, so the move after the ways meet is left out.
+#[test]
+fn a_parameter_is_one_value_where_two_ways_that_move_it_to_one_register_meet() {
+    for ways in [[1, 1], [1, 2], [2, 1]] {
+        let mut b = Builder::new();
+        let (n1, n2, x) = (b.param("n1", 0), b.param("n2", 1), b.param("x", 2));
+        let (y, z) = (b.var("y"), b.var("z"));
+        b.inst("dec", &[(n1, Access::ReadWrite)], Flow::Branch(Label(1)));
+        b.copy(y, x, Width::W64);
+        b.inst("dec", &[(n2, Access::ReadWrite)], Flow::Branch(Label(2)));
+        b.label(1);
+        b.copy(y, x, Width::W64);
+        b.label(2);
+        b.copy(y, x, Width::W64);
+        b.def(z, &[y, x]);
+        b.ret(z, 0);
+        let c = same(&b.0, &toy(5, &[]), &[ways[0], ways[1], 7]);
+        assert_eq!(["x", "y"].map(|v| reg_of(&c, v)), [r(2), r(0)]);
+        assert_eq!(copies(&c), [(r(0), r(2)), (r(0), r(2))]);
+    }
+}
+
+/// A register holds at a label as many bits of a value as the fewer that either way brings: one way copies all of `x`
+/// to `a`, and the other 32 bits of it to `b`, which take one register, and so does `w`, so that the copy of all of `x`
+/// to `w` after the ways meet stays. `n` says which way the kernel takes, the jump to the second if 2, as the Toy's
+/// `dec` says; it is run both ways.
+#[test]
+fn a_register_holds_at_a_label_as_much_of_a_value_as_the_least_of_the_ways_bring() {
+    let mut b = Builder::new();
+    let (n, m, x) = (b.param("n", 0), b.param("m", 1), b.param("x", 2));
+    let (a, half, w, u) = (b.var("a"), b.var("b"), b.var("w"), b.var("u"));
+    b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+    b.copy(a, x, Width::W64);
+    b.inst("dec", &[(m, Access::ReadWrite)], Flow::Branch(Label(2)));
+    b.label(1);
+    b.copy(half, x, Width::W32);
+    b.label(2);
+    b.copy(w, x, Width::W64);
+    b.def(u, &[w, x]);
+    b.ret(u, 0);
+    for ways in [[1, 2], [2, 2]] {
+        let c = same(&b.0, &toy(6, &[]), &[ways[0], ways[1], 7 | 1 << 40]);
+        let [a, half, w] = ["a", "b", "w"].map(|v| reg_of(&c, v));
+        assert_eq!([a, half], [w, w]);
+        assert_eq!(copies(&c), [(w, r(2)); 3]);
+    }
+}
+
+/// A register holds at a label a value only if every way to it brings that value: the register of `y` holds `x` on the
+/// way that jumps over the second copy, and `z` on the two that make it, so it holds neither where they meet, and the
+/// copy of `x` to `w`, which has the register of `y`, stays. `n` and `m` say which way the kernel takes, as the Toy's
+/// `dec` says: the first jump if `n` is not 1, the second if `m` is not 1; it is run by each of the three ways.
+#[test]
+fn a_register_holds_at_a_label_only_the_value_that_every_way_to_it_brings() {
+    let mut b = Builder::new();
+    let (n, m, x, z) = (b.param("n", 0), b.param("m", 1), b.param("x", 2), b.param("z", 3));
+    let (y, w, u) = (b.var("y"), b.var("w"), b.var("u"));
+    b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+    b.copy(y, x, Width::W64);
+    b.inst("dec", &[(m, Access::ReadWrite)], Flow::Branch(Label(2)));
+    b.label(1);
+    b.copy(y, z, Width::W64);
+    b.label(2);
+    b.copy(w, x, Width::W64);
+    b.def(u, &[w, x, z]);
+    b.ret(u, 0);
+    for ways in [[1, 1], [1, 2], [2, 1]] {
+        let c = same(&b.0, &toy(6, &[]), &[ways[0], ways[1], 7, 9]);
+        let [y, w] = ["y", "w"].map(|v| reg_of(&c, v));
+        assert_eq!(y, w);
+        assert_eq!(copies(&c), [(y, r(2)), (y, r(3)), (w, r(2))]);
+    }
+}
+
+/// A copy puts a value in a register and takes out the one that was there: `y` takes `x`, then `z`, then `x` again, and
+/// the third copy stays, for the register holds `z` by then.
+#[test]
+fn a_register_holds_the_value_of_the_last_copy_into_it() {
+    let mut b = Builder::new();
+    let (x, z) = (b.param("x", 0), b.param("z", 1));
+    let (y, w) = (b.var("y"), b.var("w"));
+    b.copy(y, x, Width::W64);
+    b.def(w, &[y]);
+    b.copy(y, z, Width::W64);
+    b.def(w, &[w, y]);
+    b.copy(y, x, Width::W64);
+    b.def(w, &[w, y, x, z]);
+    b.ret(w, 0);
+    let c = same(&b.0, &toy(4, &[]), &[3, 5]);
+    assert_eq!(copies(&c), [(r(2), r(0)), (r(2), r(1)), (r(2), r(0)), (r(0), r(3))]);
+}
+
+/// And an instruction that writes it takes out the value too: `y` takes `x`, `op` writes `y`, and the copy of `x` after
+/// it stays.
+#[test]
+fn a_register_an_instruction_writes_holds_nothing_known() {
+    let mut b = Builder::new();
+    let x = b.param("x", 0);
+    let (y, w) = (b.var("y"), b.var("w"));
+    b.copy(y, x, Width::W64);
+    b.def(w, &[y]);
+    b.def(y, &[y, w]);
+    b.copy(y, x, Width::W64);
+    b.def(w, &[w, y, x]);
+    b.ret(w, 0);
+    let c = same(&b.0, &toy(4, &[]), &[3]);
+    assert_eq!(copies(&c), [(r(1), r(0)), (r(1), r(0)), (r(0), r(2))]);
+}
+
+/// A register that a copy of part of a value is put in holds that much of it and no more, as the rest is cleared: the
+/// low half of `x` in the register `y` has is no copy of all of `x`, which `z` is, in the same register.
+#[test]
+fn a_register_a_copy_of_part_of_a_value_is_put_in_holds_that_part() {
+    let mut b = Builder::new();
+    let x = b.param("x", 0);
+    let (t, y, z, u) = (b.var("t"), b.var("y"), b.var("z"), b.var("u"));
+    b.def(t, &[]);
+    b.copy(y, x, Width::W32);
+    b.def_low(t, &[t, y]);
+    b.copy(z, x, Width::W64);
+    b.def(u, &[z, x, t]);
+    b.ret(u, 0);
+    let c = same(&b.0, &toy(4, &[]), &[7 | 1 << 40]);
+    assert_eq!(["x", "t", "y", "z"].map(|v| reg_of(&c, v)), [r(0), r(1), r(2), r(2)]);
+    assert_eq!(copies(&c), [(r(2), r(0)), (r(2), r(0))]);
+}
+
+/// And one that a copy of all of it is put in after that holds all of it: the third copy of `x`, in the register of the
+/// second, is left out.
+#[test]
+fn a_register_a_copy_of_all_of_a_value_is_put_in_holds_all_of_it() {
+    let mut b = Builder::new();
+    let x = b.param("x", 0);
+    let (t, y, z, z2, u) = (b.var("t"), b.var("y"), b.var("z"), b.var("z2"), b.var("u"));
+    b.def(t, &[]);
+    b.copy(y, x, Width::W32);
+    b.def_low(t, &[t, y]);
+    b.copy(z, x, Width::W64);
+    b.def(t, &[t, z]);
+    b.copy(z2, x, Width::W64);
+    b.def(u, &[z2, x, t]);
+    b.ret(u, 0);
+    let c = same(&b.0, &toy(4, &[]), &[7 | 1 << 40]);
+    assert_eq!(["x", "t", "y", "z", "z2"].map(|v| reg_of(&c, v)), [r(0), r(1), r(2), r(2), r(2)]);
+    assert_eq!(copies(&c), [(r(2), r(0)), (r(2), r(0))]);
+}
+
+/// A copy of all of a value from a register that holds only part of it is a copy of that part: `given` is 32 bits that
+/// a call gives back, and `y` copies them, so that `z`, in the register of `given`, is not `y` whole.
+#[test]
+fn a_copy_of_all_of_a_value_from_a_register_that_holds_part_of_it_stays() {
+    let mut b = Builder::new();
+    let (t, y, z, u, given) = (b.var("t"), b.var("y"), b.var("z"), b.var("u"), b.var("given"));
+    b.def(t, &[]);
+    b.0.pinned.push((given, r(0)));
+    let implicit = vec![reg_arg(given, Width::W32, Access::Write)];
+    b.0.body.push(Item::Inst(Inst { op: "call", args: vec![], implicit, flow: Flow::Next, clobbers: vec![] }));
+    b.copy(y, given, Width::W32);
+    b.def_low(t, &[t, given]);
+    b.copy(z, y, Width::W64);
+    b.def(u, &[z, t]);
+    b.ret(u, 0);
+    let c = same(&b.0, &toy(3, &[]), &[]);
+    assert_eq!(["given", "t", "y", "z"].map(|v| reg_of(&c, v)), [r(0), r(1), r(2), r(0)]);
+    assert_eq!(copies(&c), [(r(2), r(0)), (r(0), r(2))]);
+}
+
+/// A copy to the register it reads is left out, though the register holds part of the value only: `y` takes 32 bits of
+/// what a call gives back, `z` all of `y`, in the same register, since `given` is read after and holds r0.
+#[test]
+fn a_copy_to_the_register_it_reads_is_left_out_whatever_the_register_holds() {
+    let mut b = Builder::new();
+    let (t, y, z, u, given) = (b.var("t"), b.var("y"), b.var("z"), b.var("u"), b.var("given"));
+    b.def(t, &[]);
+    b.0.pinned.push((given, r(0)));
+    let implicit = vec![reg_arg(given, Width::W32, Access::Write)];
+    b.0.body.push(Item::Inst(Inst { op: "call", args: vec![], implicit, flow: Flow::Next, clobbers: vec![] }));
+    b.copy(y, given, Width::W32);
+    b.copy(z, y, Width::W64);
+    b.def_low(t, &[t, given]);
+    b.def(u, &[z, t]);
+    b.ret(u, 0);
+    let c = same(&b.0, &toy(3, &[]), &[]);
+    assert_eq!(["given", "t", "y", "z"].map(|v| reg_of(&c, v)), [r(0), r(1), r(2), r(2)]);
+    assert_eq!(copies(&c), [(r(2), r(0))]);
+}
+
+/// A register that a copy is put in holds no more of a value than the register it reads: `y` takes the 32 bits that a
+/// call gives back in `given`, `z` all of `y`, and `w` all of `z`. `z` holds those 32 bits alone, so the copy to `w`
+/// reads `z`, and not the register of `given`, which holds all that the call wrote.
+#[test]
+fn a_register_a_copy_is_put_in_holds_no_more_of_a_value_than_the_register_it_reads() {
+    let mut b = Builder::new();
+    let (t, y, z, w, u, given) = (b.var("t"), b.var("y"), b.var("z"), b.var("w"), b.var("u"), b.var("given"));
+    b.def(t, &[]);
+    b.0.pinned.push((given, r(0)));
+    let implicit = vec![reg_arg(given, Width::W32, Access::Write)];
+    b.0.body.push(Item::Inst(Inst { op: "call", args: vec![], implicit, flow: Flow::Next, clobbers: vec![] }));
+    b.copy(y, given, Width::W32);
+    b.copy(z, y, Width::W64);
+    b.copy(w, z, Width::W64);
+    b.def_low(t, &[t, given]);
+    b.def(u, &[w, z, y, t]);
+    b.ret(u, 0);
+    let c = same(&b.0, &toy(6, &[]), &[]);
+    assert_eq!(["given", "t", "y", "z", "w"].map(|v| reg_of(&c, v)), [r(0), r(1), r(2), r(3), r(4)]);
+    assert_eq!(copies(&c), [(r(2), r(0)), (r(3), r(2)), (r(4), r(3))]);
+}
+
+/// A register that a copy finds a value in, where nothing known is, holds it by the variable the copy reads: `x` is
+/// written before a jump and again before the label it goes to, so that its register holds nothing known at the label.
+/// There `y` takes 32 bits of `x`, `z` all of it, and `w` all of `z`, and the copy to `w` reads the register of `x`,
+/// which held the value first, and not that of `y`, which holds the low half alone.
+#[test]
+fn a_register_a_copy_finds_a_value_in_holds_it_by_the_variable_the_copy_reads() {
+    let mut b = Builder::new();
+    let n = b.param("n", 0);
+    let (x, y, z, w, u) = (b.var("x"), b.var("y"), b.var("z"), b.var("w"), b.var("u"));
+    b.def(x, &[]);
+    b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+    b.def(x, &[x]);
+    b.label(1);
+    b.copy(y, x, Width::W32);
+    b.copy(z, x, Width::W64);
+    b.copy(w, z, Width::W64);
+    b.def(u, &[w, z, y, x]);
+    b.ret(u, 0);
+    for n in [1, 2] {
+        let c = same(&b.0, &toy(6, &[]), &[n]);
+        assert_eq!(["x", "y", "z", "w"].map(|v| reg_of(&c, v)), [r(1), r(0), r(2), r(3)]);
+        assert_eq!(copies(&c), [(r(0), r(1)), (r(2), r(1)), (r(3), r(1))]);
+    }
+}
+
+/// An instruction that writes two variables makes two values: a copy of one to the other stays.
+#[test]
+fn what_an_instruction_writes_to_two_variables_is_two_values() {
+    let mut b = Builder::new();
+    let (s, one, two, u) = (b.param("s", 0), b.var("one"), b.var("two"), b.var("u"));
+    b.inst("op", &[(one, Access::Write), (two, Access::Write), (s, Access::Read)], Flow::Next);
+    b.copy(one, two, Width::W64);
+    b.def(u, &[one, two]);
+    b.ret(u, 0);
+    let c = same(&b.0, &toy(4, &[]), &[7]);
+    assert_eq!(["one", "two"].map(|v| reg_of(&c, v)), [r(0), r(1)]);
+    assert_eq!(copies(&c), [(r(0), r(1))]);
+}
+
+/// A call that clears the upper half of r0, and leaves the lower, changes what r0 holds: `y` holds `p` whole, and `z`,
+/// in r0, is not `p` whole after the call, so that the copy of `y` to it stays.
+#[test]
+fn a_register_holds_nothing_known_after_a_call_that_clears_its_upper_half() {
+    let mut b = Builder::new();
+    let p = b.param("p", 0);
+    let (y, z) = (b.var("y"), b.var("z"));
+    b.copy(y, p, Width::W64);
+    b.call_with(None, &[(p, 0)], upper(&[0]));
+    b.copy(z, y, Width::W64);
+    b.ret(z, 0);
+    let c = same(&b.0, &toy(3, &[]), &[7 | 1 << 40]);
+    assert_eq!(["p", "y", "z"].map(|v| reg_of(&c, v)), [r(0), r(1), r(0)]);
+    assert_eq!(copies(&c), [(r(1), r(0)), (r(0), r(1))]);
+}
+
+/// A copy that finds a register nothing known is in finds all of its value, and the register it copies to holds the
+/// same: `x` is written before a loop and written again at its end, so that no register is known to hold it at the top,
+/// where `y` takes 32 bits of it, `z` all of it, and `z2` all of it again, which is left out.
+#[test]
+fn a_copy_finds_what_a_register_holds_where_ways_to_a_label_leave_it_unknown() {
+    let mut b = Builder::new();
+    let n = b.param("n", 0);
+    let (x, t, y, z, z2) = (b.var("x"), b.var("t"), b.var("y"), b.var("z"), b.var("z2"));
+    b.def(x, &[]);
+    b.def(t, &[]);
+    b.label(1);
+    b.copy(y, x, Width::W32);
+    b.def_low(t, &[t, y]);
+    b.copy(z, x, Width::W64);
+    b.def(t, &[t, z]);
+    b.copy(z2, x, Width::W64);
+    b.def(t, &[t, z2]);
+    b.def(x, &[x, t]);
+    b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+    b.ret(t, 0);
+    let c = same(&b.0, &toy(5, &[]), &[3]);
+    assert_eq!(["x", "t", "y", "z", "z2"].map(|v| reg_of(&c, v)), [r(1), r(2), r(3), r(3), r(3)]);
+    assert_eq!(copies(&c), [(r(3), r(1)), (r(3), r(1)), (r(0), r(2))]);
+}
+
 #[test]
 fn a_result_live_across_a_call_moves_into_its_register_before_the_return() {
     let mut b = Builder::new();
@@ -1264,11 +1746,11 @@ fn control_must_stay_inside_the_body_for_the_paths_too() {
 }
 
 /// A number for each variable of `b`, followed over its flow by [`crate::forward`]: all 5 at the start, `narrow` sets
-/// the first operand's to 1 and `wide` to 5, and `use` fails if it is under 3. The failure is the item's index and the
-/// variable.
+/// the first operand's to 1 and `wide` to 5, and `use` fails if it is under 3. The first failure is the item's index
+/// and the variable.
 fn follow(b: &Builder) -> Result<Option<(usize, VReg)>, Error> {
     let meet = |a: &Vec<u8>, b: &Vec<u8>| a.iter().zip(b).map(|(a, b)| *a.min(b)).collect();
-    crate::forward(&b.0, vec![5u8; b.0.regs.len()], meet, |inst, now: &mut Vec<u8>| {
+    let said = crate::forward(&b.0, vec![5u8; b.0.regs.len()], meet, |_, inst, now: &mut Vec<u8>| {
         let Some(Operand::Reg(v, _)) = inst.args.first().map(|a| a.operand) else { return Ok(()) };
         match inst.op {
             "narrow" => now[v.id as usize] = 1,
@@ -1277,7 +1759,8 @@ fn follow(b: &Builder) -> Result<Option<(usize, VReg)>, Error> {
             _ => {}
         }
         Ok(())
-    })
+    })?;
+    Ok(said.into_iter().enumerate().find_map(|(i, said)| Some((i, said?.err()?))))
 }
 
 #[test]

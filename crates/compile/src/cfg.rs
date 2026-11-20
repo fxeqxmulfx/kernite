@@ -121,36 +121,34 @@ pub fn on_every_path<Op>(p: &Program<Op>, leaves: &[usize]) -> Result<Vec<bool>,
     Ok(on)
 }
 
-/// Follows a value over `p`'s body from its start to a fixed point: `start` is the value at the top of the body, `step`
-/// what an instruction does to it, and `meet` what the value at a label is of the values the ways to it bring, a jump
-/// back among them. An item that no way comes to is not stepped. `step` must give no more than it is given, and `meet`
-/// no more than either of its values, for the loop to end. It fails, as [`check`](crate::check) does, if control
-/// leaves the body or a jump has no label.
-///
-/// `step` fails where what the instruction does cannot be done, and does what it can to the value. Of the failures once
-/// the values are as small as they get, the first in the body is given: its item's index, and what `step` said.
-pub fn forward<Op, S: Clone + PartialEq, E>(
+/// Follows a value over `p`'s body to a fixed point: `start` is the value at the top of the body, `step` what the
+/// instruction at an index of the body does to it, and `meet` what the value is at a label, of the values the ways to
+/// it bring, a jump back among them. It gives what `step` said of each item, the last time `step` ran on it, once the
+/// values stop changing: `None` for an item that no way comes to, which is not stepped, and for one that is not an
+/// instruction. For the loop to end, `meet` gives no more than its first value, and a value goes down only so many
+/// times. It fails, as [`check`](crate::check) does, if control leaves the body or a jump has no label.
+pub fn forward<Op, S: Clone + PartialEq, T>(
     p: &Program<Op>,
     start: S,
     meet: impl Fn(&S, &S) -> S,
-    step: impl Fn(&Inst<Op, VReg>, &mut S) -> Result<(), E>,
-) -> Result<Option<(usize, E)>, Error> {
+    step: impl Fn(usize, &Inst<Op, VReg>, &mut S) -> T,
+) -> Result<Vec<Option<T>>, Error> {
     let blocks = blocks(&p.body)?;
     // The value at the top of each block, once a way to it is known.
     let mut tops: Vec<Option<S>> = vec![None; blocks.len()];
     tops[0] = Some(start);
-    // The value at the bottom of block `b`, and its first failure.
+    // The value at the bottom of block `b`, and what `step` said of each of its items.
     let run = |b: usize, top: &S| {
         let mut now = top.clone();
-        let mut failed = None;
-        for i in blocks[b].items.clone() {
-            if let Item::Inst(inst) = &p.body[i]
-                && let Err(e) = step(inst, &mut now)
-            {
-                failed.get_or_insert((i, e));
-            }
-        }
-        (now, failed)
+        let said: Vec<Option<T>> = blocks[b]
+            .items
+            .clone()
+            .map(|i| match &p.body[i] {
+                Item::Inst(inst) => Some(step(i, inst, &mut now)),
+                _ => None,
+            })
+            .collect();
+        (now, said)
     };
     let mut changed = true;
     while changed {
@@ -167,5 +165,10 @@ pub fn forward<Op, S: Clone + PartialEq, E>(
             }
         }
     }
-    Ok(tops.iter().enumerate().find_map(|(b, top)| run(b, top.as_ref()?).1))
+    // The blocks tile the body in order, so their items' results, put end to end, are the body's.
+    let said = tops.iter().enumerate().flat_map(|(b, top)| match top {
+        Some(top) => run(b, top).1,
+        None => blocks[b].items.clone().map(|_| None).collect(),
+    });
+    Ok(said.collect())
 }

@@ -290,7 +290,7 @@ impl<'a> Effect<'a> {
 
 /// What `inst` does to `now`, the width of each variable: the first read past one is the error, and it goes on as if it
 /// had read within them.
-fn step(inst: &Inst<Op, VReg>, now: &mut Widths) -> Result<(), Past> {
+fn step(_: usize, inst: &Inst<Op, VReg>, now: &mut Widths) -> Result<(), Past> {
     let e = Effect::of(inst);
     let past = e.reads.iter().enumerate().find_map(|(i, &reads)| {
         let var = e.vector(i).filter(|_| reads > 0)?;
@@ -332,7 +332,8 @@ pub(crate) fn check(p: &Program<Op>, start: &[(VReg, Width)]) -> Option<(usize, 
         widths[v.id as usize] = bits(w);
     }
     let meet = |a: &Widths, b: &Widths| a.iter().zip(b).map(|(&a, &b)| a.min(b)).collect();
-    let (i, Past { var, reads, has }) = forward(p, widths, meet, step).ok()??;
+    let said = forward(p, widths, meet, step).ok()?;
+    let (i, Past { var, reads, has }) = said.into_iter().enumerate().find_map(|(i, said)| Some((i, said?.err()?)))?;
     let Item::Inst(inst) = &p.body[i] else { unreachable!("an instruction fails") };
     let x = &p.regs[var.id as usize].name;
     let message = format!(

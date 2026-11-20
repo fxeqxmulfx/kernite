@@ -42,7 +42,7 @@ pub(crate) fn upper_touched<Op>(inst: &Inst<Op, VReg>, s: &dyn Spill<Op>) -> Tou
 }
 
 /// The variables `inst` reads and the variables it writes.
-fn touched<Op>(inst: &Inst<Op, VReg>) -> Touches {
+pub(crate) fn touched<Op>(inst: &Inst<Op, VReg>) -> Touches {
     (inst.reads().collect(), inst.writes().collect())
 }
 
