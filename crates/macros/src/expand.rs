@@ -253,7 +253,7 @@ pub(crate) fn expand(
                 out.extend(d.said.as_ref().map(said));
                 out.extend(d.errors.iter().map(said));
                 on_gpu.push(conds[i].clone());
-                launchers.extend(d.launcher.as_ref().map(|l| (f, l, own)));
+                launchers.extend(d.launcher.as_ref().map(|l| (f, l, own, conds[i].clone())));
                 if d.launcher.is_none() {
                     helpers.push((i, f));
                 }

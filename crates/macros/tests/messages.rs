@@ -1858,9 +1858,9 @@ fn a_refused_x86_kernel_of_instances_that_cfg_leaves_out_says_nothing_for_anothe
 
 /// A module of GPU kernels needs `kernite-cuda` where `cfg` keeps one of its GPU items, and not where it leaves out
 /// all: a feature that brings the crate, `cuda = ["dep:kernite-cuda"]`, can keep them, and the crate builds without the
-/// feature, without a word, under `deny(warnings)`, and with it. A kernel, a function that kernels call, a static and a
-/// static whose data meets its `expect(deprecated)` each make a module of their own, under `cfg` and under
-/// `cfg_attr(.., cfg(..))`.
+/// feature, without a word, under `deny(warnings)`, and with it. A kernel, a function that kernels call, a static, a
+/// kernel whose code meets its `expect(deprecated)` and a static whose data meets its own each make a module of their
+/// own, under `cfg` and under `cfg_attr(.., cfg(..))`.
 #[test]
 fn a_feature_that_brings_kernite_cuda_can_keep_the_gpu_items() {
     let optional = [("kernite-cuda = {", "kernite-cuda = { optional = true,")];
@@ -5231,6 +5231,45 @@ fn a_static_in_a_crate_without_the_crate_it_needs_is_told_of_at_each_place_it_na
             "src/lib.rs:27:45: warning: use of deprecated constant `gpu::K`",
             "src/lib.rs:27:48: warning: use of deprecated constant `gpu::K`",
             "error: could not compile `levels_statics_missing` (lib) due to 2 previous errors; 4 warnings emitted",
+        ]
+    );
+}
+
+/// A GPU kernel in a crate that lacks `kernite-cuda` is told of at the level it sets, at each place its code names a
+/// deprecated item, as it is in a crate that has the crate, beside kernite's error, which says that the crate needs
+/// `kernite-cuda`, at the module. The crate denies the lint: `warns` lowers it, so its place is a warning; `allows`
+/// quiets it, and `expects` meets its `expect` with the place, so Rust says nothing of either; `crate_level` sets no
+/// level, so its place is an error; `names_nothing` forbids the lint and names no item, so nothing is written for it,
+/// and its `forbid` is not at the `warn` of the kernel after it; `gone` sets the level of a lint Rust does not know,
+/// and `cfg` leaves it out where it keeps the others, so Rust says nothing of it. Rust tells of the same two places in
+/// a build that has `kernite-cuda`.
+#[test]
+fn a_kernel_in_a_crate_without_kernite_cuda_is_told_of_at_each_place_it_names_a_deprecated_item_at_its_level() {
+    let (warns, crate_level) = (
+        "src/lib.rs:20:30: warning: use of deprecated constant `gpu::K`",
+        "src/lib.rs:34:30: error: use of deprecated constant `gpu::K`",
+    );
+    let (built, said) = cargo_in(&["build"], &written("levels_kernels_missing"));
+    assert!(!built, "fixtures/levels_kernels_missing.rs built");
+    assert_eq!(
+        said,
+        [
+            crate_level,
+            warns,
+            "error: could not compile `levels_kernels_missing` (lib) due to 1 previous error; 1 warning emitted"
+        ]
+    );
+    let dir = edited("levels_kernels_missing", &[("kernite-cuda =", "# kernite-cuda =")]);
+    let (built, said) = cargo_in(&["build"], &dir);
+    assert!(!built, "fixtures/levels_kernels_missing.rs built without kernite-cuda");
+    assert_eq!(
+        said,
+        [
+            "src/lib.rs:8:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
+             which this crate does not have",
+            crate_level,
+            warns,
+            "error: could not compile `levels_kernels_missing` (lib) due to 2 previous errors; 1 warning emitted",
         ]
     );
 }

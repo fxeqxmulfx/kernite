@@ -48,10 +48,10 @@ pub(crate) type Laid = Result<Compiled<DeviceStatic>, Failed<DeviceStatic>>;
 ///
 /// Each kernel of `launchers` has its `places`, those of its code that name an item of the module, in the body of its
 /// launcher, where the level the kernel sets holds; so has each static of `memory`, those of its type and of what it
-/// holds, in the body of its method. In a crate without `kernite-cuda`, which has no method, a static has its places in
-/// an item of no name with its levels, where its condition holds.
+/// holds, in the body of its method. In a crate without `kernite-cuda`, which has neither, each has its places in an
+/// item of no name with its levels, where its condition holds.
 pub(crate) fn gpu(
-    launchers: &[(&Fn, &Launcher, TokenStream)],
+    launchers: &[(&Fn, &Launcher, TokenStream, Cond)],
     symbols: &[(Cond, &str)],
     memory: &[(&lang::Static, &Laid, TokenStream, Cond)],
     ptx: &[(Cond, &str)],
@@ -69,14 +69,18 @@ pub(crate) fn gpu(
         out.extend(kernels);
         out.extend(parse(";"));
         out.extend(error);
-        // No method holds the places of a static, so they are in an item of no name with its levels, where its
-        // condition holds.
-        for (s, _, places, cond) in memory {
+        // No launcher or method holds the places of a kernel or of a static, so each has them in an item of no name
+        // with its levels, where its condition holds.
+        let of_kernels = launchers.iter().map(|(f, _, places, cond)| (levels(attrs(f, top), &LEVELS), places, cond));
+        let of_statics = memory
+            .iter()
+            .map(|(s, _, places, cond)| (levels(top[s.attrs.clone()].iter().cloned(), &LEVELS), places, cond));
+        for (set, places, cond) in of_kernels.chain(of_statics) {
             if !places.is_empty()
                 && let Some(guard) = cond.guard()
             {
                 out.extend(guard);
-                out.extend(levels(top[s.attrs.clone()].iter().cloned(), &LEVELS));
+                out.extend(set);
                 out.extend(unnamed(places.clone()));
             }
         }
@@ -126,7 +130,7 @@ pub(crate) fn gpu(
     let (mut errors, mut clashed) = (TokenStream::new(), TokenStream::new());
     let taken: Vec<&str> =
         launchers.iter().map(|(f, ..)| f.name.as_str()).chain(memory.iter().map(|(s, ..)| s.name.as_str())).collect();
-    for (f, how, places) in launchers {
+    for (f, how, places, _) in launchers {
         let launched: Option<Vec<Launched>> = match how {
             Launcher::Never => None,
             Launcher::Of(l) => Some(l.iter().map(|(args, i)| (args.clone(), index(*i))).collect()),

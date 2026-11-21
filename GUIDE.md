@@ -436,8 +436,9 @@ once at each place, whatever instances of a kernel write it and whatever kernels
 The level of a lint that a kernel sets holds at each of these places, as in a function of Rust's. `#[allow(deprecated)]`
 on a kernel has Rust say nothing at any of them, on x86 and on a GPU; `warn`, `deny` and `forbid` make each a warning or
 an error, though the crate allows the lint or denies it; and `expect` is met by each: Rust says nothing of them, and of
-a kernel whose code names no deprecated item, that the expectation is unfulfilled, once, at the attribute. Where a
-kernel with a level calls a deprecated helper, GPU helper or `extern "ptx-func"` function, Rust says the kernel's name
+a kernel whose code names no deprecated item, that the expectation is unfulfilled, once, at the attribute. A GPU kernel
+in a crate without `kernite-cuda` has its places at its level too, beside the error that says the crate needs it. Where
+a kernel with a level calls a deprecated helper, GPU helper or `extern "ptx-func"` function, Rust says the kernel's name
 in the path, `cpu::warned::_::touch`, as the function of the item's name is in the kernel's own function, one for all
 the kernel's places. Where the build is incremental, Rust counts an error in the item's `deprecated` once for each
 function that has it: the function of each kernel, helper or function with a level whose code names the item, the one of
