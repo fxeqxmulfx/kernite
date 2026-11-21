@@ -382,8 +382,9 @@ fn a_static_named_in_a_kernel_shows_its_doc() -> Result {
 
 /// What a hover shows at the name of an instruction, in a module whose kernels compile: its doc, which says what it
 /// does, each form it takes with the operands it writes marked, the CPU feature it needs, and where Intel's SDM says
-/// the rest; at either word of a name of two; and the doc of the member of a family that is named. An instruction only
-/// a function that `cfg` leaves out names has none.
+/// the rest; at either word of a name of two; and the doc of the member of a family that is named. A GPU instruction's
+/// doc says what each word of its name is, the PTX and the GPU it needs, and where PTX's ISA says the rest; it shows at
+/// each word of the name. An instruction only a function that `cfg` leaves out names has none.
 #[test]
 fn an_instruction_named_in_a_kernel_shows_its_doc() -> Result {
     let Some(binary) = rust_analyzer() else {
@@ -413,11 +414,35 @@ fn an_instruction_named_in_a_kernel_shows_its_doc() -> Result {
     assert!(shown.contains("cmovz(+r64, r64/m64)"), "{shown}");
     let left_out = editor.hover("src/lib.rs", "vsubps(", 2)?.unwrap_or_default();
     assert!(!left_out.contains("Intel's SDM"), "{left_out}");
+    let shown = editor.shown("ld.global.f32(", 1)?;
+    for want in [
+        "Reads memory at the address in the second operand, and writes it to the first.",
+        "* `.global`: global memory, which every thread of the GPU reaches\n* `.f32`: a float of 32 bits",
+        "ld.global.f32(=f32/_, [u64])",
+        "`=` marks an operand it writes.",
+        "PTX's ISA, Data Movement and Conversion Instructions: ld.",
+    ] {
+        assert!(shown.contains(want), "no `{want}` in the hover at `ld`:\n{shown}");
+    }
+    for skip in [5, 11] {
+        let shown = editor.shown("ld.global.f32(", skip)?;
+        assert!(shown.contains("ld.global.f32(=f32/_, [u64])"), "{shown}");
+    }
+    let shown = editor.shown("fma.rn.ftz.f32(", 1)?;
+    assert!(shown.contains("fma.rn.ftz.f32(=f32, f32, f32, f32)"), "{shown}");
+    assert!(shown.contains("* `.ftz`: flushes a subnormal input or result to a zero"), "{shown}");
+    let shown = editor.shown("shfl.sync.bfly.b32(", 1)?;
+    assert!(shown.contains("Needs PTX 6.0 and `sm_30`."), "{shown}");
+    let shown = editor.shown("mma.sync.aligned", 1)?;
+    let form = "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32(=(f32/_)*4, %f16x2*4, %f16x2*2, f32*4)";
+    assert!(shown.contains(form) && shown.contains("Needs PTX 7.0 and `sm_80`."), "{shown}");
+    let left_out = editor.hover("src/lib.rs", "sub.rn.f32(", 1)?.unwrap_or_default();
+    assert!(!left_out.contains("PTX's ISA"), "{left_out}");
     Ok(())
 }
 
 /// What a hover shows at the name of an instruction where a kernel is refused: its doc, in the kernel that kernite
-/// refuses as in the one it compiles; and nothing at a name x86 has no instruction of.
+/// refuses as in the one it compiles; and nothing at a name that x86 or the GPU has no instruction of.
 #[test]
 fn an_instruction_shows_its_doc_where_a_kernel_is_refused() -> Result {
     let Some(binary) = rust_analyzer() else {
@@ -431,5 +456,14 @@ fn an_instruction_shows_its_doc_where_a_kernel_is_refused() -> Result {
     }
     let unknown = editor.hover("src/lib.rs", "vaddpz(", 2)?.unwrap_or_default();
     assert!(!unknown.contains("Intel's SDM"), "{unknown}");
+    for (needle, name) in [
+        ("ld.global.f32(", "Data Movement and Conversion Instructions: ld."),
+        ("sub.rn.f32(", "Floating-Point Instructions: sub."),
+    ] {
+        let shown = editor.shown(needle, 1)?;
+        assert!(shown.contains(&format!("PTX's ISA, {name}")), "{shown}");
+    }
+    let unknown = editor.hover("src/lib.rs", "ld.globl.f32(", 1)?.unwrap_or_default();
+    assert!(!unknown.contains("PTX's ISA"), "{unknown}");
     Ok(())
 }

@@ -39,6 +39,10 @@ impl Backend for Ptx {
         Ok(made)
     }
 
+    fn doc(&self, name: &str) -> Option<String> {
+        crate::docs::of(name)
+    }
+
     fn room(&self, statics: &[Static]) -> Vec<Option<String>> {
         crate::room(statics)
     }

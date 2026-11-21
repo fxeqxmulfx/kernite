@@ -4548,8 +4548,8 @@ fn a_fragment_behind_a_pointer_that_kernite_takes_is_one_type_to_rust_and_to_the
     Ok(())
 }
 
-/// The docs of the instructions a kernel names are nothing to Rust: a module of x86 kernels that name them builds,
-/// tests and documents without a word, with a function that `cfg` leaves out and one that only a test keeps.
+/// The docs of the instructions a kernel names are nothing to Rust: modules of x86 and of GPU kernels that name them
+/// build, test and document without a word, each with a function that `cfg` leaves out and one that only a test keeps.
 #[test]
 fn the_docs_of_instructions_say_nothing_to_rust() -> Result {
     let dir = written("docs_instructions")?;
@@ -4559,7 +4559,7 @@ fn the_docs_of_instructions_say_nothing_to_rust() -> Result {
     Ok(())
 }
 
-/// Rust drops what holds the docs: the code rustc writes of a module of kernels that name instructions has the kernels,
+/// Rust drops what holds the docs: the code rustc writes of modules of kernels that name instructions has the kernels,
 /// and no function of an instruction and no word of a doc.
 #[test]
 fn the_docs_of_instructions_add_no_code() -> Result {
@@ -4573,16 +4573,20 @@ fn the_docs_of_instructions_add_no_code() -> Result {
     );
     let code = fs::read_to_string(&ir)?;
     assert!(code.contains("add_row") && code.contains("claim"), "the code has no kernel of the fixture");
-    assert!(!code.contains("Intel's SDM"), "the code has the words of a doc");
-    for name in ["vaddps", "lock_bts", "cmovz", "vsubps", "vmulps"] {
+    assert!(code.contains("axpy") && code.contains("neighbour"), "the code has no GPU kernel of the fixture");
+    assert!(!code.contains("Intel's SDM") && !code.contains("PTX's ISA"), "the code has the words of a doc");
+    let names = ["vaddps", "lock_bts", "cmovz", "vsubps", "vmulps"];
+    for name in
+        names.into_iter().chain(["ld_global_f32", "fma_rn_ftz_f32", "shfl_sync_bfly_b32", "sub_rn_f32", "mul_rn_f32"])
+    {
         let defined = code.lines().filter(|line| line.starts_with("define") && line.contains(name)).count();
         assert_eq!(defined, 0, "the code defines a function of `{name}`");
     }
     Ok(())
 }
 
-/// A name x86 has no instruction of has no doc, so its error is kernite's alone, once, and not Rust's as well, which
-/// would say it cannot find a name: the instructions beside it that x86 has are documented.
+/// A name x86 or the GPU has no instruction of has no doc, so its error is kernite's alone, once, and not Rust's as
+/// well, which would say it cannot find a name: the instructions beside it that the machine has are documented.
 #[test]
 fn a_name_that_is_no_instruction_has_its_own_error_alone() -> Result {
     refuses(
@@ -4590,6 +4594,13 @@ fn a_name_that_is_no_instruction_has_its_own_error_alone() -> Result {
         &[
             "src/lib.rs:11:9: error: x86 has no instruction `vaddpz` that kernite knows",
             "error: could not compile `docs_unknown` (lib) due to 1 previous error",
+        ],
+    )?;
+    refuses(
+        "docs_unknown_gpu",
+        &[
+            "src/lib.rs:9:18: error: PTX's `ld` has no `.globl` that kernite knows",
+            "error: could not compile `docs_unknown_gpu` (lib) due to 1 previous error",
         ],
     )?;
     Ok(())

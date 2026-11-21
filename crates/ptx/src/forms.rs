@@ -1163,6 +1163,21 @@ impl Bound {
         }
     }
 
+    /// How many registers `spec` is: one, so many taken together, or as many as `.v2` or `.v4` say.
+    pub fn count(&self, spec: &Spec) -> usize {
+        match spec.count {
+            Count::One => 1,
+            Count::Fixed(n) => n,
+            Count::Vec => self.lanes(),
+        }
+    }
+
+    /// Whether an address in `space` is in a 64-bit variable: a generic or a global one is, but for a form that
+    /// takes one in 32 bits, as [`Check::Addr32`] says.
+    pub fn wide(&self, space: Space) -> bool {
+        space.wide() && !self.form.checks.contains(&Check::Addr32)
+    }
+
     /// The first state space the name gives, where the memory it takes the address of is:
     /// `cvta.shared`'s.
     pub fn space(&self) -> Space {

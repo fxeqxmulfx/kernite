@@ -1,5 +1,5 @@
-//! A module of x86 kernels, one of which kernite refuses, as an editor opens it, for `tests/hover.rs` to hover at the
-//! instructions a kernel names.
+//! Modules of x86 and of GPU kernels, one of each that kernite refuses, as an editor opens them, for `tests/hover.rs`
+//! to hover at the instructions a kernel names.
 
 #[kernite_macros::kernels]
 pub mod kernels {
@@ -18,5 +18,24 @@ pub mod kernels {
         vmovups(x, [a]);
         vsubps(x, x, x);
         vaddpz(x, x, x);
+    }
+}
+
+#[kernite_macros::kernels]
+pub mod gpu {
+    /// Adds one to the float at `a`.
+    pub unsafe extern "ptx-kernel" fn add_one(a: *mut f32) {
+        let v: f32;
+        ld.global.f32(v, [a]);
+        add.rn.f32(v, v, 1.0);
+        st.global.f32([a], v);
+    }
+
+    /// Names one instruction that the GPU has, with an operand too many, and one that it has not.
+    pub unsafe extern "ptx-kernel" fn broken(a: *mut f32) {
+        let v: f32;
+        ld.global.f32(v, [a]);
+        sub.rn.f32(v, v, v, v);
+        ld.globl.f32(v, [a]);
     }
 }

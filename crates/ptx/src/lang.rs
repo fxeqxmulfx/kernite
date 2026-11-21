@@ -609,7 +609,7 @@ impl Kernel {
     /// `a` as `spec`, as many registers as it takes together: braced, as PTX writes a fragment
     /// even of one, `{%r1}`, which may be given as one, `d`, or as one taken together, `(d,)`.
     fn several(&self, b: &Bound, spec: &Spec, a: &Given<Var>, name: &str, w: &mut Written) -> Result<String, String> {
-        let n = lanes(b, spec);
+        let n = b.count(spec);
         let braced = matches!(spec.count, Count::Fixed(_));
         if n == 1 && !braced {
             // ptxas leaves a register of a vector unwritten, but not the one of a name with
@@ -907,7 +907,7 @@ impl Kernel {
         }
         let space = b.spaces().get(w.addrs).copied().unwrap_or(Space::Generic);
         w.addrs += 1;
-        let wide = space.wide() && !b.form.checks.contains(&Check::Addr32);
+        let wide = b.wide(space);
         let (base, ty) = match m.base {
             // ptxas takes an address known now of local memory, `[256]`, as PTX's ISA has it;
             // but ptxas lays out local memory, for the kernel's variables and for its own, so
@@ -1441,7 +1441,7 @@ impl Kernel {
 fn reach(b: &Bound, args: &[Given<Var>]) -> u64 {
     match b.form.op {
         "ld" | "st" | "atom" | "red" | "wmma" => {
-            b.form.data().and_then(|s| Some(u64::from(b.ty(s.ty?)?.bits()) / 8 * lanes(b, s) as u64)).unwrap_or(1)
+            b.form.data().and_then(|s| Some(u64::from(b.ty(s.ty?)?.bits()) / 8 * b.count(s) as u64)).unwrap_or(1)
         }
         "mbarrier" => 8,
         "ldmatrix" => 16,
@@ -1451,15 +1451,6 @@ fn reach(b: &Bound, args: &[Given<Var>]) -> u64 {
             _ => 1,
         },
         _ => 1,
-    }
-}
-
-/// How many registers `spec` of `b` is.
-fn lanes(b: &Bound, spec: &Spec) -> usize {
-    match spec.count {
-        Count::One => 1,
-        Count::Fixed(n) => n,
-        Count::Vec => b.lanes(),
     }
 }
 
@@ -1480,10 +1471,10 @@ fn shaped(b: &Bound, spec: &Spec, a: &Given<Var>) -> bool {
         | (Role::Func, Given::Func(_))
         | (Role::Imm(_), Given::Int(_)) => true,
         (Role::Dst | Role::Src, Given::Var(v)) => matches!(v, Var::Mem(_)) == spec.memory,
-        (Role::Dst | Role::Src, Given::Vector(parts)) => lanes(b, spec) == parts.len(),
+        (Role::Dst | Role::Src, Given::Vector(parts)) => b.count(spec) == parts.len(),
         (Role::Dst | Role::Src, Given::Pair(..)) => spec.second.is_some(),
         (Role::Dst | Role::Src, Given::Mem(_) | Given::Label(_) | Given::Func(_)) => false,
-        (Role::Dst | Role::Src, _) => lanes(b, spec) == 1,
+        (Role::Dst | Role::Src, _) => b.count(spec) == 1,
         _ => false,
     }
 }
@@ -1676,7 +1667,7 @@ fn describe(b: &Bound, spec: &Spec) -> String {
             let what = if b.form.op.starts_with("su") { "surface" } else { "texture" };
             let Some(at) = spec.inner.get(1) else { return format!("a {what}'s handle in brackets, `[t]`") };
             let names = if at.lead.is_some() { ["i", "x", "y", "z"] } else { ["x", "y", "z", "w"] };
-            let at = match lanes(b, at) {
+            let at = match b.count(at) {
                 1 => names[0].to_string(),
                 n => format!("({})", names.get(..n).unwrap_or_default().join(", ")),
             };
@@ -1690,7 +1681,7 @@ fn describe(b: &Bound, spec: &Spec) -> String {
         Role::Src if spec.sreg => format!("a `{t}` variable, a value or a special register"),
         Role::Src => format!("a `{t}` variable or a value"),
     };
-    match (lanes(b, spec), spec.lead) {
+    match (b.count(spec), spec.lead) {
         (1, _) => one,
         (n, Some(lead)) => {
             let first =

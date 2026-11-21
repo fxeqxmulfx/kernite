@@ -18,6 +18,7 @@
 
 mod backend;
 mod call;
+mod docs;
 mod entry;
 pub mod forms;
 pub mod lang;

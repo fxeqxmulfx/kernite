@@ -11,6 +11,7 @@
 
 mod assembly;
 mod classify;
+mod docs;
 mod dto;
 mod facade;
 mod function;
@@ -20,6 +21,7 @@ mod present;
 
 pub use assembly::{Assembly, Kept, When};
 pub use classify::{Abi, Owner, abi, cooperative, function, instance, owner};
+pub use docs::texts;
 pub use dto::{
     Bytes, Call, Compiled, DeviceFnOut, DeviceOut, DeviceStatic, Documented, Done, Failed, Given, HostStatic, ItemOut,
     Launch, Launcher, ModuleOut, Naked, NativeInstance, NativeOut, Quantity, Requirement, Why,

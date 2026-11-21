@@ -976,6 +976,17 @@ takes `r#`, so `tex.2d` is `tex._2d`, `ld.global.L2::64B` is `ld.global.L2__64B`
 texture or a surface is its handle, the `u64` of a CUDA texture or surface object, in brackets with its coordinates:
 `tex._2d.v4.f32.f32((r, g, b, a), [t, (x, y)])`.
 
+An editor shows the doc of a PTX instruction where a kernel names it, as it does for x86: hover at any word of
+`ld.global.f32(v, [p])` in rust-analyzer. The doc says what the instruction does, in a sentence of kernite's own; what
+each word of its name means, in a phrase; each form it takes, as a kernel writes it, `ld.global.f32(=f32/_, [u64])`,
+with `=` before each operand it writes, `+` before each it reads and writes, `%` before each that must be a variable,
+`_` where a sink may stand, and the limits of a number known now, `u32[0,31]` or `#4|8|16`; the PTX and the GPU it
+needs, when more than PTX 3.0 and `sm_30`, and `@7.5 sm_80` after a form that needs more than the first; and where
+PTX's ISA says the rest. Each instruction of `forms` has a doc and each word of its name a phrase, which a test holds
+the table to. `shfl` and `vote` without `.sync` have none, as kernite refuses them, and a name that is no instruction
+has its own error and no doc. The macros write a doc as they write x86's, so it adds no code and changes no listing and
+no error.
+
 Memory a kernel declares is a variable: `let tile: shared<[f32; 256], 16>;` is 256 floats of shared memory at a
 multiple of 16, reached by its name, `ld.shared.f32(v, [tile + 16])`, and `shared<[f32]>` is as many as the launch
 gives, `Grid::new(blocks, threads).with_shared(bytes)`. A kernel's `f16` and `bf16`, which Rust has not, are

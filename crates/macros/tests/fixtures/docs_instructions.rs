@@ -1,5 +1,5 @@
-//! A module of x86 kernels that name instructions, as a crate builds, tests, documents and lints it: the docs of the
-//! instructions, which an editor shows, are nothing to Rust.
+//! Modules of x86 and of GPU kernels that name instructions, as a crate builds, tests, documents and lints them: the
+//! docs of the instructions, which an editor shows, are nothing to Rust.
 
 #[kernite_macros::kernels]
 pub mod kernels {
@@ -42,5 +42,42 @@ pub mod kernels {
         vmovups(y, [b]);
         vmulps(x, x, y);
         vmovups([a], x);
+    }
+}
+
+#[kernite_macros::kernels]
+pub mod gpu {
+    /// Adds `a` times the float at `x` to the float at `y`.
+    pub unsafe extern "ptx-kernel" fn axpy(a: f32, x: *const f32, y: *mut f32) {
+        let (u, v): (f32, f32);
+        ld.global.f32(u, [x]);
+        ld.global.f32(v, [y]);
+        fma.rn.ftz.f32(v, a, u, v);
+        st.global.f32([y], v);
+    }
+
+    /// Writes to `out` the `v` of the lane whose index differs from this one's in the lowest bit.
+    pub unsafe extern "ptx-kernel" fn neighbour(v: u32, out: *mut u32) {
+        let w: u32;
+        shfl.sync.bfly.b32(w, v, 1, 31, 0xffffffff);
+        st.global.u32([out], w);
+    }
+
+    /// Built for a test and left out of the library.
+    #[cfg(test)]
+    pub unsafe extern "ptx-kernel" fn in_tests(y: *mut f32) {
+        let v: f32;
+        ld.global.f32(v, [y]);
+        sub.rn.f32(v, v, v);
+        st.global.f32([y], v);
+    }
+
+    /// Left out always.
+    #[cfg(any())]
+    pub unsafe extern "ptx-kernel" fn left_out(y: *mut f32) {
+        let v: f32;
+        ld.global.f32(v, [y]);
+        mul.rn.f32(v, v, v);
+        st.global.f32([y], v);
     }
 }

@@ -731,34 +731,7 @@ static RELATIONS: [(&str, &str); 12] = [
 /// it, and says which line is wrong.
 fn sentences() -> &'static BTreeMap<&'static str, String> {
     static SENTENCES_BY_NAME: OnceLock<BTreeMap<&'static str, String>> = OnceLock::new();
-    SENTENCES_BY_NAME.get_or_init(|| parse(SENTENCES).unwrap_or_default())
-}
-
-/// The sentences of `text`, by name, or the first line that is wrong, and why.
-fn parse(text: &'static str) -> Result<BTreeMap<&'static str, String>, String> {
-    let mut entries: Vec<(&'static str, String)> = vec![];
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        match (line.starts_with(' '), entries.last_mut()) {
-            (true, Some((_, sentence))) => {
-                sentence.push(' ');
-                sentence.push_str(line.trim());
-            }
-            (true, None) => return Err(format!("`{}` goes on from no sentence", line.trim())),
-            (false, _) => {
-                let (names, sentence) = line.split_once(" : ").ok_or_else(|| format!("`{line}` has no ` : `"))?;
-                entries.push((names, sentence.to_string()));
-            }
-        }
-    }
-    let mut out = BTreeMap::new();
-    for (names, sentence) in entries {
-        for name in names.split_whitespace() {
-            if out.insert(name, sentence.clone()).is_some() {
-                return Err(format!("`{name}` has two sentences"));
-            }
-        }
-    }
-    Ok(out)
+    SENTENCES_BY_NAME.get_or_init(|| kernite_build::texts(SENTENCES).unwrap_or_default())
 }
 
 /// The stem and the condition of `name`, if it is `cmov`, `set` or `j` with a condition.
@@ -1002,16 +975,12 @@ mod tests {
 
     #[test]
     fn the_sentences_parse_and_each_is_of_a_name_kernite_writes() -> Result {
-        let all = parse(SENTENCES)?;
+        let all = kernite_build::texts(SENTENCES)?;
         assert!(all.len() > 340, "{} sentences", all.len());
         for (name, sentence) in &all {
             assert!(forms::of(name).is_some(), "`{name}` is no instruction of the table");
             assert!(sentence.ends_with('.') && !sentence.contains("  "), "`{name}`: {sentence}");
         }
-        assert_eq!(parse("a : b.\n    c.\n"), Ok(BTreeMap::from([("a", "b. c.".to_string())])));
-        assert_eq!(parse("a b : c.\na : d.\n"), Err("`a` has two sentences".into()));
-        assert_eq!(parse("a b.\n"), Err("`a b.` has no ` : `".into()));
-        assert_eq!(parse("  a.\n"), Err("`a.` goes on from no sentence".into()));
         Ok(())
     }
 

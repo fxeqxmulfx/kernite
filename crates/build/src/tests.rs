@@ -3,13 +3,14 @@
 //! its machine, but those written to fail.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use kernite_lang::{Error, Fault, Fn, Guard, IntTy, Memory, Mention, Operand, Span, Target, Value, parse};
 
 use crate::{
     Abi, Assembly, Backend, Call, Called, ConstItem, Device, DeviceOut, DeviceStatic, Done, Given, HostStatic, ItemOut,
     Kept, Launch, Launcher, ModuleOut, Naked, Native, NativeOut, Owner, Quantity, Requirement, StaticError, Unfinished,
-    When, Why, abi, all, compile, consts, cooperative, function, instance, module, one, owner, prepare, statics,
+    When, Why, abi, all, compile, consts, cooperative, function, instance, module, one, owner, prepare, statics, texts,
 };
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
@@ -1649,4 +1650,18 @@ fn a_module_has_the_docs_of_the_instructions_its_functions_name() -> Result {
     let names: Vec<String> = out.instructions.iter().map(|d| d.name.clone()).collect();
     assert_eq!(names, ["doc.once", "doc.both", "doc.both", "doc.on.gpu"]);
     Ok(())
+}
+
+/// A table of texts is a line for each set of names, then ` : `, then the text, which goes on in the lines after it
+/// that start with a space.
+#[test]
+fn a_table_of_texts_is_read_by_name() {
+    let text = |names: &[(&'static str, &str)]| -> Result<BTreeMap<&'static str, String>, String> {
+        Ok(names.iter().map(|&(name, text)| (name, text.to_string())).collect())
+    };
+    assert_eq!(texts("a : b.\n    c.\n"), text(&[("a", "b. c.")]));
+    assert_eq!(texts("a b : c.\n\nd : e.\n"), text(&[("a", "c."), ("b", "c."), ("d", "e.")]));
+    assert_eq!(texts("a b : c.\na : d.\n"), Err("`a` has two texts".into()));
+    assert_eq!(texts("a b.\n"), Err("`a b.` has no ` : `".into()));
+    assert_eq!(texts("  a.\n"), Err("`a.` goes on from no text".into()));
 }
