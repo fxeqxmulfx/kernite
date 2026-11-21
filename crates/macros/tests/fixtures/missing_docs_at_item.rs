@@ -2,9 +2,9 @@
 //! item written in plain Rust, and not at the module's `#[kernite_macros::kernels]`, where nothing can be mended. Each
 //! is told of at its own place: the statics of GPU kernels, which are methods of `Kernels`; the statics of x86 kernels,
 //! near `rip` and far from it; and the x86 kernels, plain, giving back a number, a pointer or `()`, and of instances.
-//! What has a doc is not told of, nor is a GPU kernel, whose launcher the macros write with a doc, nor a cooperative
-//! x86 kernel, whose launcher they write with one, nor an x86 kernel that names a static of its module, whose safety
-//! contract they write as a doc.
+//! What has a doc is not told of, nor is a GPU kernel or a cooperative x86 kernel, whose launcher the macros write with
+//! a doc, nor an x86 kernel that names a static of its module, whose safety contract they write as a doc, nor one that
+//! needs a CPU feature past x86-64's own, `avx` here, whose doc names it: an `unsafe fn` or not, plain or of instances.
 
 /// GPU statics of no doc, and one with a doc, and a GPU kernel.
 #[kernite_macros::kernels]
@@ -67,4 +67,30 @@ pub mod cpu {
 
     #[cooperative]
     pub unsafe extern "sysv64" fn together() {}
+
+    pub unsafe extern "sysv64" fn needs(p: *mut f32) {
+        let v: ymm;
+        vmovups(v, [p]);
+        vmovups([p], v);
+    }
+
+    pub extern "sysv64" fn needs_safely(xs: &mut [f32; 8]) {
+        let v: ymm;
+        vmovups(v, [xs]);
+        vmovups([xs], v);
+    }
+
+    #[instances(2, 3)]
+    pub unsafe extern "sysv64" fn needs_many<const N: u64>(p: *mut f32) {
+        let v: ymm;
+        vmovups(v, [p + N]);
+        vmovups([p + N], v);
+    }
+
+    #[instances(8, 16)]
+    pub extern "sysv64" fn needs_many_safely<const N: usize>(xs: &mut [f32; N]) {
+        let v: ymm;
+        vmovups(v, [xs]);
+        vmovups([xs], v);
+    }
 }

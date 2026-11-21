@@ -420,7 +420,10 @@ of GPU kernels, which Rust has as a method of `Kernels`, and of an x86 kernel. C
 kernel that is an `unsafe fn` and whose docs have no `# Safety`, as it does of any public `unsafe fn`. Neither tells of
 a GPU kernel or a cooperative x86 kernel, whose launcher the macros write with a doc, a `# Safety` where it is an
 `unsafe fn`, nor of an x86 kernel that names a static of its module, whose `# Safety` they write where its docs have
-none.
+none. Rust does not tell of an x86 kernel whose code needs a CPU feature past x86-64's own either, an `unsafe fn` or
+not, plain or of instances: the macros write it a doc that names the features. Clippy tells of one whose docs have no
+`# Safety`, as it does of any public function that is `#[target_feature]`, which a function without the feature calls
+only in an `unsafe` block.
 
 A deprecated item that a kernel names is told of by Rust at the name, once for each place the kernel writes it.
 `lea(p, [COUNTS]);` of a deprecated static is a warning at `COUNTS`, with the note of the attribute, `call(v, old, ());`

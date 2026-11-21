@@ -4984,7 +4984,9 @@ fn rust_counts_a_malformed_deprecated_once_for_each_item_with_a_level_that_names
 /// methods of `Kernels`; each static of x86 kernels, near `rip` and far from it; and each x86 kernel that the macros
 /// write a function for, plain, giving back a number, a pointer or `()`, and of instances. A static or a kernel with a
 /// doc is not told of, nor is a GPU kernel or a cooperative x86 kernel, whose launcher the macros write with a doc, nor
-/// an x86 kernel that names a static of its module, whose safety contract they write as a doc.
+/// an x86 kernel that names a static of its module, whose safety contract they write as a doc, nor one whose code needs
+/// a CPU feature past x86-64's own, `avx` here, an `unsafe fn` or not, plain or of instances, whose doc they write to
+/// name the features.
 #[test]
 fn an_item_of_kernels_with_no_doc_is_told_of_at_the_item() -> Result {
     refuses(
@@ -5007,15 +5009,17 @@ fn an_item_of_kernels_with_no_doc_is_told_of_at_the_item() -> Result {
 }
 
 /// Clippy tells of a public x86 kernel whose docs have no `# Safety` at the kernel, as it tells of an `unsafe fn` of
-/// Rust's own: a plain kernel, one that gives back a number, and one of instances. It says nothing of a kernel whose
-/// docs have one, of a kernel that names a static of its module, plain or of instances, whose contract the macros write
-/// as one, of a cooperative kernel, nor of a GPU kernel, whose launcher has the macros'.
+/// Rust's own: a plain kernel, one that gives back a number, and one of instances. So it does of one that needs a CPU
+/// feature past x86-64's own, `avx` here, whether it is an `unsafe fn` or not, plain or of instances: Rust has one that
+/// is no `unsafe fn` as unsafe to call where the caller does not have the feature. It says nothing of a kernel whose
+/// docs have a `# Safety`, of a kernel that names a static of its module, plain or of instances, whose contract the
+/// macros write as one, of a cooperative kernel, nor of a GPU kernel, whose launcher has the macros'.
 #[test]
 fn clippy_tells_of_a_public_x86_kernel_with_no_safety_doc_at_the_kernel() -> Result {
     if clippy_here() {
         let (done, said) = cargo(&["clippy"], "missing_safety_doc_at_item")?;
         let missing = "warning: unsafe function's docs are missing a `# Safety` section";
-        let lines = [14, 17, 23].map(|line| format!("src/lib.rs:{line}:5: {missing}"));
+        let lines = [15, 18, 24, 65, 73, 81, 89].map(|line| format!("src/lib.rs:{line}:5: {missing}"));
         assert!(
             done && said == lines,
             "fixtures/missing_safety_doc_at_item.rs: Clippy {done}, and said:\n{}",
