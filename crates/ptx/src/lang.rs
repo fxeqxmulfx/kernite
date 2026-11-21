@@ -2040,7 +2040,7 @@ impl Target for Kernel {
         }
     }
 
-    fn inst_at(&mut self, at: Span) {
+    fn inst_at(&mut self, at: Span, _operands: &[Span]) {
         self.at = at;
     }
 }

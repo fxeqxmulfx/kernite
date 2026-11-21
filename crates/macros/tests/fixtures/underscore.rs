@@ -1,10 +1,11 @@
 //! Parameters named `_`, in a kernel of every kind: values given and not read, as Rust has it. Each kernel
 //! takes a number named `_`, a number it reads, a pointer named `_`, and the pointer it writes through and
 //! the number it reads after them, so that a kernel that read from the wrong place would give a wrong value.
-//! Rust builds the crate without a word, under `#![deny(warnings)]`, and the tests run each kernel: the x86
+//! Two x86 kernels take a slice named `_` first, which is two registers, before the numbers they read. Rust
+//! builds the crate without a word, under `#![deny(warnings)]`, and the tests run each kernel: the x86
 //! kernels, plain, of compile-time arguments, cooperative, and cooperative of arguments, and the GPU kernels
-//! of the same kinds, on the GPU if there is one. Some parameters and compile-time arguments are named as
-//! the macros name a parameter named `_`, `__kernite_0` among them, which the macros then name otherwise.
+//! of the same kinds, on the GPU if there is one. Some parameters and compile-time arguments are named as the
+//! macros name a parameter named `_`, `__kernite_0` among them, which the macros then name otherwise.
 
 #![deny(warnings)]
 #![allow(non_upper_case_globals)]
@@ -85,6 +86,20 @@ pub mod cpu {
     pub unsafe extern "sysv64" fn counted_together<const __kernite_0: u64>(_: u64, a: u64, p: *mut u64) {
         add(a, __kernite_0);
         mov(qword[p], a);
+    }
+
+    /// `a - b`, of a slice named `_`.
+    pub unsafe extern "sysv64" fn sliced(_: &[u64], a: u64, b: u64) -> u64 {
+        sub(a, b);
+        ret(a);
+    }
+
+    /// `a - b + N`, of a slice named `_`.
+    #[instances(10, 20)]
+    pub unsafe extern "sysv64" fn sliced_tiles<const N: u64>(_: &[u64], a: u64, b: u64) -> u64 {
+        sub(a, b);
+        add(a, N);
+        ret(a);
     }
 }
 
@@ -167,6 +182,8 @@ fn each_x86_kernel_reads_what_comes_after_the_parameters_named_underscore() -> R
         assert_eq!(cpu::tiles::<20>(1, 50, junk, 8), 62);
         assert_eq!(cpu::named_tiles::<10>(100, 1, 50, 200, junk, 8), 52 + 200 + 100);
         assert_eq!(cpu::counted::<20>(1, 50), 70);
+        assert_eq!(cpu::sliced(&[999, 999], 50, 8), 42);
+        assert_eq!(cpu::sliced_tiles::<10>(&[999, 999], 50, 8), 52);
         // That `$launch`, a cooperative kernel, writes `$want` through `written`.
         macro_rules! writes {
             ($want:expr, $launch:expr) => {{

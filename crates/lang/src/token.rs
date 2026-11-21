@@ -356,16 +356,31 @@ pub fn pointer(ty: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-/// The array `ty`, a type as [`read_type`] gives it, is a reference to, `&[f32; 8]` or `&mut [f32; 8]`: whether the
-/// reference is `&mut`, then the type of the elements and their count, as written. A reference to a slice or to
-/// anything else is none, and so is a reference with a lifetime, `&'a [f32; 8]`.
-pub fn array_ref(ty: &str) -> Option<(bool, &str, &str)> {
+/// The elements `ty`, a type as [`read_type`] gives it, is a reference to, if it is one to an array, `&[f32; 8]`, or to
+/// a slice, `&mut [f32]`: whether the reference is `&mut`, then the type of the elements and, for an array, their
+/// count, as written. A reference to anything else is none, and so is a reference with a lifetime, `&'a [f32; 8]`.
+pub fn array_ref(ty: &str) -> Option<(bool, &str, Option<&str>)> {
     let (write, to) = match ty.strip_prefix("&mut ") {
         Some(to) => (true, to),
         None => (false, ty.strip_prefix('&')?),
     };
-    let (elem, len) = to.strip_prefix('[')?.strip_suffix(']')?.rsplit_once("; ")?;
-    Some((write, elem, len))
+    let inside = to.strip_prefix('[')?.strip_suffix(']')?;
+    // The `;` of the array itself is outside every bracket of its elements' type, `[[u8; 4]; 8]`, and a slice of
+    // arrays, `[[u8; 4]]`, has none outside.
+    let mut depth = 0_u32;
+    let semicolon = inside.char_indices().find_map(|(at, c)| {
+        match c {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        (c == ';' && depth == 0).then_some(at)
+    });
+    let split = semicolon.and_then(|at| inside.split_at_checked(at));
+    Some(match split.and_then(|(elem, rest)| Some((elem, rest.strip_prefix("; ")?))) {
+        Some((elem, len)) => (write, elem, Some(len)),
+        None => (write, inside, None),
+    })
 }
 
 /// Whether the type `ty` has no size: a slice, a `str` or a `dyn`, or a tuple that ends in one.

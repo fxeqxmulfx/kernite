@@ -136,16 +136,20 @@ pub fn on_every_path<Op>(p: &Program<Op>, leaves: &[usize]) -> Result<Vec<bool>,
 }
 
 /// Follows a value over `p`'s body to a fixed point: `start` is the value at the top of the body, `step` what the
-/// instruction at an index of the body does to it, and `meet` what the value is at a label, of the values the ways to
-/// it bring, a jump back among them. It gives what `step` said of each item, the last time `step` ran on it, once the
-/// values stop changing: `None` for an item that no way comes to, which is not stepped, and for one that is not an
-/// instruction. For the loop to end, `meet` gives no more than its first value, and a value goes down only so many
-/// times. It fails, as [`check`](crate::check) does, if control leaves the body or a jump has no label.
+/// instruction at an index of the body does to it, and `meet` what the value is at a label, of the value it has and the
+/// one a way to it brings, given whether that way goes back, to its own block or one before it, as a loop's does. A way
+/// out of a jump that goes to its label or on to the next item, one the flags decide, changes the value as `edge` says,
+/// given the jump, and whether the way is to its label. It gives what `step` said of each item, the last time `step`
+/// ran on it, once the values stop changing: `None` for an item that no way comes to, which is not stepped, and for one
+/// that is not an instruction. For the loop to end, `meet` gives no more than its first value, and, on a way back, lets
+/// a value go down only so many times. It fails, as [`check`](crate::check) does, if control leaves the body or a jump
+/// has no label.
 pub fn forward<Op, S: Clone + PartialEq, T>(
     p: &Program<Op>,
     start: S,
-    meet: impl Fn(&S, &S) -> S,
+    meet: impl Fn(&S, &S, bool) -> S,
     step: impl Fn(usize, &Inst<Op, VReg>, &mut S) -> T,
+    edge: impl Fn(&Inst<Op, VReg>, bool, &mut S),
 ) -> Result<Vec<Option<T>>, Error> {
     let blocks = blocks(&p.body)?;
     // The value at the top of each block, once a way to it is known: the first block's is `start`.
@@ -170,9 +174,18 @@ pub fn forward<Op, S: Clone + PartialEq, T>(
         for (b, block) in blocks.iter().enumerate() {
             let Some(Some(top)) = tops.get(b) else { continue };
             let (bottom, _) = run(block, top);
-            for &to in &block.succs {
+            // The jump the block ends at, if the flags decide it: its way to its label comes first.
+            let jump = block.items_in(&p.body).iter().rev().find_map(|item| match item {
+                Item::Inst(inst) if matches!(inst.flow, Flow::Branch(_)) => Some(inst),
+                _ => None,
+            });
+            for (way, &to) in block.succs.iter().enumerate() {
                 let Some(at) = tops.get_mut(to) else { continue };
-                let met = at.as_ref().map_or_else(|| bottom.clone(), |t| meet(t, &bottom));
+                let mut out = bottom.clone();
+                if let Some(inst) = jump {
+                    edge(inst, way == 0, &mut out);
+                }
+                let met = at.as_ref().map_or_else(|| out.clone(), |t| meet(t, &out, to <= b));
                 if at.as_ref() != Some(&met) {
                     *at = Some(met);
                     changed = true;

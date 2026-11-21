@@ -563,13 +563,14 @@ in `Cargo.toml`. kernite says at the static when it has none.
 ## A safe kernel
 
 An x86 kernel that is no `unsafe fn` is one kernite proves safe where it compiles it, and Rust calls it as it calls any
-function, with no `unsafe`. It takes numbers and arrays by reference, `&[f32; 8]` for an array it reads and
-`&mut [f32; 8]` for one it writes, and gives back a number, a pointer or nothing. An array holds Rust's numbers, as
-stack memory does, and is 2147483647 bytes at most, as a static is; its length may be a compile-time argument,
-`&[f32; N]`, or a const. Rust says an array is as long as its type says, and kernite checks each address the kernel
-reaches in one as it checks one in stack memory: inside the array, at a displacement known now, and at the alignment its
-instruction needs. So nothing is checked when the kernel runs, and there is nothing for the caller to promise. The code
-of a safe kernel is that of the same kernel written with `unsafe` and a pointer for each array: kernite adds none.
+function, with no `unsafe`. It takes numbers, arrays by reference, `&[f32; 8]` for an array it reads and `&mut [f32; 8]`
+for one it writes, and slices, `&[f32]` and `&mut [f32]`, and gives back a number, a pointer or nothing. An array holds
+Rust's numbers, as stack memory does, and is 2147483647 bytes at most, as a static is; its length may be a compile-time
+argument, `&[f32; N]`, or a const. Rust says an array is as long as its type says, and kernite checks each address the
+kernel reaches in one as it checks one in stack memory: inside the array, at a displacement known now, and at the
+alignment its instruction needs. So nothing is checked when the kernel runs, and there is nothing for the caller to
+promise. The code of a safe kernel is that of the same kernel written with `unsafe` and a pointer for each array, and a
+pointer and a count for each slice: kernite adds none.
 
 ```rust
 #[kernite_macros::kernels]
@@ -589,8 +590,62 @@ A call passes an array of the callee's type, or a part of one: `[xs]` is `xs`, a
 which must lie inside `xs`, at a multiple of the callee's element size. The callee's length may be a compile-time
 argument or a const as well: `sum::<4>` takes a `&[u64; 4]` and calls `sum::<2>` on each half. A write through `&[T; N]`
 is an error, as one to constant memory is, and an array is passed to a callee that writes only from `&mut [T; N]`. A
-kernel may call itself and the safe kernels of its module, and so reaches no memory but the arrays it is given and its
-own frames, which it touches a page at a time, so that an overflow of the stack faults at the guard page, as above.
+kernel may call itself and the safe kernels of its module, and so reaches no memory but the arrays and slices it is
+given and its own frames, which it touches a page at a time, so that an overflow of the stack faults at the guard page,
+as above.
+
+A slice is two registers: its address, in one, and its length in elements, in the next, which the kernel names `xs.len`.
+It takes two of the six registers SysV passes integers in, so a kernel takes six integers in all, slices and numbers
+together, and the function the macro writes takes the slice and passes its address and its length. A slice holds Rust's
+numbers, as an array does, and has any length, none too. It is at a multiple of its element's bytes, as Rust lays it
+out, and kernite takes it to be at no more: `vmovaps` of a `ymm`, which needs a multiple of 32, is an error in a slice
+of floats, where `vmovups` reads at any. kernite does not know the length, so it proves each address the kernel reaches
+in the slice from the compares the kernel makes of an index with `xs.len`:
+
+```rust
+#[kernite_macros::kernels]
+mod kernels {
+    /// The sum of the integers of `xs`.
+    pub extern "sysv64" fn sum(xs: &[u64]) -> u64 {
+        let (i, sum): (gpr, gpr);
+        zero(i);
+        zero(sum);
+        label(top);
+        cmp(i, xs.len);
+        jae(done);
+        add(sum, [xs + i * 8]);
+        inc(i);
+        jmp(top);
+        label(done);
+        ret(sum);
+    }
+}
+```
+
+The index is a gpr, scaled by the bytes of an element, `[xs + i * 8]`, with a displacement known now beside it if the
+kernel wants, `[xs + i * 4 + 32]`. The address is inside the slice where, on every way to it, the compares have kept
+`i + n` at or below `xs.len`, `n` the elements the instruction reaches from the index: one for the `add` above, eight
+for a `vaddps` of a `ymm` of floats, so `lea(j, [i + 8])`, `cmp(j, xs.len)` and `ja(done)` keep eight. The displacement
+counts in, and the last element it reaches is rounded up. An address with no index, `[xs + 4]`, is inside where `xs.len`
+has been compared with 2 or more. None is before the start, which the index at 0 would reach: `[xs + i * 4 - 4]` is an
+error, as it is in an array.
+
+A compare is a `cmp` of a gpr with another or with a number known now, or a `test` of a gpr with itself, each gpr whole,
+that a conditional jump or a `cmov` reads, with nothing between them but `mov`, `lea`, jumps and `cmov`s, which leave
+the flags as they are. kernite follows both ways of the jump, and holds each way to what the compare says of the numbers
+as unsigned ones: `jb`, `jae`, `ja`, `jbe`, `je` and `jne`, and their other names, say what they say, and a signed
+condition, `jl` say, says nothing. It follows the numbers the kernel keeps in whole gprs: `mov` of a gpr or of a number
+known now, `lea` of a gpr and a displacement, `add` and `sub` of a number known now, `inc`, `dec`, `zero` and `xor` of a
+gpr with itself write a number it follows, and so does a `cmov` of a gpr, which is the one or the other as the compare
+says: `mov(n, xs.len)` copies the length, and `cmp(n, ys.len)` then `cmova(n, ys.len)` make `n` the shorter of two. A
+number below a length is far below 2^64, for Rust has no slice longer than `isize::MAX` bytes, so adding to it does not
+wrap. Any other instruction that writes a gpr, or a part of one, and an `add`, a `sub`, an `inc`, a `dec` or a `lea`
+that may wrap, makes it a number of any value until a compare says more. A loop has what holds on each way round it.
+
+The length stays as the kernel was given it, for the compares are of it: `mov(n, xs.len)` copies it to a variable that
+may change, and an instruction that writes `xs.len` is an error. A kernel passes no slice to a function it calls: the
+callee takes the address and the length as two numbers, `*const f32` and `n: usize`, and is an `unsafe fn`, as is a
+`#[cooperative]` kernel, which takes no slice but the two numbers.
 
 What kernite cannot prove it refuses, at the first parameter, operand or call it cannot, and the error says that the
 kernel is then an `unsafe fn`, which compiles as it always has, and which Rust calls in an `unsafe` block. A kernel is
@@ -599,7 +654,10 @@ an `unsafe fn` when it:
 - takes a raw pointer, `*const f32`, which may point anywhere;
 - reaches an array at an index in a register, `[xs + i * 4]`, or at an address it has taken, `lea(p, [xs])`, or at an
   address in a register, where kernite cannot keep it inside the array;
-- reaches a bit of an array at an offset in a register, `bts([xs], i)`, which may lie anywhere in memory;
+- reaches a slice at an index that no compare on every way to the address keeps below the length, at a vector of
+  indices, or at an address it has taken, `lea(p, [xs])`, or writes the length of a slice, `dec(xs.len)`, which the
+  compares rest on;
+- reaches a bit of an array or a slice at an offset in a register, `bts([xs], i)`, which may lie anywhere in memory;
 - makes a non-temporal store, `movnti([xs], g)`, which goes around the caches, and may return before an `sfence` or
   `mfence` orders it: Rust holds the store unfinished until one does, and what the caller does next races with it;
 - names a static of the module's, which every kernel and the host reach;
@@ -986,18 +1044,18 @@ is.
 
 [`examples/my-app`](examples/my-app/src/main.rs) uses kernite as a crate outside it would: for the CPU `sum8`, a safe
 function of an array, `dot` for one accumulator, for four and for sixteen, two of which spill, `count_bytes`, by tables
-in its stack memory, `sum16`, a safe one too, which calls `sum8` for each half, `gcds`, which calls Stein's `gcd`, a
-safe function of two numbers, which calls itself, `histogram`, which counts in the module's memory from call to call,
-`weigh`, by weights in its constant memory, and `normalize` and `diffuse` on the threads of a grid, which compute what
-the GPU's do, bit for bit; and for the GPU `saxpy`, `block_sums` for blocks of 256 threads and of 1024 and
-`reverse_runs` in shared memory, `scale_f16`, written in place, `gcds`, which calls `gcd`, an `extern "ptx-func"`
-function that calls itself, `histogram`, which counts in the module's global memory from launch to launch, and `weigh`,
-by weights in its constant memory, with safe functions over them; and `matmul` on the tensor cores, by `cp.async`,
-`ldmatrix` and `mma`, in a module of its own, since it needs an Ampere GPU, `sm_80`; and in another, for Pascal's,
-`sm_60`, `normalize`, whose threads keep their floats in registers while the grid waits for every block's sum, and
-`diffuse`, which takes any number of steps in one launch, the grid waiting between them. Its tests hold each kernel to a
-scalar reference that does the same float operations in the same order, bit for bit, or the tensor cores, which add in
-an order of their own, to products of integers, exact in any order; and its listings to
+in its stack memory, `sum16`, a safe one too, which calls `sum8` for each half, `gcds`, a safe function of three slices,
+which calls Stein's `gcd`, a safe function of two numbers, which calls itself, `histogram`, which counts in the module's
+memory from call to call, `weigh`, by weights in its constant memory, and `normalize` and `diffuse` on the threads of a
+grid, which compute what the GPU's do, bit for bit; and for the GPU `saxpy`, `block_sums` for blocks of 256 threads and
+of 1024 and `reverse_runs` in shared memory, `scale_f16`, written in place, `gcds`, which calls `gcd`, an
+`extern "ptx-func"` function that calls itself, `histogram`, which counts in the module's global memory from launch to
+launch, and `weigh`, by weights in its constant memory, with safe functions over them; and `matmul` on the tensor cores,
+by `cp.async`, `ldmatrix` and `mma`, in a module of its own, since it needs an Ampere GPU, `sm_80`; and in another, for
+Pascal's, `sm_60`, `normalize`, whose threads keep their floats in registers while the grid waits for every block's sum,
+and `diffuse`, which takes any number of steps in one launch, the grid waiting between them. Its tests hold each kernel
+to a scalar reference that does the same float operations in the same order, bit for bit, or the tensor cores, which add
+in an order of their own, to products of integers, exact in any order; and its listings to
 [`snapshots/`](examples/my-app/snapshots/).
 
 ```
@@ -1057,10 +1115,12 @@ The output is deterministic:
 - no crate depends on anything outside the workspace;
 - clippy forbids hash maps and hash sets.
 
-The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one, `dead_code` say, and build
-its kernels: Rust lints the names and the code a kernel is written with, and none that the macro adds. Clippy's
-`too_many_arguments` is the one lint a crate of kernels may not forbid: Clippy says it of a launcher of more than seven
-parameters, whoever wrote it, and each launcher allows it.
+The Rust the macro writes needs no `allow` of a lint of Rust's but one, so a crate may `forbid` the others, `dead_code`
+say, and build its kernels: Rust lints the names and the code a kernel is written with, and none that the macro adds. A
+crate of kernels may not forbid two lints: Rust's `improper_ctypes_definitions` where an x86 kernel takes a slice, which
+Rust says of a `sysv64` function that takes one, and which the function the macro writes for the kernel allows; and
+Clippy's `too_many_arguments`, which Clippy says of a launcher of more than seven parameters, whoever wrote it, and
+which each launcher allows.
 
 Checking the generated kernels is for the crates that hold them: a snapshot of every listing, so that any change
 to any layer that moves an instruction shows in review, and runs against scalar references, bit for bit, as in

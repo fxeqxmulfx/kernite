@@ -709,6 +709,29 @@ fn a_reference_to_an_array_is_a_type_and_any_other_reference_is_a_name() -> Resu
     Ok(())
 }
 
+/// A reference to an array or to a slice is told by whether it writes, the type of its elements and, for an array,
+/// their count. The array's `;` is the one outside every bracket of its elements' type, so `&[[u8; 4]]` is a slice of
+/// arrays, and `&[[u8; 4]; 2]` an array of them. Any other reference is none, and so is one with a lifetime.
+#[test]
+fn a_reference_to_an_array_or_a_slice_is_split_at_the_semicolon_of_the_array_itself() {
+    let want = [
+        ("&[f32; 8]", Some((false, "f32", Some("8")))),
+        ("&mut [u64; N]", Some((true, "u64", Some("N")))),
+        ("&[[u8; 4]; 2]", Some((false, "[u8; 4]", Some("2")))),
+        ("&[f32]", Some((false, "f32", None))),
+        ("&mut [f32]", Some((true, "f32", None))),
+        ("&[[u8; 4]]", Some((false, "[u8; 4]", None))),
+        ("&mut [(u8, [u8; 2])]", Some((true, "(u8, [u8; 2])", None))),
+        ("&'a [f32; 8]", None),
+        ("&u8", None),
+        ("&&[u8; 4]", None),
+        ("*const [f32; 8]", None),
+    ];
+    for (ty, want) in want {
+        assert_eq!(crate::array_ref(ty), want, "{ty}");
+    }
+}
+
 /// A type that begins with a binder, `for<'a> fn(&'a u8)`, is read whole, as any other type is: the
 /// `<` after `for` opens the binder, not the arguments of a type named `for`. So it is one type as a
 /// parameter, which starts at its `for`, as the argument of another type, `Option<for<'a> fn(&'a u8)>`,

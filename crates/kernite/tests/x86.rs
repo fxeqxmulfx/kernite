@@ -2157,7 +2157,7 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() -> Result {
     for (params, ty) in [
         ("a: [usize;3]", "[usize; 3]"),
         ("a: (u32 ,u32)", "(u32, u32)"),
-        ("a: &mut[f32]", "&mut [f32]"),
+        ("a: &mut(u8,u8)", "&mut (u8, u8)"),
         ("a: Box<dyn A+B>", "Box<dyn A + B>"),
         ("a: Box<dyn Iterator<Item=u8>>", "Box<dyn Iterator<Item = u8>>"),
         ("a: Box<dyn Iterator<Item = u8> + Send>", "Box<dyn Iterator<Item = u8> + Send>"),

@@ -182,7 +182,7 @@ impl Target for Trace {
         self.declared.push((var, at));
     }
 
-    fn inst_at(&mut self, at: Span) {
+    fn inst_at(&mut self, at: Span, _operands: &[Span]) {
         self.at = Some(at);
     }
 }

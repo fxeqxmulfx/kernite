@@ -2556,20 +2556,30 @@ fn control_must_stay_inside_the_body_for_the_paths_too() -> Result {
 }
 
 /// A number for each variable of `b`, followed over its flow by [`crate::forward`]: all 5 at the start, `narrow` sets
-/// the first operand's to 1 and `wide` to 5, and `use` fails if it is under 3. The first failure is the item's index
-/// and the variable.
+/// the first operand's to 1 and `wide` to 5, the way of a `brn` to its label sets its operand's to 1, and `use` fails
+/// if it is under 3. The first failure is the item's index and the variable.
 fn follow(b: &Builder) -> Result<Option<(usize, VReg)>, Error> {
-    let meet = |a: &Vec<u8>, b: &Vec<u8>| a.iter().zip(b).map(|(a, b)| *a.min(b)).collect();
-    let said = crate::forward(&b.0, vec![5u8; b.0.regs.len()], meet, |_, inst, now: &mut Vec<u8>| {
-        let Some(Operand::Reg(v, _)) = inst.args.first().map(|a| a.operand) else { return Ok(()) };
-        match inst.op {
-            "narrow" => now[v.id as usize] = 1,
-            "wide" => now[v.id as usize] = 5,
-            "use" if now[v.id as usize] < 3 => return Err(v),
-            _ => {}
-        }
-        Ok(())
-    })?;
+    let meet = |a: &Vec<u8>, b: &Vec<u8>, _: bool| a.iter().zip(b).map(|(a, b)| *a.min(b)).collect();
+    let said = crate::forward(
+        &b.0,
+        vec![5u8; b.0.regs.len()],
+        meet,
+        |_, inst, now: &mut Vec<u8>| {
+            let Some(Operand::Reg(v, _)) = inst.args.first().map(|a| a.operand) else { return Ok(()) };
+            match inst.op {
+                "narrow" => now[v.id as usize] = 1,
+                "wide" => now[v.id as usize] = 5,
+                "use" if now[v.id as usize] < 3 => return Err(v),
+                _ => {}
+            }
+            Ok(())
+        },
+        |inst, to_label, now: &mut Vec<u8>| {
+            if let ("brn", true, Some(Operand::Reg(v, _))) = (inst.op, to_label, inst.args.first().map(|a| a.operand)) {
+                now[v.id as usize] = 1;
+            }
+        },
+    )?;
     Ok(said.into_iter().enumerate().find_map(|(i, said)| Some((i, said?.err()?))))
 }
 
@@ -2631,6 +2641,44 @@ fn a_jump_back_brings_a_value_to_its_label_too() {
     b.label(2);
     b.inst("ret", &[], Flow::Return);
     assert_eq!(follow(&b), Ok(Some((2, x))));
+}
+
+#[test]
+fn a_way_out_of_a_branch_changes_the_value_as_edge_says() {
+    // The way to the label narrows `x`, and the way on does not.
+    let mut b = Builder::new();
+    let x = b.var("x");
+    b.inst("brn", &[(x, Access::Read)], Flow::Branch(Label(1)));
+    b.inst("use", &[(x, Access::Read)], Flow::Next);
+    b.inst("ret", &[], Flow::Return);
+    b.label(1);
+    b.inst("use", &[(x, Access::Read)], Flow::Next);
+    b.inst("ret", &[], Flow::Return);
+    assert_eq!(follow(&b), Ok(Some((4, x))));
+}
+
+/// `meet` is told whether a way goes back, to its own block or one before it, as a loop's does: the jump back to the
+/// top does, and the way on past it does not.
+#[test]
+fn meet_is_told_whether_a_way_goes_back() -> Result {
+    let mut b = Builder::new();
+    let p = b.var("p");
+    b.label(1);
+    b.inst("br", &[(p, Access::Read)], Flow::Branch(Label(1)));
+    b.inst("ret", &[], Flow::Return);
+    let met = std::cell::RefCell::new(std::collections::BTreeSet::new());
+    crate::forward(
+        &b.0,
+        None,
+        |old: &Option<bool>, new: &Option<bool>, back: bool| {
+            met.borrow_mut().insert((*new, back));
+            *old
+        },
+        |_, _, _| {},
+        |_, to_label, now: &mut Option<bool>| *now = Some(to_label),
+    )?;
+    assert_eq!(met.into_inner(), [(Some(true), true), (Some(false), false)].into());
+    Ok(())
 }
 
 #[test]

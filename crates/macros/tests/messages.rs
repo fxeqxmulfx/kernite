@@ -177,7 +177,7 @@ fn refuses_by(command: &[&str], name: &str, lines: &[&str]) -> Result {
 fn takes_pointer(ty: &str) -> String {
     format!(
         "a pointer may point anywhere, so a kernel that takes `{ty}` is an `unsafe fn`; kernite checks an array by \
-         reference, `&[f32; 8]`"
+         reference, `&[f32; 8]`, and a slice, `&[f32]`"
     )
 }
 
@@ -1254,7 +1254,7 @@ fn a_kernel_that_is_no_unsafe_fn_has_no_safety_contract_and_a_crate_that_forbids
     builds_quietly("safe_kernels")?;
     let docs = documents_quietly("safe_kernels")?.join("cpu");
     let page = |f: &str| fs::read_to_string(docs.join(format!("fn.{f}.html")));
-    for f in ["twice", "first", "four_times", "fill", "tile", "second"] {
+    for f in ["twice", "first", "four_times", "fill", "tile", "second", "sum", "set"] {
         let page = page(f)?;
         assert!(!page.contains(">Safety</h2>"), "the docs of `{f}` have a `# Safety`");
         assert!(!page.contains("unsafe fn"), "`{f}` is an `unsafe fn` in its docs");
@@ -1913,12 +1913,13 @@ fn a_kernels_parameters_keep_their_names_beside_those_the_macros_rust_binds() ->
     Ok(())
 }
 
-/// A parameter named `_` is a number or a pointer the kernel is given and does not read, as it is in any
-/// Rust function: in an x86 kernel, plain, of compile-time arguments, cooperative, and cooperative of
-/// arguments, and in a GPU kernel of those kinds. Rust builds the crate without a word, and the tests the
-/// fixture holds run each kernel, the x86 kernels and the GPU kernels on the GPU: each reads the parameters
-/// after the ones named `_` where the ABI puts them. The macros name each such parameter for Rust
-/// themselves, `__kernite_0`, and a parameter or a compile-time argument of that name is the kernel's own.
+/// A parameter named `_` is a number, a pointer or a slice the kernel is given and does not read, as it
+/// is in any Rust function: in an x86 kernel, plain, of compile-time arguments, cooperative, and
+/// cooperative of arguments, and in a GPU kernel of those kinds. Rust builds the crate without a word,
+/// and the tests the fixture holds run each kernel, the x86 kernels and the GPU kernels on the GPU: each
+/// reads the parameters after the ones named `_` where the ABI puts them. The macros name each such
+/// parameter for Rust themselves, `__kernite_0`, and a parameter or a compile-time argument of that name
+/// is the kernel's own.
 #[test]
 fn a_parameter_named_underscore_is_passed_and_not_read_in_a_kernel_of_whatever_kind_it_is() -> Result {
     let printed = runs_quietly(&["test"], "underscore")?;
@@ -4107,6 +4108,21 @@ fn a_crate_of_kernels_may_not_forbid_clippys_too_many_arguments() -> Result {
         ];
         assert!(!done && said == lines, "fixtures/many_forbidden.rs: Clippy said:\n{}", said.join("\n"));
     }
+    Ok(())
+}
+
+/// Rust's `improper_ctypes_definitions` is the other lint a crate of kernels may not forbid, where a kernel takes a
+/// slice: the function the macro writes for it allows it, so Rust refuses the crate at the module's attribute.
+#[test]
+fn a_crate_of_kernels_of_slices_may_not_forbid_improper_ctypes_definitions() -> Result {
+    let (done, said) = cargo(&["build"], "slices_forbidden")?;
+    let lines = [
+        "src/lib.rs:6:1: error[E0453]: allow(improper_ctypes_definitions) incompatible with previous forbid: overruled \
+         by previous forbid"
+            .to_string(),
+        "error: could not compile `slices_forbidden` (lib) due to 1 previous error".to_string(),
+    ];
+    assert!(!done && said == lines, "fixtures/slices_forbidden.rs: Rust said:\n{}", said.join("\n"));
     Ok(())
 }
 

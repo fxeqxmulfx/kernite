@@ -257,7 +257,7 @@ fn put(held: &mut Holds, r: PReg, h: Held) {
 
 /// What two ways to a label bring: the registers that hold one value on both, in the order of the first, each with as
 /// many bits as the fewer of the two ways.
-fn meet(a: &Holds, b: &Holds) -> Holds {
+fn meet(a: &Holds, b: &Holds, _: bool) -> Holds {
     let both = |&(r, h): &(PReg, Held)| {
         let (_, other) = b.iter().find(|(at, other)| *at == r && other.value == h.value)?;
         Some((r, Held { bits: h.bits.min(other.bits), ..h }))
@@ -349,7 +349,7 @@ fn leave_out<Op: PartialEq>(p: &mut Program<Op>, regs: &[Option<PReg>], s: &dyn 
         put(held, at, Held { bits: value.bits.min(width), by: to, ..value });
         fate
     };
-    let fates = forward(p, arrived, meet, step)?;
+    let fates = forward(p, arrived, meet, step, |_, _, _| {})?;
     p.body = std::mem::take(&mut p.body)
         .into_iter()
         .zip(fates)

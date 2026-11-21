@@ -308,7 +308,7 @@ fn reload<Op: PartialEq>(p: &mut Program<Op>, regs: &mut [Option<PReg>], s: &dyn
             written = wrote;
         }
     };
-    let meet = |a: &Mirrors, b: &Mirrors| -> Mirrors {
+    let meet = |a: &Mirrors, b: &Mirrors, _: bool| -> Mirrors {
         let both = |(at, m): &(PReg, Mirror)| {
             let (_, o) = b.iter().find(|(r, o)| r == at && o.slot == m.slot)?;
             let mut by = [&m.by[..], &o.by[..]].concat();
@@ -318,7 +318,7 @@ fn reload<Op: PartialEq>(p: &mut Program<Op>, regs: &mut [Option<PReg>], s: &dyn
         };
         a.iter().filter_map(both).collect()
     };
-    let fates = forward(p, Vec::new(), meet, step)?;
+    let fates = forward(p, Vec::new(), meet, step, |_, _, _| {})?;
     // The variables made one: those in which the ways to a load bring the slot's content to one register, and the
     // variable of each load left out, with the one read in place of it. Each is renamed to the first of its set by
     // `rank`: the parameter, if one is in it, and else the one of the lowest number.

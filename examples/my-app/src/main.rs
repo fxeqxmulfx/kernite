@@ -5,10 +5,12 @@
 //! and its listing to the one in `snapshots/`.
 
 /// The kernels for the cpu, and the memory of the module's, `COUNTS` and `WEIGHTS`, which they
-/// keep from call to call. `sum8`, `sum16` and `gcd` are safe functions: they reach no memory
-/// but the arrays they are given and their own frames. Each other kernel reads what its
-/// pointers point at, so it is `unsafe`, and all but `gcds` and `histogram`, which take
-/// integers, need AVX2 and FMA.
+/// keep from call to call. `sum8`, `sum16`, `gcd` and `gcds` are safe functions: they reach no
+/// memory but the arrays and slices they are given and their own frames, each element of a slice
+/// below its length by a compare of the kernel's own. Each other kernel reads what its pointers
+/// point at, or names the module's memory, or runs on a grid, so it is `unsafe`; all but
+/// `histogram`, which takes integers, need AVX, `dot` FMA as well, and `count_bytes` and
+/// `normalize` AVX2.
 #[kernite_macros::kernels]
 mod kernels {
     /// The sum of the eight floats at `xs`.
@@ -37,7 +39,9 @@ mod kernels {
     /// the one before it; then they are added in order, and the lanes summed as in `sum8`.
     /// Each holds a register through the loop and the load needs one more, so sixteen take 17
     /// of the 16 there are: two spill to the stack, loaded before their multiply-adds and
-    /// stored after, as the listing says.
+    /// stored after, as the listing says. It is `unsafe`, for it takes pointers and a count: a safe
+    /// kernel would take slices and reach each float at an index, `[x + i * 4]`, and this loop, which
+    /// moves the two addresses on, makes `dot::<16>` up to 5% faster on a Zen 3.
     #[instances(1, 4, 16)]
     pub unsafe extern "sysv64" fn dot<const UNROLL: usize>(x: *const f32, y: *const f32, n: usize) -> f32 {
         test(n, n);
@@ -387,13 +391,18 @@ mod kernels {
         label(done);
     }
 
-    /// `g[i]`, the greatest common divisor of `a[i]` and `b[i]`, for each `i < n`, by `gcd`.
-    /// What lives across the calls, the pointers, `n` and `i`, is in registers `gcd` does not write, so the kernel
-    /// saves none for its own caller.
-    pub unsafe extern "sysv64" fn gcds(a: *const u32, b: *const u32, g: *mut u32, n: usize) {
+    /// `g[i]`, the greatest common divisor of `a[i]` and `b[i]`, for each `i` below the shortest of the three lengths,
+    /// by `gcd`. What lives across the calls, the addresses, `n` and `i`, is in registers `gcd` does not write, so the
+    /// kernel saves none for its own caller.
+    pub extern "sysv64" fn gcds(a: &[u32], b: &[u32], g: &mut [u32]) {
+        let (n, i): (gpr, gpr);
+        mov(n, a.len);
+        cmp(n, b.len);
+        cmova(n, b.len);
+        cmp(n, g.len);
+        cmova(n, g.len);
         test(n, n);
         jz(done);
-        let i: gpr;
         zero(i);
         label(next);
         let (x, y, d): (gpr, gpr, gpr);
@@ -1070,9 +1079,7 @@ fn gcds_on_cpu(a: &[u32], b: &[u32]) -> Run<Vec<u32>> {
         return Err("a and b differ in length".into());
     }
     let mut g = vec![0; a.len()];
-    // SAFETY: `a.len()` integers behind each pointer, to read and to write, and the kernel
-    // needs no more of the cpu than x86-64 has.
-    unsafe { kernels::gcds(a.as_ptr(), b.as_ptr(), g.as_mut_ptr(), a.len()) };
+    kernels::gcds(a, b, &mut g);
     Ok(g)
 }
 
@@ -2417,43 +2424,44 @@ mod tests {
     /// The cpu's kernels for the test of one memory for a cpu kernel and a GPU kernel.
     #[kernite_macros::kernels]
     mod host {
-        /// The indices of the eight floats a step of `fill` writes, as floats.
-        pub static LANES: constant<[f32; 8]> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
-
-        /// `x[i] = 1 + i * 0.000001` for each `i < n`, `n` a multiple of 8, each operation rounded
-        /// once: eight floats at a time, from the indices as floats, which grow by eight. All the
-        /// floats are between 1 and 2, so that each of them shows in a sum of the squares.
-        pub unsafe extern "sysv64" fn fill(x: *mut f32, n: usize) {
-            test(n, n);
-            jz(done);
+        /// `x[i] = 1 + i * 0.000001` for each `i` below the last multiple of 8 of `x`'s length, each
+        /// operation rounded once: eight floats at a time, from the indices as floats, which grow by
+        /// eight. All the floats are between 1 and 2, so that each of them shows in a sum of the squares.
+        pub extern "sysv64" fn fill(x: &mut [f32]) {
+            let (i, j): (gpr, gpr);
             let (at, eight, step, one, v): (ymm, ymm, ymm, ymm, ymm);
-            vmovups(at, [LANES]);
+            vmovups(at, [[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]]);
             vbroadcastss(eight, [8.0]);
             vbroadcastss(step, [0.000001]);
             vbroadcastss(one, [1.0]);
+            zero(i);
             label(top);
+            lea(j, [i + 8]);
+            cmp(j, x.len);
+            ja(done);
             vmulps(v, at, step);
             vaddps(v, v, one);
-            vmovups([x], v);
+            vmovups([x + i * 4], v);
             vaddps(at, at, eight);
-            add(x, 32);
-            sub(n, 8);
-            jnz(top);
+            add(i, 8);
+            jmp(top);
             label(done);
         }
 
-        /// The eight lanes of the sum of the `n` floats at `x`, `n` a multiple of 8, to `out`:
-        /// lane `j` is the floats at `j` of each eight, added in order.
-        pub unsafe extern "sysv64" fn lanes(x: *const f32, n: usize, out: *mut f32) {
+        /// The eight lanes of the sum of the floats of `x` below the last multiple of 8 of its length, to
+        /// `out`: lane `j` is the floats at `j` of each eight, added in order.
+        pub extern "sysv64" fn lanes(x: &[f32], out: &mut [f32; 8]) {
+            let (i, j): (gpr, gpr);
             let acc: ymm;
             zero(acc);
-            test(n, n);
-            jz(done);
+            zero(i);
             label(top);
-            vaddps(acc, acc, [x]);
-            add(x, 32);
-            sub(n, 8);
-            jnz(top);
+            lea(j, [i + 8]);
+            cmp(j, x.len);
+            ja(done);
+            vaddps(acc, acc, [x + i * 4]);
+            add(i, 8);
+            jmp(top);
             label(done);
             vmovups([out], acc);
         }
@@ -2515,8 +2523,8 @@ mod tests {
         let address = memory.ptr().addr();
         let filled = memory.host_mut()?;
         assert_eq!(filled.as_ptr() as u64, address, "the cpu's address is the GPU's");
-        // SAFETY: `n` floats at `filled`, which has them, and a cpu that runs the kernel.
-        unsafe { host::fill(filled.as_mut_ptr(), n) };
+        // SAFETY: a cpu that runs the kernel: it has AVX, which `fill` needs.
+        unsafe { host::fill(filled) };
         let want: Vec<f32> = Vec::from_fn(n, |i| 1.0 + i as f32 * 0.000001);
         assert_eq!(bits(filled), bits(&want), "the cpu kernel's floats");
 
@@ -2530,8 +2538,8 @@ mod tests {
         assert_eq!(bits(squared), bits(&want), "the GPU kernel's floats");
 
         let mut lanes = [0f32; 8];
-        // SAFETY: `n` floats at `squared`, which has them, eight at `lanes`, and a cpu that runs the kernel.
-        unsafe { host::lanes(squared.as_ptr(), n, lanes.as_mut_ptr()) };
+        // SAFETY: a cpu that runs the kernel: it has AVX, which `lanes` needs.
+        unsafe { host::lanes(squared, &mut lanes) };
         // SAFETY: a cpu that runs the kernels has AVX, which `sum8` needs.
         let sum = unsafe { kernels::sum8(&lanes) };
         let mut want_lanes = [0f32; 8];

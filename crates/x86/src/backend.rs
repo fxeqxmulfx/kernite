@@ -84,7 +84,7 @@ impl Backend for X86 {
         let decls = std::mem::take(&mut kernel.decls);
         let reach = std::mem::take(&mut kernel.reach);
         let any = kernel.reaches_any();
-        if let Some((at, message)) = kernel.unowned().or_else(|| kernel.unordered()) {
+        if let Some((at, message)) = kernel.unowned().or_else(|| kernel.unordered()).or_else(|| kernel.unproven()) {
             return Err(Unfinished { at, message });
         }
         let program = kernel.finish(|called| changed_by(called, done), |name| may_run_sse(name, done));

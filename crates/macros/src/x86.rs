@@ -56,10 +56,14 @@ pub(crate) fn naked(
     let mut out = TokenStream::new();
     let mut statics = vec![];
     let safe = !f.unsafe_fn;
+    // A slice is two words, its address and its length, which Rust passes in two registers, but it is no type of a
+    // function of the `sysv64` ABI, so a function that takes one calls the naked function that takes the two.
+    let slices = written_params(f, top).iter().any(|p| array_ref(&p.ty).is_some_and(|(.., slice)| slice));
     if let [one] = instances
         && one.args.is_empty()
         && !cooperative
         && !safe
+        && !slices
     {
         let listing = &one.naked;
         let mut docs = attrs(f, top);
@@ -84,6 +88,10 @@ pub(crate) fn naked(
             let (ty, cast) = erased(&p.ty);
             params.push(format!("{}: {ty}", p.name));
             names.push(format!("{}{cast}", p.name));
+            if array_ref(&p.ty).is_some_and(|(.., slice)| slice) {
+                params.push("_: usize".to_string());
+                names.push(format!("{}.len()", p.name));
+            }
         }
         if cooperative {
             params.push("_: &::kernite_cpu::Place".to_string());
@@ -120,6 +128,10 @@ pub(crate) fn naked(
                 (true, false) => parse(&format!("#[target_feature(enable = {:?})]\n#[inline]", features.join(","))),
                 _ => parse("#[inline(always)]"),
             });
+            // Rust warns of a slice in the signature of a `sysv64` function, which only Rust calls, as `f` is.
+            if slices {
+                out.extend(parse("#[allow(improper_ctypes_definitions)]"));
+            }
             out.extend(signature(f, top));
             let mut body = checks(f, top);
             let call = parse(&format!("({})({})", chosen(f, &arms, top), names.join(", ")));
@@ -332,13 +344,13 @@ fn instance_name(function: &str, k: usize) -> String {
 /// `ty`, a type of `f`'s, as an instance writes it, and what `f` writes after a value of it to pass
 /// it on: a pointer is `*const ()` or `*mut ()` to the instance, whatever it points to, and
 /// `as *const ()` or `as *mut ()` in `f`, which is a cast and not a call, so that Rust says nothing
-/// of the type it points to; an array by reference is the same, after a cast to the pointer to the
-/// array, `as *const _`, which Rust makes of a reference alone; a number is the primitive, as it is
-/// in `f`, and nothing.
+/// of the type it points to; an array or a slice by reference is the same, after a cast to the
+/// pointer to it, `as *const _`, which Rust makes of a reference alone; a number is the primitive,
+/// as it is in `f`, and nothing.
 fn erased(ty: &[TokenTree]) -> (String, String) {
     match (pointer(ty), array_ref(ty)) {
         (Some((kind, _)), _) => (format!("*{kind} ()"), format!(" as *{kind} ()")),
-        (_, Some((kind, _))) => (format!("*{kind} ()"), format!(" as *{kind} _ as *{kind} ()")),
+        (_, Some((kind, ..))) => (format!("*{kind} ()"), format!(" as *{kind} _ as *{kind} ()")),
         (None, None) => (given_back(ty).to_string(), String::new()),
     }
 }

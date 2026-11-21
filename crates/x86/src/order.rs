@@ -28,8 +28,8 @@ fn step(at: usize, inst: &Inst<Op, VReg>, now: &mut Unordered) -> Unordered {
 /// A body that is not whole, that control leaves or a jump has no label for, has none: allocating registers says what
 /// is wrong with it.
 pub(crate) fn check(p: &Program<Op>) -> Option<(usize, String)> {
-    let meet = |a: &Unordered, b: &Unordered| a.iter().chain(b).min().copied();
-    let said = forward(p, None, meet, step).ok()?;
+    let meet = |a: &Unordered, b: &Unordered, _: bool| a.iter().chain(b).min().copied();
+    let said = forward(p, None, meet, step, |_, _, _| {}).ok()?;
     let store = said.into_iter().flatten().flatten().min()?;
     let Some(Item::Inst(inst)) = p.body.get(store) else { return None };
     let message = format!(

@@ -21,7 +21,8 @@
 //! ```
 //!
 //! - An `extern "sysv64" fn` is compiled for x86-64. One that is no `unsafe fn`, and that kernite proves safe, takes
-//!   numbers and arrays by reference, `&[f32; 8]` or `&mut [f32; 8]`, and is a function Rust calls with no `unsafe`,
+//!   numbers, arrays by reference, `&[f32; 8]` or `&mut [f32; 8]`, and slices, `&[f32]` or `&mut [f32]`, and is a
+//!   function Rust calls with no `unsafe`,
 //!   a call of an `#[unsafe(naked)]` one of its own, its body the kernel's `naked_asm!`; where the code needs CPU
 //!   features past x86-64's own, `avx` say, it is `#[target_feature(enable = "avx")]`, so only a function that has
 //!   them calls it with no `unsafe`. Any other is an `unsafe extern "sysv64" fn`, and becomes an `#[unsafe(naked)]`
@@ -208,11 +209,13 @@
 //! keeps, and writes the error, with the types of the helpers Rust keeps beside it. A module that
 //! builds is shown none of them, so an import that only a helper names is unused to Rust.
 //!
-//! The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one,
-//! `dead_code` say, and build its kernels: Rust lints the names and the code a kernel is
-//! written with, and none that the macro adds. Clippy's `too_many_arguments` is the one lint a
-//! crate of kernels may not forbid: Clippy says it of a launcher of more than seven parameters,
-//! whoever wrote it, and each launcher allows it.
+//! The Rust the macro writes needs no `allow` of a lint of Rust's but one, so a crate may `forbid`
+//! the others, `dead_code` say, and build its kernels: Rust lints the names and the code a kernel
+//! is written with, and none that the macro adds. A crate of kernels may not forbid two lints:
+//! Rust's `improper_ctypes_definitions` where an x86 kernel takes a slice, which Rust says of a
+//! `sysv64` function that takes one, and which the function the macro writes for the kernel allows;
+//! and Clippy's `too_many_arguments`, which Clippy says of a launcher of more than seven
+//! parameters, whoever wrote it, and which each launcher allows.
 //!
 //! A module of kernels takes the consts it shares with others from a module `#[consts]` is
 //! on, which it names by its path, as Rust reads one where the module is:
@@ -310,16 +313,16 @@
 //! name = "kernite"
 //! ```
 //!
-//! An x86 kernel is an `unsafe fn` unless kernite proves it safe, which it does of one that takes numbers and arrays by
-//! reference and reaches no memory but those and its frames: GUIDE.md says which are not, and why. An `unsafe` kernel
-//! trusts the pointers it is given, and that nothing else touches the memory of the module's it names while it runs, as
-//! an x86 kernel's safety contract says, by name, of the statics it and the functions it calls name, whether it calls
-//! them by name or at an address. One that does not compile is a `compile_error!` where the trouble is, beside a stub
-//! of its signature or its launcher, so that its callers are not errors as well. Both are under the kernel's `cfg`, as
-//! a helper's errors and a static's are under theirs, and so are the function of each of its instances and the module
-//! of its constants: what `cfg` leaves out says nothing. A module of x86 kernels has `LISTINGS` whether its kernels
-//! compile or not, with the listing of each that compiles and `cfg` keeps, and of no other; a module of GPU kernels
-//! alone has none.
+//! An x86 kernel is an `unsafe fn` unless kernite proves it safe, which it does of one that takes numbers, arrays and
+//! slices by reference and reaches no memory but those and its frames: GUIDE.md says which are not, and why. An
+//! `unsafe` kernel trusts the pointers it is given, and that nothing else touches the memory of the module's it names
+//! while it runs, as an x86 kernel's safety contract says, by name, of the statics it and the functions it calls name,
+//! whether it calls them by name or at an address. One that does not compile is a `compile_error!` where the trouble
+//! is, beside a stub of its signature or its launcher, so that its callers are not errors as well. Both are under the
+//! kernel's `cfg`, as a helper's errors and a static's are under theirs, and so are the function of each of its
+//! instances and the module of its constants: what `cfg` leaves out says nothing. A module of x86 kernels has
+//! `LISTINGS` whether its kernels compile or not, with the listing of each that compiles and `cfg` keeps, and of no
+//! other; a module of GPU kernels alone has none.
 //!
 //! kernite refuses a module of kernels whole, at its attribute, for an argument of `#[kernels]` that is not
 //! `consts = path`, such as `consts = 5`, and for consts given in a crate with no dependency named `kernite-macros`. It

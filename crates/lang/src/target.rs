@@ -66,9 +66,9 @@ pub trait Target {
     /// the machine finds with it later is placed. A machine need not keep it.
     fn declared_at(&mut self, _var: Self::Var, _at: Span) {}
 
-    /// The instruction that `inst` is given next is at `at`: where an error the machine finds
-    /// with it later is placed. A machine need not keep it.
-    fn inst_at(&mut self, _at: Span) {}
+    /// The instruction that `inst` is given next is at `at`, and its operands are at `operands`: where an error the
+    /// machine finds with it later is placed. A machine need not keep them.
+    fn inst_at(&mut self, _at: Span, _operands: &[Span]) {}
 }
 
 /// What an instruction is given.

@@ -406,12 +406,12 @@ fn what_kernite_cannot_prove_safe_is_refused_unless_the_kernel_is_unsafe() -> Re
         (
             kernel("p: *const f32", "", ""),
             "1:29: a pointer may point anywhere, so a kernel that takes `*const f32` is an `unsafe fn`; kernite checks \
-             an array by reference, `&[f32; 8]`",
+             an array by reference, `&[f32; 8]`, and a slice, `&[f32]`",
         ),
         (
             kernel("a: u64, p: *mut f32", "", ""),
             "1:37: a pointer may point anywhere, so a kernel that takes `*mut f32` is an `unsafe fn`; kernite checks \
-             an array by reference, `&[f32; 8]`",
+             an array by reference, `&[f32; 8]`, and a slice, `&[f32]`",
         ),
         (
             kernel("", " -> bool", "let g: gpr;\nmov(g, 1);\nret(g);"),
