@@ -46,8 +46,9 @@ and reaches no memory but that and its own frame, which kernite checks where it 
 nothing for the caller to promise. It needs AVX, which Rust checks where it is called: only a function that has it,
 `#[target_feature(enable = "avx")]`, calls it with no `unsafe`. Its body is the kernel in Intel syntax, in an
 `#[unsafe(naked)]` function. A kernel that takes a pointer, or that kernite cannot prove safe in some other way, is an
-`unsafe extern "sysv64" fn`. A kernel for a GPU is written the same way, as an `extern "ptx-kernel"` function:
-[kernite-cuda's README](https://crates.io/crates/kernite-cuda) has one.
+`unsafe extern "sysv64" fn`. A kernel for a GPU is written the same way, as an `extern "ptx-kernel"` function, and
+it is no `unsafe fn` where kernite proves that each thread reads and writes inside the memory it is lent, and writes
+a part of its own: [kernite-cuda's README](https://crates.io/crates/kernite-cuda) has one.
 
 The language, the targets and the guarantees are in
 [GUIDE.md](https://github.com/fxeqxmulfx/kernite/blob/master/GUIDE.md), and the API is in

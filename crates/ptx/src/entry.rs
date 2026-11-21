@@ -1,6 +1,6 @@
 //! A kernel or a function written out, and the module of them the driver loads.
 
-use kernite_build::{Assembly, Kept, When};
+use kernite_build::{Assembly, Kept, Requirement, When};
 use kernite_core::{Item, Program};
 
 use crate::call::{Returns, formal, passed};
@@ -57,6 +57,9 @@ pub struct Entry {
     /// For a kernel, its tuning directives as PTX writes them, `.maxntid 16, 16`, between its
     /// parameters and its body.
     pub directives: Vec<String>,
+    /// For a kernel with no `unsafe`, what each launch must hold for it to be safe, which the host checks; none
+    /// for an `unsafe` kernel or a function.
+    pub requires: Vec<Requirement>,
 }
 
 impl Entry {

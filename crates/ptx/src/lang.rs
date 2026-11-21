@@ -75,32 +75,10 @@ use crate::call::{NO_PRED, Prototype, Returns, fits_param, formal};
 use crate::entry::{Entry, Op, Param};
 use crate::forms::{self, Bound, Check, Count, Imm, Part, Role, Space, Spec, TyRef};
 use crate::needs::Needs;
+use crate::safety::{self, Proof, Step};
 use crate::statics::{Memory, Static, shape};
 use crate::ty::{Kind, Ty};
-
-/// A variable: a register of the type it was declared, or a part of one, or memory the
-/// kernel declares in a state space, which stands for its address.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Var {
-    /// A register.
-    Reg {
-        /// Which.
-        reg: VReg,
-        /// Its type.
-        ty: Ty,
-    },
-    /// A part of a 32-bit register, as a video instruction selects it: `r.b0`.
-    Part {
-        /// Which register.
-        reg: VReg,
-        /// Its type.
-        ty: Ty,
-        /// Which part.
-        part: Part,
-    },
-    /// Memory, by its place among the kernel's.
-    Mem(usize),
-}
+use crate::var::Var;
 
 /// Shared memory a kernel declares, at most, beside what the launch gives it: 48 KB.
 const SHARED: u64 = 48 << 10;
@@ -155,6 +133,8 @@ pub struct Kernel {
     /// Each instruction of a kernel, by its place in the body, where a thread may end or never
     /// come back while others go on: a guarded `ret`, `exit` or `trap`, or a call.
     pub(crate) leaves: Vec<usize>,
+    /// For a kernel with no `unsafe`, what proves it safe as its instructions come.
+    proof: Option<Proof>,
 }
 
 /// What a kernel makes of a function or a kernel of its module, which it may name.
@@ -263,6 +243,7 @@ impl Kernel {
             at: Span::default(),
             masks: vec![],
             leaves: vec![],
+            proof: None,
         }
     }
 
@@ -298,6 +279,12 @@ impl Kernel {
         self.needs = self.needs.and(Needs { ptx: 50, sm: 60 });
     }
 
+    /// Makes the kernel one with no `unsafe`, which kernite proves safe as its instructions come: an instruction that
+    /// it cannot follow is an error, and what each launch must hold is in the [`Entry`].
+    pub fn safe(&mut self) {
+        self.proof = Some(Proof::new());
+    }
+
     /// The kernel as written.
     pub fn finish(self) -> Entry {
         // The module's memory the module declares.
@@ -312,6 +299,7 @@ impl Kernel {
             func: self.func,
             calls: self.calls,
             directives: self.directives,
+            requires: self.proof.map(Proof::requires).unwrap_or_default(),
         }
     }
 
@@ -420,6 +408,38 @@ impl Kernel {
         if self.func.is_none() {
             self.leaves.push(self.p.body.len());
         }
+    }
+
+    /// What the proof of a kernel with no `unsafe`, if it is one, makes of the instruction `name`, which `b` is of,
+    /// over `args`, under `guard`, and `w` is the operands of: an error where it cannot prove it safe. A kernel that
+    /// names memory it declares, or the module's, is not proved: it is an `unsafe fn`.
+    fn prove(
+        &mut self,
+        name: &str,
+        b: &Bound,
+        args: &[Given<Var>],
+        guard: Option<(VReg, bool)>,
+        w: &Written,
+    ) -> Result<(), Fault> {
+        let Some(proof) = &mut self.proof else { return Ok(()) };
+        if let Some((at, i)) = args.iter().enumerate().find_map(|(at, a)| Some((at, safety::memory(a)?))) {
+            let v = self.declared.get(i).map_or("", |d| d.0.as_str());
+            let what = match self.memory.get(i).map(|m| m.space) {
+                Some(Space::Shared) => "shared memory, which the threads of a block reach together",
+                Some(Space::Local) => "local memory, which kernite does not follow",
+                _ => "memory of the module's, which every kernel and the host reach",
+            };
+            return Err(Fault::at(at, format!("`{v}` is {what}, so a kernel that names it is an `unsafe fn`")));
+        }
+        let written = w
+            .args
+            .iter()
+            .filter_map(|a| match (a.operand, a.access) {
+                (Operand::Reg(r, _), Access::Write | Access::ReadWrite) => Some(r.id),
+                _ => None,
+            })
+            .collect();
+        proof.inst(&Step { name, bound: b, args, guard, written, reach: w.reach })
     }
 
     /// Adds the instruction, under the predicate `guard` if there is one, held or not; keeping
@@ -1795,6 +1815,9 @@ impl Target for Kernel {
         self.p.params.push((reg, PReg { class: reg.class, hw: 0 }));
         self.p.signature.params.push(reg.class);
         self.named.insert(format!("{}_param_{}", self.p.name, self.params.len()));
+        if let Some(proof) = &mut self.proof {
+            proof.param(reg, self.params.len(), ty, t);
+        }
         self.params.push(Param { ty: t, reg: self.reg(reg).to_string(), pointer });
         Ok(Var::Reg { reg, ty: t })
     }
@@ -1925,6 +1948,9 @@ impl Target for Kernel {
             return Err(Fault::at(i, format!("`{word}` is not defined")));
         }
         let op = name.split('.').next().unwrap_or_default();
+        if self.proof.is_some() && matches!(op, "call" | "grid") {
+            return Err(safety::refused(name, op));
+        }
         if op == "call" {
             return self.call(name, args, guard);
         }
@@ -1964,6 +1990,7 @@ impl Target for Kernel {
                 None => Fault::new(format!("`{name}` takes {}, not {}", counts(&ranges), args.len())),
             });
         };
+        self.prove(name, b, args, guard, &w)?;
         self.needs = self.needs.and(b.needs).and(w.needs);
         for f in &w.funcs {
             self.named_fn(f);

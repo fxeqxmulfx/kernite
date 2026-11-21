@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         const BLOCK: u32 = 128;
 
         #[instances(BLOCK, BLOCK * 2)]
-        pub unsafe extern "ptx-kernel" fn store<const N: u32>(x: *mut u32) {
+        pub extern "ptx-kernel" fn store<const N: u32>(x: *mut u32) {
             st.global.u32([x], N);
         }
     "#;

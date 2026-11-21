@@ -13,8 +13,8 @@ use std::sync::{Mutex, PoisonError};
 use kernite::lang::{IntTy, Mem as Address, Operand as Given, Target, Value};
 use kernite::{Assembly, Kept};
 use kernite_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Sel, Space, Spec};
-use kernite_ptx::lang::{Callee, Kernel, Var};
-use kernite_ptx::{Entry, Kind, Needs, Prototype, Returns, Static, Ty};
+use kernite_ptx::lang::{Callee, Kernel};
+use kernite_ptx::{Entry, Kind, Needs, Prototype, Returns, Static, Ty, Var};
 
 #[path = "common/quotes.rs"]
 mod quotes;

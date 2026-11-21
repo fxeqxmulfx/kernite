@@ -17,8 +17,10 @@ fn main() -> Result<(), String> {
     // What is wrong with an instruction is a `Fault`, which has its message.
     let said = |fault: Fault| fault.message;
 
-    // `pub unsafe extern "ptx-kernel" fn store(out: *mut f32)`, which writes 1.5 to `out`.
+    // `pub extern "ptx-kernel" fn store(out: *mut f32)`, which writes 1.5 to `out`, is a kernel with no `unsafe`:
+    // `safe` has it proved as each instruction comes.
     let mut kernel = Kernel::new("store", "store");
+    kernel.safe();
     let out = kernel.param("out", "*mut f32")?;
     let x = Operand::Var(kernel.var("x", "f32")?);
     let at = Operand::Mem(Mem { base: Some(out), index: None, disp: 0 });
@@ -31,8 +33,13 @@ fn main() -> Result<(), String> {
     kernel.inst("st.global.f32", &[at, x], None).map_err(said)?;
     kernel.end()?;
 
+    // A launch is safe on one block of one thread, and a float at `out` to write: three conditions, which the host
+    // checks.
+    let entry = kernel.finish();
+    assert_eq!(entry.requires.len(), 3);
+
     // The module is of the PTX version and for the GPU that its instructions need.
-    let ptx = module(&[kernel.finish()], &[]).whole()?;
+    let ptx = module(&[entry], &[]).whole()?;
     assert!(ptx.contains(".version 3.0\n.target sm_30\n"));
     assert!(ptx.contains("\tmov.f32 %x, 0f3FC00000;\n\tst.global.f32 [%out], %x;\n\tret;\n"));
     Ok(())

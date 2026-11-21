@@ -9,7 +9,7 @@ use crate::classify::{attributes, helper, must_be_unsafe};
 use crate::function::stub;
 use crate::present::{Refusal, said};
 use crate::{
-    Abi, Assembly, Backend, Call, Compiled, Device, DeviceFnOut, DeviceOut, Failed, Given, ItemOut, Launcher,
+    Abi, Assembly, Backend, Call, Compiled, Device, DeviceFnOut, DeviceOut, Failed, Given, ItemOut, Launch, Launcher,
     ModuleOut, Naked, Native, NativeInstance, NativeOut, Owner, compile, instance, owner, prepare,
 };
 
@@ -21,9 +21,10 @@ use crate::{
 /// is said where it can be mended. A kernel the process runs is written for Rust to call when it is
 /// an `unsafe fn`, its attributes hold, each of its instances compiled, and it names no static of
 /// the GPU's. The GPU's module has the code of each instance that compiled, of each function the GPU
-/// runs whose attributes hold; Rust launches a kernel of it when it is an `unsafe fn`, its
-/// attributes hold, and each of its instances compiled. The GPU's module is put together from what
-/// Rust keeps of them, and why it is none is said at the module's first item that is the GPU's.
+/// runs whose attributes hold; Rust launches a kernel of it when its attributes hold, it is an
+/// `unsafe fn` if it is `#[cooperative]`, and each of its instances compiled. The GPU's module is
+/// put together from what Rust keeps of them, and why it is none is said at the module's first
+/// item that is the GPU's.
 ///
 /// A `refused` module is one refused whole: at its attribute, with no consts given, or for an item
 /// kernite cannot read, which leaves it the items kernite reads and the consts it is given. Nothing
@@ -145,7 +146,7 @@ pub fn module<N: Native, D: Device>(
         let mut launched = vec![];
         for (args, code) in compiled {
             if launches {
-                launched.push((args, symbols.len()));
+                launched.push(Launch { args, symbol: symbols.len(), requires: device.requires(&code) });
                 symbols.push((codes.len(), device.symbol(&code)));
             }
             codes.push(code);

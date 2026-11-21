@@ -80,6 +80,10 @@ pub mod kernels {
     /// The last tile of `k` may be short, and the last tiles of `m` and `n` may reach past the
     /// rows of `a` and the columns of `b`. For each piece outside, `cp.async` reads nothing and
     /// copies zeros, so that what is outside adds zero. Past the edges of `c` nothing is stored.
+    ///
+    /// An `unsafe fn`: its tiles are in shared memory, its threads wait for each other at a
+    /// barrier, and the threads of a warp load and multiply together, which kernite cannot prove
+    /// safe.
     pub unsafe extern "ptx-kernel" fn hgemm(c: *mut f32, a: *const f16, b: *const f16, m: u32, n: u32, k: u32) {
         // `smem` starts at a multiple of 128 bytes, the width of the 32 banks, which the xors in
         // the doc need.

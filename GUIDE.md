@@ -694,7 +694,7 @@ it has none and `cfg` keeps it.
 #[kernite_macros::kernels]
 mod gpu {
     /// `y[i] = a * x[i] + y[i]` for each `i < n`, rounded once.
-    pub unsafe extern "ptx-kernel" fn saxpy(a: f32, x: *const f32, y: *mut f32, n: u32) {
+    pub extern "ptx-kernel" fn saxpy(a: f32, x: *const f32, y: *mut f32, n: u32) {
         let (block, size, thread, i): (u32, u32, u32, u32);
         mov.u32(block, ctaid.x);
         mov.u32(size, ntid.x);
@@ -711,10 +711,14 @@ mod gpu {
 
 let cuda = kernite_cuda::Cuda::new()?;
 let kernels = gpu::Kernels::load(&cuda)?;
-let (xs, ys) = (cuda.upload(&x)?, cuda.upload(&y)?);
-unsafe { kernels.saxpy(kernite_cuda::Grid::new(n.div_ceil(256), 256), 2.0, xs.ptr(), ys.ptr(), n)? };
+let (xs, mut ys) = (cuda.upload(&x)?, cuda.upload(&y)?);
+kernels.saxpy(kernite_cuda::Grid::new(n.div_ceil(256), 256), 2.0, &xs, &mut ys, n)?;
 ys.read_into(&mut y)?;
 ```
+
+`saxpy` is no `unsafe fn`: kernite proves that each thread reads and writes inside `x` and `y`, and writes only its own
+element of `y`, as "A safe GPU kernel", below, says. Its launcher takes the memory, `&xs` to read and `&mut ys` to
+write, and Rust calls it with no `unsafe`.
 
 A machine may have several GPUs. The GPUs are those the driver shows the program: all of the machine's, unless
 `CUDA_VISIBLE_DEVICES` chooses which, and the driver numbers them from 0 in its order. `Cuda::count()` says how many
@@ -779,14 +783,16 @@ no `sync` of its own. The compiler refuses to take a pointer for a kernel while 
 `lend` borrows the slice. Dropping the memory waits for the kernels that use it, as dropping a buffer does, and then
 frees it, or gives a slice lent back to the host.
 
-A pointer taken before the slice is `Copy`, and the compiler cannot refuse a launch on it, so a launch is `unsafe`, and
-its contract is this: each pointer is to a buffer or to unified memory of the GPU, as long as the kernel reads and
-writes through it; from the launch until the kernel is done, the host holds no slice of memory the kernel writes, and no
-slice it may write of memory the kernel reads; and where `cuda.concurrent_managed_access()` is false, the GPU not
-reaching managed memory while the host does, the host holds no slice of managed memory at all. The method is the GPU's
-`CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS`, and a GPU where it is false faults the host on managed memory while any
-kernel runs. `Module::launch` says the contract in its `# Safety`, and the macros write it as the `# Safety` of the
-launcher of a GPU kernel that has none.
+A pointer taken before the slice is `Copy`, and the compiler cannot refuse a launch on it, so the launch of a kernel
+that is an `unsafe fn`, which takes pointers, is `unsafe`, and its contract is this: each pointer is to a buffer or to
+unified memory of the GPU, as long as the kernel reads and writes through it; from the launch until the kernel is done,
+the host holds no slice of memory the kernel writes, and no slice it may write of memory the kernel reads; and where
+`cuda.concurrent_managed_access()` is false, the GPU not reaching managed memory while the host does, the host holds no
+slice of managed memory at all. The method is the GPU's `CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS`, and a GPU where
+it is false faults the host on managed memory while any kernel runs. `Module::launch` says the contract in its
+`# Safety`, and the macros write it as the `# Safety` of the launcher of a GPU kernel that is an `unsafe fn` and has
+none. The launcher of a kernel that is no `unsafe fn` takes the memory, not a pointer, and has no contract for its
+caller to keep: "A safe GPU kernel", below, says what it checks.
 
 Managed memory is moved ahead of its use, and advised how it is used, over a range of its elements; a slice lent is
 advised too, but not moved. `memory.prefetch(0..len, Location::Gpu)` moves them to the GPU, ahead of the kernels that
@@ -1040,6 +1046,72 @@ name = "kernite"
 the module. The error names the manifest. A package with no workspace's manifest is one of its own, named as the package
 is.
 
+## A safe GPU kernel
+
+A GPU kernel that is no `unsafe fn` is one kernite proves safe where it compiles it, and Rust calls its launcher as it
+calls any function, with no `unsafe`. The launcher takes memory where the kernel takes a pointer: `&xs` where the kernel
+takes a `*const f32`, memory it reads, and `&mut ys` where it takes a `*mut f32`, memory it writes. The memory is a
+`Buffer`, managed or page-locked memory, a slice the host lends for good, `cuda.lend(Vec::leak(v))`, or, for a `*const`,
+the elements of a buffer from one on, `xs.tail(i)`. A slice lent for less is not, as a `mem::forget` of what `lend` gave
+would give it back to the host while the kernel may still write it. Rust keeps the host from touching `ys` while the
+launcher has it, and from lending the same memory twice; the kernel keeps what it is lent until it is done, so that
+`read`, `write`, `host` and dropping the memory wait for the kernel first. What is left is the kernel's own threads, and
+kernite proves, as each instruction comes, that they keep to what they are lent:
+
+- each load and store is of global memory, at an address worked out from one of the kernel's pointers, at a multiple of
+  the bytes it moves, and inside the memory the launcher lent for it;
+- no two threads write one address, and none reads what another may write: each thread writes only its own part of the
+  memory, and reads of memory the kernel writes only that part.
+
+What keeps the threads apart is the thread's index among the grid's, `ctaid.x * ntid.x + tid.x`, which `global_index`
+works out in [`examples/my-app`](examples/my-app/src/main.rs), and what keeps it inside the memory is a compare: the
+threads whose index is not below `n` end, `setp.ge.u32(past, i, n); if past { ret(); }`, and kernite knows that a thread
+that goes on has `i < n`, as it does after any `ret`, `exit` or `trap` under an `if`. kernite follows whole numbers: the
+thread's index in its block, the block's in its grid, the sizes of both, the kernel's integers and numbers known now, by
+`mov`, `add`, `sub`, `mul`, `mad`, `shl` and `cvt` from 32 bits to 64, and the addresses that `mad.wide` and `add` make
+of a pointer and a number. What it cannot know, because the launch gives it, is left as a condition on the launch: that
+the memory lent for a pointer has the elements the kernel reaches, `x.len() >= n` for `saxpy`; that a thread's part of
+the memory it writes holds its bytes; and that no number the kernel works out wraps. The launcher checks each of them,
+and the grid, before the kernel runs. An error says which does not hold, as Rust writes it, with the value of each
+number in it, and no kernel runs: ``cuLaunchKernel: `saxpy` is safe on this launch only if `x.len() >= n`, so that each
+element it reaches of `x` is inside it, and that does not hold: `x.len()` is 999, `n` is 1000``.
+
+The grid of a safe kernel runs along x alone, with fewer than 2^32 threads, so that `ctaid.x * ntid.x + tid.x` numbers
+each of them apart in 32 bits. A grid with more than one block or thread along y or z is an error before the kernel
+runs, ``cuLaunchKernel: `saxpy` is safe on a grid that runs along x alone, for kernite proves that its threads reach
+memory apart by their index along x: the grid has 2 blocks along y``, and so is one of 2^32 threads or more,
+``cuLaunchKernel: `saxpy` numbers its threads in 32 bits, so its grid has fewer than 4294967296 of them: the grid has
+16777216 blocks of 256 threads, 4294967296 in all``. Memory of another GPU than the kernels are loaded on is an error
+too, ``cuLaunchKernel: the memory is on another GPU than the kernels are loaded on``, and so is managed memory on a GPU
+that cannot reach it while the host does, which the host may touch while the kernel runs: ``cuLaunchKernel: a kernel
+that is no `unsafe fn` is not lent managed memory by a GPU that cannot reach it while the host does: its
+CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0``. The code of a safe kernel is that of the same kernel written with
+`unsafe`: kernite adds none to the kernel, and the launcher's checks run on the host.
+
+What kernite cannot prove it refuses, at the first instruction or operand it cannot, and the error says what kernite
+cannot prove there, and that a kernel that does it is an `unsafe fn`, which compiles as it always has, and whose
+launcher takes pointers, `xs.ptr()`, and is `unsafe`. A kernel is an `unsafe fn` when it:
+
+- writes at an address that is not only its thread's, `[y + (i + 1) * 4]`, or reads memory the kernel may write at one
+  that is not, so that a thread may race with another;
+- reaches an element at an index that no compare keeps below the memory's length, or one that a compare keeps below it
+  only after the access, or reaches memory before it starts, `[at - 4]`;
+- reaches an address that kernite cannot follow to a pointer of the kernel's, as a number or a loaded word is, one that
+  is not a multiple of the bytes it moves from its pointer, or more bytes at once than the type its pointer is to has,
+  `ld.global.v4.f32` through a `*const f32`; or writes through a `*const` pointer, which is memory lent to be read;
+- loads or stores more than plainly, `st.volatile.global.f32`, or reaches memory by a generic address, `st.f32`, which
+  may be shared or local memory, or any memory but global;
+- names shared memory, the kernel's own or the launch's, local memory, or a static of the module's, which the threads of
+  a block, or every kernel and the host, reach;
+- makes threads wait for each other, or orders what they write, `bar`, `membar`, `fence`; or works on the registers of
+  the threads of a warp together, `shfl`, `vote`, `mma`;
+- reaches memory that other threads reach at once, as an atomic, `atom` and `red`, or `cp.async`, does;
+- reaches a texture or a surface, jumps, or calls a function, `call`, which kernite does not follow;
+- is `#[cooperative]`, whose blocks wait for each other, so that kernite cannot prove that they reach memory apart.
+
+A crate may `forbid(unsafe_code)` and have safe GPU kernels, and launch them: the Rust the macro writes for a launcher
+is no `unsafe` of the crate's.
+
 ## Examples
 
 [`examples/my-app`](examples/my-app/src/main.rs) uses kernite as a crate outside it would: for the CPU `sum8`, a safe
@@ -1047,16 +1119,16 @@ function of an array, `dot` for one accumulator, for four and for sixteen, two o
 in its stack memory, `sum16`, a safe one too, which calls `sum8` for each half, `gcds`, a safe function of three slices,
 which calls Stein's `gcd`, a safe function of two numbers, which calls itself, `histogram`, which counts in the module's
 memory from call to call, `weigh`, by weights in its constant memory, and `normalize` and `diffuse` on the threads of a
-grid, which compute what the GPU's do, bit for bit; and for the GPU `saxpy`, `block_sums` for blocks of 256 threads and
-of 1024 and `reverse_runs` in shared memory, `scale_f16`, written in place, `gcds`, which calls `gcd`, an
-`extern "ptx-func"` function that calls itself, `histogram`, which counts in the module's global memory from launch to
-launch, and `weigh`, by weights in its constant memory, with safe functions over them; and `matmul` on the tensor cores,
-by `cp.async`, `ldmatrix` and `mma`, in a module of its own, since it needs an Ampere GPU, `sm_80`; and in another, for
-Pascal's, `sm_60`, `normalize`, whose threads keep their floats in registers while the grid waits for every block's sum,
-and `diffuse`, which takes any number of steps in one launch, the grid waiting between them. Its tests hold each kernel
-to a scalar reference that does the same float operations in the same order, bit for bit, or the tensor cores, which add
-in an order of their own, to products of integers, exact in any order; and its listings to
-[`snapshots/`](examples/my-app/snapshots/).
+grid, which compute what the GPU's do, bit for bit; and for the GPU `saxpy`, a safe kernel, launched with no `unsafe`,
+`block_sums` for blocks of 256 threads and of 1024 and `reverse_runs` in shared memory, `scale_f16`, written in place, a
+safe one too, `gcds`, which calls `gcd`, an `extern "ptx-func"` function that calls itself, `histogram`, which counts in
+the module's global memory from launch to launch, and `weigh`, by weights in its constant memory, with safe functions
+over them; and `matmul` on the tensor cores, by `cp.async`, `ldmatrix` and `mma`, in a module of its own, since it needs
+an Ampere GPU, `sm_80`; and in another, for Pascal's, `sm_60`, `normalize`, whose threads keep their floats in registers
+while the grid waits for every block's sum, and `diffuse`, which takes any number of steps in one launch, the grid
+waiting between them. Its tests hold each kernel to a scalar reference that does the same float operations in the same
+order, bit for bit, or the tensor cores, which add in an order of their own, to products of integers, exact in any
+order; and its listings to [`snapshots/`](examples/my-app/snapshots/).
 
 ```
 cargo run -p my-app
@@ -1106,7 +1178,7 @@ Each crate depends only on the layers inside it. `crates/kernite/tests/architect
 | adapters | `kernite-x86`, `kernite-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kernite` | which machine and syntax each kernel compiles with |
 | delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, and the safe functions that call them; launchers of a grid's threads, or launchers of PTX |
-| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and memory the host reaches too, modules, launches, copies between GPUs; `f16` and `bf16`; depends on no other crate |
+| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and memory the host reaches too, modules, launches and what a safe kernel's launch must hold, copies between GPUs; `f16` and `bf16`; depends on no other crate |
 | runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid and the CPUs they run on, and the memory of a module of x86 kernels; depends on no other crate |
 
 ## Guarantees

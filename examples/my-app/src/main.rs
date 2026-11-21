@@ -557,7 +557,7 @@ mod kernels {
 #[kernite_macros::kernels]
 mod gpu {
     /// `y[i] = a * x[i] + y[i]` for each `i < n`, rounded once.
-    pub unsafe extern "ptx-kernel" fn saxpy(a: f32, x: *const f32, y: *mut f32, n: u32) {
+    pub extern "ptx-kernel" fn saxpy(a: f32, x: *const f32, y: *mut f32, n: u32) {
         let i: u32;
         global_index(i);
         let past: pred;
@@ -578,6 +578,8 @@ mod gpu {
     /// `sums[b]`, the sum of the `N` floats of `x` from `N b`: a block of `N` threads each,
     /// adding in a tree in the shared memory it declares, half as many threads each level.
     /// `N` is a power of two, compiled for 256 and for 1024, as many threads as a block has.
+    ///
+    /// An `unsafe fn`: its tree is in shared memory, and its threads wait for each other at a barrier.
     #[instances(256, 1024)]
     pub unsafe extern "ptx-kernel" fn block_sums<const N: u32>(x: *const f32, sums: *mut f32) {
         let tile: shared<[f32; N], 16>;
@@ -613,6 +615,8 @@ mod gpu {
 
     /// Each block's run of floats of `x`, a thread each, reversed in place through the shared
     /// memory the launch gives: 4 bytes a thread.
+    ///
+    /// An `unsafe fn`: shared memory is one its threads reach together, and they wait for each other at a barrier.
     pub unsafe extern "ptx-kernel" fn reverse_runs(x: *mut f32) {
         let run: shared<[f32]>;
         let (t, n, i, j, base): (u32, u32, u32, u32, u32);
@@ -635,7 +639,7 @@ mod gpu {
     }
 
     /// `x[i] *= a` for each `i < n`, in `f16`, rounded once.
-    pub unsafe extern "ptx-kernel" fn scale_f16(x: *mut f16, a: f16, n: u32) {
+    pub extern "ptx-kernel" fn scale_f16(x: *mut f16, a: f16, n: u32) {
         let i: u32;
         global_index(i);
         let past: pred;
@@ -652,6 +656,8 @@ mod gpu {
     }
 
     /// `g[i]`, the greatest common divisor of `a[i]` and `b[i]`, for each `i < n`, by `gcd`.
+    ///
+    /// An `unsafe fn`: it calls `gcd`, a function kernite does not follow.
     pub unsafe extern "ptx-kernel" fn gcds(a: *const u32, b: *const u32, g: *mut u32, n: u32) {
         let i: u32;
         global_index(i);
@@ -695,6 +701,9 @@ mod gpu {
     pub static WEIGHTS: constant<[f32; 4]> = [1.0, 0.5, 0.25, 2.0];
 
     /// Adds each `x[i]`, `i < n`, to its bin of `COUNTS`, the one its top four bits say.
+    ///
+    /// An `unsafe fn`: `COUNTS` is memory of the module's, which every kernel and the host reach, and the threads
+    /// add to a bin at once, atomically.
     pub unsafe extern "ptx-kernel" fn histogram(x: *const u32, n: u32) {
         let i: u32;
         global_index(i);
@@ -714,6 +723,8 @@ mod gpu {
     }
 
     /// `x[i] *= WEIGHTS[i % 4]` for each `i < n`, rounded once.
+    ///
+    /// An `unsafe fn`: `WEIGHTS` is memory of the module's, which every kernel and the host reach.
     pub unsafe extern "ptx-kernel" fn weigh(x: *mut f32, n: u32) {
         let i: u32;
         global_index(i);
@@ -757,6 +768,9 @@ mod ampere {
     /// from global memory to shared, with no register between; `ldmatrix` loads each thread's
     /// fragments of them; and `mma` multiplies them, adding to the tile in `f32`. `n` must be
     /// a multiple of 8, and `k` a positive multiple of 16.
+    ///
+    /// An `unsafe fn`: its tiles are in shared memory, its threads wait for each other at a barrier, and the threads
+    /// of a warp load and multiply together.
     pub unsafe extern "ptx-kernel" fn matmul(a: *const f16, bt: *const f16, c: *mut f32, n: u32, k: u32) {
         let a_tile: shared<[f16; 256], 16>;
         let b_tile: shared<[f16; 128], 16>;
@@ -866,6 +880,9 @@ mod pascal {
     /// `gpu::block_sums`, and the block's to `sums[b]`. The grid waits; then the block's first
     /// thread adds the blocks' sums, in order, and each thread divides its floats by that,
     /// rounded once.
+    ///
+    /// An `unsafe fn`: it is `#[cooperative]`, and its blocks wait for each other, so that kernite cannot prove
+    /// that they reach memory apart.
     #[cooperative]
     pub unsafe extern "ptx-kernel" fn normalize(x: *mut f32, sums: *mut f32, n: u32) {
         let tile: shared<[f32; 256], 16>;
@@ -949,6 +966,9 @@ mod pascal {
     /// operation rounded once, an end's missing neighbour as warm as the end. Each thread keeps
     /// its float in a register, and writes it for its neighbours to `x` and to `y` by turns,
     /// the one they are not reading; the grid waits between steps. `y` is as long as `x`.
+    ///
+    /// An `unsafe fn`: it is `#[cooperative]`, and its threads read what their neighbours wrote, so that kernite
+    /// cannot prove that they reach memory apart.
     #[cooperative]
     pub unsafe extern "ptx-kernel" fn diffuse(x: *mut f32, y: *mut f32, n: u32, steps: u32) {
         let (i, j): (u32, u32);
@@ -1147,10 +1167,8 @@ fn saxpy(cuda: &Cuda, kernels: &gpu::Kernels, a: f32, x: &[f32], y: &mut [f32]) 
     if n == 0 {
         return Ok(());
     }
-    let (xs, ys) = (cuda.upload(x)?, cuda.upload(y)?);
-    // SAFETY: `n` floats behind each pointer, in buffers that last until `read_into` has
-    // waited for the kernel.
-    unsafe { kernels.saxpy(Grid::new(n.div_ceil(256), 256), a, xs.ptr(), ys.ptr(), n)? };
+    let (xs, mut ys) = (cuda.upload(x)?, cuda.upload(y)?);
+    kernels.saxpy(Grid::new(n.div_ceil(256), 256), a, &xs, &mut ys, n)?;
     Ok(ys.read_into(y)?)
 }
 
@@ -1198,10 +1216,8 @@ fn scale_f16(cuda: &Cuda, kernels: &gpu::Kernels, a: f16, x: &mut [f16]) -> Run 
     if n == 0 {
         return Ok(());
     }
-    let xs = cuda.upload(x)?;
-    // SAFETY: `n` halves behind the pointer, in a buffer that lasts until `read_into` has
-    // waited for the kernel.
-    unsafe { kernels.scale_f16(Grid::new(n.div_ceil(256), 256), xs.ptr(), a, n)? };
+    let mut xs = cuda.upload(x)?;
+    kernels.scale_f16(Grid::new(n.div_ceil(256), 256), &mut xs, a, n)?;
     Ok(xs.read_into(x)?)
 }
 
@@ -2255,7 +2271,7 @@ mod tests {
     #[kernite_macros::kernels]
     mod oldest {
         /// `y[i] = a * x[i] + y[i]` for each `i < n`, rounded once.
-        pub unsafe extern "ptx-kernel" fn saxpy(a: f32, x: *const f32, y: *mut f32, n: u32) {
+        pub extern "ptx-kernel" fn saxpy(a: f32, x: *const f32, y: *mut f32, n: u32) {
             let (block, size, thread, i): (u32, u32, u32, u32);
             mov.u32(block, ctaid.x);
             mov.u32(size, ntid.x);
@@ -2311,16 +2327,68 @@ mod tests {
         let n = 65535 * 256 + 1;
         let (x, y) = (floats(n, 7), floats(n, 8));
         let want: Vec<u32> = x.iter().zip(&y).map(|(x, y)| 1.5f32.mul_add(*x, *y).to_bits()).collect();
-        let (xs, ys) = (cuda.upload(&x)?, cuda.upload(&y)?);
-        // SAFETY: `n` floats behind each pointer, in buffers that last until `read` has waited
-        // for the kernel.
-        unsafe { kernels.saxpy(Grid::new(65536, 256), 1.5, xs.ptr(), ys.ptr(), n as u32) }?;
+        let (xs, mut ys) = (cuda.upload(&x)?, cuda.upload(&y)?);
+        kernels.saxpy(Grid::new(65536, 256), 1.5, &xs, &mut ys, n as u32)?;
         assert_eq!(ys.read()?.iter().map(|y| y.to_bits()).collect::<Vec<_>>(), want);
         let most = (1 << 31) - 1;
         let out = cuda.alloc::<u32>(1)?;
         // SAFETY: a word at `out`, which the last block writes.
         unsafe { kernels.last(Grid::new(most, 1), out.ptr()) }?;
         assert_eq!(out.read()?, [most - 1]);
+        Ok(())
+    }
+
+    /// A launch of a kernel that is no `unsafe fn` is checked before the kernel runs, and what does not hold is an
+    /// error that says it in Rust, with the numbers: `saxpy` of `n` floats over an `x` or a `y` of fewer, over a grid
+    /// that runs along y, and over one of 2^32 threads. No kernel runs, so `y` holds what it did; one that holds runs.
+    /// On a machine with no GPU, skipped.
+    #[test]
+    fn a_launch_the_proof_does_not_hold_for_is_refused_before_the_kernel_runs() -> Result {
+        let cuda = match Cuda::new() {
+            Ok(cuda) => cuda,
+            Err(e) => {
+                eprintln!("no GPU: skipped. {e}");
+                return Ok(());
+            }
+        };
+        let kernels = gpu::Kernels::load(&cuda)?;
+        let (x, y) = (floats(1000, 1), floats(1000, 2));
+        let (long, short) = (cuda.upload(&x)?, cuda.upload(&x[..999])?);
+        let mut ys = cuda.upload(&y)?;
+        let mut few = cuda.upload(&y[..999])?;
+        let refused = |e: kernite_cuda::Error| e.to_string();
+        let unless = |names: &str, why: &str, values: &str| {
+            format!(
+                "cuLaunchKernel: `saxpy` is safe on this launch only if `{names}`, so that {why}, and that does not \
+                 hold: {values}"
+            )
+        };
+        // The memory has fewer elements than `n`, of `x`, which the kernel reads, or of `y`, which it writes.
+        let grid = Grid::new(4, 256);
+        let got = kernels.saxpy(grid, 1.5, &short, &mut ys, 1000).err().map(refused);
+        let want =
+            unless("x.len() >= n", "each element it reaches of `x` is inside it", "`x.len()` is 999, `n` is 1000");
+        assert_eq!(got, Some(want));
+        let got = kernels.saxpy(grid, 1.5, &long, &mut few, 1000).err().map(refused);
+        let want =
+            unless("y.len() >= n", "each element it reaches of `y` is inside it", "`y.len()` is 999, `n` is 1000");
+        assert_eq!(got, Some(want));
+        // The grid has a block along y, or 2^32 threads.
+        let mut along_y = grid;
+        along_y.blocks[1] = 2;
+        let got = kernels.saxpy(along_y, 1.5, &long, &mut ys, 1000).err().map(refused);
+        let want = "cuLaunchKernel: `saxpy` is safe on a grid that runs along x alone, for kernite proves that its \
+                    threads reach memory apart by their index along x: the grid has 2 blocks along y";
+        assert_eq!(got.as_deref(), Some(want));
+        let got = kernels.saxpy(Grid::new(1 << 24, 256), 1.5, &long, &mut ys, 1000).err().map(refused);
+        let want = "cuLaunchKernel: `saxpy` numbers its threads in 32 bits, so its grid has fewer than 4294967296 of \
+                    them: the grid has 16777216 blocks of 256 threads, 4294967296 in all";
+        assert_eq!(got.as_deref(), Some(want));
+        assert_eq!(ys.read()?, y, "no kernel ran");
+        // The launch that holds runs.
+        kernels.saxpy(grid, 1.5, &long, &mut ys, 1000)?;
+        let want: Vec<u32> = x.iter().zip(&y).map(|(x, y)| 1.5f32.mul_add(*x, *y).to_bits()).collect();
+        assert_eq!(ys.read()?.iter().map(|y| y.to_bits()).collect::<Vec<_>>(), want);
         Ok(())
     }
 
@@ -2471,7 +2539,7 @@ mod tests {
     #[kernite_macros::kernels]
     mod device {
         /// `x[i] *= x[i]` for each `i < n`, rounded once.
-        pub unsafe extern "ptx-kernel" fn square(x: *mut f32, n: u32) {
+        pub extern "ptx-kernel" fn square(x: *mut f32, n: u32) {
             let (block, size, thread, i): (u32, u32, u32, u32);
             mov.u32(block, ctaid.x);
             mov.u32(size, ntid.x);
@@ -2528,10 +2596,9 @@ mod tests {
         let want: Vec<f32> = Vec::from_fn(n, |i| 1.0 + i as f32 * 0.000001);
         assert_eq!(bits(filled), bits(&want), "the cpu kernel's floats");
 
-        // SAFETY: `square` reads and writes `n` floats at the pointer, which the memory, managed
-        // memory of this GPU, has, and this test holds no slice of it. The GPU reaches managed memory
-        // while the host does, or the test would have been skipped.
-        unsafe { kernels.square(Grid::new(n.div_ceil(256) as u32, 256), memory.ptr(), n as u32) }?;
+        // The launcher lends the managed memory to the kernel, which a GPU that reaches managed memory while
+        // the host does lets it be, or the test would have been skipped.
+        kernels.square(Grid::new(n.div_ceil(256) as u32, 256), &mut memory, n as u32)?;
         let squared = memory.host()?;
         assert_eq!(squared.as_ptr() as u64, address, "no copy");
         let want: Vec<f32> = want.iter().map(|x| x * x).collect();

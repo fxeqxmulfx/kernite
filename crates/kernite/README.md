@@ -20,7 +20,7 @@ fn main() -> Result<(), String> {
             ret(sum);
         }
 
-        pub unsafe extern "ptx-kernel" fn store(x: *mut u32) {
+        pub extern "ptx-kernel" fn store(x: *mut u32) {
             st.global.u32([x], 1);
         }
     "#;

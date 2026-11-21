@@ -181,6 +181,10 @@ fn takes_pointer(ty: &str) -> String {
     )
 }
 
+/// What kernite says of a GPU kernel that is no `unsafe fn` and has a barrier, which it cannot prove safe.
+const BARRIER: &str = "`bar.sync` makes threads wait for each other, or orders what they write, and kernite cannot \
+                       prove that this is safe, so a kernel that does is an `unsafe fn`";
+
 /// What Rust says of `name`, a type that is not there, at `place` of `src/lib.rs`.
 fn not_found(place: &str, name: &str) -> String {
     format!("src/lib.rs:{place}: error[E0425]: cannot find type `{name}` in this scope: not found in this scope")
@@ -520,7 +524,7 @@ fn what_a_module_says_when_its_parts_fail() -> Result {
             "src/lib.rs:10:7: error: `#[cooperative]` goes on a kernel whose blocks or threads wait for each other, \
              `extern \"ptx-kernel\"` or `extern \"sysv64\"`; `f` is a function the kernels call, which runs as the \
              kernel that calls it is launched",
-            "src/lib.rs:15:32: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
+            &format!("src/lib.rs:15:44: error: {BARRIER}"),
             "src/lib.rs:37:12: error: a static is memory of the module's kernels: the GPU's, for PTX kernels, or the \
              process's, for x86 ones; and this module has both, so it is two modules, one of each kind of kernel and \
              the statics they name",
@@ -851,7 +855,7 @@ fn a_module_refused_at_its_attribute_is_told_what_the_macro_finds_in_writing_it_
              \"C\"` is none of these",
             "src/lib.rs:37:23: error: `global<[u32; 0]>` holds nothing",
             "src/lib.rs:43:50: error: `grid` names a parameter of the launcher as well",
-            "src/lib.rs:51:32: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
+            &format!("src/lib.rs:52:13: error: {BARRIER}"),
             "src/lib.rs:55:7: error: `once` takes no compile-time arguments, so it is compiled once, with no \
              `#[instances(..)]`",
             "src/lib.rs:61:28: error: `nope` is not defined",
@@ -1323,6 +1327,23 @@ fn a_gpu_kernels_launcher_says_what_a_launch_keeps_to() -> Result {
     Ok(())
 }
 
+/// A GPU kernel that is no `unsafe fn` has a launcher that Rust calls without `unsafe`: its docs have no `# Safety`,
+/// and say that the launch is checked first. A crate that forbids `unsafe_code` has such kernels and launches them: the
+/// code the macro writes for one is no `unsafe` of the crate's.
+#[test]
+fn a_gpu_kernel_that_is_no_unsafe_fn_has_a_safe_launcher_and_a_crate_that_forbids_unsafe_launches_it() -> Result {
+    builds_quietly("safe_gpu_kernels")?;
+    let page = fs::read_to_string(documents_quietly("safe_gpu_kernels")?.join("gpu/struct.Kernels.html"))?;
+    // The launcher's signature and docs, up to the next method.
+    let (_, method) = page.split_once("id=\"method.plus\"").ok_or("the method is not there")?;
+    let method = method.split_once("id=\"method.").map_or(method, |(before, _)| before);
+    assert!(!method.contains("unsafe"), "the launcher is an `unsafe fn`: {method}");
+    assert!(!method.contains(">Safety</h5>"), "the launcher's docs have a `# Safety`: {method}");
+    let said = "The launch is checked first, and is an error that says what does not hold, with no kernel run";
+    assert!(method.contains(said), "the launcher's docs lack `{said}`: {method}");
+    Ok(())
+}
+
 /// The function's docs name the CPU features its kernel needs past x86-64's own, which nothing
 /// checks for when it runs, as the listing's header does: three, two, one, or, for a kernel
 /// that needs none, no paragraph. A generic kernel's docs name those of every instance, each
@@ -1540,7 +1561,7 @@ fn what_cfg_leaves_out_says_nothing() -> Result {
             // of `taken` and `counted` named as a parameter of a launcher, which the module says after the rest.
             "src/lib.rs:119:28: error: `y` is not defined",
             "src/lib.rs:125:20: error: PTX has no instruction `frobnicate` that kernite knows",
-            "src/lib.rs:130:32: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
+            &format!("src/lib.rs:131:13: error: {BARRIER}"),
             "src/lib.rs:138:28: error: in `tile::<1>`: `y` is not defined",
             "src/lib.rs:138:28: error: in `tile::<2>`: `y` is not defined",
             "src/lib.rs:143:7: error: `plain` takes no compile-time arguments, so it is compiled once, with no \

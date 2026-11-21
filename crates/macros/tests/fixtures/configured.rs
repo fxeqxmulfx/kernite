@@ -125,10 +125,10 @@ pub mod gpu {
         frobnicate.u32([p]);
     }
 
-    /// A kernel that is not `unsafe`.
+    /// A kernel that is not `unsafe`, and kernite cannot prove it safe.
     #[cfg(feature = "cpu")]
     pub extern "ptx-kernel" fn safe(p: *mut u32) {
-        st.global.u32([p], 1);
+        bar.sync(0);
     }
 
     /// A kernel of instances, whose errors are one for each.

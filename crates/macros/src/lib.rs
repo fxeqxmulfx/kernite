@@ -32,11 +32,15 @@
 //!   does, or at the address `lea(fp, [gcd])` takes; all but a `#[cooperative]` one, which
 //!   its launcher runs. One that never returns, `-> !`, ends each way out in `ud2()` or in a
 //!   call of one that does not.
-//! - An `unsafe extern "ptx-kernel" fn` is compiled to PTX, for NVIDIA GPUs. The module's are
+//! - An `extern "ptx-kernel" fn` is compiled to PTX, for NVIDIA GPUs. The module's are
 //!   one PTX module, `PTX`, and `Kernels::load(&cuda)` has the driver compile it for the GPU
 //!   it finds; then each kernel is launched by the method of its name, which takes a
-//!   `kernite_cuda::Grid` and the kernel's parameters, a pointer as the `kernite_cuda::Ptr` a
-//!   buffer on the GPU gives, and an `f16` or a `bf16` as kernite-cuda's, Rust having neither.
+//!   `kernite_cuda::Grid` and the kernel's parameters, an `f16` or a `bf16` as kernite-cuda's, Rust having neither.
+//!   One that is no `unsafe fn`, and that kernite proves safe, is launched by a safe method: it takes the memory
+//!   a pointer is to, `&impl Memory<T>` for a `*const T` and `&mut impl MemoryMut<T>` for a `*mut T`, which a
+//!   buffer is, and checks on the host that the launch holds what the proof needs, and is an error, with no kernel
+//!   run, where it does not. Any other is an `unsafe extern "ptx-kernel" fn`, and its method is `unsafe` and takes a
+//!   pointer as the `kernite_cuda::Ptr` a buffer on the GPU gives.
 //!   A crate with a module of GPU kernels needs a dependency named `kernite-cuda` for these, not
 //!   renamed in `Cargo.toml`, and the error is at the module when it has none and `cfg` keeps one
 //!   of its GPU items: a feature can bring `kernite-cuda` and keep them, and the crate builds
@@ -101,15 +105,15 @@
 //! #[kernite_macros::kernels]
 //! mod gpu {
 //!     /// `x[i] *= a` for each `i < n`.
-//!     pub unsafe extern "ptx-kernel" fn scale(x: *mut f32, a: f32, n: u32) {
+//!     pub extern "ptx-kernel" fn scale(x: *mut f32, a: f32, n: u32) {
 //!         ..
 //!     }
 //! }
 //!
 //! let cuda = kernite_cuda::Cuda::new()?;
-//! let xs = cuda.upload(&[1.0, 2.0, 3.0])?;
+//! let mut xs = cuda.upload(&[1.0, 2.0, 3.0])?;
 //! let kernels = gpu::Kernels::load(&cuda)?;
-//! unsafe { kernels.scale(kernite_cuda::Grid::new(1, 32), xs.ptr(), 2.0, 3)? };
+//! kernels.scale(kernite_cuda::Grid::new(1, 32), &mut xs, 2.0, 3)?;
 //! ```
 //!
 //! A kernel with const generics, integers or `bool`s, is compiled for each instance its

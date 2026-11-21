@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ret(v);
         }
 
-        pub unsafe extern "ptx-kernel" fn store(x: *mut u32) {
+        pub extern "ptx-kernel" fn store(x: *mut u32) {
             st.global.u32([x], 1);
         }
     "#;

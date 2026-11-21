@@ -8,8 +8,8 @@ use kernite_lang::{Error, Fault, Fn, Guard, IntTy, Memory, Mention, Operand, Spa
 
 use crate::{
     Abi, Assembly, Backend, Call, Called, ConstItem, Device, DeviceOut, DeviceStatic, Done, Given, HostStatic, ItemOut,
-    Kept, Launcher, ModuleOut, Naked, Native, NativeOut, Owner, StaticError, Unfinished, When, abi, all, compile,
-    consts, cooperative, function, instance, module, one, owner, prepare, statics,
+    Kept, Launch, Launcher, ModuleOut, Naked, Native, NativeOut, Owner, Quantity, Requirement, StaticError, Unfinished,
+    When, Why, abi, all, compile, consts, cooperative, function, instance, module, one, owner, prepare, statics,
 };
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
@@ -146,6 +146,8 @@ struct Told {
     funcs: Vec<String>,
     reach: Vec<String>,
     statics: Vec<String>,
+    /// Whether the kernel is no `unsafe fn`.
+    safe: bool,
 }
 
 thread_local! {
@@ -226,6 +228,7 @@ impl Backend for Echo {
             funcs: vec![],
             reach: vec![],
             statics: vec![],
+            safe: !f.unsafe_fn,
         }
     }
 
@@ -270,6 +273,14 @@ impl Device for Echo {
 
     fn symbol(&self, code: &Told) -> String {
         code.name.clone()
+    }
+
+    /// A kernel that is no `unsafe fn` requires a grid of a block or more.
+    fn requires(&self, code: &Told) -> Vec<Requirement> {
+        match code.safe {
+            true => vec![Requirement { terms: vec![(1, vec![Quantity::Blocks]), (-1, vec![])], why: Why::Fits }],
+            false => vec![],
+        }
     }
 
     fn device_static(&self, s: &Laid) -> DeviceStatic {
@@ -1113,13 +1124,12 @@ fn a_module_refused_whole_says_nothing_of_an_item_named_as_a_const_given() -> Re
 }
 
 /// A kernel that is not an `unsafe fn` is refused where it is named, though it is compiled, if it is one that kernite
-/// cannot prove safe: a kernel on the threads of a grid, which the process runs, is not written, and one the GPU runs
-/// is never launched, though its code is in the GPU's module. A kernel the process runs on one thread is as safe as
-/// its machine proves it, which the machine says. A function the kernels call promises Rust nothing, so it need not be
-/// one.
+/// cannot prove safe: a kernel on the threads of a grid, which the process runs, is not written, and a kernel on the
+/// blocks of one, which the GPU runs, is never launched, though its code is in the GPU's module. Any other kernel is as
+/// safe as its machine proves it, which the machine says. A function the kernels call promises Rust nothing, so it
+/// need not be one.
 #[test]
 fn a_kernel_that_is_not_unsafe_is_refused() -> Result {
-    let not = "a kernel trusts the pointers it is given, so it is an `unsafe fn`";
     let src = "#[cooperative] extern \"sysv64\" fn k(x: u64) { add(x, 1); }";
     let out = echoed(src)?;
     let [ItemOut::Native(k)] = &out.items[..] else { return Err(format!("{:?}", out.items).into()) };
@@ -1132,12 +1142,14 @@ fn a_kernel_that_is_not_unsafe_is_refused() -> Result {
     let out = echoed(src)?;
     let [ItemOut::Native(k)] = &out.items[..] else { return Err(format!("{:?}", out.items).into()) };
     assert!(k.not_unsafe.is_none() && k.written && k.listings.len() == 1);
-    let src = "extern \"ptx-kernel\" fn g() {}\nextern \"ptx-func\" fn f() {}";
+    let src = "#[cooperative] extern \"ptx-kernel\" fn g() {}\nextern \"ptx-func\" fn f() {}";
     let out = echoed(src)?;
     let [ItemOut::Device(g), ItemOut::Device(f)] = &out.items[..] else {
         return Err(format!("{:?}", out.items).into());
     };
-    assert_eq!(g.not_unsafe.as_ref().map(|e| e.at(src)), Some(format!("1:24: {not}")));
+    let blocks = "the blocks of a grid run at once and wait for each other, and kernite cannot prove that they reach \
+                  memory apart, so a `#[cooperative]` kernel is an `unsafe fn`";
+    assert_eq!(g.not_unsafe.as_ref().map(|e| e.at(src)), Some(format!("1:3: {blocks}")));
     assert_eq!(g.launcher, Some(Launcher::Never));
     assert!(f.not_unsafe.is_none());
     let device = out.device.ok_or("device gave None")?;
@@ -1145,6 +1157,29 @@ fn a_kernel_that_is_not_unsafe_is_refused() -> Result {
     let made: Vec<_> = text.lines().filter(|line| line.starts_with("new ")).collect();
     assert_eq!(made, ["new g: g []", "new f: f []"]);
     assert!(device.symbols.is_empty());
+    Ok(())
+}
+
+/// A kernel the GPU runs that is no `unsafe fn` is launched with what its machine says a launch must hold, of each of
+/// its instances, and one that is an `unsafe fn` with none.
+#[test]
+fn a_safe_gpu_kernel_is_launched_with_what_its_machine_requires() -> Result {
+    let src = "#[instances(2, 4)] extern \"ptx-kernel\" fn tile<const N: u32>() {}\n\
+               unsafe extern \"ptx-kernel\" fn raw() {}";
+    let out = echoed(src)?;
+    let [ItemOut::Device(tile), ItemOut::Device(raw)] = &out.items[..] else {
+        return Err(format!("{:?}", out.items).into());
+    };
+    assert!(tile.not_unsafe.is_none() && raw.not_unsafe.is_none());
+    let grid = Requirement { terms: vec![(1, vec![Quantity::Blocks]), (-1, vec![])], why: Why::Fits };
+    let n = |n| vec![Value::Int(n, Some(IntTy::U32))];
+    let want = Launcher::Of(vec![
+        Launch { args: n(2), symbol: 0, requires: vec![grid.clone()] },
+        Launch { args: n(4), symbol: 1, requires: vec![grid] },
+    ]);
+    assert_eq!(tile.launcher.as_ref(), Some(&want));
+    let want = Launcher::Of(vec![Launch { args: vec![], symbol: 2, requires: vec![] }]);
+    assert_eq!(raw.launcher.as_ref(), Some(&want));
     Ok(())
 }
 
@@ -1363,13 +1398,14 @@ fn the_gpu_s_kernels_are_launched_by_index() -> Result {
     }
     let launchers: Vec<_> = functions.iter().map(|d| d.launcher.as_ref()).collect();
     let n = |n| vec![Value::Int(n, Some(IntTy::U32))];
-    let tile = Launcher::Of(vec![(n(2), 1), (n(4), 2)]);
+    let one = |args, symbol| Launch { args, symbol, requires: vec![] };
+    let tile = Launcher::Of(vec![one(n(2), 1), one(n(4), 2)]);
     let want = [
-        Some(&Launcher::Of(vec![(vec![], 0)])),
+        Some(&Launcher::Of(vec![one(vec![], 0)])),
         Some(&tile),
         None,
         Some(&Launcher::Never),
-        Some(&Launcher::Of(vec![(vec![], 3)])),
+        Some(&Launcher::Of(vec![one(vec![], 3)])),
         Some(&Launcher::Never),
     ];
     assert_eq!(launchers, want);

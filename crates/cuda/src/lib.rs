@@ -63,9 +63,11 @@ use std::rc::Rc;
 mod half;
 #[doc(hidden)]
 pub mod named;
+mod safe;
 mod unified;
 
 pub use half::{bf16, f16};
+pub use safe::{Memory, MemoryMut, Quantity, Requirement, View, Why, holds};
 pub use unified::{Advice, Location, Placement, Unified};
 
 /// What every function of the driver returns: 0, or what went wrong.
@@ -361,6 +363,15 @@ impl Driver {
     fn current(&self) -> Result<&Api, Error> {
         CURRENT.with(|current| enter(current, self.context, || self.set_current()))?;
         Ok(&self.api)
+    }
+
+    /// `Ok` if `other` is this GPU: memory on another is no memory of a kernel loaded on this one.
+    fn same_gpu(&self, other: &Driver) -> Result<(), Error> {
+        if self.context != other.context {
+            let message = "the memory is on another GPU than the kernels are loaded on".to_string();
+            return Err(Error::new("cuLaunchKernel", message));
+        }
+        Ok(())
     }
 
     /// Makes this GPU's context current on the thread, whichever is now.
@@ -719,6 +730,12 @@ impl<T: Plain> Buffer<T> {
     /// if `i` is past its end.
     pub fn at(&self, i: usize) -> Option<Ptr<T>> {
         Ptr::element(self.ptr, self.len, i)
+    }
+
+    /// Its elements from `i` on, borrowed, for a kernel that is no `unsafe fn` to be lent the part
+    /// of the buffer from there on; `None` if `i` is past its end.
+    pub fn tail(&self, i: usize) -> Option<View<'_, T>> {
+        View::new(self, i)
     }
 
     /// How many elements it has.
@@ -1286,6 +1303,17 @@ mod tests {
         // It tries again, for the context the driver last had is still `a`.
         enter(&remembered, b, || give(b))?;
         assert_eq!((driver.get(), gives.get()), (b, 4));
+        Ok(())
+    }
+
+    /// Memory is lent to a kernel loaded on the GPU the memory is on, which is the GPU whose context is the same, and
+    /// to no other: the error says so, in GUIDE.md's words, before the kernel runs.
+    #[test]
+    fn memory_is_lent_only_to_a_kernel_loaded_on_its_own_gpu() -> Result {
+        let on = |context| Driver { api: Api::refusing(), device: 0, context: ptr::without_provenance_mut(context) };
+        assert_eq!(on(1).same_gpu(&on(1)), Ok(()));
+        let e = on(1).same_gpu(&on(2)).err().ok_or("same_gpu gave Ok")?;
+        assert_eq!(e.to_string(), "cuLaunchKernel: the memory is on another GPU than the kernels are loaded on");
         Ok(())
     }
 }

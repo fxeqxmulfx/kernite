@@ -11,8 +11,8 @@ pub mod gpu {
     #[instances(1)]
     extern "ptx-func" fn f() {}
 
-    // It is not `unsafe`.
-    pub extern "ptx-kernel" fn old() {}
+    // It is not `unsafe`, and kernite cannot prove it safe.
+    pub extern "ptx-kernel" fn old() { bar.sync(0); }
 }
 
 #[kernite_macros::consts]

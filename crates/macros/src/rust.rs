@@ -420,7 +420,7 @@ enum Ask {
 
 /// The number `ty` is, if `ty` is one by its name or its path, `u64` or `core::primitive::u64`: `u8` to
 /// `u64`, `i8` to `i64`, `usize`, `isize`, `f32`, `f64` or `bool`, which the language reads by their names.
-fn number_name(ty: &[TokenTree]) -> Option<&'static str> {
+pub(crate) fn number_name(ty: &[TokenTree]) -> Option<&'static str> {
     let read = lang::read_type(&lex(ty).0.ok()?);
     let known = lang::IntTy::parse(&read).map(lang::IntTy::name);
     known.or_else(|| ["bool", "f32", "f64"].into_iter().find(|n| *n == read))

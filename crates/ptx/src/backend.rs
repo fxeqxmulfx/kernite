@@ -1,6 +1,8 @@
 //! PTX as kernite-build sees it: a machine whose kernels a driver loads as one module.
 
-use kernite_build::{Abi, Assembly, Backend, Called, Device, DeviceStatic, Done, StaticError, Unfinished, abi};
+use kernite_build::{
+    Abi, Assembly, Backend, Called, Device, DeviceStatic, Done, Requirement, StaticError, Unfinished, abi,
+};
 use kernite_lang::{Fn, Memory, Value};
 
 use crate::lang::{Callee, Kernel};
@@ -68,6 +70,9 @@ impl Backend for Ptx {
         if cooperative {
             kernel.cooperative();
         }
+        if !f.unsafe_fn && abi(f) == Some(Abi::PtxKernel) {
+            kernel.safe();
+        }
         for s in statics {
             kernel.module_memory(s);
         }
@@ -102,6 +107,10 @@ impl Device for Ptx {
 
     fn symbol(&self, code: &Entry) -> String {
         code.program.name.clone()
+    }
+
+    fn requires(&self, code: &Entry) -> Vec<Requirement> {
+        code.requires.clone()
     }
 
     fn device_static(&self, s: &Static) -> DeviceStatic {

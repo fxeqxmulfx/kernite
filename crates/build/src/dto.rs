@@ -214,7 +214,7 @@ pub struct Call {
 /// A function the GPU runs, compiled into the module it loads.
 #[derive(Debug)]
 pub struct DeviceFnOut {
-    /// Why it is not a kernel Rust may launch: it is not an `unsafe fn`.
+    /// Why it is not a kernel Rust may launch: it is `#[cooperative]`, and not an `unsafe fn`.
     pub not_unsafe: Option<Error>,
     /// What is wrong with its `#[cooperative]` or its directives, else with its
     /// `#[instances(..)]`; then nothing of it is compiled.
@@ -230,12 +230,23 @@ pub struct DeviceFnOut {
 /// How Rust launches a kernel of the GPU's.
 #[derive(Debug, PartialEq)]
 pub enum Launcher {
-    /// Never: the kernel is not an `unsafe fn`, its attributes are wrong, or one of its
-    /// instances did not compile.
+    /// Never: the kernel is `#[cooperative]` and not an `unsafe fn`, its attributes are wrong,
+    /// or one of its instances did not compile.
     Never,
-    /// Each instance by its compile-time arguments, and the index of its symbol in
-    /// [`DeviceOut::symbols`].
-    Of(Vec<(Vec<Value>, usize)>),
+    /// Each instance, with the index of its symbol in [`DeviceOut::symbols`].
+    Of(Vec<Launch>),
+}
+
+/// An instance of a kernel that Rust launches.
+#[derive(Debug, PartialEq)]
+pub struct Launch {
+    /// Its compile-time arguments; none for a kernel that takes none.
+    pub args: Vec<Value>,
+    /// The index of its symbol in [`DeviceOut::symbols`].
+    pub symbol: usize,
+    /// What a launch must hold for a kernel that is no `unsafe fn` to be safe, which the host checks before the kernel
+    /// runs; none for a kernel that is one.
+    pub requires: Vec<Requirement>,
 }
 
 /// The module the GPU loads, put together from what the program keeps of the module's items.
@@ -256,4 +267,38 @@ pub struct DeviceOut {
     /// [`Kept::Static`](crate::Kept::Static): a static of the GPU's memory that was laid out, in
     /// the order of the items.
     pub static_items: Vec<usize>,
+}
+
+/// A number a launch fixes, which a condition on the launch is over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Quantity {
+    /// How many threads each block has: the kernel's `ntid.x`.
+    Threads,
+    /// How many blocks the grid has: the kernel's `nctaid.x`.
+    Blocks,
+    /// The number that parameter `i` is, as the launch gives it.
+    Param(usize),
+    /// How many elements the memory has that pointer parameter `i` is lent.
+    Len(usize),
+}
+
+/// What a condition on a launch keeps true of the kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Why {
+    /// No number the kernel works out wraps.
+    Fits,
+    /// Each element the kernel reaches of the memory of pointer parameter `i` is inside it.
+    Inside(usize),
+    /// No two threads write one element of the memory of pointer parameter `i`, and none reads one another writes.
+    Apart(usize),
+}
+
+/// A condition on a launch of a kernel that is no `unsafe fn`, which the host checks before the kernel runs: the sum of
+/// its terms is not negative. A term is a factor and the quantities multiplied by it, none for a number alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Requirement {
+    /// The terms: each a factor, and the quantities multiplied by it.
+    pub terms: Vec<(i128, Vec<Quantity>)>,
+    /// What it keeps true.
+    pub why: Why,
 }

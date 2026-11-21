@@ -3,7 +3,7 @@
 
 use kernite_lang::{Fn, Memory, Span, Target, Value};
 
-use crate::{Assembly, DeviceStatic, Done, HostStatic, Naked};
+use crate::{Assembly, DeviceStatic, Done, HostStatic, Naked, Requirement};
 
 /// A machine kernite compiles a module's functions for: its kernels while their bodies are
 /// written, its statics, how its kernels see the functions they call, and its code.
@@ -68,6 +68,9 @@ pub trait Device: Backend {
     fn module(&self, code: &[Self::Code], statics: &[Self::Static]) -> Assembly;
     /// The name the driver finds `code` by.
     fn symbol(&self, code: &Self::Code) -> String;
+    /// What a launch of `code` must hold for it to be safe, if it is the code of a kernel that is no `unsafe fn`;
+    /// none for one that is.
+    fn requires(&self, code: &Self::Code) -> Vec<Requirement>;
     /// `s` as the host reads it.
     fn device_static(&self, s: &Self::Static) -> DeviceStatic;
 }

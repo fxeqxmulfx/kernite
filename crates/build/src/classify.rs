@@ -46,19 +46,19 @@ pub fn abi(f: &Fn) -> Option<Abi> {
     f.abi.as_ref().and_then(|(abi, _)| Abi::of(abi))
 }
 
-/// Why `f`, of ABI `abi`, must be an `unsafe fn` and is not, if so, as the error at the place it is mended. A GPU
-/// kernel trusts the pointers it is given, and an x86 kernel run on the threads of a grid reaches one memory with all
-/// of them at once; kernite does not prove either safe. Any other x86 kernel is proved where it is compiled, and its
-/// machine says what it cannot prove. A function the kernels call is called by nothing else, so it promises Rust
-/// nothing, and need not be one.
+/// Why `f`, of ABI `abi`, must be an `unsafe fn` and is not, if so, as the error at the place it is mended. A
+/// `#[cooperative]` kernel runs all the threads of its grid at once, or all the blocks, which wait for each other and
+/// reach one memory together, and kernite does not prove that safe. Any other kernel is proved where it is compiled,
+/// and its machine says what it cannot prove. A function the kernels call is called by nothing else, so it promises
+/// Rust nothing, and need not be one.
 pub(crate) fn must_be_unsafe(f: &Fn, abi: Abi) -> Option<Error> {
     if f.unsafe_fn {
         return None;
     }
     match (abi, &f.cooperative) {
-        (Abi::PtxFunc, _) | (Abi::Sysv64, None) => None,
+        (Abi::PtxFunc, _) | (Abi::Sysv64 | Abi::PtxKernel, None) => None,
         (Abi::Sysv64, Some(c)) => Some(said(Refusal::Grid, c.span)),
-        (Abi::PtxKernel, _) => Some(said(Refusal::NotUnsafe, f.span)),
+        (Abi::PtxKernel, Some(c)) => Some(said(Refusal::Blocks, c.span)),
     }
 }
 

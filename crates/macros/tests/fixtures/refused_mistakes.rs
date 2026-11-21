@@ -49,7 +49,7 @@ pub mod cpu {
 #[cfg_attr(feature = "taken", kernite_macros::kernels)]
 pub mod gpu {
     pub extern "ptx-kernel" fn plain(x: *mut u32) {
-        st.global.u32([x], 1);
+        bar.sync(0);
     }
 
     #[instances(1)]

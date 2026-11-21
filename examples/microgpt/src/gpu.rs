@@ -3,13 +3,16 @@
 //! a sum in order is a chain in one thread, and the threads take apart only what is the same
 //! for each element.
 
-use kernite_cuda::{Buffer, Cuda, Error, Grid, Ptr};
+use kernite_cuda::{Buffer, Cuda, Error, Grid, Ptr, View};
 
 use crate::model::{self, Adam, Buf, E, FC1, FC2, H, LM, Layer, M, Op, Ops, PARAMS, QKV, T, Then, V, VP, WO, WTE};
 
-/// The kernels. Pointers are to the first row of the buffers [`Buf`] names; a kernel works
-/// out its rows from its block and thread, and trusts that they are there. They read the
-/// model's sizes and `exp`'s constants as [`crate::model::consts`] has them.
+/// The kernels. Each works out its rows from its block and thread. One that kernite proves
+/// safe is no `unsafe fn`: it is lent the buffers [`Buf`] names, and the launch is checked, with
+/// no kernel run, to have the rows it reaches. One it cannot, a loop that jumps or a token
+/// that says which row to read, is an `unsafe fn`, given pointers to the first row of the
+/// buffers, and trusts that its rows are there. They read the model's sizes and `exp`'s
+/// constants as [`crate::model::consts`] has them.
 #[kernite_macros::kernels(consts = crate::model::consts)]
 pub mod kernels {
     /// What `matmul` does to each output before it stores it: nothing, adds the residual
@@ -21,7 +24,8 @@ pub mod kernels {
     pub const RELU: usize = 2;
 
     /// `x0 = wte[token] + wpe[t]`, `p` the parameters: row `t0` and on a block each, an
-    /// element a thread.
+    /// element a thread. An `unsafe fn`: a token says which row of `wte` it reads, and no compare
+    /// keeps it below `V`.
     pub unsafe extern "ptx-kernel" fn embed(x0: *mut f32, p: *const f32, tokens: *const u32, t0: u32) {
         let (t, e, tok, i): (u32, u32, u32, u32);
         mov.u32(t, ctaid.x);
@@ -43,7 +47,7 @@ pub mod kernels {
 
     /// Each row of `x` divided by its root mean square, into `y`, and the scale it took into
     /// `r`: row `t0` and on a thread each.
-    pub unsafe extern "ptx-kernel" fn rmsnorm(y: *mut f32, r: *mut f32, x: *const f32, t0: u32) {
+    pub extern "ptx-kernel" fn rmsnorm(y: *mut f32, r: *mut f32, x: *const f32, t0: u32) {
         let t: u32;
         mov.u32(t, tid.x);
         add.u32(t, t, t0);
@@ -70,27 +74,27 @@ pub mod kernels {
     }
 
     /// `y = x W`, `W` the queries', keys' and values' weights side by side.
-    pub unsafe extern "ptx-kernel" fn qkv(y: *mut f32, x: *const f32, w: *const f32, t0: u32) {
+    pub extern "ptx-kernel" fn qkv(y: *mut f32, x: *const f32, w: *const f32, t0: u32) {
         matmul::<E, QKV_COLS, STORE>(y, x, w, y, t0);
     }
 
     /// `y = x W + res`, `W` attention's output projection.
-    pub unsafe extern "ptx-kernel" fn wo(y: *mut f32, x: *const f32, w: *const f32, res: *const f32, t0: u32) {
+    pub extern "ptx-kernel" fn wo(y: *mut f32, x: *const f32, w: *const f32, res: *const f32, t0: u32) {
         matmul::<E, E, ADD>(y, x, w, res, t0);
     }
 
     /// `y = relu(x W)`, `W` the MLP's first layer.
-    pub unsafe extern "ptx-kernel" fn fc1(y: *mut f32, x: *const f32, w: *const f32, t0: u32) {
+    pub extern "ptx-kernel" fn fc1(y: *mut f32, x: *const f32, w: *const f32, t0: u32) {
         matmul::<E, M, RELU>(y, x, w, y, t0);
     }
 
     /// `y = x W + res`, `W` the MLP's second layer.
-    pub unsafe extern "ptx-kernel" fn fc2(y: *mut f32, x: *const f32, w: *const f32, res: *const f32, t0: u32) {
+    pub extern "ptx-kernel" fn fc2(y: *mut f32, x: *const f32, w: *const f32, res: *const f32, t0: u32) {
         matmul::<M, E, ADD>(y, x, w, res, t0);
     }
 
     /// `y = x W`, `W` the logits' head.
-    pub unsafe extern "ptx-kernel" fn lm(y: *mut f32, x: *const f32, w: *const f32, t0: u32) {
+    pub extern "ptx-kernel" fn lm(y: *mut f32, x: *const f32, w: *const f32, t0: u32) {
         matmul::<E, VP, STORE>(y, x, w, y, t0);
     }
 
@@ -129,7 +133,8 @@ pub mod kernels {
 
     /// Each head of row `t0` and on attending to the rows up to it, from `qkv`'s queries, keys
     /// and values: its weights into `aw`, and the values they weigh, summed, into `att`. A
-    /// block each row, a thread each head.
+    /// block each row, a thread each head. An `unsafe fn`: a loop over the rows up to its own
+    /// is a jump.
     pub unsafe extern "ptx-kernel" fn attention(att: *mut f32, aw: *mut f32, qkv: *const f32, t0: u32) {
         let (t, h, i): (u32, u32, u32);
         mov.u32(t, ctaid.x);
@@ -235,7 +240,7 @@ pub mod kernels {
 
     /// `probs = softmax(logits * inv_temp)` over the first `V` of each row, the rest zero: row
     /// `t0` and on a thread each.
-    pub unsafe extern "ptx-kernel" fn softmax(probs: *mut f32, logits: *const f32, inv_temp: f32, t0: u32) {
+    pub extern "ptx-kernel" fn softmax(probs: *mut f32, logits: *const f32, inv_temp: f32, t0: u32) {
         let t: u32;
         mov.u32(t, tid.x);
         add.u32(t, t, t0);
@@ -304,7 +309,7 @@ pub mod kernels {
 
     /// `d = (probs - onehot(target)) * inv_n`, the targets at `targets`: a block each row, a
     /// thread each token.
-    pub unsafe extern "ptx-kernel" fn xent(d: *mut f32, probs: *const f32, targets: *const u32, inv_n: f32) {
+    pub extern "ptx-kernel" fn xent(d: *mut f32, probs: *const f32, targets: *const u32, inv_n: f32) {
         let (t, j, i, target): (u32, u32, u32, u32);
         mov.u32(t, ctaid.x);
         mov.u32(j, tid.x);
@@ -323,27 +328,27 @@ pub mod kernels {
     }
 
     /// `dx += dy Wᵀ` for `QKV`.
-    pub unsafe extern "ptx-kernel" fn qkv_bwd_x(dx: *mut f32, dy: *const f32, w: *const f32) {
+    pub extern "ptx-kernel" fn qkv_bwd_x(dx: *mut f32, dy: *const f32, w: *const f32) {
         bwd_x::<E, QKV_COLS>(dx, dy, w);
     }
 
     /// `dx += dy Wᵀ` for `WO`.
-    pub unsafe extern "ptx-kernel" fn wo_bwd_x(dx: *mut f32, dy: *const f32, w: *const f32) {
+    pub extern "ptx-kernel" fn wo_bwd_x(dx: *mut f32, dy: *const f32, w: *const f32) {
         bwd_x::<E, E>(dx, dy, w);
     }
 
     /// `dx += dy Wᵀ` for `FC1`.
-    pub unsafe extern "ptx-kernel" fn fc1_bwd_x(dx: *mut f32, dy: *const f32, w: *const f32) {
+    pub extern "ptx-kernel" fn fc1_bwd_x(dx: *mut f32, dy: *const f32, w: *const f32) {
         bwd_x::<E, M>(dx, dy, w);
     }
 
     /// `dx += dy Wᵀ` for `FC2`.
-    pub unsafe extern "ptx-kernel" fn fc2_bwd_x(dx: *mut f32, dy: *const f32, w: *const f32) {
+    pub extern "ptx-kernel" fn fc2_bwd_x(dx: *mut f32, dy: *const f32, w: *const f32) {
         bwd_x::<M, E>(dx, dy, w);
     }
 
     /// `dx += dy Wᵀ` for `LM`.
-    pub unsafe extern "ptx-kernel" fn lm_bwd_x(dx: *mut f32, dy: *const f32, w: *const f32) {
+    pub extern "ptx-kernel" fn lm_bwd_x(dx: *mut f32, dy: *const f32, w: *const f32) {
         bwd_x::<E, VP>(dx, dy, w);
     }
 
@@ -394,7 +399,8 @@ pub mod kernels {
     }
 
     /// `g += xᵀ dy` over `n` rows, `g` of `ROWS` rows of `COLS`: a block each input, a thread
-    /// each output, each weight's gradient a chain over the rows in order, from where it was.
+    /// each output, each weight's gradient a chain over the rows in order, from where it was. A
+    /// kernel of it is an `unsafe fn`: the chain is a loop, which is a jump.
     fn bwd_w<const ROWS: usize, const COLS: usize>(g: u64, x: u64, dy: u64, n: u32) {
         let (i, o, at, t): (u32, u32, u32, u32);
         mov.u32(i, ctaid.x);
@@ -428,7 +434,7 @@ pub mod kernels {
     }
 
     /// `dh = 0` where `h` is not above zero: a block each row, a thread each element.
-    pub unsafe extern "ptx-kernel" fn relu_bwd(dh: *mut f32, h: *const f32) {
+    pub extern "ptx-kernel" fn relu_bwd(dh: *mut f32, h: *const f32) {
         let (t, j, i): (u32, u32, u32);
         mov.u32(t, ctaid.x);
         mov.u32(j, tid.x);
@@ -447,7 +453,7 @@ pub mod kernels {
 
     /// `dx +=` the gradient by `x` of normalizing it, given the gradient `dy` by the result and
     /// the scale `r` each row took: a thread each row.
-    pub unsafe extern "ptx-kernel" fn rmsnorm_bwd(dx: *mut f32, dy: *const f32, x: *const f32, r: *const f32) {
+    pub extern "ptx-kernel" fn rmsnorm_bwd(dx: *mut f32, dy: *const f32, x: *const f32, r: *const f32) {
         let t: u32;
         mov.u32(t, tid.x);
         let (dxs, dys, xs): (u64, u64, u64);
@@ -484,6 +490,7 @@ pub mod kernels {
 
     /// `dqkv` from `datt`, attention's gradient, over rows `0..n`: each row's query's, and the
     /// keys and values it attended to added to, a row at a time in order. A thread each head.
+    /// An `unsafe fn`: its loops are jumps.
     pub unsafe extern "ptx-kernel" fn attention_bwd(
         dqkv: *mut f32,
         qkv: *const f32,
@@ -603,7 +610,8 @@ pub mod kernels {
     }
 
     /// The embeddings' gradients, `g` the parameters': `wte[token] += dx0` and `wpe[t] +=
-    /// dx0` for rows `0..n` in order, a thread each element of a row.
+    /// dx0` for rows `0..n` in order, a thread each element of a row. An `unsafe fn`: a loop over
+    /// the rows is a jump, and a token says which row of `wte` it adds to.
     pub unsafe extern "ptx-kernel" fn embed_bwd(g: *mut f32, dx0: *const f32, tokens: *const u32, n: u32) {
         let (e, t, tok, i): (u32, u32, u32, u32);
         mov.u32(e, tid.x);
@@ -638,7 +646,7 @@ pub mod kernels {
 
     /// Adam's step on the `n` parameters `p`, by their gradients `g`, which it zeroes, and
     /// their moments `m` and `v`: a thread each.
-    pub unsafe extern "ptx-kernel" fn adam(
+    pub extern "ptx-kernel" fn adam(
         p: *mut f32,
         g: *mut f32,
         m: *mut f32,
@@ -738,10 +746,21 @@ impl Gpu {
         Ok(b.of(&self.bufs)?.ptr())
     }
 
-    /// The weights of `l` in `b`: the parameters, or their gradients.
-    fn weights(&self, b: Buf, l: Layer) -> Op<Ptr<f32>> {
-        b.of(&self.bufs)?.at(l.at).ok_or_else(|| format!("{l:?} is past the end of {b:?}"))
+    /// The gradients of the weights of `l`, from where `l` starts: what a kernel that is an `unsafe fn` is given.
+    fn grads(&self, l: Layer) -> Op<Ptr<f32>> {
+        Buf::Grads.of(&self.bufs)?.at(l.at).ok_or_else(|| format!("{l:?} is past the end of the gradients"))
     }
+}
+
+/// The buffers `names` of `all`, each borrowed for a kernel to be lent it, or why that cannot be: a kernel that is no
+/// `unsafe fn` is lent memory that nothing else reaches while it runs, so no two of them are one buffer.
+fn borrow<const N: usize>(all: &mut [Buffer<f32>], names: [Buf; N]) -> Op<[&mut Buffer<f32>; N]> {
+    all.get_disjoint_mut(names.map(|b| b as usize)).map_err(|e| format!("{names:?} are not {N} buffers: {e}"))
+}
+
+/// The weights of `l` in the parameters `p`, from where `l` starts: what a kernel is lent for them.
+fn weights(p: &Buffer<f32>, l: Layer) -> Op<View<'_, f32>> {
+    p.tail(l.at).ok_or_else(|| format!("{l:?} is past the end of the parameters"))
 }
 
 /// What the driver says, once it says a call failed: there is no going on without the GPU.
@@ -788,50 +807,58 @@ impl Ops for Gpu {
         }
         let (ks, x0, p, tokens) = (&self.kernels, self.at(Buf::X0)?, self.at(Buf::Params)?, self.tokens.ptr());
         // SAFETY: a block for each of the rows `t0..n` of `X0` and of the tokens, a thread for
-        // each element; each token's row of `wte`, and the rows of `wpe` up to `n`.
+        // each element; each token's row of `wte`, and the rows of `wpe` up to `n`. kernite
+        // cannot prove it: a token says which row of `wte` it reads.
         launch(rows(t0, n)?, E as u32, |grid| said(unsafe { ks.embed(grid, x0, p, tokens, t0 as u32) }))
     }
 
     fn rmsnorm(&mut self, y: Buf, r: Buf, x: Buf, t0: usize, n: usize) -> Op {
-        let (ks, y, r, x) = (&self.kernels, self.at(y)?, self.at(r)?, self.at(x)?);
-        // SAFETY: a thread for each of the rows `t0..n` of each.
-        launch(1, rows(t0, n)?, |grid| said(unsafe { ks.rmsnorm(grid, y, r, x, t0 as u32) }))
+        let ks = &self.kernels;
+        let [y, r, x] = borrow(&mut self.bufs, [y, r, x])?;
+        launch(1, rows(t0, n)?, |grid| said(ks.rmsnorm(grid, y, r, x, t0 as u32)))
     }
 
     fn matmul(&mut self, l: Layer, y: Buf, x: Buf, then: Then, t0: usize, n: usize) -> Op {
         if (x.width(), y.width()) != (l.rows, l.cols) {
             return Err(format!("{x:?} by {l:?} into {y:?}"));
         }
-        let (ks, w, out, x, t0) = (&self.kernels, self.weights(Buf::Params, l)?, self.at(y)?, self.at(x)?, t0 as u32);
-        let res = match then {
-            Then::Add(res) => self.at(res)?,
-            _ => out,
-        };
-        // SAFETY: a block for each of the rows `t0..n` of each, as wide as the layer says, a
-        // thread for each output; and its weights.
-        launch(rows(t0 as usize, n)?, l.cols as u32, |grid| unsafe {
-            match (l, then) {
-                (QKV, Then::Store) => said(ks.qkv(grid, out, x, w, t0)),
-                (WO, Then::Add(_)) => said(ks.wo(grid, out, x, w, res, t0)),
-                (FC1, Then::Relu) => said(ks.fc1(grid, out, x, w, t0)),
-                (FC2, Then::Add(_)) => said(ks.fc2(grid, out, x, w, res, t0)),
-                (LM, Then::Store) => said(ks.lm(grid, out, x, w, t0)),
-                _ => Err(format!("no kernel computes {l:?} then {then:?}")),
+        let (ks, bufs, blocks, threads, t0) = (&self.kernels, &mut self.bufs, rows(t0, n)?, l.cols as u32, t0 as u32);
+        match (l, then) {
+            (QKV, Then::Store) => {
+                let [y, x, p] = borrow(bufs, [y, x, Buf::Params])?;
+                launch(blocks, threads, |grid| said(ks.qkv(grid, y, x, &weights(p, l)?, t0)))
             }
-        })
+            (WO, Then::Add(res)) => {
+                let [y, x, p, res] = borrow(bufs, [y, x, Buf::Params, res])?;
+                launch(blocks, threads, |grid| said(ks.wo(grid, y, x, &weights(p, l)?, res, t0)))
+            }
+            (FC1, Then::Relu) => {
+                let [y, x, p] = borrow(bufs, [y, x, Buf::Params])?;
+                launch(blocks, threads, |grid| said(ks.fc1(grid, y, x, &weights(p, l)?, t0)))
+            }
+            (FC2, Then::Add(res)) => {
+                let [y, x, p, res] = borrow(bufs, [y, x, Buf::Params, res])?;
+                launch(blocks, threads, |grid| said(ks.fc2(grid, y, x, &weights(p, l)?, res, t0)))
+            }
+            (LM, Then::Store) => {
+                let [y, x, p] = borrow(bufs, [y, x, Buf::Params])?;
+                launch(blocks, threads, |grid| said(ks.lm(grid, y, x, &weights(p, l)?, t0)))
+            }
+            _ => Err(format!("no kernel computes {l:?} then {then:?}")),
+        }
     }
 
     fn attention(&mut self, t0: usize, n: usize) -> Op {
         let (ks, att, aw, qkv) = (&self.kernels, self.at(Buf::Att)?, self.at(Buf::Aw)?, self.at(Buf::Qkv)?);
         // SAFETY: a block for each of the rows `t0..n`, a thread for each head, which reads the
-        // rows up to its own.
+        // rows up to its own. kernite cannot prove it: that loop is a jump.
         launch(rows(t0, n)?, H as u32, |grid| said(unsafe { ks.attention(grid, att, aw, qkv, t0 as u32) }))
     }
 
     fn softmax(&mut self, inv_temp: f32, t0: usize, n: usize) -> Op {
-        let (ks, probs, logits) = (&self.kernels, self.at(Buf::Probs)?, self.at(Buf::Logits)?);
-        // SAFETY: a thread for each of the rows `t0..n` of each.
-        launch(1, rows(t0, n)?, |grid| said(unsafe { ks.softmax(grid, probs, logits, inv_temp, t0 as u32) }))
+        let ks = &self.kernels;
+        let [probs, logits] = borrow(&mut self.bufs, [Buf::Probs, Buf::Logits])?;
+        launch(1, rows(t0, n)?, |grid| said(ks.softmax(grid, probs, logits, inv_temp, t0 as u32)))
     }
 
     fn clear(&mut self) -> Op {
@@ -845,29 +872,26 @@ impl Ops for Gpu {
         if self.count <= n {
             return Err(format!("a target for each of {n} rows"));
         }
-        let targets = self.tokens.at(1).ok_or("a document's tokens end before its targets")?;
-        let (ks, d, probs) = (&self.kernels, self.at(Buf::DLogits)?, self.at(Buf::Probs)?);
-        // SAFETY: a block for each of `n` rows of each and of the targets, the tokens after the
-        // first, and a thread for each token.
-        launch(rows(0, n)?, VP as u32, |grid| said(unsafe { ks.xent(grid, d, probs, targets, 1.0 / n as f32) }))
+        let targets = self.tokens.tail(1).ok_or("a document's tokens end before its targets")?;
+        let ks = &self.kernels;
+        let [d, probs] = borrow(&mut self.bufs, [Buf::DLogits, Buf::Probs])?;
+        launch(rows(0, n)?, VP as u32, |grid| said(ks.xent(grid, d, probs, &targets, 1.0 / n as f32)))
     }
 
     fn bwd_x(&mut self, l: Layer, dx: Buf, dy: Buf, n: usize) -> Op {
         if (dx.width(), dy.width()) != (l.rows, l.cols) {
             return Err(format!("{dy:?} by {l:?} into {dx:?}"));
         }
-        let (ks, w, dx, dy) = (&self.kernels, self.weights(Buf::Params, l)?, self.at(dx)?, self.at(dy)?);
-        // SAFETY: a block for each of `n` rows of each, as wide as the layer says, a thread for
-        // each input; and its weights.
-        launch(rows(0, n)?, l.rows as u32, |grid| unsafe {
-            match l {
-                QKV => said(ks.qkv_bwd_x(grid, dx, dy, w)),
-                WO => said(ks.wo_bwd_x(grid, dx, dy, w)),
-                FC1 => said(ks.fc1_bwd_x(grid, dx, dy, w)),
-                FC2 => said(ks.fc2_bwd_x(grid, dx, dy, w)),
-                LM => said(ks.lm_bwd_x(grid, dx, dy, w)),
-                _ => Err(format!("no kernel for {l:?}")),
-            }
+        let ks = &self.kernels;
+        let [dx, dy, p] = borrow(&mut self.bufs, [dx, dy, Buf::Params])?;
+        let w = weights(p, l)?;
+        launch(rows(0, n)?, l.rows as u32, |grid| match l {
+            QKV => said(ks.qkv_bwd_x(grid, dx, dy, &w)),
+            WO => said(ks.wo_bwd_x(grid, dx, dy, &w)),
+            FC1 => said(ks.fc1_bwd_x(grid, dx, dy, &w)),
+            FC2 => said(ks.fc2_bwd_x(grid, dx, dy, &w)),
+            LM => said(ks.lm_bwd_x(grid, dx, dy, &w)),
+            _ => Err(format!("no kernel for {l:?}")),
         })
     }
 
@@ -875,9 +899,10 @@ impl Ops for Gpu {
         if (x.width(), dy.width()) != (l.rows, l.cols) {
             return Err(format!("{x:?} by {dy:?} for {l:?}"));
         }
-        let (ks, g, x, dy, n) = (&self.kernels, self.weights(Buf::Grads, l)?, self.at(x)?, self.at(dy)?, rows(0, n)?);
+        let (ks, g, x, dy, n) = (&self.kernels, self.grads(l)?, self.at(x)?, self.at(dy)?, rows(0, n)?);
         // SAFETY: a block for each input and a thread for each output of the layer's gradients,
-        // over `n` rows of each, as wide as the layer says.
+        // over `n` rows of each, as wide as the layer says. kernite cannot prove it: the chain
+        // over the rows is a jump.
         launch(l.rows as u32, l.cols as u32, |grid| unsafe {
             match l {
                 QKV => said(ks.qkv_bwd_w(grid, g, x, dy, n)),
@@ -891,21 +916,22 @@ impl Ops for Gpu {
     }
 
     fn relu_bwd(&mut self, n: usize) -> Op {
-        let (ks, dh, h) = (&self.kernels, self.at(Buf::DHid)?, self.at(Buf::Hid)?);
-        // SAFETY: a block for each of `n` rows of each, a thread for each element.
-        launch(rows(0, n)?, M as u32, |grid| said(unsafe { ks.relu_bwd(grid, dh, h) }))
+        let ks = &self.kernels;
+        let [dh, h] = borrow(&mut self.bufs, [Buf::DHid, Buf::Hid])?;
+        launch(rows(0, n)?, M as u32, |grid| said(ks.relu_bwd(grid, dh, h)))
     }
 
     fn rmsnorm_bwd(&mut self, dx: Buf, dy: Buf, x: Buf, r: Buf, n: usize) -> Op {
-        let (ks, dx, dy, x, r) = (&self.kernels, self.at(dx)?, self.at(dy)?, self.at(x)?, self.at(r)?);
-        // SAFETY: a thread for each of `n` rows of each.
-        launch(1, rows(0, n)?, |grid| said(unsafe { ks.rmsnorm_bwd(grid, dx, dy, x, r) }))
+        let ks = &self.kernels;
+        let [dx, dy, x, r] = borrow(&mut self.bufs, [dx, dy, x, r])?;
+        launch(1, rows(0, n)?, |grid| said(ks.rmsnorm_bwd(grid, dx, dy, x, r)))
     }
 
     fn attention_bwd(&mut self, n: usize) -> Op {
         let (ks, dqkv, n) = (&self.kernels, self.at(Buf::DQkv)?, rows(0, n)?);
         let (qkv, aw, datt) = (self.at(Buf::Qkv)?, self.at(Buf::Aw)?, self.at(Buf::DAtt)?);
-        // SAFETY: a thread for each head, over `n` rows of each.
+        // SAFETY: a thread for each head, over `n` rows of each. kernite cannot prove it: its
+        // loops are jumps.
         launch(1, H as u32, |grid| said(unsafe { ks.attention_bwd(grid, dqkv, qkv, aw, datt, n) }))
     }
 
@@ -916,17 +942,17 @@ impl Ops for Gpu {
         let (ks, g, dx0, tokens, n) =
             (&self.kernels, self.at(Buf::Grads)?, self.at(Buf::DX0)?, self.tokens.ptr(), rows(0, n)?);
         // SAFETY: a thread for each element of a row, over `n` rows of `DX0` and of the tokens;
-        // each token's row of `wte`, and the rows of `wpe` up to `n`.
+        // each token's row of `wte`, and the rows of `wpe` up to `n`. kernite cannot prove it: a
+        // token says which row of `wte` it adds to.
         launch(1, E as u32, |grid| said(unsafe { ks.embed_bwd(grid, g, dx0, tokens, n) }))
     }
 
     fn adam(&mut self, a: &Adam) -> Op {
-        let (ks, p, g) = (&self.kernels, self.at(Buf::Params)?, self.at(Buf::Grads)?);
-        let (m, v, n) = (self.at(Buf::Moment1)?, self.at(Buf::Moment2)?, PARAMS as u32);
-        // SAFETY: a thread for each of the `PARAMS` floats of each, the ones past them doing
-        // nothing.
+        let ks = &self.kernels;
+        let [p, g, m, v] = borrow(&mut self.bufs, [Buf::Params, Buf::Grads, Buf::Moment1, Buf::Moment2])?;
+        let n = PARAMS as u32;
         launch(n.div_ceil(256), 256, |grid| {
-            said(unsafe { ks.adam(grid, p, g, m, v, n, a.lr, a.b1, a.ob1, a.b2, a.ob2, a.bc1, a.bc2, a.eps) })
+            said(ks.adam(grid, p, g, m, v, n, a.lr, a.b1, a.ob1, a.b2, a.ob2, a.bc1, a.bc2, a.eps))
         })
     }
 }

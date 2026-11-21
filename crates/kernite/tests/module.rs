@@ -49,15 +49,20 @@ fn ptx_str_compiles_no_function_of_an_abi_kernite_does_not_know() -> Result {
 const GRID: &str = "the threads of a grid run at once, and kernite cannot prove that they reach memory apart, so a \
                     `#[cooperative]` kernel is an `unsafe fn`";
 
+/// The message of a kernel on the blocks of a grid that is not an `unsafe fn`.
+const BLOCKS: &str = "the blocks of a grid run at once and wait for each other, and kernite cannot prove that they \
+                      reach memory apart, so a `#[cooperative]` kernel is an `unsafe fn`";
+
 #[test]
-fn the_facades_refuse_a_kernel_that_is_not_unsafe() -> Result {
-    let not = "a kernel trusts the pointers it is given, so it is an `unsafe fn`";
-    // A kernel the process runs on one thread is no `unsafe fn` where kernite proves it safe, as its machine says.
+fn the_facades_refuse_a_cooperative_kernel_that_is_not_unsafe() -> Result {
+    // A kernel the process runs on one thread, or the GPU on threads that reach memory apart, is no `unsafe fn` where
+    // kernite proves it safe, as its machine says.
     assert_eq!(x86("extern \"sysv64\" fn k() {}", "k")?, "# k() -> ()");
+    assert!(compiles_for_ptx("pub extern \"ptx-kernel\" fn k() {}\n")?);
     let x = kernite::x86_str("#[cooperative] extern \"sysv64\" fn k() {}", "k");
     assert_eq!(x.err().ok_or("x gave Ok")?, format!("1:3: {GRID}"));
-    let p = kernite::ptx_str("extern \"ptx-kernel\" fn k() {}");
-    assert_eq!(p.err().ok_or("p gave Ok")?, format!("1:24: {not}"));
+    let p = kernite::ptx_str("#[cooperative] extern \"ptx-kernel\" fn k() {}");
+    assert_eq!(p.err().ok_or("p gave Ok")?, format!("1:3: {BLOCKS}"));
     // A function a kernel calls promises Rust nothing, so it need not be one.
     assert!(compiles_for_ptx("pub unsafe extern \"ptx-kernel\" fn k() {}\nextern \"ptx-func\" fn f() {}\n")?);
     // What does not compile is refused for that, as it was: the rest of the module is read after.
@@ -111,10 +116,10 @@ fn the_facades_read_the_attributes_of_every_function_of_the_module() -> Result {
     let once = "`j` takes no compile-time arguments, so it is compiled once, with no `#[instances(..)]`";
     let src = format!("{kernel}#[instances(1)] pub unsafe extern \"sysv64\" fn j() {{}}\n");
     assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, format!("2:3: {once}"));
-    // A kernel that is not `unsafe` is said first, before its attributes.
-    let src = "pub unsafe extern \"sysv64\" fn k() {}\n#[instances(1)] pub extern \"ptx-kernel\" fn j() {}\n";
-    let not = "a kernel trusts the pointers it is given, so it is an `unsafe fn`";
-    assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, format!("2:44: {not}"));
+    // A cooperative kernel that is not `unsafe` is said first, before its attributes.
+    let src =
+        "pub unsafe extern \"sysv64\" fn k() {}\n#[instances(1)] #[cooperative] pub extern \"ptx-kernel\" fn j() {}\n";
+    assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, format!("2:19: {BLOCKS}"));
     let src = format!("{kernel}#[instances(1)] #[cooperative] pub extern \"sysv64\" fn j() {{}}\n");
     assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, format!("2:19: {GRID}"));
     Ok(())
