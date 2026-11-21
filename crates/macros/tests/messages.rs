@@ -4768,6 +4768,46 @@ fn rust_says_a_malformed_deprecated_of_a_helper_or_a_gpu_function_once_whether_a
     );
 }
 
+/// Rust says a malformed `deprecated` of a helper or an `extern "ptx-func"` function once, and counts it once, though
+/// kernels name the item at more than one place, as it does of a function of its own that is called at many: a helper
+/// that another helper calls, which two kernels call (20:7); one that two kernels call, one of them of two instances
+/// (8:7); one that a kernel calls twice (14:7); and a function that one kernel calls twice and another calls (64:7).
+/// Cargo says them in the order of the first place that names each. The macros write the function that stands in for an
+/// item once for all the places of a block, for where the build is incremental, as these are, Rust counts an error in a
+/// `deprecated` once for each function that has it.
+#[test]
+fn rust_counts_a_malformed_deprecated_of_a_helper_or_a_gpu_function_once_though_kernels_name_it_at_many_places() {
+    refuses(
+        "helper_deprecated_malformed_named_twice",
+        &[
+            "src/lib.rs:20:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:8:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:14:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:64:7: error[E0539]: malformed `deprecated` attribute input",
+            "error: could not compile `helper_deprecated_malformed_named_twice` (lib) due to 4 previous errors",
+        ],
+    );
+}
+
+/// Rust says a malformed `deprecated` once, at the attribute, but counts it once for each function that has it, where
+/// the build is incremental, as these are: the function of each kernel, helper or function with a level whose code
+/// names the item, the one of all the other places, and the launcher of a GPU kernel. A helper that two kernels and a
+/// helper with a level name, and two kernels with none (9:7), counts four; a function that a kernel and a function with
+/// a level name, and a kernel with none (60:7), counts three; and a GPU kernel whose address two kernels take (82:7)
+/// counts two, for its launcher.
+#[test]
+fn rust_counts_a_malformed_deprecated_once_for_each_item_with_a_level_that_names_it_and_for_a_launcher() {
+    refuses(
+        "helper_deprecated_malformed_counted_more",
+        &[
+            "src/lib.rs:9:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:60:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:82:7: error[E0539]: malformed `deprecated` attribute input",
+            "error: could not compile `helper_deprecated_malformed_counted_more` (lib) due to 9 previous errors",
+        ],
+    );
+}
+
 /// An item of a module of kernels with no doc is told of by `missing_docs` at the item, as Rust tells of an item of
 /// plain Rust, and not at the module's `#[kernite_macros::kernels]`: each of two statics of GPU kernels, which are
 /// methods of `Kernels`; each static of x86 kernels, near `rip` and far from it; and each x86 kernel that the macros
@@ -4835,16 +4875,16 @@ fn a_kernels_use_of_a_deprecated_item_is_told_of_once_at_the_use() {
 
 /// A use of a deprecated helper, `extern "ptx-func"` function or GPU kernel is told of at the name, once for each place
 /// a kernel, a function or a helper writes it, as Rust tells of a use of a deprecated function of its own: Rust never
-/// sees the code of any of them, so the macros write a function of the name and the `deprecated` for each place, and
-/// Rust says its path, `cpu::_::touch`. On x86, `touch` is told of where `names` calls it (53:9), at each of the two
-/// places in `twice` (62:9, 63:9), in `both`, a helper that two kernels call, once (48:9), in `many`, which has two
-/// instances, once (79:9), and in `old`, a deprecated helper (43:9): Rust tells of a use in a deprecated function as it
-/// does of any, but not of one in the item itself. `loud`, which `cfg_attr` deprecates (54:9), `old` (56:9) and
-/// `r#type` (57:9) are told of at the call in `names`; `quiet`, which `cfg_attr` does not, is not, nor is `unused`,
-/// which no kernel calls, nor `touch` in `gone`, which `cfg` leaves out. On the GPU, `old` is told of at a call from a
-/// function (129:17), at a call from a kernel (136:17) and at the address the kernel takes (137:21), `gcd` at the
-/// kernel's call (138:17) and not at its own, `bump`, a helper, at its call (140:9), and `spent`, a kernel, at the
-/// address `run` takes (141:21).
+/// sees the code of any of them, so the macros write a function of the name and the `deprecated`, once for all the
+/// places of a block, with a use at each, and Rust says its path, `cpu::_::touch`. On x86, `touch` is told of where
+/// `names` calls it (53:9), at each of the two places in `twice` (62:9, 63:9), in `both`, a helper that two kernels
+/// call, once (48:9), in `many`, which has two instances, once (79:9), and in `old`, a deprecated helper (43:9): Rust
+/// tells of a use in a deprecated function as it does of any, but not of one in the item itself. `loud`, which
+/// `cfg_attr` deprecates (54:9), `old` (56:9) and `r#type` (57:9) are told of at the call in `names`; `quiet`, which
+/// `cfg_attr` does not, is not, nor is `unused`, which no kernel calls, nor `touch` in `gone`, which `cfg` leaves out.
+/// On the GPU, `old` is told of at a call from a function (129:17), at a call from a kernel (136:17) and at the address
+/// the kernel takes (137:21), `gcd` at the kernel's call (138:17) and not at its own, `bump`, a helper, at its call
+/// (140:9), and `spent`, a kernel, at the address `run` takes (141:21).
 #[test]
 fn a_use_of_a_deprecated_helper_or_function_is_told_of_at_each_place() {
     refuses(
@@ -4866,6 +4906,21 @@ fn a_use_of_a_deprecated_helper_or_function_is_told_of_at_each_place() {
             "src/lib.rs:140:9: error: use of deprecated function `gpu::_::bump`",
             "src/lib.rs:141:21: error: use of deprecated function `gpu::_::spent`",
             "error: could not compile `deprecated_helpers` (lib) due to 15 previous errors",
+        ],
+    );
+}
+
+/// A deprecated helper or `extern "ptx-func"` function is told of at a kernel that `cfg` keeps, though a kernel that
+/// `cfg` leaves out names it before: the function that the macros write for the item, once for all the places of the
+/// module, is there where the `cfg` of any place holds, and not where the first one's does.
+#[test]
+fn a_deprecated_item_is_told_of_at_a_kernel_that_cfg_keeps_though_one_it_leaves_out_names_it_first() {
+    refuses(
+        "deprecated_left_out_first",
+        &[
+            "src/lib.rs:22:9: error: use of deprecated function `cpu::_::old`",
+            "src/lib.rs:45:17: error: use of deprecated function `gpu::_::old`",
+            "error: could not compile `deprecated_left_out_first` (lib) due to 2 previous errors",
         ],
     );
 }

@@ -422,29 +422,32 @@ A deprecated item that a kernel names is told of by Rust at the name, once for e
 of a deprecated x86 kernel is one at `old`, and `call(old::<2>, p);` of an instance of one that takes compile-time
 arguments is one at `old` too, as a use of a generic function of Rust's is. A static in the GPU's memory is told of as a
 use of its method, `Kernels::COUNTS`. Rust never sees the code of a helper, an `extern "ptx-func"` function or a GPU
-kernel, so a deprecated one is told of as a use of a function of its name that kernite writes for the place, and Rust
-says its path with an `_`, `cpu::_::touch`: `touch(p);` of a helper, `call(v, gcd, (a, b));` and `mov.u64(fp, gcd);` of
-a function, and `mov.u64(fp, run);` of a kernel are each a warning at the name, with the note of the attribute. A use
-inside the deprecated item itself is not told of, as in Rust. Rust says nothing at the module's attribute, nor of an
-item that no kernel names, but for an error in its `deprecated`, which Rust reads as it does of a function of its own.
-An x86 kernel of instances is a function for each instance, and the code of a helper is part of each x86 kernel that
-calls it. Where the build is incremental, as the dev profile's is, Rust tells of the first place each function writes
-the name: once for each instance, and for a place in a helper, once for each kernel that calls it. `old::<2>`, a helper,
-an `extern "ptx-func"` function and a GPU kernel are told of once at each place, whatever instances of a kernel write it
-and whatever kernels call the helper it is in.
+kernel, so a deprecated one is told of as a use of a function of its name that kernite writes, and Rust says its path
+with an `_`, `cpu::_::touch`: `touch(p);` of a helper, `call(v, gcd, (a, b));` and `mov.u64(fp, gcd);` of a function,
+and `mov.u64(fp, run);` of a kernel are each a warning at the name, with the note of the attribute. A use inside the
+deprecated item itself is not told of, as in Rust. Rust says nothing at the module's attribute, nor of an item that no
+kernel names, but for an error in its `deprecated`, which Rust reads as it does of a function of its own: it says the
+error once, at the attribute, whatever places name the item. An x86 kernel of instances is a function for each instance,
+and the code of a helper is part of each x86 kernel that calls it. Where the build is incremental, as the dev profile's
+is, Rust tells of the first place each function writes the name: once for each instance, and for a place in a helper,
+once for each kernel that calls it. `old::<2>`, a helper, an `extern "ptx-func"` function and a GPU kernel are told of
+once at each place, whatever instances of a kernel write it and whatever kernels call the helper it is in.
 
 The level of a lint that a kernel sets holds at each of these places, as in a function of Rust's. `#[allow(deprecated)]`
 on a kernel has Rust say nothing at any of them, on x86 and on a GPU; `warn`, `deny` and `forbid` make each a warning or
 an error, though the crate allows the lint or denies it; and `expect` is met by each: Rust says nothing of them, and of
 a kernel whose code names no deprecated item, that the expectation is unfulfilled, once, at the attribute. Where a
 kernel with a level calls a deprecated helper, GPU helper or `extern "ptx-func"` function, Rust says the kernel's name
-in the path, `cpu::warned::_::touch`, as the place is in the kernel's own function. A helper, a GPU helper and an
-`extern "ptx-func"` function have a level of their own for their code, and the level of the kernel that calls them does
-not reach in: `touch(p);` in a helper with `#[allow(deprecated)]` says nothing, whatever kernel calls it, and in one
-with no level it is told of at the module's level, though the kernel allows the lint. A helper is compiled only where a
-kernel that `cfg` keeps calls it, so Rust says nothing of the `expect` of a helper or a GPU helper that no such kernel
-calls, whatever its code names; an `extern "ptx-func"` function is compiled whether a kernel calls it or not, and its
-`expect` holds as a function's does.
+in the path, `cpu::warned::_::touch`, as the function of the item's name is in the kernel's own function, one for all
+the kernel's places. Where the build is incremental, Rust counts an error in the item's `deprecated` once for each
+function that has it: the function of each kernel, helper or function with a level whose code names the item, the one of
+all the other places that name it, and the launcher of a GPU kernel. A helper, a GPU helper and an `extern "ptx-func"`
+function have a level of their own for their code, and the level of the kernel that calls them does not reach in:
+`touch(p);` in a helper with `#[allow(deprecated)]` says nothing, whatever kernel calls it, and in one with no level it
+is told of at the module's level, though the kernel allows the lint. A helper is compiled only where a kernel that `cfg`
+keeps calls it, so Rust says nothing of the `expect` of a helper or a GPU helper that no such kernel calls, whatever its
+code names; an `extern "ptx-func"` function is compiled whether a kernel calls it or not, and its `expect` holds as a
+function's does.
 
 One place does not have the level of its code: the first an x86 kernel writes the name of a static, or of a kernel that
 takes no compile-time arguments. The name is an operand of the kernel's function, so Rust tells of it at the level of

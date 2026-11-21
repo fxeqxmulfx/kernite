@@ -184,22 +184,21 @@ pub(crate) fn cfg_of(item: &lang::Item, top: &[TokenTree]) -> TokenStream {
     carried(tokens[..attrs_len(tokens)].iter().cloned(), false)
 }
 
-/// What Rust reads for a use of `item`, a helper, an `extern "ptx-func"` function or a GPU kernel, whose code Rust
-/// never sees: `{ #[deprecated(note = "..")] fn old() {} old }`, a function of the same name that has the `deprecated`
-/// of `item`, so that Rust tells of the use at `span`, where a kernel writes the name, as it tells of a use of any
-/// deprecated function. The function is in the block, so that it hides no name of the module's. None where `item` is
-/// not deprecated.
-pub(crate) fn stand_in(item: &lang::Item, top: &[TokenTree], span: Span) -> Option<TokenStream> {
+/// The function that stands in for `item`, a helper, an `extern "ptx-func"` function or a GPU kernel, whose code Rust
+/// never sees, where a kernel names it: one of its name that has its `deprecated`,
+/// `#[deprecated(note = "..")] fn old() {}`, for Rust to tell of a use of `old` as it tells of a use of any deprecated
+/// function. A block that names the item has it once for all its uses, as Rust reads the `deprecated` of each function
+/// that has it. None where `item` is not deprecated.
+pub(crate) fn stand_in(item: &lang::Item, top: &[TokenTree]) -> Option<TokenStream> {
     let tokens = &top[item.tokens.clone()];
-    let mut inner = deprecated(tokens[..attrs_len(tokens)].iter().cloned());
-    if inner.is_empty() {
+    let mut stand_in = deprecated(tokens[..attrs_len(tokens)].iter().cloned());
+    if stand_in.is_empty() {
         return None;
     }
-    inner.extend(parse("fn"));
-    inner.extend([name_at(item, top, span)]);
-    inner.extend(parse("() {}"));
-    inner.extend([name_at(item, top, span)]);
-    Some(TokenStream::from(TokenTree::Group(Group::new(Delimiter::Brace, inner))))
+    stand_in.extend(parse("fn"));
+    stand_in.extend([name_at(item, top, site())]);
+    stand_in.extend(parse("() {}"));
+    Some(stand_in)
 }
 
 /// The name of `item`, a const, a static or a function, as `top` writes it, `r#type` as well, of the
