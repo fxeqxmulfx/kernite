@@ -333,6 +333,8 @@ mod tests {
     use super::{cargo_home, workspace_from};
     use std::path::{Path, PathBuf};
 
+    type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
     /// What `workspace_from` gives.
     type Walked = Result<(String, Option<PathBuf>), String>;
 
@@ -723,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn cargos_home_is_cargo_home_else_dot_cargo_of_the_user() {
+    fn cargos_home_is_cargo_home_else_dot_cargo_of_the_user() -> Result {
         let user = || Some(PathBuf::from("/home/u"));
         let dot_cargo = Some(PathBuf::from("/home/u/.cargo"));
         // `CARGO_HOME`, if it is set and not empty, whoever the user is.
@@ -734,7 +736,8 @@ mod tests {
         assert_eq!(cargo_home(None, user()), dot_cargo);
         assert_eq!(cargo_home(None, None), None);
         // A relative one is from the current directory, which is rustc's: Cargo's may be another.
-        let here = std::env::current_dir().unwrap();
+        let here = std::env::current_dir()?;
         assert_eq!(cargo_home(Some(".cargo".into()), user()), Some(here.join(".cargo")));
+        Ok(())
     }
 }

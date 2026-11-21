@@ -1,3 +1,5 @@
+use std::convert::Infallible;
+
 use crate::reg::Register;
 
 /// How many bits an operand covers: which view of a register, or how much memory.
@@ -177,18 +179,24 @@ impl<R: Register> Arg<R> {
 
     /// The same argument with every register replaced by `f` of it.
     pub fn map<S>(self, mut f: impl FnMut(R) -> S) -> Arg<S> {
+        let Ok(arg) = self.try_map(|r| Ok::<S, Infallible>(f(r)));
+        arg
+    }
+
+    /// The same argument with every register replaced by `f` of it, or the first error `f` gives.
+    pub fn try_map<S, E>(self, mut f: impl FnMut(R) -> Result<S, E>) -> Result<Arg<S>, E> {
         let operand = match self.operand {
-            Operand::Reg(r, w) => Operand::Reg(f(r), w),
+            Operand::Reg(r, w) => Operand::Reg(f(r)?, w),
             Operand::Mem(m) => Operand::Mem(Mem {
                 base: match m.base {
-                    Base::Reg(r) => Base::Reg(f(r)),
+                    Base::Reg(r) => Base::Reg(f(r)?),
                     Base::Slot(s) => Base::Slot(s),
                     Base::Const(c) => Base::Const(c),
                     Base::Func(f) => Base::Func(f),
                     Base::Static(s) => Base::Static(s),
                     Base::None => Base::None,
                 },
-                index: m.index.map(|(r, scale)| (f(r), scale)),
+                index: m.index.map(|(r, scale)| Ok((f(r)?, scale))).transpose()?,
                 disp: m.disp,
                 width: m.width,
             }),
@@ -196,6 +204,6 @@ impl<R: Register> Arg<R> {
             Operand::Label(l) => Operand::Label(l),
             Operand::Func(f) => Operand::Func(f),
         };
-        Arg { operand, access: self.access }
+        Ok(Arg { operand, access: self.access })
     }
 }

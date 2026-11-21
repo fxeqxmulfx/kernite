@@ -75,11 +75,12 @@ fn on_cpu(sizes: &[usize]) -> Result<ExitCode, kernite_cpu::Error> {
         let shape = (n, n, n);
         let (a, b, mut c) = (floats(n * n, 1), floats(n * n, 2), vec![0.0; n * n]);
         for &threads in &counts {
-            let time = average(|count| {
+            let time = average(|count| -> Result<(), kernite_cpu::Error> {
                 for _ in 0..count {
-                    cpu::sgemm(&mut c, &a, &b, shape, threads).unwrap_or_else(|e| panic!("the grid failed: {e}"));
+                    cpu::sgemm(&mut c, &a, &b, shape, threads)?;
                 }
-            });
+                Ok(())
+            })?;
             println!("{n:>6} {threads:>7} {:>14.1}", gflops(shape, time));
         }
     }
@@ -124,21 +125,31 @@ fn floats(n: usize, seed: u32) -> Vec<f32> {
     })
 }
 
-/// Asserts that `lens`, the lengths of `a`, `b` and `c`, are those of a product of `shape`.
-fn operands((a, b, c): (usize, usize, usize), (m, n, k): Shape) {
-    assert_eq!(Some(a), m.checked_mul(k), "a is not {m} rows of {k}");
-    assert_eq!(Some(b), k.checked_mul(n), "b is not {k} rows of {n}");
-    assert_eq!(Some(c), m.checked_mul(n), "c is not {m} rows of {n}");
+/// Why `lens`, the lengths of `a`, `b` and `c`, are not those of a product of `shape`, if they are not.
+fn operands((a, b, c): (usize, usize, usize), (m, n, k): Shape) -> Result<(), String> {
+    for (name, len, rows, cols) in [("a", a, m, k), ("b", b, k, n), ("c", c, m, n)] {
+        if Some(len) != rows.checked_mul(cols) {
+            return Err(format!("{name} is not {rows} rows of {cols}"));
+        }
+    }
+    Ok(())
 }
 
-/// As [`operands`] asserts, for a GPU kernel, which counts in 32 bits: and that each of them
+/// A launch of a GPU kernel that is refused before it is made, for `message`.
+fn refused(message: String) -> Error {
+    Error { call: "cuLaunchKernel", message, log: String::new() }
+}
+
+/// As [`operands`] checks, for a GPU kernel, which counts in 32 bits: and that each of them
 /// has fewer than 2^32 elements. `shape` in 32 bits.
-fn gpu_operands(lens: (usize, usize, usize), shape: Shape) -> (u32, u32, u32) {
-    operands(lens, shape);
+fn gpu_operands(lens: (usize, usize, usize), shape: Shape) -> Result<(u32, u32, u32), Error> {
+    operands(lens, shape).map_err(refused)?;
     let (m, n, k) = shape;
     let fits = |len: usize| u32::try_from(len).is_ok();
-    assert!(fits(m * k) && fits(k * n) && fits(m * n), "{m} by {n} by {k} has 2^32 elements or more");
-    (m as u32, n as u32, k as u32)
+    if !(fits(m * k) && fits(k * n) && fits(m * n)) {
+        return Err(refused(format!("{m} by {n} by {k} has 2^32 elements or more")));
+    }
+    Ok((m as u32, n as u32, k as u32))
 }
 
 /// How long a run takes at the least: the 3 that warm up take half a minute, by which time the
@@ -147,23 +158,24 @@ const RUN: Duration = Duration::from_secs(10);
 
 /// The average time of one call, where `calls(count)` makes `count` calls back to back and waits
 /// for them: of 10 runs after 3 to warm up. A run is as many calls as take [`RUN`] or more: the
-/// count doubles until a run takes a second or more, then grows in proportion.
-fn average(mut calls: impl FnMut(u32)) -> Duration {
+/// count doubles until a run takes a second or more, then grows in proportion. It stops at the
+/// first run that fails.
+fn average<E>(mut calls: impl FnMut(u32) -> Result<(), E>) -> Result<Duration, E> {
     let mut run = |count| {
         let start = Instant::now();
-        calls(count);
-        start.elapsed()
+        calls(count)?;
+        Ok(start.elapsed())
     };
-    let (mut count, mut time) = (1, run(1));
+    let (mut count, mut time) = (1, run(1)?);
     while time < Duration::from_secs(1) {
         count *= 2;
-        time = run(count);
+        time = run(count)?;
     }
     let count = count * RUN.div_duration_f64(time).ceil() as u32;
     for _ in 0..3 {
-        run(count);
+        run(count)?;
     }
-    (0..10).map(|_| run(count)).sum::<Duration>() / (10 * count)
+    Ok((0..10).map(|_| run(count)).sum::<Result<Duration, E>>()? / (10 * count))
 }
 
 /// The GFLOPS of the product of `a` and `b` of `shape` that `launch` starts on the GPU, given
@@ -177,13 +189,12 @@ fn gpu_gflops<T: Plain>(
 ) -> Result<f64, Error> {
     let (m, n, _) = shape;
     let (a, b, c) = (cuda.upload(a)?, cuda.upload(b)?, cuda.alloc::<f32>(m * n)?);
-    let check = |done: Result<(), Error>| done.unwrap_or_else(|e| panic!("the GPU failed: {e}"));
     let time = average(|count| {
         for _ in 0..count {
-            check(launch(&c, &a, &b));
+            launch(&c, &a, &b)?;
         }
-        check(cuda.sync());
-    });
+        cuda.sync()
+    })?;
     Ok(gflops(shape, time))
 }
 

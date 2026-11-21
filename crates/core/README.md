@@ -17,7 +17,7 @@ enum Op {
     Ret,
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `fn sum(a, b) -> a + b`: `a` and `b` arrive in `rdi` and `rsi`, and the sum leaves in `rax`.
     let gpr = |id| VReg { id, class: Class::Gpr };
     let (a, b) = (gpr(0), gpr(1));
@@ -43,10 +43,13 @@ fn main() {
         funcs: vec![],
         statics: vec![],
     };
-    let [Item::Inst(add), Item::Inst(ret)] = &program.body[..] else { unreachable!() };
+    let [Item::Inst(add), Item::Inst(ret)] = &program.body[..] else {
+        return Err("the body is an `add` and a `ret`".into());
+    };
     assert_eq!(add.reads().collect::<Vec<_>>(), [a, b]);
     assert_eq!(add.writes().collect::<Vec<_>>(), [a]);
     assert_eq!(ret.reads().collect::<Vec<_>>(), [a]);
+    Ok(())
 }
 ```
 

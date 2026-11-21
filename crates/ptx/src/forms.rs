@@ -797,6 +797,14 @@ pub struct Form {
     pub line: &'static str,
 }
 
+impl Form {
+    /// The operand that holds the data a load, a store or the like moves: the first that is a register or a value and
+    /// is not there for a condition. The table gives it a type, and the size of the data is that type's.
+    pub fn data(&self) -> Option<&Spec> {
+        self.operands.iter().find(|s| matches!(s.role, Role::Dst | Role::Src) && s.when.is_none())
+    }
+}
+
 /// An element of a name: a word, or one of a few.
 #[derive(Clone, Debug)]
 pub struct Elem {
@@ -858,7 +866,7 @@ impl Imm {
     /// The values one of [`Imm::Of`] may be, and none for another.
     pub fn values(self) -> Vec<i64> {
         match self {
-            Imm::Of(values) => values.split('|').map(|v| v.parse().expect("the table's values are numbers")).collect(),
+            Imm::Of(values) => values.split('|').filter_map(|v| v.parse().ok()).collect(),
             _ => vec![],
         }
     }
@@ -1171,10 +1179,11 @@ impl Bound {
     }
 }
 
-/// Every form, parsed from [`TABLE`] once.
+/// Every form, parsed from [`TABLE`] once. A table that does not parse has none: a test of the crate parses it and says
+/// which line is wrong.
 pub fn forms() -> &'static [Form] {
     static FORMS: OnceLock<Vec<Form>> = OnceLock::new();
-    FORMS.get_or_init(|| parse(TABLE))
+    FORMS.get_or_init(|| parse(TABLE).unwrap_or_default())
 }
 
 /// What of PTX's is for GPUs newer than kernite writes for, after the oldest GPU the ISA has it
@@ -1306,8 +1315,10 @@ fn make(form: &'static Form, choice: Vec<Option<usize>>) -> Bound {
     for (e, c) in form.elems.iter().zip(&choice) {
         if let Some(k) = *c {
             needs = needs.and(e.alts[k].needs);
-            if e.slot.is_some() {
-                types.push(Ty::parse(e.alts[k].words[0]).expect("a slot's words are types"));
+            if e.slot.is_some()
+                && let Some(ty) = e.alts[k].words.first().and_then(|w| Ty::parse(w))
+            {
+                types.push(ty);
             }
         }
     }
@@ -1342,7 +1353,7 @@ fn unknown(name: &str, op: &str, words: &[&str], of: &[&'static Form]) -> String
             best = Some(n);
         }
     }
-    let n = best.expect("an instruction kernite knows has forms");
+    let Some(n) = best else { return format!("PTX has no `{op}` that kernite knows") };
     let canon = n.canon.join(".");
     if n.distance == 0 {
         return format!("PTX writes `{name}` as `{canon}`, its words in that order");
@@ -1675,7 +1686,8 @@ pub fn reserved(name: &str) -> bool {
     BEYOND.iter().any(|(n, _)| *n == name) || sregs().iter().any(|s| s.name.split('.').next() == Some(name))
 }
 
-fn parse(text: &'static str) -> Vec<Form> {
+/// The forms of `text`, or the first line that is no form, and why.
+fn parse(text: &'static str) -> Result<Vec<Form>, String> {
     let mut macros: Vec<(&'static str, Vec<Elem>)> = vec![];
     let mut operands: Vec<(&'static str, &'static str)> = vec![];
     let mut forms = vec![];
@@ -1687,35 +1699,41 @@ fn parse(text: &'static str) -> Vec<Form> {
         if let Some(def) = line.strip_prefix('$') {
             if let Some((name, ops)) = def.split_once(" : ") {
                 // `$U` is an operand a special register may be.
-                assert!(Ty::parse(name).is_none() && !["T", "U", "V", "W"].contains(&name), "`{line}` is a type");
+                if Ty::parse(name).is_some() || ["T", "U", "V", "W"].contains(&name) {
+                    return Err(format!("`{line}` is a type"));
+                }
                 operands.push((name, ops));
                 continue;
             }
-            let (name, elem) = def.split_once(" = ").unwrap_or_else(|| panic!("`{line}` defines `$name = ..`"));
-            let (op, elems) = name_of(elem, &macros);
-            assert!(op.is_empty(), "`{line}` is elements, not a name");
+            let (name, elem) = def.split_once(" = ").ok_or_else(|| format!("`{line}` defines `$name = ..`"))?;
+            let (op, elems) = name_of(elem, &macros)?;
+            if !op.is_empty() {
+                return Err(format!("`{line}` is elements, not a name"));
+            }
             macros.push((name, elems));
             continue;
         }
-        forms.push(form(line, &macros, &operands));
+        forms.push(form(line, &macros, &operands)?);
     }
-    forms
+    Ok(forms)
 }
 
 fn form(
     line: &'static str,
     macros: &[(&'static str, Vec<Elem>)],
     operand_macros: &[(&'static str, &'static str)],
-) -> Form {
+) -> Result<Form, String> {
     let (name, rest) = match line.split_once(" : ") {
         Some((name, rest)) => (name, rest),
         None => line.split_once(' ').unwrap_or((line, "")),
     };
-    let (op, mut elems) = name_of(name, macros);
+    let (op, mut elems) = name_of(name, macros)?;
     let mut slot = 0;
     for e in &mut elems {
         if e.alts.iter().all(|a| a.words.len() == 1 && Ty::parse(a.words[0]).is_some()) {
-            assert!(!e.optional, "`{line}`: a type is not to be left out");
+            if e.optional {
+                return Err(format!("`{line}`: a type is not to be left out"));
+            }
             e.slot = Some(slot);
             slot += 1;
         }
@@ -1731,7 +1749,7 @@ fn form(
     let (mut operands, mut needs, mut wide, mut checks) = (vec![], Needs::default(), false, vec![]);
     for token in tokens {
         if let Some(r) = token.strip_prefix('@') {
-            needs = needs.and(req(r, line));
+            needs = needs.and(req(r, line)?);
         } else if let Some(c) = token.strip_prefix('+') {
             match c {
                 "wide" => wide = true,
@@ -1741,44 +1759,48 @@ fn form(
                 "neg" => checks.push(Check::Neg),
                 "tex" => checks.push(Check::Tex),
                 "addr32" => checks.push(Check::Addr32),
-                _ => panic!("`{line}`: no check `+{c}`"),
+                _ => return Err(format!("`{line}`: no check `+{c}`")),
             }
         } else {
-            operands.push(spec(token.trim_end_matches(','), line));
+            operands.push(spec(token.trim_end_matches(','), line)?);
         }
     }
     for s in &operands {
-        if let Some(TyRef::Slot(i)) = s.ty {
-            assert!(i < slot, "`{line}` has no type {i}");
+        if let Some(TyRef::Slot(i)) = s.ty
+            && i >= slot
+        {
+            return Err(format!("`{line}` has no type {i}"));
         }
     }
-    assert!(needs.ptx != 0, "`{line}` says the version of PTX it needs, `@1.0` for any");
-    Form { op, elems, operands, needs, wide, checks, line }
+    if needs.ptx == 0 {
+        return Err(format!("`{line}` says the version of PTX it needs, `@1.0` for any"));
+    }
+    Ok(Form { op, elems, operands, needs, wide, checks, line })
 }
 
 /// The first word of `s` and the elements after it.
-fn name_of(s: &'static str, macros: &[(&'static str, Vec<Elem>)]) -> (&'static str, Vec<Elem>) {
+fn name_of(s: &'static str, macros: &[(&'static str, Vec<Elem>)]) -> Result<(&'static str, Vec<Elem>), String> {
     let end = s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(s.len());
     let (op, mut rest) = s.split_at(end);
     let mut elems: Vec<Elem> = vec![];
     while let Some(c) = rest.chars().next() {
         match c {
             '.' => {
-                let (alt, r) = alt_of(rest, true, s);
+                let (alt, r) = alt_of(rest, true, s)?;
                 elems.push(Elem { alts: vec![alt], optional: false, slot: None, why: None });
                 rest = r;
             }
             '{' | '(' => {
                 let close = if c == '{' { '}' } else { ')' };
-                let end = rest.find(close).unwrap_or_else(|| panic!("`{s}`: `{c}` is not closed"));
-                let alts = rest[1..end]
-                    .split('|')
-                    .map(|a| {
-                        let (alt, r) = alt_of(a, false, s);
-                        assert!(r.is_empty(), "`{s}`: `{a}` is one choice");
-                        alt
-                    })
-                    .collect();
+                let end = rest.find(close).ok_or_else(|| format!("`{s}`: `{c}` is not closed"))?;
+                let mut alts = vec![];
+                for a in rest[1..end].split('|') {
+                    let (alt, r) = alt_of(a, false, s)?;
+                    if !r.is_empty() {
+                        return Err(format!("`{s}`: `{a}` is one choice"));
+                    }
+                    alts.push(alt);
+                }
                 elems.push(Elem { alts, optional: c == '{', slot: None, why: None });
                 rest = &rest[end + 1..];
             }
@@ -1786,23 +1808,24 @@ fn name_of(s: &'static str, macros: &[(&'static str, Vec<Elem>)]) -> (&'static s
                 let end =
                     rest[1..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).map_or(rest.len(), |e| e + 1);
                 let m = &rest[1..end];
-                let (_, more) = macros.iter().find(|(n, _)| *n == m).unwrap_or_else(|| panic!("`{s}`: no `${m}`"));
+                let (_, more) = macros.iter().find(|(n, _)| *n == m).ok_or_else(|| format!("`{s}`: no `${m}`"))?;
                 elems.extend(more.iter().cloned());
                 rest = &rest[end..];
             }
             '~' => {
                 let end = rest[1..].find(|c: char| !c.is_ascii_alphabetic()).map_or(rest.len(), |e| e + 1);
-                elems.last_mut().unwrap_or_else(|| panic!("`{s}`: `~` follows an element")).why = Some(&rest[1..end]);
+                let last = elems.last_mut().ok_or_else(|| format!("`{s}`: `~` follows an element"))?;
+                last.why = Some(&rest[1..end]);
                 rest = &rest[end..];
             }
-            _ => panic!("`{s}`: `{rest}` is no element"),
+            _ => return Err(format!("`{s}`: `{rest}` is no element")),
         }
     }
-    (op, elems)
+    Ok((op, elems))
 }
 
 /// One choice, `.a.b@7.0@sm80`, and what follows it: its first word only, if `one`.
-fn alt_of(s: &'static str, one: bool, line: &str) -> (Alt, &'static str) {
+fn alt_of(s: &'static str, one: bool, line: &str) -> Result<(Alt, &'static str), String> {
     let mut rest = s;
     let mut words = vec![];
     while let Some(r) = rest.strip_prefix('.') {
@@ -1813,7 +1836,9 @@ fn alt_of(s: &'static str, one: bool, line: &str) -> (Alt, &'static str) {
             break;
         }
     }
-    assert!(!words.is_empty(), "`{line}`: `{s}` has no word");
+    if words.is_empty() {
+        return Err(format!("`{line}`: `{s}` has no word"));
+    }
     let mut needs = Needs::default();
     while let Some(r) = rest.strip_prefix('@') {
         let digits = |from: usize| from + r[from..].find(|c: char| !c.is_ascii_digit()).unwrap_or(r.len() - from);
@@ -1822,36 +1847,38 @@ fn alt_of(s: &'static str, one: bool, line: &str) -> (Alt, &'static str) {
             major => major,
         };
         let end = if r.starts_with("sm") { digits(2) } else { version(0) };
-        needs = needs.and(req(&r[..end], line));
+        needs = needs.and(req(&r[..end], line)?);
         rest = &r[end..];
     }
-    (Alt { words, needs }, rest)
+    Ok((Alt { words, needs }, rest))
 }
 
 /// A requirement after `@`: `7.8` or `sm80`.
-fn req(r: &str, line: &str) -> Needs {
-    let num = |s: &str| s.parse::<u32>().unwrap_or_else(|_| panic!("`{line}`: `@{r}` is no requirement"));
+fn req(r: &str, line: &str) -> Result<Needs, String> {
+    let num = |s: &str| s.parse::<u32>().map_err(|_| format!("`{line}`: `@{r}` is no requirement"));
     let gpu = |s: &str| {
-        let sm = num(s);
-        assert!(GPUS.iter().any(|&(g, _)| g == sm), "`{line}`: `@{r}` is no GPU kernite writes for");
-        sm
+        let sm = num(s)?;
+        if GPUS.iter().any(|&(g, _)| g == sm) {
+            Ok(sm)
+        } else {
+            Err(format!("`{line}`: `@{r}` is no GPU kernite writes for"))
+        }
     };
-    let version = |s: &str| {
-        let (major, minor) = s.split_once('.').unwrap_or_else(|| panic!("`{line}`: `@{r}` is no version"));
-        num(major) * 10 + num(minor)
+    let version = |s: &str| -> Result<u32, String> {
+        let (major, minor) = s.split_once('.').ok_or_else(|| format!("`{line}`: `@{r}` is no version"))?;
+        Ok(num(major)? * 10 + num(minor)?)
     };
-    if let Some(sm) = r.strip_prefix("sm") {
-        Needs { sm: gpu(sm), ..Needs::default() }
-    } else {
-        Needs { ptx: version(r), ..Needs::default() }
-    }
+    Ok(match r.strip_prefix("sm") {
+        Some(sm) => Needs { sm: gpu(sm)?, ..Needs::default() },
+        None => Needs { ptx: version(r)?, ..Needs::default() },
+    })
 }
 
 /// An operand, as [`TABLE`] writes it.
-fn spec(s: &'static str, line: &str) -> Spec {
+fn spec(s: &'static str, line: &str) -> Result<Spec, String> {
     let (when, s) = match s.strip_prefix('{') {
         Some(r) => {
-            let (w, r) = r.split_once('}').unwrap_or_else(|| panic!("`{line}`: `{s}` is not closed"));
+            let (w, r) = r.split_once('}').ok_or_else(|| format!("`{line}`: `{s}` is not closed"))?;
             (Some(w), r)
         }
         None => (None, s),
@@ -1861,24 +1888,30 @@ fn spec(s: &'static str, line: &str) -> Spec {
         None => (false, s),
     };
     let mut first = if let Some((a, b)) = s.split_once("[|") {
-        let mut first = one(a, line);
-        first.second = Some((Box::new(one(b.trim_suffix(']'), line)), true));
+        let mut first = one(a, line)?;
+        first.second = Some((Box::new(one(b.trim_suffix(']'), line)?), true));
         first
     } else if let Some((a, b)) = s.split_once('|').filter(|_| !s.starts_with(['[', '#'])) {
-        let mut first = one(a, line);
-        first.second = Some((Box::new(one(b, line)), false));
+        let mut first = one(a, line)?;
+        first.second = Some((Box::new(one(b, line)?), false));
         first
     } else {
-        one(s, line)
+        one(s, line)?
     };
     first.when = when;
     first.optional = optional;
-    first
+    Ok(first)
 }
 
-fn one(s: &'static str, line: &str) -> Spec {
+fn one(s: &'static str, line: &str) -> Result<Spec, String> {
     let (s, needs) = match s.split_once('@') {
-        Some((s, r)) => (s, r.split('@').fold(Needs::default(), |n, r| n.and(req(r, line)))),
+        Some((s, r)) => {
+            let mut needs = Needs::default();
+            for r in r.split('@') {
+                needs = needs.and(req(r, line)?);
+            }
+            (s, needs)
+        }
         None => (s, Needs::default()),
     };
     let mut spec = Spec {
@@ -1906,7 +1939,7 @@ fn one(s: &'static str, line: &str) -> Spec {
         needs,
         inner: vec![],
     };
-    let num = |n: &str| n.parse::<i64>().unwrap_or_else(|_| panic!("`{line}`: `{s}` has no number `{n}`"));
+    let num = |n: &str| n.parse::<i64>().map_err(|_| format!("`{line}`: `{s}` has no number `{n}`"));
     match s {
         "[R]" => spec.role = Role::Addr(Access::Read),
         "[W]" => spec.role = Role::Addr(Access::Write),
@@ -1922,19 +1955,23 @@ fn one(s: &'static str, line: &str) -> Spec {
         }
         "#" => spec.role = Role::Imm(Imm::Bits(32)),
         _ if s.starts_with('[') => {
-            let inner = s[1..].strip_suffix(']').unwrap_or_else(|| panic!("`{line}`: `{s}` is not closed"));
+            let inner = s[1..].strip_suffix(']').ok_or_else(|| format!("`{line}`: `{s}` is not closed"))?;
             spec.role = Role::Handle;
-            spec.inner = inner.split(',').map(|o| one(o, line)).collect();
+            for o in inner.split(',') {
+                spec.inner.push(one(o, line)?);
+            }
         }
         _ if s.starts_with('#') => {
             let r = &s[1..];
             spec.role = Role::Imm(if let Some(n) = r.strip_prefix('=') {
-                n.split('|').for_each(|v| _ = num(v));
+                for v in n.split('|') {
+                    num(v)?;
+                }
                 Imm::Of(n)
             } else if let Some(n) = r.strip_prefix('^') {
-                Imm::Pow2(num(n) as u32)
+                Imm::Pow2(num(n)? as u32)
             } else {
-                Imm::Bits(num(r) as u32)
+                Imm::Bits(num(r)? as u32)
             });
         }
         _ => {
@@ -1954,7 +1991,7 @@ fn one(s: &'static str, line: &str) -> Spec {
                 t = &t[1..];
             }
             if let Some((lead, r)) = t.split_once('+') {
-                spec.lead = Some(Ty::parse(lead).unwrap_or_else(|| panic!("`{line}`: `{lead}` is no type")));
+                spec.lead = Some(Ty::parse(lead).ok_or_else(|| format!("`{line}`: `{lead}` is no type"))?);
                 t = r;
             }
             if let Some((ty, r)) = t.split_once("{.") {
@@ -1964,24 +2001,24 @@ fn one(s: &'static str, line: &str) -> Spec {
                     Some("bxyzw") => Sel::Bytes,
                     Some("hmask") => Sel::HalfMask,
                     Some("bmask") => Sel::ByteMask,
-                    _ => panic!("`{line}`: `{s}` has no parts that kernite knows"),
+                    _ => return Err(format!("`{line}`: `{s}` has no parts that kernite knows")),
                 };
                 spec.part = Some(sel);
                 t = ty;
             }
             if let Some((ty, n)) = t.split_once('/') {
-                spec.step = Some(num(n));
+                spec.step = Some(num(n)?);
                 t = ty;
             }
             if let Some((ty, m)) = t.split_once('&') {
                 let m = m.strip_prefix("0x").and_then(|m| i64::from_str_radix(m, 16).ok());
-                spec.mask = Some(m.unwrap_or_else(|| panic!("`{line}`: `{s}` has no mask in hex, `&0x1f1f`")));
+                spec.mask = Some(m.ok_or_else(|| format!("`{line}`: `{s}` has no mask in hex, `&0x1f1f`"))?);
                 t = ty;
             }
             if let Some((ty, r)) = t.split_once('[') {
-                let (lo, hi) =
-                    r.strip_suffix(']').and_then(|r| r.split_once(',')).unwrap_or_else(|| panic!("`{line}`: `{s}`"));
-                spec.range = Some((num(lo), num(hi)));
+                let range = r.strip_suffix(']').and_then(|r| r.split_once(','));
+                let (lo, hi) = range.ok_or_else(|| format!("`{line}`: `{s}` has no range, `[lo,hi]`"))?;
+                spec.range = Some((num(lo)?, num(hi)?));
                 t = ty;
             }
             if let Some(ty) = t.strip_suffix("(0,1]") {
@@ -1990,23 +2027,81 @@ fn one(s: &'static str, line: &str) -> Spec {
             }
             let (ty, count) = match t.split_once('*') {
                 Some((ty, "v")) => (ty, Count::Vec),
-                Some((ty, n)) => (ty, Count::Fixed(n.parse().unwrap_or_else(|_| panic!("`{line}`: `{s}`")))),
+                Some((ty, n)) => {
+                    (ty, Count::Fixed(n.parse().map_err(|_| format!("`{line}`: `{s}` has no count `{n}`"))?))
+                }
                 None => (t, Count::One),
             };
             let count = match (count, spec.lead) {
                 (_, None) => count,
                 (Count::Fixed(n), Some(_)) => Count::Fixed(n + 1),
-                _ => panic!("`{line}`: `{s}` leads so many taken together, `u32+T*3`"),
+                _ => return Err(format!("`{line}`: `{s}` leads so many taken together, `u32+T*3`")),
             };
             spec.ty = Some(match ty {
                 "T" => TyRef::Slot(0),
                 "U" => TyRef::Slot(1),
                 "V" => TyRef::Slot(2),
                 "W" => TyRef::Slot(3),
-                _ => TyRef::Fixed(Ty::parse(ty).unwrap_or_else(|| panic!("`{line}`: `{ty}` is no type"))),
+                _ => TyRef::Fixed(Ty::parse(ty).ok_or_else(|| format!("`{line}`: `{ty}` is no type"))?),
             });
             spec.count = count;
         }
     }
-    spec
+    Ok(spec)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
+    #[test]
+    fn the_table_parses() -> Result {
+        let names = parse(TABLE)?.len();
+        assert!(names > 500, "{names} names");
+        Ok(())
+    }
+
+    /// What a load, a store and the like reach is the size of their data, and a form with data of no type would
+    /// reach one byte, which no alignment is of: the table gives each form its data, and a type for it.
+    #[test]
+    fn the_data_of_a_load_or_a_store_has_a_type() {
+        for form in forms().iter().filter(|f| matches!(f.op, "ld" | "st" | "atom" | "red" | "wmma")) {
+            assert!(form.data().is_some_and(|s| s.ty.is_some()), "`{}` has no data of a type", form.line);
+        }
+    }
+
+    /// A line of the table that is no form is the first error, and says what is wrong with it.
+    #[test]
+    fn a_table_that_is_no_table_says_which_line_and_why() {
+        let wrong = |text: &'static str| parse(text).err();
+        assert_eq!(wrong("$u32 : r"), Some("`$u32 : r` is a type".into()));
+        assert_eq!(wrong("$m"), Some("`$m` defines `$name = ..`".into()));
+        assert_eq!(wrong("$m = add"), Some("`$m = add` is elements, not a name".into()));
+        assert_eq!(wrong("add{.u32 @1.0"), Some("`add{.u32`: `{` is not closed".into()));
+        assert_eq!(wrong("add{.a,b|.c} @1.0"), Some("`add{.a,b|.c}`: `.a,b` is one choice".into()));
+        assert_eq!(wrong("add$no @1.0"), Some("`add$no`: no `$no`".into()));
+        assert_eq!(wrong("add~x @1.0"), Some("`add~x`: `~` follows an element".into()));
+        assert_eq!(wrong("add@@"), Some("`add@@`: `@@` is no element".into()));
+        assert_eq!(wrong("add.t @1.0 +no"), Some("`add.t @1.0 +no`: no check `+no`".into()));
+        assert_eq!(wrong("add @1.x"), Some("`add @1.x`: `@1.x` is no requirement".into()));
+        assert_eq!(wrong("add @1"), Some("`add @1`: `@1` is no version".into()));
+        assert_eq!(wrong("add @sm1"), Some("`add @sm1`: `@sm1` is no GPU kernite writes for".into()));
+        assert_eq!(wrong("add"), Some("`add` says the version of PTX it needs, `@1.0` for any".into()));
+        assert_eq!(wrong("add =u9 @1.0"), Some("`add =u9 @1.0`: `u9` is no type".into()));
+        assert_eq!(wrong("add =u32[1 @1.0"), Some("`add =u32[1 @1.0`: `=u32[1` has no range, `[lo,hi]`".into()));
+        assert_eq!(wrong("add =u32[a,2] @1.0"), Some("`add =u32[a,2] @1.0`: `=u32[a,2]` has no number `a`".into()));
+        assert_eq!(
+            wrong("add =u32&1f @1.0"),
+            Some("`add =u32&1f @1.0`: `=u32&1f` has no mask in hex, `&0x1f1f`".into())
+        );
+        assert_eq!(wrong("add =u32*x @1.0"), Some("`add =u32*x @1.0`: `=u32*x` has no count `x`".into()));
+        assert_eq!(
+            wrong("add =u32{.q} @1.0"),
+            Some("`add =u32{.q} @1.0`: `=u32{.q}` has no parts that kernite knows".into())
+        );
+        assert_eq!(wrong("add =T,U @1.0"), Some("`add =T,U @1.0`: `T,U` is no type".into()));
+        assert_eq!(wrong("# a comment\n\nnop @1.0"), None);
+    }
 }

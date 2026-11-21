@@ -19,8 +19,8 @@ pub mod kernels {
 }
 
 // Each name and listing, as bytes: Rust compares those as it builds, and not yet `str`s.
-const _: () = {
-    let [two, three, together] = kernels::LISTINGS else { panic!("a listing for each instance and kernel") };
+const fn listings() {
+    let [two, three, together] = kernels::LISTINGS else { return };
     assert!(matches!(two.0.as_bytes(), b"plus::<2>"));
     assert!(matches!(
         two.1.as_bytes(),
@@ -53,4 +53,9 @@ const _: () = {
     ret
 "
     ));
+}
+
+const _: () = {
+    assert!(kernels::LISTINGS.len() == 3, "a listing for each instance and kernel");
+    listings();
 };

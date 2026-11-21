@@ -142,8 +142,9 @@ pub(crate) fn gpu(
 
 /// The method that gives static `s`'s memory on the GPU, `laid`, by its index `i` among the
 /// module's variables, an expression, as the `kernite_cuda::Global` of the type of Rust's its
-/// elements are read as; or one that never runs, for a static that did not compile: of the type
-/// its elements are read as, if only what the static holds is wrong, and of any type if not.
+/// elements are read as, or the error `kernite_cuda::Module::global` gives; or one that never
+/// runs, for a static that did not compile: of the type its elements are read as, if only what
+/// the static holds is wrong, and of any type if not.
 fn accessor(s: &lang::Static, laid: &Laid, i: String, top: &[TokenTree]) -> TokenStream {
     let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
     out.extend(top[s.vis.clone()].iter().cloned());
@@ -153,13 +154,14 @@ fn accessor(s: &lang::Static, laid: &Laid, i: String, top: &[TokenTree]) -> Toke
     let mut name = top[s.vis.end + 1].clone();
     name.set_span(name.span().resolved_at(site()));
     out.extend([name]);
-    let (read, body) = match laid {
-        Ok(m) => (Some(&m.code), format!("self.module.global({i})")),
-        Err(failed) => (failed.stub.as_ref(), "::core::unreachable!()".to_string()),
+    let (read, i) = match laid {
+        Ok(m) => (Some(&m.code), i),
+        Err(failed) => (failed.stub.as_ref(), "0".to_string()),
     };
+    let global = |ty: &str| format!("::core::result::Result<::kernite_cuda::Global<'_, {ty}>, ::kernite_cuda::Error>");
     out.extend(parse(&match read {
-        Some(m) => format!("(&self) -> ::kernite_cuda::Global<'_, {}> {{ {body} }}", primitive(&m.host)),
-        None => format!("<T: ::kernite_cuda::Plain>(&self) -> ::kernite_cuda::Global<'_, T> {{ {body} }}"),
+        Some(m) => format!("(&self) -> {} {{ self.module.global({i}) }}", global(&primitive(&m.host))),
+        None => format!("<T: ::kernite_cuda::Plain>(&self) -> {} {{ self.module.global({i}) }}", global("T")),
     }));
     out
 }

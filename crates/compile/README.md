@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     asm.ret();
 
-    let kernel = compile(&asm.finish(), &SysV)?;
+    let kernel = compile(&asm.finish()?, &SysV)?;
     let spilled: Vec<_> = kernel.frame.slots.iter().filter(|slot| slot.spill).map(|slot| &slot.name[..]).collect();
     assert_eq!(spilled, ["v15"]);
     assert_eq!((kernel.frame.size, kernel.frame.align), (32, 32));

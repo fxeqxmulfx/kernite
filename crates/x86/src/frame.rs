@@ -108,10 +108,10 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     }
     // The frame's instructions need none, but for the epilogue's `vzeroupper`, which is AVX's: a kernel that writes it
     // needs AVX, unless it lists a feature that builds on it.
-    let mut features: Vec<Feature> = insts(&c.body)
-        .filter(|inst| !idle(inst))
-        .filter_map(|inst| forms::feature(inst.op, &inst.args, &inst.implicit))
-        .collect();
+    let mut features: Vec<Feature> = vec![];
+    for inst in insts(&c.body).filter(|inst| !idle(inst)) {
+        features.extend(forms::feature(inst.op, &inst.args, &inst.implicit)?);
+    }
     let implies_avx = [Feature::Avx2, Feature::Fma, Feature::F16c];
     let clears_upper = insts(&body).any(|inst| inst.op == Op::Vzeroupper);
     let reaches_sse = insts(&c.body).any(|inst| inst.op == Op::Vzeroupper);
@@ -285,9 +285,8 @@ fn prologue(frame: &Frame, pad: u32, free: Label, below: u32) -> Result<Vec<Item
         }
         return Ok(items);
     }
-    // No kernel's frame is aligned past a page: the language refuses one, and `Asm::slot` asserts
-    // it.
-    assert!(frame.align <= PAGE, "a frame aligned to {}: the prologue might step over a page", frame.align);
+    // No kernel's frame is aligned past a page: the language refuses one, and so does `Asm::finish`; one
+    // that was might step over a page.
     if frame.size > (1 << 31) + below {
         return Err(format!(
             "the kernel's frame, its stack memory and the variables that spilled, reaches {} bytes past the stack \
@@ -389,6 +388,8 @@ mod tests {
     use super::*;
     use crate::intel;
 
+    type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
     const RAX: PReg = PReg { class: Class::Gpr, hw: 0 };
     const RCX: PReg = PReg { class: Class::Gpr, hw: 1 };
     const RBX: PReg = PReg { class: Class::Gpr, hw: 3 };
@@ -422,14 +423,14 @@ mod tests {
     }
 
     /// The code of `c`'s listing, a line each.
-    fn code(c: &Allocated<Op>) -> String {
-        intel::print(c, vec![]).unwrap().code().collect::<Vec<_>>().join("\n")
+    fn code(c: &Allocated<Op>) -> Result<String> {
+        Ok(intel::print(c, vec![])?.code().collect::<Vec<_>>().join("\n"))
     }
 
     /// The prologue and the epilogue are instructions of the body before the printer sees it,
     /// which it prints as it prints the rest.
     #[test]
-    fn the_frame_is_instructions_before_it_is_printed() {
+    fn the_frame_is_instructions_before_it_is_printed() -> Result {
         let b = Slot { align: 32, ..slot("b", 32, false) };
         let frame = Frame { saved: vec![RBX], slots: vec![b], offsets: vec![0], size: 32, align: 32 };
         let store = Mem { base: Base::Slot(SlotId(0)), index: None, disp: 0, width: Width::W64 };
@@ -439,7 +440,7 @@ mod tests {
             inst(Op::Ret, vec![]),
         ];
         let c = kernel(body, frame);
-        let lowered = lower(&c).unwrap();
+        let lowered = lower(&c)?;
         let ops: Vec<_> = lowered
             .body
             .iter()
@@ -451,15 +452,16 @@ mod tests {
         assert_eq!(ops, ["push", "push", "mov", "sub", "and", "mov", "mov", "mov", "pop", "pop", "ret"]);
         let want = "push rbx\npush rbp\nmov rbp, rsp\nsub rsp, 32\nand rsp, -32\nmov rbx, rdi\n\
                     mov qword ptr [rsp], rbx\nmov rsp, rbp\npop rbp\npop rbx\nret";
-        assert_eq!(code(&c), want);
+        assert_eq!(code(&c)?, want);
         assert_eq!((lowered.returns, lowered.padding, lowered.features), (true, 0, vec![]));
+        Ok(())
     }
 
     /// A frame that touches more than `UNROLLED` pages touches them in a loop, at a label of its
     /// own, placed first so that it takes the first number: the least value no label of the body
     /// has, 2 beside the body's 1, 0 and `grid.sync()`'s `u32::MAX`, which come out of order.
     #[test]
-    fn the_probe_loops_label_is_one_no_label_of_the_body_has() {
+    fn the_probe_loops_label_is_one_no_label_of_the_body_has() -> Result {
         let frame = Frame {
             saved: vec![],
             slots: vec![slot("b", 5 * PAGE, false)],
@@ -470,7 +472,7 @@ mod tests {
         let body =
             vec![Item::Label(Label(1)), Item::Label(Label(0)), Item::Label(Label(u32::MAX)), inst(Op::Ret, vec![])];
         let c = kernel(body, frame);
-        let lowered = lower(&c).unwrap();
+        let lowered = lower(&c)?;
         let labels: Vec<_> =
             lowered.body.iter().filter_map(|item| if let Item::Label(l) = item { Some(l.0) } else { None }).collect();
         assert_eq!(labels, [2, 1, 0, u32::MAX]);
@@ -481,7 +483,8 @@ mod tests {
         assert_eq!(jne, Some(&Flow::Branch(Label(2))));
         let want = "lea r11, [rsp - 16384]\n2:\nsub rsp, 4096\nor qword ptr [rsp], 0\ncmp rsp, r11\njne 2b\n\
                     sub rsp, 3968\n3:\n4:\n5:\nadd rsp, 20352\nret";
-        assert_eq!(code(&c), want);
+        assert_eq!(code(&c)?, want);
+        Ok(())
     }
 
     /// An address reaches 2^31 bytes past the stack pointer, and the bytes of a frame that lie below it are not past
@@ -502,14 +505,15 @@ mod tests {
     /// `vmovdqu`, changes nothing, and is left out; one of 32 bits clears the upper half, and one of an xmm the upper
     /// lanes, and stay. A move left out asks for no `vzeroupper`, nor does one of an xmm, which sets no upper half.
     #[test]
-    fn a_move_of_a_register_to_itself_is_left_out() {
+    fn a_move_of_a_register_to_itself_is_left_out() -> Result {
         let frame = Frame { saved: vec![], slots: vec![], offsets: vec![], size: 0, align: 0 };
         let wide = [Op::Vmovaps, Op::Vmovups, Op::Vmovdqa, Op::Vmovdqu].map(|op| mov(op, YMM0, YMM0, Width::W256));
         let ret = inst(Op::Ret, vec![]);
         let mut body = vec![mov(Op::Mov, RAX, RAX, Width::W64), mov(Op::Mov, RAX, RAX, Width::W32)];
         body.extend(wide.clone());
         body.extend([mov(Op::Vmovaps, YMM0, YMM0, Width::W128), mov(Op::Mov, RAX, RCX, Width::W64), ret.clone()]);
-        assert_eq!(code(&kernel(body, frame.clone())), "mov eax, eax\nvmovaps xmm0, xmm0\nmov rax, rcx\nret");
-        assert_eq!(code(&kernel([&wide[..], &[ret]].concat(), frame)), "ret");
+        assert_eq!(code(&kernel(body, frame.clone()))?, "mov eax, eax\nvmovaps xmm0, xmm0\nmov rax, rcx\nret");
+        assert_eq!(code(&kernel([&wide[..], &[ret]].concat(), frame))?, "ret");
+        Ok(())
     }
 }

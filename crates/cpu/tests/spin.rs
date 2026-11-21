@@ -19,11 +19,14 @@
 //! the machine does.
 
 use std::fs::File;
+use std::io;
 use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use kernite_cpu::{Grid, SPIN, cpus, launch, most};
+
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
 /// How many rounds a test makes at most to see a thread told to stop spinning. Many rounds show it
 /// on a quiet machine, and one in a few hundred beside busy work on every CPU, where a launch
@@ -45,16 +48,16 @@ fn alone() -> MutexGuard<'static, ()> {
 
 /// The first four CPUs the caller's thread may run on, one more than a grid has threads, if the
 /// process runs that many threads at once; none if not.
-fn four() -> Option<Vec<usize>> {
-    let all = cpus().unwrap();
-    if all.len() < THREADS + 1 || most().unwrap() < THREADS {
+fn four() -> Result<Option<Vec<usize>>> {
+    let all = cpus()?;
+    if all.len() < THREADS + 1 || most()? < THREADS {
         eprintln!(
             "the caller's thread may run on fewer than four CPUs, or the process runs fewer than three threads at \
              once: skipped"
         );
-        return None;
+        return Ok(None);
     }
-    Some(all[..4].to_vec())
+    Ok(Some(all[..4].to_vec()))
 }
 
 /// What Linux has counted of a thread, as of the last time it stopped running.
@@ -73,26 +76,19 @@ impl Count {
     /// thread reads `status` last, with its buffers made, and asks nothing of the system after:
     /// a call that stopped the thread to wait would be counted by the next count, as if a launch
     /// had told it to stop.
-    fn of(status: &File, schedstat: &File) -> Count {
+    fn of(status: &File, schedstat: &File) -> Result<Count> {
         let (mut times, mut switches) = ([0; 256], [0; 8192]);
-        let (times_size, switches_size) =
-            (schedstat.read_at(&mut times, 0).unwrap(), status.read_at(&mut switches, 0).unwrap());
-        let (times, switches) =
-            (str::from_utf8(&times[..times_size]).unwrap(), str::from_utf8(&switches[..switches_size]).unwrap());
-        let field = |name: &str| -> u64 {
-            switches
-                .lines()
-                .find_map(|line| line.strip_prefix(name)?.strip_prefix(':'))
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap()
+        let (times_size, switches_size) = (schedstat.read_at(&mut times, 0)?, status.read_at(&mut switches, 0)?);
+        let (times, switches) = (str::from_utf8(&times[..times_size])?, str::from_utf8(&switches[..switches_size])?);
+        let field = |name: &str| -> Result<u64> {
+            let line = switches.lines().find_map(|line| line.strip_prefix(name)?.strip_prefix(':'));
+            Ok(line.ok_or("find_map gave None")?.trim().parse()?)
         };
-        Count {
-            cpu: Duration::from_nanos(times.split_whitespace().next().unwrap().parse().unwrap()),
-            stopped: field("voluntary_ctxt_switches"),
-            displaced: field("nonvoluntary_ctxt_switches"),
-        }
+        Ok(Count {
+            cpu: Duration::from_nanos(times.split_whitespace().next().ok_or("next gave None")?.parse()?),
+            stopped: field("voluntary_ctxt_switches")?,
+            displaced: field("nonvoluntary_ctxt_switches")?,
+        })
     }
 
     /// Whether the thread was told to stop spinning between `before` and this count: it stopped to
@@ -105,6 +101,9 @@ impl Count {
     }
 }
 
+/// The files in `/proc` of a thread, `status` and `schedstat`, as it opened them.
+type Files = io::Result<(File, File)>;
+
 /// Launches that count the threads they run. A count is as of the last time the thread stopped
 /// running, so the CPU a thread used between two counts is that of all the time it was awake: short
 /// when a launch tells it to stop soon after it wakes, as the launches of a test do, one after the
@@ -113,7 +112,7 @@ impl Count {
 struct Counter {
     /// The files in `/proc` of each thread. A thread opens its own in the first launch it runs in,
     /// and reads them again in the ones after, which costs less than opening.
-    files: Arc<[OnceLock<(File, File)>; THREADS]>,
+    files: Arc<[OnceLock<Files>; THREADS]>,
     /// The count of each thread at the last launch that used it.
     last: [Option<Count>; THREADS],
 }
@@ -121,25 +120,28 @@ struct Counter {
 impl Counter {
     /// Launches `grid`, and says, by thread, which of its kept threads were told to stop spinning
     /// since the last launch that used them. The caller's thread, the first, is never one.
-    fn launch(&mut self, grid: Grid<'_>) -> [bool; THREADS] {
-        let (files, counts) = (Arc::clone(&self.files), Arc::<[OnceLock<Count>; THREADS]>::default());
+    fn launch(&mut self, grid: Grid<'_>) -> Result<[bool; THREADS]> {
+        let (files, counts) = (Arc::clone(&self.files), Arc::<[OnceLock<Result<Count>>; THREADS]>::default());
         let into = Arc::clone(&counts);
         launch(grid, move |place| {
             let t = place.thread() as usize;
             // `/proc/thread-self` is the thread that opens it.
-            let (status, schedstat) = files[t].get_or_init(|| {
-                (File::open("/proc/thread-self/status").unwrap(), File::open("/proc/thread-self/schedstat").unwrap())
+            let opened = files[t].get_or_init(|| {
+                Ok((File::open("/proc/thread-self/status")?, File::open("/proc/thread-self/schedstat")?))
             });
-            let _ = into[t].set(Count::of(status, schedstat));
-        })
-        .unwrap();
+            let _ = into[t].set(match opened {
+                Ok((status, schedstat)) => Count::of(status, schedstat),
+                Err(e) => Err(e.to_string().into()),
+            });
+        })?;
         let mut told = [false; THREADS];
         for (t, count) in counts.iter().enumerate().skip(1) {
-            if let Some(&count) = count.get() {
+            if let Some(count) = count.get() {
+                let count = *count.as_ref().map_err(|e| e.to_string())?;
                 told[t] = self.last[t].replace(count).is_some_and(|before| count.told_since(&before));
             }
         }
-        told
+        Ok(told)
     }
 }
 
@@ -158,9 +160,9 @@ impl Counter {
 /// The first launch of the next round puts them back, and counts the thread the second does not
 /// use.
 #[test]
-fn a_launch_that_moves_a_thread_onto_the_cpu_of_a_kept_thread_ends_its_spin_before_it_moves() {
+fn a_launch_that_moves_a_thread_onto_the_cpu_of_a_kept_thread_ends_its_spin_before_it_moves() -> Result {
     let _alone = alone();
-    let Some(on) = four() else { return };
+    let Some(on) = four()? else { return Ok(()) };
     let first = Grid::on(&on[..THREADS]);
     let (caller_to_unused, caller_to_used, kept_to_unused) = ([on[2], on[1]], [on[1], on[0]], [on[0], on[2]]);
     // The second launch, and the kept thread in the way.
@@ -171,13 +173,18 @@ fn a_launch_that_moves_a_thread_onto_the_cpu_of_a_kept_thread_ends_its_spin_befo
     ];
     for (what, second, in_the_way) in cases {
         let mut counter = Counter::default();
-        let ended = (0..TRIES).any(|_| {
-            let (told_first, told_second) = (counter.launch(first), counter.launch(second));
-            told_first[in_the_way] || told_second[in_the_way]
-        });
+        let mut ended = false;
+        for _ in 0..TRIES {
+            let (told_first, told_second) = (counter.launch(first)?, counter.launch(second)?);
+            ended = told_first[in_the_way] || told_second[in_the_way];
+            if ended {
+                break;
+            }
+        }
         let message = "rounds found the kept thread in the way stop to wait early, with no thread taking its CPU";
         assert!(ended, "{what}: none of {TRIES} {message}");
     }
+    Ok(())
 }
 
 /// A launch ends the spin of no kept thread that no thread moves onto the CPU of: not when it
@@ -185,9 +192,9 @@ fn a_launch_that_moves_a_thread_onto_the_cpu_of_a_kept_thread_ends_its_spin_befo
 /// threads on the first three CPUs; and a second that uses the first kept thread and not the
 /// second. In no round is either kept thread told to stop spinning, by either launch.
 #[test]
-fn a_launch_ends_the_spin_of_no_kept_thread_that_no_thread_moves_onto_the_cpu_of() {
+fn a_launch_ends_the_spin_of_no_kept_thread_that_no_thread_moves_onto_the_cpu_of() -> Result {
     let _alone = alone();
-    let Some(on) = four() else { return };
+    let Some(on) = four()? else { return Ok(()) };
     let first = Grid::on(&on[..THREADS]);
     let (none_moves, to_a_free_cpu) = ([on[0], on[1]], [on[3], on[1]]);
     let cases = [
@@ -196,15 +203,15 @@ fn a_launch_ends_the_spin_of_no_kept_thread_that_no_thread_moves_onto_the_cpu_of
     ];
     for (what, second) in cases {
         let mut counter = Counter::default();
-        let rounds_told = (0..ROUNDS)
-            .filter(|_| {
-                let (told_first, told_second) = (counter.launch(first), counter.launch(second));
-                told_first.iter().chain(&told_second).any(|&told| told)
-            })
-            .count();
+        let mut rounds_told = 0;
+        for _ in 0..ROUNDS {
+            let (told_first, told_second) = (counter.launch(first)?, counter.launch(second)?);
+            rounds_told += usize::from(told_first.iter().chain(&told_second).any(|&told| told));
+        }
         let message = "rounds found a kept thread told to stop spinning, where no thread moved onto its CPU";
         assert_eq!(rounds_told, 0, "{what}: {rounds_told} of {ROUNDS} {message}");
     }
+    Ok(())
 }
 
 /// A launch that moves a thread ends the spin of the kept threads the system places, which may
@@ -212,15 +219,15 @@ fn a_launch_ends_the_spin_of_no_kept_thread_that_no_thread_moves_onto_the_cpu_of
 /// thread has taken its CPU. A round is a launch of three threads that the system places, and
 /// a launch that moves the caller's thread.
 #[test]
-fn a_launch_that_moves_a_thread_ends_the_spin_of_the_kept_threads_the_system_places() {
+fn a_launch_that_moves_a_thread_ends_the_spin_of_the_kept_threads_the_system_places() -> Result {
     let _alone = alone();
-    let Some(on) = four() else { return };
+    let Some(on) = four()? else { return Ok(()) };
     let (anywhere, here) = (Grid::new(THREADS), Grid::on(&on[..1]));
     let mut counter = Counter::default();
     let mut ended = [false; 2];
     for _ in 0..TRIES {
-        let told = counter.launch(anywhere);
-        counter.launch(here);
+        let told = counter.launch(anywhere)?;
+        counter.launch(here)?;
         ended = [ended[0] || told[1], ended[1] || told[2]];
         if ended == [true; 2] {
             break;
@@ -228,6 +235,7 @@ fn a_launch_that_moves_a_thread_ends_the_spin_of_the_kept_threads_the_system_pla
     }
     let message = "stopped to wait early, with no thread taking its CPU, in some of";
     assert_eq!(ended, [true; 2], "kept threads the system places did not all stop: {ended:?} {message} {TRIES} rounds");
+    Ok(())
 }
 
 /// A kept thread whose spin a launch ended spins again after the next launch that uses it. A round
@@ -238,21 +246,22 @@ fn a_launch_that_moves_a_thread_ends_the_spin_of_the_kept_threads_the_system_pla
 /// between the two: a thread that is told to stop spinning stays told until a launch uses it, and a
 /// launch that does not clear that leaves the thread to sleep at once, where it was to spin.
 #[test]
-fn a_kept_thread_whose_spin_a_launch_ended_spins_again_after_the_next_launch_that_uses_it() {
+fn a_kept_thread_whose_spin_a_launch_ended_spins_again_after_the_next_launch_that_uses_it() -> Result {
     let _alone = alone();
-    let Some(on) = four() else { return };
+    let Some(on) = four()? else { return Ok(()) };
     let (first, caller_to_third) = (Grid::on(&on[..THREADS]), [on[2], on[1]]);
     let second = Grid::on(&caller_to_third);
     let mut counter = Counter::default();
     let (mut ended, mut asleep_again, mut rounds) = (false, 0, 0);
     while rounds < ROUNDS || (!ended && rounds < TRIES) {
-        counter.launch(second);
+        counter.launch(second)?;
         // The third thread, at index 2.
-        ended |= counter.launch(first)[2];
-        asleep_again += usize::from(counter.launch(first)[2]);
+        ended |= counter.launch(first)?[2];
+        asleep_again += usize::from(counter.launch(first)?[2]);
         rounds += 1;
     }
     let message = "rounds found the thread stop to wait early after a launch that used it";
     assert!(ended, "none of {rounds} rounds found the thread the second launch left stop to wait early");
     assert_eq!(asleep_again, 0, "{asleep_again} of {rounds} {message}");
+    Ok(())
 }

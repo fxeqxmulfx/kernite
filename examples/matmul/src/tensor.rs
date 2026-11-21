@@ -380,7 +380,7 @@ pub mod kernels {
 }
 
 /// Launches `hgemm` on `c`, `a` and `b`, of the sizes `shape` gives, `(m, n, k)`. `n` and `k` are
-/// multiples of 8, or the call panics.
+/// multiples of 8, or the launch is refused.
 ///
 /// # Safety
 ///
@@ -393,8 +393,10 @@ pub unsafe fn launch(
     b: &Buffer<f16>,
     shape: crate::Shape,
 ) -> Result<(), Error> {
-    let (m, n, k) = crate::gpu_operands((a.len(), b.len(), c.len()), shape);
-    assert!(n % 8 == 0 && k % 8 == 0, "n is {n} and k is {k}: both must be multiples of 8");
+    let (m, n, k) = crate::gpu_operands((a.len(), b.len(), c.len()), shape)?;
+    if n % 8 != 0 || k % 8 != 0 {
+        return Err(crate::refused(format!("n is {n} and k is {k}: both must be multiples of 8")));
+    }
     if m * n == 0 {
         return Ok(());
     }

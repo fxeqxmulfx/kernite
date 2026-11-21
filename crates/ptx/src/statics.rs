@@ -36,6 +36,8 @@ pub struct Static {
     pub memory: Memory,
     /// What each of its elements is.
     pub elem: Ty,
+    /// The number the host reads each element as, `u32`: [`Ty::host`] of its element.
+    pub host: &'static str,
     /// What it holds until something writes it, as bytes; zeros past their end.
     pub init: Vec<u8>,
 }
@@ -59,13 +61,13 @@ impl Static {
             }
         };
         let (elem, bytes, align) = shape(ty, word)?;
-        if elem.host().is_none() {
+        let Some(host) = elem.host() else {
             return Err(format!(
                 "a static holds numbers the host reads as Rust's: `b8` to `b64`, `u8` to `u64`, `s8` to `s64`, \
                  `f16`, `bf16`, `f32` and `f64`; not `{}`",
                 elem.name()
             ));
-        }
+        };
         let Some(bytes) = bytes else {
             return Err(format!(
                 "`{ty}` has no size, which only shared memory may leave to the launch: `{word}<[{}; 64]>`",
@@ -73,7 +75,7 @@ impl Static {
             ));
         };
         let memory = Memory { name: symbol.to_string(), space, align, bytes: Some(bytes) };
-        Ok(Static { name: name.to_string(), ty: ty.to_string(), memory, elem, init: vec![] })
+        Ok(Static { name: name.to_string(), ty: ty.to_string(), memory, elem, host, init: vec![] })
     }
 
     /// Makes it hold `value` until something writes it: an array of as many elements as it

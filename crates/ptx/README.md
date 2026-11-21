@@ -9,28 +9,33 @@ cargo add kernite-ptx kernite-lang
 ```
 
 ```rust
-use kernite_lang::{Mem, Operand, Target};
+use kernite_lang::{Fault, Mem, Operand, Target};
 use kernite_ptx::lang::Kernel;
 use kernite_ptx::module;
 
-fn main() {
+fn main() -> Result<(), String> {
+    // What is wrong with an instruction is a `Fault`, which has its message.
+    let said = |fault: Fault| fault.message;
+
     // `pub unsafe extern "ptx-kernel" fn store(out: *mut f32)`, which writes 1.5 to `out`.
     let mut kernel = Kernel::new("store", "store");
-    let out = kernel.param("out", "*mut f32").unwrap();
-    let x = Operand::Var(kernel.var("x", "f32").unwrap());
+    let out = kernel.param("out", "*mut f32")?;
+    let x = Operand::Var(kernel.var("x", "f32")?);
     let at = Operand::Mem(Mem { base: Some(out), index: None, disp: 0 });
 
     // Each instruction is checked: `st.global.u32` does not store an `f32`.
-    let fault = kernel.inst("st.global.u32", &[at.clone(), x.clone()], None).unwrap_err();
+    let wrong = kernel.inst("st.global.u32", &[at.clone(), x.clone()], None);
+    let fault = wrong.err().ok_or("`st.global.u32` took an `f32`")?;
     assert_eq!(fault.message, "`st.global.u32` wants a `u32` variable; this is a `f32`");
-    kernel.inst("mov.f32", &[x.clone(), Operand::F32(1.5)], None).unwrap();
-    kernel.inst("st.global.f32", &[at, x], None).unwrap();
-    kernel.end().unwrap();
+    kernel.inst("mov.f32", &[x.clone(), Operand::F32(1.5)], None).map_err(said)?;
+    kernel.inst("st.global.f32", &[at, x], None).map_err(said)?;
+    kernel.end()?;
 
     // The module is of the PTX version and for the GPU that its instructions need.
-    let ptx = module(&[kernel.finish()], &[]).whole().unwrap();
+    let ptx = module(&[kernel.finish()], &[]).whole()?;
     assert!(ptx.contains(".version 3.0\n.target sm_30\n"));
     assert!(ptx.contains("\tmov.f32 %x, 0f3FC00000;\n\tst.global.f32 [%out], %x;\n\tret;\n"));
+    Ok(())
 }
 ```
 

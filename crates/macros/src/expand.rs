@@ -188,7 +188,7 @@ pub(crate) fn expand(
                     helpers.push((i, f));
                 }
             }
-            _ => unreachable!("kernite::module says what each item is"),
+            _ => out.extend(error_under(cfg, at(item.span), "kernite made this item what it is not: that is a bug")),
         }
     }
     let laid = Cond::any(memory.iter().filter(|(_, m, _)| m.is_ok()).map(|(.., c)| c.clone()));
@@ -269,7 +269,7 @@ fn take(made: &ModuleOut, top: &[TokenTree], path: &[TokenTree]) -> TokenStream 
     let mut names = TokenStream::new();
     for (item, made_item) in made.module.items.iter().zip(&made.items) {
         if matches!(made_item, ItemOut::Given) {
-            names.extend([name_at(item, top, site())]);
+            names.extend(name_at(item, top, site()));
             names.extend(parse(","));
         }
     }
@@ -298,7 +298,7 @@ fn named(
     let module = &made.module;
     let (mut names, mut errors) = (TokenStream::new(), TokenStream::new());
     for m in made.items[i].mentions() {
-        let j = position(module, &m.name);
+        let Some(j) = position(module, &m.name) else { continue };
         let kept = Cond::all([conds[i].clone(), runs(made, conds, i, module.item_at(m.span), &[])]);
         let rust = match (&module.items[j].kind, &made.items[j]) {
             (_, ItemOut::Rust | ItemOut::Given | ItemOut::HostStatic(_)) => true,
@@ -309,10 +309,10 @@ fn named(
             let Some(guard) = kept.guard() else { continue };
             names.extend(guard);
             names.extend(parse("let _ ="));
-            names.extend([name_at(&module.items[j], top, place(m))]);
+            names.extend(name_at(&module.items[j], top, place(m)));
             names.extend(parse(";"));
         } else if let Some(guard) = Cond::all([kept, conds[j].clone().not()]).guard() {
-            let reader = module.items[i].name().expect("an item that names others has a name");
+            let reader = module.items[i].name().unwrap_or_default();
             let message = format!("`{}` is left out by `cfg` where `{reader}`, which names it, is kept", m.name);
             errors.extend(error_under(&guard, place(m), &message));
         }

@@ -5,7 +5,7 @@
 
 use kernite_cuda::{Buffer, Cuda, Error, Grid, Ptr};
 
-use crate::model::{Adam, Buf, E, FC1, FC2, H, LM, Layer, M, Ops, PARAMS, QKV, T, Then, V, VP, WO, WTE};
+use crate::model::{Adam, Buf, E, FC1, FC2, H, LM, Layer, M, Op, Ops, PARAMS, QKV, T, Then, V, VP, WO, WTE};
 
 /// The kernels. Pointers are to the first row of the buffers [`Buf`] names; a kernel works
 /// out its rows from its block and thread, and trusts that they are there. They read the
@@ -734,178 +734,195 @@ impl Gpu {
     }
 
     /// The weights of `l` in `b`: the parameters, or their gradients.
-    fn weights(&self, b: Buf, l: Layer) -> Ptr<f32> {
-        self.bufs[b as usize].at(l.at)
+    fn weights(&self, b: Buf, l: Layer) -> Op<Ptr<f32>> {
+        self.bufs[b as usize].at(l.at).ok_or_else(|| format!("{l:?} is past the end of {b:?}"))
     }
 }
 
 /// What the driver says, once it says a call failed: there is no going on without the GPU.
-fn check<R>(r: Result<R, Error>) -> R {
-    r.unwrap_or_else(|e| panic!("the GPU failed: {e}"))
+fn said<R>(r: Result<R, Error>) -> Op<R> {
+    r.map_err(|e| format!("the GPU failed: {e}"))
 }
 
 /// `t0..n` as rows of a document: within it, `T` at most. How many, for a grid.
-fn rows(t0: usize, n: usize) -> u32 {
-    assert!(t0 <= n && n <= T, "rows {t0}..{n} of a document of {T}");
-    (n - t0) as u32
+fn rows(t0: usize, n: usize) -> Op<u32> {
+    if t0 > n || n > T {
+        return Err(format!("rows {t0}..{n} of a document of {T}"));
+    }
+    Ok((n - t0) as u32)
 }
 
 /// Launches `kernel` over `blocks` blocks of `threads` threads, if that is any: a grid of none
 /// cannot be launched, and would have nothing to do.
-fn launch(blocks: u32, threads: u32, kernel: impl FnOnce(Grid) -> Result<(), Error>) {
-    if blocks > 0 && threads > 0 {
-        check(kernel(Grid::new(blocks, threads)));
-    }
+fn launch(blocks: u32, threads: u32, kernel: impl FnOnce(Grid) -> Op) -> Op {
+    if blocks > 0 && threads > 0 { kernel(Grid::new(blocks, threads)) } else { Ok(()) }
 }
 
 impl Ops for Gpu {
-    fn write(&mut self, b: Buf, data: &[f32]) {
-        check(self.bufs[b as usize].write(data));
+    fn write(&mut self, b: Buf, data: &[f32]) -> Op {
+        said(self.bufs[b as usize].write(data))
     }
 
-    fn read(&mut self, b: Buf) -> Vec<f32> {
-        check(self.bufs[b as usize].read())
+    fn read(&mut self, b: Buf) -> Op<Vec<f32>> {
+        said(self.bufs[b as usize].read())
     }
 
-    fn tokens(&mut self, tokens: &[u32]) {
-        assert!(tokens.len() <= T + 1 && tokens.iter().all(|&t| (t as usize) < V), "tokens of a document");
+    fn tokens(&mut self, tokens: &[u32]) -> Op {
+        if tokens.len() > T + 1 || tokens.iter().any(|&t| t as usize >= V) {
+            return Err(format!("a document has {} tokens at most, each below {V}", T + 1));
+        }
         let mut all = [0; T + 1];
         all[..tokens.len()].copy_from_slice(tokens);
-        check(self.tokens.write(&all));
+        said(self.tokens.write(&all))?;
         self.count = tokens.len();
+        Ok(())
     }
 
-    fn embed(&mut self, t0: usize, n: usize) {
-        assert!(self.count >= n, "a token for each of {n} rows");
+    fn embed(&mut self, t0: usize, n: usize) -> Op {
+        if self.count < n {
+            return Err(format!("a token for each of {n} rows"));
+        }
         let (ks, x0, p, tokens) = (&self.kernels, self.at(Buf::X0), self.at(Buf::Params), self.tokens.ptr());
         // SAFETY: a block for each of the rows `t0..n` of `X0` and of the tokens, a thread for
         // each element; each token's row of `wte`, and the rows of `wpe` up to `n`.
-        launch(rows(t0, n), E as u32, |grid| unsafe { ks.embed(grid, x0, p, tokens, t0 as u32) });
+        launch(rows(t0, n)?, E as u32, |grid| said(unsafe { ks.embed(grid, x0, p, tokens, t0 as u32) }))
     }
 
-    fn rmsnorm(&mut self, y: Buf, r: Buf, x: Buf, t0: usize, n: usize) {
+    fn rmsnorm(&mut self, y: Buf, r: Buf, x: Buf, t0: usize, n: usize) -> Op {
         let (ks, y, r, x) = (&self.kernels, self.at(y), self.at(r), self.at(x));
         // SAFETY: a thread for each of the rows `t0..n` of each.
-        launch(1, rows(t0, n), |grid| unsafe { ks.rmsnorm(grid, y, r, x, t0 as u32) });
+        launch(1, rows(t0, n)?, |grid| said(unsafe { ks.rmsnorm(grid, y, r, x, t0 as u32) }))
     }
 
-    fn matmul(&mut self, l: Layer, y: Buf, x: Buf, then: Then, t0: usize, n: usize) {
-        assert_eq!((x.width(), y.width()), (l.rows, l.cols), "{x:?} by {l:?} into {y:?}");
-        let (ks, w, out, x, t0) = (&self.kernels, self.weights(Buf::Params, l), self.at(y), self.at(x), t0 as u32);
+    fn matmul(&mut self, l: Layer, y: Buf, x: Buf, then: Then, t0: usize, n: usize) -> Op {
+        if (x.width(), y.width()) != (l.rows, l.cols) {
+            return Err(format!("{x:?} by {l:?} into {y:?}"));
+        }
+        let (ks, w, out, x, t0) = (&self.kernels, self.weights(Buf::Params, l)?, self.at(y), self.at(x), t0 as u32);
         let res = match then {
             Then::Add(res) => self.at(res),
             _ => out,
         };
         // SAFETY: a block for each of the rows `t0..n` of each, as wide as the layer says, a
         // thread for each output; and its weights.
-        launch(rows(t0 as usize, n), l.cols as u32, |grid| unsafe {
+        launch(rows(t0 as usize, n)?, l.cols as u32, |grid| unsafe {
             match (l, then) {
-                (QKV, Then::Store) => ks.qkv(grid, out, x, w, t0),
-                (WO, Then::Add(_)) => ks.wo(grid, out, x, w, res, t0),
-                (FC1, Then::Relu) => ks.fc1(grid, out, x, w, t0),
-                (FC2, Then::Add(_)) => ks.fc2(grid, out, x, w, res, t0),
-                (LM, Then::Store) => ks.lm(grid, out, x, w, t0),
-                _ => panic!("no kernel computes {l:?} then {then:?}"),
+                (QKV, Then::Store) => said(ks.qkv(grid, out, x, w, t0)),
+                (WO, Then::Add(_)) => said(ks.wo(grid, out, x, w, res, t0)),
+                (FC1, Then::Relu) => said(ks.fc1(grid, out, x, w, t0)),
+                (FC2, Then::Add(_)) => said(ks.fc2(grid, out, x, w, res, t0)),
+                (LM, Then::Store) => said(ks.lm(grid, out, x, w, t0)),
+                _ => Err(format!("no kernel computes {l:?} then {then:?}")),
             }
-        });
+        })
     }
 
-    fn attention(&mut self, t0: usize, n: usize) {
+    fn attention(&mut self, t0: usize, n: usize) -> Op {
         let (ks, att, aw, qkv) = (&self.kernels, self.at(Buf::Att), self.at(Buf::Aw), self.at(Buf::Qkv));
         // SAFETY: a block for each of the rows `t0..n`, a thread for each head, which reads the
         // rows up to its own.
-        launch(rows(t0, n), H as u32, |grid| unsafe { ks.attention(grid, att, aw, qkv, t0 as u32) });
+        launch(rows(t0, n)?, H as u32, |grid| said(unsafe { ks.attention(grid, att, aw, qkv, t0 as u32) }))
     }
 
-    fn softmax(&mut self, inv_temp: f32, t0: usize, n: usize) {
+    fn softmax(&mut self, inv_temp: f32, t0: usize, n: usize) -> Op {
         let (ks, probs, logits) = (&self.kernels, self.at(Buf::Probs), self.at(Buf::Logits));
         // SAFETY: a thread for each of the rows `t0..n` of each.
-        launch(1, rows(t0, n), |grid| unsafe { ks.softmax(grid, probs, logits, inv_temp, t0 as u32) });
+        launch(1, rows(t0, n)?, |grid| said(unsafe { ks.softmax(grid, probs, logits, inv_temp, t0 as u32) }))
     }
 
-    fn clear(&mut self) {
+    fn clear(&mut self) -> Op {
         for b in Buf::SUMS {
-            check(self.bufs[b as usize].zero());
+            said(self.bufs[b as usize].zero())?;
         }
+        Ok(())
     }
 
-    fn xent(&mut self, n: usize) {
-        assert!(self.count > n, "a target for each of {n} rows");
-        let (ks, d, probs, targets) = (&self.kernels, self.at(Buf::DLogits), self.at(Buf::Probs), self.tokens.at(1));
+    fn xent(&mut self, n: usize) -> Op {
+        if self.count <= n {
+            return Err(format!("a target for each of {n} rows"));
+        }
+        let targets = self.tokens.at(1).ok_or("a document's tokens end before its targets")?;
+        let (ks, d, probs) = (&self.kernels, self.at(Buf::DLogits), self.at(Buf::Probs));
         // SAFETY: a block for each of `n` rows of each and of the targets, the tokens after the
         // first, and a thread for each token.
-        launch(rows(0, n), VP as u32, |grid| unsafe { ks.xent(grid, d, probs, targets, 1.0 / n as f32) });
+        launch(rows(0, n)?, VP as u32, |grid| said(unsafe { ks.xent(grid, d, probs, targets, 1.0 / n as f32) }))
     }
 
-    fn bwd_x(&mut self, l: Layer, dx: Buf, dy: Buf, n: usize) {
-        assert_eq!((dx.width(), dy.width()), (l.rows, l.cols), "{dy:?} by {l:?} into {dx:?}");
-        let (ks, w, dx, dy) = (&self.kernels, self.weights(Buf::Params, l), self.at(dx), self.at(dy));
+    fn bwd_x(&mut self, l: Layer, dx: Buf, dy: Buf, n: usize) -> Op {
+        if (dx.width(), dy.width()) != (l.rows, l.cols) {
+            return Err(format!("{dy:?} by {l:?} into {dx:?}"));
+        }
+        let (ks, w, dx, dy) = (&self.kernels, self.weights(Buf::Params, l)?, self.at(dx), self.at(dy));
         // SAFETY: a block for each of `n` rows of each, as wide as the layer says, a thread for
         // each input; and its weights.
-        launch(rows(0, n), l.rows as u32, |grid| unsafe {
+        launch(rows(0, n)?, l.rows as u32, |grid| unsafe {
             match l {
-                QKV => ks.qkv_bwd_x(grid, dx, dy, w),
-                WO => ks.wo_bwd_x(grid, dx, dy, w),
-                FC1 => ks.fc1_bwd_x(grid, dx, dy, w),
-                FC2 => ks.fc2_bwd_x(grid, dx, dy, w),
-                LM => ks.lm_bwd_x(grid, dx, dy, w),
-                _ => panic!("no kernel for {l:?}"),
+                QKV => said(ks.qkv_bwd_x(grid, dx, dy, w)),
+                WO => said(ks.wo_bwd_x(grid, dx, dy, w)),
+                FC1 => said(ks.fc1_bwd_x(grid, dx, dy, w)),
+                FC2 => said(ks.fc2_bwd_x(grid, dx, dy, w)),
+                LM => said(ks.lm_bwd_x(grid, dx, dy, w)),
+                _ => Err(format!("no kernel for {l:?}")),
             }
-        });
+        })
     }
 
-    fn bwd_w(&mut self, l: Layer, x: Buf, dy: Buf, n: usize) {
-        assert_eq!((x.width(), dy.width()), (l.rows, l.cols), "{x:?} by {dy:?} for {l:?}");
-        let (ks, g, x, dy, n) = (&self.kernels, self.weights(Buf::Grads, l), self.at(x), self.at(dy), rows(0, n));
+    fn bwd_w(&mut self, l: Layer, x: Buf, dy: Buf, n: usize) -> Op {
+        if (x.width(), dy.width()) != (l.rows, l.cols) {
+            return Err(format!("{x:?} by {dy:?} for {l:?}"));
+        }
+        let (ks, g, x, dy, n) = (&self.kernels, self.weights(Buf::Grads, l)?, self.at(x), self.at(dy), rows(0, n)?);
         // SAFETY: a block for each input and a thread for each output of the layer's gradients,
         // over `n` rows of each, as wide as the layer says.
         launch(l.rows as u32, l.cols as u32, |grid| unsafe {
             match l {
-                QKV => ks.qkv_bwd_w(grid, g, x, dy, n),
-                WO => ks.wo_bwd_w(grid, g, x, dy, n),
-                FC1 => ks.fc1_bwd_w(grid, g, x, dy, n),
-                FC2 => ks.fc2_bwd_w(grid, g, x, dy, n),
-                LM => ks.lm_bwd_w(grid, g, x, dy, n),
-                _ => panic!("no kernel for {l:?}"),
+                QKV => said(ks.qkv_bwd_w(grid, g, x, dy, n)),
+                WO => said(ks.wo_bwd_w(grid, g, x, dy, n)),
+                FC1 => said(ks.fc1_bwd_w(grid, g, x, dy, n)),
+                FC2 => said(ks.fc2_bwd_w(grid, g, x, dy, n)),
+                LM => said(ks.lm_bwd_w(grid, g, x, dy, n)),
+                _ => Err(format!("no kernel for {l:?}")),
             }
-        });
+        })
     }
 
-    fn relu_bwd(&mut self, n: usize) {
+    fn relu_bwd(&mut self, n: usize) -> Op {
         let (ks, dh, h) = (&self.kernels, self.at(Buf::DHid), self.at(Buf::Hid));
         // SAFETY: a block for each of `n` rows of each, a thread for each element.
-        launch(rows(0, n), M as u32, |grid| unsafe { ks.relu_bwd(grid, dh, h) });
+        launch(rows(0, n)?, M as u32, |grid| said(unsafe { ks.relu_bwd(grid, dh, h) }))
     }
 
-    fn rmsnorm_bwd(&mut self, dx: Buf, dy: Buf, x: Buf, r: Buf, n: usize) {
+    fn rmsnorm_bwd(&mut self, dx: Buf, dy: Buf, x: Buf, r: Buf, n: usize) -> Op {
         let (ks, dx, dy, x, r) = (&self.kernels, self.at(dx), self.at(dy), self.at(x), self.at(r));
         // SAFETY: a thread for each of `n` rows of each.
-        launch(1, rows(0, n), |grid| unsafe { ks.rmsnorm_bwd(grid, dx, dy, x, r) });
+        launch(1, rows(0, n)?, |grid| said(unsafe { ks.rmsnorm_bwd(grid, dx, dy, x, r) }))
     }
 
-    fn attention_bwd(&mut self, n: usize) {
-        let (ks, dqkv, n) = (&self.kernels, self.at(Buf::DQkv), rows(0, n));
+    fn attention_bwd(&mut self, n: usize) -> Op {
+        let (ks, dqkv, n) = (&self.kernels, self.at(Buf::DQkv), rows(0, n)?);
         let (qkv, aw, datt) = (self.at(Buf::Qkv), self.at(Buf::Aw), self.at(Buf::DAtt));
         // SAFETY: a thread for each head, over `n` rows of each.
-        launch(1, H as u32, |grid| unsafe { ks.attention_bwd(grid, dqkv, qkv, aw, datt, n) });
+        launch(1, H as u32, |grid| said(unsafe { ks.attention_bwd(grid, dqkv, qkv, aw, datt, n) }))
     }
 
-    fn embed_bwd(&mut self, n: usize) {
-        assert!(self.count >= n, "a token for each of {n} rows");
+    fn embed_bwd(&mut self, n: usize) -> Op {
+        if self.count < n {
+            return Err(format!("a token for each of {n} rows"));
+        }
         let (ks, g, dx0, tokens, n) =
-            (&self.kernels, self.at(Buf::Grads), self.at(Buf::DX0), self.tokens.ptr(), rows(0, n));
+            (&self.kernels, self.at(Buf::Grads), self.at(Buf::DX0), self.tokens.ptr(), rows(0, n)?);
         // SAFETY: a thread for each element of a row, over `n` rows of `DX0` and of the tokens;
         // each token's row of `wte`, and the rows of `wpe` up to `n`.
-        launch(1, E as u32, |grid| unsafe { ks.embed_bwd(grid, g, dx0, tokens, n) });
+        launch(1, E as u32, |grid| said(unsafe { ks.embed_bwd(grid, g, dx0, tokens, n) }))
     }
 
-    fn adam(&mut self, a: &Adam) {
+    fn adam(&mut self, a: &Adam) -> Op {
         let (ks, p, g) = (&self.kernels, self.at(Buf::Params), self.at(Buf::Grads));
         let (m, v, n) = (self.at(Buf::Moment1), self.at(Buf::Moment2), PARAMS as u32);
         // SAFETY: a thread for each of the `PARAMS` floats of each, the ones past them doing
         // nothing.
-        launch(n.div_ceil(256), 256, |grid| unsafe {
-            ks.adam(grid, p, g, m, v, n, a.lr, a.b1, a.ob1, a.b2, a.ob2, a.bc1, a.bc2, a.eps)
-        });
+        launch(n.div_ceil(256), 256, |grid| {
+            said(unsafe { ks.adam(grid, p, g, m, v, n, a.lr, a.b1, a.ob1, a.b2, a.ob2, a.bc1, a.bc2, a.eps) })
+        })
     }
 }

@@ -38,7 +38,7 @@ pub(crate) fn blocks<Op, R>(body: &[Item<Op, R>]) -> Result<Vec<Block>, Error> {
     let ranges: Vec<_> = starts.iter().copied().zip(ends).map(|(s, e)| s..e).collect();
     let block_at = |label: u32| {
         let i = *at.get(&label).ok_or(Error::NoSuchLabel { label })?;
-        Ok(ranges.iter().position(|r| r.start == i).expect("labels start blocks"))
+        ranges.iter().position(|r| r.start == i).ok_or(Error::NoSuchLabel { label })
     };
     let mut blocks = Vec::with_capacity(ranges.len());
     for (b, items) in ranges.iter().enumerate() {
@@ -70,10 +70,12 @@ pub fn on_every_path<Op>(p: &Program<Op>, leaves: &[usize]) -> Result<Vec<bool>,
     let mut succs: Vec<Vec<usize>> = blocks.iter().map(|b| b.succs.clone()).collect();
     // How far every path into each block runs it: through its first leave, if it has one.
     let mut runs: Vec<usize> = blocks.iter().map(|b| b.items.end).collect();
+    // An index that is no item of the body is no place a thread ends.
     for &leave in leaves {
-        let b = blocks.iter().position(|b| b.items.contains(&leave)).expect("a leave is an item of the body");
-        succs[b].push(end);
-        runs[b] = runs[b].min(leave + 1);
+        if let Some(b) = blocks.iter().position(|b| b.items.contains(&leave)) {
+            succs[b].push(end);
+            runs[b] = runs[b].min(leave + 1);
+        }
     }
     for s in succs.iter_mut().filter(|s| s.is_empty()) {
         s.push(end);

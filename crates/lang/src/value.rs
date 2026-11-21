@@ -32,28 +32,39 @@ pub enum IntTy {
     Usize,
 }
 
-const INT_TYS: [(&str, IntTy); 10] = [
-    ("usize", IntTy::Usize),
-    ("isize", IntTy::Isize),
-    ("u16", IntTy::U16),
-    ("u32", IntTy::U32),
-    ("u64", IntTy::U64),
-    ("i16", IntTy::I16),
-    ("i32", IntTy::I32),
-    ("i64", IntTy::I64),
-    ("u8", IntTy::U8),
-    ("i8", IntTy::I8),
+const INT_TYS: [IntTy; 10] = [
+    IntTy::Usize,
+    IntTy::Isize,
+    IntTy::U16,
+    IntTy::U32,
+    IntTy::U64,
+    IntTy::I16,
+    IntTy::I32,
+    IntTy::I64,
+    IntTy::U8,
+    IntTy::I8,
 ];
 
 impl IntTy {
     /// The type `name` names.
     pub fn parse(name: &str) -> Option<IntTy> {
-        INT_TYS.iter().find(|(n, _)| *n == name).map(|&(_, t)| t)
+        INT_TYS.into_iter().find(|t| t.name() == name)
     }
 
     /// Its name.
     pub fn name(self) -> &'static str {
-        INT_TYS.iter().find(|(_, t)| *t == self).map(|&(n, _)| n).expect("every type is in the table")
+        match self {
+            IntTy::I8 => "i8",
+            IntTy::I16 => "i16",
+            IntTy::I32 => "i32",
+            IntTy::I64 => "i64",
+            IntTy::Isize => "isize",
+            IntTy::U8 => "u8",
+            IntTy::U16 => "u16",
+            IntTy::U32 => "u32",
+            IntTy::U64 => "u64",
+            IntTy::Usize => "usize",
+        }
     }
 
     /// Its width in bits.
@@ -283,8 +294,9 @@ impl Format {
             return (x as f32).to_string();
         }
         for digits in 0..17 {
-            let y: f64 = format!("{x:.digits$e}").parse().expect("Rust reads the floats it writes");
-            if self.round(y) == bits {
+            if let Ok(y) = format!("{x:.digits$e}").parse::<f64>()
+                && self.round(y) == bits
+            {
                 return y.to_string();
             }
         }
@@ -358,9 +370,8 @@ fn number(text: &str, want: Want, negative: bool) -> Result<Value, String> {
     if let Some(digits) = t.strip_suffix("f16") {
         return float(finite(text, digits.parse().map(|x| Value::F16(F16.round(x))).map_err(|_| bad())?));
     }
-    if let Some(&(name, ty)) = INT_TYS.iter().find(|(name, _)| t.ends_with(name)) {
-        let x = t[..t.len() - name.len()].parse().map_err(|_| bad())?;
-        return whole(x, Some(ty));
+    if let Some((digits, ty)) = INT_TYS.into_iter().find_map(|ty| Some((t.strip_suffix(ty.name())?, ty))) {
+        return whole(digits.parse().map_err(|_| bad())?, Some(ty));
     }
     if t.contains(['.', 'e', 'E']) {
         let v = match want {

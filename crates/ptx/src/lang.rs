@@ -607,7 +607,7 @@ impl Kernel {
         // An array's index, the lead, ptxas checks apart, and takes no `f16x2` for it: "Array index in the 'tex'
         // instruction has unexpected type". It takes one for an integer in the rest, as anywhere, and refuses it beside
         // an operand that does not go with it: the rule below.
-        let lane = b.ty(spec.ty.expect("a register's operand has a type"));
+        let lane = typed(b, spec, name)?;
         let mut texts = vec![];
         for (k, part) in parts.iter().enumerate() {
             let slot = spec.lead.filter(|_| k == 0).unwrap_or(lane);
@@ -675,7 +675,7 @@ impl Kernel {
 
     /// `a` as one register of `spec`: a variable, or what else `spec` lets it be.
     fn one(&self, b: &Bound, spec: &Spec, a: &Given<Var>, name: &str, w: &mut Written) -> Result<String, String> {
-        let t = b.ty(spec.ty.expect("a register's operand has a type"));
+        let t = typed(b, spec, name)?;
         let write = spec.role == Role::Dst;
         let var = |reg: VReg, ty: Ty, w: &mut Written| {
             let access = if write { Access::Write } else { Access::Read };
@@ -1047,7 +1047,7 @@ impl Kernel {
         let at_args = callee + 1;
         let mut reads = vec![];
         let mut line = String::new();
-        let (target, texts, flow) = match (&rest[callee], &targets) {
+        let (target, (r, a), table, flow) = match (&rest[callee], &targets) {
             (Given::Func(f), None) => {
                 let (proto, symbol) = self.called(f, callee)?;
                 let texts = self.passing(f, proto, &passed, result.map(|r| &rest[r]), &mut reads, at_args)?;
@@ -1057,7 +1057,7 @@ impl Kernel {
                 };
                 let symbol = symbol.to_string();
                 self.named_fn(&symbol);
-                (symbol, texts, flow)
+                (symbol, texts, None, flow)
             }
             (Given::Func(f), Some(_)) => {
                 return Err(Fault::at(
@@ -1092,7 +1092,7 @@ impl Kernel {
                 self.needs = self.needs.and(Needs { ptx: 21, sm: 20 });
                 match targets {
                     Some(targets) => {
-                        let mut texts: Option<Vec<String>> = None;
+                        let mut texts: Option<(String, String)> = None;
                         let mut never = true;
                         let mut symbols = vec![];
                         for t in targets {
@@ -1125,25 +1125,23 @@ impl Kernel {
                         }
                         line += &format!("$C{}: .calltargets {};\n\t", self.tables, symbols.join(", "));
                         let flow = if never && guard.is_none() { Flow::Return } else { Flow::Next };
-                        let mut texts = texts.expect("a call has a target");
-                        texts.push(format!("$C{}", self.tables));
+                        let texts = texts.ok_or_else(|| Fault::new(shape))?;
+                        let table = format!("$C{}", self.tables);
                         self.tables += 1;
-                        (fp, texts, flow)
+                        (fp, texts, Some(table), flow)
                     }
                     None => {
-                        let mut texts = self.prototype(&passed, result.map(|r| &rest[r]), &mut reads, at_args)?;
-                        let proto = texts.pop().expect("the prototype comes last");
+                        let (r, a, proto) = self.prototype(&passed, result.map(|r| &rest[r]), &mut reads, at_args)?;
                         line += &format!("$P{}: .callprototype {proto};\n\t", self.tables);
-                        texts.push(format!("$P{}", self.tables));
+                        let table = format!("$P{}", self.tables);
                         self.tables += 1;
-                        (fp, texts, Flow::Next)
+                        (fp, (r, a), Some(table), Flow::Next)
                     }
                 }
             }
         };
         line += &self.guarded(guard);
         // What it returns, the function, its arguments, and the table it is one of.
-        let [r, a, table @ ..] = texts.as_slice() else { unreachable!("a call writes its result and its arguments") };
         line += name;
         line += " ";
         if !r.is_empty() {
@@ -1153,8 +1151,8 @@ impl Kernel {
         if !a.is_empty() || !r.is_empty() {
             line += &format!(", ({a})");
         }
-        for t in table {
-            line += &format!(", {t}");
+        if let Some(table) = table {
+            line += &format!(", {table}");
         }
         line += ";";
         if flow == Flow::Next {
@@ -1219,7 +1217,7 @@ impl Kernel {
         result: Option<&Given<Var>>,
         args: &mut Vec<Arg<VReg>>,
         at: usize,
-    ) -> Result<Vec<String>, Fault> {
+    ) -> Result<(String, String), Fault> {
         let r = match (proto.returns, result) {
             (Returns::Value(t), None) => {
                 return Err(Fault::new(format!(
@@ -1270,18 +1268,18 @@ impl Kernel {
             };
             texts.push(self.pass(t, &wants, a, true, args).map_err(|m| Fault::at(at, m))?);
         }
-        Ok(vec![r, texts.join(", ")])
+        Ok((r, texts.join(", ")))
     }
 
     /// The result and the arguments of a call through a prototype, written out as
-    /// [`Kernel::passing`] writes them, and last the prototype their types make.
+    /// [`Kernel::passing`] writes them, and the prototype their types make.
     fn prototype(
         &self,
         passed: &[&Given<Var>],
         result: Option<&Given<Var>>,
         args: &mut Vec<Arg<VReg>>,
         at: usize,
-    ) -> Result<Vec<String>, Fault> {
+    ) -> Result<(String, String, String), Fault> {
         let var = |a: &Given<Var>, at: usize, what: &str| match a {
             Given::Var(Var::Reg { ty: Ty::Pred, .. }) => Err(Fault::at(at, NO_PRED)),
             Given::Var(Var::Reg { reg, ty }) => Ok((*reg, *ty)),
@@ -1313,7 +1311,7 @@ impl Kernel {
             (true, true) => "_ ".into(),
             _ => format!("{ret}_ ({})", params.join(", ")),
         };
-        Ok(vec![r, texts.join(", "), proto])
+        Ok((r, texts.join(", "), proto))
     }
 
     /// `a` as a value of type `t` passed to a function, if `call`, or given back from one, written out: a
@@ -1410,8 +1408,7 @@ impl Kernel {
 fn reach(b: &Bound, args: &[Given<Var>]) -> u64 {
     match b.form.op {
         "ld" | "st" | "atom" | "red" | "wmma" => {
-            let data = b.form.operands.iter().find(|s| matches!(s.role, Role::Dst | Role::Src) && s.when.is_none());
-            data.map_or(1, |s| u64::from(b.ty(s.ty.expect("data has a type")).bits()) / 8 * lanes(b, s) as u64)
+            b.form.data().and_then(|s| Some(u64::from(b.ty(s.ty?).bits()) / 8 * lanes(b, s) as u64)).unwrap_or(1)
         }
         "mbarrier" => 8,
         "ldmatrix" => 16,
@@ -1622,10 +1619,17 @@ fn known(imm: Imm, x: i128, name: &str) -> Result<String, String> {
                 let some: Vec<String> = some.iter().map(i64::to_string).collect();
                 format!("`{name}` takes {} or {last} here; {x} is not one of them", some.join(", "))
             }
-            [] => unreachable!("the table gives one value at least"),
+            [] => format!("`{name}` takes no value here; {x} is not one"),
         },
         Imm::Pow2(p) => format!("`{name}` takes a power of two here, 2^{p} at most; {x} is not one"),
     })
+}
+
+/// The type of the register `spec` is, which the table gives each; or that the instruction `name` has none for this
+/// operand.
+fn typed(b: &Bound, spec: &Spec, name: &str) -> Result<Ty, String> {
+    let t = spec.ty.ok_or_else(|| format!("`{name}` has no type for this operand"))?;
+    Ok(b.ty(t))
 }
 
 /// What `spec` of `b` wants, for an error.
@@ -1680,7 +1684,7 @@ fn counts(ranges: &[(usize, usize)]) -> String {
         [one] if one == "1" => "1 operand".into(),
         [one] => format!("{one} operands"),
         [first @ .., last] => format!("{} or {last} operands", first.join(", ")),
-        [] => unreachable!("an instruction has forms"),
+        [] => "no operands".into(),
     }
 }
 

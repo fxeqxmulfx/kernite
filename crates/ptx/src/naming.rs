@@ -41,7 +41,9 @@ pub fn scope(path: &[&str]) -> String {
 /// and without arguments, the symbol is `name`, as [`ident`] writes it.
 ///
 /// `args` are integers and `bool`s, as a kernel's compile-time arguments are: an integer of
-/// its type, C++'s of its size, and one of no type an `i32`, as Rust has it.
+/// its type, C++'s of its size, and one of no type an `i32`, as Rust has it. The language
+/// refuses an argument of another kind, which this would write as Rust writes it, between `X`
+/// and `E`.
 pub fn symbol(scope: &str, name: &str, args: &[Value]) -> String {
     if scope.is_empty() && args.is_empty() {
         return ident(name);
@@ -70,7 +72,7 @@ pub fn symbol(scope: &str, name: &str, args: &[Value]) -> String {
                     let sign = if *x < 0 { "n" } else { "" };
                     format!("L{ty}{sign}{}E", x.unsigned_abs())
                 }
-                other => unreachable!("a kernel's compile-time argument is an integer or a bool, not {}", other.kind()),
+                other => format!("X{other}E"),
             };
         }
         out += "E";

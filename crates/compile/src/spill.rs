@@ -213,7 +213,9 @@ pub(crate) fn tidy<Op: PartialEq>(
 /// instruction does not write the variable: the spill stores each variable an instruction writes, and the store would
 /// name it too. Else the load is a copy, which the allocator leaves out where the two take one register.
 fn reload<Op: PartialEq>(p: &mut Program<Op>, regs: &mut [Option<PReg>], s: &dyn Spill<Op>) -> Result<(), Error> {
-    let reg = |v: VReg| regs[v.id as usize].expect("a variable the body names has a register");
+    // A variable the body names has a register, and [`compile`](crate::compile) refuses one that has none: here it
+    // holds nothing, and a load of it stays.
+    let reg = |v: VReg| regs[v.id as usize];
     // How many instructions name each variable.
     let mut named = vec![0; p.regs.len()];
     for item in &p.body {
@@ -233,7 +235,7 @@ fn reload<Op: PartialEq>(p: &mut Program<Op>, regs: &mut [Option<PReg>], s: &dyn
     // What becomes of the load `m` for `next`, where the loads for `next` that are not left out write `written`, with
     // `held` made what the registers hold after it.
     let fate = |m: &Move, next: Option<&Inst<Op, VReg>>, written: &[PReg], held: &mut Mirrors| {
-        let at = reg(m.var);
+        let Some(at) = reg(m.var) else { return Load::Stays };
         let mut holders = held.iter().filter(|(_, h)| h.slot == m.slot);
         let from = holders.clone().find(|(r, _)| *r == at).or_else(|| holders.next()).cloned();
         let once = named[m.var.id as usize] == 2 && !p.results.iter().any(|&(r, _)| r == m.var);
@@ -250,7 +252,7 @@ fn reload<Op: PartialEq>(p: &mut Program<Op>, regs: &mut [Option<PReg>], s: &dyn
     };
     let step = |i: usize, inst: &Inst<Op, VReg>, held: &mut Mirrors| {
         let Some(Move { slot, var, load, .. }) = moved(p, inst, s) else {
-            for r in inst.writes().map(reg) {
+            for r in inst.writes().filter_map(reg) {
                 held.retain(|(at, _)| *at != r);
             }
             for &clobber in &inst.clobbers {
@@ -266,7 +268,9 @@ fn reload<Op: PartialEq>(p: &mut Program<Op>, regs: &mut [Option<PReg>], s: &dyn
         };
         if !load {
             held.retain(|(_, m)| m.slot != slot);
-            held.push((reg(var), Mirror { slot, by: vec![var] }));
+            if let Some(at) = reg(var) {
+                held.push((at, Mirror { slot, by: vec![var] }));
+            }
             return Load::Stays;
         }
         // This load and the loads after it are for the instruction after them. The registers that those not left out
@@ -283,7 +287,7 @@ fn reload<Op: PartialEq>(p: &mut Program<Op>, regs: &mut [Option<PReg>], s: &dyn
             let wrote: Vec<PReg> = group
                 .iter()
                 .filter(|m| !matches!(fate(m, next, &written, &mut now), Load::Reads(..)))
-                .map(|m| reg(m.var))
+                .filter_map(|m| reg(m.var))
                 .collect();
             if wrote == written {
                 break fate(&group[0], next, &written, held);

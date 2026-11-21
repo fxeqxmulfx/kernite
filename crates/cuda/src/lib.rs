@@ -676,7 +676,7 @@ impl Cuda {
 
     /// `len` elements on the GPU, as they were left.
     fn reserve<T: Plain>(&self, len: usize) -> Result<Buffer<T>, Error> {
-        let bytes = bytes::<T>(len);
+        let bytes = bytes::<T>("cuMemAlloc", len)?;
         let (api, mut ptr) = (self.driver.current()?, 0);
         // SAFETY: it writes the address to `ptr`. It refuses no bytes, so it is asked for one.
         api.check("cuMemAlloc", unsafe { (api.alloc)(&mut ptr, bytes.max(1)) })?;
@@ -684,9 +684,21 @@ impl Cuda {
     }
 }
 
-/// How many bytes `len` elements of `T` take. Panics if they are more than there are addresses.
-fn bytes<T>(len: usize) -> usize {
-    len.checked_mul(size_of::<T>()).expect("memory of more bytes than there are addresses")
+/// How many bytes `len` elements of `T` take; or the error that says the `call` is refused, as they are more than there
+/// are addresses.
+fn bytes<T>(call: &'static str, len: usize) -> Result<usize, Error> {
+    len.checked_mul(size_of::<T>()).ok_or_else(|| {
+        Error::new(call, format!("{len} elements of {} bytes are more bytes than there are addresses", size_of::<T>()))
+    })
+}
+
+/// `Ok` if `got` is `want`, the elements of the memory `owner`; else the error that says the `call` is refused, as
+/// `owner` has `want` elements, and `action` them with `got`.
+fn same_len(call: &'static str, owner: &str, want: usize, action: &str, got: usize) -> Result<(), Error> {
+    if want != got {
+        return Err(Error::new(call, format!("{owner} of {want} elements {action} {got}")));
+    }
+    Ok(())
 }
 
 /// `len` elements of `T` on one GPU, the one that made it, freed when it is dropped.
@@ -700,14 +712,13 @@ pub struct Buffer<T: Plain> {
 impl<T: Plain> Buffer<T> {
     /// Its address, for a kernel to be given.
     pub fn ptr(&self) -> Ptr<T> {
-        self.at(0)
+        Ptr::new(self.ptr)
     }
 
-    /// The address of its element `i`, for a kernel to be given the part from there on.
-    /// Panics if `i` is past its end.
-    pub fn at(&self, i: usize) -> Ptr<T> {
-        assert!(i <= self.len, "element {i} of a buffer of {}", self.len);
-        Ptr { addr: self.ptr + (i * size_of::<T>()) as u64, of: PhantomData }
+    /// The address of its element `i`, for a kernel to be given the part from there on; `None`
+    /// if `i` is past its end.
+    pub fn at(&self, i: usize) -> Option<Ptr<T>> {
+        Ptr::element(self.ptr, self.len, i)
     }
 
     /// How many elements it has.
@@ -720,10 +731,10 @@ impl<T: Plain> Buffer<T> {
         self.len == 0
     }
 
-    /// Copies `data` to it, after the kernels launched before have run. Panics if `data` has
-    /// not as many elements.
+    /// Copies `data` to it, after the kernels launched before have run. It is an error if `data`
+    /// has not as many elements: `cuMemcpyHtoD: a buffer of 4 elements written with 2`.
     pub fn write(&mut self, data: &[T]) -> Result<(), Error> {
-        assert_eq!(data.len(), self.len, "a buffer of {} elements written with {}", self.len, data.len());
+        same_len("cuMemcpyHtoD", "a buffer", self.len, "written with", data.len())?;
         self.driver.write(self.ptr, data)
     }
 
@@ -734,10 +745,10 @@ impl<T: Plain> Buffer<T> {
         Ok(out)
     }
 
-    /// Copies what it holds to `out`, after the kernels launched before have run. Panics if
-    /// `out` has not as many elements.
+    /// Copies what it holds to `out`, after the kernels launched before have run. It is an error
+    /// if `out` has not as many elements: `cuMemcpyDtoH: a buffer of 4 elements read into 2`.
     pub fn read_into(&self, out: &mut [T]) -> Result<(), Error> {
-        assert_eq!(out.len(), self.len, "a buffer of {} elements read into {}", self.len, out.len());
+        same_len("cuMemcpyDtoH", "a buffer", self.len, "read into", out.len())?;
         self.driver.read_into(self.ptr, out)
     }
 
@@ -749,10 +760,10 @@ impl<T: Plain> Buffer<T> {
     /// Copies what `from` holds to it, after the kernels launched before have run on the GPU
     /// of either, and before those launched after run on either. `from` may be on another
     /// GPU than it: where the two have a link between them, the driver's peer access, the copy
-    /// goes over the link, and where they have none it goes through the host. Panics if `from`
-    /// has not as many elements.
+    /// goes over the link, and where they have none it goes through the host. It is an error if
+    /// `from` has not as many elements: `cuMemcpyPeer: a buffer of 4 elements copied from one of 2`.
     pub fn copy_from(&mut self, from: &Buffer<T>) -> Result<(), Error> {
-        assert_eq!(from.len, self.len, "a buffer of {} elements copied from one of {}", self.len, from.len);
+        same_len("cuMemcpyPeer", "a buffer", self.len, "copied from one of", from.len)?;
         self.driver.copy_from(self.ptr, &from.driver, from.ptr, self.len * size_of::<T>())
     }
 }
@@ -787,6 +798,18 @@ impl<T: ?Sized> Ptr<T> {
     /// The address, as the GPU reckons it.
     pub fn addr(self) -> u64 {
         self.addr
+    }
+}
+
+impl<T> Ptr<T> {
+    fn new(addr: u64) -> Ptr<T> {
+        Ptr { addr, of: PhantomData }
+    }
+
+    /// The address of element `i` of the `len` elements at `addr`, or of the place past them; `None` for `i` beyond
+    /// that.
+    fn element(addr: u64, len: usize, i: usize) -> Option<Ptr<T>> {
+        (i <= len).then(|| Ptr::new(addr + (i * size_of::<T>()) as u64))
     }
 }
 
@@ -993,12 +1016,18 @@ impl Module {
     }
 
     /// The module's memory `index`, as [`load`](Module::load) was given its name, as elements
-    /// of `T`. Panics if its bytes are no whole number of them.
-    pub fn global<T: Plain>(&self, index: usize) -> Global<'_, T> {
-        let (ptr, bytes) = self.globals[index];
+    /// of `T`. It is an error if `load` was given no such name, or if its bytes are no whole
+    /// number of `T`: `cuModuleGetGlobal: 6 bytes are no whole number of elements of 4`.
+    pub fn global<T: Plain>(&self, index: usize) -> Result<Global<'_, T>, Error> {
+        let refused = |message| Error::new("cuModuleGetGlobal", message);
+        let Some(&(ptr, bytes)) = self.globals.get(index) else {
+            return Err(refused(format!("there is no memory {index} in a module of {}", self.globals.len())));
+        };
         let size = size_of::<T>();
-        assert!(bytes.is_multiple_of(size), "{bytes} bytes are no whole number of elements of {size}");
-        Global { module: self, ptr, len: bytes / size, of: PhantomData }
+        if !bytes.is_multiple_of(size) {
+            return Err(refused(format!("{bytes} bytes are no whole number of elements of {size}")));
+        }
+        Ok(Global { module: self, ptr, len: bytes / size, of: PhantomData })
     }
 
     /// Launches kernel `index`, as [`load`](Module::load) was given its name, over `grid`,
@@ -1129,14 +1158,13 @@ pub struct Global<'m, T: Plain> {
 impl<T: Plain> Global<'_, T> {
     /// Its address, for a kernel to be given; it points at something while the module lasts.
     pub fn ptr(&self) -> Ptr<T> {
-        self.at(0)
+        Ptr::new(self.ptr)
     }
 
-    /// The address of its element `i`, for a kernel to be given the part from there on.
-    /// Panics if `i` is past its end.
-    pub fn at(&self, i: usize) -> Ptr<T> {
-        assert!(i <= self.len, "element {i} of a module's memory of {}", self.len);
-        Ptr { addr: self.ptr + (i * size_of::<T>()) as u64, of: PhantomData }
+    /// The address of its element `i`, for a kernel to be given the part from there on; `None`
+    /// if `i` is past its end.
+    pub fn at(&self, i: usize) -> Option<Ptr<T>> {
+        Ptr::element(self.ptr, self.len, i)
     }
 
     /// How many elements it has.
@@ -1149,10 +1177,10 @@ impl<T: Plain> Global<'_, T> {
         self.len == 0
     }
 
-    /// Copies `data` to it, after the kernels launched before have run. Panics if `data` has
-    /// not as many elements.
+    /// Copies `data` to it, after the kernels launched before have run. It is an error if `data`
+    /// has not as many elements: `cuMemcpyHtoD: a module's memory of 4 elements written with 2`.
     pub fn write(&self, data: &[T]) -> Result<(), Error> {
-        assert_eq!(data.len(), self.len, "a module's memory of {} elements written with {}", self.len, data.len());
+        same_len("cuMemcpyHtoD", "a module's memory", self.len, "written with", data.len())?;
         self.module.driver.write(self.ptr, data)
     }
 
@@ -1163,10 +1191,11 @@ impl<T: Plain> Global<'_, T> {
         Ok(out)
     }
 
-    /// Copies what it holds to `out`, after the kernels launched before have run. Panics if
-    /// `out` has not as many elements.
+    /// Copies what it holds to `out`, after the kernels launched before have run. It is an error
+    /// if `out` has not as many elements: `cuMemcpyDtoH: a module's memory of 4 elements read
+    /// into 2`.
     pub fn read_into(&self, out: &mut [T]) -> Result<(), Error> {
-        assert_eq!(out.len(), self.len, "a module's memory of {} elements read into {}", self.len, out.len());
+        same_len("cuMemcpyDtoH", "a module's memory", self.len, "read into", out.len())?;
         self.module.driver.read_into(self.ptr, out)
     }
 
@@ -1185,6 +1214,8 @@ impl<T: Plain> fmt::Debug for Global<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
     /// A function of the fake driver that every lookup finds: it refuses.
     unsafe extern "C" fn refuse() -> CuResult {
@@ -1207,24 +1238,25 @@ mod tests {
     /// it has, and has for the two it lacks the error of the lookup, which a call that needs one
     /// returns. A driver that lacks any other function is not opened.
     #[test]
-    fn a_driver_before_cuda_12_2_is_opened_and_one_that_lacks_any_other_function_is_not() {
+    fn a_driver_before_cuda_12_2_is_opened_and_one_that_lacks_any_other_function_is_not() -> Result {
         let lacks = |name: &str| format!("dlsym: the driver has no `{name}`: libcuda.so.1: undefined symbol");
-        let api = Api::load(finds(&[c"cuMemPrefetchAsync_v2", c"cuMemAdvise_v2"])).ok().unwrap();
-        assert_eq!(api.prefetch.err().unwrap().to_string(), lacks("cuMemPrefetchAsync_v2"));
-        assert_eq!(api.advise.err().unwrap().to_string(), lacks("cuMemAdvise_v2"));
-        let api = Api::load(finds(&[])).ok().unwrap();
+        let api = Api::load(finds(&[c"cuMemPrefetchAsync_v2", c"cuMemAdvise_v2"])).ok().ok_or("ok gave None")?;
+        assert_eq!(api.prefetch.err().ok_or("err gave None")?.to_string(), lacks("cuMemPrefetchAsync_v2"));
+        assert_eq!(api.advise.err().ok_or("err gave None")?.to_string(), lacks("cuMemAdvise_v2"));
+        let api = Api::load(finds(&[])).ok().ok_or("ok gave None")?;
         assert!(api.prefetch.is_ok() && api.advise.is_ok(), "a driver that has them has them");
         for name in [c"cuInit", c"cuMemRangeGetAttribute", c"cuGetErrorString"] {
-            let e = Api::load(finds(&[name])).err().unwrap();
+            let e = Api::load(finds(&[name])).err().ok_or("err gave None")?;
             assert_eq!(e.to_string(), lacks(&name.to_string_lossy()), "{name:?}");
         }
+        Ok(())
     }
 
     /// A call asks the driver to switch only when it goes to another GPU than the last call
     /// did, and a context the driver would not make current is not taken for the current one.
     /// The driver here is a cell that holds the context it was last given, and counts the gives.
     #[test]
-    fn a_context_is_made_current_only_when_another_is() {
+    fn a_context_is_made_current_only_when_another_is() -> Result {
         let (remembered, driver, gives) = (Cell::new(ptr::null_mut()), Cell::new(ptr::null_mut()), Cell::new(0));
         let (a, b) = (ptr::without_provenance_mut(1), ptr::without_provenance_mut(2));
         let give = |context| {
@@ -1233,13 +1265,14 @@ mod tests {
             Ok(())
         };
         for (context, gives_so_far) in [(a, 1), (a, 1), (b, 2), (b, 2), (a, 3), (a, 3)] {
-            enter(&remembered, context, || give(context)).unwrap();
+            enter(&remembered, context, || give(context))?;
             assert_eq!((driver.get(), gives.get()), (context, gives_so_far));
         }
         let refused = enter(&remembered, b, || Err(Error::new("cuCtxSetCurrent", "refused".into())));
-        assert_eq!(refused.unwrap_err().message, "refused");
+        assert_eq!(refused.err().ok_or("refused gave Ok")?.message, "refused");
         // It tries again, for the context the driver last had is still `a`.
-        enter(&remembered, b, || give(b)).unwrap();
+        enter(&remembered, b, || give(b))?;
         assert_eq!((driver.get(), gives.get()), (b, 4));
+        Ok(())
     }
 }

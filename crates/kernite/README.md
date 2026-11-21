@@ -27,7 +27,7 @@ fn main() -> Result<(), String> {
 
     // x86-64: `for` unrolls while the kernel compiles, and kernite chooses the registers.
     let listing = kernite::x86_str(src, "sum4")?;
-    print!("{}", listing.text());
+    print!("{listing}");
     assert_eq!(listing.code().nth(3), Some("add rax, qword ptr [rdi + 24]"));
 
     // PTX: each function the GPU runs, in one module.
@@ -37,7 +37,7 @@ fn main() -> Result<(), String> {
 
     // An error is at its `line:column`.
     let wrong = src.replace("add(", "adds(");
-    let error = kernite::x86_str(&wrong, "sum4").unwrap_err();
+    let error = kernite::x86_str(&wrong, "sum4").err().ok_or("`adds` compiled")?;
     assert_eq!(error, "6:17: x86 has no instruction `adds` that kernite knows");
     Ok(())
 }

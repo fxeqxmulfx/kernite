@@ -7,22 +7,24 @@ use kernite_lang::{ItemKind, Module, Span};
 use kernite_ptx::lang::{Callee, Kernel};
 use kernite_ptx::{Prototype, Ptx, Returns, Static, Ty};
 
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
 /// Static `name` of `module`, laid out by `ptx`.
-fn lay_out(ptx: &Ptx, module: &Module, name: &str) -> Result<Static, StaticError> {
+fn lay_out(ptx: &Ptx, module: &Module, name: &str) -> Result<Result<Static, StaticError>> {
     let s = module.items.iter().find_map(|item| match &item.kind {
         ItemKind::Static(s) if s.name == name => Some(s),
         _ => None,
     });
-    ptx.lay_out(name, &kernite_lang::memory(module, s.unwrap()).unwrap())
+    Ok(ptx.lay_out(name, &kernite_lang::memory(module, s.ok_or("find_map gave None")?)?))
 }
 
 /// The kernel `ptx` makes of `name`, a function of `module` or an instance of one, told of
 /// `statics` and `callees`, with its body written, for `finish`.
-fn written(ptx: &Ptx, module: &Module, name: &str, statics: &[Static], callees: &[Called<Callee>]) -> Kernel {
-    let (f, args, _) = kernite_build::instance(module, name).unwrap().unwrap();
-    let mut kernel = ptx.kernel(f, name, &args, kernite_build::cooperative(f).unwrap(), statics, callees);
-    kernite_lang::kernel(module, f, &args, &mut kernel).unwrap();
-    kernel
+fn written(ptx: &Ptx, module: &Module, name: &str, statics: &[Static], callees: &[Called<Callee>]) -> Result<Kernel> {
+    let (f, args, _) = kernite_build::instance(module, name)?.ok_or("unwrap gave None")?;
+    let mut kernel = ptx.kernel(f, name, &args, kernite_build::cooperative(f)?, statics, callees);
+    kernite_lang::kernel(module, f, &args, &mut kernel)?;
+    Ok(kernel)
 }
 
 /// A `#[cooperative]` kernel that names memory of its module comes out of the port as the
@@ -31,7 +33,7 @@ fn written(ptx: &Ptx, module: &Module, name: &str, statics: &[Static], callees: 
 /// given, here the namespaces `kernite::gpu`. The host finds the static by its symbol and reads its
 /// `b32`s as `u32`s.
 #[test]
-fn ptx_compiles_a_kernel_through_the_port() {
+fn ptx_compiles_a_kernel_through_the_port() -> Result {
     let src = r#"
         static COUNTS: global<[b32; 4]> = [1, 2, 3, 4];
 
@@ -40,10 +42,12 @@ fn ptx_compiles_a_kernel_through_the_port() {
             red.global.add.u32([COUNTS + 4], x);
         }
     "#;
-    let module = kernite_lang::parse(src).unwrap();
+    let module = kernite_lang::parse(src)?;
     let ptx = Ptx::new("7kernite3gpu");
-    let counts = lay_out(&ptx, &module, "COUNTS").unwrap();
-    let count = ptx.finish(written(&ptx, &module, "count", std::slice::from_ref(&counts), &[]), &[]).unwrap();
+    let counts = lay_out(&ptx, &module, "COUNTS")?.map_err(|e| format!("{e:?}"))?;
+    let count = ptx
+        .finish(written(&ptx, &module, "count", std::slice::from_ref(&counts), &[])?, &[])
+        .map_err(|e| format!("{e:?}"))?;
     assert_eq!(ptx.symbol(&count), "_ZN7kernite3gpu5countE");
     let host =
         DeviceStatic { symbol: "_ZN7kernite3gpu6COUNTSE".into(), ty: "global<[b32; 4]>".into(), host: "u32".into() };
@@ -67,7 +71,8 @@ fn ptx_compiles_a_kernel_through_the_port() {
 \tret;
 }
 ";
-    assert_eq!(ptx.module(&[count], &[counts]).whole().unwrap(), want);
+    assert_eq!(ptx.module(&[count], &[counts]).whole()?, want);
+    Ok(())
 }
 
 /// A module has 64 KB of constant memory, so a static that fits alone has no room after statics
@@ -75,20 +80,24 @@ fn ptx_compiles_a_kernel_through_the_port() {
 /// that has none takes none, so `D` fits where `B` did not. What a static holds is checked when it
 /// is laid out, before the room left: one wrong in both is refused at its value.
 #[test]
-fn a_static_that_does_not_fit_beside_those_before_it_has_no_room() {
+fn a_static_that_does_not_fit_beside_those_before_it_has_no_room() -> Result {
     let src = "
         static A: constant<[u8; 65535]>;
         static B: constant<[u32; 1]>;
         static C: constant<[u32; 2]> = [1, 2, 3];
         static D: constant<[u8; 1]>;
     ";
-    let module = kernite_lang::parse(src).unwrap();
+    let module = kernite_lang::parse(src)?;
     let ptx = Ptx::new("");
     let three = StaticError::Value("`constant<[u32; 2]>` holds 2 elements; this has 3".into());
-    assert_eq!(lay_out(&ptx, &module, "C"), Err(three));
-    let laid: Vec<Static> = ["A", "B", "D"].map(|name| lay_out(&ptx, &module, name).unwrap()).into();
+    assert_eq!(lay_out(&ptx, &module, "C")?, Err(three));
+    let mut laid = vec![];
+    for name in ["A", "B", "D"] {
+        laid.push(lay_out(&ptx, &module, name)?.map_err(|e| format!("{e:?}"))?);
+    }
     let full = "this makes the module's constant memory 65540 bytes, and a module has 64 KB";
     assert_eq!(ptx.room(&laid), [None, Some(full.into()), None]);
+    Ok(())
 }
 
 /// A function `extern "ptx-func"` is a `.func` of the module, which a kernel calls by its
@@ -97,7 +106,7 @@ fn a_static_that_does_not_fit_beside_those_before_it_has_no_room() {
 /// a kernel takes the address of, for the GPU to launch it. It sees a function that takes a
 /// `pred` or an array, which PTX does not pass, as broken, and a function of the process as none.
 #[test]
-fn a_function_the_kernels_call_is_a_func() {
+fn a_function_the_kernels_call_is_a_func() -> Result {
     let src = r#"
         #[instances(2)]
         pub unsafe extern "ptx-func" fn times<const N: u32>(x: u32) -> u32 {
@@ -121,19 +130,20 @@ fn a_function_the_kernels_call_is_a_func() {
 
         unsafe extern "sysv64" fn nothing() {}
     "#;
-    let module = kernite_lang::parse(src).unwrap();
+    let module = kernite_lang::parse(src)?;
     let ptx = Ptx::new("7kernite3gpu");
-    let callee = |name| ptx.callee(kernite_build::function(&module, name).unwrap());
+    let callee =
+        |name| -> Result<_> { Ok(ptx.callee(kernite_build::function(&module, name).ok_or("function gave None")?)) };
     let calls = Callee::Calls(Prototype { params: vec![Ty::U32], returns: Returns::Value(Ty::U32) });
-    assert_eq!(callee("times"), Some(calls.clone()));
-    assert_eq!(callee("flag"), Some(Callee::Broken));
-    assert_eq!(callee("pair"), Some(Callee::Broken));
-    assert_eq!(callee("k"), Some(Callee::Kernel));
-    assert_eq!(callee("nothing"), None);
-    let (_, args, _) = kernite_build::instance(&module, "times::<2>").unwrap().unwrap();
+    assert_eq!(callee("times")?, Some(calls.clone()));
+    assert_eq!(callee("flag")?, Some(Callee::Broken));
+    assert_eq!(callee("pair")?, Some(Callee::Broken));
+    assert_eq!(callee("k")?, Some(Callee::Kernel));
+    assert_eq!(callee("nothing")?, None);
+    let (_, args, _) = kernite_build::instance(&module, "times::<2>")?.ok_or("unwrap gave None")?;
     let called = Called { name: "times::<2>".into(), function: "times".into(), args, callee: calls };
-    let times = ptx.finish(written(&ptx, &module, "times::<2>", &[], &[]), &[]).unwrap();
-    let k = ptx.finish(written(&ptx, &module, "k::<1>", &[], &[called]), &[]).unwrap();
+    let times = ptx.finish(written(&ptx, &module, "times::<2>", &[], &[])?, &[]).map_err(|e| format!("{e:?}"))?;
+    let k = ptx.finish(written(&ptx, &module, "k::<1>", &[], &[called])?, &[]).map_err(|e| format!("{e:?}"))?;
     assert_eq!([&times.name, &k.name], ["times::<2>", "k::<1>"]);
     let want = "// Written by kernite.
 
@@ -169,13 +179,14 @@ fn a_function_the_kernels_call_is_a_func() {
 \tret;
 }
 ";
-    assert_eq!(ptx.module(&[times, k], &[]).whole().unwrap(), want);
+    assert_eq!(ptx.module(&[times, k], &[]).whole()?, want);
+    Ok(())
 }
 
 /// Each refusal says what to blame, for kernite-build to place it: the part of a static that is
 /// wrong, or the variable a kernel reads before anything writes it.
 #[test]
-fn each_refusal_says_what_to_blame() {
+fn each_refusal_says_what_to_blame() -> Result {
     let src = r#"
         static EMPTY: global<[u32; 0]>;
         static BIG: global<s8> = 128;
@@ -185,23 +196,24 @@ fn each_refusal_says_what_to_blame() {
             st.global.u32([p], x);
         }
     "#;
-    let module = kernite_lang::parse(src).unwrap();
+    let module = kernite_lang::parse(src)?;
     let ptx = Ptx::new("");
     let empty = StaticError::Type("`global<[u32; 0]>` holds nothing".into());
-    assert_eq!(lay_out(&ptx, &module, "EMPTY"), Err(empty));
+    assert_eq!(lay_out(&ptx, &module, "EMPTY")?, Err(empty));
     let big = StaticError::Value("this is 128, out of range for `s8`".into());
-    assert_eq!(lay_out(&ptx, &module, "BIG"), Err(big));
+    assert_eq!(lay_out(&ptx, &module, "BIG")?, Err(big));
     // Where `x` is declared: a byte of the source, as a string's spans are.
-    let at = Some(Span(src.find("x: u32").unwrap() as u32));
+    let at = Some(Span(src.find("x: u32").ok_or("find gave None")? as u32));
     let unfinished = Unfinished { at, message: "`x` is read before anything writes it".into() };
-    assert_eq!(ptx.finish(written(&ptx, &module, "unwritten", &[], &[]), &[]), Err(unfinished));
+    assert_eq!(ptx.finish(written(&ptx, &module, "unwritten", &[], &[])?, &[]), Err(unfinished));
+    Ok(())
 }
 
 /// A mask of lanes that leaves out lane 0, on an instruction that thread 0 runs, is refused when
 /// the kernel is finished, and says where the instruction is, for kernite-build to place it there;
 /// under a guard it is taken.
 #[test]
-fn a_mask_without_lane_0_is_refused_at_its_instruction() {
+fn a_mask_without_lane_0_is_refused_at_its_instruction() -> Result {
     let src = r#"
         pub unsafe extern "ptx-kernel" fn masked(n: u32) {
             bar.warp.sync(2);
@@ -215,13 +227,14 @@ fn a_mask_without_lane_0_is_refused_at_its_instruction() {
             }
         }
     "#;
-    let module = kernite_lang::parse(src).unwrap();
+    let module = kernite_lang::parse(src)?;
     let ptx = Ptx::new("");
     // At the last word of the instruction's name, as an error of the instruction's is.
-    let at = Some(Span(src.find("sync(2)").unwrap() as u32));
+    let at = Some(Span(src.find("sync(2)").ok_or("find gave None")? as u32));
     let message = "`bar.warp.sync` is run by thread 0, which is in lane 0; this mask leaves lane 0 out, and PTX \
                    leaves the instruction undefined in a thread outside its mask";
     let unfinished = Unfinished { at, message: message.into() };
-    assert_eq!(ptx.finish(written(&ptx, &module, "masked", &[], &[]), &[]), Err(unfinished));
-    assert!(ptx.finish(written(&ptx, &module, "guarded", &[], &[]), &[]).is_ok());
+    assert_eq!(ptx.finish(written(&ptx, &module, "masked", &[], &[])?, &[]), Err(unfinished));
+    assert!(ptx.finish(written(&ptx, &module, "guarded", &[], &[])?, &[]).is_ok());
+    Ok(())
 }

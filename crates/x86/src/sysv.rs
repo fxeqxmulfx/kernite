@@ -144,17 +144,16 @@ impl SysV {
 impl Spill<Op> for SysV {
     fn width(&self, class: Class) -> Width {
         match class {
-            Class::Gpr => Width::W64,
+            // x86 has no `Pred` or `Float` registers, so no variable is of either.
+            Class::Gpr | Class::Pred | Class::Float => Width::W64,
             Class::Vec => Width::W256,
-            Class::Pred | Class::Float => unreachable!("x86 has no {class:?} registers"),
         }
     }
 
     fn kept(&self, class: Class, named: Width) -> Width {
         match class {
-            Class::Gpr => Width::W64,
+            Class::Gpr | Class::Pred | Class::Float => Width::W64,
             Class::Vec => named.max(Width::W128),
-            Class::Pred | Class::Float => unreachable!("x86 has no {class:?} registers"),
         }
     }
 

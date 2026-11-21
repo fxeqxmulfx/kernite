@@ -159,35 +159,36 @@ mod tests {
     /// The module loads on a GPU, which finds each name `load` asks for, and each kernel that is there
     /// runs, as the one it is: it writes its number to a buffer and to its static, which the host reads.
     #[test]
-    fn each_kernel_that_is_there_loads_and_runs() {
-        let Ok(cuda) = Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return };
-        let kernels = Kernels::load(&cuda).unwrap();
-        let out = cuda.alloc::<u32>(1).unwrap();
+    fn each_kernel_that_is_there_loads_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(cuda) = Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
+        let kernels = Kernels::load(&cuda)?;
+        let out = cuda.alloc::<u32>(1)?;
         let grid = Grid::new(1, 1);
         // SAFETY: each kernel writes the one word of `out`, and a static of the module.
-        unsafe { kernels.first(grid, out.ptr()) }.unwrap();
-        assert_eq!((out.read().unwrap(), kernels.SEEN().read().unwrap()), (vec![1], vec![1, 0]));
+        unsafe { kernels.first(grid, out.ptr()) }?;
+        assert_eq!((out.read()?, kernels.SEEN()?.read()?), (vec![1], vec![1, 0]));
         #[cfg(feature = "more")]
         {
             // SAFETY: as above.
-            unsafe { kernels.middle(grid, out.ptr()) }.unwrap();
-            assert_eq!((out.read().unwrap(), kernels.MORE().read().unwrap()), (vec![42], vec![42, 0]));
+            unsafe { kernels.middle(grid, out.ptr()) }?;
+            assert_eq!((out.read()?, kernels.MORE()?.read()?), (vec![42], vec![42, 0]));
             // SAFETY: as above.
-            unsafe { kernels.tile::<7>(grid, out.ptr()) }.unwrap();
-            assert_eq!((out.read().unwrap(), kernels.AGAIN().read().unwrap()), (vec![7], vec![7, 0]));
+            unsafe { kernels.tile::<7>(grid, out.ptr()) }?;
+            assert_eq!((out.read()?, kernels.AGAIN()?.read()?), (vec![7], vec![7, 0]));
             // SAFETY: as above.
-            unsafe { kernels.tile::<8>(grid, out.ptr()) }.unwrap();
-            assert_eq!((out.read().unwrap(), kernels.AGAIN().read().unwrap()), (vec![8], vec![8, 0]));
+            unsafe { kernels.tile::<8>(grid, out.ptr()) }?;
+            assert_eq!((out.read()?, kernels.AGAIN()?.read()?), (vec![8], vec![8, 0]));
         }
         #[cfg(not(feature = "more"))]
         {
             // SAFETY: as above.
-            unsafe { kernels.less(grid, out.ptr()) }.unwrap();
-            assert_eq!(out.read().unwrap(), [3]);
+            unsafe { kernels.less(grid, out.ptr()) }?;
+            assert_eq!(out.read()?, [3]);
         }
         // SAFETY: as above.
-        unsafe { kernels.last(grid, out.ptr()) }.unwrap();
-        assert_eq!((out.read().unwrap(), kernels.LATE().read().unwrap()), (vec![4], vec![4, 0]));
+        unsafe { kernels.last(grid, out.ptr()) }?;
+        assert_eq!((out.read()?, kernels.LATE()?.read()?), (vec![4], vec![4, 0]));
+        Ok(())
     }
 
     /// The module's `.version` and `.target` are the floor, PTX 3.0 and `sm_30`, without the kernel
@@ -219,22 +220,23 @@ mod tests {
     /// run. With the feature `new`, whose kernel is for `sm_80` and newer, the test says it is skipped
     /// on an older GPU, where the module cannot load.
     #[test]
-    fn a_module_of_the_header_it_needs_loads_and_runs() {
-        let Ok(cuda) = Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return };
+    fn a_module_of_the_header_it_needs_loads_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(cuda) = Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
         if cfg!(feature = "new") && cuda.sm() < 80 {
             eprintln!("the {} is older than Ampere, sm_80: skipped", cuda.name());
-            return;
+            return Ok(());
         }
-        let kernels = mixed::Kernels::load(&cuda).unwrap();
-        let out = cuda.alloc::<u32>(1).unwrap();
+        let kernels = mixed::Kernels::load(&cuda)?;
+        let out = cuda.alloc::<u32>(1)?;
         // SAFETY: each kernel writes the one word of `out`.
-        unsafe { kernels.plain(Grid::new(1, 32), out.ptr()) }.unwrap();
-        assert_eq!(out.read().unwrap(), [1]);
+        unsafe { kernels.plain(Grid::new(1, 32), out.ptr()) }?;
+        assert_eq!(out.read()?, [1]);
         #[cfg(feature = "new")]
         {
             // SAFETY: as above.
-            unsafe { kernels.newer(Grid::new(1, 32), out.ptr(), 2) }.unwrap();
-            assert_eq!(out.read().unwrap(), [64]);
+            unsafe { kernels.newer(Grid::new(1, 32), out.ptr(), 2) }?;
+            assert_eq!(out.read()?, [64]);
         }
+        Ok(())
     }
 }

@@ -38,15 +38,16 @@ pub mod cpu {
 mod tests {
     /// Each kernel runs, and writes through its pointer what it names: `eight` and `COUNT`, which is 0.
     #[test]
-    fn the_kernels_run_where_the_feature_keeps_them() {
+    fn the_kernels_run_where_the_feature_keeps_them() -> Result<(), Box<dyn std::error::Error>> {
         let p = &mut 9u64;
         // SAFETY: `p` is the u64 each kernel writes, and nothing else touches `COUNT`.
         unsafe {
             super::cpu::inst::<2>(p);
             assert_eq!(*p, 10);
             *p = 9;
-            super::cpu::together(kernite_cpu::Grid::new(1), p).unwrap();
+            super::cpu::together(kernite_cpu::Grid::new(1), p)?;
             assert_eq!(*p, 0);
         }
+        Ok(())
     }
 }

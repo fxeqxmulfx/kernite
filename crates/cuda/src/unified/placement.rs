@@ -152,17 +152,18 @@ impl<T: Plain> Unified<'_, T> {
         self.driver.require(call, CONCURRENT_MANAGED_ACCESS, "the GPU cannot reach managed memory while the host does")
     }
 
-    /// The address and the bytes of the elements `range`.
-    /// Panics if it has no elements, or goes past the end.
-    fn span(&self, range: &Range<usize>) -> (u64, usize) {
-        assert!(
-            range.start < range.end && range.end <= self.len,
-            "elements {}..{} of memory of {}",
-            range.start,
-            range.end,
-            self.len
-        );
-        (self.at(range.start).addr(), (range.end - range.start) * size_of::<T>())
+    /// The address and the bytes of the elements `range`; or the error that says the `call` is refused, as `range` has
+    /// no elements, or goes past the end.
+    fn span(&self, call: &'static str, range: &Range<usize>) -> Result<(u64, usize), Error> {
+        let Range { start, end } = *range;
+        let said = if start >= end {
+            format!("the range {start}..{end} has no elements")
+        } else if end > self.len {
+            format!("the range {start}..{end} goes past the end of the {} elements", self.len)
+        } else {
+            return Ok((self.addr() + (start * size_of::<T>()) as u64, (end - start) * size_of::<T>()));
+        };
+        Err(Error::new(call, said))
     }
 
     /// Moves the elements `range` to `to`, ahead of what will touch them, on the stream the
@@ -177,7 +178,8 @@ impl<T: Plain> Unified<'_, T> {
     /// It needs a driver of CUDA 12.2 or later; an older one is the error of the lookup of its
     /// function: ``dlsym: the driver has no `cuMemPrefetchAsync_v2`: libcuda.so.1: undefined
     /// symbol: cuMemPrefetchAsync_v2``.
-    /// Panics if `range` has no elements, or goes past the end.
+    /// A range with no elements, or one past the end, is refused before the driver is asked: `cuMemPrefetchAsync: the
+    /// range 2..2 has no elements`, or `the range 3..5 goes past the end of the 4 elements`.
     ///
     /// ```no_run
     /// # use kernite_cuda::{Cuda, Location};
@@ -191,7 +193,7 @@ impl<T: Plain> Unified<'_, T> {
     /// ```
     pub fn prefetch(&self, range: Range<usize>, to: Location) -> Result<(), Error> {
         self.require_kind("cuMemPrefetchAsync", "prefetches managed memory alone", false)?;
-        let (addr, count) = self.span(&range);
+        let (addr, count) = self.span("cuMemPrefetchAsync", &range)?;
         self.require_concurrent("cuMemPrefetchAsync")?;
         let (api, to) = (self.driver.current()?, to.raw(self.driver.device));
         let prefetch = api.prefetch.clone()?;
@@ -214,10 +216,10 @@ impl<T: Plain> Unified<'_, T> {
     /// It needs a driver of CUDA 12.2 or later; an older one is the error of the lookup of its
     /// function: ``dlsym: the driver has no `cuMemAdvise_v2`: libcuda.so.1: undefined symbol:
     /// cuMemAdvise_v2``.
-    /// Panics if `range` has no elements, or goes past the end.
+    /// A range with no elements, or one past the end, is refused as it is for a prefetch.
     pub fn advise(&self, range: Range<usize>, advice: Advice) -> Result<(), Error> {
         self.require_kind("cuMemAdvise", "advises managed and pageable memory alone", true)?;
-        let (addr, count) = self.span(&range);
+        let (addr, count) = self.span("cuMemAdvise", &range)?;
         let (number, place) = advice.raw(self.driver.device)?;
         if matches!(advice, Advice::PreferredLocation(Location::Gpu) | Advice::AccessedBy(Location::Gpu)) {
             self.require_concurrent("cuMemAdvise")?;
@@ -238,11 +240,11 @@ impl<T: Plain> Unified<'_, T> {
     /// buffer made at that address may start with them.
     /// It needs a driver of CUDA 12.2 or later, which brought the attributes of the preferred
     /// place and of the last prefetch with `cuMemAdvise_v2`; an older one is the error of the
-    /// lookup of that function, as for [`advise`](Unified::advise).
-    /// Panics if `range` has no elements, or goes past the end.
+    /// lookup of that function, as for [`advise`](Unified::advise). A range with no elements, or one past the end, is
+    /// refused as it is for a prefetch.
     pub fn placement(&self, range: Range<usize>) -> Result<Placement, Error> {
         self.require_kind("cuMemRangeGetAttribute", "tells the place of managed memory alone", false)?;
-        let (addr, count) = self.span(&range);
+        let (addr, count) = self.span("cuMemRangeGetAttribute", &range)?;
         let (api, device) = (self.driver.current()?, self.driver.device);
         // A driver that has `cuMemAdvise_v2` has the attributes of CUDA 12.2.
         api.advise.clone()?;
@@ -278,11 +280,12 @@ impl<T: Plain> Unified<'_, T> {
 mod tests {
     use std::cell::Cell;
     use std::marker::PhantomData;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use super::super::tests::{gpu, gpu_with};
     use super::*;
     use crate::{CuResult, Cuda};
+
+    type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
     thread_local! {
         /// The advice that the fake driver took last, as it was told: the address, the bytes and
@@ -305,20 +308,31 @@ mod tests {
     /// advice that names it, of managed memory and of a slice lent, in GUIDE.md's words, naming
     /// the call each refuses, before the driver is asked; and one that can is asked.
     #[test]
-    fn a_gpu_that_cannot_reach_managed_memory_with_the_host_is_refused_a_prefetch_and_advice_naming_it() {
+    fn a_gpu_that_cannot_reach_managed_memory_with_the_host_is_refused_a_prefetch_and_advice_naming_it() -> Result {
         let said = |call| {
             format!(
                 "{call}: the GPU cannot reach managed memory while the host does: \
                  its CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0"
             )
         };
-        let cuda = gpu(&[]);
+        let cuda = gpu(&[])?;
         let m = memory(&cuda, Kind::Managed);
-        assert_eq!(m.prefetch(0..4, Location::Host).unwrap_err().to_string(), said("cuMemPrefetchAsync"));
+        assert_eq!(
+            m.prefetch(0..4, Location::Host).err().ok_or("prefetch gave Ok")?.to_string(),
+            said("cuMemPrefetchAsync")
+        );
         for advice in [Advice::PreferredLocation(Location::Gpu), Advice::AccessedBy(Location::Gpu)] {
-            assert_eq!(m.advise(0..4, advice).unwrap_err().to_string(), said("cuMemAdvise"), "{advice:?}");
+            assert_eq!(
+                m.advise(0..4, advice).err().ok_or("advise gave Ok")?.to_string(),
+                said("cuMemAdvise"),
+                "{advice:?}"
+            );
             let lent = memory(&cuda, Kind::Lent);
-            assert_eq!(lent.advise(0..4, advice).unwrap_err().to_string(), said("cuMemAdvise"), "{advice:?}");
+            assert_eq!(
+                lent.advise(0..4, advice).err().ok_or("advise gave Ok")?.to_string(),
+                said("cuMemAdvise"),
+                "{advice:?}"
+            );
         }
         // The other advice does not name the GPU, so the driver is asked, and refuses.
         let others = [
@@ -331,93 +345,116 @@ mod tests {
             Advice::NotAccessedBy(Location::Gpu),
         ];
         for advice in others {
-            assert_eq!(m.advise(0..4, advice).unwrap_err().call, "cuMemAdvise", "{advice:?}");
+            assert_eq!(m.advise(0..4, advice).err().ok_or("advise gave Ok")?.call, "cuMemAdvise", "{advice:?}");
         }
-        let m = memory(&gpu(&[CONCURRENT_MANAGED_ACCESS]), Kind::Managed);
-        assert_eq!(m.prefetch(0..4, Location::Gpu).unwrap_err().call, "cuMemPrefetchAsync");
-        assert_eq!(m.advise(0..4, Advice::AccessedBy(Location::Gpu)).unwrap_err().call, "cuMemAdvise");
+        let m = memory(&gpu(&[CONCURRENT_MANAGED_ACCESS])?, Kind::Managed);
+        assert_eq!(m.prefetch(0..4, Location::Gpu).err().ok_or("prefetch gave Ok")?.call, "cuMemPrefetchAsync");
+        assert_eq!(
+            m.advise(0..4, Advice::AccessedBy(Location::Gpu)).err().ok_or("advise gave Ok")?.call,
+            "cuMemAdvise"
+        );
+        Ok(())
     }
 
     /// Memory that is page-locked or a slice lent is not moved or placed: each call says so, in
     /// GUIDE.md's words, before the driver is asked.
     #[test]
-    fn only_managed_memory_is_moved_and_placed() {
-        let cuda = gpu(&[CONCURRENT_MANAGED_ACCESS]);
+    fn only_managed_memory_is_moved_and_placed() -> Result {
+        let cuda = gpu(&[CONCURRENT_MANAGED_ACCESS])?;
         for (kind, this) in [(Kind::Pinned, "page-locked memory"), (Kind::Lent, "a slice lent")] {
             let m = memory(&cuda, kind);
             let said = |call, rule| format!("{call}: the driver {rule}: this is {this}");
             let prefetch = said("cuMemPrefetchAsync", "prefetches managed memory alone");
-            assert_eq!(m.prefetch(0..4, Location::Gpu).unwrap_err().to_string(), prefetch);
+            assert_eq!(m.prefetch(0..4, Location::Gpu).err().ok_or("prefetch gave Ok")?.to_string(), prefetch);
             let placement = said("cuMemRangeGetAttribute", "tells the place of managed memory alone");
-            assert_eq!(m.placement(0..4).unwrap_err().to_string(), placement);
+            assert_eq!(m.placement(0..4).err().ok_or("placement gave Ok")?.to_string(), placement);
         }
+        Ok(())
     }
 
     /// A slice lent is advised as managed memory is: the driver is told the advice, for the
     /// elements' addresses. Page-locked memory is refused it, in GUIDE.md's words, and the driver
     /// is not asked.
     #[test]
-    fn a_slice_lent_is_advised_as_managed_memory_is_and_page_locked_memory_is_not() {
-        let cuda = gpu_with(&[CONCURRENT_MANAGED_ACCESS], |api| api.advise = Ok(advise));
+    fn a_slice_lent_is_advised_as_managed_memory_is_and_page_locked_memory_is_not() -> Result {
+        let cuda = gpu_with(&[CONCURRENT_MANAGED_ACCESS], |api| api.advise = Ok(advise))?;
         for kind in [Kind::Managed, Kind::Lent] {
             ADVISED.set(None);
-            memory(&cuda, kind).advise(1..3, Advice::ReadMostly).unwrap();
+            memory(&cuda, kind).advise(1..3, Advice::ReadMostly)?;
             assert_eq!(ADVISED.get(), Some((4096 + 4, 8, 1)));
         }
         ADVISED.set(None);
-        let e = memory(&cuda, Kind::Pinned).advise(1..3, Advice::ReadMostly).unwrap_err();
+        let e = memory(&cuda, Kind::Pinned).advise(1..3, Advice::ReadMostly).err().ok_or("advise gave Ok")?;
         let said = "cuMemAdvise: the driver advises managed and pageable memory alone: this is page-locked memory";
         assert_eq!(e.to_string(), said);
         assert_eq!(ADVISED.get(), None, "the driver was not asked");
+        Ok(())
     }
 
     /// A NUMA node does not touch memory, so it is refused as an accessor, in GUIDE.md's words,
     /// before the driver is asked.
     #[test]
-    fn a_numa_node_is_no_accessor() {
-        let m = memory(&gpu(&[CONCURRENT_MANAGED_ACCESS]), Kind::Managed);
+    fn a_numa_node_is_no_accessor() -> Result {
+        let m = memory(&gpu(&[CONCURRENT_MANAGED_ACCESS])?, Kind::Managed);
         let said = "cuMemAdvise: only the GPU and the host access memory, not a NUMA node";
         for place in [Location::Numa(0), Location::NumaOfThread] {
             for advice in [Advice::AccessedBy(place), Advice::NotAccessedBy(place)] {
-                assert_eq!(m.advise(0..4, advice).unwrap_err().to_string(), said, "{advice:?}");
+                assert_eq!(m.advise(0..4, advice).err().ok_or("advise gave Ok")?.to_string(), said, "{advice:?}");
             }
         }
+        Ok(())
     }
 
-    /// A range of no elements, or past the end, is a mistake of the caller: the call panics,
-    /// as `at` does, and the driver is not asked.
+    /// A range of no elements, or past the end, is a mistake of the caller: each call says so, and
+    /// the driver is not asked.
     #[test]
-    fn a_range_of_no_elements_or_past_the_end_panics() {
-        let m = memory(&gpu(&[CONCURRENT_MANAGED_ACCESS]), Kind::Managed);
-        for range in [0..0, 2..2, 3..5, 4..5, 5..5] {
-            let calls: [&dyn Fn(); 3] = [
-                &|| drop(m.prefetch(range.clone(), Location::Gpu)),
-                &|| drop(m.advise(range.clone(), Advice::ReadMostly)),
-                &|| drop(m.placement(range.clone())),
-            ];
-            for call in calls {
-                assert!(catch_unwind(AssertUnwindSafe(call)).is_err(), "{range:?}");
-            }
+    fn a_range_of_no_elements_or_past_the_end_is_an_error() -> Result {
+        let m = memory(&gpu(&[CONCURRENT_MANAGED_ACCESS])?, Kind::Managed);
+        let none = "has no elements";
+        let past = "goes past the end of the 4 elements";
+        for (range, wrong) in [(0..0, none), (2..2, none), (3..5, past), (4..5, past), (5..5, none)] {
+            let said = |call| format!("{call}: the range {}..{} {wrong}", range.start, range.end);
+            let prefetch = m.prefetch(range.clone(), Location::Gpu).err().ok_or("prefetch gave Ok")?;
+            assert_eq!(prefetch.to_string(), said("cuMemPrefetchAsync"));
+            let advise = m.advise(range.clone(), Advice::ReadMostly).err().ok_or("advise gave Ok")?;
+            assert_eq!(advise.to_string(), said("cuMemAdvise"));
+            let placement = m.placement(range.clone()).err().ok_or("placement gave Ok")?;
+            assert_eq!(placement.to_string(), said("cuMemRangeGetAttribute"));
         }
+        Ok(())
     }
 
     /// A driver before CUDA 12.2 lacks `cuMemPrefetchAsync_v2` and `cuMemAdvise_v2`: a prefetch,
     /// advice and a placement are the error of the lookup of the function the call needs, and
     /// memory the call is not for is refused as before.
     #[test]
-    fn a_driver_before_cuda_12_2_is_the_error_of_its_lookup_for_a_prefetch_advice_and_a_placement() {
+    fn a_driver_before_cuda_12_2_is_the_error_of_its_lookup_for_a_prefetch_advice_and_a_placement() -> Result {
         let cuda = gpu_with(&[CONCURRENT_MANAGED_ACCESS], |api| {
             api.prefetch = Err(crate::missing(c"cuMemPrefetchAsync_v2", "undefined symbol"));
             api.advise = Err(crate::missing(c"cuMemAdvise_v2", "undefined symbol"));
-        });
+        })?;
         let lacks = |name| format!("dlsym: the driver has no `{name}`: undefined symbol");
         let m = memory(&cuda, Kind::Managed);
-        assert_eq!(m.prefetch(0..4, Location::Gpu).unwrap_err().to_string(), lacks("cuMemPrefetchAsync_v2"));
-        assert_eq!(m.advise(0..4, Advice::ReadMostly).unwrap_err().to_string(), lacks("cuMemAdvise_v2"));
-        assert_eq!(m.placement(0..4).unwrap_err().to_string(), lacks("cuMemAdvise_v2"));
+        assert_eq!(
+            m.prefetch(0..4, Location::Gpu).err().ok_or("prefetch gave Ok")?.to_string(),
+            lacks("cuMemPrefetchAsync_v2")
+        );
+        assert_eq!(
+            m.advise(0..4, Advice::ReadMostly).err().ok_or("advise gave Ok")?.to_string(),
+            lacks("cuMemAdvise_v2")
+        );
+        assert_eq!(m.placement(0..4).err().ok_or("placement gave Ok")?.to_string(), lacks("cuMemAdvise_v2"));
         // Memory that the calls are not for is refused as before.
         let pinned = memory(&cuda, Kind::Pinned);
-        assert!(pinned.prefetch(0..4, Location::Gpu).unwrap_err().to_string().contains("this is page-locked memory"));
+        assert!(
+            pinned
+                .prefetch(0..4, Location::Gpu)
+                .err()
+                .ok_or("prefetch gave Ok")?
+                .to_string()
+                .contains("this is page-locked memory")
+        );
+        Ok(())
     }
 
     /// A place is told to the driver as the driver has it, for the GPU the memory is on, and a

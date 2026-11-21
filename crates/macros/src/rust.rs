@@ -163,9 +163,9 @@ pub(crate) fn const_names(tokens: &[TokenTree]) -> impl Iterator<Item = &TokenTr
     tokens.windows(2).filter(|w| is_ident(&w[0], "const")).map(|w| &w[1])
 }
 
-/// The place of the item of `module` named `name`, among its items.
-pub(crate) fn position(module: &lang::Module, name: &str) -> usize {
-    module.items.iter().position(|item| item.name() == Some(name)).expect("an item of the module")
+/// The place of the item of `module` named `name`, among its items; none if it has none.
+pub(crate) fn position(module: &lang::Module, name: &str) -> Option<usize> {
+    module.items.iter().position(|item| item.name() == Some(name))
 }
 
 /// What [`carried`] keeps of `item`'s attributes when it offers nothing: its `cfg`.
@@ -175,17 +175,17 @@ pub(crate) fn cfg_of(item: &lang::Item, top: &[TokenTree]) -> TokenStream {
 }
 
 /// The name of `item`, a const, a static or a function, as `top` writes it, `r#type` as well, of the
-/// span `span`.
-pub(crate) fn name_at(item: &lang::Item, top: &[TokenTree], span: Span) -> TokenTree {
+/// span `span`; none for an item that has no name.
+pub(crate) fn name_at(item: &lang::Item, top: &[TokenTree], span: Span) -> Option<TokenTree> {
     let mut name = match &item.kind {
-        ItemKind::Const(_) => const_names(&top[item.tokens.clone()]).next().expect("a const has a name"),
+        ItemKind::Const(_) => const_names(&top[item.tokens.clone()]).next()?,
         ItemKind::Static(s) => &top[s.vis.end + 1],
         ItemKind::Fn(f) => &top[f.head.end + 1],
-        ItemKind::Other => unreachable!("only an item with a name is named"),
+        ItemKind::Other => return None,
     }
     .clone();
     name.set_span(span);
-    name
+    Some(name)
 }
 
 /// An error at each of `f`'s compile-time arguments named as one of `own`, the locals the Rust of
@@ -226,20 +226,22 @@ fn split_commas(tokens: &[TokenTree]) -> impl Iterator<Item = &[TokenTree]> {
 /// named here, for every signature and body the macros write for `f`: it takes the next of `__kernite_0`,
 /// `__kernite_1` and on that no parameter or compile-time argument of `f` is named.
 pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, usize)> {
-    let TokenTree::Group(group) = &top[f.params_at] else { unreachable!("parameters are in parentheses") };
+    let TokenTree::Group(group) = &top[f.params_at] else { return vec![] };
     let tokens = for_rust(flatten(group.stream()));
     let params = split_commas(&tokens).filter(|p| !p.is_empty());
     let taken: Vec<&str> =
         f.generics.iter().map(|g| &g.name).chain(f.params.iter().map(|p| &p.name)).map(String::as_str).collect();
     let mut free = (0..).map(|n| format!("__kernite_{n}")).filter(|name| !taken.contains(&name.as_str()));
     params
-        .map(|p| {
+        .filter_map(|p| {
             let mut p = p.to_vec();
-            let colon = p.iter().position(|t| is_punct(t, ':')).expect("a parameter has a type");
-            if is_ident(&p[colon - 1], "_") {
-                p[colon - 1] = TokenTree::Ident(Ident::new(&free.next().expect("names do not run out"), site()));
+            let colon = p.iter().position(|t| is_punct(t, ':'))?;
+            if is_ident(&p[colon - 1], "_")
+                && let Some(name) = free.next()
+            {
+                p[colon - 1] = TokenTree::Ident(Ident::new(&name, site()));
             }
-            (p, colon)
+            Some((p, colon))
         })
         .collect()
 }
@@ -420,8 +422,7 @@ pub(crate) fn asks(f: &Fn, top: &[TokenTree], pointee: fn(&[TokenTree]) -> Token
     for (i, (ty, ask)) in types.zip(&asked).enumerate() {
         let local = TokenTree::Ident(Ident::new(&format!("__{i}"), Span::mixed_site()));
         values.push(match ask {
-            Some(Ask::Pointer(..)) => {
-                let (kind, to) = pointer(&ty).expect("a pointer is asked of");
+            Some(Ask::Pointer(..)) if let Some((kind, to)) = pointer(&ty) => {
                 params.extend([local.clone()]);
                 params.extend(parse(&format!(":*{kind}")));
                 params.extend(pointee(to));
@@ -605,7 +606,7 @@ pub(crate) fn carried(attrs: impl IntoIterator<Item = TokenTree>, offered: bool)
     let attrs: Vec<TokenTree> = attrs.into_iter().collect();
     let mut out = TokenStream::new();
     for attr in attrs.chunks(2) {
-        let [hash, TokenTree::Group(group)] = attr else { unreachable!("an attribute is `#` and brackets") };
+        let [hash, TokenTree::Group(group)] = attr else { continue };
         let Some(meta) = keep(flatten(group.stream()), offered) else { continue };
         let mut kept = Group::new(Delimiter::Bracket, meta.into_iter().collect());
         kept.set_span(group.span());
@@ -626,7 +627,7 @@ fn keep(meta: Vec<TokenTree>, offered: bool) -> Option<Vec<TokenTree>> {
         [cfg_attr, TokenTree::Group(list)] if named(cfg_attr, "cfg_attr") => {
             let tokens = flatten(list.stream());
             let mut parts = tokens.split(|t| is_punct(t, ','));
-            let mut kept = parts.next().expect("a split has a first part").to_vec();
+            let mut kept = parts.next().unwrap_or_default().to_vec();
             let condition = kept.len();
             for part in parts.filter_map(|part| keep(part.to_vec(), offered)) {
                 kept.extend(parse(","));
@@ -847,7 +848,8 @@ const ERROR: &str = "::core::compile_error!";
 
 /// `::core::compile_error! { message }`, reported where `span` is.
 pub(crate) fn error(span: Span, message: &str) -> TokenStream {
-    let mut out = parse(ERROR);
+    // Not by `parse`, which gives an error for text that is no tokens.
+    let mut out: TokenStream = ERROR.parse().unwrap_or_default();
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, TokenTree::Literal(Literal::string(message)).into()))]);
     respan(out, span)
 }
@@ -1071,9 +1073,15 @@ pub(crate) fn quiet(tokens: &[TokenTree]) -> impl Iterator<Item = TokenTree> + '
     })
 }
 
-/// The tokens `s` writes, each of the span [`SITE`] says.
+/// The tokens `s` writes, each of the span [`SITE`] says. Text that is no tokens is an [`error`], kernite's own
+/// mistake: kernite-macros writes none such.
 pub(crate) fn parse(s: &str) -> TokenStream {
-    let tokens: TokenStream = s.parse().expect("kernite-macros writes tokens that parse");
+    let tokens: TokenStream = s.parse().unwrap_or_else(|why| {
+        error(
+            Span::call_site(),
+            &format!("kernite-macros wrote `{s}`, which is no tokens: {why}; this is kernite's own mistake"),
+        )
+    });
     match SITE.get() {
         Some(span) => respan(tokens, span),
         None => tokens,
@@ -1091,8 +1099,10 @@ pub(crate) fn hygienic(s: &str, runs: bool) -> TokenStream {
         let mut out = TokenStream::new();
         while let Some(t) = tokens.next() {
             out.extend([match t {
-                TokenTree::Punct(p) if p.as_char() == '$' => {
-                    let name = tokens.next().expect("a `$` has a name after it");
+                TokenTree::Punct(p)
+                    if p.as_char() == '$'
+                        && let Some(name) = tokens.next() =>
+                {
                     let name = if runs { name.to_string() } else { "_".to_string() };
                     TokenTree::Ident(Ident::new(&name, Span::mixed_site()))
                 }

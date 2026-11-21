@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use kernite_core::Access;
 use kernite_x86::forms::{self, Form, Kind};
@@ -12,6 +12,8 @@ use kernite_x86::{Asm, Feature, SysV, intel};
 
 #[path = "common/quotes.rs"]
 mod quotes;
+
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
 /// The kernels of `examples/my-app`, and the same dot product with sixteen accumulators.
 const KERNELS: &str = r#"
@@ -82,35 +84,37 @@ const KERNELS: &str = r#"
 /// `tests/builder` holds the listings `kernite-x86`'s builder made of these kernels, before the
 /// language: what the language writes must compile to the same instructions in the same registers.
 #[test]
-fn the_examples_kernels_come_out_as_the_builder_wrote_them() {
+fn the_examples_kernels_come_out_as_the_builder_wrote_them() -> Result {
     let snapshots = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/builder");
     for name in ["sum8", "dot_unroll1", "dot_unroll4"] {
-        let listing = kernite::x86_str(KERNELS, name).unwrap();
-        let want = std::fs::read_to_string(snapshots.join(format!("{name}.s"))).unwrap();
-        assert_eq!(listing.text(), want, "{name}");
+        let listing = kernite::x86_str(KERNELS, name)?;
+        let want = std::fs::read_to_string(snapshots.join(format!("{name}.s")))?;
+        assert_eq!(listing.to_string(), want, "{name}");
     }
+    Ok(())
 }
 
 /// A kernel's assembly changes only when the kernel does: it is the same each time it compiles,
 /// and the same whatever else its module holds.
 #[test]
-fn a_kernels_assembly_changes_only_when_it_does() {
+fn a_kernels_assembly_changes_only_when_it_does() -> Result {
     let k = "unsafe extern \"sysv64\" fn k(x: *mut u64) {\nlet g: gpr;\nmov(g, [x]);\nadd(g, STEP);\nmov([x], g);\n}\n";
     let alone = format!("const STEP: u64 = 3;\n{k}");
     let among = format!(
         "static S: global<u64>;\nconst STEP: u64 = 3;\nconst FAR: u64 = 9;\nfn far(g: gpr) {{\nadd(g, FAR);\n}}\n\
          unsafe extern \"sysv64\" fn j(x: *mut u64) {{\nlet g: gpr;\nmov(g, [x]);\nfar(g);\nmov([x], g);\n}}\n{k}"
     );
-    let listing = |src: &str| kernite::x86_str(src, "k").unwrap().text();
-    assert_eq!(listing(&alone), listing(&alone));
-    assert_eq!(listing(&among), listing(&alone));
+    let listing = |src: &str| -> Result<_> { Ok(kernite::x86_str(src, "k")?.to_string()) };
+    assert_eq!(listing(&alone)?, listing(&alone)?);
+    assert_eq!(listing(&among)?, listing(&alone)?);
+    Ok(())
 }
 
 /// Sixteen accumulators and the load beside them take 17 of the 16 vector registers: the two
 /// that cost least to keep on the stack, of those that hold one through the loop, spill.
 #[test]
-fn sixteen_accumulators_and_a_load_spill_two_and_the_listing_says_where() {
-    let text = kernite::x86_str(KERNELS, "dot_unroll16").unwrap().text();
+fn sixteen_accumulators_and_a_load_spill_two_and_the_listing_says_where() -> Result {
+    let text = kernite::x86_str(KERNELS, "dot_unroll16")?.to_string();
     let header = "# dot_unroll16(gpr, gpr, gpr) -> vec
 # needs: avx, fma
 # frame: 64 bytes aligned to 32, saves []
@@ -127,10 +131,11 @@ fn sixteen_accumulators_and_a_load_spill_two_and_the_listing_says_where() {
     add rdi, 512
 ";
     assert!(text.contains(last), "{text}");
+    Ok(())
 }
 
 #[test]
-fn up_to_fifteen_accumulators_fit_without_spilling() {
+fn up_to_fifteen_accumulators_fit_without_spilling() -> Result {
     let mut src = KERNELS.to_string();
     for k in 1..=15 {
         src += &format!(
@@ -138,9 +143,10 @@ fn up_to_fifteen_accumulators_fit_without_spilling() {
         );
     }
     for k in 1..=15 {
-        let listing = kernite::x86_str(&src, &format!("dot{k}")).unwrap_or_else(|e| panic!("{k} accumulators: {e}"));
-        assert!(listing.frame.slots.is_empty(), "{k} accumulators:\n{}", listing.text());
+        let listing = kernite::x86_str(&src, &format!("dot{k}")).map_err(|e| format!("{k} accumulators: {e}"))?;
+        assert!(listing.frame.slots.is_empty(), "{k} accumulators:\n{listing}");
     }
+    Ok(())
 }
 
 /// Thirteen sums, the pointer and the count take 15 of the 14 general registers the allocator
@@ -149,7 +155,7 @@ fn up_to_fifteen_accumulators_fit_without_spilling() {
 /// flags, which a `mov` leaves as they were. The count is in rsi at the top of the loop on the
 /// way in, and in r15 on the jump back, so no register holds it there, and it is loaded.
 #[test]
-fn a_general_register_spills_with_mov_a_parameter_from_where_it_arrives() {
+fn a_general_register_spills_with_mov_a_parameter_from_where_it_arrives() -> Result {
     let src = "unsafe extern \"sysv64\" fn k(p: *mut u64, n: usize) {
         let g: [gpr; 13];
         for k in 0..13 { mov(g[k], [p + 8 * k]); }
@@ -159,7 +165,7 @@ fn a_general_register_spills_with_mov_a_parameter_from_where_it_arrives() {
         jnz(top);
         for k in 0..13 { mov([p + 8 * k], g[k]); }
     }";
-    let text = kernite::x86_str(src, "k").unwrap().text();
+    let text = kernite::x86_str(src, "k")?.to_string();
     let parts = [
         "# frame: 16 bytes aligned to 8, saves [rbx, r12, r13, r14, r15]
 # n, spilled: 8 bytes at rsp - 16
@@ -178,6 +184,7 @@ fn a_general_register_spills_with_mov_a_parameter_from_where_it_arrives() {
     for part in parts {
         assert!(text.contains(part), "{part}\nin\n{text}");
     }
+    Ok(())
 }
 
 /// A spilled variable is read in the register that holds it, with no load, where one does. A store leaves what it
@@ -197,7 +204,7 @@ fn a_spilled_variable_is_read_in_the_register_a_store_or_a_load_left_it_in() -> 
         add(g[0], n);
         mov([p], g[0]);
     }";
-    let text = kernite::x86_str(src, "k")?.text();
+    let text = kernite::x86_str(src, "k")?.to_string();
     let parts = [
         "# n, spilled: 8 bytes at rsp - 8
 # p=rdi n=rsi,rcx g0=rax g1=rcx g2=rdx g3=rsi",
@@ -244,7 +251,7 @@ fn a_call_leaves_a_spilled_variable_in_a_register_it_does_not_change() -> Result
                 add(a, b); add(a, c); add(a, d);
             }}"
         );
-        kernite::x86_str(&src, "k").map(|listing| listing.text())
+        kernite::x86_str(&src, "k").map(|listing| listing.to_string())
     };
     let text = kernel("nothing")?;
     let want = "    # n spilled
@@ -283,7 +290,7 @@ fn a_spilled_variable_that_an_instruction_writes_too_is_copied_from_the_register
         add(g[0], n);
         mov([p], g[0]);
     }";
-    let text = kernite::x86_str(src, "k")?.text();
+    let text = kernite::x86_str(src, "k")?.to_string();
     let parts = [
         "# n, spilled: 8 bytes at rsp - 8\n",
         "    mov rax, qword ptr [rdi]
@@ -365,7 +372,7 @@ fn a_vector_the_call_clears_is_loaded_once_after_it_and_read_in_the_register_it_
     ret
 # f0: vtouch
 ";
-    assert_eq!(kernite::x86_str(src, "vkeeps")?.text(), want);
+    assert_eq!(kernite::x86_str(src, "vkeeps")?.to_string(), want);
     let want = "# vpast(gpr, gpr) -> vec
 # needs: avx
 # frame: 32 bytes aligned to 32, saves []
@@ -391,7 +398,7 @@ fn a_vector_the_call_clears_is_loaded_once_after_it_and_read_in_the_register_it_
     ret
 # f0: vtouch
 ";
-    assert_eq!(kernite::x86_str(src, "vpast")?.text(), want);
+    assert_eq!(kernite::x86_str(src, "vpast")?.to_string(), want);
     Ok(())
 }
 
@@ -417,7 +424,7 @@ fn a_register_holds_a_spilled_variable_at_a_label_if_every_way_to_it_brings_it_t
                 mov([p], g[0]);
             }}"
         );
-        kernite::x86_str(&src, "k").map(|listing| listing.text())
+        kernite::x86_str(&src, "k").map(|listing| listing.to_string())
     };
     let text = kernel("add(g[0], 1);")?;
     let want = "    jz 2f
@@ -464,7 +471,7 @@ fn a_register_holds_a_spilled_variable_at_a_label_though_each_way_writes_it() ->
         add(g[0], c);
         mov([p], g[0]);
     }";
-    let text = kernite::x86_str(src, "k")?.text();
+    let text = kernite::x86_str(src, "k")?.to_string();
     let parts = [
         "    jz 2f
     mov rcx, 5
@@ -518,7 +525,7 @@ fn a_call_that_runs_vzeroupper_leaves_a_spilled_xmm_in_its_register() -> Result<
             vaddss(r.xmm, r.xmm, x.xmm);
             ret(r.xmm);
         }"#;
-    let text = kernite::x86_str(src, "k")?.text();
+    let text = kernite::x86_str(src, "k")?.to_string();
     let parts = [
         "    vmovss xmm1, dword ptr [rsi]
     # x spilled
@@ -550,7 +557,7 @@ fn a_store_that_no_load_follows_is_left_out_with_its_slot() -> Result<(), String
     let sums: String = (1..17).map(|i| format!("vaddps(v0, v0, v{i});\n")).collect();
     let src = format!("unsafe extern \"sysv64\" fn k(x: *mut f32) {{\n{loads}{sums}vmovups([x], v0);\n}}\n");
     let listing = kernite::x86_str(&src, "k")?;
-    let text = listing.text();
+    let text = listing.to_string();
     let parts = [
         "# frame: 32 bytes aligned to 32, saves []\n# v15, spilled: 32 bytes at rsp\n",
         "    vmovups ymm15, ymmword ptr [rdi + 480]
@@ -589,7 +596,7 @@ fn a_store_that_another_store_of_the_variable_follows_before_any_load_is_left_ou
         add(g[0], c);
         mov([p], g[0]);
     }";
-    let text = kernite::x86_str(src, "k")?.text();
+    let text = kernite::x86_str(src, "k")?.to_string();
     let want = "    mov rcx, qword ptr [rdi + 8]
     add rax, rcx
     mov rcx, qword ptr [rdi + 16]
@@ -620,7 +627,7 @@ fn an_instruction_reads_two_spilled_variables_in_the_registers_that_hold_them() 
         add(g[0], m);
         mov([p], g[0]);
     }";
-    let text = kernite::x86_str(src, "k")?.text();
+    let text = kernite::x86_str(src, "k")?.to_string();
     let parts = [
         "    # n spilled
     mov qword ptr [rsp - 8], rsi
@@ -653,7 +660,7 @@ fn compile(params: &str, body: &str) -> Result<String, String> {
 }
 
 #[test]
-fn memory_operands_take_every_form_x86_has() {
+fn memory_operands_take_every_form_x86_has() -> Result {
     let code = compile(
         "x: *const f32, i: usize",
         "let v: ymm;
@@ -664,8 +671,7 @@ fn memory_operands_take_every_form_x86_has() {
          let g: gpr;
          mov(g.r32, [x + i * 4]);
          lea(g, [x + i * 8]);",
-    )
-    .unwrap();
+    )?;
     let want = "vmovups ymm0, ymmword ptr [rdi + rsi*4 + 16]
 vmovups ymmword ptr [rdi - 32], ymm0
 vbroadcastss ymm0, dword ptr [rip + {c0}]
@@ -675,13 +681,14 @@ lea rax, [rdi + rsi*8]
 vzeroupper
 ret";
     assert_eq!(code, want);
+    Ok(())
 }
 
 /// x86 scales an index by 1, 2, 4 or 8, so an index with no base beside it, times 3, 5 or 9, is
 /// its own base: `[n + n * 2]`, which `[n * 3]` is too, since a variable that comes twice in an
 /// address has its scales added. `llvm-mc` and GNU as assemble each as x86 encodes it.
 #[test]
-fn an_index_with_no_base_times_3_5_or_9_is_its_own_base() {
+fn an_index_with_no_base_times_3_5_or_9_is_its_own_base() -> Result {
     let cases = [
         ("lea(x, [n + n * 2]);", "lea rdi, [rsi + rsi*2]", "48 8d 3c 76"),
         ("lea(x, [n * 3]);", "lea rdi, [rsi + rsi*2]", "48 8d 3c 76"),
@@ -694,32 +701,35 @@ fn an_index_with_no_base_times_3_5_or_9_is_its_own_base() {
         ("lea(x, [n + n * 8]);", "lea rdi, [rsi + rsi*8]", "48 8d 3c f6"),
         ("lea(x, [n * 9]);", "lea rdi, [rsi + rsi*8]", "48 8d 3c f6"),
     ];
-    addresses_encode("own-base", &cases);
+    addresses_encode("own-base", &cases)?;
+    Ok(())
 }
 
 /// A gpr whose scales come to 0 is left out: `[x + n * 0]`, `[x + n - n]` and `[x + n * N]` where
 /// the const `N` is 0 are all `[x]`. `llvm-mc` and GNU as assemble each as x86 encodes it.
 #[test]
-fn a_gpr_whose_scales_come_to_0_is_left_out() {
+fn a_gpr_whose_scales_come_to_0_is_left_out() -> Result {
     let cases = [
         ("lea(x, [x + n * 0]);", "lea rdi, [rdi]", "48 8d 3f"),
         ("lea(x, [x + n - n]);", "lea rdi, [rdi]", "48 8d 3f"),
         ("const N: usize = 0; lea(x, [x + n * N]);", "lea rdi, [rdi]", "48 8d 3f"),
     ];
-    addresses_encode("left-out", &cases);
+    addresses_encode("left-out", &cases)?;
+    Ok(())
 }
 
 /// A base takes an index times 1, 2, 4 or 8, and a number. `llvm-mc` and GNU as assemble each as
 /// x86 encodes it.
 #[test]
-fn a_base_takes_an_index_times_1_2_4_or_8_and_a_number() {
+fn a_base_takes_an_index_times_1_2_4_or_8_and_a_number() -> Result {
     let cases = [
         ("lea(x, [x + n]);", "lea rdi, [rdi + rsi*1]", "48 8d 3c 37"),
         ("lea(x, [x + n * 2]);", "lea rdi, [rdi + rsi*2]", "48 8d 3c 77"),
         ("lea(x, [x + n * 4 + 8]);", "lea rdi, [rdi + rsi*4 + 8]", "48 8d 7c b7 08"),
         ("lea(x, [x + n * 8 - 8]);", "lea rdi, [rdi + rsi*8 - 8]", "48 8d 7c f7 f8"),
     ];
-    addresses_encode("scales", &cases);
+    addresses_encode("scales", &cases)?;
+    Ok(())
 }
 
 /// x86 has an index with no base, `[rcx*4]`, and writes it with a 32-bit displacement, 0 where
@@ -727,7 +737,7 @@ fn a_base_takes_an_index_times_1_2_4_or_8_and_a_number() {
 /// its scales added. A gather's vector of indices is an index too, `[ymm2*4]`, of a ymm or an xmm.
 /// `llvm-mc` and GNU as assemble each as x86 encodes it.
 #[test]
-fn an_index_with_no_base_has_a_32_bit_displacement() {
+fn an_index_with_no_base_has_a_32_bit_displacement() -> Result {
     let cases = [
         ("lea(x, [n * 4]);", "lea rdi, [rsi*4]", "48 8d 3c b5 00 00 00 00"),
         ("lea(x, [n * 2]);", "lea rdi, [rsi*2]", "48 8d 3c 75 00 00 00 00"),
@@ -760,32 +770,34 @@ fn an_index_with_no_base_has_a_32_bit_displacement() {
             "c4 e2 f5 90 04 d5 00 00 00 00",
         ),
     ];
-    addresses_encode("no-base", &cases);
+    addresses_encode("no-base", &cases)?;
+    Ok(())
 }
 
 /// Each of `cases`, a kernel's body, a line of its listing and the bytes x86 encodes that line
 /// as, holds: the kernel compiles to a listing with that line, and `llvm-mc` and GNU as, where
 /// they are here, make those bytes of it. `name` is for the files they read.
-fn addresses_encode(name: &str, cases: &[(&str, &str, &str)]) {
+fn addresses_encode(name: &str, cases: &[(&str, &str, &str)]) -> Result {
     for &(body, line, _) in cases {
-        let code = compile("x: *const f32, n: usize", body).unwrap_or_else(|e| panic!("{e}, of {body}"));
+        let code = compile("x: *const f32, n: usize", body).map_err(|e| format!("{e}, of {body}"))?;
         assert!(code.lines().any(|l| l == line), "{line} is not a line of\n{code}\nof {body}");
     }
     let encoded: Vec<_> = cases.iter().map(|&(_, line, bytes)| (line, bytes)).collect();
-    encode(name, &encoded);
+    encode(name, &encoded)?;
+    Ok(())
 }
 
 /// Each of `cases`, a line of a listing and the bytes x86 encodes it as, holds: `llvm-mc` and GNU
 /// as, where they are here, make those bytes of it. `name` is for the files they read.
-fn encode(name: &str, cases: &[(&str, &str)]) {
+fn encode(name: &str, cases: &[(&str, &str)]) -> Result {
     let (Some(mc), Some(gnu)) = (tool("LLVM_MC", "llvm-mc"), tool("GNU_AS", "as")) else {
         eprintln!("no llvm-mc or GNU as here: skipped; set LLVM_MC and GNU_AS to run it");
-        return;
+        return Ok(());
     };
     let lines: Vec<&str> = cases.iter().map(|&(line, _)| line).collect();
     let (text, at) = source(&lines);
     let (ok, out, said) =
-        assemble(&mc, &["-triple=x86_64", "-x86-asm-syntax=intel", "-show-encoding"], &format!("{name}-mc.s"), &text);
+        assemble(&mc, &["-triple=x86_64", "-x86-asm-syntax=intel", "-show-encoding"], &format!("{name}-mc.s"), &text)?;
     assert!(ok && said.is_empty(), "llvm-mc says {said:?}, of\n{text}");
     // `leaq (,%rsi,4), %rdi  # encoding: [0x48,0x8d,0x3c,0xb5,0x00,0x00,0x00,0x00]`
     let made = out.lines().filter_map(|l| l.split_once("encoding: [")).map(|(_, e)| {
@@ -796,7 +808,7 @@ fn encode(name: &str, cases: &[(&str, &str)]) {
     }
     // GNU as's listing has a line's number, its offset and up to four of its bytes in hex in a
     // row, and more rows below it for the rest of them.
-    let (ok, out, said) = assemble(&gnu, &["--64", "-al", "-o", "/dev/null"], &format!("{name}-gnu.s"), &text);
+    let (ok, out, said) = assemble(&gnu, &["--64", "-al", "-o", "/dev/null"], &format!("{name}-gnu.s"), &text)?;
     assert!(ok && said.is_empty(), "GNU as says {said:?}, of\n{text}");
     let mut made: Vec<Vec<&str>> = vec![vec![]; cases.len()];
     for row in out.lines() {
@@ -809,19 +821,19 @@ fn encode(name: &str, cases: &[(&str, &str)]) {
     for ((line, want), made) in cases.iter().zip(made) {
         assert_eq!(made.join(" ").to_lowercase(), *want, "GNU as, of {line}");
     }
+    Ok(())
 }
 
 /// Memory is as much as the other operands say, or, where an instruction's forms differ by that
 /// alone, as Intel's word before the brackets says. A write to `r16` or `r8` keeps the rest of
 /// the register, so it needs a value there first.
 #[test]
-fn memory_is_as_much_as_the_operands_or_a_word_before_it_say() {
+fn memory_is_as_much_as_the_operands_or_a_word_before_it_say() -> Result {
     let code = compile(
         "x: *mut u64",
         "let g: gpr; zero(g); movzx(g.r32, byte[x]); add(dword[x], 1); mov(g.r16, word[x]); mov(g.r8, [[7u8]]); \
          add(qword[x], g); add([x], g);",
-    )
-    .unwrap();
+    )?;
     let want = "xor eax, eax
 movzx eax, byte ptr [rdi]
 add dword ptr [rdi], 1
@@ -831,12 +843,13 @@ add qword ptr [rdi], rax
 add qword ptr [rdi], rax
 ret";
     assert_eq!(code, want);
+    Ok(())
 }
 
 /// The word before the brackets is checked wherever it is given: on stack memory, on memory that
 /// holds data, on a static, and on memory at a vector of indices, as on memory at a pointer.
 #[test]
-fn the_word_before_the_brackets_is_checked_wherever_it_is_given() {
+fn the_word_before_the_brackets_is_checked_wherever_it_is_given() -> Result {
     let cases = [
         (
             "let b: local<u64>; let g: gpr; zero(g); mov(qword[b], g); mov(g, dword[b]);",
@@ -855,13 +868,14 @@ fn the_word_before_the_brackets_is_checked_wherever_it_is_given() {
     ];
     for (body, want) in cases {
         let src = format!("static S: global<u64>;\nunsafe extern \"sysv64\" fn k(x: *const u32) {{\n{body}\n}}\n");
-        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), want, "{body}");
+        assert_eq!(kernite::x86_str(&src, "k").err().ok_or("x86_str gave Ok")?, want, "{body}");
     }
+    Ok(())
 }
 
 /// A gpr is `g`, or `g.r32`, `g.r16` or `g.r8`, its low 32, 16 or 8 bits, and nothing else.
 #[test]
-fn a_gpr_is_g_or_g_r32_g_r16_or_g_r8() {
+fn a_gpr_is_g_or_g_r32_g_r16_or_g_r8() -> Result {
     let code =
         compile("x: *mut u64", "let g: gpr; mov(g, [x]); mov(g.r32, 1); mov(g.r16, 2); mov(g.r8, 3); mov([x], g);");
     let want = "mov rax, qword ptr [rdi]
@@ -870,25 +884,31 @@ mov ax, 2
 mov al, 3
 mov qword ptr [rdi], rax
 ret";
-    assert_eq!(code.unwrap(), want);
-    let e = compile("x: *mut u64", "let g: gpr; mov(g.r64, 1);").unwrap_err();
+    assert_eq!(code?, want);
+    let e = compile("x: *mut u64", "let g: gpr; mov(g.r64, 1);").err().ok_or("compile gave Ok")?;
     assert_eq!(e, "2:19: a gpr is seen as `gpr`, `r32`, `r16` or `r8`, not `r64`");
+    Ok(())
 }
 
 /// A write to `r16` or `r8` keeps the rest of the gpr, as x86 does, so it reads the gpr, which
 /// must hold a value first. One to `r32` clears the rest, as x86 does, and reads nothing.
 #[test]
-fn a_write_to_r16_or_r8_keeps_the_rest_of_the_gpr() {
+fn a_write_to_r16_or_r8_keeps_the_rest_of_the_gpr() -> Result {
     for body in ["let g: gpr; mov(g.r16, 1); mov([x], g);", "let g: gpr; mov(g.r8, 1); mov([x], g);"] {
-        assert_eq!(compile("x: *mut u64", body).unwrap_err(), "2:5: `g` is read before anything writes it", "{body}");
+        assert_eq!(
+            compile("x: *mut u64", body).err().ok_or("compile gave Ok")?,
+            "2:5: `g` is read before anything writes it",
+            "{body}"
+        );
     }
     let code = compile("x: *mut u64", "let g: gpr; mov(g.r32, 1); mov([x], g);");
-    assert_eq!(code.unwrap(), "mov eax, 1\nmov qword ptr [rdi], rax\nret");
+    assert_eq!(code?, "mov eax, 1\nmov qword ptr [rdi], rax\nret");
+    Ok(())
 }
 
 /// A gather reads memory at a vector of indices, `[p + v * 4]`, under a mask, and needs AVX2.
 #[test]
-fn a_gather_reads_memory_at_a_vector_of_indices() {
+fn a_gather_reads_memory_at_a_vector_of_indices() -> Result {
     let src = "unsafe extern \"sysv64\" fn k(x: *const f32) {
         let v: ymm; let m: ymm; let i: ymm;
         zero(v); ones(m); zero(i);
@@ -896,7 +916,7 @@ fn a_gather_reads_memory_at_a_vector_of_indices() {
         vpgatherdq(v, [x + i.xmm * 8], m);
         vgatherqps(v.xmm, [x + i * 4], m.xmm);
     }";
-    let listing = kernite::x86_str(src, "k").unwrap();
+    let listing = kernite::x86_str(src, "k")?;
     assert_eq!(listing.features, [Feature::Avx, Feature::Avx2]);
     let code: Vec<&str> = listing.code().collect();
     let want = [
@@ -910,13 +930,14 @@ fn a_gather_reads_memory_at_a_vector_of_indices() {
         "ret",
     ];
     assert_eq!(code, want);
+    Ok(())
 }
 
 /// A gather takes its result, its indices and its mask in three registers, as x86 faults
 /// otherwise: kernite keeps them apart where nothing reads the indices or the mask again, and
 /// refuses a variable that is two of them, here the result and the mask.
 #[test]
-fn a_gather_takes_its_result_indices_and_mask_in_three_registers() {
+fn a_gather_takes_its_result_indices_and_mask_in_three_registers() -> Result {
     let body = "let v: ymm; let m: ymm; let i: ymm; zero(v); ones(m); zero(i); vpgatherdd(v, [x + i * 4], m); \
                 vmovups([x], v);";
     let want = "vxorps xmm0, xmm0, xmm0
@@ -926,19 +947,20 @@ vpgatherdd ymm0, dword ptr [rdi + ymm2*4], ymm1
 vmovups ymmword ptr [rdi], ymm0
 vzeroupper
 ret";
-    assert_eq!(compile("x: *mut u32", body).unwrap(), want);
+    assert_eq!(compile("x: *mut u32", body)?, want);
     let e = compile("x: *mut u32", "let v: ymm; let i: ymm; zero(v); zero(i); vpgatherdd(v, [x + i * 4], v);");
     assert_eq!(
-        e.unwrap_err(),
+        e.err().ok_or("e gave Ok")?,
         "2:70: `vpgatherdd` faults unless its result, its indices and its mask are three registers; `v` is its \
          result and its mask"
     );
+    Ok(())
 }
 
 /// SysV leaves MXCSR's control bits as the caller set them, so a kernel that loads MXCSR stores
 /// the caller's first, in its frame, and loads it back before it returns.
 #[test]
-fn a_kernel_that_loads_mxcsr_gives_the_callers_back() {
+fn a_kernel_that_loads_mxcsr_gives_the_callers_back() -> Result {
     let src = "unsafe extern \"sysv64\" fn k(x: *const u32) {\nvldmxcsr([x]);\n}\n";
     let want = "# k(gpr) -> ()
 # needs: avx
@@ -951,13 +973,14 @@ fn a_kernel_that_loads_mxcsr_gives_the_callers_back() {
     vldmxcsr dword ptr [rsp - 4]
     ret
 ";
-    assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
+    Ok(())
 }
 
 /// A kernel that loads MXCSR twice and returns in two places stores the caller's once, before
 /// its first load, and loads it back before each return.
 #[test]
-fn a_kernel_that_loads_mxcsr_loads_the_callers_back_before_each_return() {
+fn a_kernel_that_loads_mxcsr_loads_the_callers_back_before_each_return() -> Result {
     let src = "unsafe extern \"sysv64\" fn k(x: *const u32, n: u64) {\nvldmxcsr([x]);\ntest(n, n);\njz(done);\n\
                vldmxcsr([x + 4]);\nret();\nlabel(done);\n}\n";
     let want = "# k(gpr, gpr) -> ()
@@ -977,11 +1000,12 @@ fn a_kernel_that_loads_mxcsr_loads_the_callers_back_before_each_return() {
     vldmxcsr dword ptr [rsp - 4]
     ret
 ";
-    assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
+    Ok(())
 }
 
 #[test]
-fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
+fn a_wrong_operand_is_named_by_what_the_instruction_wants() -> Result {
     let cases = [
         ("let v: ymm; vaddps(v, v.xmm, v);", "2:25: `vaddps` wants a ymm; this is an xmm"),
         ("let v: ymm; vaddps(v, v);", "2:13: `vaddps` takes 3 operands, not 2"),
@@ -1099,20 +1123,20 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ),
     ];
     for (body, want) in cases {
-        assert_eq!(compile("x: *const f32", body).unwrap_err(), want, "{body}");
+        assert_eq!(compile("x: *const f32", body).err().ok_or("compile gave Ok")?, want, "{body}");
     }
+    Ok(())
 }
 
 /// An immediate x86 reads in part is no more than it reads: 6 bits of a shift's count, 5 of
 /// `vcmpps`'s control byte, 1 of a ymm's half, and a bit for each lane `vpblendd` blends.
 #[test]
-fn an_immediate_is_what_x86_reads_of_it() {
+fn an_immediate_is_what_x86_reads_of_it() -> Result {
     let code = compile(
         "x: *const f32",
         "let v: ymm; vmovups(v, [x]); shl(x, 63); vcmpps(v, v, v, 31); vextractf128(v.xmm, v, 1); vpslld(v, v, \
          255); vpblendd(v, v, v, 0xff); vpblendd(v.xmm, v.xmm, v.xmm, 0xf);",
-    )
-    .unwrap();
+    )?;
     let want = "vmovups ymm0, ymmword ptr [rdi]
 shl rdi, 63
 vcmpps ymm0, ymm0, ymm0, 0x1f
@@ -1123,6 +1147,7 @@ vpblendd xmm0, xmm0, xmm0, 0x0f
 vzeroupper
 ret";
     assert_eq!(code, want);
+    Ok(())
 }
 
 /// A program built in Rust writes an index with no base as the language does: `n.times(4)` is
@@ -1132,25 +1157,25 @@ ret";
 /// `vpgatherdq(v, [i.xmm * 8], m)`. Only the builder writes a scale of 1 of a gpr, `[rsi*1]`, where
 /// the language writes a base, `[n]`.
 #[test]
-fn the_builder_writes_an_index_with_no_base() {
+fn the_builder_writes_an_index_with_no_base() -> Result {
     let mut a = Asm::new("k");
     let (x, n) = (a.param("x"), a.param("n"));
     let (v, m, i) = (a.ymm("v"), a.ymm("m"), a.ymm("i"));
     a.zero(v);
     a.ones(m);
     a.zero(i);
-    a.lea(x, n.times(1));
-    a.lea(x, n.times(2));
-    a.lea(x, n.times(4));
-    a.lea(x, n.times(4).plus(8));
-    a.lea(x, n.times(8).plus(-8));
-    a.vpgatherdd(v, i.times(4), m);
+    a.lea(x, n.times(1)?);
+    a.lea(x, n.times(2)?);
+    a.lea(x, n.times(4)?);
+    a.lea(x, n.times(4)?.plus(8));
+    a.lea(x, n.times(8)?.plus(-8));
+    a.vpgatherdd(v, i.times(4)?, m);
     a.ones(m);
-    a.vpgatherdd(v, i.times(8).plus(-8), m);
+    a.vpgatherdd(v, i.times(8)?.plus(-8), m);
     a.ones(m);
-    a.vpgatherdq(v, i.xmm().times(8), m);
+    a.vpgatherdq(v, i.xmm().times(8)?, m);
     a.ret();
-    let listing = intel::print(&kernite_compile::compile(&a.finish(), &SysV).unwrap(), vec![]).unwrap();
+    let listing = intel::print(&kernite_compile::compile(&a.finish()?, &SysV)?, vec![])?;
     let cases = [
         ("lea rdi, [rsi*1]", "48 8d 3c 35 00 00 00 00"),
         ("lea rdi, [rsi*2]", "48 8d 3c 75 00 00 00 00"),
@@ -1162,20 +1187,23 @@ fn the_builder_writes_an_index_with_no_base() {
         ("vpgatherdq ymm0, qword ptr [xmm2*8], ymm1", "c4 e2 f5 90 04 d5 00 00 00 00"),
     ];
     for (line, _) in cases {
-        assert!(listing.code().any(|l| l == line), "{line} is not a line of\n{}", listing.text());
+        assert!(listing.code().any(|l| l == line), "{line} is not a line of\n{listing}");
     }
-    encode("builder", &cases);
+    encode("builder", &cases)?;
+    Ok(())
 }
 
 /// The builder takes no more of an immediate than x86 reads, nor a scale x86 has not, as the
-/// language does not.
+/// language does not: an address is refused where it is made, and an instruction at `finish`, which
+/// says the first it was given.
 #[test]
-fn the_builder_refuses_what_x86_would_not_read() {
-    let refused = |want: &str, build: fn(&mut Asm)| {
-        let e = std::panic::catch_unwind(|| build(&mut Asm::new("k"))).expect_err(want);
-        let said = e.downcast_ref::<String>().map(String::as_str).or(e.downcast_ref::<&str>().copied());
-        assert_eq!(said, Some(want));
+fn the_builder_refuses_what_x86_would_not_read() -> Result {
+    let finish = |build: fn(&mut Asm)| {
+        let mut a = Asm::new("k");
+        build(&mut a);
+        a.finish().err()
     };
+    let refused = |want: &str, build: fn(&mut Asm)| assert_eq!(finish(build).as_deref(), Some(want));
     refused("shl by 64: x86 shifts a gpr by 0 to 63", |a| {
         let g = a.gpr("g");
         a.shl(g, 64);
@@ -1196,37 +1224,66 @@ fn the_builder_refuses_what_x86_would_not_read() {
         let v = a.ymm("v").xmm();
         a.vpblendd(v, v, v, 0x10);
     });
-    refused("scale 3", |a| {
-        a.gpr("g").times(3);
-    });
-    refused("scale 16", |a| {
-        a.ymm("v").times(16);
-    });
-    refused("scale 0", |a| {
-        a.ymm("v").xmm().times(0);
-    });
-    refused("one index to an address", |a| {
-        let (g, v) = (a.gpr("g"), a.ymm("v"));
-        g.at(0).index(g, 4).index_ymm(v, 4);
-    });
-    refused("a constant's address takes no index", |a| {
+    // The first of two wrong values is the one it says.
+    refused("shl by 64: x86 shifts a gpr by 0 to 63", |a| {
         let g = a.gpr("g");
-        a.u32s(&[1]).index(g, 4);
+        a.shl(g, 64);
+        a.shr(g, 65);
+    });
+    refused("a seventh integer parameter, where SysV passes six in registers", |a| {
+        for name in ["a", "b", "c", "d", "e", "f", "g"] {
+            a.param(name);
+        }
+    });
+    refused("`slot` is aligned to 3, where an alignment is a power of two, a page at most", |a| {
+        a.slot("slot", 8, 3);
+    });
+    refused("`slot` is aligned to 8192, where an alignment is a power of two, a page at most", |a| {
+        a.slot("slot", 8, 8192);
+    });
+    refused("a constant is aligned to 6, which is no power of two", |a| {
+        a.constant(&[1], 6);
+    });
+    refused("a label in a captured stream", |a| {
+        let label = a.label();
+        a.capture(|a| a.place(label));
+    });
+    refused("`jmp` in a captured stream", |a| {
+        let label = a.label();
+        a.capture(|a| a.jmp(label));
+    });
+    refused("`vpgatherdd` reads memory at a vector of indices", |a| {
+        let (g, v) = (a.gpr("g"), a.ymm("v"));
+        a.vpgatherdd(v, g.at(0), v);
+    });
+    refused("`vpgatherdd` faults unless its result, indices and mask are three registers", |a| {
+        let (i, v) = (a.ymm("i"), a.ymm("v"));
+        if let Ok(from) = i.times(4) {
+            a.vpgatherdd(v, from, v);
+        }
     });
     let mut a = Asm::new("k");
     let (g, v) = (a.gpr("g"), a.ymm("v"));
+    assert_eq!(g.times(3).err().as_deref(), Some("scale 3"));
+    assert_eq!(v.times(16).err().as_deref(), Some("scale 16"));
+    assert_eq!(v.xmm().times(0).err().as_deref(), Some("scale 0"));
+    assert_eq!(g.at(0).index(g, 4)?.index_ymm(v, 4).err().as_deref(), Some("one index to an address"));
+    assert_eq!(a.u32s(&[1]).index(g, 4).err().as_deref(), Some("a constant's address takes no index"));
     a.shl(g, 63);
     a.vextractf128(v.xmm(), v, 1);
     a.vpblendd(v, v, v, 0xff);
     a.vpblendd(v.xmm(), v.xmm(), v.xmm(), 0x0f);
+    assert!(a.finish().is_ok());
+    Ok(())
 }
 
 #[test]
-fn a_kernel_takes_what_sysv_passes_in_registers() {
-    let e = compile("a: u32", "").unwrap_err();
+fn a_kernel_takes_what_sysv_passes_in_registers() -> Result {
+    let e = compile("a: u32", "").err().ok_or("compile gave Ok")?;
     assert_eq!(e, "1:32: SysV leaves the high bits of a `u32` as they were; take a usize or a u64");
-    let code = compile("a: f32, p: *mut f32, b: f32", "vmovss([p], b.xmm); vaddss(b.xmm, a.xmm, b.xmm);").unwrap();
+    let code = compile("a: f32, p: *mut f32, b: f32", "vmovss([p], b.xmm); vaddss(b.xmm, a.xmm, b.xmm);")?;
     assert_eq!(code, "vmovss dword ptr [rdi], xmm1\nvaddss xmm1, xmm0, xmm1\nret");
+    Ok(())
 }
 
 /// What kernite says of the instruction `name` that reads `reads` bits of `x`, of which only the low `has` are the
@@ -1954,7 +2011,7 @@ fn an_instruction_writes_as_much_of_a_float_as_intels_manual_says() {
 /// reads. The instructions that carry such an operand, or pick what they read of it by a number, do not read it as
 /// data: another test holds them. `call` writes the other operands of the form.
 #[test]
-fn each_form_that_reads_the_low_bits_of_an_xmm_takes_a_float_of_so_many() {
+fn each_form_that_reads_the_low_bits_of_an_xmm_takes_a_float_of_so_many() -> Result {
     let carries = ["vmovq", "vmovss", "vmovsd", "vmovhps", "vmovhpd", "vunpcklpd", "vpunpcklqdq", "vmovlhps"];
     let mut cases = 0;
     for form in forms::names().filter(|n| !carries.contains(n)).flat_map(|n| forms::of(n).unwrap_or_default()) {
@@ -1965,7 +2022,7 @@ fn each_form_that_reads_the_low_bits_of_an_xmm_takes_a_float_of_so_many() {
             if reads >= 128 {
                 continue;
             }
-            let call = call(name, form, false, Some(i));
+            let call = call(name, form, false, Some(i))?;
             // The instruction is a line of its own, in column 1.
             let row = call.lines().position(|l| l.starts_with(&format!("{name}("))).map_or(0, |r| r + 2);
             for has in [32, 64] {
@@ -1983,6 +2040,7 @@ fn each_form_that_reads_the_low_bits_of_an_xmm_takes_a_float_of_so_many() {
     }
     // Every form that reads part of an xmm, for each float: neither a form nor an operand is left out.
     assert!(cases >= 850, "{cases} cases");
+    Ok(())
 }
 
 /// An operand of a form that writes an xmm or a ymm takes a float parameter, which the kernel reads all of after. A
@@ -1992,14 +2050,14 @@ fn each_form_that_reads_the_low_bits_of_an_xmm_takes_a_float_of_so_many() {
 /// gather keeps the lanes of its result that its mask leaves out, and reads none of them, so its result too keeps what
 /// the parameter has.
 #[test]
-fn each_form_that_writes_a_vector_writes_a_float_whole_or_alone() {
+fn each_form_that_writes_a_vector_writes_a_float_whole_or_alone() -> Result {
     let mut cases = 0;
     for form in forms::names().flat_map(|n| forms::of(n).unwrap_or_default()) {
         let name = form.op.name();
         for (i, spec) in form.operands.iter().enumerate() {
             let (Kind::Vec(w), Access::Write | Access::ReadWrite) = (spec.kind, spec.access) else { continue };
             let bits = w.bytes() * 8;
-            let call = call(name, form, false, Some(i));
+            let call = call(name, form, false, Some(i))?;
             let at = call.lines().position(|l| l.starts_with(&format!("{name}("))).map_or(0, |r| r + 2);
             // The kernel's last line, after the call and the stores of its other operands.
             let last = call.lines().count() + 2;
@@ -2020,21 +2078,22 @@ fn each_form_that_writes_a_vector_writes_a_float_whole_or_alone() {
     }
     // Every form that writes a vector, for each float: neither a form nor an operand is left out.
     assert!(cases >= 2900, "{cases} cases");
+    Ok(())
 }
 
 /// A pointer is one register, whatever it points to: an array, a pointer, a tuple, a generic type.
 /// A pointer to what has no size, a slice, a `str` or a `dyn`, in parentheses or not, or a tuple that
 /// ends in one, is two words in Rust, and an error.
 #[test]
-fn a_kernel_takes_a_pointer_to_any_type_in_a_register() {
+fn a_kernel_takes_a_pointer_to_any_type_in_a_register() -> Result {
     let params = "shape: *const [usize; 3], out: *mut *const f32, pair: *const (u32, u32), \
                   cell: *const Cell<u8, 2>, n: usize";
-    let code = compile(params, "mov(n, [shape + 8]); mov([out], pair); mov([cell], n);").unwrap();
+    let code = compile(params, "mov(n, [shape + 8]); mov([out], pair); mov([cell], n);")?;
     assert_eq!(code, "mov r8, qword ptr [rdi + 8]\nmov qword ptr [rsi], rdx\nmov qword ptr [rcx], r8\nret");
     let src = "unsafe extern \"sysv64\" fn k(p: *const [usize; 3]) -> *mut [usize; 3] { ret(p); }";
-    assert_eq!(kernite::x86_str(src, "k").unwrap().code().collect::<Vec<_>>(), ["mov rax, rdi", "ret"]);
+    assert_eq!(kernite::x86_str(src, "k")?.code().collect::<Vec<_>>(), ["mov rax, rdi", "ret"]);
     for to in ["()", "(u32,)", "(u32, u32)"] {
-        assert_eq!(compile(&format!("p: *const {to}"), "").unwrap(), "ret", "{to}");
+        assert_eq!(compile(&format!("p: *const {to}"), "")?, "ret", "{to}");
     }
     for to in [
         "[f32]",
@@ -2051,32 +2110,41 @@ fn a_kernel_takes_a_pointer_to_any_type_in_a_register() {
         let why = format!(
             "a pointer to `{to}` has two words, an address and a length or a table, and a kernel's pointer has one"
         );
-        assert_eq!(compile(&format!("p: *const {to}"), "").unwrap_err(), format!("1:32: {why}"), "{to}");
+        assert_eq!(
+            compile(&format!("p: *const {to}"), "").err().ok_or("compile gave Ok")?,
+            format!("1:32: {why}"),
+            "{to}"
+        );
         let src = format!("unsafe extern \"sysv64\" fn k() -> *mut {to} {{}}");
-        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("1:34: {why}"), "-> {to}");
+        assert_eq!(kernite::x86_str(&src, "k").err().ok_or("x86_str gave Ok")?, format!("1:34: {why}"), "-> {to}");
     }
+    Ok(())
 }
 
 /// A type may hold an arrow, `->`, one operator whose `>` ends no type and closes no `<`: a pointer to
 /// a function's pointer, or to a type with one among its arguments, is one register as any pointer is,
 /// and the parameter after it is read from the next.
 #[test]
-fn a_kernel_takes_a_pointer_to_a_type_that_holds_an_arrow() {
+fn a_kernel_takes_a_pointer_to_a_type_that_holds_an_arrow() -> Result {
     for params in [
         "call: *const fn(u32) -> u32, table: *mut Pair<fn() -> u8, 2>, \
          boxed: *const Box<dyn Fn(u8) -> u8 + Send>, n: usize",
         "call: *const fn(u32)->u32, table: *mut Pair<fn()->&u8,2>, boxed: *const Box<dyn Fn(u8)->u8+Send>,n: usize",
     ] {
-        let code = compile(params, "mov([call], n); mov([table], n); mov([boxed], n);").unwrap();
+        let code = compile(params, "mov([call], n); mov([table], n); mov([boxed], n);")?;
         assert_eq!(code, "mov qword ptr [rdi], rcx\nmov qword ptr [rsi], rcx\nmov qword ptr [rdx], rcx\nret");
     }
     let src = "unsafe extern \"sysv64\" fn k(p: *const fn(u32) -> u32) -> *mut fn(u32) -> u32 { ret(p); }";
-    assert_eq!(kernite::x86_str(src, "k").unwrap().code().collect::<Vec<_>>(), ["mov rax, rdi", "ret"]);
+    assert_eq!(kernite::x86_str(src, "k")?.code().collect::<Vec<_>>(), ["mov rax, rdi", "ret"]);
     let to = "dyn Fn(u8) -> u8";
     let why = format!(
         "a pointer to `{to}` has two words, an address and a length or a table, and a kernel's pointer has one"
     );
-    assert_eq!(compile("p: *const dyn Fn(u8)->u8, n: usize", "").unwrap_err(), format!("1:32: {why}"));
+    assert_eq!(
+        compile("p: *const dyn Fn(u8)->u8, n: usize", "").err().ok_or("compile gave Ok")?,
+        format!("1:32: {why}")
+    );
+    Ok(())
 }
 
 /// A type in a message is written as Rust writes it, whatever the source spaced: a parameter by
@@ -2084,7 +2152,7 @@ fn a_kernel_takes_a_pointer_to_a_type_that_holds_an_arrow() {
 /// or spaced, as the messages of rustc write them. So is the length of an array, but where kernite takes the type
 /// of a parameter or a variable apart, and works the length out.
 #[test]
-fn a_type_in_a_message_is_written_as_rust_writes_it() {
+fn a_type_in_a_message_is_written_as_rust_writes_it() -> Result {
     let takes = "a kernel takes pointers, 64-bit integers and floats, not";
     for (params, ty) in [
         ("a: [usize;3]", "[usize; 3]"),
@@ -2119,11 +2187,15 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
         ("a: Marker<{}>", "Marker<{}>"),
         ("a: Marker<{ }>", "Marker<{ }>"),
     ] {
-        assert_eq!(compile(params, "").unwrap_err(), format!("1:32: {takes} `{ty}`"), "{params}");
+        assert_eq!(compile(params, "").err().ok_or("compile gave Ok")?, format!("1:32: {takes} `{ty}`"), "{params}");
     }
     // The rows of the review, each packed and spaced, in a block and as a macro's arguments.
     for (ty, quoted) in quotes::quoted() {
-        assert_eq!(compile(&format!("a: {ty}"), "").unwrap_err(), format!("1:32: {takes} `{quoted}`"), "{ty}");
+        assert_eq!(
+            compile(&format!("a: {ty}"), "").err().ok_or("compile gave Ok")?,
+            format!("1:32: {takes} `{quoted}`"),
+            "{ty}"
+        );
     }
     // The length of an array is worked out in the type of a parameter that is an array or a name with arguments,
     // and in those of its elements and arguments that are, `[usize; 6]`; its names are the module's. In any other
@@ -2145,10 +2217,17 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
         ("Wrap<Wrap<[usize;N*2]>>", "Wrap<Wrap<[usize; 6]>>"),
     ] {
         let src = format!("const N: usize = 3;\nunsafe extern \"sysv64\" fn k(a: {ty}) {{}}\n");
-        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("2:32: {takes} `{quoted}`"), "{ty}");
+        assert_eq!(
+            kernite::x86_str(&src, "k").err().ok_or("x86_str gave Ok")?,
+            format!("2:32: {takes} `{quoted}`"),
+            "{ty}"
+        );
     }
     let two = "has two words, an address and a length or a table, and a kernel's pointer has one";
-    assert_eq!(compile("p: *const dyn A+Send", "").unwrap_err(), format!("1:32: a pointer to `dyn A + Send` {two}"));
+    assert_eq!(
+        compile("p: *const dyn A+Send", "").err().ok_or("compile gave Ok")?,
+        format!("1:32: a pointer to `dyn A + Send` {two}")
+    );
     for (to, quoted) in [
         ("dyn Tr<N={3}>", "dyn Tr<N = {3}>"),
         ("dyn Tr<N={ 3 }>", "dyn Tr<N = { 3 }>"),
@@ -2157,36 +2236,52 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
         ("dyn Tr<Item<X> =u8>", "dyn Tr<Item<X> = u8>"),
     ] {
         let why = format!("1:32: a pointer to `{quoted}` {two}");
-        assert_eq!(compile(&format!("p: *const {to}"), "").unwrap_err(), why, "{to}");
+        assert_eq!(compile(&format!("p: *const {to}"), "").err().ok_or("compile gave Ok")?, why, "{to}");
     }
     let src = "#[instances(2)]\nunsafe extern \"sysv64\" fn k<const N: usize>(a: [usize; N]) {}";
-    assert_eq!(kernite::x86_str(src, "k::<2>").unwrap_err(), format!("2:48: in `k::<2>`: {takes} `[usize; 2]`"));
+    assert_eq!(
+        kernite::x86_str(src, "k::<2>").err().ok_or("x86_str gave Ok")?,
+        format!("2:48: in `k::<2>`: {takes} `[usize; 2]`")
+    );
     let src = "unsafe extern \"sysv64\" fn k() -> (u32,u32) {}";
     let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `(u32, u32)`";
-    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, format!("1:34: {returns}"));
     let src = "unsafe extern \"sysv64\" fn k() -> fn(u32)->u32 {}";
     let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `fn(u32) -> u32`";
-    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, format!("1:34: {returns}"));
     let src = "unsafe extern \"sysv64\" fn k() -> (u8,Marker<{N*2}>) {}";
     let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `(u8, Marker<{N*2}>)`";
-    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, format!("1:34: {returns}"));
     let src = "unsafe extern \"sysv64\" fn k() -> (u8,Marker<{ N * 2 }>) {}";
     let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `(u8, Marker<{ N * 2 }>)`";
-    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, format!("1:34: {returns}"));
     // In a result the length of an array is as the source has it; in the type of a variable, worked out.
     let src = "const N: usize = 3;\nunsafe extern \"sysv64\" fn k() -> [usize;N*2] {}";
     let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `[usize; N*2]`";
-    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("2:34: {returns}"));
+    assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, format!("2:34: {returns}"));
     let vars = "x86 variables are `gpr`, `ymm`, `xmm` and stack memory, `local<..>`; not";
     let src = "const N: usize = 3;\nunsafe extern \"sysv64\" fn k() { let v: Wrap<[usize;N*2]>; }";
-    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("2:40: {vars} `Wrap<[usize; 6]>`"));
+    assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, format!("2:40: {vars} `Wrap<[usize; 6]>`"));
     let src = "const N: usize = 3;\nunsafe extern \"sysv64\" fn k() { let v: a::Wrap<[usize;N*2]>; }";
-    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("2:40: {vars} `a::Wrap<[usize; N*2]>`"));
-    assert_eq!(compile("", "let v: *const[u8;4];").unwrap_err(), format!("2:8: {vars} `*const [u8; 4]`"));
-    assert_eq!(compile("", "let v: fn(u32)->u32;").unwrap_err(), format!("2:8: {vars} `fn(u32) -> u32`"));
-    assert_eq!(compile("", "let v: m!(a+b);").unwrap_err(), format!("2:8: {vars} `m!(a+b)`"));
-    assert_eq!(compile("", "let v: m!(a + b);").unwrap_err(), format!("2:8: {vars} `m!(a + b)`"));
-    assert_eq!(compile("", "let v: (u8,Marker<{N*2}>);").unwrap_err(), format!("2:8: {vars} `(u8, Marker<{{N*2}}>)`"));
+    assert_eq!(
+        kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?,
+        format!("2:40: {vars} `a::Wrap<[usize; N*2]>`")
+    );
+    assert_eq!(
+        compile("", "let v: *const[u8;4];").err().ok_or("compile gave Ok")?,
+        format!("2:8: {vars} `*const [u8; 4]`")
+    );
+    assert_eq!(
+        compile("", "let v: fn(u32)->u32;").err().ok_or("compile gave Ok")?,
+        format!("2:8: {vars} `fn(u32) -> u32`")
+    );
+    assert_eq!(compile("", "let v: m!(a+b);").err().ok_or("compile gave Ok")?, format!("2:8: {vars} `m!(a+b)`"));
+    assert_eq!(compile("", "let v: m!(a + b);").err().ok_or("compile gave Ok")?, format!("2:8: {vars} `m!(a + b)`"));
+    assert_eq!(
+        compile("", "let v: (u8,Marker<{N*2}>);").err().ok_or("compile gave Ok")?,
+        format!("2:8: {vars} `(u8, Marker<{{N*2}}>)`")
+    );
+    Ok(())
 }
 
 /// Rust never sees a kernel's body run, so kernite says which of the module's items it named, and
@@ -2194,7 +2289,7 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
 /// only the constants nothing reads dead, and says what it cannot find where it is written. A name
 /// in a helper the kernel calls is the kernel's, and one in the definition of a constant is not.
 #[test]
-fn a_kernel_names_the_items_it_names() {
+fn a_kernel_names_the_items_it_names() -> Result {
     let src = r#"
         const ADD: usize = 1;
         const STORE: usize = 0;
@@ -2226,17 +2321,18 @@ fn a_kernel_names_the_items_it_names() {
             add(x, SPARE);
         }
     "#;
-    let module = kernite::lang::parse(src).unwrap();
-    let named = |name| {
-        let k = kernite::x86(&module, kernite::function(&module, name).unwrap(), &[]).unwrap();
-        k.mentions.into_iter().map(|m| (m.name, src[..m.span.0 as usize].lines().count())).collect::<Vec<_>>()
+    let module = kernite::lang::parse(src)?;
+    let named = |name| -> Result<_> {
+        let k = kernite::x86(&module, kernite::function(&module, name).ok_or("function gave None")?, &[])?;
+        Ok(k.mentions.into_iter().map(|m| (m.name, src[..m.span.0 as usize].lines().count())).collect::<Vec<_>>())
     };
     let at = |name: &str, line: usize| (name.to_string(), line);
     // The helper `then`, `STORE` as its value, and `ADD` in the `if` that chooses, in its body;
     // not `OFFSET`, in the branch not taken, nor `SPARE`, in a helper not called.
-    assert_eq!(named("stores"), [at("then", 12), at("STORE", 12), at("ADD", 22)]);
+    assert_eq!(named("stores")?, [at("then", 12), at("STORE", 12), at("ADD", 22)]);
     // `OFFSET` in the branch taken, and not `LANE`, which `OFFSET`'s definition names.
-    assert_eq!(named("adds"), [at("then", 18), at("ADD", 18), at("ADD", 22), at("OFFSET", 23)]);
+    assert_eq!(named("adds")?, [at("then", 18), at("ADD", 18), at("ADD", 22), at("OFFSET", 23)]);
+    Ok(())
 }
 
 /// Memory of the module's, which its x86 kernels name: a histogram they keep from call to
@@ -2292,8 +2388,8 @@ const STATICS: &str = r#"
 /// takes its address for an index; its listing names each static it names, `{COUNTS}`, for the
 /// macro to pass by `sym`.
 #[test]
-fn a_static_is_reached_at_a_displacement_from_rip() {
-    let count = kernite::x86_str(STATICS, "count").unwrap();
+fn a_static_is_reached_at_a_displacement_from_rip() -> Result {
+    let count = kernite::x86_str(STATICS, "count")?;
     let want = "# count(gpr, gpr) -> ()
 # frame: 0 bytes aligned to 0, saves []
 # x=rdi n=rsi p=rcx v=rdx c=rax
@@ -2314,9 +2410,9 @@ fn a_static_is_reached_at_a_displacement_from_rip() {
 3:
     ret
 ";
-    assert_eq!(count.text(), want);
+    assert_eq!(count.to_string(), want);
     assert_eq!(count.statics, ["SEEN", "COUNTS"]);
-    let weigh = kernite::x86_str(STATICS, "weigh").unwrap();
+    let weigh = kernite::x86_str(STATICS, "weigh")?;
     let want = "# weigh(gpr) -> ()
 # needs: avx
 # frame: 0 bytes aligned to 0, saves []
@@ -2333,15 +2429,16 @@ fn a_static_is_reached_at_a_displacement_from_rip() {
     vzeroupper
     ret
 ";
-    assert_eq!(weigh.text(), want);
+    assert_eq!(weigh.to_string(), want);
     assert_eq!(weigh.statics, ["WEIGHTS", "COUNTS", "SIGNED"]);
+    Ok(())
 }
 
 /// Each static is an array of one of Rust's numbers, at the multiple its type says, holding
 /// what it says, its bytes the lowest first, or zeros; and the constants it read.
 #[test]
-fn a_static_is_rusts_numbers_holding_what_it_says() {
-    let module = kernite::lang::parse(STATICS).unwrap();
+fn a_static_is_rusts_numbers_holding_what_it_says() -> Result {
+    let module = kernite::lang::parse(STATICS)?;
     let statics: Vec<_> = kernite::x86_statics(&module).into_iter().map(Result::unwrap).collect();
     let shape = |s: &kernite_x86::lang::Static| (s.name.clone(), s.elem, s.size, s.len, s.align, s.constant);
     let shapes: Vec<_> = statics.iter().map(|s| shape(&s.code)).collect();
@@ -2361,32 +2458,37 @@ fn a_static_is_rusts_numbers_holding_what_it_says() {
     assert_eq!(statics[3].code.init, [255, 2, 128]);
     assert_eq!(statics[0].mentions.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["N"]);
     assert!(statics[1..].iter().all(|s| s.mentions.is_empty()));
+    Ok(())
 }
 
 /// A helper takes memory of the module's as it takes stack memory: of the type it is declared.
 #[test]
-fn a_helper_takes_a_static_of_its_type() {
+fn a_helper_takes_a_static_of_its_type() -> Result {
     let src = |param: &str| {
         format!(
             "static C: global<[u32; 16]>;\nunsafe extern \"sysv64\" fn k() {{\nbump(C);\n}}\nfn bump(c: {param}) \
              {{\nlet t: gpr;\nmov(t.r32, [c + 8]);\ninc(t);\nmov([c + 8], t.r32);\n}}\n"
         )
     };
-    let code = kernite::x86_str(&src("global<[u32; 16]>"), "k").unwrap();
-    assert!(code.code().any(|l| l == "mov dword ptr [rip + {C} + 8], eax"), "{}", code.text());
-    let e = kernite::x86_str(&src("global<[u32; 8]>"), "k").unwrap_err();
+    let code = kernite::x86_str(&src("global<[u32; 16]>"), "k")?;
+    assert!(code.code().any(|l| l == "mov dword ptr [rip + {C} + 8], eax"), "{}", code.to_string());
+    let e = kernite::x86_str(&src("global<[u32; 8]>"), "k").err().ok_or("x86_str gave Ok")?;
     assert_eq!(e, "3:6: `c`: `C` is memory, `global<[u32; 16]>`; it is no `global<[u32; 8]>`");
-    let e = kernite::x86_str(&src("gpr"), "k").unwrap_err();
+    let e = kernite::x86_str(&src("gpr"), "k").err().ok_or("x86_str gave Ok")?;
     assert_eq!(e, "3:6: `c`: `C` is memory, `global<[u32; 16]>`; it is no `gpr`");
     let src = "unsafe extern \"sysv64\" fn k(x: *const f32) {\nload(x);\n}\nfn load(b: constant<u64>) {}\n";
-    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), "2:6: `b`: a gpr is no memory, `constant<u64>`");
+    assert_eq!(
+        kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?,
+        "2:6: `b`: a gpr is no memory, `constant<u64>`"
+    );
+    Ok(())
 }
 
 /// What kernite can check of an address in a static, it does, as it does for stack memory; and
 /// it refuses a write to constant memory, and an index beside a static's name, which x86 has
 /// no address for.
 #[test]
-fn a_static_is_reached_within_it() {
+fn a_static_is_reached_within_it() -> Result {
     let cases = [
         (
             "let g: gpr; zero(g); mov(g.r32, [C + g * 4]);",
@@ -2454,7 +2556,7 @@ fn a_static_is_reached_within_it() {
     let statics = "static C: global<[u32; 16]>;\nstatic W: constant<[f32; 16], 32> = [1.0; 16];\n";
     for (body, want) in cases {
         let src = format!("{statics}unsafe extern \"sysv64\" fn k(x: *const f32) {{\n{body}\n}}\n");
-        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), want, "{body}");
+        assert_eq!(kernite::x86_str(&src, "k").err().ok_or("x86_str gave Ok")?, want, "{body}");
     }
     // As far as one past the end for `lea`, which reaches nothing, of constant memory as well;
     // and an instruction that reads and writes memory of the module's, which is no constant.
@@ -2462,15 +2564,16 @@ fn a_static_is_reached_within_it() {
         "{statics}unsafe extern \"sysv64\" fn k() {{\nlet g: gpr;\nlea(g, [C + 64]);\nlea(g, [W]);\nadd(dword[C + 8], \
          1);\n}}\n"
     );
-    let code = kernite::x86_str(&src, "k").unwrap();
+    let code = kernite::x86_str(&src, "k")?;
     let want = ["lea rax, [rip + {C} + 64]", "lea rax, [rip + {W}]", "add dword ptr [rip + {C} + 8], 1", "ret"];
     assert_eq!(code.code().collect::<Vec<_>>(), want);
+    Ok(())
 }
 
 /// A static of an x86 kernel's module is of Rust's numbers, as the host reads them, of a size
 /// a displacement from `rip` reaches; it holds what it says, and has a name of its own.
 #[test]
-fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() {
+fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() -> Result {
     let cases = [
         (
             "static mut A: global<u32>;",
@@ -2553,13 +2656,15 @@ fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() {
     ];
     let k = "unsafe extern \"sysv64\" fn k(x: *mut u32) {}";
     for (items, want) in cases {
-        assert_eq!(kernite::x86_str(&format!("{items}\n{k}"), "k").unwrap_err(), want, "{items}");
+        assert_eq!(kernite::x86_str(&format!("{items}\n{k}"), "k").err().ok_or("x86_str gave Ok")?, want, "{items}");
     }
     // The kernel itself says that it names one that does not compile.
     let src =
         "static A: global<[u32; 2]> = [1];\nunsafe extern \"sysv64\" fn j() {\nlet g: gpr;\nmov(g.r32, [A]);\n}\n";
-    let module = kernite::lang::parse(src).unwrap();
-    let e = kernite::x86(&module, kernite::function(&module, "j").unwrap(), &[]).unwrap_err();
+    let module = kernite::lang::parse(src)?;
+    let e = kernite::x86(&module, kernite::function(&module, "j").ok_or("function gave None")?, &[])
+        .err()
+        .ok_or("x86 gave Ok")?;
     assert_eq!(e.at(src), "4:13: `A` does not compile, so no kernel names it");
     // Every number of each type, and a name like a listing's that is none of its.
     for items in [
@@ -2571,15 +2676,16 @@ fn a_static_is_memory_of_rusts_numbers_holding_what_it_says() {
         "static A: global<[u8; 2147483647]>;",
         "static c: global<u32>; static cf1: global<u32>; static c0x: global<u32>;",
     ] {
-        kernite::x86_str(&format!("{items}\n{k}"), "k").unwrap();
+        kernite::x86_str(&format!("{items}\n{k}"), "k")?;
     }
+    Ok(())
 }
 
 /// A module's statics are its kernels' memory: the process's for x86 kernels, and the GPU's
 /// for PTX ones, or for none. A module of both kinds of kernel and a static is two modules,
 /// which its first static says, whatever comes before it.
 #[test]
-fn a_static_is_its_kernels_memory() {
+fn a_static_is_its_kernels_memory() -> Result {
     use kernite::Owner::{Gpu, Process};
     let x86 = "unsafe extern \"sysv64\" fn k(x: u64) -> u64 { ret(x); }";
     let gpu = "unsafe extern \"ptx-kernel\" fn g(x: *mut u32) { st.global.u32([x], 1); }";
@@ -2587,9 +2693,9 @@ fn a_static_is_its_kernels_memory() {
     let helper = "fn h(x: gpr) { inc(x); }";
     let other = "extern \"C\" fn c() {}";
     let (s, t) = ("static S: global<u32>;", "static T: constant<u32> = 1;");
-    let whose = |items: &[&str]| {
+    let whose = |items: &[&str]| -> Result<_> {
         let src = items.join("\n");
-        kernite::owner(&kernite::lang::parse(&src).unwrap()).map_err(|e| e.at(&src))
+        Ok(kernite::owner(&kernite::lang::parse(&src)?).map_err(|e| e.at(&src)))
     };
     let split = "a static is memory of the module's kernels: the GPU's, for PTX kernels, or the process's, for x86 \
                  ones; and this module has both, so it is two modules, one of each kind of kernel and the statics they \
@@ -2608,8 +2714,9 @@ fn a_static_is_its_kernels_memory() {
         (&[helper, x86, func, s], Err(format!("4:8: {split}"))),
     ];
     for (items, want) in cases {
-        assert_eq!(whose(items), want, "{items:?}");
+        assert_eq!(whose(items)?, want, "{items:?}");
     }
+    Ok(())
 }
 
 /// A cooperative kernel's thread reads its place in the grid from the register after its
@@ -2617,7 +2724,7 @@ fn a_static_is_its_kernels_memory() {
 /// each thread counts itself in with `lock xadd`, and the last lets the others go, who spin
 /// on the generation with `pause`. Its labels are the kernel's own, beside the body's.
 #[test]
-fn a_cooperative_kernel_waits_for_its_grid_at_a_barrier_of_its_own() {
+fn a_cooperative_kernel_waits_for_its_grid_at_a_barrier_of_its_own() -> Result {
     let src = r#"
         #[cooperative]
         unsafe extern "sysv64" fn k(x: *mut u64) {
@@ -2694,7 +2801,8 @@ fn a_cooperative_kernel_waits_for_its_grid_at_a_barrier_of_its_own() {
     mov qword ptr [rdi + rax*8], rcx
     ret
 ";
-    assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
+    Ok(())
 }
 
 /// The cooperative kernel `k` around `body`, compiled, or the error.
@@ -2707,7 +2815,7 @@ fn cooperative(params: &str, body: &str) -> Result<String, String> {
 /// thread, in a kernel that runs on a grid, `#[cooperative]`, which takes five integers at
 /// most and returns nothing.
 #[test]
-fn the_grid_is_a_cooperative_kernels_to_read_and_wait_for() {
+fn the_grid_is_a_cooperative_kernels_to_read_and_wait_for() -> Result {
     let cases = [
         (
             "let t: gpr; mov(t, grid.block);",
@@ -2730,7 +2838,7 @@ fn the_grid_is_a_cooperative_kernels_to_read_and_wait_for() {
         ),
     ];
     for (body, want) in cases {
-        assert_eq!(cooperative("x: usize", body).unwrap_err(), want, "{body}");
+        assert_eq!(cooperative("x: usize", body).err().ok_or("cooperative gave Ok")?, want, "{body}");
     }
     let not = [
         (
@@ -2744,27 +2852,28 @@ fn the_grid_is_a_cooperative_kernels_to_read_and_wait_for() {
         ),
     ];
     for (body, want) in not {
-        assert_eq!(compile("x: usize", body).unwrap_err(), want, "{body}");
+        assert_eq!(compile("x: usize", body).err().ok_or("compile gave Ok")?, want, "{body}");
     }
     // The place takes the sixth integer register; floats go in registers of their own.
     let five = "a: usize, b: usize, c: usize, d: usize, e: usize";
-    assert_eq!(cooperative(&format!("{five}, x: f32"), "").unwrap(), "ret");
+    assert_eq!(cooperative(&format!("{five}, x: f32"), "")?, "ret");
     assert_eq!(
-        cooperative(&format!("{five}, f: usize"), "").unwrap_err(),
+        cooperative(&format!("{five}, f: usize"), "").err().ok_or("cooperative gave Ok")?,
         "2:82: a cooperative kernel takes five integers at most: SysV passes six in registers, and the sixth is the \
          thread's place in the grid"
     );
     let src = "#[cooperative]\nunsafe extern \"sysv64\" fn k() -> f32 {}\n";
     assert_eq!(
-        kernite::x86_str(src, "k").unwrap_err(),
+        kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?,
         "2:34: a cooperative kernel's threads return nothing: they write what they compute to memory"
     );
+    Ok(())
 }
 
 /// A GPU's tuning directives are the GPU kernel's: an x86 kernel says none, however many
 /// instances it has, and the error is one, at the directive.
 #[test]
-fn an_x86_kernel_says_no_gpu_directive() {
+fn an_x86_kernel_says_no_gpu_directive() -> Result {
     let not = |name: &str| {
         format!(
             "`#[{name}(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`; `k` is a kernel for x86-64, which the \
@@ -2778,25 +2887,34 @@ fn an_x86_kernel_says_no_gpu_directive() {
         ("#[maxnreg(32)]", "maxnreg"),
     ] {
         let src = format!("{attr}\nunsafe extern \"sysv64\" fn k() {{}}\n");
-        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("1:3: {}", not(name)), "{attr}");
+        assert_eq!(
+            kernite::x86_str(&src, "k").err().ok_or("x86_str gave Ok")?,
+            format!("1:3: {}", not(name)),
+            "{attr}"
+        );
     }
     // What PTX has not is said by its name, whatever the kernel.
     let src = "#[maxnctapersm(2)]\nunsafe extern \"sysv64\" fn k() {}\n";
     assert_eq!(
-        kernite::x86_str(src, "k").unwrap_err(),
+        kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?,
         "1:3: PTX has no `.maxnctapersm` from 2.1 on; `#[minnctapersm(..)]` gives the blocks an SM should hold at \
          once, at least"
     );
     let src = "#[maxnreg(32)] #[instances(1, 2)]\nunsafe extern \"sysv64\" fn k<const N: u32>() {}\n";
     for name in ["k::<1>", "k::<2>"] {
-        assert_eq!(kernite::x86_str(src, name).unwrap_err(), format!("1:3: {}", not("maxnreg")), "{name}");
+        assert_eq!(
+            kernite::x86_str(src, name).err().ok_or("x86_str gave Ok")?,
+            format!("1:3: {}", not("maxnreg")),
+            "{name}"
+        );
     }
+    Ok(())
 }
 
 /// Stack memory is the kernel's frame: the header says where each slot lies, and brackets reach
 /// it from `rsp`, an index beside it.
 #[test]
-fn stack_memory_is_part_of_the_frame() {
+fn stack_memory_is_part_of_the_frame() -> Result {
     let src = r#"
         unsafe extern "sysv64" fn k(x: *const f32, i: usize) -> f32 {
             let n: local<u64>;
@@ -2837,13 +2955,14 @@ fn stack_memory_is_part_of_the_frame() {
     vzeroupper
     ret
 ";
-    assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
+    Ok(())
 }
 
 /// Until written, stack memory holds whatever was there: kernite clears none of it, and takes a
 /// read of it before any write, as it does not of a variable.
 #[test]
-fn stack_memory_holds_whatever_was_there_until_written() {
+fn stack_memory_holds_whatever_was_there_until_written() -> Result {
     let src = "unsafe extern \"sysv64\" fn k() -> u64 {\nlet b: local<u64>;\nlet g: gpr;\nmov(g, [b]);\nret(g);\n}\n";
     let want = "# k() -> gpr
 # frame: 8 bytes aligned to 8, saves []
@@ -2852,7 +2971,8 @@ fn stack_memory_holds_whatever_was_there_until_written() {
     mov rax, qword ptr [rsp - 8]
     ret
 ";
-    assert_eq!(kernite::x86_str(src, "k").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
+    Ok(())
 }
 
 /// The stack pointer is 8 past a multiple of 16 on entry, as SysV says, so a frame aligned to 16 or less keeps no `rbp`
@@ -2861,7 +2981,7 @@ fn stack_memory_holds_whatever_was_there_until_written() {
 /// is as long as it is. One aligned to more keeps the caller's stack pointer in `rbp`, aligns its own with `and`, and
 /// takes the frame down from `rbp`.
 #[test]
-fn only_a_frame_aligned_past_16_keeps_the_stack_pointer_in_rbp() {
+fn only_a_frame_aligned_past_16_keeps_the_stack_pointer_in_rbp() -> Result {
     let cases = [
         ("local<u64>", "mov rax, qword ptr [rsp - 8]\nret"),
         ("local<[u64; 2], 16>", "mov rax, qword ptr [rsp - 24]\nret"),
@@ -2875,32 +2995,34 @@ fn only_a_frame_aligned_past_16_keeps_the_stack_pointer_in_rbp() {
         ),
     ];
     for (ty, want) in cases {
-        assert_eq!(compile("", &format!("let b: {ty}; let g: gpr; mov(g, [b]);")).unwrap(), want, "{ty}");
+        assert_eq!(compile("", &format!("let b: {ty}; let g: gpr; mov(g, [b]);"))?, want, "{ty}");
     }
     let src = "unsafe extern \"sysv64\" fn k() {\nlet b: local<[u64; 2], 16>;\nlet g: gpr;\nmov(g, [b]);\n}\n";
-    let text = kernite::x86_str(src, "k").unwrap().text();
+    let text = kernite::x86_str(src, "k")?.to_string();
     assert!(
         text.contains("\n# frame: 16 bytes aligned to 16, saves [], and 8 more so that it is aligned to 16\n"),
         "{text}"
     );
+    Ok(())
 }
 
 /// An `add` takes 2^31 - 1 at most, and the stack pointer may move by 2^31 bytes: a frame of 2^31 bytes and the 8 more
 /// that align it to 16 keeps 8 bytes below the stack pointer, and the kernel takes the rest down by two. Eighteen xmm
 /// alive at once spill two, 16 bytes each, after stack memory of 2^31 - 32 bytes.
 #[test]
-fn a_frame_of_2_to_the_31_bytes_is_taken_down_by_two_adds() {
+fn a_frame_of_2_to_the_31_bytes_is_taken_down_by_two_adds() -> Result {
     let loads: String = (0..18).map(|i| format!("let v{i}: xmm;\nvmovups(v{i}, [x + {}]);\n", 16 * i)).collect();
     let sums: String = (1..18).map(|i| format!("vaddps(v0, v0, v{i});\n")).collect();
     let src = format!(
         "unsafe extern \"sysv64\" fn k(x: *mut f32) {{\nlet big: local<[u8; 2147483616], 16>;\n{loads}{sums}\
          vmovups([big], v0);\n}}\n"
     );
-    let text = kernite::x86_str(&src, "k").unwrap().text();
+    let text = kernite::x86_str(&src, "k")?.to_string();
     let frame = "# frame: 2147483648 bytes aligned to 16, saves [], and 8 more so that it is aligned to 16\n";
     assert!(text.contains(frame), "{text}");
     assert!(text.contains("\n    lea r11, [rsp - 2147483648]\n"), "{text}");
     assert!(text.ends_with("\n    add rsp, 2147483647\n    add rsp, 1\n    ret\n"), "{text}");
+    Ok(())
 }
 
 /// A frame of more than a page is touched a page at a time on the way down, as Rust's functions are, so that a frame
@@ -2908,11 +3030,11 @@ fn a_frame_of_2_to_the_31_bytes_is_taken_down_by_two_adds() {
 /// than a page below memory the kernel has touched, those below the stack pointer counted. Past three pages it is
 /// touched in a loop. What the alignment may add counts.
 #[test]
-fn a_frame_of_more_than_a_page_is_touched_a_page_at_a_time() {
-    let prologue = |ty: &str| {
-        let code = compile("", &format!("let b: {ty}; let g: gpr; mov(g, [b]);")).unwrap();
-        let end = code.find("\nmov rax").unwrap();
-        code[..end].to_string()
+fn a_frame_of_more_than_a_page_is_touched_a_page_at_a_time() -> Result {
+    let prologue = |ty: &str| -> Result<_> {
+        let code = compile("", &format!("let b: {ty}; let g: gpr; mov(g, [b]);"))?;
+        let end = code.find("\nmov rax").ok_or("find gave None")?;
+        Ok(code[..end].to_string())
     };
     let page = "sub rsp, 4096\nor qword ptr [rsp], 0";
     let cases = [
@@ -2928,8 +3050,9 @@ fn a_frame_of_more_than_a_page_is_touched_a_page_at_a_time() {
         ("local<[u8; 16385]>", format!("lea r11, [rsp - 16384]\n2:\n{page}\ncmp rsp, r11\njne 2b")),
     ];
     for (ty, want) in cases {
-        assert_eq!(prologue(ty), want, "{ty}");
+        assert_eq!(prologue(ty)?, want, "{ty}");
     }
+    Ok(())
 }
 
 /// A frame of more than 2^31 bytes, its stack memory and the variables that spilled, is more than
@@ -2938,14 +3061,14 @@ fn a_frame_of_more_than_a_page_is_touched_a_page_at_a_time() {
 /// compiles, its last spill at the furthest an address reaches and its loop's end at the furthest
 /// down; a byte more of stack memory makes it 32 bytes more, as a spill is aligned to 32.
 #[test]
-fn a_frame_past_what_an_address_reaches_is_refused() {
+fn a_frame_past_what_an_address_reaches_is_refused() -> Result {
     let loads: String = (0..18).map(|i| format!("let v{i}: ymm;\nvmovups(v{i}, [x + {}]);\n", 32 * i)).collect();
     let sums: String = (1..18).map(|i| format!("vaddps(v0, v0, v{i});\n")).collect();
     let src = format!(
         "#[instances(2147483584, 2147483585)]\nunsafe extern \"sysv64\" fn k<const N: usize>(x: *mut f32) {{\n\
          let big: local<[u8; N], 32>;\n{loads}{sums}vmovups([big], v0);\n}}\n"
     );
-    let text = kernite::x86_str(&src, "k::<2147483584>").unwrap().text();
+    let text = kernite::x86_str(&src, "k::<2147483584>")?.to_string();
     let frame = "# frame: 2147483648 bytes aligned to 32, saves []
 # big: 2147483584 bytes at rsp
 # v16, spilled: 32 bytes at rsp + 2147483584
@@ -2955,14 +3078,14 @@ fn a_frame_past_what_an_address_reaches_is_refused() {
     assert!(text.contains("\n    lea r11, [rsp - 2147483648]\n"), "{text}");
     let want = "2:27: in `k::<2147483585>`: the kernel's frame, its stack memory and the variables that spilled, \
                 reaches 2147483680 bytes past the stack pointer: more than an address does";
-    assert_eq!(kernite::x86_str(&src, "k::<2147483585>").unwrap_err(), want);
+    assert_eq!(kernite::x86_str(&src, "k::<2147483585>").err().ok_or("x86_str gave Ok")?, want);
+    Ok(())
 }
 
 /// The prologue's loop takes the first label, and the body's come after it.
 #[test]
-fn the_prologues_loop_comes_before_the_bodys_labels() {
-    let code =
-        compile("n: usize", "let b: local<[u64; 4096]>;\nlabel(top);\nmov([b], n);\ndec(n);\njnz(top);").unwrap();
+fn the_prologues_loop_comes_before_the_bodys_labels() -> Result {
+    let code = compile("n: usize", "let b: local<[u64; 4096]>;\nlabel(top);\nmov([b], n);\ndec(n);\njnz(top);")?;
     let want = "lea r11, [rsp - 28672]
 2:
 sub rsp, 4096
@@ -2977,30 +3100,35 @@ jnz 3b
 add rsp, 32640
 ret";
     assert_eq!(code, want);
+    Ok(())
 }
 
 /// A helper takes stack memory as a parameter of the type it was declared.
 #[test]
-fn a_helper_takes_stack_memory_of_its_type() {
+fn a_helper_takes_stack_memory_of_its_type() -> Result {
     let src = |param: &str| {
         format!(
             "unsafe extern \"sysv64\" fn k() {{\nlet buf: local<[f32; 16], 32>;\nlet v: ymm;\nzero(v);\nstore(buf, \
              v);\n}}\nfn store(b: {param}, v: ymm) {{\nvmovaps([b + 32], v);\n}}\n"
         )
     };
-    let code = kernite::x86_str(&src("local<[f32; 16], 32>"), "k").unwrap();
-    assert!(code.code().any(|l| l == "vmovaps ymmword ptr [rsp + 32], ymm0"), "{}", code.text());
-    let e = kernite::x86_str(&src("local<[f32; 16]>"), "k").unwrap_err();
+    let code = kernite::x86_str(&src("local<[f32; 16], 32>"), "k")?;
+    assert!(code.code().any(|l| l == "vmovaps ymmword ptr [rsp + 32], ymm0"), "{}", code.to_string());
+    let e = kernite::x86_str(&src("local<[f32; 16]>"), "k").err().ok_or("x86_str gave Ok")?;
     assert_eq!(e, "5:7: `b`: `buf` is memory, `local<[f32; 16], 32>`; it is no `local<[f32; 16]>`");
-    let e = kernite::x86_str(&src("ymm"), "k").unwrap_err();
+    let e = kernite::x86_str(&src("ymm"), "k").err().ok_or("x86_str gave Ok")?;
     assert_eq!(e, "5:7: `b`: `buf` is memory, `local<[f32; 16], 32>`; it is no `ymm`");
     let src = "unsafe extern \"sysv64\" fn k(x: *const f32) {\nload(x);\n}\nfn load(b: local<u64>) {}\n";
-    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), "2:6: `b`: a gpr is no memory, `local<u64>`");
+    assert_eq!(
+        kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?,
+        "2:6: `b`: a gpr is no memory, `local<u64>`"
+    );
+    Ok(())
 }
 
 /// What kernite can check of stack memory, it does: its type, and an address where the index is 0.
 #[test]
-fn stack_memory_is_checked_where_kernite_can() {
+fn stack_memory_is_checked_where_kernite_can() -> Result {
     let cases = [
         ("let b: local<[f32]>;", "2:8: `local<[f32]>` has no size: stack memory has one, as in `local<[f32; 64]>`"),
         ("let b: local<[f32; 0]>;", "2:8: `local<[f32; 0]>` holds nothing"),
@@ -3099,8 +3227,9 @@ fn stack_memory_is_checked_where_kernite_can() {
         ),
     ];
     for (body, want) in cases {
-        assert_eq!(compile("x: *const f32", body).unwrap_err(), want, "{body}");
+        assert_eq!(compile("x: *const f32", body).err().ok_or("compile gave Ok")?, want, "{body}");
     }
+    Ok(())
 }
 
 /// Functions that call: `gcd` itself, and the rest `gcd`, each other and the functions they
@@ -3176,7 +3305,7 @@ const CALLERS: &str = r#"
 /// and its callee gives back in rax: here, where the arguments were, but for the swap. A `ret` follows the call, so it
 /// is a jump, and `gcd` goes on in the stack it has, as a loop does.
 #[test]
-fn a_function_calls_itself_with_its_arguments_where_sysv_passes_them() {
+fn a_function_calls_itself_with_its_arguments_where_sysv_passes_them() -> Result {
     let want = "# gcd(gpr, gpr) -> gpr
 # frame: 0 bytes aligned to 0, saves []
 # a=rdi,rax b=rsi t=rax g=rax
@@ -3195,7 +3324,8 @@ fn a_function_calls_itself_with_its_arguments_where_sysv_passes_them() {
     jmp {f0}
 # f0: gcd
 ";
-    assert_eq!(kernite::x86_str(CALLERS, "gcd").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(CALLERS, "gcd")?.to_string(), want);
+    Ok(())
 }
 
 /// A parameter that a call needs the register of moves on entry to the register it waits out the call in, and an
@@ -3217,7 +3347,7 @@ unsafe extern \"sysv64\" fn g(a: u64, b: u64) -> u64 { sub(a, b); ret(a); }";
     ret
 # f0: g
 ";
-    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
     Ok(())
 }
 
@@ -3242,7 +3372,7 @@ unsafe extern \"sysv64\" fn h(a: f32, b: f32) -> f32 { vsubss(a, a, b); vaddss(b
     ret
 # f0: h
 ";
-    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
     Ok(())
 }
 
@@ -3263,7 +3393,7 @@ unsafe extern \"sysv64\" fn g(a: u64, b: u64) -> u64 { sub(a, b); add(b, 1); ret
     ret
 # f0: g
 ";
-    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
     Ok(())
 }
 
@@ -3288,7 +3418,7 @@ unsafe extern \"sysv64\" fn g(a: u64, b: u64) -> u64 { sub(a, b); ret(a); }";
     ret
 # f0: g
 ";
-    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
     Ok(())
 }
 
@@ -3310,7 +3440,7 @@ unsafe extern \"sysv64\" fn g(a: u64, b: u64) -> u64 { sub(a, b); ret(a); }";
     ret
 # f0: g
 ";
-    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
     let src =
         "unsafe extern \"sysv64\" fn k(x: f32) -> f32 { let r: xmm; call(r, h, (x, x)); vaddss(r, r, x); ret(r); }
 unsafe extern \"sysv64\" fn h(a: f32, b: f32) -> f32 { vsubss(a, a, b); ret(a); }";
@@ -3326,7 +3456,7 @@ unsafe extern \"sysv64\" fn h(a: f32, b: f32) -> f32 { vsubss(a, a, b); ret(a); 
     ret
 # f0: h
 ";
-    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
     Ok(())
 }
 
@@ -3353,7 +3483,7 @@ unsafe extern \"sysv64\" fn g(a: u64, b: u64) -> u64 { sub(a, b); ret(a); }";
     ret
 # f0: g
 ";
-    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
     let src = "unsafe extern \"sysv64\" fn k(x: u64, y: u64) -> u64 { let (r, q): (gpr, gpr); test(y, y); jz(out); \
                call(q, g, (y, y)); label(out); call(r, g, (x, y)); add(r, x); ret(r); }
 unsafe extern \"sysv64\" fn g(a: u64, b: u64) -> u64 { sub(a, b); ret(a); }";
@@ -3374,7 +3504,7 @@ unsafe extern \"sysv64\" fn g(a: u64, b: u64) -> u64 { sub(a, b); ret(a); }";
     ret
 # f0: g
 ";
-    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
     Ok(())
 }
 
@@ -3410,7 +3540,7 @@ fn a_move_in_a_loop_is_left_out_where_the_way_in_and_the_jump_back_leave_the_val
 # f0: h
 # f1: g
 ";
-    assert_eq!(kernite::x86_str(&src, "k")?.text(), want);
+    assert_eq!(kernite::x86_str(&src, "k")?.to_string(), want);
     let src = format!(
         "unsafe extern \"sysv64\" fn k(x: u64, n: u64) -> u64 {{ let (r, s): (gpr, gpr); mov(s, 0); jmp(test); \
          label(top); call(r, h, (x)); add(s, r); label(test); dec(n); jnz(top); call(r, g, (s, 1)); add(r, x); \
@@ -3438,7 +3568,7 @@ fn a_move_in_a_loop_is_left_out_where_the_way_in_and_the_jump_back_leave_the_val
 # f0: h
 # f1: g
 ";
-    assert_eq!(kernite::x86_str(&src, "k")?.text(), want);
+    assert_eq!(kernite::x86_str(&src, "k")?.to_string(), want);
     let src = "unsafe extern \"sysv64\" fn k(x: u64, n: u64) -> u64 { let (r, s): (gpr, gpr); mov(s, 0); label(top); \
                call(r, g, (x, 1)); add(s, r); dec(n); jnz(top); add(s, x); ret(s); }
 unsafe extern \"sysv64\" fn g(a: u64, b: u64) -> u64 { sub(a, b); ret(a); }";
@@ -3462,7 +3592,7 @@ unsafe extern \"sysv64\" fn g(a: u64, b: u64) -> u64 { sub(a, b); ret(a); }";
     ret
 # f0: g
 ";
-    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
     Ok(())
 }
 
@@ -3486,7 +3616,7 @@ fn a_move_into_a_register_that_holds_another_value_or_part_of_this_one_stays() -
     add rax, rsi
     ret
 ";
-    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
     let src = "unsafe extern \"sysv64\" fn k(p: *mut f32) { let (x, y, z): (ymm, xmm, ymm); vmovups(x, [p]); \
                vmovaps(y, x.xmm); vmovss([p], y); vmovaps(z, x); vmovups([p + 32], z); vmovups([p + 64], x); }";
     let want = "# k(gpr) -> ()
@@ -3502,7 +3632,7 @@ fn a_move_into_a_register_that_holds_another_value_or_part_of_this_one_stays() -
     vzeroupper
     ret
 ";
-    assert_eq!(kernite::x86_str(src, "k")?.text(), want);
+    assert_eq!(kernite::x86_str(src, "k")?.to_string(), want);
     Ok(())
 }
 
@@ -3510,7 +3640,7 @@ fn a_move_into_a_register_that_holds_another_value_or_part_of_this_one_stays() -
 /// live across one stays in a register none of them writes, here rcx, for `gcd` writes rdi, rsi and rax alone, and
 /// calls itself; and a vector stays in the register it is in, for `nothing` writes none.
 #[test]
-fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
+fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() -> Result {
     let want = "# plus(gpr) -> gpr
 # frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
 # x=rcx,rdi y=rax b=rsi
@@ -3523,7 +3653,7 @@ fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
     ret
 # f0: gcd
 ";
-    assert_eq!(kernite::x86_str(CALLERS, "plus").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(CALLERS, "plus")?.to_string(), want);
     let want = "# keep(gpr) -> ()
 # needs: avx
 # frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
@@ -3537,7 +3667,8 @@ fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
     ret
 # f0: nothing
 ";
-    assert_eq!(kernite::x86_str(CALLERS, "keep").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(CALLERS, "keep")?.to_string(), want);
+    Ok(())
 }
 
 /// A vector `v` stays in a register across a call, though not in one the call changes. A call changes the registers its
@@ -3547,7 +3678,7 @@ fn a_value_live_across_a_call_is_kept_where_the_call_leaves_it() {
 /// the upper half. A call at an address with the functions it may reach given is of each; with none given, or of the
 /// kernel itself, which is not compiled yet, it changes every vector register, and `v` spills whatever it reads.
 #[test]
-fn a_vector_live_across_a_call_spills_only_where_the_call_may_clear_a_half_the_kernel_reads() {
+fn a_vector_live_across_a_call_spills_only_where_the_call_may_clear_a_half_the_kernel_reads() -> Result {
     let at = "let fp: gpr; lea(fp, [nothing]);";
     // Each case a call, what the kernel reads of `v` after it, and where `v` is: its registers, and `spilled` if the
     // frame keeps it.
@@ -3578,11 +3709,12 @@ fn a_vector_live_across_a_call_spills_only_where_the_call_may_clear_a_half_the_k
     ];
     for (setup, call, read, want) in cases {
         let body = format!("let v: ymm; {setup} vmovups(v, [p]); {call} vmovups([p], {read});");
-        let listing = listing("p: *mut f32", "", &body).unwrap();
-        let (_, regs) = listing.regs.iter().find(|(name, _)| name == "v").unwrap();
+        let listing = listing("p: *mut f32", "", &body)?;
+        let (_, regs) = listing.regs.iter().find(|(name, _)| name == "v").ok_or("find gave None")?;
         let spilled = if listing.frame.slots.iter().any(|s| s.spill) { " spilled" } else { "" };
-        assert_eq!(format!("{regs}{spilled}"), want, "{call} {read}\n{}", listing.text());
+        assert_eq!(format!("{regs}{spilled}"), want, "{call} {read}\n{}", listing.to_string());
     }
+    Ok(())
 }
 
 /// A vector that an address takes its indices from, as a gather's are, counts as read whole after a call of a function
@@ -3590,7 +3722,7 @@ fn a_vector_live_across_a_call_spills_only_where_the_call_may_clear_a_half_the_k
 /// much of the vector an address reads. So the vector stays in the frame, and in its register where the call clears no
 /// half.
 #[test]
-fn a_vector_used_as_the_indices_of_an_address_counts_as_read_whole_after_a_call_that_clears_a_half() {
+fn a_vector_used_as_the_indices_of_an_address_counts_as_read_whole_after_a_call_that_clears_a_half() -> Result {
     let cases = [
         ("nothing", "vpgatherdd(d, [p + v * 4], m)", false),
         ("runs_vzeroupper", "vpgatherdd(d, [p + v * 4], m)", true),
@@ -3601,28 +3733,30 @@ fn a_vector_used_as_the_indices_of_an_address_counts_as_read_whole_after_a_call_
             "let (v, d, m): (ymm, ymm, ymm); vmovups(v, [p]); call({callee}); ones(m); zero(d); {gather}; \
              vmovups([p], d);"
         );
-        let listing = listing("p: *mut f32", "", &body).unwrap();
-        assert_eq!(listing.frame.slots.iter().any(|s| s.spill), spills, "{callee} {gather}\n{}", listing.text());
+        let listing = listing("p: *mut f32", "", &body)?;
+        assert_eq!(listing.frame.slots.iter().any(|s| s.spill), spills, "{callee} {gather}\n{listing}");
     }
+    Ok(())
 }
 
 /// The registers every call leaves as they were are rbx and r12 to r15: an integer alive across a call of a function
 /// that changes all the others is kept in them alone, five, each saved for the kernel's caller, and a sixth is spilled
 /// to the frame. Across a call of one that changes none, all six stay where they are.
 #[test]
-fn a_value_alive_across_a_call_that_changes_every_register_is_kept_in_rbx_or_r12_to_r15() {
+fn a_value_alive_across_a_call_that_changes_every_register_is_kept_in_rbx_or_r12_to_r15() -> Result {
     let params = "a: u64, b: u64, c: u64, d: u64, e: u64, f: u64";
     let body = |callee| format!("call({callee}); add(a, b); add(a, c); add(a, d); add(a, e); add(a, f); ret(a);");
-    let code = calling(params, " -> u64", &body("wipe")).unwrap();
+    let code = calling(params, " -> u64", &body("wipe"))?;
     let want = "push rbx\npush r12\npush r13\npush r14\npush r15\nsub rsp, 16\nmov qword ptr [rsp], r9\nmov rbx, \
                 r8\nmov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\ncall {f0}\nadd r15, r14\nadd r15, \
                 r13\nadd r15, r12\nadd r15, rbx\nmov rax, qword ptr [rsp]\nadd r15, rax\nmov rax, r15\nadd rsp, \
                 16\npop r15\npop r14\npop r13\npop r12\npop rbx\nret";
     assert_eq!(code, want);
-    let code = calling(params, " -> u64", &body("nothing")).unwrap();
+    let code = calling(params, " -> u64", &body("nothing"))?;
     let want = "sub rsp, 8\ncall {f0}\nadd rdi, rsi\nadd rdi, rdx\nadd rdi, rcx\nadd rdi, r8\nadd rdi, r9\nmov rax, \
                 rdi\nadd rsp, 8\nret";
     assert_eq!(code, want);
+    Ok(())
 }
 
 /// A call changes the registers its callee writes, and those of each function the callee calls, by a jump or a call, by
@@ -3632,7 +3766,7 @@ fn a_value_alive_across_a_call_that_changes_every_register_is_kept_in_rbx_or_r12
 /// compiled yet, and a call of a function that does not compile reaches code kernite does not have: each changes every
 /// register a callee may, and the integer stays in rbx, which every call leaves as it was and the kernel saves.
 #[test]
-fn a_call_changes_the_registers_of_each_function_it_may_reach() {
+fn a_call_changes_the_registers_of_each_function_it_may_reach() -> Result {
     let kernel = |reg: &str, calls: &str| match reg {
         "rbx" => format!("push rbx\nmov rbx, 5\n{calls}\nadd rbx, 1\nmov rax, rbx\npop rbx\nret"),
         _ => format!("sub rsp, 8\nmov {reg}, 5\n{calls}\nadd {reg}, 1\nmov rax, {reg}\nadd rsp, 8\nret"),
@@ -3660,15 +3794,16 @@ fn a_call_changes_the_registers_of_each_function_it_may_reach() {
     ];
     for (call, reg, calls) in cases {
         let body = format!("let x: gpr; mov(x, 5); {call} add(x, 1); ret(x);");
-        assert_eq!(calling("", " -> u64", &body).unwrap(), kernel(reg, calls), "{call}");
+        assert_eq!(calling("", " -> u64", &body)?, kernel(reg, calls), "{call}");
     }
+    Ok(())
 }
 
 /// `lea` takes the address of a function of the module, rip-relative, and a call through the
 /// gpr that holds it calls one of the functions taken together last, which take what it
 /// passes. A `ret` follows it, so it is a jump to the address.
 #[test]
-fn a_call_through_a_gpr_calls_one_of_the_functions_taken_together_last() {
+fn a_call_through_a_gpr_calls_one_of_the_functions_taken_together_last() -> Result {
     let want = "# through(gpr) -> gpr
 # frame: 0 bytes aligned to 0, saves []
 # a=rdi,rsi fp=rax r=rax
@@ -3677,18 +3812,19 @@ fn a_call_through_a_gpr_calls_one_of_the_functions_taken_together_last() {
     jmp rax
 # f0: gcd
 ";
-    assert_eq!(kernite::x86_str(CALLERS, "through").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(CALLERS, "through")?.to_string(), want);
+    Ok(())
 }
 
 /// A function that never returns, `-> !`, ends each way out in `ud2` or in a call of such a
 /// function, which no epilogue follows.
 #[test]
-fn a_function_that_never_returns_ends_in_ud2_or_a_call_of_one() {
+fn a_function_that_never_returns_ends_in_ud2_or_a_call_of_one() -> Result {
     let want = "# fail() -> !
 # frame: 0 bytes aligned to 0, saves []
     ud2
 ";
-    assert_eq!(kernite::x86_str(CALLERS, "fail").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(CALLERS, "fail")?.to_string(), want);
     let want = "# at(gpr, gpr, gpr) -> gpr
 # frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
 # xs=rdi n=rsi i=rdx x=rax
@@ -3702,7 +3838,8 @@ fn a_function_that_never_returns_ends_in_ud2_or_a_call_of_one() {
     call {f0}
 # f0: fail
 ";
-    assert_eq!(kernite::x86_str(CALLERS, "at").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(CALLERS, "at")?.to_string(), want);
+    Ok(())
 }
 
 /// Functions of the module for `k` to call, and some it may not. `broken` does not compile.
@@ -3758,7 +3895,7 @@ fn calling(params: &str, ret: &str, body: &str) -> Result<String, String> {
 /// lies at a multiple of 16. A frame aligned to 16 or less keeps no `rbp`; one aligned to more keeps the caller's stack
 /// pointer in `rbp`, and aligns the stack pointer with `and`.
 #[test]
-fn the_stack_pointer_is_a_multiple_of_16_at_a_call() {
+fn the_stack_pointer_is_a_multiple_of_16_at_a_call() -> Result {
     let cases = [
         ("x: u64", "call(nothing); pause();", "sub rsp, 8\ncall {f0}\npause\nadd rsp, 8\nret"),
         ("x: u64", "call(wipe); add(x, x);", "push rbx\nmov rbx, rdi\ncall {f0}\nadd rbx, rbx\npop rbx\nret"),
@@ -3804,8 +3941,9 @@ fn the_stack_pointer_is_a_multiple_of_16_at_a_call() {
         ),
     ];
     for (params, body, want) in cases {
-        assert_eq!(calling(params, "", body).unwrap(), want, "{body}");
+        assert_eq!(calling(params, "", body)?, want, "{body}");
     }
+    Ok(())
 }
 
 /// A kernel that calls nothing keeps its frame below the stack pointer, in the red zone that SysV gives a function, and
@@ -3917,7 +4055,7 @@ fn a_kernel_that_calls_nothing_keeps_up_to_128_bytes_of_its_frame_below_the_stac
     // The listing says where each slot is: the first at the bottom of the frame, with the bytes of alignment above.
     let body = "let a: local<u64>; let b: local<[f32; 4], 16>; let v: xmm; mov([a], x); vmovups(v, [p]); \
                 vmovaps([b], v); vmovaps(v, [b]); vmovups([p], v);";
-    let text = listing("p: *mut f32, x: u64", "", body).map(|l| l.text());
+    let text = listing("p: *mut f32, x: u64", "", body).map(|l| l.to_string());
     let frame = "# frame: 32 bytes aligned to 16, saves [], and 8 more so that it is aligned to 16\n\
                  # a: 8 bytes at rsp - 40\n# b: 16 bytes at rsp - 24\n";
     assert!(text.as_ref().is_ok_and(|text| text.contains(frame)), "{text:?}");
@@ -3941,7 +4079,7 @@ fn a_kernel_that_calls_nothing_keeps_up_to_128_bytes_of_its_frame_below_the_stac
 /// label between, whose `ret` stays for the way that comes to it. A kernel whose every call is a jump does not pad its
 /// frame for a call; one with a call that stays pads it, and takes the padding down before each jump.
 #[test]
-fn a_call_that_ret_follows_is_a_jump_after_the_frame_is_taken_down() {
+fn a_call_that_ret_follows_is_a_jump_after_the_frame_is_taken_down() -> Result {
     let saving = "let (r, v, fp): (gpr, ymm, gpr); let t: local<[f32; 8], 32>; vmovups(v, [p]); vmovups([t], v); \
                   call(wipe); vmovups(v, [t]); vmovups([p], v);";
     let before = "push rbx\npush r12\npush rbp\nmov rbp, rsp\nsub rsp, 32\nand rsp, -32\nmov rbx, rsi\nmov r12, \
@@ -4025,8 +4163,9 @@ fn a_call_that_ret_follows_is_a_jump_after_the_frame_is_taken_down() {
         ),
     ];
     for (params, ret, body, want) in cases {
-        assert_eq!(calling(params, ret, &body).unwrap(), want, "{body}");
+        assert_eq!(calling(params, ret, &body)?, want, "{body}");
     }
+    Ok(())
 }
 
 /// A call stays one where a jump would not do what it does: where an instruction comes between it and the `ret`, to
@@ -4036,7 +4175,7 @@ fn a_call_that_ret_follows_is_a_jump_after_the_frame_is_taken_down() {
 /// before the callee sets the upper half of what it gives back. A gpr's `r32` result is one more:
 /// `a_call_passes_what_its_callee_takes` has its `mov eax, eax`.
 #[test]
-fn a_call_stays_one_where_a_jump_would_not_do_what_it_does() {
+fn a_call_stays_one_where_a_jump_would_not_do_what_it_does() -> Result {
     let cases = [
         (
             "x: u64",
@@ -4077,8 +4216,9 @@ fn a_call_stays_one_where_a_jump_would_not_do_what_it_does() {
         ),
     ];
     for (params, ret, body, want) in cases {
-        assert_eq!(calling(params, ret, body).unwrap(), want, "{body}");
+        assert_eq!(calling(params, ret, body)?, want, "{body}");
     }
+    Ok(())
 }
 
 /// A gpr's r32 passes its 32 bits, the rest clear, and takes the result's. A float comes back as an xmm, the rest of
@@ -4088,32 +4228,33 @@ fn a_call_stays_one_where_a_jump_would_not_do_what_it_does() {
 /// ymm after, at an address with no functions given, where the call names an xmm. A float known now is read from
 /// memory, as x86 takes floats.
 #[test]
-fn a_call_passes_what_its_callee_takes() {
-    let code = calling("x: u64", " -> u64", "let r: gpr; call(r.r32, gcd, (x.r32, x)); ret(r);").unwrap();
+fn a_call_passes_what_its_callee_takes() -> Result {
+    let code = calling("x: u64", " -> u64", "let r: gpr; call(r.r32, gcd, (x.r32, x)); ret(r);")?;
     assert_eq!(code, "sub rsp, 8\nmov rsi, rdi\nmov edi, esi\ncall {f0}\nmov eax, eax\nadd rsp, 8\nret");
     let body = "let v: ymm; vmovups(v, [x]); call(v.xmm, half, (v.xmm)); vbroadcastss(v, v.xmm); vaddps(v, v, v); \
                 vmovups([x], v);";
     let want = "sub rsp, 8\nvmovups ymm0, ymmword ptr [rdi]\ncall {f0}\nvbroadcastss ymm0, xmm0\nvaddps ymm0, ymm0, \
                 ymm0\nvmovups ymmword ptr [rdi], ymm0\nadd rsp, 8\nvzeroupper\nret";
-    assert_eq!(calling("x: *mut f32", "", body).unwrap(), want);
+    assert_eq!(calling("x: *mut f32", "", body)?, want);
     let body = "let v: ymm; call(v.xmm, fp, ()); vaddps(v, v, v); vmovups([x], v);";
     let want = "push rbx\nmov rbx, rdi\ncall rsi\nvmovaps xmm0, xmm0\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr \
                 [rbx], ymm0\npop rbx\nvzeroupper\nret";
-    assert_eq!(calling("x: *mut f32, fp: u64", "", body).unwrap(), want);
-    let code = calling("x: *mut f32", "", "let v: ymm; call(v.xmm, half, 2.5); vmovss([x], v.xmm);").unwrap();
+    assert_eq!(calling("x: *mut f32, fp: u64", "", body)?, want);
+    let code = calling("x: *mut f32", "", "let v: ymm; call(v.xmm, half, 2.5); vmovss([x], v.xmm);")?;
     let want = "sub rsp, 8\nvmovss xmm0, dword ptr [rip + {c0}]\ncall {f0}\nvmovss dword ptr [rdi], xmm0\nadd rsp, \
                 8\nret";
     assert_eq!(code, want);
-    let code = calling("x: *mut f64", "", "let v: ymm; call(v.xmm, scale, (2.5f64, x)); vmovq([x], v.xmm);").unwrap();
+    let code = calling("x: *mut f64", "", "let v: ymm; call(v.xmm, scale, (2.5f64, x)); vmovq([x], v.xmm);")?;
     let want = "sub rsp, 8\nvmovq xmm0, qword ptr [rip + {c0}]\ncall {f0}\nvmovq qword ptr [rdi], xmm0\nadd rsp, \
                 8\nret";
     assert_eq!(code, want);
+    Ok(())
 }
 
 /// A call takes the module's functions SysV calls, which pass what it passes and give back
 /// what it takes, and a gpr's address of one.
 #[test]
-fn a_call_is_checked_against_its_callee() {
+fn a_call_is_checked_against_its_callee() -> Result {
     let cases = [
         ("let r: gpr; call(r, gcd, (x));", "2:26: `gcd` takes 2 arguments, not 1"),
         (
@@ -4208,14 +4349,15 @@ fn a_call_is_checked_against_its_callee() {
         ("ud2(x);", "2:1: `ud2` takes no operands, not 1"),
     ];
     for (body, want) in cases {
-        assert_eq!(calling("x: u64", "", body).unwrap_err(), want, "{body}");
+        assert_eq!(calling("x: u64", "", body).err().ok_or("calling gave Ok")?, want, "{body}");
     }
+    Ok(())
 }
 
 /// A function that never returns, `-> !`, may not, and a cooperative kernel returns. Control does not reach the end of
 /// a body that ends in a jump, as one that spins for ever does.
 #[test]
-fn a_function_that_never_returns_is_checked() {
+fn a_function_that_never_returns_is_checked() -> Result {
     let cases = [
         (
             "unsafe extern \"sysv64\" fn k() -> ! {\nret();\n}",
@@ -4238,9 +4380,10 @@ fn a_function_that_never_returns_is_checked() {
         ),
     ];
     for (src, want) in cases {
-        assert_eq!(kernite::x86_str(src, "k").unwrap_err(), want, "{src}");
+        assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, want, "{src}");
     }
-    assert_eq!(calling("", " -> !", "label(spin); pause(); jmp(spin);").unwrap(), "2:\npause\njmp 2b");
+    assert_eq!(calling("", " -> !", "label(spin); pause(); jmp(spin);")?, "2:\npause\njmp 2b");
+    Ok(())
 }
 
 /// A kernel gives back its result as SysV does: an integer, a `bool` or a pointer by `ret(g)` of a gpr, a float by
@@ -4298,7 +4441,7 @@ fn tool(var: &str, name: &str) -> Option<PathBuf> {
 /// memory at `x` of the size the form reaches, a vector of indices beside it; each integer the least the form takes
 /// there, or the most; and operand `float`, if there is one, the float parameter `f`, which the kernel does not write
 /// first, and with it no vector is read after, as a result may hold the caller's bits of `f`.
-fn call(name: &str, form: &Form, most: bool, float: Option<usize>) -> String {
+fn call(name: &str, form: &Form, most: bool, float: Option<usize>) -> Result<String, String> {
     let mut body = String::new();
     let mut after = String::new();
     let mut args = vec![];
@@ -4325,13 +4468,14 @@ fn call(name: &str, form: &Form, most: bool, float: Option<usize>) -> String {
             Kind::Vsib(elem, index) => format!("{}[x + {} * 4]", forms::word(elem), vector(index.bytes())),
             Kind::Label => "end".into(),
             kind => {
-                let (least, most_) = kind.ints().expect("an integer");
+                let (least, most_) =
+                    kind.ints().ok_or_else(|| format!("`{name}` has {kind:?}, which has no integers"))?;
                 (if most { most_ } else { least }).to_string()
             }
         });
     }
     let end = if form.operands.iter().any(|s| s.kind == Kind::Label) { "\nlabel(end);" } else { "" };
-    format!("{body}{name}({});{after}{end}", args.join(", "))
+    Ok(format!("{body}{name}({});{after}{end}", args.join(", ")))
 }
 
 /// `lines` as a file the assemblers read, Intel's syntax, and a jump's label after it: the file,
@@ -4353,12 +4497,15 @@ fn source(lines: &[&str]) -> (String, Vec<usize>) {
     (text, at)
 }
 
-/// `program` run with `args` on `text`, written to the test's directory as `name`: whether it
-/// succeeded, what it wrote, and the lines of `text` it says something of, by number, with what.
-fn assemble(program: &PathBuf, args: &[&str], name: &str, text: &str) -> (bool, String, Vec<(usize, String)>) {
+/// What a program of the toolchain did with a file: whether it succeeded, what it wrote, and the lines of the file it
+/// says something of, by number, with what.
+type Assembled = (bool, String, Vec<(usize, String)>);
+
+/// `program` run with `args` on `text`, written to the test's directory as `name`.
+fn assemble(program: &PathBuf, args: &[&str], name: &str, text: &str) -> Result<Assembled> {
     let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
-    std::fs::write(&path, text).unwrap();
-    let run = Command::new(program).args(args).arg(&path).output().unwrap();
+    std::fs::write(&path, text)?;
+    let run = Command::new(program).args(args).arg(&path).output()?;
     let file = path.to_string_lossy().into_owned();
     // `path:line: Error: why` from GNU as, `path:line:column: error: why` from llvm-mc.
     let said = String::from_utf8_lossy(&run.stderr)
@@ -4369,7 +4516,7 @@ fn assemble(program: &PathBuf, args: &[&str], name: &str, text: &str) -> (bool, 
             Some((line.parse().ok()?, why.trim().to_string()))
         })
         .collect();
-    (run.status.success(), String::from_utf8_lossy(&run.stdout).into_owned(), said)
+    Ok((run.status.success(), String::from_utf8_lossy(&run.stdout).into_owned(), said))
 }
 
 /// GNU as's name for `f`, in `-march`.
@@ -4387,44 +4534,60 @@ fn gas(f: Feature) -> &'static str {
 /// takes each line on a machine of the CPU feature its form names, and refuses it on a machine
 /// of every feature before that one; and the listing names the feature.
 #[test]
-fn every_form_kernite_knows_assembles_on_a_machine_of_its_feature() {
+fn every_form_kernite_knows_assembles_on_a_machine_of_its_feature() -> Result {
     let (Some(mc), Some(gnu)) = (tool("LLVM_MC", "llvm-mc"), tool("GNU_AS", "as")) else {
         eprintln!("no llvm-mc or GNU as here: skipped; set LLVM_MC and GNU_AS to run it");
-        return;
+        return Ok(());
     };
-    let all: Vec<&Form> = forms::names().flat_map(|n| forms::of(n).unwrap()).collect();
+    let all: Vec<&Form> = forms::names().flat_map(|n| forms::of(n).unwrap_or_default()).collect();
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let written = Mutex::new(vec![]);
-    std::thread::scope(|s| {
-        for chunk in all.chunks(all.len().div_ceil(threads)) {
-            let written = &written;
-            s.spawn(move || {
-                for form in chunk {
-                    let ints = form.operands.iter().any(|s| s.kind.ints().is_some());
-                    for most in [false, true].into_iter().take(if ints { 2 } else { 1 }) {
-                        let call = call(form.op.name(), form, most, None);
-                        let src = format!("unsafe extern \"sysv64\" fn k(x: *mut f32) {{\n{call}\n}}\n");
-                        let listing = kernite::x86_str(&src, "k").unwrap_or_else(|e| panic!("{e}, of\n{call}"));
-                        if let Some(f) = form.feature {
-                            assert!(listing.features.contains(&f), "no {f:?} in {:?}, of\n{call}", listing.features);
+    let done: Vec<_> = std::thread::scope(|s| {
+        let spawned: Vec<_> = all
+            .chunks(all.len().div_ceil(threads))
+            .map(|chunk| {
+                let written = &written;
+                s.spawn(move || -> Result<(), String> {
+                    for form in chunk {
+                        let ints = form.operands.iter().any(|s| s.kind.ints().is_some());
+                        for most in [false, true].into_iter().take(if ints { 2 } else { 1 }) {
+                            let call = call(form.op.name(), form, most, None)?;
+                            let src = format!("unsafe extern \"sysv64\" fn k(x: *mut f32) {{\n{call}\n}}\n");
+                            let listing = kernite::x86_str(&src, "k").map_err(|e| format!("{e}, of\n{call}"))?;
+                            if let Some(f) = form.feature {
+                                let features = &listing.features;
+                                assert!(features.contains(&f), "no {f:?} in {features:?}, of\n{call}");
+                            }
+                            let mnemonic = form.op.mnemonic();
+                            let line = listing
+                                .code()
+                                .filter(|l| *l == mnemonic || l.starts_with(&format!("{mnemonic} ")))
+                                .last()
+                                .ok_or_else(|| format!("no `{mnemonic}` in\n{listing}"))?;
+                            written.lock().unwrap_or_else(PoisonError::into_inner).push((
+                                form.feature,
+                                line.to_string(),
+                                call,
+                            ));
                         }
-                        let mnemonic = form.op.mnemonic();
-                        let line =
-                            listing.code().filter(|l| *l == mnemonic || l.starts_with(&format!("{mnemonic} "))).last();
-                        let line = line.unwrap_or_else(|| panic!("no `{mnemonic}` in\n{}", listing.text()));
-                        written.lock().unwrap().push((form.feature, line.to_string(), call));
                     }
-                }
-            });
-        }
+                    Ok(())
+                })
+            })
+            .collect();
+        spawned.into_iter().map(|thread| thread.join()).collect()
     });
-    let mut written = written.into_inner().unwrap();
+    for thread in done {
+        thread.map_err(|_| "a thread panicked")??;
+    }
+    let mut written = written.into_inner().unwrap_or_else(PoisonError::into_inner);
     written.sort();
 
     let lines: Vec<&str> = written.iter().map(|(_, line, _)| line.as_str()).collect();
     let (text, at) = source(&lines);
     let of = |n: usize| at.iter().position(|&a| a == n).map(|i| &written[i]);
-    let (ok, out, said) = assemble(&mc, &["-triple=x86_64", "-x86-asm-syntax=intel", "-show-encoding"], "x86.s", &text);
+    let (ok, out, said) =
+        assemble(&mc, &["-triple=x86_64", "-x86-asm-syntax=intel", "-show-encoding"], "x86.s", &text)?;
     let refused: Vec<String> = said
         .iter()
         .map(|(n, why)| match of(*n) {
@@ -4449,7 +4612,7 @@ fn every_form_kernite_knows_assembles_on_a_machine_of_its_feature() {
             format!("-march=generic64{}", fs.iter().map(|&f| format!("+{}", gas(f))).collect::<String>())
         };
         let on = march(feature.as_slice());
-        let (ok, _, said) = assemble(&gnu, &["--64", &on, "-o", "/dev/null"], &name, &text);
+        let (ok, _, said) = assemble(&gnu, &["--64", &on, "-o", "/dev/null"], &name, &text)?;
         let refused: Vec<String> = said
             .iter()
             .map(|(n, why)| match of(*n) {
@@ -4463,7 +4626,7 @@ fn every_form_kernite_knows_assembles_on_a_machine_of_its_feature() {
         }
         // Every feature before this one, which builds on none after it.
         let before = march(&Feature::ALL[..k - 1]);
-        let (_, _, said) = assemble(&gnu, &["--64", &before, "-o", "/dev/null"], &name, &text);
+        let (_, _, said) = assemble(&gnu, &["--64", &before, "-o", "/dev/null"], &name, &text)?;
         let taken: Vec<&str> = at
             .iter()
             .zip(&lines)
@@ -4472,6 +4635,7 @@ fn every_form_kernite_knows_assembles_on_a_machine_of_its_feature() {
             .collect();
         assert!(taken.is_empty(), "GNU as {before} takes what kernite says needs {feature:?}: {taken:#?}");
     }
+    Ok(())
 }
 
 /// Every instruction of x86-64-v3 that `llvm-mc` takes without AVX-512, kernite knows, or names
@@ -4555,7 +4719,7 @@ fn kernite_knows_every_instruction_of_x86_64_v3() {
 /// before it returns. Nor does a call at an address with no functions given that passes and takes back a float, an xmm:
 /// its callee takes and gives back no ymm, and a call that `ret` follows is a jump.
 #[test]
-fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() {
+fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() -> Result {
     let cases = [
         // No `vzeroupper`: nothing on all of a ymm, and no call of a function it does not know that passes or takes
         // back all of one.
@@ -4795,8 +4959,9 @@ fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() {
         ),
     ];
     for (params, ret, body, want) in cases {
-        assert_eq!(calling(params, ret, body).unwrap(), want, "{body}");
+        assert_eq!(calling(params, ret, body)?, want, "{body}");
     }
+    Ok(())
 }
 
 /// Where a kernel clears the upper halves of the vector registers depends on the ways to the place: a `vzeroupper` goes
@@ -4809,7 +4974,7 @@ fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() {
 /// address of the call, which it spilled, before the frame goes. A call that is no jump clears after that reload, just
 /// before it.
 #[test]
-fn vzeroupper_goes_where_a_way_to_it_may_have_set_an_upper_half() {
+fn vzeroupper_goes_where_a_way_to_it_may_have_set_an_upper_half() -> Result {
     let cases = [
         (
             "fp: u64, p: *mut f32",
@@ -4928,8 +5093,9 @@ fn vzeroupper_goes_where_a_way_to_it_may_have_set_an_upper_half() {
         ),
     ];
     for (params, ret, body, want) in cases {
-        assert_eq!(calling(params, ret, body).unwrap(), want, "{body}");
+        assert_eq!(calling(params, ret, body)?, want, "{body}");
     }
+    Ok(())
 }
 
 /// A kernel needs what the instructions its listing prints need, and `vzeroupper` is AVX's: a kernel that writes it
@@ -4938,7 +5104,7 @@ fn vzeroupper_goes_where_a_way_to_it_may_have_set_an_upper_half() {
 /// writes none, and needs only what its other instructions need. AVX takes its place among the other needs, which are
 /// listed by name.
 #[test]
-fn vzeroupper_needs_avx_where_nothing_else_says_so() {
+fn vzeroupper_needs_avx_where_nothing_else_says_so() -> Result {
     // What each kernel's own instructions need, with no call, and with a call at an address with no functions given
     // that takes all of a ymm back, so the kernel may have set an upper half.
     let cases = [
@@ -4954,13 +5120,14 @@ fn vzeroupper_needs_avx_where_nothing_else_says_so() {
             let src = format!(
                 "pub unsafe extern \"sysv64\" fn f(fp: u64, n: u64, x: f64, y: f64, z: f64) {{ {body}{call} }}"
             );
-            let listing = kernite::x86_str(&src, "f").unwrap();
+            let listing = kernite::x86_str(&src, "f")?;
             let features: Vec<_> = listing.features.iter().map(|f| f.name()).collect();
             assert_eq!(features.join(", "), needs, "{src}");
             let cleared = listing.code().filter(|line| *line == "vzeroupper").count();
-            assert_eq!(cleared, usize::from(!call.is_empty()), "{src}\n{}", listing.text());
+            assert_eq!(cleared, usize::from(!call.is_empty()), "{src}\n{listing}");
         }
     }
+    Ok(())
 }
 
 /// A kernel needs what the instructions its listing prints need. A move of a register to itself
@@ -4968,7 +5135,7 @@ fn vzeroupper_needs_avx_where_nothing_else_says_so() {
 /// arrives in, and does not return, so it runs no instruction of AVX's. A move of an xmm to
 /// itself clears the upper lanes, so the listing prints it, and `kept` needs AVX for it.
 #[test]
-fn a_kernels_needs_are_those_of_the_instructions_it_prints() {
+fn a_kernels_needs_are_those_of_the_instructions_it_prints() -> Result {
     let src = "pub unsafe extern \"sysv64\" fn die(x: f32) -> ! { ud2(); }
 pub unsafe extern \"sysv64\" fn never(x: f32) -> ! { call(die, x); }
 pub unsafe extern \"sysv64\" fn kept(x: f32) -> ! { vmovaps(x, x); ud2(); }";
@@ -4979,7 +5146,7 @@ pub unsafe extern \"sysv64\" fn kept(x: f32) -> ! { vmovaps(x, x); ud2(); }";
     call {f0}
 # f0: die
 ";
-    assert_eq!(kernite::x86_str(src, "never").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(src, "never")?.to_string(), want);
     let want = "# kept(vec) -> !
 # needs: avx
 # frame: 0 bytes aligned to 0, saves []
@@ -4987,5 +5154,6 @@ pub unsafe extern \"sysv64\" fn kept(x: f32) -> ! { vmovaps(x, x); ud2(); }";
     vmovaps xmm0, xmm0
     ud2
 ";
-    assert_eq!(kernite::x86_str(src, "kept").unwrap().text(), want);
+    assert_eq!(kernite::x86_str(src, "kept")?.to_string(), want);
+    Ok(())
 }

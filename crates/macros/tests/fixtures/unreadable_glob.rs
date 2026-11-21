@@ -88,7 +88,7 @@ pub mod gpu_globbed {
             kernels.scale(grid, p, 2.0)?;
             kernels.halve(grid, p)?;
         }
-        kernels.COUNTS().write(&[0; 4])?;
+        kernels.COUNTS()?.write(&[0; 4])?;
         let _ = (PTX, Kernels::load);
         Ok(())
     }

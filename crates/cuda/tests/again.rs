@@ -7,6 +7,8 @@ use std::sync::{Mutex, PoisonError};
 
 use kernite_cuda::{Buffer, Cuda, Grid, Module, arg};
 
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
 /// One test at a time: the `Cuda` that one holds keeps the context that another means to destroy.
 static ALONE: Mutex<()> = Mutex::new(());
 
@@ -41,47 +43,49 @@ const SEVEN: &str = "
 ";
 
 /// A buffer of one word, which is zero, and `seven` launched on it.
-fn seven(cuda: &Cuda) -> (Module, Buffer<u32>) {
-    let module = Module::load(cuda, SEVEN, &["seven"], &[]).unwrap();
-    let x = cuda.alloc::<u32>(1).unwrap();
-    assert_eq!(x.read().unwrap(), [0]);
+fn seven(cuda: &Cuda) -> Result<(Module, Buffer<u32>)> {
+    let module = Module::load(cuda, SEVEN, &["seven"], &[])?;
+    let x = cuda.alloc::<u32>(1)?;
+    assert_eq!(x.read()?, [0]);
     let at = x.ptr();
     // SAFETY: `seven` takes a pointer, and writes the one word the buffer has.
-    unsafe { module.launch(0, Grid::new(1, 1), &[arg(&at)]) }.unwrap();
-    (module, x)
+    unsafe { module.launch(0, Grid::new(1, 1), &[arg(&at)]) }?;
+    Ok((module, x))
 }
 
 #[test]
-fn a_gpu_is_taken_again_after_the_last_cuda_of_it_was_dropped() {
-    let Some(count) = gpus() else { return };
+fn a_gpu_is_taken_again_after_the_last_cuda_of_it_was_dropped() -> Result {
+    let Some(count) = gpus() else { return Ok(()) };
     let _alone = ALONE.lock().unwrap_or_else(PoisonError::into_inner);
     for index in 0..count {
         // The driver keeps the GPU's context while either of two is held.
-        let (first, second) = (Cuda::on(index).unwrap(), Cuda::on(index).unwrap());
+        let (first, second) = (Cuda::on(index)?, Cuda::on(index)?);
         drop(first);
-        assert_eq!(seven(&second).1.read().unwrap(), [7], "GPU {index}, the other dropped");
+        assert_eq!(seven(&second)?.1.read()?, [7], "GPU {index}, the other dropped");
         // The last one dropped destroys the context, which the thread has for its current one
         // still. A GPU taken again has a context of its own, with the handle of the one gone.
         drop(second);
         for time in 1..=3 {
-            let cuda = Cuda::on(index).unwrap();
-            assert_eq!(seven(&cuda).1.read().unwrap(), [7], "GPU {index}, taken again {time} times");
+            let cuda = Cuda::on(index)?;
+            assert_eq!(seven(&cuda)?.1.read()?, [7], "GPU {index}, taken again {time} times");
         }
     }
+    Ok(())
 }
 
 #[test]
-fn a_buffer_and_a_module_keep_their_gpu_after_the_cuda_is_dropped() {
-    let Some(count) = gpus() else { return };
+fn a_buffer_and_a_module_keep_their_gpu_after_the_cuda_is_dropped() -> Result {
+    let Some(count) = gpus() else { return Ok(()) };
     let _alone = ALONE.lock().unwrap_or_else(PoisonError::into_inner);
     for index in 0..count {
-        let (module, x) = seven(&Cuda::on(index).unwrap());
+        let (module, x) = seven(&Cuda::on(index)?)?;
         // Nothing but the module and the buffer holds the GPU now; they use it, and let it go.
-        assert_eq!(x.read().unwrap(), [7], "GPU {index}");
+        assert_eq!(x.read()?, [7], "GPU {index}");
         let at = x.ptr();
         // SAFETY: as in `seven`.
-        unsafe { module.launch(0, Grid::new(1, 1), &[arg(&at)]) }.unwrap();
+        unsafe { module.launch(0, Grid::new(1, 1), &[arg(&at)]) }?;
         drop(module);
-        assert_eq!(x.read().unwrap(), [7], "GPU {index}, the module dropped");
+        assert_eq!(x.read()?, [7], "GPU {index}, the module dropped");
     }
+    Ok(())
 }

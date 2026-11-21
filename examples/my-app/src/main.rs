@@ -1009,55 +1009,75 @@ use std::sync::{Mutex, PoisonError};
 
 use kernite_cuda::{Cuda, Grid, f16};
 
-/// Whether this cpu runs the kernels.
-fn supported() -> bool {
-    is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
+/// What a function below gives, or why it did not run its kernel: what it was given did not fit, or the cpu or the
+/// GPU said so.
+type Run<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Whether this cpu runs the kernels, or why not.
+fn supported() -> Run {
+    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        Ok(())
+    } else {
+        Err("this cpu lacks AVX2 or FMA, which the kernels are written in".into())
+    }
+}
+
+/// `len` of what `what` names, as the `u32` a kernel is given to count them; or why it is none.
+fn count(len: usize, what: &str) -> Run<u32> {
+    u32::try_from(len).map_err(|_| format!("2^32 {what} or more").into())
 }
 
 /// The sum of `xs`.
-fn sum8(xs: &[f32; 8]) -> f32 {
-    assert!(supported(), "the kernels need AVX2 and FMA");
+fn sum8(xs: &[f32; 8]) -> Run<f32> {
+    supported()?;
     // SAFETY: eight floats are there to read, and the cpu has what the kernel needs.
-    unsafe { kernels::sum8(xs.as_ptr()) }
+    Ok(unsafe { kernels::sum8(xs.as_ptr()) })
 }
 
 /// The sum of `xs`, by `sum8` of each half.
-fn sum16(xs: &[f32; 16]) -> f32 {
-    assert!(supported(), "the kernels need AVX2 and FMA");
+fn sum16(xs: &[f32; 16]) -> Run<f32> {
+    supported()?;
     // SAFETY: sixteen floats are there to read, and the cpu has what the kernel needs.
-    unsafe { kernels::sum16(xs.as_ptr()) }
+    Ok(unsafe { kernels::sum16(xs.as_ptr()) })
 }
 
 /// The dot product of `x` and `y`, which must be as long as each other and a multiple of
-/// eight floats: by four accumulators when it is a multiple of 32, else by one.
-fn dot(x: &[f32], y: &[f32]) -> f32 {
-    assert!(supported(), "the kernels need AVX2 and FMA");
-    assert_eq!(x.len(), y.len(), "x and y differ in length");
-    assert!(x.len().is_multiple_of(8), "{} floats are not a multiple of eight", x.len());
+/// eight floats, or it is an error: by four accumulators when it is a multiple of 32, else by one.
+fn dot(x: &[f32], y: &[f32]) -> Run<f32> {
+    supported()?;
+    if x.len() != y.len() {
+        return Err("x and y differ in length".into());
+    }
+    if !x.len().is_multiple_of(8) {
+        return Err(format!("{} floats are not a multiple of eight", x.len()).into());
+    }
     let kernel = if x.len().is_multiple_of(32) { kernels::dot::<4> } else { kernels::dot::<1> };
     // SAFETY: `x.len()` floats are there to read behind each pointer, a whole number of the
     // kernel's steps, and the cpu has what it needs.
-    unsafe { kernel(x.as_ptr(), y.as_ptr(), x.len()) }
+    Ok(unsafe { kernel(x.as_ptr(), y.as_ptr(), x.len()) })
 }
 
 /// Adds to `counts[b]` how many of `bytes` are `b`, for each byte `b`, wrapping past
 /// `u32::MAX`, by four tables in turn.
-fn count_bytes(bytes: &[u8], counts: &mut [u32; 256]) {
-    assert!(supported(), "the kernels need AVX2 and FMA");
+fn count_bytes(bytes: &[u8], counts: &mut [u32; 256]) -> Run {
+    supported()?;
     // SAFETY: `bytes.len()` bytes are there to read and 256 counts to write, and the cpu has
     // what the kernel needs.
-    unsafe { kernels::count_bytes::<4>(bytes.as_ptr(), bytes.len(), counts.as_mut_ptr()) }
+    unsafe { kernels::count_bytes::<4>(bytes.as_ptr(), bytes.len(), counts.as_mut_ptr()) };
+    Ok(())
 }
 
 /// The greatest common divisor of each `a[i]` and `b[i]` on the cpu, by Stein's algorithm in
-/// a function that calls itself; `a` and `b` must be as long as each other.
-fn gcds_on_cpu(a: &[u32], b: &[u32]) -> Vec<u32> {
-    assert_eq!(a.len(), b.len(), "a and b differ in length");
+/// a function that calls itself; `a` and `b` must be as long as each other, or it is an error.
+fn gcds_on_cpu(a: &[u32], b: &[u32]) -> Run<Vec<u32>> {
+    if a.len() != b.len() {
+        return Err("a and b differ in length".into());
+    }
     let mut g = vec![0; a.len()];
     // SAFETY: `a.len()` integers behind each pointer, to read and to write, and the kernel
     // needs no more of the cpu than x86-64 has.
     unsafe { kernels::gcds(a.as_ptr(), b.as_ptr(), g.as_mut_ptr(), a.len()) };
-    g
+    Ok(g)
 }
 
 /// Keeps the module's memory, `kernels::COUNTS` and `kernels::WEIGHTS`, to one call of the
@@ -1077,12 +1097,13 @@ fn histogram_on_cpu(x: &[u32]) {
 /// `x[i] *= w[i % 4]` on the cpu, each product rounded once, as `weigh` does on the GPU, of `w`
 /// the weights in the module's constant memory, `kernels::WEIGHTS`: `[1, 0.5, 0.25, 2]` until
 /// the host writes others.
-fn weigh_on_cpu(x: &mut [f32]) {
-    assert!(supported(), "the kernels need AVX2 and FMA");
+fn weigh_on_cpu(x: &mut [f32]) -> Run {
+    supported()?;
     let _held = MEMORY.lock().unwrap_or_else(PoisonError::into_inner);
     // SAFETY: `x.len()` floats are there to read and write, no other call touches `WEIGHTS`
     // while the lock is held, and the cpu has what the kernel needs.
-    unsafe { kernels::weigh(x.as_mut_ptr(), x.len()) }
+    unsafe { kernels::weigh(x.as_mut_ptr(), x.len()) };
+    Ok(())
 }
 
 /// `x / s` on `threads` threads of the cpu, `s` the sum of `x`, in one launch: each thread
@@ -1090,12 +1111,13 @@ fn weigh_on_cpu(x: &mut [f32]) {
 /// chunks' sums, bit for bit as `normalize` does on the GPU. `threads` is one at least, and at
 /// most as many as the process runs at once, `kernite_cpu::most()`: the CPUs the caller's thread
 /// may run on, or fewer where a cgroup limits the process to fewer. More is an error.
-fn normalize_on_threads(x: &mut [f32], threads: usize) -> Result<(), kernite_cpu::Error> {
-    assert!(supported(), "the kernels need AVX2 and FMA");
+fn normalize_on_threads(x: &mut [f32], threads: usize) -> Run {
+    supported()?;
     let mut sums = vec![0.0; x.len().div_ceil(1024)];
     // SAFETY: `x.len()` floats behind `x` and a float a chunk behind `sums`, which nothing
     // else touches while the threads run, and the cpu has what the kernel needs.
-    unsafe { kernels::normalize(kernite_cpu::Grid::new(threads), x.as_mut_ptr(), sums.as_mut_ptr(), x.len()) }
+    unsafe { kernels::normalize(kernite_cpu::Grid::new(threads), x.as_mut_ptr(), sums.as_mut_ptr(), x.len()) }?;
+    Ok(())
 }
 
 /// `steps` steps of heat spreading along `x` on `threads` threads of the cpu, in one launch,
@@ -1103,19 +1125,22 @@ fn normalize_on_threads(x: &mut [f32], threads: usize) -> Result<(), kernite_cpu
 /// GPU. `threads` is one at least, and at most as many as the process runs at once,
 /// `kernite_cpu::most()`: the CPUs the caller's thread may run on, or fewer where a cgroup limits
 /// the process to fewer. More is an error.
-fn diffuse_on_threads(x: &mut [f32], steps: usize, threads: usize) -> Result<(), kernite_cpu::Error> {
-    assert!(supported(), "the kernels need AVX2 and FMA");
+fn diffuse_on_threads(x: &mut [f32], steps: usize, threads: usize) -> Run {
+    supported()?;
     let mut y = vec![0.0; x.len()];
     // SAFETY: `x.len()` floats behind each pointer, which nothing else touches while the
     // threads run, and the cpu has what the kernel needs.
-    unsafe { kernels::diffuse(kernite_cpu::Grid::new(threads), x.as_mut_ptr(), y.as_mut_ptr(), x.len(), steps) }
+    unsafe { kernels::diffuse(kernite_cpu::Grid::new(threads), x.as_mut_ptr(), y.as_mut_ptr(), x.len(), steps) }?;
+    Ok(())
 }
 
 /// `y = a * x + y` on the GPU, each element rounded once; `x` and `y` must be as long as each
-/// other.
-fn saxpy(cuda: &Cuda, kernels: &gpu::Kernels, a: f32, x: &[f32], y: &mut [f32]) -> Result<(), kernite_cuda::Error> {
-    assert_eq!(x.len(), y.len(), "x and y differ in length");
-    let n = u32::try_from(x.len()).expect("fewer than 2^32 floats");
+/// other, or it is an error.
+fn saxpy(cuda: &Cuda, kernels: &gpu::Kernels, a: f32, x: &[f32], y: &mut [f32]) -> Run {
+    if x.len() != y.len() {
+        return Err("x and y differ in length".into());
+    }
+    let n = count(x.len(), "floats")?;
     if n == 0 {
         return Ok(());
     }
@@ -1123,16 +1148,18 @@ fn saxpy(cuda: &Cuda, kernels: &gpu::Kernels, a: f32, x: &[f32], y: &mut [f32]) 
     // SAFETY: `n` floats behind each pointer, in buffers that last until `read_into` has
     // waited for the kernel.
     unsafe { kernels.saxpy(Grid::new(n.div_ceil(256), 256), a, xs.ptr(), ys.ptr(), n)? };
-    ys.read_into(y)
+    Ok(ys.read_into(y)?)
 }
 
 /// The sum of each run of `N` floats of `x`, on the GPU, added in a tree; `x` must be a whole
-/// number of runs, and `N` a run `gpu::block_sums` is compiled for, 256 or 1024: another is
-/// a compile error.
-fn block_sums<const N: u32>(cuda: &Cuda, kernels: &gpu::Kernels, x: &[f32]) -> Result<Vec<f32>, kernite_cuda::Error> {
+/// number of runs, or it is an error, and `N` a run `gpu::block_sums` is compiled for, 256 or 1024:
+/// another is a compile error.
+fn block_sums<const N: u32>(cuda: &Cuda, kernels: &gpu::Kernels, x: &[f32]) -> Run<Vec<f32>> {
     let run = N as usize;
-    assert!(x.len().is_multiple_of(run), "{} floats are no whole number of runs of {N}", x.len());
-    let blocks = u32::try_from(x.len() / run).expect("fewer than 2^32 runs");
+    if !x.len().is_multiple_of(run) {
+        return Err(format!("{} floats are no whole number of runs of {N}", x.len()).into());
+    }
+    let blocks = count(x.len() / run, "runs")?;
     let mut sums = vec![0.0; blocks as usize];
     if blocks == 0 {
         return Ok(sums);
@@ -1146,10 +1173,12 @@ fn block_sums<const N: u32>(cuda: &Cuda, kernels: &gpu::Kernels, x: &[f32]) -> R
 }
 
 /// Each run of `run` floats of `x` reversed, on the GPU; `x` must be a whole number of runs,
-/// and a run no more threads than a block has.
-fn reverse_runs(cuda: &Cuda, kernels: &gpu::Kernels, x: &mut [f32], run: usize) -> Result<(), kernite_cuda::Error> {
-    assert!(run > 0 && x.len().is_multiple_of(run), "{} floats are no whole number of runs of {run}", x.len());
-    let (blocks, threads) = (u32::try_from(x.len() / run).expect("fewer than 2^32 runs"), run as u32);
+/// or it is an error, and a run no more threads than a block has.
+fn reverse_runs(cuda: &Cuda, kernels: &gpu::Kernels, x: &mut [f32], run: usize) -> Run {
+    if run == 0 || !x.len().is_multiple_of(run) {
+        return Err(format!("{} floats are no whole number of runs of {run}", x.len()).into());
+    }
+    let (blocks, threads) = (count(x.len() / run, "runs")?, run as u32);
     if blocks == 0 {
         return Ok(());
     }
@@ -1157,12 +1186,12 @@ fn reverse_runs(cuda: &Cuda, kernels: &gpu::Kernels, x: &mut [f32], run: usize) 
     // SAFETY: `run` floats a block behind `xs`, and 4 bytes of shared memory a thread, in a
     // buffer that lasts until `read_into` has waited for the kernel.
     unsafe { kernels.reverse_runs(Grid::new(blocks, threads).with_shared(4 * threads), xs.ptr())? };
-    xs.read_into(x)
+    Ok(xs.read_into(x)?)
 }
 
 /// `x *= a` on the GPU, each element in `f16`, rounded once.
-fn scale_f16(cuda: &Cuda, kernels: &gpu::Kernels, a: f16, x: &mut [f16]) -> Result<(), kernite_cuda::Error> {
-    let n = u32::try_from(x.len()).expect("fewer than 2^32 halves");
+fn scale_f16(cuda: &Cuda, kernels: &gpu::Kernels, a: f16, x: &mut [f16]) -> Run {
+    let n = count(x.len(), "halves")?;
     if n == 0 {
         return Ok(());
     }
@@ -1170,14 +1199,16 @@ fn scale_f16(cuda: &Cuda, kernels: &gpu::Kernels, a: f16, x: &mut [f16]) -> Resu
     // SAFETY: `n` halves behind the pointer, in a buffer that lasts until `read_into` has
     // waited for the kernel.
     unsafe { kernels.scale_f16(Grid::new(n.div_ceil(256), 256), xs.ptr(), a, n)? };
-    xs.read_into(x)
+    Ok(xs.read_into(x)?)
 }
 
 /// The greatest common divisor of each `a[i]` and `b[i]`, on the GPU, by a function that calls
-/// itself; `a` and `b` must be as long as each other.
-fn gcds(cuda: &Cuda, kernels: &gpu::Kernels, a: &[u32], b: &[u32]) -> Result<Vec<u32>, kernite_cuda::Error> {
-    assert_eq!(a.len(), b.len(), "a and b differ in length");
-    let n = u32::try_from(a.len()).expect("fewer than 2^32 pairs");
+/// itself; `a` and `b` must be as long as each other, or it is an error.
+fn gcds(cuda: &Cuda, kernels: &gpu::Kernels, a: &[u32], b: &[u32]) -> Run<Vec<u32>> {
+    if a.len() != b.len() {
+        return Err("a and b differ in length".into());
+    }
+    let n = count(a.len(), "pairs")?;
     let mut g = vec![0; a.len()];
     if n == 0 {
         return Ok(g);
@@ -1193,8 +1224,8 @@ fn gcds(cuda: &Cuda, kernels: &gpu::Kernels, a: &[u32], b: &[u32]) -> Result<Vec
 /// Adds each of `x` to its bin of `gpu::COUNTS`, by its top four bits, on the GPU, which keeps
 /// the counts from one call to the next: `kernels.COUNTS()` reads them, writes them, and
 /// zeroes them.
-fn histogram(cuda: &Cuda, kernels: &gpu::Kernels, x: &[u32]) -> Result<(), kernite_cuda::Error> {
-    let n = u32::try_from(x.len()).expect("fewer than 2^32 integers");
+fn histogram(cuda: &Cuda, kernels: &gpu::Kernels, x: &[u32]) -> Run {
+    let n = count(x.len(), "integers")?;
     if n == 0 {
         return Ok(());
     }
@@ -1202,13 +1233,13 @@ fn histogram(cuda: &Cuda, kernels: &gpu::Kernels, x: &[u32]) -> Result<(), kerni
     // SAFETY: `n` integers behind the pointer, in a buffer that lasts until `sync` has waited
     // for the kernel.
     unsafe { kernels.histogram(Grid::new(n.div_ceil(256), 256), xs.ptr(), n)? };
-    cuda.sync()
+    Ok(cuda.sync()?)
 }
 
 /// `x[i] *= w[i % 4]` on the GPU, each product rounded once, of `w` the weights in its
 /// constant memory, `gpu::WEIGHTS`: `[1, 0.5, 0.25, 2]` until `kernels.WEIGHTS()` writes others.
-fn weigh(cuda: &Cuda, kernels: &gpu::Kernels, x: &mut [f32]) -> Result<(), kernite_cuda::Error> {
-    let n = u32::try_from(x.len()).expect("fewer than 2^32 floats");
+fn weigh(cuda: &Cuda, kernels: &gpu::Kernels, x: &mut [f32]) -> Run {
+    let n = count(x.len(), "floats")?;
     if n == 0 {
         return Ok(());
     }
@@ -1216,25 +1247,31 @@ fn weigh(cuda: &Cuda, kernels: &gpu::Kernels, x: &mut [f32]) -> Result<(), kerni
     // SAFETY: `n` floats behind the pointer, in a buffer that lasts until `read_into` has
     // waited for the kernel.
     unsafe { kernels.weigh(Grid::new(n.div_ceil(256), 256), xs.ptr(), n)? };
-    xs.read_into(x)
+    Ok(xs.read_into(x)?)
 }
 
 /// `a b` in `f32`, of `a`, `m` rows of `k` halves, and `b`, `k` rows of `n`, given as its
 /// transpose `bt`, `n` rows of `k`, on the tensor cores; `m` must be a multiple of 16, `n` of
-/// 8 and `k` of 16. The kernels load only on an Ampere GPU or newer, `sm_80`.
+/// 8 and `k` of 16, or it is an error. The kernels load only on an Ampere GPU or newer, `sm_80`.
 fn matmul(
     cuda: &Cuda,
     kernels: &ampere::Kernels,
     a: &[f16],
     bt: &[f16],
     (m, n, k): (usize, usize, usize),
-) -> Result<Vec<f32>, kernite_cuda::Error> {
-    let whole = m.is_multiple_of(16) && n.is_multiple_of(8) && k.is_multiple_of(16);
-    assert!(whole, "{m} by {n} by {k} is no whole number of tiles of 16 by 8 by 16");
-    assert_eq!(a.len(), m * k, "a is not {m} rows of {k}");
-    assert_eq!(bt.len(), n * k, "bt is not {n} rows of {k}");
-    let fits = |len: usize| u32::try_from(len).is_ok();
-    assert!(fits(m * k) && fits(n * k) && fits(m * n), "{m} by {n} by {k} has 2^32 elements or more");
+) -> Run<Vec<f32>> {
+    if !(m.is_multiple_of(16) && n.is_multiple_of(8) && k.is_multiple_of(16)) {
+        return Err(format!("{m} by {n} by {k} is no whole number of tiles of 16 by 8 by 16").into());
+    }
+    if a.len() != m * k {
+        return Err(format!("a is not {m} rows of {k}").into());
+    }
+    if bt.len() != n * k {
+        return Err(format!("bt is not {n} rows of {k}").into());
+    }
+    if [m * k, n * k, m * n].iter().any(|&len| u32::try_from(len).is_err()) {
+        return Err(format!("{m} by {n} by {k} has 2^32 elements or more").into());
+    }
     let mut c = vec![0.0; m * n];
     if c.is_empty() || k == 0 {
         return Ok(c);
@@ -1253,8 +1290,8 @@ fn matmul(
 /// registers while the grid waits for every block's sum. `x` is at most as many floats as the
 /// GPU holds at once, `256 pascal::K` a block of as many blocks as it runs at once,
 /// `kernels.normalize_blocks(256, 0)`; more is an error.
-fn normalize(cuda: &Cuda, kernels: &pascal::Kernels, x: &mut [f32]) -> Result<(), kernite_cuda::Error> {
-    let n = u32::try_from(x.len()).expect("fewer than 2^32 floats");
+fn normalize(cuda: &Cuda, kernels: &pascal::Kernels, x: &mut [f32]) -> Run {
+    let n = count(x.len(), "floats")?;
     if n == 0 {
         return Ok(());
     }
@@ -1263,15 +1300,15 @@ fn normalize(cuda: &Cuda, kernels: &pascal::Kernels, x: &mut [f32]) -> Result<()
     // SAFETY: `n` floats behind `xs`, and a float a block behind `sums`, in buffers that last
     // until `read_into` has waited for the kernel.
     unsafe { kernels.normalize(Grid::new(blocks, 256), xs.ptr(), sums.ptr(), n)? };
-    xs.read_into(x)
+    Ok(xs.read_into(x)?)
 }
 
 /// `steps` steps of heat spreading along `x` on the GPU, in one launch: in each, each float
 /// becomes `x[i] + (x[i - 1] - x[i]) / 4 + (x[i + 1] - x[i]) / 4` of the floats before, an
 /// end's missing neighbour as warm as the end. `x` is at most a float a thread of as many
 /// blocks of 256 as the GPU runs at once, `kernels.diffuse_blocks(256, 0)`; more is an error.
-fn diffuse(cuda: &Cuda, kernels: &pascal::Kernels, x: &mut [f32], steps: u32) -> Result<(), kernite_cuda::Error> {
-    let n = u32::try_from(x.len()).expect("fewer than 2^32 floats");
+fn diffuse(cuda: &Cuda, kernels: &pascal::Kernels, x: &mut [f32], steps: u32) -> Run {
+    let n = count(x.len(), "floats")?;
     if n == 0 {
         return Ok(());
     }
@@ -1279,32 +1316,29 @@ fn diffuse(cuda: &Cuda, kernels: &pascal::Kernels, x: &mut [f32], steps: u32) ->
     // SAFETY: `n` floats behind each pointer, in buffers that last until `read_into` has
     // waited for the kernel.
     unsafe { kernels.diffuse(Grid::new(n.div_ceil(256), 256), xs.ptr(), ys.ptr(), n, steps)? };
-    xs.read_into(x)
+    Ok(xs.read_into(x)?)
 }
 
-fn main() {
-    if !supported() {
-        eprintln!("this cpu lacks AVX2 or FMA, which the kernels are written in");
-        std::process::exit(1);
-    }
-    println!("sum8(1, ..., 8) = {}", sum8(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]));
+fn main() -> Run {
+    supported()?;
+    println!("sum8(1, ..., 8) = {}", sum8(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])?);
     let ones: [f32; 16] = std::array::from_fn(|i| (i + 1) as f32);
-    println!("sum16(1, ..., 16), which calls sum8 for each half = {}", sum16(&ones));
+    println!("sum16(1, ..., 16), which calls sum8 for each half = {}", sum16(&ones)?);
     for n in [1024, 1000] {
         let x: Vec<f32> = Vec::from_fn(n, |i| (i % 7) as f32 - 3.0);
         let y: Vec<f32> = Vec::from_fn(n, |i| (i % 5) as f32 / 2.0);
         let naive: f32 = x.iter().zip(&y).map(|(a, b)| a * b).sum();
-        println!("dot of {n} floats = {}; a loop in Rust says {naive}", dot(&x, &y));
+        println!("dot of {n} floats = {}; a loop in Rust says {naive}", dot(&x, &y)?);
     }
     let mut counts = [0; 256];
-    count_bytes(b"hello, world", &mut counts);
+    count_bytes(b"hello, world", &mut counts)?;
     println!(
         "in \"hello, world\", counted in tables on the stack: {} l, {} o and {} h",
         counts[usize::from(b'l')],
         counts[usize::from(b'o')],
         counts[usize::from(b'h')]
     );
-    let g = gcds_on_cpu(&[1071, 2_971_215_073], &[462, 1_836_311_903]);
+    let g = gcds_on_cpu(&[1071, 2_971_215_073], &[462, 1_836_311_903])?;
     println!("by Stein's algorithm on the cpu: gcd(1071, 462) = {}, and of two Fibonacci numbers: {}", g[0], g[1]);
     let seen: Vec<Vec<u32>> = (0..2)
         .map(|call| {
@@ -1314,17 +1348,17 @@ fn main() {
         .collect();
     println!("4 of the 16 bins in the process's memory after a call of 3 integers, and after another: {seen:?}");
     let mut x = [1.0; 6];
-    weigh_on_cpu(&mut x);
+    weigh_on_cpu(&mut x)?;
     println!("six ones weighed on the cpu by the weights in the module's constant memory: {x:?}");
-    let cooperative = kernite_cpu::most().and_then(|most| {
-        let threads = most.min(4);
+    let cooperative = || -> Run<_> {
+        let threads = kernite_cpu::most()?.min(4);
         let mut x = [1.0, 2.0, 3.0, 4.0];
         normalize_on_threads(&mut x, threads)?;
         let mut heat = [0.0, 0.0, 0.0, 16.0, 0.0, 0.0, 0.0];
         diffuse_on_threads(&mut heat, 2, threads)?;
         Ok((threads, x, heat))
-    });
-    match cooperative {
+    };
+    match cooperative() {
         Ok((threads, x, heat)) => {
             println!("1 to 4 over their sum, on {threads} threads of the cpu that wait for each other: {x:?}");
             println!("16 among cold floats, after two steps of heat spreading on {threads} threads: {heat:?}");
@@ -1365,10 +1399,10 @@ fn main() {
                 Ok(g) => println!("gcd(1071, 462) = {}, and of two Fibonacci numbers, 46 calls deep: {}", g[0], g[1]),
                 Err(e) => println!("gcds failed: {e}"),
             }
-            let seen = (0..2).try_fold(vec![], |mut seen, launch| {
+            let seen = (0..2).try_fold(vec![], |mut seen, launch| -> Run<_> {
                 histogram(&cuda, &kernels, &[launch << 28, 0x1000_0000, u32::MAX])?;
-                seen.push(kernels.COUNTS().read()?[..4].to_vec());
-                Ok::<_, kernite_cuda::Error>(seen)
+                seen.push(kernels.COUNTS()?.read()?[..4].to_vec());
+                Ok(seen)
             });
             match seen {
                 Ok(seen) => println!("4 of the 16 bins after a launch of 3 integers, and after another: {seen:?}"),
@@ -1383,8 +1417,8 @@ fn main() {
                 let a: Vec<f16> = Vec::from_fn(64 * 64, |i| f16::from_f32((i % 7) as f32 - 3.0));
                 let bt: Vec<f16> = Vec::from_fn(64 * 64, |i| f16::from_f32((i % 5) as f32 - 2.0));
                 let naive: f32 = (0..64).map(|l| a[l].to_f32() * bt[l].to_f32()).sum();
-                let c = ampere::Kernels::load(&cuda).and_then(|kernels| matmul(&cuda, &kernels, &a, &bt, (64, 64, 64)));
-                match c {
+                let c = || -> Run<_> { matmul(&cuda, &ampere::Kernels::load(&cuda)?, &a, &bt, (64, 64, 64)) };
+                match c() {
                     Ok(c) => {
                         println!("64 by 64 by 64 on the tensor cores: c[0][0] = {}; a loop in Rust says {naive}", c[0])
                     }
@@ -1394,14 +1428,15 @@ fn main() {
                 println!("the {} is older than Ampere, sm_80, for the tensor cores' matmul", cuda.name());
             }
             if cuda.sm() >= 60 {
-                let cooperative = pascal::Kernels::load(&cuda).and_then(|kernels| {
+                let cooperative = || -> Run<_> {
+                    let kernels = pascal::Kernels::load(&cuda)?;
                     let mut x = [1.0, 2.0, 3.0, 4.0];
                     normalize(&cuda, &kernels, &mut x)?;
                     let mut heat = [0.0, 0.0, 0.0, 16.0, 0.0, 0.0, 0.0];
                     diffuse(&cuda, &kernels, &mut heat, 2)?;
                     Ok((x, heat, kernels.normalize_blocks(256, 0)? * 256 * pascal::K))
-                });
-                match cooperative {
+                };
+                match cooperative() {
                     Ok((x, heat, most)) => {
                         println!("1 to 4 over their sum, in a launch whose grid waits for every block's: {x:?}");
                         println!("the {} keeps {most} floats in its registers so, at most", cuda.name());
@@ -1415,6 +1450,7 @@ fn main() {
         }
         Err(e) => println!("no GPU to run saxpy on: {e}"),
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1426,11 +1462,13 @@ mod tests {
 
     use super::{ampere, gpu, kernels, pascal};
 
+    type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
     /// Each kernel's listing against the one in `snapshots/`, and the GPU kernels' PTX, so that a
     /// change to kernite or to a kernel that moves an instruction shows in review. With
     /// `KERNITE_BLESS=1` the files are written instead, for the diff to be reviewed and committed.
     #[test]
-    fn listings_match_their_snapshots() {
+    fn listings_match_their_snapshots() -> Result {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("snapshots");
         let bless = std::env::var_os("KERNITE_BLESS").is_some();
         let mut changed = vec![];
@@ -1445,13 +1483,14 @@ mod tests {
         for (name, text) in files.chain(ptx) {
             let path = dir.join(&name);
             if bless {
-                fs::create_dir_all(&dir).unwrap();
-                fs::write(&path, text).unwrap();
+                fs::create_dir_all(&dir)?;
+                fs::write(&path, text)?;
             } else if fs::read_to_string(&path).ok().as_deref() != Some(text) {
                 changed.push(name);
             }
         }
         assert!(changed.is_empty(), "listings changed: {changed:?}; rerun with KERNITE_BLESS=1 and review the diff");
+        Ok(())
     }
 
     /// Pseudo-random integers, the same for the same seed.
@@ -1499,14 +1538,15 @@ mod tests {
     }
 
     #[test]
-    fn sum8_is_its_reference_bit_for_bit() {
-        assert!(super::supported(), "the kernels need AVX2 and FMA");
+    fn sum8_is_its_reference_bit_for_bit() -> Result {
+        super::supported()?;
         for seed in 1..=1000 {
-            let xs: [f32; 8] = floats(8, seed).try_into().unwrap();
+            let xs: [f32; 8] = floats(8, seed).try_into().map_err(|_| "floats gave the wrong length")?;
             // SAFETY: eight floats, and a cpu that runs the kernels.
             let got = unsafe { kernels::sum8(xs.as_ptr()) };
             assert_eq!(got.to_bits(), sum_lanes(xs).to_bits(), "{xs:?}");
         }
+        Ok(())
     }
 
     /// For one accumulator and for four, and for sixteen, two of which spill, where `n` is a
@@ -1514,15 +1554,16 @@ mod tests {
     /// `sum16` against `sum8`'s reference of each half, added: what it returns has been in the
     /// kernel's stack memory and back, across a call.
     #[test]
-    fn sum16_is_sum8_of_each_half_bit_for_bit() {
-        assert!(super::supported(), "the kernels need AVX2 and FMA");
+    fn sum16_is_sum8_of_each_half_bit_for_bit() -> Result {
+        super::supported()?;
         for seed in 1..=1000 {
-            let xs: [f32; 16] = floats(16, seed).try_into().unwrap();
-            let want = sum_lanes(xs[..8].try_into().unwrap()) + sum_lanes(xs[8..].try_into().unwrap());
+            let xs: [f32; 16] = floats(16, seed).try_into().map_err(|_| "floats gave the wrong length")?;
+            let want = sum_lanes(xs[..8].try_into()?) + sum_lanes(xs[8..].try_into()?);
             // SAFETY: sixteen floats, and a cpu that runs the kernels.
             let got = unsafe { kernels::sum16(xs.as_ptr()) };
             assert_eq!(got.to_bits(), want.to_bits(), "{xs:?}");
         }
+        Ok(())
     }
 
     /// The greatest common divisor of `a` and `b`, by Euclid's algorithm, as the GPU's `gcd`
@@ -1555,9 +1596,9 @@ mod tests {
     /// alone on 64 bits, at the ends of the range and on pairs with a factor in common, a
     /// power of two in it, which Stein's algorithm halves away a call a bit.
     #[test]
-    fn gcds_on_the_cpu_are_euclids() {
+    fn gcds_on_the_cpu_are_euclids() -> Result {
         let (a, b, want) = gcd_pairs();
-        assert_eq!(super::gcds_on_cpu(&a, &b), want);
+        assert_eq!(super::gcds_on_cpu(&a, &b)?, want);
         let mut pairs =
             vec![(u64::MAX, u64::MAX), (u64::MAX, 1 << 63), (1 << 63, 1 << 62), (0, u64::MAX), (u64::MAX, 0)];
         for w in words(60_000, 9).chunks(6) {
@@ -1569,6 +1610,7 @@ mod tests {
             // SAFETY: `gcd` reaches no memory but its own stack's.
             assert_eq!(unsafe { kernels::gcd(x, y) }, euclid(x, y), "gcd({x}, {y})");
         }
+        Ok(())
     }
 
     /// `histogram` on the cpu against the counts of each bin in Rust, as on the GPU: kept in the
@@ -1607,7 +1649,7 @@ mod tests {
     /// GPU: by the weights the module starts with, and then by those the host writes; eight at
     /// a time, four, and one.
     #[test]
-    fn weigh_on_the_cpu_multiplies_by_the_weights_in_constant_memory() {
+    fn weigh_on_the_cpu_multiplies_by_the_weights_in_constant_memory() -> Result {
         let weights = &kernels::WEIGHTS;
         assert_eq!(weights.read(), [1.0, 0.5, 0.25, 2.0]);
         for w in [[1.0, 0.5, 0.25, 2.0], [3.0, -0.1, 1.0e-30, 7.5]] {
@@ -1615,15 +1657,16 @@ mod tests {
             for n in [0, 1, 3, 4, 7, 8, 12, 15, 257, 10_000] {
                 let mut x = floats(n, n as u32 + 9);
                 let want: Vec<u32> = x.iter().enumerate().map(|(i, x)| (x * w[i % 4]).to_bits()).collect();
-                super::weigh_on_cpu(&mut x);
+                super::weigh_on_cpu(&mut x)?;
                 assert_eq!(x.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), want, "{n} floats by {w:?}");
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn dot_is_its_reference_bit_for_bit() {
-        assert!(super::supported(), "the kernels need AVX2 and FMA");
+    fn dot_is_its_reference_bit_for_bit() -> Result {
+        super::supported()?;
         for n in [0, 32, 96, 128, 1024, 3968, 4000] {
             let (x, y) = (floats(n, 2 * n as u32 + 1), floats(n, 2 * n as u32 + 2));
             // SAFETY: `n` floats behind each pointer, a multiple of 32, and a cpu that runs
@@ -1638,14 +1681,15 @@ mod tests {
                 assert_eq!(sixteen.to_bits(), dot(&x, &y, 16).to_bits(), "{n} floats, sixteen accumulators");
             }
         }
+        Ok(())
     }
 
     /// Each count, from counts that start anywhere, some near `u32::MAX`, and called again and
     /// again on the same stack, so that tables left uncleared would show; at lengths short of a
     /// turn of the tables, past one, and a run of one byte.
     #[test]
-    fn count_bytes_counts_each_byte() {
-        assert!(super::supported(), "the kernels need AVX2 and FMA");
+    fn count_bytes_counts_each_byte() -> Result {
+        super::supported()?;
         let start: [u32; 256] = std::array::from_fn(|b| (b as u32).wrapping_mul(0x9e37_79b9));
         let mut inputs: Vec<Vec<u8>> = [0, 1, 3, 4, 5, 15, 16, 17, 1000, 4097, 100_000]
             .iter()
@@ -1666,6 +1710,7 @@ mod tests {
             assert_eq!(four, want, "{} bytes, four tables", bytes.len());
             assert_eq!(sixteen, want, "{} bytes, sixteen tables", bytes.len());
         }
+        Ok(())
     }
 
     /// A kernel for the tests alone.
@@ -1708,28 +1753,34 @@ mod tests {
     /// time: a frame taken at once would reach past the guard page, into memory of another's
     /// or none. The test runs itself again in a process of its own, which the overflow aborts.
     #[test]
-    fn a_frame_past_the_end_of_the_stack_faults_at_its_guard_page() {
+    fn a_frame_past_the_end_of_the_stack_faults_at_its_guard_page() -> Result {
         if std::env::var_os("MY_APP_DEEP").is_some() {
             let thread = std::thread::Builder::new().name("deep".into()).stack_size(64 << 10);
             // SAFETY: the kernel reaches no memory but its own stack's.
-            thread.spawn(|| unsafe { deep::deep() }).unwrap().join().unwrap();
-            return;
+            thread.spawn(|| unsafe { deep::deep() })?.join().map_err(|_| "the deep thread panicked")?;
+            return Ok(());
         }
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
+        let out = std::process::Command::new(std::env::current_exe()?)
             .args(["--exact", "tests::a_frame_past_the_end_of_the_stack_faults_at_its_guard_page", "--nocapture"])
             .env("MY_APP_DEEP", "1")
-            .output()
-            .unwrap();
+            .output()?;
         let stderr = String::from_utf8_lossy(&out.stderr);
         let overflowed = stderr.contains("thread 'deep'") && stderr.contains("has overflowed its stack");
         assert!(!out.status.success() && overflowed, "{stderr}");
+        Ok(())
     }
 
     /// The GPU, and its kernels; on a machine with none, `None`, and the test is skipped.
-    fn cuda() -> Option<(Cuda, gpu::Kernels)> {
-        let cuda = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")).ok()?;
-        let kernels = gpu::Kernels::load(&cuda).unwrap();
-        Some((cuda, kernels))
+    fn cuda() -> Result<Option<(Cuda, gpu::Kernels)>> {
+        let cuda = match Cuda::new() {
+            Ok(cuda) => cuda,
+            Err(e) => {
+                eprintln!("no GPU: skipped. {e}");
+                return Ok(None);
+            }
+        };
+        let kernels = gpu::Kernels::load(&cuda)?;
+        Ok(Some((cuda, kernels)))
     }
 
     /// What `block_sums` does to each run, a power of two long, in its order: each float of
@@ -1748,43 +1799,41 @@ mod tests {
     }
 
     #[test]
-    fn block_sums_is_its_tree_bit_for_bit() {
-        let Some((cuda, kernels)) = cuda() else { return };
+    fn block_sums_is_its_tree_bit_for_bit() -> Result {
+        let Some((cuda, kernels)) = cuda()? else { return Ok(()) };
         for runs in [0, 1, 2, 37] {
             let x = floats(1024 * runs, runs as u32 + 7);
             let sums = |run: usize| x.chunks(run).map(|run| tree(run).to_bits()).collect::<Vec<_>>();
             let bits = |got: Vec<f32>| got.iter().map(|s| s.to_bits()).collect::<Vec<_>>();
-            assert_eq!(bits(super::block_sums::<256>(&cuda, &kernels, &x).unwrap()), sums(256), "{runs} runs of 1024");
-            assert_eq!(
-                bits(super::block_sums::<1024>(&cuda, &kernels, &x).unwrap()),
-                sums(1024),
-                "{runs} runs of 1024"
-            );
+            assert_eq!(bits(super::block_sums::<256>(&cuda, &kernels, &x)?), sums(256), "{runs} runs of 1024");
+            assert_eq!(bits(super::block_sums::<1024>(&cuda, &kernels, &x)?), sums(1024), "{runs} runs of 1024");
         }
+        Ok(())
     }
 
     #[test]
-    fn reverse_runs_reverses_each_run() {
-        let Some((cuda, kernels)) = cuda() else { return };
+    fn reverse_runs_reverses_each_run() -> Result {
+        let Some((cuda, kernels)) = cuda()? else { return Ok(()) };
         // A run of 1024 is as many threads as a block has, and 4 KB of shared memory.
         for (n, run) in [(12, 3), (1024, 1), (4096, 1024), (1000, 40)] {
             let mut x: Vec<f32> = Vec::from_fn(n, |i| i as f32);
             let want: Vec<f32> = x.chunks(run).flat_map(|r| r.iter().rev().copied()).collect();
-            super::reverse_runs(&cuda, &kernels, &mut x, run).unwrap();
+            super::reverse_runs(&cuda, &kernels, &mut x, run)?;
             assert_eq!(x, want, "{n} floats in runs of {run}");
         }
+        Ok(())
     }
 
     /// `scale_f16` on every `f16` against the product in `f32`, which is exact, rounded to an
     /// `f16` once as `mul.rn.f16` rounds it.
     #[test]
-    fn scale_f16_rounds_the_product_once() {
-        let Some((cuda, kernels)) = cuda() else { return };
+    fn scale_f16_rounds_the_product_once() -> Result {
+        let Some((cuda, kernels)) = cuda()? else { return Ok(()) };
         for a in [3.0, -0.1, 1.0e-3, 600.0] {
             let a = f16::from_f32(a);
             let mut x: Vec<f16> = (0..=u16::MAX).map(f16::from_bits).collect();
             let want: Vec<f16> = x.iter().map(|x| f16::from_f32(x.to_f32() * a.to_f32())).collect();
-            super::scale_f16(&cuda, &kernels, a, &mut x).unwrap();
+            super::scale_f16(&cuda, &kernels, a, &mut x)?;
             for (bits, (got, want)) in (0..=u16::MAX).zip(x.iter().zip(&want)) {
                 match want.to_f32().is_nan() {
                     true => assert!(got.to_f32().is_nan(), "{bits:#06x} times {a}"),
@@ -1792,59 +1841,63 @@ mod tests {
                 }
             }
         }
+        Ok(())
     }
 
     /// `gcds` on the GPU against Euclid's algorithm in Rust, on `gcd_pairs`.
     #[test]
-    fn gcds_are_euclids() {
-        let Some((cuda, kernels)) = cuda() else { return };
+    fn gcds_are_euclids() -> Result {
+        let Some((cuda, kernels)) = cuda()? else { return Ok(()) };
         let (a, b, want) = gcd_pairs();
-        assert_eq!(super::gcds(&cuda, &kernels, &a, &b).unwrap(), want);
+        assert_eq!(super::gcds(&cuda, &kernels, &a, &b)?, want);
+        Ok(())
     }
 
     /// `histogram` against the counts of each bin in Rust, kept on the GPU from one launch to
     /// the next, and from what the host writes.
     #[test]
-    fn histogram_keeps_its_counts_from_launch_to_launch() {
-        let Some((cuda, kernels)) = cuda() else { return };
-        let counts = kernels.COUNTS();
+    fn histogram_keeps_its_counts_from_launch_to_launch() -> Result {
+        let Some((cuda, kernels)) = cuda()? else { return Ok(()) };
+        let counts = kernels.COUNTS()?;
         assert_eq!(counts.len(), 16);
-        assert_eq!(counts.read().unwrap(), [0; 16], "zeros until something writes them");
+        assert_eq!(counts.read()?, [0; 16], "zeros until something writes them");
         let mut want = [0u32; 16];
         for (n, seed) in [(1000, 1), (0, 2), (1, 3), (100_000, 4)] {
             let x = words(n, seed);
             for v in &x {
                 want[(v >> 28) as usize] += 1;
             }
-            super::histogram(&cuda, &kernels, &x).unwrap();
-            assert_eq!(counts.read().unwrap(), want, "after {n} more integers");
+            super::histogram(&cuda, &kernels, &x)?;
+            assert_eq!(counts.read()?, want, "after {n} more integers");
         }
-        counts.write(&[7; 16]).unwrap();
-        super::histogram(&cuda, &kernels, &[0, u32::MAX, u32::MAX]).unwrap();
+        counts.write(&[7; 16])?;
+        super::histogram(&cuda, &kernels, &[0, u32::MAX, u32::MAX])?;
         let mut want = [7; 16];
         want[0] += 1;
         want[15] += 2;
-        assert_eq!(counts.read().unwrap(), want, "after the host's");
-        counts.zero().unwrap();
-        assert_eq!(counts.read().unwrap(), [0; 16]);
+        assert_eq!(counts.read()?, want, "after the host's");
+        counts.zero()?;
+        assert_eq!(counts.read()?, [0; 16]);
+        Ok(())
     }
 
     /// `weigh` against each float times its weight in Rust, which rounds once as `mul.rn.f32`
     /// does: by the weights the module starts with, and then by those the host writes.
     #[test]
-    fn weigh_multiplies_by_the_weights_in_constant_memory() {
-        let Some((cuda, kernels)) = cuda() else { return };
-        let weights = kernels.WEIGHTS();
-        assert_eq!(weights.read().unwrap(), [1.0, 0.5, 0.25, 2.0]);
+    fn weigh_multiplies_by_the_weights_in_constant_memory() -> Result {
+        let Some((cuda, kernels)) = cuda()? else { return Ok(()) };
+        let weights = kernels.WEIGHTS()?;
+        assert_eq!(weights.read()?, [1.0, 0.5, 0.25, 2.0]);
         for w in [[1.0, 0.5, 0.25, 2.0], [3.0, -0.1, 1.0e-30, 7.5]] {
-            weights.write(&w).unwrap();
+            weights.write(&w)?;
             for n in [0, 1, 257, 10_000] {
                 let mut x = floats(n, n as u32 + 9);
                 let want: Vec<u32> = x.iter().enumerate().map(|(i, x)| (x * w[i % 4]).to_bits()).collect();
-                super::weigh(&cuda, &kernels, &mut x).unwrap();
+                super::weigh(&cuda, &kernels, &mut x)?;
                 assert_eq!(x.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), want, "{n} floats by {w:?}");
             }
         }
+        Ok(())
     }
 
     /// Integers from -8 to 8, as halves, the same for the same seed.
@@ -1855,12 +1908,13 @@ mod tests {
     /// `matmul` against the product of integers, of which each sum is exact in an `f32` in any
     /// order the tensor cores add: of `k` products of at most 64, less than 2^24 in all.
     #[test]
-    fn matmul_is_exact_on_integers() {
-        let Some((cuda, _)) = cuda() else { return };
+    fn matmul_is_exact_on_integers() -> Result {
+        let Some((cuda, _)) = cuda()? else { return Ok(()) };
         if cuda.sm() < 80 {
-            return eprintln!("the {} is older than Ampere, sm_80: skipped", cuda.name());
+            eprintln!("the {} is older than Ampere, sm_80: skipped", cuda.name());
+            return Ok(());
         }
-        let kernels = ampere::Kernels::load(&cuda).unwrap();
+        let kernels = ampere::Kernels::load(&cuda)?;
         for (m, n, k) in [(16, 8, 16), (0, 8, 16), (16, 8, 0), (32, 24, 48), (48, 40, 160), (128, 128, 1024)] {
             let (a, bt) = (integers(m * k, (m + k) as u32 + 1), integers(n * k, (n + k) as u32 + 2));
             let want: Vec<f32> = Vec::from_fn(m * n, |ij| {
@@ -1868,21 +1922,22 @@ mod tests {
                 let sum: i32 = (0..k).map(|l| a[i * k + l].to_f32() as i32 * bt[j * k + l].to_f32() as i32).sum();
                 sum as f32
             });
-            let got = super::matmul(&cuda, &kernels, &a, &bt, (m, n, k)).unwrap();
+            let got = super::matmul(&cuda, &kernels, &a, &bt, (m, n, k))?;
             assert_eq!(got, want, "{m} by {n} by {k}");
         }
+        Ok(())
     }
 
     /// The GPU, and its kernels whose blocks wait for each other; on a machine with none, or
     /// with one older than Pascal, `sm_60`, `None`, and the test is skipped.
-    fn pascal() -> Option<(Cuda, pascal::Kernels)> {
-        let (cuda, _) = cuda()?;
+    fn pascal() -> Result<Option<(Cuda, pascal::Kernels)>> {
+        let Some((cuda, _)) = cuda()? else { return Ok(None) };
         if cuda.sm() < 60 {
             eprintln!("the {} is older than Pascal, sm_60: skipped", cuda.name());
-            return None;
+            return Ok(None);
         }
-        let kernels = pascal::Kernels::load(&cuda).unwrap();
-        Some((cuda, kernels))
+        let kernels = pascal::Kernels::load(&cuda)?;
+        Ok(Some((cuda, kernels)))
     }
 
     /// What `normalize` computes, in its order: each thread's `K` floats added in order, 0 past
@@ -1903,21 +1958,23 @@ mod tests {
 
     /// The end of the error of a cooperative launch of `blocks` blocks, which is more than the
     /// GPU runs at once, `most`.
-    fn too_large(e: kernite_cuda::Error, blocks: u32, most: u32) {
+    fn too_large(e: Box<dyn std::error::Error + Send + Sync>, blocks: u32, most: u32) -> Result {
+        let e = e.downcast::<kernite_cuda::Error>().map_err(|e| format!("`{e}` is no error of the driver's"))?;
         assert!(e.message.starts_with("CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE (720): "), "{e}");
         assert!(
             e.message.ends_with(&format!(": the grid has {blocks} blocks, and the GPU runs {most} of these at once")),
             "{e}"
         );
+        Ok(())
     }
 
     /// `normalize` against [`normalized`], bit for bit, each time of ten: of a float, of a block
     /// and a float more, and of as many as the GPU holds at once, so that a block that went on
     /// before the others had written their sums would show; and one more is an error.
     #[test]
-    fn normalize_is_its_reference_bit_for_bit() {
-        let Some((cuda, kernels)) = pascal() else { return };
-        let most = kernels.normalize_blocks(256, 0).unwrap();
+    fn normalize_is_its_reference_bit_for_bit() -> Result {
+        let Some((cuda, kernels)) = pascal()? else { return Ok(()) };
+        let most = kernels.normalize_blocks(256, 0)?;
         let all = (most * 256 * pascal::K) as usize;
         for n in [1, 1023, 1025, 10_000, all] {
             // In [0.5, 1.5), so that the sum is far from 0.
@@ -1925,11 +1982,15 @@ mod tests {
             let want: Vec<u32> = normalized(&x).iter().map(|v| v.to_bits()).collect();
             for _ in 0..10 {
                 let mut got = x.clone();
-                super::normalize(&cuda, &kernels, &mut got).unwrap();
+                super::normalize(&cuda, &kernels, &mut got)?;
                 assert_eq!(got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), want, "{n} floats");
             }
         }
-        too_large(super::normalize(&cuda, &kernels, &mut vec![1.0; all + 1]).unwrap_err(), most + 1, most);
+        too_large(
+            super::normalize(&cuda, &kernels, &mut vec![1.0; all + 1]).err().ok_or("normalize gave Ok")?,
+            most + 1,
+            most,
+        )
     }
 
     /// What `diffuse` computes, a step at a time, in its order.
@@ -1950,30 +2011,35 @@ mod tests {
     /// so that a thread that read a neighbour of another step would show; and one more is an
     /// error.
     #[test]
-    fn diffuse_is_its_reference_bit_for_bit() {
-        let Some((cuda, kernels)) = pascal() else { return };
-        let most = kernels.diffuse_blocks(256, 0).unwrap();
+    fn diffuse_is_its_reference_bit_for_bit() -> Result {
+        let Some((cuda, kernels)) = pascal()? else { return Ok(()) };
+        let most = kernels.diffuse_blocks(256, 0)?;
         let all = (most * 256) as usize;
         for (n, steps) in [(1, 3), (2, 1), (257, 2), (1000, 0), (all, 1000)] {
             let x = floats(n, n as u32 + 13);
             let want: Vec<u32> = diffused(&x, steps).iter().map(|v| v.to_bits()).collect();
             let mut got = x.clone();
-            super::diffuse(&cuda, &kernels, &mut got, steps).unwrap();
+            super::diffuse(&cuda, &kernels, &mut got, steps)?;
             assert_eq!(got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), want, "{n} floats, {steps} steps");
         }
-        too_large(super::diffuse(&cuda, &kernels, &mut vec![0.0; all + 1], 1).unwrap_err(), most + 1, most);
+        too_large(
+            super::diffuse(&cuda, &kernels, &mut vec![0.0; all + 1], 1).err().ok_or("diffuse gave Ok")?,
+            most + 1,
+            most,
+        )
     }
 
     /// How many threads the cpu tests run on at most: four, or as many as the process runs at
     /// once if fewer, since `cargo test` runs tests beside each other and each thread spins at
     /// a barrier.
-    fn threads() -> usize {
-        kernite_cpu::most().unwrap().min(4)
+    fn threads() -> Result<usize> {
+        Ok(kernite_cpu::most()?.min(4))
     }
 
     /// The error of a grid of more threads than the process runs at once.
-    fn too_many(e: kernite_cpu::Error) {
-        let most = kernite_cpu::most().unwrap();
+    fn too_many(e: Box<dyn std::error::Error + Send + Sync>) -> Result {
+        let e = e.downcast::<kernite_cpu::Error>().map_err(|e| format!("`{e}` is no error of a launch"))?;
+        let most = kernite_cpu::most()?;
         assert_eq!(
             e.message,
             format!(
@@ -1982,6 +2048,7 @@ mod tests {
                 most + 1
             )
         );
+        Ok(())
     }
 
     /// The cpu's `normalize` against [`normalized`], the GPU's reference, bit for bit, on one
@@ -1990,16 +2057,16 @@ mod tests {
     /// thread that went on before the others had written their sums would show; and a grid of
     /// more threads than the process runs at once is an error.
     #[test]
-    fn normalize_on_threads_is_the_gpus_reference_bit_for_bit() {
-        assert!(super::supported(), "the kernels need AVX2 and FMA");
-        for threads in 1..=threads() {
+    fn normalize_on_threads_is_the_gpus_reference_bit_for_bit() -> Result {
+        super::supported()?;
+        for threads in 1..=threads()? {
             for n in [0, 1, 1023, 1024, 1025, 10_000, 41_000] {
                 // In [0.5, 1.5), so that the sum is far from 0.
                 let x: Vec<f32> = floats(n, n as u32 + 11).iter().map(|x| x / 2.0 + 1.0).collect();
                 let want: Vec<u32> = normalized(&x).iter().map(|v| v.to_bits()).collect();
                 for _ in 0..10 {
                     let mut got = x.clone();
-                    super::normalize_on_threads(&mut got, threads).unwrap();
+                    super::normalize_on_threads(&mut got, threads)?;
                     assert_eq!(
                         got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                         want,
@@ -2008,17 +2075,22 @@ mod tests {
                 }
             }
         }
-        too_many(super::normalize_on_threads(&mut [1.0], kernite_cpu::most().unwrap() + 1).unwrap_err());
+        too_many(
+            super::normalize_on_threads(&mut [1.0], kernite_cpu::most()? + 1)
+                .err()
+                .ok_or("normalize_on_threads gave Ok")?,
+        )?;
+        Ok(())
     }
 
     /// The cpu's `normalize` on a grid placed on the first CPUs the caller's thread may run on, a thread on
     /// each, against [`normalized`], bit for bit, on one thread to four: the threads wait for each
     /// other at the barrier on CPUs of their own, as they do where the system puts them.
     #[test]
-    fn normalize_on_a_placed_grid_is_the_gpus_reference_bit_for_bit() {
-        assert!(super::supported(), "the kernels need AVX2 and FMA");
-        let cpus = kernite_cpu::cpus().unwrap();
-        for threads in 1..=threads() {
+    fn normalize_on_a_placed_grid_is_the_gpus_reference_bit_for_bit() -> Result {
+        super::supported()?;
+        let cpus = kernite_cpu::cpus()?;
+        for threads in 1..=threads()? {
             for n in [1, 1025, 41_000] {
                 let x: Vec<f32> = floats(n, n as u32 + 11).iter().map(|x| x / 2.0 + 1.0).collect();
                 let want: Vec<u32> = normalized(&x).iter().map(|v| v.to_bits()).collect();
@@ -2026,7 +2098,7 @@ mod tests {
                 let grid = kernite_cpu::Grid::on(&cpus[..threads]);
                 // SAFETY: `n` floats behind `got` and a float a chunk behind `sums`, which nothing
                 // else touches while the threads run, and the cpu has what the kernel needs.
-                unsafe { super::kernels::normalize(grid, got.as_mut_ptr(), sums.as_mut_ptr(), n) }.unwrap();
+                unsafe { super::kernels::normalize(grid, got.as_mut_ptr(), sums.as_mut_ptr(), n) }?;
                 assert_eq!(
                     got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                     want,
@@ -2034,6 +2106,7 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 
     /// The cpu's `diffuse` against [`diffused`], the GPU's reference, bit for bit, on one thread
@@ -2042,14 +2115,14 @@ mod tests {
     /// grid, so that a thread that read a neighbour of another step would show; and a grid of
     /// more threads than the process runs at once is an error.
     #[test]
-    fn diffuse_on_threads_is_the_gpus_reference_bit_for_bit() {
-        assert!(super::supported(), "the kernels need AVX2 and FMA");
-        for threads in 1..=threads() {
+    fn diffuse_on_threads_is_the_gpus_reference_bit_for_bit() -> Result {
+        super::supported()?;
+        for threads in 1..=threads()? {
             for (n, steps) in [(1, 3), (2, 1), (9, 2), (10, 3), (17, 4), (1000, 0), (1025, 1), (9000, 1000)] {
                 let x = floats(n, n as u32 + 13);
                 let want: Vec<u32> = diffused(&x, steps).iter().map(|v| v.to_bits()).collect();
                 let mut got = x.clone();
-                super::diffuse_on_threads(&mut got, steps as usize, threads).unwrap();
+                super::diffuse_on_threads(&mut got, steps as usize, threads)?;
                 assert_eq!(
                     got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                     want,
@@ -2057,92 +2130,109 @@ mod tests {
                 );
             }
         }
-        too_many(super::diffuse_on_threads(&mut [1.0], 1, kernite_cpu::most().unwrap() + 1).unwrap_err());
+        too_many(
+            super::diffuse_on_threads(&mut [1.0], 1, kernite_cpu::most()? + 1)
+                .err()
+                .ok_or("diffuse_on_threads gave Ok")?,
+        )?;
+        Ok(())
     }
 
     /// A frame of 192 KB is on the stack of the thread the kernel runs on, each of the grid's,
     /// whose own it is, launch after launch on the threads the launches before kept: each reads
     /// back what it wrote, though all wrote before any read.
     #[test]
-    fn a_frame_of_192_kb_is_each_threads_own_launch_after_launch() {
-        for threads in 1..=threads() {
+    fn a_frame_of_192_kb_is_each_threads_own_launch_after_launch() -> Result {
+        for threads in 1..=threads()? {
             let want: Vec<u64> = (0..threads as u64).map(|t| 2 * t + 3).collect();
             for launch in 0..50 {
                 let mut out = vec![0u64; threads];
                 // SAFETY: a word a thread behind `out`, which nothing else touches while the
                 // threads run, and the kernel reaches nothing else.
-                unsafe { framed::framed(kernite_cpu::Grid::new(threads), out.as_mut_ptr()) }.unwrap();
+                unsafe { framed::framed(kernite_cpu::Grid::new(threads), out.as_mut_ptr()) }?;
                 assert_eq!(out, want, "{threads} threads, launch {launch}");
             }
         }
+        Ok(())
     }
 
     /// Launches from two threads at once, one of `normalize` and one of `diffuse`, each wait at
     /// a barrier of their grid's own: each result is the reference's, bit for bit, as when
     /// they launch alone, a hundred times over.
     #[test]
-    fn launches_from_two_threads_at_once_wait_at_barriers_of_their_own() {
-        assert!(super::supported(), "the kernels need AVX2 and FMA");
-        let threads = threads().min(2);
+    fn launches_from_two_threads_at_once_wait_at_barriers_of_their_own() -> Result {
+        super::supported()?;
+        let threads = threads()?.min(2);
         let x = floats(41_000, 17).iter().map(|x| x / 2.0 + 1.0).collect::<Vec<f32>>();
         let heat = floats(9000, 19);
         let bits = |v: &[f32]| v.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
         let (normal, spread) = (bits(&normalized(&x)), bits(&diffused(&heat, 50)));
-        std::thread::scope(|s| {
-            s.spawn(|| {
+        std::thread::scope(|s| -> Result {
+            let normalizing = s.spawn(|| -> Result {
                 for _ in 0..100 {
                     let mut got = x.clone();
-                    super::normalize_on_threads(&mut got, threads).unwrap();
+                    super::normalize_on_threads(&mut got, threads)?;
                     assert_eq!(bits(&got), normal);
                 }
+                Ok(())
             });
-            s.spawn(|| {
+            let diffusing = s.spawn(|| -> Result {
                 for _ in 0..100 {
                     let mut got = heat.clone();
-                    super::diffuse_on_threads(&mut got, 50, threads).unwrap();
+                    super::diffuse_on_threads(&mut got, 50, threads)?;
                     assert_eq!(bits(&got), spread);
                 }
+                Ok(())
             });
-        });
+            normalizing.join().map_err(|_| "a thread panicked")??;
+            diffusing.join().map_err(|_| "a thread panicked")??;
+            Ok(())
+        })
     }
 
     /// `saxpy` on the GPU against `f32::mul_add`, which rounds once as `fma.rn.f32` does; on a
     /// machine with no GPU, skipped.
     #[test]
-    fn saxpy_is_mul_add_bit_for_bit() {
+    fn saxpy_is_mul_add_bit_for_bit() -> Result {
         let cuda = match Cuda::new() {
             Ok(cuda) => cuda,
-            Err(e) => return eprintln!("no GPU: skipped. {e}"),
+            Err(e) => {
+                eprintln!("no GPU: skipped. {e}");
+                return Ok(());
+            }
         };
-        let kernels = gpu::Kernels::load(&cuda).unwrap();
+        let kernels = gpu::Kernels::load(&cuda)?;
         for n in [0, 1, 255, 256, 257, 10_000] {
             let (x, mut y) = (floats(n, 3 * n as u32 + 1), floats(n, 3 * n as u32 + 2));
             let want: Vec<u32> = x.iter().zip(&y).map(|(x, y)| 1.5f32.mul_add(*x, *y).to_bits()).collect();
-            super::saxpy(&cuda, &kernels, 1.5, &x, &mut y).unwrap();
+            super::saxpy(&cuda, &kernels, 1.5, &x, &mut y)?;
             assert_eq!(y.iter().map(|y| y.to_bits()).collect::<Vec<_>>(), want, "{n} floats");
         }
+        Ok(())
     }
 
     /// `Kernels::load` on the `Cuda` of each GPU, all held at once on this thread, and `saxpy`
     /// launched on each in turn against `f32::mul_add`, twice around, so that each launch follows
     /// one on another GPU. On a machine with one GPU it runs on that one; with none, skipped.
     #[test]
-    fn saxpy_is_mul_add_bit_for_bit_on_each_gpu() {
-        let Some(first) = cuda() else { return };
-        let others = (1..Cuda::count().unwrap()).map(|index| {
-            let cuda = Cuda::on(index).unwrap();
-            gpu::Kernels::load(&cuda).map(|kernels| (cuda, kernels)).unwrap()
-        });
-        let gpus: Vec<(Cuda, gpu::Kernels)> = std::iter::once(first).chain(others).collect();
+    fn saxpy_is_mul_add_bit_for_bit_on_each_gpu() -> Result {
+        let Some(first) = cuda()? else { return Ok(()) };
+        let mut gpus = vec![first];
+        for index in 1..Cuda::count()? {
+            let cuda = Cuda::on(index)?;
+            let kernels = gpu::Kernels::load(&cuda)?;
+            gpus.push((cuda, kernels));
+        }
         for round in 0..2 {
             for (index, (cuda, kernels)) in gpus.iter().enumerate() {
                 let seed = 10 * round + index as u32;
                 let (x, mut y) = (floats(10_000, 3 * seed + 1), floats(10_000, 3 * seed + 2));
                 let want: Vec<u32> = x.iter().zip(&y).map(|(x, y)| 1.5f32.mul_add(*x, *y).to_bits()).collect();
-                super::saxpy(cuda, kernels, 1.5, &x, &mut y).unwrap();
+                super::saxpy(cuda, kernels, 1.5, &x, &mut y)?;
                 assert_eq!(y.iter().map(|y| y.to_bits()).collect::<Vec<_>>(), want, "GPU {index}, round {round}");
             }
         }
+        Ok(())
     }
 
     /// GPU kernels for the tests alone, of nothing past `sm_20`.
@@ -2191,27 +2281,31 @@ mod tests {
     /// one written for `sm_30`. `saxpy` over 65536 blocks against `f32::mul_add`, and the last of
     /// 2^31 - 1 blocks of one thread; on a machine with no GPU, skipped.
     #[test]
-    fn a_kernel_of_nothing_past_sm_20_starts_every_grid_the_gpu_takes() {
+    fn a_kernel_of_nothing_past_sm_20_starts_every_grid_the_gpu_takes() -> Result {
         let cuda = match Cuda::new() {
             Ok(cuda) => cuda,
-            Err(e) => return eprintln!("no GPU: skipped. {e}"),
+            Err(e) => {
+                eprintln!("no GPU: skipped. {e}");
+                return Ok(());
+            }
         };
         assert!(oldest::PTX.contains(".version 3.0\n.target sm_30\n"), "{}", oldest::PTX);
-        let kernels = oldest::Kernels::load(&cuda).unwrap();
+        let kernels = oldest::Kernels::load(&cuda)?;
         // 65536 blocks of 256 threads, the last with one float to its name.
         let n = 65535 * 256 + 1;
         let (x, y) = (floats(n, 7), floats(n, 8));
         let want: Vec<u32> = x.iter().zip(&y).map(|(x, y)| 1.5f32.mul_add(*x, *y).to_bits()).collect();
-        let (xs, ys) = (cuda.upload(&x).unwrap(), cuda.upload(&y).unwrap());
+        let (xs, ys) = (cuda.upload(&x)?, cuda.upload(&y)?);
         // SAFETY: `n` floats behind each pointer, in buffers that last until `read` has waited
         // for the kernel.
-        unsafe { kernels.saxpy(Grid::new(65536, 256), 1.5, xs.ptr(), ys.ptr(), n as u32) }.unwrap();
-        assert_eq!(ys.read().unwrap().iter().map(|y| y.to_bits()).collect::<Vec<_>>(), want);
+        unsafe { kernels.saxpy(Grid::new(65536, 256), 1.5, xs.ptr(), ys.ptr(), n as u32) }?;
+        assert_eq!(ys.read()?.iter().map(|y| y.to_bits()).collect::<Vec<_>>(), want);
         let most = (1 << 31) - 1;
-        let out = cuda.alloc::<u32>(1).unwrap();
+        let out = cuda.alloc::<u32>(1)?;
         // SAFETY: a word at `out`, which the last block writes.
-        unsafe { kernels.last(Grid::new(most, 1), out.ptr()) }.unwrap();
-        assert_eq!(out.read().unwrap(), [most - 1]);
+        unsafe { kernels.last(Grid::new(most, 1), out.ptr()) }?;
+        assert_eq!(out.read()?, [most - 1]);
+        Ok(())
     }
 
     /// GPU kernels for the tests alone, of 20 KB of shared memory of their own and the launch's
@@ -2265,18 +2359,21 @@ mod tests {
     /// with no GPU, with one older than Pascal, `sm_60`, or whose blocks have less than 99 KB,
     /// skipped.
     #[test]
-    fn a_kernel_with_shared_memory_of_its_own_is_given_the_launchs_beside_it() {
+    fn a_kernel_with_shared_memory_of_its_own_is_given_the_launchs_beside_it() -> Result {
         let cuda = match Cuda::new() {
             Ok(cuda) => cuda,
-            Err(e) => return eprintln!("no GPU: skipped. {e}"),
+            Err(e) => {
+                eprintln!("no GPU: skipped. {e}");
+                return Ok(());
+            }
         };
         let most = cuda.max_shared();
         if cuda.sm() < 60 || most < 99 << 10 {
             eprintln!("the {}, sm_{}, gives a block {most} bytes: skipped", cuda.name(), cuda.sm());
-            return;
+            return Ok(());
         }
-        let kernels = beside::Kernels::load(&cuda).unwrap();
-        let out = cuda.alloc::<u32>(2).unwrap();
+        let kernels = beside::Kernels::load(&cuda)?;
+        let out = cuda.alloc::<u32>(2)?;
         let all = most - 20480;
         // 28 KB is what a launch is given unasked beside the kernel's own 20 KB; the rest the
         // kernel must be let have.
@@ -2284,12 +2381,12 @@ mod tests {
             let grid = Grid::new(1, 1).with_shared(bytes);
             // SAFETY: `both` and `together` write two words at `out`, which has them, and the last
             // word of the `bytes` of shared memory they are given.
-            unsafe { kernels.both(grid, out.ptr(), bytes) }.unwrap();
-            assert_eq!(out.read().unwrap(), [7, 9], "{bytes} bytes");
+            unsafe { kernels.both(grid, out.ptr(), bytes) }?;
+            assert_eq!(out.read()?, [7, 9], "{bytes} bytes");
             // SAFETY: as above.
-            unsafe { kernels.together(grid, out.ptr(), bytes) }.unwrap();
-            assert_eq!(out.read().unwrap(), [7, 9], "{bytes} bytes, cooperatively");
-            assert!(kernels.together_blocks(1, bytes).unwrap() >= 1, "{bytes} bytes");
+            unsafe { kernels.together(grid, out.ptr(), bytes) }?;
+            assert_eq!(out.read()?, [7, 9], "{bytes} bytes, cooperatively");
+            assert!(kernels.together_blocks(1, bytes)? >= 1, "{bytes} bytes");
         }
         // 80 KB, 100 KB in all.
         for bytes in [all + 1, all + 1024, u32::MAX] {
@@ -2304,7 +2401,8 @@ mod tests {
                 assert!(e.message.ends_with(&said(bytes, most)), "{e}");
             }
         }
-        cuda.sync().unwrap();
+        cuda.sync()?;
+        Ok(())
     }
 
     /// The cpu's kernels for the test of one memory for a cpu kernel and a GPU kernel.
@@ -2380,26 +2478,33 @@ mod tests {
     /// fills it, a GPU kernel squares it, and a cpu kernel adds it up, each bit for bit as the
     /// scalar reference does, in the kernel's order; on a machine with no GPU, skipped.
     #[test]
-    fn a_cpu_kernel_fills_managed_memory_a_gpu_kernel_squares_it_and_a_cpu_kernel_adds_it_up() {
+    fn a_cpu_kernel_fills_managed_memory_a_gpu_kernel_squares_it_and_a_cpu_kernel_adds_it_up() -> Result {
         let cuda = match Cuda::new() {
             Ok(cuda) => cuda,
-            Err(e) => return eprintln!("no GPU: skipped. {e}"),
+            Err(e) => {
+                eprintln!("no GPU: skipped. {e}");
+                return Ok(());
+            }
         };
         // This test holds slices of managed memory while the other tests of the binary launch kernels,
         // which a launch's contract allows only where the GPU reaches managed memory while the host does.
         if !cuda.concurrent_managed_access() {
-            return eprintln!("the GPU cannot reach managed memory while the host does: skipped.");
+            eprintln!("the GPU cannot reach managed memory while the host does: skipped.");
+            return Ok(());
         }
-        let kernels = device::Kernels::load(&cuda).unwrap();
+        let kernels = device::Kernels::load(&cuda)?;
         // A multiple of 8, and not of 256, so that the last block has threads past the end.
         let n = 1_000_008;
         // SAFETY: the cpu kernel `fill` writes each of the `n` floats before anything reads one.
         let mut memory = match unsafe { cuda.managed_uninit::<f32>(n) } {
             Ok(memory) => memory,
-            Err(e) => return eprintln!("the GPU cannot: skipped. {e}"),
+            Err(e) => {
+                eprintln!("the GPU cannot: skipped. {e}");
+                return Ok(());
+            }
         };
         let address = memory.ptr().addr();
-        let filled = memory.host_mut().unwrap();
+        let filled = memory.host_mut()?;
         assert_eq!(filled.as_ptr() as u64, address, "the cpu's address is the GPU's");
         // SAFETY: `n` floats at `filled`, which has them, and a cpu that runs the kernel.
         unsafe { host::fill(filled.as_mut_ptr(), n) };
@@ -2409,8 +2514,8 @@ mod tests {
         // SAFETY: `square` reads and writes `n` floats at the pointer, which the memory, managed
         // memory of this GPU, has, and this test holds no slice of it. The GPU reaches managed memory
         // while the host does, or the test would have been skipped.
-        unsafe { kernels.square(Grid::new(n.div_ceil(256) as u32, 256), memory.ptr(), n as u32) }.unwrap();
-        let squared = memory.host().unwrap();
+        unsafe { kernels.square(Grid::new(n.div_ceil(256) as u32, 256), memory.ptr(), n as u32) }?;
+        let squared = memory.host()?;
         assert_eq!(squared.as_ptr() as u64, address, "no copy");
         let want: Vec<f32> = want.iter().map(|x| x * x).collect();
         assert_eq!(bits(squared), bits(&want), "the GPU kernel's floats");
@@ -2430,6 +2535,7 @@ mod tests {
         }
         assert_eq!(lanes.map(f32::to_bits), want_lanes.map(f32::to_bits), "the cpu kernel's lanes");
         assert_eq!(sum.to_bits(), sum_lanes(want_lanes).to_bits(), "the sum of the squares");
+        Ok(())
     }
 
     /// The bits of `floats`.

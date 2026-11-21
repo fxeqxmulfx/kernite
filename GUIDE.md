@@ -541,8 +541,8 @@ back. A jump that passes all of a ymm has no `vzeroupper` before it: the callee,
 halves before it returns. A kernel that never returns, `-> !`, ends each way out in `ud2()` or in a call of one that
 does not.
 
-Memory of the module's is a `static` beside its kernels, in the process's memory, which each kernel names as it names its
-own, and which keeps what they write from one call to the next: `static COUNTS: global<[u32; 16]>;` is 16 words the
+Memory of the module's is a `static` beside its kernels, in the process's memory, which each kernel names as it names
+its own, and which keeps what they write from one call to the next: `static COUNTS: global<[u32; 16]>;` is 16 words the
 kernels read and write, and `static WEIGHTS: constant<[f32; 4]> = [1.0, 0.5, 0.25, 2.0];` four floats they only read,
 holding what it says until something writes it. A kernel reaches a static at a displacement from `rip`,
 `vbroadcastf128(w, [WEIGHTS])`, and `lea(p, [COUNTS])` takes its address, for an index, `[p + i * 4]`. kernite checks an
@@ -694,7 +694,9 @@ the driver advises managed and pageable memory alone: this is page-locked memory
 
 A NUMA node does not touch memory, so it is refused as an accessor: `cuMemAdvise: only the GPU and the host access
 memory, not a NUMA node`; and the driver refuses a node the host does not have: `cuMemPrefetchAsync:
-CUDA_ERROR_INVALID_VALUE (1): invalid argument`. A range with no elements, or one past the end, panics.
+CUDA_ERROR_INVALID_VALUE (1): invalid argument`. A range with no elements, or one past the end, is refused before the
+driver is asked: `cuMemPrefetchAsync: the range 2..2 has no elements`, or `the range 3..5 goes past the end of the 4
+elements`; `advise` and `placement` say it with their own calls.
 
 The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, takes a NUMA node as the preferred location,
 `PreferredLocation(Numa(node))` or `PreferredLocation(NumaOfThread)`, and changes nothing: the memory prefers what it
@@ -848,11 +850,12 @@ own, and which keeps what they write from one launch to the next: `static COUNTS
 global memory, `red.global.add.u32([COUNTS + 8], 1)`, and `static WEIGHTS: constant<[f32; 4]> = [1.0, 0.5, 0.25, 2.0];`
 four floats of constant memory, which the kernels only read, `ld.r#const.f32(w, [WEIGHTS + 4])`, holding what it says
 until something writes it. The host reads and writes each as `Kernels` gives it, a [`Global`](crates/cuda/src/lib.rs) of
-Rust's type for its elements: `kernels.COUNTS().read()?`, `kernels.WEIGHTS().write(&[2.0; 4])?`. kernite refuses what a
-module cannot hold: more than the 64 KB of constant memory it has, or 4 GB of global memory, whose size `ptxas` writes
-in 32 bits. The error is at the type of a static that does not fit beside the statics before it that fit. It takes no
-room, so a static after it may fit. The room is that of the statics `cfg` keeps: two tables of 48000 bytes, one under
-`cfg(feature = "new")` and one under `cfg(not(feature = "new"))`, fit in a module, and both under
+Rust's type for its elements: `kernels.COUNTS()?.read()?`, `kernels.WEIGHTS()?.write(&[2.0; 4])?`. An accessor is an
+error only by a mistake of kernite's own: the module has not the memory it names, or not a whole number of its elements.
+kernite refuses what a module cannot hold: more than the 64 KB of constant memory it has, or 4 GB of global memory,
+whose size `ptxas` writes in 32 bits. The error is at the type of a static that does not fit beside the statics before
+it that fit. It takes no room, so a static after it may fit. The room is that of the statics `cfg` keeps: two tables of
+48000 bytes, one under `cfg(feature = "new")` and one under `cfg(not(feature = "new"))`, fit in a module, and both under
 `cfg(feature = "new")` do not.
 
 A kernel whose blocks wait for each other is `#[cooperative]`, and its `grid.sync()` waits until every thread of the

@@ -18,6 +18,8 @@ use std::{fs, io, ptr};
 use common::listed;
 use kernite_cpu::{Grid, cpus, launch, most};
 
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
 // The C library's way into the system's calls, for the one it has no function for.
 unsafe extern "C" {
     fn syscall(number: c_long, ...) -> c_long;
@@ -94,10 +96,10 @@ fn node_of(cpu: usize) -> Option<usize> {
 }
 
 /// The nodes the process may take memory from, if the system says.
-fn mems() -> Option<Vec<usize>> {
-    let status = fs::read_to_string("/proc/self/status").ok()?;
-    let list = status.lines().find_map(|line| line.strip_prefix("Mems_allowed_list:"))?;
-    Some(listed(list.trim()))
+fn mems() -> Result<Option<Vec<usize>>> {
+    let Ok(status) = fs::read_to_string("/proc/self/status") else { return Ok(None) };
+    let list = status.lines().find_map(|line| line.strip_prefix("Mems_allowed_list:"));
+    Ok(list.map(|list| listed(list.trim())).transpose()?)
 }
 
 /// The CPUs a grid is placed on, each with its node: up to `per_node` of each node, the nodes in
@@ -130,46 +132,48 @@ fn a_grid_is_placed_on_the_nodes_in_turn() {
 /// with `vec![1.0; n]` has them all, since the caller wrote them. So a grid's threads place the
 /// pages of the first, and the caller has placed those of the second.
 #[test]
-fn a_buffer_of_zeros_has_no_page_until_a_thread_writes_it_and_one_the_caller_fills_has_them_all() {
+fn a_buffer_of_zeros_has_no_page_until_a_thread_writes_it_and_one_the_caller_fills_has_them_all() -> Result {
     if !says_where_pages_are() {
-        return;
+        return Ok(());
     }
     let (zeros, ones) = (vec![0.0f32; elements(1)], vec![1.0f32; elements(1)]);
-    let (of_zeros, of_ones) =
-        (nodes_of(&looked_at(start(&zeros), 0)).unwrap(), nodes_of(&looked_at(start(&ones), 0)).unwrap());
+    let (of_zeros, of_ones) = (nodes_of(&looked_at(start(&zeros), 0))?, nodes_of(&looked_at(start(&ones), 0))?);
     let there = of_zeros.iter().filter(|&&node| node != NOT_THERE).count();
     assert_eq!(there, 0, "of {LOOKED_AT} pages of the zeros");
     let missing = of_ones.iter().filter(|&&node| node < 0).count();
     assert_eq!(missing, 0, "of {LOOKED_AT} pages of the ones");
+    Ok(())
 }
 
 /// A grid placed on the CPUs of the machine's nodes, each thread of which writes its part of a
 /// buffer first: each page of a part is on the node of the thread's CPU. With one node, which is
 /// what this machine has, every page is on it, and the test says it skipped what needs two.
 #[test]
-fn each_page_of_a_buffer_the_threads_of_a_placed_grid_write_first_is_on_the_node_of_its_thread() {
+fn each_page_of_a_buffer_the_threads_of_a_placed_grid_write_first_is_on_the_node_of_its_thread() -> Result {
     if !says_where_pages_are() {
-        return;
+        return Ok(());
     }
-    let Some(mems) = mems() else {
-        return eprintln!("the system does not say which NUMA nodes the process may use: skipped");
+    let Some(mems) = mems()? else {
+        eprintln!("the system does not say which NUMA nodes the process may use: skipped");
+        return Ok(());
     };
     let mut nodes: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for cpu in cpus().unwrap() {
+    for cpu in cpus()? {
         if let Some(node) = node_of(cpu).filter(|node| mems.contains(node)) {
             nodes.entry(node).or_default().push(cpu);
         }
     }
-    let placed = placement(&nodes, 2, most().unwrap());
+    let placed = placement(&nodes, 2, most()?);
     if placed.is_empty() {
-        return eprintln!("the system does not say which NUMA node a CPU is on: skipped");
+        eprintln!("the system does not say which NUMA node a CPU is on: skipped");
+        return Ok(());
     }
     let on: Vec<usize> = placed.iter().map(|&(cpu, _)| cpu).collect();
 
     let mut buffer = vec![0.0f32; elements(placed.len())];
     let first = start(&buffer);
     let pages: Vec<usize> = (0..placed.len()).flat_map(|t| looked_at(first, t)).collect();
-    let before = nodes_of(&pages).unwrap();
+    let before = nodes_of(&pages)?;
     assert!(before.iter().all(|&node| node == NOT_THERE), "a page of the buffer is there before a thread writes it");
 
     // The grid's threads write to the buffer by address.
@@ -181,10 +185,9 @@ fn each_page_of_a_buffer_the_threads_of_a_placed_grid_write_first_is_on_the_node
             // only this thread writes the part it is in.
             unsafe { part.add(page * PAGE).write(1) };
         }
-    })
-    .unwrap();
+    })?;
 
-    let after = nodes_of(&pages).unwrap();
+    let after = nodes_of(&pages)?;
     for (t, &(cpu, node)) in placed.iter().enumerate() {
         let found: BTreeSet<c_int> = after[t * LOOKED_AT..][..LOOKED_AT].iter().copied().collect();
         let message = format!("the nodes of the pages thread {t} wrote, on CPU {cpu} of node {node}");
@@ -195,4 +198,5 @@ fn each_page_of_a_buffer_the_threads_of_a_placed_grid_write_first_is_on_the_node
             "this machine has one NUMA node, so no page could be on another than its thread's: skipped, for want of two NUMA nodes"
         );
     }
+    Ok(())
 }

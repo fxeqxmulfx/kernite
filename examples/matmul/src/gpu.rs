@@ -373,7 +373,7 @@ pub unsafe fn launch(
     b: &Buffer<f32>,
     shape: crate::Shape,
 ) -> Result<(), Error> {
-    let (m, n, k) = crate::gpu_operands((a.len(), b.len(), c.len()), shape);
+    let (m, n, k) = crate::gpu_operands((a.len(), b.len(), c.len()), shape)?;
     if m * n == 0 {
         return Ok(());
     }

@@ -3,7 +3,7 @@
 //! bit for bit: a sum in order is a chain of scalar fused multiply-adds, and what is the same
 //! for each of a row's elements is done eight at a time.
 
-use crate::model::{Adam, Buf, E, FC1, FC2, LM, Layer, M, Ops, PARAMS, QKV, T, Then, V, WO, WTE};
+use crate::model::{Adam, Buf, E, FC1, FC2, LM, Layer, M, Op, Ops, PARAMS, QKV, T, Then, V, WO, WTE};
 
 /// The kernels. Pointers are to rows of the buffers [`Buf`] names, and a count `n` is of rows
 /// unless it says otherwise; each kernel trusts that its pointers have that many rows to read
@@ -716,39 +716,44 @@ impl Cpu {
             return None;
         }
         let mut cpu = Cpu { bufs: Buf::ALL.iter().map(|b| vec![0.0; b.len()]).collect(), tokens: vec![] };
-        cpu.write(Buf::Params, params);
+        cpu.bufs[Buf::Params as usize].copy_from_slice(params);
         Some(cpu)
     }
 
-    /// Where element `at` of `b` is, for a kernel, `len` elements from there being in it.
-    /// The pointers into a buffer come from the one pointer `as_mut_ptr` gives, so that none
+    /// Where element `at` of `b` is, for a kernel, `len` elements from there being in it; or why they are
+    /// not. The pointers into a buffer come from the one pointer `as_mut_ptr` gives, so that none
     /// invalidates another.
-    fn at(&mut self, b: Buf, at: usize, len: usize) -> *mut f32 {
+    fn at(&mut self, b: Buf, at: usize, len: usize) -> Op<*mut f32> {
         let buf = &mut self.bufs[b as usize];
-        assert!(at + len <= buf.len(), "{len} floats at {at} of {b:?}, which has {}", buf.len());
-        buf.as_mut_ptr().wrapping_add(at)
+        if at + len > buf.len() {
+            return Err(format!("{len} floats at {at} of {b:?}, which has {}", buf.len()));
+        }
+        Ok(buf.as_mut_ptr().wrapping_add(at))
     }
 
     /// Row `t` of `b`, `rows` rows of it from there being in it.
-    fn row(&mut self, b: Buf, t: usize, rows: usize) -> *mut f32 {
+    fn row(&mut self, b: Buf, t: usize, rows: usize) -> Op<*mut f32> {
         self.at(b, t * b.width(), rows * b.width())
     }
 
     /// The weights of `l`.
-    fn weights(&mut self, b: Buf, l: Layer) -> *mut f32 {
+    fn weights(&mut self, b: Buf, l: Layer) -> Op<*mut f32> {
         self.at(b, l.at, l.rows * l.cols)
     }
 
-    /// The tokens from `t`, `n - t` of them being there.
-    fn tokens_at(&self, t: usize, n: usize) -> *const u32 {
-        self.tokens[t..n].as_ptr()
+    /// The tokens from `t`, `n - t` of them being there; or why they are not.
+    fn tokens_at(&self, t: usize, n: usize) -> Op<*const u32> {
+        let tokens = self.tokens.get(t..n);
+        tokens.map(<[u32]>::as_ptr).ok_or_else(|| format!("tokens {t}..{n} of {}", self.tokens.len()))
     }
 }
 
-/// `t0..n` as rows of a document: within it, `T` at most.
-fn rows(t0: usize, n: usize) -> usize {
-    assert!(t0 <= n && n <= T, "rows {t0}..{n} of a document of {T}");
-    n - t0
+/// `t0..n` as rows of a document: within it, `T` at most. How many.
+fn rows(t0: usize, n: usize) -> Op<usize> {
+    if t0 > n || n > T {
+        return Err(format!("rows {t0}..{n} of a document of {T}"));
+    }
+    Ok(n - t0)
 }
 
 /// What the kernels take of the model's sizes.
@@ -760,85 +765,103 @@ const _: () = {
 };
 
 impl Ops for Cpu {
-    fn write(&mut self, b: Buf, data: &[f32]) {
+    fn write(&mut self, b: Buf, data: &[f32]) -> Op {
         self.bufs[b as usize].copy_from_slice(data);
+        Ok(())
     }
 
-    fn read(&mut self, b: Buf) -> Vec<f32> {
-        self.bufs[b as usize].clone()
+    fn read(&mut self, b: Buf) -> Op<Vec<f32>> {
+        Ok(self.bufs[b as usize].clone())
     }
 
-    fn tokens(&mut self, tokens: &[u32]) {
-        assert!(tokens.len() <= T + 1 && tokens.iter().all(|&t| (t as usize) < V), "tokens of a document");
+    fn tokens(&mut self, tokens: &[u32]) -> Op {
+        if tokens.len() > T + 1 || tokens.iter().any(|&t| t as usize >= V) {
+            return Err(format!("a document has {} tokens at most, each below {V}", T + 1));
+        }
         self.tokens = tokens.to_vec();
+        Ok(())
     }
 
-    fn embed(&mut self, t0: usize, n: usize) {
-        rows(t0, n);
-        let (x0, p, tokens) = (self.row(Buf::X0, 0, n), self.at(Buf::Params, 0, PARAMS), self.tokens_at(0, n));
+    fn embed(&mut self, t0: usize, n: usize) -> Op {
+        rows(t0, n)?;
+        let (x0, p, tokens) = (self.row(Buf::X0, 0, n)?, self.at(Buf::Params, 0, PARAMS)?, self.tokens_at(0, n)?);
         // SAFETY: `n` rows of `X0` and tokens, each token's row of `wte` and the rows of `wpe`
         // up to `n`, and a CPU that runs the kernels.
         unsafe { kernels::embed(x0, p, tokens, t0, n) }
+        Ok(())
     }
 
-    fn rmsnorm(&mut self, y: Buf, r: Buf, x: Buf, t0: usize, n: usize) {
-        let k = rows(t0, n);
-        let (y, r, x) = (self.row(y, t0, k), self.row(r, t0, k), self.row(x, t0, k));
+    fn rmsnorm(&mut self, y: Buf, r: Buf, x: Buf, t0: usize, n: usize) -> Op {
+        let k = rows(t0, n)?;
+        let (y, r, x) = (self.row(y, t0, k)?, self.row(r, t0, k)?, self.row(x, t0, k)?);
         // SAFETY: `k` rows of each from `t0`, and a CPU that runs the kernels.
         unsafe { kernels::rmsnorm(y, r, x, k) }
+        Ok(())
     }
 
-    fn matmul(&mut self, l: Layer, y: Buf, x: Buf, then: Then, t0: usize, n: usize) {
-        let k = rows(t0, n);
-        assert_eq!((x.width(), y.width()), (l.rows, l.cols), "{x:?} by {l:?} into {y:?}");
-        let (w, out, x) = (self.weights(Buf::Params, l), self.row(y, t0, k), self.row(x, t0, k));
+    fn matmul(&mut self, l: Layer, y: Buf, x: Buf, then: Then, t0: usize, n: usize) -> Op {
+        let k = rows(t0, n)?;
+        if (x.width(), y.width()) != (l.rows, l.cols) {
+            return Err(format!("{x:?} by {l:?} into {y:?}"));
+        }
+        let (w, out, x) = (self.weights(Buf::Params, l)?, self.row(y, t0, k)?, self.row(x, t0, k)?);
         // SAFETY: `k` rows of each from `t0`, as wide as the layer says, its weights, and a
         // CPU that runs the kernels.
         unsafe {
             match (l, then) {
                 (QKV, Then::Store) => kernels::qkv(out, x, w, k),
-                (WO, Then::Add(res)) => kernels::wo(out, x, w, self.row(res, t0, k), k),
+                (WO, Then::Add(res)) => kernels::wo(out, x, w, self.row(res, t0, k)?, k),
                 (FC1, Then::Relu) => kernels::fc1(out, x, w, k),
-                (FC2, Then::Add(res)) => kernels::fc2(out, x, w, self.row(res, t0, k), k),
+                (FC2, Then::Add(res)) => kernels::fc2(out, x, w, self.row(res, t0, k)?, k),
                 (LM, Then::Store) => kernels::lm(out, x, w, k),
-                _ => panic!("no kernel computes {l:?} then {then:?}"),
+                _ => return Err(format!("no kernel computes {l:?} then {then:?}")),
             }
         }
+        Ok(())
     }
 
-    fn attention(&mut self, t0: usize, n: usize) {
-        rows(t0, n);
-        let (att, aw, qkv) = (self.row(Buf::Att, 0, n), self.row(Buf::Aw, 0, n), self.row(Buf::Qkv, 0, n));
+    fn attention(&mut self, t0: usize, n: usize) -> Op {
+        rows(t0, n)?;
+        let (att, aw, qkv) = (self.row(Buf::Att, 0, n)?, self.row(Buf::Aw, 0, n)?, self.row(Buf::Qkv, 0, n)?);
         // SAFETY: rows up to `n` of each, and a CPU that runs the kernels.
         unsafe { kernels::attention(att, aw, qkv, t0, n) }
+        Ok(())
     }
 
-    fn softmax(&mut self, inv_temp: f32, t0: usize, n: usize) {
-        let k = rows(t0, n);
-        let (probs, logits) = (self.row(Buf::Probs, t0, k), self.row(Buf::Logits, t0, k));
+    fn softmax(&mut self, inv_temp: f32, t0: usize, n: usize) -> Op {
+        let k = rows(t0, n)?;
+        let (probs, logits) = (self.row(Buf::Probs, t0, k)?, self.row(Buf::Logits, t0, k)?);
         // SAFETY: `k` rows of each from `t0`, and a CPU that runs the kernels.
         unsafe { kernels::softmax(probs, logits, inv_temp, k) }
+        Ok(())
     }
 
-    fn clear(&mut self) {
+    fn clear(&mut self) -> Op {
         for b in Buf::SUMS {
             self.bufs[b as usize].fill(0.0);
         }
+        Ok(())
     }
 
-    fn xent(&mut self, n: usize) {
-        rows(0, n);
-        assert!(self.tokens.len() > n, "a target for each of {n} rows");
-        let (d, probs, targets) = (self.row(Buf::DLogits, 0, n), self.row(Buf::Probs, 0, n), self.tokens_at(1, n + 1));
+    fn xent(&mut self, n: usize) -> Op {
+        rows(0, n)?;
+        if self.tokens.len() <= n {
+            return Err(format!("a target for each of {n} rows"));
+        }
+        let (d, probs, targets) =
+            (self.row(Buf::DLogits, 0, n)?, self.row(Buf::Probs, 0, n)?, self.tokens_at(1, n + 1)?);
         // SAFETY: `n` rows of each and `n` targets, each below `V`, and a CPU that runs the
         // kernels.
         unsafe { kernels::xent(d, probs, targets, 1.0 / n as f32, n) }
+        Ok(())
     }
 
-    fn bwd_x(&mut self, l: Layer, dx: Buf, dy: Buf, n: usize) {
-        rows(0, n);
-        assert_eq!((dx.width(), dy.width()), (l.rows, l.cols), "{dy:?} by {l:?} into {dx:?}");
-        let (w, dx, dy) = (self.weights(Buf::Params, l), self.row(dx, 0, n), self.row(dy, 0, n));
+    fn bwd_x(&mut self, l: Layer, dx: Buf, dy: Buf, n: usize) -> Op {
+        rows(0, n)?;
+        if (dx.width(), dy.width()) != (l.rows, l.cols) {
+            return Err(format!("{dy:?} by {l:?} into {dx:?}"));
+        }
+        let (w, dx, dy) = (self.weights(Buf::Params, l)?, self.row(dx, 0, n)?, self.row(dy, 0, n)?);
         // SAFETY: `n` rows of each, as wide as the layer says, its weights, and a CPU that runs
         // the kernels.
         unsafe {
@@ -848,15 +871,18 @@ impl Ops for Cpu {
                 FC1 => kernels::fc1_bwd_x(dx, dy, w, n),
                 FC2 => kernels::fc2_bwd_x(dx, dy, w, n),
                 LM => kernels::lm_bwd_x(dx, dy, w, n),
-                _ => panic!("no kernel for {l:?}"),
+                _ => return Err(format!("no kernel for {l:?}")),
             }
         }
+        Ok(())
     }
 
-    fn bwd_w(&mut self, l: Layer, x: Buf, dy: Buf, n: usize) {
-        rows(0, n);
-        assert_eq!((x.width(), dy.width()), (l.rows, l.cols), "{x:?} by {dy:?} for {l:?}");
-        let (g, x, dy) = (self.weights(Buf::Grads, l), self.row(x, 0, n), self.row(dy, 0, n));
+    fn bwd_w(&mut self, l: Layer, x: Buf, dy: Buf, n: usize) -> Op {
+        rows(0, n)?;
+        if (x.width(), dy.width()) != (l.rows, l.cols) {
+            return Err(format!("{x:?} by {dy:?} for {l:?}"));
+        }
+        let (g, x, dy) = (self.weights(Buf::Grads, l)?, self.row(x, 0, n)?, self.row(dy, 0, n)?);
         // SAFETY: `n` rows of each, as wide as the layer says, its gradients, and a CPU that
         // runs the kernels.
         unsafe {
@@ -866,48 +892,56 @@ impl Ops for Cpu {
                 FC1 => kernels::fc1_bwd_w(g, x, dy, n),
                 FC2 => kernels::fc2_bwd_w(g, x, dy, n),
                 LM => kernels::lm_bwd_w(g, x, dy, n),
-                _ => panic!("no kernel for {l:?}"),
+                _ => return Err(format!("no kernel for {l:?}")),
             }
         }
+        Ok(())
     }
 
-    fn relu_bwd(&mut self, n: usize) {
-        rows(0, n);
-        let (dh, h) = (self.row(Buf::DHid, 0, n), self.row(Buf::Hid, 0, n));
+    fn relu_bwd(&mut self, n: usize) -> Op {
+        rows(0, n)?;
+        let (dh, h) = (self.row(Buf::DHid, 0, n)?, self.row(Buf::Hid, 0, n)?);
         // SAFETY: `n` rows of `M` floats of each, `M / 8` vectors a row, and a CPU that runs the
         // kernels.
         unsafe { kernels::relu_bwd(dh, h, n * M / 8) }
+        Ok(())
     }
 
-    fn rmsnorm_bwd(&mut self, dx: Buf, dy: Buf, x: Buf, r: Buf, n: usize) {
-        rows(0, n);
-        let (dx, dy, x, r) = (self.row(dx, 0, n), self.row(dy, 0, n), self.row(x, 0, n), self.row(r, 0, n));
+    fn rmsnorm_bwd(&mut self, dx: Buf, dy: Buf, x: Buf, r: Buf, n: usize) -> Op {
+        rows(0, n)?;
+        let (dx, dy, x, r) = (self.row(dx, 0, n)?, self.row(dy, 0, n)?, self.row(x, 0, n)?, self.row(r, 0, n)?);
         // SAFETY: `n` rows of each, and a CPU that runs the kernels.
         unsafe { kernels::rmsnorm_bwd(dx, dy, x, r, n) }
+        Ok(())
     }
 
-    fn attention_bwd(&mut self, n: usize) {
-        rows(0, n);
-        let dqkv = self.row(Buf::DQkv, 0, n);
-        let (qkv, aw, datt) = (self.row(Buf::Qkv, 0, n), self.row(Buf::Aw, 0, n), self.row(Buf::DAtt, 0, n));
+    fn attention_bwd(&mut self, n: usize) -> Op {
+        rows(0, n)?;
+        let dqkv = self.row(Buf::DQkv, 0, n)?;
+        let (qkv, aw, datt) = (self.row(Buf::Qkv, 0, n)?, self.row(Buf::Aw, 0, n)?, self.row(Buf::DAtt, 0, n)?);
         // SAFETY: `n` rows of each, and a CPU that runs the kernels.
         unsafe { kernels::attention_bwd(dqkv, qkv, aw, datt, n) }
+        Ok(())
     }
 
-    fn embed_bwd(&mut self, n: usize) {
-        rows(0, n);
-        assert!(self.tokens.len() >= n, "a token for each of {n} rows");
-        let (g, dx0, tokens) = (self.at(Buf::Grads, 0, PARAMS), self.row(Buf::DX0, 0, n), self.tokens_at(0, n));
+    fn embed_bwd(&mut self, n: usize) -> Op {
+        rows(0, n)?;
+        if self.tokens.len() < n {
+            return Err(format!("a token for each of {n} rows"));
+        }
+        let (g, dx0, tokens) = (self.at(Buf::Grads, 0, PARAMS)?, self.row(Buf::DX0, 0, n)?, self.tokens_at(0, n)?);
         // SAFETY: `n` rows of `DX0` and tokens, each token's row of `wte` and the rows of `wpe`
         // up to `n`, and a CPU that runs the kernels.
         unsafe { kernels::embed_bwd(g, dx0, tokens, n) }
+        Ok(())
     }
 
-    fn adam(&mut self, a: &Adam) {
-        let (p, g) = (self.at(Buf::Params, 0, PARAMS), self.at(Buf::Grads, 0, PARAMS));
-        let (m, v) = (self.at(Buf::Moment1, 0, PARAMS), self.at(Buf::Moment2, 0, PARAMS));
+    fn adam(&mut self, a: &Adam) -> Op {
+        let (p, g) = (self.at(Buf::Params, 0, PARAMS)?, self.at(Buf::Grads, 0, PARAMS)?);
+        let (m, v) = (self.at(Buf::Moment1, 0, PARAMS)?, self.at(Buf::Moment2, 0, PARAMS)?);
         // SAFETY: `PARAMS` floats of each, `PARAMS / 8` vectors, and a CPU that runs the
         // kernels.
         unsafe { kernels::adam(p, g, m, v, PARAMS / 8, a.lr, a.b1, a.ob1, a.b2, a.ob2, a.bc1, a.bc2, a.eps) }
+        Ok(())
     }
 }

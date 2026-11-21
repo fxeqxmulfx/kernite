@@ -424,7 +424,8 @@ pub fn runnable(counts: &[usize]) -> Result<Vec<usize>, kernite_cpu::Error> {
 }
 
 /// `c = a b` by the kernel, on `threads` threads, of the operands of `shape`. It fails where the
-/// grid cannot start: with no threads, or with more than the machine runs at once.
+/// operands are not of `shape`, or the machine lacks what the kernel needs, or the grid cannot
+/// start: with no threads, or with more than the machine runs at once.
 pub fn sgemm(
     c: &mut [f32],
     a: &[f32],
@@ -433,8 +434,10 @@ pub fn sgemm(
     threads: usize,
 ) -> Result<(), kernite_cpu::Error> {
     let (m, n, k) = shape;
-    assert!(supported(), "the kernels need AVX2 and FMA");
-    crate::operands((a.len(), b.len(), c.len()), shape);
+    if !supported() {
+        return Err(kernite_cpu::Error { message: "the kernels need AVX2 and FMA".into() });
+    }
+    crate::operands((a.len(), b.len(), c.len()), shape).map_err(|message| kernite_cpu::Error { message })?;
     if m * n == 0 {
         return Ok(());
     }

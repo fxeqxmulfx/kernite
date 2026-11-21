@@ -624,9 +624,8 @@ impl<'a> Parser<'a> {
 
     /// `let (a, b): (T, U);` declares a variable of each type, and `let (a, b) = (x, y);`
     /// names each value: so many `let`s, in order.
-    fn lets(&mut self) -> Result<Vec<Stmt>, Error> {
-        self.pos += 1;
-        let (inner, span) = self.group(Delim::Paren).expect("a tuple after `let`");
+    fn lets(&mut self, inner: &'a [Tree], span: Span) -> Result<Vec<Stmt>, Error> {
+        self.pos += 2;
         let mut p = Parser::new(inner, span);
         let mut names = vec![];
         while !p.done() {
@@ -719,25 +718,30 @@ impl<'a> Parser<'a> {
     /// in a loop, and not by a call for each, so that a long row of them is no deeper to the parser
     /// than one.
     fn if_stmt(&mut self) -> Result<Stmt, Error> {
+        let (cond, then, span) = self.link(1)?;
         let mut links = vec![];
         let ending = loop {
-            let span = self.span();
-            nested(links.len() + 1, span)?;
-            self.pos += 1;
-            let (cond, then) = (self.expr()?, self.braced()?);
-            links.push((cond, then, span));
             if !self.eat_ident("else") {
                 break None;
             }
             if !self.is_ident("if") {
                 break Some(Box::new(Stmt::Block(self.braced()?)));
             }
+            links.push(self.link(links.len() + 2)?);
         };
-        let chain = links
+        let otherwise = links
             .into_iter()
             .rev()
             .fold(ending, |otherwise, (cond, then, span)| Some(Box::new(Stmt::If { cond, then, otherwise, span })));
-        Ok(*chain.expect("an `if` is a link"))
+        Ok(Stmt::If { cond, then, otherwise, span })
+    }
+
+    /// An `if` with its condition and its block, `depth` links down its chain, and where it is.
+    fn link(&mut self, depth: usize) -> Result<(Expr, Block, Span), Error> {
+        let span = self.span();
+        nested(depth, span)?;
+        self.pos += 1;
+        Ok((self.expr()?, self.braced()?, span))
     }
 
     fn braced(&mut self) -> Result<Block, Error> {
@@ -997,8 +1001,10 @@ fn block(trees: &[Tree], span: Span) -> Result<Block, Error> {
         if p.eat_op(";") {
             continue;
         }
-        if p.is_ident("let") && matches!(p.peek_at(1), Some(Tree::Group { delim: Delim::Paren, .. })) {
-            stmts.extend(p.lets()?);
+        if p.is_ident("let")
+            && let Some(&Tree::Group { delim: Delim::Paren, ref trees, span, .. }) = p.peek_at(1)
+        {
+            stmts.extend(p.lets(trees, span)?);
         } else {
             stmts.push(p.stmt()?);
         }

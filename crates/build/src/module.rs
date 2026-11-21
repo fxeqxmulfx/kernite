@@ -71,14 +71,12 @@ pub fn module<N: Native, D: Device>(
                 continue;
             }
             ItemKind::Static(s) if process => {
-                let laid = (!refused).then(|| host.next().expect("each static is laid out or refused"));
-                items.push(ItemOut::HostStatic(static_out(m, s, native, laid, |s| native.host_static(s))));
+                items.push(ItemOut::HostStatic(static_out(m, s, native, host.next(), |s| native.host_static(s))));
                 continue;
             }
             ItemKind::Static(s) => {
                 first.get_or_insert(s.span);
-                let laid = (!refused).then(|| gpu.next().expect("each static is laid out or refused"));
-                let out = static_out(m, s, device, laid, |s| device.device_static(s));
+                let out = static_out(m, s, device, gpu.next(), |s| device.device_static(s));
                 if out.is_ok() {
                     static_items.push(items.len());
                 }
@@ -297,11 +295,12 @@ fn touched(module: &Module, items: &[ItemOut]) -> Vec<Vec<String>> {
 /// `#[instances(..)]` lists, if it takes compile-time arguments.
 fn calls(module: &Module, funcs: &[String]) -> Vec<Call> {
     let call = |name: &String| {
-        // A function that takes no compile-time arguments and lists instances is wrong at its
-        // own item, and `instance` refuses it: the call names it whole, as it names any
-        // function of none.
-        let Ok(found) = instance(module, name) else { return Call { function: name.clone(), instance: None } };
-        let (g, _, k) = found.expect("a kernel calls an instance its function lists");
+        // A kernel calls only an instance its function lists, so `instance` finds it. A function
+        // that takes no compile-time arguments and lists instances is wrong at its own item, and
+        // `instance` refuses it: the call names it whole, as it names any function of none.
+        let Ok(Some((g, _, k))) = instance(module, name) else {
+            return Call { function: name.clone(), instance: None };
+        };
         Call { function: g.name.clone(), instance: (!g.generics.is_empty()).then_some(k) }
     };
     funcs.iter().map(call).collect()

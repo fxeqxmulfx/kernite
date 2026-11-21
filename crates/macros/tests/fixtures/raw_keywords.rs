@@ -154,7 +154,7 @@ macro_rules! x86_kernels_run {
             assert_eq!(word, 1);
             assert_eq!($kernels::tiles::<2>(at.cast()).cast::<u64>(), at);
             assert_eq!(word, 2);
-            $kernels::together(kernite_cpu::Grid::new(1), (&raw mut half).cast()).unwrap();
+            $kernels::together(kernite_cpu::Grid::new(1), (&raw mut half).cast())?;
         }
         assert_eq!(half, 1);
     };
@@ -175,29 +175,32 @@ mod tests {
     }
 
     #[test]
-    fn a_kernel_that_names_no_type_by_a_keyword_runs() {
+    fn a_kernel_that_names_no_type_by_a_keyword_runs() -> Result<(), Box<dyn std::error::Error>> {
         x86_kernels_run!(no_keyword);
+        Ok(())
     }
 
     #[test]
-    fn a_kernel_that_names_types_by_keywords_runs() {
+    fn a_kernel_that_names_types_by_keywords_runs() -> Result<(), Box<dyn std::error::Error>> {
         x86_kernels_run!(keyword);
+        Ok(())
     }
 
     #[test]
-    fn a_gpu_kernel_that_names_types_by_keywords_runs() {
-        let Ok(cuda) = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")) else { return };
-        let kernels = gpu::Kernels::load(&cuda).unwrap();
-        let words = cuda.alloc::<u32>(4).unwrap();
+    fn a_gpu_kernel_that_names_types_by_keywords_runs() -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(cuda) = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
+        let kernels = gpu::Kernels::load(&cuda)?;
+        let words = cuda.alloc::<u32>(4)?;
         let grid = Grid::new(1, 1);
         // SAFETY: each kernel writes one word to a buffer that has four, and every launch has ended when they are read.
         unsafe {
-            kernels.path(grid, words.ptr(), 5).unwrap();
-            kernels.generic(grid, words.at(1), 6).unwrap();
-            kernels.offset::<1>(grid, words.at(2), 10).unwrap();
-            kernels.offset::<2>(grid, words.at(3), 20).unwrap();
+            kernels.path(grid, words.ptr(), 5)?;
+            kernels.generic(grid, words.at(1).ok_or("`words` has no element 1")?, 6)?;
+            kernels.offset::<1>(grid, words.at(2).ok_or("`words` has no element 2")?, 10)?;
+            kernels.offset::<2>(grid, words.at(3).ok_or("`words` has no element 3")?, 20)?;
         }
-        cuda.sync().unwrap();
-        assert_eq!(words.read().unwrap(), [5, 6, 11, 22]);
+        cuda.sync()?;
+        assert_eq!(words.read()?, [5, 6, 11, 22]);
+        Ok(())
     }
 }

@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 use kernite_cpu::{Grid, SPIN, launch, most};
 
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
 /// How many launches the test makes.
 const LAUNCHES: usize = 1000;
 
@@ -22,63 +24,70 @@ fn tasks() -> Option<usize> {
 }
 
 /// A thread's name, from its directory in `/proc/self/task`.
-fn name(task: &Path) -> String {
-    fs::read_to_string(task.join("comm")).unwrap().trim().to_string()
+fn name(task: &Path) -> Result<String> {
+    Ok(fs::read_to_string(task.join("comm"))?.trim().to_string())
 }
 
 /// The threads a grid keeps, by their directories in `/proc/self/task`: those named
 /// `grid thread N`.
-fn kept() -> Vec<PathBuf> {
-    let all = fs::read_dir("/proc/self/task").unwrap().map(|task| task.unwrap().path());
-    all.filter(|task| name(task).starts_with("grid thread ")).collect()
+fn kept() -> Result<Vec<PathBuf>> {
+    let mut kept = vec![];
+    for task in fs::read_dir("/proc/self/task")? {
+        let task = task?.path();
+        if name(&task)?.starts_with("grid thread ") {
+            kept.push(task);
+        }
+    }
+    Ok(kept)
 }
 
 /// Whether Linux says the thread sleeps. A thread that spins is running, or waits for a CPU to
 /// run on.
-fn asleep(task: &Path) -> bool {
-    let stat = fs::read_to_string(task.join("stat")).unwrap();
+fn asleep(task: &Path) -> Result<bool> {
+    let stat = fs::read_to_string(task.join("stat"))?;
     // The state is the letter after the name, which is in brackets.
-    stat.rsplit_once(") ").unwrap().1.starts_with('S')
+    Ok(stat.rsplit_once(") ").ok_or("rsplit_once gave None")?.1.starts_with('S'))
 }
 
 /// For how long the threads have used the CPU in all, as Linux counts it. It is exact for threads
 /// that sleep, and lags for those that run.
-fn cpu(tasks: &[PathBuf]) -> Duration {
+fn cpu(tasks: &[PathBuf]) -> Result<Duration> {
     tasks
         .iter()
-        .map(|task| {
-            let schedstat = fs::read_to_string(task.join("schedstat")).unwrap();
-            Duration::from_nanos(schedstat.split_whitespace().next().unwrap().parse().unwrap())
+        .map(|task| -> Result<Duration> {
+            let schedstat = fs::read_to_string(task.join("schedstat"))?;
+            Ok(Duration::from_nanos(schedstat.split_whitespace().next().ok_or("split_whitespace gave None")?.parse()?))
         })
         .sum()
 }
 
 /// Waits, as long as it is patient, until each of the threads sleeps.
-fn wait_for_sleep(tasks: &[PathBuf]) {
+fn wait_for_sleep(tasks: &[PathBuf]) -> Result {
     let deadline = Instant::now() + PATIENCE;
     for task in tasks {
-        while !asleep(task) {
+        while !asleep(task)? {
             assert!(
                 Instant::now() < deadline,
                 "{} spins {PATIENCE:?} after the last launch, and does not sleep",
-                name(task)
+                name(task)?
             );
             thread::sleep(SPIN);
         }
     }
+    Ok(())
 }
 
 /// Whether one of the threads is found asleep less than `SPIN` after `began`.
-fn asleep_early(tasks: &[PathBuf], began: Instant) -> bool {
+fn asleep_early(tasks: &[PathBuf], began: Instant) -> Result<bool> {
     while began.elapsed() < SPIN {
         for task in tasks {
             // The clock is read after the state, so the thread was asleep before the time it shows.
-            if asleep(task) && began.elapsed() < SPIN {
-                return true;
+            if asleep(task)? && began.elapsed() < SPIN {
+                return Ok(true);
             }
         }
     }
-    false
+    Ok(false)
 }
 
 /// A thread with no kernel to run spins for [`SPIN`], for the next to come, then sleeps and uses
@@ -96,27 +105,31 @@ fn asleep_early(tasks: &[PathBuf], began: Instant) -> bool {
 /// to sleep. Then it counts the CPU they use in one more launch and the spin after it, and the
 /// CPU they use in 100 ms of sleep.
 #[test]
-fn kept_threads_spin_for_a_launch_that_comes_soon_then_sleep_and_end_with_their_caller() {
+fn kept_threads_spin_for_a_launch_that_comes_soon_then_sleep_and_end_with_their_caller() -> Result {
     // The test looks for `SPIN` after a launch began, so a `SPIN` of nothing would let it find nothing.
     assert_eq!(SPIN, Duration::from_micros(200), "GUIDE.md says a kept thread spins for 200 microseconds");
-    let threads = most().unwrap().min(4);
+    let threads = most()?.min(4);
     if threads < 2 {
-        return eprintln!("the process runs one thread at once, so no grid keeps a thread: skipped");
+        eprintln!("the process runs one thread at once, so no grid keeps a thread: skipped");
+        return Ok(());
     }
-    let Some(before) = tasks() else { return eprintln!("no /proc/self/task: skipped") };
-    let caller = thread::spawn(move || {
-        launch(Grid::new(threads), |_| {}).unwrap();
-        let kept = kept();
+    let Some(before) = tasks() else {
+        eprintln!("no /proc/self/task: skipped");
+        return Ok(());
+    };
+    let caller = thread::spawn(move || -> Result {
+        launch(Grid::new(threads), |_| {})?;
+        let kept = kept()?;
         assert_eq!(kept.len(), threads - 1, "a grid of {threads} keeps threads named `grid thread N`");
 
         let mut early = 0;
         for _ in 0..LAUNCHES {
             let began = Instant::now();
-            launch(Grid::new(threads), |_| {}).unwrap();
-            early += usize::from(asleep_early(&kept, began));
+            launch(Grid::new(threads), |_| {})?;
+            early += usize::from(asleep_early(&kept, began)?);
         }
         assert_eq!(
-            tasks().unwrap(),
+            tasks().ok_or("tasks gave None")?,
             before + threads,
             "the threads beyond the {before} the process had are the caller's and the grid's others, {threads} in all"
         );
@@ -125,11 +138,11 @@ fn kept_threads_spin_for_a_launch_that_comes_soon_then_sleep_and_end_with_their_
             "{early} of {LAUNCHES} launches found a kept thread asleep less than {SPIN:?} after the launch began"
         );
 
-        wait_for_sleep(&kept);
-        let rested = cpu(&kept);
-        launch(Grid::new(threads), |_| {}).unwrap();
-        wait_for_sleep(&kept);
-        let spun = cpu(&kept);
+        wait_for_sleep(&kept)?;
+        let rested = cpu(&kept)?;
+        launch(Grid::new(threads), |_| {})?;
+        wait_for_sleep(&kept)?;
+        let spun = cpu(&kept)?;
         // A thread spins for `SPIN` and the system adds a few microseconds: four times is room to spare.
         let allowed = 4 * SPIN * kept.len() as u32;
         assert!(
@@ -139,21 +152,20 @@ fn kept_threads_spin_for_a_launch_that_comes_soon_then_sleep_and_end_with_their_
             kept.len()
         );
         thread::sleep(Duration::from_millis(100));
-        let later = cpu(&kept);
+        let later = cpu(&kept)?;
         assert!(
             later - spun < Duration::from_millis(10),
             "{:?} of CPU in 100 ms, from threads that sleep",
             later - spun
         );
+        Ok(())
     });
-    if let Err(panic) = caller.join() {
-        std::panic::resume_unwind(panic);
-    }
+    caller.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
     let deadline = Instant::now() + PATIENCE;
     loop {
-        let now = tasks().unwrap();
+        let now = tasks().ok_or("tasks gave None")?;
         if now == before {
-            return;
+            return Ok(());
         }
         assert!(
             Instant::now() < deadline,

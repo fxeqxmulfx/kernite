@@ -59,7 +59,7 @@ impl Cuda {
         // The driver does not clear it, and the host must not be lent bytes that were never
         // written. The GPU writes the zeros: where the GPU does not allow concurrent access, the
         // host must not touch managed memory while a kernel runs, and one may be running.
-        memory.driver.zero(memory.addr(), bytes::<T>(len))?;
+        memory.driver.zero(memory.addr(), len * size_of::<T>())?;
         Ok(memory)
     }
 
@@ -77,7 +77,7 @@ impl Cuda {
     /// bytes as they are.
     pub unsafe fn managed_uninit<T: Plain>(&self, len: usize) -> Result<Unified<'static, T>, Error> {
         self.driver.require("cuMemAllocManaged", MANAGED_MEMORY, "the GPU cannot allocate managed memory")?;
-        let bytes = bytes::<T>(len);
+        let bytes = bytes::<T>("cuMemAllocManaged", len)?;
         let (api, mut addr) = (self.driver.current()?, 0);
         // SAFETY: it writes the address to `addr`. It refuses no bytes, so it is asked for one. 1
         // is CU_MEM_ATTACH_GLOBAL: any stream of any GPU may use it, as the default stream does.
@@ -118,7 +118,7 @@ impl Cuda {
     pub unsafe fn pinned_uninit<T: Plain>(&self, len: usize) -> Result<Unified<'static, T>, Error> {
         let cannot = "the GPU cannot reach page-locked memory at the host's addresses";
         self.driver.require("cuMemHostAlloc", UNIFIED_ADDRESSING, cannot)?;
-        let bytes = bytes::<T>(len);
+        let bytes = bytes::<T>("cuMemHostAlloc", len)?;
         let (api, mut host) = (self.driver.current()?, ptr::null_mut());
         // SAFETY: it writes the address to `host`. It refuses no bytes, so it is asked for one. 2
         // is CU_MEMHOSTALLOC_DEVICEMAP: the GPU reaches it.
@@ -156,11 +156,12 @@ impl Cuda {
     /// touch of it:
     ///
     /// ```compile_fail,E0502
-    /// # let cuda = kernite_cuda::Cuda::new().unwrap();
+    /// # let cuda = kernite_cuda::Cuda::new()?;
     /// let mut xs = vec![1.0f32; 4];
-    /// let lent = cuda.lend(&mut xs).unwrap();
+    /// let lent = cuda.lend(&mut xs)?;
     /// let first = xs[0];
     /// let for_a_kernel = lent.ptr();
+    /// # Ok::<(), kernite_cuda::Error>(())
     /// ```
     pub fn lend<'a, T: Plain>(&self, memory: &'a mut [T]) -> Result<Unified<'a, T>, Error> {
         let cannot = "the GPU cannot reach pageable memory, a slice of the host's";
@@ -225,24 +226,26 @@ enum Kind {
 /// another, so the compiler refuses to take a pointer for a kernel while the host holds a slice:
 ///
 /// ```compile_fail,E0502
-/// # let cuda = kernite_cuda::Cuda::new().unwrap();
-/// let mut xs = cuda.managed::<f32>(4).unwrap();
-/// let slice = xs.host_mut().unwrap();
+/// # let cuda = kernite_cuda::Cuda::new()?;
+/// let mut xs = cuda.managed::<f32>(4)?;
+/// let slice = xs.host_mut()?;
 /// let for_a_kernel = xs.ptr();
 /// slice[0] = 1.0;
+/// # Ok::<(), kernite_cuda::Error>(())
 /// ```
 ///
 /// A [`Ptr`] is `Copy` and borrows nothing, so the compiler cannot refuse a launch on one taken
 /// before the slice:
 ///
 /// ```no_run
-/// # let cuda = kernite_cuda::Cuda::new().unwrap();
-/// let mut xs = cuda.managed::<f32>(4).unwrap();
+/// # let cuda = kernite_cuda::Cuda::new()?;
+/// let mut xs = cuda.managed::<f32>(4)?;
 /// let for_a_kernel = xs.ptr();
-/// let slice = xs.host_mut().unwrap();
+/// let slice = xs.host_mut()?;
 /// // A launch on `for_a_kernel` here would run under `slice`.
 /// let _ = for_a_kernel;
 /// slice[0] = 1.0;
+/// # Ok::<(), kernite_cuda::Error>(())
 /// ```
 ///
 /// A launch is `unsafe` for that, as for a [`Buffer`](super::Buffer), and its contract, which
@@ -269,14 +272,13 @@ pub struct Unified<'a, T: Plain> {
 impl<T: Plain> Unified<'_, T> {
     /// Its address, for a kernel to be given.
     pub fn ptr(&self) -> Ptr<T> {
-        self.at(0)
+        Ptr::new(self.addr())
     }
 
-    /// The address of its element `i`, for a kernel to be given the part from there on.
-    /// Panics if `i` is past its end.
-    pub fn at(&self, i: usize) -> Ptr<T> {
-        assert!(i <= self.len, "element {i} of memory of {}", self.len);
-        Ptr { addr: self.addr() + (i * size_of::<T>()) as u64, of: PhantomData }
+    /// The address of its element `i`, for a kernel to be given the part from there on; `None`
+    /// if `i` is past its end.
+    pub fn at(&self, i: usize) -> Option<Ptr<T>> {
+        Ptr::element(self.addr(), self.len, i)
     }
 
     /// How many elements it has.
@@ -348,6 +350,8 @@ mod tests {
     use super::super::{Api, CuResult, Handle};
     use super::*;
 
+    type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
     thread_local! {
         /// What the GPU here says of each attribute: the attribute's number is the index.
         static ATTRIBUTES: Cell<[c_int; 128]> = const { Cell::new([0; 128]) };
@@ -367,12 +371,12 @@ mod tests {
 
     /// A GPU that says each of `flags` is 1 and every other attribute 0, and refuses every call but
     /// the two that tell its attributes and make its context current.
-    pub(super) fn gpu(flags: &[Flag]) -> Cuda {
+    pub(super) fn gpu(flags: &[Flag]) -> Result<Cuda> {
         gpu_with(flags, |_| {})
     }
 
     /// The same GPU, with the calls `replace` puts in the driver's place.
-    pub(super) fn gpu_with(flags: &[Flag], replace: impl FnOnce(&mut Api)) -> Cuda {
+    pub(super) fn gpu_with(flags: &[Flag], replace: impl FnOnce(&mut Api)) -> Result<Cuda> {
         let mut values = [0; 128];
         for (attribute, _) in flags {
             values[*attribute as usize] = 1;
@@ -383,7 +387,7 @@ mod tests {
         api.set_current = set_current;
         replace(&mut api);
         let driver = Rc::new(Driver { api, device: 0, context: ptr::without_provenance_mut(1) });
-        Cuda::of(driver, String::new()).unwrap()
+        Ok(Cuda::of(driver, String::new())?)
     }
 
     thread_local! {
@@ -443,56 +447,60 @@ mod tests {
     /// A GPU says it reaches managed memory while the host does as its attribute says, whatever
     /// else it says of itself.
     #[test]
-    fn a_gpu_says_whether_it_reaches_managed_memory_while_the_host_does() {
-        assert!(gpu(&[CONCURRENT_MANAGED_ACCESS]).concurrent_managed_access());
-        assert!(!gpu(&[]).concurrent_managed_access());
+    fn a_gpu_says_whether_it_reaches_managed_memory_while_the_host_does() -> Result {
+        assert!(gpu(&[CONCURRENT_MANAGED_ACCESS])?.concurrent_managed_access());
+        assert!(!gpu(&[])?.concurrent_managed_access());
         let others = [MANAGED_MEMORY, UNIFIED_ADDRESSING, PAGEABLE_MEMORY_ACCESS];
-        assert!(!gpu(&others).concurrent_managed_access());
-        assert!(gpu(&[&others[..], &[CONCURRENT_MANAGED_ACCESS]].concat()).concurrent_managed_access());
+        assert!(!gpu(&others)?.concurrent_managed_access());
+        assert!(gpu(&[&others[..], &[CONCURRENT_MANAGED_ACCESS]].concat())?.concurrent_managed_access());
+        Ok(())
     }
 
     /// A GPU that does not allocate managed memory is refused it, in GUIDE.md's words, before
     /// the driver is asked for any.
     #[test]
-    fn managed_memory_is_made_only_for_a_gpu_that_allocates_it() {
-        let e = gpu(&[]).managed::<u32>(4).unwrap_err();
+    fn managed_memory_is_made_only_for_a_gpu_that_allocates_it() -> Result {
+        let e = gpu(&[])?.managed::<u32>(4).err().ok_or("managed gave Ok")?;
         let said = "the GPU cannot allocate managed memory: its CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY is 0";
         assert_eq!(e.to_string(), format!("cuMemAllocManaged: {said}"));
         // One that does is asked, and the driver here refuses everything.
-        let e = gpu(&[MANAGED_MEMORY]).managed::<u32>(4).unwrap_err();
+        let e = gpu(&[MANAGED_MEMORY])?.managed::<u32>(4).err().ok_or("managed gave Ok")?;
         assert_eq!(e.call, "cuMemAllocManaged");
+        Ok(())
     }
 
     /// A GPU that does not use the host's addresses for the host's memory is refused page-locked
     /// memory, in GUIDE.md's words, before the driver is asked for any.
     #[test]
-    fn page_locked_memory_is_made_only_for_a_gpu_that_uses_the_hosts_addresses() {
-        let e = gpu(&[]).pinned::<u32>(4).unwrap_err();
+    fn page_locked_memory_is_made_only_for_a_gpu_that_uses_the_hosts_addresses() -> Result {
+        let e = gpu(&[])?.pinned::<u32>(4).err().ok_or("pinned gave Ok")?;
         let said = "the GPU cannot reach page-locked memory at the host's addresses: \
                     its CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0";
         assert_eq!(e.to_string(), format!("cuMemHostAlloc: {said}"));
-        let e = gpu(&[UNIFIED_ADDRESSING]).pinned::<u32>(4).unwrap_err();
+        let e = gpu(&[UNIFIED_ADDRESSING])?.pinned::<u32>(4).err().ok_or("pinned gave Ok")?;
         assert_eq!(e.call, "cuMemHostAlloc");
+        Ok(())
     }
 
     /// A GPU that does not reach pageable memory is refused a slice, in GUIDE.md's words, and
     /// one that does is lent it: the address of its elements is the slice's.
     #[test]
-    fn a_slice_is_lent_only_to_a_gpu_that_reaches_pageable_memory() {
+    fn a_slice_is_lent_only_to_a_gpu_that_reaches_pageable_memory() -> Result {
         let mut host = [1u32, 2, 3];
         let at = host.as_ptr() as u64;
-        let e = gpu(&[]).lend(&mut host).unwrap_err();
+        let e = gpu(&[])?.lend(&mut host).err().ok_or("lend gave Ok")?;
         let said = "the GPU cannot reach pageable memory, a slice of the host's: \
                     its CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0";
         assert_eq!(e.to_string(), format!("cuDeviceGetAttribute: {said}"));
-        let lent = gpu(&[PAGEABLE_MEMORY_ACCESS]).lend(&mut host).unwrap();
+        let lent = gpu(&[PAGEABLE_MEMORY_ACCESS])?.lend(&mut host)?;
         assert_eq!((lent.len(), lent.ptr().addr()), (3, at));
+        Ok(())
     }
 
     /// Managed and page-locked memory are zeros, though the driver clears neither: the fake hands
     /// out bytes of 0xAA.
     #[test]
-    fn managed_and_page_locked_memory_are_zeros_though_the_driver_clears_neither() {
+    fn managed_and_page_locked_memory_are_zeros_though_the_driver_clears_neither() -> Result {
         let cuda = gpu_with(&[MANAGED_MEMORY, UNIFIED_ADDRESSING], |api| {
             api.alloc_managed = alloc_managed;
             api.alloc_host = alloc_host;
@@ -500,28 +508,30 @@ mod tests {
             api.free = free;
             api.free_host = free_host;
             api.synchronize = synchronize;
-        });
-        assert_eq!(cuda.managed::<u32>(4).unwrap().host().unwrap(), [0; 4]);
-        assert_eq!(cuda.pinned::<u32>(4).unwrap().host().unwrap(), [0; 4]);
+        })?;
+        assert_eq!(cuda.managed::<u32>(4)?.host()?, [0; 4]);
+        assert_eq!(cuda.pinned::<u32>(4)?.host()?, [0; 4]);
+        Ok(())
     }
 
     /// Managed and page-locked memory made with no zeros are as the driver hands them out, the
     /// fake's bytes of 0xAA, and nothing is asked to clear them: the fake has no `cuMemsetD8`.
     #[test]
-    fn memory_made_with_no_zeros_is_as_the_driver_hands_it_out() {
+    fn memory_made_with_no_zeros_is_as_the_driver_hands_it_out() -> Result {
         let cuda = gpu_with(&[MANAGED_MEMORY, UNIFIED_ADDRESSING], |api| {
             api.alloc_managed = alloc_managed;
             api.alloc_host = alloc_host;
             api.free = free;
             api.free_host = free_host;
             api.synchronize = synchronize;
-        });
+        })?;
         // SAFETY: only the test reads the bytes, and it knows them to be the fake's.
-        let managed = unsafe { cuda.managed_uninit::<u32>(4) }.unwrap();
-        assert_eq!(managed.host().unwrap(), [0xAAAA_AAAA; 4]);
+        let managed = unsafe { cuda.managed_uninit::<u32>(4) }?;
+        assert_eq!(managed.host()?, [0xAAAA_AAAA; 4]);
         drop(managed);
         // SAFETY: as above.
-        let pinned = unsafe { cuda.pinned_uninit::<u32>(4) }.unwrap();
-        assert_eq!(pinned.host().unwrap(), [0xAAAA_AAAA; 4]);
+        let pinned = unsafe { cuda.pinned_uninit::<u32>(4) }?;
+        assert_eq!(pinned.host()?, [0xAAAA_AAAA; 4]);
+        Ok(())
     }
 }

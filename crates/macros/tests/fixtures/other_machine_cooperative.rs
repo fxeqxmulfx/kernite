@@ -32,16 +32,17 @@ pub mod cpu {
 mod tests {
     /// Each kernel runs on a grid, and writes through its pointer what it holds.
     #[test]
-    fn the_kernels_run_where_cfg_keeps_them() {
+    fn the_kernels_run_where_cfg_keeps_them() -> Result<(), Box<dyn std::error::Error>> {
         let (x, p) = (&mut [0.0f32; 8], &mut 0u64);
         // SAFETY: `x` is the eight floats a kernel writes, and `p` the u64 the others do.
         unsafe {
-            super::cpu::together(kernite_cpu::Grid::new(1), p).unwrap();
+            super::cpu::together(kernite_cpu::Grid::new(1), p)?;
             assert_eq!(*p, 3);
-            super::cpu::quarter(kernite_cpu::Grid::new(1), x.as_mut_ptr()).unwrap();
+            super::cpu::quarter(kernite_cpu::Grid::new(1), x.as_mut_ptr())?;
             assert_eq!(*x, [0.25; 8]);
-            super::cpu::tiles::<2>(kernite_cpu::Grid::new(1), p).unwrap();
+            super::cpu::tiles::<2>(kernite_cpu::Grid::new(1), p)?;
             assert_eq!(*p, 2);
         }
+        Ok(())
     }
 }

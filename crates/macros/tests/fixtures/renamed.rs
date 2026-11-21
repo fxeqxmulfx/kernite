@@ -14,7 +14,9 @@ mod gpu {
 const _: () = {
     let mut ptx = gpu::PTX.as_bytes();
     while !matches!(ptx.split_first_chunk(), Some((b".entry _ZN4acme7renamed3gpu1kE(", _))) {
-        let [_, rest @ ..] = ptx else { panic!("the kernel is not named acme::renamed::gpu::k") };
-        ptx = rest;
+        assert!(!ptx.is_empty(), "the kernel is not named acme::renamed::gpu::k");
+        if let [_, rest @ ..] = ptx {
+            ptx = rest;
+        }
     }
 };

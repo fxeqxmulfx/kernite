@@ -717,32 +717,33 @@ pub fn names() -> impl Iterator<Item = &'static str> {
 }
 
 /// The form of an instruction kernite wrote that its operands fit: `None` for one the table does
-/// not have, as `ret`.
-///
-/// # Panics
-///
-/// If the table has the instruction, but in no form its operands fit, which is a bug of
-/// whoever built it.
+/// not have, as `ret`, and for one it has in no form its operands fit, which [`feature`] says.
 pub fn form<R: Register>(op: Op, args: &[Arg<R>], implicit: &[Arg<R>]) -> Option<&'static Form> {
-    let found = of(op.name())?.iter().find(|f| {
+    of(op.name())?.iter().find(|f| {
         f.operands.len() == args.len() && f.operands.iter().zip(args).all(|(s, a)| s.kind.takes(&a.operand, implicit))
-    });
-    Some(found.unwrap_or_else(|| panic!("`{}` in no form x86 has: {args:?}", op.name())))
+    })
 }
 
-/// The CPU feature an instruction kernite wrote needs past x86-64's own, if any: `None` for one
-/// the table does not have, as `ret`; and as [`form`] panics.
-pub fn feature<R: Register>(op: Op, args: &[Arg<R>], implicit: &[Arg<R>]) -> Option<Feature> {
-    form(op, args, implicit).and_then(|f| f.feature)
+/// The CPU feature an instruction kernite wrote needs past x86-64's own, if any: none for one the
+/// table does not have, as `ret`. An instruction the table has, in no form its operands fit, is an
+/// error: whoever built it wrote operands that x86 has no form for.
+pub fn feature<R: Register>(op: Op, args: &[Arg<R>], implicit: &[Arg<R>]) -> Result<Option<Feature>, String> {
+    match (of(op.name()), form(op, args, implicit)) {
+        (None, _) => Ok(None),
+        (Some(_), Some(form)) => Ok(form.feature),
+        (Some(_), None) => Err(format!("`{}` in no form x86 has: {args:?}", op.name())),
+    }
 }
 
-/// Every form, parsed from [`TABLE`] once, by name.
+/// Every form, parsed from [`TABLE`] once, by name. A table that does not parse has none: a test
+/// of the crate parses it and says which line is wrong.
 fn forms() -> &'static BTreeMap<&'static str, Vec<Form>> {
     static FORMS: OnceLock<BTreeMap<&'static str, Vec<Form>>> = OnceLock::new();
-    FORMS.get_or_init(|| parse(TABLE))
+    FORMS.get_or_init(|| parse(TABLE).unwrap_or_default())
 }
 
-fn parse(text: &'static str) -> BTreeMap<&'static str, Vec<Form>> {
+/// The forms of `text`, by name, or the first line that is no form, and why.
+fn parse(text: &'static str) -> Result<BTreeMap<&'static str, Vec<Form>>, String> {
     let mut macros: Vec<(&str, &str)> = vec![];
     let mut out: BTreeMap<&'static str, Vec<Form>> = BTreeMap::new();
     for line in text.lines().map(str::trim) {
@@ -750,24 +751,21 @@ fn parse(text: &'static str) -> BTreeMap<&'static str, Vec<Form>> {
             continue;
         }
         if let Some(def) = line.strip_prefix('$') {
-            let (name, value) = def.split_once(" = ").unwrap_or_else(|| panic!("`{line}` defines `$name = {{..}}`"));
+            let (name, value) = def.split_once(" = ").ok_or_else(|| format!("`{line}` defines `$name = {{..}}`"))?;
             macros.push((name, value));
             continue;
         }
-        let (head, body) = line.split_once(" : ").unwrap_or_else(|| panic!("`{line}` has no ` : `"));
-        let (names, widths, feature) = head_of(head, line);
-        let names: Vec<&'static str> = names
-            .iter()
-            .flat_map(|n| {
-                let n = macros.iter().fold(n.to_string(), |n, (m, value)| n.replace(&format!("${m}"), value));
-                expand(&n)
-            })
-            .map(|n| &*Box::leak(n.into_boxed_str()))
-            .collect();
+        let (head, body) = line.split_once(" : ").ok_or_else(|| format!("`{line}` has no ` : `"))?;
+        let (written, widths, feature) = head_of(head, line)?;
+        let mut names: Vec<&'static str> = vec![];
+        for n in written {
+            let n = macros.iter().fold(n.to_string(), |n, (m, value)| n.replace(&format!("${m}"), value));
+            names.extend(expand(&n)?.into_iter().map(|n| &*Box::leak(n.into_boxed_str())));
+        }
         for &(n, own) in &widths {
             let feature = own.or(feature);
             for form in body.split(" ; ") {
-                for operands in operands_of(form, n, line) {
+                for operands in operands_of(form, n, line)? {
                     for &name in &names {
                         let form = Form { op: Op(name), operands: operands.clone(), feature, line };
                         out.entry(name).or_default().push(form);
@@ -776,127 +774,130 @@ fn parse(text: &'static str) -> BTreeMap<&'static str, Vec<Form>> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// The widths a line gives its forms at, each with its own feature if it has one.
 type Widths = Vec<(u32, Option<Feature>)>;
 
 /// A line's names, its widths, and its feature: one width, 0, if it gives none.
-fn head_of(head: &'static str, line: &str) -> (Vec<&'static str>, Widths, Option<Feature>) {
+fn head_of(head: &'static str, line: &str) -> Result<(Vec<&'static str>, Widths, Option<Feature>), String> {
     let (names, widths, rest) = match head.split_once('[') {
         Some((names, rest)) => {
-            let (widths, rest) = rest.split_once(']').unwrap_or_else(|| panic!("`{line}` has no `]`"));
-            let widths = widths
-                .split_whitespace()
-                .map(|w| match w.split_once('@') {
-                    Some((w, f)) => (w, Some(feature_of(f, line))),
+            let (widths, rest) = rest.split_once(']').ok_or_else(|| format!("`{line}` has no `]`"))?;
+            let mut parsed = vec![];
+            for w in widths.split_whitespace() {
+                let (w, own) = match w.split_once('@') {
+                    Some((w, f)) => (w, Some(feature_of(f, line)?)),
                     None => (w, None),
-                })
-                .map(|(w, f)| (w.parse::<u32>().unwrap_or_else(|_| panic!("`{line}`: no width `{w}`")), f))
-                .collect();
-            (names, widths, rest)
+                };
+                parsed.push((w.parse::<u32>().map_err(|_| format!("`{line}`: no width `{w}`"))?, own));
+            }
+            (names, parsed, rest)
         }
         None => match head.split_once('@') {
             Some((names, _)) => (names, vec![(0, None)], &head[names.len()..]),
             None => (head, vec![(0, None)], ""),
         },
     };
-    let feature = rest.trim().strip_prefix('@').map(|f| feature_of(f, line));
-    (names.split_whitespace().collect(), widths, feature)
+    let feature = rest.trim().strip_prefix('@').map(|f| feature_of(f, line)).transpose()?;
+    Ok((names.split_whitespace().collect(), widths, feature))
 }
 
-fn feature_of(name: &str, line: &str) -> Feature {
-    Feature::ALL.into_iter().find(|f| f.name() == name).unwrap_or_else(|| panic!("`{line}`: no feature `{name}`"))
+fn feature_of(name: &str, line: &str) -> Result<Feature, String> {
+    Feature::ALL.into_iter().find(|f| f.name() == name).ok_or_else(|| format!("`{line}`: no feature `{name}`"))
 }
 
 /// `name` with each of its `{a,b}` written out: every name it stands for.
-fn expand(name: &str) -> Vec<String> {
-    let Some(open) = name.find('{') else { return vec![name.to_string()] };
-    let close = open + name[open..].find('}').unwrap_or_else(|| panic!("`{name}` has no `}}`"));
-    let rest = expand(&name[close + 1..]);
-    name[open + 1..close]
+fn expand(name: &str) -> Result<Vec<String>, String> {
+    let Some(open) = name.find('{') else { return Ok(vec![name.to_string()]) };
+    let close = open + name[open..].find('}').ok_or_else(|| format!("`{name}` has no `}}`"))?;
+    let rest = expand(&name[close + 1..])?;
+    Ok(name[open + 1..close]
         .split(',')
         .flat_map(|alt| rest.iter().map(move |r| format!("{}{alt}{r}", &name[..open])))
-        .collect()
+        .collect())
 }
 
 /// The operands of each form `form` stands for, at width `n`: one for each of its operands'
 /// alternatives.
-fn operands_of(form: &str, n: u32, line: &str) -> Vec<Vec<Spec>> {
+fn operands_of(form: &str, n: u32, line: &str) -> Result<Vec<Vec<Spec>>, String> {
     if form == "()" {
-        return vec![vec![]];
+        return Ok(vec![vec![]]);
     }
     let mut out: Vec<Vec<Spec>> = vec![vec![]];
     for operand in form.split(", ") {
-        let (access, alts) = match operand.as_bytes()[0] {
-            b'=' => (Write, &operand[1..]),
-            b'+' => (ReadWrite, &operand[1..]),
-            b'~' => (Ignored, &operand[1..]),
+        let (access, alts) = match operand.as_bytes().first() {
+            Some(b'=') => (Write, &operand[1..]),
+            Some(b'+') => (ReadWrite, &operand[1..]),
+            Some(b'~') => (Ignored, &operand[1..]),
             _ => (Read, operand),
         };
-        let specs: Vec<Spec> = alts.split('/').map(|alt| Spec { kind: kind_of(alt, n, line), access }).collect();
+        let mut specs: Vec<Spec> = vec![];
+        for alt in alts.split('/') {
+            specs.push(Spec { kind: kind_of(alt, n, line)?, access });
+        }
         out = out.iter().flat_map(|head| specs.iter().map(move |s| [head.as_slice(), &[*s]].concat())).collect();
     }
-    out
+    Ok(out)
 }
 
 /// The kind the token `t` names at width `n`, which `N` stands for.
-fn kind_of(t: &str, n: u32, line: &str) -> Kind {
+fn kind_of(t: &str, n: u32, line: &str) -> Result<Kind, String> {
     let t = match t.strip_suffix('N') {
-        Some(stem) => {
-            assert!(n != 0, "`{line}` has `N` and no widths");
-            format!("{stem}{n}")
-        }
+        Some(stem) if n == 0 => return Err(format!("`{line}` has `N` and no widths: `{stem}N`")),
+        Some(stem) => format!("{stem}{n}"),
         None => t.to_string(),
     };
     let width = |bits: &str| match bits {
-        "8" => W8,
-        "16" => W16,
-        "32" => W32,
-        "64" => W64,
-        "128" => W128,
-        "256" => W256,
-        _ => panic!("`{line}`: no width `{bits}` in `{t}`"),
+        "8" => Ok(W8),
+        "16" => Ok(W16),
+        "32" => Ok(W32),
+        "64" => Ok(W64),
+        "128" => Ok(W128),
+        "256" => Ok(W256),
+        _ => Err(format!("`{line}`: no width `{bits}` in `{t}`")),
     };
     if let Some(c) = t.strip_prefix("#0x") {
-        return Kind::Control(u8::from_str_radix(c, 16).unwrap_or_else(|_| panic!("`{line}`: no byte `{t}`")));
+        return u8::from_str_radix(c, 16).map(Kind::Control).map_err(|_| format!("`{line}`: no byte `{t}`"));
     }
     if let Some(r) = t.strip_prefix('#') {
-        let (lo, hi) = r.split_once('-').unwrap_or_else(|| panic!("`{line}`: no range `{t}`"));
-        let parse = |x: &str| x.parse::<i64>().unwrap_or_else(|_| panic!("`{line}`: no range `{t}`"));
-        return Kind::Range(parse(lo), parse(hi));
+        let (lo, hi) = r.split_once('-').ok_or_else(|| format!("`{line}`: no range `{t}`"))?;
+        let parse = |x: &str| x.parse::<i64>().map_err(|_| format!("`{line}`: no range `{t}`"));
+        return Ok(Kind::Range(parse(lo)?, parse(hi)?));
     }
     match t.as_str() {
-        "xmm" => return Kind::Vec(W128),
-        "ymm" => return Kind::Vec(W256),
-        "m" => return Kind::Addr,
-        "imm64" => return Kind::Imm64,
-        "lab" => return Kind::Label,
-        "vm32x" => return Kind::Vsib(W32, W128),
-        "vm32y" => return Kind::Vsib(W32, W256),
-        "vm64x" => return Kind::Vsib(W64, W128),
-        "vm64y" => return Kind::Vsib(W64, W256),
+        "xmm" => return Ok(Kind::Vec(W128)),
+        "ymm" => return Ok(Kind::Vec(W256)),
+        "m" => return Ok(Kind::Addr),
+        "imm64" => return Ok(Kind::Imm64),
+        "lab" => return Ok(Kind::Label),
+        "vm32x" => return Ok(Kind::Vsib(W32, W128)),
+        "vm32y" => return Ok(Kind::Vsib(W32, W256)),
+        "vm64x" => return Ok(Kind::Vsib(W64, W128)),
+        "vm64y" => return Ok(Kind::Vsib(W64, W256)),
         _ => {}
     }
-    let (letter, bits) = t.split_at(1);
-    match letter {
-        "r" => Kind::Gpr(width(bits)),
-        "v" => Kind::Vec(width(bits)),
-        "m" => Kind::Mem(width(bits)),
-        "a" => Kind::Aligned(width(bits)),
-        "i" => Kind::Imm(width(bits)),
-        _ => panic!("`{line}`: no operand `{t}`"),
-    }
+    let (letter, bits) = t.split_at_checked(1).ok_or_else(|| format!("`{line}`: no operand `{t}`"))?;
+    Ok(match letter {
+        "r" => Kind::Gpr(width(bits)?),
+        "v" => Kind::Vec(width(bits)?),
+        "m" => Kind::Mem(width(bits)?),
+        "a" => Kind::Aligned(width(bits)?),
+        "i" => Kind::Imm(width(bits)?),
+        _ => return Err(format!("`{line}`: no operand `{t}`")),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
     #[test]
-    fn the_table_parses_and_names_each_instruction_once_per_form() {
-        let all: usize = forms().values().map(Vec::len).sum();
+    fn the_table_parses_and_names_each_instruction_once_per_form() -> Result {
+        let all: usize = parse(TABLE)?.values().map(Vec::len).sum();
         assert!(all > 2500, "{all} forms");
         for (name, forms) in forms() {
             for (i, a) in forms.iter().enumerate() {
@@ -910,12 +911,35 @@ mod tests {
         assert_eq!(of("vcmpngt_uqps").map(<[Form]>::len), Some(4));
         assert_eq!(of("vfnmsub231pd").map(<[Form]>::len), Some(4));
         assert!(of("lock.xadd").is_some() && of("mul").is_none());
+        Ok(())
     }
 
     #[test]
-    fn a_name_expands_to_every_name_it_stands_for() {
-        assert_eq!(expand("vf{madd,msub}{132,231}ps"), ["vfmadd132ps", "vfmadd231ps", "vfmsub132ps", "vfmsub231ps"]);
-        assert_eq!(expand("pause"), ["pause"]);
+    fn a_name_expands_to_every_name_it_stands_for() -> Result {
+        assert_eq!(expand("vf{madd,msub}{132,231}ps")?, ["vfmadd132ps", "vfmadd231ps", "vfmsub132ps", "vfmsub231ps"]);
+        assert_eq!(expand("pause")?, ["pause"]);
+        Ok(())
+    }
+
+    /// A line of the table that is no form is the first error, and says what is wrong with it.
+    #[test]
+    fn a_table_that_is_no_table_says_which_line_and_why() {
+        let wrong = |text: &'static str| parse(text).err();
+        assert_eq!(wrong("add r32"), Some("`add r32` has no ` : `".into()));
+        assert_eq!(wrong("$m"), Some("`$m` defines `$name = {..}`".into()));
+        assert_eq!(wrong("add[8 x] : r8"), Some("`add[8 x] : r8`: no width `x`".into()));
+        assert_eq!(wrong("add[8 : r8"), Some("`add[8 : r8` has no `]`".into()));
+        assert_eq!(wrong("add@sse9 : r8"), Some("`add@sse9 : r8`: no feature `sse9`".into()));
+        assert_eq!(wrong("a{b : r8"), Some("`a{b` has no `}`".into()));
+        assert_eq!(wrong("add : rN"), Some("`add : rN` has `N` and no widths: `rN`".into()));
+        assert_eq!(wrong("add[8] : r9"), Some("`add[8] : r9`: no width `9` in `r9`".into()));
+        assert_eq!(wrong("add : #0xzz"), Some("`add : #0xzz`: no byte `#0xzz`".into()));
+        assert_eq!(wrong("add : #1"), Some("`add : #1`: no range `#1`".into()));
+        assert_eq!(wrong("add : #1-x"), Some("`add : #1-x`: no range `#1-x`".into()));
+        assert_eq!(wrong("add : q8"), Some("`add : q8`: no operand `q8`".into()));
+        assert_eq!(wrong("add : r8, "), Some("`add : r8,`: no width `8,` in `r8,`".into()));
+        assert_eq!(wrong("add : r8, , r8"), Some("`add : r8, , r8`: no operand ``".into()));
+        assert_eq!(wrong("# a comment\n\nnop : ()"), None);
     }
 
     /// Forms that operands may fit at once differ only in how much memory they reach, which
@@ -952,52 +976,65 @@ mod tests {
     }
 
     #[test]
-    fn memory_of_no_size_is_the_datas_or_named() {
-        let movzx = of("movzx").unwrap();
+    fn memory_of_no_size_is_the_datas_or_named() -> Result {
+        let movzx = of("movzx").ok_or("of gave None")?;
         let mem = |data| Shape::Mem { size: None, data, vsib: None };
         let r32 = Shape::Gpr(W32);
         assert_eq!(choose(movzx, &[r32, mem(None)]), Err(Miss::Size { at: 1, sizes: vec![W8, W16] }));
-        let f = choose(movzx, &[r32, mem(Some(2))]).unwrap();
+        let f = choose(movzx, &[r32, mem(Some(2))]).map_err(|e| format!("{e:?}"))?;
         assert_eq!(f.operands[1].kind, Kind::Mem(W16));
         let sized = Shape::Mem { size: Some(W8), data: None, vsib: None };
-        assert_eq!(choose(movzx, &[r32, sized]).unwrap().operands[1].kind, Kind::Mem(W8));
+        assert_eq!(choose(movzx, &[r32, sized]).map_err(|e| format!("{e:?}"))?.operands[1].kind, Kind::Mem(W8));
+        Ok(())
     }
 
     #[test]
-    fn a_miss_names_what_the_forms_that_fit_furthest_want() {
-        let vaddps = of("vaddps").unwrap();
+    fn a_miss_names_what_the_forms_that_fit_furthest_want() -> Result {
+        let vaddps = of("vaddps").ok_or("of gave None")?;
         let (y, x) = (Shape::Vec(W256), Shape::Vec(W128));
-        let miss = choose(vaddps, &[y, x, y]).unwrap_err();
+        let miss = choose(vaddps, &[y, x, y]).err().ok_or("choose gave Ok")?;
         assert_eq!(miss, Miss::Wants { at: 1, wants: vec![Kind::Vec(W256)] });
-        assert_eq!(choose(vaddps, &[y, y]).unwrap_err(), Miss::Count(vec![3]));
-        let Miss::Wants { wants, .. } = choose(of("add").unwrap(), &[Shape::Vec(W128), Shape::Int(1)]).unwrap_err()
+        assert_eq!(choose(vaddps, &[y, y]).err().ok_or("choose gave Ok")?, Miss::Count(vec![3]));
+        let Miss::Wants { wants, .. } = choose(of("add").ok_or("of gave None")?, &[Shape::Vec(W128), Shape::Int(1)])
+            .err()
+            .ok_or("choose gave Ok")?
         else {
-            panic!()
+            return Err("choose gave no Wants".into());
         };
         assert_eq!(wanted(&wants, Shape::Vec(W128)), "a gpr, whole or as r32, r16 or r8");
         assert_eq!(wanted(&wants, Shape::Int(1)), "a gpr (whole or as r32, r16 or r8) or memory of 1, 2, 4 or 8 bytes");
-        let Miss::Wants { wants, .. } = choose(of("vmovd").unwrap(), &[Shape::Gpr(W16), Shape::Vec(W128)]).unwrap_err()
+        let Miss::Wants { wants, .. } =
+            choose(of("vmovd").ok_or("of gave None")?, &[Shape::Gpr(W16), Shape::Vec(W128)])
+                .err()
+                .ok_or("choose gave Ok")?
         else {
-            panic!()
+            return Err("choose gave no Wants".into());
         };
         assert_eq!(wanted(&wants, Shape::Gpr(W16)), "a gpr (whole or as r32) or an xmm");
         // An operand of which the instruction reads part of an xmm, `v32`, is an xmm.
-        let Miss::Wants { wants, .. } = choose(of("vmovd").unwrap(), &[Shape::Gpr(W32), Shape::Int(1)]).unwrap_err()
+        let Miss::Wants { wants, .. } = choose(of("vmovd").ok_or("of gave None")?, &[Shape::Gpr(W32), Shape::Int(1)])
+            .err()
+            .ok_or("choose gave Ok")?
         else {
-            panic!()
+            return Err("choose gave no Wants".into());
         };
         assert_eq!(wants, [Kind::Vec(W32)]);
         assert_eq!(wanted(&wants, Shape::Int(1)), "an xmm");
-        let Miss::Wants { wants, .. } = choose(of("movzx").unwrap(), &[Shape::Gpr(W32), Shape::Int(1)]).unwrap_err()
+        let Miss::Wants { wants, .. } = choose(of("movzx").ok_or("of gave None")?, &[Shape::Gpr(W32), Shape::Int(1)])
+            .err()
+            .ok_or("choose gave Ok")?
         else {
-            panic!()
+            return Err("choose gave no Wants".into());
         };
         assert_eq!(wanted(&wants, Shape::Int(1)), "a gpr (as r16 or r8) or memory of 1 or 2 bytes");
-        let shl = of("shl").unwrap();
-        let Miss::Wants { at: 1, wants } = choose(shl, &[Shape::Gpr(W64), Shape::Int(64)]).unwrap_err() else {
-            panic!()
+        let shl = of("shl").ok_or("of gave None")?;
+        let Miss::Wants { at: 1, wants } =
+            choose(shl, &[Shape::Gpr(W64), Shape::Int(64)]).err().ok_or("choose gave Ok")?
+        else {
+            return Err("choose gave no Wants".into());
         };
         assert_eq!(wanted(&wants, Shape::Int(64)), "an integer, 0 to 63");
         assert_eq!(Kind::Control(0xbb).noun(), "a control byte of no bits but those of 0xbb");
+        Ok(())
     }
 }

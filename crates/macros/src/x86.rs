@@ -198,8 +198,9 @@ fn operand(label: &str, path: &str, item: &lang::Item, top: &[TokenTree]) -> Tok
 fn reached(module: &lang::Module, listing: &Naked, top: &[TokenTree]) -> TokenStream {
     let mut out = TokenStream::new();
     for name in &listing.statics {
-        let item = &module.items[position(module, name)];
-        let written = name_at(item, top, site()).to_string();
+        let Some(item) = position(module, name).and_then(|i| module.items.get(i)) else { continue };
+        let Some(written) = name_at(item, top, site()) else { continue };
+        let written = written.to_string();
         out.extend(operand(&written, &written, item, top));
     }
     out
@@ -303,10 +304,11 @@ fn elements(m: &HostStatic) -> Vec<String> {
 fn callees(module: &lang::Module, calls: &[Call], top: &[TokenTree]) -> TokenStream {
     let mut out = TokenStream::new();
     for (i, call) in calls.iter().enumerate() {
-        let item = &module.items[position(module, &call.function)];
-        let path = match call.instance {
-            Some(k) => instance_name(&call.function, k),
-            None => name_at(item, top, site()).to_string(),
+        let Some(item) = position(module, &call.function).and_then(|j| module.items.get(j)) else { continue };
+        let path = match (call.instance, name_at(item, top, site())) {
+            (Some(k), _) => instance_name(&call.function, k),
+            (None, Some(name)) => name.to_string(),
+            (None, None) => continue,
         };
         out.extend(operand(&format!("f{i}"), &path, item, top));
     }

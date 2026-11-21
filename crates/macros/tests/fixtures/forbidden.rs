@@ -4,14 +4,7 @@
 //! cooperative kernel whose `_blocks` method has two underscores. The `forbid` is of every lint
 //! but Clippy's, which Rust does not check.
 
-#![forbid(
-    dead_code,
-    non_snake_case,
-    unused_variables,
-    unused_imports,
-    unused_macros,
-    unreachable_patterns
-)]
+#![forbid(dead_code, non_snake_case, unused_variables, unused_imports, unused_macros, unreachable_patterns)]
 
 /// Each x86 kernel, called as Rust calls it.
 pub fn on_the_cpu(x: &mut u32) -> Result<u64, kernite_cpu::Error> {
@@ -34,7 +27,7 @@ pub fn on_the_gpu(kernels: &gpu::Kernels, x: kernite_cuda::Ptr<f32>) -> Result<u
         kernels.rounds::<2>(grid, x)?;
         kernels.k_(grid, x)?;
     }
-    kernels.COUNTS().write(&[0; 4])?;
+    kernels.COUNTS()?.write(&[0; 4])?;
     kernels.together_blocks(32, 0)?;
     kernels.rounds_blocks::<2>(32, 0)?;
     kernels.k__blocks(32, 0)
@@ -55,7 +48,7 @@ pub fn with_consts(
         kernels.rounds::<2>(grid, x)?;
         kernels.k_(grid, x)?;
     }
-    kernels.COUNTS().write(&[0; 4])?;
+    kernels.COUNTS()?.write(&[0; 4])?;
     kernels.together_blocks(32, 0)?;
     kernels.rounds_blocks::<2>(32, 0)?;
     kernels.k__blocks(32, 0)?;

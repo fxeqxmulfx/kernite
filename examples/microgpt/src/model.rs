@@ -245,122 +245,130 @@ impl Adam {
     }
 }
 
+/// What an operation of [`Ops`] gives, nothing or what it reads; or why it could not: the GPU's driver
+/// failed, or the operation was asked of rows or buffers it has none for.
+pub type Op<T = ()> = Result<T, String>;
+
 /// The operations the model is made of, which a backend computes: the reference in Rust, the
 /// others by their kernels. Each forward operation computes rows `t0..n`, so that a sample can
 /// add one position to the ones before; each backward one, rows `0..n`.
 pub trait Ops {
     /// Copies `data` into `b`, all of it.
-    fn write(&mut self, b: Buf, data: &[f32]);
+    fn write(&mut self, b: Buf, data: &[f32]) -> Op;
     /// All of `b`.
-    fn read(&mut self, b: Buf) -> Vec<f32>;
+    fn read(&mut self, b: Buf) -> Op<Vec<f32>>;
     /// The document's tokens, from `BOS`: what the positions read, and the targets they are
     /// trained toward.
-    fn tokens(&mut self, tokens: &[u32]);
+    fn tokens(&mut self, tokens: &[u32]) -> Op;
 
     /// `X0`: each position's token's embedding plus its own.
-    fn embed(&mut self, t0: usize, n: usize);
+    fn embed(&mut self, t0: usize, n: usize) -> Op;
     /// `y` is `x` normalized by its root mean square, and `r` the scale it took.
-    fn rmsnorm(&mut self, y: Buf, r: Buf, x: Buf, t0: usize, n: usize);
+    fn rmsnorm(&mut self, y: Buf, r: Buf, x: Buf, t0: usize, n: usize) -> Op;
     /// `y` is `x` by `layer`, and then what `then` says.
-    fn matmul(&mut self, layer: Layer, y: Buf, x: Buf, then: Then, t0: usize, n: usize);
+    fn matmul(&mut self, layer: Layer, y: Buf, x: Buf, then: Then, t0: usize, n: usize) -> Op;
     /// `Att` and `Aw`, from `Qkv`: each head of each position attending to it and the ones
     /// before.
-    fn attention(&mut self, t0: usize, n: usize);
+    fn attention(&mut self, t0: usize, n: usize) -> Op;
     /// `Probs`: the softmax of the logits times `inv_temp`, past `V` zero.
-    fn softmax(&mut self, inv_temp: f32, t0: usize, n: usize);
+    fn softmax(&mut self, inv_temp: f32, t0: usize, n: usize) -> Op;
 
     /// Sets the buffers in [`Buf::SUMS`] to zero.
-    fn clear(&mut self);
+    fn clear(&mut self) -> Op;
     /// `DLogits`: the cross-entropy's gradient toward each next token, over `n` positions.
-    fn xent(&mut self, n: usize);
+    fn xent(&mut self, n: usize) -> Op;
     /// `dx += dy` by `layer` transposed: the gradient by its input.
-    fn bwd_x(&mut self, layer: Layer, dx: Buf, dy: Buf, n: usize);
+    fn bwd_x(&mut self, layer: Layer, dx: Buf, dy: Buf, n: usize) -> Op;
     /// `layer`'s gradient `+= x` transposed by `dy`.
-    fn bwd_w(&mut self, layer: Layer, x: Buf, dy: Buf, n: usize);
+    fn bwd_w(&mut self, layer: Layer, x: Buf, dy: Buf, n: usize) -> Op;
     /// `DHid` where the ReLU passed its input, else zero.
-    fn relu_bwd(&mut self, n: usize);
+    fn relu_bwd(&mut self, n: usize) -> Op;
     /// `dx +=` the gradient by `x` of the normalization, `r` its scale, given `dy`.
-    fn rmsnorm_bwd(&mut self, dx: Buf, dy: Buf, x: Buf, r: Buf, n: usize);
+    fn rmsnorm_bwd(&mut self, dx: Buf, dy: Buf, x: Buf, r: Buf, n: usize) -> Op;
     /// `DQkv`, from `DAtt`.
-    fn attention_bwd(&mut self, n: usize);
+    fn attention_bwd(&mut self, n: usize) -> Op;
     /// The embeddings' gradients `+= DX0`.
-    fn embed_bwd(&mut self, n: usize);
+    fn embed_bwd(&mut self, n: usize) -> Op;
     /// Adam's step on every parameter, which zeroes its gradient.
-    fn adam(&mut self, adam: &Adam);
+    fn adam(&mut self, adam: &Adam) -> Op;
 }
 
 /// Positions `t0..n` of the model, the earlier ones' keys and values in place: the
 /// probabilities of the next token at each, the logits scaled by `inv_temp` first.
-pub fn forward(ops: &mut impl Ops, t0: usize, n: usize, inv_temp: f32) {
+pub fn forward(ops: &mut impl Ops, t0: usize, n: usize, inv_temp: f32) -> Op {
     use Buf::*;
-    ops.embed(t0, n);
+    ops.embed(t0, n)?;
     // Normalized once into the residual stream, and again into attention, as microgpt.py
     // does: not redundant, by the gradient the residual stream carries.
-    ops.rmsnorm(X1, R1, X0, t0, n);
-    ops.rmsnorm(X2, R2, X1, t0, n);
-    ops.matmul(QKV, Qkv, X2, Then::Store, t0, n);
-    ops.attention(t0, n);
-    ops.matmul(WO, X3, Att, Then::Add(X1), t0, n);
-    ops.rmsnorm(X4, R3, X3, t0, n);
-    ops.matmul(FC1, Hid, X4, Then::Relu, t0, n);
-    ops.matmul(FC2, X5, Hid, Then::Add(X3), t0, n);
-    ops.matmul(LM, Logits, X5, Then::Store, t0, n);
-    ops.softmax(inv_temp, t0, n);
+    ops.rmsnorm(X1, R1, X0, t0, n)?;
+    ops.rmsnorm(X2, R2, X1, t0, n)?;
+    ops.matmul(QKV, Qkv, X2, Then::Store, t0, n)?;
+    ops.attention(t0, n)?;
+    ops.matmul(WO, X3, Att, Then::Add(X1), t0, n)?;
+    ops.rmsnorm(X4, R3, X3, t0, n)?;
+    ops.matmul(FC1, Hid, X4, Then::Relu, t0, n)?;
+    ops.matmul(FC2, X5, Hid, Then::Add(X3), t0, n)?;
+    ops.matmul(LM, Logits, X5, Then::Store, t0, n)?;
+    ops.softmax(inv_temp, t0, n)
 }
 
 /// The gradients of the mean cross-entropy over positions `0..n`, added to `Grads`.
-pub fn backward(ops: &mut impl Ops, n: usize) {
+pub fn backward(ops: &mut impl Ops, n: usize) -> Op {
     use Buf::*;
-    ops.clear();
-    ops.xent(n);
-    ops.bwd_x(LM, D5, DLogits, n);
-    ops.bwd_w(LM, X5, DLogits, n);
-    ops.bwd_x(FC2, DHid, D5, n);
-    ops.bwd_w(FC2, Hid, D5, n);
-    ops.relu_bwd(n);
-    ops.bwd_x(FC1, DX4, DHid, n);
-    ops.bwd_w(FC1, X4, DHid, n);
+    ops.clear()?;
+    ops.xent(n)?;
+    ops.bwd_x(LM, D5, DLogits, n)?;
+    ops.bwd_w(LM, X5, DLogits, n)?;
+    ops.bwd_x(FC2, DHid, D5, n)?;
+    ops.bwd_w(FC2, Hid, D5, n)?;
+    ops.relu_bwd(n)?;
+    ops.bwd_x(FC1, DX4, DHid, n)?;
+    ops.bwd_w(FC1, X4, DHid, n)?;
     // `D5` was the gradient by `X5`, which is `X3` plus the MLP's: now it is by `X3`.
-    ops.rmsnorm_bwd(D5, DX4, X3, R3, n);
-    ops.bwd_x(WO, DAtt, D5, n);
-    ops.bwd_w(WO, Att, D5, n);
-    ops.attention_bwd(n);
-    ops.bwd_x(QKV, DX2, DQkv, n);
-    ops.bwd_w(QKV, X2, DQkv, n);
+    ops.rmsnorm_bwd(D5, DX4, X3, R3, n)?;
+    ops.bwd_x(WO, DAtt, D5, n)?;
+    ops.bwd_w(WO, Att, D5, n)?;
+    ops.attention_bwd(n)?;
+    ops.bwd_x(QKV, DX2, DQkv, n)?;
+    ops.bwd_w(QKV, X2, DQkv, n)?;
     // And `X3` is `X1` plus attention's: now `D5` is by `X1`.
-    ops.rmsnorm_bwd(D5, DX2, X1, R2, n);
-    ops.rmsnorm_bwd(DX0, D5, X0, R1, n);
-    ops.embed_bwd(n);
+    ops.rmsnorm_bwd(D5, DX2, X1, R2, n)?;
+    ops.rmsnorm_bwd(DX0, D5, X0, R1, n)?;
+    ops.embed_bwd(n)
 }
 
-/// The tokens of `doc`, between a `BOS` on each side, each letter by its place in `chars`.
-pub fn tokenize(doc: &str, chars: &[char]) -> Vec<u32> {
-    let letters = doc.chars().map(|c| chars.iter().position(|&k| k == c).expect("a letter of the names") as u32);
-    std::iter::once(BOS).chain(letters).chain([BOS]).collect()
+/// The tokens of `doc`, between a `BOS` on each side, each letter by its place in `chars`; or the letter
+/// that is not among them.
+pub fn tokenize(doc: &str, chars: &[char]) -> Op<Vec<u32>> {
+    let letter = |c: char| {
+        chars.iter().position(|&k| k == c).map(|i| i as u32).ok_or(format!("`{c}` is no letter of the names"))
+    };
+    let letters = doc.chars().map(letter).collect::<Op<Vec<u32>>>()?;
+    Ok(std::iter::once(BOS).chain(letters).chain([BOS]).collect())
 }
 
 /// Step `step` of `steps` of training on `tokens`: forward over its first `T` positions at
 /// most, backward, Adam. Its loss, the mean cross-entropy, worked out in `f64` as microgpt.py
 /// does, from the probabilities.
-pub fn train(ops: &mut impl Ops, tokens: &[u32], step: usize, steps: usize) -> f64 {
+pub fn train(ops: &mut impl Ops, tokens: &[u32], step: usize, steps: usize) -> Op<f64> {
     let n = T.min(tokens.len() - 1);
-    ops.tokens(&tokens[..=n]);
-    forward(ops, 0, n, 1.0);
-    let probs = ops.read(Buf::Probs);
+    ops.tokens(&tokens[..=n])?;
+    forward(ops, 0, n, 1.0)?;
+    let probs = ops.read(Buf::Probs)?;
     let losses: f64 = (0..n).map(|t| -f64::from(probs[t * VP + tokens[t + 1] as usize]).ln()).sum();
-    backward(ops, n);
-    ops.adam(&Adam::at(step, steps));
-    (1.0 / n as f64) * losses
+    backward(ops, n)?;
+    ops.adam(&Adam::at(step, steps))?;
+    Ok((1.0 / n as f64) * losses)
 }
 
 /// A name, as microgpt.py samples one: from `BOS`, each next token drawn from the
 /// probabilities the logits times `inv_temp` give, until `BOS` again or `T` letters.
-pub fn sample(ops: &mut impl Ops, rng: &mut Random, inv_temp: f32, chars: &[char]) -> String {
+pub fn sample(ops: &mut impl Ops, rng: &mut Random, inv_temp: f32, chars: &[char]) -> Op<String> {
     let (mut tokens, mut name) = (vec![BOS], String::new());
     for pos in 0..T {
-        ops.tokens(&tokens);
-        forward(ops, pos, pos + 1, inv_temp);
-        let probs = ops.read(Buf::Probs);
+        ops.tokens(&tokens)?;
+        forward(ops, pos, pos + 1, inv_temp)?;
+        let probs = ops.read(Buf::Probs)?;
         let weights: Vec<f64> = probs[pos * VP..][..V].iter().map(|&p| f64::from(p)).collect();
         let token = rng.choice(&weights) as u32;
         if token == BOS {
@@ -369,5 +377,5 @@ pub fn sample(ops: &mut impl Ops, rng: &mut Random, inv_temp: f32, chars: &[char
         name.push(chars[token as usize]);
         tokens.push(token);
     }
-    name
+    Ok(name)
 }

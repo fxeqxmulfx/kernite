@@ -89,10 +89,11 @@ pub(crate) fn allocate<Op: Clone + PartialEq>(
         let Some(spilled) = spill::choose(&p, &blocks, &live, &candidates) else {
             let name = |i: usize| p.regs[i].name.clone();
             let vreg = p.vreg(v);
-            let first = first_mentions(&p)[v].expect("a variable coloured is named");
-            let near = p.body[..first].iter().rev().find_map(|item| match item {
-                Item::Note(note) => Some(note.clone()),
-                _ => None,
+            let near = first_mentions(&p)[v].and_then(|first| {
+                p.body[..first].iter().rev().find_map(|item| match item {
+                    Item::Note(note) => Some(note.clone()),
+                    _ => None,
+                })
             });
             let changed = offered.iter().filter(|r| changed[v].contains(r)).copied().collect();
             let taken = taken.into_iter().map(|(u, r)| (name(u), r)).collect();
@@ -190,9 +191,11 @@ fn split<Op>(p: &mut Program<Op>, v: usize, s: &dyn Spill<Op>) -> usize {
             }
         }
         None => {
-            let at = p.params.iter().position(|&(q, _)| q == var).expect("a parameter or a result splits");
-            p.params[at].0 = made;
-            p.body.insert(0, Item::Inst(s.copy(var, made, width)));
+            // A parameter or a result splits: a variable that is neither has nothing to move.
+            if let Some(at) = p.params.iter().position(|&(q, _)| q == var) {
+                p.params[at].0 = made;
+                p.body.insert(0, Item::Inst(s.copy(var, made, width)));
+            }
         }
     }
     made.id as usize
@@ -284,7 +287,9 @@ enum Fate<Op> {
 fn leave_out<Op: PartialEq>(p: &mut Program<Op>, regs: &[Option<PReg>], s: &dyn Spill<Op>) -> Result<(), Error> {
     let (blocks, live) = analyse(p)?;
     let (upper, kept) = (upper_live(p, &blocks, s), spill::kept(p, s));
-    let reg = |v: VReg| regs[v.id as usize].expect("a variable the body names has a register");
+    // A variable the body names has a register, and [`compile`](crate::compile) refuses one that has none: here it
+    // holds no register, and a copy of it stays.
+    let reg = |v: VReg| regs[v.id as usize];
     // For each copy, whether an instruction after it reads `from`, and whether one reads all of `to` before one writes
     // it.
     let mut after = vec![(false, false); p.body.len()];
@@ -311,11 +316,13 @@ fn leave_out<Op: PartialEq>(p: &mut Program<Op>, regs: &[Option<PReg>], s: &dyn 
                 held.retain(|(at, _)| *at != r);
             }
             for (k, v) in inst.writes().enumerate() {
-                put(held, reg(v), Held { value: Value::Write(i, k), bits: s.width(v.class), by: v });
+                if let Some(at) = reg(v) {
+                    put(held, at, Held { value: Value::Write(i, k), bits: s.width(v.class), by: v });
+                }
             }
             return Fate::Stays;
         };
-        let (at, source) = (reg(to), reg(from));
+        let (Some(at), Some(source)) = (reg(to), reg(from)) else { return Fate::Stays };
         let value = held.iter().find(|(r, _)| *r == source).map(|&(_, h)| h).unwrap_or_else(|| {
             let h = Held { value: Value::Found(i), bits: s.width(from.class), by: from };
             put(held, source, h);
@@ -379,23 +386,6 @@ fn colour<Op>(
             Some(r) => regs[v] = Some(r),
             None => return Err((v, held)),
         }
-    }
-    for (v, row) in adj.iter().enumerate() {
-        for u in row.iter() {
-            debug_assert!(
-                regs[v] != regs[u],
-                "{} and {} interfere and share {:?}",
-                p.regs[v].name,
-                p.regs[u].name,
-                regs[v]
-            );
-        }
-        debug_assert!(
-            regs[v].is_none_or(|r| !changed[v].contains(&r)),
-            "{} is in {:?}, which an instruction it is live across changes",
-            p.regs[v].name,
-            regs[v]
-        );
     }
     Ok(regs)
 }

@@ -125,7 +125,7 @@ impl Native for X86 {
     fn naked(&self, code: &Listing) -> Naked {
         Naked {
             code: code.code().map(Into::into).collect(),
-            text: code.text(),
+            text: code.to_string(),
             needs: code.features.iter().map(|f| f.name().into()).collect(),
             consts: code.consts.iter().map(|c| Bytes { bytes: c.bytes.clone(), align: c.align }).collect(),
             funcs: code.funcs.clone(),

@@ -14,6 +14,8 @@ use kernite_cuda::{Advice, Cuda, Location};
 mod common;
 use common::{NO_ADVICE, NO_PREFETCH, PAGE, first_page, or_skip};
 
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
 /// What the rounds of some threads saw. A round advises a buffer, prefetches it, frees it, and
 /// makes another.
 struct Seen {
@@ -27,55 +29,66 @@ struct Seen {
 
 /// What `threads` threads saw, in at most `rounds` rounds each: they stop once a buffer has
 /// started with the advice or the last prefetch of the one freed.
-fn seen(threads: usize, rounds: usize) -> Seen {
+fn seen(threads: usize, rounds: usize) -> Result<Seen> {
     let (reused, started_with_them) = (AtomicUsize::new(0), AtomicUsize::new(0));
-    thread::scope(|scope| {
-        for _ in 0..threads {
-            scope.spawn(|| {
-                let cuda = Cuda::new().unwrap();
-                for _ in 0..rounds {
-                    if started_with_them.load(Ordering::Relaxed) > 0 {
-                        return;
-                    }
-                    // Four pages of its own: the second and third read mostly, the third and fourth
-                    // prefetched to the GPU, and the first and second preferred there.
-                    let m = cuda.managed::<u32>(5 * PAGE).unwrap();
-                    let at = first_page(&m);
-                    m.advise(at + PAGE..at + 3 * PAGE, Advice::ReadMostly).unwrap();
-                    m.advise(at..at + 2 * PAGE, Advice::PreferredLocation(Location::Gpu)).unwrap();
-                    m.prefetch(at + 2 * PAGE..at + 4 * PAGE, Location::Gpu).unwrap();
-                    let was = m.ptr().addr();
-                    drop(m);
+    thread::scope(|scope| -> Result {
+        let spawned: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| -> Result {
+                    let cuda = Cuda::new()?;
+                    for _ in 0..rounds {
+                        if started_with_them.load(Ordering::Relaxed) > 0 {
+                            return Ok(());
+                        }
+                        // Four pages of its own: the second and third read mostly, the third and fourth
+                        // prefetched to the GPU, and the first and second preferred there.
+                        let m = cuda.managed::<u32>(5 * PAGE)?;
+                        let at = first_page(&m);
+                        m.advise(at + PAGE..at + 3 * PAGE, Advice::ReadMostly)?;
+                        m.advise(at..at + 2 * PAGE, Advice::PreferredLocation(Location::Gpu))?;
+                        m.prefetch(at + 2 * PAGE..at + 4 * PAGE, Location::Gpu)?;
+                        let was = m.ptr().addr();
+                        drop(m);
 
-                    let m = cuda.managed::<u32>(5 * PAGE).unwrap();
-                    if m.ptr().addr() != was {
-                        continue;
+                        let m = cuda.managed::<u32>(5 * PAGE)?;
+                        if m.ptr().addr() != was {
+                            continue;
+                        }
+                        reused.fetch_add(1, Ordering::Relaxed);
+                        let at = first_page(&m);
+                        let mut started = false;
+                        for page in 0..4 {
+                            let p = m.placement(at + page * PAGE..at + (page + 1) * PAGE)?;
+                            if p.read_mostly || p.preferred.is_some() || p.last_prefetch.is_some() {
+                                started = true;
+                                break;
+                            }
+                        }
+                        started_with_them.fetch_add(usize::from(started), Ordering::Relaxed);
                     }
-                    reused.fetch_add(1, Ordering::Relaxed);
-                    let at = first_page(&m);
-                    let started = (0..4).any(|page| {
-                        let p = m.placement(at + page * PAGE..at + (page + 1) * PAGE).unwrap();
-                        p.read_mostly || p.preferred.is_some() || p.last_prefetch.is_some()
-                    });
-                    started_with_them.fetch_add(usize::from(started), Ordering::Relaxed);
-                }
-            });
+                    Ok(())
+                })
+            })
+            .collect();
+        for thread in spawned {
+            thread.join().map_err(|_| "a thread panicked")??;
         }
-    });
-    Seen { reused: reused.into_inner(), started_with_them: started_with_them.into_inner() }
+        Ok(())
+    })?;
+    Ok(Seen { reused: reused.into_inner(), started_with_them: started_with_them.into_inner() })
 }
 
 #[test]
-fn a_freed_buffers_advice_and_last_prefetch_outlive_it_for_two_threads_and_not_for_one() {
-    let Ok(cuda) = Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return };
-    let probe = cuda.managed::<u32>(PAGE).unwrap();
-    let Some(()) = or_skip(probe.prefetch(0..PAGE, Location::Gpu), NO_PREFETCH) else { return };
+fn a_freed_buffers_advice_and_last_prefetch_outlive_it_for_two_threads_and_not_for_one() -> Result {
+    let Ok(cuda) = Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
+    let probe = cuda.managed::<u32>(PAGE)?;
+    let Some(()) = or_skip(probe.prefetch(0..PAGE, Location::Gpu), NO_PREFETCH) else { return Ok(()) };
     let Some(()) = or_skip(probe.advise(0..PAGE, Advice::PreferredLocation(Location::Gpu)), NO_ADVICE) else {
-        return;
+        return Ok(());
     };
     drop(probe);
 
-    let one = seen(1, 1000);
+    let one = seen(1, 1000)?;
     assert_eq!(
         one.started_with_them, 0,
         "{} of the {} buffers made at the address of the one freed started with its advice or its last \
@@ -90,7 +103,7 @@ fn a_freed_buffers_advice_and_last_prefetch_outlive_it_for_two_threads_and_not_f
          to show that none starts with its advice or its last prefetch",
         one.reused
     );
-    let two = seen(2, 5000);
+    let two = seen(2, 5000)?;
     assert!(
         two.started_with_them > 0,
         "none of the {} buffers made at the address of the one freed started with its advice or its last \
@@ -98,4 +111,5 @@ fn a_freed_buffers_advice_and_last_prefetch_outlive_it_for_two_threads_and_not_f
          address twice",
         two.reused
     );
+    Ok(())
 }

@@ -11,10 +11,10 @@ cargo add kernite-build kernite-lang kernite-x86
 
 ```rust
 use kernite_build::one;
-use kernite_lang::{Error, parse};
+use kernite_lang::parse;
 use kernite_x86::X86;
 
-fn main() -> Result<(), Error> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let src = r#"
         #[instances(2, 4)]
         pub unsafe extern "sysv64" fn scale<const K: u64>(x: u64) -> u64 {
@@ -30,7 +30,7 @@ fn main() -> Result<(), Error> {
     let module = parse(src)?;
 
     // `one` finds an instance by its name and has the machine compile it.
-    let listing = one(&module, &X86, "scale::<4>")?.expect("an instance of `scale`").code;
+    let listing = one(&module, &X86, "scale::<4>")?.ok_or("`scale` has no instance `scale::<4>`")?.code;
     assert_eq!(listing.code().collect::<Vec<_>>(), ["imul rax, rdi, 4", "ret"]);
 
     // The GPU runs `store`, so x86 has no kernel of that name.

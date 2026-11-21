@@ -5,7 +5,7 @@
 //! multiply-add, which rounds once. `e^x` is [`exp`], a polynomial the kernels evaluate the
 //! same way, where a library's would differ by machine.
 
-use crate::model::{Adam, Buf, D, E, H, LN2_HI, LN2_LO, Layer, M, Ops, PARAMS, T, TAYLOR, Then, V, VP, WPE, WTE};
+use crate::model::{Adam, Buf, D, E, H, LN2_HI, LN2_LO, Layer, M, Op, Ops, PARAMS, T, TAYLOR, Then, V, VP, WPE, WTE};
 
 /// e^x for `x <= 0`, as every backend works it out: x is cut to `k ln 2 + r`, `k` the nearest
 /// integer to `x / ln 2` and `|r| <= ln 2 / 2`; e^r by its Taylor series; and 2^k by its bits.
@@ -29,7 +29,7 @@ impl Reference {
     /// A model of `params`, Adam's moments zero.
     pub fn new(params: &[f32]) -> Reference {
         let mut r = Reference { bufs: Buf::ALL.iter().map(|b| vec![0.0; b.len()]).collect(), tokens: vec![] };
-        r.write(Buf::Params, params);
+        r.buf_mut(Buf::Params).copy_from_slice(params);
         r
     }
 
@@ -41,34 +41,38 @@ impl Reference {
         &mut self.bufs[b as usize]
     }
 
-    /// Two buffers at once, `a` to read and `b` to write.
-    fn pair(&mut self, a: Buf, b: Buf) -> (&[f32], &mut [f32]) {
-        assert_ne!(a, b, "a buffer read and written at once");
+    /// Two buffers at once, `a` to read and `b` to write; or why they are one.
+    fn pair(&mut self, a: Buf, b: Buf) -> Op<(&[f32], &mut [f32])> {
+        if a == b {
+            return Err(format!("{a:?} is read and written at once"));
+        }
         let (a, b) = (a as usize, b as usize);
-        if a < b {
+        Ok(if a < b {
             let (lo, hi) = self.bufs.split_at_mut(b);
             (&lo[a], &mut hi[0])
         } else {
             let (lo, hi) = self.bufs.split_at_mut(a);
             (&hi[0], &mut lo[b])
-        }
+        })
     }
 }
 
 impl Ops for Reference {
-    fn write(&mut self, b: Buf, data: &[f32]) {
+    fn write(&mut self, b: Buf, data: &[f32]) -> Op {
         self.buf_mut(b).copy_from_slice(data);
+        Ok(())
     }
 
-    fn read(&mut self, b: Buf) -> Vec<f32> {
-        self.buf(b).to_vec()
+    fn read(&mut self, b: Buf) -> Op<Vec<f32>> {
+        Ok(self.buf(b).to_vec())
     }
 
-    fn tokens(&mut self, tokens: &[u32]) {
+    fn tokens(&mut self, tokens: &[u32]) -> Op {
         self.tokens = tokens.to_vec();
+        Ok(())
     }
 
-    fn embed(&mut self, t0: usize, n: usize) {
+    fn embed(&mut self, t0: usize, n: usize) -> Op {
         let p = self.buf(Buf::Params).to_vec();
         let tokens = self.tokens.clone();
         let x = self.buf_mut(Buf::X0);
@@ -77,9 +81,10 @@ impl Ops for Reference {
                 x[t * E + e] = p[WTE + tokens[t] as usize * E + e] + p[WPE + t * E + e];
             }
         }
+        Ok(())
     }
 
-    fn rmsnorm(&mut self, y: Buf, r: Buf, x: Buf, t0: usize, n: usize) {
+    fn rmsnorm(&mut self, y: Buf, r: Buf, x: Buf, t0: usize, n: usize) -> Op {
         let x = self.buf(x).to_vec();
         let mut scales = self.buf(r).to_vec();
         let out = self.buf_mut(y);
@@ -93,10 +98,10 @@ impl Ops for Reference {
                 out[t * E + e] = row[e] * s;
             }
         }
-        self.write(r, &scales);
+        self.write(r, &scales)
     }
 
-    fn matmul(&mut self, l: Layer, y: Buf, x: Buf, then: Then, t0: usize, n: usize) {
+    fn matmul(&mut self, l: Layer, y: Buf, x: Buf, then: Then, t0: usize, n: usize) -> Op {
         let (w, x) = (self.buf(Buf::Params)[l.at..][..l.rows * l.cols].to_vec(), self.buf(x).to_vec());
         let res = match then {
             Then::Add(b) => self.buf(b).to_vec(),
@@ -117,9 +122,10 @@ impl Ops for Reference {
                 };
             }
         }
+        Ok(())
     }
 
-    fn attention(&mut self, t0: usize, n: usize) {
+    fn attention(&mut self, t0: usize, n: usize) -> Op {
         let qkv = self.buf(Buf::Qkv).to_vec();
         let (mut aw, mut att) = (self.buf(Buf::Aw).to_vec(), self.buf(Buf::Att).to_vec());
         for t in t0..n {
@@ -153,12 +159,12 @@ impl Ops for Reference {
                 att[t * E + h * D..][..D].copy_from_slice(&out);
             }
         }
-        self.write(Buf::Aw, &aw);
-        self.write(Buf::Att, &att);
+        self.write(Buf::Aw, &aw)?;
+        self.write(Buf::Att, &att)
     }
 
-    fn softmax(&mut self, inv_temp: f32, t0: usize, n: usize) {
-        let (logits, probs) = self.pair(Buf::Logits, Buf::Probs);
+    fn softmax(&mut self, inv_temp: f32, t0: usize, n: usize) -> Op {
+        let (logits, probs) = self.pair(Buf::Logits, Buf::Probs)?;
         for t in t0..n {
             let (l, p) = (&logits[t * VP..][..VP], &mut probs[t * VP..][..VP]);
             let mut m = f32::NEG_INFINITY;
@@ -179,29 +185,32 @@ impl Ops for Reference {
             }
             p[V..].fill(0.0);
         }
+        Ok(())
     }
 
-    fn clear(&mut self) {
+    fn clear(&mut self) -> Op {
         for b in Buf::SUMS {
             self.buf_mut(b).fill(0.0);
         }
+        Ok(())
     }
 
-    fn xent(&mut self, n: usize) {
+    fn xent(&mut self, n: usize) -> Op {
         let inv_n = 1.0 / n as f32;
         let targets = self.tokens[1..=n].to_vec();
-        let (probs, d) = self.pair(Buf::Probs, Buf::DLogits);
+        let (probs, d) = self.pair(Buf::Probs, Buf::DLogits)?;
         for t in 0..n {
             for j in 0..VP {
                 let y = if j == targets[t] as usize { 1.0 } else { 0.0 };
                 d[t * VP + j] = (probs[t * VP + j] - y) * inv_n;
             }
         }
+        Ok(())
     }
 
-    fn bwd_x(&mut self, l: Layer, dx: Buf, dy: Buf, n: usize) {
+    fn bwd_x(&mut self, l: Layer, dx: Buf, dy: Buf, n: usize) -> Op {
         let w = self.buf(Buf::Params)[l.at..][..l.rows * l.cols].to_vec();
-        let (dy, dx) = self.pair(dy, dx);
+        let (dy, dx) = self.pair(dy, dx)?;
         for t in 0..n {
             for i in 0..l.rows {
                 let mut acc = dx[t * l.rows + i];
@@ -211,9 +220,10 @@ impl Ops for Reference {
                 dx[t * l.rows + i] = acc;
             }
         }
+        Ok(())
     }
 
-    fn bwd_w(&mut self, l: Layer, x: Buf, dy: Buf, n: usize) {
+    fn bwd_w(&mut self, l: Layer, x: Buf, dy: Buf, n: usize) -> Op {
         let (x, dy) = (self.buf(x).to_vec(), self.buf(dy).to_vec());
         let g = &mut self.buf_mut(Buf::Grads)[l.at..][..l.rows * l.cols];
         for i in 0..l.rows {
@@ -225,17 +235,19 @@ impl Ops for Reference {
                 g[i * l.cols + o] = acc;
             }
         }
+        Ok(())
     }
 
-    fn relu_bwd(&mut self, n: usize) {
-        let (h, dh) = self.pair(Buf::Hid, Buf::DHid);
+    fn relu_bwd(&mut self, n: usize) -> Op {
+        let (h, dh) = self.pair(Buf::Hid, Buf::DHid)?;
         for (d, &x) in dh[..n * M].iter_mut().zip(&h[..n * M]) {
             // Not `x <= 0.0`: the ReLU passed no NaN either.
             *d = if x > 0.0 { *d } else { 0.0 };
         }
+        Ok(())
     }
 
-    fn rmsnorm_bwd(&mut self, dx: Buf, dy: Buf, x: Buf, r: Buf, n: usize) {
+    fn rmsnorm_bwd(&mut self, dx: Buf, dy: Buf, x: Buf, r: Buf, n: usize) -> Op {
         let (dy, x, r) = (self.buf(dy).to_vec(), self.buf(x).to_vec(), self.buf(r).to_vec());
         let dx = self.buf_mut(dx);
         for t in 0..n {
@@ -251,9 +263,10 @@ impl Ops for Reference {
                 dx[t * E + e] += g;
             }
         }
+        Ok(())
     }
 
-    fn attention_bwd(&mut self, n: usize) {
+    fn attention_bwd(&mut self, n: usize) -> Op {
         let (qkv, aw, datt) = (self.buf(Buf::Qkv).to_vec(), self.buf(Buf::Aw).to_vec(), self.buf(Buf::DAtt).to_vec());
         let dqkv = self.buf_mut(Buf::DQkv);
         for h in 0..H {
@@ -281,9 +294,10 @@ impl Ops for Reference {
                 dqkv[t * 3 * E + h * D..][..D].copy_from_slice(&dq);
             }
         }
+        Ok(())
     }
 
-    fn embed_bwd(&mut self, n: usize) {
+    fn embed_bwd(&mut self, n: usize) -> Op {
         let (dx, tokens) = (self.buf(Buf::DX0).to_vec(), self.tokens.clone());
         let g = self.buf_mut(Buf::Grads);
         for t in 0..n {
@@ -292,11 +306,13 @@ impl Ops for Reference {
                 g[WPE + t * E + e] += dx[t * E + e];
             }
         }
+        Ok(())
     }
 
-    fn adam(&mut self, a: &Adam) {
+    fn adam(&mut self, a: &Adam) -> Op {
         let four = [Buf::Params, Buf::Grads, Buf::Moment1, Buf::Moment2].map(|b| b as usize);
-        let [p, g, m, v] = self.bufs.get_disjoint_mut(four).expect("the parameters' four buffers");
+        let [p, g, m, v] =
+            self.bufs.get_disjoint_mut(four).map_err(|e| format!("the parameters' four buffers: {e}"))?;
         for i in 0..PARAMS {
             let t = m[i] * a.b1;
             m[i] = a.ob1.mul_add(g[i], t);
@@ -310,5 +326,6 @@ impl Ops for Reference {
             p[i] -= step;
             g[i] = 0.0;
         }
+        Ok(())
     }
 }

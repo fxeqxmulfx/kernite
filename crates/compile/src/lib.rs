@@ -35,22 +35,24 @@ pub fn check<Op>(p: &Program<Op>) -> Result<(), Error> {
 /// fit, and lays out its frame.
 pub fn compile<Op: Clone + PartialEq>(p: &Program<Op>, m: &(impl Machine + Spill<Op>)) -> Result<Allocated<Op>, Error> {
     let (p, regs) = alloc::allocate(p, m, m)?;
-    let reg = |v: kernite_core::VReg| regs[v.id as usize].expect("every variable named has a register");
+    let reg = |v: kernite_core::VReg| {
+        regs[v.id as usize].ok_or_else(|| Error::NoRegister { var: p.regs[v.id as usize].name.clone(), vreg: v })
+    };
     let body = p
         .body
         .iter()
         .map(|item| match item {
-            Item::Label(l) => Item::Label(*l),
-            Item::Note(note) => Item::Note(note.clone()),
-            Item::Inst(inst) => Item::Inst(Inst {
+            Item::Label(l) => Ok(Item::Label(*l)),
+            Item::Note(note) => Ok(Item::Note(note.clone())),
+            Item::Inst(inst) => Ok(Item::Inst(Inst {
                 op: inst.op.clone(),
-                args: inst.args.iter().map(|arg| arg.map(reg)).collect(),
-                implicit: inst.implicit.iter().map(|arg| arg.map(reg)).collect(),
+                args: inst.args.iter().map(|arg| arg.try_map(reg)).collect::<Result<_, _>>()?,
+                implicit: inst.implicit.iter().map(|arg| arg.try_map(reg)).collect::<Result<_, _>>()?,
                 flow: inst.flow.clone(),
                 clobbers: inst.clobbers.clone(),
-            }),
+            })),
         })
-        .collect();
+        .collect::<Result<_, Error>>()?;
     let mut used: Vec<PReg> = regs.iter().flatten().copied().collect();
     used.sort();
     used.dedup();

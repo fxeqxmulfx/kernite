@@ -4,6 +4,8 @@
 
 use kernite_lang::{Error, Fault, Guard, ItemKind, Mem, Operand, Run, Span, Target};
 
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
 /// A kernel with a pointer, a `ymm`, a loop of `v.xmm` fields, which the evaluator unrolls, a
 /// label and a helper, whose parameter is a view of what it is given, and which declares a
 /// variable of its own. [`Trace`] is a machine of its own, which takes every type and instruction.
@@ -210,13 +212,13 @@ fn run(src: &str, trace: &mut Trace) -> Result<Run, String> {
         ItemKind::Fn(f) if f.name == "k" => Some(f),
         _ => None,
     });
-    kernite_lang::kernel(&module, k.expect("a kernel `k`"), &[], trace).map_err(|e| e.at(src))
+    kernite_lang::kernel(&module, k.ok_or("no kernel `k`")?, &[], trace).map_err(|e| e.at(src))
 }
 
 #[test]
-fn the_evaluator_asks_its_target_in_source_order() {
+fn the_evaluator_asks_its_target_in_source_order() -> Result {
     let mut trace = Trace::default();
-    run(KERNEL, &mut trace).unwrap();
+    run(KERNEL, &mut trace)?;
     let want = [
         "param xs: *const f32 = v0",
         "param n: u64 = v1",
@@ -236,12 +238,13 @@ fn the_evaluator_asks_its_target_in_source_order() {
         "end",
     ];
     assert_eq!(trace.lines, want);
+    Ok(())
 }
 
 #[test]
-fn a_type_is_given_to_the_target_as_rust_writes_it() {
+fn a_type_is_given_to_the_target_as_rust_writes_it() -> Result {
     let mut trace = Trace::default();
-    run(TYPES, &mut trace).unwrap();
+    run(TYPES, &mut trace)?;
     let want = [
         "param a: *const [usize; 3] = v0",
         "param b: *mut *const f32 = v1",
@@ -255,14 +258,15 @@ fn a_type_is_given_to_the_target_as_rust_writes_it() {
         "end",
     ];
     assert_eq!(trace.lines, want);
+    Ok(())
 }
 
 /// A name written raw is the name Rust reads, so the target is told `u64` of `r#u64`, and `[f32; 2]` of `[r#f32; N]`:
 /// each name of a type is read so.
 #[test]
-fn a_type_written_raw_is_given_to_the_target_as_the_type_rust_reads() {
+fn a_type_written_raw_is_given_to_the_target_as_the_type_rust_reads() -> Result {
     let mut trace = Trace::default();
-    run(RAW, &mut trace).unwrap();
+    run(RAW, &mut trace)?;
     let want = [
         "param a: u64 = v0",
         "param b: [f32; 2] = v1",
@@ -276,12 +280,13 @@ fn a_type_written_raw_is_given_to_the_target_as_the_type_rust_reads() {
         "end",
     ];
     assert_eq!(trace.lines, want);
+    Ok(())
 }
 
 #[test]
-fn a_static_is_made_once_the_first_time_the_kernel_names_it() {
+fn a_static_is_made_once_the_first_time_the_kernel_names_it() -> Result {
     let mut trace = Trace::default();
-    run(STATICS, &mut trace).unwrap();
+    run(STATICS, &mut trace)?;
     let want = [
         "param n: u64 = v0",
         "add v0, v0, v0",
@@ -293,86 +298,93 @@ fn a_static_is_made_once_the_first_time_the_kernel_names_it() {
         "end",
     ];
     assert_eq!(trace.lines, want);
+    Ok(())
 }
 
 #[test]
-fn each_declaration_is_one_param_or_var() {
+fn each_declaration_is_one_param_or_var() -> Result {
     // The target is told where each declaration is, by the variable it made for it: `2:33: v0`.
     // A helper's parameter is a view of what it is given, so not a declaration. An array is a
     // declaration for each of its variables.
-    let told = |src: &str| -> Vec<String> {
+    let told = |src: &str| -> Result<Vec<String>> {
         let mut trace = Trace::default();
-        run(src, &mut trace).unwrap();
-        trace.declared.into_iter().map(|(v, span)| Error { span, message: format!("v{v}") }.at(src)).collect()
+        run(src, &mut trace)?;
+        Ok(trace.declared.into_iter().map(|(v, span)| Error { span, message: format!("v{v}") }.at(src)).collect())
     };
-    assert_eq!(told(KERNEL), ["2:33: v0", "2:49: v1", "3:9: v2", "15:9: v6"]);
-    assert_eq!(told(ARRAY), ["3:9: v0", "3:9: v1", "3:9: v2"]);
+    assert_eq!(told(KERNEL)?, ["2:33: v0", "2:49: v1", "3:9: v2", "15:9: v6"]);
+    assert_eq!(told(ARRAY)?, ["3:9: v0", "3:9: v1", "3:9: v2"]);
+    Ok(())
 }
 
 #[test]
-fn the_target_is_told_where_each_instruction_is_before_it_is_given_it() {
+fn the_target_is_told_where_each_instruction_is_before_it_is_given_it() -> Result {
     // An instruction is at its name. One in a loop is at the same place each time it runs, and one
     // of a helper is in the helper.
-    let told = |src: &str| -> Vec<String> {
+    let told = |src: &str| -> Result<Vec<String>> {
         let mut trace = Trace::default();
-        run(src, &mut trace).unwrap();
+        run(src, &mut trace)?;
         let place = |(name, at): (String, Option<Span>)| match at {
             Some(span) => Error { span, message: name }.at(src),
             None => format!("{name} is not placed"),
         };
-        trace.placed.into_iter().map(place).collect()
+        Ok(trace.placed.into_iter().map(place).collect())
     };
-    assert_eq!(told(KERNEL), ["5:9: vmovups", "5:9: vmovups", "16:5: add", "9:5: jnz", "10:5: ret"]);
+    assert_eq!(told(KERNEL)?, ["5:9: vmovups", "5:9: vmovups", "16:5: add", "9:5: jnz", "10:5: ret"]);
+    Ok(())
 }
 
 #[test]
-fn a_fault_points_at_the_operand_it_names() {
-    let refused = |name: &'static str, fault: Fault| {
+fn a_fault_points_at_the_operand_it_names() -> Result {
+    let refused = |name: &'static str, fault: Fault| -> Result<_> {
         let mut trace = Trace { refuse: Some((name, fault)), ..Trace::default() };
-        run(KERNEL, &mut trace).unwrap_err()
+        Ok(run(KERNEL, &mut trace).err().ok_or("run gave Ok")?)
     };
-    assert_eq!(refused("add", Fault::at(1, "no")), "16:12: no");
-    assert_eq!(refused("vmovups", Fault::at(0, "no")), "5:19: no");
+    assert_eq!(refused("add", Fault::at(1, "no"))?, "16:12: no");
+    assert_eq!(refused("vmovups", Fault::at(0, "no"))?, "5:19: no");
+    Ok(())
 }
 
 #[test]
-fn the_target_is_told_the_directives_once_before_the_parameters() {
+fn the_target_is_told_the_directives_once_before_the_parameters() -> Result {
     // A kernel with none tells it nothing. One with some tells it the whole numbers each gives,
     // worked out, in the order written.
     let mut trace = Trace::default();
-    run(KERNEL, &mut trace).unwrap();
+    run(KERNEL, &mut trace)?;
     assert!(!trace.lines.iter().any(|line| line.starts_with("directives")));
     let mut trace = Trace::default();
-    let run = run(DIRECTIVES, &mut trace).unwrap();
+    let run = run(DIRECTIVES, &mut trace)?;
     assert_eq!(trace.lines, ["directives maxntid[8, 16] maxnreg[32]", "param n: u32 = v0", "end"]);
     // The const the directives read is named by the kernel, at each place it is written.
     let named: Vec<String> =
         run.mentions.iter().map(|m| Error { span: m.span, message: m.name.clone() }.at(DIRECTIVES)).collect();
     assert_eq!(named, ["4:11: SIZE", "4:17: SIZE"]);
+    Ok(())
 }
 
 #[test]
-fn a_directive_is_wrong_at_its_value_or_at_its_name() {
-    let refused = |directive: usize, fault: Fault| {
+fn a_directive_is_wrong_at_its_value_or_at_its_name() -> Result {
+    let refused = |directive: usize, fault: Fault| -> Result<_> {
         let mut trace = Trace { refuse_directive: Some((directive, fault)), ..Trace::default() };
-        run(DIRECTIVES, &mut trace).unwrap_err()
+        Ok(run(DIRECTIVES, &mut trace).err().ok_or("run gave Ok")?)
     };
-    assert_eq!(refused(0, Fault::at(0, "no")), "4:11: no");
+    assert_eq!(refused(0, Fault::at(0, "no"))?, "4:11: no");
     // A value that is worked out is at its operator, as an expression is anywhere.
-    assert_eq!(refused(0, Fault::at(1, "no")), "4:22: no");
-    assert_eq!(refused(0, Fault::new("no")), "4:3: no");
-    assert_eq!(refused(1, Fault::new("no")), "5:3: no");
+    assert_eq!(refused(0, Fault::at(1, "no"))?, "4:22: no");
+    assert_eq!(refused(0, Fault::new("no"))?, "4:3: no");
+    assert_eq!(refused(1, Fault::new("no"))?, "5:3: no");
     // A value the directive does not have is the directive's as a whole.
-    assert_eq!(refused(1, Fault::at(1, "no")), "5:3: no");
+    assert_eq!(refused(1, Fault::at(1, "no"))?, "5:3: no");
+    Ok(())
 }
 
 #[test]
-fn a_directive_gives_whole_numbers() {
+fn a_directive_gives_whole_numbers() -> Result {
     for (value, kind) in [("1.5", "an f32"), ("true", "a bool"), ("[1, 2]", "an array"), ("2.0f64", "an f64")] {
         let src = format!("#[maxnreg({value})]\npub unsafe extern \"ptx-kernel\" fn k() {{}}");
         let want = format!("1:11: `#[maxnreg(..)]` gives whole numbers; this is {kind}");
-        assert_eq!(run(&src, &mut Trace::default()).unwrap_err(), want, "{value}");
+        assert_eq!(run(&src, &mut Trace::default()).err().ok_or("run gave Ok")?, want, "{value}");
     }
+    Ok(())
 }
 
 /// A target that takes only what it must, to see what the evaluator does with one that is told a
@@ -412,16 +424,17 @@ impl Target for Bare {
 }
 
 #[test]
-fn a_target_that_says_nothing_of_directives_takes_none() {
-    let module = kernite_lang::parse(DIRECTIVES).unwrap();
+fn a_target_that_says_nothing_of_directives_takes_none() -> Result {
+    let module = kernite_lang::parse(DIRECTIVES)?;
     let k = module.items.iter().find_map(|item| match &item.kind {
         ItemKind::Fn(f) => Some(f),
         _ => None,
     });
-    let e = kernite_lang::kernel(&module, k.unwrap(), &[], &mut Bare).unwrap_err();
+    let e = kernite_lang::kernel(&module, k.ok_or("k gave None")?, &[], &mut Bare).err().ok_or("kernel gave Ok")?;
     assert_eq!(e.at(DIRECTIVES), "4:3: this machine takes no `#[maxntid(..)]`");
     // A kernel with none runs on it.
-    let module = kernite_lang::parse("pub unsafe extern \"ptx-kernel\" fn k() {}").unwrap();
-    let ItemKind::Fn(f) = &module.items[0].kind else { panic!("a kernel") };
-    kernite_lang::kernel(&module, f, &[], &mut Bare).unwrap();
+    let module = kernite_lang::parse("pub unsafe extern \"ptx-kernel\" fn k() {}")?;
+    let ItemKind::Fn(f) = &module.items[0].kind else { return Err("a kernel".into()) };
+    kernite_lang::kernel(&module, f, &[], &mut Bare)?;
+    Ok(())
 }

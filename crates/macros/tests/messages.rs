@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Mutex, PoisonError};
 
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
 /// Held while Cargo builds a fixture: the fixtures share a target directory, and a Cargo that
 /// waits for another's lock says so.
 static CARGO: Mutex<()> = Mutex::new(());
@@ -20,20 +22,20 @@ const ROOT: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/kernite-macros");
 
 /// Whether Cargo did `command`, `["build"]` say, for fixture `name`, written afresh, and what it
 /// said, a line each, in order.
-fn cargo(command: &[&str], name: &str) -> (bool, Vec<String>) {
-    cargo_in(command, &written(name))
+fn cargo(command: &[&str], name: &str) -> Result<(bool, Vec<String>)> {
+    cargo_in(command, &written(name)?)
 }
 
 /// Fixture `name` written as the `src/lib.rs` of a crate that depends on kernite-macros, kernite-cuda and kernite-cpu,
 /// as a user's does: the crate's directory. The crate is a workspace of its own in `CARGO_TARGET_TMPDIR`. Few fixtures
 /// use all three dependencies, so its manifest allows `unused_dependencies`, Cargo's lint of a dependency that a crate
 /// does not use, and ends with what `{name}.toml` beside the fixture says of the workspace, if there is one.
-fn written(name: &str) -> PathBuf {
+fn written(name: &str) -> Result<PathBuf> {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let crates = here.parent().expect("kernite-macros is in crates/");
+    let crates = here.parent().ok_or("kernite-macros is in no directory")?;
     let fixtures = here.join("tests/fixtures");
     let dir = Path::new(ROOT).join(name).join("project");
-    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("src"))?;
     let path = |c: &str| crates.join(c).display().to_string();
     let (macros, cuda, cpu) = (path("macros"), path("cuda"), path("cpu"));
     let manifest = format!(
@@ -55,32 +57,32 @@ unused_dependencies = "allow"
 "#
     );
     let workspace = fs::read_to_string(fixtures.join(format!("{name}.toml"))).unwrap_or_default();
-    fs::write(dir.join("Cargo.toml"), manifest + &workspace).unwrap();
-    fs::copy(fixtures.join(format!("{name}.rs")), dir.join("src/lib.rs")).unwrap();
-    dir
+    fs::write(dir.join("Cargo.toml"), manifest + &workspace)?;
+    fs::copy(fixtures.join(format!("{name}.rs")), dir.join("src/lib.rs"))?;
+    Ok(dir)
 }
 
 /// Fixture `name` as `written` writes it, but with each `from` of `edits` in its manifest written as its `to`.
 /// A dependency is left out by making its line a comment: `("kernite-cuda =", "# kernite-cuda =")`.
-fn edited(name: &str, edits: &[(&str, &str)]) -> PathBuf {
-    let dir = written(name);
+fn edited(name: &str, edits: &[(&str, &str)]) -> Result<PathBuf> {
+    let dir = written(name)?;
     let manifest = dir.join("Cargo.toml");
-    let text = fs::read_to_string(&manifest).unwrap();
-    fs::write(&manifest, edits.iter().fold(text, |text, (from, to)| text.replace(from, to))).unwrap();
-    dir
+    let text = fs::read_to_string(&manifest)?;
+    fs::write(&manifest, edits.iter().fold(text, |text, (from, to)| text.replace(from, to)))?;
+    Ok(dir)
 }
 
 /// Whether Cargo did `command` in the crate at `dir`, and what it said, a line each, in order.
-fn cargo_in(command: &[&str], dir: &Path) -> (bool, Vec<String>) {
-    let out = cargo_out(command, dir);
-    let said = String::from_utf8(out.stderr).expect("Cargo writes UTF-8");
-    (out.status.success(), said.lines().map(String::from).collect())
+fn cargo_in(command: &[&str], dir: &Path) -> Result<(bool, Vec<String>)> {
+    let out = cargo_out(command, dir)?;
+    let said = String::from_utf8(out.stderr)?;
+    Ok((out.status.success(), said.lines().map(String::from).collect()))
 }
 
 /// What Cargo did when it ran `command` in the crate at `dir`. The crate is built offline into
 /// `kernite-macros/target`, so that it never waits for the build that runs these tests. What the
 /// environment would change of a build is taken out of it.
-fn cargo_out(command: &[&str], dir: &Path) -> Output {
+fn cargo_out(command: &[&str], dir: &Path) -> Result<Output> {
     let _one = CARGO.lock().unwrap_or_else(PoisonError::into_inner);
     let mut run = Command::new(env!("CARGO"));
     run.args(command);
@@ -100,23 +102,24 @@ fn cargo_out(command: &[&str], dir: &Path) -> Output {
     ] {
         run.env_remove(var);
     }
-    run.output().expect("Cargo runs")
+    Ok(run.output()?)
 }
 
 /// That Cargo builds fixture `name` without a word.
-fn builds_quietly(name: &str) {
-    builds_quietly_in(&["build"], name, &written(name));
+fn builds_quietly(name: &str) -> Result {
+    builds_quietly_in(&["build"], name, &written(name)?)
 }
 
 /// That Cargo does `command`, `["build", "--features", "cuda"]` say, in `dir`, where fixture `name` is
 /// written, without a word.
-fn builds_quietly_in(command: &[&str], name: &str, dir: &Path) {
-    let (built, said) = cargo_in(command, dir);
+fn builds_quietly_in(command: &[&str], name: &str, dir: &Path) -> Result {
+    let (built, said) = cargo_in(command, dir)?;
     assert!(
         built && said.is_empty(),
         "fixtures/{name}.rs: {command:?} built {built}, and Cargo said:\n{}",
         said.join("\n")
     );
+    Ok(())
 }
 
 /// That Cargo does `command`, `["test", "--features", "big"]` say, for fixture `name`, without a word, and
@@ -124,8 +127,8 @@ fn builds_quietly_in(command: &[&str], name: &str, dir: &Path) {
 /// crate that uses them runs them. Returns what the tests printed. A test that finds the GPU missing says
 /// so in a line with "skipped" and passes: that line is no word of Cargo's, and it is said again here, as a
 /// test of this file says of a tool it lacks.
-fn runs_quietly(command: &[&str], name: &str) -> String {
-    let out = cargo_out(command, &written(name));
+fn runs_quietly(command: &[&str], name: &str) -> Result<String> {
+    let out = cargo_out(command, &written(name)?)?;
     let (said, printed) = (String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
     let (skipped, said): (Vec<&str>, Vec<&str>) = said.lines().partition(|line| line.contains("skipped"));
     for line in skipped {
@@ -133,38 +136,41 @@ fn runs_quietly(command: &[&str], name: &str) -> String {
     }
     let (passed, said) = (out.status.success() && said.is_empty(), said.join("\n"));
     assert!(passed, "fixtures/{name}.rs: ran {}, and Cargo said:\n{said}\n{printed}", out.status.success());
-    printed.into_owned()
+    Ok(printed.into_owned())
 }
 
 /// That Cargo documents fixture `name` without a word; then where rustdoc wrote its pages.
-fn documents_quietly(name: &str) -> PathBuf {
-    let (done, said) = cargo(&["doc", "--no-deps"], name);
+fn documents_quietly(name: &str) -> Result<PathBuf> {
+    let (done, said) = cargo(&["doc", "--no-deps"], name)?;
     assert!(done && said.is_empty(), "fixtures/{name}.rs: documented {done}, and Cargo said:\n{}", said.join("\n"));
-    Path::new(ROOT).join("target/doc").join(name)
+    Ok(Path::new(ROOT).join("target/doc").join(name))
 }
 
 /// That Cargo documents fixture `name` without a word; then, of each function `f` of its module
 /// `module`, the lines rustdoc wrote of it, from `start` to the `</div>` after it.
-fn documented(name: &str, module: &str, start: &str) -> impl Fn(&str) -> Vec<String> {
-    let dir = documents_quietly(name).join(module);
-    move |f: &str| {
-        let page = fs::read_to_string(dir.join(format!("fn.{f}.html"))).unwrap();
-        let (_, docs) = page.split_once(start).unwrap_or_else(|| panic!("fn.{f}.html has no `{start}`"));
-        docs.split_once("</div>").expect("the docs end").0.lines().map(String::from).collect()
-    }
+fn documented(name: &str, module: &str, start: &str) -> Result<impl Fn(&str) -> Result<Vec<String>>> {
+    let dir = documents_quietly(name)?.join(module);
+    Ok(move |f: &str| {
+        let page = fs::read_to_string(dir.join(format!("fn.{f}.html")))?;
+        let (_, docs) = page.split_once(start).ok_or_else(|| format!("fn.{f}.html has no `{start}`"))?;
+        let (docs, _) = docs.split_once("</div>").ok_or("the docs do not end")?;
+        Ok(docs.lines().map(String::from).collect())
+    })
 }
 
 /// That Cargo does not build fixture `name`, and says `lines`, in that order, and nothing else.
-fn refuses(name: &str, lines: &[&str]) {
-    refuses_by(&["build"], name, lines);
+fn refuses(name: &str, lines: &[&str]) -> Result {
+    refuses_by(&["build"], name, lines)?;
+    Ok(())
 }
 
 /// That Cargo does not do `command`, `["build", "--features", "cpu"]` say, for fixture `name`, and says
 /// `lines`, in that order, and nothing else.
-fn refuses_by(command: &[&str], name: &str, lines: &[&str]) {
-    let (done, said) = cargo(command, name);
+fn refuses_by(command: &[&str], name: &str, lines: &[&str]) -> Result {
+    let (done, said) = cargo(command, name)?;
     assert!(!done, "fixtures/{name}.rs: {command:?} did it");
     assert_eq!(said, lines, "fixtures/{name}.rs: Cargo said:\n{}", said.join("\n"));
+    Ok(())
 }
 
 /// What Rust says of `name`, a type that is not there, at `place` of `src/lib.rs`.
@@ -324,14 +330,15 @@ fn arm_here() -> bool {
 }
 
 /// That Cargo checks fixture `name` for [`ARM`] without a word, if this machine can check a crate for it.
-fn checks_quietly_for_arm(name: &str) {
+fn checks_quietly_for_arm(name: &str) -> Result {
     if arm_here() {
-        builds_quietly_in(&["check", "--target", ARM], name, &written(name));
+        builds_quietly_in(&["check", "--target", ARM], name, &written(name)?)?;
     }
+    Ok(())
 }
 
 #[test]
-fn the_macro_says_what_it_refuses_where_it_is() {
+fn the_macro_says_what_it_refuses_where_it_is() -> Result {
     // The modules given `STEP` come last: Rust expands each a step later, when the macro of the
     // module of consts calls `__kernels!` back.
     refuses(
@@ -360,13 +367,14 @@ fn the_macro_says_what_it_refuses_where_it_is() {
             "src/lib.rs:46:15: error: `STEP` names one of the consts the module takes from `crate::sizes` as well",
             "error: could not compile `refused` (lib) due to 13 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// kernite reads no item of a module whose brackets nest too deep. Rust says nothing of the code that names a kernel of
 /// it by path or by `use`, but cannot find it by a glob, and says the import is unused.
 #[test]
-fn brackets_nested_past_64_deep_are_refused_where_they_open() {
+fn brackets_nested_past_64_deep_are_refused_where_they_open() -> Result {
     // The 64th parenthesis is the first past the most, as `kernite::x86_str` counts the same
     // tokens.
     refuses(
@@ -377,11 +385,12 @@ fn brackets_nested_past_64_deep_are_refused_where_they_open() {
             "src/lib.rs:28:18: error[E0425]: cannot find function `f` in this scope: not found in this scope",
             "error: could not compile `nested` (lib) due to 2 previous errors; 1 warning emitted",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 #[test]
-fn an_instance_not_listed_stops_the_build() {
+fn an_instance_not_listed_stops_the_build() -> Result {
     // `cargo check` evaluates no generic function's constants, so it says nothing of these.
     refuses(
         "instances",
@@ -396,26 +405,29 @@ fn an_instance_not_listed_stops_the_build() {
             "src/lib.rs:28:14: note: the above error was encountered while instantiating `fn Kernels::k::<3>`",
             "error: could not compile `instances` (lib) due to 2 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 #[test]
-fn the_workspace_is_named_as_its_directory_is_unless_its_manifest_names_it() {
+fn the_workspace_is_named_as_its_directory_is_unless_its_manifest_names_it() -> Result {
     // Each fixture asserts, as it builds, what its kernel is named in PTX: as the directory of
     // its workspace, `project`, is; or as `renamed.toml` names the workspace.
-    builds_quietly("named");
-    builds_quietly("renamed");
+    builds_quietly("named")?;
+    builds_quietly("renamed")?;
+    Ok(())
 }
 
 #[test]
-fn a_workspace_named_nothing_is_left_out_of_its_kernels_names() {
+fn a_workspace_named_nothing_is_left_out_of_its_kernels_names() -> Result {
     // The fixture asserts, as it builds, that its kernel is named in PTX in its crate's namespace
     // and its module's alone: `unnamed.toml` names the workspace `''`.
-    builds_quietly("unnamed");
+    builds_quietly("unnamed")?;
+    Ok(())
 }
 
 #[test]
-fn a_crate_is_built_again_when_its_workspace_is_renamed() {
+fn a_crate_is_built_again_when_its_workspace_is_renamed() -> Result {
     // The crate is a member of a workspace one directory up, as a user's is, each example among
     // them. It is not a workspace of its own, where its manifest and the workspace's would be one
     // file: the macro includes the workspace's manifest, not the crate's own, and this test tells
@@ -423,32 +435,34 @@ fn a_crate_is_built_again_when_its_workspace_is_renamed() {
     // asserts, as it builds, that its kernel is named so. The test then names it `after`, and
     // Cargo builds the crate again: the kernel is `after::rebuilt::gpu::k` now, and the assert
     // fails. Cargo names the file from the workspace's root, `project/src/lib.rs`.
-    let dir = written("rebuilt");
+    let dir = written("rebuilt")?;
     let manifest = dir.join("Cargo.toml");
-    let member = fs::read_to_string(&manifest).unwrap().replace("[workspace]\n", "");
-    fs::write(&manifest, member).unwrap();
-    let named = |name: &str| {
+    let member = fs::read_to_string(&manifest)?.replace("[workspace]\n", "");
+    fs::write(&manifest, member)?;
+    let named = |name: &str| -> Result<_> {
         let workspace = format!(
             "[workspace]\nresolver = \"3\"\nmembers = [\"project\"]\n\n[workspace.metadata.kernite]\nname = {name:?}\n"
         );
-        fs::write(Path::new(ROOT).join("rebuilt/Cargo.toml"), workspace).unwrap();
+        fs::write(Path::new(ROOT).join("rebuilt/Cargo.toml"), workspace)?;
+        Ok(())
     };
-    named("before");
-    let (built, said) = cargo_in(&["build"], &dir);
+    named("before")?;
+    let (built, said) = cargo_in(&["build"], &dir)?;
     assert!(built && said.is_empty(), "fixtures/rebuilt.rs: built {built}, and Cargo said:\n{}", said.join("\n"));
-    named("after");
-    let (built, said) = cargo_in(&["build"], &dir);
+    named("after")?;
+    let (built, said) = cargo_in(&["build"], &dir)?;
     assert!(!built, "fixtures/rebuilt.rs built, its workspace named `after`");
-    let error = "project/src/lib.rs:18:41: error[E0080]: evaluation panicked: the kernel is not named \
+    let error = "project/src/lib.rs:18:9: error[E0080]: evaluation panicked: the kernel is not named \
                  before::rebuilt::gpu::k: evaluation of `_` failed here";
     assert_eq!(said, [error, "error: could not compile `rebuilt` (lib) due to 1 previous error"]);
+    Ok(())
 }
 
 /// The error is at the attribute, and names the manifest, which is the crate's own: the crate is a workspace of its
 /// own. The kernel compiles, so the error is the only one of its module. A module that `#[kernels]` refuses at its
 /// attribute, beside it, is told its refusal alone: nothing of it is compiled, so it reads no workspace.
 #[test]
-fn a_workspace_named_by_what_is_not_a_string_is_refused_where_the_module_is() {
+fn a_workspace_named_by_what_is_not_a_string_is_refused_where_the_module_is() -> Result {
     let manifest = Path::new(ROOT).join("nonstring/project/Cargo.toml");
     let error = format!(
         "src/lib.rs:5:1: error: `name` in `[workspace.metadata.kernite]` of {} is not a string: a workspace is named by \
@@ -462,11 +476,12 @@ fn a_workspace_named_by_what_is_not_a_string_is_refused_where_the_module_is() {
             &format!("src/lib.rs:14:27: error: {REFUSED}"),
             "error: could not compile `nonstring` (lib) due to 2 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 #[test]
-fn errors_inside_a_module_point_into_it() {
+fn errors_inside_a_module_point_into_it() -> Result {
     // Rust's parser speaks first; then the macro, of the module as a whole, then of each item.
     refuses(
         "inside",
@@ -481,11 +496,12 @@ fn errors_inside_a_module_point_into_it() {
              `#[instances(..)]` lists what a function that names an ABI is compiled for",
             "error: could not compile `inside` (lib) due to 5 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 #[test]
-fn what_a_module_says_when_its_parts_fail() {
+fn what_a_module_says_when_its_parts_fail() -> Result {
     // The module given `STEP` comes last: Rust expands it a step later, when the macro of the
     // module of consts calls `__kernels!` back.
     refuses(
@@ -506,11 +522,12 @@ fn what_a_module_says_when_its_parts_fail() {
             "src/lib.rs:26:16: error: `STEP` names one of the consts the module takes from `crate::sizes` as well",
             "error: could not compile `parts` (lib) due to 6 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 #[test]
-fn a_static_that_does_not_compile_is_said_once() {
+fn a_static_that_does_not_compile_is_said_once() -> Result {
     // Once where it is, not for each kernel that names it; each of those says it cannot.
     refuses(
         "statics",
@@ -523,7 +540,8 @@ fn a_static_that_does_not_compile_is_said_once() {
             "src/lib.rs:29:21: error: `COUNTS` does not compile, so no kernel names it",
             "error: could not compile `statics` (lib) due to 6 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A static whose value alone is wrong stands as its type has it, so that the code that uses it is
@@ -536,7 +554,7 @@ fn a_static_that_does_not_compile_is_said_once() {
 /// kernite says the value only, since it reads that first, and Rust asks for the type of a use that says
 /// none, of the process's static and of the GPU's.
 #[test]
-fn a_static_whose_value_alone_is_wrong_stands_as_its_type_has_it() {
+fn a_static_whose_value_alone_is_wrong_stands_as_its_type_has_it() -> Result {
     refuses(
         "static_stubs",
         &[
@@ -550,8 +568,8 @@ fn a_static_whose_value_alone_is_wrong_stands_as_its_type_has_it() {
             "src/lib.rs:23:45: error: `nope` is not defined",
             "src/lib.rs:24:23: error: `global<[u32; 0]>` holds nothing",
             // `HOLLOW`, whose type is refused too: kernite says the value, which it reads first.
-            "src/lib.rs:151:44: error: `nope` is not defined",
-            "src/lib.rs:160:44: error: `nope` is not defined",
+            "src/lib.rs:155:44: error: `nope` is not defined",
+            "src/lib.rs:164:44: error: `nope` is not defined",
             // Rust's, in the order of the uses: the process's `COUNTS` where `u64`s are wanted; its `EMPTY`, read
             // and cast to an address with no type said; the GPU's `COUNTS` where `u64`s are wanted; its `EMPTY`,
             // with no type said; and the `HOLLOW` of the process's, read with no type said, and the GPU's.
@@ -559,17 +577,18 @@ fn a_static_whose_value_alone_is_wrong_stands_as_its_type_has_it() {
             "src/lib.rs:76:16: error[E0282]: type annotations needed: cannot infer type of the type parameter `T` \
              declared on the method `read`",
             "src/lib.rs:80:25: error[E0641]: cannot cast from a pointer of an unknown kind",
-            "src/lib.rs:133:5: error[E0308]: mismatched types: expected `Result<Vec<u64>, Error>`, found \
+            "src/lib.rs:136:5: error[E0308]: mismatched types: expected `Result<Vec<u64>, Error>`, found \
              `Result<Vec<u32>, Error>`",
-            "src/lib.rs:143:13: error[E0283]: type annotations needed: cannot infer type of the type parameter `T` \
+            "src/lib.rs:147:16: error[E0283]: type annotations needed: cannot infer type of the type parameter `T` \
              declared on the method `EMPTY`",
-            "src/lib.rs:169:24: error[E0282]: type annotations needed: cannot infer type of the type parameter `T` \
+            "src/lib.rs:173:24: error[E0282]: type annotations needed: cannot infer type of the type parameter `T` \
              declared on the method `read`",
-            "src/lib.rs:174:13: error[E0283]: type annotations needed: cannot infer type of the type parameter `T` \
+            "src/lib.rs:178:16: error[E0283]: type annotations needed: cannot infer type of the type parameter `T` \
              declared on the method `HOLLOW`",
             "error: could not compile `static_stubs` (lib) due to 18 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// An integer where an integer of another type is wanted is told by its type, `a u16` where a `u8` is wanted, and
@@ -579,7 +598,7 @@ fn a_static_whose_value_alone_is_wrong_stands_as_its_type_has_it() {
 /// words of its own, on both. Where the type wanted is no integer's, `D`, what is wrong is that the value is an
 /// integer, and kernite says `an integer`. Rust's own error stands beside kernite's, at the const.
 #[test]
-fn an_integer_of_another_type_is_told_by_its_type_beside_rusts_error() {
+fn an_integer_of_another_type_is_told_by_its_type_beside_rusts_error() -> Result {
     refuses(
         "int_kinds",
         &[
@@ -597,7 +616,8 @@ fn an_integer_of_another_type_is_told_by_its_type_beside_rusts_error() {
             &not_the_number("12:25", "bool", "u16"),
             "error: could not compile `int_kinds` (lib) due to 12 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A crate that does not depend on `kernite-cpu` is told where it needs the crate, at each static of
@@ -606,8 +626,8 @@ fn an_integer_of_another_type_is_told_by_its_type_beside_rusts_error() {
 /// it is in a crate that has `kernite-cpu`: kernite's error at the type, and Rust's, after kernite's,
 /// that a pointer's type has no size.
 #[test]
-fn a_crate_without_kernite_cpu_is_told_at_what_needs_it() {
-    let (built, said) = cargo_in(&["build"], &edited("no_cpu", &[("kernite-cpu =", "# kernite-cpu =")]));
+fn a_crate_without_kernite_cpu_is_told_at_what_needs_it() -> Result {
+    let (built, said) = cargo_in(&["build"], &edited("no_cpu", &[("kernite-cpu =", "# kernite-cpu =")])?)?;
     assert!(!built, "fixtures/no_cpu.rs built");
     assert_eq!(
         said,
@@ -625,6 +645,7 @@ fn a_crate_without_kernite_cpu_is_told_at_what_needs_it() {
             "error: could not compile `no_cpu` (lib) due to 6 previous errors",
         ]
     );
+    Ok(())
 }
 
 /// A crate that does not depend on `kernite-cuda` is told where it needs the crate, once at each
@@ -633,9 +654,9 @@ fn a_crate_without_kernite_cpu_is_told_at_what_needs_it() {
 /// that gives `str` another type, whose empty `PTX` is a `&str` all the same. The crate's own name
 /// holds `kernite-cuda`, which does not make it a dependency.
 #[test]
-fn a_crate_without_kernite_cuda_is_told_at_each_module_of_gpu_kernels() {
+fn a_crate_without_kernite_cuda_is_told_at_each_module_of_gpu_kernels() -> Result {
     let edits = [("kernite-cuda =", "# kernite-cuda ="), ("\"no_cuda\"", "\"my-kernite-cuda-app\"")];
-    let (built, said) = cargo_in(&["build"], &edited("no_cuda", &edits));
+    let (built, said) = cargo_in(&["build"], &edited("no_cuda", &edits)?)?;
     assert!(!built, "fixtures/no_cuda.rs built");
     assert_eq!(
         said,
@@ -649,6 +670,7 @@ fn a_crate_without_kernite_cuda_is_told_at_each_module_of_gpu_kernels() {
             "error: could not compile `my-kernite-cuda-app` (lib) due to 3 previous errors",
         ]
     );
+    Ok(())
 }
 
 /// A crate whose dependencies on `kernite-macros`, `kernite-cuda` and `kernite-cpu` are renamed in its
@@ -662,14 +684,14 @@ fn a_crate_without_kernite_cuda_is_told_at_each_module_of_gpu_kernels() {
 /// with a static that `#[kernels]` refuses at its attribute, last, is told its refusal and the `kernite-cuda` it
 /// needs, as the first is, and not the `kernite-macros` it needs for its static: no room of it is counted.
 #[test]
-fn a_crate_that_renames_kernite_macros_kernite_cuda_and_kernite_cpu_is_told_it_has_none() {
+fn a_crate_that_renames_kernite_macros_kernite_cuda_and_kernite_cpu_is_told_it_has_none() -> Result {
     let edits = [
         ("kernite-macros = {", "km = { package = \"kernite-macros\","),
         ("kernite-cuda = {", "cuda = { package = \"kernite-cuda\","),
         ("kernite-cpu = {", "cpu = { package = \"kernite-cpu\","),
     ];
-    let dir = edited("renamed_deps", &edits);
-    let (built, without) = cargo_in(&["build"], &dir);
+    let dir = edited("renamed_deps", &edits)?;
+    let (built, without) = cargo_in(&["build"], &dir)?;
     assert!(!built, "fixtures/renamed_deps.rs built");
     assert_eq!(
         without,
@@ -692,7 +714,7 @@ fn a_crate_that_renames_kernite_macros_kernite_cuda_and_kernite_cpu_is_told_it_h
             "error: could not compile `renamed_deps` (lib) due to 8 previous errors",
         ]
     );
-    let (built, with) = cargo_in(&["build", "--features", "more"], &dir);
+    let (built, with) = cargo_in(&["build", "--features", "more"], &dir)?;
     assert!(!built, "fixtures/renamed_deps.rs built with the feature");
     assert_eq!(with[..4], without[..4]);
     assert_eq!(
@@ -716,14 +738,16 @@ fn a_crate_that_renames_kernite_macros_kernite_cuda_and_kernite_cpu_is_told_it_h
             "error: could not compile `renamed_deps` (lib) due to 12 previous errors",
         ]
     );
+    Ok(())
 }
 
 /// A crate that renames `kernite-macros` builds a module of consts that no module of kernels takes without
 /// a word: it is a module of kernels given consts that needs a dependency of that name.
 #[test]
-fn a_crate_that_renames_kernite_macros_builds_consts_no_module_takes() {
-    let dir = edited("renamed_consts", &[("kernite-macros = {", "km = { package = \"kernite-macros\",")]);
-    builds_quietly_in(&["build"], "renamed_consts", &dir);
+fn a_crate_that_renames_kernite_macros_builds_consts_no_module_takes() -> Result {
+    let dir = edited("renamed_consts", &[("kernite-macros = {", "km = { package = \"kernite-macros\",")])?;
+    builds_quietly_in(&["build"], "renamed_consts", &dir)?;
+    Ok(())
 }
 
 /// What `#[kernels]` says of an argument that is not `consts = path`.
@@ -736,7 +760,7 @@ const REFUSED: &str = "`#[kernels]` takes the module of consts its kernels read,
 /// another module by path and by `use`, or by a glob. A module kernite cannot read has the refusal alone, and the
 /// items kernite reads of it. What else such a module is told is the tests' below.
 #[test]
-fn a_module_of_kernels_refused_at_its_attribute_is_still_there_for_the_code_that_names_it() {
+fn a_module_of_kernels_refused_at_its_attribute_is_still_there_for_the_code_that_names_it() -> Result {
     refuses(
         "refused_attribute",
         &[
@@ -745,7 +769,8 @@ fn a_module_of_kernels_refused_at_its_attribute_is_still_there_for_the_code_that
             &format!("src/lib.rs:78:27: error: {REFUSED}"),
             "error: could not compile `refused_attribute` (lib) due to 3 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A static of a module that `#[kernels]` refuses at its attribute stands as its type has it, as a static whose value
@@ -755,7 +780,7 @@ fn a_module_of_kernels_refused_at_its_attribute_is_still_there_for_the_code_that
 /// `SIZED`, stands as one whose elements are of any type: a use that says the type is no error of Rust's, and a use that
 /// says none is, beside the refusal. The process's statics and the GPU's alike.
 #[test]
-fn a_static_of_a_module_refused_at_its_attribute_stands_as_its_type_has_it() {
+fn a_static_of_a_module_refused_at_its_attribute_stands_as_its_type_has_it() -> Result {
     refuses(
         "refused_statics",
         &[
@@ -768,13 +793,14 @@ fn a_static_of_a_module_refused_at_its_attribute_stands_as_its_type_has_it() {
             "src/lib.rs:57:16: error[E0282]: type annotations needed: cannot infer type of the type parameter `T` \
              declared on the method `read`",
             "src/lib.rs:61:25: error[E0641]: cannot cast from a pointer of an unknown kind",
-            "src/lib.rs:78:5: error[E0308]: mismatched types: expected `Result<Vec<u64>, Error>`, found \
+            "src/lib.rs:79:5: error[E0308]: mismatched types: expected `Result<Vec<u64>, Error>`, found \
              `Result<Vec<u32>, Error>`",
-            "src/lib.rs:88:13: error[E0283]: type annotations needed: cannot infer type of the type parameter `T` \
+            "src/lib.rs:90:16: error[E0283]: type annotations needed: cannot infer type of the type parameter `T` \
              declared on the method `SIZED`",
             "error: could not compile `refused_statics` (lib) due to 7 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A module of kernels that `#[kernels]` refuses at its attribute is told its refusal, and what the macro finds in
@@ -786,7 +812,7 @@ fn a_static_of_a_module_refused_at_its_attribute_stands_as_its_type_has_it() {
 /// kernels of both kinds with a static. With the feature `taken` the same modules are not refused, and each mistake
 /// is said.
 #[test]
-fn a_module_refused_at_its_attribute_is_told_what_the_macro_finds_in_writing_it_and_nothing_in_its_items() {
+fn a_module_refused_at_its_attribute_is_told_what_the_macro_finds_in_writing_it_and_nothing_in_its_items() -> Result {
     refuses(
         "refused_mistakes",
         &[
@@ -801,7 +827,7 @@ fn a_module_refused_at_its_attribute_is_told_what_the_macro_finds_in_writing_it_
             &format!("src/lib.rs:92:60: error: {REFUSED}"),
             "error: could not compile `refused_mistakes` (lib) due to 8 previous errors",
         ],
-    );
+    )?;
     refuses_by(
         &["build", "--features", "taken"],
         "refused_mistakes",
@@ -832,7 +858,8 @@ fn a_module_refused_at_its_attribute_is_told_what_the_macro_finds_in_writing_it_
              the statics they name",
             "error: could not compile `refused_mistakes` (lib) due to 16 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A module of kernels that kernite cannot read is still there, as far as kernite reads it, for the code that names its
@@ -841,7 +868,7 @@ fn a_module_refused_at_its_attribute_is_told_what_the_macro_finds_in_writing_it_
 /// compile, a const, a struct, and a static as its type has it. So Rust says nothing of the code that names them, from
 /// the crate's root, from another module by `use` or by a glob.
 #[test]
-fn a_module_with_two_items_of_a_name_is_still_there_for_the_code_that_names_it() {
+fn a_module_with_two_items_of_a_name_is_still_there_for_the_code_that_names_it() -> Result {
     refuses(
         "unreadable_glob",
         &[
@@ -849,21 +876,23 @@ fn a_module_with_two_items_of_a_name_is_still_there_for_the_code_that_names_it()
             "src/lib.rs:37:39: error: `scale` names another function of the module as well",
             "error: could not compile `unreadable_glob` (lib) due to 2 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A module of kernels with the head of a function kernite does not take, `bad<T>`, says so once, and is still there as
 /// far as kernite reads it: `good` comes before `bad`, so Rust says nothing of the code that names `good` by the
 /// module's path, by `use` or by a glob, as it says nothing of one that names a module that compiles.
 #[test]
-fn a_module_with_the_head_of_a_kernel_it_cannot_read_is_still_there_for_the_kernel_it_reads() {
+fn a_module_with_the_head_of_a_kernel_it_cannot_read_is_still_there_for_the_kernel_it_reads() -> Result {
     refuses(
         "unreadable_head",
         &[
             "src/lib.rs:10:39: error: a function's generics are values, as in `<const N: usize>`",
             "error: could not compile `unreadable_head` (lib) due to 1 previous error",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A function kernite cannot read ends at its body, though its head holds a brace group in `<..>`, as a const argument
@@ -871,14 +900,15 @@ fn a_module_with_the_head_of_a_kernel_it_cannot_read_is_still_there_for_the_kern
 /// as an item, which it would refuse. kernite's error is said alone, at the first. `good`, after them, is still there
 /// for the glob that names it.
 #[test]
-fn a_function_kernite_cannot_read_ends_at_its_body_whatever_a_const_argument_of_its_head_holds() {
+fn a_function_kernite_cannot_read_ends_at_its_body_whatever_a_const_argument_of_its_head_holds() -> Result {
     refuses(
         "unreadable_angle",
         &[
             "src/lib.rs:11:22: error: a function's generics are values, as in `<const N: usize>`",
             "error: could not compile `unreadable_angle` (lib) due to 1 previous error",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// kernite reads every item of a module but the one it cannot read, `bad`: `good` and `scale` before it, `late` after
@@ -886,7 +916,7 @@ fn a_function_kernite_cannot_read_ends_at_its_body_whatever_a_const_argument_of_
 /// glob, as it cannot find a name no module has; and the import is unused, as for any glob, where `bad` is all it
 /// names. A GPU kernel is named as a method of `Kernels`: Rust finds `scale` and `late`, and not `bad`.
 #[test]
-fn rust_cannot_find_by_a_glob_what_kernite_does_not_know_of_a_module_it_cannot_read() {
+fn rust_cannot_find_by_a_glob_what_kernite_does_not_know_of_a_module_it_cannot_read() -> Result {
     refuses(
         "unreadable_unknown",
         &[
@@ -899,7 +929,8 @@ fn rust_cannot_find_by_a_glob_what_kernite_does_not_know_of_a_module_it_cannot_r
             "src/lib.rs:79:18: error[E0425]: cannot find function `bad` in this scope: not found in this scope",
             "error: could not compile `unreadable_unknown` (lib) due to 5 previous errors; 1 warning emitted",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A module of x86 kernels that kernite cannot read has a static that kernite knows where it has read a function that
@@ -908,7 +939,7 @@ fn rust_cannot_find_by_a_glob_what_kernite_does_not_know_of_a_module_it_cannot_r
 /// path, by `use` or by a glob, nor of the third by a path or by `use`, and cannot find it by a glob. Nor does it ask
 /// for `kernite-cuda`, as it would if kernite took the third for the GPU's.
 #[test]
-fn a_static_of_a_module_kernite_cannot_read_is_known_if_a_function_that_names_an_abi_is_read() {
+fn a_static_of_a_module_kernite_cannot_read_is_known_if_a_function_that_names_an_abi_is_read() -> Result {
     let lines = [
         "src/lib.rs:15:39: error: a function's generics are values, as in `<const N: usize>`",
         "src/lib.rs:24:39: error: a function's generics are values, as in `<const N: usize>`",
@@ -917,17 +948,19 @@ fn a_static_of_a_module_kernite_cannot_read_is_known_if_a_function_that_names_an
         "src/lib.rs:70:9: warning: unused import: `crate::no_other::*`",
         "error: could not compile `unreadable_statics` (lib) due to 4 previous errors; 1 warning emitted",
     ];
-    refuses("unreadable_statics", &lines);
-    let (built, said) = cargo_in(&["build"], &edited("unreadable_statics", &[("kernite-cuda =", "# kernite-cuda =")]));
+    refuses("unreadable_statics", &lines)?;
+    let (built, said) =
+        cargo_in(&["build"], &edited("unreadable_statics", &[("kernite-cuda =", "# kernite-cuda =")])?)?;
     assert!(!built, "fixtures/unreadable_statics.rs built without kernite-cuda");
     assert_eq!(said, lines, "without kernite-cuda, Cargo said:\n{}", said.join("\n"));
+    Ok(())
 }
 
 /// A `const` or a `static` that kernite cannot read ends at its `;`, though its value holds a brace group with more
 /// after it: a block added to, a struct literal read for a field and a branch are each told once, and Rust says nothing
 /// of what would be left of them as an item of its own, nor of the code that names the kernel beside them.
 #[test]
-fn a_const_or_a_static_kernite_cannot_read_ends_at_its_semicolon() {
+fn a_const_or_a_static_kernite_cannot_read_ends_at_its_semicolon() -> Result {
     refuses(
         "unreadable_cut",
         &[
@@ -936,7 +969,8 @@ fn a_const_or_a_static_kernite_cannot_read_ends_at_its_semicolon() {
             "src/lib.rs:26:27: error: expected `;`, found `true`",
             "error: could not compile `unreadable_cut` (lib) due to 3 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A module that takes consts and that kernite cannot read says so alone, and is still there as far as kernite reads
@@ -944,34 +978,36 @@ fn a_const_or_a_static_kernite_cannot_read_ends_at_its_semicolon() {
 /// const it takes, `STEP`, is not said, as it is in a module that compiles, for the error that can be mended first is
 /// the head.
 #[test]
-fn a_module_given_consts_that_kernite_cannot_read_is_still_there_and_says_its_error_alone() {
+fn a_module_given_consts_that_kernite_cannot_read_is_still_there_and_says_its_error_alone() -> Result {
     refuses(
         "unreadable_given",
         &[
             "src/lib.rs:25:39: error: a function's generics are values, as in `<const N: usize>`",
             "error: could not compile `unreadable_given` (lib) due to 1 previous error",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// An argument of `#[consts]` is told where it is, once, and changes nothing else. The module is the one it is without
 /// the argument, so Rust says nothing of the code that reads its consts, nor of a module of kernels that takes them.
 #[test]
-fn a_module_of_consts_given_an_argument_is_still_there_for_the_code_that_reads_it() {
+fn a_module_of_consts_given_an_argument_is_still_there_for_the_code_that_reads_it() -> Result {
     refuses(
         "consts_argument",
         &[
             "src/lib.rs:6:26: error: `#[consts]` takes no arguments",
             "error: could not compile `consts_argument` (lib) due to 1 previous error",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// The module of consts is the one it is without the argument, so its other errors are said, beside the argument's:
 /// they are other mistakes. The module of kernels that takes its consts reads the one that is right, and says its own
 /// error.
 #[test]
-fn a_module_of_consts_given_an_argument_says_its_other_errors_as_well() {
+fn a_module_of_consts_given_an_argument_says_its_other_errors_as_well() -> Result {
     refuses(
         "consts_argument_beside",
         &[
@@ -983,16 +1019,17 @@ fn a_module_of_consts_given_an_argument_says_its_other_errors_as_well() {
             "src/lib.rs:17:16: error: `nope` is not defined",
             "error: could not compile `consts_argument_beside` (lib) due to 4 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A module of GPU kernels that `#[kernels]` refuses at its attribute needs `kernite-cuda` where `cfg` keeps one of
 /// its GPU items, as a module kernite does not refuse does: the crate is told once, at the module, beside the
 /// attribute, and not where the feature leaves the kernel out.
 #[test]
-fn a_module_refused_at_its_attribute_needs_kernite_cuda_where_cfg_keeps_a_gpu_item() {
-    let dir = edited("refused_features", &[("kernite-cuda =", "# kernite-cuda =")]);
-    let (built, kept) = cargo_in(&["build", "--features", "a"], &dir);
+fn a_module_refused_at_its_attribute_needs_kernite_cuda_where_cfg_keeps_a_gpu_item() -> Result {
+    let dir = edited("refused_features", &[("kernite-cuda =", "# kernite-cuda =")])?;
+    let (built, kept) = cargo_in(&["build", "--features", "a"], &dir)?;
     assert!(!built, "fixtures/refused_features.rs built with the feature");
     assert_eq!(
         kept,
@@ -1003,7 +1040,7 @@ fn a_module_refused_at_its_attribute_needs_kernite_cuda_where_cfg_keeps_a_gpu_it
             "error: could not compile `refused_features` (lib) due to 2 previous errors",
         ]
     );
-    let (built, left_out) = cargo_in(&["build"], &dir);
+    let (built, left_out) = cargo_in(&["build"], &dir)?;
     assert!(!built, "fixtures/refused_features.rs built without the feature");
     assert_eq!(
         left_out,
@@ -1012,15 +1049,16 @@ fn a_module_refused_at_its_attribute_needs_kernite_cuda_where_cfg_keeps_a_gpu_it
             "error: could not compile `refused_features` (lib) due to 1 previous error",
         ]
     );
+    Ok(())
 }
 
 /// A module of x86 kernels that `#[kernels]` refuses at its attribute needs `kernite-cpu` for its static and its
 /// cooperative kernel, as a module kernite does not refuse does: each is told, at the static and at the kernel,
 /// beside the attribute. Rust says nothing of the code that names them.
 #[test]
-fn a_module_refused_at_its_attribute_needs_kernite_cpu_for_a_static_and_a_cooperative_kernel() {
-    let dir = edited("refused_cpu", &[("kernite-cpu =", "# kernite-cpu =")]);
-    let (built, said) = cargo_in(&["build"], &dir);
+fn a_module_refused_at_its_attribute_needs_kernite_cpu_for_a_static_and_a_cooperative_kernel() -> Result {
+    let dir = edited("refused_cpu", &[("kernite-cpu =", "# kernite-cpu =")])?;
+    let (built, said) = cargo_in(&["build"], &dir)?;
     assert!(!built, "fixtures/refused_cpu.rs built");
     assert_eq!(
         said,
@@ -1033,15 +1071,16 @@ fn a_module_refused_at_its_attribute_needs_kernite_cpu_for_a_static_and_a_cooper
             "error: could not compile `refused_cpu` (lib) due to 3 previous errors",
         ]
     );
+    Ok(())
 }
 
 /// A module of kernels given consts, in a crate that renames `kernite-macros`, is told once, at its attribute. It
 /// is still there, as a module that `#[kernels]` refuses is, so Rust says nothing of the code that names its items.
 /// The static of the GPU one does not tell it again that it needs `kernite-macros`: no room of it is counted.
 #[test]
-fn a_module_of_kernels_given_consts_without_kernite_macros_is_still_there_for_the_code_that_names_it() {
-    let dir = edited("renamed_given", &[("kernite-macros = {", "km = { package = \"kernite-macros\",")]);
-    let (built, said) = cargo_in(&["build"], &dir);
+fn a_module_of_kernels_given_consts_without_kernite_macros_is_still_there_for_the_code_that_names_it() -> Result {
+    let dir = edited("renamed_given", &[("kernite-macros = {", "km = { package = \"kernite-macros\",")])?;
+    let (built, said) = cargo_in(&["build"], &dir)?;
     assert!(!built, "fixtures/renamed_given.rs built");
     assert_eq!(
         said,
@@ -1053,6 +1092,7 @@ fn a_module_of_kernels_given_consts_without_kernite_macros_is_still_there_for_th
             "error: could not compile `renamed_given` (lib) due to 2 previous errors",
         ]
     );
+    Ok(())
 }
 
 /// A module of kernels, x86 or GPU, whose consts' path Rust cannot find, `crate::nope`, is told once, at the path, for
@@ -1061,7 +1101,7 @@ fn a_module_of_kernels_given_consts_without_kernite_macros_is_still_there_for_th
 /// brings in nothing, and Rust warns of that alone. kernite cannot tell that the path fails, for Rust finds it after
 /// the macro runs, so the module is there, with nothing in it, for that code to find.
 #[test]
-fn a_module_of_kernels_whose_consts_path_rust_cannot_find_is_told_once() {
+fn a_module_of_kernels_whose_consts_path_rust_cannot_find_is_told_once() -> Result {
     refuses(
         "consts_path_missing",
         &[
@@ -1071,14 +1111,15 @@ fn a_module_of_kernels_whose_consts_path_rust_cannot_find_is_told_once() {
             "src/lib.rs:53:9: warning: unused import: `crate::gpu::*`",
             "error: could not compile `consts_path_missing` (lib) due to 2 previous errors; 2 warnings emitted",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A module of kernels whose consts' path is a module with no `#[kernite_macros::consts]` on it is told once, at the
 /// path, as one that is not there is: the module has no `__kernite_consts`, which that attribute writes. Rust says
 /// nothing of the code that names the module's items. The glob brings in nothing, and Rust warns of that alone.
 #[test]
-fn a_module_of_kernels_whose_consts_path_is_a_module_with_no_consts_attribute_is_told_once() {
+fn a_module_of_kernels_whose_consts_path_is_a_module_with_no_consts_attribute_is_told_once() -> Result {
     refuses(
         "consts_path_plain",
         &[
@@ -1086,7 +1127,8 @@ fn a_module_of_kernels_whose_consts_path_is_a_module_with_no_consts_attribute_is
             "src/lib.rs:31:9: warning: unused import: `crate::cpu::*`",
             "error: could not compile `consts_path_plain` (lib) due to 1 previous error; 1 warning emitted",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A consts path Rust cannot find is told once, at the name it cannot find, whatever form the path has: from the root
@@ -1097,7 +1139,7 @@ fn a_module_of_kernels_whose_consts_path_is_a_module_with_no_consts_attribute_is
 /// The code that calls the kernels of each, from the crate's root and from the module they are in, is told nothing.
 /// Rust says first the paths that fail at their first name, and then those that fail at a later one.
 #[test]
-fn a_consts_path_is_told_once_at_the_name_rust_cannot_find_in_each_form() {
+fn a_consts_path_is_told_once_at_the_name_rust_cannot_find_in_each_form() -> Result {
     refuses(
         "consts_path_forms",
         &[
@@ -1122,14 +1164,15 @@ fn a_consts_path_is_told_once_at_the_name_rust_cannot_find_in_each_form() {
              `__hidden_3`",
             "error: could not compile `consts_path_forms` (lib) due to 11 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A `use` of an item of such a module by name is Rust's error as well, beside the path's: the module has no such item
 /// until the path is mended, and kernite cannot give it one, for what the module has is what the consts make of it. The
 /// module itself, imported or renamed, is there, and Rust says nothing of the code that calls its kernels by it.
 #[test]
-fn a_use_of_an_item_by_name_of_a_module_whose_consts_path_rust_cannot_find_is_told_as_well() {
+fn a_use_of_an_item_by_name_of_a_module_whose_consts_path_rust_cannot_find_is_told_as_well() -> Result {
     refuses(
         "consts_path_named",
         &[
@@ -1140,25 +1183,27 @@ fn a_use_of_an_item_by_name_of_a_module_whose_consts_path_rust_cannot_find_is_to
             "src/lib.rs:34:13: error[E0432]: unresolved import `crate::cpu::step`",
             "error: could not compile `consts_path_named` (lib) due to 4 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A module of kernels given consts keeps its own attributes first in it, the docs `//!` and the attributes `#![..]`,
 /// as a module that is given none does: its docs are on its page, and a lint that it forbids is not broken by what the
 /// macro writes in it to find the module of consts. No page shows that, not even a page of private items.
 #[test]
-fn a_module_of_kernels_given_consts_keeps_its_own_attributes_first() {
-    builds_quietly("consts_inner");
-    let docs = documents_quietly("consts_inner");
+fn a_module_of_kernels_given_consts_keeps_its_own_attributes_first() -> Result {
+    builds_quietly("consts_inner")?;
+    let docs = documents_quietly("consts_inner")?;
     for (module, said) in [("cpu", "Kernels that step."), ("gpu", "Kernels that step on the GPU.")] {
-        let page = fs::read_to_string(docs.join(module).join("index.html")).unwrap();
+        let page = fs::read_to_string(docs.join(module).join("index.html"))?;
         assert!(page.contains(said), "the page of `{module}` lacks its docs, `{said}`");
     }
-    builds_quietly_in(&["doc", "--no-deps", "--document-private-items"], "consts_inner", &written("consts_inner"));
+    builds_quietly_in(&["doc", "--no-deps", "--document-private-items"], "consts_inner", &written("consts_inner")?)?;
     for module in ["cpu", "gpu"] {
-        let page = fs::read_to_string(docs.join(module).join("index.html")).unwrap();
+        let page = fs::read_to_string(docs.join(module).join("index.html"))?;
         assert!(!page.contains("__consts"), "the page of `{module}` shows the module the macro wrote in it");
     }
+    Ok(())
 }
 
 /// A kernel's safety contract says that nothing else touches the memory of the module's it
@@ -1166,17 +1211,17 @@ fn a_module_of_kernels_given_consts_keeps_its_own_attributes_first() {
 /// or at an address: in a `# Safety` of its own, or after the one its docs have; and for a
 /// grid's kernel, while its threads run.
 #[test]
-fn a_kernels_safety_contract_says_nothing_else_touches_the_memory_it_names() {
+fn a_kernels_safety_contract_says_nothing_else_touches_the_memory_it_names() -> Result {
     // The paragraphs of the kernel's `# Safety`, as rustdoc writes them.
-    let safety = documented("contract", "cpu", ">Safety</h2>\n");
+    let safety = documented("contract", "cpu", ">Safety</h2>\n")?;
     let runs = "<p>The kernel trusts the pointers it is given: each must be to memory as long as the kernel reads and \
                 writes through it. Nothing else touches the module’s memory, <code>RUNS</code>, while it runs.</p>";
-    assert_eq!(safety("run"), [runs]);
+    assert_eq!(safety("run")?, [runs]);
     // A call at an address names no function in the code, and the contract names the memory of
     // each it may reach: `run` is the last of the two, and `idle` names none.
-    assert_eq!(safety("either"), [runs]);
+    assert_eq!(safety("either")?, [runs]);
     assert_eq!(
-        safety("scale"),
+        safety("scale")?,
         [
             "<p><code>x</code> points at an integer.</p>",
             "<p>Nothing else touches the module’s memory, <code>RUNS</code> and <code>FACTORS</code>, while it \
@@ -1184,11 +1229,12 @@ fn a_kernels_safety_contract_says_nothing_else_touches_the_memory_it_names() {
         ]
     );
     assert_eq!(
-        safety("runs"),
+        safety("runs")?,
         ["<p>The kernel trusts the pointers it is given: each must be to memory as long as the kernel’s threads \
              read and write through it, which nothing else touches while they run. Nothing else touches the \
              module’s memory, <code>RUNS</code>, while they run.</p>"]
     );
+    Ok(())
 }
 
 /// A GPU kernel's launcher says what a launch keeps to, as `Module::launch` does: the kernel's own
@@ -1197,13 +1243,14 @@ fn a_kernels_safety_contract_says_nothing_else_touches_the_memory_it_names() {
 /// the kernel writes, and no slice it may write of memory the kernel reads; and where
 /// `Cuda::concurrent_managed_access` is false, no slice of managed memory at all.
 #[test]
-fn a_gpu_kernels_launcher_says_what_a_launch_keeps_to() {
-    let page = fs::read_to_string(documents_quietly("contract").join("gpu/struct.Kernels.html")).unwrap();
+fn a_gpu_kernels_launcher_says_what_a_launch_keeps_to() -> Result {
+    let page = fs::read_to_string(documents_quietly("contract")?.join("gpu/struct.Kernels.html"))?;
     // The paragraphs after the heading of `name`'s `# Safety`, as rustdoc writes them.
-    let safety = |name: &str| -> Vec<String> {
-        let (_, method) = page.split_once(&format!("id=\"method.{name}\"")).expect("the method is there");
-        let (_, docs) = method.split_once(">Safety</h5>\n").unwrap_or_else(|| panic!("`{name}` has no `# Safety`"));
-        docs.split_once("</div>").expect("the docs end").0.lines().map(String::from).collect()
+    let safety = |name: &str| -> Result<Vec<String>> {
+        let (_, method) = page.split_once(&format!("id=\"method.{name}\"")).ok_or("the method is not there")?;
+        let (_, docs) = method.split_once(">Safety</h5>\n").ok_or_else(|| format!("`{name}` has no `# Safety`"))?;
+        let (docs, _) = docs.split_once("</div>").ok_or("the docs do not end")?;
+        Ok(docs.lines().map(String::from).collect())
     };
     let contract = "<p>The kernel trusts the pointers it is given: each must be to a buffer or to unified memory of \
                     the GPU the kernels are loaded on, as long as the kernel reads and writes through it. From the \
@@ -1211,8 +1258,9 @@ fn a_gpu_kernels_launcher_says_what_a_launch_keeps_to() {
                     slice it may write of memory the kernel reads; and where \
                     <code>Cuda::concurrent_managed_access</code> is false, the GPU not reaching managed memory while \
                     the host does, the host must hold no slice of managed memory at all.</p>";
-    assert_eq!(safety("one"), [contract]);
-    assert_eq!(safety("two"), ["<p><code>x</code> points at an integer.</p>"]);
+    assert_eq!(safety("one")?, [contract]);
+    assert_eq!(safety("two")?, ["<p><code>x</code> points at an integer.</p>"]);
+    Ok(())
 }
 
 /// The function's docs name the CPU features its kernel needs past x86-64's own, which nothing
@@ -1220,39 +1268,39 @@ fn a_gpu_kernels_launcher_says_what_a_launch_keeps_to() {
 /// that needs none, no paragraph. A generic kernel's docs name those of every instance, each
 /// once, in the order of their names, and a grid's kernel's launcher's those of the kernel.
 #[test]
-fn the_functions_docs_name_the_cpu_features_a_kernel_needs() {
+fn the_functions_docs_name_the_cpu_features_a_kernel_needs() -> Result {
     // The paragraphs of the function's docs, as rustdoc writes them.
-    let docs = documented("needs", "kernels", "<div class=\"docblock\">");
+    let docs = documented("needs", "kernels", "<div class=\"docblock\">")?;
     let needs =
         |list: &str| format!("<p>Needs the CPU {list}, past x86-64’s own, which nothing checks for when it runs.</p>");
     assert_eq!(
-        docs("bits"),
+        docs("bits")?,
         [
             "<p>How many bits of <code>x</code> are set, lead and trail, summed.</p>".to_string(),
             needs("features <code>bmi1</code>, <code>lzcnt</code> and <code>popcnt</code>"),
         ]
     );
     assert_eq!(
-        docs("axpy"),
+        docs("axpy")?,
         [
             "<p><code>y += a * x</code>, eight floats at once.</p>".to_string(),
             needs("features <code>avx</code> and <code>fma</code>"),
         ]
     );
     assert_eq!(
-        docs("ones"),
+        docs("ones")?,
         ["<p>How many bits of <code>x</code> are set.</p>".to_string(), needs("feature <code>popcnt</code>")]
     );
-    assert_eq!(docs("next"), ["<p><code>x</code> and one.</p>"]);
+    assert_eq!(docs("next")?, ["<p><code>x</code> and one.</p>"]);
     assert_eq!(
-        docs("pick"),
+        docs("pick")?,
         [
             "<p>How many zeros lead <code>x</code>, or how many of its bits are set.</p>".to_string(),
             needs("features <code>lzcnt</code> and <code>popcnt</code>"),
         ]
     );
     assert_eq!(
-        docs("count"),
+        docs("count")?,
         [
             "<p>How many bits of <code>x</code> are set, or how many zeros lead it, when <code>N</code> is 2.</p>"
                 .to_string(),
@@ -1260,31 +1308,34 @@ fn the_functions_docs_name_the_cpu_features_a_kernel_needs() {
         ]
     );
     assert_eq!(
-        docs("together")[..2],
+        docs("together")?[..2],
         [
             "<p>How many bits are set of the word at <code>x</code>, once every thread of the grid is there.</p>"
                 .to_string(),
             needs("feature <code>popcnt</code>"),
         ]
     );
+    Ok(())
 }
 
 /// The module's `LISTINGS` holds each x86 kernel's listing by its name, and an instance's by
 /// its name and arguments, as `plus::<2>`. The fixture asserts each, name and listing, as it
 /// builds.
 #[test]
-fn listings_holds_each_kernels_listing_by_its_name() {
-    builds_quietly("listings");
+fn listings_holds_each_kernels_listing_by_its_name() -> Result {
+    builds_quietly("listings")?;
+    Ok(())
 }
 
 /// `LISTINGS` holds the listings of the kernels `cfg` keeps, one for each instance of a kernel that
 /// has them, and none of a kernel that `cfg` leaves out, by a `cfg` or by a `cfg_attr(..)`. The
 /// fixture asserts, as it builds, which listings the module has with its feature and without it.
 #[test]
-fn listings_holds_what_cfg_keeps() {
-    let dir = written("configured_listings");
-    builds_quietly_in(&["build"], "configured_listings", &dir);
-    builds_quietly_in(&["build", "--features", "more"], "configured_listings", &dir);
+fn listings_holds_what_cfg_keeps() -> Result {
+    let dir = written("configured_listings")?;
+    builds_quietly_in(&["build"], "configured_listings", &dir)?;
+    builds_quietly_in(&["build", "--features", "more"], "configured_listings", &dir)?;
+    Ok(())
 }
 
 /// A module of x86 kernels has `LISTINGS` whether its kernels compile or not, so Rust says nothing of the code that
@@ -1293,7 +1344,7 @@ fn listings_holds_what_cfg_keeps() {
 /// so a glob of it beside one of a module with a `LISTINGS` of its own is not ambiguous. The fixture's consts assert
 /// what each holds, which Rust evaluates beside kernite's errors.
 #[test]
-fn a_module_of_x86_kernels_has_listings_whether_its_kernels_compile_or_not() {
+fn a_module_of_x86_kernels_has_listings_whether_its_kernels_compile_or_not() -> Result {
     refuses(
         "listings_uncompiled",
         &[
@@ -1301,11 +1352,12 @@ fn a_module_of_x86_kernels_has_listings_whether_its_kernels_compile_or_not() {
             "src/lib.rs:29:16: error: `nope` is not defined",
             "error: could not compile `listings_uncompiled` (lib) due to 2 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 #[test]
-fn a_kernel_that_does_not_compile_leaves_a_stub() {
+fn a_kernel_that_does_not_compile_leaves_a_stub() -> Result {
     // Rust calls each stub, and a kernel calls two, and none of these calls is an error.
     refuses(
         "stubs",
@@ -1318,7 +1370,8 @@ fn a_kernel_that_does_not_compile_leaves_a_stub() {
             "src/lib.rs:37:28: error: `y` is not defined",
             "error: could not compile `stubs` (lib) due to 6 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A module of GPU kernels holds what `cfg` keeps: a static, a function that kernels call or a kernel
@@ -1328,15 +1381,16 @@ fn a_kernel_that_does_not_compile_leaves_a_stub() {
 /// is left out. The fixture's tests run with each of its features and without; they assert which of the
 /// module is in `PTX` and, on a machine with a GPU, load it and launch each kernel that is there.
 #[test]
-fn a_gpu_module_holds_what_cfg_keeps() {
+fn a_gpu_module_holds_what_cfg_keeps() -> Result {
     for features in ["", "more", "new", "more,new"] {
         let command = ["test", "--features", features];
-        let printed = runs_quietly(&command, "configured_ptx");
+        let printed = runs_quietly(&command, "configured_ptx")?;
         assert!(
             printed.contains("test result: ok. 5 passed"),
             "fixtures/configured_ptx.rs: {command:?} printed:\n{printed}"
         );
     }
+    Ok(())
 }
 
 /// The room of a module's statics is that of the statics `cfg` keeps. The fixture has two tables of
@@ -1345,12 +1399,13 @@ fn a_gpu_module_holds_what_cfg_keeps() {
 /// without, and its tests assert which table the module has and, on a machine with a GPU, load it and
 /// read the table that is there.
 #[test]
-fn the_room_of_a_gpu_module_counts_the_statics_cfg_keeps() {
+fn the_room_of_a_gpu_module_counts_the_statics_cfg_keeps() -> Result {
     for features in ["", "new"] {
         let command = ["test", "--features", features];
-        let printed = runs_quietly(&command, "room");
+        let printed = runs_quietly(&command, "room")?;
         assert!(printed.contains("test result: ok. 2 passed"), "fixtures/room.rs: {command:?} printed:\n{printed}");
     }
+    Ok(())
 }
 
 /// A static that does not fit beside those before it that `cfg` keeps is refused at its type, in the words
@@ -1359,7 +1414,7 @@ fn the_room_of_a_gpu_module_counts_the_statics_cfg_keeps() {
 /// second table; with it, so are `kept`, at its second table, and `kept_global`, of global memory. `either`
 /// is not, whichever `cfg` leaves out, `cfg_attr(..)` too.
 #[test]
-fn a_static_with_no_room_beside_those_cfg_keeps_is_refused_at_its_type() {
+fn a_static_with_no_room_beside_those_cfg_keeps_is_refused_at_its_type() -> Result {
     let constant = "this makes the module's constant memory 96000 bytes, and a module has 64 KB";
     let global = "this makes the module's global memory as much as 4294967302 bytes, each static aligned, and \
                   `ptxas` writes its size in 32 bits: a module has less than 4 GB";
@@ -1369,7 +1424,7 @@ fn a_static_with_no_room_beside_those_cfg_keeps_is_refused_at_its_type() {
             &format!("src/lib.rs:11:19: error: {constant}"),
             "error: could not compile `room_refused` (lib) due to 1 previous error",
         ],
-    );
+    )?;
     refuses_by(
         &["build", "--features", "new"],
         "room_refused",
@@ -1379,7 +1434,8 @@ fn a_static_with_no_room_beside_those_cfg_keeps_is_refused_at_its_type() {
             &format!("src/lib.rs:30:19: error: {global}"),
             "error: could not compile `room_refused` (lib) due to 3 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A kernel, a helper or a static that `cfg` leaves out says nothing of what is wrong with it, as
@@ -1394,8 +1450,8 @@ fn a_static_with_no_room_beside_those_cfg_keeps_is_refused_at_its_type() {
 /// a helper's under its caller's, and says nothing of it where that item is not, nor, with the
 /// feature, any error of its own.
 #[test]
-fn what_cfg_leaves_out_says_nothing() {
-    builds_quietly("configured");
+fn what_cfg_leaves_out_says_nothing() -> Result {
+    builds_quietly("configured")?;
     refuses_by(
         &["build", "--features", "cpu"],
         "configured",
@@ -1440,7 +1496,8 @@ fn what_cfg_leaves_out_says_nothing() {
              blocks a grid of `k` has at most, and a kernel or a static of the module is named `k_blocks` as well",
             "error: could not compile `configured` (lib) due to 27 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// What rests on all of a module's items together is said as it is for a module that has no `cfg`,
@@ -1448,7 +1505,7 @@ fn what_cfg_leaves_out_says_nothing() {
 /// reads every item before it knows which `cfg` holds, as Rust parses every item before it does.
 /// Each case in the fixture has a function that `cfg` leaves out.
 #[test]
-fn what_rests_on_all_the_items_is_said_whatever_cfg_leaves_out() {
+fn what_rests_on_all_the_items_is_said_whatever_cfg_leaves_out() -> Result {
     // The modules in order: `head`, `twice` and `blocks`.
     refuses(
         "configured_module",
@@ -1459,17 +1516,19 @@ fn what_rests_on_all_the_items_is_said_whatever_cfg_leaves_out() {
              blocks a grid of `k` has at most, and a kernel or a static of the module is named `k_blocks` as well",
             "error: could not compile `configured_module` (lib) due to 3 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A const `cfg` keeps that only what `cfg` leaves out reads is unused to Rust, which says so, as it
 /// does of a const that nothing reads; with the kernel there it is used, and Rust says nothing.
 #[test]
-fn rust_finds_a_const_unused_that_only_what_cfg_leaves_out_reads() {
-    let (built, said) = cargo(&["build"], "configured_unused");
+fn rust_finds_a_const_unused_that_only_what_cfg_leaves_out_reads() -> Result {
+    let (built, said) = cargo(&["build"], "configured_unused")?;
     assert!(built, "fixtures/configured_unused.rs did not build");
     assert_eq!(said, ["src/lib.rs:6:11: warning: constant `N` is never used"]);
-    builds_quietly_in(&["build", "--features", "cpu"], "configured_unused", &written("configured_unused"));
+    builds_quietly_in(&["build", "--features", "cpu"], "configured_unused", &written("configured_unused")?)?;
+    Ok(())
 }
 
 /// A kernel that `cfg` keeps names only what `cfg` keeps: where it names an item `cfg` leaves out, the name
@@ -1497,7 +1556,7 @@ fn rust_finds_a_const_unused_that_only_what_cfg_leaves_out_reads() {
 /// loops, on x86, and in the type of a static, a function, a helper, a kernel and a directive, on a GPU. Of the
 /// third, nothing is said without `big`, with which the next test builds.
 #[test]
-fn a_kernel_that_cfg_keeps_is_told_at_each_name_that_cfg_leaves_out() {
+fn a_kernel_that_cfg_keeps_is_told_at_each_name_that_cfg_leaves_out() -> Result {
     refuses(
         "configured_names",
         &[
@@ -1538,7 +1597,8 @@ fn a_kernel_that_cfg_keeps_is_told_at_each_name_that_cfg_leaves_out() {
             &no_value("484:15", "SIZE"),
             "error: could not compile `configured_names` (lib) due to 31 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// What is told is judged by the conditions of both, the kernel's and the item's. With `big`, an item that
@@ -1547,7 +1607,7 @@ fn a_kernel_that_cfg_keeps_is_told_at_each_name_that_cfg_leaves_out() {
 /// not where neither holds, nor where both do. Rust says the const's name, `WIDE`, in the last module, where
 /// kernite says no error.
 #[test]
-fn a_name_is_told_where_the_kernel_is_kept_and_the_item_is_not() {
+fn a_name_is_told_where_the_kernel_is_kept_and_the_item_is_not() -> Result {
     refuses_by(
         &["build", "--features", "big"],
         "configured_names",
@@ -1557,25 +1617,28 @@ fn a_name_is_told_where_the_kernel_is_kept_and_the_item_is_not() {
             &no_value("499:23", "WIDE"),
             "error: could not compile `configured_names` (lib) due to 3 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// What `cfg` keeps of what the kernels name builds without a word, under `deny(warnings)`, and the x86
 /// kernels run as they did: each writes through its pointer what it names, as the test the fixture holds
 /// finds.
 #[test]
-fn what_cfg_keeps_of_what_a_kernel_names_builds_and_runs() {
-    let printed = runs_quietly(&["test", "--features", "big,wide"], "configured_names");
+fn what_cfg_keeps_of_what_a_kernel_names_builds_and_runs() -> Result {
+    let printed = runs_quietly(&["test", "--features", "big,wide"], "configured_names")?;
     assert!(printed.contains("1 passed"), "fixtures/configured_names.rs ran its test, and printed:\n{printed}");
+    Ok(())
 }
 
 /// A kernel of compile-time arguments and a cooperative one that a feature leaves out with what they name, a
 /// static and an x86 kernel, say nothing without it. With it, they build without a word, and run.
 #[test]
-fn kernels_of_instances_and_cooperative_ones_that_a_feature_leaves_out_say_nothing() {
-    builds_quietly("configured_hidden");
-    let printed = runs_quietly(&["test", "--features", "big"], "configured_hidden");
+fn kernels_of_instances_and_cooperative_ones_that_a_feature_leaves_out_say_nothing() -> Result {
+    builds_quietly("configured_hidden")?;
+    let printed = runs_quietly(&["test", "--features", "big"], "configured_hidden")?;
     assert!(printed.contains("1 passed"), "fixtures/configured_hidden.rs ran its test, and printed:\n{printed}");
+    Ok(())
 }
 
 /// A crate that keeps its x86 kernels only on x86-64, by `cfg(target_arch = "x86_64")`, builds for another
@@ -1584,30 +1647,32 @@ fn kernels_of_instances_and_cooperative_ones_that_a_feature_leaves_out_say_nothi
 /// holds a constant, one of compile-time arguments, and one of those whose instances hold a constant. For
 /// x86-64 it keeps them, and they run.
 #[test]
-fn x86_kernels_that_cfg_leaves_out_say_nothing_for_another_machine() {
-    checks_quietly_for_arm("other_machine");
-    let printed = runs_quietly(&["test"], "other_machine");
+fn x86_kernels_that_cfg_leaves_out_say_nothing_for_another_machine() -> Result {
+    checks_quietly_for_arm("other_machine")?;
+    let printed = runs_quietly(&["test"], "other_machine")?;
     assert!(printed.contains("1 passed"), "fixtures/other_machine.rs ran its test, and printed:\n{printed}");
+    Ok(())
 }
 
 /// So do cooperative x86 kernels, a plain one, one whose code holds a constant and one of compile-time
 /// arguments, in a crate that takes `kernite-cpu` on every machine. For x86-64 they run on a grid.
 #[test]
-fn cooperative_x86_kernels_that_cfg_leaves_out_say_nothing_for_another_machine() {
-    checks_quietly_for_arm("other_machine_cooperative");
-    let printed = runs_quietly(&["test"], "other_machine_cooperative");
+fn cooperative_x86_kernels_that_cfg_leaves_out_say_nothing_for_another_machine() -> Result {
+    checks_quietly_for_arm("other_machine_cooperative")?;
+    let printed = runs_quietly(&["test"], "other_machine_cooperative")?;
     assert!(
         printed.contains("1 passed"),
         "fixtures/other_machine_cooperative.rs ran its test, and printed:\n{printed}"
     );
+    Ok(())
 }
 
 /// So does an x86 kernel of compile-time arguments that kernite refuses: its stub has a function for each
 /// instance, for the kernels that call one, and it goes with the kernel too. For x86-64 the kernel is kernite's
 /// error for each instance, and nothing else.
 #[test]
-fn a_refused_x86_kernel_of_instances_that_cfg_leaves_out_says_nothing_for_another_machine() {
-    checks_quietly_for_arm("other_machine_refused");
+fn a_refused_x86_kernel_of_instances_that_cfg_leaves_out_says_nothing_for_another_machine() -> Result {
+    checks_quietly_for_arm("other_machine_refused")?;
     refuses(
         "other_machine_refused",
         &[
@@ -1615,7 +1680,8 @@ fn a_refused_x86_kernel_of_instances_that_cfg_leaves_out_says_nothing_for_anothe
             "src/lib.rs:10:13: error: in `tiles::<2>`: `v` is read before anything writes it",
             "error: could not compile `other_machine_refused` (lib) due to 2 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A module of GPU kernels needs `kernite-cuda` where `cfg` keeps one of its GPU items, and not
@@ -1624,11 +1690,12 @@ fn a_refused_x86_kernel_of_instances_that_cfg_leaves_out_says_nothing_for_anothe
 /// it. A kernel, a function that kernels call and a static each make a module of their own, under
 /// `cfg` and under `cfg_attr(.., cfg(..))`.
 #[test]
-fn a_feature_that_brings_kernite_cuda_can_keep_the_gpu_items() {
+fn a_feature_that_brings_kernite_cuda_can_keep_the_gpu_items() -> Result {
     let optional = [("kernite-cuda = {", "kernite-cuda = { optional = true,")];
-    let dir = edited("configured_cuda", &optional);
-    builds_quietly_in(&["build"], "configured_cuda", &dir);
-    builds_quietly_in(&["build", "--features", "cuda"], "configured_cuda", &dir);
+    let dir = edited("configured_cuda", &optional)?;
+    builds_quietly_in(&["build"], "configured_cuda", &dir)?;
+    builds_quietly_in(&["build", "--features", "cuda"], "configured_cuda", &dir)?;
+    Ok(())
 }
 
 /// A crate without `kernite-cuda` is told so once, where a module of GPU kernels is, and only where
@@ -1640,8 +1707,8 @@ fn a_feature_that_brings_kernite_cuda_can_keep_the_gpu_items() {
 /// both hold; a static under `b`; a kernel `cfg` does not touch and one under `a`; a GPU kernel
 /// under `a` and an x86 kernel under `b`, which needs no crate.
 #[test]
-fn a_module_needs_kernite_cuda_where_cfg_keeps_one_of_its_gpu_items() {
-    let dir = edited("configured_gpu", &[("kernite-cuda =", "# kernite-cuda =")]);
+fn a_module_needs_kernite_cuda_where_cfg_keeps_one_of_its_gpu_items() -> Result {
+    let dir = edited("configured_gpu", &[("kernite-cuda =", "# kernite-cuda =")])?;
     let [just_a, a_or_b, a_and_b, a_then_b, nested, static_b, always, mixed] = [6, 15, 31, 41, 51, 60, 68, 81];
     let cases: [(&[&str], &[u32]); 4] = [
         (&["build"], &[a_then_b, nested, always]),
@@ -1650,7 +1717,7 @@ fn a_module_needs_kernite_cuda_where_cfg_keeps_one_of_its_gpu_items() {
         (&["build", "--features", "a,b"], &[just_a, a_or_b, a_and_b, a_then_b, static_b, always, mixed]),
     ];
     for (command, modules) in cases {
-        let (built, said) = cargo_in(command, &dir);
+        let (built, said) = cargo_in(command, &dir)?;
         assert!(!built, "fixtures/configured_gpu.rs: {command:?} built");
         let mut lines: Vec<String> = modules
             .iter()
@@ -1664,14 +1731,16 @@ fn a_module_needs_kernite_cuda_where_cfg_keeps_one_of_its_gpu_items() {
         lines.push(format!("error: could not compile `configured_gpu` (lib) due to {} previous errors", modules.len()));
         assert_eq!(said, lines, "fixtures/configured_gpu.rs: {command:?}: Cargo said:\n{}", said.join("\n"));
     }
+    Ok(())
 }
 
 /// A module of kernels takes its consts by any path Rust has, and Rust sees them in it, those of
 /// the module the path names: the fixture asserts, as it builds, which `STEP` each sees. A name may
 /// be on the path twice, or be a raw name, and a module the path goes through may have a `sizes` of its own.
 #[test]
-fn consts_are_taken_by_any_path() {
-    builds_quietly("paths");
+fn consts_are_taken_by_any_path() -> Result {
+    builds_quietly("paths")?;
+    Ok(())
 }
 
 /// The kernels read the module's consts as values known now, and so does Rust: those of a
@@ -1679,12 +1748,13 @@ fn consts_are_taken_by_any_path() {
 /// which Rust sees in the module of kernels that takes them. The fixture asserts, as it builds,
 /// that a kernel reads what Rust does.
 #[test]
-fn the_kernels_read_the_consts_as_values_known_now_and_so_does_rust() {
-    builds_quietly("values");
+fn the_kernels_read_the_consts_as_values_known_now_and_so_does_rust() -> Result {
+    builds_quietly("values")?;
+    Ok(())
 }
 
 #[test]
-fn what_a_module_of_consts_hands_on_and_refuses() {
+fn what_a_module_of_consts_hands_on_and_refuses() -> Result {
     // Its items in order, each past its doc: its own attribute passes; the const that is not `pub`
     // is refused for that, before kernite works it out; the `pub` one at the call kernite cannot
     // work out; then the function. None is handed on, so the module of kernels keeps a `STEP` of
@@ -1699,11 +1769,12 @@ fn what_a_module_of_consts_hands_on_and_refuses() {
              and nothing else",
             "error: could not compile `consts` (lib) due to 3 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 #[test]
-fn a_module_that_takes_consts_has_no_const_function_or_static_of_their_names() {
+fn a_module_that_takes_consts_has_no_const_function_or_static_of_their_names() -> Result {
     // The function is refused at its name. The struct and the type are in Rust's other namespace,
     // which the `use` of the consts does not reach, and no kernel names them.
     refuses(
@@ -1712,12 +1783,14 @@ fn a_module_that_takes_consts_has_no_const_function_or_static_of_their_names() {
             "src/lib.rs:20:35: error: `STEP` names one of the consts the module takes from `crate::sizes` as well",
             "error: could not compile `names` (lib) due to 1 previous error",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 #[test]
-fn kernels_that_compile_say_nothing() {
-    builds_quietly("quiet");
+fn kernels_that_compile_say_nothing() -> Result {
+    builds_quietly("quiet")?;
+    Ok(())
 }
 
 /// A GPU kernel's tuning directives, `#[maxntid(..)]`, `#[reqntid(..)]`, `#[minnctapersm(..)]` and
@@ -1727,13 +1800,14 @@ fn kernels_that_compile_say_nothing() {
 /// edge of the registers a launch gives a block launches over its most threads, and not a step past
 /// it. They skip where there is no GPU.
 #[test]
-fn a_gpu_kernel_runs_over_the_blocks_its_directives_allow() {
-    let printed = runs_quietly(&["test"], "tuned");
+fn a_gpu_kernel_runs_over_the_blocks_its_directives_allow() -> Result {
+    let printed = runs_quietly(&["test"], "tuned")?;
     assert!(printed.contains("test result: ok. 3 passed"), "fixtures/tuned.rs ran its tests, and printed:\n{printed}");
+    Ok(())
 }
 
 #[test]
-fn the_macro_says_what_is_wrong_with_a_directive_where_it_is() {
+fn the_macro_says_what_is_wrong_with_a_directive_where_it_is() -> Result {
     // A value is said at the value, and a kernel of instances once, for the first that is wrong. A
     // directive on a function that is no GPU kernel is said at the directive once, though two
     // kernels call the helper, and for the helper nothing calls.
@@ -1765,7 +1839,8 @@ fn the_macro_says_what_is_wrong_with_a_directive_where_it_is() {
             "src/lib.rs:79:15: error: `#[maxntid(..)]` gives whole numbers; this is an f32",
             "error: could not compile `directives` (lib) due to 14 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A parameter named as a local the macro's Rust binds for itself, `index`, `grid`, `threads` or
@@ -1773,8 +1848,9 @@ fn the_macro_says_what_is_wrong_with_a_directive_where_it_is() {
 /// launcher's own `index` hid it, and Rust said "unused variable: `index`". So is a compile-time
 /// argument, where no launcher or method binds its name.
 #[test]
-fn a_kernels_parameters_keep_their_names_beside_those_the_macros_rust_binds() {
-    builds_quietly("parameters");
+fn a_kernels_parameters_keep_their_names_beside_those_the_macros_rust_binds() -> Result {
+    builds_quietly("parameters")?;
+    Ok(())
 }
 
 /// A parameter named `_` is a number or a pointer the kernel is given and does not read, as it is in any
@@ -1784,12 +1860,13 @@ fn a_kernels_parameters_keep_their_names_beside_those_the_macros_rust_binds() {
 /// after the ones named `_` where the ABI puts them. The macros name each such parameter for Rust
 /// themselves, `__kernite_0`, and a parameter or a compile-time argument of that name is the kernel's own.
 #[test]
-fn a_parameter_named_underscore_is_passed_and_not_read_in_a_kernel_of_whatever_kind_it_is() {
-    let printed = runs_quietly(&["test"], "underscore");
+fn a_parameter_named_underscore_is_passed_and_not_read_in_a_kernel_of_whatever_kind_it_is() -> Result {
+    let printed = runs_quietly(&["test"], "underscore")?;
     assert!(
         printed.contains("test result: ok. 2 passed"),
         "fixtures/underscore.rs ran its tests, and printed:\n{printed}"
     );
+    Ok(())
 }
 
 /// A kernel kernite refuses, with a number and a pointer named `_`, is kernite's error alone, where it
@@ -1800,7 +1877,7 @@ fn a_parameter_named_underscore_is_passed_and_not_read_in_a_kernel_of_whatever_k
 /// module that gives a number's name another type, Rust says as well, once, at the type of the number
 /// named `_`: it is not that number.
 #[test]
-fn a_kernel_kernite_refuses_with_a_parameter_named_underscore_is_kernites_error_alone() {
+fn a_kernel_kernite_refuses_with_a_parameter_named_underscore_is_kernites_error_alone() -> Result {
     let y = "error: `y` is not defined";
     let abi = "error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, \
                for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` is none of these";
@@ -1857,7 +1934,8 @@ fn a_kernel_kernite_refuses_with_a_parameter_named_underscore_is_kernites_error_
     let mut said: Vec<String> = kernite.map(|(at, what)| format!("src/lib.rs:{at}: {what}")).into();
     said.extend(numbers.map(|(at, number, found)| not_the_number(at, number, found)));
     said.push(format!("error: could not compile `underscore_refused` (lib) due to {} previous errors", said.len()));
-    refuses("underscore_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("underscore_refused", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A parameter's type means in every x86 kernel what it means in any function of the module, whether
@@ -1867,10 +1945,11 @@ fn a_kernel_kernite_refuses_with_a_parameter_named_underscore_is_kernites_error_
 /// the crate without a word, and the test the fixture holds runs each x86 kernel, which writes
 /// through its pointer. So does its doc test, from another crate.
 #[test]
-fn a_parameters_type_means_what_it_means_where_the_kernel_is_written() {
-    let printed = runs_quietly(&["test"], "beside");
+fn a_parameters_type_means_what_it_means_where_the_kernel_is_written() -> Result {
+    let printed = runs_quietly(&["test"], "beside")?;
     let passed = printed.matches("1 passed").count();
     assert_eq!(passed, 2, "fixtures/beside.rs ran its test and its doc test, and printed:\n{printed}");
+    Ok(())
 }
 
 /// A type in a kernel's parameters or return may name the kernel's compile-time arguments, as in any
@@ -1881,14 +1960,15 @@ fn a_parameters_type_means_what_it_means_where_the_kernel_is_written() {
 /// without a word, and the tests the fixture holds run each x86 kernel, which writes through its
 /// pointer. So does its doc test, from another crate.
 #[test]
-fn a_type_in_a_kernel_may_name_its_compile_time_arguments() {
-    let printed = runs_quietly(&["test"], "argument_pointers");
+fn a_type_in_a_kernel_may_name_its_compile_time_arguments() -> Result {
+    let printed = runs_quietly(&["test"], "argument_pointers")?;
     for passed in ["test result: ok. 10 passed", "test result: ok. 1 passed"] {
         assert!(
             printed.contains(passed),
             "fixtures/argument_pointers.rs ran its tests and its doc test, and printed:\n{printed}"
         );
     }
+    Ok(())
 }
 
 /// Rust takes a compile-time argument in a type alone, `[u8; N]` or `[u8; { N }]`, and no expression
@@ -1896,7 +1976,7 @@ fn a_type_in_a_kernel_may_name_its_compile_time_arguments() {
 /// at the type as the kernel writes it, and said once, as is every error in a type of a kernel of
 /// instances.
 #[test]
-fn an_expression_of_a_compile_time_argument_in_a_type_is_rusts_error() {
+fn an_expression_of_a_compile_time_argument_in_a_type_is_rusts_error() -> Result {
     refuses(
         "argument_expression",
         &[
@@ -1904,7 +1984,8 @@ fn an_expression_of_a_compile_time_argument_in_a_type_is_rusts_error() {
              operation using `N`",
             "error: could not compile `argument_expression` (lib) due to 1 previous error",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A type that is not there, in the parameters or the result of an x86 kernel of instances, is Rust's
@@ -1912,7 +1993,7 @@ fn an_expression_of_a_compile_time_argument_in_a_type_is_rusts_error() {
 /// instances' own copies of the type were, nor once for each instance. So is a result that is a pointer
 /// to a type with no size, `*mut CStr`.
 #[test]
-fn an_error_in_a_type_of_a_kernel_of_instances_is_said_once() {
+fn an_error_in_a_type_of_a_kernel_of_instances_is_said_once() -> Result {
     refuses(
         "type_errors_instances",
         &[
@@ -1921,13 +2002,14 @@ fn an_error_in_a_type_of_a_kernel_of_instances_is_said_once() {
             &size_unknown("18:86", "[i8]"),
             "error: could not compile `type_errors_instances` (lib) due to 3 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// So is an error in a type of a cooperative x86 kernel, of instances and not: not again at the
 /// attribute, where its launcher's instances had it.
 #[test]
-fn an_error_in_a_type_of_a_cooperative_kernel_is_said_once() {
+fn an_error_in_a_type_of_a_cooperative_kernel_is_said_once() -> Result {
     refuses(
         "type_errors_cooperative",
         &[
@@ -1935,13 +2017,14 @@ fn an_error_in_a_type_of_a_cooperative_kernel_is_said_once() {
             &not_found("13:49", "Absent"),
             "error: could not compile `type_errors_cooperative` (lib) due to 2 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// The kernels that said it once already still do: a plain x86 kernel, in a parameter and in a
 /// result, and a GPU kernel of instances.
 #[test]
-fn an_error_in_a_type_of_any_other_kernel_is_said_once() {
+fn an_error_in_a_type_of_any_other_kernel_is_said_once() -> Result {
     refuses(
         "type_errors_others",
         &[
@@ -1950,7 +2033,8 @@ fn an_error_in_a_type_of_any_other_kernel_is_said_once() {
             &not_found("19:71", "Elsewhere"),
             "error: could not compile `type_errors_others` (lib) due to 3 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A lint in a type of a kernel of instances, or of a cooperative kernel, is said once, at the type,
@@ -1960,7 +2044,7 @@ fn an_error_in_a_type_of_any_other_kernel_is_said_once() {
 /// is in a `cfg_attr`. Where it says `expect`, Rust says nothing if the lint is in the type, and, if
 /// not, that the expectation is unfulfilled, once, at the `expect`.
 #[test]
-fn a_lint_in_a_type_of_a_kernel_of_instances_is_said_once_at_the_level_the_kernel_sets() {
+fn a_lint_in_a_type_of_a_kernel_of_instances_is_said_once_at_the_level_the_kernel_sets() -> Result {
     let braces = "unnecessary braces around const expression";
     refuses(
         "type_lints",
@@ -1971,7 +2055,8 @@ fn a_lint_in_a_type_of_a_kernel_of_instances_is_said_once_at_the_level_the_kerne
             "src/lib.rs:33:14: warning: this lint expectation is unfulfilled",
             "error: could not compile `type_lints` (lib) due to 2 previous errors; 2 warnings emitted",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A kernel takes a pointer to any type, as it takes one to a number: to an array, a pointer, a
@@ -1982,8 +2067,9 @@ fn a_lint_in_a_type_of_a_kernel_of_instances_is_said_once_at_the_level_the_kerne
 /// pointee as written, but for those two, which a launcher names as kernite-cuda does, and Rust
 /// builds the module without a word.
 #[test]
-fn a_kernel_takes_a_pointer_to_any_type() {
-    builds_quietly("pointers");
+fn a_kernel_takes_a_pointer_to_any_type() -> Result {
+    builds_quietly("pointers")?;
+    Ok(())
 }
 
 /// A lifetime has no place in a kernel, and the macro hands one on as punctuation, where the lexer
@@ -1992,7 +2078,7 @@ fn a_kernel_takes_a_pointer_to_any_type() {
 /// type in the lexer's words, not taken for one register, with the next parameter read from the
 /// wrong one.
 #[test]
-fn a_pointer_to_a_type_with_a_lifetime_is_refused_at_its_type() {
+fn a_pointer_to_a_type_with_a_lifetime_is_refused_at_its_type() -> Result {
     refuses(
         "lifetimes",
         &[
@@ -2000,7 +2086,8 @@ fn a_pointer_to_a_type_with_a_lifetime_is_refused_at_its_type() {
             "src/lib.rs:12:45: error: lifetimes and labels have no place in a kernel",
             "error: could not compile `lifetimes` (lib) due to 2 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A type that begins with a binder, `for<'a> fn(&'a u8)`, is read whole, as any other type is: it was once
@@ -2010,7 +2097,7 @@ fn a_pointer_to_a_type_with_a_lifetime_is_refused_at_its_type() {
 /// refused in the lexer's words, as a pointer to any type with a lifetime is, and a pointer to a function's
 /// type that has no binder, `*const fn(&u8)`, is taken.
 #[test]
-fn a_type_that_begins_with_a_binder_is_read_whole() {
+fn a_type_that_begins_with_a_binder_is_read_whole() -> Result {
     refuses(
         "binders",
         &[
@@ -2029,7 +2116,8 @@ fn a_type_that_begins_with_a_binder_is_read_whole() {
             "src/lib.rs:45:53: error: lifetimes and labels have no place in a kernel",
             "error: could not compile `binders` (lib) due to 8 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A pointer to a type with no size, which Rust passes in two registers where a kernel's is one, is
@@ -2051,7 +2139,7 @@ fn a_type_that_begins_with_a_binder_is_read_whole() {
 /// two places: a kernel of compile-time arguments casts back a pointer it returns, so for
 /// `(u8, [CStr; 3])` Rust says the array in the signature, and the tuple at the cast.
 #[test]
-fn a_pointer_to_a_type_with_no_size_is_refused_at_its_type() {
+fn a_pointer_to_a_type_with_no_size_is_refused_at_its_type() -> Result {
     // What kernite says, in the order of the kernels: the x86 module's, then the GPU's.
     let told = "error: a pointer to `[f32]` has two words, an address and a length or a table, \
                 and a kernel's pointer has one";
@@ -2173,7 +2261,8 @@ fn a_pointer_to_a_type_with_no_size_is_refused_at_its_type() {
     said.extend(sizes.map(|(at, ty)| size_unknown(at, ty)));
     let errors = kernite.len() + sizes.len();
     said.push(format!("error: could not compile `no_size` (lib) due to {errors} previous errors"));
-    refuses("no_size", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("no_size", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A pointer to a type with no size is Rust's error at the type, whatever the type holds and whatever
@@ -2183,7 +2272,7 @@ fn a_pointer_to_a_type_with_no_size_is_refused_at_its_type() {
 /// reads a number. Each is one error, at the type, in a kernel, plain, of compile-time arguments or
 /// cooperative, on x86 and on a GPU.
 #[test]
-fn a_pointer_to_a_type_with_no_size_is_refused_whatever_it_holds_or_is_called() {
+fn a_pointer_to_a_type_with_no_size_is_refused_whatever_it_holds_or_is_called() -> Result {
     let sizes = [
         // `(&u8, CStr)`, and `GTail<[&u8]>`: an x86 kernel, plain, of compile-time arguments,
         // cooperative.
@@ -2212,7 +2301,8 @@ fn a_pointer_to_a_type_with_no_size_is_refused_whatever_it_holds_or_is_called() 
     ];
     let mut said: Vec<String> = sizes.map(|(at, ty)| size_unknown(at, ty)).into();
     said.push(format!("error: could not compile `no_size_names` (lib) due to {} previous errors", sizes.len()));
-    refuses("no_size_names", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("no_size_names", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A pointer to a type Rust refuses by itself, `NeedsCopy<String>` where the struct asks for an argument
@@ -2224,7 +2314,7 @@ fn a_pointer_to_a_type_with_no_size_is_refused_whatever_it_holds_or_is_called() 
 /// comes first; and in a GPU kernel, plain, of compile-time arguments, cooperative, and cooperative of
 /// compile-time arguments, and one kernite refuses.
 #[test]
-fn a_pointer_to_a_type_rust_refuses_by_itself_is_said_once_at_its_type() {
+fn a_pointer_to_a_type_rust_refuses_by_itself_is_said_once_at_its_type() -> Result {
     let y = "error: `y` is not defined";
     // What kernite says, in the order of the kernels: the x86 module's, then the GPU's.
     let kernite = [
@@ -2263,7 +2353,8 @@ fn a_pointer_to_a_type_rust_refuses_by_itself_is_said_once_at_its_type() {
     said.extend(bounds.map(|(at, ty)| not_copy(at, ty)));
     let errors = kernite.len() + bounds.len();
     said.push(format!("error: could not compile `pointer_bound` (lib) due to {errors} previous errors"));
-    refuses("pointer_bound", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("pointer_bound", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A pointer to a type with a `_` in it, `*const [_; 3]` or `*mut (u8, _)`, is Rust's error alone: Rust does not
@@ -2276,7 +2367,7 @@ fn a_pointer_to_a_type_rust_refuses_by_itself_is_said_once_at_its_type() {
 /// plain kernel's. So is a `_` in a result that is no pointer, `-> [_; 3]`, beside kernite's error, and a `_` that
 /// is an array's whole length, `*const [u8; _]`, in an x86 kernel's parameter and result.
 #[test]
-fn a_placeholder_in_a_pointers_type_is_rusts_error_alone_at_the_placeholder() {
+fn a_placeholder_in_a_pointers_type_is_rusts_error_alone_at_the_placeholder() -> Result {
     let y = "error: `y` is not defined";
     // What kernite says, in the order of the kernels: the x86 module's, then the GPU's.
     let kernite = [
@@ -2322,7 +2413,8 @@ fn a_placeholder_in_a_pointers_type_is_rusts_error_alone_at_the_placeholder() {
     said.extend(holes.map(|(at, what)| not_allowed(at, what)));
     let errors = kernite.len() + holes.len();
     said.push(format!("error: could not compile `placeholder` (lib) due to {errors} previous errors"));
-    refuses("placeholder", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("placeholder", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A `_` is Rust's placeholder in a type, and is no placeholder where it is a pattern or a name, or the macro's
@@ -2335,12 +2427,13 @@ fn a_placeholder_in_a_pointers_type_is_rusts_error_alone_at_the_placeholder() {
 /// plain and of compile-time arguments, which gives its pointer back, and the second adds its argument to it
 /// first. A kernel taken for one with a placeholder is a stub, which aborts.
 #[test]
-fn a_result_with_an_underscore_that_is_no_placeholder_is_a_kernel_that_runs() {
-    let printed = runs_quietly(&["test"], "not_placeholder");
+fn a_result_with_an_underscore_that_is_no_placeholder_is_a_kernel_that_runs() -> Result {
+    let printed = runs_quietly(&["test"], "not_placeholder")?;
     assert!(
         printed.contains("test result: ok. 1 passed"),
         "fixtures/not_placeholder.rs ran its test, and printed:\n{printed}"
     );
+    Ok(())
 }
 
 /// A result whose type holds a block among its arguments, `Arr<{ 3 }>`, is read whole as a parameter's type is: the
@@ -2350,8 +2443,8 @@ fn a_result_with_an_underscore_that_is_no_placeholder_is_a_kernel_that_runs() {
 /// nothing, and the tests the fixture holds call each x86 kernel: each that gives back a pointer gives back the one
 /// it is given, moved by its argument if it has one, and the one that takes a pointer writes a byte through it.
 #[test]
-fn a_result_whose_type_holds_a_block_is_a_kernel_and_rust_lints_the_braces_alone() {
-    let out = cargo_out(&["test", "--lib"], &written("block_result"));
+fn a_result_whose_type_holds_a_block_is_a_kernel_and_rust_lints_the_braces_alone() -> Result {
+    let out = cargo_out(&["test", "--lib"], &written("block_result")?)?;
     let (said, printed) = (String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
     assert!(out.status.success(), "fixtures/block_result.rs: its tests failed:\n{said}\n{printed}");
     assert!(printed.contains("test result: ok. 2 passed"), "fixtures/block_result.rs ran no tests:\n{printed}");
@@ -2362,13 +2455,14 @@ fn a_result_whose_type_holds_a_block_is_a_kernel_and_rust_lints_the_braces_alone
         at.map(|at| format!("src/lib.rs:{at}: warning: {braces}")),
         "fixtures/block_result.rs"
     );
+    Ok(())
 }
 
 /// A kernel with a result that none of its kind may have, a cooperative kernel or a GPU kernel, which give back
 /// nothing, plain or of compile-time arguments, or an x86 kernel whose result is no number or pointer, is refused at
 /// the result when its type holds a block, as it is when it holds none, in the words of its kind.
 #[test]
-fn a_result_its_kind_may_not_have_is_refused_at_the_result_when_its_type_holds_a_block() {
+fn a_result_its_kind_may_not_have_is_refused_at_the_result_when_its_type_holds_a_block() -> Result {
     let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
     let gpu = "a GPU kernel returns nothing, not `*const crate::Arr<{ 3 }>`: it writes what it works out to memory";
     refuses(
@@ -2384,7 +2478,8 @@ fn a_result_its_kind_may_not_have_is_refused_at_the_result_when_its_type_holds_a
             &format!("src/lib.rs:41:76: error: in `tiles::<2>`: {gpu}"),
             "error: could not compile `block_result_refused` (lib) due to 7 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A kernel with a result that none of its kind may have, a cooperative kernel or a GPU kernel, which give back
@@ -2392,7 +2487,7 @@ fn a_result_its_kind_may_not_have_is_refused_at_the_result_when_its_type_holds_a
 /// the result when its type is a macro in braces, `byte!{ _ }`, as it is when it holds a block or no macro, in the
 /// words of its kind.
 #[test]
-fn a_result_its_kind_may_not_have_is_refused_at_the_result_when_its_type_is_a_macro_in_braces() {
+fn a_result_its_kind_may_not_have_is_refused_at_the_result_when_its_type_is_a_macro_in_braces() -> Result {
     let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
     let gpu = "a GPU kernel returns nothing, not `*const byte! { _ }`: it writes what it works out to memory";
     refuses(
@@ -2408,21 +2503,23 @@ fn a_result_its_kind_may_not_have_is_refused_at_the_result_when_its_type_is_a_ma
             &format!("src/lib.rs:41:76: error: in `tiles::<2>`: {gpu}"),
             "error: could not compile `type_macro_refused` (lib) due to 7 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// The `!` of never follows the arrow, a keyword or a lifetime, and is no macro's: the braces after it are the body.
 /// So a kernel whose result is a reference to never, `&'static !`, is refused at the result, a reference, and not for
 /// the want of a body.
 #[test]
-fn a_result_that_is_a_reference_to_never_is_refused_at_the_result_and_its_braces_are_the_body() {
+fn a_result_that_is_a_reference_to_never_is_refused_at_the_result_and_its_braces_are_the_body() -> Result {
     refuses(
         "never_after_lifetime",
         &[
             "src/lib.rs:7:50: error: a kernel returns a float, an integer or a pointer, or never, `!`; not `&'static !`",
             "error: could not compile `never_after_lifetime` (lib) due to 1 previous error",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A pointer to a type with no size, a tuple that ends in `CStr` or a struct whose last field is a slice, is Rust's
@@ -2432,7 +2529,7 @@ fn a_result_that_is_a_reference_to_never_is_refused_at_the_result_and_its_braces
 /// which Rust refuses alone. So it is in an x86 kernel, plain, of compile-time arguments and cooperative, and in a GPU
 /// kernel.
 #[test]
-fn a_pointer_with_no_size_and_an_underscore_that_is_no_placeholder_is_rusts_error_at_its_type() {
+fn a_pointer_with_no_size_and_an_underscore_that_is_no_placeholder_is_rusts_error_at_its_type() -> Result {
     let sizes = [
         // A pattern in a block, and an argument of a macro, in an array's length: an x86 kernel, plain, of
         // compile-time arguments and cooperative.
@@ -2459,7 +2556,8 @@ fn a_pointer_with_no_size_and_an_underscore_that_is_no_placeholder_is_rusts_erro
     let mut said: Vec<String> = sizes.map(|(at, ty)| size_unknown(at, ty)).into();
     let errors = sizes.len();
     said.push(format!("error: could not compile `not_placeholder_no_size` (lib) due to {errors} previous errors"));
-    refuses("not_placeholder_no_size", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("not_placeholder_no_size", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// Asking Rust whether each pointer has a size costs a crate no word, under `#![deny(warnings)]`: of
@@ -2470,8 +2568,9 @@ fn a_pointer_with_no_size_and_an_underscore_that_is_no_placeholder_is_rusts_erro
 /// So it does in an x86 kernel, plain, of compile-time arguments, cooperative, and cooperative of
 /// compile-time arguments; and in a GPU kernel, plain, of compile-time arguments and cooperative.
 #[test]
-fn a_kernel_with_a_pointer_builds_without_a_word_of_whatever_kind_it_is() {
-    builds_quietly("pointer_checks");
+fn a_kernel_with_a_pointer_builds_without_a_word_of_whatever_kind_it_is() -> Result {
+    builds_quietly("pointer_checks")?;
+    Ok(())
 }
 
 /// A generic is a value, so one that is a type is refused where it is: `<T>`, at the `T`, and `impl` in a
@@ -2481,7 +2580,7 @@ fn a_kernel_with_a_pointer_builds_without_a_word_of_whatever_kind_it_is() {
 /// to which Rust passes in two words. The macro writes nothing else for the module, so Rust says nothing of its
 /// own, nor of a call to a kernel, and a kernel of instances is said once.
 #[test]
-fn a_generic_that_is_a_type_is_refused_at_its_token() {
+fn a_generic_that_is_a_type_is_refused_at_its_token() -> Result {
     let generics =
         |place: &str| format!("src/lib.rs:{place}: error: a function's generics are values, as in `<const N: usize>`");
     refuses(
@@ -2506,14 +2605,15 @@ fn a_generic_that_is_a_type_is_refused_at_its_token() {
             &generics("130:54"),
             "error: could not compile `type_generics` (lib) due to 17 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// An `impl` makes a function generic in its parameters and its result alone. In the type of a variable, a
 /// const or a static it is said as it was: the x86 target takes no such variable, Rust takes no `impl` in a
 /// const's type, at the const and again at a kernel that reads it, and the PTX target takes no such memory.
 #[test]
-fn impl_in_the_type_of_a_variable_a_const_or_a_static_is_said_as_it_was() {
+fn impl_in_the_type_of_a_variable_a_const_or_a_static_is_said_as_it_was() -> Result {
     refuses(
         "type_impls",
         &[
@@ -2526,7 +2626,8 @@ fn impl_in_the_type_of_a_variable_a_const_or_a_static_is_said_as_it_was() {
             "src/lib.rs:22:18: error[E0562]: `impl Trait` is not allowed in const types",
             "error: could not compile `type_impls` (lib) due to 5 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A number's name that the module gives another type is Rust's error at the type, once: kernite reads
@@ -2535,7 +2636,7 @@ fn impl_in_the_type_of_a_variable_a_const_or_a_static_is_said_as_it_was() {
 /// another number; in each parameter and result of an x86 kernel, plain, of compile-time arguments
 /// or cooperative, and in each parameter of a GPU kernel of those kinds.
 #[test]
-fn a_number_named_as_another_type_is_refused_at_the_type_whatever_the_kernel_is() {
+fn a_number_named_as_another_type_is_refused_at_the_type_whatever_the_kernel_is() -> Result {
     let numbers = [
         // `u64` and `f64`, which the crate's root gives and a module takes by a `use`: `id` takes
         // a `u64`, and `twice` takes and gives back an `f64`.
@@ -2607,13 +2708,14 @@ fn a_number_named_as_another_type_is_refused_at_the_type_whatever_the_kernel_is(
     ];
     let mut said: Vec<String> = numbers.map(|(at, number, found)| not_the_number(at, number, found)).into();
     said.push(format!("error: could not compile `number_names` (lib) due to {} previous errors", numbers.len()));
-    refuses("number_names", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("number_names", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// The same in kernels kernite refuses: kernite says what is wrong where it is, in the kernel, and
 /// Rust says what it finds at the type, in the stub the macros leave for each, once.
 #[test]
-fn a_number_named_as_another_type_is_refused_at_the_type_in_a_kernel_kernite_refuses() {
+fn a_number_named_as_another_type_is_refused_at_the_type_in_a_kernel_kernite_refuses() -> Result {
     let kernite = [
         // An x86 kernel kernite refuses for a body that names a variable it has not: a plain one, one
         // of compile-time arguments, which it says once for each instance, a cooperative one, and a
@@ -2667,7 +2769,8 @@ fn a_number_named_as_another_type_is_refused_at_the_type_in_a_kernel_kernite_ref
     let mut said: Vec<String> = kernite.map(String::from).into();
     said.extend(numbers.map(|(at, number, found)| not_the_number(at, number, found)));
     said.push(format!("error: could not compile `number_names_refused` (lib) due to {} previous errors", said.len()));
-    refuses("number_names_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("number_names_refused", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A number's name that the module gives a type with no size, `u8` a slice, is Rust's error at the
@@ -2680,7 +2783,7 @@ fn a_number_named_as_another_type_is_refused_at_the_type_in_a_kernel_kernite_ref
 /// a size that is not `Copy`, `String`, is only that it is not the number, in a cooperative x86 kernel
 /// and in a GPU one.
 #[test]
-fn a_number_named_as_a_type_with_no_size_is_refused_at_the_type_and_not_at_the_attribute() {
+fn a_number_named_as_a_type_with_no_size_is_refused_at_the_type_and_not_at_the_attribute() -> Result {
     let mut said: Vec<String> =
         ["src/lib.rs:33:13: error: `y` is not defined", "src/lib.rs:60:24: error: `y` is not defined"]
             .map(String::from)
@@ -2714,7 +2817,8 @@ fn a_number_named_as_a_type_with_no_size_is_refused_at_the_type_and_not_at_the_a
     said.push(not_the_number("108:48", "u16", "String"));
     // Each line is said once, so the count is the lines' own.
     said.push(format!("error: could not compile `number_names_unsized` (lib) due to {} previous errors", said.len()));
-    refuses("number_names_unsized", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("number_names_unsized", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A number written as a primitive's path, `core::primitive::u64`, is the number wherever a type is written, as Rust
@@ -2723,12 +2827,13 @@ fn a_number_named_as_a_type_with_no_size_is_refused_at_the_type_and_not_at_the_a
 /// kernel by its names. The tests the fixture holds run the kernels, the GPU ones on the GPU, which they skip where
 /// there is none.
 #[test]
-fn a_kernel_typed_by_primitive_paths_builds_and_runs_as_the_kernel_typed_by_names() {
-    let printed = runs_quietly(&["test"], "primitive_paths");
+fn a_kernel_typed_by_primitive_paths_builds_and_runs_as_the_kernel_typed_by_names() -> Result {
+    let printed = runs_quietly(&["test"], "primitive_paths")?;
     assert!(
         printed.contains("test result: ok. 4 passed"),
         "fixtures/primitive_paths.rs ran its tests, and printed:\n{printed}"
     );
+    Ok(())
 }
 
 /// A constant named by a primitive's path, `core::primitive::u32::MAX`, is the constant its name gives, `u32::MAX`, as
@@ -2738,12 +2843,13 @@ fn a_kernel_typed_by_primitive_paths_builds_and_runs_as_the_kernel_typed_by_name
 /// kernel by the names. The tests the fixture holds run the kernels, the GPU ones on the GPU, which they skip where
 /// there is none.
 #[test]
-fn a_constant_named_by_primitive_paths_builds_and_gives_the_value_the_names_give() {
-    let printed = runs_quietly(&["test"], "primitive_paths_values");
+fn a_constant_named_by_primitive_paths_builds_and_gives_the_value_the_names_give() -> Result {
+    let printed = runs_quietly(&["test"], "primitive_paths_values")?;
     assert!(
         printed.contains("test result: ok. 4 passed"),
         "fixtures/primitive_paths_values.rs ran its tests, and printed:\n{printed}"
     );
+    Ok(())
 }
 
 /// A path that the place does not take is kernite's error alone, at the type, in the words it has for the same type by
@@ -2753,7 +2859,7 @@ fn a_constant_named_by_primitive_paths_builds_and_gives_the_value_the_names_give
 /// result and a variable of an x86 kernel and a GPU kernel, in the four kinds of type: a primitive the place does not
 /// take, a type of the crate's, a `type` of the crate's for `u64`, and a path that names no primitive.
 #[test]
-fn a_path_that_names_no_type_the_place_takes_is_kernites_error_alone_at_the_type() {
+fn a_path_that_names_no_type_the_place_takes_is_kernites_error_alone_at_the_type() -> Result {
     let compile_time = |at: &str, ty: &str| {
         format!(
             "src/lib.rs:{at}: error: a function that names an ABI takes integers and `bool`s at compile time, as \
@@ -2829,7 +2935,8 @@ fn a_path_that_names_no_type_the_place_takes_is_kernites_error_alone_at_the_type
         "error: could not compile `primitive_paths_refused` (lib) due to {} previous errors",
         said.len()
     ));
-    refuses("primitive_paths_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("primitive_paths_refused", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A reference with a lifetime to a primitive by its path, `&'static ::core::primitive::u8`, is `&'static u8` to
@@ -2838,7 +2945,7 @@ fn a_path_that_names_no_type_the_place_takes_is_kernites_error_alone_at_the_type
 /// written by the name, and Rust says no more. So it is of a lifetime that a binder declares,
 /// `for<'a> fn(&'a ::std::primitive::u8) -> &'a ::std::primitive::u16`, on x86 and on a GPU.
 #[test]
-fn a_primitive_written_as_a_path_after_a_lifetime_is_the_primitive_in_kernites_error() {
+fn a_primitive_written_as_a_path_after_a_lifetime_is_the_primitive_in_kernites_error() -> Result {
     let mut said = vec![
         // x86, by the paths and by the names.
         x86_takes("9:45", "", "&'static u8"),
@@ -2855,14 +2962,15 @@ fn a_primitive_written_as_a_path_after_a_lifetime_is_the_primitive_in_kernites_e
         "error: could not compile `primitive_paths_lifetimes` (lib) due to {} previous errors",
         said.len()
     ));
-    refuses("primitive_paths_lifetimes", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("primitive_paths_lifetimes", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A lifetime before a path from the root that is no primitive's, `&'static ::core::ffi::CStr`, keeps its space in
 /// kernite's error, as it does before any other path, `&'static core::ffi::CStr`: for the parameter of an x86 kernel
 /// and of a GPU kernel, and for a function type's parameter, `for<'a> fn(&'a ::core::ffi::CStr)`.
 #[test]
-fn a_lifetime_keeps_its_space_before_a_path_from_the_root_in_kernites_error() {
+fn a_lifetime_keeps_its_space_before_a_path_from_the_root_in_kernites_error() -> Result {
     let mut said = vec![
         // x86, by a path from the root and by one that is not, and in a function type's parameter.
         x86_takes("6:45", "", "&'static ::core::ffi::CStr"),
@@ -2872,7 +2980,8 @@ fn a_lifetime_keeps_its_space_before_a_path_from_the_root_in_kernites_error() {
         gpu_takes("21:49", "", "&'static ::core::ffi::CStr"),
     ];
     said.push(format!("error: could not compile `lifetime_root` (lib) due to {} previous errors", said.len()));
-    refuses("lifetime_root", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("lifetime_root", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A module that gives `core` or `std` another meaning, `use crate::fake as core;`, has Rust say that a number written
@@ -2881,7 +2990,7 @@ fn a_lifetime_keeps_its_space_before_a_path_from_the_root_in_kernites_error() {
 /// asked of, as it is not for the name, and a path from the root, `::core::primitive::u64`, is the crate `core`
 /// whatever the module gives, so Rust says nothing of it.
 #[test]
-fn a_number_written_as_a_path_through_a_core_the_module_gives_another_meaning_is_rusts_error_at_the_type() {
+fn a_number_written_as_a_path_through_a_core_the_module_gives_another_meaning_is_rusts_error_at_the_type() -> Result {
     let mut said: Vec<String> = [
         // x86, by the paths: a parameter and a result, a float, and a float whose result is from the root.
         ("31:43", "u64", "u32"),
@@ -2902,7 +3011,8 @@ fn a_number_written_as_a_path_through_a_core_the_module_gives_another_meaning_is
         "error: could not compile `primitive_paths_shadowed` (lib) due to {} previous errors",
         said.len()
     ));
-    refuses("primitive_paths_shadowed", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("primitive_paths_shadowed", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// The types that a helper's or an `extern "ptx-func"` function's signature names are shown to Rust whole where a
@@ -2912,7 +3022,7 @@ fn a_number_written_as_a_path_through_a_core_the_module_gives_another_meaning_is
 /// says its own error once for each module, at the kernel that does not compile. Some lists of compile-time
 /// arguments end with a comma, which is no type to show Rust.
 #[test]
-fn rust_says_nothing_of_a_helper_or_a_function_typed_by_primitive_paths() {
+fn rust_says_nothing_of_a_helper_or_a_function_typed_by_primitive_paths() -> Result {
     refuses(
         "primitive_paths_helpers",
         &[
@@ -2922,7 +3032,8 @@ fn rust_says_nothing_of_a_helper_or_a_function_typed_by_primitive_paths() {
             "src/lib.rs:88:28: error: `y` is not defined",
             "error: could not compile `primitive_paths_helpers` (lib) due to 4 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// An x86 kernel takes and gives back no `f16`, which only a GPU has: kernite refuses it at the type, once
@@ -2932,7 +3043,7 @@ fn rust_says_nothing_of_a_helper_or_a_function_typed_by_primitive_paths() {
 /// and in a result, of a kernel plain, of compile-time arguments, cooperative, and cooperative of
 /// compile-time arguments, and at a call of each. So it is of a `bf16`, which Rust has not.
 #[test]
-fn an_x86_kernel_that_takes_or_gives_back_a_half_is_kernites_error_alone() {
+fn an_x86_kernel_that_takes_or_gives_back_a_half_is_kernites_error_alone() -> Result {
     let mut said = vec![];
     for (ty, [plain, tiles, together, together_tiles, result, tiles_result]) in [
         ("f16", ["8:44", "13:58", "18:47", "24:67", "28:53", "33:73"]),
@@ -2946,14 +3057,15 @@ fn an_x86_kernel_that_takes_or_gives_back_a_half_is_kernites_error_alone() {
         said.extend([1, 2].map(|n| x86_gives(tiles_result, &instance("tiles_result", n), ty)));
     }
     said.push(format!("error: could not compile `halves_refused` (lib) due to {} previous errors", said.len()));
-    refuses("halves_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("halves_refused", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A pointer to an `f16` is a pointer, which an x86 kernel takes whatever it points to: kernite says
 /// nothing of it, and Rust's word that its `f16` is unstable is the only one, said once, at the type, in
 /// a kernel of every kind, in a parameter and in a result.
 #[test]
-fn a_pointer_to_an_f16_in_an_x86_kernel_is_rusts_error_alone() {
+fn a_pointer_to_an_f16_in_an_x86_kernel_is_rusts_error_alone() -> Result {
     let unstable = |place: &str| format!("src/lib.rs:{place}: error[E0658]: the type `f16` is unstable");
     refuses(
         "halves_pointers",
@@ -2966,19 +3078,21 @@ fn a_pointer_to_an_f16_in_an_x86_kernel_is_rusts_error_alone() {
             &unstable("32:78"),
             "error: could not compile `halves_pointers` (lib) due to 6 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A GPU kernel takes an `f16` and a `bf16`, by value and by pointer, written plain or raw, `r#f16`: Rust builds
 /// the crate without a word, the launcher takes kernite-cuda's two, and the tests the fixture holds run each
 /// kernel and read back what it wrote. They skip where there is no GPU.
 #[test]
-fn a_gpu_kernel_takes_the_halves_as_kernite_cuda_has_them() {
-    let printed = runs_quietly(&["test"], "halves_gpu");
+fn a_gpu_kernel_takes_the_halves_as_kernite_cuda_has_them() -> Result {
+    let printed = runs_quietly(&["test"], "halves_gpu")?;
     assert!(
         printed.contains("test result: ok. 2 passed"),
         "fixtures/halves_gpu.rs ran its tests, and printed:\n{printed}"
     );
+    Ok(())
 }
 
 /// A type an x86 kernel takes or gives back that kernite refuses is kernite's error alone, at the type, once
@@ -3003,7 +3117,7 @@ fn a_gpu_kernel_takes_the_halves_as_kernite_cuda_has_them() {
 /// which the module imports, taken as `f16`, `f128`, `[f16; 4]` or `self::f16`: Rust finds the type, so it does
 /// not call the import unused.
 #[test]
-fn an_x86_kernel_that_takes_or_gives_back_a_type_kernite_refuses_is_kernites_error_alone() {
+fn an_x86_kernel_that_takes_or_gives_back_a_type_kernite_refuses_is_kernites_error_alone() -> Result {
     let mut said = vec![];
     for (ty, [plain, tiles, together, together_tiles]) in [
         ("f128", ["9:44", "14:58", "19:47", "25:67"]),
@@ -3061,7 +3175,8 @@ fn an_x86_kernel_that_takes_or_gives_back_a_type_kernite_refuses_is_kernites_err
         said.push(x86_takes(place, "", ty));
     }
     said.push(format!("error: could not compile `types_refused` (lib) due to {} previous errors", said.len()));
-    refuses("types_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("types_refused", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A type a GPU kernel takes that kernite refuses is kernite's error alone, at the type, once for each
@@ -3080,7 +3195,7 @@ fn an_x86_kernel_that_takes_or_gives_back_a_type_kernite_refuses_is_kernites_err
 /// or `f128`, which the module imports, taken as `f128`, `[f16; 4]` or `self::f16`: Rust finds the type, so it
 /// does not call the import unused.
 #[test]
-fn a_gpu_kernel_that_takes_a_type_kernite_refuses_is_kernites_error_alone() {
+fn a_gpu_kernel_that_takes_a_type_kernite_refuses_is_kernites_error_alone() -> Result {
     let mut said = vec![];
     for (ty, [plain, tiles, together, together_tiles]) in [
         ("f128", ["9:48", "14:62", "19:51", "25:71"]),
@@ -3115,7 +3230,8 @@ fn a_gpu_kernel_that_takes_a_type_kernite_refuses_is_kernites_error_alone() {
         gpu_takes("321:48", "", "fn(f128: u8)"),
     ]);
     said.push(format!("error: could not compile `types_refused_gpu` (lib) due to {} previous errors", said.len()));
-    refuses("types_refused_gpu", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("types_refused_gpu", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A type kernite refuses, written raw, is kernite's error alone, at the type, once for each instance, as it is
@@ -3125,7 +3241,7 @@ fn a_gpu_kernel_that_takes_a_type_kernite_refuses_is_kernites_error_alone() {
 /// arguments, cooperative, or both. So is a result that a cooperative kernel or a GPU kernel may not have, `r#f16`,
 /// `r#f128` or `r#u64`: the launcher hands the type to Rust, which reads it as it reads the one written plain.
 #[test]
-fn a_type_kernite_refuses_written_raw_is_kernites_error_alone() {
+fn a_type_kernite_refuses_written_raw_is_kernites_error_alone() -> Result {
     let two = |place: &str, kernel: &str, ty: &str| {
         format!(
             "src/lib.rs:{place}: error: {kernel}a pointer to `{ty}` has two words, an address and a length or a \
@@ -3160,7 +3276,8 @@ fn a_type_kernite_refuses_written_raw_is_kernites_error_alone() {
     said.extend([1, 2].map(|n| gpu_returns("149:79", &instance("gpu_tiles", n), "f128")));
     said.extend([gpu_returns("154:76", "", "u64"), coop_returns("159:62", "")]);
     said.push(format!("error: could not compile `types_refused_raw` (lib) due to {} previous errors", said.len()));
-    refuses("types_refused_raw", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("types_refused_raw", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A type kernite refuses whose name is a keyword written raw, `r#dyn::Foo`, `r#mut` or `r#for<u8>`, is kernite's
@@ -3169,7 +3286,7 @@ fn a_type_kernite_refuses_written_raw_is_kernites_error_alone() {
 /// for `str` is no keyword. Rust says nothing of the type, nor at a call of the kernel, which the crate's own
 /// function makes.
 #[test]
-fn a_type_named_by_a_keyword_written_raw_that_kernite_refuses_is_kernites_error_alone() {
+fn a_type_named_by_a_keyword_written_raw_that_kernite_refuses_is_kernites_error_alone() -> Result {
     let two = |place: &str, ty: &str| {
         format!(
             "src/lib.rs:{place}: error: a pointer to `{ty}` has two words, an address and a length or a table, \
@@ -3185,7 +3302,8 @@ fn a_type_named_by_a_keyword_written_raw_that_kernite_refuses_is_kernites_error_
     said.extend([1, 2].map(|n| gpu_takes("77:62", &instance("tiles", n), "r#mut")));
     said.push(two("81:47", "[r#mut]"));
     said.push(format!("error: could not compile `keywords_refused` (lib) due to {} previous errors", said.len()));
-    refuses("keywords_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("keywords_refused", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// Rust says of a type kernite refuses what it says of any function's signature, once, at the fault, beside
@@ -3198,7 +3316,7 @@ fn a_type_named_by_a_keyword_written_raw_that_kernite_refuses_is_kernites_error_
 /// written: `core::f16`, `[core::f128; 2]`, and an `f16` or an `f128` where the kernel's module imports a
 /// module so named, alone or in an array. Rust says nothing at a call of any kernel.
 #[test]
-fn rust_says_of_a_type_kernite_refuses_what_it_says_of_any_signature() {
+fn rust_says_of_a_type_kernite_refuses_what_it_says_of_any_signature() -> Result {
     let call = |place: &str| {
         format!("src/lib.rs:{place}: error: a call is a statement: an instruction or a helper, not a value")
     };
@@ -3243,7 +3361,8 @@ fn rust_says_of_a_type_kernite_refuses_what_it_says_of_any_signature() {
         not_allowed("27:52", "return types"),
     ]);
     said.push(format!("error: could not compile `types_signature` (lib) due to {} previous errors", said.len()));
-    refuses("types_signature", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("types_signature", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// The result of a kernel that can have none, a cooperative x86 kernel's or a GPU kernel's, is kernite's error at
@@ -3261,7 +3380,7 @@ fn rust_says_of_a_type_kernite_refuses_what_it_says_of_any_signature() {
 /// `Result` of the launch. The functions that call each kernel as Rust calls it, with `?`, `unwrap`, a `match` and
 /// a type for the result, get no word from Rust.
 #[test]
-fn rust_sees_the_result_a_kernel_cannot_have_as_it_sees_the_result_of_a_plain_kernel() {
+fn rust_sees_the_result_a_kernel_cannot_have_as_it_sees_the_result_of_a_plain_kernel() -> Result {
     // What kernite says, in the order of the kernels: plain x86, cooperative x86, cooperative x86 of compile-time
     // arguments, then the GPU kernels, plain, of compile-time arguments, and cooperative, and last the kernels with
     // a pointer to a trait object and with never.
@@ -3333,7 +3452,8 @@ fn rust_sees_the_result_a_kernel_cannot_have_as_it_sees_the_result_of_a_plain_ke
         size_unknown("181:73", "[i8]"),
     ]);
     said.push(format!("error: could not compile `result_kinds` (lib) due to {} previous errors", said.len()));
-    refuses("result_kinds", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("result_kinds", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A helper is compiled where a kernel calls it, and an `extern "ptx-func"` function is a `.func` of the GPU's
@@ -3345,7 +3465,7 @@ fn rust_sees_the_result_a_kernel_cannot_have_as_it_sees_the_result_of_a_plain_ke
 /// each, or by a helper; and of a function of instances, which says its error for each. kernite says it at the
 /// argument of the call of a helper, at the result of a helper that is called, and at the type of a function.
 #[test]
-fn rust_sees_the_types_a_helper_or_a_function_names_as_it_sees_a_kernels() {
+fn rust_sees_the_types_a_helper_or_a_function_names_as_it_sees_a_kernels() -> Result {
     let gpr = "`x`: a gpr is seen as `gpr`, `r32`, `r16` or `r8`, not `Ret`";
     let func = "a function takes and returns PTX's types, as its variables are: `u32`, `f32`, `b64`; not `Ret`";
     let nothing = "a helper returns nothing; it writes the variables it is given";
@@ -3374,7 +3494,8 @@ fn rust_sees_the_types_a_helper_or_a_function_names_as_it_sees_a_kernels() {
     lines.extend([1, 2].map(|n| said("153:56", &instance("g", n), func)));
     lines.extend([said("171:11", "", gpu), said("180:21", "", nothing)]);
     lines.push(format!("error: could not compile `helper_imports` (lib) due to {} previous errors", lines.len()));
-    refuses("helper_imports", &lines.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("helper_imports", &lines.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// Rust says of the types a helper's or an `extern "ptx-func"` function's signature names only three things, in a
@@ -3387,7 +3508,7 @@ fn rust_sees_the_types_a_helper_or_a_function_names_as_it_sees_a_kernels() {
 /// a helper no kernel calls too, of whose types kernite says nothing. kernite says its own once, at the type of each
 /// function it refuses.
 #[test]
-fn rust_says_of_the_types_a_helper_or_a_function_names_what_it_says_of_any_signature() {
+fn rust_says_of_the_types_a_helper_or_a_function_names_what_it_says_of_any_signature() -> Result {
     let func = |place: &str, ty: &str| {
         format!(
             "src/lib.rs:{place}: error: a function takes and returns PTX's types, as its variables are: `u32`, \
@@ -3420,7 +3541,8 @@ fn rust_says_of_the_types_a_helper_or_a_function_names_what_it_says_of_any_signa
     ]);
     // Rust counts the `f16` of `half!()` for each signature that writes it, three, and prints it once.
     said.push(format!("error: could not compile `helper_types` (lib) due to {} previous errors", said.len() + 2));
-    refuses("helper_types", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("helper_types", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A module that builds shows Rust none of the types of its helpers and functions, so an import of the crate's that
@@ -3428,11 +3550,12 @@ fn rust_says_of_the_types_a_helper_or_a_function_names_what_it_says_of_any_signa
 /// that no kernel calls, for a helper is compiled where it is called. One that a kernel names, as the type a pointer
 /// it takes points to, is used, on x86 and on a GPU.
 #[test]
-fn a_module_that_builds_shows_rust_no_types_of_a_helper_or_a_function() {
-    let (built, said) = cargo(&["build"], "helper_imports_unused");
+fn a_module_that_builds_shows_rust_no_types_of_a_helper_or_a_function() -> Result {
+    let (built, said) = cargo(&["build"], "helper_imports_unused")?;
     assert!(built, "fixtures/helper_imports_unused.rs did not build");
     let unused = |place: &str| format!("src/lib.rs:{place}: warning: unused import: `super::Ret`");
     assert_eq!(said, [unused("9:9"), unused("37:9"), unused("50:9")]);
+    Ok(())
 }
 
 /// A function under `cfg` shows Rust its types where `cfg` keeps it and kernite says an error, there. The modules
@@ -3447,7 +3570,7 @@ fn a_module_that_builds_shows_rust_no_types_of_a_helper_or_a_function() {
 /// of its kernel under `a`, which shows its helper though the kernel under `b` is left out; and the seventh shows its
 /// helper, for `cfg` keeps it. With both every import is used, and kernite's errors are the only words.
 #[test]
-fn rust_sees_the_types_of_a_function_where_cfg_keeps_it_and_the_module_has_an_error() {
+fn rust_sees_the_types_of_a_function_where_cfg_keeps_it_and_the_module_has_an_error() -> Result {
     let unused = |place: &str| format!("src/lib.rs:{place}: warning: unused import: `super::Ret`");
     let undefined = |place: &str| format!("src/lib.rs:{place}: error: `y` is not defined");
     let argument = "src/lib.rs:20:11: error: `x`: a gpr is seen as `gpr`, `r32`, `r16` or `r8`, not `Ret`".to_string();
@@ -3455,11 +3578,12 @@ fn rust_sees_the_types_of_a_function_where_cfg_keeps_it_and_the_module_has_an_er
                   `f32`, `b64`; not `Ret`"
         .to_string();
     // What Cargo says with `features`, none if empty: kernite's errors, then Rust's warnings, then the count.
-    let builds = |features: &str, mut said: Vec<String>, unused_at: &[&str], count: &str| {
+    let builds = |features: &str, mut said: Vec<String>, unused_at: &[&str], count: &str| -> Result<_> {
         said.extend(unused_at.iter().map(|at| unused(at)));
         said.push(format!("error: could not compile `helper_imports_configured` (lib) due to {count}"));
         let command: &[&str] = if features.is_empty() { &["build"] } else { &["build", "--features", features] };
-        refuses_by(command, "helper_imports_configured", &said.iter().map(String::as_str).collect::<Vec<_>>());
+        refuses_by(command, "helper_imports_configured", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+        Ok(())
     };
     let two = "src/lib.rs:118:12: error: a static is memory of the module's kernels: the GPU's, for PTX kernels, or \
                the process's, for x86 ones; and this module has both, so it is two modules, one of each kind of \
@@ -3471,7 +3595,7 @@ fn rust_sees_the_types_of_a_function_where_cfg_keeps_it_and_the_module_has_an_er
         vec![undefined("36:13"), undefined("66:28"), two.clone()],
         &all,
         "3 previous errors; 7 warnings emitted",
-    );
+    )?;
     let said = vec![
         argument.clone(),
         undefined("36:13"),
@@ -3481,9 +3605,9 @@ fn rust_sees_the_types_of_a_function_where_cfg_keeps_it_and_the_module_has_an_er
         undefined("103:13"),
         two.clone(),
     ];
-    builds("a", said, &["73:9"], "7 previous errors; 1 warning emitted");
+    builds("a", said, &["73:9"], "7 previous errors; 1 warning emitted")?;
     let said = vec![undefined("36:13"), undefined("66:28"), undefined("86:28"), undefined("108:13"), two.clone()];
-    builds("b", said, &all, "5 previous errors; 7 warnings emitted");
+    builds("b", said, &all, "5 previous errors; 7 warnings emitted")?;
     let said = vec![
         argument,
         undefined("36:13"),
@@ -3495,14 +3619,15 @@ fn rust_sees_the_types_of_a_function_where_cfg_keeps_it_and_the_module_has_an_er
         undefined("108:13"),
         two,
     ];
-    builds("a,b", said, &[], "9 previous errors");
+    builds("a,b", said, &[], "9 previous errors")?;
+    Ok(())
 }
 
 /// A crate that forbids lints is told of helpers and of `extern "ptx-func"` functions in a module where kernite says
 /// an error, and of nothing else, as Rust and Clippy are: what the macros write for Rust to see their types needs
 /// no `allow`, and a `forbid(unused_imports)` is not tripped by the import that only they name.
 #[test]
-fn a_crate_that_forbids_lints_is_told_of_the_helpers_that_do_not_compile_and_of_nothing_else() {
+fn a_crate_that_forbids_lints_is_told_of_the_helpers_that_do_not_compile_and_of_nothing_else() -> Result {
     let lines = [
         "src/lib.rs:35:13: error: `y` is not defined",
         "src/lib.rs:43:48: error: a function takes and returns PTX's types, as its variables are: `u32`, `f32`, \
@@ -3510,10 +3635,11 @@ fn a_crate_that_forbids_lints_is_told_of_the_helpers_that_do_not_compile_and_of_
         "src/lib.rs:56:28: error: `y` is not defined",
         "error: could not compile `helper_imports_forbidden` (lib) due to 3 previous errors",
     ];
-    refuses("helper_imports_forbidden", &lines);
+    refuses("helper_imports_forbidden", &lines)?;
     if clippy_here() {
-        refuses_by(&["clippy"], "helper_imports_forbidden", &lines);
+        refuses_by(&["clippy"], "helper_imports_forbidden", &lines)?;
     }
+    Ok(())
 }
 
 /// Rust is shown the types a helper's signature names where kernite says an error of the module as a whole, as it is
@@ -3524,7 +3650,7 @@ fn a_crate_that_forbids_lints_is_told_of_the_helpers_that_do_not_compile_and_of_
 /// language's types, `gpr`, `ymm`, `local<[u32; 4], 16>` and `r32`, which it cannot find. A module that takes its
 /// consts from another is expanded after the rest, so its error is the last.
 #[test]
-fn rust_sees_the_types_a_helper_names_where_kernite_says_an_error_of_the_module_as_a_whole() {
+fn rust_sees_the_types_a_helper_names_where_kernite_says_an_error_of_the_module_as_a_whole() -> Result {
     let attribute = format!("src/lib.rs:54:27: error: {REFUSED}");
     refuses(
         "helper_imports_whole",
@@ -3537,13 +3663,14 @@ fn rust_sees_the_types_a_helper_names_where_kernite_says_an_error_of_the_module_
             "src/lib.rs:43:15: error: `STEP` names one of the consts the module takes from `crate::sizes` as well",
             "error: could not compile `helper_imports_whole` (lib) due to 4 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// Rust is shown the types a helper's signature names where the module is refused for a workspace named by what is
 /// not a string: the error is the module's, at its attribute, and the import that only the helper names is used.
 #[test]
-fn rust_sees_the_types_a_helper_names_where_the_workspace_is_named_by_what_is_not_a_string() {
+fn rust_sees_the_types_a_helper_names_where_the_workspace_is_named_by_what_is_not_a_string() -> Result {
     let manifest = Path::new(ROOT).join("helper_imports_workspace/project/Cargo.toml");
     let error = format!(
         "src/lib.rs:9:1: error: `name` in `[workspace.metadata.kernite]` of {} is not a string: a workspace is named \
@@ -3551,7 +3678,8 @@ fn rust_sees_the_types_a_helper_names_where_the_workspace_is_named_by_what_is_no
         manifest.display()
     );
     let count = "error: could not compile `helper_imports_workspace` (lib) due to 1 previous error";
-    refuses("helper_imports_workspace", &[&error, count]);
+    refuses("helper_imports_workspace", &[&error, count])?;
+    Ok(())
 }
 
 /// Rust is shown the types a helper's signature names where a macro finds an error in writing the module, as it is
@@ -3563,7 +3691,7 @@ fn rust_sees_the_types_a_helper_names_where_the_workspace_is_named_by_what_is_no
 /// whose types are the language's, `gpr`, `ymm`, `local<[u32; 4], 16>` and `r32`. kernite's errors are all the
 /// words: Rust does not call the import unused, and says nothing of the types it cannot find.
 #[test]
-fn rust_sees_the_types_a_helper_names_where_a_macro_finds_an_error_in_writing_the_module() {
+fn rust_sees_the_types_a_helper_names_where_a_macro_finds_an_error_in_writing_the_module() -> Result {
     let grid = "names a parameter of the launcher as well";
     let blocks = "names a parameter of `k_blocks` as well";
     let twice = "`#[cooperative]` gives `Kernels` a method `k_blocks`, which says how many blocks a grid of `k` has at \
@@ -3583,7 +3711,8 @@ fn rust_sees_the_types_a_helper_names_where_a_macro_finds_an_error_in_writing_th
             &left_out("145:9", "g", "k"),
             "error: could not compile `helper_imports_macros` (lib) due to 8 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// Rust is shown the types a helper's signature names where the crate lacks a dependency the Rust the macros write
@@ -3594,13 +3723,13 @@ fn rust_sees_the_types_a_helper_names_where_a_macro_finds_an_error_in_writing_th
 /// whose parameter is `Ret`, a type of the crate's that nothing else names, and another whose types are the
 /// language's, `gpr`, `ymm`, `local<[u32; 4], 16>` and `r32`. kernite's errors are all the words.
 #[test]
-fn rust_sees_the_types_a_helper_names_where_the_crate_lacks_a_dependency_the_macros_write() {
+fn rust_sees_the_types_a_helper_names_where_the_crate_lacks_a_dependency_the_macros_write() -> Result {
     let edits = [
         ("kernite-macros = {", "km = { package = \"kernite-macros\","),
         ("kernite-cuda = {", "cuda = { package = \"kernite-cuda\","),
         ("kernite-cpu = {", "cpu = { package = \"kernite-cpu\","),
     ];
-    let (built, said) = cargo_in(&["build"], &edited("helper_imports_deps", &edits));
+    let (built, said) = cargo_in(&["build"], &edited("helper_imports_deps", &edits)?)?;
     assert!(!built, "fixtures/helper_imports_deps.rs built");
     assert_eq!(
         said,
@@ -3618,6 +3747,7 @@ fn rust_sees_the_types_a_helper_names_where_the_crate_lacks_a_dependency_the_mac
             "error: could not compile `helper_imports_deps` (lib) due to 5 previous errors",
         ]
     );
+    Ok(())
 }
 
 /// Rust is silent about a name it cannot find only where an error is an item of the module, and the macros find each
@@ -3630,7 +3760,7 @@ fn rust_sees_the_types_a_helper_names_where_the_crate_lacks_a_dependency_the_mac
 /// types in the first two, so it does not call the import unused, and says nothing of the types it cannot find. In
 /// the last two it is not, and says the import is unused.
 #[test]
-fn rust_sees_the_types_a_helper_names_wherever_the_error_a_macro_writes_is_an_item_of_the_module() {
+fn rust_sees_the_types_a_helper_names_wherever_the_error_a_macro_writes_is_an_item_of_the_module() -> Result {
     let two = "src/lib.rs:16:12: error: a static is memory of the module's kernels: the GPU's, for PTX kernels, or the \
                process's, for x86 ones; and this module has both, so it is two modules, one of each kind of kernel \
                and the statics they name";
@@ -3645,8 +3775,9 @@ fn rust_sees_the_types_a_helper_names_wherever_the_error_a_macro_writes_is_an_it
         "src/lib.rs:78:9: warning: unused import: `super::Ret`",
         "error: could not compile `helper_imports_scan` (lib) due to 3 previous errors; 2 warnings emitted",
     ];
-    refuses("helper_imports_scan", &lines);
-    refuses_by(&["build", "--features", "a"], "helper_imports_scan", &lines);
+    refuses("helper_imports_scan", &lines)?;
+    refuses_by(&["build", "--features", "a"], "helper_imports_scan", &lines)?;
+    Ok(())
 }
 
 /// A GPU module whose statics have no room beside each other where `cfg` keeps both is told so at the type of the
@@ -3657,31 +3788,33 @@ fn rust_sees_the_types_a_helper_names_wherever_the_error_a_macro_writes_is_an_it
 /// module has an error of its own, and Rust says of the types once, beside both. The features: `a` and `b` keep a
 /// static each, `c` keeps `h` and `lifetimes`, and `d` the kernel. `language` is always kept.
 #[test]
-fn rust_sees_the_types_a_helper_names_where_the_statics_have_no_room_and_cfg_keeps_the_helper() {
+fn rust_sees_the_types_a_helper_names_where_the_statics_have_no_room_and_cfg_keeps_the_helper() -> Result {
     let unused = "src/lib.rs:12:9: warning: unused import: `super::Ret`";
     let room = "src/lib.rs:18:19: error: this makes the module's constant memory 96000 bytes, and a module has 64 KB";
     let broken = "src/lib.rs:40:13: error: a bool is no operand";
     let lifetime = undeclared("26:22", "'a");
-    let says = |features: &str, lines: &[&str], count: &str| {
+    let says = |features: &str, lines: &[&str], count: &str| -> Result<_> {
         let mut lines = lines.to_vec();
         let count = format!("error: could not compile `helper_imports_room` (lib) due to {count}");
         lines.push(&count);
-        refuses_by(&["build", "--features", features], "helper_imports_room", &lines);
+        refuses_by(&["build", "--features", features], "helper_imports_room", &lines)?;
+        Ok(())
     };
     // The room is right: the module builds, and shows Rust no helper.
-    let (built, said) = cargo(&["build", "--features", "a,c"], "helper_imports_room");
+    let (built, said) = cargo(&["build", "--features", "a,c"], "helper_imports_room")?;
     assert!(built, "fixtures/helper_imports_room.rs did not build with a,c");
     assert_eq!(said, [unused]);
     // The room is the only error, and `h` is left out: the import is unused.
-    says("a,b", &[room, unused], "1 previous error; 1 warning emitted");
+    says("a,b", &[room, unused], "1 previous error; 1 warning emitted")?;
     // The room is the only error, and the helpers are kept: `__Room` shows Rust their types beside it.
-    says("a,b,c", &[room, &lifetime], "2 previous errors");
+    says("a,b,c", &[room, &lifetime], "2 previous errors")?;
     // The kernel is kept as well, and `h` is not: the import is unused.
-    says("a,b,d", &[broken, room, unused], "2 previous errors; 1 warning emitted");
+    says("a,b,d", &[broken, room, unused], "2 previous errors; 1 warning emitted")?;
     // The kernel and the helpers are kept: Rust says of the types once.
-    says("a,b,c,d", &[broken, room, &lifetime], "3 previous errors");
+    says("a,b,c,d", &[broken, room, &lifetime], "3 previous errors")?;
     // The kernel and the helpers are kept, and no static: the types are shown beside the kernel's error alone.
-    says("c,d", &[broken, &lifetime], "2 previous errors");
+    says("c,d", &[broken, &lifetime], "2 previous errors")?;
+    Ok(())
 }
 
 /// A compile-time argument named as the launcher's parameter, `grid`, of a cooperative kernel that `cfg` keeps under
@@ -3691,7 +3824,7 @@ fn rust_sees_the_types_a_helper_names_where_the_statics_have_no_room_and_cfg_kee
 /// are said and the helpers are kept, so it does not call the import unused, and says nothing of the types it cannot
 /// find; otherwise the import is unused.
 #[test]
-fn rust_sees_the_types_a_helper_names_where_cfg_keeps_the_error_the_macros_find_and_the_helper() {
+fn rust_sees_the_types_a_helper_names_where_cfg_keeps_the_error_the_macros_find_and_the_helper() -> Result {
     let unused = [
         "src/lib.rs:11:9: warning: unused import: `super::Ret`",
         "src/lib.rs:38:9: warning: unused import: `super::Ret`",
@@ -3701,20 +3834,22 @@ fn rust_sees_the_types_a_helper_names_where_cfg_keeps_the_error_the_macros_find_
         "src/lib.rs:54:47: error: `grid` names a parameter of the launcher as well",
         "src/lib.rs:54:64: error: `threads` names a parameter of `g_blocks` as well",
     ];
-    let says = |features: &str, lines: &[&str], count: &str| {
+    let says = |features: &str, lines: &[&str], count: &str| -> Result<_> {
         let mut lines = lines.to_vec();
         let count = format!("error: could not compile `helper_imports_clash` (lib) due to {count}");
         lines.push(&count);
-        refuses_by(&["build", "--features", features], "helper_imports_clash", &lines);
+        refuses_by(&["build", "--features", features], "helper_imports_clash", &lines)?;
+        Ok(())
     };
     // The kernels are kept and the helpers are not: the import is unused.
-    says("a", &[errors.as_slice(), unused.as_slice()].concat(), "3 previous errors; 2 warnings emitted");
+    says("a", &[errors.as_slice(), unused.as_slice()].concat(), "3 previous errors; 2 warnings emitted")?;
     // The helpers are kept and the kernels are not: nothing is wrong, and the import is unused.
-    let (built, said) = cargo(&["build", "--features", "b"], "helper_imports_clash");
+    let (built, said) = cargo(&["build", "--features", "b"], "helper_imports_clash")?;
     assert!(built, "fixtures/helper_imports_clash.rs did not build with b");
     assert_eq!(said, unused);
     // Both are kept: Rust is shown the types, and says nothing of them.
-    says("a,b", &errors, "3 previous errors");
+    says("a,b", &errors, "3 previous errors")?;
+    Ok(())
 }
 
 /// A pointer to a type kernite refuses by value is said as it was. A pointer of one word is taken, whatever
@@ -3722,7 +3857,7 @@ fn rust_sees_the_types_a_helper_names_where_cfg_keeps_the_error_the_macros_find_
 /// parameter and in a result, on x86 and on a GPU. A pointer of two words, to a `[u64]`, is kernite's error
 /// alone, at the pointer's type. Both are so in a kernel of every kind.
 #[test]
-fn a_pointer_to_a_type_kernite_refuses_by_value_is_said_as_it_was() {
+fn a_pointer_to_a_type_kernite_refuses_by_value_is_said_as_it_was() -> Result {
     let two = |place: &str, kernel: &str| two_words(place, kernel, "[u64]");
     // kernite says its errors first, in the order of the kernels, and Rust says its own after them.
     let mut said = vec![two("33:44", "")];
@@ -3737,7 +3872,8 @@ fn a_pointer_to_a_type_kernite_refuses_by_value_is_said_as_it_was() {
             .map(|place| unstable(place, "f128")),
     );
     said.push(format!("error: could not compile `types_pointers` (lib) due to {} previous errors", said.len()));
-    refuses("types_pointers", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("types_pointers", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// Asking Rust whether each number is that number costs a crate no word, under `#![deny(warnings)]`:
@@ -3747,8 +3883,9 @@ fn a_pointer_to_a_type_kernite_refuses_by_value_is_said_as_it_was() {
 /// compile-time arguments, cooperative, and cooperative of compile-time arguments; and in a GPU
 /// kernel, plain, of compile-time arguments and cooperative.
 #[test]
-fn a_kernel_with_numbers_builds_without_a_word_of_whatever_kind_it_is() {
-    builds_quietly("number_checks");
+fn a_kernel_with_numbers_builds_without_a_word_of_whatever_kind_it_is() -> Result {
+    builds_quietly("number_checks")?;
+    Ok(())
 }
 
 /// The closure that the launcher of a cooperative x86 kernel runs is the launcher's first, however many
@@ -3757,12 +3894,12 @@ fn a_kernel_with_numbers_builds_without_a_word_of_whatever_kind_it_is() {
 /// names in the code of a release build. The questions are in an item of their own. Needs `nm`, which
 /// says the symbols of the library, and skips without it.
 #[test]
-fn the_launcher_of_a_cooperative_kernel_that_takes_numbers_runs_its_first_closure() {
-    builds_quietly("closure_names");
+fn the_launcher_of_a_cooperative_kernel_that_takes_numbers_runs_its_first_closure() -> Result {
+    builds_quietly("closure_names")?;
     let library = Path::new(ROOT).join("target/debug/libclosure_names.rlib");
     let Ok(out) = Command::new("nm").arg("--demangle").arg(library).output() else {
         eprintln!("no nm here: skipped");
-        return;
+        return Ok(());
     };
     let symbols = String::from_utf8_lossy(&out.stdout);
     let ours: Vec<&str> = symbols.lines().filter(|s| s.contains("closure_names::")).collect();
@@ -3771,13 +3908,15 @@ fn the_launcher_of_a_cooperative_kernel_that_takes_numbers_runs_its_first_closur
         "fixtures/closure_names.rs: `together` runs no first closure, and its library has:\n{}",
         ours.join("\n")
     );
+    Ok(())
 }
 
 /// A module that takes the name of `u8`, `u32`, `str` or any number from elsewhere builds as one that
 /// does not: the Rust the macros write names the primitives by their paths, `::core::primitive::u8`.
 #[test]
-fn a_module_that_gives_a_primitive_another_type_builds_as_one_that_does_not() {
-    builds_quietly("primitive_names");
+fn a_module_that_gives_a_primitive_another_type_builds_as_one_that_does_not() -> Result {
+    builds_quietly("primitive_names")?;
+    Ok(())
 }
 
 /// A compile-time argument is no local, and no span of stable Rust keeps it apart from one of its
@@ -3786,7 +3925,7 @@ fn a_module_that_gives_a_primitive_another_type_builds_as_one_that_does_not() {
 /// "expected `Grid`, found `u32`", as the launcher or method never runs. So is a name written raw,
 /// `r#grid`, which Rust reads as `grid`.
 #[test]
-fn a_compile_time_argument_named_as_the_launchers_parameters_is_refused_at_its_name() {
+fn a_compile_time_argument_named_as_the_launchers_parameters_is_refused_at_its_name() -> Result {
     refuses(
         "arguments",
         &[
@@ -3797,20 +3936,22 @@ fn a_compile_time_argument_named_as_the_launchers_parameters_is_refused_at_its_n
             "src/lib.rs:71:43: error: `grid` names a parameter of the launcher as well",
             "error: could not compile `arguments` (lib) due to 5 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A crate may forbid each lint the macro used to `allow`, and builds its kernels without a word.
 #[test]
-fn a_crate_that_forbids_lints_builds_its_kernels_without_a_word() {
-    builds_quietly("forbidden");
+fn a_crate_that_forbids_lints_builds_its_kernels_without_a_word() -> Result {
+    builds_quietly("forbidden")?;
+    Ok(())
 }
 
 /// The same crate is told of a kernel that does not compile where it does not, and of nothing
 /// else: its stub and its launcher, which never run, use what they take, and ask Rust the size of
 /// each pointer they take or give back.
 #[test]
-fn a_crate_that_forbids_lints_is_told_of_a_kernel_that_does_not_compile_and_of_nothing_else() {
+fn a_crate_that_forbids_lints_is_told_of_a_kernel_that_does_not_compile_and_of_nothing_else() -> Result {
     // The modules given consts come last, and the second first: Rust expands them a step later.
     refuses(
         "forbidden_stubs",
@@ -3830,27 +3971,29 @@ fn a_crate_that_forbids_lints_is_told_of_a_kernel_that_does_not_compile_and_of_n
             "src/lib.rs:57:18: error: `y` is not defined",
             "error: could not compile `forbidden_stubs` (lib) due to 13 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// The launcher of a cooperative kernel keeps the kernel's `expect` as written, so that one nothing
 /// meets is refused once, where the kernel has it: `k_blocks` keeps no lint.
 #[test]
-fn the_launcher_keeps_a_kernels_expect_as_written() {
+fn the_launcher_keeps_a_kernels_expect_as_written() -> Result {
     refuses(
         "unmet",
         &[
             "src/lib.rs:10:14: error: this lint expectation is unfulfilled",
             "error: could not compile `unmet` (lib) due to 1 previous error",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// A crate that forbids a lint a kernel expects is refused once, at the `expect`, of a cooperative GPU
 /// kernel, an x86 kernel of instances and a cooperative one: the launcher, or the function that picks
 /// an instance, keeps the `expect` as written, and `k_blocks` and the instances keep no lint.
 #[test]
-fn a_crate_that_forbids_a_lint_a_kernel_expects_is_refused_once_at_the_expect() {
+fn a_crate_that_forbids_a_lint_a_kernel_expects_is_refused_once_at_the_expect() -> Result {
     let refused =
         "error[E0453]: expect(non_snake_case) incompatible with previous forbid: overruled by previous forbid";
     refuses(
@@ -3861,7 +4004,8 @@ fn a_crate_that_forbids_a_lint_a_kernel_expects_is_refused_once_at_the_expect() 
             &format!("src/lib.rs:24:14: {refused}"),
             "error: could not compile `forbidden_expect` (lib) due to 3 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// Clippy says "too many arguments" of a function of more than seven parameters wherever its tokens
@@ -3871,23 +4015,24 @@ fn a_crate_that_forbids_a_lint_a_kernel_expects_is_refused_once_at_the_expect() 
 /// that take or give back pointers, of every kind, which the macros ask Rust the size of, nor of those
 /// that take parameters named `_`, which the macros name for Rust themselves.
 #[test]
-fn clippy_says_nothing_of_the_rust_the_macro_writes() {
+fn clippy_says_nothing_of_the_rust_the_macro_writes() -> Result {
     if clippy_here() {
         for name in
             ["many", "forbidden", "pointers", "pointer_checks", "number_checks", "primitive_names", "underscore"]
         {
-            let (done, said) = cargo(&["clippy"], name);
+            let (done, said) = cargo(&["clippy"], name)?;
             assert!(done && said.is_empty(), "fixtures/{name}.rs: Clippy {done}, and said:\n{}", said.join("\n"));
         }
     }
+    Ok(())
 }
 
 /// That lint is the one a crate of kernels may not forbid: each launcher allows it, of however many
 /// parameters, so Clippy refuses each module that has one, at its attribute.
 #[test]
-fn a_crate_of_kernels_may_not_forbid_clippys_too_many_arguments() {
+fn a_crate_of_kernels_may_not_forbid_clippys_too_many_arguments() -> Result {
     if clippy_here() {
-        let (done, said) = cargo(&["clippy"], "many_forbidden");
+        let (done, said) = cargo(&["clippy"], "many_forbidden")?;
         let allowed =
             "allow(clippy::too_many_arguments) incompatible with previous forbid: overruled by previous forbid";
         let lines = [
@@ -3897,14 +4042,16 @@ fn a_crate_of_kernels_may_not_forbid_clippys_too_many_arguments() {
         ];
         assert!(!done && said == lines, "fixtures/many_forbidden.rs: Clippy said:\n{}", said.join("\n"));
     }
+    Ok(())
 }
 
 /// A name written raw, `r#type`, reaches Rust as written: a parameter's and a compile-time
 /// argument's, in each kind of kernel that passes them on, a kernel's, a function's that a kernel
 /// calls, a static's and a const's.
 #[test]
-fn names_written_raw_reach_rust_as_written() {
-    builds_quietly("raw");
+fn names_written_raw_reach_rust_as_written() -> Result {
+    builds_quietly("raw")?;
+    Ok(())
 }
 
 /// A type's name written raw, `r#u64`, is the type Rust reads: Rust builds the crate without a word, an x86 kernel
@@ -3913,12 +4060,13 @@ fn names_written_raw_reach_rust_as_written() {
 /// compile-time arguments or cooperative; and a GPU kernel runs with the launcher Rust reads, and its static is
 /// read back as the type Rust reads.
 #[test]
-fn a_type_written_raw_is_the_type_rust_reads() {
-    let printed = runs_quietly(&["test"], "raw_types");
+fn a_type_written_raw_is_the_type_rust_reads() -> Result {
+    let printed = runs_quietly(&["test"], "raw_types")?;
     assert!(
         printed.contains("test result: ok. 4 passed"),
         "fixtures/raw_types.rs ran its tests, and printed:\n{printed}"
     );
+    Ok(())
 }
 
 /// A type named by a keyword written raw is the type Rust reads: a pointer to `r#dyn::Foo`, a struct of a module
@@ -3927,12 +4075,13 @@ fn a_type_written_raw_is_the_type_rust_reads() {
 /// layout by words that are no keywords, `dyn_::Foo` say, and runs as it does, whether the kernel is plain, of
 /// compile-time arguments or cooperative, and a GPU kernel runs with the launcher Rust reads.
 #[test]
-fn a_type_named_by_a_keyword_written_raw_is_the_type_rust_reads() {
-    let printed = runs_quietly(&["test"], "raw_keywords");
+fn a_type_named_by_a_keyword_written_raw_is_the_type_rust_reads() -> Result {
+    let printed = runs_quietly(&["test"], "raw_keywords")?;
     assert!(
         printed.contains("test result: ok. 4 passed"),
         "fixtures/raw_keywords.rs ran its tests, and printed:\n{printed}"
     );
+    Ok(())
 }
 
 /// An attribute kernite reads, written raw, is the attribute written plain: a kernel's `#[r#instances(..)]` and
@@ -3942,12 +4091,13 @@ fn a_type_named_by_a_keyword_written_raw_is_the_type_rust_reads() {
 /// PTX of the one written plain, has its launchers, `together_blocks` among them, and the driver holds a launch to
 /// its directives. A module given its consts by `r#consts` reads them as one given them by `consts`.
 #[test]
-fn an_attribute_written_raw_is_the_attribute_written_plain() {
-    let printed = runs_quietly(&["test"], "raw_attributes");
+fn an_attribute_written_raw_is_the_attribute_written_plain() -> Result {
+    let printed = runs_quietly(&["test"], "raw_attributes")?;
     assert!(
         printed.contains("test result: ok. 7 passed"),
         "fixtures/raw_attributes.rs ran its tests, and printed:\n{printed}"
     );
+    Ok(())
 }
 
 /// An attribute kernite reads, written raw, is wrong as the plain one is: kernite's error alone, in the same words, at
@@ -3956,7 +4106,7 @@ fn an_attribute_written_raw_is_the_attribute_written_plain() {
 /// `#[r#cooperative]`; a directive with no list, `#[r#maxnreg]`; two of one directive; a directive PTX has no more,
 /// `#[r#maxnctapersm(2)]`; a directive on a kernel for x86-64; and the module's own, `#[kernels(r#consts = 5)]`.
 #[test]
-fn an_attribute_written_raw_is_wrong_as_the_plain_one_is() {
+fn an_attribute_written_raw_is_wrong_as_the_plain_one_is() -> Result {
     // The line of the attribute refused in each module of the fixture, the plain one first, then the raw one, and
     // for two of one the mixed one; the column of its name; and what is said.
     let cases: [(&[u32], u32, &str); 9] = [
@@ -3985,7 +4135,8 @@ fn an_attribute_written_raw_is_wrong_as_the_plain_one_is() {
         said.extend(lines.iter().map(|line| format!("src/lib.rs:{line}:{column}: error: {message}")));
     }
     said.push(format!("error: could not compile `raw_attributes_refused` (lib) due to {} previous errors", said.len()));
-    refuses("raw_attributes_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("raw_attributes_refused", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A name Rust refuses written raw, `r#self`, `r#Self`, `r#super`, `r#crate` or `r#_`, is Rust's error in a module of
@@ -3995,7 +4146,7 @@ fn an_attribute_written_raw_is_wrong_as_the_plain_one_is() {
 /// cannot find the type. An `r#` that no name follows, a parameter's, is the error of Rust's lexer, "found invalid
 /// character; only `#` is allowed in raw string delimitation", which stops the crate.
 #[test]
-fn a_name_rust_refuses_raw_is_rusts_error_in_a_module_of_kernels() {
+fn a_name_rust_refuses_raw_is_rusts_error_in_a_module_of_kernels() -> Result {
     let raw = |place: &str, name: &str| format!("src/lib.rs:{place}: error: `{name}` cannot be a raw identifier");
     let mut said = vec![];
     // A variable's kernel writes its name on three lines at one column: the `let`, the `mov` and the `ret`.
@@ -4009,14 +4160,15 @@ fn a_name_rust_refuses_raw_is_rusts_error_in_a_module_of_kernels() {
     said.extend(["40:61", "40:85"].map(|place| format!("src/lib.rs:{place}: {no_foo}")));
     said.extend(["44:56", "44:74"].map(|place| format!("src/lib.rs:{place}: {no_self}")));
     said.push(format!("error: could not compile `raw_names_refused` (lib) due to {} previous errors", said.len()));
-    refuses("raw_names_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("raw_names_refused", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
     refuses(
         "raw_alone_refused",
         &[
             "src/lib.rs:5:45: error: found invalid character; only `#` is allowed in raw string delimitation: :",
             "error: could not compile `raw_alone_refused` (lib) due to 1 previous error",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// The method that says how many blocks a cooperative GPU kernel's grid has at most, `k_blocks`,
@@ -4033,17 +4185,17 @@ fn a_name_rust_refuses_raw_is_rusts_error_in_a_module_of_kernels() {
 /// or in two, or written by a macro. Where the kernel denies or forbids a lint, or warns of one its
 /// module denies, Rust refuses the build, and says each lint of `n` once, at the launcher.
 #[test]
-fn a_cooperative_kernels_blocks_method_keeps_what_it_says_of_lints() {
-    builds_quietly("blocks");
-    let docs = documents_quietly("blocks");
-    let page = |module: &str| fs::read_to_string(docs.join(module).join("struct.Kernels.html")).unwrap();
+fn a_cooperative_kernels_blocks_method_keeps_what_it_says_of_lints() -> Result {
+    builds_quietly("blocks")?;
+    let docs = documents_quietly("blocks")?;
+    let page = |module: &str| -> Result<_> { Ok(fs::read_to_string(docs.join(module).join("struct.Kernels.html"))?) };
     // The docblock after `k_blocks`' anchor, as rustdoc writes it.
-    let own = |module: &str| -> Vec<String> {
-        let page = page(module);
+    let own = |module: &str| -> Result<Vec<String>> {
+        let page = page(module)?;
         let (_, method) =
-            page.split_once("id=\"method.k_blocks\"").unwrap_or_else(|| panic!("{module} has no `k_blocks`"));
-        let (_, block) = method.split_once("<div class=\"docblock\">").expect("`k_blocks` has docs");
-        block.split_once("</div>").expect("the docs end").0.lines().map(String::from).collect()
+            page.split_once("id=\"method.k_blocks\"").ok_or_else(|| format!("{module} has no `k_blocks`"))?;
+        let (_, block) = method.split_once("<div class=\"docblock\">").ok_or("`k_blocks` has no docs")?;
+        Ok(block.split_once("</div>").ok_or("the docs do not end")?.0.lines().map(String::from).collect())
     };
     for module in ["listed", "conditional_docs_and_lint", "raw_names"] {
         let want = [
@@ -4054,11 +4206,11 @@ fn a_cooperative_kernels_blocks_method_keeps_what_it_says_of_lints() {
             "<code>shared</code> bytes of the launch’s shared memory: as many as the GPU runs at once, for it".into(),
             "runs them all together.</p>".into(),
         ];
-        assert_eq!(own(module), want, "{module}");
+        assert_eq!(own(module)?, want, "{module}");
     }
     for module in ["hidden", "raw_hidden", "hidden_aliased", "conditional", "nested", "written", "written_in_cfg_attr"]
     {
-        assert!(!page(module).contains("k_blocks"), "the docs of `{module}`'s `Kernels` show `k_blocks`");
+        assert!(!page(module)?.contains("k_blocks"), "the docs of `{module}`'s `Kernels` show `k_blocks`");
     }
     refuses(
         "denied",
@@ -4068,13 +4220,14 @@ fn a_cooperative_kernels_blocks_method_keeps_what_it_says_of_lints() {
             "src/lib.rs:39:51: warning: const parameter `n` should have an upper case name",
             "error: could not compile `denied` (lib) due to 2 previous errors; 1 warning emitted",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// An error in an attribute that `k_blocks` keeps is said once, where the kernel has it, and not
 /// again where the macro is.
 #[test]
-fn an_error_in_an_attribute_k_blocks_keeps_is_said_once() {
+fn an_error_in_an_attribute_k_blocks_keeps_is_said_once() -> Result {
     refuses(
         "malformed",
         &[
@@ -4083,14 +4236,15 @@ fn an_error_in_an_attribute_k_blocks_keeps_is_said_once() {
             "src/lib.rs:22:23: error: malformed `expect` attribute input",
             "error: could not compile `malformed` (lib) due to 3 previous errors",
         ],
-    );
+    )?;
     refuses(
         "twice",
         &[
             "src/lib.rs:9:5: error: multiple `deprecated` attributes: help: remove this attribute",
             "error: could not compile `twice` (lib) due to 2 previous errors",
         ],
-    );
+    )?;
+    Ok(())
 }
 
 /// kernite says a block, the length of an array in a tuple and a macro's arguments with the spaces their source has,
@@ -4104,7 +4258,7 @@ fn an_error_in_an_attribute_k_blocks_keeps_is_said_once() {
 /// nothing after it, whatever the spans say: two fragments that are each a `<`, joint to the `,` after each at the
 /// call, are `<<`.
 #[test]
-fn a_block_an_arrays_length_and_a_macros_arguments_are_said_as_their_source_has_them() {
+fn a_block_an_arrays_length_and_a_macros_arguments_are_said_as_their_source_has_them() -> Result {
     let mut said = vec![
         x86_takes("25:51", "", "Marker<{N*2}>"),
         x86_takes("29:51", "", "Marker<{ N * 2 }>"),
@@ -4147,7 +4301,8 @@ fn a_block_an_arrays_length_and_a_macros_arguments_are_said_as_their_source_has_
         x86_takes("205:53", "", "Marker<{ N * 2 }>"),
     ]);
     said.push(format!("error: could not compile `type_quotes` (lib) due to {} previous errors", said.len()));
-    refuses("type_quotes", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("type_quotes", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A macro's fragment `$n:expr` is one operand where an x86 kernel reads it, as Rust reads it: `$n * 2` with `$n` as
@@ -4156,12 +4311,13 @@ fn a_block_an_arrays_length_and_a_macros_arguments_are_said_as_their_source_has_
 /// gives for the same fragment worked out beside them. It is so for a fragment a macro passes on to another, whole or
 /// as tokens, and under a `-`, for a number with a sign too.
 #[test]
-fn a_fragment_is_one_operand_in_an_x86_kernels_expression() {
-    let printed = runs_quietly(&["test"], "fragments_operands");
+fn a_fragment_is_one_operand_in_an_x86_kernels_expression() -> Result {
+    let printed = runs_quietly(&["test"], "fragments_operands")?;
     assert!(
         printed.contains("test result: ok. 42 passed"),
         "fixtures/fragments_operands.rs ran, and printed:\n{printed}"
     );
+    Ok(())
 }
 
 /// A const of a module that a macro writes from a fragment is one value to Rust, which gets the module written back,
@@ -4169,29 +4325,32 @@ fn a_fragment_is_one_operand_in_an_x86_kernels_expression() {
 /// and an element of an array, of an array of arrays too. So it is for a fragment that holds a fragment, and for a
 /// const in a module of its own that the kernels take by its path.
 #[test]
-fn a_const_built_from_a_fragment_is_one_value_to_rust_and_to_the_kernel() {
-    let printed = runs_quietly(&["test"], "fragments_consts");
+fn a_const_built_from_a_fragment_is_one_value_to_rust_and_to_the_kernel() -> Result {
+    let printed = runs_quietly(&["test"], "fragments_consts")?;
     assert!(printed.contains("test result: ok. 5 passed"), "fixtures/fragments_consts.rs ran, and printed:\n{printed}");
+    Ok(())
 }
 
 /// A fragment is one operand, or one type, in the places besides an x86 kernel's expression and a const: a GPU
 /// kernel's operand, where the PTX writes 6 for `$n * 2` and -3 for `-$n`, an array's length, `#[instances(..)]`, and,
 /// for a `$t:ty`, a parameter's type, a result and an argument of a type, of an x86 kernel and of a GPU kernel.
 #[test]
-fn a_fragment_is_one_operand_or_one_type_in_each_place_kernite_reads_it() {
-    let printed = runs_quietly(&["test"], "fragments_places");
+fn a_fragment_is_one_operand_or_one_type_in_each_place_kernite_reads_it() -> Result {
+    let printed = runs_quietly(&["test"], "fragments_places")?;
     assert!(
         printed.contains("test result: ok. 12 passed"),
         "fixtures/fragments_places.rs ran, and printed:\n{printed}"
     );
+    Ok(())
 }
 
 /// A fragment that is no group, `$i:ident` and `$t:tt`, and a literal of one token, a group of one, are read as they
 /// were, and so is a fragment that no operator is next to or that holds none of its own.
 #[test]
-fn a_fragment_that_is_no_group_is_read_as_it_was() {
-    let printed = runs_quietly(&["test"], "fragments_bare");
+fn a_fragment_that_is_no_group_is_read_as_it_was() -> Result {
+    let printed = runs_quietly(&["test"], "fragments_bare")?;
     assert!(printed.contains("test result: ok. 6 passed"), "fixtures/fragments_bare.rs ran, and printed:\n{printed}");
+    Ok(())
 }
 
 /// An error at a fragment is said where the fragment is, in the call of the macro that has it. kernite's: at the name
@@ -4202,7 +4361,7 @@ fn a_fragment_that_is_no_group_is_read_as_it_was() {
 /// 6 for `1 + 2`, has no index 6, and a fragment where a `;` should be is told as one thing, `1 + 2`. A type that is a
 /// fragment is said whole, `Wrap<Wrap<u8>>`, and, next to a result, as it was.
 #[test]
-fn an_error_at_a_fragment_is_said_where_the_fragment_is() {
+fn an_error_at_a_fragment_is_said_where_the_fragment_is() -> Result {
     let said_at = |place: &str, message: &str| format!("src/lib.rs:{place}: error: {message}");
     let mut said = vec![
         said_at("20:19", "`x` is not defined"),
@@ -4231,7 +4390,8 @@ fn an_error_at_a_fragment_is_said_where_the_fragment_is() {
         size_unknown("116:31", "[i8]"),
     ];
     said.push(format!("error: could not compile `fragments_refused` (lib) due to {} previous errors", said.len()));
-    refuses("fragments_refused", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("fragments_refused", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A macro's fragment `$t:ty` of bounds, `dyn core::fmt::Debug + Send`, is one type to Rust behind a pointer or a
@@ -4244,7 +4404,7 @@ fn an_error_at_a_fragment_is_said_where_the_fragment_is() {
 /// one word is a warning at the parentheses of the GPU parameters' call: the launcher writes the type in `Ptr<..>`,
 /// where they are not needed.
 #[test]
-fn a_fragment_of_bounds_behind_a_pointer_is_one_type_to_rust_wherever_the_macros_write_it_back() {
+fn a_fragment_of_bounds_behind_a_pointer_is_one_type_to_rust_wherever_the_macros_write_it_back() -> Result {
     let (mut said, mut repeated) = (Vec::new(), 0);
     // The fixture calls each macro with the fragment, then with the type in parentheses. Cargo says a message once,
     // however many calls make it, and counts each.
@@ -4308,7 +4468,8 @@ fn a_fragment_of_bounds_behind_a_pointer_is_one_type_to_rust_wherever_the_macros
     said.push(format!(
         "error: could not compile `fragments_bounds` (lib) due to {errors} previous errors; 1 warning emitted"
     ));
-    refuses("fragments_bounds", &said.iter().map(String::as_str).collect::<Vec<_>>());
+    refuses("fragments_bounds", &said.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
 }
 
 /// A macro's fragment `$t:ty` behind a pointer that kernite takes is one type to Rust and to the kernel, with nothing
@@ -4317,10 +4478,11 @@ fn a_fragment_of_bounds_behind_a_pointer_is_one_type_to_rust_wherever_the_macros
 /// as `dyn core::fmt::Debug + Send`, which has a size whatever its argument has; and bounds behind a pointer in a type
 /// of the module's own, `pub type Fat = *const $t;`, which has two words.
 #[test]
-fn a_fragment_behind_a_pointer_that_kernite_takes_is_one_type_to_rust_and_to_the_kernel() {
-    let printed = runs_quietly(&["test"], "fragments_pointees");
+fn a_fragment_behind_a_pointer_that_kernite_takes_is_one_type_to_rust_and_to_the_kernel() -> Result {
+    let printed = runs_quietly(&["test"], "fragments_pointees")?;
     assert!(
         printed.contains("test result: ok. 4 passed"),
         "fixtures/fragments_pointees.rs ran, and printed:\n{printed}"
     );
+    Ok(())
 }

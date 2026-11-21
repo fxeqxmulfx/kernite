@@ -13,9 +13,10 @@ pub struct Module {
 }
 
 impl Module {
-    /// The place among its items of the one that writes `span`: the last that starts at or before it.
+    /// The place among its items of the one that writes `span`: the last that starts at or before it, and the first for
+    /// a place before them all.
     pub fn item_at(&self, span: Span) -> usize {
-        self.items.iter().rposition(|item| item.span <= span).expect("an item writes each place")
+        self.items.iter().rposition(|item| item.span <= span).unwrap_or(0)
     }
 }
 

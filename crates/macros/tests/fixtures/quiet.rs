@@ -17,9 +17,9 @@ pub fn on_the_gpu(kernels: &gpu::Kernels, x: kernite_cuda::Ptr<f32>) -> Result<u
         kernels.together(kernite_cuda::Grid::new(1, 1), x)?;
         kernels.tuned(kernite_cuda::Grid::new(1, 64), x)?;
     }
-    kernels.COUNTS().write(&[0; 4])?;
-    let _: kernite_cuda::Global<'_, kernite_cuda::f16> = kernels.F16S();
-    let _: kernite_cuda::Global<'_, kernite_cuda::bf16> = kernels.BF16S();
+    kernels.COUNTS()?.write(&[0; 4])?;
+    let _: kernite_cuda::Global<'_, kernite_cuda::f16> = kernels.F16S()?;
+    let _: kernite_cuda::Global<'_, kernite_cuda::bf16> = kernels.BF16S()?;
     kernels.together_blocks(32, 0)
 }
 

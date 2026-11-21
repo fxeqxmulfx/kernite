@@ -333,8 +333,10 @@ pub(crate) fn check(p: &Program<Op>, start: &[(VReg, Width)]) -> Option<(usize, 
     }
     let meet = |a: &Widths, b: &Widths| a.iter().zip(b).map(|(&a, &b)| a.min(b)).collect();
     let said = forward(p, widths, meet, step).ok()?;
-    let (i, Past { var, reads, has }) = said.into_iter().enumerate().find_map(|(i, said)| Some((i, said?.err()?)))?;
-    let Item::Inst(inst) = &p.body[i] else { unreachable!("an instruction fails") };
+    let (i, inst, Past { var, reads, has }) = p.body.iter().zip(said).enumerate().find_map(|(i, (item, said))| {
+        let Item::Inst(inst) = item else { return None };
+        Some((i, inst, said?.err()?))
+    })?;
     let x = &p.regs[var.id as usize].name;
     let message = format!(
         "`{}` reads {reads} bits of `{x}`, of which only the low {has} are the kernel's: SysV leaves the rest of the \

@@ -154,7 +154,7 @@ pub mod gpu {
 }
 
 #[test]
-fn each_x86_kernel_reads_what_comes_after_the_parameters_named_underscore() {
+fn each_x86_kernel_reads_what_comes_after_the_parameters_named_underscore() -> Result<(), Box<dyn std::error::Error>> {
     // What a number named `_` is given, which the kernels would show if they read it, and a pointer
     // named `_`, to memory they must not write.
     let (junk, mut written) = (999u64, 0u64);
@@ -171,7 +171,7 @@ fn each_x86_kernel_reads_what_comes_after_the_parameters_named_underscore() {
         macro_rules! writes {
             ($want:expr, $launch:expr) => {{
                 *written = 0;
-                $launch.unwrap();
+                $launch?;
                 assert_eq!(*written, $want, stringify!($launch));
             }};
         }
@@ -182,21 +182,22 @@ fn each_x86_kernel_reads_what_comes_after_the_parameters_named_underscore() {
         writes!(70, cpu::counted_together::<20>(grid, 1, 50, written));
         assert_eq!(*junk, 999);
     }
+    Ok(())
 }
 
 #[test]
-fn each_gpu_kernel_reads_what_comes_after_the_parameters_named_underscore() {
-    let Ok(cuda) = kernite_cuda::Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return };
-    let kernels = gpu::Kernels::load(&cuda).unwrap();
-    let (junk, mut written) = (cuda.upload(&[999u32]).unwrap(), cuda.alloc::<u32>(1).unwrap());
+fn each_gpu_kernel_reads_what_comes_after_the_parameters_named_underscore() -> Result<(), Box<dyn std::error::Error>> {
+    let Ok(cuda) = kernite_cuda::Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
+    let kernels = gpu::Kernels::load(&cuda)?;
+    let (junk, mut written) = (cuda.upload(&[999u32])?, cuda.alloc::<u32>(1)?);
     let grid = kernite_cuda::Grid::new(1, 1);
     // That `$launch` writes `$want` through `written`.
     macro_rules! writes {
         ($want:expr, $launch:expr) => {{
-            written.write(&[0]).unwrap();
-            unsafe { $launch.unwrap() };
-            cuda.sync().unwrap();
-            assert_eq!(written.read().unwrap(), [$want], stringify!($launch));
+            written.write(&[0])?;
+            unsafe { $launch? };
+            cuda.sync()?;
+            assert_eq!(written.read()?, [$want], stringify!($launch));
         }};
     }
     writes!(42, kernels.plain(grid, 1, 50, junk.ptr(), written.ptr(), 8));
@@ -211,5 +212,6 @@ fn each_gpu_kernel_reads_what_comes_after_the_parameters_named_underscore() {
     } else {
         eprintln!("{} launches no kernel cooperatively: skipped", cuda.name());
     }
-    assert_eq!(junk.read().unwrap(), [999]);
+    assert_eq!(junk.read()?, [999]);
+    Ok(())
 }

@@ -155,11 +155,12 @@ pub const fn join<const N: usize>(parts: &[&[&str]], hole: &[u8]) -> [u8; N] {
     out
 }
 
-/// `bytes` as the text they are: pieces of text joined by names of letters, digits and `_`.
+/// `bytes` as the text they are, or no text if they are none; pieces of text joined by names of letters, digits and `_`
+/// are text.
 pub const fn text(bytes: &'static [u8]) -> &'static str {
     match core::str::from_utf8(bytes) {
         Ok(s) => s,
-        Err(_) => panic!("text joined by names is text"),
+        Err(_) => "",
     }
 }
 

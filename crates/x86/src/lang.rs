@@ -682,7 +682,7 @@ impl Kernel {
                             }
                         }
                         let reaches = targets.iter().map(|t| t.to_string()).collect();
-                        (Operand::Reg(fp, W64), passing.expect("a call has a target"), never, vec![], Some(reaches))
+                        (Operand::Reg(fp, W64), passing.ok_or_else(|| Fault::new(shape))?, never, vec![], Some(reaches))
                     }
                     None => (Operand::Reg(fp, W64), self.shaped(&passed, result, at)?, false, vec![], None),
                 }
@@ -714,7 +714,7 @@ impl Kernel {
             let pinned = self.new_var(to.class, &name);
             self.p.pinned.push((pinned, to));
             let w = width(to.class, view);
-            self.pass(pinned, a, *ty, w);
+            self.pass(pinned, a, *ty, w).map_err(|m| Fault::at(at, m))?;
             let read = if to.class == Class::Vec { self.named(reg, view, known.then_some(*ty)) } else { w };
             implicit.push(Arg { operand: Operand::Reg(pinned, read), access: Read });
         }
@@ -764,13 +764,10 @@ impl Kernel {
     }
 
     /// Moves `a`, an argument of type `ty`, to `to`, the variable SysV passes it in: `width` of a variable, or a gpr's
-    /// `r32` with the rest clear; an integer known now; or a float known now, from memory.
-    fn pass(&mut self, to: VReg, a: &Given<Var>, ty: Ty, width: Width) {
+    /// `r32` with the rest clear; an integer known now; or a float known now, from memory. An argument that is none of
+    /// these is one that [`passing`](Self::passing) refuses.
+    fn pass(&mut self, to: VReg, a: &Given<Var>, ty: Ty, width: Width) -> Result<(), String> {
         let inst = match (a, ty) {
-            (Given::Var(v), _) => match v.reg().expect("an argument is a variable of a register") {
-                (reg, View::R32) => move_r32(to, reg),
-                (reg, _) => SysV.copy(to, reg, width),
-            },
             (Given::Int(x), _) => {
                 let value = Arg { operand: Operand::Imm(Imm { value: *x as i64, hex: false }), access: Read };
                 let to = Arg { operand: Operand::Reg(to, W64), access: Write };
@@ -778,9 +775,14 @@ impl Kernel {
             }
             (Given::F32(x), _) => self.load_float(to, &x.to_le_bytes(), Op::Vmovss, W32),
             (Given::F64(x), _) => self.load_float(to, &x.to_le_bytes(), Op::Vmovq, W64),
-            _ => unreachable!("an argument is a variable or a value known now"),
+            (a, _) => match reg_of(a) {
+                Some((reg, View::R32)) => move_r32(to, reg),
+                Some((reg, _)) => SysV.copy(to, reg, width),
+                None => return Err(takes_no("call", a)),
+            },
         };
         self.p.body.push(Item::Inst(inst));
+        Ok(())
     }
 
     /// `op(to.xmm, [bytes])`: a float known now, as a constant.
@@ -902,7 +904,7 @@ impl Kernel {
     }
 
     /// Stack memory declared as `let name: ty`, `ty` being `local<[f32; 64], 32>`.
-    fn new_memory(&mut self, name: &str, ty: &str) -> Result<Var, String> {
+    fn new_memory(&mut self, name: &str, ty: &str) -> Result<SlotId, String> {
         let (elem, size, len, align) = shape(ty, "local")?;
         let Some(len) = len else {
             return Err(format!("`{ty}` has no size: stack memory has one, as in `local<[{elem}; 64]>`"));
@@ -917,16 +919,17 @@ impl Kernel {
         let all = bytes
             .and_then(|b| end.next_multiple_of(align).checked_add(b))
             .and_then(|e| e.checked_next_multiple_of(most));
-        let (Some(bytes), Some(..=FRAME)) = (bytes, all) else {
-            return Err(format!(
+        let too_much = || {
+            format!(
                 "this makes the kernel's stack memory more than {FRAME} bytes, the most an address reaches past the \
                  stack pointer"
-            ));
+            )
         };
-        let narrow = |n: u64| u32::try_from(n).expect("a frame of 2^31 bytes at most");
-        self.p.slots.push(Slot { name: name.to_string(), size: narrow(bytes), align: narrow(align), spill: false });
+        let (Some(bytes), Some(..=FRAME)) = (bytes, all) else { return Err(too_much()) };
+        let (Ok(size), Ok(align)) = (u32::try_from(bytes), u32::try_from(align)) else { return Err(too_much()) };
+        self.p.slots.push(Slot { name: name.to_string(), size, align, spill: false });
         self.declared.push(ty.to_string());
-        Ok(Var(Place::Stack(SlotId(self.p.slots.len() as u32 - 1))))
+        Ok(SlotId(self.p.slots.len() as u32 - 1))
     }
 
     /// The functions the kernel's calls may reach, each by what the source calls it, with repeats.
@@ -1230,8 +1233,7 @@ impl Kernel {
         for (i, (spec, a)) in form.operands.iter().zip(args).enumerate() {
             let mut access = spec.access;
             let operand = match a {
-                Given::Var(v) => {
-                    let (reg, view) = v.reg().expect("stack memory is refused as an operand");
+                Given::Var(v) if let Some((reg, view)) = v.reg() => {
                     // A write to a gpr's r16 or r8 keeps the rest of it, which it so reads.
                     if access == Write && matches!(view, View::R16 | View::R8) {
                         access = ReadWrite;
@@ -1248,7 +1250,7 @@ impl Kernel {
                     Operand::Mem(m)
                 }
                 Given::Label(l) => Operand::Label(Label(*l)),
-                _ => unreachable!("the form fits"),
+                _ => return Err(Fault::at(i, takes_no(name, a))),
             };
             out.push(Arg { operand, access });
         }
@@ -1263,10 +1265,10 @@ impl Kernel {
     /// not.
     fn apart(&self, name: &str, out: &[Arg<VReg>], index: VReg) -> Result<(), Fault> {
         let reg = |a: &Arg<VReg>| match a.operand {
-            Operand::Reg(reg, _) => reg,
-            _ => unreachable!("a gather's result and mask are vectors"),
+            Operand::Reg(reg, _) => Some(reg),
+            _ => None,
         };
-        let (result, mask) = (reg(&out[0]), reg(&out[2]));
+        let (Some(result), Some(mask)) = (out.first().and_then(reg), out.get(2).and_then(reg)) else { return Ok(()) };
         let pairs = [
             (result, "result", mask, "mask", 2),
             (result, "result", index, "indices", 1),
@@ -1310,7 +1312,7 @@ impl Kernel {
                 return Ok(Mem { base: Base::Func(self.func(f)), index: None, disp: 0, width });
             }
             Given::Mem(m) => m,
-            _ => unreachable!("memory"),
+            _ => return Err(takes_no(name, a)),
         };
         // Memory stands for its address, which comes first, and a vector of indices is the
         // index; each may be added as it is.
@@ -1354,8 +1356,8 @@ impl Kernel {
             (base, index) = (Some(i), Some((i, k - 1)));
         }
         let held = base.filter(|b| b.reg().is_none());
-        if let (Some(Var(Place::Static(s))), Some((i, k))) = (held, index) {
-            let (held, i) = (&self.statics[s.0 as usize].name, i.reg().expect("an index is a register").0);
+        if let (Some(Var(Place::Static(s))), Some((Var(Place::Reg(i, _)), k))) = (held, index) {
+            let held = &self.statics[s.0 as usize].name;
             let i = &self.p.regs[i.id as usize].name;
             let scaled = if k == 1 { i.clone() } else { format!("{i} * {k}") };
             return Err(format!(
@@ -1365,8 +1367,7 @@ impl Kernel {
         }
         let whole = |v: Var| match v.0 {
             Place::Reg(reg, View::R64) => Ok(reg),
-            Place::Reg(_, view) => Err(format!("an address is made of gprs seen whole; this is {}", view.name())),
-            Place::Stack(_) | Place::Static(_) => unreachable!("memory is the base"),
+            _ => Err(format!("an address is made of gprs seen whole; this is {}", given(&Given::Var(v)))),
         };
         let base = if held.is_some() { None } else { base.map(whole).transpose()? };
         let index = match index {
@@ -1383,13 +1384,14 @@ impl Kernel {
             }
             None => None,
         };
+        let far = || format!("{} bytes are too far for an address", m.disp);
         match held.map(|v| v.0) {
             Some(Place::Stack(s)) => {
                 let slot = &self.p.slots[s.0 as usize];
                 let ty = &self.declared[s.0 as usize];
                 let memory = Region { name: &slot.name, bytes: slot.size.into(), align: slot.align.into(), ty };
                 self.within(memory, index, m.disp, kind, access, name)?;
-                let disp = i32::try_from(m.disp).expect("inside a frame of 2^31 bytes at most");
+                let disp = i32::try_from(m.disp).map_err(|_| far())?;
                 return Ok(Mem { base: Base::Slot(s), index, disp, width });
             }
             Some(Place::Static(s)) => {
@@ -1403,12 +1405,12 @@ impl Kernel {
                 }
                 let memory = Region { name: &st.name, bytes: st.bytes(), align: st.align, ty: &st.ty };
                 self.within(memory, None, m.disp, kind, access, name)?;
-                let disp = i32::try_from(m.disp).expect("inside a static of 2^31 bytes at most");
+                let disp = i32::try_from(m.disp).map_err(|_| far())?;
                 return Ok(Mem { base: Base::Static(s), index: None, disp, width });
             }
             _ => {}
         }
-        let disp = i32::try_from(m.disp).map_err(|_| format!("{} bytes are too far for an address", m.disp))?;
+        let disp = i32::try_from(m.disp).map_err(|_| far())?;
         Ok(Mem { base: base.map_or(Base::None, Base::Reg), index, disp, width })
     }
 
@@ -1571,24 +1573,30 @@ fn shape(ty: &str, word: &str) -> Result<(&'static str, u64, Option<u64>, u64), 
     Ok((elem, size, len, align))
 }
 
-/// What `a`, an operand the checks of [`Target::inst`] let through, is to the forms.
-fn operand_shape(a: &Given<Var>) -> Shape {
-    match a {
-        Given::Var(v) => match v.reg().expect("stack memory is refused as an operand") {
-            (reg, view) if reg.class == Class::Vec => Shape::Vec(view.width()),
-            (_, view) => Shape::Gpr(view.width()),
+/// What `a`, an operand the checks of [`Target::inst`] let through, is to the forms; or that the instruction `name`
+/// takes none like it, which those checks have refused.
+fn operand_shape(name: &str, a: &Given<Var>) -> Result<Shape, String> {
+    Ok(match a {
+        Given::Var(v) if let Some((reg, view)) = v.reg() => match reg.class {
+            Class::Vec => Shape::Vec(view.width()),
+            _ => Shape::Gpr(view.width()),
         },
         Given::Int(x) => Shape::Int(*x),
         Given::Mem(m) => Shape::Mem { size: None, data: None, vsib: vector_index(m) },
         Given::Data(bytes) => Shape::Mem { size: None, data: Some(bytes.len()), vsib: None },
         Given::Code(_) => Shape::Mem { size: None, data: None, vsib: None },
-        Given::Sized(word, inner) => match operand_shape(inner) {
+        Given::Sized(word, inner) => match operand_shape(name, inner)? {
             Shape::Mem { data, vsib, .. } => Shape::Mem { size: forms::width_of(word), data, vsib },
-            _ => unreachable!("a size is memory's"),
+            _ => return Err(takes_no(name, a)),
         },
         Given::Label(_) => Shape::Label,
-        _ => unreachable!("refused before"),
-    }
+        _ => return Err(takes_no(name, a)),
+    })
+}
+
+/// Why the instruction `name` takes no operand like `a`.
+fn takes_no(name: &str, a: &Given<Var>) -> String {
+    format!("`{name}` takes no operand that is {}", given(a))
 }
 
 /// The width of the vector of indices memory `m` is at, if it adds one.
@@ -1718,7 +1726,7 @@ impl Target for Kernel {
 
     fn var(&mut self, name: &str, ty: &str) -> Result<Var, String> {
         if ty.starts_with("local<") {
-            return self.new_memory(name, ty);
+            return self.new_memory(name, ty).map(|slot| Var(Place::Stack(slot)));
         }
         if let Some(rest) = ty.strip_prefix("shared<") {
             return Err(format!("`shared<..>` is a GPU's memory; an x86 kernel has stack memory, `local<{rest}`"));
@@ -1756,14 +1764,13 @@ impl Target for Kernel {
     }
 
     fn view(&mut self, v: Var, view: &str) -> Result<Var, String> {
-        // As a helper's parameter, memory is the memory it was declared.
-        if let Some((name, ty)) = self.declared(v) {
-            return match view == ty {
-                true => Ok(v),
-                false => Err(format!("`{name}` is memory, `{ty}`; it is no `{view}`")),
+        let Place::Reg(reg, from) = v.0 else {
+            // As a helper's parameter, memory is the memory it was declared.
+            return match self.declared(v) {
+                Some((name, ty)) if view != ty => Err(format!("`{name}` is memory, `{ty}`; it is no `{view}`")),
+                _ => Ok(v),
             };
-        }
-        let Place::Reg(reg, from) = v.0 else { unreachable!("a variable that is no memory is a register") };
+        };
         let to = match (reg.class, view) {
             (Class::Vec, "ymm") => View::Ymm,
             (Class::Vec, "xmm") => View::Xmm,
@@ -1814,8 +1821,7 @@ impl Target for Kernel {
         let jumps = forms.is_some_and(|f| f.iter().any(|f| f.operands.iter().any(|s| s.kind == Kind::Label)));
         for (i, a) in args.iter().enumerate() {
             match a {
-                Given::Var(v) if v.reg().is_none() => {
-                    let (held, _) = self.declared(*v).expect("a variable that is no register is memory");
+                Given::Var(v) if let Some((held, _)) = self.declared(*v) => {
                     return Err(Fault::at(
                         i,
                         format!(
@@ -1913,7 +1919,10 @@ impl Target for Kernel {
                 return Err(Fault::at(i, "`lea` takes an address and reaches no memory: no size before the brackets"));
             }
         }
-        let shapes: Vec<Shape> = args.iter().map(operand_shape).collect();
+        let mut shapes = vec![];
+        for (i, a) in args.iter().enumerate() {
+            shapes.push(operand_shape(name, a).map_err(|m| Fault::at(i, m))?);
+        }
         let form = forms::choose(forms, &shapes).map_err(|miss| missed(name, args, &shapes, &grid, miss))?;
         let (built, implicit) = self.build(form, args, name)?;
         for (i, s) in &grid {
@@ -1922,10 +1931,7 @@ impl Target for Kernel {
             }
         }
         if form.op == Op::Vldmxcsr && self.mxcsr.is_none() {
-            let Var(Place::Stack(kept)) = self.new_memory("mxcsr", "local<u32>").map_err(Fault::new)? else {
-                unreachable!("stack memory is a slot")
-            };
-            self.mxcsr = Some(kept);
+            self.mxcsr = Some(self.new_memory("mxcsr", "local<u32>").map_err(Fault::new)?);
         }
         let flow = match built.iter().find_map(|a| if let Operand::Label(l) = a.operand { Some(l) } else { None }) {
             Some(l) if form.op == Op::Jmp => Flow::Jump(l),

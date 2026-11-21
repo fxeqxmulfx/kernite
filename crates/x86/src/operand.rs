@@ -104,24 +104,18 @@ impl Gpr {
     }
 
     /// The address of it times `scale`, with no base: `[g*4]`. x86 writes it with a 32-bit
-    /// displacement, 0 unless [`Addr::plus`] adds one.
-    ///
-    /// # Panics
-    ///
-    /// On a scale other than 1, 2, 4 or 8, as [`Addr::index`] does.
-    pub fn times(self, scale: u8) -> Addr {
+    /// displacement, 0 unless [`Addr::plus`] adds one. A scale other than 1, 2, 4 or 8 is an
+    /// error, as [`Addr::index`] says.
+    pub fn times(self, scale: u8) -> Result<Addr, String> {
         Addr::NOTHING.index(self, scale)
     }
 }
 
 impl Ymm {
     /// The address of eight 32-bit offsets in it times `scale`, with no base: `[v*4]`, for an AVX2
-    /// gather. x86 writes it with a 32-bit displacement, 0 unless [`Addr::plus`] adds one.
-    ///
-    /// # Panics
-    ///
-    /// On a scale other than 1, 2, 4 or 8, as [`Addr::index`] does.
-    pub fn times(self, scale: u8) -> Addr {
+    /// gather. x86 writes it with a 32-bit displacement, 0 unless [`Addr::plus`] adds one. A
+    /// scale other than 1, 2, 4 or 8 is an error, as [`Addr::index`] says.
+    pub fn times(self, scale: u8) -> Result<Addr, String> {
         Addr::NOTHING.index_ymm(self, scale)
     }
 }
@@ -129,11 +123,8 @@ impl Ymm {
 impl Xmm {
     /// The address of four 32-bit offsets in it times `scale`, with no base: `[v*8]`, for an AVX2
     /// quadword gather. x86 writes it with a 32-bit displacement, 0 unless [`Addr::plus`] adds one.
-    ///
-    /// # Panics
-    ///
-    /// On a scale other than 1, 2, 4 or 8, as [`Addr::index`] does.
-    pub fn times(self, scale: u8) -> Addr {
+    /// A scale other than 1, 2, 4 or 8 is an error, as [`Addr::index`] says.
+    pub fn times(self, scale: u8) -> Result<Addr, String> {
         Addr::NOTHING.index_xmm(self, scale)
     }
 }
@@ -147,40 +138,37 @@ impl Addr {
         Addr { disp: self.disp + disp, ..self }
     }
 
-    /// Plus `by` times `scale`.
-    ///
-    /// # Panics
-    ///
-    /// On a scale other than 1, 2, 4 or 8, a second index, or an index on a constant,
-    /// whose address is relative to the instruction and takes none.
-    pub fn index(self, by: Gpr, scale: u8) -> Addr {
+    /// Plus `by` times `scale`. A scale other than 1, 2, 4 or 8, a second index, and an index on
+    /// a constant, whose address is relative to the instruction and takes none, are errors:
+    /// `scale 3`, `one index to an address`, `a constant's address takes no index`.
+    pub fn index(self, by: Gpr, scale: u8) -> Result<Addr, String> {
         self.indexed(by.0, scale)
     }
 
-    /// Plus eight 32-bit offsets in a YMM register, for an AVX2 gather.
-    ///
-    /// # Panics
-    ///
-    /// As [`Addr::index`] does.
-    pub fn index_ymm(self, by: Ymm, scale: u8) -> Addr {
+    /// Plus eight 32-bit offsets in a YMM register, for an AVX2 gather. It is an error where
+    /// [`Addr::index`] is.
+    pub fn index_ymm(self, by: Ymm, scale: u8) -> Result<Addr, String> {
         self.indexed(by.0, scale)
     }
 
-    /// Plus four 32-bit offsets in an XMM register, for an AVX2 quadword gather.
-    ///
-    /// # Panics
-    ///
-    /// As [`Addr::index`] does.
-    pub fn index_xmm(self, by: Xmm, scale: u8) -> Addr {
+    /// Plus four 32-bit offsets in an XMM register, for an AVX2 quadword gather. It is an error
+    /// where [`Addr::index`] is.
+    pub fn index_xmm(self, by: Xmm, scale: u8) -> Result<Addr, String> {
         self.indexed(by.0, scale)
     }
 
     /// `by` times `scale` as the one index of the address: the rules for an index are kept here.
-    fn indexed(self, by: VReg, scale: u8) -> Addr {
-        assert!(matches!(scale, 1 | 2 | 4 | 8), "scale {scale}");
-        assert!(self.index.is_none(), "one index to an address");
-        assert!(!matches!(self.base, Base::Const(_)), "a constant's address takes no index");
-        Addr { index: Some((by, scale)), ..self }
+    fn indexed(self, by: VReg, scale: u8) -> Result<Addr, String> {
+        if !matches!(scale, 1 | 2 | 4 | 8) {
+            return Err(format!("scale {scale}"));
+        }
+        if self.index.is_some() {
+            return Err("one index to an address".into());
+        }
+        if matches!(self.base, Base::Const(_)) {
+            return Err("a constant's address takes no index".into());
+        }
+        Ok(Addr { index: Some((by, scale)), ..self })
     }
 
     pub(crate) fn mem(self, width: Width) -> Operand<VReg> {

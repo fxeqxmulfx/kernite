@@ -37,7 +37,7 @@
 //!     }
 //! "#;
 //! let listing = kernite::x86_str(src, "sum8")?;
-//! print!("{}", listing.text());
+//! print!("{listing}");
 //! # Ok::<(), String>(())
 //! ```
 
@@ -131,11 +131,13 @@ pub fn ptx_statics(module: &Module, scope: &str) -> Vec<Result<Compiled<Static>,
 /// Why each of `types`, those of the statics a module's PTX keeps, in order, as
 /// [`DeviceStatic::ty`] has them, has no room in the module beside those before it that have, as
 /// [`ptx_statics`] says of a module that keeps them all; `None` for each that has. Each is the type
-/// of a static that was laid out.
+/// of a static that was laid out; one that is the type of none has the error that says why, and
+/// takes no room.
 pub fn ptx_room(types: &[&str]) -> Vec<Option<String>> {
-    let statics: Vec<Static> =
-        types.iter().map(|ty| Static::new("", "", ty).expect("the type of a static that was laid out")).collect();
-    kernite_ptx::room(&statics)
+    let made: Vec<Result<Static, String>> = types.iter().map(|ty| Static::new("", "", ty)).collect();
+    let statics: Vec<Static> = made.iter().filter_map(|s| s.as_ref().ok().cloned()).collect();
+    let mut rooms = kernite_ptx::room(&statics).into_iter();
+    made.into_iter().map(|s| s.err().or_else(|| rooms.next().flatten())).collect()
 }
 
 /// Every kernel `extern "ptx-kernel"` and function `extern "ptx-func"` of the module in

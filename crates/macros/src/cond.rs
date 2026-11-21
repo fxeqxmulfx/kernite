@@ -26,9 +26,9 @@ impl Cond {
     /// item with none.
     pub(crate) fn of(cfg: &TokenStream) -> Cond {
         let attrs: Vec<TokenTree> = cfg.clone().into_iter().collect();
-        Cond::all(attrs.chunks(2).filter_map(|attr| {
-            let [_, TokenTree::Group(meta)] = attr else { unreachable!("an attribute is `#` and brackets") };
-            predicate(&flatten(meta.stream())).map(Cond::If)
+        Cond::all(attrs.chunks(2).filter_map(|attr| match attr {
+            [_, TokenTree::Group(meta)] => predicate(&flatten(meta.stream())).map(Cond::If),
+            _ => None,
         }))
     }
 
@@ -175,7 +175,7 @@ fn predicate(meta: &[TokenTree]) -> Option<TokenStream> {
         return Some(tokens.into_iter().collect());
     }
     let mut parts = tokens.split(|t| is_punct(t, ','));
-    let when: TokenStream = parts.next().expect("a split has a first part").iter().cloned().collect();
+    let when: TokenStream = parts.next().into_iter().flatten().cloned().collect();
     let then: Vec<TokenStream> = parts.filter_map(predicate).collect();
     (!then.is_empty()).then(|| call("any", vec![call("not", vec![when]), join("all", then)]))
 }

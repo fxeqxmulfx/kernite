@@ -71,8 +71,10 @@ pub fn memory(module: &Module, s: &Static) -> Result<Memory, Error> {
 pub fn constant(module: &Module, c: &Const) -> Result<Value, Error> {
     let mut consts = Consts;
     let mut e = Eval::new(module, &mut consts);
-    let i = e.consts.iter().position(|(k, _)| std::ptr::eq(*k, c)).expect("a constant of the module");
-    e.consts[i].1 = State::Busy;
+    let Some((_, state)) = e.consts.iter_mut().find(|(k, _)| std::ptr::eq(*k, c)) else {
+        return Err(err(c.span, format!("`{}` is no constant of this module", c.name)));
+    };
+    *state = State::Busy;
     e.constant(c)
 }
 
@@ -307,8 +309,12 @@ impl<'a, T: Target> Eval<'a, T> {
         }
     }
 
+    /// Binds `name` in the innermost scope, which a name bound outside any scope opens.
     fn bind(&mut self, name: &str, b: Binding<T::Var>) {
-        self.scopes.last_mut().expect("a scope").push((name.to_string(), b));
+        match self.scopes.last_mut() {
+            Some(scope) => scope.push((name.to_string(), b)),
+            None => self.scopes.push(vec![(name.to_string(), b)]),
+        }
     }
 
     fn lookup(&mut self, name: &str, span: Span) -> Result<Option<Binding<T::Var>>, Error> {
@@ -638,8 +644,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 Ok(v)
             }
             // A literal negated is one number, as Rust reads `-128i8`.
-            Expr::Unary(UnOp::Neg, inner, _) if matches!(**inner, Expr::Lit(..)) => {
-                let Expr::Lit(text, _) = &**inner else { unreachable!("a literal") };
+            Expr::Unary(UnOp::Neg, inner, _) if let Expr::Lit(text, _) = &**inner => {
                 value::negated(text, want).map_err(at)
             }
             Expr::Unary(op, inner, _) => {
@@ -994,8 +999,11 @@ impl<'a, T: Target> Eval<'a, T> {
         // body or a helper's has new ones each time; jumps may name them before they are placed.
         for stmt in &b.stmts {
             let Some((name, span)) = placed_label(stmt) else { continue };
-            let scope = self.scopes.last().expect("a scope");
-            if scope.iter().any(|(n, b)| n == name && matches!(b, Binding::Label(_))) {
+            let placed = self
+                .scopes
+                .last()
+                .is_some_and(|scope| scope.iter().any(|(n, b)| n == name && matches!(b, Binding::Label(_))));
+            if placed {
                 return Err(err(span, format!("label `{name}` is placed twice in this block")));
             }
             self.labels += 1;
@@ -1238,10 +1246,11 @@ impl<'a, T: Target> Eval<'a, T> {
         if self.guard.is_some() {
             return Err(err(span, "a label takes no predicate: control arrives there whatever it holds"));
         }
-        let scope = self.scopes.last().expect("a scope");
-        let found = scope.iter().rev().find_map(|(n, b)| match b {
-            Binding::Label(l) if path.len() == 1 && *n == path[0] => Some(*l),
-            _ => None,
+        let found = self.scopes.last().and_then(|scope| {
+            scope.iter().rev().find_map(|(n, b)| match b {
+                Binding::Label(l) if path.len() == 1 && *n == path[0] => Some(*l),
+                _ => None,
+            })
         });
         let Some(l) = found else {
             return Err(err(*pspan, "a label is placed by a statement of its own, `label(name);`, in a block"));

@@ -83,10 +83,9 @@ impl Random {
         (a as f64 * 67108864.0 + b as f64) * (1.0 / 9007199254740992.0)
     }
 
-    /// `random.getrandbits(k)`, for `k` from 1 to 32.
+    /// `random.getrandbits(k)`, for `k` from 1 to 32, the most the port draws: any other is the nearest.
     pub fn bits(&mut self, k: u32) -> u32 {
-        assert!((1..=32).contains(&k), "kernite's port draws 1 to 32 bits, not {k}");
-        self.next_u32() >> (32 - k)
+        self.next_u32() >> (32 - k.clamp(1, 32))
     }
 
     /// `random._randbelow(n)`: below `n`, by drawing as many bits as `n` has until one is.

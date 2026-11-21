@@ -41,7 +41,7 @@ pub fn cpu_read() -> u64 {
 }
 
 pub fn cpu_addresses() -> usize {
-    cpu::COUNTS.ptr() as usize + cpu::COUNTS.at(1) as usize
+    cpu::COUNTS.ptr() as usize + cpu::COUNTS.at(1).map_or(0, |p| p as usize)
 }
 
 pub fn cpu_table() -> f64 {
@@ -90,57 +90,61 @@ pub fn is_halves(_: kernite_cuda::Global<'_, kernite_cuda::f16>) {}
 pub fn is_empty(_: kernite_cuda::Global<'_, u32>) {}
 
 /// The accessor of a GPU static gives a `Global` of the type the static is read as.
-pub fn gpu_type(kernels: &gpu::Kernels) {
-    is_gpu_counts(kernels.COUNTS());
-    is_halves(kernels.HALVES());
+pub fn gpu_type(kernels: &gpu::Kernels) -> Result<(), kernite_cuda::Error> {
+    is_gpu_counts(kernels.COUNTS()?);
+    is_halves(kernels.HALVES()?);
+    Ok(())
 }
 
-pub fn gpu_length(kernels: &gpu::Kernels) -> usize {
-    kernels.COUNTS().len()
+pub fn gpu_length(kernels: &gpu::Kernels) -> Result<usize, kernite_cuda::Error> {
+    Ok(kernels.COUNTS()?.len())
 }
 
-pub fn gpu_emptiness(kernels: &gpu::Kernels) -> bool {
-    kernels.COUNTS().is_empty()
+pub fn gpu_emptiness(kernels: &gpu::Kernels) -> Result<bool, kernite_cuda::Error> {
+    Ok(kernels.COUNTS()?.is_empty())
 }
 
-pub fn gpu_address(kernels: &gpu::Kernels) {
-    let _address = kernels.COUNTS().ptr();
+pub fn gpu_address(kernels: &gpu::Kernels) -> Result<(), kernite_cuda::Error> {
+    let _address = kernels.COUNTS()?.ptr();
+    Ok(())
 }
 
-pub fn gpu_element(kernels: &gpu::Kernels) {
-    let _element = kernels.COUNTS().at(1);
+pub fn gpu_element(kernels: &gpu::Kernels) -> Result<(), kernite_cuda::Error> {
+    let _element = kernels.COUNTS()?.at(1);
+    Ok(())
 }
 
 pub fn gpu_read(kernels: &gpu::Kernels) -> Result<usize, kernite_cuda::Error> {
-    let read = kernels.COUNTS().read()?;
+    let read = kernels.COUNTS()?.read()?;
     Ok(read.len())
 }
 
 pub fn gpu_zero(kernels: &gpu::Kernels) -> Result<(), kernite_cuda::Error> {
-    kernels.COUNTS().zero()
+    kernels.COUNTS()?.zero()
 }
 
 pub fn gpu_halves(kernels: &gpu::Kernels) -> Result<usize, kernite_cuda::Error> {
-    Ok(kernels.HALVES().read()?.len())
+    Ok(kernels.HALVES()?.read()?.len())
 }
 
 pub fn gpu_held(kernels: &gpu::Kernels) -> Result<usize, kernite_cuda::Error> {
-    Ok(kernels.HELD().read()?.len())
+    Ok(kernels.HELD()?.read()?.len())
 }
 
 /// A use that the static's type does not fit is Rust's error, as it is for one that compiles.
 pub fn gpu_misfit(kernels: &gpu::Kernels) -> Result<Vec<u64>, kernite_cuda::Error> {
-    kernels.COUNTS().read()
+    kernels.COUNTS()?.read()
 }
 
 /// A static whose type kernite does not take has elements of any type, which a use says.
-pub fn gpu_empty(kernels: &gpu::Kernels) {
-    is_empty(kernels.EMPTY());
+pub fn gpu_empty(kernels: &gpu::Kernels) -> Result<(), kernite_cuda::Error> {
+    is_empty(kernels.EMPTY()?);
+    Ok(())
 }
 
 /// A use that says no type for the elements is Rust's error, beside kernite's.
-pub fn gpu_empty_open(kernels: &gpu::Kernels) -> usize {
-    kernels.EMPTY().len()
+pub fn gpu_empty_open(kernels: &gpu::Kernels) -> Result<usize, kernite_cuda::Error> {
+    Ok(kernels.EMPTY()?.len())
 }
 
 // A static whose value is wrong and whose type the machine refuses too, `HOLLOW`, has kernite's one error at
@@ -170,6 +174,6 @@ pub fn cpu_hollow_open() -> u64 {
 }
 
 /// The same on the GPU.
-pub fn gpu_hollow_open(kernels: &gpu_hollow::Kernels) -> usize {
-    kernels.HOLLOW().len()
+pub fn gpu_hollow_open(kernels: &gpu_hollow::Kernels) -> Result<usize, kernite_cuda::Error> {
+    Ok(kernels.HOLLOW()?.len())
 }

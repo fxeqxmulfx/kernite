@@ -105,8 +105,7 @@ impl Device for Ptx {
     }
 
     fn device_static(&self, s: &Static) -> DeviceStatic {
-        let host = s.elem.host().expect("a static is of a type the host reads");
-        DeviceStatic { symbol: s.memory.name.clone(), ty: s.ty.clone(), host: host.into() }
+        DeviceStatic { symbol: s.memory.name.clone(), ty: s.ty.clone(), host: s.host.into() }
     }
 }
 

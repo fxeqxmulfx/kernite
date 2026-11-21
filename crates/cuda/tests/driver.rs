@@ -1,8 +1,8 @@
 //! The driver as kernite calls it, on the GPU here, if there is one.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
-
 use kernite_cuda::{Buffer, Cuda, Grid, Module, arg, bf16, f16};
+
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
 /// `x[i] += 1` for each `i < n`, a thread each, written by hand.
 const PTX: &str = "
@@ -41,51 +41,82 @@ fn cuda() -> Option<Cuda> {
 }
 
 #[test]
-fn a_kernel_runs_on_what_was_uploaded() {
-    let Some(cuda) = cuda() else { return };
+fn a_kernel_runs_on_what_was_uploaded() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
     let xs: Vec<f32> = Vec::from_fn(1000, |i| i as f32 / 3.0);
-    let buf = cuda.upload(&xs).unwrap();
-    let module = Module::load(&cuda, PTX, &["add_one"], &[]).unwrap();
+    let buf = cuda.upload(&xs)?;
+    let module = Module::load(&cuda, PTX, &["add_one"], &[])?;
     // Threads past the first 999, to see the bounds checked.
     let (x, n) = (buf.ptr(), 999u32);
     // SAFETY: `add_one` takes a pointer and a `u32`, and writes only the first `n` of the
     // 1000 the buffer has.
-    unsafe { module.launch(0, Grid::new(4, 256), &[arg(&x), arg(&n)]) }.unwrap();
-    cuda.sync().unwrap();
+    unsafe { module.launch(0, Grid::new(4, 256), &[arg(&x), arg(&n)]) }?;
+    cuda.sync()?;
     let want: Vec<f32> = xs.iter().enumerate().map(|(i, x)| if i < 999 { x + 1.0 } else { *x }).collect();
-    assert_eq!(buf.read().unwrap(), want);
+    assert_eq!(buf.read()?, want);
+    Ok(())
 }
 
 #[test]
-fn a_buffer_is_zero_until_written_and_reads_back_what_was() {
-    let Some(cuda) = cuda() else { return };
-    let mut buf = cuda.alloc::<u32>(5).unwrap();
-    assert_eq!(buf.read().unwrap(), [0; 5]);
-    buf.write(&[1, 2, 3, 4, u32::MAX]).unwrap();
+fn a_buffer_is_zero_until_written_and_reads_back_what_was() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let mut buf = cuda.alloc::<u32>(5)?;
+    assert_eq!(buf.read()?, [0; 5]);
+    buf.write(&[1, 2, 3, 4, u32::MAX])?;
     let mut out = [0; 5];
-    buf.read_into(&mut out).unwrap();
+    buf.read_into(&mut out)?;
     assert_eq!(out, [1, 2, 3, 4, u32::MAX]);
-    buf.zero().unwrap();
-    assert_eq!(buf.read().unwrap(), [0; 5]);
-    assert_eq!(buf.at(2).addr(), buf.ptr().addr() + 8);
-    assert!(cuda.alloc::<f32>(0).unwrap().is_empty());
+    buf.zero()?;
+    assert_eq!(buf.read()?, [0; 5]);
+    assert_eq!(buf.at(2).ok_or("at gave None")?.addr(), buf.ptr().addr() + 8);
+    // As far as one past the end, and no further.
+    assert_eq!(buf.at(5).ok_or("at gave None")?.addr(), buf.ptr().addr() + 20);
+    assert!(buf.at(6).is_none());
+    assert!(cuda.alloc::<f32>(0)?.is_empty());
+    Ok(())
+}
+
+/// What a buffer is written from, read into or copied from has as many elements as it, and the call
+/// says so of what has not, before the driver is asked; and its bytes are no more than there are
+/// addresses.
+#[test]
+fn a_buffer_is_written_read_and_copied_with_as_many_elements_as_it_has() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let mut buf = cuda.alloc::<u32>(5)?;
+    let said = |e: Option<kernite_cuda::Error>| e.map(|e| e.to_string());
+    let write = said(buf.write(&[1, 2, 3, 4]).err());
+    assert_eq!(write.as_deref(), Some("cuMemcpyHtoD: a buffer of 5 elements written with 4"));
+    let read = said(buf.read_into(&mut [0; 6]).err());
+    assert_eq!(read.as_deref(), Some("cuMemcpyDtoH: a buffer of 5 elements read into 6"));
+    let copy = said(buf.copy_from(&cuda.alloc::<u32>(4)?).err());
+    assert_eq!(copy.as_deref(), Some("cuMemcpyPeer: a buffer of 5 elements copied from one of 4"));
+    // None was written, read or copied.
+    assert_eq!(buf.read()?, [0; 5]);
+    let bytes = "18446744073709551615 elements of 8 bytes are more bytes than there are addresses";
+    let large = said(cuda.alloc::<u64>(usize::MAX).err());
+    assert_eq!(large.as_deref(), Some(&*format!("cuMemAlloc: {bytes}")));
+    Ok(())
 }
 
 #[test]
-fn ptx_the_driver_will_not_compile_is_logged() {
-    let Some(cuda) = cuda() else { return };
-    let e = Module::load(&cuda, &PTX.replace("add.rn.f32", "add.rn.f99"), &["add_one"], &[]).err().unwrap();
+fn ptx_the_driver_will_not_compile_is_logged() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let e = Module::load(&cuda, &PTX.replace("add.rn.f32", "add.rn.f99"), &["add_one"], &[])
+        .err()
+        .ok_or("err gave None")?;
     assert_eq!(e.call, "cuModuleLoadDataEx");
     assert!(e.message.starts_with("CUDA_ERROR_INVALID_PTX"), "{e}");
     assert!(e.log.contains("f99"), "{e}");
+    Ok(())
 }
 
 #[test]
-fn a_kernel_the_module_has_not_is_named() {
-    let Some(cuda) = cuda() else { return };
-    let e = Module::load(&cuda, PTX, &["add_one", "add_two"], &[]).err().unwrap();
+fn a_kernel_the_module_has_not_is_named() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let e = Module::load(&cuda, PTX, &["add_one", "add_two"], &[]).err().ok_or("err gave None")?;
     assert_eq!(e.call, "cuModuleGetFunction");
     assert!(e.message.starts_with("CUDA_ERROR_NOT_FOUND") && e.message.ends_with("for `add_two`"), "{e}");
+    Ok(())
 }
 
 /// Each block's `ntid` words of `x` reversed through the shared memory the launch gives, a
@@ -141,29 +172,32 @@ const SHARED: &str = "
 ";
 
 #[test]
-fn a_launch_gives_the_shared_memory_it_says() {
-    let Some(cuda) = cuda() else { return };
-    let module = Module::load(&cuda, SHARED, &["reverse", "last"], &[]).unwrap();
-    let buf = cuda.upload(&(0..512).collect::<Vec<u32>>()).unwrap();
+fn a_launch_gives_the_shared_memory_it_says() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let module = Module::load(&cuda, SHARED, &["reverse", "last"], &[])?;
+    let buf = cuda.upload(&(0..512).collect::<Vec<u32>>())?;
     let x = buf.ptr();
     // SAFETY: `reverse` takes a pointer, and reads and writes there the 256 words of each of
     // the two blocks, through the 1 KB each is given.
-    unsafe { module.launch(0, Grid::new(2, 256).with_shared(1024), &[arg(&x)]) }.unwrap();
+    unsafe { module.launch(0, Grid::new(2, 256).with_shared(1024), &[arg(&x)]) }?;
     let want: Vec<u32> = (0..512).map(|i| i / 256 * 256 + 255 - i % 256).collect();
-    assert_eq!(buf.read().unwrap(), want);
+    assert_eq!(buf.read()?, want);
     // As much as a block may have, which from Volta on is more than the 48 KB a launch
     // gives unasked; and then a word more, which the driver refuses.
     let most = cuda.max_shared();
     assert!(most >= 48 << 10, "{most}");
     // SAFETY: `last` takes a pointer and a `u32`, and writes the first word there, and the
     // last of the bytes it is given in shared memory.
-    unsafe { module.launch(1, Grid::new(1, 1).with_shared(most), &[arg(&x), arg(&most)]) }.unwrap();
-    assert_eq!(buf.read().unwrap()[0], most);
+    unsafe { module.launch(1, Grid::new(1, 1).with_shared(most), &[arg(&x), arg(&most)]) }?;
+    assert_eq!(buf.read()?[0], most);
     let more = most + 4;
     // SAFETY: as before.
-    let e = unsafe { module.launch(1, Grid::new(1, 1).with_shared(more), &[arg(&x), arg(&more)]) }.unwrap_err();
+    let e = unsafe { module.launch(1, Grid::new(1, 1).with_shared(more), &[arg(&x), arg(&more)]) }
+        .err()
+        .ok_or("value gave Ok")?;
     assert!(e.message.starts_with("CUDA_ERROR_INVALID_VALUE"), "{e}");
-    cuda.sync().unwrap();
+    cuda.sync()?;
+    Ok(())
 }
 
 /// The floats of 16 bits as the GPU's `cvt` converts them, a thread each: `widen` from `f16`
@@ -246,22 +280,22 @@ fn steps(last: u16, to_f32: fn(u16) -> f32) -> impl Iterator<Item = (f32, f64)> 
 }
 
 #[test]
-fn floats_of_16_bits_convert_as_the_gpu_converts_them() {
-    let Some(cuda) = cuda() else { return };
+fn floats_of_16_bits_convert_as_the_gpu_converts_them() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
     if cuda.sm() < 80 {
         eprintln!("{}, sm_{}, has no `cvt.rn.bf16.f32`: skipped", cuda.name(), cuda.sm());
-        return;
+        return Ok(());
     }
-    let module = Module::load(&cuda, HALF, &["widen", "narrow"], &[]).unwrap();
+    let module = Module::load(&cuda, HALF, &["widen", "narrow"], &[])?;
     let grid = |n: usize| Grid::new(n.div_ceil(256) as u32, 256);
     // Every f16.
     let all: Vec<f16> = (0..=u16::MAX).map(f16::from_bits).collect();
-    let (hs, ys) = (cuda.upload(&all).unwrap(), cuda.alloc::<f32>(all.len()).unwrap());
+    let (hs, ys) = (cuda.upload(&all)?, cuda.alloc::<f32>(all.len())?);
     let n = all.len() as u32;
     // SAFETY: `widen` takes two pointers and a `u32`, and reads `n` halves at the first and
     // writes `n` floats at the second.
-    unsafe { module.launch(0, grid(all.len()), &[arg(&hs.ptr()), arg(&ys.ptr()), arg(&n)]) }.unwrap();
-    for (h, y) in all.iter().zip(ys.read().unwrap()) {
+    unsafe { module.launch(0, grid(all.len()), &[arg(&hs.ptr()), arg(&ys.ptr()), arg(&n)]) }?;
+    for (h, y) in all.iter().zip(ys.read()?) {
         match y.is_nan() {
             true => assert!(h.to_f32().is_nan(), "{:#06x}", h.to_bits()),
             false => assert_eq!(h.to_f32().to_bits(), y.to_bits(), "{:#06x}", h.to_bits()),
@@ -287,13 +321,13 @@ fn floats_of_16_bits_convert_as_the_gpu_converts_them() {
     }));
     xs.extend([0.0, f32::INFINITY, f32::NAN, f32::MAX, f32::MIN_POSITIVE, f32::from_bits(1)]);
     assert!(xs.contains(&65520.0) && xs.contains(&f32::from_bits(0x7f7f_8000)), "the ties at the largest");
-    let x = cuda.upload(&xs).unwrap();
-    let (h, b) = (cuda.alloc::<f16>(xs.len()).unwrap(), cuda.alloc::<bf16>(xs.len()).unwrap());
+    let x = cuda.upload(&xs)?;
+    let (h, b) = (cuda.alloc::<f16>(xs.len())?, cuda.alloc::<bf16>(xs.len())?);
     let n = xs.len() as u32;
     // SAFETY: `narrow` takes three pointers and a `u32`, and reads `n` floats at the first,
     // and writes `n` halves at each of the others.
-    unsafe { module.launch(1, grid(xs.len()), &[arg(&x.ptr()), arg(&h.ptr()), arg(&b.ptr()), arg(&n)]) }.unwrap();
-    let (h, b) = (h.read().unwrap(), b.read().unwrap());
+    unsafe { module.launch(1, grid(xs.len()), &[arg(&x.ptr()), arg(&h.ptr()), arg(&b.ptr()), arg(&n)]) }?;
+    let (h, b) = (h.read()?, b.read()?);
     for (i, &x) in xs.iter().enumerate() {
         let (h, b) = (h[i].to_bits(), b[i].to_bits());
         if x.is_nan() {
@@ -307,6 +341,7 @@ fn floats_of_16_bits_convert_as_the_gpu_converts_them() {
         assert_eq!(f16::from_f32(x).to_bits(), h, "f16 of {x:e}, {:#010x}", x.to_bits());
         assert_eq!(bf16::from_f32(x).to_bits(), b, "bf16 of {x:e}, {:#010x}", x.to_bits());
     }
+    Ok(())
 }
 
 /// What a kernel of the parameters of fewer bits and of `f64` is given, written to `out`: an
@@ -341,15 +376,15 @@ const PARAMS: &str = "
 ";
 
 #[test]
-fn a_kernel_is_given_the_bits_of_each_parameter() {
-    let Some(cuda) = cuda() else { return };
-    let module = Module::load(&cuda, PARAMS, &["params"], &[]).unwrap();
-    let out = cuda.alloc::<u8>(16).unwrap();
+fn a_kernel_is_given_the_bits_of_each_parameter() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let module = Module::load(&cuda, PARAMS, &["params"], &[])?;
+    let out = cuda.alloc::<u8>(16)?;
     let (h, b, c, s, d) = (f16::from_f32(1.5), bf16::from_f32(-2.25), 0xa5u8, -12345i16, 1.0e300f64);
     let args = [arg(&out.ptr()), arg(&h), arg(&b), arg(&c), arg(&s), arg(&d)];
     // SAFETY: `params` takes these, and writes 16 bytes at the pointer.
-    unsafe { module.launch(0, Grid::new(1, 1), &args) }.unwrap();
-    let got = out.read().unwrap();
+    unsafe { module.launch(0, Grid::new(1, 1), &args) }?;
+    let got = out.read()?;
     let mut want = vec![0u8; 16];
     want[0..2].copy_from_slice(&h.to_bits().to_le_bytes());
     want[2..4].copy_from_slice(&b.to_bits().to_le_bytes());
@@ -357,6 +392,7 @@ fn a_kernel_is_given_the_bits_of_each_parameter() {
     want[6..8].copy_from_slice(&s.to_le_bytes());
     want[8..16].copy_from_slice(&d.to_le_bytes());
     assert_eq!(got, want);
+    Ok(())
 }
 
 /// Memory of the module's own, which its kernels name, and which keeps what they write from one
@@ -372,6 +408,7 @@ const GLOBALS: &str = "
 .global .align 4 .b8 counts[16];
 .visible .global .align 4 .b8 seen[8] = {7, 0, 0, 0, 9};
 .const .align 4 .b8 table[8] = {0, 0, 128, 63, 0, 0, 0, 64};
+.global .align 1 .b8 odd[6];
 
 .visible .entry count(.param .u32 i_param)
 {
@@ -406,45 +443,71 @@ const GLOBALS: &str = "
 ";
 
 #[test]
-fn a_module_s_memory_keeps_what_is_written_from_launch_to_launch() {
-    let Some(cuda) = cuda() else { return };
-    let module = Module::load(&cuda, GLOBALS, &["count", "copy"], &["counts", "seen", "table"]).unwrap();
-    let (counts, seen, table) = (module.global::<u32>(0), module.global::<u32>(1), module.global::<f32>(2));
+fn a_module_s_memory_keeps_what_is_written_from_launch_to_launch() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let module = Module::load(&cuda, GLOBALS, &["count", "copy"], &["counts", "seen", "table", "odd"])?;
+    let (counts, seen, table) = (module.global::<u32>(0)?, module.global::<u32>(1)?, module.global::<f32>(2)?);
     // What the PTX declares: zeros, or what it is initialized to, and zeros after.
-    assert_eq!(counts.read().unwrap(), [0; 4]);
-    assert_eq!(seen.read().unwrap(), [7, 9]);
-    assert_eq!(table.read().unwrap(), [1.0, 2.0]);
-    let count = |i: u32, threads: u32| {
+    assert_eq!(counts.read()?, [0; 4]);
+    assert_eq!(seen.read()?, [7, 9]);
+    assert_eq!(table.read()?, [1.0, 2.0]);
+    let count = |i: u32, threads: u32| -> Result<_> {
         // SAFETY: `count` takes a `u32`, and adds to word `i` of the four of `counts`.
-        unsafe { module.launch(0, Grid::new(1, threads), &[arg(&i)]) }.unwrap()
+        Ok(unsafe { module.launch(0, Grid::new(1, threads), &[arg(&i)]) }?)
     };
-    count(2, 64);
-    count(2, 32);
-    count(0, 3);
-    assert_eq!(counts.read().unwrap(), [3, 0, 96, 0]);
-    counts.write(&[10, 20, 30, 40]).unwrap();
-    count(1, 1);
-    assert_eq!(counts.read().unwrap(), [10, 21, 30, 40]);
-    counts.zero().unwrap();
-    count(3, 5);
-    assert_eq!(counts.read().unwrap(), [0, 0, 0, 5]);
+    count(2, 64)?;
+    count(2, 32)?;
+    count(0, 3)?;
+    assert_eq!(counts.read()?, [3, 0, 96, 0]);
+    counts.write(&[10, 20, 30, 40])?;
+    count(1, 1)?;
+    assert_eq!(counts.read()?, [10, 21, 30, 40]);
+    counts.zero()?;
+    count(3, 5)?;
+    assert_eq!(counts.read()?, [0, 0, 0, 5]);
     // Constant memory, which its kernels only read, the host writes.
-    seen.write(&[5, 6]).unwrap();
-    table.write(&[3.0, 4.0]).unwrap();
+    seen.write(&[5, 6])?;
+    table.write(&[3.0, 4.0])?;
     // SAFETY: `copy` takes a pointer, and writes 16 bytes there, as many as `counts` has.
-    unsafe { module.launch(1, Grid::new(1, 1), &[arg(&counts.ptr())]) }.unwrap();
-    assert_eq!(counts.read().unwrap(), [5, 6, 3.0f32.to_bits(), 4.0f32.to_bits()]);
+    unsafe { module.launch(1, Grid::new(1, 1), &[arg(&counts.ptr())]) }?;
+    assert_eq!(counts.read()?, [5, 6, 3.0f32.to_bits(), 4.0f32.to_bits()]);
     // Its bytes as elements of any size they are a whole number of.
-    assert_eq!((module.global::<u8>(1).len(), module.global::<u64>(0).len()), (8, 2));
-    assert_eq!(counts.at(3).addr(), counts.ptr().addr() + 12);
+    assert_eq!((module.global::<u8>(1)?.len(), module.global::<u64>(0)?.len()), (8, 2));
+    assert_eq!(counts.at(3).ok_or("at gave None")?.addr(), counts.ptr().addr() + 12);
+    assert_eq!(counts.at(4).ok_or("at gave None")?.addr(), counts.ptr().addr() + 16);
+    assert!(counts.at(5).is_none());
+    Ok(())
+}
+
+/// The module's memory a call asks for is one it was loaded with, and its bytes a whole number of
+/// the elements it is asked for as; what is written to it or read from it has as many elements as
+/// it has. Each says so, and none is written.
+#[test]
+fn a_module_s_memory_is_refused_that_is_not_there_or_is_no_whole_number_of_elements() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let module = Module::load(&cuda, GLOBALS, &["count", "copy"], &["counts", "seen", "table", "odd"])?;
+    let said = |e: Option<kernite_cuda::Error>| e.map(|e| e.to_string());
+    let none = said(module.global::<u32>(4).err());
+    assert_eq!(none.as_deref(), Some("cuModuleGetGlobal: there is no memory 4 in a module of 4"));
+    let odd = said(module.global::<u32>(3).err());
+    assert_eq!(odd.as_deref(), Some("cuModuleGetGlobal: 6 bytes are no whole number of elements of 4"));
+    assert_eq!(module.global::<u16>(3)?.len(), 3);
+    let counts = module.global::<u32>(0)?;
+    let write = said(counts.write(&[1, 2]).err());
+    assert_eq!(write.as_deref(), Some("cuMemcpyHtoD: a module's memory of 4 elements written with 2"));
+    let read = said(counts.read_into(&mut [0; 5]).err());
+    assert_eq!(read.as_deref(), Some("cuMemcpyDtoH: a module's memory of 4 elements read into 5"));
+    assert_eq!(counts.read()?, [0; 4]);
+    Ok(())
 }
 
 #[test]
-fn memory_the_module_has_not_is_named() {
-    let Some(cuda) = cuda() else { return };
-    let e = Module::load(&cuda, GLOBALS, &[], &["counts", "nothing"]).err().unwrap();
+fn memory_the_module_has_not_is_named() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let e = Module::load(&cuda, GLOBALS, &[], &["counts", "nothing"]).err().ok_or("err gave None")?;
     assert_eq!(e.call, "cuModuleGetGlobal");
     assert!(e.message.starts_with("CUDA_ERROR_NOT_FOUND") && e.message.ends_with("for `nothing`"), "{e}");
+    Ok(())
 }
 
 /// Where the driver's workspace for the grid is, as `%envreg1:%envreg2` give its address, high
@@ -479,52 +542,56 @@ done:
 ";
 
 #[test]
-fn a_cooperative_launch_has_a_workspace_for_the_grid() {
-    let Some(cuda) = cuda() else { return };
+fn a_cooperative_launch_has_a_workspace_for_the_grid() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
     if !cuda.cooperative() {
         eprintln!("{} launches no kernel cooperatively: skipped", cuda.name());
-        return;
+        return Ok(());
     }
-    let module = Module::load(&cuda, WORKSPACE, &["workspace"], &[]).unwrap();
-    let at = cuda.alloc::<u64>(3).unwrap();
+    let module = Module::load(&cuda, WORKSPACE, &["workspace"], &[])?;
+    let at = cuda.alloc::<u64>(3)?;
     // SAFETY: `workspace` takes a pointer, and writes a word of 8 bytes there for each block.
-    unsafe { module.launch_cooperative(0, Grid::new(3, 64), &[arg(&at.ptr())]) }.unwrap();
-    let ws = at.read().unwrap();
+    unsafe { module.launch_cooperative(0, Grid::new(3, 64), &[arg(&at.ptr())]) }?;
+    let ws = at.read()?;
     // An address on the GPU, which the barrier after its first word is aligned in.
     assert!(ws[0] != 0 && ws[0].is_multiple_of(8) && ws.iter().all(|&w| w == ws[0]), "{ws:#x?}");
+    Ok(())
 }
 
 #[test]
-fn a_cooperative_launch_has_at_most_the_blocks_the_gpu_runs_at_once() {
-    let Some(cuda) = cuda() else { return };
+fn a_cooperative_launch_has_at_most_the_blocks_the_gpu_runs_at_once() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
     if !cuda.cooperative() {
         eprintln!("{} launches no kernel cooperatively: skipped", cuda.name());
-        return;
+        return Ok(());
     }
-    let module = Module::load(&cuda, WORKSPACE, &["workspace"], &[]).unwrap();
-    let most = module.resident(0, 256, 0).unwrap();
+    let module = Module::load(&cuda, WORKSPACE, &["workspace"], &[])?;
+    let most = module.resident(0, 256, 0)?;
     // Every SM holds a block of 256 threads, and none more than 2048 threads.
     let sms = cuda.multiprocessors();
     assert!((sms..=sms * 8).contains(&most), "{most} blocks on {sms} SMs");
     // Fewer threads, more blocks, up to as many as an SM holds.
-    assert!(module.resident(0, 32, 0).unwrap() > most);
-    let mut at = cuda.alloc::<u64>(most as usize + 1).unwrap();
+    assert!(module.resident(0, 32, 0)? > most);
+    let mut at = cuda.alloc::<u64>(most as usize + 1)?;
     // SAFETY: `workspace` takes a pointer, and writes a word of 8 bytes there for each block.
-    unsafe { module.launch_cooperative(0, Grid::new(most, 256), &[arg(&at.ptr())]) }.unwrap();
-    cuda.sync().unwrap();
+    unsafe { module.launch_cooperative(0, Grid::new(most, 256), &[arg(&at.ptr())]) }?;
+    cuda.sync()?;
     // SAFETY: as above.
-    let e = unsafe { module.launch_cooperative(0, Grid::new(most + 1, 256), &[arg(&at.ptr())]) }.unwrap_err();
+    let e = unsafe { module.launch_cooperative(0, Grid::new(most + 1, 256), &[arg(&at.ptr())]) }
+        .err()
+        .ok_or("value gave Ok")?;
     assert_eq!(e.call, "cuLaunchCooperativeKernel");
     assert!(e.message.starts_with("CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE (720): "), "{e}");
     let tail = format!(": the grid has {} blocks, and the GPU runs {most} of these at once", most + 1);
     assert!(e.message.ends_with(&tail), "{e}");
     // The launch was refused, and the GPU goes on.
-    cuda.sync().unwrap();
-    at.zero().unwrap();
+    cuda.sync()?;
+    at.zero()?;
     // SAFETY: as above.
-    unsafe { module.launch_cooperative(0, Grid::new(most, 256), &[arg(&at.ptr())]) }.unwrap();
-    let ws = at.read().unwrap();
+    unsafe { module.launch_cooperative(0, Grid::new(most, 256), &[arg(&at.ptr())]) }?;
+    let ws = at.read()?;
     assert!(ws[0] != 0 && ws[..most as usize].iter().all(|&w| w == ws[0]) && ws[most as usize] == 0, "{ws:#x?}");
+    Ok(())
 }
 
 /// Stores `ctaid.x` of the last block, the one whose number is one less than the blocks along
@@ -558,21 +625,21 @@ done:
 /// module of kernite's is written for `sm_30` at the least. The `.target` says it, not the
 /// `.version`.
 #[test]
-fn the_driver_starts_65535_blocks_of_a_module_for_fermi_and_more_of_one_for_kepler() {
-    let Some(cuda) = cuda() else { return };
-    let mut out = cuda.alloc::<u32>(1).unwrap();
+fn the_driver_starts_65535_blocks_of_a_module_for_fermi_and_more_of_one_for_kepler() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let mut out = cuda.alloc::<u32>(1)?;
     let at = out.ptr();
     for (target, most) in [("sm_20", 65535), ("sm_21", 65535), ("sm_30", 65536)] {
-        let module = Module::load(&cuda, &LAST.replace("sm_30", target), &["last"], &[]).unwrap();
+        let module = Module::load(&cuda, &LAST.replace("sm_30", target), &["last"], &[])?;
         for blocks in [1, 65535, 65536] {
-            out.zero().unwrap();
+            out.zero()?;
             // SAFETY: `last` takes a pointer, and writes a word there.
             let launched = unsafe { module.launch(0, Grid::new(blocks, 1), &[arg(&at)]) };
             if blocks <= most {
-                launched.unwrap();
-                assert_eq!(out.read().unwrap(), [blocks - 1], "{blocks} blocks for {target}");
+                launched?;
+                assert_eq!(out.read()?, [blocks - 1], "{blocks} blocks for {target}");
             } else {
-                let e = launched.unwrap_err();
+                let e = launched.err().ok_or("launched gave Ok")?;
                 assert_eq!(e.call, "cuLaunchKernel");
                 // The driver's words alone: no size of the launch, its shared memory of none among
                 // them, is past what the GPU takes.
@@ -580,7 +647,8 @@ fn the_driver_starts_65535_blocks_of_a_module_for_fermi_and_more_of_one_for_kepl
             }
         }
     }
-    cuda.sync().unwrap();
+    cuda.sync()?;
+    Ok(())
 }
 
 /// Each grid, and what a launch over it says: nothing, for one the GPU takes, at the least and at
@@ -633,10 +701,10 @@ fn refusal(call: &str, e: &kernite_cuda::Error, said: &str) {
 }
 
 #[test]
-fn a_launch_over_a_grid_the_gpu_does_not_take_says_which_size_is_past_which_limit() {
-    let Some(cuda) = cuda() else { return };
-    let module = Module::load(&cuda, LAST, &["last"], &[]).unwrap();
-    let out = cuda.alloc::<u32>(1).unwrap();
+fn a_launch_over_a_grid_the_gpu_does_not_take_says_which_size_is_past_which_limit() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let module = Module::load(&cuda, LAST, &["last"], &[])?;
+    let out = cuda.alloc::<u32>(1)?;
     let at = out.ptr();
     for (grid, said) in grids() {
         // SAFETY: `last` takes a pointer, and writes a word there.
@@ -644,31 +712,33 @@ fn a_launch_over_a_grid_the_gpu_does_not_take_says_which_size_is_past_which_limi
         match (launched, said) {
             (Ok(()), None) => {}
             (Err(e), Some(said)) => refusal("cuLaunchKernel", &e, said),
-            (launched, said) => panic!("{grid:?}: {launched:?}, and it should say {said:?}"),
+            (launched, said) => return Err(format!("{grid:?}: {launched:?}, and it should say {said:?}").into()),
         }
     }
     // The launches refused did not harm the GPU, nor the ones that started.
-    cuda.sync().unwrap();
+    cuda.sync()?;
+    Ok(())
 }
 
 #[test]
-fn a_cooperative_launch_over_a_grid_the_gpu_does_not_take_says_it_too() {
-    let Some(cuda) = cuda() else { return };
+fn a_cooperative_launch_over_a_grid_the_gpu_does_not_take_says_it_too() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
     if !cuda.cooperative() {
         eprintln!("{} launches no kernel cooperatively: skipped", cuda.name());
-        return;
+        return Ok(());
     }
-    let module = Module::load(&cuda, LAST, &["last"], &[]).unwrap();
-    let out = cuda.alloc::<u32>(1).unwrap();
+    let module = Module::load(&cuda, LAST, &["last"], &[])?;
+    let out = cuda.alloc::<u32>(1)?;
     let at = out.ptr();
     // Only the grids the GPU does not take: one it takes may have more blocks than it runs at
     // once, which is refused in other words.
     for (grid, said) in grids().into_iter().filter_map(|(grid, said)| said.map(|said| (grid, said))) {
         // SAFETY: `last` takes a pointer, and writes a word there.
-        let e = unsafe { module.launch_cooperative(0, grid, &[arg(&at)]) }.unwrap_err();
+        let e = unsafe { module.launch_cooperative(0, grid, &[arg(&at)]) }.err().ok_or("value gave Ok")?;
         refusal("cuLaunchCooperativeKernel", &e, said);
     }
-    cuda.sync().unwrap();
+    cuda.sync()?;
+    Ok(())
 }
 
 /// A kernel of 20 KB of shared memory of its own, `both`, and one of none, `plain`, each given
@@ -756,19 +826,19 @@ fn launch_own(
 }
 
 #[test]
-fn a_launch_gives_a_block_all_the_shared_memory_the_gpu_has_with_the_kernels_own_counted() {
-    let Some(cuda) = cuda() else { return };
+fn a_launch_gives_a_block_all_the_shared_memory_the_gpu_has_with_the_kernels_own_counted() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
     let most = cuda.max_shared();
     if most < 99 << 10 {
         eprintln!("{}, sm_{}, gives a block {most} bytes of shared memory, not 99 KB: skipped", cuda.name(), cuda.sm());
-        return;
+        return Ok(());
     }
-    let load = || Module::load(&cuda, OWN, &["both", "plain"], &[]).unwrap();
-    let mut out = cuda.alloc::<u32>(2).unwrap();
+    let load = || -> Result<_> { Ok(Module::load(&cuda, OWN, &["both", "plain"], &[])?) };
+    let mut out = cuda.alloc::<u32>(2)?;
     for (index, own) in OWNS {
         // The count of blocks a kernel runs at once lets it have the shared memory it counts by,
         // as a launch does: of a kernel nothing has let have more, it is not none.
-        assert!(load().resident(index, 256, most - own).unwrap() >= 1, "{own} bytes of the kernel's");
+        assert!(load()?.resident(index, 256, most - own)? >= 1, "{own} bytes of the kernel's");
     }
     for cooperative in [false, true] {
         if cooperative && !cuda.cooperative() {
@@ -777,7 +847,7 @@ fn a_launch_gives_a_block_all_the_shared_memory_the_gpu_has_with_the_kernels_own
         }
         for (index, own) in OWNS {
             // A module of its own, which nothing has let have more than the driver gives unasked.
-            let module = load();
+            let module = load()?;
             // What a launch gets unasked, 48 KB with the kernel's own, and what the GPU gives it.
             let (unasked, all) = ((48 << 10) - own, most - own);
             let mut sizes: Vec<u32> = [0, 16, 28, 29, 40, 48, 49, 79].map(|kb| kb << 10).into();
@@ -788,25 +858,26 @@ fn a_launch_gives_a_block_all_the_shared_memory_the_gpu_has_with_the_kernels_own
             // Up from none to all, and down again: a kernel let have more keeps what it was let,
             // and runs a launch of less.
             for &bytes in sizes.iter().chain(sizes.iter().rev()) {
-                out.zero().unwrap();
+                out.zero()?;
                 let grid = Grid::new(1, 1).with_shared(bytes);
                 let what =
                     format!("{bytes} bytes from the launch and {own} of the kernel's, cooperative: {cooperative}");
-                launch_own(&module, cooperative, index, grid, out.ptr()).unwrap_or_else(|e| panic!("{what}: {e}"));
+                launch_own(&module, cooperative, index, grid, out.ptr()).map_err(|e| format!("{what}: {e}"))?;
                 let want = [if own > 0 { 7 } else { 0 }, if bytes > 0 { 9 } else { 0 }];
-                assert_eq!(out.read().unwrap(), want, "{what}");
+                assert_eq!(out.read()?, want, "{what}");
             }
         }
     }
-    cuda.sync().unwrap();
+    cuda.sync()?;
+    Ok(())
 }
 
 #[test]
-fn a_launch_past_the_shared_memory_the_gpu_gives_a_block_says_how_much_the_block_has() {
-    let Some(cuda) = cuda() else { return };
+fn a_launch_past_the_shared_memory_the_gpu_gives_a_block_says_how_much_the_block_has() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
     let most = cuda.max_shared();
-    let module = Module::load(&cuda, OWN, &["both", "plain"], &[]).unwrap();
-    let mut out = cuda.alloc::<u32>(2).unwrap();
+    let module = Module::load(&cuda, OWN, &["both", "plain"], &[])?;
+    let mut out = cuda.alloc::<u32>(2)?;
     let said = |own: u32, bytes: u32| {
         let all = u64::from(own) + u64::from(bytes);
         format!(
@@ -827,30 +898,32 @@ fn a_launch_past_the_shared_memory_the_gpu_gives_a_block_says_how_much_the_block
                 }
                 let what =
                     format!("{bytes} bytes from the launch and {own} of the kernel's, cooperative: {cooperative}");
-                let e = launch_own(&module, cooperative, index, launch, out.ptr()).expect_err(&what);
+                let launched = launch_own(&module, cooperative, index, launch, out.ptr());
+                let e = launched.err().ok_or_else(|| format!("{what}: launch_own gave Ok"))?;
                 refusal("cuFuncSetAttribute", &e, &said(own, bytes));
             }
-            let e = module.resident(index, 256, bytes).expect_err("resident");
+            let e = module.resident(index, 256, bytes).err().ok_or("resident gave Ok")?;
             refusal("cuFuncSetAttribute", &e, &said(own, bytes));
         }
         // A launch refused leaves the kernel as it was, and the GPU: the most it gives still runs,
         // and so does a launch of the 48 KB it gets unasked.
         for bytes in [all, (48 << 10) - own] {
-            out.zero().unwrap();
-            launch_own(&module, false, index, Grid::new(1, 1).with_shared(bytes), out.ptr()).unwrap();
-            assert_eq!(out.read().unwrap(), [if own > 0 { 7 } else { 0 }, 9], "{bytes} bytes and {own}");
+            out.zero()?;
+            launch_own(&module, false, index, Grid::new(1, 1).with_shared(bytes), out.ptr())?;
+            assert_eq!(out.read()?, [if own > 0 { 7 } else { 0 }, 9], "{bytes} bytes and {own}");
         }
-        assert!(module.resident(index, 256, all).unwrap() >= 1);
+        assert!(module.resident(index, 256, all)? >= 1);
     }
-    cuda.sync().unwrap();
+    cuda.sync()?;
+    Ok(())
 }
 
 #[test]
-fn the_first_size_past_is_said_whether_it_is_the_grids_or_the_shared_memorys() {
-    let Some(cuda) = cuda() else { return };
+fn the_first_size_past_is_said_whether_it_is_the_grids_or_the_shared_memorys() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
     let most = cuda.max_shared();
-    let module = Module::load(&cuda, OWN, &["plain"], &[]).unwrap();
-    let out = cuda.alloc::<u32>(2).unwrap();
+    let module = Module::load(&cuda, OWN, &["plain"], &[])?;
+    let out = cuda.alloc::<u32>(2)?;
     let shared = most + 4;
     let grid = |blocks, threads| Grid { blocks, threads, shared };
     let all = format!(
@@ -868,10 +941,11 @@ fn the_first_size_past_is_said_whether_it_is_the_grids_or_the_shared_memorys() {
         (grid([1, 1, 1], [1, 1, 1]), all.as_str()),
     ];
     for (grid, said) in cases {
-        let e = launch_own(&module, false, 0, grid, out.ptr()).unwrap_err();
+        let e = launch_own(&module, false, 0, grid, out.ptr()).err().ok_or("launch_own gave Ok")?;
         refusal("cuFuncSetAttribute", &e, said);
     }
-    cuda.sync().unwrap();
+    cuda.sync()?;
+    Ok(())
 }
 
 /// A module of kernels written by hand, each adding 1 to the word at its pointer for each thread
@@ -946,59 +1020,62 @@ fn launches() -> Vec<(usize, [u32; 3], Result<u32, String>)> {
 }
 
 #[test]
-fn a_launch_over_a_block_the_kernel_refuses_says_the_directive_and_the_threads() {
-    let Some(cuda) = cuda() else { return };
+fn a_launch_over_a_block_the_kernel_refuses_says_the_directive_and_the_threads() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
     let names: Vec<&str> = TUNED.iter().map(|(name, _)| *name).collect();
-    let module = Module::load(&cuda, &counting(&TUNED), &names, &[]).unwrap();
-    let mut count = cuda.alloc::<u32>(1).unwrap();
+    let module = Module::load(&cuda, &counting(&TUNED), &names, &[])?;
+    let mut count = cuda.alloc::<u32>(1)?;
     for (index, threads, done) in launches() {
         let grid = Grid { blocks: [3, 1, 1], threads, shared: 0 };
-        count.zero().unwrap();
+        count.zero()?;
         // SAFETY: each kernel takes a pointer, and adds to the word there.
         let launched = unsafe { module.launch(index, grid, &[arg(&count.ptr())]) };
         match (launched, done) {
             (Ok(()), Ok(block)) => {
-                cuda.sync().unwrap();
-                assert_eq!(count.read().unwrap(), [3 * block], "{} over {grid:?}", names[index]);
+                cuda.sync()?;
+                assert_eq!(count.read()?, [3 * block], "{} over {grid:?}", names[index]);
             }
             (Err(e), Err(said)) => refusal("cuLaunchKernel", &e, &said),
             (launched, done) => {
-                panic!("{} over {grid:?}: {launched:?}, and the driver should do {done:?}", names[index])
+                let said = format!("{} over {grid:?}: {launched:?}, and the driver should do {done:?}", names[index]);
+                return Err(said.into());
             }
         }
     }
     // The launches refused did not harm the GPU, nor the ones that started.
-    cuda.sync().unwrap();
+    cuda.sync()?;
+    Ok(())
 }
 
 #[test]
-fn a_cooperative_launch_over_a_block_the_kernel_refuses_says_it_too() {
-    let Some(cuda) = cuda() else { return };
+fn a_cooperative_launch_over_a_block_the_kernel_refuses_says_it_too() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
     if !cuda.cooperative() {
         eprintln!("{} launches no kernel cooperatively: skipped", cuda.name());
-        return;
+        return Ok(());
     }
     let names: Vec<&str> = TUNED.iter().map(|(name, _)| *name).collect();
-    let module = Module::load(&cuda, &counting(&TUNED), &names, &[]).unwrap();
-    let count = cuda.alloc::<u32>(1).unwrap();
+    let module = Module::load(&cuda, &counting(&TUNED), &names, &[])?;
+    let count = cuda.alloc::<u32>(1)?;
     // Only the blocks the kernel refuses: one it takes may have more blocks than it runs at once,
     // which is refused in other words.
     for (index, threads, said) in launches().into_iter().filter_map(|(i, t, done)| done.err().map(|said| (i, t, said)))
     {
         let grid = Grid { blocks: [3, 1, 1], threads, shared: 0 };
         // SAFETY: each kernel takes a pointer, and adds to the word there.
-        let e = unsafe { module.launch_cooperative(index, grid, &[arg(&count.ptr())]) }.unwrap_err();
+        let e = unsafe { module.launch_cooperative(index, grid, &[arg(&count.ptr())]) }.err().ok_or("value gave Ok")?;
         refusal("cuLaunchCooperativeKernel", &e, &said);
     }
-    cuda.sync().unwrap();
+    cuda.sync()?;
+    Ok(())
 }
 
 #[test]
-fn the_kernels_block_is_said_after_the_gpus_limits_and_the_shared_memory() {
-    let Some(cuda) = cuda() else { return };
+fn the_kernels_block_is_said_after_the_gpus_limits_and_the_shared_memory() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
     let names: Vec<&str> = TUNED.iter().map(|(name, _)| *name).collect();
-    let module = Module::load(&cuda, &counting(&TUNED), &names, &[]).unwrap();
-    let count = cuda.alloc::<u32>(1).unwrap();
+    let module = Module::load(&cuda, &counting(&TUNED), &names, &[])?;
+    let count = cuda.alloc::<u32>(1)?;
     let (index, most) = (2, cuda.max_shared());
     let shared = most + 4;
     // 512 threads are past the `.maxntid 256` of kernel `max`, which is at `index`, and `shared`
@@ -1011,41 +1088,45 @@ fn the_kernels_block_is_said_after_the_gpus_limits_and_the_shared_memory() {
     );
     let args = [arg(&count.ptr())];
     // SAFETY: the kernels take a pointer, and add to the word there, if they start at all.
-    let e = unsafe { module.launch(index, past_both, &args) }.unwrap_err();
+    let e = unsafe { module.launch(index, past_both, &args) }.err().ok_or("value gave Ok")?;
     refusal("cuFuncSetAttribute", &e, &all);
     if cuda.cooperative() {
         // SAFETY: as above.
-        let e = unsafe { module.launch_cooperative(index, past_both, &args) }.unwrap_err();
+        let e = unsafe { module.launch_cooperative(index, past_both, &args) }.err().ok_or("value gave Ok")?;
         refusal("cuFuncSetAttribute", &e, &all);
     }
-    cuda.sync().unwrap();
+    cuda.sync()?;
+    Ok(())
 }
 
 /// The indexes of the GPUs for a test of two: 0 and 1; or, on a machine with one GPU, 0 twice,
 /// and a line that says what the test could not show. `None`, and why, where the driver shows none.
-fn two_gpus() -> Option<[usize; 2]> {
+fn two_gpus() -> Result<Option<[usize; 2]>> {
     // Where the driver shows none, `cuda` says so, and the test is skipped.
-    cuda()?;
-    let count = Cuda::count().unwrap();
+    if cuda().is_none() {
+        return Ok(None);
+    }
+    let count = Cuda::count()?;
     if count < 2 {
         eprintln!("two GPUs: skipped, the driver shows {count}; the test runs on GPU 0 twice");
-        return Some([0, 0]);
+        return Ok(Some([0, 0]));
     }
-    Some([0, 1])
+    Ok(Some([0, 1]))
 }
 
 /// Launches `add_one`, kernel 0 of `module`, over the first 1000 floats of `x`.
-fn add_one(module: &Module, x: &Buffer<f32>) {
+fn add_one(module: &Module, x: &Buffer<f32>) -> Result {
     let (x, n) = (x.ptr(), 1000u32);
     // SAFETY: `add_one` takes a pointer and a `u32`, and writes only the first `n` floats there,
     // which the buffers of these tests have.
-    unsafe { module.launch(0, Grid::new(4, 256), &[arg(&x), arg(&n)]) }.unwrap();
+    unsafe { module.launch(0, Grid::new(4, 256), &[arg(&x), arg(&n)]) }?;
+    Ok(())
 }
 
 #[test]
-fn a_gpu_is_taken_by_its_index_and_a_missing_one_is_an_error_that_says_how_many_there_are() {
-    let Some(first) = cuda() else { return };
-    let count = Cuda::count().unwrap();
+fn a_gpu_is_taken_by_its_index_and_a_missing_one_is_an_error_that_says_how_many_there_are() -> Result {
+    let Some(first) = cuda() else { return Ok(()) };
+    let count = Cuda::count()?;
     // The system lists a GPU in a directory of its own, unless `CUDA_VISIBLE_DEVICES` hides some.
     if let (Ok(gpus), None) = (std::fs::read_dir("/proc/driver/nvidia/gpus"), std::env::var_os("CUDA_VISIBLE_DEVICES"))
     {
@@ -1053,15 +1134,15 @@ fn a_gpu_is_taken_by_its_index_and_a_missing_one_is_an_error_that_says_how_many_
     }
     // GPU 0 by its index is the one `Cuda::new` gives, and every index below the count is a GPU.
     let describe = |c: &Cuda| (c.name().to_string(), c.sm(), c.max_shared(), c.multiprocessors());
-    assert_eq!(describe(&Cuda::on(0).unwrap()), describe(&first));
+    assert_eq!(describe(&Cuda::on(0)?), describe(&first));
     for index in 0..count {
-        Cuda::on(index).unwrap();
+        Cuda::on(index)?;
     }
     // The first index past the last GPU, and the greatest there is, are errors that say how many
     // GPUs there are.
     let gpus = if count == 1 { "1 GPU".to_string() } else { format!("{count} GPUs") };
     for past in [count, usize::MAX] {
-        let e = Cuda::on(past).err().unwrap();
+        let e = Cuda::on(past).err().ok_or("err gave None")?;
         let said = "CUDA_ERROR_INVALID_DEVICE (101): invalid device ordinal";
         assert_eq!(
             (e.call, e.message),
@@ -1069,32 +1150,33 @@ fn a_gpu_is_taken_by_its_index_and_a_missing_one_is_an_error_that_says_how_many_
         );
     }
     if count == 1 {
-        let e = Cuda::on(1).err().unwrap();
+        let e = Cuda::on(1).err().ok_or("err gave None")?;
         assert_eq!(
             e.to_string(),
             "cuDeviceGet: CUDA_ERROR_INVALID_DEVICE (101): invalid device ordinal: the driver shows 1 GPU, and none is numbered 1"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn a_cuda_of_each_gpu_on_one_thread_sends_each_call_to_its_own_gpu() {
-    let Some(gpus) = two_gpus() else { return };
+fn a_cuda_of_each_gpu_on_one_thread_sends_each_call_to_its_own_gpu() -> Result {
+    let Some(gpus) = two_gpus()? else { return Ok(()) };
     // Each `Cuda` is made, and its module loaded, with its own GPU's context current; the second
     // makes its context current in the first's place.
-    let a = Cuda::on(gpus[0]).unwrap();
-    let module_a = Module::load(&a, PTX, &["add_one"], &[]).unwrap();
-    let globals_a = Module::load(&a, GLOBALS, &["count"], &["counts"]).unwrap();
-    let b = Cuda::on(gpus[1]).unwrap();
-    let module_b = Module::load(&b, PTX, &["add_one"], &[]).unwrap();
-    let globals_b = Module::load(&b, GLOBALS, &["count"], &["counts"]).unwrap();
-    let (mut xs_a, mut xs_b) = (a.alloc::<f32>(1000).unwrap(), b.alloc::<f32>(1000).unwrap());
+    let a = Cuda::on(gpus[0])?;
+    let module_a = Module::load(&a, PTX, &["add_one"], &[])?;
+    let globals_a = Module::load(&a, GLOBALS, &["count"], &["counts"])?;
+    let b = Cuda::on(gpus[1])?;
+    let module_b = Module::load(&b, PTX, &["add_one"], &[])?;
+    let globals_b = Module::load(&b, GLOBALS, &["count"], &["counts"])?;
+    let (mut xs_a, mut xs_b) = (a.alloc::<f32>(1000)?, b.alloc::<f32>(1000)?);
     for round in 1..=4 {
         // Copies in turn, then launches on both GPUs before either is waited for, in an order
         // that changes, and each call goes to its own GPU.
-        xs_a.write(&[round as f32; 1000]).unwrap();
-        xs_b.write(&[10.0 * round as f32; 1000]).unwrap();
-        let order: [&dyn Fn(); 4] = if round % 2 == 0 {
+        xs_a.write(&[round as f32; 1000])?;
+        xs_b.write(&[10.0 * round as f32; 1000])?;
+        let order: [&dyn Fn() -> Result; 4] = if round % 2 == 0 {
             [&|| add_one(&module_a, &xs_a), &|| add_one(&module_b, &xs_b), &|| add_one(&module_b, &xs_b), &|| {
                 add_one(&module_a, &xs_a)
             }]
@@ -1103,86 +1185,105 @@ fn a_cuda_of_each_gpu_on_one_thread_sends_each_call_to_its_own_gpu() {
                 add_one(&module_b, &xs_b)
             }]
         };
-        order.iter().for_each(|launch| launch());
-        if round % 2 == 0 {
-            a.sync().unwrap();
-            b.sync().unwrap();
-        } else {
-            b.sync().unwrap();
-            a.sync().unwrap();
+        for launch in order {
+            launch()?;
         }
-        assert_eq!(xs_a.read().unwrap(), vec![round as f32 + 2.0; 1000], "round {round}, GPU {}", gpus[0]);
-        assert_eq!(xs_b.read().unwrap(), vec![10.0 * round as f32 + 2.0; 1000], "round {round}, GPU {}", gpus[1]);
+        if round % 2 == 0 {
+            a.sync()?;
+            b.sync()?;
+        } else {
+            b.sync()?;
+            a.sync()?;
+        }
+        assert_eq!(xs_a.read()?, vec![round as f32 + 2.0; 1000], "round {round}, GPU {}", gpus[0]);
+        assert_eq!(xs_b.read()?, vec![10.0 * round as f32 + 2.0; 1000], "round {round}, GPU {}", gpus[1]);
     }
     // The memory of each module is on its own GPU: the same variable on each holds its own count.
-    let count = |module: &Module, threads: u32| {
+    let count = |module: &Module, threads: u32| -> Result<_> {
         let i = 1u32;
         // SAFETY: `count` takes a `u32`, and adds to word `i` of the four of `counts`.
-        unsafe { module.launch(0, Grid::new(1, threads), &[arg(&i)]) }.unwrap()
+        Ok(unsafe { module.launch(0, Grid::new(1, threads), &[arg(&i)]) }?)
     };
-    count(&globals_a, 3);
-    count(&globals_b, 5);
-    count(&globals_a, 3);
-    assert_eq!(globals_b.global::<u32>(0).read().unwrap(), [0, 5, 0, 0]);
-    assert_eq!(globals_a.global::<u32>(0).read().unwrap(), [0, 6, 0, 0]);
+    count(&globals_a, 3)?;
+    count(&globals_b, 5)?;
+    count(&globals_a, 3)?;
+    assert_eq!(globals_b.global::<u32>(0)?.read()?, [0, 5, 0, 0]);
+    assert_eq!(globals_a.global::<u32>(0)?.read()?, [0, 6, 0, 0]);
     // What is dropped goes to its own GPU's context too, whichever was used last.
     drop(xs_a);
-    b.sync().unwrap();
+    b.sync()?;
     drop(globals_a);
     drop(module_a);
-    assert_eq!(xs_b.read().unwrap(), vec![42.0; 1000]);
+    assert_eq!(xs_b.read()?, vec![42.0; 1000]);
     drop(a);
-    b.sync().unwrap();
+    b.sync()?;
+    Ok(())
 }
 
 #[test]
-fn a_buffer_is_copied_from_one_gpu_to_another() {
-    let Some(gpus) = two_gpus() else { return };
-    let a = Cuda::on(gpus[0]).unwrap();
-    let module_a = Module::load(&a, PTX, &["add_one"], &[]).unwrap();
-    let b = Cuda::on(gpus[1]).unwrap();
-    let module_b = Module::load(&b, PTX, &["add_one"], &[]).unwrap();
+fn a_buffer_is_copied_from_one_gpu_to_another() -> Result {
+    let Some(gpus) = two_gpus()? else { return Ok(()) };
+    let a = Cuda::on(gpus[0])?;
+    let module_a = Module::load(&a, PTX, &["add_one"], &[])?;
+    let b = Cuda::on(gpus[1])?;
+    let module_b = Module::load(&b, PTX, &["add_one"], &[])?;
     // Whole numbers, so that each addition is exact, whichever order the sums are made in.
     let xs: Vec<f32> = Vec::from_fn(1000, |i| i as f32);
     let plus = |n: u32| xs.iter().map(|x| x + n as f32).collect::<Vec<f32>>();
-    let (mut from_a, mut on_b) = (a.upload(&xs).unwrap(), b.alloc::<f32>(1000).unwrap());
+    let (mut from_a, mut on_b) = (a.upload(&xs)?, b.alloc::<f32>(1000)?);
     // The kernels launched before the copy, on either GPU, which are not waited for, have run when
     // it is made, and those launched after it, on either, run after it.
-    (0..100).for_each(|_| add_one(&module_b, &on_b));
-    (0..300).for_each(|_| add_one(&module_a, &from_a));
-    on_b.copy_from(&from_a).unwrap();
-    (0..200).for_each(|_| add_one(&module_a, &from_a));
-    (0..200).for_each(|_| add_one(&module_b, &on_b));
-    assert_eq!(on_b.read().unwrap(), plus(500), "300 on the first GPU before the copy, 200 on the second after it");
-    assert_eq!(from_a.read().unwrap(), plus(500), "300 before the copy and 200 after it");
+    for _ in 0..100 {
+        add_one(&module_b, &on_b)?;
+    }
+    for _ in 0..300 {
+        add_one(&module_a, &from_a)?;
+    }
+    on_b.copy_from(&from_a)?;
+    for _ in 0..200 {
+        add_one(&module_a, &from_a)?;
+    }
+    for _ in 0..200 {
+        add_one(&module_b, &on_b)?;
+    }
+    assert_eq!(on_b.read()?, plus(500), "300 on the first GPU before the copy, 200 on the second after it");
+    assert_eq!(from_a.read()?, plus(500), "300 before the copy and 200 after it");
     // And back.
-    on_b.write(&plus(7)).unwrap();
-    from_a.copy_from(&on_b).unwrap();
-    assert_eq!(from_a.read().unwrap(), plus(7));
+    on_b.write(&plus(7))?;
+    from_a.copy_from(&on_b)?;
+    assert_eq!(from_a.read()?, plus(7));
     // A buffer of none is copied to one of none, and one of another length is refused.
-    b.alloc::<f32>(0).unwrap().copy_from(&a.alloc::<f32>(0).unwrap()).unwrap();
-    let short = a.alloc::<f32>(999).unwrap();
-    let refused = catch_unwind(AssertUnwindSafe(|| on_b.copy_from(&short))).unwrap_err();
-    let said = refused.downcast_ref::<String>().cloned().unwrap_or_default();
-    assert!(said.contains("a buffer of 1000 elements copied from one of 999"), "{said}");
+    b.alloc::<f32>(0)?.copy_from(&a.alloc::<f32>(0)?)?;
+    let short = a.alloc::<f32>(999)?;
+    let refused = on_b.copy_from(&short).err().ok_or("copy_from gave Ok")?;
+    assert_eq!(refused.to_string(), "cuMemcpyPeer: a buffer of 1000 elements copied from one of 999");
+    Ok(())
 }
 
 #[test]
-fn threads_each_take_a_cuda_of_a_gpu_and_may_share_one() {
-    let Some(_) = cuda() else { return };
-    let count = Cuda::count().unwrap();
+fn threads_each_take_a_cuda_of_a_gpu_and_may_share_one() -> Result {
+    let Some(_) = cuda() else { return Ok(()) };
+    let count = Cuda::count()?;
     // Two threads for each GPU, each with the `Cuda` of its own thread.
-    std::thread::scope(|scope| {
-        for thread in 0..2 * count {
-            scope.spawn(move || {
-                let cuda = Cuda::on(thread % count).unwrap();
-                let module = Module::load(&cuda, PTX, &["add_one"], &[]).unwrap();
-                let xs = cuda.upload(&[thread as f32; 1000]).unwrap();
-                for _ in 0..50 {
-                    add_one(&module, &xs);
-                }
-                assert_eq!(xs.read().unwrap(), vec![thread as f32 + 50.0; 1000], "thread {thread}");
-            });
+    std::thread::scope(|scope| -> Result {
+        let threads: Vec<_> = (0..2 * count)
+            .map(|thread| {
+                scope.spawn(move || -> Result {
+                    let cuda = Cuda::on(thread % count)?;
+                    let module = Module::load(&cuda, PTX, &["add_one"], &[])?;
+                    let xs = cuda.upload(&[thread as f32; 1000])?;
+                    for _ in 0..50 {
+                        add_one(&module, &xs)?;
+                    }
+                    assert_eq!(xs.read()?, vec![thread as f32 + 50.0; 1000], "thread {thread}");
+                    Ok(())
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().map_err(|_| "a thread panicked")??;
         }
-    });
+        Ok(())
+    })?;
+    Ok(())
 }

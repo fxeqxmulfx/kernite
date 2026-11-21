@@ -33,10 +33,13 @@ impl Stream {
 /// for its whole life, or keeps one on the stack when there are not enough, which the listing
 /// says.
 /// Every method takes the operands its instruction takes, so an instruction the machine
-/// has no encoding for does not compile.
+/// has no encoding for does not compile. A method given a value x86 has no encoding for, a
+/// shift past 63 say, makes [`finish`](Asm::finish) an error, which says what was wrong first.
 pub struct Asm {
     p: Program<Op>,
     labels: u32,
+    /// What was wrong with the first value a method was given that x86 has no encoding for.
+    error: Option<String>,
 }
 
 impl Asm {
@@ -57,12 +60,21 @@ impl Asm {
                 statics: vec![],
             },
             labels: 0,
+            error: None,
         }
     }
 
-    /// The kernel as written.
-    pub fn finish(self) -> Program<Op> {
-        self.p
+    /// The kernel as written; or what was wrong with the first value a method was given that
+    /// x86 has no encoding for, as the method's docs say.
+    pub fn finish(self) -> Result<Program<Op>, String> {
+        self.error.map_or(Ok(self.p), Err)
+    }
+
+    /// Keeps `why` if `ok` is false and nothing was wrong before, for [`finish`](Asm::finish) to say.
+    fn require(&mut self, ok: bool, why: impl FnOnce() -> String) {
+        if !ok {
+            self.error.get_or_insert_with(why);
+        }
     }
 
     fn var(&mut self, class: Class, name: String) -> VReg {
@@ -71,16 +83,16 @@ impl Asm {
         VReg { id, class }
     }
 
-    /// The next integer or pointer parameter, in the register SysV passes it in.
-    ///
-    /// # Panics
-    ///
-    /// Past the sixth, which SysV passes on the stack.
+    /// The next integer or pointer parameter, in the register SysV passes it in. Past the sixth,
+    /// which SysV passes on the stack, [`finish`](Asm::finish) is an error.
     pub fn param(&mut self, name: impl Into<String>) -> Gpr {
-        let at = *INT_PARAMS.get(self.p.params.len()).expect("six integer parameters in registers");
         let v = self.var(Class::Gpr, name.into());
-        self.p.params.push((v, at));
-        self.p.signature.params.push(Class::Gpr);
+        let at = INT_PARAMS.get(self.p.params.len()).copied();
+        self.require(at.is_some(), || "a seventh integer parameter, where SysV passes six in registers".into());
+        if let Some(at) = at {
+            self.p.params.push((v, at));
+            self.p.signature.params.push(Class::Gpr);
+        }
         Gpr(v)
     }
 
@@ -111,21 +123,22 @@ impl Asm {
     }
 
     /// `size` bytes of stack called `name`, aligned to `align`. Until written, they hold
-    /// whatever was there.
-    ///
-    /// # Panics
-    ///
-    /// On an alignment that is no power of two, or more than a page: the frame is touched a
-    /// page at a time on the way down, and a larger alignment could skip one.
+    /// whatever was there. An alignment that is no power of two, or more than a page, makes
+    /// [`finish`](Asm::finish) an error: the frame is touched a page at a time on the way down,
+    /// and a larger alignment could skip one.
     pub fn slot(&mut self, name: impl Into<String>, size: u32, align: u32) -> Slot {
-        assert!(align.is_power_of_two() && align <= PAGE, "alignment {align}");
-        self.p.slots.push(SlotSpec { name: name.into(), size, align, spill: false });
+        let name = name.into();
+        self.require(align.is_power_of_two() && align <= PAGE, || {
+            format!("`{name}` is aligned to {align}, where an alignment is a power of two, a page at most")
+        });
+        self.p.slots.push(SlotSpec { name, size, align, spill: false });
         Slot(SlotId(self.p.slots.len() as u32 - 1))
     }
 
-    /// Read-only `bytes`, aligned to `align`. The same bytes asked for twice are stored once.
+    /// Read-only `bytes`, aligned to `align`, which is a power of two, or [`finish`](Asm::finish)
+    /// is an error. The same bytes asked for twice are stored once.
     pub fn constant(&mut self, bytes: &[u8], align: u32) -> Addr {
-        assert!(align.is_power_of_two(), "alignment {align}");
+        self.require(align.is_power_of_two(), || format!("a constant is aligned to {align}, which is no power of two"));
         let at = match self.p.consts.iter().position(|c| c.bytes == bytes) {
             Some(at) => {
                 self.p.consts[at].align = self.p.consts[at].align.max(align);
@@ -174,17 +187,17 @@ impl Asm {
     /// what others load from there, is the kernel's to keep in order: the allocator sees only
     /// registers.
     ///
-    /// # Panics
-    ///
-    /// If `write` places a label or jumps: a branch cannot be spread.
+    /// If `write` places a label or jumps, [`finish`](Asm::finish) is an error: a branch cannot be spread.
     pub fn capture(&mut self, write: impl FnOnce(&mut Self)) -> Stream {
         let from = self.p.body.len();
         write(self);
         let items: VecDeque<_> = self.p.body.drain(from..).collect();
         for item in &items {
             match item {
-                Item::Label(_) => panic!("a label in a captured stream"),
-                Item::Inst(i) => assert!(i.flow == Flow::Next, "{:?} in a captured stream", i.op),
+                Item::Label(_) => self.require(false, || "a label in a captured stream".into()),
+                Item::Inst(i) => {
+                    self.require(i.flow == Flow::Next, || format!("`{}` in a captured stream", i.op.name()))
+                }
                 Item::Note(_) => {}
             }
         }
@@ -261,23 +274,17 @@ impl Asm {
         self.emit(Op::Or, vec![gpr(dst, W64, ReadWrite), gpr(src, W64, Read)]);
     }
 
-    /// `shl dst, count`.
-    ///
-    /// # Panics
-    ///
-    /// Past 63, as x86 shifts a gpr by the low 6 bits of its count alone.
+    /// `shl dst, count`. Past 63, as x86 shifts a gpr by the low 6 bits of its count alone,
+    /// [`finish`](Asm::finish) is an error.
     pub fn shl(&mut self, dst: Gpr, count: u8) {
-        assert!(count < 64, "shl by {count}: x86 shifts a gpr by 0 to 63");
+        self.require(count < 64, || format!("shl by {count}: x86 shifts a gpr by 0 to 63"));
         self.emit(Op::Shl, vec![gpr(dst, W64, ReadWrite), number(count.into())]);
     }
 
-    /// `shr dst, count`.
-    ///
-    /// # Panics
-    ///
-    /// Past 63, as x86 shifts a gpr by the low 6 bits of its count alone.
+    /// `shr dst, count`. Past 63, as x86 shifts a gpr by the low 6 bits of its count alone,
+    /// [`finish`](Asm::finish) is an error.
     pub fn shr(&mut self, dst: Gpr, count: u8) {
-        assert!(count < 64, "shr by {count}: x86 shifts a gpr by 0 to 63");
+        self.require(count < 64, || format!("shr by {count}: x86 shifts a gpr by 0 to 63"));
         self.emit(Op::Shr, vec![gpr(dst, W64, ReadWrite), number(count.into())]);
     }
 
@@ -424,14 +431,14 @@ impl Asm {
         vshufps = Vshufps;
     }
 
-    /// `vpblendd`: 32-bit lanes from `b` where the control byte's bit is set.
-    ///
-    /// # Panics
-    ///
-    /// On an xmm, past `0x0f`, as x86 reads a bit for each of its 4 lanes alone.
+    /// `vpblendd`: 32-bit lanes from `b` where the control byte's bit is set. On an xmm, past
+    /// `0x0f`, as x86 reads a bit for each of its 4 lanes alone, [`finish`](Asm::finish) is an
+    /// error.
     pub fn vpblendd<V: Vector>(&mut self, dst: V, a: V, b: impl Into<Src<V>>, control_byte: u8) {
         let lanes = V::WIDTH.bytes() / 4;
-        assert!(u32::from(control_byte) >> lanes == 0, "vpblendd of {lanes} lanes by {control_byte:#04x}");
+        self.require(u32::from(control_byte) >> lanes == 0, || {
+            format!("vpblendd of {lanes} lanes by {control_byte:#04x}")
+        });
         self.emit(Op::Vpblendd, vec![vec(dst, Write), vec(a, Read), src(b.into()), control(control_byte)]);
     }
 
@@ -520,21 +527,15 @@ impl Asm {
 
     /// `vpgatherdd`: eight 32-bit entries, where mask lanes have their high bit set. The
     /// instruction clears those mask bits as it gathers, and leaves other destination lanes.
-    ///
-    /// # Panics
-    ///
     /// Unless `from` is at a ymm of indices, and `dst`, the indices and `mask` are three
-    /// registers, without which the instruction faults.
+    /// registers, without which the instruction faults, [`finish`](Asm::finish) is an error.
     pub fn vpgatherdd(&mut self, dst: Ymm, from: Addr, mask: Ymm) {
         self.gather(Op::Vpgatherdd, dst.0, (from, W32, W256), mask.0);
     }
 
-    /// `vpgatherdq`: four 64-bit entries from four XMM 32-bit offsets.
-    ///
-    /// # Panics
-    ///
-    /// Unless `from` is at an xmm of indices, and `dst`, the indices and `mask` are three
-    /// registers, without which the instruction faults.
+    /// `vpgatherdq`: four 64-bit entries from four XMM 32-bit offsets. Unless `from` is at an
+    /// xmm of indices, and `dst`, the indices and `mask` are three registers, without which the
+    /// instruction faults, [`finish`](Asm::finish) is an error.
     pub fn vpgatherdq(&mut self, dst: Ymm, from: Addr, mask: Ymm) {
         self.gather(Op::Vpgatherdq, dst.0, (from, W64, W128), mask.0);
     }
@@ -543,15 +544,13 @@ impl Asm {
     /// `index_width`, under `mask`: the vector of indices is an operand it reads, at that width,
     /// which the operands do not write out.
     fn gather(&mut self, op: Op, dst: VReg, (from, width, index_width): (Addr, Width, Width), mask: VReg) {
-        let index = match from.index {
-            Some((i, _)) if i.class == Class::Vec => i,
-            _ => panic!("`{}` reads memory at a vector of indices", op.name()),
+        let Some((index, _)) = from.index.filter(|(i, _)| i.class == Class::Vec) else {
+            self.require(false, || format!("`{}` reads memory at a vector of indices", op.name()));
+            return;
         };
-        assert!(
-            dst != mask && dst != index && index != mask,
-            "`{}` faults unless its result, indices and mask are three registers",
-            op.name()
-        );
+        self.require(dst != mask && dst != index && index != mask, || {
+            format!("`{}` faults unless its result, indices and mask are three registers", op.name())
+        });
         let implicit = vec![arg(Operand::Reg(index, index_width), Read)];
         let wide = |v: VReg| arg(Operand::Reg(v, W256), ReadWrite);
         self.inst(op, vec![wide(dst), mem(from, width), wide(mask)], implicit, Flow::Next);
@@ -632,23 +631,17 @@ impl Asm {
         self.emit(Op::Vcvtph2ps, vec![vec(dst, Write), src(a.into())]);
     }
 
-    /// `vextractf128`: one 128-bit lane of `a`.
-    ///
-    /// # Panics
-    ///
-    /// Past lane 1, as x86 reads bit 0 of `lane` alone.
+    /// `vextractf128`: one 128-bit lane of `a`. Past lane 1, as x86 reads bit 0 of `lane`
+    /// alone, [`finish`](Asm::finish) is an error.
     pub fn vextractf128(&mut self, dst: Xmm, a: Ymm, lane: u8) {
-        assert!(lane < 2, "vextractf128 of lane {lane}: a ymm has 2");
+        self.require(lane < 2, || format!("vextractf128 of lane {lane}: a ymm has 2"));
         self.emit(Op::Vextractf128, vec![vec(dst, Write), vec(a, Read), number(lane.into())]);
     }
 
-    /// `vinserti128`: `a` with its 128-bit lane `lane` replaced by `b`.
-    ///
-    /// # Panics
-    ///
-    /// Past lane 1, as x86 reads bit 0 of `lane` alone.
+    /// `vinserti128`: `a` with its 128-bit lane `lane` replaced by `b`. Past lane 1, as x86
+    /// reads bit 0 of `lane` alone, [`finish`](Asm::finish) is an error.
     pub fn vinserti128(&mut self, dst: Ymm, a: Ymm, b: impl Into<Src<Xmm>>, lane: u8) {
-        assert!(lane < 2, "vinserti128 of lane {lane}: a ymm has 2");
+        self.require(lane < 2, || format!("vinserti128 of lane {lane}: a ymm has 2"));
         self.emit(Op::Vinserti128, vec![vec(dst, Write), vec(a, Read), src(b.into()), number(lane.into())]);
     }
 
