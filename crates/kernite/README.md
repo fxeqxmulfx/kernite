@@ -11,7 +11,7 @@ cargo add kernite
 ```rust
 fn main() -> Result<(), String> {
     let src = r#"
-        pub unsafe extern "sysv64" fn sum4(x: *const u64) -> u64 {
+        pub extern "sysv64" fn sum4(x: &[u64; 4]) -> u64 {
             let sum: gpr;
             mov(sum, [x]);
             for i in 1..4 {

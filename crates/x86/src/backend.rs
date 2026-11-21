@@ -9,6 +9,7 @@ use kernite_core::Clobber;
 use kernite_lang::{Fn, Memory, Value};
 
 use crate::SysV;
+use crate::forms::Feature;
 use crate::intel::{self, Listing};
 use crate::lang::{Callee, Kernel, Prototype, Static};
 use crate::sysv::{CALL_CLOBBERS, VECS};
@@ -37,7 +38,7 @@ impl Backend for X86 {
         Ok(made)
     }
 
-    fn callee(&self, g: &Fn) -> Option<Callee> {
+    fn callee(&self, g: &Fn, params: &[String]) -> Option<Callee> {
         if abi(g) != Some(Abi::Sysv64) {
             return None;
         }
@@ -46,12 +47,13 @@ impl Backend for X86 {
         }
         // One of no prototype says why where it is compiled; a kernel that calls it, that it
         // does not compile.
-        Some(prototype(g).map_or(Callee::Broken, Callee::Calls))
+        let calls = if g.unsafe_fn { Callee::Unsafe } else { Callee::Calls };
+        Some(prototype(g, params).map_or(Callee::Broken, calls))
     }
 
     fn kernel(
         &self,
-        _: &Fn,
+        f: &Fn,
         name: &str,
         _: &[Value],
         cooperative: bool,
@@ -59,6 +61,9 @@ impl Backend for X86 {
         callees: &[Called<Callee>],
     ) -> Kernel {
         let mut kernel = Kernel::new(name);
+        if !f.unsafe_fn {
+            kernel.safe();
+        }
         if cooperative {
             kernel.cooperative();
         }
@@ -79,7 +84,7 @@ impl Backend for X86 {
         let decls = std::mem::take(&mut kernel.decls);
         let reach = std::mem::take(&mut kernel.reach);
         let any = kernel.reaches_any();
-        if let Some((at, message)) = kernel.unowned() {
+        if let Some((at, message)) = kernel.unowned().or_else(|| kernel.unordered()) {
             return Err(Unfinished { at, message });
         }
         let program = kernel.finish(|called| changed_by(called, done), |name| may_run_sse(name, done));
@@ -89,8 +94,30 @@ impl Backend for X86 {
         if any {
             listing.changes = CALL_CLOBBERS.to_vec();
         }
+        listing.features = needed_by(&listing, done);
         Ok(listing)
     }
+}
+
+/// The CPU features past x86-64's own that `listing` needs: those of its instructions, and of each function it may call
+/// in turn, as the listings of `done` say, for a kernel runs only where each function it calls does. A function with no
+/// listing adds none.
+fn needed_by(listing: &Listing, done: &[Done<Listing>]) -> Vec<Feature> {
+    let (mut seen, mut features) = (vec![], listing.features.clone());
+    let mut todo = listing.funcs.iter().chain(&listing.reach).collect::<Vec<_>>();
+    while let Some(name) = todo.pop() {
+        if seen.contains(&name) {
+            continue;
+        }
+        seen.push(name);
+        if let Some(callee) = done.iter().find(|(done, _)| done == name).and_then(|(_, l)| l.as_ref().ok()) {
+            features.extend(&callee.code.features);
+            todo.extend(callee.code.funcs.iter().chain(&callee.code.reach));
+        }
+    }
+    features.sort_by_key(|f| f.name());
+    features.dedup();
+    features
 }
 
 /// What a call of the functions `called`, each by what the source calls it, does to registers, as the listings of
@@ -139,16 +166,10 @@ impl Native for X86 {
     }
 }
 
-/// The prototype of `f`, a function `extern "sysv64"`, as the kernels that call it see it;
-/// `None` if SysV does not pass one of its types whole in a register.
-fn prototype(f: &Fn) -> Option<Prototype> {
-    let params: Option<Vec<(&str, &str)>> = f
-        .params
-        .iter()
-        .map(|p| match &p.ty {
-            kernite_lang::Type::Name(ty, _) => Some((p.name.as_str(), ty.as_str())),
-            _ => None,
-        })
-        .collect();
-    Prototype::of(&params?, f.ret.as_ref().map(|r| r.ty.as_str())).ok()
+/// The prototype of `f`, a function `extern "sysv64"`, whose parameters are of the types `params`, as the kernels
+/// that call it see it; `None` if SysV does not pass one of its types whole in a register.
+fn prototype(f: &Fn, params: &[String]) -> Option<Prototype> {
+    let params: Vec<(&str, &str)> =
+        f.params.iter().map(|p| p.name.as_str()).zip(params.iter().map(String::as_str)).collect();
+    Prototype::of(&params, f.ret.as_ref().map(|r| r.ty.as_str())).ok()
 }

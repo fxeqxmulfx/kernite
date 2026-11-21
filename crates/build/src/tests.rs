@@ -193,7 +193,7 @@ impl Backend for Echo {
     }
 
     /// Its kernels call each function of an ABI kernite compiles for, as that ABI.
-    fn callee(&self, g: &Fn) -> Option<Abi> {
+    fn callee(&self, g: &Fn, _: &[String]) -> Option<Abi> {
         abi(g)
     }
 
@@ -833,7 +833,7 @@ fn a_module_refused_whole_is_not_compiled_and_says_nothing() -> Result {
                #[instances(1)] fn h() {}\n\
                extern \"C\" fn c() {}\n\
                unsafe extern \"sysv64\" fn k(x: u64) { add(x, ONE); }\n\
-               extern \"sysv64\" fn bare(x: u64) { add(x, ONE); }\n\
+               #[cooperative] extern \"sysv64\" fn bare(x: u64) { add(x, ONE); }\n\
                #[instances(1)] unsafe extern \"sysv64\" fn once(x: u64) {}\n\
                #[instances(2, 4)] unsafe extern \"sysv64\" fn tile<const N: u64>(x: u64) { lea(x, [A]); }\n\
                struct S;";
@@ -1112,18 +1112,26 @@ fn a_module_refused_whole_says_nothing_of_an_item_named_as_a_const_given() -> Re
     Ok(())
 }
 
-/// A kernel that is not an `unsafe fn` is refused where it is named, though it is compiled: one
-/// the process runs is not written, and one the GPU runs is never launched, though its code is in
-/// the GPU's module. A function the kernels call promises Rust nothing, so it need not be one.
+/// A kernel that is not an `unsafe fn` is refused where it is named, though it is compiled, if it is one that kernite
+/// cannot prove safe: a kernel on the threads of a grid, which the process runs, is not written, and one the GPU runs
+/// is never launched, though its code is in the GPU's module. A kernel the process runs on one thread is as safe as
+/// its machine proves it, which the machine says. A function the kernels call promises Rust nothing, so it need not be
+/// one.
 #[test]
 fn a_kernel_that_is_not_unsafe_is_refused() -> Result {
     let not = "a kernel trusts the pointers it is given, so it is an `unsafe fn`";
+    let src = "#[cooperative] extern \"sysv64\" fn k(x: u64) { add(x, 1); }";
+    let out = echoed(src)?;
+    let [ItemOut::Native(k)] = &out.items[..] else { return Err(format!("{:?}", out.items).into()) };
+    let grid = "the threads of a grid run at once, and kernite cannot prove that they reach memory apart, so a \
+                `#[cooperative]` kernel is an `unsafe fn`";
+    assert_eq!(k.not_unsafe.as_ref().map(|e| e.at(src)), Some(format!("1:3: {grid}")));
+    assert_eq!((k.instances.len(), k.count, k.written), (1, 1, false));
+    assert!(k.listings.is_empty());
     let src = "extern \"sysv64\" fn k(x: u64) { add(x, 1); }";
     let out = echoed(src)?;
     let [ItemOut::Native(k)] = &out.items[..] else { return Err(format!("{:?}", out.items).into()) };
-    assert_eq!(k.not_unsafe.as_ref().map(|e| e.at(src)), Some(format!("1:20: {not}")));
-    assert_eq!((k.instances.len(), k.count, k.written), (1, 1, false));
-    assert!(k.listings.is_empty());
+    assert!(k.not_unsafe.is_none() && k.written && k.listings.len() == 1);
     let src = "extern \"ptx-kernel\" fn g() {}\nextern \"ptx-func\" fn f() {}";
     let out = echoed(src)?;
     let [ItemOut::Device(g), ItemOut::Device(f)] = &out.items[..] else {
@@ -1202,7 +1210,7 @@ fn a_kernel_names_the_statics_its_callees_reach() -> Result {
                unsafe extern \"sysv64\" fn four(x: u64) { call(tile::<4>, x); }\n\
                unsafe extern \"sysv64\" fn ping(x: u64) { call(pong, x); }\n\
                unsafe extern \"sysv64\" fn pong(x: u64) { call(ping, x); lea(x, [A]); }\n\
-               extern \"sysv64\" fn plain(x: u64) { lea(x, [A]); }";
+               #[cooperative] extern \"sysv64\" fn plain(x: u64) { lea(x, [A]); }";
     let out = echoed(src)?;
     let [
         _,
@@ -1423,14 +1431,20 @@ fn a_call_reaches_the_instance_its_code_names() -> Result {
                #[instances(4, 2)] unsafe extern \"sysv64\" fn tile<const N: u64>(x: u64) { add(x, N); }\n\
                unsafe extern \"sysv64\" fn twice(x: u64) { call(tile::<2>, x); call(step, x); }\n\
                unsafe extern \"sysv64\" fn address(x: u64) { lea(x, [tile::<4>]); lea(x, [tile::<4>]); }\n\
-               extern \"sysv64\" fn plain(x: u64) { call(step, x); }";
+               extern \"sysv64\" fn safe(x: u64) { add(x, 1); }\n\
+               unsafe extern \"sysv64\" fn user(x: u64) { call(safe, x); }\n\
+               #[cooperative] extern \"sysv64\" fn plain(x: u64) { call(step, x); }";
     let out = echoed(src)?;
-    let [_, _, ItemOut::Native(twice), ItemOut::Native(address), ItemOut::Native(plain)] = &out.items[..] else {
+    let [_, _, ItemOut::Native(twice), ItemOut::Native(address), _, ItemOut::Native(user), ItemOut::Native(plain)] =
+        &out.items[..]
+    else {
         return Err(format!("{:?}", out.items).into());
     };
     let call = |function: &str, instance| Call { function: function.into(), instance };
     assert_eq!(twice.instances[0].calls, [call("tile", Some(1)), call("step", None)]);
     assert_eq!(address.instances[0].calls, [call("tile", Some(0))]);
+    // A kernel that is no `unsafe fn` is a function that calls its instance, which the code names.
+    assert_eq!(user.instances[0].calls, [call("safe", Some(0))]);
     assert!(plain.instances[0].calls.is_empty() && !plain.written);
     Ok(())
 }

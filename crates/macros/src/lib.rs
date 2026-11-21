@@ -6,7 +6,7 @@
 //! #[kernite_macros::kernels]
 //! mod cpu {
 //!     /// The sum of the eight floats at `xs`.
-//!     pub unsafe extern "sysv64" fn sum8(xs: *const f32) -> f32 {
+//!     pub extern "sysv64" fn sum8(xs: &[f32; 8]) -> f32 {
 //!         let v: ymm;
 //!         vmovups(v, [xs]);
 //!         ret_sum(v);
@@ -20,7 +20,11 @@
 //! }
 //! ```
 //!
-//! - An `unsafe extern "sysv64" fn` is compiled for x86-64 and becomes an `#[unsafe(naked)]`
+//! - An `extern "sysv64" fn` is compiled for x86-64. One that is no `unsafe fn`, and that kernite proves safe, takes
+//!   numbers and arrays by reference, `&[f32; 8]` or `&mut [f32; 8]`, and is a function Rust calls with no `unsafe`,
+//!   a call of an `#[unsafe(naked)]` one of its own, its body the kernel's `naked_asm!`; where the code needs CPU
+//!   features past x86-64's own, `avx` say, it is `#[target_feature(enable = "avx")]`, so only a function that has
+//!   them calls it with no `unsafe`. Any other is an `unsafe extern "sysv64" fn`, and becomes an `#[unsafe(naked)]`
 //!   function of the signature it declares, its body the kernel's `naked_asm!`; constants it
 //!   reads are statics beside it. `LISTINGS` holds each one's listing, by name, for snapshots.
 //!   The module's kernels call each other, themselves among them, as `call(r, gcd, (a, b))`
@@ -232,7 +236,7 @@
 //! #[kernite_macros::kernels(consts = crate::sizes)]
 //! pub mod cpu {
 //!     /// `x` a step on.
-//!     pub unsafe extern "sysv64" fn step(x: u64) -> u64 {
+//!     pub extern "sysv64" fn step(x: u64) -> u64 {
 //!         add(x, STEP);
 //!         ret(x);
 //!     }
@@ -242,7 +246,7 @@
 //! }
 //!
 //! fn main() {
-//!     assert_eq!(unsafe { cpu::step(1) }, 4);
+//!     assert_eq!(cpu::step(1), 4);
 //!     assert_eq!(cpu::TWO, 6);
 //! }
 //! ```
@@ -306,16 +310,16 @@
 //! name = "kernite"
 //! ```
 //!
-//! A kernel is `unsafe`: it trusts the pointers it is given, and that nothing else touches the
-//! memory of the module's it names while it runs, as an x86 kernel's safety contract says, by
-//! name, of the statics it and the functions it calls name, whether it calls them by name or
-//! at an address. One that does not compile is a `compile_error!` where the trouble is, beside
-//! a stub of its signature or its launcher, so that its callers are not errors as well. Both
-//! are under the kernel's `cfg`, as a helper's errors and a static's are under theirs, and so
-//! are the function of each of its instances and the module of its constants: what `cfg` leaves
-//! out says nothing. A module of x86 kernels has `LISTINGS` whether its kernels compile or not,
-//! with the listing of each that compiles and `cfg` keeps, and of no other; a module of GPU
-//! kernels alone has none.
+//! An x86 kernel is an `unsafe fn` unless kernite proves it safe, which it does of one that takes numbers and arrays by
+//! reference and reaches no memory but those and its frames: GUIDE.md says which are not, and why. An `unsafe` kernel
+//! trusts the pointers it is given, and that nothing else touches the memory of the module's it names while it runs, as
+//! an x86 kernel's safety contract says, by name, of the statics it and the functions it calls name, whether it calls
+//! them by name or at an address. One that does not compile is a `compile_error!` where the trouble is, beside a stub
+//! of its signature or its launcher, so that its callers are not errors as well. Both are under the kernel's `cfg`, as
+//! a helper's errors and a static's are under theirs, and so are the function of each of its instances and the module
+//! of its constants: what `cfg` leaves out says nothing. A module of x86 kernels has `LISTINGS` whether its kernels
+//! compile or not, with the listing of each that compiles and `cfg` keeps, and of no other; a module of GPU kernels
+//! alone has none.
 //!
 //! kernite refuses a module of kernels whole, at its attribute, for an argument of `#[kernels]` that is not
 //! `consts = path`, such as `consts = 5`, and for consts given in a crate with no dependency named `kernite-macros`. It
@@ -325,14 +329,14 @@
 //! error as well, but for two kinds of use, beside the refusal. A use that the type of the first kind of static does
 //! not fit is Rust's error, as it is for a static that compiles. A use of the second kind that says no type for its
 //! elements has Rust ask for it. The module is given no consts, so a type that reads one is of the second kind. kernite
-//! checks none of the items, so it says nothing it would find in them, such as a kernel that is not `unsafe`, an ABI it
-//! does not know, what a static holds, or what compiling a kernel finds. It compiles nothing of the module, so a
-//! workspace `name` that is not a string is no error at it. No room is counted for the statics, so a crate with no
-//! dependency named `kernite-macros` is not told it needs one for them. What the macro finds in writing the module for
-//! Rust is said, as for any module: the dependency the crate needs, `kernite-cuda` for a GPU item that `cfg` keeps and
-//! `kernite-cpu` for an x86 static or cooperative kernel; a compile-time argument named as a parameter of a launcher or
-//! of a `_blocks` method, `grid`, `threads` or `shared`; and a GPU kernel or a static named as a cooperative kernel's
-//! `_blocks` method.
+//! checks none of the items, so it says nothing it would find in them, such as a kernel that must be `unsafe` and is
+//! not, an ABI it does not know, what a static holds, or what compiling a kernel finds. It compiles nothing of the
+//! module, so a workspace `name` that is not a string is no error at it. No room is counted for the statics, so a crate
+//! with no dependency named `kernite-macros` is not told it needs one for them. What the macro finds in writing the
+//! module for Rust is said, as for any module: the dependency the crate needs, `kernite-cuda` for a GPU item that `cfg`
+//! keeps and `kernite-cpu` for an x86 static or cooperative kernel; a compile-time argument named as a parameter of a
+//! launcher or of a `_blocks` method, `grid`, `threads` or `shared`; and a GPU kernel or a static named as a
+//! cooperative kernel's `_blocks` method.
 //!
 //! A module kernite cannot read is refused whole as well, and stays with every item kernite can read. A `const` or a
 //! `static` it cannot read ends at its `;`, for its value may hold a `{..}`, as in `= { 1 };`. Any other item ends at

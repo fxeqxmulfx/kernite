@@ -27,8 +27,8 @@ pub struct Listing {
     pub name: String,
     /// What it takes and gives.
     pub signature: Signature,
-    /// The CPU features past x86-64's own its instructions need, by name, which nothing
-    /// checks for when it runs.
+    /// The CPU features past x86-64's own its instructions need, and those of each function it may call, by name, which
+    /// nothing checks for when it runs.
     pub features: Vec<Feature>,
     /// The code, prologue and epilogues included. Constant `i`'s address reads `{ci}`, for
     /// the operand of `naked_asm!` that names it.

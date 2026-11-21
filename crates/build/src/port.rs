@@ -25,8 +25,9 @@ pub trait Backend {
     fn room(&self, statics: &[Self::Static]) -> Vec<Option<String>> {
         vec![None; statics.len()]
     }
-    /// How this machine's kernels see `g` when they call it; `None` if they cannot name it.
-    fn callee(&self, g: &Fn) -> Option<Self::Callee>;
+    /// How this machine's kernels see `g` when they call an instance of it whose parameters are of the types `params`,
+    /// worked out, `&[u64; 2]` for `&[u64; N]`; `None` if they cannot name it.
+    fn callee(&self, g: &Fn, params: &[String]) -> Option<Self::Callee>;
     /// The kernel `name`, instance `args` of `f`, told whether it is `cooperative`, each of
     /// `statics` and each of `callees`.
     fn kernel(

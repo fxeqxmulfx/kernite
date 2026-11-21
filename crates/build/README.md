@@ -17,7 +17,7 @@ use kernite_x86::X86;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let src = r#"
         #[instances(2, 4)]
-        pub unsafe extern "sysv64" fn scale<const K: u64>(x: u64) -> u64 {
+        pub extern "sysv64" fn scale<const K: u64>(x: u64) -> u64 {
             let v: gpr;
             imul(v, x, K);
             ret(v);

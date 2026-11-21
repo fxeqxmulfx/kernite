@@ -288,6 +288,19 @@ pub(crate) fn pointer(ty: &[TokenTree]) -> Option<(&'static str, &[TokenTree])> 
     }
 }
 
+/// `"const"` or `"mut"`, and the tokens of the type of the elements, if `ty` is a reference to an array, `&[T; N]` or
+/// `&mut [T; N]`: an array a kernel is given. The macros read one here and nowhere else.
+pub(crate) fn array_ref(ty: &[TokenTree]) -> Option<(&'static str, Vec<TokenTree>)> {
+    let (kind, group) = match ty {
+        [amp, mut_, TokenTree::Group(g)] if is_punct(amp, '&') && is_ident(mut_, "mut") => ("mut", g),
+        [amp, TokenTree::Group(g)] if is_punct(amp, '&') => ("const", g),
+        _ => return None,
+    };
+    let inside = flatten(group.stream());
+    let end = inside.iter().position(|t| is_punct(t, ';')).filter(|_| group.delimiter() == Delimiter::Bracket)?;
+    Some((kind, inside.get(..end)?.to_vec()))
+}
+
 /// Where in a type a token is, that a caller looks for.
 enum Place {
     /// Where a type is written: a type of its own, `f16`, or the first segment of a path, `f16::X`, which may
@@ -408,16 +421,20 @@ fn number_name(ty: &[TokenTree]) -> Option<&'static str> {
 }
 
 /// For each of `f`'s parameters, and last for its result: what Rust is asked of its type, if it is
-/// asked. It is asked of a number by its name or its path, as [`number_name`] reads it, and not of `f16` and
-/// `bf16`, which Rust has not; and of a pointer of one word, `*const T` or `*mut T`. The language
-/// says which: a pointer to a slice, a `str` or a `dyn` has two words, and is its error alone,
-/// which Rust is not asked of, for it would say the same twice. Nor is it asked of a pointer to a
-/// type with a `_` in it, `*const _` or `*const [_; 3]`, which is Rust's error alone, at the `_`:
-/// the type to ask of is one Rust cannot infer, and it would say that too.
+/// asked. It is asked of a number by its name or its path, as [`number_name`] reads it, and not of
+/// `f16` and `bf16`, which Rust has not; of the elements of an array by reference, `&[T; N]`, as of
+/// a number; and of a pointer of one word, `*const T` or `*mut T`. The language says which: a
+/// pointer to a slice, a `str` or a `dyn` has two words, and is its error alone, which Rust is not
+/// asked of, for it would say the same twice. Nor is it asked of a pointer to a type with a `_` in
+/// it, `*const _` or `*const [_; 3]`, which is Rust's error alone, at the `_`: the type to ask of
+/// is one Rust cannot infer, and it would say that too.
 fn asked(f: &Fn, top: &[TokenTree]) -> Vec<Option<Ask>> {
     let ask = |ty: &[TokenTree]| {
         if let Some(name) = number_name(ty) {
             return Some(Ask::Number(name, ty.to_vec()));
+        }
+        if let Some((_, elem)) = array_ref(ty) {
+            return number_name(&elem).map(|name| Ask::Number(name, elem));
         }
         let (_, to) = pointer(ty)?;
         let one = lex(ty).0.is_ok_and(|trees| lang::pointer(&lang::read_type(&trees)) == Ok(true));
@@ -976,11 +993,12 @@ pub(crate) fn number_type(ty: &[TokenTree]) -> Option<TokenStream> {
 }
 
 /// `ty`, a type a kernel takes, as the Rust the macros write has it: [`number_type`] if it is a
-/// number's name, as written if it is a pointer, else [`refused`], for a kernel takes no other type.
-/// It is for the signatures [`signature`] writes and an x86 kernel's instances and launcher. A GPU
-/// launcher's parameters are [`number_type`]'s, [`half`]'s or [`refused`].
+/// number's name, as written if it is a pointer or an array of numbers by reference, else
+/// [`refused`], for a kernel takes no other type. It is for the signatures [`signature`] writes
+/// and an x86 kernel's instances and launcher. A GPU launcher's parameters are
+/// [`number_type`]'s, [`half`]'s or [`refused`].
 pub(crate) fn value(ty: &[TokenTree]) -> TokenStream {
-    if pointer(ty).is_some() {
+    if pointer(ty).is_some() || array_ref(ty).is_some_and(|(_, elem)| number_name(&elem).is_some()) {
         return ty.iter().cloned().collect();
     }
     number_type(ty).unwrap_or_else(|| refused(ty))

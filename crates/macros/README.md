@@ -12,7 +12,7 @@ cargo add kernite-macros
 #[kernite_macros::kernels]
 mod kernels {
     /// The sum of the eight floats at `xs`.
-    pub unsafe extern "sysv64" fn sum8(xs: *const f32) -> f32 {
+    pub extern "sysv64" fn sum8(xs: &[f32; 8]) -> f32 {
         let v: ymm;
         vmovups(v, [xs]);
         let high: ymm;
@@ -28,17 +28,25 @@ mod kernels {
     }
 }
 
+/// `sum8` needs AVX, so a function that has it calls it with no `unsafe`.
+#[target_feature(enable = "avx")]
+fn sum() -> f32 {
+    kernels::sum8(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+}
+
 fn main() {
     assert!(is_x86_feature_detected!("avx"), "sum8 needs AVX");
-    let xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    // SAFETY: eight floats are there to read, and the CPU has AVX.
-    let sum = unsafe { kernels::sum8(xs.as_ptr()) };
-    assert_eq!(sum, 36.0);
+    // SAFETY: the CPU has AVX, as the line above found.
+    assert_eq!(unsafe { sum() }, 36.0);
 }
 ```
 
-`sum8` is an `#[unsafe(naked)]` function of the signature it declares, its body the kernel in Intel syntax. A kernel for
-a GPU is written the same way, as an `extern "ptx-kernel"` function:
+`sum8` is a function of the signature it declares, and Rust calls it with no `unsafe`: it takes an array by reference
+and reaches no memory but that and its own frame, which kernite checks where it compiles the kernel, so there is
+nothing for the caller to promise. It needs AVX, which Rust checks where it is called: only a function that has it,
+`#[target_feature(enable = "avx")]`, calls it with no `unsafe`. Its body is the kernel in Intel syntax, in an
+`#[unsafe(naked)]` function. A kernel that takes a pointer, or that kernite cannot prove safe in some other way, is an
+`unsafe extern "sysv64" fn`. A kernel for a GPU is written the same way, as an `extern "ptx-kernel"` function:
 [kernite-cuda's README](https://crates.io/crates/kernite-cuda) has one.
 
 The language, the targets and the guarantees are in

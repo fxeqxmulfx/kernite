@@ -41,12 +41,12 @@ impl Backend for Ptx {
         crate::room(statics)
     }
 
-    fn callee(&self, g: &Fn) -> Option<Callee> {
+    fn callee(&self, g: &Fn, params: &[String]) -> Option<Callee> {
         match abi(g) {
             Some(Abi::PtxKernel) => Some(Callee::Kernel),
             // One of no prototype says why where it is compiled; a kernel that calls it, that it
             // does not compile.
-            Some(Abi::PtxFunc) => Some(prototype(g).map_or(Callee::Broken, Callee::Calls)),
+            Some(Abi::PtxFunc) => Some(prototype(g, params).map_or(Callee::Broken, Callee::Calls)),
             _ => None,
         }
     }
@@ -109,16 +109,9 @@ impl Device for Ptx {
     }
 }
 
-/// The prototype of `f`, a function `extern "ptx-func"`, as the kernels that call it see it;
-/// `None` if PTX does not pass one of its types.
-fn prototype(f: &Fn) -> Option<Prototype> {
-    let params: Option<Vec<&str>> = f
-        .params
-        .iter()
-        .map(|p| match &p.ty {
-            kernite_lang::Type::Name(ty, _) => Some(ty.as_str()),
-            _ => None,
-        })
-        .collect();
-    Prototype::of(&params?, f.ret.as_ref().map(|r| r.ty.as_str())).ok()
+/// The prototype of `f`, a function `extern "ptx-func"`, whose parameters are of the types `params`, as the kernels
+/// that call it see it; `None` if PTX does not pass one of its types.
+fn prototype(f: &Fn, params: &[String]) -> Option<Prototype> {
+    let params: Vec<&str> = params.iter().map(String::as_str).collect();
+    Prototype::of(&params, f.ret.as_ref().map(|r| r.ty.as_str())).ok()
 }

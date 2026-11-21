@@ -2197,17 +2197,18 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() -> Result {
             "{ty}"
         );
     }
-    // The length of an array is worked out in the type of a parameter that is an array or a name with arguments,
-    // and in those of its elements and arguments that are, `[usize; 6]`; its names are the module's. In any other
-    // type, a tuple, a reference or a path, it is written as its source has it.
+    // The length of an array is worked out in the type of a parameter that is an array, a reference to one or a name
+    // with arguments, and in those of its elements and arguments that are, `[usize; 6]`; its names are the module's.
+    // In any other type, a tuple, a reference to another type or a path, it is written as its source has it. A
+    // reference to an array of numbers is one a kernel takes, so it is no row here: `ptx.rs` has it.
     for (ty, quoted) in [
         ("(u8,[usize;N*2])", "(u8, [usize; N*2])"),
         ("(u8,[usize; N * 2])", "(u8, [usize; N * 2])"),
         ("(u8,[usize ;(N+1)/2 ])", "(u8, [usize; (N+1)/2])"),
         ("(u8,[usize;!0usize&N])", "(u8, [usize; !0usize&N])"),
         ("(u8,[usize;\n    N * // twice\n    2\n])", "(u8, [usize; N * 2])"),
-        ("&[usize;N*2]", "&[usize; N*2]"),
-        ("&mut [usize;N * 2]", "&mut [usize; N * 2]"),
+        ("&(u8,[usize;N*2])", "&(u8, [usize; N*2])"),
+        ("&mut (u8,[usize;N * 2])", "&mut (u8, [usize; N * 2])"),
         ("a::Wrap<[usize;N*2]>", "a::Wrap<[usize; N*2]>"),
         ("Wrap<(u8,[usize;N*2])>", "Wrap<(u8, [usize; N*2])>"),
         ("[(u8,[usize;N*2]);2]", "[(u8, [usize; N*2]); 2]"),

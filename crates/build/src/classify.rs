@@ -3,7 +3,7 @@
 //! kernels are cooperative, what is wrong with a helper, and which function an instance's name
 //! names.
 
-use kernite_lang::{Fn, ItemKind, Module, Value};
+use kernite_lang::{Error, Fn, ItemKind, Module, Value};
 
 use crate::present::{Of, Refusal, said};
 
@@ -46,11 +46,20 @@ pub fn abi(f: &Fn) -> Option<Abi> {
     f.abi.as_ref().and_then(|(abi, _)| Abi::of(abi))
 }
 
-/// Whether `f`, of ABI `abi`, is an `unsafe fn` if it must be: a kernel trusts the pointers it is
-/// given, so it is one. A function the kernels call is called by nothing else, so it promises
-/// Rust nothing, and need not be.
-pub(crate) fn trusted(f: &Fn, abi: Abi) -> bool {
-    abi == Abi::PtxFunc || f.unsafe_fn
+/// Why `f`, of ABI `abi`, must be an `unsafe fn` and is not, if so, as the error at the place it is mended. A GPU
+/// kernel trusts the pointers it is given, and an x86 kernel run on the threads of a grid reaches one memory with all
+/// of them at once; kernite does not prove either safe. Any other x86 kernel is proved where it is compiled, and its
+/// machine says what it cannot prove. A function the kernels call is called by nothing else, so it promises Rust
+/// nothing, and need not be one.
+pub(crate) fn must_be_unsafe(f: &Fn, abi: Abi) -> Option<Error> {
+    if f.unsafe_fn {
+        return None;
+    }
+    match (abi, &f.cooperative) {
+        (Abi::PtxFunc, _) | (Abi::Sysv64, None) => None,
+        (Abi::Sysv64, Some(c)) => Some(said(Refusal::Grid, c.span)),
+        (Abi::PtxKernel, _) => Some(said(Refusal::NotUnsafe, f.span)),
+    }
 }
 
 /// Whose memory a module's statics are: its kernels'.

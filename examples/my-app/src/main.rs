@@ -5,12 +5,14 @@
 //! and its listing to the one in `snapshots/`.
 
 /// The kernels for the cpu, and the memory of the module's, `COUNTS` and `WEIGHTS`, which they
-/// keep from call to call. Each reads what its pointers point at, and all but `gcds`, `gcd` and
-/// `histogram`, which take integers, need AVX2 and FMA.
+/// keep from call to call. `sum8`, `sum16` and `gcd` are safe functions: they reach no memory
+/// but the arrays they are given and their own frames. Each other kernel reads what its
+/// pointers point at, so it is `unsafe`, and all but `gcds` and `histogram`, which take
+/// integers, need AVX2 and FMA.
 #[kernite_macros::kernels]
 mod kernels {
     /// The sum of the eight floats at `xs`.
-    pub unsafe extern "sysv64" fn sum8(xs: *const f32) -> f32 {
+    pub extern "sysv64" fn sum8(xs: &[f32; 8]) -> f32 {
         let v: ymm;
         vmovups(v, [xs]);
         ret_sum(v);
@@ -21,11 +23,10 @@ mod kernels {
     /// of which the kernel reads only the lower half, waits out the second call in `xmm2`, moved there as an xmm, as
     /// the listing says, and the kernel writes no `vzeroupper` of its own. And `xs` stays in `rdi`, where it arrived,
     /// which `sum8` does not write, so neither call moves it and the kernel saves none for its own caller.
-    pub unsafe extern "sysv64" fn sum16(xs: *const f32) -> f32 {
+    pub extern "sysv64" fn sum16(xs: &[f32; 16]) -> f32 {
         let (low, high): (ymm, ymm);
-        call(low.xmm, sum8, xs);
-        add(xs, 32);
-        call(high.xmm, sum8, xs);
+        call(low.xmm, sum8, [xs]);
+        call(high.xmm, sum8, [xs + 32]);
         vaddss(high.xmm, low.xmm, high.xmm);
         ret(high.xmm);
     }
@@ -409,7 +410,7 @@ mod kernels {
     /// The greatest common divisor of `a` and `b` by Stein's algorithm, which halves and
     /// subtracts where Euclid's divides, a call of itself a step. A step takes a bit off one of
     /// them at least, so the calls go no deeper than the two have bits, 128.
-    pub unsafe extern "sysv64" fn gcd(a: u64, b: u64) -> u64 {
+    pub extern "sysv64" fn gcd(a: u64, b: u64) -> u64 {
         let (t, g): (gpr, gpr);
         note("`a` the larger");
         cmp(a, b);
@@ -1027,18 +1028,13 @@ fn count(len: usize, what: &str) -> Run<u32> {
     u32::try_from(len).map_err(|_| format!("2^32 {what} or more").into())
 }
 
-/// The sum of `xs`.
-fn sum8(xs: &[f32; 8]) -> Run<f32> {
-    supported()?;
-    // SAFETY: eight floats are there to read, and the cpu has what the kernel needs.
-    Ok(unsafe { kernels::sum8(xs.as_ptr()) })
-}
-
-/// The sum of `xs`, by `sum8` of each half.
-fn sum16(xs: &[f32; 16]) -> Run<f32> {
-    supported()?;
-    // SAFETY: sixteen floats are there to read, and the cpu has what the kernel needs.
-    Ok(unsafe { kernels::sum16(xs.as_ptr()) })
+/// Prints what `sum8` and `sum16` give. They are safe functions that need AVX, so a function that has it calls them,
+/// as it calls any function.
+#[target_feature(enable = "avx")]
+fn sums() {
+    println!("sum8(1, ..., 8) = {}", kernels::sum8(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]));
+    let ones: [f32; 16] = std::array::from_fn(|i| (i + 1) as f32);
+    println!("sum16(1, ..., 16), which calls sum8 for each half = {}", kernels::sum16(&ones));
 }
 
 /// The dot product of `x` and `y`, which must be as long as each other and a multiple of
@@ -1321,9 +1317,8 @@ fn diffuse(cuda: &Cuda, kernels: &pascal::Kernels, x: &mut [f32], steps: u32) ->
 
 fn main() -> Run {
     supported()?;
-    println!("sum8(1, ..., 8) = {}", sum8(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])?);
-    let ones: [f32; 16] = std::array::from_fn(|i| (i + 1) as f32);
-    println!("sum16(1, ..., 16), which calls sum8 for each half = {}", sum16(&ones)?);
+    // SAFETY: `supported` found AVX2, which is AVX and more, and `sums` needs AVX alone.
+    unsafe { sums() };
     for n in [1024, 1000] {
         let x: Vec<f32> = Vec::from_fn(n, |i| (i % 7) as f32 - 3.0);
         let y: Vec<f32> = Vec::from_fn(n, |i| (i % 5) as f32 / 2.0);
@@ -1546,11 +1541,16 @@ mod tests {
     #[test]
     fn sum8_is_its_reference_bit_for_bit() -> Result {
         super::supported()?;
+        // SAFETY: `supported` found AVX2, which is AVX and more, and `sum8_against_its_reference` needs AVX alone.
+        unsafe { sum8_against_its_reference() }
+    }
+
+    /// `sum8_is_its_reference_bit_for_bit`, in a function that has AVX, which `sum8` needs: a call of a safe function.
+    #[target_feature(enable = "avx")]
+    fn sum8_against_its_reference() -> Result {
         for seed in 1..=1000 {
             let xs: [f32; 8] = floats(8, seed).try_into().map_err(|_| "floats gave the wrong length")?;
-            // SAFETY: eight floats, and a cpu that runs the kernels.
-            let got = unsafe { kernels::sum8(xs.as_ptr()) };
-            assert_eq!(got.to_bits(), sum_lanes(xs).to_bits(), "{xs:?}");
+            assert_eq!(kernels::sum8(&xs).to_bits(), sum_lanes(xs).to_bits(), "{xs:?}");
         }
         Ok(())
     }
@@ -1562,12 +1562,17 @@ mod tests {
     #[test]
     fn sum16_is_sum8_of_each_half_bit_for_bit() -> Result {
         super::supported()?;
+        // SAFETY: `supported` found AVX2, which is AVX and more, and `sum16_against_its_reference` needs AVX alone.
+        unsafe { sum16_against_its_reference() }
+    }
+
+    /// `sum16_is_sum8_of_each_half_bit_for_bit`, in a function that has AVX, which `sum16` needs.
+    #[target_feature(enable = "avx")]
+    fn sum16_against_its_reference() -> Result {
         for seed in 1..=1000 {
             let xs: [f32; 16] = floats(16, seed).try_into().map_err(|_| "floats gave the wrong length")?;
             let want = sum_lanes(xs[..8].try_into()?) + sum_lanes(xs[8..].try_into()?);
-            // SAFETY: sixteen floats, and a cpu that runs the kernels.
-            let got = unsafe { kernels::sum16(xs.as_ptr()) };
-            assert_eq!(got.to_bits(), want.to_bits(), "{xs:?}");
+            assert_eq!(kernels::sum16(&xs).to_bits(), want.to_bits(), "{xs:?}");
         }
         Ok(())
     }
@@ -1613,8 +1618,7 @@ mod tests {
             pairs.push((wide(w[2], w[3]), wide(w[4], w[5])));
         }
         for (x, y) in pairs {
-            // SAFETY: `gcd` reaches no memory but its own stack's.
-            assert_eq!(unsafe { kernels::gcd(x, y) }, euclid(x, y), "gcd({x}, {y})");
+            assert_eq!(kernels::gcd(x, y), euclid(x, y), "gcd({x}, {y})");
         }
         Ok(())
     }
@@ -1723,7 +1727,7 @@ mod tests {
     #[kernite_macros::kernels]
     mod deep {
         /// Clears the first and the last word of a megabyte of stack memory.
-        pub unsafe extern "sysv64" fn deep() {
+        pub extern "sysv64" fn deep() {
             let words: local<[u64; 131072]>;
             let zero: gpr;
             zero(zero);
@@ -1762,8 +1766,7 @@ mod tests {
     fn a_frame_past_the_end_of_the_stack_faults_at_its_guard_page() -> Result {
         if std::env::var_os("MY_APP_DEEP").is_some() {
             let thread = std::thread::Builder::new().name("deep".into()).stack_size(64 << 10);
-            // SAFETY: the kernel reaches no memory but its own stack's.
-            thread.spawn(|| unsafe { deep::deep() })?.join().map_err(|_| "the deep thread panicked")?;
+            thread.spawn(|| deep::deep())?.join().map_err(|_| "the deep thread panicked")?;
             return Ok(());
         }
         let out = std::process::Command::new(std::env::current_exe()?)
@@ -2527,12 +2530,10 @@ mod tests {
         assert_eq!(bits(squared), bits(&want), "the GPU kernel's floats");
 
         let mut lanes = [0f32; 8];
-        // SAFETY: `n` floats at `squared`, which has them, eight at `lanes`, and a cpu that runs
-        // the kernels.
-        let sum = unsafe {
-            host::lanes(squared.as_ptr(), n, lanes.as_mut_ptr());
-            kernels::sum8(lanes.as_ptr())
-        };
+        // SAFETY: `n` floats at `squared`, which has them, eight at `lanes`, and a cpu that runs the kernel.
+        unsafe { host::lanes(squared.as_ptr(), n, lanes.as_mut_ptr()) };
+        // SAFETY: a cpu that runs the kernels has AVX, which `sum8` needs.
+        let sum = unsafe { kernels::sum8(&lanes) };
         let mut want_lanes = [0f32; 8];
         for eight in want.chunks(8) {
             for (lane, x) in want_lanes.iter_mut().zip(eight) {

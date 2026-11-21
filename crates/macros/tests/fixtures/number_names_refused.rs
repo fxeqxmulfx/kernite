@@ -47,7 +47,7 @@ pub mod cpu {
         ret(a);
     }
 
-    pub extern "sysv64" fn safe(a: f32) -> f32 {
+    pub extern "sysv64" fn safe(p: *const u8, a: f32) -> f32 {
         ret(a);
     }
 }

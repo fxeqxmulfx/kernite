@@ -2,7 +2,7 @@
 //! so that a kernel is a function written where it is called.
 //!
 //! ```text
-//! pub unsafe extern "sysv64" fn sum8(xs: *const f32) -> f32 {
+//! pub extern "sysv64" fn sum8(xs: &[f32; 8]) -> f32 {
 //!     let v: ymm;
 //!     vmovups(v, [xs]);
 //!     ret_sum(v);
@@ -104,10 +104,10 @@ pub use ast::{
     BinOp, Block, Const, Cooperative, Directive, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret,
     Static, Stmt, Type, UnOp,
 };
-pub use eval::{Memory, Mention, Run, constant, instance, instances, kernel, memory};
+pub use eval::{Memory, Mention, Run, constant, instance, instances, kernel, memory, param_types};
 pub use parse::{module, read};
 pub use target::{Fault, Guard, Mem, Operand, Target};
-pub use token::{Delim, Span, Tree, lex, pointer, read_type, text, unraw};
+pub use token::{Delim, Span, Tree, array_ref, lex, pointer, read_type, text, unraw};
 pub use value::{IntTy, Value, article};
 
 /// Why a module does not compile, and where.

@@ -45,11 +45,17 @@ fn ptx_str_compiles_no_function_of_an_abi_kernite_does_not_know() -> Result {
     Ok(())
 }
 
+/// The message of a kernel on the threads of a grid that is not an `unsafe fn`.
+const GRID: &str = "the threads of a grid run at once, and kernite cannot prove that they reach memory apart, so a \
+                    `#[cooperative]` kernel is an `unsafe fn`";
+
 #[test]
 fn the_facades_refuse_a_kernel_that_is_not_unsafe() -> Result {
     let not = "a kernel trusts the pointers it is given, so it is an `unsafe fn`";
-    let x = kernite::x86_str("extern \"sysv64\" fn k() {}", "k");
-    assert_eq!(x.err().ok_or("x gave Ok")?, format!("1:20: {not}"));
+    // A kernel the process runs on one thread is no `unsafe fn` where kernite proves it safe, as its machine says.
+    assert_eq!(x86("extern \"sysv64\" fn k() {}", "k")?, "# k() -> ()");
+    let x = kernite::x86_str("#[cooperative] extern \"sysv64\" fn k() {}", "k");
+    assert_eq!(x.err().ok_or("x gave Ok")?, format!("1:3: {GRID}"));
     let p = kernite::ptx_str("extern \"ptx-kernel\" fn k() {}");
     assert_eq!(p.err().ok_or("p gave Ok")?, format!("1:24: {not}"));
     // A function a kernel calls promises Rust nothing, so it need not be one.
@@ -106,9 +112,11 @@ fn the_facades_read_the_attributes_of_every_function_of_the_module() -> Result {
     let src = format!("{kernel}#[instances(1)] pub unsafe extern \"sysv64\" fn j() {{}}\n");
     assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, format!("2:3: {once}"));
     // A kernel that is not `unsafe` is said first, before its attributes.
-    let src = format!("{kernel}#[instances(1)] pub extern \"sysv64\" fn j() {{}}\n");
+    let src = "pub unsafe extern \"sysv64\" fn k() {}\n#[instances(1)] pub extern \"ptx-kernel\" fn j() {}\n";
     let not = "a kernel trusts the pointers it is given, so it is an `unsafe fn`";
-    assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, format!("2:40: {not}"));
+    assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, format!("2:44: {not}"));
+    let src = format!("{kernel}#[instances(1)] #[cooperative] pub extern \"sysv64\" fn j() {{}}\n");
+    assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, format!("2:19: {GRID}"));
     Ok(())
 }
 
@@ -131,8 +139,7 @@ fn the_facades_read_the_directives_of_every_function_of_the_module() -> Result {
     let want = format!("2:3: `#[reqntid(..)]` {goes}; `j` is a kernel for x86-64, which the process runs");
     assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, want);
     // A kernel that is not `unsafe` is said first, before its directives.
-    let src = format!("{ptx}#[maxntid(1)] pub extern \"sysv64\" fn j() {{}}\n");
-    let not = "a kernel trusts the pointers it is given, so it is an `unsafe fn`";
-    assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, format!("2:38: {not}"));
+    let src = format!("{ptx}#[maxntid(1)] #[cooperative] pub extern \"sysv64\" fn j() {{}}\n");
+    assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, format!("2:17: {GRID}"));
     Ok(())
 }

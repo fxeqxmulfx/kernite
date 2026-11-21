@@ -12,7 +12,7 @@ called by name, over variables declared with a type and no value; kernite alloca
 #[kernite_macros::kernels]
 mod kernels {
     /// The sum of the eight floats at `xs`.
-    pub unsafe extern "sysv64" fn sum8(xs: *const f32) -> f32 {
+    pub extern "sysv64" fn sum8(xs: &[f32; 8]) -> f32 {
         let v: ymm;
         vmovups(v, [xs]);
         let high: ymm;
@@ -28,29 +28,33 @@ mod kernels {
     }
 }
 
-let sum = unsafe { kernels::sum8(xs.as_ptr()) };
+/// `sum8` needs AVX, so a function that has it calls it with no `unsafe`.
+#[target_feature(enable = "avx")]
+fn sum(xs: &[f32; 8]) -> f32 {
+    kernels::sum8(xs)
+}
 ```
 
-`sum8` becomes an `#[unsafe(naked)]` function of the signature it declares, its body the kernel in Intel syntax,
-and `kernels::LISTINGS` holds each kernel's listing for snapshots. Everything that is not an instruction happens
-while the kernel compiles: `for` unrolls, `if` on a bool chooses, a function without an ABI is a helper inlined
-where it is called, and `<const N: usize>` makes one generic. Each parameter and generic of a function has a
-name of its own, but `_`. A parameter named `_` is given and not read, as in Rust, in a kernel of every kind: the next
-parameter is read where the ABI puts it. Rust cannot pass `_` on, so the macros name it for Rust, and the function Rust
-calls the kernel by takes it under that name. A generic kernel is compiled for each value its `#[instances(1, 4)]`
-lists, each a kernel of its own, which Rust calls as it calls a generic function, `kernels::dot::<4>(x, y, n)`; a value
-it does not list fails to build. A value known now holds at most 1048576 elements in all, however its arrays nest, and a
-range as many. Each number, float and `bool` is an element, and so is each array of none or one item,
-which costs memory of its own. A kernel declares at most 65536 variables, however its loops and helpers repeat
-them. Working out a function takes at most 4194304 steps: each turn of a `for`, each instruction, call, label or
-note, each number of a range, each item an array lists, as `[a, b]`, and each element of each `[x; n]`, of each
-array a method makes, of each one copied from a name, as `let b: [u32; 4] = a;` and `for x in a` copy it, and of
-each value an index takes or a note shows. A number read by name or worked out costs none of its own. Nesting is
-held to 64 levels, so that no kernel can run the compiler out of stack. Brackets, types, expressions, rows of
-`else if`s, consts that name consts and a value's arrays each nest 64 deep at most, and each operator in
-`a + b + c` is a level of its expression. A block, a `for` and an `if` are a level for what they hold, and count
-together with the expression inside them, along the helpers that call one another.
-[`kernite-lang`](crates/lang/src/lib.rs) describes the language.
+`sum8` is a function of the signature it declares, and Rust calls it with no `unsafe`: kernite proves it safe, as "A
+safe kernel" below says, and a kernel it cannot prove safe is an `unsafe fn`. Its body is the kernel in Intel syntax,
+in an `#[unsafe(naked)]` function, and `kernels::LISTINGS` holds each kernel's listing for snapshots. Everything that is
+not an instruction happens while the kernel compiles: `for` unrolls, `if` on a bool chooses, a function without an ABI
+is a helper inlined where it is called, and `<const N: usize>` makes one generic. Each parameter and generic of a
+function has a name of its own, but `_`. A parameter named `_` is given and not read, as in Rust, in a kernel of every
+kind: the next parameter is read where the ABI puts it. Rust cannot pass `_` on, so the macros name it for Rust, and the
+function Rust calls the kernel by takes it under that name. A generic kernel is compiled for each value its
+`#[instances(1, 4)]` lists, each a kernel of its own, which Rust calls as it calls a generic function,
+`kernels::dot::<4>(x, y, n)`; a value it does not list fails to build. A value known now holds at most 1048576 elements
+in all, however its arrays nest, and a range as many. Each number, float and `bool` is an element, and so is each array
+of none or one item, which costs memory of its own. A kernel declares at most 65536 variables, however its loops and
+helpers repeat them. Working out a function takes at most 4194304 steps: each turn of a `for`, each instruction, call,
+label or note, each number of a range, each item an array lists, as `[a, b]`, and each element of each `[x; n]`, of each
+array a method makes, of each one copied from a name, as `let b: [u32; 4] = a;` and `for x in a` copy it, and of each
+value an index takes or a note shows. A number read by name or worked out costs none of its own. Nesting is held to 64
+levels, so that no kernel can run the compiler out of stack. Brackets, types, expressions, rows of `else if`s, consts
+that name consts and a value's arrays each nest 64 deep at most, and each operator in `a + b + c` is a level of its
+expression. A block, a `for` and an `if` are a level for what they hold, and count together with the expression inside
+them, along the helpers that call one another. [`kernite-lang`](crates/lang/src/lib.rs) describes the language.
 
 A type in a kernel's parameters or return means what it means in any function of the module: `super::W` is the `W`
 beside the module of kernels, and `self::W` the one in it. It may name the kernel's compile-time arguments, as in any
@@ -77,9 +81,10 @@ a type with no size, `*const [CStr; 3]` or `*const (CStr, u8)`. One case has two
 as Rust writes it, `[usize; 3]` and `fn(f16: u8)`. A block and the arguments of a macro are written as their source has
 them, as Rust writes a block it does not work out: `Marker<{N*2}>` from `{N*2}`, `Marker<{ N * 2 }>` from `{ N * 2 }`
 and `m!(a+b)`. A run of spaces, line breaks and comments is one space. The length of an array is worked out in the type
-of a parameter or a variable that is an array or a name with arguments, and in those of its elements and arguments that
-are: with `N` as 3, `[usize; 6]` from `[usize;N*2]` and `Wrap<[usize; 6]>` from `Wrap<[usize;N*2]>`. In any other type,
-and in a result, it is written as its source has it: `(u8, [usize; N*2])` from `(u8,[usize;N*2])`.
+of a parameter or a variable that is an array, a reference to one or a name with arguments, and in those of its elements
+and arguments that are: with `N` as 3, `[usize; 6]` from `[usize;N*2]`, `&[usize; 6]` from `&[usize;N*2]` and
+`Wrap<[usize; 6]>` from `Wrap<[usize;N*2]>`. In any other type, and in a result, it is written as its source has it:
+`(u8, [usize; N*2])` from `(u8,[usize;N*2])`.
 
 A number's name in a kernel's parameters or return, `u8` to `u64`, `i8` to `i64`, `usize`, `isize`, `f32`, `f64` or
 `bool`, means that number: `u64` is 64 bits. A module that gives the name another type, `pub type u64 = u32;` and a
@@ -214,13 +219,13 @@ whose elements are of any type if not. So Rust says nothing of the code that nam
 but for two kinds of use, beside the refusal. A use that the type of the first kind of static does not fit is Rust's
 error, as it is for a static that compiles. A use of the second kind that says no type for its elements has Rust ask for
 it. The module is given no consts, so a type that reads one is of the second kind. kernite checks none of the items, so
-it says nothing it would find in them, such as a kernel that is not `unsafe`, an ABI it does not know, what a static
-holds, or what compiling a kernel finds. It compiles nothing of the module, so a workspace `name` that is not a string
-is no error at it. No room is counted for the statics, so a crate with no dependency named `kernite-macros` is not told
-it needs one for them. What the macro finds in writing the module for Rust is said, as for any module: the dependency
-the crate needs, `kernite-cuda` for a GPU item that `cfg` keeps and `kernite-cpu` for an x86 static or cooperative
-kernel; a compile-time argument named as a parameter of a launcher or of a `_blocks` method, `grid`, `threads` or
-`shared`; and a GPU kernel or a static named as a cooperative kernel's `_blocks` method.
+it says nothing it would find in them, such as a kernel that must be `unsafe` and is not, an ABI it does not know, what
+a static holds, or what compiling a kernel finds. It compiles nothing of the module, so a workspace `name` that is not a
+string is no error at it. No room is counted for the statics, so a crate with no dependency named `kernite-macros` is
+not told it needs one for them. What the macro finds in writing the module for Rust is said, as for any module: the
+dependency the crate needs, `kernite-cuda` for a GPU item that `cfg` keeps and `kernite-cpu` for an x86 static or
+cooperative kernel; a compile-time argument named as a parameter of a launcher or of a `_blocks` method, `grid`,
+`threads` or `shared`; and a GPU kernel or a static named as a cooperative kernel's `_blocks` method.
 
 A module kernite cannot read is refused whole as well, and stays with every item kernite can read. A `const` or a
 `static` it cannot read ends at its `;`, for its value may hold a `{..}`, as in `= { 1 };`. Any other item ends at its
@@ -252,10 +257,10 @@ the modules of kernels that take them.
 
 A function or a static that `cfg` leaves out says nothing, as Rust says nothing of a function it leaves out. A macro
 runs before Rust knows which `cfg` holds, so kernite compiles each one, and puts each error it finds in one under the
-same `#[cfg(..)]` or `#[cfg_attr(.., cfg(..))]`: a kernel that does not compile, or is not `unsafe`, a helper, a static.
-Where `cfg` leaves them out, the crate builds without a word; where it keeps them, each error is said where it is.
-A crate that keeps its x86 kernels on x86-64 alone, by `cfg(target_arch = "x86_64")`, builds for another machine
-without a word, though only x86-64 has `extern "sysv64"`: each function kernite writes for a kernel is under the
+same `#[cfg(..)]` or `#[cfg_attr(.., cfg(..))]`: a kernel that does not compile, or is not `unsafe` where it must be, a
+helper, a static. Where `cfg` leaves them out, the crate builds without a word; where it keeps them, each error is said
+where it is. A crate that keeps its x86 kernels on x86-64 alone, by `cfg(target_arch = "x86_64")`, builds for another
+machine without a word, though only x86-64 has `extern "sysv64"`: each function kernite writes for a kernel is under the
 kernel's `cfg` too, as one for each instance of a kernel of compile-time arguments or of a cooperative one.
 
 A kernel names the items of its module that it uses: a const it reads, a static, a helper, a kernel or an
@@ -554,6 +559,64 @@ nor any that the functions it calls name, whether it calls them by name or at an
 kernels': on the GPU for GPU kernels, so a module with kernels of both kinds and a static is an error, which says to
 make it two. A crate with a static in a module of x86 kernels needs a dependency named `kernite-cpu` for it, not renamed
 in `Cargo.toml`. kernite says at the static when it has none.
+
+## A safe kernel
+
+An x86 kernel that is no `unsafe fn` is one kernite proves safe where it compiles it, and Rust calls it as it calls any
+function, with no `unsafe`. It takes numbers and arrays by reference, `&[f32; 8]` for an array it reads and
+`&mut [f32; 8]` for one it writes, and gives back a number, a pointer or nothing. An array holds Rust's numbers, as
+stack memory does, and is 2147483647 bytes at most, as a static is; its length may be a compile-time argument,
+`&[f32; N]`, or a const. Rust says an array is as long as its type says, and kernite checks each address the kernel
+reaches in one as it checks one in stack memory: inside the array, at a displacement known now, and at the alignment its
+instruction needs. So nothing is checked when the kernel runs, and there is nothing for the caller to promise. The code
+of a safe kernel is that of the same kernel written with `unsafe` and a pointer for each array: kernite adds none.
+
+```rust
+#[kernite_macros::kernels]
+mod kernels {
+    /// The sum of the sixteen floats at `xs`: `sum8` of each half, added.
+    pub extern "sysv64" fn sum16(xs: &[f32; 16]) -> f32 {
+        let (low, high): (ymm, ymm);
+        call(low.xmm, sum8, [xs]);
+        call(high.xmm, sum8, [xs + 32]);
+        vaddss(high.xmm, low.xmm, high.xmm);
+        ret(high.xmm);
+    }
+}
+```
+
+A call passes an array of the callee's type, or a part of one: `[xs]` is `xs`, and `[xs + 32]` the array 32 bytes on,
+which must lie inside `xs`, at a multiple of the callee's element size. The callee's length may be a compile-time
+argument or a const as well: `sum::<4>` takes a `&[u64; 4]` and calls `sum::<2>` on each half. A write through `&[T; N]`
+is an error, as one to constant memory is, and an array is passed to a callee that writes only from `&mut [T; N]`. A
+kernel may call itself and the safe kernels of its module, and so reaches no memory but the arrays it is given and its
+own frames, which it touches a page at a time, so that an overflow of the stack faults at the guard page, as above.
+
+What kernite cannot prove it refuses, at the first parameter, operand or call it cannot, and the error says that the
+kernel is then an `unsafe fn`, which compiles as it always has, and which Rust calls in an `unsafe` block. A kernel is
+an `unsafe fn` when it:
+
+- takes a raw pointer, `*const f32`, which may point anywhere;
+- reaches an array at an index in a register, `[xs + i * 4]`, or at an address it has taken, `lea(p, [xs])`, or at an
+  address in a register, where kernite cannot keep it inside the array;
+- reaches a bit of an array at an offset in a register, `bts([xs], i)`, which may lie anywhere in memory;
+- makes a non-temporal store, `movnti([xs], g)`, which goes around the caches, and may return before an `sfence` or
+  `mfence` orders it: Rust holds the store unfinished until one does, and what the caller does next races with it;
+- names a static of the module's, which every kernel and the host reach;
+- calls a kernel that is an `unsafe fn`, or calls at an address, which reaches a function kernite cannot name;
+- gives a `bool` back, which must be 0 or 1, and kernite cannot prove that it is;
+- runs on a grid of threads, `#[cooperative]`, whose threads reach one memory at once.
+
+The code of a kernel may need CPU features past x86-64's own, as `sum8`'s `vmovups` of a `ymm` needs `avx`, and so does
+a kernel that calls one that does. Rust checks them where the kernel is called: the function it calls is
+`#[target_feature(enable = "avx")]`, so only a function that has `avx` the same way calls it with no `unsafe`, and any
+other calls it in an `unsafe` block, which says why the CPU has `avx`. The features the build is configured with,
+`-C target-cpu=x86-64-v3`, do not count: Rust asks for the attribute. Nothing is checked when the kernel is called: Rust
+has seen that the caller has the features, or the caller says in an `unsafe` block that the CPU does. A kernel that is
+an `unsafe fn` is the same as it was: what it needs is for its caller to know.
+
+A crate may `forbid(unsafe_code)` and have safe kernels, and call them: the Rust the macro writes for one is no
+`unsafe` of the crate's.
 
 ## On a GPU
 
@@ -921,20 +984,21 @@ is.
 
 ## Examples
 
-[`examples/my-app`](examples/my-app/src/main.rs) uses kernite as a crate outside it would: for the CPU `sum8`, `dot` for
-one accumulator, for four and for sixteen, two of which spill, `count_bytes`, by tables in its stack memory, `sum16`,
-which calls `sum8` for each half, `gcds`, which calls Stein's `gcd`, which calls itself, `histogram`, which counts in
-the module's memory from call to call, `weigh`, by weights in its constant memory, and `normalize` and `diffuse` on the
-threads of a grid, which compute what the GPU's do, bit for bit; and for the GPU
-`saxpy`, `block_sums` for blocks of 256 threads and of 1024 and `reverse_runs` in shared memory, `scale_f16`, written in place, `gcds`, which calls `gcd`, an `extern "ptx-func"`
-function that calls itself, `histogram`, which counts in the module's global memory from launch to launch, and
-`weigh`, by weights in its constant memory, with safe functions over them; and
-`matmul` on the tensor cores, by `cp.async`, `ldmatrix` and `mma`, in a module of its own, since it needs an Ampere
-GPU, `sm_80`; and in another, for Pascal's, `sm_60`, `normalize`, whose threads keep their floats in registers while
-the grid waits for every block's sum, and `diffuse`, which takes any number of steps in one launch, the grid waiting
-between them. Its tests hold each kernel to a scalar reference that does the same float operations in the same order,
-bit for bit, or the tensor cores, which add in an order of their own, to products of integers, exact in any order;
-and its listings to [`snapshots/`](examples/my-app/snapshots/).
+[`examples/my-app`](examples/my-app/src/main.rs) uses kernite as a crate outside it would: for the CPU `sum8`, a safe
+function of an array, `dot` for one accumulator, for four and for sixteen, two of which spill, `count_bytes`, by tables
+in its stack memory, `sum16`, a safe one too, which calls `sum8` for each half, `gcds`, which calls Stein's `gcd`, a
+safe function of two numbers, which calls itself, `histogram`, which counts in the module's memory from call to call,
+`weigh`, by weights in its constant memory, and `normalize` and `diffuse` on the threads of a grid, which compute what
+the GPU's do, bit for bit; and for the GPU `saxpy`, `block_sums` for blocks of 256 threads and of 1024 and
+`reverse_runs` in shared memory, `scale_f16`, written in place, `gcds`, which calls `gcd`, an `extern "ptx-func"`
+function that calls itself, `histogram`, which counts in the module's global memory from launch to launch, and `weigh`,
+by weights in its constant memory, with safe functions over them; and `matmul` on the tensor cores, by `cp.async`,
+`ldmatrix` and `mma`, in a module of its own, since it needs an Ampere GPU, `sm_80`; and in another, for Pascal's,
+`sm_60`, `normalize`, whose threads keep their floats in registers while the grid waits for every block's sum, and
+`diffuse`, which takes any number of steps in one launch, the grid waiting between them. Its tests hold each kernel to a
+scalar reference that does the same float operations in the same order, bit for bit, or the tensor cores, which add in
+an order of their own, to products of integers, exact in any order; and its listings to
+[`snapshots/`](examples/my-app/snapshots/).
 
 ```
 cargo run -p my-app
@@ -983,7 +1047,7 @@ Each crate depends only on the layers inside it. `crates/kernite/tests/architect
 | use cases | `kernite-build` | what kernite does with a module: ABIs, its rules, compiling each function; the ports a machine implements |
 | adapters | `kernite-x86`, `kernite-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kernite` | which machine and syntax each kernel compiles with |
-| delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, launchers of a grid's threads, or launchers of PTX |
+| delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, and the safe functions that call them; launchers of a grid's threads, or launchers of PTX |
 | runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and memory the host reaches too, modules, launches, copies between GPUs; `f16` and `bf16`; depends on no other crate |
 | runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid and the CPUs they run on, and the memory of a module of x86 kernels; depends on no other crate |
 

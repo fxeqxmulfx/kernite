@@ -5,7 +5,7 @@ use std::cell::LazyCell;
 
 use kernite_lang::{Error, Item, ItemKind, Mention, Module, Static};
 
-use crate::classify::{attributes, helper, trusted};
+use crate::classify::{attributes, helper, must_be_unsafe};
 use crate::function::stub;
 use crate::present::{Refusal, said};
 use crate::{
@@ -94,7 +94,7 @@ pub fn module<N: Native, D: Device>(
             continue;
         };
         // A refused module's kernels are not looked at: nothing of them is said or compiled.
-        let not_unsafe = (!refused && !trusted(f, abi)).then(|| said(Refusal::NotUnsafe, f.span));
+        let not_unsafe = if refused { None } else { must_be_unsafe(f, abi) };
         let checked = if refused { Ok(vec![]) } else { attributes(f).and(kernite_lang::instances(m, f)) };
         let (said, listed) = match checked {
             Ok(listed) => (None, listed),
@@ -291,7 +291,8 @@ fn touched(module: &Module, items: &[ItemOut]) -> Vec<Vec<String>> {
 
 /// Each function of `module` that `funcs` names, `gcd` or `tile::<4>`, as the code of an
 /// instance names them: by the function's name, and the index of the instance among those its
-/// `#[instances(..)]` lists, if it takes compile-time arguments.
+/// `#[instances(..)]` lists, if it takes compile-time arguments or is no `unsafe fn`: such a
+/// function is one that calls its instance, so the code calls the instance.
 fn calls(module: &Module, funcs: &[String]) -> Vec<Call> {
     let call = |name: &String| {
         // A kernel calls only an instance its function lists, so `instance` finds it. A function
@@ -300,7 +301,7 @@ fn calls(module: &Module, funcs: &[String]) -> Vec<Call> {
         let Ok(Some((g, _, k))) = instance(module, name) else {
             return Call { function: name.clone(), instance: None };
         };
-        Call { function: g.name.clone(), instance: (!g.generics.is_empty()).then_some(k) }
+        Call { function: g.name.clone(), instance: (!g.generics.is_empty() || !g.unsafe_fn).then_some(k) }
     };
     funcs.iter().map(call).collect()
 }

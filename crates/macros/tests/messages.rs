@@ -173,6 +173,14 @@ fn refuses_by(command: &[&str], name: &str, lines: &[&str]) -> Result {
     Ok(())
 }
 
+/// What kernite says of a kernel that is no `unsafe fn` and takes the pointer `ty`.
+fn takes_pointer(ty: &str) -> String {
+    format!(
+        "a pointer may point anywhere, so a kernel that takes `{ty}` is an `unsafe fn`; kernite checks an array by \
+         reference, `&[f32; 8]`"
+    )
+}
+
 /// What Rust says of `name`, a type that is not there, at `place` of `src/lib.rs`.
 fn not_found(place: &str, name: &str) -> String {
     format!("src/lib.rs:{place}: error[E0425]: cannot find type `{name}` in this scope: not found in this scope")
@@ -360,7 +368,7 @@ fn the_macro_says_what_it_refuses_where_it_is() -> Result {
             "src/lib.rs:31:23: error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \
              \"ptx-kernel\"` ones, for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \
              \"C\"` is none of these",
-            "src/lib.rs:36:28: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
+            &format!("src/lib.rs:36:33: error: {}", takes_pointer("*const u32")),
             "src/lib.rs:51:7: error: `#[cooperative]` gives `Kernels` a method `k_blocks`, which says how many blocks \
              a grid of `k` has at most, and a kernel or a static of the module is named `k_blocks` as well",
             "src/lib.rs:60:8: error: `h` names another function of the module as well",
@@ -832,7 +840,7 @@ fn a_module_refused_at_its_attribute_is_told_what_the_macro_finds_in_writing_it_
         &["build", "--features", "taken"],
         "refused_mistakes",
         &[
-            "src/lib.rs:11:28: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
+            &format!("src/lib.rs:11:37: error: {}", takes_pointer("*const u64")),
             "src/lib.rs:16:7: error: `once` takes no compile-time arguments, so it is compiled once, with no \
              `#[instances(..)]`",
             "src/lib.rs:23:16: error: `nope` is not defined",
@@ -1237,6 +1245,58 @@ fn a_kernels_safety_contract_says_nothing_else_touches_the_memory_it_names() -> 
     Ok(())
 }
 
+/// A kernel that is no `unsafe fn` is a function Rust calls without `unsafe`, so its docs have no `# Safety`; where its
+/// code needs CPU features past x86-64's own they say that Rust checks where it is called, and only a function that has
+/// them calls it without `unsafe`. A crate that forbids `unsafe_code` has such kernels and calls them: the code the
+/// macro writes for one is no `unsafe` of the crate's.
+#[test]
+fn a_kernel_that_is_no_unsafe_fn_has_no_safety_contract_and_a_crate_that_forbids_unsafe_calls_it() -> Result {
+    builds_quietly("safe_kernels")?;
+    let docs = documents_quietly("safe_kernels")?.join("cpu");
+    let page = |f: &str| fs::read_to_string(docs.join(format!("fn.{f}.html")));
+    for f in ["twice", "first", "four_times", "fill", "tile", "second"] {
+        let page = page(f)?;
+        assert!(!page.contains(">Safety</h2>"), "the docs of `{f}` have a `# Safety`");
+        assert!(!page.contains("unsafe fn"), "`{f}` is an `unsafe fn` in its docs");
+    }
+    let first = page("first")?;
+    for said in [
+        "Needs the CPU feature <code>avx</code>, past x86-64’s own, which Rust checks where it is called: only a \
+         function that has it, <code>#[target_feature(enable = \"avx\")]</code>, calls it without <code>unsafe</code>.",
+        "The first of the four floats at <code>xs</code>.",
+    ] {
+        assert!(first.contains(said), "the docs of `first` lack `{said}`");
+    }
+    assert!(!page("twice")?.contains("Needs the CPU"), "the docs of `twice` name a feature it needs not");
+    Ok(())
+}
+
+/// Rust refuses a call of a safe kernel that needs `avx` by a function that has not got it, whatever features the
+/// build is configured with, and one of a kernel that is an `unsafe fn` outside an `unsafe` block, whatever features
+/// the caller has; it takes a call by a function that has `avx` and a call in an `unsafe` block. A kernel that calls
+/// one that needs it needs it too.
+#[test]
+fn a_kernel_that_needs_a_cpu_feature_is_called_only_where_rust_knows_the_cpu_has_it() -> Result {
+    let call = |at: &str, f: &str| {
+        format!(
+            "src/lib.rs:{at}: error[E0133]: call to function `{f}` with `#[target_feature]` is unsafe and requires \
+             unsafe block: call to function with `#[target_feature]`"
+        )
+    };
+    let (first, again) = (call("31:5", "first"), call("31:22", "again"));
+    let lines: [&str; 4] = [
+        &first,
+        &again,
+        "src/lib.rs:52:5: error[E0133]: call to unsafe function `load` is unsafe and requires unsafe block: call \
+         to unsafe function",
+        "error: could not compile `safe_kernels_refused` (lib) due to 3 previous errors",
+    ];
+    refuses("safe_kernels_refused", &lines)?;
+    // The features a build is configured with do not count: Rust asks for the attribute, or an `unsafe` block.
+    let flags = "build.rustflags=[\"-C\", \"target-cpu=x86-64-v3\"]";
+    refuses_by(&["build", "--config", flags], "safe_kernels_refused", &lines)
+}
+
 /// A GPU kernel's launcher says what a launch keeps to, as `Module::launch` does: the kernel's own
 /// `# Safety`, or, where it has none, the macros': each pointer is to a buffer or to unified
 /// memory of the GPU; from the launch until the kernel is done, the host holds no slice of memory
@@ -1465,7 +1525,7 @@ fn what_cfg_leaves_out_says_nothing() -> Result {
             "src/lib.rs:39:23: error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \
              \"ptx-kernel\"` ones, for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \
              \"C\"` is none of these",
-            "src/lib.rs:45:28: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
+            &format!("src/lib.rs:45:36: error: {}", takes_pointer("*mut u64")),
             "src/lib.rs:53:13: error: in `tile::<1>`: `y` is not defined",
             "src/lib.rs:53:13: error: in `tile::<2>`: `y` is not defined",
             "src/lib.rs:58:7: error: `plain` takes no compile-time arguments, so it is compiled once, with no \
@@ -1881,7 +1941,7 @@ fn a_kernel_kernite_refuses_with_a_parameter_named_underscore_is_kernites_error_
     let y = "error: `y` is not defined";
     let abi = "error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, \
                for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` is none of these";
-    let safe = "error: a kernel trusts the pointers it is given, so it is an `unsafe fn`";
+    let safe = format!("error: {}", takes_pointer("*const usize"));
     let kernite = [
         // The module of x86 kernels: a plain one, one of compile-time arguments, which kernite says
         // once for each instance, a cooperative one and a cooperative one of arguments; one whose
@@ -1893,7 +1953,7 @@ fn a_kernel_kernite_refuses_with_a_parameter_named_underscore_is_kernites_error_
         ("33:13", "error: in `together_tiles::<1>`: `y` is not defined"),
         ("33:13", "error: in `together_tiles::<2>`: `y` is not defined"),
         ("36:23", abi),
-        ("40:28", safe),
+        ("40:54", safe.as_str()),
         // The module of GPU kernels: the same four kinds.
         ("48:24", y),
         ("53:24", "error: in `tiles::<1>`: `y` is not defined"),
@@ -1909,7 +1969,7 @@ fn a_kernel_kernite_refuses_with_a_parameter_named_underscore_is_kernites_error_
         ("89:13", "error: in `together_tiles::<1>`: `y` is not defined"),
         ("89:13", "error: in `together_tiles::<2>`: `y` is not defined"),
         ("92:23", abi),
-        ("96:28", safe),
+        ("96:54", safe.as_str()),
         ("106:24", y),
         ("111:24", "error: in `tiles::<1>`: `y` is not defined"),
         ("111:24", "error: in `tiles::<2>`: `y` is not defined"),
@@ -2150,7 +2210,7 @@ fn a_pointer_to_a_type_with_no_size_is_refused_at_its_type() -> Result {
     let told_str_second = "error: in `str_path_tiles::<2>`: a pointer to `str` has two words, an address and a length \
                            or a table, and a kernel's pointer has one";
     let y = "error: `y` is not defined";
-    let safe = "error: a kernel trusts the pointers it is given, so it is an `unsafe fn`";
+    let safe = format!("error: {}", takes_pointer("*const core::ffi::CStr"));
     let abi = "error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, \
                for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` is none of these";
     let gives = "error: a GPU kernel returns nothing, not `*mut core::ffi::CStr`: it writes what it works out \
@@ -2173,7 +2233,7 @@ fn a_pointer_to_a_type_with_no_size_is_refused_at_its_type() -> Result {
         ("125:23", y),
         ("130:23", "error: in `refused_returns_tiles::<1>`: `y` is not defined"),
         ("130:23", "error: in `refused_returns_tiles::<2>`: `y` is not defined"),
-        ("133:28", safe),
+        ("133:36", safe.as_str()),
         ("137:23", abi),
         ("216:48", told),
         ("241:28", y),
@@ -2633,78 +2693,82 @@ fn impl_in_the_type_of_a_variable_a_const_or_a_static_is_said_as_it_was() -> Res
 /// A number's name that the module gives another type is Rust's error at the type, once: kernite reads
 /// the number the name says, and the macros ask Rust whether the type is that number. The names are
 /// given by a `use` of a `pub type` of the crate's root, and of a module of aliases, to the type of
-/// another number; in each parameter and result of an x86 kernel, plain, of compile-time arguments
-/// or cooperative, and in each parameter of a GPU kernel of those kinds.
+/// another number; in each parameter and result of an x86 kernel, plain, of compile-time arguments or
+/// cooperative, and in each parameter of a GPU kernel of those kinds; and in the elements of an array
+/// by reference.
 #[test]
 fn a_number_named_as_another_type_is_refused_at_the_type_whatever_the_kernel_is() -> Result {
     let numbers = [
         // `u64` and `f64`, which the crate's root gives and a module takes by a `use`: `id` takes
         // a `u64`, and `twice` takes and gives back an `f64`.
-        ("35:41", "u64", "u32"),
-        ("39:44", "f64", "f32"),
-        ("39:52", "f64", "f32"),
+        ("36:41", "u64", "u32"),
+        ("40:44", "f64", "f32"),
+        ("40:52", "f64", "f32"),
         // An x86 kernel, plain: a parameter of each number it takes.
-        ("50:12", "f32", "f64"),
-        ("51:12", "f64", "f32"),
-        ("52:12", "usize", "isize"),
-        ("53:12", "isize", "usize"),
-        ("54:12", "u64", "i64"),
-        ("55:12", "i64", "u64"),
+        ("51:12", "f32", "f64"),
+        ("52:12", "f64", "f32"),
+        ("53:12", "usize", "isize"),
+        ("54:12", "isize", "usize"),
+        ("55:12", "u64", "i64"),
+        ("56:12", "i64", "u64"),
         // The same, a result of each number it gives back, and `bool`.
-        ("60:58", "f32", "f64"),
-        ("61:58", "f64", "f32"),
-        ("62:60", "usize", "isize"),
-        ("63:60", "isize", "usize"),
-        ("64:58", "u64", "i64"),
-        ("65:58", "i64", "u64"),
-        ("66:58", "u32", "i32"),
-        ("67:58", "i32", "u32"),
-        ("68:58", "u16", "i16"),
-        ("69:58", "i16", "u16"),
-        ("70:57", "u8", "i8"),
-        ("71:57", "i8", "u8"),
-        ("72:59", "bool", "u8"),
+        ("61:58", "f32", "f64"),
+        ("62:58", "f64", "f32"),
+        ("63:60", "usize", "isize"),
+        ("64:60", "isize", "usize"),
+        ("65:58", "u64", "i64"),
+        ("66:58", "i64", "u64"),
+        ("67:58", "u32", "i32"),
+        ("68:58", "i32", "u32"),
+        ("69:58", "u16", "i16"),
+        ("70:58", "i16", "u16"),
+        ("71:57", "u8", "i8"),
+        ("72:57", "i8", "u8"),
+        ("73:59", "bool", "u8"),
         // An x86 kernel of compile-time arguments: a parameter of each number.
-        ("81:12", "f32", "f64"),
-        ("82:12", "f64", "f32"),
-        ("83:12", "usize", "isize"),
-        ("84:12", "isize", "usize"),
-        ("85:12", "u64", "i64"),
-        ("86:12", "i64", "u64"),
+        ("82:12", "f32", "f64"),
+        ("83:12", "f64", "f32"),
+        ("84:12", "usize", "isize"),
+        ("85:12", "isize", "usize"),
+        ("86:12", "u64", "i64"),
+        ("87:12", "i64", "u64"),
         // A result of three of them.
-        ("92:74", "f32", "f64"),
-        ("94:73", "u8", "i8"),
-        ("96:75", "bool", "u8"),
+        ("93:74", "f32", "f64"),
+        ("95:73", "u8", "i8"),
+        ("97:75", "bool", "u8"),
         // A cooperative x86 kernel, plain and of compile-time arguments.
-        ("105:12", "f32", "f64"),
-        ("106:12", "f64", "f32"),
-        ("107:12", "usize", "isize"),
-        ("108:12", "isize", "usize"),
-        ("109:12", "u64", "i64"),
-        ("110:12", "i64", "u64"),
-        ("117:67", "f32", "f64"),
-        ("117:75", "u64", "i64"),
+        ("106:12", "f32", "f64"),
+        ("107:12", "f64", "f32"),
+        ("108:12", "usize", "isize"),
+        ("109:12", "isize", "usize"),
+        ("110:12", "u64", "i64"),
+        ("111:12", "i64", "u64"),
+        ("118:67", "f32", "f64"),
+        ("118:75", "u64", "i64"),
         // A GPU kernel, plain: a parameter of each number it takes.
-        ("127:12", "u8", "i8"),
-        ("128:12", "u16", "i16"),
-        ("129:12", "u32", "i32"),
-        ("130:12", "u64", "i64"),
-        ("131:12", "i8", "u8"),
-        ("132:12", "i16", "u16"),
-        ("133:12", "i32", "u32"),
-        ("134:12", "i64", "u64"),
-        ("135:12", "usize", "isize"),
-        ("136:12", "isize", "usize"),
-        ("137:12", "f32", "f64"),
-        ("138:12", "f64", "f32"),
+        ("128:12", "u8", "i8"),
+        ("129:12", "u16", "i16"),
+        ("130:12", "u32", "i32"),
+        ("131:12", "u64", "i64"),
+        ("132:12", "i8", "u8"),
+        ("133:12", "i16", "u16"),
+        ("134:12", "i32", "u32"),
+        ("135:12", "i64", "u64"),
+        ("136:12", "usize", "isize"),
+        ("137:12", "isize", "usize"),
+        ("138:12", "f32", "f64"),
+        ("139:12", "f64", "f32"),
         // A GPU kernel of compile-time arguments, a cooperative one, and a cooperative one of arguments.
-        ("143:69", "u8", "i8"),
-        ("143:76", "f64", "f32"),
-        ("147:58", "u32", "i32"),
-        ("147:66", "f32", "f64"),
-        ("152:78", "i64", "u64"),
+        ("144:69", "u8", "i8"),
+        ("144:76", "f64", "f32"),
+        ("148:58", "u32", "i32"),
+        ("148:66", "f32", "f64"),
+        ("153:78", "i64", "u64"),
         // A name for a type wider than the number: Rust would pass eight bytes where the kernel reads four.
-        ("166:78", "u32", "u64"),
+        ("167:78", "u32", "u64"),
+        // An array by reference of a number of another type.
+        ("178:40", "f32", "f64"),
+        ("178:59", "u8", "i8"),
     ];
     let mut said: Vec<String> = numbers.map(|(at, number, found)| not_the_number(at, number, found)).into();
     said.push(format!("error: could not compile `number_names` (lib) due to {} previous errors", numbers.len()));
@@ -2716,6 +2780,7 @@ fn a_number_named_as_another_type_is_refused_at_the_type_whatever_the_kernel_is(
 /// Rust says what it finds at the type, in the stub the macros leave for each, once.
 #[test]
 fn a_number_named_as_another_type_is_refused_at_the_type_in_a_kernel_kernite_refuses() -> Result {
+    let pointer = format!("src/lib.rs:50:36: error: {}", takes_pointer("*const u8"));
     let kernite = [
         // An x86 kernel kernite refuses for a body that names a variable it has not: a plain one, one
         // of compile-time arguments, which it says once for each instance, a cooperative one, and a
@@ -2731,7 +2796,7 @@ fn a_number_named_as_another_type_is_refused_at_the_type_in_a_kernel_kernite_ref
         "src/lib.rs:46:23: error: kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \
          \"ptx-kernel\"` ones, for NVIDIA GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"C\"` \
          is none of these",
-        "src/lib.rs:50:28: error: a kernel trusts the pointers it is given, so it is an `unsafe fn`",
+        &pointer,
         // A GPU kernel: a plain one, one of compile-time arguments, and a cooperative one.
         "src/lib.rs:60:24: error: `y` is not defined",
         "src/lib.rs:65:24: error: in `tiles::<1>`: `y` is not defined",
@@ -2757,8 +2822,8 @@ fn a_number_named_as_another_type_is_refused_at_the_type_in_a_kernel_kernite_ref
         // One whose `extern` kernite does not know, and one that is not `unsafe`.
         ("46:43", "u64", "i64"),
         ("46:51", "f64", "f32"),
-        ("50:36", "f32", "f64"),
-        ("50:44", "f32", "f64"),
+        ("50:50", "f32", "f64"),
+        ("50:58", "f32", "f64"),
         // A GPU kernel kernite refuses: a plain one, one of compile-time arguments and a cooperative one.
         ("59:48", "u32", "i32"),
         ("59:56", "f64", "f32"),

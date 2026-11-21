@@ -572,6 +572,19 @@ impl<'a> Parser<'a> {
             p.finish()?;
             return Ok(ty);
         }
+        // A reference to an array, `&[T; N]` or `&mut [T; N]`, whose length is worked out as an array's is. Any other
+        // reference is read as a name below.
+        let from = self.pos;
+        if self.eat_op("&") {
+            let write = self.eat_ident("mut");
+            if matches!(self.peek(), Some(Tree::Group { delim: Delim::Bracket, .. })) {
+                let array = self.ty(open)?;
+                if matches!(array, Type::Array(..)) {
+                    return Ok(Type::Ref(write, Box::new(array), self.span_at(from)));
+                }
+            }
+            self.pos = from;
+        }
         if let Some((inner, span)) = self.group(Delim::Bracket) {
             nested(open, span)?;
             let mut p = Parser::new(inner, span);

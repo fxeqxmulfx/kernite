@@ -86,8 +86,7 @@ pub fn kernel<T: Target>(module: &Module, f: &Fn, args: &[Value], target: &mut T
     instance(f, args)?;
     let mut e = Eval::new(module, target);
     e.listed(f)?;
-    e.scopes
-        .push(f.generics.iter().zip(args).map(|(g, a)| (g.name.clone(), Binding::Value(Rc::new(a.clone())))).collect());
+    e.scopes.push(generic_scope(f, args.iter().cloned()));
     e.directives(f)?;
     for p in &f.params {
         let ty = e.type_name(&p.ty)?;
@@ -101,6 +100,22 @@ pub fn kernel<T: Target>(module: &Module, f: &Fn, args: &[Value], target: &mut T
     e.block(f.body.as_ref().map_err(Clone::clone)?)?;
     e.target.end().map_err(|m| err(f.span, m))?;
     Ok(Run { mentions: e.mentions })
+}
+
+/// The types of the parameters of `f`, a function of `module`, for the compile-time arguments `args`, those of one of
+/// its [`instances`]: each as [`kernel`] tells it to its target, with what it names worked out, `&[u64; 2]` for
+/// `&[u64; N]` where `N` is 2.
+pub fn param_types(module: &Module, f: &Fn, args: &[Value]) -> Result<Vec<String>, Error> {
+    instance(f, args)?;
+    let mut no_machine = Consts;
+    let mut e = Eval::new(module, &mut no_machine);
+    e.scopes.push(generic_scope(f, args.iter().cloned()));
+    f.params.iter().map(|p| e.type_name(&p.ty)).collect()
+}
+
+/// The scope of the body of `f`: each of its generics names the compile-time argument that `values` gives it.
+fn generic_scope<'a, V>(f: &Fn, values: impl IntoIterator<Item = Value>) -> Scope<'a, V> {
+    f.generics.iter().zip(values).map(|(g, v)| (g.name.clone(), Binding::Value(Rc::new(v)))).collect()
 }
 
 /// The compile-time arguments of each instance of `f`, a function of `module`, in the order
@@ -531,7 +546,7 @@ impl<'a, T: Target> Eval<'a, T> {
                     other => Err(err(span, format!("this is {}, not an array", other.kind()))),
                 }
             }
-            Type::Slice(..) | Type::Generic(..) => {
+            Type::Ref(..) | Type::Slice(..) | Type::Generic(..) => {
                 Err(err(ty.span(), "a value known now is a number, a bool, or an array of them, `[T; N]`"))
             }
         }
@@ -542,6 +557,7 @@ impl<'a, T: Target> Eval<'a, T> {
     fn type_name(&mut self, t: &Type) -> Result<String, Error> {
         Ok(match t {
             Type::Name(name, _) => name.clone(),
+            Type::Ref(write, array, _) => format!("&{}{}", if *write { "mut " } else { "" }, self.type_name(array)?),
             Type::Array(elem, len, _) => format!("[{}; {}]", self.type_name(elem)?, self.count(len)?),
             Type::Slice(elem, _) => format!("[{}]", self.type_name(elem)?),
             Type::Generic(name, args, _) => {
@@ -1107,7 +1123,7 @@ impl<'a, T: Target> Eval<'a, T> {
 
     fn let_(&mut self, name: &str, span: Span, ty: Option<&Type>, value: Option<&Expr>) -> Result<(), Error> {
         let b = match (ty, value) {
-            (Some(t @ (Type::Name(..) | Type::Generic(..))), None) => {
+            (Some(t @ (Type::Name(..) | Type::Ref(..) | Type::Generic(..))), None) => {
                 let ty = self.type_name(t)?;
                 self.declare(1, span)?;
                 let v = self.target.var(name, &ty).map_err(|m| err(t.span(), m))?;
@@ -1328,7 +1344,7 @@ impl<'a, T: Target> Eval<'a, T> {
             ));
         }
         let values = self.generics(f, generics)?;
-        let scope = f.generics.iter().zip(values).map(|(g, v)| (g.name.clone(), Binding::Value(Rc::new(v)))).collect();
+        let scope = generic_scope(f, values);
         let given = args.iter().map(|a| self.binding(a)).collect::<Result<Vec<_>, _>>()?;
         let outer = std::mem::replace(&mut self.scopes, vec![scope]);
         let r = self.params(f, args, given).and_then(|()| {
@@ -1346,7 +1362,7 @@ impl<'a, T: Target> Eval<'a, T> {
         for ((p, e), b) in f.params.iter().zip(args).zip(given) {
             let at = |m: String| err(e.span(), format!("`{}`: {m}", p.name));
             let b = match (&p.ty, b) {
-                (t @ (Type::Name(..) | Type::Generic(..)), Binding::Var(v)) => {
+                (t @ (Type::Name(..) | Type::Ref(..) | Type::Generic(..)), Binding::Var(v)) => {
                     let t = self.type_name(t)?;
                     Binding::Var(self.target.view(v, &t).map_err(at)?)
                 }
@@ -1360,7 +1376,7 @@ impl<'a, T: Target> Eval<'a, T> {
                     }
                     Binding::Vars(vs.into_iter().map(|v| self.target.view(v, t)).collect::<Result<_, _>>().map_err(at)?)
                 }
-                (t @ (Type::Name(..) | Type::Generic(..)), b) => {
+                (t @ (Type::Name(..) | Type::Ref(..) | Type::Generic(..)), b) => {
                     let t = self.type_name(t)?;
                     return Err(at(format!("wants a variable of type `{t}`; this is {}", b.kind())));
                 }
@@ -1451,6 +1467,6 @@ fn want(ty: &Type) -> Want {
     match ty {
         Type::Name(name, _) => Want::of(name.trim_start_matches("&[").trim_end_matches(']')),
         Type::Array(elem, ..) | Type::Slice(elem, _) => want(elem),
-        Type::Generic(..) => Want::Any,
+        Type::Ref(..) | Type::Generic(..) => Want::Any,
     }
 }

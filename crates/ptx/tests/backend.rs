@@ -132,8 +132,12 @@ fn a_function_the_kernels_call_is_a_func() -> Result {
     "#;
     let module = kernite_lang::parse(src)?;
     let ptx = Ptx::new("7kernite3gpu");
-    let callee =
-        |name| -> Result<_> { Ok(ptx.callee(kernite_build::function(&module, name).ok_or("function gave None")?)) };
+    // A function is seen as one of its instances is, by the types of its parameters worked out.
+    let callee = |name| -> Result<_> {
+        let f = kernite_build::function(&module, name).ok_or("function gave None")?;
+        let args = kernite_lang::instances(&module, f)?.into_iter().next().unwrap_or_default();
+        Ok(ptx.callee(f, &kernite_lang::param_types(&module, f, &args)?))
+    };
     let calls = Callee::Calls(Prototype { params: vec![Ty::U32], returns: Returns::Value(Ty::U32) });
     assert_eq!(callee("times")?, Some(calls.clone()));
     assert_eq!(callee("flag")?, Some(Callee::Broken));

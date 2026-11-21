@@ -8,7 +8,7 @@ use kernite::{Call, HostStatic, Naked, NativeInstance};
 
 use crate::cond::Cond;
 use crate::rust::{
-    Written, asks, attrs, cfg_of, checks, clashes, depends_on, given_back, gives_placeholder, hygienic,
+    Written, array_ref, asks, attrs, cfg_of, checks, clashes, depends_on, given_back, gives_placeholder, hygienic,
     launcher_result, missing, name_after, name_at, never, parse, pick, pointer, position, primitive, probe, result,
     signature, site, span_of, stub, value_params, visibility, within, written, written_params,
 };
@@ -16,25 +16,30 @@ use crate::rust::{
 /// The crate the Rust of a static or a cooperative kernel names.
 const CPU: &str = "kernite-cpu";
 
-/// `f` as an `#[unsafe(naked)]` function whose body is the listing of its one instance, and
-/// the statics its constants are, in a hidden module beside it. For a function of compile-time
+/// `f` as an `#[unsafe(naked)]` function whose body is the listing of its one instance, and the
+/// statics its constants are, in a hidden module beside it. For a function of compile-time
 /// arguments, each instance is such a function, of the name [`instance_name`] gives it, and `f`
 /// is one that calls the instance its arguments pick. So is each instance of a cooperative
 /// kernel, which takes the thread's place in the grid after `f`'s parameters, and `f` is its
-/// [`grid_launcher`]. An instance is a function of the module of kernels, as `f` is, and not of
-/// a module of its own. It takes what `f` takes, but a pointer is `*const ()` or `*mut ()` to it,
-/// whatever it points to, and `f` casts the pointers it passes on and the one it gets back; and a
-/// number is the number in both, `::core::primitive::u64`, and not the name the kernel writes. So
-/// no type of `f`'s is written twice: Rust reads each once, in `f`, where it means what it means
-/// in any function of the module, `super::W` or `[u8; N]`, whose `N` is a compile-time argument,
-/// and a number's name in the questions `f` asks of it; it says an error in one once, at the type,
-/// and lints it at the level `f` sets. Each instance names the functions of `module` it calls by
-/// the operands [`callees`] gives, and its statics by those [`reached`] gives. Its safety contract
-/// says that nothing else touches `named`, the module's memory, while it runs. A cooperative
-/// kernel of a crate without `kernite-cpu` is [`x86_stub`]'s instead, with the error that says so,
-/// and so is a kernel that gives back a type with a `_` in it, which is Rust's error alone.
-/// All this writes is under `cfg`, `f`'s own, the module of its statics included: an instance is `extern
-/// "sysv64"`, which only x86-64 has, so a crate that keeps `f` there alone builds for another machine.
+/// [`grid_launcher`]. So is the instance of a kernel that is no `unsafe fn`, and `f` is the
+/// function Rust calls without `unsafe`: `#[inline(always)]`, or where the code needs CPU
+/// features `#[target_feature(enable = "..")]` and `#[inline]`, for Rust lets no naked function
+/// be `#[target_feature]`; and only a function that has the features calls `f` without
+/// `unsafe`. An instance is a function of the module of kernels, as `f` is, and not of a module
+/// of its own. It takes what `f` takes, but a pointer or an array by reference is `*const ()`
+/// or `*mut ()` to it, whatever it points to, and `f` casts the ones it passes on and the
+/// pointer it gets back; and a number is the number in both, `::core::primitive::u64`, and not
+/// the name the kernel writes. So no type of `f`'s is written twice: Rust reads each once, in
+/// `f`, where it means what it means in any function of the module, `super::W` or `[u8; N]`,
+/// whose `N` is a compile-time argument, and a number's name in the questions `f` asks of it;
+/// it says an error in one once, at the type, and lints it at the level `f` sets. Each instance
+/// names the functions of `module` it calls by the operands [`callees`] gives, and its statics
+/// by those [`reached`] gives. Its safety contract says that nothing else touches `named`, the
+/// module's memory, while it runs. A cooperative kernel of a crate without `kernite-cpu` is
+/// [`x86_stub`]'s instead, with the error that says so, and so is a kernel that gives back a
+/// type with a `_` in it, which is Rust's error alone. All this writes is under `cfg`, `f`'s
+/// own, the module of its statics included: an instance is `extern "sysv64"`, which only x86-64
+/// has, so a crate that keeps `f` there alone builds for another machine.
 pub(crate) fn naked(
     module: &lang::Module,
     f: &Fn,
@@ -50,13 +55,15 @@ pub(crate) fn naked(
     }
     let mut out = TokenStream::new();
     let mut statics = vec![];
+    let safe = !f.unsafe_fn;
     if let [one] = instances
         && one.args.is_empty()
         && !cooperative
+        && !safe
     {
         let listing = &one.naked;
         let mut docs = attrs(f, top);
-        docs.extend(needs(instances));
+        docs.extend(needs(&features(instances), safe));
         out.extend(contract(docs, named));
         out.extend(parse("#[unsafe(naked)]"));
         out.extend(signature(f, top));
@@ -102,16 +109,20 @@ pub(crate) fn naked(
             statics.push((format!("I{k}C"), listing));
             arms.push((instance.args.clone(), name));
         }
+        let features = features(instances);
         if cooperative {
-            out.extend(grid_launcher(f, Some(&arms), needs(instances), named, cfg, top));
+            out.extend(grid_launcher(f, Some(&arms), needs(&features, safe), named, cfg, top));
         } else {
             let mut docs = attrs(f, top);
-            docs.extend(needs(instances));
+            docs.extend(needs(&features, safe));
             out.extend(contract(docs, named));
-            out.extend(parse("#[inline(always)]"));
+            out.extend(match (safe, features.is_empty()) {
+                (true, false) => parse(&format!("#[target_feature(enable = {:?})]\n#[inline]", features.join(","))),
+                _ => parse("#[inline(always)]"),
+            });
             out.extend(signature(f, top));
             let mut body = checks(f, top);
-            let call = parse(&format!("({})({})", pick(f, &arms, top), names.join(", ")));
+            let call = parse(&format!("({})({})", chosen(f, &arms, top), names.join(", ")));
             body.extend(result(f, top, call));
             out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
         }
@@ -319,13 +330,25 @@ fn instance_name(function: &str, k: usize) -> String {
 }
 
 /// `ty`, a type of `f`'s, as an instance writes it, and what `f` writes after a value of it to pass
-/// it on: a pointer is `*const ()` or `*mut ()` to the instance, whatever it points to, and `as
-/// *const ()` or `as *mut ()` in `f`, which is a cast and not a call, so that Rust says nothing of
-/// the type it points to; a number is the primitive, as it is in `f`, and nothing.
+/// it on: a pointer is `*const ()` or `*mut ()` to the instance, whatever it points to, and
+/// `as *const ()` or `as *mut ()` in `f`, which is a cast and not a call, so that Rust says nothing
+/// of the type it points to; an array by reference is the same, after a cast to the pointer to the
+/// array, `as *const _`, which Rust makes of a reference alone; a number is the primitive, as it is
+/// in `f`, and nothing.
 fn erased(ty: &[TokenTree]) -> (String, String) {
-    match pointer(ty) {
-        Some((kind, _)) => (format!("*{kind} ()"), format!(" as *{kind} ()")),
-        None => (given_back(ty).to_string(), String::new()),
+    match (pointer(ty), array_ref(ty)) {
+        (Some((kind, _)), _) => (format!("*{kind} ()"), format!(" as *{kind} ()")),
+        (_, Some((kind, _))) => (format!("*{kind} ()"), format!(" as *{kind} _ as *{kind} ()")),
+        (None, None) => (given_back(ty).to_string(), String::new()),
+    }
+}
+
+/// The instance `f` calls, as a Rust expression: the only one, `arms` having one that takes no arguments, by its name,
+/// else the one `f`'s compile-time arguments [`pick`].
+fn chosen(f: &Fn, arms: &[(Vec<Value>, String)], top: &[TokenTree]) -> String {
+    match arms {
+        [(args, kernel)] if args.is_empty() => kernel.clone(),
+        _ => pick(f, arms, top),
     }
 }
 
@@ -404,10 +427,7 @@ fn grid_launcher(
     out.extend(launcher_result(f, top, result));
     let text = match kernels {
         Some(kernels) => {
-            let kernel = match kernels {
-                [(args, kernel)] if args.is_empty() => kernel.clone(),
-                _ => pick(f, kernels, top),
-            };
+            let kernel = chosen(f, kernels, top);
             let (mut addresses, mut args) = (String::new(), vec![]);
             for Written { name, ty, .. } in written_params(f, top) {
                 match pointer(&ty) {
@@ -435,21 +455,36 @@ fn grid_launcher(
     out
 }
 
-/// The doc that names the CPU features past x86-64's own the code of `instances` needs, which
-/// nothing checks for when it runs; none if it needs none.
-fn needs(instances: &[NativeInstance]) -> TokenStream {
+/// The CPU features past x86-64's own the code of `instances` needs, each once, by name.
+fn features(instances: &[NativeInstance]) -> Vec<&str> {
     let mut features: Vec<&str> = instances.iter().flat_map(|k| k.naked.needs.iter().map(String::as_str)).collect();
     features.sort();
     features.dedup();
+    features
+}
+
+/// The doc that names the CPU `features`, past x86-64's own, which the code of a kernel needs; none if it needs none.
+/// For a kernel that is an `unsafe fn` it says that nothing checks for them when it runs; for one that is not, that
+/// Rust checks where it is called, for only a function that has them calls it without `unsafe`.
+fn needs(features: &[&str], safe: bool) -> TokenStream {
     let named: Vec<String> = features.iter().map(|f| format!("`{f}`")).collect();
     let (list, noun) = match named.as_slice() {
         [] => return TokenStream::new(),
         [one] => (one.clone(), "feature"),
         [rest @ .., last] => (format!("{} and {last}", rest.join(", ")), "features"),
     };
+    let checked = match safe {
+        true => format!(
+            "which Rust checks where it is called: only a function that has {}, `#[target_feature(enable = \"{}\")]`, \
+             calls it without `unsafe`",
+            if features.len() == 1 { "it" } else { "them" },
+            features.join(",")
+        ),
+        false => "which nothing checks for when it runs".to_string(),
+    };
     parse(&format!(
-        "#[doc = \"\"]\n#[doc = \" Needs the CPU {noun} {list}, past x86-64's own, which nothing checks for when it \
-         runs.\"]"
+        "#[doc = \"\"]\n#[doc = {:?}]",
+        format!(" Needs the CPU {noun} {list}, past x86-64's own, {checked}.")
     ))
 }
 

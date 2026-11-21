@@ -10,6 +10,13 @@ use kernite_x86::lang::Callee;
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
+/// How `X86` sees function `name` of `module`, which is of one instance, of none: the types of its parameters worked
+/// out, as a use case tells them.
+fn callee_of(module: &Module, name: &str) -> Result<Option<Callee>> {
+    let f = function(module, name).ok_or("function gave None")?;
+    Ok(X86.callee(f, &kernite_lang::param_types(module, f, &[])?))
+}
+
 /// A kernel that names memory of its module and calls a function of it comes out of the port as
 /// Rust takes it: its code as `naked_asm!` reads it, its listing, the CPU features it needs, the
 /// constants it reads, and the function and the static it names. The static comes out as Rust
@@ -26,10 +33,9 @@ fn x86_compiles_a_kernel_through_the_port() -> Result {
                }";
     let module = parse(src)?;
     let ItemKind::Static(counts) = &module.items[0].kind else { return Err("a static first".into()) };
-    let (half, k) =
-        (function(&module, "half").ok_or("function gave None")?, function(&module, "k").ok_or("function gave None")?);
+    let k = function(&module, "k").ok_or("function gave None")?;
     let statics = [X86.lay_out("COUNTS", &kernite_lang::memory(&module, counts)?).map_err(|e| format!("{e:?}"))?];
-    let callee = X86.callee(half).ok_or("callee gave None")?;
+    let callee = callee_of(&module, "half")?.ok_or("callee gave None")?;
     let callees = [Called { name: "half".into(), function: "half".into(), args: vec![], callee }];
     let mut kernel = X86.kernel(k, "k", &[], false, &statics, &callees);
     kernite_lang::kernel(&module, k, &[], &mut kernel)?;
@@ -91,7 +97,7 @@ fn a_call_at_an_address_hands_on_the_functions_it_may_reach() -> Result {
     let module = parse(src)?;
     let mut callees = vec![];
     for name in ["half", "twice", "third"] {
-        let callee = X86.callee(function(&module, name).ok_or("function gave None")?).ok_or("callee gave None")?;
+        let callee = callee_of(&module, name)?.ok_or("callee gave None")?;
         callees.push(Called { name: name.into(), function: name.into(), args: vec![], callee });
     }
     let k = function(&module, "k").ok_or("function gave None")?;
@@ -111,7 +117,13 @@ fn finished(module: &Module, name: &str, done: &[(String, Listing)]) -> Result<L
         .iter()
         .filter_map(|item| match &item.kind {
             ItemKind::Fn(f) => {
-                Some(Called { name: f.name.clone(), function: f.name.clone(), args: vec![], callee: X86.callee(f)? })
+                let types = kernite_lang::param_types(module, f, &[]).ok()?;
+                Some(Called {
+                    name: f.name.clone(),
+                    function: f.name.clone(),
+                    args: vec![],
+                    callee: X86.callee(f, &types)?,
+                })
             }
             _ => None,
         })
@@ -240,11 +252,8 @@ fn a_call_to_a_cooperative_function_is_refused() -> Result {
                call(together, x);\n\
                }";
     let module = parse(src)?;
-    let (together, k) = (
-        function(&module, "together").ok_or("function gave None")?,
-        function(&module, "k").ok_or("function gave None")?,
-    );
-    assert_eq!(X86.callee(together), Some(Callee::Cooperative));
+    let k = function(&module, "k").ok_or("function gave None")?;
+    assert_eq!(callee_of(&module, "together")?, Some(Callee::Cooperative));
     let callees =
         [Called { name: "together".into(), function: "together".into(), args: vec![], callee: Callee::Cooperative }];
     let mut kernel = X86.kernel(k, "k", &[], false, &[], &callees);
@@ -266,7 +275,7 @@ fn the_port_sees_each_function_by_its_abi_and_its_types() -> Result {
                pub unsafe extern \"ptx-func\" fn far() {}\n\
                fn h() {}";
     let module = parse(src)?;
-    let callee = |name| -> Result<_> { Ok(X86.callee(function(&module, name).ok_or("function gave None")?)) };
+    let callee = |name| callee_of(&module, name);
     assert_eq!(callee("pair")?, Some(Callee::Broken));
     assert_eq!(callee("narrow")?, Some(Callee::Broken));
     assert_eq!(callee("far")?, None);

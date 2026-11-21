@@ -283,6 +283,47 @@ fn a_type_written_raw_is_given_to_the_target_as_the_type_rust_reads() -> Result 
     Ok(())
 }
 
+/// A reference to an array, `&[f32; N]`, is given to the target with its length worked out, as an array's is: a
+/// const's, a number's in hex, a sum, or a compile-time argument's, `N` of the instance `k::<2>`. A reference to
+/// anything else is given as it is written. `param_types` says the same of an instance's parameters, with no machine to
+/// run it on, for the kernels that call it.
+#[test]
+fn a_reference_to_an_array_is_given_to_the_target_with_its_length_worked_out() -> Result {
+    let src = r#"
+const L: usize = 3;
+
+#[instances(2)]
+pub unsafe extern "sysv64" fn k<const N: usize>(
+    a: &[f32;L], b:  &  mut[u64; 0x10], c: &[u8; L * 2], d: &[f32], e: &mut u8, f: &[u16; N],
+) {}
+"#;
+    let module = kernite_lang::parse(src).map_err(|e| e.at(src))?;
+    let f = module.items.iter().find_map(|item| match &item.kind {
+        ItemKind::Fn(f) if f.name == "k" => Some(f),
+        _ => None,
+    });
+    let f = f.ok_or("no kernel `k`")?;
+    let instances = kernite_lang::instances(&module, f).map_err(|e| e.at(src))?;
+    let [args] = instances.as_slice() else { return Err("one instance".into()) };
+    let mut trace = Trace::default();
+    kernite_lang::kernel(&module, f, args, &mut trace).map_err(|e| e.at(src))?;
+    let want = [
+        "param a: &[f32; 3] = v0",
+        "param b: &mut [u64; 16] = v1",
+        "param c: &[u8; 6] = v2",
+        "param d: &[f32] = v3",
+        "param e: &mut u8 = v4",
+        "param f: &[u16; 2] = v5",
+        "end",
+    ];
+    assert_eq!(trace.lines, want);
+    let types = kernite_lang::param_types(&module, f, args).map_err(|e| e.at(src))?;
+    assert_eq!(types, ["&[f32; 3]", "&mut [u64; 16]", "&[u8; 6]", "&[f32]", "&mut u8", "&[u16; 2]"]);
+    let e = kernite_lang::param_types(&module, f, &[]).err().ok_or("param_types gave Ok")?;
+    assert_eq!(e.at(src), "5:31: `k` takes 1 compile-time arguments; this gives 0");
+    Ok(())
+}
+
 #[test]
 fn a_static_is_made_once_the_first_time_the_kernel_names_it() -> Result {
     let mut trace = Trace::default();

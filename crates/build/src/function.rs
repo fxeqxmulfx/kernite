@@ -30,8 +30,9 @@ pub struct Prepared<B: Backend> {
 /// What [`compile`] tells every kernel of `module`: the statics `backend` lays out, and each
 /// instance of each function `backend` lets its kernels call, each in the module's order. Beside
 /// them, each static as [`statics`] has it, but for the room: which statics the module keeps is
-/// not for this to say. A function whose instances are wrong has no instance here: it says why
-/// where it is compiled.
+/// not for this to say. A function whose instances are wrong, or whose parameters' types cannot be worked out, has no
+/// instance here: it says why where it is compiled. `backend` sees each instance by the types of its parameters, worked
+/// out.
 pub fn prepare<B: Backend>(module: &Module, backend: &B) -> Prepared<B> {
     let mut statics = vec![];
     for item in &module.items {
@@ -49,10 +50,14 @@ pub fn prepare<B: Backend>(module: &Module, backend: &B) -> Prepared<B> {
     let mut callees = vec![];
     for item in &module.items {
         let ItemKind::Fn(g) = &item.kind else { continue };
-        let Some(callee) = backend.callee(g) else { continue };
         for args in kernite_lang::instances(module, g).unwrap_or_default() {
-            if let Ok(name) = kernite_lang::instance(g, &args) {
-                callees.push(Called { name, function: g.name.clone(), args, callee: callee.clone() });
+            let (Ok(name), Ok(params)) =
+                (kernite_lang::instance(g, &args), kernite_lang::param_types(module, g, &args))
+            else {
+                continue;
+            };
+            if let Some(callee) = backend.callee(g, &params) {
+                callees.push(Called { name, function: g.name.clone(), args, callee });
             }
         }
     }

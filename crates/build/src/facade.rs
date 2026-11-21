@@ -3,7 +3,7 @@
 
 use kernite_lang::{Error, ItemKind, Module};
 
-use crate::classify::{attributes, helper, trusted};
+use crate::classify::{attributes, helper, must_be_unsafe};
 use crate::present::{Refusal, said};
 use crate::{Abi, Compiled, Device, Native, abi, compile, instance, owner, prepare};
 
@@ -76,8 +76,8 @@ fn rules(module: &Module) -> Result<(), Error> {
             continue;
         };
         let Some(abi) = Abi::of(name) else { return Err(said(Refusal::UnknownAbi { abi: name }, *at)) };
-        if !trusted(f, abi) {
-            return Err(said(Refusal::NotUnsafe, f.span));
+        if let Some(e) = must_be_unsafe(f, abi) {
+            return Err(e);
         }
         attributes(f)?;
         kernite_lang::instances(module, f)?;

@@ -2,7 +2,8 @@
 //! kernel of every kind: kernite reads the number the name says and Rust passes what the type is, so
 //! the macros ask Rust whether each number a kernel takes or gives back is that number. It is not,
 //! and Rust says so, once, at the type: in each parameter and result of an x86 kernel, plain, of
-//! compile-time arguments and cooperative, and in each parameter of a GPU kernel of those kinds.
+//! compile-time arguments and cooperative, and in each parameter of a GPU kernel of those kinds; and
+//! in the elements of an array by reference.
 
 #![allow(non_camel_case_types)]
 
@@ -165,5 +166,15 @@ pub mod gpu_wide {
 
     pub unsafe extern "ptx-kernel" fn store(p: *mut core::primitive::u32, n: u32) {
         st.global.u32([p], n);
+    }
+}
+
+/// An array by reference of a number whose name the module gives another type, `f32` that is `f64` say: Rust passes
+/// an array of other bytes than the kernel reaches.
+#[kernite_macros::kernels]
+pub mod arrays {
+    use crate::alias::*;
+
+    pub extern "sysv64" fn reads(xs: &[f32; 8], ys: &mut [u8; 4]) {
     }
 }

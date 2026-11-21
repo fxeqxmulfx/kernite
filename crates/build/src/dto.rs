@@ -201,13 +201,13 @@ pub struct NativeInstance {
 }
 
 /// A function a kernel's code names, `{fi}`: by its name, and its instance's index among those
-/// its `#[instances(..)]` lists, if it takes compile-time arguments.
+/// its `#[instances(..)]` lists, if it takes compile-time arguments or is no `unsafe fn`.
 #[derive(Debug, PartialEq)]
 pub struct Call {
     /// The function's name, `tile`.
     pub function: String,
-    /// The instance's index in its function's `#[instances(..)]`; none for a function that
-    /// takes no compile-time arguments.
+    /// The instance's index in its function's `#[instances(..)]`; none for a function that takes no compile-time
+    /// arguments and is an `unsafe fn`, which is the code of its own.
     pub instance: Option<usize>,
 }
 

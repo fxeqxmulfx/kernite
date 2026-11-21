@@ -67,11 +67,12 @@ fn lexed_with_lifetimes(src: &str) -> Result<Vec<Tree>> {
     Ok(made(crate::lex(&src.replace('\'', "lt_"))?))
 }
 
-/// A type as the parser holds it, written out: a name, a name with arguments, an array or a slice, whose length is
-/// left out.
+/// A type as the parser holds it, written out: a name, a reference to an array, a name with arguments, an array or a
+/// slice, whose length is left out.
 fn shown(ty: &crate::Type) -> String {
     match ty {
         crate::Type::Name(name, _) => name.clone(),
+        crate::Type::Ref(write, array, _) => format!("&{}{}", if *write { "mut " } else { "" }, shown(array)),
         crate::Type::Generic(name, args, _) => {
             format!("{name}<{}>", args.iter().map(shown).collect::<Vec<_>>().join(", "))
         }
@@ -680,6 +681,31 @@ fn a_macros_arguments_are_written_as_their_source_has_them() -> Result {
     ] {
         assert_eq!(written(src)?, ty, "{src}");
     }
+    Ok(())
+}
+
+/// A reference to an array, `&[f32; N]` or `&mut [f32; N]`, is a type of its own, read whole, and its
+/// length is a value worked out where it is read; a reference to anything else is read as a name.
+#[test]
+fn a_reference_to_an_array_is_a_type_and_any_other_reference_is_a_name() -> Result {
+    let src = "pub unsafe extern \"sysv64\" fn k<const N: usize>(a: &[f32; N], b: &mut [u64; 0x10], c: &[f32], \
+               d: &mut u8, e: &&[u8; 4], f: & mut [u8; 2]) {}";
+    let module = crate::module(&crate::lex(src)?, 0)?;
+    let crate::ItemKind::Fn(f) = &module.items[0].kind else { return Err("a function".into()) };
+    let types: Vec<(String, bool)> =
+        f.params.iter().map(|p| (shown(&p.ty), matches!(p.ty, crate::Type::Ref(..)))).collect();
+    let want = [
+        ("&[f32; ..]", true),
+        ("&mut [u64; ..]", true),
+        ("&[f32]", false),
+        ("&mut u8", false),
+        ("&&[u8; 4]", false),
+        ("&mut [u8; ..]", true),
+    ];
+    assert_eq!(types, want.map(|(ty, one)| (ty.to_string(), one)));
+    let crate::Type::Ref(write, array, span) = &f.params[0].ty else { return Err("a reference".into()) };
+    assert!(!write && matches!(**array, crate::Type::Array(..)));
+    assert_eq!(*span, Span(src.find("&[f32; N]").ok_or("find gave None")? as u32));
     Ok(())
 }
 

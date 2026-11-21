@@ -23,6 +23,7 @@ pub mod intel;
 pub mod lang;
 mod op;
 mod operand;
+mod order;
 mod sysv;
 mod widths;
 

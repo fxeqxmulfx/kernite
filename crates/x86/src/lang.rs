@@ -54,6 +54,16 @@
 //! kernite checks what an address reaches as it does stack memory's, and refuses a write to
 //! constant memory: a write through an address `lea` took is the kernel's to keep from.
 //!
+//! A kernel that is no `unsafe fn`, [`Kernel::safe`], does only what kernite proves safe, so Rust calls it with no
+//! `unsafe`. It takes numbers and arrays by reference, `xs: &[f32; 8]` to read and `xs: &mut [f32; 8]` to write, which
+//! it reaches as it reaches stack memory, `vmovups(v, [xs + 32])`, at an index known now, each address checked. It
+//! passes one to a function of the module that takes one, whole as `[xs]` or a part of it as `[xs + 32]`, which lies
+//! inside it, aligned for the elements, and written only by a callee that takes `&mut` of an array it has `&mut` of.
+//! Each of these is an error that says the kernel is then an `unsafe fn`: a pointer taken; a static of the module's
+//! named; an address in a register, or at an index in one; a bit at an offset in a register; an address taken with
+//! `lea`; a non-temporal store that the kernel may return after with no `sfence` between; a call of an `unsafe fn`, or
+//! at an address; and a `bool` given back.
+//!
 //! A `#[cooperative]` kernel runs on the threads of a grid, each the same code, as a GPU kernel
 //! runs on blocks. A thread reads where it is as memory, 8 bytes each: `grid.thread`, its index
 //! from 0, and `grid.threads`, how many there are, as in `mov(t, grid.thread)` or
@@ -108,6 +118,8 @@
 //! clears the upper halves before it returns. A function that never returns, `-> !`, ends each way out in `ud2()`,
 //! which faults, or in a call of one that never returns.
 
+use std::borrow::Cow;
+
 use kernite_compile::Spill;
 use kernite_core::Access::{self, Ignored, Read, ReadWrite, Write};
 use kernite_core::Width::{self, W32, W64, W128, W256};
@@ -122,7 +134,7 @@ use crate::forms::{self, Form, Kind, Miss, Shape};
 use crate::op::Op;
 use crate::operand::ymm;
 use crate::sysv::{CALL_CLOBBERS, FLOAT_PARAMS, FLOAT_RESULT, INT_PARAMS, INT_RESULT, PAGE, SysV};
-use crate::widths;
+use crate::{order, widths};
 
 /// The operands of an instruction.
 type Args = Vec<Arg<VReg>>;
@@ -175,6 +187,8 @@ enum Place {
     Stack(SlotId),
     /// Memory of the module's, a static, by its index among those the kernel names.
     Static(StaticId),
+    /// An array the kernel is given by reference, `&[f32; 8]`, by the register its address arrives in.
+    Array(VReg),
 }
 
 impl Var {
@@ -182,7 +196,7 @@ impl Var {
     fn reg(self) -> Option<(VReg, View)> {
         match self.0 {
             Place::Reg(reg, view) => Some((reg, view)),
-            Place::Stack(_) | Place::Static(_) => None,
+            Place::Stack(_) | Place::Static(_) | Place::Array(_) => None,
         }
     }
 
@@ -253,11 +267,63 @@ enum Ty {
     Int,
     F32,
     F64,
+    /// A reference to an array: its address, in a general register.
+    Array(Array),
+}
+
+/// An array a kernel is given by reference, `&[f32; 8]` or `&mut [f32; 8]`: a register holds its address, which Rust
+/// keeps a multiple of the bytes of an element, for as long as the kernel runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Array {
+    /// The type of its elements: one of Rust's numbers.
+    elem: &'static str,
+    /// The bytes of each element, which its address is a multiple of.
+    size: u64,
+    /// How many elements it has.
+    len: u64,
+    /// Whether the kernel writes it, `&mut`.
+    write: bool,
+}
+
+impl Array {
+    /// The array that `ty`, written `&[f32; 8]` or `&mut [f32; 8]`, is a reference to, its length worked out; none if
+    /// `ty` is no such reference; or why kernite refuses the array: its elements are no number of Rust's, or it is more
+    /// bytes than a displacement of 32 bits reaches, as a static is. An array of no element is taken, though a static
+    /// or stack memory of none is refused: a kernel is given one, and no address is inside it, so each instruction that
+    /// reaches it is refused.
+    fn of(ty: &str) -> Result<Option<Array>, String> {
+        let Some((write, elem, len)) = kernite_lang::array_ref(ty) else { return Ok(None) };
+        let Some(&(elem, size)) = HELD.iter().find(|(e, _)| *e == elem) else {
+            return Err(only_numbers("an array by reference", elem));
+        };
+        let Ok(len) = len.parse::<u64>() else { return Ok(None) };
+        if len.checked_mul(size).is_none_or(|bytes| bytes > FAR) {
+            return Err(format!(
+                "`{ty}` is more than {FAR} bytes: a kernel reaches an array by reference at a displacement from its \
+                 address, of 32 bits, signed"
+            ));
+        }
+        Ok(Some(Array { elem, size, len, write }))
+    }
+
+    /// How many bytes it is.
+    fn bytes(self) -> u64 {
+        self.len * self.size
+    }
+
+    /// Its type, as the source writes it.
+    fn ty(self) -> String {
+        let write = if self.write { "mut " } else { "" };
+        format!("&{write}[{}; {}]", self.elem, self.len)
+    }
 }
 
 impl Ty {
     /// The type of a parameter written `ty`, `*const f32`; or why SysV passes none such whole.
     fn param(ty: &str) -> Result<Ty, String> {
+        if let Some(array) = Array::of(ty)? {
+            return Ok(Ty::Array(array));
+        }
         match ty {
             "f32" => Ok(Ty::F32),
             "f64" => Ok(Ty::F64),
@@ -271,22 +337,26 @@ impl Ty {
     }
 
     fn class(self) -> Class {
-        if self == Ty::Int { Class::Gpr } else { Class::Vec }
+        match self {
+            Ty::Int | Ty::Array(_) => Class::Gpr,
+            Ty::F32 | Ty::F64 => Class::Vec,
+        }
     }
 
     /// How many bits of its register a value of this type is.
     fn width(self) -> Width {
         match self {
             Ty::F32 => W32,
-            Ty::F64 | Ty::Int => W64,
+            Ty::F64 | Ty::Int | Ty::Array(_) => W64,
         }
     }
 
-    fn noun(self) -> &'static str {
+    fn noun(self) -> String {
         match self {
-            Ty::Int => "an integer",
-            Ty::F32 => "an `f32`",
-            Ty::F64 => "an `f64`",
+            Ty::Int => "an integer".into(),
+            Ty::F32 => "an `f32`".into(),
+            Ty::F64 => "an `f64`".into(),
+            Ty::Array(array) => format!("a `{}`", array.ty()),
         }
     }
 }
@@ -325,6 +395,9 @@ impl Returns {
 pub enum Callee {
     /// One it calls, which takes and gives back what the prototype says.
     Calls(Prototype),
+    /// One that is an `unsafe fn`, which takes and gives back what the prototype says, and which a kernel calls if it
+    /// is an `unsafe fn` as well.
+    Unsafe(Prototype),
     /// A cooperative kernel, whose threads run on a grid its launcher starts.
     Cooperative,
     /// One that does not compile, which says why where it is declared.
@@ -346,7 +419,7 @@ impl Prototype {
     pub fn of(params: &[(&str, &str)], ret: Option<&str>) -> Result<Prototype, String> {
         let params: Vec<(String, Ty)> =
             params.iter().map(|&(name, ty)| Ty::param(ty).map(|t| (name.to_string(), t))).collect::<Result<_, _>>()?;
-        let ints = params.iter().filter(|(_, t)| *t == Ty::Int).count();
+        let ints = params.iter().filter(|(_, t)| t.class() == Class::Gpr).count();
         if ints > INT_PARAMS.len() {
             return Err(SEVENTH.into());
         }
@@ -494,6 +567,10 @@ pub struct Kernel {
     statics: Vec<Static>,
     /// Whether it runs on the threads of a grid, `#[cooperative]`.
     cooperative: bool,
+    /// Whether it is no `unsafe fn`, so that it does only what kernite can prove safe.
+    safe: bool,
+    /// The arrays it is given by reference, each by the register its address arrives in.
+    arrays: Vec<(VReg, Array)>,
     /// The variable a thread's place in the grid arrives in, once there is one.
     grid: Option<VReg>,
     /// The next label of the kernel's own code, `grid.sync()`'s. They count down from the
@@ -540,6 +617,8 @@ impl Kernel {
             module: vec![],
             statics: vec![],
             cooperative: false,
+            safe: false,
+            arrays: vec![],
             grid: None,
             labels: u32::MAX,
             mxcsr: None,
@@ -562,17 +641,32 @@ impl Kernel {
         self.module.push(s.clone());
     }
 
-    /// The name of memory `v`, of the stack or of the module's, and its type as declared; `None`
-    /// for a register.
-    fn declared(&self, v: Var) -> Option<(&str, &str)> {
+    /// The name of memory `v`, of the stack or of the module's or an array it is given, and its type as declared;
+    /// `None` for a register.
+    fn declared(&self, v: Var) -> Option<(&str, Cow<'_, str>)> {
         match v.0 {
             Place::Reg(..) => None,
-            Place::Stack(s) => Some((&self.p.slots.get(s.0 as usize)?.name, self.declared.get(s.0 as usize)?)),
+            Place::Stack(s) => {
+                Some((&self.p.slots.get(s.0 as usize)?.name, Cow::Borrowed(self.declared.get(s.0 as usize)?.as_str())))
+            }
             Place::Static(s) => {
                 let s = self.statics.get(s.0 as usize)?;
-                Some((&s.name, &s.ty))
+                Some((&s.name, Cow::Borrowed(s.ty.as_str())))
+            }
+            Place::Array(reg) => {
+                let (_, array) = self.arrays.iter().find(|(r, _)| *r == reg)?;
+                Some((self.p.var_name(reg), Cow::Owned(array.ty())))
             }
         }
+    }
+
+    /// Makes the kernel one that is no `unsafe fn`, before its parameters are declared: it does only what kernite can
+    /// prove safe. It takes no pointer, and reaches no memory but its stack's and the arrays it is given, at addresses
+    /// known now, and no bit at an offset in a register, and takes the address of none; an `sfence` or an `mfence`
+    /// orders each non-temporal store it makes before it returns; it names no static of the module's; it calls only
+    /// functions that are no `unsafe fn`, and none at an address; and it gives back no `bool`.
+    pub fn safe(&mut self) {
+        self.safe = true;
     }
 
     /// The prototype of `f`, a function the kernel names by its operand `at`; or why it may not
@@ -580,6 +674,10 @@ impl Kernel {
     fn called(&self, f: &str, at: usize) -> Result<Prototype, Fault> {
         match self.callees.iter().find(|(name, _)| name == f) {
             Some((_, Callee::Calls(proto))) => Ok(proto.clone()),
+            Some((_, Callee::Unsafe(proto))) if !self.safe => Ok(proto.clone()),
+            Some((_, Callee::Unsafe(_))) => {
+                Err(Fault::at(at, format!("`{f}` is an `unsafe fn`, so a kernel that calls it is an `unsafe fn`")))
+            }
             Some((_, Callee::Cooperative)) => Err(Fault::at(
                 at,
                 format!(
@@ -667,6 +765,13 @@ impl Kernel {
                         ));
                     }
                 };
+                if self.safe {
+                    return Err(Fault::at(
+                        callee,
+                        "`call` at the address in a gpr reaches a function kernite cannot name, so a kernel that does \
+                         is an `unsafe fn`",
+                    ));
+                }
                 match targets {
                     // Each of the functions must take what the call passes. They take it the same
                     // way: a variable passes as it is, whatever its callee makes of it, and a value
@@ -700,10 +805,10 @@ impl Kernel {
         let mut implicit = vec![];
         let (mut ints, mut floats) = (0, 0);
         for (k, (a, ty)) in passed.iter().zip(&tys).enumerate() {
-            let (count, regs) =
-                if *ty == Ty::Int { (&mut ints, &INT_PARAMS[..]) } else { (&mut floats, &FLOAT_PARAMS[..]) };
+            let gpr = ty.class() == Class::Gpr;
+            let (count, regs) = if gpr { (&mut ints, &INT_PARAMS[..]) } else { (&mut floats, &FLOAT_PARAMS[..]) };
             let Some(&to) = regs.get(*count) else {
-                let why = if *ty == Ty::Int { SEVENTH } else { NINTH };
+                let why = if gpr { SEVENTH } else { NINTH };
                 return Err(Fault::at(at, format!("this passes too many: {why}")));
             };
             *count += 1;
@@ -768,6 +873,18 @@ impl Kernel {
     /// `r32` with the rest clear; an integer known now; or a float known now, from memory. An argument that is none of
     /// these is one that [`passing`](Self::passing) refuses.
     fn pass(&mut self, to: VReg, a: &Given<Var>, ty: Ty, width: Width) -> Result<(), String> {
+        // An array, by its address: the register of the array the kernel is given, and past it what `a` is at.
+        if let Given::Mem(m) = a
+            && let Some(Var(Place::Array(from))) = m.base
+        {
+            self.p.body.push(Item::Inst(SysV.copy(to, from, width)));
+            if m.disp != 0 {
+                let (to, by) = (Operand::Reg(to, W64), Operand::Imm(Imm { value: m.disp, hex: false }));
+                let args = vec![Arg { operand: to, access: ReadWrite }, Arg { operand: by, access: Read }];
+                self.push(Op::Add, args, vec![], Flow::Next);
+            }
+            return Ok(());
+        }
         let inst = match (a, ty) {
             (Given::Int(x), _) => {
                 let value = Arg { operand: Operand::Imm(Imm { value: *x as i64, hex: false }), access: Read };
@@ -844,6 +961,10 @@ impl Kernel {
         let mut tys = vec![];
         for (k, ((name, t), a)) in proto.params.iter().zip(passed).enumerate() {
             let fits = match (t, a) {
+                (Ty::Array(want), a) => {
+                    self.array_arg(f, *want, a).map_err(|m| Fault::at(at, m))?;
+                    true
+                }
                 (_, Given::Var(v)) => v.reg().is_some_and(|(reg, _)| reg.class == t.class()),
                 (Ty::Int, Given::Int(x)) => (i128::from(i64::MIN)..=i128::from(u64::MAX)).contains(x),
                 (Ty::F32, Given::F32(_)) | (Ty::F64, Given::F64(_)) => true,
@@ -865,6 +986,61 @@ impl Kernel {
             tys.push(*t);
         }
         Ok((tys, kept))
+    }
+
+    /// Whether the call of `f` passes `a` as the array `want`: an array the kernel is given, whole, `[xs]`, or part of
+    /// it, `[xs + 32]`, of the bytes `want` has, at a multiple of its elements' bytes, and one it writes only if the
+    /// kernel may; or, in a kernel that is an `unsafe fn`, a gpr, as any pointer is passed; else why not.
+    fn array_arg(&self, f: &str, want: Array, a: &Given<Var>) -> Result<(), String> {
+        let ty = Ty::Array(want).noun();
+        let found = match a {
+            Given::Var(v) if !self.safe && v.reg().is_some_and(|(reg, _)| reg.class == Class::Gpr) => return Ok(()),
+            Given::Mem(m) if m.index.is_none() => m.base.and_then(|b| match b.0 {
+                Place::Array(reg) => {
+                    self.arrays.iter().find(|(r, _)| *r == reg).map(|&(reg, have)| (reg, have, m.disp))
+                }
+                _ => None,
+            }),
+            _ => None,
+        };
+        let Some((reg, have, disp)) = found else {
+            return Err(format!(
+                "`{f}` takes {ty}: an array the kernel is given, as `[xs]`, or part of it, as `[xs + 32]`; this is {}",
+                given(a)
+            ));
+        };
+        let xs = self.p.var_name(reg);
+        let at = match disp {
+            0 => format!("[{xs}]"),
+            d if d < 0 => format!("[{xs} - {}]", d.unsigned_abs()),
+            d => format!("[{xs} + {d}]"),
+        };
+        if disp < 0 {
+            return Err(format!("`{f}` takes {ty} at `{at}`, before `{xs}` starts"));
+        }
+        if disp.unsigned_abs() + want.bytes() > have.bytes() {
+            return Err(format!(
+                "`{f}` takes {ty}, {}, at `{at}`, past the end of `{xs}`, {}",
+                bytes(want.bytes()),
+                bytes(have.bytes())
+            ));
+        }
+        if want.write && !have.write {
+            return Err(format!(
+                "`{f}` writes through {ty}, and `{xs}` is a `{}`: a kernel only reads what it is given by `&`",
+                have.ty()
+            ));
+        }
+        if have.size < want.size {
+            return Err(format!(
+                "`{f}` takes {ty}, at a multiple of {}; `{xs}` is at a multiple of {}",
+                want.size, have.size
+            ));
+        }
+        if !disp.unsigned_abs().is_multiple_of(want.size) {
+            return Err(format!("`{f}` takes {ty}, at a multiple of {}; `{at}` is not one", want.size));
+        }
+        Ok(())
     }
 
     /// How a call through a variable, of no functions taken together, passes `passed`, the
@@ -950,8 +1126,21 @@ impl Kernel {
     pub(crate) fn unowned(&self) -> Option<(Option<Span>, String)> {
         let start: Vec<_> = self.floats.iter().map(|&(v, ty)| (v, ty.width())).collect();
         let (i, message) = widths::check(&self.p, &start)?;
+        Some((self.written_at(i), message))
+    }
+
+    /// The first non-temporal store of a kernel that is no `unsafe fn` that it may return after with no `sfence` or
+    /// `mfence` between, if there is one: where it is in the source, if the source said, and what is wrong. Its caller
+    /// does what it likes next, and x86 may land the store after that. A body that is not whole has none.
+    pub(crate) fn unordered(&self) -> Option<(Option<Span>, String)> {
+        let (i, message) = self.safe.then(|| order::check(&self.p)).flatten()?;
+        Some((self.written_at(i), message))
+    }
+
+    /// Where the source wrote the instruction at `i` in the body, if it said.
+    fn written_at(&self, i: usize) -> Option<Span> {
         let before = self.starts.partition_point(|&(first, _)| first <= i);
-        Some((before.checked_sub(1).and_then(|k| self.starts.get(k)).map(|s| s.1), message))
+        before.checked_sub(1).and_then(|k| self.starts.get(k)).map(|s| s.1)
     }
 
     /// The kernel as written. A cooperative one takes its place in the grid, read or not, as
@@ -1246,6 +1435,26 @@ impl Kernel {
             };
             out.push(Arg { operand, access });
         }
+        // A bit at the offset in a register lies as far from the memory as 2^60 bytes, either way; one at an offset
+        // known now lies in the operand, as the forms take it.
+        if self.safe
+            && matches!(name.strip_prefix("lock.").unwrap_or(name), "bt" | "btc" | "btr" | "bts")
+            && let [Arg { operand: Operand::Mem(m), .. }, Arg { operand: Operand::Reg(offset, _), .. }] = out.as_slice()
+        {
+            let held = match m.base {
+                Base::Reg(array) => self.p.var_name(array),
+                Base::Slot(slot) => self.p.slots.get(slot.0 as usize).map_or("", |s| s.name.as_str()),
+                _ => "",
+            };
+            return Err(Fault::at(
+                1,
+                format!(
+                    "`{name}` reaches a bit at the offset in `{}`, which kernite cannot keep inside `{held}`, so a \
+                     kernel that does is an `unsafe fn`",
+                    self.p.var_name(*offset)
+                ),
+            ));
+        }
         if let [Arg { operand: Operand::Reg(index, _), .. }] = implicit.as_slice() {
             self.apart(name, &out, *index)?;
         }
@@ -1376,11 +1585,21 @@ impl Kernel {
             None => None,
         };
         let far = || format!("{} bytes are too far for an address", m.disp);
+        if self.safe
+            && kind == Kind::Addr
+            && let Some((memory, _)) = held.and_then(|v| self.declared(v))
+        {
+            return Err(format!(
+                "`{name}` puts the address of `{memory}` in a register, where kernite cannot check what it reaches, \
+                 so a kernel that does is an `unsafe fn`"
+            ));
+        }
         match held.map(|v| v.0) {
             Some(Place::Stack(s))
                 if let (Some(slot), Some(ty)) = (self.p.slots.get(s.0 as usize), self.declared.get(s.0 as usize)) =>
             {
-                let memory = Region { name: &slot.name, bytes: slot.size.into(), align: slot.align.into(), ty };
+                let memory =
+                    Region { name: &slot.name, bytes: slot.size.into(), align: slot.align.into(), ty: Some(ty) };
                 self.within(memory, index, m.disp, kind, access, name)?;
                 let disp = i32::try_from(m.disp).map_err(|_| far())?;
                 return Ok(Mem { base: Base::Slot(s), index, disp, width });
@@ -1393,12 +1612,34 @@ impl Kernel {
                         st.name
                     ));
                 }
-                let memory = Region { name: &st.name, bytes: st.bytes(), align: st.align, ty: &st.ty };
+                let memory = Region { name: &st.name, bytes: st.bytes(), align: st.align, ty: Some(&st.ty) };
                 self.within(memory, None, m.disp, kind, access, name)?;
                 let disp = i32::try_from(m.disp).map_err(|_| far())?;
                 return Ok(Mem { base: Base::Static(s), index: None, disp, width });
             }
+            Some(Place::Array(reg)) if let Some(&(_, array)) = self.arrays.iter().find(|(r, _)| *r == reg) => {
+                let given = self.p.var_name(reg);
+                if !array.write && kind != Kind::Addr && matches!(access, Write | ReadWrite) {
+                    return Err(format!(
+                        "`{name}` {} `{given}`, which is `{}`: a kernel only reads what it is given by `&`, and writes \
+                         what it is given by `&mut`",
+                        verb(access),
+                        array.ty()
+                    ));
+                }
+                let memory = Region { name: given, bytes: array.bytes(), align: array.size, ty: None };
+                self.within(memory, index, m.disp, kind, access, name)?;
+                let disp = i32::try_from(m.disp).map_err(|_| far())?;
+                return Ok(Mem { base: Base::Reg(reg), index, disp, width });
+            }
             _ => {}
+        }
+        if self.safe && kind != Kind::Addr && access != Ignored {
+            let at = base.or(index.map(|(i, _)| i)).map_or(String::new(), |r| self.p.var_name(r).to_string());
+            return Err(format!(
+                "`{name}` reaches memory at the address in `{at}`, which kernite cannot check, so a kernel that does \
+                 is an `unsafe fn`"
+            ));
         }
         let disp = i32::try_from(m.disp).map_err(|_| far())?;
         Ok(Mem { base: base.map_or(Base::None, Base::Reg), index, disp, width })
@@ -1436,6 +1677,12 @@ impl Kernel {
             d => at += &format!(" + {d}"),
         }
         at.push(']');
+        if self.safe && index.is_some() && kind.size().is_some() {
+            return Err(format!(
+                "`{name}` reaches `{at}`, at an index in a register, which kernite cannot keep inside `{v}`, so a \
+                 kernel that does is an `unsafe fn`"
+            ));
+        }
         let Some(width) = kind.size() else {
             return match disp {
                 d if d < 0 => Err(format!("`{name}` takes the address `{at}`, before `{v}` starts{when}")),
@@ -1460,20 +1707,27 @@ impl Kernel {
         }
         let Kind::Aligned(_) = kind else { return Ok(()) };
         if memory.align < size {
-            let stem = ty.trim_suffix('>');
-            let stem = match stem.rsplit_once(", ") {
-                Some((stem, align)) if align.parse::<u64>().is_ok() => stem,
-                _ => stem,
-            };
-            let anywhere = match name {
-                "vmovaps" => ", or `vmovups` at any",
-                "vmovapd" => ", or `vmovupd` at any",
-                "vmovdqa" => ", or `vmovdqu` at any",
-                _ => "",
-            };
+            // What mends it: the type with the alignment, for memory the kernel declares, and the instruction that
+            // takes any.
+            let mut mends = vec![];
+            if let Some(ty) = ty {
+                let stem = ty.trim_suffix('>');
+                let stem = match stem.rsplit_once(", ") {
+                    Some((stem, align)) if align.parse::<u64>().is_ok() => stem,
+                    _ => stem,
+                };
+                mends.push(format!("`{stem}, {size}>`"));
+            }
+            match name {
+                "vmovaps" => mends.push("`vmovups` at any".into()),
+                "vmovapd" => mends.push("`vmovupd` at any".into()),
+                "vmovdqa" => mends.push("`vmovdqu` at any".into()),
+                _ => {}
+            }
+            let mends = if mends.is_empty() { String::new() } else { format!(": {}", mends.join(", or ")) };
             return Err(format!(
                 "`{name}` {verb} {size} bytes at once, at an address that is a multiple of {size}; `{v}` is at a \
-                 multiple of {}: `{stem}, {size}>`{anywhere}",
+                 multiple of {}{mends}",
                 memory.align
             ));
         }
@@ -1496,8 +1750,9 @@ struct Region<'a> {
     bytes: u64,
     /// What its address is a multiple of.
     align: u64,
-    /// Its type, as declared: `local<[f32; 64], 32>`.
-    ty: &'a str,
+    /// Its type, as declared: `local<[f32; 64], 32>`; none for an array the kernel is given, whose address is a
+    /// multiple of its elements' bytes, whatever the kernel writes.
+    ty: Option<&'a str>,
 }
 
 /// What an instruction does to memory it reaches with `access`, in words.
@@ -1507,6 +1762,14 @@ fn verb(access: Access) -> &'static str {
         ReadWrite => "reads and writes",
         Read | Ignored => "reads",
     }
+}
+
+/// Why `elem` is no element of `what`, memory of the stack, of the module's or of an array a kernel is given: all
+/// three hold Rust's numbers.
+fn only_numbers(what: &str, elem: &str) -> String {
+    format!(
+        "{what} holds Rust's numbers, `u8` to `u64`, `i8` to `i64`, `usize`, `isize`, `f32` and `f64`; not `{elem}`"
+    )
 }
 
 /// What memory of the type `ty`, `word<args>`, holds, stack memory `local<..>` or the module's,
@@ -1539,10 +1802,7 @@ fn shape(ty: &str, word: &str) -> Result<(&'static str, u64, Option<u64>, u64), 
         None => (array, Some(1)),
     };
     let Some(&(elem, size)) = HELD.iter().find(|(e, _)| *e == elem) else {
-        return Err(format!(
-            "{what} holds Rust's numbers, `u8` to `u64`, `i8` to `i64`, `usize`, `isize`, `f32` and `f64`; \
-             not `{elem}`"
-        ));
+        return Err(only_numbers(what, elem));
     };
     let align = match align {
         None => size,
@@ -1646,6 +1906,7 @@ fn given(a: &Given<Var>) -> String {
             Place::Reg(_, view) => view.name().into(),
             Place::Stack(_) => "stack memory".into(),
             Place::Static(_) => "memory of the module's".into(),
+            Place::Array(_) => "an array".into(),
         },
         Given::Special(name) => format!("`{name}`"),
         Given::Int(x) => format!("the integer {x}"),
@@ -1679,8 +1940,14 @@ impl Target for Kernel {
     type Var = Var;
 
     fn param(&mut self, name: &str, ty: &str) -> Result<Var, String> {
-        let float = Ty::param(ty)?;
-        let (class, at, view) = if float == Ty::Int {
+        let kind = Ty::param(ty)?;
+        if self.safe && pointer(ty)? {
+            return Err(format!(
+                "a pointer may point anywhere, so a kernel that takes `{ty}` is an `unsafe fn`; kernite checks an \
+                 array by reference, `&[f32; 8]`"
+            ));
+        }
+        let (class, at, view) = if kind.class() == Class::Gpr {
             if self.cooperative && self.ints == INT_PARAMS.len() - 1 {
                 return Err("a cooperative kernel takes five integers at most: SysV passes six in registers, and the \
                             sixth is the thread's place in the grid"
@@ -1695,15 +1962,26 @@ impl Target for Kernel {
         };
         let reg = self.new_var(class, name);
         if class == Class::Vec {
-            self.floats.push((reg, float));
+            self.floats.push((reg, kind));
         }
         self.p.params.push((reg, at));
         self.p.signature.params.push(class);
-        Ok(Var(Place::Reg(reg, view)))
+        match kind {
+            Ty::Array(array) => {
+                self.arrays.push((reg, array));
+                Ok(Var(Place::Array(reg)))
+            }
+            _ => Ok(Var(Place::Reg(reg, view))),
+        }
     }
 
     fn result(&mut self, ty: &str) -> Result<(), String> {
         let returns = Returns::of(ty)?;
+        if self.safe && ty == "bool" {
+            return Err("a `bool` is 0 or 1, which kernite cannot prove a kernel gives back, so a kernel that gives \
+                        one back is an `unsafe fn`"
+                .into());
+        }
         if self.cooperative && returns != Returns::Nothing {
             return Err("a cooperative kernel's threads return nothing: they write what they compute to memory".into());
         }
@@ -1742,6 +2020,12 @@ impl Target for Kernel {
         let Some(s) = self.module.iter().find(|s| s.name == name) else {
             return Err(format!("`{name}` does not compile, so no kernel names it"));
         };
+        if self.safe {
+            return Err(format!(
+                "`{name}` is memory of the module's, which every kernel and the host reach, so a kernel that names it \
+                 is an `unsafe fn`"
+            ));
+        }
         let at = match self.p.statics.iter().position(|n| n == name) {
             Some(at) => at,
             None => {
@@ -1812,12 +2096,15 @@ impl Target for Kernel {
         for (i, a) in args.iter().enumerate() {
             match a {
                 Given::Var(v) if let Some((held, _)) = self.declared(*v) => {
+                    // A safe kernel takes no address, so `lea` is no way out.
+                    let lea = if self.safe {
+                        String::new()
+                    } else {
+                        format!("`lea(p, [{held}])` puts the address of `{held}` in `p`, and ")
+                    };
                     return Err(Fault::at(
                         i,
-                        format!(
-                            "`{name}` takes no memory as an operand: `lea(p, [{held}])` puts the address of `{held}` \
-                             in `p`, and `[{held}]` is what it holds"
-                        ),
+                        format!("`{name}` takes no memory as an operand: {lea}`[{held}]` is what it holds"),
                     ));
                 }
                 Given::Special(s) if s == "cl" && forms::BY_CL.contains(&name) => {

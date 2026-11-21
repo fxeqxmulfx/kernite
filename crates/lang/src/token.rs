@@ -356,6 +356,18 @@ pub fn pointer(ty: &str) -> Result<bool, String> {
     Ok(true)
 }
 
+/// The array `ty`, a type as [`read_type`] gives it, is a reference to, `&[f32; 8]` or `&mut [f32; 8]`: whether the
+/// reference is `&mut`, then the type of the elements and their count, as written. A reference to a slice or to
+/// anything else is none, and so is a reference with a lifetime, `&'a [f32; 8]`.
+pub fn array_ref(ty: &str) -> Option<(bool, &str, &str)> {
+    let (write, to) = match ty.strip_prefix("&mut ") {
+        Some(to) => (true, to),
+        None => (false, ty.strip_prefix('&')?),
+    };
+    let (elem, len) = to.strip_prefix('[')?.strip_suffix(']')?.rsplit_once("; ")?;
+    Some((write, elem, len))
+}
+
 /// Whether the type `ty` has no size: a slice, a `str` or a `dyn`, or a tuple that ends in one.
 fn no_size(ty: &[Tree]) -> bool {
     match ty {
