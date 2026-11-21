@@ -208,6 +208,21 @@ fn ops(c: &Allocated<&'static str>) -> Vec<&'static str> {
     c.body.iter().filter_map(|i| if let Item::Inst(i) = i { Some(i.op) } else { None }).collect()
 }
 
+/// The slot each store and load of `c` names, in order.
+fn moves(c: &Allocated<&'static str>) -> Vec<(&'static str, u32)> {
+    let slot = |i: &Inst<&'static str, PReg>| {
+        i.args.iter().find_map(|a| match a.operand {
+            Operand::Mem(Mem { base: Base::Slot(s), .. }) => Some(s.0),
+            _ => None,
+        })
+    };
+    let moved = |item: &Item<&'static str, PReg>| match item {
+        Item::Inst(i) if matches!(i.op, "store" | "load") => slot(i).map(|s| (i.op, s)),
+        _ => None,
+    };
+    c.body.iter().filter_map(moved).collect()
+}
+
 /// The registers each copy of `c` writes and reads, in order.
 fn copies(c: &Allocated<&'static str>) -> Vec<(PReg, PReg)> {
     let copy = |item: &Item<&'static str, PReg>| match item {
@@ -338,6 +353,39 @@ impl Builder {
     /// A copy of `width` of `from` to `to`, as a machine's code makes one.
     fn copy(&mut self, to: VReg, from: VReg, width: Width) {
         self.0.body.push(Item::Inst(Toy::copy(&toy(0, &[]), to, from, width)));
+    }
+
+    /// A slot of `width`'s bytes: one that a spill keeps a variable in, as the allocator makes it, or one of the
+    /// program's own.
+    fn slot_at(&mut self, width: Width, name: &str, spill: bool) -> SlotId {
+        let bytes = width.bytes();
+        self.0.slots.push(Slot { name: name.into(), size: bytes, align: bytes, spill });
+        SlotId(self.0.slots.len() as u32 - 1)
+    }
+
+    /// [`slot_at`](Builder::slot_at) of 8 bytes.
+    fn slot(&mut self, name: &str, spill: bool) -> SlotId {
+        self.slot_at(Width::W64, name, spill)
+    }
+
+    /// `v` stored to `slot`, `width` of it, as the allocator stores a spilled variable.
+    fn store_at(&mut self, width: Width, slot: SlotId, v: VReg) {
+        self.0.body.push(Item::Inst(Toy::store(&toy(0, &[]), slot, v, width)));
+    }
+
+    /// [`store_at`](Builder::store_at) of all of it.
+    fn store(&mut self, slot: SlotId, v: VReg) {
+        self.store_at(Width::W64, slot, v);
+    }
+
+    /// `v` loaded from `slot`, `width` of it, as the allocator loads a spilled variable.
+    fn load_at(&mut self, width: Width, v: VReg, slot: SlotId) {
+        self.0.body.push(Item::Inst(Toy::load(&toy(0, &[]), v, slot, width)));
+    }
+
+    /// [`load_at`](Builder::load_at) of all of it.
+    fn load(&mut self, v: VReg, slot: SlotId) {
+        self.load_at(Width::W64, v, slot);
     }
 
     fn label(&mut self, l: u32) {
@@ -657,10 +705,11 @@ fn a_parameter_spills_from_the_register_it_arrives_in() {
 }
 
 /// A result that spills comes back before the return to the register it leaves in, as much as it is kept in: all of the
-/// register, or 32 bits where no instruction names more.
+/// register, or 32 bits where no instruction names more. It is a load from its slot, or, where a register holds it, a
+/// copy from there: the register the last write left it in holds it until a call changes every register.
 #[test]
 fn a_result_spills_and_comes_back_to_the_register_it_leaves_in() {
-    for width in [Width::W64, Width::W32] {
+    for (width, call) in [(Width::W64, false), (Width::W32, false), (Width::W64, true), (Width::W32, true)] {
         let mut b = Builder::new();
         let (res, x, y, w, x2, y2, w2) =
             (b.var("res"), b.var("x"), b.var("y"), b.var("w"), b.var("x2"), b.var("y2"), b.var("w2"));
@@ -673,13 +722,16 @@ fn a_result_spills_and_comes_back_to_the_register_it_leaves_in() {
         b.def(w2, &[x2, y2]);
         let add = vec![reg_arg(res, width, Access::ReadWrite), reg_arg(w2, width, Access::Read)];
         b.0.body.push(Item::Inst(plain("add", add)));
+        if call {
+            b.call(None, &[], &[0, 1]);
+        }
         b.ret_at(width, res, 0);
         let c = same(&b.0, &toy(2, &[]), &[]);
         assert_eq!(spilled(&c), ["res"]);
         let last: Vec<_> = c.body.iter().rev().take(2).collect();
-        let Item::Inst(load) = last[1] else { panic!("a load before the return") };
-        assert_eq!((load.op, load.args[0].operand), ("load", Operand::Reg(r(0), width)));
-        assert_eq!(reg_of(&c, "res"), r(0));
+        let Item::Inst(back) = last[1] else { panic!("a load or a copy before the return") };
+        assert_eq!((back.op, back.args[0].operand), (if call { "load" } else { "copy" }, Operand::Reg(r(0), width)));
+        assert!(regs_of(&c, "res").contains(&r(0)));
     }
 }
 
@@ -728,6 +780,602 @@ fn a_variable_is_kept_as_wide_as_the_widest_instruction_that_names_it() {
         b.0.body.push(Item::Inst(plain("op", args)));
     };
     assert_eq!(kept(address), whole);
+}
+
+/// A spilled variable is read in the register that holds it, with no load, where one does. A parameter that spills is
+/// stored on entry from the register it arrives in, `p` from r1, and that register holds it until an instruction writes
+/// the register: `x` reads it there. `b` takes r1, so the read of `p` after it is a load. The same where each
+/// instruction that names `p` reads 32 bits of it, and `p` is kept in 32.
+#[test]
+fn a_spilled_variable_is_read_in_the_register_that_holds_it() {
+    for width in [Width::W64, Width::W32] {
+        let mut b = Builder::new();
+        let p = b.param("p", 1);
+        let (x, y, a, d, z, w) = (b.var("x"), b.var("y"), b.var("a"), b.var("b"), b.var("z"), b.var("w"));
+        b.def_at(width, x, &[p]);
+        b.def(y, &[x]);
+        b.def(a, &[y]);
+        b.def(d, &[]);
+        b.def(z, &[a, d]);
+        b.def_at(width, w, &[z, p]);
+        b.ret(w, 0);
+        let c = same(&b.0, &toy(2, &[]), &[5]);
+        assert_eq!(spilled(&c), ["p"]);
+        assert_eq!(ops(&c), ["store", "op", "op", "op", "op", "op", "load", "op", "ret"]);
+        let Item::Inst(read) = &c.body[1] else { panic!("an instruction") };
+        assert_eq!(read.args[2].operand, Operand::Reg(r(1), width));
+    }
+}
+
+/// A load leaves what it loads in the register it loads to, as a store leaves what it stores in the register it stores
+/// from: `w` reads `p` in r1, where its load put it, and `v` reads it there too, with no load of its own.
+#[test]
+fn a_load_leaves_what_it_loads_in_the_register_it_loads_to() {
+    let mut b = Builder::new();
+    let p = b.param("p", 1);
+    let (x, y, a, d, z, w, v) = (b.var("x"), b.var("y"), b.var("a"), b.var("b"), b.var("z"), b.var("w"), b.var("v"));
+    b.def(x, &[p]);
+    b.def(y, &[x]);
+    b.def(a, &[y]);
+    b.def(d, &[]);
+    b.def(z, &[a, d]);
+    b.def(w, &[z, p]);
+    b.def(v, &[w, p]);
+    b.ret(v, 0);
+    let c = same(&b.0, &toy(2, &[]), &[5]);
+    assert_eq!(ops(&c), ["store", "op", "op", "op", "op", "op", "load", "op", "op", "ret"]);
+}
+
+/// A store to a slot leaves what it stores in the register it stores from, and in no other that held what the slot kept
+/// before: `x` and `y` are stored in turn to a slot, and the load after reads `y`, in r1. `x` is alive to the end in
+/// r0, and a read of it would be wrong, for it is not what the slot keeps.
+#[test]
+fn a_store_leaves_what_it_stores_only_in_the_register_it_stores_from() {
+    let mut b = Builder::new();
+    let (x, y, t, z, w) = (b.var("x"), b.var("y"), b.var("t"), b.var("z"), b.var("w"));
+    let s = b.slot("s", true);
+    b.def(x, &[]);
+    b.def(y, &[]);
+    b.store(s, x);
+    b.store(s, y);
+    b.load(t, s);
+    b.def(z, &[t, x]);
+    b.def(w, &[z, y]);
+    b.ret(w, 0);
+    let c = same(&b.0, &toy(3, &[]), &[]);
+    assert_eq!(ops(&c), ["op", "op", "op", "op", "ret"]);
+    let Item::Inst(read) = &c.body[2] else { panic!("an instruction") };
+    assert_eq!(read.args[2].operand, Operand::Reg(r(1), Width::W64));
+}
+
+/// A call leaves in a register what it does not change, and the load after it is left out, and the store before it,
+/// and the slot: `x` stays in r0 over the call. A call that changes r0 leaves nothing in it, nor does one that clears
+/// its upper half, where the slot keeps all of r0: one kept in 32 bits stays.
+#[test]
+fn a_call_leaves_in_a_register_what_it_does_not_change() {
+    let all = |hw: u8| vec![Clobber::All(r(hw))];
+    for (clobbers, width, kept) in [
+        (all(1), Width::W64, true),
+        (all(0), Width::W64, false),
+        (upper(&[0]), Width::W64, false),
+        (upper(&[0]), Width::W32, true),
+        (all(0), Width::W32, false),
+    ] {
+        let mut b = Builder::new();
+        let (x, t, z) = (b.var("x"), b.var("t"), b.var("z"));
+        let s = b.slot_at(width, "s", true);
+        b.def_at(width, x, &[]);
+        b.store_at(width, s, x);
+        b.call_with(None, &[], clobbers);
+        b.load_at(width, t, s);
+        b.def_at(width, z, &[t]);
+        b.ret_at(width, z, 0);
+        let c = same(&b.0, &toy(2, &[]), &[]);
+        let ops_kept: &[&str] =
+            if kept { &["op", "call", "op", "ret"] } else { &["op", "store", "call", "load", "op", "ret"] };
+        assert_eq!(ops(&c), ops_kept);
+    }
+}
+
+/// A store that no load follows is left out, and the slot of the variable with it: the slots after it are the ones the
+/// moves name from then on. Four values are alive at once in three registers, so `v3` spills, and `v2`. `v3` is stored
+/// from r2, where it was written, and nothing writes r2 before the last `add`, which reads `v3` there: its load is left
+/// out, and no load follows its store, nor does its slot hold anything, so that the slot of `v2` is the first.
+#[test]
+fn a_store_that_no_load_follows_is_left_out_with_its_slot() {
+    let mut b = Builder::new();
+    let v: Vec<VReg> = (0..4).map(|i| b.var(&format!("v{i}"))).collect();
+    for &x in &v {
+        b.def(x, &[]);
+    }
+    for &x in &v[1..] {
+        b.inst("add", &[(v[0], Access::ReadWrite), (x, Access::Read)], Flow::Next);
+    }
+    b.ret(v[0], 0);
+    let c = same(&b.0, &toy(3, &[]), &[]);
+    assert_eq!(spilled(&c), ["v2"]);
+    assert_eq!(ops(&c), ["op", "op", "op", "store", "op", "add", "load", "add", "add", "ret"]);
+    assert_eq!(moves(&c), [("store", 0), ("load", 0)]);
+    assert_eq!(regs_of(&c, "v3"), [r(2)]);
+}
+
+/// A store that another store to its slot follows, with no load between them, is left out too, for no one reads what it
+/// stores. `x` and `y` are stored in turn, and a call changes every register before the load, so that only the store of
+/// `y` is of use.
+#[test]
+fn a_store_that_another_store_follows_before_any_load_is_left_out() {
+    let mut b = Builder::new();
+    let (x, y, t, z) = (b.var("x"), b.var("y"), b.var("t"), b.var("z"));
+    let s = b.slot("s", true);
+    b.def(x, &[]);
+    b.def(y, &[]);
+    b.store(s, x);
+    b.store(s, y);
+    b.call(None, &[], &[0, 1]);
+    b.load(t, s);
+    b.def(z, &[t]);
+    b.ret(z, 0);
+    let c = same(&b.0, &toy(2, &[]), &[]);
+    assert_eq!(ops(&c), ["op", "op", "store", "call", "load", "op", "ret"]);
+    let Item::Inst(store) = &c.body[2] else { panic!("an instruction") };
+    assert_eq!(store.args[1].operand, Operand::Reg(r(1), Width::W64));
+}
+
+/// A store stays where a load may follow it, on some way if not on every: the load after the jump reads the store
+/// before it, if the kernel does not jump. `n` says which way the kernel takes, the jump if 2, as the Toy's `dec` says;
+/// it is run both ways. `y` takes the register of `x`, so that no register holds what the slot keeps.
+#[test]
+fn a_store_stays_where_a_load_follows_it_on_one_way_only() {
+    let mut b = Builder::new();
+    let (n, x, y, t) = (b.param("n", 1), b.var("x"), b.var("y"), b.var("t"));
+    let s = b.slot("s", true);
+    b.def(x, &[]);
+    b.store(s, x);
+    b.def(y, &[]);
+    b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+    b.load(t, s);
+    b.inst("add", &[(y, Access::ReadWrite), (t, Access::Read)], Flow::Next);
+    b.label(1);
+    b.ret(y, 0);
+    for way in [1, 2] {
+        let c = same(&b.0, &toy(3, &[]), &[way]);
+        assert_eq!(ops(&c), ["op", "store", "op", "dec", "load", "add", "ret"]);
+    }
+}
+
+/// A store stays where a load follows it by the jump back of a loop: each turn stores what the next loads. `x` is
+/// stored before the loop from r1, where it stays, for the loop reads it, and `t2` in the loop from r2, so that no
+/// register holds what the slot keeps at the top of the loop, and the load there stays.
+#[test]
+fn a_store_stays_where_a_load_follows_it_by_the_jump_back_of_a_loop() {
+    let mut b = Builder::new();
+    let (n, x, t, t2) = (b.param("n", 0), b.var("x"), b.var("t"), b.var("t2"));
+    let s = b.slot("s", true);
+    b.def(x, &[]);
+    b.store(s, x);
+    b.label(1);
+    b.load(t, s);
+    b.def(t2, &[t, x]);
+    b.store(s, t2);
+    b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+    b.ret(t2, 2);
+    for turns in 1..=3 {
+        let c = same(&b.0, &toy(3, &[]), &[turns]);
+        assert_eq!(ops(&c), ["op", "store", "load", "op", "store", "dec", "ret"]);
+        assert_eq!(regs_of(&c, "x"), [r(1)]);
+        assert_eq!(regs_of(&c, "t2"), [r(2)]);
+    }
+}
+
+/// A register holds what a slot keeps at the top of a loop though each turn brings it in a variable of its own: `x` is
+/// stored before the loop from r1, and `t2` in the loop, also from r1, so that r1 holds what the slot keeps at the top
+/// on both ways, in `x` on the way in and in `t2` on the jump back, which are made one. The load at the top is left
+/// out, and both stores, which no load follows now.
+#[test]
+fn a_register_holds_what_a_slot_keeps_at_the_top_of_a_loop_though_each_turn_brings_it_in_a_variable_of_its_own() {
+    let mut b = Builder::new();
+    let (n, x, t, t2) = (b.param("n", 0), b.var("x"), b.var("t"), b.var("t2"));
+    let s = b.slot("s", true);
+    b.def(x, &[]);
+    b.store(s, x);
+    b.label(1);
+    b.load(t, s);
+    b.def(t2, &[t]);
+    b.store(s, t2);
+    b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+    b.ret(t2, 1);
+    for turns in 1..=3 {
+        let c = same(&b.0, &toy(2, &[]), &[turns]);
+        assert_eq!(ops(&c), ["op", "op", "dec", "ret"]);
+        assert_eq!(regs_of(&c, "x").into_iter().chain(regs_of(&c, "t2")).collect::<Vec<_>>(), [r(1)]);
+    }
+}
+
+/// A slot of the program's own keeps its stores and its number, though no load follows them: only the slots that spills
+/// make are left out, and the ones after them are numbered again from where the program's own end.
+#[test]
+fn a_slot_of_the_programs_own_keeps_its_stores_and_its_number() {
+    let mut b = Builder::new();
+    let (x, y, u, t, w) = (b.var("x"), b.var("y"), b.var("u"), b.var("t"), b.var("w"));
+    let (own, a, k) = (b.slot("own", false), b.slot("a", true), b.slot("k", true));
+    b.def(x, &[]);
+    b.store(own, x);
+    b.store(a, x);
+    b.def(y, &[]);
+    b.store(k, y);
+    b.def(u, &[]);
+    b.load(t, k);
+    b.def(w, &[t, u]);
+    b.ret(w, 0);
+    let c = same(&b.0, &toy(3, &[]), &[]);
+    assert_eq!(spilled(&c), ["k"]);
+    assert_eq!(c.frame.slots.len(), 2);
+    assert_eq!(moves(&c), [("store", 0), ("store", 1), ("load", 1)]);
+}
+
+/// A load is left out where the instruction after it is the only one that reads the variable it loads, and that
+/// instruction reads the variable of the register that holds it: it reads there before it writes, though the register
+/// is the one it writes. `z` takes r0 from `x`, which it reads there as `t`, and so it does where it reads `t` twice.
+#[test]
+fn a_load_is_left_out_where_the_instruction_after_it_is_the_only_one_that_reads_it() {
+    for twice in [false, true] {
+        let mut b = Builder::new();
+        let (x, y, t, z, w) = (b.var("x"), b.var("y"), b.var("t"), b.var("z"), b.var("w"));
+        let s = b.slot("s", true);
+        b.def(x, &[]);
+        b.def(y, &[]);
+        b.store(s, x);
+        b.load(t, s);
+        b.def(z, &[t, x, t][..if twice { 3 } else { 2 }]);
+        b.def(w, &[z, y]);
+        b.ret(w, 0);
+        let c = same(&b.0, &toy(3, &[]), &[]);
+        assert_eq!(ops(&c), ["op", "op", "op", "op", "ret"]);
+        let Item::Inst(read) = &c.body[2] else { panic!("an instruction") };
+        assert!(
+            read.args
+                .iter()
+                .all(|a| a.operand == Operand::Reg(r(0), Width::W64) || matches!(a.operand, Operand::Imm(_)))
+        );
+    }
+}
+
+/// A load is a copy from the register that holds what it loads where the instruction it is for is not the only one
+/// that reads what it loads: `t` is read by `z` and by `w`. The copy is of as much as the load was: all of it, or 32
+/// bits where no instruction names more.
+#[test]
+fn a_load_is_a_copy_where_the_instruction_it_is_for_is_not_the_only_one_that_reads_it() {
+    for width in [Width::W64, Width::W32] {
+        let mut b = Builder::new();
+        let (x, t, z, w, v) = (b.var("x"), b.var("t"), b.var("z"), b.var("w"), b.var("v"));
+        let s = b.slot("x", true);
+        b.def_at(width, x, &[]);
+        b.store_at(width, s, x);
+        b.load_at(width, t, s);
+        b.def_at(width, z, &[t]);
+        b.def_at(width, w, &[t, z]);
+        b.def_at(width, v, &[w, x]);
+        b.ret_at(width, v, 0);
+        let c = same(&b.0, &toy(4, &[]), &[]);
+        assert_eq!(ops(&c), ["op", "copy", "op", "op", "op", "ret"]);
+        assert_eq!(copies(&c), [(r(1), r(0))]);
+    }
+}
+
+/// A load is a copy where the instruction after it does not read what it loads, though a later one is the only other
+/// that does: `y` takes the register that holds `x`, which it reads, and writes it before `z` reads `t`, so `z` cannot
+/// read `t` there. The copy keeps `t` in r1, and the store and its slot are gone, as no load follows.
+#[test]
+fn a_load_is_a_copy_where_the_instruction_after_it_does_not_read_what_it_loads() {
+    let mut b = Builder::new();
+    let (x, t, y, z) = (b.var("x"), b.var("t"), b.var("y"), b.var("z"));
+    let s = b.slot("s", true);
+    b.def(x, &[]);
+    b.store(s, x);
+    b.load(t, s);
+    b.def(y, &[x]);
+    b.def(z, &[t, y]);
+    b.ret(z, 0);
+    let c = same(&b.0, &toy(3, &[]), &[]);
+    assert_eq!(ops(&c), ["op", "copy", "op", "op", "ret"]);
+    assert_eq!(copies(&c), [(r(1), r(0))]);
+}
+
+/// A load is left out where the instruction it is for comes after another load, as the first of two does that are for
+/// one instruction: `p` and `q` arrive in r0 and r1 and are stored on entry, and `z` reads `t` and `u`, loaded from
+/// those slots; each is read in the register it arrived in, and the loads and the stores are left out. So it is where
+/// the load between goes to the register that holds what the first loads, as `u` goes to r1 where `q` is, if `t` is
+/// loaded from `q`'s slot: the load between is left out as well, and writes no register.
+#[test]
+fn a_load_is_left_out_where_the_instruction_it_is_for_comes_after_another_load() {
+    for swapped in [false, true] {
+        let mut b = Builder::new();
+        let (p, q) = (b.param("p", 0), b.param("q", 1));
+        let (t, u, z) = (b.var("t"), b.var("u"), b.var("z"));
+        let (sp, sq) = (b.slot("p", true), b.slot("q", true));
+        b.store(sp, p);
+        b.store(sq, q);
+        let (first, second) = if swapped { (sq, sp) } else { (sp, sq) };
+        b.load(t, first);
+        b.load(u, second);
+        b.def(z, &[t, u]);
+        b.ret(z, 0);
+        let c = same(&b.0, &toy(4, &[]), &[5, 6]);
+        assert_eq!(ops(&c), ["op", "ret"]);
+        let Item::Inst(read) = &c.body[0] else { panic!("an instruction") };
+        let (at_t, at_u) = if swapped { (r(1), r(0)) } else { (r(0), r(1)) };
+        assert_eq!(read.args[2].operand, Operand::Reg(at_t, Width::W64));
+        assert_eq!(read.args[3].operand, Operand::Reg(at_u, Width::W64));
+    }
+}
+
+/// A load is a copy where another load for its instruction writes the register that holds what it loads, as a load
+/// does that is not left out: `t` is loaded from `q`'s slot, which r1 holds, and `u`, which `w` reads as well, is
+/// loaded to r1 from `p`'s. `t` is copied out of r1 before `u` comes there, and the copy takes r0, where `p` was, so
+/// `u` is loaded from its slot.
+#[test]
+fn a_load_is_a_copy_where_another_load_for_its_instruction_writes_the_register_that_holds_what_it_loads() {
+    let mut b = Builder::new();
+    let (p, q) = (b.param("p", 0), b.param("q", 1));
+    let (t, u, z, w) = (b.var("t"), b.var("u"), b.var("z"), b.var("w"));
+    let (sp, sq) = (b.slot("p", true), b.slot("q", true));
+    b.store(sp, p);
+    b.store(sq, q);
+    b.load(t, sq);
+    b.load(u, sp);
+    b.def(z, &[t, u]);
+    b.def(w, &[z, u]);
+    b.ret(w, 0);
+    let c = same(&b.0, &toy(4, &[]), &[5, 6]);
+    assert_eq!(ops(&c), ["store", "copy", "load", "op", "op", "ret"]);
+    assert_eq!(copies(&c), [(r(0), r(1))]);
+}
+
+/// A load is a copy where a load after it writes the register that holds what it loads, though that load is a copy only
+/// as a third writes the register that holds what it loads in turn: `t`, `u` and `v` take r0, r1 and r2, and are loaded
+/// from the slots of `pb`, `pc` and `pa`, which r1, r2 and r0 hold. `w` reads `v` as well, so the load of `v` writes
+/// r2; `u` is copied out of r2 before it, and `t` out of r1 before that. The copy of `t` takes r0, where `pa` was, so
+/// `v` is loaded from its slot.
+#[test]
+fn a_load_is_a_copy_where_the_loads_after_it_write_the_registers_that_hold_what_each_loads_one_after_another() {
+    let mut b = Builder::new();
+    let (pa, pb, pc) = (b.param("pa", 0), b.param("pb", 1), b.param("pc", 2));
+    let (t, u, v, z, w) = (b.var("t"), b.var("u"), b.var("v"), b.var("z"), b.var("w"));
+    let (sa, sb, sc) = (b.slot("pa", true), b.slot("pb", true), b.slot("pc", true));
+    b.store(sa, pa);
+    b.store(sb, pb);
+    b.store(sc, pc);
+    b.load(t, sb);
+    b.load(u, sc);
+    b.load(v, sa);
+    b.def(z, &[t, u, v]);
+    b.def(w, &[z, v]);
+    b.ret(w, 0);
+    let c = same(&b.0, &toy(4, &[]), &[5, 6, 7]);
+    assert_eq!(ops(&c), ["store", "copy", "copy", "load", "op", "op", "ret"]);
+    assert_eq!(copies(&c), [(r(0), r(1)), (r(1), r(2))]);
+}
+
+/// A copy from the register it writes is left out, as any copy between one register is: `t` is loaded to r0, where `x`
+/// was, and read twice, so the load is a copy of r0 to r0.
+#[test]
+fn a_load_that_is_a_copy_from_the_register_it_writes_is_left_out() {
+    let mut b = Builder::new();
+    let (x, t, z, w) = (b.var("x"), b.var("t"), b.var("z"), b.var("w"));
+    let s = b.slot("s", true);
+    b.def(x, &[]);
+    b.store(s, x);
+    b.load(t, s);
+    b.def(z, &[t]);
+    b.def(w, &[t, z]);
+    b.ret(w, 0);
+    let c = same(&b.0, &toy(2, &[]), &[]);
+    assert_eq!(ops(&c), ["op", "op", "op", "ret"]);
+    assert!(copies(&c).is_empty());
+}
+
+/// A load that is a copy leaves what it loads in the register it loads to, as any load does, and a later load into that
+/// register is a copy from it, and left out, where another register holds the same first. Each of the two ways to the
+/// label stores `x` from r2 and loads `t` to r3, and each writes `x` of its own, so that at the label what each
+/// register holds is not one value to the copies, though the slot keeps the same in both, in `x` and in `t`. `u` is
+/// loaded to r3, where the way put `t`, and no copy is made, as one from r2 would be. `n` says which way the kernel
+/// takes, the jump if 2, as the Toy's `dec` says; it is run both ways.
+#[test]
+fn a_load_that_is_a_copy_leaves_what_it_loads_in_the_register_it_loads_to() {
+    let mut b = Builder::new();
+    let (n, acc, x, t, u) = (b.param("n", 1), b.var("acc"), b.var("x"), b.var("t"), b.var("u"));
+    let s = b.slot("s", true);
+    let add_twice = |b: &mut Builder, v: VReg| {
+        for _ in 0..2 {
+            b.inst("add", &[(acc, Access::ReadWrite), (v, Access::Read)], Flow::Next);
+        }
+    };
+    b.def(acc, &[]);
+    b.def(x, &[]);
+    b.store(s, x);
+    b.load(t, s);
+    add_twice(&mut b, t);
+    b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+    b.def(x, &[]);
+    b.store(s, x);
+    b.load(t, s);
+    add_twice(&mut b, t);
+    b.label(1);
+    b.load(u, s);
+    add_twice(&mut b, u);
+    b.inst("add", &[(acc, Access::ReadWrite), (x, Access::Read)], Flow::Next);
+    b.inst("add", &[(acc, Access::ReadWrite), (n, Access::Read)], Flow::Next);
+    b.ret(acc, 0);
+    for way in [1, 2] {
+        let c = same(&b.0, &toy(4, &[]), &[way]);
+        let ops_kept =
+            ["op", "op", "copy", "add", "add", "dec", "op", "copy", "add", "add", "add", "add", "add", "add", "ret"];
+        assert_eq!(ops(&c), ops_kept);
+        assert_eq!(copies(&c), [(r(3), r(2)), (r(3), r(2))]);
+    }
+}
+
+/// A register holds what a slot keeps at a label if each way to it brings that. Two ways come to the label, the jump
+/// and the code `way` before it, and `x` is stored before them, from r1, where it stays, read after the label. Where
+/// `way` leaves r1 as it was, the load after the label is left out; where it stores something else to the slot, the
+/// ways bring it in two registers, and the load stays. `n` says which way the kernel takes, the jump if 2, as the Toy's
+/// `dec` says; it is run both ways.
+#[test]
+fn a_register_holds_what_a_slot_keeps_at_a_label_if_every_way_to_it_brings_it() {
+    let join = |way: fn(&mut Builder, SlotId)| {
+        let mut b = Builder::new();
+        let (n, x, t, z) = (b.param("n", 0), b.var("x"), b.var("t"), b.var("z"));
+        let s = b.slot("s", true);
+        b.def(x, &[]);
+        b.store(s, x);
+        b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+        way(&mut b, s);
+        b.label(1);
+        b.load(t, s);
+        b.def(z, &[t, x]);
+        b.ret(z, 0);
+        let (jumps, falls) = (same(&b.0, &toy(4, &[]), &[2]), same(&b.0, &toy(4, &[]), &[1]));
+        assert_eq!(ops(&jumps), ops(&falls));
+        ops(&falls)
+    };
+    let agree = |b: &mut Builder, _| {
+        let y = b.var("y");
+        b.def(y, &[]);
+    };
+    assert_eq!(join(agree), ["op", "dec", "op", "op", "ret"]);
+    let differ = |b: &mut Builder, s| {
+        let y = b.var("y");
+        b.def(y, &[]);
+        b.store(s, y);
+    };
+    assert_eq!(join(differ), ["op", "store", "dec", "op", "store", "load", "op", "ret"]);
+}
+
+/// A register holds what a slot keeps at a label only if each way to it has the register hold that slot's content, and
+/// not another's. `w` and `x` are stored to `b` and `a`, and `w` and `n` are read after the label, so `x` has r2, and
+/// `y`, which the way that falls through writes before it stores it to `b`, takes r2 where `x` was. At the label r2
+/// holds `a` on the jump and `b` on the fall, and the two loads stay, whichever comes first: the first one's register
+/// would be r2, and end what it holds. `n` says which way the kernel takes, the jump if 2, as the Toy's `dec` says; it
+/// is run both ways.
+#[test]
+fn a_register_holds_what_a_slot_keeps_at_a_label_only_if_each_way_to_it_has_it_hold_that_slot_and_not_another() {
+    for a_first in [true, false] {
+        let mut b = Builder::new();
+        let (n, w, x, y) = (b.param("n", 0), b.var("w"), b.var("x"), b.var("y"));
+        let (t, u, v, z) = (b.var("t"), b.var("u"), b.var("v"), b.var("z"));
+        let (sa, sb) = (b.slot("a", true), b.slot("b", true));
+        b.def(w, &[]);
+        b.def(x, &[]);
+        b.store(sb, w);
+        b.store(sa, x);
+        b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+        b.def(y, &[]);
+        b.store(sb, y);
+        b.label(1);
+        let (first, second) = if a_first { (sa, sb) } else { (sb, sa) };
+        b.load(t, first);
+        b.def(v, &[t]);
+        b.load(u, second);
+        b.def(z, &[u, v, w, n]);
+        b.ret(z, 0);
+        for way in [1, 2] {
+            let c = same(&b.0, &toy(5, &[]), &[way]);
+            let ops_kept = ["op", "op", "store", "store", "dec", "op", "store", "load", "op", "load", "op", "ret"];
+            assert_eq!(ops(&c), ops_kept);
+            let slots = [("store", sb.0), ("store", sa.0), ("store", sb.0), ("load", first.0), ("load", second.0)];
+            assert_eq!(moves(&c), slots);
+            assert_eq!(regs_of(&c, "x").into_iter().chain(regs_of(&c, "y")).collect::<Vec<_>>(), [r(2), r(2)]);
+        }
+    }
+}
+
+/// A register holds what a slot keeps at a label though each way to it brings that in a variable of its own: here both
+/// ways bring it in r0, the one in `x` and the other in `y`, which are made one, written on each way. `z` reads it in
+/// r0, the load after the label is left out, and so are the stores, which no load follows now. `n` and `m` say which
+/// way the kernel takes, as the Toy's `dec` says: the first jump over the code of `x` if `n` is not 1, the second over
+/// that of `y` if `m` is not 1; it is run by each of the three ways.
+#[test]
+fn a_register_holds_what_a_slot_keeps_at_a_label_though_each_way_brings_it_in_a_variable_of_its_own() {
+    let mut b = Builder::new();
+    let (n, m, x, y, t, z) = (b.param("n", 0), b.param("m", 1), b.var("x"), b.var("y"), b.var("t"), b.var("z"));
+    let s = b.slot("s", true);
+    b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+    b.def(x, &[]);
+    b.store(s, x);
+    b.inst("dec", &[(m, Access::ReadWrite)], Flow::Branch(Label(2)));
+    b.label(1);
+    b.def(y, &[]);
+    b.store(s, y);
+    b.label(2);
+    b.load(t, s);
+    b.def(z, &[t]);
+    b.ret(z, 0);
+    for ways in [[1, 5], [2, 5], [1, 1]] {
+        let c = same(&b.0, &toy(3, &[]), &ways);
+        assert_eq!(ops(&c), ["dec", "op", "dec", "op", "op", "ret"]);
+        assert_eq!(regs_of(&c, "x").into_iter().chain(regs_of(&c, "y")).collect::<Vec<_>>(), [r(0)]);
+    }
+}
+
+/// A parameter stays as it is where variables are made one. `x` comes after `y` and arrives in r0, stored from there;
+/// the way that falls through loads the slot to `y`, in r0 too, so that the ways bring its content in `y` and in `x`.
+/// `z` reads it in `x`, the parameter, though `y` is the lower of the two, and `y` has no register left. `n` says which
+/// way the kernel takes, the jump if 2, as the Toy's `dec` says; it is run both ways.
+#[test]
+fn a_parameter_stays_as_it_is_where_variables_are_made_one() {
+    let mut b = Builder::new();
+    let (n, y, x, t, z) = (b.param("n", 1), b.var("y"), b.param("x", 0), b.var("t"), b.var("z"));
+    let s = b.slot("s", true);
+    b.store(s, x);
+    b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+    b.load(y, s);
+    b.label(1);
+    b.load(t, s);
+    b.def(z, &[t]);
+    b.ret(z, 0);
+    for way in [1, 2] {
+        let c = same(&b.0, &toy(3, &[]), &[way, 7]);
+        assert_eq!(ops(&c), ["dec", "op", "ret"]);
+        assert_eq!(regs_of(&c, "x"), [r(0)]);
+        assert_eq!(regs_of(&c, "y"), []);
+    }
+}
+
+/// A register holds what a slot keeps in a loop if the way into it and the jump back both bring that. `x` is stored
+/// before the loop, from r1, where it stays, read after the loop. Where the body leaves r1 as it was, the load at the
+/// top of the loop is left out; where it stores something else to the slot, the jump back brings it in another
+/// register, and the load stays.
+#[test]
+fn a_register_holds_what_a_slot_keeps_in_a_loop_if_the_way_in_and_the_jump_back_both_bring_it() {
+    let looped = |body: fn(&mut Builder, SlotId, VReg)| {
+        let mut b = Builder::new();
+        let (n, x, acc, t, z) = (b.param("n", 0), b.var("x"), b.var("acc"), b.var("t"), b.var("z"));
+        let s = b.slot("s", true);
+        b.def(x, &[]);
+        b.def(acc, &[]);
+        b.store(s, x);
+        b.label(1);
+        b.load(t, s);
+        b.inst("add", &[(acc, Access::ReadWrite), (t, Access::Read)], Flow::Next);
+        body(&mut b, s, acc);
+        b.inst("dec", &[(n, Access::ReadWrite)], Flow::Branch(Label(1)));
+        b.def(z, &[acc, x]);
+        b.ret(z, 0);
+        let ways: Vec<_> = (1..=3).map(|turns| ops(&same(&b.0, &toy(5, &[]), &[turns]))).collect();
+        assert!(ways.windows(2).all(|w| w[0] == w[1]));
+        ways[0].clone()
+    };
+    let agree = |b: &mut Builder, _, acc| {
+        let y = b.var("y");
+        b.def(y, &[acc]);
+    };
+    assert_eq!(looped(agree), ["op", "op", "add", "op", "dec", "op", "ret"]);
+    let differ = |b: &mut Builder, s, acc| {
+        let y = b.var("y");
+        b.def(y, &[acc]);
+        b.store(s, y);
+    };
+    assert_eq!(looped(differ), ["op", "op", "store", "load", "add", "op", "store", "dec", "op", "ret"]);
 }
 
 #[test]

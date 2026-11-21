@@ -146,7 +146,8 @@ fn up_to_fifteen_accumulators_fit_without_spilling() {
 /// Thirteen sums, the pointer and the count take 15 of the 14 general registers the allocator
 /// has. The count spills, a parameter stored from where it arrives; then a sum, for the count to
 /// be loaded beside the others. Its store goes between the `sub` and the `jnz` that reads its
-/// flags, which a `mov` leaves as they were.
+/// flags, which a `mov` leaves as they were. The count is in rsi at the top of the loop on the
+/// way in, and in r15 on the jump back, so no register holds it there, and it is loaded.
 #[test]
 fn a_general_register_spills_with_mov_a_parameter_from_where_it_arrives() {
     let src = "unsafe extern \"sysv64\" fn k(p: *mut u64, n: usize) {
@@ -177,6 +178,472 @@ fn a_general_register_spills_with_mov_a_parameter_from_where_it_arrives() {
     for part in parts {
         assert!(text.contains(part), "{part}\nin\n{text}");
     }
+}
+
+/// A spilled variable is read in the register that holds it, with no load, where one does. A store leaves what it
+/// stores in the register it stores from, and a load in the register it loads to, until an instruction writes the
+/// register. Thirteen sums, the pointer and the count are 15 values for the 14 registers, and the count spills, stored
+/// on entry from rsi, where it arrives: the first `add` reads it there, and the sum that takes rsi ends that. The first
+/// of the two `add`s at the end loads it to rcx, and the second reads it there.
+#[test]
+fn a_spilled_variable_is_read_in_the_register_a_store_or_a_load_left_it_in() -> Result<(), String> {
+    let src = "unsafe extern \"sysv64\" fn k(p: *mut u64, n: u64) {
+        let g: [gpr; 13];
+        mov(g[0], [p]);
+        add(g[0], n);
+        for k in 1..13 { mov(g[k], [p + 8 * k]); }
+        for k in 1..13 { add(g[0], g[k]); }
+        add(g[0], n);
+        add(g[0], n);
+        mov([p], g[0]);
+    }";
+    let text = kernite::x86_str(src, "k")?.text();
+    let parts = [
+        "# n, spilled: 8 bytes at rsp - 8
+# p=rdi n=rsi,rcx g0=rax g1=rcx g2=rdx g3=rsi",
+        "    # n spilled
+    mov qword ptr [rsp - 8], rsi
+    mov rax, qword ptr [rdi]
+    add rax, rsi
+    mov rcx, qword ptr [rdi + 8]",
+        "    mov rsi, qword ptr [rdi + 24]",
+        "    # n reloaded
+    mov rcx, qword ptr [rsp - 8]
+    add rax, rcx
+    add rax, rcx
+    mov qword ptr [rdi], rax",
+    ];
+    for part in parts {
+        assert!(text.contains(part), "{part}\nin\n{text}");
+    }
+    assert_eq!(text.matches("reloaded").count(), 1, "{text}");
+    Ok(())
+}
+
+/// A call leaves in a register what it does not change, and a spilled variable is read there after it: the count, in
+/// rsi, after `nothing`, which writes no register. A callee that writes rsi leaves nothing there, and the count is
+/// loaded after the call.
+#[test]
+fn a_call_leaves_a_spilled_variable_in_a_register_it_does_not_change() -> Result<(), String> {
+    let kernel = |callee: &str| {
+        let src = format!(
+            "unsafe extern \"sysv64\" fn k(p: *mut u64, n: u64) {{
+                let g: [gpr; 13];
+                mov(g[0], [p]);
+                call({callee});
+                add(g[0], n);
+                for k in 1..13 {{ mov(g[k], [p + 8 * k]); }}
+                for k in 1..13 {{ add(g[0], g[k]); }}
+                add(g[0], n);
+                mov([p], g[0]);
+            }}
+            unsafe extern \"sysv64\" fn nothing() {{}}
+            unsafe extern \"sysv64\" fn writes_rsi() {{
+                let (a, b, c, d): (gpr, gpr, gpr, gpr);
+                mov(a, 1); mov(b, 1); mov(c, 1); mov(d, 1);
+                add(a, b); add(a, c); add(a, d);
+            }}"
+        );
+        kernite::x86_str(&src, "k").map(|listing| listing.text())
+    };
+    let text = kernel("nothing")?;
+    let want = "    # n spilled
+    mov qword ptr [rsp], rsi
+    mov rax, qword ptr [rdi]
+    call {f0}
+    add rax, rsi
+";
+    assert!(text.contains(want), "{text}");
+    assert_eq!(text.matches("reloaded").count(), 1, "{text}");
+    let text = kernel("writes_rsi")?;
+    let want = "    # n spilled
+    mov qword ptr [rsp], rsi
+    mov r8, qword ptr [rdi]
+    call {f0}
+    # n reloaded
+    mov rax, qword ptr [rsp]
+    add r8, rax
+";
+    assert!(text.contains(want), "{text}");
+    assert_eq!(text.matches("reloaded").count(), 2, "{text}");
+    Ok(())
+}
+
+/// An instruction that reads a spilled variable and writes it too takes a copy of the register that holds it, a `mov`
+/// between registers, and not a load: the count is stored on entry from rsi, and `add(n, 1)` copies it to rcx, adds
+/// there, and stores it from there. The `add` that reads it once, at the end, loads it, for no register holds it then.
+#[test]
+fn a_spilled_variable_that_an_instruction_writes_too_is_copied_from_the_register_that_holds_it() -> Result<(), String> {
+    let src = "unsafe extern \"sysv64\" fn k(p: *mut u64, n: u64) {
+        let g: [gpr; 13];
+        mov(g[0], [p]);
+        add(n, 1);
+        for k in 1..13 { mov(g[k], [p + 8 * k]); }
+        for k in 1..13 { add(g[0], g[k]); add(g[0], g[k]); }
+        add(g[0], n);
+        mov([p], g[0]);
+    }";
+    let text = kernite::x86_str(src, "k")?.text();
+    let parts = [
+        "# n, spilled: 8 bytes at rsp - 8\n",
+        "    mov rax, qword ptr [rdi]
+    mov rcx, rsi
+    add rcx, 1
+    # n spilled
+    mov qword ptr [rsp - 8], rcx
+",
+        "    # n reloaded
+    mov rcx, qword ptr [rsp - 8]
+    add rax, rcx
+    mov qword ptr [rdi], rax
+",
+    ];
+    for part in parts {
+        assert!(text.contains(part), "{part}\nin\n{text}");
+    }
+    assert_eq!(text.matches("reloaded").count(), 1, "{text}");
+    Ok(())
+}
+
+/// A call of a function that runs `vzeroupper` clears the upper half of every vector register, so that a ymm the kernel
+/// reads whole after it is kept in the frame, and loaded once after the call: `vaddps` and the store to `[q]` read the
+/// register `w` was loaded to, with no store or load of `w` between them. `s`, an xmm that the kernel reads in its
+/// lower half alone, stays in its register. A register that the callee does not write is cleared as well: `w` of
+/// `vpast` is in ymm1, `vtouch` writes ymm0, and `w` is loaded after the call all the same.
+#[test]
+fn a_vector_the_call_clears_is_loaded_once_after_it_and_read_in_the_register_it_was_loaded_to() -> Result<(), String> {
+    let src = r#"
+        unsafe extern "sysv64" fn vtouch(p: *mut f32) -> f32 {
+            let v: ymm;
+            vmovups(v, [p]);
+            vaddps(v, v, v);
+            vmovups([p], v);
+            ret(v.xmm);
+        }
+        unsafe extern "sysv64" fn vkeeps(p: *mut f32, q: *mut f32) -> f32 {
+            let (w, s, r): (ymm, ymm, ymm);
+            vmovups(w, [q]);
+            vmovss(s.xmm, [q + 32]);
+            call(r.xmm, vtouch, (p));
+            vaddps(w, w, w);
+            vmovups([q], w);
+            vaddss(r.xmm, r.xmm, s.xmm);
+            ret(r.xmm);
+        }
+        unsafe extern "sysv64" fn vpast(p: *mut f32, q: *mut f32) -> f32 {
+            let (a, w, r): (ymm, ymm, ymm);
+            vmovups(a, [q + 64]);
+            vmovups(w, [q]);
+            vmovups([q + 64], a);
+            call(r.xmm, vtouch, (p));
+            vaddps(w, w, w);
+            vmovups([q], w);
+            ret(r.xmm);
+        }"#;
+    let want = "# vkeeps(gpr, gpr) -> vec
+# needs: avx
+# frame: 32 bytes aligned to 32, saves []
+# w, spilled: 32 bytes at rsp
+# p=rdi q=rsi s=ymm1 r=ymm0 w=ymm0,ymm2
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    and rsp, -32
+    vmovups ymm0, ymmword ptr [rsi]
+    # w spilled
+    vmovups ymmword ptr [rsp], ymm0
+    vmovss xmm1, dword ptr [rsi + 32]
+    call {f0}
+    # w reloaded
+    vmovups ymm2, ymmword ptr [rsp]
+    vaddps ymm2, ymm2, ymm2
+    vmovups ymmword ptr [rsi], ymm2
+    vaddss xmm0, xmm0, xmm1
+    mov rsp, rbp
+    pop rbp
+    vzeroupper
+    ret
+# f0: vtouch
+";
+    assert_eq!(kernite::x86_str(src, "vkeeps")?.text(), want);
+    let want = "# vpast(gpr, gpr) -> vec
+# needs: avx
+# frame: 32 bytes aligned to 32, saves []
+# w, spilled: 32 bytes at rsp
+# p=rdi q=rsi a=ymm0 r=ymm0 w=ymm1
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    and rsp, -32
+    vmovups ymm0, ymmword ptr [rsi + 64]
+    vmovups ymm1, ymmword ptr [rsi]
+    # w spilled
+    vmovups ymmword ptr [rsp], ymm1
+    vmovups ymmword ptr [rsi + 64], ymm0
+    call {f0}
+    # w reloaded
+    vmovups ymm1, ymmword ptr [rsp]
+    vaddps ymm1, ymm1, ymm1
+    vmovups ymmword ptr [rsi], ymm1
+    mov rsp, rbp
+    pop rbp
+    vzeroupper
+    ret
+# f0: vtouch
+";
+    assert_eq!(kernite::x86_str(src, "vpast")?.text(), want);
+    Ok(())
+}
+
+/// A register holds a spilled variable at a label if each way to it brings it there. The count is stored on entry
+/// from rsi, and the way that falls through leaves rsi as it was, as the way that jumps does, so that the `add` after
+/// the label reads it there. Where the way that falls through writes the count, a store to its slot from rcx ends what
+/// rsi holds of it, the ways bring it in two registers, and the count is loaded after the label.
+#[test]
+fn a_register_holds_a_spilled_variable_at_a_label_if_every_way_to_it_brings_it_there() -> Result<(), String> {
+    let kernel = |way: &str| {
+        let src = format!(
+            "unsafe extern \"sysv64\" fn k(p: *mut u64, n: u64) {{
+                let g: [gpr; 13];
+                mov(g[0], [p]);
+                test(g[0], g[0]);
+                jz(skip);
+                {way}
+                label(skip);
+                add(g[0], n);
+                for k in 1..13 {{ mov(g[k], [p + 8 * k]); }}
+                for k in 1..13 {{ add(g[0], g[k]); }}
+                add(g[0], n);
+                mov([p], g[0]);
+            }}"
+        );
+        kernite::x86_str(&src, "k").map(|listing| listing.text())
+    };
+    let text = kernel("add(g[0], 1);")?;
+    let want = "    jz 2f
+    add rax, 1
+2:
+    add rax, rsi
+";
+    assert!(text.contains(want), "{text}");
+    assert_eq!(text.matches("reloaded").count(), 1, "{text}");
+    let text = kernel("mov(n, 5);")?;
+    let want = "    jz 2f
+    mov rcx, 5
+    # n spilled
+    mov qword ptr [rsp - 8], rcx
+2:
+    # n reloaded
+    mov rcx, qword ptr [rsp - 8]
+    add rax, rcx
+";
+    assert!(text.contains(want), "{text}");
+    assert_eq!(text.matches("reloaded").count(), 2, "{text}");
+    Ok(())
+}
+
+/// A register holds a spilled variable at a label though each way to it writes the variable: `c` is written to rcx on
+/// each way of an `if`, and stored from there, and the `add` after the label reads it in rcx, with no load. The last
+/// `add` loads it, for the sums between take rcx.
+#[test]
+fn a_register_holds_a_spilled_variable_at_a_label_though_each_way_writes_it() -> Result<(), String> {
+    let src = "unsafe extern \"sysv64\" fn k(p: *mut u64) {
+        let g: [gpr; 13];
+        let c: gpr;
+        mov(g[0], [p]);
+        test(g[0], g[0]);
+        jz(other);
+        mov(c, 5);
+        jmp(join);
+        label(other);
+        mov(c, 6);
+        label(join);
+        add(g[0], c);
+        for k in 1..13 { mov(g[k], [p + 8 * k]); }
+        for k in 1..13 { add(g[0], g[k]); }
+        add(g[0], c);
+        mov([p], g[0]);
+    }";
+    let text = kernite::x86_str(src, "k")?.text();
+    let parts = [
+        "    jz 2f
+    mov rcx, 5
+    # c spilled
+    mov qword ptr [rsp - 8], rcx
+    jmp 3f
+2:
+    mov rcx, 6
+    # c spilled
+    mov qword ptr [rsp - 8], rcx
+3:
+    add rax, rcx
+    mov rcx, qword ptr [rdi + 8]
+",
+        "    # c reloaded
+    mov rcx, qword ptr [rsp - 8]
+    add rax, rcx
+",
+    ];
+    for part in parts {
+        assert!(text.contains(part), "{part}\nin\n{text}");
+    }
+    assert_eq!(text.matches("reloaded").count(), 1, "{text}");
+    Ok(())
+}
+
+/// A call of a function that runs `vzeroupper` leaves the lower half of each vector register as it was, so that an xmm
+/// kept in the frame stays in its register over it: `x` is stored from xmm1, `vtouch` writes ymm0 alone, and the
+/// `vaddss` after the call reads `x` in xmm1, with no load. The `vaddss` at the end loads it, for the sums between take
+/// xmm1.
+#[test]
+fn a_call_that_runs_vzeroupper_leaves_a_spilled_xmm_in_its_register() -> Result<(), String> {
+    let src = r#"
+        unsafe extern "sysv64" fn vtouch(p: *mut f32) -> f32 {
+            let v: ymm;
+            vmovups(v, [p]);
+            vaddps(v, v, v);
+            vmovups([p], v);
+            ret(v.xmm);
+        }
+        unsafe extern "sysv64" fn k(p: *mut f32, q: *mut f32) -> f32 {
+            let (a, x, r): (ymm, ymm, ymm);
+            let g: [ymm; 15];
+            vmovss(a.xmm, [q + 64]);
+            vmovss(x.xmm, [q]);
+            vmovss([q + 64], a.xmm);
+            call(r.xmm, vtouch, (p));
+            vaddss(r.xmm, r.xmm, x.xmm);
+            for k in 0..15 { vmovss(g[k].xmm, [q + 4 * k + 4]); }
+            for k in 0..15 { vaddss(r.xmm, r.xmm, g[k].xmm); }
+            vaddss(r.xmm, r.xmm, x.xmm);
+            ret(r.xmm);
+        }"#;
+    let text = kernite::x86_str(src, "k")?.text();
+    let parts = [
+        "    vmovss xmm1, dword ptr [rsi]
+    # x spilled
+    vmovups xmmword ptr [rsp], xmm1
+    vmovss dword ptr [rsi + 64], xmm0
+    call {f0}
+    vaddss xmm0, xmm0, xmm1
+    vmovss xmm1, dword ptr [rsi + 4]
+",
+        "    # x reloaded
+    vmovups xmm1, xmmword ptr [rsp]
+    vaddss xmm0, xmm0, xmm1
+",
+    ];
+    for part in parts {
+        assert!(text.contains(part), "{part}\nin\n{text}");
+    }
+    assert_eq!(text.matches("reloaded").count(), 1, "{text}");
+    Ok(())
+}
+
+/// A store that no load follows is left out, and its slot with it. Seventeen vectors alive at once are one too many for
+/// the 16 registers: kernite spills the last, `v16`, and then `v15`, to make room for the last to be written. The last
+/// is read in the register it was written to, so that no load follows its store, and the frame has the slot of `v15`
+/// alone, and the last `vaddps` reads `v16` in ymm15.
+#[test]
+fn a_store_that_no_load_follows_is_left_out_with_its_slot() -> Result<(), String> {
+    let loads: String = (0..17).map(|i| format!("let v{i}: ymm;\nvmovups(v{i}, [x + {}]);\n", 32 * i)).collect();
+    let sums: String = (1..17).map(|i| format!("vaddps(v0, v0, v{i});\n")).collect();
+    let src = format!("unsafe extern \"sysv64\" fn k(x: *mut f32) {{\n{loads}{sums}vmovups([x], v0);\n}}\n");
+    let listing = kernite::x86_str(&src, "k")?;
+    let text = listing.text();
+    let parts = [
+        "# frame: 32 bytes aligned to 32, saves []\n# v15, spilled: 32 bytes at rsp\n",
+        "    vmovups ymm15, ymmword ptr [rdi + 480]
+    # v15 spilled
+    vmovups ymmword ptr [rsp], ymm15
+    vmovups ymm15, ymmword ptr [rdi + 512]
+",
+        "    # v15 reloaded
+    vmovups ymm1, ymmword ptr [rsp]
+    vaddps ymm0, ymm0, ymm1
+    vaddps ymm0, ymm0, ymm15
+",
+    ];
+    for part in parts {
+        assert!(text.contains(part), "{part}\nin\n{text}");
+    }
+    assert_eq!(listing.frame.slots.iter().filter(|slot| slot.spill).count(), 1, "{text}");
+    assert_eq!(text.matches("spilled").count(), 2, "{text}");
+    Ok(())
+}
+
+/// A store is left out where another store of the variable follows before any load, though a load comes after the
+/// second: `c` is written, read in rcx where it was written, and written again, and the `add` at the end loads it. Only
+/// the second store stays, and the listing names the spill twice, in its header and at that store.
+#[test]
+fn a_store_that_another_store_of_the_variable_follows_before_any_load_is_left_out() -> Result<(), String> {
+    let src = "unsafe extern \"sysv64\" fn k(p: *mut u64) {
+        let g: [gpr; 13];
+        let c: gpr;
+        mov(g[0], [p]);
+        mov(c, [p + 8]);
+        add(g[0], c);
+        mov(c, [p + 16]);
+        for k in 1..13 { mov(g[k], [p + 8 * k]); }
+        for k in 1..13 { add(g[0], g[k]); }
+        add(g[0], c);
+        mov([p], g[0]);
+    }";
+    let text = kernite::x86_str(src, "k")?.text();
+    let want = "    mov rcx, qword ptr [rdi + 8]
+    add rax, rcx
+    mov rcx, qword ptr [rdi + 16]
+    # c spilled
+    mov qword ptr [rsp - 8], rcx
+";
+    assert!(text.contains(want), "{text}");
+    assert_eq!(text.matches("spilled").count(), 2, "{text}");
+    Ok(())
+}
+
+/// An instruction that reads two spilled variables reads each in the register that holds it, with neither load: `n` and
+/// `m` arrive in rsi and rdx and are stored on entry, and `cmp` reads them there, though the load of `m` is followed by
+/// the load of `n`, and not by the `cmp`, and the load of `n` goes to rdx, where `m` is: it is left out as well, and
+/// writes no register. The `add`s at the end load each once, for the sums between take rsi and rdx.
+#[test]
+fn an_instruction_reads_two_spilled_variables_in_the_registers_that_hold_them() -> Result<(), String> {
+    let src = "unsafe extern \"sysv64\" fn k(p: *mut u64, n: u64, m: u64) {
+        let g: [gpr; 13];
+        mov(g[0], [p]);
+        cmp(n, m);
+        jb(skip);
+        add(g[0], 1);
+        label(skip);
+        for k in 1..13 { mov(g[k], [p + 8 * k]); }
+        for k in 1..13 { add(g[0], g[k]); }
+        add(g[0], n);
+        add(g[0], m);
+        mov([p], g[0]);
+    }";
+    let text = kernite::x86_str(src, "k")?.text();
+    let parts = [
+        "    # n spilled
+    mov qword ptr [rsp - 8], rsi
+    # m spilled
+    mov qword ptr [rsp - 16], rdx
+    mov rax, qword ptr [rdi]
+    cmp rsi, rdx
+    jb 2f
+",
+        "    # n reloaded
+    mov rcx, qword ptr [rsp - 8]
+    add rax, rcx
+    # m reloaded
+    mov rcx, qword ptr [rsp - 16]
+    add rax, rcx
+    mov qword ptr [rdi], rax
+",
+    ];
+    for part in parts {
+        assert!(text.contains(part), "{part}\nin\n{text}");
+    }
+    assert_eq!(text.matches("reloaded").count(), 2, "{text}");
+    Ok(())
 }
 
 /// The kernel `k` around `body`, compiled, or the error.
@@ -2419,12 +2886,12 @@ fn only_a_frame_aligned_past_16_keeps_the_stack_pointer_in_rbp() {
 }
 
 /// An `add` takes 2^31 - 1 at most, and the stack pointer may move by 2^31 bytes: a frame of 2^31 bytes and the 8 more
-/// that align it to 16 keeps 8 bytes below the stack pointer, and the kernel takes the rest down by two. Seventeen xmm
+/// that align it to 16 keeps 8 bytes below the stack pointer, and the kernel takes the rest down by two. Eighteen xmm
 /// alive at once spill two, 16 bytes each, after stack memory of 2^31 - 32 bytes.
 #[test]
 fn a_frame_of_2_to_the_31_bytes_is_taken_down_by_two_adds() {
-    let loads: String = (0..17).map(|i| format!("let v{i}: xmm;\nvmovups(v{i}, [x + {}]);\n", 16 * i)).collect();
-    let sums: String = (1..17).map(|i| format!("vaddps(v0, v0, v{i});\n")).collect();
+    let loads: String = (0..18).map(|i| format!("let v{i}: xmm;\nvmovups(v{i}, [x + {}]);\n", 16 * i)).collect();
+    let sums: String = (1..18).map(|i| format!("vaddps(v0, v0, v{i});\n")).collect();
     let src = format!(
         "unsafe extern \"sysv64\" fn k(x: *mut f32) {{\nlet big: local<[u8; 2147483616], 16>;\n{loads}{sums}\
          vmovups([big], v0);\n}}\n"
@@ -2466,14 +2933,14 @@ fn a_frame_of_more_than_a_page_is_touched_a_page_at_a_time() {
 }
 
 /// A frame of more than 2^31 bytes, its stack memory and the variables that spilled, is more than
-/// an address reaches past the stack pointer, and the kernel is refused at its name. Seventeen
+/// an address reaches past the stack pointer, and the kernel is refused at its name. Eighteen
 /// vectors alive at once spill two, after stack memory of `N` bytes. A frame of 2^31 bytes
 /// compiles, its last spill at the furthest an address reaches and its loop's end at the furthest
 /// down; a byte more of stack memory makes it 32 bytes more, as a spill is aligned to 32.
 #[test]
 fn a_frame_past_what_an_address_reaches_is_refused() {
-    let loads: String = (0..17).map(|i| format!("let v{i}: ymm;\nvmovups(v{i}, [x + {}]);\n", 32 * i)).collect();
-    let sums: String = (1..17).map(|i| format!("vaddps(v0, v0, v{i});\n")).collect();
+    let loads: String = (0..18).map(|i| format!("let v{i}: ymm;\nvmovups(v{i}, [x + {}]);\n", 32 * i)).collect();
+    let sums: String = (1..18).map(|i| format!("vaddps(v0, v0, v{i});\n")).collect();
     let src = format!(
         "#[instances(2147483584, 2147483585)]\nunsafe extern \"sysv64\" fn k<const N: usize>(x: *mut f32) {{\n\
          let big: local<[u8; N], 32>;\n{loads}{sums}vmovups([big], v0);\n}}\n"
@@ -4430,7 +4897,7 @@ fn vzeroupper_goes_where_a_way_to_it_may_have_set_an_upper_half() {
             "let (v, r): (ymm, gpr); call(fp, ()); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); add(a, b); \
              add(a, c); add(a, d); add(b, c); add(b, d); add(c, d); add(a, b); call(r, fp, (a)); ret(r);",
             "push rbx\npush r12\npush r13\npush r14\npush r15\nsub rsp, 16\nmov qword ptr [rsp], r9\nmov rbx, r8\n\
-             mov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\nmov rax, qword ptr [rsp]\ncall rax\n\
+             mov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\ncall r9\n\
              vmovups ymm0, ymmword ptr [r15]\nvaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [r15], ymm0\n\
              add r14, r13\nadd r14, r12\nadd r14, rbx\nadd r13, r12\nadd r13, rbx\nadd r12, rbx\nadd r14, r13\n\
              mov rdi, r14\nmov rax, qword ptr [rsp]\nadd rsp, 16\npop r15\npop r14\npop r13\npop r12\npop rbx\n\
@@ -4443,10 +4910,21 @@ fn vzeroupper_goes_where_a_way_to_it_may_have_set_an_upper_half() {
              add(a, c); add(a, d); add(b, c); add(b, d); add(c, d); add(a, p); call(r, fp, (a)); ret(r);",
             "push rbx\npush r12\npush r13\npush r14\npush r15\nsub rsp, 16\nmov qword ptr [rsp], r9\nmov rbx, r8\n\
              mov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\nvmovups ymm0, ymmword ptr [r15]\n\
-             vaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [r15], ymm0\nmov rax, qword ptr [rsp]\nvzeroupper\n\
-             call rax\nadd r14, r13\nadd r14, r12\nadd r14, rbx\nadd r13, r12\nadd r13, rbx\nadd r12, rbx\nadd r14, \
+             vaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [r15], ymm0\nvzeroupper\n\
+             call r9\nadd r14, r13\nadd r14, r12\nadd r14, rbx\nadd r13, r12\nadd r13, rbx\nadd r12, rbx\nadd r14, \
              r15\nmov rdi, r14\nmov rax, qword ptr [rsp]\nadd rsp, 16\npop r15\npop r14\npop r13\npop r12\npop rbx\n\
              jmp rax",
+        ),
+        (
+            "p: *mut f32, a: u64, b: u64, c: u64, d: u64, fp: u64",
+            " -> u64",
+            "let v: ymm; call(fp, ()); vmovups(v, [p]); vaddps(v, v, v); vmovups([p], v); add(a, b); add(a, c); \
+             add(a, d); add(b, c); add(b, d); add(c, d); call(fp, ()); add(a, p); ret(a);",
+            "push rbx\npush r12\npush r13\npush r14\npush r15\nsub rsp, 16\nmov qword ptr [rsp], r9\nmov rbx, r8\n\
+             mov r12, rcx\nmov r13, rdx\nmov r14, rsi\nmov r15, rdi\ncall r9\nvmovups ymm0, ymmword ptr [r15]\n\
+             vaddps ymm0, ymm0, ymm0\nvmovups ymmword ptr [r15], ymm0\nadd r14, r13\nadd r14, r12\nadd r14, rbx\n\
+             add r13, r12\nadd r13, rbx\nadd r12, rbx\nmov rax, qword ptr [rsp]\nvzeroupper\ncall rax\nadd r14, r15\n\
+             mov rax, r14\nadd rsp, 16\npop r15\npop r14\npop r13\npop r12\npop rbx\nret",
         ),
     ];
     for (params, ret, body, want) in cases {

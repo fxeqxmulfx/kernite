@@ -259,12 +259,12 @@ fn the_port_sees_each_function_by_its_abi_and_its_types() {
 }
 
 /// A frame of more than 2^31 bytes, past what an address reaches, is the kernel's to blame and
-/// not a variable's: the port says why, and names no variable. Seventeen vectors alive at once
+/// not a variable's: the port says why, and names no variable. Eighteen vectors alive at once
 /// spill two, after stack memory of 2^31 - 63 bytes.
 #[test]
 fn a_frame_past_what_an_address_reaches_blames_no_variable() {
-    let loads: String = (0..17).map(|i| format!("let v{i}: ymm;\nvmovups(v{i}, [x + {}]);\n", 32 * i)).collect();
-    let sums: String = (1..17).map(|i| format!("vaddps(v0, v0, v{i});\n")).collect();
+    let loads: String = (0..18).map(|i| format!("let v{i}: ymm;\nvmovups(v{i}, [x + {}]);\n", 32 * i)).collect();
+    let sums: String = (1..18).map(|i| format!("vaddps(v0, v0, v{i});\n")).collect();
     let src = format!(
         "unsafe extern \"sysv64\" fn k(x: *mut f32) {{\nlet big: local<[u8; 2147483585], 32>;\n{loads}{sums}\
          vmovups([big], v0);\n}}"

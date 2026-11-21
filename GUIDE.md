@@ -368,12 +368,13 @@ call or the frame needs the stack pointer at a multiple of 16, and `add rsp` tak
 keeps the caller's stack pointer in `rbp`: the kernel aligns the stack pointer with `and rsp`, and takes the frame down
 by `mov rsp, rbp`.
 
-When the variables alive together do not fit in the registers, kernite spills one to a slot of the frame: it stores it
-after each instruction that writes it and loads it before each one that reads it. It spills, of the variable left
-without a register and those holding the ones it could have, the one whose loads and stores are fewest for how long
-it is alive, one in a loop counting ten times one outside, and spills again until all fit. The listing names each
-spill, in its header and at each load and store. Sixteen accumulators of `dot` and the load beside them take 17 of the
-16 vector registers, and two spill:
+When the variables alive together do not fit in the registers, kernite spills one to a slot of the frame. It stores it
+after an instruction that writes it only where a load of it follows before it is stored again, and loads it before an
+instruction that reads it only where no register holds it. It spills, of the variable left without a register and those
+holding the ones it could have, the one whose loads and stores are fewest for how long it is alive, one in a loop
+counting ten times one outside, and spills again until all fit. The listing names each spill that keeps a slot, in its
+header and at each load and store. Sixteen accumulators of `dot` and the load beside them take 17 of the 16 vector
+registers, and two spill:
 
 ```
 # dot::<16>(gpr, gpr, gpr) -> vec
@@ -389,6 +390,15 @@ spill, in its header and at each load and store. Sixteen accumulators of `dot` a
     # acc15 spilled
     vmovups ymmword ptr [rsp], ymm15
 ```
+
+A store of a spilled variable leaves it in the register it stores from, and a load of it in the register it loads to,
+and the kernel reads it there, with no load, until an instruction writes that register, a call changes what it holds of
+the variable, or the variable is stored again from another register. A call changes the registers its callee writes, and
+the upper half of each vector register if the callee runs `vzeroupper`, which holds no part of an xmm or a float. An
+instruction that reads the variable and writes it too takes a `mov` from the register that holds it, and not a load.
+Where two ways meet, at a label, a register holds the variable only if each way brings it there. A store is left out if
+no way from it comes to a load of the variable before another store of it, and so is a slot that no move uses. After its
+loop, `dot::<16>` reads `acc15` in `ymm15`, where the last turn left it, and does not load it.
 
 A spill moves a register with `mov` or `vmovups`, which leave the flags as they were, so it may go between a
 comparison and its jump. Only when no spill makes room, as when one instruction names more variables than there are

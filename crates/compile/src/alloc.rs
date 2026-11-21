@@ -2,8 +2,8 @@ use kernite_core::{Clobber, Flow, Inst, Item, PReg, Program, VReg, Width};
 
 use crate::Error;
 use crate::bits::Bits;
-use crate::cfg::{Block, forward};
-use crate::live::{Live, analyse, before, copied, first_mentions, interference, touched, upper_live, upper_touched};
+use crate::cfg::forward;
+use crate::live::{analyse, before, copied, first_mentions, interference, touched, upper_live, upper_touched};
 use crate::spill;
 use crate::{Machine, Spill};
 
@@ -35,6 +35,10 @@ use crate::{Machine, Spill};
 /// none that splitting or spilling made, nor a call's argument or result. No choice depends on
 /// anything but the program, so the same program always gets the same registers and the same
 /// spills.
+///
+/// Once every variable has a register, [`spill::tidy`] leaves out the moves of a spilled variable that are not needed:
+/// a load where a register holds it, a store that no load follows before another store of it, and a slot that no move
+/// uses.
 pub(crate) fn allocate<Op: Clone + PartialEq>(
     p: &Program<Op>,
     m: &dyn Machine,
@@ -65,8 +69,9 @@ pub(crate) fn allocate<Op: Clone + PartialEq>(
         };
         let prefer = preferences(&p, &kept, s, &short);
         let (v, held) = match colour(&p, m, &adj, &changed, &prefer, regs) {
-            Ok(regs) => {
-                leave_out(&mut p, &blocks, &live, &upper, &regs, &kept, s)?;
+            Ok(mut regs) => {
+                spill::tidy(&mut p, &mut regs, s)?;
+                leave_out(&mut p, &regs, s)?;
                 return Ok((p, regs));
             }
             Err(short) => short,
@@ -178,7 +183,7 @@ fn split<Op>(p: &mut Program<Op>, v: usize, s: &dyn Spill<Op>) -> usize {
                 match item {
                     Item::Inst(inst) if inst.flow == Flow::Return && inst.reads().any(|r| r == var) => {
                         p.body.push(Item::Inst(s.copy(made, var, width)));
-                        p.body.push(Item::Inst(spill::renamed(inst, var, made)));
+                        p.body.push(Item::Inst(spill::renamed(inst, |r| if r == var { made } else { r })));
                     }
                     item => p.body.push(item),
                 }
@@ -271,19 +276,14 @@ enum Fate<Op> {
 /// there, and no instruction has written it or the register `from` takes since, nor a call changed one. What each
 /// register holds is followed over the flow to a fixed point, by [`forward`]: where ways meet, at a label, a register
 /// holds a value if each way brings it in that register, and as much of it as the least of them. A copy changes nothing
-/// then only where it moves all of the register, or no instruction after it reads all of `to` before one writes it, as
-/// `upper` says, for a copy of less clears the rest. A copy that stays reads the register that held the value first, so
-/// that copies of one value in a row do not wait for each other, where an instruction after it reads `from`, as `live`
-/// says: else the copy that wrote `from` would move what nothing reads.
-fn leave_out<Op: PartialEq>(
-    p: &mut Program<Op>,
-    blocks: &[Block],
-    live: &Live,
-    upper: &Live,
-    regs: &[Option<PReg>],
-    kept: &[Width],
-    s: &dyn Spill<Op>,
-) -> Result<(), Error> {
+/// then only where it moves all of the register, or no instruction after it reads all of `to` before one writes it,
+/// which the liveness of the upper halves says, for a copy of less clears the rest. A copy that stays reads the
+/// register that held the value first, so that copies of one value in a row do not wait for each other, where an
+/// instruction after it reads `from`, which liveness says: else the copy that wrote `from` would move what nothing
+/// reads.
+fn leave_out<Op: PartialEq>(p: &mut Program<Op>, regs: &[Option<PReg>], s: &dyn Spill<Op>) -> Result<(), Error> {
+    let (blocks, live) = analyse(p)?;
+    let (upper, kept) = (upper_live(p, &blocks, s), spill::kept(p, s));
     let reg = |v: VReg| regs[v.id as usize].expect("a variable the body names has a register");
     // For each copy, whether an instruction after it reads `from`, and whether one reads all of `to` before one writes
     // it.
@@ -292,7 +292,7 @@ fn leave_out<Op: PartialEq>(
         let (mut now, mut high) = (live.outs[b].clone(), upper.outs[b].clone());
         for i in block.items.clone().rev() {
             let Item::Inst(inst) = &p.body[i] else { continue };
-            if let Some((to, from, _)) = copied(p, inst, kept, s) {
+            if let Some((to, from, _)) = copied(p, inst, &kept, s) {
                 after[i] = (now.contains(from.id as usize), high.contains(to.id as usize));
             }
             let (reads, writes) = touched(inst);
@@ -306,7 +306,7 @@ fn leave_out<Op: PartialEq>(
         .map(|(j, &(v, r))| (r, Held { value: Value::Param(j), bits: s.width(v.class), by: v }))
         .collect();
     let step = |i: usize, inst: &Inst<Op, VReg>, held: &mut Holds| {
-        let Some((to, from, width)) = copied(p, inst, kept, s) else {
+        let Some((to, from, width)) = copied(p, inst, &kept, s) else {
             for &(Clobber::All(r) | Clobber::Upper(r)) in &inst.clobbers {
                 held.retain(|(at, _)| *at != r);
             }

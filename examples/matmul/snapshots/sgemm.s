@@ -10,7 +10,7 @@
 # k, spilled: 8 bytes at rsp + 196648
 # shape, spilled: 8 bytes at rsp + 196656
 # counters, spilled: 8 bytes at rsp + 196664
-# c=rdi,r11 a=rsi b=rdx shape=rcx,rax,rdx,rdi,rsi,r8,r9,r10 packed=r8,r9,r11 n=rax,rbx
+# c=rdi,r11 a=rsi b=rdx shape=rcx,rdx,rdi,r8,r9,r10 packed=r8,r9,r11 n=rax,rbx
 # ld=rax pc=rcx kc=rdx most=rsi,r8,r13,r15 part=rsi sliver=r8
 # row=rsi mine=rdi lda=r9 q=r8,r11 p=rsi,r12,r13 left=rdi,rbx
 # s=r10,ymm14 s3=r11 l=rbx,r13 f=r12 r=r10 at=r8
@@ -44,16 +44,10 @@
     mov qword ptr [rsp + 196640], r8
     # c spilled
     mov qword ptr [rsp + 196616], rdi
-    # shape reloaded
-    mov rax, qword ptr [rsp + 196656]
-    mov rax, qword ptr [rax]
+    mov rax, qword ptr [rcx]
     # m spilled
     mov qword ptr [rsp + 196608], rax
-    # shape reloaded
-    mov rax, qword ptr [rsp + 196656]
-    mov rax, qword ptr [rax + 8]
-    # shape reloaded
-    mov rcx, qword ptr [rsp + 196656]
+    mov rax, qword ptr [rcx + 8]
     mov rcx, qword ptr [rcx + 16]
     # k spilled
     mov qword ptr [rsp + 196648], rcx
@@ -178,9 +172,7 @@
     lock inc qword ptr [rsi + 64]
     jmp 4b
 15:
-    # shape reloaded
-    mov rsi, qword ptr [rsp + 196656]
-    mov rsi, qword ptr [rsi + 24]
+    mov rsi, qword ptr [rdi + 24]
 16:
     # counters reloaded
     mov rdi, qword ptr [rsp + 196664]
@@ -200,8 +192,6 @@
     cmp rsi, qword ptr [rdi + 32]
     jae 33f
     shl rsi, 5
-    # shape reloaded
-    mov rdi, qword ptr [rsp + 196656]
     mov rdi, qword ptr [rdi + rsi*1 + 48]
     # shape reloaded
     mov r8, qword ptr [rsp + 196656]
@@ -532,9 +522,7 @@
     lock inc qword ptr [rsi + 192]
     jmp 18b
 33:
-    # shape reloaded
-    mov rdx, qword ptr [rsp + 196656]
-    mov rsi, qword ptr [rdx + 32]
+    mov rsi, qword ptr [rdi + 32]
 34:
     # counters reloaded
     mov rdx, qword ptr [rsp + 196664]
