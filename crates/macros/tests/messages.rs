@@ -1856,11 +1856,11 @@ fn a_refused_x86_kernel_of_instances_that_cfg_leaves_out_says_nothing_for_anothe
     );
 }
 
-/// A module of GPU kernels needs `kernite-cuda` where `cfg` keeps one of its GPU items, and not
-/// where it leaves out all: a feature that brings the crate, `cuda = ["dep:kernite-cuda"]`, can keep
-/// them, and the crate builds without the feature, without a word, under `deny(warnings)`, and with
-/// it. A kernel, a function that kernels call and a static each make a module of their own, under
-/// `cfg` and under `cfg_attr(.., cfg(..))`.
+/// A module of GPU kernels needs `kernite-cuda` where `cfg` keeps one of its GPU items, and not where it leaves out
+/// all: a feature that brings the crate, `cuda = ["dep:kernite-cuda"]`, can keep them, and the crate builds without the
+/// feature, without a word, under `deny(warnings)`, and with it. A kernel, a function that kernels call, a static and a
+/// static whose data meets its `expect(deprecated)` each make a module of their own, under `cfg` and under
+/// `cfg_attr(.., cfg(..))`.
 #[test]
 fn a_feature_that_brings_kernite_cuda_can_keep_the_gpu_items() {
     let optional = [("kernite-cuda = {", "kernite-cuda = { optional = true,")];
@@ -5082,6 +5082,101 @@ fn a_kernel_rust_does_not_get_the_code_of_is_told_of_at_each_place_it_names_a_de
                  signatures for return types: not allowed in type signatures",
             "error: could not compile `levels_stubs` (lib) due to 4 previous errors; 8 warnings emitted",
         ],
+    );
+}
+
+/// A static that allows a lint is told of nothing, by Rust, at any place its type or its data names a deprecated item,
+/// though the crate denies the lint: on x86, a static in reach of `rip` and one far from it, and on the GPU, one in
+/// constant memory and one in global memory. So it is of a static whose `allow` is in a `cfg_attr(..)`.
+#[test]
+fn a_static_that_allows_a_lint_is_told_of_nothing_at_any_place_it_names_a_deprecated_item() {
+    builds_quietly("levels_statics_allowed");
+}
+
+/// A static that raises a lint, by `warn`, `deny` or `forbid`, is told of at each place its type or its data names a
+/// deprecated item, as a warning or an error though the crate allows the lint: on x86, a static in reach of `rip` and
+/// one far from it, and on the GPU, one in constant memory and one in global memory. `CRATE` sets no level, and Rust
+/// says nothing of it.
+#[test]
+fn a_static_that_raises_a_lint_is_told_of_at_each_place_it_names_a_deprecated_item_at_that_level() {
+    refuses(
+        "levels_statics_raised",
+        &[
+            "src/lib.rs:20:35: warning: use of deprecated constant `cpu::N`",
+            "src/lib.rs:20:42: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:20:45: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:23:36: error: use of deprecated constant `cpu::N`",
+            "src/lib.rs:23:43: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:23:46: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:26:37: error: use of deprecated constant `cpu::N`",
+            "src/lib.rs:26:44: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:26:47: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:32:34: error: use of deprecated constant `cpu::FAR`",
+            "src/lib.rs:51:38: warning: use of deprecated constant `gpu::N`",
+            "src/lib.rs:51:45: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:51:48: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:54:37: error: use of deprecated constant `gpu::N`",
+            "src/lib.rs:54:44: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:54:47: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:57:40: error: use of deprecated constant `gpu::N`",
+            "src/lib.rs:57:47: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:57:50: error: use of deprecated constant `gpu::K`",
+            "error: could not compile `levels_statics_raised` (lib) due to 13 previous errors; 6 warnings emitted",
+        ],
+    );
+}
+
+/// A static that lowers a lint, by `warn`, or expects it, is told of at each place its type or its data names a
+/// deprecated item, where the crate denies the lint: `WARNS` as a warning at each place, and `IN_DATA`, `IN_TYPE` and
+/// the far `LONG` nothing, as each meets its expectation, on x86 and on the GPU. Of `UNMET`, whose type and data name
+/// no deprecated item, Rust says that its expectation is unfulfilled, once, at the attribute, and of `GONE`, which
+/// `cfg` leaves out, nothing. `CRATE` sets no level, and each place of it is an error.
+#[test]
+fn a_static_that_lowers_a_lint_or_expects_it_is_told_of_at_each_place_it_names_a_deprecated_item_at_that_level() {
+    refuses(
+        "levels_statics_lowered",
+        &[
+            "src/lib.rs:25:35: warning: use of deprecated constant `cpu::N`",
+            "src/lib.rs:25:42: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:25:45: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:40:35: error: use of deprecated constant `cpu::N`",
+            "src/lib.rs:40:42: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:40:45: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:80:38: error: use of deprecated constant `gpu::N`",
+            "src/lib.rs:80:45: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:80:48: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:65:38: warning: use of deprecated constant `gpu::N`",
+            "src/lib.rs:65:45: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:65:48: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:33:14: warning: this lint expectation is unfulfilled",
+            "src/lib.rs:73:14: warning: this lint expectation is unfulfilled",
+            "error: could not compile `levels_statics_lowered` (lib) due to 6 previous errors; 8 warnings emitted",
+        ],
+    );
+}
+
+/// A static in a crate that lacks the crate it needs, `kernite-cpu` for a static of x86 kernels and `kernite-cuda` for
+/// one in the GPU's memory, is told of at the level it sets, at each place its data names a deprecated item, as it is
+/// in a crate that has the crate: each `WARNS` is two warnings, though the crate allows the lint, beside kernite's
+/// error, which says that the crate needs `kernite-cpu`, at the static, or `kernite-cuda`, at the module.
+#[test]
+fn a_static_in_a_crate_without_the_crate_it_needs_is_told_of_at_each_place_it_names_a_deprecated_item_at_its_level() {
+    let edits = [("kernite-cpu =", "# kernite-cpu ="), ("kernite-cuda =", "# kernite-cuda =")];
+    let (built, said) = cargo_in(&["build"], &edited("levels_statics_missing", &edits));
+    assert!(!built, "fixtures/levels_statics_missing.rs built");
+    assert_eq!(
+        said,
+        [
+            "src/lib.rs:12:16: error: a static of x86 kernels needs a dependency named `kernite-cpu`, \
+             which this crate does not have",
+            "src/lib.rs:21:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
+             which this crate does not have",
+            "src/lib.rs:12:42: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:12:45: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:27:45: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:27:48: warning: use of deprecated constant `gpu::K`",
+            "error: could not compile `levels_statics_missing` (lib) due to 2 previous errors; 4 warnings emitted",
+        ]
     );
 }
 

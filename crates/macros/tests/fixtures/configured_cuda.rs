@@ -1,8 +1,8 @@
-//! Modules of GPU kernels whose GPU items are all under the feature `cuda`, which brings
-//! `kernite-cuda`: built without it, the crate has no `kernite-cuda`, and builds without a word,
-//! under `deny(warnings)`, as it does a crate that never had the modules; built with it, the
-//! modules are there. Each module has one GPU item, a kernel, a function that kernels call or a
-//! static, under `cfg` and under `cfg_attr(.., cfg(..))`.
+//! Modules of GPU kernels whose GPU items are all under the feature `cuda`, which brings `kernite-cuda`: built without
+//! it, the crate has no `kernite-cuda`, and builds without a word, under `deny(warnings)`, as it does a crate that
+//! never had the modules; built with it, the modules are there. Each module has one GPU item, a kernel, a function that
+//! kernels call, a static, or a static whose data meets its `expect(deprecated)`, under `cfg` and under
+//! `cfg_attr(.., cfg(..))`.
 
 #![deny(warnings)]
 
@@ -60,6 +60,28 @@ pub mod static_by_attr {
     pub static COUNTS: global<[u32; 4]>;
 }
 
+/// A static whose data meets its `expect(deprecated)`, under `cfg`.
+#[kernite_macros::kernels]
+pub mod expecting_by_cfg {
+    #[deprecated]
+    pub const K: u32 = 5;
+
+    #[cfg(feature = "cuda")]
+    #[expect(deprecated)]
+    pub static COUNTS: global<[u32; 2]> = [K, K];
+}
+
+/// A static whose data meets its `expect(deprecated)`, under a `cfg_attr(..)`.
+#[kernite_macros::kernels]
+pub mod expecting_by_attr {
+    #[deprecated]
+    pub const K: u32 = 5;
+
+    #[cfg_attr(not(feature = "cuda"), cfg(any()))]
+    #[expect(deprecated)]
+    pub static COUNTS: global<[u32; 2]> = [K, K];
+}
+
 /// With the feature, each module's kernels load on a GPU, and each module is PTX.
 #[cfg(feature = "cuda")]
 pub fn load(cuda: &kernite_cuda::Cuda) -> Result<usize, kernite_cuda::Error> {
@@ -69,5 +91,7 @@ pub fn load(cuda: &kernite_cuda::Cuda) -> Result<usize, kernite_cuda::Error> {
     func_by_attr::Kernels::load(cuda)?;
     static_by_cfg::Kernels::load(cuda)?;
     static_by_attr::Kernels::load(cuda)?;
+    expecting_by_cfg::Kernels::load(cuda)?;
+    expecting_by_attr::Kernels::load(cuda)?;
     Ok(kernel_by_cfg::PTX.len())
 }

@@ -297,23 +297,25 @@ fn list(names: &[String]) -> String {
     }
 }
 
-/// Static `s` of a module of x86 kernels as Rust has it, as written but for its type and what it
-/// holds: `made`, a `kernite_cpu::Global` of its elements at the multiple its type says, holding
-/// what it says or zeros; for a static that did not compile, beside its error, `made` is the
-/// static as its type has it, holding zeros, if only what it holds is wrong; if not, `None`, and a
-/// `kernite_cpu::Stub` stands for it, which leaves the type of its elements to the code that uses
-/// it. In a crate without `kernite-cpu`, its type is [`missing`]'s, with the error that says so after it, under `cfg`,
-/// the static's own. A far static, past `rip`'s reach, is a reference to memory that [`linked`] defines past the code
-/// and data in reach of `rip`, and a static of an `extern` block declares: Rust would lay a static of its own out among
-/// them, and make it in time and memory that grow with its size. The kernels load the address from the reference. A
-/// crate of the `dylib` kind exports the reference, as it exports only the symbols that Rust defines, which the memory
-/// is not. What each static holds, a far one's reference and a stub too, is in a block with a `global_asm!` that makes
-/// its symbol protected: [`initializer`] says why. On a system that is not Linux, it is an error at its name.
+/// Static `s` of a module of x86 kernels as Rust has it, as written but for its type and what it holds: `made`, a
+/// `kernite_cpu::Global` of its elements at the multiple its type says, holding what it says or zeros; for a static
+/// that did not compile, beside its error, `made` is the static as its type has it, holding zeros, if only what it
+/// holds is wrong; if not, `None`, and a `kernite_cpu::Stub` stands for it, which leaves the type of its elements to
+/// the code that uses it. In a crate without `kernite-cpu`, its type is [`missing`]'s, with the error that says so
+/// after it, under `cfg`, the static's own. A far static, past `rip`'s reach, is a reference to memory that [`linked`]
+/// defines past the code and data in reach of `rip`, and a static of an `extern` block declares: Rust would lay a
+/// static of its own out among them, and make it in time and memory that grow with its size. The kernels load the
+/// address from the reference. A crate of the `dylib` kind exports the reference, as it exports only the symbols that
+/// Rust defines, which the memory is not. What each static holds, a far one's reference and a stub too, is in a block
+/// with a `global_asm!` that makes its symbol protected: [`initializer`] says why. On a system that is not Linux, it is
+/// an error at its name. In each case what it holds comes after the `places` of the static, those of its type and of
+/// what it holds that name an item: [`assigned`] says why.
 pub(crate) fn cpu_static(
     s: &lang::Static,
     made: Option<&HostStatic>,
     cfg: &TokenStream,
     top: &[TokenTree],
+    places: TokenStream,
 ) -> TokenStream {
     // Its name as written, after `static`.
     let name = &top[s.vis.end + 1];
@@ -326,7 +328,7 @@ pub(crate) fn cpu_static(
         let (ty, error) = missing(cfg, name.span(), "a static of x86 kernels", CPU);
         out.extend(parse(":"));
         out.extend(ty);
-        out.extend(parse("= [];"));
+        out.extend(assigned(places, "[]"));
         out.extend(error);
         return out;
     }
@@ -335,7 +337,7 @@ pub(crate) fn cpu_static(
         let sym = symbol(name);
         let memory = format!("__kernite_{sym}");
         out.extend(parse(&format!(": &{}", global(m))));
-        out.extend(initializer(name, &format!("&{memory}")));
+        out.extend(initializer(name, &format!("&{memory}"), places));
         let under = |attr: &str| cfg.clone().into_iter().chain(parse(attr)).collect::<TokenStream>();
         let mut declared = under(r#"#[cfg(target_os = "linux")]"#);
         declared.extend(linked(&sym, m));
@@ -363,24 +365,36 @@ pub(crate) fn cpu_static(
         None => ("::kernite_cpu::Stub".to_string(), "::kernite_cpu::Stub".to_string()),
     };
     out.extend(parse(&format!(": {ty}")));
-    out.extend(initializer(name, &value));
+    out.extend(initializer(name, &value, places));
     out
 }
 
-/// What the static `name` holds, `value`, in a block with a `global_asm!` that makes the symbol of the static
-/// protected, on Linux. A symbol that a crate of the `dylib` kind exports is default, which a program may replace, so
-/// the linker refuses a kernel's displacement from `rip` to it:
+/// What the static `name` holds, `value`, after its `places`, in a block with a `global_asm!` that makes the symbol of
+/// the static protected, on Linux. A symbol that a crate of the `dylib` kind exports is default, which a program may
+/// replace, so the linker refuses a kernel's displacement from `rip` to it:
 /// `relocation R_X86_64_PC32 cannot be used against symbol`. A protected symbol is exported as well, and the crate's
 /// own kernels bind to the crate's own. The `global_asm!` names the static, which may be deprecated. Rust tells of no
 /// use of a deprecated item inside the item itself, so the `global_asm!` is in the static's own initializer, and no
 /// `allow` is written, which a crate that forbids `deprecated` would refuse. It ends the static, at its name: see
 /// [`ending_at`].
-fn initializer(name: &TokenTree, value: &str) -> TokenStream {
+fn initializer(name: &TokenTree, value: &str, places: TokenStream) -> TokenStream {
     let text = format!(
-        "= {{ #[cfg(target_os = \"linux\")] mod __kernite_protected {{ \
-         ::core::arch::global_asm!(\".protected {{}}\", sym super::{name}); }} {value} }};"
+        "#[cfg(target_os = \"linux\")] mod __kernite_protected {{ \
+         ::core::arch::global_asm!(\".protected {{}}\", sym super::{name}); }} {value}"
     );
-    ending_at(parse(&text), name.span())
+    ending_at(assigned(places, &text), name.span())
+}
+
+/// `= { .. };`, what a static holds: the `places` of the static, in an item of no name, and then `value`. The block is
+/// in the static, so Rust tells of each place at the level the static sets, as it does in a static of its own, and an
+/// `expect` of the static is met by a place of it.
+fn assigned(places: TokenStream, value: &str) -> TokenStream {
+    let mut block = unnamed(places);
+    block.extend(parse(value));
+    let mut out = parse("=");
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, block))]);
+    out.extend(parse(";"));
+    out
 }
 
 /// The name of a static as the linker has it after the path of its module, which `module_path!` gives, for the statics

@@ -456,6 +456,16 @@ incompatible with `#[unsafe(naked)]`". A kernel of instances, or a cooperative o
 each instance allows the lint instead: where the crate forbids the lint, Rust says at the attribute that neither the
 `expect` nor the `allow` can overrule the `forbid`.
 
+The level of a lint that a static sets holds at each place its type or its data names an item, as in a static of Rust's:
+a static of x86 kernels, in reach of `rip` or far from it, and a static in the GPU's memory. `#[allow(deprecated)]` on
+`static S: global<[u8; N]> = [K, K];`, with `N` and `K` deprecated consts of the module, has Rust say nothing of any of
+the three places, though the crate denies the lint. `warn`, `deny` and `forbid` make each a warning or an error, though
+the crate allows the lint or denies it; and `expect` is met by each: Rust says nothing of them, and of a static whose
+type and data name no deprecated item, that the expectation is unfulfilled, once, at the attribute. A static that sets
+no level is told of at the module's level. A static in a crate without the crate it needs, `kernite-cpu` for one of x86
+kernels and `kernite-cuda` for one in the GPU's memory, has its places at its level too, beside the error that says the
+crate needs it.
+
 A module holds what `cfg` keeps: Rust puts it together, where it knows which `cfg` holds. `LISTINGS` has the listing
 of each x86 kernel that compiles and `cfg` keeps, and of no other. A module of x86 kernels has it whether its kernels
 compile or not, so Rust says nothing of the code that names it, and it is empty where none compiles. A module of GPU

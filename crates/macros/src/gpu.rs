@@ -8,9 +8,9 @@ use kernite::{Compiled, DeviceStatic, Failed, Launcher};
 
 use crate::cond::Cond;
 use crate::rust::{
-    self, asks, attrs, body_at, carried, clashes, depends_on, ending_at, error_under, half, host, hygienic,
-    launcher_result, missing, name_at, never, number_type, parse, pick, pointer, primitive, ptr_type, quiet, refused,
-    site, unnamed, visibility, written_params,
+    self, LEVELS, asks, attrs, body_at, carried, clashes, depends_on, ending_at, error_under, half, host, hygienic,
+    launcher_result, levels, missing, name_at, never, number_type, parse, pick, pointer, primitive, ptr_type, quiet,
+    refused, site, unnamed, visibility, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -47,11 +47,13 @@ pub(crate) type Laid = Result<Compiled<DeviceStatic>, Failed<DeviceStatic>>;
 /// them lets the crate build without the feature.
 ///
 /// Each kernel of `launchers` has its `places`, those of its code that name an item of the module, in the body of its
-/// launcher, where the level the kernel sets holds.
+/// launcher, where the level the kernel sets holds; so has each static of `memory`, those of its type and of what it
+/// holds, in the body of its method. In a crate without `kernite-cuda`, which has no method, a static has its places in
+/// an item of no name with its levels, where its condition holds.
 pub(crate) fn gpu(
     launchers: &[(&Fn, &Launcher, TokenStream)],
     symbols: &[(Cond, &str)],
-    memory: &[(&lang::Static, &Laid, Cond)],
+    memory: &[(&lang::Static, &Laid, TokenStream, Cond)],
     ptx: &[(Cond, &str)],
     top: &[TokenTree],
     at: &dyn std::ops::Fn(lang::Span) -> Span,
@@ -67,11 +69,22 @@ pub(crate) fn gpu(
         out.extend(kernels);
         out.extend(parse(";"));
         out.extend(error);
+        // No method holds the places of a static, so they are in an item of no name with its levels, where its
+        // condition holds.
+        for (s, _, places, cond) in memory {
+            if !places.is_empty()
+                && let Some(guard) = cond.guard()
+            {
+                out.extend(guard);
+                out.extend(levels(top[s.attrs.clone()].iter().cloned(), &LEVELS));
+                out.extend(unnamed(places.clone()));
+            }
+        }
         return out;
     }
     // The module's variables: the statics that compiled, in order.
     let variables: Vec<(&Cond, &DeviceStatic)> =
-        memory.iter().filter_map(|(_, m, c)| m.as_ref().ok().map(|m| (c, &m.code))).collect();
+        memory.iter().filter_map(|(_, m, _, c)| m.as_ref().ok().map(|m| (c, &m.code))).collect();
     let mut out = parse(
         "/// The module's GPU kernels, functions and statics that `cfg` keeps, in PTX, for the CUDA\n\
          /// driver to compile for the GPU it finds. Each is named as C++ names it in the\n\
@@ -138,10 +151,10 @@ pub(crate) fn gpu(
         methods.extend(blocks(f, launched.as_deref().filter(|_| threads.is_empty()), top));
         clashed.extend(threads);
     }
-    for (k, (s, laid, _)) in memory.iter().enumerate() {
+    for (k, (s, laid, places, _)) in memory.iter().enumerate() {
         // Its index among the variables there are, those of the statics that compiled.
-        let i = Cond::count(memory[..k].iter().filter(|(_, m, _)| m.is_ok()).map(|(.., c)| c));
-        methods.extend(accessor(s, laid, i, top));
+        let i = Cond::count(memory[..k].iter().filter(|(_, m, ..)| m.is_ok()).map(|(.., c)| c));
+        methods.extend(accessor(s, laid, i, top, places.clone()));
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, methods))]);
     out.extend(clashed);
@@ -149,13 +162,14 @@ pub(crate) fn gpu(
     out
 }
 
-/// The method that gives static `s`'s memory on the GPU, `laid`, by its index `i` among the
-/// module's variables, an expression, as the `kernite_cuda::Global` of the type of Rust's its
-/// elements are read as; or one that never runs, for a static that did not compile: of the type
-/// its elements are read as, if only what the static holds is wrong, and of any type if not. It has the attributes of
-/// the static that [`taken`](rust::taken) says it takes. It ends at the static's name, for Rust to tell of the method
-/// at the static, as it tells of any item with no doc that a module has: see [`ending_at`].
-fn accessor(s: &lang::Static, laid: &Laid, i: String, top: &[TokenTree]) -> TokenStream {
+/// The method that gives static `s`'s memory on the GPU, `laid`, by its index `i` among the module's variables, an
+/// expression, as the `kernite_cuda::Global` of the type of Rust's its elements are read as; or one that never runs,
+/// for a static that did not compile: of the type its elements are read as, if only what the static holds is wrong, and
+/// of any type if not. It has the attributes of the static that [`taken`](rust::taken) says it takes. Its body has the
+/// `places` of the static's type and of what it holds that name an item, where the level the static sets holds, as in a
+/// static of Rust's, `expect` too. It ends at the static's name, for Rust to tell of the method at the static, as it
+/// tells of any item with no doc that a module has: see [`ending_at`].
+fn accessor(s: &lang::Static, laid: &Laid, i: String, top: &[TokenTree], places: TokenStream) -> TokenStream {
     let mut out = rust::taken(top[s.attrs.clone()].iter().cloned()).0;
     out.extend(top[s.vis.clone()].iter().cloned());
     out.extend(parse("fn"));
@@ -174,7 +188,9 @@ fn accessor(s: &lang::Static, laid: &Laid, i: String, top: &[TokenTree]) -> Toke
         None => "<T: ::kernite_cuda::Plain>(&self) -> ::kernite_cuda::Global<'_, T>".to_string(),
     };
     out.extend(ending_at(parse(&signature), at));
-    out.extend([body_at(parse(&body), at)]);
+    let mut code = unnamed(places);
+    code.extend(parse(&body));
+    out.extend([body_at(code, at)]);
     out
 }
 

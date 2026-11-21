@@ -155,11 +155,15 @@ pub(crate) fn expand(
     let mut carried = vec![TokenStream::new(); helper.len()];
     // Where each of them has a stand-in, as `named` says, in which Rust reads its `deprecated`.
     let mut stood_in = vec![Cond::Never; helper.len()];
-    // Which functions set the level of a lint: only the places of those are written where their level holds.
+    // Which functions and statics set the level of a lint: only their places are written where the level holds.
     let leveled: Vec<bool> = module
         .items
         .iter()
-        .map(|item| matches!(&item.kind, ItemKind::Fn(f) if !levels(attrs(f, &top), &LEVELS).is_empty()))
+        .map(|item| match &item.kind {
+            ItemKind::Fn(f) => !levels(attrs(f, &top), &LEVELS).is_empty(),
+            ItemKind::Static(s) => !levels(top[s.attrs.clone()].iter().cloned(), &LEVELS).is_empty(),
+            _ => false,
+        })
         .collect();
     // Each listing the process's kernels have, by name, under the `cfg` of the kernel it is of, as
     // what `naked` writes for it is.
@@ -176,9 +180,9 @@ pub(crate) fn expand(
         let (names, errors) = named(&made, &conds, i, &top, &place, &firsts, &mut stood_in);
         left_out.extend(errors);
         // Each place is where the code that writes it is, for the level its item sets to hold there, as in Rust: in the
-        // body of the kernel, which `own` has, or in what holds the places of the helper or the GPU function. A place
-        // of an item that sets no level, or of a const or a static, is in a block of the module, where Rust tells of it
-        // at the level of the module.
+        // body of the kernel, or in the static, which `own` has, or in what holds the places of the helper or the GPU
+        // function. A place of an item that sets no level, or of a const, is in a block of the module, where Rust tells
+        // of it at the level of the module.
         let mut own = TokenStream::new();
         for (at, statement) in names {
             if helper[at] && leveled[at] {
@@ -206,13 +210,13 @@ pub(crate) fn expand(
             (ItemKind::Static(s), ItemOut::HostStatic(laid)) => {
                 out.extend(laid.as_ref().err().and_then(|failed| failed.error.as_ref()).map(said));
                 let held = laid.as_ref().map_or_else(|failed| failed.stub.as_ref(), |c| Some(&c.code));
-                out.extend(cpu_static(s, held, cfg, &top));
+                out.extend(cpu_static(s, held, cfg, &top, own));
             }
             (ItemKind::Static(s), ItemOut::DeviceStatic(laid)) => {
                 out.extend(laid.as_ref().err().and_then(|failed| failed.error.as_ref()).map(said));
                 let is = ("memory on the GPU", "a static of GPU kernels");
                 out.extend(refused_attrs(top[s.attrs.clone()].iter().cloned(), &top[s.vis.end + 1], is, cfg));
-                memory.push((s, laid, conds[i].clone()));
+                memory.push((s, laid, own, conds[i].clone()));
                 on_gpu.push(conds[i].clone());
                 if let Ok(laid) = laid {
                     fields.extend(room::room(cfg, i, &laid.code.ty, at(s.ty.span())));
@@ -252,7 +256,7 @@ pub(crate) fn expand(
             _ => unreachable!("kernite::module says what each item is"),
         }
     }
-    let laid = Cond::any(memory.iter().filter(|(_, m, _)| m.is_ok()).map(|(.., c)| c.clone()));
+    let laid = Cond::any(memory.iter().filter(|(_, m, ..)| m.is_ok()).map(|(.., c)| c.clone()));
     out.extend(room::lacking(&laid));
     // The rest of the module, after the room and the names `cfg` leaves out.
     let mut tail = TokenStream::new();
