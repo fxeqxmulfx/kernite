@@ -303,16 +303,25 @@ fn name(r: PReg, width: Width) -> Result<String, String> {
         "al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b",
         "r15b",
     ];
-    let hw = r.hw as usize;
-    match (r.class, width) {
-        (Class::Gpr, Width::W64) => Ok(GPR64[hw].to_string()),
-        (Class::Gpr, Width::W32) => Ok(GPR32[hw].to_string()),
-        (Class::Gpr, Width::W16) => Ok(GPR16[hw].to_string()),
-        (Class::Gpr, Width::W8) => Ok(GPR8[hw].to_string()),
-        (Class::Vec, Width::W128) => Ok(format!("xmm{hw}")),
-        (Class::Vec, Width::W256) => Ok(format!("ymm{hw}")),
-        (class, width) => Err(format!("no {width:?} view of a {class:?} register")),
-    }
+    let hw = usize::from(r.hw);
+    let names = match (r.class, width) {
+        (Class::Gpr, Width::W64) => GPR64,
+        (Class::Gpr, Width::W32) => GPR32,
+        (Class::Gpr, Width::W16) => GPR16,
+        (Class::Gpr, Width::W8) => GPR8,
+        (Class::Vec, Width::W128) => return Ok(format!("xmm{hw}")),
+        (Class::Vec, Width::W256) => return Ok(format!("ymm{hw}")),
+        (class, width) => return Err(format!("no {width:?} view of a {class:?} register")),
+    };
+    names
+        .get(hw)
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("x86 has {} gprs, so none is numbered {hw}", names.len()))
+}
+
+/// What the program has numbered `at`, or why it has none: an address names what the program does not hold.
+fn numbered<'a, T>(items: &'a [T], at: u32, what: &str) -> Result<&'a T, String> {
+    items.get(at as usize).ok_or_else(|| format!("an address is of {what} {at}, and the program has {}", items.len()))
 }
 
 /// A memory operand; a slot's address is its offset in the frame from `from` past the stack pointer, which is as far
@@ -329,10 +338,13 @@ fn memory(
     let (mut text, disp) = match m.base {
         Base::None => (String::new(), i64::from(m.disp)),
         Base::Reg(r) => (name(r, Width::W64)?, i64::from(m.disp)),
-        Base::Slot(s) => (name(RSP, Width::W64)?, i64::from(m.disp) + from + i64::from(c.frame.offsets[s.0 as usize])),
+        Base::Slot(s) => {
+            let offset = *numbered(&c.frame.offsets, s.0, "slot")?;
+            (name(RSP, Width::W64)?, i64::from(m.disp) + from + i64::from(offset))
+        }
         Base::Const(k) => (format!("rip + {{c{}}}", k.0), i64::from(m.disp)),
         Base::Func(f) => (format!("rip + {{f{}}}", f.0), i64::from(m.disp)),
-        Base::Static(s) => (format!("rip + {{{}}}", c.statics[s.0 as usize]), i64::from(m.disp)),
+        Base::Static(s) => (format!("rip + {{{}}}", numbered(&c.statics, s.0, "static")?), i64::from(m.disp)),
     };
     if let Some((r, scale)) = m.index {
         let width = match (r.class, vector_index) {

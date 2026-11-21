@@ -80,7 +80,11 @@ pub fn init(rng: &mut Random) -> Vec<f32> {
     let mut draw = |outs: usize, ins: usize, at: &dyn Fn(usize, usize) -> usize| {
         for o in 0..outs {
             for i in 0..ins {
-                p[at(o, i)] = rng.gauss(0.0, 0.08) as f32;
+                let w = rng.gauss(0.0, 0.08) as f32;
+                // The layers tile `p`, so each weight has its place in it, which the weights Python drew hold.
+                if let Some(place) = p.get_mut(at(o, i)) {
+                    *place = w;
+                }
             }
         }
     };
@@ -192,6 +196,25 @@ impl Buf {
             b => T * b.width(),
         }
     }
+
+    /// Its entry of `all`, which has one for each buffer of [`Buf::ALL`], in order.
+    pub fn of<T>(self, all: &[T]) -> Op<&T> {
+        all.get(self as usize).ok_or_else(|| format!("{self:?} has no buffer"))
+    }
+
+    /// The same, to change.
+    pub fn of_mut<T>(self, all: &mut [T]) -> Op<&mut T> {
+        all.get_mut(self as usize).ok_or_else(|| format!("{self:?} has no buffer"))
+    }
+
+    /// Copies `data` over `mem`, the memory of this buffer, all of it: the two must be as long as one another.
+    pub fn store(self, mem: &mut [f32], data: &[f32]) -> Op {
+        if mem.len() != data.len() {
+            return Err(format!("{} floats for {self:?}, which has {}", data.len(), mem.len()));
+        }
+        mem.copy_from_slice(data);
+        Ok(())
+    }
 }
 
 /// What a matrix product does to each output before it is stored.
@@ -248,6 +271,25 @@ impl Adam {
 /// What an operation of [`Ops`] gives, nothing or what it reads; or why it could not: the GPU's driver
 /// failed, or the operation was asked of rows or buffers it has none for.
 pub type Op<T = ()> = Result<T, String>;
+
+/// `t0..n` as rows of a document: within it, `T` at most. How many.
+pub fn rows(t0: usize, n: usize) -> Op<usize> {
+    if t0 > n || n > T {
+        return Err(format!("rows {t0}..{n} of a document of {T}"));
+    }
+    Ok(n - t0)
+}
+
+/// `len` elements of `s` from `at`; or why they are not there.
+pub fn span<T>(s: &[T], at: usize, len: usize) -> Op<&[T]> {
+    s.get(at..).and_then(|s| s.get(..len)).ok_or_else(|| format!("{len} elements at {at} of {}", s.len()))
+}
+
+/// The same, to change.
+pub fn span_mut<T>(s: &mut [T], at: usize, len: usize) -> Op<&mut [T]> {
+    let all = s.len();
+    s.get_mut(at..).and_then(|s| s.get_mut(..len)).ok_or_else(|| format!("{len} elements at {at} of {all}"))
+}
 
 /// The operations the model is made of, which a backend computes: the reference in Rust, the
 /// others by their kernels. Each forward operation computes rows `t0..n`, so that a sample can
@@ -351,11 +393,15 @@ pub fn tokenize(doc: &str, chars: &[char]) -> Op<Vec<u32>> {
 /// most, backward, Adam. Its loss, the mean cross-entropy, worked out in `f64` as microgpt.py
 /// does, from the probabilities.
 pub fn train(ops: &mut impl Ops, tokens: &[u32], step: usize, steps: usize) -> Op<f64> {
-    let n = T.min(tokens.len() - 1);
-    ops.tokens(&tokens[..=n])?;
+    let n = T.min(tokens.len().saturating_sub(1));
+    ops.tokens(tokens.get(..=n).ok_or("a document has no tokens")?)?;
     forward(ops, 0, n, 1.0)?;
     let probs = ops.read(Buf::Probs)?;
-    let losses: f64 = (0..n).map(|t| -f64::from(probs[t * VP + tokens[t + 1] as usize]).ln()).sum();
+    let losses = (probs.as_chunks::<VP>().0.iter().zip(tokens.iter().skip(1)).take(n))
+        .map(|(row, &next)| {
+            row.get(next as usize).map(|&p| -f64::from(p).ln()).ok_or_else(|| format!("token {next} is none of {VP}"))
+        })
+        .sum::<Op<f64>>()?;
     backward(ops, n)?;
     ops.adam(&Adam::at(step, steps))?;
     Ok((1.0 / n as f64) * losses)
@@ -369,12 +415,12 @@ pub fn sample(ops: &mut impl Ops, rng: &mut Random, inv_temp: f32, chars: &[char
         ops.tokens(&tokens)?;
         forward(ops, pos, pos + 1, inv_temp)?;
         let probs = ops.read(Buf::Probs)?;
-        let weights: Vec<f64> = probs[pos * VP..][..V].iter().map(|&p| f64::from(p)).collect();
-        let token = rng.choice(&weights) as u32;
+        let weights: Vec<f64> = span(&probs, pos * VP, V)?.iter().map(|&p| f64::from(p)).collect();
+        let token = rng.choice(&weights).ok_or("no probabilities to draw a token by")? as u32;
         if token == BOS {
             break;
         }
-        name.push(chars[token as usize]);
+        name.push(*chars.get(token as usize).ok_or_else(|| format!("token {token} is no letter"))?);
         tokens.push(token);
     }
     Ok(name)

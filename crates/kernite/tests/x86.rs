@@ -814,8 +814,8 @@ fn encode(name: &str, cases: &[(&str, &str)]) -> Result {
     for row in out.lines() {
         let n = row.get(..4).and_then(|n| n.trim().parse().ok());
         let hex = row.get(10..).and_then(|r| r.split('\t').next()).map_or("", str::trim);
-        if let Some(i) = at.iter().position(|&a| Some(a) == n) {
-            made[i].extend((0..hex.len()).step_by(2).map(|k| &hex[k..k + 2]));
+        if let Some(bytes) = at.iter().position(|&a| Some(a) == n).and_then(|i| made.get_mut(i)) {
+            bytes.extend(hex.as_bytes().chunks(2).filter_map(|pair| std::str::from_utf8(pair).ok()));
         }
     }
     for ((line, want), made) in cases.iter().zip(made) {
@@ -1816,7 +1816,7 @@ fn an_instruction_reads_as_much_of_a_float_as_intels_manual_says() {
         (256, "vperm2f128(w.ymm, fl.ymm, y.ymm, 1);"),
     ];
     for (reads, body) in cases {
-        let name = &body[..body.find('(').unwrap_or(body.len())];
+        let name = body.split_once('(').map_or(body, |(name, _)| name);
         for has in [32, 64] {
             let params = format!("fl: f{has}, y: f64, w: f64, n: usize, p: *mut f32");
             let got = compile(&params, &format!("let z: xmm; zero(y); zero(w); zero(z);\n{body}")).map(|_| ());
@@ -2324,7 +2324,12 @@ fn a_kernel_names_the_items_it_names() -> Result {
     let module = kernite::lang::parse(src)?;
     let named = |name| -> Result<_> {
         let k = kernite::x86(&module, kernite::function(&module, name).ok_or("function gave None")?, &[])?;
-        Ok(k.mentions.into_iter().map(|m| (m.name, src[..m.span.0 as usize].lines().count())).collect::<Vec<_>>())
+        k.mentions
+            .into_iter()
+            .map(|m| -> Result<_> {
+                Ok((m.name, src.get(..m.span.0 as usize).ok_or("get gave None")?.lines().count()))
+            })
+            .collect::<Result<Vec<_>>>()
     };
     let at = |name: &str, line: usize| (name.to_string(), line);
     // The helper `then`, `STORE` as its value, and `ADD` in the `if` that chooses, in its body;
@@ -3033,8 +3038,8 @@ fn a_frame_of_2_to_the_31_bytes_is_taken_down_by_two_adds() -> Result {
 fn a_frame_of_more_than_a_page_is_touched_a_page_at_a_time() -> Result {
     let prologue = |ty: &str| -> Result<_> {
         let code = compile("", &format!("let b: {ty}; let g: gpr; mov(g, [b]);"))?;
-        let end = code.find("\nmov rax").ok_or("find gave None")?;
-        Ok(code[..end].to_string())
+        let (prologue, _) = code.split_once("\nmov rax").ok_or("split_once gave None")?;
+        Ok(prologue.to_string())
     };
     let page = "sub rsp, 4096\nor qword ptr [rsp], 0";
     let cases = [

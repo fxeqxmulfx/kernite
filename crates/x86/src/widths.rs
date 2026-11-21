@@ -63,9 +63,9 @@ impl<'a> Effect<'a> {
         let mut e = Effect { inst, size, reads: vec![0; inst.args.len() + inst.implicit.len()], carries: vec![] };
         let form = forms::form(inst.op, &inst.args, &inst.implicit);
         for (i, a) in inst.operands().enumerate() {
-            if let (Some(_), Operand::Reg(_, w)) = (e.vector(i), a.operand) {
+            if let Operand::Reg(_, w) = a.operand {
                 let kind = form.and_then(|f| f.operands.get(i)).map(|s| s.kind);
-                e.reads[i] = bits(if let Some(Kind::Vec(k)) = kind { k } else { w });
+                e.read(i, bits(if let Some(Kind::Vec(k)) = kind { k } else { w }));
             }
         }
         // A scalar instruction writes the low `n` bits of its result and carries the rest of its first source. The form
@@ -75,7 +75,7 @@ impl<'a> Effect<'a> {
             && access != Read
         {
             let (n, from) = (bits(n), usize::from(access == Write));
-            if matches!(form.map(|f| f.operands[from].kind), Some(Kind::Vec(W128))) {
+            if matches!(form.and_then(|f| f.operands.get(from)).map(|s| s.kind), Some(Kind::Vec(W128))) {
                 e.read(from, 0);
             }
             e.carry(from, n, n, 128 - n, 1);
@@ -94,8 +94,10 @@ impl<'a> Effect<'a> {
 
     /// Has it read the low `bits` of operand `i`, if that is a vector, and no more.
     fn read(&mut self, i: usize, bits: u16) {
-        if self.vector(i).is_some() {
-            self.reads[i] = bits;
+        if self.vector(i).is_some()
+            && let Some(read) = self.reads.get_mut(i)
+        {
+            *read = bits;
         }
     }
 
@@ -247,13 +249,14 @@ impl<'a> Effect<'a> {
             }
             "vpermq" | "vpermpd" => self.read(1, (top(4, 2) + 1) * 64),
             "vperm2f128" | "vperm2i128" => {
-                let mut most = [0, 0];
-                for field in [n & 15, n >> 4 & 15].into_iter().filter(|f| f & 8 == 0) {
-                    let from = usize::from(field >> 1 & 1);
-                    most[from] = most[from].max(((field & 1) + 1) * 128);
-                }
-                self.read(1, most[0]);
-                self.read(2, most[1]);
+                // Each field picks a half of a source, unless its bit 3 clears it: bit 1 says of which, and bit 0 of
+                // which half, so how much of it is read.
+                let fields = [n & 15, n >> 4 & 15].into_iter().filter(|f| f & 8 == 0);
+                let most = |source: u16| {
+                    fields.clone().filter(|f| f >> 1 & 1 == source).map(|f| ((f & 1) + 1) * 128).max().unwrap_or(0)
+                };
+                self.read(1, most(0));
+                self.read(2, most(1));
             }
             // A dot product reads the lanes it multiplies, which bits 4 and up of its number pick, in each half.
             "vdpps" | "vdppd" => {
@@ -294,7 +297,7 @@ fn step(_: usize, inst: &Inst<Op, VReg>, now: &mut Widths) -> Result<(), Past> {
     let e = Effect::of(inst);
     let past = e.reads.iter().enumerate().find_map(|(i, &reads)| {
         let var = e.vector(i).filter(|_| reads > 0)?;
-        let has = now[var.id as usize];
+        let has = *now.get(var.id as usize)?;
         (has < reads).then_some(Past { var, reads, has })
     });
     // The result is its own as far as every lane it carries is.
@@ -302,7 +305,7 @@ fn step(_: usize, inst: &Inst<Op, VReg>, now: &mut Widths) -> Result<(), Past> {
         .carries
         .iter()
         .filter_map(|c| {
-            let have = now[e.vector(c.from)?.id as usize].saturating_sub(c.src).min(c.len);
+            let have = now.get(e.vector(c.from)?.id as usize)?.saturating_sub(c.src).min(c.len);
             (have < c.len).then(|| c.dst + have / c.lane * c.lane)
         })
         .min()
@@ -313,11 +316,13 @@ fn step(_: usize, inst: &Inst<Op, VReg>, now: &mut Widths) -> Result<(), Past> {
         {
             // The first operand is as wide as the carried lanes leave it, for VEX clears what it does not compute; a
             // call's result, as wide as its callee's type.
-            now[v.id as usize] = match i {
-                0 => carried,
-                i if i < inst.args.len() => 256,
-                _ => bits(w),
-            };
+            if let Some(width) = now.get_mut(v.id as usize) {
+                *width = match i {
+                    0 => carried,
+                    i if i < inst.args.len() => 256,
+                    _ => bits(w),
+                };
+            }
         }
     }
     past.map_or(Ok(()), Err)
@@ -329,7 +334,9 @@ fn step(_: usize, inst: &Inst<Op, VReg>, now: &mut Widths) -> Result<(), Past> {
 pub(crate) fn check(p: &Program<Op>, start: &[(VReg, Width)]) -> Option<(usize, String)> {
     let mut widths = vec![256; p.regs.len()];
     for &(v, w) in start {
-        widths[v.id as usize] = bits(w);
+        if let Some(width) = widths.get_mut(v.id as usize) {
+            *width = bits(w);
+        }
     }
     let meet = |a: &Widths, b: &Widths| a.iter().zip(b).map(|(&a, &b)| a.min(b)).collect();
     let said = forward(p, widths, meet, step).ok()?;
@@ -337,7 +344,7 @@ pub(crate) fn check(p: &Program<Op>, start: &[(VReg, Width)]) -> Option<(usize, 
         let Item::Inst(inst) = item else { return None };
         Some((i, inst, said?.err()?))
     })?;
-    let x = &p.regs[var.id as usize].name;
+    let x = p.var_name(var);
     let message = format!(
         "`{}` reads {reads} bits of `{x}`, of which only the low {has} are the kernel's: SysV leaves the rest of the \
          register of a float as the caller had it, or the callee, of one it gave back. Read the float alone, as a \

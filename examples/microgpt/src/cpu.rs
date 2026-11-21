@@ -3,7 +3,7 @@
 //! bit for bit: a sum in order is a chain of scalar fused multiply-adds, and what is the same
 //! for each of a row's elements is done eight at a time.
 
-use crate::model::{Adam, Buf, E, FC1, FC2, LM, Layer, M, Op, Ops, PARAMS, QKV, T, Then, V, WO, WTE};
+use crate::model::{Adam, Buf, E, FC1, FC2, LM, Layer, M, Op, Ops, PARAMS, QKV, T, Then, V, WO, WTE, rows};
 
 /// The kernels. Pointers are to rows of the buffers [`Buf`] names, and a count `n` is of rows
 /// unless it says otherwise; each kernel trusts that its pointers have that many rows to read
@@ -709,22 +709,22 @@ pub struct Cpu {
 }
 
 impl Cpu {
-    /// A model of `params`, Adam's moments zero; `None` if this CPU has not AVX2 and FMA,
-    /// which the kernels are written in.
-    pub fn new(params: &[f32]) -> Option<Cpu> {
+    /// A model of `params`, Adam's moments zero; or why not: this CPU has not AVX2 and FMA,
+    /// which the kernels are written in, or `params` are not a model's.
+    pub fn new(params: &[f32]) -> Op<Cpu> {
         if !(is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")) {
-            return None;
+            return Err("this CPU lacks AVX2 or FMA, which the kernels are written in".into());
         }
         let mut cpu = Cpu { bufs: Buf::ALL.iter().map(|b| vec![0.0; b.len()]).collect(), tokens: vec![] };
-        cpu.bufs[Buf::Params as usize].copy_from_slice(params);
-        Some(cpu)
+        cpu.write(Buf::Params, params)?;
+        Ok(cpu)
     }
 
     /// Where element `at` of `b` is, for a kernel, `len` elements from there being in it; or why they are
     /// not. The pointers into a buffer come from the one pointer `as_mut_ptr` gives, so that none
     /// invalidates another.
     fn at(&mut self, b: Buf, at: usize, len: usize) -> Op<*mut f32> {
-        let buf = &mut self.bufs[b as usize];
+        let buf = b.of_mut(&mut self.bufs)?;
         if at + len > buf.len() {
             return Err(format!("{len} floats at {at} of {b:?}, which has {}", buf.len()));
         }
@@ -748,14 +748,6 @@ impl Cpu {
     }
 }
 
-/// `t0..n` as rows of a document: within it, `T` at most. How many.
-fn rows(t0: usize, n: usize) -> Op<usize> {
-    if t0 > n || n > T {
-        return Err(format!("rows {t0}..{n} of a document of {T}"));
-    }
-    Ok(n - t0)
-}
-
 /// What the kernels take of the model's sizes.
 const _: () = {
     assert!(WTE == 0, "embed and embed_bwd find a token's row as its offset from the parameters");
@@ -766,12 +758,11 @@ const _: () = {
 
 impl Ops for Cpu {
     fn write(&mut self, b: Buf, data: &[f32]) -> Op {
-        self.bufs[b as usize].copy_from_slice(data);
-        Ok(())
+        b.store(b.of_mut(&mut self.bufs)?, data)
     }
 
     fn read(&mut self, b: Buf) -> Op<Vec<f32>> {
-        Ok(self.bufs[b as usize].clone())
+        Ok(b.of(&self.bufs)?.clone())
     }
 
     fn tokens(&mut self, tokens: &[u32]) -> Op {
@@ -838,7 +829,7 @@ impl Ops for Cpu {
 
     fn clear(&mut self) -> Op {
         for b in Buf::SUMS {
-            self.bufs[b as usize].fill(0.0);
+            b.of_mut(&mut self.bufs)?.fill(0.0);
         }
         Ok(())
     }

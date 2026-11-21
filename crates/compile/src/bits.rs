@@ -1,5 +1,6 @@
 /// A set of small integers, as bits. Iterates in increasing order, so whatever walks one
-/// walks it the same way every time.
+/// walks it the same way every time. A number past the room the set was made with, rounded
+/// up to a multiple of 64, is no member, and `insert` adds none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Bits(Vec<u64>);
 
@@ -17,15 +18,19 @@ impl Bits {
     }
 
     pub(crate) fn insert(&mut self, i: usize) {
-        self.0[i / 64] |= 1 << (i % 64);
+        if let Some(word) = self.0.get_mut(i / 64) {
+            *word |= 1 << (i % 64);
+        }
     }
 
     pub(crate) fn remove(&mut self, i: usize) {
-        self.0[i / 64] &= !(1 << (i % 64));
+        if let Some(word) = self.0.get_mut(i / 64) {
+            *word &= !(1 << (i % 64));
+        }
     }
 
     pub(crate) fn contains(&self, i: usize) -> bool {
-        self.0[i / 64] >> (i % 64) & 1 == 1
+        self.0.get(i / 64).is_some_and(|word| word >> (i % 64) & 1 == 1)
     }
 
     /// Adds every member of `other`.

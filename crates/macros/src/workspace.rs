@@ -104,7 +104,7 @@ fn root(dir: &Path, home: Option<&Path>, read: &dyn Fn(&Path) -> Option<String>)
 
 /// Whether the manifest whose `entries` these are has a `workspace` table.
 fn has_workspace(entries: &[Entry]) -> bool {
-    entries.iter().any(|(path, _)| path[0] == "workspace")
+    entries.iter().any(|(path, _)| path.first().is_some_and(|key| key == "workspace"))
 }
 
 /// Whether the workspace whose manifest `entries` are in `dir` leaves out the package whose
@@ -179,6 +179,12 @@ fn parse(text: &str) -> Option<Vec<Entry>> {
 /// TOML's whitespace, spaces and tabs, and its newlines.
 const BLANK: [char; 4] = [' ', '\t', '\r', '\n'];
 
+/// The first character of `s` and what follows it; none for no character.
+fn split_first(s: &str) -> Option<(char, &str)> {
+    let mut chars = s.chars();
+    Some((chars.next()?, chars.as_str()))
+}
+
 /// The rest of a TOML document to read.
 struct Toml<'a>(&'a str);
 
@@ -208,7 +214,7 @@ impl Toml<'_> {
                 parts.push(self.string()?);
             } else {
                 let end = self.0.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-')));
-                let (bare, rest) = self.0.split_at(end.unwrap_or(self.0.len()));
+                let (bare, rest) = self.0.split_at_checked(end.unwrap_or(self.0.len()))?;
                 if bare.is_empty() {
                     return None;
                 }
@@ -226,32 +232,33 @@ impl Toml<'_> {
         let quote = self.0.chars().next()?;
         // A long string is fenced by three quotes, and holds up to two together.
         let fence = if self.0.starts_with(&quote.to_string().repeat(3)) { 3 } else { 1 };
-        let mut rest = &self.0[fence..];
+        let mut rest = self.0.get(fence..)?;
         if fence == 3 {
             rest = rest.strip_prefix("\r\n").or_else(|| rest.strip_prefix('\n')).unwrap_or(rest);
         }
         let mut text = String::new();
         loop {
-            let c = rest.chars().next()?;
+            let (c, tail) = split_first(rest)?;
             if c == quote {
-                let run = rest.len() - rest.trim_start_matches(quote).len();
+                let after = rest.trim_start_matches(quote);
+                let run = rest.len() - after.len();
                 let ends = run >= fence;
                 // The last quotes of a run end a long string, and the ones before them are in it.
                 text.extend(std::iter::repeat_n(quote, if ends { run - fence } else { run }));
-                rest = &rest[run..];
+                rest = after;
                 if ends {
                     self.0 = rest;
                     return Some(text);
                 }
                 continue;
             }
-            rest = &rest[c.len_utf8()..];
+            rest = tail;
             if c != '\\' || quote == '\'' {
                 text.push(c);
                 continue;
             }
-            let escape = rest.chars().next()?;
-            rest = &rest[escape.len_utf8()..];
+            let (escape, tail) = split_first(rest)?;
+            rest = tail;
             text.push(match escape {
                 'b' => '\u{8}',
                 't' => '\t',
@@ -266,8 +273,9 @@ impl Toml<'_> {
                         'u' => 4,
                         _ => 8,
                     };
-                    let code = u32::from_str_radix(rest.get(..digits)?, 16).ok()?;
-                    rest = &rest[digits..];
+                    let (hex, tail) = rest.split_at_checked(digits)?;
+                    let code = u32::from_str_radix(hex, 16).ok()?;
+                    rest = tail;
                     char::from_u32(code)?
                 }
                 // A backslash at the end of a line, in a long string, passes by the whitespace
@@ -321,7 +329,7 @@ impl Toml<'_> {
             if end == 0 {
                 return None;
             }
-            self.0 = &self.0[end..];
+            self.0 = self.0.get(end..)?;
             entries.push((path, None));
         }
         Some(())

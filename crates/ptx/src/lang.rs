@@ -337,8 +337,18 @@ impl Kernel {
         VReg { id, class }
     }
 
+    /// The name of `reg` in the text. `new_var` gives each variable one as it makes it, so none is left without.
     fn reg(&self, reg: VReg) -> &str {
-        &self.regs[reg.id as usize].0
+        self.regs.get(reg.id as usize).map_or("", |r| r.0.as_str())
+    }
+
+    /// The memory a variable names by its number: what it is, its name and its type as declared; or why there is
+    /// none.
+    fn memory_at(&self, i: usize) -> Result<(&Memory, &str, &str), String> {
+        match (self.memory.get(i), self.declared.get(i)) {
+            (Some(m), Some((name, ty))) => Ok((m, name, ty)),
+            _ => Err(format!("a variable names memory {i}, and the kernel declares {}", self.memory.len())),
+        }
     }
 
     /// What an instruction under `guard` starts with: `@%p `, `@!%p `, or nothing.
@@ -359,12 +369,11 @@ impl Kernel {
             ));
         }
         if bytes.is_none()
-            && let Some(other) = self.memory.iter().position(|m| m.bytes.is_none())
+            && let Some((_, (other, _))) = self.memory.iter().zip(&self.declared).find(|(m, _)| m.bytes.is_none())
         {
             return Err(format!(
-                "`{name}` would start where `{}` does, after the memory with a size: a kernel has one \
-                 `shared<[T]>`, which the launch gives",
-                self.declared[other].0
+                "`{name}` would start where `{other}` does, after the memory with a size: a kernel has one \
+                 `shared<[T]>`, which the launch gives"
             ));
         }
         if let Some(n) = bytes {
@@ -433,8 +442,11 @@ impl Kernel {
             k += 1;
             let covered = last.iter().any(|&(r, j)| r == w.var && k <= j + 1);
             let stale = !covered && reads.contains(&w.var) && (w.side.is_none() || w.side != side);
-            if stale && let Item::Inst(inst) = &mut body[w.at] {
-                inst.args[w.arg].access = Access::ReadWrite;
+            if stale
+                && let Some(Item::Inst(inst)) = body.get_mut(w.at)
+                && let Some(arg) = inst.args.get_mut(w.arg)
+            {
+                arg.access = Access::ReadWrite;
             }
             !stale
         });
@@ -481,7 +493,7 @@ impl Kernel {
         }
         // PTX leaves undefined an index past the labels, where ptxas 13.5 jumps to the first.
         if let Some(i) = specs.iter().position(|s| s.role == Role::Labels).and_then(|l| l.checked_sub(1))
-            && let Given::Int(x) = args[i]
+            && let Some(&Given::Int(x)) = args.get(i)
             && !(0..w.table.len() as i128).contains(&x)
         {
             let m = match w.table.len() {
@@ -501,8 +513,9 @@ impl Kernel {
             return Err(Miss::At(i, true, Fault::at(i, m)));
         }
         if b.form.checks.contains(&Check::Neg) {
-            let negs: Vec<usize> = (0..args.len()).filter(|&i| specs[i].neg).collect();
-            let negated = |i: usize| matches!(args[i], Given::Neg(_));
+            let negs: Vec<usize> =
+                specs.iter().zip(args).enumerate().filter(|(_, (s, _))| s.neg).map(|(i, _)| i).collect();
+            let negated = |i: usize| matches!(args.get(i), Some(Given::Neg(_)));
             if let &[x, y, z] = negs.as_slice()
                 && negated(x) != negated(y)
                 && negated(z)
@@ -652,14 +665,15 @@ impl Kernel {
             .filter_map(|(k, (p, text))| Some((k, Seen::of(p, text, lane)?)))
             .collect();
         // A half known now is written as its bits, an integer, and the error says so: it is no `f16` beside an `f16`.
-        let named = |k: usize, end: &str| match &parts[k] {
-            p @ (Given::F16(_) | Given::Bf16(_)) => {
-                format!("{}, written as the integer {}{end}", self.given(p), texts[k])
+        let named = |k: usize, end: &str| match parts.iter().zip(&texts).nth(k) {
+            Some((p @ (Given::F16(_) | Given::Bf16(_)), text)) => {
+                format!("{}, written as the integer {text}{end}", self.given(p))
             }
-            p => self.given(p),
+            Some((p, _)) => self.given(p),
+            None => String::new(),
         };
         for (i, &(k, this)) in seen.iter().enumerate() {
-            if let Some((j, why)) = seen[..i].iter().find_map(|&(j, that)| Some((j, this.apart(that)?))) {
+            if let Some((j, why)) = seen.iter().take(i).find_map(|&(j, that)| Some((j, this.apart(that)?))) {
                 w.part = Some(k);
                 return Err(format!("`{name}` {why}; this is {} beside {}", named(k, ","), named(j, "")));
             }
@@ -714,7 +728,7 @@ impl Kernel {
                 })
             }
             Given::Var(Var::Mem(i)) => {
-                let (m, (v, _)) = (&self.memory[*i], &self.declared[*i]);
+                let (m, v, _) = self.memory_at(*i)?;
                 if !spec.memory || write {
                     let mov = if m.space == Space::Global { "mov.u64" } else { "mov.u32" };
                     return Err(format!(
@@ -871,7 +885,7 @@ impl Kernel {
                  `mad.wide.u32(a, i, 4, p)` does"
             ));
         }
-        let space = b.spaces()[w.addrs];
+        let space = b.spaces().get(w.addrs).copied().unwrap_or(Space::Generic);
         w.addrs += 1;
         let wide = space.wide() && !b.form.checks.contains(&Check::Addr32);
         let (base, ty) = match m.base {
@@ -919,7 +933,7 @@ impl Kernel {
         access: Access,
         name: &str,
     ) -> Result<String, String> {
-        let (m, (v, ty)) = (&self.memory[i], &self.declared[i]);
+        let (m, v, ty) = self.memory_at(i)?;
         let verb = match access {
             Access::Write => "writes",
             Access::ReadWrite => "reads and writes",
@@ -1022,21 +1036,19 @@ impl Kernel {
         }
         let shape = "`call` is `call(f, (a, b))`, or `call(r, f, (a, b))` for a function that returns a value, \
                      `f` a function of the module or a variable that holds the address of one";
-        let targets: Option<Vec<&str>> = match args.last() {
-            Some(Given::Vector(fs)) if !fs.is_empty() && fs.iter().all(|f| matches!(f, Given::Func(_))) => {
-                Some(fs.iter().filter_map(|f| if let Given::Func(f) = f { Some(f.as_str()) } else { None }).collect())
+        let (rest, targets): (&[Given<Var>], Option<Vec<&str>>) = match args.split_last() {
+            Some((Given::Vector(fs), rest)) if !fs.is_empty() && fs.iter().all(|f| matches!(f, Given::Func(_))) => {
+                let targets = fs.iter().filter_map(|f| if let Given::Func(f) = f { Some(f.as_str()) } else { None });
+                (rest, Some(targets.collect()))
             }
-            _ => None,
+            _ => (args, None),
         };
-        let rest = &args[..args.len() - usize::from(targets.is_some())];
         let at = rest.iter().position(|a| matches!(a, Given::Func(_)));
-        let (result, callee, passed) = match (at, rest.len()) {
-            (Some(0), 1 | 2) => (None, 0, rest.get(1)),
-            (Some(1), 2 | 3) => (Some(0), 1, rest.get(2)),
+        let (result, (callee, called), passed) = match (at, rest) {
+            (Some(0) | None, [f] | [f, _]) => (None, (0, f), rest.get(1)),
+            (Some(1), [r, f] | [r, f, _]) | (None, [r, f, _]) => (Some(r), (1, f), rest.get(2)),
             (Some(i), _) if i < 2 => return Err(Fault::new(shape)),
             (Some(i), _) => return Err(Fault::at(i, shape)),
-            (None, 1 | 2) => (None, 0, rest.get(1)),
-            (None, 3) => (Some(0), 1, rest.get(2)),
             (None, _) => return Err(Fault::new(shape)),
         };
         let passed: Vec<&Given<Var>> = match passed {
@@ -1047,10 +1059,10 @@ impl Kernel {
         let at_args = callee + 1;
         let mut reads = vec![];
         let mut line = String::new();
-        let (target, (r, a), table, flow) = match (&rest[callee], &targets) {
+        let (target, (r, a), table, flow) = match (called, &targets) {
             (Given::Func(f), None) => {
                 let (proto, symbol) = self.called(f, callee)?;
-                let texts = self.passing(f, proto, &passed, result.map(|r| &rest[r]), &mut reads, at_args)?;
+                let texts = self.passing(f, proto, &passed, result, &mut reads, at_args)?;
                 let flow = match (proto.returns, guard) {
                     (Returns::Never, None) => Flow::Return,
                     _ => Flow::Next,
@@ -1092,7 +1104,7 @@ impl Kernel {
                 self.needs = self.needs.and(Needs { ptx: 21, sm: 20 });
                 match targets {
                     Some(targets) => {
-                        let mut texts: Option<(String, String)> = None;
+                        let mut texts: Option<(&str, (String, String))> = None;
                         let mut never = true;
                         let mut symbols = vec![];
                         for t in targets {
@@ -1100,23 +1112,21 @@ impl Kernel {
                             symbols.push(symbol.to_string());
                             never &= proto.returns == Returns::Never;
                             let mut some = vec![];
-                            let these =
-                                self.passing(t, proto, &passed, result.map(|r| &rest[r]), &mut some, at_args)?;
+                            let these = self.passing(t, proto, &passed, result, &mut some, at_args)?;
                             match &texts {
-                                Some(first) if *first != these => {
+                                Some((first, seen)) if *seen != these => {
                                     return Err(Fault::at(
                                         at_args,
                                         format!(
-                                            "`{t}` takes other types than `{}` does, which write a value known \
-                                             now another way: put it in a variable first",
-                                            targets[0]
+                                            "`{t}` takes other types than `{first}` does, which write a value known \
+                                             now another way: put it in a variable first"
                                         ),
                                     ));
                                 }
                                 Some(_) => {}
                                 None => {
                                     reads.append(&mut some);
-                                    texts = Some(these);
+                                    texts = Some((t, these));
                                 }
                             }
                         }
@@ -1125,13 +1135,13 @@ impl Kernel {
                         }
                         line += &format!("$C{}: .calltargets {};\n\t", self.tables, symbols.join(", "));
                         let flow = if never && guard.is_none() { Flow::Return } else { Flow::Next };
-                        let texts = texts.ok_or_else(|| Fault::new(shape))?;
+                        let (_, texts) = texts.ok_or_else(|| Fault::new(shape))?;
                         let table = format!("$C{}", self.tables);
                         self.tables += 1;
                         (fp, texts, Some(table), flow)
                     }
                     None => {
-                        let (r, a, proto) = self.prototype(&passed, result.map(|r| &rest[r]), &mut reads, at_args)?;
+                        let (r, a, proto) = self.prototype(&passed, result, &mut reads, at_args)?;
                         line += &format!("$P{}: .callprototype {proto};\n\t", self.tables);
                         let table = format!("$P{}", self.tables);
                         self.tables += 1;
@@ -1375,7 +1385,10 @@ impl Kernel {
         match a {
             Given::Var(Var::Reg { ty, .. }) => format!("a `{}` variable", ty.name()),
             Given::Var(Var::Part { ty, part, .. }) => format!("a part of a `{}` variable, `.{part}`", ty.name()),
-            Given::Var(Var::Mem(i)) => format!("`{}`, {} memory", self.declared[*i].0, self.memory[*i].space.noun()),
+            Given::Var(Var::Mem(i)) => match self.memory_at(*i) {
+                Ok((m, v, _)) => format!("`{v}`, {} memory", m.space.noun()),
+                Err(why) => why,
+            },
             Given::Special(name) if name == "_" => "`_`".into(),
             Given::Special(name) => format!("`{name}`"),
             Given::Int(x) => format!("the integer {x}"),
@@ -1408,7 +1421,7 @@ impl Kernel {
 fn reach(b: &Bound, args: &[Given<Var>]) -> u64 {
     match b.form.op {
         "ld" | "st" | "atom" | "red" | "wmma" => {
-            b.form.data().and_then(|s| Some(u64::from(b.ty(s.ty?).bits()) / 8 * lanes(b, s) as u64)).unwrap_or(1)
+            b.form.data().and_then(|s| Some(u64::from(b.ty(s.ty?)?.bits()) / 8 * lanes(b, s) as u64)).unwrap_or(1)
         }
         "mbarrier" => 8,
         "ldmatrix" => 16,
@@ -1628,13 +1641,12 @@ fn known(imm: Imm, x: i128, name: &str) -> Result<String, String> {
 /// The type of the register `spec` is, which the table gives each; or that the instruction `name` has none for this
 /// operand.
 fn typed(b: &Bound, spec: &Spec, name: &str) -> Result<Ty, String> {
-    let t = spec.ty.ok_or_else(|| format!("`{name}` has no type for this operand"))?;
-    Ok(b.ty(t))
+    spec.ty.and_then(|t| b.ty(t)).ok_or_else(|| format!("`{name}` has no type for this operand"))
 }
 
 /// What `spec` of `b` wants, for an error.
 fn describe(b: &Bound, spec: &Spec) -> String {
-    let t = spec.ty.map(|t| b.ty(t).name()).unwrap_or_default();
+    let t = spec.ty.and_then(|t| b.ty(t)).map(|t| t.name()).unwrap_or_default();
     let one = match spec.role {
         Role::Addr(_) => return "an address, as in `[p + 4]`".into(),
         Role::Label => return "a label".into(),
@@ -1646,7 +1658,7 @@ fn describe(b: &Bound, spec: &Spec) -> String {
             let names = if at.lead.is_some() { ["i", "x", "y", "z"] } else { ["x", "y", "z", "w"] };
             let at = match lanes(b, at) {
                 1 => names[0].to_string(),
-                n => format!("({})", names[..n].join(", ")),
+                n => format!("({})", names.get(..n).unwrap_or_default().join(", ")),
             };
             return format!("a {what}'s handle and the coordinates in it, in brackets: `[t, {at}]`");
         }
@@ -1783,7 +1795,7 @@ impl Target for Kernel {
         self.p.params.push((reg, PReg { class: reg.class, hw: 0 }));
         self.p.signature.params.push(reg.class);
         self.named.insert(format!("{}_param_{}", self.p.name, self.params.len()));
-        self.params.push(Param { ty: t, reg: reg.id as usize, pointer });
+        self.params.push(Param { ty: t, reg: self.reg(reg).to_string(), pointer });
         Ok(Var::Reg { reg, ty: t })
     }
 
@@ -1851,7 +1863,7 @@ impl Target for Kernel {
                 };
             }
             Var::Mem(i) => {
-                let (name, ty) = &self.declared[i];
+                let (_, name, ty) = self.memory_at(i)?;
                 return match view == ty {
                     true => Ok(v),
                     false => Err(format!("`{name}` is memory, `{ty}`; it is no `{view}`")),

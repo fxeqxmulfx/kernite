@@ -153,9 +153,9 @@ fn host_waits(module: &Module, m: &mut Unified<u32>) -> Result {
     m.host_mut()?.copy_from_slice(&[5, 6, 7, 8]);
     delay(module, m.ptr())?;
     let started = Instant::now();
-    let slice = m.host_mut()?;
-    assert_eq!(slice[0], 105, "{:?}", started.elapsed());
-    slice[1] = 9;
+    let [first, second, ..] = m.host_mut()? else { return Err("four words".into()) };
+    assert_eq!(*first, 105, "{:?}", started.elapsed());
+    *second = 9;
     assert_eq!(m.host()?, [105, 9, 7, 8]);
     Ok(())
 }

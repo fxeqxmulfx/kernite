@@ -24,7 +24,10 @@ pub trait Target {
     /// which of them is wrong, by its place among them, and what is wrong with it. A machine
     /// takes none unless it says so.
     fn directives(&mut self, given: &[(&str, Vec<i128>)]) -> Result<(), (usize, Fault)> {
-        Err((0, Fault::new(format!("this machine takes no `#[{}(..)]`", given[0].0))))
+        match given.first() {
+            Some((name, _)) => Err((0, Fault::new(format!("this machine takes no `#[{name}(..)]`")))),
+            None => Ok(()),
+        }
     }
 
     /// A new variable of the machine's type `ty`.

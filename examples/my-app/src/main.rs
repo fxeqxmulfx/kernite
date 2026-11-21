@@ -1332,18 +1332,20 @@ fn main() -> Run {
     }
     let mut counts = [0; 256];
     count_bytes(b"hello, world", &mut counts)?;
+    let count = |byte: u8| counts.get(usize::from(byte)).ok_or("a count for each byte");
     println!(
         "in \"hello, world\", counted in tables on the stack: {} l, {} o and {} h",
-        counts[usize::from(b'l')],
-        counts[usize::from(b'o')],
-        counts[usize::from(b'h')]
+        count(b'l')?,
+        count(b'o')?,
+        count(b'h')?
     );
     let g = gcds_on_cpu(&[1071, 2_971_215_073], &[462, 1_836_311_903])?;
-    println!("by Stein's algorithm on the cpu: gcd(1071, 462) = {}, and of two Fibonacci numbers: {}", g[0], g[1]);
+    let [gcd, fibonacci] = <[u32; 2]>::try_from(g.as_slice())?;
+    println!("by Stein's algorithm on the cpu: gcd(1071, 462) = {gcd}, and of two Fibonacci numbers: {fibonacci}");
     let seen: Vec<Vec<u32>> = (0..2)
         .map(|call| {
             histogram_on_cpu(&[call << 28, 0x1000_0000, u32::MAX]);
-            kernels::COUNTS.read()[..4].to_vec()
+            kernels::COUNTS.read().into_iter().take(4).collect()
         })
         .collect();
     println!("4 of the 16 bins in the process's memory after a call of 3 integers, and after another: {seen:?}");
@@ -1368,8 +1370,8 @@ fn main() -> Run {
     let gpu = Cuda::new().and_then(|cuda| gpu::Kernels::load(&cuda).map(|kernels| (cuda, kernels)));
     match gpu {
         Ok((cuda, kernels)) => {
-            let x: Vec<f32> = Vec::from_fn(1000, |i| i as f32 / 8.0);
-            let mut y = vec![1.0; 1000];
+            let x: [f32; 1000] = std::array::from_fn(|i| i as f32 / 8.0);
+            let mut y = [1.0; 1000];
             match saxpy(&cuda, &kernels, 2.0, &x, &mut y) {
                 Ok(()) => println!("saxpy on the {}: 2 * {} + 1 = {}", cuda.name(), x[999], y[999]),
                 Err(e) => println!("saxpy failed on the {}: {e}", cuda.name()),
@@ -1396,12 +1398,15 @@ fn main() -> Run {
                 Err(e) => println!("scale_f16 failed: {e}"),
             }
             match gcds(&cuda, &kernels, &[1071, 2_971_215_073], &[462, 1_836_311_903]) {
-                Ok(g) => println!("gcd(1071, 462) = {}, and of two Fibonacci numbers, 46 calls deep: {}", g[0], g[1]),
+                Ok(g) => {
+                    let [gcd, fibonacci] = <[u32; 2]>::try_from(g.as_slice())?;
+                    println!("gcd(1071, 462) = {gcd}, and of two Fibonacci numbers, 46 calls deep: {fibonacci}")
+                }
                 Err(e) => println!("gcds failed: {e}"),
             }
             let seen = (0..2).try_fold(vec![], |mut seen, launch| -> Run<_> {
                 histogram(&cuda, &kernels, &[launch << 28, 0x1000_0000, u32::MAX])?;
-                seen.push(kernels.COUNTS()?.read()?[..4].to_vec());
+                seen.push(kernels.COUNTS()?.read()?.into_iter().take(4).collect::<Vec<u32>>());
                 Ok(seen)
             });
             match seen {
@@ -1416,11 +1421,12 @@ fn main() -> Run {
             if cuda.sm() >= 80 {
                 let a: Vec<f16> = Vec::from_fn(64 * 64, |i| f16::from_f32((i % 7) as f32 - 3.0));
                 let bt: Vec<f16> = Vec::from_fn(64 * 64, |i| f16::from_f32((i % 5) as f32 - 2.0));
-                let naive: f32 = (0..64).map(|l| a[l].to_f32() * bt[l].to_f32()).sum();
+                let naive: f32 = a.iter().zip(&bt).take(64).map(|(a, b)| a.to_f32() * b.to_f32()).sum();
                 let c = || -> Run<_> { matmul(&cuda, &ampere::Kernels::load(&cuda)?, &a, &bt, (64, 64, 64)) };
                 match c() {
                     Ok(c) => {
-                        println!("64 by 64 by 64 on the tensor cores: c[0][0] = {}; a loop in Rust says {naive}", c[0])
+                        let c00 = c.first().ok_or("matmul gave no numbers")?;
+                        println!("64 by 64 by 64 on the tensor cores: c[0][0] = {c00}; a loop in Rust says {naive}")
                     }
                     Err(e) => println!("matmul failed: {e}"),
                 }

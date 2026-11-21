@@ -50,14 +50,20 @@ fn alone() -> MutexGuard<'static, ()> {
 /// process runs that many threads at once; none if not.
 fn four() -> Result<Option<Vec<usize>>> {
     let all = cpus()?;
-    if all.len() < THREADS + 1 || most()? < THREADS {
+    let four = all.get(..THREADS + 1);
+    if four.is_none() || most()? < THREADS {
         eprintln!(
             "the caller's thread may run on fewer than four CPUs, or the process runs fewer than three threads at \
              once: skipped"
         );
         return Ok(None);
     }
-    Ok(Some(all[..4].to_vec()))
+    Ok(four.map(<[usize]>::to_vec))
+}
+
+/// The text in the first `size` bytes of `buffer`, which a read filled.
+fn text(buffer: &[u8], size: usize) -> Result<&str> {
+    Ok(str::from_utf8(buffer.get(..size).ok_or("a read gave more bytes than the buffer has")?)?)
 }
 
 /// What Linux has counted of a thread, as of the last time it stopped running.
@@ -79,7 +85,7 @@ impl Count {
     fn of(status: &File, schedstat: &File) -> Result<Count> {
         let (mut times, mut switches) = ([0; 256], [0; 8192]);
         let (times_size, switches_size) = (schedstat.read_at(&mut times, 0)?, status.read_at(&mut switches, 0)?);
-        let (times, switches) = (str::from_utf8(&times[..times_size])?, str::from_utf8(&switches[..switches_size])?);
+        let (times, switches) = (text(&times, times_size)?, text(&switches, switches_size)?);
         let field = |name: &str| -> Result<u64> {
             let line = switches.lines().find_map(|line| line.strip_prefix(name)?.strip_prefix(':'));
             Ok(line.ok_or("find_map gave None")?.trim().parse()?)
@@ -125,20 +131,21 @@ impl Counter {
         let into = Arc::clone(&counts);
         launch(grid, move |place| {
             let t = place.thread() as usize;
+            let (Some(files), Some(into)) = (files.get(t), into.get(t)) else { return };
             // `/proc/thread-self` is the thread that opens it.
-            let opened = files[t].get_or_init(|| {
+            let opened = files.get_or_init(|| {
                 Ok((File::open("/proc/thread-self/status")?, File::open("/proc/thread-self/schedstat")?))
             });
-            let _ = into[t].set(match opened {
+            let _ = into.set(match opened {
                 Ok((status, schedstat)) => Count::of(status, schedstat),
                 Err(e) => Err(e.to_string().into()),
             });
         })?;
         let mut told = [false; THREADS];
-        for (t, count) in counts.iter().enumerate().skip(1) {
+        for ((count, last), slot) in counts.iter().zip(&mut self.last).zip(&mut told).skip(1) {
             if let Some(count) = count.get() {
                 let count = *count.as_ref().map_err(|e| e.to_string())?;
-                told[t] = self.last[t].replace(count).is_some_and(|before| count.told_since(&before));
+                *slot = last.replace(count).is_some_and(|before| count.told_since(&before));
             }
         }
         Ok(told)

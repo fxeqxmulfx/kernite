@@ -46,6 +46,10 @@ panic = "deny"
 unreachable = "deny"
 todo = "deny"
 unimplemented = "deny"
+# No index or slice panics either: `get`, an iterator or a pattern says what is there. A test may index, as
+# `clippy.toml` says.
+indexing_slicing = "deny"
+string_slice = "deny"
 
 [profile.release]
 codegen-units = 1

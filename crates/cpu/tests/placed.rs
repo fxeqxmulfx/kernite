@@ -511,9 +511,9 @@ fn limited_to_some(said: &str) -> Result {
     for (t, (_, (threads, _))) in seen(Grid::new(most))?.iter().enumerate() {
         assert_eq!(*threads, list, "thread {t}, not placed");
     }
-    let placement = &kept[..most];
-    for (t, (_, (list, cpu))) in seen(Grid::on(placement))?.iter().enumerate() {
-        assert_eq!((listed(list)?, *cpu), (vec![placement[t]], placement[t]), "thread {t}, placed");
+    let placement = kept.get(..most).ok_or("the thread may run on fewer CPUs than a grid has threads")?;
+    for (t, ((_, (list, cpu)), &want)) in seen(Grid::on(placement))?.iter().zip(placement).enumerate() {
+        assert_eq!((listed(list)?, *cpu), (vec![want], want), "thread {t}, placed");
     }
     Ok(())
 }

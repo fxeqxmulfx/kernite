@@ -1164,7 +1164,7 @@ fn apart(line: &str) -> Result<(String, usize, String)> {
     let (before, after) = line.split_once('@').ok_or("split_once gave None")?;
     let kernel = format!("{before}{after}");
     let body = format!("{TOGETHER_DECLARED} {kernel}");
-    let name = kernel[..kernel.find('(').ok_or("find gave None")?].replace("._", ".");
+    let name = kernel.split_once('(').ok_or("split_once gave None")?.0.replace("._", ".");
     let col = body.len() - after.len() + 1;
     Ok((body, col, name))
 }
@@ -1441,7 +1441,7 @@ fn a_special_register_goes_where_its_bits_are_those_the_instruction_reads() -> R
                 let ptx = got.map_err(|e| format!("{kernel}: {e}"))?;
                 assert!(ptx.contains(&format!("\t{}\n", place.line.replace('R', &r.name))), "{kernel}: {ptx}");
             } else {
-                let name = before[..before.find('(').ok_or("find gave None")?].replace("._", ".");
+                let name = before.split_once('(').ok_or("split_once gave None")?.0.replace("._", ".");
                 let field = if after.starts_with(['(', '[']) { 0 } else { r.name.find('.').map_or(0, |dot| dot + 1) };
                 let col = body.len() - after.len() + 1 + field;
                 let want = format!("2:{col}: `{name}` reads a `{}`; `{}` is a `{}`", place.ty, r.name, r.ty.name());
@@ -2078,7 +2078,8 @@ fn kernite_knows_every_instruction_ptx_has_for_sm_20_to_sm_86() -> Result {
 #[test]
 fn what_is_for_newer_gpus_says_which() -> Result {
     for (gpu, items) in forms::NEWER.lines().filter_map(|l| l.split_once(": ")) {
-        let number: u32 = gpu["sm_".len()..].trim_end_matches(['a', 'f']).parse()?;
+        let number: u32 =
+            gpu.strip_prefix("sm_").ok_or("strip_prefix gave None")?.trim_end_matches(['a', 'f']).parse()?;
         assert!(number > 86, "{gpu} is one kernite writes for");
         for item in items.split_whitespace() {
             let want = match item.split_once('.') {
@@ -3458,9 +3459,10 @@ fn every_set(entries: &[Entry], statics: &[Static]) -> Vec<(u32, Made, Made)> {
                 Kept::Code(i) => has(i),
                 Kept::Static(j) => has(entries.len() + j),
             };
-            let code: Vec<Entry> = (0..entries.len()).filter(|&i| has(i)).map(|i| entries[i].clone()).collect();
+            let code: Vec<Entry> =
+                entries.iter().enumerate().filter(|&(i, _)| has(i)).map(|(_, e)| e.clone()).collect();
             let memory: Vec<Static> =
-                (0..statics.len()).filter(|&j| has(entries.len() + j)).map(|j| statics[j].clone()).collect();
+                statics.iter().enumerate().filter(|&(j, _)| has(entries.len() + j)).map(|(_, s)| s.clone()).collect();
             (set, assembly.text(&kept), kernite_ptx::module(&code, &memory).whole())
         })
         .collect()
@@ -4134,7 +4136,8 @@ fn names(form: &Form) -> Vec<(String, Vec<Option<usize>>)> {
         .iter()
         .map(|e| e.optional.then_some(None).into_iter().chain((0..e.alts.len()).map(Some)).collect())
         .collect();
-    let first: Vec<Option<usize>> = options.iter().map(|o| o[0]).collect();
+    // Each element's first choice: none for one that is optional, and its first word for any other, which has one.
+    let first: Vec<Option<usize>> = options.iter().map(|o| o.first().copied().flatten()).collect();
     let mut choices = vec![first.clone()];
     if form.checks.contains(&Check::Cvt) {
         choices = vec![vec![]];
@@ -4151,16 +4154,17 @@ fn names(form: &Form) -> Vec<(String, Vec<Option<usize>>)> {
                 .collect();
         }
     } else {
+        // `c` with its `i`th choice `x` instead.
+        let set = |c: &[Option<usize>], i: usize, x: Option<usize>| -> Vec<Option<usize>> {
+            c.iter().enumerate().map(|(k, &was)| if k == i { x } else { was }).collect()
+        };
         for (i, oi) in options.iter().enumerate() {
             for &a in oi {
-                let mut c = first.clone();
-                c[i] = a;
+                let c = set(&first, i, a);
                 choices.push(c.clone());
                 for (j, oj) in options.iter().enumerate().skip(i + 1) {
                     for &b in oj {
-                        let mut d = c.clone();
-                        d[j] = b;
-                        choices.push(d);
+                        choices.push(set(&c, j, b));
                     }
                 }
             }
@@ -4169,7 +4173,11 @@ fn names(form: &Form) -> Vec<(String, Vec<Option<usize>>)> {
     let mut names: Vec<(String, Vec<Option<usize>>)> = choices
         .into_iter()
         .map(|c| {
-            let words = form.elems.iter().zip(&c).filter_map(|(e, k)| k.map(|k| e.alts[k].words.join(".")));
+            let words = form
+                .elems
+                .iter()
+                .zip(&c)
+                .filter_map(|(e, k)| k.and_then(|k| e.alts.get(k)).map(|alt| alt.words.join(".")));
             (std::iter::once(form.op.to_string()).chain(words).collect::<Vec<_>>().join("."), c)
         })
         .collect();
@@ -4306,7 +4314,9 @@ impl Making {
             }
             let t = match spec.lead {
                 Some(lead) if k == 0 => lead,
-                _ => b.ty(spec.ty.ok_or("a register's operand has no type")?),
+                _ => b
+                    .ty(spec.ty.ok_or("a register's operand has no type")?)
+                    .ok_or("a name gives its operand no type")?,
             };
             let part = if spec.memory {
                 Some(Given::Var(self.memory(b.space())?))
@@ -4421,7 +4431,8 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style, retype: bool) -> Resu
             Role::Imm(imm @ Imm::Of(_)) => {
                 let values = imm.values();
                 m.differs |= style == Style::Values && values.len() > 1;
-                Given::Int(if style == Style::Values { values[values.len() - 1] } else { values[0] }.into())
+                let value = if style == Style::Values { values.last() } else { values.first() };
+                Given::Int(value.copied().ok_or("an immediate has no value")?.into())
             }
             Role::Imm(Imm::Pow2(p)) => {
                 m.differs |= matches!(style, Style::Least | Style::Most);
@@ -4458,7 +4469,7 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style, retype: bool) -> Resu
     let mut entry = m.kernel.finish();
     if retype {
         for id in m.packed {
-            entry.regs[id].1 = Ty::F16x2;
+            entry.regs.get_mut(id).ok_or("get_mut gave None")?.1 = Ty::F16x2;
         }
         entry.needs = entry.needs.and(Ty::F16x2.needs());
     }
@@ -4472,8 +4483,9 @@ fn by_hand(n: usize, name: &str, form: &'static Form, choice: Vec<Option<usize>>
     for (e, k) in form.elems.iter().zip(&choice) {
         if let (Some(slot), Some(k)) = (e.slot, k) {
             types.resize(types.len().max(slot + 1), Ty::Pred);
-            let word = e.alts[*k].words[0];
-            types[slot] = Ty::parse(word).ok_or_else(|| format!("`{word}` is no type"))?;
+            let word = e.alts.get(*k).and_then(|alt| alt.words.first()).ok_or("an alternative has no word")?;
+            let ty = Ty::parse(word).ok_or_else(|| format!("`{word}` is no type"))?;
+            *types.get_mut(slot).ok_or("get_mut gave None")? = ty;
         }
     }
     let b = Bound { form, choice, types, needs: Needs::default() };
@@ -4493,7 +4505,7 @@ fn by_hand(n: usize, name: &str, form: &'static Form, choice: Vec<Option<usize>>
             }
             Role::Addr(_) => "[%a]".to_string(),
             Role::Imm(Imm::Bits(_)) => "1".to_string(),
-            Role::Imm(imm @ Imm::Of(_)) => imm.values()[0].to_string(),
+            Role::Imm(imm @ Imm::Of(_)) => imm.values().first().ok_or("an immediate has no value")?.to_string(),
             Role::Imm(Imm::Pow2(_)) => "16".to_string(),
             Role::Dst | Role::Src => registers(&b, spec, &mut regs)?,
         });
@@ -4511,7 +4523,7 @@ fn by_hand(n: usize, name: &str, form: &'static Form, choice: Vec<Option<usize>>
 /// Operand `spec` of `b` as registers, each added to `regs`: one; a vector, braced even of
 /// one; or two written at once.
 fn registers(b: &Bound, spec: &Spec, regs: &mut Vec<Ty>) -> Result<String> {
-    let t = b.ty(spec.ty.ok_or("a register's operand has no type")?);
+    let t = b.ty(spec.ty.ok_or("a register's operand has no type")?).ok_or("a name gives its operand no type")?;
     let lanes = match spec.count {
         Count::One => 1,
         Count::Fixed(n) => n,
@@ -4522,7 +4534,8 @@ fn registers(b: &Bound, spec: &Spec, regs: &mut Vec<Ty>) -> Result<String> {
         format!("%v{}", regs.len())
     });
     let braced = matches!(spec.count, Count::Fixed(_));
-    let first = if lanes == 1 && !braced { names[0].clone() } else { format!("{{{}}}", names.join(", ")) };
+    let joined = names.join(", ");
+    let first = if lanes == 1 && !braced { joined } else { format!("{{{joined}}}") };
     Ok(match &spec.second {
         Some((second, _)) => format!("{first}|{}", registers(b, second, regs)?),
         None => first,
@@ -4615,8 +4628,8 @@ fn assemble(ptxas: &Path, dir: &str, modules: &[(String, u32)]) -> Result<Vec<(B
                 s.spawn(|| -> Result {
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some((text, gpu)) = modules.get(i) else { return Ok(()) };
-                        *out[i].lock().unwrap_or_else(PoisonError::into_inner) =
+                        let (Some((text, gpu)), Some(slot)) = (modules.get(i), out.get(i)) else { return Ok(()) };
+                        *slot.lock().unwrap_or_else(PoisonError::into_inner) =
                             refused(ptxas, text, *gpu, &dir.join(i.to_string()))?;
                     }
                 })
@@ -4761,7 +4774,10 @@ const VERSIONS: [u32; 48] = [
 
 /// The newest version of PTX, the last of [`VERSIONS`]: a test that writes a module of it takes the version from here,
 /// and writes no number of its own.
-const NEWEST: u32 = VERSIONS[VERSIONS.len() - 1];
+const NEWEST: u32 = {
+    let [.., newest] = VERSIONS;
+    newest
+};
 
 /// The version 5.1, which `ptxas` 13.5 reads as 6.0, though PTX has none: in a module of it `ptxas` takes `shfl.sync`,
 /// `vote.sync`, `bar.warp.sync` and `.target sm_70`, which it refuses at 5.0. The ISA says nothing of a module of 5.1,

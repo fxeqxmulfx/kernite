@@ -131,10 +131,10 @@ macro_rules! elements {
             /// Memory holding `values` until something writes it, for a static to be.
             pub const fn new(values: [$t; N]) -> Self {
                 let mut cells = [const { $cell::new(0) }; N];
-                let mut i = 0;
-                while i < N {
-                    cells[i] = $cell::new($to(values[i]));
-                    i += 1;
+                let (mut to, mut from): (&mut [$cell], &[$t]) = (&mut cells, &values);
+                while let ([cell, more_cells @ ..], [value, more_values @ ..]) = (to, from) {
+                    *cell = $cell::new($to(*value));
+                    (to, from) = (more_cells, more_values);
                 }
                 Global { align: [], cells }
             }

@@ -1,6 +1,7 @@
 //! The evaluator: a kernel's body run at compile time, its loops unrolled and its helpers
 //! inlined, as calls into the [`Target`] that builds the machine's instructions.
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::ast::{BinOp, Block, Const, Expr, Fn, Generic, ItemKind, Module, Static, Stmt, Type, UnOp};
@@ -71,10 +72,10 @@ pub fn memory(module: &Module, s: &Static) -> Result<Memory, Error> {
 pub fn constant(module: &Module, c: &Const) -> Result<Value, Error> {
     let mut consts = Consts;
     let mut e = Eval::new(module, &mut consts);
-    let Some((_, state)) = e.consts.iter_mut().find(|(k, _)| std::ptr::eq(*k, c)) else {
+    let Some(k) = e.consts.iter().copied().find(|k| std::ptr::eq(*k, c)) else {
         return Err(err(c.span, format!("`{}` is no constant of this module", c.name)));
     };
-    *state = State::Busy;
+    e.states.insert(&k.name, State::Busy);
     e.constant(c)
 }
 
@@ -211,7 +212,7 @@ fn err(span: Span, message: impl Into<String>) -> Error {
 
 /// What a name stands for.
 #[derive(Clone, Debug)]
-enum Binding<V> {
+enum Binding<'a, V> {
     /// A value known now.
     Value(Rc<Value>),
     /// A variable.
@@ -220,12 +221,12 @@ enum Binding<V> {
     Vars(Vec<V>),
     /// A label of the block.
     Label(u32),
-    /// Memory of the module's, by its place among the module's statics: a variable the
-    /// target makes the first time the function names it.
-    Static(usize),
+    /// Memory of the module's, by its name: a variable the target makes the first time the
+    /// function names it.
+    Static(&'a str),
 }
 
-impl<V> Binding<V> {
+impl<V> Binding<'_, V> {
     fn kind(&self) -> String {
         match self {
             Binding::Value(v) => v.kind().to_string(),
@@ -237,11 +238,10 @@ impl<V> Binding<V> {
     }
 }
 
-type Scope<V> = Vec<(String, Binding<V>)>;
+type Scope<'a, V> = Vec<(String, Binding<'a, V>)>;
 
-/// A module constant: waiting to be named, being evaluated, or known.
+/// A module constant that a function has named: being evaluated, or known.
 enum State {
-    Waiting,
     Busy,
     Done(Rc<Value>),
 }
@@ -254,9 +254,13 @@ enum Lin<V> {
 
 struct Eval<'a, T: Target> {
     target: &'a mut T,
-    consts: Vec<(&'a Const, State)>,
-    /// The module's statics, each with its variable once the function names it.
-    statics: Vec<(&'a Static, Option<T::Var>)>,
+    consts: Vec<&'a Const>,
+    /// The constants a function has named, by name.
+    states: BTreeMap<&'a str, State>,
+    /// The names of the module's statics.
+    statics: Vec<&'a str>,
+    /// The variable of each static the function has named, by name.
+    made: BTreeMap<&'a str, T::Var>,
     helpers: Vec<&'a Fn>,
     /// The functions that name an ABI, each compiled on its own: kernels, and functions the
     /// machine calls.
@@ -264,7 +268,7 @@ struct Eval<'a, T: Target> {
     /// Where the function has named an item of the module, as [`Run`] has them.
     mentions: Vec<Mention>,
     /// The names in scope, innermost last. A helper runs in scopes of its own.
-    scopes: Vec<Scope<T::Var>>,
+    scopes: Vec<Scope<'a, T::Var>>,
     labels: u32,
     guard: Option<Guard<T::Var>>,
     /// How many instructions have run.
@@ -284,8 +288,8 @@ impl<'a, T: Target> Eval<'a, T> {
         let (mut consts, mut statics, mut helpers, mut compiled) = (vec![], vec![], vec![], vec![]);
         for item in &module.items {
             match &item.kind {
-                ItemKind::Const(c) => consts.push((c, State::Waiting)),
-                ItemKind::Static(s) => statics.push((s, None)),
+                ItemKind::Const(c) => consts.push(c),
+                ItemKind::Static(s) => statics.push(s.name.as_str()),
                 ItemKind::Fn(f) if f.abi.is_some() => compiled.push(f),
                 ItemKind::Fn(f) => helpers.push(f),
                 ItemKind::Other => {}
@@ -294,7 +298,9 @@ impl<'a, T: Target> Eval<'a, T> {
         Eval {
             target,
             consts,
+            states: BTreeMap::new(),
             statics,
+            made: BTreeMap::new(),
             helpers,
             compiled,
             mentions: vec![],
@@ -310,14 +316,14 @@ impl<'a, T: Target> Eval<'a, T> {
     }
 
     /// Binds `name` in the innermost scope, which a name bound outside any scope opens.
-    fn bind(&mut self, name: &str, b: Binding<T::Var>) {
+    fn bind(&mut self, name: &str, b: Binding<'a, T::Var>) {
         match self.scopes.last_mut() {
             Some(scope) => scope.push((name.to_string(), b)),
             None => self.scopes.push(vec![(name.to_string(), b)]),
         }
     }
 
-    fn lookup(&mut self, name: &str, span: Span) -> Result<Option<Binding<T::Var>>, Error> {
+    fn lookup(&mut self, name: &str, span: Span) -> Result<Option<Binding<'a, T::Var>>, Error> {
         for scope in self.scopes.iter().rev() {
             if let Some((_, b)) = scope.iter().rev().find(|(n, _)| n == name) {
                 return Ok(Some(b.clone()));
@@ -325,7 +331,7 @@ impl<'a, T: Target> Eval<'a, T> {
         }
         let found = match self.global(name, span)? {
             Some(v) => Some(Binding::Value(v)),
-            None => self.statics.iter().position(|(s, _)| s.name == name).map(Binding::Static),
+            None => self.statics.iter().copied().find(|s| *s == name).map(Binding::Static),
         };
         if found.is_some() {
             Mention::record(&mut self.mentions, name, span);
@@ -337,43 +343,41 @@ impl<'a, T: Target> Eval<'a, T> {
     fn lent(&mut self, e: &Expr, want: Want) -> Result<Rc<Value>, Error> {
         let at = |m: String| err(e.span(), m);
         match e {
-            Expr::Path(path, span) if path.len() == 1 => match self.lookup(&path[0], *span)? {
+            Expr::Path(path, span) if let [name] = path.as_slice() => match self.lookup(name, *span)? {
                 Some(Binding::Value(v)) => Ok(v),
                 Some(b) => Err(at(format!(
-                    "`{}` is {}, known only when the kernel runs; this wants a value known now",
-                    path[0],
+                    "`{name}` is {}, known only when the kernel runs; this wants a value known now",
                     b.kind()
                 ))),
-                None => Err(at(format!("`{}` is not defined", path[0]))),
+                None => Err(at(format!("`{name}` is not defined"))),
             },
             _ => self.value(e, want).map(Rc::new),
         }
     }
 
-    /// The variable the module's static `i` is, named at `span`: the target makes it the first
-    /// time.
-    fn static_var(&mut self, i: usize, span: Span) -> Result<T::Var, Error> {
-        if let Some(v) = self.statics[i].1 {
+    /// The variable the module's static `name` is, named at `span`: the target makes it the
+    /// first time.
+    fn static_var(&mut self, name: &'a str, span: Span) -> Result<T::Var, Error> {
+        if let Some(&v) = self.made.get(name) {
             return Ok(v);
         }
-        let v = self.target.global(&self.statics[i].0.name).map_err(|m| err(span, m))?;
-        self.statics[i].1 = Some(v);
+        let v = self.target.global(name).map_err(|m| err(span, m))?;
+        self.made.insert(name, v);
         Ok(v)
     }
 
     /// The module constant `name`, evaluated the first time it is named, in a scope of
     /// constants alone.
     fn global(&mut self, name: &str, span: Span) -> Result<Option<Rc<Value>>, Error> {
-        let Some(i) = self.consts.iter().position(|(c, _)| c.name == name) else {
+        let Some(c) = self.consts.iter().copied().find(|c| c.name == name) else {
             return Ok(None);
         };
-        match &self.consts[i].1 {
-            State::Done(v) => return Ok(Some(v.clone())),
-            State::Busy => return Err(err(span, format!("`{name}` is defined in terms of itself"))),
-            State::Waiting => {}
+        match self.states.get(name) {
+            Some(State::Done(v)) => return Ok(Some(v.clone())),
+            Some(State::Busy) => return Err(err(span, format!("`{name}` is defined in terms of itself"))),
+            None => {}
         }
-        self.consts[i].1 = State::Busy;
-        let c = self.consts[i].0;
+        self.states.insert(&c.name, State::Busy);
         let outer = std::mem::take(&mut self.scopes);
         // What its definition names is Rust's to see, as the definition is Rust's.
         let saved = std::mem::take(&mut self.mentions);
@@ -381,7 +385,7 @@ impl<'a, T: Target> Eval<'a, T> {
         self.mentions = saved;
         self.scopes = outer;
         let v = Rc::new(v?);
-        self.consts[i].1 = State::Done(v.clone());
+        self.states.insert(&c.name, State::Done(v.clone()));
         Ok(Some(v))
     }
 
@@ -406,9 +410,9 @@ impl<'a, T: Target> Eval<'a, T> {
             }
             given.push((d.name.as_str(), sizes));
         }
-        self.target.directives(&given).map_err(|(i, fault)| {
-            let d = &f.directives[i];
-            Error { span: place(&fault, &d.values, d.span), message: fault.message }
+        self.target.directives(&given).map_err(|(i, fault)| match f.directives.get(i) {
+            Some(d) => Error { span: place(&fault, &d.values, d.span), message: fault.message },
+            None => Error { span: f.span, message: fault.message },
         })
     }
 
@@ -616,9 +620,12 @@ impl<'a, T: Target> Eval<'a, T> {
                 }
             }
             Expr::Call { func, generics, args, .. } => match (&**func, generics.as_slice(), args.as_slice()) {
-                (Expr::Path(p, _), [], [arg]) if p.len() == 2 && p[1] == "from_bits" => {
+                (Expr::Path(p, _), [], [arg])
+                    if let [ty, from_bits] = p.as_slice()
+                        && from_bits == "from_bits" =>
+                {
                     let bits = self.value(arg, Want::Any)?;
-                    match (p[0].as_str(), bits) {
+                    match (ty.as_str(), bits) {
                         ("f32", Value::Int(b, _)) => u32::try_from(b)
                             .map(|b| Value::F32(f32::from_bits(b)))
                             .map_err(|_| at(format!("{b} is not 32 bits"))),
@@ -722,21 +729,19 @@ impl<'a, T: Target> Eval<'a, T> {
     /// The variable `e` names, if it names one: `v`, `acc[2]`, `v.xmm`.
     fn place(&mut self, e: &Expr) -> Result<Option<T::Var>, Error> {
         match e {
-            Expr::Path(path, span) if path.len() == 1 => match self.lookup(&path[0], *span)? {
+            Expr::Path(path, span) if let [name] = path.as_slice() => match self.lookup(name, *span)? {
                 Some(Binding::Var(v)) => Ok(Some(v)),
-                Some(Binding::Static(i)) => self.static_var(i, *span).map(Some),
+                Some(Binding::Static(s)) => self.static_var(s, *span).map(Some),
                 _ => Ok(None),
             },
             Expr::Index(base, index, span) => {
                 let Expr::Path(path, pspan) = &**base else { return Ok(None) };
-                if path.len() != 1 {
-                    return Ok(None);
-                }
-                let Some(Binding::Vars(vs)) = self.lookup(&path[0], *pspan)? else { return Ok(None) };
+                let [name] = path.as_slice() else { return Ok(None) };
+                let Some(Binding::Vars(vs)) = self.lookup(name, *pspan)? else { return Ok(None) };
                 let i = self.count(index)?;
                 match vs.get(i) {
                     Some(&v) => Ok(Some(v)),
-                    None => Err(err(*span, format!("`{}` has {} variables; there is no [{i}]", path[0], vs.len()))),
+                    None => Err(err(*span, format!("`{name}` has {} variables; there is no [{i}]", vs.len()))),
                 }
             }
             Expr::Field(base, field, span) => match self.place(base)? {
@@ -749,13 +754,13 @@ impl<'a, T: Target> Eval<'a, T> {
     }
 
     /// What `e` stands for, for `let` and `for`: a variable, many, or a value.
-    fn binding(&mut self, e: &Expr) -> Result<Binding<T::Var>, Error> {
+    fn binding(&mut self, e: &Expr) -> Result<Binding<'a, T::Var>, Error> {
         if let Expr::Path(path, span) = e
-            && path.len() == 1
-            && let Some(b) = self.lookup(&path[0], *span)?
+            && let [name] = path.as_slice()
+            && let Some(b) = self.lookup(name, *span)?
         {
             return match b {
-                Binding::Static(i) => self.static_var(i, *span).map(Binding::Var),
+                Binding::Static(s) => self.static_var(s, *span).map(Binding::Var),
                 b => Ok(b),
             };
         }
@@ -769,8 +774,8 @@ impl<'a, T: Target> Eval<'a, T> {
     /// or one of them inverted, negated or joined to another.
     fn runtime(&mut self, e: &Expr) -> Result<bool, Error> {
         Ok(match e {
-            Expr::Path(path, span) if path.len() == 1 => {
-                !matches!(self.lookup(&path[0], *span)?, Some(Binding::Value(_)))
+            Expr::Path(path, span) if let [name] = path.as_slice() => {
+                !matches!(self.lookup(name, *span)?, Some(Binding::Value(_)))
             }
             Expr::Field(..) => self.place(e)?.is_some() || dotted(e).is_some(),
             Expr::Index(..) => self.place(e)?.is_some(),
@@ -784,13 +789,13 @@ impl<'a, T: Target> Eval<'a, T> {
     /// What `e` gives an instruction.
     fn operand(&mut self, e: &Expr) -> Result<Operand<T::Var>, Error> {
         match e {
-            Expr::Path(path, span) if path.len() == 1 => match self.lookup(&path[0], *span)? {
+            Expr::Path(path, span) if let [name] = path.as_slice() => match self.lookup(name, *span)? {
                 Some(Binding::Var(v)) => Ok(Operand::Var(v)),
-                Some(Binding::Static(i)) => self.static_var(i, *span).map(Operand::Var),
+                Some(Binding::Static(s)) => self.static_var(s, *span).map(Operand::Var),
                 Some(Binding::Value(v)) => scalar(&v, *span),
                 Some(Binding::Vars(vs)) => Ok(Operand::Vector(vs.into_iter().map(Operand::Var).collect())),
                 Some(Binding::Label(l)) => Ok(Operand::Label(l)),
-                None => self.unscoped(&path[0], *span),
+                None => self.unscoped(name, *span),
             },
             Expr::Field(..) => match self.place(e)? {
                 Some(v) => Ok(Operand::Var(v)),
@@ -871,7 +876,7 @@ impl<'a, T: Target> Eval<'a, T> {
     /// instruction names it: one its `#[instances(..)]` lists.
     fn instance_named(&mut self, func: &Expr, generics: &[Expr], span: Span) -> Result<Operand<T::Var>, Error> {
         let (name, at) = match func {
-            Expr::Path(path, at) if path.len() == 1 => (&path[0], *at),
+            Expr::Path(path, at) if let [name] = path.as_slice() => (name, *at),
             _ => return Err(err(span, "an instance is of a function of the module, by its name, as `tile::<4>`")),
         };
         let Some(&f) = self.compiled.iter().find(|f| f.name == *name) else {
@@ -918,8 +923,11 @@ impl<'a, T: Target> Eval<'a, T> {
     /// function of the module that names an ABI, `[f]` or `[tile::<4>]`.
     fn memory(&mut self, inner: &Expr, span: Span) -> Result<Operand<T::Var>, Error> {
         let func = match inner {
-            Expr::Path(path, at) if path.len() == 1 && self.lookup(&path[0], *at)?.is_none() => {
-                Some(self.unscoped(&path[0], *at)?)
+            Expr::Path(path, at)
+                if let [name] = path.as_slice()
+                    && self.lookup(name, *at)?.is_none() =>
+            {
+                Some(self.unscoped(name, *at)?)
             }
             Expr::Instance { func, generics, span } => Some(self.instance_named(func, generics, *span)?),
             _ => None,
@@ -1031,7 +1039,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 Ok(())
             }
             Stmt::For { var, iter, body, .. } => {
-                let items: Vec<Binding<T::Var>> = match self.binding(iter)? {
+                let items: Vec<Binding<'a, T::Var>> = match self.binding(iter)? {
                     Binding::Value(ref v) if let Value::Array(xs) = &**v => {
                         // An array made by the header and one that is lent are both copied below,
                         // item by item. The count of the one made stands for its copy, and the one
@@ -1248,7 +1256,12 @@ impl<'a, T: Target> Eval<'a, T> {
         }
         let found = self.scopes.last().and_then(|scope| {
             scope.iter().rev().find_map(|(n, b)| match b {
-                Binding::Label(l) if path.len() == 1 && *n == path[0] => Some(*l),
+                Binding::Label(l)
+                    if let [name] = path.as_slice()
+                        && n == name =>
+                {
+                    Some(*l)
+                }
                 _ => None,
             })
         });
@@ -1265,19 +1278,19 @@ impl<'a, T: Target> Eval<'a, T> {
         };
         let mut out = String::new();
         let mut rest = text.as_str();
-        while let Some(i) = rest.find(['{', '}']) {
-            out += &rest[..i];
-            let tail = &rest[i..];
-            if tail.starts_with("{{") || tail.starts_with("}}") {
-                out.push(tail.as_bytes()[0] as char);
-                rest = &tail[2..];
+        while let Some((before, tail)) = rest.find(['{', '}']).and_then(|i| rest.split_at_checked(i)) {
+            out += before;
+            let escaped =
+                [('{', "{{"), ('}', "}}")].into_iter().find_map(|(c, pair)| Some((c, tail.strip_prefix(pair)?)));
+            if let Some((brace, after)) = escaped {
+                out.push(brace);
+                rest = after;
                 continue;
             }
-            let close = tail.find('}').filter(|_| tail.starts_with('{'));
-            let Some(close) = close else {
+            let Some((name, after)) = tail.strip_prefix('{').and_then(|inner| inner.split_once('}')) else {
                 return Err(err(*sspan, "a `{` in a note opens a name and a `}` closes it; `{{` and `}}` are braces"));
             };
-            let name = tail[1..close].trim();
+            let name = name.trim();
             match self.lookup(name, *sspan)? {
                 Some(Binding::Value(v)) => {
                     self.step(value::held(&v), *sspan)?;
@@ -1286,7 +1299,7 @@ impl<'a, T: Target> Eval<'a, T> {
                 Some(b) => return Err(err(*sspan, format!("`{name}` is {}, and a note shows values", b.kind()))),
                 None => return Err(err(*sspan, format!("`{name}` is not defined"))),
             }
-            rest = &tail[close + 1..];
+            rest = after;
         }
         out += rest;
         self.target.note(&out);
@@ -1329,7 +1342,7 @@ impl<'a, T: Target> Eval<'a, T> {
     }
 
     /// Binds `f`'s parameters to what the caller gave, in `f`'s scope.
-    fn params(&mut self, f: &Fn, args: &[Expr], given: Vec<Binding<T::Var>>) -> Result<(), Error> {
+    fn params(&mut self, f: &Fn, args: &[Expr], given: Vec<Binding<'a, T::Var>>) -> Result<(), Error> {
         for ((p, e), b) in f.params.iter().zip(args).zip(given) {
             let at = |m: String| err(e.span(), format!("`{}`: {m}", p.name));
             let b = match (&p.ty, b) {
@@ -1392,7 +1405,7 @@ fn sum<V>(l: Lin<V>, span: Span) -> Result<(Vec<(V, i64)>, i64), Error> {
 /// `a.b.c` as it reads, if `e` is names joined by dots.
 fn dotted(e: &Expr) -> Option<String> {
     match e {
-        Expr::Path(path, _) if path.len() == 1 => Some(path[0].clone()),
+        Expr::Path(path, _) if let [name] = path.as_slice() => Some(name.clone()),
         Expr::Field(base, name, _) => Some(format!("{}.{name}", dotted(base)?)),
         _ => None,
     }
@@ -1422,8 +1435,12 @@ fn spelled(name: &str) -> String {
 fn placed_label(s: &Stmt) -> Option<(&str, Span)> {
     let Stmt::Expr(Expr::Call { func, generics, args, .. }) = s else { return None };
     match (&**func, generics.as_slice(), args.as_slice()) {
-        (Expr::Path(f, _), [], [Expr::Path(name, span)]) if f.len() == 1 && f[0] == "label" && name.len() == 1 => {
-            Some((&name[0], *span))
+        (Expr::Path(f, _), [], [Expr::Path(names, span)])
+            if let [label] = f.as_slice()
+                && label == "label"
+                && let [name] = names.as_slice() =>
+        {
+            Some((name, *span))
         }
         _ => None,
     }

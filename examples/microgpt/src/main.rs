@@ -90,8 +90,8 @@ fn run(
     samples: usize,
     mut step: impl FnMut(usize, f64),
 ) -> Op<Vec<String>> {
-    for i in 0..steps {
-        let tokens = model::tokenize(&names.docs[i % names.docs.len()], &names.chars)?;
+    for (i, doc) in names.docs.iter().cycle().take(steps).enumerate() {
+        let tokens = model::tokenize(doc, &names.chars)?;
         step(i, model::train(ops, &tokens, i, steps)?);
     }
     (0..samples).map(|_| model::sample(ops, rng, INV_TEMP, &names.chars)).collect()
@@ -141,9 +141,9 @@ fn main() -> ExitCode {
     };
     let ran = match backend {
         Backend::Cpu => match Cpu::new(&params) {
-            Some(mut cpu) => run(&mut cpu, &names, &mut rng, STEPS, SAMPLES, print),
-            None => {
-                eprintln!("this CPU lacks AVX2 or FMA, which the kernels are written in");
+            Ok(mut cpu) => run(&mut cpu, &names, &mut rng, STEPS, SAMPLES, print),
+            Err(e) => {
+                eprintln!("{e}");
                 return ExitCode::FAILURE;
             }
         },
@@ -154,7 +154,13 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         },
-        Backend::Reference => run(&mut Reference::new(&params), &names, &mut rng, STEPS, SAMPLES, print),
+        Backend::Reference => match Reference::new(&params) {
+            Ok(mut reference) => run(&mut reference, &names, &mut rng, STEPS, SAMPLES, print),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        },
     };
     let samples = match ran {
         Ok(samples) => samples,

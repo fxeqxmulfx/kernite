@@ -22,7 +22,9 @@ pub(crate) fn kept<Op>(p: &Program<Op>, s: &dyn Spill<Op>) -> Vec<Width> {
                     Operand::Reg(_, width) => width,
                     _ => s.width(v.class),
                 };
-                named[v.id as usize] = named[v.id as usize].max(width);
+                if let Some(at) = named.get_mut(v.id as usize) {
+                    *at = (*at).max(width);
+                }
             }
         }
     }
@@ -48,27 +50,28 @@ pub(crate) fn choose<Op>(p: &Program<Op>, blocks: &[Block], live: &Live, candida
     let mut back: Vec<Option<usize>> = vec![None; blocks.len()];
     for (b, block) in blocks.iter().enumerate() {
         for &s in block.succs.iter().filter(|&&s| s <= b) {
-            back[s] = Some(back[s].map_or(b, |e| e.max(b)));
+            if let Some(last) = back.get_mut(s) {
+                *last = Some(last.map_or(b, |e| e.max(b)));
+            }
         }
     }
     let often: Vec<u128> = Vec::from_fn(blocks.len(), |b| {
         let loops = back.iter().enumerate().filter(|&(top, end)| top <= b && end.is_some_and(|e| b <= e)).count();
         10u128.saturating_pow(loops as u32)
     });
-    let (mut cost, mut size) = (vec![0u128; candidates.len()], vec![0u128; candidates.len()]);
-    for (k, &c) in candidates.iter().enumerate() {
-        // A parameter's store on entry.
-        cost[k] = u128::from(p.params.iter().any(|(v, _)| v.id as usize == c));
-    }
-    for (b, block) in blocks.iter().enumerate() {
-        let mut now = live.outs[b].clone();
-        for item in p.body[block.items.clone()].iter().rev() {
+    // Each candidate, with what it costs and how many instructions it is live after. A parameter costs a store on
+    // entry.
+    let mut tally: Vec<(usize, u128, u128)> =
+        candidates.iter().map(|&c| (c, u128::from(p.params.iter().any(|(v, _)| v.id as usize == c)), 0)).collect();
+    for ((block, out), &often) in blocks.iter().zip(&live.outs).zip(&often) {
+        let mut now = out.clone();
+        for item in block.items_in(&p.body).iter().rev() {
             let Item::Inst(inst) = item else { continue };
-            for (k, &c) in candidates.iter().enumerate() {
-                size[k] += u128::from(now.contains(c));
-                let moves = u128::from(inst.reads().any(|r| r.id as usize == c))
-                    + u128::from(inst.writes().any(|w| w.id as usize == c));
-                cost[k] = cost[k].saturating_add(often[b].saturating_mul(moves));
+            for (c, cost, size) in &mut tally {
+                *size += u128::from(now.contains(*c));
+                let moves = u128::from(inst.reads().any(|r| r.id as usize == *c))
+                    + u128::from(inst.writes().any(|w| w.id as usize == *c));
+                *cost = cost.saturating_add(often.saturating_mul(moves));
             }
             for w in inst.writes() {
                 now.remove(w.id as usize);
@@ -78,10 +81,8 @@ pub(crate) fn choose<Op>(p: &Program<Op>, blocks: &[Block], live: &Live, candida
             }
         }
     }
-    let weighs = |k: usize, by: usize| cost[k].saturating_mul(size[by] + 1);
-    (0..candidates.len())
-        .min_by(|&a, &b| weighs(a, b).cmp(&weighs(b, a)).then(candidates[b].cmp(&candidates[a])))
-        .map(|k| candidates[k])
+    let weighs = |(_, cost, _): &(usize, u128, u128), (_, _, by): &(usize, u128, u128)| cost.saturating_mul(by + 1);
+    tally.iter().min_by(|a, b| weighs(a, b).cmp(&weighs(b, a)).then(b.0.cmp(&a.0))).map(|&(c, ..)| c)
 }
 
 /// `p` with its variable `v` kept in a slot of its own, as wide as [`kept`] says, `s` storing it there after each
@@ -90,9 +91,9 @@ pub(crate) fn choose<Op>(p: &Program<Op>, blocks: &[Block], live: &Live, candida
 /// is stored on entry, from the register it arrives in; a result is loaded into itself before each return that reads
 /// it, in the register it leaves in. [`tidy`] leaves out the moves that the colouring makes needless.
 pub(crate) fn rewrite<Op>(p: &mut Program<Op>, v: usize, s: &dyn Spill<Op>) {
-    let RegInfo { class, name } = p.regs[v].clone();
-    let var = p.vreg(v);
-    let width = kept(p, s)[v];
+    // A number that is no variable of the program has nothing to keep in a slot.
+    let (Some(var), Some(&width)) = (p.vreg(v), kept(p, s).get(v)) else { return };
+    let (class, name) = (var.class, p.var_name(var).to_string());
     let bytes = width.bytes();
     let slot = SlotId(p.slots.len() as u32);
     p.slots.push(Slot { name: name.clone(), size: bytes, align: bytes, spill: true });
@@ -152,7 +153,9 @@ struct Move {
 /// `inst` as a [`Move`], if it is one: a move is known by its being equal to what `s` stores or loads.
 fn moved<Op: PartialEq>(p: &Program<Op>, inst: &Inst<Op, VReg>, s: &dyn Spill<Op>) -> Option<Move> {
     let (slot, width) = inst.args.iter().find_map(|arg| match arg.operand {
-        Operand::Mem(Mem { base: Base::Slot(slot), width, .. }) if p.slots[slot.0 as usize].spill => {
+        Operand::Mem(Mem { base: Base::Slot(slot), width, .. })
+            if p.slots.get(slot.0 as usize).is_some_and(|slot| slot.spill) =>
+        {
             Some((slot, width))
         }
         _ => None,
@@ -215,7 +218,7 @@ pub(crate) fn tidy<Op: PartialEq>(
 fn reload<Op: PartialEq>(p: &mut Program<Op>, regs: &mut [Option<PReg>], s: &dyn Spill<Op>) -> Result<(), Error> {
     // A variable the body names has a register, and [`compile`](crate::compile) refuses one that has none: here it
     // holds nothing, and a load of it stays.
-    let reg = |v: VReg| regs[v.id as usize];
+    let reg = |v: VReg| regs.get(v.id as usize).copied().flatten();
     // How many instructions name each variable.
     let mut named = vec![0; p.regs.len()];
     for item in &p.body {
@@ -224,7 +227,9 @@ fn reload<Op: PartialEq>(p: &mut Program<Op>, regs: &mut [Option<PReg>], s: &dyn
         vars.sort();
         vars.dedup();
         for v in vars {
-            named[v.id as usize] += 1;
+            if let Some(count) = named.get_mut(v.id as usize) {
+                *count += 1;
+            }
         }
     }
     // The load of a spilled variable that an item is, if it is one.
@@ -238,7 +243,7 @@ fn reload<Op: PartialEq>(p: &mut Program<Op>, regs: &mut [Option<PReg>], s: &dyn
         let Some(at) = reg(m.var) else { return Load::Stays };
         let mut holders = held.iter().filter(|(_, h)| h.slot == m.slot);
         let from = holders.clone().find(|(r, _)| *r == at).or_else(|| holders.next()).cloned();
-        let once = named[m.var.id as usize] == 2 && !p.results.iter().any(|&(r, _)| r == m.var);
+        let once = named.get(m.var.id as usize) == Some(&2) && !p.results.iter().any(|&(r, _)| r == m.var);
         if let Some((held_at, h)) = &from
             && once
             && next.is_some_and(|next| next.reads().any(|v| v == m.var))
@@ -248,7 +253,10 @@ fn reload<Op: PartialEq>(p: &mut Program<Op>, regs: &mut [Option<PReg>], s: &dyn
         }
         held.retain(|(r, _)| *r != at);
         held.push((at, Mirror { slot: m.slot, by: vec![m.var] }));
-        from.map_or(Load::Stays, |(_, h)| Load::Becomes(s.copy(m.var, h.by[0], m.width), h.by))
+        let Some((_, h)) = from else { return Load::Stays };
+        // A mirror has the variable that made it: one that has none is a mirror of nothing, and the load stays.
+        let Some(&by) = h.by.first() else { return Load::Stays };
+        Load::Becomes(s.copy(m.var, by, m.width), h.by)
     };
     let step = |i: usize, inst: &Inst<Op, VReg>, held: &mut Mirrors| {
         let Some(Move { slot, var, load, .. }) = moved(p, inst, s) else {
@@ -260,7 +268,12 @@ fn reload<Op: PartialEq>(p: &mut Program<Op>, regs: &mut [Option<PReg>], s: &dyn
                     Clobber::All(r) => held.retain(|(at, _)| *at != r),
                     // The lower half stays, and holds all that a slot of less than the register keeps.
                     Clobber::Upper(r) => {
-                        held.retain(|(at, m)| *at != r || p.slots[m.slot.0 as usize].size < s.width(r.class).bytes());
+                        held.retain(|(at, m)| {
+                            *at != r
+                                || p.slots
+                                    .get(m.slot.0 as usize)
+                                    .is_some_and(|slot| slot.size < s.width(r.class).bytes())
+                        });
                     }
                 }
             }
@@ -276,7 +289,7 @@ fn reload<Op: PartialEq>(p: &mut Program<Op>, regs: &mut [Option<PReg>], s: &dyn
         // This load and the loads after it are for the instruction after them. The registers that those not left out
         // write are found by running the loads with none written, then with those the run before wrote, until a run
         // writes the same: no run writes fewer than the one before.
-        let group: Vec<Move> = p.body[i..].iter().map_while(loads).collect();
+        let group: Vec<Move> = p.body.get(i..).unwrap_or_default().iter().map_while(loads).collect();
         let next = match p.body.get(i + group.len()) {
             Some(Item::Inst(next)) => Some(next),
             _ => None,
@@ -290,7 +303,7 @@ fn reload<Op: PartialEq>(p: &mut Program<Op>, regs: &mut [Option<PReg>], s: &dyn
                 .filter_map(|m| reg(m.var))
                 .collect();
             if wrote == written {
-                break fate(&group[0], next, &written, held);
+                break group.first().map_or(Load::Stays, |first| fate(first, next, &written, held));
             }
             written = wrote;
         }
@@ -311,32 +324,39 @@ fn reload<Op: PartialEq>(p: &mut Program<Op>, regs: &mut [Option<PReg>], s: &dyn
     // `rank`: the parameter, if one is in it, and else the one of the lowest number.
     let mut one: Vec<usize> = (0..p.regs.len()).collect();
     let root = |one: &[usize], mut v: usize| {
-        while one[v] != v {
-            v = one[v];
+        while let Some(&up) = one.get(v)
+            && up != v
+        {
+            v = up;
         }
         v
     };
     let rank = |v: usize| (!p.params.iter().any(|(q, _)| q.id as usize == v), v);
     for fate in fates.iter().flatten() {
         let (Load::Reads(_, by) | Load::Becomes(_, by)) = fate else { continue };
-        for pair in by.windows(2) {
-            let (a, b) = (root(&one, pair[0].id as usize), root(&one, pair[1].id as usize));
+        for (a, b) in by.iter().zip(by.iter().skip(1)) {
+            let (a, b) = (root(&one, a.id as usize), root(&one, b.id as usize));
             let (low, high) = if rank(a) <= rank(b) { (a, b) } else { (b, a) };
-            one[high] = low;
+            if let Some(up) = one.get_mut(high) {
+                *up = low;
+            }
         }
     }
     for fate in fates.iter().flatten() {
-        if let Load::Reads(var, by) = fate {
-            one[var.id as usize] = by[0].id as usize;
+        if let Load::Reads(var, by) = fate
+            && let Some(first) = by.first()
+            && let Some(up) = one.get_mut(var.id as usize)
+        {
+            *up = first.id as usize;
         }
     }
-    let to: Vec<VReg> = (0..one.len()).map(|v| p.vreg(root(&one, v))).collect();
+    let to: Vec<Option<VReg>> = (0..one.len()).map(|v| p.vreg(root(&one, v))).collect();
     for (v, r) in regs.iter_mut().enumerate() {
-        if to[v] != p.vreg(v) {
+        if root(&one, v) != v {
             *r = None;
         }
     }
-    let rename = |inst| renamed(inst, |v| to[v.id as usize]);
+    let rename = |inst| renamed(inst, |v| to.get(v.id as usize).copied().flatten().unwrap_or(v));
     p.body = std::mem::take(&mut p.body)
         .into_iter()
         .zip(fates)
@@ -365,12 +385,14 @@ fn drop_dead_stores<Op: PartialEq>(p: &mut Program<Op>, s: &dyn Spill<Op>) -> Re
     };
     let live = liveness(&p.body, &blocks, p.slots.len(), &touches);
     let mut dead = vec![false; p.body.len()];
-    for (b, block) in blocks.iter().enumerate() {
-        let mut now = live.outs[b].clone();
+    for (block, out) in blocks.iter().zip(&live.outs) {
+        let mut now = out.clone();
         for i in block.items.clone().rev() {
-            let Item::Inst(inst) = &p.body[i] else { continue };
+            let Some(Item::Inst(inst)) = p.body.get(i) else { continue };
             let (reads, writes) = touches(inst);
-            dead[i] = writes.iter().any(|&slot| !now.contains(slot));
+            if let Some(dead) = dead.get_mut(i) {
+                *dead = writes.iter().any(|&slot| !now.contains(slot));
+            }
             before(&mut now, &reads, &writes);
         }
     }
@@ -387,8 +409,9 @@ fn drop_unused_slots<Op: PartialEq>(p: &mut Program<Op>, s: &dyn Spill<Op>) {
     for item in &p.body {
         if let Item::Inst(inst) = item
             && let Some(m) = moved(p, inst, s)
+            && let Some(at) = used.get_mut(m.slot.0 as usize)
         {
-            used[m.slot.0 as usize] = true;
+            *at = true;
         }
     }
     let keep: Vec<bool> = p.slots.iter().zip(&used).map(|(slot, &used)| used || !slot.spill).collect();
@@ -403,11 +426,13 @@ fn drop_unused_slots<Op: PartialEq>(p: &mut Program<Op>, s: &dyn Spill<Op>) {
     p.body = body
         .into_iter()
         .map(|item| match item {
-            Item::Inst(inst) => Item::Inst(match moved(p, &inst, s) {
-                Some(m) if m.load => s.load(m.var, number[m.slot.0 as usize], m.width),
-                Some(m) => s.store(number[m.slot.0 as usize], m.var, m.width),
-                None => inst,
-            }),
+            Item::Inst(inst) => {
+                let numbered = moved(p, &inst, s).and_then(|m| {
+                    let slot = *number.get(m.slot.0 as usize)?;
+                    Some(if m.load { s.load(m.var, slot, m.width) } else { s.store(slot, m.var, m.width) })
+                });
+                Item::Inst(numbered.unwrap_or(inst))
+            }
             item => item,
         })
         .collect();

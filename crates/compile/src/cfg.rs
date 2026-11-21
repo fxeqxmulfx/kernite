@@ -14,6 +14,13 @@ pub(crate) struct Block {
     pub(crate) succs: Vec<usize>,
 }
 
+impl Block {
+    /// Its items in `body`, the body [`blocks`] cut it from, which has them all.
+    pub(crate) fn items_in<'a, Op, R>(&self, body: &'a [Item<Op, R>]) -> &'a [Item<Op, R>] {
+        body.get(self.items.clone()).unwrap_or_default()
+    }
+}
+
 /// A body cut into [`Block`]s, in body order: a block starts at the top, at every label and
 /// after every instruction that can jump.
 pub(crate) fn blocks<Op, R>(body: &[Item<Op, R>]) -> Result<Vec<Block>, Error> {
@@ -42,7 +49,7 @@ pub(crate) fn blocks<Op, R>(body: &[Item<Op, R>]) -> Result<Vec<Block>, Error> {
     };
     let mut blocks = Vec::with_capacity(ranges.len());
     for (b, items) in ranges.iter().enumerate() {
-        let last = body[items.clone()].iter().rev().find_map(|item| match item {
+        let last = body.get(items.clone()).unwrap_or_default().iter().rev().find_map(|item| match item {
             Item::Inst(inst) => Some(&inst.flow),
             _ => None,
         });
@@ -67,60 +74,65 @@ pub fn on_every_path<Op>(p: &Program<Op>, leaves: &[usize]) -> Result<Vec<bool>,
     let blocks = blocks(&p.body)?;
     // The end is a block of its own, after the last.
     let end = blocks.len();
-    let mut succs: Vec<Vec<usize>> = blocks.iter().map(|b| b.succs.clone()).collect();
+    // The first place a thread may end in a block, if one does. An index that is no item of the body is no such place.
+    let leaving = |b: &Block| leaves.iter().copied().filter(|leave| b.items.contains(leave)).min();
     // How far every path into each block runs it: through its first leave, if it has one.
-    let mut runs: Vec<usize> = blocks.iter().map(|b| b.items.end).collect();
-    // An index that is no item of the body is no place a thread ends.
-    for &leave in leaves {
-        if let Some(b) = blocks.iter().position(|b| b.items.contains(&leave)) {
-            succs[b].push(end);
-            runs[b] = runs[b].min(leave + 1);
-        }
-    }
+    let runs: Vec<usize> = blocks.iter().map(|b| leaving(b).map_or(b.items.end, |leave| leave + 1)).collect();
+    let mut succs: Vec<Vec<usize>> =
+        blocks.iter().map(|b| b.succs.iter().copied().chain(leaving(b).map(|_| end)).collect()).collect();
     for s in succs.iter_mut().filter(|s| s.is_empty()) {
         s.push(end);
     }
-    let mut reaches = vec![false; end + 1];
-    reaches[end] = true;
+    let mut reaches = Bits::new(end + 1);
+    reaches.insert(end);
     let mut grown = true;
     while grown {
         grown = false;
-        for b in (0..end).rev() {
-            if !reaches[b] && succs[b].iter().any(|&s| reaches[s]) {
-                reaches[b] = true;
+        for (b, s) in succs.iter().enumerate().rev() {
+            if !reaches.contains(b) && s.iter().any(|&to| reaches.contains(to)) {
+                reaches.insert(b);
                 grown = true;
             }
         }
     }
     for (b, s) in succs.iter_mut().enumerate() {
-        if !reaches[b] && s.iter().any(|&to| to <= b) {
+        if !reaches.contains(b) && s.iter().any(|&to| to <= b) {
             s.push(end);
         }
     }
     // The blocks that every path from `b` to the end passes through, `b` among them.
-    let mut after = vec![Bits::full(end + 1); end + 1];
-    after[end] = Bits::new(end + 1);
-    after[end].insert(end);
+    let mut last = Bits::new(end + 1);
+    last.insert(end);
+    let mut after = vec![Bits::full(end + 1); end];
+    after.push(last);
     let mut changed = true;
     while changed {
         changed = false;
-        for b in (0..end).rev() {
+        for (b, s) in succs.iter().enumerate().rev() {
             let mut now = Bits::full(end + 1);
-            for &s in &succs[b] {
-                now.intersect_with(&after[s]);
+            for to in s.iter().filter_map(|&to| after.get(to)) {
+                now.intersect_with(to);
             }
             now.insert(b);
-            if now != after[b] {
-                after[b] = now;
+            if let Some(was) = after.get_mut(b)
+                && *was != now
+            {
+                *was = now;
                 changed = true;
             }
         }
     }
-    let mut on = vec![false; p.body.len()];
-    for b in after[0].iter().filter(|&b| b < end) {
-        on[blocks[b].items.start..runs[b]].fill(true);
-    }
-    Ok(on)
+    // The blocks tile the body in order: a block that every path runs has its items on every path, as far as it runs.
+    let first = after.first();
+    Ok(blocks
+        .iter()
+        .zip(&runs)
+        .enumerate()
+        .flat_map(|(b, (block, &run))| {
+            let on = first.is_some_and(|every| every.contains(b));
+            block.items.clone().map(move |i| on && i < run)
+        })
+        .collect())
 }
 
 /// Follows a value over `p`'s body to a fixed point: `start` is the value at the top of the body, `step` what the
@@ -136,16 +148,16 @@ pub fn forward<Op, S: Clone + PartialEq, T>(
     step: impl Fn(usize, &Inst<Op, VReg>, &mut S) -> T,
 ) -> Result<Vec<Option<T>>, Error> {
     let blocks = blocks(&p.body)?;
-    // The value at the top of each block, once a way to it is known.
-    let mut tops: Vec<Option<S>> = vec![None; blocks.len()];
-    tops[0] = Some(start);
-    // The value at the bottom of block `b`, and what `step` said of each of its items.
-    let run = |b: usize, top: &S| {
+    // The value at the top of each block, once a way to it is known: the first block's is `start`.
+    let mut tops: Vec<Option<S>> = std::iter::once(Some(start)).chain(blocks.iter().skip(1).map(|_| None)).collect();
+    // The value at the bottom of a block, and what `step` said of each of its items.
+    let run = |block: &Block, top: &S| {
         let mut now = top.clone();
-        let said: Vec<Option<T>> = blocks[b]
-            .items
-            .clone()
-            .map(|i| match &p.body[i] {
+        let items = block.items_in(&p.body);
+        let said: Vec<Option<T>> = items
+            .iter()
+            .zip(block.items.clone())
+            .map(|(item, i)| match item {
                 Item::Inst(inst) => Some(step(i, inst, &mut now)),
                 _ => None,
             })
@@ -156,21 +168,22 @@ pub fn forward<Op, S: Clone + PartialEq, T>(
     while changed {
         changed = false;
         for (b, block) in blocks.iter().enumerate() {
-            let Some(top) = &tops[b] else { continue };
-            let (bottom, _) = run(b, top);
+            let Some(Some(top)) = tops.get(b) else { continue };
+            let (bottom, _) = run(block, top);
             for &to in &block.succs {
-                let met = tops[to].as_ref().map_or_else(|| bottom.clone(), |t| meet(t, &bottom));
-                if tops[to].as_ref() != Some(&met) {
-                    tops[to] = Some(met);
+                let Some(at) = tops.get_mut(to) else { continue };
+                let met = at.as_ref().map_or_else(|| bottom.clone(), |t| meet(t, &bottom));
+                if at.as_ref() != Some(&met) {
+                    *at = Some(met);
                     changed = true;
                 }
             }
         }
     }
     // The blocks tile the body in order, so their items' results, put end to end, are the body's.
-    let said = tops.iter().enumerate().flat_map(|(b, top)| match top {
-        Some(top) => run(b, top).1,
-        None => blocks[b].items.clone().map(|_| None).collect(),
+    let said = tops.iter().zip(&blocks).flat_map(|(top, block)| match top {
+        Some(top) => run(block, top).1,
+        None => block.items.clone().map(|_| None).collect(),
     });
     Ok(said.collect())
 }

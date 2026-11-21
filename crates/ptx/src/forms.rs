@@ -913,11 +913,11 @@ impl Sel {
     pub fn takes(self, part: Part) -> bool {
         let w = part.which();
         match self {
-            Sel::One => w.len() == 1 && w[0] <= if part.halves { 1 } else { 3 },
+            Sel::One => matches!(w, [x] if *x <= if part.halves { 1 } else { 3 }),
             Sel::Halves => part.halves && w.len() == 2,
             Sel::Bytes => !part.halves && w.len() == 4,
             Sel::HalfMask => part.halves && matches!(w, [0] | [1] | [1, 0]),
-            Sel::ByteMask => !part.halves && w.iter().all(|&x| x <= 3) && w.windows(2).all(|p| p[0] > p[1]),
+            Sel::ByteMask => !part.halves && w.iter().all(|&x| x <= 3) && w.is_sorted_by(|a, b| a > b),
         }
     }
 
@@ -969,7 +969,7 @@ impl Part {
 
     /// Which bytes or halves, as written.
     pub fn which(&self) -> &[u8] {
-        &self.which[..usize::from(self.len)]
+        self.which.get(..usize::from(self.len)).unwrap_or_default()
     }
 }
 
@@ -1133,7 +1133,7 @@ impl Bound {
             .elems
             .iter()
             .zip(&self.choice)
-            .flat_map(|(e, c)| c.map(|k| e.alts[k].words.as_slice()))
+            .flat_map(|(e, c)| c.and_then(|k| e.alts.get(k)).map(|a| a.words.as_slice()))
             .flatten()
             .copied()
     }
@@ -1143,11 +1143,11 @@ impl Bound {
         self.words().any(|w| w == word)
     }
 
-    /// The type `t` is.
-    pub fn ty(&self, t: TyRef) -> Ty {
+    /// The type `t` is; none, for a slot the name gives no type.
+    pub fn ty(&self, t: TyRef) -> Option<Ty> {
         match t {
-            TyRef::Slot(i) => self.types[i],
-            TyRef::Fixed(t) => t,
+            TyRef::Slot(i) => self.types.get(i).copied(),
+            TyRef::Fixed(t) => Some(t),
         }
     }
 
@@ -1313,10 +1313,10 @@ fn make(form: &'static Form, choice: Vec<Option<usize>>) -> Bound {
     let mut needs = form.needs;
     let mut types = vec![];
     for (e, c) in form.elems.iter().zip(&choice) {
-        if let Some(k) = *c {
-            needs = needs.and(e.alts[k].needs);
+        if let Some(alt) = c.and_then(|k| e.alts.get(k)) {
+            needs = needs.and(alt.needs);
             if e.slot.is_some()
-                && let Some(ty) = e.alts[k].words.first().and_then(|w| Ty::parse(w))
+                && let Some(ty) = alt.words.first().and_then(|w| Ty::parse(w))
             {
                 types.push(ty);
             }
@@ -1376,7 +1376,10 @@ fn unknown(name: &str, op: &str, words: &[&str], of: &[&'static Form]) -> String
             ),
             _ => {
                 let alts: Vec<String> = e.alts.iter().map(|a| format!("`.{}`", a.words.join("."))).collect();
-                let what = if alts.len() == 1 { alts[0].clone() } else { format!("one of {}", alts.join(", ")) };
+                let what = match alts.as_slice() {
+                    [one] => one.clone(),
+                    _ => format!("one of {}", alts.join(", ")),
+                };
                 format!("`{name}` leaves out {what}: `{canon}`")
             }
         },
@@ -1443,10 +1446,11 @@ fn near(form: &'static Form, words: &[&str]) -> Near {
 /// What `b`'s checks need, or why its words cannot go together.
 fn check(b: &Bound, name: &str) -> Result<Needs, String> {
     let mut needs = Needs::default();
+    let first = b.types.first().copied();
     for c in &b.form.checks {
-        match c {
-            Check::Vec => {
-                let bits = b.lanes() as u32 * b.types[0].bits();
+        match (c, first) {
+            (Check::Vec, Some(t)) => {
+                let bits = b.lanes() as u32 * t.bits();
                 let op = b.form.op;
                 if bits == 256 && (op == "ld" || op == "st") {
                     return Err(format!(
@@ -1462,15 +1466,15 @@ fn check(b: &Bound, name: &str) -> Result<Needs, String> {
                     ));
                 }
             }
-            Check::B128Sys => {
-                if b.has("sys") && b.types[0] == Ty::B128 {
+            (Check::B128Sys, Some(t)) => {
+                if b.has("sys") && t == Ty::B128 {
                     needs = needs.and(Needs { ptx: 84, ..Needs::default() });
                 }
             }
-            Check::Cvt => needs = needs.and(cvt(b, name)?),
-            Check::Tex => {
-                let t = b.types[0].name();
-                match (b.has("v2"), b.types[0] == Ty::F16x2) {
+            (Check::Cvt, _) => needs = needs.and(cvt(b, name)?),
+            (Check::Tex, Some(ty)) => {
+                let t = ty.name();
+                match (b.has("v2"), ty == Ty::F16x2) {
                     (true, false) => {
                         return Err(format!("`{name}` returns four of a `{t}`, `.v4`; two only of an `f16x2`, `.v2`"));
                     }
@@ -1480,8 +1484,9 @@ fn check(b: &Bound, name: &str) -> Result<Needs, String> {
                     _ => {}
                 }
             }
-            // Of the operands, which the target checks.
-            Check::Neg | Check::Addr32 => {}
+            // Of the operands, which the target checks; or of a type, which a form that has such a check always has one
+            // of.
+            (Check::Neg | Check::Addr32 | Check::Vec | Check::B128Sys | Check::Tex, _) => {}
         }
     }
     Ok(needs)
@@ -1493,7 +1498,7 @@ fn check(b: &Bound, name: &str) -> Result<Needs, String> {
 /// fall outside what its type holds. What it needs beyond its words: ptxas takes `.ftz` from
 /// PTX 1.4 on, but with a few conversions from 1.5.
 fn cvt(b: &Bound, name: &str) -> Result<Needs, String> {
-    let (d, a) = (b.types[0], b.types[1]);
+    let &[d, a, ..] = b.types.as_slice() else { return Ok(Needs::default()) };
     let float = |t: Ty| t.kind() == Kind::Float;
     let irnd = ["rni", "rzi", "rmi", "rpi"].into_iter().find(|w| b.has(w));
     let frnd = ["rn", "rz", "rm", "rp"].into_iter().find(|w| b.has(w));
@@ -1730,7 +1735,7 @@ fn form(
     let (op, mut elems) = name_of(name, macros)?;
     let mut slot = 0;
     for e in &mut elems {
-        if e.alts.iter().all(|a| a.words.len() == 1 && Ty::parse(a.words[0]).is_some()) {
+        if e.alts.iter().all(|a| matches!(a.words.as_slice(), [w] if Ty::parse(w).is_some())) {
             if e.optional {
                 return Err(format!("`{line}`: a type is not to be left out"));
             }
@@ -1778,12 +1783,18 @@ fn form(
     Ok(Form { op, elems, operands, needs, wide, checks, line })
 }
 
+/// `s` split before the first of its characters that `stop` says ends it: all of `s` and nothing more, if none does.
+fn split_when(s: &str, stop: impl Fn(char) -> bool) -> (&str, &str) {
+    s.find(stop).and_then(|at| s.split_at_checked(at)).unwrap_or((s, ""))
+}
+
 /// The first word of `s` and the elements after it.
 fn name_of(s: &'static str, macros: &[(&'static str, Vec<Elem>)]) -> Result<(&'static str, Vec<Elem>), String> {
-    let end = s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(s.len());
-    let (op, mut rest) = s.split_at(end);
+    let past_word = |c: char| !(c.is_ascii_alphanumeric() || c == '_');
+    let (op, mut rest) = split_when(s, past_word);
     let mut elems: Vec<Elem> = vec![];
     while let Some(c) = rest.chars().next() {
+        let tail = rest.strip_prefix(c).unwrap_or_default();
         match c {
             '.' => {
                 let (alt, r) = alt_of(rest, true, s)?;
@@ -1792,9 +1803,9 @@ fn name_of(s: &'static str, macros: &[(&'static str, Vec<Elem>)]) -> Result<(&'s
             }
             '{' | '(' => {
                 let close = if c == '{' { '}' } else { ')' };
-                let end = rest.find(close).ok_or_else(|| format!("`{s}`: `{c}` is not closed"))?;
+                let (inside, after) = tail.split_once(close).ok_or_else(|| format!("`{s}`: `{c}` is not closed"))?;
                 let mut alts = vec![];
-                for a in rest[1..end].split('|') {
+                for a in inside.split('|') {
                     let (alt, r) = alt_of(a, false, s)?;
                     if !r.is_empty() {
                         return Err(format!("`{s}`: `{a}` is one choice"));
@@ -1802,21 +1813,19 @@ fn name_of(s: &'static str, macros: &[(&'static str, Vec<Elem>)]) -> Result<(&'s
                     alts.push(alt);
                 }
                 elems.push(Elem { alts, optional: c == '{', slot: None, why: None });
-                rest = &rest[end + 1..];
+                rest = after;
             }
             '$' => {
-                let end =
-                    rest[1..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).map_or(rest.len(), |e| e + 1);
-                let m = &rest[1..end];
+                let (m, after) = split_when(tail, past_word);
                 let (_, more) = macros.iter().find(|(n, _)| *n == m).ok_or_else(|| format!("`{s}`: no `${m}`"))?;
                 elems.extend(more.iter().cloned());
-                rest = &rest[end..];
+                rest = after;
             }
             '~' => {
-                let end = rest[1..].find(|c: char| !c.is_ascii_alphabetic()).map_or(rest.len(), |e| e + 1);
+                let (why, after) = split_when(tail, |c| !c.is_ascii_alphabetic());
                 let last = elems.last_mut().ok_or_else(|| format!("`{s}`: `~` follows an element"))?;
-                last.why = Some(&rest[1..end]);
-                rest = &rest[end..];
+                last.why = Some(why);
+                rest = after;
             }
             _ => return Err(format!("`{s}`: `{rest}` is no element")),
         }
@@ -1829,9 +1838,9 @@ fn alt_of(s: &'static str, one: bool, line: &str) -> Result<(Alt, &'static str),
     let mut rest = s;
     let mut words = vec![];
     while let Some(r) = rest.strip_prefix('.') {
-        let end = r.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':')).unwrap_or(r.len());
-        words.push(&r[..end]);
-        rest = &r[end..];
+        let (word, after) = split_when(r, |c| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'));
+        words.push(word);
+        rest = after;
         if one {
             break;
         }
@@ -1840,15 +1849,21 @@ fn alt_of(s: &'static str, one: bool, line: &str) -> Result<(Alt, &'static str),
         return Err(format!("`{line}`: `{s}` has no word"));
     }
     let mut needs = Needs::default();
+    // What follows the digits that `s` starts with.
+    fn after_digits(s: &str) -> &str {
+        split_when(s, |c| !c.is_ascii_digit()).1
+    }
     while let Some(r) = rest.strip_prefix('@') {
-        let digits = |from: usize| from + r[from..].find(|c: char| !c.is_ascii_digit()).unwrap_or(r.len() - from);
-        let version = |from: usize| match digits(from) {
-            major if r[major..].starts_with('.') => digits(major + 1),
-            major => major,
+        // A GPU, `sm80`, or a version, `7.8` or `7`.
+        let after = match r.strip_prefix("sm") {
+            Some(number) => after_digits(number),
+            None => {
+                let major = after_digits(r);
+                major.strip_prefix('.').map_or(major, after_digits)
+            }
         };
-        let end = if r.starts_with("sm") { digits(2) } else { version(0) };
-        needs = needs.and(req(&r[..end], line)?);
-        rest = &r[end..];
+        needs = needs.and(req(r.strip_suffix(after).unwrap_or(r), line)?);
+        rest = after;
     }
     Ok((Alt { words, needs }, rest))
 }
@@ -1954,15 +1969,14 @@ fn one(s: &'static str, line: &str) -> Result<Spec, String> {
             spec.exact = true;
         }
         "#" => spec.role = Role::Imm(Imm::Bits(32)),
-        _ if s.starts_with('[') => {
-            let inner = s[1..].strip_suffix(']').ok_or_else(|| format!("`{line}`: `{s}` is not closed"))?;
+        _ if let Some(inner) = s.strip_prefix('[') => {
+            let inner = inner.strip_suffix(']').ok_or_else(|| format!("`{line}`: `{s}` is not closed"))?;
             spec.role = Role::Handle;
             for o in inner.split(',') {
                 spec.inner.push(one(o, line)?);
             }
         }
-        _ if s.starts_with('#') => {
-            let r = &s[1..];
+        _ if let Some(r) = s.strip_prefix('#') => {
             spec.role = Role::Imm(if let Some(n) = r.strip_prefix('=') {
                 for v in n.split('|') {
                     num(v)?;
@@ -1988,7 +2002,7 @@ fn one(s: &'static str, line: &str) -> Result<Spec, String> {
                     '&' => spec.memory = true,
                     _ => spec.sreg = true,
                 }
-                t = &t[1..];
+                t = t.strip_prefix(c).unwrap_or_default();
             }
             if let Some((lead, r)) = t.split_once('+') {
                 spec.lead = Some(Ty::parse(lead).ok_or_else(|| format!("`{line}`: `{lead}` is no type"))?);

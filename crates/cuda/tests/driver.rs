@@ -479,6 +479,28 @@ fn a_module_s_memory_keeps_what_is_written_from_launch_to_launch() -> Result {
     Ok(())
 }
 
+/// A kernel that a call names is one the module was loaded with: a launch or a count of the blocks that run at once of
+/// another is an error that says so, and nothing is launched.
+#[test]
+fn a_kernel_is_refused_that_the_module_was_not_loaded_with() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let module = Module::load(&cuda, PTX, &["add_one"], &[])?;
+    let grid = Grid::new(1, 32);
+    // SAFETY: there is no kernel 1, so nothing is launched, and no argument is read.
+    let launch = unsafe { module.launch(1, grid, &[]) }.err();
+    assert_eq!(launch.map(|e| e.to_string()).as_deref(), Some("cuLaunchKernel: there is no kernel 1 in a module of 1"));
+    // SAFETY: as above.
+    let cooperative = unsafe { module.launch_cooperative(2, grid, &[]) }.err();
+    let said = cooperative.map(|e| e.to_string());
+    let want = "cuLaunchCooperativeKernel: there is no kernel 2 in a module of 1";
+    // A GPU that launches none cooperatively says that first.
+    assert!(said.as_deref().is_some_and(|said| said == want || said.contains("launches no kernel cooperatively")));
+    let resident = module.resident(1, 32, 0).err();
+    let want = "cuOccupancyMaxActiveBlocksPerMultiprocessor: there is no kernel 1 in a module of 1";
+    assert_eq!(resident.map(|e| e.to_string()).as_deref(), Some(want));
+    Ok(())
+}
+
 /// The module's memory a call asks for is one it was loaded with, and its bytes a whole number of
 /// the elements it is asked for as; what is written to it or read from it has as many elements as
 /// it has. Each says so, and none is written.

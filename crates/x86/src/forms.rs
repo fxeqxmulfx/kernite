@@ -560,6 +560,8 @@ pub enum Miss {
     Wants {
         /// Where.
         at: usize,
+        /// What is there.
+        shape: Shape,
         /// What those forms take there, each once.
         wants: Vec<Kind>,
     },
@@ -577,48 +579,47 @@ pub enum Miss {
 /// holds, if it holds data, or none.
 pub fn choose(forms: &'static [Form], shapes: &[Shape]) -> Result<&'static Form, Miss> {
     let mut fit: Vec<&'static Form> = vec![];
-    let mut furthest: Option<(usize, Vec<Kind>)> = None;
+    let mut furthest: Option<(usize, Shape, Vec<Kind>)> = None;
     for form in forms.iter().filter(|f| f.operands.len() == shapes.len()) {
-        let Some(at) = form.operands.iter().zip(shapes).position(|(s, &shape)| !s.kind.fits(shape)) else {
+        let misfit = form.operands.iter().zip(shapes).enumerate().find(|(_, (s, shape))| !s.kind.fits(**shape));
+        let Some((at, (spec, &shape))) = misfit else {
             fit.push(form);
             continue;
         };
-        let kind = form.operands[at].kind;
+        let kind = spec.kind;
         match &mut furthest {
-            Some((far, wants)) if *far == at => {
+            Some((far, _, wants)) if *far == at => {
                 if !wants.contains(&kind) {
                     wants.push(kind);
                 }
             }
-            Some((far, _)) if *far > at => {}
-            _ => furthest = Some((at, vec![kind])),
+            Some((far, ..)) if *far > at => {}
+            _ => furthest = Some((at, shape, vec![kind])),
         }
     }
-    if fit.is_empty() {
-        return Err(match furthest {
-            Some((at, wants)) => Miss::Wants { at, wants },
-            None => {
-                let mut counts: Vec<usize> = forms.iter().map(|f| f.operands.len()).collect();
-                counts.sort();
-                counts.dedup();
-                Miss::Count(counts)
-            }
-        });
-    }
+    let size_at = |f: &Form, at: usize| f.operands.get(at).and_then(|s| s.kind.size());
     for (at, &shape) in shapes.iter().enumerate() {
         let Shape::Mem { size: None, data, .. } = shape else { continue };
-        let mut sizes: Vec<Width> = fit.iter().filter_map(|f| f.operands[at].kind.size()).collect();
+        let mut sizes: Vec<Width> = fit.iter().filter_map(|f| size_at(f, at)).collect();
         sizes.sort();
         sizes.dedup();
         if sizes.len() < 2 {
             continue;
         }
         match data.and_then(|n| sizes.iter().copied().find(|w| w.bytes() as usize == n)) {
-            Some(w) => fit.retain(|f| f.operands[at].kind.size() == Some(w)),
+            Some(w) => fit.retain(|f| size_at(f, at) == Some(w)),
             None => return Err(Miss::Size { at, sizes }),
         }
     }
-    Ok(fit[0])
+    fit.first().copied().ok_or_else(|| match furthest {
+        Some((at, shape, wants)) => Miss::Wants { at, shape, wants },
+        None => {
+            let mut counts: Vec<usize> = forms.iter().map(|f| f.operands.len()).collect();
+            counts.sort();
+            counts.dedup();
+            Miss::Count(counts)
+        }
+    })
 }
 
 /// What `wants`, kinds of operand forms take in a place, are, for a message about `given`,
@@ -674,8 +675,9 @@ pub fn wanted(wants: &[Kind], given: Shape) -> String {
             parts.push(noun);
         }
     }
-    if let Some((alone, beside)) = views {
-        parts[0] = if parts.len() == 1 { alone } else { format!("a gpr ({beside})") };
+    let count = parts.len();
+    if let (Some((alone, beside)), [first, ..]) = (views, parts.as_mut_slice()) {
+        *first = if count == 1 { alone } else { format!("a gpr ({beside})") };
     }
     list(&parts)
 }
@@ -795,8 +797,8 @@ fn head_of(head: &'static str, line: &str) -> Result<(Vec<&'static str>, Widths,
             }
             (names, parsed, rest)
         }
-        None => match head.split_once('@') {
-            Some((names, _)) => (names, vec![(0, None)], &head[names.len()..]),
+        None => match head.find('@').and_then(|at| head.split_at_checked(at)) {
+            Some((names, rest)) => (names, vec![(0, None)], rest),
             None => (head, vec![(0, None)], ""),
         },
     };
@@ -810,13 +812,10 @@ fn feature_of(name: &str, line: &str) -> Result<Feature, String> {
 
 /// `name` with each of its `{a,b}` written out: every name it stands for.
 fn expand(name: &str) -> Result<Vec<String>, String> {
-    let Some(open) = name.find('{') else { return Ok(vec![name.to_string()]) };
-    let close = open + name[open..].find('}').ok_or_else(|| format!("`{name}` has no `}}`"))?;
-    let rest = expand(&name[close + 1..])?;
-    Ok(name[open + 1..close]
-        .split(',')
-        .flat_map(|alt| rest.iter().map(move |r| format!("{}{alt}{r}", &name[..open])))
-        .collect())
+    let Some((before, after)) = name.split_once('{') else { return Ok(vec![name.to_string()]) };
+    let (alts, after) = after.split_once('}').ok_or_else(|| format!("`{name}` has no `}}`"))?;
+    let rest = expand(after)?;
+    Ok(alts.split(',').flat_map(|alt| rest.iter().map(move |r| format!("{before}{alt}{r}"))).collect())
 }
 
 /// The operands of each form `form` stands for, at width `n`: one for each of its operands'
@@ -827,12 +826,10 @@ fn operands_of(form: &str, n: u32, line: &str) -> Result<Vec<Vec<Spec>>, String>
     }
     let mut out: Vec<Vec<Spec>> = vec![vec![]];
     for operand in form.split(", ") {
-        let (access, alts) = match operand.as_bytes().first() {
-            Some(b'=') => (Write, &operand[1..]),
-            Some(b'+') => (ReadWrite, &operand[1..]),
-            Some(b'~') => (Ignored, &operand[1..]),
-            _ => (Read, operand),
-        };
+        let (access, alts) = [('=', Write), ('+', ReadWrite), ('~', Ignored)]
+            .into_iter()
+            .find_map(|(mark, access)| Some((access, operand.strip_prefix(mark)?)))
+            .unwrap_or((Read, operand));
         let mut specs: Vec<Spec> = vec![];
         for alt in alts.split('/') {
             specs.push(Spec { kind: kind_of(alt, n, line)?, access });
@@ -993,7 +990,7 @@ mod tests {
         let vaddps = of("vaddps").ok_or("of gave None")?;
         let (y, x) = (Shape::Vec(W256), Shape::Vec(W128));
         let miss = choose(vaddps, &[y, x, y]).err().ok_or("choose gave Ok")?;
-        assert_eq!(miss, Miss::Wants { at: 1, wants: vec![Kind::Vec(W256)] });
+        assert_eq!(miss, Miss::Wants { at: 1, shape: x, wants: vec![Kind::Vec(W256)] });
         assert_eq!(choose(vaddps, &[y, y]).err().ok_or("choose gave Ok")?, Miss::Count(vec![3]));
         let Miss::Wants { wants, .. } = choose(of("add").ok_or("of gave None")?, &[Shape::Vec(W128), Shape::Int(1)])
             .err()
@@ -1028,7 +1025,7 @@ mod tests {
         };
         assert_eq!(wanted(&wants, Shape::Int(1)), "a gpr (as r16 or r8) or memory of 1 or 2 bytes");
         let shl = of("shl").ok_or("of gave None")?;
-        let Miss::Wants { at: 1, wants } =
+        let Miss::Wants { at: 1, wants, .. } =
             choose(shl, &[Shape::Gpr(W64), Shape::Int(64)]).err().ok_or("choose gave Ok")?
         else {
             return Err("choose gave no Wants".into());

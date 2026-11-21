@@ -52,13 +52,12 @@ fn on_gpu(params: &[f32]) -> Result<Option<Gpu>> {
 
 /// A model of `params` in plain Rust: the reference.
 fn in_rust(params: &[f32]) -> Result<Option<Reference>> {
-    Ok(Some(Reference::new(params)))
+    Ok(Some(Reference::new(params)?))
 }
 
 /// A model of `params` on the CPU, which must run the kernels.
 fn on_cpu(params: &[f32]) -> Result<Option<Cpu>> {
-    let cpu = Cpu::new(params).ok_or("a CPU with AVX2 and FMA, which the kernels are written in")?;
-    Ok(Some(cpu))
+    Ok(Some(Cpu::new(params)?))
 }
 
 #[test]
@@ -70,7 +69,10 @@ fn draws_are_pythons() -> Result {
     let mut rng = Random::new(42);
     assert_eq!(Vec::from_fn(7, |_| rng.gauss(0.0, 0.08)), draws::<f64>("gauss")?);
     let (mut rng, weights) = (Random::new(42), [0.1, 0.25, 0.0, 0.4, 0.25]);
-    assert_eq!(Vec::from_fn(24, |_| rng.choice(&weights)), draws::<usize>("choices")?);
+    assert_eq!(
+        Vec::from_fn(24, |_| rng.choice(&weights)),
+        draws::<usize>("choices")?.into_iter().map(Some).collect::<Vec<_>>()
+    );
     // What microgpt.py draws, in its order: the shuffle of its names, then its 4192 weights.
     let (mut rng, mut order) = (Random::new(42), (0..DOCS).collect::<Vec<_>>());
     rng.shuffle(&mut order);
@@ -147,7 +149,7 @@ fn agrees_op_by_op<A: Ops>(new: impl FnOnce(&[f32]) -> Result<Option<A>>) -> Res
     let (mut rng, names) = python_start()?;
     let params = model::init(&mut rng);
     let Some(a) = new(&params)? else { return Ok(()) };
-    let mut both = Both { a, b: Reference::new(&params) };
+    let mut both = Both { a, b: Reference::new(&params)? };
     let mut docs = vec!["abcdefghijklmnopqrstuvwxyz".to_string()];
     docs.extend_from_slice(&names.docs[..24]);
     run(&mut both, &Names { docs, chars: names.chars }, &mut rng, 25, 5, |_, _| {})?;

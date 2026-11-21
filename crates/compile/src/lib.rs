@@ -36,7 +36,8 @@ pub fn check<Op>(p: &Program<Op>) -> Result<(), Error> {
 pub fn compile<Op: Clone + PartialEq>(p: &Program<Op>, m: &(impl Machine + Spill<Op>)) -> Result<Allocated<Op>, Error> {
     let (p, regs) = alloc::allocate(p, m, m)?;
     let reg = |v: kernite_core::VReg| {
-        regs[v.id as usize].ok_or_else(|| Error::NoRegister { var: p.regs[v.id as usize].name.clone(), vreg: v })
+        let at = regs.get(v.id as usize).copied().flatten();
+        at.ok_or_else(|| Error::NoRegister { var: p.var_name(v).to_string(), vreg: v })
     };
     let body = p
         .body

@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         funcs: vec![],
         statics: vec![],
     };
-    let [Item::Inst(add), Item::Inst(ret)] = &program.body[..] else {
+    let [Item::Inst(add), Item::Inst(ret)] = program.body.as_slice() else {
         return Err("the body is an `add` and a `ret`".into());
     };
     assert_eq!(add.reads().collect::<Vec<_>>(), [a, b]);

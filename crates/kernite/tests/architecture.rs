@@ -217,7 +217,7 @@ fn code(src: &str) -> Result<String> {
             // Comments nest: each `/*` waits for a `*/` of its own.
             let (mut depth, mut len) = (0, 0);
             loop {
-                let here = &rest[len..];
+                let here = rest.get(len..).ok_or("get gave None")?;
                 if here.starts_with("/*") {
                     (depth, len) = (depth + 1, len + 2);
                 } else if here.starts_with("*/") {
@@ -229,9 +229,9 @@ fn code(src: &str) -> Result<String> {
                     break len;
                 }
             }
-        } else if c == 'r' && rest[1 + hashes..].starts_with('"') {
+        } else if c == 'r' && rest.get(1 + hashes..).is_some_and(|r| r.starts_with('"')) {
             let end = format!("\"{}", "#".repeat(hashes));
-            2 + hashes + rest[2 + hashes..].find(&end).ok_or("find gave None")? + end.len()
+            2 + hashes + rest.get(2 + hashes..).and_then(|r| r.find(&end)).ok_or("find gave None")? + end.len()
         } else if c == '"' {
             let mut chars = rest.char_indices().skip(1);
             loop {
@@ -243,9 +243,9 @@ fn code(src: &str) -> Result<String> {
             }
         } else if c == '\'' {
             // A character, unless it is a lifetime or a label, as `'a` is.
-            let mut then = rest[1..].chars();
+            let mut then = rest.chars().skip(1);
             match (then.next(), then.next()) {
-                (Some('\\'), _) => 4 + rest[3..].find('\'').ok_or("find gave None")?,
+                (Some('\\'), _) => 4 + rest.get(3..).and_then(|r| r.find('\'')).ok_or("find gave None")?,
                 (Some(x), Some('\'')) => 2 + x.len_utf8(),
                 _ => 0,
             }
@@ -253,14 +253,14 @@ fn code(src: &str) -> Result<String> {
             0
         };
         out.push(if len == 0 { c } else { ' ' });
-        rest = &rest[len.max(c.len_utf8())..];
+        rest = rest.get(len.max(c.len_utf8())..).ok_or("get gave None")?;
     }
     let mut kept = String::new();
     let mut rest = out.as_str();
-    while let Some(at) = rest.find("#[cfg(test)]") {
-        kept += &rest[..at];
+    while let Some((before, item)) = rest.split_once("#[cfg(test)]") {
+        kept += before;
         let mut depth = 0;
-        let end = rest[at..].find(|c: char| {
+        let end = item.find(|c: char| {
             depth += match c {
                 '(' | '[' | '{' => 1,
                 ')' | ']' | '}' => -1,
@@ -268,9 +268,23 @@ fn code(src: &str) -> Result<String> {
             };
             depth <= 0 && matches!(c, ';' | '}')
         });
-        rest = &rest[at + end.ok_or("end gave None")? + 1..];
+        rest = item.get(end.ok_or("end gave None")? + 1..).ok_or("get gave None")?;
     }
     Ok(kept + rest)
+}
+
+/// The text after each `pat` in `text`, but not after one that is the end of a longer name: `use ` after `reuse` is
+/// none.
+fn after_each<'a>(text: &'a str, pat: &str) -> Result<Vec<&'a str>> {
+    let mut all = vec![];
+    for (at, _) in text.match_indices(pat) {
+        let (before, after) = (text.get(..at), text.get(at + pat.len()..));
+        let (before, after) = before.zip(after).ok_or("get gave None")?;
+        if !before.ends_with(word) {
+            all.push(after);
+        }
+    }
+    Ok(all)
 }
 
 /// The modules each of a crate's modules uses: those it names after `crate::`, or after
@@ -280,8 +294,8 @@ fn uses<'a>(root: &'a str, modules: &'a BTreeMap<String, String>) -> Result<BTre
     let module = |name: &str| modules.get_key_value(name).map(|(m, _)| m.as_str());
     // The module each name the root takes with `use` comes from.
     let mut taken = BTreeMap::new();
-    for (at, _) in root.match_indices("use ").filter(|&(at, _)| !root[..at].ends_with(word)) {
-        let path = root[at + 4..].split(';').next().ok_or("next gave None")?.trim_start().trim_start_matches("crate::");
+    for rest in after_each(root, "use ")? {
+        let path = rest.split(';').next().ok_or("next gave None")?.trim_start().trim_start_matches("crate::");
         let Some(from) = module(path.split(|c: char| !word(c)).next().ok_or("next gave None")?) else { continue };
         for leaf in path.split([',', '{', '}']).filter(|l| !l.trim_end().ends_with("::")) {
             taken.extend(leaf.rsplit(|c: char| !word(c)).find(|w| !w.is_empty()).map(|name| (name, from)));
@@ -290,13 +304,13 @@ fn uses<'a>(root: &'a str, modules: &'a BTreeMap<String, String>) -> Result<BTre
     let mut uses = BTreeMap::new();
     for (name, text) in modules {
         let used: &mut BTreeSet<&str> = uses.entry(name.as_str()).or_default();
-        for (at, _) in text.match_indices("crate::").filter(|&(at, _)| !text[..at].ends_with(word)) {
+        for rest in after_each(text, "crate::")? {
             // A name, or paths in braces, each of which starts with one.
-            let rest = &text[at + "crate::".len()..];
             let (mut depth, mut starts) = (0, true);
             for (i, c) in rest.char_indices() {
                 if starts && word(c) {
-                    let named = rest[i..].split(|c: char| !word(c)).next().ok_or("next gave None")?;
+                    let from = rest.get(i..).ok_or("get gave None")?;
+                    let named = from.split(|c: char| !word(c)).next().ok_or("next gave None")?;
                     used.extend(module(named).or_else(|| taken.get(named).copied()));
                 }
                 depth += match c {
@@ -327,7 +341,7 @@ fn cycle<'a>(uses: &BTreeMap<&'a str, BTreeSet<&'a str>>) -> Option<Vec<&'a str>
     let mut path = vec![*left.keys().next()?];
     while let Some(&next) = left.get(path.last()?).and_then(|used| used.iter().find(|u| left.contains_key(*u))) {
         if let Some(at) = path.iter().position(|&m| m == next) {
-            return Some([&path[at..], &[next]].concat());
+            return Some([path.get(at..)?, &[next]].concat());
         }
         path.push(next);
     }
@@ -430,8 +444,7 @@ fn no_crates_modules_use_each_other_in_a_cycle() -> Result {
 /// and `Given` after `kernite::`, and `self` and `Tree` after `lang::`.
 fn starts<'a>(code: &'a str, prefix: &str) -> Result<Vec<&'a str>> {
     let mut names = vec![];
-    for (at, _) in code.match_indices(prefix).filter(|&(at, _)| !code[..at].ends_with(word)) {
-        let rest = &code[at + prefix.len()..];
+    for rest in after_each(code, prefix)? {
         let first = |s: &'a str| -> Result<_> { Ok(s.split(|c: char| !word(c)).next().ok_or("next gave None")?) };
         let Some(group) = rest.strip_prefix('{') else {
             names.push(first(rest)?);
@@ -445,7 +458,7 @@ fn starts<'a>(code: &'a str, prefix: &str) -> Result<Vec<&'a str>> {
                 '}' => depth -= 1,
                 ',' if depth == 0 => new = true,
                 c if new && word(c) => {
-                    names.push(first(&group[i..])?);
+                    names.push(first(group.get(i..).ok_or("get gave None")?)?);
                     new = false;
                 }
                 _ => {}
@@ -524,13 +537,14 @@ fn the_macro_names_only_the_language_the_use_cases_ptx_scope_and_ptx_room() -> R
 }
 
 /// `text` without each part that begins with `start` and ends at the first `end` outside braces.
-fn without(text: &str, start: &str, end: char) -> String {
+fn without(text: &str, start: &str, end: char) -> Result<String> {
     let mut kept = String::new();
     let mut rest = text;
     while let Some(at) = rest.find(start) {
-        kept += &rest[..at];
+        let (before, part) = rest.split_at_checked(at).ok_or("split_at_checked gave None")?;
+        kept += before;
         let mut depth = 0;
-        let stop = rest[at..].find(|c: char| {
+        let stop = part.find(|c: char| {
             depth += match c {
                 '{' => 1,
                 '}' => -1,
@@ -538,15 +552,15 @@ fn without(text: &str, start: &str, end: char) -> String {
             };
             depth == 0 && c == end
         });
-        rest = &rest[at + stop.unwrap_or(rest.len() - at - 1) + 1..];
+        rest = part.get(stop.unwrap_or(part.len() - 1) + 1..).ok_or("get gave None")?;
     }
-    kept + rest
+    Ok(kept + rest)
 }
 
 /// The code of `text`, that of a source with its strings and comments blank, without what the compiler runs: each
 /// `const { .. }` block and each `const _: () = ..;` item, whose assertions fail the build.
-fn without_compile_time(text: &str) -> String {
-    without(&without(text, "const {", '}'), "const _: () =", ';')
+fn without_compile_time(text: &str) -> Result<String> {
+    without(&without(text, "const {", '}')?, "const _: () =", ';')
 }
 
 /// Code that is no test asserts nothing: a kernel or a caller that goes wrong is told so, by an error, and no
@@ -566,12 +580,12 @@ fn no_code_that_is_no_test_asserts() -> Result {
                 if file.ends_with("tests.rs") {
                     continue;
                 }
-                let text = without_compile_time(&text);
+                let text = without_compile_time(&text)?;
                 // The text has no comments and no strings, so a line of it is not the line of the file: it is shown.
                 for line in text.lines() {
                     for name in macros {
-                        if let Some(at) = line.find(&format!("{name}!"))
-                            && !line[..at].ends_with(word)
+                        if let Some((before, _)) = line.split_once(&format!("{name}!"))
+                            && !before.ends_with(word)
                         {
                             found.push(format!("{}: {}", file.strip_prefix(workspace()?)?.display(), line.trim()));
                         }
@@ -585,10 +599,11 @@ fn no_code_that_is_no_test_asserts() -> Result {
 }
 
 #[test]
-fn what_the_compiler_runs_is_not_code_that_asserts() {
+fn what_the_compiler_runs_is_not_code_that_asserts() -> Result {
     let text = "const { assert!(N > 0) }\nfn f() { const { assert!(1 < 2, \"x\") }; }\nfn g() { assert!(true) }\n";
-    assert_eq!(without_compile_time(text), "\nfn f() { ; }\nfn g() { assert!(true) }\n");
+    assert_eq!(without_compile_time(text)?, "\nfn f() { ; }\nfn g() { assert!(true) }\n");
     let text = "const _: () = assert!(A == 0);\nconst _: () = {\n    assert!(B);\n    assert!(C);\n};\n\
                 fn h() { assert!(D) }\n";
-    assert_eq!(without_compile_time(text), "\n\nfn h() { assert!(D) }\n");
+    assert_eq!(without_compile_time(text)?, "\n\nfn h() { assert!(D) }\n");
+    Ok(())
 }

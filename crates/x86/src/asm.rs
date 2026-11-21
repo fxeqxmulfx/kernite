@@ -3,8 +3,7 @@ use std::collections::VecDeque;
 use kernite_core::Access::{Ignored, Read, ReadWrite, Write};
 use kernite_core::Width::{self, W8, W16, W32, W64, W128, W256};
 use kernite_core::{
-    Arg, Base, Class, Const, ConstId, Flow, Inst, Item, Label, Operand, Program, RegInfo, Signature, Slot as SlotSpec,
-    SlotId, VReg,
+    Arg, Base, Class, Flow, Inst, Item, Label, Operand, Program, RegInfo, Signature, Slot as SlotSpec, SlotId, VReg,
 };
 
 use crate::op::Op;
@@ -139,17 +138,7 @@ impl Asm {
     /// is an error. The same bytes asked for twice are stored once.
     pub fn constant(&mut self, bytes: &[u8], align: u32) -> Addr {
         self.require(align.is_power_of_two(), || format!("a constant is aligned to {align}, which is no power of two"));
-        let at = match self.p.consts.iter().position(|c| c.bytes == bytes) {
-            Some(at) => {
-                self.p.consts[at].align = self.p.consts[at].align.max(align);
-                at
-            }
-            None => {
-                self.p.consts.push(Const { bytes: bytes.to_vec(), align });
-                self.p.consts.len() - 1
-            }
-        };
-        Addr { base: Base::Const(ConstId(at as u32)), index: None, disp: 0 }
+        Addr { base: Base::Const(self.p.constant(bytes, align)), index: None, disp: 0 }
     }
 
     /// `values` as bytes, aligned to their size up to 32.

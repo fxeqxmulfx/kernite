@@ -122,10 +122,10 @@ pub struct Error {
 impl Error {
     /// The message with the line and column of a span that is a byte offset into `src`.
     pub fn at(&self, src: &str) -> String {
-        let offset = (self.span.0 as usize).min(src.len());
-        let before = &src[..offset];
-        let line = before.matches('\n').count() + 1;
-        let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+        let (mut line, mut column) = (1, 1);
+        for (_, c) in src.char_indices().take_while(|&(i, _)| i < self.span.0 as usize) {
+            (line, column) = if c == '\n' { (line + 1, 1) } else { (line, column + 1) };
+        }
         format!("{line}:{column}: {}", self.message)
     }
 }

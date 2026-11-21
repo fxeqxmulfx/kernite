@@ -112,7 +112,7 @@ use kernite_compile::Spill;
 use kernite_core::Access::{self, Ignored, Read, ReadWrite, Write};
 use kernite_core::Width::{self, W32, W64, W128, W256};
 use kernite_core::{
-    Arg, Base, Class, Clobber, Const, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo,
+    Arg, Base, Class, Clobber, ConstId, Flow, FuncId, Imm, Inst, Item, Label, Mem, Operand, Program, RegInfo,
     Signature, Slot, SlotId, StaticId, VReg,
 };
 use kernite_lang::{Fault, Guard, Operand as Given, Span, Target, Value, article, pointer};
@@ -458,7 +458,7 @@ fn datum(t: &str, size: u64, x: &Value, what: &str) -> Result<Vec<u8>, String> {
             if !(lo..=hi).contains(&v) {
                 return Err(format!("{what} is {v}, out of range for `{t}`"));
             }
-            Ok(v.to_le_bytes()[..size as usize].to_vec())
+            Ok(v.to_le_bytes().into_iter().take(size as usize).collect())
         }
         Value::Int(v, _) => Err(format!("{what} is an integer, and {} `{t}` a float: `{v}.0`", article(t))),
         Value::F32(v) if t == "f32" => Ok(v.to_le_bytes().to_vec()),
@@ -567,9 +567,9 @@ impl Kernel {
     fn declared(&self, v: Var) -> Option<(&str, &str)> {
         match v.0 {
             Place::Reg(..) => None,
-            Place::Stack(s) => Some((&self.p.slots[s.0 as usize].name, &self.declared[s.0 as usize])),
+            Place::Stack(s) => Some((&self.p.slots.get(s.0 as usize)?.name, self.declared.get(s.0 as usize)?)),
             Place::Static(s) => {
-                let s = &self.statics[s.0 as usize];
+                let s = self.statics.get(s.0 as usize)?;
                 Some((&s.name, &s.ty))
             }
         }
@@ -617,16 +617,16 @@ impl Kernel {
     fn call(&mut self, args: &[Given<Var>]) -> Result<(), Fault> {
         let shape = "`call` is `call(f, (a, b))`, or `call(r, f, (a, b))` for a function that returns a value, `f` \
                      a function of the module or a gpr that holds the address of one";
-        let targets: Option<Vec<&str>> = match args.last() {
-            Some(Given::Vector(fs)) if !fs.is_empty() && fs.iter().all(|f| matches!(f, Given::Func(_))) => {
-                Some(fs.iter().filter_map(|f| if let Given::Func(f) = f { Some(f.as_str()) } else { None }).collect())
+        let (rest, targets): (&[Given<Var>], Option<Vec<&str>>) = match args.split_last() {
+            Some((Given::Vector(fs), rest)) if !fs.is_empty() && fs.iter().all(|f| matches!(f, Given::Func(_))) => {
+                let targets = fs.iter().filter_map(|f| if let Given::Func(f) = f { Some(f.as_str()) } else { None });
+                (rest, Some(targets.collect()))
             }
-            _ => None,
+            _ => (args, None),
         };
-        let rest = &args[..args.len() - usize::from(targets.is_some())];
-        let (result, callee, passed) = match (rest.iter().position(|a| matches!(a, Given::Func(_))), rest.len()) {
-            (Some(0), 1 | 2) | (None, 1 | 2) => (None, 0, rest.get(1)),
-            (Some(1), 2 | 3) | (None, 3) => (Some(&rest[0]), 1, rest.get(2)),
+        let (result, (callee, called), passed) = match (rest.iter().position(|a| matches!(a, Given::Func(_))), rest) {
+            (Some(0) | None, [f] | [f, _]) => (None, (0, f), rest.get(1)),
+            (Some(1), [r, f] | [r, f, _]) | (None, [r, f, _]) => (Some(r), (1, f), rest.get(2)),
             (Some(i), _) if i >= 2 => return Err(Fault::at(i, shape)),
             _ => return Err(Fault::new(shape)),
         };
@@ -638,7 +638,7 @@ impl Kernel {
         let at = callee + 1;
         // What the call passes and gives back, whether it returns, the names of its callee's parameters, which name the
         // variables that pass values known now, and the functions it may reach.
-        let (target, (tys, kept), never, names, reaches) = match (&rest[callee], &targets) {
+        let (target, (tys, kept), never, names, reaches) = match (called, &targets) {
             (Given::Func(f), None) => {
                 let proto = self.called(f, callee)?;
                 let passing = self.passing(f, &proto, &passed, result, at)?;
@@ -708,7 +708,7 @@ impl Kernel {
             };
             *count += 1;
             let (name, view, reg) = match reg_of(a) {
-                Some((reg, view)) => (self.p.regs[reg.id as usize].name.clone(), view, Some(reg)),
+                Some((reg, view)) => (self.p.var_name(reg).to_string(), view, Some(reg)),
                 None => (names.get(k).cloned().unwrap_or_else(|| format!("argument {}", k + 1)), View::Xmm, None),
             };
             let pinned = self.new_var(to.class, &name);
@@ -721,7 +721,8 @@ impl Kernel {
         let back = match (result.and_then(reg_of), kept) {
             (Some((reg, view)), Some(ty)) => {
                 let from = if ty == Ty::Int { INT_RESULT } else { FLOAT_RESULT };
-                let pinned = self.new_var(from.class, &self.p.regs[reg.id as usize].name.clone());
+                let name = self.p.var_name(reg).to_string();
+                let pinned = self.new_var(from.class, &name);
                 self.p.pinned.push((pinned, from));
                 let w = if from.class == Class::Vec {
                     self.named(Some(reg), view, known.then_some(ty))
@@ -950,7 +951,7 @@ impl Kernel {
         let start: Vec<_> = self.floats.iter().map(|&(v, ty)| (v, ty.width())).collect();
         let (i, message) = widths::check(&self.p, &start)?;
         let before = self.starts.partition_point(|&(first, _)| first <= i);
-        Some((before.checked_sub(1).map(|k| self.starts[k].1), message))
+        Some((before.checked_sub(1).and_then(|k| self.starts.get(k)).map(|s| s.1), message))
     }
 
     /// The kernel as written. A cooperative one takes its place in the grid, read or not, as
@@ -1036,10 +1037,12 @@ impl Kernel {
         if let Some(g) = self.grid {
             return g;
         }
-        let at = INT_PARAMS[self.ints];
         let g = self.new_var(Class::Gpr, "grid");
-        self.p.params.push((g, at));
-        self.p.signature.params.push(Class::Gpr);
+        // `param` keeps a cooperative kernel to five integers, which leaves a register for the grid.
+        if let Some(&at) = INT_PARAMS.get(self.ints) {
+            self.p.params.push((g, at));
+            self.p.signature.params.push(Class::Gpr);
+        }
         self.grid = Some(g);
         g
     }
@@ -1149,18 +1152,7 @@ impl Kernel {
 
     /// Read-only `bytes`, aligned to their size up to 32, stored once however often asked for.
     fn constant(&mut self, bytes: &[u8]) -> ConstId {
-        let align = (bytes.len() as u32).next_power_of_two().min(32);
-        let at = match self.p.consts.iter().position(|c| c.bytes == bytes) {
-            Some(at) => {
-                self.p.consts[at].align = self.p.consts[at].align.max(align);
-                at
-            }
-            None => {
-                self.p.consts.push(Const { bytes: bytes.to_vec(), align });
-                self.p.consts.len() - 1
-            }
-        };
-        ConstId(at as u32)
+        self.p.constant(bytes, (bytes.len() as u32).next_power_of_two().min(32))
     }
 
     fn ret(&mut self, args: &[Given<Var>]) -> Result<(), Fault> {
@@ -1276,7 +1268,7 @@ impl Kernel {
         ];
         for (a, one, b, other, at) in pairs {
             if a == b {
-                let v = &self.p.regs[a.id as usize].name;
+                let v = self.p.var_name(a);
                 return Err(Fault::at(
                     at,
                     format!(
@@ -1357,9 +1349,8 @@ impl Kernel {
         }
         let held = base.filter(|b| b.reg().is_none());
         if let (Some(Var(Place::Static(s))), Some((Var(Place::Reg(i, _)), k))) = (held, index) {
-            let held = &self.statics[s.0 as usize].name;
-            let i = &self.p.regs[i.id as usize].name;
-            let scaled = if k == 1 { i.clone() } else { format!("{i} * {k}") };
+            let (held, i) = (self.statics.get(s.0 as usize).map_or("", |s| s.name.as_str()), self.p.var_name(i));
+            let scaled = if k == 1 { i.to_string() } else { format!("{i} * {k}") };
             return Err(format!(
                 "x86 reaches memory of the module's at a displacement from `rip`, with no register beside it: \
                  `lea(p, [{held}])` puts the address of `{held}` in `p`, for `[p + {scaled}]`"
@@ -1386,16 +1377,15 @@ impl Kernel {
         };
         let far = || format!("{} bytes are too far for an address", m.disp);
         match held.map(|v| v.0) {
-            Some(Place::Stack(s)) => {
-                let slot = &self.p.slots[s.0 as usize];
-                let ty = &self.declared[s.0 as usize];
+            Some(Place::Stack(s))
+                if let (Some(slot), Some(ty)) = (self.p.slots.get(s.0 as usize), self.declared.get(s.0 as usize)) =>
+            {
                 let memory = Region { name: &slot.name, bytes: slot.size.into(), align: slot.align.into(), ty };
                 self.within(memory, index, m.disp, kind, access, name)?;
                 let disp = i32::try_from(m.disp).map_err(|_| far())?;
                 return Ok(Mem { base: Base::Slot(s), index, disp, width });
             }
-            Some(Place::Static(s)) => {
-                let st = &self.statics[s.0 as usize];
+            Some(Place::Static(s)) if let Some(st) = self.statics.get(s.0 as usize) => {
                 if st.constant && kind != Kind::Addr && matches!(access, Write | ReadWrite) {
                     return Err(format!(
                         "`{name}` {} `{}`, which is constant memory: the kernels only read it",
@@ -1433,7 +1423,7 @@ impl Kernel {
         let mut at = format!("[{v}");
         let mut when = String::new();
         if let Some((i, k)) = index {
-            let name = &self.p.regs[i.id as usize].name;
+            let name = self.p.var_name(i);
             at += &if k == 1 { format!(" + {name}") } else { format!(" + {name} * {k}") };
             when = match i.class {
                 Class::Vec => format!(", when the indices in `{name}` are 0"),
@@ -1610,7 +1600,7 @@ fn vector_index(m: &kernite_lang::Mem<Var>) -> Option<Width> {
 
 /// Why no form of `name` fits `args`, which are `shapes` to the forms, those of `grid` being
 /// the grid's values by their names.
-fn missed(name: &str, args: &[Given<Var>], shapes: &[Shape], grid: &[(usize, String)], miss: Miss) -> Fault {
+fn missed(name: &str, args: &[Given<Var>], grid: &[(usize, String)], miss: Miss) -> Fault {
     let later = forms::LATER_FORMS.iter().find(|&&(n, count, _)| n == name && count == args.len());
     match miss {
         Miss::Count(_) if let Some((_, count, why)) = later => {
@@ -1628,12 +1618,12 @@ fn missed(name: &str, args: &[Given<Var>], shapes: &[Shape], grid: &[(usize, Str
             };
             Fault::new(format!("`{name}` takes {n}, not {}", args.len()))
         }
-        Miss::Wants { at, wants } => {
+        Miss::Wants { at, shape, wants } => {
             let this = match grid.iter().find(|(i, _)| *i == at) {
                 Some((_, s)) => format!("`{s}`, 8 bytes of memory"),
-                None => given(&args[at]),
+                None => args.get(at).map(given).unwrap_or_default(),
             };
-            Fault::at(at, format!("`{name}` wants {}; this is {this}", forms::wanted(&wants, shapes[at])))
+            Fault::at(at, format!("`{name}` wants {}; this is {this}", forms::wanted(&wants, shape)))
         }
         Miss::Size { at, sizes } => {
             let n: Vec<String> = sizes.iter().map(|w| w.bytes().to_string()).collect();
@@ -1923,10 +1913,10 @@ impl Target for Kernel {
         for (i, a) in args.iter().enumerate() {
             shapes.push(operand_shape(name, a).map_err(|m| Fault::at(i, m))?);
         }
-        let form = forms::choose(forms, &shapes).map_err(|miss| missed(name, args, &shapes, &grid, miss))?;
+        let form = forms::choose(forms, &shapes).map_err(|miss| missed(name, args, &grid, miss))?;
         let (built, implicit) = self.build(form, args, name)?;
         for (i, s) in &grid {
-            if built[*i].access != Read {
+            if built.get(*i).is_none_or(|a| a.access != Read) {
                 return Err(Fault::at(*i, format!("`{s}` is read, as in `mov(t, {s})`; the launcher writes it")));
             }
         }

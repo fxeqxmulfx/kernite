@@ -22,7 +22,7 @@ use crate::gpu::{HOLE, gpu};
 use crate::room;
 use crate::rust::{
     cfg_of, error, error_under, flatten, for_rust, from_inside, inner_attribute, lex, name_at, parse, position, seen,
-    site, stub,
+    site, stub, within,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
@@ -87,11 +87,9 @@ pub(crate) fn expand(
     let module = &made.module;
     // The module's own attributes, `#![..]`, before anything the macro writes, where Rust has
     // them. A module given consts has them from `#[kernels]`, which writes this inside the module.
-    let mut out: TokenStream = module
-        .items
-        .iter()
-        .filter(|item| given.is_none() && inner_attribute(&top[item.tokens.clone()]))
-        .flat_map(|item| top[item.tokens.clone()].iter().cloned())
+    let mut out: TokenStream = (module.items.iter().map(|item| within(&top, &item.tokens)))
+        .filter(|tokens| given.is_none() && inner_attribute(tokens))
+        .flat_map(|tokens| tokens.iter().cloned())
         .collect();
     // The errors of the module as a whole, said under no `cfg`: at its attribute or at a workspace's name that is not a
     // string; an item that has the name of a const the module takes; and a module that is two.
@@ -107,9 +105,12 @@ pub(crate) fn expand(
     let cfgs: Vec<TokenStream> = module.items.iter().map(|item| cfg_of(item, &top)).collect();
     let conds: Vec<Cond> = cfgs.iter().map(Cond::of).collect();
     // Where `cfg` keeps what a part of the GPU's module is of: the code of an item, or a static of the GPU's.
-    let kept = |device: &DeviceOut, it: Kept| match it {
-        Kept::Code(i) => conds[device.code_items[i]].clone(),
-        Kept::Static(j) => conds[device.static_items[j]].clone(),
+    let kept = |device: &DeviceOut, it: Kept| {
+        let item = match it {
+            Kept::Code(i) => device.code_items.get(i),
+            Kept::Static(j) => device.static_items.get(j),
+        };
+        item.map_or(Cond::Never, |&at| cond_of(&conds, at))
     };
     // Why the GPU's module is none, each reason where `cfg` keeps what it is of.
     let mut unloaded = vec![];
@@ -134,9 +135,9 @@ pub(crate) fn expand(
     // Each listing the process's kernels have, by name, under the `cfg` of the kernel it is of, as
     // what `naked` writes for it is.
     let mut listed = vec![];
-    for (i, (item, made_item)) in module.items.iter().zip(&made.items).enumerate() {
-        let tokens = &top[item.tokens.clone()];
-        let cfg = &cfgs[i];
+    for (i, (((item, made_item), cfg), cond)) in module.items.iter().zip(&made.items).zip(&cfgs).zip(&conds).enumerate()
+    {
+        let tokens = within(&top, &item.tokens);
         let said = |e: &lang::Error| error_under(cfg, at(e.span), &e.message);
         let (names, errors) = named(&made, &conds, i, &top, &place);
         reads.extend(names);
@@ -154,15 +155,15 @@ pub(crate) fn expand(
             }
             (ItemKind::Static(s), ItemOut::DeviceStatic(laid)) => {
                 out.extend(laid.as_ref().err().and_then(|failed| failed.error.as_ref()).map(said));
-                memory.push((s, laid, conds[i].clone()));
-                on_gpu.push(conds[i].clone());
+                memory.push((s, laid, cond.clone()));
+                on_gpu.push(cond.clone());
                 if let Ok(laid) = laid {
                     fields.extend(room::room(cfg, i, &laid.code.ty, at(s.ty.span())));
                 }
             }
             (ItemKind::Fn(f), ItemOut::Helper(errors)) => {
                 out.extend(errors.iter().map(said));
-                helpers.push((i, f));
+                helpers.push((i, cond, f));
             }
             (ItemKind::Fn(f), ItemOut::Unknown(e)) => {
                 out.extend(e.as_ref().map(said));
@@ -182,10 +183,10 @@ pub(crate) fn expand(
                 out.extend(d.not_unsafe.as_ref().map(said));
                 out.extend(d.said.as_ref().map(said));
                 out.extend(d.errors.iter().map(said));
-                on_gpu.push(conds[i].clone());
+                on_gpu.push(cond.clone());
                 launchers.extend(d.launcher.as_ref().map(|l| (f, l)));
                 if d.launcher.is_none() {
-                    helpers.push((i, f));
+                    helpers.push((i, cond, f));
                 }
             }
             _ => out.extend(error_under(cfg, at(item.span), "kernite made this item what it is not: that is a bug")),
@@ -235,9 +236,9 @@ pub(crate) fn expand(
     // decides, so `__Room` shows them there, as a field of each helper in the struct says.
     let failing = Cond::any([Cond::errors_in(&out), Cond::errors_in(&left_out), Cond::errors_in(&tail)]);
     let mut shown = TokenStream::new();
-    for (i, f) in helpers {
-        reads.extend(Cond::all([conds[i].clone(), failing.clone()]).guard().map(|g| seen(f, &top, &g)));
-        shown.extend(conds[i].guard().map(|g| room::shown(&g, i, seen(f, &top, &TokenStream::new()))));
+    for (i, cond, f) in helpers {
+        reads.extend(Cond::all([cond.clone(), failing.clone()]).guard().map(|g| seen(f, &top, &g)));
+        shown.extend(cond.guard().map(|g| room::shown(&g, i, seen(f, &top, &TokenStream::new()))));
     }
     out.extend(room::carrier(fields, shown));
     out.extend(left_out);
@@ -297,10 +298,12 @@ fn named(
 ) -> (TokenStream, TokenStream) {
     let module = &made.module;
     let (mut names, mut errors) = (TokenStream::new(), TokenStream::new());
-    for m in made.items[i].mentions() {
+    let Some((reader, made_reader)) = module.items.get(i).zip(made.items.get(i)) else { return (names, errors) };
+    for m in made_reader.mentions() {
         let Some(j) = position(module, &m.name) else { continue };
-        let kept = Cond::all([conds[i].clone(), runs(made, conds, i, module.item_at(m.span), &[])]);
-        let rust = match (&module.items[j].kind, &made.items[j]) {
+        let Some((item, made_item)) = module.items.get(j).zip(made.items.get(j)) else { continue };
+        let kept = Cond::all([cond_of(conds, i), runs(made, conds, i, module.item_at(m.span), &[])]);
+        let rust = match (&item.kind, made_item) {
             (_, ItemOut::Rust | ItemOut::Given | ItemOut::HostStatic(_)) => true,
             (ItemKind::Fn(f), ItemOut::Native(_)) => f.generics.is_empty(),
             _ => false,
@@ -309,10 +312,10 @@ fn named(
             let Some(guard) = kept.guard() else { continue };
             names.extend(guard);
             names.extend(parse("let _ ="));
-            names.extend(name_at(&module.items[j], top, place(m)));
+            names.extend(name_at(item, top, place(m)));
             names.extend(parse(";"));
-        } else if let Some(guard) = Cond::all([kept, conds[j].clone().not()]).guard() {
-            let reader = module.items[i].name().unwrap_or_default();
+        } else if let Some(guard) = Cond::all([kept, cond_of(conds, j).not()]).guard() {
+            let reader = reader.name().unwrap_or_default();
             let message = format!("`{}` is left out by `cfg` where `{reader}`, which names it, is kept", m.name);
             errors.extend(error_under(&guard, place(m), &message));
         }
@@ -330,8 +333,14 @@ fn runs(made: &ModuleOut, conds: &[Cond], i: usize, c: usize, way: &[usize]) -> 
         return Cond::Always;
     }
     let module = &made.module;
+    let (Some(made_reader), Some(callee)) = (made.items.get(i), module.items.get(c)) else { return Cond::Never };
     let way = [way, &[c]].concat();
-    let calls = made.items[i].mentions().iter().filter(|m| module.items[c].name() == Some(&m.name));
+    let calls = made_reader.mentions().iter().filter(|m| callee.name() == Some(&m.name));
     let callers = calls.map(|m| module.item_at(m.span)).filter(|caller| !way.contains(caller));
-    Cond::all([conds[c].clone(), Cond::any(callers.map(|caller| runs(made, conds, i, caller, &way)))])
+    Cond::all([cond_of(conds, c), Cond::any(callers.map(|caller| runs(made, conds, i, caller, &way)))])
+}
+
+/// When item `i` is there, `conds` saying it of each item of the module: never for an item the module has not.
+fn cond_of(conds: &[Cond], i: usize) -> Cond {
+    conds.get(i).cloned().unwrap_or(Cond::Never)
 }

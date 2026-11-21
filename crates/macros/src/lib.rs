@@ -380,8 +380,8 @@ use kernite::lang;
 
 use crate::expand::expand;
 use crate::rust::{
-    MACROS, attrs_len, braced, depends_on, error, flatten, for_rust, inner_attribute, is_ident, is_path, is_punct, lex,
-    module, named, needs_dependency, parse, path_uses, site, site_at,
+    MACROS, attrs_of, braced, depends_on, error, flatten, for_rust, inner_attribute, is_ident, is_path, is_punct, lex,
+    module, named, needs_dependency, parse, path_uses, site, site_at, span_of, within,
 };
 
 /// See the crate documentation.
@@ -390,7 +390,7 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr: Vec<TokenTree> = attr.into_iter().collect();
     let tokens: Vec<TokenTree> = item.into_iter().collect();
     let Some((braces, head)) = braced(&tokens) else {
-        let span = tokens.first().map_or_else(Span::call_site, TokenTree::span);
+        let span = span_of(tokens.first());
         return error(
             span,
             "`#[kernels]` goes on a module written in braces, `mod name { .. }`, where the kernels are",
@@ -410,7 +410,7 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
         _ => {
             let message = "`#[kernels]` takes the module of consts its kernels read, as `consts = crate::model::sizes`, \
                            a module `#[kernite_macros::consts]` is on; or nothing";
-            return refused(error(attr[0].span(), message));
+            return refused(error(span_of(attr.first()), message));
         }
     };
     // The macro the consts' module has calls `__kernels!` back by the name `kernite-macros`, which a
@@ -425,8 +425,8 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
     // found in a module of its own, `__consts`, which the docs hide, written at the path's last name, for an
     // error of Rust's in it to point there.
     let body = flatten(braces.stream());
-    let attrs = body.as_chunks::<3>().0.iter().take_while(|attr| inner_attribute(*attr)).count() * 3;
-    let mut inner: TokenStream = body[..attrs].iter().cloned().collect();
+    let attrs = body.as_chunks::<3>().0.iter().take_while(|attr| inner_attribute(*attr));
+    let mut inner: TokenStream = attrs.flatten().cloned().collect();
     let site = site_at(path.last().map_or_else(Span::call_site, |t| t.span().resolved_at(Span::call_site())));
     inner.extend(parse("#[doc(hidden)] mod __consts"));
     inner.extend([TokenTree::Group(Group::new(Delimiter::Brace, path_uses(path)))]);
@@ -445,7 +445,7 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
     let tokens: Vec<TokenTree> = item.into_iter().collect();
     let Some((braces, head)) = braced(&tokens) else {
-        let span = tokens.first().map_or_else(Span::call_site, TokenTree::span);
+        let span = span_of(tokens.first());
         return error(
             span,
             "`#[consts]` goes on a module written in braces, `mod name { .. }`, of the consts kernels read",
@@ -465,13 +465,14 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => inner.extend(error(at(e.span), &e.message)),
         Ok(module) => {
             for (item, verdict) in module.items.iter().zip(kernite::consts(&module)) {
-                let tokens = &top[item.tokens.clone()];
-                let named = &tokens[attrs_len(tokens)..];
+                let tokens = within(&top, &item.tokens);
+                let (_, named) = attrs_of(tokens);
+                let start = span_of(named.first().or(tokens.first()));
                 match verdict {
                     ConstItem::Given | ConstItem::Wrong(_) if !named.first().is_some_and(|t| is_ident(t, "pub")) => {
                         let message = "a const of a module of consts is `pub`, for the modules of kernels that take \
                                        it to see";
-                        inner.extend(error(named[0].span(), message));
+                        inner.extend(error(start, message));
                     }
                     ConstItem::Given => given.extend(tokens.iter().cloned()),
                     ConstItem::Wrong(e) => inner.extend(error(at(e.span), &e.message)),
@@ -480,7 +481,7 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
                     ConstItem::NotAConst => {
                         let message = "a module of consts holds the consts kernels read, as `pub const E: usize = \
                                        16;`, and nothing else";
-                        inner.extend(error(named.first().unwrap_or(&tokens[0]).span(), message));
+                        inner.extend(error(start, message));
                     }
                 }
             }

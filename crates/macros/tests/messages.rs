@@ -708,7 +708,7 @@ fn a_crate_that_renames_kernite_macros_kernite_cuda_and_kernite_cpu_is_told_it_h
              which this crate does not have",
             "src/lib.rs:93:1: error: a module of kernels given consts needs a dependency named `kernite-macros`, \
              which this crate does not have",
-            &format!("src/lib.rs:111:15: error: {REFUSED}")[..],
+            format!("src/lib.rs:111:15: error: {REFUSED}").as_str(),
             "src/lib.rs:111:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, which this \
              crate does not have",
             "error: could not compile `renamed_deps` (lib) due to 8 previous errors",
@@ -732,7 +732,7 @@ fn a_crate_that_renames_kernite_macros_kernite_cuda_and_kernite_cpu_is_told_it_h
              which this crate does not have",
             "src/lib.rs:104:1: error: a module of kernels given consts needs a dependency named `kernite-macros`, \
              which this crate does not have",
-            &format!("src/lib.rs:111:15: error: {REFUSED}")[..],
+            format!("src/lib.rs:111:15: error: {REFUSED}").as_str(),
             "src/lib.rs:111:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, which this \
              crate does not have",
             "error: could not compile `renamed_deps` (lib) due to 12 previous errors",
@@ -1034,7 +1034,7 @@ fn a_module_refused_at_its_attribute_needs_kernite_cuda_where_cfg_keeps_a_gpu_it
     assert_eq!(
         kept,
         [
-            &format!("src/lib.rs:6:27: error: {REFUSED}")[..],
+            format!("src/lib.rs:6:27: error: {REFUSED}").as_str(),
             "src/lib.rs:6:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, which this crate \
              does not have",
             "error: could not compile `refused_features` (lib) due to 2 previous errors",
@@ -1045,7 +1045,7 @@ fn a_module_refused_at_its_attribute_needs_kernite_cuda_where_cfg_keeps_a_gpu_it
     assert_eq!(
         left_out,
         [
-            &format!("src/lib.rs:6:27: error: {REFUSED}")[..],
+            format!("src/lib.rs:6:27: error: {REFUSED}").as_str(),
             "error: could not compile `refused_features` (lib) due to 1 previous error",
         ]
     );
@@ -1063,7 +1063,7 @@ fn a_module_refused_at_its_attribute_needs_kernite_cpu_for_a_static_and_a_cooper
     assert_eq!(
         said,
         [
-            &format!("src/lib.rs:5:27: error: {REFUSED}")[..],
+            format!("src/lib.rs:5:27: error: {REFUSED}").as_str(),
             "src/lib.rs:7:16: error: a static of x86 kernels needs a dependency named `kernite-cpu`, which this crate \
              does not have",
             "src/lib.rs:10:35: error: a cooperative x86 kernel needs a dependency named `kernite-cpu`, which this \

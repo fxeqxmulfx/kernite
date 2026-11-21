@@ -35,11 +35,17 @@ fn mark(step: usize) {
     let _ = fs::metadata(format!("{MARK}{step}"));
 }
 
+/// The first `threads` of the CPUs the process may run on, for a grid of that many threads to be placed on.
+fn first_cpus(threads: usize) -> Result<Vec<usize>> {
+    let cpus = cpus()?;
+    Ok(cpus.get(..threads).ok_or("the grid has more threads than the process has CPUs")?.to_vec())
+}
+
 /// What the process `strace` runs does: a launch, which starts the threads, then a thousand.
 fn launches(threads: usize) -> Result {
-    let cpus = cpus()?;
+    let on = first_cpus(threads)?;
     let placed = env::var_os(PLACED).is_some();
-    let grid = || if placed { Grid::on(&cpus[..threads]) } else { Grid::new(threads) };
+    let grid = || if placed { Grid::on(&on) } else { Grid::new(threads) };
     launch(grid(), |_| {})?;
     mark(0);
     for _ in 0..1000 {
@@ -86,15 +92,18 @@ fn steps_of(name: &str, threads: usize, placed: bool) -> Result<Option<Vec<Vec<S
     assert!(marks.len() >= 2, "{name}: the marks are not in the calls");
     Ok(Some(
         marks
-            .windows(2)
-            .map(|pair| calls[pair[0] + 1..pair[1]].iter().map(|call| call.to_string()).collect())
+            .iter()
+            .zip(marks.iter().skip(1))
+            .map(|(&from, &to)| {
+                calls.get(from + 1..to).unwrap_or_default().iter().map(|call| call.to_string()).collect()
+            })
             .collect(),
     ))
 }
 
 /// How a failure shows `calls`: the first few.
-fn first(calls: &[String]) -> String {
-    calls[..calls.len().min(5)].join("\n")
+fn first<S: AsRef<str>>(calls: &[S]) -> String {
+    calls.iter().take(5).map(|call| call.as_ref()).collect::<Vec<_>>().join("\n")
 }
 
 /// Whether a call `strace` shows starts a thread or maps a stack.
@@ -116,7 +125,7 @@ fn assert_places_no_memory(name: &str) -> Result {
     let calls = fs::read_to_string(log_of(name))?;
     let memory: Vec<&str> = calls.lines().filter(|call| MEMORY.iter().any(|m| call.contains(m))).collect();
     let message = "calls place memory or set a policy for it, as";
-    assert!(memory.is_empty(), "{name}: {} {message}:\n{}", memory.len(), memory[..memory.len().min(5)].join("\n"));
+    assert!(memory.is_empty(), "{name}: {} {message}:\n{}", memory.len(), first(&memory));
     Ok(())
 }
 
@@ -183,14 +192,16 @@ struct Step {
 
 /// The steps for a grid of `threads` threads, two at least, on `cpus`, those the caller's thread
 /// may run on, which are as many. They begin with the grid not placed, which has started the
-/// threads, so that the first step is the first to place it.
-fn script(cpus: &[usize], threads: usize) -> Vec<Step> {
+/// threads, so that the first step is the first to place it. It is an error where `cpus` are
+/// fewer than `threads`, or `threads` are fewer than two.
+fn script(cpus: &[usize], threads: usize) -> Result<Vec<Step>> {
     let on = |placed: &[usize], reads, sets| Step { placed: Some(placed.to_vec()), threads: placed.len(), reads, sets };
     let anywhere = |threads, reads, sets| Step { placed: None, threads, reads, sets };
-    let first = &cpus[..threads];
+    let (first, spare) = cpus.split_at_checked(threads).ok_or("the grid has more threads than the process has CPUs")?;
+    let ((two, rest), (_, fewer)) =
+        first.split_first_chunk::<2>().zip(first.split_last()).ok_or("a grid has two threads at least")?;
     // The first two threads swap CPUs, then the last moves to a CPU none has, if there is one.
-    let mut swapped = first.to_vec();
-    swapped.swap(0, 1);
+    let swapped: Vec<usize> = two.iter().rev().chain(rest).copied().collect();
     let mut last = swapped.clone();
     let mut script = vec![
         // From not placed: the CPUs the caller's thread may run on are read, then each thread moves.
@@ -198,8 +209,8 @@ fn script(cpus: &[usize], threads: usize) -> Vec<Step> {
         on(first, 0, 0),
         on(&swapped, 0, 2),
     ];
-    if let Some(&spare) = cpus.get(threads) {
-        last[threads - 1] = spare;
+    if let (Some(&spare), Some(slot)) = (spare.first(), last.last_mut()) {
+        *slot = spare;
         script.push(on(&last, 0, 1));
     }
     script.extend([
@@ -209,25 +220,25 @@ fn script(cpus: &[usize], threads: usize) -> Vec<Step> {
         anywhere(threads, 0, 0),
         // Placed on two threads only, then not placed: the others were never moved, so only the
         // two go back.
-        on(&first[..2], 1, 2),
+        on(two, 1, 2),
         anywhere(threads, 0, 2),
         // Placed again: the caller's thread is free, so its CPUs are read, and all move.
         on(first, 1, threads),
         // A grid of fewer threads finds them where it places them, and leaves the last where it was.
-        on(&first[..threads - 1], 0, 0),
+        on(fewer, 0, 0),
         on(first, 0, 0),
         // A grid of the caller's thread alone that is not placed lets every kept thread go, too.
         anywhere(1, 0, threads),
         anywhere(threads, 0, 0),
     ]);
-    script
+    Ok(script)
 }
 
 /// What the process `strace` runs for the test of changes does: a launch not placed, which starts
 /// the threads and asks how many the process runs, then the steps, a mark before each.
 fn changes(threads: usize) -> Result {
     launch(Grid::new(threads), |_| {})?;
-    let script = script(&cpus()?, threads);
+    let script = script(&cpus()?, threads)?;
     for (step, Step { placed, threads, .. }) in script.iter().enumerate() {
         mark(step);
         let grid = match placed {
@@ -260,7 +271,7 @@ fn a_launch_that_changes_the_placement_makes_a_call_for_each_thread_that_moves_a
     }
     let name = "a_launch_that_changes_the_placement_makes_a_call_for_each_thread_that_moves_and_no_other";
     let Some(steps) = steps_of(name, threads, false)? else { return Ok(()) };
-    let script = script(&all, threads);
+    let script = script(&all, threads)?;
     assert_eq!(steps.len(), script.len());
     for (i, (calls, step)) in steps.iter().zip(&script).enumerate() {
         let count = |call: &str| calls.iter().filter(|line| line.contains(call)).count();
@@ -284,9 +295,9 @@ fn a_launch_that_changes_the_placement_makes_a_call_for_each_thread_that_moves_a
 /// What the process `strace` runs for the test of starts does: one launch that places a grid, which
 /// starts its threads, between two marks.
 fn starts(threads: usize) -> Result {
-    let cpus = cpus()?;
+    let on = first_cpus(threads)?;
     mark(0);
-    launch(Grid::on(&cpus[..threads]), |_| {})?;
+    launch(Grid::on(&on), |_| {})?;
     mark(1);
     Ok(())
 }

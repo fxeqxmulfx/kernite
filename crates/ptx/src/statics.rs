@@ -104,9 +104,9 @@ impl Static {
     pub fn declaration(&self) -> String {
         let m = &self.memory;
         let mut out = format!(".{} .align {} .b8 {}[{}]", m.space.word(), m.align, m.name, m.bytes.unwrap_or(0));
-        let end = self.init.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-        if end > 0 {
-            let bytes: Vec<String> = self.init[..end].iter().map(u8::to_string).collect();
+        let held = self.init.iter().rposition(|&b| b != 0).and_then(|i| self.init.get(..=i)).unwrap_or_default();
+        if !held.is_empty() {
+            let bytes: Vec<String> = held.iter().map(u8::to_string).collect();
             out += &format!(" = {{{}}}", bytes.join(", "));
         }
         out + ";\n"
@@ -144,7 +144,7 @@ fn datum(t: Ty, x: &Value, what: &str) -> Result<Vec<u8>, String> {
             if !(lo..=hi).contains(&v) {
                 return Err(format!("{what} is {v}, out of range for `{name}`"));
             }
-            Ok(v.to_le_bytes()[..bits as usize / 8].to_vec())
+            Ok(v.to_le_bytes().into_iter().take(bits as usize / 8).collect())
         }
         Value::Int(v, _) if t.kind() == Kind::Float => {
             Err(format!("{what} is an integer, and {} `{name}` a float: `{v}.0`", article(name)))

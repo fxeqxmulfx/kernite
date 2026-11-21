@@ -8,9 +8,9 @@ use kernite::{Call, HostStatic, Naked, NativeInstance};
 
 use crate::cond::Cond;
 use crate::rust::{
-    asks, attrs, cfg_of, checks, clashes, depends_on, given_back, gives_placeholder, hygienic, launcher_result,
-    missing, name_at, never, parse, pick, pointer, position, primitive, probe, result, signature, site, stub,
-    value_params, visibility, written, written_params,
+    Written, asks, attrs, cfg_of, checks, clashes, depends_on, given_back, gives_placeholder, hygienic,
+    launcher_result, missing, name_after, name_at, never, parse, pick, pointer, position, primitive, probe, result,
+    signature, site, span_of, stub, value_params, visibility, within, written, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -73,16 +73,16 @@ pub(crate) fn naked(
         // Each instance's parameters and their types: `f`'s, then a cooperative kernel's place. `f`
         // passes its own on by their names, before the colon, and a pointer cast.
         let (mut params, mut names) = (vec![], vec![]);
-        for (param, colon) in written_params(f, top) {
-            let (ty, cast) = erased(&param[colon + 1..]);
-            params.push(format!("{}: {ty}", param[colon - 1]));
-            names.push(format!("{}{cast}", param[colon - 1]));
+        for p in written_params(f, top) {
+            let (ty, cast) = erased(&p.ty);
+            params.push(format!("{}: {ty}", p.name));
+            names.push(format!("{}{cast}", p.name));
         }
         if cooperative {
             params.push("_: &::kernite_cpu::Place".to_string());
         }
         // Its result, which `f` casts back if it is a pointer.
-        let ret = f.ret.as_ref().map_or(String::new(), |r| format!("-> {}", erased(&top[r.tokens.clone()]).0));
+        let ret = f.ret.as_ref().map_or(String::new(), |r| format!("-> {}", erased(within(top, &r.tokens)).0));
         let (mut arms, mut fns) = (vec![], TokenStream::new());
         for (k, instance) in instances.iter().enumerate() {
             let (listing, name) = (&instance.naked, instance_name(&f.name, k));
@@ -251,14 +251,14 @@ pub(crate) fn cpu_static(
     cfg: &TokenStream,
     top: &[TokenTree],
 ) -> TokenStream {
-    let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
-    out.extend(top[s.vis.clone()].iter().cloned());
+    let mut out: TokenStream = within(top, &s.attrs).iter().cloned().collect();
+    out.extend(within(top, &s.vis).iter().cloned());
     out.extend(parse("static"));
     // Its name as written, after `static`.
-    let name = &top[s.vis.end + 1];
-    out.extend([name.clone()]);
+    let name = name_after(&s.vis, top);
+    out.extend(name.cloned());
     if !depends_on(CPU) {
-        let (ty, error) = missing(cfg, name.span(), "a static of x86 kernels", CPU);
+        let (ty, error) = missing(cfg, span_of(name), "a static of x86 kernels", CPU);
         out.extend(parse(":"));
         out.extend(ty);
         out.extend(parse("= [];"));
@@ -283,11 +283,8 @@ pub(crate) fn cpu_static(
 fn elements(m: &HostStatic) -> Vec<String> {
     let size = m.size as usize;
     Vec::from_fn(m.len as usize, |i| {
-        let mut word = [0; 8];
-        if let Some(bytes) = m.init.get(i * size..(i + 1) * size) {
-            word[..size].copy_from_slice(bytes);
-        }
-        let bits = u64::from_le_bytes(word);
+        let bytes = m.init.get(i * size..(i + 1) * size).unwrap_or_default();
+        let bits = bytes.iter().rev().fold(0, |bits, &byte| bits << 8 | u64::from(byte));
         // The bits as a signed number of the element's width.
         let signed = ((bits << (64 - 8 * size)) as i64) >> (64 - 8 * size);
         match m.elem.as_str() {
@@ -383,7 +380,7 @@ fn grid_launcher(
     // Its visibility, then `unsafe fn` and its name and generics as written.
     out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("unsafe fn"));
-    out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
+    out.extend(top.get(f.head.end + 1..f.params_at).unwrap_or_default().iter().cloned());
     // Its types are `kernite_cpu`'s, but where the crate has none: any grid goes in, and the error,
     // said once, comes out.
     let (grid, result, missed) = match depends_on(CPU) {
@@ -393,7 +390,7 @@ fn grid_launcher(
             TokenStream::new(),
         ),
         false => {
-            let name = top[f.head.end + 1].span();
+            let name = span_of(name_after(&f.head, top));
             let (result, missed) = missing(cfg, name, "a cooperative x86 kernel", CPU);
             (parse("impl ::core::marker::Sized"), result, missed)
         }
@@ -412,10 +409,8 @@ fn grid_launcher(
                 _ => pick(f, kernels, top),
             };
             let (mut addresses, mut args) = (String::new(), vec![]);
-            for (param, colon) in written_params(f, top) {
-                // Its name, before the colon.
-                let name = &param[colon - 1];
-                match pointer(&param[colon + 1..]) {
+            for Written { name, ty, .. } in written_params(f, top) {
+                match pointer(&ty) {
                     Some((kind, _)) => {
                         let again = if kind == "mut" { "_mut" } else { "" };
                         addresses += &format!("let {name} = ({name} as *{kind} ()).expose_provenance();\n");

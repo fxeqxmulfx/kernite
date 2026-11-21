@@ -3,6 +3,7 @@
 
 use std::cell::Cell;
 use std::mem::DropGuard;
+use std::ops::Range;
 
 use proc_macro::{Delimiter, Group, Ident, Literal, Spacing, Span, TokenStream, TokenTree};
 
@@ -111,27 +112,27 @@ pub(crate) fn inner_attribute(tokens: &[TokenTree]) -> bool {
     matches!(tokens, [hash, bang, ..] if is_punct(hash, '#') && is_punct(bang, '!'))
 }
 
-/// How many of `tokens`, an item's, are its attributes, `#[..]` each.
-pub(crate) fn attrs_len(tokens: &[TokenTree]) -> usize {
-    let mut n = 0;
-    while let [hash, TokenTree::Group(g), ..] = &tokens[n..]
+/// `tokens`, an item's, as its attributes, `#[..]` each, and what follows them.
+pub(crate) fn attrs_of(tokens: &[TokenTree]) -> (&[TokenTree], &[TokenTree]) {
+    let mut rest = tokens;
+    while let [hash, TokenTree::Group(g), after @ ..] = rest
         && is_punct(hash, '#')
         && g.delimiter() == Delimiter::Bracket
     {
-        n += 2;
+        rest = after;
     }
-    n
+    (tokens.get(..tokens.len() - rest.len()).unwrap_or_default(), rest)
 }
 
 /// `f`'s visibility as written, `pub` or `pub(..)`, or none.
 pub(crate) fn visibility<'a>(f: &Fn, top: &'a [TokenTree]) -> &'a [TokenTree] {
-    let head = &top[f.head.clone()];
+    let head = within(top, &f.head);
     let vis = match head {
         [pub_, TokenTree::Group(g), ..] if is_ident(pub_, "pub") && g.delimiter() == Delimiter::Parenthesis => 2,
         [pub_, ..] if is_ident(pub_, "pub") => 1,
         _ => 0,
     };
-    &head[..vis]
+    head.get(..vis).unwrap_or_default()
 }
 
 /// `const { if .. }` on `f`'s compile-time arguments, by their names as written, `r#in` as well:
@@ -152,15 +153,34 @@ pub(crate) fn pick(f: &Fn, arms: &[(Vec<Value>, String)], top: &[TokenTree]) -> 
     out + &format!("{{ ::core::panic!({message:?}) }} }}")
 }
 
+/// The tokens of `top` that `range` covers, a range of tokens that the parser gave; none for one it did not.
+pub(crate) fn within<'a>(top: &'a [TokenTree], range: &Range<usize>) -> &'a [TokenTree] {
+    top.get(range.clone()).unwrap_or_default()
+}
+
+/// The name of a function or a static as written, `r#type` as well: the token after the keyword, `fn` or `static`,
+/// that comes after `before`, its head or its visibility.
+pub(crate) fn name_after<'a>(before: &Range<usize>, top: &'a [TokenTree]) -> Option<&'a TokenTree> {
+    top.get(before.end + 1)
+}
+
+/// Where `token` is; the macro's call site for none.
+pub(crate) fn span_of(token: Option<&TokenTree>) -> Span {
+    token.map_or_else(Span::call_site, TokenTree::span)
+}
+
 /// `f`'s generics as written, `<const N: usize>`; none if it has none.
 pub(crate) fn written_generics<'a>(f: &Fn, top: &'a [TokenTree]) -> &'a [TokenTree] {
-    &top[f.head.end + 2..f.params_at]
+    top.get(f.head.end + 2..f.params_at).unwrap_or_default()
 }
 
 /// The name after each `const` of `tokens`, as written, `r#type` as well: a const's, or those of
 /// a function's compile-time arguments.
 pub(crate) fn const_names(tokens: &[TokenTree]) -> impl Iterator<Item = &TokenTree> {
-    tokens.windows(2).filter(|w| is_ident(&w[0], "const")).map(|w| &w[1])
+    tokens.windows(2).filter_map(|w| match w {
+        [keyword, name] if is_ident(keyword, "const") => Some(name),
+        _ => None,
+    })
 }
 
 /// The place of the item of `module` named `name`, among its items; none if it has none.
@@ -170,17 +190,16 @@ pub(crate) fn position(module: &lang::Module, name: &str) -> Option<usize> {
 
 /// What [`carried`] keeps of `item`'s attributes when it offers nothing: its `cfg`.
 pub(crate) fn cfg_of(item: &lang::Item, top: &[TokenTree]) -> TokenStream {
-    let tokens = &top[item.tokens.clone()];
-    carried(tokens[..attrs_len(tokens)].iter().cloned(), false)
+    carried(attrs_of(within(top, &item.tokens)).0.iter().cloned(), false)
 }
 
 /// The name of `item`, a const, a static or a function, as `top` writes it, `r#type` as well, of the
 /// span `span`; none for an item that has no name.
 pub(crate) fn name_at(item: &lang::Item, top: &[TokenTree], span: Span) -> Option<TokenTree> {
     let mut name = match &item.kind {
-        ItemKind::Const(_) => const_names(&top[item.tokens.clone()]).next()?,
-        ItemKind::Static(s) => &top[s.vis.end + 1],
-        ItemKind::Fn(f) => &top[f.head.end + 1],
+        ItemKind::Const(_) => const_names(within(top, &item.tokens)).next()?,
+        ItemKind::Static(s) => name_after(&s.vis, top)?,
+        ItemKind::Fn(f) => name_after(&f.head, top)?,
         ItemKind::Other => return None,
     }
     .clone();
@@ -219,14 +238,24 @@ fn split_commas(tokens: &[TokenTree]) -> impl Iterator<Item = &[TokenTree]> {
     })
 }
 
-/// `f`'s parameters as written, each its tokens, `x: *mut f32`, and the place of its colon. A fragment that stays
-/// one type is in parentheses, as [`for_rust`] has it, for the macros write each parameter as it is here, and Rust
-/// reads `*const $t`, with `$t` as `dyn Debug + Send`, as one type only so. A comma ends a parameter unless
+/// A parameter as written, `mut x: *mut f32`.
+pub(crate) struct Written {
+    /// Its tokens up to its colon, the colon too: `mut x:`.
+    pub(crate) head: Vec<TokenTree>,
+    /// Its name, `x`: the token before the colon.
+    pub(crate) name: TokenTree,
+    /// Its type, `*mut f32`: the tokens after the colon.
+    pub(crate) ty: Vec<TokenTree>,
+}
+
+/// `f`'s parameters as written, those that have a name and a colon. A fragment that stays one type is in
+/// parentheses, as [`for_rust`] has it, for the macros write each parameter as it is here, and Rust reads
+/// `*const $t`, with `$t` as `dyn Debug + Send`, as one type only so. A comma ends a parameter unless
 /// [`split_commas`] says it is among the arguments of a type's. Rust cannot pass a parameter named `_` on, so each is
 /// named here, for every signature and body the macros write for `f`: it takes the next of `__kernite_0`,
 /// `__kernite_1` and on that no parameter or compile-time argument of `f` is named.
-pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, usize)> {
-    let TokenTree::Group(group) = &top[f.params_at] else { return vec![] };
+pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<Written> {
+    let Some(TokenTree::Group(group)) = top.get(f.params_at) else { return vec![] };
     let tokens = for_rust(flatten(group.stream()));
     let params = split_commas(&tokens).filter(|p| !p.is_empty());
     let taken: Vec<&str> =
@@ -234,14 +263,16 @@ pub(crate) fn written_params(f: &Fn, top: &[TokenTree]) -> Vec<(Vec<TokenTree>, 
     let mut free = (0..).map(|n| format!("__kernite_{n}")).filter(|name| !taken.contains(&name.as_str()));
     params
         .filter_map(|p| {
-            let mut p = p.to_vec();
-            let colon = p.iter().position(|t| is_punct(t, ':'))?;
-            if is_ident(&p[colon - 1], "_")
-                && let Some(name) = free.next()
+            let (head, ty) = p.split_at_checked(p.iter().position(|t| is_punct(t, ':'))? + 1)?;
+            let mut head = head.to_vec();
+            let name = head.iter_mut().nth_back(1)?;
+            if is_ident(name, "_")
+                && let Some(fresh) = free.next()
             {
-                p[colon - 1] = TokenTree::Ident(Ident::new(&name, site()));
+                *name = TokenTree::Ident(Ident::new(&fresh, site()));
             }
-            Some((p, colon))
+            let name = name.clone();
+            Some(Written { head, name, ty: ty.to_vec() })
         })
         .collect()
 }
@@ -284,7 +315,7 @@ fn walk(
     let all = tokens;
     let mut out = TokenStream::new();
     while let [t, rest @ ..] = tokens {
-        let before = &all[..all.len() - tokens.len()];
+        let before = all.get(..all.len() - tokens.len()).unwrap_or_default();
         tokens = rest;
         match (t, rest) {
             (TokenTree::Ident(_), [bang, args @ TokenTree::Group(_), after @ ..]) if is_punct(bang, '!') => {
@@ -348,7 +379,7 @@ fn placeholder(tokens: &[TokenTree]) -> bool {
 
 /// Whether `f` gives back a type with a `_` in it, which Rust refuses in a signature.
 pub(crate) fn gives_placeholder(f: &Fn, top: &[TokenTree]) -> bool {
-    f.ret.as_ref().is_some_and(|r| placeholder(&top[r.tokens.clone()]))
+    f.ret.as_ref().is_some_and(|r| placeholder(within(top, &r.tokens)))
 }
 
 /// The name of the trait the macros write into a body to ask Rust whether a pointer has a size.
@@ -390,18 +421,17 @@ fn asked(f: &Fn, top: &[TokenTree]) -> Vec<Option<Ask>> {
         }
         let (_, to) = pointer(ty)?;
         let one = lex(ty).0.is_ok_and(|trees| lang::pointer(&lang::read_type(&trees)) == Ok(true));
-        (one && !placeholder(to)).then(|| Ask::Pointer(to[0].span(), to[to.len() - 1].span()))
+        (one && !placeholder(to)).then(|| Ask::Pointer(span_of(to.first()), span_of(to.last())))
     };
-    let params = written_params(f, top).into_iter().map(|(param, colon)| ask(&param[colon + 1..]));
-    params.chain([f.ret.as_ref().and_then(|r| ask(&top[r.tokens.clone()]))]).collect()
+    let params = written_params(f, top).into_iter().map(|p| ask(&p.ty));
+    params.chain([f.ret.as_ref().and_then(|r| ask(within(top, &r.tokens)))]).collect()
 }
 
 /// What asks Rust of each type `f` takes, in a body that has the parameters by their names:
 /// [`numbers`] asks of the numbers and [`pointers`] of the pointers. A result that is a pointer is
 /// asked of where it is given back. Nothing if `f` has none to ask of.
 pub(crate) fn checks(f: &Fn, top: &[TokenTree]) -> TokenStream {
-    let names: Vec<TokenStream> =
-        written_params(f, top).iter().map(|(param, colon)| param[colon - 1].clone().into()).collect();
+    let names: Vec<TokenStream> = written_params(f, top).into_iter().map(|p| p.name.into()).collect();
     let asked = asked(f, top);
     let mut out = numbers(&asked);
     out.extend(pointers(&asked, &names));
@@ -416,8 +446,8 @@ pub(crate) fn checks(f: &Fn, top: &[TokenTree]) -> TokenStream {
 pub(crate) fn asks(f: &Fn, top: &[TokenTree], pointee: fn(&[TokenTree]) -> TokenStream) -> TokenStream {
     let asked = asked(f, top);
     let mut out = numbers(&asked);
-    let result = f.ret.as_ref().map(|r| top[r.tokens.clone()].to_vec());
-    let types = written_params(f, top).into_iter().map(|(param, colon)| param[colon + 1..].to_vec()).chain(result);
+    let result = f.ret.as_ref().map(|r| within(top, &r.tokens).to_vec());
+    let types = written_params(f, top).into_iter().map(|p| p.ty).chain(result);
     let (mut params, mut values) = (TokenStream::new(), vec![]);
     for (i, (ty, ask)) in types.zip(&asked).enumerate() {
         let local = TokenTree::Ident(Ident::new(&format!("__{i}"), Span::mixed_site()));
@@ -485,7 +515,7 @@ fn numbers(asked: &[Option<Ask>]) -> TokenStream {
 /// and not of any value of it, which a type that has no size has none of. Each token but the type is
 /// the macro's, located where the type begins.
 fn number(name: &str, ty: &[TokenTree]) -> TokenStream {
-    let at = ty[0].span();
+    let at = span_of(ty.first());
     let mut out = placed("let _ = | __kernite_asked :", at);
     out.extend(ty.iter().cloned());
     out.extend(placed(&format!("| {{ let _: {} = __kernite_asked; }};", primitive(name)), at));
@@ -572,8 +602,10 @@ pub(crate) fn stub(f: &Fn, top: &[TokenTree]) -> TokenStream {
     let mut out = attrs(f, top);
     out.extend(signature(f, top));
     let mut body = asks(f, top, written);
-    if gives_placeholder(f, top) {
-        body.extend(parse(&format!("let _ = self::{} as *const ();", top[f.head.end + 1])));
+    if gives_placeholder(f, top)
+        && let Some(name) = name_after(&f.head, top)
+    {
+        body.extend(parse(&format!("let _ = self::{name} as *const ();")));
     }
     body.extend(parse(&never(f, top)));
     body.extend(parse("::core::unreachable!()"));
@@ -584,7 +616,7 @@ pub(crate) fn stub(f: &Fn, top: &[TokenTree]) -> TokenStream {
 /// What a body of `f`'s parameters does when it never runs, for a kernel that does not compile: it
 /// uses each parameter, by its name, which Rust would find unused.
 pub(crate) fn never(f: &Fn, top: &[TokenTree]) -> String {
-    written_params(f, top).iter().map(|(param, colon)| format!("let _ = {};", param[colon - 1])).collect()
+    written_params(f, top).iter().map(|p| format!("let _ = {};", p.name)).collect()
 }
 
 /// `f`'s attributes as written, but `#[instances(..)]`, `#[cooperative]` and its directives,
@@ -595,7 +627,7 @@ pub(crate) fn attrs(f: &Fn, top: &[TokenTree]) -> TokenStream {
     let kernite = |i: &usize| {
         [&instances, &cooperative].into_iter().chain(f.directives.iter().map(|d| &d.tokens)).any(|r| r.contains(i))
     };
-    f.attrs.clone().filter(|i| !kernite(i)).map(|i| top[i].clone()).collect()
+    f.attrs.clone().filter(|i| !kernite(i)).filter_map(|i| top.get(i).cloned()).collect()
 }
 
 /// What the code that stands for an item, an error said of it or a method it gives, keeps of the
@@ -654,14 +686,14 @@ pub(crate) fn named(t: &TokenTree, name: &str) -> bool {
 /// `f`'s signature as written, from its visibility to its result, but for its parameters, as
 /// [`value_params`] has them, and its result, which is [`given_back`]'s.
 pub(crate) fn signature(f: &Fn, top: &[TokenTree]) -> TokenStream {
-    let mut out: TokenStream = top[f.head.start..f.params_at].iter().cloned().collect();
+    let mut out: TokenStream = top.get(f.head.start..f.params_at).unwrap_or_default().iter().cloned().collect();
     let mut params = Group::new(Delimiter::Parenthesis, value_params(f, top));
-    params.set_span(top[f.params_at].span());
+    params.set_span(span_of(top.get(f.params_at)));
     out.extend([TokenTree::Group(params)]);
     if let Some(r) = &f.ret {
         // The arrow, then the result.
-        out.extend(top[f.params_at + 1..r.tokens.start].iter().cloned());
-        out.extend(given_back(&top[r.tokens.clone()]));
+        out.extend(top.get(f.params_at + 1..r.tokens.start).unwrap_or_default().iter().cloned());
+        out.extend(given_back(within(top, &r.tokens)));
     }
     out
 }
@@ -670,9 +702,9 @@ pub(crate) fn signature(f: &Fn, top: &[TokenTree]) -> TokenStream {
 /// [`value`]'s.
 pub(crate) fn value_params(f: &Fn, top: &[TokenTree]) -> TokenStream {
     let mut out = TokenStream::new();
-    for (param, colon) in written_params(f, top) {
-        out.extend(param[..=colon].iter().cloned());
-        out.extend(value(&param[colon + 1..]));
+    for p in written_params(f, top) {
+        out.extend(p.head);
+        out.extend(value(&p.ty));
         out.extend(parse(","));
     }
     out
@@ -688,7 +720,8 @@ pub(crate) fn flatten(stream: TokenStream) -> Vec<TokenTree> {
         match t {
             TokenTree::Group(g) if g.delimiter() == Delimiter::None => {
                 let inside = flatten(g.stream());
-                if stays(&inside, &tokens[..i], &tokens[i + 1..]) {
+                let (before, after) = (tokens.get(..i).unwrap_or_default(), tokens.get(i + 1..).unwrap_or_default());
+                if stays(&inside, before, after) {
                     out.push(t.clone());
                 } else {
                     out.extend(inside);
@@ -712,23 +745,18 @@ pub(crate) fn flatten(stream: TokenStream) -> Vec<TokenTree> {
 fn stays(inside: &[TokenTree], before: &[TokenTree], after: &[TokenTree]) -> bool {
     let is_any = |t: &TokenTree, chars: &str| chars.chars().any(|c| is_punct(t, c));
     let loose = inside.iter().any(|t| is_any(t, "+-*/%^&|<>!=") || is_ident(t, "as"))
-        || inside.windows(2).any(|dots| is_punct(&dots[0], '.') && is_punct(&dots[1], '.'));
+        || inside.windows(2).any(|w| matches!(w, [a, b] if is_punct(a, '.') && is_punct(b, '.')));
     // `==`, `!=`, `<=` and `>=` are an `=` that an operator is joint to.
-    let compares = |pair: &[TokenTree]| match pair {
-        [op, eq] => {
-            is_punct(eq, '=')
-                && is_any(op, "=!<>")
-                && matches!(op, TokenTree::Punct(p) if p.spacing() == Spacing::Joint)
-        }
-        _ => false,
+    let compares = |op: &TokenTree, eq: &TokenTree| {
+        is_punct(eq, '=') && is_any(op, "=!<>") && matches!(op, TokenTree::Punct(p) if p.spacing() == Spacing::Joint)
     };
     let arrow = matches!(before, [.., dash, head] if is_punct(dash, '-') && is_punct(head, '>'));
     let left = before.last().is_some_and(|t| is_any(t, "+-*/%^&|<>!")) && !arrow
         || before.last().is_some_and(|t| is_ident(t, "const") || is_ident(t, "mut"))
         || matches!(before, [.., quote, _] if is_punct(quote, '\''))
-        || before.len() >= 2 && compares(&before[before.len() - 2..]);
+        || matches!(before, [.., op, eq] if compares(op, eq));
     let right = after.first().is_some_and(|t| is_any(t, "+-*/%^&|<>.") || is_ident(t, "as"))
-        || after.len() >= 2 && compares(&after[..2]);
+        || matches!(after, [op, eq, ..] if compares(op, eq));
     loose && (left || right)
 }
 
@@ -738,7 +766,11 @@ fn ends(t: &TokenTree) -> (TokenTree, TokenTree) {
     match t {
         TokenTree::Group(g) if g.delimiter() == Delimiter::None => {
             let inside = flatten(g.stream());
-            (ends(&inside[0]).0, ends(&inside[inside.len() - 1]).1)
+            match (inside.first(), inside.last()) {
+                (Some(first), Some(last)) => (ends(first).0, ends(last).1),
+                // `flatten` opens a group with nothing in it, so there is none.
+                _ => (t.clone(), t.clone()),
+            }
         }
         t => (t.clone(), t.clone()),
     }
@@ -940,7 +972,7 @@ pub(crate) fn half(ty: &[TokenTree]) -> Option<TokenStream> {
 /// name, so it says nothing of the type: a value of one with no size, or that a launcher cannot
 /// pass on, would be an error at the module's attribute, where nothing can be mended.
 pub(crate) fn number_type(ty: &[TokenTree]) -> Option<TokenStream> {
-    number_name(ty).map(|name| placed(&primitive(name), ty[0].span()))
+    number_name(ty).map(|name| placed(&primitive(name), span_of(ty.first())))
 }
 
 /// `ty`, a type a kernel takes, as the Rust the macros write has it: [`number_type`] if it is a
@@ -977,7 +1009,7 @@ fn unit(ty: &[TokenTree]) -> bool {
 /// lifetime from what the launcher takes, a cooperative kernel's grid or a GPU kernel's `self`, where a plain
 /// kernel's has none to take.
 pub(crate) fn launcher_result(f: &Fn, top: &[TokenTree], launched: TokenStream) -> TokenStream {
-    match f.ret.as_ref().map(|r| &top[r.tokens.clone()]) {
+    match f.ret.as_ref().map(|r| within(top, &r.tokens)) {
         Some(ty) if !unit(ty) => refused_beside(ty, launched),
         _ => launched,
     }
@@ -994,9 +1026,9 @@ pub(crate) fn launcher_result(f: &Fn, top: &[TokenTree], launched: TokenStream) 
 pub(crate) fn seen(f: &Fn, top: &[TokenTree], guard: &TokenStream) -> TokenStream {
     let written = written_generics(f, top);
     let inside = written.get(1..written.len().saturating_sub(1)).unwrap_or_default();
-    let generics = split_commas(inside).filter(|g| !g.is_empty()).map(|g| g[3..].to_vec());
-    let params = written_params(f, top).into_iter().map(|(param, colon)| param[colon + 1..].to_vec());
-    let result = f.ret.iter().map(|r| top[r.tokens.clone()].to_vec());
+    let generics = split_commas(inside).filter(|g| !g.is_empty()).map(|g| g.get(3..).unwrap_or_default().to_vec());
+    let params = written_params(f, top).into_iter().map(|p| p.ty);
+    let result = f.ret.iter().map(|r| within(top, &r.tokens).to_vec());
     let mut out = TokenStream::new();
     for ty in generics.chain(params).chain(result) {
         out.extend(guard.clone());
@@ -1025,7 +1057,7 @@ pub(crate) fn refused(ty: &[TokenTree]) -> TokenStream {
 
 /// [`refused`], with `beside` among the arguments if it is not empty: Rust finds the names in it too.
 fn refused_beside(ty: &[TokenTree], beside: TokenStream) -> TokenStream {
-    let at = ty[0].span();
+    let at = span_of(ty.first());
     let mut out = placed(&format!("{REFUSED}<"), at);
     out.extend(unstable(ty));
     if !beside.is_empty() {

@@ -8,8 +8,9 @@ use kernite::{Compiled, DeviceStatic, Failed, Launcher};
 
 use crate::cond::Cond;
 use crate::rust::{
-    asks, attrs, carried, clashes, depends_on, error_under, half, host, hygienic, launcher_result, missing, never,
-    number_type, parse, pick, pointer, primitive, quiet, refused, site, visibility, written_params,
+    Written, asks, attrs, carried, clashes, depends_on, error_under, half, host, hygienic, launcher_result, missing,
+    name_after, never, number_type, parse, pick, pointer, primitive, quiet, refused, site, span_of, visibility, within,
+    written_generics, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -98,7 +99,7 @@ pub(crate) fn gpu(
     );
     methods.extend([TokenTree::Group(Group::new(Delimiter::Brace, load))]);
     // The index of the name of symbol `i` among the names that are there.
-    let index = |i: usize| Cond::count(symbols[..i].iter().map(|(c, _)| c));
+    let index = |i: usize| Cond::count(symbols.iter().take(i).map(|(c, _)| c));
     // The errors that follow the `impl`, as items of the module: those of a name that two methods have, and those of
     // a compile-time argument named as a parameter that a method binds for itself.
     let (mut errors, mut clashed) = (TokenStream::new(), TokenStream::new());
@@ -131,7 +132,7 @@ pub(crate) fn gpu(
     }
     for (k, (s, laid, _)) in memory.iter().enumerate() {
         // Its index among the variables there are, those of the statics that compiled.
-        let i = Cond::count(memory[..k].iter().filter(|(_, m, _)| m.is_ok()).map(|(.., c)| c));
+        let i = Cond::count(memory.iter().take(k).filter(|(_, m, _)| m.is_ok()).map(|(.., c)| c));
         methods.extend(accessor(s, laid, i, top));
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, methods))]);
@@ -146,14 +147,15 @@ pub(crate) fn gpu(
 /// runs, for a static that did not compile: of the type its elements are read as, if only what
 /// the static holds is wrong, and of any type if not.
 fn accessor(s: &lang::Static, laid: &Laid, i: String, top: &[TokenTree]) -> TokenStream {
-    let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
-    out.extend(top[s.vis.clone()].iter().cloned());
+    let mut out: TokenStream = within(top, &s.attrs).iter().cloned().collect();
+    out.extend(within(top, &s.vis).iter().cloned());
     out.extend(parse("fn"));
     // Its name as written, after `static`, where it is but of the macro's span: Rust lints the case
     // of a name the user wrote, and `COUNTS` is the name of a method, not of a static.
-    let mut name = top[s.vis.end + 1].clone();
-    name.set_span(name.span().resolved_at(site()));
-    out.extend([name]);
+    out.extend(name_after(&s.vis, top).cloned().map(|mut name| {
+        name.set_span(name.span().resolved_at(site()));
+        name
+    }));
     let (read, i) = match laid {
         Ok(m) => (Some(&m.code), i),
         Err(failed) => (failed.stub.as_ref(), "0".to_string()),
@@ -230,14 +232,12 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     // Its visibility, then `unsafe fn` and its name and generics as written.
     out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("unsafe fn"));
-    out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
+    out.extend(top.get(f.head.end + 1..f.params_at).unwrap_or_default().iter().cloned());
     let mut params = hygienic("&self, $grid: ::kernite_cuda::Grid, ", launched.is_some());
     let mut args = vec![];
-    for (param, colon) in written_params(f, top) {
-        // Its name, before the colon.
-        let name = &param[colon - 1];
-        params.extend(param[..=colon].iter().cloned());
-        match pointer(&param[colon + 1..]) {
+    for Written { head, name, ty } in written_params(f, top) {
+        params.extend(head);
+        match pointer(&ty) {
             Some((_, to)) => {
                 // Its address, by a cast. A call of `arg` is generic over the type of the pointer, so Rust
                 // would say an error in the type it points to again, at the call.
@@ -250,8 +250,7 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
             }
             None => {
                 args.push(format!("::kernite_cuda::arg(&{name})"));
-                let ty = &param[colon + 1..];
-                params.extend(number_type(ty).or_else(|| half(ty)).unwrap_or_else(|| refused(ty)));
+                params.extend(number_type(&ty).or_else(|| half(&ty)).unwrap_or_else(|| refused(&ty)));
             }
         }
         params.extend(parse(","));
@@ -289,9 +288,9 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
     // where `f` has its own, for an error or a reader to find, but of the macro's span.
     out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("fn"));
-    let name = top[f.head.end + 1].span().resolved_at(site());
+    let name = span_of(name_after(&f.head, top)).resolved_at(site());
     out.extend([TokenTree::Ident(Ident::new(&blocks_name(f), name))]);
-    out.extend(quiet(&top[f.head.end + 2..f.params_at]));
+    out.extend(quiet(written_generics(f, top)));
     out.extend(hygienic(
         "(&self, $threads: ::core::primitive::u32, $shared: ::core::primitive::u32) \
          -> ::core::result::Result<::core::primitive::u32, ::kernite_cuda::Error>",

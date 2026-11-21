@@ -21,8 +21,9 @@ pub(crate) fn analyse<Op>(p: &Program<Op>) -> Result<(Vec<Block>, Live), Error> 
     let blocks = cfg::blocks(&p.body)?;
     let live = liveness(&p.body, &blocks, p.regs.len(), &touched);
     let params: Vec<usize> = p.params.iter().map(|(v, _)| v.id as usize).collect();
-    if let Some(i) = live.ins[0].iter().find(|i| !params.contains(i)) {
-        return Err(Error::ReadBeforeWrite { var: p.regs[i].name.clone(), vreg: p.vreg(i) });
+    let read = live.ins.first().and_then(|top| top.iter().find(|i| !params.contains(i)));
+    if let Some(vreg) = read.and_then(|i| p.vreg(i)) {
+        return Err(Error::ReadBeforeWrite { var: p.var_name(vreg).to_string(), vreg });
     }
     Ok((blocks, live))
 }
@@ -67,34 +68,41 @@ pub(crate) fn liveness<Op>(
     n: usize,
     touches: &dyn Fn(&Inst<Op, VReg>) -> Touches,
 ) -> Live {
-    let (mut uses, mut defs) = (vec![Bits::new(n); blocks.len()], vec![Bits::new(n); blocks.len()]);
-    for (b, block) in blocks.iter().enumerate() {
-        for item in &body[block.items.clone()] {
-            let Item::Inst(inst) = item else { continue };
-            let (reads, writes) = touches(inst);
-            for r in reads {
-                if !defs[b].contains(r) {
-                    uses[b].insert(r);
+    // What each block reads before it writes it, and what it writes.
+    let (uses, defs): (Vec<Bits>, Vec<Bits>) = blocks
+        .iter()
+        .map(|block| {
+            let (mut uses, mut defs) = (Bits::new(n), Bits::new(n));
+            for item in block.items_in(body) {
+                let Item::Inst(inst) = item else { continue };
+                let (reads, writes) = touches(inst);
+                for r in reads {
+                    if !defs.contains(r) {
+                        uses.insert(r);
+                    }
+                }
+                for w in writes {
+                    defs.insert(w);
                 }
             }
-            for w in writes {
-                defs[b].insert(w);
-            }
-        }
-    }
+            (uses, defs)
+        })
+        .unzip();
     let mut live = Live { ins: uses.clone(), outs: vec![Bits::new(n); blocks.len()] };
     loop {
         let mut changed = false;
-        for b in (0..blocks.len()).rev() {
+        for (b, ((block, uses), defs)) in blocks.iter().zip(&uses).zip(&defs).enumerate().rev() {
             let mut out = Bits::new(n);
-            for &s in &blocks[b].succs {
-                out.union_with(&live.ins[s]);
+            for to in block.succs.iter().filter_map(|&s| live.ins.get(s)) {
+                out.union_with(to);
             }
             let mut ins = out.clone();
-            ins.subtract(&defs[b]);
-            ins.union_with(&uses[b]);
-            if out != live.outs[b] || ins != live.ins[b] {
-                (live.outs[b], live.ins[b]) = (out, ins);
+            ins.subtract(defs);
+            ins.union_with(uses);
+            if let (Some(was_out), Some(was_in)) = (live.outs.get_mut(b), live.ins.get_mut(b))
+                && (out != *was_out || ins != *was_in)
+            {
+                (*was_out, *was_in) = (out, ins);
                 changed = true;
             }
         }
@@ -116,7 +124,7 @@ pub(crate) fn copied<Op: PartialEq>(
     let (writes, reads): (Vec<VReg>, Vec<VReg>) = (inst.writes().collect(), inst.reads().collect());
     let ([to], [from]) = (writes.as_slice(), reads.as_slice()) else { return None };
     let of = if p.pinned.iter().any(|&(v, _)| v == *from) { from } else { to };
-    let width = kept[of.id as usize];
+    let width = *kept.get(of.id as usize)?;
     let copy = to != from && to.class == from.class && *inst == s.copy(*to, *from, width);
     copy.then_some((*to, *from, width))
 }
@@ -138,15 +146,19 @@ pub(crate) fn interference<Op: PartialEq>(
     let n = p.regs.len();
     let mut adj = vec![Bits::new(n); n];
     let mut changed: Vec<Vec<PReg>> = vec![vec![]; n];
+    let class = |v: usize| p.regs.get(v).map(|info| info.class);
     let mut edge = |a: usize, b: usize| {
-        if a != b && p.regs[a].class == p.regs[b].class {
-            adj[a].insert(b);
-            adj[b].insert(a);
+        if a != b && class(a) == class(b) {
+            for (x, y) in [(a, b), (b, a)] {
+                if let Some(near) = adj.get_mut(x) {
+                    near.insert(y);
+                }
+            }
         }
     };
-    for (b, block) in blocks.iter().enumerate() {
-        let (mut now, mut high) = (live.outs[b].clone(), upper.outs[b].clone());
-        for item in p.body[block.items.clone()].iter().rev() {
+    for ((block, out), high_out) in blocks.iter().zip(&live.outs).zip(&upper.outs) {
+        let (mut now, mut high) = (out.clone(), high_out.clone());
+        for item in block.items_in(&p.body).iter().rev() {
             let Item::Inst(inst) = item else { continue };
             let (reads, writes) = touched(inst);
             // The variable that the copy to a call's argument reads, if `inst` is one: it writes the argument alone.
@@ -158,9 +170,11 @@ pub(crate) fn interference<Op: PartialEq>(
                     Clobber::All(reg) => (reg, &now),
                     Clobber::Upper(reg) => (reg, &high),
                 };
-                for l in alive.iter().filter(|&l| p.regs[l].class == reg.class) {
-                    if !writes.contains(&l) {
-                        changed[l].push(reg);
+                for l in alive.iter().filter(|&l| class(l) == Some(reg.class)) {
+                    if !writes.contains(&l)
+                        && let Some(regs) = changed.get_mut(l)
+                    {
+                        regs.push(reg);
                     }
                 }
             }
@@ -190,7 +204,9 @@ pub(crate) fn first_mentions<Op>(p: &Program<Op>) -> Vec<Option<usize>> {
     for (i, item) in p.body.iter().enumerate() {
         let Item::Inst(inst) = item else { continue };
         for v in inst.operands().flat_map(Arg::regs) {
-            first[v.id as usize].get_or_insert(i);
+            if let Some(at) = first.get_mut(v.id as usize) {
+                at.get_or_insert(i);
+            }
         }
     }
     first

@@ -53,9 +53,9 @@ fn lexed_with_lifetimes(src: &str) -> Result<Vec<Tree>> {
         trees
             .into_iter()
             .flat_map(|tree| match tree {
-                Tree::Ident { name, space, span } if name.starts_with("lt_") => vec![
+                Tree::Ident { ref name, space, span } if let Some(word) = name.strip_prefix("lt_") => vec![
                     Tree::Punct { ch: '\'', space, span },
-                    Tree::Ident { name: name["lt_".len()..].to_string(), space: false, span },
+                    Tree::Ident { name: word.to_string(), space: false, span },
                 ],
                 Tree::Group { delim, trees, space, space_close, span } => {
                     vec![Tree::Group { delim, trees: made(trees), space, space_close, span }]
@@ -588,7 +588,7 @@ fn an_arrays_length_is_written_as_its_source_has_it() -> Result {
     // A length is an expression; statements, `let x = 1; x`, are only a block's.
     for expr in EXPRESSIONS.iter().filter(|e| !e.starts_with("let ")) {
         for src in spaced_both_ways(&format!("[u8; {expr}]")) {
-            let length = src["[u8;".len()..src.len() - 1].trim_start();
+            let length = src.strip_prefix("[u8;").and_then(|s| s.strip_suffix(']')).ok_or("an array")?.trim_start();
             assert_eq!(written(&src)?, format!("[u8; {length}]"), "{src}");
         }
     }

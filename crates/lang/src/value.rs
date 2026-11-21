@@ -342,17 +342,12 @@ fn number(text: &str, want: Want, negative: bool) -> Result<Value, String> {
         Want::Int(ty) => Some(ty),
         _ => None,
     };
-    let radix = match t.get(..2) {
-        Some("0x") => 16,
-        Some("0o") => 8,
-        Some("0b") => 2,
-        _ => 10,
-    };
     let bad = || format!("`{text}` is not a number kernite reads");
-    if radix != 10 {
-        let body = &t[2..];
-        let split = body.find(|c: char| !c.is_digit(radix)).unwrap_or(body.len());
-        let (digits, suffix) = body.split_at(split);
+    let prefixed =
+        [("0x", 16), ("0o", 8), ("0b", 2)].into_iter().find_map(|(p, radix)| Some((t.strip_prefix(p)?, radix)));
+    if let Some((body, radix)) = prefixed {
+        let split = body.find(|c: char| !c.is_digit(radix)).and_then(|at| body.split_at_checked(at));
+        let (digits, suffix) = split.unwrap_or((body, ""));
         let ty = if suffix.is_empty() { int_want } else { Some(IntTy::parse(suffix).ok_or_else(bad)?) };
         let x = i128::from_str_radix(digits, radix).map_err(|_| bad())?;
         return whole(x, ty);
@@ -685,7 +680,7 @@ pub fn bytes(v: &Value) -> Result<Vec<u8>, String> {
             Value::Int(x, t) => {
                 let t = t.unwrap_or(default);
                 int(x, Some(t))?;
-                out.extend_from_slice(&x.to_le_bytes()[..t.bits() as usize / 8]);
+                out.extend(x.to_le_bytes().iter().take(t.bits() as usize / 8));
             }
             Value::F32(x) => out.extend_from_slice(&x.to_le_bytes()),
             Value::F64(x) => out.extend_from_slice(&x.to_le_bytes()),

@@ -305,7 +305,10 @@ pub fn launch(grid: Grid<'_>, kernel: impl Fn(&Place) + Send + Sync + 'static) -
         None => put_anywhere(&mut team, caller, threads - 1),
     });
     // A team that has a thread gone is no more: the next launch starts another.
-    let ended = ready.and_then(|()| run_on(&team[..threads - 1], threads, kernel).inspect_err(|_| team.clear()));
+    let ended = ready.and_then(|()| {
+        let others = team.get(..threads - 1).ok_or_else(|| gone(()));
+        others.and_then(|others| run_on(others, threads, kernel)).inspect_err(|_| team.clear())
+    });
     KEPT.set(team);
     match ended? {
         Ok(()) => Ok(()),
@@ -367,15 +370,17 @@ struct Placed {
 /// not there, and starts the threads the grid needs that none has, each on its CPU. The CPUs are
 /// checked first, unless the last launch gave the same, and an error from the check moves nothing.
 fn put_on(team: &mut Vec<Worker>, caller: &mut Option<Placed>, on: &[usize]) -> Result<(), Error> {
+    // A grid has a thread at least, which `launch` sees to, and the caller's is the first.
+    let [first, others @ ..] = on else { return Ok(()) };
     match caller {
         Some(placed) => {
             let same = placed.on == on;
             if !same {
                 checked(on, &placed.home)?;
             }
-            rest(team, Some(placed.on[0]), on);
-            if placed.on[0] != on[0] {
-                move_caller(on[0])?;
+            rest(team, placed.on.first().copied(), on);
+            if placed.on.first() != Some(first) {
+                move_caller(*first)?;
             }
             if !same {
                 on.clone_into(&mut placed.on);
@@ -385,14 +390,14 @@ fn put_on(team: &mut Vec<Worker>, caller: &mut Option<Placed>, on: &[usize]) -> 
             let home = mask()?;
             checked(on, &home)?;
             rest(team, None, on);
-            move_caller(on[0])?;
+            move_caller(*first)?;
             *caller = Some(Placed { on: on.to_vec(), home });
         }
     }
-    for (worker, &cpu) in team.iter_mut().zip(&on[1..]) {
+    for (worker, &cpu) in team.iter_mut().zip(others) {
         worker.go_to(cpu)?;
     }
-    start(team, on.len() - 1, Some(on))
+    start(team, others.len(), Some(on))
 }
 
 /// Before any thread moves, ends the spin of each kept thread that a thread would wait for on its
@@ -459,10 +464,10 @@ fn move_caller(cpu: usize) -> Result<(), Error> {
 fn start(team: &mut Vec<Worker>, workers: usize, on: Option<&[usize]>) -> Result<(), Error> {
     while team.len() < workers {
         let t = team.len() + 1;
-        let started = Worker::start(t as u64, on.map(|on| on[0]));
+        let started = Worker::start(t as u64, on.and_then(|on| on.first().copied()));
         let mut worker = started.map_err(|e| Error { message: format!("a thread of the grid did not start: {e}") })?;
-        if let Some(on) = on {
-            worker.go_to(on[t])?;
+        if let Some(&cpu) = on.and_then(|on| on.get(t)) {
+            worker.go_to(cpu)?;
             worker.jobs.send(None).map_err(gone)?;
         }
         team.push(worker);

@@ -40,7 +40,7 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     let jumps = jumps(c);
     let calls = insts(&c.body).filter(|inst| inst.op == Op::Call).count() > jumps.len();
     let returns = insts(&c.body).any(|inst| inst.op == Op::Ret);
-    let upper = upper_set(&c.body, &jumps);
+    let uppers = upper_set(&c.body, &jumps);
     // The prologue's loop takes the least value no label of the body has: going up the body's
     // labels in order, each one that has the value looked for moves it one on.
     let labels: BTreeSet<u32> = c
@@ -58,14 +58,14 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     let done: BTreeSet<usize> = jumps.values().flatten().copied().collect();
     // Whether the call that comes next has a `vzeroupper` written before it.
     let mut clear = false;
-    for (i, item) in c.body.iter().enumerate() {
+    for (i, (item, &upper)) in c.body.iter().zip(&uppers).enumerate() {
         match item {
             Item::Inst(call) if jumps.contains_key(&i) => {
                 let mut jump =
                     Inst { op: Op::Jmp, implicit: vec![], flow: Flow::Return, clobbers: vec![], ..call.clone() };
                 // An address in a register the epilogue restores goes first to `r11`, which passes no argument and
                 // which the epilogue leaves as it is.
-                if let Operand::Reg(at, _) = call.args[0].operand
+                if let Some(&Arg { operand: Operand::Reg(at, _), .. }) = call.args.first()
                     && c.frame.saved.contains(&at)
                 {
                     body.push(inst(Op::Mov, vec![reg(R11, Access::Write), reg(at, Access::Read)]));
@@ -73,16 +73,16 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
                 }
                 // The callee, passed all of a ymm, clears the upper halves before it returns. A `vzeroupper` written
                 // before the call goes after the frame is taken down, where it goes before a `ret`.
-                let clears = (mem::take(&mut clear) || upper[i]) && !call.implicit.iter().any(ymm);
+                let clears = (mem::take(&mut clear) || upper) && !call.implicit.iter().any(ymm);
                 body.extend(epilogue(&c.frame, padding, below, clears));
                 body.push(Item::Inst(jump));
                 continue;
             }
             Item::Inst(_) if done.contains(&i) => continue,
-            Item::Inst(inst) if inst.op == Op::Ret => body.extend(epilogue(&c.frame, padding, below, upper[i])),
+            Item::Inst(inst) if inst.op == Op::Ret => body.extend(epilogue(&c.frame, padding, below, upper)),
             // The `vzeroupper` written before a call waits for it, and goes before it where an upper half may be set.
             Item::Inst(inst) if inst.op == Op::Vzeroupper => {
-                clear = upper[i];
+                clear = upper;
                 continue;
             }
             Item::Inst(call) if call.op == Op::Call && mem::take(&mut clear) => {
@@ -91,8 +91,9 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
             Item::Inst(inst) if idle(inst) => continue,
             Item::Inst(inst) => {
                 let spill = inst.args.iter().find_map(|a| match a.operand {
-                    Operand::Mem(Mem { base: Base::Slot(s), .. }) if c.frame.slots[s.0 as usize].spill => {
-                        Some((&c.frame.slots[s.0 as usize].name, a.access))
+                    Operand::Mem(Mem { base: Base::Slot(s), .. }) => {
+                        let slot = c.frame.slots.get(s.0 as usize).filter(|slot| slot.spill)?;
+                        Some((&slot.name, a.access))
                     }
                     _ => None,
                 });
@@ -151,7 +152,7 @@ fn jumps(c: &Allocated<Op>) -> BTreeMap<usize, Option<usize>> {
         });
         let Some((j, ret)) = next else { continue };
         if ret.op == Op::Ret && !call.implicit.iter().any(|a| ymm(a) && a.access == Access::Write) {
-            let alone = !c.body[i + 1..j].iter().any(|item| matches!(item, Item::Label(_)));
+            let alone = !c.body.iter().take(j).skip(i + 1).any(|item| matches!(item, Item::Label(_)));
             jumps.insert(i, alone.then_some(j));
         }
     }
@@ -176,15 +177,16 @@ fn upper_set(body: &[Item<Op, PReg>], jumps: &BTreeMap<usize, Option<usize>>) ->
     // none.
     let mut at = BTreeSet::new();
     loop {
-        let (mut set, mut now, mut grown) = (vec![false; body.len()], false, false);
+        let (mut set, mut now, mut grown) = (Vec::with_capacity(body.len()), false, false);
         for (i, item) in body.iter().enumerate() {
             let Item::Inst(inst) = item else {
                 if let Item::Label(l) = item {
                     now |= at.contains(&l.0);
                 }
+                set.push(false);
                 continue;
             };
-            set[i] = now;
+            set.push(now);
             if inst.op == Op::Vzeroupper {
                 now = false;
             } else if !idle(inst) && inst.operands().any(ymm) {

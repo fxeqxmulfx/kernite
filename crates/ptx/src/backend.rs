@@ -87,7 +87,7 @@ impl Backend for Ptx {
         // undefined for one whose mask leaves lane 0 out.
         if !masks.is_empty() {
             let on = kernite_compile::on_every_path(&code.program, &leaves).map_err(blame)?;
-            if let Some((_, at, message)) = masks.into_iter().find(|&(i, ..)| on[i]) {
+            if let Some((_, at, message)) = masks.into_iter().find(|&(i, ..)| on.get(i) != Some(&false)) {
                 return Err(Unfinished { at: Some(at), message });
             }
         }

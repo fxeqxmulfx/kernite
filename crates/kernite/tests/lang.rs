@@ -148,26 +148,27 @@ fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() -> Result {
     Ok(())
 }
 
+/// `src` with each word of it that `then` gives another for written as that, but not where the word is a part of an
+/// instruction's name, `ld.global.u32`.
+fn map_words(src: &str, then: impl Fn(&str) -> Option<String>) -> String {
+    let in_word = |c: char| c.is_alphanumeric() || c == '_';
+    let chars: Vec<char> = src.chars().collect();
+    let runs: Vec<&[char]> = chars.chunk_by(|a, b| in_word(*a) == in_word(*b)).collect();
+    let mut out = String::new();
+    for (i, run) in runs.iter().enumerate() {
+        let text: String = run.iter().collect();
+        let before = i.checked_sub(1).and_then(|before| runs.get(before)).and_then(|r| r.last());
+        let dotted = before == Some(&'.') || runs.get(i + 1).and_then(|r| r.first()) == Some(&'.');
+        let mapped = if run.iter().all(|&c| in_word(c)) && !dotted { then(&text) } else { None };
+        out += &mapped.unwrap_or(text);
+    }
+    out
+}
+
 /// `src` with each of `names` written raw, `u64` as `r#u64`, but not where it is a part of an instruction's name,
 /// `ld.global.u32`.
 fn raw(src: &str, names: &[&str]) -> String {
-    let chars: Vec<char> = src.chars().collect();
-    let in_word = |c: char| c.is_alphanumeric() || c == '_';
-    let (mut out, mut at) = (String::new(), 0);
-    while at < chars.len() {
-        let end = (at..chars.len()).find(|&i| !in_word(chars[i])).unwrap_or(chars.len());
-        if end == at {
-            out.push(chars[at]);
-            at += 1;
-            continue;
-        }
-        let word: String = chars[at..end].iter().collect();
-        let dotted = (at > 0 && chars[at - 1] == '.') || chars.get(end) == Some(&'.');
-        out += if names.contains(&word.as_str()) && !dotted { "r#" } else { "" };
-        out += &word;
-        at = end;
-    }
-    out
+    map_words(src, |word| names.contains(&word).then(|| format!("r#{word}")))
 }
 
 /// A name written raw is the name Rust reads, so a type written so is the type written plain: a kernel compiles to
@@ -741,22 +742,7 @@ const PATHS: [&str; 6] = [
 /// `src` with each primitive written as `path`, `u64` as `core::primitive::u64`, and `u32::MAX` as
 /// `core::primitive::u32::MAX`, but where it is a part of an instruction's name, `ld.global.u32`.
 fn pathed(src: &str, path: &str) -> String {
-    let chars: Vec<char> = src.chars().collect();
-    let in_word = |c: char| c.is_alphanumeric() || c == '_';
-    let (mut out, mut at) = (String::new(), 0);
-    while at < chars.len() {
-        let end = (at..chars.len()).find(|&i| !in_word(chars[i])).unwrap_or(chars.len());
-        if end == at {
-            out.push(chars[at]);
-            at += 1;
-            continue;
-        }
-        let word: String = chars[at..end].iter().collect();
-        let part = (at > 0 && chars[at - 1] == '.') || chars.get(end) == Some(&'.');
-        out += &if PRIMITIVES.contains(&word.as_str()) && !part { path.replace("{}", &word) } else { word };
-        at = end;
-    }
-    out
+    map_words(src, |word| PRIMITIVES.contains(&word).then(|| path.replace("{}", word)))
 }
 
 /// Rust names a primitive by a path as well as by its name, and a path is read as the name: a kernel typed by

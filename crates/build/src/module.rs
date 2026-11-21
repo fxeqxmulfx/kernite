@@ -264,8 +264,7 @@ fn touched(module: &Module, items: &[ItemOut]) -> Vec<Vec<String>> {
         // Its instances' code, then that of the functions they name or may reach, and on.
         let mut reached: Vec<&Naked> = out.instances.iter().map(|k| &k.naked).collect();
         let mut at = 0;
-        while at < reached.len() {
-            let code = reached[at];
+        while let Some(&code) = reached.get(at) {
             for name in code.funcs.iter().chain(&code.reach) {
                 if let Some(&(_, called)) = named.iter().find(|(n, _)| n == name)
                     && !reached.iter().any(|r| std::ptr::eq(*r, called))

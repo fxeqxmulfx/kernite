@@ -1067,7 +1067,7 @@ fn a_const_given_twice_is_refused_at_the_module_s_own() -> Result {
                unsafe extern \"sysv64\" fn k(x: u64) { add(x, STEP); add(x, W); }";
     // The first five items are the consts given: the macro tells the parser how many tokens they
     // are, and the parser leaves an item of the module's own named as one of them to `module`.
-    let before = kernite_lang::lex(&src[..src.find("const STEP: u64 = 4;").ok_or("find gave None")?])?.len();
+    let before = kernite_lang::lex(src.split_once("const STEP: u64 = 4;").ok_or("split_once gave None")?.0)?.len();
     let parsed = kernite_lang::module(&kernite_lang::lex(src)?, before)?;
     let kept = [0, 2, 5, 6, 7].map(|i| parsed.items[i].tokens.clone());
     let out = module(parsed, Some(Given { before, from: "crate::sizes".into() }), false, &Echo, &Echo);
@@ -1096,7 +1096,7 @@ fn a_module_refused_whole_says_nothing_of_an_item_named_as_a_const_given() -> Re
     let src = "const STEP: u64 = 3;\n\
                unsafe extern \"sysv64\" fn STEP(x: u64) { ret(x); }\n\
                unsafe extern \"sysv64\" fn k(x: u64) { add(x, STEP); }";
-    let before = kernite_lang::lex(&src[..src.find('\n').ok_or("find gave None")?])?.len();
+    let before = kernite_lang::lex(src.split_once('\n').ok_or("split_once gave None")?.0)?.len();
     let given = || Some(Given { before, from: "crate::sizes".into() });
     let parse = || -> Result<_> { Ok(kernite_lang::module(&kernite_lang::lex(src)?, before)?) };
     for (refused, said) in [

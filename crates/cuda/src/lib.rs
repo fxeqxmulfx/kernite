@@ -1036,7 +1036,8 @@ impl Module {
     /// and a GPU from Volta on can give more once the kernel is let have it: the launch that
     /// needs more asks the driver, once, and a launch of no more than that asks it nothing. A
     /// `grid` the GPU does not take, or the kernel's `.maxntid` or `.reqntid` does not, is an
-    /// error that says which size of it is past which limit.
+    /// error that says which size of it is past which limit. So is an `index` of no kernel the
+    /// module has.
     ///
     /// # Safety
     ///
@@ -1050,7 +1051,8 @@ impl Module {
     /// launch waits for the kernel, so only a slice taken before it can break this.
     pub unsafe fn launch(&self, index: usize, grid: Grid, args: &[*const c_void]) -> Result<(), Error> {
         let ([bx, by, bz], [tx, ty, tz]) = (grid.blocks, grid.threads);
-        let (api, k, params) = (self.driver.current()?, &self.kernels[index], args.as_ptr().cast_mut().cast());
+        let k = self.kernel("cuLaunchKernel", index)?;
+        let (api, params) = (self.driver.current()?, args.as_ptr().cast_mut().cast());
         self.let_have(k, &grid)?;
         // SAFETY: the caller's. The driver reads `args`, and through them, as it launches.
         let launched = unsafe {
@@ -1074,7 +1076,8 @@ impl Module {
             return Err(Error::new("cuLaunchCooperativeKernel", message.into()));
         }
         let ([bx, by, bz], [tx, ty, tz]) = (grid.blocks, grid.threads);
-        let (api, k, params) = (self.driver.current()?, &self.kernels[index], args.as_ptr().cast_mut().cast());
+        let k = self.kernel("cuLaunchCooperativeKernel", index)?;
+        let (api, params) = (self.driver.current()?, args.as_ptr().cast_mut().cast());
         self.let_have(k, &grid)?;
         // SAFETY: the caller's. The driver reads `args`, and through them, as it launches.
         let launched = unsafe {
@@ -1098,9 +1101,11 @@ impl Module {
     /// `shared` bytes of the launch's shared memory: as many as one of its SMs holds, by the
     /// registers, the shared memory and the threads each takes, times how many SMs it has. A
     /// cooperative launch of the kernel has at most this many. The kernel is let have `shared`
-    /// bytes first, as for a launch, and `shared` past what a block has is an error that says so.
+    /// bytes first, as for a launch, and `shared` past what a block has is an error that says
+    /// so. So is an `index` of no kernel the module has.
     pub fn resident(&self, index: usize, threads: u32, shared: u32) -> Result<u32, Error> {
-        let (api, k) = (self.driver.current()?, &self.kernels[index]);
+        let k = self.kernel("cuOccupancyMaxActiveBlocksPerMultiprocessor", index)?;
+        let api = self.driver.current()?;
         self.let_have(k, &Grid::new(1, threads).with_shared(shared))?;
         let (threads, mut blocks) = (c_int::try_from(threads).unwrap_or(c_int::MAX), 0);
         // SAFETY: `k.function` is a kernel of the module, which is loaded; it writes the count to
@@ -1108,6 +1113,14 @@ impl Module {
         let found = unsafe { (api.occupancy)(&mut blocks, k.function, threads, shared as usize) };
         api.check("cuOccupancyMaxActiveBlocksPerMultiprocessor", found)?;
         Ok(blocks as u32 * self.multiprocessors)
+    }
+
+    /// Kernel `index`, as [`load`](Module::load) was given its name; or why the module has none, as the call `call`
+    /// that asks for it says.
+    fn kernel(&self, call: &'static str, index: usize) -> Result<&Kernel, Error> {
+        self.kernels.get(index).ok_or_else(|| {
+            Error::new(call, format!("there is no kernel {index} in a module of {}", self.kernels.len()))
+        })
     }
 
     /// Lets kernel `k` have the `grid.shared` bytes of shared memory the launch over `grid` gives
