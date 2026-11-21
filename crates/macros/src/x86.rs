@@ -8,9 +8,10 @@ use kernite::{Call, HostStatic, Naked, NativeInstance, NativeOut};
 
 use crate::cond::Cond;
 use crate::rust::{
-    Written, array_ref, asks, attrs, cfg_of, clashes, depends_on, error_under, given_back, gives_placeholder, hygienic,
-    launcher_result, missing, name_after, name_at, never, parse, pick, pointer, position, primitive, probe, result,
-    signature, span_of, stub, value_params, visibility, within, written, written_params,
+    Written, array_ref, asks, attrs, body_at, cfg_of, clashes, depends_on, ending_at, error_under, given_back,
+    gives_placeholder, hygienic, launcher_result, missing, naked_levels, name_after, name_at, never, parse, pick,
+    pointer, position, primitive, probe, respan, result, signature, span_of, stub, unnamed, value_params, visibility,
+    within, written, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -40,20 +41,29 @@ const CPU: &str = "kernite-cpu";
 /// type with a `_` in it, which is Rust's error alone. All this writes is under `cfg`, `f`'s
 /// own, the module of its statics included: an instance is `extern "sysv64"`, which only x86-64
 /// has, so a crate that keeps `f` there alone builds for another machine. `at` says where `f` first
-/// writes the name of an item of the module, for the operands to be written there.
+/// writes the name of an item of the module, for the operands to be written there. Its code ends at `f`'s name, for
+/// Rust to tell of `f` at `f`: see [`ending_at`].
+///
+/// A lint is at the level `f` sets at each place its code names an item, as in a function of Rust's. `places` are the
+/// places of `f`'s own that Rust is told of by a statement, and they are in the body of `f`, or of its launcher, in an
+/// item of no name, where the level `f` sets holds, `expect` too. An operand is a place too, in the function of each
+/// instance, which has the levels `f` sets, an `expect` as an `allow`, for Rust refuses `expect` on a naked function.
 pub(crate) fn naked(
     module: &lang::Module,
     f: &Fn,
-    instances: &[NativeInstance],
-    named: &[String],
+    k: &NativeOut,
     cfg: &TokenStream,
     top: &[TokenTree],
     at: &dyn std::ops::Fn(&str) -> Span,
+    places: TokenStream,
 ) -> TokenStream {
+    let (instances, named) = (&k.instances[..], &k.touched[..]);
+    // Where the code of `f` ends, its name: see [`ending_at`].
+    let end = span_of(name_after(&f.head, top));
     let hidden = format!("__kernite_{}", f.name);
     let cooperative = f.cooperative.is_some();
     if (cooperative && !depends_on(CPU)) || gives_placeholder(f, top) {
-        return x86_stub(f, instances.len(), named, cfg, top);
+        return x86_stub(f, instances.len(), named, cfg, top, places);
     }
     let mut out = TokenStream::new();
     let mut statics = vec![];
@@ -70,7 +80,7 @@ pub(crate) fn naked(
         let listing = &one.naked;
         let mut docs = attrs(f, top);
         docs.extend(needs(&features(instances), safe));
-        out.extend(contract(docs, named));
+        out.extend(contract(docs, named, end));
         out.extend(parse("#[unsafe(naked)]"));
         out.extend(signature(f, top));
         let code = asm(
@@ -80,7 +90,9 @@ pub(crate) fn naked(
             reached(module, listing, top, at),
             probe(f, top),
         );
-        out.extend([TokenTree::Group(Group::new(Delimiter::Brace, code))]);
+        let mut body = unnamed(places);
+        body.extend(code);
+        out.extend([body_at(body, end)]);
         statics.push(("C".to_string(), listing));
     } else {
         // Each instance's parameters and their types: `f`'s, then a cooperative kernel's place. `f`
@@ -111,6 +123,7 @@ pub(crate) fn naked(
                 None,
             );
             fns.extend(cfg.clone());
+            fns.extend(naked_levels(attrs(f, top)));
             fns.extend(parse(&format!(
                 "#[doc(hidden)]\n#[unsafe(naked)]\nunsafe extern \"sysv64\" fn {name}({}) {ret}",
                 params.join(", ")
@@ -121,11 +134,11 @@ pub(crate) fn naked(
         }
         let features = features(instances);
         if cooperative {
-            out.extend(grid_launcher(f, Some(&arms), needs(&features, safe), named, cfg, top));
+            out.extend(grid_launcher(f, Some(&arms), needs(&features, safe), named, cfg, top, places));
         } else {
             let mut docs = attrs(f, top);
             docs.extend(needs(&features, safe));
-            out.extend(contract(docs, named));
+            out.extend(contract(docs, named, end));
             out.extend(match (safe, features.is_empty()) {
                 (true, false) => parse(&format!("#[target_feature(enable = {:?})]\n#[inline]", features.join(","))),
                 _ => parse("#[inline(always)]"),
@@ -136,9 +149,10 @@ pub(crate) fn naked(
             }
             out.extend(signature(f, top));
             let mut body = asks(f, top, written);
+            body.extend(unnamed(places));
             let call = parse(&format!("({})({})", chosen(f, &arms, top), names.join(", ")));
             body.extend(result(f, top, call));
-            out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
+            out.extend([body_at(body, end)]);
         }
         out.extend(fns);
     }
@@ -220,10 +234,12 @@ fn operand(label: &str, path: TokenStream, item: &lang::Item, top: &[TokenTree])
 }
 
 /// The mentions of kernel `k` at which it first writes the name of each item that its code names by an operand: a
-/// static, or a function of no compile-time arguments. [`reached`] and [`callees`] write the operand at that place, in
-/// the function of each instance that names the item, so Rust tells of the item there: a deprecated one say. `named`
-/// has Rust find the item at each later mention. None where Rust does not get the code of `k`, which has no operand.
-pub(crate) fn operands(k: &NativeOut) -> Vec<&lang::Mention> {
+/// static, or a function of no compile-time arguments; the first that `own` says `k` writes itself, if it writes the
+/// name at all, for the operand is in the function of each instance, where the levels of `k` hold, and not a helper's.
+/// [`reached`] and [`callees`] write the operand at that place, in the function of each instance that names the item,
+/// so Rust tells of the item there: a deprecated one say. `named` has Rust find the item at each other mention. None
+/// where Rust does not get the code of `k`, which has no operand.
+pub(crate) fn operands<'a>(k: &'a NativeOut, own: &dyn std::ops::Fn(&lang::Mention) -> bool) -> Vec<&'a lang::Mention> {
     if !k.written {
         return vec![];
     }
@@ -232,13 +248,27 @@ pub(crate) fn operands(k: &NativeOut) -> Vec<&lang::Mention> {
             one.naked.statics.contains(name) || one.calls.iter().any(|c| c.instance.is_none() && c.function == *name)
         })
     };
-    let places = k.mentions.iter().enumerate();
-    places
-        .filter(|(n, m)| {
-            by_operand(&m.name) && k.mentions.get(..*n).unwrap_or_default().iter().all(|x| x.name != m.name)
-        })
-        .map(|(_, m)| m)
-        .collect()
+    let mut firsts: Vec<&lang::Mention> = vec![];
+    for m in k.mentions.iter().filter(|m| by_operand(&m.name)) {
+        match firsts.iter_mut().find(|first| first.name == m.name) {
+            None => firsts.push(m),
+            Some(first) if own(m) && !own(first) => *first = m,
+            Some(_) => {}
+        }
+    }
+    firsts
+}
+
+/// What Rust reads for a use of `item`, an x86 kernel of compile-time arguments, by a kernel that names its instance of
+/// `args` at `span`: `old::<2>`, the function that has the attributes of the kernel, so Rust tells of the use as it
+/// tells of any use of a function of its own, a deprecated one at that place. The code of a kernel names the function
+/// of the instance, which has none of them, and Rust has no name for the kernel alone, which it cannot work out the
+/// arguments of.
+pub(crate) fn instance_used(item: &lang::Item, args: &[Value], top: &[TokenTree], span: Span) -> Option<TokenStream> {
+    let args: Vec<String> = args.iter().map(Value::to_string).collect();
+    let mut path = TokenStream::from(name_at(item, top, span)?);
+    path.extend(parse(&format!("::<{}>", args.join(", "))));
+    Some(path)
 }
 
 /// The operands by which the code of `listing`, of a kernel of `module`, names each static it
@@ -261,23 +291,25 @@ fn reached(
 
 /// `docs`, a kernel's attributes, with what its safety contract says of `named`, the memory of
 /// the module's: that nothing else touches it while the kernel runs. A contract the docs do not
-/// have says that the kernel trusts the pointers it is given as well.
-fn contract(mut docs: TokenStream, named: &[String]) -> TokenStream {
+/// have says that the kernel trusts the pointers it is given as well. The contract is located at `at`, a token of the
+/// user's: Clippy leaves out the attributes of a macro, and would ask the kernel for the `# Safety` that it has.
+fn contract(mut docs: TokenStream, named: &[String], at: Span) -> TokenStream {
     if named.is_empty() {
         return docs;
     }
     let memory = format!("Nothing else touches the module's memory, {}, while it runs.", list(named));
-    if !docs.to_string().contains("# Safety") {
-        docs.extend(parse(&format!(
+    let written = if !docs.to_string().contains("# Safety") {
+        parse(&format!(
             "#[doc = \"\"]\n#[doc = \" # Safety\"]\n#[doc = \"\"]\n#[doc = {:?}]",
             format!(
                 " The kernel trusts the pointers it is given: each must be to memory as long as the kernel reads and \
                  writes through it. {memory}"
             )
-        )));
+        ))
     } else {
-        docs.extend(parse(&format!("#[doc = \"\"]\n#[doc = {:?}]", format!(" {memory}"))));
-    }
+        parse(&format!("#[doc = \"\"]\n#[doc = {:?}]", format!(" {memory}")))
+    };
+    docs.extend(respan(written, at));
     docs
 }
 
@@ -291,23 +323,25 @@ fn list(names: &[String]) -> String {
     }
 }
 
-/// Static `s` of a module of x86 kernels as Rust has it, as written but for its type and what it
-/// holds: `made`, a `kernite_cpu::Global` of its elements at the multiple its type says, holding
-/// what it says or zeros; for a static that did not compile, beside its error, `made` is the
-/// static as its type has it, holding zeros, if only what it holds is wrong; if not, `None`, and a
-/// `kernite_cpu::Stub` stands for it, which leaves the type of its elements to the code that uses
-/// it. In a crate without `kernite-cpu`, its type is [`missing`]'s, with the error that says so after it, under `cfg`,
-/// the static's own. A far static, past `rip`'s reach, is a reference to memory that [`linked`] defines past the code
-/// and data in reach of `rip`, and a static of an `extern` block declares: Rust would lay a static of its own out among
-/// them, and make it in time and memory that grow with its size. The kernels load the address from the reference. A
-/// crate of the `dylib` kind exports the reference, as it exports only the symbols that Rust defines, which the memory
-/// is not. What each static holds, a far one's reference and a stub too, is in a block with a `global_asm!` that makes
-/// its symbol protected: [`initializer`] says why. On a system that is not Linux, it is an error at its name.
+/// Static `s` of a module of x86 kernels as Rust has it, as written but for its type and what it holds: `made`, a
+/// `kernite_cpu::Global` of its elements at the multiple its type says, holding what it says or zeros; for a static
+/// that did not compile, beside its error, `made` is the static as its type has it, holding zeros, if only what it
+/// holds is wrong; if not, `None`, and a `kernite_cpu::Stub` stands for it, which leaves the type of its elements to
+/// the code that uses it. In a crate without `kernite-cpu`, its type is [`missing`]'s, with the error that says so
+/// after it, under `cfg`, the static's own. A far static, past `rip`'s reach, is a reference to memory that [`linked`]
+/// defines past the code and data in reach of `rip`, and a static of an `extern` block declares: Rust would lay a
+/// static of its own out among them, and make it in time and memory that grow with its size. The kernels load the
+/// address from the reference. A crate of the `dylib` kind exports the reference, as it exports only the symbols that
+/// Rust defines, which the memory is not. What each static holds, a far one's reference and a stub too, is in a block
+/// with a `global_asm!` that makes its symbol protected: [`initializer`] says why. On a system that is not Linux, it is
+/// an error at its name. In each case what it holds comes after the `places` of the static, those of its type and of
+/// what it holds that name an item: [`assigned`] says why.
 pub(crate) fn cpu_static(
     s: &lang::Static,
     made: Option<&HostStatic>,
     cfg: &TokenStream,
     top: &[TokenTree],
+    places: TokenStream,
 ) -> TokenStream {
     // Its name as written, after `static`.
     let Some(name) = name_after(&s.vis, top) else { return TokenStream::new() };
@@ -320,7 +354,7 @@ pub(crate) fn cpu_static(
         let (ty, error) = missing(cfg, name.span(), "a static of x86 kernels", CPU);
         out.extend(parse(":"));
         out.extend(ty);
-        out.extend(parse("= [];"));
+        out.extend(assigned(places, "[]"));
         out.extend(error);
         return out;
     }
@@ -328,8 +362,8 @@ pub(crate) fn cpu_static(
     if let Some(m) = far {
         let sym = symbol(name);
         let memory = format!("__kernite_{sym}");
-        out.extend(parse(&format!(": &'static {}", global(m))));
-        out.extend(initializer(name, &format!("&{memory}")));
+        out.extend(parse(&format!(": &{}", global(m))));
+        out.extend(initializer(name, &format!("&{memory}"), places));
         let under = |attr: &str| cfg.clone().into_iter().chain(parse(attr)).collect::<TokenStream>();
         let mut declared = under(r#"#[cfg(target_os = "linux")]"#);
         declared.extend(linked(&sym, m));
@@ -357,22 +391,36 @@ pub(crate) fn cpu_static(
         None => ("::kernite_cpu::Stub".to_string(), "::kernite_cpu::Stub".to_string()),
     };
     out.extend(parse(&format!(": {ty}")));
-    out.extend(initializer(name, &value));
+    out.extend(initializer(name, &value, places));
     out
 }
 
-/// What the static `name` holds, `value`, in a block with a `global_asm!` that makes the symbol of the static
-/// protected, on Linux. A symbol that a crate of the `dylib` kind exports is default, which a program may replace, so
-/// the linker refuses a kernel's displacement from `rip` to it:
+/// What the static `name` holds, `value`, after its `places`, in a block with a `global_asm!` that makes the symbol of
+/// the static protected, on Linux. A symbol that a crate of the `dylib` kind exports is default, which a program may
+/// replace, so the linker refuses a kernel's displacement from `rip` to it:
 /// `relocation R_X86_64_PC32 cannot be used against symbol`. A protected symbol is exported as well, and the crate's
 /// own kernels bind to the crate's own. The `global_asm!` names the static, which may be deprecated. Rust tells of no
 /// use of a deprecated item inside the item itself, so the `global_asm!` is in the static's own initializer, and no
-/// `allow` is written, which a crate that forbids `deprecated` would refuse.
-fn initializer(name: &TokenTree, value: &str) -> TokenStream {
-    parse(&format!(
-        "= {{ #[cfg(target_os = \"linux\")] mod __kernite_protected {{ \
-         ::core::arch::global_asm!(\".protected {{}}\", sym super::{name}); }} {value} }};"
-    ))
+/// `allow` is written, which a crate that forbids `deprecated` would refuse. It ends the static, at its name: see
+/// [`ending_at`].
+fn initializer(name: &TokenTree, value: &str, places: TokenStream) -> TokenStream {
+    let text = format!(
+        "#[cfg(target_os = \"linux\")] mod __kernite_protected {{ \
+         ::core::arch::global_asm!(\".protected {{}}\", sym super::{name}); }} {value}"
+    );
+    ending_at(assigned(places, &text), name.span())
+}
+
+/// `= { .. };`, what a static holds: the `places` of the static, in an item of no name, and then `value`. The block is
+/// in the static, so Rust tells of each place at the level the static sets, as it does in a static of its own, and an
+/// `expect` of the static is met by a place of it.
+fn assigned(places: TokenStream, value: &str) -> TokenStream {
+    let mut block = unnamed(places);
+    block.extend(parse(value));
+    let mut out = parse("=");
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, block))]);
+    out.extend(parse(";"));
+    out
 }
 
 /// The name of a static as the linker has it after the path of its module, which `module_path!` gives, for the statics
@@ -480,7 +528,8 @@ fn chosen(f: &Fn, arms: &[(Vec<Value>, String)], top: &[TokenTree]) -> String {
 /// It binds `__kernite_grid` for itself, which a parameter of `f` may be named as well; a compile-time argument may
 /// not, which is an error at its name, after the function, under `cfg`, `f`'s own; and the function never runs, as one
 /// of a kernel that did not compile. In a crate without `kernite-cpu`, it takes any grid, gives [`missing`]'s type,
-/// with the error that says so after it, and never runs. Its result is [`launcher_result`]'s.
+/// with the error that says so after it, and never runs. Its result is [`launcher_result`]'s. Its body has the `places`
+/// of `f`'s code that Rust is told of by a statement, as [`naked`] says.
 fn grid_launcher(
     f: &Fn,
     kernels: Option<&[(Vec<Value>, String)]>,
@@ -488,6 +537,7 @@ fn grid_launcher(
     named: &[String],
     cfg: &TokenStream,
     top: &[TokenTree],
+    places: TokenStream,
 ) -> TokenStream {
     let clashes = clashes(f, cfg, &["__kernite_grid"], "the launcher", top);
     let kernels = if clashes.is_empty() { kernels } else { None };
@@ -566,6 +616,7 @@ fn grid_launcher(
         None => format!("{}::core::unreachable!()", never(f, top)),
     };
     let mut body = asks(f, top, written);
+    body.extend(unnamed(places));
     body.extend(hygienic(&text, kernels.is_some()));
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
     out.extend(missed);
@@ -612,17 +663,20 @@ fn needs(features: &[&str], safe: bool) -> TokenStream {
 /// `instances` as functions too, named as [`naked`] would name them, for kernels that call one to
 /// name. Its safety contract says what the kernel's would of `named`, the module's memory. Each
 /// instance is under `cfg`, `f`'s own, as `f` is.
+///
+/// Its body has the `places` of `f`'s code that Rust is told of by a statement, as [`naked`] says.
 pub(crate) fn x86_stub(
     f: &Fn,
     instances: usize,
     named: &[String],
     cfg: &TokenStream,
     top: &[TokenTree],
+    places: TokenStream,
 ) -> TokenStream {
     if f.cooperative.is_some() {
-        return grid_launcher(f, None, TokenStream::new(), named, cfg, top);
+        return grid_launcher(f, None, TokenStream::new(), named, cfg, top, places);
     }
-    let mut out = stub(f, top);
+    let mut out = stub(f, top, places);
     if !f.generics.is_empty() {
         for k in 0..instances {
             let name = instance_name(&f.name, k);

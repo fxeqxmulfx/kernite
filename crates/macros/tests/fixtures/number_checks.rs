@@ -3,8 +3,11 @@
 //! named as the locals the macros write for them; a kernel that never returns; kernels deprecated,
 //! by `#[deprecated]` and by `cfg_attr`, and kernels configured out, by `#[cfg]` and by `cfg_attr`.
 //! Each is plain, of compile-time arguments and cooperative, on x86, and a GPU kernel too.
+//! Clippy asks of each public x86 kernel a `# Safety`, as of any `unsafe fn`, which these have not: allowed here.
+//! Clippy asks for a better name than `__0` and `__1` too: allowed here, as the kernels are named to test the macros.
 
 #![deny(warnings)]
+#![allow(clippy::missing_safety_doc, clippy::just_underscores_and_digits)]
 
 /// The x86 kernels.
 #[kernite_macros::kernels]

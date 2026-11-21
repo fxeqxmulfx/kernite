@@ -5,9 +5,11 @@
 //! builds the crate without a word, under `#![deny(warnings)]`, and the tests run each kernel: the x86
 //! kernels, plain, of compile-time arguments, cooperative, and cooperative of arguments, and the GPU kernels
 //! of the same kinds, on the GPU if there is one. Some parameters and compile-time arguments are named as the
-//! macros name a parameter named `_`, `__kernite_0` among them, which the macros then name otherwise.
+//! macros name a parameter named `_`, `__kernite_0` among them, which the macros then name otherwise. Clippy asks
+//! of each public `unsafe fn` a `# Safety`, which these x86 kernels have not: allowed here.
 
 #![deny(warnings)]
+#![allow(clippy::missing_safety_doc)]
 #![allow(non_upper_case_globals)]
 
 /// x86 kernels: each gives `a - b` back, or writes it through `p`; those of arguments add `N` as well.

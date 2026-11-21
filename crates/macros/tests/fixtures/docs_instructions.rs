@@ -1,5 +1,8 @@
 //! Modules of x86 and of GPU kernels that name instructions, as a crate builds, tests, documents and lints them: the
-//! docs of the instructions, which an editor shows, are nothing to Rust.
+//! docs of the instructions, which an editor shows, are nothing to Rust. Clippy asks of each public `unsafe fn` a
+//! `# Safety`, which the x86 kernels that name no static have not: allowed here.
+
+#![allow(clippy::missing_safety_doc)]
 
 #[kernite_macros::kernels]
 pub mod kernels {

@@ -1,7 +1,7 @@
 //! Each attribute that a static of GPU kernels takes, which its method, `Kernels::COUNTS`, has, and Rust says of the
 //! method what it says of any: a doc, `cfg`, `cfg_attr(..)`, `deprecated`, the level of a lint, and `rustfmt`'s. A
-//! method with no doc is told of by `missing_docs`, once for its place, which is its module's, so each module that Rust
-//! tells of has one static. A deprecated method is told of at its use, in `uses`. A static of x86 kernels, in `cpu`, is
+//! method with no doc is told of by `missing_docs` at the static, as any item of the author's is, whether its module
+//! has one static or more. A deprecated method is told of at its use, in `uses`. A static of x86 kernels, in `cpu`, is
 //! a static of Rust's: Rust takes `#[used]` of it, which a static of GPU kernels refuses, and tells of its use as it
 //! tells of a static's.
 

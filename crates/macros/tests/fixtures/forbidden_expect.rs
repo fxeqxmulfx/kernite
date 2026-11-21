@@ -1,6 +1,6 @@
-//! A cooperative GPU kernel, an x86 kernel of instances and a cooperative one, whose
-//! `#[expect(non_snake_case)]` each meets, in a crate that forbids that lint: Rust refuses each
-//! `expect` once, where the kernel has it, for `k_blocks` keeps no lint and an instance has none.
+//! A cooperative GPU kernel, an x86 kernel of instances and a cooperative one, whose `#[expect(non_snake_case)]` each
+//! meets, in a crate that forbids that lint: Rust refuses each `expect` where the kernel has it, as `k_blocks` keeps no
+//! lint, and on x86 the `allow` that the function of each instance has for the `expect`, at the same place.
 
 #![forbid(non_snake_case)]
 

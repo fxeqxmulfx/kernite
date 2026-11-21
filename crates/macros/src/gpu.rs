@@ -8,9 +8,10 @@ use kernite::{Compiled, DeviceStatic, Failed, Launcher, Quantity, Requirement, W
 
 use crate::cond::Cond;
 use crate::rust::{
-    self, Written, asks, attrs, carried, clashes, depends_on, error_under, filtered, flatten, half, host, hygienic,
-    is_punct, launcher_result, missing, name_after, name_at, never, number_name, number_type, parse, pick, pointer,
-    primitive, ptr_type, quiet, refused, site, span_of, visibility, within, written_generics, written_params,
+    self, LEVELS, Written, asks, attrs, body_at, carried, clashes, depends_on, ending_at, error_under, half, host,
+    hygienic, launcher_result, levels, missing, name_after, name_at, never, number_name, number_type, parse, pick,
+    pointer, primitive, ptr_type, quiet, refused, site, span_of, unnamed, visibility, within, written_generics,
+    written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -50,10 +51,15 @@ pub(crate) type Laid = Result<Compiled<DeviceStatic>, Failed<DeviceStatic>>;
 /// else is said of the code that loads it or launches a kernel. Both are there when any of the
 /// module's GPU items is, `on_gpu` their conditions: a feature that brings `kernite-cuda` and keeps
 /// them lets the crate build without the feature.
+///
+/// Each kernel of `launchers` has its `places`, those of its code that name an item of the module, in the body of its
+/// launcher, where the level the kernel sets holds; so has each static of `memory`, those of its type and of what it
+/// holds, in the body of its method. In a crate without `kernite-cuda`, which has neither, each has its places in an
+/// item of no name with its levels, where its condition holds.
 pub(crate) fn gpu(
-    launchers: &[(&Fn, &Launcher)],
+    launchers: &[(&Fn, &Launcher, TokenStream, Cond)],
     symbols: &[(Cond, &str)],
-    memory: &[(&lang::Static, &Laid, Cond)],
+    memory: &[(&lang::Static, &Laid, TokenStream, Cond)],
     ptx: &[(Cond, &str)],
     top: &[TokenTree],
     at: &dyn std::ops::Fn(lang::Span) -> Span,
@@ -69,11 +75,26 @@ pub(crate) fn gpu(
         out.extend(kernels);
         out.extend(parse(";"));
         out.extend(error);
+        // No launcher or method holds the places of a kernel or of a static, so each has them in an item of no name
+        // with its levels, where its condition holds.
+        let of_kernels = launchers.iter().map(|(f, _, places, cond)| (levels(attrs(f, top), &LEVELS), places, cond));
+        let of_statics = memory
+            .iter()
+            .map(|(s, _, places, cond)| (levels(within(top, &s.attrs).iter().cloned(), &LEVELS), places, cond));
+        for (set, places, cond) in of_kernels.chain(of_statics) {
+            if !places.is_empty()
+                && let Some(guard) = cond.guard()
+            {
+                out.extend(guard);
+                out.extend(set);
+                out.extend(unnamed(places.clone()));
+            }
+        }
         return out;
     }
     // The module's variables: the statics that compiled, in order.
     let variables: Vec<(&Cond, &DeviceStatic)> =
-        memory.iter().filter_map(|(_, m, c)| m.as_ref().ok().map(|m| (c, &m.code))).collect();
+        memory.iter().filter_map(|(_, m, _, c)| m.as_ref().ok().map(|m| (c, &m.code))).collect();
     let mut out = parse(
         "/// The module's GPU kernels, functions and statics that `cfg` keeps, in PTX, for the CUDA\n\
          /// driver to compile for the GPU it finds. Each is named as C++ names it in the\n\
@@ -114,8 +135,8 @@ pub(crate) fn gpu(
     // a compile-time argument named as a parameter that a method binds for itself.
     let (mut errors, mut clashed) = (TokenStream::new(), TokenStream::new());
     let taken: Vec<&str> =
-        launchers.iter().map(|(f, _)| f.name.as_str()).chain(memory.iter().map(|(s, ..)| s.name.as_str())).collect();
-    for (f, how) in launchers {
+        launchers.iter().map(|(f, ..)| f.name.as_str()).chain(memory.iter().map(|(s, ..)| s.name.as_str())).collect();
+    for (f, how, places, _) in launchers {
         let launched: Option<Vec<Launched>> = match how {
             Launcher::Never => None,
             Launcher::Of(l) => Some(
@@ -127,7 +148,7 @@ pub(crate) fn gpu(
         // The methods would be under the kernel's `cfg`, and so are their errors.
         let cfg = carried(attrs(f, top), false);
         let grid = clashes(f, &cfg, &["__kernite_grid"], "the launcher", top);
-        methods.extend(launcher(f, launched.as_deref().filter(|_| grid.is_empty()), top));
+        methods.extend(launcher(f, launched.as_deref().filter(|_| grid.is_empty()), top, places.clone()));
         clashed.extend(grid);
         let Some(c) = &f.cooperative else { continue };
         let name = blocks_name(f);
@@ -144,10 +165,10 @@ pub(crate) fn gpu(
         methods.extend(blocks(f, launched.as_deref().filter(|_| threads.is_empty()), top));
         clashed.extend(threads);
     }
-    for (k, (s, laid, _)) in memory.iter().enumerate() {
+    for (k, (s, laid, places, _)) in memory.iter().enumerate() {
         // Its index among the variables there are, those of the statics that compiled.
-        let i = Cond::count(memory.iter().take(k).filter(|(_, m, _)| m.is_ok()).map(|(.., c)| c));
-        methods.extend(accessor(s, laid, i, top));
+        let i = Cond::count(memory.iter().take(k).filter(|(_, m, ..)| m.is_ok()).map(|(.., c)| c));
+        methods.extend(accessor(s, laid, i, top, places.clone()));
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, methods))]);
     out.extend(clashed);
@@ -156,27 +177,35 @@ pub(crate) fn gpu(
 }
 
 /// The method that gives static `s`'s memory on the GPU, `laid`, by its index `i` among the module's variables, an
+/// The method that gives static `s`'s memory on the GPU, `laid`, by its index `i` among the module's variables, an
 /// expression, as the `kernite_cuda::Global` of the type of Rust's its elements are read as, or the error
 /// `kernite_cuda::Module::global` gives; or one that never runs, for a static that did not compile: of the type its
 /// elements are read as, if only what the static holds is wrong, and of any type if not. It has the attributes of the
-/// static that [`static_attrs`] says it takes.
-fn accessor(s: &lang::Static, laid: &Laid, i: String, top: &[TokenTree]) -> TokenStream {
-    let mut out = static_attrs(s, top).0;
-    out.extend(within(top, &s.vis).iter().cloned());
-    out.extend(parse("fn"));
+/// static that [`taken`](rust::taken) says it takes. Its body has the `places` of the static's type and of what it
+/// holds that name an item, where the level the static sets holds, as in a static of Rust's, `expect` too. It ends at
+/// the static's name, for Rust to tell of the method at the static, as it tells of any item with no doc that a module
+/// has: see [`ending_at`].
+fn accessor(s: &lang::Static, laid: &Laid, i: String, top: &[TokenTree], places: TokenStream) -> TokenStream {
     // Its name as written, after `static`, where it is but of the macro's span: Rust lints the case
     // of a name the user wrote, and `COUNTS` is the name of a method, not of a static.
-    out.extend(name_after(&s.vis, top).cloned().map(|mut name| {
-        name.set_span(name.span().resolved_at(site()));
-        name
-    }));
+    let Some(mut name) = name_after(&s.vis, top).cloned() else { return TokenStream::new() };
+    let at = name.span();
+    name.set_span(at.resolved_at(site()));
+    let mut out = rust::taken(within(top, &s.attrs).iter().cloned()).0;
+    out.extend(within(top, &s.vis).iter().cloned());
+    out.extend(parse("fn"));
+    out.extend([name]);
     // A static that did not compile has no memory of its own, and its method never runs.
     let i = if laid.is_ok() { i } else { "0".to_string() };
     let global = |ty: &str| format!("::core::result::Result<::kernite_cuda::Global<'_, {ty}>, ::kernite_cuda::Error>");
-    out.extend(parse(&match read(laid) {
-        Some(m) => format!("(&self) -> {} {{ self.module.global({i}) }}", global(&primitive(&m.host))),
-        None => format!("<T: ::kernite_cuda::Plain>(&self) -> {} {{ self.module.global({i}) }}", global("T")),
-    }));
+    let signature = match read(laid) {
+        Some(m) => format!("(&self) -> {}", global(&primitive(&m.host))),
+        None => format!("<T: ::kernite_cuda::Plain>(&self) -> {}", global("T")),
+    };
+    out.extend(ending_at(parse(&signature), at));
+    let mut code = unnamed(places);
+    code.extend(parse(&format!("self.module.global({i})")));
+    out.extend([body_at(code, at)]);
     out
 }
 
@@ -197,50 +226,6 @@ pub(crate) fn used(item: &lang::Item, laid: &Laid, top: &[TokenTree], span: Span
     let mut path = parse("Kernels::");
     path.extend([name_at(item, top, span)?]);
     Some(path)
-}
-
-/// The attributes of GPU static `s`, which its method takes, and, of the rest, each one's name, a raw one plain, and
-/// where it is. The static is memory on the GPU, and no symbol or code of the host's, so its method takes what says how
-/// Rust has it, and no other attribute: a doc, `cfg`, `deprecated`, the level of a lint, `allow`, `warn`, `deny`,
-/// `forbid` or `expect`, and a `rustfmt` attribute, each alone or in a `cfg_attr(..)`, whatever its condition. The
-/// others are for what the static is not: `no_mangle`, `export_name`, `link_section` and `used` for a symbol, `cold`
-/// and `track_caller` for code, and the rest of Rust's for an item of its own. `unsafe(no_mangle)` is `no_mangle`.
-fn static_attrs(s: &lang::Static, top: &[TokenTree]) -> (TokenStream, Vec<(Span, String)>) {
-    let mut refused = vec![];
-    let taken = filtered(within(top, &s.attrs).iter().cloned(), &mut |meta| {
-        let [first, ..] = &meta[..] else { return None };
-        let at = first.span();
-        let takes = ["doc", "cfg", "deprecated", "allow", "warn", "deny", "forbid", "expect", "rustfmt"];
-        if takes.iter().any(|name| rust::named(first, name)) {
-            return Some(meta);
-        }
-        let attr = match &meta[..] {
-            [wrapper, TokenTree::Group(inner)] if rust::named(wrapper, "unsafe") => flatten(inner.stream()),
-            _ => meta,
-        };
-        // The name, which may be a path, `a::b`, up to its arguments or its value.
-        let path: Vec<&TokenTree> =
-            attr.iter().take_while(|t| matches!(t, TokenTree::Ident(_)) || is_punct(t, ':')).collect();
-        let written = path.iter().map(|t| lang::unraw(&t.to_string()).to_string()).collect();
-        refused.push((path.first().map_or(at, |t| t.span()), written));
-        None
-    });
-    (taken, refused)
-}
-
-/// The error at each attribute of GPU static `s` that its method does not take, under `cfg`, the static's own: where
-/// `cfg` leaves the static out, it says nothing. It says what the static is, by its name as written, `r#type` as well,
-/// and what it takes instead.
-pub(crate) fn refused_attrs(s: &lang::Static, cfg: &TokenStream, top: &[TokenTree]) -> TokenStream {
-    let Some(name) = name_after(&s.vis, top) else { return TokenStream::new() };
-    let said = |(at, attr): (Span, String)| {
-        let message = format!(
-            "`{name}` is memory on the GPU, which `{attr}` is not for: a static of GPU kernels takes a doc, `cfg`, \
-             `deprecated`, the level of a lint, and a `rustfmt` attribute, alone or in a `cfg_attr(..)`"
-        );
-        error_under(cfg, at, &message)
-    };
-    static_attrs(s, top).1.into_iter().map(said).collect()
 }
 
 /// The constant that is the `parts` of a text joined, each under its condition, with the module's
@@ -291,8 +276,9 @@ fn listed<'a>(elements: impl Iterator<Item = (&'a Cond, TokenStream)>) -> TokenT
 /// which a launch must hold, before it launches. A cooperative kernel is launched cooperatively, every block of its
 /// grid at once. The launcher binds `__kernite_grid` for itself, which a parameter of `f` may be named as well; a
 /// compile-time argument may not, and `launched` is `None` for the launcher that never runs, as one of a kernel that
-/// did not compile. Its result is [`launcher_result`]'s.
-fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStream {
+/// did not compile. Its result is [`launcher_result`]'s. Its body has the `places` of `f`'s code that name an item,
+/// where the level `f` sets holds, as in a function of Rust's, `expect` too.
+fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree], places: TokenStream) -> TokenStream {
     let mut out = attrs(f, top);
     if f.cooperative.is_some() {
         out.extend(parse(&format!(
@@ -374,7 +360,9 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     out.extend(launcher_result(f, top, parse("::core::result::Result<(), ::kernite_cuda::Error>")));
     let how = if f.cooperative.is_some() { "launch_cooperative" } else { "launch" };
     let never = format!("{}::core::unreachable!()", never(f, top));
-    out.extend(body(f, launched, top, asks(f, top, host), &never, |index, requires| {
+    let mut checks = asks(f, top, host);
+    checks.extend(unnamed(places));
+    out.extend(body(f, launched, top, checks, &never, |index, requires| {
         let launch = format!("unsafe {{ self.module.{how}({index}, $__kernite_grid, &[{}]) }}", args.join(", "));
         if f.unsafe_fn {
             return launch;

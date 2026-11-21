@@ -4,6 +4,9 @@
 //! `<`; and a GPU kernel's, an array as long as its compile-time argument says, and `f16` and
 //! `bf16`, which a launcher names as kernite-cuda does. Rust builds each module as written,
 //! without a word.
+//! Clippy asks of each public x86 kernel a `# Safety`, as of any `unsafe fn`, which these have not: allowed here.
+
+#![allow(clippy::missing_safety_doc)]
 
 /// A type of the crate's with two arguments, one of them a number.
 #[repr(C)]

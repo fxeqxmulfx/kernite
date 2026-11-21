@@ -18,14 +18,15 @@ use kernite::lang::{self, ItemKind};
 use kernite::{DeviceOut, ItemOut, Kept, ModuleOut};
 
 use crate::cond::Cond;
-use crate::gpu::{HOLE, gpu, refused_attrs, used};
+use crate::gpu::{HOLE, gpu, used};
 use crate::room;
 use crate::rust::{
-    cfg_of, error, error_under, flatten, for_rust, from_inside, grouped, ident_at, inner_attribute, lex, name_at,
-    parse, passable, position, seen, site, stub, takes, unnamed, within,
+    LEVELS, attrs, cfg_of, deprecated, error, error_under, flatten, for_rust, from_inside, grouped, ident_at,
+    inner_attribute, levels, lex, name_after, name_at, parse, passable, position, refused_attrs, seen, site, stand_in,
+    stub, takes, unnamed, within,
 };
 use crate::workspace::workspace;
-use crate::x86::{cpu_static, naked, operands, x86_stub};
+use crate::x86::{cpu_static, instance_used, naked, operands, x86_stub};
 
 /// What the module's braces, `body`, hold once its kernels are compiled; `given`, the consts it
 /// takes from outside, and the path of their module, as `#[kernels(consts = path)]` writes it. A
@@ -139,13 +140,33 @@ pub(crate) fn expand(
     // How each kernel the GPU launches is, and each static of the GPU's, as the host reads it; when
     // each GPU item is there; what shows Rust what each item names; and the errors of a name that `cfg` leaves out.
     let (mut launchers, mut memory, mut on_gpu) = (vec![], vec![], vec![]);
-    let (mut reads, mut left_out) = (TokenStream::new(), TokenStream::new());
+    let (mut reads, mut left_out) = (Block::default(), TokenStream::new());
     // A field for each static of the GPU's that is laid out, under its `cfg`, for Rust to count the room
     // of those it keeps.
     let mut fields = TokenStream::new();
     // The functions whose types nothing else shows Rust: each helper, and each GPU function, which is not launched,
     // whether a kernel calls it or not.
     let mut helpers = vec![];
+    // Which items are those, and, for each, the places that name an item in its code, as `named` says them: Rust has no
+    // function of a helper or a GPU function to put them in.
+    let helper: Vec<bool> = made
+        .items
+        .iter()
+        .map(|item| matches!(item, ItemOut::Helper(_)) || matches!(item, ItemOut::Device(d) if d.launcher.is_none()))
+        .collect();
+    let mut carried: Vec<Block> = helper.iter().map(|_| Block::default()).collect();
+    // Where each of them has a stand-in, as `named` says, in which Rust reads its `deprecated`.
+    let mut stood_in = vec![Cond::Never; helper.len()];
+    // Which functions and statics set the level of a lint: only their places are written where the level holds.
+    let leveled: Vec<bool> = module
+        .items
+        .iter()
+        .map(|item| match &item.kind {
+            ItemKind::Fn(f) => !levels(attrs(f, &top), &LEVELS).is_empty(),
+            ItemKind::Static(s) => !levels(within(&top, &s.attrs).iter().cloned(), &LEVELS).is_empty(),
+            _ => false,
+        })
+        .collect();
     // Each listing the process's kernels have, by name, under the `cfg` of the kernel it is of, as
     // what `naked` writes for it is.
     let mut listed = vec![];
@@ -153,9 +174,47 @@ pub(crate) fn expand(
     {
         let tokens = within(&top, &item.tokens);
         let said = |e: &lang::Error| error_under(cfg, at(e.span), &e.message);
-        let (names, errors) = named(&made, &conds, i, &top, &place);
-        reads.extend(names);
+        // Where the kernel first writes the name of each item its code names by an operand.
+        let firsts = match made_item {
+            ItemOut::Native(k) => operands(k, &|m| module.item_at(m.span) == i),
+            _ => vec![],
+        };
+        let (names, errors) = named(&made, &conds, i, &top, &place, &firsts);
         left_out.extend(errors);
+        // Each place is where the code that writes it is, for the level its item sets to hold there, as in Rust: in the
+        // body of the kernel, or in the static, which `own` has, or in what holds the places of the helper or the GPU
+        // function. A place of an item that sets no level, or of a const, is in a block of the module, where Rust tells
+        // of it at the level of the module.
+        let mut own = Block::default();
+        for place in names {
+            if let Some((j, there, _)) = &place.stand_in
+                && let Some(uses) = stood_in.get_mut(*j)
+            {
+                *uses = Cond::any([uses.clone(), there.clone()]);
+            }
+            let at = place.at;
+            let leveled_at = leveled.get(at) == Some(&true);
+            if helper.get(at) == Some(&true)
+                && leveled_at
+                && let Some(block) = carried.get_mut(at)
+            {
+                block.push(place);
+            } else if at == i && leveled_at {
+                own.push(place);
+            } else {
+                reads.push(place);
+            }
+        }
+        let own = own.written();
+        // A helper or an `extern "ptx-func"` function is no item of Rust's: it takes the attributes that say how Rust
+        // has it.
+        if helper.get(i) == Some(&true)
+            && let ItemKind::Fn(f) = &item.kind
+            && let Some(name) = name_after(&f.head, &top)
+        {
+            let is = if f.abi.is_some() { "an `extern \"ptx-func\"` function" } else { "a helper" };
+            out.extend(refused_attrs(attrs(f, &top), name, (is, is), cfg));
+        }
         match (&item.kind, made_item) {
             // The module's own attributes are first, and a const given is Rust's where its
             // module is.
@@ -165,12 +224,14 @@ pub(crate) fn expand(
             (ItemKind::Static(s), ItemOut::HostStatic(laid)) => {
                 out.extend(laid.as_ref().err().and_then(|failed| failed.error.as_ref()).map(said));
                 let held = laid.as_ref().map_or_else(|failed| failed.stub.as_ref(), |c| Some(&c.code));
-                out.extend(cpu_static(s, held, cfg, &top));
+                out.extend(cpu_static(s, held, cfg, &top, own));
             }
             (ItemKind::Static(s), ItemOut::DeviceStatic(laid)) => {
                 out.extend(laid.as_ref().err().and_then(|failed| failed.error.as_ref()).map(said));
-                out.extend(refused_attrs(s, cfg, &top));
-                memory.push((s, laid, cond.clone()));
+                let is = ("memory on the GPU", "a static of GPU kernels");
+                let attrs = within(&top, &s.attrs).iter().cloned();
+                out.extend(name_after(&s.vis, &top).map(|name| refused_attrs(attrs, name, is, cfg)));
+                memory.push((s, laid, own, cond.clone()));
                 on_gpu.push(cond.clone());
                 if let Ok(laid) = laid {
                     fields.extend(room::room(cfg, i, &laid.code.ty, at(s.ty.span())));
@@ -182,17 +243,16 @@ pub(crate) fn expand(
             }
             (ItemKind::Fn(f), ItemOut::Unknown(e)) => {
                 out.extend(e.as_ref().map(said));
-                out.extend(stub(f, &top));
+                out.extend(stub(f, &top, TokenStream::new()));
             }
             (ItemKind::Fn(f), ItemOut::Native(k)) => {
                 out.extend(k.not_unsafe.as_ref().map(said));
                 out.extend(k.said.as_ref().map(said));
-                let firsts = operands(k);
                 // The kernel writes what its code names; the macro's call site stands for what it does not.
                 let first = |name: &str| firsts.iter().find(|m| m.name == name).map_or_else(site, |m| place(m.span));
                 out.extend(match k.written {
-                    true => naked(module, f, &k.instances, &k.touched, cfg, &top, &first),
-                    false => x86_stub(f, k.count, &k.touched, cfg, &top),
+                    true => naked(module, f, k, cfg, &top, &first, own),
+                    false => x86_stub(f, k.count, &k.touched, cfg, &top, own),
                 });
                 out.extend(k.errors.iter().map(said));
                 listed.extend(k.listings.iter().map(|listing| (cfg, listing)));
@@ -202,7 +262,7 @@ pub(crate) fn expand(
                 out.extend(d.said.as_ref().map(said));
                 out.extend(d.errors.iter().map(said));
                 on_gpu.push(cond.clone());
-                launchers.extend(d.launcher.as_ref().map(|l| (f, l)));
+                launchers.extend(d.launcher.as_ref().map(|l| (f, l, own, cond.clone())));
                 if d.launcher.is_none() {
                     helpers.push((i, cond, f));
                 }
@@ -210,7 +270,7 @@ pub(crate) fn expand(
             _ => out.extend(error_under(cfg, at(item.span), "kernite made this item what it is not: that is a bug")),
         }
     }
-    let laid = Cond::any(memory.iter().filter(|(_, m, _)| m.is_ok()).map(|(.., c)| c.clone()));
+    let laid = Cond::any(memory.iter().filter(|(_, m, ..)| m.is_ok()).map(|(.., c)| c.clone()));
     out.extend(room::lacking(&laid));
     // The rest of the module, after the room and the names `cfg` leaves out.
     let mut tail = TokenStream::new();
@@ -255,14 +315,43 @@ pub(crate) fn expand(
     let failing = Cond::any([Cond::errors_in(&out), Cond::errors_in(&left_out), Cond::errors_in(&tail)]);
     let mut shown = TokenStream::new();
     for (i, cond, f) in helpers {
-        reads.extend(Cond::all([cond.clone(), failing.clone()]).guard().map(|g| seen(f, &top, &g)));
+        reads.statements.extend(Cond::all([cond.clone(), failing.clone()]).guard().map(|g| seen(f, &top, &g)));
         shown.extend(cond.guard().map(|g| room::shown(&g, i, seen(f, &top, &TokenStream::new()))));
+        // What Rust reads of a helper or a GPU function, whose code it never sees, is in items of no name that have it.
+        // Its `deprecated` is in one under the item's own `cfg`, but for where a stand-in has it, as `stood_in` says:
+        // so Rust says what is wrong of it once, whether a kernel names the item or not. The level it sets, `expect`
+        // too, which is unfulfilled where no place the code names has the lint, is in another, with the places of its
+        // code that name an item. The code of a helper is read only where an item `cfg` keeps runs it, and only there
+        // is that item.
+        let says = deprecated(attrs(f, &top));
+        if !says.is_empty()
+            && let Some(guard) = Cond::all([cond.clone(), cond_of(&stood_in, i).not()]).guard()
+        {
+            out.extend(guard);
+            out.extend(says);
+            out.extend(parse("const _: () = {};"));
+        }
+        let read = match made.items.get(i) {
+            Some(ItemOut::Helper(_)) => Cond::any(
+                (0..made.items.len())
+                    .filter(|&k| k != i)
+                    .map(|k| Cond::all([cond_of(&conds, k), runs(&made, &conds, k, i, &[])])),
+            ),
+            _ => cond.clone(),
+        };
+        if leveled.get(i) == Some(&true)
+            && let Some(guard) = read.guard()
+            && let Some(block) = carried.get_mut(i)
+        {
+            let places = std::mem::take(block).written();
+            out.extend(guard);
+            out.extend(levels(attrs(f, &top), &LEVELS));
+            out.extend(if places.is_empty() { parse("const _: () = {};") } else { unnamed(places) });
+        }
     }
     out.extend(room::carrier(fields, shown));
     out.extend(left_out);
-    if !reads.is_empty() {
-        out.extend(unnamed(reads));
-    }
+    out.extend(unnamed(reads.written()));
     out.extend(docs(&made, &conds, &at));
     out.extend(tail);
     out
@@ -353,6 +442,63 @@ fn find(guard: TokenStream, what: impl IntoIterator<Item = TokenTree>) -> TokenS
     find
 }
 
+/// A place where the code of an item names an item of its module, and what has Rust tell of it.
+struct Place {
+    /// The item whose code writes the place.
+    at: usize,
+    /// What has Rust tell of the place, under the `cfg` that keeps it.
+    statement: TokenStream,
+    /// If the statement names a function that stands in for an item, [`stand_in`]: the item, where the statement is,
+    /// and the function.
+    stand_in: Option<(usize, Cond, TokenStream)>,
+}
+
+impl Place {
+    /// The place in item `at` that `statement` has Rust tell of, which names no stand-in.
+    fn of(at: usize, statement: TokenStream) -> Place {
+        Place { at, statement, stand_in: None }
+    }
+}
+
+/// The places that one block has Rust tell of: their statements, and the function that stands in for each item they
+/// name, once for all its uses. Rust reads the `deprecated` of each function that has it, and where the build is
+/// incremental it counts an error in it once for each, so a function for each use would have Rust count one error as
+/// often as the item is named. Each block has a function of its own: a use names a function in its block, and Rust says
+/// the path of the use from where the function is, `cpu::warned::_::touch` in a kernel's.
+#[derive(Default)]
+struct Block {
+    /// The statements of the places.
+    statements: TokenStream,
+    /// Each item that a function stands in for, where any of its uses is, and the function.
+    stand_ins: Vec<(usize, Cond, TokenStream)>,
+}
+
+impl Block {
+    /// The block holds `place`.
+    fn push(&mut self, place: Place) {
+        self.statements.extend(place.statement);
+        if let Some((item, there, function)) = place.stand_in {
+            match self.stand_ins.iter_mut().find(|(other, ..)| *other == item) {
+                Some((_, uses, _)) => *uses = Cond::any([uses.clone(), there]),
+                None => self.stand_ins.push((item, there, function)),
+            }
+        }
+    }
+
+    /// What the block holds as code: the function of each item, where any of its uses is, then the statements.
+    fn written(self) -> TokenStream {
+        let mut out = TokenStream::new();
+        for (_, uses, function) in self.stand_ins {
+            if let Some(guard) = uses.guard() {
+                out.extend(guard);
+                out.extend(function);
+            }
+        }
+        out.extend(self.statements);
+        out
+    }
+}
+
 /// What says, at each place item `i` of `made` names an item of its module, that `cfg` may leave the
 /// item out; `place` is the span of the place. Rust has a name for a const, a static of the process's
 /// and an x86 kernel that takes no compile-time arguments, and finds it where it is written: a
@@ -363,32 +509,39 @@ fn find(guard: TokenStream, what: impl IntoIterator<Item = TokenTree>) -> TokenS
 /// Rust cannot find the item. For any other item kernite says so itself, as an error where `cfg` keeps item `i` and
 /// leaves that one out; these are the second, for they are items of the module. A static of GPU kernels has a method
 /// with its attributes, so the first of the pair has `let _ = Kernels::NAME;` for it too, where `cfg` keeps the static,
-/// for Rust to tell of a deprecated one at the place. Both are under the `cfg` of item `i` and of the code that has the
-/// place, where item `i` runs it: [`runs`]. A constant of a module of Rust's that item `i` names by its path,
-/// `std::f32::consts::PI`, is Rust's to say as well, in the first of the pair, by [`takes`]: that the path gives the
-/// constant kernite took. So is one that a const that item `i` names has in its definition, where `cfg` keeps the
-/// const; but not one in a const that the module is given, whose path is Rust's where the consts are, in a module that
-/// holds nothing to give `std` another meaning.
+/// for Rust to tell of a deprecated one at the place. So has an instance of an x86 kernel, `let _ = old::<2>;`: the
+/// code names the function of the instance, which has no attributes, and Rust cannot work out the arguments of `old`
+/// alone. So has a deprecated helper, `extern "ptx-func"` function or GPU kernel, whose code Rust never sees: `let _ =
+/// old;`, the name of a function that stands in for it and has its `deprecated`, [`stand_in`]. A place in the item
+/// itself has none, for Rust does not tell of a use inside the item that is deprecated. Both are under the `cfg` of
+/// item `i` and of the code that has the place, where item `i` runs it: [`runs`]. A constant of a module of Rust's that
+/// item `i` names by its path, `std::f32::consts::PI`, is Rust's to say as well, in the first of the pair, by
+/// [`takes`]: that the path gives the constant kernite took. So is one that a const that item `i` names has in its
+/// definition, where `cfg` keeps the const; but not one in a const that the module is given, whose path is Rust's where
+/// the consts are, in a module that holds nothing to give `std` another meaning.
+///
+/// Each statement of the first is given with the item whose code writes the place, for the level that item sets to hold
+/// there. The operand of a place of a kernel is in the function of each instance, where the kernel's levels hold, but a
+/// helper's do not, and where an `expect` is an `allow`: so where a kernel allows a lint or expects it, each place has
+/// the statement too, to be told of at the level of its code, as one that is not an operand is.
 fn named(
     made: &ModuleOut,
     conds: &[Cond],
     i: usize,
     top: &[TokenTree],
     place: &dyn Fn(lang::Span) -> Span,
-) -> (TokenStream, TokenStream) {
+    covered: &[&lang::Mention],
+) -> (Vec<Place>, TokenStream) {
     let module = &made.module;
-    let (mut names, mut errors) = (TokenStream::new(), TokenStream::new());
+    let (mut names, mut errors) = (vec![], TokenStream::new());
     let Some((reader, made_reader)) = module.items.get(i).zip(made.items.get(i)) else { return (names, errors) };
-    let covered = match made_reader {
-        ItemOut::Native(k) => operands(k),
-        _ => vec![],
-    };
+    let lowers = matches!(&reader.kind, ItemKind::Fn(f) if !levels(attrs(f, top), &["allow", "expect"]).is_empty());
     for m in made_reader.mentions() {
         let at = module.item_at(m.span);
         let kept = Cond::all([cond_of(conds, i), runs(made, conds, i, at, &[])]);
         if m.value.is_some() {
             let given = matches!(made.items.get(at), Some(ItemOut::Given));
-            names.extend(kept.guard().filter(|_| !given).map(|guard| takes(guard, m, place)));
+            names.extend(kept.guard().filter(|_| !given).map(|guard| Place::of(at, takes(guard, m, place))));
             continue;
         }
         let Some(j) = position(module, &m.name) else { continue };
@@ -399,12 +552,12 @@ fn named(
             _ => false,
         };
         if rust {
-            let kept = match covered.iter().any(|x| x.span == m.span) {
+            let kept = match covered.iter().any(|x| x.span == m.span) && !lowers {
                 true => Cond::all([kept, cond_of(conds, j).not()]),
                 false => kept,
             };
             let Some(guard) = kept.guard() else { continue };
-            names.extend(find(guard, name_at(item, top, place(m.span))));
+            names.push(Place::of(at, find(guard, name_at(item, top, place(m.span)))));
             continue;
         }
         if let Some(guard) = Cond::all([kept.clone(), cond_of(conds, j).not()]).guard() {
@@ -412,11 +565,21 @@ fn named(
             let message = format!("`{}` is left out by `cfg` where `{reader}`, which names it, is kept", m.name);
             errors.extend(error_under(&guard, place(m.span), &message));
         }
-        if let ItemOut::DeviceStatic(laid) = made_item
-            && let Some(path) = used(item, laid, top, place(m.span))
-            && let Some(guard) = Cond::all([kept, cond_of(conds, j)]).guard()
-        {
-            names.extend(find(guard, path));
+        let function = match made_item {
+            ItemOut::Helper(_) | ItemOut::Device(_) if at != j => stand_in(item, top),
+            _ => None,
+        };
+        let path = match made_item {
+            ItemOut::DeviceStatic(laid) => used(item, laid, top, place(m.span)),
+            ItemOut::Native(_) if at != j => instance_used(item, &m.args, top, place(m.span)),
+            _ => function.as_ref().and_then(|_| name_at(item, top, place(m.span))).map(TokenStream::from),
+        };
+        if let Some(path) = path {
+            let there = Cond::all([kept, cond_of(conds, j)]);
+            if let Some(guard) = there.guard() {
+                let stand_in = function.map(|function| (j, there, function));
+                names.push(Place { at, statement: find(guard, path), stand_in });
+            }
         }
     }
     (names, errors)
@@ -444,7 +607,7 @@ fn runs(made: &ModuleOut, conds: &[Cond], i: usize, c: usize, way: &[usize]) -> 
     Cond::all([cond_of(conds, c), Cond::any(callers.map(|caller| runs(made, conds, i, caller, &way)))])
 }
 
-/// When item `i` is there, `conds` saying it of each item of the module: never for an item the module has not.
+/// The condition of item `i` that `conds` says, one for each item of the module: never for an item the module has not.
 fn cond_of(conds: &[Cond], i: usize) -> Cond {
     conds.get(i).cloned().unwrap_or(Cond::Never)
 }

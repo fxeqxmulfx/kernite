@@ -193,6 +193,22 @@ pub(crate) fn cfg_of(item: &lang::Item, top: &[TokenTree]) -> TokenStream {
     carried(attrs_of(within(top, &item.tokens)).0.iter().cloned(), false)
 }
 
+/// The function that stands in for `item`, a helper, an `extern "ptx-func"` function or a GPU kernel, whose code Rust
+/// never sees, where a kernel names it: one of its name that has its `deprecated`,
+/// `#[deprecated(note = "..")] fn old() {}`, for Rust to tell of a use of `old` as it tells of a use of any deprecated
+/// function. A block that names the item has it once for all its uses, as Rust reads the `deprecated` of each function
+/// that has it. None where `item` is not deprecated.
+pub(crate) fn stand_in(item: &lang::Item, top: &[TokenTree]) -> Option<TokenStream> {
+    let mut stand_in = deprecated(attrs_of(within(top, &item.tokens)).0.iter().cloned());
+    if stand_in.is_empty() {
+        return None;
+    }
+    stand_in.extend(parse("fn"));
+    stand_in.extend([name_at(item, top, site())?]);
+    stand_in.extend(parse("() {}"));
+    Some(stand_in)
+}
+
 /// The name of `item`, a const, a static or a function, as `top` writes it, `r#type` as well, of the
 /// span `span`; none for an item that has no name.
 pub(crate) fn name_at(item: &lang::Item, top: &[TokenTree], span: Span) -> Option<TokenTree> {
@@ -593,14 +609,14 @@ fn numbers(asked: &[Option<Ask>]) -> TokenStream {
             inner.extend(number(name, ty));
         }
     }
-    if inner.is_empty() {
-        return inner;
-    }
     unnamed(inner)
 }
 
-/// `inner` in an item of no name, `const _: () = { .. };`, where Rust checks it and runs nothing.
+/// `inner` in an item of no name, `const _: () = { .. };`, where Rust checks it and runs nothing. No `inner`, no item.
 pub(crate) fn unnamed(inner: TokenStream) -> TokenStream {
+    if inner.is_empty() {
+        return inner;
+    }
     let mut out = respan(parse("const _: () ="), Span::mixed_site());
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, inner))]);
     out.extend(respan(parse(";"), Span::mixed_site()));
@@ -653,6 +669,24 @@ fn located(mut token: TokenTree, at: Span) -> TokenTree {
     token
 }
 
+/// `tokens`, which end an item the macros write for one of the user's, with its last token located at `at`, a token of
+/// the user's. Rust says of an item, as of `missing_docs`, where the item's span is, which runs from its first token to
+/// its last: the user's if both are, so Rust tells at the item as it does of any the user wrote; and the macro's
+/// otherwise, which is the module's attribute, where nothing can be mended.
+pub(crate) fn ending_at(tokens: TokenStream, at: Span) -> TokenStream {
+    let mut tokens: Vec<TokenTree> = tokens.into_iter().collect();
+    if let Some(last) = tokens.last_mut() {
+        last.set_span(at);
+    }
+    tokens.into_iter().collect()
+}
+
+/// `code` in braces, the body of an item the macros write for one of the user's, located at `at`, a token of the
+/// user's: it ends the item, as [`ending_at`] says.
+pub(crate) fn body_at(code: TokenStream, at: Span) -> TokenTree {
+    located(TokenTree::Group(Group::new(Delimiter::Brace, code)), at)
+}
+
 /// `f` with a body that never runs, for a kernel that does not compile. It asks Rust of each type `f`
 /// takes or gives back, as [`asks`] says: of a number by a closure of the type as written, which it
 /// never calls, so that a result reads as it does in a kernel that compiles, "expected `f64`, found
@@ -663,10 +697,13 @@ fn located(mut token: TokenTree, at: Span) -> TokenTree {
 /// the stub casts `f` itself, `self::f as *const ()`, which asks Rust for the signature it is in
 /// the middle of checking. Rust gives up on the body, as it does after any error, and does not say
 /// as well that a body that never returns leaves the type of the `_` to infer.
-pub(crate) fn stub(f: &Fn, top: &[TokenTree]) -> TokenStream {
+///
+/// Its body has the `places` of the kernel's code that name an item, as [`named`](crate::expand) says them.
+pub(crate) fn stub(f: &Fn, top: &[TokenTree], places: TokenStream) -> TokenStream {
     let mut out = attrs(f, top);
     out.extend(signature(f, top));
     let mut body = asks(f, top, written);
+    body.extend(unnamed(places));
     if gives_placeholder(f, top)
         && let Some(name) = name_after(&f.head, top)
     {
@@ -708,6 +745,86 @@ pub(crate) fn carried(attrs: impl IntoIterator<Item = TokenTree>, offered: bool)
         [name, ..] if named(name, "cfg") || (offered && named(name, "deprecated")) => Some(meta),
         _ => None,
     })
+}
+
+/// The attributes that set the level of a lint.
+pub(crate) const LEVELS: [&str; 5] = ["allow", "warn", "deny", "forbid", "expect"];
+
+/// What an item's attributes, `attrs`, `#` and brackets each, say of the level of a lint, of those among `kinds`, which
+/// are some of [`LEVELS`]: each of them, alone or in a `cfg_attr(..)`.
+pub(crate) fn levels(attrs: impl IntoIterator<Item = TokenTree>, kinds: &[&str]) -> TokenStream {
+    filtered(attrs, &mut |meta| {
+        let [name, ..] = &meta[..] else { return None };
+        kinds.iter().any(|kind| named(name, kind)).then_some(meta)
+    })
+}
+
+/// What an item's attributes, `attrs`, say of the level of a lint, as [`levels`] says it, for a naked function, which
+/// Rust refuses `expect` on: an `expect` is an `allow` there.
+pub(crate) fn naked_levels(attrs: impl IntoIterator<Item = TokenTree>) -> TokenStream {
+    filtered(levels(attrs, &LEVELS), &mut |mut meta| {
+        if let Some(first) = meta.first_mut()
+            && named(first, "expect")
+        {
+            *first = Ident::new("allow", first.span()).into();
+        }
+        Some(meta)
+    })
+}
+
+/// What an item's attributes, `attrs`, `#` and brackets each, say of its being deprecated: each `deprecated`, alone or
+/// in a `cfg_attr(..)`.
+pub(crate) fn deprecated(attrs: impl IntoIterator<Item = TokenTree>) -> TokenStream {
+    filtered(attrs, &mut |meta| matches!(&meta[..], [name, ..] if named(name, "deprecated")).then_some(meta))
+}
+
+/// What an item that is no item of Rust's takes of its attributes, `attrs`, `#` and brackets each, and, of the rest,
+/// each one's name, a raw one plain, and where it is. A static of GPU kernels, a helper and an `extern "ptx-func"`
+/// function are no symbol of the host's, nor an item of Rust's, so each takes what says how Rust has it, and no other
+/// attribute: a doc, `cfg`, `deprecated`, the level of a lint, `allow`, `warn`, `deny`, `forbid` or `expect`, and a
+/// `rustfmt` attribute, each alone or in a `cfg_attr(..)`, whatever its condition. The others are for what the item is
+/// not: `no_mangle`, `export_name`, `link_section` and `used` for a symbol, `cold` and `track_caller` for a function of
+/// Rust's, and the rest of Rust's for an item of its own. `unsafe(no_mangle)` is `no_mangle`.
+pub(crate) fn taken(attrs: impl IntoIterator<Item = TokenTree>) -> (TokenStream, Vec<(Span, String)>) {
+    let mut refused = vec![];
+    let taken = filtered(attrs, &mut |meta| {
+        let [first, ..] = &meta[..] else { return None };
+        let at = first.span();
+        let takes = ["doc", "cfg", "deprecated", "rustfmt"];
+        if takes.iter().chain(&LEVELS).any(|name| named(first, name)) {
+            return Some(meta);
+        }
+        let attr = match &meta[..] {
+            [wrapper, TokenTree::Group(inner)] if named(wrapper, "unsafe") => flatten(inner.stream()),
+            _ => meta,
+        };
+        // The name, which may be a path, `a::b`, up to its arguments or its value.
+        let path: Vec<&TokenTree> =
+            attr.iter().take_while(|t| matches!(t, TokenTree::Ident(_)) || is_punct(t, ':')).collect();
+        let written = path.iter().map(|t| lang::unraw(&t.to_string()).to_string()).collect();
+        refused.push((path.first().map_or(at, |t| t.span()), written));
+        None
+    });
+    (taken, refused)
+}
+
+/// The error at each of `attrs` that the item named `name` does not take, as [`taken`] says, under `cfg`, the item's
+/// own: where `cfg` leaves the item out, it says nothing. It names the item as written, `r#type` as well, and says what
+/// it is, `is`, and what takes the attributes it takes, `takers`.
+pub(crate) fn refused_attrs(
+    attrs: impl IntoIterator<Item = TokenTree>,
+    name: &TokenTree,
+    (is, takers): (&str, &str),
+    cfg: &TokenStream,
+) -> TokenStream {
+    let said = |(at, attr): (Span, String)| {
+        let message = format!(
+            "`{name}` is {is}, which `{attr}` is not for: {takers} takes a doc, `cfg`, `deprecated`, the level of a \
+             lint, and a `rustfmt` attribute, alone or in a `cfg_attr(..)`"
+        );
+        error_under(cfg, at, &message)
+    };
+    taken(attrs).1.into_iter().map(said).collect()
 }
 
 /// The attributes `attrs`, `#` and brackets each, as `leaf` leaves them: `leaf` is given the tokens in an attribute's
@@ -770,9 +887,10 @@ pub(crate) fn signature(f: &Fn, top: &[TokenTree]) -> TokenStream {
     params.set_span(span_of(top.get(f.params_at)));
     out.extend([TokenTree::Group(params)]);
     if let Some(r) = &f.ret {
-        // The arrow, then the result.
+        // The arrow, then the result, which ends where the kernel's does.
         out.extend(top.get(f.params_at + 1..r.tokens.start).unwrap_or_default().iter().cloned());
-        out.extend(given_back(within(top, &r.tokens)));
+        let ret = within(top, &r.tokens);
+        out.extend(ending_at(given_back(ret), span_of(ret.last())));
     }
     out
 }

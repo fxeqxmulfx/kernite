@@ -1903,11 +1903,11 @@ fn a_refused_x86_kernel_of_instances_that_cfg_leaves_out_says_nothing_for_anothe
     Ok(())
 }
 
-/// A module of GPU kernels needs `kernite-cuda` where `cfg` keeps one of its GPU items, and not
-/// where it leaves out all: a feature that brings the crate, `cuda = ["dep:kernite-cuda"]`, can keep
-/// them, and the crate builds without the feature, without a word, under `deny(warnings)`, and with
-/// it. A kernel, a function that kernels call and a static each make a module of their own, under
-/// `cfg` and under `cfg_attr(.., cfg(..))`.
+/// A module of GPU kernels needs `kernite-cuda` where `cfg` keeps one of its GPU items, and not where it leaves out
+/// all: a feature that brings the crate, `cuda = ["dep:kernite-cuda"]`, can keep them, and the crate builds without the
+/// feature, without a word, under `deny(warnings)`, and with it. A kernel, a function that kernels call, a static, a
+/// kernel whose code meets its `expect(deprecated)` and a static whose data meets its own each make a module of their
+/// own, under `cfg` and under `cfg_attr(.., cfg(..))`.
 #[test]
 fn a_feature_that_brings_kernite_cuda_can_keep_the_gpu_items() -> Result {
     let optional = [("kernite-cuda = {", "kernite-cuda = { optional = true,")];
@@ -4506,31 +4506,39 @@ fn the_launcher_keeps_a_kernels_expect_as_written() -> Result {
     Ok(())
 }
 
-/// A crate that forbids a lint a kernel expects is refused once, at the `expect`, of a cooperative GPU
-/// kernel, an x86 kernel of instances and a cooperative one: the launcher, or the function that picks
-/// an instance, keeps the `expect` as written, and `k_blocks` and the instances keep no lint.
+/// A crate that forbids a lint a kernel expects is refused at the `expect`, of a cooperative GPU kernel, an x86 kernel
+/// of instances and a cooperative one: the launcher, or the function that picks an instance, keeps the `expect` as
+/// written, and `k_blocks` keeps no lint. The function of each x86 instance has an `allow` for the `expect`, which Rust
+/// refuses too, at the same place.
 #[test]
-fn a_crate_that_forbids_a_lint_a_kernel_expects_is_refused_once_at_the_expect() -> Result {
-    let refused =
-        "error[E0453]: expect(non_snake_case) incompatible with previous forbid: overruled by previous forbid";
+fn a_crate_that_forbids_a_lint_a_kernel_expects_is_refused_at_the_expect() -> Result {
+    let refused = |at: &str, level: &str| {
+        format!(
+            "src/lib.rs:{at}: error[E0453]: {level}(non_snake_case) incompatible with previous forbid: overruled by \
+             previous forbid"
+        )
+    };
     refuses(
         "forbidden_expect",
         &[
-            &format!("src/lib.rs:10:14: {refused}"),
-            &format!("src/lib.rs:18:14: {refused}"),
-            &format!("src/lib.rs:24:14: {refused}"),
-            "error: could not compile `forbidden_expect` (lib) due to 3 previous errors",
+            &refused("10:14", "expect"),
+            &refused("18:14", "expect"),
+            &refused("18:14", "allow"),
+            &refused("24:14", "expect"),
+            &refused("24:14", "allow"),
+            "error: could not compile `forbidden_expect` (lib) due to 5 previous errors",
         ],
     )?;
     Ok(())
 }
 
-/// Clippy says "too many arguments" of a function of more than seven parameters wherever its tokens
-/// come from, and a launcher takes `self` and the grid as well as the kernel's parameters: so each
-/// launcher allows it, and Clippy says nothing of one of eight or nine, of each kind of kernel. It
-/// says nothing of the kernels that forbid lints either, whose instances include `bool`s, nor of those
-/// that take or give back pointers, of every kind, which the macros ask Rust the size of, nor of those
-/// that take parameters named `_`, which the macros name for Rust themselves.
+/// Clippy says "too many arguments" of a function of more than seven parameters wherever its tokens come from, and a
+/// launcher takes `self` and the grid as well as the kernel's parameters: so each launcher allows it, and Clippy says
+/// nothing of one of eight or nine, of each kind of kernel. It says nothing of the kernels that forbid lints either,
+/// whose instances include `bool`s, nor of those that take or give back pointers, of every kind, which the macros ask
+/// Rust the size of, nor of those that take parameters named `_`, which the macros name for Rust themselves. What it
+/// says of a fixture's own kernels, that a public one has no `# Safety` and that a parameter is named `__0`, the
+/// fixture allows: `clippy_tells_of_a_public_x86_kernel_with_no_safety_doc_at_the_kernel` holds the first.
 #[test]
 fn clippy_says_nothing_of_the_rust_the_macro_writes() -> Result {
     if clippy_here() {
@@ -4798,14 +4806,13 @@ fn an_attribute_that_is_not_for_memory_on_the_gpu_is_kernites_error_alone() -> R
 /// A static of GPU kernels gives its method, `Kernels::COUNTS`, each attribute it takes, and Rust says of the method
 /// what the attribute makes it say. A module that denies `missing_docs` is told of no static that has a doc, written as
 /// `///`, as `#[doc = ..]` and in a `cfg_attr(..)`, nor of one with `#[doc(hidden)]`, `#[allow(missing_docs)]`, alone
-/// or in a `cfg_attr(..)`, or `#[expect(missing_docs)]`; it is told of one with none, once, at the module; of one whose
+/// or in a `cfg_attr(..)`, or `#[expect(missing_docs)]`; it is told of one with none, at the static; of one whose
 /// doc and level are in a `cfg_attr(..)` that does not hold, which Rust leaves out as it does of any item; and of none
 /// that `cfg` leaves out, which has no method. The level that a static gives its method is Rust's for it: `#[warn(..)]`
 /// is a warning, `#[deny(..)]` and `#[forbid(..)]` an error, and an `#[expect(..)]` that no lint meets a warning, at
 /// the attribute. A deprecated static is told of at each use of its method, and a table with `#[rustfmt::skip]` is a
 /// static as any is. A static of x86 kernels is a `static` of Rust's: it keeps `#[used]`, which a static of GPU kernels
-/// refuses, and when it is deprecated it is told of at its use as a static is. Each module that Rust tells of has one
-/// static, for Rust says one message once for its place.
+/// refuses, and when it is deprecated it is told of at its use as a static is.
 #[test]
 fn a_static_of_gpu_kernels_gives_its_method_the_attributes_it_takes() -> Result {
     refuses(
@@ -4813,15 +4820,208 @@ fn a_static_of_gpu_kernels_gives_its_method_the_attributes_it_takes() -> Result 
         &[
             "src/lib.rs:125:84: error: use of deprecated static `cpu::OLD`: use `KEPT`",
             "src/lib.rs:125:38: error: use of deprecated method `kept::Kernels::OLD`: use `HERE`",
-            "src/lib.rs:38:1: error: missing documentation for a method",
-            "src/lib.rs:47:1: error: missing documentation for a method",
-            "src/lib.rs:58:1: warning: missing documentation for a method",
-            "src/lib.rs:65:1: error: missing documentation for a method",
-            "src/lib.rs:72:1: error: missing documentation for a method",
+            "src/lib.rs:42:5: error: missing documentation for a method",
+            "src/lib.rs:53:5: error: missing documentation for a method",
+            "src/lib.rs:61:5: warning: missing documentation for a method",
+            "src/lib.rs:68:5: error: missing documentation for a method",
+            "src/lib.rs:75:5: error: missing documentation for a method",
             "src/lib.rs:81:14: warning: this lint expectation is unfulfilled",
             "error: could not compile `static_attrs_kept` (lib) due to 6 previous errors; 2 warnings emitted",
         ],
     )?;
+    Ok(())
+}
+
+/// An attribute on a helper or an `extern "ptx-func"` function that is not for it is kernite's error alone, once, at
+/// the attribute's name, in the same words for each but what the item is, its name, as written, and the attribute's, a
+/// raw one plain, as it is on a static of GPU kernels: neither is a symbol of the host's nor a function of Rust's. So
+/// it is for an attribute of a symbol, `#[unsafe(no_mangle)]`, `#[unsafe(export_name = ..)]`,
+/// `#[unsafe(link_section = ..)]` and `#[used]`; for one of a function, `#[cold]` and `#[track_caller]`; and for any
+/// other: one of Rust's, `#[must_use]`, `#[derive(..)]` and `#[repr(..)]`, one of a tool that is not `rustfmt`, and one
+/// that nothing defines, `#[foo]`, of which Rust says "cannot find attribute `foo` in this scope" on a function of its
+/// own. It is the same for the attribute written raw, on an item named raw; in a `cfg_attr(..)`, whatever its
+/// condition, beside one the item takes, and inside another `cfg_attr(..)`; and for each attribute of an item. An item
+/// that `cfg` leaves out says nothing. Rust says nothing of the attribute, which is not written to it, nor of a
+/// kernel's call of the item.
+#[test]
+fn an_attribute_that_is_not_for_a_helper_or_a_gpu_function_is_kernites_error_alone() -> Result {
+    // The line and the column of each attribute's name, the item it is on, as written, and the attribute's name.
+    let helpers: [(u32, u32, &str, &str); 20] = [
+        (9, 14, "no_mangle", "no_mangle"),
+        (14, 14, "export_name", "export_name"),
+        (19, 14, "link_section", "link_section"),
+        (24, 7, "cold", "cold"),
+        (29, 7, "track_caller", "track_caller"),
+        (34, 7, "used", "used"),
+        (41, 7, "r#type", "used"),
+        (46, 14, "raw_unsafe", "no_mangle"),
+        (51, 30, "holds", "no_mangle"),
+        (56, 23, "false_condition", "used"),
+        (61, 61, "beside", "used"),
+        (66, 39, "nested", "cold"),
+        (73, 7, "must_use", "must_use"),
+        (78, 7, "derive", "derive"),
+        (83, 7, "repr", "repr"),
+        (88, 7, "clippy", "clippy::cognitive_complexity"),
+        (93, 7, "unknown", "foo"),
+        (101, 7, "many", "used"),
+        (103, 7, "many", "cold"),
+        (115, 7, "here", "used"),
+    ];
+    let functions: [(u32, u32, &str, &str); 8] = [
+        (150, 7, "odd", "foo"),
+        (155, 7, "must_use", "must_use"),
+        (160, 14, "no_mangle", "no_mangle"),
+        (165, 7, "r#type", "used"),
+        (170, 23, "false_condition", "cold"),
+        (176, 7, "many", "used"),
+        (178, 7, "many", "cold"),
+        (190, 7, "here", "used"),
+    ];
+    let said = |is: &str, found: &[(u32, u32, &str, &str)]| -> Vec<String> {
+        found
+            .iter()
+            .map(|(line, column, name, attr)| {
+                format!(
+                    "src/lib.rs:{line}:{column}: error: `{name}` is {is}, which `{attr}` is not for: {is} takes a doc, \
+                     `cfg`, `deprecated`, the level of a lint, and a `rustfmt` attribute, alone or in a `cfg_attr(..)`"
+                )
+            })
+            .collect()
+    };
+    let mut lines = said("a helper", &helpers);
+    lines.extend(said("an `extern \"ptx-func\"` function", &functions));
+    lines.push(format!("error: could not compile `helper_attrs_refused` (lib) due to {} previous errors", lines.len()));
+    refuses("helper_attrs_refused", &lines.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok(())
+}
+
+/// A helper and an `extern "ptx-func"` function take each attribute that says how Rust has them, and Rust says nothing
+/// of any: a doc, written as `///`, as `#[doc = ..]`, as `#[doc(hidden)]` and in a `cfg_attr(..)`; `cfg`; `deprecated`,
+/// alone, with a `since` and a `note`, and in a `cfg_attr(..)`; the level of a lint, `allow`, `warn`, `deny` and
+/// `forbid`, and an `expect` that a use of a deprecated item meets; and `#[rustfmt::skip]`.
+#[test]
+fn a_helper_and_a_gpu_function_take_the_attributes_that_say_how_rust_has_them() -> Result {
+    builds_quietly("helper_attrs_kept")?;
+    Ok(())
+}
+
+/// Rust reads the `deprecated` of each helper and each `extern "ptx-func"` function as it reads a function of its own,
+/// whether a kernel names it or not: a `deprecated` that is malformed is Rust's error at the attribute, in its words,
+/// once. So it is for one in a `cfg_attr(..)` that holds, for two on an item, "multiple `deprecated` attributes", for
+/// an item that a kernel names and one that `cfg` leaves out names too, and for an item that only a kernel under a
+/// `cfg` names, whether the `cfg` holds or not. Rust says nothing of one that is not malformed, of one in a
+/// `cfg_attr(..)` that does not hold, nor of an item that `cfg` leaves out. Cargo prints, of each module, the errors of
+/// the items that no kernel names first, and those of the items that a kernel names after, for Rust reads their
+/// `deprecated` where the kernel names them.
+#[test]
+fn rust_says_a_malformed_deprecated_of_a_helper_or_a_gpu_function_once_whether_a_kernel_names_it_or_not() -> Result {
+    refuses(
+        "helper_deprecated_malformed",
+        &[
+            "src/lib.rs:15:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:21:23: error[E0538]: malformed `deprecated` attribute input",
+            "src/lib.rs:28:5: error: multiple `deprecated` attributes: help: remove this attribute",
+            "src/lib.rs:53:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:9:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:59:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:101:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:107:23: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:126:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:95:7: error[E0538]: malformed `deprecated` attribute input",
+            "src/lib.rs:132:7: error[E0539]: malformed `deprecated` attribute input",
+            "error: could not compile `helper_deprecated_malformed` (lib) due to 11 previous errors",
+        ],
+    )?;
+    Ok(())
+}
+
+/// Rust says a malformed `deprecated` of a helper or an `extern "ptx-func"` function once, and counts it once, though
+/// kernels name the item at more than one place, as it does of a function of its own that is called at many: a helper
+/// that another helper calls, which two kernels call (20:7); one that two kernels call, one of them of two instances
+/// (8:7); one that a kernel calls twice (14:7); and a function that one kernel calls twice and another calls (64:7).
+/// Cargo says them in the order of the first place that names each. The macros write the function that stands in for an
+/// item once for all the places of a block, for where the build is incremental, as these are, Rust counts an error in a
+/// `deprecated` once for each function that has it.
+#[test]
+fn rust_counts_a_malformed_deprecated_of_a_helper_or_a_gpu_function_once_though_kernels_name_it_at_many_places()
+-> Result {
+    refuses(
+        "helper_deprecated_malformed_named_twice",
+        &[
+            "src/lib.rs:20:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:8:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:14:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:64:7: error[E0539]: malformed `deprecated` attribute input",
+            "error: could not compile `helper_deprecated_malformed_named_twice` (lib) due to 4 previous errors",
+        ],
+    )?;
+    Ok(())
+}
+
+/// Rust says a malformed `deprecated` once, at the attribute, but counts it once for each function that has it, where
+/// the build is incremental, as these are: the function of each kernel, helper or function with a level whose code
+/// names the item, the one of all the other places, and the launcher of a GPU kernel. A helper that two kernels and a
+/// helper with a level name, and two kernels with none (9:7), counts four; a function that a kernel and a function with
+/// a level name, and a kernel with none (60:7), counts three; and a GPU kernel whose address two kernels take (82:7)
+/// counts two, for its launcher.
+#[test]
+fn rust_counts_a_malformed_deprecated_once_for_each_item_with_a_level_that_names_it_and_for_a_launcher() -> Result {
+    refuses(
+        "helper_deprecated_malformed_counted_more",
+        &[
+            "src/lib.rs:9:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:60:7: error[E0539]: malformed `deprecated` attribute input",
+            "src/lib.rs:82:7: error[E0539]: malformed `deprecated` attribute input",
+            "error: could not compile `helper_deprecated_malformed_counted_more` (lib) due to 9 previous errors",
+        ],
+    )?;
+    Ok(())
+}
+
+/// An item of a module of kernels with no doc is told of by `missing_docs` at the item, as Rust tells of an item of
+/// plain Rust, and not at the module's `#[kernite_macros::kernels]`: each of two statics of GPU kernels, which are
+/// methods of `Kernels`; each static of x86 kernels, near `rip` and far from it; and each x86 kernel that the macros
+/// write a function for, plain, giving back a number, a pointer or `()`, and of instances. A static or a kernel with a
+/// doc is not told of, nor is a GPU kernel or a cooperative x86 kernel, whose launcher the macros write with a doc, nor
+/// an x86 kernel that names a static of its module, whose safety contract they write as a doc.
+#[test]
+fn an_item_of_kernels_with_no_doc_is_told_of_at_the_item() -> Result {
+    refuses(
+        "missing_docs_at_item",
+        &[
+            "src/lib.rs:14:5: error: missing documentation for a method",
+            "src/lib.rs:19:5: error: missing documentation for a method",
+            "src/lib.rs:31:5: error: missing documentation for a static",
+            "src/lib.rs:33:5: error: missing documentation for a static",
+            "src/lib.rs:38:5: error: missing documentation for a function",
+            "src/lib.rs:40:5: error: missing documentation for a function",
+            "src/lib.rs:44:5: error: missing documentation for a function",
+            "src/lib.rs:48:5: error: missing documentation for a function",
+            "src/lib.rs:51:5: error: missing documentation for a function",
+            "src/lib.rs:58:5: error: missing documentation for a function",
+            "error: could not compile `missing_docs_at_item` (lib) due to 10 previous errors",
+        ],
+    )?;
+    Ok(())
+}
+
+/// Clippy tells of a public x86 kernel whose docs have no `# Safety` at the kernel, as it tells of an `unsafe fn` of
+/// Rust's own: a plain kernel, one that gives back a number, and one of instances. It says nothing of a kernel whose
+/// docs have one, of a kernel that names a static of its module, plain or of instances, whose contract the macros write
+/// as one, of a cooperative kernel, nor of a GPU kernel, whose launcher has the macros'.
+#[test]
+fn clippy_tells_of_a_public_x86_kernel_with_no_safety_doc_at_the_kernel() -> Result {
+    if clippy_here() {
+        let (done, said) = cargo(&["clippy"], "missing_safety_doc_at_item")?;
+        let missing = "warning: unsafe function's docs are missing a `# Safety` section";
+        let lines = [14, 17, 23].map(|line| format!("src/lib.rs:{line}:5: {missing}"));
+        assert!(
+            done && said == lines,
+            "fixtures/missing_safety_doc_at_item.rs: Clippy {done}, and said:\n{}",
+            said.join("\n")
+        );
+    }
     Ok(())
 }
 
@@ -4847,6 +5047,88 @@ fn a_kernels_use_of_a_deprecated_item_is_told_of_once_at_the_use() -> Result {
     Ok(())
 }
 
+/// A use of a deprecated helper, `extern "ptx-func"` function or GPU kernel is told of at the name, once for each place
+/// a kernel, a function or a helper writes it, as Rust tells of a use of a deprecated function of its own: Rust never
+/// sees the code of any of them, so the macros write a function of the name and the `deprecated`, once for all the
+/// places of a block, with a use at each, and Rust says its path, `cpu::_::touch`. On x86, `touch` is told of where
+/// `names` calls it (53:9), at each of the two places in `twice` (62:9, 63:9), in `both`, a helper that two kernels
+/// call, once (48:9), in `many`, which has two instances, once (79:9), and in `old`, a deprecated helper (43:9): Rust
+/// tells of a use in a deprecated function as it does of any, but not of one in the item itself. `loud`, which
+/// `cfg_attr` deprecates (54:9), `old` (56:9) and `r#type` (57:9) are told of at the call in `names`; `quiet`, which
+/// `cfg_attr` does not, is not, nor is `unused`, which no kernel calls, nor `touch` in `gone`, which `cfg` leaves out.
+/// On the GPU, `old` is told of at a call from a function (129:17), at a call from a kernel (136:17) and at the address
+/// the kernel takes (137:21), `gcd` at the kernel's call (138:17) and not at its own, `bump`, a helper, at its call
+/// (140:9), and `spent`, a kernel, at the address `run` takes (141:21).
+#[test]
+fn a_use_of_a_deprecated_helper_or_function_is_told_of_at_each_place() -> Result {
+    refuses(
+        "deprecated_helpers",
+        &[
+            "src/lib.rs:43:9: error: use of deprecated function `cpu::_::touch`: use `fresh`",
+            "src/lib.rs:53:9: error: use of deprecated function `cpu::_::touch`: use `fresh`",
+            "src/lib.rs:54:9: error: use of deprecated function `cpu::_::loud`",
+            "src/lib.rs:56:9: error: use of deprecated function `cpu::_::old`",
+            "src/lib.rs:57:9: error: use of deprecated function `cpu::_::r#type`",
+            "src/lib.rs:62:9: error: use of deprecated function `cpu::_::touch`: use `fresh`",
+            "src/lib.rs:63:9: error: use of deprecated function `cpu::_::touch`: use `fresh`",
+            "src/lib.rs:48:9: error: use of deprecated function `cpu::_::touch`: use `fresh`",
+            "src/lib.rs:79:9: error: use of deprecated function `cpu::_::touch`: use `fresh`",
+            "src/lib.rs:129:17: error: use of deprecated function `gpu::_::old`: use `fresh`",
+            "src/lib.rs:136:17: error: use of deprecated function `gpu::_::old`: use `fresh`",
+            "src/lib.rs:137:21: error: use of deprecated function `gpu::_::old`: use `fresh`",
+            "src/lib.rs:138:17: error: use of deprecated function `gpu::_::gcd`",
+            "src/lib.rs:140:9: error: use of deprecated function `gpu::_::bump`",
+            "src/lib.rs:141:21: error: use of deprecated function `gpu::_::spent`",
+            "error: could not compile `deprecated_helpers` (lib) due to 15 previous errors",
+        ],
+    )?;
+    Ok(())
+}
+
+/// A deprecated helper or `extern "ptx-func"` function is told of at a kernel that `cfg` keeps, though a kernel that
+/// `cfg` leaves out names it before: the function that the macros write for the item, once for all the places of the
+/// module, is there where the `cfg` of any place holds, and not where the first one's does.
+#[test]
+fn a_deprecated_item_is_told_of_at_a_kernel_that_cfg_keeps_though_one_it_leaves_out_names_it_first() -> Result {
+    refuses(
+        "deprecated_left_out_first",
+        &[
+            "src/lib.rs:22:9: error: use of deprecated function `cpu::_::old`",
+            "src/lib.rs:45:17: error: use of deprecated function `gpu::_::old`",
+            "error: could not compile `deprecated_left_out_first` (lib) due to 2 previous errors",
+        ],
+    )?;
+    Ok(())
+}
+
+/// A use of a deprecated x86 kernel of instances by a kernel is told of at the name, once for each place a kernel
+/// writes an instance of it, as Rust tells of a use of a deprecated generic function of its own: a call of `old::<2>`;
+/// of `old::<1>` and then `old::<2>`, two instances of one function; of `old::<2>` at two places; of the instance that
+/// the kernel's own argument names, `old::<M>`, which a kernel of two instances writes at one place; and of an instance
+/// of three arguments, a number, a `bool` and a negative number, `shapes::<4, false, -2>`. A place in a helper that two
+/// kernels call, `old::<1>`, is told of once. Rust says nothing at the module's attribute, nor of `unused`, which no
+/// kernel calls, nor of `rec`, which calls its own instance, as Rust does not tell of a use inside the item deprecated.
+/// Cargo says once a line that two errors share, so the count, eight for eight lines, shows that no place is told of
+/// twice.
+#[test]
+fn a_kernels_call_of_an_instance_of_a_deprecated_kernel_is_told_of_at_each_place() -> Result {
+    refuses(
+        "deprecated_instances",
+        &[
+            "src/lib.rs:26:14: error: use of deprecated function `cpu::old`: use `fresh`",
+            "src/lib.rs:31:14: error: use of deprecated function `cpu::old`: use `fresh`",
+            "src/lib.rs:32:14: error: use of deprecated function `cpu::old`: use `fresh`",
+            "src/lib.rs:37:14: error: use of deprecated function `cpu::old`: use `fresh`",
+            "src/lib.rs:38:14: error: use of deprecated function `cpu::old`: use `fresh`",
+            "src/lib.rs:44:14: error: use of deprecated function `cpu::old`: use `fresh`",
+            "src/lib.rs:49:14: error: use of deprecated function `cpu::old`: use `fresh`",
+            "src/lib.rs:75:14: error: use of deprecated function `cpu::shapes`",
+            "error: could not compile `deprecated_instances` (lib) due to 8 previous errors",
+        ],
+    )?;
+    Ok(())
+}
+
 /// A kernel is a function, and Rust tells of a deprecated static at the first place each function writes it: `EACH` of
 /// a kernel of two instances is two errors at its first place and one at the place after, and of a helper that two
 /// kernels call, two at its one place: five under `deny`. Cargo says the two at a place as one line, so the count is
@@ -4862,6 +5144,326 @@ fn a_deprecated_static_is_told_of_for_each_instance_and_each_kernel_that_calls_t
             "error: could not compile `deprecated_functions` (lib) due to 5 previous errors",
         ],
     )?;
+    Ok(())
+}
+
+/// A kernel that allows `deprecated` is told of nothing, by Rust, at any place its code names a deprecated item, though
+/// the crate denies the lint: a static at each of its places, a constant, a helper, an x86 kernel and an instance of
+/// one, an x86 kernel of no compile-time arguments, which it calls, and on the GPU a static, a function, a helper and
+/// the address of a kernel. So it is for a kernel of instances, whose code is a function for each, for a cooperative
+/// one, and for a kernel whose `allow` is in a `cfg_attr`.
+#[test]
+fn a_kernel_that_allows_a_lint_is_told_of_nothing_at_any_place_it_names_a_deprecated_item() -> Result {
+    builds_quietly("levels_allowed")?;
+    Ok(())
+}
+
+/// A kernel that raises a lint, by `warn`, `deny` or `forbid`, is told of at each place its code names a deprecated
+/// item, as a warning or an error though the crate allows the lint: a static at each place, a constant, a helper, a
+/// kernel it calls and the function of each instance of a kernel on x86, and on the GPU a function, a static and a
+/// constant, of a kernel and of a cooperative one. `crate_level` sets no level, and Rust says nothing of it. The
+/// kernel's level holds at no place in a helper: `names_after` is told of its own place of `BIG` and not of the
+/// helper's. Cargo says once a line that two errors share, so the count has a second error for each first place of
+/// `BIG` in `forbidden` and `team`, and of `leaf` in `forbidden`, which each of their two instances writes.
+#[test]
+fn a_kernel_that_raises_a_lint_is_told_of_at_each_place_it_names_a_deprecated_item_at_that_level() -> Result {
+    refuses(
+        "levels_raised",
+        &[
+            "src/lib.rs:44:17: warning: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:45:22: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:46:17: warning: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:48:9: warning: use of deprecated function `cpu::warned::_::touch`",
+            "src/lib.rs:57:17: warning: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:70:14: error: use of deprecated function `cpu::leaf`",
+            "src/lib.rs:65:17: error: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:66:22: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:67:17: error: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:69:9: error: use of deprecated function `cpu::denied::_::touch`",
+            "src/lib.rs:71:14: error: use of deprecated function `cpu::leaf`",
+            "src/lib.rs:80:17: error: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:81:22: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:82:9: error: use of deprecated function `cpu::forbidden::_::touch`",
+            "src/lib.rs:84:14: error: use of deprecated function `cpu::leaf`",
+            "src/lib.rs:83:14: error: use of deprecated function `cpu::leaf`",
+            "src/lib.rs:78:17: error: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:94:17: error: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:95:22: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:96:9: error: use of deprecated function `cpu::team::_::touch`",
+            "src/lib.rs:92:17: error: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:126:42: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:127:17: warning: use of deprecated function `gpu::Kernels::warned::_::old`",
+            "src/lib.rs:135:42: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:136:17: error: use of deprecated function `gpu::Kernels::denied::_::old`",
+            "src/lib.rs:145:42: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:146:17: error: use of deprecated function `gpu::Kernels::forbidden::_::old`",
+            "src/lib.rs:126:29: warning: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:128:29: warning: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:135:29: error: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:137:29: error: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:145:29: error: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:147:29: error: use of deprecated method `gpu::Kernels::COUNTS`",
+            "error: could not compile `levels_raised` (lib) due to 27 previous errors; 9 warnings emitted",
+        ],
+    )?;
+    Ok(())
+}
+
+/// A kernel that lowers a lint, by `warn`, or expects it, is told of at each place its code names a deprecated item,
+/// where the crate denies the lint: of `warned` as a warning at each place, and of `expected` nothing, as each place
+/// meets its expectation, on x86 and on the GPU. So it is of the first place of the static `BIG` in the x86 kernel of
+/// instances `expected` and in the cooperative `once`, an operand of the function of each instance, which allows the
+/// lint the kernel expects: `once` names `BIG` there alone. Of `unmet`, whose code names none, Rust says that its
+/// expectation is unfulfilled, once, at the attribute. `crate_level` sets no level, and each place of it is an error.
+#[test]
+fn a_kernel_that_lowers_a_lint_or_expects_it_is_told_of_at_each_place_it_names_a_deprecated_item_at_that_level()
+-> Result {
+    refuses(
+        "levels_lowered",
+        &[
+            "src/lib.rs:35:22: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:36:26: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:37:9: warning: use of deprecated function `cpu::warned::_::touch`",
+            "src/lib.rs:25:22: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:26:26: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:27:9: error: use of deprecated function `cpu::_::touch`",
+            "src/lib.rs:88:42: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:89:17: error: use of deprecated function `gpu::_::old`",
+            "src/lib.rs:97:42: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:98:17: warning: use of deprecated function `gpu::Kernels::warned::_::old`",
+            "src/lib.rs:88:29: error: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:90:29: error: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:97:29: warning: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:99:29: warning: use of deprecated method `gpu::Kernels::COUNTS`",
+            "src/lib.rs:62:14: warning: this lint expectation is unfulfilled",
+            "src/lib.rs:112:14: warning: this lint expectation is unfulfilled",
+            "error: could not compile `levels_lowered` (lib) due to 7 previous errors; 9 warnings emitted",
+        ],
+    )?;
+    Ok(())
+}
+
+/// The level a helper, or an `extern "ptx-func"` function, sets holds at each place its own code names a deprecated
+/// item, and the level of the kernel that calls it does not reach in. Rust tells of `allows` nothing, though `plain`,
+/// which calls it, sets no level and the crate denies the lint; of `warns` and `warns_bump` as a warning; and of `lets`
+/// at each place, though `quiet`, which calls it, allows the lint: a function and a constant on x86, the static
+/// `COUNTS`, which `quiet` names by an operand too, and on the GPU a function and a helper. Of `expects`, whose places
+/// all meet its expectation, it tells nothing, and of `unmet`, whose code names none, that its expectation is
+/// unfulfilled, once, at the attribute. `gone` is left out by `cfg`, on x86 and on the GPU, and Rust says nothing of
+/// its expectation; nor of the expectation of `alone`, which no kernel calls, on x86 and on the GPU, nor of `hidden`,
+/// which only a kernel that `cfg` leaves out calls: kernite reads a helper's code only where a kernel calls it. Of
+/// `spare`, an `extern "ptx-func"` function that no kernel calls, it says that its expectation is unfulfilled.
+#[test]
+fn the_level_a_helper_sets_holds_at_each_place_in_its_code_and_the_level_of_its_kernel_does_not_reach_in() -> Result {
+    refuses(
+        "levels_helpers",
+        &[
+            "src/lib.rs:33:9: warning: use of deprecated function `cpu::_::touch`",
+            "src/lib.rs:37:9: error: use of deprecated function `cpu::_::touch`",
+            "src/lib.rs:38:22: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:70:17: error: use of deprecated static `cpu::COUNTS`",
+            "src/lib.rs:108:9: warning: use of deprecated function `gpu::_::bump`",
+            "src/lib.rs:143:17: warning: use of deprecated function `gpu::_::old`",
+            "src/lib.rs:149:17: error: use of deprecated function `gpu::_::old`",
+            "src/lib.rs:112:9: error: use of deprecated function `gpu::_::bump`",
+            "src/lib.rs:47:14: warning: this lint expectation is unfulfilled",
+            "src/lib.rs:160:14: warning: this lint expectation is unfulfilled",
+            "src/lib.rs:165:14: warning: this lint expectation is unfulfilled",
+            "error: could not compile `levels_helpers` (lib) due to 5 previous errors; 6 warnings emitted",
+        ],
+    )?;
+    Ok(())
+}
+
+/// Rust cannot hold every level at the naked function of an x86 kernel. The first place a kernel's code names a static
+/// is an operand of the function, which Rust tells of at the kernel's level where the kernel neither allows the lint
+/// nor expects it, whichever helper's code the place is in: `warns_through` is told of the place in the helper `names`
+/// as a warning, though the helper sets no level, and `through` of the place in `allows_names` as an error, though the
+/// helper allows the lint. A plain kernel's function is the naked one, and `expects` is Rust's own error, in its words.
+#[test]
+fn rust_cannot_hold_every_level_at_the_naked_function_of_an_x86_kernel() -> Result {
+    let no_expect = "error[E0736]: attribute incompatible with `#[unsafe(naked)]`: the `expect` attribute is \
+                     incompatible with `#[unsafe(naked)]`";
+    refuses(
+        "levels_limits",
+        &[
+            &format!("src/lib.rs:37:7: {no_expect}"),
+            "src/lib.rs:14:17: warning: use of deprecated static `cpu::BIG`",
+            "src/lib.rs:20:17: error: use of deprecated static `cpu::BIG`",
+            "error: could not compile `levels_limits` (lib) due to 2 previous errors; 1 warning emitted",
+        ],
+    )?;
+    Ok(())
+}
+
+/// A kernel that Rust does not get the code of is told of at the level it sets at each place its code names a
+/// deprecated item, as one it does: `plain` and `tiles` of x86 give back a type with a `_` in it, and `team` of x86 and
+/// the GPU's `tiles` have an instance that does not compile. Each place is a warning though the crate allows the lint,
+/// and Rust says its own error, kernite's or Rust's, beside them.
+#[test]
+fn a_kernel_rust_does_not_get_the_code_of_is_told_of_at_each_place_it_names_a_deprecated_item_at_its_level() -> Result {
+    refuses(
+        "levels_stubs",
+        &[
+            "src/lib.rs:39:22: error: in `team::<300>`: `mov` wants an integer of 8 bits; this is the integer 300",
+            "src/lib.rs:61:30: error: in `tiles::<70000>`: `st.global.u16` wants 16 bits; 70000 does not fit them",
+            "src/lib.rs:19:9: warning: use of deprecated function `cpu::plain::_::touch`",
+            "src/lib.rs:20:22: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:27:9: warning: use of deprecated function `cpu::tiles::_::touch`",
+            "src/lib.rs:28:22: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:37:9: warning: use of deprecated function `cpu::team::_::touch`",
+            "src/lib.rs:38:22: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:59:17: warning: use of deprecated function `gpu::Kernels::tiles::_::old`",
+            "src/lib.rs:60:30: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:18:65: error[E0121]: the placeholder `_` is not allowed within types on item \
+                 signatures for return types: not allowed in type signatures",
+            "src/lib.rs:26:79: error[E0121]: the placeholder `_` is not allowed within types on item \
+                 signatures for return types: not allowed in type signatures",
+            "error: could not compile `levels_stubs` (lib) due to 4 previous errors; 8 warnings emitted",
+        ],
+    )?;
+    Ok(())
+}
+
+/// A static that allows a lint is told of nothing, by Rust, at any place its type or its data names a deprecated item,
+/// though the crate denies the lint: on x86, a static in reach of `rip` and one far from it, and on the GPU, one in
+/// constant memory and one in global memory. So it is of a static whose `allow` is in a `cfg_attr(..)`.
+#[test]
+fn a_static_that_allows_a_lint_is_told_of_nothing_at_any_place_it_names_a_deprecated_item() -> Result {
+    builds_quietly("levels_statics_allowed")?;
+    Ok(())
+}
+
+/// A static that raises a lint, by `warn`, `deny` or `forbid`, is told of at each place its type or its data names a
+/// deprecated item, as a warning or an error though the crate allows the lint: on x86, a static in reach of `rip` and
+/// one far from it, and on the GPU, one in constant memory and one in global memory. `CRATE` sets no level, and Rust
+/// says nothing of it.
+#[test]
+fn a_static_that_raises_a_lint_is_told_of_at_each_place_it_names_a_deprecated_item_at_that_level() -> Result {
+    refuses(
+        "levels_statics_raised",
+        &[
+            "src/lib.rs:20:35: warning: use of deprecated constant `cpu::N`",
+            "src/lib.rs:20:42: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:20:45: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:23:36: error: use of deprecated constant `cpu::N`",
+            "src/lib.rs:23:43: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:23:46: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:26:37: error: use of deprecated constant `cpu::N`",
+            "src/lib.rs:26:44: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:26:47: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:32:34: error: use of deprecated constant `cpu::FAR`",
+            "src/lib.rs:51:38: warning: use of deprecated constant `gpu::N`",
+            "src/lib.rs:51:45: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:51:48: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:54:37: error: use of deprecated constant `gpu::N`",
+            "src/lib.rs:54:44: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:54:47: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:57:40: error: use of deprecated constant `gpu::N`",
+            "src/lib.rs:57:47: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:57:50: error: use of deprecated constant `gpu::K`",
+            "error: could not compile `levels_statics_raised` (lib) due to 13 previous errors; 6 warnings emitted",
+        ],
+    )?;
+    Ok(())
+}
+
+/// A static that lowers a lint, by `warn`, or expects it, is told of at each place its type or its data names a
+/// deprecated item, where the crate denies the lint: `WARNS` as a warning at each place, and `IN_DATA`, `IN_TYPE` and
+/// the far `LONG` nothing, as each meets its expectation, on x86 and on the GPU. Of `UNMET`, whose type and data name
+/// no deprecated item, Rust says that its expectation is unfulfilled, once, at the attribute, and of `GONE`, which
+/// `cfg` leaves out, nothing. `CRATE` sets no level, and each place of it is an error.
+#[test]
+fn a_static_that_lowers_a_lint_or_expects_it_is_told_of_at_each_place_it_names_a_deprecated_item_at_that_level()
+-> Result {
+    refuses(
+        "levels_statics_lowered",
+        &[
+            "src/lib.rs:25:35: warning: use of deprecated constant `cpu::N`",
+            "src/lib.rs:25:42: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:25:45: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:40:35: error: use of deprecated constant `cpu::N`",
+            "src/lib.rs:40:42: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:40:45: error: use of deprecated constant `cpu::K`",
+            "src/lib.rs:80:38: error: use of deprecated constant `gpu::N`",
+            "src/lib.rs:80:45: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:80:48: error: use of deprecated constant `gpu::K`",
+            "src/lib.rs:65:38: warning: use of deprecated constant `gpu::N`",
+            "src/lib.rs:65:45: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:65:48: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:33:14: warning: this lint expectation is unfulfilled",
+            "src/lib.rs:73:14: warning: this lint expectation is unfulfilled",
+            "error: could not compile `levels_statics_lowered` (lib) due to 6 previous errors; 8 warnings emitted",
+        ],
+    )?;
+    Ok(())
+}
+
+/// A static in a crate that lacks the crate it needs, `kernite-cpu` for a static of x86 kernels and `kernite-cuda` for
+/// one in the GPU's memory, is told of at the level it sets, at each place its data names a deprecated item, as it is
+/// in a crate that has the crate: each `WARNS` is two warnings, though the crate allows the lint, beside kernite's
+/// error, which says that the crate needs `kernite-cpu`, at the static, or `kernite-cuda`, at the module.
+#[test]
+fn a_static_in_a_crate_without_the_crate_it_needs_is_told_of_at_each_place_it_names_a_deprecated_item_at_its_level()
+-> Result {
+    let edits = [("kernite-cpu =", "# kernite-cpu ="), ("kernite-cuda =", "# kernite-cuda =")];
+    let (built, said) = cargo_in(&["build"], &edited("levels_statics_missing", &edits)?)?;
+    assert!(!built, "fixtures/levels_statics_missing.rs built");
+    assert_eq!(
+        said,
+        [
+            "src/lib.rs:12:16: error: a static of x86 kernels needs a dependency named `kernite-cpu`, \
+             which this crate does not have",
+            "src/lib.rs:21:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
+             which this crate does not have",
+            "src/lib.rs:12:42: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:12:45: warning: use of deprecated constant `cpu::K`",
+            "src/lib.rs:27:45: warning: use of deprecated constant `gpu::K`",
+            "src/lib.rs:27:48: warning: use of deprecated constant `gpu::K`",
+            "error: could not compile `levels_statics_missing` (lib) due to 2 previous errors; 4 warnings emitted",
+        ]
+    );
+    Ok(())
+}
+
+/// A GPU kernel in a crate that lacks `kernite-cuda` is told of at the level it sets, at each place its code names a
+/// deprecated item, as it is in a crate that has the crate, beside kernite's error, which says that the crate needs
+/// `kernite-cuda`, at the module. The crate denies the lint: `warns` lowers it, so its place is a warning; `allows`
+/// quiets it, and `expects` meets its `expect` with the place, so Rust says nothing of either; `crate_level` sets no
+/// level, so its place is an error; `names_nothing` forbids the lint and names no item, so nothing is written for it,
+/// and its `forbid` is not at the `warn` of the kernel after it; `gone` sets the level of a lint Rust does not know,
+/// and `cfg` leaves it out where it keeps the others, so Rust says nothing of it. Rust tells of the same two places in
+/// a build that has `kernite-cuda`.
+#[test]
+fn a_kernel_in_a_crate_without_kernite_cuda_is_told_of_at_each_place_it_names_a_deprecated_item_at_its_level() -> Result
+{
+    let (warns, crate_level) = (
+        "src/lib.rs:20:30: warning: use of deprecated constant `gpu::K`",
+        "src/lib.rs:34:30: error: use of deprecated constant `gpu::K`",
+    );
+    let (built, said) = cargo_in(&["build"], &written("levels_kernels_missing")?)?;
+    assert!(!built, "fixtures/levels_kernels_missing.rs built");
+    assert_eq!(
+        said,
+        [
+            crate_level,
+            warns,
+            "error: could not compile `levels_kernels_missing` (lib) due to 1 previous error; 1 warning emitted"
+        ]
+    );
+    let dir = edited("levels_kernels_missing", &[("kernite-cuda =", "# kernite-cuda =")])?;
+    let (built, said) = cargo_in(&["build"], &dir)?;
+    assert!(!built, "fixtures/levels_kernels_missing.rs built without kernite-cuda");
+    assert_eq!(
+        said,
+        [
+            "src/lib.rs:8:1: error: a module of GPU kernels needs a dependency named `kernite-cuda`, \
+             which this crate does not have",
+            crate_level,
+            warns,
+            "error: could not compile `levels_kernels_missing` (lib) due to 2 previous errors; 1 warning emitted",
+        ]
+    );
     Ok(())
 }
 
