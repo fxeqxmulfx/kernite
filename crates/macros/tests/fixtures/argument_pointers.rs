@@ -223,14 +223,15 @@ fn a_bool_argument() {
 }
 
 #[test]
-fn a_cooperative_kernel() {
+fn a_cooperative_kernel() -> Result<(), Box<dyn std::error::Error>> {
     let (mut two, mut three) = ([0u8; 2], [0u8; 3]);
     let grid = kernite_cpu::Grid::new(1);
     unsafe {
-        cpu::together::<2>(grid, &mut two).unwrap();
-        cpu::together::<3>(grid, &mut three).unwrap();
+        cpu::together::<2>(grid, &mut two)?;
+        cpu::together::<3>(grid, &mut three)?;
     }
     assert_eq!((two[0], three[0]), (2, 3));
+    Ok(())
 }
 
 #[test]

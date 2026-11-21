@@ -1,13 +1,14 @@
 //! The kernels against the reference, and their listings against `snapshots/`.
 
 use std::fs;
-use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use kernite_cuda::{Buffer, Cuda, Error, Plain, f16};
 
 use crate::{Shape, cpu, floats, gpu, reference, tensor};
+
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
 /// The products the GPU's kernels are held to: the least, none, and of each size up to a few
 /// hundred.
@@ -32,10 +33,10 @@ fn on_gpu<T: Plain>(
     b: &[T],
     (m, n, _): Shape,
     launch: impl FnOnce(&Buffer<f32>, &Buffer<T>, &Buffer<T>) -> Result<(), Error>,
-) -> Vec<f32> {
-    let (a, b, c) = (cuda.upload(a).unwrap(), cuda.upload(b).unwrap(), cuda.alloc(m * n).unwrap());
-    launch(&c, &a, &b).unwrap();
-    c.read().unwrap()
+) -> Result<Vec<f32>> {
+    let (a, b, c) = (cuda.upload(a)?, cuda.upload(b)?, cuda.alloc(m * n)?);
+    launch(&c, &a, &b)?;
+    Ok(c.read()?)
 }
 
 /// The products `cpu::sgemm` is held to: none in each of `m`, `n` and `k`, and the least; then
@@ -61,44 +62,49 @@ fn cpu_shapes() -> Vec<Shape> {
 const THREADS: [usize; 4] = [1, 2, 6, 12];
 
 #[test]
-fn cpu_sgemm_is_the_reference_bit_for_bit() {
-    let counts = cpu::runnable(&THREADS).unwrap();
+fn cpu_sgemm_is_the_reference_bit_for_bit() -> Result {
+    let counts = cpu::runnable(&THREADS)?;
     for shape @ (m, n, k) in cpu_shapes() {
         let (a, b) = (floats(m * k, 1), floats(k * n, 2));
         for &threads in &counts {
             // `c`, then a row and a tile more, which the kernel leaves as they are.
             let mut c = vec![f32::NAN; m * n + n + cpu::kernels::NR];
             let (c, past) = c.split_at_mut(m * n);
-            cpu::sgemm(c, &a, &b, shape, threads).unwrap();
+            cpu::sgemm(c, &a, &b, shape, threads)?;
             same_bits(c, &reference::sgemm(&a, &b, shape), shape);
             assert!(past.iter().all(|x| x.is_nan()), "{shape:?} on {threads} threads: c written past its end");
         }
     }
+    Ok(())
 }
 
 #[test]
-#[should_panic(expected = "c is not 4294967296 rows of 4294967296")]
-fn cpu_sgemm_refuses_a_shape_too_large_to_count() {
-    cpu::sgemm(&mut [], &[], &[], (1 << 32, 1 << 32, 0), 1).unwrap();
+fn cpu_sgemm_refuses_a_shape_too_large_to_count() -> Result {
+    let refused = cpu::sgemm(&mut [], &[], &[], (1 << 32, 1 << 32, 0), 1).err().ok_or("sgemm gave Ok")?;
+    assert_eq!(refused.message, "c is not 4294967296 rows of 4294967296");
+    Ok(())
 }
 
 #[test]
-fn cpu_sgemm_takes_usize_max_rows_of_nothing() {
-    cpu::sgemm(&mut [], &[], &[], (usize::MAX, 0, 0), 1).unwrap();
+fn cpu_sgemm_takes_usize_max_rows_of_nothing() -> Result {
+    cpu::sgemm(&mut [], &[], &[], (usize::MAX, 0, 0), 1)?;
+    Ok(())
 }
 
 #[test]
-fn cpu_runnable_keeps_as_many_threads_as_the_machine_runs_at_once() {
-    let most = kernite_cpu::most().unwrap();
-    assert_eq!(cpu::runnable(&[1, most]).unwrap(), [1, most]);
+fn cpu_runnable_keeps_as_many_threads_as_the_machine_runs_at_once() -> Result {
+    let most = kernite_cpu::most()?;
+    assert_eq!(cpu::runnable(&[1, most])?, [1, most]);
+    Ok(())
 }
 
 #[test]
-fn cpu_sgemm_fails_where_its_grid_cannot_start() {
-    let most = kernite_cpu::most().unwrap();
+fn cpu_sgemm_fails_where_its_grid_cannot_start() -> Result {
+    let most = kernite_cpu::most()?;
     for threads in [0, most + 1] {
         assert!(cpu::sgemm(&mut [0.0], &[1.0], &[1.0], (1, 1, 1), threads).is_err(), "{threads} threads");
     }
+    Ok(())
 }
 
 /// The products the GPU's cores are held to: none in each of `m`, `n` and `k`; then each size the
@@ -119,21 +125,22 @@ fn gpu_shapes() -> Vec<Shape> {
 }
 
 #[test]
-fn gpu_sgemm_is_the_reference_bit_for_bit() {
-    let Some(cuda) = cuda() else { return };
-    let kernels = gpu::kernels::Kernels::load(&cuda).unwrap();
+fn gpu_sgemm_is_the_reference_bit_for_bit() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let kernels = gpu::kernels::Kernels::load(&cuda)?;
     for shape @ (m, n, k) in gpu_shapes() {
         let (a, b) = (floats(m * k, 1), floats(k * n, 2));
         // SAFETY: `on_gpu` keeps the buffers until it reads `c`, which waits for the kernel.
-        let c = on_gpu(&cuda, &a, &b, shape, |c, a, b| unsafe { gpu::launch(&kernels, c, a, b, shape) });
+        let c = on_gpu(&cuda, &a, &b, shape, |c, a, b| unsafe { gpu::launch(&kernels, c, a, b, shape) })?;
         same_bits(&c, &reference::sgemm(&a, &b, shape), shape);
     }
+    Ok(())
 }
 
 #[test]
-fn gpu_sgemm_takes_a_row_of_more_than_65535_blocks() {
-    let Some(cuda) = cuda() else { return };
-    let kernels = gpu::kernels::Kernels::load(&cuda).unwrap();
+fn gpu_sgemm_takes_a_row_of_more_than_65535_blocks() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let kernels = gpu::kernels::Kernels::load(&cuda)?;
     // A row of 65536 blocks is one more than the 65535 that a module written for `sm_20` has
     // along x. There are that many tiles down, then across, in the kernel that loads 16 bytes,
     // `n` and `k` multiples of 4, and in the one that loads 4.
@@ -142,26 +149,28 @@ fn gpu_sgemm_takes_a_row_of_more_than_65535_blocks() {
     for shape @ (m, n, k) in shapes {
         let (a, b) = (floats(m * k, 1), floats(k * n, 2));
         // SAFETY: `on_gpu` keeps the buffers until it reads `c`, which waits for the kernel.
-        let c = on_gpu(&cuda, &a, &b, shape, |c, a, b| unsafe { gpu::launch(&kernels, c, a, b, shape) });
+        let c = on_gpu(&cuda, &a, &b, shape, |c, a, b| unsafe { gpu::launch(&kernels, c, a, b, shape) })?;
         same_bits(&c, &reference::sgemm(&a, &b, shape), shape);
     }
+    Ok(())
 }
 
 #[test]
-fn gpu_sgemm_never_steps_past_k_with_zeros() {
-    let Some(cuda) = cuda() else { return };
-    let kernels = gpu::kernels::Kernels::load(&cuda).unwrap();
+fn gpu_sgemm_never_steps_past_k_with_zeros() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let kernels = gpu::kernels::Kernels::load(&cuda)?;
     // Each product, -1e-30 by 1e-30, is less than the least float, so each chain is -0 at every
     // step: a step of a zero past `k` would make it +0.
     for k in 1..=2 * gpu::kernels::BK + 1 {
         for shape @ (m, n, _) in [(3, 5, k), (3, 8, k)] {
             let (a, b) = (vec![-1e-30; m * k], vec![1e-30; k * n]);
             // SAFETY: `on_gpu` keeps the buffers until it reads `c`, which waits for the kernel.
-            let c = on_gpu(&cuda, &a, &b, shape, |c, a, b| unsafe { gpu::launch(&kernels, c, a, b, shape) });
+            let c = on_gpu(&cuda, &a, &b, shape, |c, a, b| unsafe { gpu::launch(&kernels, c, a, b, shape) })?;
             same_bits(&c, &reference::sgemm(&a, &b, shape), shape);
             assert!(c.iter().all(|x| x.to_bits() == (-0.0f32).to_bits()), "{shape:?}: {c:?}");
         }
     }
+    Ok(())
 }
 
 /// Integers from -8 to 8, of which `k` products, at most 64 each, sum exactly in an `f32` in
@@ -204,49 +213,51 @@ fn hgemm_and_reference(
     cuda: &Cuda,
     kernels: &tensor::kernels::Kernels,
     shape @ (m, n, k): Shape,
-) -> (Vec<f32>, Vec<f32>) {
+) -> Result<(Vec<f32>, Vec<f32>)> {
     let (a, b) = (integers(m * k, 1), integers(k * n, 2));
     let widen = |x: &[f16]| x.iter().map(|h| h.to_f32()).collect::<Vec<_>>();
     // SAFETY: `on_gpu` keeps the buffers until it reads `c`, which waits for the kernel.
-    let c = on_gpu(cuda, &a, &b, shape, |c, a, b| unsafe { tensor::launch(kernels, c, a, b, shape) });
-    (c, reference::sgemm(&widen(&a), &widen(&b), shape))
+    let c = on_gpu(cuda, &a, &b, shape, |c, a, b| unsafe { tensor::launch(kernels, c, a, b, shape) })?;
+    Ok((c, reference::sgemm(&widen(&a), &widen(&b), shape)))
 }
 
 #[test]
-fn hgemm_is_exact_on_integers() {
-    let Some(cuda) = ampere() else { return };
-    let kernels = tensor::kernels::Kernels::load(&cuda).unwrap();
+fn hgemm_is_exact_on_integers() -> Result {
+    let Some(cuda) = ampere() else { return Ok(()) };
+    let kernels = tensor::kernels::Kernels::load(&cuda)?;
     for shape in tensor_shapes() {
-        let (c, want) = hgemm_and_reference(&cuda, &kernels, shape);
+        let (c, want) = hgemm_and_reference(&cuda, &kernels, shape)?;
         same_bits(&c, &want, shape);
     }
+    Ok(())
 }
 
 #[test]
-fn hgemm_is_exact_over_65536_tiles_down_and_across() {
-    let Some(cuda) = ampere() else { return };
-    let kernels = tensor::kernels::Kernels::load(&cuda).unwrap();
+fn hgemm_is_exact_over_65536_tiles_down_and_across() -> Result {
+    let Some(cuda) = ampere() else { return Ok(()) };
+    let kernels = tensor::kernels::Kernels::load(&cuda)?;
     // 65536 tiles, one more than the 65535 that 16 bits hold, the last of them short: a count of
     // blocks, or of tiles down or across, held in 16 bits would be 0.
     use tensor::kernels::{BM, BN};
     for shape in [(65535 * BM + 1, 8, 8), (1, 65535 * BN + 8, 8)] {
-        let (c, want) = hgemm_and_reference(&cuda, &kernels, shape);
+        let (c, want) = hgemm_and_reference(&cuda, &kernels, shape)?;
         same_bits(&c, &want, shape);
     }
+    Ok(())
 }
 
 #[test]
-fn hgemm_refuses_n_and_k_that_are_not_multiples_of_8() {
-    let Some(cuda) = ampere() else { return };
-    let kernels = tensor::kernels::Kernels::load(&cuda).unwrap();
+fn hgemm_refuses_n_and_k_that_are_not_multiples_of_8() -> Result {
+    let Some(cuda) = ampere() else { return Ok(()) };
+    let kernels = tensor::kernels::Kernels::load(&cuda)?;
     for shape @ (m, n, k) in [(1, 7, 8), (1, 8, 7), (1, 9, 16)] {
-        let (c, a, b) =
-            (cuda.alloc::<f32>(m * n).unwrap(), cuda.alloc::<f16>(m * k).unwrap(), cuda.alloc::<f16>(k * n).unwrap());
-        // SAFETY: nothing is launched: `launch` panics before it.
-        let refused = panic::catch_unwind(AssertUnwindSafe(|| unsafe { tensor::launch(&kernels, &c, &a, &b, shape) }));
-        let message = *refused.unwrap_err().downcast::<String>().unwrap();
-        assert_eq!(message, format!("n is {n} and k is {k}: both must be multiples of 8"));
+        let (c, a, b) = (cuda.alloc::<f32>(m * n)?, cuda.alloc::<f16>(m * k)?, cuda.alloc::<f16>(k * n)?);
+        // SAFETY: nothing is launched: `launch` refuses before it.
+        let refused = unsafe { tensor::launch(&kernels, &c, &a, &b, shape) }.err().ok_or("launch gave Ok")?;
+        assert_eq!(refused.call, "cuLaunchKernel");
+        assert_eq!(refused.message, format!("n is {n} and k is {k}: both must be multiples of 8"));
     }
+    Ok(())
 }
 
 /// `ptxas`, if CUDA is here: `$PTXAS`, or on the path, or in a toolkit under `/usr/local`.
@@ -269,25 +280,29 @@ fn ptxas() -> Option<PathBuf> {
 }
 
 #[test]
-fn hgemm_spills_nothing() {
-    let Some(ptxas) = ptxas() else { return eprintln!("no ptxas here: skipped; set PTXAS to run it") };
+fn hgemm_spills_nothing() -> Result {
+    let Some(ptxas) = ptxas() else {
+        eprintln!("no ptxas here: skipped; set PTXAS to run it");
+        return Ok(());
+    };
     let src = std::env::temp_dir().join(format!("matmul-hgemm-{}.ptx", std::process::id()));
-    fs::write(&src, tensor::kernels::PTX).unwrap();
+    fs::write(&src, tensor::kernels::PTX)?;
     let run = Command::new(ptxas).args(["-v", "-arch=sm_80", "-o", "/dev/null"]).arg(&src).output();
     // Before the unwrap and the asserts, so that a ptxas that cannot be run, one that fails, or a
     // spill leaves nothing in the temp dir.
-    fs::remove_file(src).unwrap();
-    let run = run.unwrap();
+    fs::remove_file(src)?;
+    let run = run?;
     let report = String::from_utf8_lossy(&run.stderr);
     assert!(run.status.success(), "{report}");
     assert!(report.contains("0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"), "{report}");
+    Ok(())
 }
 
 /// Each x86 kernel's listing against the one in `snapshots/`, and the GPU kernels' PTX, so that
 /// a change to kernite or to a kernel that moves an instruction shows in review. With
 /// `KERNITE_BLESS=1` the files are written instead, for the diff to be reviewed and committed.
 #[test]
-fn listings_match_their_snapshots() {
+fn listings_match_their_snapshots() -> Result {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("snapshots");
     let bless = std::env::var_os("KERNITE_BLESS").is_some();
     let mut changed = vec![];
@@ -296,11 +311,12 @@ fn listings_match_their_snapshots() {
     for (name, text) in files.chain(ptx) {
         let path = dir.join(&name);
         if bless {
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(&path, text).unwrap();
+            fs::create_dir_all(&dir)?;
+            fs::write(&path, text)?;
         } else if fs::read_to_string(&path).ok().as_deref() != Some(text) {
             changed.push(name);
         }
     }
     assert!(changed.is_empty(), "listings changed: {changed:?}; rerun with KERNITE_BLESS=1 and review the diff");
+    Ok(())
 }

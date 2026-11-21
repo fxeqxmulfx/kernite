@@ -1,6 +1,8 @@
 //! PTX as kernite-build sees it: a machine whose kernels a driver loads as one module.
 
-use kernite_build::{Abi, Assembly, Backend, Called, Device, DeviceStatic, Done, StaticError, Unfinished, abi};
+use kernite_build::{
+    Abi, Assembly, Backend, Called, Device, DeviceStatic, Done, Requirement, StaticError, Unfinished, abi,
+};
 use kernite_lang::{Fn, Memory, Value};
 
 use crate::lang::{Callee, Kernel};
@@ -38,16 +40,20 @@ impl Backend for Ptx {
         Ok(made)
     }
 
+    fn doc(&self, name: &str) -> Option<String> {
+        crate::docs::of(name)
+    }
+
     fn room(&self, statics: &[Static]) -> Vec<Option<String>> {
         crate::room(statics)
     }
 
-    fn callee(&self, g: &Fn) -> Option<Callee> {
+    fn callee(&self, g: &Fn, params: &[String]) -> Option<Callee> {
         match abi(g) {
             Some(Abi::PtxKernel) => Some(Callee::Kernel),
             // One of no prototype says why where it is compiled; a kernel that calls it, that it
             // does not compile.
-            Some(Abi::PtxFunc) => Some(prototype(g).map_or(Callee::Broken, Callee::Calls)),
+            Some(Abi::PtxFunc) => Some(prototype(g, params).map_or(Callee::Broken, Callee::Calls)),
             _ => None,
         }
     }
@@ -69,6 +75,9 @@ impl Backend for Ptx {
         if cooperative {
             kernel.cooperative();
         }
+        if !f.unsafe_fn && abi(f) == Some(Abi::PtxKernel) {
+            kernel.safe();
+        }
         for s in statics {
             kernel.module_memory(s);
         }
@@ -88,7 +97,7 @@ impl Backend for Ptx {
         // undefined for one whose mask leaves lane 0 out.
         if !masks.is_empty() {
             let on = kernite_compile::on_every_path(&code.program, &leaves).map_err(blame)?;
-            if let Some((_, at, message)) = masks.into_iter().find(|&(i, ..)| on[i]) {
+            if let Some((_, at, message)) = masks.into_iter().find(|&(i, ..)| on.get(i) != Some(&false)) {
                 return Err(Unfinished { at: Some(at), message });
             }
         }
@@ -105,23 +114,19 @@ impl Device for Ptx {
         code.program.name.clone()
     }
 
+    fn requires(&self, code: &Entry) -> Vec<Requirement> {
+        code.requires.clone()
+    }
+
     fn device_static(&self, s: &Static) -> DeviceStatic {
-        let host = s.elem.host().expect("a static is of a type the host reads");
         let outside = s.memory.bytes.filter(|_| s.outside).map(|bytes| (bytes, s.memory.align));
-        DeviceStatic { symbol: s.memory.name.clone(), ty: s.declared().into(), host: host.into(), outside }
+        DeviceStatic { symbol: s.memory.name.clone(), ty: s.declared().into(), host: s.host.into(), outside }
     }
 }
 
-/// The prototype of `f`, a function `extern "ptx-func"`, as the kernels that call it see it;
-/// `None` if PTX does not pass one of its types.
-fn prototype(f: &Fn) -> Option<Prototype> {
-    let params: Option<Vec<&str>> = f
-        .params
-        .iter()
-        .map(|p| match &p.ty {
-            kernite_lang::Type::Name(ty, _) => Some(ty.as_str()),
-            _ => None,
-        })
-        .collect();
-    Prototype::of(&params?, f.ret.as_ref().map(|r| r.ty.as_str())).ok()
+/// The prototype of `f`, a function `extern "ptx-func"`, whose parameters are of the types `params`, as the kernels
+/// that call it see it; `None` if PTX does not pass one of its types.
+fn prototype(f: &Fn, params: &[String]) -> Option<Prototype> {
+    let params: Vec<&str> = params.iter().map(String::as_str).collect();
+    Prototype::of(&params, f.ret.as_ref().map(|r| r.ty.as_str())).ok()
 }

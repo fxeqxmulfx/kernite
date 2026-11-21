@@ -5,6 +5,8 @@
 
 use kernite_cuda::{Cuda, Grid, Module, arg};
 
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
 /// `bump`: `x[0] += 1`.
 const BUMP: &str = "
 .version 3.0
@@ -30,9 +32,9 @@ unsafe extern "C" {
 }
 
 #[test]
-fn the_driver_faults_a_kernel_on_a_lent_element_with_a_guard_page_in_its_64_kib() {
-    let Ok(cuda) = Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return };
-    let module = Module::load(&cuda, BUMP, &["bump"], &[]).unwrap();
+fn the_driver_faults_a_kernel_on_a_lent_element_with_a_guard_page_in_its_64_kib() -> Result {
+    let Ok(cuda) = Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
+    let module = Module::load(&cuda, BUMP, &["bump"], &[])?;
     const PAGE: usize = 4096;
     // SAFETY: a mapping of our own, 1 MiB, read and write (3), private and anonymous (0x22).
     let mapping = unsafe { mmap(std::ptr::null_mut(), 1 << 20, 3, 0x22, -1, 0) };
@@ -47,18 +49,22 @@ fn the_driver_faults_a_kernel_on_a_lent_element_with_a_guard_page_in_its_64_kib(
     // SAFETY: a page of the mapping. 102 is MADV_GUARD_INSTALL, which a Linux before 6.13 refuses.
     if unsafe { madvise((element + PAGE) as *mut u8, PAGE, 102) } != 0 {
         eprintln!("no guard pages: skipped");
-        return;
+        return Ok(());
     }
     let lent = match cuda.lend(word) {
         Ok(lent) => lent,
-        Err(e) => return eprintln!("the GPU cannot: skipped. {e}"),
+        Err(e) => {
+            eprintln!("the GPU cannot: skipped. {e}");
+            return Ok(());
+        }
     };
     // SAFETY: `bump` takes a pointer and adds 1 to the word there, which `lent` has. The host holds
     // no slice of it. The launch starts, and the kernel fails on the GPU, which this test is for.
-    unsafe { module.launch(0, Grid::new(1, 1), &[arg(&lent.ptr())]) }.unwrap();
-    let failed = cuda.sync().unwrap_err();
+    unsafe { module.launch(0, Grid::new(1, 1), &[arg(&lent.ptr())]) }?;
+    let failed = cuda.sync().err().ok_or("sync gave Ok")?;
     assert_eq!(failed.message, "CUDA_ERROR_ILLEGAL_ADDRESS (700): an illegal memory access was encountered");
-    assert_eq!(lent.host().unwrap_err(), failed, "every call after it fails the same");
+    assert_eq!(lent.host().err().ok_or("host gave Ok")?, failed, "every call after it fails the same");
     drop(lent);
     assert_eq!(word[0], 7, "the kernel wrote nothing");
+    Ok(())
 }

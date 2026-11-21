@@ -109,13 +109,15 @@ pub mod other {
     use crate::gpu::Kernels;
     use crate::unreadable::same;
 
-    pub fn by_path(x: *mut u32) -> usize {
-        unsafe { crate::cpu::together(kernite_cpu::Grid::new(1), x).unwrap() };
-        crate::cpu::COUNTS.len() + crate::cpu::LISTINGS.len() + unsafe { crate::cpu::step(crate::cpu::STEP) } as usize
+    pub fn by_path(x: *mut u32) -> Result<usize, kernite_cpu::Error> {
+        unsafe { crate::cpu::together(kernite_cpu::Grid::new(1), x)? };
+        Ok(crate::cpu::COUNTS.len()
+            + crate::cpu::LISTINGS.len()
+            + unsafe { crate::cpu::step(crate::cpu::STEP) } as usize)
     }
 
-    pub fn by_use(kernels: &Kernels) -> u32 {
-        kernels.together_blocks(32, 0).unwrap() + unsafe { step(1) + same(1) } as u32
+    pub fn by_use(kernels: &Kernels) -> Result<u32, kernite_cuda::Error> {
+        Ok(kernels.together_blocks(32, 0)? + unsafe { step(1) + same(1) } as u32)
     }
 }
 
@@ -123,10 +125,10 @@ pub mod other {
 pub mod cpu_globbed {
     use crate::cpu::*;
 
-    pub fn all(x: *mut u32) -> u64 {
-        unsafe { together(kernite_cpu::Grid::new(1), x).unwrap() };
+    pub fn all(x: *mut u32) -> Result<u64, kernite_cpu::Error> {
+        unsafe { together(kernite_cpu::Grid::new(1), x)? };
         COUNTS.zero();
-        LISTINGS.len() as u64 + unsafe { step(STEP) + tile::<2>(1) + foreign(1) + Pair(1, 2).0 }
+        Ok(LISTINGS.len() as u64 + unsafe { step(STEP) + tile::<2>(1) + foreign(1) + Pair(1, 2).0 })
     }
 }
 
@@ -141,7 +143,7 @@ pub mod gpu_globbed {
             kernels.tile::<2>(grid, p)?;
             kernels.together(grid, p)?;
         }
-        kernels.COUNTS().write(&[0; 4])?;
+        kernels.COUNTS()?.write(&[0; 4])?;
         let _ = (PTX, Kernels::load);
         kernels.together_blocks(32, 0)
     }

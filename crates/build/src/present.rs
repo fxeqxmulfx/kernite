@@ -34,8 +34,10 @@ pub(crate) enum Refusal<'a> {
     Directive { directive: &'a str, name: &'a str, of: Of },
     /// A function of ABI `abi`, which kernite compiles nothing for.
     UnknownAbi { abi: &'a str },
-    /// A kernel that is not an `unsafe fn`.
-    NotUnsafe,
+    /// An x86 kernel on the threads of a grid that is not an `unsafe fn`.
+    Grid,
+    /// A GPU kernel on the blocks of a grid, which wait for each other, that is not an `unsafe fn`.
+    Blocks,
     /// An item of the module's own named `name`, as a const it takes from module `from` is.
     GivenTwice { name: &'a str, from: &'a str },
 }
@@ -61,7 +63,16 @@ pub(crate) fn said(r: Refusal<'_>, span: Span) -> Error {
             "kernite compiles `extern \"sysv64\"` kernels, for x86-64, and `extern \"ptx-kernel\"` ones, for NVIDIA \
              GPUs, with the `extern \"ptx-func\"` functions they call; `extern \"{abi}\"` is none of these"
         ),
-        Refusal::NotUnsafe => "a kernel trusts the pointers it is given, so it is an `unsafe fn`".to_string(),
+        Refusal::Grid => {
+            "the threads of a grid run at once, and kernite cannot prove that they reach memory apart, so a \
+             `#[cooperative]` kernel is an `unsafe fn`"
+                .to_string()
+        }
+        Refusal::Blocks => {
+            "the blocks of a grid run at once and wait for each other, and kernite cannot prove that they reach memory \
+             apart, so a `#[cooperative]` kernel is an `unsafe fn`"
+                .to_string()
+        }
         Refusal::GivenTwice { name, from } => {
             format!("`{name}` names one of the consts the module takes from `{from}` as well")
         }

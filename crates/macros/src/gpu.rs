@@ -4,13 +4,13 @@
 use proc_macro::{Delimiter, Group, Ident, Span, TokenStream, TokenTree};
 
 use kernite::lang::{self, Fn, Value};
-use kernite::{Compiled, DeviceStatic, Failed, Launcher};
+use kernite::{Compiled, DeviceStatic, Failed, Launcher, Quantity, Requirement, Why};
 
 use crate::cond::Cond;
 use crate::rust::{
-    self, asks, attrs, carried, clashes, depends_on, error_under, filtered, flatten, half, host, hygienic, is_punct,
-    launcher_result, missing, name_at, never, number_type, parse, pick, pointer, primitive, ptr_type, quiet, refused,
-    site, visibility, written_params,
+    self, Written, asks, attrs, carried, clashes, depends_on, error_under, filtered, flatten, half, host, hygienic,
+    is_punct, launcher_result, missing, name_after, name_at, never, number_name, number_type, parse, pick, pointer,
+    primitive, ptr_type, quiet, refused, site, span_of, visibility, within, written_generics, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -22,9 +22,14 @@ const CUDA: &str = "kernite-cuda";
 /// kernite refuses one in a note, the one place where a kernel's source could put one.
 pub(crate) const HOLE: &str = "\0";
 
-/// What a kernel's instance is: its compile-time arguments, none for a kernel that takes
-/// none, and its index among the names the driver is asked for, as an expression of Rust.
-type Launched = (Vec<Value>, String);
+/// What a kernel's instance is: its compile-time arguments, none for a kernel that takes none; its index among the
+/// names the driver is asked for, as an expression of Rust; and what a launch must hold for it, as the expression of
+/// Rust that is a `&[::kernite_cuda::Requirement]`, which is empty for an `unsafe fn`.
+struct Launched {
+    args: Vec<Value>,
+    index: String,
+    requires: String,
+}
 
 /// A static of the GPU's as kernite compiled it; or why it is none, and what stands for it.
 pub(crate) type Laid = Result<Compiled<DeviceStatic>, Failed<DeviceStatic>>;
@@ -104,7 +109,7 @@ pub(crate) fn gpu(
     );
     methods.extend([TokenTree::Group(Group::new(Delimiter::Brace, load))]);
     // The index of the name of symbol `i` among the names that are there.
-    let index = |i: usize| Cond::count(symbols[..i].iter().map(|(c, _)| c));
+    let index = |i: usize| Cond::count(symbols.iter().take(i).map(|(c, _)| c));
     // The errors that follow the `impl`, as items of the module: those of a name that two methods have, and those of
     // a compile-time argument named as a parameter that a method binds for itself.
     let (mut errors, mut clashed) = (TokenStream::new(), TokenStream::new());
@@ -113,7 +118,11 @@ pub(crate) fn gpu(
     for (f, how) in launchers {
         let launched: Option<Vec<Launched>> = match how {
             Launcher::Never => None,
-            Launcher::Of(l) => Some(l.iter().map(|(args, i)| (args.clone(), index(*i))).collect()),
+            Launcher::Of(l) => Some(
+                l.iter()
+                    .map(|l| Launched { args: l.args.clone(), index: index(l.symbol), requires: table(&l.requires) })
+                    .collect(),
+            ),
         };
         // The methods would be under the kernel's `cfg`, and so are their errors.
         let cfg = carried(attrs(f, top), false);
@@ -137,7 +146,7 @@ pub(crate) fn gpu(
     }
     for (k, (s, laid, _)) in memory.iter().enumerate() {
         // Its index among the variables there are, those of the statics that compiled.
-        let i = Cond::count(memory[..k].iter().filter(|(_, m, _)| m.is_ok()).map(|(.., c)| c));
+        let i = Cond::count(memory.iter().take(k).filter(|(_, m, _)| m.is_ok()).map(|(.., c)| c));
         methods.extend(accessor(s, laid, i, top));
     }
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, methods))]);
@@ -146,27 +155,27 @@ pub(crate) fn gpu(
     out
 }
 
-/// The method that gives static `s`'s memory on the GPU, `laid`, by its index `i` among the
-/// module's variables, an expression, as the `kernite_cuda::Global` of the type of Rust's its
-/// elements are read as; or one that never runs, for a static that did not compile: of the type
-/// its elements are read as, if only what the static holds is wrong, and of any type if not. It has the attributes of
-/// the static that [`static_attrs`] says it takes.
+/// The method that gives static `s`'s memory on the GPU, `laid`, by its index `i` among the module's variables, an
+/// expression, as the `kernite_cuda::Global` of the type of Rust's its elements are read as, or the error
+/// `kernite_cuda::Module::global` gives; or one that never runs, for a static that did not compile: of the type its
+/// elements are read as, if only what the static holds is wrong, and of any type if not. It has the attributes of the
+/// static that [`static_attrs`] says it takes.
 fn accessor(s: &lang::Static, laid: &Laid, i: String, top: &[TokenTree]) -> TokenStream {
     let mut out = static_attrs(s, top).0;
-    out.extend(top[s.vis.clone()].iter().cloned());
+    out.extend(within(top, &s.vis).iter().cloned());
     out.extend(parse("fn"));
     // Its name as written, after `static`, where it is but of the macro's span: Rust lints the case
     // of a name the user wrote, and `COUNTS` is the name of a method, not of a static.
-    let mut name = top[s.vis.end + 1].clone();
-    name.set_span(name.span().resolved_at(site()));
-    out.extend([name]);
-    let body = match laid {
-        Ok(_) => format!("self.module.global({i})"),
-        Err(_) => "::core::unreachable!()".to_string(),
-    };
+    out.extend(name_after(&s.vis, top).cloned().map(|mut name| {
+        name.set_span(name.span().resolved_at(site()));
+        name
+    }));
+    // A static that did not compile has no memory of its own, and its method never runs.
+    let i = if laid.is_ok() { i } else { "0".to_string() };
+    let global = |ty: &str| format!("::core::result::Result<::kernite_cuda::Global<'_, {ty}>, ::kernite_cuda::Error>");
     out.extend(parse(&match read(laid) {
-        Some(m) => format!("(&self) -> ::kernite_cuda::Global<'_, {}> {{ {body} }}", primitive(&m.host)),
-        None => format!("<T: ::kernite_cuda::Plain>(&self) -> ::kernite_cuda::Global<'_, T> {{ {body} }}"),
+        Some(m) => format!("(&self) -> {} {{ self.module.global({i}) }}", global(&primitive(&m.host))),
+        None => format!("<T: ::kernite_cuda::Plain>(&self) -> {} {{ self.module.global({i}) }}", global("T")),
     }));
     out
 }
@@ -186,7 +195,7 @@ pub(crate) fn used(item: &lang::Item, laid: &Laid, top: &[TokenTree], span: Span
         return None;
     }
     let mut path = parse("Kernels::");
-    path.extend([name_at(item, top, span)]);
+    path.extend([name_at(item, top, span)?]);
     Some(path)
 }
 
@@ -198,7 +207,7 @@ pub(crate) fn used(item: &lang::Item, laid: &Laid, top: &[TokenTree], span: Span
 /// and `track_caller` for code, and the rest of Rust's for an item of its own. `unsafe(no_mangle)` is `no_mangle`.
 fn static_attrs(s: &lang::Static, top: &[TokenTree]) -> (TokenStream, Vec<(Span, String)>) {
     let mut refused = vec![];
-    let taken = filtered(top[s.attrs.clone()].iter().cloned(), &mut |meta| {
+    let taken = filtered(within(top, &s.attrs).iter().cloned(), &mut |meta| {
         let [first, ..] = &meta[..] else { return None };
         let at = first.span();
         let takes = ["doc", "cfg", "deprecated", "allow", "warn", "deny", "forbid", "expect", "rustfmt"];
@@ -223,7 +232,7 @@ fn static_attrs(s: &lang::Static, top: &[TokenTree]) -> (TokenStream, Vec<(Span,
 /// `cfg` leaves the static out, it says nothing. It says what the static is, by its name as written, `r#type` as well,
 /// and what it takes instead.
 pub(crate) fn refused_attrs(s: &lang::Static, cfg: &TokenStream, top: &[TokenTree]) -> TokenStream {
-    let name = &top[s.vis.end + 1];
+    let Some(name) = name_after(&s.vis, top) else { return TokenStream::new() };
     let said = |(at, attr): (Span, String)| {
         let message = format!(
             "`{name}` is memory on the GPU, which `{attr}` is not for: a static of GPU kernels takes a doc, `cfg`, \
@@ -274,10 +283,12 @@ fn listed<'a>(elements: impl Iterator<Item = (&'a Cond, TokenStream)>) -> TokenT
     TokenTree::Group(Group::new(Delimiter::Bracket, list))
 }
 
-/// The method that launches `f` over a grid, each of its instances `launched`: its parameters
-/// those of `f`, a pointer as the address on the GPU it is, `::kernite_cuda::Ptr`, and a number as
-/// the number and not the name the kernel writes; and its compile-time arguments those of `f`,
-/// which pick the instance. A cooperative kernel is launched cooperatively, every block of its
+/// The method that launches `f` over a grid, each of its instances `launched`: its parameters those of `f`, a number as
+/// the number and not the name the kernel writes; and its compile-time arguments those of `f`, which pick the instance.
+/// An `unsafe fn` kernel's launcher is an `unsafe fn` and takes a pointer as the address on the GPU it is,
+/// `::kernite_cuda::Ptr`; one that is not is safe: it takes the memory a pointer is to, `&impl Memory<T>` for a
+/// `*const T` and `&mut impl MemoryMut<T>` for a `*mut T`, and checks on the host what kernite proved of the kernel,
+/// which a launch must hold, before it launches. A cooperative kernel is launched cooperatively, every block of its
 /// grid at once. The launcher binds `__kernite_grid` for itself, which a parameter of `f` may be named as well; a
 /// compile-time argument may not, and `launched` is `None` for the launcher that never runs, as one of a kernel that
 /// did not compile. Its result is [`launcher_result`]'s.
@@ -290,7 +301,13 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
             blocks_name(f)
         )));
     }
-    if !out.to_string().contains("# Safety") {
+    if !f.unsafe_fn {
+        out.extend(parse(
+            "#[doc = \"\"]\n#[doc = \" The launch is checked first, and is an error that says what does not hold, \
+             with no kernel run: the grid runs its threads along x alone, fewer than 2^32 of them, and the memory it \
+             is lent is as long as the kernel's reads and writes need.\"]",
+        ));
+    } else if !out.to_string().contains("# Safety") {
         out.extend(parse(
             "#[doc = \"\"]\n#[doc = \" # Safety\"]\n#[doc = \"\"]\n\
              #[doc = \" The kernel trusts the pointers it is given: each must be to a buffer or to unified memory \
@@ -305,27 +322,49 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     // tokens come from, and the launcher takes `self` and the grid as well: so it allows that, and
     // a crate of kernels may not forbid `clippy::too_many_arguments`.
     out.extend(parse("#[allow(clippy::too_many_arguments)]"));
-    // Its visibility, then `unsafe fn` and its name and generics as written.
+    // Its visibility, then `fn`, `unsafe` before it for an `unsafe fn`, and its name and generics as written.
     out.extend(visibility(f, top).iter().cloned());
-    out.extend(parse("unsafe fn"));
-    out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
+    out.extend(parse(if f.unsafe_fn { "unsafe fn" } else { "fn" }));
+    out.extend(top.get(f.head.end + 1..f.params_at).unwrap_or_default().iter().cloned());
     let mut params = hygienic("&self, $__kernite_grid: ::kernite_cuda::Grid, ", launched.is_some());
-    let mut args = vec![];
-    for (param, colon) in written_params(f, top) {
-        // Its name, before the colon.
-        let name = &param[colon - 1];
-        params.extend(param[..=colon].iter().cloned());
-        let ty = &param[colon + 1..];
-        match pointer(ty) {
-            Some((_, to)) => {
+    // What the body writes of the parameters: the memory lent for each pointer of a safe kernel, the parameters' names,
+    // the number each is, or how many elements the memory has, and the arguments the driver is given.
+    let (mut lends, mut names, mut values, mut args) = (String::new(), vec![], vec![], vec![]);
+    for (j, Written { head, name, ty }) in written_params(f, top).into_iter().enumerate() {
+        params.extend(head);
+        names.push(format!("{:?}", lang::unraw(&name.to_string())));
+        match pointer(&ty) {
+            Some((_, to)) if f.unsafe_fn => {
                 // Its address, by a cast. A call of `arg` is generic over the type of the pointer, so Rust
                 // would say an error in the type it points to again, at the call.
                 args.push(format!("(&raw const {name}) as *const ::core::ffi::c_void"));
-                params.extend(ptr_type(ty, to));
+                values.push("0".to_string());
+                params.extend(ptr_type(&ty, to));
+            }
+            Some((kind, to)) => {
+                // The memory it is lent, for as long as the launch takes: its address and its elements.
+                let as_mut = kind == "mut";
+                let borrow = if as_mut { "&*" } else { "" };
+                lends += &format!(
+                    "let ($__kernite_p{j}, $__kernite_n{j}) = \
+                     ::kernite_cuda::Memory::lend({borrow}{name}, &self.module)?; "
+                );
+                args.push(format!("::kernite_cuda::arg(&$__kernite_p{j})"));
+                values.push(format!("$__kernite_n{j} as ::core::primitive::i128"));
+                params.extend(parse(if as_mut {
+                    "&mut impl ::kernite_cuda::MemoryMut<"
+                } else {
+                    "&impl ::kernite_cuda::Memory<"
+                }));
+                params.extend(host(to));
+                params.extend(parse(",>"));
             }
             None => {
                 args.push(format!("::kernite_cuda::arg(&{name})"));
-                params.extend(number_type(ty).or_else(|| half(ty)).unwrap_or_else(|| refused(ty)));
+                // A number a condition may be over; a float is none.
+                let integer = number_name(&ty).is_some_and(|n| !n.starts_with('f'));
+                values.push(if integer { format!("{name} as ::core::primitive::i128") } else { "0".to_string() });
+                params.extend(number_type(&ty).or_else(|| half(&ty)).unwrap_or_else(|| refused(&ty)));
             }
         }
         params.extend(parse(","));
@@ -335,8 +374,17 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenSt
     out.extend(launcher_result(f, top, parse("::core::result::Result<(), ::kernite_cuda::Error>")));
     let how = if f.cooperative.is_some() { "launch_cooperative" } else { "launch" };
     let never = format!("{}::core::unreachable!()", never(f, top));
-    out.extend(body(f, launched, top, asks(f, top, host), &never, |index| {
-        format!("unsafe {{ self.module.{how}({index}, $__kernite_grid, &[{}]) }}", args.join(", "))
+    out.extend(body(f, launched, top, asks(f, top, host), &never, |index, requires| {
+        let launch = format!("unsafe {{ self.module.{how}({index}, $__kernite_grid, &[{}]) }}", args.join(", "));
+        if f.unsafe_fn {
+            return launch;
+        }
+        format!(
+            "{lends}::kernite_cuda::holds(&$__kernite_grid, {:?}, &[{}], &[{}], {requires})?; {launch}",
+            f.name,
+            names.join(", "),
+            values.join(", ")
+        )
     }));
     out
 }
@@ -363,15 +411,15 @@ fn blocks(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree]) -> TokenStre
     // where `f` has its own, for an error or a reader to find, but of the macro's span.
     out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("fn"));
-    let name = top[f.head.end + 1].span().resolved_at(site());
+    let name = span_of(name_after(&f.head, top)).resolved_at(site());
     out.extend([TokenTree::Ident(Ident::new(&blocks_name(f), name))]);
-    out.extend(quiet(&top[f.head.end + 2..f.params_at]));
+    out.extend(quiet(written_generics(f, top)));
     out.extend(hygienic(
         "(&self, $__kernite_threads: ::core::primitive::u32, $__kernite_shared: ::core::primitive::u32) \
          -> ::core::result::Result<::core::primitive::u32, ::kernite_cuda::Error>",
         launched.is_some(),
     ));
-    out.extend(body(f, launched, top, TokenStream::new(), "::core::unreachable!()", |index| {
+    out.extend(body(f, launched, top, TokenStream::new(), "::core::unreachable!()", |index, _| {
         format!("self.module.resident({index}, $__kernite_threads, $__kernite_shared)")
     }));
     out
@@ -382,22 +430,63 @@ fn blocks_name(f: &Fn) -> String {
     format!("{}_blocks", f.name)
 }
 
-/// The body of a method of `f`, which does `then` with the index of the instance among
-/// `launched` its compile-time arguments pick, as an expression; or `never`, for a kernel that
-/// did not compile. The `checks` come first.
+/// The body of a method of `f`, which does `then` with the index of the instance among `launched` its compile-time
+/// arguments pick, and what a launch of it must hold, each as an expression; or `never`, for a kernel that did not
+/// compile. The `checks` come first.
 fn body(
     f: &Fn,
     launched: Option<&[Launched]>,
     top: &[TokenTree],
     mut checks: TokenStream,
     never: &str,
-    then: impl std::ops::Fn(&str) -> String,
+    then: impl std::ops::Fn(&str, &str) -> String,
 ) -> TokenStream {
     let body = match launched {
-        Some([(args, i)]) if args.is_empty() => then(i),
-        Some(instances) => then(&pick(f, instances, top)),
+        Some([one]) if one.args.is_empty() => then(&one.index, &one.requires),
+        Some(instances) => {
+            let by = |of: fn(&Launched) -> &String| {
+                let arms: Vec<(Vec<Value>, String)> =
+                    instances.iter().map(|l| (l.args.clone(), of(l).clone())).collect();
+                pick(f, &arms, top)
+            };
+            then(&by(|l| &l.index), &by(|l| &l.requires))
+        }
         None => never.to_string(),
     };
     checks.extend(hygienic(&body, launched.is_some()));
     [TokenTree::Group(Group::new(Delimiter::Brace, checks))].into_iter().collect()
+}
+
+/// What a launch must hold, `requires`, as the expression of Rust that is the `&[::kernite_cuda::Requirement]` the
+/// launcher checks; each a sum of terms, which are a factor and the quantities multiplied by it.
+fn table(requires: &[Requirement]) -> String {
+    if requires.is_empty() {
+        return "&[]".to_string();
+    }
+    let quantity = |q: &Quantity| match q {
+        Quantity::Threads => "::kernite_cuda::Quantity::Threads".to_string(),
+        Quantity::Blocks => "::kernite_cuda::Quantity::Blocks".to_string(),
+        Quantity::Param(i) => format!("::kernite_cuda::Quantity::Param({i})"),
+        Quantity::Len(i) => format!("::kernite_cuda::Quantity::Len({i})"),
+    };
+    let written: Vec<String> = requires
+        .iter()
+        .map(|r| {
+            let terms: Vec<String> = r
+                .terms
+                .iter()
+                .map(|(factor, quantities)| {
+                    let each: Vec<String> = quantities.iter().map(quantity).collect();
+                    format!("({factor}, &[{}])", each.join(", "))
+                })
+                .collect();
+            let why = match r.why {
+                Why::Fits => "Fits".to_string(),
+                Why::Inside(i) => format!("Inside({i})"),
+                Why::Apart(i) => format!("Apart({i})"),
+            };
+            format!("::kernite_cuda::Requirement {{ terms: &[{}], why: ::kernite_cuda::Why::{why} }}", terms.join(", "))
+        })
+        .collect();
+    format!("{{ const __REQUIRES: &[::kernite_cuda::Requirement] = &[{}]; __REQUIRES }}", written.join(", "))
 }

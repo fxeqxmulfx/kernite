@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
 use kernite_cpu::{Grid, launch, most};
 
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
 /// What names the process that runs the body of a test.
 const CHILD: &str = "KERNITE_CPU_CHILD";
 
@@ -20,23 +22,24 @@ fn is_child() -> bool {
 
 /// Runs the test `name` again in a process of its own, where Rust gives a thread `stack` bytes
 /// of stack, and fails if it fails.
-fn again(name: &str, stack: usize) {
-    let out = Command::new(std::env::current_exe().unwrap())
+fn again(name: &str, stack: usize) -> Result {
+    let out = Command::new(std::env::current_exe()?)
         .args(["--exact", name, "--nocapture", "--test-threads=1"])
         .env(CHILD, "1")
         .env("RUST_MIN_STACK", stack.to_string())
-        .output()
-        .unwrap();
+        .output()?;
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success() && text.contains("1 passed"), "{text}");
+    Ok(())
 }
 
 /// A launch of two threads, one of which cannot start, is an error, and no thread has run the
 /// kernel; a launch of one thread, which starts none, still runs.
 #[test]
-fn a_thread_that_cannot_start_is_an_error_and_no_thread_runs_the_kernel() {
-    if most().unwrap() < 2 {
-        return eprintln!("the process runs one thread at once, so no grid starts a thread: skipped");
+fn a_thread_that_cannot_start_is_an_error_and_no_thread_runs_the_kernel() -> Result {
+    if most()? < 2 {
+        eprintln!("the process runs one thread at once, so no grid starts a thread: skipped");
+        return Ok(());
     }
     if !is_child() {
         // More than the address space has: no stack of it can be mapped.
@@ -47,32 +50,33 @@ fn a_thread_that_cannot_start_is_an_error_and_no_thread_runs_the_kernel() {
     let error = launch(Grid::new(2), move |_| {
         into.fetch_add(1, SeqCst);
     })
-    .unwrap_err();
+    .err()
+    .ok_or("launch gave Ok")?;
     assert!(error.message.starts_with("a thread of the grid did not start: "), "{error}");
     assert_eq!(ran.load(SeqCst), 0, "{error}");
     let into = Arc::clone(&ran);
     launch(Grid::new(1), move |_| {
         into.fetch_add(1, SeqCst);
-    })
-    .unwrap();
+    })?;
     assert_eq!(ran.load(SeqCst), 1);
+    Ok(())
 }
 
 /// Every thread of a grid has the stack Rust gives, here 16 MB where it gives 2: a kernel that
 /// takes 8 MB of it runs on each.
 #[test]
-fn a_thread_of_the_grid_has_the_stack_rust_gives() {
+fn a_thread_of_the_grid_has_the_stack_rust_gives() -> Result {
     if !is_child() {
         return again("a_thread_of_the_grid_has_the_stack_rust_gives", 16 << 20);
     }
-    let threads = most().unwrap().min(3);
+    let threads = most()?.min(3);
     let ran = Arc::new(AtomicUsize::new(0));
     let into = Arc::clone(&ran);
     launch(Grid::new(threads), move |_| {
         let mut frame = [0u8; 8 << 20];
         black_box(&mut frame);
         into.fetch_add(1, SeqCst);
-    })
-    .unwrap();
+    })?;
     assert_eq!(ran.load(SeqCst), threads);
+    Ok(())
 }

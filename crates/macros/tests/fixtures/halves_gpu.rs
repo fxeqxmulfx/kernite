@@ -26,36 +26,38 @@ mod tests {
 
     /// Launches `store`, or `store_raw` if `raw`, and gives back the bits of what it wrote and of what it was
     /// given: the half written, the half given, the brain written, the brain given.
-    fn stored(raw: bool) -> Option<[u16; 4]> {
-        let Ok(cuda) = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")) else { return None };
-        let kernels = gpu::Kernels::load(&cuda).unwrap();
-        let (out, other) = (cuda.alloc::<f16>(1).unwrap(), cuda.alloc::<bf16>(1).unwrap());
+    fn stored(raw: bool) -> Result<Option<[u16; 4]>, Box<dyn std::error::Error>> {
+        let Ok(cuda) = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(None) };
+        let kernels = gpu::Kernels::load(&cuda)?;
+        let (out, other) = (cuda.alloc::<f16>(1)?, cuda.alloc::<bf16>(1)?);
         let (half, brain) = (f16::from_f32(1.5), bf16::from_f32(-2.5));
         let grid = Grid::new(1, 1);
         // SAFETY: the kernel writes one half to each buffer, which holds one, and the launch has ended
         // when they are read.
         unsafe {
             if raw {
-                kernels.store_raw(grid, out.ptr(), half, brain, other.ptr()).unwrap();
+                kernels.store_raw(grid, out.ptr(), half, brain, other.ptr())?;
             } else {
-                kernels.store(grid, out.ptr(), half, brain, other.ptr()).unwrap();
+                kernels.store(grid, out.ptr(), half, brain, other.ptr())?;
             }
         }
-        cuda.sync().unwrap();
-        Some([out.read().unwrap()[0].to_bits(), half.to_bits(), other.read().unwrap()[0].to_bits(), brain.to_bits()])
+        cuda.sync()?;
+        Ok(Some([out.read()?[0].to_bits(), half.to_bits(), other.read()?[0].to_bits(), brain.to_bits()]))
     }
 
     #[test]
-    fn a_launcher_takes_the_halves_as_kernite_cuda_has_them() {
-        if let Some([out, half, other, brain]) = stored(false) {
+    fn a_launcher_takes_the_halves_as_kernite_cuda_has_them() -> Result<(), Box<dyn std::error::Error>> {
+        if let Some([out, half, other, brain]) = stored(false)? {
             assert_eq!((out, other), (half, brain));
         }
+        Ok(())
     }
 
     #[test]
-    fn a_launcher_takes_the_halves_written_raw_as_kernite_cuda_has_them() {
-        if let Some([out, half, other, brain]) = stored(true) {
+    fn a_launcher_takes_the_halves_written_raw_as_kernite_cuda_has_them() -> Result<(), Box<dyn std::error::Error>> {
+        if let Some([out, half, other, brain]) = stored(true)? {
             assert_eq!((out, other), (half, brain));
         }
+        Ok(())
     }
 }

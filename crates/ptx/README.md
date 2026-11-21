@@ -14,21 +14,29 @@ use kernite_ptx::lang::Kernel;
 use kernite_ptx::module;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // `pub unsafe extern "ptx-kernel" fn store(out: *mut f32)`, which writes 1.5 to `out`.
+    // `pub extern "ptx-kernel" fn store(out: *mut f32)`, which writes 1.5 to `out`, is a kernel with no `unsafe`:
+    // `safe` has it proved as each instruction comes.
     let mut kernel = Kernel::new("store", "store");
+    kernel.safe();
     let out = kernel.param("out", "*mut f32")?;
     let x = Operand::Var(kernel.var("x", "f32")?);
     let at = Operand::Mem(Mem { base: Some(out), index: None, disp: 0 });
 
     // Each instruction is checked: `st.global.u32` does not store an `f32`.
-    let fault = kernel.inst("st.global.u32", &[at.clone(), x.clone()], None).unwrap_err();
+    let wrong = kernel.inst("st.global.u32", &[at.clone(), x.clone()], None);
+    let fault = wrong.err().ok_or("`st.global.u32` took an `f32`")?;
     assert_eq!(fault.message, "`st.global.u32` wants a `u32` variable; this is an `f32`");
     kernel.inst("mov.f32", &[x.clone(), Operand::F32(1.5)], None)?;
     kernel.inst("st.global.f32", &[at, x], None)?;
     kernel.end()?;
 
+    // A launch is safe on one block of one thread, and a float at `out` to write: three conditions, which the host
+    // checks.
+    let entry = kernel.finish();
+    assert_eq!(entry.requires.len(), 3);
+
     // The module is of the PTX version and for the GPU that its instructions need.
-    let ptx = module(&[kernel.finish()], &[]).whole()?;
+    let ptx = module(&[entry], &[]).whole()?;
     assert!(ptx.contains(".version 3.0\n.target sm_30\n"));
     assert!(ptx.contains("\tmov.f32 %x, 0f3FC00000;\n\tst.global.f32 [%out], %x;\n\tret;\n"));
     Ok(())

@@ -1,4 +1,4 @@
-use crate::operand::{Arg, Label};
+use crate::operand::{Arg, ConstId, Label};
 use crate::reg::{Class, PReg, Register, VReg};
 
 /// Where control goes after an instruction.
@@ -21,6 +21,22 @@ pub enum Flow {
     /// Out of the kernel, with its result where [`Program::results`] puts it; or nowhere, as
     /// after a trap, or a call of a function that never returns.
     Return,
+}
+
+impl Flow {
+    /// The labels control may go to.
+    pub fn labels(&self) -> &[Label] {
+        match self {
+            Flow::Next | Flow::Return => &[],
+            Flow::Jump(l) | Flow::Branch(l) => std::slice::from_ref(l),
+            Flow::Table { to, .. } => to,
+        }
+    }
+
+    /// Whether control may go to the next item.
+    pub fn falls_through(&self) -> bool {
+        !matches!(self, Flow::Jump(_) | Flow::Return | Flow::Table { or_next: false, .. })
+    }
 }
 
 /// What an instruction does to a machine register besides its operands.
@@ -171,8 +187,29 @@ pub struct Program<Op> {
 }
 
 impl<Op> Program<Op> {
-    /// The variable `regs[i]` describes.
-    pub fn vreg(&self, i: usize) -> VReg {
-        VReg { id: i as u32, class: self.regs[i].class }
+    /// The variable `regs[i]` describes; none, if the program has no variable `i`.
+    pub fn vreg(&self, i: usize) -> Option<VReg> {
+        self.regs.get(i).map(|info| VReg { id: i as u32, class: info.class })
+    }
+
+    /// What the source calls variable `v`; nothing, for one the program does not have.
+    pub fn var_name(&self, v: VReg) -> &str {
+        self.regs.get(v.id as usize).map_or("", |r| r.name.as_str())
+    }
+
+    /// The constant of `bytes`, aligned to `align` at least: the one the program has of them, if it has one, else
+    /// a new one.
+    pub fn constant(&mut self, bytes: &[u8], align: u32) -> ConstId {
+        let at = match self.consts.iter_mut().enumerate().find(|(_, c)| c.bytes == bytes) {
+            Some((at, c)) => {
+                c.align = c.align.max(align);
+                at
+            }
+            None => {
+                self.consts.push(Const { bytes: bytes.to_vec(), align });
+                self.consts.len() - 1
+            }
+        };
+        ConstId(at as u32)
     }
 }

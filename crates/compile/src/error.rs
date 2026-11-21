@@ -55,6 +55,14 @@ pub enum Error {
         /// Its register.
         reg: PReg,
     },
+    /// A variable the body names that the allocator gave no register, which it gives each one:
+    /// kernite's own mistake, never the program's.
+    NoRegister {
+        /// The variable.
+        var: String,
+        /// Which it is, of those of its name.
+        vreg: VReg,
+    },
     /// More variables of a file live at once than it has registers, and none of them may
     /// spill to make room, as when one instruction names more than there are: those spilling
     /// made are as short as they can be, and one an instruction writes as it jumps has no
@@ -86,6 +94,7 @@ impl Error {
             Error::ReadBeforeWrite { vreg, .. }
             | Error::FixedTwice { vreg, .. }
             | Error::FixedChanged { vreg, .. }
+            | Error::NoRegister { vreg, .. }
             | Error::OutOfRegisters { vreg, .. }
             | Error::FixedClash { vreg, .. } => Some(*vreg),
             Error::LabelTwice { .. } | Error::NoSuchLabel { .. } | Error::FallsOffEnd => None,
@@ -107,6 +116,7 @@ impl fmt::Display for Error {
             Error::FixedChanged { var, reg, .. } => {
                 write!(f, "`{var}` must be in {reg:?}, which an instruction it is live across changes")
             }
+            Error::NoRegister { var, .. } => write!(f, "`{var}` has no register, which is kernite's own mistake"),
             Error::OutOfRegisters { class, var, near, taken, changed, have, .. } => {
                 write!(f, "no {class:?} register left for `{var}`")?;
                 if let Some(near) = near {

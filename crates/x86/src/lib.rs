@@ -17,13 +17,17 @@
 
 mod asm;
 mod backend;
+mod bounds;
+mod docs;
 pub mod forms;
 mod frame;
 pub mod intel;
 pub mod lang;
 mod op;
 mod operand;
+mod order;
 mod sysv;
+mod widths;
 
 pub use asm::{Asm, Stream};
 pub use backend::X86;

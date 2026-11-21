@@ -120,10 +120,10 @@ mod tests {
     use super::gpu;
 
     /// The GPU and the kernels on it, or none where there is no GPU.
-    fn gpu() -> Option<(Cuda, gpu::Kernels)> {
-        let cuda = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")).ok()?;
-        let kernels = gpu::Kernels::load(&cuda).unwrap();
-        Some((cuda, kernels))
+    fn gpu() -> Result<Option<(Cuda, gpu::Kernels)>, Error> {
+        let Ok(cuda) = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(None) };
+        let kernels = gpu::Kernels::load(&cuda)?;
+        Ok(Some((cuda, kernels)))
     }
 
     /// `blocks` blocks of `threads` threads along x, y and z.
@@ -141,76 +141,79 @@ mod tests {
     }
 
     #[test]
-    fn a_kernel_runs_over_the_blocks_its_directives_allow() {
-        let Some((cuda, k)) = gpu() else { return };
+    fn a_kernel_runs_over_the_blocks_its_directives_allow() -> Result<(), Box<dyn std::error::Error>> {
+        let Some((cuda, k)) = gpu()? else { return Ok(()) };
         // SAFETY: each kernel adds to the count it is given, which lives until the launch has run.
         unsafe {
             // `.maxntid` takes a block of that many threads at most in all, of any shape.
-            assert_eq!(ran(&cuda, |n| k.max_x(grid(3, [256, 1, 1]), n)).unwrap(), 768);
-            assert_eq!(ran(&cuda, |n| k.max_x(grid(3, [1, 1, 1]), n)).unwrap(), 3);
-            assert_eq!(ran(&cuda, |n| k.max_xy(grid(2, [16, 16, 1]), n)).unwrap(), 512);
-            assert_eq!(ran(&cuda, |n| k.max_xy(grid(2, [256, 1, 1]), n)).unwrap(), 512);
-            assert_eq!(ran(&cuda, |n| k.max_xyz(grid(2, [8, 8, 4]), n)).unwrap(), 512);
-            assert_eq!(ran(&cuda, |n| k.max_xyz(grid(2, [4, 4, 16]), n)).unwrap(), 512);
+            assert_eq!(ran(&cuda, |n| k.max_x(grid(3, [256, 1, 1]), n))?, 768);
+            assert_eq!(ran(&cuda, |n| k.max_x(grid(3, [1, 1, 1]), n))?, 3);
+            assert_eq!(ran(&cuda, |n| k.max_xy(grid(2, [16, 16, 1]), n))?, 512);
+            assert_eq!(ran(&cuda, |n| k.max_xy(grid(2, [256, 1, 1]), n))?, 512);
+            assert_eq!(ran(&cuda, |n| k.max_xyz(grid(2, [8, 8, 4]), n))?, 512);
+            assert_eq!(ran(&cuda, |n| k.max_xyz(grid(2, [4, 4, 16]), n))?, 512);
             // `.reqntid` takes a block of its shape.
-            assert_eq!(ran(&cuda, |n| k.req_x(grid(3, [256, 1, 1]), n)).unwrap(), 768);
-            assert_eq!(ran(&cuda, |n| k.req_xy(grid(2, [16, 16, 1]), n)).unwrap(), 512);
-            assert_eq!(ran(&cuda, |n| k.req_xyz(grid(2, [8, 8, 4]), n)).unwrap(), 512);
+            assert_eq!(ran(&cuda, |n| k.req_x(grid(3, [256, 1, 1]), n))?, 768);
+            assert_eq!(ran(&cuda, |n| k.req_xy(grid(2, [16, 16, 1]), n))?, 512);
+            assert_eq!(ran(&cuda, |n| k.req_xyz(grid(2, [8, 8, 4]), n))?, 512);
             // `.minnctapersm` and `.maxnreg` ask for more of the GPU, and launch as the kernel does.
-            assert_eq!(ran(&cuda, |n| k.max_blocks(grid(4, [256, 1, 1]), n)).unwrap(), 1024);
-            assert_eq!(ran(&cuda, |n| k.regs(grid(4, [1024, 1, 1]), n)).unwrap(), 4096);
+            assert_eq!(ran(&cuda, |n| k.max_blocks(grid(4, [256, 1, 1]), n))?, 1024);
+            assert_eq!(ran(&cuda, |n| k.regs(grid(4, [1024, 1, 1]), n))?, 4096);
             // Each instance has the size it is compiled for.
-            assert_eq!(ran(&cuda, |n| k.tile::<64>(grid(3, [64, 1, 1]), n)).unwrap(), 192);
-            assert_eq!(ran(&cuda, |n| k.tile::<128>(grid(3, [128, 1, 1]), n)).unwrap(), 384);
+            assert_eq!(ran(&cuda, |n| k.tile::<64>(grid(3, [64, 1, 1]), n))?, 192);
+            assert_eq!(ran(&cuda, |n| k.tile::<128>(grid(3, [128, 1, 1]), n))?, 384);
         }
+        Ok(())
     }
 
     #[test]
-    fn a_launch_the_directives_refuse_says_the_directive_and_the_threads() {
-        let Some((cuda, k)) = gpu() else { return };
+    fn a_launch_the_directives_refuse_says_the_directive_and_the_threads() -> Result<(), Box<dyn std::error::Error>> {
+        let Some((cuda, k)) = gpu()? else { return Ok(()) };
         // What the driver refuses of a launch, past `CUDA_ERROR_INVALID_VALUE (1): invalid argument`.
-        let refused = |launched: Result<u32, Error>| {
-            let e = launched.unwrap_err();
+        let refused = |launched: Result<u32, Error>| -> Result<String, Box<dyn std::error::Error>> {
+            let e = launched.err().ok_or("a launch the directives refuse gave Ok")?;
             assert_eq!(e.call, "cuLaunchKernel");
             let said = e.message.strip_prefix("CUDA_ERROR_INVALID_VALUE (1): invalid argument: ");
-            said.unwrap_or_else(|| panic!("{e}")).to_string()
+            Ok(said.ok_or_else(|| e.to_string())?.to_string())
         };
         // SAFETY: as above.
         unsafe {
-            let said = refused(ran(&cuda, |n| k.req_x(grid(1, [128, 1, 1]), n)));
+            let said = refused(ran(&cuda, |n| k.req_x(grid(1, [128, 1, 1]), n)))?;
             assert_eq!(said, "each block has 128 threads along x, and the kernel's `.reqntid 256` takes 256 exactly");
-            let said = refused(ran(&cuda, |n| k.max_x(grid(1, [512, 1, 1]), n)));
+            let said = refused(ran(&cuda, |n| k.max_x(grid(1, [512, 1, 1]), n)))?;
             assert_eq!(said, "each block has 512 threads, and the kernel's `.maxntid 256` takes 256 at most");
-            let said = refused(ran(&cuda, |n| k.req_xy(grid(1, [256, 1, 1]), n)));
+            let said = refused(ran(&cuda, |n| k.req_xy(grid(1, [256, 1, 1]), n)))?;
             assert_eq!(said, "each block has 256 threads along x, and the kernel's `.reqntid 16, 16` takes 16 exactly");
-            let said = refused(ran(&cuda, |n| k.max_xyz(grid(1, [16, 16, 2]), n)));
+            let said = refused(ran(&cuda, |n| k.max_xyz(grid(1, [16, 16, 2]), n)))?;
             assert_eq!(said, "each block has 512 threads, and the kernel's `.maxntid 8, 8, 4` takes 256 at most");
-            let said = refused(ran(&cuda, |n| k.tile::<64>(grid(1, [128, 1, 1]), n)));
+            let said = refused(ran(&cuda, |n| k.tile::<64>(grid(1, [128, 1, 1]), n)))?;
             assert_eq!(said, "each block has 128 threads along x, and the kernel's `.reqntid 64` takes 64 exactly");
         }
         // The launches refused did not harm the GPU.
-        cuda.sync().unwrap();
+        cuda.sync()?;
+        Ok(())
     }
 
     /// The name of the kernel in `gpu::PTX` that has `part`, as its `.entry` says it.
-    fn entry(part: &str) -> &'static str {
+    fn entry(part: &str) -> Result<&'static str, String> {
         let mut names = gpu::PTX.lines().filter_map(|l| l.strip_prefix(".visible .entry ")?.strip_suffix('('));
-        names.find(|name| name.contains(part)).unwrap_or_else(|| panic!("no kernel has {part}"))
+        names.find(|name| name.contains(part)).ok_or_else(|| format!("no kernel has {part}"))
     }
 
     /// `gpu::PTX` with the directive `from` of the kernel `name` written `to`, by hand.
-    fn rewritten(name: &str, from: &str, to: &str) -> String {
-        let start = gpu::PTX.find(&format!(".entry {name}(")).unwrap();
-        let end = start + gpu::PTX[start..].find("\n{\n").unwrap();
+    fn rewritten(name: &str, from: &str, to: &str) -> Result<String, String> {
+        let start = gpu::PTX.find(&format!(".entry {name}(")).ok_or_else(|| format!("no kernel is named {name}"))?;
+        let end = start + gpu::PTX[start..].find("\n{\n").ok_or_else(|| format!("the kernel {name} has no body"))?;
         let head = &gpu::PTX[start..end];
         assert_eq!(head.matches(from).count(), 1, "{name} says {from} once");
-        format!("{}{}{}", &gpu::PTX[..start], head.replace(from, to), &gpu::PTX[end..])
+        Ok(format!("{}{}{}", &gpu::PTX[..start], head.replace(from, to), &gpu::PTX[end..]))
     }
 
     #[test]
-    fn a_kernel_at_the_edge_of_the_registers_a_launch_gives_launches_over_its_most_threads() {
-        let Some((cuda, k)) = gpu() else { return };
-        let (x, y) = (cuda.alloc::<f32>(1024 * 250).unwrap(), cuda.alloc::<f32>(1024).unwrap());
+    fn a_kernel_at_the_edge_of_the_registers_a_launch_gives_launches_over_its_most_threads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Some((cuda, k)) = gpu()? else { return Ok(()) };
+        let (x, y) = (cuda.alloc::<f32>(1024 * 250)?, cuda.alloc::<f32>(1024)?);
         let (xs, ys) = (x.ptr(), y.ptr());
         let launched = |threads: u32, launch: &dyn Fn(Grid) -> Result<(), Error>| {
             launch(grid(1, [threads, 1, 1])).and_then(|()| cuda.sync())
@@ -220,12 +223,12 @@ mod tests {
         // SAFETY: each kernel reads `x[i + 1024 j]` for `j` below 250 and writes `y[i]`, for the thread `i`,
         // below 1024; both buffers have room for that.
         unsafe {
-            launched(256, &|g| k.heavy_max::<256, 255>(g, xs, ys)).unwrap();
-            launched(288, &|g| k.heavy_max::<288, 168>(g, xs, ys)).unwrap();
-            launched(384, &|g| k.heavy_max::<384, 168>(g, xs, ys)).unwrap();
-            launched(1000, &|g| k.heavy_max::<1000, 64>(g, xs, ys)).unwrap();
-            launched(256, &|g| k.heavy_req::<256>(g, xs, ys)).unwrap();
-            launched(33, &|g| k.heavy_req::<33>(g, xs, ys)).unwrap();
+            launched(256, &|g| k.heavy_max::<256, 255>(g, xs, ys))?;
+            launched(288, &|g| k.heavy_max::<288, 168>(g, xs, ys))?;
+            launched(384, &|g| k.heavy_max::<384, 168>(g, xs, ys))?;
+            launched(1000, &|g| k.heavy_max::<1000, 64>(g, xs, ys))?;
+            launched(256, &|g| k.heavy_req::<256>(g, xs, ys))?;
+            launched(33, &|g| k.heavy_req::<33>(g, xs, ys))?;
         }
         // The same PTX by hand, with a step more of registers or a thread more, which kernite refuses: the
         // kernel keeps every register it is given, `ptxas` does not lower `.maxnreg` for the threads of a
@@ -238,15 +241,16 @@ mod tests {
             ("heavy_reqILj256EE", ".reqntid 256", ".reqntid 257", 257),
         ];
         for (part, from, to, threads) in past {
-            let name = entry(part);
-            let module = Module::load(&cuda, &rewritten(name, from, to), &[name], &[]).unwrap();
+            let name = entry(part)?;
+            let module = Module::load(&cuda, &rewritten(name, from, to)?, &[name], &[])?;
             // SAFETY: as above.
             let result = unsafe { module.launch(0, grid(1, [threads, 1, 1]), &[arg(&xs), arg(&ys)]) };
-            let e = result.and_then(|()| cuda.sync()).unwrap_err();
+            let e = result.and_then(|()| cuda.sync()).err().ok_or("a launch past what a block may have gave Ok")?;
             assert_eq!(e.call, "cuLaunchKernel", "{part}: {e}");
             assert!(e.message.starts_with("CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES (701)"), "{part} {to}: {e}");
         }
         // The launches that failed did not harm the GPU.
-        cuda.sync().unwrap();
+        cuda.sync()?;
+        Ok(())
     }
 }

@@ -8,12 +8,13 @@ mod tests {
 
     /// The kernel writes the first byte of each static and the byte 1 on, which the host reads back.
     #[test]
-    fn a_kernel_of_a_dylib_writes_its_statics_and_the_host_reads_them_back() {
+    fn a_kernel_of_a_dylib_writes_its_statics_and_the_host_reads_them_back() -> Result<(), Box<dyn std::error::Error>> {
         // SAFETY: `ends` writes only the memory of its module, which nothing else touches.
         unsafe { ends(1) };
         assert_eq!((NEAR.len(), &NEAR.read()[..3]), (4096, &[7, 9, 0][..]));
         // SAFETY: Each address is in a static, which lives for the whole program, of atomics the kernel wrote.
-        let at = |i: usize| unsafe { *BIG.at(i) };
-        assert_eq!((BIG.len(), [at(0), at(1), at(2)]), (3221225472, [7, 9, 0]));
+        let at = |i: usize| BIG.at(i).map(|p| unsafe { *p }).ok_or("at gave None");
+        assert_eq!((BIG.len(), [at(0)?, at(1)?, at(2)?]), (3221225472, [7, 9, 0]));
+        Ok(())
     }
 }

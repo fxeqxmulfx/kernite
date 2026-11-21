@@ -177,7 +177,7 @@ struct Barrier {
     generation: AtomicU64,
 }
 
-/// Why a grid did not run.
+/// Why a grid did not run, or why memory of a module's was not read or written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     /// What went wrong.
@@ -306,7 +306,11 @@ pub fn launch(grid: Grid<'_>, kernel: impl Fn(&Place) + Send + Sync + 'static) -
         Some(on) => put_on(&mut team, caller, on),
         None => put_anywhere(&mut team, caller, threads - 1),
     });
-    let ended = ready.map(|()| run_on(&team[..threads - 1], threads, kernel));
+    // A team that has a thread gone is no more: the next launch starts another.
+    let ended = ready.and_then(|()| {
+        let others = team.get(..threads - 1).ok_or_else(|| gone(()));
+        others.and_then(|others| run_on(others, threads, kernel)).inspect_err(|_| team.clear())
+    });
     KEPT.set(team);
     match ended? {
         Ok(()) => Ok(()),
@@ -315,22 +319,28 @@ pub fn launch(grid: Grid<'_>, kernel: impl Fn(&Place) + Send + Sync + 'static) -
 }
 
 /// Runs `kernel` as thread 0 on the caller's thread, and as the others on `others`, and says how
-/// they ended once all have.
-fn run_on(others: &[Worker], threads: usize, kernel: impl Fn(&Place) + Send + Sync + 'static) -> thread::Result<()> {
+/// they ended once all have; or that a thread of the grid is gone.
+fn run_on(
+    others: &[Worker],
+    threads: usize,
+    kernel: impl Fn(&Place) + Send + Sync + 'static,
+) -> Result<thread::Result<()>, Error> {
     let launch: Arc<Launch> = Arc::new(Launch { threads: threads as u64, barrier: Barrier::default(), kernel });
     for worker in others {
-        worker.jobs.send(Some(Arc::clone(&launch))).expect(GONE);
+        worker.jobs.send(Some(Arc::clone(&launch))).map_err(gone)?;
     }
     let mut ended = launch.run(0);
     for worker in others {
-        ended = ended.and(wait(&worker.done, || false).expect(GONE));
+        ended = ended.and(wait(&worker.done, || false).map_err(gone)?);
     }
-    ended
+    Ok(ended)
 }
 
 /// What a launch says if a thread of its grid has ended, which a panic in the kernel does not
 /// make it do: the thread catches that.
-const GONE: &str = "a thread of the grid ended before its launch did";
+fn gone<E>(_: E) -> Error {
+    Error { message: "a thread of the grid ended before its launch did".into() }
+}
 
 /// What every thread of a launch shares: the kernel, and what its places hold.
 struct Launch<K: ?Sized = dyn Fn(&Place) + Send + Sync> {
@@ -362,15 +372,17 @@ struct Placed {
 /// not there, and starts the threads the grid needs that none has, each on its CPU. The CPUs are
 /// checked first, unless the last launch gave the same, and an error from the check moves nothing.
 fn put_on(team: &mut Vec<Worker>, caller: &mut Option<Placed>, on: &[usize]) -> Result<(), Error> {
+    // A grid has a thread at least, which `launch` sees to, and the caller's is the first.
+    let [first, others @ ..] = on else { return Ok(()) };
     match caller {
         Some(placed) => {
             let same = placed.on == on;
             if !same {
                 checked(on, &placed.home)?;
             }
-            rest(team, Some(placed.on[0]), on);
-            if placed.on[0] != on[0] {
-                move_caller(on[0])?;
+            rest(team, placed.on.first().copied(), on);
+            if placed.on.first() != Some(first) {
+                move_caller(*first)?;
             }
             if !same {
                 on.clone_into(&mut placed.on);
@@ -380,14 +392,14 @@ fn put_on(team: &mut Vec<Worker>, caller: &mut Option<Placed>, on: &[usize]) -> 
             let home = mask()?;
             checked(on, &home)?;
             rest(team, None, on);
-            move_caller(on[0])?;
+            move_caller(*first)?;
             *caller = Some(Placed { on: on.to_vec(), home });
         }
     }
-    for (worker, &cpu) in team.iter_mut().zip(&on[1..]) {
+    for (worker, &cpu) in team.iter_mut().zip(others) {
         worker.go_to(cpu)?;
     }
-    start(team, on.len() - 1, Some(on))
+    start(team, others.len(), Some(on))
 }
 
 /// Before any thread moves, ends the spin of each kept thread that a thread would wait for on its
@@ -454,11 +466,11 @@ fn move_caller(cpu: usize) -> Result<(), Error> {
 fn start(team: &mut Vec<Worker>, workers: usize, on: Option<&[usize]>) -> Result<(), Error> {
     while team.len() < workers {
         let t = team.len() + 1;
-        let started = Worker::start(t as u64, on.map(|on| on[0]));
+        let started = Worker::start(t as u64, on.and_then(|on| on.first().copied()));
         let mut worker = started.map_err(|e| Error { message: format!("a thread of the grid did not start: {e}") })?;
-        if let Some(on) = on {
-            worker.go_to(on[t])?;
-            worker.jobs.send(None).expect(GONE);
+        if let Some(&cpu) = on.and_then(|on| on.get(t)) {
+            worker.go_to(cpu)?;
+            worker.jobs.send(None).map_err(gone)?;
         }
         team.push(worker);
     }
@@ -562,119 +574,129 @@ mod tests {
     use std::mem::{align_of, offset_of, size_of};
     use std::panic;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+    use std::sync::{Arc, Mutex, PoisonError, mpsc};
     use std::thread;
     use std::time::{Duration, Instant};
 
     use super::{Barrier, Cpus, Grid, Place, SPIN, Worker, checked, cpus, launch, most, put_on, rest};
 
+    type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
     #[test]
-    fn each_thread_runs_the_kernel_once_given_its_place() {
-        for threads in 1..=most().unwrap().min(4) {
+    fn each_thread_runs_the_kernel_once_given_its_place() -> Result {
+        for threads in 1..=most()?.min(4) {
             let seen = Arc::new(Mutex::new(vec![]));
             let into = Arc::clone(&seen);
-            launch(Grid::new(threads), move |place| into.lock().unwrap().push((place.thread(), place.threads())))
-                .unwrap();
-            let mut seen = seen.lock().unwrap().clone();
+            launch(Grid::new(threads), move |place| {
+                into.lock().unwrap_or_else(PoisonError::into_inner).push((place.thread(), place.threads()))
+            })?;
+            let mut seen = seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
             seen.sort();
             let want: Vec<(u64, u64)> = (0..threads as u64).map(|t| (t, threads as u64)).collect();
             assert_eq!(seen, want);
         }
+        Ok(())
     }
 
     /// A thread of the grid is named by its place, as a profiler or a debugger lists threads,
     /// in the launches after the first as in it; the caller's keeps its own name.
     #[test]
-    fn a_thread_of_the_grid_is_named_by_its_place() {
-        let threads = most().unwrap().min(4);
+    fn a_thread_of_the_grid_is_named_by_its_place() -> Result {
+        let threads = most()?.min(4);
         let caller = thread::current().name().map(String::from);
         for _ in 0..3 {
             let named = Arc::new(Mutex::new(vec![]));
             let into = Arc::clone(&named);
             launch(Grid::new(threads), move |place| {
-                into.lock().unwrap().push((place.thread(), thread::current().name().map(String::from)));
-            })
-            .unwrap();
-            let mut named = named.lock().unwrap().clone();
+                into.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push((place.thread(), thread::current().name().map(String::from)));
+            })?;
+            let mut named = named.lock().unwrap_or_else(PoisonError::into_inner).clone();
             named.sort();
             let want: Vec<(u64, Option<String>)> = (0..threads as u64)
                 .map(|t| (t, if t == 0 { caller.clone() } else { Some(format!("grid thread {t}")) }))
                 .collect();
             assert_eq!(named, want);
         }
+        Ok(())
     }
 
     /// The caller's thread is the grid's first, and the launch returns once every thread has
     /// ended: the others take a while, and each has run when it does.
     #[test]
-    fn the_callers_thread_is_the_first_and_the_launch_returns_when_all_have_ended() {
+    fn the_callers_thread_is_the_first_and_the_launch_returns_when_all_have_ended() -> Result {
         let caller = thread::current().id();
-        let threads = most().unwrap().min(4);
+        let threads = most()?.min(4);
         let ran = Arc::new(Mutex::new(vec![]));
         let into = Arc::clone(&ran);
         launch(Grid::new(threads), move |place| {
             if place.thread() > 0 {
                 thread::sleep(Duration::from_millis(20));
             }
-            into.lock().unwrap().push((place.thread(), thread::current().id() == caller));
-        })
-        .unwrap();
-        let mut ran = ran.lock().unwrap().clone();
+            into.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((place.thread(), thread::current().id() == caller));
+        })?;
+        let mut ran = ran.lock().unwrap_or_else(PoisonError::into_inner).clone();
         ran.sort();
         let want: Vec<(u64, bool)> = (0..threads as u64).map(|t| (t, t == 0)).collect();
         assert_eq!(ran, want);
+        Ok(())
     }
 
     #[test]
-    fn a_grid_has_one_thread_to_as_many_as_the_process_runs_at_once() {
-        let most = most().unwrap();
-        let never = |_: &Place| panic!("no thread runs");
+    fn a_grid_has_one_thread_to_as_many_as_the_process_runs_at_once() -> Result {
+        let most = most()?;
+        let never = |_: &Place| {};
         assert_eq!(
-            launch(Grid::new(0), never).unwrap_err().message,
+            launch(Grid::new(0), never).err().ok_or("launch gave Ok")?.message,
             "a grid has one thread at least, and this has none"
         );
         assert_eq!(
-            launch(Grid::new(most + 1), never).unwrap_err().message,
+            launch(Grid::new(most + 1), never).err().ok_or("launch gave Ok")?.message,
             format!(
                 "the grid has {} threads, and the process runs {most} at once: the CPUs the caller's thread may run \
                  on, or fewer where a cgroup limits the process to fewer",
                 most + 1
             )
         );
+        Ok(())
     }
 
     /// Two launches at once, from two threads, each have all their threads running: every
     /// thread of both waits for all of both, which none could if a launch waited for the other
     /// to end, or ran on the other's threads.
     #[test]
-    fn launches_from_two_threads_at_once_run_at_once_each_on_threads_of_its_own() {
-        let threads = most().unwrap().min(3);
+    fn launches_from_two_threads_at_once_run_at_once_each_on_threads_of_its_own() -> Result {
+        let threads = most()?.min(3);
         let meet = Arc::new(std::sync::Barrier::new(2 * threads));
         let ids = Arc::new(Mutex::new(vec![]));
         let callers: Vec<_> = Vec::from_fn(2, |_| {
             let (meet, ids) = (Arc::clone(&meet), Arc::clone(&ids));
-            thread::spawn(move || {
+            thread::spawn(move || -> Result {
                 launch(Grid::new(threads), move |_| {
                     meet.wait();
-                    ids.lock().unwrap().push(thread::current().id());
-                })
-                .unwrap();
+                    ids.lock().unwrap_or_else(PoisonError::into_inner).push(thread::current().id());
+                })?;
+                Ok(())
             })
         });
         for caller in callers {
-            caller.join().unwrap();
+            caller.join().map_err(|_| "a thread panicked")??;
         }
-        let ids = ids.lock().unwrap();
+        let ids = ids.lock().unwrap_or_else(PoisonError::into_inner);
         assert_eq!(ids.len(), 2 * threads);
         assert!(ids.iter().enumerate().all(|(i, id)| !ids[i + 1..].contains(id)), "{ids:?}");
+        Ok(())
     }
 
     /// A thread of the grid that panics ends the launch, once all have, as a panic in the
     /// caller with the payload it was given; the threads run the next launch as before.
     #[test]
-    fn a_panic_in_a_thread_of_the_grid_ends_the_launch_in_the_caller() {
-        let threads = most().unwrap().min(3);
+    fn a_panic_in_a_thread_of_the_grid_ends_the_launch_in_the_caller() -> Result {
+        let threads = most()?.min(3);
         let last = threads as u64 - 1;
         // `resume_unwind` panics without the message a hook would print.
         let launched = panic::catch_unwind(|| {
@@ -684,13 +706,17 @@ mod tests {
                 }
             })
         });
-        assert_eq!(*launched.unwrap_err().downcast::<&str>().unwrap(), "the last thread panics");
+        let payload = launched.err().ok_or("launched gave Ok")?;
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"the last thread panics"));
         let ran = Arc::new(Mutex::new(vec![]));
         let into = Arc::clone(&ran);
-        launch(Grid::new(threads), move |place| into.lock().unwrap().push(place.thread())).unwrap();
-        let mut ran = ran.lock().unwrap().clone();
+        launch(Grid::new(threads), move |place| {
+            into.lock().unwrap_or_else(PoisonError::into_inner).push(place.thread())
+        })?;
+        let mut ran = ran.lock().unwrap_or_else(PoisonError::into_inner).clone();
         ran.sort();
         assert_eq!(ran, (0..threads as u64).collect::<Vec<_>>());
+        Ok(())
     }
 
     /// A launch of the placement the launch before it gave checks nothing again, and a launch of
@@ -700,64 +726,68 @@ mod tests {
     /// is not checked again, so it passes, and any other is, so it fails and leaves the note as it
     /// was.
     #[test]
-    fn a_launch_of_the_placement_the_launch_before_gave_checks_nothing_again() {
-        let all = cpus().unwrap();
+    fn a_launch_of_the_placement_the_launch_before_gave_checks_nothing_again() -> Result {
+        let all = cpus()?;
         if all.len() < 2 {
-            return eprintln!("the thread may run on one CPU: skipped");
+            eprintln!("the thread may run on one CPU: skipped");
+            return Ok(());
         }
         let (first, second) = ([all[0], all[1]], [all[1], all[0]]);
         let (mut team, mut caller) = (Vec::new(), None);
-        put_on(&mut team, &mut caller, &first).unwrap();
-        assert_eq!(caller.as_ref().unwrap().on, first);
-        put_on(&mut team, &mut caller, &second).unwrap();
-        assert_eq!(caller.as_ref().unwrap().on, second);
+        put_on(&mut team, &mut caller, &first)?;
+        assert_eq!(caller.as_ref().ok_or("as_ref gave None")?.on, first);
+        put_on(&mut team, &mut caller, &second)?;
+        assert_eq!(caller.as_ref().ok_or("as_ref gave None")?.on, second);
         let none_fits = all[1] + 1;
-        caller.as_mut().unwrap().home = Cpus::one(none_fits);
+        caller.as_mut().ok_or("as_mut gave None")?.home = Cpus::one(none_fits);
         assert_eq!(put_on(&mut team, &mut caller, &second), Ok(()));
         let message = format!(
             "thread 0 of the grid is placed on CPU {}, and the caller's thread may run on CPUs {none_fits}",
             first[0]
         );
-        assert_eq!(put_on(&mut team, &mut caller, &first).unwrap_err().message, message);
-        assert_eq!(caller.unwrap().on, second);
+        assert_eq!(put_on(&mut team, &mut caller, &first).err().ok_or("put_on gave Ok")?.message, message);
+        assert_eq!(caller.ok_or("caller gave None")?.on, second);
+        Ok(())
     }
 
     /// Asserts that `work` on 1024 threads takes less than 8 times as long as on 256: 4 times if it
     /// grows as its threads do, 16 if it grows as their square. Each is the quickest of many tries,
     /// which other work on the machine slows the same.
-    fn assert_grows_as_threads_do(what: &str, work: impl Fn(usize)) {
-        let quickest = |threads: usize| {
+    fn assert_grows_as_threads_do(what: &str, work: impl Fn(usize)) -> Result {
+        let quickest = |threads: usize| -> Result<_> {
             let tries = (0..100).map(|_| {
                 let began = Instant::now();
                 work(threads);
                 began.elapsed()
             });
-            tries.min().unwrap()
+            Ok(tries.min().ok_or("min gave None")?)
         };
-        let (few, many) = (quickest(256), quickest(1024));
+        let (few, many) = (quickest(256)?, quickest(1024)?);
         assert!(many < 8 * few, "{what} took {few:?} on 256 threads and {many:?} on 1024");
+        Ok(())
     }
 
     /// A placement of many CPUs is checked in time that grows as its threads do, not as their
     /// square.
     #[test]
-    fn a_placement_is_checked_in_time_that_grows_as_its_threads_do() {
+    fn a_placement_is_checked_in_time_that_grows_as_its_threads_do() -> Result {
         let on: Vec<usize> = (0..1024).collect();
         let mut home = Cpus::empty();
         on.iter().for_each(|&cpu| _ = home.insert(cpu));
         assert_grows_as_threads_do("the check", |threads| {
-            black_box(checked(black_box(&on[..threads]), &home)).unwrap();
-        });
+            assert_eq!(black_box(checked(black_box(&on[..threads]), &home)), Ok(()));
+        })?;
+        Ok(())
     }
 
     /// The check stops at the first thread it refuses, for a CPU the caller's thread may not run
     /// on or for one taken, and for a CPU taken it names the thread that had it first and the one
     /// that has it again.
     #[test]
-    fn the_check_names_the_two_threads_given_one_cpu() {
+    fn the_check_names_the_two_threads_given_one_cpu() -> Result {
         let mut home = Cpus::empty();
         (0..8).for_each(|cpu| _ = home.insert(cpu));
-        let said = |on: &[usize]| checked(on, &home).unwrap_err().message;
+        let said = |on: &[usize]| -> Result<_> { Ok(checked(on, &home).err().ok_or("checked gave Ok")?.message) };
         let twice = |other, t, cpu| {
             format!(
                 "threads {other} and {t} of the grid are both placed on CPU {cpu}, and a thread that waits needs a CPU \
@@ -768,13 +798,14 @@ mod tests {
             format!("thread {t} of the grid is placed on CPU {cpu}, and the caller's thread may run on CPUs 0-7")
         };
         assert_eq!(checked(&[7, 0, 3, 5], &home), Ok(()));
-        assert_eq!(said(&[3, 5, 3]), twice(0, 2, 3));
-        assert_eq!(said(&[1, 2, 3, 2]), twice(1, 3, 2));
-        assert_eq!(said(&[4, 5, 6, 5, 4, 6]), twice(1, 3, 5));
-        assert_eq!(said(&[2, 2, 2]), twice(0, 1, 2));
-        assert_eq!(said(&[1, 8, 1]), outside(1, 8));
-        assert_eq!(said(&[1, 1, 8]), twice(0, 1, 1));
-        assert_eq!(said(&[8, 8]), outside(0, 8));
+        assert_eq!(said(&[3, 5, 3])?, twice(0, 2, 3));
+        assert_eq!(said(&[1, 2, 3, 2])?, twice(1, 3, 2));
+        assert_eq!(said(&[4, 5, 6, 5, 4, 6])?, twice(1, 3, 5));
+        assert_eq!(said(&[2, 2, 2])?, twice(0, 1, 2));
+        assert_eq!(said(&[1, 8, 1])?, outside(1, 8));
+        assert_eq!(said(&[1, 1, 8])?, twice(0, 1, 1));
+        assert_eq!(said(&[8, 8])?, outside(0, 8));
+        Ok(())
     }
 
     /// The directory in `/proc/self/task` of the thread of this process named `name`, if there is
@@ -782,7 +813,8 @@ mod tests {
     fn task_named(name: &str) -> Option<PathBuf> {
         let tasks = fs::read_dir("/proc/self/task").ok()?;
         tasks
-            .map(|task| task.unwrap().path())
+            .flatten()
+            .map(|task| task.path())
             .find(|task| fs::read_to_string(task.join("comm")).is_ok_and(|comm| comm.trim_end() == name))
     }
 
@@ -794,9 +826,9 @@ mod tests {
     }
 
     /// For how long the thread has used the CPU, as Linux counts it; exact for a thread that sleeps.
-    fn used(task: &Path) -> Duration {
-        let schedstat = fs::read_to_string(task.join("schedstat")).unwrap();
-        Duration::from_nanos(schedstat.split_whitespace().next().unwrap().parse().unwrap())
+    fn used(task: &Path) -> Result<Duration> {
+        let schedstat = fs::read_to_string(task.join("schedstat"))?;
+        Ok(Duration::from_nanos(schedstat.split_whitespace().next().ok_or("next gave None")?.parse()?))
     }
 
     /// A thread started where the caller's thread is on one CPU sleeps, and uses no more CPU than
@@ -805,10 +837,10 @@ mod tests {
     /// Other work on the machine keeps a thread from running, never from sleeping, so the test
     /// looks at the least CPU a thread used before it was told and the most after, in a few threads.
     #[test]
-    fn a_thread_started_for_a_placed_grid_sleeps_until_it_is_told_and_then_spins() {
+    fn a_thread_started_for_a_placed_grid_sleeps_until_it_is_told_and_then_spins() -> Result {
         let (mut least_before, mut most_after) = (Duration::MAX, Duration::ZERO);
         for t in 70..90 {
-            let worker = Worker::start(t, Some(0)).unwrap();
+            let worker = Worker::start(t, Some(0))?;
             let name = format!("grid thread {t}");
             let deadline = Instant::now() + Duration::from_secs(5);
             let task = loop {
@@ -822,19 +854,20 @@ mod tests {
             };
             // Longer than a spin: a thread that spun would have used its `SPIN` by now.
             thread::sleep(4 * SPIN);
-            let before = used(&task);
+            let before = used(&task)?;
             assert!(asleep(&task), "{name} does not sleep, though it has not been told");
             least_before = least_before.min(before);
-            worker.jobs.send(None).unwrap();
+            worker.jobs.send(None)?;
             thread::sleep(4 * SPIN);
             while !asleep(&task) {
                 assert!(Instant::now() < deadline, "{name} does not sleep in 5 s after it spun");
                 thread::sleep(SPIN);
             }
-            most_after = most_after.max(used(&task) - before);
+            most_after = most_after.max(used(&task)? - before);
         }
         assert!(least_before < SPIN / 2, "no thread slept as it started: the least CPU one used was {least_before:?}");
         assert!(most_after > SPIN / 2, "no thread spun when told: the most CPU one used was {most_after:?}");
+        Ok(())
     }
 
     /// A kept thread placed on `at`, as `rest` reads one: its CPU and its flag. A `Worker` holds
@@ -845,21 +878,52 @@ mod tests {
         Worker { jobs, done, thread: thread::spawn(|| {}), at: Some(at), rest: Arc::new(AtomicBool::new(false)) }
     }
 
+    /// A thread of the team that is gone, which a panic in the kernel does not make a thread, ends the launch
+    /// as an error, before any thread runs the kernel; and the team is no more, so the launch after starts
+    /// one, and runs.
+    #[test]
+    fn a_thread_that_is_gone_ends_the_launch_in_an_error_and_the_next_launch_starts_afresh() -> Result {
+        if most()? < 2 {
+            eprintln!("the process runs one thread at once: skipped");
+            return Ok(());
+        }
+        let (jobs, _) = mpsc::channel();
+        let (_, done) = mpsc::channel();
+        let gone =
+            Worker { jobs, done, thread: thread::spawn(|| {}), at: None, rest: Arc::new(AtomicBool::new(false)) };
+        super::KEPT.set(vec![gone]);
+        let ran = Arc::new(AtomicU64::new(0));
+        let into = Arc::clone(&ran);
+        let refused = launch(Grid::new(2), move |_| {
+            into.fetch_add(1, Relaxed);
+        });
+        let refused = refused.err().ok_or("launch gave Ok")?;
+        assert_eq!(refused.message, "a thread of the grid ended before its launch did");
+        assert_eq!(ran.load(Relaxed), 0);
+        let into = Arc::clone(&ran);
+        launch(Grid::new(2), move |_| {
+            into.fetch_add(1, Relaxed);
+        })?;
+        assert_eq!(ran.load(Relaxed), 2);
+        Ok(())
+    }
+
     /// A launch that moves two threads ends the spins it must in time that grows as the grid's
     /// threads do, not as their square. The team is 1023 threads on CPUs 1 to 1023, but for threads
     /// 1 and 2, which are on each other's. A launch of 256 threads puts them back, and so does one
     /// of 1024: each ends the spin of those two threads, and of no other.
     #[test]
-    fn a_launch_that_moves_threads_ends_the_spins_in_time_that_grows_as_the_threads_do() {
+    fn a_launch_that_moves_threads_ends_the_spins_in_time_that_grows_as_the_threads_do() -> Result {
         let on: Vec<usize> = (0..1024).collect();
         let mut before = on.clone();
         before.swap(1, 2);
         let team: Vec<Worker> = before[1..].iter().map(|&cpu| placed(cpu)).collect();
         assert_grows_as_threads_do("the end of the spins", |threads| {
             rest(&team[..threads - 1], Some(0), &on[..threads]);
-        });
+        })?;
         let ended: Vec<usize> = (0..team.len()).filter(|&i| team[i].rest.load(Relaxed)).collect();
         assert_eq!(ended, [0, 1]);
+        Ok(())
     }
 
     /// The words of a place and of the barrier where kernite-x86 reads them, the barrier a cache

@@ -1,7 +1,7 @@
 //! Intel syntax, as `naked_asm!` reads it.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
+use std::fmt;
 
 use kernite_compile::{Allocated, Frame};
 use kernite_core::{Base, Class, Const, Item, Label, Mem, Operand, PReg, Signature, Width};
@@ -27,8 +27,8 @@ pub struct Listing {
     pub name: String,
     /// What it takes and gives.
     pub signature: Signature,
-    /// The CPU features past x86-64's own its instructions need, by name, which nothing
-    /// checks for when it runs.
+    /// The CPU features past x86-64's own its instructions need, and those of each function it may call, by name, which
+    /// nothing checks for when it runs.
     pub features: Vec<Feature>,
     /// The code, prologue and epilogues included. Constant `i`'s address reads `{ci}`, for
     /// the operand of `naked_asm!` that names it.
@@ -49,9 +49,14 @@ pub struct Listing {
     pub regs: Vec<(String, String)>,
     /// The frame.
     pub frame: Frame,
-    /// Bytes the prologue moves the stack pointer down besides the frame's, so that a kernel
-    /// that calls calls at a multiple of 16, as SysV asks.
+    /// Bytes of the frame besides its slots, so that a kernel that calls calls at a multiple of 16, as SysV asks, and a
+    /// frame aligned to 16 lies at one.
     pub padding: u32,
+    /// How many bytes of the frame lie below the stack pointer, in the red zone, which SysV lets a function use without
+    /// moving the stack pointer: a kernel that calls nothing keeps up to 128 bytes of a frame aligned to 16 or less
+    /// there, the frame's size and `padding` counted. A slot is at its offset in `frame` from as far below the stack
+    /// pointer as that.
+    pub below: u32,
     /// Whether control returns: whether the kernel has a `ret`, though a jump to a callee may stand for it. One with
     /// none never returns.
     pub returns: bool,
@@ -62,6 +67,11 @@ pub struct Listing {
     /// Whether its code runs `vzeroupper`, which clears the upper half of each vector register: a call of it leaves the
     /// lower halves of those it does not write as they were.
     pub clears_upper: bool,
+    /// Whether a call of it may run SSE code, which pays for an upper half set: its code calls a function it does not
+    /// know, or one that may, with no ymm passed or given back, for such a callee runs AVX instructions. It does not
+    /// clear an upper half that its caller set before that call, so a kernel that calls it has `vzeroupper` before the
+    /// call where it may have set one.
+    pub reaches_sse: bool,
 }
 
 impl Listing {
@@ -72,13 +82,14 @@ impl Listing {
             Line::Note(_) => None,
         })
     }
+}
 
+impl fmt::Display for Listing {
     /// Everything, for people and for snapshot files: the signature, the CPU features it
     /// needs, the frame and where each of its slots is, a variable that spilled among them,
     /// where each variable lives, the code with its notes, the functions it names, and the
     /// constants' bytes.
-    pub fn text(&self) -> String {
-        let mut out = String::new();
+    fn fmt(&self, out: &mut fmt::Formatter) -> fmt::Result {
         let class = |c: &Class| match c {
             Class::Gpr => "gpr",
             Class::Vec => "vec",
@@ -90,15 +101,18 @@ impl Listing {
             true => self.signature.result.as_ref().map_or("()", class),
             false => "!",
         };
-        writeln!(out, "# {}({}) -> {}", self.name, params.join(", "), result).unwrap();
+        writeln!(out, "# {}({}) -> {}", self.name, params.join(", "), result)?;
         if !self.features.is_empty() {
             let features: Vec<_> = self.features.iter().map(|f| f.name()).collect();
-            writeln!(out, "# needs: {}", features.join(", ")).unwrap();
+            writeln!(out, "# needs: {}", features.join(", "))?;
         }
-        let saved: Vec<_> = self.frame.saved.iter().map(|&r| name(r, Width::W64)).collect();
-        let padded = match self.padding {
-            0 => String::new(),
-            n => format!(", and {n} more so that it calls at a multiple of 16"),
+        // A general-purpose register has a name at 64 bits, as the frame's do.
+        let gpr64 = |r: PReg| name(r, Width::W64).unwrap_or_default();
+        let saved: Vec<_> = self.frame.saved.iter().map(|&r| gpr64(r)).collect();
+        let padded = match (self.padding, self.frame.align) {
+            (0, _) => String::new(),
+            (n, 16) => format!(", and {n} more so that it is aligned to 16"),
+            (n, _) => format!(", and {n} more so that it calls at a multiple of 16"),
         };
         writeln!(
             out,
@@ -106,13 +120,12 @@ impl Listing {
             self.frame.size,
             self.frame.align,
             saved.join(", ")
-        )
-        .unwrap();
+        )?;
+        let from = -i64::from(self.below);
         for (slot, &at) in self.frame.slots.iter().zip(&self.frame.offsets) {
-            let sp = name(RSP, Width::W64);
-            let at = if at == 0 { sp } else { format!("{sp} + {at}") };
+            let at = format!("{}{}", gpr64(RSP), displacement(from + i64::from(at)));
             let spilled = if slot.spill { ", spilled" } else { "" };
-            writeln!(out, "# {}{spilled}: {} at {at}", slot.name, crate::bytes(slot.size.into())).unwrap();
+            writeln!(out, "# {}{spilled}: {} at {at}", slot.name, crate::bytes(slot.size.into()))?;
         }
         // A name the kernel gives many variables, one per place it writes one, shows once
         // with every register those got.
@@ -126,27 +139,35 @@ impl Listing {
         }
         for chunk in names.chunks(6) {
             let pairs: Vec<_> = chunk.iter().map(|(v, r)| format!("{v}={}", r.join(","))).collect();
-            writeln!(out, "# {}", pairs.join(" ")).unwrap();
+            writeln!(out, "# {}", pairs.join(" "))?;
         }
         for line in &self.lines {
             match line {
-                Line::Code(code) if code.ends_with(':') => writeln!(out, "{code}"),
-                Line::Code(code) => writeln!(out, "    {code}"),
-                Line::Note(note) => writeln!(out, "    # {note}"),
+                Line::Code(code) if code.ends_with(':') => writeln!(out, "{code}")?,
+                Line::Code(code) => writeln!(out, "    {code}")?,
+                Line::Note(note) => writeln!(out, "    # {note}")?,
             }
-            .unwrap();
         }
         for (i, f) in self.funcs.iter().enumerate() {
-            writeln!(out, "# f{i}: {f}").unwrap();
+            writeln!(out, "# f{i}: {f}")?;
         }
         for (i, c) in self.consts.iter().enumerate() {
-            writeln!(out, "# c{i}, aligned to {}:", c.align).unwrap();
+            writeln!(out, "# c{i}, aligned to {}:", c.align)?;
             for row in c.bytes.chunks(16) {
                 let bytes: Vec<_> = row.iter().map(|b| format!("{b:02x}")).collect();
-                writeln!(out, "#   {}", bytes.join(" ")).unwrap();
+                writeln!(out, "#   {}", bytes.join(" "))?;
             }
         }
-        out
+        Ok(())
+    }
+}
+
+/// A displacement as an address has it after the register: ` + 8`, ` - 8`, or nothing for 0.
+fn displacement(disp: i64) -> String {
+    match disp {
+        0 => String::new(),
+        d if d > 0 => format!(" + {d}"),
+        d => format!(" - {}", -d),
     }
 }
 
@@ -160,8 +181,9 @@ pub fn taken(name: &str) -> bool {
 /// `c` in Intel syntax, with the frame set up on entry and taken down before every `ret`, and
 /// a note before each store of a variable that spilled and each load of it back. A kernel that
 /// calls has its stack pointer at a multiple of 16 for each call; a move of all 64 bits, or all 256, into a register
-/// that holds the value already changes nothing, and is left out where the code after the last label shows it does. Or
-/// why not: a frame past what an address reaches.
+/// that holds the value already changes nothing, and is left out where the code after the last label shows it does. The
+/// part of a frame in the red zone is neither set up nor taken down. Or why not: a frame past what an address
+/// reaches.
 ///
 /// Labels become local numbers, in the order they are placed, which `naked_asm!` asks for so
 /// that the same code can be emitted twice. Numbers made of ones and zeros alone are skipped:
@@ -170,6 +192,7 @@ pub fn taken(name: &str) -> bool {
 /// `reach` is what a call at an address may reach, which `c` does not name: the listing keeps it.
 pub fn print(c: &Allocated<Op>, reach: Vec<String>) -> Result<Listing, String> {
     let lowered = frame::lower(c)?;
+    let from = -i64::from(lowered.below);
     let mut numbers = BTreeMap::new();
     let mut places = BTreeMap::new();
     let mut next = 2;
@@ -183,12 +206,10 @@ pub fn print(c: &Allocated<Op>, reach: Vec<String>) -> Result<Listing, String> {
             next += 1;
         }
     }
-    let lines = lowered
-        .body
-        .iter()
-        .enumerate()
-        .map(|(i, item)| match item {
-            Item::Label(l) => Line::Code(format!("{}:", numbers[l])),
+    let mut lines = Vec::with_capacity(lowered.body.len());
+    for (i, item) in lowered.body.iter().enumerate() {
+        lines.push(match item {
+            Item::Label(l) => Line::Code(format!("{}:", number(&numbers, *l)?)),
             Item::Note(note) => Line::Note(note.clone()),
             Item::Inst(inst) => {
                 // A gather's vector of indices is among the operands it does not write out, at
@@ -199,18 +220,17 @@ pub fn print(c: &Allocated<Op>, reach: Vec<String>) -> Result<Listing, String> {
                         _ => None,
                     })
                 };
-                let operands: Vec<String> = inst
-                    .args
-                    .iter()
-                    .map(|a| match a.operand {
-                        Operand::Reg(r, w) => name(r, w),
-                        Operand::Mem(m) => memory(&m, c, inst.op != Op::Lea, vector_index(&m)),
+                let mut operands: Vec<String> = Vec::with_capacity(inst.args.len());
+                for a in &inst.args {
+                    operands.push(match a.operand {
+                        Operand::Reg(r, w) => name(r, w)?,
+                        Operand::Mem(m) => memory(&m, c, from, inst.op != Op::Lea, vector_index(&m))?,
                         Operand::Imm(imm) if imm.hex => format!("{:#04x}", imm.value),
                         Operand::Imm(imm) => imm.value.to_string(),
-                        Operand::Label(l) => jump_target(l, i, &numbers, &places),
+                        Operand::Label(l) => jump_target(l, i, &numbers, &places)?,
                         Operand::Func(f) => format!("{{f{}}}", f.0),
-                    })
-                    .collect();
+                    });
+                }
                 let mnemonic = inst.op.mnemonic();
                 Line::Code(if operands.is_empty() {
                     mnemonic.to_string()
@@ -218,8 +238,14 @@ pub fn print(c: &Allocated<Op>, reach: Vec<String>) -> Result<Listing, String> {
                     format!("{mnemonic} {}", operands.join(", "))
                 })
             }
-        })
-        .collect();
+        });
+    }
+    let mut regs = vec![];
+    for (info, r) in &c.assignment {
+        if let Some(r) = *r {
+            regs.push((info.name.clone(), name(r, full(r.class)?)?));
+        }
+    }
     Ok(Listing {
         name: c.name.clone(),
         signature: c.signature.clone(),
@@ -229,34 +255,43 @@ pub fn print(c: &Allocated<Op>, reach: Vec<String>) -> Result<Listing, String> {
         funcs: c.funcs.clone(),
         reach,
         statics: c.statics.clone(),
-        regs: c
-            .assignment
-            .iter()
-            .filter_map(|(info, r)| r.map(|r| (info.name.clone(), name(r, full(r.class)))))
-            .collect(),
+        regs,
         frame: c.frame.clone(),
         padding: lowered.padding,
+        below: lowered.below,
         returns: lowered.returns,
         changes: lowered.changes,
         clears_upper: lowered.clears_upper,
+        reaches_sse: lowered.reaches_sse,
     })
 }
 
-fn jump_target(l: Label, from: usize, numbers: &BTreeMap<Label, u32>, places: &BTreeMap<Label, usize>) -> String {
-    let way = if places[&l] < from { 'b' } else { 'f' };
-    format!("{}{way}", numbers[&l])
+/// The number local label `l` has, or why none: a jump to a label never placed.
+fn number(numbers: &BTreeMap<Label, u32>, l: Label) -> Result<u32, String> {
+    numbers.get(&l).copied().ok_or_else(|| format!("a jump goes to label {}, which is never placed", l.0))
 }
 
-fn full(class: Class) -> Width {
+fn jump_target(
+    l: Label,
+    from: usize,
+    numbers: &BTreeMap<Label, u32>,
+    places: &BTreeMap<Label, usize>,
+) -> Result<String, String> {
+    let way = if places.get(&l).is_some_and(|&at| at < from) { 'b' } else { 'f' };
+    Ok(format!("{}{way}", number(numbers, l)?))
+}
+
+/// The widest view of a register of `class`, or why it has none.
+fn full(class: Class) -> Result<Width, String> {
     match class {
-        Class::Gpr => Width::W64,
-        Class::Vec => Width::W256,
-        Class::Pred | Class::Float => unreachable!("x86 has no {class:?} registers"),
+        Class::Gpr => Ok(Width::W64),
+        Class::Vec => Ok(Width::W256),
+        Class::Pred | Class::Float => Err(format!("x86 has no {class:?} registers")),
     }
 }
 
-/// A register's name at a width.
-fn name(r: PReg, width: Width) -> String {
+/// A register's name at a width, or why it has none: the file has no such view of it.
+fn name(r: PReg, width: Width) -> Result<String, String> {
     const GPR64: [&str; 16] =
         ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"];
     const GPR32: [&str; 16] = [
@@ -269,48 +304,63 @@ fn name(r: PReg, width: Width) -> String {
         "al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b",
         "r15b",
     ];
-    let hw = r.hw as usize;
-    match (r.class, width) {
-        (Class::Gpr, Width::W64) => GPR64[hw].to_string(),
-        (Class::Gpr, Width::W32) => GPR32[hw].to_string(),
-        (Class::Gpr, Width::W16) => GPR16[hw].to_string(),
-        (Class::Gpr, Width::W8) => GPR8[hw].to_string(),
-        (Class::Vec, Width::W128) => format!("xmm{hw}"),
-        (Class::Vec, Width::W256) => format!("ymm{hw}"),
-        (class, width) => panic!("no {width:?} view of a {class:?} register"),
-    }
+    let hw = usize::from(r.hw);
+    let names = match (r.class, width) {
+        (Class::Gpr, Width::W64) => GPR64,
+        (Class::Gpr, Width::W32) => GPR32,
+        (Class::Gpr, Width::W16) => GPR16,
+        (Class::Gpr, Width::W8) => GPR8,
+        (Class::Vec, Width::W128) => return Ok(format!("xmm{hw}")),
+        (Class::Vec, Width::W256) => return Ok(format!("ymm{hw}")),
+        (class, width) => return Err(format!("no {width:?} view of a {class:?} register")),
+    };
+    names
+        .get(hw)
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("x86 has {} gprs, so none is numbered {hw}", names.len()))
 }
 
-/// A memory operand; `sized` puts the access's size in front, which every instruction but
-/// `lea` wants. `vector_index` is the width of its vector of indices, if it is at one.
-///
-/// # Panics
-///
-/// If its index is a vector of no width given, which whoever built the instruction left out.
-fn memory(m: &Mem<PReg>, c: &Allocated<Op>, sized: bool, vector_index: Option<Width>) -> String {
+/// What the program has numbered `at`, or why it has none: an address names what the program does not hold.
+fn numbered<'a, T>(items: &'a [T], at: u32, what: &str) -> Result<&'a T, String> {
+    items.get(at as usize).ok_or_else(|| format!("an address is of {what} {at}, and the program has {}", items.len()))
+}
+
+/// A memory operand; a slot's address is its offset in the frame from `from` past the stack pointer, which is as far
+/// below it as the frame's `below`. `sized` puts the access's size in front, which every instruction but `lea` wants.
+/// `vector_index` is the width of its vector of indices, if it is at one; an index that is a vector of no width given,
+/// which whoever built the instruction left out, is an error.
+fn memory(
+    m: &Mem<PReg>,
+    c: &Allocated<Op>,
+    from: i64,
+    sized: bool,
+    vector_index: Option<Width>,
+) -> Result<String, String> {
     let (mut text, disp) = match m.base {
         Base::None => (String::new(), i64::from(m.disp)),
-        Base::Reg(r) => (name(r, Width::W64), i64::from(m.disp)),
-        Base::Slot(s) => (name(RSP, Width::W64), i64::from(m.disp) + i64::from(c.frame.offsets[s.0 as usize])),
+        Base::Reg(r) => (name(r, Width::W64)?, i64::from(m.disp)),
+        Base::Slot(s) => {
+            let offset = *numbered(&c.frame.offsets, s.0, "slot")?;
+            (name(RSP, Width::W64)?, i64::from(m.disp) + from + i64::from(offset))
+        }
         Base::Const(k) => (format!("rip + {{c{}}}", k.0), i64::from(m.disp)),
         Base::Func(f) => (format!("rip + {{f{}}}", f.0), i64::from(m.disp)),
-        Base::Static(s) => (format!("rip + {{{}}}", c.statics[s.0 as usize]), i64::from(m.disp)),
+        Base::Static(s) => (format!("rip + {{{}}}", numbered(&c.statics, s.0, "static")?), i64::from(m.disp)),
     };
     if let Some((r, scale)) = m.index {
-        let width = match r.class {
-            Class::Vec => vector_index.expect("a vector of indices among the operands an instruction reads unwritten"),
+        let width = match (r.class, vector_index) {
+            (Class::Vec, Some(width)) => width,
+            (Class::Vec, None) => {
+                return Err("a vector of indices among the operands an instruction reads unwritten".into());
+            }
             _ => Width::W64,
         };
         let plus = if text.is_empty() { "" } else { " + " };
-        write!(text, "{plus}{}*{scale}", name(r, width)).unwrap();
+        text += &format!("{plus}{}*{scale}", name(r, width)?);
     }
-    match disp {
-        0 => {}
-        d if d > 0 => write!(text, " + {d}").unwrap(),
-        d => write!(text, " - {}", -d).unwrap(),
-    }
+    text += &displacement(disp);
     if !sized {
-        return format!("[{text}]");
+        return Ok(format!("[{text}]"));
     }
     let size = match m.width {
         Width::W8 => "byte",
@@ -320,5 +370,5 @@ fn memory(m: &Mem<PReg>, c: &Allocated<Op>, sized: bool, vector_index: Option<Wi
         Width::W128 => "xmmword",
         Width::W256 => "ymmword",
     };
-    format!("{size} ptr [{text}]")
+    Ok(format!("{size} ptr [{text}]"))
 }

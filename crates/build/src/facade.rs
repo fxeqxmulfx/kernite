@@ -3,8 +3,7 @@
 
 use kernite_lang::{Error, ItemKind, Module};
 
-use crate::classify::{abi_or_error, attributes, helper, named, trusted};
-use crate::present::{Refusal, said};
+use crate::classify::{abi_or_error, attributes, helper, must_be_unsafe, named};
 use crate::{Abi, Compiled, Device, Native, abi, compile, instance, owner, prepare};
 
 /// Why a name names no instance of a function the process runs, for [`one`] to compile.
@@ -99,8 +98,8 @@ fn rules(module: &Module) -> Result<(), Error> {
             }
             continue;
         };
-        if !trusted(f, abi) {
-            return Err(said(Refusal::NotUnsafe, f.span));
+        if let Some(e) = must_be_unsafe(f, abi) {
+            return Err(e);
         }
         attributes(f)?;
         kernite_lang::instances(module, f)?;

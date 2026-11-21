@@ -37,6 +37,19 @@ missing_docs = "warn"
 [workspace.lints.clippy]
 # Iteration order must never reach the output: same program, same bytes.
 disallowed_types = "deny"
+# No code of kernite calls `unwrap` or `expect`, or panics by a macro: what can fail says so in its type, and `?` passes
+# it on. A test fails by `assert!`, `assert_eq!`, `assert_ne!` or the error it returns, and no other code asserts:
+# `crates/kernite/tests/architecture.rs` checks that, as clippy has no lint for it.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+# No index or slice panics either: `get`, an iterator or a pattern says what is there. A test may index, as
+# `clippy.toml` says.
+indexing_slicing = "deny"
+string_slice = "deny"
 
 [profile.release]
 codegen-units = 1

@@ -5,7 +5,7 @@ use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
 
 use kernite::{Kept, When};
 
-use crate::rust::{attrs_len, flatten, inner_attribute, is_error, is_punct, named, parse};
+use crate::rust::{attrs_of, flatten, inner_attribute, is_error, is_punct, named, parse};
 
 /// When something the macro writes is there: always, never, or when a predicate of `cfg` holds,
 /// `feature = "cuda"`. The macro does not evaluate a predicate; it writes it for Rust to.
@@ -26,9 +26,9 @@ impl Cond {
     /// item with none.
     pub(crate) fn of(cfg: &TokenStream) -> Cond {
         let attrs: Vec<TokenTree> = cfg.clone().into_iter().collect();
-        Cond::all(attrs.chunks(2).filter_map(|attr| {
-            let [_, TokenTree::Group(meta)] = attr else { unreachable!("an attribute is `#` and brackets") };
-            predicate(&flatten(meta.stream())).map(Cond::If)
+        Cond::all(attrs.chunks(2).filter_map(|attr| match attr {
+            [_, TokenTree::Group(meta)] => predicate(&flatten(meta.stream())).map(Cond::If),
+            _ => None,
         }))
     }
 
@@ -40,20 +40,20 @@ impl Cond {
         let tokens: Vec<TokenTree> = module.clone().into_iter().collect();
         let ends =
             |t: &TokenTree| is_punct(t, ';') || matches!(t, TokenTree::Group(g) if g.delimiter() == Delimiter::Brace);
-        let (mut found, mut attrs, mut start, mut i) = (vec![], TokenStream::new(), true, 0);
-        while i < tokens.len() {
-            let (rest, n) = (&tokens[i..], attrs_len(&tokens[i..]));
+        let (mut found, mut attrs, mut start, mut rest) = (vec![], TokenStream::new(), true, tokens.as_slice());
+        while let [first, after @ ..] = rest {
+            let (these, tail) = attrs_of(rest);
             if start && inner_attribute(rest) {
-                i += 3;
-            } else if start && n > 0 {
-                attrs.extend(rest[..n].iter().cloned());
-                i += n;
+                rest = rest.get(3..).unwrap_or_default();
+            } else if start && !these.is_empty() {
+                attrs.extend(these.iter().cloned());
+                rest = tail;
             } else {
                 if start && is_error(rest) {
                     found.push(Cond::of(&attrs));
                 }
-                (attrs, start) = (TokenStream::new(), ends(&tokens[i]));
-                i += 1;
+                (attrs, start) = (TokenStream::new(), ends(first));
+                rest = after;
             }
         }
         Cond::any(found)
@@ -175,16 +175,16 @@ fn predicate(meta: &[TokenTree]) -> Option<TokenStream> {
         return Some(tokens.into_iter().collect());
     }
     let mut parts = tokens.split(|t| is_punct(t, ','));
-    let when: TokenStream = parts.next().expect("a split has a first part").iter().cloned().collect();
+    let when: TokenStream = parts.next().into_iter().flatten().cloned().collect();
     let then: Vec<TokenStream> = parts.filter_map(predicate).collect();
     (!then.is_empty()).then(|| call("any", vec![call("not", vec![when]), join("all", then)]))
 }
 
 /// `name(parts)` for a predicate's `all` or `any`, or the part alone where there is one.
-fn join(name: &str, mut parts: Vec<TokenStream>) -> TokenStream {
-    match parts.len() {
-        1 => parts.remove(0),
-        _ => call(name, parts),
+fn join(name: &str, parts: Vec<TokenStream>) -> TokenStream {
+    match <[TokenStream; 1]>::try_from(parts) {
+        Ok([only]) => only,
+        Err(parts) => call(name, parts),
     }
 }
 

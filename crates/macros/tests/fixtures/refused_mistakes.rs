@@ -7,8 +7,8 @@
 #[cfg_attr(not(feature = "taken"), kernite_macros::kernels(consts = 5))]
 #[cfg_attr(feature = "taken", kernite_macros::kernels)]
 pub mod cpu {
-    // A kernel that is not `unsafe`.
-    pub extern "sysv64" fn plain(x: u64) -> u64 {
+    // A kernel that is not `unsafe`, and takes a pointer.
+    pub extern "sysv64" fn plain(x: *const u64) -> u64 {
         ret(x);
     }
 
@@ -49,7 +49,7 @@ pub mod cpu {
 #[cfg_attr(feature = "taken", kernite_macros::kernels)]
 pub mod gpu {
     pub extern "ptx-kernel" fn plain(x: *mut u32) {
-        st.global.u32([x], 1);
+        bar.sync(0);
     }
 
     #[instances(1)]

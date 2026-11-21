@@ -4,22 +4,25 @@
 
 use kernite_cuda::Cuda;
 
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
 /// Whether this process has the driver in its memory: a file whose name starts `libcuda.so`,
 /// as `libcuda.so.1` and the file it links to do.
-fn open() -> bool {
-    let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
-    maps.lines().any(|l| l.rsplit('/').next().is_some_and(|file| file.starts_with("libcuda.so")))
+fn open() -> Result<bool> {
+    let maps = std::fs::read_to_string("/proc/self/maps")?;
+    Ok(maps.lines().any(|l| l.rsplit('/').next().is_some_and(|file| file.starts_with("libcuda.so"))))
 }
 
 #[test]
-fn the_driver_is_opened_when_a_gpu_is_asked_for() {
-    assert!(!open(), "the driver is open before a GPU is asked for");
+fn the_driver_is_opened_when_a_gpu_is_asked_for() -> Result {
+    assert!(!open()?, "the driver is open before a GPU is asked for");
     match Cuda::new() {
-        Ok(_) => assert!(open(), "a GPU, and the driver not open"),
+        Ok(_) => assert!(open()?, "a GPU, and the driver not open"),
         // The driver is open if `dlopen` found it, whatever failed after.
         Err(e) => {
-            assert_eq!(open(), e.call != "dlopen", "{e}");
+            assert_eq!(open()?, e.call != "dlopen", "{e}");
             eprintln!("no GPU: {e}");
         }
     }
+    Ok(())
 }

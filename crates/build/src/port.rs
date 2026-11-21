@@ -3,7 +3,7 @@
 
 use kernite_lang::{Fn, Memory, Span, Target, Value};
 
-use crate::{Assembly, DeviceStatic, Done, HostStatic, Naked};
+use crate::{Assembly, DeviceStatic, Done, HostStatic, Naked, Requirement};
 
 /// A machine kernite compiles a module's functions for: its kernels while their bodies are
 /// written, its statics, how its kernels see the functions they call, and its code.
@@ -26,8 +26,9 @@ pub trait Backend {
     fn room(&self, statics: &[Self::Static]) -> Vec<Option<String>> {
         vec![None; statics.len()]
     }
-    /// How this machine's kernels see `g` when they call it; `None` if they cannot name it.
-    fn callee(&self, g: &Fn) -> Option<Self::Callee>;
+    /// How this machine's kernels see `g` when they call an instance of it whose parameters are of the types `params`,
+    /// worked out, `&[u64; 2]` for `&[u64; N]`; `None` if they cannot name it.
+    fn callee(&self, g: &Fn, params: &[String]) -> Option<Self::Callee>;
     /// The kernel `name`, instance `args` of `f`, told whether it is `cooperative`, each of
     /// `statics` and each of `callees`.
     fn kernel(
@@ -43,6 +44,12 @@ pub trait Backend {
     /// depend on. A machine whose code does not says none.
     fn calls(&self, _: &Self::Kernel) -> Vec<String> {
         vec![]
+    }
+    /// The doc of the instruction `name`, as the machine writes it, `vaddps` or `ld.global.f32`: what it does and what
+    /// it takes, in Markdown, for an editor to show where a kernel names it; none for a name the machine has no
+    /// instruction of. A machine whose instructions have no docs says none.
+    fn doc(&self, _name: &str) -> Option<String> {
+        None
     }
     /// `kernel`'s code, its body written: its registers allocated, or its code checked; or why
     /// not. `done` has what compiling each instance of the module gave so far, by its name: the code of each function
@@ -68,6 +75,9 @@ pub trait Device: Backend {
     fn module(&self, code: &[Self::Code], statics: &[Self::Static]) -> Assembly;
     /// The name the driver finds `code` by.
     fn symbol(&self, code: &Self::Code) -> String;
+    /// What a launch of `code` must hold for it to be safe, if it is the code of a kernel that is no `unsafe fn`;
+    /// none for one that is.
+    fn requires(&self, code: &Self::Code) -> Vec<Requirement>;
     /// `s` as the host reads it.
     fn device_static(&self, s: &Self::Static) -> DeviceStatic;
 }

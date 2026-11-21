@@ -187,27 +187,29 @@ mod tests {
 
     /// The GPU kernels give the same, launched by the paths and by the names, on the GPU.
     #[test]
-    fn a_gpu_kernel_with_constants_named_by_paths_gives_the_value_the_names_give() {
-        let Ok(cuda) = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")) else { return };
-        let (plain, paths) = (plain_gpu::Kernels::load(&cuda).unwrap(), paths_gpu::Kernels::load(&cuda).unwrap());
-        let ints = [cuda.alloc::<u32>(2).unwrap(), cuda.alloc::<u32>(2).unwrap()];
-        let wides = [cuda.alloc::<u64>(2).unwrap(), cuda.alloc::<u64>(2).unwrap()];
-        let floats = [cuda.alloc::<f32>(1).unwrap(), cuda.alloc::<f32>(1).unwrap()];
-        let doubles = [cuda.alloc::<f64>(1).unwrap(), cuda.alloc::<f64>(1).unwrap()];
+    fn a_gpu_kernel_with_constants_named_by_paths_gives_the_value_the_names_give()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(cuda) = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
+        let (plain, paths) = (plain_gpu::Kernels::load(&cuda)?, paths_gpu::Kernels::load(&cuda)?);
+        let ints = [cuda.alloc::<u32>(2)?, cuda.alloc::<u32>(2)?];
+        let wides = [cuda.alloc::<u64>(2)?, cuda.alloc::<u64>(2)?];
+        let floats = [cuda.alloc::<f32>(1)?, cuda.alloc::<f32>(1)?];
+        let doubles = [cuda.alloc::<f64>(1)?, cuda.alloc::<f64>(1)?];
         // SAFETY: each kernel writes one number to each buffer it is given, which holds one or more, and the launches
         // have ended when they are read.
         unsafe {
-            plain.fill::<8>(Grid::new(1, 1), ints[0].ptr(), wides[0].ptr(), 5).unwrap();
-            paths.fill::<8>(Grid::new(1, 1), ints[1].ptr(), wides[1].ptr(), 5).unwrap();
-            plain.floats(Grid::new(1, 1), floats[0].ptr(), doubles[0].ptr()).unwrap();
-            paths.floats(Grid::new(1, 1), floats[1].ptr(), doubles[1].ptr()).unwrap();
+            plain.fill::<8>(Grid::new(1, 1), ints[0].ptr(), wides[0].ptr(), 5)?;
+            paths.fill::<8>(Grid::new(1, 1), ints[1].ptr(), wides[1].ptr(), 5)?;
+            plain.floats(Grid::new(1, 1), floats[0].ptr(), doubles[0].ptr())?;
+            paths.floats(Grid::new(1, 1), floats[1].ptr(), doubles[1].ptr())?;
         }
-        cuda.sync().unwrap();
+        cuda.sync()?;
         for i in 0..2 {
-            assert_eq!(ints[i].read().unwrap()[0], 8 + u16::MAX as u32 + u8::BITS + 5 + usize::BITS);
-            assert_eq!(wides[i].read().unwrap()[0], u64::MAX);
-            assert_eq!(floats[i].read().unwrap(), [1.5]);
-            assert_eq!(doubles[i].read().unwrap(), [f64::MIN]);
+            assert_eq!(ints[i].read()?[0], 8 + u16::MAX as u32 + u8::BITS + 5 + usize::BITS);
+            assert_eq!(wides[i].read()?[0], u64::MAX);
+            assert_eq!(floats[i].read()?, [1.5]);
+            assert_eq!(doubles[i].read()?, [f64::MIN]);
         }
+        Ok(())
     }
 }

@@ -38,6 +38,8 @@ pub struct Static {
     pub memory: Memory,
     /// What each of its elements is.
     pub elem: Ty,
+    /// The number the host reads each element as, `u32`: [`Ty::host`] of its element.
+    pub host: &'static str,
     /// What it holds until something writes it, as bytes; zeros past their end.
     pub init: Vec<u8>,
     /// Whether it is outside the module, which has no room for it in its global memory: it is [`place`](Static::place)d
@@ -76,13 +78,13 @@ impl Static {
             }
         };
         let (elem, bytes, align) = shape(ty, word)?;
-        if elem.host().is_none() {
+        let Some(host) = elem.host() else {
             return Err(format!(
                 "a static holds numbers the host reads as Rust's: `b8` to `b64`, `u8` to `u64`, `s8` to `s64`, \
                  `f16`, `bf16`, `f32` and `f64`; not `{}`",
                 elem.name()
             ));
-        }
+        };
         let Some(bytes) = bytes else {
             return Err(format!(
                 "`{ty}` has no size, which only shared memory may leave to the launch: `{word}<[{}; 64]>`",
@@ -90,7 +92,7 @@ impl Static {
             ));
         };
         let memory = Memory { name: symbol.to_string(), space, align, bytes: Some(bytes) };
-        Ok(Static { name: name.to_string(), ty: ty.to_string(), memory, elem, init: vec![], outside: false })
+        Ok(Static { name: name.to_string(), ty: ty.to_string(), memory, elem, host, init: vec![], outside: false })
     }
 
     /// Puts it in the module, or outside it: where the module has no room for it in its global memory beside the
@@ -149,9 +151,9 @@ impl Static {
     pub fn declaration(&self) -> String {
         let m = self.held();
         let mut out = format!(".{} .align {} .b8 {}[{}]", m.space.word(), m.align, m.name, m.bytes.unwrap_or(0));
-        let end = self.init.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-        if end > 0 {
-            let bytes: Vec<String> = self.init[..end].iter().map(u8::to_string).collect();
+        let held = self.init.iter().rposition(|&b| b != 0).and_then(|i| self.init.get(..=i)).unwrap_or_default();
+        if !held.is_empty() {
+            let bytes: Vec<String> = held.iter().map(u8::to_string).collect();
             out += &format!(" = {{{}}}", bytes.join(", "));
         }
         out + ";\n"
@@ -184,7 +186,7 @@ fn datum(t: Ty, x: &Value, what: &str) -> Result<Vec<u8>, String> {
             if !(lo..=hi).contains(&v) {
                 return Err(format!("{what} is {v}, out of range for `{name}`"));
             }
-            Ok(v.to_le_bytes()[..bits as usize / 8].to_vec())
+            Ok(v.to_le_bytes().into_iter().take(bits as usize / 8).collect())
         }
         Value::Int(v, _) if t.kind() == Kind::Float => {
             Err(format!("{what} is an integer, and {} a float: `{v}.0`", with_article(name)))

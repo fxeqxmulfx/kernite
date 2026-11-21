@@ -82,9 +82,12 @@ const EXPRESSIONS: &[&str] = &[
 fn packed(expr: &str) -> String {
     let chars: Vec<char> = expr.chars().collect();
     let word = |c: char| c.is_alphanumeric() || c == '_';
-    (0..chars.len())
-        .filter(|&i| chars[i] != ' ' || (0 < i && i + 1 < chars.len() && word(chars[i - 1]) && word(chars[i + 1])))
-        .map(|i| chars[i])
+    let word_at = |i: Option<usize>| i.and_then(|i| chars.get(i)).is_some_and(|&c| word(c));
+    chars
+        .iter()
+        .enumerate()
+        .filter(|&(i, &c)| c != ' ' || (word_at(i.checked_sub(1)) && word_at(Some(i + 1))))
+        .map(|(_, &c)| c)
         .collect()
 }
 

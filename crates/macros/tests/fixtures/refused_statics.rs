@@ -65,25 +65,27 @@ pub fn cpu_sized_address() -> usize {
 pub fn is_gpu_counts(_: kernite_cuda::Global<'_, u32>) {}
 
 /// The accessor of a GPU static gives a `Global` of the type the static is read as.
-pub fn gpu_type(kernels: &gpu::Kernels) {
-    is_gpu_counts(kernels.COUNTS());
+pub fn gpu_type(kernels: &gpu::Kernels) -> Result<(), kernite_cuda::Error> {
+    is_gpu_counts(kernels.COUNTS()?);
+    Ok(())
 }
 
-pub fn gpu_length(kernels: &gpu::Kernels) -> usize {
-    kernels.COUNTS().len()
+pub fn gpu_length(kernels: &gpu::Kernels) -> Result<usize, kernite_cuda::Error> {
+    Ok(kernels.COUNTS()?.len())
 }
 
 /// A use that the static's type does not fit is Rust's error, as it is for one that compiles.
 pub fn gpu_misfit(kernels: &gpu::Kernels) -> Result<Vec<u64>, kernite_cuda::Error> {
-    kernels.COUNTS().read()
+    kernels.COUNTS()?.read()
 }
 
 /// A static whose type reads a const the module would be given has elements of any type, which a use says.
-pub fn gpu_sized(kernels: &gpu::Kernels) {
-    is_gpu_counts(kernels.SIZED());
+pub fn gpu_sized(kernels: &gpu::Kernels) -> Result<(), kernite_cuda::Error> {
+    is_gpu_counts(kernels.SIZED()?);
+    Ok(())
 }
 
 /// A use that says no type for the elements is Rust's error, beside the refusal.
-pub fn gpu_sized_open(kernels: &gpu::Kernels) -> usize {
-    kernels.SIZED().len()
+pub fn gpu_sized_open(kernels: &gpu::Kernels) -> Result<usize, kernite_cuda::Error> {
+    Ok(kernels.SIZED()?.len())
 }

@@ -8,34 +8,39 @@ use kernite::{Call, HostStatic, Naked, NativeInstance, NativeOut};
 
 use crate::cond::Cond;
 use crate::rust::{
-    asks, attrs, cfg_of, clashes, depends_on, error_under, given_back, gives_placeholder, hygienic, launcher_result,
-    missing, name_at, never, parse, pick, pointer, position, primitive, probe, result, signature, stub, value_params,
-    visibility, written, written_params,
+    Written, array_ref, asks, attrs, cfg_of, clashes, depends_on, error_under, given_back, gives_placeholder, hygienic,
+    launcher_result, missing, name_after, name_at, never, parse, pick, pointer, position, primitive, probe, result,
+    signature, span_of, stub, value_params, visibility, within, written, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
 const CPU: &str = "kernite-cpu";
 
-/// `f` as an `#[unsafe(naked)]` function whose body is the listing of its one instance, and
-/// the statics its constants are, in a hidden module beside it. For a function of compile-time
+/// `f` as an `#[unsafe(naked)]` function whose body is the listing of its one instance, and the
+/// statics its constants are, in a hidden module beside it. For a function of compile-time
 /// arguments, each instance is such a function, of the name [`instance_name`] gives it, and `f`
 /// is one that calls the instance its arguments pick. So is each instance of a cooperative
 /// kernel, which takes the thread's place in the grid after `f`'s parameters, and `f` is its
-/// [`grid_launcher`]. An instance is a function of the module of kernels, as `f` is, and not of
-/// a module of its own. It takes what `f` takes, but a pointer is `*const ()` or `*mut ()` to it,
-/// whatever it points to, and `f` casts the pointers it passes on and the one it gets back; and a
-/// number is the number in both, `::core::primitive::u64`, and not the name the kernel writes. So
-/// no type of `f`'s is written twice: Rust reads each once, in `f`, where it means what it means
-/// in any function of the module, `super::W` or `[u8; N]`, whose `N` is a compile-time argument,
-/// and a number's name in the questions `f` asks of it; it says an error in one once, at the type,
-/// and lints it at the level `f` sets. Each instance names the functions of `module` it calls by
-/// the operands [`callees`] gives, and its statics by those [`reached`] gives. Its safety contract
-/// says that nothing else touches `named`, the module's memory, while it runs. A cooperative
-/// kernel of a crate without `kernite-cpu` is [`x86_stub`]'s instead, with the error that says so,
-/// and so is a kernel that gives back a type with a `_` in it, which is Rust's error alone.
-/// All this writes is under `cfg`, `f`'s own, the module of its statics included: an instance is `extern
-/// "sysv64"`, which only x86-64 has, so a crate that keeps `f` there alone builds for another machine. `at` says where
-/// `f` first writes the name of an item of the module, for the operands to be written there.
+/// [`grid_launcher`]. So is the instance of a kernel that is no `unsafe fn`, and `f` is the
+/// function Rust calls without `unsafe`: `#[inline(always)]`, or where the code needs CPU
+/// features `#[target_feature(enable = "..")]` and `#[inline]`, for Rust lets no naked function
+/// be `#[target_feature]`; and only a function that has the features calls `f` without
+/// `unsafe`. An instance is a function of the module of kernels, as `f` is, and not of a module
+/// of its own. It takes what `f` takes, but a pointer or an array by reference is `*const ()`
+/// or `*mut ()` to it, whatever it points to, and `f` casts the ones it passes on and the
+/// pointer it gets back; and a number is the number in both, `::core::primitive::u64`, and not
+/// the name the kernel writes. So no type of `f`'s is written twice: Rust reads each once, in
+/// `f`, where it means what it means in any function of the module, `super::W` or `[u8; N]`,
+/// whose `N` is a compile-time argument, and a number's name in the questions `f` asks of it;
+/// it says an error in one once, at the type, and lints it at the level `f` sets. Each instance
+/// names the functions of `module` it calls by the operands [`callees`] gives, and its statics
+/// by those [`reached`] gives. Its safety contract says that nothing else touches `named`, the
+/// module's memory, while it runs. A cooperative kernel of a crate without `kernite-cpu` is
+/// [`x86_stub`]'s instead, with the error that says so, and so is a kernel that gives back a
+/// type with a `_` in it, which is Rust's error alone. All this writes is under `cfg`, `f`'s
+/// own, the module of its statics included: an instance is `extern "sysv64"`, which only x86-64
+/// has, so a crate that keeps `f` there alone builds for another machine. `at` says where `f` first
+/// writes the name of an item of the module, for the operands to be written there.
 pub(crate) fn naked(
     module: &lang::Module,
     f: &Fn,
@@ -52,13 +57,19 @@ pub(crate) fn naked(
     }
     let mut out = TokenStream::new();
     let mut statics = vec![];
+    let safe = !f.unsafe_fn;
+    // A slice is two words, its address and its length, which Rust passes in two registers, but it is no type of a
+    // function of the `sysv64` ABI, so a function that takes one calls the naked function that takes the two.
+    let slices = written_params(f, top).iter().any(|p| array_ref(&p.ty).is_some_and(|(.., slice)| slice));
     if let [one] = instances
         && one.args.is_empty()
         && !cooperative
+        && !safe
+        && !slices
     {
         let listing = &one.naked;
         let mut docs = attrs(f, top);
-        docs.extend(needs(instances));
+        docs.extend(needs(&features(instances), safe));
         out.extend(contract(docs, named));
         out.extend(parse("#[unsafe(naked)]"));
         out.extend(signature(f, top));
@@ -75,16 +86,20 @@ pub(crate) fn naked(
         // Each instance's parameters and their types: `f`'s, then a cooperative kernel's place. `f`
         // passes its own on by their names, before the colon, and a pointer cast.
         let (mut params, mut names) = (vec![], vec![]);
-        for (param, colon) in written_params(f, top) {
-            let (ty, cast) = erased(&param[colon + 1..]);
-            params.push(format!("{}: {ty}", param[colon - 1]));
-            names.push(format!("{}{cast}", param[colon - 1]));
+        for p in written_params(f, top) {
+            let (ty, cast) = erased(&p.ty);
+            params.push(format!("{}: {ty}", p.name));
+            names.push(format!("{}{cast}", p.name));
+            if array_ref(&p.ty).is_some_and(|(.., slice)| slice) {
+                params.push("_: usize".to_string());
+                names.push(format!("{}.len()", p.name));
+            }
         }
         if cooperative {
             params.push("_: &::kernite_cpu::Place".to_string());
         }
         // Its result, which `f` casts back if it is a pointer.
-        let ret = f.ret.as_ref().map_or(String::new(), |r| format!("-> {}", erased(&top[r.tokens.clone()]).0));
+        let ret = f.ret.as_ref().map_or(String::new(), |r| format!("-> {}", erased(within(top, &r.tokens)).0));
         let (mut arms, mut fns) = (vec![], TokenStream::new());
         for (k, instance) in instances.iter().enumerate() {
             let (listing, name) = (&instance.naked, instance_name(&f.name, k));
@@ -104,16 +119,24 @@ pub(crate) fn naked(
             statics.push((format!("I{k}C"), listing));
             arms.push((instance.args.clone(), name));
         }
+        let features = features(instances);
         if cooperative {
-            out.extend(grid_launcher(f, Some(&arms), needs(instances), named, cfg, top));
+            out.extend(grid_launcher(f, Some(&arms), needs(&features, safe), named, cfg, top));
         } else {
             let mut docs = attrs(f, top);
-            docs.extend(needs(instances));
+            docs.extend(needs(&features, safe));
             out.extend(contract(docs, named));
-            out.extend(parse("#[inline(always)]"));
+            out.extend(match (safe, features.is_empty()) {
+                (true, false) => parse(&format!("#[target_feature(enable = {:?})]\n#[inline]", features.join(","))),
+                _ => parse("#[inline(always)]"),
+            });
+            // Rust warns of a slice in the signature of a `sysv64` function, which only Rust calls, as `f` is.
+            if slices {
+                out.extend(parse("#[allow(improper_ctypes_definitions)]"));
+            }
             out.extend(signature(f, top));
             let mut body = asks(f, top, written);
-            let call = parse(&format!("({})({})", pick(f, &arms, top), names.join(", ")));
+            let call = parse(&format!("({})({})", chosen(f, &arms, top), names.join(", ")));
             body.extend(result(f, top, call));
             out.extend([TokenTree::Group(Group::new(Delimiter::Brace, body))]);
         }
@@ -211,7 +234,9 @@ pub(crate) fn operands(k: &NativeOut) -> Vec<&lang::Mention> {
     };
     let places = k.mentions.iter().enumerate();
     places
-        .filter(|(n, m)| by_operand(&m.name) && k.mentions[..*n].iter().all(|x| x.name != m.name))
+        .filter(|(n, m)| {
+            by_operand(&m.name) && k.mentions.get(..*n).unwrap_or_default().iter().all(|x| x.name != m.name)
+        })
         .map(|(_, m)| m)
         .collect()
 }
@@ -227,8 +252,8 @@ fn reached(
 ) -> TokenStream {
     let mut out = TokenStream::new();
     for name in &listing.statics {
-        let item = &module.items[position(module, name)];
-        let path = name_at(item, top, at(name));
+        let Some(item) = position(module, name).and_then(|i| module.items.get(i)) else { continue };
+        let Some(path) = name_at(item, top, at(name)) else { continue };
         out.extend(operand(&path.to_string(), path.into(), item, top));
     }
     out
@@ -285,10 +310,10 @@ pub(crate) fn cpu_static(
     top: &[TokenTree],
 ) -> TokenStream {
     // Its name as written, after `static`.
-    let name = &top[s.vis.end + 1];
+    let Some(name) = name_after(&s.vis, top) else { return TokenStream::new() };
     let far = made.filter(|m| m.far && depends_on(CPU));
-    let mut out: TokenStream = s.attrs.clone().map(|i| top[i].clone()).collect();
-    out.extend(top[s.vis.clone()].iter().cloned());
+    let mut out: TokenStream = within(top, &s.attrs).iter().cloned().collect();
+    out.extend(within(top, &s.vis).iter().cloned());
     out.extend(parse("static"));
     out.extend([name.clone()]);
     if !depends_on(CPU) {
@@ -381,11 +406,8 @@ fn linked(name: &str, m: &HostStatic) -> TokenStream {
 fn elements(m: &HostStatic) -> Vec<String> {
     let size = m.size as usize;
     Vec::from_fn(m.len as usize, |i| {
-        let mut word = [0; 8];
-        if let Some(bytes) = m.init.get(i * size..(i + 1) * size) {
-            word[..size].copy_from_slice(bytes);
-        }
-        let bits = u64::from_le_bytes(word);
+        let bytes = m.init.get(i * size..(i + 1) * size).unwrap_or_default();
+        let bits = bytes.iter().rev().fold(0, |bits, &byte| bits << 8 | u64::from(byte));
         // The bits as a signed number of the element's width.
         let signed = ((bits << (64 - 8 * size)) as i64) >> (64 - 8 * size);
         match m.elem.as_str() {
@@ -408,10 +430,11 @@ fn callees(
 ) -> TokenStream {
     let mut out = TokenStream::new();
     for (i, call) in calls.iter().enumerate() {
-        let item = &module.items[position(module, &call.function)];
-        let path = match call.instance {
-            Some(k) => parse(&instance_name(&call.function, k)),
-            None => name_at(item, top, at(&call.function)).into(),
+        let Some(item) = position(module, &call.function).and_then(|j| module.items.get(j)) else { continue };
+        let path = match (call.instance, name_at(item, top, at(&call.function))) {
+            (Some(k), _) => parse(&instance_name(&call.function, k)),
+            (None, Some(name)) => name.into(),
+            (None, None) => continue,
         };
         out.extend(operand(&format!("f{i}"), path, item, top));
     }
@@ -425,13 +448,25 @@ fn instance_name(function: &str, k: usize) -> String {
 }
 
 /// `ty`, a type of `f`'s, as an instance writes it, and what `f` writes after a value of it to pass
-/// it on: a pointer is `*const ()` or `*mut ()` to the instance, whatever it points to, and `as
-/// *const ()` or `as *mut ()` in `f`, which is a cast and not a call, so that Rust says nothing of
-/// the type it points to; a number is the primitive, as it is in `f`, and nothing.
+/// it on: a pointer is `*const ()` or `*mut ()` to the instance, whatever it points to, and
+/// `as *const ()` or `as *mut ()` in `f`, which is a cast and not a call, so that Rust says nothing
+/// of the type it points to; an array or a slice by reference is the same, after a cast to the
+/// pointer to it, `as *const _`, which Rust makes of a reference alone; a number is the primitive,
+/// as it is in `f`, and nothing.
 fn erased(ty: &[TokenTree]) -> (String, String) {
-    match pointer(ty) {
-        Some((kind, _)) => (format!("*{kind} ()"), format!(" as *{kind} ()")),
-        None => (given_back(ty).to_string(), String::new()),
+    match (pointer(ty), array_ref(ty)) {
+        (Some((kind, _)), _) => (format!("*{kind} ()"), format!(" as *{kind} ()")),
+        (_, Some((kind, ..))) => (format!("*{kind} ()"), format!(" as *{kind} _ as *{kind} ()")),
+        (None, None) => (given_back(ty).to_string(), String::new()),
+    }
+}
+
+/// The instance `f` calls, as a Rust expression: the only one, `arms` having one that takes no arguments, by its name,
+/// else the one `f`'s compile-time arguments [`pick`].
+fn chosen(f: &Fn, arms: &[(Vec<Value>, String)], top: &[TokenTree]) -> String {
+    match arms {
+        [(args, kernel)] if args.is_empty() => kernel.clone(),
+        _ => pick(f, arms, top),
     }
 }
 
@@ -485,7 +520,7 @@ fn grid_launcher(
     // Its visibility, then `unsafe fn` and its name and generics as written.
     out.extend(visibility(f, top).iter().cloned());
     out.extend(parse("unsafe fn"));
-    out.extend(top[f.head.end + 1..f.params_at].iter().cloned());
+    out.extend(top.get(f.head.end + 1..f.params_at).unwrap_or_default().iter().cloned());
     // Its types are `kernite_cpu`'s, but where the crate has none: any grid goes in, and the error,
     // said once, comes out.
     let (grid, result, missed) = match depends_on(CPU) {
@@ -495,7 +530,7 @@ fn grid_launcher(
             TokenStream::new(),
         ),
         false => {
-            let name = top[f.head.end + 1].span();
+            let name = span_of(name_after(&f.head, top));
             let (result, missed) = missing(cfg, name, "a cooperative x86 kernel", CPU);
             (parse("impl ::core::marker::Sized"), result, missed)
         }
@@ -509,15 +544,10 @@ fn grid_launcher(
     out.extend(launcher_result(f, top, result));
     let text = match kernels {
         Some(kernels) => {
-            let kernel = match kernels {
-                [(args, kernel)] if args.is_empty() => kernel.clone(),
-                _ => pick(f, kernels, top),
-            };
+            let kernel = chosen(f, kernels, top);
             let (mut addresses, mut args) = (String::new(), vec![]);
-            for (param, colon) in written_params(f, top) {
-                // Its name, before the colon.
-                let name = &param[colon - 1];
-                match pointer(&param[colon + 1..]) {
+            for Written { name, ty, .. } in written_params(f, top) {
+                match pointer(&ty) {
                     Some((kind, _)) => {
                         let again = if kind == "mut" { "_mut" } else { "" };
                         addresses += &format!("let {name} = ({name} as *{kind} ()).expose_provenance();\n");
@@ -543,21 +573,36 @@ fn grid_launcher(
     out
 }
 
-/// The doc that names the CPU features past x86-64's own the code of `instances` needs, which
-/// nothing checks for when it runs; none if it needs none.
-fn needs(instances: &[NativeInstance]) -> TokenStream {
+/// The CPU features past x86-64's own the code of `instances` needs, each once, by name.
+fn features(instances: &[NativeInstance]) -> Vec<&str> {
     let mut features: Vec<&str> = instances.iter().flat_map(|k| k.naked.needs.iter().map(String::as_str)).collect();
     features.sort();
     features.dedup();
+    features
+}
+
+/// The doc that names the CPU `features`, past x86-64's own, which the code of a kernel needs; none if it needs none.
+/// For a kernel that is an `unsafe fn` it says that nothing checks for them when it runs; for one that is not, that
+/// Rust checks where it is called, for only a function that has them calls it without `unsafe`.
+fn needs(features: &[&str], safe: bool) -> TokenStream {
     let named: Vec<String> = features.iter().map(|f| format!("`{f}`")).collect();
     let (list, noun) = match named.as_slice() {
         [] => return TokenStream::new(),
         [one] => (one.clone(), "feature"),
         [rest @ .., last] => (format!("{} and {last}", rest.join(", ")), "features"),
     };
+    let checked = match safe {
+        true => format!(
+            "which Rust checks where it is called: only a function that has {}, `#[target_feature(enable = \"{}\")]`, \
+             calls it without `unsafe`",
+            if features.len() == 1 { "it" } else { "them" },
+            features.join(",")
+        ),
+        false => "which nothing checks for when it runs".to_string(),
+    };
     parse(&format!(
-        "#[doc = \"\"]\n#[doc = \" Needs the CPU {noun} {list}, past x86-64's own, which nothing checks for when it \
-         runs.\"]"
+        "#[doc = \"\"]\n#[doc = {:?}]",
+        format!(" Needs the CPU {noun} {list}, past x86-64's own, {checked}.")
     ))
 }
 

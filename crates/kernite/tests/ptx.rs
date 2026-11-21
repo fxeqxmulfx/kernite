@@ -7,17 +7,19 @@ use std::collections::BTreeMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use kernite::lang::{IntTy, Mem as Address, Operand as Given, Target, Value, with_article};
 use kernite::{Assembly, Kept};
 use kernite_ptx::forms::{self, Bound, Check, Count, Form, Imm, Role, Sel, Space, Spec};
-use kernite_ptx::lang::{Callee, Kernel, Var};
-use kernite_ptx::{Entry, Kind, Needs, Prototype, Returns, Static, Ty};
+use kernite_ptx::lang::{Callee, Kernel};
+use kernite_ptx::{Entry, Kind, Needs, Prototype, Returns, Static, Ty, Var};
 
 #[path = "common/quotes.rs"]
 mod quotes;
+
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
 const KERNELS: &str = r#"
     /// `x[i] *= a` for each `i < n`, a thread each.
@@ -75,10 +77,10 @@ const KERNELS: &str = r#"
 "#;
 
 #[test]
-fn a_kernel_comes_out_as_ptx_writes_it() {
-    let ptx = kernite::ptx_str(KERNELS).unwrap();
+fn a_kernel_comes_out_as_ptx_writes_it() -> Result {
+    let ptx = kernite::ptx_str(KERNELS)?;
     println!("{ptx}");
-    let scale = ptx.split(".visible .entry ").nth(1).unwrap();
+    let scale = ptx.split(".visible .entry ").nth(1).ok_or("nth gave None")?;
     let want = "scale(
 \t.param .u64 scale_param_0,
 \t.param .f32 scale_param_1,
@@ -110,6 +112,7 @@ $L0:
 
 ";
     assert_eq!(scale, want);
+    Ok(())
 }
 
 /// `ptxas`, if CUDA is here: `$PTXAS`, or on the path, or in a toolkit under `/usr/local`.
@@ -132,10 +135,10 @@ fn ptxas() -> Option<PathBuf> {
 }
 
 #[test]
-fn ptxas_takes_what_kernite_writes() {
+fn ptxas_takes_what_kernite_writes() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     for (name, kernels) in [
         ("kernels", KERNELS),
@@ -157,9 +160,10 @@ fn ptxas_takes_what_kernite_writes() {
             "calls" => &["--warning-as-error", "--suppress-stack-size-warning"],
             _ => &["--warning-as-error"],
         };
-        let run = assembled(&ptxas, &kernite::ptx_str(kernels).unwrap(), "sm_75", name, flags);
+        let run = assembled(&ptxas, &kernite::ptx_str(kernels)?, "sm_75", name, flags)?;
         assert!(run.status.success(), "{name}: {}", String::from_utf8_lossy(&run.stderr));
     }
+    Ok(())
 }
 
 /// The kernel `k` around `body`, compiled, or the error.
@@ -168,7 +172,7 @@ fn compile(params: &str, body: &str) -> Result<String, String> {
 }
 
 #[test]
-fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
+fn a_wrong_operand_is_named_by_what_the_instruction_wants() -> Result {
     let cases = [
         ("let i: u32; add.rn.f32(i, x, x);", "2:24: `add.rn.f32` wants an `f32` variable; this is a `u32`"),
         (
@@ -412,14 +416,15 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() {
         ("vfrob.f32(x);", "2:7: PTX has no instruction `vfrob` that kernite knows"),
     ];
     for (body, want) in cases {
-        assert_eq!(compile("x: *mut f32, n: u32", body).unwrap_err(), want, "{body}");
+        assert_eq!(compile("x: *mut f32, n: u32", body).err().ok_or("compile gave Ok")?, want, "{body}");
     }
+    Ok(())
 }
 
 /// ptxas 13.5 takes an `f16x2` where an instruction of a 32-bit integer type wants a variable, and reads its 32 bits
 /// as those of a `b32`, and kernite takes it: its code has the variable as the operand, with no `mov` beside it.
 #[test]
-fn an_f16x2_is_taken_where_an_instruction_wants_a_32_bit_integer() {
+fn an_f16x2_is_taken_where_an_instruction_wants_a_32_bit_integer() -> Result {
     let cases = [
         ("add.u32(g, h, n);", "add.u32 %g, %h, %n;"),
         ("add.s32(g, h, n);", "add.s32 %g, %h, %n;"),
@@ -447,10 +452,11 @@ fn an_f16x2_is_taken_where_an_instruction_wants_a_32_bit_integer() {
     ];
     for (inst, line) in cases {
         let body = format!("let (h, g): (f16x2, f16x2); let (b, p): (b32, pred); mov.b32(h, n); mov.b32(b, n); {inst}");
-        let ptx = compile("x: *mut u32, n: u32", &body).unwrap();
+        let ptx = compile("x: *mut u32, n: u32", &body)?;
         assert!(ptx.contains(&format!("\t{line}\n")), "{inst}: {ptx}");
         assert_eq!(ptx.matches("\tmov.").count(), body.matches("mov.").count(), "{inst}: a `mov` beside it: {ptx}");
     }
+    Ok(())
 }
 
 /// An `f16x2` where an instruction wants a 32-bit integer, and where a call wants one or an `f32`, which `ptxas` reads
@@ -501,8 +507,8 @@ const BITS: &str = r#"
 /// `f16x2`, a `bf16x2` or a `tf32` takes a `u32` for its argument, writes one with its result, and gives back one
 /// with `ret`.
 #[test]
-fn an_f16x2_is_taken_where_a_call_wants_a_32_bit_integer_or_float() {
-    let ptx = kernite::ptx_str(BITS).unwrap();
+fn an_f16x2_is_taken_where_a_call_wants_a_32_bit_integer_or_float() -> Result {
+    let ptx = kernite::ptx_str(BITS)?;
     for line in [
         "\tcall (%g), count, (%g);\n",
         "\tcall (%h), half, (%g);\n",
@@ -523,28 +529,30 @@ fn an_f16x2_is_taken_where_a_call_wants_a_32_bit_integer_or_float() {
         assert!(ptx.contains(line), "{line}: {ptx}");
     }
     assert_eq!(ptx.matches("\tmov.").count(), BITS.matches("mov.").count(), "a `mov` beside a call: {ptx}");
+    Ok(())
 }
 
 /// What `ptxas` makes of [`BITS`] is what it makes of the same kernels with a `b32` in place of each `f16x2`,
 /// `bf16x2` and `tf32`: the same bytes of a cubin, and so the same machine code.
 #[test]
-fn ptxas_assembles_an_f16x2_for_a_32_bit_integer_as_a_b32() {
+fn ptxas_assembles_an_f16x2_for_a_32_bit_integer_as_a_b32() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
-    let packed = kernite::ptx_str(BITS).unwrap();
+    let packed = kernite::ptx_str(BITS)?;
     // A register of `b32` needs no PTX 4.2 and `sm_53`, as one of `f16x2` does: its module is put there.
     let twin = BITS.replace("bf16x2", "b32").replace("tf32", "b32").replace("f16x2", "b32");
-    let bits = retarget(&kernite::ptx_str(&twin).unwrap(), 42, 53);
+    let bits = retarget(&kernite::ptx_str(&twin)?, 42, 53);
     assert_eq!(header(&packed), header(&bits));
-    let cubin = |name: &str, text: &str| {
-        let run = assembled(&ptxas, text, "sm_75", name, &["--warning-as-error"]);
+    let cubin = |name: &str, text: &str| -> Result<_> {
+        let run = assembled(&ptxas, text, "sm_75", name, &["--warning-as-error"])?;
         assert!(run.status.success(), "{name}: {}", String::from_utf8_lossy(&run.stderr));
-        std::fs::read(Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.cubin"))).unwrap()
+        Ok(std::fs::read(Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.cubin")))?)
     };
-    let (of_f16x2, of_b32) = (cubin("bits_f16x2", &packed), cubin("bits_b32", &bits));
+    let (of_f16x2, of_b32) = (cubin("bits_f16x2", &packed)?, cubin("bits_b32", &bits)?);
     assert!(of_f16x2 == of_b32, "ptxas makes other bytes of an f16x2 than of a b32");
+    Ok(())
 }
 
 /// `ptxas` 13.5 wants the registers of a vector of one size and one type, bits beside any and an integer beside an
@@ -553,7 +561,7 @@ fn ptxas_assembles_an_f16x2_for_a_32_bit_integer_as_a_b32() {
 /// expression". kernite refuses the others, at the first register that does not go with one before it, and names the
 /// one it does not go with: `(f, b, i, i)` at the first `i`, which goes with `b` and not with `f`.
 #[test]
-fn the_registers_of_a_vector_are_of_one_size_and_one_type() {
+fn the_registers_of_a_vector_are_of_one_size_and_one_type() -> Result {
     let cases = [
         // An `f32` beside a `u32`, in `st`, `ld`, `ldu` and `mov`, packed and unpacked.
         (
@@ -677,8 +685,9 @@ fn the_registers_of_a_vector_are_of_one_size_and_one_type() {
         ),
     ];
     for (body, want) in cases {
-        assert_eq!(compile("x: *mut u32, n: u32, s: u64", body).unwrap_err(), want, "{body}");
+        assert_eq!(compile("x: *mut u32, n: u32, s: u64", body).err().ok_or("compile gave Ok")?, want, "{body}");
     }
+    Ok(())
 }
 
 /// Why the operands of a vector do not go together: what kernite says of it, as the words of its error, and what
@@ -1187,46 +1196,48 @@ const ONLY_KERNITE_REFUSES: &[Apart] = &[
 /// The kernel `line`, a vector of a table such as [`BOTH_REFUSE`], without the `@` that marks where its error points:
 /// the line of the body it is in, after the variables of [`TOGETHER_DECLARED`]; the column its error points at; and the
 /// name of its instruction.
-fn apart(line: &str) -> (String, usize, String) {
-    let (before, after) = line.split_once('@').unwrap();
+fn apart(line: &str) -> Result<(String, usize, String)> {
+    let (before, after) = line.split_once('@').ok_or("split_once gave None")?;
     let kernel = format!("{before}{after}");
     let body = format!("{TOGETHER_DECLARED} {kernel}");
-    let name = kernel[..kernel.find('(').unwrap()].replace("._", ".");
+    let name = kernel.split_once('(').ok_or("split_once gave None")?.0.replace("._", ".");
     let col = body.len() - after.len() + 1;
-    (body, col, name)
+    Ok((body, col, name))
 }
 
 /// kernite refuses each vector of [`BOTH_REFUSE`] and [`ONLY_KERNITE_REFUSES`] at the operand that does not go in it,
 /// in the words of why, and names it: beside the first operand before it that it does not go with, or with its bits.
 #[test]
-fn an_operand_that_does_not_go_in_its_vector_is_refused_where_ptxas_refuses_it() {
+fn an_operand_that_does_not_go_in_its_vector_is_refused_where_ptxas_refuses_it() -> Result {
     for &(line, _, why, this) in BOTH_REFUSE.iter().chain(ONLY_KERNITE_REFUSES) {
-        let (body, col, name) = apart(line);
+        let (body, col, name) = apart(line)?;
         let want = format!("2:{col}: `{name}` {}; this is {this}", why.kernite());
-        assert_eq!(compile("x: *mut u32, n: u32, s: u64", &body).unwrap_err(), want, "{line}");
+        assert_eq!(compile("x: *mut u32, n: u32, s: u64", &body).err().ok_or("compile gave Ok")?, want, "{line}");
     }
+    Ok(())
 }
 
 /// The module of [`TOGETHER_DECLARED`] alone, of the newest PTX for `sm_86`, with the line of PTX `line` in it.
-fn with_line(line: &str) -> String {
-    let ptx = compile("x: *mut u32, n: u32, s: u64", TOGETHER_DECLARED).unwrap();
-    retarget(&ptx, NEWEST, 86).replace("\tret;\n", &format!("\t{line}\n\tret;\n"))
+fn with_line(line: &str) -> Result<String> {
+    let ptx = compile("x: *mut u32, n: u32, s: u64", TOGETHER_DECLARED)?;
+    Ok(retarget(&ptx, NEWEST, 86).replace("\tret;\n", &format!("\t{line}\n\tret;\n")))
 }
 
 /// `ptxas` refuses each line of [`BOTH_REFUSE`], in the words that tell why, and takes the module without it.
 #[test]
-fn ptxas_refuses_each_vector_that_kernite_refuses_with_it() {
+fn ptxas_refuses_each_vector_that_kernite_refuses_with_it() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
-    let alone = assembled(&ptxas, &with_line(""), "sm_86", "apart_alone", &[]);
+    let alone = assembled(&ptxas, &with_line("")?, "sm_86", "apart_alone", &[])?;
     assert!(alone.status.success(), "{}", String::from_utf8_lossy(&alone.stderr));
     for (n, &(_, line, why, _)) in BOTH_REFUSE.iter().enumerate() {
-        let run = assembled(&ptxas, &with_line(line), "sm_86", &format!("apart_{n}"), &[]);
+        let run = assembled(&ptxas, &with_line(line)?, "sm_86", &format!("apart_{n}"), &[])?;
         let said = String::from_utf8_lossy(&run.stderr);
         assert!(!run.status.success() && said.contains(why.ptxas()), "{line}: {said}");
     }
+    Ok(())
 }
 
 /// `ptxas` 13.5 takes each vector of [`ONLY_KERNITE_REFUSES`], by one of two bugs of its own: it checks each operand
@@ -1234,15 +1245,16 @@ fn ptxas_refuses_each_vector_that_kernite_refuses_with_it() {
 /// of bits only where the float is first. It fails the day `ptxas` refuses one, for GUIDE.md to say no more of that
 /// bug.
 #[test]
-fn ptxas_takes_each_vector_that_only_kernite_refuses() {
+fn ptxas_takes_each_vector_that_only_kernite_refuses() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     for (n, &(_, line, _, _)) in ONLY_KERNITE_REFUSES.iter().enumerate() {
-        let run = assembled(&ptxas, &with_line(line), "sm_86", &format!("only_kernite_{n}"), &[]);
+        let run = assembled(&ptxas, &with_line(line)?, "sm_86", &format!("only_kernite_{n}"), &[])?;
         assert!(run.status.success(), "{line}: {}", String::from_utf8_lossy(&run.stderr));
     }
+    Ok(())
 }
 
 /// A special register of bits that a vector of floats does not take, beside a float known now, before it and after it:
@@ -1281,28 +1293,31 @@ const FLOAT_FIRST: [(&str, &str, bool, &str); 4] = [
 /// kernite refuses each vector of [`FLOAT_FIRST`], the float first or last, at the vector, or the `[` of the
 /// coordinates: the register has bits that the instruction does not take there.
 #[test]
-fn a_special_register_of_bits_a_vector_of_floats_does_not_take_is_refused_beside_a_float_known_now() {
+fn a_special_register_of_bits_a_vector_of_floats_does_not_take_is_refused_beside_a_float_known_now() -> Result {
     for (line, _, _, said) in FLOAT_FIRST {
-        let (body, col, name) = apart(line);
+        let (body, col, name) = apart(line)?;
         let want = format!("2:{col}: `{name}` {said}");
-        assert_eq!(compile("x: *mut u32, n: u32, s: u64", &body).unwrap_err(), want, "{line}");
+        assert_eq!(compile("x: *mut u32, n: u32, s: u64", &body).err().ok_or("compile gave Ok")?, want, "{line}");
     }
+    Ok(())
 }
 
 /// `ptxas` 13.5 takes each vector of [`FLOAT_FIRST`] that has the float first, and refuses the others, "Arguments
 /// mismatch". It fails the day `ptxas` takes or refuses one the other way, for GUIDE.md to say no more of that bug.
 #[test]
-fn ptxas_takes_a_special_register_of_bits_the_vector_does_not_take_after_a_float_known_now_and_refuses_it_before() {
+fn ptxas_takes_a_special_register_of_bits_the_vector_does_not_take_after_a_float_known_now_and_refuses_it_before()
+-> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     for (n, &(_, line, takes, _)) in FLOAT_FIRST.iter().enumerate() {
-        let run = assembled(&ptxas, &with_line(line), "sm_86", &format!("float_first_{n}"), &[]);
+        let run = assembled(&ptxas, &with_line(line)?, "sm_86", &format!("float_first_{n}"), &[])?;
         let said = String::from_utf8_lossy(&run.stderr);
         assert_eq!(run.status.success(), takes, "{line}: {said}");
         assert!(takes || said.contains("Arguments mismatch for instruction"), "{line}: {said}");
     }
+    Ok(())
 }
 
 /// An integer variable of the float's size in a vector of floats, beside no float: the data of `st`, the result of `ld`
@@ -1364,32 +1379,34 @@ const INTEGER_IN_FLOATS: [(&str, &str, &str); 12] = [
 /// kernite refuses each vector of [`INTEGER_IN_FLOATS`], at the vector, or the `[` of the coordinates, though `ptxas`
 /// takes it: an integer variable is not a float, whatever it is beside.
 #[test]
-fn an_integer_variable_in_a_vector_of_floats_is_refused_though_ptxas_takes_it() {
+fn an_integer_variable_in_a_vector_of_floats_is_refused_though_ptxas_takes_it() -> Result {
     for (line, _, said) in INTEGER_IN_FLOATS {
-        let (body, col, name) = apart(line);
+        let (body, col, name) = apart(line)?;
         let want = format!("2:{col}: `{name}` {said}");
-        assert_eq!(compile("x: *mut u32, n: u32, s: u64", &body).unwrap_err(), want, "{line}");
+        assert_eq!(compile("x: *mut u32, n: u32, s: u64", &body).err().ok_or("compile gave Ok")?, want, "{line}");
     }
+    Ok(())
 }
 
 /// `ptxas` 13.5 takes each vector of [`INTEGER_IN_FLOATS`], and refuses an integer variable alone, in `st.global.f32`
 /// and `ld.global.f32`: "Arguments mismatch". It fails the day `ptxas` refuses a vector or takes a variable alone, for
 /// GUIDE.md to say no more of that bug.
 #[test]
-fn ptxas_takes_an_integer_variable_in_a_vector_of_floats_and_refuses_it_alone() {
+fn ptxas_takes_an_integer_variable_in_a_vector_of_floats_and_refuses_it_alone() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     for (n, &(_, line, _)) in INTEGER_IN_FLOATS.iter().enumerate() {
-        let run = assembled(&ptxas, &with_line(line), "sm_86", &format!("integer_in_floats_{n}"), &[]);
+        let run = assembled(&ptxas, &with_line(line)?, "sm_86", &format!("integer_in_floats_{n}"), &[])?;
         assert!(run.status.success(), "{line}: {}", String::from_utf8_lossy(&run.stderr));
     }
     for (n, line) in ["st.global.f32 [%x], %i;", "ld.global.f32 %i, [%x];"].into_iter().enumerate() {
-        let run = assembled(&ptxas, &with_line(line), "sm_86", &format!("integer_alone_{n}"), &[]);
+        let run = assembled(&ptxas, &with_line(line)?, "sm_86", &format!("integer_alone_{n}"), &[])?;
         let said = String::from_utf8_lossy(&run.stderr);
         assert!(!run.status.success() && said.contains("Arguments mismatch for instruction"), "{line}: {said}");
     }
+    Ok(())
 }
 
 /// A place where an instruction reads a special register by its bits: its kernel, the line of PTX kernite writes for
@@ -1448,19 +1465,19 @@ fn places() -> Vec<Place> {
 /// `[s, (f, tid.x)]`, the coordinates of `tex` and `tld4`. kernite writes the line of each special register of the bits
 /// the place takes, and refuses the rest where the place has `@`.
 #[test]
-fn a_special_register_goes_where_its_bits_are_those_the_instruction_reads() {
+fn a_special_register_goes_where_its_bits_are_those_the_instruction_reads() -> Result {
     for place in places() {
-        let (before, after) = place.kernel.split_once('@').unwrap();
+        let (before, after) = place.kernel.split_once('@').ok_or("split_once gave None")?;
         for r in forms::sregs() {
             let after = after.replace('R', &r.name);
             let kernel = format!("{before}{after}");
             let body = format!("{TOGETHER_DECLARED} {kernel}");
             let got = compile("x: *mut u32, n: u32, s: u64", &body);
             if place.takes(r.ty.bits()) {
-                let ptx = got.unwrap_or_else(|e| panic!("{kernel}: {e}"));
+                let ptx = got.map_err(|e| format!("{kernel}: {e}"))?;
                 assert!(ptx.contains(&format!("\t{}\n", place.line.replace('R', &r.name))), "{kernel}: {ptx}");
             } else {
-                let name = before[..before.find('(').unwrap()].replace("._", ".");
+                let name = before.split_once('(').ok_or("split_once gave None")?.0.replace("._", ".");
                 let field = if after.starts_with(['(', '[']) { 0 } else { r.name.find('.').map_or(0, |dot| dot + 1) };
                 let col = body.len() - after.len() + 1 + field;
                 let want = format!(
@@ -1469,24 +1486,25 @@ fn a_special_register_goes_where_its_bits_are_those_the_instruction_reads() {
                     r.name,
                     with_article(r.ty.name())
                 );
-                assert_eq!(got.unwrap_err(), want, "{kernel}");
+                assert_eq!(got.err().ok_or("got gave Ok")?, want, "{kernel}");
             }
         }
     }
+    Ok(())
 }
 
 /// What `ptxas` says of each of `lines` of PTX, each in a kernel of its own that declares `u`, `x` and `s`, of 64 bits,
 /// `i`, a `u32`, `j`, an `s32`, `f` and `r0` to `r3`, of `f32`, and `d`, an `f64`, in one module of the newest PTX for
 /// `sm_86`: its first error, or `None` where it takes the line.
-fn said_of(ptxas: &Path, dir: &str, lines: &[String]) -> Vec<Option<String>> {
+fn said_of(ptxas: &Path, dir: &str, lines: &[String]) -> Result<Vec<Option<String>>> {
     const DECLARED: &str =
         ".reg .u64 %u, %x, %s;\n\t.reg .u32 %i;\n\t.reg .s32 %j;\n\t.reg .f32 %f, %r0, %r1, %r2, %r3;\n\t.reg .f64 %d;";
     let mut text = format!(".version {}\n.target sm_86\n.address_size 64\n\n", dotted(NEWEST));
     for (n, line) in lines.iter().enumerate() {
         text += &format!(".visible .entry k{n}()\n{{\n\t{DECLARED}\n\t{line}\n\tret;\n}}\n");
     }
-    let (refused, _) = assemble(ptxas, dir, &[(text, 86)]).remove(0);
-    (0..lines.len()).map(|n| refused.get(&format!("k{n}")).cloned()).collect()
+    let (refused, _) = assemble(ptxas, dir, &[(text, 86)])?.remove(0);
+    Ok((0..lines.len()).map(|n| refused.get(&format!("k{n}")).cloned()).collect())
 }
 
 /// `ptxas` 13.5 takes a special register as an integer, bits or a float of no more bits than it has, where an
@@ -1495,42 +1513,44 @@ fn said_of(ptxas: &Path, dir: &str, lines: &[String]) -> Vec<Option<String>> {
 /// `ptxas` takes one it refuses here, for kernite to take it too, or refuses one it takes, for kernite and GUIDE.md to
 /// say no more of it.
 #[test]
-fn ptxas_takes_a_special_register_where_its_bits_are_those_the_instruction_reads() {
+fn ptxas_takes_a_special_register_where_its_bits_are_those_the_instruction_reads() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     let mut cases = vec![];
     for place in places() {
         cases.extend(forms::sregs().iter().map(|r| (place.line.replace('R', &r.name), place.takes(r.ty.bits()))));
     }
     let lines: Vec<String> = cases.iter().map(|(line, _)| line.clone()).collect();
-    for ((line, takes), said) in cases.iter().zip(said_of(&ptxas, "wider", &lines)) {
+    for ((line, takes), said) in cases.iter().zip(said_of(&ptxas, "wider", &lines)?) {
         match said {
             None => assert!(takes, "ptxas takes `{line}`"),
             Some(said) => {
-                let op = line.split(['.', ' ']).next().unwrap();
+                let op = line.split(['.', ' ']).next().ok_or("next gave None")?;
                 assert!(!takes, "ptxas refuses `{line}`: {said}");
                 // The quote is left open, as `ptxas` names `sust.b` where `op` is `sust`.
                 assert!(said.contains(&format!("Arguments mismatch for instruction '{op}")), "{line}: {said}");
             }
         }
     }
+    Ok(())
 }
 
 /// `ptxas` 13.5 refuses each special register in `st` alone, which stores one only as one of a vector's: it says that a
 /// special register is not allowed there. It fails the day `ptxas` takes one, for kernite to take it too.
 #[test]
-fn ptxas_refuses_each_special_register_in_st_alone() {
+fn ptxas_refuses_each_special_register_in_st_alone() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     let lines: Vec<String> = forms::sregs().iter().map(|r| format!("st.global.b16 [%x], %{};", r.name)).collect();
-    for (line, said) in lines.iter().zip(said_of(&ptxas, "alone", &lines)) {
-        let said = said.unwrap_or_else(|| panic!("ptxas takes `{line}`"));
+    for (line, said) in lines.iter().zip(said_of(&ptxas, "alone", &lines)?) {
+        let said = said.ok_or_else(|| format!("ptxas takes `{line}`"))?;
         assert!(said.ends_with("Special register argument not allowed for instruction 'st'"), "{line}: {said}");
     }
+    Ok(())
 }
 
 /// The variables of [`TOGETHER`]: each type of 16, 32 and 64 bits that tells `ptxas` registers apart in a vector, and
@@ -1734,25 +1754,27 @@ const TOGETHER: [(&str, &str); 124] = [
 
 /// kernite writes each of [`TOGETHER`] as it is.
 #[test]
-fn a_vector_takes_registers_of_types_that_ptxas_takes_together() {
+fn a_vector_takes_registers_of_types_that_ptxas_takes_together() -> Result {
     for (inst, line) in TOGETHER {
-        let ptx = compile("x: *mut u32, n: u32, s: u64", &format!("{TOGETHER_DECLARED} {inst}")).unwrap();
+        let ptx = compile("x: *mut u32, n: u32, s: u64", &format!("{TOGETHER_DECLARED} {inst}"))?;
         assert!(ptx.contains(&format!("\t{line}\n")), "{inst}: {ptx}");
     }
+    Ok(())
 }
 
 /// `ptxas` takes each of [`TOGETHER`], as kernite writes it.
 #[test]
-fn ptxas_takes_each_vector_that_kernite_takes() {
+fn ptxas_takes_each_vector_that_kernite_takes() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     for (n, (inst, _)) in TOGETHER.into_iter().enumerate() {
-        let ptx = compile("x: *mut u32, n: u32, s: u64", &format!("{TOGETHER_DECLARED} {inst}")).unwrap();
-        let run = assembled(&ptxas, &ptx, "sm_86", &format!("together_{n}"), &["--warning-as-error"]);
+        let ptx = compile("x: *mut u32, n: u32, s: u64", &format!("{TOGETHER_DECLARED} {inst}"))?;
+        let run = assembled(&ptxas, &ptx, "sm_86", &format!("together_{n}"), &["--warning-as-error"])?;
         assert!(run.status.success(), "{inst}: {}", String::from_utf8_lossy(&run.stderr));
     }
+    Ok(())
 }
 
 /// Where an instruction moves or converts a float and takes no special register, whatever its bits: a `mov` of an `f32`
@@ -1788,39 +1810,41 @@ fn float_places() -> Vec<(String, String, String)> {
 /// which `mov` reads it. `ptxas` 13.5 takes none there: not a `b32` such as `envreg0` for an `f32`, and not a `u32`
 /// such as `tid.x`.
 #[test]
-fn a_special_register_in_a_mov_or_a_cvt_of_a_float_is_refused_at_the_register() {
+fn a_special_register_in_a_mov_or_a_cvt_of_a_float_is_refused_at_the_register() -> Result {
     for r in forms::sregs() {
         for (kernel, _, name) in float_places() {
             let body = kernel.replace('R', &r.name);
-            let col = body.rfind(&r.name).unwrap() + 1 + r.name.find('.').map_or(0, |dot| dot + 1);
+            let col = body.rfind(&r.name).ok_or("rfind gave None")? + 1 + r.name.find('.').map_or(0, |dot| dot + 1);
             let want = format!("2:{col}: `{name}` reads no special register; `mov.{}` does", r.ty.name());
-            assert_eq!(compile("", &body).unwrap_err(), want, "{body}");
+            assert_eq!(compile("", &body).err().ok_or("compile gave Ok")?, want, "{body}");
         }
     }
+    Ok(())
 }
 
 /// `ptxas` 13.5 refuses each special register where an instruction moves or converts a float, of the float's size or
 /// not: it says that a special register is not allowed there, or, for some, that the arguments mismatch. It fails the
 /// day `ptxas` takes one, for kernite to take it too.
 #[test]
-fn ptxas_refuses_each_special_register_in_a_mov_or_a_cvt_of_a_float() {
+fn ptxas_refuses_each_special_register_in_a_mov_or_a_cvt_of_a_float() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     let lines: Vec<String> = forms::sregs()
         .iter()
         .flat_map(|r| float_places().into_iter().map(move |(_, line, _)| line.replace('R', &r.name)))
         .collect();
-    for (line, said) in lines.iter().zip(said_of(&ptxas, "float_places", &lines)) {
-        let said = said.unwrap_or_else(|| panic!("ptxas takes `{line}`"));
-        let op = line.split(['.', ' ']).next().unwrap();
+    for (line, said) in lines.iter().zip(said_of(&ptxas, "float_places", &lines)?) {
+        let said = said.ok_or_else(|| format!("ptxas takes `{line}`"))?;
+        let op = line.split(['.', ' ']).next().ok_or("next gave None")?;
         assert!(
             said.ends_with(&format!("Special register argument not allowed for instruction '{op}'"))
                 || said.ends_with(&format!("Arguments mismatch for instruction '{op}'")),
             "{line}: {said}"
         );
     }
+    Ok(())
 }
 
 /// `ptxas` 13.5 refuses registers of two types in a vector, in each of `st`, also of floats, `ld`, `ldu`, `mov`,
@@ -1829,10 +1853,10 @@ fn ptxas_refuses_each_special_register_in_a_mov_or_a_cvt_of_a_float() {
 /// refuses. It fails the day `ptxas` takes a vector it refuses here, for kernite to take it too, or refuses one it
 /// takes, for the comment by kernite's rule and GUIDE.md to say no more of its bug.
 #[test]
-fn ptxas_checks_each_register_of_a_vector_against_its_neighbour_alone() {
+fn ptxas_checks_each_register_of_a_vector_against_its_neighbour_alone() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     let types = "Vector with elements of different types are not allowed in";
     let cases = [
@@ -1863,13 +1887,14 @@ fn ptxas_checks_each_register_of_a_vector_against_its_neighbour_alone() {
              \t{inst}\n\tret;\n}}\n",
             dotted(NEWEST)
         );
-        let run = assembled(&ptxas, &text, "sm_86", &format!("neighbour_{n}"), &[]);
+        let run = assembled(&ptxas, &text, "sm_86", &format!("neighbour_{n}"), &[])?;
         let said = String::from_utf8_lossy(&run.stderr);
         match refused {
             Some(words) => assert!(!run.status.success() && said.contains(&words), "{inst}: {said}"),
             None => assert!(run.status.success(), "{inst}: {said}"),
         }
     }
+    Ok(())
 }
 
 /// A `bf16x2` and a `tf32` where an instruction wants an integer or a float of 32 bits, and a `bf16` where one wants an
@@ -1944,8 +1969,8 @@ const KEPT: &str = r#"
 /// a call, and in a `ret`. Its code writes the variable as it is, with no `mov` beside it, and it is the code of the
 /// same kernels with a `b16` or `b32` in place of each.
 #[test]
-fn a_bf16_a_bf16x2_or_a_tf32_is_taken_where_the_b16_or_b32_it_is_kept_in_is() {
-    let ptx = kernite::ptx_str(KEPT).unwrap();
+fn a_bf16_a_bf16x2_or_a_tf32_is_taken_where_the_b16_or_b32_it_is_kept_in_is() -> Result {
+    let ptx = kernite::ptx_str(KEPT)?;
     for line in [
         "\tadd.u32 %i, %b, %i;\n",
         "\tadd.u32 %i, %t, %i;\n",
@@ -1986,37 +2011,40 @@ fn a_bf16_a_bf16x2_or_a_tf32_is_taken_where_the_b16_or_b32_it_is_kept_in_is() {
     }
     assert_eq!(ptx.matches("\tmov.").count(), KEPT.matches("mov.").count(), "a `mov` beside one: {ptx}");
     let bits = KEPT.replace(": bf16x2", ": b32").replace(": tf32", ": b32").replace(": bf16", ": b16");
-    assert_eq!(ptx, kernite::ptx_str(&bits).unwrap());
+    assert_eq!(ptx, kernite::ptx_str(&bits)?);
+    Ok(())
 }
 
 /// `ptxas` takes what kernite writes of [`KEPT`], at the `sm_80` that `fma.rn.bf16x2` needs.
 #[test]
-fn ptxas_assembles_a_bf16_a_bf16x2_and_a_tf32_as_the_b16_or_b32_they_are_kept_in() {
+fn ptxas_assembles_a_bf16_a_bf16x2_and_a_tf32_as_the_b16_or_b32_they_are_kept_in() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
-    let run = assembled(&ptxas, &kernite::ptx_str(KEPT).unwrap(), "sm_86", "kept", &["--warning-as-error"]);
+    let run = assembled(&ptxas, &kernite::ptx_str(KEPT)?, "sm_86", "kept", &["--warning-as-error"])?;
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    Ok(())
 }
 
 /// `ptxas` 13.5 takes a `.b32`, which a `tf32` is, for an operand of `fma.rn.bf16x2`, and refuses a `.u32`, an `.f32`
 /// and an `.f16x2`, as kernite does of a `u32`, an `f32` and an `f16x2`, in
 /// `a_wrong_operand_is_named_by_what_the_instruction_wants`.
 #[test]
-fn ptxas_takes_a_b32_for_an_operand_of_fma_rn_bf16x2_and_no_integer_or_float() {
+fn ptxas_takes_a_b32_for_an_operand_of_fma_rn_bf16x2_and_no_integer_or_float() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     for (ty, takes) in [("b32", true), ("u32", false), ("f32", false), ("f16x2", false)] {
         let text = format!(
             ".version 7.0\n.target sm_80\n.address_size 64\n\n.visible .entry k()\n{{\n\t.reg .b32 %b;\n\t.reg .{ty} \
              %x;\n\tmov.b32 %b, 0;\n\tmov.b32 %x, 0;\n\tfma.rn.bf16x2 %b, %x, %b, %b;\n\tret;\n}}\n"
         );
-        let run = assembled(&ptxas, &text, "sm_86", &format!("fma_of_{ty}"), &[]);
+        let run = assembled(&ptxas, &text, "sm_86", &format!("fma_of_{ty}"), &[])?;
         assert_eq!(run.status.success(), takes, "{ty}: {}", String::from_utf8_lossy(&run.stderr));
     }
+    Ok(())
 }
 
 /// A name of each instruction PTX's ISA has for the GPUs from `sm_20` to `sm_86`, by the
@@ -2025,7 +2053,7 @@ fn ptxas_takes_a_b32_for_an_operand_of_fma_rn_bf16x2_and_no_integer_or_float() {
 /// among them: its operands are what the function it calls takes, as
 /// `a_call_passes_what_the_function_takes_and_returns` checks.
 #[test]
-fn kernite_knows_every_instruction_ptx_has_for_sm_20_to_sm_86() {
+fn kernite_knows_every_instruction_ptx_has_for_sm_20_to_sm_86() -> Result {
     let isa = [
         // Integer arithmetic.
         "add.s32 sub.s32 mul.lo.s32 mad.lo.s32 mul24.lo.s32 mad24.lo.s32 sad.s32 div.s32 rem.s32 abs.s32 neg.s32 \
@@ -2076,23 +2104,23 @@ fn kernite_knows_every_instruction_ptx_has_for_sm_20_to_sm_86() {
     ];
     let names: Vec<&str> = isa.iter().flat_map(|s| s.split_whitespace()).collect();
     for name in &names {
-        if let Err(e) = forms::find(name) {
-            panic!("{name}: {e}");
-        }
+        forms::find(name).map_err(|e| format!("{name}: {e}"))?;
     }
     for form in forms::forms() {
         let op = Some(form.op);
         assert!(names.iter().any(|n| n.split('.').next() == op), "no name here is of `{}`", form.line);
     }
+    Ok(())
 }
 
 /// Each instruction of PTX's that [`forms::NEWER`] has is none that kernite knows, and each word
 /// none that a form of its instruction has, so that the error is the GPU it is for; and each GPU is
 /// newer than kernite writes for.
 #[test]
-fn what_is_for_newer_gpus_says_which() {
+fn what_is_for_newer_gpus_says_which() -> Result {
     for (gpu, items) in forms::NEWER.lines().filter_map(|l| l.split_once(": ")) {
-        let number: u32 = gpu["sm_".len()..].trim_end_matches(['a', 'f']).parse().unwrap();
+        let number: u32 =
+            gpu.strip_prefix("sm_").ok_or("strip_prefix gave None")?.trim_end_matches(['a', 'f']).parse()?;
         assert!(number > 86, "{gpu} is one kernite writes for");
         for item in items.split_whitespace() {
             let want = match item.split_once('.') {
@@ -2104,10 +2132,11 @@ fn what_is_for_newer_gpus_says_which() {
             assert_eq!(forms::find(item).err(), Some(want), "{item}");
         }
     }
+    Ok(())
 }
 
 #[test]
-fn a_wrong_name_is_named_by_what_ptx_has() {
+fn a_wrong_name_is_named_by_what_ptx_has() -> Result {
     let cases = [
         (
             "let v: f32; ld.f32.global(v, [x]);",
@@ -2165,8 +2194,9 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
         ),
     ];
     for (body, want) in cases {
-        assert_eq!(compile("x: *mut f32, n: u32, d: f64", body).unwrap_err(), want, "{body}");
+        assert_eq!(compile("x: *mut f32, n: u32, d: f64", body).err().ok_or("compile gave Ok")?, want, "{body}");
     }
+    Ok(())
 }
 
 /// `shfl` and `vote` without `.sync`, which PTX deprecated in 6.0, are refused wherever they are written, as
@@ -2175,7 +2205,7 @@ fn a_wrong_name_is_named_by_what_ptx_has() {
 /// makes it PTX 7.0 and `sm_75`. Each error says why, and names the form with `.sync`, whose last operand is a mask of
 /// lanes.
 #[test]
-fn shfl_and_vote_without_sync_are_refused_whichever_the_version_and_gpu() {
+fn shfl_and_vote_without_sync_are_refused_whichever_the_version_and_gpu() -> Result {
     let why = "is deprecated since PTX 6.0, and `ptxas` refuses it from PTX 6.4 on `sm_70` and newer, where the \
                threads of a warp need not run together";
     let cases = [
@@ -2194,21 +2224,25 @@ fn shfl_and_vote_without_sync_are_refused_whichever_the_version_and_gpu() {
                 "{line}:{column}: `{name}` {why}: `{canon}` takes a mask of lanes, the threads that take part, as its \
                  last operand"
             );
-            assert_eq!(compile("n: u32, f: f32", &format!("{before}{body}")).unwrap_err(), want, "{before}{body}");
+            assert_eq!(
+                compile("n: u32, f: f32", &format!("{before}{body}")).err().ok_or("compile gave Ok")?,
+                want,
+                "{before}{body}"
+            );
         }
     }
+    Ok(())
 }
 
 /// The three names GUIDE.md gives: `tex.2d` is `tex._2d`, `ld.global.L2::64B` is
 /// `ld.global.L2__64B`, and `cp.async` is `cp.r#async`.
 #[test]
-fn an_instructions_name_is_rusts_words() {
+fn an_instructions_name_is_rusts_words() -> Result {
     let ptx = compile(
         "p: *mut u32, t: u64, x: f32, y: f32",
         "let (r, g, b, a): (f32, f32, f32, f32); tex._2d.v4.f32.f32((r, g, b, a), [t, (x, y)]); let v: b32; \
          ld.global.L2__64B.b32(v, [p]); let tile: shared<[u32; 4], 16>; cp.r#async.ca.shared.global([tile], [p], 4);",
-    )
-    .unwrap();
+    )?;
     for line in [
         "\ttex.2d.v4.f32.f32 {%r, %g, %b, %a}, [%t, {%x, %y}];\n",
         "\tld.global.L2::64B.b32 %v, [%p];\n",
@@ -2216,10 +2250,11 @@ fn an_instructions_name_is_rusts_words() {
     ] {
         assert!(ptx.contains(line), "{line}{ptx}");
     }
+    Ok(())
 }
 
 #[test]
-fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
+fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() -> Result {
     let cases = [
         ("let i: u32; add.u32(i, n);", "2:17: `add.u32` takes 3 operands, not 2"),
         ("add.u32(_, n, n);", "2:9: `add.u32` has no result here that it may leave unwritten, `_`"),
@@ -2573,8 +2608,13 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() {
         ),
     ];
     for (body, want) in cases {
-        assert_eq!(compile("x: *mut f32, n: u32, h: f16, s: u64, z: f32", body).unwrap_err(), want, "{body}");
+        assert_eq!(
+            compile("x: *mut f32, n: u32, h: f16, s: u64, z: f32", body).err().ok_or("compile gave Ok")?,
+            want,
+            "{body}"
+        );
     }
+    Ok(())
 }
 
 /// The mask of lanes that `name` is refused for: thread 0 is in lane 0, and the mask has not.
@@ -2586,11 +2626,11 @@ fn without_lane_0(name: &str) -> String {
 }
 
 #[test]
-fn a_mask_known_now_without_lane_0_is_refused_where_thread_0_runs_the_instruction() {
+fn a_mask_known_now_without_lane_0_is_refused_where_thread_0_runs_the_instruction() -> Result {
     // Every kernel has a thread 0, and it is in lane 0. An instruction that no guard, `ret`,
     // call or jump keeps it from is run by it, with the mask given.
     assert_eq!(
-        compile("n: u32", "bar.warp.sync(2);").unwrap_err(),
+        compile("n: u32", "bar.warp.sync(2);").err().ok_or("compile gave Ok")?,
         "2:10: `bar.warp.sync` is run by thread 0, which is in lane 0; this mask leaves lane 0 out, and PTX leaves \
          the instruction undefined in a thread outside its mask"
     );
@@ -2626,12 +2666,13 @@ fn a_mask_known_now_without_lane_0_is_refused_where_thread_0_runs_the_instructio
     ];
     for (body, at, name) in cases {
         let want = format!("{at}: {}", without_lane_0(name));
-        assert_eq!(compile("x: *mut f32, n: u32", body).unwrap_err(), want, "{body}");
+        assert_eq!(compile("x: *mut f32, n: u32", body).err().ok_or("compile gave Ok")?, want, "{body}");
     }
+    Ok(())
 }
 
 #[test]
-fn a_mask_without_lane_0_is_taken_where_thread_0_may_not_run_the_instruction() {
+fn a_mask_without_lane_0_is_taken_where_thread_0_may_not_run_the_instruction() -> Result {
     let cases = [
         // Under a guard.
         "let p: pred; setp.eq.u32(p, n, 0); if p { bar.warp.sync(2); }",
@@ -2659,24 +2700,21 @@ fn a_mask_without_lane_0_is_taken_where_thread_0_may_not_run_the_instruction() {
         "bar.warp.sync(n);",
     ];
     for body in cases {
-        if let Err(e) = compile("x: *mut f32, n: u32", body) {
-            panic!("{body}: {e}");
-        }
+        compile("x: *mut f32, n: u32", body).map_err(|e| format!("{body}: {e}"))?;
     }
     // After a call, which may end the thread, or keep it for ever.
     let ptx = kernite::ptx_str(
         "unsafe extern \"ptx-kernel\" fn k() { call(nothing); bar.warp.sync(2); }\n\
          extern \"ptx-func\" fn nothing() {}\n",
-    )
-    .unwrap();
+    )?;
     assert!(ptx.contains("\tcall nothing;\n\tbar.warp.sync 2;\n"), "{ptx}");
     // In a function kernels call, which thread 0 runs wherever it runs a call of it.
     let ptx = kernite::ptx_str(
         "unsafe extern \"ptx-kernel\" fn k() { call(warp); }\n\
          extern \"ptx-func\" fn warp() { bar.warp.sync(2); }\n",
-    )
-    .unwrap();
+    )?;
     assert!(ptx.contains("\tbar.warp.sync 2;\n\tret;\n}\n"), "{ptx}");
+    Ok(())
 }
 
 /// Each form with a mask of lanes is marked: those of `bar.warp.sync`, `vote.sync`, `match.sync`,
@@ -2694,7 +2732,7 @@ fn a_mask_of_lanes_is_marked_in_each_form_that_has_one() {
 }
 
 #[test]
-fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
+fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() -> Result {
     let cases = [
         ("", ".version 3.0 .target sm_30"),
         ("let i: u32; popc.b32(i, n);", ".version 3.0 .target sm_30"),
@@ -2768,20 +2806,20 @@ fn a_module_is_of_the_oldest_ptx_and_gpu_its_instructions_need() {
         ("mov.u64(y, k);", ".version 3.1 .target sm_35"),
     ];
     for (body, want) in cases {
-        let ptx = compile("x: *mut f32, n: u32, f: f32, y: u64", body).unwrap();
+        let ptx = compile("x: *mut f32, n: u32, f: f32, y: u64", body)?;
         let header: Vec<&str> = ptx.lines().filter(|l| l.starts_with(".version") || l.starts_with(".target")).collect();
         assert_eq!(header.join(" "), want, "{body}");
     }
+    Ok(())
 }
 
 #[test]
-fn a_fragment_is_braced_even_when_it_is_one_register() {
+fn a_fragment_is_braced_even_when_it_is_one_register() -> Result {
     let ptx = compile(
         "y: u64, n: u32",
         "let (d, e): (b32, b32); ldmatrix.sync.aligned.m8n8.x1.b16(d, [y]); ldmatrix.sync.aligned.m8n8.x1.b16((e,), \
          [y]); let (a, b): (s32, s32); mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32((a, b), d, (e,), (0, n));",
-    )
-    .unwrap();
+    )?;
     for line in [
         "\tldmatrix.sync.aligned.m8n8.x1.b16 {%d}, [%y];\n",
         "\tldmatrix.sync.aligned.m8n8.x1.b16 {%e}, [%y];\n",
@@ -2789,18 +2827,18 @@ fn a_fragment_is_braced_even_when_it_is_one_register() {
     ] {
         assert!(ptx.contains(line), "{line}{ptx}");
     }
+    Ok(())
 }
 
 #[test]
-fn an_operand_is_written_wherever_ptxas_takes_it() {
+fn an_operand_is_written_wherever_ptxas_takes_it() -> Result {
     let ptx = compile(
         "x: *mut f32, n: u32",
         "let d: u32; selp.u32(d, n, 0, 7); st.global.v2.u32([x], (tid.x, tid.y)); let (a, b, c, e): (s32, s32, s32, \
          s32); mma.sync.aligned.m16n8k16.row.col.s32.u8.u8.s32((a, b, c, e), (n, 8), n, (0, 0, 0, 0)); \
          cp.async.ca.shared.global([n], [n], 4); brx.idx(1, (one, two)); label(one); label(two); \
          mul24.lo.s32(a, a, 0xffff_ffff);",
-    )
-    .unwrap();
+    )?;
     for line in [
         "\tselp.u32 %d, %n, 0, 1;\n",
         "\tst.global.v2.u32 [%x], {%tid.x, %tid.y};\n",
@@ -2811,16 +2849,16 @@ fn an_operand_is_written_wherever_ptxas_takes_it() {
     ] {
         assert!(ptx.contains(line), "{line}{ptx}");
     }
+    Ok(())
 }
 
 #[test]
-fn a_part_of_a_variable_is_written_after_it() {
+fn a_part_of_a_variable_is_written_after_it() -> Result {
     let ptx = compile(
         "n: u32",
         "let (d, e): (u32, s32); vadd.u32.u32.u32.sat(d.h1, n.b0, n.h1, n); vmad.s32.u32.u32.shr7(e, -n.b3, n, n); \
          vadd4.u32.u32.u32(d.b32, n.b7654, n.b3210, d);",
-    )
-    .unwrap();
+    )?;
     for line in [
         "\tvadd.u32.u32.u32.sat %d.h1, %n.b0, %n.h1, %n;\n",
         "\tvmad.s32.u32.u32.shr7 %e, -%n.b3, %n, %n;\n",
@@ -2828,6 +2866,7 @@ fn a_part_of_a_variable_is_written_after_it() {
     ] {
         assert!(ptx.contains(line), "{line}{ptx}");
     }
+    Ok(())
 }
 
 /// Kernels that jump through tables of labels, under a guard and not.
@@ -2870,15 +2909,16 @@ const TABLES: &str = r#"
 "#;
 
 #[test]
-fn a_jump_through_a_table_declares_the_table_before_it() {
-    let ptx = kernite::ptx_str(TABLES).unwrap();
-    let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
+fn a_jump_through_a_table_declares_the_table_before_it() -> Result {
+    let ptx = kernite::ptx_str(TABLES)?;
+    let (head, entries) = ptx.split_once(".visible .entry ").ok_or("split_once gave None")?;
     assert!(head.contains(".version 6.0\n.target sm_30\n"), "{head}");
-    let (pick, parity) = entries.split_once(".visible .entry ").unwrap();
+    let (pick, parity) = entries.split_once(".visible .entry ").ok_or("split_once gave None")?;
     let line = "\t$T0: .branchtargets $L0, $L1, $L2;\n\t@%p brx.idx.uni %n, $T0;\n\tret;\n$L0:\n";
     assert!(pick.contains(line), "{line}{pick}");
     let line = "\t$T0: .branchtargets $L0, $L1;\n\tbrx.idx %i, $T0;\n$L0:\n";
     assert!(parity.contains(line), "{line}{parity}");
+    Ok(())
 }
 
 const SURFACES: &str = r#"
@@ -2950,9 +2990,9 @@ const TEXTURES: &str = r#"
 "#;
 
 #[test]
-fn a_texture_is_its_handle_in_brackets_with_the_coordinates_in_it() {
-    let ptx = kernite::ptx_str(TEXTURES).unwrap();
-    let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
+fn a_texture_is_its_handle_in_brackets_with_the_coordinates_in_it() -> Result {
+    let ptx = kernite::ptx_str(TEXTURES)?;
+    let (head, entries) = ptx.split_once(".visible .entry ").ok_or("split_once gave None")?;
     assert!(head.contains(".version 3.1\n.target sm_30\n"), "{head}");
     for line in [
         "\ttex.level.2d.v4.f32.f32 {%r, _, _, _}, [%t, {%x, 0f3F000000}], 0f00000000;\n",
@@ -2961,12 +3001,13 @@ fn a_texture_is_its_handle_in_brackets_with_the_coordinates_in_it() {
     ] {
         assert!(entries.contains(line), "{line}{entries}");
     }
+    Ok(())
 }
 
 #[test]
-fn a_surface_is_its_handle_in_brackets_with_the_coordinates_in_it() {
-    let ptx = kernite::ptx_str(SURFACES).unwrap();
-    let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
+fn a_surface_is_its_handle_in_brackets_with_the_coordinates_in_it() -> Result {
+    let ptx = kernite::ptx_str(SURFACES)?;
+    let (head, entries) = ptx.split_once(".visible .entry ").ok_or("split_once gave None")?;
     assert!(head.contains(".version 3.1\n.target sm_30\n"), "{head}");
     for line in [
         "\tsuld.b.2d.v4.b32.clamp {%r, %g, %b, %a}, [%from, {%x, %y}];\n",
@@ -2976,31 +3017,33 @@ fn a_surface_is_its_handle_in_brackets_with_the_coordinates_in_it() {
     ] {
         assert!(entries.contains(line), "{line}{entries}");
     }
+    Ok(())
 }
 
 /// PTX's ISA has a cache operation on `sust.b`, and none on `sust.p`, which `ptxas` takes one
 /// on too.
 #[test]
-fn sust_p_takes_a_cache_operation_as_sust_b_has() {
+fn sust_p_takes_a_cache_operation_as_sust_b_has() -> Result {
     let ptx = compile(
         "s: u64, x: i32, y: i32",
         "let v: b32; mov.b32(v, 7); sust.b._2d.cg.b32.trap([s, (x, y)], v); sust.p._2d.cg.b32.trap([s, (x, y)], v);",
-    )
-    .unwrap();
+    )?;
     for line in ["\tsust.b.2d.cg.b32.trap [%s, {%x, %y}], %v;\n", "\tsust.p.2d.cg.b32.trap [%s, {%x, %y}], %v;\n"] {
         assert!(ptx.contains(line), "{line}{ptx}");
     }
+    Ok(())
 }
 
 #[test]
-fn a_kernel_takes_pointers_and_numbers_and_returns_nothing() {
-    let e = compile("x: bool", "").unwrap_err();
+fn a_kernel_takes_pointers_and_numbers_and_returns_nothing() -> Result {
+    let e = compile("x: bool", "").err().ok_or("compile gave Ok")?;
     assert_eq!(
         e,
         "1:36: a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, `f32` and `f64`, not `bool`"
     );
-    let e = kernite::ptx_str("unsafe extern \"ptx-kernel\" fn k() -> f32 {}").unwrap_err();
+    let e = kernite::ptx_str("unsafe extern \"ptx-kernel\" fn k() -> f32 {}").err().ok_or("ptx_str gave Ok")?;
     assert_eq!(e, "1:38: a GPU kernel returns nothing, not `f32`: it writes what it works out to memory");
+    Ok(())
 }
 
 /// A kernel's pointer is an address on the GPU whatever it points to: an array, a pointer, a tuple,
@@ -3008,19 +3051,18 @@ fn a_kernel_takes_pointers_and_numbers_and_returns_nothing() {
 /// a tuple that ends in one, is two words in Rust, and an error; and a function takes no pointer
 /// at all, whatever it points to.
 #[test]
-fn a_kernel_takes_a_pointer_to_any_type() {
+fn a_kernel_takes_a_pointer_to_any_type() -> Result {
     let ptx = compile(
         "shape: *const [usize; 3], out: *mut *const f32, pair: *const (u32, u32), cell: *const Cell<u8, 2>",
         "let v: u64; ld.global.u64(v, [shape + 8]); st.global.u64([out], v); st.global.u64([pair], v);\n\
          st.global.u64([cell], v);",
-    )
-    .unwrap();
+    )?;
     for (i, name) in ["shape", "out", "pair", "cell"].iter().enumerate() {
         let part = format!("\tld.param.u64 %{name}, [k_param_{i}];\n\tcvta.to.global.u64 %{name}, %{name};\n");
         assert!(ptx.contains(&part), "{part}\nin\n{ptx}");
     }
     for to in ["()", "(u32,)", "(u32, u32)"] {
-        compile(&format!("p: *const {to}"), "").unwrap();
+        compile(&format!("p: *const {to}"), "")?;
     }
     for to in [
         "[f32]",
@@ -3037,28 +3079,32 @@ fn a_kernel_takes_a_pointer_to_any_type() {
         let why = format!(
             "a pointer to `{to}` has two words, an address and a length or a table, and a kernel's pointer has one"
         );
-        assert_eq!(compile(&format!("p: *const {to}"), "").unwrap_err(), format!("1:36: {why}"), "{to}");
+        assert_eq!(
+            compile(&format!("p: *const {to}"), "").err().ok_or("compile gave Ok")?,
+            format!("1:36: {why}"),
+            "{to}"
+        );
     }
     let func = "a function takes and returns PTX's types, an address is a `u64`";
     for to in ["[usize; 3]", "[f32]", "str", "dyn Foo", "(dyn A + Send)", "f32"] {
         let src = format!("extern \"ptx-func\" fn f(a: *const {to}) {{}}");
         let want = format!("1:27: {func}; not `*const {to}`");
-        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "function {to}");
+        assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, want, "function {to}");
     }
+    Ok(())
 }
 
 /// A type may hold an arrow, `->`, one operator whose `>` ends no type and closes no `<`: a pointer to
 /// a function's pointer, or to a type with one among its arguments, is an address as any pointer is,
 /// and the parameter after it is the next.
 #[test]
-fn a_kernel_takes_a_pointer_to_a_type_that_holds_an_arrow() {
+fn a_kernel_takes_a_pointer_to_a_type_that_holds_an_arrow() -> Result {
     for params in [
         "call: *const fn(u32) -> u32, table: *mut Pair<fn() -> u8, 2>, \
          boxed: *const Box<dyn Fn(u8) -> u8 + Send>, n: u64",
         "call: *const fn(u32)->u32, table: *mut Pair<fn()->&u8,2>, boxed: *const Box<dyn Fn(u8)->u8+Send>,n: u64",
     ] {
-        let ptx =
-            compile(params, "st.global.u64([call], n); st.global.u64([table], n); st.global.u64([boxed], n);").unwrap();
+        let ptx = compile(params, "st.global.u64([call], n); st.global.u64([table], n); st.global.u64([boxed], n);")?;
         for (i, name) in ["call", "table", "boxed"].iter().enumerate() {
             let part = format!("\tld.param.u64 %{name}, [k_param_{i}];\n\tcvta.to.global.u64 %{name}, %{name};\n");
             assert!(ptx.contains(&part), "{part}\nin\n{ptx}");
@@ -3069,10 +3115,14 @@ fn a_kernel_takes_a_pointer_to_a_type_that_holds_an_arrow() {
     let why = format!(
         "a pointer to `{to}` has two words, an address and a length or a table, and a kernel's pointer has one"
     );
-    assert_eq!(compile("p: *const dyn Fn(u8)->u8, n: u64", "").unwrap_err(), format!("1:36: {why}"));
+    assert_eq!(compile("p: *const dyn Fn(u8)->u8, n: u64", "").err().ok_or("compile gave Ok")?, format!("1:36: {why}"));
     let func = "a function takes and returns PTX's types, an address is a `u64`";
     let src = "extern \"ptx-func\" fn f(a: *const fn(u32)->u32) {}";
-    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:27: {func}; not `*const fn(u32) -> u32`"));
+    assert_eq!(
+        kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?,
+        format!("1:27: {func}; not `*const fn(u32) -> u32`")
+    );
+    Ok(())
 }
 
 /// A type in a message is written as Rust writes it, whatever the source spaced: a parameter by
@@ -3080,7 +3130,7 @@ fn a_kernel_takes_a_pointer_to_a_type_that_holds_an_arrow() {
 /// or spaced, as the messages of rustc write them. So is the length of an array, but where kernite takes the type
 /// of a parameter or a variable apart, and works the length out.
 #[test]
-fn a_type_in_a_message_is_written_as_rust_writes_it() {
+fn a_type_in_a_message_is_written_as_rust_writes_it() -> Result {
     let takes = "a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, `f32` and `f64`, not";
     for (params, ty) in [
         ("a: [usize;3]", "[usize; 3]"),
@@ -3115,36 +3165,46 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
         ("a: Marker<{}>", "Marker<{}>"),
         ("a: Marker<{ }>", "Marker<{ }>"),
     ] {
-        assert_eq!(compile(params, "").unwrap_err(), format!("1:36: {takes} `{ty}`"), "{params}");
+        assert_eq!(compile(params, "").err().ok_or("compile gave Ok")?, format!("1:36: {takes} `{ty}`"), "{params}");
     }
     // The rows of the review, each packed and spaced, in a block and as a macro's arguments.
     for (ty, quoted) in quotes::quoted() {
-        assert_eq!(compile(&format!("a: {ty}"), "").unwrap_err(), format!("1:36: {takes} `{quoted}`"), "{ty}");
+        assert_eq!(
+            compile(&format!("a: {ty}"), "").err().ok_or("compile gave Ok")?,
+            format!("1:36: {takes} `{quoted}`"),
+            "{ty}"
+        );
     }
-    // The length of an array is worked out in the type of a parameter that is an array or a name with arguments,
-    // and in those of its elements and arguments that are, `[usize; 6]`; its names are the module's. In any other
-    // type, a tuple, a reference or a path, it is written as its source has it.
+    // The length of an array is worked out in the type of a parameter that is an array, a reference to one or a name
+    // with arguments, and in those of its elements and arguments that are, `[usize; 6]`; its names are the module's.
+    // In any other type, a tuple, a reference to another type or a path, it is written as its source has it.
     for (ty, quoted) in [
         ("(u8,[usize;N*2])", "(u8, [usize; N*2])"),
         ("(u8,[usize; N * 2])", "(u8, [usize; N * 2])"),
         ("(u8,[usize ;(N+1)/2 ])", "(u8, [usize; (N+1)/2])"),
         ("(u8,[usize;!0usize&N])", "(u8, [usize; !0usize&N])"),
         ("(u8,[usize;\n    N * // twice\n    2\n])", "(u8, [usize; N * 2])"),
-        ("&[usize;N*2]", "&[usize; N*2]"),
-        ("&mut [usize;N * 2]", "&mut [usize; N * 2]"),
+        ("&(u8,[usize;N*2])", "&(u8, [usize; N*2])"),
+        ("&mut (u8,[usize;N * 2])", "&mut (u8, [usize; N * 2])"),
         ("a::Wrap<[usize;N*2]>", "a::Wrap<[usize; N*2]>"),
         ("Wrap<(u8,[usize;N*2])>", "Wrap<(u8, [usize; N*2])>"),
         ("[(u8,[usize;N*2]);2]", "[(u8, [usize; N*2]); 2]"),
         ("[usize;N*2]", "[usize; 6]"),
+        ("&[usize;N*2]", "&[usize; 6]"),
+        ("&mut [usize;N * 2]", "&mut [usize; 6]"),
+        ("&[[usize;N*2];2]", "&[[usize; 6]; 2]"),
         ("Wrap<[usize;N*2]>", "Wrap<[usize; 6]>"),
         ("[[usize;N*2];2]", "[[usize; 6]; 2]"),
         ("Wrap<Wrap<[usize;N*2]>>", "Wrap<Wrap<[usize; 6]>>"),
     ] {
         let src = format!("const N: usize = 3;\nunsafe extern \"ptx-kernel\" fn k(a: {ty}) {{}}\n");
-        assert_eq!(kernite::ptx_str(&src).unwrap_err(), format!("2:36: {takes} `{quoted}`"), "{ty}");
+        assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, format!("2:36: {takes} `{quoted}`"), "{ty}");
     }
     let two = "has two words, an address and a length or a table, and a kernel's pointer has one";
-    assert_eq!(compile("p: *const dyn A+Send", "").unwrap_err(), format!("1:36: a pointer to `dyn A + Send` {two}"));
+    assert_eq!(
+        compile("p: *const dyn A+Send", "").err().ok_or("compile gave Ok")?,
+        format!("1:36: a pointer to `dyn A + Send` {two}")
+    );
     for (to, quoted) in [
         ("dyn Tr<N={3}>", "dyn Tr<N = {3}>"),
         ("dyn Tr<N={ 3 }>", "dyn Tr<N = { 3 }>"),
@@ -3153,41 +3213,51 @@ fn a_type_in_a_message_is_written_as_rust_writes_it() {
         ("dyn Tr<Item<X> =u8>", "dyn Tr<Item<X> = u8>"),
     ] {
         let why = format!("1:36: a pointer to `{quoted}` {two}");
-        assert_eq!(compile(&format!("p: *const {to}"), "").unwrap_err(), why, "{to}");
+        assert_eq!(compile(&format!("p: *const {to}"), "").err().ok_or("compile gave Ok")?, why, "{to}");
     }
     let src = "unsafe extern \"ptx-kernel\" fn k() -> (u32,u32) {}";
     let returns = "a GPU kernel returns nothing, not `(u32, u32)`: it writes what it works out to memory";
-    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:38: {returns}"));
+    assert_eq!(kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?, format!("1:38: {returns}"));
     for (ty, quoted) in
         [("(u8,Marker<{N*2}>)", "(u8, Marker<{N*2}>)"), ("(u8,Marker<{ N * 2 }>)", "(u8, Marker<{ N * 2 }>)")]
     {
         let src = format!("unsafe extern \"ptx-kernel\" fn k() -> {ty} {{}}");
         let returns = format!("a GPU kernel returns nothing, not `{quoted}`: it writes what it works out to memory");
-        assert_eq!(kernite::ptx_str(&src).unwrap_err(), format!("1:38: {returns}"), "{ty}");
+        assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, format!("1:38: {returns}"), "{ty}");
     }
     // In a result the length of an array is as the source has it; in the type of a variable, worked out.
     let src = "const N: usize = 3;\nunsafe extern \"ptx-kernel\" fn k() -> [usize;N*2] {}";
     let returns = "a GPU kernel returns nothing, not `[usize; N*2]`: it writes what it works out to memory";
-    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("2:38: {returns}"));
+    assert_eq!(kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?, format!("2:38: {returns}"));
     let vars = "PTX variables are `pred`, `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, \
                 `bf16x2`, `tf32`, `f32` and `f64`, not";
     let src = "const N: usize = 3;\nunsafe extern \"ptx-kernel\" fn k() { let v: Wrap<[usize;N*2]>; }";
-    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("2:44: {vars} `Wrap<[usize; 6]>`"));
+    assert_eq!(kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?, format!("2:44: {vars} `Wrap<[usize; 6]>`"));
     let src = "const N: usize = 3;\nunsafe extern \"ptx-kernel\" fn k() { let v: a::Wrap<[usize;N*2]>; }";
-    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("2:44: {vars} `a::Wrap<[usize; N*2]>`"));
-    assert_eq!(compile("", "let v: *const[u8;4];").unwrap_err(), format!("2:8: {vars} `*const [u8; 4]`"));
-    assert_eq!(compile("", "let v: fn(u32)->u32;").unwrap_err(), format!("2:8: {vars} `fn(u32) -> u32`"));
-    assert_eq!(compile("", "let v: m!(a+b);").unwrap_err(), format!("2:8: {vars} `m!(a+b)`"));
-    assert_eq!(compile("", "let v: m!(a + b);").unwrap_err(), format!("2:8: {vars} `m!(a + b)`"));
-    assert_eq!(compile("", "let v: (u8,Marker<{N*2}>);").unwrap_err(), format!("2:8: {vars} `(u8, Marker<{{N*2}}>)`"));
+    assert_eq!(kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?, format!("2:44: {vars} `a::Wrap<[usize; N*2]>`"));
+    assert_eq!(
+        compile("", "let v: *const[u8;4];").err().ok_or("compile gave Ok")?,
+        format!("2:8: {vars} `*const [u8; 4]`")
+    );
+    assert_eq!(
+        compile("", "let v: fn(u32)->u32;").err().ok_or("compile gave Ok")?,
+        format!("2:8: {vars} `fn(u32) -> u32`")
+    );
+    assert_eq!(compile("", "let v: m!(a+b);").err().ok_or("compile gave Ok")?, format!("2:8: {vars} `m!(a+b)`"));
+    assert_eq!(compile("", "let v: m!(a + b);").err().ok_or("compile gave Ok")?, format!("2:8: {vars} `m!(a + b)`"));
+    assert_eq!(
+        compile("", "let v: (u8,Marker<{N*2}>);").err().ok_or("compile gave Ok")?,
+        format!("2:8: {vars} `(u8, Marker<{{N*2}}>)`")
+    );
     let funcs = "a function takes and returns PTX's types, as its variables are: `u32`, `f32`, `b64`; not";
     let src = "extern \"ptx-func\" fn f(a: [usize;3]) {}";
-    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:27: {funcs} `[usize; 3]`"));
+    assert_eq!(kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?, format!("1:27: {funcs} `[usize; 3]`"));
+    Ok(())
 }
 
 /// A kernel says which items of its module it names, and where: in its directives, then in its body.
 #[test]
-fn a_kernel_names_the_items_it_names() {
+fn a_kernel_names_the_items_it_names() -> Result {
     let src = r#"
         const ONE: f32 = 1.0;
         const THREADS: u32 = 64;
@@ -3200,10 +3270,17 @@ fn a_kernel_names_the_items_it_names() {
             st.global.f32([x], v);
         }
     "#;
-    let module = kernite::lang::parse(src).unwrap();
-    let k = kernite::ptx(&module, kernite::function(&module, "k").unwrap(), &[], "").unwrap();
+    let module = kernite::lang::parse(src)?;
+    let k = kernite::ptx(&module, kernite::function(&module, "k").ok_or("function gave None")?, &[], "")?;
     let named: Vec<_> = k.mentions.iter().map(|m| (m.name.as_str(), m.span.0 as usize)).collect();
-    assert_eq!(named, [("THREADS", src.find("THREADS)]").unwrap()), ("ONE", src.find("ONE);").unwrap())]);
+    assert_eq!(
+        named,
+        [
+            ("THREADS", src.find("THREADS)]").ok_or("find gave None")?),
+            ("ONE", src.find("ONE);").ok_or("find gave None")?)
+        ]
+    );
+    Ok(())
 }
 
 /// Functions the kernels call, and a kernel that calls them each way PTX does.
@@ -3285,7 +3362,7 @@ const CALLS: &str = r#"
 "#;
 
 #[test]
-fn a_function_comes_out_as_ptx_writes_it() {
+fn a_function_comes_out_as_ptx_writes_it() -> Result {
     let src = r#"
         pub unsafe extern "ptx-kernel" fn first(x: *mut u32, n: u32) {
             let (a, g): (u32, u32);
@@ -3353,9 +3430,9 @@ fn a_function_comes_out_as_ptx_writes_it() {
 \tret;
 }
 ";
-    assert_eq!(kernite::ptx_str(src).unwrap(), want);
+    assert_eq!(kernite::ptx_str(src)?, want);
     // Each way to call one, and what a function of no value and one that never returns are.
-    let ptx = kernite::ptx_str(CALLS).unwrap();
+    let ptx = kernite::ptx_str(CALLS)?;
     for text in [
         ".version 6.4\n.target sm_35\n",
         "\n.func (.param .u32 odd_retval) odd(\n\t.param .u32 odd_param_0\n);\n\n.func (.param .u32 even_retval) even(",
@@ -3373,6 +3450,7 @@ fn a_function_comes_out_as_ptx_writes_it() {
     ] {
         assert!(ptx.contains(text), "{text}\nin\n{ptx}");
     }
+    Ok(())
 }
 
 /// Kernels and functions that name each other, forward and back, kernels that share what a
@@ -3459,9 +3537,10 @@ fn every_set(entries: &[Entry], statics: &[Static]) -> Vec<(u32, Made, Made)> {
                 Kept::Code(i) => has(i),
                 Kept::Static(j) => has(entries.len() + j),
             };
-            let code: Vec<Entry> = (0..entries.len()).filter(|&i| has(i)).map(|i| entries[i].clone()).collect();
+            let code: Vec<Entry> =
+                entries.iter().enumerate().filter(|&(i, _)| has(i)).map(|(_, e)| e.clone()).collect();
             let memory: Vec<Static> =
-                (0..statics.len()).filter(|&j| has(entries.len() + j)).map(|j| statics[j].clone()).collect();
+                statics.iter().enumerate().filter(|&(j, _)| has(entries.len() + j)).map(|(_, s)| s.clone()).collect();
             (set, assembly.text(&kept), kernite_ptx::module(&code, &memory).whole())
         })
         .collect()
@@ -3473,9 +3552,11 @@ fn put_together(assembly: &Assembly, kept: &[usize]) -> Result<String, String> {
 }
 
 /// `names` compiled, each a kernel or a function of `source`.
-fn compiled(source: &str, names: &[&str]) -> Vec<Entry> {
-    let module = kernite::lang::parse(source).unwrap();
-    let compile = |name| kernite::ptx(&module, kernite::function(&module, name).unwrap(), &[], "").unwrap().code;
+fn compiled(source: &str, names: &[&str]) -> Result<Vec<Entry>> {
+    let module = kernite::lang::parse(source)?;
+    let compile = |name| -> Result<_> {
+        Ok(kernite::ptx(&module, kernite::function(&module, name).ok_or("function gave None")?, &[], "")?.code)
+    };
     names.iter().copied().map(compile).collect()
 }
 
@@ -3485,11 +3566,14 @@ fn compiled(source: &str, names: &[&str]) -> Vec<Entry> {
 /// static whose name in PTX is a function's is refused where both are kept, and where one is, the
 /// other's module has it.
 #[test]
-fn a_module_put_together_from_what_is_kept_is_the_module_of_what_is_kept_alone() {
-    let module = kernite::lang::parse(PARTS).unwrap();
-    let mut statics: Vec<Static> = kernite::ptx_statics(&module, "").into_iter().map(|s| s.unwrap().code).collect();
-    statics.push(Static::new("S", "odd", "global<u32>").unwrap());
-    let entries = compiled(PARTS, &["first", "second", "gcd", "even", "odd", "reverse"]);
+fn a_module_put_together_from_what_is_kept_is_the_module_of_what_is_kept_alone() -> Result {
+    let module = kernite::lang::parse(PARTS)?;
+    let mut statics = vec![];
+    for made in kernite::ptx_statics(&module, "") {
+        statics.push(made.map_err(|e| format!("{e:?}"))?.code);
+    }
+    statics.push(Static::new("S", "odd", "global<u32>")?);
+    let entries = compiled(PARTS, &["first", "second", "gcd", "even", "odd", "reverse"])?;
     let modules = every_set(&entries, &statics);
     for (set, together, alone) in &modules {
         assert_eq!(together, alone, "{set:b}");
@@ -3500,6 +3584,7 @@ fn a_module_put_together_from_what_is_kept_is_the_module_of_what_is_kept_alone()
     assert_eq!((made, modules.len() - made), (384, 128));
     let both = |it| matches!(it, Kept::Code(4) | Kept::Static(2));
     assert_eq!(kernite_ptx::module(&entries, &statics).text(&both), Err("`S` is `odd` in PTX, as `odd` is".into()));
+    Ok(())
 }
 
 /// Kernels that need more of PTX and of the GPU, one after another, and the last two the same GPU.
@@ -3535,8 +3620,8 @@ const NEEDS: &str = r#"
 /// the module of it alone is: its `.version` and `.target` are the oldest that have every
 /// instruction of the kernels kept, and the floor if none is.
 #[test]
-fn a_module_put_together_from_what_is_kept_is_of_the_ptx_and_gpu_it_needs() {
-    let entries = compiled(NEEDS, &["plain", "half", "sleep", "tanh", "wait", "arrive"]);
+fn a_module_put_together_from_what_is_kept_is_of_the_ptx_and_gpu_it_needs() -> Result {
+    let entries = compiled(NEEDS, &["plain", "half", "sleep", "tanh", "wait", "arrive"])?;
     for (set, together, alone) in every_set(&entries, &[]) {
         assert!(together.is_ok(), "{set:b}");
         assert_eq!(together, alone, "{set:b}");
@@ -3559,8 +3644,9 @@ fn a_module_put_together_from_what_is_kept_is_of_the_ptx_and_gpu_it_needs() {
         (&[0, 1, 2, 3, 4, 5], ".version 7.1 .target sm_80"),
     ];
     for (kept, want) in cases {
-        assert_eq!(header(&put_together(&assembly, kept).unwrap()), want, "kept {kept:?}");
+        assert_eq!(header(&put_together(&assembly, kept)?), want, "kept {kept:?}");
     }
+    Ok(())
 }
 
 /// A function with an instruction for a newer GPU, and the one kernel that calls it, beside a
@@ -3588,18 +3674,19 @@ const HELPED: &str = r#"
 /// and `sm_75`, which `fast` needs, and `plain` alone is of the floor. In each set of the three the
 /// module put together is the module of that set alone.
 #[test]
-fn a_function_kept_sets_the_header_though_the_kernel_that_calls_it_is_left_out() {
-    let entries = compiled(HELPED, &["plain", "shine", "fast"]);
+fn a_function_kept_sets_the_header_though_the_kernel_that_calls_it_is_left_out() -> Result {
+    let entries = compiled(HELPED, &["plain", "shine", "fast"])?;
     for (set, together, alone) in every_set(&entries, &[]) {
         assert!(together.is_ok(), "{set:b}");
         assert_eq!(together, alone, "{set:b}");
     }
     let assembly = kernite_ptx::module(&entries, &[]);
-    let with_function = put_together(&assembly, &[0, 2]).unwrap();
+    let with_function = put_together(&assembly, &[0, 2])?;
     assert_eq!(header(&with_function), ".version 7.0 .target sm_75");
     assert!(with_function.contains(".func (.param .f32 fast_retval) fast("), "{with_function}");
     assert!(!with_function.contains(".entry shine("), "{with_function}");
-    assert_eq!(header(&put_together(&assembly, &[0]).unwrap()), ".version 3.0 .target sm_30");
+    assert_eq!(header(&put_together(&assembly, &[0])?), ".version 3.0 .target sm_30");
+    Ok(())
 }
 
 /// A kernel and a function each compiled for every instance their `#[instances(..)]` lists,
@@ -3641,8 +3728,8 @@ const INSTANCES: &str = r#"
 "#;
 
 #[test]
-fn each_instance_is_a_kernel_of_its_own_named_as_cpp_names_it() {
-    let ptx = kernite::ptx_str(INSTANCES).unwrap();
+fn each_instance_is_a_kernel_of_its_own_named_as_cpp_names_it() -> Result {
+    let ptx = kernite::ptx_str(INSTANCES)?;
     for text in [
         ".visible .entry _Z5shiftILj1EE(\n\t.param .u64 _Z5shiftILj1EE_param_0\n)\n",
         "\tld.param.u64 %x, [_Z5shiftILj1EE_param_0];\n",
@@ -3661,9 +3748,10 @@ fn each_instance_is_a_kernel_of_its_own_named_as_cpp_names_it() {
         assert!(ptx.contains(text), "{text}\nin\n{ptx}");
     }
     // In a scope, as `#[kernels]` names them, each name is in it.
-    let module = kernite::lang::parse(INSTANCES).unwrap();
+    let module = kernite::lang::parse(INSTANCES)?;
     let scope = kernite::ptx_scope(&["kernite", "app", "gpu"]);
-    let uses = kernite::ptx(&module, kernite::function(&module, "uses").unwrap(), &[], &scope).unwrap().code;
+    let uses =
+        kernite::ptx(&module, kernite::function(&module, "uses").ok_or("function gave None")?, &[], &scope)?.code;
     assert_eq!(uses.program.name, "_ZN7kernite3app3gpu4usesE");
     assert_eq!(
         uses.calls,
@@ -3674,6 +3762,7 @@ fn each_instance_is_a_kernel_of_its_own_named_as_cpp_names_it() {
         ]
     );
     assert!(uses.text().contains("\tmov.u64 %k, _ZN7kernite3app3gpu5shiftILj8EEE;\n"));
+    Ok(())
 }
 
 /// NVIDIA's demangler, beside `ptxas`, which Nsight and `cuda-gdb` demangle as.
@@ -3689,46 +3778,50 @@ fn cuobjdump() -> Option<PathBuf> {
 }
 
 /// What `cuobjdump` prints, with `flag`, of the cubin `name`, which `assembled` made.
-fn dumped(tool: &Path, name: &str, flag: &str) -> String {
+fn dumped(tool: &Path, name: &str, flag: &str) -> Result<String> {
     let cubin = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.cubin"));
-    let run = Command::new(tool).arg(flag).arg(cubin).output().unwrap();
+    let run = Command::new(tool).arg(flag).arg(cubin).output()?;
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
-    String::from_utf8(run.stdout).unwrap()
+    Ok(String::from_utf8(run.stdout)?)
 }
 
 /// The size in bytes of the section `section` of the cubin `name`, if it has one: from the table `cuobjdump -elf`
 /// prints, whose columns are `Index Offset Size ES Align Type Flags Link Info Name`, the sizes in hex.
-fn section_size(tool: &Path, name: &str, section: &str) -> Option<u64> {
-    dumped(tool, name, "-elf").lines().find_map(|line| {
+fn section_size(tool: &Path, name: &str, section: &str) -> Result<Option<u64>> {
+    let size = dumped(tool, name, "-elf")?.lines().find_map(|line| {
         let columns: Vec<&str> = line.split_whitespace().collect();
-        (columns.len() == 10 && columns[9] == section).then(|| u64::from_str_radix(columns[2], 16).unwrap())
-    })
+        match columns[..] {
+            [_, _, size, _, _, _, _, _, _, name] if name == section => Some(u64::from_str_radix(size, 16)),
+            _ => None,
+        }
+    });
+    Ok(size.transpose()?)
 }
 
 /// The instructions of the cubin `name`, as `cuobjdump -sass` prints them, each without its address and its encoding.
-fn instructions(tool: &Path, name: &str) -> Vec<String> {
+fn instructions(tool: &Path, name: &str) -> Result<Vec<String>> {
     let line = |line: &str| {
         let (address, rest) = line.trim().strip_prefix("/*")?.split_once("*/")?;
         address.chars().all(|c| c.is_ascii_hexdigit()).then_some(())?;
         Some(rest.split("/*").next()?.trim().trim_end_matches(';').trim().to_string())
     };
-    dumped(tool, name, "-sass").lines().filter_map(line).collect()
+    Ok(dumped(tool, name, "-sass")?.lines().filter_map(line).collect())
 }
 
 #[test]
-fn the_tools_that_read_ptx_show_each_name_as_rust_has_it() {
+fn the_tools_that_read_ptx_show_each_name_as_rust_has_it() -> Result {
     let Some(filt) = cu_filt() else {
         eprintln!("no cu++filt beside ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
-    let module = kernite::lang::parse(INSTANCES).unwrap();
+    let module = kernite::lang::parse(INSTANCES)?;
     // A name that is no name in C++ is made one.
     let scope = kernite::ptx_scope(&["my-workspace", "my_app", "gpu"]);
     let mut symbols = vec![];
     for name in ["shift", "uses", "affine"] {
-        let f = kernite::function(&module, name).unwrap();
-        for args in kernite::lang::instances(&module, f).unwrap() {
-            symbols.push(kernite::ptx(&module, f, &args, &scope).unwrap().code.program.name);
+        let f = kernite::function(&module, name).ok_or("function gave None")?;
+        for args in kernite::lang::instances(&module, f)? {
+            symbols.push(kernite::ptx(&module, f, &args, &scope)?.code.program.name);
         }
     }
     let mut want = vec![
@@ -3762,20 +3855,21 @@ fn the_tools_that_read_ptx_show_each_name_as_rust_has_it() {
     symbols.push(kernite_ptx::symbol("", "tile", &[Value::Int(4, None), Value::Bool(true)]));
     want.push("tile<(int)4, (bool)1>".into());
     // A static, as a variable of its namespace.
-    let statics = kernite::lang::parse(STATICS).unwrap();
-    symbols.push(kernite::ptx_statics(&statics, &scope).remove(0).unwrap().code.memory.name);
+    let statics = kernite::lang::parse(STATICS)?;
+    symbols.push(kernite::ptx_statics(&statics, &scope).remove(0)?.code.memory.name);
     want.push("my_workspace::my_app::gpu::COUNTS".into());
     // The shared memory a launch gives, as the kernel's static.
-    let shared = kernite::lang::parse(SHARED).unwrap();
-    let reverse = kernite::function(&shared, "reverse").unwrap();
-    symbols.push(kernite::ptx(&shared, reverse, &[], &scope).unwrap().code.memory.remove(0).name);
+    let shared = kernite::lang::parse(SHARED)?;
+    let reverse = kernite::function(&shared, "reverse").ok_or("function gave None")?;
+    symbols.push(kernite::ptx(&shared, reverse, &[], &scope)?.code.memory.remove(0).name);
     want.push("my_workspace::my_app::gpu::reverse::buf".into());
     // A name beyond ASCII as Rust's legacy mangling writes it.
     symbols.push(kernite_ptx::symbol(&kernite::ptx_scope(&["app", "мо"]), "σ", &[Value::Bool(false)]));
     want.push("app::$u43c$$u43e$::$u3c3$<(bool)0>".into());
-    let shown = Command::new(&filt).args(&symbols).output().unwrap();
-    let shown = String::from_utf8(shown.stdout).unwrap();
+    let shown = Command::new(&filt).args(&symbols).output()?;
+    let shown = String::from_utf8(shown.stdout)?;
     assert_eq!(shown.lines().collect::<Vec<_>>(), want, "{symbols:?}");
+    Ok(())
 }
 
 /// A kernel, its parameter, its variables and its memory named beyond ASCII, which PTX's names
@@ -3797,8 +3891,8 @@ const NAMES: &str = r#"
 "#;
 
 #[test]
-fn a_name_beyond_ascii_is_written_as_rust_writes_one_in_a_symbol() {
-    let ptx = kernite::ptx_str(NAMES).unwrap();
+fn a_name_beyond_ascii_is_written_as_rust_writes_one_in_a_symbol() -> Result {
+    let ptx = kernite::ptx_str(NAMES)?;
     for text in [
         ".extern .shared .align 4 .b8 _ZZ6$u3b4$E18$u431$$u443$$u444$[];\n",
         ".visible .entry $u3b4$(\n\t.param .u64 $u3b4$_param_0\n)\n",
@@ -3812,17 +3906,18 @@ fn a_name_beyond_ascii_is_written_as_rust_writes_one_in_a_symbol() {
     }
     // In a scope as well, as kernite-cuda writes a module's path.
     assert_eq!(kernite::ptx_scope(&["app", "мо"]), "3app12$u43c$$u43e$");
-    let module = kernite::lang::parse(NAMES).unwrap();
-    let delta = kernite::function(&module, "δ").unwrap();
-    let entry = kernite::ptx(&module, delta, &[], &kernite::ptx_scope(&["kernite", "app"])).unwrap().code;
+    let module = kernite::lang::parse(NAMES)?;
+    let delta = kernite::function(&module, "δ").ok_or("function gave None")?;
+    let entry = kernite::ptx(&module, delta, &[], &kernite::ptx_scope(&["kernite", "app"]))?.code;
     assert_eq!(entry.program.name, "_ZN7kernite3app6$u3b4$E");
     assert!(entry.text().contains("\tst.shared.f32 [_ZZN7kernite3app6$u3b4$EE18$u431$$u443$$u444$], %$u3c3$;\n"));
+    Ok(())
 }
 
 /// A variable's register is named after it, with `_` after the name of a special register, one
 /// kernite reads or one it reads none of, and then a number if another register has the name.
 #[test]
-fn a_variable_named_as_a_special_register_takes_a_trailing_underscore() {
+fn a_variable_named_as_a_special_register_takes_a_trailing_underscore() -> Result {
     let src = r#"
         pub unsafe extern "ptx-kernel" fn k(out: *mut u32) {
             let clusterid: u32;
@@ -3860,14 +3955,15 @@ fn a_variable_named_as_a_special_register_takes_a_trailing_underscore() {
 \tret;
 }
 ";
-    assert_eq!(kernite::ptx_str(src).unwrap(), want);
+    assert_eq!(kernite::ptx_str(src)?, want);
+    Ok(())
 }
 
 #[test]
-fn ptxas_takes_a_function_that_never_returns_from_ptx_6_4_and_sm_30() {
+fn ptxas_takes_a_function_that_never_returns_from_ptx_6_4_and_sm_30() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     let src = r#"
         unsafe extern "ptx-kernel" fn k(n: u32) {
@@ -3882,22 +3978,23 @@ fn ptxas_takes_a_function_that_never_returns_from_ptx_6_4_and_sm_30() {
             exit();
         }
     "#;
-    let text = kernite::ptx_str(src).unwrap();
+    let text = kernite::ptx_str(src)?;
     assert!(text.contains("\n.version 6.4\n.target sm_30\n"), "{text}");
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("never");
-    std::fs::create_dir_all(&dir).unwrap();
-    assert_eq!(refused(&ptxas, &text, gpu_of(&text), &dir.join("needs")).0, BTreeMap::new());
+    std::fs::create_dir_all(&dir)?;
+    assert_eq!(refused(&ptxas, &text, gpu_of(&text)?, &dir.join("needs"))?.0, BTreeMap::new());
     for (v, sm) in [(63, 30), (64, 20)] {
         let older = retarget(&text, v, sm);
-        assert!(!refused(&ptxas, &older, gpu_of(&older), &dir.join(format!("{v}-{sm}"))).0.is_empty(), "{v} {sm}");
+        assert!(!refused(&ptxas, &older, gpu_of(&older)?, &dir.join(format!("{v}-{sm}")))?.0.is_empty(), "{v} {sm}");
     }
+    Ok(())
 }
 
 /// The path that calls `halt` ends there, and the one that calls `back` goes on: so `v` is
 /// written on each path that reaches its store, and `first` returns a value on each that
 /// reaches its end, only where the call is of `halt`.
 #[test]
-fn a_call_of_a_function_that_never_returns_ends_its_callers_path_there() {
+fn a_call_of_a_function_that_never_returns_ends_its_callers_path_there() -> Result {
     let src = |kernel_calls: &str, first_calls: &str| {
         format!(
             "unsafe extern \"ptx-kernel\" fn k(x: *mut u32, n: u32) {{\n\
@@ -3921,13 +4018,17 @@ fn a_call_of_a_function_that_never_returns_ends_its_callers_path_there() {
              extern \"ptx-func\" fn back() {{}}\n"
         )
     };
-    let ptx = kernite::ptx_str(&src("halt", "halt")).unwrap();
+    let ptx = kernite::ptx_str(&src("halt", "halt"))?;
     assert!(ptx.contains("\t@%p ret;\n\tcall halt;\n}\n"), "{ptx}");
-    assert_eq!(kernite::ptx_str(&src("back", "halt")).unwrap_err(), "2:9: `v` is read before anything writes it");
     assert_eq!(
-        kernite::ptx_str(&src("halt", "back")).unwrap_err(),
+        kernite::ptx_str(&src("back", "halt")).err().ok_or("ptx_str gave Ok")?,
+        "2:9: `v` is read before anything writes it"
+    );
+    assert_eq!(
+        kernite::ptx_str(&src("halt", "back")).err().ok_or("ptx_str gave Ok")?,
         "12:22: control reaches the end of `first`, which returns a `u32`: `ret(v)` gives it back"
     );
+    Ok(())
 }
 
 /// The kernel `k` around `body`, before the functions it may call, compiled, or the error.
@@ -3951,7 +4052,7 @@ fn calling(body: &str) -> Result<String, String> {
 }
 
 #[test]
-fn a_call_passes_what_the_function_takes_and_returns() {
+fn a_call_passes_what_the_function_takes_and_returns() -> Result {
     let cases = [
         ("call(n, first, (n,));", "2:16: `first` takes 2 arguments, not 1"),
         ("call(n, first, (n, f));", "2:16: `first` takes a `u32` as argument 2; this is an `f32` variable"),
@@ -4031,14 +4132,15 @@ fn a_call_passes_what_the_function_takes_and_returns() {
         ("let a: f16; mov.b16(a, 1); call(short, (a));", "2:40: `short` takes a `u16`; this is an `f16` variable"),
     ];
     for (body, want) in cases {
-        assert_eq!(calling(body).unwrap_err(), want, "{body}");
+        assert_eq!(calling(body).err().ok_or("calling gave Ok")?, want, "{body}");
     }
+    Ok(())
 }
 
 /// A helper takes a variable of the type its parameter has, or a part of one of that type, or the memory its parameter
 /// names; each message says the type of the variable it is given with its article.
 #[test]
-fn a_helper_takes_what_its_parameter_names() {
+fn a_helper_takes_what_its_parameter_names() -> Result {
     let cases = [
         ("takes_u(f);", "2:9: `a`: an `f32` variable is no `u32`"),
         ("takes_f(n);", "2:9: `a`: a `u32` variable is no `f32`"),
@@ -4048,12 +4150,13 @@ fn a_helper_takes_what_its_parameter_names() {
         ("takes_m(n);", "2:9: `a`: a `u32` variable is no memory, `shared<[u32; 4]>`"),
     ];
     for (body, want) in cases {
-        assert_eq!(calling(body).unwrap_err(), want, "{body}");
+        assert_eq!(calling(body).err().ok_or("calling gave Ok")?, want, "{body}");
     }
+    Ok(())
 }
 
 #[test]
-fn a_function_takes_and_returns_ptx_types() {
+fn a_function_takes_and_returns_ptx_types() -> Result {
     let cases = [
         (
             "extern \"ptx-func\" fn f(p: pred) {}",
@@ -4101,8 +4204,17 @@ fn a_function_takes_and_returns_ptx_types() {
         ),
     ];
     for (src, want) in cases {
-        assert_eq!(kernite::ptx_str(src).unwrap_err(), want, "{src}");
+        assert_eq!(kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?, want, "{src}");
     }
+    // Control does not reach the end of a body that ends in a jump, or in a jump through a table, as one that spins for
+    // ever does.
+    for src in [
+        "extern \"ptx-func\" fn f() -> ! { label(spin); bra(spin); }",
+        "extern \"ptx-func\" fn f(n: u32) -> ! { label(spin); brx.idx(n, (spin,)); }",
+    ] {
+        kernite::ptx_str(src).map_err(|e| format!("{src}: {e}"))?;
+    }
+    Ok(())
 }
 
 /// How an instance gives its operands.
@@ -4180,7 +4292,8 @@ fn names(form: &Form) -> Vec<(String, Vec<Option<usize>>)> {
         .iter()
         .map(|e| e.optional.then_some(None).into_iter().chain((0..e.alts.len()).map(Some)).collect())
         .collect();
-    let first: Vec<Option<usize>> = options.iter().map(|o| o[0]).collect();
+    // Each element's first choice: none for one that is optional, and its first word for any other, which has one.
+    let first: Vec<Option<usize>> = options.iter().map(|o| o.first().copied().flatten()).collect();
     let mut choices = vec![first.clone()];
     if form.checks.contains(&Check::Cvt) {
         choices = vec![vec![]];
@@ -4197,16 +4310,17 @@ fn names(form: &Form) -> Vec<(String, Vec<Option<usize>>)> {
                 .collect();
         }
     } else {
+        // `c` with its `i`th choice `x` instead.
+        let set = |c: &[Option<usize>], i: usize, x: Option<usize>| -> Vec<Option<usize>> {
+            c.iter().enumerate().map(|(k, &was)| if k == i { x } else { was }).collect()
+        };
         for (i, oi) in options.iter().enumerate() {
             for &a in oi {
-                let mut c = first.clone();
-                c[i] = a;
+                let c = set(&first, i, a);
                 choices.push(c.clone());
                 for (j, oj) in options.iter().enumerate().skip(i + 1) {
                     for &b in oj {
-                        let mut d = c.clone();
-                        d[j] = b;
-                        choices.push(d);
+                        choices.push(set(&c, j, b));
                     }
                 }
             }
@@ -4215,7 +4329,11 @@ fn names(form: &Form) -> Vec<(String, Vec<Option<usize>>)> {
     let mut names: Vec<(String, Vec<Option<usize>>)> = choices
         .into_iter()
         .map(|c| {
-            let words = form.elems.iter().zip(&c).filter_map(|(e, k)| k.map(|k| e.alts[k].words.join(".")));
+            let words = form
+                .elems
+                .iter()
+                .zip(&c)
+                .filter_map(|(e, k)| k.and_then(|k| e.alts.get(k)).map(|alt| alt.words.join(".")));
             (std::iter::once(form.op.to_string()).chain(words).collect::<Vec<_>>().join("."), c)
         })
         .collect();
@@ -4250,18 +4368,18 @@ fn value(t: Ty, spec: &Spec) -> Option<Given<Var>> {
 
 /// The module's memory the instances reach: 256 bytes at a multiple of 32, as a fragment
 /// `wmma` loads is, in global memory, `g`, and in constant memory, `c`.
-fn statics() -> [Static; 2] {
-    [("g", "global"), ("c", "constant")]
-        .map(|(name, space)| Static::new(name, name, &format!("{space}<[u8; 256], 32>")).unwrap())
+fn statics() -> Result<[Static; 2]> {
+    let one = |name: &str, space: &str| Static::new(name, name, &format!("{space}<[u8; 256], 32>"));
+    Ok([one("g", "global")?, one("c", "constant")?])
 }
 
 /// Kernel `k{n}`, which names the module's memory, [`statics`].
-fn kernel(n: usize) -> Kernel {
+fn kernel(n: usize) -> Result<Kernel> {
     let mut kernel = Kernel::new(format!("k{n}"), format!("k{n}"));
-    for s in statics() {
+    for s in statics()? {
         kernel.module_memory(&s);
     }
-    kernel
+    Ok(kernel)
 }
 
 /// An instance being made: the kernel, and whether its operands differ from those of
@@ -4284,36 +4402,36 @@ struct Making {
 }
 
 impl Making {
-    fn var(&mut self, t: Ty) -> Var {
+    fn var(&mut self, t: Ty) -> Result<Var> {
         self.vars += 1;
-        self.kernel.var(&format!("v{}", self.vars), t.name()).unwrap()
+        Ok(self.kernel.var(&format!("v{}", self.vars), t.name())?)
     }
 
     /// Memory of 256 bytes at a multiple of 32, as a fragment `wmma` loads is: the module's,
     /// [`statics`], for `.global` and `.const`, and else the kernel's, in local memory for
     /// `.local` and in shared memory otherwise.
-    fn memory(&mut self, space: Space) -> Var {
+    fn memory(&mut self, space: Space) -> Result<Var> {
         match space {
-            Space::Global => return self.kernel.global("g").unwrap(),
-            Space::Const => return self.kernel.global("c").unwrap(),
+            Space::Global => return Ok(self.kernel.global("g")?),
+            Space::Const => return Ok(self.kernel.global("c")?),
             _ => {}
         }
         self.vars += 1;
         let space = if space == Space::Local { "local" } else { "shared" };
-        self.kernel.var(&format!("s{}", self.vars), &format!("{space}<[u8; 256], 32>")).unwrap()
+        Ok(self.kernel.var(&format!("s{}", self.vars), &format!("{space}<[u8; 256], 32>"))?)
     }
 
     /// A variable of type `t` for `spec`: in [`Style::Parts`], a part of one where it may be,
     /// and negated where it may be; in [`Style::Packed`], an `f16x2` for the one it says, in
     /// [`Style::PackedPart`] a part of it where it may be one, and in [`Style::PackedNeg`] negated where it may be;
     /// and an `f16x2` if `all`.
-    fn reg(&mut self, spec: &Spec, t: Ty, style: Style, all: bool) -> Given<Var> {
+    fn reg(&mut self, spec: &Spec, t: Ty, style: Style, all: bool) -> Result<Given<Var>> {
         let packable = matches!(t.kind(), Kind::Unsigned | Kind::Signed);
         let alone = matches!(style, Style::Packed(k) | Style::PackedPart(k) | Style::PackedNeg(k) if k == self.ints);
         self.ints += usize::from(packable);
         let packed = packable && (all || alone);
         self.differs |= packed && matches!(style, Style::Packed(_) | Style::PackedAll(_));
-        let mut v = self.var(if packed && !self.retype { Ty::F16x2 } else { t });
+        let mut v = self.var(if packed && !self.retype { Ty::F16x2 } else { t })?;
         if let (true, Var::Reg { reg, .. }) = (packed, &v) {
             self.packed.push(reg.id as usize);
             self.packed_place.clone_from(&self.place);
@@ -4322,17 +4440,17 @@ impl Making {
             && (style == Style::Parts || packed && matches!(style, Style::PackedPart(_)))
         {
             self.differs = true;
-            v = self.kernel.field(v, example(sel)).unwrap();
+            v = self.kernel.field(v, example(sel))?;
         }
         if spec.neg && (style == Style::Parts || packed && matches!(style, Style::PackedNeg(_))) {
             self.differs = true;
-            return Given::Neg(Box::new(Given::Var(v)));
+            return Ok(Given::Neg(Box::new(Given::Var(v))));
         }
-        Given::Var(v)
+        Ok(Given::Var(v))
     }
 
     /// The operand `spec` of `b`, as `style` gives it.
-    fn operand(&mut self, b: &Bound, spec: &Spec, style: Style) -> Given<Var> {
+    fn operand(&mut self, b: &Bound, spec: &Spec, style: Style) -> Result<Given<Var>> {
         let lanes = match spec.count {
             Count::One => 1,
             Count::Fixed(n) => n,
@@ -4352,15 +4470,17 @@ impl Making {
             }
             let t = match spec.lead {
                 Some(lead) if k == 0 => lead,
-                _ => b.ty(spec.ty.expect("a register's operand has a type")),
+                _ => b
+                    .ty(spec.ty.ok_or("a register's operand has no type")?)
+                    .ok_or("a name gives its operand no type")?,
             };
             let part = if spec.memory {
-                Some(Given::Var(self.memory(b.space())))
+                Some(Given::Var(self.memory(b.space())?))
             } else if style == Style::Sinks && sink && !self.sunk {
                 self.sunk = true;
                 Some(Given::Special("_".into()))
             } else if style == Style::Sinks && spec.not && t == Ty::Pred {
-                Some(Given::Not(Box::new(Given::Var(self.var(t)))))
+                Some(Given::Not(Box::new(Given::Var(self.var(t)?))))
             } else if style == Style::Values && spec.role == Role::Src && !spec.reg_only && !(spec.one_var && k == 0) {
                 value(t, spec)
             } else if style == Style::Specials
@@ -4384,22 +4504,28 @@ impl Making {
                 None
             };
             self.differs |= part.is_some() && !spec.memory;
-            parts.push(part.unwrap_or_else(|| self.reg(spec, t, style, all)));
+            parts.push(match part {
+                Some(part) => part,
+                None => self.reg(spec, t, style, all)?,
+            });
         }
-        match lanes {
-            1 => parts.pop().expect("one"),
+        Ok(match lanes {
+            1 => parts.pop().ok_or("an operand has no part")?,
             _ => Given::Vector(parts),
-        }
+        })
     }
 }
+
+/// What [`instance`] makes: the kernel and the place of its `f16x2` register, or kernite's refusal of it.
+type Instance = Result<(Entry, String), String>;
 
 /// Kernel `k{n}`, of the one instruction `name`, of form `b`, its operands as `style` gives
 /// them; `None` if they would be those of [`Style::Vars`]; else kernite's refusal. With `retype`, an `f16x2` that
 /// the style gives is a register of the type the form gives, declared `.f16x2` after. The kernel comes with the place
 /// of its `f16x2` register: which operand of which line of the table.
-fn instance(n: usize, name: &str, b: &Bound, style: Style, retype: bool) -> Option<Result<(Entry, String), String>> {
+fn instance(n: usize, name: &str, b: &Bound, style: Style, retype: bool) -> Result<Option<Instance>> {
     let mut m = Making {
-        kernel: kernel(n),
+        kernel: kernel(n)?,
         vars: 0,
         differs: false,
         sunk: false,
@@ -4411,8 +4537,8 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style, retype: bool) -> Opti
         packed_place: String::new(),
     };
     m.kernel.callee("f", "f", Callee::Calls(Prototype { params: vec![], returns: Returns::Nothing }));
-    let addr = m.kernel.var("a", "u64").unwrap();
-    let narrow = (style == Style::Narrow).then(|| m.kernel.var("n", "u32").unwrap());
+    let addr = m.kernel.var("a", "u64")?;
+    let narrow = if style == Style::Narrow { Some(m.kernel.var("n", "u32")?) } else { None };
     let mut spaces = b.spaces().into_iter();
     let mut args = vec![];
     for (i, spec) in b.form.operands.iter().enumerate().filter(|(_, s)| s.when.is_none_or(|w| b.has(w))) {
@@ -4426,24 +4552,20 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style, retype: bool) -> Opti
             Role::Labels => Given::Vector(vec![Given::Label(0), Given::Label(1)]),
             Role::Func => Given::Func("f".into()),
             Role::Handle => {
-                let items: Vec<Given<Var>> = spec
-                    .inner
-                    .iter()
-                    .enumerate()
-                    .map(|(j, s)| {
-                        m.place = format!("operand {}.{} of `{}`", i + 1, j + 1, b.form.line);
-                        m.operand(b, s, style)
-                    })
-                    .collect();
+                let mut items = vec![];
+                for (j, s) in spec.inner.iter().enumerate() {
+                    m.place = format!("operand {}.{} of `{}`", i + 1, j + 1, b.form.line);
+                    items.push(m.operand(b, s, style)?);
+                }
                 match items.as_slice() {
                     &[Given::Var(t)] => Given::Mem(Address { base: Some(t), index: None, disp: 0 }),
                     _ => Given::List(items),
                 }
             }
-            Role::Addr(_) => match spaces.next().expect("a space for each address") {
+            Role::Addr(_) => match spaces.next().ok_or("an address has no space")? {
                 s @ (Space::Shared | Space::Local | Space::Global | Space::Const) if style == Style::Memory => {
                     m.differs = true;
-                    Given::Mem(Address { base: Some(m.memory(s)), index: None, disp: 32 })
+                    Given::Mem(Address { base: Some(m.memory(s)?), index: None, disp: 32 })
                 }
                 s if !s.wide() || b.form.checks.contains(&Check::Addr32) => match narrow {
                     Some(n) => {
@@ -4465,7 +4587,8 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style, retype: bool) -> Opti
             Role::Imm(imm @ Imm::Of(_)) => {
                 let values = imm.values();
                 m.differs |= style == Style::Values && values.len() > 1;
-                Given::Int(if style == Style::Values { values[values.len() - 1] } else { values[0] }.into())
+                let value = if style == Style::Values { values.last() } else { values.first() };
+                Given::Int(value.copied().ok_or("an immediate has no value")?.into())
             }
             Role::Imm(Imm::Pow2(p)) => {
                 m.differs |= matches!(style, Style::Least | Style::Most);
@@ -4476,84 +4599,87 @@ fn instance(n: usize, name: &str, b: &Bound, style: Style, retype: bool) -> Opti
                 })
             }
             Role::Dst | Role::Src => {
-                let first = m.operand(b, spec, style);
+                let first = m.operand(b, spec, style)?;
                 match &spec.second {
                     Some((_, true)) if matches!(style, Style::Short | Style::Single) => {
                         m.differs = true;
                         first
                     }
-                    Some((second, _)) => Given::Pair(Box::new(first), Box::new(m.operand(b, second, style))),
+                    Some((second, _)) => Given::Pair(Box::new(first), Box::new(m.operand(b, second, style)?)),
                     None => first,
                 }
             }
         });
     }
     if style != Style::Vars && !m.differs {
-        return None;
+        return Ok(None);
     }
     if let Err(f) = m.kernel.inst(name, &args, None) {
-        return Some(Err(format!("kernite refuses `{name}` as {style:?}: {}", f.message)));
+        return Ok(Some(Err(format!("kernite refuses `{name}` as {style:?}: {}", f.message))));
     }
     if b.form.operands.iter().any(|s| matches!(s.role, Role::Label | Role::Labels)) {
         m.kernel.label(0);
         m.kernel.label(1);
     }
-    m.kernel.end().unwrap();
+    m.kernel.end()?;
     let mut entry = m.kernel.finish();
     if retype {
         for id in m.packed {
-            entry.regs[id].1 = Ty::F16x2;
+            entry.regs.get_mut(id).ok_or("get_mut gave None")?.1 = Ty::F16x2;
         }
         entry.needs = entry.needs.and(Ty::F16x2.needs());
     }
-    Some(Ok((entry, m.packed_place)))
+    Ok(Some(Ok((entry, m.packed_place))))
 }
 
 /// Kernel `k{n}` of the one instruction `name`, of `form` with the words `choice`, written
 /// as kernite would write it if it took it: for a name it refuses, which `ptxas` should too.
-fn by_hand(n: usize, name: &str, form: &'static Form, choice: Vec<Option<usize>>) -> String {
+fn by_hand(n: usize, name: &str, form: &'static Form, choice: Vec<Option<usize>>) -> Result<String> {
     let mut types = vec![];
     for (e, k) in form.elems.iter().zip(&choice) {
         if let (Some(slot), Some(k)) = (e.slot, k) {
             types.resize(types.len().max(slot + 1), Ty::Pred);
-            types[slot] = Ty::parse(e.alts[*k].words[0]).expect("a type's word is its name");
+            let word = e.alts.get(*k).and_then(|alt| alt.words.first()).ok_or("an alternative has no word")?;
+            let ty = Ty::parse(word).ok_or_else(|| format!("`{word}` is no type"))?;
+            *types.get_mut(slot).ok_or("get_mut gave None")? = ty;
         }
     }
     let b = Bound { form, choice, types, needs: Needs::default() };
     let mut regs = vec![];
-    let operands: Vec<String> = form
-        .operands
-        .iter()
-        .filter(|s| s.when.is_none_or(|w| b.has(w)))
-        .map(|spec| match spec.role {
+    let mut operands = vec![];
+    for spec in form.operands.iter().filter(|s| s.when.is_none_or(|w| b.has(w))) {
+        operands.push(match spec.role {
             Role::Label => "$L0".to_string(),
             Role::Labels => "$T0".to_string(),
             Role::Func => "f".to_string(),
             Role::Handle => {
-                let inner: Vec<String> = spec.inner.iter().map(|s| registers(&b, s, &mut regs)).collect();
+                let mut inner = vec![];
+                for s in &spec.inner {
+                    inner.push(registers(&b, s, &mut regs)?);
+                }
                 format!("[{}]", inner.join(", "))
             }
             Role::Addr(_) => "[%a]".to_string(),
             Role::Imm(Imm::Bits(_)) => "1".to_string(),
-            Role::Imm(imm @ Imm::Of(_)) => imm.values()[0].to_string(),
+            Role::Imm(imm @ Imm::Of(_)) => imm.values().first().ok_or("an immediate has no value")?.to_string(),
             Role::Imm(Imm::Pow2(_)) => "16".to_string(),
-            Role::Dst | Role::Src => registers(&b, spec, &mut regs),
-        })
-        .collect();
+            Role::Dst | Role::Src => registers(&b, spec, &mut regs)?,
+        });
+    }
     let decls: String =
         regs.iter().enumerate().map(|(i, t)| format!("\t.reg .{} %v{};\n", t.decl().name(), i + 1)).collect();
     let label = if form.operands.iter().any(|s| matches!(s.role, Role::Label | Role::Labels)) { "$L0:\n" } else { "" };
     let table = if form.operands.iter().any(|s| s.role == Role::Labels) { "\t$T0: .branchtargets $L0;\n" } else { "" };
-    format!(
+    Ok(format!(
         ".visible .entry k{n}()\n{{\n\t.reg .b64 %a;\n{decls}\n{table}\t{name} {};\n{label}\tret;\n}}\n",
         operands.join(", ")
-    )
+    ))
 }
 
 /// Operand `spec` of `b` as registers, each added to `regs`: one; a vector, braced even of
 /// one; or two written at once.
-fn registers(b: &Bound, spec: &Spec, regs: &mut Vec<Ty>) -> String {
-    let t = b.ty(spec.ty.expect("a register's operand has a type"));
+fn registers(b: &Bound, spec: &Spec, regs: &mut Vec<Ty>) -> Result<String> {
+    let t = b.ty(spec.ty.ok_or("a register's operand has no type")?).ok_or("a name gives its operand no type")?;
     let lanes = match spec.count {
         Count::One => 1,
         Count::Fixed(n) => n,
@@ -4564,49 +4690,49 @@ fn registers(b: &Bound, spec: &Spec, regs: &mut Vec<Ty>) -> String {
         format!("%v{}", regs.len())
     });
     let braced = matches!(spec.count, Count::Fixed(_));
-    let first = if lanes == 1 && !braced { names[0].clone() } else { format!("{{{}}}", names.join(", ")) };
-    match &spec.second {
-        Some((second, _)) => format!("{first}|{}", registers(b, second, regs)),
+    let joined = names.join(", ");
+    let first = if lanes == 1 && !braced { joined } else { format!("{{{joined}}}") };
+    Ok(match &spec.second {
+        Some((second, _)) => format!("{first}|{}", registers(b, second, regs)?),
         None => first,
-    }
+    })
 }
 
 /// The kernels of the instructions kernite reads from no form's operands: each special
 /// register read, as it is and as the fewer bits PTX lets `mov` read of it, and the floats
 /// of 16 bits known now that a `b16` takes.
-fn others(n: &mut usize) -> Vec<Entry> {
+fn others(n: &mut usize) -> Result<Vec<Entry>> {
     let mut out = vec![];
-    let mut one = |name: &str, t: Ty, a: Given<Var>| {
+    let mut one = |name: &str, t: Ty, a: Given<Var>| -> Result<_> {
         *n += 1;
         let mut kernel = Kernel::new(format!("k{n}"), format!("k{n}"));
-        let v = kernel.var("v", t.name()).unwrap();
-        kernel
-            .inst(name, &[Given::Var(v), a], None)
-            .unwrap_or_else(|f| panic!("kernite refuses `{name}`: {}", f.message));
-        kernel.end().unwrap();
+        let v = kernel.var("v", t.name())?;
+        kernel.inst(name, &[Given::Var(v), a], None).map_err(|f| format!("kernite refuses `{name}`: {}", f.message))?;
+        kernel.end()?;
         out.push(kernel.finish());
+        Ok(())
     };
     for r in forms::sregs() {
-        one(&format!("mov.{}", r.ty.name()), r.ty, Given::Special(r.name.clone()));
+        one(&format!("mov.{}", r.ty.name()), r.ty, Given::Special(r.name.clone()))?;
         if r.fewest < r.ty.bits() {
-            one("mov.u16", Ty::U16, Given::Special(r.name.clone()));
-            one("cvt.u32.u16", Ty::U32, Given::Special(r.name.clone()));
+            one("mov.u16", Ty::U16, Given::Special(r.name.clone()))?;
+            one("cvt.u32.u16", Ty::U32, Given::Special(r.name.clone()))?;
         }
     }
-    one("mov.b16", Ty::F16, Given::F16(0x3E00));
-    one("mov.b16", Ty::Bf16, Given::Bf16(0x3FC0));
-    one("mov.b32", Ty::F16x2, Given::Vector(vec![Given::F16(0x3E00), Given::F16(0x4000)]));
-    one("mov.b32", Ty::Tf32, Given::F32(1.5));
-    one("mov.b64", Ty::F64, Given::F64(1.5));
+    one("mov.b16", Ty::F16, Given::F16(0x3E00))?;
+    one("mov.b16", Ty::Bf16, Given::Bf16(0x3FC0))?;
+    one("mov.b32", Ty::F16x2, Given::Vector(vec![Given::F16(0x3E00), Given::F16(0x4000)]))?;
+    one("mov.b32", Ty::Tf32, Given::F32(1.5))?;
+    one("mov.b64", Ty::F64, Given::F64(1.5))?;
     // The address of the module's memory, in the bits ptxas takes it in: 64 for global
     // memory's, which it refuses in 32.
     let all = [(Ty::U64, "g"), (Ty::B64, "g"), (Ty::S64, "g"), (Ty::U64, "c"), (Ty::U32, "c"), (Ty::S32, "c")];
     for (t, name) in all {
         *n += 1;
-        let mut kernel = kernel(*n);
-        let (v, m) = (kernel.var("v", t.name()).unwrap(), kernel.global(name).unwrap());
-        kernel.inst(&format!("mov.{}", t.name()), &[Given::Var(v), Given::Var(m)], None).unwrap();
-        kernel.end().unwrap();
+        let mut kernel = kernel(*n)?;
+        let (v, m) = (kernel.var("v", t.name())?, kernel.global(name)?);
+        kernel.inst(&format!("mov.{}", t.name()), &[Given::Var(v), Given::Var(m)], None).map_err(|f| f.message)?;
+        kernel.end()?;
         out.push(kernel.finish());
     }
     // A kernel's address, its own, for the GPU to launch it.
@@ -4615,53 +4741,62 @@ fn others(n: &mut usize) -> Vec<Entry> {
         let name = format!("k{n}");
         let mut kernel = Kernel::new(&name, &name);
         kernel.callee(&name, &name, Callee::Kernel);
-        let v = kernel.var("v", t.name()).unwrap();
-        kernel.inst(&format!("mov.{}", t.name()), &[Given::Var(v), Given::Func(name.clone())], None).unwrap();
-        kernel.end().unwrap();
+        let v = kernel.var("v", t.name())?;
+        kernel
+            .inst(&format!("mov.{}", t.name()), &[Given::Var(v), Given::Func(name.clone())], None)
+            .map_err(|f| f.message)?;
+        kernel.end()?;
         out.push(kernel.finish());
     }
-    out
+    Ok(out)
 }
 
 /// The function an instance that takes a function's address takes it of, in each module of
 /// one that does.
-fn callee() -> Entry {
+fn callee() -> Result<Entry> {
     let mut f = Kernel::func("f", "f");
-    f.end().unwrap();
-    f.finish()
+    f.end()?;
+    Ok(f.finish())
 }
 
 /// The module of `entries`, with the function they name and the memory they reach,
 /// [`statics`].
-fn module(entries: &[Entry]) -> String {
+fn module(entries: &[Entry]) -> Result<String> {
     let mut all = entries.to_vec();
     if entries.iter().any(|e| e.calls.iter().any(|c| c == "f")) {
-        all.insert(0, callee());
+        all.insert(0, callee()?);
     }
-    kernite_ptx::module(&all, &statics()).whole().unwrap()
+    Ok(kernite_ptx::module(&all, &statics()?).whole()?)
 }
 
 /// The kernels `ptxas` refuses of each module, assembling it for the GPU given with it, by
 /// name, each with the first error it finds in it; `?` for one outside any kernel. And a hash of the cubin it makes of
 /// the rest. The modules are written in the directory `dir` of the tests' own.
-fn assemble(ptxas: &Path, dir: &str, modules: &[(String, u32)]) -> Vec<(BTreeMap<String, String>, u64)> {
+fn assemble(ptxas: &Path, dir: &str, modules: &[(String, u32)]) -> Result<Vec<(BTreeMap<String, String>, u64)>> {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir)?;
     let next = AtomicUsize::new(0);
     let out: Vec<Mutex<(BTreeMap<String, String>, u64)>> = modules.iter().map(|_| Mutex::default()).collect();
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-    std::thread::scope(|s| {
-        for _ in 0..threads {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some((text, gpu)) = modules.get(i) else { break };
-                    *out[i].lock().unwrap() = refused(ptxas, text, *gpu, &dir.join(i.to_string()));
-                }
-            });
+    std::thread::scope(|s| -> Result {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| -> Result {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let (Some((text, gpu)), Some(slot)) = (modules.get(i), out.get(i)) else { return Ok(()) };
+                        *slot.lock().unwrap_or_else(PoisonError::into_inner) =
+                            refused(ptxas, text, *gpu, &dir.join(i.to_string()))?;
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().map_err(|_| "a thread panicked")??;
         }
-    });
-    out.into_iter().map(|m| m.into_inner().unwrap()).collect()
+        Ok(())
+    })?;
+    Ok(out.into_iter().map(|m| m.into_inner().unwrap_or_else(PoisonError::into_inner)).collect())
 }
 
 /// The kernels `ptxas` refuses of the module `text`, which it reads at `path` and assembles
@@ -4671,24 +4806,23 @@ fn assemble(ptxas: &Path, dir: &str, modules: &[(String, u32)]) -> Vec<(BTreeMap
 /// version of PTX deprecates, as of `shfl` without `.sync`, and kernite takes none of it. Advice,
 /// as that `mma.sp` is slower than `mma.sp::ordered_metadata`, is no refusal; nor is the warning that `ptxas` 13.5
 /// cannot size the stack of a kernel with `alloca` or `stackrestore`, which size it as they run.
-fn refused(ptxas: &Path, text: &str, gpu: u32, path: &Path) -> (BTreeMap<String, String>, u64) {
+fn refused(ptxas: &Path, text: &str, gpu: u32, path: &Path) -> Result<(BTreeMap<String, String>, u64)> {
     let (src, bin) = (path.with_extension("ptx"), path.with_extension("cubin"));
     let (mut text, mut out) = (text.to_string(), BTreeMap::new());
     loop {
-        std::fs::write(&src, &text).unwrap();
+        std::fs::write(&src, &text)?;
         let run = Command::new(ptxas)
             .args(["--gpu-name", &format!("sm_{gpu}"), "--warning-as-error", "--suppress-stack-size-warning"])
             .arg(&src)
             .arg("-o")
             .arg(&bin)
-            .output()
-            .unwrap();
+            .output()?;
         let cubin = std::fs::read(&bin).unwrap_or_default();
         let _ = std::fs::remove_file(&bin);
         if run.status.success() {
             let mut hasher = DefaultHasher::new();
             cubin.hash(&mut hasher);
-            return (out, hasher.finish());
+            return Ok((out, hasher.finish()));
         }
         let stderr = String::from_utf8_lossy(&run.stderr);
         let mut wrong: Vec<String> = vec![];
@@ -4708,10 +4842,10 @@ fn refused(ptxas: &Path, text: &str, gpu: u32, path: &Path) -> (BTreeMap<String,
             // A crash says nothing.
             let why = if stderr.trim().is_empty() { format!("ptxas: {}", run.status) } else { stderr.trim().into() };
             out.entry("?".into()).or_insert(why);
-            return (out, 0);
+            return Ok((out, 0));
         }
         for k in &wrong {
-            text = without(&text, k);
+            text = without(&text, k).ok_or_else(|| format!("the module has no whole kernel `{k}`"))?;
         }
     }
 }
@@ -4721,15 +4855,13 @@ fn kernel_at(text: &str, line: usize) -> Option<&str> {
     text.lines().take(line).filter_map(|l| l.strip_prefix(".visible .entry ")).last().and_then(|l| l.split('(').next())
 }
 
-/// The module `text` without its kernel `k`.
-fn without(text: &str, k: &str) -> String {
+/// The module `text` without its kernel `k`; or `None` if `k` is not a whole kernel of it.
+fn without(text: &str, k: &str) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
-    let start = lines
-        .iter()
-        .position(|l| l.strip_prefix(".visible .entry ").and_then(|l| l.split('(').next()) == Some(k))
-        .expect("the kernel is in the module");
-    let end = start + lines[start..].iter().position(|l| *l == "}").expect("a kernel ends");
-    lines[..start].iter().chain(&lines[end + 1..]).map(|l| format!("{l}\n")).collect()
+    let start =
+        lines.iter().position(|l| l.strip_prefix(".visible .entry ").and_then(|l| l.split('(').next()) == Some(k))?;
+    let end = start + lines.iter().skip(start).position(|l| *l == "}")?;
+    Some(lines.iter().enumerate().filter(|(i, _)| *i < start || *i > end).map(|(_, l)| format!("{l}\n")).collect())
 }
 
 /// `entries` with each `f16x2` register declared `.b32`, which is how `ptxas` reads an `f16x2` for an integer.
@@ -4745,37 +4877,34 @@ fn as_bits(entries: &[Entry]) -> Vec<Entry> {
 
 /// The kernels of `entries`, found by halves, of which `ptxas` makes a cubin for the GPU `gpu` that differs from the
 /// cubin of the same with each `f16x2` register declared `.b32`.
-fn differ(ptxas: &Path, entries: &[Entry], gpu: u32) -> Vec<String> {
+fn differ(ptxas: &Path, entries: &[Entry], gpu: u32) -> Result<Vec<String>> {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bits");
-    std::fs::create_dir_all(&dir).unwrap();
-    let cubin = |entries: &[Entry]| refused(ptxas, &module(entries), gpu, &dir.join("one")).1;
-    if entries.is_empty() || cubin(entries) == cubin(&as_bits(entries)) {
-        return vec![];
+    std::fs::create_dir_all(&dir)?;
+    let cubin = |entries: &[Entry]| -> Result<_> { Ok(refused(ptxas, &module(entries)?, gpu, &dir.join("one"))?.1) };
+    if entries.is_empty() || cubin(entries)? == cubin(&as_bits(entries))? {
+        return Ok(vec![]);
     }
-    match entries {
+    Ok(match entries {
         [e] => vec![e.program.name.clone()],
         _ => {
             let (first, rest) = entries.split_at(entries.len() / 2);
-            [differ(ptxas, first, gpu), differ(ptxas, rest, gpu)].concat()
+            [differ(ptxas, first, gpu)?, differ(ptxas, rest, gpu)?].concat()
         }
-    }
+    })
 }
 
 /// The GPU `ptxas` assembles `text` for, but where another is said: the one it is for, or
 /// Turing, `sm_75`, the oldest that ptxas 13.5 assembles for.
-fn gpu_of(text: &str) -> u32 {
-    let sm: u32 = text
-        .lines()
-        .find_map(|l| l.strip_prefix(".target sm_"))
-        .and_then(|t| t.parse().ok())
-        .expect("a module has a target");
-    sm.max(75)
+fn gpu_of(text: &str) -> Result<u32> {
+    let target = text.lines().find_map(|l| l.strip_prefix(".target sm_")).ok_or("a module has no target")?;
+    let sm: u32 = target.parse().map_err(|e| format!("`.target sm_{target}`: {e}"))?;
+    Ok(sm.max(75))
 }
 
 /// The module `text`, which `ptxas` should make `expect` of, for the GPU [`gpu_of`] gives.
-fn at(text: String, expect: Expect) -> (String, u32, Expect) {
-    let g = gpu_of(&text);
-    (text, g, expect)
+fn at(text: String, expect: Expect) -> Result<(String, u32, Expect)> {
+    let g = gpu_of(&text)?;
+    Ok((text, g, expect))
 }
 
 /// A module's `.version` and `.target`.
@@ -4801,7 +4930,10 @@ const VERSIONS: [u32; 48] = [
 
 /// The newest version of PTX, the last of [`VERSIONS`]: a test that writes a module of it takes the version from here,
 /// and writes no number of its own.
-const NEWEST: u32 = VERSIONS[VERSIONS.len() - 1];
+const NEWEST: u32 = {
+    let [.., newest] = VERSIONS;
+    newest
+};
 
 /// The version 5.1, which `ptxas` 13.5 reads as 6.0, though PTX has none: in a module of it `ptxas` takes `shfl.sync`,
 /// `vote.sync`, `bar.warp.sync` and `.target sm_70`, which it refuses at 5.0. The ISA says nothing of a module of 5.1,
@@ -4819,8 +4951,8 @@ const FERMI: u32 = 21;
 
 /// The newest GPU a module of PTX `v` may be for: before 2.0, one of Tesla's, `sm_11` or `sm_13`,
 /// and before 3.0, Fermi's, [`FERMI`], which kernite writes for none of.
-fn newest(v: u32) -> u32 {
-    match v {
+fn newest(v: u32) -> Result<u32> {
+    Ok(match v {
         ..12 => 11,
         12..20 => 13,
         20..30 => FERMI,
@@ -4829,22 +4961,26 @@ fn newest(v: u32) -> u32 {
             .filter(|&&(_, came)| came <= v)
             .map(|&(g, _)| g)
             .max()
-            .expect("every version from 3.0 has Kepler"),
-    }
+            .ok_or("no GPU has come by this version, though every version from 3.0 has Kepler")?,
+    })
 }
 
 /// The version of PTX before `v`.
-fn before(v: u32) -> Option<u32> {
-    let i = VERSIONS.iter().position(|&x| x == v).expect("a version ptxas reads");
-    i.checked_sub(1).map(|i| VERSIONS[i])
+fn before(v: u32) -> Result<Option<u32>> {
+    let i = VERSIONS.iter().position(|&x| x == v).ok_or("no version of PTX that ptxas reads")?;
+    Ok(i.checked_sub(1).and_then(|i| VERSIONS.get(i)).copied())
 }
 
 /// The version of PTX that came with the GPU `sm`: one kernite writes for, or [`FERMI`].
-fn came(sm: u32) -> u32 {
-    match sm {
+fn came(sm: u32) -> Result<u32> {
+    Ok(match sm {
         FERMI => 20,
-        _ => kernite_ptx::GPUS.iter().find(|&&(g, _)| g == sm).map(|&(_, v)| v).expect("a GPU kernite writes for"),
-    }
+        _ => kernite_ptx::GPUS
+            .iter()
+            .find(|&&(g, _)| g == sm)
+            .map(|&(_, v)| v)
+            .ok_or_else(|| format!("sm_{sm} is no GPU kernite writes for"))?,
+    })
 }
 
 /// The module `text` as one of PTX `v` for the GPU `sm`.
@@ -4868,22 +5004,20 @@ const ONE_KERNEL: &str = ".version 3.0\n.target sm_30\n.address_size 64\n\n.visi
 /// kernite does not know, for [`VERSIONS`] to have it and the tests to hand each form to `ptxas` at it, and the day it
 /// stops reading one that kernite does.
 #[test]
-fn ptxas_reads_each_version_of_ptx_that_versions_has_and_5_1_and_no_other() {
+fn ptxas_reads_each_version_of_ptx_that_versions_has_and_5_1_and_no_other() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     let every: Vec<u32> = (10..(NEWEST / 10 + 2) * 10).collect();
-    let modules: Vec<(String, u32)> = every
-        .iter()
-        .map(|&v| retarget(ONE_KERNEL, v, newest(v)))
-        .map(|text| {
-            let gpu = gpu_of(&text);
-            (text, gpu)
-        })
-        .collect();
+    let mut modules: Vec<(String, u32)> = vec![];
+    for &v in &every {
+        let text = retarget(ONE_KERNEL, v, newest(v)?);
+        let gpu = gpu_of(&text)?;
+        modules.push((text, gpu));
+    }
     let mut failures = vec![];
-    for (&v, (refused, _)) in every.iter().zip(assemble(&ptxas, "versions", &modules)) {
+    for (&v, (refused, _)) in every.iter().zip(assemble(&ptxas, "versions", &modules)?) {
         let (known, said) = (VERSIONS.contains(&v) || v == READ_AS_6_0, refused.values().next());
         let (version, unread) = (dotted(v), said.is_some_and(|m| m.contains("Unsupported .version")));
         match (known, unread, said) {
@@ -4896,6 +5030,7 @@ fn ptxas_reads_each_version_of_ptx_that_versions_has_and_5_1_and_no_other() {
         }
     }
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+    Ok(())
 }
 
 /// `ptxas` 13.5 reads PTX 5.1 as 6.0, though PTX has no 5.1: it takes `shfl.sync`, `vote.sync`, `bar.warp.sync` and
@@ -4903,10 +5038,10 @@ fn ptxas_reads_each_version_of_ptx_that_versions_has_and_5_1_and_no_other() {
 /// which it takes at 6.1. It fails the day `ptxas` reads 5.1 as another version, for [`READ_AS_6_0`] and GUIDE.md to
 /// say what it is.
 #[test]
-fn ptxas_reads_ptx_5_1_as_6_0() {
+fn ptxas_reads_ptx_5_1_as_6_0() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     // Each line of a kernel, the GPU its module is for, and the first version of PTX that has both.
     let lines = [
@@ -4918,20 +5053,18 @@ fn ptxas_reads_ptx_5_1_as_6_0() {
     ];
     let tries: Vec<_> =
         lines.into_iter().flat_map(|(line, sm, came)| [50, READ_AS_6_0, 60, 61].map(|v| (line, sm, came, v))).collect();
-    let modules: Vec<(String, u32)> = tries
-        .iter()
-        .map(|&(line, sm, _, v)| {
-            let text = format!(
-                ".version 6.0\n.target sm_{sm}\n.address_size 64\n\n.visible .entry k()\n{{\n\t.reg .b32 %r<3>;\n\
-                 \t.reg .pred %p<3>;\n\t{line}\n\tret;\n}}\n"
-            );
-            let text = retarget(&text, v, sm);
-            let gpu = gpu_of(&text);
-            (text, gpu)
-        })
-        .collect();
+    let mut modules: Vec<(String, u32)> = vec![];
+    for &(line, sm, _, v) in &tries {
+        let text = format!(
+            ".version 6.0\n.target sm_{sm}\n.address_size 64\n\n.visible .entry k()\n{{\n\t.reg .b32 %r<3>;\n\
+             \t.reg .pred %p<3>;\n\t{line}\n\tret;\n}}\n"
+        );
+        let text = retarget(&text, v, sm);
+        let gpu = gpu_of(&text)?;
+        modules.push((text, gpu));
+    }
     let mut failures = vec![];
-    for (&(line, sm, came, v), (refused, _)) in tries.iter().zip(assemble(&ptxas, "five_one", &modules)) {
+    for (&(line, sm, came, v), (refused, _)) in tries.iter().zip(assemble(&ptxas, "five_one", &modules)?) {
         // 5.1 is read as 6.0: ptxas takes a line from the version that brought it.
         let takes = (if v == READ_AS_6_0 { 60 } else { v }) >= came;
         let (version, with) = (dotted(v), if line.is_empty() { String::new() } else { format!(", `{line}`") });
@@ -4942,6 +5075,7 @@ fn ptxas_reads_ptx_5_1_as_6_0() {
         }
     }
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+    Ok(())
 }
 
 /// `ptxas` takes each form kernite knows, written each way kernite has, at the version and for the GPU kernite says it
@@ -4950,10 +5084,10 @@ fn ptxas_reads_ptx_5_1_as_6_0() {
 /// `ptxas` takes it and makes the cubin of a `b32`; where kernite refuses it, `ptxas` refuses the kernel with that
 /// register declared `.f16x2`, but for the places [`ptxas_bug`] says.
 #[test]
-fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
+fn ptxas_takes_every_form_kernite_knows_where_kernite_says() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     let (mut n, mut failures) = (0, vec![]);
     let mut what: BTreeMap<String, String> = BTreeMap::new();
@@ -5003,7 +5137,7 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
                 Style::Most,
             ] {
                 n += 1;
-                match instance(n, &name, b, style, false) {
+                match instance(n, &name, b, style, false)? {
                     None => {}
                     Some(Ok(e)) => add(e, &mut what, Group::Plain),
                     Some(Err(m)) => failures.push(m),
@@ -5015,11 +5149,11 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
                 let mut left = false;
                 for style in [Style::Packed(k), Style::PackedPart(k), Style::PackedNeg(k), Style::PackedAll(k)] {
                     n += 1;
-                    match instance(n, &name, b, style, false) {
+                    match instance(n, &name, b, style, false)? {
                         None => continue,
                         Some(Ok(e)) => add(e, &mut what, Group::Packed),
                         // kernite refuses it, so `ptxas` should: the kernel with the register declared `.f16x2`.
-                        Some(Err(m)) => match instance(n, &name, b, style, true).expect("the style gives it") {
+                        Some(Err(m)) => match instance(n, &name, b, style, true)?.ok_or("the style gives it")? {
                             Ok(e) => {
                                 why.insert(e.0.program.name.clone(), m);
                                 let group = if ptxas_bug(b.form, &e.1) { Group::Bug } else { Group::Wrong };
@@ -5036,7 +5170,7 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
             }
         }
     }
-    for e in others(&mut n) {
+    for e in others(&mut n)? {
         add((e, String::new()), &mut what, Group::Plain);
     }
     for ((_, ptx, ..), entries) in groups.iter().filter(|((_, ptx, ..), _)| !VERSIONS.contains(ptx)) {
@@ -5058,43 +5192,46 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
     let mut modules: Vec<(String, u32, Expect)> = vec![];
     let mut twins: Vec<(usize, &[Entry])> = vec![];
     for (&(group, ptx, sm), entries) in groups.iter().filter(|((_, ptx, ..), _)| VERSIONS.contains(ptx)) {
-        let gpu = newest(ptx);
+        let gpu = newest(ptx)?;
         if gpu < sm {
             let v = dotted(ptx);
             failures.push(format!("{} kernels need PTX {v} and sm_{sm}, which no module of {v} is for", entries.len()));
         }
         if matches!(group, Group::Wrong | Group::Bug) {
             let expect = if group == Group::Bug { Expect::Takes } else { Expect::Refuses };
-            modules.extend(entries.chunks(100).map(|some| at(module(some), expect)));
+            for some in entries.chunks(100) {
+                modules.push(at(module(some)?, expect)?);
+            }
             continue;
         }
-        let text = module(entries);
+        let text = module(entries)?;
         if group == Group::Packed {
             twins.push((modules.len(), entries));
-            modules.push(at(text, Expect::Takes));
-            modules.push(at(module(&as_bits(entries)), Expect::Takes));
+            modules.push(at(text, Expect::Takes)?);
+            modules.push(at(module(&as_bits(entries))?, Expect::Takes)?);
             continue;
         }
         let exact = retarget(&text, ptx, gpu);
         for &(g, _) in kernite_ptx::GPUS.iter().filter(|&&(g, _)| g >= sm) {
             let latest = retarget(&text, NEWEST, g);
             if latest != text && latest != exact {
-                modules.push(at(latest, Expect::Takes));
+                modules.push(at(latest, Expect::Takes)?);
             }
         }
         if exact != text {
-            modules.push(at(exact, Expect::Takes));
+            modules.push(at(exact, Expect::Takes)?);
         }
-        for &(g, _) in kernite_ptx::GPUS.iter().filter(|&&(g, _)| g > gpu_of(&text)) {
+        let target = gpu_of(&text)?;
+        for &(g, _) in kernite_ptx::GPUS.iter().filter(|&&(g, _)| g > target) {
             modules.push((text.clone(), g, Expect::Takes));
         }
-        modules.push(at(text.clone(), Expect::Takes));
-        if let Some(v) = before(ptx) {
-            modules.push(at(retarget(&text, v, newest(v)), Expect::Refuses));
+        modules.push(at(text.clone(), Expect::Takes)?);
+        if let Some(v) = before(ptx)? {
+            modules.push(at(retarget(&text, v, newest(v)?), Expect::Refuses)?);
         }
         if sm > 0 {
             let g = kernite_ptx::GPUS.iter().map(|&(g, _)| g).rfind(|&g| g < sm).unwrap_or(FERMI);
-            modules.push(at(retarget(&text, ptx.max(came(g)), g), Expect::Refuses));
+            modules.push(at(retarget(&text, ptx.max(came(g)?), g), Expect::Refuses)?);
         }
     }
     // And the names kernite refuses, for the newest GPU and at the newest version kernite knows,
@@ -5103,26 +5240,26 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
     let mut hand = vec![];
     for (form, name, choice, m) in refused {
         n += 1;
-        let text = by_hand(n, &name, form, choice);
-        let line =
-            text.lines().find(|l| l.trim_start().starts_with(name.as_str())).expect("its line").trim().to_string();
+        let text = by_hand(n, &name, form, choice)?;
+        let line = text.lines().find(|l| l.trim_start().starts_with(name.as_str())).ok_or("by_hand wrote no line")?;
+        let line = line.trim().to_string();
         what.insert(format!("k{n}"), line);
         why.insert(format!("k{n}"), m);
         hand.push(text);
     }
-    let f = callee().text();
-    let (version, gpu) = (dotted(NEWEST), newest(NEWEST));
+    let f = callee()?.text();
+    let (version, gpu) = (dotted(NEWEST), newest(NEWEST)?);
     for some in hand.chunks(100) {
         let text = format!(
             "// Written by hand.\n\n.version {version}\n.target sm_{gpu}\n.address_size 64\n\n{f}\n{}",
             some.join("\n")
         );
-        modules.push(at(text, Expect::Refuses));
+        modules.push(at(text, Expect::Refuses)?);
     }
     let texts: Vec<(String, u32)> = modules.iter().map(|(t, g, _)| (t.clone(), *g)).collect();
-    let results = assemble(&ptxas, "forms", &texts);
+    let results = assemble(&ptxas, "forms", &texts)?;
     for ((text, g, expect), (refused, _)) in modules.iter().zip(&results) {
-        let header = match *g == gpu_of(text) {
+        let header = match *g == gpu_of(text)? {
             true => header(text),
             false => format!("{} for sm_{g}", header(text)),
         };
@@ -5155,7 +5292,7 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
     for (i, entries) in twins {
         let ((taken, cubin), (twin_taken, twin)) = (&results[i], &results[i + 1]);
         if taken.is_empty() && twin_taken.is_empty() && cubin != twin {
-            for k in differ(&ptxas, entries, modules[i].1) {
+            for k in differ(&ptxas, entries, modules[i].1)? {
                 let line = what.get(&k).map_or("?", String::as_str);
                 failures
                     .push(format!("{}: ptxas makes another cubin of `{line}` than of a `b32`", header(&modules[i].0)));
@@ -5164,6 +5301,7 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
     }
     eprintln!("{n} instances in {} modules; {refusals} names kernite refuses", modules.len());
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+    Ok(())
 }
 
 /// A warning of `ptxas` is a refusal of the kernel it warns of, for
@@ -5174,10 +5312,10 @@ fn ptxas_takes_every_form_kernite_knows_where_kernite_says() {
 /// GPU the version has, with what `ptxas` says of the form first; but for `vote.ballot.b32` in PTX 6.0 and 6.1, which
 /// `ptxas` takes without a word, though it warns of it in every other module it takes.
 #[test]
-fn ptxas_warns_of_shfl_and_vote_without_sync_or_refuses_them_at_every_version_and_gpu() {
+fn ptxas_warns_of_shfl_and_vote_without_sync_or_refuses_them_at_every_version_and_gpu() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     let wrong = [
         ("shfl", "shfl", "shfl.idx.b32 %r1, %r2, 0, 31;"),
@@ -5192,9 +5330,13 @@ fn ptxas_warns_of_shfl_and_vote_without_sync_or_refuses_them_at_every_version_an
     let at: Vec<(u32, u32)> = (VERSIONS.into_iter().filter(|&v| v >= 30))
         .flat_map(|v| kernite_ptx::GPUS.into_iter().filter(move |&(_, came)| came <= v).map(move |(g, _)| (v, g)))
         .collect();
-    let modules: Vec<(String, u32)> =
-        at.iter().map(|&(v, g)| retarget(&text, v, g)).map(|m| (m.clone(), gpu_of(&m))).collect();
-    for ((v, g), (refusals, _)) in at.into_iter().zip(assemble(&ptxas, "deprecated", &modules)) {
+    let mut modules: Vec<(String, u32)> = vec![];
+    for &(v, g) in &at {
+        let m = retarget(&text, v, g);
+        let gpu = gpu_of(&m)?;
+        modules.push((m, gpu));
+    }
+    for ((v, g), (refusals, _)) in at.into_iter().zip(assemble(&ptxas, "deprecated", &modules)?) {
         for (name, op, line) in wrong {
             let what = match (name, v, g) {
                 ("ballot", 60 | 61, _) => None,
@@ -5205,6 +5347,7 @@ fn ptxas_warns_of_shfl_and_vote_without_sync_or_refuses_them_at_every_version_an
             assert_eq!(refusals.get(name), want.as_ref(), "PTX {v} for sm_{g}: `{line}`");
         }
     }
+    Ok(())
 }
 
 /// Kernels that keep what they work on in shared memory: as much as the kernel declares, and
@@ -5268,9 +5411,9 @@ const SHARED: &str = r#"
 "#;
 
 #[test]
-fn memory_is_declared_where_ptx_has_it() {
-    let ptx = kernite::ptx_str(SHARED).unwrap();
-    let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
+fn memory_is_declared_where_ptx_has_it() -> Result {
+    let ptx = kernite::ptx_str(SHARED)?;
+    let (head, entries) = ptx.split_once(".visible .entry ").ok_or("split_once gave None")?;
     let want = "// Written by kernite.
 
 .version 3.0
@@ -5281,7 +5424,7 @@ fn memory_is_declared_where_ptx_has_it() {
 
 ";
     assert_eq!(head, want);
-    let block_sum = entries.split(".visible .entry ").next().unwrap();
+    let block_sum = entries.split(".visible .entry ").next().ok_or("next gave None")?;
     for line in [
         "\t.reg .u64 %x, %y, %at;\n\t.shared .align 16 .b8 tile[1024];\n\n",
         "\tmov.u32 %mine, tile;\n",
@@ -5291,10 +5434,11 @@ fn memory_is_declared_where_ptx_has_it() {
         assert!(block_sum.contains(line), "{line}");
     }
     assert!(entries.contains("\tmov.u32 %s, _ZZ7reverseE3buf;\n"));
+    Ok(())
 }
 
 #[test]
-fn memory_is_reached_in_its_state_space_and_within_it() {
+fn memory_is_reached_in_its_state_space_and_within_it() -> Result {
     let t = "let t: shared<[f32; 256], 16>; let f: f32;";
     let cases = [
         ("let t: shared<[f32; 0]>;".to_string(), "2:8: `shared<[f32; 0]>` holds nothing"),
@@ -5432,21 +5576,21 @@ fn memory_is_reached_in_its_state_space_and_within_it() {
         (format!("{t} mov.f32(f, t.x);"), "2:57: `t` is memory, `shared<[f32; 256], 16>`; it is no `x`"),
     ];
     for (body, want) in cases {
-        assert_eq!(compile("x: *mut f32, n: u32", &body).unwrap_err(), want, "{body}");
+        assert_eq!(compile("x: *mut f32, n: u32", &body).err().ok_or("compile gave Ok")?, want, "{body}");
     }
     // A kernel declares 48 KB of shared memory, to the byte, and no more.
-    let ptx = compile("x: *mut f32, n: u32", "let a: shared<[u8; 49152]>; mov.u32(n, a);").unwrap();
+    let ptx = compile("x: *mut f32, n: u32", "let a: shared<[u8; 49152]>; mov.u32(n, a);")?;
     assert!(ptx.contains("\t.shared .align 1 .b8 a[49152];\n"));
     // Memory takes the name it is given, but for one PTX has or the kernel's other names.
     let ptx = compile(
         "x: *mut f32, n: u32",
         "let WARP_SZ: shared<u32>; let k: shared<u32>; let k_param_0: shared<u32>; mov.u32(n, WARP_SZ); \
          mov.u32(n, k); mov.u32(n, k_param_0);",
-    )
-    .unwrap();
+    )?;
     for line in ["\tmov.u32 %n, WARP_SZ_;\n", "\tmov.u32 %n, k_1;\n", "\tmov.u32 %n, k_param_0_1;\n"] {
         assert!(ptx.contains(line), "{line}");
     }
+    Ok(())
 }
 
 /// Memory of the module's, which its kernels name: a histogram they keep from launch to
@@ -5502,9 +5646,9 @@ const STATICS: &str = r#"
 "#;
 
 #[test]
-fn a_static_is_declared_once_for_each_kernel_to_name() {
-    let ptx = kernite::ptx_str(STATICS).unwrap();
-    let (head, entries) = ptx.split_once(".visible .entry ").unwrap();
+fn a_static_is_declared_once_for_each_kernel_to_name() -> Result {
+    let ptx = kernite::ptx_str(STATICS)?;
+    let (head, entries) = ptx.split_once(".visible .entry ").ok_or("split_once gave None")?;
     let want = "// Written by kernite.
 
 .version 3.1
@@ -5532,14 +5676,15 @@ fn a_static_is_declared_once_for_each_kernel_to_name() {
         assert!(entries.contains(line), "{line}");
     }
     // In a scope, each is named as C++ names a variable of its namespace, as a kernel is.
-    let module = kernite::lang::parse(STATICS).unwrap();
+    let module = kernite::lang::parse(STATICS)?;
     let scope = kernite::ptx_scope(&["kernite", "my_app", "gpu"]);
     let statics: Vec<_> = kernite::ptx_statics(&module, &scope).into_iter().map(Result::unwrap).collect();
     assert_eq!(statics[0].code.memory.name, "_ZN7kernite6my_app3gpu6COUNTSE");
     assert_eq!(statics[0].mentions.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["N"]);
     assert!(statics[1..].iter().all(|s| s.mentions.is_empty()));
-    let count = kernite::ptx(&module, kernite::function(&module, "count").unwrap(), &[], &scope).unwrap();
+    let count = kernite::ptx(&module, kernite::function(&module, "count").ok_or("function gave None")?, &[], &scope)?;
     assert!(count.code.text().contains("\tmov.u64 %at, _ZN7kernite6my_app3gpu6COUNTSE;\n"));
+    Ok(())
 }
 
 /// Statics where the module has no room for the last of global memory: `BIG` is 6 GB, which `ptxas` cannot lay out in a
@@ -5583,8 +5728,8 @@ const OUTSIDE: &str = r#"
 /// loads that address as it starts, and reaches the static through it, a function as a kernel. A kernel that does not
 /// name it loads nothing. The static in the module is as it was.
 #[test]
-fn a_static_the_module_has_no_room_for_is_outside_it() {
-    let ptx = kernite::ptx_str(OUTSIDE).unwrap();
+fn a_static_the_module_has_no_room_for_is_outside_it() -> Result {
+    let ptx = kernite::ptx_str(OUTSIDE)?;
     let want = "// Written by kernite.
 
 .version 3.0
@@ -5649,19 +5794,20 @@ fn a_static_the_module_has_no_room_for_is_outside_it() {
 }
 ";
     assert_eq!(ptx, want);
+    Ok(())
 }
 
 /// Where a static of global memory is: it is outside the module where its bytes, and the padding of its alignment, make
 /// 4 GB beside those before it that are in the module, and in it otherwise. One outside takes none of the module's, so
 /// a static after it may be in; one that does not lay out takes none either. Constant memory is never outside.
 #[test]
-fn a_static_of_global_memory_is_outside_where_it_makes_the_module_4_gb() {
-    let places = |src: &str| -> Vec<&'static str> {
-        let made = kernite::ptx_statics(&kernite::lang::parse(src).unwrap(), "");
+fn a_static_of_global_memory_is_outside_where_it_makes_the_module_4_gb() -> Result {
+    let places = |src: &str| -> Result<Vec<&'static str>> {
+        let made = kernite::ptx_statics(&kernite::lang::parse(src)?, "");
         let place = |s: Result<_, _>| {
             s.map_or("none", |s: kernite::Compiled<Static>| if s.code.outside { "out" } else { "in" })
         };
-        made.into_iter().map(place).collect()
+        Ok(made.into_iter().map(place).collect())
     };
     let cases = [
         ("static A: global<[u8; 4294967295]>;", vec!["in"]),
@@ -5698,37 +5844,39 @@ fn a_static_of_global_memory_is_outside_where_it_makes_the_module_4_gb() {
         ("static A: constant<[u8; 4294967296]>; static B: global<u8>;", vec!["none", "in"]),
     ];
     for (src, want) in cases {
-        assert_eq!(places(src), want, "{src}");
+        assert_eq!(places(src)?, want, "{src}");
     }
+    Ok(())
 }
 
 /// `ptxas` takes the module with a static outside it, and lays out the module's own memory alone: the global memory of
 /// its cubin is `SMALL`, 16 bytes, and not the 6 GB of `BIG`, whose slot is in the constant memory beside `TABLE`.
 #[test]
-fn ptxas_lays_out_a_module_with_a_static_outside_it_as_the_statics_in_it() {
+fn ptxas_lays_out_a_module_with_a_static_outside_it_as_the_statics_in_it() -> Result {
     let (Some(ptxas), Some(dump)) = (ptxas(), cuobjdump()) else {
         eprintln!("no ptxas or cuobjdump here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
-    let run = assembled(&ptxas, &kernite::ptx_str(OUTSIDE).unwrap(), "sm_86", "outside", &["--warning-as-error"]);
+    let run = assembled(&ptxas, &kernite::ptx_str(OUTSIDE)?, "sm_86", "outside", &["--warning-as-error"])?;
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(section_size(&dump, "outside", ".nv.global"), Some(16));
-    assert_eq!(section_size(&dump, "outside", ".nv.global.init"), None);
+    assert_eq!(section_size(&dump, "outside", ".nv.global")?, Some(16));
+    assert_eq!(section_size(&dump, "outside", ".nv.global.init")?, None);
     // `TABLE` of 8 bytes, and the 8 of `BIG`'s slot after it.
-    assert_eq!(section_size(&dump, "outside", ".nv.constant3"), Some(16));
+    assert_eq!(section_size(&dump, "outside", ".nv.constant3")?, Some(16));
+    Ok(())
 }
 
 /// A kernel reaches a static outside the module at the cost of one in it: it writes the first byte and the last, as the
 /// same instructions, with its address from the constant memory of the module, `c[0x3]`, where a static in the module
 /// has it from `c[0x4]`, and so no instruction is added.
 #[test]
-fn a_static_outside_the_module_is_reached_by_the_instructions_of_one_in_it() {
+fn a_static_outside_the_module_is_reached_by_the_instructions_of_one_in_it() -> Result {
     let (Some(ptxas), Some(dump)) = (ptxas(), cuobjdump()) else {
         eprintln!("no ptxas or cuobjdump here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     // The biggest static a module has room for, and one that makes it 6 GB, both written at the same displacement.
-    let sass = |name: &str, bytes: u64| {
+    let sass = |name: &str, bytes: u64| -> Result<Vec<String>> {
         let kernel = format!(
             r#"
             static BIG: global<[u8; {bytes}]>;
@@ -5741,20 +5889,21 @@ fn a_static_outside_the_module_is_reached_by_the_instructions_of_one_in_it() {
             }}
             "#
         );
-        let text = kernite::ptx_str(&kernel).unwrap();
+        let text = kernite::ptx_str(&kernel)?;
         assert_eq!(text.contains(".const .align 8 .b8 BIG[8];"), bytes > 4294967295, "{name}");
-        let run = assembled(&ptxas, &text, "sm_86", name, &["--warning-as-error"]);
+        let run = assembled(&ptxas, &text, "sm_86", name, &["--warning-as-error"])?;
         assert!(run.status.success(), "{name}: {}", String::from_utf8_lossy(&run.stderr));
         instructions(&dump, name)
     };
-    let (inside, outside) = (sass("sass_inside", 4294967295), sass("sass_outside", 6442450944));
+    let (inside, outside) = (sass("sass_inside", 4294967295)?, sass("sass_outside", 6442450944)?);
     assert_eq!(inside.iter().filter(|i| i.starts_with("STG.E.U8")).count(), 2);
     assert_eq!(outside, inside.iter().map(|i| i.replace("c[0x4]", "c[0x3]")).collect::<Vec<_>>());
     assert!(outside.iter().any(|i| i.contains("c[0x3][0x0]")));
+    Ok(())
 }
 
 #[test]
-fn a_static_is_memory_of_a_type_the_host_reads_holding_what_it_says() {
+fn a_static_is_memory_of_a_type_the_host_reads_holding_what_it_says() -> Result {
     let cases = [
         (
             "static mut A: global<u32>;",
@@ -5844,39 +5993,43 @@ fn a_static_is_memory_of_a_type_the_host_reads_holding_what_it_says() {
     ];
     let k = "unsafe extern \"ptx-kernel\" fn k(x: *mut u32) {}";
     for (items, want) in cases {
-        assert_eq!(kernite::ptx_str(&format!("{items}\n{k}")).unwrap_err(), want, "{items}");
+        assert_eq!(kernite::ptx_str(&format!("{items}\n{k}")).err().ok_or("ptx_str gave Ok")?, want, "{items}");
     }
     // Every byte of constant memory, and a `b` type's integers of either sign.
-    let ptx = kernite::ptx_str("static A: constant<[u8; 65535]>; static B: constant<u8>;").unwrap();
+    let ptx = kernite::ptx_str("static A: constant<[u8; 65535]>; static B: constant<u8>;")?;
     assert!(ptx.contains(".const .align 1 .b8 A[65535];\n.const .align 1 .b8 B[1];\n"));
-    let ptx = kernite::ptx_str("static A: global<[b8; 2]> = [255, -128];").unwrap();
+    let ptx = kernite::ptx_str("static A: global<[b8; 2]> = [255, -128];")?;
     assert!(ptx.contains(".global .align 1 .b8 A[2] = {255, 128};\n"));
     // The slot of a static outside the module takes the last 8 bytes of the constant memory.
-    let ptx = kernite::ptx_str("static A: constant<[u8; 65528]>; static B: global<[u8; 4294967296]>;").unwrap();
+    let ptx = kernite::ptx_str("static A: constant<[u8; 65528]>; static B: global<[u8; 4294967296]>;")?;
     assert!(ptx.contains(".const .align 1 .b8 A[65528];\n.const .align 8 .b8 B[8];\n"));
     // A static that fails takes no room: `A` fails at its value, and `B` lays out. `ptx_str` stops
     // at `A`, so only `ptx_statics` shows it.
     let src = "static A: constant<[u8; 65536]> = 1; static B: constant<u8>;";
-    let made = kernite::ptx_statics(&kernite::lang::parse(src).unwrap(), "");
+    let made = kernite::ptx_statics(&kernite::lang::parse(src)?, "");
     let want = "1:35: `constant<[u8; 65536]>` holds an array of `u8`; this is an integer";
-    assert_eq!(made[0].as_ref().unwrap_err().at(src), want);
+    assert_eq!(made[0].as_ref().err().ok_or("as_ref gave Ok")?.at(src), want);
     assert_eq!(made[1].as_ref().err(), None);
     // Nor does one that has no room: `B` is refused beside `A`, and `C` fits beside `A` alone.
     let src = "static A: constant<[u8; 65535]>; static B: constant<[u32; 1]>; static C: constant<u8>;";
-    let made = kernite::ptx_statics(&kernite::lang::parse(src).unwrap(), "");
+    let made = kernite::ptx_statics(&kernite::lang::parse(src)?, "");
     let want = "1:44: this makes the module's constant memory 65540 bytes, and a module has 64 KB";
-    assert_eq!(made[1].as_ref().unwrap_err().at(src), want);
+    assert_eq!(made[1].as_ref().err().ok_or("as_ref gave Ok")?.at(src), want);
     assert_eq!(made[2].as_ref().err(), None);
+    Ok(())
 }
 
 /// The room of the types of the statics a module keeps, `ptx_room`, which the macro asks once Rust has
 /// left out those `cfg` does, is that of `ptx_statics` for a module that keeps them all: each type that
 /// does not fit beside those before it that do is refused in the same words, and takes none. Only constant memory is
 /// short of room: a static of global memory the module has no room for is outside it, and its type is `constant<u64>`
-/// here, as `DeviceStatic::ty` has it, the slot of its address, which takes 8 bytes of the 64 KB.
+/// here, as `DeviceStatic::ty` has it, the slot of its address, which takes 8 bytes of the 64 KB. A type that is no
+/// static's is refused as a static is, and takes none either.
 #[test]
 fn the_room_of_the_types_a_module_keeps_is_counted_in_order() {
     let constant = |all| format!("this makes the module's constant memory {all} bytes, and a module has 64 KB");
+    let memory = "a static of the module is memory: in global memory, `global<[u32; 16]>`, or in constant memory, \
+                  which its kernels only read, `constant<[f32; 4]>`; not `u32`";
     let cases = [
         ("constant<[u8; 65535]>", None),
         ("constant<[u32; 1]>", Some(constant(65540))),
@@ -5885,6 +6038,7 @@ fn the_room_of_the_types_a_module_keeps_is_counted_in_order() {
         ("constant<u8>", Some(constant(65537))),
         // Global memory has no room to lack, of any size.
         ("global<[u8; 4294967295]>", None),
+        ("u32", Some(memory.to_string())),
         ("global<u8>", None),
         ("global<[u8; 18446744073709551615]>", None),
     ];
@@ -5898,7 +6052,7 @@ fn the_room_of_the_types_a_module_keeps_is_counted_in_order() {
 }
 
 #[test]
-fn a_static_is_reached_in_its_state_space_and_within_it() {
+fn a_static_is_reached_in_its_state_space_and_within_it() -> Result {
     let (a, c) = ("static A: global<[u32; 4]>;", "static C: constant<[u32; 4]>;");
     let cases = [
         (
@@ -5963,11 +6117,12 @@ fn a_static_is_reached_in_its_state_space_and_within_it() {
     ];
     for (items, body, want) in cases {
         let src = format!("{items}\nunsafe extern \"ptx-kernel\" fn k(x: *mut u32) {{ let v: u32;\n{body}\n}}\n");
-        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{body}");
+        assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, want, "{body}");
     }
     // A variable of the kernel's own takes the name it is given, before the module's.
     let ptx = kernite::ptx_str(&format!("{a}\nunsafe extern \"ptx-kernel\" fn k() {{ let A: u32; mov.u32(A, 1); }}\n"));
-    assert!(ptx.unwrap().contains("\tmov.u32 %A, 1;\n"));
+    assert!(ptx?.contains("\tmov.u32 %A, 1;\n"));
+    Ok(())
 }
 
 /// A kernel whose blocks wait for each other, in its body and in a helper's, with variables
@@ -6007,10 +6162,10 @@ const COOPERATIVE: &str = r#"
 "#;
 
 #[test]
-fn a_cooperative_kernel_waits_for_its_grid_as_cuda_does() {
-    let ptx = kernite::ptx_str(COOPERATIVE).unwrap();
+fn a_cooperative_kernel_waits_for_its_grid_as_cuda_does() -> Result {
+    let ptx = kernite::ptx_str(COOPERATIVE)?;
     // A cooperative launch is from Pascal's GPUs on, and PTX 5.0.
-    let (head, reverse) = ptx.split_once(".visible .entry ").unwrap();
+    let (head, reverse) = ptx.split_once(".visible .entry ").ok_or("split_once gave None")?;
     assert_eq!(head, "// Written by kernite.\n\n.version 5.0\n.target sm_60\n.address_size 64\n\n");
     // Each block's first thread adds to the count of the driver's barrier for the grid, the
     // first block's so that it turns over its top bit once all have, and waits for that.
@@ -6087,10 +6242,11 @@ $Lgrid_done:
 "
     );
     assert_eq!(reverse, want);
+    Ok(())
 }
 
 #[test]
-fn grid_sync_is_where_every_thread_of_the_grid_comes_to_it() {
+fn grid_sync_is_where_every_thread_of_the_grid_comes_to_it() -> Result {
     let cases = [
         (
             "",
@@ -6131,12 +6287,13 @@ fn grid_sync_is_where_every_thread_of_the_grid_comes_to_it() {
             "{attr}\nunsafe extern \"ptx-kernel\" fn k(x: *mut u32, n: u32) {{\n{body}\n}}\n\
              extern \"ptx-func\" fn f() {{\n    grid.sync();\n}}\nfn h() {{\n    grid.sync();\n}}\n"
         );
-        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{body}");
+        assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, want, "{body}");
     }
+    Ok(())
 }
 
 #[test]
-fn cooperative_is_said_of_a_kernel_alone() {
+fn cooperative_is_said_of_a_kernel_alone() -> Result {
     let not = "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, `extern \"ptx-kernel\"` \
                or `extern \"sysv64\"`";
     let nothing = "1:3: `#[cooperative]` takes nothing: it says that a kernel's blocks or threads wait for each other";
@@ -6159,13 +6316,14 @@ fn cooperative_is_said_of_a_kernel_alone() {
     ];
     for (items, want) in cases {
         let src = format!("{items}\nunsafe extern \"ptx-kernel\" fn k(x: *mut u32) {{}}");
-        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{items}");
+        assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, want, "{items}");
     }
     // Beside `#[instances(..)]`, either first, it makes each instance cooperative.
     for attrs in ["#[cooperative] #[instances(1, 2)]", "#[instances(1, 2)] #[cooperative]"] {
         let src = format!("{attrs}\nunsafe extern \"ptx-kernel\" fn k<const N: u32>() {{ grid.sync(); }}");
-        assert_eq!(kernite::ptx_str(&src).unwrap().matches("\tatom.add.u32 %old, [%barrier], %add;\n").count(), 2);
+        assert_eq!(kernite::ptx_str(&src)?.matches("\tatom.add.u32 %old, [%barrier], %add;\n").count(), 2);
     }
+    Ok(())
 }
 
 /// A kernel for each form of each directive: `.maxntid` and `.reqntid` of one, two and three
@@ -6241,15 +6399,15 @@ const TUNED: &str = r#"
 "#;
 
 /// The directives of the `.entry` `name` of `ptx`: its lines between its parameters and its body.
-fn directives_of(ptx: &str, name: &str) -> Vec<String> {
-    let entry = ptx.split_once(&format!(".visible .entry {name}(")).expect("the module has the kernel").1;
-    let head = entry.split_once("\n{\n").expect("a kernel has a body").0;
-    head.lines().skip_while(|l| *l != ")").skip(1).map(String::from).collect()
+fn directives_of(ptx: &str, name: &str) -> Result<Vec<String>> {
+    let entry = ptx.split_once(&format!(".visible .entry {name}(")).ok_or("the module has no such kernel")?.1;
+    let head = entry.split_once("\n{\n").ok_or("a kernel has no body")?.0;
+    Ok(head.lines().skip_while(|l| *l != ")").skip(1).map(String::from).collect())
 }
 
 #[test]
-fn a_kernel_says_its_directives_between_its_parameters_and_its_body() {
-    let ptx = kernite::ptx_str(TUNED).unwrap();
+fn a_kernel_says_its_directives_between_its_parameters_and_its_body() -> Result {
+    let ptx = kernite::ptx_str(TUNED)?;
     // `.maxntid` and `.maxnreg` came with PTX 1.3, `.minnctapersm` with 2.0 and `.reqntid` with 2.1, and
     // every module kernite writes is of `.version 3.0` at least, `Needs::FLOOR`, so a directive asks nothing
     // of the module.
@@ -6269,12 +6427,13 @@ fn a_kernel_says_its_directives_between_its_parameters_and_its_body() {
         ("all", &[".maxnreg 48", ".minnctapersm 4", ".reqntid 8, 8, 4"]),
     ];
     for (name, lines) in all {
-        assert_eq!(directives_of(&ptx, name), lines, "{name}");
+        assert_eq!(directives_of(&ptx, name)?, lines, "{name}");
     }
     // As `nvcc` prints them: after the `)` of the parameters, one to a line, before the `{`.
     let want =
         ".visible .entry max_blocks(\n\t.param .u64 max_blocks_param_0\n)\n.maxntid 256\n.minnctapersm 2\n{\n\t.reg ";
     assert!(ptx.contains(want), "{ptx}");
+    Ok(())
 }
 
 /// A module of a kernel for each of `attrs`, `k0`, `k1` and so on, that does nothing.
@@ -6327,35 +6486,34 @@ const EDGES: &[&str] = &[
 
 /// What `ptxas` makes of the module `text` for the GPU `gpu`, with `flags`, named `name` in the
 /// directory of this test.
-fn assembled(ptxas: &Path, text: &str, gpu: &str, name: &str, flags: &[&str]) -> std::process::Output {
+fn assembled(ptxas: &Path, text: &str, gpu: &str, name: &str, flags: &[&str]) -> Result<std::process::Output> {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let (src, out) = (dir.join(format!("{name}.ptx")), dir.join(format!("{name}.cubin")));
-    std::fs::write(&src, text).unwrap();
-    Command::new(ptxas).args(["--gpu-name", gpu]).args(flags).arg(&src).arg("-o").arg(&out).output().unwrap()
+    std::fs::write(&src, text)?;
+    Ok(Command::new(ptxas).args(["--gpu-name", gpu]).args(flags).arg(&src).arg("-o").arg(&out).output()?)
 }
 
 #[test]
-fn ptxas_takes_each_directive_kernite_writes_without_a_word() {
+fn ptxas_takes_each_directive_kernite_writes_without_a_word() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     // Turing's SM holds the fewest blocks and warps of the GPUs kernite writes for, and a
     // GeForce RTX 3050 is Ampere.
-    for (name, text) in
-        [("tuned", kernite::ptx_str(TUNED).unwrap()), ("edges", kernite::ptx_str(&tuned(EDGES)).unwrap())]
-    {
+    for (name, text) in [("tuned", kernite::ptx_str(TUNED)?), ("edges", kernite::ptx_str(&tuned(EDGES))?)] {
         for gpu in ["sm_75", "sm_86"] {
-            let run = assembled(&ptxas, &text, gpu, &format!("{name}_{gpu}"), &["--warning-as-error"]);
+            let run = assembled(&ptxas, &text, gpu, &format!("{name}_{gpu}"), &["--warning-as-error"])?;
             assert!(run.status.success(), "{name} for {gpu}: {}", String::from_utf8_lossy(&run.stderr));
         }
     }
+    Ok(())
 }
 
 /// A kernel that loads the 64 floats `v[k]` at `x[tid.x]`, 1024 apart, and writes to `y[tid.x]` the sum of
 /// their products in pairs, `v[k] * v[63 - k]`. It loads them all before it uses the first: without a
 /// limit, `ptxas` gives it more than 32 registers.
-fn heavy(attrs: &str) -> String {
+fn heavy(attrs: &str) -> Result<String> {
     let body = r#"
     pub unsafe extern "ptx-kernel" fn heavy(x: *const f32, y: *mut f32) {
         let (i, at): (u32, u64);
@@ -6374,76 +6532,81 @@ fn heavy(attrs: &str) -> String {
         st.global.f32([at], s);
     }
     "#;
-    kernite::ptx_str(&format!("{attrs}{body}")).unwrap()
+    Ok(kernite::ptx_str(&format!("{attrs}{body}"))?)
 }
 
 /// The registers `ptxas -v` says the kernel of the module `text` uses, for the RTX 3050's `sm_86`.
-fn used_registers(ptxas: &Path, text: &str, name: &str) -> u32 {
-    let run = assembled(ptxas, text, "sm_86", name, &["-v", "--warning-as-error"]);
+fn used_registers(ptxas: &Path, text: &str, name: &str) -> Result<u32> {
+    let run = assembled(ptxas, text, "sm_86", name, &["-v", "--warning-as-error"])?;
     let said = String::from_utf8_lossy(&run.stderr).into_owned();
     assert!(run.status.success(), "{name}: {said}");
-    let after = said.split_once("Used ").unwrap_or_else(|| panic!("{name}: {said}")).1;
-    after.split_once(" registers").unwrap().0.parse().unwrap()
+    let after = said.split_once("Used ").ok_or_else(|| format!("{name}: {said}"))?.1;
+    Ok(after.split_once(" registers").ok_or("split_once gave None")?.0.parse()?)
 }
 
 #[test]
-fn a_kernel_with_maxnreg_uses_no_more_registers_than_it_says() {
+fn a_kernel_with_maxnreg_uses_no_more_registers_than_it_says() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
-    let used = |attrs: &str, name: &str| used_registers(&ptxas, &heavy(attrs), name);
-    let free = used("", "free");
+    let used = |attrs: &str, name: &str| -> Result<_> { used_registers(&ptxas, &heavy(attrs)?, name) };
+    let free = used("", "free")?;
     assert!(free > 32, "the kernel needs {free} registers, and the test means nothing if that is 32 or fewer");
     for most in [24, 32, 48] {
-        let held = used(&format!("#[maxnreg({most})]"), &format!("held_{most}"));
+        let held = used(&format!("#[maxnreg({most})]"), &format!("held_{most}"))?;
         assert!(held <= most, "`#[maxnreg({most})]` and {held} registers, not {free}");
     }
+    Ok(())
 }
 
 #[test]
-fn ptxas_lowers_maxnreg_for_the_blocks_an_sm_holds_but_not_for_the_threads_of_a_block() {
+fn ptxas_lowers_maxnreg_for_the_blocks_an_sm_holds_but_not_for_the_threads_of_a_block() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
-    let used = |attrs: &str, name: &str| used_registers(&ptxas, &heavy(attrs), name);
-    let free = used("", "free_again");
+    let used = |attrs: &str, name: &str| -> Result<_> { used_registers(&ptxas, &heavy(attrs)?, name) };
+    let free = used("", "free_again")?;
     assert!(free > 64, "the kernel needs {free} registers, and the test means nothing if that is 64 or fewer");
     // 1024 threads have 64 registers each, and `.maxntid 1024` alone gives the kernel no more.
-    assert_eq!(used("#[maxntid(1024)]", "threads"), 64);
+    assert_eq!(used("#[maxntid(1024)]", "threads")?, 64);
     // Four blocks of 256 threads are 1024 threads an SM, and `.minnctapersm 4` gives it 64 as well,
     // though `.maxnreg` says 128.
-    assert_eq!(used("#[maxntid(256)] #[minnctapersm(4)] #[maxnreg(128)]", "blocks"), 64);
+    assert_eq!(used("#[maxntid(256)] #[minnctapersm(4)] #[maxnreg(128)]", "blocks")?, 64);
     // `.maxnreg 128` beside `.maxntid 1024` is kept, and kernite refuses it: no block of 1024
     // threads has 128 registers each. The module is by hand, for kernite does not write it.
-    let text = heavy("#[maxntid(1024)]").replace(".maxntid 1024\n", ".maxntid 1024\n.maxnreg 128\n");
+    let text = heavy("#[maxntid(1024)]")?.replace(".maxntid 1024\n", ".maxntid 1024\n.maxnreg 128\n");
     assert!(text.contains(".maxnreg 128"), "{text}");
-    assert_eq!(used_registers(&ptxas, &text, "kept"), free);
+    assert_eq!(used_registers(&ptxas, &text, "kept")?, free);
+    Ok(())
 }
 
 #[test]
-fn ptxas_keeps_the_last_of_a_directive_said_twice_and_says_nothing_of_the_first() {
+fn ptxas_keeps_the_last_of_a_directive_said_twice_and_says_nothing_of_the_first() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
-    let once = |most: u32| used_registers(&ptxas, &heavy(&format!("#[maxnreg({most})]")), &format!("once_{most}"));
+    let once = |most: u32| -> Result<_> {
+        used_registers(&ptxas, &heavy(&format!("#[maxnreg({most})]"))?, &format!("once_{most}"))
+    };
     // The modules are by hand, for kernite refuses a directive twice, at the second.
-    let twice = |first: u32, last: u32| {
-        let text = heavy(&format!("#[maxnreg({last})]"));
+    let twice = |first: u32, last: u32| -> Result<_> {
+        let text = heavy(&format!("#[maxnreg({last})]"))?;
         let text = text.replace(&format!(".maxnreg {last}\n"), &format!(".maxnreg {first}\n.maxnreg {last}\n"));
         assert!(text.contains(&format!(".maxnreg {first}\n.maxnreg {last}\n")), "{text}");
         used_registers(&ptxas, &text, &format!("twice_{first}_{last}"))
     };
-    let (low, high) = (once(32), once(48));
+    let (low, high) = (once(32)?, once(48)?);
     assert!(low <= 32 && high > 32, "`#[maxnreg(32)]` and {low} registers, `#[maxnreg(48)]` and {high}");
-    assert_eq!(twice(48, 32), low);
-    assert_eq!(twice(32, 48), high);
+    assert_eq!(twice(48, 32)?, low);
+    assert_eq!(twice(32, 48)?, high);
+    Ok(())
 }
 
 #[test]
-fn what_ptx_forbids_and_ptxas_would_cut_or_ignore_is_refused_at_the_directive() {
+fn what_ptx_forbids_and_ptxas_would_cut_or_ignore_is_refused_at_the_directive() -> Result {
     let size = |name: &str| format!("`#[{name}(..)]` gives one size, two or three: the threads along x, then y and z");
     let few = "threads are too few: a block has 1 at least along each axis";
     let one = |name: &str, what: &str| format!("`#[{name}(..)]` gives one number: {what}");
@@ -6569,14 +6732,15 @@ fn what_ptx_forbids_and_ptxas_would_cut_or_ignore_is_refused_at_the_directive() 
     ];
     for (attrs, at, want) in cases {
         let src = format!("{attrs}\npub unsafe extern \"ptx-kernel\" fn k() {{}}\n");
-        assert_eq!(kernite::ptx_str(&src).unwrap_err(), format!("{at}: {want}"), "{attrs}");
+        assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, format!("{at}: {want}"), "{attrs}");
     }
     // The other side of each edge is taken.
-    kernite::ptx_str(&tuned(EDGES)).unwrap();
+    kernite::ptx_str(&tuned(EDGES))?;
+    Ok(())
 }
 
 #[test]
-fn a_directive_is_said_of_a_gpu_kernel_alone() {
+fn a_directive_is_said_of_a_gpu_kernel_alone() -> Result {
     let not = |name: &str| format!("`#[{name}(..)]` goes on a GPU kernel, `extern \"ptx-kernel\"`");
     let cooperative = "`#[cooperative]` goes on a kernel whose blocks or threads wait for each other, \
                        `extern \"ptx-kernel\"` or `extern \"sysv64\"`";
@@ -6608,20 +6772,21 @@ fn a_directive_is_said_of_a_gpu_kernel_alone() {
     ];
     for (items, want) in cases {
         let src = format!("{items}\npub unsafe extern \"ptx-kernel\" fn k() {{}}\n");
-        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{items}");
+        assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, want, "{items}");
     }
     // Where the function is called, it is said once, and for the function, not for the kernel.
     let src = "#[maxnreg(32)]\nfn h() {\n    bar.sync(0);\n}\npub unsafe extern \"ptx-kernel\" fn j() {\n    h();\n}\n\
                pub unsafe extern \"ptx-kernel\" fn k() {\n    h();\n}\n";
     let want = format!("1:3: {}; `h` is a helper, inlined where it is called", not("maxnreg"));
-    assert_eq!(kernite::ptx_str(src).unwrap_err(), want);
+    assert_eq!(kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?, want);
+    Ok(())
 }
 
 /// `.maxnctapersm` is gone from PTX 2.1 on, and `ptxas` refuses it: the name is what is wrong with
 /// `#[maxnctapersm(..)]`, in whatever form it is written and on whatever it is. The error says so, at the
 /// name, and not that the directive goes on a GPU kernel, where it would be refused too.
 #[test]
-fn maxnctapersm_is_refused_by_its_name_in_every_form_and_every_place() {
+fn maxnctapersm_is_refused_by_its_name_in_every_form_and_every_place() -> Result {
     let want = "1:3: PTX has no `.maxnctapersm` from 2.1 on; `#[minnctapersm(..)]` gives the blocks an SM should hold \
                 at once, at least";
     for items in [
@@ -6636,8 +6801,9 @@ fn maxnctapersm_is_refused_by_its_name_in_every_form_and_every_place() {
         "#[maxnctapersm(2)] const A: u32 = 1;",
     ] {
         let src = format!("{items}\npub unsafe extern \"ptx-kernel\" fn k() {{}}\n");
-        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{items}");
+        assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, want, "{items}");
     }
+    Ok(())
 }
 
 /// A kernel of a tile `N` along y and 8 along x, compiled for 16 and for 32.
@@ -6651,10 +6817,10 @@ const GENERIC: &str = r#"
 "#;
 
 #[test]
-fn a_directive_works_out_the_consts_and_the_instance_of_its_kernel() {
-    let ptx = kernite::ptx_str(GENERIC).unwrap();
-    assert_eq!(directives_of(&ptx, "_Z4tileILj16EE"), [".maxntid 8, 16", ".minnctapersm 2"]);
-    assert_eq!(directives_of(&ptx, "_Z4tileILj32EE"), [".maxntid 8, 32", ".minnctapersm 4"]);
+fn a_directive_works_out_the_consts_and_the_instance_of_its_kernel() -> Result {
+    let ptx = kernite::ptx_str(GENERIC)?;
+    assert_eq!(directives_of(&ptx, "_Z4tileILj16EE")?, [".maxntid 8, 16", ".minnctapersm 2"]);
+    assert_eq!(directives_of(&ptx, "_Z4tileILj32EE")?, [".maxntid 8, 32", ".minnctapersm 4"]);
     // What is wrong with an instance is said of that instance, at the value.
     for (instances, want) in [
         ("16, 2048", "2:11: in `tile::<2048>`: 2048 threads are too many: a block has 1024 at most along x"),
@@ -6663,8 +6829,9 @@ fn a_directive_works_out_the_consts_and_the_instance_of_its_kernel() {
         let src = format!(
             "#[instances({instances})]\n#[maxntid(N)]\npub unsafe extern \"ptx-kernel\" fn tile<const N: u32>() {{}}\n"
         );
-        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{instances}");
+        assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, want, "{instances}");
     }
+    Ok(())
 }
 
 /// A kernel `k` written by hand, with `lines` for its directives.
@@ -6673,15 +6840,15 @@ fn written_with(lines: &str) -> String {
 }
 
 #[test]
-fn ptxas_refuses_cuts_or_ignores_what_kernite_refuses_of_the_directives() {
+fn ptxas_refuses_cuts_or_ignores_what_kernite_refuses_of_the_directives() -> Result {
     let Some(ptxas) = ptxas() else {
         eprintln!("no ptxas here: skipped; set PTXAS to run it");
-        return;
+        return Ok(());
     };
     // What `ptxas` says of a kernel with `lines`, for the GPU `gpu`.
-    let said = |gpu: &str, lines: &str, name: usize| -> (bool, String) {
-        let run = assembled(&ptxas, &written_with(lines), gpu, &format!("written_with_{name}"), &[]);
-        (run.status.success(), String::from_utf8_lossy(&run.stderr).into_owned())
+    let said = |gpu: &str, lines: &str, name: usize| -> Result<(bool, String)> {
+        let run = assembled(&ptxas, &written_with(lines), gpu, &format!("written_with_{name}"), &[])?;
+        Ok((run.status.success(), String::from_utf8_lossy(&run.stderr).into_owned()))
     };
     let cases = [
         // Refused, which kernite refuses at the directive in its words.
@@ -6718,7 +6885,7 @@ fn ptxas_refuses_cuts_or_ignores_what_kernite_refuses_of_the_directives() {
     // For the RTX 3050's `sm_86`.
     let before = cases.len();
     for (i, (lines, takes, word)) in cases.into_iter().enumerate() {
-        let (took, stderr) = said("sm_86", lines, i);
+        let (took, stderr) = said("sm_86", lines, i)?;
         assert_eq!(took, takes, "{lines}: {stderr}");
         assert!(stderr.contains(word) && (!word.is_empty() || stderr.is_empty()), "{lines}: {stderr}");
     }
@@ -6743,10 +6910,11 @@ fn ptxas_refuses_cuts_or_ignores_what_kernite_refuses_of_the_directives() {
         (".maxntid 513\n.minnctapersm 2", false),
     ];
     for (i, (lines, takes)) in turing.into_iter().enumerate() {
-        let (took, stderr) = said("sm_75", lines, before + 2 * i);
+        let (took, stderr) = said("sm_75", lines, before + 2 * i)?;
         let word = if takes { "" } else { ignored };
         assert!(took && stderr.contains(word) && (!takes || stderr.is_empty()), "{lines}: {stderr}");
         // Ampere's holds 48 warps, more than any of these makes.
-        assert_eq!(said("sm_86", lines, before + 2 * i + 1), (true, String::new()), "{lines}");
+        assert_eq!(said("sm_86", lines, before + 2 * i + 1)?, (true, String::new()), "{lines}");
     }
+    Ok(())
 }

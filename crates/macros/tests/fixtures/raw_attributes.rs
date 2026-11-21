@@ -190,11 +190,11 @@ macro_rules! x86_kernels_run {
         // SAFETY: each cooperative kernel writes the word it is given, which is there; `tile` is given none.
         unsafe {
             assert_eq!(($kernels::tile::<1>(10), $kernels::tile::<2>(10)), (11, 12));
-            $kernels::together(kernite_cpu::Grid::new(1), &mut word).unwrap();
+            $kernels::together(kernite_cpu::Grid::new(1), &mut word)?;
             assert_eq!(word, 1);
-            $kernels::together_tiles::<1>(kernite_cpu::Grid::new(1), &mut other).unwrap();
+            $kernels::together_tiles::<1>(kernite_cpu::Grid::new(1), &mut other)?;
             assert_eq!(other, 1);
-            $kernels::together_tiles::<2>(kernite_cpu::Grid::new(1), &mut other).unwrap();
+            $kernels::together_tiles::<2>(kernite_cpu::Grid::new(1), &mut other)?;
             assert_eq!(other, 2);
         }
     };
@@ -214,13 +214,15 @@ mod tests {
     }
 
     #[test]
-    fn a_kernel_with_attributes_written_plain_runs() {
+    fn a_kernel_with_attributes_written_plain_runs() -> Result<(), Box<dyn std::error::Error>> {
         x86_kernels_run!(plain);
+        Ok(())
     }
 
     #[test]
-    fn a_kernel_with_attributes_written_raw_runs() {
+    fn a_kernel_with_attributes_written_raw_runs() -> Result<(), Box<dyn std::error::Error>> {
         x86_kernels_run!(raw);
+        Ok(())
     }
 
     #[test]
@@ -258,42 +260,46 @@ mod tests {
     }
 
     #[test]
-    fn a_gpu_kernel_with_attributes_written_raw_runs_over_the_blocks_its_directives_allow() {
-        let Ok(cuda) = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")) else { return };
-        let k = raw_gpu::Kernels::load(&cuda).unwrap();
+    fn a_gpu_kernel_with_attributes_written_raw_runs_over_the_blocks_its_directives_allow()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(cuda) = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
+        let k = raw_gpu::Kernels::load(&cuda)?;
         // What the driver refuses of a launch, past `CUDA_ERROR_INVALID_VALUE (1): invalid argument`.
-        let refused = |launched: Result<u32, Error>| {
-            let e = launched.unwrap_err();
+        let refused = |launched: Result<u32, Error>| -> Result<String, Box<dyn std::error::Error>> {
+            let e = launched.err().ok_or("a launch past a directive gave Ok")?;
             let said = e.message.strip_prefix("CUDA_ERROR_INVALID_VALUE (1): invalid argument: ");
-            said.unwrap_or_else(|| panic!("{e}")).to_string()
+            Ok(said.ok_or_else(|| e.to_string())?.to_string())
         };
         // SAFETY: each kernel adds to the count it is given, which lives until the launch has run.
         unsafe {
-            assert_eq!(ran(&cuda, |n| k.most(grid(3, 256), n)).unwrap(), 768);
-            assert_eq!(ran(&cuda, |n| k.exactly(grid(2, 128), n)).unwrap(), 256);
-            assert_eq!(ran(&cuda, |n| k.held(grid(4, 256), n)).unwrap(), 1024);
-            assert_eq!(ran(&cuda, |n| k.few(grid(4, 1024), n)).unwrap(), 4096);
-            assert_eq!(ran(&cuda, |n| k.tile::<64>(grid(3, 64), n)).unwrap(), 192);
-            assert_eq!(ran(&cuda, |n| k.tile::<96>(grid(3, 96), n)).unwrap(), 288);
+            assert_eq!(ran(&cuda, |n| k.most(grid(3, 256), n))?, 768);
+            assert_eq!(ran(&cuda, |n| k.exactly(grid(2, 128), n))?, 256);
+            assert_eq!(ran(&cuda, |n| k.held(grid(4, 256), n))?, 1024);
+            assert_eq!(ran(&cuda, |n| k.few(grid(4, 1024), n))?, 4096);
+            assert_eq!(ran(&cuda, |n| k.tile::<64>(grid(3, 64), n))?, 192);
+            assert_eq!(ran(&cuda, |n| k.tile::<96>(grid(3, 96), n))?, 288);
             // A launch past a directive is refused, with the directive the PTX says.
-            let said = refused(ran(&cuda, |n| k.most(grid(1, 512), n)));
+            let said = refused(ran(&cuda, |n| k.most(grid(1, 512), n)))?;
             assert_eq!(said, "each block has 512 threads, and the kernel's `.maxntid 256` takes 256 at most");
-            let said = refused(ran(&cuda, |n| k.exactly(grid(1, 64), n)));
+            let said = refused(ran(&cuda, |n| k.exactly(grid(1, 64), n)))?;
             assert_eq!(said, "each block has 64 threads along x, and the kernel's `.reqntid 128` takes 128 exactly");
-            let said = refused(ran(&cuda, |n| k.tile::<64>(grid(1, 96), n)));
+            let said = refused(ran(&cuda, |n| k.tile::<64>(grid(1, 96), n)))?;
             assert_eq!(said, "each block has 96 threads along x, and the kernel's `.reqntid 64` takes 64 exactly");
         }
-        cuda.sync().unwrap();
+        cuda.sync()?;
+        Ok(())
     }
 
     #[test]
-    fn a_cooperative_gpu_kernel_written_raw_has_a_method_for_the_blocks_of_its_grid_and_runs() {
-        let Ok(cuda) = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")) else { return };
-        let k = raw_gpu::Kernels::load(&cuda).unwrap();
-        let blocks = k.together_blocks(32, 0).unwrap();
+    fn a_cooperative_gpu_kernel_written_raw_has_a_method_for_the_blocks_of_its_grid_and_runs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(cuda) = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
+        let k = raw_gpu::Kernels::load(&cuda)?;
+        let blocks = k.together_blocks(32, 0)?;
         assert!(blocks > 0);
         // SAFETY: the kernel adds to the count it is given, which lives until the launch has run.
         let threads = unsafe { ran(&cuda, |n| k.together(grid(blocks, 32), n)) };
-        assert_eq!(threads.unwrap(), blocks * 32);
+        assert_eq!(threads?, blocks * 32);
+        Ok(())
     }
 }

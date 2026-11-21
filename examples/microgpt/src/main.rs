@@ -28,7 +28,7 @@ use std::process::{Command, ExitCode};
 
 use cpu::Cpu;
 use gpu::Gpu;
-use model::{BOS, Ops, V};
+use model::{BOS, Op, Ops, V};
 use random::Random;
 use reference::Reference;
 
@@ -49,11 +49,13 @@ struct Names {
 }
 
 impl Names {
-    /// `docs`, each a name, and the letters among them in order: tokens 0 to 25.
-    fn new(docs: Vec<String>) -> Names {
+    /// `docs`, each a name, and the letters among them in order: tokens 0 to 25; or why they are not of 26 letters.
+    fn new(docs: Vec<String>) -> Result<Names, String> {
         let chars: Vec<char> = docs.iter().flat_map(|d| d.chars()).collect::<BTreeSet<_>>().into_iter().collect();
-        assert_eq!(chars.len() as u32, BOS, "the names are of the 26 letters");
-        Names { docs, chars }
+        if chars.len() as u32 != BOS {
+            return Err(format!("the names are of the {BOS} letters, and these of {}", chars.len()));
+        }
+        Ok(Names { docs, chars })
     }
 }
 
@@ -87,12 +89,12 @@ fn run(
     steps: usize,
     samples: usize,
     mut step: impl FnMut(usize, f64),
-) -> Vec<String> {
-    for i in 0..steps {
-        let tokens = model::tokenize(&names.docs[i % names.docs.len()], &names.chars);
-        step(i, model::train(ops, &tokens, i, steps));
+) -> Op<Vec<String>> {
+    for (i, doc) in names.docs.iter().cycle().take(steps).enumerate() {
+        let tokens = model::tokenize(doc, &names.chars)?;
+        step(i, model::train(ops, &tokens, i, steps)?);
     }
-    Vec::from_fn(samples, |_| model::sample(ops, rng, INV_TEMP, &names.chars))
+    (0..samples).map(|_| model::sample(ops, rng, INV_TEMP, &names.chars)).collect()
 }
 
 /// Which computes the model.
@@ -122,7 +124,13 @@ fn main() -> ExitCode {
     };
     let mut rng = Random::new(42);
     rng.shuffle(&mut docs);
-    let names = Names::new(docs);
+    let names = match Names::new(docs) {
+        Ok(names) => names,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
     println!("num docs: {}", names.docs.len());
     println!("vocab size: {V}");
     let params = model::init(&mut rng);
@@ -131,11 +139,11 @@ fn main() -> ExitCode {
         print!("step {:4} / {STEPS:4} | loss {loss:.4}\r", i + 1);
         let _ = std::io::stdout().flush();
     };
-    let samples = match backend {
+    let ran = match backend {
         Backend::Cpu => match Cpu::new(&params) {
-            Some(mut cpu) => run(&mut cpu, &names, &mut rng, STEPS, SAMPLES, print),
-            None => {
-                eprintln!("this CPU lacks AVX2 or FMA, which the kernels are written in");
+            Ok(mut cpu) => run(&mut cpu, &names, &mut rng, STEPS, SAMPLES, print),
+            Err(e) => {
+                eprintln!("{e}");
                 return ExitCode::FAILURE;
             }
         },
@@ -146,7 +154,20 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         },
-        Backend::Reference => run(&mut Reference::new(&params), &names, &mut rng, STEPS, SAMPLES, print),
+        Backend::Reference => match Reference::new(&params) {
+            Ok(mut reference) => run(&mut reference, &names, &mut rng, STEPS, SAMPLES, print),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let samples = match ran {
+        Ok(samples) => samples,
+        Err(e) => {
+            eprintln!("\n{e}");
+            return ExitCode::FAILURE;
+        }
     };
     println!("\n--- inference (new, hallucinated names) ---");
     for (i, name) in samples.iter().enumerate() {

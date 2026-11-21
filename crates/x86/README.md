@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The allocator gives the variables registers, and the printer writes the lines that `naked_asm!` takes.
     // `vec![]` lists the functions that a call at an address may reach: none.
-    let listing = intel::print(&compile(&asm.finish(), &SysV)?, vec![])?;
+    let listing = intel::print(&compile(&asm.finish()?, &SysV)?, vec![])?;
     let want = [
         "vmovups ymm0, ymmword ptr [rdi]",
         "vextractf128 xmm1, ymm0, 1",

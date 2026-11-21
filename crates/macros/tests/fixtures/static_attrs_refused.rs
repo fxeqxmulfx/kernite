@@ -117,6 +117,6 @@ pub mod used_as_memory {
 }
 
 /// Reads the memory, in Rust and outside the module, where rustc checks the use of the method as it does any.
-pub fn read(kernels: &used_as_memory::Kernels) -> Vec<u32> {
-    kernels.COUNTS().read().unwrap()
+pub fn read(kernels: &used_as_memory::Kernels) -> Result<Vec<u32>, kernite_cuda::Error> {
+    kernels.COUNTS()?.read()
 }

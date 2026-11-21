@@ -7,7 +7,7 @@ use std::ptr;
 use std::rc::Rc;
 use std::slice;
 
-use super::{Cuda, Driver, Error, Plain, Ptr, bytes};
+use super::{Cuda, Driver, Error, Memory, MemoryMut, Plain, Ptr, bytes, sealed};
 
 mod placement;
 
@@ -59,7 +59,7 @@ impl Cuda {
         // The driver does not clear it, and the host must not be lent bytes that were never
         // written. The GPU writes the zeros: where the GPU does not allow concurrent access, the
         // host must not touch managed memory while a kernel runs, and one may be running.
-        memory.driver.zero(memory.addr(), bytes::<T>(len))?;
+        memory.driver.zero(memory.addr(), len * size_of::<T>())?;
         Ok(memory)
     }
 
@@ -77,7 +77,7 @@ impl Cuda {
     /// bytes as they are.
     pub unsafe fn managed_uninit<T: Plain>(&self, len: usize) -> Result<Unified<'static, T>, Error> {
         self.driver.require("cuMemAllocManaged", MANAGED_MEMORY, "the GPU cannot allocate managed memory")?;
-        let bytes = bytes::<T>(len);
+        let bytes = bytes::<T>("cuMemAllocManaged", len)?;
         let (api, mut addr) = (self.driver.current()?, 0);
         // SAFETY: it writes the address to `addr`. It refuses no bytes, so it is asked for one. 1
         // is CU_MEM_ATTACH_GLOBAL: any stream of any GPU may use it, as the default stream does.
@@ -118,7 +118,7 @@ impl Cuda {
     pub unsafe fn pinned_uninit<T: Plain>(&self, len: usize) -> Result<Unified<'static, T>, Error> {
         let cannot = "the GPU cannot reach page-locked memory at the host's addresses";
         self.driver.require("cuMemHostAlloc", UNIFIED_ADDRESSING, cannot)?;
-        let bytes = bytes::<T>(len);
+        let bytes = bytes::<T>("cuMemHostAlloc", len)?;
         let (api, mut host) = (self.driver.current()?, ptr::null_mut());
         // SAFETY: it writes the address to `host`. It refuses no bytes, so it is asked for one. 2
         // is CU_MEMHOSTALLOC_DEVICEMAP: the GPU reaches it.
@@ -156,11 +156,30 @@ impl Cuda {
     /// touch of it:
     ///
     /// ```compile_fail,E0502
-    /// # let cuda = kernite_cuda::Cuda::new().unwrap();
+    /// # let cuda = kernite_cuda::Cuda::new()?;
     /// let mut xs = vec![1.0f32; 4];
-    /// let lent = cuda.lend(&mut xs).unwrap();
+    /// let lent = cuda.lend(&mut xs)?;
     /// let first = xs[0];
     /// let for_a_kernel = lent.ptr();
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    ///
+    /// A kernel that is no `unsafe fn` is lent a slice lent for good alone, as a `mem::forget` of
+    /// what `lend` gave would give one lent for less back to the host with no wait for the kernel:
+    ///
+    /// ```compile_fail,E0597
+    /// # let cuda = kernite_cuda::Cuda::new()?;
+    /// fn lent_to_a_safe_kernel(_: &mut impl kernite_cuda::MemoryMut<f32>) {}
+    /// let mut xs = vec![1.0f32; 4];
+    /// lent_to_a_safe_kernel(&mut cuda.lend(&mut xs)?);
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    ///
+    /// ```no_run
+    /// # let cuda = kernite_cuda::Cuda::new()?;
+    /// fn lent_to_a_safe_kernel(_: &mut impl kernite_cuda::MemoryMut<f32>) {}
+    /// lent_to_a_safe_kernel(&mut cuda.lend(Vec::leak(vec![1.0f32; 4]))?);
+    /// # Ok::<(), kernite_cuda::Error>(())
     /// ```
     pub fn lend<'a, T: Plain>(&self, memory: &'a mut [T]) -> Result<Unified<'a, T>, Error> {
         let cannot = "the GPU cannot reach pageable memory, a slice of the host's";
@@ -225,32 +244,37 @@ enum Kind {
 /// another, so the compiler refuses to take a pointer for a kernel while the host holds a slice:
 ///
 /// ```compile_fail,E0502
-/// # let cuda = kernite_cuda::Cuda::new().unwrap();
-/// let mut xs = cuda.managed::<f32>(4).unwrap();
-/// let slice = xs.host_mut().unwrap();
+/// # let cuda = kernite_cuda::Cuda::new()?;
+/// let mut xs = cuda.managed::<f32>(4)?;
+/// let slice = xs.host_mut()?;
 /// let for_a_kernel = xs.ptr();
 /// slice[0] = 1.0;
+/// # Ok::<(), kernite_cuda::Error>(())
 /// ```
 ///
 /// A [`Ptr`] is `Copy` and borrows nothing, so the compiler cannot refuse a launch on one taken
 /// before the slice:
 ///
 /// ```no_run
-/// # let cuda = kernite_cuda::Cuda::new().unwrap();
-/// let mut xs = cuda.managed::<f32>(4).unwrap();
+/// # let cuda = kernite_cuda::Cuda::new()?;
+/// let mut xs = cuda.managed::<f32>(4)?;
 /// let for_a_kernel = xs.ptr();
-/// let slice = xs.host_mut().unwrap();
+/// let slice = xs.host_mut()?;
 /// // A launch on `for_a_kernel` here would run under `slice`.
 /// let _ = for_a_kernel;
 /// slice[0] = 1.0;
+/// # Ok::<(), kernite_cuda::Error>(())
 /// ```
 ///
-/// A launch is `unsafe` for that, as for a [`Buffer`](super::Buffer), and its contract, which
-/// [`Module::launch`] has as its `# Safety`, is this: each pointer is to a buffer or to unified
-/// memory of the GPU, as long as the kernel reads and writes through it; from the launch until the
-/// kernel is done, the host holds no slice of memory the kernel writes, and no slice it may write
-/// of memory the kernel reads; and where [`Cuda::concurrent_managed_access`] is false, the GPU not
-/// reaching managed memory while the host does, the host holds no slice of managed memory at all.
+/// A launch on a pointer is `unsafe` for that, as for a [`Buffer`](super::Buffer), and its
+/// contract, which [`Module::launch`] has as its `# Safety`, is this: each pointer is to a buffer
+/// or to unified memory of the GPU, as long as the kernel reads and writes through it; from the
+/// launch until the kernel is done, the host holds no slice of memory the kernel writes, and no
+/// slice it may write of memory the kernel reads; and where [`Cuda::concurrent_managed_access`]
+/// is false, the GPU not reaching managed memory while the host does, the host holds no slice of
+/// managed memory at all. The launcher of a kernel that is no `unsafe fn` takes the memory, not a
+/// pointer, and borrows it, as [`Memory`](super::Memory) says, so the compiler refuses that
+/// launch while the host holds such a slice.
 ///
 /// Dropping the memory waits for the kernels that use it, and then frees it; or, for a slice
 /// lent, gives it back to the host.
@@ -269,14 +293,13 @@ pub struct Unified<'a, T: Plain> {
 impl<T: Plain> Unified<'_, T> {
     /// Its address, for a kernel to be given.
     pub fn ptr(&self) -> Ptr<T> {
-        self.at(0)
+        Ptr::new(self.addr())
     }
 
-    /// The address of its element `i`, for a kernel to be given the part from there on.
-    /// Panics if `i` is past its end.
-    pub fn at(&self, i: usize) -> Ptr<T> {
-        assert!(i <= self.len, "element {i} of memory of {}", self.len);
-        Ptr { addr: self.addr() + (i * size_of::<T>()) as u64, of: PhantomData }
+    /// The address of its element `i`, for a kernel to be given the part from there on; `None`
+    /// if `i` is past its end.
+    pub fn at(&self, i: usize) -> Option<Ptr<T>> {
+        Ptr::element(self.addr(), self.len, i)
     }
 
     /// How many elements it has.
@@ -294,9 +317,11 @@ impl<T: Plain> Unified<'_, T> {
     pub fn host(&self) -> Result<&[T], Error> {
         self.driver.sync()?;
         // SAFETY: `ptr` is the address of `len` elements of `T`, which last as long as `self`.
-        // `sync` waited for the kernels launched, and a launch after it is `unsafe` and keeps
-        // from writing the memory while the host holds this slice. Any bits are a `T`, as `Plain`
-        // promises.
+        // `sync` waited for the kernels launched, and none launched after it writes the memory
+        // while the host holds this slice: the launcher of a kernel that is no `unsafe fn`
+        // borrows the memory mutably to write it, which it cannot while this slice borrows `self`,
+        // and an `unsafe` launch keeps from it, as its caller promises. Any bits are a `T`, as
+        // `Plain` promises.
         Ok(unsafe { slice::from_raw_parts(self.ptr, self.len) })
     }
 
@@ -305,8 +330,9 @@ impl<T: Plain> Unified<'_, T> {
     pub fn host_mut(&mut self) -> Result<&mut [T], Error> {
         self.driver.sync()?;
         // SAFETY: as for `host`, and nothing else holds a slice of it, as `self` is borrowed
-        // for as long as this one is held. A launch after `sync` keeps from reading the memory
-        // too, as the host may write it.
+        // for as long as this one is held. No kernel launched after `sync` reads the memory
+        // either, as the host may write it: a launcher that lends it borrows `self`, which it
+        // cannot while this slice borrows it mutably, and an `unsafe` launch keeps from it.
         Ok(unsafe { slice::from_raw_parts_mut(self.ptr, self.len) })
     }
 
@@ -315,6 +341,26 @@ impl<T: Plain> Unified<'_, T> {
         self.ptr.addr() as u64
     }
 }
+
+// Memory of `'static` alone: a slice lent for less would be the host's again at a `mem::forget` of its `Unified`, with
+// no wait for the kernel.
+impl<T: Plain> sealed::Sealed for Unified<'static, T> {}
+
+impl<T: Plain> Memory<T> for Unified<'static, T> {
+    fn lend(&self, module: &super::Module) -> Result<(Ptr<T>, usize), Error> {
+        module.driver.same_gpu(&self.driver)?;
+        if matches!(self.kind, Kind::Managed) {
+            // The host may touch managed memory while the kernel runs, as any slice of it it holds may, which a GPU
+            // that does not reach it while the host does faults on.
+            let cannot = "a kernel that is no `unsafe fn` is not lent managed memory by a GPU that cannot reach it \
+                          while the host does";
+            self.driver.require("cuLaunchKernel", CONCURRENT_MANAGED_ACCESS, cannot)?;
+        }
+        Ok((self.ptr(), self.len))
+    }
+}
+
+impl<T: Plain> MemoryMut<T> for Unified<'static, T> {}
 
 impl<T: Plain> Drop for Unified<'_, T> {
     fn drop(&mut self) {
@@ -345,8 +391,10 @@ mod tests {
     use std::cell::Cell;
     use std::ffi::{c_uint, c_void};
 
-    use super::super::{Api, CuResult, Handle};
+    use super::super::{Api, Buffer, CuResult, Handle, Module};
     use super::*;
+
+    type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
     thread_local! {
         /// What the GPU here says of each attribute: the attribute's number is the index.
@@ -367,12 +415,12 @@ mod tests {
 
     /// A GPU that says each of `flags` is 1 and every other attribute 0, and refuses every call but
     /// the two that tell its attributes and make its context current.
-    pub(super) fn gpu(flags: &[Flag]) -> Cuda {
+    pub(super) fn gpu(flags: &[Flag]) -> Result<Cuda> {
         gpu_with(flags, |_| {})
     }
 
     /// The same GPU, with the calls `replace` puts in the driver's place.
-    pub(super) fn gpu_with(flags: &[Flag], replace: impl FnOnce(&mut Api)) -> Cuda {
+    pub(super) fn gpu_with(flags: &[Flag], replace: impl FnOnce(&mut Api)) -> Result<Cuda> {
         let mut values = [0; 128];
         for (attribute, _) in flags {
             values[*attribute as usize] = 1;
@@ -383,7 +431,7 @@ mod tests {
         api.set_current = set_current;
         replace(&mut api);
         let driver = Rc::new(Driver { api, device: 0, context: ptr::without_provenance_mut(1) });
-        Cuda::of(driver, String::new()).unwrap()
+        Ok(Cuda::of(driver, String::new())?)
     }
 
     thread_local! {
@@ -440,59 +488,81 @@ mod tests {
         0
     }
 
+    /// The fake driver's `cuModuleLoadDataEx`: a module with no kernels and no memory.
+    unsafe extern "C" fn load_module(
+        module: *mut Handle,
+        _: *const c_void,
+        _: c_uint,
+        _: *mut c_int,
+        _: *mut *mut c_void,
+    ) -> CuResult {
+        // SAFETY: the caller gives a place for the module.
+        unsafe { *module = ptr::without_provenance_mut(1) };
+        0
+    }
+
+    /// The fake driver's `cuModuleUnload`.
+    unsafe extern "C" fn unload_module(_: Handle) -> CuResult {
+        0
+    }
+
     /// A GPU says it reaches managed memory while the host does as its attribute says, whatever
     /// else it says of itself.
     #[test]
-    fn a_gpu_says_whether_it_reaches_managed_memory_while_the_host_does() {
-        assert!(gpu(&[CONCURRENT_MANAGED_ACCESS]).concurrent_managed_access());
-        assert!(!gpu(&[]).concurrent_managed_access());
+    fn a_gpu_says_whether_it_reaches_managed_memory_while_the_host_does() -> Result {
+        assert!(gpu(&[CONCURRENT_MANAGED_ACCESS])?.concurrent_managed_access());
+        assert!(!gpu(&[])?.concurrent_managed_access());
         let others = [MANAGED_MEMORY, UNIFIED_ADDRESSING, PAGEABLE_MEMORY_ACCESS];
-        assert!(!gpu(&others).concurrent_managed_access());
-        assert!(gpu(&[&others[..], &[CONCURRENT_MANAGED_ACCESS]].concat()).concurrent_managed_access());
+        assert!(!gpu(&others)?.concurrent_managed_access());
+        assert!(gpu(&[&others[..], &[CONCURRENT_MANAGED_ACCESS]].concat())?.concurrent_managed_access());
+        Ok(())
     }
 
     /// A GPU that does not allocate managed memory is refused it, in GUIDE.md's words, before
     /// the driver is asked for any.
     #[test]
-    fn managed_memory_is_made_only_for_a_gpu_that_allocates_it() {
-        let e = gpu(&[]).managed::<u32>(4).unwrap_err();
+    fn managed_memory_is_made_only_for_a_gpu_that_allocates_it() -> Result {
+        let e = gpu(&[])?.managed::<u32>(4).err().ok_or("managed gave Ok")?;
         let said = "the GPU cannot allocate managed memory: its CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY is 0";
         assert_eq!(e.to_string(), format!("cuMemAllocManaged: {said}"));
         // One that does is asked, and the driver here refuses everything.
-        let e = gpu(&[MANAGED_MEMORY]).managed::<u32>(4).unwrap_err();
+        let e = gpu(&[MANAGED_MEMORY])?.managed::<u32>(4).err().ok_or("managed gave Ok")?;
         assert_eq!(e.call, "cuMemAllocManaged");
+        Ok(())
     }
 
     /// A GPU that does not use the host's addresses for the host's memory is refused page-locked
     /// memory, in GUIDE.md's words, before the driver is asked for any.
     #[test]
-    fn page_locked_memory_is_made_only_for_a_gpu_that_uses_the_hosts_addresses() {
-        let e = gpu(&[]).pinned::<u32>(4).unwrap_err();
+    fn page_locked_memory_is_made_only_for_a_gpu_that_uses_the_hosts_addresses() -> Result {
+        let e = gpu(&[])?.pinned::<u32>(4).err().ok_or("pinned gave Ok")?;
         let said = "the GPU cannot reach page-locked memory at the host's addresses: \
                     its CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0";
         assert_eq!(e.to_string(), format!("cuMemHostAlloc: {said}"));
-        let e = gpu(&[UNIFIED_ADDRESSING]).pinned::<u32>(4).unwrap_err();
+        let e = gpu(&[UNIFIED_ADDRESSING])?.pinned::<u32>(4).err().ok_or("pinned gave Ok")?;
         assert_eq!(e.call, "cuMemHostAlloc");
+        Ok(())
     }
 
     /// A GPU that does not reach pageable memory is refused a slice, in GUIDE.md's words, and
     /// one that does is lent it: the address of its elements is the slice's.
     #[test]
-    fn a_slice_is_lent_only_to_a_gpu_that_reaches_pageable_memory() {
+    fn a_slice_is_lent_only_to_a_gpu_that_reaches_pageable_memory() -> Result {
         let mut host = [1u32, 2, 3];
         let at = host.as_ptr() as u64;
-        let e = gpu(&[]).lend(&mut host).unwrap_err();
+        let e = gpu(&[])?.lend(&mut host).err().ok_or("lend gave Ok")?;
         let said = "the GPU cannot reach pageable memory, a slice of the host's: \
                     its CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0";
         assert_eq!(e.to_string(), format!("cuDeviceGetAttribute: {said}"));
-        let lent = gpu(&[PAGEABLE_MEMORY_ACCESS]).lend(&mut host).unwrap();
+        let lent = gpu(&[PAGEABLE_MEMORY_ACCESS])?.lend(&mut host)?;
         assert_eq!((lent.len(), lent.ptr().addr()), (3, at));
+        Ok(())
     }
 
     /// Managed and page-locked memory are zeros, though the driver clears neither: the fake hands
     /// out bytes of 0xAA.
     #[test]
-    fn managed_and_page_locked_memory_are_zeros_though_the_driver_clears_neither() {
+    fn managed_and_page_locked_memory_are_zeros_though_the_driver_clears_neither() -> Result {
         let cuda = gpu_with(&[MANAGED_MEMORY, UNIFIED_ADDRESSING], |api| {
             api.alloc_managed = alloc_managed;
             api.alloc_host = alloc_host;
@@ -500,28 +570,75 @@ mod tests {
             api.free = free;
             api.free_host = free_host;
             api.synchronize = synchronize;
-        });
-        assert_eq!(cuda.managed::<u32>(4).unwrap().host().unwrap(), [0; 4]);
-        assert_eq!(cuda.pinned::<u32>(4).unwrap().host().unwrap(), [0; 4]);
+        })?;
+        assert_eq!(cuda.managed::<u32>(4)?.host()?, [0; 4]);
+        assert_eq!(cuda.pinned::<u32>(4)?.host()?, [0; 4]);
+        Ok(())
     }
 
     /// Managed and page-locked memory made with no zeros are as the driver hands them out, the
     /// fake's bytes of 0xAA, and nothing is asked to clear them: the fake has no `cuMemsetD8`.
     #[test]
-    fn memory_made_with_no_zeros_is_as_the_driver_hands_it_out() {
+    fn memory_made_with_no_zeros_is_as_the_driver_hands_it_out() -> Result {
         let cuda = gpu_with(&[MANAGED_MEMORY, UNIFIED_ADDRESSING], |api| {
             api.alloc_managed = alloc_managed;
             api.alloc_host = alloc_host;
             api.free = free;
             api.free_host = free_host;
             api.synchronize = synchronize;
-        });
+        })?;
         // SAFETY: only the test reads the bytes, and it knows them to be the fake's.
-        let managed = unsafe { cuda.managed_uninit::<u32>(4) }.unwrap();
-        assert_eq!(managed.host().unwrap(), [0xAAAA_AAAA; 4]);
+        let managed = unsafe { cuda.managed_uninit::<u32>(4) }?;
+        assert_eq!(managed.host()?, [0xAAAA_AAAA; 4]);
         drop(managed);
         // SAFETY: as above.
-        let pinned = unsafe { cuda.pinned_uninit::<u32>(4) }.unwrap();
-        assert_eq!(pinned.host().unwrap(), [0xAAAA_AAAA; 4]);
+        let pinned = unsafe { cuda.pinned_uninit::<u32>(4) }?;
+        assert_eq!(pinned.host()?, [0xAAAA_AAAA; 4]);
+        Ok(())
+    }
+
+    /// A kernel that is no `unsafe fn` is lent managed memory only by a GPU that reaches it while the host does, which
+    /// the host may touch while the kernel runs, and the error says so, in GUIDE.md's words, before the kernel runs.
+    #[test]
+    fn a_kernel_is_lent_managed_memory_only_by_a_gpu_that_reaches_it_while_the_host_does() -> Result {
+        let lent = |flags: &[Flag]| -> Result<std::result::Result<(u64, usize), String>> {
+            let cuda = gpu_with(flags, |api| {
+                api.alloc_managed = alloc_managed;
+                api.memset = memset;
+                api.free = free;
+                api.synchronize = synchronize;
+                api.load_module = load_module;
+                api.unload_module = unload_module;
+            })?;
+            let module = Module::load(&cuda, "", &[], &[])?;
+            let managed = cuda.managed::<u32>(4)?;
+            let lent = managed.lend(&module).map(|(at, len)| (at.addr(), len)).map_err(|e| e.to_string());
+            assert!(lent.is_err() || lent == Ok((managed.ptr().addr(), 4)), "{lent:?}");
+            Ok(lent)
+        };
+        let said = "cuLaunchKernel: a kernel that is no `unsafe fn` is not lent managed memory by a GPU that cannot \
+                    reach it while the host does: its CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0";
+        assert_eq!(lent(&[MANAGED_MEMORY])?, Err(said.to_string()));
+        assert!(lent(&[MANAGED_MEMORY, CONCURRENT_MANAGED_ACCESS])?.is_ok());
+        Ok(())
+    }
+
+    /// The elements of a buffer from one on are lent with the address of that element and how many are left; a view
+    /// from its end is lent with none, and none starts past it.
+    #[test]
+    fn the_tail_of_a_buffer_is_lent_from_its_element_and_none_starts_past_its_end() -> Result {
+        let cuda = gpu_with(&[], |api| {
+            api.load_module = load_module;
+            api.unload_module = unload_module;
+        })?;
+        let module = Module::load(&cuda, "", &[], &[])?;
+        // The fake driver gave it no address, and frees none: its `cuMemFree` refuses, and a drop ignores that.
+        let buffer = Buffer::<u32> { driver: cuda.driver.clone(), ptr: 4096, len: 4, of: PhantomData };
+        for (from, want) in [(0, (4096, 4)), (1, (4100, 3)), (4, (4112, 0))] {
+            let (at, left) = buffer.tail(from).ok_or("tail gave None")?.lend(&module)?;
+            assert_eq!((at.addr(), left), want, "from {from}");
+        }
+        assert!(buffer.tail(5).is_none());
+        Ok(())
     }
 }

@@ -4,12 +4,14 @@
 use std::fs;
 use std::path::Path;
 
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
 /// The workspace's root.
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 /// The text of the file at `path` in the workspace.
-fn read(path: &str) -> String {
-    fs::read_to_string(Path::new(ROOT).join(path)).unwrap()
+fn read(path: &str) -> Result<String> {
+    Ok(fs::read_to_string(Path::new(ROOT).join(path))?)
 }
 
 /// The lines of `text` after the line `head`, up to one that starts a table or ends an array:
@@ -19,9 +21,9 @@ fn under<'a>(text: &'a str, head: &str) -> impl Iterator<Item = &'a str> {
 }
 
 #[test]
-fn clippy_forbids_hash_maps_and_hash_sets() {
+fn clippy_forbids_hash_maps_and_hash_sets() -> Result {
     // The order they iterate in differs from run to run, and would reach the output.
-    let listed = read("clippy.toml");
+    let listed = read("clippy.toml")?;
     for ty in ["std::collections::HashMap", "std::collections::HashSet"] {
         let entry = format!("{{ path = \"{ty}\"");
         assert!(
@@ -32,14 +34,14 @@ fn clippy_forbids_hash_maps_and_hash_sets() {
     // Each crate denies what clippy.toml lists, or takes the workspace's lints, which deny it.
     let deny = "disallowed_types = \"deny\"";
     assert!(
-        under(&read("Cargo.toml"), "[workspace.lints.clippy]").any(|line| line == deny),
+        under(&read("Cargo.toml")?, "[workspace.lints.clippy]").any(|line| line == deny),
         "the workspace's lints let a crate use what clippy.toml lists"
     );
     let root = Path::new(ROOT);
     for dir in ["crates", "examples"] {
-        for entry in fs::read_dir(root.join(dir)).unwrap() {
-            let path = format!("{dir}/{}", entry.unwrap().file_name().display());
-            let manifest = read(&format!("{path}/Cargo.toml"));
+        for entry in fs::read_dir(root.join(dir))? {
+            let path = format!("{dir}/{}", entry?.file_name().display());
+            let manifest = read(&format!("{path}/Cargo.toml"))?;
             assert!(
                 under(&manifest, "[lints.clippy]").any(|line| line == deny)
                     || under(&manifest, "[lints]").any(|line| line == "workspace = true"),
@@ -57,4 +59,5 @@ fn clippy_forbids_hash_maps_and_hash_sets() {
             );
         }
     }
+    Ok(())
 }

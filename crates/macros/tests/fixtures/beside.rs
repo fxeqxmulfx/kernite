@@ -13,9 +13,10 @@
 /// unsafe {
 ///     beside::by_super::tile::<3>(&mut w);
 ///     assert_eq!(w.0, 3);
-///     beside::by_super::together(kernite_cpu::Grid::new(1), &mut w).unwrap();
+///     beside::by_super::together(kernite_cpu::Grid::new(1), &mut w)?;
 /// }
 /// assert_eq!(w.0, 4);
+/// # Ok::<(), kernite_cpu::Error>(())
 /// ```
 #[derive(Default)]
 pub struct W(pub u64);
@@ -200,7 +201,7 @@ pub fn on_the_gpu(kernels: &gpu::Kernels, p: kernite_cuda::Ptr<W>) -> Result<u32
 }
 
 #[test]
-fn each_x86_kernel_writes_through_its_pointer() {
+fn each_x86_kernel_writes_through_its_pointer() -> Result<(), Box<dyn std::error::Error>> {
     use outer::{far, near};
 
     // That the three kernels of the module `$m`, called on a word of type `$w`, each write theirs.
@@ -215,7 +216,7 @@ fn each_x86_kernel_writes_through_its_pointer() {
                 assert_eq!(w.0, 2, "{}::tile::<2>", stringify!($m));
                 assert_eq!($m::tile::<3>(&mut w), &raw mut w, "{}::tile::<3>", stringify!($m));
                 assert_eq!(w.0, 3, "{}::tile::<3>", stringify!($m));
-                $m::together(grid, &mut w).unwrap();
+                $m::together(grid, &mut w)?;
                 assert_eq!(w.0, 4, "{}::together", stringify!($m));
             }
         }};
@@ -228,4 +229,5 @@ fn each_x86_kernel_writes_through_its_pointer() {
     writes!(by_name, by_name::W);
     writes!(near, outer::V);
     writes!(far, W);
+    Ok(())
 }

@@ -270,7 +270,7 @@ pub fn on_the_cpu(p: *const u8, q: *mut u32) -> Result<(), kernite_cpu::Error> {
         plain::import(p);
         cpu::size(grid(), p)?;
         let _ = cpu::bound(grid(), p)?;
-        cpu::reference(grid(), p).unwrap();
+        cpu::reference(grid(), p)?;
         let _: Result<(), kernite_cpu::Error> = cpu::lifetime(grid(), p);
         let _: u64 = cpu::blank(grid(), p);
         cpu::module(grid(), p)?;
@@ -280,7 +280,7 @@ pub fn on_the_cpu(p: *const u8, q: *mut u32) -> Result<(), kernite_cpu::Error> {
             Err(e) => return Err(e),
         }
         cpu_tiles::size::<1>(grid(), p)?;
-        cpu_tiles::array::<2>(grid(), p).unwrap();
+        cpu_tiles::array::<2>(grid(), p)?;
         cpu_tiles::import::<2>(grid(), p)?;
         let done: Result<(), kernite_cpu::Error> = cpu_unit::unit(grid(), q);
         done?;
@@ -306,7 +306,7 @@ pub fn on_the_gpu(
     unsafe {
         gpu.size(grid(), p, 1)?;
         let _ = gpu.bound(grid(), p, 1)?;
-        gpu.reference(grid(), p, 1).unwrap();
+        gpu.reference(grid(), p, 1)?;
         let _: Result<(), kernite_cuda::Error> = gpu.lifetime(grid(), p, 1);
         let _: u64 = gpu.blank(grid(), p, 1);
         gpu.module(grid(), p, 1)?;
@@ -316,7 +316,7 @@ pub fn on_the_gpu(
             Err(e) => return Err(e),
         }
         tiles.size::<1>(grid(), p)?;
-        tiles.array::<2>(grid(), p).unwrap();
+        tiles.array::<2>(grid(), p)?;
         tiles.import::<2>(grid(), p)?;
         coop.size(grid(), p, 1)?;
         coop.import(grid(), p, 1)?;

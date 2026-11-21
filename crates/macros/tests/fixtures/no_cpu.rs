@@ -49,7 +49,7 @@ pub fn on_the_cpu(x: *mut u32) -> Result<u64, Box<dyn std::error::Error>> {
     let _ = cpu::COUNTS.read();
     unsafe {
         cpu::together((), x)?;
-        cpu::tile::<2>((), x).unwrap();
+        cpu::tile::<2>((), x)?;
         let _ = cpu::counts((), x)?;
         cpu::count();
         Ok(cpu::step(1) + plain::step(1))

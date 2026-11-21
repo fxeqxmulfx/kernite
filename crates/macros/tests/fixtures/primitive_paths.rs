@@ -212,7 +212,7 @@ mod tests {
 
     /// The x86 kernels run as Rust calls them, typed by the paths and by the names, to the same result.
     #[test]
-    fn a_kernel_typed_by_paths_is_called_as_the_kernel_typed_by_names_is() {
+    fn a_kernel_typed_by_paths_is_called_as_the_kernel_typed_by_names_is() -> Result<(), Box<dyn std::error::Error>> {
         let (mut a, mut b) = (0u32, 0u32);
         // SAFETY: each kernel writes one `u32` through the pointer it is given, which is to one.
         let (by_name, by_path) = unsafe { (plain_x86::plus::<2>(10, &mut a), paths_x86::plus::<2>(10, &mut b)) };
@@ -225,36 +225,39 @@ mod tests {
         let (mut a, mut b) = (0u32, 0u32);
         // SAFETY: each thread of the grid writes one `u32` through the pointer it is given, which is to one.
         unsafe {
-            plain_x86::together(CpuGrid::new(1), &mut a, 1).unwrap();
-            paths_x86::together(CpuGrid::new(1), &mut b, 1).unwrap();
+            plain_x86::together(CpuGrid::new(1), &mut a, 1)?;
+            paths_x86::together(CpuGrid::new(1), &mut b, 1)?;
         }
         assert_eq!((a, b), (1, 1));
         assert_eq!(paths_x86::COUNTS.read(), plain_x86::COUNTS.read());
         assert_eq!(plain_x86::COUNTS.read(), [1, 2, 3, 4]);
+        Ok(())
     }
 
     /// The GPU kernels run as Rust launches them, typed by the paths and by the names, to the same result.
     #[test]
-    fn a_gpu_kernel_typed_by_paths_is_launched_as_the_kernel_typed_by_names_is() {
-        let Ok(cuda) = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")) else { return };
-        let (plain, paths) = (plain_gpu::Kernels::load(&cuda).unwrap(), paths_gpu::Kernels::load(&cuda).unwrap());
-        let ints = [cuda.alloc::<u32>(1).unwrap(), cuda.alloc::<u32>(1).unwrap()];
-        let floats = [cuda.alloc::<f32>(1).unwrap(), cuda.alloc::<f32>(1).unwrap()];
+    fn a_gpu_kernel_typed_by_paths_is_launched_as_the_kernel_typed_by_names_is()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(cuda) = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
+        let (plain, paths) = (plain_gpu::Kernels::load(&cuda)?, paths_gpu::Kernels::load(&cuda)?);
+        let ints = [cuda.alloc::<u32>(1)?, cuda.alloc::<u32>(1)?];
+        let floats = [cuda.alloc::<f32>(1)?, cuda.alloc::<f32>(1)?];
         // SAFETY: each kernel writes one number to the buffer it is given, which holds one, and the launches have
         // ended when they are read.
         unsafe {
-            plain.fill::<8>(Grid::new(1, 1), ints[0].ptr(), 5, 1.5).unwrap();
-            paths.fill::<8>(Grid::new(1, 1), ints[1].ptr(), 5, 1.5).unwrap();
-            plain.floats(Grid::new(1, 1), floats[0].ptr(), 1.0, -2, 3).unwrap();
-            paths.floats(Grid::new(1, 1), floats[1].ptr(), 1.0, -2, 3).unwrap();
+            plain.fill::<8>(Grid::new(1, 1), ints[0].ptr(), 5, 1.5)?;
+            paths.fill::<8>(Grid::new(1, 1), ints[1].ptr(), 5, 1.5)?;
+            plain.floats(Grid::new(1, 1), floats[0].ptr(), 1.0, -2, 3)?;
+            paths.floats(Grid::new(1, 1), floats[1].ptr(), 1.0, -2, 3)?;
         }
-        cuda.sync().unwrap();
+        cuda.sync()?;
         for (int, float) in ints.iter().zip(&floats) {
-            assert_eq!(int.read().unwrap(), [8 + 7 + 10]);
-            assert_eq!(float.read().unwrap(), [2.5]);
+            assert_eq!(int.read()?, [8 + 7 + 10]);
+            assert_eq!(float.read()?, [2.5]);
         }
         let bytes = [1u8, 2, 3, 4];
-        paths.BYTES().write(&bytes).unwrap();
-        assert_eq!(paths.BYTES().read().unwrap(), bytes);
+        paths.BYTES()?.write(&bytes)?;
+        assert_eq!(paths.BYTES()?.read()?, bytes);
+        Ok(())
     }
 }

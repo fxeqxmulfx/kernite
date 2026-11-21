@@ -19,15 +19,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for &x in &v {
         asm.zero(x);
     }
-    for &x in &v[1..] {
-        asm.vaddps(v[0], v[0], x);
+    let (&sum, rest) = v.split_first().ok_or("seventeen vectors")?;
+    for &x in rest {
+        asm.vaddps(sum, sum, x);
     }
     asm.ret();
 
-    let kernel = compile(&asm.finish(), &SysV)?;
-    let spilled: Vec<_> = kernel.frame.slots.iter().filter(|slot| slot.spill).map(|slot| &slot.name[..]).collect();
-    assert_eq!(spilled, ["v16", "v15"]);
-    assert_eq!((kernel.frame.size, kernel.frame.align), (64, 32));
+    let kernel = compile(&asm.finish()?, &SysV)?;
+    let spilled: Vec<_> = kernel.frame.slots.iter().filter(|slot| slot.spill).map(|slot| slot.name.as_str()).collect();
+    assert_eq!(spilled, ["v15"]);
+    assert_eq!((kernel.frame.size, kernel.frame.align), (32, 32));
     Ok(())
 }
 ```

@@ -33,24 +33,26 @@ mod tests {
     /// The kernel writes the first byte and the last byte of 1 GiB, which the host reads back, and what it leaves alone
     /// is zeros.
     #[test]
-    fn a_kernel_reaches_a_static_of_1_gib_at_a_displacement() {
+    fn a_kernel_reaches_a_static_of_1_gib_at_a_displacement() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!((NEAR.len(), NEAR.is_empty()), (1073741824, false));
         // SAFETY: `ends` writes only the memory of the module it names, which nothing else touches.
         unsafe { ends() };
         // SAFETY: Each address is in a static, which lives for the whole program, of atomics the kernel wrote.
-        let at = unsafe { |i: usize| *NEAR.at(i) };
-        assert_eq!((at(0), at(1), at(536870912), at(1073741822), at(1073741823)), (7, 0, 0, 0, 9));
+        let at = |i: usize| NEAR.at(i).map(|p| unsafe { *p }).ok_or("at gave None");
+        assert_eq!((at(0)?, at(1)?, at(536870912)?, at(1073741822)?, at(1073741823)?), (7, 0, 0, 0, 9));
+        Ok(())
     }
 
     /// The kernel writes the last byte of the second static of 1 GiB, by its address, which the host reads back, and
     /// what it leaves alone is zeros.
     #[test]
-    fn a_kernel_reaches_a_second_static_of_1_gib_by_its_address() {
+    fn a_kernel_reaches_a_second_static_of_1_gib_by_its_address() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(PAST.len(), 1073741824);
         // SAFETY: `past` writes only the memory of the module it names, which nothing else touches.
         unsafe { past() };
         // SAFETY: Each address is in a static, which lives for the whole program, of atomics the kernel wrote.
-        let at = unsafe { |i: usize| *PAST.at(i) };
-        assert_eq!((at(0), at(1073741822), at(1073741823)), (0, 0, 2));
+        let at = |i: usize| PAST.at(i).map(|p| unsafe { *p }).ok_or("at gave None");
+        assert_eq!((at(0)?, at(1073741822)?, at(1073741823)?), (0, 0, 2));
+        Ok(())
     }
 }

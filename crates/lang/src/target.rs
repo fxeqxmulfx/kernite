@@ -24,7 +24,10 @@ pub trait Target {
     /// which of them is wrong, by its place among them, and what is wrong with it. A machine
     /// takes none unless it says so.
     fn directives(&mut self, given: &[(&str, Vec<i128>)]) -> Result<(), (usize, Fault)> {
-        Err((0, Fault::new(format!("this machine takes no `#[{}(..)]`", given[0].0))))
+        match given.first() {
+            Some((name, _)) => Err((0, Fault::new(format!("this machine takes no `#[{name}(..)]`")))),
+            None => Ok(()),
+        }
     }
 
     /// A new variable of the machine's type `ty`.
@@ -65,9 +68,9 @@ pub trait Target {
     /// the machine finds with it later is placed. A machine need not keep it.
     fn declared_at(&mut self, _var: Self::Var, _at: Span) {}
 
-    /// The instruction that `inst` is given next is at `at`: where an error the machine finds
-    /// with it later is placed. A machine need not keep it.
-    fn inst_at(&mut self, _at: Span) {}
+    /// The instruction that `inst` is given next is at `at`, and its operands are at `operands`: where an error the
+    /// machine finds with it later is placed. A machine need not keep them.
+    fn inst_at(&mut self, _at: Span, _operands: &[Span]) {}
 }
 
 /// What an instruction is given.

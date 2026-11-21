@@ -68,11 +68,11 @@ pub fn lines(given: &[(&str, Vec<i128>)]) -> Result<Vec<String>, (usize, Fault)>
         }
         .map_err(|fault| (i, fault))?;
     }
-    let find = |name: &str| given.iter().position(|(n, _)| *n == name);
+    let find = |name: &str| given.iter().enumerate().find(|(_, (n, _))| *n == name).map(|(i, (_, values))| (i, values));
     // The threads of a block, if the kernel says them, and the one number of a directive that has one.
-    let threads = find("maxntid").or(find("reqntid")).map(|i| given[i].1.iter().product::<i128>());
-    let number = |name: &str| find(name).map(|i| (i, given[i].1[0]));
-    if let (Some(max), Some(req)) = (find("maxntid"), find("reqntid")) {
+    let threads = find("maxntid").or(find("reqntid")).map(|(_, values)| values.iter().product::<i128>());
+    let number = |name: &str| find(name).and_then(|(i, values)| Some((i, *values.first()?)));
+    if let (Some((max, _)), Some((req, _))) = (find("maxntid"), find("reqntid")) {
         let fault = Fault::new(
             "a kernel has `#[maxntid(..)]` or `#[reqntid(..)]`, not both: its blocks have at most these threads, or \
              exactly these",
@@ -133,8 +133,7 @@ fn block(name: &str, values: &[i128]) -> Result<(), Fault> {
         let fault = format!("`#[{name}(..)]` gives one size, two or three: the threads along x, then y and z");
         return Err(if values.is_empty() { Fault::new(fault) } else { Fault::at(AXES.len(), fault) });
     }
-    for (i, &n) in values.iter().enumerate() {
-        let (axis, most) = AXES[i];
+    for (i, (&n, &(axis, most))) in values.iter().zip(&AXES).enumerate() {
         if n < 1 {
             return Err(Fault::at(i, format!("{n} threads are too few: a block has 1 at least along each axis")));
         }

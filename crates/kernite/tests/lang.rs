@@ -2,20 +2,22 @@
 //! labels numbered afresh, values computed as Rust computes them, memory in brackets,
 //! predicates guarding, and errors where the trouble is.
 
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
 /// Kernel `name` of `src`, for x86: its listing, as a snapshot holds it.
-fn x86(src: &str, name: &str) -> String {
-    kernite::x86_str(src, name).unwrap_or_else(|e| panic!("{e}")).text()
+fn x86(src: &str, name: &str) -> Result<String> {
+    Ok(kernite::x86_str(src, name)?.to_string())
 }
 
 /// Kernel `name` of `src`, for x86: its instructions alone, without the listing's comments.
-fn code(src: &str, name: &str) -> Vec<String> {
-    kernite::x86_str(src, name).unwrap_or_else(|e| panic!("{e}")).code().map(String::from).collect()
+fn code(src: &str, name: &str) -> Result<Vec<String>> {
+    Ok(kernite::x86_str(src, name)?.code().map(String::from).collect())
 }
 
 /// The `.entry` of the one kernel in `src`, in PTX, from its name on.
-fn ptx(src: &str) -> String {
-    let module = kernite::ptx_str(src).unwrap_or_else(|e| panic!("{e}"));
-    module.split(".visible .entry ").nth(1).expect("an entry").to_string()
+fn ptx(src: &str) -> Result<String> {
+    let module = kernite::ptx_str(src)?;
+    Ok(module.split(".visible .entry ").nth(1).ok_or("the module has no entry")?.to_string())
 }
 
 /// Kernel `k`, whose body is `body` from its second line on.
@@ -24,8 +26,8 @@ fn kernel(body: &str) -> String {
 }
 
 /// Why kernel `k`, whose body is `body` from its second line on, does not compile.
-fn refused(body: &str) -> String {
-    kernite::x86_str(&kernel(body), "k").unwrap_err()
+fn refused(body: &str) -> Result<String> {
+    Ok(kernite::x86_str(&kernel(body), "k").err().ok_or("x86_str gave Ok")?)
 }
 
 /// What `src` compiles to, or why it does not: for x86, the listing of kernel `name`; for a GPU, which `src` says by
@@ -33,12 +35,12 @@ fn refused(body: &str) -> String {
 fn compile(src: &str, name: &str) -> Result<String, String> {
     match src.contains("ptx-kernel") {
         true => kernite::ptx_str(src),
-        false => kernite::x86_str(src, name).map(|listing| listing.text()),
+        false => kernite::x86_str(src, name).map(|listing| listing.to_string()),
     }
 }
 
 #[test]
-fn a_kernel_runs_its_helpers_in_place() {
+fn a_kernel_runs_its_helpers_in_place() -> Result {
     let src = r#"
         /// The fifth of the eight floats at `xs`, the first of their high half.
         pub unsafe extern "sysv64" fn fifth(xs: *const f32) -> f32 {
@@ -64,14 +66,15 @@ fn a_kernel_runs_its_helpers_in_place() {
     vzeroupper
     ret
 ";
-    assert_eq!(x86(src, "fifth"), want);
+    assert_eq!(x86(src, "fifth")?, want);
+    Ok(())
 }
 
 /// A note is one line, on x86 and on a GPU: each line break in it, `\r\n`, `\n` or `\r`, is a space, so that no text of
 /// it is code to an assembler, as `int3` would be on a line of its own. Each is written by an escape, and `\n` and
 /// `\r\n` in the string itself too, plain or raw: Rust refuses a lone `\r` there.
 #[test]
-fn a_line_break_in_a_note_is_a_space_on_every_machine() {
+fn a_line_break_in_a_note_is_a_space_on_every_machine() -> Result {
     for (string, shown) in [
         (r#""a\nint3""#, "a int3"),
         (r#""a\r\nint3""#, "a int3"),
@@ -87,18 +90,19 @@ fn a_line_break_in_a_note_is_a_space_on_every_machine() {
     ] {
         let note = format!("note({string});");
         let listing = format!("# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # {shown}\n    ret\n");
-        assert_eq!(x86(&kernel(&note), "k"), listing, "{string:?}");
-        assert_eq!(code(&kernel(&note), "k"), ["ret"], "{string:?}");
+        assert_eq!(x86(&kernel(&note), "k")?, listing, "{string:?}");
+        assert_eq!(code(&kernel(&note), "k")?, ["ret"], "{string:?}");
         let gpu = format!("unsafe extern \"ptx-kernel\" fn k() {{\n{note}\n}}\n");
-        assert_eq!(ptx(&gpu), format!("k(\n)\n{{\n\n\t// {shown}\n\tret;\n}}\n"), "{string:?}");
+        assert_eq!(ptx(&gpu)?, format!("k(\n)\n{{\n\n\t// {shown}\n\tret;\n}}\n"), "{string:?}");
     }
+    Ok(())
 }
 
 /// A NUL in a note is refused at the string, on x86 and on a GPU, for `ptxas` reads a NUL as the end of the module: by
 /// an escape, `\0`, `\x00` or `\u{0}`, and as the character, in a plain string and in a raw one. The error is at the
 /// string, wherever the NUL is in it and whatever else the note holds. Another control character is no trouble.
 #[test]
-fn a_nul_in_a_note_is_refused_at_the_string_on_every_machine() {
+fn a_nul_in_a_note_is_refused_at_the_string_on_every_machine() -> Result {
     let message = "a NUL is not allowed in a note, on any machine: `ptxas` reads it as the end of the module";
     for string in [
         r#""a\0b""#,
@@ -117,13 +121,14 @@ fn a_nul_in_a_note_is_refused_at_the_string_on_every_machine() {
     ] {
         let note = format!("let x = 1;\nnote({string});");
         let want = format!("3:6: {message}");
-        assert_eq!(refused(&note), want, "{string:?}");
+        assert_eq!(refused(&note)?, want, "{string:?}");
         let gpu = format!("unsafe extern \"ptx-kernel\" fn k() {{\n{note}\n}}\n");
-        assert_eq!(kernite::ptx_str(&gpu).unwrap_err(), want, "{string:?}");
+        assert_eq!(kernite::ptx_str(&gpu).err().ok_or("ptx_str gave Ok")?, want, "{string:?}");
     }
     // A note keeps any other control character as it is: U+0001, the NUL's neighbour, DEL, a tab and NEL.
     let listing = "# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # a\u{1}\u{7f}\tb\u{85}\n    ret\n";
-    assert_eq!(x86(&kernel(r#"note("a\u{1}\x7f\tb\u{85}");"#), "k"), listing);
+    assert_eq!(x86(&kernel(r#"note("a\u{1}\x7f\tb\u{85}");"#), "k")?, listing);
+    Ok(())
 }
 
 /// A kernel for `abi`, `sysv64` or `ptx-kernel`, that binds `declared` as 7 and has a note of `text`, as the kernel's
@@ -220,7 +225,7 @@ fn a_notes_name_is_a_name_of_rust_and_is_not_read_in_nfc_on_every_machine() {
 }
 
 #[test]
-fn a_function_that_names_an_abi_is_not_const_and_no_function_is_async() {
+fn a_function_that_names_an_abi_is_not_const_and_no_function_is_async() -> Result {
     let constant = "a function that names an ABI runs on its machine, never while Rust compiles, so it is not `const`";
     let asynchronous = "a function runs when it is called, so it is not `async`";
     for (src, at, message) in [
@@ -230,23 +235,28 @@ fn a_function_that_names_an_abi_is_not_const_and_no_function_is_async() {
         (r#"pub const async unsafe extern "sysv64" fn k() {}"#, "1:5", constant),
         (r#"pub async const unsafe extern "sysv64" fn k() {}"#, "1:5", asynchronous),
     ] {
-        assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("{at}: {message}"), "{src}");
+        assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, format!("{at}: {message}"), "{src}");
     }
     for (helper, at) in [("async fn h() {}", "2:1"), ("const async fn h() {}", "2:7")] {
         let src = format!("pub unsafe extern \"sysv64\" fn k() {{ h(); }}\n{helper}");
-        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("{at}: {asynchronous}"), "{src}");
+        assert_eq!(
+            kernite::x86_str(&src, "k").err().ok_or("x86_str gave Ok")?,
+            format!("{at}: {asynchronous}"),
+            "{src}"
+        );
     }
     for (src, at, message) in [
         (r#"pub const unsafe extern "ptx-kernel" fn k() {}"#, "1:5", constant),
         (r#"pub async unsafe extern "ptx-kernel" fn k() {}"#, "1:5", asynchronous),
         (r#"const extern "ptx-func" fn f() {}"#, "1:1", constant),
     ] {
-        assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("{at}: {message}"), "{src}");
+        assert_eq!(kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?, format!("{at}: {message}"), "{src}");
     }
     // A helper may be `const`: kernite runs it while the kernel compiles, as Rust may run a
     // `const fn`.
     let src = "pub unsafe extern \"sysv64\" fn k() { h(); }\nconst fn h() { note(\"it runs now\"); }";
-    assert_eq!(x86(src, "k"), "# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # it runs now\n    ret\n");
+    assert_eq!(x86(src, "k")?, "# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # it runs now\n    ret\n");
+    Ok(())
 }
 
 /// A raw string is a string, as in Rust, wherever kernite takes one: a note's text by `r"hi"`, `r#"hi"#` or
@@ -254,7 +264,7 @@ fn a_function_that_names_an_abi_is_not_const_and_no_function_is_async() {
 /// `r#"ptx-kernel"#` is the ABI. A raw string that is never closed is refused where it starts, as a plain one is. So is
 /// one of more than 255 `#`, as Rust refuses it.
 #[test]
-fn a_raw_string_is_a_string_for_a_note_and_for_an_abi() {
+fn a_raw_string_is_a_string_for_a_note_and_for_an_abi() -> Result {
     let raw = |hashes: usize, text: &str| format!("r{0}\"{text}\"{0}", "#".repeat(hashes));
     // (the `#`s of the raw string, its text, what a note shows of it), with `k` as 7.
     let notes = [
@@ -271,12 +281,12 @@ fn a_raw_string_is_a_string_for_a_note_and_for_an_abi() {
         let on_x86 =
             |lit: &str| x86(&format!("unsafe extern \"sysv64\" fn k() {{\nlet k = 7;\nnote({lit});\n}}\n"), "k");
         let want = format!("# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # {shown}\n    ret\n");
-        assert_eq!(on_x86(&plain), want, "{plain}");
-        assert_eq!(on_x86(&raw), want, "{raw}");
+        assert_eq!(on_x86(&plain)?, want, "{plain}");
+        assert_eq!(on_x86(&raw)?, want, "{raw}");
         let on_gpu =
             |lit: &str| ptx(&format!("unsafe extern \"ptx-kernel\" fn k() {{\nlet k = 7;\nnote({lit});\n}}\n"));
-        assert!(on_gpu(&plain).contains(&format!("\t// {shown}\n")), "{plain}");
-        assert_eq!(on_gpu(&raw), on_gpu(&plain), "{raw}");
+        assert!(on_gpu(&plain)?.contains(&format!("\t// {shown}\n")), "{plain}");
+        assert_eq!(on_gpu(&raw)?, on_gpu(&plain)?, "{raw}");
     }
     // Each ABI by a raw string is the ABI by the plain one, and an ABI that kernite does not know is told as the plain
     // one is, at the string, with no escape read in it: `sysv\64` is no ABI.
@@ -293,12 +303,13 @@ fn a_raw_string_is_a_string_for_a_note_and_for_an_abi() {
     // A raw string that is never closed is refused where it starts, as a plain one is.
     let never = "2:6: this string is never closed";
     for lit in ["\"hi);", "r\"hi);", "r#\"hi\");", "r##\"hi\"#);"] {
-        assert_eq!(refused(&format!("note({lit}")), never, "{lit}");
+        assert_eq!(refused(&format!("note({lit}"))?, never, "{lit}");
     }
     let gpu = "pub unsafe extern \"ptx-kernel\" fn k() {\nnote(r#\"hi\");\n}\n";
-    assert_eq!(kernite::ptx_str(gpu).unwrap_err(), never);
+    assert_eq!(kernite::ptx_str(gpu).err().ok_or("ptx_str gave Ok")?, never);
     // So is a raw string of more than 255 `#`, as Rust refuses it.
-    assert_eq!(refused(&format!("note({});", raw(256, "hi"))), "2:6: a raw string has 255 `#` at most, as in Rust");
+    assert_eq!(refused(&format!("note({});", raw(256, "hi")))?, "2:6: a raw string has 255 `#` at most, as in Rust");
+    Ok(())
 }
 
 /// A CR that no LF follows is refused at the CR, as Rust refuses it, in a string, plain or raw, a note's or an ABI's,
@@ -363,7 +374,7 @@ fn a_cr_on_its_own_is_refused_in_a_string_and_a_doc_comment_and_taken_in_any_oth
 /// and on a GPU. A source whose lines end in CRLF is the source whose lines end in LF, with doc comments and strings of
 /// more than a line in it.
 #[test]
-fn a_crlf_in_a_string_is_a_lf_and_a_source_of_crlf_lines_is_the_source_of_lf_lines() {
+fn a_crlf_in_a_string_is_a_lf_and_a_source_of_crlf_lines_is_the_source_of_lf_lines() -> Result {
     for (crlf, lf, text) in [
         ("\"a\r\nb\"", "\"a\nb\"", "a\nb"),
         ("r\"a\r\nb\"", "r\"a\nb\"", "a\nb"),
@@ -372,7 +383,7 @@ fn a_crlf_in_a_string_is_a_lf_and_a_source_of_crlf_lines_is_the_source_of_lf_lin
         for top in ["", "unsafe extern \"ptx-kernel\" fn g() {}\n"] {
             let with = |lit: &str| compile(&format!("{top}unsafe extern {lit} fn k() {{}}\n"), "k");
             assert_eq!(with(crlf), with(lf), "{top:?} {crlf:?}");
-            let message = with(crlf).unwrap_err();
+            let message = with(crlf).err().ok_or("with gave Ok")?;
             assert!(message.ends_with(&format!("`extern \"{text}\"` is none of these")), "{message:?}");
         }
     }
@@ -392,10 +403,11 @@ fn a_crlf_in_a_string_is_a_lf_and_a_source_of_crlf_lines_is_the_source_of_lf_lin
             "",
         ]
         .join("\n");
-        let listing = compile(&lf, "k").unwrap();
+        let listing = compile(&lf, "k")?;
         assert!(listing.contains(notes), "{abi}: {listing:?}");
         assert_eq!(compile(&lf.replace('\n', "\r\n"), "k"), Ok(listing), "{abi}");
     }
+    Ok(())
 }
 
 /// A plain string takes the escapes that Rust reads, wherever kernite takes one. A note's text, `note("\x41")`,
@@ -403,7 +415,7 @@ fn a_crlf_in_a_string_is_a_lf_and_a_source_of_crlf_lines_is_the_source_of_lf_lin
 /// read before the `{k}` of a note is, as Rust reads a format string. An ABI, `extern "sysv\x364"`, is `sysv64`, and
 /// one that kernite does not know is told as the string reads.
 #[test]
-fn a_string_takes_the_escapes_that_rust_reads_for_a_note_and_for_an_abi() {
+fn a_string_takes_the_escapes_that_rust_reads_for_a_note_and_for_an_abi() -> Result {
     // (the text of a plain string, what a note shows of it), with `k` as 7.
     let notes = [
         (r"\x41", "A"),
@@ -427,8 +439,8 @@ fn a_string_takes_the_escapes_that_rust_reads_for_a_note_and_for_an_abi() {
         let on_x86 =
             |lit: &str| x86(&format!("unsafe extern \"sysv64\" fn k() {{\nlet k = 7;\nnote({lit});\n}}\n"), "k");
         let want = format!("# k() -> ()\n# frame: 0 bytes aligned to 0, saves []\n    # {shown}\n    ret\n");
-        assert_eq!(on_x86(&lit), want, "{text:?}");
-        let on_gpu = ptx(&format!("unsafe extern \"ptx-kernel\" fn k() {{\nlet k = 7;\nnote({lit});\n}}\n"));
+        assert_eq!(on_x86(&lit)?, want, "{text:?}");
+        let on_gpu = ptx(&format!("unsafe extern \"ptx-kernel\" fn k() {{\nlet k = 7;\nnote({lit});\n}}\n"))?;
         assert!(on_gpu.contains(&format!("\t// {shown}\n")), "{text:?}: {on_gpu}");
     }
     // An ABI is read as a note's text is: each of these is the ABI it spells, and one told as the string says is one
@@ -446,17 +458,18 @@ fn a_string_takes_the_escapes_that_rust_reads_for_a_note_and_for_an_abi() {
         assert!(escaped.is_ok(), "{written}");
         assert_eq!(escaped, kernite::ptx_str(&with(&format!("{abi:?}"))), "{written}");
     }
-    let unknown = compile(&with("\"a\\x41\\u{e9}\\\n   b\""), "f").unwrap_err();
+    let unknown = compile(&with("\"a\\x41\\u{e9}\\\n   b\""), "f").err().ok_or("compile gave Ok")?;
     assert!(unknown.ends_with("`extern \"aAéb\"` is none of these"), "{unknown}");
-    let raw = kernite::ptx_str(&with(r#"r"ptx-\x6bernel""#)).unwrap_err();
+    let raw = kernite::ptx_str(&with(r#"r"ptx-\x6bernel""#)).err().ok_or("ptx_str gave Ok")?;
     assert!(raw.ends_with(r#"`extern "ptx-\x6bernel"` is none of these"#), "{raw}");
+    Ok(())
 }
 
 /// An escape that Rust refuses is refused at its `\`, with `line:column`, in a note's text and in an ABI, on x86 and on
 /// a GPU, and the words say which of three it is: an escape that is none, `\x` that has not two hex digits, 7f at most,
 /// or `\u` that has not one to six in braces that make a character.
 #[test]
-fn a_string_refuses_the_escapes_that_rust_refuses_at_the_escape() {
+fn a_string_refuses_the_escapes_that_rust_refuses_at_the_escape() -> Result {
     let none = |c: &str| {
         format!(
             "`\\{c}` is no escape, as in Rust: a string has `\\n`, `\\r`, `\\t`, `\\0`, `\\\\`, `\\'`, `\\\"`, \
@@ -511,8 +524,9 @@ fn a_string_refuses_the_escapes_that_rust_refuses_at_the_escape() {
     }
     // A raw string has no escapes to refuse.
     for src in kernels(r#"note(r"\q\x80\ud800");"#) {
-        assert!(compile(&src, "k").unwrap().contains(r"\q\x80\ud800"), "{src:?}");
+        assert!(compile(&src, "k")?.contains(r"\q\x80\ud800"), "{src:?}");
     }
+    Ok(())
 }
 
 /// The spaces of Rust's lexer, Pattern_White_Space: a tab, the line breaks, U+000B and U+000C, U+0085, a space, the
@@ -615,26 +629,28 @@ fn named(declared: &str, used: &str) -> [Result<String, String>; 2] {
 /// writes as it does: x86 as they are, in NFC, and a GPU's PTX with `$u` and the code point in hex and `$` for each
 /// character beyond ASCII.
 #[test]
-fn a_name_goes_on_with_each_character_rust_takes_in_one_on_every_machine() {
-    let [x86, gpu] = named("", "").map(Result::unwrap);
+fn a_name_goes_on_with_each_character_rust_takes_in_one_on_every_machine() -> Result {
+    let [x86, gpu] = named("", "");
+    let (x86, gpu) = (x86?, gpu?);
     // The character, and how each machine writes the name's first two letters, `a` and it, which are `á` for U+0301.
     for (c, on_x86, on_gpu) in [("·", "a·", "a$ub7$"), ("‿", "a‿", "a$u203f$"), ("\u{301}", "á", "$ue1$")] {
-        let [on_x86_listing, on_gpu_listing] =
-            named(c, c).map(|listing| listing.unwrap_or_else(|e| panic!("{c:?}: {e}")));
-        assert_eq!(on_x86_listing.replace(on_x86, "a"), x86, "{c:?}");
-        assert_eq!(on_gpu_listing.replace(on_gpu, "a"), gpu, "{c:?}");
+        let [on_x86_listing, on_gpu_listing] = named(c, c).map(|listing| listing.map_err(|e| format!("{c:?}: {e}")));
+        assert_eq!(on_x86_listing?.replace(on_x86, "a"), x86, "{c:?}");
+        assert_eq!(on_gpu_listing?.replace(on_gpu, "a"), gpu, "{c:?}");
     }
+    Ok(())
 }
 
 /// A name starts with each character that Rust takes to start one, and not only with those that `char::is_alphabetic`
 /// takes: U+2118 is no letter. A kernel whose parameter is named so compiles, on x86 and on a GPU, to the listing of
 /// the one named `a`, but for the name, which each machine writes as it does.
 #[test]
-fn a_name_starts_with_each_character_rust_takes_to_start_one_on_every_machine() {
+fn a_name_starts_with_each_character_rust_takes_to_start_one_on_every_machine() -> Result {
     for (abi, on_machine) in [("sysv64", "℘"), ("ptx-kernel", "$u2118$")] {
-        let listing = |name: &str| compile(&format!("unsafe extern \"{abi}\" fn k({name}: u64) {{}}\n"), "k").unwrap();
-        assert_eq!(listing("℘").replace(on_machine, "a"), listing("a"), "{abi}");
+        let listing = |name: &str| compile(&format!("unsafe extern \"{abi}\" fn k({name}: u64) {{}}\n"), "k");
+        assert_eq!(listing("℘")?.replace(on_machine, "a"), listing("a")?, "{abi}");
     }
+    Ok(())
 }
 
 /// No other character is in a name. `a½` and `a²` have one that `char::is_alphanumeric` takes and Rust does not, and
@@ -666,28 +682,30 @@ fn no_other_character_is_in_a_name_on_every_machine() {
 /// spells it alike, which writes the name in NFC. Two helpers so named are two of one name, refused where the second
 /// is, as two of one spelling are. `x86_str` finds a kernel by its name in either spelling.
 #[test]
-fn a_name_in_each_of_its_spellings_is_one_name_on_every_machine() {
-    let alike = named("é", "é").map(Result::unwrap);
+fn a_name_in_each_of_its_spellings_is_one_name_on_every_machine() -> Result {
+    let [on_x86, on_gpu] = named("é", "é");
+    let alike = [on_x86?, on_gpu?];
     for (declared, used) in [("é", "e\u{301}"), ("e\u{301}", "é"), ("e\u{301}", "e\u{301}")] {
         assert_eq!(named(declared, used), alike.clone().map(Ok), "declared {declared:?}, used {used:?}");
     }
     let twice = |second: &str| format!("fn caf\u{e9}() {{}} fn {second}() {{}}");
     let want = "1:17: `caf\u{e9}` names another function of the module as well";
     for second in ["caf\u{e9}", "cafe\u{301}"] {
-        assert_eq!(kernite::x86_str(&twice(second), "k").unwrap_err(), want, "{second:?}");
-        assert_eq!(kernite::ptx_str(&twice(second)).unwrap_err(), want, "{second:?}");
+        assert_eq!(kernite::x86_str(&twice(second), "k").err().ok_or("x86_str gave Ok")?, want, "{second:?}");
+        assert_eq!(kernite::ptx_str(&twice(second)).err().ok_or("ptx_str gave Ok")?, want, "{second:?}");
     }
     let kernel = |declared: &str, given: &str| {
         compile(&format!("unsafe extern \"sysv64\" fn caf{declared}() {{}}\n"), &format!("caf{given}"))
     };
-    let own = kernel("\u{e9}", "\u{e9}").unwrap();
+    let own = kernel("\u{e9}", "\u{e9}")?;
     for (declared, given) in [("\u{e9}", "e\u{301}"), ("e\u{301}", "\u{e9}"), ("e\u{301}", "e\u{301}")] {
         assert_eq!(kernel(declared, given), Ok(own.clone()), "declared {declared:?}, given {given:?}");
     }
+    Ok(())
 }
 
 #[test]
-fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
+fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() -> Result {
     // Rust refuses a name bound twice among a function's generics and parameters, E0403 and E0415;
     // without the check the body's `x` is the second, and the first goes without a word.
     let twice = |name: &str| format!("`{name}` names another parameter of the function as well");
@@ -710,18 +728,23 @@ fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
         ),
         ("#[instances(1)]\npub unsafe extern \"sysv64\" fn k<const N: u64>(N: u64) {}", "k::<1>", "2:47", "N"),
     ] {
-        assert_eq!(kernite::x86_str(src, kernel).unwrap_err(), format!("{at}: {}", twice(name)), "{src}");
+        assert_eq!(
+            kernite::x86_str(src, kernel).err().ok_or("x86_str gave Ok")?,
+            format!("{at}: {}", twice(name)),
+            "{src}"
+        );
     }
     // A GPU kernel and a GPU function are read as an x86 kernel is.
     for (src, at) in [
         (r#"pub unsafe extern "ptx-kernel" fn k(x: u64, x: u64) {}"#, "1:45"),
         (r#"pub unsafe extern "ptx-func" fn f(x: u64, x: u64) {}"#, "1:43"),
     ] {
-        assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("{at}: {}", twice("x")), "{src}");
+        assert_eq!(kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?, format!("{at}: {}", twice("x")), "{src}");
     }
     // `_` names none, so two stay, as Rust takes them.
     let src = r#"pub unsafe extern "sysv64" fn k(_: u64, _: u64) {}"#;
-    assert!(x86(src, "k").starts_with("# k(gpr, gpr) -> ()\n"), "{src}");
+    assert!(x86(src, "k")?.starts_with("# k(gpr, gpr) -> ()\n"), "{src}");
+    Ok(())
 }
 
 /// A `mut` before a parameter's name is taken and means nothing, in a function of every kind: a kernel compiles to the
@@ -729,7 +752,7 @@ fn each_parameter_and_generic_of_a_function_has_a_name_of_its_own() {
 /// `#[cooperative]`, and a helper; for a GPU kernel the same, and an `extern "ptx-func"` function; before one name and
 /// before each.
 #[test]
-fn a_mut_before_a_parameters_name_is_taken_and_means_nothing_in_a_function_of_every_kind() {
+fn a_mut_before_a_parameters_name_is_taken_and_means_nothing_in_a_function_of_every_kind() -> Result {
     for (src, kernel) in [
         (r#"pub unsafe extern "sysv64" fn k(MUTx: u64) -> u64 { add(x, 1); ret(x); }"#, "k"),
         (r#"pub unsafe extern "sysv64" fn k(MUTa: u64, MUTb: u64) -> u64 { add(a, b); ret(a); }"#, "k"),
@@ -800,31 +823,33 @@ fn a_mut_before_a_parameters_name_is_taken_and_means_nothing_in_a_function_of_ev
             "k",
         ),
     ] {
-        let without = compile(&src.replace("MUT", ""), kernel).unwrap_or_else(|e| panic!("{e}\n{src}"));
+        let without = compile(&src.replace("MUT", ""), kernel).map_err(|e| format!("{e}\n{src}"))?;
         assert_eq!(compile(&src.replace("MUT", "mut "), kernel), Ok(without), "{src}");
     }
+    Ok(())
+}
+
+/// `src` with each word of it that `then` gives another for written as that, but not where the word is a part of an
+/// instruction's name, `ld.global.u32`.
+fn map_words(src: &str, then: impl Fn(&str) -> Option<String>) -> String {
+    let in_word = |c: char| c.is_alphanumeric() || c == '_';
+    let chars: Vec<char> = src.chars().collect();
+    let runs: Vec<&[char]> = chars.chunk_by(|a, b| in_word(*a) == in_word(*b)).collect();
+    let mut out = String::new();
+    for (i, run) in runs.iter().enumerate() {
+        let text: String = run.iter().collect();
+        let before = i.checked_sub(1).and_then(|before| runs.get(before)).and_then(|r| r.last());
+        let dotted = before == Some(&'.') || runs.get(i + 1).and_then(|r| r.first()) == Some(&'.');
+        let mapped = if run.iter().all(|&c| in_word(c)) && !dotted { then(&text) } else { None };
+        out += &mapped.unwrap_or(text);
+    }
+    out
 }
 
 /// `src` with each of `names` written raw, `u64` as `r#u64`, but not where it is a part of an instruction's name,
 /// `ld.global.u32`.
 fn raw(src: &str, names: &[&str]) -> String {
-    let chars: Vec<char> = src.chars().collect();
-    let in_word = |c: char| c.is_alphanumeric() || c == '_';
-    let (mut out, mut at) = (String::new(), 0);
-    while at < chars.len() {
-        let end = (at..chars.len()).find(|&i| !in_word(chars[i])).unwrap_or(chars.len());
-        if end == at {
-            out.push(chars[at]);
-            at += 1;
-            continue;
-        }
-        let word: String = chars[at..end].iter().collect();
-        let dotted = (at > 0 && chars[at - 1] == '.') || chars.get(end) == Some(&'.');
-        out += if names.contains(&word.as_str()) && !dotted { "r#" } else { "" };
-        out += &word;
-        at = end;
-    }
-    out
+    map_words(src, |word| names.contains(&word).then(|| format!("r#{word}")))
 }
 
 /// A name written raw is the name Rust reads, so a type written so is the type written plain: a kernel compiles to
@@ -832,7 +857,7 @@ fn raw(src: &str, names: &[&str]) -> String {
 /// result's, a number's, a float's or a pointer's, in a kernel of instances too; for a variable's, alone or in an
 /// array; for a helper's parameter's; and for a const's and a static's.
 #[test]
-fn a_type_written_raw_is_the_type_written_plain() {
+fn a_type_written_raw_is_the_type_written_plain() -> Result {
     let x86_names = ["u64", "usize", "u32", "f32", "f64", "u8", "gpr", "ymm", "global"];
     for (src, kernel) in [
         (r#"pub unsafe extern "sysv64" fn k(x: u64, n: usize) -> u64 { add(x, n); ret(x); }"#, "k"),
@@ -874,7 +899,7 @@ fn a_type_written_raw_is_the_type_written_plain() {
     ] {
         let written = raw(src, &x86_names);
         assert_ne!(written, src);
-        assert_eq!(x86(&written, kernel), x86(src, kernel), "{written}");
+        assert_eq!(x86(&written, kernel)?, x86(src, kernel)?, "{written}");
     }
     let gpu_names = ["u32", "u64", "f32", "f16", "bf16", "pred", "global"];
     for src in [
@@ -912,16 +937,16 @@ fn a_type_written_raw_is_the_type_written_plain() {
     ] {
         let written = raw(src, &gpu_names);
         assert_ne!(written, src);
-        let module = |src: &str| kernite::ptx_str(src).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(module(&written), module(src), "{written}");
+        assert_eq!(kernite::ptx_str(&written)?, kernite::ptx_str(src)?, "{written}");
     }
+    Ok(())
 }
 
 /// An error that quotes a type written raw quotes it as Rust reads it, `f16` and not `r#f16`, at the place it has
 /// for the type written plain: a parameter's type, a result's, a variable's, and a pointer's, whole, in an x86
 /// kernel, a cooperative one and a GPU kernel.
 #[test]
-fn an_error_quotes_a_type_written_raw_as_rust_reads_it() {
+fn an_error_quotes_a_type_written_raw_as_rust_reads_it() -> Result {
     let takes = "a kernel takes pointers, 64-bit integers and floats, not `f16`";
     let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `f16`";
     let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
@@ -942,12 +967,13 @@ fn an_error_quotes_a_type_written_raw_as_rust_reads_it() {
         (r#"unsafe extern "ptx-kernel" fn k() -> *const [f32; 2] {}"#, "f32", "1:38", gpu_nothing),
         (r#"unsafe extern "ptx-kernel" fn k() { let v: f128; }"#, "f128", "1:44", gpu_variable),
     ] {
-        let err = |src: &str| compile(src, "k").unwrap_err();
+        let err = |src: &str| -> Result<_> { Ok(compile(src, "k").err().ok_or("compile gave Ok")?) };
         let written = raw(plain, &[name]);
         assert_ne!(written, plain);
-        assert_eq!(err(plain), format!("{at}: {said}"), "{plain}");
-        assert_eq!(err(&written), format!("{at}: {said}"), "{written}");
+        assert_eq!(err(plain)?, format!("{at}: {said}"), "{plain}");
+        assert_eq!(err(&written)?, format!("{at}: {said}"), "{written}");
     }
+    Ok(())
 }
 
 /// A keyword written raw is a name in a type: Rust reads `*const r#dyn::Foo`, a pointer to a struct of a module named
@@ -957,7 +983,7 @@ fn an_error_quotes_a_type_written_raw_as_rust_reads_it() {
 /// it is: `dyn`, which makes a pointer two words; `mut` and `const`, which are spaced; `for`, which opens a binder;
 /// `impl`, which a parameter may not have; `true`, which is a literal; and `type`, which no reader asks of.
 #[test]
-fn a_keyword_written_raw_is_a_name_in_a_type() {
+fn a_keyword_written_raw_is_a_name_in_a_type() -> Result {
     let x86_kernel = |name: &str| {
         format!(
             r#"pub unsafe extern "sysv64" fn k(
@@ -979,16 +1005,17 @@ fn a_keyword_written_raw_is_a_name_in_a_type() {
     for word in ["dyn", "mut", "const", "for", "impl", "true", "type"] {
         // The kernel it is compared with names the keyword and a `_`, `dyn_`, which is no keyword.
         let (raw, no_keyword) = (format!("r#{word}"), format!("{word}_"));
-        assert_eq!(x86(&x86_kernel(&raw), "k"), x86(&x86_kernel(&no_keyword), "k"), "{}", x86_kernel(&raw));
-        assert_eq!(ptx(&gpu_kernel(&raw)), ptx(&gpu_kernel(&no_keyword)), "{}", gpu_kernel(&raw));
+        assert_eq!(x86(&x86_kernel(&raw), "k")?, x86(&x86_kernel(&no_keyword), "k")?, "{}", x86_kernel(&raw));
+        assert_eq!(ptx(&gpu_kernel(&raw))?, ptx(&gpu_kernel(&no_keyword))?, "{}", gpu_kernel(&raw));
     }
+    Ok(())
 }
 
 /// A const named by a keyword written raw is found where a type takes it as an argument, as `ALIGN` is:
 /// `shared<[u32; 4], r#type>` is `shared<[u32; 4], 16>`, and so is `shared<[u32; 4], ALIGN>`, whether `ALIGN` is
 /// written raw where it is declared, where it is used, or both.
 #[test]
-fn a_const_named_by_a_keyword_is_an_argument_of_a_type() {
+fn a_const_named_by_a_keyword_is_an_argument_of_a_type() -> Result {
     let kernel = |declared: &str, align: &str| {
         format!(
             "const {declared}: usize = 16;\n\
@@ -1005,15 +1032,16 @@ fn a_const_named_by_a_keyword_is_an_argument_of_a_type() {
     for (declared, align) in
         [("r#type", "r#type"), ("r#ALIGN", "ALIGN"), ("ALIGN", "r#ALIGN"), ("r#ALIGN", "r#ALIGN"), ("ALIGN", "ALIGN")]
     {
-        assert_eq!(ptx(&kernel(declared, align)), ptx(literal), "{declared}, {align}");
+        assert_eq!(ptx(&kernel(declared, align))?, ptx(literal)?, "{declared}, {align}");
     }
+    Ok(())
 }
 
 /// An error that quotes a keyword written raw quotes it as written, `r#dyn::Foo` and `r#mut`: without its `r#` it is
 /// the keyword, a type of another kind, and the error would name it. A name that is no keyword is quoted as Rust
 /// reads it, `str` for `r#str`, and a pointer to it has two words as one to `str` has.
 #[test]
-fn an_error_quotes_a_keyword_written_raw_as_written() {
+fn an_error_quotes_a_keyword_written_raw_as_written() -> Result {
     let takes = |ty: &str| format!("a kernel takes pointers, 64-bit integers and floats, not `{ty}`");
     let returns = |ty: &str| format!("a kernel returns a float, an integer or a pointer, or never, `!`; not `{ty}`");
     let variable =
@@ -1052,15 +1080,16 @@ fn an_error_quotes_a_keyword_written_raw_as_written() {
         (r#"unsafe extern "ptx-kernel" fn k(p: *const [r#mut]) {}"#, "1:36", words("[r#mut]")),
         (r#"unsafe extern "ptx-kernel" fn k(p: *const r#str) {}"#, "1:36", words("str")),
     ] {
-        assert_eq!(compile(src, "k").unwrap_err(), format!("{at}: {said}"), "{src}");
+        assert_eq!(compile(src, "k").err().ok_or("compile gave Ok")?, format!("{at}: {said}"), "{src}");
     }
+    Ok(())
 }
 
 /// A name written raw is the name in a value's place as in a type's: `r#x` and `x` are one value, whether a
 /// kernel's name, a parameter, a variable, a const, a compile-time argument or a helper, and whether the name is
 /// written raw where it is declared, where it is used, or both.
 #[test]
-fn a_value_named_raw_is_the_value_named_plain() {
+fn a_value_named_raw_is_the_value_named_plain() -> Result {
     let src = r#"
         const STEP: u64 = 3;
         #[instances(2)]
@@ -1077,15 +1106,16 @@ fn a_value_named_raw_is_the_value_named_plain() {
     "#;
     let written = raw(src, &["STEP", "N", "x", "t", "g", "k", "bump"]);
     assert_ne!(written, src);
-    assert_eq!(x86(&written, "k::<2>"), x86(src, "k::<2>"), "{written}");
+    assert_eq!(x86(&written, "k::<2>")?, x86(src, "k::<2>")?, "{written}");
     // A name raw where it is declared and plain where it is used, and the other way about, in one kernel.
     let plain = r#"pub unsafe extern "sysv64" fn k(x: u64) -> u64 { add(x, 1); ret(x); }"#;
     for mixed in [
         r#"pub unsafe extern "sysv64" fn k(r#x: u64) -> u64 { add(x, 1); ret(r#x); }"#,
         r#"pub unsafe extern "sysv64" fn k(x: u64) -> u64 { add(r#x, 1); ret(x); }"#,
     ] {
-        assert_eq!(x86(mixed, "k"), x86(plain, "k"), "{mixed}");
+        assert_eq!(x86(mixed, "k")?, x86(plain, "k")?, "{mixed}");
     }
+    Ok(())
 }
 
 /// The attributes of kernite's: a function's `#[instances(..)]` and `#[cooperative]`, and a GPU kernel's directives,
@@ -1097,7 +1127,7 @@ const ATTRIBUTES: [&str; 7] =
 /// `#[r#instances(..)]` or `#[r#cooperative]` compiles to the listing of the one written plain, and a GPU kernel with
 /// those and with each directive to its PTX.
 #[test]
-fn an_attribute_written_raw_is_the_attribute() {
+fn an_attribute_written_raw_is_the_attribute() -> Result {
     let tile = r#"
         #[instances(1, 2)]
         pub unsafe extern "sysv64" fn k<const N: u64>(x: u64) -> u64 {
@@ -1115,10 +1145,10 @@ fn an_attribute_written_raw_is_the_attribute() {
     for (src, kernel) in [(tile, "k::<1>"), (tile, "k::<2>"), (together, "k")] {
         let written = raw(src, &ATTRIBUTES);
         assert_ne!(written, src);
-        assert_eq!(x86(&written, kernel), x86(src, kernel), "{written}");
+        assert_eq!(x86(&written, kernel)?, x86(src, kernel)?, "{written}");
     }
-    assert_ne!(x86(tile, "k::<1>"), x86(tile, "k::<2>"));
-    assert!(x86(together, "k").contains("lock xadd"));
+    assert_ne!(x86(tile, "k::<1>")?, x86(tile, "k::<2>")?);
+    assert!(x86(together, "k")?.contains("lock xadd"));
     let gpu = r#"
         #[instances(1, 2)]
         #[maxntid(256)]
@@ -1135,16 +1165,17 @@ fn an_attribute_written_raw_is_the_attribute() {
             st.global.u32([x], 1);
         }
     "#;
-    let ptx = kernite::ptx_str(gpu).unwrap();
+    let ptx = kernite::ptx_str(gpu)?;
     let want = [".maxntid 256", ".maxnreg 32", ".minnctapersm 2", ".reqntid 8, 8, 4", "atom.add.u32 %old, [%barrier]"];
     assert!(want.iter().all(|line| ptx.contains(line)), "{ptx}");
-    assert_eq!(kernite::ptx_str(&raw(gpu, &ATTRIBUTES)).unwrap(), ptx);
+    assert_eq!(kernite::ptx_str(&raw(gpu, &ATTRIBUTES))?, ptx);
+    Ok(())
 }
 
 /// An attribute of kernite's written raw is wrong as the plain one is: the same error, in the same words, at the same
 /// `line:column`. Each attribute is on a line of its own, so that its name starts where the plain one's does.
 #[test]
-fn an_attribute_written_raw_is_wrong_as_the_plain_one_is() {
+fn an_attribute_written_raw_is_wrong_as_the_plain_one_is() -> Result {
     let kernel = "unsafe extern \"ptx-kernel\" fn k() {}";
     let generic = "unsafe extern \"ptx-kernel\" fn k<const N: u32>() {}";
     let gives =
@@ -1211,9 +1242,10 @@ fn an_attribute_written_raw_is_wrong_as_the_plain_one_is() {
         let written = raw(&src, &ATTRIBUTES);
         assert_ne!(written, src);
         for src in [&src, &written] {
-            assert_eq!(kernite::ptx_str(src).unwrap_err(), want, "{src}");
+            assert_eq!(kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?, want, "{src}");
         }
     }
+    Ok(())
 }
 
 /// What kernite says of an `inline` on a function or a static.
@@ -1273,25 +1305,26 @@ const INLINED_ITEMS: [(&str, &str); 18] = [
 /// it, in every form, on a function or a static: one error, at the `inline`. `kernite::x86_str` and `kernite::ptx_str`
 /// say it of every source, whatever machine its kernels are for, for kernite reads the attribute before it asks one.
 #[test]
-fn an_inline_attribute_on_a_function_or_a_static_is_refused_at_its_inline() {
+fn an_inline_attribute_on_a_function_or_a_static_is_refused_at_its_inline() -> Result {
     for (item, kernel) in INLINED_ITEMS {
-        let line = item.lines().position(|line| line == "ATTR").expect("a line for the attribute") + 1;
-        compile(&item.replace("ATTR\n", ""), kernel).unwrap_or_else(|e| panic!("{e}\n{item}"));
+        let line = item.lines().position(|line| line == "ATTR").ok_or("a line for the attribute")? + 1;
+        compile(&item.replace("ATTR\n", ""), kernel).map_err(|e| format!("{e}\n{item}"))?;
         for (form, word) in INLINES {
             let src = item.replace("ATTR", &format!("#[{form}]"));
-            let column = format!("#[{form}]").find(word).expect("the word of the error") + 1;
+            let column = format!("#[{form}]").find(word).ok_or("the word of the error")? + 1;
             let want = format!("{line}:{column}: {INLINED}");
-            assert_eq!(kernite::x86_str(&src, kernel).unwrap_err(), want, "{src}");
-            assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{src}");
+            assert_eq!(kernite::x86_str(&src, kernel).err().ok_or("x86_str gave Ok")?, want, "{src}");
+            assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, want, "{src}");
         }
     }
+    Ok(())
 }
 
 /// An item that is neither a function nor a static keeps its `#[inline]` for Rust to read: a const kernite works out
 /// compiles as it does without the attribute, on x86 and on a GPU. The macros hand the const to Rust as written, and
 /// Rust says what is wrong of it.
 #[test]
-fn an_inline_attribute_on_a_const_is_left_to_rust() {
+fn an_inline_attribute_on_a_const_is_left_to_rust() -> Result {
     for (src, kernel) in [
         ("#[inline]\nconst N: u32 = 1;\nunsafe extern \"sysv64\" fn k() { let r: gpr; mov(r, N); }", "k"),
         (
@@ -1299,9 +1332,10 @@ fn an_inline_attribute_on_a_const_is_left_to_rust() {
             "k",
         ),
     ] {
-        let without = compile(&src.replace("#[inline]\n", ""), kernel).unwrap_or_else(|e| panic!("{e}\n{src}"));
+        let without = compile(&src.replace("#[inline]\n", ""), kernel).map_err(|e| format!("{e}\n{src}"))?;
         assert_eq!(compile(src, kernel), Ok(without), "{src}");
     }
+    Ok(())
 }
 
 /// The places a name is written, a kernel for each, `NAME` where the name goes, and the kernel to ask of it: a kernel's
@@ -1338,51 +1372,54 @@ fn places() -> impl Iterator<Item = &'static str> {
 /// wherever a name is written: a kernel's, a parameter's, a variable's, an attribute's, a type, and the start of a
 /// type's path, on x86 and on a GPU. The error says the name as Rust reads it.
 #[test]
-fn a_name_rust_lets_be_written_raw_in_no_place_is_refused_at_its_r() {
+fn a_name_rust_lets_be_written_raw_in_no_place_is_refused_at_its_r() -> Result {
     for name in ["self", "Self", "super", "crate", "_"] {
         for place in places() {
             let src = place.replace("NAME", &format!("r#{name}"));
-            let at = src.find("r#").expect("a raw name") + 1;
+            let at = src.find("r#").ok_or("no raw name")? + 1;
             assert_eq!(compile(&src, "k"), Err(format!("1:{at}: `{name}` cannot be written raw")), "{src}");
         }
     }
+    Ok(())
 }
 
 /// An `r#` that no name follows is refused at the `r#`, wherever a name is written, whether a bracket, a colon, a
 /// dot or a `#` comes after it, or a space or a digit: none of these starts a name. A quote starts a raw string.
 #[test]
-fn an_r_that_no_name_follows_is_refused_at_its_r() {
+fn an_r_that_no_name_follows_is_refused_at_its_r() -> Result {
     let said = "`r#` comes before a name, as in `r#u64`";
     let mut sources: Vec<String> = places().map(|place| place.replace("NAME", "r#")).collect();
     for after in [" x", "9", "9x", ".x", "#x"] {
         sources.push(format!(r#"unsafe extern "sysv64" fn k(r#{after}: u64) -> u64 {{ ret(x); }}"#));
     }
     for src in sources {
-        let at = src.find("r#").expect("a raw name") + 1;
+        let at = src.find("r#").ok_or("no raw name")? + 1;
         assert_eq!(compile(&src, "k"), Err(format!("1:{at}: {said}")), "{src}");
     }
+    Ok(())
 }
 
 /// Every other name written raw is a name wherever one is written: `r#u64`, a type's; `r#dyn`, a keyword; `r#union`, a
 /// weak one; and `r#gen` and `r#try`, reserved words. A kernel with one compiles to what the kernel with `xxx` in its
 /// place compiles to, with the name where `xxx` was, on x86 and on a GPU.
 #[test]
-fn every_other_name_written_raw_is_a_name_wherever_a_name_is_written() {
+fn every_other_name_written_raw_is_a_name_wherever_a_name_is_written() -> Result {
     for name in ["u64", "dyn", "union", "gen", "try"] {
         let plain = "x".repeat(name.len());
         for (place, kernel) in PLACES {
-            let compiles = |written: &str| {
+            let compiles = |written: &str| -> Result<String> {
                 let src = place.replace("NAME", written);
                 let kernel = kernel.replace("NAME", written.trim_start_matches("r#"));
-                compile(&src, &kernel).unwrap_or_else(|e| panic!("{e}\n{src}"))
+                Ok(compile(&src, &kernel).map_err(|e| format!("{e}\n{src}"))?)
             };
-            assert_eq!(compiles(&format!("r#{name}")), compiles(&plain).replace(&plain, name), "{place}");
+            assert_eq!(compiles(&format!("r#{name}"))?, compiles(&plain)?.replace(&plain, name), "{place}");
         }
     }
+    Ok(())
 }
 
 #[test]
-fn a_generic_is_a_value_and_a_type_is_refused_at_its_token() {
+fn a_generic_is_a_value_and_a_type_is_refused_at_its_token() -> Result {
     // `<T>` is a generic that is a type, and so is an `impl` in a parameter's type or the result's: in a
     // parameter it makes the function generic over a type, and in the result it hides one. A kernel's generics
     // are values, so each is refused, at the `T` or the first `impl`, in one set of words, wherever the type
@@ -1428,7 +1465,7 @@ fn a_generic_is_a_value_and_a_type_is_refused_at_its_token() {
         // Of two, the first.
         (r#"pub unsafe extern "sysv64" fn k(p: *const (impl A, impl B)) {}"#, "1:44"),
     ] {
-        assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("{at}: {generics}"), "{src}");
+        assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, format!("{at}: {generics}"), "{src}");
     }
     // A GPU kernel and a GPU function are read as an x86 kernel is.
     for (src, at) in [
@@ -1448,11 +1485,12 @@ fn a_generic_is_a_value_and_a_type_is_refused_at_its_token() {
         (r#"pub unsafe extern "ptx-func" fn f(x: u64) -> Option<impl Copy> {}"#, "1:53"),
         (r#"pub unsafe extern "ptx-func" fn f(x: u64) -> Option<*mut impl Copy> {}"#, "1:58"),
     ] {
-        assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("{at}: {generics}"), "{src}");
+        assert_eq!(kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?, format!("{at}: {generics}"), "{src}");
     }
     // A type named `r#impl` is a name, not the keyword.
     let src = r#"pub unsafe extern "sysv64" fn k(p: *const r#impl, n: usize) { mov(qword[p], n); }"#;
-    assert!(x86(src, "k").starts_with("# k(gpr, gpr) -> ()\n"), "{src}");
+    assert!(x86(src, "k")?.starts_with("# k(gpr, gpr) -> ()\n"), "{src}");
+    Ok(())
 }
 
 /// The 17 types of `core::primitive`, which Rust names by a path as well as by a name.
@@ -1475,22 +1513,7 @@ const PATHS: [&str; 6] = [
 /// `src` with each primitive written as `path`, `u64` as `core::primitive::u64`, and `u32::MAX` as
 /// `core::primitive::u32::MAX`, but where it is a part of an instruction's name, `ld.global.u32`.
 fn pathed(src: &str, path: &str) -> String {
-    let chars: Vec<char> = src.chars().collect();
-    let in_word = |c: char| c.is_alphanumeric() || c == '_';
-    let (mut out, mut at) = (String::new(), 0);
-    while at < chars.len() {
-        let end = (at..chars.len()).find(|&i| !in_word(chars[i])).unwrap_or(chars.len());
-        if end == at {
-            out.push(chars[at]);
-            at += 1;
-            continue;
-        }
-        let word: String = chars[at..end].iter().collect();
-        let part = (at > 0 && chars[at - 1] == '.') || chars.get(end) == Some(&'.');
-        out += &if PRIMITIVES.contains(&word.as_str()) && !part { path.replace("{}", &word) } else { word };
-        at = end;
-    }
-    out
+    map_words(src, |word| PRIMITIVES.contains(&word).then(|| path.replace("{}", word)))
 }
 
 /// Rust names a primitive by a path as well as by its name, and a path is read as the name: a kernel typed by
@@ -1501,7 +1524,7 @@ fn pathed(src: &str, path: &str) -> String {
 /// helper's and a function's; a variable's, alone, in an array and in memory; a const's and a static's; a helper's
 /// parameter; and the type of a cast.
 #[test]
-fn a_primitive_written_by_its_path_is_the_primitive_written_by_its_name() {
+fn a_primitive_written_by_its_path_is_the_primitive_written_by_its_name() -> Result {
     for (src, kernels) in [
         // A kernel's parameters and result: integers, floats, and pointers to a type, in an array and nested.
         (
@@ -1572,11 +1595,11 @@ fn a_primitive_written_by_its_path_is_the_primitive_written_by_its_name() {
             let written = pathed(src, path);
             assert_ne!(written, src);
             for kernel in kernels {
-                assert_eq!(x86(&written, kernel), x86(src, kernel), "{written}");
+                assert_eq!(x86(&written, kernel)?, x86(src, kernel)?, "{written}");
             }
         }
     }
-    let module = |src: &str| kernite::ptx_str(src).unwrap_or_else(|e| panic!("{e}\n{src}"));
+    let module = |src: &str| kernite::ptx_str(src).map_err(|e| format!("{e}\n{src}"));
     for src in [
         // A kernel's parameters: integers, floats and a pointer.
         "pub unsafe extern \"ptx-kernel\" fn g(\n\
@@ -1649,9 +1672,10 @@ fn a_primitive_written_by_its_path_is_the_primitive_written_by_its_name() {
         for path in PATHS {
             let written = pathed(src, path);
             assert_ne!(written, src);
-            assert_eq!(module(&written), module(src), "{written}");
+            assert_eq!(module(&written)?, module(src)?, "{written}");
         }
     }
+    Ok(())
 }
 
 /// A primitive's constants and `from_bits` are named by the path of the primitive as well as by its name, and a path is
@@ -1661,7 +1685,7 @@ fn a_primitive_written_by_its_path_is_the_primitive_written_by_its_name() {
 /// is wherever a value is known now: a const, a static's data, a kernel's operand, a compile-time argument and the
 /// value an instance lists, a cast's, and the length of an array.
 #[test]
-fn a_constant_named_by_the_path_of_its_primitive_is_the_constant_named_by_its_name() {
+fn a_constant_named_by_the_path_of_its_primitive_is_the_constant_named_by_its_name() -> Result {
     for (src, kernels) in [
         // A const, a static, and a kernel's operands: an integer, a float, a float made of bits.
         (
@@ -1692,11 +1716,11 @@ fn a_constant_named_by_the_path_of_its_primitive_is_the_constant_named_by_its_na
             let written = pathed(src, path);
             assert_ne!(written, src);
             for kernel in kernels {
-                assert_eq!(x86(&written, kernel), x86(src, kernel), "{written}");
+                assert_eq!(x86(&written, kernel)?, x86(src, kernel)?, "{written}");
             }
         }
     }
-    let module = |src: &str| kernite::ptx_str(src).unwrap_or_else(|e| panic!("{e}\n{src}"));
+    let module = |src: &str| kernite::ptx_str(src).map_err(|e| format!("{e}\n{src}"));
     for src in [
         "const TOP: u32 = u16::MAX as u32; const INF: f32 = f32::INFINITY;\n\
          const HALF: f64 = f64::from_bits(0x3fe0000000000000);\n\
@@ -1716,9 +1740,10 @@ fn a_constant_named_by_the_path_of_its_primitive_is_the_constant_named_by_its_na
         for path in PATHS {
             let written = pathed(src, path);
             assert_ne!(written, src);
-            assert_eq!(module(&written), module(src), "{written}");
+            assert_eq!(module(&written)?, module(src)?, "{written}");
         }
     }
+    Ok(())
 }
 
 /// The constants of `core::f32::consts` and `core::f64::consts` that Rust has stable, by name, each with Rust's own
@@ -1751,7 +1776,7 @@ const ROOTS: [&str; 6] = ["core::", "::core::", "std::", "::std::", "::r#std::",
 
 /// What the kernels over the operands `single` and `double`, an `f32` and an `f64`, compile to: for x86 each loads its
 /// operand from memory, as a table of constants in the listing; for a GPU one moves both into registers.
-fn compiled(single: &str, double: &str) -> (String, String, String) {
+fn compiled(single: &str, double: &str) -> Result<(String, String, String)> {
     let x86s = format!(r#"unsafe extern "sysv64" fn s() {{ let v: ymm; vmovups(v, [[{single}; 8]]); }}"#);
     let x86d = format!(r#"unsafe extern "sysv64" fn d() {{ let v: ymm; vmovupd(v, [[{double}; 4]]); }}"#);
     let ptx_src = format!(
@@ -1763,7 +1788,7 @@ fn compiled(single: &str, double: &str) -> (String, String, String) {
             st.global.f64([b], y);
         }}"#
     );
-    (x86(&x86s, "s"), x86(&x86d, "d"), ptx(&ptx_src))
+    Ok((x86(&x86s, "s")?, x86(&x86d, "d")?, ptx(&ptx_src)?))
 }
 
 /// A constant of `core::f32::consts` or `core::f64::consts` is named by its path from the root of `core` or `std`,
@@ -1773,25 +1798,26 @@ fn compiled(single: &str, double: &str) -> (String, String, String) {
 /// values are Rust's own constants, and each of the six that it has unstable, whose values are the bits its nightly
 /// gives; of `f32` and of `f64`.
 #[test]
-fn a_constant_of_core_consts_is_rusts_own_by_a_path_from_its_root() {
+fn a_constant_of_core_consts_is_rusts_own_by_a_path_from_its_root() -> Result {
     for (name, single, double) in RUST_CONSTS.into_iter().chain(UNSTABLE_CONSTS) {
         let bits = (format!("f32::from_bits({single:#x})"), format!("f64::from_bits({double:#x})"));
-        let want = compiled(&bits.0, &bits.1);
+        let want = compiled(&bits.0, &bits.1)?;
         for root in ROOTS {
-            let named = compiled(&format!("{root}f32::consts::{name}"), &format!("{root}f64::consts::{name}"));
+            let named = compiled(&format!("{root}f32::consts::{name}"), &format!("{root}f64::consts::{name}"))?;
             assert_eq!(named, want, "{root}{name}");
         }
         // A name written raw is the name Rust reads, at each place it is written.
-        let raw = compiled(&format!("::r#core::r#f32::r#consts::r#{name}"), &format!("std::r#f64::consts::r#{name}"));
+        let raw = compiled(&format!("::r#core::r#f32::r#consts::r#{name}"), &format!("std::r#f64::consts::r#{name}"))?;
         assert_eq!(raw, want, "r#{name}");
     }
+    Ok(())
 }
 
 /// An integer's constants, `MIN`, `MAX` and `BITS`, are Rust's own for each of the ten integers kernite has, `u8` to
 /// `u64`, `i8` to `i64`, `usize` and `isize`: a const that holds each, or a note that says it, has Rust's value, and
 /// `BITS` is a `u32` whatever the integer is.
 #[test]
-fn an_integer_s_constants_are_rusts_own() {
+fn an_integer_s_constants_are_rusts_own() -> Result {
     macro_rules! own {
         ($($ty:ident),*) => {
             [$((stringify!($ty), $ty::MIN.to_string(), $ty::MAX.to_string(), $ty::BITS.to_string())),*]
@@ -1802,13 +1828,18 @@ fn an_integer_s_constants_are_rusts_own() {
             "const LOW: {ty} = {ty}::MIN; const HIGH: {ty} = {ty}::MAX; const WIDTH: u32 = {ty}::BITS;\n\
              pub unsafe extern \"sysv64\" fn k() {{ note(\"{{LOW}} {{HIGH}} {{WIDTH}}\"); }}"
         );
-        let listing = x86(&src, "k");
+        let listing = x86(&src, "k")?;
         assert!(listing.contains(&format!("# {min} {max} {bits}\n")), "{ty}: {listing}");
         // The value is the integer's own type, so that a use of another is refused, `u64::MAX` as a `u32`.
         let wrong =
             format!("const WIDTH: u8 = {ty}::BITS;\npub unsafe extern \"sysv64\" fn k() {{ note(\"{{WIDTH}}\"); }}");
-        assert_eq!(kernite::x86_str(&wrong, "k").unwrap_err(), "1:19: this is a u32, not u8", "{ty}");
+        assert_eq!(
+            kernite::x86_str(&wrong, "k").err().ok_or("x86_str gave Ok")?,
+            "1:19: this is a u32, not u8",
+            "{ty}"
+        );
     }
+    Ok(())
 }
 
 /// A float's own constants are named by the float's path: `INFINITY`, `NEG_INFINITY`, `MAX`, `MIN`, `MIN_POSITIVE` and
@@ -1816,7 +1847,7 @@ fn an_integer_s_constants_are_rusts_own() {
 /// bits that IEEE 754's rules give a float of their widths, 5 bits of exponent and 10 of fraction, and 8 and 7, for
 /// Rust has no such floats to take them from. The primitive's path names them too, `core::primitive::f64::EPSILON`.
 #[test]
-fn a_float_s_own_constants_are_rusts_own_by_the_floats_path() {
+fn a_float_s_own_constants_are_rusts_own_by_the_floats_path() -> Result {
     macro_rules! own {
         ($($name:ident),*) => {
             [$((stringify!($name), f32::$name.to_bits(), f64::$name.to_bits())),*]
@@ -1825,12 +1856,12 @@ fn a_float_s_own_constants_are_rusts_own_by_the_floats_path() {
     let floats: [(&str, u32, u64); 6] = own!(INFINITY, NEG_INFINITY, MAX, MIN, MIN_POSITIVE, EPSILON);
     for (name, single, double) in floats {
         let bits = (format!("f32::from_bits({single:#x})"), format!("f64::from_bits({double:#x})"));
-        let want = compiled(&bits.0, &bits.1);
+        let want = compiled(&bits.0, &bits.1)?;
         for path in PATHS {
             let (single, double) = (path.replace("{}", "f32"), path.replace("{}", "f64"));
-            assert_eq!(compiled(&format!("{single}::{name}"), &format!("{double}::{name}")), want, "{path}::{name}");
+            assert_eq!(compiled(&format!("{single}::{name}"), &format!("{double}::{name}"))?, want, "{path}::{name}");
         }
-        assert_eq!(compiled(&format!("f32::{name}"), &format!("f64::{name}")), want, "{name}");
+        assert_eq!(compiled(&format!("f32::{name}"), &format!("f64::{name}"))?, want, "{name}");
     }
     // The bits of the halves: a lane of a vector for x86, a register for a GPU.
     let halves = [
@@ -1841,7 +1872,7 @@ fn a_float_s_own_constants_are_rusts_own_by_the_floats_path() {
         ("MIN_POSITIVE", 0x0400, 0x0080),
         ("EPSILON", 0x1400, 0x3c00),
     ];
-    let halved = |half: &str, brain: &str| {
+    let halved = |half: &str, brain: &str| -> Result<_> {
         let x86_src = format!(
             r#"unsafe extern "sysv64" fn k() {{ let v: ymm; vpbroadcastw(v, [{half}]); vpbroadcastw(v, [{brain}]); }}"#
         );
@@ -1854,12 +1885,13 @@ fn a_float_s_own_constants_are_rusts_own_by_the_floats_path() {
                 st.global.b16([b], y);
             }}"#
         );
-        (x86(&x86_src, "k"), ptx(&ptx_src))
+        Ok((x86(&x86_src, "k")?, ptx(&ptx_src)?))
     };
     for (name, half, brain) in halves {
-        let want = halved(&format!("f16::from_bits({half:#x})"), &format!("bf16::from_bits({brain:#x})"));
-        assert_eq!(halved(&format!("f16::{name}"), &format!("bf16::{name}")), want, "{name}");
+        let want = halved(&format!("f16::from_bits({half:#x})"), &format!("bf16::from_bits({brain:#x})"))?;
+        assert_eq!(halved(&format!("f16::{name}"), &format!("bf16::{name}"))?, want, "{name}");
     }
+    Ok(())
 }
 
 /// Why a constant's path is refused in text, which no Rust reads: the path as it is written, and what kernite says of
@@ -1869,7 +1901,7 @@ fn refused_constants() -> Vec<(String, String)> {
     let mut rows = vec![];
     // A path without its root is Rust's after a `use std::f32;`, which kernite does not read.
     for read in ["f32::consts::LOG2_E", "f64::consts::PI", "f64::consts::FRAC_2_SQRT_PI"] {
-        let ty = read.split("::").next().unwrap();
+        let ty = read.split("::").next().unwrap_or_default();
         let error = format!(
             "`{read}` is Rust's only after `use std::{ty};`, which kernite does not read: write `core::{read}`"
         );
@@ -1943,8 +1975,10 @@ fn refused_constants() -> Vec<(String, String)> {
 /// Rust has deprecated in a module of its type, `std::u32::MAX`, or has not, `f32::NAN`, `f32::RADIX` or `f64::DIGITS`.
 /// A path with a `::` before another name than `core` or `std` is no expression.
 #[test]
-fn a_path_that_names_no_constant_kernite_knows_is_refused_at_its_first_token_in_text() {
-    let at = |src: &str, path: &str| 1 + src.find(path).unwrap_or_else(|| panic!("`{path}` in {src}"));
+fn a_path_that_names_no_constant_kernite_knows_is_refused_at_its_first_token_in_text() -> Result {
+    let at = |src: &str, path: &str| -> Result<usize> {
+        Ok(1 + src.find(path).ok_or_else(|| format!("`{path}` in {src}"))?)
+    };
     for (path, error) in refused_constants() {
         for src in [
             format!(r#"unsafe extern "sysv64" fn k() {{ let g: gpr; mov(g, {path}); }}"#),
@@ -1955,20 +1989,29 @@ fn a_path_that_names_no_constant_kernite_knows_is_refused_at_its_first_token_in_
             ),
             format!("fn h() {{ let g: gpr; mov(g, {path}); }}\nunsafe extern \"sysv64\" fn k() {{ h(); }}"),
         ] {
-            let want = format!("{}:{}: {error}", 1, at(&src, &path));
-            assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), want, "{src}");
+            let want = format!("{}:{}: {error}", 1, at(&src, &path)?);
+            assert_eq!(kernite::x86_str(&src, "k").err().ok_or("x86_str gave Ok")?, want, "{src}");
         }
         let src = format!(r#"unsafe extern "ptx-kernel" fn g() {{ let v: f32; mov.f32(v, {path}); }}"#);
-        let want = format!("1:{}: {error}", at(&src, &path));
-        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{src}");
+        let want = format!("1:{}: {error}", at(&src, &path)?);
+        assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, want, "{src}");
     }
     // The `::` before a name other than `core` or `std` begins no path.
     for path in ["::f32::consts::PI", "::my::f32::consts::PI", "::u32::MAX"] {
         let src = format!(r#"unsafe extern "sysv64" fn k() {{ let g: gpr; mov(g, {path}); }}"#);
-        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), "1:52: expected an expression, found `:`", "{path}");
+        assert_eq!(
+            kernite::x86_str(&src, "k").err().ok_or("x86_str gave Ok")?,
+            "1:52: expected an expression, found `:`",
+            "{path}"
+        );
         let src = format!(r#"unsafe extern "ptx-kernel" fn g() {{ let v: f32; mov.f32(v, {path}); }}"#);
-        assert_eq!(kernite::ptx_str(&src).unwrap_err(), "1:60: expected an expression, found `:`", "{path}");
+        assert_eq!(
+            kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?,
+            "1:60: expected an expression, found `:`",
+            "{path}"
+        );
     }
+    Ok(())
 }
 
 /// Each place a type is written, with `{ty}` where it is, and for x86 the kernel to compile: a kernel's parameter,
@@ -2015,8 +2058,9 @@ const GPU_PLACES: [&str; 17] = [
 
 /// What every place says of `ty`: the listing, or the PTX, or why not.
 fn said(ty: &str) -> Vec<Result<String, String>> {
-    let x86s =
-        X86_PLACES.iter().map(|(src, kernel)| kernite::x86_str(&src.replace("{ty}", ty), kernel).map(|l| l.text()));
+    let x86s = X86_PLACES
+        .iter()
+        .map(|(src, kernel)| kernite::x86_str(&src.replace("{ty}", ty), kernel).map(|l| l.to_string()));
     let ptxs = GPU_PLACES.iter().map(|src| kernite::ptx_str(&src.replace("{ty}", ty)));
     x86s.chain(ptxs).collect()
 }
@@ -2067,7 +2111,7 @@ fn a_path_is_refused_as_the_type_it_names_is_where_the_place_does_not_take_it() 
 /// raw is the name Rust reads in it, as in any path, but for a keyword, `r#mut`, which stays as written, in a
 /// compile-time argument's type and a cast's too.
 #[test]
-fn an_error_names_a_primitive_by_its_name_and_any_other_path_as_written() {
+fn an_error_names_a_primitive_by_its_name_and_any_other_path_as_written() -> Result {
     let takes = "a kernel takes pointers, 64-bit integers and floats, not";
     let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not";
     let compile_time = "a function that names an ABI takes integers and `bool`s at compile time, as Rust's const \
@@ -2193,7 +2237,7 @@ fn an_error_names_a_primitive_by_its_name_and_any_other_path_as_written() {
             "1:52: `from_bits` makes an f32, f64, f16 or bf16 of an integer".into(),
         ),
     ] {
-        assert_eq!(kernite::x86_str(src, kernel).unwrap_err(), error, "{src}");
+        assert_eq!(kernite::x86_str(src, kernel).err().ok_or("x86_str gave Ok")?, error, "{src}");
     }
     let takes = "a GPU kernel takes pointers, integers and the floats `f16`, `bf16`, `f32` and `f64`, not";
     let memory = "memory holds `b8` to `b128`, `u8` to `u64`, `s8` to `s64`, `f16`, `f16x2`, `bf16`, `bf16x2`, `tf32`, \
@@ -2232,8 +2276,9 @@ fn an_error_names_a_primitive_by_its_name_and_any_other_path_as_written() {
             "1:60: `::core::primitive::f16::MAX` is not a constant kernite knows".into(),
         ),
     ] {
-        assert_eq!(kernite::ptx_str(src).unwrap_err(), error, "{src}");
+        assert_eq!(kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?, error, "{src}");
     }
+    Ok(())
 }
 
 /// A result is a type, and is read whole as a parameter's is, up to the body or the `where` or `;` before it: not
@@ -2242,7 +2287,7 @@ fn an_error_names_a_primitive_by_its_name_and_any_other_path_as_written() {
 /// result that is no number or pointer, and one that a cooperative kernel or a GPU kernel may not have, is
 /// refused: every error is at the result, and the x86 kernel's and the GPU kernel's quote the type whole.
 #[test]
-fn a_result_that_holds_a_block_is_read_whole_up_to_its_body() {
+fn a_result_that_holds_a_block_is_read_whole_up_to_its_body() -> Result {
     for to in [
         "Arr<{ 3 }>",
         "crate::Arr<{ 3 }>",
@@ -2255,23 +2300,23 @@ fn a_result_that_holds_a_block_is_read_whole_up_to_its_body() {
         "<A as B>::C<{ 3 }>",
     ] {
         let src = format!("unsafe extern \"sysv64\" fn k(p: *const u8) -> *const {to} {{ ret(p); }}");
-        assert_eq!(code(&src, "k"), ["mov rax, rdi", "ret"], "{to}");
+        assert_eq!(code(&src, "k")?, ["mov rax, rdi", "ret"], "{to}");
     }
     let src = "#[instances(1, 2)]\nunsafe extern \"sysv64\" fn k<const N: u64>(p: *const u8) -> *const Arr<{ 3 }> \
                { add(p, N); ret(p); }";
-    assert_eq!(code(src, "k::<1>"), ["add rdi, 1", "mov rax, rdi", "ret"]);
-    assert_eq!(code(src, "k::<2>"), ["add rdi, 2", "mov rax, rdi", "ret"]);
+    assert_eq!(code(src, "k::<1>")?, ["add rdi, 1", "mov rax, rdi", "ret"]);
+    assert_eq!(code(src, "k::<2>")?, ["add rdi, 2", "mov rax, rdi", "ret"]);
     // Every error is at the result, and the x86 kernel's and the GPU kernel's quote the type whole: a kernel
     // returns a pointer or a number, a cooperative kernel's threads return nothing, and so does a GPU kernel.
     let src = "unsafe extern \"sysv64\" fn k() -> Arr<{ 3 }> {}";
     let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `Arr<{ 3 }>`";
-    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, format!("1:34: {returns}"));
     let src = "#[cooperative]\nunsafe extern \"sysv64\" fn k() -> *const Arr<{ 3 }> {}";
     let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
-    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("2:34: {nothing}"));
+    assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, format!("2:34: {nothing}"));
     let src = "unsafe extern \"ptx-kernel\" fn k() -> *const Arr<{ 3 }> {}";
     let nothing = "a GPU kernel returns nothing, not `*const Arr<{ 3 }>`: it writes what it works out to memory";
-    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:38: {nothing}"));
+    assert_eq!(kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?, format!("1:38: {nothing}"));
     // The result still ends at its `where`, which a kernel has none of, and at the `;` of a function with no
     // body, with a block in it or without.
     let no_body = "a kernel is written in its body, and `k` has none";
@@ -2282,8 +2327,9 @@ fn a_result_that_holds_a_block_is_read_whole_up_to_its_body() {
         ("*const Arr<{ 3 }>;", "1:51", no_body),
     ] {
         let src = format!("unsafe extern \"sysv64\" fn k() -> {result}");
-        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("{at}: {message}"), "{result}");
+        assert_eq!(kernite::x86_str(&src, "k").err().ok_or("x86_str gave Ok")?, format!("{at}: {message}"), "{result}");
     }
+    Ok(())
 }
 
 /// A result that is a type macro in braces, `byte!{ _ }`, is read whole, as one in parentheses is: the braces right
@@ -2294,7 +2340,7 @@ fn a_result_that_holds_a_block_is_read_whole_up_to_its_body() {
 /// arguments. A result that is no number or pointer, and one that a cooperative kernel or a GPU kernel may not have,
 /// is refused at the result, as it is with any type.
 #[test]
-fn a_result_that_holds_a_macro_in_braces_is_read_whole_up_to_its_body() {
+fn a_result_that_holds_a_macro_in_braces_is_read_whole_up_to_its_body() -> Result {
     for to in [
         "byte!{ _ }",
         "crate::byte!{ _ }",
@@ -2306,29 +2352,29 @@ fn a_result_that_holds_a_macro_in_braces_is_read_whole_up_to_its_body() {
         "[byte!{ _ }; 1]",
     ] {
         let src = format!("unsafe extern \"sysv64\" fn k(p: *const u8) -> *const {to} {{ ret(p); }}");
-        assert_eq!(code(&src, "k"), ["mov rax, rdi", "ret"], "{to}");
+        assert_eq!(code(&src, "k")?, ["mov rax, rdi", "ret"], "{to}");
     }
     // The `!` of never follows the arrow, `-> !`, a keyword, `*const !`, or a lifetime, `&'static !`, and is no macro's:
     // the braces after it are the body. A string holds no lifetime, so the first two are tried here.
-    assert_eq!(code("unsafe extern \"sysv64\" fn k() -> ! { ud2(); }", "k"), ["ud2"]);
+    assert_eq!(code("unsafe extern \"sysv64\" fn k() -> ! { ud2(); }", "k")?, ["ud2"]);
     for to in ["*const fn() -> !", "*const !", "*mut !"] {
         let src = format!("unsafe extern \"sysv64\" fn k(p: *const u8) -> {to} {{ ret(p); }}");
-        assert_eq!(code(&src, "k"), ["mov rax, rdi", "ret"], "{to}");
+        assert_eq!(code(&src, "k")?, ["mov rax, rdi", "ret"], "{to}");
     }
     let src = "#[instances(1, 2)]\nunsafe extern \"sysv64\" fn k<const N: u64>(p: *const u8) -> *const byte!{ _ } \
                { add(p, N); ret(p); }";
-    assert_eq!(code(src, "k::<1>"), ["add rdi, 1", "mov rax, rdi", "ret"]);
-    assert_eq!(code(src, "k::<2>"), ["add rdi, 2", "mov rax, rdi", "ret"]);
+    assert_eq!(code(src, "k::<1>")?, ["add rdi, 1", "mov rax, rdi", "ret"]);
+    assert_eq!(code(src, "k::<2>")?, ["add rdi, 2", "mov rax, rdi", "ret"]);
     // Every error is at the result, and the x86 kernel's and the GPU kernel's quote the type whole.
     let src = "unsafe extern \"sysv64\" fn k() -> byte!{ _ } {}";
     let returns = "a kernel returns a float, an integer or a pointer, or never, `!`; not `byte! { _ }`";
-    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("1:34: {returns}"));
+    assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, format!("1:34: {returns}"));
     let src = "#[cooperative]\nunsafe extern \"sysv64\" fn k() -> *const byte!{ _ } {}";
     let nothing = "a cooperative kernel's threads return nothing: they write what they compute to memory";
-    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), format!("2:34: {nothing}"));
+    assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, format!("2:34: {nothing}"));
     let src = "unsafe extern \"ptx-kernel\" fn k() -> *const byte!{ _ } {}";
     let nothing = "a GPU kernel returns nothing, not `*const byte! { _ }`: it writes what it works out to memory";
-    assert_eq!(kernite::ptx_str(src).unwrap_err(), format!("1:38: {nothing}"));
+    assert_eq!(kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?, format!("1:38: {nothing}"));
     // The result still ends at its `where`, which a kernel has none of, and at the `;` of a function with no
     // body, after a macro in braces too.
     let no_body = "a kernel is written in its body, and `k` has none";
@@ -2337,12 +2383,13 @@ fn a_result_that_holds_a_macro_in_braces_is_read_whole_up_to_its_body() {
         ("*const byte!{ _ };", "1:51", no_body),
     ] {
         let src = format!("unsafe extern \"sysv64\" fn k() -> {result}");
-        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), format!("{at}: {message}"), "{result}");
+        assert_eq!(kernite::x86_str(&src, "k").err().ok_or("x86_str gave Ok")?, format!("{at}: {message}"), "{result}");
     }
+    Ok(())
 }
 
 #[test]
-fn loops_unroll_and_number_their_labels_afresh() {
+fn loops_unroll_and_number_their_labels_afresh() -> Result {
     let src = r#"
         const STEP: usize = 32;
 
@@ -2396,11 +2443,12 @@ fn loops_unroll_and_number_their_labels_afresh() {
     vzeroupper
     ret
 ";
-    assert_eq!(x86(src, "k"), want);
+    assert_eq!(x86(src, "k")?, want);
+    Ok(())
 }
 
 #[test]
-fn brackets_are_memory_at_an_address_or_holding_data() {
+fn brackets_are_memory_at_an_address_or_holding_data() -> Result {
     let src = r#"
         pub unsafe extern "sysv64" fn m(x: *const f32, i: usize) {
             let v: ymm;
@@ -2439,11 +2487,12 @@ fn brackets_are_memory_at_an_address_or_holding_data() {
 # c3, aligned to 8:
 #   ff ff ff ff 02 00 00 00
 ";
-    assert_eq!(x86(src, "m"), want);
+    assert_eq!(x86(src, "m")?, want);
+    Ok(())
 }
 
 #[test]
-fn a_predicate_guards_what_its_if_holds() {
+fn a_predicate_guards_what_its_if_holds() -> Result {
     let src = r#"
         pub unsafe extern "ptx-kernel" fn g(n: u32, out: *mut u32) {
             let i: u32;
@@ -2488,7 +2537,8 @@ fn a_predicate_guards_what_its_if_holds() {
 \tret;
 }
 ";
-    assert_eq!(ptx(src), want);
+    assert_eq!(ptx(src)?, want);
+    Ok(())
 }
 
 /// An `if` on a variable guards each instruction inside, and the target checks the variable as
@@ -2496,11 +2546,11 @@ fn a_predicate_guards_what_its_if_holds() {
 /// `else` too, whatever the variable is. Both blocks run before either count is read, so what is
 /// wrong inside either is said first.
 #[test]
-fn an_if_that_guards_no_instruction_is_refused() {
+fn an_if_that_guards_no_instruction_is_refused() -> Result {
     let block = "an `if` on a variable guards each instruction inside, and its block runs none";
     // x86 takes no predicate, and a note is no instruction.
     for body in [r#"let g: gpr; zero(g); if g { note("x"); }"#, "let g: gpr; zero(g); if g {}"] {
-        assert_eq!(refused(body), format!("2:22: {block}"), "{body}");
+        assert_eq!(refused(body)?, format!("2:22: {block}"), "{body}");
     }
     // PTX takes a `pred` alone, and `r` is a `u32`. A block counts what it runs, not what it
     // holds: a `for` over nothing runs none, and so does a call of `h`, which is empty. A block
@@ -2522,7 +2572,7 @@ fn an_if_that_guards_no_instruction_is_refused() {
     ];
     for (body, want) in cases {
         let src = format!("unsafe extern \"ptx-kernel\" fn k(n: u32, out: *mut u32) {{\n{body}\n}}\nfn h() {{}}\n");
-        assert_eq!(kernite::ptx_str(&src).unwrap_err(), want, "{body}");
+        assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, want, "{body}");
     }
     // An `if` that guards an instruction takes a note beside it, and counts one that a loop, an
     // `if` on a bool or a helper runs.
@@ -2547,12 +2597,13 @@ fn an_if_that_guards_no_instruction_is_refused() {
             st.global.u32([o], v);
         }
     "#;
-    let entry = ptx(src);
+    let entry = ptx(src)?;
     assert!(entry.contains("\t// x\n\t@%p st.global.u32 [%out], %n;\n\t@%p st.global.u32 [%out], %n;\n"), "{entry}");
+    Ok(())
 }
 
 #[test]
-fn values_are_computed_as_rust_computes_them() {
+fn values_are_computed_as_rust_computes_them() -> Result {
     let src = r#"
         const BITS: u32 = 1 << 31;
         const HALF: f64 = 1.0 / 2.0;
@@ -2595,7 +2646,8 @@ fn values_are_computed_as_rust_computes_them() {
 # c1, aligned to 4:
 #   00 00 80 3f
 ";
-    assert_eq!(x86(src, "v"), want);
+    assert_eq!(x86(src, "v")?, want);
+    Ok(())
 }
 
 /// A shift or a `!` is checked for overflow, as `+` is. One of an integer with a type is wrapped
@@ -2604,7 +2656,7 @@ fn values_are_computed_as_rust_computes_them() {
 /// it, at the operator: past it, a value would reach the ends of `i128`, and the third would
 /// divide `i128::MIN` by -1.
 #[test]
-fn a_shift_and_a_not_are_checked_for_overflow() {
+fn a_shift_and_a_not_are_checked_for_overflow() -> Result {
     let src = r#"
         const HIGH: u64 = 3 << 63;
         const MASK: u8 = !0;
@@ -2618,7 +2670,7 @@ fn a_shift_and_a_not_are_checked_for_overflow() {
     # 9223372036854775808 255
     ret
 ";
-    assert_eq!(x86(src, "k"), want);
+    assert_eq!(x86(src, "k")?, want);
     let cases = [
         ("const X: u64 = (3 << 63) as u64;", "2:19: 27670116110564327424 is out of range for an integer"),
         ("const X: u64 = !18446744073709551615 as u64;", "2:16: -18446744073709551616 is out of range for an integer"),
@@ -2628,8 +2680,9 @@ fn a_shift_and_a_not_are_checked_for_overflow() {
         ),
     ];
     for (body, want) in cases {
-        assert_eq!(refused(body), want, "{body}");
+        assert_eq!(refused(body)?, want, "{body}");
     }
+    Ok(())
 }
 
 /// A shift known now by a negative count, by as many bits as its type has, or by more, is an error at its operator
@@ -2638,7 +2691,7 @@ fn a_shift_and_a_not_are_checked_for_overflow() {
 /// last bit works out as in Rust: `1 << 7` of an `i8` is -128, and a `>>` of a signed type keeps its sign: `-8 >> 1`
 /// is -4.
 #[test]
-fn a_shift_known_now_by_a_count_that_is_not_from_0_to_the_last_bit_of_its_type_is_refused_at_its_operator() {
+fn a_shift_known_now_by_a_count_that_is_not_from_0_to_the_last_bit_of_its_type_is_refused_at_its_operator() -> Result {
     // Each integer type, its bits, and what Rust makes of `1 << (bits - 1)` of it.
     macro_rules! own {
         ($($ty:ident),*) => {
@@ -2652,26 +2705,30 @@ fn a_shift_known_now_by_a_count_that_is_not_from_0_to_the_last_bit_of_its_type_i
         for op in ["<<", ">>"] {
             for count in [-1, -3, *bits, bits + 8] {
                 let body = format!("const X: {ty} = 1 {op} {count};");
-                let want =
-                    format!("2:{}: a shift by {count} is not from 0 to {}", body.find(op).unwrap() + 1, bits - 1);
-                assert_eq!(refused(&body), want, "{body}");
+                let want = format!(
+                    "2:{}: a shift by {count} is not from 0 to {}",
+                    body.find(op).ok_or("find gave None")? + 1,
+                    bits - 1
+                );
+                assert_eq!(refused(&body)?, want, "{body}");
             }
         }
     }
-    assert_eq!(refused("const X: u64 = (1 << 64) as u64;"), "2:19: a shift by 64 is not from 0 to 63");
-    assert_eq!(refused("const X: u64 = (1 >> -1) as u64;"), "2:19: a shift by -1 is not from 0 to 63");
+    assert_eq!(refused("const X: u64 = (1 << 64) as u64;")?, "2:19: a shift by 64 is not from 0 to 63");
+    assert_eq!(refused("const X: u64 = (1 >> -1) as u64;")?, "2:19: a shift by -1 is not from 0 to 63");
     let names: Vec<_> = types.iter().map(|(ty, ..)| format!("{{{}}}", ty.to_uppercase())).collect();
     let src = format!("{consts}unsafe extern \"sysv64\" fn k() {{ note(\"{{SIGNED}} {}\"); }}\n", names.join(" "));
     let values: Vec<_> = types.iter().map(|(.., last)| last.as_str()).collect();
-    let listing = x86(&src, "k");
+    let listing = x86(&src, "k")?;
     assert!(listing.contains(&format!("# {} {}\n", -8_i32 >> 1, values.join(" "))), "{listing}");
+    Ok(())
 }
 
 /// A const is what kernels read: a number, a float, a `bool`, or an array of them. The kernel
 /// reads one of each, and adds only if each is what it was declared. One of another type is no
 /// value known now, and the error says what one is.
 #[test]
-fn a_const_is_a_number_a_float_a_bool_or_an_array_of_them() {
+fn a_const_is_a_number_a_float_a_bool_or_an_array_of_them() -> Result {
     let src = |ty: &str| {
         format!(
             "const N: u64 = 1;\nconst F: f32 = 2.5;\nconst B: bool = true;\nconst XS: {ty} = [1, 2];\n\
@@ -2686,13 +2743,14 @@ fn a_const_is_a_number_a_float_a_bool_or_an_array_of_them() {
     mov rax, rdi
     ret
 ";
-    assert_eq!(x86(&src("[u64; 2]"), "k"), want);
-    let e = kernite::x86_str(&src("[u64]"), "k").unwrap_err();
+    assert_eq!(x86(&src("[u64; 2]"), "k")?, want);
+    let e = kernite::x86_str(&src("[u64]"), "k").err().ok_or("x86_str gave Ok")?;
     assert_eq!(e, "4:11: a value known now is a number, a bool, or an array of them, `[T; N]`");
+    Ok(())
 }
 
 #[test]
-fn sixteen_bit_floats_are_values_and_data() {
+fn sixteen_bit_floats_are_values_and_data() -> Result {
     let src = r#"
         const THIRD: f16 = 1.0 / 3.0;
 
@@ -2727,11 +2785,12 @@ fn sixteen_bit_floats_are_values_and_data() {
 # c1, aligned to 4:
 #   c0 3f 00 c0
 ";
-    assert_eq!(x86(src, "h"), want);
+    assert_eq!(x86(src, "h")?, want);
+    Ok(())
 }
 
 #[test]
-fn errors_point_where_the_trouble_is() {
+fn errors_point_where_the_trouble_is() -> Result {
     let cases: &[(&str, &str)] = &[
         ("let k = nope;", "1:9: `nope` is not defined"),
         ("let x;", "1:5: `let x;` declares nothing: give it a type, as in `let x: ymm;`, or a value"),
@@ -2796,7 +2855,7 @@ fn errors_point_where_the_trouble_is() {
             "unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\nfn two(a: ymm, b: ymm) {{}}\nfn deep() {{ deep(); }}\n\
              const A: usize = B;\nconst B: usize = A;\n"
         );
-        let got = kernite::x86_str(&src, "k").unwrap_err();
+        let got = kernite::x86_str(&src, "k").err().ok_or("x86_str gave Ok")?;
         // The body is on the second line.
         let want = want.replacen("1:", "2:", 1);
         assert_eq!(got, want, "{body}");
@@ -2823,16 +2882,19 @@ fn errors_point_where_the_trouble_is() {
         ),
     ];
     for (body, want) in cases {
-        let got = kernite::ptx_str(&format!("unsafe extern \"ptx-kernel\" fn k() {{\n{body}\n}}\n")).unwrap_err();
+        let got = kernite::ptx_str(&format!("unsafe extern \"ptx-kernel\" fn k() {{\n{body}\n}}\n"))
+            .err()
+            .ok_or("ptx_str gave Ok")?;
         assert_eq!(got, *want, "{body}");
     }
+    Ok(())
 }
 
 /// What the machine finds wrong with a variable once the body is written is placed where that
 /// variable is declared, though others of its name are declared before it or after: a helper's,
 /// an array's, or one declared again.
 #[test]
-fn an_error_is_placed_at_its_own_variable_s_declaration() {
+fn an_error_is_placed_at_its_own_variable_s_declaration() -> Result {
     let cases: &[(&str, &str)] = &[
         ("let v: ymm; h(); let v: ymm;", "4:14: `v` is read before anything writes it"),
         // An array's variables are called `v0` and `v1`.
@@ -2842,16 +2904,19 @@ fn an_error_is_placed_at_its_own_variable_s_declaration() {
     for (body, want) in cases {
         let src =
             format!("unsafe extern \"sysv64\" fn k() {{\n{body}\n}}\nfn h() {{ let v: ymm; vaddps(v, v, v); }}\n");
-        let got = kernite::x86_str(&src, "k").unwrap_err();
+        let got = kernite::x86_str(&src, "k").err().ok_or("x86_str gave Ok")?;
         assert_eq!(got, *want, "{body}");
     }
     let body = "let v: f32; let v: f32; add.rn.f32(v, v, 1.5); let v: f32;";
-    let got = kernite::ptx_str(&format!("unsafe extern \"ptx-kernel\" fn k() {{\n{body}\n}}\n")).unwrap_err();
+    let got = kernite::ptx_str(&format!("unsafe extern \"ptx-kernel\" fn k() {{\n{body}\n}}\n"))
+        .err()
+        .ok_or("ptx_str gave Ok")?;
     assert_eq!(got, "2:17: `v` is read before anything writes it");
+    Ok(())
 }
 
 #[test]
-fn a_kernel_with_compile_time_arguments_is_compiled_for_each_instance_it_lists() {
+fn a_kernel_with_compile_time_arguments_is_compiled_for_each_instance_it_lists() -> Result {
     // Each case comes before these, so its lines are its own.
     let after = r#"
 const WIDE: u32 = 8;
@@ -2938,15 +3003,16 @@ fn h<const N: u32>() {}
     ];
     for (case, want) in cases {
         let src = case.replacen('K', k, 1) + after;
-        assert_eq!(kernite::ptx_str(&src).unwrap_err(), *want, "{case}");
+        assert_eq!(kernite::ptx_str(&src).err().ok_or("ptx_str gave Ok")?, *want, "{case}");
     }
     let named = "K() { let a: u64; mov.u64(a, shift::<{ WIDE / 8 }>); mov.u64(a, shift::<8u32>); }";
-    let ptx = kernite::ptx_str(&(named.replacen('K', k, 1) + after)).unwrap();
+    let ptx = kernite::ptx_str(&(named.replacen('K', k, 1) + after))?;
     assert!(ptx.contains("\tmov.u64 %a, _Z5shiftILj1EE;\n\tmov.u64 %a, _Z5shiftILj8EE;\n"), "{ptx}");
+    Ok(())
 }
 
 #[test]
-fn a_helper_sees_none_of_its_callers_names() {
+fn a_helper_sees_none_of_its_callers_names() -> Result {
     let src = r#"
         pub unsafe extern "sysv64" fn k() {
             let secret = 3;
@@ -2956,13 +3022,14 @@ fn a_helper_sees_none_of_its_callers_names() {
             note("{secret}");
         }
     "#;
-    assert_eq!(kernite::x86_str(src, "k").unwrap_err(), "7:18: `secret` is not defined");
+    assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, "7:18: `secret` is not defined");
+    Ok(())
 }
 
 /// Each const, function and static of a module has a name of its own: of two of one name, the
 /// static is refused, else the function, else the second, at its name.
 #[test]
-fn each_const_function_and_static_has_a_name_of_its_own() {
+fn each_const_function_and_static_has_a_name_of_its_own() -> Result {
     let cases = [
         ("fn h() {} fn h() {}", "1:14: `h` names another function of the module as well"),
         (r#"fn k() {} pub unsafe extern "sysv64" fn k() {}"#, "1:41: `k` names another function of the module as well"),
@@ -2989,14 +3056,18 @@ fn each_const_function_and_static_has_a_name_of_its_own() {
         ),
     ];
     for (src, want) in cases {
-        assert_eq!(kernite::x86_str(src, "k").unwrap_err(), want, "{src}");
+        assert_eq!(kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?, want, "{src}");
     }
     let src = r#"pub unsafe extern "ptx-kernel" fn k() {} pub unsafe extern "ptx-kernel" fn k() {}"#;
-    assert_eq!(kernite::ptx_str(src).unwrap_err(), "1:76: `k` names another function of the module as well");
+    assert_eq!(
+        kernite::ptx_str(src).err().ok_or("ptx_str gave Ok")?,
+        "1:76: `k` names another function of the module as well"
+    );
+    Ok(())
 }
 
 #[test]
-fn array_parameters_take_variables_declared_together() {
+fn array_parameters_take_variables_declared_together() -> Result {
     let src = r#"
         pub unsafe extern "sysv64" fn k(x: *const f32) -> f32 {
             let acc: [ymm; 3];
@@ -3024,13 +3095,14 @@ fn array_parameters_take_variables_declared_together() {
     vzeroupper
     ret
 ";
-    assert_eq!(x86(src, "k"), want);
+    assert_eq!(x86(src, "k")?, want);
+    Ok(())
 }
 
 /// What each const of the module `src` works out to on its own: its value, or its error at its place.
-fn constants(src: &str) -> impl Fn(&str) -> Result<String, String> + '_ {
-    let module = kernite::lang::parse(src).unwrap();
-    move |name| {
+fn constants(src: &str) -> Result<impl Fn(&str) -> Result<Result<String, String>> + '_> {
+    let module = kernite::lang::parse(src)?;
+    Ok(move |name: &str| -> Result<_> {
         let c = module
             .items
             .iter()
@@ -3038,19 +3110,19 @@ fn constants(src: &str) -> impl Fn(&str) -> Result<String, String> + '_ {
                 kernite::lang::ItemKind::Const(c) if c.name == name => Some(c),
                 _ => None,
             })
-            .unwrap();
-        kernite::lang::constant(&module, c).map(|v| v.to_string()).map_err(|e| e.at(src))
-    }
+            .ok_or("find_map gave None")?;
+        Ok(kernite::lang::constant(&module, c).map(|v| v.to_string()).map_err(|e| e.at(src)))
+    })
 }
 
 /// A constant of a module works out on its own, in terms of the module's others, before or
 /// after it, as a module of consts has each checked; or says why it is no value known now.
 #[test]
-fn a_constant_works_out_on_its_own() {
+fn a_constant_works_out_on_its_own() -> Result {
     let src = "const D: usize = E / H;\nconst E: usize = 16;\nconst H: usize = 4;\nconst W: [f32; 2] = [0.5, -1.0];\n\
                const LOOP: u32 = LOOP + 1;\nconst BAD: u32 = 1.5;\nconst GONE: u32 = NOPE;\n\
                const DIV: u32 = 1 / 0;\nconst REM: u32 = 1 % 0;\nunsafe extern \"sysv64\" fn k() {}\n";
-    let value = constants(src);
+    let value = constants(src)?;
     let cases = [
         ("D", Ok("4")),
         ("W", Ok("[0.5, -1]")),
@@ -3061,14 +3133,15 @@ fn a_constant_works_out_on_its_own() {
         ("REM", Err("9:20: 1 % 0 divides by zero")),
     ];
     for (name, want) in cases {
-        assert_eq!(value(name), want.map(String::from).map_err(String::from), "{name}");
+        assert_eq!(value(name)?, want.map(String::from).map_err(String::from), "{name}");
     }
+    Ok(())
 }
 
 /// A `/` or a `%` of integers known now by zero says that it divides by zero, at its operator, in a const that a kernel
 /// reads, on x86 and on a GPU, as it does where the const is worked out on its own. By one, the same kernels compile.
 #[test]
-fn a_kernel_that_reads_a_division_by_zero_is_told_that_it_divides_by_zero() {
+fn a_kernel_that_reads_a_division_by_zero_is_told_that_it_divides_by_zero() -> Result {
     let src = |gpu: bool, op: &str, divisor: u32| {
         let kernel = match gpu {
             true => r#"unsafe extern "ptx-kernel" fn k(p: *mut u32) { st.global.u32([p], N); }"#,
@@ -3078,16 +3151,17 @@ fn a_kernel_that_reads_a_division_by_zero_is_told_that_it_divides_by_zero() {
     };
     for (op, want) in [("/", "1:18: 1 / 0 divides by zero"), ("%", "1:18: 1 % 0 divides by zero")] {
         for gpu in [false, true] {
-            assert_eq!(compile(&src(gpu, op, 0), "k").unwrap_err(), want, "{op}, gpu: {gpu}");
-            compile(&src(gpu, op, 1), "k").unwrap_or_else(|e| panic!("{op} by 1, gpu: {gpu}: {e}"));
+            assert_eq!(compile(&src(gpu, op, 0), "k").err().ok_or("compile gave Ok")?, want, "{op}, gpu: {gpu}");
+            compile(&src(gpu, op, 1), "k").map_err(|e| format!("{op} by 1, gpu: {gpu}: {e}"))?;
         }
     }
+    Ok(())
 }
 
 /// The remainder of the least of a signed type by -1, known now, overflows, as in Rust, though it is 0: it is an error
 /// at its `%`, in a const that a kernel reads, on x86 and on a GPU. By 1, the same kernels compile.
 #[test]
-fn a_kernel_that_reads_the_remainder_of_the_least_of_a_signed_type_by_minus_one_is_told_that_it_overflows() {
+fn a_kernel_that_reads_the_remainder_of_the_least_of_a_signed_type_by_minus_one_is_told_that_it_overflows() -> Result {
     let src = |gpu: bool, ty: &str, store: &str, least: &str, divisor: i32| {
         let kernel = match gpu {
             true => format!(r#"unsafe extern "ptx-kernel" fn k(p: *mut {ty}) {{ st.global.{store}([p], N); }}"#),
@@ -3100,10 +3174,15 @@ fn a_kernel_that_reads_the_remainder_of_the_least_of_a_signed_type_by_minus_one_
     {
         let want = format!("{at}: {least} % -1 overflows");
         for gpu in [false, true] {
-            assert_eq!(compile(&src(gpu, ty, store, least, -1), "k").unwrap_err(), want, "{ty}, gpu: {gpu}");
-            compile(&src(gpu, ty, store, least, 1), "k").unwrap_or_else(|e| panic!("{ty} by 1, gpu: {gpu}: {e}"));
+            assert_eq!(
+                compile(&src(gpu, ty, store, least, -1), "k").err().ok_or("compile gave Ok")?,
+                want,
+                "{ty}, gpu: {gpu}"
+            );
+            compile(&src(gpu, ty, store, least, 1), "k").map_err(|e| format!("{ty} by 1, gpu: {gpu}: {e}"))?;
         }
     }
+    Ok(())
 }
 
 /// The least of each signed type by -1 overflows under `%` as under `/`, at the operator: the `%` says that it
@@ -3111,7 +3190,7 @@ fn a_kernel_that_reads_the_remainder_of_the_least_of_a_signed_type_by_minus_one_
 /// as they are in Rust. A product past i128, in which kernite works an integer out, says that it overflows too:
 /// `u64::MAX * u64::MAX`.
 #[test]
-fn the_least_of_each_signed_type_overflows_by_minus_one_under_a_remainder_as_under_a_quotient() {
+fn the_least_of_each_signed_type_overflows_by_minus_one_under_a_remainder_as_under_a_quotient() -> Result {
     let types = [
         ("i8", "-128"),
         ("i16", "-32768"),
@@ -3121,25 +3200,27 @@ fn the_least_of_each_signed_type_overflows_by_minus_one_under_a_remainder_as_und
     ];
     let (mut src, mut cases) = (String::new(), vec![]);
     // A const of the type `ty` that is `sum`, which works out to `want`, or is the error `want` at its `op`.
-    let mut add = |ty: &str, sum: &str, op: char, want: Result<&str, String>| {
+    let mut add = |ty: &str, sum: &str, op: char, want: Result<&str, String>| -> Result {
         let line = format!("const N{}: {ty} = {sum};\n", cases.len());
-        let at = format!("{}:{}", src.lines().count() + 1, line.find(op).unwrap() + 1);
+        let at = format!("{}:{}", src.lines().count() + 1, line.find(op).ok_or("find gave None")? + 1);
         cases.push((format!("N{}", cases.len()), want.map(String::from).map_err(|message| format!("{at}: {message}"))));
         src += &line;
+        Ok(())
     };
     for (ty, least) in types {
-        let magnitude = -least.parse::<i128>().unwrap();
-        add(ty, &format!("{least} % -1"), '%', Err(format!("{least} % -1 overflows")));
-        add(ty, &format!("({least} + 1) % -1"), '%', Ok("0"));
-        add(ty, &format!("{least} % 1"), '%', Ok("0"));
-        add(ty, &format!("{least} / -1"), '/', Err(format!("{magnitude} is out of range for {ty}")));
+        let magnitude = -least.parse::<i128>()?;
+        add(ty, &format!("{least} % -1"), '%', Err(format!("{least} % -1 overflows")))?;
+        add(ty, &format!("({least} + 1) % -1"), '%', Ok("0"))?;
+        add(ty, &format!("{least} % 1"), '%', Ok("0"))?;
+        add(ty, &format!("{least} / -1"), '/', Err(format!("{magnitude} is out of range for {ty}")))?;
     }
     let product = "18446744073709551615 * 18446744073709551615";
-    add("u64", product, '*', Err(format!("{product} overflows")));
-    let value = constants(&src);
+    add("u64", product, '*', Err(format!("{product} overflows")))?;
+    let value = constants(&src)?;
     for (name, want) in cases {
-        assert_eq!(value(&name), want, "{name}");
+        assert_eq!(value(&name)?, want, "{name}");
     }
+    Ok(())
 }
 
 /// An integer where an integer of another type is wanted is told by its type, `a u16` for a `u8`: `an integer` would
@@ -3147,10 +3228,10 @@ fn the_least_of_each_signed_type_overflows_by_minus_one_under_a_remainder_as_und
 /// and a `let`, on x86; and for a compile-time argument of `#[instances(..)]`, on x86 and on a GPU. Where the type
 /// wanted is no integer's, what is wrong is that the value is an integer, and it is `an integer`, whatever its type.
 #[test]
-fn an_integer_of_another_type_is_told_by_its_type() {
-    let x86 = |items: &str| {
+fn an_integer_of_another_type_is_told_by_its_type() -> Result {
+    let x86 = |items: &str| -> Result<_> {
         let src = format!("{items}\nunsafe extern \"sysv64\" fn k() -> u64 {{ let r: gpr; mov(r, A); ret(r); }}\n");
-        kernite::x86_str(&src, "k").unwrap_err()
+        Ok(kernite::x86_str(&src, "k").err().ok_or("x86_str gave Ok")?)
     };
     let consts = [
         ("const A: u8 = 1u16;", "1:15: this is a u16, not u8"),
@@ -3174,10 +3255,10 @@ fn an_integer_of_another_type_is_told_by_its_type() {
         ("const A: u8 = 300;", "1:15: 300 is out of range for u8"),
     ];
     for (items, want) in consts {
-        assert_eq!(x86(items), want, "{items}");
+        assert_eq!(x86(items)?, want, "{items}");
     }
-    assert_eq!(refused("let n: u8 = 1u16;"), "2:13: this is a u16, not u8");
-    assert_eq!(refused("let n: u8 = 1;\nlet m: bool = 1u16;"), "3:15: this is an integer, not bool");
+    assert_eq!(refused("let n: u8 = 1u16;")?, "2:13: this is a u16, not u8");
+    assert_eq!(refused("let n: u8 = 1;\nlet m: bool = 1u16;")?, "3:15: this is an integer, not bool");
     let instances = [
         ("#[instances(1u16)]\nK<const N: u8>() {}", "1:13: this is a u16, not u8"),
         ("#[instances(1, 2i32)]\nK<const N: u8>() {}", "1:16: this is an i32, not u8"),
@@ -3185,23 +3266,28 @@ fn an_integer_of_another_type_is_told_by_its_type() {
     ];
     for (case, want) in instances {
         let on_x86 = case.replacen('K', "unsafe extern \"sysv64\" fn k", 1);
-        assert_eq!(kernite::x86_str(&on_x86, "k").unwrap_err(), want, "{on_x86}");
+        assert_eq!(kernite::x86_str(&on_x86, "k").err().ok_or("x86_str gave Ok")?, want, "{on_x86}");
         let on_a_gpu = case.replacen('K', "unsafe extern \"ptx-kernel\" fn k", 1);
-        assert_eq!(kernite::ptx_str(&on_a_gpu).unwrap_err(), want, "{on_a_gpu}");
+        assert_eq!(kernite::ptx_str(&on_a_gpu).err().ok_or("ptx_str gave Ok")?, want, "{on_a_gpu}");
     }
+    Ok(())
 }
 
 /// A range unrolls to no more numbers than a value holds, 1048576 at most.
 #[test]
-fn a_range_of_more_than_a_value_holds_is_refused() {
-    assert_eq!(refused("for i in 0..1048577 {}"), "2:11: 1048577 elements are too many: a value holds 1048576 at most");
+fn a_range_of_more_than_a_value_holds_is_refused() -> Result {
+    assert_eq!(
+        refused("for i in 0..1048577 {}")?,
+        "2:11: 1048577 elements are too many: a value holds 1048576 at most"
+    );
+    Ok(())
 }
 
 /// A repeat of more elements than a value holds is refused there, before it is built, and so is one
 /// of empty arrays or of arrays of one, which hold no more than one each but cost memory of their
 /// own.
 #[test]
-fn a_repeat_of_more_than_a_value_holds_is_refused() {
+fn a_repeat_of_more_than_a_value_holds_is_refused() -> Result {
     let cases = [
         (
             "const X: [u32; 1048577] = [0; 1048577];",
@@ -3217,15 +3303,16 @@ fn a_repeat_of_more_than_a_value_holds_is_refused() {
         ),
     ];
     for (body, want) in cases {
-        assert_eq!(refused(body), want, "{body}");
+        assert_eq!(refused(body)?, want, "{body}");
     }
+    Ok(())
 }
 
 /// A repeat of repeats, each within the most a value holds, is refused at the outer one when they
 /// hold more in all, however deep they nest, before it is built: the first would hold
 /// 1099511627776 numbers.
 #[test]
-fn a_repeat_of_repeats_holding_more_in_all_is_refused() {
+fn a_repeat_of_repeats_holding_more_in_all_is_refused() -> Result {
     let cases = [
         (
             "const X: [[u32; 1 << 20]; 1 << 20] = [[0; 1 << 20]; 1 << 20];",
@@ -3237,15 +3324,16 @@ fn a_repeat_of_repeats_holding_more_in_all_is_refused() {
         ),
     ];
     for (body, want) in cases {
-        assert_eq!(refused(body), want, "{body}");
+        assert_eq!(refused(body)?, want, "{body}");
     }
+    Ok(())
 }
 
 /// An array of repeats, each within the most a value holds, is refused at the array when they hold
 /// more in all, and its error counts what every item holds; so is an array of one that holds the
 /// most, which counts as one more.
 #[test]
-fn an_array_of_repeats_holding_more_in_all_is_refused() {
+fn an_array_of_repeats_holding_more_in_all_is_refused() -> Result {
     let cases = [
         (
             "const X: [[u32; 1 << 20]; 3] = [[0; 1 << 20], [0; 1 << 20], [0; 1 << 20]];",
@@ -3257,13 +3345,14 @@ fn an_array_of_repeats_holding_more_in_all_is_refused() {
         ),
     ];
     for (body, want) in cases {
-        assert_eq!(refused(body), want, "{body}");
+        assert_eq!(refused(body)?, want, "{body}");
     }
+    Ok(())
 }
 
 /// A value that holds the most, 1048576 elements, keeps every item, and a range unrolls to as many.
 #[test]
-fn a_value_holding_the_most_keeps_every_item() {
+fn a_value_holding_the_most_keeps_every_item() -> Result {
     let src = r#"pub unsafe extern "sysv64" fn k(x: u64) -> u64 {
     for i in 0..1048576 {}
     for half in [[0; 1 << 19], [0; 1 << 19]] {
@@ -3280,14 +3369,15 @@ fn a_value_holding_the_most_keeps_every_item() {
     mov rax, rdi
     ret
 ";
-    assert_eq!(x86(src, "k"), want);
+    assert_eq!(x86(src, "k")?, want);
+    Ok(())
 }
 
 /// A kernel declares at most 65536 variables by `let`, however its loops repeat them. The `let`
 /// that would pass the most is refused where it stands, before it makes any variable: an array of
 /// 2^40 would abort the process.
 #[test]
-fn a_let_that_would_pass_the_most_variables_is_refused_before_any_is_made() {
+fn a_let_that_would_pass_the_most_variables_is_refused_before_any_is_made() -> Result {
     let cases = [
         ("let v: [gpr; 1099511627776];", "2:14: 1099511627776 variables are too many: a kernel declares 65536 at most"),
         (
@@ -3301,25 +3391,28 @@ fn a_let_that_would_pass_the_most_variables_is_refused_before_any_is_made() {
         ),
     ];
     for (body, want) in cases {
-        assert_eq!(refused(body), want, "{body}");
+        assert_eq!(refused(body)?, want, "{body}");
     }
+    Ok(())
 }
 
 /// The variables a helper declares count for the kernel that calls it: here `t` makes 65537.
 #[test]
-fn a_helpers_variables_count_for_the_kernel_that_calls_it() {
+fn a_helpers_variables_count_for_the_kernel_that_calls_it() -> Result {
     let src = "unsafe extern \"sysv64\" fn k() {\nlet a: [gpr; 65535]; h();\n}\nfn h() { let t: [gpr; 2]; }\n";
     assert_eq!(
-        kernite::x86_str(src, "k").unwrap_err(),
+        kernite::x86_str(src, "k").err().ok_or("x86_str gave Ok")?,
         "4:23: 65537 variables are too many: a kernel declares 65536 at most"
     );
+    Ok(())
 }
 
 /// A kernel that declares exactly the most compiles, its parameters not counted among them. PTX
 /// builds no graph of its variables, so this takes no time to speak of.
 #[test]
-fn a_kernel_that_declares_exactly_the_most_variables_compiles() {
-    kernite::ptx_str("unsafe extern \"ptx-kernel\" fn k(x: *mut u32) {\nlet v: [u32; 65536];\n}\n").unwrap();
+fn a_kernel_that_declares_exactly_the_most_variables_compiles() -> Result {
+    kernite::ptx_str("unsafe extern \"ptx-kernel\" fn k(x: *mut u32) {\nlet v: [u32; 65536];\n}\n")?;
+    Ok(())
 }
 
 /// A row of operators, of brackets, of `else if`s or of arrays nests 64 deep at most. A row of the
@@ -3327,7 +3420,7 @@ fn a_kernel_that_declares_exactly_the_most_variables_compiles() {
 /// the parser or the evaluator would follow, each level a call, until a thread of 2 MiB ran out
 /// of stack.
 #[test]
-fn what_nests_past_64_deep_is_refused_where_the_level_starts() {
+fn what_nests_past_64_deep_is_refused_where_the_level_starts() -> Result {
     // A name, the body of a row of `n`, the most `n` that compiles, and where one more is refused.
     type Shape = (&'static str, fn(usize) -> String, usize, &'static str);
     let shapes: [Shape; 11] = [
@@ -3344,25 +3437,31 @@ fn what_nests_past_64_deep_is_refused_where_the_level_starts() {
         ("arrays of a repeat", |n| format!("let w = 0;{}", "\nlet w = [w; 1];".repeat(n)), 64, "67:9"),
     ];
     for (name, body, most, at) in shapes {
-        x86(&kernel(&body(most)), "k");
+        x86(&kernel(&body(most)), "k")?;
         let why = format!("{at}: this nests 64 deep at most");
-        assert_eq!(refused(&body(most + 1)), why, "{name}");
-        assert_eq!(refused(&body(5000)), why, "{name}, 5000 of them");
+        assert_eq!(refused(&body(most + 1))?, why, "{name}");
+        assert_eq!(refused(&body(5000))?, why, "{name}, 5000 of them");
     }
+    Ok(())
 }
 
 /// Consts that name consts nest like the expressions that name them: a chain of 64 works out, and
 /// one of 65, or of 5000, is refused where the 65th const is written.
 #[test]
-fn consts_that_name_consts_nest_64_deep_at_most() {
+fn consts_that_name_consts_nest_64_deep_at_most() -> Result {
     let module = |n: usize| {
         let consts: String = (0..n).map(|i| format!("const A{i}: u32 = A{};\n", i + 1)).collect();
         format!("{consts}const A{n}: u32 = 1;\n{}", kernel("let y = A0;"))
     };
-    x86(&module(63), "k");
+    x86(&module(63), "k")?;
     for n in [64, 5000] {
-        assert_eq!(kernite::x86_str(&module(n), "k").unwrap_err(), "65:18: this nests 64 deep at most", "{n}");
+        assert_eq!(
+            kernite::x86_str(&module(n), "k").err().ok_or("x86_str gave Ok")?,
+            "65:18: this nests 64 deep at most",
+            "{n}"
+        );
     }
+    Ok(())
 }
 
 /// A type nests 64 deep at most, and `Name<T>` and `[T; N]` are a level each, in a pointer to them
@@ -3370,48 +3469,55 @@ fn consts_that_name_consts_nest_64_deep_at_most() {
 /// reads the rest. A type of 64 is read, and then it is the machine that has no such variable. A
 /// result is a type, and nests as far.
 #[test]
-fn a_type_nests_64_deep_at_most() {
+fn a_type_nests_64_deep_at_most() -> Result {
     for (pointer, at) in [("", "2:134"), ("*const ", "2:141")] {
         let body = |n: usize| format!("let x: {pointer}{}u32{};", "a<".repeat(n), ">".repeat(n));
-        assert!(refused(&body(63)).starts_with("2:8: x86 variables are "), "{pointer}");
+        assert!(refused(&body(63))?.starts_with("2:8: x86 variables are "), "{pointer}");
         for n in [64, 5000] {
-            assert_eq!(refused(&body(n)), format!("{at}: this nests 64 deep at most"), "{pointer}{n}");
+            assert_eq!(refused(&body(n))?, format!("{at}: this nests 64 deep at most"), "{pointer}{n}");
         }
     }
     let result = |n: usize| {
         let ty = format!("{}u32{}", "a<".repeat(n), ">".repeat(n));
         format!("unsafe extern \"sysv64\" fn k(p: *const u8) -> *const {ty} {{ ret(p); }}")
     };
-    kernite::x86_str(&result(63), "k").unwrap();
+    kernite::x86_str(&result(63), "k")?;
     for n in [64, 5000] {
-        assert_eq!(kernite::x86_str(&result(n), "k").unwrap_err(), "1:179: this nests 64 deep at most", "-> {n}");
+        assert_eq!(
+            kernite::x86_str(&result(n), "k").err().ok_or("x86_str gave Ok")?,
+            "1:179: this nests 64 deep at most",
+            "-> {n}"
+        );
     }
+    Ok(())
 }
 
 /// A row inside brackets inside a row is counted whole: 62 fields in parentheses in 62 fields, and
 /// so on, is 3906 deep, which the evaluator would follow, with no count of its own for a field,
 /// until a stack of 6 MiB ran out. It is refused at the first level past 64.
 #[test]
-fn a_row_inside_brackets_inside_a_row_is_counted_whole() {
+fn a_row_inside_brackets_inside_a_row_is_counted_whole() -> Result {
     let deep = (0..62).fold("x".to_string(), |e, _| format!("({e}){}", ".f".repeat(62)));
-    assert_eq!(refused(&format!("let y = {deep};")), "2:194: this nests 64 deep at most");
+    assert_eq!(refused(&format!("let y = {deep};"))?, "2:194: this nests 64 deep at most");
+    Ok(())
 }
 
 /// A block, a `for` and an `if` are a level for what they hold, and count with the expression in
 /// them: 62 of them around `1 + 1` compile, and 63 are refused where the 65th level starts.
 #[test]
-fn blocks_loops_and_ifs_nest_with_their_expressions_64_deep_at_most() {
+fn blocks_loops_and_ifs_nest_with_their_expressions_64_deep_at_most() -> Result {
     for (open, at) in [("{", "2:72"), ("if true {", "2:576"), ("for i in 0..1 {", "2:940")] {
         let body = |n: usize| format!("{}let y = 1 + 1;{}", open.repeat(n), "}".repeat(n));
-        x86(&kernel(&body(62)), "k");
-        assert_eq!(refused(&body(63)), format!("{at}: this nests 64 deep at most"), "{open}");
+        x86(&kernel(&body(62)), "k")?;
+        assert_eq!(refused(&body(63))?, format!("{at}: this nests 64 deep at most"), "{open}");
     }
+    Ok(())
 }
 
 /// A helper's blocks count with its caller's, for the stack is one: 62 helpers, each calling the
 /// next from a `for`, compile, and the 63rd `for` is refused at its range.
 #[test]
-fn the_loops_of_helpers_that_call_helpers_nest_64_deep_at_most() {
+fn the_loops_of_helpers_that_call_helpers_nest_64_deep_at_most() -> Result {
     let module = |n: usize| {
         let helpers: String = (0..n)
             .map(|i| {
@@ -3421,28 +3527,30 @@ fn the_loops_of_helpers_that_call_helpers_nest_64_deep_at_most() {
             .collect();
         format!("{helpers}{}", kernel("h0();"))
     };
-    x86(&module(62), "k");
-    assert_eq!(kernite::x86_str(&module(63), "k").unwrap_err(), "63:21: this nests 64 deep at most");
+    x86(&module(62), "k")?;
+    assert_eq!(kernite::x86_str(&module(63), "k").err().ok_or("x86_str gave Ok")?, "63:21: this nests 64 deep at most");
+    Ok(())
 }
 
 /// The deepest kernel the rules allow, helpers 64 deep and a sum of 64 terms in the last, compiles
 /// on the stack of a test, 2 MiB: 64 is what fits it, with room to spare.
 #[test]
-fn the_deepest_kernel_fits_the_stack_of_a_test() {
+fn the_deepest_kernel_fits_the_stack_of_a_test() -> Result {
     let helpers: String = (0..64)
         .map(|i| {
             let inside = if i < 63 { format!("h{}();", i + 1) } else { format!("let y = 1{};", " + 1".repeat(63)) };
             format!("fn h{i}() {{ {inside} }}\n")
         })
         .collect();
-    x86(&format!("{helpers}{}", kernel("h0();")), "k");
+    x86(&format!("{helpers}{}", kernel("h0();")), "k")?;
+    Ok(())
 }
 
 /// The step past the most, 4194304, is refused where it is taken, in seconds. Without the count,
 /// loops that nest take 2^40 turns, a helper that calls itself twice takes 2^40 calls, and a const
 /// of 2^20 elements shown 2^20 times takes 2^40 elements: days, or an abort out of memory.
 #[test]
-fn work_past_the_most_steps_is_refused_where_the_step_past_it_is_taken() {
+fn work_past_the_most_steps_is_refused_where_the_step_past_it_is_taken() -> Result {
     let twice =
         "fn h<const N: usize>() {\n    if N > 0 {\n        h::<{ N - 1 }>();\n        h::<{ N - 1 }>();\n    }\n}\n";
     let table = "const A: [u32; 1 << 20] = [0; 1 << 20]; ";
@@ -3472,8 +3580,9 @@ fn work_past_the_most_steps_is_refused_where_the_step_past_it_is_taken() {
     ];
     for (name, src, at) in cases {
         let want = format!("{at}: this takes more than 4194304 steps to work out");
-        assert_eq!(kernite::x86_str(&src, "k").unwrap_err(), want, "{name}");
+        assert_eq!(kernite::x86_str(&src, "k").err().ok_or("x86_str gave Ok")?, want, "{name}");
     }
+    Ok(())
 }
 
 /// Work of exactly the most steps compiles, and a note after it is the step past, refused. A loop
@@ -3485,7 +3594,7 @@ fn work_past_the_most_steps_is_refused_where_the_step_past_it_is_taken() {
 /// elements; and a label costs one, a number an index takes or a note shows costs one, and an array
 /// there costs its elements.
 #[test]
-fn work_within_the_most_steps_compiles() {
+fn work_within_the_most_steps_compiles() -> Result {
     let cases = [
         ("a loop's range and turns", "for i in 0..1048576 {}", 2 * 1048576),
         ("a number read by name or worked out", "for i in 0..1000 { let b = i + 1; }", 2 * 1000),
@@ -3503,20 +3612,19 @@ fn work_within_the_most_steps_compiles() {
     for (name, work, steps) in cases {
         let turns = (4194304 - steps) / 2;
         let body = format!("{work} for k in 0..{} {{}} for l in 0..{} {{}}", turns / 2, turns - turns / 2);
-        if let Err(e) = kernite::x86_str(&kernel(&body), "k") {
-            panic!("{name}: {e}");
-        }
+        kernite::x86_str(&kernel(&body), "k").map_err(|e| format!("{name}: {e}"))?;
         let past = kernite::x86_str(&kernel(&format!("{body} note(\"\");")), "k");
         let want = format!("2:{}: this takes more than 4194304 steps to work out", body.len() + 2);
         assert_eq!(past.err(), Some(want), "{name}");
     }
+    Ok(())
 }
 
 /// An operator of two characters, `<<`, `&&`, `==`, `!=`, `<=` and `..`, is one token only if no space, line
 /// break or comment is between its characters: with one, they are two, and no expression begins with the
 /// second.
 #[test]
-fn an_operator_of_two_characters_has_nothing_between_them() {
+fn an_operator_of_two_characters_has_nothing_between_them() -> Result {
     let constant = |op: &str| {
         let src = format!(
             "const A: u32 = 8;\nconst B: u32 = A {op} 1;\n\
@@ -3524,15 +3632,18 @@ fn an_operator_of_two_characters_has_nothing_between_them() {
         );
         kernite::x86_str(&src, "k").map(|l| l.code().collect::<Vec<_>>().join("; "))
     };
-    assert_eq!(constant("<<").unwrap(), "mov rax, 16; ret");
-    assert_eq!(constant(">>").unwrap(), "mov rax, 4; ret");
+    assert_eq!(constant("<<")?, "mov rax, 16; ret");
+    assert_eq!(constant(">>")?, "mov rax, 4; ret");
     for op in ["&&", "||"] {
-        assert_eq!(constant(op).unwrap_err(), format!("2:18: `{op}` has no meaning between an integer and an integer"));
+        assert_eq!(
+            constant(op).err().ok_or("constant gave Ok")?,
+            format!("2:18: `{op}` has no meaning between an integer and an integer")
+        );
     }
     for op in ["==", "!=", "<=", ">="] {
-        assert_eq!(constant(op).unwrap_err(), "2:18: this is a bool, not u32");
+        assert_eq!(constant(op).err().ok_or("constant gave Ok")?, "2:18: this is a bool, not u32");
     }
-    assert_eq!(constant("..").unwrap_err(), "2:18: this is an array, not u32");
+    assert_eq!(constant("..").err().ok_or("constant gave Ok")?, "2:18: this is an array, not u32");
     for (op, at, found) in [
         ("< <", "2:20", "`<`"),
         ("<\n<", "3:1", "`<`"),
@@ -3543,9 +3654,14 @@ fn an_operator_of_two_characters_has_nothing_between_them() {
         ("< =", "2:20", "`=`"),
         ("> =", "2:20", "`=`"),
     ] {
-        assert_eq!(constant(op).unwrap_err(), format!("{at}: expected an expression, found {found}"), "{op}");
+        assert_eq!(
+            constant(op).err().ok_or("constant gave Ok")?,
+            format!("{at}: expected an expression, found {found}"),
+            "{op}"
+        );
     }
-    assert_eq!(constant(". .").unwrap_err(), "2:20: expected a name, found `.`");
-    assert_eq!(constant("= =").unwrap_err(), "2:18: expected `;`, found `=`");
-    assert_eq!(constant("! =").unwrap_err(), "2:18: expected `;`, found `!`");
+    assert_eq!(constant(". .").err().ok_or("constant gave Ok")?, "2:20: expected a name, found `.`");
+    assert_eq!(constant("= =").err().ok_or("constant gave Ok")?, "2:18: expected `;`, found `=`");
+    assert_eq!(constant("! =").err().ok_or("constant gave Ok")?, "2:18: expected `;`, found `!`");
+    Ok(())
 }

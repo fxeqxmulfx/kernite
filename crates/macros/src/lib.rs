@@ -6,7 +6,7 @@
 //! #[kernite_macros::kernels]
 //! mod cpu {
 //!     /// The sum of the eight floats at `xs`.
-//!     pub unsafe extern "sysv64" fn sum8(xs: *const f32) -> f32 {
+//!     pub extern "sysv64" fn sum8(xs: &[f32; 8]) -> f32 {
 //!         let v: ymm;
 //!         vmovups(v, [xs]);
 //!         ret_sum(v);
@@ -20,18 +20,27 @@
 //! }
 //! ```
 //!
-//! - An `unsafe extern "sysv64" fn` is compiled for x86-64 and becomes an `#[unsafe(naked)]`
+//! - An `extern "sysv64" fn` is compiled for x86-64. One that is no `unsafe fn`, and that kernite proves safe, takes
+//!   numbers, arrays by reference, `&[f32; 8]` or `&mut [f32; 8]`, and slices, `&[f32]` or `&mut [f32]`, and is a
+//!   function Rust calls with no `unsafe`,
+//!   a call of an `#[unsafe(naked)]` one of its own, its body the kernel's `naked_asm!`; where the code needs CPU
+//!   features past x86-64's own, `avx` say, it is `#[target_feature(enable = "avx")]`, so only a function that has
+//!   them calls it with no `unsafe`. Any other is an `unsafe extern "sysv64" fn`, and becomes an `#[unsafe(naked)]`
 //!   function of the signature it declares, its body the kernel's `naked_asm!`; constants it
 //!   reads are statics beside it. `LISTINGS` holds each one's listing, by name, for snapshots.
 //!   The module's kernels call each other, themselves among them, as `call(r, gcd, (a, b))`
 //!   does, or at the address `lea(fp, [gcd])` takes; all but a `#[cooperative]` one, which
 //!   its launcher runs. One that never returns, `-> !`, ends each way out in `ud2()` or in a
 //!   call of one that does not.
-//! - An `unsafe extern "ptx-kernel" fn` is compiled to PTX, for NVIDIA GPUs. The module's are
+//! - An `extern "ptx-kernel" fn` is compiled to PTX, for NVIDIA GPUs. The module's are
 //!   one PTX module, `PTX`, and `Kernels::load(&cuda)` has the driver compile it for the GPU
 //!   it finds; then each kernel is launched by the method of its name, which takes a
-//!   `kernite_cuda::Grid` and the kernel's parameters, a pointer as the `kernite_cuda::Ptr` a
-//!   buffer on the GPU gives, and an `f16` or a `bf16` as kernite-cuda's, Rust having neither.
+//!   `kernite_cuda::Grid` and the kernel's parameters, an `f16` or a `bf16` as kernite-cuda's, Rust having neither.
+//!   One that is no `unsafe fn`, and that kernite proves safe, is launched by a safe method: it takes the memory
+//!   a pointer is to, `&impl Memory<T>` for a `*const T` and `&mut impl MemoryMut<T>` for a `*mut T`, which a
+//!   buffer is, and checks on the host that the launch holds what the proof needs, and is an error, with no kernel
+//!   run, where it does not. Any other is an `unsafe extern "ptx-kernel" fn`, and its method is `unsafe` and takes a
+//!   pointer as the `kernite_cuda::Ptr` a buffer on the GPU gives.
 //!   A crate with a module of GPU kernels needs a dependency named `kernite-cuda` for these, not
 //!   renamed in `Cargo.toml`, and the error is at the module when it has none and `cfg` keeps one
 //!   of its GPU items: a feature can bring `kernite-cuda` and keep them, and the crate builds
@@ -101,15 +110,15 @@
 //! #[kernite_macros::kernels]
 //! mod gpu {
 //!     /// `x[i] *= a` for each `i < n`.
-//!     pub unsafe extern "ptx-kernel" fn scale(x: *mut f32, a: f32, n: u32) {
+//!     pub extern "ptx-kernel" fn scale(x: *mut f32, a: f32, n: u32) {
 //!         ..
 //!     }
 //! }
 //!
 //! let cuda = kernite_cuda::Cuda::new()?;
-//! let xs = cuda.upload(&[1.0, 2.0, 3.0])?;
+//! let mut xs = cuda.upload(&[1.0, 2.0, 3.0])?;
 //! let kernels = gpu::Kernels::load(&cuda)?;
-//! unsafe { kernels.scale(kernite_cuda::Grid::new(1, 32), xs.ptr(), 2.0, 3)? };
+//! kernels.scale(kernite_cuda::Grid::new(1, 32), &mut xs, 2.0, 3)?;
 //! ```
 //!
 //! A kernel with const generics, integers or `bool`s, is compiled for each instance its
@@ -218,11 +227,13 @@
 //! keeps, and writes the error, with the types of the helpers Rust keeps beside it. A module that
 //! builds is shown none of them, so an import that only a helper names is unused to Rust.
 //!
-//! The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one,
-//! `dead_code` say, and build its kernels: Rust lints the names and the code a kernel is
-//! written with, and none that the macro adds. Clippy's `too_many_arguments` is the one lint a
-//! crate of kernels may not forbid: Clippy says it of a launcher of more than seven parameters,
-//! whoever wrote it, and each launcher allows it.
+//! The Rust the macro writes needs no `allow` of a lint of Rust's but one, so a crate may `forbid`
+//! the others, `dead_code` say, and build its kernels: Rust lints the names and the code a kernel
+//! is written with, and none that the macro adds. A crate of kernels may not forbid two lints:
+//! Rust's `improper_ctypes_definitions` where an x86 kernel takes a slice, which Rust says of a
+//! `sysv64` function that takes one, and which the function the macro writes for the kernel allows;
+//! and Clippy's `too_many_arguments`, which Clippy says of a launcher of more than seven
+//! parameters, whoever wrote it, and which each launcher allows.
 //!
 //! Each name that the Rust the macro writes binds for itself starts with `__kernite_`, for Rust reads a binding named
 //! as a const in scope as that const, and refuses one named as a static. So a module of kernels may have a const or a
@@ -250,7 +261,7 @@
 //! #[kernite_macros::kernels(consts = crate::sizes)]
 //! pub mod cpu {
 //!     /// `x` a step on.
-//!     pub unsafe extern "sysv64" fn step(x: u64) -> u64 {
+//!     pub extern "sysv64" fn step(x: u64) -> u64 {
 //!         add(x, STEP);
 //!         ret(x);
 //!     }
@@ -260,7 +271,7 @@
 //! }
 //!
 //! fn main() {
-//!     assert_eq!(unsafe { cpu::step(1) }, 4);
+//!     assert_eq!(cpu::step(1), 4);
 //!     assert_eq!(cpu::TWO, 6);
 //! }
 //! ```
@@ -324,16 +335,16 @@
 //! name = "kernite"
 //! ```
 //!
-//! A kernel is `unsafe`: it trusts the pointers it is given, and that nothing else touches the
-//! memory of the module's it names while it runs, as an x86 kernel's safety contract says, by
-//! name, of the statics it and the functions it calls name, whether it calls them by name or
-//! at an address. One that does not compile is a `compile_error!` where the trouble is, beside
-//! a stub of its signature or its launcher, so that its callers are not errors as well. Both
-//! are under the kernel's `cfg`, as a helper's errors and a static's are under theirs, and so
-//! are the function of each of its instances and the module of its constants: what `cfg` leaves
-//! out says nothing. A module of x86 kernels has `LISTINGS` whether its kernels compile or not,
-//! with the listing of each that compiles and `cfg` keeps, and of no other; a module of GPU
-//! kernels alone has none.
+//! An x86 kernel is an `unsafe fn` unless kernite proves it safe, which it does of one that takes numbers, arrays and
+//! slices by reference and reaches no memory but those and its frames: GUIDE.md says which are not, and why. An
+//! `unsafe` kernel trusts the pointers it is given, and that nothing else touches the memory of the module's it names
+//! while it runs, as an x86 kernel's safety contract says, by name, of the statics it and the functions it calls name,
+//! whether it calls them by name or at an address. One that does not compile is a `compile_error!` where the trouble
+//! is, beside a stub of its signature or its launcher, so that its callers are not errors as well. Both are under the
+//! kernel's `cfg`, as a helper's errors and a static's are under theirs, and so are the function of each of its
+//! instances and the module of its constants: what `cfg` leaves out says nothing. A module of x86 kernels has
+//! `LISTINGS` whether its kernels compile or not, with the listing of each that compiles and `cfg` keeps, and of no
+//! other; a module of GPU kernels alone has none.
 //!
 //! kernite refuses a module of kernels whole, at its attribute, for an argument of `#[kernels]` that is not
 //! `consts = path`, such as `consts = 5`, and for consts given in a crate with no dependency named `kernite-macros`. It
@@ -343,14 +354,14 @@
 //! error as well, but for two kinds of use, beside the refusal. A use that the type of the first kind of static does
 //! not fit is Rust's error, as it is for a static that compiles. A use of the second kind that says no type for its
 //! elements has Rust ask for it. The module is given no consts, so a type that reads one is of the second kind. kernite
-//! checks none of the items, so it says nothing it would find in them, such as a kernel that is not `unsafe`, an ABI it
-//! does not know, what a static holds, or what compiling a kernel finds. It compiles nothing of the module, so a
-//! workspace `name` that is not a string is no error at it. No room is counted for the statics, so a crate with no
-//! dependency named `kernite-macros` is not told it needs one for them. What the macro finds in writing the module for
-//! Rust is said, as for any module: the dependency the crate needs, `kernite-cuda` for a GPU item that `cfg` keeps and
-//! `kernite-cpu` for an x86 static or cooperative kernel; a compile-time argument named as a parameter of a launcher or
-//! of a `_blocks` method, `__kernite_grid`, `__kernite_threads` or `__kernite_shared`; and a GPU kernel or a static
-//! named as a cooperative kernel's `_blocks` method.
+//! checks none of the items, so it says nothing it would find in them, such as a kernel that must be `unsafe` and is
+//! not, an ABI it does not know, what a static holds, or what compiling a kernel finds. It compiles nothing of the
+//! module, so a workspace `name` that is not a string is no error at it. No room is counted for the statics, so a crate
+//! with no dependency named `kernite-macros` is not told it needs one for them. What the macro finds in writing the
+//! module for Rust is said, as for any module: the dependency the crate needs, `kernite-cuda` for a GPU item that `cfg`
+//! keeps and `kernite-cpu` for an x86 static or cooperative kernel; a compile-time argument named as a parameter of a
+//! launcher or of a `_blocks` method, `__kernite_grid`, `__kernite_threads` or `__kernite_shared`; and a GPU kernel or
+//! a static named as a cooperative kernel's `_blocks` method.
 //!
 //! A module kernite cannot read is refused whole as well, and stays with every item kernite can read. A `const` or a
 //! `static` it cannot read ends at its `;`, for its value may hold a `{..}`, as in `= { 1 };`. Any other item ends at
@@ -398,8 +409,8 @@ use kernite::lang;
 
 use crate::expand::expand;
 use crate::rust::{
-    MACROS, attrs_len, braced, depends_on, error, flatten, for_rust, grouped, inner_attribute, is_ident, is_path,
-    is_punct, lex, module, named, needs_dependency, parse, path_uses, site, site_at,
+    MACROS, attrs_of, braced, depends_on, error, flatten, for_rust, grouped, inner_attribute, is_ident, is_path,
+    is_punct, lex, module, named, needs_dependency, parse, path_uses, site, site_at, span_of, within,
 };
 
 /// See the crate documentation.
@@ -408,7 +419,7 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr: Vec<TokenTree> = attr.into_iter().collect();
     let tokens: Vec<TokenTree> = item.into_iter().collect();
     let Some((braces, head)) = braced(&tokens) else {
-        let span = tokens.first().map_or_else(Span::call_site, TokenTree::span);
+        let span = span_of(tokens.first());
         return error(
             span,
             "`#[kernels]` goes on a module written in braces, `mod name { .. }`, where the kernels are",
@@ -428,7 +439,7 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
         _ => {
             let message = "`#[kernels]` takes the module of consts its kernels read, as `consts = crate::model::sizes`, \
                            a module `#[kernite_macros::consts]` is on; or nothing";
-            return refused(error(attr[0].span(), message));
+            return refused(error(span_of(attr.first()), message));
         }
     };
     // The macro the consts' module has calls `__kernels!` back by the name `kernite-macros`, which a
@@ -443,8 +454,8 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
     // found in a module of its own, `__consts`, which the docs hide, written at the path's last name, for an
     // error of Rust's in it to point there.
     let body = flatten(braces.stream());
-    let attrs = body.as_chunks::<3>().0.iter().take_while(|attr| inner_attribute(*attr)).count() * 3;
-    let mut inner: TokenStream = body[..attrs].iter().cloned().collect();
+    let attrs = body.as_chunks::<3>().0.iter().take_while(|attr| inner_attribute(*attr));
+    let mut inner: TokenStream = attrs.flatten().cloned().collect();
     let site = site_at(path.last().map_or_else(Span::call_site, |t| t.span().resolved_at(Span::call_site())));
     inner.extend(parse("#[doc(hidden)] mod __consts"));
     inner.extend([TokenTree::Group(Group::new(Delimiter::Brace, path_uses(path)))]);
@@ -463,7 +474,7 @@ pub fn kernels(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
     let tokens: Vec<TokenTree> = item.into_iter().collect();
     let Some((braces, head)) = braced(&tokens) else {
-        let span = tokens.first().map_or_else(Span::call_site, TokenTree::span);
+        let span = span_of(tokens.first());
         return error(
             span,
             "`#[consts]` goes on a module written in braces, `mod name { .. }`, of the consts kernels read",
@@ -483,13 +494,14 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => inner.extend(error(at(e.span), &e.message)),
         Ok(module) => {
             for (item, verdict) in module.items.iter().zip(kernite::consts(&module)) {
-                let tokens = &top[item.tokens.clone()];
-                let named = &tokens[attrs_len(tokens)..];
+                let tokens = within(&top, &item.tokens);
+                let (_, named) = attrs_of(tokens);
+                let start = span_of(named.first().or(tokens.first()));
                 match verdict {
                     ConstItem::Given | ConstItem::Wrong(_) if !named.first().is_some_and(|t| is_ident(t, "pub")) => {
                         let message = "a const of a module of consts is `pub`, for the modules of kernels that take \
                                        it to see";
-                        inner.extend(error(named[0].span(), message));
+                        inner.extend(error(start, message));
                     }
                     ConstItem::Given => given.extend(tokens.iter().cloned()),
                     ConstItem::Wrong(e) => inner.extend(error(at(e.span), &e.message)),
@@ -498,7 +510,7 @@ pub fn consts(attr: TokenStream, item: TokenStream) -> TokenStream {
                     ConstItem::NotAConst => {
                         let message = "a module of consts holds the consts kernels read, as `pub const E: usize = \
                                        16;`, and nothing else";
-                        inner.extend(error(named.first().unwrap_or(&tokens[0]).span(), message));
+                        inner.extend(error(start, message));
                     }
                 }
             }

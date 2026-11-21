@@ -18,14 +18,17 @@
 
 mod backend;
 mod call;
+mod docs;
 mod entry;
 pub mod forms;
 pub mod lang;
 mod naming;
 mod needs;
+mod safety;
 mod statics;
 mod tuning;
 mod ty;
+mod var;
 
 pub use backend::Ptx;
 pub use call::{Prototype, Returns, formal, passable, passed};
@@ -34,3 +37,4 @@ pub use naming::{ident, scope, symbol};
 pub use needs::{GPUS, Needs};
 pub use statics::{Memory, Static, room};
 pub use ty::{Kind, Ty};
+pub use var::Var;

@@ -17,9 +17,10 @@ pub struct Module {
 }
 
 impl Module {
-    /// The place among its items of the one that writes `span`: the last that starts at or before it.
+    /// The place among its items of the one that writes `span`: the last that starts at or before it, and the first for
+    /// a place before them all.
     pub fn item_at(&self, span: Span) -> usize {
-        self.items.iter().rposition(|item| item.span <= span).expect("an item writes each place")
+        self.items.iter().rposition(|item| item.span <= span).unwrap_or(0)
     }
 }
 
@@ -199,12 +200,15 @@ pub struct Ret {
     pub tokens: Range<usize>,
 }
 
-/// A type: a name, an array of variables, `[ymm; N]`, or a name with arguments,
+/// A type: a name, an array of variables, `[ymm; N]`, a reference to an array, `&[f32; N]`, or a name with arguments,
 /// `shared<[f32; 256], 16>`.
 #[derive(Clone, Debug)]
 pub enum Type {
     /// A type by its name, as Rust writes it: `ymm`, `*const f32`, `*const [usize; 3]`.
     Name(String, Span),
+    /// `&[elem; len]` or `&mut [elem; len]`, a reference to an array: whether it is `&mut`, and the array, whose length
+    /// is worked out where the type is read.
+    Ref(bool, Box<Type>, Span),
     /// `[elem; len]`.
     Array(Box<Type>, Expr, Span),
     /// `[elem]`, of a length the program learns when it runs.
@@ -217,7 +221,11 @@ impl Type {
     /// Where it is.
     pub fn span(&self) -> Span {
         match self {
-            Type::Name(_, span) | Type::Array(_, _, span) | Type::Slice(_, span) | Type::Generic(_, _, span) => *span,
+            Type::Name(_, span)
+            | Type::Ref(_, _, span)
+            | Type::Array(_, _, span)
+            | Type::Slice(_, span)
+            | Type::Generic(_, _, span) => *span,
         }
     }
 }

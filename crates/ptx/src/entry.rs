@@ -1,6 +1,6 @@
 //! A kernel or a function written out, and the module of them the driver loads.
 
-use kernite_build::{Assembly, Kept, When};
+use kernite_build::{Assembly, Kept, Requirement, When};
 use kernite_core::{Item, Program};
 
 use crate::call::{Returns, formal, passed};
@@ -18,8 +18,8 @@ pub struct Op(pub String);
 pub struct Param {
     /// The type of its register; the `.param` is of [`Param::passed`].
     pub ty: Ty,
-    /// The variable it is loaded into, by [`kernite_core::VReg::id`].
-    pub reg: usize,
+    /// The register it is loaded into, by its name.
+    pub reg: String,
     /// Whether it is a pointer, to be made a global address.
     pub pointer: bool,
 }
@@ -61,6 +61,9 @@ pub struct Entry {
     /// For a kernel, its tuning directives as PTX writes them, `.maxntid 16, 16`, between its
     /// parameters and its body.
     pub directives: Vec<String>,
+    /// For a kernel with no `unsafe`, what each launch must hold for it to be safe, which the host checks; none
+    /// for an `unsafe` kernel or a function.
+    pub requires: Vec<Requirement>,
 }
 
 impl Entry {
@@ -120,14 +123,14 @@ impl Entry {
         }
         out += "\n";
         for (i, p) in self.params.iter().enumerate() {
-            let reg = &self.regs[p.reg].0;
+            let reg = &p.reg;
             out += &format!("\tld.param.{} %{reg}, [{name}_param_{i}];\n", self.passed(p).name());
             if p.pointer {
                 out += &format!("\tcvta.to.global.u64 %{reg}, %{reg};\n");
             }
         }
         for (reg, slot) in &self.outside {
-            let reg = &self.regs[*reg].0;
+            let Some((reg, _)) = self.regs.get(*reg) else { continue };
             out += &format!("\tld.const.u64 %{reg}, [{slot}];\n\tcvta.to.global.u64 %{reg}, %{reg};\n");
         }
         for item in &self.program.body {
@@ -161,16 +164,16 @@ fn headers(entries: &[Entry]) -> Vec<(When, String)> {
     let mut parts = vec![];
     for ptx in values(|n| n.ptx) {
         for sm in values(|n| n.sm) {
-            let (within, beyond): (Vec<usize>, Vec<usize>) =
-                (0..needs.len()).partition(|&i| needs[i].ptx <= ptx && needs[i].sm <= sm);
+            let (within, beyond): (Vec<_>, Vec<_>) =
+                needs.iter().enumerate().partition(|(_, n)| n.ptx <= ptx && n.sm <= sm);
             let reach = |value: u32, of: fn(&Needs) -> u32| -> Vec<When> {
-                within.iter().filter(|&&i| of(&needs[i]) == value).map(|&i| code(i)).collect()
+                within.iter().filter(|(_, n)| of(n) == value).map(|&(i, _)| code(i)).collect()
             };
             let (by_ptx, by_sm) = (reach(ptx, |n| n.ptx), reach(sm, |n| n.sm));
             if (ptx > 0 && by_ptx.is_empty()) || (sm > 0 && by_sm.is_empty()) {
                 continue;
             }
-            let mut when = vec![When::Not(Box::new(When::Any(beyond.into_iter().map(code).collect())))];
+            let mut when = vec![When::Not(Box::new(When::Any(beyond.into_iter().map(|(i, _)| code(i)).collect())))];
             when.extend((ptx > 0).then_some(When::Any(by_ptx)));
             when.extend((sm > 0).then_some(When::Any(by_sm)));
             let at = Needs { ptx, sm };
@@ -230,10 +233,14 @@ pub fn module(entries: &[Entry], statics: &[Static]) -> Assembly {
     // of those kept that name it.
     for (i, e) in entries.iter().enumerate() {
         for name in &e.calls {
-            let Some(at) = entries.iter().position(|l| l.program.name == *name).filter(|&at| at > i) else { continue };
-            let before = (0..i).filter(|&j| entries[j].calls.contains(name)).map(code).collect();
+            let first = entries.iter().enumerate().find(|(_, l)| l.program.name == *name);
+            let Some((at, callee)) = first.filter(|&(at, _)| at > i) else { continue };
+            let before = (entries.iter().enumerate().take(i))
+                .filter(|(_, e)| e.calls.contains(name))
+                .map(|(j, _)| code(j))
+                .collect();
             let when = When::All(vec![code(i), code(at), When::Not(Box::new(When::Any(before)))]);
-            parts.push((when, "\n".to_string() + &entries[at].declaration()));
+            parts.push((when, "\n".to_string() + &callee.declaration()));
         }
         parts.push((code(i), "\n".to_string() + &e.text()));
     }

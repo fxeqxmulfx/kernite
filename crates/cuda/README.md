@@ -12,7 +12,7 @@ cargo add kernite-macros kernite-cuda
 #[kernite_macros::kernels]
 mod gpu {
     /// `y[i] = a * x[i] + y[i]` for each `i < n`, rounded once.
-    pub unsafe extern "ptx-kernel" fn saxpy(a: f32, x: *const f32, y: *mut f32, n: u32) {
+    pub extern "ptx-kernel" fn saxpy(a: f32, x: *const f32, y: *mut f32, n: u32) {
         let (block, size, thread, i): (u32, u32, u32, u32);
         mov.u32(block, ctaid.x);
         mov.u32(size, ntid.x);
@@ -42,14 +42,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut y = vec![1.0f32; 1000];
     let want: Vec<f32> = x.iter().zip(&y).map(|(x, y)| a.mul_add(*x, *y)).collect();
     let n = x.len() as u32;
-    let (xs, ys) = (cuda.upload(&x)?, cuda.upload(&y)?);
-    // SAFETY: `n` floats behind each pointer, in buffers that last until `read_into` has waited for the kernel.
-    unsafe { kernels.saxpy(kernite_cuda::Grid::new(n.div_ceil(256), 256), a, xs.ptr(), ys.ptr(), n)? };
+    let (xs, mut ys) = (cuda.upload(&x)?, cuda.upload(&y)?);
+    kernels.saxpy(kernite_cuda::Grid::new(n.div_ceil(256), 256), a, &xs, &mut ys, n)?;
     ys.read_into(&mut y)?;
     assert_eq!(y, want);
     Ok(())
 }
 ```
+
+`saxpy` is no `unsafe fn`: kernite proves that each thread reads and writes inside `x` and `y`, and that it writes only
+its own element of `y`, so a launch takes the buffers by reference, `&xs` to read and `&mut ys` to write, and Rust calls
+it with no `unsafe`. What the proof leaves for the launch, that `x` and `y` have `n` floats each, the launch checks
+before the kernel runs, and an error says which does not hold. A kernel that kernite cannot prove safe is an
+`unsafe fn`, and a launch of it takes the pointers, `xs.ptr()`, and says in an `unsafe` block why they are good.
 
 The language, the targets and the guarantees are in
 [GUIDE.md](https://github.com/fxeqxmulfx/kernite/blob/master/GUIDE.md), and the API is in

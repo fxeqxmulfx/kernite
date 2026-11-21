@@ -49,11 +49,10 @@ where
         self.cells.as_ptr().cast::<T>().cast_mut()
     }
 
-    /// The address of its element `i`, for a kernel to be given the part from there on. Panics
+    /// The address of its element `i`, for a kernel to be given the part from there on; `None`
     /// if `i` is past its end.
-    pub fn at(&self, i: usize) -> *mut T {
-        assert!(i <= N, "element {i} of a module's memory of {N}");
-        self.ptr().wrapping_add(i)
+    pub fn at(&self, i: usize) -> Option<*mut T> {
+        (i <= N).then(|| self.ptr().wrapping_add(i))
     }
 
     /// How many elements it has.
@@ -66,9 +65,8 @@ where
         N == 0
     }
 
-    /// Copies `data` to it. Panics if `data` has not as many elements.
-    pub fn write(&self, data: &[T]) {
-        assert_eq!(data.len(), N, "a module's memory of {N} elements written with {}", data.len());
+    /// Copies `data` to it.
+    pub fn write(&self, data: &[T; N]) {
         for (cell, &x) in self.cells().iter().zip(data) {
             T::store(cell, x);
         }
@@ -79,9 +77,8 @@ where
         self.cells().iter().map(T::load).collect()
     }
 
-    /// Copies what it holds to `out`. Panics if `out` has not as many elements.
-    pub fn read_into(&self, out: &mut [T]) {
-        assert_eq!(out.len(), N, "a module's memory of {N} elements read into {}", out.len());
+    /// Copies what it holds to `out`.
+    pub fn read_into(&self, out: &mut [T; N]) {
         for (x, cell) in out.iter_mut().zip(self.cells()) {
             *x = T::load(cell);
         }
@@ -144,10 +141,10 @@ macro_rules! elements {
             /// Memory holding `values` until something writes it, for a static to be.
             pub const fn new(values: [$t; N]) -> Self {
                 let mut cells = [const { $cell::new(0) }; N];
-                let mut i = 0;
-                while i < N {
-                    cells[i] = $cell::new($to(values[i]));
-                    i += 1;
+                let (mut to, mut from): (&mut [$cell], &[$t]) = (&mut cells, &values);
+                while let ([cell, more_cells @ ..], [value, more_values @ ..]) = (to, from) {
+                    *cell = $cell::new($to(*value));
+                    (to, from) = (more_cells, more_values);
                 }
                 Global { align: [], cells: MaybeUninit::new(cells) }
             }
@@ -213,9 +210,10 @@ alignments! {
 }
 
 /// What stands for a static that did not compile, beside the error, when its type or its name is
-/// wrong: each of [`Global`]'s methods, which never runs, and the type of its elements left to the
-/// code that uses it, which says it, or Rust asks for it, beside kernite's error. A static whose
-/// value alone is wrong stands as a [`Global`] of its type, holding zeros.
+/// wrong: each of [`Global`]'s methods, which does nothing, as the code that uses it does not
+/// build, and the type of its elements left to the code that uses it, which says it, or Rust asks
+/// for it, beside kernite's error. A static whose value alone is wrong stands as a [`Global`] of
+/// its type, holding zeros.
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct Stub;
@@ -223,36 +221,30 @@ pub struct Stub;
 #[doc(hidden)]
 impl Stub {
     pub fn ptr<T>(&self) -> *mut T {
-        unreachable!("a static that did not compile")
+        std::ptr::null_mut()
     }
 
-    pub fn at<T>(&self, _: usize) -> *mut T {
-        unreachable!("a static that did not compile")
+    pub fn at<T>(&self, _: usize) -> Option<*mut T> {
+        None
     }
 
     pub fn len(&self) -> usize {
-        unreachable!("a static that did not compile")
+        0
     }
 
     pub fn is_empty(&self) -> bool {
-        unreachable!("a static that did not compile")
+        true
     }
 
-    pub fn write<T>(&self, _: &[T]) {
-        unreachable!("a static that did not compile")
-    }
+    pub fn write<T>(&self, _: &[T]) {}
 
     pub fn read<T>(&self) -> Vec<T> {
-        unreachable!("a static that did not compile")
+        Vec::new()
     }
 
-    pub fn read_into<T>(&self, _: &mut [T]) {
-        unreachable!("a static that did not compile")
-    }
+    pub fn read_into<T>(&self, _: &mut [T]) {}
 
-    pub fn zero(&self) {
-        unreachable!("a static that did not compile")
-    }
+    pub fn zero(&self) {}
 }
 
 /// What only this crate implements.
@@ -266,6 +258,8 @@ mod tests {
 
     use super::Global;
 
+    type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
     static COUNTS: Global<u32, 16, 4> = Global::<u32, 16, 4>::zeroed();
     static WEIGHTS: Global<f32, 8, 32> = Global::<f32, 8, 32>::new([1.0, 0.5, 0.25, 2.0, -1.0, 0.0, 3.0, 1.5]);
     static SIGNED: Global<i8, 3, 1> = Global::<i8, 3, 1>::new([-1, 2, -128]);
@@ -273,15 +267,16 @@ mod tests {
     /// Its elements are where its address is, at the multiple it says, nothing before them and
     /// nothing after but what makes the size a multiple of it.
     #[test]
-    fn memory_is_its_elements_at_its_alignment() {
+    fn memory_is_its_elements_at_its_alignment() -> Result {
         assert_eq!(COUNTS.ptr().addr(), (&raw const COUNTS).addr());
         assert_eq!((align_of::<Global<u32, 16, 4>>(), size_of::<Global<u32, 16, 4>>()), (4, 64));
         assert_eq!((align_of::<Global<f32, 8, 32>>(), size_of::<Global<f32, 8, 32>>()), (32, 32));
         assert_eq!((align_of::<Global<u8, 3, 4096>>(), size_of::<Global<u8, 3, 4096>>()), (4096, 4096));
         assert_eq!((align_of::<Global<u64, 1>>(), size_of::<Global<u64, 1>>()), (8, 8));
         assert!(WEIGHTS.ptr().addr().is_multiple_of(32));
-        assert_eq!(WEIGHTS.at(2).addr() - WEIGHTS.ptr().addr(), 8);
+        assert_eq!(WEIGHTS.at(2).ok_or("at gave None")?.addr() - WEIGHTS.ptr().addr(), 8);
         assert_eq!((COUNTS.len(), COUNTS.is_empty()), (16, false));
+        Ok(())
     }
 
     /// Memory made zeroed holds zeros, as a number of each width reads them, a float as `0.0`.
@@ -315,22 +310,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic = "a module's memory of 16 elements written with 2"]
-    fn a_write_is_of_every_element() {
-        let g: Global<u32, 16> = Global::<u32, 16>::zeroed();
-        g.write(&[1, 2]);
-    }
-
-    #[test]
-    #[should_panic = "a module's memory of 16 elements read into 17"]
-    fn a_read_is_of_every_element() {
-        COUNTS.read_into(&mut [0; 17]);
-    }
-
-    #[test]
-    #[should_panic = "element 17 of a module's memory of 16"]
-    fn an_address_is_in_it_or_one_past_its_end() {
-        assert_eq!(COUNTS.at(16).addr() - COUNTS.ptr().addr(), 64);
-        COUNTS.at(17);
+    fn an_address_is_in_it_or_one_past_its_end() -> Result {
+        assert_eq!(COUNTS.at(16).ok_or("at gave None")?.addr() - COUNTS.ptr().addr(), 64);
+        assert_eq!(COUNTS.at(17), None);
+        Ok(())
     }
 }

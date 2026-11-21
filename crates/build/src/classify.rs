@@ -3,7 +3,7 @@
 //! kernels are cooperative, what is wrong with a helper, and which function an instance's name
 //! names.
 
-use kernite_lang::{Fn, ItemKind, Module, Value};
+use kernite_lang::{Error, Fn, ItemKind, Module, Value};
 
 use crate::present::{Of, Refusal, said};
 
@@ -47,16 +47,25 @@ pub fn abi(f: &Fn) -> Option<Abi> {
 }
 
 /// The ABI `f` names: none for a helper, which names none, and the error, at the ABI, for one kernite knows nothing of.
-pub(crate) fn abi_or_error(f: &Fn) -> Result<Option<Abi>, kernite_lang::Error> {
+pub(crate) fn abi_or_error(f: &Fn) -> Result<Option<Abi>, Error> {
     let Some((name, at)) = &f.abi else { return Ok(None) };
     Abi::of(name).map(Some).ok_or_else(|| said(Refusal::UnknownAbi { abi: name }, *at))
 }
 
-/// Whether `f`, of ABI `abi`, is an `unsafe fn` if it must be: a kernel trusts the pointers it is
-/// given, so it is one. A function the kernels call is called by nothing else, so it promises
-/// Rust nothing, and need not be.
-pub(crate) fn trusted(f: &Fn, abi: Abi) -> bool {
-    abi == Abi::PtxFunc || f.unsafe_fn
+/// Why `f`, of ABI `abi`, must be an `unsafe fn` and is not, if so, as the error at the place it is mended. A
+/// `#[cooperative]` kernel runs all the threads of its grid at once, or all the blocks, which wait for each other and
+/// reach one memory together, and kernite does not prove that safe. Any other kernel is proved where it is compiled,
+/// and its machine says what it cannot prove. A function the kernels call is called by nothing else, so it promises
+/// Rust nothing, and need not be one.
+pub(crate) fn must_be_unsafe(f: &Fn, abi: Abi) -> Option<Error> {
+    if f.unsafe_fn {
+        return None;
+    }
+    match (abi, &f.cooperative) {
+        (Abi::PtxFunc, _) | (Abi::Sysv64 | Abi::PtxKernel, None) => None,
+        (Abi::Sysv64, Some(c)) => Some(said(Refusal::Grid, c.span)),
+        (Abi::PtxKernel, Some(c)) => Some(said(Refusal::Blocks, c.span)),
+    }
 }
 
 /// Whose memory a module's statics are: its kernels'.

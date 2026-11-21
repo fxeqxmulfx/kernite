@@ -1,10 +1,11 @@
 //! Parameters named `_`, in a kernel of every kind: values given and not read, as Rust has it. Each kernel
 //! takes a number named `_`, a number it reads, a pointer named `_`, and the pointer it writes through and
 //! the number it reads after them, so that a kernel that read from the wrong place would give a wrong value.
-//! Rust builds the crate without a word, under `#![deny(warnings)]`, and the tests run each kernel: the x86
+//! Two x86 kernels take a slice named `_` first, which is two registers, before the numbers they read. Rust
+//! builds the crate without a word, under `#![deny(warnings)]`, and the tests run each kernel: the x86
 //! kernels, plain, of compile-time arguments, cooperative, and cooperative of arguments, and the GPU kernels
-//! of the same kinds, on the GPU if there is one. Some parameters and compile-time arguments are named as
-//! the macros name a parameter named `_`, `__kernite_0` among them, which the macros then name otherwise.
+//! of the same kinds, on the GPU if there is one. Some parameters and compile-time arguments are named as the
+//! macros name a parameter named `_`, `__kernite_0` among them, which the macros then name otherwise.
 
 #![deny(warnings)]
 #![allow(non_upper_case_globals)]
@@ -86,6 +87,20 @@ pub mod cpu {
         add(a, __kernite_0);
         mov(qword[p], a);
     }
+
+    /// `a - b`, of a slice named `_`.
+    pub unsafe extern "sysv64" fn sliced(_: &[u64], a: u64, b: u64) -> u64 {
+        sub(a, b);
+        ret(a);
+    }
+
+    /// `a - b + N`, of a slice named `_`.
+    #[instances(10, 20)]
+    pub unsafe extern "sysv64" fn sliced_tiles<const N: u64>(_: &[u64], a: u64, b: u64) -> u64 {
+        sub(a, b);
+        add(a, N);
+        ret(a);
+    }
 }
 
 /// GPU kernels: each writes `a - b` through `p`; those of arguments add `N` as well.
@@ -154,7 +169,7 @@ pub mod gpu {
 }
 
 #[test]
-fn each_x86_kernel_reads_what_comes_after_the_parameters_named_underscore() {
+fn each_x86_kernel_reads_what_comes_after_the_parameters_named_underscore() -> Result<(), Box<dyn std::error::Error>> {
     // What a number named `_` is given, which the kernels would show if they read it, and a pointer
     // named `_`, to memory they must not write.
     let (junk, mut written) = (999u64, 0u64);
@@ -167,11 +182,13 @@ fn each_x86_kernel_reads_what_comes_after_the_parameters_named_underscore() {
         assert_eq!(cpu::tiles::<20>(1, 50, junk, 8), 62);
         assert_eq!(cpu::named_tiles::<10>(100, 1, 50, 200, junk, 8), 52 + 200 + 100);
         assert_eq!(cpu::counted::<20>(1, 50), 70);
+        assert_eq!(cpu::sliced(&[999, 999], 50, 8), 42);
+        assert_eq!(cpu::sliced_tiles::<10>(&[999, 999], 50, 8), 52);
         // That `$launch`, a cooperative kernel, writes `$want` through `written`.
         macro_rules! writes {
             ($want:expr, $launch:expr) => {{
                 *written = 0;
-                $launch.unwrap();
+                $launch?;
                 assert_eq!(*written, $want, stringify!($launch));
             }};
         }
@@ -182,21 +199,22 @@ fn each_x86_kernel_reads_what_comes_after_the_parameters_named_underscore() {
         writes!(70, cpu::counted_together::<20>(grid, 1, 50, written));
         assert_eq!(*junk, 999);
     }
+    Ok(())
 }
 
 #[test]
-fn each_gpu_kernel_reads_what_comes_after_the_parameters_named_underscore() {
-    let Ok(cuda) = kernite_cuda::Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return };
-    let kernels = gpu::Kernels::load(&cuda).unwrap();
-    let (junk, mut written) = (cuda.upload(&[999u32]).unwrap(), cuda.alloc::<u32>(1).unwrap());
+fn each_gpu_kernel_reads_what_comes_after_the_parameters_named_underscore() -> Result<(), Box<dyn std::error::Error>> {
+    let Ok(cuda) = kernite_cuda::Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
+    let kernels = gpu::Kernels::load(&cuda)?;
+    let (junk, mut written) = (cuda.upload(&[999u32])?, cuda.alloc::<u32>(1)?);
     let grid = kernite_cuda::Grid::new(1, 1);
     // That `$launch` writes `$want` through `written`.
     macro_rules! writes {
         ($want:expr, $launch:expr) => {{
-            written.write(&[0]).unwrap();
-            unsafe { $launch.unwrap() };
-            cuda.sync().unwrap();
-            assert_eq!(written.read().unwrap(), [$want], stringify!($launch));
+            written.write(&[0])?;
+            unsafe { $launch? };
+            cuda.sync()?;
+            assert_eq!(written.read()?, [$want], stringify!($launch));
         }};
     }
     writes!(42, kernels.plain(grid, 1, 50, junk.ptr(), written.ptr(), 8));
@@ -211,5 +229,6 @@ fn each_gpu_kernel_reads_what_comes_after_the_parameters_named_underscore() {
     } else {
         eprintln!("{} launches no kernel cooperatively: skipped", cuda.name());
     }
-    assert_eq!(junk.read().unwrap(), [999]);
+    assert_eq!(junk.read()?, [999]);
+    Ok(())
 }

@@ -33,7 +33,7 @@ pub mod an_abi_kernite_does_not_know {
 
 #[kernite_macros::kernels]
 pub mod a_kernel_that_is_not_unsafe {
-    pub extern "sysv64" fn f() {}
+    pub extern "sysv64" fn f(p: *const u32) {}
 }
 
 #[kernite_macros::consts]

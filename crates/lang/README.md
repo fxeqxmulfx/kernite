@@ -24,12 +24,12 @@ fn names(src: &str) -> Result<Vec<String>, Error> {
     Ok(names)
 }
 
-fn main() -> Result<(), Error> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let src = r#"
         const BLOCK: u32 = 128;
 
         #[instances(BLOCK, BLOCK * 2)]
-        pub unsafe extern "ptx-kernel" fn store<const N: u32>(x: *mut u32) {
+        pub extern "ptx-kernel" fn store<const N: u32>(x: *mut u32) {
             st.global.u32([x], N);
         }
     "#;
@@ -37,7 +37,8 @@ fn main() -> Result<(), Error> {
 
     // An error is at its `line:column`.
     let wrong = src.replace("BLOCK * 2", "SIZE * 2");
-    assert_eq!(names(&wrong).unwrap_err().at(&wrong), "4:28: `SIZE` is not defined");
+    let error = names(&wrong).err().ok_or("`SIZE` was taken, though it is not defined")?;
+    assert_eq!(error.at(&wrong), "4:28: `SIZE` is not defined");
     Ok(())
 }
 ```

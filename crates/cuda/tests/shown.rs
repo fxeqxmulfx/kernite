@@ -9,6 +9,8 @@ use std::{env, fs};
 
 use kernite_cuda::Cuda;
 
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+
 /// What names the process that runs the test again, to say what it makes of its GPUs.
 const CHILD: &str = "KERNITE_CUDA_CHILD";
 
@@ -17,11 +19,11 @@ const NAME: &str = "count_and_on_say_what_the_driver_shows_the_program";
 
 /// What a process says of its GPUs: the count, and what taking the GPU after the last is, or the
 /// first, if there is none.
-fn says() -> String {
+fn says() -> Result<String> {
     let count = Cuda::count();
     let next = count.as_ref().copied().unwrap_or_default();
     let count = count.map_or_else(|e| e.to_string(), |count| count.to_string());
-    format!("count: {count}\non({next}): {}", Cuda::on(next).err().unwrap())
+    Ok(format!("count: {count}\non({next}): {}", Cuda::on(next).err().ok_or("err gave None")?))
 }
 
 /// Four cases, each in a process of its own.
@@ -35,38 +37,45 @@ fn says() -> String {
 /// - A `libcuda.so.1` that is no library, where the loader looks first: there is no driver, which
 ///   is an error for both.
 #[test]
-fn count_and_on_say_what_the_driver_shows_the_program() {
+fn count_and_on_say_what_the_driver_shows_the_program() -> Result {
     if env::var_os(CHILD).is_some() {
-        return println!("{}", says());
+        println!("{}", says()?);
+        return Ok(());
     }
     let count = match Cuda::count() {
         Ok(count @ 1..) => count,
-        Ok(0) => return eprintln!("no GPU: skipped, the driver shows none"),
-        Err(e) => return eprintln!("no GPU: skipped. {e}"),
+        Ok(0) => {
+            eprintln!("no GPU: skipped, the driver shows none");
+            return Ok(());
+        }
+        Err(e) => {
+            eprintln!("no GPU: skipped. {e}");
+            return Ok(());
+        }
     };
     let none = "cuInit: CUDA_ERROR_NO_DEVICE (100): no CUDA-capable device is detected";
     let past = "cuDeviceGet: CUDA_ERROR_INVALID_DEVICE (101): invalid device ordinal: the driver shows 1 GPU, \
                 and none is numbered 1";
     let refused = "cuInit: CUDA_ERROR_INVALID_DEVICE (101): invalid device ordinal";
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-driver");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("libcuda.so.1"), "").unwrap();
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("libcuda.so.1"), "")?;
     let absent = format!("dlopen: no CUDA driver: {}/libcuda.so.1: file too short", dir.display());
     let last = (count - 1).to_string();
     let cases = [
         ("CUDA_VISIBLE_DEVICES", "", format!("count: 0\non(0): {none}")),
         ("CUDA_VISIBLE_DEVICES", last.as_str(), format!("count: 1\non(1): {past}")),
         ("CUDA_VISIBLE_DEVICES", "0,0", format!("count: {refused}\non(0): {refused}")),
-        ("LD_LIBRARY_PATH", dir.to_str().unwrap(), format!("count: {absent}\non(0): {absent}")),
+        ("LD_LIBRARY_PATH", dir.to_str().ok_or("to_str gave None")?, format!("count: {absent}\non(0): {absent}")),
     ];
     for (variable, value, want) in cases {
-        let out = Command::new(env::current_exe().unwrap())
+        let out = Command::new(env::current_exe()?)
             .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
             .env(CHILD, "1")
             .env(variable, value)
-            .output()
-            .unwrap();
+            .output()?;
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         assert!(out.status.success() && text.contains(&want), "{variable}={value:?} should say\n{want}\n{text}");
     }
+    Ok(())
 }

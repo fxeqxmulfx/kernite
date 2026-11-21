@@ -173,7 +173,7 @@ macro_rules! x86_kernels_run {
             assert_eq!($kernels::sum64(1.5, 2.25), 3.75);
             assert_eq!($kernels::after(bytes.as_ptr()), bytes.as_ptr().add(1));
             assert_eq!(($kernels::plus::<2>(10), $kernels::plus::<3>(10)), (12, 13));
-            $kernels::together(kernite_cpu::Grid::new(1), &mut word).unwrap();
+            $kernels::together(kernite_cpu::Grid::new(1), &mut word)?;
             assert_eq!($kernels::doubled(21), 42);
         }
         assert_eq!(word, 1);
@@ -194,35 +194,37 @@ mod tests {
     }
 
     #[test]
-    fn a_kernel_written_plain_runs() {
+    fn a_kernel_written_plain_runs() -> Result<(), Box<dyn std::error::Error>> {
         x86_kernels_run!(plain);
+        Ok(())
     }
 
     #[test]
-    fn a_kernel_written_raw_runs() {
+    fn a_kernel_written_raw_runs() -> Result<(), Box<dyn std::error::Error>> {
         x86_kernels_run!(raw);
+        Ok(())
     }
 
     #[test]
-    fn a_gpu_kernel_written_raw_runs() {
-        let Ok(cuda) = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")) else { return };
-        let kernels = gpu::Kernels::load(&cuda).unwrap();
-        let (word, float, longs) =
-            (cuda.alloc::<u32>(1).unwrap(), cuda.alloc::<f32>(1).unwrap(), cuda.alloc::<u64>(2).unwrap());
+    fn a_gpu_kernel_written_raw_runs() -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(cuda) = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
+        let kernels = gpu::Kernels::load(&cuda)?;
+        let (word, float, longs) = (cuda.alloc::<u32>(1)?, cuda.alloc::<f32>(1)?, cuda.alloc::<u64>(2)?);
         let grid = Grid::new(1, 1);
         // SAFETY: each kernel writes one element to a buffer that has it, or adds to the first of the counts,
         // and every launch has ended when its result is read.
         unsafe {
-            kernels.total(grid, word.ptr(), 2, 3).unwrap();
-            kernels.doubled(grid, float.ptr(), 1.25).unwrap();
-            kernels.offset::<1>(grid, longs.ptr(), 10).unwrap();
-            kernels.offset::<2>(grid, longs.at(1), 20).unwrap();
-            kernels.together(grid, 5).unwrap();
+            kernels.total(grid, word.ptr(), 2, 3)?;
+            kernels.doubled(grid, float.ptr(), 1.25)?;
+            kernels.offset::<1>(grid, longs.ptr(), 10)?;
+            kernels.offset::<2>(grid, longs.at(1).ok_or("`longs` has no element 1")?, 20)?;
+            kernels.together(grid, 5)?;
         }
-        cuda.sync().unwrap();
-        assert_eq!(word.read().unwrap(), [5]);
-        assert_eq!(float.read().unwrap(), [2.5]);
-        assert_eq!(longs.read().unwrap(), [11, 22]);
-        assert_eq!(kernels.COUNTS().read().unwrap(), [5, 0, 0, 0]);
+        cuda.sync()?;
+        assert_eq!(word.read()?, [5]);
+        assert_eq!(float.read()?, [2.5]);
+        assert_eq!(longs.read()?, [11, 22]);
+        assert_eq!(kernels.COUNTS()?.read()?, [5, 0, 0, 0]);
+        Ok(())
     }
 }

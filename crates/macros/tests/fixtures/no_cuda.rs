@@ -52,7 +52,7 @@ pub fn on_the_gpu<C, G: Copy, P: Copy, H>(cuda: &C, grid: G, x: P, a: H) -> Resu
         kernels.together(grid, x)?;
         more::Kernels::load(cuda)?.nothing(grid)?;
     }
-    kernels.COUNTS().write(&[0; 4])?;
+    kernels.COUNTS()?.write(&[0; 4])?;
     let _ = (gpu::PTX, more::PTX);
     Ok(kernels.together_blocks(32, 0)? + unsafe { cpu::step(1) } as u32)
 }

@@ -162,8 +162,8 @@ pub(crate) fn primitive(trees: &[Tree]) -> Option<(&'static str, usize)> {
     let root = root(trees)?;
     let len = root + 4;
     let written = text(trees.get(root..len)?);
-    match written.split("::").map(unraw).collect::<Vec<_>>()[..] {
-        ["primitive", name] => PRIMITIVES.into_iter().find(|p| *p == name).map(|p| (p, len)),
+    match written.split("::").map(unraw).collect::<Vec<_>>().as_slice() {
+        ["primitive", name] => PRIMITIVES.into_iter().find(|p| p == name).map(|p| (p, len)),
         _ => None,
     }
 }
@@ -178,33 +178,38 @@ pub(crate) fn primitive(trees: &[Tree]) -> Option<(&'static str, usize)> {
 /// taken for the keyword. So it is for the 48 keywords Rust lets be written raw, the strict and the reserved ones.
 /// A weak keyword, `union` say, is a name as it is, and loses its `r#` as any name does.
 pub fn read_type(trees: &[Tree]) -> String {
-    fn plain(trees: &mut Vec<Tree>) {
+    fn plain(trees: &[Tree]) -> Vec<Tree> {
+        let mut out = Vec::with_capacity(trees.len());
         let mut at = 0;
-        while at < trees.len() {
+        while let Some(rest @ [first, ..]) = trees.get(at..) {
             // A path is read where it begins, and a lifetime's name begins none.
-            let len = if lifetime(trees, at) { 0 } else { path(&trees[at..]) };
-            let read = match primitive(&trees[at..at + len]) {
+            let len = if lifetime(trees, at) { 0 } else { path(rest) };
+            let read = match rest.get(..len).and_then(primitive) {
                 Some((name, n)) if n == len => {
-                    trees[at] =
-                        Tree::Ident { name: name.to_string(), space: trees[at].space(), span: trees[at].span() };
-                    trees.drain(at + 1..at + n);
-                    1
+                    out.push(Tree::Ident { name: name.to_string(), space: first.space(), span: first.span() });
+                    len
                 }
-                _ => len.max(1),
+                _ => {
+                    let read = len.max(1);
+                    for tree in rest.iter().take(read) {
+                        let mut tree = tree.clone();
+                        match &mut tree {
+                            Tree::Ident { name, .. } if !KEYWORDS.contains(&unraw(name)) => {
+                                *name = unraw(name).to_string();
+                            }
+                            Tree::Group { trees, .. } => *trees = plain(trees),
+                            _ => {}
+                        }
+                        out.push(tree);
+                    }
+                    read
+                }
             };
-            for tree in &mut trees[at..at + read] {
-                match tree {
-                    Tree::Ident { name, .. } if !KEYWORDS.contains(&unraw(name)) => *name = unraw(name).to_string(),
-                    Tree::Group { trees, .. } => plain(trees),
-                    _ => {}
-                }
-            }
             at += read;
         }
+        out
     }
-    let mut trees = trees.to_vec();
-    plain(&mut trees);
-    text(&trees)
+    text(&plain(trees))
 }
 
 /// `trees` as Rust writes a type in a message.
@@ -238,8 +243,8 @@ fn written(trees: &[Tree], source: bool) -> String {
             // The length of an array is all that follows its `;`.
             Tree::Punct { ch: ';', .. } if !source => {
                 out.push(';');
-                if i + 1 < trees.len() {
-                    out += &format!(" {}", written(&trees[i + 1..], true));
+                if let Some(rest @ [_, ..]) = trees.get(i + 1..) {
+                    out += &format!(" {}", written(rest, true));
                 }
                 break;
             }
@@ -267,7 +272,7 @@ fn written(trees: &[Tree], source: bool) -> String {
 /// trait object with a `+` that is no argument's, `dyn A + B`, and it stands where Rust reads a type of no bounds:
 /// after a `&`, the name of its lifetime or its `mut`, a pointer's `const` or `mut`, or an arrow, `->`.
 fn parenthesized(trees: &[Tree], i: usize, inside: &[Tree]) -> bool {
-    let behind = match i.checked_sub(1).map(|j| (j, &trees[j])) {
+    let behind = match i.checked_sub(1).and_then(|j| Some((j, trees.get(j)?))) {
         Some((_, Tree::Punct { ch: '&', .. })) => true,
         Some((j, Tree::Punct { ch: '>', .. })) => arrow_head(trees, j),
         Some((j, Tree::Ident { name, .. })) => matches!(name.as_str(), "const" | "mut") || lifetime(trees, j),
@@ -276,10 +281,15 @@ fn parenthesized(trees: &[Tree], i: usize, inside: &[Tree]) -> bool {
     behind && outside(inside, '+').next().is_some()
 }
 
+/// The tree before `trees[i]`, if there is one.
+fn before(trees: &[Tree], i: usize) -> Option<&Tree> {
+    i.checked_sub(1).and_then(|j| trees.get(j))
+}
+
 /// Whether `trees[i]` is the arguments of a macro, `(a + b)` in `m!(a + b)`: a group after a `!`, which in
 /// a type is the macro's and no other's.
 fn macro_args(trees: &[Tree], i: usize) -> bool {
-    i > 0 && matches!(trees[i - 1], Tree::Punct { ch: '!', .. })
+    matches!(before(trees, i), Some(Tree::Punct { ch: '!', .. }))
 }
 
 /// Whether `trees[i]` is the `>` of an arrow, `->`, as in `fn(u8) -> u8`: one operator, whose `>` closes
@@ -294,11 +304,10 @@ fn arrow_head(trees: &[Tree], i: usize) -> bool {
 /// Whether `trees[i]` is the `>` that ends a binder, as in `for<'a> fn(&'a u8)`: the nearest angle
 /// bracket before it is a `<`, and a `for` stands before that.
 fn binder_end(trees: &[Tree], i: usize) -> bool {
-    matches!(trees[i], Tree::Punct { ch: '>', .. })
-        && trees[..i].iter().rposition(|t| matches!(t, Tree::Punct { ch: '<' | '>', .. })).is_some_and(|open| {
-            matches!(trees[open], Tree::Punct { ch: '<', .. })
-                && matches!(trees[..open].last(), Some(Tree::Ident { name, .. }) if name == "for")
-        })
+    let (Some(Tree::Punct { ch: '>', .. }), Some(trees)) = (trees.get(i), trees.get(..i)) else { return false };
+    let mut back = trees.iter().rev().skip_while(|t| !matches!(t, Tree::Punct { ch: '<' | '>', .. }));
+    matches!(back.next(), Some(Tree::Punct { ch: '<', .. }))
+        && matches!(back.next(), Some(Tree::Ident { name, .. }) if name == "for")
 }
 
 /// Whether `trees[i]` and the tree after it are a `::`: two colons with no space between them.
@@ -308,12 +317,12 @@ fn colons(trees: &[Tree], i: usize) -> bool {
 
 /// Whether `trees[j]` is a `:` that is not half of a `::`, as in `fn(x: u8)` and `Item: Copy`.
 fn colon(trees: &[Tree], j: usize) -> bool {
-    matches!(trees[j], Tree::Punct { ch: ':', .. }) && !colons(trees, j) && !(j > 0 && colons(trees, j - 1))
+    matches!(trees.get(j), Some(Tree::Punct { ch: ':', .. })) && !colons(trees, j) && !(j > 0 && colons(trees, j - 1))
 }
 
 /// Whether `trees[j]` is the name of a lifetime, as in `&'a [u8]`: a word after a `'`.
 fn lifetime(trees: &[Tree], j: usize) -> bool {
-    matches!(trees[j], Tree::Ident { .. }) && j > 0 && matches!(trees[j - 1], Tree::Punct { ch: '\'', .. })
+    matches!(trees.get(j), Some(Tree::Ident { .. })) && matches!(before(trees, j), Some(Tree::Punct { ch: '\'', .. }))
 }
 
 /// Whether `name` is a keyword that a type or a bound follows, as in `*const u8`, `&mut [u8]`, `dyn 'a + A`
@@ -339,10 +348,10 @@ fn spaced(trees: &[Tree], i: usize) -> bool {
     // the arguments of a name, as in `Item<X>=u8`.
     let apart = |j: usize| {
         let next = |chars: &str| matches!(trees.get(j + 1), Some(Tree::Punct { ch, .. }) if chars.contains(*ch));
-        match trees[j] {
-            Tree::Punct { ch: '+', .. } => !next("="),
-            Tree::Punct { ch: '=', .. } => {
-                !next("=>") && !matches!(trees[..j].last(), Some(Tree::Punct { ch, .. }) if *ch != '>')
+        match trees.get(j) {
+            Some(Tree::Punct { ch: '+', .. }) => !next("="),
+            Some(Tree::Punct { ch: '=', .. }) => {
+                !next("=>") && !matches!(before(trees, j), Some(Tree::Punct { ch, .. }) if *ch != '>')
             }
             _ => false,
         }
@@ -353,16 +362,16 @@ fn spaced(trees: &[Tree], i: usize) -> bool {
         || colon(trees, i - 1)
         || apart(i - 1)
         || apart(i)
-        || match (&trees[i - 1], &trees[i]) {
-            (Tree::Ident { name, .. }, _) if keyword(name) => true,
-            (_, Tree::Ident { name, .. }) if name == "as" => true,
-            (Tree::Ident { .. }, after) if lifetime(trees, i - 1) => {
-                !matches!(after, Tree::Punct { ch: ',' | '>', .. }) && !colon(trees, i)
+        || match (before(trees, i), trees.get(i)) {
+            (Some(Tree::Ident { name, .. }), _) if keyword(name) => true,
+            (_, Some(Tree::Ident { name, .. })) if name == "as" => true,
+            (Some(Tree::Ident { .. }), after) if lifetime(trees, i - 1) => {
+                !matches!(after, Some(Tree::Punct { ch: ',' | '>', .. })) && !colon(trees, i)
             }
-            (Tree::Punct { ch, .. }, after) => {
-                *ch == ',' || *ch == '!' && matches!(after, Tree::Group { delim: Delim::Brace, .. })
+            (Some(Tree::Punct { ch, .. }), after) => {
+                *ch == ',' || *ch == '!' && matches!(after, Some(Tree::Group { delim: Delim::Brace, .. }))
             }
-            (_, Tree::Punct { .. } | Tree::Group { .. }) => false,
+            (_, Some(Tree::Punct { .. } | Tree::Group { .. })) => false,
             _ => true,
         }
 }
@@ -386,6 +395,33 @@ pub fn pointer(ty: &str) -> Result<bool, String> {
     Ok(true)
 }
 
+/// The elements `ty`, a type as [`read_type`] gives it, is a reference to, if it is one to an array, `&[f32; 8]`, or to
+/// a slice, `&mut [f32]`: whether the reference is `&mut`, then the type of the elements and, for an array, their
+/// count, as written. A reference to anything else is none, and so is a reference with a lifetime, `&'a [f32; 8]`.
+pub fn array_ref(ty: &str) -> Option<(bool, &str, Option<&str>)> {
+    let (write, to) = match ty.strip_prefix("&mut ") {
+        Some(to) => (true, to),
+        None => (false, ty.strip_prefix('&')?),
+    };
+    let inside = to.strip_prefix('[')?.strip_suffix(']')?;
+    // The `;` of the array itself is outside every bracket of its elements' type, `[[u8; 4]; 8]`, and a slice of
+    // arrays, `[[u8; 4]]`, has none outside.
+    let mut depth = 0_u32;
+    let semicolon = inside.char_indices().find_map(|(at, c)| {
+        match c {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        (c == ';' && depth == 0).then_some(at)
+    });
+    let split = semicolon.and_then(|at| inside.split_at_checked(at));
+    Some(match split.and_then(|(elem, rest)| Some((elem, rest.strip_prefix("; ")?))) {
+        Some((elem, len)) => (write, elem, Some(len)),
+        None => (write, inside, None),
+    })
+}
+
 /// Whether the type `ty` has no size: a slice, a `str` or a `dyn`, or a tuple that ends in one.
 fn no_size(ty: &[Tree]) -> bool {
     match ty {
@@ -407,7 +443,7 @@ fn last_field(mut fields: &[Tree]) -> &[Tree] {
     if let [rest @ .., Tree::Punct { ch: ',', .. }] = fields {
         fields = rest;
     }
-    &fields[outside(fields, ',').last().map_or(0, |i| i + 1)..]
+    fields.get(outside(fields, ',').last().map_or(0, |i| i + 1)..).unwrap_or_default()
 }
 
 /// The places in `trees` of each `sep` that is the type's own, and not among the arguments of a type in it, as the `,`
@@ -455,7 +491,11 @@ fn is_doc(rest: &str) -> bool {
 /// An error at the first CR before `end` in `text` that no LF follows, as its offset in `text` and what is wrong, where
 /// `what` allows none.
 fn lone_cr(text: &str, end: usize, what: &str) -> Result<(), (usize, String)> {
-    match text.match_indices('\r').take_while(|&(i, _)| i < end).find(|&(i, _)| !text[i + 1..].starts_with('\n')) {
+    match text
+        .match_indices('\r')
+        .take_while(|&(i, _)| i < end)
+        .find(|&(i, _)| text.as_bytes().get(i + 1) != Some(&b'\n'))
+    {
         Some((i, _)) => Err((i, format!("a CR on its own is not allowed in {what}"))),
         None => Ok(()),
     }
@@ -472,11 +512,12 @@ pub(crate) fn unescape(body: &str) -> Result<String, (usize, String)> {
         let (from, at) = (body.len() - rest.len(), rest.find('\\').unwrap_or(rest.len()));
         // Up to the character after the `\`: past that, a `\` that ends a line may leave out a CR on its own.
         lone_cr(rest, at + 2, "a string, as in Rust: write `\\r`").map_err(|(cr, message)| (from + cr, message))?;
-        out.push_str(&rest[..at].replace("\r\n", "\n"));
-        let Some(escape) = rest[at..].strip_prefix('\\') else { return Ok(out) };
+        let (plain, after) = rest.split_at_checked(at).unwrap_or((rest, ""));
+        out.push_str(&plain.replace("\r\n", "\n"));
+        let Some(escape) = after.strip_prefix('\\') else { return Ok(out) };
         let (c, len) = escape_of(escape).ok_or_else(|| (from + at, refused(escape)))?;
         out.extend(c);
-        rest = &escape[len..];
+        rest = escape.get(len..).unwrap_or_default();
     }
 }
 
@@ -497,7 +538,7 @@ fn escape_of(rest: &str) -> Option<(Option<char>, usize)> {
             Some((Some(char::from(byte)), 3))
         }
         'u' => {
-            let (digits, _) = rest[1..].strip_prefix('{')?.split_once('}')?;
+            let (digits, _) = rest.strip_prefix("u{")?.split_once('}')?;
             let hex = digits.replace('_', "");
             if digits.starts_with('_') || hex.len() > 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return None;
@@ -551,13 +592,23 @@ struct Lexer<'a> {
     pos: usize,
 }
 
-impl Lexer<'_> {
+impl<'a> Lexer<'a> {
+    /// The source from here on.
+    fn rest(&self) -> &'a str {
+        self.src.get(self.pos..).unwrap_or_default()
+    }
+
+    /// The source from `from` to here.
+    fn since(&self, from: usize) -> &'a str {
+        self.src.get(from..self.pos).unwrap_or_default()
+    }
+
     fn peek(&self) -> Option<char> {
-        self.src[self.pos..].chars().next()
+        self.rest().chars().next()
     }
 
     fn peek2(&self) -> Option<char> {
-        self.src[self.pos..].chars().nth(1)
+        self.rest().chars().nth(1)
     }
 
     fn span(&self) -> Span {
@@ -610,14 +661,14 @@ impl Lexer<'_> {
                     return Ok((out, space));
                 }
                 '"' => out.push(Tree::Lit { text: self.string()?, space, span }),
-                'r' if self.src[self.pos + 1..].trim_start_matches('#').starts_with('"') => {
+                'r' if self.rest().get(1..).is_some_and(|after| after.trim_start_matches('#').starts_with('"')) => {
                     out.push(Tree::Lit { text: self.raw_string()?, space, span });
                 }
                 '\'' => out.push(Tree::Lit { text: self.char()?, space, span }),
                 c if c.is_ascii_digit() => out.push(Tree::Lit { text: self.number(), space, span }),
                 c if starts_name(c) => {
                     let start = self.pos;
-                    let raw = self.src[start..].starts_with("r#");
+                    let raw = self.rest().starts_with("r#");
                     if raw {
                         self.pos += 2;
                     }
@@ -626,15 +677,15 @@ impl Lexer<'_> {
                         self.pos += c.len_utf8();
                     }
                     if raw {
-                        let word = &self.src[from..self.pos];
+                        let word = self.since(from);
                         if !word.starts_with(starts_name) {
                             return Err(Error { span, message: "`r#` comes before a name, as in `r#u64`".into() });
                         }
-                        if never_raw(&self.src[start..self.pos]) {
+                        if never_raw(self.since(start)) {
                             return Err(Error { span, message: format!("`{word}` cannot be written raw") });
                         }
                     }
-                    out.push(Tree::Ident { name: unicode::nfc(&self.src[start..self.pos]), space, span });
+                    out.push(Tree::Ident { name: unicode::nfc(self.since(start)), space, span });
                 }
                 c if PUNCT.contains(c) => {
                     self.pos += 1;
@@ -647,7 +698,7 @@ impl Lexer<'_> {
 
     fn skip_space(&mut self) -> Result<(), Error> {
         loop {
-            let rest = &self.src[self.pos..];
+            let rest = self.rest();
             let (from, doc) = (self.pos, is_doc(rest));
             if let Some(c) = rest.chars().next()
                 && is_space(c)
@@ -659,7 +710,7 @@ impl Lexer<'_> {
                 let start = self.span();
                 let mut depth = 0;
                 loop {
-                    let rest = &self.src[self.pos..];
+                    let rest = self.rest();
                     if rest.starts_with("/*") {
                         depth += 1;
                         self.pos += 2;
@@ -686,7 +737,7 @@ impl Lexer<'_> {
 
     /// An error at the first CR that no LF follows, from `from` to the lexer's place, where `what` allows none.
     fn no_lone_cr(&self, from: usize, what: &str) -> Result<(), Error> {
-        lone_cr(&self.src[from..], self.pos - from, what)
+        lone_cr(self.src.get(from..).unwrap_or_default(), self.pos - from, what)
             .map_err(|(cr, message)| Error { span: Span((from + cr) as u32), message })
     }
 
@@ -704,10 +755,10 @@ impl Lexer<'_> {
                 }
                 Some('"') => {
                     self.pos += 1;
-                    let body = start + 1;
-                    unescape(&self.src[body..self.pos - 1])
-                        .map_err(|(at, message)| Error { span: Span((body + at) as u32), message })?;
-                    return Ok(self.src[start..self.pos].to_string());
+                    let quoted = self.since(start);
+                    let body = quoted.strip_prefix('"').and_then(|q| q.strip_suffix('"')).unwrap_or_default();
+                    unescape(body).map_err(|(at, message)| Error { span: Span((start + 1 + at) as u32), message })?;
+                    return Ok(quoted.to_string());
                 }
                 Some(c) => self.pos += c.len_utf8(),
             }
@@ -718,18 +769,18 @@ impl Lexer<'_> {
     /// after it as the `r` has, 255 at most, as in Rust.
     fn raw_string(&mut self) -> Result<String, Error> {
         let (start, span) = (self.pos, self.span());
-        let rest = &self.src[start + 1..];
+        let rest = self.src.get(start + 1..).unwrap_or_default();
         let hashes = rest.len() - rest.trim_start_matches('#').len();
         if hashes > 255 {
             return Err(Error { span, message: "a raw string has 255 `#` at most, as in Rust".into() });
         }
         let (close, body) = (format!("\"{}", "#".repeat(hashes)), start + 1 + hashes + 1);
-        let Some(len) = self.src[body..].find(&close) else {
+        let Some(len) = self.src.get(body..).and_then(|b| b.find(&close)) else {
             return Err(Error { span, message: "this string is never closed".into() });
         };
         self.pos = body + len + close.len();
         self.no_lone_cr(start, "a raw string, as in Rust")?;
-        Ok(self.src[start..self.pos].to_string())
+        Ok(self.since(start).to_string())
     }
 
     fn char(&mut self) -> Result<String, Error> {
@@ -746,7 +797,7 @@ impl Lexer<'_> {
             return Err(Error { span, message: "lifetimes and labels have no place in a kernel".into() });
         }
         self.pos += 1;
-        Ok(self.src[start..self.pos].to_string())
+        Ok(self.since(start).to_string())
     }
 
     /// A number as Rust writes it: `16`, `0x3f`, `1_000`, `0.5`, `1e-5`, `8u8`, `2.0f32`. A
@@ -755,13 +806,13 @@ impl Lexer<'_> {
     fn number(&mut self) -> String {
         let start = self.pos;
         let word = |c: char| c == '_' || c.is_ascii_alphanumeric();
-        let radix = ["0x", "0o", "0b"].iter().any(|p| self.src[start..].starts_with(p));
+        let radix = ["0x", "0o", "0b"].iter().any(|p| self.rest().starts_with(p));
         if radix {
             self.pos += 2;
             while self.peek().is_some_and(word) {
                 self.pos += 1;
             }
-            return self.src[start..self.pos].to_string();
+            return self.since(start).to_string();
         }
         while self.peek().is_some_and(|c| c == '_' || c.is_ascii_digit()) {
             self.pos += 1;
@@ -772,8 +823,7 @@ impl Lexer<'_> {
                 self.pos += 1;
             }
         }
-        if matches!(self.peek(), Some('e' | 'E')) {
-            let rest = &self.src[self.pos + 1..];
+        if let Some(rest) = self.rest().strip_prefix(['e', 'E']) {
             let digits = rest.trim_prefix(['+', '-']);
             if digits.starts_with(|c: char| c.is_ascii_digit()) {
                 self.pos += 1 + (rest.len() - digits.len());
@@ -785,6 +835,6 @@ impl Lexer<'_> {
         while self.peek().is_some_and(word) {
             self.pos += 1;
         }
-        self.src[start..self.pos].to_string()
+        self.since(start).to_string()
     }
 }

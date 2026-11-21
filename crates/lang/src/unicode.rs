@@ -26,7 +26,7 @@ pub(crate) fn is_xid_continue(c: char) -> bool {
 
 /// The combining class of `c`, which orders the marks of a character: 0 for a character that is no mark.
 fn class(c: char) -> u8 {
-    COMBINING.binary_search_by_key(&c, |&(mark, _)| mark).map_or(0, |at| COMBINING[at].1)
+    COMBINING.binary_search_by_key(&c, |&(mark, _)| mark).ok().and_then(|at| COMBINING.get(at)).map_or(0, |m| m.1)
 }
 
 // The Hangul syllables are not in the tables: each is a leading consonant, a vowel and perhaps a trailing consonant,
@@ -51,7 +51,11 @@ fn compose(a: char, b: char) -> Option<char> {
     {
         char::from_u32(first + second - TRAILING)
     } else {
-        COMPOSITION.binary_search_by_key(&(a, b), |&(pair, _)| pair).ok().map(|at| COMPOSITION[at].1)
+        COMPOSITION
+            .binary_search_by_key(&(a, b), |&(pair, _)| pair)
+            .ok()
+            .and_then(|at| COMPOSITION.get(at))
+            .map(|c| c.1)
     }
 }
 
@@ -62,9 +66,9 @@ pub fn nfc(name: &str) -> String {
     // taking it apart and putting it together again would give the same.
     let mut chars = Vec::new();
     for c in name.chars() {
-        match DECOMPOSITION.binary_search_by_key(&c, |&(whole, _)| whole) {
-            Ok(at) => chars.extend(DECOMPOSITION[at].1.chars()),
-            Err(_) => chars.push(c),
+        match DECOMPOSITION.binary_search_by_key(&c, |&(whole, _)| whole).ok().and_then(|at| DECOMPOSITION.get(at)) {
+            Some((_, parts)) => chars.extend(parts.chars()),
+            None => chars.push(c),
         }
     }
     // The marks after a character go in the order of their classes, those of one class as they came.
@@ -79,9 +83,10 @@ pub fn nfc(name: &str) -> String {
         let class = class(c);
         if let Some(at) = starter
             && (out.len() == at + 1 || last < class)
-            && let Some(whole) = compose(out[at], c)
+            && let Some(slot) = out.get_mut(at)
+            && let Some(whole) = compose(*slot, c)
         {
-            out[at] = whole;
+            *slot = whole;
             continue;
         }
         if class == 0 {

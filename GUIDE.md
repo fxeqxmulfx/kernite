@@ -12,7 +12,7 @@ called by name, over variables declared with a type and no value; kernite alloca
 #[kernite_macros::kernels]
 mod kernels {
     /// The sum of the eight floats at `xs`.
-    pub unsafe extern "sysv64" fn sum8(xs: *const f32) -> f32 {
+    pub extern "sysv64" fn sum8(xs: &[f32; 8]) -> f32 {
         let v: ymm;
         vmovups(v, [xs]);
         let high: ymm;
@@ -28,29 +28,33 @@ mod kernels {
     }
 }
 
-let sum = unsafe { kernels::sum8(xs.as_ptr()) };
+/// `sum8` needs AVX, so a function that has it calls it with no `unsafe`.
+#[target_feature(enable = "avx")]
+fn sum(xs: &[f32; 8]) -> f32 {
+    kernels::sum8(xs)
+}
 ```
 
-`sum8` becomes an `#[unsafe(naked)]` function of the signature it declares, its body the kernel in Intel syntax,
-and `kernels::LISTINGS` holds each kernel's listing for snapshots. Everything that is not an instruction happens
-while the kernel compiles: `for` unrolls, `if` on a bool chooses, a function without an ABI is a helper inlined
-where it is called, and `<const N: usize>` makes one generic. Each parameter and generic of a function has a
-name of its own, but `_`. A parameter named `_` is given and not read, as in Rust, in a kernel of every kind: the next
-parameter is read where the ABI puts it. Rust cannot pass `_` on, so the macros name it for Rust, and the function Rust
-calls the kernel by takes it under that name. A generic kernel is compiled for each value its `#[instances(1, 4)]`
-lists, each a kernel of its own, which Rust calls as it calls a generic function, `kernels::dot::<4>(x, y, n)`; a value
-it does not list fails to build. A value known now holds at most 1048576 elements in all, however its arrays nest, and a
-range as many. Each number, float and `bool` is an element, and so is each array of none or one item,
-which costs memory of its own. A kernel declares at most 65536 variables, however its loops and helpers repeat
-them. Working out a function takes at most 4194304 steps: each turn of a `for`, each instruction, call, label or
-note, each number of a range, each item an array lists, as `[a, b]`, and each element of each `[x; n]`, of each
-array a method makes, of each one copied from a name, as `let b: [u32; 4] = a;` and `for x in a` copy it, and of
-each value an index takes or a note shows. A number read by name or worked out costs none of its own. Nesting is
-held to 64 levels, so that no kernel can run the compiler out of stack. Brackets, types, expressions, rows of
-`else if`s, consts that name consts and a value's arrays each nest 64 deep at most, and each operator in
-`a + b + c` is a level of its expression. A block, a `for` and an `if` are a level for what they hold, and count
-together with the expression inside them, along the helpers that call one another.
-[`kernite-lang`](crates/lang/src/lib.rs) describes the language.
+`sum8` is a function of the signature it declares, and Rust calls it with no `unsafe`: kernite proves it safe, as "A
+safe kernel" below says, and a kernel it cannot prove safe is an `unsafe fn`. Its body is the kernel in Intel syntax,
+in an `#[unsafe(naked)]` function, and `kernels::LISTINGS` holds each kernel's listing for snapshots. Everything that is
+not an instruction happens while the kernel compiles: `for` unrolls, `if` on a bool chooses, a function without an ABI
+is a helper inlined where it is called, and `<const N: usize>` makes one generic. Each parameter and generic of a
+function has a name of its own, but `_`. A parameter named `_` is given and not read, as in Rust, in a kernel of every
+kind: the next parameter is read where the ABI puts it. Rust cannot pass `_` on, so the macros name it for Rust, and the
+function Rust calls the kernel by takes it under that name. A generic kernel is compiled for each value its
+`#[instances(1, 4)]` lists, each a kernel of its own, which Rust calls as it calls a generic function,
+`kernels::dot::<4>(x, y, n)`; a value it does not list fails to build. A value known now holds at most 1048576 elements
+in all, however its arrays nest, and a range as many. Each number, float and `bool` is an element, and so is each array
+of none or one item, which costs memory of its own. A kernel declares at most 65536 variables, however its loops and
+helpers repeat them. Working out a function takes at most 4194304 steps: each turn of a `for`, each instruction, call,
+label or note, each number of a range, each item an array lists, as `[a, b]`, and each element of each `[x; n]`, of each
+array a method makes, of each one copied from a name, as `let b: [u32; 4] = a;` and `for x in a` copy it, and of each
+value an index takes or a note shows. A number read by name or worked out costs none of its own. Nesting is held to 64
+levels, so that no kernel can run the compiler out of stack. Brackets, types, expressions, rows of `else if`s, consts
+that name consts and a value's arrays each nest 64 deep at most, and each operator in `a + b + c` is a level of its
+expression. A block, a `for` and an `if` are a level for what they hold, and count together with the expression inside
+them, along the helpers that call one another. [`kernite-lang`](crates/lang/src/lib.rs) describes the language.
 
 A helper is always inlined, and nothing else is, so `#[inline]` changes nothing kernite compiles: kernite refuses it, in
 every form, on a function or a static, at the `inline`. `#[inline(never)]`, `#[r#inline]` and
@@ -85,9 +89,9 @@ twice, at `[CStr; 3]` and at the whole type. A type in a message is written as R
 `fn(f16: u8)`. A block and the arguments of a macro are written as their source has them, as Rust writes a block it does
 not work out: `Marker<{N*2}>` from `{N*2}`, `Marker<{ N * 2 }>` from `{ N * 2 }` and `m!(a+b)`. A run of spaces, line
 breaks and comments is one space. The length of an array is worked out in the type of a parameter or a variable that is
-an array or a name with arguments, and in those of its elements and arguments that are: with `N` as 3, `[usize; 6]` from
-`[usize;N*2]` and `Wrap<[usize; 6]>` from `Wrap<[usize;N*2]>`. In any other type, and in a result, it is written as its
-source has it: `(u8, [usize; N*2])` from `(u8,[usize;N*2])`.
+an array, a reference to one or a name with arguments, and in those of its elements and arguments that are: with `N` as
+3, `[usize; 6]` from `[usize;N*2]`, `&[usize; 6]` from `&[usize;N*2]` and `Wrap<[usize; 6]>` from `Wrap<[usize;N*2]>`.
+In any other type, and in a result, it is written as its source has it: `(u8, [usize; N*2])` from `(u8,[usize;N*2])`.
 
 A number's name in a kernel's parameters or return, `u8` to `u64`, `i8` to `i64`, `usize`, `isize`, `f32`, `f64` or
 `bool`, means that number: `u64` is 64 bits. A module that gives the name another type, `pub type u64 = u32;` and a
@@ -334,14 +338,14 @@ whose elements are of any type if not. So Rust says nothing of the code that nam
 but for two kinds of use, beside the refusal. A use that the type of the first kind of static does not fit is Rust's
 error, as it is for a static that compiles. A use of the second kind that says no type for its elements has Rust ask for
 it. The module is given no consts, so a type that reads one is of the second kind. kernite checks none of the items, so
-it says nothing it would find in them, such as a kernel that is not `unsafe`, an ABI it does not know, what a static
-holds, or what compiling a kernel finds. It compiles nothing of the module, so a workspace `name` that is not a string
-is no error at it. No room is counted for the statics, so a crate with no dependency named `kernite-macros` is not told
-it needs one for them. What the macro finds in writing the module for Rust is said, as for any module: the dependency
-the crate needs, `kernite-cuda` for a GPU item that `cfg` keeps and `kernite-cpu` for an x86 static or cooperative
-kernel; a compile-time argument named as a parameter of a launcher or of a `_blocks` method, `__kernite_grid`,
-`__kernite_threads` or `__kernite_shared`; and a GPU kernel or a static named as a cooperative kernel's `_blocks`
-method.
+it says nothing it would find in them, such as a kernel that must be `unsafe` and is not, an ABI it does not know, what
+a static holds, or what compiling a kernel finds. It compiles nothing of the module, so a workspace `name` that is not a
+string is no error at it. No room is counted for the statics, so a crate with no dependency named `kernite-macros` is
+not told it needs one for them. What the macro finds in writing the module for Rust is said, as for any module: the
+dependency the crate needs, `kernite-cuda` for a GPU item that `cfg` keeps and `kernite-cpu` for an x86 static or
+cooperative kernel; a compile-time argument named as a parameter of a launcher or of a `_blocks` method,
+`__kernite_grid`, `__kernite_threads` or `__kernite_shared`; and a GPU kernel or a static named as a cooperative
+kernel's `_blocks` method.
 
 A module kernite cannot read is refused whole as well, and stays with every item kernite can read. A `const` or a
 `static` it cannot read ends at its `;`, for its value may hold a `{..}`, as in `= { 1 };`. Any other item ends at its
@@ -373,10 +377,10 @@ the modules of kernels that take them.
 
 A function or a static that `cfg` leaves out says nothing, as Rust says nothing of a function it leaves out. A macro
 runs before Rust knows which `cfg` holds, so kernite compiles each one, and puts each error it finds in one under the
-same `#[cfg(..)]` or `#[cfg_attr(.., cfg(..))]`: a kernel that does not compile, or is not `unsafe`, a helper, a static.
-Where `cfg` leaves them out, the crate builds without a word; where it keeps them, each error is said where it is.
-A crate that keeps its x86 kernels on x86-64 alone, by `cfg(target_arch = "x86_64")`, builds for another machine
-without a word, though only x86-64 has `extern "sysv64"`: each function kernite writes for a kernel is under the
+same `#[cfg(..)]` or `#[cfg_attr(.., cfg(..))]`: a kernel that does not compile, or is not `unsafe` where it must be, a
+helper, a static. Where `cfg` leaves them out, the crate builds without a word; where it keeps them, each error is said
+where it is. A crate that keeps its x86 kernels on x86-64 alone, by `cfg(target_arch = "x86_64")`, builds for another
+machine without a word, though only x86-64 has `extern "sysv64"`: each function kernite writes for a kernel is under the
 kernel's `cfg` too, as one for each instance of a kernel of compile-time arguments or of a cooperative one.
 
 A kernel names the items of its module that it uses: a const it reads, a static, a helper, a kernel or an
@@ -438,19 +442,82 @@ are installed, a test hands them every form, with each integer the least the for
 take it, and GNU `as` must take it at the feature kernite says it needs, without a warning, and refuse it at the
 features before.
 
+An editor shows an instruction's doc where a kernel names it: hover at `vaddps` in rust-analyzer. The doc says what the
+instruction does, in a sentence of kernite's own; each form it takes, as a kernel writes it, `vaddps(=ymm, ymm,
+ymm/m256)`, with `=` before each operand it writes, `+` before each it reads and writes, and `~` before each it reads
+nothing of; the CPU feature it needs; and where Intel's SDM says the rest. Each instruction of `forms` has a doc, and a
+family's, `cmovz`, `vcmpltps` or `vfmadd231ps`, says its own condition, predicate or order. The macros write a doc as a
+function that nothing calls, in a block of the module, and a `let _ = ..;` at each name that names it, under the `cfg`
+of the item the name is in. So a doc adds no code and changes no listing and no error, and needs no `allow`: a name
+that is no instruction has its own error and no doc, and a function that `cfg` leaves out has none for a name only it
+names.
+
+A kernel gives back its result as SysV does: `ret(g)` of a gpr for an integer, a `bool` or a pointer, which SysV has in
+`rax`; `ret(v)` of a vector for a float, which it has in `xmm0`; and `ret()` for none. Any other `ret` is an error at
+the `ret`, in a kernel and in a function of the module alike: `ret(v)` in one that gives back an integer, a `bool` or a
+pointer, `ret(g)` in one that gives back a float, `ret()` in one that gives back a value, and `ret(g)` or `ret(v)` in
+one that gives back nothing.
+
+SysV passes an `f32` in the low 32 bits of a vector register and an `f64` in the low 64, and leaves the rest as the
+caller had it, which may be different at each call. A call gives a float back so, and leaves the rest as its callee had
+it. kernite holds each vector variable to how many of its low bits are the kernel's own: a float's 32 or 64 to begin
+with, and all 256 of any other; and then what each instruction that writes it makes of it. An instruction that reads
+more of it, on any way to the instruction, is an error at the instruction, which names the variable: `vmovups([p], x)`
+of an `f32` `x` reads 128 bits of it and `vmovups([p], x.ymm)` 256, where `vmovss([p], x)` reads its 32. The variable is
+whole once the kernel has written all of it, with `zero(x)`, a load, or an instruction that computes all of an xmm or a
+ymm, as `vaddps` does. A scalar instruction writes the float alone, and carries the rest of its first source to the same
+place of its result: `vaddss(y, x, z)` leaves `y` the bits of `x` past the float, where `vaddss(y, w, z)` makes all of
+`y` the kernel's own if `w` is. An instruction that carries bits does not read them, and its result is the kernel's own
+as far as every bit it carries is: a move of a whole register, `vmovaps(y, x)`; the logic of bits, `vandps(x, x, mask)`,
+with which Rust takes the absolute value of a float, and `vxorps(x, x, x)`, which carries the bits of `x` though it
+computes zero, where `zero(x)` writes all of it; a blend, `vblendps(y, x, z, 1)` by a number, which takes each lane from
+one source, and `vblendvps(y, x, z, m)` by a register, whose selector counts in whole lanes; and what a merge keeps: the
+rest of the first source of a scalar instruction, the half that `vmovhps`, `vmovlps` and `vmovhlps` keep, the lanes that
+`vinsertps`, `vpinsrd` and `vinsertf128` leave, the element of each half of its first source that `vunpcklpd` leaves in
+place, and of its second that `vunpckhpd` does, the last element of the second source of `vunpckhps`, and the lanes of
+its result that a gather's mask leaves out. An instruction that picks lanes by a number known now reads the lanes it
+picks and no more: `vextractps(g, x, 0)` and `vpshufd(y, x, 0)` read 32 bits of `x`, and `vdpps(y, x, z, 0x11)`, which
+multiplies the first lanes alone, 32 of each. One that takes part of each 128 bits reads as far as the last part it
+takes: `vunpcklps` and `vmovddup` the low 64 bits of each, and `vmovsldup` and `vpmuludq` the even lanes, so 64 and 96
+bits of an xmm, and 192 and 224 of a ymm. A function of the module is held to it as a kernel is. A call reads each
+argument as far as its callee takes it, 32 bits of an `f32` and 64 of an `f64`, so `call(r, scale, (x, n))` of an `f32`
+`x`, where `scale` takes an `f64`, is an error; at an address with no functions given, it reads a float as the float,
+and any other vector as the call names it, an xmm or all of a ymm, so `x.ymm` of a float is an error there. What a call
+gives back is the kernel's own as far as the call would read it as an argument: 32 or 64 bits of a float that its callee
+gives back, and at an address with no functions given, a float as the float, and any other vector as the call names it.
+`ret(v)` reads `v` as far as the kernel gives it back, 32 bits of an `f32` and 64 of an `f64`, so `ret(x)` of an `f32`
+`x`, where the kernel gives back an `f64`, is an error.
+
 Stack memory a kernel declares is a variable, as a GPU kernel's local memory is: `let tables: local<[u32; 1024], 32>;`
 is 4 KB of its frame at a multiple of 32, reached by its name, `mov(c.r32, [tables + b * 4])`, and `lea(p, [tables])`
 takes its address. Until written, it holds whatever was there. kernite checks an address in it where the index is 0:
 what it reaches lies inside, and `vmovaps` and `vmovdqa` reach it at a multiple of what they move; the index is the
 kernel's to keep inside. A frame of more than a page is touched a page at a time on the way down, as Rust's functions
-are, so that one past the end of the stack faults at the guard page there rather than reach past it.
+are, so that one past the end of the stack faults at the guard page there rather than reach past it: no byte of a frame
+lies more than a page below memory the kernel has touched, those below the stack pointer counted. The stack pointer is 8
+past a multiple of 16 on entry, as SysV says. A kernel that calls nothing, or whose calls are all jumps, keeps up to 128
+bytes of a frame aligned to 16 or less below the stack pointer, in the red zone that SysV lets a function use without
+moving the stack pointer, as rustc does of its own. A frame of 128 bytes or less, with the few bytes more that align it,
+lies there whole, with no `sub rsp` or `add rsp`, and the slot of a frame of 8 bytes is at `[rsp - 8]`. A bigger one has
+`sub rsp` move the stack pointer by what is past 128 bytes, or by the pages the kernel touches where they are more, and
+`add rsp` take it back: a frame of 136 bytes has `sub rsp, 8`, its first word at `[rsp - 128]` and its last at `[rsp]`,
+and one of 4097 bytes has `sub rsp, 4096` for the page the kernel touches, which leaves one byte below the stack
+pointer. Linux, as SysV asks, runs a signal handler below the red zone, which it leaves as it is. On bare metal and
+under UEFI an interrupt may write it, and rustc's `x86_64-unknown-none` and `x86_64-unknown-uefi` keep their own
+functions out of it. kernite writes one listing for every target, so a kernel whose frame lies in part below the stack
+pointer runs on those only where no interrupt writes the stack it runs on. A call writes its return address in the red
+zone, so `sub rsp` makes the whole frame of a kernel that calls, aligned to 16 or less, with a few bytes more where a
+call or the frame needs the stack pointer at a multiple of 16, and `add rsp` takes it down. Only a frame aligned past 16
+keeps the caller's stack pointer in `rbp`: the kernel aligns the stack pointer with `and rsp`, and takes the frame down
+by `mov rsp, rbp`.
 
-When the variables alive together do not fit in the registers, kernite spills one to a slot of the frame: it stores it
-after each instruction that writes it and loads it before each one that reads it. It spills, of the variable left
-without a register and those holding the ones it could have, the one whose loads and stores are fewest for how long
-it is alive, one in a loop counting ten times one outside, and spills again until all fit. The listing names each
-spill, in its header and at each load and store. Sixteen accumulators of `dot` and the load beside them take 17 of the
-16 vector registers, and two spill:
+When the variables alive together do not fit in the registers, kernite spills one to a slot of the frame. It stores it
+after an instruction that writes it only where a load of it follows before it is stored again, and loads it before an
+instruction that reads it only where no register holds it. It spills, of the variable left without a register and those
+holding the ones it could have, the one whose loads and stores are fewest for how long it is alive, one in a loop
+counting ten times one outside, and spills again until all fit. The listing names each spill that keeps a slot, in its
+header and at each load and store. Sixteen accumulators of `dot` and the load beside them take 17 of the 16 vector
+registers, and two spill:
 
 ```
 # dot::<16>(gpr, gpr, gpr) -> vec
@@ -466,6 +533,15 @@ spill, in its header and at each load and store. Sixteen accumulators of `dot` a
     # acc15 spilled
     vmovups ymmword ptr [rsp], ymm15
 ```
+
+A store of a spilled variable leaves it in the register it stores from, and a load of it in the register it loads to,
+and the kernel reads it there, with no load, until an instruction writes that register, a call changes what it holds of
+the variable, or the variable is stored again from another register. A call changes the registers its callee writes, and
+the upper half of each vector register if the callee runs `vzeroupper`, which holds no part of an xmm or a float. An
+instruction that reads the variable and writes it too takes a `mov` from the register that holds it, and not a load.
+Where two ways meet, at a label, a register holds the variable only if each way brings it there. A store is left out if
+no way from it comes to a load of the variable before another store of it, and so is a slot that no move uses. After its
+loop, `dot::<16>` reads `acc15` in `ymm15`, where the last turn left it, and does not load it.
 
 A spill moves a register with `mov` or `vmovups`, which leave the flags as they were, so it may go between a
 comparison and its jump. Only when no spill makes room, as when one instruction names more variables than there are
@@ -556,42 +632,60 @@ from a parameter of its name: that is an error at its name. A crate with a coope
 `kernite-cpu` for the grid, not renamed in `Cargo.toml`. kernite says at the kernel when it has none.
 
 A kernel calls the module's others, itself among them, as SysV calls a function: `call(g, gcd, (a, b))` moves `a` to
-`rdi` and `b` to `rsi`, and `g` from `rax`, and is checked against what `gcd` takes and returns. `lea(fp, [gcd])` takes
-an address to call at, `call(g, fp, (a, b), (gcd, sum))`, checked against each function given. A value alive across a
-call is kept in a register the call does not change. A call changes the registers its callee writes and does not
-restore, and those of each function the callee calls, by name or at an address with the functions it may reach given.
-kernite cannot check that the address is that of one of them, and trusts it: a value alive across the call is kept in a
-register none of them changes, which another function may change. So `gcds`, which calls `gcd` in a loop, keeps its
-values in registers `gcd` does not write, and saves none for its own caller. A call at an address with no functions
-given may reach any function, and one that comes back to the function it is in, as `gcd`'s call of `gcd`, reaches code
-that is not compiled yet: each changes every register SysV lets a callee change, so an integer alive across it is kept
-in `rbx` or `r12` to `r15`, which every callee leaves as it was, and which the kernel saves for its own caller, and a
-vector spills. A vector alive across any other call stays in a register none of the functions it may reach writes, as an
-integer does. But a function that runs `vzeroupper` clears the upper half of every vector register, and leaves the lower
-half: a vector of which an instruction after the call reads all, as one on all of a ymm does, spills, and one of which
-the kernel reads the lower half alone, an xmm or a float, stays in its register. So does one whose lower half the kernel
-writes before it reads all of it: an instruction that writes an xmm or a float clears the upper half of its ymm, even
-one that reads it too, as an FMA does. A vector that an address takes its indices from counts as read whole, though a
-gather of an xmm of indices reads its lower half alone. The stack pointer is a multiple of 16 at each call. A kernel
-writes `vzeroupper` before it returns where it may have set the upper half of a vector register, so that the SSE code of
-its caller does not pay for it. It may have where it runs an instruction on all of a ymm, or calls at an address with no
-functions given and passes a float or takes one back, which may be a vector. kernite moves and spills all of a vector
-register, though it holds a float or an xmm, `vmovaps ymm0, ymm1`, so a kernel of xmm registers alone writes it where
-its listing moves or spills one. One that does neither writes none, though it calls the module's functions: each clears
-what it sets before it returns. A call that `ret` follows at once is a jump: the kernel takes its frame down as `ret`
-does, and jumps to the callee, which returns to the kernel's caller. So `call(g, gcd, (a, b)); ret(g);` is a loop in
-`gcd`: the stack does not grow. A label between the call and the `ret` leaves the `ret` for the other ways that come to
-it, and an address to call at in a register the kernel saves goes first to `r11`, which taking the frame down leaves as
-it is. The call stays a call where an instruction comes between it and the `ret`,
-`call(r, gcd, (a, b)); add(r, 1); ret(r);`. It stays one too where the jump would not do what the call does: where the
-kernel has taken the address of its stack memory, which the callee may use, and the frame the jump takes down holds; and
-where it calls at an address with no functions given and passes a float or takes one back, which may be a vector: the
-kernel's `vzeroupper`, as it takes its frame down, would clear the upper half of one it passes, and runs before the
-callee sets that of one it gives back. A kernel that never returns, `-> !`, ends each way out in `ud2()` or in a call of
-one that does not.
+`rdi` and `b` to `rsi`, and `g` from `rax`, and is checked against what `gcd` takes and returns. A move to a register
+that holds the value already, on every way to it, a jump back among them, is left out. A value that goes to two
+registers goes to each from the register that held it first, where the variable it comes from is read after the move, so
+that no move waits for another. A value that a call takes in the register that holds it stays there, though the call
+takes it again: `x` in `rdi` stays there for `call(r, gcd, (x, x))`, which moves it to `rsi`. One alive across the call
+stays there through it, if the call does not change that register. `lea(fp, [gcd])` takes an address to call at,
+`call(g, fp, (a, b), (gcd, sum))`, checked against each function given. A value alive across a call is kept in a
+register the call does not change. A call changes the registers its callee writes and does not restore, and those of
+each function the callee calls, by name or at an address with the functions it may reach given. kernite cannot check
+that the address is that of one of them, and trusts it: a value alive across the call is kept in a register none of them
+changes, which another function may change. So `gcds`, which calls `gcd` in a loop, keeps its values in registers `gcd`
+does not write, and saves none for its own caller. A call at an address with no functions given may reach any function,
+and one that comes back to the function it is in, as `gcd`'s call of `gcd`, reaches code that is not compiled yet: each
+changes every register SysV lets a callee change, so an integer alive across it is kept in `rbx` or `r12` to `r15`,
+which every callee leaves as it was, and which the kernel saves for its own caller, and a vector spills. A vector alive
+across any other call stays in a register none of the functions it may reach writes, as an integer does. But a function
+that runs `vzeroupper` clears the upper half of every vector register, and leaves the lower half: a vector of which an
+instruction after the call reads all, as one on all of a ymm does, spills, and one of which the kernel reads the lower
+half alone, an xmm or a float, stays in its register. So does one whose lower half the kernel writes before it reads all
+of it: an instruction that writes an xmm or a float clears the upper half of its ymm, even one that reads it too, as an
+FMA does. A vector that an address takes its indices from counts as read whole, though a gather of an xmm of indices
+reads its lower half alone. The stack pointer is a multiple of 16 at each call. A kernel writes `vzeroupper` where it
+may have set the upper half of a vector register: before it returns, so that the SSE code of its caller does not pay for
+it, and before it calls a function that may run SSE code, so that the SSE code of the callee does not. It may have
+where, on some way to it, the kernel runs an instruction on all of a ymm, or calls at an address with no functions given
+and passes all of a ymm or takes all of one back, with no `vzeroupper` since. A call at an address with no functions
+given may run SSE code: the kernel does not know its callee. So may a call that comes back to the function it is in
+through another of the module's: it reaches code that is not compiled yet. So may a function of the module that makes
+such a call, or calls one of the module's that may, unless the call passes all of a ymm or takes all of one back: its
+callee runs AVX instructions, and `vzeroupper` would clear the upper half of a ymm it passes. A call of the function the
+kernel is in may where one of the kernel's other calls may. The instructions of the module's other functions are AVX's,
+which pay nothing for an upper half set, and the kernel clears it before it returns. kernite moves and spills a vector
+register as wide as an instruction uses its variable: as an xmm, `vmovaps xmm0, xmm1`, where none uses it as all of a
+ymm, and else as all of a ymm, `vmovaps ymm0, ymm1`. A call of the module's functions, by name or at an address with
+them given, passes a float and takes one back as an xmm: `call(v.xmm, half, (x))` writes `v` as an instruction that
+writes an xmm does, though only the float of it is the kernel's own. A call at an address with no functions given passes
+and takes back each vector as the call names it: an xmm, or all of a ymm. A float, an `xmm` or the `.xmm` of a ymm says
+that its callee takes or gives back no ymm, and all of a ymm that it does, as the type of a function pointer does in
+Rust. So a kernel of xmm registers alone writes no `vzeroupper`, though it moves and spills them and calls functions, by
+name or at an address: each clears what it sets before it returns. A call that `ret` follows at once is a jump: the
+kernel takes its frame down and writes `vzeroupper` as `ret` does, and jumps to the callee, which returns to the
+kernel's caller. So `call(g, gcd, (a, b)); ret(g);` is a loop in `gcd`: the stack does not grow. A label between the
+call and the `ret` leaves the `ret` for the other ways that come to it, and an address to call at in a register the
+kernel saves goes first to `r11`, which taking the frame down leaves as it is. The call stays a call where an
+instruction comes between it and the `ret`, `call(r, gcd, (a, b)); add(r, 1); ret(r);`. It stays one too where the jump
+would not do what the call does: where the kernel has taken the address of its stack memory, which the callee may use,
+and the frame the jump takes down holds; and where it calls at an address with no functions given and takes all of a ymm
+back: the kernel's `vzeroupper`, as it takes its frame down, runs before the callee sets the upper half of what it gives
+back. A jump that passes all of a ymm has no `vzeroupper` before it: the callee, passed all of a ymm, clears the upper
+halves before it returns. A kernel that never returns, `-> !`, ends each way out in `ud2()` or in a call of one that
+does not.
 
-Memory of the module's is a `static` beside its kernels, in the process's memory, which each kernel names as it names its
-own, and which keeps what they write from one call to the next: `static COUNTS: global<[u32; 16]>;` is 16 words the
+Memory of the module's is a `static` beside its kernels, in the process's memory, which each kernel names as it names
+its own, and which keeps what they write from one call to the next: `static COUNTS: global<[u32; 16]>;` is 16 words the
 kernels read and write, and `static WEIGHTS: constant<[f32; 4]> = [1.0, 0.5, 0.25, 2.0];` four floats they only read,
 holding what it says until something writes it. A kernel reaches a static at a displacement from `rip`,
 `vbroadcastf128(w, [WEIGHTS])`, and `lea(p, [COUNTS])` takes its address, for an index, `[p + i * 4]`. kernite checks an
@@ -633,6 +727,123 @@ its module and its name, as `module_path!` gives them, so two such statics of on
 symbol defined twice, which the assembler or the linker refuses: two modules of one name in two functions have one path,
 and so do two versions of one crate.
 
+## A safe kernel
+
+An x86 kernel that is no `unsafe fn` is one kernite proves safe where it compiles it, and Rust calls it as it calls any
+function, with no `unsafe`. It takes numbers, arrays by reference, `&[f32; 8]` for an array it reads and `&mut [f32; 8]`
+for one it writes, and slices, `&[f32]` and `&mut [f32]`, and gives back a number, a pointer or nothing. An array holds
+Rust's numbers, as stack memory does, and is 2147483647 bytes at most, for a kernel reaches each element at a
+displacement from the array's address, of 32 bits, signed; its length may be a compile-time argument, `&[f32; N]`, or a
+const. Rust says an array is as long as its type says, and kernite checks each address the kernel reaches in one as it
+checks one in stack memory: inside the array, at a displacement known now, and at the alignment its instruction needs.
+So nothing is checked when the kernel runs, and there is nothing for the caller to promise. The code of a safe kernel is
+that of the same kernel written with `unsafe` and a pointer for each array, and a pointer and a count for each slice:
+kernite adds none.
+
+```rust
+#[kernite_macros::kernels]
+mod kernels {
+    /// The sum of the sixteen floats at `xs`: `sum8` of each half, added.
+    pub extern "sysv64" fn sum16(xs: &[f32; 16]) -> f32 {
+        let (low, high): (ymm, ymm);
+        call(low.xmm, sum8, [xs]);
+        call(high.xmm, sum8, [xs + 32]);
+        vaddss(high.xmm, low.xmm, high.xmm);
+        ret(high.xmm);
+    }
+}
+```
+
+A call passes an array of the callee's type, or a part of one: `[xs]` is `xs`, and `[xs + 32]` the array 32 bytes on,
+which must lie inside `xs`, at a multiple of the callee's element size. The callee's length may be a compile-time
+argument or a const as well: `sum::<4>` takes a `&[u64; 4]` and calls `sum::<2>` on each half. A write through `&[T; N]`
+is an error, as one to constant memory is, and an array is passed to a callee that writes only from `&mut [T; N]`. A
+kernel may call itself and the safe kernels of its module, and so reaches no memory but the arrays and slices it is
+given and its own frames, which it touches a page at a time, so that an overflow of the stack faults at the guard page,
+as above.
+
+A slice is two registers: its address, in one, and its length in elements, in the next, which the kernel names `xs.len`.
+It takes two of the six registers SysV passes integers in, so a kernel takes six integers in all, slices and numbers
+together, and the function the macro writes takes the slice and passes its address and its length. A slice holds Rust's
+numbers, as an array does, and has any length, none too. It is at a multiple of its element's bytes, as Rust lays it
+out, and kernite takes it to be at no more: `vmovaps` of a `ymm`, which needs a multiple of 32, is an error in a slice
+of floats, where `vmovups` reads at any. kernite does not know the length, so it proves each address the kernel reaches
+in the slice from the compares the kernel makes of an index with `xs.len`:
+
+```rust
+#[kernite_macros::kernels]
+mod kernels {
+    /// The sum of the integers of `xs`.
+    pub extern "sysv64" fn sum(xs: &[u64]) -> u64 {
+        let (i, sum): (gpr, gpr);
+        zero(i);
+        zero(sum);
+        label(top);
+        cmp(i, xs.len);
+        jae(done);
+        add(sum, [xs + i * 8]);
+        inc(i);
+        jmp(top);
+        label(done);
+        ret(sum);
+    }
+}
+```
+
+The index is a gpr, scaled by the bytes of an element, `[xs + i * 8]`, with a displacement known now beside it if the
+kernel wants, `[xs + i * 4 + 32]`. The address is inside the slice where, on every way to it, the compares have kept
+`i + n` at or below `xs.len`, `n` the elements the instruction reaches from the index: one for the `add` above, eight
+for a `vaddps` of a `ymm` of floats, so `lea(j, [i + 8])`, `cmp(j, xs.len)` and `ja(done)` keep eight. The displacement
+counts in, and the last element it reaches is rounded up. An address with no index, `[xs + 4]`, is inside where `xs.len`
+has been compared with 2 or more. None is before the start, which the index at 0 would reach: `[xs + i * 4 - 4]` is an
+error, as it is in an array.
+
+A compare is a `cmp` of a gpr with another or with a number known now, or a `test` of a gpr with itself, each gpr whole,
+that a conditional jump or a `cmov` reads, with nothing between them but `mov`, `lea`, jumps and `cmov`s, which leave
+the flags as they are. kernite follows both ways of the jump, and holds each way to what the compare says of the numbers
+as unsigned ones: `jb`, `jae`, `ja`, `jbe`, `je` and `jne`, and their other names, say what they say, and a signed
+condition, `jl` say, says nothing. It follows the numbers the kernel keeps in whole gprs: `mov` of a gpr or of a number
+known now, `lea` of a gpr and a displacement, `add` and `sub` of a number known now, `inc`, `dec`, `zero` and `xor` of a
+gpr with itself write a number it follows, and so does a `cmov` of a gpr, which is the one or the other as the compare
+says: `mov(n, xs.len)` copies the length, and `cmp(n, ys.len)` then `cmova(n, ys.len)` make `n` the shorter of two. A
+number below a length is far below 2^64, for Rust has no slice longer than `isize::MAX` bytes, so adding to it does not
+wrap. Any other instruction that writes a gpr, or a part of one, and an `add`, a `sub`, an `inc`, a `dec` or a `lea`
+that may wrap, makes it a number of any value until a compare says more. A loop has what holds on each way round it.
+
+The length stays as the kernel was given it, for the compares are of it: `mov(n, xs.len)` copies it to a variable that
+may change, and an instruction that writes `xs.len` is an error. A kernel passes no slice to a function it calls: the
+callee takes the address and the length as two numbers, `*const f32` and `n: usize`, and is an `unsafe fn`, as is a
+`#[cooperative]` kernel, which takes no slice but the two numbers.
+
+What kernite cannot prove it refuses, at the first parameter, operand or call it cannot, and the error says that the
+kernel is then an `unsafe fn`, which compiles as it always has, and which Rust calls in an `unsafe` block. A kernel is
+an `unsafe fn` when it:
+
+- takes a raw pointer, `*const f32`, which may point anywhere;
+- reaches an array at an index in a register, `[xs + i * 4]`, or at an address it has taken, `lea(p, [xs])`, or at an
+  address in a register, where kernite cannot keep it inside the array;
+- reaches a slice at an index that no compare on every way to the address keeps below the length, at a vector of
+  indices, or at an address it has taken, `lea(p, [xs])`, or writes the length of a slice, `dec(xs.len)`, which the
+  compares rest on;
+- reaches a bit of an array or a slice at an offset in a register, `bts([xs], i)`, which may lie anywhere in memory;
+- makes a non-temporal store, `movnti([xs], g)`, which goes around the caches, and may return before an `sfence` or
+  `mfence` orders it: Rust holds the store unfinished until one does, and what the caller does next races with it;
+- names a static of the module's, which every kernel and the host reach;
+- calls a kernel that is an `unsafe fn`, or calls at an address, which reaches a function kernite cannot name;
+- gives a `bool` back, which must be 0 or 1, and kernite cannot prove that it is;
+- runs on a grid of threads, `#[cooperative]`, whose threads reach one memory at once.
+
+The code of a kernel may need CPU features past x86-64's own, as `sum8`'s `vmovups` of a `ymm` needs `avx`, and so does
+a kernel that calls one that does. Rust checks them where the kernel is called: the function it calls is
+`#[target_feature(enable = "avx")]`, so only a function that has `avx` the same way calls it with no `unsafe`, and any
+other calls it in an `unsafe` block, which says why the CPU has `avx`. The features the build is configured with,
+`-C target-cpu=x86-64-v3`, do not count: Rust asks for the attribute. Nothing is checked when the kernel is called: Rust
+has seen that the caller has the features, or the caller says in an `unsafe` block that the CPU does. A kernel that is
+an `unsafe fn` is the same as it was: what it needs is for its caller to know.
+
+A crate may `forbid(unsafe_code)` and have safe kernels, and call them: the Rust the macro writes for one is no
+`unsafe` of the crate's.
+
 ## On a GPU
 
 An `extern "ptx-kernel"` function is compiled to PTX. The module's kernels are one PTX module, `PTX`, which
@@ -651,7 +862,7 @@ it has none and `cfg` keeps it.
 #[kernite_macros::kernels]
 mod gpu {
     /// `y[i] = a * x[i] + y[i]` for each `i < n`, rounded once.
-    pub unsafe extern "ptx-kernel" fn saxpy(a: f32, x: *const f32, y: *mut f32, n: u32) {
+    pub extern "ptx-kernel" fn saxpy(a: f32, x: *const f32, y: *mut f32, n: u32) {
         let (block, size, thread, i): (u32, u32, u32, u32);
         mov.u32(block, ctaid.x);
         mov.u32(size, ntid.x);
@@ -668,10 +879,14 @@ mod gpu {
 
 let cuda = kernite_cuda::Cuda::new()?;
 let kernels = gpu::Kernels::load(&cuda)?;
-let (xs, ys) = (cuda.upload(&x)?, cuda.upload(&y)?);
-unsafe { kernels.saxpy(kernite_cuda::Grid::new(n.div_ceil(256), 256), 2.0, xs.ptr(), ys.ptr(), n)? };
+let (xs, mut ys) = (cuda.upload(&x)?, cuda.upload(&y)?);
+kernels.saxpy(kernite_cuda::Grid::new(n.div_ceil(256), 256), 2.0, &xs, &mut ys, n)?;
 ys.read_into(&mut y)?;
 ```
+
+`saxpy` is no `unsafe fn`: kernite proves that each thread reads and writes inside `x` and `y`, and writes only its own
+element of `y`, as "A safe GPU kernel", below, says. Its launcher takes the memory, `&xs` to read and `&mut ys` to
+write, and Rust calls it with no `unsafe`.
 
 A machine may have several GPUs. The GPUs are those the driver shows the program: all of the machine's, unless
 `CUDA_VISIBLE_DEVICES` chooses which, and the driver numbers them from 0 in its order. `Cuda::count()` says how many
@@ -736,14 +951,16 @@ no `sync` of its own. The compiler refuses to take a pointer for a kernel while 
 `lend` borrows the slice. Dropping the memory waits for the kernels that use it, as dropping a buffer does, and then
 frees it, or gives a slice lent back to the host.
 
-A pointer taken before the slice is `Copy`, and the compiler cannot refuse a launch on it, so a launch is `unsafe`, and
-its contract is this: each pointer is to a buffer or to unified memory of the GPU, as long as the kernel reads and
-writes through it; from the launch until the kernel is done, the host holds no slice of memory the kernel writes, and no
-slice it may write of memory the kernel reads; and where `cuda.concurrent_managed_access()` is false, the GPU not
-reaching managed memory while the host does, the host holds no slice of managed memory at all. The method is the GPU's
-`CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS`, and a GPU where it is false faults the host on managed memory while any
-kernel runs. `Module::launch` says the contract in its `# Safety`, and the macros write it as the `# Safety` of the
-launcher of a GPU kernel that has none.
+A pointer taken before the slice is `Copy`, and the compiler cannot refuse a launch on it, so the launch of a kernel
+that is an `unsafe fn`, which takes pointers, is `unsafe`, and its contract is this: each pointer is to a buffer or to
+unified memory of the GPU, as long as the kernel reads and writes through it; from the launch until the kernel is done,
+the host holds no slice of memory the kernel writes, and no slice it may write of memory the kernel reads; and where
+`cuda.concurrent_managed_access()` is false, the GPU not reaching managed memory while the host does, the host holds no
+slice of managed memory at all. The method is the GPU's `CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS`, and a GPU where
+it is false faults the host on managed memory while any kernel runs. `Module::launch` says the contract in its
+`# Safety`, and the macros write it as the `# Safety` of the launcher of a GPU kernel that is an `unsafe fn` and has
+none. The launcher of a kernel that is no `unsafe fn` takes the memory, not a pointer, and has no contract for its
+caller to keep: "A safe GPU kernel", below, says what it checks.
 
 Managed memory is moved ahead of its use, and advised how it is used, over a range of its elements; a slice lent is
 advised too, but not moved. `memory.prefetch(0..len, Location::Gpu)` moves them to the GPU, ahead of the kernels that
@@ -772,7 +989,9 @@ the driver advises managed and pageable memory alone: this is page-locked memory
 
 A NUMA node does not touch memory, so it is refused as an accessor: `cuMemAdvise: only the GPU and the host access
 memory, not a NUMA node`; and the driver refuses a node the host does not have: `cuMemPrefetchAsync:
-CUDA_ERROR_INVALID_VALUE (1): invalid argument`. A range with no elements, or one past the end, panics.
+CUDA_ERROR_INVALID_VALUE (1): invalid argument`. A range with no elements, or one past the end, is refused before the
+driver is asked: `cuMemPrefetchAsync: the range 2..2 has no elements`, or `the range 3..5 goes past the end of the 4
+elements`; `advise` and `placement` say it with their own calls.
 
 The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, takes a NUMA node as the preferred location,
 `PreferredLocation(Numa(node))` or `PreferredLocation(NumaOfThread)`, and changes nothing: the memory prefers what it
@@ -915,6 +1134,17 @@ takes `r#`, so `tex.2d` is `tex._2d`, `ld.global.L2::64B` is `ld.global.L2__64B`
 texture or a surface is its handle, the `u64` of a CUDA texture or surface object, in brackets with its coordinates:
 `tex._2d.v4.f32.f32((r, g, b, a), [t, (x, y)])`.
 
+An editor shows the doc of a PTX instruction where a kernel names it, as it does for x86: hover at any word of
+`ld.global.f32(v, [p])` in rust-analyzer. The doc says what the instruction does, in a sentence of kernite's own; what
+each word of its name means, in a phrase; each form it takes, as a kernel writes it, `ld.global.f32(=f32/_, [u64])`,
+with `=` before each operand it writes, `+` before each it reads and writes, `%` before each that must be a variable,
+`_` where a sink may stand, and the limits of a number known now, `u32[0,31]` or `#4|8|16`; the PTX and the GPU it
+needs, when more than PTX 3.0 and `sm_30`, and `@7.5 sm_80` after a form that needs more than the first; and where
+PTX's ISA says the rest. Each instruction of `forms` has a doc and each word of its name a phrase, which a test holds
+the table to. `shfl` and `vote` without `.sync` have none, as kernite refuses them, and a name that is no instruction
+has its own error and no doc. The macros write a doc as they write x86's, so it adds no code and changes no listing and
+no error.
+
 Memory a kernel declares is a variable: `let tile: shared<[f32; 256], 16>;` is 256 floats of shared memory at a
 multiple of 16, reached by its name, `ld.shared.f32(v, [tile + 16])`, and `shared<[f32]>` is as many as the launch
 gives, `Grid::new(blocks, threads).with_shared(bytes)`. A kernel's `f16` and `bf16`, which Rust has not, are
@@ -926,11 +1156,12 @@ own, and which keeps what they write from one launch to the next: `static COUNTS
 global memory, `red.global.add.u32([COUNTS + 8], 1)`, and `static WEIGHTS: constant<[f32; 4]> = [1.0, 0.5, 0.25, 2.0];`
 four floats of constant memory, which the kernels only read, `ld.r#const.f32(w, [WEIGHTS + 4])`, holding what it says
 until something writes it. The host reads and writes each as `Kernels` gives it, a [`Global`](crates/cuda/src/lib.rs) of
-Rust's type for its elements: `kernels.COUNTS().read()?`, `kernels.WEIGHTS().write(&[2.0; 4])?`. A module has 64 KB of
-constant memory, and kernite refuses a static that does not fit in it beside the statics before it that fit, at its
-type. It takes no room, so a static after it may fit. The room is that of the statics `cfg` keeps: two tables of 48000
-bytes, one under `cfg(feature = "new")` and one under `cfg(not(feature = "new"))`, fit in a module, and both under
-`cfg(feature = "new")` do not.
+Rust's type for its elements: `kernels.COUNTS()?.read()?`, `kernels.WEIGHTS()?.write(&[2.0; 4])?`. An accessor is an
+error only by a mistake of kernite's own: the module has not the memory it names, or not a whole number of its elements.
+A module has 64 KB of constant memory, and kernite refuses a static that does not fit in it beside the statics before it
+that fit, at its type. It takes no room, so a static after it may fit. The room is that of the statics `cfg` keeps: two
+tables of 48000 bytes, one under `cfg(feature = "new")` and one under `cfg(not(feature = "new"))`, fit in a module, and
+both under `cfg(feature = "new")` do not.
 
 A module's global memory may be of any size that the GPU has the memory for. `ptxas` writes the size of a module's
 global memory in 32 bits, and cuts a bigger one without a word, so a static of global memory that makes it 4 GB, its
@@ -1012,22 +1243,89 @@ name = "kernite"
 the module. The error names the manifest. A package with no workspace's manifest is one of its own, named as the package
 is.
 
+## A safe GPU kernel
+
+A GPU kernel that is no `unsafe fn` is one kernite proves safe where it compiles it, and Rust calls its launcher as it
+calls any function, with no `unsafe`. The launcher takes memory where the kernel takes a pointer: `&xs` where the kernel
+takes a `*const f32`, memory it reads, and `&mut ys` where it takes a `*mut f32`, memory it writes. The memory is a
+`Buffer`, managed or page-locked memory, a slice the host lends for good, `cuda.lend(Vec::leak(v))`, or, for a `*const`,
+the elements of a buffer from one on, `xs.tail(i)`. A slice lent for less is not, as a `mem::forget` of what `lend` gave
+would give it back to the host while the kernel may still write it. Rust keeps the host from touching `ys` while the
+launcher has it, and from lending the same memory twice; the kernel keeps what it is lent until it is done, so that
+`read`, `write`, `host` and dropping the memory wait for the kernel first. What is left is the kernel's own threads, and
+kernite proves, as each instruction comes, that they keep to what they are lent:
+
+- each load and store is of global memory, at an address worked out from one of the kernel's pointers, at a multiple of
+  the bytes it moves, and inside the memory the launcher lent for it;
+- no two threads write one address, and none reads what another may write: each thread writes only its own part of the
+  memory, and reads of memory the kernel writes only that part.
+
+What keeps the threads apart is the thread's index among the grid's, `ctaid.x * ntid.x + tid.x`, which `global_index`
+works out in [`examples/my-app`](examples/my-app/src/main.rs), and what keeps it inside the memory is a compare: the
+threads whose index is not below `n` end, `setp.ge.u32(past, i, n); if past { ret(); }`, and kernite knows that a thread
+that goes on has `i < n`, as it does after any `ret`, `exit` or `trap` under an `if`. kernite follows whole numbers: the
+thread's index in its block, the block's in its grid, the sizes of both, the kernel's integers and numbers known now, by
+`mov`, `add`, `sub`, `mul`, `mad`, `shl` and `cvt` from 32 bits to 64, and the addresses that `mad.wide` and `add` make
+of a pointer and a number. What it cannot know, because the launch gives it, is left as a condition on the launch: that
+the memory lent for a pointer has the elements the kernel reaches, `x.len() >= n` for `saxpy`; that a thread's part of
+the memory it writes holds its bytes; and that no number the kernel works out wraps. The launcher checks each of them,
+and the grid, before the kernel runs. An error says which does not hold, as Rust writes it, with the value of each
+number in it, and no kernel runs: ``cuLaunchKernel: `saxpy` is safe on this launch only if `x.len() >= n`, so that each
+element it reaches of `x` is inside it, and that does not hold: `x.len()` is 999, `n` is 1000``.
+
+The grid of a safe kernel runs along x alone, with fewer than 2^32 threads, so that `ctaid.x * ntid.x + tid.x` numbers
+each of them apart in 32 bits. A grid with more than one block or thread along y or z is an error before the kernel
+runs, ``cuLaunchKernel: `saxpy` is safe on a grid that runs along x alone, for kernite proves that its threads reach
+memory apart by their index along x: the grid has 2 blocks along y``, and so is one of 2^32 threads or more,
+``cuLaunchKernel: `saxpy` numbers its threads in 32 bits, so its grid has fewer than 4294967296 of them: the grid has
+16777216 blocks of 256 threads, 4294967296 in all``. Memory of another GPU than the kernels are loaded on is an error
+too, ``cuLaunchKernel: the memory is on another GPU than the kernels are loaded on``, and so is managed memory on a GPU
+that cannot reach it while the host does, which the host may touch while the kernel runs: ``cuLaunchKernel: a kernel
+that is no `unsafe fn` is not lent managed memory by a GPU that cannot reach it while the host does: its
+CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0``. The code of a safe kernel is that of the same kernel written with
+`unsafe`: kernite adds none to the kernel, and the launcher's checks run on the host.
+
+What kernite cannot prove it refuses, at the first instruction or operand it cannot, and the error says what kernite
+cannot prove there, and that a kernel that does it is an `unsafe fn`, which compiles as it always has, and whose
+launcher takes pointers, `xs.ptr()`, and is `unsafe`. A kernel is an `unsafe fn` when it:
+
+- writes at an address that is not only its thread's, `[y + (i + 1) * 4]`, or reads memory the kernel may write at one
+  that is not, so that a thread may race with another;
+- reaches an element at an index that no compare keeps below the memory's length, or one that a compare keeps below it
+  only after the access, or reaches memory before it starts, `[at - 4]`;
+- reaches an address that kernite cannot follow to a pointer of the kernel's, as a number or a loaded word is, one that
+  is not a multiple of the bytes it moves from its pointer, or more bytes at once than the type its pointer is to has,
+  `ld.global.v4.f32` through a `*const f32`; or writes through a `*const` pointer, which is memory lent to be read;
+- loads or stores more than plainly, `st.volatile.global.f32`, or reaches memory by a generic address, `st.f32`, which
+  may be shared or local memory, or any memory but global;
+- names shared memory, the kernel's own or the launch's, local memory, or a static of the module's, which the threads of
+  a block, or every kernel and the host, reach;
+- makes threads wait for each other, or orders what they write, `bar`, `membar`, `fence`; or works on the registers of
+  the threads of a warp together, `shfl`, `vote`, `mma`;
+- reaches memory that other threads reach at once, as an atomic, `atom` and `red`, or `cp.async`, does;
+- reaches a texture or a surface, jumps, or calls a function, `call`, which kernite does not follow;
+- is `#[cooperative]`, whose blocks wait for each other, so that kernite cannot prove that they reach memory apart.
+
+A crate may `forbid(unsafe_code)` and have safe GPU kernels, and launch them: the Rust the macro writes for a launcher
+is no `unsafe` of the crate's.
+
 ## Examples
 
-[`examples/my-app`](examples/my-app/src/main.rs) uses kernite as a crate outside it would: for the CPU `sum8`, `dot` for
-one accumulator, for four and for sixteen, two of which spill, `count_bytes`, by tables in its stack memory, `sum16`,
-which calls `sum8` for each half, `gcds`, which calls Stein's `gcd`, which calls itself, `histogram`, which counts in
-the module's memory from call to call, `weigh`, by weights in its constant memory, and `normalize` and `diffuse` on the
-threads of a grid, which compute what the GPU's do, bit for bit; and for the GPU
-`saxpy`, `block_sums` for blocks of 256 threads and of 1024 and `reverse_runs` in shared memory, `scale_f16`, written in place, `gcds`, which calls `gcd`, an `extern "ptx-func"`
-function that calls itself, `histogram`, which counts in the module's global memory from launch to launch, and
-`weigh`, by weights in its constant memory, with safe functions over them; and
-`matmul` on the tensor cores, by `cp.async`, `ldmatrix` and `mma`, in a module of its own, since it needs an Ampere
-GPU, `sm_80`; and in another, for Pascal's, `sm_60`, `normalize`, whose threads keep their floats in registers while
-the grid waits for every block's sum, and `diffuse`, which takes any number of steps in one launch, the grid waiting
-between them. Its tests hold each kernel to a scalar reference that does the same float operations in the same order,
-bit for bit, or the tensor cores, which add in an order of their own, to products of integers, exact in any order;
-and its listings to [`snapshots/`](examples/my-app/snapshots/).
+[`examples/my-app`](examples/my-app/src/main.rs) uses kernite as a crate outside it would: for the CPU `sum8`, a safe
+function of an array, `dot` for one accumulator, for four and for sixteen, two of which spill, `count_bytes`, by tables
+in its stack memory, `sum16`, a safe one too, which calls `sum8` for each half, `gcds`, a safe function of three slices,
+which calls Stein's `gcd`, a safe function of two numbers, which calls itself, `histogram`, which counts in the module's
+memory from call to call, `weigh`, by weights in its constant memory, and `normalize` and `diffuse` on the threads of a
+grid, which compute what the GPU's do, bit for bit; and for the GPU `saxpy`, a safe kernel, launched with no `unsafe`,
+`block_sums` for blocks of 256 threads and of 1024 and `reverse_runs` in shared memory, `scale_f16`, written in place, a
+safe one too, `gcds`, which calls `gcd`, an `extern "ptx-func"` function that calls itself, `histogram`, which counts in
+the module's global memory from launch to launch, and `weigh`, by weights in its constant memory, with safe functions
+over them; and `matmul` on the tensor cores, by `cp.async`, `ldmatrix` and `mma`, in a module of its own, since it needs
+an Ampere GPU, `sm_80`; and in another, for Pascal's, `sm_60`, `normalize`, whose threads keep their floats in registers
+while the grid waits for every block's sum, and `diffuse`, which takes any number of steps in one launch, the grid
+waiting between them. Its tests hold each kernel to a scalar reference that does the same float operations in the same
+order, bit for bit, or the tensor cores, which add in an order of their own, to products of integers, exact in any
+order; and its listings to [`snapshots/`](examples/my-app/snapshots/).
 
 ```
 cargo run -p my-app
@@ -1076,8 +1374,8 @@ Each crate depends only on the layers inside it. `crates/kernite/tests/architect
 | use cases | `kernite-build` | what kernite does with a module: ABIs, its rules, compiling each function; the ports a machine implements |
 | adapters | `kernite-x86`, `kernite-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kernite` | which machine and syntax each kernel compiles with |
-| delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, launchers of a grid's threads, or launchers of PTX |
-| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and memory the host reaches too, modules, launches, copies between GPUs; `f16` and `bf16`; depends on no other crate |
+| delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, and the safe functions that call them; launchers of a grid's threads, or launchers of PTX |
+| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and memory the host reaches too, modules, launches and what a safe kernel's launch must hold, copies between GPUs; `f16` and `bf16`; depends on no other crate |
 | runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid and the CPUs they run on, and the memory of a module of x86 kernels; depends on no other crate |
 
 ## Guarantees
@@ -1086,10 +1384,12 @@ The output is deterministic:
 - no crate depends on anything outside the workspace;
 - clippy forbids hash maps and hash sets.
 
-The Rust the macro writes needs no `allow` of a lint of Rust's, so a crate may `forbid` one, `dead_code` say, and build
-its kernels: Rust lints the names and the code a kernel is written with, and none that the macro adds. Clippy's
-`too_many_arguments` is the one lint a crate of kernels may not forbid: Clippy says it of a launcher of more than seven
-parameters, whoever wrote it, and each launcher allows it.
+The Rust the macro writes needs no `allow` of a lint of Rust's but one, so a crate may `forbid` the others, `dead_code`
+say, and build its kernels: Rust lints the names and the code a kernel is written with, and none that the macro adds. A
+crate of kernels may not forbid two lints: Rust's `improper_ctypes_definitions` where an x86 kernel takes a slice, which
+Rust says of a `sysv64` function that takes one, and which the function the macro writes for the kernel allows; and
+Clippy's `too_many_arguments`, which Clippy says of a launcher of more than seven parameters, whoever wrote it, and
+which each launcher allows.
 
 Each name that the Rust the macro writes binds for itself starts with `__kernite_`, for Rust reads a binding named as a
 const in scope as that const, and refuses one named as a static. So a module of kernels may have a const or a static of

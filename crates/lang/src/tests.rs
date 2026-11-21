@@ -6,49 +6,51 @@
 
 use crate::token::{Delim, Span, Tree, unescape};
 use crate::value::{IntTy, Value, article, cast, typed, with_article};
-use crate::{Mention, instance, parse};
+use crate::{ItemKind, Mention, instance, instructions, parse};
+
+type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
 #[test]
-fn the_lexer_reads_what_rust_writes() {
+fn the_lexer_reads_what_rust_writes() -> Result {
     let src = "a.b(0..n, 1.5e-3, 0x1F_u8, r#type, \"s\\\"q\", 1..=2) /* c /* nested */ */ // end";
-    let trees = crate::lex(src).unwrap();
+    let trees = crate::lex(src)?;
     assert_eq!(crate::text(&trees), r#"a.b(0..n, 1.5e-3, 0x1F_u8, r#type, "s\"q", 1..=2)"#);
+    Ok(())
 }
 
 /// The lexer refuses a name written raw that Rust refuses, at its `r#`: `self`, `Self`, `super`, `crate` and `_`, which
 /// Rust lets be written raw in no place, and an `r#` that no name follows. Every other name written raw is one name,
 /// whatever it starts as or is: a keyword, a weak one, a reserved one, or one that has `self` or `crate` in it.
 #[test]
-fn the_lexer_refuses_a_name_written_raw_that_rust_refuses() {
-    let error = |src: &str| crate::lex(src).unwrap_err().at(src);
+fn the_lexer_refuses_a_name_written_raw_that_rust_refuses() -> Result {
+    let error = |src: &str| -> Result<_> { Ok(crate::lex(src).err().ok_or("lex gave Ok")?.at(src)) };
     for name in ["self", "Self", "super", "crate", "_"] {
         let src = format!("a r#{name} b");
-        assert_eq!(error(&src), format!("1:3: `{name}` cannot be written raw"), "{src}");
+        assert_eq!(error(&src)?, format!("1:3: `{name}` cannot be written raw"), "{src}");
     }
     // No name after the `r#`: a space, the end, a bracket, a dot or a digit. A quote begins a raw string.
     for src in ["a r# b", "a r#", "a r#(b)", "a r#.b", "a r#9", "a r#1x"] {
-        assert_eq!(error(src), "1:3: `r#` comes before a name, as in `r#u64`", "{src}");
+        assert_eq!(error(src)?, "1:3: `r#` comes before a name, as in `r#u64`", "{src}");
     }
     let names = "r#u64 r#dyn r#union r#gen r#try r#_x r#__ r#selfie r#crate_ r#é self Self super crate _";
-    let idents: Vec<String> = crate::lex(names)
-        .unwrap()
+    let idents: Vec<String> = crate::lex(names)?
         .into_iter()
         .map(|tree| match tree {
-            Tree::Ident { name, .. } => name,
-            other => panic!("{other:?}"),
+            Tree::Ident { name, .. } => Ok(name),
+            other => Err(format!("{other:?}")),
         })
-        .collect();
+        .collect::<std::result::Result<_, _>>()?;
     assert_eq!(idents, names.split(' ').collect::<Vec<_>>());
+    Ok(())
 }
 
 /// The text of each token of `src`, which are all literals.
-fn lits(src: &str) -> Vec<String> {
-    crate::lex(src)
-        .unwrap()
+fn lits(src: &str) -> Result<Vec<String>> {
+    crate::lex(src)?
         .into_iter()
         .map(|tree| match tree {
-            Tree::Lit { text, .. } => text,
-            other => panic!("{src}: {other:?}"),
+            Tree::Lit { text, .. } => Ok(text),
+            other => Err(format!("{src}: {other:?}").into()),
         })
         .collect()
 }
@@ -58,7 +60,7 @@ fn lits(src: &str) -> Vec<String> {
 /// start, in the words of a plain string that is never closed. One of more than 255 `#` is an error at its start too,
 /// as in Rust.
 #[test]
-fn the_lexer_reads_a_raw_string_as_one_token() {
+fn the_lexer_reads_a_raw_string_as_one_token() -> Result {
     for lit in [
         r#"r"hi""#,
         r##"r#"hi"#"##,
@@ -69,31 +71,32 @@ fn the_lexer_reads_a_raw_string_as_one_token() {
         r##"r#""#"##,
         "r\"two\nlines\"",
     ] {
-        assert_eq!(lits(lit), [lit], "{lit}");
+        assert_eq!(lits(lit)?, [lit], "{lit}");
     }
     // Each ends where Rust ends it, and the `#` after that is a token of its own.
-    assert_eq!(lits(r##"r#"a"# r"b" "c""##), [r##"r#"a"#"##, r#"r"b""#, r#""c""#]);
-    let trees = crate::lex("r#\"a\"##").unwrap();
+    assert_eq!(lits(r##"r#"a"# r"b" "c""##)?, [r##"r#"a"#"##, r#"r"b""#, r#""c""#]);
+    let trees = crate::lex("r#\"a\"##")?;
     assert!(matches!(&trees[..], [Tree::Lit { text, .. }, Tree::Punct { ch: '#', .. }] if text == "r#\"a\"#"));
-    let error = |src: &str| crate::lex(src).unwrap_err().at(src);
+    let error = |src: &str| -> Result<_> { Ok(crate::lex(src).err().ok_or("lex gave Ok")?.at(src)) };
     for src in [r#"r"hi"#, r##"r#"hi""##, r###"r##"hi"#"###, r#"r""#, r##"r#""##, r##"r#"hi"x"##] {
-        assert_eq!(error(&format!("a {src}")), "1:3: this string is never closed", "{src}");
+        assert_eq!(error(&format!("a {src}"))?, "1:3: this string is never closed", "{src}");
     }
-    assert_eq!(error(r#"a "hi"#), "1:3: this string is never closed");
+    assert_eq!(error(r#"a "hi"#)?, "1:3: this string is never closed");
     // As in Rust, a raw string begins with 255 `#` at most.
     let raw = |hashes: usize| format!("r{0}\"a\"{0}", "#".repeat(hashes));
-    assert_eq!(lits(&raw(255)), [raw(255)]);
-    assert_eq!(error(&format!("a {}", raw(256))), "1:3: a raw string has 255 `#` at most, as in Rust");
+    assert_eq!(lits(&raw(255))?, [raw(255)]);
+    assert_eq!(error(&format!("a {}", raw(256)))?, "1:3: a raw string has 255 `#` at most, as in Rust");
     // A name that begins as a raw string is a name, and an `r` that ends a name, or stands alone, is no raw string.
-    let kinds = |src: &str| -> String {
+    let kinds = |src: &str| -> Result<String> {
         let kind = |tree: &Tree| match tree {
             Tree::Lit { .. } => 'l',
             Tree::Ident { .. } => 'i',
             _ => 'p',
         };
-        crate::lex(src).unwrap().iter().map(kind).collect()
+        Ok(crate::lex(src)?.iter().map(kind).collect())
     };
-    assert_eq!(kinds(r##"r#type bar#"x"# r "y""##), "iiplpil");
+    assert_eq!(kinds(r##"r#type bar#"x"# r "y""##)?, "iiplpil");
+    Ok(())
 }
 
 /// A string, plain or raw, is its text as the source has it, a CRLF in it too, the one after a `\` too, which the
@@ -102,11 +105,11 @@ fn the_lexer_reads_a_raw_string_as_one_token() {
 /// comment, `//`, `////`, `/*` and `/***`, it is taken, as Rust takes it. A comment within another is of the outer
 /// one's kind, as in Rust.
 #[test]
-fn a_cr_on_its_own_is_refused_in_a_string_and_a_doc_comment_and_a_crlf_in_a_string_stays() {
+fn a_cr_on_its_own_is_refused_in_a_string_and_a_doc_comment_and_a_crlf_in_a_string_stays() -> Result {
     for src in ["\"a\r\nb\"", "r\"a\r\nb\"", "r#\"a\r\n\r\nb\"#", "\"a\\\r\n  b\"", "\"a\\r\\nb\"", "r\"a\\r\\nb\""] {
-        assert_eq!(lits(src), [src], "{src:?}");
+        assert_eq!(lits(src)?, [src], "{src:?}");
     }
-    let error = |src: &str| crate::lex(src).unwrap_err().at(src);
+    let error = |src: &str| -> Result<_> { Ok(crate::lex(src).err().ok_or("lex gave Ok")?.at(src)) };
     let words = |what: &str| format!("a CR on its own is not allowed in {what}, as in Rust");
     let (string, raw, doc) = (words("a string") + ": write `\\r`", words("a raw string"), words("a doc comment"));
     for (src, at, message) in [
@@ -126,11 +129,11 @@ fn a_cr_on_its_own_is_refused_in_a_string_and_a_doc_comment_and_a_crlf_in_a_stri
         ("/**\r\n * a\r\n * b\r */", "3:5", &doc),
         ("/** a /* b\rc */ d */", "1:11", &doc),
     ] {
-        assert_eq!(error(src), format!("{at}: {message}"), "{src:?}");
+        assert_eq!(error(src)?, format!("{at}: {message}"), "{src:?}");
     }
     // Never closed is told as it was, at the start of the string.
-    assert_eq!(error("a \"b\rc"), "1:3: this string is never closed");
-    assert_eq!(error("a r\"b\rc"), "1:3: this string is never closed");
+    assert_eq!(error("a \"b\rc")?, "1:3: this string is never closed");
+    assert_eq!(error("a r\"b\rc")?, "1:3: this string is never closed");
     // A comment that is no doc comment, and a CRLF that ends a line of a doc comment, hold nothing to refuse.
     for src in [
         "// a\rb",
@@ -144,6 +147,7 @@ fn a_cr_on_its_own_is_refused_in_a_string_and_a_doc_comment_and_a_crlf_in_a_stri
     ] {
         assert!(crate::lex(src).is_ok(), "{src:?}");
     }
+    Ok(())
 }
 
 /// A plain string takes the escapes of Rust: `\n`, `\r`, `\t`, `\0`, `\\`, `\'` and `\"`; `\x41`, of two hex digits
@@ -151,7 +155,7 @@ fn a_cr_on_its_own_is_refused_in_a_string_and_a_doc_comment_and_a_crlf_in_a_stri
 /// and a `\` that ends a line, which leaves out the line break, a CRLF too, and the white space after it, however many
 /// lines it spans, and a CR on its own in it. The lexer keeps each as written, and `unescape` gives the text.
 #[test]
-fn a_string_takes_the_escapes_that_rust_reads() {
+fn a_string_takes_the_escapes_that_rust_reads() -> Result {
     for (body, text) in [
         (r#"\n\r\t\0\\\'\""#, "\n\r\t\0\\'\""),
         (r"\01\x7f\x7F\x41\x00", "\u{0}1\u{7f}\u{7f}A\u{0}"),
@@ -168,11 +172,12 @@ fn a_string_takes_the_escapes_that_rust_reads() {
         (r"a\r\nb", "a\r\nb"),
     ] {
         let lit = format!("\"{body}\"");
-        assert_eq!(lits(&lit), [lit.as_str()], "{body:?}");
+        assert_eq!(lits(&lit)?, [lit.as_str()], "{body:?}");
         assert_eq!(unescape(body), Ok(text.to_string()), "{body:?}");
     }
     // A raw string has none, and each of its `\` stays.
-    assert_eq!(lits(r##"r"\q\x80\u{d800}" r#"\"#"##), [r#"r"\q\x80\u{d800}""#, r##"r#"\"#"##]);
+    assert_eq!(lits(r##"r"\q\x80\u{d800}" r#"\"#"##)?, [r#"r"\q\x80\u{d800}""#, r##"r#"\"#"##]);
+    Ok(())
 }
 
 /// Each escape that Rust refuses is an error at its `\`, `line:column` and all, and a string says which of three it is:
@@ -180,8 +185,8 @@ fn a_string_takes_the_escapes_that_rust_reads() {
 /// a character, `_` after the first only. The first in a string is the one told, wherever the string is, though a CR on
 /// its own follows it.
 #[test]
-fn a_string_refuses_the_escapes_that_rust_refuses_at_the_escape() {
-    let error = |src: &str| crate::lex(src).unwrap_err().at(src);
+fn a_string_refuses_the_escapes_that_rust_refuses_at_the_escape() -> Result {
+    let error = |src: &str| -> Result<_> { Ok(crate::lex(src).err().ok_or("lex gave Ok")?.at(src)) };
     let none = |c: &str| {
         format!(
             "`\\{c}` is no escape, as in Rust: a string has `\\n`, `\\r`, `\\t`, `\\0`, `\\\\`, `\\'`, `\\\"`, \
@@ -229,24 +234,25 @@ fn a_string_refuses_the_escapes_that_rust_refuses_at_the_escape() {
         ("a \"\\q\rb\"", "1:4", none("q")),
         ("a \"b\" \"c\\x80\"", "1:9", x.into()),
     ] {
-        assert_eq!(error(src), format!("{at}: {message}"), "{src:?}");
+        assert_eq!(error(src)?, format!("{at}: {message}"), "{src:?}");
     }
     // A string that is never closed is told so, whatever is in it.
-    assert_eq!(error("a \"b\\q"), "1:3: this string is never closed");
+    assert_eq!(error("a \"b\\q")?, "1:3: this string is never closed");
+    Ok(())
 }
 
 /// The tokens of `src`, a source with lifetimes in it, as `for<'a> fn(&'a u8)` has. The lexer of a
 /// string refuses a lifetime, but the macro is given one as `proc_macro` hands it over: a `'` right before
 /// the name that follows it. So each `'` of `src` is lexed as the start of a word, `lt_a`, which is then
 /// made into the two tokens.
-fn lexed_with_lifetimes(src: &str) -> Vec<Tree> {
+fn lexed_with_lifetimes(src: &str) -> Result<Vec<Tree>> {
     fn made(trees: Vec<Tree>) -> Vec<Tree> {
         trees
             .into_iter()
             .flat_map(|tree| match tree {
-                Tree::Ident { name, space, span } if name.starts_with("lt_") => vec![
+                Tree::Ident { ref name, space, span } if let Some(word) = name.strip_prefix("lt_") => vec![
                     Tree::Punct { ch: '\'', space, span },
-                    Tree::Ident { name: name["lt_".len()..].to_string(), space: false, span },
+                    Tree::Ident { name: word.to_string(), space: false, span },
                 ],
                 Tree::Group { delim, trees, space, space_close, span } => {
                     vec![Tree::Group { delim, trees: made(trees), space, space_close, span }]
@@ -255,14 +261,15 @@ fn lexed_with_lifetimes(src: &str) -> Vec<Tree> {
             })
             .collect()
     }
-    made(crate::lex(&src.replace('\'', "lt_")).unwrap())
+    Ok(made(crate::lex(&src.replace('\'', "lt_"))?))
 }
 
-/// A type as the parser holds it, written out: a name, a name with arguments, an array or a slice, whose length is
-/// left out.
+/// A type as the parser holds it, written out: a name, a reference to an array, a name with arguments, an array or a
+/// slice, whose length is left out.
 fn shown(ty: &crate::Type) -> String {
     match ty {
         crate::Type::Name(name, _) => name.clone(),
+        crate::Type::Ref(write, array, _) => format!("&{}{}", if *write { "mut " } else { "" }, shown(array)),
         crate::Type::Generic(name, args, _) => {
             format!("{name}<{}>", args.iter().map(shown).collect::<Vec<_>>().join(", "))
         }
@@ -276,8 +283,8 @@ fn shown(ty: &crate::Type) -> String {
 /// side of a `+` or a `=` that no operator holds and of an arrow, `->`, and none beside the rest, nor
 /// inside an operator, `+=`, `==`, `=>`, `<=`, `..=` or `->`.
 #[test]
-fn a_type_is_written_as_rust_writes_it() {
-    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+fn a_type_is_written_as_rust_writes_it() -> Result {
+    let written = |src: &str| -> Result<_> { Ok(crate::text(&crate::lex(src)?)) };
     for ty in [
         "*const [usize; 3]",
         "*mut *const f32",
@@ -305,27 +312,27 @@ fn a_type_is_written_as_rust_writes_it() {
         "Box<dyn Fn(u8) -> u8 + Send>",
         "*const (dyn Fn(u8) -> u8 + Send)",
     ] {
-        assert_eq!(written(ty), ty);
+        assert_eq!(written(ty)?, ty);
     }
     // The text of an expression has such operators, which get no space inside or beside them.
     for expr in ["a+=b", "a==b", "a=>b", "a<=b", "0..=n"] {
-        assert_eq!(written(expr), expr);
+        assert_eq!(written(expr)?, expr);
     }
-    assert_eq!(written("*  mut*const[ usize ;3 ]"), "*mut *const [usize; 3]");
-    assert_eq!(written("(u32 ,u32 , )"), "(u32, u32,)");
-    assert_eq!(written("Box<dyn A+B>"), "Box<dyn A + B>");
-    assert_eq!(written("dyn  Iterator<Item=u8>"), "dyn Iterator<Item = u8>");
+    assert_eq!(written("*  mut*const[ usize ;3 ]")?, "*mut *const [usize; 3]");
+    assert_eq!(written("(u32 ,u32 , )")?, "(u32, u32,)");
+    assert_eq!(written("Box<dyn A+B>")?, "Box<dyn A + B>");
+    assert_eq!(written("dyn  Iterator<Item=u8>")?, "dyn Iterator<Item = u8>");
     // Punctuation beside a `=` or a `+` does not hold it: `=&`, `>+` and `+?` are no operators.
-    assert_eq!(written("Box<dyn Iterator<Item=&u8>>"), "Box<dyn Iterator<Item = &u8>>");
-    assert_eq!(written("Box<dyn Iterator<Item = u8>+Send>"), "Box<dyn Iterator<Item = u8> + Send>");
-    assert_eq!(written("*const dyn A+?Sized"), "*const dyn A + ?Sized");
+    assert_eq!(written("Box<dyn Iterator<Item=&u8>>")?, "Box<dyn Iterator<Item = &u8>>");
+    assert_eq!(written("Box<dyn Iterator<Item = u8>+Send>")?, "Box<dyn Iterator<Item = u8> + Send>");
+    assert_eq!(written("*const dyn A+?Sized")?, "*const dyn A + ?Sized");
     // The `>` of an arrow, with punctuation right after it, `->&`, is the arrow's and no other's.
-    assert_eq!(written("*const fn(u32)->u32"), "*const fn(u32) -> u32");
-    assert_eq!(written("Pair<fn()->&u8,2>"), "Pair<fn() -> &u8, 2>");
-    assert_eq!(written("Box<dyn Fn(u8)->u8+Send>"), "Box<dyn Fn(u8) -> u8 + Send>");
-    assert_eq!(written("fn(fn()->!)  ->  !"), "fn(fn() -> !) -> !");
+    assert_eq!(written("*const fn(u32)->u32")?, "*const fn(u32) -> u32");
+    assert_eq!(written("Pair<fn()->&u8,2>")?, "Pair<fn() -> &u8, 2>");
+    assert_eq!(written("Box<dyn Fn(u8)->u8+Send>")?, "Box<dyn Fn(u8) -> u8 + Send>");
+    assert_eq!(written("fn(fn()->!)  ->  !")?, "fn(fn() -> !) -> !");
     // A binder is followed by a space; the `>` that closes the arguments of a type is no binder's.
-    let bound = |src: &str| crate::text(&lexed_with_lifetimes(src));
+    let bound = |src: &str| -> Result<_> { Ok(crate::text(&lexed_with_lifetimes(src)?)) };
     for ty in [
         "for<'a> fn(&'a u8)",
         "for<'a> fn(&'a u8) -> &'a u8",
@@ -340,17 +347,18 @@ fn a_type_is_written_as_rust_writes_it() {
         "Box<dyn for<'a> Tr<'a>>",
         "dyn for<'a> Tr<'a> + Send",
     ] {
-        assert_eq!(bound(ty), ty);
+        assert_eq!(bound(ty)?, ty);
     }
-    assert_eq!(bound("for<'a>fn(&'a u8)"), "for<'a> fn(&'a u8)");
-    assert_eq!(bound("for < 'a >  fn(&'a u8)->&'a u8"), "for<'a> fn(&'a u8) -> &'a u8");
-    assert_eq!(bound("Option<&dyn for<'a>Fn(&'a u8)>"), "Option<&dyn for<'a> Fn(&'a u8)>");
-    assert_eq!(bound("Box<dyn Send+for<'a>Fn(&'a u8)>"), "Box<dyn Send + for<'a> Fn(&'a u8)>");
+    assert_eq!(bound("for<'a>fn(&'a u8)")?, "for<'a> fn(&'a u8)");
+    assert_eq!(bound("for < 'a >  fn(&'a u8)->&'a u8")?, "for<'a> fn(&'a u8) -> &'a u8");
+    assert_eq!(bound("Option<&dyn for<'a>Fn(&'a u8)>")?, "Option<&dyn for<'a> Fn(&'a u8)>");
+    assert_eq!(bound("Box<dyn Send+for<'a>Fn(&'a u8)>")?, "Box<dyn Send + for<'a> Fn(&'a u8)>");
+    Ok(())
 }
 
 /// `src`, a type, with a macro's fragment where it has `frag`: a group of no brackets that holds `inside`, which is one
 /// type, as brackets make it.
-fn with_fragment(src: &str, inside: &str) -> Vec<Tree> {
+fn with_fragment(src: &str, inside: &str) -> Result<Vec<Tree>> {
     fn grouped(trees: Vec<Tree>, inside: &[Tree]) -> Vec<Tree> {
         trees
             .into_iter()
@@ -365,7 +373,7 @@ fn with_fragment(src: &str, inside: &str) -> Vec<Tree> {
             })
             .collect()
     }
-    grouped(lexed_with_lifetimes(src), &lexed_with_lifetimes(inside))
+    Ok(grouped(lexed_with_lifetimes(src)?, &lexed_with_lifetimes(inside)?))
 }
 
 /// The bounds of a trait object that a macro's fragment holds, `dyn A + B`, are written in parentheses where Rust reads
@@ -374,8 +382,8 @@ fn with_fragment(src: &str, inside: &str) -> Vec<Tree> {
 /// written as they are. Anywhere else the fragment is written as it is, and so is one with no `+` of its own: none, one
 /// among the arguments of a type, or one in the parentheses the user wrote.
 #[test]
-fn the_bounds_of_a_fragment_are_in_parentheses_where_rust_reads_a_type_of_no_bounds() {
-    let written = |src: &str, inside: &str| crate::text(&with_fragment(src, inside));
+fn the_bounds_of_a_fragment_are_in_parentheses_where_rust_reads_a_type_of_no_bounds() -> Result {
+    let written = |src: &str, inside: &str| -> Result<_> { Ok(crate::text(&with_fragment(src, inside)?)) };
     for (src, ty) in [
         ("&frag", "&(dyn A + B)"),
         ("&mut frag", "&mut (dyn A + B)"),
@@ -392,20 +400,21 @@ fn the_bounds_of_a_fragment_are_in_parentheses_where_rust_reads_a_type_of_no_bou
         ("fn(&mut frag) -> u8", "fn(&mut (dyn A + B)) -> u8"),
         ("Wrap<&'static frag>", "Wrap<&'static (dyn A + B)>"),
     ] {
-        assert_eq!(written(src, "dyn A + B"), ty, "{src}");
+        assert_eq!(written(src, "dyn A + B")?, ty, "{src}");
     }
     for src in
         ["frag", "Wrap<frag>", "(frag, u8)", "(u8, frag)", "[frag; 2]", "[frag]", "fn(frag) -> u8", "Pair<u8, frag>"]
     {
-        assert_eq!(written(src, "dyn A + B"), src.replace("frag", "dyn A + B"), "{src}");
+        assert_eq!(written(src, "dyn A + B")?, src.replace("frag", "dyn A + B"), "{src}");
     }
     for inside in ["u8", "[u8]", "Wrap<u8>", "Wrap<dyn A + B>", "Wrap<dyn Fn() -> u8 + B>", "(dyn A + B)"] {
         for src in ["&frag", "*const frag", "&'a mut frag", "fn() -> frag"] {
-            assert_eq!(written(src, inside), src.replace("frag", inside), "{src} with {inside}");
+            assert_eq!(written(src, inside)?, src.replace("frag", inside), "{src} with {inside}");
         }
     }
     // What is not the type's own is as the source has it, the length of an array.
-    assert_eq!(written("[u8; &frag]", "a + b"), "[u8; &a + b]");
+    assert_eq!(written("[u8; &frag]", "a + b")?, "[u8; &a + b]");
+    Ok(())
 }
 
 /// A type has a space after a `:` that is not half of a `::`, `fn(x: u8)`, `Item: Copy` and `'b: 'a`; after
@@ -413,8 +422,8 @@ fn the_bounds_of_a_fragment_are_in_parentheses_where_rust_reads_a_type_of_no_bou
 /// `impl`, `dyn (A) + B` and `impl 'a + A`; and before `as`, `<Vec<u8> as Tr>::Out`. The braces of a macro have
 /// a space before them, `byte! {..}`; the parentheses of a macro have none, `byte!(_)`.
 #[test]
-fn a_colon_a_lifetime_and_a_macros_braces_are_written_as_rust_writes_them() {
-    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+fn a_colon_a_lifetime_and_a_macros_braces_are_written_as_rust_writes_them() -> Result {
+    let written = |src: &str| -> Result<_> { Ok(crate::text(&crate::lex(src)?)) };
     for (src, ty) in [
         ("fn(f16:u8)", "fn(f16: u8)"),
         ("fn(f16 : u8)", "fn(f16: u8)"),
@@ -444,9 +453,9 @@ fn a_colon_a_lifetime_and_a_macros_braces_are_written_as_rust_writes_them() {
         ("[byte!{_};1]", "[byte! {_}; 1]"),
         ("fn(u8)->byte!{_}", "fn(u8) -> byte! {_}"),
     ] {
-        assert_eq!(written(src), ty, "{src}");
+        assert_eq!(written(src)?, ty, "{src}");
     }
-    let bound = |src: &str| crate::text(&lexed_with_lifetimes(src));
+    let bound = |src: &str| -> Result<_> { Ok(crate::text(&lexed_with_lifetimes(src)?)) };
     for (src, ty) in [
         ("&'a [u8]", "&'a [u8]"),
         ("&'static [u8]", "&'static [u8]"),
@@ -477,14 +486,15 @@ fn a_colon_a_lifetime_and_a_macros_braces_are_written_as_rust_writes_them() {
         ("for<'a,'b:'a> fn(&'a u8,&'b u8)", "for<'a, 'b: 'a> fn(&'a u8, &'b u8)"),
         ("dyn for<'a> Tr<'a,Item:Copy>", "dyn for<'a> Tr<'a, Item: Copy>"),
     ] {
-        assert_eq!(bound(src), ty, "{src}");
+        assert_eq!(bound(src)?, ty, "{src}");
     }
+    Ok(())
 }
 
 /// A keyword written raw is a name: `r#mut` has none of the spaces `mut` has.
 #[test]
-fn a_keyword_written_raw_is_a_name_and_has_none_of_the_spaces_a_keyword_has() {
-    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+fn a_keyword_written_raw_is_a_name_and_has_none_of_the_spaces_a_keyword_has() -> Result {
+    let written = |src: &str| -> Result<_> { Ok(crate::text(&crate::lex(src)?)) };
     for (src, ty) in [
         ("mut::Foo", "mut ::Foo"),
         ("r#mut::Foo", "r#mut::Foo"),
@@ -497,8 +507,9 @@ fn a_keyword_written_raw_is_a_name_and_has_none_of_the_spaces_a_keyword_has() {
         ("Foo<r#as>", "Foo<r#as>"),
         ("Foo<r#as,r#mut>", "Foo<r#as, r#mut>"),
     ] {
-        assert_eq!(written(src), ty, "{src}");
+        assert_eq!(written(src)?, ty, "{src}");
     }
+    Ok(())
 }
 
 /// The `>` before a `=` closes the arguments of a name, so the two are no `>=`: an associated type with
@@ -506,17 +517,17 @@ fn a_keyword_written_raw_is_a_name_and_has_none_of_the_spaces_a_keyword_has() {
 /// does, or spaces one side of the `=`. And `as` has a space after it before a path from the root,
 /// `<A as ::b::C>::D`.
 #[test]
-fn an_associated_type_with_arguments_and_a_path_from_the_root_after_as_are_written_as_rust_writes_them() {
-    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+fn an_associated_type_with_arguments_and_a_path_from_the_root_after_as_are_written_as_rust_writes_them() -> Result {
+    let written = |src: &str| -> Result<_> { Ok(crate::text(&crate::lex(src)?)) };
     for ty in [
         "dyn Tr<Item<X> = u8>",
         "dyn Tr<Item<X> = u8, Other<Y, Z> = &u8>",
         "<A as ::b::C>::D",
         "<A as ::b::C<u8>>::D<u16>",
     ] {
-        assert_eq!(written(ty), ty);
+        assert_eq!(written(ty)?, ty);
     }
-    assert_eq!(written("<A as::b::C>::D"), "<A as ::b::C>::D");
+    assert_eq!(written("<A as::b::C>::D")?, "<A as ::b::C>::D");
     for (src, ty) in [
         ("dyn Tr<Item<X>=u8>", "dyn Tr<Item<X> = u8>"),
         ("dyn Tr<Item<X> =u8>", "dyn Tr<Item<X> = u8>"),
@@ -530,44 +541,48 @@ fn an_associated_type_with_arguments_and_a_path_from_the_root_after_as_are_writt
         ("Box<dyn Tr<Item<X>=u8>+Send>", "Box<dyn Tr<Item<X> = u8> + Send>"),
         ("*const Foo<Item<X>=u8>", "*const Foo<Item<X> = u8>"),
     ] {
-        assert_eq!(written(src), ty, "{src}");
+        assert_eq!(written(src)?, ty, "{src}");
     }
-    let bound = |src: &str| crate::text(&lexed_with_lifetimes(src));
+    let bound = |src: &str| -> Result<_> { Ok(crate::text(&lexed_with_lifetimes(src)?)) };
     for src in ["dyn Tr<Item<'a>=&'a u8>", "dyn Tr<Item<'a> =&'a u8>", "dyn Tr<Item<'a>= &'a u8>"] {
-        assert_eq!(bound(src), "dyn Tr<Item<'a> = &'a u8>", "{src}");
+        assert_eq!(bound(src)?, "dyn Tr<Item<'a> = &'a u8>", "{src}");
     }
-    assert_eq!(bound("dyn for<'a> Tr<Item<'a>=&'a u8>"), "dyn for<'a> Tr<Item<'a> = &'a u8>");
+    assert_eq!(bound("dyn for<'a> Tr<Item<'a>=&'a u8>")?, "dyn for<'a> Tr<Item<'a> = &'a u8>");
+    Ok(())
 }
 
 /// The lexer says, of each token, whether the source has a space before it: a space, a line break or a
 /// comment; and of each group, whether it has one before its first token and before the bracket that
 /// closes it.
 #[test]
-fn the_lexer_says_where_the_source_has_a_space() {
-    let spaces = |src: &str| crate::lex(src).unwrap().iter().map(Tree::space).collect::<Vec<_>>();
-    assert_eq!(spaces("a+b"), [false, false, false]);
-    assert_eq!(spaces("a + b"), [false, true, true]);
-    assert_eq!(spaces("a+ b"), [false, false, true]);
-    assert_eq!(spaces("a +b"), [false, true, false]);
-    assert_eq!(spaces("a  +\n\t b"), [false, true, true]);
-    assert_eq!(spaces("a/**/+// c\nb"), [false, true, true]);
-    assert_eq!(spaces("a/**/+b"), [false, true, false]);
-    assert_eq!(spaces("a<<b a< <b"), [false, false, false, false, true, false, true, false]);
-    let group = |src: &str| match crate::lex(src).unwrap().last() {
-        Some(Tree::Group { trees, space, space_close, .. }) => {
-            (*space, trees.first().is_some_and(Tree::space), *space_close)
-        }
-        _ => panic!("{src} does not end in a group"),
+fn the_lexer_says_where_the_source_has_a_space() -> Result {
+    let spaces = |src: &str| -> Result<_> { Ok(crate::lex(src)?.iter().map(Tree::space).collect::<Vec<_>>()) };
+    assert_eq!(spaces("a+b")?, [false, false, false]);
+    assert_eq!(spaces("a + b")?, [false, true, true]);
+    assert_eq!(spaces("a+ b")?, [false, false, true]);
+    assert_eq!(spaces("a +b")?, [false, true, false]);
+    assert_eq!(spaces("a  +\n\t b")?, [false, true, true]);
+    assert_eq!(spaces("a/**/+// c\nb")?, [false, true, true]);
+    assert_eq!(spaces("a/**/+b")?, [false, true, false]);
+    assert_eq!(spaces("a<<b a< <b")?, [false, false, false, false, true, false, true, false]);
+    let group = |src: &str| -> Result<_> {
+        Ok(match crate::lex(src)?.last() {
+            Some(Tree::Group { trees, space, space_close, .. }) => {
+                (*space, trees.first().is_some_and(Tree::space), *space_close)
+            }
+            _ => return Err(format!("{src} does not end in a group").into()),
+        })
     };
-    assert_eq!(group("f(a)"), (false, false, false));
-    assert_eq!(group("f (a)"), (true, false, false));
-    assert_eq!(group("f( a)"), (false, true, false));
-    assert_eq!(group("f(a )"), (false, false, true));
-    assert_eq!(group("f( a )"), (false, true, true));
-    assert_eq!(group("f{}"), (false, false, false));
-    assert_eq!(group("f{ }"), (false, false, true));
-    assert_eq!(group("f{/**/}"), (false, false, true));
-    assert_eq!(group("f{\n}"), (false, false, true));
+    assert_eq!(group("f(a)")?, (false, false, false));
+    assert_eq!(group("f (a)")?, (true, false, false));
+    assert_eq!(group("f( a)")?, (false, true, false));
+    assert_eq!(group("f(a )")?, (false, false, true));
+    assert_eq!(group("f( a )")?, (false, true, true));
+    assert_eq!(group("f{}")?, (false, false, false));
+    assert_eq!(group("f{ }")?, (false, false, true));
+    assert_eq!(group("f{/**/}")?, (false, false, true));
+    assert_eq!(group("f{\n}")?, (false, false, true));
+    Ok(())
 }
 
 /// Expressions, each as rustfmt writes it. The spaces that do not stand between two word characters are the
@@ -760,44 +775,45 @@ fn spaced_both_ways(row: &str) -> Vec<String> {
 /// rustfmt writes, and with one space of the form, or one space less, at a time. The type around it is spaced as
 /// before.
 #[test]
-fn a_block_is_written_as_its_source_has_it() {
-    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+fn a_block_is_written_as_its_source_has_it() -> Result {
+    let written = |src: &str| -> Result<_> { Ok(crate::text(&crate::lex(src)?)) };
     for expr in EXPRESSIONS {
         for src in spaced_both_ways(&format!("Marker<{{ {expr} }}>")) {
-            assert_eq!(written(&src), src);
+            assert_eq!(written(&src)?, src);
         }
     }
     // Rows of the review: the operators of a comparison are not the brackets of a type, and the other way round.
-    assert_eq!(written("Marker<{!0usize&3}>"), "Marker<{!0usize&3}>");
-    assert_eq!(written("Marker<{ !0usize & 3 }>"), "Marker<{ !0usize & 3 }>");
-    assert_eq!(written("Marker<{<Vec<u8>as Tr>::N}>"), "Marker<{<Vec<u8>as Tr>::N}>");
-    assert_eq!(written("Marker<{let v:Option<usize>=Some(3);v}>"), "Marker<{let v:Option<usize>=Some(3);v}>");
-    assert_eq!(written("Marker<{N*2}>"), "Marker<{N*2}>");
-    assert_eq!(written("Marker<{ N * 2 }>"), "Marker<{ N * 2 }>");
-    assert_eq!(written("Marker<{N * 2}>"), "Marker<{N * 2}>");
-    assert_eq!(written("Marker<{ N*2 }>"), "Marker<{ N*2 }>");
+    assert_eq!(written("Marker<{!0usize&3}>")?, "Marker<{!0usize&3}>");
+    assert_eq!(written("Marker<{ !0usize & 3 }>")?, "Marker<{ !0usize & 3 }>");
+    assert_eq!(written("Marker<{<Vec<u8>as Tr>::N}>")?, "Marker<{<Vec<u8>as Tr>::N}>");
+    assert_eq!(written("Marker<{let v:Option<usize>=Some(3);v}>")?, "Marker<{let v:Option<usize>=Some(3);v}>");
+    assert_eq!(written("Marker<{N*2}>")?, "Marker<{N*2}>");
+    assert_eq!(written("Marker<{ N * 2 }>")?, "Marker<{ N * 2 }>");
+    assert_eq!(written("Marker<{N * 2}>")?, "Marker<{N * 2}>");
+    assert_eq!(written("Marker<{ N*2 }>")?, "Marker<{ N*2 }>");
     // An empty block has none, or the one the source has.
-    assert_eq!(written("Marker<{}>"), "Marker<{}>");
-    assert_eq!(written("Marker<{ }>"), "Marker<{ }>");
+    assert_eq!(written("Marker<{}>")?, "Marker<{}>");
+    assert_eq!(written("Marker<{ }>")?, "Marker<{ }>");
     // A run of spaces, line breaks and comments is one space, and a comment is a space where it stands.
-    assert_eq!(written("Marker<{  N   *\t2  }>"), "Marker<{ N * 2 }>");
-    assert_eq!(written("Marker<{\n    N *\n    2\n}>"), "Marker<{ N * 2 }>");
-    assert_eq!(written("Marker<{ // twice\n    N *\n    2 // the last\n}>"), "Marker<{ N * 2 }>");
-    assert_eq!(written("Marker<{ /* a */ N /* b */ * /* c */ 2 /* d */ }>"), "Marker<{ N * 2 }>");
-    assert_eq!(written("Marker<{N/* b */*2}>"), "Marker<{N *2}>");
-    assert_eq!(written("Marker<{N*/* c */2}>"), "Marker<{N* 2}>");
-    assert_eq!(written("Marker<{/* a */N*2/* d */}>"), "Marker<{ N*2 }>");
+    assert_eq!(written("Marker<{  N   *\t2  }>")?, "Marker<{ N * 2 }>");
+    assert_eq!(written("Marker<{\n    N *\n    2\n}>")?, "Marker<{ N * 2 }>");
+    assert_eq!(written("Marker<{ // twice\n    N *\n    2 // the last\n}>")?, "Marker<{ N * 2 }>");
+    assert_eq!(written("Marker<{ /* a */ N /* b */ * /* c */ 2 /* d */ }>")?, "Marker<{ N * 2 }>");
+    assert_eq!(written("Marker<{N/* b */*2}>")?, "Marker<{N *2}>");
+    assert_eq!(written("Marker<{N*/* c */2}>")?, "Marker<{N* 2}>");
+    assert_eq!(written("Marker<{/* a */N*2/* d */}>")?, "Marker<{ N*2 }>");
     // The block inside a block, and the array inside it, are as the source has them too.
-    assert_eq!(written("Marker<{{N*2}}>"), "Marker<{{N*2}}>");
-    assert_eq!(written("Marker<{ { N * 2 } }>"), "Marker<{ { N * 2 } }>");
-    assert_eq!(written("Marker<{size_of::<[u8;4]>()}>"), "Marker<{size_of::<[u8;4]>()}>");
-    assert_eq!(written("Marker<{size_of::<[u8; 4]>()}>"), "Marker<{size_of::<[u8; 4]>()}>");
+    assert_eq!(written("Marker<{{N*2}}>")?, "Marker<{{N*2}}>");
+    assert_eq!(written("Marker<{ { N * 2 } }>")?, "Marker<{ { N * 2 } }>");
+    assert_eq!(written("Marker<{size_of::<[u8;4]>()}>")?, "Marker<{size_of::<[u8;4]>()}>");
+    assert_eq!(written("Marker<{size_of::<[u8; 4]>()}>")?, "Marker<{size_of::<[u8; 4]>()}>");
+    Ok(())
 }
 
 /// The type's own tokens around a block are spaced as ever, whatever the source has; the block is not.
 #[test]
-fn the_type_around_a_block_is_spaced_as_before() {
-    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+fn the_type_around_a_block_is_spaced_as_before() -> Result {
+    let written = |src: &str| -> Result<_> { Ok(crate::text(&crate::lex(src)?)) };
     for (src, ty) in [
         ("Pair<u8,{3}>", "Pair<u8, {3}>"),
         ("Pair<u8 , { 3 }>", "Pair<u8, { 3 }>"),
@@ -818,20 +834,21 @@ fn the_type_around_a_block_is_spaced_as_before() {
         ("&mut Marker<{N*2}>", "&mut Marker<{N*2}>"),
         ("Marker<{N*2},{ N * 2 }>", "Marker<{N*2}, { N * 2 }>"),
     ] {
-        assert_eq!(written(src), ty, "{src}");
+        assert_eq!(written(src)?, ty, "{src}");
     }
+    Ok(())
 }
 
 /// The length of an array, all that follows its `;`, is written as its source has it, one space after the
 /// `;` and none before the `]`: `[u8; N*2]` from `[u8;N*2]` and `[u8; N * 2]` from `[u8 ; N * 2 ]`.
 #[test]
-fn an_arrays_length_is_written_as_its_source_has_it() {
-    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+fn an_arrays_length_is_written_as_its_source_has_it() -> Result {
+    let written = |src: &str| -> Result<_> { Ok(crate::text(&crate::lex(src)?)) };
     // A length is an expression; statements, `let x = 1; x`, are only a block's.
     for expr in EXPRESSIONS.iter().filter(|e| !e.starts_with("let ")) {
         for src in spaced_both_ways(&format!("[u8; {expr}]")) {
-            let length = src["[u8;".len()..src.len() - 1].trim_start();
-            assert_eq!(written(&src), format!("[u8; {length}]"), "{src}");
+            let length = src.strip_prefix("[u8;").and_then(|s| s.strip_suffix(']')).ok_or("an array")?.trim_start();
+            assert_eq!(written(&src)?, format!("[u8; {length}]"), "{src}");
         }
     }
     for (src, ty) in [
@@ -864,23 +881,24 @@ fn an_arrays_length_is_written_as_its_source_has_it() {
         ("&[u8]", "&[u8]"),
         ("&mut [Arr<{3}>]", "&mut [Arr<{3}>]"),
     ] {
-        assert_eq!(written(src), ty, "{src}");
+        assert_eq!(written(src)?, ty, "{src}");
     }
+    Ok(())
 }
 
 /// The arguments of a macro, in any of its brackets, are written as their source has them; the type around
 /// them is spaced as ever, and so is the space before the braces of a macro, `byte! {..}`.
 #[test]
-fn a_macros_arguments_are_written_as_their_source_has_them() {
-    let written = |src: &str| crate::text(&crate::lex(src).unwrap());
+fn a_macros_arguments_are_written_as_their_source_has_them() -> Result {
+    let written = |src: &str| -> Result<_> { Ok(crate::text(&crate::lex(src)?)) };
     for expr in EXPRESSIONS {
         for (open, close) in [("(", ")"), ("[", "]")] {
             for src in spaced_both_ways(&format!("m!{open} {expr} {close}")) {
-                assert_eq!(written(&src), src);
+                assert_eq!(written(&src)?, src);
             }
         }
         for src in spaced_both_ways(&format!("m!{{ {expr} }}")) {
-            assert_eq!(written(&src), src.replacen("!{", "! {", 1));
+            assert_eq!(written(&src)?, src.replacen("!{", "! {", 1));
         }
     }
     for (src, ty) in [
@@ -919,7 +937,56 @@ fn a_macros_arguments_are_written_as_their_source_has_them() {
         ("fn()->!", "fn() -> !"),
         ("Foo<!,(a:u8)>", "Foo<!, (a: u8)>"),
     ] {
-        assert_eq!(written(src), ty, "{src}");
+        assert_eq!(written(src)?, ty, "{src}");
+    }
+    Ok(())
+}
+
+/// A reference to an array, `&[f32; N]` or `&mut [f32; N]`, is a type of its own, read whole, and its
+/// length is a value worked out where it is read; a reference to anything else is read as a name.
+#[test]
+fn a_reference_to_an_array_is_a_type_and_any_other_reference_is_a_name() -> Result {
+    let src = "pub unsafe extern \"sysv64\" fn k<const N: usize>(a: &[f32; N], b: &mut [u64; 0x10], c: &[f32], \
+               d: &mut u8, e: &&[u8; 4], f: & mut [u8; 2]) {}";
+    let module = crate::module(&crate::lex(src)?, 0)?;
+    let crate::ItemKind::Fn(f) = &module.items[0].kind else { return Err("a function".into()) };
+    let types: Vec<(String, bool)> =
+        f.params.iter().map(|p| (shown(&p.ty), matches!(p.ty, crate::Type::Ref(..)))).collect();
+    let want = [
+        ("&[f32; ..]", true),
+        ("&mut [u64; ..]", true),
+        ("&[f32]", false),
+        ("&mut u8", false),
+        ("&&[u8; 4]", false),
+        ("&mut [u8; ..]", true),
+    ];
+    assert_eq!(types, want.map(|(ty, one)| (ty.to_string(), one)));
+    let crate::Type::Ref(write, array, span) = &f.params[0].ty else { return Err("a reference".into()) };
+    assert!(!write && matches!(**array, crate::Type::Array(..)));
+    assert_eq!(*span, Span(src.find("&[f32; N]").ok_or("find gave None")? as u32));
+    Ok(())
+}
+
+/// A reference to an array or to a slice is told by whether it writes, the type of its elements and, for an array,
+/// their count. The array's `;` is the one outside every bracket of its elements' type, so `&[[u8; 4]]` is a slice of
+/// arrays, and `&[[u8; 4]; 2]` an array of them. Any other reference is none, and so is one with a lifetime.
+#[test]
+fn a_reference_to_an_array_or_a_slice_is_split_at_the_semicolon_of_the_array_itself() {
+    let want = [
+        ("&[f32; 8]", Some((false, "f32", Some("8")))),
+        ("&mut [u64; N]", Some((true, "u64", Some("N")))),
+        ("&[[u8; 4]; 2]", Some((false, "[u8; 4]", Some("2")))),
+        ("&[f32]", Some((false, "f32", None))),
+        ("&mut [f32]", Some((true, "f32", None))),
+        ("&[[u8; 4]]", Some((false, "[u8; 4]", None))),
+        ("&mut [(u8, [u8; 2])]", Some((true, "(u8, [u8; 2])", None))),
+        ("&'a [f32; 8]", None),
+        ("&u8", None),
+        ("&&[u8; 4]", None),
+        ("*const [f32; 8]", None),
+    ];
+    for (ty, want) in want {
+        assert_eq!(crate::array_ref(ty), want, "{ty}");
     }
 }
 
@@ -928,25 +995,26 @@ fn a_macros_arguments_are_written_as_their_source_has_them() {
 /// parameter, which starts at its `for`, as the argument of another type, `Option<for<'a> fn(&'a u8)>`,
 /// and as a result.
 #[test]
-fn a_type_that_begins_with_a_binder_is_read_whole() {
+fn a_type_that_begins_with_a_binder_is_read_whole() -> Result {
     let src = "pub unsafe extern \"sysv64\" fn k(x: for<'a> fn(&'a u8), y: Option<for<'a> fn(&'a u8)>, \
                z: Option<&dyn for<'a> Fn(&'a u8)>) -> for<'a> fn(&'a u8) {}";
-    let module = crate::module(&lexed_with_lifetimes(src), 0).unwrap();
-    let crate::ItemKind::Fn(f) = &module.items[0].kind else { panic!("a function") };
+    let module = crate::module(&lexed_with_lifetimes(src)?, 0)?;
+    let crate::ItemKind::Fn(f) = &module.items[0].kind else { return Err("a function".into()) };
     let types: Vec<String> = f.params.iter().map(|p| shown(&p.ty)).collect();
     assert_eq!(types, ["for<'a> fn(&'a u8)", "Option<for<'a> fn(&'a u8)>", "Option<&dyn for<'a> Fn(&'a u8)>"]);
     // No `'` comes before the first `for`, so the lexer's offset is the source's.
-    assert_eq!(f.params[0].ty.span(), Span(src.find("for<").unwrap() as u32));
+    assert_eq!(f.params[0].ty.span(), Span(src.find("for<").ok_or("find gave None")? as u32));
     assert_eq!(f.ret.as_ref().map(|r| r.ty.as_str()), Some("for<'a> fn(&'a u8)"));
+    Ok(())
 }
 
 /// A name written raw is the name Rust reads: `r#u64` is `u64`. A type is read so wherever it is written: a
 /// parameter's, a result's, a const's, a static's, a variable's, an array's element, an argument of a type, and
 /// the names of a type read as text, `*const [r#f16; 4]`, at any depth. `text` writes a type as it was written.
 #[test]
-fn a_name_written_raw_is_the_name_rust_reads() {
+fn a_name_written_raw_is_the_name_rust_reads() -> Result {
     assert_eq!((crate::unraw("r#u64"), crate::unraw("u64"), crate::unraw("r#type")), ("u64", "u64", "type"));
-    let read = |src: &str| crate::read_type(&crate::lex(src).unwrap());
+    let read = |src: &str| -> Result<_> { Ok(crate::read_type(&crate::lex(src)?)) };
     for (written, name) in [
         ("r#u64", "u64"),
         ("*const r#u8", "*const u8"),
@@ -955,11 +1023,11 @@ fn a_name_written_raw_is_the_name_rust_reads() {
         ("&mut r#str", "&mut str"),
         ("*const u8", "*const u8"),
     ] {
-        assert_eq!(read(written), name, "{written}");
-        assert_eq!(crate::text(&crate::lex(written).unwrap()), written, "{written}");
+        assert_eq!(read(written)?, name, "{written}");
+        assert_eq!(crate::text(&crate::lex(written)?), written, "{written}");
     }
     // A block among the arguments of a type holds names too, which `text` writes as the source has them.
-    assert_eq!((read("Arr<{ r#N }>"), read("Arr<{r#N}>")), ("Arr<{ N }>".into(), "Arr<{N}>".into()));
+    assert_eq!((read("Arr<{ r#N }>")?, read("Arr<{r#N}>")?), ("Arr<{ N }>".into(), "Arr<{N}>".into()));
     let src = r#"
         const N: r#usize = 4;
         static S: r#global<[r#u32; 4]>;
@@ -969,16 +1037,16 @@ fn a_name_written_raw_is_the_name_rust_reads() {
             let n: r#u32 = 3;
         }
     "#;
-    let module = parse(src).unwrap();
+    let module = parse(src)?;
     let kinds: Vec<_> = module.items.iter().map(|item| &item.kind).collect();
     let [crate::ItemKind::Const(c), crate::ItemKind::Static(s), crate::ItemKind::Fn(f)] = kinds[..] else {
-        panic!("a const, a static and a function")
+        return Err("a const, a static and a function".into());
     };
     assert_eq!((shown(&c.ty), shown(&s.ty)), ("usize".into(), "global<[u32; ..]>".into()));
     let params: Vec<String> = f.params.iter().map(|p| shown(&p.ty)).collect();
     assert_eq!(params, ["u64", "[f32; ..]", "*const str"]);
     assert_eq!(f.ret.as_ref().map(|r| r.ty.as_str()), Some("u64"));
-    let lets = f.body.as_ref().unwrap().stmts.iter();
+    let lets = f.body.as_ref().map_err(|e| e.to_string())?.stmts.iter();
     let lets: Vec<String> = lets
         .filter_map(|s| match s {
             crate::Stmt::Let { ty: Some(ty), .. } => Some(shown(ty)),
@@ -989,6 +1057,7 @@ fn a_name_written_raw_is_the_name_rust_reads() {
     // A pointer to a `str` written raw is a pointer to a `str`, which has two words.
     let words = "a pointer to `str` has two words, an address and a length or a table, and a kernel's pointer has one";
     assert_eq!(crate::pointer(&params[2]), Err(words.into()));
+    Ok(())
 }
 
 /// A keyword written raw is a name, and no keyword: `read_type` leaves its `r#`, at any depth of a type and for every
@@ -997,7 +1066,7 @@ fn a_name_written_raw_is_the_name_rust_reads() {
 /// written close, where `mut <u8>` is not; `Arr<{r#true}>` holds a name, and not the literal. A word that is no
 /// keyword loses its `r#`, a weak keyword too, and a generic's name is read so as the rest is.
 #[test]
-fn a_keyword_written_raw_stays_a_name_in_a_type() {
+fn a_keyword_written_raw_stays_a_name_in_a_type() -> Result {
     // The keywords Rust lets be written raw, as the Rust Reference lists them: the strict ones, then the reserved ones.
     let keywords = [
         "as", "async", "await", "break", "const", "continue", "dyn", "else", "enum", "extern", "false", "fn", "for",
@@ -1005,7 +1074,7 @@ fn a_keyword_written_raw_stays_a_name_in_a_type() {
         "trait", "true", "type", "unsafe", "use", "where", "while", "abstract", "become", "box", "do", "final", "gen",
         "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
     ];
-    let read = |src: &str| crate::read_type(&crate::lex(src).unwrap());
+    let read = |src: &str| -> Result<_> { Ok(crate::read_type(&crate::lex(src)?)) };
     for word in keywords {
         for ty in [
             format!("r#{word}"),
@@ -1016,34 +1085,35 @@ fn a_keyword_written_raw_stays_a_name_in_a_type() {
             format!("fn(r#{word}) -> r#{word}"),
             format!("Arr<{{r#{word}}}>"),
         ] {
-            assert_eq!(read(&ty), ty, "{ty}");
+            assert_eq!(read(&ty)?, ty, "{ty}");
         }
         // A pointer to a type that the word names has one word.
         for pointer in [format!("*const r#{word}::Foo"), format!("*mut r#{word}<u64>")] {
-            assert_eq!(crate::pointer(&read(&pointer)), Ok(true), "{pointer}");
+            assert_eq!(crate::pointer(&read(&pointer)?), Ok(true), "{pointer}");
         }
     }
-    let words = |ty: &str| crate::pointer(ty).unwrap_err();
-    assert!(words(&read("*const dyn Foo")).starts_with("a pointer to `dyn Foo` has two words"));
-    assert!(words(&read("*const r#str")).starts_with("a pointer to `str` has two words"));
-    assert!(words(&read("*const [r#mut]")).starts_with("a pointer to `[r#mut]` has two words"));
-    assert!(words(&read("*const (u8, r#str)")).starts_with("a pointer to `(u8, str)` has two words"));
+    let words = |ty: &str| -> Result<_> { Ok(crate::pointer(ty).err().ok_or("pointer gave Ok")?) };
+    assert!(words(&read("*const dyn Foo")?)?.starts_with("a pointer to `dyn Foo` has two words"));
+    assert!(words(&read("*const r#str")?)?.starts_with("a pointer to `str` has two words"));
+    assert!(words(&read("*const [r#mut]")?)?.starts_with("a pointer to `[r#mut]` has two words"));
+    assert!(words(&read("*const (u8, r#str)")?)?.starts_with("a pointer to `(u8, str)` has two words"));
     for word in ["union", "macro_rules", "raw", "safe", "auto", "default", "u64", "str", "f16", "gpr", "Foo", "dyn_"] {
-        assert_eq!(read(&format!("*const r#{word}::Foo")), format!("*const {word}::Foo"), "{word}");
+        assert_eq!(read(&format!("*const r#{word}::Foo"))?, format!("*const {word}::Foo"), "{word}");
     }
     // The parser holds a name that is a keyword written raw as `read_type` gives it,
     // in a generic's name as in the rest.
-    let module = parse("static S: r#mut<[r#dyn; 4], r#u32>; static T: r#global<r#true>;").unwrap();
+    let module = parse("static S: r#mut<[r#dyn; 4], r#u32>; static T: r#global<r#true>;")?;
     let kinds: Vec<_> = module.items.iter().map(|item| &item.kind).collect();
-    let [crate::ItemKind::Static(s), crate::ItemKind::Static(t)] = kinds[..] else { panic!("two statics") };
+    let [crate::ItemKind::Static(s), crate::ItemKind::Static(t)] = kinds[..] else { return Err("two statics".into()) };
     assert_eq!((shown(&s.ty), shown(&t.ty)), ("r#mut<[r#dyn; ..], u32>".into(), "global<r#true>".into()));
+    Ok(())
 }
 
 /// An attribute of kernite's written raw is the attribute, as Rust reads `r#cfg` as `cfg`: a function holds its
 /// `#[r#instances(..)]`, its `#[r#cooperative]` and its directives, each under the name Rust reads, and
 /// `#[r#allow(..)]`, which is Rust's, is no directive.
 #[test]
-fn an_attribute_written_raw_is_the_attribute() {
+fn an_attribute_written_raw_is_the_attribute() -> Result {
     let src = r#"
         #[r#instances(1, 2)]
         #[r#cooperative]
@@ -1054,17 +1124,20 @@ fn an_attribute_written_raw_is_the_attribute() {
         #[r#allow(dead_code)]
         pub unsafe extern "ptx-kernel" fn k<const N: u32>() {}
     "#;
-    let module = parse(src).unwrap();
-    let crate::ItemKind::Fn(f) = &module.items[0].kind else { panic!("a function") };
+    let module = parse(src)?;
+    let crate::ItemKind::Fn(f) = &module.items[0].kind else { return Err("a function".into()) };
     assert_eq!((f.instances.is_some(), f.cooperative.is_some()), (true, true));
     let directives: Vec<&str> = f.directives.iter().map(|d| d.name.as_str()).collect();
     assert_eq!(directives, ["maxntid", "reqntid", "minnctapersm", "maxnreg"]);
     // Each is where it is written, at its `r#`, for an error to point there.
-    let at = |name: &str| Span(src.find(name).unwrap() as u32);
-    assert_eq!(f.instances.as_ref().map(|i| i.span), Some(at("r#instances")));
-    assert_eq!(f.cooperative.as_ref().map(|c| c.span), Some(at("r#cooperative")));
+    let at = |name: &str| -> Result<_> { Ok(Span(src.find(name).ok_or("find gave None")? as u32)) };
+    assert_eq!(f.instances.as_ref().map(|i| i.span), Some(at("r#instances")?));
+    assert_eq!(f.cooperative.as_ref().map(|c| c.span), Some(at("r#cooperative")?));
     let spans: Vec<Span> = f.directives.iter().map(|d| d.span).collect();
-    assert_eq!(spans, ["r#maxntid", "r#reqntid", "r#minnctapersm", "r#maxnreg"].map(at));
+    let written: Vec<Span> =
+        ["r#maxntid", "r#reqntid", "r#minnctapersm", "r#maxnreg"].into_iter().map(at).collect::<Result<_>>()?;
+    assert_eq!(spans, written);
+    Ok(())
 }
 
 /// A path is names joined by `::`, with a `::` before the first or not, and `a::b` is four trees: a name, two colons
@@ -1072,8 +1145,8 @@ fn an_attribute_written_raw_is_the_attribute() {
 /// but the same written raw is a name. Two colons make a `::` only when no space is between them; a name is a path
 /// whether a `::` comes after it or not, and a `::` with no name after it is no part of one.
 #[test]
-fn a_path_is_names_joined_by_double_colons() {
-    let count = |src: &str| crate::token::path(&crate::lex(src).unwrap());
+fn a_path_is_names_joined_by_double_colons() -> Result {
+    let count = |src: &str| -> Result<_> { Ok(crate::token::path(&crate::lex(src)?)) };
     for (src, trees) in [
         ("a", 1),
         ("a::b", 4),
@@ -1097,16 +1170,17 @@ fn a_path_is_names_joined_by_double_colons() {
         ("<a>::b", 0),
         ("", 0),
     ] {
-        assert_eq!(count(src), trees, "{src}");
+        assert_eq!(count(src)?, trees, "{src}");
     }
     for word in ["as", "const", "dyn", "impl", "mut"] {
         for src in [format!("{word}::a"), format!("::{word}::a"), word.to_string(), format!("a::{word}::b")] {
             let want = if src.starts_with("a::") { 1 } else { 0 };
-            assert_eq!(count(&src), want, "{src}");
+            assert_eq!(count(&src)?, want, "{src}");
         }
-        assert_eq!(count(&format!("r#{word}::a")), 4, "r#{word}");
-        assert_eq!(count(&format!("::r#{word}::a")), 6, "::r#{word}");
+        assert_eq!(count(&format!("r#{word}::a"))?, 4, "r#{word}");
+        assert_eq!(count(&format!("::r#{word}::a"))?, 6, "::r#{word}");
     }
+    Ok(())
 }
 
 /// `primitive` reads the third name of `core::primitive::NAME`, or of `std::primitive::NAME`, with a `::` before the
@@ -1115,8 +1189,8 @@ fn a_path_is_names_joined_by_double_colons() {
 /// `r#core::primitive::u64` as the others. The path may go on past the primitive's, and other trees may follow it;
 /// any other path begins with no primitive's.
 #[test]
-fn a_path_begins_with_a_primitive_when_core_or_std_primitive_names_one() {
-    let begins = |src: &str| crate::token::primitive(&crate::lex(src).unwrap());
+fn a_path_begins_with_a_primitive_when_core_or_std_primitive_names_one() -> Result {
+    let begins = |src: &str| -> Result<_> { Ok(crate::token::primitive(&crate::lex(src)?)) };
     for (src, want) in [
         ("core::primitive::u64", Some(("u64", 7))),
         ("std::primitive::str", Some(("str", 7))),
@@ -1156,11 +1230,12 @@ fn a_path_begins_with_a_primitive_when_core_or_std_primitive_names_one() {
         ("core", None),
         ("", None),
     ] {
-        assert_eq!(begins(src), want, "{src}");
+        assert_eq!(begins(src)?, want, "{src}");
     }
     // Fewer trees than a primitive's path has are the path of none.
     assert_eq!(crate::token::primitive(&[]), None);
-    assert_eq!(crate::token::primitive(&crate::lex("core::primitive").unwrap()), None);
+    assert_eq!(crate::token::primitive(&crate::lex("core::primitive")?), None);
+    Ok(())
 }
 
 /// Rust names each primitive by a path as well as by its name, and the language reads the name: a type written with
@@ -1172,8 +1247,8 @@ fn a_path_begins_with_a_primitive_when_core_or_std_primitive_names_one() {
 /// written but for the names written raw in it, which are the names Rust reads: one that goes on, one that begins
 /// elsewhere, one to a type `core::primitive` has not, and a module's.
 #[test]
-fn a_primitive_is_read_by_its_name_whether_it_is_written_by_a_path_or_not() {
-    let read = |src: &str| crate::read_type(&crate::lex(src).unwrap());
+fn a_primitive_is_read_by_its_name_whether_it_is_written_by_a_path_or_not() -> Result {
+    let read = |src: &str| -> Result<_> { Ok(crate::read_type(&crate::lex(src)?)) };
     let names = [
         "bool", "char", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64",
         "u128", "usize",
@@ -1181,8 +1256,8 @@ fn a_primitive_is_read_by_its_name_whether_it_is_written_by_a_path_or_not() {
     for name in names {
         for root in ["core", "::core", "std", "::std", "r#core", " core ", ":: std"] {
             let path = format!("{root}::primitive::{name}");
-            assert_eq!(read(&path), name, "{path}");
-            assert_eq!(read(&format!("{root}::r#primitive::r#{name}")), name, "{path} written raw");
+            assert_eq!(read(&path)?, name, "{path}");
+            assert_eq!(read(&format!("{root}::r#primitive::r#{name}"))?, name, "{path} written raw");
         }
     }
     for (src, want) in [
@@ -1223,11 +1298,11 @@ fn a_primitive_is_read_by_its_name_whether_it_is_written_by_a_path_or_not() {
         ("[r#std::r#primitive::u8; 4]", "[u8; 4]"),
         ("(r#core::primitive::u32, ::core::r#primitive::f64)", "(u32, f64)"),
     ] {
-        assert_eq!(read(src), want, "{src}");
+        assert_eq!(read(src)?, want, "{src}");
     }
     // A lifetime is a `'` and a name, and its name begins no path: `'static ::core::primitive::u8` is a lifetime and a
     // path. The tokens are made as the macro is given them, for the lexer of a string refuses a lifetime.
-    let bound = |src: &str| crate::read_type(&lexed_with_lifetimes(src));
+    let bound = |src: &str| -> Result<_> { Ok(crate::read_type(&lexed_with_lifetimes(src)?)) };
     for (src, want) in [
         ("&'static ::core::primitive::u8", "&'static u8"),
         ("&'static core::primitive::u8", "&'static u8"),
@@ -1239,7 +1314,7 @@ fn a_primitive_is_read_by_its_name_whether_it_is_written_by_a_path_or_not() {
         ("for<'a> fn(&'a ::core::primitive::u8) -> &'a ::std::primitive::u8", "for<'a> fn(&'a u8) -> &'a u8"),
         ("&'a u8", "&'a u8"),
     ] {
-        assert_eq!(bound(src), want, "{src}");
+        assert_eq!(bound(src)?, want, "{src}");
     }
     // A `'` with no name after it is no lifetime, and nothing to take the tokens that follow it for.
     let quote = Tree::Punct { ch: '\'', space: false, span: Span(0) };
@@ -1271,7 +1346,7 @@ fn a_primitive_is_read_by_its_name_whether_it_is_written_by_a_path_or_not() {
         "*const my::core::primitive::u64",
         "[my::std::primitive::u8; 4]",
     ] {
-        assert_eq!(read(path), crate::text(&crate::lex(path).unwrap()), "{path}");
+        assert_eq!(read(path)?, crate::text(&crate::lex(path)?), "{path}");
     }
     // A path that is no primitive's is a path still, but for the names written raw in it, which are the names Rust
     // reads. A keyword written raw stays so.
@@ -1281,7 +1356,7 @@ fn a_primitive_is_read_by_its_name_whether_it_is_written_by_a_path_or_not() {
         ("::r#core::primitive::r#u64::r#MAX", "::core::primitive::u64::MAX"),
         ("my::r#mut::r#Word", "my::r#mut::Word"),
     ] {
-        assert_eq!(read(src), want, "{src}");
+        assert_eq!(read(src)?, want, "{src}");
     }
     // A type is read as a path where the parser reads one: a function's parameters, its result, its compile-time
     // arguments and a cast.
@@ -1290,45 +1365,50 @@ fn a_primitive_is_read_by_its_name_whether_it_is_written_by_a_path_or_not() {
                x: ::core::primitive::u64, p: *mut std::primitive::u8, \
                q: [::std::primitive::f32; core::primitive::u8::BITS as usize]) \
                -> ::std::primitive::u32 { let y = x as core::primitive::u8; let z = y as r#u32; }";
-    let module = crate::module(&crate::lex(src).unwrap(), 0).unwrap();
-    let crate::ItemKind::Fn(f) = &module.items[0].kind else { panic!("a function") };
+    let module = crate::module(&crate::lex(src)?, 0)?;
+    let crate::ItemKind::Fn(f) = &module.items[0].kind else { return Err("a function".into()) };
     // A name written raw is the name, as it is anywhere else.
     assert_eq!(f.generics.iter().map(|g| g.ty.as_str()).collect::<Vec<_>>(), ["usize", "u16", "u64", "u8"]);
     let types: Vec<String> = f.params[..2].iter().map(|p| shown(&p.ty)).collect();
     assert_eq!(types, ["u64", "*mut u8"]);
-    let crate::Type::Array(elem, len, _) = &f.params[2].ty else { panic!("an array") };
+    let crate::Type::Array(elem, len, _) = &f.params[2].ty else { return Err("an array".into()) };
     assert_eq!(shown(elem), "f32");
     // The length is a value, and its path is read from the primitive's name too.
-    let crate::Expr::Cast(bits, ty, _) = len else { panic!("a cast") };
+    let crate::Expr::Cast(bits, ty, _) = len else { return Err("a cast".into()) };
     assert!(matches!(&**bits, crate::Expr::Path(names, _) if names == &["u8", "BITS"]) && ty == "usize");
-    let at = |path: &str| Span(src.find(path).unwrap() as u32);
-    assert_eq!(f.generics[0].span, at("N:"));
-    assert_eq!(f.params[0].ty.span(), at("::core::primitive::u64"));
-    assert_eq!(f.params[1].ty.span(), at("*mut std::primitive::u8"));
-    assert_eq!(f.ret.as_ref().map(|r| (r.ty.as_str(), r.span)), Some(("u32", at("::std::primitive::u32"))));
-    let body = f.body.as_ref().unwrap();
-    let crate::Stmt::Let { value: Some(crate::Expr::Cast(_, ty, _)), .. } = &body.stmts[0] else { panic!("a cast") };
+    let at = |path: &str| -> Result<_> { Ok(Span(src.find(path).ok_or("find gave None")? as u32)) };
+    assert_eq!(f.generics[0].span, at("N:")?);
+    assert_eq!(f.params[0].ty.span(), at("::core::primitive::u64")?);
+    assert_eq!(f.params[1].ty.span(), at("*mut std::primitive::u8")?);
+    assert_eq!(f.ret.as_ref().map(|r| (r.ty.as_str(), r.span)), Some(("u32", at("::std::primitive::u32")?)));
+    let body = f.body.as_ref().map_err(|e| e.to_string())?;
+    let crate::Stmt::Let { value: Some(crate::Expr::Cast(_, ty, _)), .. } = &body.stmts[0] else {
+        return Err("a cast".into());
+    };
     assert_eq!(ty, "u8");
-    let crate::Stmt::Let { value: Some(crate::Expr::Cast(_, ty, _)), .. } = &body.stmts[1] else { panic!("a cast") };
+    let crate::Stmt::Let { value: Some(crate::Expr::Cast(_, ty, _)), .. } = &body.stmts[1] else {
+        return Err("a cast".into());
+    };
     assert_eq!(ty, "u32");
     // The same with a lifetime before the path, in a parameter, in a type's arguments and in the result.
     let src = "pub unsafe extern \"sysv64\" fn k(x: &'static ::core::primitive::u8, y: Foo<'a, ::std::primitive::str>) \
                -> &'a ::std::primitive::str {}";
-    let module = crate::module(&lexed_with_lifetimes(src), 0).unwrap();
-    let crate::ItemKind::Fn(f) = &module.items[0].kind else { panic!("a function") };
+    let module = crate::module(&lexed_with_lifetimes(src)?, 0)?;
+    let crate::ItemKind::Fn(f) = &module.items[0].kind else { return Err("a function".into()) };
     let types: Vec<String> = f.params.iter().map(|p| shown(&p.ty)).collect();
     assert_eq!(types, ["&'static u8", "Foo<'a, str>"]);
     assert_eq!(f.ret.as_ref().map(|r| r.ty.as_str()), Some("&'a str"));
     // No `'` comes before the first parameter's type, so the lexer's offset is the source's.
-    assert_eq!(f.params[0].ty.span(), Span(src.find("&'static").unwrap() as u32));
+    assert_eq!(f.params[0].ty.span(), Span(src.find("&'static").ok_or("find gave None")? as u32));
     // A path that is no name is the parser's error: it wants a name, not a `::` with none after it.
     for (bad, said) in
         [("k<const N: ::>()", "expected a name, found `:`"), ("k<const N: 5>()", "expected a name, found `5`")]
     {
         let src = format!("pub unsafe extern \"sysv64\" fn {bad} {{}}");
-        let err = crate::module(&crate::lex(&src).unwrap(), 0).unwrap_err();
+        let err = crate::module(&crate::lex(&src)?, 0).err().ok_or("module gave Ok")?;
         assert_eq!(err.message, said, "{src}");
     }
+    Ok(())
 }
 
 /// A path in a value that begins with a primitive's path, `core::primitive::u32::MAX`, is read as the one that begins
@@ -1339,13 +1419,15 @@ fn a_primitive_is_read_by_its_name_whether_it_is_written_by_a_path_or_not() {
 /// that begins elsewhere, and a module's, `core::u32::MAX`, with a `::` before it or not. A path from the root of no
 /// library of Rust's is no value: the parser wants an expression, not a `::`.
 #[test]
-fn a_value_path_that_begins_with_a_primitives_path_is_read_from_its_name() {
-    let parsed = |src: &str| {
-        let module = crate::module(&crate::lex(&format!("const C: u64 = {src};")).unwrap(), 0);
-        module.map(|m| match &m.items[0].kind {
-            crate::ItemKind::Const(c) => c.value.clone(),
-            _ => panic!("a const"),
-        })
+fn a_value_path_that_begins_with_a_primitives_path_is_read_from_its_name() -> Result {
+    let parsed = |src: &str| -> Result<_> {
+        match crate::module(&crate::lex(&format!("const C: u64 = {src};"))?, 0) {
+            Ok(m) => match &m.items[0].kind {
+                crate::ItemKind::Const(c) => Ok(Ok(c.value.clone())),
+                _ => Err("a const".into()),
+            },
+            Err(e) => Ok(Err(e)),
+        }
     };
     let at = Span("const C: u64 = ".len() as u32);
     let primitives = [
@@ -1371,7 +1453,9 @@ fn a_value_path_that_begins_with_a_primitives_path_is_read_from_its_name() {
                 (format!("{root}::primitive::{name}::NOT::HERE"), written(&["NOT", "HERE"])),
                 (format!("{root}::primitive::{name}::consts::PI"), written(&["consts", "PI"])),
             ] {
-                let Ok(crate::Expr::Path(names, span)) = parsed(&path) else { panic!("a path: {path}") };
+                let Ok(crate::Expr::Path(names, span)) = parsed(&path)? else {
+                    return Err(format!("a path: {path}").into());
+                };
                 assert_eq!(names, want, "{path}");
                 assert_eq!(span, at, "{path}");
             }
@@ -1380,22 +1464,24 @@ fn a_value_path_that_begins_with_a_primitives_path_is_read_from_its_name() {
     // A call, and what is called: `f32::from_bits`.
     for root in ["core", "::core", "std", "::std"] {
         let src = format!("{root}::primitive::f32::from_bits(1)");
-        let Ok(crate::Expr::Call { func, args, span, .. }) = parsed(&src) else { panic!("a call: {src}") };
-        let crate::Expr::Path(names, _) = *func else { panic!("a path: {src}") };
+        let Ok(crate::Expr::Call { func, args, span, .. }) = parsed(&src)? else {
+            return Err(format!("a call: {src}").into());
+        };
+        let crate::Expr::Path(names, _) = *func else { return Err(format!("a path: {src}").into()) };
         assert_eq!((names, args.len(), span), (vec!["f32".to_string(), "from_bits".to_string()], 1, at), "{src}");
     }
     // A name written raw is the name Rust reads, whichever name of the path it is.
     for src in ["::core::primitive::r#u64::MAX", "r#core::primitive::u64::MAX", "::r#std::r#primitive::r#u64::r#MAX"] {
-        let Ok(crate::Expr::Path(names, span)) = parsed(src) else { panic!("a path: {src}") };
+        let Ok(crate::Expr::Path(names, span)) = parsed(src)? else { return Err(format!("a path: {src}").into()) };
         assert_eq!((names, span), (vec!["u64".to_string(), "MAX".to_string()], at), "{src}");
     }
     // A path goes on as a path does after a name: a cast, a method.
-    let Ok(crate::Expr::Cast(inner, ty, _)) = parsed("::core::primitive::u8::MAX as ::std::primitive::u64") else {
-        panic!("a cast")
+    let Ok(crate::Expr::Cast(inner, ty, _)) = parsed("::core::primitive::u8::MAX as ::std::primitive::u64")? else {
+        return Err("a cast".into());
     };
-    let crate::Expr::Path(names, _) = *inner else { panic!("a path") };
+    let crate::Expr::Path(names, _) = *inner else { return Err("a path".into()) };
     assert_eq!((names, ty.as_str()), (vec!["u8".to_string(), "MAX".to_string()], "u64"));
-    assert!(matches!(parsed("core::primitive::u32::MAX.count_ones()"), Ok(crate::Expr::Method { .. })));
+    assert!(matches!(parsed("core::primitive::u32::MAX.count_ones()")?, Ok(crate::Expr::Method { .. })));
     // Any other path is as it was written: one to a type `core::primitive` has not, one that begins elsewhere, a
     // module's.
     for path in [
@@ -1415,16 +1501,17 @@ fn a_value_path_that_begins_with_a_primitives_path_is_read_from_its_name() {
         "::core::u32::MAX",
         "::core::primitive::f16::MAX",
     ] {
-        let Ok(crate::Expr::Path(names, span)) = parsed(path) else { panic!("a path: {path}") };
+        let Ok(crate::Expr::Path(names, span)) = parsed(path)? else { return Err(format!("a path: {path}").into()) };
         assert_eq!(names.join("::"), path, "{path}");
         assert_eq!(span, at, "{path}");
     }
     // A path from the root of `core` or `std` is read whole, as one without a `::` before it is, and the value says
     // what it names. One from another root is no value: the parser wants an expression, not a `::`.
     for path in ["::my::u32::MAX", "::"] {
-        let err = parsed(path).unwrap_err();
+        let err = parsed(path)?.err().ok_or("parsed gave Ok")?;
         assert_eq!((err.message.as_str(), err.span), ("expected an expression, found `:`", at), "{path}");
     }
+    Ok(())
 }
 
 /// A path in a value that begins at the root of `core` or `std` with a `::` before it, `::std::f32::consts::PI`, is
@@ -1433,13 +1520,14 @@ fn a_value_path_that_begins_with_a_primitives_path_is_read_from_its_name() {
 /// or from none, `::f32::consts::PI`, is no value: the parser wants an expression, not a `::`. It goes on as a path
 /// does after a name: a cast, a method.
 #[test]
-fn a_path_from_the_root_of_core_or_std_with_a_colon_before_it_is_read_whole() {
-    let parsed = |src: &str| {
-        let module = crate::module(&crate::lex(&format!("const C: u64 = {src};")).unwrap(), 0);
-        module.map(|m| match &m.items[0].kind {
-            crate::ItemKind::Const(c) => c.value.clone(),
-            _ => panic!("a const"),
-        })
+fn a_path_from_the_root_of_core_or_std_with_a_colon_before_it_is_read_whole() -> Result {
+    // The value of the constant, or none if the item is no constant.
+    let parsed = |src: &str| -> Result<_> {
+        let module = crate::module(&crate::lex(&format!("const C: u64 = {src};"))?, 0);
+        Ok(module.map(|m| match &m.items[0].kind {
+            crate::ItemKind::Const(c) => Some(c.value.clone()),
+            _ => None,
+        }))
     };
     let at = Span("const C: u64 = ".len() as u32);
     for (src, want) in [
@@ -1453,7 +1541,9 @@ fn a_path_from_the_root_of_core_or_std_with_a_colon_before_it_is_read_whole() {
         ("::std::f32::consts::NOPE::MORE", vec!["", "std", "f32", "consts", "NOPE", "MORE"]),
         ("::std::f32", vec!["", "std", "f32"]),
     ] {
-        let Ok(crate::Expr::Path(names, span)) = parsed(src) else { panic!("a path: {src}") };
+        let Ok(Some(crate::Expr::Path(names, span))) = parsed(src)? else {
+            return Err(format!("a path: {src}").into());
+        };
         assert_eq!((names.iter().map(String::as_str).collect::<Vec<_>>(), span), (want, at), "{src}");
     }
     // The root is `core` or `std` and a `::` after it, else nothing is read of the path.
@@ -1465,13 +1555,16 @@ fn a_path_from_the_root_of_core_or_std_with_a_colon_before_it_is_read_whole() {
         "::std",
         "::",
     ] {
-        let err = parsed(src).unwrap_err();
+        let err = parsed(src)?.err().ok_or("parsed gave Ok")?;
         assert_eq!((err.message.as_str(), err.span), ("expected an expression, found `:`", at), "{src}");
     }
-    let Ok(crate::Expr::Cast(inner, ty, _)) = parsed("::std::f32::consts::PI as f64") else { panic!("a cast") };
-    let crate::Expr::Path(names, _) = *inner else { panic!("a path") };
+    let Ok(Some(crate::Expr::Cast(inner, ty, _))) = parsed("::std::f32::consts::PI as f64")? else {
+        return Err("a cast".into());
+    };
+    let crate::Expr::Path(names, _) = *inner else { return Err("a path".into()) };
     assert_eq!((names.join("::"), ty.as_str()), ("::std::f32::consts::PI".to_string(), "f64"));
-    assert!(matches!(parsed("::core::f32::consts::PI.to_bits()"), Ok(crate::Expr::Method { .. })));
+    assert!(matches!(parsed("::core::f32::consts::PI.to_bits()")?, Ok(Some(crate::Expr::Method { .. }))));
+    Ok(())
 }
 
 /// The `!` of never follows the arrow, a keyword or a lifetime, and is no macro's: the braces after it are the
@@ -1479,14 +1572,16 @@ fn a_path_from_the_root_of_core_or_std_with_a_colon_before_it_is_read_whole() {
 /// before the braces. A macro after a lifetime, `&'static byte!{ _ }`, takes its braces, as it does anywhere in a
 /// result. The tokens are made as the macro is given them, for the lexer of a string refuses a lifetime.
 #[test]
-fn the_braces_after_a_never_that_follows_a_lifetime_are_the_body() {
+fn the_braces_after_a_never_that_follows_a_lifetime_are_the_body() -> Result {
     for (result, tokens) in [("&'static !", 4), ("&'a !", 4), ("&'a mut !", 5), ("&'static byte!{ _ }", 6)] {
         let src = format!("pub unsafe extern \"sysv64\" fn k() -> {result} {{ ud2(); }}");
-        let module = crate::module(&lexed_with_lifetimes(&src), 0).expect(result);
-        let crate::ItemKind::Fn(f) = &module.items[0].kind else { panic!("a function") };
+        let module = crate::module(&lexed_with_lifetimes(&src)?, 0).map_err(|e| format!("{result}: {e}"))?;
+        let crate::ItemKind::Fn(f) = &module.items[0].kind else { return Err("a function".into()) };
         assert_eq!(f.ret.as_ref().map(|r| r.tokens.len()), Some(tokens), "{result}");
-        assert_eq!(f.body.as_ref().expect(result).stmts.len(), 1, "{result}");
+        let body = f.body.as_ref().map_err(|e| format!("{result}: {e}"))?;
+        assert_eq!(body.stmts.len(), 1, "{result}");
     }
+    Ok(())
 }
 
 /// A pointer is one word, unless it is to a slice, a `str` or a `dyn`: those are an address and a
@@ -1561,28 +1656,31 @@ fn a_pointer_has_one_word_unless_it_is_to_what_has_no_size() {
 /// nearer, or at the middle to the one whose last bit is 0, as IEEE rounds: so on to the
 /// largest, past which the middle rounds to infinity.
 #[test]
-fn sixteen_bit_floats_round_to_nearest_even() {
+fn sixteen_bit_floats_round_to_nearest_even() -> Result {
     for (ty, inf) in [("f16", 0x7c00), ("bf16", 0x7f80)] {
         let make = |h: u16| if ty == "f16" { Value::F16(h) } else { Value::Bf16(h) };
-        let wide = |h: u16| match cast(&make(h), "f64") {
-            Ok(Value::F64(x)) => x,
-            other => panic!("{other:?}"),
+        let wide = |h: u16| -> Result<f64> {
+            match cast(&make(h), "f64") {
+                Ok(Value::F64(x)) => Ok(x),
+                other => Err(format!("{other:?}").into()),
+            }
         };
-        let round = |x: f64| cast(&Value::F64(x), ty).unwrap();
+        let round = |x: f64| -> Result<_> { Ok(cast(&Value::F64(x), ty)?) };
         for h in 0..inf {
-            let (x, next) = (wide(h), wide(h + 1));
-            assert_eq!(round(x), make(h), "{ty} {h:#x}");
-            assert_eq!(round(-x), make(h | 0x8000), "{ty} -{h:#x}");
+            let (x, next) = (wide(h)?, wide(h + 1)?);
+            assert_eq!(round(x)?, make(h), "{ty} {h:#x}");
+            assert_eq!(round(-x)?, make(h | 0x8000), "{ty} -{h:#x}");
             // Past the largest, the middle is where the next would be, were it not infinite.
-            let next = if h + 1 == inf { x + (x - wide(h - 1)) } else { next };
+            let next = if h + 1 == inf { x + (x - wide(h - 1)?) } else { next };
             let mid = (x + next) / 2.0;
-            assert_eq!(round(mid), make(if h % 2 == 0 { h } else { h + 1 }), "{ty} between {h:#x} and the next");
-            assert_eq!(round(mid.next_down()), make(h), "{ty} under the middle above {h:#x}");
-            assert_eq!(round(mid.next_up()), make(h + 1), "{ty} over the middle above {h:#x}");
+            assert_eq!(round(mid)?, make(if h % 2 == 0 { h } else { h + 1 }), "{ty} between {h:#x} and the next");
+            assert_eq!(round(mid.next_down())?, make(h), "{ty} under the middle above {h:#x}");
+            assert_eq!(round(mid.next_up())?, make(h + 1), "{ty} over the middle above {h:#x}");
         }
-        assert_eq!(round(f64::INFINITY), make(inf));
-        assert!(matches!(round(f64::NAN), Value::F16(h) | Value::Bf16(h) if h & inf == inf && h != inf));
+        assert_eq!(round(f64::INFINITY)?, make(inf));
+        assert!(matches!(round(f64::NAN)?, Value::F16(h) | Value::Bf16(h) if h & inf == inf && h != inf));
     }
+    Ok(())
 }
 
 /// A value known now that is not of the type wanted is told by what it is. An integer where an integer of another
@@ -1640,17 +1738,17 @@ fn a_type_name_is_read_with_its_article() {
 /// An instance gives each generic a value of its type, and what it says of a value that is not one names the type with
 /// its article: an `i32`, a `u8`, a `bool`, an `isize`.
 #[test]
-fn an_instance_gives_each_generic_a_value_of_its_type() {
+fn an_instance_gives_each_generic_a_value_of_its_type() -> Result {
     let src = "unsafe extern \"ptx-kernel\" fn k<const A: i32, const B: u8, const C: bool, const D: isize>() {}";
-    let module = parse(src).unwrap();
-    let crate::ItemKind::Fn(f) = &module.items[0].kind else { panic!("a function") };
+    let module = parse(src)?;
+    let crate::ItemKind::Fn(f) = &module.items[0].kind else { return Err("a function".into()) };
     let ok = [
         Value::Int(-1, Some(IntTy::I32)),
         Value::Int(1, Some(IntTy::U8)),
         Value::Bool(true),
         Value::Int(2, Some(IntTy::Isize)),
     ];
-    assert_eq!(instance(f, &ok).unwrap(), "k::<-1, 1, true, 2>");
+    assert_eq!(instance(f, &ok)?, "k::<-1, 1, true, 2>");
     // Each at the generic, where it is named.
     for (at, wrong, want) in [
         (0, Value::Bool(true), "1:39: `k` takes an `i32` for `A`; this is a bool"),
@@ -1660,19 +1758,20 @@ fn an_instance_gives_each_generic_a_value_of_its_type() {
     ] {
         let mut args = ok.clone();
         args[at] = wrong;
-        assert_eq!(instance(f, &args).unwrap_err().at(src), want);
+        assert_eq!(instance(f, &args).err().ok_or("instance gave Ok")?.at(src), want);
     }
+    Ok(())
 }
 
 #[test]
-fn a_function_says_whether_it_is_unsafe() {
+fn a_function_says_whether_it_is_unsafe() -> Result {
     let src = r#"
         pub unsafe extern "sysv64" fn k() {}
         extern "ptx-func" fn f() {}
         unsafe fn h() {}
         pub(crate) unsafe extern "C" fn c() {}
     "#;
-    let module = crate::parse(src).unwrap();
+    let module = crate::parse(src)?;
     let said: Vec<(&str, bool)> = module
         .items
         .iter()
@@ -1682,17 +1781,19 @@ fn a_function_says_whether_it_is_unsafe() {
         })
         .collect();
     assert_eq!(said, [("k", true), ("f", false), ("h", true), ("c", true)]);
+    Ok(())
 }
 
 /// A place is in the item that starts last before it, whatever it is nested in: the brackets of a
 /// static's type, the body of a helper.
 #[test]
-fn a_place_is_in_the_item_that_writes_it() {
+fn a_place_is_in_the_item_that_writes_it() -> Result {
     let src = "const A: u64 = 1;\nstatic S: global<[u32; A]>;\nfn help(x: gpr) { add(x, A); }\n\
                unsafe extern \"sysv64\" fn k(x: u64) { help(x); }";
-    let module = parse(src).unwrap();
-    let item_of = |at: &str| module.item_at(Span(src.rfind(at).unwrap() as u32));
-    assert_eq!([item_of("A: u64"), item_of("A]"), item_of("A); }"), item_of("help(x); }")], [0, 1, 2, 3]);
+    let module = parse(src)?;
+    let item_of = |at: &str| -> Result<_> { Ok(module.item_at(Span(src.rfind(at).ok_or("rfind gave None")? as u32))) };
+    assert_eq!([item_of("A: u64")?, item_of("A]")?, item_of("A); }")?, item_of("help(x); }")?], [0, 1, 2, 3]);
+    Ok(())
 }
 
 /// Mentions come in the order of the source, however they were recorded, and a place has one.
@@ -1715,11 +1816,11 @@ fn a_function_has_its_mentions_in_the_order_of_the_source_each_place_once() {
 /// head's if there is one, else the first item in the way, as for a module it cannot read at all; the consts a module
 /// is given are none of its own.
 #[test]
-fn a_module_kernite_cannot_read_has_the_items_it_reads() {
-    let read = |src: &str, given: &str| {
-        let (module, error) = crate::read(&crate::lex(src).unwrap(), crate::lex(given).unwrap().len());
+fn a_module_kernite_cannot_read_has_the_items_it_reads() -> Result {
+    let read = |src: &str, given: &str| -> Result<_> {
+        let (module, error) = crate::read(&crate::lex(src)?, crate::lex(given)?.len());
         let names: Vec<_> = module.items.iter().map(|item| item.name().unwrap_or("_").to_string()).collect();
-        (names, error.map(|e| e.at(src)))
+        Ok((names, error.map(|e| e.at(src))))
     };
     let cases = [
         ("fn a() {} const b: u32 = 1; static c: global<u32>;", "", vec!["a", "b", "c"], None),
@@ -1844,6 +1945,52 @@ fn a_module_kernite_cannot_read_has_the_items_it_reads() {
     ];
     for (src, given, names, error) in cases {
         let want = (names.into_iter().map(String::from).collect::<Vec<_>>(), error.map(String::from));
-        assert_eq!(read(src, given), want, "{src}");
+        assert_eq!(read(src, given)?, want, "{src}");
     }
+    Ok(())
+}
+
+/// A function names each instruction where it is written, each word of its name at a place: a call, or a method of
+/// dotted words, as a statement, in a loop, an `if` and its `else`, or a block; once, whatever the loop unrolls to. A
+/// word that is not Rust's own is spelled as the machine writes it: `tex._2d` is `tex.2d`, `cp.r#async` `cp.async`.
+/// A helper's call, any function's, `label` and `note` are none, nor is a name inside an operand, nor is one in a body
+/// that does not parse.
+#[test]
+fn a_function_names_each_instruction_where_it_is_written() -> Result {
+    let src = "fn help(x: gpr) { add(x, 1); }\n\
+               unsafe extern \"sysv64\" fn kernel(x: gpr) {\n\
+               let y: gpr;\n\
+               mov(y, [x + 1]);\n\
+               help(y);\n\
+               label(top);\n\
+               note(\"n\");\n\
+               for i in 0..2 { lock.bts([x], i); }\n\
+               if true { vaddps(a, b, c); } else if false { vsubps(a, b, c); } else { vmulps(a, b, c); }\n\
+               { tex._2d.v4.f32(a, b); cp.r#async(a); }\n\
+               kernel(x);\n\
+               }\n\
+               fn broken() { let = 1; }\n";
+    let module = parse(src)?;
+    let function = |name: &str| module.items.iter().find_map(|item| (item.name() == Some(name)).then_some(&item.kind));
+    let Some(ItemKind::Fn(kernel)) = function("kernel") else { return Err("no kernel".into()) };
+    let named: Vec<(String, Vec<u32>)> =
+        instructions(&module, kernel).into_iter().map(|n| (n.name, n.spans.iter().map(|s| s.0).collect())).collect();
+    let at = |word: &str| src.find(word).map(|i| i as u32).ok_or("find gave None");
+    assert_eq!(
+        named,
+        [
+            ("mov".to_string(), vec![at("mov(y")?]),
+            ("lock.bts".to_string(), vec![at("lock")?, at("bts")?]),
+            ("vaddps".to_string(), vec![at("vaddps")?]),
+            ("vsubps".to_string(), vec![at("vsubps")?]),
+            ("vmulps".to_string(), vec![at("vmulps")?]),
+            ("tex.2d.v4.f32".to_string(), vec![at("tex")?, at("_2d")?, at("v4")?, at("f32")?]),
+            ("cp.async".to_string(), vec![at("cp")?, at("r#async")?]),
+        ]
+    );
+    let Some(ItemKind::Fn(help)) = function("help") else { return Err("no help".into()) };
+    assert_eq!(instructions(&module, help).len(), 1);
+    let Some(ItemKind::Fn(broken)) = function("broken") else { return Err("no broken".into()) };
+    assert_eq!(instructions(&module, broken), []);
+    Ok(())
 }

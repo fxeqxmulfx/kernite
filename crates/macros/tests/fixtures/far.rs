@@ -85,7 +85,7 @@ mod tests {
     /// it leaves alone is zeros. A static of 2 GiB with a raw name is reached the same way, and so is one of 2147483647
     /// bytes, at its last byte.
     #[test]
-    fn a_kernel_reaches_a_static_of_3_gib_by_its_address() {
+    fn a_kernel_reaches_a_static_of_3_gib_by_its_address() -> Result<(), Box<dyn std::error::Error>> {
         // To Rust it is a reference to the linker's memory.
         let _: &'static kernite_cpu::Global<u8, 3221225472, 4096> = BIG;
         assert_eq!((BIG.len(), BIG.is_empty(), r#type.len()), (3221225472, false, 1073741824));
@@ -95,22 +95,24 @@ mod tests {
             middle();
         }
         // SAFETY: Each address is in a static, which lives for the whole program, of atomics the kernels wrote.
-        let (at, last) = unsafe { (|i: usize| *BIG.at(i), *r#type.at(1073741823)) };
-        assert_eq!((at(0), at(3221225471), last), (7, 9, -1));
-        assert_eq!((at(8), at(2147483656)), (6, 5));
-        assert_eq!((at(1), at(7), at(9), at(1610612736), at(3221225470)), (0, 0, 0, 0, 0));
+        let at = |i: usize| BIG.at(i).map(|p| unsafe { *p }).ok_or("at gave None");
         // SAFETY: As before.
-        assert_eq!(unsafe { *r#type.at(0) }, 0);
+        let of_type = |i: usize| r#type.at(i).map(|p| unsafe { *p }).ok_or("at gave None");
+        assert_eq!((at(0)?, at(3221225471)?, of_type(1073741823)?), (7, 9, -1));
+        assert_eq!((at(8)?, at(2147483656)?), (6, 5));
+        assert_eq!((at(1)?, at(7)?, at(9)?, at(1610612736)?, at(3221225470)?), (0, 0, 0, 0, 0));
+        assert_eq!(of_type(0)?, 0);
         assert_eq!(RUNS.read(), [1]);
         // SAFETY: As before.
         unsafe { ends(100) };
-        assert_eq!((at(0), at(100), at(3221225471), RUNS.read()[0]), (7, 9, 9, 2));
+        assert_eq!((at(0)?, at(100)?, at(3221225471)?, RUNS.read()[0]), (7, 9, 9, 2));
         assert_eq!((BIG.ptr().addr() % 4096, r#type.ptr().addr() % 2), (0, 0));
         // SAFETY: `edge` writes only the memory of the module it names, which nothing else touches.
         unsafe { edge() };
         // SAFETY: Each address is in a static, which lives for the whole program, of atomics the kernel wrote.
-        let (first, last) = unsafe { (*EDGE.at(0), *EDGE.at(2147483646)) };
-        assert_eq!((EDGE.len(), first, last), (2147483647, 0, 4));
+        let at = |i: usize| EDGE.at(i).map(|p| unsafe { *p }).ok_or("at gave None");
+        assert_eq!((EDGE.len(), at(0)?, at(2147483646)?), (2147483647, 0, 4));
+        Ok(())
     }
 
     /// The kernel writes `B`, of one byte, past reach beside a static that `cfg` leaves out, by its address, which the
@@ -120,6 +122,6 @@ mod tests {
         // SAFETY: `touch` writes only the memory of the module it names, which nothing else touches.
         unsafe { left_out::touch() };
         // SAFETY: The address is in a static, which lives for the whole program, of atomics the kernel wrote.
-        assert_eq!(unsafe { *left_out::B.at(0) }, 3);
+        assert_eq!(left_out::B.at(0).map(|p| unsafe { *p }), Some(3));
     }
 }

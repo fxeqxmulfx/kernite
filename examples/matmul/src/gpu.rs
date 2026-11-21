@@ -47,6 +47,9 @@ pub mod kernels {
     /// `WIDE` is for an `n` and a `k` that are multiples of 4, and `a`, `b` and `c` that start at
     /// a multiple of 16 bytes: the global loads and stores are then `v4`, 16 bytes each. Without
     /// it they are 4 bytes.
+    ///
+    /// An `unsafe fn`: its tiles are in shared memory, and its threads wait for each other at a
+    /// barrier, which kernite cannot prove safe.
     #[instances(true, false)]
     pub unsafe extern "ptx-kernel" fn sgemm<const WIDE: bool>(
         c: *mut f32,
@@ -373,7 +376,7 @@ pub unsafe fn launch(
     b: &Buffer<f32>,
     shape: crate::Shape,
 ) -> Result<(), Error> {
-    let (m, n, k) = crate::gpu_operands((a.len(), b.len(), c.len()), shape);
+    let (m, n, k) = crate::gpu_operands((a.len(), b.len(), c.len()), shape)?;
     if m * n == 0 {
         return Ok(());
     }

@@ -65,16 +65,15 @@ pub fn read(trees: &[Tree], given: usize) -> (Module, Option<Error>) {
 /// consts of the first `given` tokens, and says why, at the name of the first. Of two, the static
 /// is the one in the way, else the function, else the second.
 fn named_once(items: &mut Vec<Item>, given: usize) -> Option<Error> {
-    const KINDS: [&str; 3] = ["constant", "function", "static"];
-    // Each item's first token, name, where the name is, and kind as an index of `KINDS`. Of two items of
-    // a name, the one of the later kind in `KINDS` is in the way, else the later one.
+    // Each item's first token, name, where the name is, and kind, a number to order them by and its name. Of two
+    // items of a name, the one of the later kind is in the way, else the later one.
     let named: Vec<_> = items
         .iter()
         .filter_map(|item| {
             let (name, span, kind) = match &item.kind {
-                ItemKind::Const(c) => (c.name.as_str(), c.span, 0),
-                ItemKind::Fn(f) => (f.name.as_str(), f.span, 1),
-                ItemKind::Static(s) => (s.name.as_str(), s.span, 2),
+                ItemKind::Const(c) => (c.name.as_str(), c.span, (0, "constant")),
+                ItemKind::Fn(f) => (f.name.as_str(), f.span, (1, "function")),
+                ItemKind::Static(s) => (s.name.as_str(), s.span, (2, "static")),
                 ItemKind::Other => return None,
             };
             Some((item.tokens.start, name, span, kind))
@@ -84,8 +83,8 @@ fn named_once(items: &mut Vec<Item>, given: usize) -> Option<Error> {
     for &(at, name, span, kind) in &named {
         for &(from, same, _, other) in &named {
             if from >= given && same == name && (other, from) < (kind, at) {
-                let what = if other == kind { "another" } else { "a" };
-                let message = format!("`{name}` names {what} {} of the module as well", KINDS[other]);
+                let which = if other == kind { "another" } else { "a" };
+                let message = format!("`{name}` names {which} {} of the module as well", other.1);
                 error.get_or_insert(Error { span, message });
                 way.push(at);
                 break;
@@ -146,8 +145,23 @@ impl<'a> Parser<'a> {
         self.trees.get(self.pos + n)
     }
 
+    /// The tokens from here on.
+    fn rest(&self) -> &'a [Tree] {
+        self.trees.get(self.pos..).unwrap_or_default()
+    }
+
+    /// The tokens from `from` to here.
+    fn since(&self, from: usize) -> &'a [Tree] {
+        self.trees.get(from..self.pos).unwrap_or_default()
+    }
+
+    /// Where the token `at` is: where errors at the end point, if there is none.
+    fn span_at(&self, at: usize) -> Span {
+        self.trees.get(at).map_or(self.end, Tree::span)
+    }
+
     fn span(&self) -> Span {
-        self.peek().map_or(self.end, Tree::span)
+        self.span_at(self.pos)
     }
 
     fn bump(&mut self) -> Option<&'a Tree> {
@@ -193,12 +207,12 @@ impl<'a> Parser<'a> {
     /// A type that is a name, `u64`, or a path, `core::primitive::u64`, as [`read_type`] gives it: a generic's, or the
     /// one a cast is to.
     fn path_type(&mut self) -> Result<String, Error> {
-        match path(&self.trees[self.pos..]) {
+        let from = self.pos;
+        match path(self.rest()) {
             0 => Ok(self.ident()?.0),
             len => {
-                let ty = read_type(&self.trees[self.pos..self.pos + len]);
                 self.pos += len;
-                Ok(ty)
+                Ok(read_type(self.since(from)))
             }
         }
     }
@@ -234,7 +248,7 @@ impl<'a> Parser<'a> {
 
     /// The item of the tokens from `start` to here.
     fn made(&self, start: usize, kind: ItemKind) -> Item {
-        Item { tokens: start..self.pos, span: self.trees[start].span(), kind }
+        Item { tokens: start..self.pos, span: self.span_at(start), kind }
     }
 
     fn item(&mut self) -> Result<Item, Error> {
@@ -385,7 +399,7 @@ impl<'a> Parser<'a> {
         if self.eat_ident("fn") {
             // A helper may be `const`: kernite runs it while the kernel compiles. The error is at
             // the first word refused.
-            let refused = self.trees[qualifiers..self.pos - 1].iter().find_map(|t| match t {
+            let refused = self.since(qualifiers).iter().find_map(|t| match t {
                 Tree::Ident { name, span, .. } if name == "async" => {
                     Some((*span, "a function runs when it is called, so it is not `async`"))
                 }
@@ -420,7 +434,7 @@ impl<'a> Parser<'a> {
     /// group. Any other item ends at its first `;`, or at its first brace group outside `<..>`, where a const
     /// argument may hold one: a function ends at its body.
     fn skip(&mut self) {
-        let mut words = self.trees[self.pos..].iter().filter_map(|t| match t {
+        let mut words = self.rest().iter().filter_map(|t| match t {
             Tree::Ident { name, .. } if name != "pub" => Some(name.as_str()),
             _ => None,
         });
@@ -522,15 +536,15 @@ impl<'a> Parser<'a> {
             // the body. A lifetime is a `'` and the name that follows it.
             self.skip_ty(1, |p| {
                 let macro_args = matches!(
-                    &p.trees[..p.pos],
+                    p.since(0),
                     [.., before, Tree::Ident { name, .. }, Tree::Punct { ch: '!', .. }]
                         if name != "const" && name != "mut" && !matches!(before, Tree::Punct { ch: '\'', .. })
                 );
                 let body = matches!(p.peek(), Some(Tree::Group { delim: Delim::Brace, .. })) && !macro_args;
                 p.is_ident("where") || p.is_op(";") || body
             })?;
-            no_impl(&self.trees[from..self.pos])?;
-            Some(Ret { ty: read_type(&self.trees[from..self.pos]), span, tokens: from..self.pos })
+            no_impl(self.since(from))?;
+            Some(Ret { ty: read_type(self.since(from)), span, tokens: from..self.pos })
         } else {
             None
         };
@@ -569,6 +583,19 @@ impl<'a> Parser<'a> {
             p.finish()?;
             return Ok(ty);
         }
+        // A reference to an array, `&[T; N]` or `&mut [T; N]`, whose length is worked out as an array's is. Any other
+        // reference is read as a name below.
+        let from = self.pos;
+        if self.eat_op("&") {
+            let write = self.eat_ident("mut");
+            if matches!(self.peek(), Some(Tree::Group { delim: Delim::Bracket, .. })) {
+                let array = self.ty(open)?;
+                if matches!(array, Type::Array(..)) {
+                    return Ok(Type::Ref(write, Box::new(array), self.span_at(from)));
+                }
+            }
+            self.pos = from;
+        }
         if let Some((inner, span)) = self.group(Delim::Bracket) {
             nested(open, span)?;
             let mut p = Parser::new(inner, span);
@@ -582,12 +609,12 @@ impl<'a> Parser<'a> {
             return Ok(Type::Array(Box::new(elem), len, span));
         }
         // `for<'a> fn(&'a u8)` begins with a binder, not with the name of a type: it is read whole below.
-        if let Some(Tree::Ident { name, span, .. }) = self.peek()
+        if let Some(first @ Tree::Ident { name, span, .. }) = self.peek()
             && name != "for"
             && matches!(self.peek_at(1), Some(Tree::Punct { ch: '<', .. }))
         {
             nested(open, *span)?;
-            let head = read_type(&self.trees[self.pos..=self.pos]);
+            let head = read_type(std::slice::from_ref(first));
             self.pos += 2;
             let mut args = vec![];
             while !self.eat_op(">") {
@@ -604,7 +631,7 @@ impl<'a> Parser<'a> {
         if from == self.pos {
             return self.error(format!("expected a type, found {}", self.found()));
         }
-        Ok(Type::Name(read_type(&self.trees[from..self.pos]), span))
+        Ok(Type::Name(read_type(self.since(from)), span))
     }
 
     /// Goes past the tokens of a type, at level `open` of the type it is in, to the first that `ends` it, or to the
@@ -615,7 +642,7 @@ impl<'a> Parser<'a> {
         let mut angles = 0;
         while !self.done() && (angles > 0 || !(self.is_op(">") || ends(self))) {
             if self.is_op("<") {
-                nested(open + angles, self.trees[from..self.pos].last().map_or(self.span(), Tree::span))?;
+                nested(open + angles, self.since(from).last().map_or(self.span(), Tree::span))?;
                 angles += 1;
             } else if self.is_op(">") {
                 angles -= 1;
@@ -635,9 +662,8 @@ impl<'a> Parser<'a> {
 
     /// `let (a, b): (T, U);` declares a variable of each type, and `let (a, b) = (x, y);`
     /// names each value: so many `let`s, in order.
-    fn lets(&mut self) -> Result<Vec<Stmt>, Error> {
-        self.pos += 1;
-        let (inner, span) = self.group(Delim::Paren).expect("a tuple after `let`");
+    fn lets(&mut self, inner: &'a [Tree], span: Span) -> Result<Vec<Stmt>, Error> {
+        self.pos += 2;
         let mut p = Parser::new(inner, span);
         let mut names = vec![];
         while !p.done() {
@@ -730,25 +756,30 @@ impl<'a> Parser<'a> {
     /// in a loop, and not by a call for each, so that a long row of them is no deeper to the parser
     /// than one.
     fn if_stmt(&mut self) -> Result<Stmt, Error> {
+        let (cond, then, span) = self.link(1)?;
         let mut links = vec![];
         let ending = loop {
-            let span = self.span();
-            nested(links.len() + 1, span)?;
-            self.pos += 1;
-            let (cond, then) = (self.expr()?, self.braced()?);
-            links.push((cond, then, span));
             if !self.eat_ident("else") {
                 break None;
             }
             if !self.is_ident("if") {
                 break Some(Box::new(Stmt::Block(self.braced()?)));
             }
+            links.push(self.link(links.len() + 2)?);
         };
-        let chain = links
+        let otherwise = links
             .into_iter()
             .rev()
             .fold(ending, |otherwise, (cond, then, span)| Some(Box::new(Stmt::If { cond, then, otherwise, span })));
-        Ok(*chain.expect("an `if` is a link"))
+        Ok(Stmt::If { cond, then, otherwise, span })
+    }
+
+    /// An `if` with its condition and its block, `depth` links down its chain, and where it is.
+    fn link(&mut self, depth: usize) -> Result<(Expr, Block, Span), Error> {
+        let span = self.span();
+        nested(depth, span)?;
+        self.pos += 1;
+        Ok((self.expr()?, self.braced()?, span))
     }
 
     fn braced(&mut self) -> Result<Block, Error> {
@@ -849,13 +880,13 @@ impl<'a> Parser<'a> {
         // A path that begins with a primitive's, `core::primitive::u32::MAX`, is read from the primitive's name, if it
         // ends there or with a name more. One that goes on by two, `core::primitive::f32::consts::PI`, is no path of
         // Rust's, and is read as it is written.
-        let here = &self.trees[self.pos..];
+        let here = self.rest();
         if let Some((name, len)) = primitive(here).filter(|&(_, len)| path(here) <= len + 3) {
             self.pos += len;
             return self.path_from(name, span);
         }
         // A path from the root of a library with a `::` before it, `::core::f32::consts::PI`, is read whole.
-        if self.is_op("::") && root(&self.trees[self.pos..]).is_some() {
+        if self.is_op("::") && root(self.rest()).is_some() {
             return self.path_from("", span);
         }
         let Some(t) = self.bump() else {
@@ -1014,8 +1045,10 @@ fn block(trees: &[Tree], span: Span) -> Result<Block, Error> {
         if p.eat_op(";") {
             continue;
         }
-        if p.is_ident("let") && matches!(p.peek_at(1), Some(Tree::Group { delim: Delim::Paren, .. })) {
-            stmts.extend(p.lets()?);
+        if p.is_ident("let")
+            && let Some(&Tree::Group { delim: Delim::Paren, ref trees, span, .. }) = p.peek_at(1)
+        {
+            stmts.extend(p.lets(trees, span)?);
         } else {
             stmts.push(p.stmt()?);
         }
@@ -1059,7 +1092,7 @@ fn params(trees: &[Tree]) -> Result<Vec<Param>, Error> {
         p.expect_op(":")?;
         let from = p.pos;
         let ty = p.ty(1)?;
-        no_impl(&p.trees[from..p.pos])?;
+        no_impl(p.since(from))?;
         out.push(Param { name, span, ty });
         if !p.done() {
             p.expect_op(",")?;
@@ -1090,9 +1123,12 @@ fn is_string(lit: &str) -> bool {
 
 /// A string literal's text, as Rust reads it: a raw string's with each CRLF a LF, a plain string's by `unescape`.
 fn unquote(lit: &str, span: Span) -> Result<String, Error> {
-    if let Some(raw) = lit.strip_prefix('r') {
-        let hashes = raw.len() - raw.trim_start_matches('#').len();
-        return Ok(raw[hashes + 1..raw.len() - hashes - 1].replace("\r\n", "\n"));
+    let raw = lit.strip_prefix('r');
+    // What the quotes hold; a raw string has `#`s outside them too.
+    let quoted = raw.map_or(lit, |raw| raw.trim_matches('#'));
+    let inner = quoted.strip_prefix('"').and_then(|q| q.strip_suffix('"')).unwrap_or_default();
+    if raw.is_some() {
+        return Ok(inner.replace("\r\n", "\n"));
     }
-    unescape(&lit[1..lit.len() - 1]).map_err(|(_, message)| Error { span, message })
+    unescape(inner).map_err(|(_, message)| Error { span, message })
 }

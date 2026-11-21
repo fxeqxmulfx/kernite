@@ -2,7 +2,7 @@
 //! so that a kernel is a function written where it is called.
 //!
 //! ```text
-//! pub unsafe extern "sysv64" fn sum8(xs: *const f32) -> f32 {
+//! pub extern "sysv64" fn sum8(xs: &[f32; 8]) -> f32 {
 //!     let v: ymm;
 //!     vmovups(v, [xs]);
 //!     ret_sum(v);
@@ -127,10 +127,10 @@ pub use ast::{
     BinOp, Block, Const, Cooperative, Directive, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret,
     Static, Stmt, Type, UnOp,
 };
-pub use eval::{Memory, Mention, Run, constant, instance, instances, kernel, memory};
+pub use eval::{Memory, Mention, Named, Run, constant, instance, instances, instructions, kernel, memory, param_types};
 pub use parse::{module, read};
 pub use target::{Fault, Guard, Mem, Operand, Target};
-pub use token::{Delim, Span, Tree, lex, never_raw, pointer, read_type, text, unraw};
+pub use token::{Delim, Span, Tree, array_ref, lex, never_raw, pointer, read_type, text, unraw};
 pub use unicode::nfc;
 pub use value::{IntTy, Value, with_article};
 
@@ -146,10 +146,10 @@ pub struct Error {
 impl Error {
     /// The message with the line and column of a span that is a byte offset into `src`.
     pub fn at(&self, src: &str) -> String {
-        let offset = (self.span.0 as usize).min(src.len());
-        let before = &src[..offset];
-        let line = before.matches('\n').count() + 1;
-        let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+        let (mut line, mut column) = (1, 1);
+        for (_, c) in src.char_indices().take_while(|&(i, _)| i < self.span.0 as usize) {
+            (line, column) = if c == '\n' { (line + 1, 1) } else { (line, column + 1) };
+        }
         format!("{line}:{column}: {}", self.message)
     }
 }

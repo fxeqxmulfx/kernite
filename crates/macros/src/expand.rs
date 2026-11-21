@@ -21,8 +21,8 @@ use crate::cond::Cond;
 use crate::gpu::{HOLE, gpu, refused_attrs, used};
 use crate::room;
 use crate::rust::{
-    cfg_of, error, error_under, flatten, for_rust, from_inside, grouped, inner_attribute, lex, name_at, parse,
-    passable, position, seen, site, stub, takes, unnamed,
+    cfg_of, error, error_under, flatten, for_rust, from_inside, grouped, ident_at, inner_attribute, lex, name_at,
+    parse, passable, position, seen, site, stub, takes, unnamed, within,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, operands, x86_stub};
@@ -104,11 +104,9 @@ pub(crate) fn expand(
     }
     // The module's own attributes, `#![..]`, before anything the macro writes, where Rust has
     // them. A module given consts has them from `#[kernels]`, which writes this inside the module.
-    let mut out: TokenStream = module
-        .items
-        .iter()
-        .filter(|item| given.is_none() && inner_attribute(&top[item.tokens.clone()]))
-        .flat_map(|item| top[item.tokens.clone()].iter().cloned())
+    let mut out: TokenStream = (module.items.iter().map(|item| within(&top, &item.tokens)))
+        .filter(|tokens| given.is_none() && inner_attribute(tokens))
+        .flat_map(|tokens| tokens.iter().cloned())
         .collect();
     // The errors of the module as a whole, said under no `cfg`: at its attribute or at a workspace's name that is not a
     // string; an item that has the name of a const the module takes; and a module that is two.
@@ -121,9 +119,12 @@ pub(crate) fn expand(
     out.extend(free);
     let conds: Vec<Cond> = cfgs.iter().map(Cond::of).collect();
     // Where `cfg` keeps what a part of the GPU's module is of: the code of an item, or a static of the GPU's.
-    let kept = |device: &DeviceOut, it: Kept| match it {
-        Kept::Code(i) => conds[device.code_items[i]].clone(),
-        Kept::Static(j) => conds[device.static_items[j]].clone(),
+    let kept = |device: &DeviceOut, it: Kept| {
+        let item = match it {
+            Kept::Code(i) => device.code_items.get(i),
+            Kept::Static(j) => device.static_items.get(j),
+        };
+        item.map_or(Cond::Never, |&at| cond_of(&conds, at))
     };
     // Why the GPU's module is none, each reason where `cfg` keeps what it is of.
     let mut unloaded = vec![];
@@ -148,9 +149,9 @@ pub(crate) fn expand(
     // Each listing the process's kernels have, by name, under the `cfg` of the kernel it is of, as
     // what `naked` writes for it is.
     let mut listed = vec![];
-    for (i, (item, made_item)) in module.items.iter().zip(&made.items).enumerate() {
-        let tokens = &top[item.tokens.clone()];
-        let cfg = &cfgs[i];
+    for (i, (((item, made_item), cfg), cond)) in module.items.iter().zip(&made.items).zip(&cfgs).zip(&conds).enumerate()
+    {
+        let tokens = within(&top, &item.tokens);
         let said = |e: &lang::Error| error_under(cfg, at(e.span), &e.message);
         let (names, errors) = named(&made, &conds, i, &top, &place);
         reads.extend(names);
@@ -169,15 +170,15 @@ pub(crate) fn expand(
             (ItemKind::Static(s), ItemOut::DeviceStatic(laid)) => {
                 out.extend(laid.as_ref().err().and_then(|failed| failed.error.as_ref()).map(said));
                 out.extend(refused_attrs(s, cfg, &top));
-                memory.push((s, laid, conds[i].clone()));
-                on_gpu.push(conds[i].clone());
+                memory.push((s, laid, cond.clone()));
+                on_gpu.push(cond.clone());
                 if let Ok(laid) = laid {
                     fields.extend(room::room(cfg, i, &laid.code.ty, at(s.ty.span())));
                 }
             }
             (ItemKind::Fn(f), ItemOut::Helper(errors)) => {
                 out.extend(errors.iter().map(said));
-                helpers.push((i, f));
+                helpers.push((i, cond, f));
             }
             (ItemKind::Fn(f), ItemOut::Unknown(e)) => {
                 out.extend(e.as_ref().map(said));
@@ -187,9 +188,8 @@ pub(crate) fn expand(
                 out.extend(k.not_unsafe.as_ref().map(said));
                 out.extend(k.said.as_ref().map(said));
                 let firsts = operands(k);
-                let first = |name: &str| {
-                    place(firsts.iter().find(|m| m.name == name).expect("the kernel writes what its code names").span)
-                };
+                // The kernel writes what its code names; the macro's call site stands for what it does not.
+                let first = |name: &str| firsts.iter().find(|m| m.name == name).map_or_else(site, |m| place(m.span));
                 out.extend(match k.written {
                     true => naked(module, f, &k.instances, &k.touched, cfg, &top, &first),
                     false => x86_stub(f, k.count, &k.touched, cfg, &top),
@@ -201,13 +201,13 @@ pub(crate) fn expand(
                 out.extend(d.not_unsafe.as_ref().map(said));
                 out.extend(d.said.as_ref().map(said));
                 out.extend(d.errors.iter().map(said));
-                on_gpu.push(conds[i].clone());
+                on_gpu.push(cond.clone());
                 launchers.extend(d.launcher.as_ref().map(|l| (f, l)));
                 if d.launcher.is_none() {
-                    helpers.push((i, f));
+                    helpers.push((i, cond, f));
                 }
             }
-            _ => unreachable!("kernite::module says what each item is"),
+            _ => out.extend(error_under(cfg, at(item.span), "kernite made this item what it is not: that is a bug")),
         }
     }
     let laid = Cond::any(memory.iter().filter(|(_, m, _)| m.is_ok()).map(|(.., c)| c.clone()));
@@ -254,16 +254,62 @@ pub(crate) fn expand(
     // decides, so `__Room` shows them there, as a field of each helper in the struct says.
     let failing = Cond::any([Cond::errors_in(&out), Cond::errors_in(&left_out), Cond::errors_in(&tail)]);
     let mut shown = TokenStream::new();
-    for (i, f) in helpers {
-        reads.extend(Cond::all([conds[i].clone(), failing.clone()]).guard().map(|g| seen(f, &top, &g)));
-        shown.extend(conds[i].guard().map(|g| room::shown(&g, i, seen(f, &top, &TokenStream::new()))));
+    for (i, cond, f) in helpers {
+        reads.extend(Cond::all([cond.clone(), failing.clone()]).guard().map(|g| seen(f, &top, &g)));
+        shown.extend(cond.guard().map(|g| room::shown(&g, i, seen(f, &top, &TokenStream::new()))));
     }
     out.extend(room::carrier(fields, shown));
     out.extend(left_out);
     if !reads.is_empty() {
         out.extend(unnamed(reads));
     }
+    out.extend(docs(&made, &conds, &at));
     out.extend(tail);
+    out
+}
+
+/// What shows an editor the doc of an instruction where a kernel names it: a block of the module that has a function
+/// for each instruction `made` has a doc of, which is that doc and is never called, and, at each word of a kernel that
+/// names the instruction, a `let _ = NAME;` of the word, for Rust to resolve it there as it resolves a name of the
+/// kernel's own. Each is under the `cfg` of the item that names the instruction, and the function under that of any of
+/// them: Rust has no word of an item that `cfg` leaves out, and nothing is never used. Rust has nothing to say of any
+/// of it, and an instruction that its machine has no doc of has no function: if it is no instruction, its error is its
+/// own. The function is named as the instruction is, with a `_` for each character that is no part of a name,
+/// `lock.bts` as `lock_bts`; a name that two have, `add` of x86 and of the GPU, or `a.b` and `a_b`, is told apart by a
+/// number.
+fn docs(made: &ModuleOut, conds: &[Cond], at: &dyn Fn(lang::Span) -> Span) -> TokenStream {
+    let (mut items, mut reads) = (TokenStream::new(), TokenStream::new());
+    let mut taken: Vec<String> = vec![];
+    for documented in &made.instructions {
+        let words: String = documented.name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+        let (mut name, mut n) = (words.clone(), 1);
+        while taken.contains(&name) {
+            n += 1;
+            name = format!("{words}_{n}");
+        }
+        let kept = Cond::any(documented.places.iter().map(|&(i, _)| cond_of(conds, i)));
+        let Some(guard) = kept.guard() else { continue };
+        items.extend(guard);
+        items.extend(parse(&format!("#[doc = {:?}] fn", documented.doc)));
+        items.extend(ident_at(&name, site()));
+        items.extend(parse("() {}"));
+        for &(i, word) in &documented.places {
+            if let Some(guard) = cond_of(conds, i).guard() {
+                reads.extend(guard);
+                reads.extend(parse("let _ ="));
+                reads.extend(ident_at(&name, at(word)));
+                reads.extend(parse(";"));
+            }
+        }
+        taken.push(name);
+    }
+    if items.is_empty() {
+        return items;
+    }
+    items.extend(reads);
+    let mut out = parse("const _: () =");
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, items))]);
+    out.extend(parse(";"));
     out
 }
 
@@ -286,7 +332,7 @@ fn take(made: &ModuleOut, top: &[TokenTree], path: &[TokenTree]) -> TokenStream 
     let mut names = TokenStream::new();
     for (item, made_item) in made.module.items.iter().zip(&made.items) {
         if matches!(made_item, ItemOut::Given) {
-            names.extend([name_at(item, top, site())]);
+            names.extend(name_at(item, top, site()));
             names.extend(parse(","));
         }
     }
@@ -332,41 +378,43 @@ fn named(
 ) -> (TokenStream, TokenStream) {
     let module = &made.module;
     let (mut names, mut errors) = (TokenStream::new(), TokenStream::new());
-    let covered = match &made.items[i] {
+    let Some((reader, made_reader)) = module.items.get(i).zip(made.items.get(i)) else { return (names, errors) };
+    let covered = match made_reader {
         ItemOut::Native(k) => operands(k),
         _ => vec![],
     };
-    for m in made.items[i].mentions() {
+    for m in made_reader.mentions() {
         let at = module.item_at(m.span);
-        let kept = Cond::all([conds[i].clone(), runs(made, conds, i, at, &[])]);
+        let kept = Cond::all([cond_of(conds, i), runs(made, conds, i, at, &[])]);
         if m.value.is_some() {
-            let given = matches!(made.items[at], ItemOut::Given);
+            let given = matches!(made.items.get(at), Some(ItemOut::Given));
             names.extend(kept.guard().filter(|_| !given).map(|guard| takes(guard, m, place)));
             continue;
         }
-        let j = position(module, &m.name);
-        let rust = match (&module.items[j].kind, &made.items[j]) {
+        let Some(j) = position(module, &m.name) else { continue };
+        let Some((item, made_item)) = module.items.get(j).zip(made.items.get(j)) else { continue };
+        let rust = match (&item.kind, made_item) {
             (_, ItemOut::Rust | ItemOut::Given | ItemOut::HostStatic(_)) => true,
             (ItemKind::Fn(f), ItemOut::Native(_)) => f.generics.is_empty(),
             _ => false,
         };
         if rust {
             let kept = match covered.iter().any(|x| x.span == m.span) {
-                true => Cond::all([kept, conds[j].clone().not()]),
+                true => Cond::all([kept, cond_of(conds, j).not()]),
                 false => kept,
             };
             let Some(guard) = kept.guard() else { continue };
-            names.extend(find(guard, [name_at(&module.items[j], top, place(m.span))]));
+            names.extend(find(guard, name_at(item, top, place(m.span))));
             continue;
         }
-        if let Some(guard) = Cond::all([kept.clone(), conds[j].clone().not()]).guard() {
-            let reader = module.items[i].name().expect("an item that names others has a name");
+        if let Some(guard) = Cond::all([kept.clone(), cond_of(conds, j).not()]).guard() {
+            let reader = reader.name().unwrap_or_default();
             let message = format!("`{}` is left out by `cfg` where `{reader}`, which names it, is kept", m.name);
             errors.extend(error_under(&guard, place(m.span), &message));
         }
-        if let ItemOut::DeviceStatic(laid) = &made.items[j]
-            && let Some(path) = used(&module.items[j], laid, top, place(m.span))
-            && let Some(guard) = Cond::all([kept, conds[j].clone()]).guard()
+        if let ItemOut::DeviceStatic(laid) = made_item
+            && let Some(path) = used(item, laid, top, place(m.span))
+            && let Some(guard) = Cond::all([kept, cond_of(conds, j)]).guard()
         {
             names.extend(find(guard, path));
         }
@@ -386,11 +434,17 @@ fn runs(made: &ModuleOut, conds: &[Cond], i: usize, c: usize, way: &[usize]) -> 
     if c == i {
         return Cond::Always;
     }
-    if matches!(module.items[c].kind, ItemKind::Const(_)) {
-        return conds[c].clone();
+    let (Some(made_reader), Some(callee)) = (made.items.get(i), module.items.get(c)) else { return Cond::Never };
+    if matches!(callee.kind, ItemKind::Const(_)) {
+        return cond_of(conds, c);
     }
     let way = [way, &[c]].concat();
-    let calls = made.items[i].mentions().iter().filter(|m| module.items[c].name() == Some(&m.name));
+    let calls = made_reader.mentions().iter().filter(|m| callee.name() == Some(&m.name));
     let callers = calls.map(|m| module.item_at(m.span)).filter(|caller| !way.contains(caller));
-    Cond::all([conds[c].clone(), Cond::any(callers.map(|caller| runs(made, conds, i, caller, &way)))])
+    Cond::all([cond_of(conds, c), Cond::any(callers.map(|caller| runs(made, conds, i, caller, &way)))])
+}
+
+/// When item `i` is there, `conds` saying it of each item of the module: never for an item the module has not.
+fn cond_of(conds: &[Cond], i: usize) -> Cond {
+    conds.get(i).cloned().unwrap_or(Cond::Never)
 }

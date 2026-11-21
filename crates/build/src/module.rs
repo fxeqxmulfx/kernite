@@ -2,15 +2,16 @@
 //! its items is once its kernels are compiled, for whatever writes the module out for Rust.
 
 use std::cell::LazyCell;
+use std::collections::BTreeMap;
 
 use kernite_lang::{Error, Item, ItemKind, Mention, Module, Static};
 
-use crate::classify::{abi_or_error, attributes, helper, trusted};
+use crate::classify::{abi_or_error, attributes, helper, must_be_unsafe};
 use crate::function::stub;
 use crate::present::{Refusal, said};
 use crate::{
-    Abi, Assembly, Backend, Call, Compiled, Device, DeviceFnOut, DeviceOut, Failed, Given, ItemOut, Launcher,
-    ModuleOut, Naked, Native, NativeInstance, NativeOut, Owner, compile, instance, owner, prepare,
+    Abi, Assembly, Backend, Call, Compiled, Device, DeviceFnOut, DeviceOut, Documented, Failed, Given, ItemOut, Launch,
+    Launcher, ModuleOut, Naked, Native, NativeInstance, NativeOut, Owner, abi, compile, instance, owner, prepare,
 };
 
 /// `module`, given the consts `given` says, its kernels compiled: each function the process runs
@@ -21,9 +22,10 @@ use crate::{
 /// is said where it can be mended. A kernel the process runs is written for Rust to call when it is
 /// an `unsafe fn`, its attributes hold, each of its instances compiled, and it names no static of
 /// the GPU's. The GPU's module has the code of each instance that compiled, of each function the GPU
-/// runs whose attributes hold; Rust launches a kernel of it when it is an `unsafe fn`, its
-/// attributes hold, and each of its instances compiled. The GPU's module is put together from what
-/// Rust keeps of them, and why it is none is said at the module's first item that is the GPU's.
+/// runs whose attributes hold; Rust launches a kernel of it when its attributes hold, it is an
+/// `unsafe fn` if it is `#[cooperative]`, and each of its instances compiled. The GPU's module is
+/// put together from what Rust keeps of them, and why it is none is said at the module's first
+/// item that is the GPU's.
 ///
 /// A `refused` module is one refused whole: at its attribute, with no consts given, or for an item
 /// kernite cannot read, which leaves it the items kernite reads and the consts it is given. Nothing
@@ -73,14 +75,12 @@ pub fn module<N: Native, D: Device>(
                 continue;
             }
             ItemKind::Static(s) if process => {
-                let laid = (!refused).then(|| host.next().expect("each static is laid out or refused"));
-                items.push(ItemOut::HostStatic(static_out(m, s, native, laid, |s| native.host_static(s))));
+                items.push(ItemOut::HostStatic(static_out(m, s, native, host.next(), |s| native.host_static(s))));
                 continue;
             }
             ItemKind::Static(s) => {
                 first.get_or_insert(s.span);
-                let laid = (!refused).then(|| gpu.next().expect("each static is laid out or refused"));
-                let out = static_out(m, s, device, laid, |s| device.device_static(s));
+                let out = static_out(m, s, device, gpu.next(), |s| device.device_static(s));
                 if out.is_ok() {
                     static_items.push(items.len());
                 }
@@ -101,7 +101,7 @@ pub fn module<N: Native, D: Device>(
             }
         };
         // A refused module's kernels are not looked at: nothing of them is said or compiled.
-        let not_unsafe = (!refused && !trusted(f, abi)).then(|| said(Refusal::NotUnsafe, f.span));
+        let not_unsafe = if refused { None } else { must_be_unsafe(f, abi) };
         let checked = if refused { Ok(vec![]) } else { attributes(f).and(kernite_lang::instances(m, f)) };
         let (said, listed) = match checked {
             Ok(listed) => (None, listed),
@@ -152,7 +152,7 @@ pub fn module<N: Native, D: Device>(
         let mut launched = vec![];
         for (args, code) in compiled {
             if launches {
-                launched.push((args, symbols.len()));
+                launched.push(Launch { args, symbol: symbols.len(), requires: device.requires(&code) });
                 symbols.push((codes.len(), device.symbol(&code)));
             }
             codes.push(code);
@@ -178,8 +178,41 @@ pub fn module<N: Native, D: Device>(
         let assembly = if refused { Assembly::default() } else { device.module(&codes, &d.made) };
         DeviceOut { assembly, at, symbols, code_items, static_items }
     });
+    let instructions = documented(m, whose.as_ref().ok().copied(), native, device);
     let (given, owner) = if refused { (vec![], None) } else { (twice, whose.err()) };
-    ModuleOut { module, given, owner, items, device: loaded }
+    ModuleOut { module, given, owner, items, device: loaded, instructions }
+}
+
+/// Each instruction a function of `module` names that its machine has a doc of, with each place it is named, in the
+/// order of the source. A function that names an ABI is the machine's whose it is, `native` for `extern "sysv64"`
+/// and `device` for the rest; a helper, or a function of an ABI kernite compiles for none, is the module's owner's,
+/// whose it is: none, if the module is two. A machine is asked once of each name.
+fn documented<N: Native, D: Device>(module: &Module, whose: Option<Owner>, native: &N, device: &D) -> Vec<Documented> {
+    let mut out: Vec<Documented> = vec![];
+    // Where the doc of each name a machine was asked of is in `out`, by whether the machine is `native`; none if it has
+    // no doc.
+    let mut asked: BTreeMap<(bool, String), Option<usize>> = BTreeMap::new();
+    for (i, item) in module.items.iter().enumerate() {
+        let ItemKind::Fn(f) = &item.kind else { continue };
+        let process = match (abi(f), whose) {
+            (Some(abi), _) => abi.native(),
+            (None, Some(whose)) => whose == Owner::Process,
+            (None, None) => continue,
+        };
+        for named in kernite_lang::instructions(module, f) {
+            let at = *asked.entry((process, named.name.clone())).or_insert_with(|| {
+                let doc = if process { native.doc(&named.name) } else { device.doc(&named.name) };
+                doc.map(|doc| {
+                    out.push(Documented { name: named.name.clone(), doc, places: vec![] });
+                    out.len() - 1
+                })
+            });
+            if let Some(documented) = at.and_then(|at| out.get_mut(at)) {
+                documented.places.extend(named.spans.iter().map(|&span| (i, span)));
+            }
+        }
+    }
+    out
 }
 
 /// Static `s` of `module` as an item of it comes out: `laid`, as `backend` laid it out, its memory
@@ -273,8 +306,7 @@ fn touched(module: &Module, items: &[ItemOut]) -> Vec<Vec<String>> {
         // Its instances' code, then that of the functions they name or may reach, and on.
         let mut reached: Vec<&Naked> = out.instances.iter().map(|k| &k.naked).collect();
         let mut at = 0;
-        while at < reached.len() {
-            let code = reached[at];
+        while let Some(&code) = reached.get(at) {
             for name in code.funcs.iter().chain(&code.reach) {
                 if let Some(&(_, called)) = named.iter().find(|(n, _)| n == name)
                     && !reached.iter().any(|r| std::ptr::eq(*r, called))
@@ -301,15 +333,17 @@ fn touched(module: &Module, items: &[ItemOut]) -> Vec<Vec<String>> {
 
 /// Each function of `module` that `funcs` names, `gcd` or `tile::<4>`, as the code of an
 /// instance names them: by the function's name, and the index of the instance among those its
-/// `#[instances(..)]` lists, if it takes compile-time arguments.
+/// `#[instances(..)]` lists, if it takes compile-time arguments or is no `unsafe fn`: such a
+/// function is one that calls its instance, so the code calls the instance.
 fn calls(module: &Module, funcs: &[String]) -> Vec<Call> {
     let call = |name: &String| {
-        // A function that takes no compile-time arguments and lists instances is wrong at its
-        // own item, and `instance` refuses it: the call names it whole, as it names any
-        // function of none.
-        let Ok(found) = instance(module, name) else { return Call { function: name.clone(), instance: None } };
-        let (g, _, k) = found.expect("a kernel calls an instance its function lists");
-        Call { function: g.name.clone(), instance: (!g.generics.is_empty()).then_some(k) }
+        // A kernel calls only an instance its function lists, so `instance` finds it. A function
+        // that takes no compile-time arguments and lists instances is wrong at its own item, and
+        // `instance` refuses it: the call names it whole, as it names any function of none.
+        let Ok(Some((g, _, k))) = instance(module, name) else {
+            return Call { function: name.clone(), instance: None };
+        };
+        Call { function: g.name.clone(), instance: (!g.generics.is_empty() || !g.unsafe_fn).then_some(k) }
     };
     funcs.iter().map(call).collect()
 }

@@ -6,6 +6,25 @@ const N: usize = 624;
 /// The offset of the word each is mixed with.
 const M: usize = 397;
 
+/// Word `i` of the state, counting around: the state has `N` words, so `i % N` is among them.
+fn word(mt: &[u32; N], i: usize) -> u32 {
+    mt.get(i % N).copied().unwrap_or_default()
+}
+
+/// A step of the seeding: word `*i` of the state is mixed with the one before it, by `mul`, and then by `then`.
+/// `*i` goes on to the next word, around from the last to the first, which then takes the last's place.
+fn mix(mt: &mut [u32; N], i: &mut usize, mul: u32, then: impl FnOnce(u32) -> u32) {
+    let prev = word(mt, *i + N - 1);
+    if let Some(w) = mt.get_mut(*i) {
+        *w = then(*w ^ (prev ^ (prev >> 30)).wrapping_mul(mul));
+    }
+    *i += 1;
+    if *i >= N {
+        mt[0] = word(mt, N - 1);
+        *i = 1;
+    }
+}
+
 /// Python's `random.Random`.
 pub struct Random {
     state: [u32; N],
@@ -23,38 +42,26 @@ impl Random {
     }
 
     fn init_genrand(&mut self, seed: u32) {
-        self.state[0] = seed;
-        for i in 1..N {
-            let prev = self.state[i - 1];
-            self.state[i] = 1812433253u32.wrapping_mul(prev ^ (prev >> 30)).wrapping_add(i as u32);
-        }
+        let mut prev = seed;
+        self.state = std::array::from_fn(|i| {
+            if i > 0 {
+                prev = 1812433253u32.wrapping_mul(prev ^ (prev >> 30)).wrapping_add(i as u32);
+            }
+            prev
+        });
         self.index = N;
     }
 
     fn init_by_array(&mut self, key: &[u32]) {
         self.init_genrand(19650218);
         let mt = &mut self.state;
-        let (mut i, mut j) = (1, 0);
-        for _ in 0..N.max(key.len()) {
-            let prev = mt[i - 1];
-            mt[i] = (mt[i] ^ (prev ^ (prev >> 30)).wrapping_mul(1664525)).wrapping_add(key[j]).wrapping_add(j as u32);
-            (i, j) = (i + 1, j + 1);
-            if i >= N {
-                mt[0] = mt[N - 1];
-                i = 1;
-            }
-            if j >= key.len() {
-                j = 0;
-            }
+        let mut i = 1;
+        for (j, &part) in key.iter().enumerate().cycle().take(N.max(key.len())) {
+            mix(mt, &mut i, 1664525, |w| w.wrapping_add(part).wrapping_add(j as u32));
         }
         for _ in 0..N - 1 {
-            let prev = mt[i - 1];
-            mt[i] = (mt[i] ^ (prev ^ (prev >> 30)).wrapping_mul(1566083941)).wrapping_sub(i as u32);
-            i += 1;
-            if i >= N {
-                mt[0] = mt[N - 1];
-                i = 1;
-            }
+            let at = i as u32;
+            mix(mt, &mut i, 1566083941, |w| w.wrapping_sub(at));
         }
         mt[0] = 0x8000_0000;
     }
@@ -64,12 +71,15 @@ impl Random {
         if self.index >= N {
             let mt = &mut self.state;
             for k in 0..N {
-                let y = (mt[k] & 0x8000_0000) | (mt[(k + 1) % N] & 0x7fff_ffff);
-                mt[k] = mt[(k + M) % N] ^ (y >> 1) ^ if y & 1 == 1 { 0x9908_b0df } else { 0 };
+                let y = (word(mt, k) & 0x8000_0000) | (word(mt, k + 1) & 0x7fff_ffff);
+                let twisted = word(mt, k + M) ^ (y >> 1) ^ if y & 1 == 1 { 0x9908_b0df } else { 0 };
+                if let Some(w) = mt.get_mut(k) {
+                    *w = twisted;
+                }
             }
             self.index = 0;
         }
-        let mut y = self.state[self.index];
+        let mut y = word(&self.state, self.index);
         self.index += 1;
         y ^= y >> 11;
         y ^= (y << 7) & 0x9d2c_5680;
@@ -83,10 +93,9 @@ impl Random {
         (a as f64 * 67108864.0 + b as f64) * (1.0 / 9007199254740992.0)
     }
 
-    /// `random.getrandbits(k)`, for `k` from 1 to 32.
+    /// `random.getrandbits(k)`, for `k` from 1 to 32, the most the port draws: any other is the nearest.
     pub fn bits(&mut self, k: u32) -> u32 {
-        assert!((1..=32).contains(&k), "kernite's port draws 1 to 32 bits, not {k}");
-        self.next_u32() >> (32 - k)
+        self.next_u32() >> (32 - k.clamp(1, 32))
     }
 
     /// `random._randbelow(n)`: below `n`, by drawing as many bits as `n` has until one is.
@@ -102,9 +111,18 @@ impl Random {
 
     /// `random.shuffle(xs)`.
     pub fn shuffle<T>(&mut self, xs: &mut [T]) {
-        for i in (1..xs.len()).rev() {
-            let j = self.below(i as u32 + 1) as usize;
-            xs.swap(i, j);
+        let mut rest = xs;
+        // The last of those left swaps with one of them drawn: with itself if the draw is its own place, which is no
+        // place in `head`, and then there is nothing to do.
+        while let Some((last, head)) = rest.split_last_mut() {
+            if head.is_empty() {
+                break;
+            }
+            let j = self.below(head.len() as u32 + 1) as usize;
+            if let Some(other) = head.get_mut(j) {
+                std::mem::swap(last, other);
+            }
+            rest = head;
         }
     }
 
@@ -124,8 +142,9 @@ impl Random {
     }
 
     /// `random.choices(range(len(weights)), weights)[0]`: an index, each as likely as its
-    /// weight, found where a uniform draw falls among the weights summed in order.
-    pub fn choice(&mut self, weights: &[f64]) -> usize {
+    /// weight, found where a uniform draw falls among the weights summed in order; none, if
+    /// there are no weights.
+    pub fn choice(&mut self, weights: &[f64]) -> Option<usize> {
         // `itertools.accumulate(weights)`, which starts at the first weight as `0.0 + w` does.
         let cum: Vec<f64> = weights
             .iter()
@@ -134,18 +153,9 @@ impl Random {
                 Some(*sum)
             })
             .collect();
-        let total = cum[cum.len() - 1] + 0.0;
-        let x = self.random() * total;
-        // `bisect.bisect_right(cum, x, 0, len - 1)`.
-        let (mut lo, mut hi) = (0, cum.len() - 1);
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if x < cum[mid] {
-                hi = mid;
-            } else {
-                lo = mid + 1;
-            }
-        }
-        lo
+        let (&last, before) = cum.split_last()?;
+        let x = self.random() * (last + 0.0);
+        // `bisect.bisect_right(cum, x, 0, len - 1)`: the first of the sums before the last that `x` is below.
+        Some(before.partition_point(|&c| c <= x))
     }
 }

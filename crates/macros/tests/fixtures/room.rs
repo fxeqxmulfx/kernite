@@ -51,16 +51,17 @@ mod tests {
     /// The module loads on a GPU, and the kernel reads the table that is there: 7 with the feature,
     /// where `FAST` is, and 9 without it.
     #[test]
-    fn the_kernel_reads_the_table_cfg_keeps() {
-        let Ok(cuda) = Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return };
-        let kernels = Kernels::load(&cuda).unwrap();
-        let out = cuda.alloc::<u32>(1).unwrap();
+    fn the_kernel_reads_the_table_cfg_keeps() -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(cuda) = Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
+        let kernels = Kernels::load(&cuda)?;
+        let out = cuda.alloc::<u32>(1)?;
         // SAFETY: the kernel writes the one word of `out`.
         #[cfg(feature = "new")]
-        unsafe { kernels.fast(Grid::new(1, 1), out.ptr()) }.unwrap();
+        unsafe { kernels.fast(Grid::new(1, 1), out.ptr()) }?;
         // SAFETY: as above.
         #[cfg(not(feature = "new"))]
-        unsafe { kernels.slow(Grid::new(1, 1), out.ptr()) }.unwrap();
-        assert_eq!(out.read().unwrap(), [if cfg!(feature = "new") { 7 } else { 9 }]);
+        unsafe { kernels.slow(Grid::new(1, 1), out.ptr()) }?;
+        assert_eq!(out.read()?, [if cfg!(feature = "new") { 7 } else { 9 }]);
+        Ok(())
     }
 }

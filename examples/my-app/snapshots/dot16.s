@@ -6,7 +6,7 @@
 # x=rdi y=rsi n=rdx acc0=ymm0 acc1=ymm1 acc2=ymm2
 # acc3=ymm3 acc4=ymm4 acc5=ymm5 acc6=ymm6 acc7=ymm7 acc8=ymm8
 # acc9=ymm9 acc10=ymm10 acc11=ymm11 acc12=ymm12 acc13=ymm13 xs=ymm14
-# sum=ymm0 high=ymm1 pair=ymm1 zero=ymm0 acc15=ymm14,ymm15,ymm1 acc14=ymm14,ymm15,ymm1
+# sum=ymm0 high=ymm1 pair=ymm1 zero=ymm0 acc15=ymm14,ymm15 acc14=ymm14,ymm15,ymm1
     push rbp
     mov rbp, rsp
     sub rsp, 64
@@ -95,9 +95,7 @@
     # acc14 reloaded
     vmovups ymm1, ymmword ptr [rsp + 32]
     vaddps ymm0, ymm0, ymm1
-    # acc15 reloaded
-    vmovups ymm1, ymmword ptr [rsp]
-    vaddps ymm0, ymm0, ymm1
+    vaddps ymm0, ymm0, ymm15
     # the lanes
     vextractf128 xmm1, ymm0, 1
     vaddps xmm0, xmm0, xmm1
@@ -113,5 +111,4 @@
     vxorps xmm0, xmm0, xmm0
     mov rsp, rbp
     pop rbp
-    vzeroupper
     ret

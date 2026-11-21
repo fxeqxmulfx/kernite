@@ -1,20 +1,24 @@
-# gcds(gpr, gpr, gpr, gpr) -> ()
+# gcds(gpr, gpr, gpr, gpr, gpr, gpr) -> ()
 # frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
-# a=r9,rdi b=r8,rsi g=rdx n=rcx i=r10 x=rdi
-# y=rsi d=rax
+# a=r10,rdi a.len=rsi b=rdx b.len=rcx g=r8 g.len=r9
+# n=r11 i=rcx x=rdi y=rsi d=rax
     sub rsp, 8
-    mov r8, rsi
-    mov r9, rdi
-    test rcx, rcx
+    mov r10, rdi
+    mov r11, rsi
+    cmp r11, rcx
+    cmova r11, rcx
+    cmp r11, r9
+    cmova r11, r9
+    test r11, r11
     jz 3f
-    xor r10d, r10d
+    xor ecx, ecx
 2:
-    mov edi, dword ptr [r9 + r10*4]
-    mov esi, dword ptr [r8 + r10*4]
+    mov edi, dword ptr [r10 + rcx*4]
+    mov esi, dword ptr [rdx + rcx*4]
     call {f0}
-    mov dword ptr [rdx + r10*4], eax
-    inc r10
-    cmp r10, rcx
+    mov dword ptr [r8 + rcx*4], eax
+    inc rcx
+    cmp rcx, r11
     jnz 2b
 3:
     add rsp, 8
