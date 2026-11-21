@@ -10,56 +10,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Mutex, PoisonError};
 
-type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+mod common;
+
+use common::{BUILD_ENV, ROOT, Result, written};
 
 /// Held while Cargo builds a fixture: the fixtures share a target directory, and a Cargo that
 /// waits for another's lock says so.
 static CARGO: Mutex<()> = Mutex::new(());
 
-/// Where in `CARGO_TARGET_TMPDIR` each fixture is a crate, `kernite-macros/name/project`, so that
-/// its workspace is not named as the crate is; and where they are built, `kernite-macros/target`.
-const ROOT: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/kernite-macros");
-
 /// Whether Cargo did `command`, `["build"]` say, for fixture `name`, written afresh, and what it
 /// said, a line each, in order.
 fn cargo(command: &[&str], name: &str) -> Result<(bool, Vec<String>)> {
     cargo_in(command, &written(name)?)
-}
-
-/// Fixture `name` written as the `src/lib.rs` of a crate that depends on kernite-macros, kernite-cuda and kernite-cpu,
-/// as a user's does: the crate's directory. The crate is a workspace of its own in `CARGO_TARGET_TMPDIR`. Few fixtures
-/// use all three dependencies, so its manifest allows `unused_dependencies`, Cargo's lint of a dependency that a crate
-/// does not use, and ends with what `{name}.toml` beside the fixture says of the workspace, if there is one.
-fn written(name: &str) -> Result<PathBuf> {
-    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let crates = here.parent().ok_or("kernite-macros is in no directory")?;
-    let fixtures = here.join("tests/fixtures");
-    let dir = Path::new(ROOT).join(name).join("project");
-    fs::create_dir_all(dir.join("src"))?;
-    let path = |c: &str| crates.join(c).display().to_string();
-    let (macros, cuda, cpu) = (path("macros"), path("cuda"), path("cpu"));
-    let manifest = format!(
-        r#"[package]
-name = {name:?}
-version = "0.0.0"
-edition = "2024"
-publish = false
-
-[dependencies]
-kernite-macros = {{ path = {macros:?} }}
-kernite-cuda = {{ path = {cuda:?} }}
-kernite-cpu = {{ path = {cpu:?} }}
-
-[lints.cargo]
-unused_dependencies = "allow"
-
-[workspace]
-"#
-    );
-    let workspace = fs::read_to_string(fixtures.join(format!("{name}.toml"))).unwrap_or_default();
-    fs::write(dir.join("Cargo.toml"), manifest + &workspace)?;
-    fs::copy(fixtures.join(format!("{name}.rs")), dir.join("src/lib.rs"))?;
-    Ok(dir)
 }
 
 /// Fixture `name` as `written` writes it, but with each `from` of `edits` in its manifest written as its `to`.
@@ -79,27 +41,17 @@ fn cargo_in(command: &[&str], dir: &Path) -> Result<(bool, Vec<String>)> {
     Ok((out.status.success(), said.lines().map(String::from).collect()))
 }
 
-/// What Cargo did when it ran `command` in the crate at `dir`. The crate is built offline into
-/// `kernite-macros/target`, so that it never waits for the build that runs these tests. What the
+/// What Cargo did when it ran `command` in the crate at `dir`; what follows a `--` in `command` is for rustc. The crate
+/// is built offline into `kernite-macros/target`, so that it never waits for the build that runs these tests. What the
 /// environment would change of a build is taken out of it.
 fn cargo_out(command: &[&str], dir: &Path) -> Result<Output> {
     let _one = CARGO.lock().unwrap_or_else(PoisonError::into_inner);
+    let (cargo, rustc) = command.split_at(command.iter().position(|&word| word == "--").unwrap_or(command.len()));
     let mut run = Command::new(env!("CARGO"));
-    run.args(command);
+    run.args(cargo);
     run.args(["--offline", "--quiet", "--message-format=short", "--color=never", "--target-dir"]);
-    run.arg(Path::new(ROOT).join("target")).current_dir(dir);
-    for var in [
-        "RUSTFLAGS",
-        "CARGO_ENCODED_RUSTFLAGS",
-        "CARGO_BUILD_RUSTFLAGS",
-        "RUSTDOCFLAGS",
-        "CARGO_ENCODED_RUSTDOCFLAGS",
-        "CARGO_BUILD_RUSTDOCFLAGS",
-        "RUSTC_WRAPPER",
-        "RUSTC_WORKSPACE_WRAPPER",
-        "CARGO_TARGET_DIR",
-        "CARGO_BUILD_TARGET_DIR",
-    ] {
+    run.arg(Path::new(ROOT).join("target")).args(rustc).current_dir(dir);
+    for var in BUILD_ENV {
         run.env_remove(var);
     }
     Ok(run.output()?)
@@ -4104,9 +4056,16 @@ fn a_crate_that_forbids_a_lint_a_kernel_expects_is_refused_once_at_the_expect() 
 #[test]
 fn clippy_says_nothing_of_the_rust_the_macro_writes() -> Result {
     if clippy_here() {
-        for name in
-            ["many", "forbidden", "pointers", "pointer_checks", "number_checks", "primitive_names", "underscore"]
-        {
+        for name in [
+            "many",
+            "forbidden",
+            "pointers",
+            "pointer_checks",
+            "number_checks",
+            "primitive_names",
+            "underscore",
+            "docs_instructions",
+        ] {
             let (done, said) = cargo(&["clippy"], name)?;
             assert!(done && said.is_empty(), "fixtures/{name}.rs: Clippy {done}, and said:\n{}", said.join("\n"));
         }
@@ -4586,5 +4545,52 @@ fn a_fragment_behind_a_pointer_that_kernite_takes_is_one_type_to_rust_and_to_the
         printed.contains("test result: ok. 4 passed"),
         "fixtures/fragments_pointees.rs ran, and printed:\n{printed}"
     );
+    Ok(())
+}
+
+/// The docs of the instructions a kernel names are nothing to Rust: a module of x86 kernels that name them builds,
+/// tests and documents without a word, with a function that `cfg` leaves out and one that only a test keeps.
+#[test]
+fn the_docs_of_instructions_say_nothing_to_rust() -> Result {
+    let dir = written("docs_instructions")?;
+    builds_quietly_in(&["build"], "docs_instructions", &dir)?;
+    builds_quietly_in(&["test", "--no-run"], "docs_instructions", &dir)?;
+    documents_quietly("docs_instructions")?;
+    Ok(())
+}
+
+/// Rust drops what holds the docs: the code rustc writes of a module of kernels that name instructions has the kernels,
+/// and no function of an instruction and no word of a doc.
+#[test]
+fn the_docs_of_instructions_add_no_code() -> Result {
+    let dir = written("docs_instructions")?;
+    let ir = dir.join("code.ll");
+    let (done, said) = cargo_in(&["rustc", "--lib", "--", &format!("--emit=llvm-ir={}", ir.display())], &dir)?;
+    assert!(
+        done && said.is_empty(),
+        "fixtures/docs_instructions.rs: emitted {done}, and Cargo said:\n{}",
+        said.join("\n")
+    );
+    let code = fs::read_to_string(&ir)?;
+    assert!(code.contains("add_row") && code.contains("claim"), "the code has no kernel of the fixture");
+    assert!(!code.contains("Intel's SDM"), "the code has the words of a doc");
+    for name in ["vaddps", "lock_bts", "cmovz", "vsubps", "vmulps"] {
+        let defined = code.lines().filter(|line| line.starts_with("define") && line.contains(name)).count();
+        assert_eq!(defined, 0, "the code defines a function of `{name}`");
+    }
+    Ok(())
+}
+
+/// A name x86 has no instruction of has no doc, so its error is kernite's alone, once, and not Rust's as well, which
+/// would say it cannot find a name: the instructions beside it that x86 has are documented.
+#[test]
+fn a_name_that_is_no_instruction_has_its_own_error_alone() -> Result {
+    refuses(
+        "docs_unknown",
+        &[
+            "src/lib.rs:11:9: error: x86 has no instruction `vaddpz` that kernite knows",
+            "error: could not compile `docs_unknown` (lib) due to 1 previous error",
+        ],
+    )?;
     Ok(())
 }

@@ -44,6 +44,12 @@ pub trait Backend {
     fn calls(&self, _: &Self::Kernel) -> Vec<String> {
         vec![]
     }
+    /// The doc of the instruction `name`, as the machine writes it, `vaddps` or `ld.global.f32`: what it does and what
+    /// it takes, in Markdown, for an editor to show where a kernel names it; none for a name the machine has no
+    /// instruction of. A machine whose instructions have no docs says none.
+    fn doc(&self, _name: &str) -> Option<String> {
+        None
+    }
     /// `kernel`'s code, its body written: its registers allocated, or its code checked; or why
     /// not. `done` has what compiling each instance of the module gave so far, by its name: the code of each function
     /// it calls among them, and of each they call in turn, for a function is finished after those it calls. It has no

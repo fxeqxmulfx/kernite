@@ -21,8 +21,8 @@ mod present;
 pub use assembly::{Assembly, Kept, When};
 pub use classify::{Abi, Owner, abi, cooperative, function, instance, owner};
 pub use dto::{
-    Bytes, Call, Compiled, DeviceFnOut, DeviceOut, DeviceStatic, Done, Failed, Given, HostStatic, ItemOut, Launch,
-    Launcher, ModuleOut, Naked, NativeInstance, NativeOut, Quantity, Requirement, Why,
+    Bytes, Call, Compiled, DeviceFnOut, DeviceOut, DeviceStatic, Documented, Done, Failed, Given, HostStatic, ItemOut,
+    Launch, Launcher, ModuleOut, Naked, NativeInstance, NativeOut, Quantity, Requirement, Why,
 };
 pub use facade::{all, one};
 pub use function::{Prepared, compile, prepare, statics};

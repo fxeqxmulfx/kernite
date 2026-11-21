@@ -314,6 +314,16 @@ are installed, a test hands them every form, with each integer the least the for
 take it, and GNU `as` must take it at the feature kernite says it needs, without a warning, and refuse it at the
 features before.
 
+An editor shows an instruction's doc where a kernel names it: hover at `vaddps` in rust-analyzer. The doc says what the
+instruction does, in a sentence of kernite's own; each form it takes, as a kernel writes it, `vaddps(=ymm, ymm,
+ymm/m256)`, with `=` before each operand it writes, `+` before each it reads and writes, and `~` before each it reads
+nothing of; the CPU feature it needs; and where Intel's SDM says the rest. Each instruction of `forms` has a doc, and a
+family's, `cmovz`, `vcmpltps` or `vfmadd231ps`, says its own condition, predicate or order. The macros write a doc as a
+function that nothing calls, in a block of the module, and a `let _ = ..;` at each name that names it, under the `cfg`
+of the item the name is in. So a doc adds no code and changes no listing and no error, and needs no `allow`: a name
+that is no instruction has its own error and no doc, and a function that `cfg` leaves out has none for a name only it
+names.
+
 A kernel gives back its result as SysV does: `ret(g)` of a gpr for an integer, a `bool` or a pointer, which SysV has in
 `rax`; `ret(v)` of a vector for a float, which it has in `xmm0`; and `ret()` for none. Any other `ret` is an error at
 the `ret`, in a kernel and in a function of the module alike: `ret(v)` in one that gives back an integer, a `bool` or a

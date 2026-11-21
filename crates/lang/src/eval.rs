@@ -1418,13 +1418,73 @@ fn sum<V>(l: Lin<V>, span: Span) -> Result<(Vec<(V, i64)>, i64), Error> {
     }
 }
 
-/// `a.b.c` as it reads, if `e` is names joined by dots.
-fn dotted(e: &Expr) -> Option<String> {
+/// The words of `a.b.c`, each where it is written, if `e` is names joined by dots.
+fn words(e: &Expr) -> Option<Vec<(&str, Span)>> {
     match e {
-        Expr::Path(path, _) if let [name] = path.as_slice() => Some(name.clone()),
-        Expr::Field(base, name, _) => Some(format!("{}.{name}", dotted(base)?)),
+        Expr::Path(path, span) if let [name] = path.as_slice() => Some(vec![(name, *span)]),
+        Expr::Field(base, name, span) => {
+            let mut words = words(base)?;
+            words.push((name, *span));
+            Some(words)
+        }
         _ => None,
     }
+}
+
+/// `a.b.c` as it reads, if `e` is names joined by dots.
+fn dotted(e: &Expr) -> Option<String> {
+    Some(words(e)?.into_iter().map(|(word, _)| word).collect::<Vec<_>>().join("."))
+}
+
+/// An instruction a function names: its name as the machine writes it, and where each word of it is written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Named {
+    /// The instruction's name, as the machine is given it: `ld.global.f32`.
+    pub name: String,
+    /// Where each word of the name is written, in order.
+    pub spans: Vec<Span>,
+}
+
+/// Each instruction the body of `f`, a function of `module`, names, in the order of the source, each place once:
+/// where it is written, so that a loop is not unrolled and a helper is not inlined, and an `if` that is left out
+/// still names its instructions. A helper's call is no instruction, nor are `label` and `note`, nor is a call of
+/// any function of the module. A body that does not parse names none.
+pub fn instructions(module: &Module, f: &Fn) -> Vec<Named> {
+    fn walk(module: &Module, s: &Stmt, out: &mut Vec<Named>) {
+        match s {
+            Stmt::Expr(e) => out.extend(instruction(module, e)),
+            Stmt::For { body: block, .. } | Stmt::Block(block) => block.stmts.iter().for_each(|s| walk(module, s, out)),
+            Stmt::If { then, otherwise, .. } => {
+                then.stmts.iter().for_each(|s| walk(module, s, out));
+                otherwise.iter().for_each(|s| walk(module, s, out));
+            }
+            Stmt::Let { .. } | Stmt::Const(_) => {}
+        }
+    }
+    let mut out = vec![];
+    if let Ok(body) = &f.body {
+        body.stmts.iter().for_each(|s| walk(module, s, &mut out));
+    }
+    out
+}
+
+/// The instruction a statement's expression names, as [`Eval::call`] reads it.
+fn instruction(module: &Module, e: &Expr) -> Option<Named> {
+    let (words, name) = match e {
+        Expr::Call { func, generics, .. } if generics.is_empty() => {
+            let Expr::Path(path, at) = &**func else { return None };
+            let [name] = path.as_slice() else { return None };
+            let own = module.items.iter().any(|item| matches!(&item.kind, ItemKind::Fn(f) if f.name == *name));
+            if own || name == "label" || name == "note" {
+                return None;
+            }
+            (vec![], (name.as_str(), *at))
+        }
+        Expr::Method { recv, name, span, .. } => (words(recv)?, (name.as_str(), *span)),
+        _ => return None,
+    };
+    let (words, spans): (Vec<&str>, Vec<Span>) = words.into_iter().chain([name]).unzip();
+    Some(Named { name: spelled(&words.join(".")), spans })
 }
 
 /// Where `fault` is among `args`, the operands of what is at `span`: the part of an argument that it names, as

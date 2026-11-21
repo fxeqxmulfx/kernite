@@ -1180,6 +1180,12 @@ pub(crate) fn site() -> Span {
     SITE.get().unwrap_or_else(Span::call_site)
 }
 
+/// The raw identifier `name`, located at `at` and resolved as the macro's own tokens are, so that Rust finds the item
+/// the macro wrote of that name by it, at `at`.
+pub(crate) fn ident_at(name: &str, at: Span) -> TokenStream {
+    respan(parse(&format!("r#{name}")), at.resolved_at(site()))
+}
+
 /// `tokens`, each of the span `span`.
 fn respan(tokens: TokenStream, span: Span) -> TokenStream {
     tokens

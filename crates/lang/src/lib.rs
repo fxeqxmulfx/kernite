@@ -104,7 +104,7 @@ pub use ast::{
     BinOp, Block, Const, Cooperative, Directive, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret,
     Static, Stmt, Type, UnOp,
 };
-pub use eval::{Memory, Mention, Run, constant, instance, instances, kernel, memory, param_types};
+pub use eval::{Memory, Mention, Named, Run, constant, instance, instances, instructions, kernel, memory, param_types};
 pub use parse::{module, read};
 pub use target::{Fault, Guard, Mem, Operand, Target};
 pub use token::{Delim, Span, Tree, array_ref, lex, pointer, read_type, text, unraw};

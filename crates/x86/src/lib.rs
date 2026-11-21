@@ -18,6 +18,7 @@
 mod asm;
 mod backend;
 mod bounds;
+mod docs;
 pub mod forms;
 mod frame;
 pub mod intel;

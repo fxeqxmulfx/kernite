@@ -460,6 +460,27 @@ impl Kind {
         }
     }
 
+    /// What the table writes for it, as [`kind_of`] reads it: `r32`, `ymm`, `v64`, `m128`, `a256`, `m`, `vm32x`, `i8`,
+    /// `imm64`, `#0-31`, `#0x1f`, `lab`.
+    pub(crate) fn text(self) -> String {
+        let bits = |w: Width| w.bytes() * 8;
+        match self {
+            Kind::Gpr(w) => format!("r{}", bits(w)),
+            Kind::Vec(W128) => "xmm".into(),
+            Kind::Vec(W256) => "ymm".into(),
+            Kind::Vec(w) => format!("v{}", bits(w)),
+            Kind::Mem(w) => format!("m{}", bits(w)),
+            Kind::Aligned(w) => format!("a{}", bits(w)),
+            Kind::Addr => "m".into(),
+            Kind::Vsib(elem, index) => format!("vm{}{}", bits(elem), if index == W256 { 'y' } else { 'x' }),
+            Kind::Imm(w) => format!("i{}", bits(w)),
+            Kind::Imm64 => "imm64".into(),
+            Kind::Range(lo, hi) => format!("#{lo}-{hi}"),
+            Kind::Control(mask) => format!("#{mask:#04x}"),
+            Kind::Label => "lab".into(),
+        }
+    }
+
     /// What it is, as a message names it: `a gpr's r32`, `4 bytes of memory`.
     fn noun(self) -> String {
         match self {
@@ -757,8 +778,7 @@ fn parse(text: &'static str) -> Result<BTreeMap<&'static str, Vec<Form>>, String
             macros.push((name, value));
             continue;
         }
-        let (head, body) = line.split_once(" : ").ok_or_else(|| format!("`{line}` has no ` : `"))?;
-        let (written, widths, feature) = head_of(head, line)?;
+        let (written, widths, feature, body) = pieces(line)?;
         let mut names: Vec<&'static str> = vec![];
         for n in written {
             let n = macros.iter().fold(n.to_string(), |n, (m, value)| n.replace(&format!("${m}"), value));
@@ -781,6 +801,17 @@ fn parse(text: &'static str) -> Result<BTreeMap<&'static str, Vec<Form>>, String
 
 /// The widths a line gives its forms at, each with its own feature if it has one.
 type Widths = Vec<(u32, Option<Feature>)>;
+
+/// A line of the table taken apart: the names it writes, the widths it gives its forms at, the feature they need, and
+/// its forms, apart by ` ; `.
+pub(crate) type Pieces = (Vec<&'static str>, Widths, Option<Feature>, &'static str);
+
+/// `line` taken apart.
+pub(crate) fn pieces(line: &'static str) -> Result<Pieces, String> {
+    let (head, body) = line.split_once(" : ").ok_or_else(|| format!("`{line}` has no ` : `"))?;
+    let (written, widths, feature) = head_of(head, line)?;
+    Ok((written, widths, feature, body))
+}
 
 /// A line's names, its widths, and its feature: one width, 0, if it gives none.
 fn head_of(head: &'static str, line: &str) -> Result<(Vec<&'static str>, Widths, Option<Feature>), String> {
@@ -820,7 +851,7 @@ fn expand(name: &str) -> Result<Vec<String>, String> {
 
 /// The operands of each form `form` stands for, at width `n`: one for each of its operands'
 /// alternatives.
-fn operands_of(form: &str, n: u32, line: &str) -> Result<Vec<Vec<Spec>>, String> {
+pub(crate) fn operands_of(form: &str, n: u32, line: &str) -> Result<Vec<Vec<Spec>>, String> {
     if form == "()" {
         return Ok(vec![vec![]]);
     }

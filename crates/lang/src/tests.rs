@@ -6,7 +6,7 @@
 
 use crate::token::{Span, Tree};
 use crate::value::{IntTy, Value, article, cast, typed};
-use crate::{Mention, parse};
+use crate::{ItemKind, Mention, instructions, parse};
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
@@ -1587,5 +1587,50 @@ fn a_module_kernite_cannot_read_has_the_items_it_reads() -> Result {
         let want = (names.into_iter().map(String::from).collect::<Vec<_>>(), error.map(String::from));
         assert_eq!(read(src, given)?, want, "{src}");
     }
+    Ok(())
+}
+
+/// A function names each instruction where it is written, each word of its name at a place: a call, or a method of
+/// dotted words, as a statement, in a loop, an `if` and its `else`, or a block; once, whatever the loop unrolls to. A
+/// word that is not Rust's own is spelled as the machine writes it: `tex._2d` is `tex.2d`, `cp.r#async` `cp.async`.
+/// A helper's call, any function's, `label` and `note` are none, nor is a name inside an operand, nor is one in a body
+/// that does not parse.
+#[test]
+fn a_function_names_each_instruction_where_it_is_written() -> Result {
+    let src = "fn help(x: gpr) { add(x, 1); }\n\
+               unsafe extern \"sysv64\" fn kernel(x: gpr) {\n\
+               let y: gpr;\n\
+               mov(y, [x + 1]);\n\
+               help(y);\n\
+               label(top);\n\
+               note(\"n\");\n\
+               for i in 0..2 { lock.bts([x], i); }\n\
+               if true { vaddps(a, b, c); } else if false { vsubps(a, b, c); } else { vmulps(a, b, c); }\n\
+               { tex._2d.v4.f32(a, b); cp.r#async(a); }\n\
+               kernel(x);\n\
+               }\n\
+               fn broken() { let = 1; }\n";
+    let module = parse(src)?;
+    let function = |name: &str| module.items.iter().find_map(|item| (item.name() == Some(name)).then_some(&item.kind));
+    let Some(ItemKind::Fn(kernel)) = function("kernel") else { return Err("no kernel".into()) };
+    let named: Vec<(String, Vec<u32>)> =
+        instructions(&module, kernel).into_iter().map(|n| (n.name, n.spans.iter().map(|s| s.0).collect())).collect();
+    let at = |word: &str| src.find(word).map(|i| i as u32).ok_or("find gave None");
+    assert_eq!(
+        named,
+        [
+            ("mov".to_string(), vec![at("mov(y")?]),
+            ("lock.bts".to_string(), vec![at("lock")?, at("bts")?]),
+            ("vaddps".to_string(), vec![at("vaddps")?]),
+            ("vsubps".to_string(), vec![at("vsubps")?]),
+            ("vmulps".to_string(), vec![at("vmulps")?]),
+            ("tex.2d.v4.f32".to_string(), vec![at("tex")?, at("_2d")?, at("v4")?, at("f32")?]),
+            ("cp.async".to_string(), vec![at("cp")?, at("r#async")?]),
+        ]
+    );
+    let Some(ItemKind::Fn(help)) = function("help") else { return Err("no help".into()) };
+    assert_eq!(instructions(&module, help).len(), 1);
+    let Some(ItemKind::Fn(broken)) = function("broken") else { return Err("no broken".into()) };
+    assert_eq!(instructions(&module, broken), []);
     Ok(())
 }

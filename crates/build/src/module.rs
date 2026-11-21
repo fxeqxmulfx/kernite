@@ -2,6 +2,7 @@
 //! its items is once its kernels are compiled, for whatever writes the module out for Rust.
 
 use std::cell::LazyCell;
+use std::collections::BTreeMap;
 
 use kernite_lang::{Error, Item, ItemKind, Mention, Module, Static};
 
@@ -9,8 +10,8 @@ use crate::classify::{attributes, helper, must_be_unsafe};
 use crate::function::stub;
 use crate::present::{Refusal, said};
 use crate::{
-    Abi, Assembly, Backend, Call, Compiled, Device, DeviceFnOut, DeviceOut, Failed, Given, ItemOut, Launch, Launcher,
-    ModuleOut, Naked, Native, NativeInstance, NativeOut, Owner, compile, instance, owner, prepare,
+    Abi, Assembly, Backend, Call, Compiled, Device, DeviceFnOut, DeviceOut, Documented, Failed, Given, ItemOut, Launch,
+    Launcher, ModuleOut, Naked, Native, NativeInstance, NativeOut, Owner, abi, compile, instance, owner, prepare,
 };
 
 /// `module`, given the consts `given` says, its kernels compiled: each function the process runs
@@ -172,8 +173,41 @@ pub fn module<N: Native, D: Device>(
         let assembly = if refused { Assembly::default() } else { device.module(&codes, &d.made) };
         DeviceOut { assembly, at, symbols, code_items, static_items }
     });
+    let instructions = documented(m, whose.as_ref().ok().copied(), native, device);
     let (given, owner) = if refused { (vec![], None) } else { (twice, whose.err()) };
-    ModuleOut { module, given, owner, items, device: loaded }
+    ModuleOut { module, given, owner, items, device: loaded, instructions }
+}
+
+/// Each instruction a function of `module` names that its machine has a doc of, with each place it is named, in the
+/// order of the source. A function that names an ABI is the machine's whose it is, `native` for `extern "sysv64"`
+/// and `device` for the rest; a helper, or a function of an ABI kernite compiles for none, is the module's owner's,
+/// whose it is: none, if the module is two. A machine is asked once of each name.
+fn documented<N: Native, D: Device>(module: &Module, whose: Option<Owner>, native: &N, device: &D) -> Vec<Documented> {
+    let mut out: Vec<Documented> = vec![];
+    // Where the doc of each name a machine was asked of is in `out`, by whether the machine is `native`; none if it has
+    // no doc.
+    let mut asked: BTreeMap<(bool, String), Option<usize>> = BTreeMap::new();
+    for (i, item) in module.items.iter().enumerate() {
+        let ItemKind::Fn(f) = &item.kind else { continue };
+        let process = match (abi(f), whose) {
+            (Some(abi), _) => abi.native(),
+            (None, Some(whose)) => whose == Owner::Process,
+            (None, None) => continue,
+        };
+        for named in kernite_lang::instructions(module, f) {
+            let at = *asked.entry((process, named.name.clone())).or_insert_with(|| {
+                let doc = if process { native.doc(&named.name) } else { device.doc(&named.name) };
+                doc.map(|doc| {
+                    out.push(Documented { name: named.name.clone(), doc, places: vec![] });
+                    out.len() - 1
+                })
+            });
+            if let Some(documented) = at.and_then(|at| out.get_mut(at)) {
+                documented.places.extend(named.spans.iter().map(|&span| (i, span)));
+            }
+        }
+    }
+    out
 }
 
 /// Static `s` of `module` as an item of it comes out: `laid`, as `backend` laid it out, its memory

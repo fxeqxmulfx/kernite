@@ -114,6 +114,22 @@ pub struct ModuleOut {
     /// The module the GPU loads, if a static of the module's or a function of it is the GPU's;
     /// empty, in a refused module.
     pub device: Option<DeviceOut>,
+    /// Each instruction its functions name that their machine has a doc of, with each place it is named. Rust
+    /// never sees what an instruction is, so whatever writes the module out for it shows it each place, for an editor
+    /// to show the doc there. A refused module has them too, found by reading its functions as they are written.
+    pub instructions: Vec<Documented>,
+}
+
+/// An instruction that functions of a module name, which their machine has a doc of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Documented {
+    /// Its name, as the machine writes it: `ld.global.f32`.
+    pub name: String,
+    /// Its doc.
+    pub doc: String,
+    /// Each place a function of the module names it, as the item that is the function and where a word of the name is
+    /// written: a place for each word, in the order of the source.
+    pub places: Vec<(usize, Span)>,
 }
 
 /// What an item of a module is, its kernels compiled.

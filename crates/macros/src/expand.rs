@@ -21,8 +21,8 @@ use crate::cond::Cond;
 use crate::gpu::{HOLE, gpu};
 use crate::room;
 use crate::rust::{
-    cfg_of, error, error_under, flatten, for_rust, from_inside, inner_attribute, lex, name_at, parse, position, seen,
-    site, stub, within,
+    cfg_of, error, error_under, flatten, for_rust, from_inside, ident_at, inner_attribute, lex, name_at, parse,
+    position, seen, site, stub, within,
 };
 use crate::workspace::workspace;
 use crate::x86::{cpu_static, naked, x86_stub};
@@ -247,7 +247,53 @@ pub(crate) fn expand(
         out.extend([TokenTree::Group(Group::new(Delimiter::Brace, reads))]);
         out.extend(parse(";"));
     }
+    out.extend(docs(&made, &conds, &at));
     out.extend(tail);
+    out
+}
+
+/// What shows an editor the doc of an instruction where a kernel names it: a block of the module that has a function
+/// for each instruction `made` has a doc of, which is that doc and is never called, and, at each word of a kernel that
+/// names the instruction, a `let _ = NAME;` of the word, for Rust to resolve it there as it resolves a name of the
+/// kernel's own. Each is under the `cfg` of the item that names the instruction, and the function under that of any of
+/// them: Rust has no word of an item that `cfg` leaves out, and nothing is never used. Rust has nothing to say of any
+/// of it, and an instruction that its machine has no doc of has no function: if it is no instruction, its error is its
+/// own. The function is named as the instruction is, with a `_` for each character that is no part of a name,
+/// `lock.bts` as `lock_bts`; a name that two have, `add` of x86 and of the GPU, or `a.b` and `a_b`, is told apart by a
+/// number.
+fn docs(made: &ModuleOut, conds: &[Cond], at: &dyn Fn(lang::Span) -> Span) -> TokenStream {
+    let (mut items, mut reads) = (TokenStream::new(), TokenStream::new());
+    let mut taken: Vec<String> = vec![];
+    for documented in &made.instructions {
+        let words: String = documented.name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+        let (mut name, mut n) = (words.clone(), 1);
+        while taken.contains(&name) {
+            n += 1;
+            name = format!("{words}_{n}");
+        }
+        let kept = Cond::any(documented.places.iter().map(|&(i, _)| cond_of(conds, i)));
+        let Some(guard) = kept.guard() else { continue };
+        items.extend(guard);
+        items.extend(parse(&format!("#[doc = {:?}] fn", documented.doc)));
+        items.extend(ident_at(&name, site()));
+        items.extend(parse("() {}"));
+        for &(i, word) in &documented.places {
+            if let Some(guard) = cond_of(conds, i).guard() {
+                reads.extend(guard);
+                reads.extend(parse("let _ ="));
+                reads.extend(ident_at(&name, at(word)));
+                reads.extend(parse(";"));
+            }
+        }
+        taken.push(name);
+    }
+    if items.is_empty() {
+        return items;
+    }
+    items.extend(reads);
+    let mut out = parse("const _: () =");
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, items))]);
+    out.extend(parse(";"));
     out
 }
 

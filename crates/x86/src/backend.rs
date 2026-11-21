@@ -9,6 +9,7 @@ use kernite_core::Clobber;
 use kernite_lang::{Fn, Memory, Value};
 
 use crate::SysV;
+use crate::docs;
 use crate::forms::Feature;
 use crate::intel::{self, Listing};
 use crate::lang::{Callee, Kernel, Prototype, Static};
@@ -36,6 +37,10 @@ impl Backend for X86 {
             made.init(value).map_err(StaticError::Value)?;
         }
         Ok(made)
+    }
+
+    fn doc(&self, name: &str) -> Option<String> {
+        docs::of(name)
     }
 
     fn callee(&self, g: &Fn, params: &[String]) -> Option<Callee> {

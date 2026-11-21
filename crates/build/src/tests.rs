@@ -232,6 +232,11 @@ impl Backend for Echo {
         }
     }
 
+    /// Documents each instruction whose name starts with `doc.`, as Echo's.
+    fn doc(&self, name: &str) -> Option<String> {
+        name.strip_prefix("doc.").map(|word| format!("Echo's doc of {word}"))
+    }
+
     /// The functions its body names, and those it may reach at an address.
     fn calls(&self, kernel: &Told) -> Vec<String> {
         kernel.funcs.iter().chain(&kernel.reach).cloned().collect()
@@ -285,6 +290,63 @@ impl Device for Echo {
 
     fn device_static(&self, s: &Laid) -> DeviceStatic {
         DeviceStatic { symbol: s.name.clone(), ty: format!("global<{}>", s.held), host: s.held.clone() }
+    }
+}
+
+/// Echo with docs of its own, to tell the two machines of a module apart: it documents each instruction whose name
+/// starts with `doc.`, as Loud's.
+struct Loud;
+
+impl Backend for Loud {
+    type Kernel = Told;
+    type Static = Laid;
+    type Callee = Abi;
+    type Code = Told;
+
+    fn lay_out(&self, name: &str, memory: &Memory) -> Result<Laid, StaticError> {
+        Echo.lay_out(name, memory)
+    }
+
+    fn callee(&self, g: &Fn, params: &[String]) -> Option<Abi> {
+        Echo.callee(g, params)
+    }
+
+    fn kernel(
+        &self,
+        f: &Fn,
+        name: &str,
+        args: &[Value],
+        cooperative: bool,
+        statics: &[Laid],
+        callees: &[Called<Abi>],
+    ) -> Told {
+        Echo.kernel(f, name, args, cooperative, statics, callees)
+    }
+
+    fn doc(&self, name: &str) -> Option<String> {
+        name.strip_prefix("doc.").map(|word| format!("Loud's doc of {word}"))
+    }
+
+    fn finish(&self, kernel: Told, done: &[Done<Told>]) -> Result<Told, Unfinished> {
+        Echo.finish(kernel, done)
+    }
+}
+
+impl Device for Loud {
+    fn module(&self, code: &[Told], statics: &[Laid]) -> Assembly {
+        Echo.module(code, statics)
+    }
+
+    fn symbol(&self, code: &Told) -> String {
+        Echo.symbol(code)
+    }
+
+    fn requires(&self, code: &Told) -> Vec<Requirement> {
+        Echo.requires(code)
+    }
+
+    fn device_static(&self, s: &Laid) -> DeviceStatic {
+        Echo.device_static(s)
     }
 }
 
@@ -1523,5 +1585,68 @@ fn a_module_of_consts_says_what_each_of_its_items_is() -> Result {
         .collect();
     let call = "4:20: a call is a statement: an instruction or a helper, not a value";
     assert_eq!(said, ["not a const", "given", "given", call, "given", "given", "not a const"]);
+    Ok(())
+}
+
+/// Each instruction a module's functions name that their machine has a doc of comes out with each place it is named, a
+/// place for each word of its name, in the order of the source, whether it is a kernel that compiles or not, or in a
+/// module refused whole. A function that names an ABI is its machine's, the process's for `extern "sysv64"` and the
+/// GPU's for the others; a helper, or a function of an ABI kernite knows nothing of, is its module's owner's, which a
+/// module of both kinds of kernel and a static has none of. An instruction its machine has no doc of comes out
+/// nowhere, and one named by the machines both, with a doc of each.
+#[test]
+fn a_module_has_the_docs_of_the_instructions_its_functions_name() -> Result {
+    let x86 = "unsafe extern \"sysv64\" fn k(x: u64) { doc.once(x); nodoc(x); doc.both(x); }\n";
+    let gpu = "unsafe extern \"ptx-kernel\" fn g(x: *mut u32) { doc.both(x); doc.on.gpu(x); fail(x); }\n";
+    let help = "fn help(x: u64) { doc.helper(x); }\nextern \"C\" fn c() { doc.other(); }\n";
+    let told = |src: &str, out: ModuleOut| -> Vec<(String, String, Vec<String>)> {
+        let at = |&(i, span): &(usize, Span)| {
+            let message = out.module.items.get(i).and_then(|item| item.name()).unwrap_or_default().to_string();
+            Error { span, message }.at(src)
+        };
+        out.instructions.iter().map(|d| (d.name.clone(), d.doc.clone(), d.places.iter().map(at).collect())).collect()
+    };
+    let one = |name: &str, doc: &str, places: &[&str]| {
+        (name.to_string(), doc.to_string(), places.iter().map(|p| p.to_string()).collect::<Vec<_>>())
+    };
+    // A module of x86 kernels: the helper and the function of no ABI kernite knows are the process's.
+    let src = format!("{help}{x86}");
+    let out = module(parse(&src)?, None, false, &Echo, &Loud);
+    assert_eq!(
+        told(&src, out),
+        [
+            one("doc.helper", "Echo's doc of helper", &["1:19: help", "1:23: help"]),
+            one("doc.other", "Echo's doc of other", &["2:21: c", "2:25: c"]),
+            one("doc.once", "Echo's doc of once", &["3:39: k", "3:43: k"]),
+            one("doc.both", "Echo's doc of both", &["3:62: k", "3:66: k"]),
+        ]
+    );
+    // A module of both kinds of kernel: the GPU's, which the helper is of. The same name, `doc.both`, has a doc
+    // of each machine, and no more place than its own.
+    let src = format!("{help}{x86}{gpu}");
+    let out = module(parse(&src)?, None, false, &Echo, &Loud);
+    let all = told(&src, out);
+    assert_eq!(
+        all.iter().map(|(name, doc, _)| (name.as_str(), doc.as_str())).collect::<Vec<_>>(),
+        [
+            ("doc.helper", "Loud's doc of helper"),
+            ("doc.other", "Loud's doc of other"),
+            ("doc.once", "Echo's doc of once"),
+            ("doc.both", "Echo's doc of both"),
+            ("doc.both", "Loud's doc of both"),
+            ("doc.on.gpu", "Loud's doc of on.gpu"),
+        ]
+    );
+    assert_eq!(all[3].2, ["3:62: k", "3:66: k"]);
+    assert_eq!(all[4].2, ["4:48: g", "4:52: g"]);
+    // The refused module has them too, the code of none of them compiled.
+    let out = module(parse(&src)?, None, true, &Echo, &Loud);
+    assert_eq!(told(&src, out), all);
+    // A module that is two: the kernels' are as they are, and the helper's, whose machine it is no one's, is none.
+    let src = format!("{help}{x86}{gpu}static S: global<u32>;\n");
+    let out = module(parse(&src)?, None, false, &Echo, &Loud);
+    assert!(out.owner.is_some());
+    let names: Vec<String> = out.instructions.iter().map(|d| d.name.clone()).collect();
+    assert_eq!(names, ["doc.once", "doc.both", "doc.both", "doc.on.gpu"]);
     Ok(())
 }
