@@ -700,13 +700,17 @@ from a parameter of its name: that is an error at its name. A crate with a coope
 
 A kernel calls the module's others, itself among them, as SysV calls a function: `call(g, gcd, (a, b))` moves `a` to
 `rdi` and `b` to `rsi`, and `g` from `rax`, and is checked against what `gcd` takes and returns. A move to a register
-that holds the value already, on every way to it, a jump back among them, is left out. A value that goes to two
-registers goes to each from the register that held it first, where the variable it comes from is read after the move, so
-that no move waits for another. A value that a call takes in the register that holds it stays there, though the call
-takes it again: `x` in `rdi` stays there for `call(r, gcd, (x, x))`, which moves it to `rsi`. One alive across the call
-stays there through it, if the call does not change that register. `lea(fp, [gcd])` takes an address to call at,
-`call(g, fp, (a, b), (gcd, sum))`, checked against each function given. A value alive across a call is kept in a
-register the call does not change. A call changes the registers its callee writes and does not restore, and those of
+that holds the value already, on every way to it, a jump back among them, is left out. So is the kernel's own move of
+all of a variable, as wide as kernite moves it, which a paragraph below tells: `mov` of a gpr, and `vmovaps`, `vmovapd`,
+`vmovups`, `vmovupd`, `vmovdqa` or `vmovdqu` of a vector. Its move of a variable to itself is left out where it moves
+all of the register, a gpr's 64 bits or a ymm's 256, and stays where it moves less, which may change the rest:
+`mov(x.r32, x.r32)` clears the upper half of the gpr, and `vmovaps(x, x)` of a float the upper lanes of its ymm. A value
+that goes to two registers goes to each from the register that held it first, where the variable it comes from is read
+after the move, so that no move waits for another. A value that a call takes in the register that holds it stays there,
+though the call takes it again: `x` in `rdi` stays there for `call(r, gcd, (x, x))`, which moves it to `rsi`. One alive
+across the call stays there through it, if the call does not change that register. `lea(fp, [gcd])` takes an address to
+call at, `call(g, fp, (a, b), (gcd, sum))`, checked against each function given. A value alive across a call is kept in
+a register the call does not change. A call changes the registers its callee writes and does not restore, and those of
 each function the callee calls, by name or at an address with the functions it may reach given. kernite cannot check
 that the address is that of one of them, and trusts it: a value alive across the call is kept in a register none of them
 changes, which another function may change. So `gcds`, which calls `gcd` in a loop, keeps its values in registers `gcd`

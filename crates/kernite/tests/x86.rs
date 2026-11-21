@@ -5177,6 +5177,88 @@ fn a_kernel_clears_the_upper_halves_only_where_it_may_have_set_one() -> Result {
     Ok(())
 }
 
+/// A move of all of a register to a register that holds the value already is left out, as the kernel writes it, `mov`
+/// or one of the six `vmov` that move a vector register, in whichever spelling: where the move is of a variable to
+/// itself, where its two variables take one register, and where the register it writes holds the value from an earlier
+/// move, as a move back does, between two xmm too, whose upper lanes nothing reads. It stays where the register it
+/// writes does not hold the value, and stays as written. One of 32 bits of a gpr stays, as it clears the upper half,
+/// and so does one of an xmm of a ymm, or of a float to itself, as it clears the upper lanes. A move that is left out
+/// asks for no `vzeroupper`.
+#[test]
+fn a_move_of_all_of_a_register_to_one_that_holds_the_value_is_left_out_as_the_kernel_writes_it() -> Result {
+    let (load, store) = ("vmovups ymm0, ymmword ptr [rdi]", "vmovups ymmword ptr [rdi], ymm0");
+    for op in ["vmovaps", "vmovapd", "vmovups", "vmovupd", "vmovdqa", "vmovdqu"] {
+        let moved = format!("{op} ymm1, ymm0");
+        let (there, back) = (format!("{op} xmm1, xmm0"), format!("{op} xmm0, xmm1"));
+        let two = |body: &str| format!("let (a, b): (ymm, ymm); vmovups(a, [p]); {body}");
+        let cases = [
+            // The same variable, and two that take one register: `a` is dead after the move.
+            (format!("let b: ymm; vmovups(b, [p]); {op}(b, b); vmovups([p], b);"), vec![load, store]),
+            (two(&format!("{op}(b, a); vmovups([p], b);")), vec![load, store]),
+            // `a` is read after, so `b` takes another register, and the move stays as the kernel writes it.
+            (
+                two(&format!("{op}(b, a); vaddps(b, b, a); vmovups([p], b);")),
+                vec![load, &moved, "vaddps ymm1, ymm1, ymm0", "vmovups ymmword ptr [rdi], ymm1"],
+            ),
+            // The move back into `a`, which holds the value still, is left out; the move to `b` stays.
+            (
+                two(&format!("{op}(b, a); vmovups([p + 8], a); {op}(a, b); vmovups([p], a); vmovups([p + 16], b);")),
+                vec![
+                    load,
+                    &moved,
+                    "vmovups ymmword ptr [rdi + 8], ymm0",
+                    store,
+                    "vmovups ymmword ptr [rdi + 16], ymm1",
+                ],
+            ),
+            // A move of the `.xmm` of a ymm clears the upper lanes, which the stores of all of `a` and `b` read.
+            (
+                two(&format!(
+                    "{op}(b.xmm, a.xmm); vmovups([p + 64], a); {op}(a.xmm, b.xmm); vmovups([p], a); \
+                     vmovups([p + 32], b);"
+                )),
+                vec![
+                    load,
+                    &there,
+                    "vmovups ymmword ptr [rdi + 64], ymm0",
+                    &back,
+                    store,
+                    "vmovups ymmword ptr [rdi + 32], ymm1",
+                ],
+            ),
+        ];
+        for (body, lines) in cases {
+            let want = [&lines[..], &["vzeroupper", "ret"]].concat().join("\n");
+            assert_eq!(calling("p: *mut f32", "", &body)?, want, "{body}");
+        }
+        // Two xmm, whose upper lanes nothing reads: the move back is left out, and nothing sets an upper half.
+        let body = format!(
+            "let (a, b): (xmm, xmm); vmovups(a, [p]); {op}(b, a); vmovups([p + 64], a); {op}(a, b); vmovups([p], a); \
+             vmovups([p + 16], b);"
+        );
+        let lines = [
+            "vmovups xmm0, xmmword ptr [rdi]",
+            &there,
+            "vmovups xmmword ptr [rdi + 64], xmm0",
+            "vmovups xmmword ptr [rdi], xmm0",
+            "vmovups xmmword ptr [rdi + 16], xmm1",
+            "ret",
+        ];
+        assert_eq!(calling("p: *mut f32", "", &body)?, lines.join("\n"), "{body}");
+    }
+    let cases = [
+        ("x: u64", " -> u64", "mov(x, x); ret(x);", "mov rax, rdi\nret"),
+        ("x: u64", " -> u64", "mov(x.r32, x.r32); ret(x);", "mov edi, edi\nmov rax, rdi\nret"),
+        ("x: f32", " -> f32", "vmovaps(x, x); ret(x);", "vmovaps xmm0, xmm0\nret"),
+        // The only vector instruction is left out, so nothing sets an upper half.
+        ("x: f32", " -> f32", "vmovups(x.ymm, x.ymm); ret(x);", "ret"),
+    ];
+    for (params, ret, body, want) in cases {
+        assert_eq!(calling(params, ret, body)?, want, "{body}");
+    }
+    Ok(())
+}
+
 /// Where a kernel clears the upper halves of the vector registers depends on the ways to the place: a `vzeroupper` goes
 /// before a `ret`, and before a call at an address with no functions given, where some way to it may have set one and
 /// none has run `vzeroupper` since. So neither a second call nor a jump to one of the module's functions has one after

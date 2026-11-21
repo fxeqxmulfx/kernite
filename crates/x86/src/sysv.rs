@@ -176,6 +176,18 @@ impl Spill<Op> for SysV {
             clobbers: vec![],
         }
     }
+
+    /// `mov` copies a gpr, and `vmovaps`, `vmovapd`, `vmovups`, `vmovupd`, `vmovdqa` and `vmovdqu` a vector register,
+    /// as wide as their two registers are: `copy` makes `vmovaps`, and the others move the same bits.
+    fn copies(&self, inst: &Inst<Op, VReg>) -> Option<(VReg, VReg, Width)> {
+        match (inst.op.name(), inst.args.as_slice()) {
+            (
+                "mov" | "vmovaps" | "vmovapd" | "vmovups" | "vmovupd" | "vmovdqa" | "vmovdqu",
+                [Arg { operand: Operand::Reg(to, w), .. }, Arg { operand: Operand::Reg(from, v), .. }],
+            ) if w == v => Some((*to, *from, *w)),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

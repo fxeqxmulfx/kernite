@@ -40,12 +40,20 @@ pub trait Spill<Op> {
 
     /// An instruction that copies `width` of `from`'s register to `to`'s, of the same file. The allocator moves a
     /// parameter or a result with it, and a spilled variable that a register holds, in place of its load; a machine's
-    /// own code may move a call's arguments and its result with it too, and the allocator, seeing such a move, places
-    /// the two in one register where it can, leaves it out where it changes nothing, and has it read another register
-    /// that holds the value, where that is as good.
-    ///
-    /// The allocator knows such a move only by its being equal to what this returns, at the width `to` is kept. One of
-    /// another width, as x86's `mov(to.r32, from.r32)` is, stays a move. Where `from` is pinned, a call's result, the
-    /// width is that `from` is kept at, what the callee gives back, though `to` may be kept in more.
+    /// own code may move a call's arguments and its result with it too.
     fn copy(&self, to: VReg, from: VReg, width: Width) -> Inst<Op, VReg>;
+
+    /// What `inst` copies, if it moves `width` of a register to another of the same file, or to itself: the variable
+    /// it writes, the one it reads, and `width`. Each instruction [`Spill::copy`] makes is one, and so is each other
+    /// spelling of the move, as x86's `vmovups` between two vector registers is.
+    ///
+    /// The allocator leaves a copy out where it changes nothing, and has it read another register that holds the value,
+    /// where that is as good; where one of its two variables is a call's argument or result, or one that splitting
+    /// made, it places the two in one register where it can. It knows a move as a copy only by this, at the width `to`
+    /// is kept: one of another width, as x86's `mov(to.r32, from.r32)` is, stays a move. Where `from` is pinned, a
+    /// call's result, the width is that `from` is kept at, what the callee gives back, though `to` may be kept in more.
+    /// A copy of a variable to itself is left out where it moves all of the register, which is as wide as
+    /// [`Spill::width`] says, and stays where it moves less, which may change the rest, as x86's `mov` of 32 bits
+    /// clears the upper half.
+    fn copies(&self, inst: &Inst<Op, VReg>) -> Option<(VReg, VReg, Width)>;
 }

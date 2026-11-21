@@ -180,10 +180,8 @@ pub fn taken(name: &str) -> bool {
 
 /// `c` in Intel syntax, with the frame set up on entry and taken down before every `ret`, and
 /// a note before each store of a variable that spilled and each load of it back. A kernel that
-/// calls has its stack pointer at a multiple of 16 for each call; a move of all 64 bits, or all 256, into a register
-/// that holds the value already changes nothing, and is left out where the code after the last label shows it does. The
-/// part of a frame in the red zone is neither set up nor taken down. Or why not: a frame past what an address
-/// reaches.
+/// calls has its stack pointer at a multiple of 16 for each call. The part of a frame in the red zone is neither set
+/// up nor taken down. Or why not: a frame past what an address reaches.
 ///
 /// Labels become local numbers, in the order they are placed, which `naked_asm!` asks for so
 /// that the same code can be emitted twice. Numbers made of ones and zeros alone are skipped:
