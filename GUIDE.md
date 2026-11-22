@@ -419,11 +419,9 @@ plain Rust: at the item's `pub`, and not at the module's attribute. That holds o
 of GPU kernels, which Rust has as a method of `Kernels`, and of an x86 kernel. Clippy tells there too of a public x86
 kernel that is an `unsafe fn` and whose docs have no `# Safety`, as it does of any public `unsafe fn`. Neither tells of
 a GPU kernel or a cooperative x86 kernel, whose launcher the macros write with a doc, a `# Safety` where it is an
-`unsafe fn`, nor of an x86 kernel that names a static of its module, whose `# Safety` they write where its docs have
-none. Rust does not tell of an x86 kernel whose code needs a CPU feature past x86-64's own either, an `unsafe fn` or
-not, plain or of instances: the macros write it a doc that names the features. Clippy tells of one whose docs have no
-`# Safety`, as it does of any public function that is `#[target_feature]`, which a function without the feature calls
-only in an `unsafe` block.
+`unsafe fn`, nor of an x86 kernel that names a static of its module, or whose code needs a CPU feature past x86-64's
+own, an `unsafe fn` or not, plain or of instances: the macros write its `# Safety` where its docs have none, and add to
+the one they have.
 
 A deprecated item that a kernel names is told of by Rust at the name, once for each place the kernel writes it.
 `lea(p, [COUNTS]);` of a deprecated static is a warning at `COUNTS`, with the note of the attribute, `call(v, old, ());`
@@ -503,10 +501,10 @@ comes twice has its scales added, so `[x + x * 3]` is `[x * 4]`. A gpr whose sca
 2, 4 or 8, as x86 has it: `[i * 5]` is `[i + i * 4]`. Any other scale is an error, `[x + i * 3]` or `[i * 6]`. A gather,
 `vpgatherdd(v, [x + i * 4], mask)`, has a vector of indices in `i`, and its base may be left out too, `[i * 4]`. It
 takes its result, indices and mask in three registers, as x86 faults otherwise. The listing's header and the function's
-doc name the CPU features a kernel needs, `# needs: avx, fma`, which nothing checks for when it runs; and a kernel that
-loads MXCSR stores the caller's first and loads it back before it returns, as SysV says. Where `llvm-mc` and GNU `as`
-are installed, a test hands them every form, with each integer the least the form takes and the most: `llvm-mc` must
-take it, and GNU `as` must take it at the feature kernite says it needs, without a warning, and refuse it at the
+`# Safety` name the CPU features a kernel needs, `# needs: avx, fma`, which nothing checks for when it runs; and a
+kernel that loads MXCSR stores the caller's first and loads it back before it returns, as SysV says. Where `llvm-mc` and
+GNU `as` are installed, a test hands them every form, with each integer the least the form takes and the most: `llvm-mc`
+must take it, and GNU `as` must take it at the feature kernite says it needs, without a warning, and refuse it at the
 features before.
 
 An editor shows an instruction's doc where a kernel names it: hover at `vaddps` in rust-analyzer. The doc says what the
@@ -910,7 +908,11 @@ a kernel that calls one that does. Rust checks them where the kernel is called: 
 other calls it in an `unsafe` block, which says why the CPU has `avx`. The features the build is configured with,
 `-C target-cpu=x86-64-v3`, do not count: Rust asks for the attribute. Nothing is checked when the kernel is called: Rust
 has seen that the caller has the features, or the caller says in an `unsafe` block that the CPU does. A kernel that is
-an `unsafe fn` is the same as it was: what it needs is for its caller to know.
+an `unsafe fn` is the same as it was: what it needs is for its caller to know. The kernel's `# Safety` names the
+features: the macros write one where its docs have none, and add to the one they have. Where they write it, a safe
+kernel's says nothing else, and an `unsafe fn`'s says first that the kernel trusts the pointers it is given. Clippy asks
+any public function that is `#[target_feature]` for a `# Safety`, as it asks an `unsafe fn`, and tells of no such
+kernel, as each has one.
 
 A crate may `forbid(unsafe_code)` and have safe kernels, and call them: the Rust the macro writes for one is no
 `unsafe` of the crate's.

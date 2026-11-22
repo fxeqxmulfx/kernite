@@ -1,9 +1,9 @@
 //! Clippy tells of a public x86 kernel whose docs have no `# Safety`, at the kernel, as it tells of an `unsafe fn` of
 //! Rust's own: of a plain one, one that gives back a number, and one of instances. It does not tell of a kernel whose
 //! docs have one, nor of a kernel that names a static of its module, plain or of instances, whose contract the macros
-//! write as one, nor of a cooperative kernel, whose launcher has the macros'. A GPU kernel is not told of either: its
-//! launcher has the macros' `# Safety`. It tells of a kernel that needs a CPU feature past x86-64's own, `avx` here,
-//! and has no `# Safety`, an `unsafe fn` or not, plain or of instances.
+//! write as one, nor of a kernel that needs a CPU feature past x86-64's own, `avx` here, an `unsafe fn` or not, plain
+//! or of instances, whose features the macros write into one, nor of a cooperative kernel, whose launcher has the
+//! macros'. A GPU kernel is not told of either: its launcher has the macros' `# Safety`.
 
 /// x86 kernels, in each form, and a static that one names.
 #[kernite_macros::kernels]
@@ -61,22 +61,22 @@ pub mod cpu {
     #[cooperative]
     pub unsafe extern "sysv64" fn together() {}
 
-    /// A kernel that needs `avx`, with no `# Safety`.
+    /// A kernel that needs `avx`, with no safety section.
     pub unsafe extern "sysv64" fn needs(p: *mut f32) {
         let v: ymm;
         vmovups(v, [p]);
         vmovups([p], v);
     }
 
-    /// A kernel that is no `unsafe fn` and needs `avx`, with no `# Safety`: Rust has it as a function that is unsafe to
-    /// call where the caller does not have the feature.
+    /// A kernel that is no `unsafe fn` and needs `avx`, with no safety section: Rust has it as a function that is
+    /// unsafe to call where the caller does not have the feature.
     pub extern "sysv64" fn needs_safely(xs: &mut [f32; 8]) {
         let v: ymm;
         vmovups(v, [xs]);
         vmovups([xs], v);
     }
 
-    /// Kernels of instances that need `avx`, with no `# Safety`.
+    /// Kernels of instances that need `avx`, with no safety section.
     #[instances(2, 3)]
     pub unsafe extern "sysv64" fn needs_many<const N: u64>(p: *mut f32) {
         let v: ymm;
@@ -84,7 +84,7 @@ pub mod cpu {
         vmovups([p + N], v);
     }
 
-    /// Kernels of instances that are no `unsafe fn` and need `avx`, with no `# Safety`.
+    /// Kernels of instances that are no `unsafe fn` and need `avx`, with no safety section.
     #[instances(8, 16)]
     pub extern "sysv64" fn needs_many_safely<const N: usize>(xs: &mut [f32; N]) {
         let v: ymm;

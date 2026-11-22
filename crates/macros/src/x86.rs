@@ -36,13 +36,12 @@ const CPU: &str = "kernite-cpu";
 /// it says an error in one once, at the type, and lints it at the level `f` sets. Each instance
 /// names the functions of `module` it calls by the operands [`callees`] gives, and its statics
 /// by those [`reached`] gives. Its safety contract says that nothing else touches `named`, the
-/// module's memory, while it runs. A cooperative kernel of a crate without `kernite-cpu` is
-/// [`x86_stub`]'s instead, with the error that says so, and so is a kernel that gives back a
-/// type with a `_` in it, which is Rust's error alone. All this writes is under `cfg`, `f`'s
-/// own, the module of its statics included: an instance is `extern "sysv64"`, which only x86-64
-/// has, so a crate that keeps `f` there alone builds for another machine. `at` says where `f` first
-/// writes the name of an item of the module, for the operands to be written there. Its code ends at `f`'s name, for
-/// Rust to tell of `f` at `f`: see [`ending_at`].
+/// module's memory, while it runs, and which CPU features the code needs. A cooperative kernel of a crate without
+/// `kernite-cpu` is [`x86_stub`]'s instead, with the error that says so, and so is a kernel that gives back a type with
+/// a `_` in it, which is Rust's error alone. All this writes is under `cfg`, `f`'s own, the module of its statics
+/// included: an instance is `extern "sysv64"`, which only x86-64 has, so a crate that keeps `f` there alone builds for
+/// another machine. `at` says where `f` first writes the name of an item of the module, for the operands to be written
+/// there. Its code ends at `f`'s name, for Rust to tell of `f` at `f`: see [`ending_at`].
 ///
 /// A lint is at the level `f` sets at each place its code names an item, as in a function of Rust's. `places` are the
 /// places of `f`'s own that Rust is told of by a statement, and they are in the body of `f`, or of its launcher, in an
@@ -78,9 +77,7 @@ pub(crate) fn naked(
         && !slices
     {
         let listing = &one.naked;
-        let mut docs = attrs(f, top);
-        docs.extend(needs(&features(instances), safe));
-        out.extend(contract(docs, named, end));
+        out.extend(contract(attrs(f, top), named, &features(instances), safe, end));
         out.extend(parse("#[unsafe(naked)]"));
         out.extend(signature(f, top));
         let code = asm(
@@ -134,11 +131,9 @@ pub(crate) fn naked(
         }
         let features = features(instances);
         if cooperative {
-            out.extend(grid_launcher(f, Some(&arms), needs(&features, safe), named, cfg, top, places));
+            out.extend(grid_launcher(f, Some(&arms), &features, named, cfg, top, places));
         } else {
-            let mut docs = attrs(f, top);
-            docs.extend(needs(&features, safe));
-            out.extend(contract(docs, named, end));
+            out.extend(contract(attrs(f, top), named, &features, safe, end));
             out.extend(match (safe, features.is_empty()) {
                 (true, false) => parse(&format!("#[target_feature(enable = {:?})]\n#[inline]", features.join(","))),
                 _ => parse("#[inline(always)]"),
@@ -289,27 +284,37 @@ fn reached(
     out
 }
 
-/// `docs`, a kernel's attributes, with what its safety contract says of `named`, the memory of
-/// the module's: that nothing else touches it while the kernel runs. A contract the docs do not
-/// have says that the kernel trusts the pointers it is given as well. The contract is located at `at`, a token of the
-/// user's: Clippy leaves out the attributes of a macro, and would ask the kernel for the `# Safety` that it has.
-fn contract(mut docs: TokenStream, named: &[String], at: Span) -> TokenStream {
-    if named.is_empty() {
+/// `docs`, a kernel's attributes, with its safety contract: what it says of `named`, the memory of the module's that
+/// the kernel names, that nothing else touches it while the kernel runs, and, after it, of the CPU `features` its code
+/// needs, as [`needs`] says. A kernel that names no memory and needs no feature has none. Where the docs have no
+/// `# Safety`, the contract is one of its own, which says first, of a kernel that is an `unsafe fn`, that it trusts the
+/// pointers it is given; else it follows the one they have. It is located at `at`, a token of the user's: Clippy leaves
+/// out the attributes of a macro, and would ask the kernel for the `# Safety` that it has.
+fn contract(mut docs: TokenStream, named: &[String], features: &[String], safe: bool, at: Span) -> TokenStream {
+    let needs = needs(features, safe);
+    if named.is_empty() && needs.is_empty() {
         return docs;
     }
-    let memory = format!("Nothing else touches the module's memory, {}, while it runs.", list(named));
-    let written = if !docs.to_string().contains("# Safety") {
-        parse(&format!(
-            "#[doc = \"\"]\n#[doc = \" # Safety\"]\n#[doc = \"\"]\n#[doc = {:?}]",
-            format!(
-                " The kernel trusts the pointers it is given: each must be to memory as long as the kernel reads and \
-                 writes through it. {memory}"
-            )
-        ))
-    } else {
-        parse(&format!("#[doc = \"\"]\n#[doc = {:?}]", format!(" {memory}")))
-    };
-    docs.extend(respan(written, at));
+    let own = !docs.to_string().contains("# Safety");
+    let mut first = String::new();
+    if own && !safe {
+        first += "The kernel trusts the pointers it is given: each must be to memory as long as the kernel reads and \
+                  writes through it. ";
+    }
+    if !named.is_empty() {
+        first += &format!("Nothing else touches the module's memory, {}, while it runs.", list(named));
+    }
+    let mut written = String::new();
+    if own {
+        written += "#[doc = \"\"]\n#[doc = \" # Safety\"]\n";
+    }
+    for paragraph in [first, needs] {
+        let paragraph = paragraph.trim();
+        if !paragraph.is_empty() {
+            written += &format!("#[doc = \"\"]\n#[doc = {:?}]\n", format!(" {paragraph}"));
+        }
+    }
+    docs.extend(respan(parse(&written), at));
     docs
 }
 
@@ -523,8 +528,8 @@ fn chosen(f: &Fn, arms: &[(Vec<Value>, String)], top: &[TokenTree]) -> String {
 /// instance `kernels` has for `f`'s compile-time arguments, given its place in the grid. A
 /// pointer reaches the threads as the address it is, which each makes a pointer again, as
 /// Rust's pointers do not cross threads. Without `kernels`, it never runs, for a kernel that
-/// did not compile. `needs` is the doc of the CPU features the kernels need. Its safety
-/// contract says that nothing else touches `named`, the module's memory, while the threads run.
+/// did not compile. Its safety contract says that nothing else touches `named`, the module's memory, while the threads
+/// run, and, after it, which CPU `features` the kernels need, as [`needs`] says.
 /// It binds `__kernite_grid` for itself, which a parameter of `f` may be named as well; a compile-time argument may
 /// not, which is an error at its name, after the function, under `cfg`, `f`'s own; and the function never runs, as one
 /// of a kernel that did not compile. In a crate without `kernite-cpu`, it takes any grid, gives [`missing`]'s type,
@@ -533,7 +538,7 @@ fn chosen(f: &Fn, arms: &[(Vec<Value>, String)], top: &[TokenTree]) -> String {
 fn grid_launcher(
     f: &Fn,
     kernels: Option<&[(Vec<Value>, String)]>,
-    needs: TokenStream,
+    features: &[String],
     named: &[String],
     cfg: &TokenStream,
     top: &[TokenTree],
@@ -542,7 +547,6 @@ fn grid_launcher(
     let clashes = clashes(f, cfg, &["__kernite_grid"], "the launcher", top);
     let kernels = if clashes.is_empty() { kernels } else { None };
     let mut out = attrs(f, top);
-    out.extend(needs);
     out.extend(parse(
         "#[doc = \"\"]\n#[doc = \" Every thread of the grid runs at once, as `grid.sync()` needs, each on a core, so a \
          grid has at most as many threads as the process runs at once, [`kernite_cpu::most`]: the CPUs the caller's \
@@ -562,6 +566,11 @@ fn grid_launcher(
         )));
     } else if !memory.is_empty() {
         out.extend(parse(&format!("#[doc = \"\"]\n#[doc = {memory:?}]")));
+    }
+    // The launcher is an `unsafe fn`, as a cooperative kernel is.
+    let needs = needs(features, false);
+    if !needs.is_empty() {
+        out.extend(parse(&format!("#[doc = \"\"]\n#[doc = {:?}]", format!(" {needs}"))));
     }
     // Clippy says "too many arguments" of a function of more than seven parameters wherever its
     // tokens come from, and the launcher takes the grid as well: so it allows that, and a crate of
@@ -625,36 +634,32 @@ fn grid_launcher(
 }
 
 /// The CPU features past x86-64's own the code of `instances` needs, each once, by name.
-fn features(instances: &[NativeInstance]) -> Vec<&str> {
-    let mut features: Vec<&str> = instances.iter().flat_map(|k| k.naked.needs.iter().map(String::as_str)).collect();
+fn features(instances: &[NativeInstance]) -> Vec<String> {
+    let mut features: Vec<String> = instances.iter().flat_map(|k| k.naked.needs.iter().cloned()).collect();
     features.sort();
     features.dedup();
     features
 }
 
-/// The doc that names the CPU `features`, past x86-64's own, which the code of a kernel needs; none if it needs none.
-/// For a kernel that is an `unsafe fn` it says that nothing checks for them when it runs; for one that is not, that
-/// Rust checks where it is called, for only a function that has them calls it without `unsafe`.
-fn needs(features: &[&str], safe: bool) -> TokenStream {
-    let named: Vec<String> = features.iter().map(|f| format!("`{f}`")).collect();
-    let (list, noun) = match named.as_slice() {
-        [] => return TokenStream::new(),
-        [one] => (one.clone(), "feature"),
-        [rest @ .., last] => (format!("{} and {last}", rest.join(", ")), "features"),
-    };
+/// The paragraph that names the CPU `features`, past x86-64's own, which the code of a kernel needs; none if it needs
+/// none. For a kernel that is an `unsafe fn` it says that nothing checks for them when it runs; for one that is not,
+/// that Rust checks where it is called, for only a function that has them calls it without `unsafe`, and any other
+/// calls it in an `unsafe` block, which says why the CPU has them.
+fn needs(features: &[String], safe: bool) -> String {
+    if features.is_empty() {
+        return String::new();
+    }
+    let (noun, them) = if let [_] = features { ("feature", "it") } else { ("features", "them") };
     let checked = match safe {
         true => format!(
-            "which Rust checks where it is called: only a function that has {}, `#[target_feature(enable = \"{}\")]`, \
-             calls it without `unsafe`",
-            if features.len() == 1 { "it" } else { "them" },
+            "which Rust checks where it is called: only a function that has {them}, \
+             `#[target_feature(enable = \"{}\")]`, calls it without `unsafe`, and any other calls it in an `unsafe` \
+             block, which says why the CPU has {them}",
             features.join(",")
         ),
         false => "which nothing checks for when it runs".to_string(),
     };
-    parse(&format!(
-        "#[doc = \"\"]\n#[doc = {:?}]",
-        format!(" Needs the CPU {noun} {list}, past x86-64's own, {checked}.")
-    ))
+    format!("Needs the CPU {noun} {}, past x86-64's own, {checked}.", list(features))
 }
 
 /// `f`, an x86 kernel that does not compile, or that gives back a type with a `_` in it, or a
@@ -674,7 +679,7 @@ pub(crate) fn x86_stub(
     places: TokenStream,
 ) -> TokenStream {
     if f.cooperative.is_some() {
-        return grid_launcher(f, None, TokenStream::new(), named, cfg, top, places);
+        return grid_launcher(f, None, &[], named, cfg, top, places);
     }
     let mut out = stub(f, top, places);
     if !f.generics.is_empty() {
