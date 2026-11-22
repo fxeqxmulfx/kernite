@@ -435,12 +435,14 @@ none, the macros write a `# Safety` of their own at the end of the docs. A parag
 `# Safety`, the grid of a cooperative kernel that runs at once and the launch of a safe GPU kernel that is checked
 first, comes at the end of the text before the docs' first heading, so that no heading of the user's has it. Each
 paragraph of theirs has a blank line after it, as before it, so that a title with a line of `=` under it, or a list,
-that comes next is not a line of it. None goes in a block quote or a list item, which it would end: a heading in one is
-where its block begins, and what the macros add to a `# Safety` in one comes after the block, even where the block has a
-heading after it. Where the docs end in a code block or a block of HTML that they leave open, what the macros add comes
-after it. A doc of a macro's text, `#[doc = include_str!("..")]` say, the macros cannot read: they take it for a line of
-text with no space before it. Where it holds more, a heading or a block that it leaves open, they may read the docs
-otherwise than rustdoc does, and Clippy may tell of the kernel.
+that comes next is not a line of it. Each line of theirs has as many spaces before its text as the docs' lines of text
+share, as rustdoc counts them, a space and a tab alike. rustdoc takes that much off each line of text, so docs indented
+as a module's code, as a `/** */` in a module is, are not read as a block of code. None goes in a block quote or a list
+item, which it would end: a heading in one is where its block begins, and what the macros add to a `# Safety` in one
+comes after the block, even where the block has a heading after it. Where the docs end in a code block or a block of
+HTML that they leave open, what the macros add comes after it. A doc of a macro's text, `#[doc = include_str!("..")]`
+say, the macros cannot read: they take it for a line of text with no space before it. Where it holds more, a heading or
+a block that it leaves open, they may read the docs otherwise than rustdoc does, and Clippy may tell of the kernel.
 
 A deprecated item that a kernel names is told of by Rust at the name, once for each place the kernel writes it.
 `lea(p, [COUNTS]);` of a deprecated static is a warning at `COUNTS`, with the note of the attribute, `call(v, old, ());`

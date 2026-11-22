@@ -3,7 +3,9 @@
 //! `# Safety` comes at its end, before the next heading of its level or higher. A paragraph of their own that is no
 //! part of a `# Safety` comes at the end of the text before the docs' first heading. A `# Safety` of their own comes at
 //! the end of the docs. None of them joins the text after it, a title with a line of `=` under it say, nor ends a block
-//! quote or a list item that holds a heading: there it comes where the block begins, or after it.
+//! quote or a list item that holds a heading: there it comes where the block begins, or after it. Each line of theirs
+//! has the indent that the docs' lines share, so that rustdoc takes off as much as it would without them: docs indented
+//! as the code of a module, as a `/** */` in one is, are no block of code.
 
 /// x86 kernels.
 #[kernite_macros::kernels]
@@ -285,6 +287,133 @@ pub mod cpu {
     /// Run it on two threads.
     #[cooperative]
     pub unsafe extern "sysv64" fn blocked() {}
+
+    /**
+        Names `WORD` and needs `popcnt`, in block docs indented as code, with a `# Safety` and an `# Examples`.
+
+        # Safety
+
+        The kernel reads nothing.
+
+        # Examples
+
+        Call it once.
+    */
+    pub unsafe extern "sysv64" fn indented() {
+        let n: gpr;
+        mov(n, [WORD]);
+        popcnt(n, n);
+        mov([WORD], n);
+    }
+
+    /**
+        Names `WORD` and needs `popcnt`, in block docs indented as code, with an `# Examples` alone.
+
+        # Examples
+
+        Call it once.
+    */
+    pub unsafe extern "sysv64" fn indented_own() {
+        let n: gpr;
+        mov(n, [WORD]);
+        popcnt(n, n);
+        mov([WORD], n);
+    }
+
+    /**
+        Names `WORD`, in block docs that leave a block of code open.
+
+        ```text
+        code
+    */
+    pub unsafe extern "sysv64" fn indented_open() {
+        let n: gpr;
+        mov(n, [WORD]);
+        inc(n);
+        mov([WORD], n);
+    }
+
+    /**
+        Names `WORD`, in block docs indented as code, with a block of code in its `# Safety`.
+
+        # Safety
+
+        The kernel reads nothing, as this code does:
+
+            let n = WORD;
+    */
+    pub unsafe extern "sysv64" fn indented_deeper() {
+        let n: gpr;
+        mov(n, [WORD]);
+        inc(n);
+        mov([WORD], n);
+    }
+
+    /**
+            let n = WORD;
+
+        Names `WORD`, in block docs whose first line has four spaces more than the others, so it is code.
+
+        # Safety
+
+        The kernel reads nothing.
+    */
+    pub unsafe extern "sysv64" fn indented_first() {
+        let n: gpr;
+        mov(n, [WORD]);
+        inc(n);
+        mov([WORD], n);
+    }
+
+    #[doc = "\t\tNames `WORD`, in docs whose lines have two tabs, with a `# Safety` and an `# Examples` after it."]
+    #[doc = ""]
+    #[doc = "\t\t# Safety"]
+    #[doc = ""]
+    #[doc = "\t\tThe kernel reads nothing."]
+    #[doc = ""]
+    #[doc = "\t\t# Examples"]
+    #[doc = ""]
+    #[doc = "\t\tCall it once."]
+    pub unsafe extern "sysv64" fn tabbed() {
+        let n: gpr;
+        mov(n, [WORD]);
+        inc(n);
+        mov([WORD], n);
+    }
+
+    /**
+        A cooperative kernel that names `WORD`, in block docs indented as code, with a `# Safety` and an `# Examples`.
+
+        # Safety
+
+        The kernel reads nothing.
+
+        # Examples
+
+        Run it on two threads.
+    */
+    #[cooperative]
+    pub unsafe extern "sysv64" fn indented_together() {
+        let n: gpr;
+        mov(n, [WORD]);
+        popcnt(n, n);
+        mov([WORD], n);
+    }
+
+    /**
+        A cooperative kernel that names `WORD`, in block docs indented as code, with an `# Examples` alone.
+
+        # Examples
+
+        Run it on two threads.
+    */
+    #[cooperative]
+    pub unsafe extern "sysv64" fn indented_together_own() {
+        let n: gpr;
+        mov(n, [WORD]);
+        popcnt(n, n);
+        mov([WORD], n);
+    }
 }
 
 /// GPU kernels.
@@ -320,4 +449,23 @@ pub mod gpu {
     ///
     /// Launch it on one block.
     pub extern "ptx-kernel" fn rest() {}
+
+    /**
+        A cooperative GPU kernel, in block docs indented as code, that end with an example.
+
+        # Examples
+
+        Launch it on one block.
+    */
+    #[cooperative]
+    pub unsafe extern "ptx-kernel" fn indented() {}
+
+    /**
+        A GPU kernel that is no `unsafe fn`, in block docs indented as code, that end with an example.
+
+        # Examples
+
+        Launch it on one block.
+    */
+    pub extern "ptx-kernel" fn indented_safe() {}
 }

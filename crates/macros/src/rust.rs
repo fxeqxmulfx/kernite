@@ -749,9 +749,25 @@ pub(crate) fn by_line(docs: TokenStream) -> Vec<TokenTree> {
         }
     }
     if let Some(end) = headings(&out).1 {
-        out.extend(respan(parse(&format!("#[doc = {:?}]", format!(" {end}"))), span_of(docs.last())));
+        let space = " ".repeat(shared_indent(&out));
+        out.extend(respan(parse(&format!("#[doc = {:?}]", format!("{space}{end}"))), span_of(docs.last())));
     }
     out
+}
+
+/// How many spaces or tabs rustdoc takes off the start of each line of `docs`, an item's attributes as [`by_line`] has
+/// them, a doc for each line: the fewest that a line of text has, as rustc's `unindent_doc_fragments` counts them, a
+/// space and a tab alike, or one where no line has text, the one space that `///` leaves. A line the macros add has
+/// that many spaces, so that rustdoc takes off as much of the docs as it would without it: a line of one space would
+/// leave five of the six that every line of `/** */` docs indented as their module's code has, and the docs would read
+/// as code.
+pub(crate) fn shared_indent(docs: &[TokenTree]) -> usize {
+    docs.chunks(2)
+        .filter_map(doc_text)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.chars().take_while(|c| matches!(c, ' ' | '\t')).count())
+        .min()
+        .unwrap_or(1)
 }
 
 /// Where the macros add paragraphs to `docs`, an item's attributes as [`by_line`] has them, each place an index in
@@ -829,16 +845,11 @@ enum Start<'a> {
 /// that closes the block they leave open at their top level, a code block of a fence or a block of HTML that a text
 /// ends, if they leave one. One in a block quote or a list item needs none: a line after a blank line, as the macros
 /// write, ends its container, and the block with it. rustdoc reads Markdown with pulldown-cmark, as CommonMark has it,
-/// but where [`spaced`] and [`html`] say; and each line that has text with the one space of a `///` taken off, and a
-/// line of white space alone as it is.
+/// but where [`spaced`] and [`html`] say; and each line that has text with the indent that they share taken off, as
+/// [`shared_indent`] says, and a line of white space alone as it is.
 fn headings(docs: &[TokenTree]) -> (Vec<Heading>, Option<String>) {
     let lines: Vec<Option<String>> = docs.chunks(2).map(doc_text).collect();
-    // The one space that `///` leaves before its text, if every line has it, which rustdoc takes off. It takes off more
-    // where all the lines share more, but not once the macros add a line of their own, which has that one alone: so
-    // lines that all have six spaces read as code, not as the heading they were.
-    let indent = usize::from(
-        lines.iter().flatten().filter(|line| !line.trim().is_empty()).all(|line| line.starts_with([' ', '\t'])),
-    );
+    let indent = shared_indent(docs);
     let mut out = vec![];
     let mut open = vec![];
     let mut leaf = Leaf::None;

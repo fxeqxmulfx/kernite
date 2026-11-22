@@ -10,8 +10,8 @@ use crate::cond::Cond;
 use crate::rust::{
     Written, array_ref, asks, attrs, body_at, by_line, cfg_of, clashes, depends_on, ending_at, error_under, given_back,
     gives_placeholder, hygienic, launcher_result, missing, naked_levels, name_after, name_at, never, parse, pick,
-    pointer, position, primitive, probe, respan, result, section_ends, signature, span_of, stub, unnamed, value_params,
-    visibility, within, written, written_params,
+    pointer, position, primitive, probe, respan, result, section_ends, shared_indent, signature, span_of, stub,
+    unnamed, value_params, visibility, within, written, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -298,6 +298,7 @@ fn contract(docs: TokenStream, named: &[String], features: &[String], safe: bool
     }
     let mut docs = by_line(docs);
     let safety = section_ends(&docs).1;
+    let space = " ".repeat(shared_indent(&docs));
     let own = safety.is_none();
     let mut first = String::new();
     if own && !safe {
@@ -309,13 +310,13 @@ fn contract(docs: TokenStream, named: &[String], features: &[String], safe: bool
     }
     let mut written = String::new();
     if own {
-        written += "#[doc = \"\"]\n#[doc = \" # Safety\"]\n";
+        written += &format!("#[doc = \"\"]\n#[doc = \"{space}# Safety\"]\n");
     }
     // A blank line after each paragraph, as before it, so that the docs' next line is no line of it.
     for paragraph in [first, needs] {
         let paragraph = paragraph.trim();
         if !paragraph.is_empty() {
-            written += &format!("#[doc = \"\"]\n#[doc = {:?}]\n#[doc = \"\"]\n", format!(" {paragraph}"));
+            written += &format!("#[doc = \"\"]\n#[doc = {:?}]\n#[doc = \"\"]\n", format!("{space}{paragraph}"));
         }
     }
     let end = safety.unwrap_or(docs.len());
@@ -555,6 +556,7 @@ fn grid_launcher(
     let kernels = if clashes.is_empty() { kernels } else { None };
     let mut docs = by_line(attrs(f, top));
     let (lead, safety) = section_ends(&docs);
+    let space = " ".repeat(shared_indent(&docs));
     let memory = match named {
         [] => String::new(),
         named => format!(" Nothing else touches the module's memory, {}, while they run.", list(named)),
@@ -563,31 +565,32 @@ fn grid_launcher(
     let mut added = String::new();
     if safety.is_none() {
         added += &format!(
-            "#[doc = \"\"]\n#[doc = \" # Safety\"]\n#[doc = \"\"]\n#[doc = {:?}]\n#[doc = \"\"]\n",
+            "#[doc = \"\"]\n#[doc = \"{space}# Safety\"]\n#[doc = \"\"]\n#[doc = {:?}]\n#[doc = \"\"]\n",
             format!(
-                " The kernel trusts the pointers it is given: each must be to memory as long as the kernel's threads \
-                 read and write through it, which nothing else touches while they run.{memory}"
+                "{space}The kernel trusts the pointers it is given: each must be to memory as long as the kernel's \
+                 threads read and write through it, which nothing else touches while they run.{memory}"
             )
         );
     } else if !memory.is_empty() {
+        let memory = format!("{space}{}", memory.trim_start());
         added += &format!("#[doc = \"\"]\n#[doc = {memory:?}]\n#[doc = \"\"]\n");
     }
     // The launcher is an `unsafe fn`, as a cooperative kernel is.
     let needs = needs(features, false);
     if !needs.is_empty() {
-        added += &format!("#[doc = \"\"]\n#[doc = {:?}]\n#[doc = \"\"]\n", format!(" {needs}"));
+        added += &format!("#[doc = \"\"]\n#[doc = {:?}]\n#[doc = \"\"]\n", format!("{space}{needs}"));
     }
     let end = safety.unwrap_or(docs.len());
     docs.splice(end..end, parse(&added));
     // The grid's paragraph comes before the heading, so after the contract is added: that does not move it.
     docs.splice(
         lead..lead,
-        parse(
-            "#[doc = \"\"]\n#[doc = \" Every thread of the grid runs at once, as `grid.sync()` needs, each on a core, \
-             so a grid has at most as many threads as the process runs at once, [`kernite_cpu::most`]: the CPUs the \
-             caller's thread may run on, or fewer where a cgroup limits the process to fewer. More is an error.\"]\n\
-             #[doc = \"\"]",
-        ),
+        parse(&format!(
+            "#[doc = \"\"]\n#[doc = \"{space}Every thread of the grid runs at once, as `grid.sync()` needs, each on \
+             a core, so a grid has at most as many threads as the process runs at once, [`kernite_cpu::most`]: the \
+             CPUs the caller's thread may run on, or fewer where a cgroup limits the process to fewer. More is an \
+             error.\"]\n#[doc = \"\"]",
+        )),
     );
     let mut out: TokenStream = docs.into_iter().collect();
     // Clippy says "too many arguments" of a function of more than seven parameters wherever its

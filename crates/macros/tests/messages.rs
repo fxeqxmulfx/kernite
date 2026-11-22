@@ -1540,13 +1540,13 @@ fn the_macros_write_a_safety_for_docs_that_name_it_in_a_sentence_or_a_code_block
 /// a code block that its container's end closes. The words in a sentence are no heading, nor is a title that says more,
 /// `#`s too many or glued, a line of a code block, fenced, indented or left open, or of a block of HTML, to its end
 /// mark or to a blank line; nor is a line of `=` or `-` that begins a block quote, a list item or a break, or that not
-/// all of the containers of the paragraph above it go on, an underline of it. Nor is a line of docs that all have six
-/// spaces: rustdoc takes off less of those once the macros add a line of their own, and reads them as code. Each rule
-/// that says where a block begins or ends has a kernel, as the fixture's docs list them: the macros close a code block
-/// that the docs leave open at the top level, and none in a container, so that their own paragraphs are no lines of it.
-/// Clippy tells of no kernel of them, as it would of one whose docs the macros took for having a `# Safety` that Clippy
-/// takes for none; but it takes a title of two lines for one that has the word on one, and the macros do not, so they
-/// write a `# Safety` of their own too.
+/// all of the containers of the paragraph above it go on, an underline of it. A heading is one after the indent that
+/// all the lines of the docs share, six spaces say: rustdoc takes off that much of them, and of the lines the macros
+/// add, which have it too. Each rule that says where a block begins or ends has a kernel, as the fixture's docs list
+/// them: the macros close a code block that the docs leave open at the top level, and none in a container, so that
+/// their own paragraphs are no lines of it. Clippy tells of no kernel of them, as it would of one whose docs the macros
+/// took for having a `# Safety` that Clippy takes for none; but it takes a title of two lines for one that has the word
+/// on one, and the macros do not, so they write a `# Safety` of their own too.
 #[test]
 fn the_macros_take_docs_for_having_a_safety_as_clippy_does() -> Result {
     // The kernels of the fixture whose docs the macros take for having a `# Safety`, and those whose docs they take for
@@ -1558,11 +1558,11 @@ fn the_macros_take_docs_for_having_a_safety_as_clippy_does() -> Result {
                underline_spaces tab_item_title closing_spaces hash_feed feed_before_hash lone_tag_no_break \
                attribute_no_break value_tab values_glued value_empty hr_feed item_feed_fence empty_item_gap \
                item_four_spaces nine_digits tab_after_marker two_ticks feed_indent no_break_line attribute_between \
-               no_break_last";
+               no_break_last shared_indent";
     let lacks = "lower code_span more bang hash_glued nospace seven fenced tilde rust_fence long_fence unclosed \
-                 indented sentence html html_block shared_indent comment_gap pre_gap pre_open comment_open \
-                 quote_under break_under lazy_quote lazy_item ordered_fence tab_fence fence_quote_line quote_open \
-                 item_open fence_text two_line_title lazy_title nested_lazy ordered_two item_code underline_four \
+                 indented sentence html html_block comment_gap pre_gap pre_open comment_open quote_under \
+                 break_under lazy_quote lazy_item ordered_fence tab_fence fence_quote_line quote_open item_open \
+                 fence_text two_line_title lazy_title nested_lazy ordered_two item_code underline_four \
                  lone_tag_space lone_tag_quoted lone_tag_value spaces_after_empty_item bullet_after_quote_text \
                  spaced_break_open dashes_item_open bullet_after_text_open empty_item_open empty_item_short_open \
                  code_item_open code_item_short_open comment_after_text declaration_after_text div_after_text \
@@ -1724,6 +1724,122 @@ fn what_the_macros_add_to_a_safety_is_its_last_paragraphs() -> Result {
             "CPU",
             "h2 Examples",
             "Run it on two threads.",
+        ]
+    );
+    Ok(())
+}
+
+/// What the macros add to the docs has the indent that the docs' lines share, as rustdoc counts it, a space and a tab
+/// alike, so that rustdoc takes off as much of the docs as it would without those lines. Block docs whose lines have
+/// the eight spaces of the module's code keep their paragraphs, headings and code in each place that adds lines: an
+/// x86 kernel that names a static, a cooperative x86 kernel and the launcher of a GPU kernel. So do docs whose lines
+/// have two tabs, docs whose first line has more indent than the rest, docs with a block of code in their `# Safety`,
+/// and docs whose last block of code is open.
+#[test]
+fn what_the_macros_add_to_the_docs_has_the_indent_that_their_lines_share() -> Result {
+    let docs = kernel_docs()?;
+    let reads = "The kernel reads nothing.";
+    assert_eq!(
+        tagged(docs("cpu", "indented")?),
+        [
+            "Names WORD and needs popcnt, in block docs indented as code, with a # Safety and an # Examples.",
+            "h2 Safety",
+            reads,
+            "MEM",
+            "CPU",
+            "h2 Examples",
+            "Call it once.",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "indented_own")?),
+        [
+            "Names WORD and needs popcnt, in block docs indented as code, with an # Examples alone.",
+            "h2 Examples",
+            "Call it once.",
+            "h2 Safety",
+            "TRUST",
+            "CPU",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "indented_open")?),
+        ["Names WORD, in block docs that leave a block of code open.", "code", "h2 Safety", "TRUST"]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "indented_deeper")?),
+        [
+            "Names WORD, in block docs indented as code, with a block of code in its # Safety.",
+            "h2 Safety",
+            "The kernel reads nothing, as this code does:",
+            "let n = WORD;",
+            "MEM",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "indented_first")?),
+        [
+            "let n = WORD;",
+            "Names WORD, in block docs whose first line has four spaces more than the others, so it is code.",
+            "h2 Safety",
+            reads,
+            "MEM",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "tabbed")?),
+        [
+            "Names WORD, in docs whose lines have two tabs, with a # Safety and an # Examples after it.",
+            "h2 Safety",
+            reads,
+            "MEM",
+            "h2 Examples",
+            "Call it once.",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "indented_together")?),
+        [
+            "A cooperative kernel that names WORD, in block docs indented as code, with a # Safety and an # Examples.",
+            "GRID",
+            "h2 Safety",
+            reads,
+            "MEM",
+            "CPU",
+            "h2 Examples",
+            "Run it on two threads.",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "indented_together_own")?),
+        [
+            "A cooperative kernel that names WORD, in block docs indented as code, with an # Examples alone.",
+            "GRID",
+            "h2 Examples",
+            "Run it on two threads.",
+            "h2 Safety",
+            "TRUST",
+            "CPU",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("gpu", "indented")?),
+        [
+            "A cooperative GPU kernel, in block docs indented as code, that end with an example.",
+            "GRID",
+            "h5 Examples",
+            "Launch it on one block.",
+            "h5 Safety",
+            "TRUST",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("gpu", "indented_safe")?),
+        [
+            "A GPU kernel that is no unsafe fn, in block docs indented as code, that end with an example.",
+            "CHECKED",
+            "h5 Examples",
+            "Launch it on one block.",
         ]
     );
     Ok(())

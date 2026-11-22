@@ -2,9 +2,9 @@
 //! the word Safety alone, `Safety` or `SAFETY`, in emphasis or not, in each form that Markdown has for one, as rustdoc
 //! reads it, in a block quote or a list item or not; and not the words in a sentence, a title that says more, `#`s too
 //! many or glued, a line of a code block, fenced, indented or left open, a line of a block of HTML, a line of `=` or
-//! `-` that is no underline of the paragraph above it, nor a line of docs that all have six spaces, which read as code
-//! once the macros add a line of their own, as rustdoc takes off less of their indent. A title of two lines that has
-//! the word on one is none of theirs, though Clippy takes it for one: they write a `# Safety` of their own as well.
+//! `-` that is no underline of the paragraph above it. A heading is one after the indent that all the lines of the docs
+//! share, six spaces say, which rustdoc takes off. A title of two lines that has the word on one is none of theirs,
+//! though Clippy takes it for one: they write a `# Safety` of their own as well.
 //!
 //! Each rule of Markdown that says where a block begins or ends has a kernel too: spaces after the marks of a fence
 //! close it, and text does not; an underline has up to three spaces before it; a bullet, a comment, a declaration and a

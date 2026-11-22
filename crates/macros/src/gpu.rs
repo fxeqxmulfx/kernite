@@ -10,8 +10,8 @@ use crate::cond::Cond;
 use crate::rust::{
     self, LEVELS, Written, asks, attrs, body_at, by_line, carried, clashes, depends_on, ending_at, error_under, half,
     host, hygienic, launcher_result, levels, missing, name_after, name_at, never, number_name, number_type, parse,
-    pick, pointer, primitive, ptr_type, quiet, refused, section_ends, site, span_of, unnamed, visibility, within,
-    written_generics, written_params,
+    pick, pointer, primitive, ptr_type, quiet, refused, section_ends, shared_indent, site, span_of, unnamed,
+    visibility, within, written_generics, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -281,33 +281,36 @@ fn listed<'a>(elements: impl Iterator<Item = (&'a Cond, TokenStream)>) -> TokenT
 fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree], places: TokenStream) -> TokenStream {
     let mut docs = by_line(attrs(f, top));
     let (lead, safety) = section_ends(&docs);
+    let space = " ".repeat(shared_indent(&docs));
     // The paragraphs of the macros' own come before the docs' first heading, so that no heading of the user's has them,
     // with a blank line after each, as before it, so that the heading is not a line of it.
     let mut written = String::new();
     if f.cooperative.is_some() {
         written += &format!(
-            "#[doc = \"\"]\n#[doc = \" Every block of the grid runs at once, as `grid.sync()` needs, so a grid of more \
-             blocks than [`{0}`](Self::{0}) says the GPU runs is an error.\"]\n#[doc = \"\"]\n",
+            "#[doc = \"\"]\n#[doc = \"{space}Every block of the grid runs at once, as `grid.sync()` needs, so a grid \
+             of more blocks than [`{0}`](Self::{0}) says the GPU runs is an error.\"]\n#[doc = \"\"]\n",
             blocks_name(f)
         );
     }
     if !f.unsafe_fn {
-        written += "#[doc = \"\"]\n#[doc = \" The launch is checked first, and is an error that says what does not \
-                    hold, with no kernel run: the grid runs its threads along x alone, fewer than 2^32 of them, and \
-                    the memory it is lent is as long as the kernel's reads and writes need.\"]\n#[doc = \"\"]\n";
+        written += &format!(
+            "#[doc = \"\"]\n#[doc = \"{space}The launch is checked first, and is an error that says what does not \
+             hold, with no kernel run: the grid runs its threads along x alone, fewer than 2^32 of them, and the \
+             memory it is lent is as long as the kernel's reads and writes need.\"]\n#[doc = \"\"]\n"
+        );
     }
     docs.splice(lead..lead, parse(&written));
     // A launcher that is an `unsafe fn` has the macros' `# Safety`, at the end of the docs, where they have none.
     if f.unsafe_fn && safety.is_none() {
-        docs.extend(parse(
-            "#[doc = \"\"]\n#[doc = \" # Safety\"]\n#[doc = \"\"]\n\
-             #[doc = \" The kernel trusts the pointers it is given: each must be to a buffer or to unified memory \
-             of the GPU the kernels are loaded on, as long as the kernel reads and writes through it. From the \
+        docs.extend(parse(&format!(
+            "#[doc = \"\"]\n#[doc = \"{space}# Safety\"]\n#[doc = \"\"]\n\
+             #[doc = \"{space}The kernel trusts the pointers it is given: each must be to a buffer or to unified \
+             memory of the GPU the kernels are loaded on, as long as the kernel reads and writes through it. From the \
              launch until the kernel is done, the host must hold no slice of memory the kernel writes, and no \
              slice it may write of memory the kernel reads; and where `Cuda::concurrent_managed_access` is false, \
              the GPU not reaching managed memory while the host does, the host must hold no slice of managed \
              memory at all.\"]",
-        ));
+        )));
     }
     let mut out: TokenStream = docs.into_iter().collect();
     // Clippy says "too many arguments" of a function of more than seven parameters wherever its
