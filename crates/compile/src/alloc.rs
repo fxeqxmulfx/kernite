@@ -204,9 +204,9 @@ fn split<Op>(p: &mut Program<Op>, var: VReg, s: &dyn Spill<Op>) -> Option<usize>
     Some(made.id as usize)
 }
 
-/// For each variable, the variables of `short` it is copied to or from by `s`'s copy, in body
-/// order: it would rather have the register of one, so that the copy moves nothing.
-fn preferences<Op: PartialEq>(p: &Program<Op>, kept: &[Width], s: &dyn Spill<Op>, short: &[usize]) -> Vec<Vec<usize>> {
+/// For each variable, the variables of `short` it is copied to or from, in body order: it would
+/// rather have the register of one, so that the copy moves nothing.
+fn preferences<Op>(p: &Program<Op>, kept: &[Width], s: &dyn Spill<Op>, short: &[usize]) -> Vec<Vec<usize>> {
     let mut prefer = vec![vec![]; p.regs.len()];
     for item in &p.body {
         let Item::Inst(inst) = item else { continue };
@@ -276,7 +276,10 @@ enum Fate<Op> {
 }
 
 /// `p` without the copies of one variable to another that change nothing, and with each copy that stays reading the
-/// register that held the value first, where an instruction after it reads the variable it copies.
+/// register that held the value first, where an instruction after it reads the variable it copies. A copy is what
+/// [`Spill::copies`] says, whichever of a machine's moves it is, and stays the move it is. One of a variable to itself
+/// is left out where it moves all of the register, with no flow to follow, and stays where it moves less, which may
+/// change the rest.
 ///
 /// A copy changes nothing where the two take one register, or where the register `to` takes holds the value already, on
 /// every way to the copy: the value arrived there as a parameter, or an earlier copy put it there or took it from
@@ -288,7 +291,7 @@ enum Fate<Op> {
 /// register that held the value first, so that copies of one value in a row do not wait for each other, where an
 /// instruction after it reads `from`, which liveness says: else the copy that wrote `from` would move what nothing
 /// reads.
-fn leave_out<Op: PartialEq>(p: &mut Program<Op>, regs: &[Option<PReg>], s: &dyn Spill<Op>) -> Result<(), Error> {
+fn leave_out<Op: Clone>(p: &mut Program<Op>, regs: &[Option<PReg>], s: &dyn Spill<Op>) -> Result<(), Error> {
     let (blocks, live) = analyse(p)?;
     let (upper, kept) = (upper_live(p, &blocks, s), spill::kept(p, s));
     // A variable the body names has a register, and [`compile`](crate::compile) refuses one that has none: here it
@@ -318,6 +321,9 @@ fn leave_out<Op: PartialEq>(p: &mut Program<Op>, regs: &[Option<PReg>], s: &dyn 
         .collect();
     let step = |i: usize, inst: &Inst<Op, VReg>, held: &mut Holds| {
         let Some((to, from, width)) = copied(p, inst, &kept, s) else {
+            if s.copies(inst).is_some_and(|(to, from, width)| to == from && width == s.width(to.class)) {
+                return Fate::Out;
+            }
             for &(Clobber::All(r) | Clobber::Upper(r)) in &inst.clobbers {
                 held.retain(|(at, _)| *at != r);
             }
@@ -343,7 +349,7 @@ fn leave_out<Op: PartialEq>(p: &mut Program<Op>, regs: &[Option<PReg>], s: &dyn 
             return Fate::Out;
         }
         let fate = match held.iter().find(|(_, h)| alike(h)) {
-            Some((_, h)) if again => Fate::Becomes(s.copy(to, h.by, width)),
+            Some((_, h)) if again => Fate::Becomes(spill::renamed(inst.clone(), |v| if v == from { h.by } else { v })),
             _ => Fate::Stays,
         };
         put(held, at, Held { bits: value.bits.min(width), by: to, ..value });

@@ -112,21 +112,19 @@ pub(crate) fn liveness<Op>(
     }
 }
 
-/// The variables `inst` copies, `to` from `from`, and how much, if it is what `s`'s copy makes of the one to the other.
-/// That is a copy of as much as `to` is kept, as `kept` says. Where `from` is a call's result, it is a copy of as much
-/// as `from` is kept, what the call gives back, though `to` may be kept in more.
-pub(crate) fn copied<Op: PartialEq>(
+/// The variables `inst` copies, `to` from `from`, and how much, if `s` says it copies one to another. That is a copy of
+/// as much as `to` is kept, as `kept` says. Where `from` is a call's result, it is a copy of as much as `from` is kept,
+/// what the call gives back, though `to` may be kept in more.
+pub(crate) fn copied<Op>(
     p: &Program<Op>,
     inst: &Inst<Op, VReg>,
     kept: &[Width],
     s: &dyn Spill<Op>,
 ) -> Option<(VReg, VReg, Width)> {
-    let (writes, reads): (Vec<VReg>, Vec<VReg>) = (inst.writes().collect(), inst.reads().collect());
-    let ([to], [from]) = (writes.as_slice(), reads.as_slice()) else { return None };
-    let of = if p.pinned.iter().any(|&(v, _)| v == *from) { from } else { to };
-    let width = *kept.get(of.id as usize)?;
-    let copy = to != from && to.class == from.class && *inst == s.copy(*to, *from, width);
-    copy.then_some((*to, *from, width))
+    let (to, from, width) = s.copies(inst)?;
+    let of = if p.pinned.iter().any(|&(v, _)| v == from) { from } else { to };
+    let copy = to != from && width == *kept.get(of.id as usize)?;
+    copy.then_some((to, from, width))
 }
 
 /// The interference graph, as a set of neighbours per variable: every variable an instruction writes against every
@@ -135,7 +133,7 @@ pub(crate) fn copied<Op: PartialEq>(
 /// while the other is live. And for each variable, the registers of its file that an instruction it is live across
 /// changes besides its operands, sorted: it is live after the instruction, which does not write it. One that clears
 /// only the upper half of a register changes it for a variable whose upper half is live after it, as `upper` says.
-pub(crate) fn interference<Op: PartialEq>(
+pub(crate) fn interference<Op>(
     p: &Program<Op>,
     blocks: &[Block],
     live: &Live,

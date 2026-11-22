@@ -1259,28 +1259,33 @@ fn a_kernels_safety_contract_says_nothing_else_touches_the_memory_it_names() -> 
     Ok(())
 }
 
-/// A kernel that is no `unsafe fn` is a function Rust calls without `unsafe`, so its docs have no `# Safety`; where its
-/// code needs CPU features past x86-64's own they say that Rust checks where it is called, and only a function that has
-/// them calls it without `unsafe`. A crate that forbids `unsafe_code` has such kernels and calls them: the code the
-/// macro writes for one is no `unsafe` of the crate's.
+/// A kernel that is no `unsafe fn` is a function Rust calls without `unsafe`, so its docs have a `# Safety` only where
+/// its code needs CPU features past x86-64's own: it says that Rust checks them where the kernel is called, that only a
+/// function that has them calls it without `unsafe`, and that any other calls it in an `unsafe` block. A crate that
+/// forbids `unsafe_code` has such kernels and calls them: the code the macro writes for one is no `unsafe` of the
+/// crate's.
 #[test]
-fn a_kernel_that_is_no_unsafe_fn_has_no_safety_contract_and_a_crate_that_forbids_unsafe_calls_it() -> Result {
+fn a_safe_kernel_has_a_safety_contract_of_its_cpu_features_alone_and_a_crate_that_forbids_unsafe_calls_it() -> Result {
     builds_quietly("safe_kernels")?;
     let docs = documents_quietly("safe_kernels")?.join("cpu");
     let page = |f: &str| fs::read_to_string(docs.join(format!("fn.{f}.html")));
     for f in ["twice", "first", "four_times", "fill", "tile", "second", "sum", "set"] {
         let page = page(f)?;
-        assert!(!page.contains(">Safety</h2>"), "the docs of `{f}` have a `# Safety`");
+        // `first` alone needs a CPU feature.
+        assert_eq!(page.contains(">Safety</h2>"), f == "first", "the docs of `{f}` have a `# Safety`, or lack one");
         assert!(!page.contains("unsafe fn"), "`{f}` is an `unsafe fn` in its docs");
     }
-    let first = page("first")?;
-    for said in [
-        "Needs the CPU feature <code>avx</code>, past x86-64’s own, which Rust checks where it is called: only a \
-         function that has it, <code>#[target_feature(enable = \"avx\")]</code>, calls it without <code>unsafe</code>.",
-        "The first of the four floats at <code>xs</code>.",
-    ] {
-        assert!(first.contains(said), "the docs of `first` lack `{said}`");
-    }
+    let said = "The first of the four floats at <code>xs</code>.";
+    assert!(page("first")?.contains(said), "the docs of `first` lack `{said}`");
+    // The paragraphs of the kernel's `# Safety`, as rustdoc writes them.
+    let safety = documented("safe_kernels", "cpu", ">Safety</h2>\n")?;
+    assert_eq!(
+        safety("first")?,
+        ["<p>Needs the CPU feature <code>avx</code>, past x86-64’s own, which Rust checks where it is called: only a \
+          function that has it, <code>#[target_feature(enable = \"avx\")]</code>, calls it without \
+          <code>unsafe</code>, and any other calls it in an <code>unsafe</code> block, which says why the CPU has \
+          it.</p>"]
+    );
     assert!(!page("twice")?.contains("Needs the CPU"), "the docs of `twice` name a feature it needs not");
     Ok(())
 }
@@ -1354,54 +1359,68 @@ fn a_gpu_kernel_that_is_no_unsafe_fn_has_a_safe_launcher_and_a_crate_that_forbid
     Ok(())
 }
 
-/// The function's docs name the CPU features its kernel needs past x86-64's own, which nothing
-/// checks for when it runs, as the listing's header does: three, two, one, or, for a kernel
-/// that needs none, no paragraph. A generic kernel's docs name those of every instance, each
-/// once, in the order of their names, and a grid's kernel's launcher's those of the kernel.
+/// The function's `# Safety` names the CPU features its kernel needs past x86-64's own, which nothing checks for when
+/// it runs, as the listing's header does: three, two or one; a kernel that needs none and names no memory has no
+/// `# Safety`. The macros' own says first that the kernel trusts the pointers it is given, and the memory of the
+/// module's that it names, if any, and then the features; the one a kernel's docs have is followed by them, with no
+/// second heading. A generic kernel's names those of every instance, each once, in the order of their names, and a
+/// grid's kernel's launcher's those of the kernel.
 #[test]
-fn the_functions_docs_name_the_cpu_features_a_kernel_needs() -> Result {
-    // The paragraphs of the function's docs, as rustdoc writes them.
-    let docs = documented("needs", "kernels", "<div class=\"docblock\">")?;
+fn the_functions_safety_contract_names_the_cpu_features_a_kernel_needs() -> Result {
+    // What the function's docs say before its `# Safety`, and the paragraphs of the `# Safety`, as rustdoc writes them.
+    let all = documented("needs", "kernels", "<div class=\"docblock\">")?;
+    let docs = |f: &str| -> Result<Vec<String>> {
+        Ok(all(f)?.into_iter().take_while(|line| !line.ends_with(">Safety</h2>")).collect())
+    };
+    let safety = documented("needs", "kernels", ">Safety</h2>\n")?;
+    let trusts = "<p>The kernel trusts the pointers it is given: each must be to memory as long as the kernel reads \
+                  and writes through it.</p>";
     let needs =
         |list: &str| format!("<p>Needs the CPU {list}, past x86-64’s own, which nothing checks for when it runs.</p>");
+    assert_eq!(docs("bits")?, ["<p>How many bits of <code>x</code> are set, lead and trail, summed.</p>"]);
     assert_eq!(
-        docs("bits")?,
+        safety("bits")?,
+        [trusts.to_string(), needs("features <code>bmi1</code>, <code>lzcnt</code> and <code>popcnt</code>")]
+    );
+    assert_eq!(docs("axpy")?, ["<p><code>y += a * x</code>, eight floats at once.</p>"]);
+    assert_eq!(safety("axpy")?, [trusts.to_string(), needs("features <code>avx</code> and <code>fma</code>")]);
+    assert_eq!(docs("ones")?, ["<p>How many bits of <code>x</code> are set.</p>"]);
+    assert_eq!(safety("ones")?, [trusts.to_string(), needs("feature <code>popcnt</code>")]);
+    // A kernel whose docs have a `# Safety` has the features after it, and no second heading.
+    assert_eq!(
+        safety("counted")?,
+        ["<p><code>x</code> points at an integer.</p>".to_string(), needs("feature <code>popcnt</code>")]
+    );
+    // A kernel that names a static of its module has the memory in the paragraph of the pointers it trusts, and the
+    // features after it.
+    assert_eq!(docs("word_bits")?, ["<p>How many bits of <code>WORD</code> are set.</p>"]);
+    assert_eq!(
+        safety("word_bits")?,
         [
-            "<p>How many bits of <code>x</code> are set, lead and trail, summed.</p>".to_string(),
-            needs("features <code>bmi1</code>, <code>lzcnt</code> and <code>popcnt</code>"),
+            "<p>The kernel trusts the pointers it is given: each must be to memory as long as the kernel reads and \
+             writes through it. Nothing else touches the module’s memory, <code>WORD</code>, while it runs.</p>"
+                .to_string(),
+            needs("feature <code>popcnt</code>"),
         ]
     );
-    assert_eq!(
-        docs("axpy")?,
-        [
-            "<p><code>y += a * x</code>, eight floats at once.</p>".to_string(),
-            needs("features <code>avx</code> and <code>fma</code>"),
-        ]
-    );
-    assert_eq!(
-        docs("ones")?,
-        ["<p>How many bits of <code>x</code> are set.</p>".to_string(), needs("feature <code>popcnt</code>")]
-    );
+    // A kernel that needs none and names no memory has no `# Safety`.
     assert_eq!(docs("next")?, ["<p><code>x</code> and one.</p>"]);
-    assert_eq!(
-        docs("pick")?,
-        [
-            "<p>How many zeros lead <code>x</code>, or how many of its bits are set.</p>".to_string(),
-            needs("features <code>lzcnt</code> and <code>popcnt</code>"),
-        ]
-    );
+    assert_eq!(docs("pick")?, ["<p>How many zeros lead <code>x</code>, or how many of its bits are set.</p>"]);
+    assert_eq!(safety("pick")?, [trusts.to_string(), needs("features <code>lzcnt</code> and <code>popcnt</code>")]);
     assert_eq!(
         docs("count")?,
-        [
-            "<p>How many bits of <code>x</code> are set, or how many zeros lead it, when <code>N</code> is 2.</p>"
-                .to_string(),
-            needs("features <code>lzcnt</code> and <code>popcnt</code>"),
-        ]
+        ["<p>How many bits of <code>x</code> are set, or how many zeros lead it, when <code>N</code> is 2.</p>"]
+    );
+    assert_eq!(safety("count")?, [trusts.to_string(), needs("features <code>lzcnt</code> and <code>popcnt</code>")]);
+    assert_eq!(
+        docs("together")?[0],
+        "<p>How many bits are set of the word at <code>x</code>, once every thread of the grid is there.</p>"
     );
     assert_eq!(
-        docs("together")?[..2],
+        safety("together")?,
         [
-            "<p>How many bits are set of the word at <code>x</code>, once every thread of the grid is there.</p>"
+            "<p>The kernel trusts the pointers it is given: each must be to memory as long as the kernel’s threads \
+             read and write through it, which nothing else touches while they run.</p>"
                 .to_string(),
             needs("feature <code>popcnt</code>"),
         ]
@@ -4984,7 +5003,9 @@ fn rust_counts_a_malformed_deprecated_once_for_each_item_with_a_level_that_names
 /// methods of `Kernels`; each static of x86 kernels, near `rip` and far from it; and each x86 kernel that the macros
 /// write a function for, plain, giving back a number, a pointer or `()`, and of instances. A static or a kernel with a
 /// doc is not told of, nor is a GPU kernel or a cooperative x86 kernel, whose launcher the macros write with a doc, nor
-/// an x86 kernel that names a static of its module, whose safety contract they write as a doc.
+/// an x86 kernel that names a static of its module, whose safety contract they write as a doc, nor one whose code needs
+/// a CPU feature past x86-64's own, `avx` here, an `unsafe fn` or not, plain or of instances, whose doc they write to
+/// name the features.
 #[test]
 fn an_item_of_kernels_with_no_doc_is_told_of_at_the_item() -> Result {
     refuses(
@@ -5009,13 +5030,16 @@ fn an_item_of_kernels_with_no_doc_is_told_of_at_the_item() -> Result {
 /// Clippy tells of a public x86 kernel whose docs have no `# Safety` at the kernel, as it tells of an `unsafe fn` of
 /// Rust's own: a plain kernel, one that gives back a number, and one of instances. It says nothing of a kernel whose
 /// docs have one, of a kernel that names a static of its module, plain or of instances, whose contract the macros write
-/// as one, of a cooperative kernel, nor of a GPU kernel, whose launcher has the macros'.
+/// as one, of a kernel that needs a CPU feature past x86-64's own, `avx` here, an `unsafe fn` or not, plain or of
+/// instances, whose features the macros write into one, of a cooperative kernel, nor of a GPU kernel, whose launcher
+/// has the macros'. Rust has a kernel that is no `unsafe fn` and needs a feature as unsafe to call where the caller
+/// does not have it, so Clippy asks it for a `# Safety` as well.
 #[test]
 fn clippy_tells_of_a_public_x86_kernel_with_no_safety_doc_at_the_kernel() -> Result {
     if clippy_here() {
         let (done, said) = cargo(&["clippy"], "missing_safety_doc_at_item")?;
         let missing = "warning: unsafe function's docs are missing a `# Safety` section";
-        let lines = [14, 17, 23].map(|line| format!("src/lib.rs:{line}:5: {missing}"));
+        let lines = [15, 18, 24].map(|line| format!("src/lib.rs:{line}:5: {missing}"));
         assert!(
             done && said == lines,
             "fixtures/missing_safety_doc_at_item.rs: Clippy {done}, and said:\n{}",

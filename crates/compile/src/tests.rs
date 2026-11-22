@@ -64,6 +64,17 @@ impl Spill<&'static str> for Toy {
     fn copy(&self, to: VReg, from: VReg, width: Width) -> Inst<&'static str, VReg> {
         plain("copy", vec![reg_arg(to, width, Access::Write), reg_arg(from, width, Access::Read)])
     }
+
+    /// `copy`, and `alias`, which is another spelling of it, as x86's `vmovups` is of its `vmovaps`.
+    fn copies(&self, inst: &Inst<&'static str, VReg>) -> Option<(VReg, VReg, Width)> {
+        match (inst.op, inst.args.as_slice()) {
+            (
+                "copy" | "alias",
+                [Arg { operand: Operand::Reg(to, w), .. }, Arg { operand: Operand::Reg(from, v), .. }],
+            ) if w == v => Some((*to, *from, *w)),
+            _ => None,
+        }
+    }
 }
 
 /// What a read at 32 bits sees of a register: its low half.
@@ -78,10 +89,10 @@ fn hash(values: impl IntoIterator<Item = u64>) -> u64 {
 /// that hold zero: `op` writes a hash of its immediate and the registers it reads, `add` adds
 /// the second to the first, `add32` adds the low halves, 32 bits, of the two to the first's and clears its upper half,
 /// `dec` takes one from its register and jumps unless that leaves zero, `load` and `store` move a register's value to a
-/// slot and back, `copy` moves one to another, `call` writes a hash of the arguments it reads to its result, if it has
-/// one, and `ret` returns what it reads. A read at 32 bits sees the low half of a register, and a read of memory at the
-/// address in a register sees all of the register, for the toy has no memory but its slots. Reading a register nothing
-/// wrote, or running past ten thousand instructions, is an error.
+/// slot and back, `copy` and `alias` move one to another, `call` writes a hash of the arguments it reads to its result,
+/// if it has one, and `ret` returns what it reads. A read at 32 bits sees the low half of a register, and a read of
+/// memory at the address in a register sees all of the register, for the toy has no memory but its slots. Reading a
+/// register nothing wrote, or running past ten thousand instructions, is an error.
 ///
 /// A call writes junk to each of the machine's registers it changes, its `clobbers`, that
 /// `reg` says is a register of `R`'s, as a callee may, or to the upper half of one it clears that of; the result goes
@@ -144,7 +155,7 @@ fn run<R: Register + Ord>(
                 regs.insert(reg_of(&inst.args[0])?, left);
                 jump = left != 0;
             }
-            "load" | "copy" => {
+            "load" | "copy" | "alias" => {
                 let v = value(&inst.args[1], &regs)?;
                 regs.insert(reg_of(&inst.args[0])?, v);
             }
@@ -230,10 +241,10 @@ fn moves(c: &Allocated<&'static str>) -> Vec<(&'static str, u32)> {
     c.body.iter().filter_map(moved).collect()
 }
 
-/// The registers each copy of `c` writes and reads, in order.
+/// The registers each copy of `c` writes and reads, in order, whichever its spelling.
 fn copies(c: &Allocated<&'static str>) -> Vec<(PReg, PReg)> {
     let copy = |item: &Item<&'static str, PReg>| match item {
-        Item::Inst(i) if i.op == "copy" => match (i.args[0].operand, i.args[1].operand) {
+        Item::Inst(i) if matches!(i.op, "copy" | "alias") => match (i.args[0].operand, i.args[1].operand) {
             (Operand::Reg(to, _), Operand::Reg(from, _)) => Some((to, from)),
             _ => None,
         },
@@ -360,6 +371,11 @@ impl Builder {
     /// A copy of `width` of `from` to `to`, as a machine's code makes one.
     fn copy(&mut self, to: VReg, from: VReg, width: Width) {
         self.0.body.push(Item::Inst(Toy::copy(&toy(0, &[]), to, from, width)));
+    }
+
+    /// [`copy`](Builder::copy) spelled `op`, `copy` or `alias`: the toy's two spellings of one move.
+    fn copy_as(&mut self, op: &'static str, to: VReg, from: VReg, width: Width) {
+        self.0.body.push(Item::Inst(Inst { op, ..Toy::copy(&toy(0, &[]), to, from, width) }));
     }
 
     /// A slot of `width`'s bytes: one that a spill keeps a variable in, as the allocator makes it, or one of the
@@ -1667,6 +1683,71 @@ fn a_copy_of_less_than_its_variable_is_kept_in_stays() -> Result {
     let c = same(&program(true), &toy(3, &[]), &[])?;
     assert_eq!((reg_of(&c, "x")?, reg_of(&c, "y")?), (r(0), r(0)));
     assert_eq!(ops(&c), ["op", "copy", "op", "ret"]);
+    Ok(())
+}
+
+/// A copy of a variable to itself moves nothing, and is left out where it moves all of the register, spelled `copy` or
+/// `alias`, with no flow to follow. One of 32 bits of a register of 64 stays, in the spelling it has: it clears the
+/// upper half, which `y` reads.
+#[test]
+fn a_copy_of_a_variable_to_itself_is_left_out_where_it_moves_all_of_the_register() -> Result {
+    for (op, width, want) in [
+        ("copy", Width::W64, ["op", "op", "ret"].to_vec()),
+        ("alias", Width::W64, ["op", "op", "ret"].to_vec()),
+        ("copy", Width::W32, ["op", "copy", "op", "ret"].to_vec()),
+        ("alias", Width::W32, ["op", "alias", "op", "ret"].to_vec()),
+    ] {
+        let mut b = Builder::new();
+        let (x, y) = (b.var("x"), b.var("y"));
+        b.def(x, &[]);
+        b.copy_as(op, x, x, width);
+        b.def(y, &[x]);
+        b.ret(y, 0);
+        let c = same(&b.0, &toy(2, &[]), &[])?;
+        assert_eq!(ops(&c), want, "{op} of {width:?}");
+    }
+    Ok(())
+}
+
+/// What a machine says copies is a copy, in whatever spelling it has, and stays the move it is: `alias` is left out
+/// where its two variables take one register, and where the register it writes holds the value, as it does after a
+/// copy of `x` to `y` that `x`'s register still holds the value of, and a copy that stays reads the register that held
+/// the value first, as `alias`.
+#[test]
+fn a_copy_in_another_spelling_is_a_copy() -> Result {
+    // `x` is dead after the copy, so `y` takes its register.
+    let mut b = Builder::new();
+    let (x, y, z) = (b.var("x"), b.var("y"), b.var("z"));
+    b.def(x, &[]);
+    b.copy_as("alias", y, x, Width::W64);
+    b.def(z, &[y]);
+    b.ret(z, 0);
+    let c = same(&b.0, &toy(3, &[]), &[])?;
+    assert_eq!((reg_of(&c, "x")?, reg_of(&c, "y")?), (r(0), r(0)));
+    assert_eq!(ops(&c), ["op", "op", "ret"]);
+    // The copy of `y` back to `x` finds `x`'s register holding the value.
+    let mut b = Builder::new();
+    let (x, y, t, z) = (b.var("x"), b.var("y"), b.var("t"), b.var("z"));
+    b.def(x, &[]);
+    b.copy_as("alias", y, x, Width::W64);
+    b.def(t, &[x]);
+    b.copy_as("alias", x, y, Width::W64);
+    b.def(z, &[t, x, y]);
+    b.ret(z, 0);
+    let c = same(&b.0, &toy(4, &[]), &[])?;
+    assert_ne!(reg_of(&c, "x")?, reg_of(&c, "y")?);
+    assert_eq!(ops(&c), ["op", "alias", "op", "op", "ret"]);
+    // The second copy takes the value from the register it arrived in, `p`'s, not `q`'s.
+    let mut b = Builder::new();
+    let (p, q, w, y) = (b.param("p", 0), b.var("q"), b.var("w"), b.var("y"));
+    b.copy_as("alias", q, p, Width::W64);
+    b.copy_as("alias", w, q, Width::W64);
+    b.def(y, &[p, q, w]);
+    b.ret(y, 0);
+    let c = same(&b.0, &toy(4, &[]), &[7])?;
+    assert_eq!(ops(&c), ["alias", "alias", "op", "ret"]);
+    let (q, w) = (reg_of(&c, "q")?, reg_of(&c, "w")?);
+    assert_eq!(copies(&c), [(q, r(0)), (w, r(0))]);
     Ok(())
 }
 

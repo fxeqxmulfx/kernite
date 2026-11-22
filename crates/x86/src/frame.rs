@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 
 use kernite_compile::{Allocated, Frame};
-use kernite_core::{Access, Arg, Base, Clobber, Flow, Inst, Item, Label, Mem, Operand, PReg, Width};
+use kernite_core::{Access, Arg, Base, Flow, Inst, Item, Label, Mem, Operand, PReg, Width};
 
 use crate::forms::{self, Feature};
 use crate::op::Op;
@@ -37,11 +37,10 @@ pub(crate) struct Lowered {
 
 /// `c` with its frame made instructions, as [`print`](crate::intel::print) says; or why not.
 pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
-    let code = without_idle(&c.body);
-    let jumps = jumps(&code);
+    let jumps = jumps(&c.body);
     let calls = insts(&c.body).filter(|inst| inst.op == Op::Call).count() > jumps.len();
     let returns = insts(&c.body).any(|inst| inst.op == Op::Ret);
-    let uppers = upper_set(&code, &jumps);
+    let uppers = upper_set(&c.body, &jumps);
     // The prologue's loop takes the least value no label of the body has: going up the body's
     // labels in order, each one that has the value looked for moves it one on.
     let labels: BTreeSet<u32> = c
@@ -59,7 +58,7 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     let done: BTreeSet<usize> = jumps.values().flatten().copied().collect();
     // Whether the call that comes next has a `vzeroupper` written before it.
     let mut clear = false;
-    for (i, (item, &upper)) in code.iter().zip(&uppers).enumerate() {
+    for (i, (item, &upper)) in c.body.iter().zip(&uppers).enumerate() {
         match item {
             Item::Inst(call) if jumps.contains_key(&i) => {
                 let mut jump =
@@ -110,7 +109,7 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     // The frame's instructions need none, but for the epilogue's `vzeroupper`, which is AVX's: a kernel that writes it
     // needs AVX, unless it lists a feature that builds on it.
     let mut features: Vec<Feature> = vec![];
-    for inst in insts(&code) {
+    for inst in insts(&c.body) {
         features.extend(forms::feature(inst.op, &inst.args, &inst.implicit)?);
     }
     let implies_avx = [Feature::Avx2, Feature::Fma, Feature::F16c];
@@ -126,15 +125,15 @@ pub(crate) fn lower(c: &Allocated<Op>) -> Result<Lowered, String> {
     Ok(Lowered { body, features, padding, below, returns, changes, clears_upper, reaches_sse })
 }
 
-/// The calls of `code`, a body without its idle moves, that are jumps, by their places in it, each with the place of
-/// the `ret` it does without, if no other way comes to that `ret`. A call that `ret` follows at once, with nothing
-/// between but labels and notes, returns what the callee gives back: the kernel takes its frame down, as before a
-/// `ret`, which clears the upper halves of the vector registers where the kernel may have set one, and jumps to the
-/// callee, which returns to the kernel's caller. A call stays one where the jump would not do what it does: where the
-/// kernel has taken the address of its stack memory, which the callee may use, and the frame the epilogue takes down
-/// holds; and where it takes all of a ymm back from a function it does not know: the epilogue's `vzeroupper` runs
-/// before the callee sets the upper half of what it gives back. A jump that passes all of a ymm has no `vzeroupper`
-/// before it: the callee, passed all of a ymm, clears the upper halves before it returns.
+/// The calls of `code` that are jumps, by their places in it, each with the place of the `ret` it does without, if no
+/// other way comes to that `ret`. A call that `ret` follows at once, with nothing between but labels and notes, returns
+/// what the callee gives back: the kernel takes its frame down, as before a `ret`, which clears the upper halves of the
+/// vector registers where the kernel may have set one, and jumps to the callee, which returns to the kernel's caller. A
+/// call stays one where the jump would not do what it does: where the kernel has taken the address of its stack memory,
+/// which the callee may use, and the frame the epilogue takes down holds; and where it takes all of a ymm back from a
+/// function it does not know: the epilogue's `vzeroupper` runs before the callee sets the upper half of what it gives
+/// back. A jump that passes all of a ymm has no `vzeroupper` before it: the callee, passed all of a ymm, clears the
+/// upper halves before it returns.
 fn jumps(code: &[Item<Op, PReg>]) -> BTreeMap<usize, Option<usize>> {
     let stack = |a: &Arg<PReg>| matches!(a.operand, Operand::Mem(Mem { base: Base::Slot(_), .. }));
     let mut jumps = BTreeMap::new();
@@ -200,52 +199,6 @@ fn upper_set(body: &[Item<Op, PReg>], jumps: &BTreeMap<usize, Option<usize>>) ->
         if !grown {
             return set;
         }
-    }
-}
-
-/// `body` without its idle moves, which the listing leaves out. A move of all 64 bits, or all 256, is idle where its
-/// two registers hold one value: they are one register, or moves after the last label copied the value of one into the
-/// other, or of a third into both, and nothing wrote either after them. One of 32 bits clears the upper half, and one
-/// of an xmm the upper lanes, so neither is idle.
-fn without_idle(body: &[Item<Op, PReg>]) -> Vec<Item<Op, PReg>> {
-    // The value each register holds, named by the instruction that wrote it and the register: a register that is not
-    // here holds the value it had on entry, or at the last label, named by itself. A move gives its register the name
-    // of the value it copies, and a label makes every register forget its own, as control may come to it from where
-    // they differ.
-    let mut holds: BTreeMap<PReg, (usize, PReg)> = BTreeMap::new();
-    let value = |holds: &BTreeMap<PReg, (usize, PReg)>, r| holds.get(&r).copied().unwrap_or((usize::MAX, r));
-    let mut code = vec![];
-    for (i, item) in body.iter().enumerate() {
-        match item {
-            Item::Inst(inst) => {
-                let copy = copy_of(inst);
-                if copy.is_some_and(|(to, from)| value(&holds, to) == value(&holds, from)) {
-                    continue;
-                }
-                let copied = copy.map(|(to, from)| (to, value(&holds, from)));
-                let changed = inst.clobbers.iter().map(|c| match *c {
-                    Clobber::All(r) | Clobber::Upper(r) => r,
-                });
-                holds.extend(inst.writes().chain(changed).map(|r| (r, (i, r))));
-                holds.extend(copied);
-            }
-            Item::Label(_) => holds.clear(),
-            Item::Note(_) => {}
-        }
-        code.push(item.clone());
-    }
-    code
-}
-
-/// The registers `inst` copies, the one written and the one read: all 64 bits by `mov`, or all 256 by `vmovaps`,
-/// `vmovups`, `vmovdqa` or `vmovdqu`.
-fn copy_of(inst: &Inst<Op, PReg>) -> Option<(PReg, PReg)> {
-    match (inst.op, inst.args.as_slice()) {
-        (
-            Op::Mov | Op::Vmovaps | Op::Vmovups | Op::Vmovdqa | Op::Vmovdqu,
-            [Arg { operand: Operand::Reg(to, w), .. }, Arg { operand: Operand::Reg(from, v), .. }],
-        ) if w == v && matches!(w, Width::W64 | Width::W256) => Some((*to, *from)),
-        _ => None,
     }
 }
 
@@ -419,19 +372,15 @@ fn sp(op: Op, bytes: u32) -> Item<Op, PReg> {
 
 #[cfg(test)]
 mod tests {
-    use kernite_core::{Class, FuncId, Signature, Slot, SlotId};
+    use kernite_core::{Class, Signature, Slot, SlotId};
 
     use super::*;
     use crate::intel;
 
     type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
-    const RAX: PReg = PReg { class: Class::Gpr, hw: 0 };
-    const RCX: PReg = PReg { class: Class::Gpr, hw: 1 };
     const RBX: PReg = PReg { class: Class::Gpr, hw: 3 };
     const RDI: PReg = PReg { class: Class::Gpr, hw: 7 };
-    const YMM0: PReg = PReg { class: Class::Vec, hw: 0 };
-    const YMM1: PReg = PReg { class: Class::Vec, hw: 1 };
 
     /// A kernel of `body` in `frame`, allocated by hand.
     fn kernel(body: Vec<Item<Op, PReg>>, frame: Frame) -> Allocated<Op> {
@@ -536,88 +485,5 @@ mod tests {
         let want = "the kernel's frame, its stack memory and the variables that spilled, reaches 2147483649 bytes past \
                     the stack pointer: more than an address does";
         assert_eq!(lowered((1 << 31) + RED_ZONE + 1).err().as_deref(), Some(want));
-    }
-
-    /// A move of a register to itself, of all 64 bits by `mov` or all 256 by `vmovaps`, `vmovups`, `vmovdqa` or
-    /// `vmovdqu`, changes nothing, and is left out; one of 32 bits clears the upper half, and one of an xmm the upper
-    /// lanes, and stay. A move left out asks for no `vzeroupper`, nor does one of an xmm, which sets no upper half.
-    #[test]
-    fn a_move_of_a_register_to_itself_is_left_out() -> Result {
-        let frame = Frame { saved: vec![], slots: vec![], offsets: vec![], size: 0, align: 0 };
-        let wide = [Op::Vmovaps, Op::Vmovups, Op::Vmovdqa, Op::Vmovdqu].map(|op| mov(op, YMM0, YMM0, Width::W256));
-        let ret = inst(Op::Ret, vec![]);
-        let mut body = vec![mov(Op::Mov, RAX, RAX, Width::W64), mov(Op::Mov, RAX, RAX, Width::W32)];
-        body.extend(wide.clone());
-        body.extend([mov(Op::Vmovaps, YMM0, YMM0, Width::W128), mov(Op::Mov, RAX, RCX, Width::W64), ret.clone()]);
-        assert_eq!(code(&kernel(body, frame.clone()))?, "mov eax, eax\nvmovaps xmm0, xmm0\nmov rax, rcx\nret");
-        assert_eq!(code(&kernel([&wide[..], &[ret]].concat(), frame))?, "ret");
-        Ok(())
-    }
-
-    /// A move of all 64 bits, or all 256, between two registers that moves gave one value is left out, until either is
-    /// written, a call changes one, or a label brings control from where they differ.
-    #[test]
-    fn a_move_into_a_register_that_holds_the_value_is_left_out() -> Result {
-        let frame = Frame { saved: vec![], slots: vec![], offsets: vec![], size: 0, align: 0 };
-        let call = Inst {
-            op: Op::Call,
-            args: vec![Arg { operand: Operand::Func(FuncId(0)), access: Access::Read }],
-            implicit: vec![],
-            flow: Flow::Next,
-            clobbers: vec![Clobber::All(RCX)],
-        };
-        let clears = Item::Inst(Inst { clobbers: vec![Clobber::Upper(YMM0)], ..call.clone() });
-        let call = Item::Inst(call);
-        let (rax_rcx, rcx_rax) = (mov(Op::Mov, RAX, RCX, Width::W64), mov(Op::Mov, RCX, RAX, Width::W64));
-        let cases = [
-            // The value of rcx is in rax and in rbx, so a move back, or one between the two, is left out.
-            (vec![rax_rcx.clone(), rcx_rax.clone()], "mov rax, rcx"),
-            (
-                vec![rax_rcx.clone(), mov(Op::Mov, RBX, RAX, Width::W64), mov(Op::Mov, RCX, RBX, Width::W64)],
-                "mov rax, rcx\nmov rbx, rax",
-            ),
-            (
-                vec![rax_rcx.clone(), mov(Op::Mov, RBX, RCX, Width::W64), mov(Op::Mov, RAX, RBX, Width::W64)],
-                "mov rax, rcx\nmov rbx, rcx",
-            ),
-            (
-                vec![mov(Op::Vmovaps, YMM1, YMM0, Width::W256), mov(Op::Vmovdqu, YMM0, YMM1, Width::W256)],
-                "vmovaps ymm1, ymm0\nvzeroupper",
-            ),
-            // A register that was written since, the one read or the one written, by a move, by another instruction or
-            // by a call, all of it or its upper half, holds another value.
-            (
-                vec![rax_rcx.clone(), mov(Op::Mov, RAX, RBX, Width::W64), rcx_rax.clone()],
-                "mov rax, rcx\nmov rax, rbx\nmov rcx, rax",
-            ),
-            (
-                vec![rax_rcx.clone(), mov(Op::Mov, RCX, RBX, Width::W64), rcx_rax.clone()],
-                "mov rax, rcx\nmov rcx, rbx\nmov rcx, rax",
-            ),
-            (
-                vec![rax_rcx.clone(), mov(Op::Add, RAX, RBX, Width::W64), rcx_rax.clone()],
-                "mov rax, rcx\nadd rax, rbx\nmov rcx, rax",
-            ),
-            (
-                vec![rax_rcx.clone(), mov(Op::Add, RCX, RBX, Width::W64), rcx_rax.clone()],
-                "mov rax, rcx\nadd rcx, rbx\nmov rcx, rax",
-            ),
-            (
-                vec![rax_rcx.clone(), call.clone(), rcx_rax.clone()],
-                "sub rsp, 8\nmov rax, rcx\ncall {f0}\nmov rcx, rax\nadd rsp, 8",
-            ),
-            (
-                vec![mov(Op::Vmovaps, YMM1, YMM0, Width::W256), clears, mov(Op::Vmovaps, YMM0, YMM1, Width::W256)],
-                "sub rsp, 8\nvmovaps ymm1, ymm0\ncall {f0}\nvmovaps ymm0, ymm1\nadd rsp, 8\nvzeroupper",
-            ),
-            // A label may be reached from where they differ, and a move of 32 bits is no copy.
-            (vec![rax_rcx.clone(), Item::Label(Label(0)), rcx_rax.clone()], "mov rax, rcx\n2:\nmov rcx, rax"),
-            (vec![rax_rcx.clone(), mov(Op::Mov, RCX, RAX, Width::W32)], "mov rax, rcx\nmov ecx, eax"),
-        ];
-        for (body, want) in cases {
-            let c = kernel([&body[..], &[inst(Op::Ret, vec![])]].concat(), frame.clone());
-            assert_eq!(code(&c)?, format!("{want}\nret"), "{body:?}");
-        }
-        Ok(())
     }
 }
