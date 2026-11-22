@@ -732,6 +732,427 @@ pub(crate) fn attrs(f: &Fn, top: &[TokenTree]) -> TokenStream {
     f.attrs.clone().filter(|i| !kernite(i)).filter_map(|i| top.get(i).cloned()).collect()
 }
 
+/// `docs`, an item's attributes, `#` and brackets each, with each doc that holds more than a line as one doc for each
+/// line: a heading is then a doc of its own, and a paragraph can go before it. A line at their end closes the block
+/// that they leave open, if [`headings`] gives one, so that no paragraph added there is a line of it.
+pub(crate) fn by_line(docs: TokenStream) -> Vec<TokenTree> {
+    let docs: Vec<TokenTree> = docs.into_iter().collect();
+    let mut out = vec![];
+    for attr in docs.chunks(2) {
+        match doc_text(attr) {
+            Some(text) if text.contains('\n') => {
+                for line in text.split('\n') {
+                    out.extend(respan(parse(&format!("#[doc = {line:?}]")), span_of(attr.last())));
+                }
+            }
+            _ => out.extend(attr.iter().cloned()),
+        }
+    }
+    if let Some(end) = headings(&out).1 {
+        out.extend(respan(parse(&format!("#[doc = {:?}]", format!(" {end}"))), span_of(docs.last())));
+    }
+    out
+}
+
+/// Where the macros add paragraphs to `docs`, an item's attributes as [`by_line`] has them, each place an index in
+/// `docs`, before an attribute. The first is for a paragraph of the macros' own, at the end of the text before the
+/// first heading, so that no heading of the user's has it. The second is for one of the safety contract, at the end of
+/// the docs' `# Safety`, before the blank lines that end it; `None` where the docs have none. A `# Safety` is a heading
+/// of the word Safety alone, as [`is_safety`] says, of any level, and not those words in a sentence, in a code block or
+/// in a block of HTML. It ends before the next heading of its level or higher, or with the docs. A paragraph ends the
+/// block quote or list item before it, so none goes in one: a heading in one is where the block begins, and one in the
+/// same block as the `# Safety` does not end it.
+pub(crate) fn section_ends(docs: &[TokenTree]) -> (usize, Option<usize>) {
+    let headings = headings(docs).0;
+    // The end of the text before `at`, an index in `docs`: after its last attribute that is not a blank line of docs.
+    let text_to = |at: usize| docs.chunks(2).take(at / 2).rposition(|attr| !blank(attr)).map_or(0, |i| 2 * i + 2);
+    let lead = text_to(headings.first().map_or(docs.len(), |&(at, ..)| at));
+    let safety = headings.iter().enumerate().find(|&(_, &(.., safety))| safety).map(|(i, &(from, level, _))| {
+        let next = headings.iter().skip(i + 1).find(|&&(at, other, _)| other <= level && at > from);
+        text_to(next.map_or(docs.len(), |&(at, ..)| at))
+    });
+    (lead, safety)
+}
+
+/// A heading of docs: where its block begins, an index in them; its level; and whether it is a `# Safety`. Its block is
+/// the outermost block quote or list item that holds it, or the heading itself where none does.
+type Heading = (usize, usize, bool);
+
+/// A block of Markdown that holds blocks: a block quote, or a list item, of the column its text starts at, and of
+/// whether it holds nothing yet, as one that begins with a blank line.
+enum Container {
+    Quote,
+    Item(usize, bool),
+}
+
+/// The block of Markdown that holds the text of a line, in the line's containers.
+#[derive(Clone, Copy)]
+enum Leaf {
+    /// None: the line begins one.
+    None,
+    /// A paragraph: the doc that begins it, and whether it is that one line, of the word Safety, as [`is_safety`]
+    /// says.
+    Para(usize, bool),
+    /// A code block of a fence: its character and its length.
+    Fence(char, usize),
+    /// A code block of lines indented four columns.
+    Code,
+    /// A block of HTML: the text that ends it, or none where a blank line does.
+    Html(Option<&'static str>),
+}
+
+/// What a line begins, after the containers that it goes on.
+enum Start<'a> {
+    /// Nothing, as it is blank.
+    Blank,
+    /// A thematic break, three or more of `*`, `-` or `_`.
+    Break,
+    /// A block quote: the line after its `>` and a space.
+    Quote(&'a str),
+    /// A list item: the line after its marker and the spaces after that, the column its text starts at, and whether it
+    /// breaks a paragraph in its own containers, as a bullet or the number 1 with text after it does.
+    Item(&'a str, usize, bool),
+    /// A heading of `#`s: its level and its title.
+    Heading(usize, &'a str),
+    /// The fence of a code block: its character, its length, and the text after it.
+    Fence(char, usize, &'a str),
+    /// A block of HTML: the text that ends it, or none where a blank line does, and whether it breaks a paragraph.
+    Html(Option<&'static str>, bool),
+    /// A line indented four columns: code, where it breaks no paragraph.
+    Code,
+    /// A line of a paragraph.
+    Text,
+}
+
+/// The headings of `docs`, an item's attributes as [`by_line`] has them, as rustdoc reads their Markdown; and the line
+/// that closes the block they leave open at their top level, a code block of a fence or a block of HTML that a text
+/// ends, if they leave one. One in a block quote or a list item needs none: a line after a blank line, as the macros
+/// write, ends its container, and the block with it. rustdoc reads Markdown with pulldown-cmark, as CommonMark has it,
+/// but where [`spaced`] and [`html`] say; and each line with the one space of a `///` taken off.
+fn headings(docs: &[TokenTree]) -> (Vec<Heading>, Option<String>) {
+    let lines: Vec<Option<String>> = docs.chunks(2).map(doc_text).collect();
+    // The one space that `///` leaves before its text, if every line has it, which rustdoc takes off. It takes off more
+    // where all the lines share more, but not once the macros add a line of their own, which has that one alone: so
+    // lines that all have six spaces read as code, not as the heading they were.
+    let indent = usize::from(
+        lines.iter().flatten().filter(|line| !line.trim().is_empty()).all(|line| line.starts_with([' ', '\t'])),
+    );
+    let mut out = vec![];
+    let mut open = vec![];
+    let mut leaf = Leaf::None;
+    // The line that the outermost of the containers that `open` has began at.
+    let mut top = 0;
+    for (i, text) in lines.iter().enumerate() {
+        let Some(text) = text else { continue };
+        let line = spaced(text.get(indent..).unwrap_or_default());
+        let mut rest = line.as_str();
+        // The containers that the line goes on, from the outermost, each taking its part of the line.
+        let mut kept = 0;
+        for container in &mut open {
+            let blank = rest.trim().is_empty();
+            rest = match (container, start(rest)) {
+                (Container::Quote, Start::Quote(after)) => after,
+                (Container::Item(column, empty), _) if (blank && !*empty) || (!blank && indent_of(rest) >= *column) => {
+                    *empty &= blank;
+                    rest.get(*column..).unwrap_or_default()
+                }
+                _ => break,
+            };
+            kept += 1;
+        }
+        let lazy = kept < open.len();
+        let mut now = start(rest);
+        match leaf {
+            // A code block, or a block of HTML, whose containers the line goes on, holds the line, and ends with it
+            // where it closes the block.
+            Leaf::Fence(c, n) if !lazy => {
+                if matches!(now, Start::Fence(d, m, after) if d == c && m >= n && after.trim().is_empty()) {
+                    leaf = Leaf::None;
+                }
+                continue;
+            }
+            Leaf::Html(end) if !lazy => {
+                if end.map_or(matches!(now, Start::Blank), |end| rest.contains(end)) {
+                    leaf = Leaf::None;
+                }
+                continue;
+            }
+            Leaf::Code if !lazy && matches!(now, Start::Blank | Start::Code) => continue,
+            // A line that begins no block goes on in a paragraph, lazily, though not all of its containers go on.
+            Leaf::Para(at, _) if lazy && !breaks(&now, true) => {
+                leaf = Leaf::Para(at, false);
+                continue;
+            }
+            Leaf::Para(..) if !lazy => {}
+            _ => leaf = Leaf::None,
+        }
+        // The containers that the line does not go on end, with what they hold.
+        open.truncate(kept);
+        if open.is_empty() {
+            top = i;
+        }
+        // The blocks that the line begins: containers, then the block that holds its text.
+        loop {
+            if let Leaf::Para(at, safety) = leaf {
+                if let Some(level) = underline(rest) {
+                    // The paragraph is in the containers, if there are any, which began no later than it did.
+                    out.push((2 * at.min(top), level, safety));
+                    leaf = Leaf::None;
+                    break;
+                }
+                if !breaks(&now, false) {
+                    leaf = Leaf::Para(at, false);
+                    break;
+                }
+                leaf = Leaf::None;
+            }
+            rest = match now {
+                Start::Quote(after) => {
+                    open.push(Container::Quote);
+                    after
+                }
+                Start::Item(after, column, _) => {
+                    open.push(Container::Item(column, after.trim().is_empty()));
+                    after
+                }
+                Start::Heading(level, title) => {
+                    out.push((2 * top, level, is_safety(title)));
+                    break;
+                }
+                Start::Fence(c, n, _) => {
+                    leaf = Leaf::Fence(c, n);
+                    break;
+                }
+                Start::Html(end, _) => {
+                    if !end.is_some_and(|end| rest.contains(end)) {
+                        leaf = Leaf::Html(end);
+                    }
+                    break;
+                }
+                Start::Code => {
+                    leaf = Leaf::Code;
+                    break;
+                }
+                Start::Text => {
+                    leaf = Leaf::Para(i, is_safety(rest));
+                    break;
+                }
+                Start::Blank | Start::Break => break,
+            };
+            now = start(rest);
+        }
+    }
+    let end = match leaf {
+        Leaf::Fence(c, n) if open.is_empty() => Some(String::from(c).repeat(n)),
+        Leaf::Html(Some(end)) if open.is_empty() => Some(end.to_string()),
+        _ => None,
+    };
+    (out, end)
+}
+
+/// Whether a line that begins `now` ends a paragraph, as each block does but code, a lone tag of HTML and a list item
+/// that is empty or of a number other than 1, in the paragraph's containers; one that is `lazy`, a line that not all of
+/// them go on, a list item of any kind ends, as pulldown-cmark has it.
+fn breaks(now: &Start<'_>, lazy: bool) -> bool {
+    match now {
+        Start::Code | Start::Text | Start::Html(_, false) => false,
+        Start::Item(_, _, breaks) => lazy || *breaks,
+        _ => true,
+    }
+}
+
+/// What `line` begins, after the containers that it goes on, as [`Start`] says. A block other than code has up to three
+/// spaces before it.
+fn start(line: &str) -> Start<'_> {
+    let text = line.trim_start_matches(' ');
+    let indent = line.len() - text.len();
+    if text.is_empty() {
+        return Start::Blank;
+    }
+    if indent > 3 {
+        return Start::Code;
+    }
+    if ['*', '-', '_']
+        .into_iter()
+        .any(|mark| text.chars().all(|c| c == mark || c == ' ') && text.matches(mark).count() > 2)
+    {
+        return Start::Break;
+    }
+    if let Some(after) = text.strip_prefix('>') {
+        return Start::Quote(after.strip_prefix(' ').unwrap_or(after));
+    }
+    if let Some(item) = item(text, indent) {
+        return item;
+    }
+    // A heading of one to six `#`s, and a space or the end of the line.
+    let title = text.trim_start_matches('#');
+    let level = text.len() - title.len();
+    if (1..=6).contains(&level) && (title.is_empty() || title.starts_with(' ')) {
+        // A run of `#`s after a space closes the heading, and is no part of its title.
+        let bare = title.trim_end().trim_end_matches('#');
+        return Start::Heading(level, if bare.is_empty() || bare.ends_with(' ') { bare } else { title });
+    }
+    // A fence of three or more `` ` `` or `~`, and of `~` if a `` ` `` comes after it.
+    if let Some(c) = text.chars().next().filter(|c| matches!(c, '`' | '~')) {
+        let after = text.trim_start_matches(c);
+        let length = text.len() - after.len();
+        if length > 2 && !(c == '`' && after.contains('`')) {
+            return Start::Fence(c, length, after);
+        }
+    }
+    html(text).map_or(Start::Text, |(end, breaks)| Start::Html(end, breaks))
+}
+
+/// The list item that `text`, a line after `indent` spaces, begins, if it begins one: a marker, a bullet, `-`, `+` or
+/// `*`, or a number of up to nine digits and `.` or `)`; then one to four spaces, before its text, or more, the first
+/// of them before code, or none, where the line ends there.
+fn item(text: &str, indent: usize) -> Option<Start<'_>> {
+    let digits = text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let (after, first) = match digits {
+        0 => (text.strip_prefix(['-', '+', '*'])?, true),
+        1..=9 => (text.get(digits..)?.strip_prefix(['.', ')'])?, text.get(..digits)?.parse() == Ok(1)),
+        _ => return None,
+    };
+    let content = after.trim_start_matches(' ');
+    let marker = indent + text.len() - after.len();
+    Some(match after.len() - content.len() {
+        _ if content.is_empty() => Start::Item("", marker + 1, false),
+        0 => return None,
+        spaces @ 1..=4 => Start::Item(content, marker + spaces, first),
+        _ => Start::Item(after.get(1..)?, marker + 1, first),
+    })
+}
+
+/// The names of the tags of HTML that begin a block of HTML that a blank line ends, and that breaks a paragraph, as
+/// CommonMark 0.31 has them, a space between each two.
+const BLOCK_TAGS: &str = "address article aside base basefont blockquote body caption center col colgroup dd details \
+    dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 head header hr html \
+    iframe legend li link main menu menuitem nav noframes ol optgroup option p param search section summary table \
+    tbody td tfoot th thead title tr track ul";
+
+/// The block of HTML that `text`, a line after up to three spaces, begins, if it begins one: the text that ends it, or
+/// none where a blank line does; and whether it breaks a paragraph, as each does but a lone tag, as [`lone_tag`] says.
+/// A `<pre>`, `<script>`, `<style>` or `<textarea>` ends at its own end tag, in small letters, as pulldown-cmark has
+/// it, where CommonMark ends it at that of any of the four, in any case.
+fn html(text: &str) -> Option<(Option<&'static str>, bool)> {
+    let tag = text.strip_prefix('<')?;
+    let marked = [("!--", "-->"), ("?", "?>"), ("![CDATA[", "]]>")].into_iter().find(|(open, _)| tag.starts_with(open));
+    if let Some((_, end)) = marked {
+        return Some((Some(end), true));
+    }
+    if tag.strip_prefix('!').is_some_and(|name| name.starts_with(|c: char| c.is_ascii_alphabetic())) {
+        return Some((Some(">"), true));
+    }
+    let lower = tag.to_ascii_lowercase();
+    let closing = lower.strip_prefix('/');
+    let named = closing.unwrap_or(&lower);
+    let after = tag_name(named)?;
+    let name = named.get(..named.len() - after.len())?;
+    let ends = after.is_empty() || after.starts_with(|c: char| c.is_ascii_whitespace() || c == '>');
+    let raw = [("pre", "</pre>"), ("script", "</script>"), ("style", "</style>"), ("textarea", "</textarea>")];
+    if let Some((_, end)) = raw.into_iter().find(|&(raw, _)| raw == name && ends && closing.is_none()) {
+        return Some((Some(end), true));
+    }
+    if BLOCK_TAGS.split(' ').any(|block| block == name) && (ends || after.starts_with("/>")) {
+        return Some((None, true));
+    }
+    lone_tag(text).then_some((None, false))
+}
+
+/// Whether `text` is a tag of HTML, open or closing, and white space after it alone. An open tag has attributes, as
+/// [`attribute`] says, then a `/` or not.
+fn lone_tag(text: &str) -> bool {
+    let end = match text.strip_prefix("</") {
+        Some(closing) => tag_name(closing).map(str::trim_start),
+        None => text.strip_prefix('<').and_then(tag_name).map(|mut s| {
+            while let Some(after) = attribute(s) {
+                s = after;
+            }
+            let s = s.trim_start();
+            s.strip_prefix('/').unwrap_or(s)
+        }),
+    };
+    end.and_then(|s| s.strip_prefix('>')).is_some_and(|s| s.trim().is_empty())
+}
+
+/// `s` after the name of a tag of HTML at its start, if it has one: letters, digits and `-`, after a letter.
+fn tag_name(s: &str) -> Option<&str> {
+    s.starts_with(|c: char| c.is_ascii_alphabetic())
+        .then(|| s.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '-'))
+}
+
+/// `s` after the attribute of a tag of HTML at its start, if it has one, after white space: a name of letters, digits
+/// and `_.:-`, after a letter, `_` or `:`; and a value after `=` or not, in quotes, or with no white space or any of
+/// `"'=<>` and `` ` `` in it.
+fn attribute(s: &str) -> Option<&str> {
+    let named = s.trim_start();
+    let first = |c: char| c.is_ascii_alphabetic() || matches!(c, '_' | ':');
+    let after = named
+        .strip_prefix(first)
+        .filter(|_| named.len() < s.len())?
+        .trim_start_matches(|c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'));
+    let Some(value) = after.trim_start().strip_prefix('=').map(str::trim_start) else { return Some(after) };
+    if let Some((_, after)) = ['"', '\''].into_iter().find_map(|quote| value.strip_prefix(quote)?.split_once(quote)) {
+        return Some(after);
+    }
+    let after = value.trim_start_matches(|c: char| !c.is_whitespace() && !"\"'=<>`".contains(c));
+    (after.len() < value.len()).then_some(after)
+}
+
+/// The level of the heading that `line` makes of the paragraph above it, if it makes one: one of a line of `=`, two of
+/// a line of `-`, after up to three spaces.
+fn underline(line: &str) -> Option<usize> {
+    let marks = line.trim();
+    let level = [('=', 1), ('-', 2)].into_iter().find(|&(mark, _)| marks.chars().all(|c| c == mark))?.1;
+    (!marks.is_empty() && indent_of(line) < 4).then_some(level)
+}
+
+/// The spaces at the start of `line`.
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start_matches(' ').len()
+}
+
+/// `line` with each tab before its first letter the spaces to the next column of four, as Markdown reads a tab where
+/// it makes blocks. One after a letter stays, as pulldown-cmark reads it: so it is no space before the `#`s that close
+/// a heading, `# Safety\t#`.
+fn spaced(line: &str) -> String {
+    let mut out = String::new();
+    let mut text = false;
+    for c in line.chars() {
+        text |= c.is_alphabetic();
+        if c == '\t' && !text {
+            out.extend(std::iter::repeat_n(' ', 4 - out.len() % 4));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Whether `title`, of a heading, is the word Safety as Clippy takes it for the `# Safety` of an `unsafe fn`: `Safety`
+/// or `SAFETY`, with emphasis around it or not. Clippy takes more: a title where the word is a piece of text of its own
+/// among others, `Safety *now*` say. The macros take only a title that Clippy takes, however the rest of it reads.
+fn is_safety(title: &str) -> bool {
+    matches!(title.trim().trim_matches(['*', '_']), "Safety" | "SAFETY")
+}
+
+/// The text of the doc `attr`, `#` and brackets, if it is a string, `#[doc = "text"]`, which is what a macro is given
+/// for `///`: none for any other attribute, and for a doc of a macro's text, `#[doc = include_str!(..)]`.
+fn doc_text(attr: &[TokenTree]) -> Option<String> {
+    let [_, TokenTree::Group(group)] = attr else { return None };
+    match &flatten(group.stream())[..] {
+        [doc, eq, TokenTree::Literal(lit)] if named(doc, "doc") && is_punct(eq, '=') => {
+            lang::unquote(&lit.to_string()).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Whether `attr`, `#` and brackets, is a doc of a blank line.
+fn blank(attr: &[TokenTree]) -> bool {
+    doc_text(attr).is_some_and(|text| text.trim().is_empty())
+}
+
 /// What the code that stands for an item, an error said of it or a method it gives, keeps of the
 /// item's attributes, `attrs`, `#` and brackets each: `cfg`, which says whether the item is there,
 /// alone or in a `cfg_attr(..)`; and, if `offered`, `deprecated` and `doc(hidden)`, which say how it is

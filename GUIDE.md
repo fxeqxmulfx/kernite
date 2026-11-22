@@ -423,6 +423,23 @@ a GPU kernel or a cooperative x86 kernel, whose launcher the macros write with a
 own, an `unsafe fn` or not, plain or of instances: the macros write its `# Safety` where its docs have none, and add to
 the one they have.
 
+The macros take a heading of the word Safety alone for the docs' `# Safety`: `Safety` or `SAFETY`, in emphasis or not,
+of any level, written as Markdown has a heading, with `#`s or with a line of `=` or `-` under it, in a block quote or a
+list item or not, as rustdoc reads the docs. The words in a sentence are no heading, nor is a title that says more,
+`# Safety notes`, nor is a line of a code block, fenced or indented, or of a block of HTML. Clippy takes more for a
+`# Safety`: a title that has the word among other text, `# Safety *now*`, a title of two lines, one of them the word,
+and a title in a footnote or right after the definition of a link. Where it takes one that the macros do not, the docs
+have a `# Safety` of the macros' own as well. What the macros add to the docs' `# Safety`, the sentence on the module's
+memory and the CPU features, is its last paragraphs, before the next heading of its level or higher; where the docs have
+none, the macros write a `# Safety` of their own at the end of the docs. A paragraph of theirs that is no part of a
+`# Safety`, the grid of a cooperative kernel that runs at once and the launch of a safe GPU kernel that is checked
+first, comes at the end of the text before the docs' first heading, so that no heading of the user's has it. Each
+paragraph of theirs has a blank line after it, as before it, so that a title with a line of `=` under it, or a list,
+that comes next is not a line of it. None goes in a block quote or a list item, which it would end: a heading in one is
+where its block begins, and what the macros add to a `# Safety` in one comes after the block, even where the block has a
+heading after it. Where the docs end in a code block or a block of HTML that they leave open, what the macros add comes
+after it.
+
 A deprecated item that a kernel names is told of by Rust at the name, once for each place the kernel writes it.
 `lea(p, [COUNTS]);` of a deprecated static is a warning at `COUNTS`, with the note of the attribute, `call(v, old, ());`
 of a deprecated x86 kernel is one at `old`, and `call(old::<2>, p);` of an instance of one that takes compile-time

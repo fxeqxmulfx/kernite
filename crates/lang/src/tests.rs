@@ -241,6 +241,22 @@ fn a_string_refuses_the_escapes_that_rust_refuses_at_the_escape() -> Result {
     Ok(())
 }
 
+/// A string literal says its text as Rust reads it: a plain one's by its escapes, a raw one's as written, with each
+/// CRLF a LF, whatever `#`s it has. A literal that is no string, a number, a character or a byte string, is an error,
+/// and so is a plain string with an escape that Rust refuses, whose error says what is wrong with it.
+#[test]
+fn a_string_literal_says_its_text_as_rust_reads_it() {
+    let text = |lit: &str| crate::unquote(lit);
+    assert_eq!(text(r#""a\n\"b\"""#), Ok("a\n\"b\"".to_string()));
+    assert_eq!(text(r#""""#), Ok(String::new()));
+    assert_eq!(text(r##"r#"a\n"b"#"##), Ok("a\\n\"b".to_string()));
+    assert_eq!(text("r\"a\r\nb\""), Ok("a\nb".to_string()));
+    for lit in ["5", "'c'", "b\"a\"", "x", "r", ""] {
+        assert_eq!(text(lit), Err("it is no string".to_string()), "{lit:?}");
+    }
+    assert_eq!(unescape(r"\q").map_err(|(_, message)| message), text(r#""\q""#));
+}
+
 /// The tokens of `src`, a source with lifetimes in it, as `for<'a> fn(&'a u8)` has. The lexer of a
 /// string refuses a lifetime, but the macro is given one as `proc_macro` hands it over: a `'` right before
 /// the name that follows it. So each `'` of `src` is lexed as the start of a word, `lt_a`, which is then

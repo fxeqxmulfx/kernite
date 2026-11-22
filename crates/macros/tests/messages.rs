@@ -109,6 +109,68 @@ fn documented(name: &str, module: &str, start: &str) -> Result<impl Fn(&str) -> 
     })
 }
 
+/// What rustdoc's `docs`, the HTML of a page's docs, say, in order: a heading as its level and its title, `h2 Safety`,
+/// and each paragraph and block of code as its text, without tags.
+fn outline(docs: &str) -> Vec<String> {
+    let (mut out, mut text, mut level) = (vec![], String::new(), None);
+    for (i, piece) in docs.split('<').enumerate() {
+        // A piece is a tag, up to its `>`, and the text after it; the first has no tag.
+        let (tag, words) = if i == 0 { ("", piece) } else { piece.split_once('>').unwrap_or((piece, "")) };
+        let name = tag.split(' ').next().unwrap_or_default();
+        let block = name.trim_start_matches('/');
+        // A tag of a block ends the text before it; an inline tag, `<code>`, does not.
+        if matches!(block, "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p" | "pre" | "div") {
+            let title = text.trim().trim_start_matches('§');
+            if !title.is_empty() {
+                out.push(level.map_or_else(|| title.to_string(), |level| format!("h{level} {title}")));
+            }
+            text.clear();
+            level = block.strip_prefix('h').filter(|_| name == block).and_then(|level| level.chars().next());
+        }
+        text += words;
+    }
+    out
+}
+
+/// `outline`'s lines, with each paragraph that the macros write as what it says, as its first words show: `TRUST`, that
+/// the kernel trusts the pointers it is given, `MEM`, that nothing else touches the module's memory, `CPU`, the
+/// features it needs, `GRID`, that the grid runs at once, and `CHECKED`, that the launch is checked.
+fn tagged(outline: Vec<String>) -> Vec<String> {
+    const OWN: [(&str, &str); 6] = [
+        ("The kernel trusts the pointers", "TRUST"),
+        ("Nothing else touches the module", "MEM"),
+        ("Needs the CPU", "CPU"),
+        ("Every thread of the grid", "GRID"),
+        ("Every block of the grid", "GRID"),
+        ("The launch is checked first", "CHECKED"),
+    ];
+    let tag = |line: String| {
+        OWN.iter().find(|(words, _)| line.starts_with(words)).map_or(line.clone(), |(_, tag)| tag.to_string())
+    };
+    outline.into_iter().map(tag).collect()
+}
+
+/// That Cargo documents fixture `docs_headings` without a word; then, of each kernel `f` of its module `module`, what
+/// the docs of its function say, for an x86 kernel, `cpu`, or of its launcher, for a GPU kernel, `gpu`, as [`outline`]
+/// has them.
+fn kernel_docs() -> Result<impl Fn(&str, &str) -> Result<Vec<String>>> {
+    let dir = documents_quietly("docs_headings")?;
+    Ok(move |module: &str, f: &str| {
+        // A GPU kernel's launcher is a method of `Kernels`, whose docs follow its id.
+        let page = match module {
+            "gpu" => {
+                let kernels = fs::read_to_string(dir.join("gpu/struct.Kernels.html"))?;
+                let (_, method) = kernels.split_once(&format!("id=\"method.{f}\"")).ok_or("the method is not there")?;
+                method.to_string()
+            }
+            _ => fs::read_to_string(dir.join(format!("{module}/fn.{f}.html")))?,
+        };
+        let (_, docs) = page.split_once("<div class=\"docblock\">").ok_or_else(|| format!("`{f}` has no docs"))?;
+        let (docs, _) = docs.split_once("</div></details>").ok_or("the docs do not end")?;
+        Ok(outline(docs))
+    })
+}
+
 /// That Cargo does not build fixture `name`, and says `lines`, in that order, and nothing else.
 fn refuses(name: &str, lines: &[&str]) -> Result {
     refuses_by(&["build"], name, lines)?;
@@ -1423,6 +1485,355 @@ fn the_functions_safety_contract_names_the_cpu_features_a_kernel_needs() -> Resu
              read and write through it, which nothing else touches while they run.</p>"
                 .to_string(),
             needs("feature <code>popcnt</code>"),
+        ]
+    );
+    Ok(())
+}
+
+/// The macros find a kernel's `# Safety` by its heading, and not by its words: docs that name `# Safety` in a sentence
+/// or in a block of code have none, so the macros write one of their own, at the end of the docs, for each of the three
+/// places that write it: an x86 kernel that names a static of its module, with the pointers it trusts and the memory,
+/// a cooperative x86 kernel's launcher, and the launcher of a GPU kernel that is an `unsafe fn`. Clippy tells of none.
+#[test]
+fn the_macros_write_a_safety_for_docs_that_name_it_in_a_sentence_or_a_code_block() -> Result {
+    let docs = kernel_docs()?;
+    let trusts = "The kernel trusts the pointers it is given: each must be to memory as long as the kernel reads and \
+                  writes through it. Nothing else touches the module’s memory, WORD, while it runs.";
+    assert_eq!(
+        docs("cpu", "named")?,
+        ["Names WORD; its docs say # Safety in a sentence, and have no such heading.", "h2 Safety", trusts]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "fenced")?),
+        [
+            "Names WORD; its docs have # Safety in a code block alone, and no such heading.",
+            "# Safety",
+            "h2 Safety",
+            "TRUST"
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "joined")?),
+        [
+            "A cooperative kernel whose docs say # Safety in a sentence, and have no such heading.",
+            "GRID",
+            "h2 Safety",
+            "TRUST"
+        ]
+    );
+    assert_eq!(
+        tagged(docs("gpu", "idle")?),
+        ["A GPU kernel whose docs say # Safety in a sentence, and have no such heading.", "h5 Safety", "TRUST"]
+    );
+    if clippy_here() {
+        let (done, said) = cargo(&["clippy"], "docs_headings")?;
+        assert!(done && said.is_empty(), "fixtures/docs_headings.rs: Clippy {done}, and said:\n{}", said.join("\n"));
+    }
+    Ok(())
+}
+
+/// The macros take the docs of a kernel for having a `# Safety` as Clippy does, in each form that Markdown has for a
+/// heading of the word Safety alone, as rustdoc reads it: where they do, what they write of the module's memory is a
+/// paragraph of it, and where they do not, they write one of their own, which says that the kernel trusts the pointers
+/// it is given, in a paragraph of the page. A heading may be in a block quote or a list item, a numbered one too, after
+/// a line that begins with `<` and is no block of HTML, and after a code block that its container's end closes. The
+/// words in a sentence are no heading, nor is a title that says more, `#`s too many or glued, a line of a code block,
+/// fenced, indented or left open, or of a block of HTML, to its end mark or to a blank line; nor is a line of `=` or
+/// `-` that begins a block quote, a list item or a break, or that not all of the containers of the paragraph above it
+/// go on, an underline of it. Nor is a line of docs that all have six spaces: rustdoc takes off less of those once the
+/// macros add a line of their own, and reads them as code. Each rule that says where a block begins or ends has a
+/// kernel, as the fixture's docs list them: the macros close a code block that the docs leave open at the top level,
+/// and none in a container, so that their own paragraphs are no lines of it. Clippy tells of no kernel of them, as it
+/// would of one whose docs the macros took for having a `# Safety` that Clippy takes for none; but it takes a title of
+/// two lines for one that has the word on one, and the macros do not, so they write a `# Safety` of their own too.
+#[test]
+fn the_macros_take_docs_for_having_a_safety_as_clippy_does() -> Result {
+    // The kernels of the fixture whose docs the macros take for having a `# Safety`, and those whose docs they take for
+    // having none. Clippy takes the same of all but `two_line_title` and `lazy_title`, whose title has the word on one
+    // of two lines: the macros write a `# Safety` of their own there as well.
+    let has = "atx1 atx2 atx6 closed spaced tab indent3 upper emph strong setext1 setext2 quote list after_fence \
+               attr_newlines block autolink inline_tag lone_tag comment_line pre_line ordered item_text \
+               backtick_info quote_fence item_fence fence_spaces after_indented after_lazy ordered_after_text \
+               underline_spaces tab_item_title";
+    let lacks = "lower code_span more bang hash_glued nospace seven fenced tilde rust_fence long_fence unclosed \
+                 indented sentence html html_block shared_indent comment_gap pre_gap pre_open comment_open \
+                 quote_under break_under lazy_quote lazy_item ordered_fence tab_fence fence_quote_line quote_open \
+                 item_open fence_text two_line_title lazy_title nested_lazy ordered_two item_code underline_four \
+                 lone_tag_space lone_tag_quoted lone_tag_value spaces_after_empty_item bullet_after_quote_text \
+                 spaced_break_open dashes_item_open bullet_after_text_open empty_item_open empty_item_short_open \
+                 code_item_open code_item_short_open comment_after_text declaration_after_text div_after_text \
+                 tab_item_open";
+    let dir = documents_quietly("safety_headings")?.join("cpu");
+    let page = |name: &str| fs::read_to_string(dir.join(format!("fn.{name}.html")));
+    // The sentence on the memory, as a paragraph of the page, and no line of a block of code or of HTML.
+    let memory = "<p>Nothing else touches the module’s memory";
+    for name in has.split(' ') {
+        let page = page(name)?;
+        assert!(
+            !page.contains("The kernel trusts the pointers"),
+            "`{name}`: the macros wrote a `# Safety` of their own"
+        );
+        assert_eq!(
+            page.matches(memory).count(),
+            1,
+            "`{name}`: the macros did not add the memory to its `# Safety` once, as a paragraph"
+        );
+    }
+    for name in lacks.split(' ') {
+        // The paragraph is a paragraph of the page, and no line of a block of code that the docs leave open.
+        let page = page(name)?;
+        assert!(
+            page.contains("<p>The kernel trusts the pointers"),
+            "`{name}`: the macros took its docs for having one"
+        );
+    }
+    let pages = fs::read_dir(&dir)?
+        .filter(|file| file.as_ref().is_ok_and(|f| f.file_name().to_string_lossy().starts_with("fn.")))
+        .count();
+    assert_eq!(pages, has.split(' ').count() + lacks.split(' ').count(), "the fixture has a kernel not named here");
+    if clippy_here() {
+        let (done, said) = cargo(&["clippy"], "safety_headings")?;
+        assert!(done && said.is_empty(), "fixtures/safety_headings.rs: Clippy {done}, and said:\n{}", said.join("\n"));
+    }
+    Ok(())
+}
+
+/// What the macros add to the docs' `# Safety`, the sentence on the module's memory and the CPU features, is its last
+/// paragraphs, before the next heading of its level or higher: after a heading of a lower level that it holds, and
+/// before the `# Examples` that follows it, as the Rust API guidelines have the sections. It is so where the docs are
+/// one `#[doc]`, and in the launcher of a cooperative x86 kernel, whose paragraph on the grid is before the `# Safety`.
+/// It is a paragraph of its own, so an `Examples` right after a block of code, with a line of `=` under it or in a list
+/// that begins at 2, is still a heading; and it ends no list item, so where two `# Safety` are in one, it comes after
+/// the item.
+#[test]
+fn what_the_macros_add_to_a_safety_is_its_last_paragraphs() -> Result {
+    let docs = kernel_docs()?;
+    let reads = "The kernel reads nothing.";
+    assert_eq!(
+        tagged(docs("cpu", "ordered")?),
+        [
+            "Names WORD and needs popcnt, with a # Safety and an # Examples after it.",
+            "h2 Safety",
+            reads,
+            "MEM",
+            "CPU",
+            "h2 Examples",
+            "Call it once.",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "nested")?),
+        [
+            "Names WORD, with a ## Safety that has a ### Why of its own, and an ## Examples after it.",
+            "h3 Safety",
+            reads,
+            "h4 Why",
+            "It only writes.",
+            "MEM",
+            "h3 Examples",
+            "Call it once.",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "setext_one")?),
+        [
+            "Names WORD, with a Safety underlined by =, and an # Examples after it.",
+            "h2 Safety",
+            reads,
+            "MEM",
+            "h2 Examples",
+            "Call it once.",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "setext_two")?),
+        [
+            "Names WORD, with a Safety underlined by -, a ### Why in it, and an ## Examples after it.",
+            "h3 Safety",
+            reads,
+            "h4 Why",
+            "It only writes.",
+            "MEM",
+            "h3 Examples",
+            "Call it once.",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "one_doc")?),
+        ["Names WORD, with its docs in one #[doc].", "h2 Safety", reads, "MEM", "h2 Examples", "Call it once.",]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "titled_after_code")?),
+        [
+            "Names WORD; its # Safety ends in code, and an Examples with a line of = under it follows.",
+            "h2 Safety",
+            reads,
+            "Nothing else.",
+            "MEM",
+            "h2 Examples",
+            "Call it once.",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "listed_after_code")?),
+        [
+            "Names WORD; its # Safety ends in code, and a list that begins at 2, with an # Examples in it, follows.",
+            "h2 Safety",
+            reads,
+            "Nothing else.",
+            "MEM",
+            "h2 Examples",
+            "Call it once.",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "titled_after_code_together")?),
+        [
+            "A cooperative kernel that names WORD; its # Safety ends in code, and a title with = under it follows.",
+            "GRID",
+            "h2 Safety",
+            reads,
+            "Nothing else.",
+            "MEM",
+            "h2 Examples",
+            "Call it once.",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "twice")?),
+        ["Names WORD, with two # Safety in one list item.", "h2 Safety", "h2 Safety", reads, "MEM"]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "ordered_together")?),
+        [
+            "A cooperative kernel that names WORD and needs popcnt, with a # Safety and an # Examples after it.",
+            "GRID",
+            "h2 Safety",
+            reads,
+            "MEM",
+            "CPU",
+            "h2 Examples",
+            "Run it on two threads.",
+        ]
+    );
+    Ok(())
+}
+
+/// A paragraph of the macros' own that is no part of a `# Safety`, the grid of a cooperative kernel that runs at once
+/// and the launch of a safe GPU kernel that is checked first, comes at the end of the docs' text before their first
+/// heading, so that no heading of the user's has it: before an `# Examples` that is the docs' first heading, or the
+/// first thing in them, and after a block of code that has a line of `#` in it. It has a blank line after it, so a
+/// title with a line of `=` under it, the first thing in the docs, is still the title; and where the first heading is
+/// in a list item or a block quote, it comes before that block, which it would end. The macros' own `# Safety` comes at
+/// the end of the docs.
+#[test]
+fn a_paragraph_of_the_macros_own_comes_before_the_first_heading_of_the_docs() -> Result {
+    let docs = kernel_docs()?;
+    assert_eq!(
+        tagged(docs("cpu", "gathered")?),
+        [
+            "A cooperative kernel whose docs end with an example.",
+            "GRID",
+            "h2 Examples",
+            "Run it on two threads.",
+            "h2 Safety",
+            "TRUST",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "headed")?),
+        ["GRID", "h2 Examples", "A cooperative kernel whose docs begin with a heading.", "h2 Safety", "TRUST"]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "titled")?),
+        [
+            "GRID",
+            "h2 Examples",
+            "A cooperative kernel whose docs begin with a title that has a line of = under it.",
+            "h2 Safety",
+            "TRUST",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "listed")?),
+        [
+            "A cooperative kernel that names WORD, whose first heading is a # Safety in a list item.",
+            "GRID",
+            "Item",
+            "h2 Safety",
+            "The kernel reads nothing.",
+            "MEM",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "listed_title")?),
+        [
+            "A cooperative kernel whose first heading is a title with a line of = in a list item.",
+            "GRID",
+            "Item",
+            "h2 Title",
+            "h2 Safety",
+            "TRUST",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "quoted")?),
+        [
+            "A cooperative kernel whose first heading is a # Safety in a block quote.",
+            "GRID",
+            "Quoted.",
+            "h2 Safety",
+            "The kernel reads nothing.",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "blocked")?),
+        [
+            "A cooperative kernel whose docs have a line of # in a code block before their first heading.",
+            "# Not a heading",
+            "GRID",
+            "h2 Examples",
+            "Run it on two threads.",
+            "h2 Safety",
+            "TRUST",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("gpu", "spread")?),
+        [
+            "A cooperative GPU kernel whose docs end with an example.",
+            "GRID",
+            "h5 Examples",
+            "Launch it on one block.",
+            "h5 Safety",
+            "TRUST",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("gpu", "titled")?),
+        [
+            "GRID",
+            "h5 Launching",
+            "A cooperative GPU kernel whose docs begin with a title that has a line of = under it.",
+            "h5 Safety",
+            "TRUST",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("gpu", "titled_safe")?),
+        [
+            "CHECKED",
+            "h5 Launching",
+            "A GPU kernel that is no unsafe fn, whose docs begin with a title that has a line of = under it.",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("gpu", "rest")?),
+        [
+            "A GPU kernel that is no unsafe fn, whose docs end with an example.",
+            "CHECKED",
+            "h5 Examples",
+            "Launch it on one block.",
         ]
     );
     Ok(())

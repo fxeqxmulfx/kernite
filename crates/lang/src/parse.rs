@@ -6,7 +6,7 @@ use crate::ast::{
     BinOp, Block, Const, Cooperative, Directive, Expr, Fn, Generic, Instances, Item, ItemKind, Module, Param, Ret,
     Static, Stmt, Type, UnOp,
 };
-use crate::token::{Delim, Span, Tree, path, primitive, read_type, root, text, unescape, unraw};
+use crate::token::{Delim, Span, Tree, path, primitive, read_type, root, text, unraw};
 use crate::{Error, nested};
 
 /// A GPU kernel's tuning directives, as PTX has them: each by its name, what it gives, and an
@@ -1121,14 +1121,7 @@ fn is_string(lit: &str) -> bool {
     lit.starts_with(['"', 'r'])
 }
 
-/// A string literal's text, as Rust reads it: a raw string's with each CRLF a LF, a plain string's by `unescape`.
+/// A string literal's text, as Rust reads it, or the error at its `span`.
 fn unquote(lit: &str, span: Span) -> Result<String, Error> {
-    let raw = lit.strip_prefix('r');
-    // What the quotes hold; a raw string has `#`s outside them too.
-    let quoted = raw.map_or(lit, |raw| raw.trim_matches('#'));
-    let inner = quoted.strip_prefix('"').and_then(|q| q.strip_suffix('"')).unwrap_or_default();
-    if raw.is_some() {
-        return Ok(inner.replace("\r\n", "\n"));
-    }
-    unescape(inner).map_err(|(_, message)| Error { span, message })
+    crate::token::unquote(lit).map_err(|message| Error { span, message })
 }

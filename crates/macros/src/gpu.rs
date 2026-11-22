@@ -8,10 +8,10 @@ use kernite::{Compiled, DeviceStatic, Failed, Launcher, Quantity, Requirement, W
 
 use crate::cond::Cond;
 use crate::rust::{
-    self, LEVELS, Written, asks, attrs, body_at, carried, clashes, depends_on, ending_at, error_under, half, host,
-    hygienic, launcher_result, levels, missing, name_after, name_at, never, number_name, number_type, parse, pick,
-    pointer, primitive, ptr_type, quiet, refused, site, span_of, unnamed, visibility, within, written_generics,
-    written_params,
+    self, LEVELS, Written, asks, attrs, body_at, by_line, carried, clashes, depends_on, ending_at, error_under, half,
+    host, hygienic, launcher_result, levels, missing, name_after, name_at, never, number_name, number_type, parse,
+    pick, pointer, primitive, ptr_type, quiet, refused, section_ends, site, span_of, unnamed, visibility, within,
+    written_generics, written_params,
 };
 
 /// The crate the Rust of a module of GPU kernels names.
@@ -279,22 +279,27 @@ fn listed<'a>(elements: impl Iterator<Item = (&'a Cond, TokenStream)>) -> TokenT
 /// did not compile. Its result is [`launcher_result`]'s. Its body has the `places` of `f`'s code that name an item,
 /// where the level `f` sets holds, as in a function of Rust's, `expect` too.
 fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree], places: TokenStream) -> TokenStream {
-    let mut out = attrs(f, top);
+    let mut docs = by_line(attrs(f, top));
+    let (lead, safety) = section_ends(&docs);
+    // The paragraphs of the macros' own come before the docs' first heading, so that no heading of the user's has them,
+    // with a blank line after each, as before it, so that the heading is not a line of it.
+    let mut written = String::new();
     if f.cooperative.is_some() {
-        out.extend(parse(&format!(
+        written += &format!(
             "#[doc = \"\"]\n#[doc = \" Every block of the grid runs at once, as `grid.sync()` needs, so a grid of more \
-             blocks than [`{0}`](Self::{0}) says the GPU runs is an error.\"]",
+             blocks than [`{0}`](Self::{0}) says the GPU runs is an error.\"]\n#[doc = \"\"]\n",
             blocks_name(f)
-        )));
+        );
     }
     if !f.unsafe_fn {
-        out.extend(parse(
-            "#[doc = \"\"]\n#[doc = \" The launch is checked first, and is an error that says what does not hold, \
-             with no kernel run: the grid runs its threads along x alone, fewer than 2^32 of them, and the memory it \
-             is lent is as long as the kernel's reads and writes need.\"]",
-        ));
-    } else if !out.to_string().contains("# Safety") {
-        out.extend(parse(
+        written += "#[doc = \"\"]\n#[doc = \" The launch is checked first, and is an error that says what does not \
+                    hold, with no kernel run: the grid runs its threads along x alone, fewer than 2^32 of them, and \
+                    the memory it is lent is as long as the kernel's reads and writes need.\"]\n#[doc = \"\"]\n";
+    }
+    docs.splice(lead..lead, parse(&written));
+    // A launcher that is an `unsafe fn` has the macros' `# Safety`, at the end of the docs, where they have none.
+    if f.unsafe_fn && safety.is_none() {
+        docs.extend(parse(
             "#[doc = \"\"]\n#[doc = \" # Safety\"]\n#[doc = \"\"]\n\
              #[doc = \" The kernel trusts the pointers it is given: each must be to a buffer or to unified memory \
              of the GPU the kernels are loaded on, as long as the kernel reads and writes through it. From the \
@@ -304,6 +309,7 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree], places: To
              memory at all.\"]",
         ));
     }
+    let mut out: TokenStream = docs.into_iter().collect();
     // Clippy says "too many arguments" of a function of more than seven parameters wherever its
     // tokens come from, and the launcher takes `self` and the grid as well: so it allows that, and
     // a crate of kernels may not forbid `clippy::too_many_arguments`.

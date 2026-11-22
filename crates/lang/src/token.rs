@@ -501,6 +501,20 @@ fn lone_cr(text: &str, end: usize, what: &str) -> Result<(), (usize, String)> {
     }
 }
 
+/// The text of the string literal `lit`, plain, `"a"`, or raw, `r"a"`, as Rust reads it: a raw string's with each CRLF
+/// a LF, a plain string's with each escape the character it stands for. An error says what Rust refuses in it, or that
+/// `lit` is no string.
+pub fn unquote(lit: &str) -> Result<String, String> {
+    let raw = lit.strip_prefix('r');
+    // What the quotes hold; a raw string has `#`s outside them too.
+    let quoted = raw.map_or(lit, |raw| raw.trim_matches('#'));
+    let inner = quoted.strip_prefix('"').and_then(|q| q.strip_suffix('"')).ok_or("it is no string")?;
+    if raw.is_some() {
+        return Ok(inner.replace("\r\n", "\n"));
+    }
+    unescape(inner).map_err(|(_, message)| message)
+}
+
 /// The text that `body`, a plain string between its quotes, says, as Rust reads it: each CRLF is a LF, each escape is
 /// the character it stands for, and a `\` that ends a line, with the white space after it, is nothing. An error is the
 /// offset in `body` of what Rust refuses, and what is wrong: an escape, at its `\`, and a CR that no LF follows, at the
