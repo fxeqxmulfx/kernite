@@ -1,9 +1,10 @@
-//! A lent element that has a guard page in its aligned 64 KiB is one the driver here faults a
-//! kernel on, as GUIDE.md says. A test of its own, as a program of its own, as `sticky.rs` is: the
-//! fault fails the GPU's context for every call after it. A driver that reaches such an element
-//! fails this test, and then the sentence in GUIDE.md and the one in the docs of `Cuda::lend` go.
+//! A lent element that has a guard page in its aligned 64 KiB is one the driver here faults a kernel on, as GUIDE.md
+//! says, and a registered one is not. A test of its own, as a program of its own, as `sticky.rs` is: the fault fails
+//! the GPU's context for every call after it, so the registered element is tried first. A driver that reaches a lent
+//! element fails this test, and then the sentence in GUIDE.md and the one in the docs of `Cuda::lend` go; and a driver
+//! that faults on a registered one fails it, and then the sentence of GUIDE.md about `Cuda::register` goes.
 
-use kernite_cuda::{Cuda, Grid, Module, arg};
+use kernite_cuda::{Cuda, Grid, Module, Ptr, arg};
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
@@ -31,40 +32,64 @@ unsafe extern "C" {
     fn madvise(address: *mut u8, bytes: usize, advice: i32) -> i32;
 }
 
+const PAGE: usize = 4096;
+
+/// The word on the sixth page of the `n`th aligned 64 KiB of the mapping at `mapping`, where the seventh page is a
+/// guard page, with `7` in it; or `None` where this Linux has no guard pages, as one before 6.13.
+fn guarded(mapping: usize, n: usize) -> Option<&'static mut u32> {
+    let element = (mapping.next_multiple_of(16 * PAGE) + n * 16 * PAGE) + 5 * PAGE;
+    // SAFETY: `element` is inside the mapping, which is ours and lasts as long as the program, and aligned for a `u32`,
+    // and anonymous memory is zero, which is a `u32`. Nothing else holds a slice of it.
+    let word = unsafe { &mut *(element as *mut u32) };
+    *word = 7;
+    // SAFETY: a page of the mapping. 102 is MADV_GUARD_INSTALL, which a Linux before 6.13 refuses.
+    (unsafe { madvise((element + PAGE) as *mut u8, PAGE, 102) } == 0).then_some(word)
+}
+
+/// Launches `bump` on the word at `x`.
+fn bump(module: &Module, x: Ptr<u32>) -> Result {
+    // SAFETY: `bump` takes a pointer and adds 1 to the word there, which the caller's memory has. The caller holds no
+    // slice of it. The launch starts, and the kernel may fail on the GPU, which this test is for.
+    unsafe { module.launch(0, Grid::new(1, 1), &[arg(&x)]) }?;
+    Ok(())
+}
+
 #[test]
-fn the_driver_faults_a_kernel_on_a_lent_element_with_a_guard_page_in_its_64_kib() -> Result {
+fn the_driver_faults_a_kernel_on_a_lent_element_with_a_guard_page_in_its_64_kib_and_not_on_a_registered_one() -> Result
+{
     let Ok(cuda) = Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
     let module = Module::load(&cuda, BUMP, &["bump"], &[])?;
-    const PAGE: usize = 4096;
     // SAFETY: a mapping of our own, 1 MiB, read and write (3), private and anonymous (0x22).
     let mapping = unsafe { mmap(std::ptr::null_mut(), 1 << 20, 3, 0x22, -1, 0) };
     assert_ne!(mapping as isize, -1, "mmap");
-    // The element is on the sixth page of an aligned 64 KiB, and the guard page is the seventh.
-    let chunk = (mapping as usize).next_multiple_of(16 * PAGE);
-    let element = chunk + 5 * PAGE;
-    // SAFETY: `element` is inside the mapping, which is ours and aligned for a `u32`, and anonymous
-    // memory is zero, which is a `u32`. Nothing else holds a slice of it.
-    let word = unsafe { std::slice::from_raw_parts_mut(element as *mut u32, 1) };
-    word[0] = 7;
-    // SAFETY: a page of the mapping. 102 is MADV_GUARD_INSTALL, which a Linux before 6.13 refuses.
-    if unsafe { madvise((element + PAGE) as *mut u8, PAGE, 102) } != 0 {
+    let (Some(registered), Some(lent)) = (guarded(mapping as usize, 0), guarded(mapping as usize, 1)) else {
         eprintln!("no guard pages: skipped");
         return Ok(());
-    }
-    let lent = match cuda.lend(word) {
-        Ok(lent) => lent,
+    };
+    let ran = match cuda.register(std::slice::from_mut(registered)) {
+        Ok(memory) => {
+            bump(&module, memory.ptr())?;
+            true
+        }
+        Err(e) => {
+            eprintln!("the GPU cannot register: skipped. {e}");
+            false
+        }
+    };
+    // Dropping it waited for the kernel.
+    assert!(!ran || *registered == 8, "the kernel did not add 1 to the registered element");
+    let memory = match cuda.lend(std::slice::from_mut(lent)) {
+        Ok(memory) => memory,
         Err(e) => {
             eprintln!("the GPU cannot: skipped. {e}");
             return Ok(());
         }
     };
-    // SAFETY: `bump` takes a pointer and adds 1 to the word there, which `lent` has. The host holds
-    // no slice of it. The launch starts, and the kernel fails on the GPU, which this test is for.
-    unsafe { module.launch(0, Grid::new(1, 1), &[arg(&lent.ptr())]) }?;
+    bump(&module, memory.ptr())?;
     let failed = cuda.sync().err().ok_or("sync gave Ok")?;
     assert_eq!(failed.message, "CUDA_ERROR_ILLEGAL_ADDRESS (700): an illegal memory access was encountered");
-    assert_eq!(lent.host().err().ok_or("host gave Ok")?, failed, "every call after it fails the same");
-    drop(lent);
-    assert_eq!(word[0], 7, "the kernel wrote nothing");
+    assert_eq!(memory.host().err().ok_or("host gave Ok")?, failed, "every call after it fails the same");
+    drop(memory);
+    assert_eq!(*lent, 7, "the kernel wrote nothing");
     Ok(())
 }

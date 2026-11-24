@@ -43,12 +43,13 @@
 //! A buffer is the GPU's own memory, and the host reaches it by copies. [`Unified`] memory is
 //! reached by the host and by the GPU's kernels at one address, with no copy: [`Cuda::managed`]
 //! makes memory the driver moves to whichever touches it, [`Cuda::pinned`] makes page-locked memory
-//! in the host, and [`Cuda::lend`] lends a slice of the host's own to the GPU. The first two are
-//! zeros, and [`Cuda::managed_uninit`] and [`Cuda::pinned_uninit`], which are `unsafe`, make them
-//! without, for memory that is written whole before it is read. The slices it lends the host wait
-//! for the GPU's kernels first, and [`Module::launch`] says what a launch keeps to of the slices
-//! the host holds. Managed memory is sent to the GPU before a kernel needs it by
-//! [`Unified::prefetch`], and advised how it is used by [`Unified::advise`].
+//! in the host, [`Cuda::lend`] lends a slice of the host's own to the GPU, and [`Cuda::register`]
+//! page-locks one where it is. The first two are zeros, and [`Cuda::managed_uninit`] and
+//! [`Cuda::pinned_uninit`], which are `unsafe`, make them without, for memory that is written whole
+//! before it is read. The slices it lends the host wait for the GPU's kernels first, and
+//! [`Module::launch`] says what a launch keeps to of the slices the host holds. Managed memory is
+//! sent to the GPU before a kernel needs it by [`Unified::prefetch`], and advised how it is used by
+//! [`Unified::advise`].
 //!
 //! Kernels run in the order they are launched on one stream, and a GPU runs the work of two streams at once where it
 //! has room. All the work goes to the GPU's null stream, unless a thread makes another stream current for a closure,
@@ -183,6 +184,8 @@ api! {
     free = c"cuMemFree_v2"(u64);
     alloc_host = c"cuMemHostAlloc"(*mut *mut c_void, usize, c_uint);
     free_host = c"cuMemFreeHost"(*mut c_void);
+    register = c"cuMemHostRegister_v2"(*mut c_void, usize, c_uint);
+    unregister = c"cuMemHostUnregister"(*mut c_void);
     to_device = c"cuMemcpyHtoD_v2"(u64, *const c_void, usize);
     to_host = c"cuMemcpyDtoH_v2"(*mut c_void, u64, usize);
     copy_peer = c"cuMemcpyPeer"(u64, Handle, u64, Handle, usize);
@@ -308,8 +311,9 @@ pub struct Error {
     /// `dlsym` for a function the driver does not have.
     /// A call refused before it is made names that call, whatever the reason: `cuMemAllocManaged`
     /// where the GPU cannot allocate managed memory, `cuMemPrefetchAsync` where the memory is
-    /// page-locked, which the driver does not prefetch, and `cuMemAdvise` where a NUMA node is
-    /// given as an accessor. [`Cuda::lend`] refuses no call of the driver's, and names
+    /// page-locked, which the driver does not prefetch, `cuMemAdvise` where a NUMA node is given as
+    /// an accessor, and `cuMemHostRegister` where the GPU cannot page-lock memory the host has, or
+    /// reach it at the host's addresses. [`Cuda::lend`] refuses no call of the driver's, and names
     /// `cuDeviceGetAttribute`, which told that the GPU cannot.
     pub call: &'static str,
     /// What it said: the `CUresult` it returned, by name, number and meaning, or why there is
@@ -1331,9 +1335,15 @@ mod tests {
         assert_eq!(api.advise.err().ok_or("err gave None")?.to_string(), lacks("cuMemAdvise_v2"));
         let api = Api::load(finds(&[])).ok().ok_or("ok gave None")?;
         assert!(api.prefetch.is_ok() && api.advise.is_ok(), "a driver that has them has them");
-        for name in
-            [c"cuInit", c"cuMemRangeGetAttribute", c"cuMemGetInfo_v2", c"cuStreamDestroy_v2", c"cuGetErrorString"]
-        {
+        for name in [
+            c"cuInit",
+            c"cuMemRangeGetAttribute",
+            c"cuMemGetInfo_v2",
+            c"cuMemHostRegister_v2",
+            c"cuMemHostUnregister",
+            c"cuStreamDestroy_v2",
+            c"cuGetErrorString",
+        ] {
             let e = Api::load(finds(&[name])).err().ok_or("err gave None")?;
             assert_eq!(e.to_string(), lacks(&name.to_string_lossy()), "{name:?}");
         }
