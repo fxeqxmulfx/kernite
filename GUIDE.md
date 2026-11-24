@@ -1210,10 +1210,24 @@ event, or the `sync` of the one stream the work was given on, while the kernels 
 `unsafe`, as kernite cannot tell which work reaches which memory, and to follow it would cost an event for each memory
 at each launch: where safety would cost speed, the call stays `unsafe`.
 
+A part of memory is some of its elements, borrowed. `xs.part(3..10)` is elements 3 to 9 of a buffer, or of unified
+memory of `'static`: managed, page-locked, or a slice lent or registered for good, and `xs.part(3..)` is those from 3
+on, as a slice's range is. A range that ends past the end, or before it starts, is `None`, as `at` is for an element
+past the end. `xs.part_mut(3..10)` borrows the memory mutably, as `&mut xs[3..10]` borrows a slice, so rustc keeps the
+host from touching the memory while the part lasts, and from taking another part of it, one that overlaps it or not. A
+kernel that is no `unsafe fn`, and a copy, take a part as they take the memory, from its first element and for as many
+elements as it has, so the launch checks `x.len() >= n` of the part's elements. The memory's own refusals hold for a
+part of it: memory of another GPU, and a slice that `lend` lent, which no copy takes. A slice lent or registered for
+less than for good has no part, as no copy takes it, nor a kernel that is no `unsafe fn`. The host reads and writes a
+part of a buffer with `read`, `read_into` and `write`, which wait for the kernels launched before as a buffer's do, and
+a slice of another length is an error that says it is a part:
+`cuMemcpyHtoD: a part of a buffer of 4 elements written with 3`.
+
 `cuda.copy(&mut to, &from)` copies the elements of `from` to `to`, and returns once the GPU has the copy queued, not
-when it has done it. Each is a buffer, or unified memory that is managed, page-locked or registered for good, and `from`
-may be a view of a buffer. `to` is borrowed mutably, so rustc refuses a copy of memory onto itself. It refuses a copy
-from or to a slice registered for less than for good too, as it refuses to lend one to a kernel that is no `unsafe fn`.
+when it has done it. Each is a buffer, or unified memory that is managed, page-locked or registered for good, or a part
+of one: a copy from `from.part(0..3)` to `to.part_mut(2..5)` copies elements 0 to 2 of `from` over elements 2 to 4 of
+`to`. `to` is borrowed mutably, so rustc refuses a copy of memory onto itself. It refuses a copy from or to a slice
+registered for less than for good too, as it refuses to lend one to a kernel that is no `unsafe fn`.
 The driver tells from the two addresses where each is, so one call copies page-locked memory to a buffer, a buffer to
 page-locked memory, and a buffer to a buffer. `zero()`, of a buffer, of unified memory and of a module's global, sets
 every element to zero, and returns once the GPU has it queued too, as `grow` does for the zeros it writes. Each goes to
@@ -1535,11 +1549,11 @@ A GPU kernel that is no `unsafe fn` is one kernite proves safe where it compiles
 calls any function, with no `unsafe`. The launcher takes memory where the kernel takes a pointer: `&xs` where the kernel
 takes a `*const f32`, memory it reads, and `&mut ys` where it takes a `*mut f32`, memory it writes. The memory is a
 `Buffer`, managed or page-locked memory, a slice the host lends or registers for good, `cuda.lend(Vec::leak(v))` or
-`cuda.register(Vec::leak(v))`, or, for a `*const`, the elements of a buffer from one on, `xs.tail(i)`. A slice lent or
-registered for less is not, as a `mem::forget` of what `lend` or `register` gave would give it back to the host while
-the kernel may still write it. Rust keeps the host from touching `ys` while the launcher has it, and from lending the
-same memory twice; the kernel keeps what it is lent until it is done, so that `read`, `write`, `host` and dropping the
-memory wait for the kernel first. What is left is the kernel's own threads, and kernite proves, as each instruction
+`cuda.register(Vec::leak(v))`, or a part of one, `xs.part(3..10)` to read and `ys.part_mut(3..10)` to write. A slice
+lent or registered for less is not, as a `mem::forget` of what `lend` or `register` gave would give it back to the host
+while the kernel may still write it. Rust keeps the host from touching `ys` while the launcher has it, and from lending
+the same memory twice; the kernel keeps what it is lent until it is done, so that `read`, `write`, `host` and dropping
+the memory wait for the kernel first. What is left is the kernel's own threads, and kernite proves, as each instruction
 comes, that they keep to what they are lent:
 
 - each load and store is of global memory, of one whole element, at an address worked out from one of the kernel's

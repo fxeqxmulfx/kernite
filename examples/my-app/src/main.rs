@@ -2338,6 +2338,14 @@ mod tests {
         Ok(())
     }
 
+    /// What `saxpy` is refused with where `names` do not hold, which `why` makes safe, and `values` are.
+    fn refused_unless(names: &str, why: &str, values: &str) -> String {
+        format!(
+            "cuLaunchKernel: `saxpy` is safe on this launch only if `{names}`, so that {why}, and that does not \
+             hold: {values}"
+        )
+    }
+
     /// A launch of a kernel that is no `unsafe fn` is checked before the kernel runs, and what does not hold is an
     /// error that says it in Rust, with the numbers: `saxpy` of `n` floats over an `x` or a `y` of fewer, over a grid
     /// that runs along y, and over one of 2^32 threads. No kernel runs, so `y` holds what it did; one that holds runs.
@@ -2357,21 +2365,21 @@ mod tests {
         let mut ys = cuda.upload(&y)?;
         let mut few = cuda.upload(&y[..999])?;
         let refused = |e: kernite_cuda::Error| e.to_string();
-        let unless = |names: &str, why: &str, values: &str| {
-            format!(
-                "cuLaunchKernel: `saxpy` is safe on this launch only if `{names}`, so that {why}, and that does not \
-                 hold: {values}"
-            )
-        };
         // The memory has fewer elements than `n`, of `x`, which the kernel reads, or of `y`, which it writes.
         let grid = Grid::new(4, 256);
         let got = kernels.saxpy(grid, 1.5, &short, &mut ys, 1000).err().map(refused);
-        let want =
-            unless("x.len() >= n", "each element it reaches of `x` is inside it", "`x.len()` is 999, `n` is 1000");
+        let want = refused_unless(
+            "x.len() >= n",
+            "each element it reaches of `x` is inside it",
+            "`x.len()` is 999, `n` is 1000",
+        );
         assert_eq!(got, Some(want));
         let got = kernels.saxpy(grid, 1.5, &long, &mut few, 1000).err().map(refused);
-        let want =
-            unless("y.len() >= n", "each element it reaches of `y` is inside it", "`y.len()` is 999, `n` is 1000");
+        let want = refused_unless(
+            "y.len() >= n",
+            "each element it reaches of `y` is inside it",
+            "`y.len()` is 999, `n` is 1000",
+        );
         assert_eq!(got, Some(want));
         // The grid has a block along y, or 2^32 threads.
         let mut along_y = grid;
@@ -2389,6 +2397,72 @@ mod tests {
         kernels.saxpy(grid, 1.5, &long, &mut ys, 1000)?;
         let want: Vec<u32> = x.iter().zip(&y).map(|(x, y)| 1.5f32.mul_add(*x, *y).to_bits()).collect();
         assert_eq!(ys.read()?.iter().map(|y| y.to_bits()).collect::<Vec<_>>(), want);
+        Ok(())
+    }
+
+    /// A part of memory is lent to a kernel that is no `unsafe fn` as the memory is, from its first element and for as
+    /// many elements as it has: `saxpy` over elements 3 to 9 of `x` and of `y`, and then over elements 3 to the last,
+    /// of buffers, page-locked memory and managed memory, changes those elements of `y` and no other, bit for bit as
+    /// `f32::mul_add` does. The launch checks that `x` and `y` have `n` floats of the part, and not of the memory it
+    /// is of, and a launch that holds for the memory and not for the part is refused, with no kernel run. On a machine
+    /// with no GPU, skipped.
+    #[test]
+    fn a_part_of_memory_is_lent_to_a_safe_kernel_for_its_own_elements_alone() -> Result {
+        let cuda = match Cuda::new() {
+            Ok(cuda) => cuda,
+            Err(e) => {
+                eprintln!("no GPU: skipped. {e}");
+                return Ok(());
+            }
+        };
+        let kernels = gpu::Kernels::load(&cuda)?;
+        let (x, y) = (floats(16, 1), floats(16, 2));
+        let grid = Grid::new(1, 256);
+        let bits = |floats: &[f32]| floats.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        // What `y` holds after `saxpy` over elements `from` to `to` of `x` and of `y`.
+        let after = |from: usize, to: usize| {
+            let mut y = y.clone();
+            for i in from..to {
+                y[i] = 1.5f32.mul_add(x[i], y[i]);
+            }
+            bits(&y)
+        };
+        let (none, none_mut) = ("part gave None", "part_mut gave None");
+        let (xs, mut ys) = (cuda.upload(&x)?, cuda.upload(&y)?);
+        for (from, to) in [(3, 10), (3, 16)] {
+            ys.write(&y)?;
+            let (read, written) = (xs.part(from..to).ok_or(none)?, &mut ys.part_mut(from..to).ok_or(none_mut)?);
+            kernels.saxpy(grid, 1.5, &read, written, (to - from) as u32)?;
+            assert_eq!(bits(&ys.read()?), after(from, to), "buffers, elements {from} to {}", to - 1);
+        }
+        // Page-locked and managed memory, where the GPU makes it.
+        let mut unified = vec![("page-locked memory", cuda.pinned::<f32>(16)?, cuda.pinned::<f32>(16)?)];
+        match (cuda.managed::<f32>(16), cuda.managed::<f32>(16)) {
+            (Ok(xs), Ok(ys)) => unified.push(("managed memory", xs, ys)),
+            (Err(e), _) | (_, Err(e)) => eprintln!("no managed memory: its rows are skipped. {e}"),
+        }
+        for (what, mut xs, mut ys) in unified {
+            xs.host_mut()?.copy_from_slice(&x);
+            for (from, to) in [(3, 10), (3, 16)] {
+                ys.host_mut()?.copy_from_slice(&y);
+                let (read, written) = (xs.part(from..to).ok_or(none)?, &mut ys.part_mut(from..to).ok_or(none_mut)?);
+                kernels.saxpy(grid, 1.5, &read, written, (to - from) as u32)?;
+                assert_eq!(bits(ys.host()?), after(from, to), "{what}, elements {from} to {}", to - 1);
+            }
+        }
+        // `n` is 10 and the memory has the 10 floats, but the part of `x` has 7 and the part of `y` has 7.
+        let (xs, mut ys) = (cuda.upload(&x)?, cuda.upload(&y)?);
+        let (x_part, y_part) = (xs.part(3..10).ok_or(none)?, &mut ys.part_mut(3..10).ok_or(none_mut)?);
+        let got = kernels.saxpy(grid, 1.5, &x_part, y_part, 10).err().map(|e| e.to_string());
+        let want =
+            refused_unless("x.len() >= n", "each element it reaches of `x` is inside it", "`x.len()` is 7, `n` is 10");
+        assert_eq!(got, Some(want), "a part of `x` with fewer than `n`");
+        let (x_part, y_part) = (xs.part(3..).ok_or(none)?, &mut ys.part_mut(3..10).ok_or(none_mut)?);
+        let got = kernels.saxpy(grid, 1.5, &x_part, y_part, 10).err().map(|e| e.to_string());
+        let want =
+            refused_unless("y.len() >= n", "each element it reaches of `y` is inside it", "`y.len()` is 7, `n` is 10");
+        assert_eq!(got, Some(want), "a part of `y` with fewer than `n`");
+        assert_eq!(bits(&ys.read()?), bits(&y), "no kernel ran");
         Ok(())
     }
 

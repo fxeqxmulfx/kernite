@@ -3,7 +3,7 @@
 //! a sum in order is a chain in one thread, and the threads take apart only what is the same
 //! for each element.
 
-use kernite_cuda::{Buffer, Cuda, Error, Grid, Ptr, View};
+use kernite_cuda::{Buffer, Cuda, Error, Grid, Part, Ptr};
 
 use crate::model::{self, Adam, Buf, E, FC1, FC2, H, LM, Layer, M, Op, Ops, PARAMS, QKV, T, Then, V, VP, WO, WTE};
 
@@ -759,8 +759,8 @@ fn borrow<const N: usize>(all: &mut [Buffer<f32>], names: [Buf; N]) -> Op<[&mut 
 }
 
 /// The weights of `l` in the parameters `p`, from where `l` starts: what a kernel is lent for them.
-fn weights(p: &Buffer<f32>, l: Layer) -> Op<View<'_, f32>> {
-    p.tail(l.at).ok_or_else(|| format!("{l:?} is past the end of the parameters"))
+fn weights(p: &Buffer<f32>, l: Layer) -> Op<Part<&Buffer<f32>>> {
+    p.part(l.at..).ok_or_else(|| format!("{l:?} is past the end of the parameters"))
 }
 
 /// What the driver says, once it says a call failed: there is no going on without the GPU.
@@ -872,7 +872,7 @@ impl Ops for Gpu {
         if self.count <= n {
             return Err(format!("a target for each of {n} rows"));
         }
-        let targets = self.tokens.tail(1).ok_or("a document's tokens end before its targets")?;
+        let targets = self.tokens.part(1..).ok_or("a document's tokens end before its targets")?;
         let ks = &self.kernels;
         let [d, probs] = borrow(&mut self.bufs, [Buf::DLogits, Buf::Probs])?;
         launch(rows(0, n)?, VP as u32, |grid| said(ks.xent(grid, d, probs, &targets, 1.0 / n as f32)))

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use kernite_cuda::{Buffer, Cuda, Error, Module, Ptr, Stream, Unified, arg};
 
 mod common;
-use common::managed_or_skip;
+use common::{kinds, lent};
 mod gpu;
 use gpu::{COPIES, SEEN, SETS, TIMED_OUT, WAITS, cuda, hold, launch, load, peek, poke, run};
 
@@ -60,27 +60,6 @@ fn queued_behind_a_kernel(
     stream.sync()?;
     assert_eq!(peek(&mut out), SEEN, "the kernel before {what} did not see the flag");
     Ok(took)
-}
-
-/// A kind of memory the host reaches that a copy takes, for the tests that go through each: managed, page-locked, and
-/// registered for good, `len` elements of each. A kind the GPU does not take is left out, after a line that says so. A
-/// slice that `lend` lent is not one: a copy refuses it, and `lent` makes one.
-fn kinds(cuda: &Cuda, len: usize) -> Result<Vec<(&'static str, Unified<'static, u32>)>> {
-    let mut kinds = vec![("page-locked memory", cuda.pinned::<u32>(len)?)];
-    if let Some(managed) = managed_or_skip(cuda.managed::<u32>(len)) {
-        kinds.push(("managed memory", managed));
-    }
-    match cuda.register(Vec::leak(vec![0u32; len])) {
-        Ok(registered) => kinds.push(("a slice registered for good", registered)),
-        Err(e) => eprintln!("a GPU that page-locks no slice: none is registered. {e}"),
-    }
-    Ok(kinds)
-}
-
-/// `len` elements of a slice lent for good, if the GPU reaches pageable memory.
-fn lent(cuda: &Cuda, len: usize) -> Option<Unified<'static, u32>> {
-    let lent = cuda.lend(Vec::leak(vec![0u32; len]));
-    lent.inspect_err(|e| eprintln!("a GPU that reaches no pageable memory: no slice is lent. {e}")).ok()
 }
 
 #[test]
@@ -361,12 +340,22 @@ fn release(module: &Module, queued: &Queued, on: &Stream) -> Result {
 /// A call of the host on the memory that a copy and a zeroing are queued on, and the words it read, if it reads any.
 type HostCall = fn(&mut Buffer<u32>, &mut Unified<'static, u32>, &Cuda) -> Result<Vec<u32>>;
 
-/// The host's calls that reach memory, and wait for a kernel before they do: `read`, `write`, `host`, `host_mut` and
-/// `Cuda::sync`, each with the words it reads where the copy and the zeroings are done, and the words the buffer holds
-/// after it and a sync. `write` reads none, and the buffer holds its words: a call that returned before the zeroing of
-/// the buffer was done would find them zeros after the sync.
-const HOST_CALLS: [(&str, HostCall, &[u32], [u32; 4]); 5] = [
+/// The host's calls that reach memory, and wait for a kernel before they do: `read`, `write`, the same of a part of the
+/// buffer, `host`, `host_mut` and `Cuda::sync`, each with the words it reads where the copy and the zeroings are done,
+/// and the words the buffer holds after it and a sync. `write` reads none, and the buffer holds its words: a call that
+/// returned before the zeroing of the buffer was done would find them zeros after the sync.
+const HOST_CALLS: [(&str, HostCall, &[u32], [u32; 4]); 7] = [
     ("read", |buffer, _, _| Ok(buffer.read()?), &[0; 4], [0; 4]),
+    ("read of a part", |buffer, _, _| Ok(buffer.part(1..3).ok_or("part gave None")?.read()?), &[0; 2], [0; 4]),
+    (
+        "write of a part",
+        |buffer, _, _| {
+            buffer.part_mut(1..3).ok_or("part_mut gave None")?.write(&[1; 2])?;
+            Ok(vec![])
+        },
+        &[],
+        [0, 1, 1, 0],
+    ),
     (
         "write",
         |buffer, _, _| {
@@ -421,9 +410,9 @@ fn the_host_waits_for_a_copy_and_a_zeroing_as_it_waits_for_a_kernel() -> Result 
     Ok(())
 }
 
-/// A slice that `lend` lent, for good, where a copy takes memory, as the source and as the target: it is refused, and
-/// nothing is copied, since the driver reads pageable memory as the call is made, before the work that the stream was
-/// given earlier has run, and writes it after the call waits for the stream.
+/// A slice that `lend` lent, for good, or a part of one, where a copy takes memory, as the source and as the target: it
+/// is refused, and nothing is copied, since the driver reads pageable memory as the call is made, before the work that
+/// the stream was given earlier has run, and writes it after the call waits for the stream.
 #[test]
 fn a_slice_that_lend_lent_is_not_copied_from_or_to_and_the_error_says_what_to_do() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
@@ -436,6 +425,11 @@ fn a_slice_that_lend_lent_is_not_copied_from_or_to_and_the_error_says_what_to_do
     assert_eq!(e.to_string(), said, "from a slice lent");
     let e = cuda.copy(&mut lent, &buffer).err().ok_or("copy gave Ok")?;
     assert_eq!(e.to_string(), said, "to a slice lent");
+    let (mut two, part) = (cuda.alloc::<u32>(2)?, lent.part(1..3).ok_or("part gave None")?);
+    let e = cuda.copy(&mut two, &part).err().ok_or("copy gave Ok")?;
+    assert_eq!(e.to_string(), said, "from a part of a slice lent");
+    let e = cuda.copy(&mut lent.part_mut(1..3).ok_or("part_mut gave None")?, &two).err().ok_or("copy gave Ok")?;
+    assert_eq!(e.to_string(), said, "to a part of a slice lent");
     cuda.sync()?;
     assert_eq!((buffer.read()?, lent.host()?), (vec![5; 4], [0; 4].as_slice()), "a copy that was refused copied");
     // The slice is as it was: the host writes it, and reads what it wrote.
@@ -445,16 +439,62 @@ fn a_slice_that_lend_lent_is_not_copied_from_or_to_and_the_error_says_what_to_do
 }
 
 #[test]
-fn a_copy_from_a_view_of_a_buffer_copies_the_elements_the_view_covers() -> Result {
+fn a_copy_from_a_part_of_a_buffer_copies_the_elements_the_part_covers() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
     let buffer = cuda.upload(&[1u32, 2, 3, 4])?;
-    let view = buffer.tail(1).ok_or("tail gave None")?;
+    let part = buffer.part(1..).ok_or("part gave None")?;
     let mut rest = cuda.alloc::<u32>(3)?;
-    cuda.copy(&mut rest, &view)?;
+    cuda.copy(&mut rest, &part)?;
     assert_eq!(rest.read()?, [2, 3, 4]);
-    // A view is the elements it covers and no more, whatever the buffer it is of holds.
+    // A part is the elements it covers and no more, whatever the buffer it is of holds.
     let mut all = cuda.alloc::<u32>(4)?;
-    let e = cuda.copy(&mut all, &view).err().ok_or("copy gave Ok")?;
+    let e = cuda.copy(&mut all, &part).err().ok_or("copy gave Ok")?;
     assert_eq!(e.to_string(), "cuMemcpyAsync: memory of 4 elements copied from memory of 3");
+    let e = cuda.copy(&mut all.part_mut(1..).ok_or("part_mut gave None")?, &buffer).err().ok_or("copy gave Ok")?;
+    assert_eq!(e.to_string(), "cuMemcpyAsync: memory of 3 elements copied from memory of 4");
+    Ok(())
+}
+
+/// A copy of a part to a part, as the engine copies a range into a range, from each kind of memory a copy takes to a
+/// buffer, back, and from one buffer to another: it is queued behind a kernel that is not done when the call returns,
+/// it copies the elements of the two parts bit for bit, and no other element of either memory changes.
+#[test]
+fn a_copy_of_a_part_to_a_part_is_queued_and_copies_the_elements_of_the_parts_alone() -> Result {
+    let Some((cuda, _alone)) = cuda() else { return Ok(()) };
+    let module = load(&cuda)?;
+    let stream = cuda.stream()?;
+    let (held, sent) = (words(64, 7), words(64, 8));
+    for (what, mut memory) in kinds(&cuda, 64)? {
+        // From elements 10 to 29 of the memory to elements 40 to 59 of a buffer.
+        memory.host_mut()?.copy_from_slice(&sent);
+        let mut buffer = cuda.upload(&held)?;
+        let (mut to, from) =
+            (buffer.part_mut(40..60).ok_or("part_mut gave None")?, memory.part(10..30).ok_or("part gave None")?);
+        let into = format!("a copy from a part of {what} to a part of a buffer");
+        queued_behind_a_kernel(&cuda, &module, &stream, &into, || cuda.copy(&mut to, &from))?;
+        let mut want = held.clone();
+        want[40..60].copy_from_slice(&sent[10..30]);
+        assert!(buffer.read()? == want, "{into}: the buffer does not hold the part and the rest as it was");
+        // And back, from those elements of the buffer to elements 5 to 24 of the memory.
+        memory.host_mut()?.copy_from_slice(&held);
+        let (mut to, from) =
+            (memory.part_mut(5..25).ok_or("part_mut gave None")?, buffer.part(40..60).ok_or("part gave None")?);
+        let back = format!("a copy from a part of a buffer to a part of {what}");
+        queued_behind_a_kernel(&cuda, &module, &stream, &back, || cuda.copy(&mut to, &from))?;
+        let mut want = held.clone();
+        want[5..25].copy_from_slice(&sent[10..30]);
+        assert!(memory.host()? == want, "{back}: the memory does not hold the part and the rest as it was");
+    }
+    // From a part of a buffer to a part of another.
+    let (mut one, two) = (cuda.upload(&held)?, cuda.upload(&sent)?);
+    let (mut to, from) = (one.part_mut(8..40).ok_or("part_mut gave None")?, two.part(20..52).ok_or("part gave None")?);
+    queued_behind_a_kernel(&cuda, &module, &stream, "a copy between parts of buffers", || cuda.copy(&mut to, &from))?;
+    let mut want = held.clone();
+    want[8..40].copy_from_slice(&sent[20..52]);
+    assert!(
+        one.read()? == want,
+        "a copy between parts of buffers: the buffer does not hold the part and the rest as it was"
+    );
+    assert!(two.read()? == sent, "a copy between parts of buffers changed the buffer it copied from");
     Ok(())
 }

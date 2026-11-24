@@ -8,9 +8,10 @@ impl Cuda {
     /// it.
     ///
     /// Each is memory of this GPU: a [`Buffer`], or [`Unified`] memory of `'static` that is managed, page-locked or
-    /// registered for good, and for `from` a [`View`] too. Either may be of either kind: the copy tells the direction
-    /// by the addresses, so one call copies from page-locked memory to a buffer, back, and from a buffer to a buffer.
-    /// A copy in a [`Stream::run`] of a stream of its own runs beside a kernel of another stream.
+    /// registered for good, or a [`Part`] of either, one that `part_mut` gives for `to`. Either may be of either kind:
+    /// the copy tells the direction by the addresses, so one call copies from page-locked memory to a buffer, back, and
+    /// from a buffer to a buffer, and a copy from `from.part(0..3)` to `to.part_mut(2..5)` copies a part into a part. A
+    /// copy in a [`Stream::run`] of a stream of its own runs beside a kernel of another stream.
     ///
     /// The host's calls that reach the memory wait for the copy, as they wait for a kernel: `read`, `write`, `host`,
     /// `host_mut` and dropping it.
@@ -60,7 +61,7 @@ impl Cuda {
     ///
     /// [`Buffer`]: super::Buffer
     /// [`Unified`]: super::Unified
-    /// [`View`]: super::View
+    /// [`Part`]: super::Part
     /// [`Memory`]: super::Memory
     /// [`MemoryMut`]: super::MemoryMut
     /// [`Cuda::lend`]: super::Cuda::lend

@@ -1,10 +1,12 @@
 //! A launch of a kernel that is no `unsafe fn`: the memory it is lent, and what the host checks of the launch before
 //! the kernel runs.
 
-use super::{Buffer, Cuda, Error, Grid, Module, Plain, Ptr, sealed};
+use std::ops::{Bound, Deref, RangeBounds};
 
-/// Memory a kernel that is no `unsafe fn` reads, which its launcher borrows for the call: a [`Buffer`], a [`View`] of
-/// a buffer, or [`Unified`](super::Unified) memory of `'static`: managed or page-locked memory, or a slice the host
+use super::{Buffer, Cuda, Error, Grid, Module, Plain, Ptr, same_len, sealed};
+
+/// Memory a kernel that is no `unsafe fn` reads, which its launcher borrows for the call: a [`Buffer`], a [`Part`] of
+/// memory, or [`Unified`](super::Unified) memory of `'static`: managed or page-locked memory, or a slice the host
 /// lends for good. [`Cuda::copy`] takes it too, but for a slice that [`Cuda::lend`](super::Cuda::lend) lent, which it
 /// refuses. The kernel and the copy are trusted with it until they are done, and the host's calls that reach the memory
 /// wait for them first, as `read`, `write`, `host` and dropping the memory do; `atomics`, `host_now` and `host_now_mut`
@@ -60,33 +62,124 @@ impl<T: Plain> Memory<T> for Buffer<T> {
 
 impl<T: Plain> MemoryMut<T> for Buffer<T> {}
 
-/// The elements of a [`Buffer`] from one on, borrowed: what [`Buffer::tail`] gives, for a kernel to be lent the part of
-/// the buffer from there on.
-pub struct View<'a, T: Plain> {
-    of: &'a Buffer<T>,
+/// A part of memory, from an element for a count, borrowed as `R` says: `&Buffer<T>` or `&Unified<'static, T>` to read
+/// it, and `&mut` of either to write it, as `&xs[i..j]` and `&mut xs[i..j]` borrow a slice. [`Buffer::part`],
+/// [`Buffer::part_mut`], [`Unified::part`](super::Unified::part) and
+/// [`Unified::part_mut`](super::Unified::part_mut) give it. It is [`Memory`], and [`MemoryMut`] where it borrows
+/// mutably, for a kernel that is no `unsafe fn` and for a copy to be lent that part alone, and none of the rest of the
+/// memory it is a part of. A launch or a copy of it keeps the checks of that memory, which GPU it is on and whether it
+/// is a slice that [`Cuda::lend`](super::Cuda::lend) lent.
+///
+/// ```no_run
+/// # let cuda = kernite_cuda::Cuda::new()?;
+/// let from = cuda.pinned::<f32>(16)?;
+/// let mut to = cuda.alloc::<f32>(16)?;
+/// // Elements 2 to 4 of `from` over elements 5 to 7 of `to`, queued as any copy is.
+/// cuda.copy(&mut to.part_mut(5..8).ok_or("past the end")?, &from.part(2..5).ok_or("past the end")?)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// A part to write borrows the memory mutably, so rustc keeps the host from touching the memory while the part lasts,
+/// and from taking another part of it, one that overlaps it or not, as `&mut xs[..8]` and `&mut xs[8..]` are refused:
+///
+/// ```compile_fail,E0502
+/// # let cuda = kernite_cuda::Cuda::new()?;
+/// let mut xs = cuda.alloc::<f32>(16)?;
+/// let mut part = xs.part_mut(3..10).ok_or("past the end")?;
+/// let all = xs.read()?;
+/// part.write(&[0.0; 7])?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// ```compile_fail,E0499
+/// # let cuda = kernite_cuda::Cuda::new()?;
+/// let mut xs = cuda.alloc::<f32>(16)?;
+/// let mut first = xs.part_mut(..8).ok_or("past the end")?;
+/// let mut second = xs.part_mut(8..).ok_or("past the end")?;
+/// first.write(&[0.0; 8])?;
+/// second.write(&[0.0; 8])?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// A part to read is no memory to write, so a kernel that writes its memory, and a copy to it, are refused it:
+///
+/// ```compile_fail,E0277
+/// # let cuda = kernite_cuda::Cuda::new()?;
+/// fn launch(_: &mut impl kernite_cuda::MemoryMut<f32>) {}
+/// let xs = cuda.alloc::<f32>(16)?;
+/// launch(&mut xs.part(3..10).ok_or("past the end")?);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// A part of a buffer is read and written by the host as the buffer is: [`read`](Part::read),
+/// [`read_into`](Part::read_into) and [`write`](Part::write) wait for the kernels launched before.
+pub struct Part<R> {
+    of: R,
     /// The address of the first element, and how many there are.
-    ptr: Ptr<T>,
+    addr: u64,
     len: usize,
 }
 
-impl<'a, T: Plain> View<'a, T> {
-    /// The elements of `of` from `from` on; `None` if `from` is past its end.
-    pub(super) fn new(of: &'a Buffer<T>, from: usize) -> Option<View<'a, T>> {
-        Some(View { of, ptr: of.at(from)?, len: of.len - from })
+impl<R> Part<R> {
+    /// The `len` elements of `of` from the one at `at`.
+    pub(super) fn new<T>(of: R, at: Ptr<T>, len: usize) -> Part<R> {
+        Part { of, addr: at.addr(), len }
     }
 }
 
-impl<T: Plain> sealed::Sealed for View<'_, T> {}
+/// Where `range` starts and how many elements it takes of `len`: `None` if it ends past the end, or before it starts.
+pub(super) fn bounds(range: impl RangeBounds<usize>, len: usize) -> Option<(usize, usize)> {
+    let from = match range.start_bound() {
+        Bound::Included(&i) => i,
+        Bound::Excluded(&i) => i.checked_add(1)?,
+        Bound::Unbounded => 0,
+    };
+    let to = match range.end_bound() {
+        Bound::Included(&i) => i.checked_add(1)?,
+        Bound::Excluded(&i) => i,
+        Bound::Unbounded => len,
+    };
+    (from <= to && to <= len).then(|| (from, to - from))
+}
 
-impl<T: Plain> Memory<T> for View<'_, T> {
+impl<R> sealed::Sealed for Part<R> {}
+
+impl<T: Plain, M: Memory<T>, R: Deref<Target = M>> Memory<T> for Part<R> {
     fn lend(&self, module: &Module) -> Result<(Ptr<T>, usize), Error> {
-        module.reaches(&self.of.driver)?;
-        Ok((self.ptr, self.len))
+        self.of.lend(module)?;
+        Ok((Ptr::new(self.addr), self.len))
     }
 
     fn reach(&self, cuda: &Cuda) -> Result<(Ptr<T>, usize), Error> {
-        cuda.reaches(&self.of.driver)?;
-        Ok((self.ptr, self.len))
+        self.of.reach(cuda)?;
+        Ok((Ptr::new(self.addr), self.len))
+    }
+}
+
+impl<T: Plain, M: MemoryMut<T>> MemoryMut<T> for Part<&mut M> {}
+
+impl<T: Plain, R: Deref<Target = Buffer<T>>> Part<R> {
+    /// What it holds, after the kernels launched before have run.
+    pub fn read(&self) -> Result<Vec<T>, Error> {
+        let mut out = vec![T::default(); self.len];
+        self.read_into(&mut out)?;
+        Ok(out)
+    }
+
+    /// Copies what it holds to `out`, after the kernels launched before have run. It is an error if `out` has not as
+    /// many elements: `cuMemcpyDtoH: a part of a buffer of 4 elements read into 2`.
+    pub fn read_into(&self, out: &mut [T]) -> Result<(), Error> {
+        same_len("cuMemcpyDtoH", "a part of a buffer", self.len, "read into", out.len())?;
+        self.of.driver.read_into(self.addr, out)
+    }
+}
+
+impl<T: Plain> Part<&mut Buffer<T>> {
+    /// Copies `data` to it, after the kernels launched before have run. It is an error if `data` has not as many
+    /// elements: `cuMemcpyHtoD: a part of a buffer of 4 elements written with 2`.
+    pub fn write(&mut self, data: &[T]) -> Result<(), Error> {
+        same_len("cuMemcpyHtoD", "a part of a buffer", self.len, "written with", data.len())?;
+        self.of.driver.write(self.addr, data)
     }
 }
 
@@ -332,6 +425,40 @@ mod tests {
         assert_eq!(launch.written(&r), "4 * x.len() + 2 >= grid.blocks[0] * grid.threads[0] + 4");
         assert_eq!(launch.sum(&r), Some(4 * 10 - 24 - 4 + 2));
         assert_eq!(launch.values(&r), "`x.len()` is 10, `grid.blocks[0]` is 3, `grid.threads[0]` is 8");
+    }
+
+    /// A range of the elements of 16 is where it starts and how many it takes, whichever way it is written, as a
+    /// slice's is: `3..=2` is empty, at 3. One that ends past the end or before it starts is none, and so is a bound
+    /// that is past what a number holds.
+    #[test]
+    #[expect(clippy::reversed_empty_ranges, reason = "a range back to front is what the test refuses")]
+    fn a_range_is_where_it_starts_and_how_many_it_takes_and_none_ends_past_the_end_or_before_the_start() {
+        assert_eq!(bounds(3..10, 16), Some((3, 7)));
+        assert_eq!(bounds(3.., 16), Some((3, 13)));
+        assert_eq!(bounds(..5, 16), Some((0, 5)));
+        assert_eq!(bounds(.., 16), Some((0, 16)));
+        assert_eq!(bounds(3..=9, 16), Some((3, 7)));
+        assert_eq!(bounds(3..=2, 16), Some((3, 0)));
+        assert_eq!(bounds(..=15, 16), Some((0, 16)));
+        assert_eq!(
+            (bounds(2..2, 16), bounds(16.., 16), bounds(16..16, 16)),
+            (Some((2, 0)), Some((16, 0)), Some((16, 0)))
+        );
+        assert_eq!(bounds((Bound::Excluded(2), Bound::Excluded(5)), 16), Some((3, 2)));
+        for (what, got) in [
+            ("5..3", bounds(5..3, 16)),
+            ("0..17", bounds(0..17, 16)),
+            ("17..", bounds(17.., 16)),
+            ("..=16", bounds(..=16, 16)),
+            ("5..=3", bounds(5..=3, 16)),
+            ("usize::MAX..", bounds(usize::MAX.., 16)),
+            ("..=usize::MAX", bounds(..=usize::MAX, 16)),
+        ] {
+            assert_eq!(got, None, "{what}");
+        }
+        assert_eq!(bounds((Bound::Excluded(usize::MAX), Bound::Unbounded), 16), None);
+        assert_eq!(bounds(0..0, 0), Some((0, 0)));
+        assert_eq!(bounds(1..1, 0), None);
     }
 
     #[test]

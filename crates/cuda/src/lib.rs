@@ -73,6 +73,7 @@ use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::fmt;
 use std::marker::PhantomData;
+use std::ops::RangeBounds;
 use std::ptr;
 use std::rc::Rc;
 
@@ -88,11 +89,12 @@ mod stream;
 mod unified;
 
 use reserve::{Access, Properties, Reservation};
+use safe::bounds;
 
 pub use event::{Event, Timed, Untimed};
 pub use graph::Graph;
 pub use half::{bf16, f16};
-pub use safe::{Memory, MemoryMut, Quantity, Requirement, View, Why, holds};
+pub use safe::{Memory, MemoryMut, Part, Quantity, Requirement, Why, holds};
 pub use stream::Stream;
 pub use unified::{Advice, Atomic, Location, Placement, Unified};
 
@@ -814,10 +816,22 @@ impl<T: Plain> Buffer<T> {
         Ptr::element(self.ptr, self.len, i)
     }
 
-    /// Its elements from `i` on, borrowed, for a kernel that is no `unsafe fn` to be lent the part
-    /// of the buffer from there on; `None` if `i` is past its end.
-    pub fn tail(&self, i: usize) -> Option<View<'_, T>> {
-        View::new(self, i)
+    /// Its elements in `range`, borrowed, for a kernel that is no `unsafe fn` and a copy to be lent that part alone:
+    /// `xs.part(3..10)` is elements 3 to 9, and `xs.part(3..)` is elements 3 to the last. `None` if `range` ends past
+    /// the end or before it starts, as [`at`](Buffer::at) gives `None` for an element past it.
+    pub fn part(&self, range: impl RangeBounds<usize>) -> Option<Part<&Buffer<T>>> {
+        let (from, len) = bounds(range, self.len)?;
+        Some(Part::new(self, self.at(from)?, len))
+    }
+
+    /// Its elements in `range`, borrowed mutably, for a kernel that is no `unsafe fn` and a copy to write that part
+    /// alone: `xs.part_mut(3..10)` is elements 3 to 9. It borrows the buffer mutably, as `&mut xs[3..10]` borrows a
+    /// slice, so the host holds nothing of the buffer, and no kernel is lent it, while the part lasts. `None` if
+    /// `range` ends past the end or before it starts.
+    pub fn part_mut(&mut self, range: impl RangeBounds<usize>) -> Option<Part<&mut Buffer<T>>> {
+        let (from, len) = bounds(range, self.len)?;
+        let at = self.at(from)?;
+        Some(Part::new(self, at, len))
     }
 
     /// How many elements it has.
@@ -1472,7 +1486,7 @@ mod tests {
         Ok(())
     }
 
-    /// Memory is lent to a kernel loaded on the GPU the memory is on, a buffer, or the tail of one, and to no other:
+    /// Memory is lent to a kernel loaded on the GPU the memory is on, a buffer, or a part of one, and to no other:
     /// the error says so, in GUIDE.md's words, before the kernel runs.
     #[test]
     fn memory_is_lent_only_to_a_kernel_loaded_on_its_own_gpu() -> Result {
@@ -1482,10 +1496,10 @@ mod tests {
         let said = "cuLaunchKernel: the memory is on another GPU than the kernels are loaded on";
         let e = there.lend(&module).err().ok_or("lend gave Ok")?;
         assert_eq!(e.to_string(), said, "a buffer of another GPU");
-        let e = there.tail(1).ok_or("tail gave None")?.lend(&module).err().ok_or("lend gave Ok")?;
-        assert_eq!(e.to_string(), said, "the tail of a buffer of another GPU");
+        let e = there.part(1..).ok_or("part gave None")?.lend(&module).err().ok_or("lend gave Ok")?;
+        assert_eq!(e.to_string(), said, "a part of a buffer of another GPU");
         assert_eq!(here.lend(&module)?.1, 4, "a buffer of this GPU");
-        assert_eq!(here.tail(1).ok_or("tail gave None")?.lend(&module)?.1, 3, "the tail of a buffer of this GPU");
+        assert_eq!(here.part(1..).ok_or("part gave None")?.lend(&module)?.1, 3, "a part of a buffer of this GPU");
         Ok(())
     }
 
@@ -2838,8 +2852,8 @@ mod tests {
     }
 
     /// A copy asks the driver for the copy alone, from the address of one memory to the other's with their bytes, on
-    /// the null stream until a `run` makes a stream current, and then on that stream; a view of a buffer is copied
-    /// from by its own address.
+    /// the null stream until a `run` makes a stream current, and then on that stream; a part of a buffer is copied
+    /// from, and to, by its own address.
     #[test]
     fn a_copy_asks_the_driver_for_the_copy_alone_on_the_current_stream() -> Result {
         let cuda = gpu()?;
@@ -2850,12 +2864,18 @@ mod tests {
         assert_eq!(asked(), [format!("copy 16 bytes from {first:#x} to {second:#x} on 0x0 in 1")]);
         running(&stream, || cuda.copy(&mut to, &from))?;
         assert_eq!(asked(), [format!("copy 16 bytes from {first:#x} to {second:#x} on 0x100 in 1")]);
-        let tail = from.tail(1).ok_or("tail gave None")?;
+        let tail = from.part(1..).ok_or("part gave None")?;
         let mut end = cuda.alloc::<u32>(3)?;
         asked();
         cuda.copy(&mut end, &tail)?;
         let (from_tail, to_end) = (first + 4, second + 16);
         assert_eq!(asked(), [format!("copy 12 bytes from {from_tail:#x} to {to_end:#x} on 0x0 in 1")]);
+        // A part is copied to by its own address too, and a copy is of the part's elements and no more.
+        let mut middle = cuda.alloc::<u32>(4)?;
+        let into = middle.ptr().addr() + 4;
+        asked();
+        cuda.copy(&mut middle.part_mut(1..3).ok_or("part_mut gave None")?, &from.part(..2).ok_or("part gave None")?)?;
+        assert_eq!(asked(), [format!("copy 8 bytes from {first:#x} to {into:#x} on 0x0 in 1")]);
         Ok(())
     }
 
@@ -2930,9 +2950,11 @@ mod tests {
         assert_eq!(e.to_string(), gpu, "from memory of another GPU");
         let e = cuda.copy(&mut there, &here).err().ok_or("copy gave Ok")?;
         assert_eq!(e.to_string(), gpu, "to memory of another GPU");
-        let view = there.tail(1).ok_or("tail gave None")?;
-        let e = cuda.copy(&mut tail, &view).err().ok_or("copy gave Ok")?;
-        assert_eq!(e.to_string(), gpu, "from a view of memory of another GPU");
+        let part = there.part(1..).ok_or("part gave None")?;
+        let e = cuda.copy(&mut tail, &part).err().ok_or("copy gave Ok")?;
+        assert_eq!(e.to_string(), gpu, "from a part of memory of another GPU");
+        let e = cuda.copy(&mut there.part_mut(1..).ok_or("part_mut gave None")?, &tail).err().ok_or("copy gave Ok")?;
+        assert_eq!(e.to_string(), gpu, "to a part of memory of another GPU");
         assert!(asked().is_empty(), "the driver was asked");
         Ok(())
     }
