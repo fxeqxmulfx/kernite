@@ -198,9 +198,8 @@ impl<T: Plain> Unified<'_, T> {
         let (api, to) = (self.driver.current()?, to.raw(self.driver.device));
         let prefetch = api.prefetch.clone()?;
         // SAFETY: it reads no memory, and moves the managed memory of `count` bytes at `addr`. 0 is
-        // its flags, of which there are none yet, and the null stream is the default one, which the
-        // kernels are launched on.
-        api.check("cuMemPrefetchAsync", unsafe { prefetch(addr, count, to, 0, ptr::null_mut()) })
+        // its flags, of which there are none yet, and the stream is the one the kernels are launched on.
+        api.check("cuMemPrefetchAsync", unsafe { prefetch(addr, count, to, 0, self.driver.stream()) })
     }
 
     /// Tells the driver how the elements `range` are used, in whole pages, as [`Unified`] says.
@@ -279,11 +278,13 @@ impl<T: Plain> Unified<'_, T> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::ffi::c_uint;
     use std::marker::PhantomData;
 
     use super::super::tests::{gpu, gpu_with};
     use super::*;
-    use crate::{CuResult, Cuda};
+    use crate::tests::{create_stream, destroy_stream};
+    use crate::{CuResult, Cuda, Handle};
 
     type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
@@ -454,6 +455,37 @@ mod tests {
                 .to_string()
                 .contains("this is page-locked memory")
         );
+        Ok(())
+    }
+
+    thread_local! {
+        /// The stream that the fake driver's prefetch was given last.
+        static PREFETCHED_ON: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    /// The fake driver's `cuMemPrefetchAsync_v2`: it takes the stream.
+    unsafe extern "C" fn prefetch(_: u64, _: usize, _: MemLocation, _: c_uint, stream: Handle) -> CuResult {
+        PREFETCHED_ON.set(Some(stream.addr()));
+        0
+    }
+
+    /// A prefetch goes to the current stream, as a launch does: the null stream, or the one a `run` made current, so
+    /// that the memory is moved before the kernels launched after it on that stream need it.
+    #[test]
+    fn a_prefetch_goes_to_the_current_stream() -> Result {
+        let cuda = gpu_with(&[CONCURRENT_MANAGED_ACCESS], |api| {
+            api.prefetch = Ok(prefetch);
+            api.create_stream = create_stream;
+            api.destroy_stream = destroy_stream;
+        })?;
+        let (m, stream) = (memory(&cuda, Kind::Managed), cuda.stream()?);
+        m.prefetch(0..4, Location::Gpu)?;
+        assert_eq!(PREFETCHED_ON.take(), Some(0));
+        // SAFETY: the fake driver runs no work, so no stream's work reaches memory.
+        unsafe { stream.run(|| m.prefetch(0..4, Location::Gpu)) }?;
+        assert_eq!(PREFETCHED_ON.take(), Some(0x100));
+        m.prefetch(0..4, Location::Host)?;
+        assert_eq!(PREFETCHED_ON.take(), Some(0));
         Ok(())
     }
 
