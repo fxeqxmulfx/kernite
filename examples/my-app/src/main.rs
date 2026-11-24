@@ -2571,12 +2571,6 @@ mod tests {
                 return Ok(());
             }
         };
-        // This test holds slices of managed memory while the other tests of the binary launch kernels,
-        // which a launch's contract allows only where the GPU reaches managed memory while the host does.
-        if !cuda.concurrent_managed_access() {
-            eprintln!("the GPU cannot reach managed memory while the host does: skipped.");
-            return Ok(());
-        }
         let kernels = device::Kernels::load(&cuda)?;
         // A multiple of 8, and not of 256, so that the last block has threads past the end.
         let n = 1_000_008;
@@ -2596,8 +2590,8 @@ mod tests {
         let want: Vec<f32> = Vec::from_fn(n, |i| 1.0 + i as f32 * 0.000001);
         assert_eq!(bits(filled), bits(&want), "the cpu kernel's floats");
 
-        // The launcher lends the managed memory to the kernel, which a GPU that reaches managed memory while
-        // the host does lets it be, or the test would have been skipped.
+        // The launcher lends the managed memory to the kernel. `managed_uninit` makes none where a GPU cannot reach
+        // managed memory while the host does, and the test is skipped there.
         kernels.square(Grid::new(n.div_ceil(256) as u32, 256), &mut memory, n as u32)?;
         let squared = memory.host()?;
         assert_eq!(squared.as_ptr() as u64, address, "no copy");

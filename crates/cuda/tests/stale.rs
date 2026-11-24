@@ -12,7 +12,7 @@ use std::thread;
 use kernite_cuda::{Advice, Cuda, Location};
 
 mod common;
-use common::{NO_ADVICE, NO_PREFETCH, PAGE, first_page, or_skip};
+use common::{PAGE, first_page, managed_or_skip};
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
@@ -81,11 +81,7 @@ fn seen(threads: usize, rounds: usize) -> Result<Seen> {
 #[test]
 fn a_freed_buffers_advice_and_last_prefetch_outlive_it_for_two_threads_and_not_for_one() -> Result {
     let Ok(cuda) = Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
-    let probe = cuda.managed::<u32>(PAGE)?;
-    let Some(()) = or_skip(probe.prefetch(0..PAGE, Location::Gpu), NO_PREFETCH) else { return Ok(()) };
-    let Some(()) = or_skip(probe.advise(0..PAGE, Advice::PreferredLocation(Location::Gpu)), NO_ADVICE) else {
-        return Ok(());
-    };
+    let Some(probe) = managed_or_skip(cuda.managed::<u32>(PAGE)) else { return Ok(()) };
     drop(probe);
 
     let one = seen(1, 1000)?;

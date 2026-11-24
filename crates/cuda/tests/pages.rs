@@ -6,6 +6,9 @@
 
 use kernite_cuda::{Advice, Cuda};
 
+mod common;
+use common::managed_or_skip;
+
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
 /// A page, in bytes, as the driver moves and advises it.
@@ -14,7 +17,7 @@ const PAGE: u64 = 4096;
 #[test]
 fn an_advice_on_a_managed_buffer_reaches_the_buffer_before_it_on_the_page_they_share() -> Result {
     let Ok(cuda) = Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
-    let before = cuda.managed::<u32>(128)?;
+    let Some(before) = managed_or_skip(cuda.managed::<u32>(128)) else { return Ok(()) };
     let after = cuda.managed::<u32>(4096)?;
     let (a, b) = (before.ptr().addr(), after.ptr().addr());
     assert_eq!(b % 512, 0, "the second buffer starts at {b:#x}, which is not a multiple of 512");

@@ -1094,27 +1094,33 @@ kernel, bit for bit, with no copy.
 
 The zeros cost. The GPU writes the zeros of managed memory, so the driver has each page at the GPU when the host first
 writes it, and moves it back; the host writes the zeros of page-locked memory in a pass of its own, before its fill. The
-GPU's zeros go to the current stream, as a launch does, and `managed` returns once they are queued, where the GPU
-reaches managed memory while the host does. A GPU that does not owns managed memory while it writes them, and faults the
-host that touches any, a slice from `host()` that it holds say, so `managed` waits for the zeros there, and for all the
-work of the GPU, as `cuda.sync()` does. Memory that the host or a kernel writes whole before anything reads it needs
-none: `cuda.managed_uninit::<f32>(len)` and `cuda.pinned_uninit::<f32>(len)` leave the bytes as the driver does, and
-cost what `cuMemAllocManaged` and `cuMemHostAlloc` do. They are `unsafe`, because the bytes may be those of memory freed
-before, which the driver hands out again where a buffer beside it holds the page: the host or a kernel writes each
-element before anything reads it. Memory that is read before it is all written is made with `managed` and `pinned`,
-which are safe.
+GPU's zeros go to the current stream, as a launch does, and `managed` returns once they are queued. Memory that the host
+or a kernel writes whole before anything reads it needs none: `cuda.managed_uninit::<f32>(len)` and
+`cuda.pinned_uninit::<f32>(len)` leave the bytes as the driver does, and cost what `cuMemAllocManaged` and
+`cuMemHostAlloc` do. They are `unsafe`, because the bytes may be those of memory freed before, which the driver hands
+out again where a buffer beside it holds the page: the host or a kernel writes each element before anything reads it.
+Memory that is read before it is all written is made with `managed` and `pinned`, which are safe.
 
 A GPU does not do all four, so each asks the GPU first. Where the GPU cannot, the error says so in these words, and no
 kernel is left to fault: `cuMemAllocManaged: the GPU cannot allocate managed memory: its
-CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY is 0` for `managed` and `managed_uninit`; `cuMemHostAlloc: the GPU cannot reach
-page-locked memory at the host's addresses: its CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0` for `pinned` and
-`pinned_uninit`; and `cuDeviceGetAttribute: the GPU cannot reach pageable memory, a slice of the host's: its
-CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0` for `lend`, which a GPU with HMM can do; and `cuMemHostRegister: the
-GPU cannot page-lock memory the host has: its CU_DEVICE_ATTRIBUTE_HOST_REGISTER_SUPPORTED is 0`, or `cuMemHostRegister:
-the GPU cannot reach page-locked memory the host has at the host's addresses: its
-CU_DEVICE_ATTRIBUTE_CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM is 0`, for `register`. Each error names the call it
-refuses, as `Error::call` does; `lend` makes no call of the driver's to refuse, so its error names
-`cuDeviceGetAttribute`, which told that the GPU cannot.
+CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY is 0` for `managed` and `managed_uninit`, and `cuMemAllocManaged: GPU 1 cannot reach
+managed memory while the host does: its CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0` for them too;
+`cuMemHostAlloc: the GPU cannot reach page-locked memory at the host's addresses: its
+CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0` for `pinned` and `pinned_uninit`; and `cuDeviceGetAttribute: the GPU cannot
+reach pageable memory, a slice of the host's: its CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0` for `lend`, which a
+GPU with HMM can do; and `cuMemHostRegister: the GPU cannot page-lock memory the host has: its
+CU_DEVICE_ATTRIBUTE_HOST_REGISTER_SUPPORTED is 0`, or `cuMemHostRegister: the GPU cannot reach page-locked memory the
+host has at the host's addresses: its CU_DEVICE_ATTRIBUTE_CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM is 0`, for `register`.
+Each error names the call it refuses, as `Error::call` does; `lend` makes no call of the driver's to refuse, so its
+error names `cuDeviceGetAttribute`, which told that the GPU cannot.
+
+Managed memory is every GPU's, so `managed` makes none where the driver shows a GPU that allocates it and cannot reach
+it while the host does, whichever GPU `managed` is called on. Such a GPU, WSL2's say, faults the host on managed memory
+while any of its work runs, a kernel, a copy or a zeroing, and the host may touch the memory then. The error names the
+first such GPU by the number `Cuda::on` takes. `pinned` makes memory that such a GPU reaches at the host's addresses.
+`managed` asks each GPU the driver shows whether it allocates managed memory, and a GPU that cannot reaches none, so it
+does not stop `managed`. `CUDA_VISIBLE_DEVICES` leaves a GPU out of those the driver shows, and `managed` does not ask a
+GPU that is left out.
 
 The driver refuses to page-lock memory that is page-locked already, a slice that `register` has, or part of one:
 `cuMemHostRegister: CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED (712): part or all of the requested memory range is
@@ -1163,23 +1169,16 @@ stream, so its copy would not be queued in order. The error says so, and names `
 slice where it is, and whose copies are queued in order, as those of page-locked and of managed memory are:
 ``cuMemcpyAsync: a slice that `lend` lent is not copied from or to, as the driver reads it when the call is made, and
 writes it after the call waits for the stream: `register` page-locks the slice where it is, and its copies are queued in
-order``. So is managed memory on a GPU that cannot reach it while the host does, which the host may touch while the copy
-runs: ``cuMemcpyAsync: managed memory is not copied by a GPU that cannot reach it while the host does: its
-CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0``. A zeroing of it is refused in the same way, ``cuMemsetD8Async:
-managed memory is not zeroed by a GPU that cannot reach it while the host does``, with the same attribute at its end, as
-is a launch of a kernel that is no `unsafe fn`, below. `read` and `write` copy the host's own slice, and wait. A zeroing
-of a slice that `lend` lent is queued in order, as that of any other memory is.
+order``. `read` and `write` copy the host's own slice, and wait. A zeroing of a slice that `lend` lent is queued in
+order, as that of any other memory is.
 
 A pointer taken before the slice is `Copy`, and the compiler cannot refuse a launch on it, so the launch of a kernel
 that is an `unsafe fn`, which takes pointers, is `unsafe`, and its contract is this: each pointer is to a buffer or to
 unified memory of the GPU, as long as the kernel reads and writes through it; from the launch until the kernel is done,
-the host holds no slice of memory the kernel writes, and no slice it may write of memory the kernel reads; and where
-`cuda.concurrent_managed_access()` is false, the GPU not reaching managed memory while the host does, the host holds no
-slice of managed memory at all. The method is the GPU's `CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS`, and a GPU where
-it is false faults the host on managed memory while any kernel runs. `Module::launch` says the contract in its
-`# Safety`, and the macros write it as the `# Safety` of the launcher of a GPU kernel that is an `unsafe fn` and has
-none. The launcher of a kernel that is no `unsafe fn` takes the memory, not a pointer, and has no contract for its
-caller to keep: "A safe GPU kernel", below, says what it checks.
+the host holds no slice of memory the kernel writes, and no slice it may write of memory the kernel reads.
+`Module::launch` says the contract in its `# Safety`, and the macros write it as the `# Safety` of the launcher of a GPU
+kernel that is an `unsafe fn` and has none. The launcher of a kernel that is no `unsafe fn` takes the memory, not a
+pointer, and has no contract for its caller to keep: "A safe GPU kernel", below, says what it checks.
 
 Managed memory is moved ahead of its use, and advised how it is used, over a range of its elements; a slice lent is
 advised too, but not moved. `memory.prefetch(0..len, Location::Gpu)` moves them to the GPU, ahead of the kernels that
@@ -1188,10 +1187,10 @@ use them, on the stream the kernels are launched on; the places are `Gpu`, `Host
 `PreferredLocation(place)` or `NoPreferredLocation`, or that the GPU or the host is `AccessedBy` it or `NotAccessedBy`
 it, which the driver may follow or not. `memory.placement(range)` says what the driver has of both: `read_mostly`,
 `preferred`, `accessed_by` and `last_prefetch`, each only where every page of the range agrees, and `None` or empty
-where they do not. A prefetch, and the advice that names the GPU, need the GPU to reach managed memory while the host
-does, and where it cannot the error says so in these words: `cuMemPrefetchAsync: the GPU cannot reach managed memory
-while the host does: its CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0`, or `cuMemAdvise:` and the same for the
-advice.
+where they do not. The advice that names the GPU, a preferred location or an accessor, needs the GPU to reach managed
+memory while the host does, as the driver asks of any memory. `managed` makes none for a GPU that cannot, so the error
+says it of a slice lent alone: `cuMemAdvise: the GPU cannot reach managed memory while the host does: its
+CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0`.
 
 `prefetch`, `advise` and `placement` need a driver of CUDA 12.2 (535) or later, which brought `cuMemPrefetchAsync_v2`,
 `cuMemAdvise_v2` and the attributes of the preferred place and of the last prefetch. `Cuda::new()` opens an older driver
@@ -1510,11 +1509,8 @@ runs, ``cuLaunchKernel: `saxpy` is safe on a grid that runs along x alone, for k
 memory apart by their index along x: the grid has 2 blocks along y``, and so is one of 2^32 threads or more,
 ``cuLaunchKernel: `saxpy` numbers its threads in 32 bits, so its grid has fewer than 4294967296 of them: the grid has
 16777216 blocks of 256 threads, 4294967296 in all``. Memory of another GPU than the kernels are loaded on is an error
-too, ``cuLaunchKernel: the memory is on another GPU than the kernels are loaded on``, and so is managed memory on a GPU
-that cannot reach it while the host does, which the host may touch while the kernel runs: ``cuLaunchKernel: a kernel
-that is no `unsafe fn` is not lent managed memory by a GPU that cannot reach it while the host does: its
-CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0``. The code of a safe kernel is that of the same kernel written with
-`unsafe`: kernite adds none to the kernel, and the launcher's checks run on the host.
+too, ``cuLaunchKernel: the memory is on another GPU than the kernels are loaded on``. The code of a safe kernel is that
+of the same kernel written with `unsafe`: kernite adds none to the kernel, and the launcher's checks run on the host.
 
 What kernite cannot prove it refuses, at the first instruction or operand it cannot, and the error says what kernite
 cannot prove there, and that a kernel that does it is an `unsafe fn`, which compiles as it always has, and whose

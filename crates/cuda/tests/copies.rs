@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use kernite_cuda::{Buffer, Cuda, Error, Module, Ptr, Stream, Unified, arg};
 
+mod common;
+use common::managed_or_skip;
 mod gpu;
 use gpu::{COPIES, SEEN, SETS, TIMED_OUT, WAITS, cuda, hold, launch, load, peek, poke, run};
 
@@ -65,10 +67,8 @@ fn queued_behind_a_kernel(
 /// slice that `lend` lent is not one: a copy refuses it, and `lent` makes one.
 fn kinds(cuda: &Cuda, len: usize) -> Result<Vec<(&'static str, Unified<'static, u32>)>> {
     let mut kinds = vec![("page-locked memory", cuda.pinned::<u32>(len)?)];
-    if cuda.concurrent_managed_access() {
-        kinds.push(("managed memory", cuda.managed::<u32>(len)?));
-    } else {
-        eprintln!("a GPU that cannot reach managed memory while the host does: a copy of it is refused, none is tried");
+    if let Some(managed) = managed_or_skip(cuda.managed::<u32>(len)) {
+        kinds.push(("managed memory", managed));
     }
     match cuda.register(Vec::leak(vec![0u32; len])) {
         Ok(registered) => kinds.push(("a slice registered for good", registered)),

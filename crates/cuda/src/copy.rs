@@ -56,9 +56,7 @@ impl Cuda {
     /// [`Cuda::lend`] lent: the driver reads such a slice when the call is made, before the work the stream was given
     /// earlier has run, and writes it only after the call has waited for the stream. So its copy would not be queued in
     /// order, and it is refused. The error names [`Cuda::register`], which page-locks the slice where it is, and whose
-    /// copies are queued in order. Managed memory, on a GPU that cannot reach it while the host does, for the host may
-    /// touch it while the copy runs: `cuMemcpyAsync: managed memory is not copied by a GPU that cannot reach it while
-    /// the host does`.
+    /// copies are queued in order.
     ///
     /// [`Buffer`]: super::Buffer
     /// [`Unified`]: super::Unified

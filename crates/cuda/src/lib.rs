@@ -289,6 +289,14 @@ impl Api {
         self.check("cuDeviceGetCount", unsafe { (self.device_count)(&mut count) })?;
         Ok(count as usize)
     }
+
+    /// What the driver says of GPU `device` as the `CUdevice_attribute` `attribute`.
+    fn attribute_of(&self, device: c_int, attribute: c_int) -> Result<u32, Error> {
+        let mut v = 0;
+        // SAFETY: it writes the attribute's value to `v`.
+        let asked = unsafe { (self.attribute)(&mut v, attribute, device) };
+        self.check("cuDeviceGetAttribute", asked).map(|()| v as u32)
+    }
 }
 
 /// The driver's functions, found but not started; or why there is no driver to have.
@@ -350,11 +358,12 @@ pub struct Error {
     /// The function that failed, by its name in C: `cuInit`; `dlopen` if there is no driver, and
     /// `dlsym` for a function the driver does not have.
     /// A call refused before it is made names that call, whatever the reason: `cuMemAllocManaged`
-    /// where the GPU cannot allocate managed memory, `cuMemPrefetchAsync` where the memory is
-    /// page-locked, which the driver does not prefetch, `cuMemAdvise` where a NUMA node is given as
-    /// an accessor, and `cuMemHostRegister` where the GPU cannot page-lock memory the host has, or
-    /// reach it at the host's addresses. [`Cuda::lend`] refuses no call of the driver's, and names
-    /// `cuDeviceGetAttribute`, which told that the GPU cannot.
+    /// where the GPU cannot allocate managed memory, or a GPU cannot reach it while the host does,
+    /// `cuMemPrefetchAsync` where the memory is page-locked, which the driver does not prefetch,
+    /// `cuMemAdvise` where a NUMA node is given as an accessor, and `cuMemHostRegister` where the
+    /// GPU cannot page-lock memory the host has, or reach it at the host's addresses.
+    /// [`Cuda::lend`] refuses no call of the driver's, and names `cuDeviceGetAttribute`, which told
+    /// that the GPU cannot.
     pub call: &'static str,
     /// What it said: the `CUresult` it returned, by name, number and meaning, or why there is
     /// no driver.
@@ -517,10 +526,7 @@ impl Driver {
 
     /// What the GPU says of itself as the `CUdevice_attribute` `attribute`.
     fn attribute(&self, attribute: c_int) -> Result<u32, Error> {
-        let mut v = 0;
-        // SAFETY: it writes the attribute's value to `v`.
-        let asked = unsafe { (self.api.attribute)(&mut v, attribute, self.device) };
-        self.api.check("cuDeviceGetAttribute", asked).map(|()| v as u32)
+        self.api.attribute_of(self.device, attribute)
     }
 
     /// What the driver says of kernel `f` as the `CUfunction_attribute` `attribute`.
@@ -615,7 +621,6 @@ pub struct Cuda {
     max_shared: u32,
     multiprocessors: u32,
     cooperative: bool,
-    concurrent_managed_access: bool,
 }
 
 impl Cuda {
@@ -678,16 +683,14 @@ impl Cuda {
     /// The GPU of `driver`, called `name`, with what the GPU says of itself.
     fn of(driver: Rc<Driver>, name: String) -> Result<Cuda, Error> {
         // CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR and _MINOR,
-        // CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, _MULTIPROCESSOR_COUNT,
-        // _COOPERATIVE_LAUNCH and _CONCURRENT_MANAGED_ACCESS.
-        let [major, minor, shared, multiprocessors, cooperative, concurrent] =
-            [75, 76, 97, 16, 95, unified::CONCURRENT_MANAGED_ACCESS.0].map(|a| driver.attribute(a));
+        // CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, _MULTIPROCESSOR_COUNT and
+        // _COOPERATIVE_LAUNCH.
+        let [major, minor, shared, multiprocessors, cooperative] = [75, 76, 97, 16, 95].map(|a| driver.attribute(a));
         Ok(Cuda {
             sm: major? * 10 + minor?,
             max_shared: shared?,
             multiprocessors: multiprocessors?,
             cooperative: cooperative? != 0,
-            concurrent_managed_access: concurrent? != 0,
             driver,
             name,
         })
@@ -720,17 +723,6 @@ impl Cuda {
     /// one whose blocks wait for each other needs: a GPU from Pascal's, `sm_60`, on does.
     pub fn cooperative(&self) -> bool {
         self.cooperative
-    }
-
-    /// Whether the GPU reaches managed memory while the host does, as its
-    /// `CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS` says. A GPU that does not faults the host on
-    /// managed memory while any kernel runs, so the host may hold a slice of managed memory while
-    /// a kernel runs only where this is true: [`Module::launch`] has the rule. Such a GPU is also
-    /// refused [`Unified::prefetch`], and [`Unified::advise`] of a preferred location or an
-    /// accessor that is the GPU, and a copy and a zeroing of managed memory, [`Cuda::copy`] and
-    /// [`Unified::zero`], as the host may touch the memory while they run.
-    pub fn concurrent_managed_access(&self) -> bool {
-        self.concurrent_managed_access
     }
 
     /// Waits for every kernel launched on the GPU to finish, and says whether one failed.
@@ -1175,9 +1167,7 @@ impl Module {
     /// kernel is trusted with them. Each pointer among them must be to a buffer or to [`Unified`]
     /// memory of the GPU the module is loaded on, as long as the kernel reads and writes through
     /// it. From the launch until the kernel is done, the host must hold no slice of memory the
-    /// kernel writes, and no slice it may write of memory the kernel reads; and where
-    /// [`Cuda::concurrent_managed_access`] is false, the GPU not reaching managed memory while the
-    /// host does, the host must hold no slice of managed memory at all. A slice taken after the
+    /// kernel writes, and no slice it may write of memory the kernel reads. A slice taken after the
     /// launch waits for the kernel, so only a slice taken before it can break this.
     pub unsafe fn launch(&self, index: usize, grid: Grid, args: &[*const c_void]) -> Result<(), Error> {
         let ([bx, by, bz], [tx, ty, tz]) = (grid.blocks, grid.threads);
@@ -1747,22 +1737,17 @@ mod tests {
         0
     }
 
-    /// The fake driver's `cuCtxSynchronize`: it says the context it works in. In the context 14 it fails, with
-    /// `CUDA_ERROR_ILLEGAL_ADDRESS`, as it does where a kernel failed.
-    unsafe extern "C" fn synchronize() -> CuResult {
-        ask(format!("synchronize in {}", WORKING_IN.get()));
-        if WORKING_IN.get() == 14 { 700 } else { 0 }
+    /// The fake driver's `cuDeviceGetCount`: one GPU.
+    unsafe extern "C" fn device_count(count: *mut c_int) -> CuResult {
+        // SAFETY: the caller gives a place for the count.
+        unsafe { *count = 1 };
+        0
     }
 
-    /// The fake driver's `cuDeviceGetAttribute` of a GPU that cannot reach managed memory while the host does: every
-    /// attribute is 1, but that one.
-    unsafe extern "C" fn attribute_but_concurrent_managed_access(
-        value: *mut c_int,
-        attribute: c_int,
-        _: c_int,
-    ) -> CuResult {
-        // SAFETY: the caller gives a place for the value.
-        unsafe { *value = c_int::from(attribute != unified::CONCURRENT_MANAGED_ACCESS.0) };
+    /// The fake driver's `cuDeviceGet`: GPU `ordinal` is the device `ordinal`.
+    unsafe extern "C" fn device_get(device: *mut c_int, ordinal: c_int) -> CuResult {
+        // SAFETY: the caller gives a place for the device.
+        unsafe { *device = ordinal };
         0
     }
 
@@ -1829,6 +1814,8 @@ mod tests {
         EVENTS_MADE.set(0);
         asked();
         let mut api = Api::refusing();
+        api.device_count = device_count;
+        api.device_get = device_get;
         api.attribute = attribute;
         api.set_current = set_current;
         api.load_module = load_module;
@@ -2354,37 +2341,6 @@ mod tests {
         assert_eq!(made()?, on(""), "where no stream is current");
         NEXT.set(at);
         assert_eq!(running(&stream, made)?, on(" on 0x100"), "in a run");
-        Ok(())
-    }
-
-    /// `managed` returns once its zeros are queued where its GPU reaches managed memory while the host does. A GPU that
-    /// does not owns managed memory while it writes them, and faults the host that touches any, so there `managed`
-    /// waits for the GPU after it queues them, and says whether the work failed.
-    #[test]
-    fn managed_waits_for_its_zeros_only_where_the_gpu_cannot_reach_managed_memory_with_the_host() -> Result {
-        let (zeros, sync) = ("set 0x700000000000 to 0, 16 bytes", "synchronize in 1");
-        let made = |context: usize, cannot: bool| -> Result<(Vec<String>, Option<String>)> {
-            let cuda = gpu_replacing(context, |api| {
-                api.alloc_managed = alloc_managed;
-                api.synchronize = synchronize;
-                if cannot {
-                    api.attribute = attribute_but_concurrent_managed_access;
-                }
-            })?;
-            let made = cuda.managed::<u32>(4);
-            let said = made.as_ref().err().map(ToString::to_string);
-            let calls = asked();
-            Ok((calls, said))
-        };
-        let queued = ["alloc managed 16", zeros].map(String::from).to_vec();
-        assert_eq!(made(1, false)?, (queued.clone(), None), "where the GPU reaches managed memory with the host");
-        let waited = [queued, vec![sync.to_string()]].concat();
-        assert_eq!(made(1, true)?, (waited, None), "where it cannot");
-        let failed = "cuCtxSynchronize: CUDA_ERROR_ILLEGAL_ADDRESS (700): an illegal memory access was encountered";
-        let (calls, said) = made(14, true)?;
-        let want = ["alloc managed 16", zeros, "synchronize in 14", "free 0x700000000000"];
-        assert_eq!(calls, want, "it waited, the wait failed, and the memory was freed");
-        assert_eq!(said.as_deref(), Some(failed), "a wait that fails is the error of `managed`");
         Ok(())
     }
 

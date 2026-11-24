@@ -3,22 +3,21 @@
 //! registered, is held to the same three rules, below.
 //!
 //! The tests run beside each other, so one holds a slice of managed memory while a kernel of
-//! another runs. A launch's contract allows that where the GPU reaches managed memory while the
-//! host does, `Cuda::concurrent_managed_access`, as the GPU here does, and nowhere else: where the
-//! GPU does not, `setup` makes the tests run one at a time, as those of `placement.rs` do.
+//! another runs, which a launch's contract allows: the kernel does not reach that memory.
+//! `managed` makes none on a machine where a GPU cannot reach managed memory while the host
+//! does, and the tests of managed memory skip there, with the words of GUIDE.md.
 
 use std::ffi::{CString, c_char};
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use kernite_cuda::{Advice, Cuda, Error, Grid, Location, Module, Ptr, Unified, arg};
 
 mod common;
-use common::{NO_ADVICE, NO_PREFETCH, PAGE, first_page, or_skip};
+use common::{NO_ADVICE, PAGE, first_page, managed_or_skip, or_skip};
 mod gpu;
 use gpu::{peek, ptx};
 
@@ -74,22 +73,14 @@ again:
 /// launch returns, is early by far.
 const DELAY: Duration = Duration::from_millis(300);
 
-/// Held by each test, from its start to its end, where the GPU cannot reach managed memory while
-/// the host does: the host may then hold no slice of managed memory while any kernel runs, so no
-/// other test may.
-static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+/// What a test of the GPU is given: the GPU and the kernels.
+type Setup = (Cuda, Module);
 
-/// What a test of the GPU is given: the lock where the GPU needs the tests to run one at a time, the GPU
-/// and the kernels.
-type Setup = (Option<MutexGuard<'static, ()>>, Cuda, Module);
-
-/// What `Setup` has; or `None` where there is no GPU, after it says so. A test binds the lock first, so that it
-/// is dropped last, after the memory of the test is freed.
+/// What `Setup` has; or `None` where there is no GPU, after it says so.
 fn setup() -> Result<Option<Setup>> {
     let Ok(cuda) = Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(None) };
-    let one = (!cuda.concurrent_managed_access()).then(|| ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner));
     let module = Module::load(&cuda, &ptx(PTX), &["add_one", "delay"], &[])?;
-    Ok(Some((one, cuda, module)))
+    Ok(Some((cuda, module)))
 }
 
 /// Pseudo-random words, the same for the same seed.
@@ -106,9 +97,7 @@ fn words(n: usize, seed: u32) -> Vec<u32> {
 /// Launches `add_one` over the `n` words at `x`.
 fn add_one(module: &Module, x: Ptr<u32>, n: u32) -> Result {
     // SAFETY: `add_one` takes a pointer and a `u32`, and writes only the first `n` words there,
-    // which the caller's memory has. The caller holds no slice of it. Where the GPU cannot reach
-    // managed memory while the host does, `setup` has the test run alone, so no other test holds a
-    // slice of managed memory either, as the header says.
+    // which the caller's memory has. The caller holds no slice of it.
     unsafe { module.launch(0, Grid::new(n.div_ceil(256), 256), &[arg(&x), arg(&n)]) }?;
     Ok(())
 }
@@ -117,9 +106,7 @@ fn add_one(module: &Module, x: Ptr<u32>, n: u32) -> Result {
 fn delay(module: &Module, x: Ptr<u32>) -> Result {
     let ns = DELAY.as_nanos() as u64;
     // SAFETY: `delay` takes a pointer and a `u64`, and writes the one word at the pointer, which
-    // the caller's memory has. The caller holds no slice of it. Where the GPU cannot reach managed
-    // memory while the host does, `setup` has the test run alone, so no other test holds a slice
-    // of managed memory either, as the header says.
+    // the caller's memory has. The caller holds no slice of it.
     unsafe { module.launch(1, Grid::new(1, 1), &[arg(&x), arg(&ns)]) }?;
     Ok(())
 }
@@ -195,12 +182,12 @@ fn drop_waits(cuda: &Cuda, module: &Module, m: Unified<u32>) -> Result {
 
 #[test]
 fn a_managed_buffer_is_filled_by_the_host_added_to_by_a_kernel_and_read_by_the_host() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     // Not a whole number of blocks, and words that wrap.
     let n = 1_000_003;
     let mut input = words(n, 1);
     input[0] = u32::MAX;
-    let mut m = cuda.managed::<u32>(n)?;
+    let Some(mut m) = managed_or_skip(cuda.managed::<u32>(n)) else { return Ok(()) };
     assert_eq!(m.len(), n);
     assert!(m.host()?.iter().all(|&w| w == 0), "managed memory is zero until written");
     fill_add_read(&module, &mut m, &input)?;
@@ -209,12 +196,12 @@ fn a_managed_buffer_is_filled_by_the_host_added_to_by_a_kernel_and_read_by_the_h
 
 #[test]
 fn managed_memory_made_with_no_zeros_is_filled_by_the_host_added_to_by_a_kernel_and_read_by_the_host() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let n = 1_000_003;
     let mut input = words(n, 5);
     input[0] = u32::MAX;
     // SAFETY: `fill_add_read` writes every word, with the host, before anything reads one.
-    let mut m = unsafe { cuda.managed_uninit::<u32>(n) }?;
+    let Some(mut m) = managed_or_skip(unsafe { cuda.managed_uninit::<u32>(n) }) else { return Ok(()) };
     assert_eq!(m.len(), n);
     fill_add_read(&module, &mut m, &input)?;
     Ok(())
@@ -222,15 +209,17 @@ fn managed_memory_made_with_no_zeros_is_filled_by_the_host_added_to_by_a_kernel_
 
 #[test]
 fn the_host_waits_for_a_kernel_before_it_reads_or_writes_managed_memory() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
-    host_waits(&module, &mut cuda.managed::<u32>(4)?)?;
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
+    let Some(mut m) = managed_or_skip(cuda.managed::<u32>(4)) else { return Ok(()) };
+    host_waits(&module, &mut m)?;
     Ok(())
 }
 
 #[test]
 fn dropping_managed_memory_waits_for_the_kernel_that_uses_it() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
-    drop_waits(&cuda, &module, cuda.managed::<u32>(1)?)?;
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
+    let Some(m) = managed_or_skip(cuda.managed::<u32>(1)) else { return Ok(()) };
+    drop_waits(&cuda, &module, m)?;
     // A kernel that wrote freed memory would have failed.
     cuda.sync()?;
     Ok(())
@@ -238,8 +227,8 @@ fn dropping_managed_memory_waits_for_the_kernel_that_uses_it() -> Result {
 
 #[test]
 fn managed_memory_has_one_address_for_both_and_may_have_no_elements() -> Result {
-    let Some((_one, cuda, _)) = setup()? else { return Ok(()) };
-    let m = cuda.managed::<u32>(4)?;
+    let Some((cuda, _)) = setup()? else { return Ok(()) };
+    let Some(m) = managed_or_skip(cuda.managed::<u32>(4)) else { return Ok(()) };
     assert_eq!(m.at(3).ok_or("at gave None")?.addr(), m.ptr().addr() + 12);
     assert_eq!(m.at(4).ok_or("at gave None")?.addr(), m.ptr().addr() + 16);
     assert_eq!(format!("{m:?}"), format!("Unified(4 elements at {:#x})", m.ptr().addr()));
@@ -252,7 +241,7 @@ fn managed_memory_has_one_address_for_both_and_may_have_no_elements() -> Result 
 
 #[test]
 fn page_locked_memory_is_filled_by_the_host_added_to_by_a_kernel_and_read_by_the_host() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let n = 1_000_003;
     let mut input = words(n, 2);
     input[0] = u32::MAX;
@@ -265,7 +254,7 @@ fn page_locked_memory_is_filled_by_the_host_added_to_by_a_kernel_and_read_by_the
 
 #[test]
 fn page_locked_memory_made_with_no_zeros_is_filled_by_the_host_added_to_by_a_kernel_and_read_by_the_host() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let n = 1_000_003;
     let mut input = words(n, 6);
     input[0] = u32::MAX;
@@ -278,7 +267,7 @@ fn page_locked_memory_made_with_no_zeros_is_filled_by_the_host_added_to_by_a_ker
 
 #[test]
 fn the_host_waits_for_a_kernel_before_it_reads_or_writes_page_locked_memory() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let Some(mut m) = or_skip(cuda.pinned::<u32>(4), NO_PAGE_LOCKED) else { return Ok(()) };
     host_waits(&module, &mut m)?;
     Ok(())
@@ -286,7 +275,7 @@ fn the_host_waits_for_a_kernel_before_it_reads_or_writes_page_locked_memory() ->
 
 #[test]
 fn dropping_page_locked_memory_waits_for_the_kernel_that_uses_it() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let Some(m) = or_skip(cuda.pinned::<u32>(1), NO_PAGE_LOCKED) else { return Ok(()) };
     drop_waits(&cuda, &module, m)?;
     cuda.sync()?;
@@ -295,7 +284,7 @@ fn dropping_page_locked_memory_waits_for_the_kernel_that_uses_it() -> Result {
 
 #[test]
 fn page_locked_memory_has_one_address_for_both_and_may_have_no_elements() -> Result {
-    let Some((_one, cuda, _)) = setup()? else { return Ok(()) };
+    let Some((cuda, _)) = setup()? else { return Ok(()) };
     let Some(m) = or_skip(cuda.pinned::<u32>(4), NO_PAGE_LOCKED) else { return Ok(()) };
     assert_eq!(m.at(3).ok_or("at gave None")?.addr(), m.ptr().addr() + 12);
     assert_eq!(m.host()?.as_ptr() as u64, m.ptr().addr());
@@ -307,7 +296,7 @@ fn page_locked_memory_has_one_address_for_both_and_may_have_no_elements() -> Res
 
 #[test]
 fn a_kernel_adds_to_the_memory_of_a_vec_and_the_vec_has_it_back() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let n = 1_000_003;
     let mut input = words(n, 3);
     input[0] = u32::MAX;
@@ -324,7 +313,7 @@ fn a_kernel_adds_to_the_memory_of_a_vec_and_the_vec_has_it_back() -> Result {
 
 #[test]
 fn a_part_of_a_vec_or_a_box_is_lent_and_the_rest_of_it_is_not_touched() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let mut v = words(300, 4);
     let before = v.clone();
     let Some(lent) = or_skip(cuda.lend(&mut v[1..299]), NO_PAGEABLE) else { return Ok(()) };
@@ -349,7 +338,7 @@ fn a_part_of_a_vec_or_a_box_is_lent_and_the_rest_of_it_is_not_touched() -> Resul
 
 #[test]
 fn the_host_waits_for_a_kernel_before_it_reads_or_writes_a_slice_lent() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let mut v = vec![0u32; 4];
     let Some(mut lent) = or_skip(cuda.lend(&mut v), NO_PAGEABLE) else { return Ok(()) };
     host_waits(&module, &mut lent)?;
@@ -358,7 +347,7 @@ fn the_host_waits_for_a_kernel_before_it_reads_or_writes_a_slice_lent() -> Resul
 
 #[test]
 fn dropping_a_slice_lent_waits_for_the_kernel_and_the_host_has_the_slice_back() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let mut v = vec![5u32, 1, 2, 3];
     let Some(lent) = or_skip(cuda.lend(&mut v), NO_PAGEABLE) else { return Ok(()) };
     drop_waits(&cuda, &module, lent)?;
@@ -373,8 +362,7 @@ fn waits_for_a_stream(cuda: &Cuda, module: &Module, mut m: Unified<u32>) -> Resu
     let stream = cuda.stream()?;
     // SAFETY: each kernel writes the first word of `m` alone, or the word of `drop_waits` that is its own, which no
     // other kernel reaches: those of the other tests are on their own memory. The host holds no slice of `m` while one
-    // runs, as `host_waits` and `drop_waits` hold none, and where the GPU cannot reach managed memory while the host
-    // does, `setup` has this test run alone.
+    // runs, as `host_waits` and `drop_waits` hold none.
     unsafe {
         stream.run(|| host_waits(module, &mut m))?;
         stream.run(|| drop_waits(cuda, module, m))
@@ -383,8 +371,9 @@ fn waits_for_a_stream(cuda: &Cuda, module: &Module, mut m: Unified<u32>) -> Resu
 
 #[test]
 fn the_host_and_the_drop_wait_for_a_kernel_of_a_stream_in_managed_memory() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
-    waits_for_a_stream(&cuda, &module, cuda.managed::<u32>(4)?)?;
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
+    let Some(m) = managed_or_skip(cuda.managed::<u32>(4)) else { return Ok(()) };
+    waits_for_a_stream(&cuda, &module, m)?;
     // A kernel that wrote freed memory would have failed.
     cuda.sync()?;
     Ok(())
@@ -392,7 +381,7 @@ fn the_host_and_the_drop_wait_for_a_kernel_of_a_stream_in_managed_memory() -> Re
 
 #[test]
 fn the_host_and_the_drop_wait_for_a_kernel_of_a_stream_in_page_locked_memory() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let Some(m) = or_skip(cuda.pinned::<u32>(4), NO_PAGE_LOCKED) else { return Ok(()) };
     waits_for_a_stream(&cuda, &module, m)?;
     cuda.sync()?;
@@ -401,7 +390,7 @@ fn the_host_and_the_drop_wait_for_a_kernel_of_a_stream_in_page_locked_memory() -
 
 #[test]
 fn the_host_and_the_drop_wait_for_a_kernel_of_a_stream_in_a_slice_lent_and_the_host_has_the_slice_back() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let mut v = vec![0u32; 4];
     let Some(lent) = or_skip(cuda.lend(&mut v), NO_PAGEABLE) else { return Ok(()) };
     waits_for_a_stream(&cuda, &module, lent)?;
@@ -413,7 +402,7 @@ fn the_host_and_the_drop_wait_for_a_kernel_of_a_stream_in_a_slice_lent_and_the_h
 #[test]
 fn the_host_and_the_drop_wait_for_a_kernel_of_a_stream_in_a_slice_registered_and_the_host_has_the_slice_back() -> Result
 {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let mut v = vec![0u32; 4];
     let Some(registered) = register_or_skip(&cuda, &mut v)? else { return Ok(()) };
     waits_for_a_stream(&cuda, &module, registered)?;
@@ -424,7 +413,7 @@ fn the_host_and_the_drop_wait_for_a_kernel_of_a_stream_in_a_slice_registered_and
 
 #[test]
 fn a_kernel_adds_to_the_memory_of_a_vec_registered_and_the_vec_has_it_back() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let n = 1_000_003;
     let mut input = words(n, 6);
     input[0] = u32::MAX;
@@ -444,7 +433,7 @@ fn a_kernel_adds_to_the_memory_of_a_vec_registered_and_the_vec_has_it_back() -> 
 
 #[test]
 fn a_part_of_a_vec_or_a_box_is_registered_and_the_rest_of_it_is_not_touched() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let mut v = words(300, 7);
     let before = v.clone();
     let Some(registered) = register_or_skip(&cuda, &mut v[1..299])? else { return Ok(()) };
@@ -468,7 +457,7 @@ fn a_part_of_a_vec_or_a_box_is_registered_and_the_rest_of_it_is_not_touched() ->
 
 #[test]
 fn two_parts_of_a_vec_are_registered_at_once_and_each_is_unlocked_by_its_own_drop() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let mut v = words(300, 8);
     let before = v.clone();
     let (left, right) = v.split_at_mut(150);
@@ -490,7 +479,7 @@ fn two_parts_of_a_vec_are_registered_at_once_and_each_is_unlocked_by_its_own_dro
 
 #[test]
 fn the_host_waits_for_a_kernel_before_it_reads_or_writes_a_slice_registered() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let mut v = vec![0u32; 4];
     let Some(mut registered) = register_or_skip(&cuda, &mut v)? else { return Ok(()) };
     host_waits(&module, &mut registered)?;
@@ -499,7 +488,7 @@ fn the_host_waits_for_a_kernel_before_it_reads_or_writes_a_slice_registered() ->
 
 #[test]
 fn dropping_a_slice_registered_waits_for_the_kernel_and_the_host_has_the_slice_back() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let mut v = vec![5u32, 1, 2, 3];
     let Some(registered) = register_or_skip(&cuda, &mut v)? else { return Ok(()) };
     drop_waits(&cuda, &module, registered)?;
@@ -516,7 +505,7 @@ fn refused(made: Result<Unified<u32>, Error>, words: &str) -> Result {
 
 #[test]
 fn the_driver_refuses_memory_that_is_registered_already_or_that_it_made() -> Result {
-    let Some((_one, cuda, _)) = setup()? else { return Ok(()) };
+    let Some((cuda, _)) = setup()? else { return Ok(()) };
     // A slice registered and then forgotten stays registered, and its memory may not be freed: it is leaked.
     let leaked = Vec::leak(words(300, 9));
     let Some(forgotten) = register_or_skip(&cuda, &mut *leaked)? else { return Ok(()) };
@@ -531,7 +520,9 @@ fn the_driver_refuses_memory_that_is_registered_already_or_that_it_made() -> Res
     if let Some(mut pinned) = or_skip(cuda.pinned::<u32>(300), NO_PAGE_LOCKED) {
         refused(cuda.register(pinned.host_mut()?), invalid)?;
     }
-    refused(cuda.register(cuda.managed::<u32>(300)?.host_mut()?), invalid)?;
+    if let Some(mut managed) = managed_or_skip(cuda.managed::<u32>(300)) {
+        refused(cuda.register(managed.host_mut()?), invalid)?;
+    }
     Ok(())
 }
 
@@ -560,7 +551,7 @@ fn map(file: &File, flags: i32) -> Result<&'static mut [u32]> {
 /// mapping and not in the file.
 #[test]
 fn a_shared_mapping_of_a_file_is_refused_and_a_private_one_is_taken_with_its_pages_copied() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("mapping.bin");
     let mut page = vec![0u8; PAGE * 4];
     page[..4].copy_from_slice(&7u32.to_le_bytes());
@@ -597,7 +588,7 @@ fn a_shared_mapping_of_a_file_is_refused_and_a_private_one_is_taken_with_its_pag
 #[test]
 fn page_locked_memory_made_or_registered_is_not_moved_advised_or_placed_and_a_slice_lent_is_not_moved_or_placed()
 -> Result {
-    let Some((_one, cuda, _)) = setup()? else { return Ok(()) };
+    let Some((cuda, _)) = setup()? else { return Ok(()) };
     let pinned = or_skip(cuda.pinned::<u32>(PAGE), NO_PAGE_LOCKED);
     let (mut v, mut w) = (vec![0u32; PAGE], vec![0u32; PAGE]);
     let lent = or_skip(cuda.lend(&mut v), NO_PAGEABLE);
@@ -620,7 +611,7 @@ fn page_locked_memory_made_or_registered_is_not_moved_advised_or_placed_and_a_sl
 
 #[test]
 fn a_slice_lent_takes_each_advice_and_a_kernel_adds_to_it_after_each() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let n = 3 * PAGE;
     let input = words(n, 11);
     let mut v = input.clone();
@@ -652,14 +643,14 @@ fn a_slice_lent_takes_each_advice_and_a_kernel_adds_to_it_after_each() -> Result
 
 #[test]
 fn a_kernel_adds_to_memory_prefetched_to_the_gpu_and_the_host_reads_it_prefetched_back() -> Result {
-    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some((cuda, module)) = setup()? else { return Ok(()) };
     let n = 1_000_003;
     let mut input = words(n, 5);
     input[0] = u32::MAX;
     let want: Vec<u32> = input.iter().map(|w| w.wrapping_add(1)).collect();
-    let mut m = cuda.managed::<u32>(n)?;
+    let Some(mut m) = managed_or_skip(cuda.managed::<u32>(n)) else { return Ok(()) };
     m.host_mut()?.copy_from_slice(&input);
-    let Some(()) = or_skip(m.prefetch(0..n, Location::Gpu), NO_PREFETCH) else { return Ok(()) };
+    m.prefetch(0..n, Location::Gpu)?;
     add_one(&module, m.ptr(), n as u32)?;
     m.prefetch(0..n, Location::Host)?;
     assert_eq!(m.host()?, want, "the sums, bit for bit, from the one address");
