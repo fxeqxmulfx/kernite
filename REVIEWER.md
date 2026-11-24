@@ -59,7 +59,8 @@ Approve only after the merge, so that the tasks it unblocks start from code that
 
 Then merge what is ready into master, at once (the user's rule, 2026-11-24):
 - In a worktree of your own, from master, merge each effort's branch that has work master
-  lacks. Each is a merge commit of its own, whose message has a line for each task it brings.
+  lacks. Each is a merge commit of its own, whose message has a line for each task it brings,
+  and which adds a short line for each change a user sees to CHANGELOG.md's Unreleased.
 - Mend a conflict in the merge commit, and say how in its message.
 - Run `./make.py check` on the top. If it fails, master waits, and what fails becomes a task.
 - If it passes, fast-forward master to it by `git merge --ff-only` in the main checkout, when
