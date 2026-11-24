@@ -28,6 +28,13 @@ const UNIFIED_ADDRESSING: Flag = (41, "UNIFIED_ADDRESSING");
 /// The GPU reaches any pageable memory of the host, as one with HMM does.
 const PAGEABLE_MEMORY_ACCESS: Flag = (88, "PAGEABLE_MEMORY_ACCESS");
 
+/// The GPU page-locks memory the host has, where it is: `cuMemHostRegister` does it.
+const HOST_REGISTER_SUPPORTED: Flag = (99, "HOST_REGISTER_SUPPORTED");
+
+/// The GPU reaches memory that `cuMemHostRegister` page-locked at the host's own address for it, so that a kernel is
+/// given the slice's pointer, not another address that the driver has for the same memory.
+const HOST_POINTER_FOR_REGISTERED_MEM: Flag = (91, "CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM");
+
 /// The GPU reaches managed memory while the host does, as the driver needs of a GPU that it moves
 /// memory for. [`Cuda::concurrent_managed_access`] says it.
 pub(crate) const CONCURRENT_MANAGED_ACCESS: Flag = (89, "CONCURRENT_MANAGED_ACCESS");
@@ -139,7 +146,7 @@ impl Cuda {
     /// element that has a guard page in its aligned 64 KiB, a page set with
     /// `madvise(MADV_GUARD_INSTALL)`: the kernel fails with `CUDA_ERROR_ILLEGAL_ADDRESS (700)`, as
     /// does every call after it. glibc 2.43 sets such a page below each thread's stack, so lend
-    /// the memory of a `Vec`, a `Box` or a mapping, and not an array on a thread's stack.
+    /// the memory of a `Vec`, a `Box` or an anonymous mapping, and not an array on a thread's stack.
     ///
     /// ```no_run
     /// # use kernite_cuda::Cuda;
@@ -187,6 +194,96 @@ impl Cuda {
         let (ptr, len) = (memory.as_mut_ptr(), memory.len());
         Ok(Unified { driver: self.driver.clone(), ptr, len, kind: Kind::Lent, of: PhantomData })
     }
+
+    /// `memory`, a slice of the host's own memory, page-locked where it is for as long as the `Unified` lasts: a kernel
+    /// reads and writes its elements across the bus, a `Vec`'s or a `Box`'s, and the host has the slice back when it
+    /// drops the `Unified`, which waits for the kernels first, and then unlocks it. [`lend`](Cuda::lend) needs a GPU
+    /// that reaches pageable memory, as one with HMM does, and this does not: it needs a GPU that page-locks memory the
+    /// host has, and reaches it at the host's addresses. The error says so of one that does not, and a kernel is not
+    /// left to fault: `cuMemHostRegister: the GPU cannot page-lock memory the host has: its
+    /// CU_DEVICE_ATTRIBUTE_HOST_REGISTER_SUPPORTED is 0`, or `cuMemHostRegister: the GPU cannot reach page-locked
+    /// memory the host has at the host's addresses: its CU_DEVICE_ATTRIBUTE_CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM is
+    /// 0`.
+    ///
+    /// The driver refuses memory that is page-locked already, as a slice of what this returns is: `cuMemHostRegister:
+    /// CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED (712): part or all of the requested memory range is already mapped`;
+    /// and memory that it made, page-locked or managed: `cuMemHostRegister: CUDA_ERROR_INVALID_VALUE (1): invalid
+    /// argument`. A slice with no elements has no memory to page-lock, so the driver is asked neither to page-lock it
+    /// nor to unlock it.
+    ///
+    /// The driver here faults a kernel on a lent element that has a guard page in its aligned 64 KiB, as an array on a
+    /// thread's stack may, and runs it on such an element registered: so an array on a thread's stack may be
+    /// registered, though not lent.
+    ///
+    /// A mapping of a file is another matter. The driver here refuses a shared one on ext4, in the words it refuses
+    /// memory it made in: `cuMemHostRegister: CUDA_ERROR_INVALID_VALUE (1): invalid argument`. It takes a private one,
+    /// and Linux copies each page of it as the driver locks it, as the GPU may write it: a kernel's writes are in the
+    /// program's copies, and not in the file.
+    ///
+    /// ```no_run
+    /// # use kernite_cuda::Cuda;
+    /// let cuda = Cuda::new()?;
+    /// let mut xs = vec![1.0f32; 1000];
+    /// let registered = cuda.register(&mut xs)?;
+    /// // A kernel adds 1 to each element here, launched on `registered.ptr()`.
+    /// drop(registered);
+    /// assert_eq!(xs[999], 2.0);
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    ///
+    /// The slice is borrowed for as long as it is registered, so the compiler refuses the host a touch of it:
+    ///
+    /// ```compile_fail,E0502
+    /// # let cuda = kernite_cuda::Cuda::new()?;
+    /// let mut xs = vec![1.0f32; 4];
+    /// let registered = cuda.register(&mut xs)?;
+    /// let first = xs[0];
+    /// let for_a_kernel = registered.ptr();
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    ///
+    /// A kernel may write the slice, so it is taken as `&mut`, and a slice the host holds as `&` is refused:
+    ///
+    /// ```compile_fail,E0308
+    /// # let cuda = kernite_cuda::Cuda::new()?;
+    /// let xs = vec![1.0f32; 4];
+    /// let registered = cuda.register(&xs)?;
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    ///
+    /// A kernel that is no `unsafe fn` is given a slice registered for good alone, as a `mem::forget` of what
+    /// `register` gave would give one registered for less back to the host, with no wait for the kernel, and
+    /// locked for good:
+    ///
+    /// ```compile_fail,E0597
+    /// # let cuda = kernite_cuda::Cuda::new()?;
+    /// fn registered_for_a_safe_kernel(_: &mut impl kernite_cuda::MemoryMut<f32>) {}
+    /// let mut xs = vec![1.0f32; 4];
+    /// registered_for_a_safe_kernel(&mut cuda.register(&mut xs)?);
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    ///
+    /// ```no_run
+    /// # let cuda = kernite_cuda::Cuda::new()?;
+    /// fn registered_for_a_safe_kernel(_: &mut impl kernite_cuda::MemoryMut<f32>) {}
+    /// registered_for_a_safe_kernel(&mut cuda.register(Vec::leak(vec![1.0f32; 4]))?);
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    pub fn register<'a, T: Plain>(&self, memory: &'a mut [T]) -> Result<Unified<'a, T>, Error> {
+        let cannot = "the GPU cannot page-lock memory the host has";
+        self.driver.require("cuMemHostRegister", HOST_REGISTER_SUPPORTED, cannot)?;
+        let cannot = "the GPU cannot reach page-locked memory the host has at the host's addresses";
+        self.driver.require("cuMemHostRegister", HOST_POINTER_FOR_REGISTERED_MEM, cannot)?;
+        let (ptr, len, bytes) = (memory.as_mut_ptr(), memory.len(), size_of_val(memory));
+        // A slice with no bytes has none to lock, and the driver refuses no bytes.
+        if bytes != 0 {
+            let api = self.driver.current()?;
+            // SAFETY: the slice is `bytes` bytes at `ptr`, which the host owns. 2 is CU_MEMHOSTREGISTER_DEVICEMAP: the
+            // GPU reaches it. It is unregistered once, by the drop of the `Unified`, before the host has it back.
+            api.check("cuMemHostRegister", unsafe { (api.register)(ptr.cast(), bytes, 2) })?;
+        }
+        Ok(Unified { driver: self.driver.clone(), ptr, len, kind: Kind::Registered, of: PhantomData })
+    }
 }
 
 /// What made the memory, which is how it is let go.
@@ -197,19 +294,25 @@ enum Kind {
     Pinned,
     /// The host's own slice, which the host frees when it has it back.
     Lent,
+    /// The host's own slice, which `cuMemHostRegister` page-locked: `cuMemHostUnregister` unlocks it, and the host
+    /// frees it when it has it back. A slice with no bytes has none to lock, and none to unlock.
+    Registered,
 }
 
 /// `len` elements of `T` that the host and the kernels of one GPU, the one that made it, both
 /// reach at one address, with no copy between them. A kernel is given [`ptr`](Unified::ptr), and
 /// the host the slices [`host`](Unified::host) and [`host_mut`](Unified::host_mut). It is one of
-/// three kinds, by what makes it:
+/// four kinds, by what makes it:
 ///
 /// - [`Cuda::managed`] makes managed memory, which the driver moves to whichever of the host and
 ///   the GPU touches it.
 /// - [`Cuda::pinned`] makes page-locked memory, which stays in the host's memory, and a kernel
 ///   reads and writes it across the bus.
 /// - [`Cuda::lend`] lends a slice of the host's own memory to the GPU, for as long as `'a`, where
-///   the GPU reaches pageable memory. The others are their own: `Unified<'static, T>`.
+///   the GPU reaches pageable memory.
+/// - [`Cuda::register`] page-locks a slice of the host's own memory where it is, for as long as
+///   `'a`, and a kernel reads and writes it across the bus. The first two are their own:
+///   `Unified<'static, T>`.
 ///
 /// The first two are zeros, which cost: the GPU writes the zeros of managed memory, so the driver
 /// has each page at the GPU when the host first writes it, and moves it back, and the host writes
@@ -220,11 +323,11 @@ enum Kind {
 /// Managed memory also moves ahead of its use: [`prefetch`](Unified::prefetch) sends a range of it
 /// to the GPU or the host, [`advise`](Unified::advise) tells the driver how a range is used, and
 /// [`placement`](Unified::placement) says what the driver has of both. The driver prefetches and
-/// places managed memory alone, so those two refuse page-locked memory and a slice lent; it advises
-/// a slice lent too, and page-locked memory not. The driver works on whole pages, 4 KiB: a range
-/// reaches all of each page it touches, the rest of the page too, whether it is the memory of the
-/// same buffer or of another. A managed buffer starts at a multiple of 512 bytes, not at a page, so
-/// it shares the pages at its ends with the buffers beside it.
+/// places managed memory alone, so those two refuse page-locked memory, made or registered, and a
+/// slice lent; it advises a slice lent too, and page-locked memory not. The driver works on whole
+/// pages, 4 KiB: a range reaches all of each page it touches, the rest of the page too, whether it
+/// is the memory of the same buffer or of another. A managed buffer starts at a multiple of 512
+/// bytes, not at a page, so it shares the pages at its ends with the buffers beside it.
 ///
 /// The slices wait for every kernel launched on the GPU to finish, and say whether one failed,
 /// before they lend the memory. A slice taken after a launch is never under its kernel, so the host
@@ -277,7 +380,7 @@ enum Kind {
 /// launch while the host holds such a slice.
 ///
 /// Dropping the memory waits for the kernels that use it, and then frees it; or, for a slice
-/// lent, gives it back to the host.
+/// lent, gives it back to the host, and for a slice registered, unlocks it and gives it back.
 ///
 /// [`Module::launch`]: super::Module::launch
 pub struct Unified<'a, T: Plain> {
@@ -342,8 +445,8 @@ impl<T: Plain> Unified<'_, T> {
     }
 }
 
-// Memory of `'static` alone: a slice lent for less would be the host's again at a `mem::forget` of its `Unified`, with
-// no wait for the kernel.
+// Memory of `'static` alone: a slice lent or registered for less would be the host's again at a `mem::forget` of its
+// `Unified`, with no wait for the kernel.
 impl<T: Plain> sealed::Sealed for Unified<'static, T> {}
 
 impl<T: Plain> Memory<T> for Unified<'static, T> {
@@ -365,14 +468,19 @@ impl<T: Plain> MemoryMut<T> for Unified<'static, T> {}
 impl<T: Plain> Drop for Unified<'_, T> {
     fn drop(&mut self) {
         // As for a `Buffer`: left, if its GPU's context cannot be made current. The driver waits
-        // for the kernels that use memory before it frees it; a slice lent is waited for here.
+        // for the kernels that use memory before it frees or unlocks it; a slice lent is waited for
+        // here.
         if let Ok(api) = self.driver.current() {
             // SAFETY: the driver gave the address of managed and of page-locked memory, and each is
-            // freed once, here. A slice lent is the host's, which frees it.
+            // freed once, here. A slice registered with bytes was registered once, at this address,
+            // and is unlocked once, here. A slice lent or registered is the host's, which frees it.
             unsafe {
                 match self.kind {
                     Kind::Managed => (api.free)(self.addr()),
                     Kind::Pinned => (api.free_host)(self.ptr.cast()),
+                    // A slice with no bytes was not locked: there is nothing to unlock, and no kernel reaches it.
+                    Kind::Registered if self.len * size_of::<T>() == 0 => 0,
+                    Kind::Registered => (api.unregister)(self.ptr.cast()),
                     Kind::Lent => (api.synchronize)(),
                 }
             };
@@ -388,7 +496,7 @@ impl<T: Plain> fmt::Debug for Unified<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::ffi::{c_uint, c_void};
 
     use super::super::{Api, Buffer, CuResult, Handle, Module};
@@ -483,9 +591,53 @@ mod tests {
         unsafe { free(0) }
     }
 
-    /// The fake driver's `cuCtxSynchronize`: no kernel runs.
+    /// The fake driver's `cuCtxSynchronize`: no kernel runs, and the calls are counted.
     unsafe extern "C" fn synchronize() -> CuResult {
+        SYNCHRONIZED.set(SYNCHRONIZED.get() + 1);
         0
+    }
+
+    thread_local! {
+        /// What the fake driver was asked to page-lock, in order: the address, the bytes and the flags.
+        static REGISTERED: RefCell<Vec<(usize, usize, c_uint)>> = const { RefCell::new(Vec::new()) };
+        /// The address of each range that the fake driver was asked to unlock, in order.
+        static UNREGISTERED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+        /// How many times the fake driver was asked to wait for the kernels.
+        static SYNCHRONIZED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// What `cuMemHostRegister` is, for a fake driver to say.
+    type Register = unsafe extern "C" fn(*mut c_void, usize, c_uint) -> CuResult;
+
+    /// The fake driver's `cuMemHostRegister`: it keeps what it is asked.
+    unsafe extern "C" fn register(at: *mut c_void, bytes: usize, flags: c_uint) -> CuResult {
+        REGISTERED.with_borrow_mut(|asked| asked.push((at.addr(), bytes, flags)));
+        0
+    }
+
+    /// The fake driver's `cuMemHostRegister` of a driver that says the range is registered already.
+    unsafe extern "C" fn register_again(_: *mut c_void, _: usize, _: c_uint) -> CuResult {
+        // CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED.
+        712
+    }
+
+    /// The fake driver's `cuMemHostUnregister`: it keeps what it is asked.
+    unsafe extern "C" fn unregister(at: *mut c_void) -> CuResult {
+        UNREGISTERED.with_borrow_mut(|asked| asked.push(at.addr()));
+        0
+    }
+
+    /// A GPU that has the attributes `flags`, whose driver answers `cuMemHostRegister` with `register`, and keeps what
+    /// it is asked to register, to unregister and to wait for, none from before.
+    fn registering(flags: &[Flag], register: Register) -> Result<Cuda> {
+        REGISTERED.with_borrow_mut(Vec::clear);
+        UNREGISTERED.with_borrow_mut(Vec::clear);
+        SYNCHRONIZED.set(0);
+        gpu_with(flags, |api| {
+            api.register = register;
+            api.unregister = unregister;
+            api.synchronize = synchronize;
+        })
     }
 
     /// The fake driver's `cuModuleLoadDataEx`: a module with no kernels and no memory.
@@ -556,6 +708,75 @@ mod tests {
         assert_eq!(e.to_string(), format!("cuDeviceGetAttribute: {said}"));
         let lent = gpu(&[PAGEABLE_MEMORY_ACCESS])?.lend(&mut host)?;
         assert_eq!((lent.len(), lent.ptr().addr()), (3, at));
+        Ok(())
+    }
+
+    /// A GPU that does not page-lock memory the host has, or does not reach it at the host's addresses, is refused a
+    /// slice, in GUIDE.md's words, and the driver is not asked to page-lock it.
+    #[test]
+    fn a_slice_is_registered_only_for_a_gpu_that_page_locks_it_and_reaches_it_at_the_hosts_addresses() -> Result {
+        let mut host = [1u32, 2, 3];
+        let said = |why: &str| format!("cuMemHostRegister: {why}");
+        let cannot =
+            "the GPU cannot page-lock memory the host has: its CU_DEVICE_ATTRIBUTE_HOST_REGISTER_SUPPORTED is 0";
+        // A GPU that does not page-lock it is refused first, whatever else it says.
+        for flags in [&[][..], &[HOST_POINTER_FOR_REGISTERED_MEM]] {
+            let e = registering(flags, register)?.register(&mut host).err().ok_or("register gave Ok")?;
+            assert_eq!(e.to_string(), said(cannot));
+        }
+        let cannot = "the GPU cannot reach page-locked memory the host has at the host's addresses: \
+                      its CU_DEVICE_ATTRIBUTE_CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM is 0";
+        let e =
+            registering(&[HOST_REGISTER_SUPPORTED], register)?.register(&mut host).err().ok_or("register gave Ok")?;
+        assert_eq!(e.to_string(), said(cannot));
+        assert!(REGISTERED.with_borrow(Vec::is_empty), "the driver was not asked");
+        Ok(())
+    }
+
+    /// A slice is page-locked where it is, once, by its address and its bytes, for the GPU to reach: the address of its
+    /// elements is the slice's. It is unlocked once, at the same address, when the memory is dropped, and not before.
+    #[test]
+    fn a_slice_is_registered_once_where_it_is_and_unregistered_once_when_dropped() -> Result {
+        let cuda = registering(&[HOST_REGISTER_SUPPORTED, HOST_POINTER_FOR_REGISTERED_MEM], register)?;
+        let mut host = [1u32, 2, 3];
+        let at = host.as_ptr().addr();
+        let registered = cuda.register(&mut host)?;
+        assert_eq!((registered.len(), registered.ptr().addr()), (3, at as u64));
+        // 2 is CU_MEMHOSTREGISTER_DEVICEMAP.
+        assert_eq!(REGISTERED.take(), [(at, 12, 2)]);
+        assert!(UNREGISTERED.with_borrow(Vec::is_empty), "it is locked until it is dropped");
+        drop(registered);
+        assert_eq!(UNREGISTERED.take(), [at]);
+        assert!(REGISTERED.with_borrow(Vec::is_empty), "and it is not locked again");
+        Ok(())
+    }
+
+    /// A slice with no elements has no memory to lock, so the driver is asked neither to lock it nor to unlock it, and
+    /// its drop does not wait for the kernels, as that of a slice lent does. It is registered memory, which `prefetch`
+    /// says is page-locked, not a slice lent.
+    #[test]
+    fn a_slice_with_no_elements_is_registered_with_no_call_of_the_driver() -> Result {
+        let cuda = registering(&[HOST_REGISTER_SUPPORTED, HOST_POINTER_FOR_REGISTERED_MEM], register)?;
+        let none = cuda.register::<u64>(&mut [])?;
+        assert!(none.is_empty());
+        let e = none.prefetch(0..0, Location::Gpu).err().ok_or("prefetch gave Ok")?;
+        let said = "the driver prefetches managed memory alone: this is page-locked memory";
+        assert_eq!(e.to_string(), format!("cuMemPrefetchAsync: {said}"));
+        drop(none);
+        assert!(REGISTERED.with_borrow(Vec::is_empty) && UNREGISTERED.with_borrow(Vec::is_empty));
+        assert_eq!(SYNCHRONIZED.get(), 0, "the drop did not wait for the kernels");
+        Ok(())
+    }
+
+    /// What the driver refuses, it refuses in its own words under the name of the call, and nothing is unlocked that
+    /// was never locked.
+    #[test]
+    fn memory_the_driver_refuses_is_refused_and_not_unregistered() -> Result {
+        let cuda = registering(&[HOST_REGISTER_SUPPORTED, HOST_POINTER_FOR_REGISTERED_MEM], register_again)?;
+        let e = cuda.register(&mut [1u32, 2, 3]).err().ok_or("register gave Ok")?;
+        assert_eq!(e.call, "cuMemHostRegister");
+        assert!(e.message.contains("(712)"), "{e}");
+        assert!(UNREGISTERED.with_borrow(Vec::is_empty));
         Ok(())
     }
 

@@ -6478,3 +6478,17 @@ fn rusts_help_to_return_an_owned_value_takes_out_the_ampersand_of_a_result_and_n
     }
     Ok(())
 }
+
+/// A launcher the macros write that is no `unsafe fn` takes a slice the host registered for good,
+/// `cuda.register(Vec::leak(v))`, as it takes a buffer: the slice is a `Unified<'static, u32>`, the kernel `bump` adds
+/// 1 to each element, and the host reads the sums from the slice. Rust builds the crate without a word, under
+/// `#![deny(warnings)]`.
+#[test]
+fn a_launcher_that_is_no_unsafe_fn_takes_a_slice_registered_for_good() -> Result {
+    let printed = runs_quietly(&["test"], "registered")?;
+    assert!(
+        printed.contains("test result: ok. 1 passed"),
+        "fixtures/registered.rs ran its test, and printed:\n{printed}"
+    );
+    Ok(())
+}

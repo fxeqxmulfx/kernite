@@ -1008,16 +1008,18 @@ stream in a thread-local, which needs no call to the driver. That thread-local h
 as a thread ends too, in the destructor of another thread-local.
 
 A buffer is the GPU's own memory, which the host reaches by copies. Unified memory is reached by the host and by the
-GPU's kernels at one address, with no copy, and it is of one of three kinds. `cuda.managed::<f32>(len)` is `len` zeros
-of managed memory, which the driver moves to whichever of the host and the GPU touches it. `cuda.pinned::<f32>(len)` is
+GPU's kernels at one address, with no copy, and it is of one of four kinds. `cuda.managed::<f32>(len)` is `len` zeros of
+managed memory, which the driver moves to whichever of the host and the GPU touches it. `cuda.pinned::<f32>(len)` is
 `len` zeros of page-locked memory, which stays in the host's memory, and a kernel reads and writes it across the bus.
 `cuda.lend(&mut xs)` lends a slice of the host's own memory to the GPU, a `Vec`'s or a `Box`'s: a kernel reads and
-writes its elements where they are, and the host has the slice back when it drops what `lend` returned. A kernel is
-given `memory.ptr()`, and the host reads and writes `memory.host()` and `memory.host_mut()`, which are slices of it. The
-slices are at the address `ptr` gives, so a kernel for the CPU that is given a slice's pointer works on the memory that
-a kernel for the GPU is given: [`examples/my-app`](examples/my-app/src/main.rs) makes managed memory with
-`managed_uninit`, fills it with an x86 kernel, squares it with a PTX kernel and adds it up with an x86 kernel, bit for
-bit, with no copy.
+writes its elements where they are, and the host has the slice back when it drops what `lend` returned.
+`cuda.register(&mut xs)` page-locks a slice of the host's own memory where it is, a `Vec`'s or a `Box`'s: a kernel
+reads and writes its elements across the bus, and the host has the slice back, unlocked, when it drops what `register`
+returned. A kernel is given `memory.ptr()`, and the host reads and writes `memory.host()` and `memory.host_mut()`, which
+are slices of it. The slices are at the address `ptr` gives, so a kernel for the CPU that is given a slice's pointer
+works on the memory that a kernel for the GPU is given: [`examples/my-app`](examples/my-app/src/main.rs) makes managed
+memory with `managed_uninit`, fills it with an x86 kernel, squares it with a PTX kernel and adds it up with an x86
+kernel, bit for bit, with no copy.
 
 The zeros cost. The GPU writes the zeros of managed memory, so the driver has each page at the GPU when the host first
 writes it, and moves it back; the host writes the zeros of page-locked memory in a pass of its own, before its fill.
@@ -1027,26 +1029,42 @@ Memory that the host or a kernel writes whole before anything reads it needs non
 out again where a buffer beside it holds the page: the host or a kernel writes each element before anything reads it.
 Memory that is read before it is all written is made with `managed` and `pinned`, which are safe.
 
-A GPU does not do all three, so each asks the GPU first. Where the GPU cannot, the error says so in these words, and no
+A GPU does not do all four, so each asks the GPU first. Where the GPU cannot, the error says so in these words, and no
 kernel is left to fault: `cuMemAllocManaged: the GPU cannot allocate managed memory: its
 CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY is 0` for `managed` and `managed_uninit`; `cuMemHostAlloc: the GPU cannot reach
 page-locked memory at the host's addresses: its CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0` for `pinned` and
 `pinned_uninit`; and `cuDeviceGetAttribute: the GPU cannot reach pageable memory, a slice of the host's: its
-CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0` for `lend`, which a GPU with HMM can do. Each error names the call it
+CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0` for `lend`, which a GPU with HMM can do; and `cuMemHostRegister: the
+GPU cannot page-lock memory the host has: its CU_DEVICE_ATTRIBUTE_HOST_REGISTER_SUPPORTED is 0`, or `cuMemHostRegister:
+the GPU cannot reach page-locked memory the host has at the host's addresses: its
+CU_DEVICE_ATTRIBUTE_CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM is 0`, for `register`. Each error names the call it
 refuses, as `Error::call` does; `lend` makes no call of the driver's to refuse, so its error names
 `cuDeviceGetAttribute`, which told that the GPU cannot.
 
+The driver refuses to page-lock memory that is page-locked already, a slice that `register` has, or part of one:
+`cuMemHostRegister: CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED (712): part or all of the requested memory range is
+already mapped`. It refuses memory that it made, page-locked or managed: `cuMemHostRegister: CUDA_ERROR_INVALID_VALUE
+(1): invalid argument`. A slice with no elements has no memory to lock, so `register` asks the driver neither to lock it
+nor to unlock it.
+
 The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, faults a kernel on a lent element that has a guard
 page in its aligned 64 KiB, a page set with `madvise(MADV_GUARD_INSTALL)`: the kernel fails with
-`CUDA_ERROR_ILLEGAL_ADDRESS (700)`, as does every call after it. glibc 2.43 sets such a page below each thread's
-stack. So `lend` the memory of a `Vec`, a `Box` or a mapping, and not an array on a thread's stack.
+`CUDA_ERROR_ILLEGAL_ADDRESS (700)`, as does every call after it. glibc 2.43 sets such a page below each thread's stack.
+So `lend` the memory of a `Vec`, a `Box` or an anonymous mapping, and not an array on a thread's stack. The same kernel
+runs on an element that `register` has page-locked, so `register` takes an array on a thread's stack too.
+
+A mapping of a file is another matter for `register`. The driver here refuses a shared one on ext4, in the words it
+refuses memory it made in: `cuMemHostRegister: CUDA_ERROR_INVALID_VALUE (1): invalid argument`. It takes a private one,
+and Linux copies each page of it as the driver locks it, as the GPU may write it: a kernel's writes are in the
+program's copies, and not in the file.
 
 `host()` and `host_mut()` wait for every kernel launched on the GPU to finish, and say whether one failed, before they
 lend the slice, so a slice taken after a launch is never under its kernel, and the host reads what a kernel wrote with
 no `sync` of its own. The compiler refuses to take a pointer for a kernel while the host holds a slice it may write, as
-`ptr` borrows the memory and `host_mut` borrows it mutably, and it refuses the host a touch of a slice that is lent, as
-`lend` borrows the slice. Dropping the memory waits for the kernels that use it, as dropping a buffer does, and then
-frees it, or gives a slice lent back to the host.
+`ptr` borrows the memory and `host_mut` borrows it mutably, and it refuses the host a touch of a slice that is lent or
+registered, as `lend` and `register` borrow the slice. Dropping the memory waits for the kernels that use it, as
+dropping a buffer does, and then frees it, or gives a slice lent back to the host, or unlocks a slice registered and
+gives it back.
 
 A pointer taken before the slice is `Copy`, and the compiler cannot refuse a launch on it, so the launch of a kernel
 that is an `unsafe fn`, which takes pointers, is `unsafe`, and its contract is this: each pointer is to a buffer or to
@@ -1078,11 +1096,12 @@ all the same, and each of the three says so when it is called, in the words of t
 `cuMemAdvise_v2` for `advise` and `placement`.
 
 The driver prefetches managed memory alone, and tells the place of it alone, so `prefetch` and `placement` refuse
-page-locked memory and a slice lent, and say why: `cuMemPrefetchAsync: the driver prefetches managed memory alone: this
-is page-locked memory`, or `this is a slice lent`, and `cuMemRangeGetAttribute: the driver tells the place of managed
-memory alone: this is a slice lent`. It advises managed memory, and pageable memory where the GPU reaches it, which
-`lend` asked, so `advise` takes a slice lent as it takes managed memory, and refuses page-locked memory: `cuMemAdvise:
-the driver advises managed and pageable memory alone: this is page-locked memory`.
+page-locked memory, made or registered, and a slice lent, and say why: `cuMemPrefetchAsync: the driver prefetches
+managed memory alone: this is page-locked memory`, or `this is a slice lent`, and `cuMemRangeGetAttribute: the driver
+tells the place of managed memory alone: this is a slice lent`. It advises managed memory, and pageable memory where the
+GPU reaches it, which `lend` asked, so `advise` takes a slice lent as it takes managed memory, and refuses page-locked
+memory, made or registered: `cuMemAdvise: the driver advises managed and pageable memory alone: this is page-locked
+memory`.
 
 A NUMA node does not touch memory, so it is refused as an accessor: `cuMemAdvise: only the GPU and the host access
 memory, not a NUMA node`; and the driver refuses a node the host does not have: `cuMemPrefetchAsync:
@@ -1345,12 +1364,13 @@ is.
 A GPU kernel that is no `unsafe fn` is one kernite proves safe where it compiles it, and Rust calls its launcher as it
 calls any function, with no `unsafe`. The launcher takes memory where the kernel takes a pointer: `&xs` where the kernel
 takes a `*const f32`, memory it reads, and `&mut ys` where it takes a `*mut f32`, memory it writes. The memory is a
-`Buffer`, managed or page-locked memory, a slice the host lends for good, `cuda.lend(Vec::leak(v))`, or, for a `*const`,
-the elements of a buffer from one on, `xs.tail(i)`. A slice lent for less is not, as a `mem::forget` of what `lend` gave
-would give it back to the host while the kernel may still write it. Rust keeps the host from touching `ys` while the
-launcher has it, and from lending the same memory twice; the kernel keeps what it is lent until it is done, so that
-`read`, `write`, `host` and dropping the memory wait for the kernel first. What is left is the kernel's own threads, and
-kernite proves, as each instruction comes, that they keep to what they are lent:
+`Buffer`, managed or page-locked memory, a slice the host lends or registers for good, `cuda.lend(Vec::leak(v))` or
+`cuda.register(Vec::leak(v))`, or, for a `*const`, the elements of a buffer from one on, `xs.tail(i)`. A slice lent or
+registered for less is not, as a `mem::forget` of what `lend` or `register` gave would give it back to the host while
+the kernel may still write it. Rust keeps the host from touching `ys` while the launcher has it, and from lending the
+same memory twice; the kernel keeps what it is lent until it is done, so that `read`, `write`, `host` and dropping the
+memory wait for the kernel first. What is left is the kernel's own threads, and kernite proves, as each instruction
+comes, that they keep to what they are lent:
 
 - each load and store is of global memory, at an address worked out from one of the kernel's pointers, at a multiple of
   the bytes it moves, and inside the memory the launcher lent for it;

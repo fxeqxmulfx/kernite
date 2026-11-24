@@ -140,7 +140,7 @@ impl<T: Plain> Unified<'_, T> {
         let this = match self.kind {
             Kind::Managed => return Ok(()),
             Kind::Lent if lent => return Ok(()),
-            Kind::Pinned => "page-locked memory",
+            Kind::Pinned | Kind::Registered => "page-locked memory",
             Kind::Lent => "a slice lent",
         };
         Err(Error::new(call, format!("the driver {rule}: this is {this}")))
@@ -357,12 +357,13 @@ mod tests {
         Ok(())
     }
 
-    /// Memory that is page-locked or a slice lent is not moved or placed: each call says so, in
+    /// Memory that is page-locked, made or registered, or a slice lent is not moved or placed: each call says so, in
     /// GUIDE.md's words, before the driver is asked.
     #[test]
     fn only_managed_memory_is_moved_and_placed() -> Result {
         let cuda = gpu(&[CONCURRENT_MANAGED_ACCESS])?;
-        for (kind, this) in [(Kind::Pinned, "page-locked memory"), (Kind::Lent, "a slice lent")] {
+        let kinds = [(Kind::Pinned, "page-locked memory"), (Kind::Registered, "page-locked memory")];
+        for (kind, this) in kinds.into_iter().chain([(Kind::Lent, "a slice lent")]) {
             let m = memory(&cuda, kind);
             let said = |call, rule| format!("{call}: the driver {rule}: this is {this}");
             let prefetch = said("cuMemPrefetchAsync", "prefetches managed memory alone");
@@ -374,8 +375,8 @@ mod tests {
     }
 
     /// A slice lent is advised as managed memory is: the driver is told the advice, for the
-    /// elements' addresses. Page-locked memory is refused it, in GUIDE.md's words, and the driver
-    /// is not asked.
+    /// elements' addresses. Page-locked memory, made or registered, is refused it, in GUIDE.md's
+    /// words, and the driver is not asked.
     #[test]
     fn a_slice_lent_is_advised_as_managed_memory_is_and_page_locked_memory_is_not() -> Result {
         let cuda = gpu_with(&[CONCURRENT_MANAGED_ACCESS], |api| api.advise = Ok(advise))?;
@@ -384,11 +385,13 @@ mod tests {
             memory(&cuda, kind).advise(1..3, Advice::ReadMostly)?;
             assert_eq!(ADVISED.get(), Some((4096 + 4, 8, 1)));
         }
-        ADVISED.set(None);
-        let e = memory(&cuda, Kind::Pinned).advise(1..3, Advice::ReadMostly).err().ok_or("advise gave Ok")?;
         let said = "cuMemAdvise: the driver advises managed and pageable memory alone: this is page-locked memory";
-        assert_eq!(e.to_string(), said);
-        assert_eq!(ADVISED.get(), None, "the driver was not asked");
+        for kind in [Kind::Pinned, Kind::Registered] {
+            ADVISED.set(None);
+            let e = memory(&cuda, kind).advise(1..3, Advice::ReadMostly).err().ok_or("advise gave Ok")?;
+            assert_eq!(e.to_string(), said);
+            assert_eq!(ADVISED.get(), None, "the driver was not asked");
+        }
         Ok(())
     }
 
