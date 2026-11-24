@@ -194,10 +194,8 @@ impl Event<Timed> {
     /// # Ok::<(), kernite_cuda::Error>(())
     /// ```
     pub fn duration_since(&self, earlier: &Event<Timed>) -> Result<Duration, Error> {
-        if self.driver.context != earlier.driver.context {
-            let message = "the events are of two GPUs, and the clocks of two GPUs are not one clock".to_string();
-            return Err(Error::new("cuEventElapsedTime", message));
-        }
+        let message = "the events are of two GPUs, and the clocks of two GPUs are not one clock";
+        self.driver.require_same_gpu(&earlier.driver, "cuEventElapsedTime", message)?;
         let api = self.driver.current()?;
         let elapsed = api.elapsed_time.clone()?;
         let mut millis = 0.0f32;

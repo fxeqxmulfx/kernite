@@ -146,9 +146,12 @@ pub fn load(cuda: &Cuda) -> Result<Module> {
 
 /// `work`, with `stream` the current stream of its GPU.
 pub fn run<R>(stream: &Stream, work: impl FnOnce() -> R) -> R {
-    // SAFETY: the kernels share a word between streams at most: the flag that `sets` writes and `waits` reads, and the
-    // word that `waits` writes and `copies` reads, each by one volatile access that the GPU does whole: that is what
-    // the tests look for. The words that the kernels write are their own, and they reach no other memory in common.
+    // SAFETY: the work of two streams shares one word at most: the flag that `sets` or a copy writes and `waits` reads,
+    // or the word that `waits` writes and `copies` reads. A kernel reads and writes it by one `ld.volatile` or
+    // `st.volatile` of the whole word. A copy or a zeroing may write it by stores of any width, and the tests do not
+    // need to know which: a copy writes 1 over 0 and a zeroing 0 over 7, so the word changes in its low byte alone, and
+    // a read sees the old word or the new. The words that the work writes are its own, and it reaches no other memory
+    // in common.
     unsafe { stream.run(work) }
 }
 
@@ -170,7 +173,9 @@ pub fn hold(module: &Module, flag: Ptr<u32>, out: Ptr<u32>) -> Result {
 /// What the page-locked word `at` holds now. It is read where it is, and not by `host`, which waits for the GPU first.
 pub fn peek(at: &Unified<'_, u32>) -> u32 {
     // SAFETY: `at` is a word of page-locked memory that lasts as long as `at`, which the GPU reaches at the address the
-    // host has for it; the kernel writes it by one store of the whole word.
+    // host has for it. A kernel writes it by one `st.volatile` of the whole word. A copy or a zeroing may write it by
+    // stores of any width: it changes in its low byte alone, 1 over 0 and 0 over 7, so a read sees the old word or the
+    // new.
     unsafe { ptr::read_volatile(ptr::with_exposed_provenance::<u32>(at.ptr().addr() as usize)) }
 }
 
