@@ -60,13 +60,23 @@ impl Cuda {
     /// it, and moves it back. Memory that the host or a kernel writes whole before anything reads
     /// it needs no zeros, and [`managed_uninit`](Cuda::managed_uninit) makes it for what the
     /// driver's own call costs.
+    ///
+    /// The zeros go to the current stream of the GPU, as a launch does, after the work that stream
+    /// was given before. Where the GPU reaches managed memory while the host does,
+    /// [`concurrent_managed_access`](Cuda::concurrent_managed_access), the call returns once they
+    /// are queued. A GPU that does not owns managed memory while it writes them, and faults the host
+    /// that touches any, a slice from [`host`](Unified::host) that it holds say, so there the call
+    /// waits for the zeros, and for all the work of the GPU, as [`sync`](Cuda::sync) does.
     pub fn managed<T: Plain>(&self, len: usize) -> Result<Unified<'static, T>, Error> {
         // SAFETY: the zeros are written below, before the memory is lent.
         let memory = unsafe { self.managed_uninit(len) }?;
         // The driver does not clear it, and the host must not be lent bytes that were never
         // written. The GPU writes the zeros: where the GPU does not allow concurrent access, the
-        // host must not touch managed memory while a kernel runs, and one may be running.
+        // host must not touch managed memory while any of its work runs, and the zeros are work.
         memory.driver.zero(memory.addr(), len * size_of::<T>())?;
+        if !self.concurrent_managed_access {
+            self.driver.sync()?;
+        }
         Ok(memory)
     }
 
@@ -443,6 +453,40 @@ impl<T: Plain> Unified<'_, T> {
     fn addr(&self) -> u64 {
         self.ptr.addr() as u64
     }
+
+    /// `Ok` unless this is managed memory that its GPU cannot reach while the host does. The host may touch managed
+    /// memory while the work that `call` queues runs, as any slice of it that it holds may, and such a GPU faults it
+    /// then, so `call` is refused: `what` is what it does not do, and the error ends the sentence with the GPU's lack.
+    fn require_beside_the_host(&self, call: &'static str, what: &str) -> Result<(), Error> {
+        if matches!(self.kind, Kind::Managed) {
+            let cannot = format!("{what} by a GPU that cannot reach it while the host does");
+            self.driver.require(call, CONCURRENT_MANAGED_ACCESS, &cannot)?;
+        }
+        Ok(())
+    }
+}
+
+impl<T: Plain> Unified<'static, T> {
+    /// Sets every element to zero, on the current stream of its GPU, after the work that stream was given before, and
+    /// does not wait for it. [`host`](Unified::host) and [`host_mut`](Unified::host_mut) wait for the zeros, as they
+    /// wait for a kernel. It is for memory of `'static` alone, as [`Cuda::copy`] is: a slice lent or registered for
+    /// less would be the host's again at a `mem::forget` of its `Unified`, with the zeros still to be written.
+    ///
+    /// Managed memory is zeroed only by a GPU that reaches it while the host does, as it is copied only by one: the
+    /// host may touch it while the zeros are written, and another GPU faults the host then. The error says so,
+    /// `cuMemsetD8Async: managed memory is not zeroed by a GPU that cannot reach it while the host does: its
+    /// CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0`, and nothing is zeroed.
+    ///
+    /// ```compile_fail,E0597
+    /// # let cuda = kernite_cuda::Cuda::new()?;
+    /// let mut xs = vec![1.0f32; 4];
+    /// cuda.lend(&mut xs)?.zero()?;
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    pub fn zero(&mut self) -> Result<(), Error> {
+        self.require_beside_the_host("cuMemsetD8Async", "managed memory is not zeroed")?;
+        self.driver.zero(self.addr(), self.len * size_of::<T>())
+    }
 }
 
 // Memory of `'static` alone: a slice lent or registered for less would be the host's again at a `mem::forget` of its
@@ -451,14 +495,23 @@ impl<T: Plain> sealed::Sealed for Unified<'static, T> {}
 
 impl<T: Plain> Memory<T> for Unified<'static, T> {
     fn lend(&self, module: &super::Module) -> Result<(Ptr<T>, usize), Error> {
-        module.driver.same_gpu(&self.driver)?;
-        if matches!(self.kind, Kind::Managed) {
-            // The host may touch managed memory while the kernel runs, as any slice of it it holds may, which a GPU
-            // that does not reach it while the host does faults on.
-            let cannot = "a kernel that is no `unsafe fn` is not lent managed memory by a GPU that cannot reach it \
-                          while the host does";
-            self.driver.require("cuLaunchKernel", CONCURRENT_MANAGED_ACCESS, cannot)?;
+        module.reaches(&self.driver)?;
+        self.require_beside_the_host("cuLaunchKernel", "a kernel that is no `unsafe fn` is not lent managed memory")?;
+        Ok((self.ptr(), self.len))
+    }
+
+    fn reach(&self, cuda: &Cuda) -> Result<(Ptr<T>, usize), Error> {
+        cuda.reaches(&self.driver)?;
+        if matches!(self.kind, Kind::Lent) {
+            // The driver copies pageable memory through memory of its own: it reads it as the call is made, which is
+            // before the work the stream was given earlier has run, and writes it after the call waits for the stream.
+            let why = "a slice that `lend` lent is not copied from or to, as the driver reads it when the call is \
+                       made, and writes it after the call waits for the stream: `register` page-locks the slice where \
+                       it is, and its copies are queued in order"
+                .to_string();
+            return Err(Error::new("cuMemcpyAsync", why));
         }
+        self.require_beside_the_host("cuMemcpyAsync", "managed memory is not copied")?;
         Ok((self.ptr(), self.len))
     }
 }
@@ -529,6 +582,11 @@ pub(crate) mod tests {
 
     /// The same GPU, with the calls `replace` puts in the driver's place.
     pub(crate) fn gpu_with(flags: &[Flag], replace: impl FnOnce(&mut Api)) -> Result<Cuda> {
+        gpu_in(1, flags, replace)
+    }
+
+    /// The same GPU, with `context` as its context: two with two contexts are two GPUs.
+    fn gpu_in(context: usize, flags: &[Flag], replace: impl FnOnce(&mut Api)) -> Result<Cuda> {
         let mut values = [0; 128];
         for (attribute, _) in flags {
             values[*attribute as usize] = 1;
@@ -538,7 +596,7 @@ pub(crate) mod tests {
         api.attribute = attribute;
         api.set_current = set_current;
         replace(&mut api);
-        let driver = Rc::new(Driver { api, device: 0, context: ptr::without_provenance_mut(1) });
+        let driver = Rc::new(Driver { api, device: 0, context: ptr::without_provenance_mut(context) });
         Ok(Cuda::of(driver, String::new())?)
     }
 
@@ -568,10 +626,21 @@ pub(crate) mod tests {
         0
     }
 
-    /// The fake driver's `cuMemsetD8`.
-    unsafe extern "C" fn memset(addr: u64, value: u8, bytes: usize) -> CuResult {
+    /// The fake driver's `cuMemsetD8Async`, which sets the bytes at once.
+    unsafe extern "C" fn memset(addr: u64, value: u8, bytes: usize, _: Handle) -> CuResult {
         // SAFETY: the caller gives the address of a block of the fake driver's, of `bytes` bytes.
         unsafe { ptr::with_exposed_provenance_mut::<u8>(addr as usize).write_bytes(value, bytes) };
+        0
+    }
+
+    thread_local! {
+        /// How many times the fake driver was asked for a copy.
+        static COPIED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// The fake driver's `cuMemcpyAsync`: it counts the copies it is asked for, and makes none.
+    unsafe extern "C" fn copy_async(_: u64, _: u64, _: usize, _: Handle) -> CuResult {
+        COPIED.set(COPIED.get() + 1);
         0
     }
 
@@ -708,6 +777,113 @@ pub(crate) mod tests {
         assert_eq!(e.to_string(), format!("cuDeviceGetAttribute: {said}"));
         let lent = gpu(&[PAGEABLE_MEMORY_ACCESS])?.lend(&mut host)?;
         assert_eq!((lent.len(), lent.ptr().addr()), (3, at));
+        Ok(())
+    }
+
+    /// Unified memory of another GPU is neither copied from nor to, nor lent to a kernel, and the error says so, in
+    /// GUIDE.md's words.
+    #[test]
+    fn unified_memory_of_another_gpu_is_neither_copied_from_or_to_nor_lent_to_a_kernel() -> Result {
+        let flags = [HOST_REGISTER_SUPPORTED, HOST_POINTER_FOR_REGISTERED_MEM];
+        let replace = |api: &mut Api| {
+            api.register = register;
+            api.unregister = unregister;
+            api.load_module = load_module;
+            api.unload_module = unload_module;
+        };
+        let (here, there) = (gpu_in(1, &flags, replace)?, gpu_in(2, &flags, replace)?);
+        let (mut mine, mut theirs) =
+            (here.register(Vec::leak(vec![0u32; 4]))?, there.register(Vec::leak(vec![0u32; 4]))?);
+        let said = "cuMemcpyAsync: the memory is on another GPU than the copy is made on";
+        let e = here.copy(&mut mine, &theirs).err().ok_or("copy gave Ok")?;
+        assert_eq!(e.to_string(), said, "from memory of another GPU");
+        let e = here.copy(&mut theirs, &mine).err().ok_or("copy gave Ok")?;
+        assert_eq!(e.to_string(), said, "to memory of another GPU");
+        let module = Module::load(&here, "", &[], &[])?;
+        let e = theirs.lend(&module).err().ok_or("lend gave Ok")?;
+        assert_eq!(e.to_string(), "cuLaunchKernel: the memory is on another GPU than the kernels are loaded on");
+        assert_eq!(mine.lend(&module)?.1, 4, "memory of this GPU is lent");
+        Ok(())
+    }
+
+    /// A buffer of four words that the fake driver gave no address, as a side of a copy: the driver frees none, and its
+    /// `cuMemFree` refuses, which a drop ignores.
+    fn buffer_of(cuda: &Cuda) -> Buffer<u32> {
+        Buffer { driver: cuda.driver.clone(), ptr: 4096, len: 4, reservation: None, of: PhantomData }
+    }
+
+    /// A copy of managed memory and a zeroing of it are refused by a GPU that cannot reach managed memory while the
+    /// host does, in GUIDE.md's words, as a launch is: the host may touch the memory while they run. The driver is
+    /// asked for neither, and nothing is changed. A GPU that can is asked for both, and page-locked memory is copied
+    /// by either.
+    #[test]
+    fn a_copy_and_a_zeroing_of_managed_memory_are_refused_by_a_gpu_that_cannot_reach_it_with_the_host() -> Result {
+        // What each call said, how many copies the driver was asked for, and the managed memory's words at the end.
+        let tried = |flags: &[Flag]| -> Result<(Vec<Option<String>>, usize, Vec<u32>)> {
+            let cuda = gpu_with(flags, |api| {
+                api.alloc_managed = alloc_managed;
+                api.alloc_host = alloc_host;
+                api.memset = memset;
+                api.copy_async = copy_async;
+                api.synchronize = synchronize;
+            })?;
+            let (mut managed, mut pinned) = (cuda.managed::<u32>(4)?, cuda.pinned::<u32>(4)?);
+            let mut buffer = buffer_of(&cuda);
+            managed.host_mut()?.fill(7);
+            COPIED.set(0);
+            let said = |done: Result<(), Error>| done.err().map(|e| e.to_string());
+            let calls = vec![
+                said(cuda.copy(&mut buffer, &managed)),
+                said(cuda.copy(&mut managed, &buffer)),
+                said(managed.zero()),
+                said(cuda.copy(&mut buffer, &pinned)),
+                said(cuda.copy(&mut pinned, &buffer)),
+            ];
+            Ok((calls, COPIED.get(), managed.host()?.to_vec()))
+        };
+        let cannot_reach = "by a GPU that cannot reach it while the host does: its \
+                            CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0";
+        let copy = format!("cuMemcpyAsync: managed memory is not copied {cannot_reach}");
+        let zero = format!("cuMemsetD8Async: managed memory is not zeroed {cannot_reach}");
+        let cannot = [MANAGED_MEMORY, UNIFIED_ADDRESSING];
+        let refused = [Some(copy.clone()), Some(copy), Some(zero), None, None];
+        assert_eq!(tried(&cannot)?, (refused.to_vec(), 2, vec![7; 4]));
+        let can = [MANAGED_MEMORY, UNIFIED_ADDRESSING, CONCURRENT_MANAGED_ACCESS];
+        assert_eq!(tried(&can)?, (vec![None; 5], 4, vec![0; 4]));
+        Ok(())
+    }
+
+    /// A copy from or to a slice that `lend` lent is refused, in GUIDE.md's words, and the driver is not asked: it
+    /// reads such a slice as the call is made and writes it after the call waits for the stream, so the copy is not
+    /// queued in order. A slice that `register` page-locked is copied, and a zeroing of a lent slice is queued.
+    #[test]
+    fn a_slice_that_lend_lent_is_not_copied_from_or_to_and_one_that_register_locked_is() -> Result {
+        let flags = [PAGEABLE_MEMORY_ACCESS, HOST_REGISTER_SUPPORTED, HOST_POINTER_FOR_REGISTERED_MEM];
+        let cuda = gpu_with(&flags, |api| {
+            api.register = register;
+            api.unregister = unregister;
+            api.memset = memset;
+            api.copy_async = copy_async;
+            api.synchronize = synchronize;
+        })?;
+        let said = "cuMemcpyAsync: a slice that `lend` lent is not copied from or to, as the driver reads it when the \
+                    call is made, and writes it after the call waits for the stream: `register` page-locks the slice \
+                    where it is, and its copies are queued in order";
+        let (mut lent, mut buffer) = (cuda.lend(Vec::leak(vec![7u32; 4]))?, buffer_of(&cuda));
+        COPIED.set(0);
+        let e = cuda.copy(&mut buffer, &lent).err().ok_or("copy gave Ok")?;
+        assert_eq!(e.to_string(), said, "from a slice lent");
+        let e = cuda.copy(&mut lent, &buffer).err().ok_or("copy gave Ok")?;
+        assert_eq!(e.to_string(), said, "to a slice lent");
+        assert_eq!(COPIED.get(), 0, "the driver was asked for a copy of a slice lent");
+        let mut registered = cuda.register(Vec::leak(vec![7u32; 4]))?;
+        cuda.copy(&mut buffer, &registered)?;
+        cuda.copy(&mut registered, &buffer)?;
+        assert_eq!(COPIED.get(), 2, "the driver was not asked for the copies of a slice registered");
+        // A zeroing of the slice lent is queued as any is, and the host sees the zeros after the wait.
+        assert_eq!(lent.host()?, [7; 4]);
+        lent.zero()?;
+        assert_eq!(lent.host()?, [0; 4]);
         Ok(())
     }
 

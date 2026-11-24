@@ -57,8 +57,9 @@ impl Cuda {
 ///
 /// The GPU has a stream of its own besides, the null stream, which all the work goes to unless a thread says another:
 /// kernels, and what the host's copies and the drops of memory wait for. A kernel is launched on the current stream
-/// of its GPU, the thread's: the null stream, until [`run`](Stream::run) makes another current for a closure. Each
-/// thread has its own, and each GPU has one on each thread.
+/// of its GPU, the thread's, and so are a prefetch, a copy by [`Cuda::copy`] and a zeroing: `zero`, and the zeros that
+/// `alloc`, `managed`, `grow` and the load of a module write. It is the null stream, until [`run`](Stream::run) makes
+/// another current for a closure. Each thread has its own, and each GPU has one on each thread.
 ///
 /// A stream is blocking: its work and the null stream's wait for each other, as the null stream's work waits for all
 /// the work enqueued before it on any stream, and a stream's work for what the null stream has enqueued before it. So
@@ -76,9 +77,10 @@ pub struct Stream {
 impl Stream {
     /// Runs `work`, and returns what it returns, with this stream the current stream of its GPU on this thread: each
     /// kernel that `work` launches on the GPU, by [`Module::launch`](super::Module::launch) or by a launcher the macros
-    /// write, goes to it, through whichever [`Cuda`] of the GPU launches it. A `run` in `work` makes another stream
-    /// current, or this one, for its own closure; a `run` of a stream of another GPU is for that GPU alone. The stream
-    /// that was current is current again when `work` returns, or panics.
+    /// write, goes to it, through whichever [`Cuda`] of the GPU launches it, and so does each prefetch, copy and
+    /// zeroing that `work` makes on the GPU, and the zeros that `alloc`, `managed`, `grow` and the load of a module
+    /// write. A `run` in `work` makes another stream current, or this one, for its own closure; a `run` of a stream of
+    /// another GPU is for that GPU alone. The stream that was current is current again when `work` returns, or panics.
     ///
     /// # Safety
     ///

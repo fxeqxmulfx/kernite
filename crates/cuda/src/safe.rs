@@ -1,17 +1,23 @@
 //! A launch of a kernel that is no `unsafe fn`: the memory it is lent, and what the host checks of the launch before
 //! the kernel runs.
 
-use super::{Buffer, Error, Grid, Module, Plain, Ptr, sealed};
+use super::{Buffer, Cuda, Error, Grid, Module, Plain, Ptr, sealed};
 
 /// Memory a kernel that is no `unsafe fn` reads, which its launcher borrows for the call: a [`Buffer`], a [`View`] of
 /// a buffer, or [`Unified`](super::Unified) memory of `'static`: managed or page-locked memory, or a slice the host
-/// lends for good. The kernel is trusted with it until it is done, and the host's calls that reach the memory wait for
-/// the kernel first, as `read`, `write`, `host` and dropping the memory do. A slice lent for less is not, as a
+/// lends for good. [`Cuda::copy`] takes it too, but for a slice that [`Cuda::lend`](super::Cuda::lend) lent, which it
+/// refuses. The kernel and the copy are trusted with it until they are done, and the host's calls that reach the memory
+/// wait for them first, as `read`, `write`, `host` and dropping the memory do. A slice lent for less is not, as a
 /// `mem::forget` of what [`Cuda::lend`](super::Cuda::lend) gave would give it back to the host with no wait.
 pub trait Memory<T: Plain>: sealed::Sealed {
-    /// Its address and how many elements it has, as a kernel of `module` is lent them; an error if it is memory of
-    /// another GPU than the module's.
+    /// Its address and how many elements it has, as a kernel of `module` is lent them. It is an error if it is memory
+    /// of another GPU than the module's, or managed memory that the module's GPU cannot reach while the host does.
     fn lend(&self, module: &Module) -> Result<(Ptr<T>, usize), Error>;
+
+    /// Its address and how many elements it has, as a copy on the GPU of `cuda` reaches them. It is an error if it is
+    /// memory of another GPU than `cuda`'s, a slice that [`Cuda::lend`](super::Cuda::lend) lent, or managed memory that
+    /// `cuda`'s GPU cannot reach while the host does.
+    fn reach(&self, cuda: &Cuda) -> Result<(Ptr<T>, usize), Error>;
 }
 
 /// Memory a kernel that is no `unsafe fn` writes: its launcher borrows it mutably, so that the host holds no slice of
@@ -41,7 +47,12 @@ impl<T: Plain> sealed::Sealed for Buffer<T> {}
 
 impl<T: Plain> Memory<T> for Buffer<T> {
     fn lend(&self, module: &Module) -> Result<(Ptr<T>, usize), Error> {
-        module.driver.same_gpu(&self.driver)?;
+        module.reaches(&self.driver)?;
+        Ok((self.ptr(), self.len))
+    }
+
+    fn reach(&self, cuda: &Cuda) -> Result<(Ptr<T>, usize), Error> {
+        cuda.reaches(&self.driver)?;
         Ok((self.ptr(), self.len))
     }
 }
@@ -68,7 +79,12 @@ impl<T: Plain> sealed::Sealed for View<'_, T> {}
 
 impl<T: Plain> Memory<T> for View<'_, T> {
     fn lend(&self, module: &Module) -> Result<(Ptr<T>, usize), Error> {
-        module.driver.same_gpu(&self.of.driver)?;
+        module.reaches(&self.of.driver)?;
+        Ok((self.ptr, self.len))
+    }
+
+    fn reach(&self, cuda: &Cuda) -> Result<(Ptr<T>, usize), Error> {
+        cuda.reaches(&self.of.driver)?;
         Ok((self.ptr, self.len))
     }
 }

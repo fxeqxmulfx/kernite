@@ -160,9 +160,9 @@ impl Cuda {
 impl<T: Plain> Buffer<T> {
     /// Backs the elements it does not have yet, up to `len`, with memory at its addresses, so that it has `len`
     /// elements: the elements it had are as they were, where they were, and the elements it gains are zero, as those of
-    /// [`alloc`](Cuda::alloc) are, written after the kernels launched before have run. Its address, `ptr()`, does not
-    /// change. The buffer is one that [`reserve`](Cuda::reserve) made: one that `alloc` or `upload` made has its memory
-    /// fixed.
+    /// [`alloc`](Cuda::alloc) are, written on the current stream of its GPU, after the work that stream was given
+    /// before. Its address, `ptr()`, does not change. The buffer is one that [`reserve`](Cuda::reserve) made: one that
+    /// `alloc` or `upload` made has its memory fixed.
     ///
     /// The driver backs memory a granule at a time, 2 MiB here, and the GPU's free memory falls by whole granules: a
     /// buffer of 1 element holds a granule, and grows into the rest of it with no more memory.
@@ -230,9 +230,9 @@ impl<T: Plain> Buffer<T> {
     /// them at once, and does not wait for work that reaches them, which fails with `CUDA_ERROR_ILLEGAL_ADDRESS (700)`,
     /// as does each call after it. No pointer to them, from `ptr()` or `at()`, is used again.
     ///
-    /// The zeros that [`grow`](Buffer::grow) writes to the elements it gains, and the work of [`zero`](Buffer::zero)
-    /// and [`copy_from`](Buffer::copy_from), are such work until the GPU has done it: each returns before then, and
-    /// [`Cuda::sync`] waits for them.
+    /// The zeros that [`grow`](Buffer::grow) writes to the elements it gains, and the work of [`zero`](Buffer::zero),
+    /// [`Cuda::copy`] and [`copy_from`](Buffer::copy_from), are such work until the GPU has done it: each returns
+    /// before then, and [`Cuda::sync`] waits for them.
     pub unsafe fn shrink(&mut self, len: usize) -> Result<(), Error> {
         let reservation = self.reserved("cuMemUnmap", "shrink")?;
         if len > self.len {
@@ -278,9 +278,10 @@ impl<T: Plain> Buffer<T> {
 mod tests {
     use std::cell::{Cell, RefCell};
 
-    use super::super::CuResult;
     use super::super::unified::tests::gpu_with;
+    use super::super::{CuResult, Handle};
     use super::*;
+    use crate::tests::{create_stream, destroy_stream};
 
     type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
@@ -376,9 +377,10 @@ mod tests {
         took(format!("cuMemUnmap {} {bytes}", from_base(at)))
     }
 
-    /// The fake driver's `cuMemsetD8`.
-    unsafe extern "C" fn memset(at: u64, value: u8, bytes: usize) -> CuResult {
-        took(format!("cuMemsetD8 {} {value} {bytes}", from_base(at)))
+    /// The fake driver's `cuMemsetD8Async`: it says the stream, when it is not the null stream.
+    unsafe extern "C" fn memset(at: u64, value: u8, bytes: usize, stream: Handle) -> CuResult {
+        let on = if stream.is_null() { String::new() } else { format!(" on {:#x}", stream.addr()) };
+        took(format!("cuMemsetD8Async {} {value} {bytes}{on}", from_base(at)))
     }
 
     /// The fake driver's `cuCtxSynchronize`.
@@ -417,6 +419,8 @@ mod tests {
             api.synchronize = synchronize;
             api.alloc = alloc;
             api.free = free;
+            api.create_stream = create_stream;
+            api.destroy_stream = destroy_stream;
         })
     }
 
@@ -517,15 +521,15 @@ mod tests {
         // holds the memory. The GPU may use it, and the zeros of the element are written.
         buffer.grow(1)?;
         let mut first = backing(0, 1).to_vec();
-        first.extend([access(0, 1), "cuMemsetD8 0 0 4".to_string()]);
+        first.extend([access(0, 1), "cuMemsetD8Async 0 0 4".to_string()]);
         assert_eq!((calls(), buffer.len()), (first, 1));
         // The rest of the granule is memory it has: it grows into it with the zeros alone.
         buffer.grow(WORDS)?;
-        assert_eq!((calls(), buffer.len()), ([format!("cuMemsetD8 4 0 {}", GRANULE - 4)].to_vec(), WORDS));
+        assert_eq!((calls(), buffer.len()), ([format!("cuMemsetD8Async 4 0 {}", GRANULE - 4)].to_vec(), WORDS));
         // An element past it needs the next granule, and no other.
         buffer.grow(WORDS + 1)?;
         let mut second = backing(GRANULE, 2).to_vec();
-        second.extend([access(GRANULE, 1), format!("cuMemsetD8 {GRANULE} 0 4")]);
+        second.extend([access(GRANULE, 1), format!("cuMemsetD8Async {GRANULE} 0 4")]);
         assert_eq!((calls(), buffer.len()), (second, WORDS + 1));
         // The last granule is given back alone, as nothing is left in it; and no granule that has an element is.
         shrink(&mut buffer, WORDS)?;
@@ -537,6 +541,22 @@ mod tests {
         Ok(())
     }
 
+    /// The zeros that a growth writes go to the current stream of the GPU, after the work that stream was given before:
+    /// the null stream where no other is current, and the stream of a `run` where one is.
+    #[test]
+    fn the_zeros_that_a_growth_writes_go_to_the_current_stream() -> Result {
+        let cuda = fake()?;
+        let (mut buffer, stream) = (cuda.reserve::<u32>(2 * WORDS)?, cuda.stream()?);
+        calls();
+        // SAFETY: the fake driver runs no work.
+        unsafe { stream.run(|| buffer.grow(1)) }?;
+        let zeros = calls().into_iter().filter(|call| call.starts_with("cuMemsetD8Async")).collect::<Vec<_>>();
+        assert_eq!(zeros, ["cuMemsetD8Async 0 0 4 on 0x100"], "the zeros of a growth in a run");
+        buffer.grow(2)?;
+        assert_eq!(calls(), ["cuMemsetD8Async 4 0 4"], "the zeros of a growth where no stream is current");
+        Ok(())
+    }
+
     #[test]
     fn a_growth_over_granules_makes_them_in_turn_and_lets_the_gpu_use_them_all_at_once() -> Result {
         let cuda = fake()?;
@@ -545,7 +565,7 @@ mod tests {
         buffer.grow(2 * WORDS + 3)?;
         let mut calls_made = backing(GRANULE, 2).to_vec();
         calls_made.extend(backing(2 * GRANULE, 3));
-        calls_made.extend([access(GRANULE, 2), format!("cuMemsetD8 {GRANULE} 0 {}", GRANULE + 12)]);
+        calls_made.extend([access(GRANULE, 2), format!("cuMemsetD8Async {GRANULE} 0 {}", GRANULE + 12)]);
         assert_eq!(calls(), calls_made);
         // And the buffer gives them back the last first, as those that remain must be the first.
         shrink(&mut buffer, 1)?;
@@ -591,9 +611,9 @@ mod tests {
         let expected = [both.to_vec(), vec![access(GRANULE, 2), unmap(2), unmap(1)]].concat();
         assert_eq!(refused_growth("cuMemSetAccess", 0)?, (expected, 1));
         // Zeros the driver refuses to write: the same.
-        let zeros = format!("cuMemsetD8 4 0 {}", 2 * GRANULE);
+        let zeros = format!("cuMemsetD8Async 4 0 {}", 2 * GRANULE);
         let expected = [both.to_vec(), vec![access(GRANULE, 2), zeros, unmap(2), unmap(1)]].concat();
-        assert_eq!(refused_growth("cuMemsetD8", 0)?, (expected, 1));
+        assert_eq!(refused_growth("cuMemsetD8Async", 0)?, (expected, 1));
         Ok(())
     }
 

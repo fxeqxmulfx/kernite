@@ -1008,21 +1008,23 @@ the buffer keeps its address. The elements it grows into again are zero, those o
 the elements it has is an error, `cuMemUnmap: a buffer of 10 elements shrunk to 1000`, and so is a buffer that `alloc`
 made. `shrink` does not wait, so it is `unsafe`: no work that is queued or running on the GPU, on any stream, may reach
 an element from `len` on, or it fails with `CUDA_ERROR_ILLEGAL_ADDRESS (700)`, as does each call after it, and a pointer
-to those elements is not used again. The zeros that `grow` writes to the elements it gains, and the work of `zero` and
-`copy_from`, are such work until the GPU has done it: each returns before then, and `cuda.sync()` waits for them.
-Dropping the buffer waits for the kernels, as dropping any buffer does, then unmaps its memory and frees its addresses.
+to those elements is not used again. The zeros that `grow` writes to the elements it gains, and the work of `zero`,
+`cuda.copy` and `copy_from`, are such work until the GPU has done it: each returns before then, and `cuda.sync()` waits
+for them. Dropping the buffer waits for the kernels, as dropping any buffer does, then unmaps its memory and frees its
+addresses.
 
 `cuda.stream()` is a stream of the GPU: a queue of work that the GPU runs in order, beside the work of other streams.
 The work of a GPU goes to its null stream unless the thread says another: a kernel is launched on the current stream of
 its GPU, and `unsafe { stream.run(|| ..) }` makes `stream` the current stream of its GPU on the thread for the closure.
 Each launch in the closure goes to `stream`, through whichever `Cuda` of the GPU makes it, by `Module::launch` or by a
-launcher that kernite writes; so does `prefetch`. A `run` may be in a `run`. The stream that was current is current
-again when the closure returns, or panics, and a stream of another GPU is current for that GPU alone. A stream is
-blocking: its work and the null stream's wait for each other. So `zero` and `copy_from` run after the kernels that a
-stream was given before them, and before those it is given after; and `read`, `write`, `host()`, `host_mut()`, and the
-drop of a buffer, of unified memory and of a module, wait for the stream's work. The work of two streams does not wait
-for each other, and runs at once where the GPU has room. `stream.sync()` waits for the work of that stream alone, and
-`cuda.sync()` for all of the GPU's. Dropping a stream destroys it, and the work it holds runs on.
+launcher that kernite writes; so do `prefetch`, a copy, a zeroing, and the zeros that `alloc`, `managed`, `grow` and the
+load of a module write. A `run` may be in a `run`. The stream that was current is current again when the closure
+returns, or panics, and a stream of another GPU is current for that GPU alone. A stream is blocking: its work and the
+null stream's wait for each other. So `copy_from` runs after the kernels that a stream was given before it, and before
+those it is given after; and `read`, `write`, `host()`, `host_mut()`, and the drop of a buffer, of unified memory and of
+a module, wait for the stream's work. The work of two streams does not wait for each other, and runs at once where the
+GPU has room. `stream.sync()` waits for the work of that stream alone, and `cuda.sync()` for all of the GPU's. Dropping
+a stream destroys it, and the work it holds runs on.
 
 `run` is `unsafe`, as kernite cannot see what the work of two streams reaches. Until the work that the closure launches
 is done, work of another stream that may run beside it must write no memory that it reaches, and reach none that it
@@ -1070,12 +1072,16 @@ memory with `managed_uninit`, fills it with an x86 kernel, squares it with a PTX
 kernel, bit for bit, with no copy.
 
 The zeros cost. The GPU writes the zeros of managed memory, so the driver has each page at the GPU when the host first
-writes it, and moves it back; the host writes the zeros of page-locked memory in a pass of its own, before its fill.
-Memory that the host or a kernel writes whole before anything reads it needs none: `cuda.managed_uninit::<f32>(len)` and
-`cuda.pinned_uninit::<f32>(len)` leave the bytes as the driver does, and cost what `cuMemAllocManaged` and
-`cuMemHostAlloc` do. They are `unsafe`, because the bytes may be those of memory freed before, which the driver hands
-out again where a buffer beside it holds the page: the host or a kernel writes each element before anything reads it.
-Memory that is read before it is all written is made with `managed` and `pinned`, which are safe.
+writes it, and moves it back; the host writes the zeros of page-locked memory in a pass of its own, before its fill. The
+GPU's zeros go to the current stream, as a launch does, and `managed` returns once they are queued, where the GPU
+reaches managed memory while the host does. A GPU that does not owns managed memory while it writes them, and faults the
+host that touches any, a slice from `host()` that it holds say, so `managed` waits for the zeros there, and for all the
+work of the GPU, as `cuda.sync()` does. Memory that the host or a kernel writes whole before anything reads it needs
+none: `cuda.managed_uninit::<f32>(len)` and `cuda.pinned_uninit::<f32>(len)` leave the bytes as the driver does, and
+cost what `cuMemAllocManaged` and `cuMemHostAlloc` do. They are `unsafe`, because the bytes may be those of memory freed
+before, which the driver hands out again where a buffer beside it holds the page: the host or a kernel writes each
+element before anything reads it. Memory that is read before it is all written is made with `managed` and `pinned`,
+which are safe.
 
 A GPU does not do all four, so each asks the GPU first. Where the GPU cannot, the error says so in these words, and no
 kernel is left to fault: `cuMemAllocManaged: the GPU cannot allocate managed memory: its
@@ -1113,6 +1119,35 @@ no `sync` of its own. The compiler refuses to take a pointer for a kernel while 
 registered, as `lend` and `register` borrow the slice. Dropping the memory waits for the kernels that use it, as
 dropping a buffer does, and then frees it, or gives a slice lent back to the host, or unlocks a slice registered and
 gives it back.
+
+`cuda.copy(&mut to, &from)` copies the elements of `from` to `to`, and returns once the GPU has the copy queued, not
+when it has done it. Each is a buffer, or unified memory that is managed, page-locked or registered for good, and `from`
+may be a view of a buffer. `to` is borrowed mutably, so rustc refuses a copy of memory onto itself. It refuses a copy
+from or to a slice registered for less than for good too, as it refuses to lend one to a kernel that is no `unsafe fn`.
+The driver tells from the two addresses where each is, so one call copies page-locked memory to a buffer, a buffer to
+page-locked memory, and a buffer to a buffer. `zero()`, of a buffer, of unified memory and of a module's global, sets
+every element to zero, and returns once the GPU has it queued too, as `grow` does for the zeros it writes. Each goes to
+the current stream, as a launch does: after the work that stream was given before it, and before the work it is given
+after. A copy in a `run` of a stream of its own runs beside the work of other streams, so a kernel on stream `a` that
+waits for an element that a copy on stream `b` writes sees it. The host's calls that reach the memory wait for a copy
+and for a zeroing as they wait for a kernel: `read`, `write`, `host()`, `host_mut()`, `cuda.sync()`, and dropping the
+memory.
+
+A copy that kernite refuses is refused before the driver is asked, and nothing is copied. Memory of another number of
+elements is an error that says each length, `cuMemcpyAsync: memory of 4 elements copied from memory of 2`. So is memory
+of another GPU, `cuMemcpyAsync: the memory is on another GPU than the copy is made on`, and `copy_from` copies a buffer
+to one of another GPU, through the null stream. So is a slice that `lend` lent: the driver reads such a slice as the
+call is made, before the work the stream was given earlier has run, and writes it only after the call has waited for the
+stream, so its copy would not be queued in order. The error says so, and names `register`, which page-locks the same
+slice where it is, and whose copies are queued in order, as those of page-locked and of managed memory are:
+``cuMemcpyAsync: a slice that `lend` lent is not copied from or to, as the driver reads it when the call is made, and
+writes it after the call waits for the stream: `register` page-locks the slice where it is, and its copies are queued in
+order``. So is managed memory on a GPU that cannot reach it while the host does, which the host may touch while the copy
+runs: ``cuMemcpyAsync: managed memory is not copied by a GPU that cannot reach it while the host does: its
+CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0``. A zeroing of it is refused in the same way, ``cuMemsetD8Async:
+managed memory is not zeroed by a GPU that cannot reach it while the host does``, with the same attribute at its end, as
+is a launch of a kernel that is no `unsafe fn`, below. `read` and `write` copy the host's own slice, and wait. A zeroing
+of a slice that `lend` lent is queued in order, as that of any other memory is.
 
 A pointer taken before the slice is `Copy`, and the compiler cannot refuse a launch on it, so the launch of a kernel
 that is an `unsafe fn`, which takes pointers, is `unsafe`, and its contract is this: each pointer is to a buffer or to
@@ -1331,12 +1366,14 @@ A module's global memory may be of any size that the GPU has the memory for. `pt
 global memory in 32 bits, and cuts a bigger one without a word, so a static of global memory that makes it 4 GB, its
 bytes with those of the statics before it that are in the module, each with the padding its alignment may need, is
 outside the module, `static BIG: global<[u8; 6442450944]>;` say: kernite-cuda allocates it, zeros, at its alignment,
-when it loads the module, and frees it with the module. Every static counts, whatever `cfg` keeps, so a static is in the
-module or outside it whichever features are on. A GPU that has not the memory is an error at the load, which names the
-static. A kernel reaches it as it reaches a static in the module, `st.global.u8([BIG + 6442450943], v)`, and at the same
-cost: it reads the address from the module's constant memory, where the address of one in the module is read from the
-driver's, and its instructions are the same. It holds zeros, so a value is an error. The host reads and writes it as it
-does a static in the module. Its address takes 8 bytes of the 64 KB.
+when it loads the module, and frees it with the module. The zeros go to the current stream, as those of `alloc` do,
+after the work that stream was given before, and the load does not wait for them. Every static counts, whatever `cfg`
+keeps, so a static is in the module or outside it whichever features are on. A GPU that has not the memory is an error
+at the load, which names the static. A kernel reaches it as it reaches a static in the module,
+`st.global.u8([BIG + 6442450943], v)`, and at the same cost: it reads the address from the module's constant memory,
+where the address of one in the module is read from the driver's, and its instructions are the same. It holds zeros, so
+a value is an error. The host reads and writes it as it does a static in the module. Its address takes 8 bytes of the
+64 KB.
 
 A static is memory on the GPU, and no symbol or code of the host's, so the method that gives it has the attributes that
 say how Rust has it, and no other: a doc, `cfg`, `deprecated`, the level of a lint, `allow`, `warn`, `deny`, `forbid` or
@@ -1540,7 +1577,7 @@ Each crate depends only on the layers inside it. `crates/kernite/tests/architect
 | adapters | `kernite-x86`, `kernite-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kernite` | which machine and syntax each kernel compiles with |
 | delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, and the safe functions that call them; launchers of a grid's threads, or launchers of PTX |
-| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and how much of it is free, memory the host reaches too, modules, launches and what a safe kernel's launch must hold, streams that launches go to, events that order and time them, copies between GPUs; `f16` and `bf16`; depends on no other crate |
+| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and how much of it is free, memory the host reaches too, modules, launches and what a safe kernel's launch must hold, streams that launches, copies and zeroings go to, events that order and time them, copies between GPUs; `f16` and `bf16`; depends on no other crate |
 | runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid and the CPUs they run on, and the memory of a module of x86 kernels; depends on no other crate |
 
 ## Guarantees

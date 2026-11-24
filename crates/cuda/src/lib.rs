@@ -57,11 +57,13 @@
 //!
 //! Kernels run in the order they are launched on one stream, and a GPU runs the work of two streams at once where it
 //! has room. All the work goes to the GPU's null stream, unless a thread makes another stream current for a closure,
-//! [`Stream::run`], which [`Cuda::stream`] makes: a launch goes to the current stream of its GPU on the thread. A
-//! stream is blocking, so the copies and the drops that wait for the null stream's work wait for its work too. An
-//! [`Event`], which [`Cuda::event`] makes, is a point in the work of a stream: the host asks whether the work before
-//! it is done, or waits for it, and another stream waits for it with no wait of the host. [`Cuda::timed_event`] makes
-//! one that times work, and [`Event::duration_since`] says the time between two.
+//! [`Stream::run`], which [`Cuda::stream`] makes: a launch goes to the current stream of its GPU on the thread, and so
+//! do a prefetch, a copy that does not wait, [`Cuda::copy`], and a zeroing: `zero`, and the zeros that [`Cuda::alloc`],
+//! [`Cuda::managed`], [`Buffer::grow`] and the load of a module write. A stream is blocking, so the copies and the
+//! drops that wait for the null stream's work wait for its work too. An [`Event`], which [`Cuda::event`] makes, is a
+//! point in the work of a stream: the host asks whether the work before it is done, or waits for it, and another
+//! stream waits for it with no wait of the host. [`Cuda::timed_event`] makes one that times work, and
+//! [`Event::duration_since`] says the time between two.
 //!
 //! A kernel whose blocks wait for each other is launched cooperatively,
 //! [`Module::launch_cooperative`]: every block of the grid runs at once, so there are at most
@@ -74,6 +76,7 @@ use std::marker::PhantomData;
 use std::ptr;
 use std::rc::Rc;
 
+mod copy;
 mod event;
 mod half;
 #[doc(hidden)]
@@ -214,7 +217,8 @@ api! {
     to_device = c"cuMemcpyHtoD_v2"(u64, *const c_void, usize);
     to_host = c"cuMemcpyDtoH_v2"(*mut c_void, u64, usize);
     copy_peer = c"cuMemcpyPeer"(u64, Handle, u64, Handle, usize);
-    memset = c"cuMemsetD8_v2"(u64, u8, usize);
+    copy_async = c"cuMemcpyAsync"(u64, u64, usize, Handle);
+    memset = c"cuMemsetD8Async"(u64, u8, usize, Handle);
     memory_info = c"cuMemGetInfo_v2"(*mut usize, *mut usize);
     granularity = c"cuMemGetAllocationGranularity"(*mut usize, *const Properties, c_int);
     reserve_addresses = c"cuMemAddressReserve"(*mut u64, usize, usize, u64, u64);
@@ -417,11 +421,11 @@ impl Driver {
         Ok(&self.api)
     }
 
-    /// `Ok` if `other` is this GPU: memory on another is no memory of a kernel loaded on this one.
-    fn same_gpu(&self, other: &Driver) -> Result<(), Error> {
+    /// `Ok` if `other` is this GPU. A launch, a copy and the time between two events are each of one GPU, so what is of
+    /// another is refused: the error is of `call`, and `message` says what is of another GPU than the call is made on.
+    fn require_same_gpu(&self, other: &Driver, call: &'static str, message: &str) -> Result<(), Error> {
         if self.context != other.context {
-            let message = "the memory is on another GPU than the kernels are loaded on".to_string();
-            return Err(Error::new("cuLaunchKernel", message));
+            return Err(Error::new(call, message.to_string()));
         }
         Ok(())
     }
@@ -457,12 +461,13 @@ impl Driver {
         api.check("cuMemcpyDtoH", copied)
     }
 
-    /// Sets the `bytes` bytes at `ptr` on the GPU to zero, after the kernels launched before
-    /// have run.
+    /// Sets the `bytes` bytes at `ptr` to zero, on the current stream: after the work that stream was given before,
+    /// and it does not wait.
     fn zero(&self, ptr: u64, bytes: usize) -> Result<(), Error> {
         let api = self.current()?;
-        // SAFETY: it writes on the GPU alone.
-        api.check("cuMemsetD8", unsafe { (api.memset)(ptr, 0, bytes) })
+        // SAFETY: it writes the `bytes` bytes at `ptr`, which the caller has, and the stream is the null stream or one
+        // that a `run` of this thread holds.
+        api.check("cuMemsetD8Async", unsafe { (api.memset)(ptr, 0, bytes, self.stream()) })
     }
 
     /// How many bytes of this GPU's memory are free, and how many it has in all.
@@ -722,7 +727,8 @@ impl Cuda {
     /// managed memory while any kernel runs, so the host may hold a slice of managed memory while
     /// a kernel runs only where this is true: [`Module::launch`] has the rule. Such a GPU is also
     /// refused [`Unified::prefetch`], and [`Unified::advise`] of a preferred location or an
-    /// accessor that is the GPU.
+    /// accessor that is the GPU, and a copy and a zeroing of managed memory, [`Cuda::copy`] and
+    /// [`Unified::zero`], as the host may touch the memory while they run.
     pub fn concurrent_managed_access(&self) -> bool {
         self.concurrent_managed_access
     }
@@ -739,7 +745,9 @@ impl Cuda {
         self.driver.memory()
     }
 
-    /// `len` elements on the GPU, all zero.
+    /// `len` elements on the GPU, all zero. The zeros go to the current stream of the GPU, as a launch does, after the
+    /// work that stream was given before, and the call does not wait for them: the host's calls that reach the buffer
+    /// do, as they wait for a kernel.
     pub fn alloc<T: Plain>(&self, len: usize) -> Result<Buffer<T>, Error> {
         let mut b = self.uninit(len)?;
         b.zero()?;
@@ -842,8 +850,8 @@ impl<T: Plain> Buffer<T> {
         self.driver.read_into(self.ptr, out)
     }
 
-    /// Sets every element to zero, after the kernels launched before have run. It returns before the GPU has done it:
-    /// `read`, `write` and [`Cuda::sync`] wait for it.
+    /// Sets every element to zero, on the current stream, after the work that stream was given before. It returns
+    /// before the GPU has done it: `read`, `write` and [`Cuda::sync`] wait for it.
     pub fn zero(&mut self) -> Result<(), Error> {
         self.driver.zero(self.ptr, self.len * size_of::<T>())
     }
@@ -1058,9 +1066,11 @@ impl Module {
     /// `ptx` compiled for `cuda`'s GPU, with its kernels `names` and its memory `globals`, each by its name, in that
     /// order: a variable in global or constant memory, `None`; or `Some((bytes, align))`, memory the module has no room
     /// for, which `ptxas` cannot lay out in it: the name is that of a `.u64` in the module's constant memory, where its
-    /// kernels read the address of the memory this allocates, `bytes` of it at a multiple of `align`, zeros, freed with
-    /// the module. If the driver will not compile the PTX, the error's `log` is what its compiler said; and a GPU that
-    /// has not the memory is an error that names the variable and its bytes. Panics if an alignment is 0.
+    /// kernels read the address of the memory this allocates, `bytes` of it at a multiple of `align`, freed with the
+    /// module. The memory is zeros, which go to the current stream of the GPU as those of [`alloc`](Cuda::alloc) do,
+    /// after the work that stream was given before, and the call does not wait for them. If the driver will not compile
+    /// the PTX, the error's `log` is what its compiler said; and a GPU that has not the memory is an error that names
+    /// the variable and its bytes. Panics if an alignment is 0.
     pub fn load(
         cuda: &Cuda,
         ptx: &str,
@@ -1235,6 +1245,12 @@ impl Module {
         Ok(blocks as u32 * self.multiprocessors)
     }
 
+    /// `Ok` if `memory` is of this module's GPU: memory of another is no memory of a kernel loaded on this one.
+    pub(crate) fn reaches(&self, memory: &Driver) -> Result<(), Error> {
+        let message = "the memory is on another GPU than the kernels are loaded on";
+        self.driver.require_same_gpu(memory, "cuLaunchKernel", message)
+    }
+
     /// Kernel `index`, as [`load`](Module::load) was given its name; or why the module has none, as the call `call`
     /// that asks for it says.
     fn kernel(&self, call: &'static str, index: usize) -> Result<&Kernel, Error> {
@@ -1332,7 +1348,8 @@ impl<T: Plain> Global<'_, T> {
         self.module.driver.read_into(self.ptr, out)
     }
 
-    /// Sets every element to zero, after the kernels launched before have run.
+    /// Sets every element to zero, on the current stream, after the work that stream was given before, and does not
+    /// wait for it. The host's calls that reach it wait for the zeros, as they wait for a kernel.
     pub fn zero(&self) -> Result<(), Error> {
         self.module.driver.zero(self.ptr, self.len * size_of::<T>())
     }
@@ -1409,6 +1426,8 @@ mod tests {
             c"cuEventQuery",
             c"cuEventSynchronize",
             c"cuStreamWaitEvent",
+            c"cuMemcpyAsync",
+            c"cuMemsetD8Async",
             c"cuGetErrorString",
         ] {
             let e = Api::load(finds(&[name])).err().ok_or("err gave None")?;
@@ -1441,14 +1460,32 @@ mod tests {
         Ok(())
     }
 
-    /// Memory is lent to a kernel loaded on the GPU the memory is on, which is the GPU whose context is the same, and
-    /// to no other: the error says so, in GUIDE.md's words, before the kernel runs.
+    /// What is of another GPU is refused by one check, which the launch, the copy and the time between two events each
+    /// give their words: the GPU whose context is the same is this GPU, and any other is not, and the error is of the
+    /// call, with the words it was given.
+    #[test]
+    fn what_is_of_another_gpu_is_refused_by_one_check_that_each_call_gives_its_words() -> Result {
+        let on = |context| Driver { api: Api::refusing(), device: 0, context: ptr::without_provenance_mut(context) };
+        assert_eq!(on(1).require_same_gpu(&on(1), "cuAnyCall", "any words"), Ok(()));
+        let e = on(1).require_same_gpu(&on(2), "cuAnyCall", "any words").err().ok_or("the check gave Ok")?;
+        assert_eq!((e.call, e.message.as_str()), ("cuAnyCall", "any words"));
+        Ok(())
+    }
+
+    /// Memory is lent to a kernel loaded on the GPU the memory is on, a buffer, or the tail of one, and to no other:
+    /// the error says so, in GUIDE.md's words, before the kernel runs.
     #[test]
     fn memory_is_lent_only_to_a_kernel_loaded_on_its_own_gpu() -> Result {
-        let on = |context| Driver { api: Api::refusing(), device: 0, context: ptr::without_provenance_mut(context) };
-        assert_eq!(on(1).same_gpu(&on(1)), Ok(()));
-        let e = on(1).same_gpu(&on(2)).err().ok_or("same_gpu gave Ok")?;
-        assert_eq!(e.to_string(), "cuLaunchKernel: the memory is on another GPU than the kernels are loaded on");
+        let (cuda, other) = (gpu_in(1)?, gpu_in(2)?);
+        let module = kernel(&cuda)?;
+        let (here, there) = (cuda.alloc::<u32>(4)?, other.alloc::<u32>(4)?);
+        let said = "cuLaunchKernel: the memory is on another GPU than the kernels are loaded on";
+        let e = there.lend(&module).err().ok_or("lend gave Ok")?;
+        assert_eq!(e.to_string(), said, "a buffer of another GPU");
+        let e = there.tail(1).ok_or("tail gave None")?.lend(&module).err().ok_or("lend gave Ok")?;
+        assert_eq!(e.to_string(), said, "the tail of a buffer of another GPU");
+        assert_eq!(here.lend(&module)?.1, 4, "a buffer of this GPU");
+        assert_eq!(here.tail(1).ok_or("tail gave None")?.lend(&module)?.1, 3, "the tail of a buffer of this GPU");
         Ok(())
     }
 
@@ -1694,10 +1731,46 @@ mod tests {
         0
     }
 
-    /// The fake driver's `cuMemsetD8`.
-    unsafe extern "C" fn memset(at: u64, value: u8, bytes: usize) -> CuResult {
-        ask(format!("set {at:#x} to {value}, {bytes} bytes"));
+    /// The fake driver's `cuMemsetD8Async`: it says the stream, when it is not the null stream.
+    unsafe extern "C" fn memset(at: u64, value: u8, bytes: usize, stream: Handle) -> CuResult {
+        let on = if stream.is_null() { String::new() } else { format!(" on {:#x}", stream.addr()) };
+        ask(format!("set {at:#x} to {value}, {bytes} bytes{on}"));
         0
+    }
+
+    /// The fake driver's `cuMemAllocManaged`: it hands out addresses as `cuMemAlloc` does.
+    unsafe extern "C" fn alloc_managed(at: *mut u64, bytes: usize, _: c_uint) -> CuResult {
+        ask(format!("alloc managed {bytes}"));
+        // SAFETY: the caller gives a place for the address.
+        unsafe { *at = NEXT.get() };
+        NEXT.set(NEXT.get() + bytes as u64);
+        0
+    }
+
+    /// The fake driver's `cuCtxSynchronize`: it says the context it works in. In the context 14 it fails, with
+    /// `CUDA_ERROR_ILLEGAL_ADDRESS`, as it does where a kernel failed.
+    unsafe extern "C" fn synchronize() -> CuResult {
+        ask(format!("synchronize in {}", WORKING_IN.get()));
+        if WORKING_IN.get() == 14 { 700 } else { 0 }
+    }
+
+    /// The fake driver's `cuDeviceGetAttribute` of a GPU that cannot reach managed memory while the host does: every
+    /// attribute is 1, but that one.
+    unsafe extern "C" fn attribute_but_concurrent_managed_access(
+        value: *mut c_int,
+        attribute: c_int,
+        _: c_int,
+    ) -> CuResult {
+        // SAFETY: the caller gives a place for the value.
+        unsafe { *value = c_int::from(attribute != unified::CONCURRENT_MANAGED_ACCESS.0) };
+        0
+    }
+
+    /// The fake driver's `cuMemcpyAsync`: it says the addresses, the bytes, the stream and the context it works in. In
+    /// the context 14 the copy is refused, with `CUDA_ERROR_ILLEGAL_ADDRESS`.
+    unsafe extern "C" fn copy_async(to: u64, from: u64, bytes: usize, stream: Handle) -> CuResult {
+        ask(format!("copy {bytes} bytes from {from:#x} to {to:#x} on {:#x} in {}", stream.addr(), WORKING_IN.get()));
+        if WORKING_IN.get() == 14 { 700 } else { 0 }
     }
 
     /// The fake driver's `cuMemcpyHtoD`: it says the `u64` it is given.
@@ -1777,6 +1850,7 @@ mod tests {
         api.elapsed_time = Ok(elapsed_time);
         api.alloc = alloc;
         api.memset = memset;
+        api.copy_async = copy_async;
         api.memory_info = memory_info;
         api.to_device = to_device;
         api.free = free;
@@ -2204,6 +2278,159 @@ mod tests {
         .join()
         .map_err(|_| "the thread panicked")??;
         assert_eq!(hear.recv()?, Ok(vec!["launch on 0x0 in 1".to_string()]));
+        Ok(())
+    }
+
+    /// A copy asks the driver for the copy alone, from the address of one memory to the other's with their bytes, on
+    /// the null stream until a `run` makes a stream current, and then on that stream; a view of a buffer is copied
+    /// from by its own address.
+    #[test]
+    fn a_copy_asks_the_driver_for_the_copy_alone_on_the_current_stream() -> Result {
+        let cuda = gpu()?;
+        let (from, mut to, stream) = (cuda.alloc::<u32>(4)?, cuda.alloc::<u32>(4)?, cuda.stream()?);
+        let (first, second) = (0x7000_0000_0000u64, 0x7000_0000_0010u64);
+        asked();
+        cuda.copy(&mut to, &from)?;
+        assert_eq!(asked(), [format!("copy 16 bytes from {first:#x} to {second:#x} on 0x0 in 1")]);
+        running(&stream, || cuda.copy(&mut to, &from))?;
+        assert_eq!(asked(), [format!("copy 16 bytes from {first:#x} to {second:#x} on 0x100 in 1")]);
+        let tail = from.tail(1).ok_or("tail gave None")?;
+        let mut end = cuda.alloc::<u32>(3)?;
+        asked();
+        cuda.copy(&mut end, &tail)?;
+        let (from_tail, to_end) = (first + 4, second + 16);
+        assert_eq!(asked(), [format!("copy 12 bytes from {from_tail:#x} to {to_end:#x} on 0x0 in 1")]);
+        Ok(())
+    }
+
+    /// Zeroing a buffer, or a module's memory, goes to the current stream, and not to the null stream where one is
+    /// current.
+    #[test]
+    fn zeroing_memory_goes_to_the_current_stream() -> Result {
+        let cuda = gpu()?;
+        let (mut buffer, stream) = (cuda.alloc::<u32>(4)?, cuda.stream()?);
+        let at = 0x7000_0000_0000u64;
+        asked();
+        buffer.zero()?;
+        assert_eq!(asked(), [format!("set {at:#x} to 0, 16 bytes")]);
+        running(&stream, || buffer.zero())?;
+        assert_eq!(asked(), [format!("set {at:#x} to 0, 16 bytes on 0x100")]);
+        let module = Module::load(&cuda, "", &[], &[("small", None)])?;
+        asked();
+        running(&stream, || module.global::<u8>(0)?.zero())?;
+        assert_eq!(asked(), ["set 0x1000 to 0, 16 bytes on 0x100"]);
+        Ok(())
+    }
+
+    /// The zeros of `alloc`, of `managed` and of a module's load, for memory the module has no room for, go to the
+    /// current stream, as those of `zero` do, and not to the null stream where one is current: each is queued after
+    /// the work that stream was given, with no wait.
+    #[test]
+    fn the_zeros_of_new_memory_go_to_the_current_stream() -> Result {
+        let cuda = gpu_replacing(1, |api| api.alloc_managed = alloc_managed)?;
+        let stream = cuda.stream()?;
+        let made = || -> Result<Vec<String>> {
+            asked();
+            let _memory = (
+                cuda.alloc::<u32>(4)?,
+                cuda.managed::<u32>(4)?,
+                Module::load(&cuda, "", &[], &[("slot", Some((256, 1)))])?,
+            );
+            Ok(asked())
+        };
+        let at = 0x7000_0000_0000u64;
+        let (buffer, managed, module) = (at, at + 16, at + 32);
+        let on = |stream: &str| {
+            [
+                "alloc 16".to_string(),
+                format!("set {buffer:#x} to 0, 16 bytes{stream}"),
+                "alloc managed 16".to_string(),
+                format!("set {managed:#x} to 0, 16 bytes{stream}"),
+                "alloc 256".to_string(),
+                format!("set {module:#x} to 0, 256 bytes{stream}"),
+                format!("write {module:#x} at 0x2000, 8 bytes"),
+            ]
+        };
+        assert_eq!(made()?, on(""), "where no stream is current");
+        NEXT.set(at);
+        assert_eq!(running(&stream, made)?, on(" on 0x100"), "in a run");
+        Ok(())
+    }
+
+    /// `managed` returns once its zeros are queued where its GPU reaches managed memory while the host does. A GPU that
+    /// does not owns managed memory while it writes them, and faults the host that touches any, so there `managed`
+    /// waits for the GPU after it queues them, and says whether the work failed.
+    #[test]
+    fn managed_waits_for_its_zeros_only_where_the_gpu_cannot_reach_managed_memory_with_the_host() -> Result {
+        let (zeros, sync) = ("set 0x700000000000 to 0, 16 bytes", "synchronize in 1");
+        let made = |context: usize, cannot: bool| -> Result<(Vec<String>, Option<String>)> {
+            let cuda = gpu_replacing(context, |api| {
+                api.alloc_managed = alloc_managed;
+                api.synchronize = synchronize;
+                if cannot {
+                    api.attribute = attribute_but_concurrent_managed_access;
+                }
+            })?;
+            let made = cuda.managed::<u32>(4);
+            let said = made.as_ref().err().map(ToString::to_string);
+            let calls = asked();
+            Ok((calls, said))
+        };
+        let queued = ["alloc managed 16", zeros].map(String::from).to_vec();
+        assert_eq!(made(1, false)?, (queued.clone(), None), "where the GPU reaches managed memory with the host");
+        let waited = [queued, vec![sync.to_string()]].concat();
+        assert_eq!(made(1, true)?, (waited, None), "where it cannot");
+        let failed = "cuCtxSynchronize: CUDA_ERROR_ILLEGAL_ADDRESS (700): an illegal memory access was encountered";
+        let (calls, said) = made(14, true)?;
+        let want = ["alloc managed 16", zeros, "synchronize in 14", "free 0x700000000000"];
+        assert_eq!(calls, want, "it waited, the wait failed, and the memory was freed");
+        assert_eq!(said.as_deref(), Some(failed), "a wait that fails is the error of `managed`");
+        Ok(())
+    }
+
+    /// Memory of another number of elements is not copied, nor is memory of another GPU, and the error says which, in
+    /// GUIDE.md's words, before the driver is asked for anything.
+    #[test]
+    fn memory_of_another_length_or_gpu_is_not_copied_and_the_driver_is_asked_for_nothing() -> Result {
+        let (cuda, other) = (gpu_in(1)?, gpu_in(2)?);
+        let (long, mut short, mut tail) = (cuda.alloc::<u32>(4)?, cuda.alloc::<u32>(2)?, cuda.alloc::<u32>(3)?);
+        let (mut there, mut here) = (other.alloc::<u32>(4)?, cuda.alloc::<u32>(4)?);
+        asked();
+        let e = cuda.copy(&mut short, &long).err().ok_or("copy gave Ok")?;
+        assert_eq!(e.to_string(), "cuMemcpyAsync: memory of 2 elements copied from memory of 4");
+        let e = cuda.copy(&mut here, &short).err().ok_or("copy gave Ok")?;
+        assert_eq!(e.to_string(), "cuMemcpyAsync: memory of 4 elements copied from memory of 2");
+        let gpu = "cuMemcpyAsync: the memory is on another GPU than the copy is made on";
+        let e = cuda.copy(&mut here, &there).err().ok_or("copy gave Ok")?;
+        assert_eq!(e.to_string(), gpu, "from memory of another GPU");
+        let e = cuda.copy(&mut there, &here).err().ok_or("copy gave Ok")?;
+        assert_eq!(e.to_string(), gpu, "to memory of another GPU");
+        let view = there.tail(1).ok_or("tail gave None")?;
+        let e = cuda.copy(&mut tail, &view).err().ok_or("copy gave Ok")?;
+        assert_eq!(e.to_string(), gpu, "from a view of memory of another GPU");
+        assert!(asked().is_empty(), "the driver was asked");
+        Ok(())
+    }
+
+    /// No elements are no bytes, and the driver is asked for the copy as for any, with the address it gave the memory.
+    #[test]
+    fn a_copy_of_no_elements_is_asked_of_the_driver_as_any_copy() -> Result {
+        let cuda = gpu()?;
+        let (from, mut to) = (cuda.alloc::<u32>(0)?, cuda.alloc::<u32>(0)?);
+        asked();
+        cuda.copy(&mut to, &from)?;
+        assert_eq!(asked().len(), 1);
+        Ok(())
+    }
+
+    /// What the driver refuses of a copy is the error of the copy, in the driver's words.
+    #[test]
+    fn what_the_driver_refuses_of_a_copy_is_the_error_of_the_copy() -> Result {
+        let cuda = gpu_in(14)?;
+        let (from, mut to) = (cuda.alloc::<u32>(4)?, cuda.alloc::<u32>(4)?);
+        let e = cuda.copy(&mut to, &from).err().ok_or("copy gave Ok")?;
+        let said = "cuMemcpyAsync: CUDA_ERROR_ILLEGAL_ADDRESS (700): an illegal memory access was encountered";
+        assert_eq!(e.to_string(), said);
         Ok(())
     }
 }
