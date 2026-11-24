@@ -1,8 +1,9 @@
 # kernite-cpu
 
 kernite-cpu runs a `#[cooperative]` x86 kernel on the threads of a `Grid`, each given its place there, on any CPUs or on
-those the caller names. It also holds the memory of a module's statics, which the kernels and the host both reach. A
-crate of kernels adds it, beside `kernite-macros`, for either.
+those the caller names, and keeps them spinning for the next launch for as long as the caller says. It also holds the
+memory of a module's statics, which the kernels and the host both reach. A crate of kernels adds it, beside
+`kernite-macros`, for either.
 
 ```sh
 cargo add kernite-macros kernite-cpu

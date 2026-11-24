@@ -667,9 +667,21 @@ The grid's other threads are kept. The first launch from a thread starts them, e
 and the launches after it from that thread hand them the kernel and start none. On a Ryzen 5 5600H a launch of a kernel
 that returns at once costs 22 ns on one thread, which makes no system call, 0.2 microseconds on two, 0.8 on six and 2.3
 on twelve. A kept thread with no kernel to run spins for 200 microseconds, `kernite_cpu::SPIN`, for the next to come,
-and then sleeps, using no CPU. A launch that finds the threads asleep costs 5 microseconds on two threads, 9 on six and
-16 on twelve, and some 100 when the machine has been idle for milliseconds, as the system wakes its cores. The threads
-end when the thread that launched does.
+and then sleeps, using no CPU, and the caller spins as long for each of the others to end. A launch that finds the
+threads asleep costs 5 microseconds on two threads, 9 on six and 16 on twelve, and some 100 when the machine has been
+idle for milliseconds, as the system wakes its cores. The threads end when the thread that launched does.
+
+A grid whose launches come further apart than 200 microseconds finds its threads asleep each time.
+`kernite_cpu::Grid::on(&cpus).spin(Duration::from_millis(10))` has its threads, the caller's too, spin for 10
+milliseconds in place of the 200 microseconds, so that a launch that comes within them finds the threads awake. On
+twelve threads placed one on each CPU, a launch of nothing that comes 0.4 milliseconds after the last costs 2.0
+microseconds with the spin, where back to back it costs 1.9, and 17.7 without; one that comes 5 milliseconds after costs
+2.3, and 392 without. A launch of 192 chunks of 2 microseconds each, which takes 72 back to back, takes 72 with the spin
+however far apart, and 85 and 350 without it, 0.4 and 5 milliseconds apart. These are medians: the slowest launch of
+nothing in a hundred, 5 milliseconds after the last, took 3 to 15 milliseconds with the spin, in three runs, and 0.8 to
+2 milliseconds without it. A spin costs CPU: each kept thread uses its CPU for the spin after each launch that uses it,
+whether another launch comes or not. A grid that launches once an hour spends 10 milliseconds of the CPU of each kept
+thread on each launch, and `Duration::ZERO` has its threads sleep at once.
 
 Where a grid's threads run is the system's to say, unless the caller places them. A `Grid::new(4)` runs each thread on
 any CPU the caller's thread may run on, and the system moves it from one to another as it likes. A
@@ -695,9 +707,11 @@ know: a launch that places it on the CPU kernite left it on does not move it.
 A launch makes one call to the system for each thread it moves, and none when none moves, so a thousand launches of one
 placement ask it nothing about CPUs. The first launch that places the caller's thread, and the first after one that
 placed none, also asks once which CPUs the thread may run on. A thread that may run on one CPU alone cannot run while
-another spins there, and a spin that no launch ends lasts 200 microseconds, so a launch that moves threads first ends
-the spin of each kept thread on a CPU a thread moves to, and of each the system places: it sleeps until a launch uses
-it. A launch that moves none ends no spin.
+another spins there, and a spin that no launch ends lasts as long as its grid said, 200 microseconds if it said none, so
+a launch that moves threads first ends the spin of each kept thread on a CPU a thread moves to, and of each the system
+places, however long it was to last: it sleeps until a launch uses it. A launch that moves none ends no spin. Kept
+threads of two callers that two placed grids put on one CPU share it while they spin, as any two threads on one CPU do:
+a launch waits for its thread to get the CPU, and not for the other's spin to end.
 
 A page of memory is on the NUMA node of the CPU that first writes it, if that node has room, whichever thread asked for
 the buffer. `vec![0.0; n]`, for a large `n`, writes no page, so the first thread to write one gives it its node, and
