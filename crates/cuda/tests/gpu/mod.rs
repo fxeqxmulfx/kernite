@@ -1,6 +1,7 @@
-//! What the tests that keep a stream busy have in common: two kernels, written by hand, which hold work back until the
-//! host writes a flag or the GPU's clock says a time has gone by; the lock that keeps the other tests of a file off the
-//! null stream, which is the GPU's and not a thread's; and the host's reads and writes of the words the kernels share.
+//! What the tests that keep a stream busy have in common: three kernels, written by hand, two of which hold work back
+//! until the host writes a flag or the GPU's clock says a time has gone by, and one that copies a word, to show when
+//! the work after it runs; the lock that keeps the other tests of a file off the null stream, which is the GPU's and
+//! not a thread's; and the host's reads and writes of the words the kernels share.
 #![allow(dead_code, reason = "a test file takes what it needs of this module, and rustc calls the rest dead")]
 
 use std::ffi::c_void;
@@ -15,7 +16,7 @@ type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result:
 ///
 /// `waits(flag, out, nanos)` spins until `*flag` is not 0, or until `nanos` nanoseconds have gone by; then it writes 1
 /// to `*out` if it saw the flag, and 2 if the time went by first. `sets(flag, nanos)` writes 1 to `*flag` after `nanos`
-/// nanoseconds.
+/// nanoseconds. `copies(from, to)` writes the word `*from` to `*to`.
 const PTX: &str = "
 .version 7.5
 .target sm_61
@@ -69,12 +70,27 @@ LATER:
 	st.volatile.global.u32 [%flag], %one;
 	ret;
 }
+
+.visible .entry copies(.param .u64 from_param, .param .u64 to_param)
+{
+	.reg .u64 %from, %to;
+	.reg .u32 %word;
+
+	ld.param.u64 %from, [from_param];
+	ld.param.u64 %to, [to_param];
+	cvta.to.global.u64 %from, %from;
+	cvta.to.global.u64 %to, %to;
+	ld.volatile.global.u32 %word, [%from];
+	st.volatile.global.u32 [%to], %word;
+	ret;
+}
 ";
 
 /// The kernels of `PTX`, in the order `Module::load` is given their names.
-const KERNELS: &[&str] = &["waits", "sets"];
+const KERNELS: &[&str] = &["waits", "sets", "copies"];
 pub const WAITS: usize = 0;
 pub const SETS: usize = 1;
+pub const COPIES: usize = 2;
 
 /// What `waits` writes: that it saw the flag, or that the time went by first.
 pub const SEEN: u32 = 1;
@@ -102,9 +118,9 @@ pub fn load(cuda: &Cuda) -> Result<Module> {
 
 /// `work`, with `stream` the current stream of its GPU.
 pub fn run<R>(stream: &Stream, work: impl FnOnce() -> R) -> R {
-    // SAFETY: the kernels share one word between streams at most, the flag that `sets` writes and `waits` reads, each
-    // by one volatile access that the GPU does whole: that is what the tests look for. `waits` writes its own `out`,
-    // and the kernels reach no other memory in common.
+    // SAFETY: the kernels share a word between streams at most: the flag that `sets` writes and `waits` reads, and the
+    // word that `waits` writes and `copies` reads, each by one volatile access that the GPU does whole: that is what
+    // the tests look for. The words that the kernels write are their own, and they reach no other memory in common.
     unsafe { stream.run(work) }
 }
 

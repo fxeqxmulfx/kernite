@@ -58,7 +58,10 @@
 //! Kernels run in the order they are launched on one stream, and a GPU runs the work of two streams at once where it
 //! has room. All the work goes to the GPU's null stream, unless a thread makes another stream current for a closure,
 //! [`Stream::run`], which [`Cuda::stream`] makes: a launch goes to the current stream of its GPU on the thread. A
-//! stream is blocking, so the copies and the drops that wait for the null stream's work wait for its work too.
+//! stream is blocking, so the copies and the drops that wait for the null stream's work wait for its work too. An
+//! [`Event`], which [`Cuda::event`] makes, is a point in the work of a stream: the host asks whether the work before
+//! it is done, or waits for it, and another stream waits for it with no wait of the host. [`Cuda::timed_event`] makes
+//! one that times work, and [`Event::duration_since`] says the time between two.
 //!
 //! A kernel whose blocks wait for each other is launched cooperatively,
 //! [`Module::launch_cooperative`]: every block of the grid runs at once, so there are at most
@@ -71,6 +74,7 @@ use std::marker::PhantomData;
 use std::ptr;
 use std::rc::Rc;
 
+mod event;
 mod half;
 #[doc(hidden)]
 pub mod named;
@@ -81,6 +85,7 @@ mod unified;
 
 use reserve::{Access, Properties, Reservation};
 
+pub use event::{Event, Timed, Untimed};
 pub use half::{bf16, f16};
 pub use safe::{Memory, MemoryMut, Quantity, Requirement, View, Why, holds};
 pub use stream::Stream;
@@ -89,7 +94,7 @@ pub use unified::{Advice, Location, Placement, Unified};
 /// What every function of the driver returns: 0, or what went wrong.
 type CuResult = c_int;
 
-/// A context, a module, a function or a stream: what the driver hands out, opaque.
+/// A context, a module, a function, a stream or an event: what the driver hands out, opaque.
 type Handle = *mut c_void;
 
 /// A place that the driver is told of, as `CUmemLocation` is: a kind of place, and which one.
@@ -193,6 +198,12 @@ api! {
     create_stream = c"cuStreamCreate"(*mut Handle, c_uint);
     destroy_stream = c"cuStreamDestroy_v2"(Handle);
     sync_stream = c"cuStreamSynchronize"(Handle);
+    create_event = c"cuEventCreate"(*mut Handle, c_uint);
+    destroy_event = c"cuEventDestroy_v2"(Handle);
+    record_event = c"cuEventRecord"(Handle, Handle);
+    query_event = c"cuEventQuery"(Handle);
+    sync_event = c"cuEventSynchronize"(Handle);
+    wait_event = c"cuStreamWaitEvent"(Handle, Handle, c_uint);
     alloc = c"cuMemAlloc_v2"(*mut u64, usize);
     alloc_managed = c"cuMemAllocManaged"(*mut u64, usize, c_uint);
     free = c"cuMemFree_v2"(u64);
@@ -233,6 +244,9 @@ api! {
     ?
     prefetch = c"cuMemPrefetchAsync_v2"(u64, usize, MemLocation, c_uint, Handle);
     advise = c"cuMemAdvise_v2"(u64, usize, c_int, MemLocation);
+    // This one came with CUDA 12.8: `cuda.h` of the newest release maps `cuEventElapsedTime` to it, and a driver
+    // before it has the first name alone, which kernite-cuda does not call.
+    elapsed_time = c"cuEventElapsedTime_v2"(*mut f32, Handle, Handle);
 }
 
 impl Api {
@@ -1335,6 +1349,7 @@ mod tests {
     use std::cell::RefCell;
     use std::panic::{self, AssertUnwindSafe};
     use std::sync::mpsc;
+    use std::time::Duration;
 
     use super::*;
 
@@ -1358,16 +1373,21 @@ mod tests {
     }
 
     /// A driver of a release before CUDA 12.2 is opened all the same: the table has the functions
-    /// it has, and has for the two it lacks the error of the lookup, which a call that needs one
+    /// it has, and has for the three it lacks the error of the lookup, which a call that needs one
     /// returns. A driver that lacks any other function is not opened.
     #[test]
     fn a_driver_before_cuda_12_2_is_opened_and_one_that_lacks_any_other_function_is_not() -> Result {
         let lacks = |name: &str| format!("dlsym: the driver has no `{name}`: libcuda.so.1: undefined symbol");
-        let api = Api::load(finds(&[c"cuMemPrefetchAsync_v2", c"cuMemAdvise_v2"])).ok().ok_or("ok gave None")?;
+        let newer = [c"cuMemPrefetchAsync_v2", c"cuMemAdvise_v2", c"cuEventElapsedTime_v2"];
+        let api = Api::load(finds(&newer)).ok().ok_or("ok gave None")?;
         assert_eq!(api.prefetch.err().ok_or("err gave None")?.to_string(), lacks("cuMemPrefetchAsync_v2"));
         assert_eq!(api.advise.err().ok_or("err gave None")?.to_string(), lacks("cuMemAdvise_v2"));
+        assert_eq!(api.elapsed_time.err().ok_or("err gave None")?.to_string(), lacks("cuEventElapsedTime_v2"));
         let api = Api::load(finds(&[])).ok().ok_or("ok gave None")?;
-        assert!(api.prefetch.is_ok() && api.advise.is_ok(), "a driver that has them has them");
+        assert!(
+            api.prefetch.is_ok() && api.advise.is_ok() && api.elapsed_time.is_ok(),
+            "a driver that has them has them"
+        );
         for name in [
             c"cuInit",
             c"cuMemRangeGetAttribute",
@@ -1383,6 +1403,12 @@ mod tests {
             c"cuMemSetAccess",
             c"cuMemUnmap",
             c"cuStreamDestroy_v2",
+            c"cuEventCreate",
+            c"cuEventDestroy_v2",
+            c"cuEventRecord",
+            c"cuEventQuery",
+            c"cuEventSynchronize",
+            c"cuStreamWaitEvent",
             c"cuGetErrorString",
         ] {
             let e = Api::load(finds(&[name])).err().ok_or("err gave None")?;
@@ -1435,6 +1461,8 @@ mod tests {
         static WORKING_IN: Cell<usize> = const { Cell::new(0) };
         /// How many streams the fake driver has made.
         static STREAMS_MADE: Cell<usize> = const { Cell::new(0) };
+        /// How many events the fake driver has made.
+        static EVENTS_MADE: Cell<usize> = const { Cell::new(0) };
     }
 
     /// What the fake driver was asked since the last call, which empties it.
@@ -1568,6 +1596,74 @@ mod tests {
         if WORKING_IN.get() == 14 { 700 } else { 0 }
     }
 
+    /// The fake driver's `cuEventCreate`: the events are 0x1000, 0x2000 and so on, and it says the flags it is given,
+    /// and the context it works in. In the context 13 it is `CUDA_ERROR_INVALID_CONTEXT`.
+    unsafe extern "C" fn create_event(at: *mut Handle, flags: c_uint) -> CuResult {
+        if WORKING_IN.get() == 13 {
+            return 201;
+        }
+        EVENTS_MADE.set(EVENTS_MADE.get() + 1);
+        let event = EVENTS_MADE.get() * 0x1000;
+        ask(format!("create event {event:#x} with flags {flags} in {}", WORKING_IN.get()));
+        // SAFETY: the caller gives a place for the event.
+        unsafe { *at = ptr::without_provenance_mut(event) };
+        0
+    }
+
+    /// The fake driver's `cuEventDestroy`: it says the event, and the context it works in.
+    unsafe extern "C" fn destroy_event(event: Handle) -> CuResult {
+        ask(format!("destroy event {:#x} in {}", event.addr(), WORKING_IN.get()));
+        0
+    }
+
+    /// The fake driver's `cuEventRecord`: it says the event, the stream, and the context it works in. In the context 14
+    /// the work has failed, with `CUDA_ERROR_ILLEGAL_ADDRESS`.
+    unsafe extern "C" fn record_event(event: Handle, stream: Handle) -> CuResult {
+        ask(format!("record {:#x} on {:#x} in {}", event.addr(), stream.addr(), WORKING_IN.get()));
+        if WORKING_IN.get() == 14 { 700 } else { 0 }
+    }
+
+    /// The fake driver's `cuEventQuery`: it says the event, and the context it works in. In the context 14 the work
+    /// has failed, with `CUDA_ERROR_ILLEGAL_ADDRESS`, and in the context 15 it is not done, `CUDA_ERROR_NOT_READY`.
+    unsafe extern "C" fn query_event(event: Handle) -> CuResult {
+        ask(format!("query {:#x} in {}", event.addr(), WORKING_IN.get()));
+        match WORKING_IN.get() {
+            14 => 700,
+            15 => 600,
+            _ => 0,
+        }
+    }
+
+    /// The fake driver's `cuEventSynchronize`: it says the event, and the context it works in. In the context 14 the
+    /// work has failed, with `CUDA_ERROR_ILLEGAL_ADDRESS`.
+    unsafe extern "C" fn sync_event(event: Handle) -> CuResult {
+        ask(format!("sync event {:#x} in {}", event.addr(), WORKING_IN.get()));
+        if WORKING_IN.get() == 14 { 700 } else { 0 }
+    }
+
+    /// The fake driver's `cuStreamWaitEvent`: it says the stream, the event, the flags, and the context it works in. In
+    /// the context 14 the work has failed, with `CUDA_ERROR_ILLEGAL_ADDRESS`.
+    unsafe extern "C" fn wait_event(stream: Handle, event: Handle, flags: c_uint) -> CuResult {
+        ask(format!("{:#x} waits for {:#x} with flags {flags} in {}", stream.addr(), event.addr(), WORKING_IN.get()));
+        if WORKING_IN.get() == 14 { 700 } else { 0 }
+    }
+
+    /// The fake driver's `cuEventElapsedTime_v2`: it says the two events and the context it works in, and the time is
+    /// the events' difference over 0x1000, in milliseconds: from the event 0x1000 to 0x3000 is 2 ms, and from 0x3000 to
+    /// 0x1000 is below zero. In the context 15 an event is not done, `CUDA_ERROR_NOT_READY`, and in the context 16 one
+    /// was never recorded, `CUDA_ERROR_INVALID_HANDLE`.
+    unsafe extern "C" fn elapsed_time(millis: *mut f32, start: Handle, end: Handle) -> CuResult {
+        ask(format!("time from {:#x} to {:#x} in {}", start.addr(), end.addr(), WORKING_IN.get()));
+        match WORKING_IN.get() {
+            15 => return 600,
+            16 => return 400,
+            _ => {}
+        }
+        // SAFETY: the caller gives a place for the milliseconds.
+        unsafe { *millis = (end.addr() as f32 - start.addr() as f32) / 4096.0 };
+        0
+    }
+
     /// The fake driver's `cuModuleGetGlobal`: the module has `small`, 16 bytes at 0x1000, and two `.u64` of constant
     /// memory, `slot` at 0x2000 and `other` at 0x3000.
     unsafe extern "C" fn module_global(at: *mut u64, bytes: *mut usize, _: Handle, name: *const c_char) -> CuResult {
@@ -1618,11 +1714,13 @@ mod tests {
         0
     }
 
-    /// The fake driver's `cuGetErrorName`, and `cuGetErrorString`, which know the three errors it has.
+    /// The fake driver's `cuGetErrorName`, and `cuGetErrorString`, which know the five errors it has.
     unsafe extern "C" fn error_name(result: CuResult, name: *mut *const c_char) -> CuResult {
         let known = match result {
             2 => c"CUDA_ERROR_OUT_OF_MEMORY".as_ptr(),
             201 => c"CUDA_ERROR_INVALID_CONTEXT".as_ptr(),
+            400 => c"CUDA_ERROR_INVALID_HANDLE".as_ptr(),
+            600 => c"CUDA_ERROR_NOT_READY".as_ptr(),
             700 => c"CUDA_ERROR_ILLEGAL_ADDRESS".as_ptr(),
             _ => ptr::null(),
         };
@@ -1635,6 +1733,8 @@ mod tests {
         let known = match result {
             2 => c"out of memory".as_ptr(),
             201 => c"invalid device context".as_ptr(),
+            400 => c"invalid resource handle".as_ptr(),
+            600 => c"device not ready".as_ptr(),
             700 => c"an illegal memory access was encountered".as_ptr(),
             _ => ptr::null(),
         };
@@ -1644,10 +1744,16 @@ mod tests {
     }
 
     /// A GPU of the fake driver, whose primary context is `context`, which has the calls a module's memory makes, its
-    /// launches' and the streams', and `cuMemGetInfo`, and refuses the rest.
+    /// launches', the streams' and the events', and `cuMemGetInfo`, and refuses the rest.
     fn gpu_in(context: usize) -> Result<Cuda> {
+        gpu_replacing(context, |_| {})
+    }
+
+    /// `gpu_in(context)`, with the functions of its driver that `replace` changes.
+    fn gpu_replacing(context: usize, replace: impl FnOnce(&mut Api)) -> Result<Cuda> {
         NEXT.set(0x7000_0000_0000);
         STREAMS_MADE.set(0);
+        EVENTS_MADE.set(0);
         asked();
         let mut api = Api::refusing();
         api.attribute = attribute;
@@ -1662,6 +1768,13 @@ mod tests {
         api.create_stream = create_stream;
         api.destroy_stream = destroy_stream;
         api.sync_stream = sync_stream;
+        api.create_event = create_event;
+        api.destroy_event = destroy_event;
+        api.record_event = record_event;
+        api.query_event = query_event;
+        api.sync_event = sync_event;
+        api.wait_event = wait_event;
+        api.elapsed_time = Ok(elapsed_time);
         api.alloc = alloc;
         api.memset = memset;
         api.memory_info = memory_info;
@@ -1669,6 +1782,7 @@ mod tests {
         api.free = free;
         api.error_name = error_name;
         api.error_string = error_string;
+        replace(&mut api);
         let driver = Rc::new(Driver { api, device: 0, context: ptr::without_provenance_mut(context) });
         Ok(Cuda::of(driver, String::new())?)
     }
@@ -1924,6 +2038,134 @@ mod tests {
         let (cuda, other) = (gpu()?, gpu()?);
         let (stream, module) = (cuda.stream()?, kernel(&other)?);
         assert_eq!(running(&stream, || launched(&module))?, ["launch on 0x100 in 1"]);
+        Ok(())
+    }
+
+    /// An event is made as the driver is asked: one made not to time with the flag that says so, and one made to time
+    /// with none. Dropping each destroys it once, even after the `Cuda` that made it. Where the driver refuses to make
+    /// one, the error is its own.
+    #[test]
+    fn an_event_is_made_to_time_or_not_as_the_driver_is_asked_and_destroyed_once_when_it_is_dropped() -> Result {
+        let cuda = gpu()?;
+        let (plain, timed) = (cuda.event()?, cuda.timed_event()?);
+        assert_eq!(asked(), ["create event 0x1000 with flags 2 in 1", "create event 0x2000 with flags 0 in 1"]);
+        drop(cuda);
+        drop(plain);
+        assert_eq!(asked(), ["destroy event 0x1000 in 1"]);
+        drop(timed);
+        assert_eq!(asked(), ["destroy event 0x2000 in 1"]);
+        let refused = "cuEventCreate: CUDA_ERROR_INVALID_CONTEXT (201): invalid device context";
+        let cuda = gpu_in(13)?;
+        assert_eq!(cuda.event().err().ok_or("event gave Ok")?.to_string(), refused);
+        assert_eq!(cuda.timed_event().err().ok_or("timed_event gave Ok")?.to_string(), refused);
+        Ok(())
+    }
+
+    /// A record and a wait go to the current stream of the event's GPU: the null stream, until a `run` makes another
+    /// current for the GPU, and then that stream; a stream that is current for another GPU is not the one.
+    #[test]
+    fn a_record_and_a_wait_go_to_the_current_stream_of_the_events_gpu() -> Result {
+        let (first, second) = (gpu_in(11)?, gpu_in(12)?);
+        let (event, a, b) = (first.event()?, first.stream()?, second.stream()?);
+        asked();
+        event.record()?;
+        event.wait()?;
+        assert_eq!(asked(), ["record 0x1000 on 0x0 in 11", "0x0 waits for 0x1000 with flags 0 in 11"]);
+        running(&a, || -> Result {
+            event.record()?;
+            event.wait()?;
+            // The stream of the other GPU is current for that GPU alone.
+            running(&b, || event.record())?;
+            Ok(())
+        })?;
+        let on_a = |what: &str| format!("{what} in 11");
+        let want = [
+            on_a("record 0x1000 on 0x100"),
+            on_a("0x100 waits for 0x1000 with flags 0"),
+            on_a("record 0x1000 on 0x100"),
+        ];
+        assert_eq!(asked(), want);
+        running(&b, || event.wait())?;
+        assert_eq!(asked(), ["0x0 waits for 0x1000 with flags 0 in 11"]);
+        Ok(())
+    }
+
+    /// `done` is `cuEventQuery`: true where the driver says the work is done, false where it says `NOT_READY`, and an
+    /// error where it says any other, as the work that failed does. `sync`, `record` and `wait` say the same failure,
+    /// each by the name of its own call.
+    #[test]
+    fn an_event_is_done_or_not_as_the_driver_says_and_an_error_where_the_work_failed() -> Result {
+        let cuda = gpu()?;
+        let event = cuda.event()?;
+        asked();
+        assert!(event.done()?);
+        event.sync()?;
+        assert_eq!(asked(), ["query 0x1000 in 1", "sync event 0x1000 in 1"]);
+        assert!(!gpu_in(15)?.event()?.done()?, "the driver said the work is not ready");
+        let failed = gpu_in(14)?.event()?;
+        let said = "CUDA_ERROR_ILLEGAL_ADDRESS (700): an illegal memory access was encountered";
+        let errors = [
+            ("cuEventQuery", failed.done().map(drop)),
+            ("cuEventSynchronize", failed.sync()),
+            ("cuEventRecord", failed.record()),
+            ("cuStreamWaitEvent", failed.wait()),
+        ];
+        for (call, result) in errors {
+            assert_eq!(result.err().ok_or("a call gave Ok")?.to_string(), format!("{call}: {said}"));
+        }
+        Ok(())
+    }
+
+    /// The time between two events is what the driver says from the first to the second, as a `Duration`: the first
+    /// is the one the GPU reached earlier. An event and itself have none between them. The other way round is an error
+    /// that says so, and the driver's own refusals, for an event not done and one never recorded, come as the driver
+    /// says them.
+    #[test]
+    fn the_time_between_two_events_is_the_drivers_from_the_earlier_and_below_zero_is_an_error() -> Result {
+        let cuda = gpu()?;
+        let (a, _, c) = (cuda.timed_event()?, cuda.timed_event()?, cuda.timed_event()?);
+        asked();
+        assert_eq!(c.duration_since(&a)?, Duration::from_millis(2));
+        assert_eq!(asked(), ["time from 0x1000 to 0x3000 in 1"]);
+        assert_eq!(a.duration_since(&a)?, Duration::ZERO);
+        let backwards = a.duration_since(&c).err().ok_or("duration_since gave Ok")?;
+        let said = "the GPU reached this event before the one it is timed since: ask the later of the two";
+        assert_eq!(backwards.to_string(), format!("cuEventElapsedTime: {said}"));
+        for (context, said) in [
+            (15, "CUDA_ERROR_NOT_READY (600): device not ready"),
+            (16, "CUDA_ERROR_INVALID_HANDLE (400): invalid resource handle"),
+        ] {
+            let cuda = gpu_in(context)?;
+            let (a, b) = (cuda.timed_event()?, cuda.timed_event()?);
+            let refused = b.duration_since(&a).err().ok_or("duration_since gave Ok")?;
+            assert_eq!(refused.to_string(), format!("cuEventElapsedTime: {said}"));
+        }
+        Ok(())
+    }
+
+    /// The time between events of two GPUs is an error that says so, and the driver is not asked: the clocks of two
+    /// GPUs are not one clock.
+    #[test]
+    fn events_of_two_gpus_have_no_time_between_them() -> Result {
+        let (first, second) = (gpu_in(11)?, gpu_in(12)?);
+        let (a, b) = (first.timed_event()?, second.timed_event()?);
+        asked();
+        let e = b.duration_since(&a).err().ok_or("duration_since gave Ok")?;
+        let said = "cuEventElapsedTime: the events are of two GPUs, and the clocks of two GPUs are not one clock";
+        assert_eq!(e.to_string(), said);
+        assert!(asked().is_empty(), "the driver was asked");
+        Ok(())
+    }
+
+    /// A driver that lacks `cuEventElapsedTime_v2` is opened, and the time between two events of it is the error of
+    /// the lookup, in the driver's own words.
+    #[test]
+    fn a_driver_that_lacks_the_newer_function_gives_no_time_between_two_events() -> Result {
+        let lacks = |api: &mut Api| api.elapsed_time = Err(missing(c"cuEventElapsedTime_v2", "undefined symbol"));
+        let cuda = gpu_replacing(1, lacks)?;
+        let (a, b) = (cuda.timed_event()?, cuda.timed_event()?);
+        let e = b.duration_since(&a).err().ok_or("duration_since gave Ok")?;
+        assert_eq!(e.to_string(), "dlsym: the driver has no `cuEventElapsedTime_v2`: undefined symbol");
         Ok(())
     }
 

@@ -1052,6 +1052,30 @@ stream. A launch asks the driver for `cuLaunchKernel` alone, whichever stream is
 stream in a thread-local, which needs no call to the driver. That thread-local has no destructor, so a launch finds it
 as a thread ends too, in the destructor of another thread-local.
 
+`cuda.event()` is an event of the GPU: a point in the work of a stream, which the GPU reaches when it has done the work
+before it. `event.record()` puts the event after the work that the current stream has been given so far, and does not
+wait. `event.done()` says whether that work is done, and does not wait. `event.sync()` waits for the work the event
+stands for, and for no more. `event.wait()` makes the work that the current stream is given after the call wait for that
+work, and the host does not wait: that is how one stream waits for another, a kernel for what a kernel of another stream
+writes, say. A record again makes the event stand for the work given by then, and for that alone. A record after a
+`wait` does not change what the stream waits for: the `wait` was for the work the event stood for then. An event never
+recorded stands for no work: it is done, and nothing waits for it. An event recorded on the null stream stands for the
+work that every stream of the GPU was given before the record, as a stream is blocking. Dropping an event destroys it
+and does not wait: the work goes on, and a stream that was made to wait for it still waits. `record` and `wait` go to
+the current stream of the event's GPU, as a launch does. Each asks the driver for its own function and no other, and
+finds the current stream with no call to the driver.
+
+`cuda.timed_event()` is an event that times too. `later.duration_since(&earlier)` is the time from when the GPU reached
+`earlier` to when it reached `later`, as its own clock says it, as a `Duration`. Both have been recorded, and the work
+before both is done, which `sync` waits for; where one is not, the error is the driver's, `CUDA_ERROR_INVALID_HANDLE`
+for an event never recorded and `CUDA_ERROR_NOT_READY` for one not done. A `later` that the GPU reached before `earlier`
+is an error, as a `Duration` is not below zero: ask the one it reached later. The host may have recorded them in the
+other order, for the GPU reaches an event when the work before it on its own stream is done. Events of two GPUs, whose
+clocks are not one clock, are an error too, and the driver is not asked. An event made by `event()` does not time, and
+costs the driver less to record: on the driver here, NVIDIA's open kernel module 620.70.06 on Linux 7.0, 0.6
+microseconds a call against 1.9 microseconds for one that times. It is an `Event`, and one made by `timed_event()` an
+`Event<Timed>`, so `duration_since` is for events that time, and rustc refuses it for one that does not.
+
 A buffer is the GPU's own memory, which the host reaches by copies. Unified memory is reached by the host and by the
 GPU's kernels at one address, with no copy, and it is of one of four kinds. `cuda.managed::<f32>(len)` is `len` zeros of
 managed memory, which the driver moves to whichever of the host and the GPU touches it. `cuda.pinned::<f32>(len)` is
@@ -1545,7 +1569,7 @@ Each crate depends only on the layers inside it. `crates/kernite/tests/architect
 | adapters | `kernite-x86`, `kernite-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kernite` | which machine and syntax each kernel compiles with |
 | delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, and the safe functions that call them; launchers of a grid's threads, or launchers of PTX |
-| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and how much of it is free, memory the host reaches too, modules, launches and what a safe kernel's launch must hold, streams that launches go to, copies between GPUs; `f16` and `bf16`; depends on no other crate |
+| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and how much of it is free, memory the host reaches too, modules, launches and what a safe kernel's launch must hold, streams that launches go to, events that order and time them, copies between GPUs; `f16` and `bf16`; depends on no other crate |
 | runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid and the CPUs they run on, and the memory of a module of x86 kernels; depends on no other crate |
 
 ## Guarantees

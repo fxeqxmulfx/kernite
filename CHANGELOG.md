@@ -11,6 +11,7 @@ release gives it its version.
 - kernite-cuda launches on a stream, and runs the work of two streams at once.
 - kernite-cuda page-locks memory the host has, a `Vec`'s say, for kernels to reach until it is dropped.
 - kernite-cuda makes a buffer on a GPU that grows and shrinks at the same addresses, `cuda.reserve::<T>(n)`.
+- kernite-cuda orders the work of two streams with an event, and says the time between two events.
 - kernite builds the PTX of a module of megabytes, or of many kernels (GitHub issue 1).
 - kernite finds a kernel's `# Safety` by its heading, as rustdoc does, and adds what it writes at the end of it.
 
