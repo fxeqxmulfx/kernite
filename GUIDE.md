@@ -983,6 +983,11 @@ did not ask before, and a call to another GPU asks it once more, to make that GP
 run, and before those launched after it on either run. Where the two GPUs have a link between them, it asks the driver
 for peer access and the copy goes over the link; where they have none, the driver sends it through the host.
 
+`cuda.memory()` is `(free, total)`: how many bytes of the GPU's memory nothing holds, and how many bytes the driver
+gives programs on it, as `cuMemGetInfo_v2` says them. The total is the same each time. Every program holds some of the
+GPU's memory, not this one alone, so the free bytes are true as they are asked, and a buffer made after may find fewer.
+The call goes to the GPU of the `Cuda`, as each call does.
+
 A buffer is the GPU's own memory, which the host reaches by copies. Unified memory is reached by the host and by the
 GPU's kernels at one address, with no copy, and it is of one of three kinds. `cuda.managed::<f32>(len)` is `len` zeros
 of managed memory, which the driver moves to whichever of the host and the GPU touches it. `cuda.pinned::<f32>(len)` is
@@ -1448,7 +1453,7 @@ Each crate depends only on the layers inside it. `crates/kernite/tests/architect
 | adapters | `kernite-x86`, `kernite-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kernite` | which machine and syntax each kernel compiles with |
 | delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, and the safe functions that call them; launchers of a grid's threads, or launchers of PTX |
-| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and memory the host reaches too, modules, launches and what a safe kernel's launch must hold, copies between GPUs; `f16` and `bf16`; depends on no other crate |
+| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and how much of it is free, memory the host reaches too, modules, launches and what a safe kernel's launch must hold, copies between GPUs; `f16` and `bf16`; depends on no other crate |
 | runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid and the CPUs they run on, and the memory of a module of x86 kernels; depends on no other crate |
 
 ## Guarantees

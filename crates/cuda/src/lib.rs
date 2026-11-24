@@ -38,6 +38,7 @@
 //! for those launched before it on the buffer's GPU; [`Cuda::sync`] waits for all of its GPU's,
 //! and says whether one failed. A buffer is on one GPU, and a kernel is given the buffers of
 //! the GPU it runs on: [`Buffer::copy_from`] copies a buffer to a buffer on another.
+//! [`Cuda::memory`] says how many bytes of a GPU's memory are free, and how many it has.
 //!
 //! A buffer is the GPU's own memory, and the host reaches it by copies. [`Unified`] memory is
 //! reached by the host and by the GPU's kernels at one address, with no copy: [`Cuda::managed`]
@@ -176,6 +177,7 @@ api! {
     to_host = c"cuMemcpyDtoH_v2"(*mut c_void, u64, usize);
     copy_peer = c"cuMemcpyPeer"(u64, Handle, u64, Handle, usize);
     memset = c"cuMemsetD8_v2"(u64, u8, usize);
+    memory_info = c"cuMemGetInfo_v2"(*mut usize, *mut usize);
     range_attribute = c"cuMemRangeGetAttribute"(*mut c_void, usize, c_int, u64, usize);
     load_module = c"cuModuleLoadDataEx"(*mut Handle, *const c_void, c_uint, *mut c_int, *mut *mut c_void);
     unload_module = c"cuModuleUnload"(Handle);
@@ -411,6 +413,15 @@ impl Driver {
         let api = self.current()?;
         // SAFETY: it writes on the GPU alone.
         api.check("cuMemsetD8", unsafe { (api.memset)(ptr, 0, bytes) })
+    }
+
+    /// How many bytes of this GPU's memory are free, and how many it has in all.
+    fn memory(&self) -> Result<(usize, usize), Error> {
+        let api = self.current()?;
+        let (mut free, mut total) = (0, 0);
+        // SAFETY: it writes the free bytes to `free` and the total to `total`.
+        api.check("cuMemGetInfo", unsafe { (api.memory_info)(&mut free, &mut total) })?;
+        Ok((free, total))
     }
 
     /// Copies the `bytes` bytes at `from_ptr` on the GPU of `from` to `ptr` on this one, after
@@ -669,6 +680,13 @@ impl Cuda {
     /// Waits for every kernel launched on the GPU to finish, and says whether one failed.
     pub fn sync(&self) -> Result<(), Error> {
         self.driver.sync()
+    }
+
+    /// The bytes of the GPU's memory that nothing holds, and all the bytes it has for programs, as `(free, total)`:
+    /// what `cuMemGetInfo` says. The total is the same each time. Any program holds memory of the GPU, not this one
+    /// alone, so the free bytes are true as they are asked, and a buffer made after may find fewer.
+    pub fn memory(&self) -> Result<(usize, usize), Error> {
+        self.driver.memory()
     }
 
     /// `len` elements on the GPU, all zero.
@@ -1300,7 +1318,7 @@ mod tests {
         assert_eq!(api.advise.err().ok_or("err gave None")?.to_string(), lacks("cuMemAdvise_v2"));
         let api = Api::load(finds(&[])).ok().ok_or("ok gave None")?;
         assert!(api.prefetch.is_ok() && api.advise.is_ok(), "a driver that has them has them");
-        for name in [c"cuInit", c"cuMemRangeGetAttribute", c"cuGetErrorString"] {
+        for name in [c"cuInit", c"cuMemRangeGetAttribute", c"cuMemGetInfo_v2", c"cuGetErrorString"] {
             let e = Api::load(finds(&[name])).err().ok_or("err gave None")?;
             assert_eq!(e.to_string(), lacks(&name.to_string_lossy()), "{name:?}");
         }
@@ -1347,6 +1365,8 @@ mod tests {
         static ASKED: RefCell<Vec<String>> = const { RefCell::new(vec![]) };
         /// Where the fake driver puts the next memory it allocates.
         static NEXT: Cell<u64> = const { Cell::new(0x7000_0000_0000) };
+        /// The context the fake driver works in: the one it was last made to make current.
+        static WORKING_IN: Cell<usize> = const { Cell::new(0) };
     }
 
     /// What the fake driver was asked since the last call, which empties it.
@@ -1365,8 +1385,23 @@ mod tests {
         0
     }
 
-    /// The fake driver's `cuCtxSetCurrent`.
-    unsafe extern "C" fn set_current(_: Handle) -> CuResult {
+    /// The fake driver's `cuCtxSetCurrent`: it works in the context from now on.
+    unsafe extern "C" fn set_current(context: Handle) -> CuResult {
+        WORKING_IN.set(context.addr());
+        0
+    }
+
+    /// The fake driver's `cuMemGetInfo`: the GPU of context 11 has 3 GiB free of 4, and that of 12 has 5 of 8. In any
+    /// other context it is `CUDA_ERROR_INVALID_CONTEXT`.
+    unsafe extern "C" fn memory_info(free: *mut usize, total: *mut usize) -> CuResult {
+        let (have, all) = match WORKING_IN.get() {
+            11 => (3 << 30, 4 << 30),
+            12 => (5 << 30, 8 << 30),
+            // CUDA_ERROR_INVALID_CONTEXT.
+            _ => return 201,
+        };
+        // SAFETY: the caller gives a place for each.
+        unsafe { (*free, *total) = (have, all) };
         0
     }
 
@@ -1439,21 +1474,32 @@ mod tests {
         0
     }
 
-    /// The fake driver's `cuGetErrorName`, and `cuGetErrorString`, which know the one error it has.
+    /// The fake driver's `cuGetErrorName`, and `cuGetErrorString`, which know the two errors it has.
     unsafe extern "C" fn error_name(result: CuResult, name: *mut *const c_char) -> CuResult {
+        let known = match result {
+            2 => c"CUDA_ERROR_OUT_OF_MEMORY".as_ptr(),
+            201 => c"CUDA_ERROR_INVALID_CONTEXT".as_ptr(),
+            _ => ptr::null(),
+        };
         // SAFETY: the caller gives a place for the string.
-        unsafe { *name = if result == 2 { c"CUDA_ERROR_OUT_OF_MEMORY".as_ptr() } else { ptr::null() } };
+        unsafe { *name = known };
         0
     }
 
     unsafe extern "C" fn error_string(result: CuResult, meaning: *mut *const c_char) -> CuResult {
+        let known = match result {
+            2 => c"out of memory".as_ptr(),
+            201 => c"invalid device context".as_ptr(),
+            _ => ptr::null(),
+        };
         // SAFETY: the caller gives a place for the string.
-        unsafe { *meaning = if result == 2 { c"out of memory".as_ptr() } else { ptr::null() } };
+        unsafe { *meaning = known };
         0
     }
 
-    /// A GPU of the fake driver, which has the calls a module's memory makes, and refuses the rest.
-    fn gpu() -> Result<Cuda> {
+    /// A GPU of the fake driver, whose primary context is `context`, which has the calls a module's memory makes and
+    /// `cuMemGetInfo`, and refuses the rest.
+    fn gpu_in(context: usize) -> Result<Cuda> {
         NEXT.set(0x7000_0000_0000);
         asked();
         let mut api = Api::refusing();
@@ -1464,12 +1510,18 @@ mod tests {
         api.global = module_global;
         api.alloc = alloc;
         api.memset = memset;
+        api.memory_info = memory_info;
         api.to_device = to_device;
         api.free = free;
         api.error_name = error_name;
         api.error_string = error_string;
-        let driver = Rc::new(Driver { api, device: 0, context: ptr::without_provenance_mut(1) });
+        let driver = Rc::new(Driver { api, device: 0, context: ptr::without_provenance_mut(context) });
         Ok(Cuda::of(driver, String::new())?)
+    }
+
+    /// A GPU of the fake driver whose context is 1, which has no memory to say.
+    fn gpu() -> Result<Cuda> {
+        gpu_in(1)
     }
 
     /// Memory the module has no room for is allocated as it loads, 6 GiB of it, with zeros in it; its address is
@@ -1538,6 +1590,30 @@ mod tests {
         assert_eq!((other.ptr().addr(), other.len()), (at, 4096));
         drop(module);
         assert_eq!(asked(), ["unload 7".to_string(), format!("free {first:#x}"), format!("free {given:#x}")]);
+        Ok(())
+    }
+
+    /// A GPU says its own memory, as the driver says it of the context that is current, and the call is made in the
+    /// context of the GPU it is made on, whichever GPU the call before it went to. The free bytes come first, and the
+    /// total second, whole: the second GPU has more than a 32-bit count holds.
+    #[test]
+    fn each_gpu_says_its_own_memory_whichever_gpu_the_call_before_went_to() -> Result {
+        let (a, b) = (gpu_in(11)?, gpu_in(12)?);
+        let (of_a, of_b) = ((3 << 30, 4 << 30), (5 << 30, 8 << 30));
+        for _ in 0..2 {
+            assert_eq!(a.memory()?, of_a);
+            assert_eq!(b.memory()?, of_b);
+            assert_eq!(b.memory()?, of_b);
+            assert_eq!(a.memory()?, of_a);
+        }
+        Ok(())
+    }
+
+    /// What the driver refuses is the error it gave, which names the call `cuMemGetInfo`, in the words of the driver.
+    #[test]
+    fn a_refusal_of_the_driver_is_the_error_of_memory() -> Result {
+        let e = gpu_in(13)?.memory().err().ok_or("memory gave Ok")?;
+        assert_eq!(e.to_string(), "cuMemGetInfo: CUDA_ERROR_INVALID_CONTEXT (201): invalid device context");
         Ok(())
     }
 }

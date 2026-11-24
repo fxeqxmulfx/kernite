@@ -1,5 +1,8 @@
 //! The driver as kernite calls it, on the GPU here, if there is one.
 
+use std::ffi::{c_char, c_int, c_void};
+use std::mem::transmute;
+
 use kernite_cuda::{Buffer, Cuda, Grid, Module, arg, bf16, f16};
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
@@ -1394,5 +1397,95 @@ fn threads_each_take_a_cuda_of_a_gpu_and_may_share_one() -> Result {
         }
         Ok(())
     })?;
+    Ok(())
+}
+
+/// A GiB, in bytes.
+const GIB: usize = 1 << 30;
+
+// The dynamic loader, in the C library that every Rust program on Linux links.
+unsafe extern "C" {
+    fn dlopen(file: *const c_char, flags: c_int) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+}
+
+/// How many bytes of memory GPU `index` has in all, as the driver says them by `cuDeviceTotalMem_v2`: a call of its
+/// own, which asks of the GPU and of no context, so that it tells what `memory` says as its total by another way. The
+/// driver is open and started, as a `Cuda` of the test opened it.
+fn device_total(index: usize) -> Result<usize> {
+    // SAFETY: the driver is open, so `dlopen` gives its handle, and `dlsym` the address of the function or null.
+    let (get, total) = unsafe {
+        let driver = dlopen(c"libcuda.so.1".as_ptr(), 2);
+        (dlsym(driver, c"cuDeviceGet".as_ptr()), dlsym(driver, c"cuDeviceTotalMem_v2".as_ptr()))
+    };
+    if get.is_null() || total.is_null() {
+        return Err("the driver has no `cuDeviceGet` or `cuDeviceTotalMem_v2`".into());
+    }
+    // SAFETY: `cuda.h` declares `cuDeviceGet(CUdevice *, int)` and `cuDeviceTotalMem_v2(size_t *, CUdevice)`, and the
+    // addresses are not null.
+    let (get, total) = unsafe {
+        (
+            transmute::<*mut c_void, unsafe extern "C" fn(*mut c_int, c_int) -> c_int>(get),
+            transmute::<*mut c_void, unsafe extern "C" fn(*mut usize, c_int) -> c_int>(total),
+        )
+    };
+    let (mut device, mut bytes) = (0, 0);
+    // SAFETY: it writes the GPU to `device`.
+    let got = unsafe { get(&mut device, index as c_int) };
+    // SAFETY: it writes the bytes to `bytes`, of the GPU the driver gave; it is asked only if that was given.
+    let asked = if got == 0 { unsafe { total(&mut bytes, device) } } else { got };
+    if asked != 0 {
+        return Err(format!("the driver said {asked} of GPU {index}").into());
+    }
+    Ok(bytes)
+}
+
+/// A buffer of 1 GiB on the GPU of `cuda`, or `None` and why not: a GPU that has not a GiB free is no GPU for the test.
+fn gib(cuda: &Cuda) -> Option<Buffer<u8>> {
+    let held = cuda.alloc::<u8>(GIB);
+    held.map_err(|e| eprintln!("a GPU with 1 GiB free: skipped, this one refuses a buffer of it. {e}")).ok()
+}
+
+#[test]
+fn the_memory_is_the_gpus_total_and_the_free_bytes_that_a_buffer_held_takes_from() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let (free, total) = cuda.memory()?;
+    eprintln!("the GPU has {free} bytes free of {total}");
+    // The total is the GPU's memory as the driver says it by another call, and the same each time.
+    assert_eq!(total, device_total(0)?);
+    assert!(free <= total, "{free} bytes are free of {total}");
+    assert_eq!(cuda.memory()?.1, total);
+    let Some(held) = gib(&cuda) else { return Ok(()) };
+    let (free_held, total_held) = cuda.memory()?;
+    eprintln!("the GPU has {free_held} bytes free of {total_held}, while a buffer of 1 GiB is held");
+    assert_eq!(total_held, total);
+    assert!(free_held <= total - GIB, "{free_held} bytes are free of {total}, with 1 GiB held");
+    drop(held);
+    Ok(())
+}
+
+#[test]
+fn a_cuda_of_each_gpu_says_the_memory_of_its_own_gpu_each_after_a_call_to_the_other() -> Result {
+    let Some(gpus) = two_gpus()? else { return Ok(()) };
+    let (a, b) = (Cuda::on(gpus[0])?, Cuda::on(gpus[1])?);
+    let totals = [device_total(gpus[0])?, device_total(gpus[1])?];
+    // Each call goes to the GPU of its `Cuda`, whichever GPU the call before it went to.
+    for _ in 0..2 {
+        for (cuda, total) in [(&a, totals[0]), (&b, totals[1]), (&b, totals[1]), (&a, totals[0])] {
+            let (free, got) = cuda.memory()?;
+            assert_eq!(got, total);
+            assert!(free <= total, "{free} bytes are free of {total}");
+        }
+    }
+    // A buffer held on a GPU takes from the free bytes of that GPU, which its `Cuda` says after the other's call, as
+    // two GPUs of the same total are told apart by it alone.
+    for (cuda, total, other) in [(&a, totals[0], &b), (&b, totals[1], &a)] {
+        let Some(held) = gib(cuda) else { continue };
+        other.memory()?;
+        let (free, got) = cuda.memory()?;
+        assert_eq!(got, total);
+        assert!(free <= total - GIB, "{free} bytes are free of {total}, with 1 GiB held");
+        drop(held);
+    }
     Ok(())
 }
