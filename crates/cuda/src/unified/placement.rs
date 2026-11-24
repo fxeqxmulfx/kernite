@@ -40,7 +40,7 @@ impl Location {
     /// What the driver is told, for the GPU `device`.
     fn raw(self, device: c_int) -> MemLocation {
         match self {
-            Location::Gpu => MemLocation { kind: 1, id: device },
+            Location::Gpu => MemLocation::gpu(device),
             Location::Host => MemLocation { kind: 2, id: 0 },
             Location::Numa(node) => {
                 // A node past what an `int` holds is past the host's, and the driver says so of the

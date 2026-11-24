@@ -6492,3 +6492,16 @@ fn a_launcher_that_is_no_unsafe_fn_takes_a_slice_registered_for_good() -> Result
     );
     Ok(())
 }
+
+/// A launcher the macros write that is no `unsafe fn` takes a buffer that `cuda.reserve` made, as it takes any buffer:
+/// it is lent the elements the buffer has, as many as it was grown to, and refuses a count past them; the kernel `bump`
+/// then runs over all of them after the buffer grows. Rust builds the crate without a word, under `#![deny(warnings)]`.
+#[test]
+fn a_launcher_that_is_no_unsafe_fn_takes_a_buffer_that_grew() -> Result {
+    let printed = runs_quietly(&["test"], "reserved")?;
+    assert!(
+        printed.contains("test result: ok. 1 passed"),
+        "fixtures/reserved.rs ran its test, and printed:\n{printed}"
+    );
+    Ok(())
+}

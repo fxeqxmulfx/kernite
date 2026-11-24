@@ -1,90 +1,18 @@
-//! Streams, on a GPU: which work runs beside which, what the host waits for, and where a launch goes. Two kernels,
-//! written by hand, share a flag: `waits` spins until it sees the flag, or a time has gone by, and `sets` writes it.
-//! A `waits` that sees the flag ran beside the `sets` that wrote it, and one that does not was kept from it, however
-//! long either took, as other programs' kernels on the GPU change the times. A test of its own, as a program of its
-//! own, and one test at a time: the null stream is the GPU's and not a thread's, so a kernel that waits on a stream
-//! keeps back what another test puts on the null stream.
+//! Streams, on a GPU: which work runs beside which, what the host waits for, and where a launch goes. Two kernels of
+//! `gpu` share a flag: `waits` spins until it sees the flag, or a time has gone by, and `sets` writes it. A `waits`
+//! that sees the flag ran beside the `sets` that wrote it, and one that does not was kept from it, however long either
+//! took, as other programs' kernels on the GPU change the times. A test of its own, as a program of its own, and one
+//! test at a time.
 
-use std::ffi::c_void;
 use std::panic::{self, AssertUnwindSafe};
-use std::ptr;
-use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use kernite_cuda::{Buffer, Cuda, Error, Grid, Module, Ptr, Stream, Unified, arg};
+use kernite_cuda::{Buffer, Cuda, Error, Module, Ptr, Stream, arg};
+
+mod gpu;
+use gpu::{SEEN, SETS, TIMED_OUT, WAITS, cuda, launch, load, peek, run};
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
-
-static ALONE: Mutex<()> = Mutex::new(());
-
-/// The kernels, written by hand. `%globaltimer` is the GPU's clock, in nanoseconds.
-///
-/// `waits(flag, out, nanos)` spins until `*flag` is not 0, or until `nanos` nanoseconds have gone by; then it writes 1
-/// to `*out` if it saw the flag, and 2 if the time went by first. `sets(flag, nanos)` writes 1 to `*flag` after `nanos`
-/// nanoseconds.
-const PTX: &str = "
-.version 7.5
-.target sm_61
-.address_size 64
-
-.visible .entry waits(.param .u64 flag_param, .param .u64 out_param, .param .u64 nanos_param)
-{
-	.reg .u64 %flag, %out, %nanos, %start, %now, %gone;
-	.reg .u32 %word;
-	.reg .pred %set, %early;
-
-	ld.param.u64 %flag, [flag_param];
-	ld.param.u64 %out, [out_param];
-	ld.param.u64 %nanos, [nanos_param];
-	cvta.to.global.u64 %flag, %flag;
-	cvta.to.global.u64 %out, %out;
-	mov.u64 %start, %globaltimer;
-SPIN:
-	ld.volatile.global.u32 %word, [%flag];
-	setp.ne.u32 %set, %word, 0;
-	@%set bra SEEN;
-	mov.u64 %now, %globaltimer;
-	sub.u64 %gone, %now, %start;
-	setp.lt.u64 %early, %gone, %nanos;
-	@%early bra SPIN;
-	mov.u32 %word, 2;
-	st.volatile.global.u32 [%out], %word;
-	ret;
-SEEN:
-	mov.u32 %word, 1;
-	st.volatile.global.u32 [%out], %word;
-	ret;
-}
-
-.visible .entry sets(.param .u64 flag_param, .param .u64 nanos_param)
-{
-	.reg .u64 %flag, %nanos, %start, %now, %gone;
-	.reg .u32 %one;
-	.reg .pred %early;
-
-	ld.param.u64 %flag, [flag_param];
-	ld.param.u64 %nanos, [nanos_param];
-	cvta.to.global.u64 %flag, %flag;
-	mov.u64 %start, %globaltimer;
-LATER:
-	mov.u64 %now, %globaltimer;
-	sub.u64 %gone, %now, %start;
-	setp.lt.u64 %early, %gone, %nanos;
-	@%early bra LATER;
-	mov.u32 %one, 1;
-	st.volatile.global.u32 [%flag], %one;
-	ret;
-}
-";
-
-/// The kernels of `PTX`, in the order `Module::load` is given their names.
-const KERNELS: &[&str] = &["waits", "sets"];
-const WAITS: usize = 0;
-const SETS: usize = 1;
-
-/// What `waits` writes: that it saw the flag, or that the time went by first.
-const SEEN: u32 = 1;
-const TIMED_OUT: u32 = 2;
 
 /// How long `waits` waits for the flag, in nanoseconds, where it must see it: a second, much more than `sets` takes to
 /// run beside it. It returns as soon as it sees the flag, so the second is not spent.
@@ -101,35 +29,6 @@ const A_LONG_WHILE: u64 = 1_000_000_000;
 /// The least a call that waits for `sets` takes, with `A_LITTLE_WHILE`: the kernel is launched before the call is
 /// timed.
 const AT_LEAST: Duration = Duration::from_millis(300);
-
-/// The GPU, with the lock that keeps the other tests off the null stream; or a line that says the test is skipped.
-fn cuda() -> Option<(Cuda, MutexGuard<'static, ()>)> {
-    let alone = ALONE.lock().unwrap_or_else(PoisonError::into_inner);
-    Cuda::new().map(|cuda| (cuda, alone)).map_err(|e| eprintln!("no GPU: skipped. {e}")).ok()
-}
-
-/// `work`, with `stream` the current stream of its GPU.
-fn run<R>(stream: &Stream, work: impl FnOnce() -> R) -> R {
-    // SAFETY: the kernels of this file share one word between streams at most, the flag that `sets` writes and `waits`
-    // reads, each by one volatile access that the GPU does whole: that is what the tests look for. `waits` writes its
-    // own `out`, and the kernels reach no other memory in common.
-    unsafe { stream.run(work) }
-}
-
-/// The kernel `kernel` of `module`, launched over one thread on the current stream of its GPU, with `args`.
-fn launch(module: &Module, kernel: usize, args: &[*const c_void]) -> Result {
-    // SAFETY: each kernel is given what its `.param`s are: addresses of memory of the GPU that the test holds, and
-    // numbers, as `u64`; and it writes only the word that an address it is given is of.
-    unsafe { module.launch(kernel, Grid::new(1, 1), args) }?;
-    Ok(())
-}
-
-/// What the page-locked word `at` holds now. It is read where it is, and not by `host`, which waits for the GPU first.
-fn peek(at: &Unified<'_, u32>) -> u32 {
-    // SAFETY: `at` is a word of page-locked memory that lasts as long as `at`, which the GPU reaches at the address the
-    // host has for it; the kernel writes it by one store of the whole word.
-    unsafe { ptr::read_volatile(ptr::with_exposed_provenance::<u32>(at.ptr().addr() as usize)) }
-}
 
 /// That `waits` wrote `expected` after `around_waits` launched it and `around_sets` launched `sets`, each given the
 /// launch to put where it likes: on a stream by `run`, or where it goes. `sets` is launched after `waits`, and writes
@@ -165,7 +64,7 @@ fn on_null(launch: &dyn Fn() -> Result) -> Result {
 #[test]
 fn the_work_of_two_streams_runs_at_once_and_a_stream_and_the_null_stream_wait_for_each_other() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
-    let module = Module::load(&cuda, PTX, KERNELS, &[])?;
+    let module = load(&cuda)?;
     let (a, b) = (cuda.stream()?, cuda.stream()?);
     // `waits` on `a` sees the flag that `sets` writes on `b`: the two ran beside each other.
     race(&cuda, &module, SEEN, on(&a), on(&b), "two streams")?;
@@ -181,7 +80,7 @@ fn the_work_of_two_streams_runs_at_once_and_a_stream_and_the_null_stream_wait_fo
 #[test]
 fn a_launch_goes_to_the_stream_run_made_current_and_afterwards_to_the_stream_before() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
-    let module = Module::load(&cuda, PTX, KERNELS, &[])?;
+    let module = load(&cuda)?;
     let (a, b) = (cuda.stream()?, cuda.stream()?);
     // `sets` is on `b` in each: `waits` sees the flag only if it went to a stream that is neither `b`, where it is
     // queued before `sets`, nor the null stream, which `b` waits for.
@@ -230,7 +129,7 @@ fn a_launch_goes_to_the_stream_run_made_current_and_afterwards_to_the_stream_bef
 fn a_launch_through_another_cuda_of_the_gpu_goes_to_the_stream_of_the_gpu() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
     let other = Cuda::new()?;
-    let module = Module::load(&other, PTX, KERNELS, &[])?;
+    let module = load(&other)?;
     let (a, b) = (cuda.stream()?, cuda.stream()?);
     // The streams are made by `cuda`, and the kernels are launched with the module that `other` loaded: the GPU is one.
     race(&other, &module, SEEN, on(&a), on(&b), "a launch through another `Cuda` of the GPU")?;
@@ -252,7 +151,7 @@ fn waited(started: Instant, what: &str) {
 #[test]
 fn the_host_waits_for_the_work_of_a_stream_where_it_waits_for_the_null_streams() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
-    let module = Module::load(&cuda, PTX, KERNELS, &[])?;
+    let module = load(&cuda)?;
     let a = cuda.stream()?;
     // What the calls are made on, made before each kernel is queued: a call that makes memory may wait of itself. The
     // kernel writes a word of the memory that each call reaches. Memory the host reaches is in `unified.rs`.
@@ -282,13 +181,13 @@ fn the_host_waits_for_the_work_of_a_stream_where_it_waits_for_the_null_streams()
     Ok(())
 }
 
-/// `zero` and `copy_from` are queued and not waited for: they run after the kernel that a stream was given before them,
-/// as the stream blocks the null stream they go to, which the values they leave show. `sets` writes the 1 a little
-/// while after it is queued; `zero` clears it if it runs after, and `copy_from` copies it if it does.
+/// `zero` and `copy_from` run after the kernel that a stream was given before them, as the stream blocks the null
+/// stream they go to, which the values they leave show. `sets` writes the 1 a little while after it is queued; `zero`
+/// clears it if it runs after, and `copy_from` copies it if it does.
 #[test]
 fn zero_and_copy_from_run_after_the_work_a_stream_was_given_before_them() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
-    let module = Module::load(&cuda, PTX, KERNELS, &[])?;
+    let module = load(&cuda)?;
     let a = cuda.stream()?;
     let (mut flag, mut copy) = (cuda.alloc::<u32>(1)?, cuda.alloc::<u32>(1)?);
     queue_sets(&module, &a, flag.ptr())?;
@@ -300,25 +199,25 @@ fn zero_and_copy_from_run_after_the_work_a_stream_was_given_before_them() -> Res
     Ok(())
 }
 
-/// A call that writes the first buffer, with a second to copy from if it likes: `zero` or `copy_from`.
+/// A call that writes the first buffer, with a second to copy from if it likes.
 type Call = fn(&mut Buffer<u32>, &Buffer<u32>) -> Result<(), Error>;
 
+/// The two calls that write a buffer: `zero` and `copy_from`. Both go to the null stream.
+const CALLS: [(&str, Call); 2] = [("zero", |to, _| to.zero()), ("copy_from", |to, from| to.copy_from(from))];
+
 /// `zero` and `copy_from` run before the work a stream is given after them, as the stream's work waits for what the
-/// null stream, which they go to, was given before it, and they are queued and not waited for. The null stream is busy
-/// for a tenth of a second, so that the call waits in the queue behind that kernel; then a stream is given a `sets`
-/// that writes at once. It must wait for the call, or it would write its 1 first, and the call would clear it, or copy
-/// the 0 over it.
+/// null stream, which they go to, was given before it. The null stream is busy for a tenth of a second, so that the
+/// call waits in the queue behind that kernel; then a stream is given a `sets` that writes at once. It must wait for
+/// the call, or it would write its 1 first, and the call would clear it, or copy the 0 over it.
 #[test]
 fn zero_and_copy_from_run_before_the_work_a_stream_was_given_after_them() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
-    let module = Module::load(&cuda, PTX, KERNELS, &[])?;
+    let module = load(&cuda)?;
     let a = cuda.stream()?;
     let (mut flag, mut zeros, busy) = (cuda.alloc::<u32>(1)?, cuda.alloc::<u32>(1)?, cuda.alloc::<u32>(1)?);
     zeros.zero()?;
     let (flag_at, busy_at) = (flag.ptr(), busy.ptr());
-    let calls: [(&str, Call); 2] =
-        [("zero", |flag, _| flag.zero()), ("copy_from", |flag, zeros| flag.copy_from(zeros))];
-    for (name, call) in calls {
+    for (name, call) in CALLS {
         launch(&module, SETS, &[arg(&busy_at), arg(&A_TENTH)])?;
         call(&mut flag, &zeros)?;
         run(&a, || launch(&module, SETS, &[arg(&flag_at), arg(&AT_ONCE)]))?;
@@ -327,10 +226,36 @@ fn zero_and_copy_from_run_before_the_work_a_stream_was_given_after_them() -> Res
     Ok(())
 }
 
+/// `zero` and `copy_from` return before the GPU has done their work: they are queued behind the kernel that keeps the
+/// null stream busy for a tenth of a second, and the page-locked word that the kernel writes at its end is still 0 when
+/// each call returns; `Cuda::sync` waits for the kernel and for the call. The GPU does what the call asked once the
+/// kernel is done, which the values in the tests above show.
+#[test]
+fn zero_and_copy_from_return_before_the_gpu_has_done_their_work() -> Result {
+    let Some((cuda, _alone)) = cuda() else { return Ok(()) };
+    let module = load(&cuda)?;
+    let (mut to, from) = (cuda.alloc::<u32>(1)?, cuda.alloc::<u32>(1)?);
+    for (name, call) in CALLS {
+        // A word for each call, made before the kernel is queued: a call that makes memory may wait of itself.
+        let done = cuda.pinned::<u32>(1)?;
+        let done_at = done.ptr();
+        launch(&module, SETS, &[arg(&done_at), arg(&A_TENTH)])?;
+        let started = Instant::now();
+        call(&mut to, &from)?;
+        let took = started.elapsed();
+        let seen = peek(&done);
+        eprintln!("{name} returned after {took:?}, and the kernel before it, of a tenth of a second, had set {seen}");
+        assert_eq!(seen, 0, "{name} waited for the kernel before it, which was not done when it returned");
+        cuda.sync()?;
+        assert_eq!(peek(&done), 1, "the kernel before {name} is not done after sync");
+    }
+    Ok(())
+}
+
 #[test]
 fn a_stream_waits_for_its_own_work_alone() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
-    let module = Module::load(&cuda, PTX, KERNELS, &[])?;
+    let module = load(&cuda)?;
     let (a, b) = (cuda.stream()?, cuda.stream()?);
     let (early, late) = (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
     let (early_at, late_at) = (early.ptr(), late.ptr());
@@ -347,7 +272,7 @@ fn a_stream_waits_for_its_own_work_alone() -> Result {
 #[test]
 fn the_work_of_a_stream_runs_on_when_the_stream_is_dropped() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
-    let module = Module::load(&cuda, PTX, KERNELS, &[])?;
+    let module = load(&cuda)?;
     let (a, flag) = (cuda.stream()?, cuda.pinned::<u32>(1)?);
     let at = flag.ptr();
     run(&a, || launch(&module, SETS, &[arg(&at), arg(&A_LITTLE_WHILE)]))?;
