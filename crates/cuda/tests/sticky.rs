@@ -30,7 +30,7 @@ fn an_error_of_a_launch_that_is_not_about_its_grid_is_said_as_the_driver_says_it
     let Ok(cuda) = kernite_cuda::Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(()) };
     let module = Module::load(&cuda, FAULT, &["fault"], &[])?;
     let out = cuda.alloc::<u32>(1)?;
-    let unified = cuda.managed::<u32>(1)?;
+    let unified = cuda.pinned::<u32>(1)?;
     let at = out.ptr();
     // SAFETY: `fault` takes a pointer and does not read it. The launch starts, and the kernel
     // fails on the GPU, which this test is for.

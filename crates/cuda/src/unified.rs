@@ -36,15 +36,40 @@ const HOST_REGISTER_SUPPORTED: Flag = (99, "HOST_REGISTER_SUPPORTED");
 const HOST_POINTER_FOR_REGISTERED_MEM: Flag = (91, "CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM");
 
 /// The GPU reaches managed memory while the host does, as the driver needs of a GPU that it moves
-/// memory for. [`Cuda::concurrent_managed_access`] says it.
-pub(crate) const CONCURRENT_MANAGED_ACCESS: Flag = (89, "CONCURRENT_MANAGED_ACCESS");
+/// memory for.
+const CONCURRENT_MANAGED_ACCESS: Flag = (89, "CONCURRENT_MANAGED_ACCESS");
+
+/// The error that says the `call` is refused, as a GPU `cannot` do it, and why: its attribute `name` is 0.
+fn lacks(call: &'static str, cannot: &str, name: &str) -> Error {
+    Error::new(call, format!("{cannot}: its CU_DEVICE_ATTRIBUTE_{name} is 0"))
+}
 
 impl Driver {
     /// `Ok` if this GPU has the `flag`; or the error that says the `call` is refused, as the GPU
     /// `cannot` do it, and why.
     pub(crate) fn require(&self, call: &'static str, (attribute, name): Flag, cannot: &str) -> Result<(), Error> {
         if self.attribute(attribute)? == 0 {
-            return Err(Error::new(call, format!("{cannot}: its CU_DEVICE_ATTRIBUTE_{name} is 0")));
+            return Err(lacks(call, cannot, name));
+        }
+        Ok(())
+    }
+
+    /// `Ok` if each GPU the driver shows that allocates managed memory reaches it while the host does; or the error
+    /// that says `cuMemAllocManaged` is refused, and names the first that does not, by the number [`Cuda::on`] takes.
+    /// Managed memory is every GPU's, and a GPU that does not faults the host on it while any of its work runs, a
+    /// kernel, a copy or a zeroing, so `managed` makes none where there is one. Each GPU is asked whether it
+    /// allocates managed memory, and one that cannot reaches none, so it does not stop `managed`.
+    fn require_every_gpu_beside_the_host(&self) -> Result<(), Error> {
+        let api = &self.api;
+        for ordinal in 0..api.gpus()? {
+            let mut device = 0;
+            // SAFETY: it writes the device to `device`. `ordinal` is of a GPU the driver shows.
+            api.check("cuDeviceGet", unsafe { (api.device_get)(&mut device, ordinal as c_int) })?;
+            let has = |(attribute, _): Flag| api.attribute_of(device, attribute);
+            if has(MANAGED_MEMORY)? != 0 && has(CONCURRENT_MANAGED_ACCESS)? == 0 {
+                let cannot = format!("GPU {ordinal} cannot reach managed memory while the host does");
+                return Err(lacks("cuMemAllocManaged", &cannot, CONCURRENT_MANAGED_ACCESS.1));
+            }
         }
         Ok(())
     }
@@ -56,35 +81,39 @@ impl Cuda {
     /// managed memory; the error says so of one that does not: `cuMemAllocManaged: the GPU cannot
     /// allocate managed memory: its CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY is 0`.
     ///
+    /// Managed memory is every GPU's, so each GPU the driver shows that allocates it must reach it
+    /// while the host does too. A GPU that cannot, WSL2's say, faults the host on managed memory
+    /// while any of its work runs, a kernel, a copy or a zeroing, and the host may touch the memory
+    /// then. `managed` makes none where one GPU cannot, whichever GPU `self` is of, and the error
+    /// names the first by the number [`Cuda::on`] takes: `cuMemAllocManaged: GPU 1 cannot reach
+    /// managed memory while the host does: its CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0`.
+    /// [`pinned`](Cuda::pinned) makes memory that such a GPU reaches at the host's addresses.
+    /// `CUDA_VISIBLE_DEVICES` leaves a GPU out of those the driver shows, and `managed` does not
+    /// ask a GPU that is left out.
+    ///
     /// The GPU writes the zeros, so the driver has each page at the GPU when the host first writes
     /// it, and moves it back. Memory that the host or a kernel writes whole before anything reads
     /// it needs no zeros, and [`managed_uninit`](Cuda::managed_uninit) makes it for what the
     /// driver's own call costs.
     ///
     /// The zeros go to the current stream of the GPU, as a launch does, after the work that stream
-    /// was given before. Where the GPU reaches managed memory while the host does,
-    /// [`concurrent_managed_access`](Cuda::concurrent_managed_access), the call returns once they
-    /// are queued. A GPU that does not owns managed memory while it writes them, and faults the host
-    /// that touches any, a slice from [`host`](Unified::host) that it holds say, so there the call
-    /// waits for the zeros, and for all the work of the GPU, as [`sync`](Cuda::sync) does.
+    /// was given before, and the call returns once they are queued. [`host`](Unified::host) and
+    /// [`host_mut`](Unified::host_mut) wait for them, as they wait for a kernel.
     pub fn managed<T: Plain>(&self, len: usize) -> Result<Unified<'static, T>, Error> {
         // SAFETY: the zeros are written below, before the memory is lent.
         let memory = unsafe { self.managed_uninit(len) }?;
         // The driver does not clear it, and the host must not be lent bytes that were never
-        // written. The GPU writes the zeros: where the GPU does not allow concurrent access, the
-        // host must not touch managed memory while any of its work runs, and the zeros are work.
+        // written. The GPU writes the zeros, queued on the current stream, and a call of the host
+        // that reaches the memory waits for them.
         memory.driver.zero(memory.addr(), len * size_of::<T>())?;
-        if !self.concurrent_managed_access {
-            self.driver.sync()?;
-        }
         Ok(memory)
     }
 
     /// `len` elements of managed memory as the driver leaves it, with no zeros written: it costs
     /// what `cuMemAllocManaged` does, and no more. [`managed`](Cuda::managed) writes the zeros with
     /// the GPU, which has the driver move each page to the GPU, and back when the host first
-    /// writes it. The GPU must allocate managed memory, as for `managed`, and the error is the
-    /// same.
+    /// writes it. The GPU must allocate managed memory, and each GPU the driver shows that allocates
+    /// it must reach it while the host does too, as for `managed`, and the errors are the same.
     ///
     /// # Safety
     ///
@@ -94,6 +123,7 @@ impl Cuda {
     /// bytes as they are.
     pub unsafe fn managed_uninit<T: Plain>(&self, len: usize) -> Result<Unified<'static, T>, Error> {
         self.driver.require("cuMemAllocManaged", MANAGED_MEMORY, "the GPU cannot allocate managed memory")?;
+        self.driver.require_every_gpu_beside_the_host()?;
         let bytes = bytes::<T>("cuMemAllocManaged", len)?;
         let (api, mut addr) = (self.driver.current()?, 0);
         // SAFETY: it writes the address to `addr`. It refuses no bytes, so it is asked for one. 1
@@ -383,11 +413,9 @@ enum Kind {
 /// contract, which [`Module::launch`] has as its `# Safety`, is this: each pointer is to a buffer
 /// or to unified memory of the GPU, as long as the kernel reads and writes through it; from the
 /// launch until the kernel is done, the host holds no slice of memory the kernel writes, and no
-/// slice it may write of memory the kernel reads; and where [`Cuda::concurrent_managed_access`]
-/// is false, the GPU not reaching managed memory while the host does, the host holds no slice of
-/// managed memory at all. The launcher of a kernel that is no `unsafe fn` takes the memory, not a
-/// pointer, and borrows it, as [`Memory`](super::Memory) says, so the compiler refuses that
-/// launch while the host holds such a slice.
+/// slice it may write of memory the kernel reads. The launcher of a kernel that is no `unsafe fn`
+/// takes the memory, not a pointer, and borrows it, as [`Memory`](super::Memory) says, so the
+/// compiler refuses that launch while the host holds such a slice.
 ///
 /// Dropping the memory waits for the kernels that use it, and then frees it; or, for a slice
 /// lent, gives it back to the host, and for a slice registered, unlocks it and gives it back.
@@ -453,17 +481,6 @@ impl<T: Plain> Unified<'_, T> {
     fn addr(&self) -> u64 {
         self.ptr.addr() as u64
     }
-
-    /// `Ok` unless this is managed memory that its GPU cannot reach while the host does. The host may touch managed
-    /// memory while the work that `call` queues runs, as any slice of it that it holds may, and such a GPU faults it
-    /// then, so `call` is refused: `what` is what it does not do, and the error ends the sentence with the GPU's lack.
-    fn require_beside_the_host(&self, call: &'static str, what: &str) -> Result<(), Error> {
-        if matches!(self.kind, Kind::Managed) {
-            let cannot = format!("{what} by a GPU that cannot reach it while the host does");
-            self.driver.require(call, CONCURRENT_MANAGED_ACCESS, &cannot)?;
-        }
-        Ok(())
-    }
 }
 
 impl<T: Plain> Unified<'static, T> {
@@ -472,11 +489,6 @@ impl<T: Plain> Unified<'static, T> {
     /// wait for a kernel. It is for memory of `'static` alone, as [`Cuda::copy`] is: a slice lent or registered for
     /// less would be the host's again at a `mem::forget` of its `Unified`, with the zeros still to be written.
     ///
-    /// Managed memory is zeroed only by a GPU that reaches it while the host does, as it is copied only by one: the
-    /// host may touch it while the zeros are written, and another GPU faults the host then. The error says so,
-    /// `cuMemsetD8Async: managed memory is not zeroed by a GPU that cannot reach it while the host does: its
-    /// CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0`, and nothing is zeroed.
-    ///
     /// ```compile_fail,E0597
     /// # let cuda = kernite_cuda::Cuda::new()?;
     /// let mut xs = vec![1.0f32; 4];
@@ -484,7 +496,6 @@ impl<T: Plain> Unified<'static, T> {
     /// # Ok::<(), kernite_cuda::Error>(())
     /// ```
     pub fn zero(&mut self) -> Result<(), Error> {
-        self.require_beside_the_host("cuMemsetD8Async", "managed memory is not zeroed")?;
         self.driver.zero(self.addr(), self.len * size_of::<T>())
     }
 }
@@ -496,7 +507,6 @@ impl<T: Plain> sealed::Sealed for Unified<'static, T> {}
 impl<T: Plain> Memory<T> for Unified<'static, T> {
     fn lend(&self, module: &super::Module) -> Result<(Ptr<T>, usize), Error> {
         module.reaches(&self.driver)?;
-        self.require_beside_the_host("cuLaunchKernel", "a kernel that is no `unsafe fn` is not lent managed memory")?;
         Ok((self.ptr(), self.len))
     }
 
@@ -511,7 +521,6 @@ impl<T: Plain> Memory<T> for Unified<'static, T> {
                 .to_string();
             return Err(Error::new("cuMemcpyAsync", why));
         }
-        self.require_beside_the_host("cuMemcpyAsync", "managed memory is not copied")?;
         Ok((self.ptr(), self.len))
     }
 }
@@ -558,14 +567,30 @@ pub(crate) mod tests {
     type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
     thread_local! {
-        /// What the GPU here says of each attribute: the attribute's number is the index.
-        static ATTRIBUTES: Cell<[c_int; 128]> = const { Cell::new([0; 128]) };
+        /// What each GPU here says of each attribute: the GPU's number is the row, and the attribute's the index.
+        static ATTRIBUTES: Cell<[[c_int; 128]; 2]> = const { Cell::new([[0; 128]; 2]) };
+        /// How many GPUs the fake driver shows.
+        static GPUS: Cell<c_int> = const { Cell::new(1) };
     }
 
-    /// The fake GPU's `cuDeviceGetAttribute`.
-    unsafe extern "C" fn attribute(value: *mut c_int, attribute: c_int, _: c_int) -> CuResult {
+    /// The fake GPUs' `cuDeviceGetAttribute`.
+    unsafe extern "C" fn attribute(value: *mut c_int, attribute: c_int, device: c_int) -> CuResult {
         // SAFETY: the caller gives a place for the value.
-        unsafe { *value = ATTRIBUTES.get()[attribute as usize] };
+        unsafe { *value = ATTRIBUTES.get()[device as usize][attribute as usize] };
+        0
+    }
+
+    /// The fake driver's `cuDeviceGetCount`.
+    unsafe extern "C" fn device_count(count: *mut c_int) -> CuResult {
+        // SAFETY: the caller gives a place for the count.
+        unsafe { *count = GPUS.get() };
+        0
+    }
+
+    /// The fake driver's `cuDeviceGet`: GPU `ordinal` is the device `ordinal`.
+    unsafe extern "C" fn device_get(device: *mut c_int, ordinal: c_int) -> CuResult {
+        // SAFETY: the caller gives a place for the device.
+        unsafe { *device = ordinal };
         0
     }
 
@@ -574,8 +599,17 @@ pub(crate) mod tests {
         0
     }
 
-    /// A GPU that says each of `flags` is 1 and every other attribute 0, and refuses every call but
-    /// the two that tell its attributes and make its context current.
+    /// What a GPU says that says each of `flags` is 1 and every other attribute 0.
+    fn says(flags: &[Flag]) -> [c_int; 128] {
+        let mut values = [0; 128];
+        for (attribute, _) in flags {
+            values[*attribute as usize] = 1;
+        }
+        values
+    }
+
+    /// A machine of one GPU that says each of `flags` is 1 and every other attribute 0, and refuses every call but
+    /// the four that count the GPUs and number them, tell the attributes of one, and make its context current.
     pub(crate) fn gpu(flags: &[Flag]) -> Result<Cuda> {
         gpu_with(flags, |_| {})
     }
@@ -585,18 +619,31 @@ pub(crate) mod tests {
         gpu_in(1, flags, replace)
     }
 
+    /// A machine of two GPUs, GPU 0 and GPU 1, which say each of `first` and each of `second` is 1 and every other
+    /// attribute 0, and the `Cuda` of the GPU `on`.
+    fn machine(on: c_int, first: &[Flag], second: &[Flag]) -> Result<Cuda> {
+        ATTRIBUTES.set([says(first), says(second)]);
+        GPUS.set(2);
+        cuda_on(on, 1, |_| {})
+    }
+
     /// The same GPU, with `context` as its context: two with two contexts are two GPUs.
     fn gpu_in(context: usize, flags: &[Flag], replace: impl FnOnce(&mut Api)) -> Result<Cuda> {
-        let mut values = [0; 128];
-        for (attribute, _) in flags {
-            values[*attribute as usize] = 1;
-        }
-        ATTRIBUTES.set(values);
+        ATTRIBUTES.set([says(flags); 2]);
+        GPUS.set(1);
+        cuda_on(0, context, replace)
+    }
+
+    /// The `Cuda` of the GPU `device`, with `context` as its context, and the calls `replace` puts in the driver's
+    /// place.
+    fn cuda_on(device: c_int, context: usize, replace: impl FnOnce(&mut Api)) -> Result<Cuda> {
         let mut api = Api::refusing();
+        api.device_count = device_count;
+        api.device_get = device_get;
         api.attribute = attribute;
         api.set_current = set_current;
         replace(&mut api);
-        let driver = Rc::new(Driver { api, device: 0, context: ptr::without_provenance_mut(context) });
+        let driver = Rc::new(Driver { api, device, context: ptr::without_provenance_mut(context) });
         Ok(Cuda::of(driver, String::new())?)
     }
 
@@ -727,28 +774,64 @@ pub(crate) mod tests {
         0
     }
 
-    /// A GPU says it reaches managed memory while the host does as its attribute says, whatever
-    /// else it says of itself.
+    /// Managed memory is every GPU's, and a GPU that does not reach it while the host does faults the host on it while
+    /// any of its work runs, so `managed` makes it only where each GPU the driver shows that allocates it reaches it
+    /// while the host does: the GPU that `managed` is called on must allocate it, and the error says so of one that
+    /// does not, or names the first GPU that cannot reach it, by the number `Cuda::on` takes, in GUIDE.md's words,
+    /// before the driver is asked for any, whichever GPU of the machine the call is made on. Each GPU is asked whether
+    /// it allocates managed memory, and one that does not reaches none, so it does not stop `managed`. The driver here
+    /// refuses everything, so a refusal that is the attribute's is not the driver's.
     #[test]
-    fn a_gpu_says_whether_it_reaches_managed_memory_while_the_host_does() -> Result {
-        assert!(gpu(&[CONCURRENT_MANAGED_ACCESS])?.concurrent_managed_access());
-        assert!(!gpu(&[])?.concurrent_managed_access());
-        let others = [MANAGED_MEMORY, UNIFIED_ADDRESSING, PAGEABLE_MEMORY_ACCESS];
-        assert!(!gpu(&others)?.concurrent_managed_access());
-        assert!(gpu(&[&others[..], &[CONCURRENT_MANAGED_ACCESS]].concat())?.concurrent_managed_access());
-        Ok(())
-    }
-
-    /// A GPU that does not allocate managed memory is refused it, in GUIDE.md's words, before
-    /// the driver is asked for any.
-    #[test]
-    fn managed_memory_is_made_only_for_a_gpu_that_allocates_it() -> Result {
-        let e = gpu(&[])?.managed::<u32>(4).err().ok_or("managed gave Ok")?;
-        let said = "the GPU cannot allocate managed memory: its CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY is 0";
-        assert_eq!(e.to_string(), format!("cuMemAllocManaged: {said}"));
-        // One that does is asked, and the driver here refuses everything.
-        let e = gpu(&[MANAGED_MEMORY])?.managed::<u32>(4).err().ok_or("managed gave Ok")?;
-        assert_eq!(e.call, "cuMemAllocManaged");
+    fn managed_memory_is_made_only_where_each_gpu_that_allocates_it_reaches_it_while_the_host_does() -> Result {
+        let (m, c) = (MANAGED_MEMORY, CONCURRENT_MANAGED_ACCESS);
+        let refused = |cuda: Cuda| -> Result<(String, String)> {
+            let made = cuda.managed::<u32>(4).err().ok_or("managed gave Ok")?;
+            // SAFETY: no memory is made, as the machine refuses it, and none is read.
+            let uninit = unsafe { cuda.managed_uninit::<u32>(4) }.err().ok_or("managed_uninit gave Ok")?;
+            Ok((made.to_string(), uninit.to_string()))
+        };
+        let same = |said: String| (said.clone(), said);
+        let allocate = "cuMemAllocManaged: the GPU cannot allocate managed memory: \
+                        its CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY is 0";
+        let reach = |gpu: usize| {
+            format!(
+                "cuMemAllocManaged: GPU {gpu} cannot reach managed memory while the host does: \
+                 its CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0"
+            )
+        };
+        // One GPU.
+        assert_eq!(refused(gpu(&[])?)?, same(allocate.to_string()), "a GPU that does neither");
+        assert_eq!(refused(gpu(&[c])?)?, same(allocate.to_string()), "a GPU that reaches it and does not allocate it");
+        assert_eq!(refused(gpu(&[m])?)?, same(reach(0)), "a GPU that allocates it and does not reach it");
+        // Two GPUs, and the `Cuda` of each in turn: the GPU that cannot reach managed memory is named whichever GPU
+        // `managed` is called on, the other one as well as that one, and the first of two that cannot.
+        for (first, second, said) in
+            [(&[m, c][..], &[m][..], reach(1)), (&[m], &[m, c], reach(0)), (&[m], &[m], reach(0))]
+        {
+            for on in [0, 1] {
+                let said = same(said.clone());
+                assert_eq!(refused(machine(on, first, second)?)?, said, "GPU {on} of {first:?} and {second:?}");
+            }
+        }
+        // The GPU that `managed` is called on allocates it, or the error says so, whatever the other GPU says.
+        assert_eq!(refused(machine(0, &[], &[m, c])?)?, same(allocate.to_string()), "GPU 0 does not allocate it");
+        assert_eq!(refused(machine(1, &[m, c], &[])?)?, same(allocate.to_string()), "GPU 1 does not allocate it");
+        // Neither a GPU that does not allocate managed memory nor one that allocates it and reaches it while the host
+        // does stops `managed`: the driver is asked for the memory.
+        let asked = |cuda: Cuda| -> Result {
+            let e = cuda.managed::<u32>(4).err().ok_or("managed gave Ok")?;
+            assert_eq!(e.call, "cuMemAllocManaged");
+            assert!(!e.message.contains("CU_DEVICE_ATTRIBUTE_"), "{e}");
+            Ok(())
+        };
+        asked(gpu(&[m, c])?)?;
+        for on in [0, 1] {
+            asked(machine(on, &[m, c], &[m, c])?)?;
+        }
+        asked(machine(0, &[m, c], &[])?)?;
+        asked(machine(1, &[], &[m, c])?)?;
+        asked(machine(0, &[m, c], &[c])?)?;
+        asked(machine(1, &[c], &[m, c])?)?;
         Ok(())
     }
 
@@ -812,44 +895,72 @@ pub(crate) mod tests {
         Buffer { driver: cuda.driver.clone(), ptr: 4096, len: 4, reservation: None, of: PhantomData }
     }
 
-    /// A copy of managed memory and a zeroing of it are refused by a GPU that cannot reach managed memory while the
-    /// host does, in GUIDE.md's words, as a launch is: the host may touch the memory while they run. The driver is
-    /// asked for neither, and nothing is changed. A GPU that can is asked for both, and page-locked memory is copied
-    /// by either.
+    /// A copy of managed memory, and of page-locked memory, either way, and a zeroing of managed memory are each asked
+    /// of the driver, with the memory's own address.
     #[test]
-    fn a_copy_and_a_zeroing_of_managed_memory_are_refused_by_a_gpu_that_cannot_reach_it_with_the_host() -> Result {
-        // What each call said, how many copies the driver was asked for, and the managed memory's words at the end.
-        let tried = |flags: &[Flag]| -> Result<(Vec<Option<String>>, usize, Vec<u32>)> {
-            let cuda = gpu_with(flags, |api| {
+    fn managed_and_page_locked_memory_are_copied_and_managed_memory_is_zeroed_by_the_driver() -> Result {
+        let flags = [MANAGED_MEMORY, UNIFIED_ADDRESSING, CONCURRENT_MANAGED_ACCESS];
+        let cuda = gpu_with(&flags, |api| {
+            api.alloc_managed = alloc_managed;
+            api.alloc_host = alloc_host;
+            api.memset = memset;
+            api.copy_async = copy_async;
+            api.synchronize = synchronize;
+        })?;
+        let (mut managed, mut pinned) = (cuda.managed::<u32>(4)?, cuda.pinned::<u32>(4)?);
+        let mut buffer = buffer_of(&cuda);
+        managed.host_mut()?.fill(7);
+        COPIED.set(0);
+        cuda.copy(&mut buffer, &managed)?;
+        cuda.copy(&mut managed, &buffer)?;
+        cuda.copy(&mut buffer, &pinned)?;
+        cuda.copy(&mut pinned, &buffer)?;
+        assert_eq!(COPIED.get(), 4);
+        managed.zero()?;
+        assert_eq!(managed.host()?, [0; 4]);
+        Ok(())
+    }
+
+    /// A kernel that is no `unsafe fn` is lent a buffer, a copy of buffers is queued and a buffer is zeroed, on a GPU
+    /// that reaches managed memory while the host does, with a slice of managed memory held, and the kernel is lent
+    /// that memory too. On a GPU that does not there is no slice to hold, as `managed` makes none for it, and the same
+    /// work on buffers goes to the driver as on the other.
+    #[test]
+    fn work_on_buffers_goes_on_beside_a_slice_of_managed_memory_where_there_can_be_one_and_where_not() -> Result {
+        for reaches in [false, true] {
+            let flags = [MANAGED_MEMORY, UNIFIED_ADDRESSING, CONCURRENT_MANAGED_ACCESS];
+            let cuda = gpu_with(&flags[..2 + usize::from(reaches)], |api| {
                 api.alloc_managed = alloc_managed;
-                api.alloc_host = alloc_host;
                 api.memset = memset;
                 api.copy_async = copy_async;
                 api.synchronize = synchronize;
+                api.load_module = load_module;
+                api.unload_module = unload_module;
             })?;
-            let (mut managed, mut pinned) = (cuda.managed::<u32>(4)?, cuda.pinned::<u32>(4)?);
-            let mut buffer = buffer_of(&cuda);
-            managed.host_mut()?.fill(7);
+            let module = Module::load(&cuda, "", &[], &[])?;
+            let managed = cuda.managed::<u32>(4);
+            let held = managed.as_ref().ok().map(|managed| managed.host()).transpose()?;
+            assert_eq!(
+                held.is_some(),
+                reaches,
+                "a slice of managed memory is held where the GPU reaches it with the host"
+            );
+
+            let (block, from) = (dirty(16), buffer_of(&cuda));
+            let mut to =
+                Buffer { driver: cuda.driver.clone(), ptr: block as u64, len: 4, reservation: None, of: PhantomData };
             COPIED.set(0);
-            let said = |done: Result<(), Error>| done.err().map(|e| e.to_string());
-            let calls = vec![
-                said(cuda.copy(&mut buffer, &managed)),
-                said(cuda.copy(&mut managed, &buffer)),
-                said(managed.zero()),
-                said(cuda.copy(&mut buffer, &pinned)),
-                said(cuda.copy(&mut pinned, &buffer)),
-            ];
-            Ok((calls, COPIED.get(), managed.host()?.to_vec()))
-        };
-        let cannot_reach = "by a GPU that cannot reach it while the host does: its \
-                            CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0";
-        let copy = format!("cuMemcpyAsync: managed memory is not copied {cannot_reach}");
-        let zero = format!("cuMemsetD8Async: managed memory is not zeroed {cannot_reach}");
-        let cannot = [MANAGED_MEMORY, UNIFIED_ADDRESSING];
-        let refused = [Some(copy.clone()), Some(copy), Some(zero), None, None];
-        assert_eq!(tried(&cannot)?, (refused.to_vec(), 2, vec![7; 4]));
-        let can = [MANAGED_MEMORY, UNIFIED_ADDRESSING, CONCURRENT_MANAGED_ACCESS];
-        assert_eq!(tried(&can)?, (vec![None; 5], 4, vec![0; 4]));
+            assert_eq!(from.lend(&module)?.1, 4, "a kernel lent a buffer, reaches {reaches}");
+            if let Ok(managed) = &managed {
+                assert_eq!(managed.lend(&module)?.1, 4, "a kernel lent managed memory");
+            }
+            cuda.copy(&mut to, &from)?;
+            assert_eq!(COPIED.get(), 1, "a copy of buffers, reaches {reaches}");
+            to.zero()?;
+            // SAFETY: `block` is a block of 16 bytes that the fake driver leaked, and it is read as bytes.
+            let zeroed = unsafe { std::slice::from_raw_parts(block, 16) };
+            assert_eq!(zeroed, [0; 16], "a zeroing of a buffer, reaches {reaches}");
+        }
         Ok(())
     }
 
@@ -960,7 +1071,7 @@ pub(crate) mod tests {
     /// out bytes of 0xAA.
     #[test]
     fn managed_and_page_locked_memory_are_zeros_though_the_driver_clears_neither() -> Result {
-        let cuda = gpu_with(&[MANAGED_MEMORY, UNIFIED_ADDRESSING], |api| {
+        let cuda = gpu_with(&[MANAGED_MEMORY, CONCURRENT_MANAGED_ACCESS, UNIFIED_ADDRESSING], |api| {
             api.alloc_managed = alloc_managed;
             api.alloc_host = alloc_host;
             api.memset = memset;
@@ -977,7 +1088,7 @@ pub(crate) mod tests {
     /// fake's bytes of 0xAA, and nothing is asked to clear them: the fake has no `cuMemsetD8`.
     #[test]
     fn memory_made_with_no_zeros_is_as_the_driver_hands_it_out() -> Result {
-        let cuda = gpu_with(&[MANAGED_MEMORY, UNIFIED_ADDRESSING], |api| {
+        let cuda = gpu_with(&[MANAGED_MEMORY, CONCURRENT_MANAGED_ACCESS, UNIFIED_ADDRESSING], |api| {
             api.alloc_managed = alloc_managed;
             api.alloc_host = alloc_host;
             api.free = free;
@@ -991,32 +1102,6 @@ pub(crate) mod tests {
         // SAFETY: as above.
         let pinned = unsafe { cuda.pinned_uninit::<u32>(4) }?;
         assert_eq!(pinned.host()?, [0xAAAA_AAAA; 4]);
-        Ok(())
-    }
-
-    /// A kernel that is no `unsafe fn` is lent managed memory only by a GPU that reaches it while the host does, which
-    /// the host may touch while the kernel runs, and the error says so, in GUIDE.md's words, before the kernel runs.
-    #[test]
-    fn a_kernel_is_lent_managed_memory_only_by_a_gpu_that_reaches_it_while_the_host_does() -> Result {
-        let lent = |flags: &[Flag]| -> Result<std::result::Result<(u64, usize), String>> {
-            let cuda = gpu_with(flags, |api| {
-                api.alloc_managed = alloc_managed;
-                api.memset = memset;
-                api.free = free;
-                api.synchronize = synchronize;
-                api.load_module = load_module;
-                api.unload_module = unload_module;
-            })?;
-            let module = Module::load(&cuda, "", &[], &[])?;
-            let managed = cuda.managed::<u32>(4)?;
-            let lent = managed.lend(&module).map(|(at, len)| (at.addr(), len)).map_err(|e| e.to_string());
-            assert!(lent.is_err() || lent == Ok((managed.ptr().addr(), 4)), "{lent:?}");
-            Ok(lent)
-        };
-        let said = "cuLaunchKernel: a kernel that is no `unsafe fn` is not lent managed memory by a GPU that cannot \
-                    reach it while the host does: its CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0";
-        assert_eq!(lent(&[MANAGED_MEMORY])?, Err(said.to_string()));
-        assert!(lent(&[MANAGED_MEMORY, CONCURRENT_MANAGED_ACCESS])?.is_ok());
         Ok(())
     }
 

@@ -11,18 +11,19 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use kernite_cuda::{Advice, Cuda, Location, Unified};
 
 mod common;
-use common::{NO_ADVICE, NO_PREFETCH, PAGE, first_page, or_skip};
+use common::{PAGE, first_page, managed_or_skip};
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
 /// Held by each test from its start to its end, after its memory is freed.
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
-/// The GPU, once no other test of this file is running, or `None` and why not.
+/// The GPU, once no other test of this file is running, or `None` and why not: there is none, or the machine makes no
+/// managed memory, which the call says.
 fn gpu() -> Option<(MutexGuard<'static, ()>, Cuda)> {
     let one = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
     let cuda = Cuda::new().map_err(|e| eprintln!("no GPU: skipped. {e}")).ok()?;
-    Some((one, cuda))
+    managed_or_skip(cuda.managed::<u32>(1)).map(|_probe| (one, cuda))
 }
 
 /// A managed buffer, and what gives the words of its pages from `from` to `to`.
@@ -43,7 +44,7 @@ fn managed_memory_is_prefetched_to_each_place_and_the_driver_says_where() -> Res
     let all = pages(0, 4);
     assert_eq!(m.placement(all.clone())?.last_prefetch, None, "nothing was prefetched");
     for place in [Location::Gpu, Location::Host, Location::Numa(0), Location::NumaOfThread] {
-        let Some(()) = or_skip(m.prefetch(all.clone(), place), NO_PREFETCH) else { return Ok(()) };
+        m.prefetch(all.clone(), place)?;
         assert_eq!(m.placement(all.clone())?.last_prefetch, Some(place), "{place:?}");
     }
     Ok(())
@@ -54,7 +55,7 @@ fn a_part_of_managed_memory_is_prefetched_and_the_rest_of_it_is_not() -> Result 
     let Some((_one, cuda)) = gpu() else { return Ok(()) };
     let (m, pages) = paged(&cuda, 4)?;
     let (first, second, all) = (pages(0, 2), pages(2, 4), pages(0, 4));
-    let Some(()) = or_skip(m.prefetch(first.clone(), Location::Host), NO_PREFETCH) else { return Ok(()) };
+    m.prefetch(first.clone(), Location::Host)?;
     assert_eq!(m.placement(first)?.last_prefetch, Some(Location::Host));
     assert_eq!(m.placement(second.clone())?.last_prefetch, None, "the rest was not");
     m.prefetch(second.clone(), Location::Gpu)?;
@@ -70,7 +71,7 @@ fn a_range_reaches_the_whole_of_each_page_it_touches() -> Result {
     let (page0, page1, page2) = (pages(0, 1), pages(1, 2), pages(2, 3));
     // The second word of the first page.
     let word = page0.start + 1..page0.start + 2;
-    let Some(()) = or_skip(m.prefetch(word, Location::Host), NO_PREFETCH) else { return Ok(()) };
+    m.prefetch(word, Location::Host)?;
     assert_eq!(m.placement(page0.clone())?.last_prefetch, Some(Location::Host), "the page went with it");
     assert_eq!(m.placement(page1.clone())?.last_prefetch, None, "the next page did not");
     // The last word of the second page and the first of the third.
@@ -86,7 +87,7 @@ fn a_numa_node_the_host_does_not_have_is_refused_by_the_driver() -> Result {
     let Some((_one, cuda)) = gpu() else { return Ok(()) };
     let (m, pages) = paged(&cuda, 1)?;
     let page = pages(0, 1);
-    let Some(()) = or_skip(m.prefetch(page.clone(), Location::Host), NO_PREFETCH) else { return Ok(()) };
+    m.prefetch(page.clone(), Location::Host)?;
     // The greatest node an `int` holds reaches the driver as it is; one past it is kept at that.
     for node in [Location::Numa(c_int::MAX as u32), Location::Numa(c_int::MAX as u32 + 1), Location::Numa(u32::MAX)] {
         let (prefetch, advise) =
@@ -127,9 +128,7 @@ fn each_advice_is_in_force_for_the_range_it_is_given_for_and_the_driver_says_so(
         }
         Ok(())
     };
-    let Some(()) = or_skip(m.advise(all.clone(), Advice::PreferredLocation(Location::Gpu)), NO_ADVICE) else {
-        return Ok(());
-    };
+    m.advise(all.clone(), Advice::PreferredLocation(Location::Gpu))?;
     assert_eq!(preferred()?, Some(Location::Gpu));
     numa_changes_nothing(Some(Location::Gpu))?;
     m.advise(all.clone(), Advice::PreferredLocation(Location::Host))?;
