@@ -438,7 +438,9 @@ paragraph of theirs has a blank line after it, as before it, so that a title wit
 that comes next is not a line of it. None goes in a block quote or a list item, which it would end: a heading in one is
 where its block begins, and what the macros add to a `# Safety` in one comes after the block, even where the block has a
 heading after it. Where the docs end in a code block or a block of HTML that they leave open, what the macros add comes
-after it.
+after it. A doc of a macro's text, `#[doc = include_str!("..")]` say, the macros cannot read: they take it for a line of
+text with no space before it. Where it holds more, a heading or a block that it leaves open, they may read the docs
+otherwise than rustdoc does, and Clippy may tell of the kernel.
 
 A deprecated item that a kernel names is told of by Rust at the name, once for each place the kernel writes it.
 `lea(p, [COUNTS]);` of a deprecated static is a warning at `COUNTS`, with the note of the attribute, `call(v, old, ());`

@@ -264,6 +264,16 @@ pub mod cpu {
     #[cooperative]
     pub unsafe extern "sysv64" fn quoted() {}
 
+    /// A cooperative kernel whose first heading is a `# Safety` in a block quote, after a block quote of code.
+    ///
+    /// >     code
+    ///
+    /// > # Safety
+    /// >
+    /// > The kernel reads nothing.
+    #[cooperative]
+    pub unsafe extern "sysv64" fn quoted_code() {}
+
     /// A cooperative kernel whose docs have a line of `#` in a code block before their first heading.
     ///
     /// ```text

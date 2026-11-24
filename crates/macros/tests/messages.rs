@@ -1534,18 +1534,19 @@ fn the_macros_write_a_safety_for_docs_that_name_it_in_a_sentence_or_a_code_block
 
 /// The macros take the docs of a kernel for having a `# Safety` as Clippy does, in each form that Markdown has for a
 /// heading of the word Safety alone, as rustdoc reads it: where they do, what they write of the module's memory is a
-/// paragraph of it, and where they do not, they write one of their own, which says that the kernel trusts the pointers
-/// it is given, in a paragraph of the page. A heading may be in a block quote or a list item, a numbered one too, after
-/// a line that begins with `<` and is no block of HTML, and after a code block that its container's end closes. The
-/// words in a sentence are no heading, nor is a title that says more, `#`s too many or glued, a line of a code block,
-/// fenced, indented or left open, or of a block of HTML, to its end mark or to a blank line; nor is a line of `=` or
-/// `-` that begins a block quote, a list item or a break, or that not all of the containers of the paragraph above it
-/// go on, an underline of it. Nor is a line of docs that all have six spaces: rustdoc takes off less of those once the
-/// macros add a line of their own, and reads them as code. Each rule that says where a block begins or ends has a
-/// kernel, as the fixture's docs list them: the macros close a code block that the docs leave open at the top level,
-/// and none in a container, so that their own paragraphs are no lines of it. Clippy tells of no kernel of them, as it
-/// would of one whose docs the macros took for having a `# Safety` that Clippy takes for none; but it takes a title of
-/// two lines for one that has the word on one, and the macros do not, so they write a `# Safety` of their own too.
+/// paragraph of it, and the docs' last, as their `# Safety` ends them; and where they do not, they write one of their
+/// own, which says that the kernel trusts the pointers it is given, in a paragraph of the page. A heading may be in a
+/// block quote or a list item, a numbered one too, after a line that begins with `<` and is no block of HTML, and after
+/// a code block that its container's end closes. The words in a sentence are no heading, nor is a title that says more,
+/// `#`s too many or glued, a line of a code block, fenced, indented or left open, or of a block of HTML, to its end
+/// mark or to a blank line; nor is a line of `=` or `-` that begins a block quote, a list item or a break, or that not
+/// all of the containers of the paragraph above it go on, an underline of it. Nor is a line of docs that all have six
+/// spaces: rustdoc takes off less of those once the macros add a line of their own, and reads them as code. Each rule
+/// that says where a block begins or ends has a kernel, as the fixture's docs list them: the macros close a code block
+/// that the docs leave open at the top level, and none in a container, so that their own paragraphs are no lines of it.
+/// Clippy tells of no kernel of them, as it would of one whose docs the macros took for having a `# Safety` that Clippy
+/// takes for none; but it takes a title of two lines for one that has the word on one, and the macros do not, so they
+/// write a `# Safety` of their own too.
 #[test]
 fn the_macros_take_docs_for_having_a_safety_as_clippy_does() -> Result {
     // The kernels of the fixture whose docs the macros take for having a `# Safety`, and those whose docs they take for
@@ -1554,7 +1555,10 @@ fn the_macros_take_docs_for_having_a_safety_as_clippy_does() -> Result {
     let has = "atx1 atx2 atx6 closed spaced tab indent3 upper emph strong setext1 setext2 quote list after_fence \
                attr_newlines block autolink inline_tag lone_tag comment_line pre_line ordered item_text \
                backtick_info quote_fence item_fence fence_spaces after_indented after_lazy ordered_after_text \
-               underline_spaces tab_item_title";
+               underline_spaces tab_item_title closing_spaces hash_feed feed_before_hash lone_tag_no_break \
+               attribute_no_break value_tab values_glued value_empty hr_feed item_feed_fence empty_item_gap \
+               item_four_spaces nine_digits tab_after_marker two_ticks feed_indent no_break_line attribute_between \
+               no_break_last";
     let lacks = "lower code_span more bang hash_glued nospace seven fenced tilde rust_fence long_fence unclosed \
                  indented sentence html html_block shared_indent comment_gap pre_gap pre_open comment_open \
                  quote_under break_under lazy_quote lazy_item ordered_fence tab_fence fence_quote_line quote_open \
@@ -1562,7 +1566,9 @@ fn the_macros_take_docs_for_having_a_safety_as_clippy_does() -> Result {
                  lone_tag_space lone_tag_quoted lone_tag_value spaces_after_empty_item bullet_after_quote_text \
                  spaced_break_open dashes_item_open bullet_after_text_open empty_item_open empty_item_short_open \
                  code_item_open code_item_short_open comment_after_text declaration_after_text div_after_text \
-                 tab_item_open";
+                 tab_item_open fence_no_break fence_tab fence_feed item_no_break underline_no_break closing_no_break \
+                 closing_tab lone_tag_spaces space_before_eq div_unended pre_tabulation feed_before_tag \
+                 empty_item_feed bare_plus ten_digits tab_after_ten feed_in_fence macro_text";
     let dir = documents_quietly("safety_headings")?.join("cpu");
     let page = |name: &str| fs::read_to_string(dir.join(format!("fn.{name}.html")));
     // The sentence on the memory, as a paragraph of the page, and no line of a block of code or of HTML.
@@ -1578,6 +1584,10 @@ fn the_macros_take_docs_for_having_a_safety_as_clippy_does() -> Result {
             1,
             "`{name}`: the macros did not add the memory to its `# Safety` once, as a paragraph"
         );
+        // It is the docs' last paragraph, as each kernel's `# Safety` is the docs' last section.
+        let (_, after) = page.split_once(memory).unwrap_or_default();
+        let (after, _) = after.split_once("</details>").unwrap_or_default();
+        assert!(!after.contains("<p>"), "`{name}`: a paragraph of the docs comes after the memory");
     }
     for name in lacks.split(' ') {
         // The paragraph is a paragraph of the page, and no line of a block of code that the docs leave open.
@@ -1724,8 +1734,8 @@ fn what_the_macros_add_to_a_safety_is_its_last_paragraphs() -> Result {
 /// heading, so that no heading of the user's has it: before an `# Examples` that is the docs' first heading, or the
 /// first thing in them, and after a block of code that has a line of `#` in it. It has a blank line after it, so a
 /// title with a line of `=` under it, the first thing in the docs, is still the title; and where the first heading is
-/// in a list item or a block quote, it comes before that block, which it would end. The macros' own `# Safety` comes at
-/// the end of the docs.
+/// in a list item or a block quote, it comes before that block, which it would end, and after a block quote of code
+/// before it. The macros' own `# Safety` comes at the end of the docs.
 #[test]
 fn a_paragraph_of_the_macros_own_comes_before_the_first_heading_of_the_docs() -> Result {
     let docs = kernel_docs()?;
@@ -1782,6 +1792,16 @@ fn a_paragraph_of_the_macros_own_comes_before_the_first_heading_of_the_docs() ->
             "A cooperative kernel whose first heading is a # Safety in a block quote.",
             "GRID",
             "Quoted.",
+            "h2 Safety",
+            "The kernel reads nothing.",
+        ]
+    );
+    assert_eq!(
+        tagged(docs("cpu", "quoted_code")?),
+        [
+            "A cooperative kernel whose first heading is a # Safety in a block quote, after a block quote of code.",
+            "code",
+            "GRID",
             "h2 Safety",
             "The kernel reads nothing.",
         ]

@@ -8,10 +8,18 @@
 //!
 //! Each rule of Markdown that says where a block begins or ends has a kernel too: spaces after the marks of a fence
 //! close it, and text does not; an underline has up to three spaces before it; a bullet, a comment, a declaration and a
-//! tag of a block end a paragraph, and a tag alone on its line and a number other than 1 do not; a break is of marks
-//! and spaces; an item may be empty or begin in code, and a line of spaces ends an empty one; and a tab goes to the
-//! next column of four. The macros close a code block or a block of HTML that the docs leave open at the top level, and
-//! none in a block quote or a list item, so a kernel whose docs end in one says where it is.
+//! tag of a block end a paragraph, and a tag alone on its line and a number other than 1 do not; a tag has white space
+//! before each attribute, and a value after `=`; a break is of marks and spaces; an item may be empty or begin in code,
+//! its number has up to nine digits, and a line of spaces ends an empty one; and a tab goes to the next column of four.
+//! The macros close a code block or a block of HTML that the docs leave open at the top level, and none in a block
+//! quote or a list item, so a kernel whose docs end in one says where it is.
+//!
+//! White space other than a space has a kernel at each place it reads otherwise, as pulldown-cmark has it: a line
+//! tabulation and a form feed are blank where a block begins, after a list marker or the marks of an underline, and in
+//! and after a tag, but a line of them goes on a paragraph; only spaces may follow the marks that close a fence, or the
+//! `#`s that close a heading; and a no-break space is text. rustdoc leaves a line of white space alone as it is, with
+//! the space of its `///`, and counts a doc of a macro's text, which the macros take for a line of text with no space
+//! before it.
 //!
 //! Each kernel names a static of its module, so that the macros write the contract of its memory: into the `# Safety`
 //! that they take the docs for having, and in one of their own where they take the docs for having none. Clippy tells
@@ -906,6 +914,429 @@ pub mod cpu {
 
     #[doc = "Docs.\n\n-\tSafety\n    ---\n\nReads nothing."]
     pub unsafe extern "sysv64" fn tab_item_title() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// ```text
+    /// # Safety
+    #[doc = " ```\u{a0}"]
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn fence_no_break() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// ```text
+    /// # Safety
+    #[doc = " ```\t"]
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn fence_tab() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// ```text
+    /// # Safety
+    #[doc = " ```\u{c}"]
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn fence_feed() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    #[doc = " - \u{a0}"]
+    ///
+    ///    ```text
+    ///    code
+    pub unsafe extern "sysv64" fn item_no_break() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// Safety
+    #[doc = " ===\u{a0}"]
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn underline_no_break() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    #[doc = " # Safety #\u{a0}"]
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn closing_no_break() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    #[doc = " # Safety #\t"]
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn closing_tab() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    #[doc = " # Safety # "]
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn closing_spaces() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    #[doc = " #\u{c}Safety"]
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn hash_feed() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// # Safety
+    ///
+    /// Reads nothing.
+    ///
+    #[doc = " \u{c}# More"]
+    pub unsafe extern "sysv64" fn feed_before_hash() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    #[doc = " <br>\u{a0}"]
+    /// # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn lone_tag_no_break() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    #[doc = " <br> "]
+    /// # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn lone_tag_spaces() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    #[doc = " <br\u{a0}b>"]
+    /// # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn attribute_no_break() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    #[doc = " <br b=c\td='e'>"]
+    /// # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn value_tab() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// <br b='c'd='e'>
+    /// # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn values_glued() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// <br b=>
+    /// # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn value_empty() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// <br b ='c'>
+    /// # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn space_before_eq() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// Text.
+    #[doc = " <hr\u{c}>"]
+    /// # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn hr_feed() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// Text.
+    /// <div
+    /// class='a'>
+    /// # Safety
+    /// </div>
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn div_unended() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// Text.
+    #[doc = " <pre\u{b}>"]
+    /// # Safety
+    /// </pre>
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn pre_tabulation() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    #[doc = " \u{c}"]
+    /// <a>
+    /// # Safety
+    /// </a>
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn feed_before_tag() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// - ```text
+    #[doc = " \u{c}"]
+    ///   # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn item_feed_fence() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// Text.
+    #[doc = " + \u{c}"]
+    ///   ```text
+    ///   code
+    pub unsafe extern "sysv64" fn empty_item_feed() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// Text.
+    /// +
+    ///   ```text
+    ///   code
+    pub unsafe extern "sysv64" fn bare_plus() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// -
+    ///   Text.
+    ///
+    ///     # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn empty_item_gap() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// -    x
+    ///
+    ///       # Safety
+    ///
+    ///       Reads nothing.
+    pub unsafe extern "sysv64" fn item_four_spaces() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// 123456789. # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn nine_digits() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// 1234567890. # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn ten_digits() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    #[doc = " 1. \t# Safety"]
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn tab_after_marker() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    #[doc = " 10. \t# Safety"]
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn tab_after_ten() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// ``
+    /// # Safety
+    /// ``
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn two_ticks() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// - ```text
+    #[doc = "  \u{c}"]
+    ///   # Safety
+    ///   ```
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn feed_in_fence() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// -   a
+    ///
+    #[doc = "    \u{c}"]
+    ///     # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn feed_indent() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    #[doc = "\u{a0}"]
+    ///    # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn no_break_line() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    #[doc = concat!("Text", ".")]
+    ///
+    ///    # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn macro_text() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// Text.
+    #[allow(dead_code)]
+    ///
+    /// # Safety
+    ///
+    /// Reads nothing.
+    pub unsafe extern "sysv64" fn attribute_between() {
+        let p: gpr;
+        lea(p, [NEAR]);
+    }
+
+    /// Docs.
+    ///
+    /// # Safety
+    ///
+    /// Reads nothing.
+    #[doc = " \u{a0}"]
+    pub unsafe extern "sysv64" fn no_break_last() {
         let p: gpr;
         lea(p, [NEAR]);
     }

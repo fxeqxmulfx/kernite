@@ -803,8 +803,9 @@ enum Leaf {
 
 /// What a line begins, after the containers that it goes on.
 enum Start<'a> {
-    /// Nothing, as it is blank.
-    Blank,
+    /// Nothing, as it is blank, of the white space of [`BLANK`]; and whether it ends a paragraph, as a line of spaces
+    /// alone does: one with a line tabulation or a form feed is a line of the paragraph, as pulldown-cmark has it.
+    Blank(bool),
     /// A thematic break, three or more of `*`, `-` or `_`.
     Break,
     /// A block quote: the line after its `>` and a space.
@@ -828,7 +829,8 @@ enum Start<'a> {
 /// that closes the block they leave open at their top level, a code block of a fence or a block of HTML that a text
 /// ends, if they leave one. One in a block quote or a list item needs none: a line after a blank line, as the macros
 /// write, ends its container, and the block with it. rustdoc reads Markdown with pulldown-cmark, as CommonMark has it,
-/// but where [`spaced`] and [`html`] say; and each line with the one space of a `///` taken off.
+/// but where [`spaced`] and [`html`] say; and each line that has text with the one space of a `///` taken off, and a
+/// line of white space alone as it is.
 fn headings(docs: &[TokenTree]) -> (Vec<Heading>, Option<String>) {
     let lines: Vec<Option<String>> = docs.chunks(2).map(doc_text).collect();
     // The one space that `///` leaves before its text, if every line has it, which rustdoc takes off. It takes off more
@@ -844,16 +846,21 @@ fn headings(docs: &[TokenTree]) -> (Vec<Heading>, Option<String>) {
     let mut top = 0;
     for (i, text) in lines.iter().enumerate() {
         let Some(text) = text else { continue };
-        let line = spaced(text.get(indent..).unwrap_or_default());
+        // rustdoc takes the indent off each line that has text, and leaves a line of white space alone as it is.
+        let line = spaced(if text.trim().is_empty() { text } else { text.get(indent..).unwrap_or_default() });
         let mut rest = line.as_str();
         // The containers that the line goes on, from the outermost, each taking its part of the line.
         let mut kept = 0;
         for container in &mut open {
-            let blank = rest.trim().is_empty();
             rest = match (container, start(rest)) {
                 (Container::Quote, Start::Quote(after)) => after,
-                (Container::Item(column, empty), _) if (blank && !*empty) || (!blank && indent_of(rest) >= *column) => {
-                    *empty &= blank;
+                // An item goes on at a line of spaces alone, or of as many as its column or more; but one that
+                // holds nothing yet ends at a blank line, as pulldown-cmark has it.
+                (Container::Item(_, true), Start::Blank(_)) => break,
+                (Container::Item(column, empty), now)
+                    if matches!(now, Start::Blank(true)) || indent_of(rest) >= *column =>
+                {
+                    *empty = false;
                     rest.get(*column..).unwrap_or_default()
                 }
                 _ => break,
@@ -866,18 +873,20 @@ fn headings(docs: &[TokenTree]) -> (Vec<Heading>, Option<String>) {
             // A code block, or a block of HTML, whose containers the line goes on, holds the line, and ends with it
             // where it closes the block.
             Leaf::Fence(c, n) if !lazy => {
-                if matches!(now, Start::Fence(d, m, after) if d == c && m >= n && after.trim().is_empty()) {
+                let spaces =
+                    |after: &str| after.trim_start_matches(' ').is_empty() && text.trim_end_matches(' ').ends_with(c);
+                if matches!(now, Start::Fence(d, m, after) if d == c && m >= n && spaces(after)) {
                     leaf = Leaf::None;
                 }
                 continue;
             }
             Leaf::Html(end) if !lazy => {
-                if end.map_or(matches!(now, Start::Blank), |end| rest.contains(end)) {
+                if end.map_or(matches!(now, Start::Blank(_)), |end| rest.contains(end)) {
                     leaf = Leaf::None;
                 }
                 continue;
             }
-            Leaf::Code if !lazy && matches!(now, Start::Blank | Start::Code) => continue,
+            Leaf::Code if !lazy && matches!(now, Start::Blank(_) | Start::Code) => continue,
             // A line that begins no block goes on in a paragraph, lazily, though not all of its containers go on.
             Leaf::Para(at, _) if lazy && !breaks(&now, true) => {
                 leaf = Leaf::Para(at, false);
@@ -912,7 +921,7 @@ fn headings(docs: &[TokenTree]) -> (Vec<Heading>, Option<String>) {
                     after
                 }
                 Start::Item(after, column, _) => {
-                    open.push(Container::Item(column, after.trim().is_empty()));
+                    open.push(Container::Item(column, after.is_empty()));
                     after
                 }
                 Start::Heading(level, title) => {
@@ -937,7 +946,7 @@ fn headings(docs: &[TokenTree]) -> (Vec<Heading>, Option<String>) {
                     leaf = Leaf::Para(i, is_safety(rest));
                     break;
                 }
-                Start::Blank | Start::Break => break,
+                Start::Blank(_) | Start::Break => break,
             };
             now = start(rest);
         }
@@ -956,18 +965,24 @@ fn headings(docs: &[TokenTree]) -> (Vec<Heading>, Option<String>) {
 fn breaks(now: &Start<'_>, lazy: bool) -> bool {
     match now {
         Start::Code | Start::Text | Start::Html(_, false) => false,
+        Start::Blank(ends) => *ends,
         Start::Item(_, _, breaks) => lazy || *breaks,
         _ => true,
     }
 }
+
+/// The white space that pulldown-cmark takes for a blank line, where a block begins and after a list marker, a tag of
+/// HTML or the marks of an underline: a space, a tab, a line tabulation and a form feed. A paragraph ends, and an item
+/// goes on, at spaces alone, and the marks of a fence and the `#`s that close a heading have spaces alone after them.
+const BLANK: [char; 4] = [' ', '\t', '\x0b', '\x0c'];
 
 /// What `line` begins, after the containers that it goes on, as [`Start`] says. A block other than code has up to three
 /// spaces before it.
 fn start(line: &str) -> Start<'_> {
     let text = line.trim_start_matches(' ');
     let indent = line.len() - text.len();
-    if text.is_empty() {
-        return Start::Blank;
+    if text.trim_start_matches(BLANK).is_empty() {
+        return Start::Blank(text.is_empty());
     }
     if indent > 3 {
         return Start::Code;
@@ -987,9 +1002,9 @@ fn start(line: &str) -> Start<'_> {
     // A heading of one to six `#`s, and a space or the end of the line.
     let title = text.trim_start_matches('#');
     let level = text.len() - title.len();
-    if (1..=6).contains(&level) && (title.is_empty() || title.starts_with(' ')) {
+    if (1..=6).contains(&level) && (title.is_empty() || title.starts_with(BLANK)) {
         // A run of `#`s after a space closes the heading, and is no part of its title.
-        let bare = title.trim_end().trim_end_matches('#');
+        let bare = title.trim_end_matches(' ').trim_end_matches('#');
         return Start::Heading(level, if bare.is_empty() || bare.ends_with(' ') { bare } else { title });
     }
     // A fence of three or more `` ` `` or `~`, and of `~` if a `` ` `` comes after it.
@@ -1016,8 +1031,8 @@ fn item(text: &str, indent: usize) -> Option<Start<'_>> {
     let content = after.trim_start_matches(' ');
     let marker = indent + text.len() - after.len();
     Some(match after.len() - content.len() {
-        _ if content.is_empty() => Start::Item("", marker + 1, false),
-        0 => return None,
+        0 if !after.is_empty() => return None,
+        _ if content.trim_start_matches(BLANK).is_empty() => Start::Item("", marker + 1, false),
         spaces @ 1..=4 => Start::Item(content, marker + spaces, first),
         _ => Start::Item(after.get(1..)?, marker + 1, first),
     })
@@ -1048,12 +1063,12 @@ fn html(text: &str) -> Option<(Option<&'static str>, bool)> {
     let named = closing.unwrap_or(&lower);
     let after = tag_name(named)?;
     let name = named.get(..named.len() - after.len())?;
-    let ends = after.is_empty() || after.starts_with(|c: char| c.is_ascii_whitespace() || c == '>');
+    let ends = |space: &[char]| after.is_empty() || after.starts_with(space) || after.starts_with('>');
     let raw = [("pre", "</pre>"), ("script", "</script>"), ("style", "</style>"), ("textarea", "</textarea>")];
-    if let Some((_, end)) = raw.into_iter().find(|&(raw, _)| raw == name && ends && closing.is_none()) {
+    if let Some((_, end)) = raw.into_iter().find(|&(raw, _)| raw == name && ends(&BLANK) && closing.is_none()) {
         return Some((Some(end), true));
     }
-    if BLOCK_TAGS.split(' ').any(|block| block == name) && (ends || after.starts_with("/>")) {
+    if BLOCK_TAGS.split(' ').any(|block| block == name) && (ends(&[' ', '\t']) || after.starts_with("/>")) {
         return Some((None, true));
     }
     lone_tag(text).then_some((None, false))
@@ -1063,16 +1078,16 @@ fn html(text: &str) -> Option<(Option<&'static str>, bool)> {
 /// [`attribute`] says, then a `/` or not.
 fn lone_tag(text: &str) -> bool {
     let end = match text.strip_prefix("</") {
-        Some(closing) => tag_name(closing).map(str::trim_start),
+        Some(closing) => tag_name(closing).map(|s| s.trim_start_matches(BLANK)),
         None => text.strip_prefix('<').and_then(tag_name).map(|mut s| {
             while let Some(after) = attribute(s) {
                 s = after;
             }
-            let s = s.trim_start();
+            let s = s.trim_start_matches(BLANK);
             s.strip_prefix('/').unwrap_or(s)
         }),
     };
-    end.and_then(|s| s.strip_prefix('>')).is_some_and(|s| s.trim().is_empty())
+    end.and_then(|s| s.strip_prefix('>')).is_some_and(|s| s.trim_start_matches(BLANK).is_empty())
 }
 
 /// `s` after the name of a tag of HTML at its start, if it has one: letters, digits and `-`, after a letter.
@@ -1085,24 +1100,26 @@ fn tag_name(s: &str) -> Option<&str> {
 /// and `_.:-`, after a letter, `_` or `:`; and a value after `=` or not, in quotes, or with no white space or any of
 /// `"'=<>` and `` ` `` in it.
 fn attribute(s: &str) -> Option<&str> {
-    let named = s.trim_start();
+    let named = s.trim_start_matches(BLANK);
     let first = |c: char| c.is_ascii_alphabetic() || matches!(c, '_' | ':');
     let after = named
         .strip_prefix(first)
         .filter(|_| named.len() < s.len())?
         .trim_start_matches(|c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'));
-    let Some(value) = after.trim_start().strip_prefix('=').map(str::trim_start) else { return Some(after) };
+    let Some(value) = after.trim_start_matches(BLANK).strip_prefix('=').map(|s| s.trim_start_matches(BLANK)) else {
+        return Some(after);
+    };
     if let Some((_, after)) = ['"', '\''].into_iter().find_map(|quote| value.strip_prefix(quote)?.split_once(quote)) {
         return Some(after);
     }
-    let after = value.trim_start_matches(|c: char| !c.is_whitespace() && !"\"'=<>`".contains(c));
+    let after = value.trim_start_matches(|c: char| !"\"' =<>`".contains(c));
     (after.len() < value.len()).then_some(after)
 }
 
 /// The level of the heading that `line` makes of the paragraph above it, if it makes one: one of a line of `=`, two of
 /// a line of `-`, after up to three spaces.
 fn underline(line: &str) -> Option<usize> {
-    let marks = line.trim();
+    let marks = line.trim_start_matches(' ').trim_end_matches(BLANK);
     let level = [('=', 1), ('-', 2)].into_iter().find(|&(mark, _)| marks.chars().all(|c| c == mark))?.1;
     (!marks.is_empty() && indent_of(line) < 4).then_some(level)
 }
@@ -1136,21 +1153,23 @@ fn is_safety(title: &str) -> bool {
     matches!(title.trim().trim_matches(['*', '_']), "Safety" | "SAFETY")
 }
 
-/// The text of the doc `attr`, `#` and brackets, if it is a string, `#[doc = "text"]`, which is what a macro is given
-/// for `///`: none for any other attribute, and for a doc of a macro's text, `#[doc = include_str!(..)]`.
+/// The text of the doc `attr`, `#` and brackets, if it is a doc, `#[doc = ..]`: its string, which is what a macro is
+/// given for `///`; or, for a doc of a macro's text, `#[doc = include_str!(..)]`, which the macros cannot read, `.`, a
+/// line of text with no space before it. None for any other attribute.
 fn doc_text(attr: &[TokenTree]) -> Option<String> {
     let [_, TokenTree::Group(group)] = attr else { return None };
     match &flatten(group.stream())[..] {
         [doc, eq, TokenTree::Literal(lit)] if named(doc, "doc") && is_punct(eq, '=') => {
             lang::unquote(&lit.to_string()).ok()
         }
+        [doc, eq, ..] if named(doc, "doc") && is_punct(eq, '=') => Some(".".into()),
         _ => None,
     }
 }
 
-/// Whether `attr`, `#` and brackets, is a doc of a blank line.
+/// Whether `attr`, `#` and brackets, is a doc of a blank line, of the white space of [`BLANK`] alone.
 fn blank(attr: &[TokenTree]) -> bool {
-    doc_text(attr).is_some_and(|text| text.trim().is_empty())
+    doc_text(attr).is_some_and(|text| text.trim_matches(BLANK).is_empty())
 }
 
 /// What the code that stands for an item, an error said of it or a method it gives, keeps of the
