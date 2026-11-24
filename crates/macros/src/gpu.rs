@@ -228,21 +228,76 @@ pub(crate) fn used(item: &lang::Item, laid: &Laid, top: &[TokenTree], span: Span
     Some(path)
 }
 
+/// The most pieces that `named` gives to a part. Rust stops a constant that takes 2 000 000 steps, and
+/// `kernite_cuda::__named!` takes about 80 for each piece of a part, so a part of this many takes a sixth of them.
+const PIECES: usize = 4096;
+
+/// The most parts that a constant of `named`'s joins. Rust stops a constant that takes 2 000 000 steps, and
+/// `kernite_cuda::__joined!` takes about 80 for each text, so a constant of this many takes about 5 000. A module of
+/// more parts has a tree of more levels. For each level, rustc makes one more copy of the text as it works the
+/// constants out; the program has one. Few modules have more than 64 parts.
+const PARTS: usize = 64;
+
 /// The constant that is the `parts` of a text joined, each under its condition, with the module's
-/// path written where each [`HOLE`] is.
+/// path written where each [`HOLE`] is. A part of more than `PIECES` pieces is cut in parts of that
+/// many, each but the last with an empty piece at its end, for the hole that follows its last
+/// piece. A constant joins `PARTS` of the parts at most, and those constants are joined in a
+/// [`tree`], so that no constant takes many steps, however many parts the module has.
 fn named(parts: &[(Cond, &str)]) -> TokenStream {
-    let mut list = TokenStream::new();
+    let mut cuts = vec![];
     for (cond, text) in parts {
         let Some(guard) = cond.guard() else { continue };
-        let pieces: Vec<String> = text.split(HOLE).map(|piece| format!("{piece:?}")).collect();
-        list.extend(guard);
-        list.extend(parse(&format!("[{}],", pieces.join(", "))));
+        let pieces: Vec<&str> = text.split(HOLE).collect();
+        for (i, cut) in pieces.chunks(PIECES).enumerate() {
+            let mut written: Vec<String> = cut.iter().map(|piece| format!("{piece:?}")).collect();
+            if (i + 1) * PIECES < pieces.len() {
+                written.push("\"\"".into());
+            }
+            cuts.push((guard.clone(), format!("[{}],", written.join(", "))));
+        }
     }
-    let mut args = parse("::core::module_path!(),");
-    args.extend([TokenTree::Group(Group::new(Delimiter::Bracket, list))]);
-    let mut out = parse("::kernite_cuda::__named!");
-    out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, args))]);
-    out
+    let call = |name: &str, args: TokenStream| {
+        let mut out = parse(name);
+        out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, args))]);
+        out
+    };
+    let group = |cuts: &[(TokenStream, String)]| {
+        let mut list = TokenStream::new();
+        for (guard, cut) in cuts {
+            list.extend(guard.clone());
+            list.extend(parse(cut));
+        }
+        let mut args = parse("::core::module_path!(),");
+        args.extend([TokenTree::Group(Group::new(Delimiter::Bracket, list))]);
+        call("::kernite_cuda::__named!", args)
+    };
+    let join = |texts: &[TokenStream]| {
+        let mut args = TokenStream::new();
+        for text in texts {
+            args.extend(text.clone());
+            args.extend(parse(","));
+        }
+        call("::kernite_cuda::__joined!", args)
+    };
+    tree(&cuts, PARTS, group, join)
+}
+
+/// The root of a tree of `fan` children to a node at most, whose leaves are `leaves`, in order: a node over leaves is
+/// what `over_leaves` makes of `fan` of them, and a node over nodes what `over_nodes` makes of `fan` nodes, until one
+/// node is left. That is the node over `leaves` for `fan` leaves or fewer, and the node over none for none. The `fan`
+/// is 2 or more: at 1 each level has as many nodes as the one below it, so the loop never ends, and at 0 `chunks`
+/// panics.
+fn tree<L, N>(
+    leaves: &[L],
+    fan: usize,
+    over_leaves: impl std::ops::Fn(&[L]) -> N,
+    over_nodes: impl std::ops::Fn(&[N]) -> N,
+) -> N {
+    let mut nodes: Vec<N> = leaves.chunks(fan).map(&over_leaves).collect();
+    while nodes.len() > 1 {
+        nodes = nodes.chunks(fan).map(&over_nodes).collect();
+    }
+    nodes.pop().unwrap_or_else(|| over_leaves(&[]))
 }
 
 /// What `Module::load` is given of memory `m`: its name, as the constant `named` makes it, and the bytes of memory the
@@ -486,4 +541,77 @@ fn table(requires: &[Requirement]) -> String {
         })
         .collect();
     format!("{{ const __REQUIRES: &[::kernite_cuda::Requirement] = &[{}]; __REQUIRES }}", written.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tree;
+
+    /// What `tree` makes of leaves `0` to `n - 1`, written: `[0 1]` is a node over leaves, `(a b)` one over nodes.
+    fn drawn(n: usize, fan: usize) -> String {
+        let leaves: Vec<usize> = (0..n).collect();
+        let over_leaves = |leaves: &[usize]| {
+            let numbers: Vec<String> = leaves.iter().map(usize::to_string).collect();
+            format!("[{}]", numbers.join(" "))
+        };
+        tree(&leaves, fan, over_leaves, |nodes| format!("({})", nodes.join(" ")))
+    }
+
+    #[test]
+    fn leaves_of_one_node_are_the_node_and_more_are_joined_by_nodes_of_nodes() {
+        // Three to a node: no leaves, a node's worth, one more than it, and again a node's nodes' worth and one more.
+        assert_eq!(drawn(0, 3), "[]");
+        assert_eq!(drawn(1, 3), "[0]");
+        assert_eq!(drawn(3, 3), "[0 1 2]");
+        assert_eq!(drawn(4, 3), "([0 1 2] [3])");
+        assert_eq!(drawn(9, 3), "([0 1 2] [3 4 5] [6 7 8])");
+        assert_eq!(drawn(10, 3), "(([0 1 2] [3 4 5] [6 7 8]) ([9]))");
+    }
+
+    /// A tree, from what `tree` is given to make one.
+    #[derive(Clone, Debug)]
+    enum Node {
+        Leaves(Vec<usize>),
+        Nodes(Vec<Node>),
+    }
+
+    /// The leaves of `node` in order, where the deepest are, and the most children any node has; the depth is where
+    /// `node` is, and each leaf is where `depth` says.
+    fn walked(node: &Node, depth: usize, leaves: &mut Vec<usize>, depths: &mut Vec<usize>, most: &mut usize) {
+        match node {
+            Node::Leaves(of) => {
+                leaves.extend(of);
+                depths.push(depth);
+                *most = (*most).max(of.len());
+            }
+            Node::Nodes(of) => {
+                *most = (*most).max(of.len());
+                for node in of {
+                    walked(node, depth + 1, leaves, depths, most);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn each_leaf_is_once_in_order_at_one_depth_under_nodes_of_no_more_than_fan_children() {
+        for fan in 2..=5 {
+            for n in 0..=400 {
+                let leaves: Vec<usize> = (0..n).collect();
+                let root =
+                    tree(&leaves, fan, |leaves| Node::Leaves(leaves.to_vec()), |nodes| Node::Nodes(nodes.to_vec()));
+                let (mut walked_leaves, mut depths, mut most) = (vec![], vec![], 0);
+                walked(&root, 0, &mut walked_leaves, &mut depths, &mut most);
+                assert_eq!(walked_leaves, leaves, "{n} leaves, {fan} to a node");
+                assert!(most <= fan, "{n} leaves, {fan} to a node: a node has {most}");
+                // The nodes over leaves are `n / fan` rounded up, and each level above has a `fan`th of the one below,
+                // rounded up, until one is left: the fewest levels that `fan` to a node reach one node from.
+                let (mut nodes, mut levels) = (n.div_ceil(fan).max(1), 0);
+                while nodes > 1 {
+                    (nodes, levels) = (nodes.div_ceil(fan), levels + 1);
+                }
+                assert!(depths.iter().all(|&depth| depth == levels), "{n} leaves, {fan} to a node: {depths:?}");
+            }
+        }
+    }
 }

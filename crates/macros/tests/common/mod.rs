@@ -22,6 +22,19 @@ pub static CARGO: Mutex<()> = Mutex::new(());
 /// does not use, and ends with what `{name}.toml` beside the fixture says of the workspace, if there is one. The files
 /// of the folder `{name}/` beside it, if there is one, are the crate's other files: `src/macros.rs`, for `mod macros;`.
 pub fn written(name: &str) -> Result<PathBuf> {
+    crate_of(name, |fixtures, dir| {
+        fs::copy(fixtures.join(format!("{name}.rs")), dir.join("src/lib.rs"))?;
+        for file in fs::read_dir(fixtures.join(name)).into_iter().flatten() {
+            let file = file?;
+            fs::copy(file.path(), dir.join("src").join(file.file_name()))?;
+        }
+        Ok(())
+    })
+}
+
+/// The directory of crate `name`, as `written` writes it, with its manifest, and the files that `files`, given the
+/// directory of the fixtures and the crate's, writes in it.
+pub fn crate_of(name: &str, files: impl FnOnce(&Path, &Path) -> Result) -> Result<PathBuf> {
     let _one = CARGO.lock().unwrap_or_else(PoisonError::into_inner);
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     let crates = here.parent().ok_or("kernite-macros is in no directory")?;
@@ -50,11 +63,7 @@ unused_dependencies = "allow"
     );
     let workspace = fs::read_to_string(fixtures.join(format!("{name}.toml"))).unwrap_or_default();
     fs::write(dir.join("Cargo.toml"), manifest + &workspace)?;
-    fs::copy(fixtures.join(format!("{name}.rs")), dir.join("src/lib.rs"))?;
-    for file in fs::read_dir(fixtures.join(name)).into_iter().flatten() {
-        let file = file?;
-        fs::copy(file.path(), dir.join("src").join(file.file_name()))?;
-    }
+    files(&fixtures, &dir)?;
     Ok(dir)
 }
 

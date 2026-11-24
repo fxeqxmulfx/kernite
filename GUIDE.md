@@ -1337,6 +1337,14 @@ name = "kernite"
 the module. The error names the manifest. A package with no workspace's manifest is one of its own, named as the package
 is.
 
+`PTX` is a constant, so Rust works it out as it builds the crate, and again in each crate that names it. Rust stops a
+constant that takes more than 2 000 000 steps, and its `long_running_const_eval` is an error unless the crate allows it.
+kernite works the PTX out in many constants, each of few steps. A constant joins a few thousand pieces, a piece being
+the text between two places the module's path goes in it, or a few dozen parts, a part being what a kernel, a function
+or a static adds to the module, and those constants are joined by others, in a tree. Each piece is copied whole, in
+steps that do not grow with its bytes. So a module of megabytes, with the path in it a hundred thousand times, or of
+many kernels, builds in a crate that allows nothing, and so does each crate that names `PTX`.
+
 ## A safe GPU kernel
 
 A GPU kernel that is no `unsafe fn` is one kernite proves safe where it compiles it, and Rust calls its launcher as it

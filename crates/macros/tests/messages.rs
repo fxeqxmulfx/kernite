@@ -12,7 +12,7 @@ use std::sync::PoisonError;
 
 mod common;
 
-use common::{BUILD_ENV, CARGO, ROOT, Result, written};
+use common::{BUILD_ENV, CARGO, ROOT, Result, crate_of, written};
 
 /// Whether Cargo did `command`, `["build"]` say, for fixture `name`, written afresh, and what it
 /// said, a line each, in order.
@@ -28,6 +28,21 @@ fn edited(name: &str, edits: &[(&str, &str)]) -> Result<PathBuf> {
     let text = fs::read_to_string(&manifest)?;
     fs::write(&manifest, edits.iter().fold(text, |text, (from, to)| text.replace(from, to)))?;
     Ok(dir)
+}
+
+/// Crate `name`, which a test has written, a dependency of the crate at `dir`.
+fn depends_on(dir: &Path, name: &str) -> Result {
+    let manifest = dir.join("Cargo.toml");
+    let path = Path::new(ROOT).join(name).join("project");
+    let line = format!("[dependencies]\n{name} = {{ path = {:?} }}\n", path.display().to_string());
+    fs::write(&manifest, fs::read_to_string(&manifest)?.replace("[dependencies]\n", &line))?;
+    Ok(())
+}
+
+/// A crate as `written` writes it, whose `src/lib.rs` is `source`, which no file holds: a test that makes a crate of a
+/// size or a shape that a file in the repository should not have writes it.
+fn generated(name: &str, source: &str) -> Result<PathBuf> {
+    crate_of(name, |_, dir| Ok(fs::write(dir.join("src/lib.rs"), source)?))
 }
 
 /// Whether Cargo did `command` in the crate at `dir`, and what it said, a line each, in order.
@@ -79,7 +94,12 @@ fn builds_quietly_in(command: &[&str], name: &str, dir: &Path) -> Result {
 /// so in a line with "skipped" and passes: that line is no word of Cargo's, and it is said again here, as a
 /// test of this file says of a tool it lacks.
 fn runs_quietly(command: &[&str], name: &str) -> Result<String> {
-    let out = cargo_out("short", command, &written(name)?)?;
+    runs_quietly_in(command, name, &written(name)?)
+}
+
+/// That Cargo does `command`, as `runs_quietly` has it, in `dir`, where fixture `name` is written.
+fn runs_quietly_in(command: &[&str], name: &str, dir: &Path) -> Result<String> {
+    let out = cargo_out("short", command, dir)?;
     let (said, printed) = (String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
     let (skipped, said): (Vec<&str>, Vec<&str>) = said.lines().partition(|line| line.contains("skipped"));
     for line in skipped {
@@ -507,6 +527,133 @@ fn a_workspace_named_nothing_is_left_out_of_its_kernels_names() -> Result {
     // The fixture asserts, as it builds, that its kernel is named in PTX in its crate's namespace
     // and its module's alone: `unnamed.toml` names the workspace `''`.
     builds_quietly("unnamed")?;
+    Ok(())
+}
+
+/// A module whose PTX is much, one kernel of 32768 instructions and 787 KB, is built in the crate that has it and in a
+/// crate that names its `PTX`, and neither allows `long_running_const_eval`, which Rust denies: it stops a constant
+/// that takes more than 2 000 000 steps, and makes the constant again in each crate that names it. The second crate
+/// holds that the text is the kernel's, with its name in it.
+#[test]
+fn the_ptx_of_a_kernel_of_much_code_is_built_where_it_is_made_and_in_each_crate_that_names_it() -> Result {
+    builds_quietly("much_ptx")?;
+    let user = written("much_ptx_user")?;
+    depends_on(&user, "much_ptx")?;
+    runs_quietly_in(&["test"], "much_ptx_user", &user)?;
+    Ok(())
+}
+
+/// A module whose PTX has the name of its static 100000 times has 100000 holes in a part of 6 MB, more than one
+/// constant of Rust's takes steps for: the macros cut it in parts of a few thousand pieces, and the second crate holds
+/// that each use of the static has its name, whole, where a part is cut as well as where it is not, and that no hole is
+/// left.
+#[test]
+fn a_part_with_many_holes_is_cut_and_each_hole_has_the_names_of_the_path() -> Result {
+    builds_quietly("many_names")?;
+    let user = written("many_names_user")?;
+    depends_on(&user, "many_names")?;
+    runs_quietly_in(&["test"], "many_names_user", &user)?;
+    Ok(())
+}
+
+/// `__named!` joins parts of 16 MiB in all, with 100 000 holes, in a constant of a crate that allows nothing, and in a
+/// crate that names the constant. The pieces are told apart by a number, and have a character of two bytes in them, so
+/// that a piece joined at the wrong place, or cut in a character, is found: the second crate holds the text to the
+/// pieces of the first, with the names of the path in each hole, `app::gpu` as `3app3gpu`, and none between the parts.
+#[test]
+fn parts_of_megabytes_with_many_holes_are_joined_with_the_names_in_each_hole() -> Result {
+    const PARTS: usize = 100;
+    const PIECES: usize = 1001;
+    let piece = |n: usize| format!("{n:08}{}", "ß".repeat(80));
+    let mut lib = String::from("pub const TEXT: &str = kernite_cuda::__named!(\"app::gpu\", [\n");
+    for part in 0..PARTS {
+        lib.push('[');
+        for i in 0..PIECES {
+            lib += &format!("{:?}, ", piece(part * PIECES + i));
+        }
+        lib.push_str("],\n");
+    }
+    lib.push_str("]);\n");
+    let dir = generated("parts_of_16_mib", &lib)?;
+    builds_quietly_in(&["build"], "parts_of_16_mib", &dir)?;
+    let user = r#"
+/// The bytes of the text, known now: Rust makes the constant, and counts its steps, in this crate.
+pub const LEN: usize = parts_of_16_mib::TEXT.len();
+
+/// Piece `n` as the other crate has it.
+pub fn piece(n: usize) -> String {
+    format!("{n:08}{}", "ß".repeat(80))
+}
+
+#[test]
+fn the_text_is_the_pieces_with_the_names_in_each_hole_and_none_between_the_parts() {
+    let mut rest = parts_of_16_mib::TEXT;
+    for part in 0..@PARTS@ {
+        for i in 0..@PIECES@ {
+            let piece = piece(part * @PIECES@ + i);
+            rest = rest.strip_prefix(piece.as_str()).unwrap_or_else(|| panic!("part {part} has not piece {i}"));
+            if i + 1 < @PIECES@ {
+                rest = rest.strip_prefix("3app3gpu").unwrap_or_else(|| panic!("part {part} has not its hole {i}"));
+            }
+        }
+    }
+    assert_eq!(rest, "");
+    assert_eq!(LEN, @PARTS@ * (@PIECES@ * 168 + (@PIECES@ - 1) * 8));
+}
+"#
+    .replace("@PARTS@", &PARTS.to_string())
+    .replace("@PIECES@", &PIECES.to_string());
+    let user = generated("parts_of_16_mib_user", &user)?;
+    depends_on(&user, "parts_of_16_mib")?;
+    runs_quietly_in(&["test"], "parts_of_16_mib_user", &user)?;
+    Ok(())
+}
+
+/// A kernel whose PTX has 8192 pieces is cut in two parts of 4096, as the macros cut a part, and one of 8193 pieces in
+/// two of 4096 and one of a piece. Each cut has the hole after its last piece, and the last has none: the module
+/// has each hole of the names of the path, and no more.
+#[test]
+fn a_part_cut_where_its_pieces_are_a_multiple_of_the_cut_and_where_they_are_not_has_each_hole() -> Result {
+    runs_quietly(&["test"], "cut_edges")?;
+    Ok(())
+}
+
+/// A module of kernels that do nothing, `kernels` of them, whose PTX is one part for the module's header and one for
+/// each kernel; and a test in it, that holds each kernel to be in the PTX once, in order, with the names of the path of
+/// crate `name` in its name, and no hole to be left.
+fn kernels_with_tests(name: &str, kernels: usize) -> String {
+    let mut lib = String::from("#[kernite_macros::kernels]\npub mod gpu {\n");
+    for i in 0..kernels {
+        lib += &format!("    pub unsafe extern \"ptx-kernel\" fn k{i}() {{}}\n");
+    }
+    lib += r#"}
+
+#[test]
+fn each_kernel_is_in_the_ptx_once_in_order_with_the_names_of_the_path() {
+    let ptx = gpu::PTX;
+    let mut rest = ptx;
+    for i in 0..@KERNELS@ {
+        let name = format!("k{i}");
+        let entry = format!(".entry _ZN7project@PATH@{}{name}E(", name.len());
+        let at = rest.find(&entry).unwrap_or_else(|| panic!("no kernel `{name}` after the one before it"));
+        rest = &rest[at + entry.len()..];
+    }
+    assert_eq!(ptx.matches(".entry ").count(), @KERNELS@);
+    assert!(!ptx.contains('\0'), "a hole is left in the PTX");
+}
+"#;
+    lib.replace("@KERNELS@", &kernels.to_string()).replace("@PATH@", &format!("{}{name}3gpu", name.len()))
+}
+
+/// A constant of the macros' joins 64 parts at most, so a module of 64 parts, the header of its PTX and 63 kernels, has
+/// them in one, and one of 65, the header and 64 kernels, has 64 in one and the last in another, and those in a third.
+/// Each is built in a crate that allows nothing, and has each kernel once, in order, where the parts are joined.
+#[test]
+fn a_module_of_as_many_parts_as_a_constant_joins_and_of_one_more_has_each_kernel_once_in_order() -> Result {
+    for (name, kernels) in [("parts_of_one_constant", 63), ("parts_of_one_constant_and_one", 64)] {
+        let dir = generated(name, &kernels_with_tests(name, kernels))?;
+        runs_quietly_in(&["test"], name, &dir)?;
+    }
     Ok(())
 }
 
