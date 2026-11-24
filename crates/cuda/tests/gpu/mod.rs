@@ -1,7 +1,8 @@
 //! What the tests that keep a stream busy have in common: three kernels, written by hand, two of which hold work back
 //! until the host writes a flag or the GPU's clock says a time has gone by, and one that copies a word, to show when
-//! the work after it runs; the lock that keeps the other tests of a file off the null stream, which is the GPU's and
-//! not a thread's; and the host's reads and writes of the words the kernels share.
+//! the work after it runs; the way every kernel of the tests takes its start from that clock; the lock that keeps the
+//! other tests of a file off the null stream, which is the GPU's and not a thread's; and the host's reads and writes of
+//! the words the kernels share.
 #![allow(dead_code, reason = "a test file takes what it needs of this module, and rustc calls the rest dead")]
 
 use std::ffi::c_void;
@@ -12,16 +13,43 @@ use kernite_cuda::{Cuda, Grid, Module, Ptr, Stream, Unified, arg};
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
-/// The kernels. `%globaltimer` is the GPU's clock, in nanoseconds.
+/// The header of a module of the tests.
+const HEADER: &str = ".version 7.5\n.target sm_61\n.address_size 64\n";
+
+/// Where a kernel that waits by the clock takes its start. `%globaltimer` is the GPU's clock, in nanoseconds, and on
+/// the GPU here, an RTX 3050 under NVIDIA's open kernel module 620.70.06 and CUDA 13.5, a kernel's first reads of it
+/// are now and then wrong: the time with its top bits wrong, until the clock next moves. A start taken at the first
+/// read then ends a wait of a second at once, or never. So `clock_start` waits for the clock to move, and returns the
+/// first read after: the time, to within a tick of the clock, which is a microsecond. `clock.rs` counts the starts it
+/// gives that are wrong, and those it takes at the first read.
+const CLOCK: &str = "
+.func (.reg .u64 %start) clock_start()
+{
+	.reg .u64 %now;
+	.reg .pred %same;
+
+	mov.u64 %start, %globaltimer;
+MOVES:
+	mov.u64 %now, %globaltimer;
+	setp.eq.u64 %same, %now, %start;
+	@%same bra MOVES;
+	mov.u64 %start, %now;
+	ret;
+}
+";
+
+/// The PTX of a module of the tests: its header, `clock_start`, and `kernels`, which call it by
+/// `call (%start), clock_start, ();`.
+pub fn ptx(kernels: &str) -> String {
+    [HEADER, CLOCK, kernels].concat()
+}
+
+/// The kernels.
 ///
 /// `waits(flag, out, nanos)` spins until `*flag` is not 0, or until `nanos` nanoseconds have gone by; then it writes 1
 /// to `*out` if it saw the flag, and 2 if the time went by first. `sets(flag, nanos)` writes 1 to `*flag` after `nanos`
 /// nanoseconds. `copies(from, to)` writes the word `*from` to `*to`.
 const PTX: &str = "
-.version 7.5
-.target sm_61
-.address_size 64
-
 .visible .entry waits(.param .u64 flag_param, .param .u64 out_param, .param .u64 nanos_param)
 {
 	.reg .u64 %flag, %out, %nanos, %start, %now, %gone;
@@ -33,7 +61,7 @@ const PTX: &str = "
 	ld.param.u64 %nanos, [nanos_param];
 	cvta.to.global.u64 %flag, %flag;
 	cvta.to.global.u64 %out, %out;
-	mov.u64 %start, %globaltimer;
+	call (%start), clock_start, ();
 SPIN:
 	ld.volatile.global.u32 %word, [%flag];
 	setp.ne.u32 %set, %word, 0;
@@ -60,7 +88,7 @@ SEEN:
 	ld.param.u64 %flag, [flag_param];
 	ld.param.u64 %nanos, [nanos_param];
 	cvta.to.global.u64 %flag, %flag;
-	mov.u64 %start, %globaltimer;
+	call (%start), clock_start, ();
 LATER:
 	mov.u64 %now, %globaltimer;
 	sub.u64 %gone, %now, %start;
@@ -113,7 +141,7 @@ pub fn cuda() -> Option<(Cuda, MutexGuard<'static, ()>)> {
 
 /// The kernels, as a module of the GPU of `cuda`.
 pub fn load(cuda: &Cuda) -> Result<Module> {
-    Ok(Module::load(cuda, PTX, KERNELS, &[])?)
+    Ok(Module::load(cuda, &ptx(PTX), KERNELS, &[])?)
 }
 
 /// `work`, with `stream` the current stream of its GPU.

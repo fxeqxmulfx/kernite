@@ -7,15 +7,14 @@ use std::ptr;
 
 use kernite_cuda::{Cuda, Grid, Module, arg};
 
+mod gpu;
+use gpu::ptx;
+
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
 /// `later(x, flag, nanos)`: one thread waits `nanos` nanoseconds on the GPU's global timer, then writes 7 to `*x`, and
 /// then 1 to `*flag`.
 const PTX: &str = "
-.version 7.5
-.target sm_61
-.address_size 64
-
 .visible .entry later(.param .u64 x_param, .param .u64 flag_param, .param .u64 nanos_param)
 {
 	.reg .u64 %x, %flag, %nanos, %start, %now, %gone;
@@ -27,7 +26,7 @@ const PTX: &str = "
 	ld.param.u64 %nanos, [nanos_param];
 	cvta.to.global.u64 %x, %x;
 	cvta.to.global.u64 %flag, %flag;
-	mov.u64 %start, %globaltimer;
+	call (%start), clock_start, ();
 LATER:
 	mov.u64 %now, %globaltimer;
 	sub.u64 %gone, %now, %start;
@@ -50,7 +49,7 @@ fn dropping_a_buffer_waits_for_the_kernel_that_writes_it_and_then_unmaps_it() ->
     let Ok(mut cache) = cuda.reserve::<u32>(1 << 28).inspect_err(|e| eprintln!("the GPU cannot: skipped. {e}")) else {
         return Ok(());
     };
-    let module = Module::load(&cuda, PTX, &["later"], &[])?;
+    let module = Module::load(&cuda, &ptx(PTX), &["later"], &[])?;
     let flag = cuda.pinned::<u32>(1)?;
     cache.grow(10_000_000)?;
     let (x_at, flag_at) = (cache.ptr(), flag.ptr());

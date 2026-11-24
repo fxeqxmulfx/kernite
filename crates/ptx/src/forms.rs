@@ -1649,6 +1649,11 @@ pub fn sregs() -> &'static [Sreg] {
         }
         add("clock64".into(), Ty::U64, 20, 0, 64);
         add("clock_hi".into(), Ty::U32, 50, 0, 32);
+        // On an RTX 3050 (`sm_86`), with NVIDIA's open kernel module 620.70.06 and CUDA 13.5, a kernel's first reads of
+        // `%globaltimer` are now and then wrong: from none to 17 in 5000000 launches of one kernel, in different runs.
+        // They give the time with its top bits wrong and its low 32 bits right, until the value next changes. A start
+        // taken at one of them makes a wait by the clock end at once, or never: a kernel that waits takes its start
+        // from the first read after the value changes.
         add("globaltimer".into(), Ty::U64, 31, 30, 64);
         add("globaltimer_lo".into(), Ty::U32, 31, 30, 32);
         add("globaltimer_hi".into(), Ty::U32, 31, 30, 32);
