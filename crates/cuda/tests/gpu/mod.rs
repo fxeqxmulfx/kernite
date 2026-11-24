@@ -7,15 +7,12 @@
 #![allow(dead_code, reason = "a test file takes what it needs of this module, and rustc calls the rest dead")]
 
 use std::ffi::c_void;
-use std::ptr;
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use kernite_cuda::{Cuda, Grid, Module, Ptr, Stream, Unified, arg};
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
-
-/// The header of a module of the tests.
-const HEADER: &str = ".version 7.5\n.target sm_61\n.address_size 64\n";
 
 /// Where a kernel that waits by the clock takes its start. `%globaltimer` is the GPU's clock, in nanoseconds, and on
 /// the GPU here, an RTX 3050 under NVIDIA's open kernel module 620.70.06 and CUDA 13.5, a kernel's first reads of it
@@ -39,10 +36,15 @@ MOVES:
 }
 ";
 
-/// The PTX of a module of the tests: its header, `clock_start`, and `kernels`, which call it by
+/// The PTX of a module of the tests, for `sm_61` and later: its header, `clock_start`, and `kernels`, which call it by
 /// `call (%start), clock_start, ();`.
 pub fn ptx(kernels: &str) -> String {
-    [HEADER, CLOCK, kernels].concat()
+    ptx_for("sm_61", kernels)
+}
+
+/// The same for `target` and later, for kernels whose instructions need it: `ld.acquire` and `st.release` need `sm_70`.
+pub fn ptx_for(target: &str, kernels: &str) -> String {
+    format!(".version 7.5\n.target {target}\n.address_size 64\n{CLOCK}{kernels}")
 }
 
 /// The kernels.
@@ -224,18 +226,18 @@ pub fn hold(module: &Module, flag: Ptr<u32>, out: Ptr<u32>) -> Result {
     launch(module, WAITS, &[arg(&flag), arg(&out), arg(&FOR_THE_HOST)])
 }
 
-/// What the page-locked word `at` holds now. It is read where it is, and not by `host`, which waits for the GPU first.
-pub fn peek(at: &Unified<'_, u32>) -> u32 {
-    // SAFETY: `at` is a word of page-locked memory that lasts as long as `at`, which the GPU reaches at the address the
-    // host has for it. A kernel writes it by one `st.volatile` of the whole word. A copy or a zeroing may write it by
-    // stores of any width: it changes in its low byte alone, 1 over 0 and 0 over 7, so a read sees the old word or the
-    // new.
-    unsafe { ptr::read_volatile(ptr::with_exposed_provenance::<u32>(at.ptr().addr() as usize)) }
+/// What the page-locked word `at` holds now. It is read where it is, by `atomics`, and not by `host`, which waits for
+/// the GPU first. A kernel writes it by one `st.volatile` of the whole word, and a copy or a zeroing may write it by
+/// stores of any width: it changes in its low byte alone, 1 over 0 and 0 over 7, so a read sees the old word or the
+/// new.
+pub fn peek(at: &mut Unified<'_, u32>) -> u32 {
+    at.atomics().first().map_or(0, |word| word.load(Ordering::Acquire))
 }
 
-/// Writes `value` to the page-locked word `at`, where the kernel that spins on it reads it.
-pub fn poke(at: &Unified<'_, u32>, value: u32) {
-    // SAFETY: `at` is a word of page-locked memory that lasts as long as `at`, which the GPU reaches at the address the
-    // host has for it; the kernel reads it by one load of the whole word.
-    unsafe { ptr::write_volatile(ptr::with_exposed_provenance_mut::<u32>(at.ptr().addr() as usize), value) }
+/// Writes `value` to the page-locked word `at`, where the kernel that spins on it reads it by one load of the whole
+/// word.
+pub fn poke(at: &mut Unified<'_, u32>, value: u32) {
+    if let Some(word) = at.atomics().first() {
+        word.store(value, Ordering::Release);
+    }
 }

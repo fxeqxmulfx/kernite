@@ -94,7 +94,7 @@ pub use graph::Graph;
 pub use half::{bf16, f16};
 pub use safe::{Memory, MemoryMut, Quantity, Requirement, View, Why, holds};
 pub use stream::Stream;
-pub use unified::{Advice, Location, Placement, Unified};
+pub use unified::{Advice, Atomic, Location, Placement, Unified};
 
 /// What every function of the driver returns: 0, or what went wrong.
 type CuResult = c_int;
@@ -1171,8 +1171,11 @@ impl Module {
     /// kernel is trusted with them. Each pointer among them must be to a buffer or to [`Unified`]
     /// memory of the GPU the module is loaded on, as long as the kernel reads and writes through
     /// it. From the launch until the kernel is done, the host must hold no slice of memory the
-    /// kernel writes, and no slice it may write of memory the kernel reads. A slice taken after the
-    /// launch waits for the kernel, so only a slice taken before it can break this.
+    /// kernel writes, and no slice it may write of memory the kernel reads. The host may hold
+    /// [`atomics`](Unified::atomics) of any memory the kernel reaches, and the kernel then reaches each of its
+    /// elements by the element's size alone, as a race of two sizes is outside PTX's memory model. A slice that `host`
+    /// or `host_mut` gives after the launch waits for the kernel, so only a slice taken before it, or one that
+    /// `host_now` or `host_now_mut` gives, can break this.
     pub unsafe fn launch(&self, index: usize, grid: Grid, args: &[*const c_void]) -> Result<(), Error> {
         let ([bx, by, bz], [tx, ty, tz]) = (grid.blocks, grid.threads);
         let k = self.kernel("cuLaunchKernel", index)?;

@@ -362,7 +362,9 @@ fn launcher(f: &Fn, launched: Option<&[Launched]>, top: &[TokenTree], places: To
              #[doc = \"{space}The kernel trusts the pointers it is given: each must be to a buffer or to unified \
              memory of the GPU the kernels are loaded on, as long as the kernel reads and writes through it. From the \
              launch until the kernel is done, the host must hold no slice of memory the kernel writes, and no \
-             slice it may write of memory the kernel reads.\"]",
+             slice it may write of memory the kernel reads. The host may hold atomics of any memory the kernel \
+             reaches, and the kernel then reaches each of its elements by the element's size alone, as a race \
+             of two sizes is outside PTX's memory model.\"]",
         )));
     }
     let mut out: TokenStream = docs.into_iter().collect();

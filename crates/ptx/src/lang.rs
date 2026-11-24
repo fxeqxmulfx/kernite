@@ -1458,7 +1458,7 @@ impl Kernel {
 fn reach(b: &Bound, args: &[Given<Var>]) -> u64 {
     match b.form.op {
         "ld" | "st" | "atom" | "red" | "wmma" => {
-            b.form.data().and_then(|s| Some(u64::from(b.ty(s.ty?)?.bits()) / 8 * b.count(s) as u64)).unwrap_or(1)
+            b.form.data().and_then(|s| Some(b.scalar()? * b.count(s) as u64)).unwrap_or(1)
         }
         "mbarrier" => 8,
         "ldmatrix" => 16,

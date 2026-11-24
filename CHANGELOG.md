@@ -15,12 +15,15 @@ release gives it its version.
 - kernite-cuda copies memory on a GPU, and zeros it, on the current stream without waiting.
 - kernite-cuda writes the zeros of new memory on the current stream, not the null stream.
 - kernite-cuda makes managed memory only where each GPU reaches it while the host does, which WSL2's does not.
-- kernite-cuda's `Cuda::concurrent_managed_access` is gone, with the clause of an `unsafe` launch's contract it
-  served.
 - kernite-cuda records the work of a GPU stream as a graph, `stream.capture(..)`, and launches it, `unsafe`, as often
   as it is asked: 1100 launches as one.
+- kernite-cuda's host reaches unified memory while kernels run, with no wait: as atomics, safe, `memory.atomics()`, and
+  as a slice, `unsafe { memory.host_now() }`.
 - kernite builds the PTX of a module of megabytes, or of many kernels (GitHub issue 1).
 - kernite finds a kernel's `# Safety` by its heading, as rustdoc does, and adds what it writes at the end of it.
+- Breaks: a safe GPU kernel reaches each element whole, and kernite refuses `ld.global.u16` through a `*const u32`, as
+  the host may store the whole element while the kernel runs; kernite-cuda's `Cuda::concurrent_managed_access` is gone,
+  with the clause of an `unsafe` launch's contract it served.
 
 ## 0.6.0 (2026-11-22)
 

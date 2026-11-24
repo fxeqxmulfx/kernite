@@ -158,19 +158,19 @@ fn a_graph_launches_on_the_stream_run_made_current_and_on_no_other() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
     let module = load(&cuda)?;
     let (a, b) = (cuda.stream()?, cuda.stream()?);
-    let (flag, out) = (word(&cuda)?, word(&cuda)?);
+    let (mut flag, mut out) = (word(&cuda)?, word(&cuda)?);
     let sets = a.capture(|| launch(&module, SETS, &[arg(&flag.ptr()), arg(&AT_ONCE)]))?;
     // `waits` is queued on `a`, and the graph, whose `sets` writes the flag at once, is launched where `place` puts it:
     // `waits` sees the flag only if the graph ran beside it, on a stream that is neither `a`, where it is queued behind
     // `waits`, nor the null stream, which `a` blocks.
-    let race = |expected: u32, place: &dyn Fn() -> Result<(), Error>, what: &str| -> Result {
+    let mut race = |expected: u32, place: &dyn Fn() -> Result<(), Error>, what: &str| -> Result {
         let nanos = if expected == SEEN { A_SECOND } else { A_TENTH };
-        poke(&flag, 0);
-        poke(&out, 0);
+        poke(&mut flag, 0);
+        poke(&mut out, 0);
         run(&a, || launch(&module, WAITS, &[arg(&flag.ptr()), arg(&out.ptr()), arg(&nanos)]))?;
         place()?;
         cuda.sync()?;
-        assert_eq!(peek(&out), expected, "{what}");
+        assert_eq!(peek(&mut out), expected, "{what}");
         Ok(())
     };
     // The stream a graph was captured on is no part of it: this one was captured on `a`, and `b` runs it.
@@ -185,7 +185,7 @@ fn a_capture_waits_for_nothing_and_the_work_given_before_it_runs_as_it_did_and_i
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
     let module = load(&cuda)?;
     let a = cuda.stream()?;
-    let (flag, out) = (word(&cuda)?, word(&cuda)?);
+    let (mut flag, mut out) = (word(&cuda)?, word(&cuda)?);
     let words = filled(&cuda, &START)?;
     let at = words.ptr();
     // `waits` holds the stream until the host writes the flag, and a kernel that adds one is queued behind it.
@@ -196,10 +196,10 @@ fn a_capture_waits_for_nothing_and_the_work_given_before_it_runs_as_it_did_and_i
     // The capture returns while both are queued. Had it waited for the stream, the host would not have written the flag
     // until `waits` timed out, and `waits` would have written `TIMED_OUT`.
     let graph = a.capture(|| change(&module, DOUBLES, at, 4))?;
-    assert_eq!(peek(&out), 0, "the capture waited for the work given before it");
-    poke(&flag, 1);
+    assert_eq!(peek(&mut out), 0, "the capture waited for the work given before it");
+    poke(&mut flag, 1);
     a.sync()?;
-    assert_eq!(peek(&out), SEEN, "`waits` did not see the flag: the capture waited for it");
+    assert_eq!(peek(&mut out), SEEN, "`waits` did not see the flag: the capture waited for it");
     assert_eq!(
         words.read()?,
         START.map(|x| x + 1),
@@ -483,7 +483,7 @@ impl Dropping {
     /// on: the page-locked word `out` is the kernel's right after the drop. The capture is lost, and its error is the
     /// end's. The work the closure enqueues after the drop does not run. The stream takes work after it, and captures
     /// again.
-    fn drops<M>(&mut self, name: &str, out: &Unified<u32>, memory: M) -> Result {
+    fn drops<M>(&mut self, name: &str, out: &mut Unified<u32>, memory: M) -> Result {
         let (mut after, at) = (None, self.words.ptr());
         let captured = self.a.capture(|| {
             drop(memory);
@@ -515,7 +515,7 @@ impl Dropping {
         thread::scope(|scope| -> Result {
             let other = scope.spawn(move || -> Result<Option<u32>> {
                 let cuda = Cuda::new()?;
-                let (module, out, mut host) = (load(&cuda)?, word(&cuda)?, vec![0u32; 4]);
+                let (module, mut out, mut host) = (load(&cuda)?, word(&cuda)?, vec![0u32; 4]);
                 let Some(memory) = made(&cuda, kind, &mut host)? else {
                     ready.send(false)?;
                     return Ok(None);
@@ -524,7 +524,7 @@ impl Dropping {
                 ready.send(true)?;
                 go_rx.recv()?;
                 drop(memory);
-                Ok(Some(peek(&out)))
+                Ok(Some(peek(&mut out)))
             });
             if !ready_rx.recv()? {
                 other.join().map_err(|_| "the other thread panicked")??;
@@ -554,9 +554,9 @@ fn a_drop_in_a_capture_waits_for_the_kernel_for_each_kind_of_memory_and_for_a_mo
         let mut host = vec![0u32; 4];
         let Some(memory) = made(&rig.cuda, kind, &mut host)? else { continue };
         let (held, _) = rig.cuda.memory()?;
-        let out = word(&rig.cuda)?;
+        let mut out = word(&rig.cuda)?;
         holds(&rig.module, memory.at(), &out)?;
-        rig.drops(kind, &out, memory)?;
+        rig.drops(kind, &mut out, memory)?;
         // The memory of the GPU is free again, as the free bytes show, by half of what the buffer held at least, as
         // other programs hold and free memory too. Page-locked memory is the host's, and they do not show it.
         let (free, _) = rig.cuda.memory()?;
@@ -566,9 +566,9 @@ fn a_drop_in_a_capture_waits_for_the_kernel_for_each_kind_of_memory_and_for_a_mo
         }
     }
     // The module's kernel holds the GPU, and the drop unloads the module under it.
-    let (own, spare, out) = (load(&rig.cuda)?, word(&rig.cuda)?, word(&rig.cuda)?);
+    let (own, spare, mut out) = (load(&rig.cuda)?, word(&rig.cuda)?, word(&rig.cuda)?);
     holds(&own, spare.ptr(), &out)?;
-    rig.drops("a module", &out, own)
+    rig.drops("a module", &mut out, own)
 }
 
 #[test]
@@ -649,15 +649,15 @@ fn a_graph_that_is_dropped_while_it_runs_runs_to_its_end_and_the_drop_does_not_w
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
     let module = load(&cuda)?;
     let a = cuda.stream()?;
-    let (flag, out) = (word(&cuda)?, word(&cuda)?);
+    let (mut flag, mut out) = (word(&cuda)?, word(&cuda)?);
     let waits = [arg(&flag.ptr()), arg(&out.ptr()), arg(&FOR_THE_HOST)];
     let graph = a.capture(|| launch(&module, WAITS, &waits))?;
     run(&a, || go(&graph))?;
     // The graph's `waits` holds until the host writes the flag, which it does after the drop: the drop did not wait.
     drop(graph);
-    poke(&flag, 1);
+    poke(&mut flag, 1);
     a.sync()?;
-    assert_eq!(peek(&out), SEEN, "the work of a graph that was dropped did not run to its end, or the drop waited");
+    assert_eq!(peek(&mut out), SEEN, "the work of a graph that was dropped did not run to its end, or the drop waited");
     Ok(())
 }
 

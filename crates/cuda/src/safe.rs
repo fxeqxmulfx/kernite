@@ -7,7 +7,8 @@ use super::{Buffer, Cuda, Error, Grid, Module, Plain, Ptr, sealed};
 /// a buffer, or [`Unified`](super::Unified) memory of `'static`: managed or page-locked memory, or a slice the host
 /// lends for good. [`Cuda::copy`] takes it too, but for a slice that [`Cuda::lend`](super::Cuda::lend) lent, which it
 /// refuses. The kernel and the copy are trusted with it until they are done, and the host's calls that reach the memory
-/// wait for them first, as `read`, `write`, `host` and dropping the memory do. A slice lent for less is not, as a
+/// wait for them first, as `read`, `write`, `host` and dropping the memory do; `atomics`, `host_now` and `host_now_mut`
+/// wait for none, and the last two are `unsafe` for it. A slice lent for less is not, as a
 /// `mem::forget` of what [`Cuda::lend`](super::Cuda::lend) gave would give it back to the host with no wait.
 pub trait Memory<T: Plain>: sealed::Sealed {
     /// Its address and how many elements it has, as a kernel of `module` is lent them. It is an error if it is memory

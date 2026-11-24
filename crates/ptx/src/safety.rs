@@ -1,5 +1,5 @@
-//! What proves a kernel with no `unsafe` safe, as its instructions are written: each load and store lies inside its
-//! memory at its alignment, no two threads write one address, and none reads what another writes.
+//! What proves a kernel with no `unsafe` safe, as its instructions are written: each load and store reaches one whole
+//! element, inside its memory at its alignment, no two threads write one address, and none reads what another writes.
 //!
 //! The proof follows the kernel straight through, for a kernel has no jump: it knows each variable as a whole number
 //! of the thread's and the launch's numbers, or as an address `offset` bytes from a pointer parameter. What it cannot
@@ -538,6 +538,14 @@ impl Proof {
         };
         if !(1..=target).contains(&bytes) {
             let what = format!("reaches {bytes} bytes at once, more than the {target} of what its pointer is to");
+            return Err(here(&what));
+        }
+        // PTX takes a vector as one access for each of its scalars, so one of fewer bytes than the element reaches part
+        // of it, as a scalar of fewer bytes does: the host may store the whole element, by its atomics, while the
+        // kernel runs, and a race of two sizes is outside PTX's memory model.
+        let scalar = i128::from(i.bound.scalar().unwrap_or(i.reach));
+        if scalar < target {
+            let what = format!("reaches part of an element, {scalar} of the {target} bytes of what its pointer is to");
             return Err(here(&what));
         }
         if a.0.values().any(|c| c % bytes != 0) {

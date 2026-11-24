@@ -6,6 +6,7 @@ use std::marker::PhantomData;
 use std::ptr;
 use std::rc::Rc;
 use std::slice;
+use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicU64};
 
 use super::{Cuda, Driver, Error, Memory, MemoryMut, Plain, Ptr, bytes, sealed};
 
@@ -373,6 +374,27 @@ enum Kind {
 /// before they lend the memory. A slice taken after a launch is never under its kernel, so the host
 /// reads what the kernels wrote, and a kernel reads what the host wrote.
 ///
+/// [`atomics`](Unified::atomics), and the `unsafe` [`host_now`](Unified::host_now) and
+/// [`host_now_mut`](Unified::host_now_mut), wait for nothing: the host reaches the memory while kernels
+/// run, and a kernel and the host hand over what each writes, a job and its answer say. A kernel
+/// writes the job, then a number by `st.release.sys`; the host loads the number, and reads the job. The atomics
+/// borrow the memory mutably, as a slice of `T` is no atomic and the memory must not change while a slice is held:
+/// rustc refuses the atomics while a slice of the memory is held, and a slice while they are.
+///
+/// ```no_run
+/// # use kernite_cuda::Cuda;
+/// # use std::sync::atomic::Ordering;
+/// let cuda = Cuda::new()?;
+/// let mut job = cuda.pinned::<f32>(1025)?;
+/// // A kernel writes 1024 floats to `job.ptr()`, then the number 1 by `st.release.sys` to its element 1024.
+/// while job.atomics()[1024].load(Ordering::Acquire) != 1 {
+///     std::hint::spin_loop();
+/// }
+/// // SAFETY: the kernel writes nothing to `job` after the number.
+/// let floats = &unsafe { job.host_now() }[..1024];
+/// # Ok::<(), kernite_cuda::Error>(())
+/// ```
+///
 /// ```no_run
 /// # use kernite_cuda::Cuda;
 /// let cuda = Cuda::new()?;
@@ -413,8 +435,10 @@ enum Kind {
 /// contract, which [`Module::launch`] has as its `# Safety`, is this: each pointer is to a buffer
 /// or to unified memory of the GPU, as long as the kernel reads and writes through it; from the
 /// launch until the kernel is done, the host holds no slice of memory the kernel writes, and no
-/// slice it may write of memory the kernel reads. The launcher of a kernel that is no `unsafe fn`
-/// takes the memory, not a pointer, and borrows it, as [`Memory`](super::Memory) says, so the
+/// slice it may write of memory the kernel reads. The host may hold [`atomics`](Unified::atomics)
+/// of any, and the kernel then reaches each of its elements by the element's size alone, as a
+/// race of two sizes is outside PTX's memory model. The launcher of a kernel that is no `unsafe
+/// fn` takes the memory, not a pointer, and borrows it, as [`Memory`](super::Memory) says, so the
 /// compiler refuses that launch while the host holds such a slice.
 ///
 /// Dropping the memory waits for the kernels that use it, and then frees it; or, for a slice
@@ -454,32 +478,176 @@ impl<T: Plain> Unified<'_, T> {
     }
 
     /// What it holds, as the host reads it, after the kernels launched before have run: it waits
-    /// for every kernel launched on the GPU to finish, and says whether one failed.
+    /// for every kernel launched on the GPU to finish, and says whether one failed. A host that
+    /// must not wait for all of them reads by [`host_now`](Unified::host_now), or by
+    /// [`atomics`](Unified::atomics).
     pub fn host(&self) -> Result<&[T], Error> {
         self.driver.sync()?;
-        // SAFETY: `ptr` is the address of `len` elements of `T`, which last as long as `self`.
-        // `sync` waited for the kernels launched, and none launched after it writes the memory
+        // SAFETY: `sync` waited for the work queued, and none queued after it writes the memory
         // while the host holds this slice: the launcher of a kernel that is no `unsafe fn`
         // borrows the memory mutably to write it, which it cannot while this slice borrows `self`,
-        // and an `unsafe` launch keeps from it, as its caller promises. Any bits are a `T`, as
-        // `Plain` promises.
-        Ok(unsafe { slice::from_raw_parts(self.ptr, self.len) })
+        // and an `unsafe` launch keeps from it, as its caller promises. The host's own stores go
+        // through the atomics, which borrow `self` mutably, and cannot while this slice borrows it.
+        Ok(unsafe { self.host_now() })
     }
 
     /// What it holds, as the host reads and writes it, after the kernels launched before have
     /// run: it waits for every kernel launched on the GPU to finish, and says whether one failed.
     pub fn host_mut(&mut self) -> Result<&mut [T], Error> {
         self.driver.sync()?;
-        // SAFETY: as for `host`, and nothing else holds a slice of it, as `self` is borrowed
-        // for as long as this one is held. No kernel launched after `sync` reads the memory
-        // either, as the host may write it: a launcher that lends it borrows `self`, which it
-        // cannot while this slice borrows it mutably, and an `unsafe` launch keeps from it.
-        Ok(unsafe { slice::from_raw_parts_mut(self.ptr, self.len) })
+        // SAFETY: as for `host`, and no work queued after `sync` reads the memory either, as the
+        // host may write it: a launcher that lends it borrows `self`, which it cannot while this
+        // slice borrows it mutably, and an `unsafe` launch keeps from it.
+        Ok(unsafe { self.host_now_mut() })
+    }
+
+    /// What it holds, as the host reads it, with no wait for the GPU: the slice is of the memory as it is, while
+    /// kernels run. [`host`](Unified::host) waits for every kernel launched on the GPU to finish before it lends the
+    /// slice, and this does not, so it serves a host that knows by other means that the work that writes the memory is
+    /// done: a flag that [`atomics`](Unified::atomics) shows, an event, or the `sync` of the one stream the work was
+    /// given on, while kernels of other streams run on. It is no `Result`, as no kernel's failure is asked.
+    ///
+    /// # Safety
+    ///
+    /// No work of the GPU writes the memory while the slice is held. A launch, a copy, a [`zero`](Unified::zero) and
+    /// the zeros that [`managed`](Cuda::managed) writes return before the GPU has done them: the host knows, as above,
+    /// that each of them that writes the memory is done, and queues none that writes it until it lets the slice go. A
+    /// launcher that writes the memory and is no `unsafe fn` borrows it mutably, which it cannot while this slice
+    /// borrows it.
+    pub unsafe fn host_now(&self) -> &[T] {
+        // SAFETY: `ptr` is the address of `len` elements of `T`, which last as long as `self`, and any bits are a `T`,
+        // as `Plain` promises. Nothing writes them while the slice is held: the caller's, for the work of the GPU, and
+        // rustc's for the host's atomics, which borrow `self` mutably.
+        unsafe { slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    /// What it holds, as the host reads and writes it, with no wait for the GPU, as [`host_now`](Unified::host_now)
+    /// lends it to read. The host writes what a kernel launched after it reads, in a hand-over of a job's answer.
+    ///
+    /// # Safety
+    ///
+    /// No work of the GPU reaches the memory while the slice is held, to read it as well as to write it, as the
+    /// host's writes may be half done when it does: the host knows, as for `host_now`, that each that reaches it is
+    /// done, and queues none that does until it lets the slice go. A launcher that reads or writes the memory and is
+    /// no `unsafe fn` borrows it, which it cannot while this slice borrows it mutably.
+    pub unsafe fn host_now_mut(&mut self) -> &mut [T] {
+        // SAFETY: as for `host_now`, and nothing else holds a slice of it, as `self` is borrowed for as long as this
+        // one is held. Nothing reads it either: the caller's.
+        unsafe { slice::from_raw_parts_mut(self.ptr, self.len) }
     }
 
     /// The address as the GPU reckons it.
     fn addr(&self) -> u64 {
         self.ptr.addr() as u64
+    }
+}
+
+/// A [`Plain`] type that has an atomic of its size and its bits, which the host loads and stores while kernels run:
+/// `u32` and `i32`, `u64` and `i64`, and the floats `f32` and `f64`, whose atomics are those of the integers of their
+/// bits. [`Unified::atomics`] gives the memory of such a type as its atomics.
+pub trait Atomic: Plain {
+    /// The atomic, which has the size and the alignment of the type: `AtomicU32` for `f32`.
+    type Atom;
+}
+
+macro_rules! atomic {
+    ($($t:ty => $atom:ty),*) => { $(impl Atomic for $t { type Atom = $atom; })* };
+}
+
+atomic!(u32 => AtomicU32, i32 => AtomicI32, f32 => AtomicU32, u64 => AtomicU64, i64 => AtomicI64, f64 => AtomicU64);
+
+impl<T: Atomic> Unified<'_, T> {
+    /// What it holds, as atomics, which the host loads and stores while kernels run, with no wait for the GPU: the
+    /// element of an `f32` is an `AtomicU32` of its bits, and of an `f64` an `AtomicU64`. [`host`](Unified::host) and
+    /// [`host_mut`](Unified::host_mut) wait for every kernel launched on the GPU to finish, so the host sees what a
+    /// kernel wrote when it is done, and not while it runs; atomics are for a host and a kernel that run together, and
+    /// hand over what each writes, a job and its answer say.
+    ///
+    /// The two hand over by loads and stores of the scope of the whole system, in the order that the host's `Release`
+    /// and `Acquire` are: what a side wrote before it stores a number is seen by the other once it loads that number.
+    /// A kernel stores by `st.release.sys` and loads by `ld.acquire.sys`. Where the GPU's
+    /// `CU_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED` is 0, as the GPU here says, a read-modify-write on one side,
+    /// `fetch_add` say, need not be atomic with one on the other, so a hand-over is of loads and stores.
+    ///
+    /// It is safe. The atomics may change under the host, and any bits are a number, so no write of a kernel makes the
+    /// host's load unsound. The host's store is sound for a kernel too, even for one that is no `unsafe fn`, whose
+    /// launcher borrowed the memory for the launch alone. The host's atomic is of the element's size, and a kernel
+    /// reaches an element by its size, or by a vector of it, which PTX's memory model takes as one access for each
+    /// element: kernite proves that a kernel that is no `unsafe fn` reaches each element whole, by one access of its
+    /// size, and the contract of an `unsafe` launch says that its kernel does. So a store of the host and an access of
+    /// a kernel race, if they do, over the same bytes and no others: PTX calls that a uniform-size data-race, and its
+    /// axioms are sufficient to describe a program that has only such races. They do not apply to a program that has a
+    /// mixed-size one, a race of accesses that overlap in part, which is why the atomics are of the element's own size
+    /// alone. A kernel loads the old element or the new.
+    ///
+    /// They borrow the memory mutably, as a slice of `T` is no atomic, and the memory must not change while a slice is
+    /// held. So, while the atomics are held, rustc refuses every slice of the memory, `host`, `host_mut`, `host_now`
+    /// and `host_now_mut`, every launch of it that is no `unsafe fn`, one that only reads it too, and dropping it:
+    ///
+    /// ```compile_fail,E0502
+    /// # let cuda = kernite_cuda::Cuda::new()?;
+    /// let mut flags = cuda.pinned::<u32>(4)?;
+    /// let slice = flags.host()?;
+    /// flags.atomics()[0].store(1, std::sync::atomic::Ordering::Release);
+    /// slice[0];
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    ///
+    /// ```compile_fail,E0502
+    /// # let cuda = kernite_cuda::Cuda::new()?;
+    /// let mut flags = cuda.pinned::<u32>(4)?;
+    /// // SAFETY: no kernel runs.
+    /// let slice = unsafe { flags.host_now() };
+    /// flags.atomics()[0].store(1, std::sync::atomic::Ordering::Release);
+    /// slice[0];
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    ///
+    /// ```compile_fail,E0502
+    /// # let cuda = kernite_cuda::Cuda::new()?;
+    /// fn launch(_: &impl kernite_cuda::Memory<u32>) {}
+    /// let mut flags = cuda.pinned::<u32>(4)?;
+    /// let held = flags.atomics();
+    /// launch(&flags);
+    /// held[0].load(std::sync::atomic::Ordering::Acquire);
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    ///
+    /// ```compile_fail,E0499
+    /// # let cuda = kernite_cuda::Cuda::new()?;
+    /// fn launch(_: &mut impl kernite_cuda::MemoryMut<u32>) {}
+    /// let mut flags = cuda.pinned::<u32>(4)?;
+    /// let held = flags.atomics();
+    /// launch(&mut flags);
+    /// held[0].load(std::sync::atomic::Ordering::Acquire);
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    ///
+    /// ```compile_fail,E0499
+    /// # let cuda = kernite_cuda::Cuda::new()?;
+    /// let mut flags = cuda.pinned::<u32>(4)?;
+    /// let held = flags.atomics();
+    /// flags.host_mut()?[0] = 1;
+    /// held[0].load(std::sync::atomic::Ordering::Acquire);
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    ///
+    /// ```compile_fail,E0505
+    /// # let cuda = kernite_cuda::Cuda::new()?;
+    /// let mut flags = cuda.pinned::<u32>(4)?;
+    /// let held = flags.atomics();
+    /// drop(flags);
+    /// held[0].load(std::sync::atomic::Ordering::Acquire);
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    pub fn atomics(&mut self) -> &[T::Atom] {
+        const { assert!(size_of::<T>() == size_of::<T::Atom>() && align_of::<T>() == align_of::<T::Atom>()) };
+        // SAFETY: `ptr` is the address of `len` elements of `T`, which last as long as `self`, and an atomic of a `T`
+        // has its size, its alignment, which the assertion above makes sure of, and its bits: any bits are one. While
+        // the slice is held `self` is borrowed mutably, so the host holds no slice of the memory and reaches it by
+        // these atomics alone, and a kernel reaches each element by its size: kernite proves it of a kernel that is no
+        // `unsafe fn`, and the contract of a launch says it of one that is.
+        unsafe { slice::from_raw_parts(self.ptr.cast::<T::Atom>(), self.len) }
     }
 }
 
@@ -557,6 +725,7 @@ impl<T: Plain> fmt::Debug for Unified<'_, T> {
 pub(crate) mod tests {
     use std::cell::{Cell, RefCell};
     use std::ffi::{c_uint, c_void};
+    use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
     use super::super::tests::{
@@ -1252,6 +1421,56 @@ pub(crate) mod tests {
             assert_eq!((at.addr(), left), want, "from {from}");
         }
         assert!(buffer.tail(5).is_none());
+        Ok(())
+    }
+
+    /// `atomics`, `host_now` and `host_now_mut` wait for no kernel, where `host` and `host_mut` ask the driver to wait
+    /// for all of them, once each; and a store through the atomics is seen by the slices, and the slices' writes by the
+    /// atomics, as they are the memory itself.
+    #[test]
+    fn atomics_and_the_slices_of_now_wait_for_no_kernel_where_those_of_host_wait_for_all() -> Result {
+        let cuda = registering(&[PAGEABLE_MEMORY_ACCESS], register)?;
+        let mut xs = [1.5f32, 2.5, 3.5];
+        let mut memory = cuda.lend(&mut xs)?;
+        let atomics = memory.atomics();
+        assert_eq!(atomics.len(), 3);
+        assert_eq!(atomics[1].load(Ordering::Acquire), 2.5f32.to_bits());
+        atomics[2].store(4.5f32.to_bits(), Ordering::Release);
+        // SAFETY: the fake driver has no kernel, and the test holds no other slice.
+        assert_eq!(unsafe { memory.host_now() }, [1.5, 2.5, 4.5], "the atomics' store is not in the memory");
+        // SAFETY: as above.
+        unsafe { memory.host_now_mut() }.fill(0.5);
+        assert_eq!(
+            memory.atomics().iter().map(|a| a.load(Ordering::Acquire)).collect::<Vec<_>>(),
+            [0.5f32.to_bits(); 3]
+        );
+        assert_eq!(SYNCHRONIZED.get(), 0, "one of them waited for the kernels");
+        assert_eq!(memory.host()?, [0.5; 3]);
+        assert_eq!(SYNCHRONIZED.get(), 1, "host did not wait for the kernels, or waited twice");
+        memory.host_mut()?.fill(1.5);
+        assert_eq!(SYNCHRONIZED.get(), 2, "host_mut did not wait for the kernels, or waited twice");
+        Ok(())
+    }
+
+    /// Memory of each type that has an atomic is atomics of that type's size and bits: an integer's own, and a float's
+    /// of the integer of the same width, which the annotations here say, and as many as the memory has elements.
+    #[test]
+    fn memory_of_each_type_that_has_an_atomic_gives_the_atomics_of_its_bits() -> Result {
+        let cuda = gpu(&[PAGEABLE_MEMORY_ACCESS])?;
+        let (mut a, mut b, mut c) = ([1u32, 2], [-3i32, 4], [5.5f32, 6.5]);
+        let (mut d, mut e, mut f) = ([7u64, 8], [-9i64, 10], [11.5f64, 12.5]);
+        let (mut a, mut b, mut c) = (cuda.lend(&mut a)?, cuda.lend(&mut b)?, cuda.lend(&mut c)?);
+        let (mut d, mut e, mut f) = (cuda.lend(&mut d)?, cuda.lend(&mut e)?, cuda.lend(&mut f)?);
+        let load = Ordering::Relaxed;
+        let (u32s, i32s, f32s): (&[AtomicU32], &[AtomicI32], &[AtomicU32]) = (a.atomics(), b.atomics(), c.atomics());
+        let (u64s, i64s, f64s): (&[AtomicU64], &[AtomicI64], &[AtomicU64]) = (d.atomics(), e.atomics(), f.atomics());
+        assert_eq!([u32s[0].load(load), u32s[1].load(load)], [1, 2]);
+        assert_eq!([i32s[0].load(load), i32s[1].load(load)], [-3, 4]);
+        assert_eq!([f32s[0].load(load), f32s[1].load(load)], [5.5f32.to_bits(), 6.5f32.to_bits()]);
+        assert_eq!([u64s[0].load(load), u64s[1].load(load)], [7, 8]);
+        assert_eq!([i64s[0].load(load), i64s[1].load(load)], [-9, 10]);
+        assert_eq!([f64s[0].load(load), f64s[1].load(load)], [11.5f64.to_bits(), 12.5f64.to_bits()]);
+        assert_eq!([u32s.len(), i32s.len(), f32s.len(), u64s.len(), i64s.len(), f64s.len()], [2; 6]);
         Ok(())
     }
 }

@@ -1199,6 +1199,38 @@ registered, as `lend` and `register` borrow the slice. Dropping the memory waits
 dropping a buffer does, and then frees it, or gives a slice lent back to the host, or unlocks a slice registered and
 gives it back.
 
+A host that must not wait for every kernel reaches the memory by calls that wait for none. `memory.atomics()` is the
+memory as atomics of the same size and bits: `&[AtomicU32]` for `u32` and `f32`, `&[AtomicI32]` for `i32`,
+`&[AtomicU64]` for `u64` and `f64`, and `&[AtomicI64]` for `i64`. The host and a kernel that run together hand over a
+job and its answer by loads and stores of the scope of the whole system, in the order of the host's `Release` and
+`Acquire`: a kernel stores by `st.release.sys` and loads by `ld.acquire.sys`, and what a side wrote before it stores a
+number, the other sees once it loads that number. Where the GPU's `CU_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED` is
+0, as it is on the one here, a read-modify-write on one side, `fetch_add` say, need not be atomic with one on the other,
+so a hand-over is of loads and stores.
+
+`atomics()` is safe. An atomic may change under the host, and any bits are a number, so no write of a kernel makes a
+load of the host unsound. A store of the host is sound for a kernel too, even for one that is no `unsafe fn`, whose
+launcher borrowed the memory for the launch alone. The host's atomic is of the element's size, and a kernel reaches an
+element by its size, or by a vector of it, which PTX's memory model takes as one access for each element: kernite proves
+that a kernel that is no `unsafe fn` reaches each element whole, by one access of its size, and the contract of an
+`unsafe` launch, below, says that its kernel does. So a store of the host and an access of a kernel race, if they do,
+over the same bytes and no others: PTX calls that a uniform-size data-race, and its axioms are sufficient to describe a
+program that has only such races. They do not apply to a program that has a mixed-size one, a race of accesses that
+overlap in part, which is why the atomics are of the element's own size alone. A kernel loads the old element or the
+new.
+
+The atomics borrow the memory mutably, as a slice of `T` is no atomic, and the memory must not change while a slice is
+held. So, while they are held, rustc refuses every slice of the memory, `host()`, `host_mut()`, `host_now()` and
+`host_now_mut()`, every launch of it that is no `unsafe fn`, one that only reads it too, and dropping it.
+
+`unsafe { memory.host_now() }` and `unsafe { memory.host_now_mut() }` lend the slices that `host()` and `host_mut()`
+lend, with no wait for the GPU, and with no `Result`, as no kernel's failure is asked. No work writes the memory while
+the first is held, and none reaches it while the second is. A launch, a copy, `zero()` and the zeros that `managed()`
+writes return before the GPU has done them, so the host knows that the work is done by a flag that `atomics()` shows, an
+event, or the `sync` of the one stream the work was given on, while the kernels of other streams run on. They are
+`unsafe`, as kernite cannot tell which work reaches which memory, and to follow it would cost an event for each memory
+at each launch: where safety would cost speed, the call stays `unsafe`.
+
 `cuda.copy(&mut to, &from)` copies the elements of `from` to `to`, and returns once the GPU has the copy queued, not
 when it has done it. Each is a buffer, or unified memory that is managed, page-locked or registered for good, and `from`
 may be a view of a buffer. `to` is borrowed mutably, so rustc refuses a copy of memory onto itself. It refuses a copy
@@ -1227,10 +1259,12 @@ order, as that of any other memory is.
 A pointer taken before the slice is `Copy`, and the compiler cannot refuse a launch on it, so the launch of a kernel
 that is an `unsafe fn`, which takes pointers, is `unsafe`, and its contract is this: each pointer is to a buffer or to
 unified memory of the GPU, as long as the kernel reads and writes through it; from the launch until the kernel is done,
-the host holds no slice of memory the kernel writes, and no slice it may write of memory the kernel reads.
-`Module::launch` says the contract in its `# Safety`, and the macros write it as the `# Safety` of the launcher of a GPU
-kernel that is an `unsafe fn` and has none. The launcher of a kernel that is no `unsafe fn` takes the memory, not a
-pointer, and has no contract for its caller to keep: "A safe GPU kernel", below, says what it checks.
+the host holds no slice of memory the kernel writes, and no slice it may write of memory the kernel reads. The host may
+hold atomics of any memory the kernel reaches, and the kernel then reaches each of its elements by the element's size
+alone, as a race of two sizes is outside PTX's memory model. `Module::launch` says the contract in its `# Safety`, and
+the macros write it as the `# Safety` of the launcher of a GPU kernel that is an `unsafe fn` and has none. The launcher
+of a kernel that is no `unsafe fn` takes the memory, not a pointer, and has no contract for its caller to keep: "A safe
+GPU kernel", below, says what it checks.
 
 Managed memory is moved ahead of its use, and advised how it is used, over a range of its elements; a slice lent is
 advised too, but not moved. `memory.prefetch(0..len, Location::Gpu)` moves them to the GPU, ahead of the kernels that
@@ -1537,8 +1571,8 @@ same memory twice; the kernel keeps what it is lent until it is done, so that `r
 memory wait for the kernel first. What is left is the kernel's own threads, and kernite proves, as each instruction
 comes, that they keep to what they are lent:
 
-- each load and store is of global memory, at an address worked out from one of the kernel's pointers, at a multiple of
-  the bytes it moves, and inside the memory the launcher lent for it;
+- each load and store is of global memory, of one whole element, at an address worked out from one of the kernel's
+  pointers, at a multiple of the bytes it moves, and inside the memory the launcher lent for it;
 - no two threads write one address, and none reads what another may write: each thread writes only its own part of the
   memory, and reads of memory the kernel writes only that part.
 
@@ -1573,8 +1607,10 @@ launcher takes pointers, `xs.ptr()`, and is `unsafe`. A kernel is an `unsafe fn`
 - reaches an element at an index that no compare keeps below the memory's length, or one that a compare keeps below it
   only after the access, or reaches memory before it starts, `[at - 4]`;
 - reaches an address that kernite cannot follow to a pointer of the kernel's, as a number or a loaded word is, one that
-  is not a multiple of the bytes it moves from its pointer, or more bytes at once than the type its pointer is to has,
-  `ld.global.v4.f32` through a `*const f32`; or writes through a `*const` pointer, which is memory lent to be read;
+  is not a multiple of the bytes it moves from its pointer, more bytes at once than the type its pointer is to has,
+  `ld.global.v4.f32` through a `*const f32`, or part of an element, `ld.global.u16` through a `*const u32`, as the host
+  may store the whole element by its atomics while the kernel runs; or writes through a `*const` pointer, which is
+  memory lent to be read;
 - loads or stores more than plainly, `st.volatile.global.f32`, or reaches memory by a generic address, `st.f32`, which
   may be shared or local memory, or any memory but global;
 - names shared memory, the kernel's own or the launch's, local memory, or a static of the module's, which the threads of
@@ -1654,7 +1690,7 @@ Each crate depends only on the layers inside it. `crates/kernite/tests/architect
 | adapters | `kernite-x86`, `kernite-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kernite` | which machine and syntax each kernel compiles with |
 | delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, and the safe functions that call them; launchers of a grid's threads, or launchers of PTX |
-| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and how much of it is free, memory the host reaches too, modules, launches and what a safe kernel's launch must hold, streams that launches, copies and zeroings go to, events that order and time them, graphs that record the work of a stream to launch it again, copies between GPUs; `f16` and `bf16`; depends on no other crate |
+| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and how much of it is free, memory the host reaches too, even while kernels run, modules, launches and what a safe kernel's launch must hold, streams that launches, copies and zeroings go to, events that order and time them, graphs that record the work of a stream to launch it again, copies between GPUs; `f16` and `bf16`; depends on no other crate |
 | runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid and the CPUs they run on, and the memory of a module of x86 kernels; depends on no other crate |
 
 ## Guarantees

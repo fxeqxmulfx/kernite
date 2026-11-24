@@ -1528,7 +1528,9 @@ fn a_kernel_that_needs_a_cpu_feature_is_called_only_where_rust_knows_the_cpu_has
 /// A GPU kernel's launcher says what a launch keeps to, as `Module::launch` does: the kernel's own
 /// `# Safety`, or, where it has none, the macros': each pointer is to a buffer or to unified
 /// memory of the GPU; from the launch until the kernel is done, the host holds no slice of memory
-/// the kernel writes, and no slice it may write of memory the kernel reads.
+/// the kernel writes, and no slice it may write of memory the kernel reads. The host may hold atomics of any memory
+/// the kernel reaches, and the kernel then reaches each of its elements by the element's size alone, as a race of two
+/// sizes is outside PTX's memory model.
 #[test]
 fn a_gpu_kernels_launcher_says_what_a_launch_keeps_to() -> Result {
     let page = fs::read_to_string(documents_quietly("contract")?.join("gpu/struct.Kernels.html"))?;
@@ -1542,7 +1544,9 @@ fn a_gpu_kernels_launcher_says_what_a_launch_keeps_to() -> Result {
     let contract = "<p>The kernel trusts the pointers it is given: each must be to a buffer or to unified memory of \
                     the GPU the kernels are loaded on, as long as the kernel reads and writes through it. From the \
                     launch until the kernel is done, the host must hold no slice of memory the kernel writes, and no \
-                    slice it may write of memory the kernel reads.</p>";
+                    slice it may write of memory the kernel reads. The host may hold atomics of any memory the kernel \
+                    reaches, and the kernel then reaches each of its elements by the element’s size alone, as a race \
+                    of two sizes is outside PTX’s memory model.</p>";
     assert_eq!(safety("one")?, [contract]);
     assert_eq!(safety("two")?, ["<p><code>x</code> points at an integer.</p>"]);
     Ok(())

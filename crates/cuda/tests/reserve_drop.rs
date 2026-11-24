@@ -3,12 +3,10 @@
 //! `CUDA_ERROR_ILLEGAL_ADDRESS (700)`, as does each call after it. A test of its own, as a program of its own, as
 //! `sticky.rs` is: a drop that did not wait would fail the GPU's context for every test beside it.
 
-use std::ptr;
-
 use kernite_cuda::{Cuda, Grid, Module, arg};
 
 mod gpu;
-use gpu::ptx;
+use gpu::{peek, ptx};
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
@@ -50,7 +48,7 @@ fn dropping_a_buffer_waits_for_the_kernel_that_writes_it_and_then_unmaps_it() ->
         return Ok(());
     };
     let module = Module::load(&cuda, &ptx(PTX), &["later"], &[])?;
-    let flag = cuda.pinned::<u32>(1)?;
+    let mut flag = cuda.pinned::<u32>(1)?;
     cache.grow(10_000_000)?;
     let (x_at, flag_at) = (cache.ptr(), flag.ptr());
     // SAFETY: `later` takes two pointers and a `u64`: the first word of the buffer and the page-locked flag, which it
@@ -59,10 +57,7 @@ fn dropping_a_buffer_waits_for_the_kernel_that_writes_it_and_then_unmaps_it() ->
     // The kernel is queued, and waits: the drop returns when it has written the flag, or the kernel has failed on the
     // memory that the drop unmapped under it, and the flag is 0.
     drop(cache);
-    // SAFETY: `flag` is a word of page-locked memory that lasts as long as `flag`, which the GPU reaches at the address
-    // the host has for it; the kernel writes it by one store of the whole word.
-    let seen = unsafe { ptr::read_volatile(ptr::with_exposed_provenance::<u32>(flag.ptr().addr() as usize)) };
-    assert_eq!(seen, 1, "the drop returned before the kernel wrote to the buffer");
+    assert_eq!(peek(&mut flag), 1, "the drop returned before the kernel wrote to the buffer");
     // A kernel that fails leaves every call after it an error, `CUDA_ERROR_ILLEGAL_ADDRESS (700)`.
     cuda.sync()?;
     Ok(())
