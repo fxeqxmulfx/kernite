@@ -22,6 +22,8 @@ release gives it its version.
 - kernite-cuda lends a part of a buffer or of unified memory, `xs.part(3..10)`, to a kernel or a copy.
 - kernite builds the PTX of a module of megabytes, or of many kernels (GitHub issue 1).
 - kernite finds a kernel's `# Safety` by its heading, as rustdoc does, and adds what it writes at the end of it.
+- kernite-cpu's threads wait spinning for as long as their grid says, `Grid::on(&cpus).spin(d)`: a launch of twelve
+  threads 5 ms after the last costs 2.3 microseconds, not 392.
 - Breaks: a safe GPU kernel reaches each element whole, and kernite refuses `ld.global.u16` through a `*const u32`, as
   the host may store the whole element while the kernel runs; kernite-cuda's `Cuda::concurrent_managed_access` is gone,
   with the clause of an `unsafe` launch's contract it served; kernite-cuda's `Buffer::tail` and `View` are gone, as

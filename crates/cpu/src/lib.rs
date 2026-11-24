@@ -30,9 +30,10 @@
 //!
 //! The threads a launch needs besides the caller's are kept for the caller's launches after it:
 //! the first starts them, and each next hands the kernel to threads that run already. A kept
-//! thread with no kernel to run spins for [`SPIN`], then sleeps until a launch wakes it, and it
-//! ends when the caller's thread does. A process that forks and does not `exec` has none of
-//! them in the child, where a launch of more than one thread waits for ever.
+//! thread with no kernel to run spins for as long as the grid says, [`SPIN`] unless [`Grid::spin`]
+//! says otherwise, then sleeps until a launch wakes it, and it ends when the caller's thread does.
+//! A process that forks and does not `exec` has none of them in the child, where a launch of more
+//! than one thread waits for ever.
 //!
 //! Where the threads run is the system's to say, unless the caller places them. A
 //! [`Grid::new`] runs each thread on any CPU the caller's thread may run on, and the system moves
@@ -48,8 +49,8 @@
 //! program moves the caller's thread itself in between, kernite does not know. A launch makes one
 //! call to the system for each thread it moves, and none when none moves. A thread bound to one
 //! CPU cannot run while another spins there, so a launch that moves threads first ends the spin of
-//! each kept thread on a CPU a thread moves to, and of each the system places: it sleeps until a
-//! launch uses it. A launch that moves none ends no spin.
+//! each kept thread on a CPU a thread moves to, and of each the system places, however long it was
+//! to last: it sleeps until a launch uses it. A launch that moves none ends no spin.
 //!
 //! A page of memory is on the NUMA node of the CPU that first writes it, so a grid's threads are
 //! near their memory when each writes its part of a buffer first. The crate places no memory.
@@ -106,21 +107,24 @@ use std::sync::{Arc, LazyLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-/// How many threads a kernel runs on, each all of it, at once, and where they run: on any CPU the
-/// caller's thread may run on, as the system likes, or on the CPUs the caller gives.
+/// How many threads a kernel runs on, each all of it, at once, where they run: on any CPU the
+/// caller's thread may run on, as the system likes, or on the CPUs the caller gives; and how long
+/// they wait spinning before they sleep, [`SPIN`] unless [`Grid::spin`] says otherwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Grid<'a> {
     /// The threads: one at least, and at most [`most`].
     threads: usize,
     /// The CPU of each thread, if the caller places them.
     cpus: Option<&'a [usize]>,
+    /// How long a thread of the grid that waits spins before it sleeps.
+    spin: Duration,
 }
 
 impl Grid<'static> {
     /// A grid of `threads` threads, which the system runs on any CPU the caller's thread may run
     /// on, and moves from one to another as it likes.
     pub fn new(threads: usize) -> Grid<'static> {
-        Grid { threads, cpus: None }
+        Grid { threads, cpus: None, spin: SPIN }
     }
 }
 
@@ -137,7 +141,21 @@ impl<'a> Grid<'a> {
     /// the CPUs it could run on. A thread it starts meanwhile starts on that one CPU, as a thread
     /// starts on the CPUs of its creator. [`launch`] says the rest.
     pub fn on(cpus: &'a [usize]) -> Grid<'a> {
-        Grid { threads: cpus.len(), cpus: Some(cpus) }
+        Grid { threads: cpus.len(), cpus: Some(cpus), spin: SPIN }
+    }
+
+    /// The grid with its threads waiting spinning for `spin` before they sleep, not for [`SPIN`]: a
+    /// kept thread for the next launch, and the caller for each of the others to end. A thread that
+    /// spins sees what it waits for at once; one that sleeps is woken by the system, which costs a launch
+    /// some microseconds, and some hundreds once the cores have gone idle. A kept thread uses its
+    /// CPU for `spin` after each launch that uses it, so a grid whose launches come less than `spin`
+    /// apart finds its threads spinning, and one of `Duration::ZERO` has them sleep at once. A
+    /// launch that moves threads ends the spins it must at once, however long they were to last, as
+    /// [`launch`] says. Kept threads of two callers that a placed grid each puts on one CPU share it
+    /// while both spin, as any two threads on one CPU do: a launch waits for its thread to get the
+    /// CPU, and not for the other's spin to end.
+    pub fn spin(self, spin: Duration) -> Grid<'a> {
+        Grid { spin, ..self }
     }
 }
 
@@ -248,10 +266,10 @@ fn checked(on: &[usize], home: &Cpus) -> Result<(), Error> {
     Ok(())
 }
 
-/// How long a thread of a grid that waits spins before it sleeps: a kept thread for the next
-/// launch, and the caller for the others to end. A spinning thread sees what it waits for at
-/// once; a sleeping one is woken by the system, which costs the launch some microseconds, and
-/// more once the machine has been idle.
+/// How long a thread of a grid that waits spins before it sleeps, unless [`Grid::spin`] says
+/// otherwise: a kept thread for the next launch, and the caller for each of the others to end. A spinning
+/// thread sees what it waits for at once; a sleeping one is woken by the system, which costs the
+/// launch some microseconds, and more once the machine has been idle.
 pub const SPIN: Duration = Duration::from_micros(200);
 
 /// Runs `kernel` on each thread of `grid`, given its place there, and returns once all have
@@ -277,13 +295,16 @@ pub const SPIN: Duration = Duration::from_micros(200);
 /// and makes none when none moves; the first that places the caller's thread, and the first after
 /// one that placed none, also asks which CPUs the thread may run on, once.
 ///
+/// A kept thread waits for the next launch spinning for the grid's [`Grid::spin`], [`SPIN`] if it
+/// says none, and the caller waits for each of the others to end spinning for as long.
+///
 /// A thread bound to one CPU cannot run while another spins there, and a spin that no launch ends
-/// lasts [`SPIN`]. So a launch that moves threads first ends the spin of each kept thread on a CPU
-/// a thread moves to, and of each the system places, which may spin on any: it sleeps until a
-/// launch uses it, and the launch does not wait for the spin. A launch that moves none ends no
-/// spin. A thread a placed launch starts sleeps until the launch has put it on its CPU, and waits
-/// for launches there spinning, so that none spins on the caller's CPU, where the caller has to
-/// run to start the next.
+/// lasts as long as its grid said. So a launch that moves threads first ends the spin of each kept
+/// thread on a CPU a thread moves to, and of each the system places, which may spin on any,
+/// however long it was to last: it sleeps until a launch uses it, and the launch does not wait for
+/// the spin. A launch that moves none ends no spin. A thread a placed launch starts sleeps until
+/// the launch has put it on its CPU, and waits for launches there spinning, so that none spins on
+/// the caller's CPU, where the caller has to run to start the next.
 ///
 /// Launches from threads at once run at once, each on threads of its own. A thread of the grid
 /// that panics ends the launch, when all have, with that panic in the caller; the threads are
@@ -309,7 +330,7 @@ pub fn launch(grid: Grid<'_>, kernel: impl Fn(&Place) + Send + Sync + 'static) -
     // A team that has a thread gone is no more: the next launch starts another.
     let ended = ready.and_then(|()| {
         let others = team.get(..threads - 1).ok_or_else(|| gone(()));
-        others.and_then(|others| run_on(others, threads, kernel)).inspect_err(|_| team.clear())
+        others.and_then(|others| run_on(others, threads, grid.spin, kernel)).inspect_err(|_| team.clear())
     });
     KEPT.set(team);
     match ended? {
@@ -323,15 +344,16 @@ pub fn launch(grid: Grid<'_>, kernel: impl Fn(&Place) + Send + Sync + 'static) -
 fn run_on(
     others: &[Worker],
     threads: usize,
+    spin: Duration,
     kernel: impl Fn(&Place) + Send + Sync + 'static,
 ) -> Result<thread::Result<()>, Error> {
-    let launch: Arc<Launch> = Arc::new(Launch { threads: threads as u64, barrier: Barrier::default(), kernel });
+    let launch: Arc<Launch> = Arc::new(Launch { threads: threads as u64, spin, barrier: Barrier::default(), kernel });
     for worker in others {
         worker.jobs.send(Some(Arc::clone(&launch))).map_err(gone)?;
     }
     let mut ended = launch.run(0);
     for worker in others {
-        ended = ended.and(wait(&worker.done, || false).map_err(gone)?);
+        ended = ended.and(wait(&worker.done, spin, || false).map_err(gone)?);
     }
     Ok(ended)
 }
@@ -345,6 +367,8 @@ fn gone<E>(_: E) -> Error {
 /// What every thread of a launch shares: the kernel, and what its places hold.
 struct Launch<K: ?Sized = dyn Fn(&Place) + Send + Sync> {
     threads: u64,
+    /// How long a kept thread waits spinning for the next launch after this one.
+    spin: Duration,
     barrier: Barrier,
     /// The last field, for a launch of any kernel to be one of `dyn Fn`.
     kernel: K,
@@ -405,8 +429,8 @@ fn put_on(team: &mut Vec<Worker>, caller: &mut Option<Placed>, on: &[usize]) -> 
 /// Before any thread moves, ends the spin of each kept thread that a thread would wait for on its
 /// new CPU: those on a CPU a thread moves to, and those the system places, which may spin on any.
 /// A thread that may run on one CPU alone cannot run while another spins there, and a spin that no
-/// launch ends lasts [`SPIN`]. A launch that moves no thread ends no spin. `here` is the CPU the
-/// caller's thread is on, if a launch placed it.
+/// launch ends lasts as long as its grid said. A launch that moves no thread ends no spin. `here` is
+/// the CPU the caller's thread is on, if a launch placed it.
 fn rest(team: &[Worker], here: Option<usize>, on: &[usize]) {
     let now = |t: usize| if t == 0 { here } else { team.get(t - 1).and_then(|worker| worker.at) };
     // The CPUs threads move to, in a set made once a thread moves, for the work to take time as the
@@ -498,25 +522,28 @@ impl Worker {
     /// ended, until the `Worker` is dropped. It is named by its place, `grid thread 3`, as a
     /// profiler or a debugger lists it. It starts on the CPUs of the caller's thread, which are
     /// the one CPU `at`, or any it may run on if there is none. Where there is one, the thread
-    /// sleeps until it is sent `None`: it is not to spin there.
+    /// sleeps until it is sent `None`: it is not to spin there. Until it has run a launch it waits for
+    /// one spinning for [`SPIN`], and after each for as long as that launch's grid says.
     fn start(t: u64, at: Option<usize>) -> io::Result<Worker> {
         let (jobs, inbox) = mpsc::channel::<Option<Arc<Launch>>>();
         let (outbox, done) = mpsc::channel();
         let rest = Arc::new(AtomicBool::new(false));
         let resting = Arc::clone(&rest);
         let thread = thread::Builder::new().name(format!("grid thread {t}")).spawn(move || {
-            let spin = || wait(&inbox, || resting.load(Relaxed));
-            let mut next = if at.is_some() { inbox.recv() } else { spin() };
+            let spinning = |spin| wait(&inbox, spin, || resting.load(Relaxed));
+            let mut spin = SPIN;
+            let mut next = if at.is_some() { inbox.recv() } else { spinning(spin) };
             while let Ok(sent) = next {
                 if let Some(launch) = sent {
-                    // A launch uses the thread, so it spins again after.
+                    // A launch uses the thread, so it spins again after, for as long as the launch says.
                     resting.store(false, Relaxed);
+                    spin = launch.spin;
                     let ended = launch.run(t);
                     // The launch ends when every thread has said, so this one lets go of it first.
                     drop(launch);
                     let _ = outbox.send(ended);
                 }
-                next = spin();
+                next = spinning(spin);
             }
         })?;
         Ok(Worker { jobs, done, thread, at, rest })
@@ -553,11 +580,11 @@ thread_local! {
     static CALLER: RefCell<Option<Placed>> = const { RefCell::new(None) };
 }
 
-/// The next message from `from`, waited for by spinning for [`SPIN`], or until `rest` says to
-/// stop, then asleep.
-fn wait<T>(from: &Receiver<T>, rest: impl Fn() -> bool) -> Result<T, RecvError> {
+/// The next message from `from`, waited for by spinning for `spin`, or until `rest` says to stop,
+/// then asleep.
+fn wait<T>(from: &Receiver<T>, spin: Duration, rest: impl Fn() -> bool) -> Result<T, RecvError> {
     let start = Instant::now();
-    while start.elapsed() < SPIN && !rest() {
+    while start.elapsed() < spin && !rest() {
         match from.try_recv() {
             Err(TryRecvError::Empty) => spin_loop(),
             Ok(message) => return Ok(message),
