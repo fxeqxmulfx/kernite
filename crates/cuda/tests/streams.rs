@@ -5,12 +5,12 @@
 //! test at a time.
 
 use std::panic::{self, AssertUnwindSafe};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use kernite_cuda::{Buffer, Cuda, Error, Module, Ptr, Stream, arg};
 
 mod gpu;
-use gpu::{SEEN, SETS, TIMED_OUT, WAITS, cuda, launch, load, peek, run};
+use gpu::{SEEN, SETS, TIMED_OUT, WAITS, cuda, hold, launch, load, peek, poke, run};
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
@@ -26,9 +26,6 @@ const AT_ONCE: u64 = 0;
 const A_LITTLE_WHILE: u64 = 400_000_000;
 /// And where another stream's kernel must be running still when the first one is done: a second.
 const A_LONG_WHILE: u64 = 1_000_000_000;
-/// The least a call that waits for `sets` takes, with `A_LITTLE_WHILE`: the kernel is launched before the call is
-/// timed.
-const AT_LEAST: Duration = Duration::from_millis(300);
 
 /// That `waits` wrote `expected` after `around_waits` launched it and `around_sets` launched `sets`, each given the
 /// launch to put where it likes: on a stream by `run`, or where it goes. `sets` is launched after `waits`, and writes
@@ -136,16 +133,9 @@ fn a_launch_through_another_cuda_of_the_gpu_goes_to_the_stream_of_the_gpu() -> R
     Ok(())
 }
 
-/// Launches `sets` on stream `a`, to write the word at `at` after a little while; and says when, for a call that waits.
-fn queue_sets(module: &Module, a: &Stream, at: Ptr<u32>) -> Result<Instant> {
-    run(a, || launch(module, SETS, &[arg(&at), arg(&A_LITTLE_WHILE)]))?;
-    Ok(Instant::now())
-}
-
-/// That the call made at `started` took as long as the kernel queued before it has, so that it waited for the kernel.
-fn waited(started: Instant, what: &str) {
-    let took = started.elapsed();
-    assert!(took >= AT_LEAST, "{what} took {took:?}, and did not wait for the kernel of a stream");
+/// Launches `sets` on stream `a`, to write the word at `at` after a little while.
+fn queue_sets(module: &Module, a: &Stream, at: Ptr<u32>) -> Result {
+    run(a, || launch(module, SETS, &[arg(&at), arg(&A_LITTLE_WHILE)]))
 }
 
 #[test]
@@ -154,30 +144,28 @@ fn the_host_waits_for_the_work_of_a_stream_where_it_waits_for_the_null_streams()
     let module = load(&cuda)?;
     let a = cuda.stream()?;
     // What the calls are made on, made before each kernel is queued: a call that makes memory may wait of itself. The
-    // kernel writes a word of the memory that each call reaches. Memory the host reaches is in `unified.rs`.
-    let (mut buffer, dropped) = (cuda.alloc::<u32>(1)?, cuda.alloc::<u32>(1)?);
-    let started = queue_sets(&module, &a, buffer.ptr())?;
-    let seen = buffer.read()?;
-    waited(started, "Buffer::read");
-    assert_eq!(seen, [1], "Buffer::read did not see what the kernel of a stream wrote");
-    let started = queue_sets(&module, &a, buffer.ptr())?;
+    // kernel writes a word of the memory that a call reaches, or a page-locked word `done` where the call frees memory
+    // or reaches none, which the host reads where it is, with `peek`, as `host` waits for the GPU first: that the
+    // kernel has written the word when the call returns says that the call waited. Memory the host reaches is in
+    // `unified.rs`.
+    let (mut buffer, dropped, done) = (cuda.alloc::<u32>(1)?, cuda.alloc::<u32>(1)?, cuda.pinned::<u32>(1)?);
+    queue_sets(&module, &a, buffer.ptr())?;
+    assert_eq!(buffer.read()?, [1], "Buffer::read did not see what the kernel of a stream wrote");
+    queue_sets(&module, &a, buffer.ptr())?;
     buffer.write(&[5])?;
-    waited(started, "Buffer::write");
     assert_eq!(buffer.read()?, [5], "Buffer::write came before the kernel of a stream, which wrote over it");
-    let started = queue_sets(&module, &a, buffer.ptr())?;
+    queue_sets(&module, &a, done.ptr())?;
     cuda.sync()?;
-    waited(started, "Cuda::sync");
-    let started = queue_sets(&module, &a, dropped.ptr())?;
+    assert_eq!(peek(&done), 1, "Cuda::sync returned before the kernel of a stream was done");
+    poke(&done, 0);
+    queue_sets(&module, &a, done.ptr())?;
     drop(dropped);
-    waited(started, "the drop of a buffer");
-    // A kernel that wrote freed memory would have failed.
-    cuda.sync()?;
+    assert_eq!(peek(&done), 1, "the drop of a buffer returned before the kernel of a stream was done");
     // A module is unloaded when it is dropped, after the kernels it launched on a stream are done.
-    buffer.zero()?;
-    let started = queue_sets(&module, &a, buffer.ptr())?;
+    poke(&done, 0);
+    queue_sets(&module, &a, done.ptr())?;
     drop(module);
-    waited(started, "the drop of a module");
-    assert_eq!(buffer.read()?, [1], "the kernel of a stream did not run to its end when its module was dropped");
+    assert_eq!(peek(&done), 1, "the drop of a module returned before the kernel of a stream was done");
     Ok(())
 }
 
@@ -227,27 +215,27 @@ fn zero_and_copy_from_run_before_the_work_a_stream_was_given_after_them() -> Res
 }
 
 /// `zero` and `copy_from` return before the GPU has done their work: they are queued behind the kernel that keeps the
-/// null stream busy for a tenth of a second, and the page-locked word that the kernel writes at its end is still 0 when
-/// each call returns; `Cuda::sync` waits for the kernel and for the call. The GPU does what the call asked once the
-/// kernel is done, which the values in the tests above show.
+/// null stream busy until the host writes a flag, and the page-locked word that the kernel writes at its end is still 0
+/// when each call returns, however slow the host is; `Cuda::sync` waits for the kernel and for the call. The GPU does
+/// what the call asked once the kernel is done, which the values in the tests above show.
 #[test]
 fn zero_and_copy_from_return_before_the_gpu_has_done_their_work() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
     let module = load(&cuda)?;
     let (mut to, from) = (cuda.alloc::<u32>(1)?, cuda.alloc::<u32>(1)?);
     for (name, call) in CALLS {
-        // A word for each call, made before the kernel is queued: a call that makes memory may wait of itself.
-        let done = cuda.pinned::<u32>(1)?;
-        let done_at = done.ptr();
-        launch(&module, SETS, &[arg(&done_at), arg(&A_TENTH)])?;
+        // Words for each call, made before the kernel is queued: a call that makes memory may wait of itself.
+        let (flag, done) = (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
+        hold(&module, flag.ptr(), done.ptr())?;
         let started = Instant::now();
         call(&mut to, &from)?;
         let took = started.elapsed();
         let seen = peek(&done);
-        eprintln!("{name} returned after {took:?}, and the kernel before it, of a tenth of a second, had set {seen}");
+        eprintln!("{name} returned after {took:?}, and the kernel before it, which a flag held, had set {seen}");
         assert_eq!(seen, 0, "{name} waited for the kernel before it, which was not done when it returned");
+        poke(&flag, 1);
         cuda.sync()?;
-        assert_eq!(peek(&done), 1, "the kernel before {name} is not done after sync");
+        assert_eq!(peek(&done), SEEN, "the kernel before {name} did not see the flag, or is not done after sync");
     }
     Ok(())
 }

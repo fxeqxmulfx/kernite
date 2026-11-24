@@ -13,22 +13,20 @@ use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use kernite_cuda::{Advice, Cuda, Error, Grid, Location, Module, Ptr, Unified, arg};
 
 mod common;
 use common::{NO_ADVICE, NO_PREFETCH, PAGE, first_page, or_skip};
+mod gpu;
+use gpu::{peek, ptx};
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
 /// Two kernels, written by hand. `add_one`: `x[i] += 1` for each `i < n`, a thread each, wrapping.
 /// `delay`: one thread waits `ns` nanoseconds on the GPU's global timer, then `x[0] += 100`.
 const PTX: &str = "
-.version 7.5
-.target sm_61
-.address_size 64
-
 .visible .entry add_one(.param .u64 x_param, .param .u32 n_param)
 {
 	.reg .pred %p;
@@ -59,7 +57,7 @@ done:
 
 	ld.param.u64 %x, [x_param];
 	ld.param.u64 %ns, [ns_param];
-	mov.u64 %start, %globaltimer;
+	call (%start), clock_start, ();
 again:
 	mov.u64 %now, %globaltimer;
 	sub.u64 %waited, %now, %start;
@@ -90,7 +88,7 @@ type Setup = (Option<MutexGuard<'static, ()>>, Cuda, Module);
 fn setup() -> Result<Option<Setup>> {
     let Ok(cuda) = Cuda::new().inspect_err(|e| eprintln!("no GPU: skipped. {e}")) else { return Ok(None) };
     let one = (!cuda.concurrent_managed_access()).then(|| ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner));
-    let module = Module::load(&cuda, PTX, &["add_one", "delay"], &[])?;
+    let module = Module::load(&cuda, &ptx(PTX), &["add_one", "delay"], &[])?;
     Ok(Some((one, cuda, module)))
 }
 
@@ -171,27 +169,27 @@ fn fill_add_read(module: &Module, m: &mut Unified<u32>, input: &[u32]) -> Result
 /// has what the kernel wrote, `DELAY` later: a read, and then a write.
 fn host_waits(module: &Module, m: &mut Unified<u32>) -> Result {
     m.host_mut()?.copy_from_slice(&[5, 1, 2, 3]);
-    let started = Instant::now();
     delay(module, m.ptr())?;
     assert_eq!(m.host()?, [105, 1, 2, 3], "a read without a sync of its own is of the finished kernel");
-    assert!(started.elapsed() >= DELAY * 5 / 6, "the read came after {:?}", started.elapsed());
     // The kernel has finished, so its add is not written over, nor does it write over the host's.
     m.host_mut()?.copy_from_slice(&[5, 6, 7, 8]);
     delay(module, m.ptr())?;
-    let started = Instant::now();
     let [first, second, ..] = m.host_mut()? else { return Err("four words".into()) };
-    assert_eq!(*first, 105, "{:?}", started.elapsed());
+    assert_eq!(*first, 105, "a write without a sync of its own is of the finished kernel");
     *second = 9;
     assert_eq!(m.host()?, [105, 9, 7, 8]);
     Ok(())
 }
 
-/// Dropping `m` waits for a kernel launched on it.
-fn drop_waits(module: &Module, m: Unified<u32>) -> Result {
-    let started = Instant::now();
+/// Dropping `m` waits for a kernel launched on it, and for the work given to the GPU before the drop: `add_one` adds 1
+/// to a page-locked word of its own, after `delay` is done, and the word is 1 when the drop returns.
+fn drop_waits(cuda: &Cuda, module: &Module, m: Unified<u32>) -> Result {
+    // The word is made before the kernels are launched: a call that makes memory may wait of itself.
+    let done = cuda.pinned::<u32>(1)?;
     delay(module, m.ptr())?;
+    add_one(module, done.ptr(), 1)?;
     drop(m);
-    assert!(started.elapsed() >= DELAY * 5 / 6, "dropped after {:?}", started.elapsed());
+    assert_eq!(peek(&done), 1, "the drop returned before the kernels launched before it were done");
     Ok(())
 }
 
@@ -232,7 +230,7 @@ fn the_host_waits_for_a_kernel_before_it_reads_or_writes_managed_memory() -> Res
 #[test]
 fn dropping_managed_memory_waits_for_the_kernel_that_uses_it() -> Result {
     let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
-    drop_waits(&module, cuda.managed::<u32>(1)?)?;
+    drop_waits(&cuda, &module, cuda.managed::<u32>(1)?)?;
     // A kernel that wrote freed memory would have failed.
     cuda.sync()?;
     Ok(())
@@ -290,7 +288,7 @@ fn the_host_waits_for_a_kernel_before_it_reads_or_writes_page_locked_memory() ->
 fn dropping_page_locked_memory_waits_for_the_kernel_that_uses_it() -> Result {
     let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
     let Some(m) = or_skip(cuda.pinned::<u32>(1), NO_PAGE_LOCKED) else { return Ok(()) };
-    drop_waits(&module, m)?;
+    drop_waits(&cuda, &module, m)?;
     cuda.sync()?;
     Ok(())
 }
@@ -363,7 +361,7 @@ fn dropping_a_slice_lent_waits_for_the_kernel_and_the_host_has_the_slice_back() 
     let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
     let mut v = vec![5u32, 1, 2, 3];
     let Some(lent) = or_skip(cuda.lend(&mut v), NO_PAGEABLE) else { return Ok(()) };
-    drop_waits(&module, lent)?;
+    drop_waits(&cuda, &module, lent)?;
     assert_eq!(v, [105, 1, 2, 3], "the kernel's write is in the Vec when the host has it back");
     Ok(())
 }
@@ -373,12 +371,13 @@ fn dropping_a_slice_lent_waits_for_the_kernel_and_the_host_has_the_slice_back() 
 /// host sees what the kernel wrote.
 fn waits_for_a_stream(cuda: &Cuda, module: &Module, mut m: Unified<u32>) -> Result {
     let stream = cuda.stream()?;
-    // SAFETY: each kernel writes the first word of `m` alone, which no other kernel reaches: those of the other tests
-    // are on their own memory. The host holds no slice of `m` while one runs, as `host_waits` and `drop_waits` hold
-    // none, and where the GPU cannot reach managed memory while the host does, `setup` has this test run alone.
+    // SAFETY: each kernel writes the first word of `m` alone, or the word of `drop_waits` that is its own, which no
+    // other kernel reaches: those of the other tests are on their own memory. The host holds no slice of `m` while one
+    // runs, as `host_waits` and `drop_waits` hold none, and where the GPU cannot reach managed memory while the host
+    // does, `setup` has this test run alone.
     unsafe {
         stream.run(|| host_waits(module, &mut m))?;
-        stream.run(|| drop_waits(module, m))
+        stream.run(|| drop_waits(cuda, module, m))
     }
 }
 
@@ -503,7 +502,7 @@ fn dropping_a_slice_registered_waits_for_the_kernel_and_the_host_has_the_slice_b
     let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
     let mut v = vec![5u32, 1, 2, 3];
     let Some(registered) = register_or_skip(&cuda, &mut v)? else { return Ok(()) };
-    drop_waits(&module, registered)?;
+    drop_waits(&cuda, &module, registered)?;
     assert_eq!(v, [105, 1, 2, 3], "the kernel's write is in the Vec when the host has it back");
     Ok(())
 }

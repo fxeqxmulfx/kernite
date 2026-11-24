@@ -10,12 +10,20 @@
 #[kernite_macros::kernels]
 pub mod gpu {
     /// Spins until `*flag` is not 0, or until `nanos` nanoseconds have gone by; then writes 1 to `*out` if it saw the
-    /// flag, and 2 if the time went by first.
+    /// flag, and 2 if the time went by first. The time goes by from the first read of the clock after it moves: on the
+    /// GPU here a kernel's first reads of `%globaltimer` are now and then wrong, until the clock next moves, and a
+    /// start taken at one would end the wait at once.
     pub unsafe extern "ptx-kernel" fn waits(flag: *const u32, out: *mut u32, nanos: u64) {
-        let (start, now, gone): (u64, u64, u64);
+        let (first, start, now, gone): (u64, u64, u64, u64);
         let (word, result): (u32, u32);
-        let (seen, early): (pred, pred);
+        let (seen, early, same): (pred, pred, pred);
+        mov.u64(first, globaltimer);
+        label(moves);
         mov.u64(start, globaltimer);
+        setp.eq.u64(same, start, first);
+        if same {
+            bra(moves);
+        }
         label(spin);
         ld.volatile.global.u32(word, [flag]);
         setp.ne.u32(seen, word, 0);
