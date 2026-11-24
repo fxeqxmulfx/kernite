@@ -48,17 +48,17 @@ fn queued_behind_a_kernel(
     work: impl FnOnce() -> Result<(), Error>,
 ) -> Result<Duration> {
     // The words are made before the kernel is queued: a call that makes memory may wait of itself.
-    let (flag, out) = (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
+    let (mut flag, mut out) = (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
     let (took, seen) = run(stream, || -> Result<(Duration, u32)> {
         hold(module, flag.ptr(), out.ptr())?;
         let started = Instant::now();
         work()?;
-        Ok((started.elapsed(), peek(&out)))
+        Ok((started.elapsed(), peek(&mut out)))
     })?;
     assert_eq!(seen, 0, "{what} waited for the kernel before it, which was not done when it returned");
-    poke(&flag, 1);
+    poke(&mut flag, 1);
     stream.sync()?;
-    assert_eq!(peek(&out), SEEN, "the kernel before {what} did not see the flag");
+    assert_eq!(peek(&mut out), SEEN, "the kernel before {what} did not see the flag");
     Ok(took)
 }
 
@@ -124,7 +124,7 @@ fn in_order(
     to: Ptr<u32>,
     copy: impl FnOnce() -> Result<(), Error>,
 ) -> Result<u32> {
-    let out = cuda.pinned::<u32>(1)?;
+    let mut out = cuda.pinned::<u32>(1)?;
     let work = || -> Result {
         launch(module, SETS, &[arg(&from), arg(&A_TENTH)])?;
         copy()?;
@@ -135,7 +135,7 @@ fn in_order(
         None => work()?,
     }
     cuda.sync()?;
-    Ok(peek(&out))
+    Ok(peek(&mut out))
 }
 
 /// Says that `found`, which `in_order` gave for `copy_is`, a copy on `stream_is`, is 1, and that `moved`, the four
@@ -180,11 +180,11 @@ fn what_a_kernel_sees(
     wait: u64,
     write: impl FnOnce() -> Result<(), Error>,
 ) -> Result<u32> {
-    let out = cuda.pinned::<u32>(1)?;
+    let mut out = cuda.pinned::<u32>(1)?;
     run(a, || launch(module, WAITS, &[arg(&flag), arg(&out.ptr()), arg(&wait)]))?;
     write()?;
     cuda.sync()?;
-    Ok(peek(&out))
+    Ok(peek(&mut out))
 }
 
 #[test]
@@ -192,8 +192,8 @@ fn a_copy_on_one_stream_runs_beside_a_kernel_on_another_that_waits_for_what_it_w
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
     let module = load(&cuda)?;
     let (a, b) = (cuda.stream()?, cuda.stream()?);
-    let staged = cuda.pinned::<u32>(1)?;
-    poke(&staged, 1);
+    let mut staged = cuda.pinned::<u32>(1)?;
+    poke(&mut staged, 1);
     let mut flag = cuda.upload(&[0u32])?;
     let at = flag.ptr();
     // The null stream waits for the kernel on `a`, as `a` waits for it, so a copy that goes there cannot run before the
@@ -251,17 +251,17 @@ fn zeros_after_a_kernel(
     first: Ptr<u32>,
     zero: impl FnOnce() -> Result<(), Error>,
 ) -> Result {
-    let (stream, flag, out) = (cuda.stream()?, cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
+    let (stream, mut flag, mut out) = (cuda.stream()?, cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
     run(&stream, || -> Result {
         hold(module, flag.ptr(), out.ptr())?;
         launch(module, SETS, &[arg(&first), arg(&0u64)])?;
         zero()?;
-        assert_eq!(peek(&out), 0, "zeroing {what} waited for the kernel before it, which the flag held");
+        assert_eq!(peek(&mut out), 0, "zeroing {what} waited for the kernel before it, which the flag held");
         Ok(())
     })?;
-    poke(&flag, 1);
+    poke(&mut flag, 1);
     stream.sync()?;
-    assert_eq!(peek(&out), SEEN, "the kernel before the zeroing did not see the flag");
+    assert_eq!(peek(&mut out), SEEN, "the kernel before the zeroing did not see the flag");
     Ok(())
 }
 
@@ -305,22 +305,22 @@ fn a_zeroing_on_one_stream_runs_beside_a_kernel_on_another_which_the_host_sees_i
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
     let module = load(&cuda)?;
     let (a, b) = (cuda.stream()?, cuda.stream()?);
-    let (flag, out) = (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
+    let (mut flag, mut out) = (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
     let mut target = cuda.pinned::<u32>(1)?;
     // The kernel on `a` waits for the flag, which the host writes after it has seen the zero. The zeroing on `b` runs
     // beside it, so the host sees the zero while the kernel is still spinning on `a`, and `out` is not written.
-    poke(&target, 7);
+    poke(&mut target, 7);
     run(&a, || hold(&module, flag.ptr(), out.ptr()))?;
     run(&b, || target.zero())?;
     let started = Instant::now();
-    while peek(&target) != 0 && started.elapsed() < Duration::from_secs(2) {
+    while peek(&mut target) != 0 && started.elapsed() < Duration::from_secs(2) {
         std::hint::spin_loop();
     }
-    assert_eq!(peek(&target), 0, "the zeroing on a stream did not run beside the kernel on another");
-    assert_eq!(peek(&out), 0, "the kernel on the other stream was done before the host saw the zero");
-    poke(&flag, 1);
+    assert_eq!(peek(&mut target), 0, "the zeroing on a stream did not run beside the kernel on another");
+    assert_eq!(peek(&mut out), 0, "the kernel on the other stream was done before the host saw the zero");
+    poke(&mut flag, 1);
     cuda.sync()?;
-    assert_eq!(peek(&out), SEEN);
+    assert_eq!(peek(&mut out), SEEN);
     Ok(())
 }
 
@@ -338,7 +338,7 @@ struct Queued {
 /// Queues the work of `Queued` on `stream`.
 fn queue_behind_a_kernel(cuda: &Cuda, module: &Module, stream: &Stream) -> Result<Queued> {
     // The memory is made and filled before the kernel is queued: a call that makes memory may wait of itself.
-    let (flag, out) = (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
+    let (flag, mut out) = (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
     let (mut buffer, mut staged) = (cuda.upload(&[9u32; 4])?, cuda.pinned::<u32>(4)?);
     staged.host_mut()?.fill(7);
     run(stream, || -> Result {
@@ -346,7 +346,7 @@ fn queue_behind_a_kernel(cuda: &Cuda, module: &Module, stream: &Stream) -> Resul
         cuda.copy(&mut buffer, &staged)?;
         buffer.zero()?;
         staged.zero()?;
-        assert_eq!(peek(&out), 0, "a call that queues work waited for the kernel before it, which the flag held");
+        assert_eq!(peek(&mut out), 0, "a call that queues work waited for the kernel before it, which the flag held");
         Ok(())
     })?;
     Ok(Queued { flag, out, buffer, staged })
@@ -397,9 +397,9 @@ fn the_host_waits_for_a_copy_and_a_zeroing_as_it_waits_for_a_kernel() -> Result 
     for (name, call, read, left) in HOST_CALLS {
         let queued = queue_behind_a_kernel(&cuda, &module, &stream)?;
         release(&module, &queued, &other)?;
-        let Queued { out, mut buffer, mut staged, .. } = queued;
+        let Queued { mut out, mut buffer, mut staged, .. } = queued;
         let got = call(&mut buffer, &mut staged, &cuda)?;
-        assert_eq!(peek(&out), SEEN, "{name} returned before the kernel before the copy and the zeroing was done");
+        assert_eq!(peek(&mut out), SEEN, "{name} returned before the kernel before the copy and the zeroing was done");
         assert_eq!(got, read, "the words {name} read were not those that the copy and the zeroing leave");
         cuda.sync()?;
         assert_eq!(buffer.read()?, left, "the buffer after {name} and a sync");
@@ -409,14 +409,14 @@ fn the_host_waits_for_a_copy_and_a_zeroing_as_it_waits_for_a_kernel() -> Result 
     for dropped in ["a buffer", "page-locked memory"] {
         let queued = queue_behind_a_kernel(&cuda, &module, &stream)?;
         release(&module, &queued, &other)?;
-        let Queued { out, buffer, staged, .. } = queued;
+        let Queued { mut out, buffer, staged, .. } = queued;
         if dropped == "a buffer" {
             drop(buffer);
         } else {
             drop(staged);
         }
         let said = "returned before the kernel before the copy and the zeroing was done";
-        assert_eq!(peek(&out), SEEN, "dropping {dropped} {said}");
+        assert_eq!(peek(&mut out), SEEN, "dropping {dropped} {said}");
     }
     Ok(())
 }

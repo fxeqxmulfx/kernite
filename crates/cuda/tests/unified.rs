@@ -147,11 +147,11 @@ fn host_waits(module: &Module, m: &mut Unified<u32>) -> Result {
 /// to a page-locked word of its own, after `delay` is done, and the word is 1 when the drop returns.
 fn drop_waits(cuda: &Cuda, module: &Module, m: Unified<u32>) -> Result {
     // The word is made before the kernels are launched: a call that makes memory may wait of itself.
-    let done = cuda.pinned::<u32>(1)?;
+    let mut done = cuda.pinned::<u32>(1)?;
     delay(module, m.ptr())?;
     add_one(module, done.ptr(), 1)?;
     drop(m);
-    assert_eq!(peek(&done), 1, "the drop returned before the kernels launched before it were done");
+    assert_eq!(peek(&mut done), 1, "the drop returned before the kernels launched before it were done");
     Ok(())
 }
 

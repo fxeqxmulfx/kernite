@@ -1,8 +1,8 @@
-//! A GPU kernel that is no `unsafe fn`: kernite proves, as its instructions come, that each load and store lies inside
-//! the memory it is lent, at its alignment, that no two threads write one address, and that none reads what another
-//! writes. What the proof leaves for the launch, a count of elements say, the host checks before the kernel runs, and
-//! the kernel's code says it. What kernite cannot prove it refuses, at the first instruction or operand it cannot, and
-//! says that the kernel is then an `unsafe fn`, which compiles as it always has.
+//! A GPU kernel that is no `unsafe fn`: kernite proves, as its instructions come, that each load and store reaches one
+//! whole element, inside the memory it is lent, at its alignment, that no two threads write one address, and that none
+//! reads what another writes. What the proof leaves for the launch, a count of elements say, the host checks before the
+//! kernel runs, and the kernel's code says it. What kernite cannot prove it refuses, at the first instruction or
+//! operand it cannot, and says that the kernel is then an `unsafe fn`, which compiles as it always has.
 
 use kernite::Requirement;
 
@@ -113,6 +113,41 @@ fn saxpy_is_safe_and_its_launch_holds_what_it_reaches() -> Result {
     Ok(())
 }
 
+/// A kernel that loads and stores each element whole, by one access of its size, is proved safe whatever the size of
+/// the element, 1, 2, 4 or 8 bytes: a launch holds that each of the memories has as many elements as `n` says, and the
+/// PTX is that of the kernel with `unsafe`.
+#[test]
+fn a_kernel_that_reaches_each_element_whole_is_safe_whatever_its_size() -> Result {
+    for (ty, bytes) in [("u8", 1), ("u16", 2), ("u32", 4), ("u64", 8)] {
+        // PTX has no register of 8 bits: a byte goes in one of 16.
+        let register = if bytes == 1 { "u16" } else { ty };
+        let lines = [
+            "let i: u32;".to_string(),
+            "global_index(i);".to_string(),
+            "let past: pred;".to_string(),
+            "setp.ge.u32(past, i, n);".to_string(),
+            "if past {".to_string(),
+            "    ret();".to_string(),
+            "}".to_string(),
+            "let (at_x, at_y): (u64, u64);".to_string(),
+            format!("mad.wide.u32(at_x, i, {bytes}, x);"),
+            format!("mad.wide.u32(at_y, i, {bytes}, y);"),
+            format!("let v: {register};"),
+            format!("ld.global.{ty}(v, [at_x]);"),
+            format!("st.global.{ty}([at_y], v);"),
+        ];
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let src = module("", &kernel(&format!("x: *const {ty}, y: *mut {ty}, n: u32"), &lines));
+        assert_eq!(
+            requires(&src, "k")?,
+            ["-1*Param(2) + 1*Len(0) >= 0 (Inside(0))", "-1*Param(2) + 1*Len(1) >= 0 (Inside(1))"],
+            "{src}"
+        );
+        assert_eq!(kernite::ptx_str(&src)?, kernite::ptx_str(&trusted(&src))?, "{src}");
+    }
+    Ok(())
+}
+
 /// What kernite cannot prove a GPU kernel safe of is refused at the first instruction or operand that it cannot, in
 /// words that say what the kernel does and that it is then an `unsafe fn`; as one, it compiles, with nothing left for
 /// a launch to hold.
@@ -141,6 +176,13 @@ fn what_kernite_cannot_prove_safe_is_refused_unless_the_kernel_is_unsafe() -> Re
         "let (a, b, c, d): (f32, f32, f32, f32);",
         "ld.global.v4.f32((a, b, c, d), [at]);",
     ];
+    let part_load = ["let at: u64;", "mad.wide.u32(at, i, 4, x);", "let h: u16;", "ld.global.u16(h, [at + 2]);"];
+    let byte_load = ["let at: u64;", "mad.wide.u32(at, i, 4, x);", "let h: u16;", "ld.global.u8(h, [at + 1]);"];
+    let part_store =
+        ["let at: u64;", "mad.wide.u32(at, i, 4, y);", "let h: u16;", "mov.u16(h, 7);", "st.global.u16([at + 2], h);"];
+    let lanes =
+        ["let at: u64;", "mad.wide.u32(at, i, 4, x);", "let (h, l): (u16, u16);", "ld.global.v2.u16((h, l), [at]);"];
+    let half = ["let at: u64;", "mad.wide.u32(at, i, 8, x);", "let h: u32;", "ld.global.u32(h, [at + 4]);"];
     let before = ["let at: u64;", "mad.wide.u32(at, i, 4, y);", "st.global.f32([at - 4], 1.0);"];
     let back = [
         "let (b, j): (u32, u32);",
@@ -381,6 +423,44 @@ fn what_kernite_cannot_prove_safe_is_refused_unless_the_kernel_is_unsafe() -> Re
             &below_n(&wide),
             "[at]);",
             cannot("`ld.global.v4.f32` reaches 16 bytes at once, more than the 4 of what its pointer is to"),
+        ),
+        // Part of an element, which the host may store whole, by its atomics, while the kernel runs: a scalar of fewer
+        // bytes than the element, loaded or stored; and a vector of such scalars, which PTX takes as an access for
+        // each of them.
+        case(
+            "",
+            "x: *const u32, n: u32",
+            &below_n(&part_load),
+            "[at + 2]",
+            cannot("`ld.global.u16` reaches part of an element, 2 of the 4 bytes of what its pointer is to"),
+        ),
+        case(
+            "",
+            "x: *const u32, n: u32",
+            &below_n(&byte_load),
+            "[at + 1]",
+            cannot("`ld.global.u8` reaches part of an element, 1 of the 4 bytes of what its pointer is to"),
+        ),
+        case(
+            "",
+            "y: *mut u32, n: u32",
+            &below_n(&part_store),
+            "[at + 2]",
+            cannot("`st.global.u16` reaches part of an element, 2 of the 4 bytes of what its pointer is to"),
+        ),
+        case(
+            "",
+            "x: *const u32, n: u32",
+            &below_n(&lanes),
+            "[at]);",
+            cannot("`ld.global.v2.u16` reaches part of an element, 2 of the 4 bytes of what its pointer is to"),
+        ),
+        case(
+            "",
+            "x: *const u64, n: u32",
+            &below_n(&half),
+            "[at + 4]",
+            cannot("`ld.global.u32` reaches part of an element, 4 of the 8 bytes of what its pointer is to"),
         ),
         case(
             "",

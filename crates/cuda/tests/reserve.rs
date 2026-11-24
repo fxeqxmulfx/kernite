@@ -289,7 +289,7 @@ fn a_shrink_does_not_wait_for_a_kernel_that_works_on_the_elements_the_buffer_kee
     // The growth queued the zeros of the elements it gained, 40 MB, and the shrink below gives back granules of them:
     // it does not wait for them, so the sync does.
     cuda.sync()?;
-    let flag = cuda.pinned::<u32>(1)?;
+    let mut flag = cuda.pinned::<u32>(1)?;
     // `waits` spins on the flag, and writes to the first element of the buffer what it saw: the kernel alone writes it.
     hold(&module, flag.ptr(), cache.ptr())?;
     // SAFETY: the kernel reaches the first word, which the buffer keeps, and nothing else reaches the elements given
@@ -297,7 +297,7 @@ fn a_shrink_does_not_wait_for_a_kernel_that_works_on_the_elements_the_buffer_kee
     unsafe { cache.shrink(1000) }?;
     // The kernel still spins, as the flag is not written: a shrink that waited for it would have returned when the
     // kernel's time went by, and the kernel would have written 2.
-    poke(&flag, 1);
+    poke(&mut flag, 1);
     cuda.sync()?;
     assert_eq!(cache.read()?[0], SEEN, "the kernel did not see the flag: the shrink waited for it");
     Ok(())
@@ -308,7 +308,7 @@ fn a_growth_returns_before_the_gpu_has_written_its_zeros() -> Result {
     let Some((_alone, cuda, _)) = setup()? else { return Ok(()) };
     let module = load(&cuda)?;
     let mut cache = cuda.reserve::<u32>(CAPACITY)?;
-    let (flag, out) = (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
+    let (mut flag, out) = (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
     // `waits` holds the null stream until the host writes the flag, and the zeros of the growth are queued behind it.
     hold(&module, flag.ptr(), out.ptr())?;
     let started = Instant::now();
@@ -317,7 +317,7 @@ fn a_growth_returns_before_the_gpu_has_written_its_zeros() -> Result {
     eprintln!("a growth to {FAR} elements returned after {took:?}, with the kernel before it still spinning");
     // The host has not written the flag, so the kernel still spins: a growth that waited for the work before its zeros
     // would return only when the kernel gives up, after five seconds, and writes 2.
-    poke(&flag, 1);
+    poke(&mut flag, 1);
     cuda.sync()?;
     assert_eq!(out.host()?, [SEEN], "the kernel did not see the flag: the growth waited for the kernel before it");
     assert!(cache.read()?.iter().all(|w| *w == 0), "the zeros of the growth were not written");

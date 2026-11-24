@@ -1152,6 +1152,12 @@ impl Bound {
         }
     }
 
+    /// How many bytes one scalar of the data the form moves is, the 2 of `ld.global.v2.u16`, which PTX takes as two
+    /// accesses of 2 bytes each: none for a form that moves no data, or a name that gives it no type.
+    pub fn scalar(&self) -> Option<u64> {
+        Some(u64::from(self.ty(self.form.data()?.ty?)?.bits()) / 8)
+    }
+
     /// How many registers a vector of [`Count::Vec`] is: 2 for `.v2`, 4 for `.v4`, and 1 for
     /// a name without either.
     pub fn lanes(&self) -> usize {

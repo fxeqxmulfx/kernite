@@ -140,7 +140,7 @@ fn the_host_waits_for_the_work_of_a_stream_where_it_waits_for_the_null_streams()
     // or reaches none, which the host reads where it is, with `peek`, as `host` waits for the GPU first: that the
     // kernel has written the word when the call returns says that the call waited. Memory the host reaches is in
     // `unified.rs`.
-    let (mut buffer, dropped, done) = (cuda.alloc::<u32>(1)?, cuda.alloc::<u32>(1)?, cuda.pinned::<u32>(1)?);
+    let (mut buffer, dropped, mut done) = (cuda.alloc::<u32>(1)?, cuda.alloc::<u32>(1)?, cuda.pinned::<u32>(1)?);
     queue_sets(&module, &a, buffer.ptr())?;
     assert_eq!(buffer.read()?, [1], "Buffer::read did not see what the kernel of a stream wrote");
     queue_sets(&module, &a, buffer.ptr())?;
@@ -148,16 +148,16 @@ fn the_host_waits_for_the_work_of_a_stream_where_it_waits_for_the_null_streams()
     assert_eq!(buffer.read()?, [5], "Buffer::write came before the kernel of a stream, which wrote over it");
     queue_sets(&module, &a, done.ptr())?;
     cuda.sync()?;
-    assert_eq!(peek(&done), 1, "Cuda::sync returned before the kernel of a stream was done");
-    poke(&done, 0);
+    assert_eq!(peek(&mut done), 1, "Cuda::sync returned before the kernel of a stream was done");
+    poke(&mut done, 0);
     queue_sets(&module, &a, done.ptr())?;
     drop(dropped);
-    assert_eq!(peek(&done), 1, "the drop of a buffer returned before the kernel of a stream was done");
+    assert_eq!(peek(&mut done), 1, "the drop of a buffer returned before the kernel of a stream was done");
     // A module is unloaded when it is dropped, after the kernels it launched on a stream are done.
-    poke(&done, 0);
+    poke(&mut done, 0);
     queue_sets(&module, &a, done.ptr())?;
     drop(module);
-    assert_eq!(peek(&done), 1, "the drop of a module returned before the kernel of a stream was done");
+    assert_eq!(peek(&mut done), 1, "the drop of a module returned before the kernel of a stream was done");
     Ok(())
 }
 
@@ -217,17 +217,17 @@ fn zero_and_copy_from_return_before_the_gpu_has_done_their_work() -> Result {
     let (mut to, from) = (cuda.alloc::<u32>(1)?, cuda.alloc::<u32>(1)?);
     for (name, call) in CALLS {
         // Words for each call, made before the kernel is queued: a call that makes memory may wait of itself.
-        let (flag, done) = (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
+        let (mut flag, mut done) = (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
         hold(&module, flag.ptr(), done.ptr())?;
         let started = Instant::now();
         call(&mut to, &from)?;
         let took = started.elapsed();
-        let seen = peek(&done);
+        let seen = peek(&mut done);
         eprintln!("{name} returned after {took:?}, and the kernel before it, which a flag held, had set {seen}");
         assert_eq!(seen, 0, "{name} waited for the kernel before it, which was not done when it returned");
-        poke(&flag, 1);
+        poke(&mut flag, 1);
         cuda.sync()?;
-        assert_eq!(peek(&done), SEEN, "the kernel before {name} did not see the flag, or is not done after sync");
+        assert_eq!(peek(&mut done), SEEN, "the kernel before {name} did not see the flag, or is not done after sync");
     }
     Ok(())
 }
@@ -237,15 +237,15 @@ fn a_stream_waits_for_its_own_work_alone() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
     let module = load(&cuda)?;
     let (a, b) = (cuda.stream()?, cuda.stream()?);
-    let (early, late) = (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
+    let (mut early, mut late) = (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
     let (early_at, late_at) = (early.ptr(), late.ptr());
     run(&a, || launch(&module, SETS, &[arg(&early_at), arg(&A_LITTLE_WHILE)]))?;
     run(&b, || launch(&module, SETS, &[arg(&late_at), arg(&A_LONG_WHILE)]))?;
     a.sync()?;
-    assert_eq!(peek(&early), 1, "the kernel of `a` is not done when `a.sync()` returns");
-    assert_eq!(peek(&late), 0, "`a.sync()` waited for the kernel of `b`");
+    assert_eq!(peek(&mut early), 1, "the kernel of `a` is not done when `a.sync()` returns");
+    assert_eq!(peek(&mut late), 0, "`a.sync()` waited for the kernel of `b`");
     b.sync()?;
-    assert_eq!(peek(&late), 1, "the kernel of `b` is not done when `b.sync()` returns");
+    assert_eq!(peek(&mut late), 1, "the kernel of `b` is not done when `b.sync()` returns");
     Ok(())
 }
 
@@ -253,11 +253,11 @@ fn a_stream_waits_for_its_own_work_alone() -> Result {
 fn the_work_of_a_stream_runs_on_when_the_stream_is_dropped() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
     let module = load(&cuda)?;
-    let (a, flag) = (cuda.stream()?, cuda.pinned::<u32>(1)?);
+    let (a, mut flag) = (cuda.stream()?, cuda.pinned::<u32>(1)?);
     let at = flag.ptr();
     run(&a, || launch(&module, SETS, &[arg(&at), arg(&A_LITTLE_WHILE)]))?;
     drop(a);
     cuda.sync()?;
-    assert_eq!(peek(&flag), 1, "the kernel of the stream dropped did not run");
+    assert_eq!(peek(&mut flag), 1, "the kernel of the stream dropped did not run");
     Ok(())
 }
