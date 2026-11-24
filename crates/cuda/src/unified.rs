@@ -16,7 +16,7 @@ pub use placement::{Advice, Location, Placement};
 /// Something a GPU can do if it says so, as `cuDeviceGetAttribute` has it: the attribute's
 /// number, and its name without the `CU_DEVICE_ATTRIBUTE_` before it. The GPU says so by an
 /// attribute that is not 0.
-type Flag = (c_int, &'static str);
+pub(crate) type Flag = (c_int, &'static str);
 
 /// The GPU allocates managed memory.
 const MANAGED_MEMORY: Flag = (83, "MANAGED_MEMORY");
@@ -42,7 +42,7 @@ pub(crate) const CONCURRENT_MANAGED_ACCESS: Flag = (89, "CONCURRENT_MANAGED_ACCE
 impl Driver {
     /// `Ok` if this GPU has the `flag`; or the error that says the `call` is refused, as the GPU
     /// `cannot` do it, and why.
-    fn require(&self, call: &'static str, (attribute, name): Flag, cannot: &str) -> Result<(), Error> {
+    pub(crate) fn require(&self, call: &'static str, (attribute, name): Flag, cannot: &str) -> Result<(), Error> {
         if self.attribute(attribute)? == 0 {
             return Err(Error::new(call, format!("{cannot}: its CU_DEVICE_ATTRIBUTE_{name} is 0")));
         }
@@ -495,7 +495,7 @@ impl<T: Plain> fmt::Debug for Unified<'_, T> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::{Cell, RefCell};
     use std::ffi::{c_uint, c_void};
 
@@ -523,12 +523,12 @@ mod tests {
 
     /// A GPU that says each of `flags` is 1 and every other attribute 0, and refuses every call but
     /// the two that tell its attributes and make its context current.
-    pub(super) fn gpu(flags: &[Flag]) -> Result<Cuda> {
+    pub(crate) fn gpu(flags: &[Flag]) -> Result<Cuda> {
         gpu_with(flags, |_| {})
     }
 
     /// The same GPU, with the calls `replace` puts in the driver's place.
-    pub(super) fn gpu_with(flags: &[Flag], replace: impl FnOnce(&mut Api)) -> Result<Cuda> {
+    pub(crate) fn gpu_with(flags: &[Flag], replace: impl FnOnce(&mut Api)) -> Result<Cuda> {
         let mut values = [0; 128];
         for (attribute, _) in flags {
             values[*attribute as usize] = 1;
@@ -854,7 +854,8 @@ mod tests {
         })?;
         let module = Module::load(&cuda, "", &[], &[])?;
         // The fake driver gave it no address, and frees none: its `cuMemFree` refuses, and a drop ignores that.
-        let buffer = Buffer::<u32> { driver: cuda.driver.clone(), ptr: 4096, len: 4, of: PhantomData };
+        let buffer =
+            Buffer::<u32> { driver: cuda.driver.clone(), ptr: 4096, len: 4, reservation: None, of: PhantomData };
         for (from, want) in [(0, (4096, 4)), (1, (4100, 3)), (4, (4112, 0))] {
             let (at, left) = buffer.tail(from).ok_or("tail gave None")?.lend(&module)?;
             assert_eq!((at.addr(), left), want, "from {from}");

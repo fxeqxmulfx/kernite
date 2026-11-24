@@ -40,6 +40,10 @@
 //! the GPU it runs on: [`Buffer::copy_from`] copies a buffer to a buffer on another.
 //! [`Cuda::memory`] says how many bytes of a GPU's memory are free, and how many it has.
 //!
+//! [`Cuda::reserve`] makes a buffer that grows and shrinks at the same addresses: it reserves addresses for the
+//! elements it may have, [`Buffer::grow`] backs them with the GPU's memory, and [`Buffer::shrink`], which is `unsafe`,
+//! gives the memory back, a granule of the driver's at a time, 2 MiB on the GPU here.
+//!
 //! A buffer is the GPU's own memory, and the host reaches it by copies. [`Unified`] memory is
 //! reached by the host and by the GPU's kernels at one address, with no copy: [`Cuda::managed`]
 //! makes memory the driver moves to whichever touches it, [`Cuda::pinned`] makes page-locked memory
@@ -70,9 +74,12 @@ use std::rc::Rc;
 mod half;
 #[doc(hidden)]
 pub mod named;
+mod reserve;
 mod safe;
 mod stream;
 mod unified;
+
+use reserve::{Access, Properties, Reservation};
 
 pub use half::{bf16, f16};
 pub use safe::{Memory, MemoryMut, Quantity, Requirement, View, Why, holds};
@@ -91,6 +98,13 @@ type Handle = *mut c_void;
 struct MemLocation {
     kind: c_int,
     id: c_int,
+}
+
+impl MemLocation {
+    /// The GPU `device`, which memory is on, or is reached from.
+    fn gpu(device: c_int) -> MemLocation {
+        MemLocation { kind: 1, id: device }
+    }
 }
 
 // The dynamic loader, in the C library that every Rust program on Linux links.
@@ -191,6 +205,14 @@ api! {
     copy_peer = c"cuMemcpyPeer"(u64, Handle, u64, Handle, usize);
     memset = c"cuMemsetD8_v2"(u64, u8, usize);
     memory_info = c"cuMemGetInfo_v2"(*mut usize, *mut usize);
+    granularity = c"cuMemGetAllocationGranularity"(*mut usize, *const Properties, c_int);
+    reserve_addresses = c"cuMemAddressReserve"(*mut u64, usize, usize, u64, u64);
+    free_addresses = c"cuMemAddressFree"(u64, usize);
+    create_memory = c"cuMemCreate"(*mut u64, usize, *const Properties, u64);
+    release_memory = c"cuMemRelease"(u64);
+    map_memory = c"cuMemMap"(u64, usize, usize, u64, u64);
+    set_access = c"cuMemSetAccess"(u64, usize, *const Access, usize);
+    unmap_memory = c"cuMemUnmap"(u64, usize);
     range_attribute = c"cuMemRangeGetAttribute"(*mut c_void, usize, c_int, u64, usize);
     load_module = c"cuModuleLoadDataEx"(*mut Handle, *const c_void, c_uint, *mut c_int, *mut *mut c_void);
     unload_module = c"cuModuleUnload"(Handle);
@@ -705,34 +727,37 @@ impl Cuda {
 
     /// `len` elements on the GPU, all zero.
     pub fn alloc<T: Plain>(&self, len: usize) -> Result<Buffer<T>, Error> {
-        let mut b = self.reserve(len)?;
+        let mut b = self.uninit(len)?;
         b.zero()?;
         Ok(b)
     }
 
     /// A copy of `data` on the GPU.
     pub fn upload<T: Plain>(&self, data: &[T]) -> Result<Buffer<T>, Error> {
-        let mut b = self.reserve(data.len())?;
+        let mut b = self.uninit(data.len())?;
         b.write(data)?;
         Ok(b)
     }
 
     /// `len` elements on the GPU, as they were left.
-    fn reserve<T: Plain>(&self, len: usize) -> Result<Buffer<T>, Error> {
+    fn uninit<T: Plain>(&self, len: usize) -> Result<Buffer<T>, Error> {
         let bytes = bytes::<T>("cuMemAlloc", len)?;
         let (api, mut ptr) = (self.driver.current()?, 0);
         // SAFETY: it writes the address to `ptr`. It refuses no bytes, so it is asked for one.
         api.check("cuMemAlloc", unsafe { (api.alloc)(&mut ptr, bytes.max(1)) })?;
-        Ok(Buffer { driver: self.driver.clone(), ptr, len, of: PhantomData })
+        Ok(Buffer { driver: self.driver.clone(), ptr, len, reservation: None, of: PhantomData })
     }
 }
 
 /// How many bytes `len` elements of `T` take; or the error that says the `call` is refused, as they are more than there
 /// are addresses.
 fn bytes<T>(call: &'static str, len: usize) -> Result<usize, Error> {
-    len.checked_mul(size_of::<T>()).ok_or_else(|| {
-        Error::new(call, format!("{len} elements of {} bytes are more bytes than there are addresses", size_of::<T>()))
-    })
+    len.checked_mul(size_of::<T>()).ok_or_else(|| too_many::<T>(call, len))
+}
+
+/// The error that says the `call` is refused, as `len` elements of `T` are more bytes than there are addresses.
+fn too_many<T>(call: &'static str, len: usize) -> Error {
+    Error::new(call, format!("{len} elements of {} bytes are more bytes than there are addresses", size_of::<T>()))
 }
 
 /// `Ok` if `got` is `want`, the elements of the memory `owner`; else the error that says the `call` is refused, as
@@ -749,6 +774,8 @@ pub struct Buffer<T: Plain> {
     driver: Rc<Driver>,
     ptr: u64,
     len: usize,
+    /// What it holds beside its memory, if [`Cuda::reserve`] made it, and `None` if `alloc` or `upload` did.
+    reservation: Option<Reservation>,
     of: PhantomData<T>,
 }
 
@@ -801,16 +828,17 @@ impl<T: Plain> Buffer<T> {
         self.driver.read_into(self.ptr, out)
     }
 
-    /// Sets every element to zero, after the kernels launched before have run.
+    /// Sets every element to zero, after the kernels launched before have run. It returns before the GPU has done it:
+    /// `read`, `write` and [`Cuda::sync`] wait for it.
     pub fn zero(&mut self) -> Result<(), Error> {
         self.driver.zero(self.ptr, self.len * size_of::<T>())
     }
 
-    /// Copies what `from` holds to it, after the kernels launched before have run on the GPU
-    /// of either, and before those launched after run on either. `from` may be on another
-    /// GPU than it: where the two have a link between them, the driver's peer access, the copy
-    /// goes over the link, and where they have none it goes through the host. It is an error if
-    /// `from` has not as many elements: `cuMemcpyPeer: a buffer of 4 elements copied from one of 2`.
+    /// Copies what `from` holds to it, after the kernels launched before have run on the GPU of either, and before
+    /// those launched after run on either. It returns before the GPU has done it, as `zero` does: `read`, `write` and
+    /// [`Cuda::sync`] wait for it. `from` may be on another GPU than it: where the two have a link between them, the
+    /// driver's peer access, the copy goes over the link, and where they have none it goes through the host. It is an
+    /// error if `from` has not as many elements: `cuMemcpyPeer: a buffer of 4 elements copied from one of 2`.
     pub fn copy_from(&mut self, from: &Buffer<T>) -> Result<(), Error> {
         same_len("cuMemcpyPeer", "a buffer", self.len, "copied from one of", from.len)?;
         self.driver.copy_from(self.ptr, &from.driver, from.ptr, self.len * size_of::<T>())
@@ -821,8 +849,13 @@ impl<T: Plain> Drop for Buffer<T> {
     fn drop(&mut self) {
         // A buffer whose GPU's context cannot be made current is left, and not freed in another's.
         if let Ok(api) = self.driver.current() {
-            // SAFETY: `cuMemAlloc` gave the address, and it is freed once, here.
-            unsafe { (api.free)(self.ptr) };
+            match self.reservation {
+                None => {
+                    // SAFETY: `cuMemAlloc` gave the address, and it is freed once, here.
+                    unsafe { (api.free)(self.ptr) };
+                }
+                Some(reservation) => self.release(api, reservation),
+            }
         }
     }
 }
@@ -1341,6 +1374,14 @@ mod tests {
             c"cuMemGetInfo_v2",
             c"cuMemHostRegister_v2",
             c"cuMemHostUnregister",
+            c"cuMemGetAllocationGranularity",
+            c"cuMemAddressReserve",
+            c"cuMemAddressFree",
+            c"cuMemCreate",
+            c"cuMemRelease",
+            c"cuMemMap",
+            c"cuMemSetAccess",
+            c"cuMemUnmap",
             c"cuStreamDestroy_v2",
             c"cuGetErrorString",
         ] {

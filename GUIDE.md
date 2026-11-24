@@ -1009,6 +1009,30 @@ gives programs on it, as `cuMemGetInfo_v2` says them. The total is the same each
 GPU's memory, not this one alone, so the free bytes are true as they are asked, and a buffer made after may find fewer.
 The call goes to the GPU of the `Cuda`, as each call does.
 
+`cuda.reserve::<f32>(capacity)` is a buffer with no elements, and addresses reserved for `capacity` of them, which are
+its own until it is dropped. The addresses take none of the GPU's memory. `cache.grow(len)` backs the elements it gains,
+up to `len`, with memory at them: the elements it had stay where they were, the new ones are zero, as those of `alloc`
+are, and its address, `ptr()`, is the same after as before, so a pointer to one of its elements is good for as long as
+it has the element. The driver backs memory a granule at a time, 2 MiB on the GPU here, so a buffer of one element holds
+2 MiB, and `cuda.memory()` falls by whole granules. A kernel, a copy and `read` take the buffer as they take any buffer,
+and a launcher that is no `unsafe fn` is lent the elements it has, and none of the addresses past them. An error says
+what is refused, and leaves the buffer as it was: `cuMemMap: a buffer reserved for 268435456 elements grown to
+268435457` for a `len` past what it was reserved for; `cuMemMap: a buffer of 1000 elements grown to 10` for a `len`
+below its elements; `cuMemMap: a buffer of 4 elements was not made by reserve, so it does not grow` for a buffer that
+`alloc` or `upload` made, which has the memory it was made with; and the driver's own error, of `cuMemCreate`, for a GPU
+that has not the memory for the growth. Not every GPU maps memory at addresses it reserves, so `reserve` asks the GPU
+first, and says in these words where it cannot: `cuMemAddressReserve: the GPU cannot map memory at addresses it
+reserves: its CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED is 0`.
+
+`unsafe { cache.shrink(len) }` gives the memory of the elements from `len` on back to the GPU, a granule at a time, and
+the buffer keeps its address. The elements it grows into again are zero, those of a granule it kept too. A `len` past
+the elements it has is an error, `cuMemUnmap: a buffer of 10 elements shrunk to 1000`, and so is a buffer that `alloc`
+made. `shrink` does not wait, so it is `unsafe`: no work that is queued or running on the GPU, on any stream, may reach
+an element from `len` on, or it fails with `CUDA_ERROR_ILLEGAL_ADDRESS (700)`, as does each call after it, and a pointer
+to those elements is not used again. The zeros that `grow` writes to the elements it gains, and the work of `zero` and
+`copy_from`, are such work until the GPU has done it: each returns before then, and `cuda.sync()` waits for them.
+Dropping the buffer waits for the kernels, as dropping any buffer does, then unmaps its memory and frees its addresses.
+
 `cuda.stream()` is a stream of the GPU: a queue of work that the GPU runs in order, beside the work of other streams.
 The work of a GPU goes to its null stream unless the thread says another: a kernel is launched on the current stream of
 its GPU, and `unsafe { stream.run(|| ..) }` makes `stream` the current stream of its GPU on the thread for the closure.
