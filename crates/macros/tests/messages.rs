@@ -6354,6 +6354,17 @@ fn a_launcher_goes_to_the_current_stream_and_to_the_null_stream_where_there_is_n
     Ok(())
 }
 
+/// A launcher the macros write is recorded by `Stream::capture`, that of a kernel that is `unsafe` and that of one
+/// kernite proves safe: the fixture's `bump` and `double`, which do not commute, are launched in a capture, and the
+/// graph, launched three times, leaves the memory that the same launches one by one leave, `[22, 30, 38]`. Rust builds
+/// the crate without a word, under `#![deny(warnings)]`.
+#[test]
+fn a_graph_of_two_launchers_does_what_their_launches_do_one_by_one() -> Result {
+    let printed = runs_quietly(&["test"], "graphs")?;
+    assert!(printed.contains("test result: ok. 1 passed"), "fixtures/graphs.rs ran its test, and printed:\n{printed}");
+    Ok(())
+}
+
 /// The method that says how many blocks a cooperative GPU kernel's grid has at most, `k_blocks`,
 /// keeps what the kernel says of lints by giving Rust nothing of the kernel's to lint: its name and
 /// the compile-time arguments it takes are of the macro's span. Of the kernel's attributes it keeps

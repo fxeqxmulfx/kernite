@@ -78,6 +78,7 @@ use std::rc::Rc;
 
 mod copy;
 mod event;
+mod graph;
 mod half;
 #[doc(hidden)]
 pub mod named;
@@ -89,6 +90,7 @@ mod unified;
 use reserve::{Access, Properties, Reservation};
 
 pub use event::{Event, Timed, Untimed};
+pub use graph::Graph;
 pub use half::{bf16, f16};
 pub use safe::{Memory, MemoryMut, Quantity, Requirement, View, Why, holds};
 pub use stream::Stream;
@@ -207,6 +209,11 @@ api! {
     query_event = c"cuEventQuery"(Handle);
     sync_event = c"cuEventSynchronize"(Handle);
     wait_event = c"cuStreamWaitEvent"(Handle, Handle, c_uint);
+    begin_capture = c"cuStreamBeginCapture_v2"(Handle, c_int);
+    end_capture = c"cuStreamEndCapture"(Handle, *mut Handle);
+    launch_graph = c"cuGraphLaunch"(Handle, Handle);
+    destroy_graph = c"cuGraphDestroy"(Handle);
+    destroy_graph_exec = c"cuGraphExecDestroy"(Handle);
     alloc = c"cuMemAlloc_v2"(*mut u64, usize);
     alloc_managed = c"cuMemAllocManaged"(*mut u64, usize, c_uint);
     free = c"cuMemFree_v2"(u64);
@@ -251,6 +258,8 @@ api! {
     // This one came with CUDA 12.8: `cuda.h` of the newest release maps `cuEventElapsedTime` to it, and a driver
     // before it has the first name alone, which kernite-cuda does not call.
     elapsed_time = c"cuEventElapsedTime_v2"(*mut f32, Handle, Handle);
+    // This one came with CUDA 11.4: a driver before it makes no graph of a capture.
+    instantiate = c"cuGraphInstantiateWithFlags"(*mut Handle, Handle, u64);
 }
 
 impl Api {
@@ -861,15 +870,10 @@ impl<T: Plain> Buffer<T> {
 
 impl<T: Plain> Drop for Buffer<T> {
     fn drop(&mut self) {
-        // A buffer whose GPU's context cannot be made current is left, and not freed in another's.
-        if let Ok(api) = self.driver.current() {
-            match self.reservation {
-                None => {
-                    // SAFETY: `cuMemAlloc` gave the address, and it is freed once, here.
-                    unsafe { (api.free)(self.ptr) };
-                }
-                Some(reservation) => self.release(api, reservation),
-            }
+        match self.reservation {
+            // SAFETY: `cuMemAlloc` gave the address, and it is freed once, here.
+            None => self.driver.give_back(|api| unsafe { (api.free)(self.ptr) }),
+            Some(reservation) => self.release(reservation),
         }
     }
 }
@@ -1273,12 +1277,8 @@ impl Module {
 
 impl Drop for Module {
     fn drop(&mut self) {
-        // A module whose GPU's context cannot be made current is left, and not unloaded in
-        // another's.
-        if let Ok(api) = self.driver.current() {
-            // SAFETY: the module was loaded, and is unloaded once, here.
-            unsafe { (api.unload_module)(self.module) };
-        }
+        // SAFETY: the module was loaded, and is unloaded once, here.
+        self.driver.give_back(|api| unsafe { (api.unload_module)(self.module) });
     }
 }
 
@@ -1379,20 +1379,22 @@ mod tests {
         }
     }
 
-    /// A driver of a release before CUDA 12.2 is opened all the same: the table has the functions
-    /// it has, and has for the three it lacks the error of the lookup, which a call that needs one
+    /// A driver of a release before CUDA 11.4 is opened all the same: the table has the functions
+    /// it has, and has for the four it lacks the error of the lookup, which a call that needs one
     /// returns. A driver that lacks any other function is not opened.
     #[test]
-    fn a_driver_before_cuda_12_2_is_opened_and_one_that_lacks_any_other_function_is_not() -> Result {
+    fn a_driver_before_cuda_11_4_is_opened_and_one_that_lacks_any_other_function_is_not() -> Result {
         let lacks = |name: &str| format!("dlsym: the driver has no `{name}`: libcuda.so.1: undefined symbol");
-        let newer = [c"cuMemPrefetchAsync_v2", c"cuMemAdvise_v2", c"cuEventElapsedTime_v2"];
+        let newer =
+            [c"cuMemPrefetchAsync_v2", c"cuMemAdvise_v2", c"cuEventElapsedTime_v2", c"cuGraphInstantiateWithFlags"];
         let api = Api::load(finds(&newer)).ok().ok_or("ok gave None")?;
         assert_eq!(api.prefetch.err().ok_or("err gave None")?.to_string(), lacks("cuMemPrefetchAsync_v2"));
         assert_eq!(api.advise.err().ok_or("err gave None")?.to_string(), lacks("cuMemAdvise_v2"));
         assert_eq!(api.elapsed_time.err().ok_or("err gave None")?.to_string(), lacks("cuEventElapsedTime_v2"));
+        assert_eq!(api.instantiate.err().ok_or("err gave None")?.to_string(), lacks("cuGraphInstantiateWithFlags"));
         let api = Api::load(finds(&[])).ok().ok_or("ok gave None")?;
         assert!(
-            api.prefetch.is_ok() && api.advise.is_ok() && api.elapsed_time.is_ok(),
+            api.prefetch.is_ok() && api.advise.is_ok() && api.elapsed_time.is_ok() && api.instantiate.is_ok(),
             "a driver that has them has them"
         );
         for name in [
@@ -1418,6 +1420,11 @@ mod tests {
             c"cuStreamWaitEvent",
             c"cuMemcpyAsync",
             c"cuMemsetD8Async",
+            c"cuStreamBeginCapture_v2",
+            c"cuStreamEndCapture",
+            c"cuGraphLaunch",
+            c"cuGraphDestroy",
+            c"cuGraphExecDestroy",
             c"cuGetErrorString",
         ] {
             let e = Api::load(finds(&[name])).err().ok_or("err gave None")?;
@@ -1490,15 +1497,53 @@ mod tests {
         static STREAMS_MADE: Cell<usize> = const { Cell::new(0) };
         /// How many events the fake driver has made.
         static EVENTS_MADE: Cell<usize> = const { Cell::new(0) };
+        /// How many captures of this thread the fake driver has on: begun, and not ended.
+        static CAPTURES_ON: Cell<usize> = const { Cell::new(0) };
+        /// How many more calls that wait for the whole GPU the fake driver refuses, as a capture of another thread
+        /// makes it do, before it takes one.
+        pub(super) static ELSEWHERE: Cell<usize> = const { Cell::new(0) };
+        /// How many captures the fake driver begins before it refuses to begin one.
+        static BEGINS_LEFT: Cell<usize> = const { Cell::new(usize::MAX) };
+        /// The context that the fake driver refuses to make current, or 0 where there is none.
+        static UNSETTABLE: Cell<usize> = const { Cell::new(0) };
     }
 
     /// What the fake driver was asked since the last call, which empties it.
-    fn asked() -> Vec<String> {
+    pub(super) fn asked() -> Vec<String> {
         ASKED.take()
     }
 
-    fn ask(what: String) {
+    pub(super) fn ask(what: String) {
         ASKED.with_borrow_mut(|asked| asked.push(what));
+    }
+
+    /// The fake driver as it was before the test: it has made nothing, been asked nothing, and has no capture on.
+    pub(super) fn start_over() {
+        NEXT.set(0x7000_0000_0000);
+        STREAMS_MADE.set(0);
+        EVENTS_MADE.set(0);
+        CAPTURES_ON.set(0);
+        ELSEWHERE.set(0);
+        BEGINS_LEFT.set(usize::MAX);
+        UNSETTABLE.set(0);
+        asked();
+    }
+
+    /// What the fake driver says of a call that gives memory, a module or a graph back, as the driver does: 900, which
+    /// is `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`, while a capture of this thread is on, and 0 else.
+    pub(super) fn gives_back() -> CuResult {
+        if CAPTURES_ON.get() > 0 { 900 } else { 0 }
+    }
+
+    /// What it says of a call that waits for the whole GPU: the same, and 900 too while `ELSEWHERE` says that a capture
+    /// of another thread is on, which takes one of its refusals each time.
+    pub(super) fn waits_for_the_gpu() -> CuResult {
+        if gives_back() != 0 {
+            return 900;
+        }
+        let elsewhere = ELSEWHERE.get();
+        ELSEWHERE.set(elsewhere.saturating_sub(1));
+        if elsewhere > 0 { 900 } else { 0 }
     }
 
     /// The fake driver's `cuDeviceGetAttribute`: every attribute is 1.
@@ -1508,8 +1553,12 @@ mod tests {
         0
     }
 
-    /// The fake driver's `cuCtxSetCurrent`: it works in the context from now on.
-    unsafe extern "C" fn set_current(context: Handle) -> CuResult {
+    /// The fake driver's `cuCtxSetCurrent`: it works in the context from now on, but for the one `UNSETTABLE` says,
+    /// which it refuses with `CUDA_ERROR_INVALID_CONTEXT`.
+    pub(super) unsafe extern "C" fn set_current(context: Handle) -> CuResult {
+        if context.addr() == UNSETTABLE.get() {
+            return 201;
+        }
         WORKING_IN.set(context.addr());
         0
     }
@@ -1541,10 +1590,10 @@ mod tests {
         0
     }
 
-    /// The fake driver's `cuModuleUnload`.
+    /// The fake driver's `cuModuleUnload`: a capture of this thread refuses it.
     unsafe extern "C" fn unload_module(module: Handle) -> CuResult {
         ask(format!("unload {}", module.addr()));
-        0
+        gives_back()
     }
 
     /// The fake driver's `cuModuleGetFunction`: each kernel is the function 5.
@@ -1691,6 +1740,70 @@ mod tests {
         0
     }
 
+    /// The fake driver's `cuStreamBeginCapture`: it says the stream, the mode, and the context it works in, and counts
+    /// the capture as on. In the context 14 the stream is capturing already, and the call is refused with
+    /// `CUDA_ERROR_ILLEGAL_ADDRESS`; and it is refused after as many captures as `BEGINS_LEFT` says.
+    pub(super) unsafe extern "C" fn begin_capture(stream: Handle, mode: c_int) -> CuResult {
+        ask(format!("begin capture on {:#x} with mode {mode} in {}", stream.addr(), WORKING_IN.get()));
+        if WORKING_IN.get() == 14 || BEGINS_LEFT.get() == 0 {
+            return 700;
+        }
+        BEGINS_LEFT.set(BEGINS_LEFT.get() - 1);
+        CAPTURES_ON.set(CAPTURES_ON.get() + 1);
+        0
+    }
+
+    /// The fake driver's `cuStreamEndCapture`: it says the stream and the context it works in, counts the capture as
+    /// over, and the graph is 0x5000. In the context 15 the capture was invalidated, and the call gives no graph, and
+    /// `CUDA_ERROR_ILLEGAL_ADDRESS`.
+    pub(super) unsafe extern "C" fn end_capture(stream: Handle, graph: *mut Handle) -> CuResult {
+        ask(format!("end capture on {:#x} in {}", stream.addr(), WORKING_IN.get()));
+        CAPTURES_ON.set(CAPTURES_ON.get().saturating_sub(1));
+        let invalidated = WORKING_IN.get() == 15;
+        // SAFETY: the caller gives a place for the graph.
+        unsafe { *graph = if invalidated { ptr::null_mut() } else { ptr::without_provenance_mut(0x5000) } };
+        if invalidated { 700 } else { 0 }
+    }
+
+    /// The fake driver's `cuGraphInstantiateWithFlags`: it says the graph, the flags and the context it works in, and
+    /// the graph made of it is 0x6000. In the context 16 it is refused, with `CUDA_ERROR_ILLEGAL_ADDRESS`.
+    unsafe extern "C" fn instantiate(exec: *mut Handle, graph: Handle, flags: u64) -> CuResult {
+        ask(format!("instantiate {:#x} with flags {flags} in {}", graph.addr(), WORKING_IN.get()));
+        if WORKING_IN.get() == 16 {
+            return 700;
+        }
+        // SAFETY: the caller gives a place for the graph.
+        unsafe { *exec = ptr::without_provenance_mut(0x6000) };
+        0
+    }
+
+    /// The fake driver's `cuGraphLaunch`: it says the graph, the stream, and the context it works in. In the context
+    /// 14 the work has failed, with `CUDA_ERROR_ILLEGAL_ADDRESS`.
+    unsafe extern "C" fn launch_graph(exec: Handle, stream: Handle) -> CuResult {
+        ask(format!("launch graph {:#x} on {:#x} in {}", exec.addr(), stream.addr(), WORKING_IN.get()));
+        if WORKING_IN.get() == 14 { 700 } else { 0 }
+    }
+
+    /// The fake driver's `cuGraphDestroy`: it says the graph, and the context it works in.
+    pub(super) unsafe extern "C" fn destroy_graph(graph: Handle) -> CuResult {
+        ask(format!("destroy graph {:#x} in {}", graph.addr(), WORKING_IN.get()));
+        0
+    }
+
+    /// The fake driver's `cuGraphExecDestroy`: it says the graph, and the context it works in. A capture of this thread
+    /// refuses it.
+    unsafe extern "C" fn destroy_graph_exec(exec: Handle) -> CuResult {
+        ask(format!("destroy executable graph {:#x} in {}", exec.addr(), WORKING_IN.get()));
+        gives_back()
+    }
+
+    /// The fake driver's `cuCtxSynchronize`, for a test that says whether a call waits for the GPU: it says that it is
+    /// asked. A capture refuses it.
+    unsafe extern "C" fn synchronize() -> CuResult {
+        ask("cuCtxSynchronize".to_string());
+        waits_for_the_gpu()
+    }
+
     /// The fake driver's `cuModuleGetGlobal`: the module has `small`, 16 bytes at 0x1000, and two `.u64` of constant
     /// memory, `slot` at 0x2000 and `other` at 0x3000.
     unsafe extern "C" fn module_global(at: *mut u64, bytes: *mut usize, _: Handle, name: *const c_char) -> CuResult {
@@ -1766,13 +1879,20 @@ mod tests {
         0
     }
 
-    /// The fake driver's `cuMemFree`.
+    /// The fake driver's `cuMemFree`: a capture of this thread refuses it.
     unsafe extern "C" fn free(at: u64) -> CuResult {
         ask(format!("free {at:#x}"));
-        0
+        gives_back()
     }
 
-    /// The fake driver's `cuGetErrorName`, and `cuGetErrorString`, which know the five errors it has.
+    /// The fake driver's `cuMemFree` of a driver that fails it with `CUDA_ERROR_ILLEGAL_ADDRESS`, as it does after an
+    /// error of the work.
+    unsafe extern "C" fn free_fails(at: u64) -> CuResult {
+        ask(format!("free {at:#x}"));
+        700
+    }
+
+    /// The fake driver's `cuGetErrorName`, and `cuGetErrorString`, which know the seven errors it has.
     unsafe extern "C" fn error_name(result: CuResult, name: *mut *const c_char) -> CuResult {
         let known = match result {
             2 => c"CUDA_ERROR_OUT_OF_MEMORY".as_ptr(),
@@ -1780,6 +1900,8 @@ mod tests {
             400 => c"CUDA_ERROR_INVALID_HANDLE".as_ptr(),
             600 => c"CUDA_ERROR_NOT_READY".as_ptr(),
             700 => c"CUDA_ERROR_ILLEGAL_ADDRESS".as_ptr(),
+            900 => c"CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED".as_ptr(),
+            901 => c"CUDA_ERROR_STREAM_CAPTURE_INVALIDATED".as_ptr(),
             _ => ptr::null(),
         };
         // SAFETY: the caller gives a place for the string.
@@ -1794,6 +1916,8 @@ mod tests {
             400 => c"invalid resource handle".as_ptr(),
             600 => c"device not ready".as_ptr(),
             700 => c"an illegal memory access was encountered".as_ptr(),
+            900 => c"operation not permitted when stream is capturing".as_ptr(),
+            901 => c"operation failed due to a previous error during capture".as_ptr(),
             _ => ptr::null(),
         };
         // SAFETY: the caller gives a place for the string.
@@ -1809,10 +1933,7 @@ mod tests {
 
     /// `gpu_in(context)`, with the functions of its driver that `replace` changes.
     fn gpu_replacing(context: usize, replace: impl FnOnce(&mut Api)) -> Result<Cuda> {
-        NEXT.set(0x7000_0000_0000);
-        STREAMS_MADE.set(0);
-        EVENTS_MADE.set(0);
-        asked();
+        start_over();
         let mut api = Api::refusing();
         api.device_count = device_count;
         api.device_get = device_get;
@@ -1834,6 +1955,12 @@ mod tests {
         api.query_event = query_event;
         api.sync_event = sync_event;
         api.wait_event = wait_event;
+        api.begin_capture = begin_capture;
+        api.end_capture = end_capture;
+        api.instantiate = Ok(instantiate);
+        api.launch_graph = launch_graph;
+        api.destroy_graph = destroy_graph;
+        api.destroy_graph_exec = destroy_graph_exec;
         api.elapsed_time = Ok(elapsed_time);
         api.alloc = alloc;
         api.memset = memset;
@@ -2227,6 +2354,445 @@ mod tests {
         let (a, b) = (cuda.timed_event()?, cuda.timed_event()?);
         let e = b.duration_since(&a).err().ok_or("duration_since gave Ok")?;
         assert_eq!(e.to_string(), "dlsym: the driver has no `cuEventElapsedTime_v2`: undefined symbol");
+        Ok(())
+    }
+
+    /// A driver that lacks `cuGraphInstantiateWithFlags`, which came with CUDA 11.4, is opened, and a capture on a
+    /// stream of it is the error of the lookup: it asks the driver for nothing, begins no capture, and runs no work.
+    #[test]
+    fn a_driver_that_lacks_graph_instantiation_gives_no_graph_and_is_asked_nothing() -> Result {
+        let lacks = |api: &mut Api| api.instantiate = Err(missing(c"cuGraphInstantiateWithFlags", "undefined symbol"));
+        let cuda = gpu_replacing(1, lacks)?;
+        let stream = cuda.stream()?;
+        asked();
+        let mut ran = false;
+        let e = stream
+            .capture(|| {
+                ran = true;
+                Ok(())
+            })
+            .err()
+            .ok_or("capture gave Ok")?;
+        assert_eq!(e.to_string(), "dlsym: the driver has no `cuGraphInstantiateWithFlags`: undefined symbol");
+        assert!(!ran, "the closure ran");
+        let asked = asked();
+        assert!(asked.is_empty(), "the driver was asked {asked:?}");
+        Ok(())
+    }
+
+    /// A capture begins on its stream, in the mode that refuses the calls of its own thread alone; runs its work with
+    /// the stream current, so that a launch goes to it; ends the capture; makes a graph of what it recorded; and
+    /// destroys what the capture made, as the graph holds its own copy. The graph's launch goes to the current stream
+    /// of its GPU, the null stream where there is none, and dropping it destroys it, once. Afterwards a launch goes to
+    /// the stream it went to before.
+    #[test]
+    fn a_capture_records_the_work_of_its_stream_and_makes_a_graph_that_launches_on_the_current_stream() -> Result {
+        let cuda = gpu()?;
+        let (module, stream) = (kernel(&cuda)?, cuda.stream()?);
+        asked();
+        let graph = stream.capture(|| {
+            // SAFETY: as in `launched`.
+            unsafe { module.launch(0, Grid::new(1, 1), &[]) }
+        })?;
+        let capture = [
+            "begin capture on 0x100 with mode 1 in 1",
+            "launch on 0x100 in 1",
+            "end capture on 0x100 in 1",
+            "instantiate 0x5000 with flags 0 in 1",
+            "destroy graph 0x5000 in 1",
+        ];
+        assert_eq!(asked(), capture);
+        assert_eq!(launched(&module)?, ["launch on 0x0 in 1"], "after the capture, a launch goes where it went");
+        // SAFETY: the fake driver runs no work.
+        unsafe { graph.launch() }?;
+        assert_eq!(asked(), ["launch graph 0x6000 on 0x0 in 1"]);
+        // SAFETY: as above.
+        running(&stream, || unsafe { graph.launch() })?;
+        assert_eq!(asked(), ["launch graph 0x6000 on 0x100 in 1"]);
+        drop(graph);
+        assert_eq!(asked(), ["destroy executable graph 0x6000 in 1"]);
+        Ok(())
+    }
+
+    /// A capture ends where its work fails, where it panics, and where the driver cannot record it, and the stream is
+    /// not left capturing: the error of the work is given back, or the panic, the graph that the driver made is
+    /// destroyed, and none is made of it. The error of the work comes before the driver's. A capture the driver
+    /// refuses to begin runs no work, and one it refuses to make a graph of destroys what it recorded.
+    #[test]
+    fn a_capture_is_ended_where_its_work_fails_or_panics_or_the_driver_cannot_record_it() -> Result {
+        let refusal = "cuStreamEndCapture: CUDA_ERROR_ILLEGAL_ADDRESS (700): an illegal memory access was encountered";
+        let in_context = |context: usize| [format!("begin capture on 0x100 with mode 1 in {context}")];
+        let (cuda, work) = (gpu()?, Error::new("cuLaunchKernel", "the work failed".to_string()));
+        let stream = cuda.stream()?;
+        asked();
+        let e = stream.capture(|| Err(work.clone())).err().ok_or("capture gave Ok")?;
+        assert_eq!(e, work);
+        let ended = ["end capture on 0x100 in 1", "destroy graph 0x5000 in 1"];
+        assert_eq!(asked(), [&in_context(1)[..], &ended.map(String::from)[..]].concat());
+        let panicked =
+            panic::catch_unwind(AssertUnwindSafe(|| stream.capture(|| panic::resume_unwind(Box::new("a panic")))));
+        assert!(panicked.is_err(), "the closure did not panic");
+        assert_eq!(asked(), [&in_context(1)[..], &ended.map(String::from)[..]].concat());
+        let module = kernel(&cuda)?;
+        assert_eq!(launched(&module)?, ["launch on 0x0 in 1"], "a panic gives the stream before it back");
+
+        // The driver invalidated the capture, and gave no graph.
+        let stream = gpu_in(15)?.stream()?;
+        asked();
+        let e = stream.capture(|| Ok(())).err().ok_or("capture gave Ok")?;
+        assert_eq!(e.to_string(), refusal);
+        assert_eq!(asked(), [&in_context(15)[..], &["end capture on 0x100 in 15".to_string()][..]].concat());
+        // Where the work failed too, its error is the one given back.
+        let e = stream.capture(|| Err(work.clone())).err().ok_or("capture gave Ok")?;
+        assert_eq!(e, work);
+        asked();
+
+        // The driver refuses to begin: the work is not run, and no capture is ended.
+        let stream = gpu_in(14)?.stream()?;
+        asked();
+        let mut ran = false;
+        let e = stream
+            .capture(|| {
+                ran = true;
+                Ok(())
+            })
+            .err()
+            .ok_or("capture gave Ok")?;
+        assert!(!ran, "the work ran");
+        assert_eq!(e.call, "cuStreamBeginCapture");
+        assert_eq!(asked(), in_context(14));
+
+        // The driver refuses to make a graph: what it recorded is destroyed.
+        let stream = gpu_in(16)?.stream()?;
+        asked();
+        let e = stream.capture(|| Ok(())).err().ok_or("capture gave Ok")?;
+        assert_eq!(e.call, "cuGraphInstantiate");
+        let made =
+            ["end capture on 0x100 in 16", "instantiate 0x5000 with flags 0 in 16", "destroy graph 0x5000 in 16"];
+        assert_eq!(asked(), [&in_context(16)[..], &made.map(String::from)[..]].concat());
+        Ok(())
+    }
+
+    /// A graph is of the GPU whose stream it was captured on: its launch and its drop make that GPU's context current,
+    /// whichever the thread has then. The drop waits for nothing: the driver frees a graph that runs when it ends.
+    #[test]
+    fn a_graph_is_launched_and_destroyed_in_the_context_of_its_gpu_whichever_is_current() -> Result {
+        let graph = gpu_replacing(1, |api| api.synchronize = synchronize)?.stream()?.capture(|| Ok(()))?;
+        let second = gpu_in(2)?;
+        second.stream()?;
+        asked();
+        // SAFETY: the fake driver runs no work.
+        unsafe { graph.launch() }?;
+        assert_eq!(asked(), ["launch graph 0x6000 on 0x0 in 1"]);
+        second.stream()?;
+        asked();
+        drop(graph);
+        assert_eq!(asked(), ["destroy executable graph 0x6000 in 1"]);
+        Ok(())
+    }
+
+    /// What `capture` says where a drop ended the capture: the end of the capture is invalidated.
+    const INVALIDATED: &str = "cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901): \
+                               operation failed due to a previous error during capture";
+
+    /// What the fake driver is asked to begin and end a capture on stream `stream`, in context 1.
+    fn begin(stream: usize) -> String {
+        format!("begin capture on {stream:#x} with mode 1 in 1")
+    }
+
+    fn end(stream: usize) -> String {
+        format!("end capture on {stream:#x} in 1")
+    }
+
+    /// A drop makes the call that gives its memory back once, where no capture refuses it. An error of the driver that
+    /// is no capture's is left, as it was before captures: in a capture too, the call is not made again, and no capture
+    /// is ended or begun for it.
+    #[test]
+    fn a_drop_makes_its_call_once_where_no_capture_refuses_it_and_leaves_any_other_error() -> Result {
+        let cuda = gpu()?;
+        let buffer = cuda.alloc::<u32>(4)?;
+        asked();
+        drop(buffer);
+        assert_eq!(asked(), ["free 0x700000000000"], "no capture is on");
+
+        let cuda = gpu_replacing(1, |api| api.free = free_fails)?;
+        let (buffer, stream) = (cuda.alloc::<u32>(4)?, cuda.stream()?);
+        asked();
+        stream.capture(|| {
+            drop(buffer);
+            Ok(())
+        })?;
+        let capture =
+            [begin(0x100), "free 0x700000000000".into(), end(0x100), "instantiate 0x5000 with flags 0 in 1".into()];
+        assert_eq!(asked()[..4], capture, "the driver refused the free, and a capture was on, but not for the capture");
+        Ok(())
+    }
+
+    /// A drop in the closure of a capture finds that the driver refuses its call while the capture of its thread is
+    /// on. It ends the capture, makes the call, and begins the capture again on its stream, and in its mode, so that
+    /// what the closure enqueues next is recorded, and does not run. The capture is lost: the closure said `Ok`, and
+    /// the error of `capture` is the end's, `CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901)`, and no graph is made of what
+    /// was recorded after the drop. The graph of the capture that was ended is destroyed, as is the last.
+    #[test]
+    fn a_drop_in_a_capture_ends_it_makes_its_call_begins_it_again_and_the_capture_is_lost() -> Result {
+        let cuda = gpu()?;
+        let (buffer, stream, module) = (cuda.alloc::<u32>(4)?, cuda.stream()?, kernel(&cuda)?);
+        asked();
+        let mut seen = None;
+        let e = stream
+            .capture(|| {
+                drop(buffer);
+                seen = Some(launched(&module));
+                Ok(())
+            })
+            .err()
+            .ok_or("capture gave Ok")?;
+        assert_eq!(e.to_string(), INVALIDATED);
+        let seen = seen.ok_or("the closure did not run")??;
+        let drop_in_the_capture = [
+            begin(0x100),
+            "free 0x700000000000".to_string(),
+            end(0x100),
+            "free 0x700000000000".to_string(),
+            begin(0x100),
+            "launch on 0x100 in 1".to_string(),
+        ];
+        assert_eq!(seen, drop_in_the_capture[..], "what the closure enqueued after the drop went to the stream");
+        let done = [end(0x100), "destroy graph 0x5000 in 1".into(), "destroy graph 0x5000 in 1".into()];
+        assert_eq!(asked(), done, "the capture ended, and what it made was destroyed");
+        Ok(())
+    }
+
+    /// With more than one capture of the thread on, a drop ends each of them, the newest first, makes its call, and
+    /// begins each again, the oldest first, as each had begun. Each is lost: the closure of each said `Ok`.
+    #[test]
+    fn a_drop_in_nested_captures_ends_each_the_newest_first_and_begins_each_the_oldest_first() -> Result {
+        let cuda = gpu()?;
+        let (buffer, outer, inner) = (cuda.alloc::<u32>(4)?, cuda.stream()?, cuda.stream()?);
+        asked();
+        let mut lost = None;
+        let e = outer
+            .capture(|| {
+                lost = Some(inner.capture(|| {
+                    drop(buffer);
+                    Ok(())
+                }));
+                Ok(())
+            })
+            .err()
+            .ok_or("capture gave Ok")?;
+        let inner_lost = lost.ok_or("the closure did not run")?.err().ok_or("the inner capture gave Ok")?;
+        assert_eq!((e.to_string(), inner_lost.to_string()), (INVALIDATED.to_string(), INVALIDATED.to_string()));
+        let want = [
+            begin(0x100),
+            begin(0x200),
+            "free 0x700000000000".to_string(),
+            end(0x200),
+            end(0x100),
+            "free 0x700000000000".to_string(),
+            begin(0x100),
+            begin(0x200),
+            // The inner capture is over, and what it made, twice, is destroyed; then the outer's.
+            end(0x200),
+            "destroy graph 0x5000 in 1".to_string(),
+            "destroy graph 0x5000 in 1".to_string(),
+            end(0x100),
+            "destroy graph 0x5000 in 1".to_string(),
+            "destroy graph 0x5000 in 1".to_string(),
+        ];
+        assert_eq!(asked(), want);
+        Ok(())
+    }
+
+    /// Where the driver refuses to begin the capture again, the rest of the closure goes to the null stream, which is
+    /// safe to give work to, and not to the stream that no longer captures, where the work would run beside the
+    /// work that the capture records. The capture is lost, all the same. A drop after that finds no capture on, and
+    /// makes its call once, as it does where none is on.
+    #[test]
+    fn where_a_capture_cannot_be_begun_again_the_rest_of_the_closure_works_on_the_null_stream() -> Result {
+        let cuda = gpu()?;
+        let (first, second) = (cuda.alloc::<u32>(4)?, cuda.alloc::<u32>(4)?);
+        let (stream, module) = (cuda.stream()?, kernel(&cuda)?);
+        asked();
+        BEGINS_LEFT.set(1);
+        let mut seen = None;
+        let e = stream
+            .capture(|| {
+                drop(first);
+                seen = Some(launched(&module));
+                drop(second);
+                Ok(())
+            })
+            .err()
+            .ok_or("capture gave Ok")?;
+        assert_eq!(e.to_string(), INVALIDATED);
+        let seen = seen.ok_or("the closure did not run")??;
+        let want = [
+            begin(0x100),
+            "free 0x700000000000".to_string(),
+            end(0x100),
+            "free 0x700000000000".to_string(),
+            // Refused, and the launch is not.
+            begin(0x100),
+            "launch on 0x0 in 1".to_string(),
+        ];
+        assert_eq!(seen, want);
+        // The capture is not on, so the drop after the launch makes its call once, begins no capture, and the capture
+        // is not ended again. The graph the end made is destroyed.
+        assert_eq!(asked(), ["free 0x700000000010", "destroy graph 0x5000 in 1"]);
+        assert_eq!(launched(&module)?, ["launch on 0x0 in 1"], "after the capture, a launch goes where it went");
+        Ok(())
+    }
+
+    /// A capture that was lost, as the driver refused to begin it again, is on no more, and a drop after that ends and
+    /// begins the captures that are on, and asks the driver nothing of the lost one. The first drop begins the outer
+    /// capture again, and the driver refuses the inner; the second finds the outer on, and the driver refuses that.
+    #[test]
+    fn a_capture_that_was_lost_is_left_alone_by_the_drops_after_it() -> Result {
+        let cuda = gpu()?;
+        let (first, second) = (cuda.alloc::<u32>(4)?, cuda.alloc::<u32>(4)?);
+        let (outer, inner) = (cuda.stream()?, cuda.stream()?);
+        asked();
+        // The outer capture begins, the inner begins, and the first drop begins the outer again.
+        BEGINS_LEFT.set(3);
+        let mut lost = None;
+        let e = outer
+            .capture(|| {
+                lost = Some(inner.capture(|| {
+                    drop(first);
+                    drop(second);
+                    Ok(())
+                }));
+                Ok(())
+            })
+            .err()
+            .ok_or("capture gave Ok")?;
+        let inner_lost = lost.ok_or("the closure did not run")?.err().ok_or("the inner capture gave Ok")?;
+        assert_eq!((e.to_string(), inner_lost.to_string()), (INVALIDATED.to_string(), INVALIDATED.to_string()));
+        let want = [
+            begin(0x100),
+            begin(0x200),
+            // The first drop.
+            "free 0x700000000000".to_string(),
+            end(0x200),
+            end(0x100),
+            "free 0x700000000000".to_string(),
+            begin(0x100),
+            // Refused: the inner capture is lost.
+            begin(0x200),
+            // The second drop: the outer capture alone is on, and the inner one is not asked of.
+            "free 0x700000000010".to_string(),
+            end(0x100),
+            "destroy graph 0x5000 in 1".to_string(),
+            "free 0x700000000010".to_string(),
+            // Refused: the outer capture is lost too.
+            begin(0x100),
+            // What the two ends made is destroyed: the inner capture's, and the outer's last.
+            "destroy graph 0x5000 in 1".to_string(),
+            "destroy graph 0x5000 in 1".to_string(),
+        ];
+        assert_eq!(asked(), want);
+        Ok(())
+    }
+
+    /// A drop in a capture whose GPU's context cannot be made current ends the capture all the same, as the driver ends
+    /// a capture in whichever context is current, makes its call, and begins the capture again, in that context too.
+    /// The capture is lost, as it is by any drop. The buffer is of the GPU of context 1 and the capture of the GPU of
+    /// context 2.
+    #[test]
+    fn a_drop_in_a_capture_whose_context_cannot_be_made_current_ends_it_makes_its_call_and_begins_it_again() -> Result {
+        let (first, second) = (gpu_in(1)?, gpu_in(2)?);
+        let (buffer, stream) = (first.alloc::<u32>(4)?, second.stream()?);
+        asked();
+        let e = stream
+            .capture(|| {
+                UNSETTABLE.set(2);
+                drop(buffer);
+                Ok(())
+            })
+            .err()
+            .ok_or("capture gave Ok")?;
+        UNSETTABLE.set(0);
+        // The context of the capture's GPU could not be made current until `capture` returned, and the error is the
+        // capture's that is lost, not the context's.
+        assert_eq!(e.to_string(), INVALIDATED);
+        let want = [
+            begin(0x100).replace("in 1", "in 2"),
+            "free 0x700000000000".to_string(),
+            // The context of the buffer's GPU is current, and the capture is ended and begun again in it.
+            end(0x100),
+            "free 0x700000000000".to_string(),
+            begin(0x100),
+            // `capture` ends it again, and what the two ends made is destroyed.
+            end(0x100),
+            "destroy graph 0x5000 in 1".to_string(),
+            "destroy graph 0x5000 in 1".to_string(),
+        ];
+        assert_eq!(asked(), want);
+        Ok(())
+    }
+
+    /// A capture whose GPU's context cannot be made current once the closure is done ends the capture all the same, in
+    /// the context that is current, destroys what it made, asks for no graph, and gives the error of `cuCtxSetCurrent`,
+    /// but for the error of the closure, which comes first. The capture is of the GPU of context 2, and the closure
+    /// makes the context 1 current by making a stream of its GPU, and destroying it.
+    #[test]
+    fn a_capture_whose_context_cannot_be_made_current_once_its_closure_is_done_is_ended_all_the_same() -> Result {
+        let (first, second) = (gpu_in(1)?, gpu_in(2)?);
+        let stream = second.stream()?;
+        let work = Error::new("cuLaunchKernel", "the work failed".to_string());
+        let refused = "cuCtxSetCurrent: CUDA_ERROR_INVALID_CONTEXT (201): invalid device context";
+        for (made, result, says) in [(0x200, Ok(()), refused.to_string()), (0x300, Err(work.clone()), work.to_string())]
+        {
+            asked();
+            let e = stream
+                .capture(|| {
+                    drop(first.stream()?);
+                    UNSETTABLE.set(2);
+                    result.clone()
+                })
+                .err()
+                .ok_or("capture gave Ok")?;
+            UNSETTABLE.set(0);
+            assert_eq!(e.to_string(), says);
+            let want = [
+                begin(0x100).replace("in 1", "in 2"),
+                format!("create {made:#x} with flags 0 in 1"),
+                format!("destroy {made:#x} in 1"),
+                // The capture's context cannot be made current: the capture is ended in the one that is, and the
+                // instantiate is not asked for.
+                end(0x100),
+                "destroy graph 0x5000 in 1".to_string(),
+            ];
+            assert_eq!(asked(), want, "{says}");
+        }
+        Ok(())
+    }
+
+    /// A drop of a buffer, of a module and of a graph, in a capture, each makes its call as it does where no capture
+    /// refuses it, once the capture is ended, and the capture begins again.
+    #[test]
+    fn the_drops_of_a_buffer_a_module_and_a_graph_make_their_calls_once_the_capture_is_ended() -> Result {
+        let cuda = gpu()?;
+        let stream = cuda.stream()?;
+        let made: [(&str, Box<dyn std::any::Any>, &str); 3] = [
+            ("buffer", Box::new(cuda.alloc::<u32>(4)?), "free 0x700000000000"),
+            ("module", Box::new(kernel(&cuda)?), "unload 7"),
+            ("graph", Box::new(cuda.stream()?.capture(|| Ok(()))?), "destroy executable graph 0x6000 in 1"),
+        ];
+        for (name, what, call) in made {
+            asked();
+            let e = stream
+                .capture(|| {
+                    drop(what);
+                    Ok(())
+                })
+                .err()
+                .ok_or("capture gave Ok")?;
+            assert_eq!(e.to_string(), INVALIDATED, "{name}");
+            let want = [begin(0x100), call.to_string(), end(0x100), call.to_string(), begin(0x100), end(0x100)];
+            assert_eq!(asked()[..6], want, "{name}");
+        }
         Ok(())
     }
 

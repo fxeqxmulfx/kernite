@@ -1,8 +1,9 @@
-//! What the tests that keep a stream busy have in common: three kernels, written by hand, two of which hold work back
-//! until the host writes a flag or the GPU's clock says a time has gone by, and one that copies a word, to show when
-//! the work after it runs; the way every kernel of the tests takes its start from that clock; the lock that keeps the
-//! other tests of a file off the null stream, which is the GPU's and not a thread's; and the host's reads and writes of
-//! the words the kernels share.
+//! What the tests that keep a stream busy have in common: five kernels, written by hand, two of which hold work back
+//! until the host writes a flag or the GPU's clock says a time has gone by, one that copies a word, to show when the
+//! work after it runs, and two that change the words they are given, each its own way, to show in what order they ran;
+//! the way every kernel of the tests takes its start from that clock; the lock that keeps the other tests of a file off
+//! the null stream, which is the GPU's and not a thread's; and the host's reads and writes of the words the kernels
+//! share.
 #![allow(dead_code, reason = "a test file takes what it needs of this module, and rustc calls the rest dead")]
 
 use std::ffi::c_void;
@@ -48,7 +49,7 @@ pub fn ptx(kernels: &str) -> String {
 ///
 /// `waits(flag, out, nanos)` spins until `*flag` is not 0, or until `nanos` nanoseconds have gone by; then it writes 1
 /// to `*out` if it saw the flag, and 2 if the time went by first. `sets(flag, nanos)` writes 1 to `*flag` after `nanos`
-/// nanoseconds. `copies(from, to)` writes the word `*from` to `*to`.
+/// nanoseconds. `copies(from, to)` writes the word `*from` to `*to`. `adds_one` and `doubles` are below.
 const PTX: &str = "
 .visible .entry waits(.param .u64 flag_param, .param .u64 out_param, .param .u64 nanos_param)
 {
@@ -112,13 +113,57 @@ LATER:
 	st.volatile.global.u32 [%to], %word;
 	ret;
 }
+
+.visible .entry adds_one(.param .u64 words_param, .param .u32 n_param)
+{
+	.reg .u64 %words, %at;
+	.reg .u32 %n, %i, %word;
+	.reg .pred %past;
+
+	ld.param.u64 %words, [words_param];
+	ld.param.u32 %n, [n_param];
+	mov.u32 %i, %tid.x;
+	setp.ge.u32 %past, %i, %n;
+	@%past bra DONE;
+	cvta.to.global.u64 %words, %words;
+	mad.wide.u32 %at, %i, 4, %words;
+	ld.global.u32 %word, [%at];
+	add.u32 %word, %word, 1;
+	st.global.u32 [%at], %word;
+DONE:
+	ret;
+}
+
+.visible .entry doubles(.param .u64 words_param, .param .u32 n_param)
+{
+	.reg .u64 %words, %at;
+	.reg .u32 %n, %i, %word;
+	.reg .pred %past;
+
+	ld.param.u64 %words, [words_param];
+	ld.param.u32 %n, [n_param];
+	mov.u32 %i, %tid.x;
+	setp.ge.u32 %past, %i, %n;
+	@%past bra DONE;
+	cvta.to.global.u64 %words, %words;
+	mad.wide.u32 %at, %i, 4, %words;
+	ld.global.u32 %word, [%at];
+	add.u32 %word, %word, %word;
+	st.global.u32 [%at], %word;
+DONE:
+	ret;
+}
 ";
 
 /// The kernels of `PTX`, in the order `Module::load` is given their names.
-const KERNELS: &[&str] = &["waits", "sets", "copies"];
+const KERNELS: &[&str] = &["waits", "sets", "copies", "adds_one", "doubles"];
 pub const WAITS: usize = 0;
 pub const SETS: usize = 1;
 pub const COPIES: usize = 2;
+/// `adds_one(words, n)` adds 1 to each of the first `n` words, and `doubles(words, n)` doubles them, one thread each,
+/// for an `n` of 32 or less, one block's threads: `(x + 1) * 2` is not `x * 2 + 1`, so the order they ran in shows.
+pub const ADDS_ONE: usize = 3;
+pub const DOUBLES: usize = 4;
 
 /// What `waits` writes: that it saw the flag, or that the time went by first.
 pub const SEEN: u32 = 1;
@@ -126,7 +171,16 @@ pub const TIMED_OUT: u32 = 2;
 
 /// How long `hold` gives the host to write the flag: five seconds, much more than the host takes. The kernel returns
 /// as soon as it sees the flag, so the time is spent only where a call kept the host from writing it.
-const FOR_THE_HOST: u64 = 5_000_000_000;
+pub const FOR_THE_HOST: u64 = 5_000_000_000;
+
+/// How long `waits` waits for the flag, in nanoseconds, where it must see it: a second, much more than `sets` takes to
+/// run beside it. It returns as soon as it sees the flag, so the second is not spent.
+pub const A_SECOND: u64 = 1_000_000_000;
+/// And where it must not: a `sets` that ran beside it would write the flag at once, so a tenth of a second shows the
+/// same, and it is spent.
+pub const A_TENTH: u64 = 100_000_000;
+/// `sets` at once.
+pub const AT_ONCE: u64 = 0;
 
 /// Held by each test of a file that takes it, from its start to its end.
 static ALONE: Mutex<()> = Mutex::new(());

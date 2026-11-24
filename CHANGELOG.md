@@ -17,6 +17,8 @@ release gives it its version.
 - kernite-cuda makes managed memory only where each GPU reaches it while the host does, which WSL2's does not.
 - kernite-cuda's `Cuda::concurrent_managed_access` is gone, with the clause of an `unsafe` launch's contract it
   served.
+- kernite-cuda records the work of a GPU stream as a graph, `stream.capture(..)`, and launches it, `unsafe`, as often
+  as it is asked: 1100 launches as one.
 - kernite builds the PTX of a module of megabytes, or of many kernels (GitHub issue 1).
 - kernite finds a kernel's `# Safety` by its heading, as rustdoc does, and adds what it writes at the end of it.
 

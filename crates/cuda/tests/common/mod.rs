@@ -1,8 +1,9 @@
-//! What the tests of unified memory have in common: the words of GUIDE.md's refusals, a page, and two skips, one for a
-//! GPU that cannot make a kind of memory, and one for a machine that makes no managed memory.
+//! What the tests of memory have in common: the words of GUIDE.md's refusals, a page, and the skips: for a GPU that
+//! cannot make a kind of memory, for a machine that makes no managed memory, and for a GPU that cannot page-lock a
+//! slice.
 #![allow(dead_code, reason = "a test file takes what it needs of this module, and rustc calls the rest dead")]
 
-use kernite_cuda::{Error, Unified};
+use kernite_cuda::{Cuda, Error, Unified};
 
 /// GUIDE.md's words for a GPU that cannot be told that memory is preferred at the GPU, or accessed by it.
 pub const NO_ADVICE: &str = "cuMemAdvise: the GPU cannot reach managed memory while the host does: \
@@ -18,6 +19,23 @@ const NO_CONCURRENT: (&str, &str) = (
     "cuMemAllocManaged: GPU ",
     " cannot reach managed memory while the host does: its CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS is 0",
 );
+
+/// GUIDE.md's words for a GPU that cannot be lent a slice.
+pub const NO_PAGEABLE: &str = "cuDeviceGetAttribute: the GPU cannot reach pageable memory, a slice of the host's: \
+                               its CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0";
+
+/// GUIDE.md's words for a GPU that cannot map memory at addresses it reserves.
+pub const NO_VMM: &str = "cuMemAddressReserve: the GPU cannot map memory at addresses it reserves: its \
+                          CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED is 0";
+
+/// GUIDE.md's words for a GPU that cannot page-lock memory the host has, and for one that cannot reach it at the host's
+/// addresses.
+const NO_REGISTER: [&str; 2] = [
+    "cuMemHostRegister: the GPU cannot page-lock memory the host has: \
+     its CU_DEVICE_ATTRIBUTE_HOST_REGISTER_SUPPORTED is 0",
+    "cuMemHostRegister: the GPU cannot reach page-locked memory the host has at the host's addresses: \
+     its CU_DEVICE_ATTRIBUTE_CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM is 0",
+];
 
 /// A page, in words. The driver moves and advises whole pages.
 pub const PAGE: usize = 1024;
@@ -37,6 +55,18 @@ pub fn or_skip<T>(made: Result<T, Error>, refusal: &str) -> Option<T> {
         eprintln!("the GPU cannot: skipped. {e}");
     })
     .ok()
+}
+
+/// `cuda.register(slice)`; or `None` where the GPU cannot, after it says so in one of GUIDE.md's words, and the test is
+/// skipped, as for a machine with no GPU.
+pub fn register_or_skip<'a>(cuda: &Cuda, slice: &'a mut [u32]) -> Result<Option<Unified<'a, u32>>, Error> {
+    match cuda.register(slice) {
+        Err(e) if NO_REGISTER.contains(&e.to_string().as_str()) => {
+            eprintln!("the GPU cannot: skipped. {e}");
+            Ok(None)
+        }
+        made => made.map(Some),
+    }
 }
 
 /// `made`, the result of `managed` or `managed_uninit`, or `None` if the machine makes no managed memory: the error is

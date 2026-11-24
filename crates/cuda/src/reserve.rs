@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::ptr;
 
 use super::unified::Flag;
-use super::{Api, Buffer, Cuda, Driver, Error, MemLocation, Plain, bytes, too_many};
+use super::{Buffer, Cuda, Driver, Error, MemLocation, Plain, bytes, too_many};
 
 /// The GPU maps memory at addresses reserved before it: the driver's virtual memory management.
 const VIRTUAL_MEMORY_MANAGEMENT: Flag = (102, "VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED");
@@ -261,22 +261,24 @@ impl<T: Plain> Buffer<T> {
 
     /// Gives the GPU back what the buffer holds, as it is dropped: the kernels that may reach it are waited for, its
     /// memory is unmapped, and its addresses are freed.
-    pub(super) fn release(&self, api: &Api, reservation: Reservation) {
+    pub(super) fn release(&self, reservation: Reservation) {
         // The driver does not wait for the kernels that reach what it unmaps.
         // SAFETY: it takes nothing.
-        unsafe { (api.synchronize)() };
+        self.driver.give_back(|api| unsafe { (api.synchronize)() });
         let mut mapped = reservation.granules::<T>(self.len);
         // SAFETY: every kernel that reached the memory has run, and none is queued after: the buffer is dropped.
         let _ = unsafe { self.driver.unmap(self.ptr, reservation.granule, &mut mapped, 0) };
         // SAFETY: the addresses are `span` bytes at `ptr`, as `cuMemAddressReserve` gave them. They are freed once,
         // here.
-        unsafe { (api.free_addresses)(self.ptr, reservation.span) };
+        self.driver.give_back(|api| unsafe { (api.free_addresses)(self.ptr, reservation.span) });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+
+    use std::ffi::c_int;
 
     use super::super::unified::tests::gpu_with;
     use super::super::{CuResult, Handle};
@@ -306,6 +308,8 @@ mod tests {
         static REFUSED: Cell<Option<(&'static str, usize)>> = const { Cell::new(None) };
         /// How many handles of memory the fake driver has made: the handles are 1, 2 and on.
         static MADE: Cell<u64> = const { Cell::new(0) };
+        /// Whether the fake driver has a capture on: begun, and not ended.
+        static CAPTURING: Cell<bool> = const { Cell::new(false) };
     }
 
     /// The fake driver takes the call `line`, which starts with the function's name; and answers.
@@ -383,9 +387,25 @@ mod tests {
         took(format!("cuMemsetD8Async {} {value} {bytes}{on}", from_base(at)))
     }
 
-    /// The fake driver's `cuCtxSynchronize`.
+    /// The fake driver's `cuCtxSynchronize`: a capture refuses it, with `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`, as it
+    /// does the driver.
     unsafe extern "C" fn synchronize() -> CuResult {
-        took("cuCtxSynchronize".to_string())
+        let said = took("cuCtxSynchronize".to_string());
+        if CAPTURING.get() { 900 } else { said }
+    }
+
+    /// The fake driver's `cuStreamBeginCapture`.
+    unsafe extern "C" fn begin_capture(_: Handle, _: c_int) -> CuResult {
+        CAPTURING.set(true);
+        took("cuStreamBeginCapture".to_string())
+    }
+
+    /// The fake driver's `cuStreamEndCapture`: it makes no graph.
+    unsafe extern "C" fn end_capture(_: Handle, graph: *mut Handle) -> CuResult {
+        CAPTURING.set(false);
+        // SAFETY: the caller gives a place for the graph.
+        unsafe { graph.write(ptr::null_mut()) };
+        took("cuStreamEndCapture".to_string())
     }
 
     /// The fake driver's `cuMemAlloc`, for a buffer that `reserve` did not make.
@@ -406,6 +426,7 @@ mod tests {
         CALLS.take();
         REFUSED.take();
         MADE.take();
+        CAPTURING.take();
         gpu_with(&[MAPS], |api| {
             api.granularity = granularity;
             api.reserve_addresses = reserve_addresses;
@@ -417,6 +438,8 @@ mod tests {
             api.unmap_memory = unmap_memory;
             api.memset = memset;
             api.synchronize = synchronize;
+            api.begin_capture = begin_capture;
+            api.end_capture = end_capture;
             api.alloc = alloc;
             api.free = free;
             api.create_stream = create_stream;
@@ -664,6 +687,29 @@ mod tests {
         assert_eq!((calls(), buffer.len()), (Vec::new(), 4));
         drop(buffer);
         assert_eq!(calls(), ["cuMemFree 0"], "the driver frees it, and waits for no kernel that it does not");
+        Ok(())
+    }
+
+    /// A buffer dropped in the closure of a capture finds that the driver refuses the wait for the kernels, as it does
+    /// while a capture of its thread is on. The drop ends the capture, waits, and begins the capture again: the memory
+    /// is not unmapped before the wait is made, and the driver refuses neither the unmapping nor the freeing of the
+    /// addresses, which follow.
+    #[test]
+    fn a_buffer_dropped_in_a_capture_waits_for_the_kernels_once_the_capture_is_ended_and_unmaps_after() -> Result {
+        let cuda = fake()?;
+        let (buffer, stream) = (holding(&cuda, 3 * WORDS, WORDS + 1)?, cuda.stream()?);
+        let e = stream
+            .capture(|| {
+                drop(buffer);
+                Ok(())
+            })
+            .err()
+            .ok_or("capture gave Ok")?;
+        assert_eq!(e.call, "cuStreamEndCapture", "the capture is lost");
+        let (begin, end, wait) = ("cuStreamBeginCapture", "cuStreamEndCapture", "cuCtxSynchronize");
+        let freed = format!("cuMemAddressFree 0 {}", 3 * GRANULE);
+        let want = [begin, wait, end, wait, begin, &unmap(1), &unmap(0), &freed, end];
+        assert_eq!(calls(), want);
         Ok(())
     }
 

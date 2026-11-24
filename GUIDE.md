@@ -1078,6 +1078,58 @@ costs the driver less to record: on the driver here, NVIDIA's open kernel module
 microseconds a call against 1.9 microseconds for one that times. It is an `Event`, and one made by `timed_event()` an
 `Event<Timed>`, so `duration_since` is for events that time, and rustc refuses it for one that does not.
 
+`duration_since` needs a driver of CUDA 12.8 (570) or later, which brought `cuEventElapsedTime_v2`. `Cuda::new()` opens
+an older driver all the same, and `duration_since` says so when it is called, in the words of the loader: ``dlsym: the
+driver has no `cuEventElapsedTime_v2`: libcuda.so.1: undefined symbol: cuEventElapsedTime_v2``.
+
+`stream.capture(|| ..)` records the work of a stream, to run it again as often as it is asked, for the cost of one
+launch: 1100 launches as one. It runs the closure as `run` does, with `stream` the current stream, and the driver
+records each launch, copy and zeroing that the closure enqueues on `stream`, and runs none of them. The work that
+`stream` was given before the capture runs as it did, and is no part of the record. The result is a `Graph`.
+`unsafe { graph.launch() }` runs all the recorded work on the current stream of the graph's GPU, as a launch does: after
+the work that stream was given before, and before the work it is given after. It returns once the work is queued, and a
+launch of a graph runs after the launch of it before. A graph holds the arguments of its work as they were at the
+capture, addresses and numbers alike, and not what the memory holds: the host may write new values to the memory, and
+the next launch works on them, but a kernel that was given a count gets the capture's count at every launch. Dropping a
+graph destroys it, and the work already launched runs to its end.
+
+`capture` is safe, as nothing it records runs, and a drop in its closure still waits for the kernels that reach its
+memory, as a paragraph below tells. `launch` is `unsafe`, as a graph reaches memory and kernels by addresses that
+dropping them makes dangling, and the work of two streams may reach the same memory. Each memory that the recorded work
+reaches, and each module whose kernels it launches, must be there until the work is done, and the contract of `run`
+holds at each launch, with that of `Module::launch` for the host's slices of the memory. The driver cannot record every
+call, and refuses the rest: a call that waits for the host or for the GPU, as `read` and `sync` do; a call that makes
+memory; a wait for an event that was recorded before the capture; and a query of an event that was recorded in it. Of
+the calls that make memory, it refuses those of the thread that captures alone. A call of another thread that waits for
+the GPU as a whole, or enqueues work on the null stream, which waits for every stream, is refused too, as it would wait
+for the stream that captures, and the capture is lost. The error of `capture` is the closure's, where the closure
+returns one, and the driver's `cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED` where the closure goes on
+after a refusal, as there is no graph of what the driver could not record. A panic in the closure goes on. In each case
+the capture is ended and no graph is made, and the stream captures no more and takes work as it did before. A `capture`
+on a stream that is capturing already is refused, and the capture that is on goes on.
+
+A drop must wait for the GPU, or the driver would give memory back, or unload a module, under a kernel that reaches it.
+While a capture of its thread is on, the driver refuses the drops of a buffer, of managed and page-locked memory, of a
+slice registered, of a module and of a graph. While any capture is on, it refuses a wait for the GPU as a whole, which
+the drops of a slice lent and of a reserved buffer make. A drop in the closure of `capture` does not skip its wait. It
+ends each capture of its thread, makes its call, and begins each capture again, on its stream and in its mode, so that
+what the closure enqueues after the drop is recorded, and does not run. The drop has lost the capture, as a refused call
+does: `capture` gives no graph, and its error, where the closure returns `Ok`, is `cuStreamEndCapture:
+CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901)`. Where the driver refuses to begin a capture again, what the closure
+enqueues after the drop goes to the null stream, whose work is safe. A drop of another thread whose wait for the GPU as
+a whole is refused, as that of a slice lent and that of a reserved buffer, has lost the capture with its first call, as
+the `sync` of another thread does. It tries again, with a little time between the tries, until the capture is over, and
+then it waits for the kernels. The drops of a buffer, of managed and page-locked memory, of a slice registered and of a
+module, in another thread, are not refused: they wait for the kernels, and the capture goes on. Where no capture is on,
+a drop makes its call once, as it always did. A capture that kernite did not begin, by the driver's
+`cuStreamBeginCapture` on the thread of the drop, is one it cannot end: the drop tries its call again for ever, as the
+driver refuses it until that capture ends, which only that thread can end.
+
+`capture` needs a driver of CUDA 11.4 (470) or later, which brought `cuGraphInstantiateWithFlags`. `Cuda::new()` opens
+an older driver all the same, and `capture` says so when it is called, before it asks the driver for anything, so that
+no capture begins and the closure does not run: ``dlsym: the driver has no `cuGraphInstantiateWithFlags`:
+libcuda.so.1: undefined symbol: cuGraphInstantiateWithFlags``.
+
 A buffer is the GPU's own memory, which the host reaches by copies. Unified memory is reached by the host and by the
 GPU's kernels at one address, with no copy, and it is of one of four kinds. `cuda.managed::<f32>(len)` is `len` zeros of
 managed memory, which the driver moves to whichever of the host and the GPU touches it. `cuda.pinned::<f32>(len)` is
@@ -1602,7 +1654,7 @@ Each crate depends only on the layers inside it. `crates/kernite/tests/architect
 | adapters | `kernite-x86`, `kernite-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kernite` | which machine and syntax each kernel compiles with |
 | delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, and the safe functions that call them; launchers of a grid's threads, or launchers of PTX |
-| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and how much of it is free, memory the host reaches too, modules, launches and what a safe kernel's launch must hold, streams that launches, copies and zeroings go to, events that order and time them, copies between GPUs; `f16` and `bf16`; depends on no other crate |
+| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and how much of it is free, memory the host reaches too, modules, launches and what a safe kernel's launch must hold, streams that launches, copies and zeroings go to, events that order and time them, graphs that record the work of a stream to launch it again, copies between GPUs; `f16` and `bf16`; depends on no other crate |
 | runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid and the CPUs they run on, and the memory of a module of x86 kernels; depends on no other crate |
 
 ## Guarantees

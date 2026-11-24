@@ -151,6 +151,11 @@ impl Event<Timed> {
     /// reaches an event when the work before it on its own stream is done. An event of another GPU, whose clock is not
     /// this one's, is an error too, and the driver is not asked.
     ///
+    /// The driver must be of CUDA 12.8 (570) or later, which brought `cuEventElapsedTime_v2`:
+    /// [`Cuda::new`](super::Cuda::new) opens an older driver all the same, and `duration_since` gives the error of the
+    /// lookup then, ``dlsym: the driver has no `cuEventElapsedTime_v2`: libcuda.so.1: undefined symbol:
+    /// cuEventElapsedTime_v2``.
+    ///
     /// ```no_run
     /// # use kernite_cuda::Cuda;
     /// let cuda = Cuda::new()?;

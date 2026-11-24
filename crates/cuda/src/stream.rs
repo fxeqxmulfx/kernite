@@ -3,15 +3,30 @@
 use std::cell::Cell;
 use std::ptr;
 use std::rc::Rc;
+use std::thread;
+use std::time::Duration;
 
-use super::{Cuda, Driver, Error, Handle};
+use super::graph::Capture;
+use super::{Api, CuResult, Cuda, Driver, Error, Handle};
 
-/// What a [`Stream::run`] keeps on its stack while its closure runs: the stream it makes current, the context of that
-/// stream's GPU, and the run that was the newest before it, if there was one.
-struct Run {
+/// `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`: what the driver says of a call that it cannot record, or that would wait
+/// for the stream that captures, while a capture is on.
+const CAPTURE_UNSUPPORTED: CuResult = 900;
+
+/// How long a drop waits between two tries of a call that a capture refuses: long enough not to keep a core busy for as
+/// long as the capture lasts, and short enough for the drop to be done soon after the capture is.
+const BETWEEN_TRIES: Duration = Duration::from_micros(100);
+
+/// What a [`Stream::run`] keeps while its closure runs: the stream it makes current, the context of that stream's GPU,
+/// the run that was the newest before it, if there was one, and, where the run is a [`capture`](Stream::capture)'s,
+/// the capture. It is on the stack of the call that makes it.
+pub(super) struct Run {
     context: Handle,
-    stream: Handle,
-    before: *const Run,
+    /// The stream the work goes to: the one the run was made for, and the null stream where a drop ended the capture
+    /// and the driver refused to begin it again, as work for a stream that does not capture would run.
+    stream: Cell<Handle>,
+    before: Cell<*const Run>,
+    capture: Option<Rc<Capture>>,
 }
 
 thread_local! {
@@ -28,15 +43,90 @@ impl Driver {
     #[inline]
     pub(crate) fn stream(&self) -> Handle {
         let mut run = RUNNING.get();
-        // SAFETY: each run in the list is on the stack of a `Stream::run` that has not ended: it takes itself off the
-        // list before it ends, by returning or by panicking, and nothing writes to it once it is on.
+        // SAFETY: each run in the list is on the stack of a call of `during` that has not ended: it takes itself off
+        // the list before it ends, by returning or by panicking, and only its `Cell`s are written once it is on.
         while let Some(found) = unsafe { run.as_ref() } {
             if found.context == self.context {
-                return found.stream;
+                return found.stream.get();
             }
-            run = found.before;
+            run = found.before.get();
         }
         ptr::null_mut()
+    }
+
+    /// Makes `call`, a call that a drop needs to make, to wait for the GPU or to give memory, a module or a graph back,
+    /// and leaves what it returns, as a drop does where it fails after an error of the GPU's work. A call is made once,
+    /// as it was, where no capture refuses it. While a capture of its thread is on, the driver refuses the drops of a
+    /// buffer, of managed and page-locked memory, of a slice registered, of a module and of a graph, and says
+    /// `CAPTURE_UNSUPPORTED`. While any capture is on, it refuses a wait for the GPU as a whole, which the drops of a
+    /// slice lent and of a reserved buffer make, and says it too. Then the captures of this thread are ended, the
+    /// newest first. The call is made, and made again while a capture of another thread refuses it. Then the captures
+    /// are begun again, the oldest first. So the drop waits for the kernels that reach what it gives back, as a drop
+    /// does, and the closure of the capture goes on: see [`Capture`]. A capture that kernite did not begin, by the
+    /// driver's `cuStreamBeginCapture` on the thread of the drop, is one it cannot end: the drop tries its call again
+    /// for ever, as the driver refuses it until that capture ends, which only that thread can end.
+    pub(super) fn give_back(&self, mut call: impl FnMut(&Api) -> CuResult) {
+        // A drop whose GPU's context cannot be made current leaves what it gives back, and does not give it back in
+        // another's.
+        let Ok(api) = self.current() else { return };
+        if call(api) == CAPTURE_UNSUPPORTED {
+            self.give_back_outside_captures(RUNNING.get(), &mut call);
+        }
+    }
+
+    /// Ends the captures of this thread from the run `run` on, the newest first, makes `call` while a capture of
+    /// another thread refuses it, and begins them again, the oldest first.
+    #[cold]
+    fn give_back_outside_captures(&self, run: *const Run, call: &mut impl FnMut(&Api) -> CuResult) {
+        // SAFETY: as in `stream`.
+        let Some(found) = (unsafe { run.as_ref() }) else {
+            // A capture of another thread refuses the call as long as it lasts, and the call that is refused first
+            // has lost it: the thread that captures goes on with its closure, and ends the capture, which is lost.
+            while self.current().is_ok_and(|api| call(api) == CAPTURE_UNSUPPORTED) {
+                thread::sleep(BETWEEN_TRIES);
+            }
+            return;
+        };
+        match found.capture.as_deref().filter(|capture| capture.is_on()) {
+            None => self.give_back_outside_captures(found.before.get(), call),
+            Some(capture) => {
+                capture.leave();
+                self.give_back_outside_captures(found.before.get(), call);
+                if !capture.resume() {
+                    found.stream.set(ptr::null_mut());
+                }
+            }
+        }
+    }
+}
+
+impl Run {
+    /// A run that makes `stream` the current stream of its GPU, which captures what `stream` is capturing, if it has
+    /// `capture`.
+    pub(super) fn of(stream: &Stream, capture: Option<Rc<Capture>>) -> Run {
+        Run {
+            context: stream.driver.context,
+            stream: Cell::new(stream.handle),
+            before: Cell::new(ptr::null()),
+            capture,
+        }
+    }
+
+    /// Runs `work`, and returns what it returns, with this run the newest of the thread's, which a launch looks
+    /// along. It is the newest no more when `work` returns, or panics.
+    pub(super) fn during<R>(&self, work: impl FnOnce() -> R) -> R {
+        /// Puts back the run that was the newest when `work` ends, by returning or by panicking.
+        struct Unlink(*const Run);
+        impl Drop for Unlink {
+            fn drop(&mut self) {
+                RUNNING.set(self.0);
+            }
+        }
+        let before = RUNNING.get();
+        self.before.set(before);
+        let _unlink = Unlink(before);
+        RUNNING.set(self);
+        work()
     }
 }
 
@@ -70,8 +160,8 @@ impl Cuda {
 /// Dropping a stream destroys it. The work it has enqueued runs on, and the memory that work reaches lasts until it is
 /// done, as the drop of memory waits for it.
 pub struct Stream {
-    driver: Rc<Driver>,
-    handle: Handle,
+    pub(super) driver: Rc<Driver>,
+    pub(super) handle: Handle,
 }
 
 impl Stream {
@@ -90,17 +180,7 @@ impl Stream {
     /// two streams reaches, and to keep it itself it would have to make each launch wait for the others, which the
     /// streams are for not doing. In `work`, each call is as safe as it is on the null stream.
     pub unsafe fn run<R>(&self, work: impl FnOnce() -> R) -> R {
-        /// Puts back the run that was the newest when `work` ends, by returning or by panicking.
-        struct Unlink(*const Run);
-        impl Drop for Unlink {
-            fn drop(&mut self) {
-                RUNNING.set(self.0);
-            }
-        }
-        let run = Run { context: self.driver.context, stream: self.handle, before: RUNNING.get() };
-        let _unlink = Unlink(run.before);
-        RUNNING.set(&raw const run);
-        work()
+        Run::of(self, None).during(work)
     }
 
     /// Waits for the work enqueued on this stream, and says whether one failed. The work of other streams is not

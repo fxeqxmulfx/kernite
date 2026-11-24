@@ -13,14 +13,12 @@ use std::time::Instant;
 
 use kernite_cuda::{Cuda, Grid, Module, Ptr, arg};
 
+mod common;
+use common::NO_VMM;
 mod gpu;
 use gpu::{SEEN, cuda, hold, load, poke};
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
-
-/// GUIDE.md's words for a GPU that cannot map memory at addresses it reserves.
-const NO_VMM: &str = "cuMemAddressReserve: the GPU cannot map memory at addresses it reserves: its \
-                      CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED is 0";
 
 /// `add_one(x, n)`: `x[i] += 1` for each `i < n`, a thread each.
 const PTX: &str = "
